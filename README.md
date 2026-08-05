@@ -15,9 +15,18 @@ M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス�
 ## 実装方針（要点）
 
 - 想定クレート 9 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`
-- 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理
+- 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理（workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義。TASK-1.1b）
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査（TASK-1.2）
 - バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 動的ロード・`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成）
+
+### 依存追加・更新フロー
+
+依存の追加・更新は必ずユーザー承認を経て行う（`.claude/rules/deps-policy.md`）。承認後の実施手順:
+
+1. **判断理由の記録**: 許容依存 8 区分以外を新規追加する場合、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
+2. **バージョン固定**: `Cargo.toml` で `=x.y.z` 完全固定とし、`Cargo.lock` を同一コミットでコミットする
+3. **`docs/license-matrix.md` の同時更新**: 新規・更新する依存のライセンスを確認し、`docs/license-matrix.md`（未作成の場合は同一 PR で作成）を更新する。MPL-2.0 等コピーレフトの推移的混入は推定で記述せず、有効化しうる feature 組合せごとの `cargo tree` 実測で個別に適合確認する
+4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` 導入後。ライセンス監査）が green であることを確認する
 
 ## 開発環境構築
 

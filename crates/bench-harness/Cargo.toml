@@ -6,4 +6,7 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[dependencies]
+# criterion は dev-dependencies 限定（deps-policy.md）。5 回計測の中央値を採用する
+# ベンチ規約（.claude/rules/coding-rust.md）の実行基盤として使用する。
+[dev-dependencies]
+criterion.workspace = true

@@ -7,3 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
+rayon.workspace = true
+half.workspace = true

@@ -7,3 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# ワイヤフォーマット処理のみに使用し、テンソルへのマッピングは自作する（REQ-7・deps-policy.md）。
+safetensors.workspace = true
+# ONNX の protobuf デコードのみに使用する。生成コードは protoc 非依存で手書きし、
+# prost-build（protoc ビルド時依存）は使わない（PoC-v2-6）。
+prost.workspace = true

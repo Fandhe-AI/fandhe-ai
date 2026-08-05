@@ -7,3 +7,6 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# f16 数値型（REQ-1）。バージョンは workspace ルート Cargo.toml の
+# [workspace.dependencies]（.claude/rules/deps-policy.md 準拠）で一元固定する。
+half.workspace = true
