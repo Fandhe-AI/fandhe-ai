@@ -33,6 +33,7 @@ rust-ai-library/
 │   ├── workflows/           # implement-issue-tree.js（skills への相対 symlink）
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
+    ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     └── spec/                # 正本 submodule（rust-ai-library-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）
