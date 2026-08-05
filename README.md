@@ -17,3 +17,49 @@ M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス�
 - 想定クレート 9 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`
 - 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査（TASK-1.2）
+- バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 動的ロード・`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成）
+
+## 開発環境構築
+
+```bash
+git clone git@github.com:Fandhe-AI/rust-ai-library.git
+cd rust-ai-library
+make setup   # サブモジュール取得 → rustup → lefthook（git hooks）を一括構築
+```
+
+主な make ターゲット（`make help` で一覧表示）:
+
+| ターゲット | 内容 |
+|-----------|------|
+| `make setup` | 開発環境の一括構築（submodule・rustup・lefthook） |
+| `make fmt` / `make fmt-check` | 整形 / 整形差分の検出 |
+| `make lint` | `cargo clippy -D warnings` |
+| `make test` | `cargo test`（実機依存の `#[ignore]` テストは除く） |
+| `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
+| `make deny` | `cargo deny check licenses sources`（依存ライセンス監査） |
+| `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
+| `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
+
+Cargo.toml 未追加（M0 の TASK-1.1 で workspace 作成予定）の間、cargo 系ターゲットは CI と同じ方針でスキップされます。
+
+## Docker 開発環境
+
+ホスト環境（macOS / Linux・aarch64 / amd64）に依存せずビルド・テスト・lint を実行できます。
+
+```bash
+make docker-build   # 開発コンテナイメージをビルド
+make docker-shell   # 開発コンテナのシェルに入る
+make docker-ci      # コンテナ内で make ci を実行（環境非依存の検証）
+```
+
+コンテナ内で使えるのは CPU（rayon）バックエンドのみです。Metal はホスト macOS 直接実行、CUDA は実機（DGX Spark GB10 等）で実行します（`cudarc` の動的ロード方式のため、CUDA バックエンドの「ビルド」は CUDA toolkit 無しのコンテナでも成立します）。
+
+## CI
+
+- CI はすべて **self-hosted runner** で実行します（`.claude/rules/ci.md`）
+- `ci.yml`: fmt / clippy / test / deny / 依存禁止検査（TASK-1.2）＋集約ジョブ `ci-complete`（branch protection にはこれのみを指定）
+- `update-external.yml`: `docs/spec` サブモジュールと `.claude/skills` の自動追従（毎日 09:00 JST。PR label: `dependencies`・`automated`）
+
+## 開発体制（Claude Code）
+
+`.claude/` に Claude Code の運用体系（Agents・Rules・Skills・hooks）を整備しています。概要は [CLAUDE.md](./CLAUDE.md) を参照してください。

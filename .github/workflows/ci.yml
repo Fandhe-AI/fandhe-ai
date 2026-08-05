@@ -1,0 +1,298 @@
+# rust-ai-library の品質ゲート CI。
+#
+# Fandhe-AI/rust-ai-library-v1・local-llm-server・fandhe-multi-platform の ci.yml
+# （self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・Cargo.toml 検出ガード）
+# と同一方針に揃える（.claude/rules/ci.md）。
+#
+# 現状は Cargo.toml が未追加（M0 の TASK-1.1 で workspace 作成予定）のため、各ジョブは
+# Checkout 直後の `detect` ステップで Cargo.toml の有無を判定し、無ければ以降のステップを
+# `if: steps.detect.outputs.has_cargo == 'true'` でスキップする（ジョブ自体は success の
+# まま終了し、CI を落とさない）。ジョブ単位の `if:` ではなく各ステップの `if:` で
+# 判定しているのは、`jobs.<id>.if` は Checkout 前（ワークスペース展開前）に評価されるため
+# `hashFiles('Cargo.toml')` が常に空文字となり判定できないため。
+#
+# deps-forbidden ジョブは TASK-1.2（依存禁止リストの CI 機械検査）の実装であり、
+# Cargo.lock を対象に禁止クレート（burn 系一式・cubecl・candle・tch・ndarray。
+# .claude/rules/deps-policy.md）の混入を fail-closed で検査する。
+#
+# CUDA 実機（DGX Spark GB10）・Metal 実機依存のテストは #[ignore] で分離されている前提
+# （.claude/rules/coding-rust.md）であり、本ワークフローでは実行しない。
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --------------------------------------------------
+  # cargo fmt --check（整形差分の検出）
+  # --------------------------------------------------
+  fmt:
+    name: cargo fmt --check
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # actions/checkout v6.0.3（v1 / local-llm-server の ci.yml と同一 SHA に固定）。
+        # docs/spec サブモジュールは fmt/clippy/test に不要なため取得しない（既定で submodules: false）。
+        # persist-credentials: false: checkout 後どのステップも GITHUB_TOKEN を使わないため、
+        # 共有 self-hosted runner の workspace にトークンを残留させない。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため cargo fmt --check をスキップしました（workspace 作成後に有効化されます）"
+          fi
+
+      # self-hosted runner に rustup が未導入/欠落している場合に備え、後続ステップの
+      # 前提を自己修復する。導入済みなら何もしない（冪等。.claude/rules/ci.md）。
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      # 共有ツールチェーンを不要に汚さないよう、未導入の場合のみ追加する（冪等）。
+      - name: Ensure rustfmt component
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustup component list --installed | grep -q '^rustfmt' || rustup component add rustfmt
+
+      - name: cargo fmt --check
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo fmt --all --check
+
+  # --------------------------------------------------
+  # cargo clippy -- -D warnings（lint ゲート）
+  # --------------------------------------------------
+  clippy:
+    name: cargo clippy
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため cargo clippy をスキップしました（workspace 作成後に有効化されます）"
+          fi
+
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: Ensure clippy component
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustup component list --installed | grep -q '^clippy' || rustup component add clippy
+
+      - name: cargo clippy
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # --------------------------------------------------
+  # cargo test（実機依存の #[ignore] テストは除く）
+  # --------------------------------------------------
+  test:
+    name: cargo test
+    runs-on: self-hosted
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため cargo test をスキップしました（workspace 作成後に有効化されます）"
+          fi
+
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: cargo test
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test --workspace --all-features
+
+  # --------------------------------------------------
+  # cargo deny（依存ライセンス・供給元の監査。deny.toml 追加後に有効化）
+  # --------------------------------------------------
+  deny:
+    name: cargo deny check licenses sources
+    runs-on: self-hosted
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Cargo.toml と deny.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ] && [ -f "deny.toml" ]; then
+            echo "has_deny=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_deny=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml または deny.toml が未追加のため cargo deny をスキップしました（TASK-1.3 のライセンス整備後に有効化されます）"
+          fi
+
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_deny == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_deny == 'true'
+        run: rustup show
+
+      # 未導入の場合のみソースビルドで導入する（冪等。.claude/rules/ci.md）。
+      - name: Ensure cargo-deny is installed
+        if: steps.detect.outputs.has_deny == 'true'
+        run: |
+          set -euo pipefail
+          command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked
+
+      # --locked で Cargo.lock の書き換え・runner 汚染を防止する。
+      - name: cargo deny check licenses sources
+        if: steps.detect.outputs.has_deny == 'true'
+        run: cargo deny --locked check licenses sources
+
+  # --------------------------------------------------
+  # 依存禁止リストの機械検査（TASK-1.2・REQ-1）。
+  # Cargo.lock を対象に、禁止クレート（burn 系一式・cubecl・candle・tch・ndarray。
+  # .claude/rules/deps-policy.md）が推移的依存を含めて混入していないことを検査する。
+  # cargo 不要（grep のみ）のため rustup セットアップは行わない。
+  # --------------------------------------------------
+  deps-forbidden:
+    name: forbidden dependencies check
+    runs-on: self-hosted
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: 依存禁止リストの混入検査
+        run: |
+          set -euo pipefail
+          if [ ! -f "Cargo.lock" ]; then
+            echo "::notice::Cargo.lock が未追加のため依存禁止検査をスキップしました（workspace 作成後に有効化されます）"
+            exit 0
+          fi
+          # Cargo.lock の `name = "<crate>"` 行を完全一致で検査する（fail-closed）。
+          forbidden='^name = "(burn|burn-[a-z-]+|cubecl|cubecl-[a-z-]+|candle-core|tch|ndarray)"$'
+          if grep -qE "${forbidden}" Cargo.lock; then
+            echo "::error::依存禁止リストのクレートが Cargo.lock に含まれています（.claude/rules/deps-policy.md）:"
+            grep -E "${forbidden}" Cargo.lock
+            exit 1
+          fi
+          echo "OK: 依存禁止リストの混入なし"
+
+  # --------------------------------------------------
+  # 集約ジョブ（branch protection の required status check はこのジョブのみを指定する）。
+  # bare needs は skipped も success 扱いになるため、明示的に result を検査して
+  # fail-closed で判定する（.claude/rules/ci.md）。
+  # --------------------------------------------------
+  ci-complete:
+    name: ci-complete
+    runs-on: self-hosted
+    # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
+    if: ${{ always() }}
+    needs: [fmt, clippy, test, deny, deps-forbidden]
+    timeout-minutes: 5
+    steps:
+      - name: 完遂判定（全 needs ジョブが success であること）
+        env:
+          RESULT_FMT: ${{ needs.fmt.result }}
+          RESULT_CLIPPY: ${{ needs.clippy.result }}
+          RESULT_TEST: ${{ needs.test.result }}
+          RESULT_DENY: ${{ needs.deny.result }}
+          RESULT_DEPS_FORBIDDEN: ${{ needs.deps-forbidden.result }}
+        run: |
+          set -euo pipefail
+          ok=1
+          for pair in "fmt:${RESULT_FMT}" "clippy:${RESULT_CLIPPY}" "test:${RESULT_TEST}" "deny:${RESULT_DENY}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}"; do
+            name="${pair%%:*}"
+            result="${pair#*:}"
+            if [ "${result}" != "success" ]; then
+              echo "NG: ${name} = ${result}"
+              ok=0
+            fi
+          done
+          if [ "${ok}" -ne 1 ]; then
+            echo "一部ジョブが success ではありません" >&2
+            exit 1
+          fi
+          echo "全ジョブ success"
