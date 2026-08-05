@@ -1,7 +1,7 @@
 # guardrail／self-repair CLI コマンド仕様
 
 イシュー #183（親 #181）の成果物。`docs/spec/04-requirements.md`
-「画面・インターフェース要件」（L294-303、rust-ai-library-spec リポジトリ）が
+「画面・インターフェース要件」（L294-298、rust-ai-library-spec リポジトリ）が
 「具体的な CLI コマンド仕様は Phase 5（タスク分解後の実装リポ側）で定める」と
 明示委譲している事項を、TASK-4.1（`guardrail` 移植・#101 系）・TASK-3.1
 （`self-repair` 骨格移植・#131）・TASK-6.1（CI 常設化・#146）の実装着手前に
@@ -62,9 +62,14 @@ CI・self-repair から呼び出される本番相当経路。REQ-5 の除外リ
 | `--config <guardrail.toml>` | 任意（未指定時は `--repo` 直下探索、無ければ組み込み既定値） | 閾値設定 |
 | `--preset <strict\|default\|loose>` | 既定 `default` | PoC-3 の 3 段階閾値プリセット |
 | `--repo <path>` | 既定 `.` | 判定対象リポジトリのルート |
-| `--signals <path>` | 任意 | 計測済みシグナル JSON（1.4 節）を直接注入する CI 契約検証パス。指定時は `--baseline`/`--repo` からの実シグナル計測を行わない |
-| `--format <text\|json>` | 既定 `text` | 出力形式（`json` は `--signals` 指定時のみ有効） |
-| `--output <path>` | 任意 | 判定レポート JSON（2.1 節）の書き出し先（`--signals` 指定時のみ有効） |
+| `--signals <path>` | 任意（環境変数 `GUARDRAIL_ALLOW_INJECTED_SIGNALS=1` の設定時のみ有効。下記「`--signals` の迂回防止」参照） | 計測済みシグナル JSON（1.4 節）を直接注入する CI 契約検証パス。指定時は `--baseline`/`--repo` からの実シグナル計測を行わない |
+| `--format <text\|json>` | 既定 `text` | 出力形式。`--signals` の有無に関わらず有効（本番相当経路〈実シグナル計測〉でも `json` を指定できる） |
+| `--output <path>` | 任意 | 判定レポート JSON（2.1 節）の書き出し先。`--signals` の有無に関わらず有効。REQ-6 の回帰テストセット根拠データとするには本番相当経路（`--signals` 未指定）由来のレポートを用いること（2.1 節 `signal_source` 参照） |
+
+**`--signals` の迂回防止（A08）**: `--signals` は CI 契約検証専用パスであり、本番相当経路（CI・self-repair から呼ばれる主経路）の迂回手段になってはならない。二重の防止策を設ける:
+
+1. **入口ガード**: `--signals` の指定は環境変数 `GUARDRAIL_ALLOW_INJECTED_SIGNALS=1` が設定されている場合のみ受理し、未設定時は clap の usage エラー（終了コード `2`）で拒否する。CI 契約検証ジョブ（TASK-6.1）のみがこの環境変数を設定する
+2. **成果物側の記録**: 入口ガードを通過して `--signals` 経由で生成された判定レポート JSON は、2.1 節 `signal_source` フィールドに `"injected"` を記録する（実シグナル計測経路は `"measured"`）。REQ-6 の回帰テストセット根拠データとしての採用可否はこのフィールドで機械判定可能とし、`--signals` 経由のレポートが実測データに混入することを成果物レベルでも防ぐ
 
 出典: v1 `crates/guardrail/src/cli.rs`（`CheckArgs`。TASK-4.1-S1・S4）。
 
@@ -114,6 +119,7 @@ REQ-3「検証ゲートの計測系付け替え」注記（2026-08-05 v2 注記�
 | フィールド | 型 | 説明 |
 |---|---|---|
 | `schema_version` | string | スキーマバージョン（例 `"1"`）。将来の破壊的変更検知用 |
+| `signal_source` | `"measured"` \| `"injected"` | シグナルの出所。`--signals` 未指定（実シグナル計測。本番相当経路）なら `"measured"`、`--signals` 指定（CI 契約検証パス。1.2 節）なら `"injected"`。REQ-6 の回帰テストセット根拠データは `"measured"` のみを採用する |
 | `change_id` | string \| null | `--change-id` の値 |
 | `lines_changed` | u64 | 変更行数 |
 | `public_api_broken` | bool | 公開 API シグネチャの破壊的変更有無 |
@@ -130,7 +136,10 @@ REQ-3「検証ゲートの計測系付け替え」注記（2026-08-05 v2 注記�
 REQ-3 データ要件・REQ-6 の回帰テストセット根拠データとして再利用可能な形式
 とする。出典: v1 PoC-3 の `guardrail-results/*.json`（`docs/spec/04-requirements.md`
 データ要件 L303 が参照する実測形式）を踏襲し、`applied_exclusion_rule_ids`・
-`schema_version` を v2 で追加する。
+`schema_version`・`signal_source` を v2 で追加する。`signal_source` は本文書が
+新設するフィールドであり、本文書は新規設計文書で既存実装との互換負担がない
+ため `schema_version` は `"1"`（初版）のまま据え置く（バージョン非対応の既存
+消費者が存在しないため互換性のための版上げは不要）。
 
 ### 2.2 eval レポート JSON（`guardrail eval --output`）
 
@@ -214,8 +223,16 @@ REQ-3 データ要件・REQ-6 の回帰テストセット根拠データとし�
 `--config`／`--dataset`／`--signals` はいずれも外部入力（TOML・JSON）であり、
 パース時に次を検証する:
 
-- スキーマ検証（未知フィールドの拒否ではなく必須フィールド欠落の検出。
-  型付きエラーで返す）
+- スキーマ検証は入力の性質で使い分ける。`guardrail.toml`／`policy-exclusion.toml`
+  （閾値・除外ルール。ユーザー承認必須の設定ファイル、2.4 節）は
+  `deny_unknown_fields` 相当（未知フィールドを拒否）を採用する。除外ルール
+  `id` のタイポ等が黙って無視されると、発火すべき除外ルールが発火せず
+  「自動適用すべきでない変更が自動適用される」方向に倒れうるため
+  （`.claude/rules/security.md` A08「判定の迂回経路を作らない」と同種のリスク）、
+  誤りは早期に型付きエラーとして検出する。`--signals`（1.4 節のシグナル
+  JSON。CI 契約検証パス専用）・`--dataset`（ラベル付きデータセット）は
+  必須フィールド欠落の検出のみとし、将来のフィールド追加に対する前方互換性
+  を優先する（判定を安全側に倒す性質の設定ファイルではないため）
 - `change_id` 等の外部由来文字列をシェル展開・パス連結に直接使わない
   （`--output` の書き込み先パス構築、`--dataset` 配下のファイル探索で
   `change_id` を経由する場合はパストラバーサル対策として `--dataset`
@@ -332,7 +349,7 @@ trait 設計自体の詳細は TASK-3.1 実装時に確定する。
 ## 5. 参照
 
 - `docs/spec/04-requirements.md`（rust-ai-library-spec）REQ-3・REQ-4・REQ-5・
-  REQ-6・データ要件（L294-304）
+  REQ-6・画面・インターフェース要件（L294-298）・データ要件（L300-304）
 - `Fandhe-AI/rust-ai-library-v1`:
   - `crates/guardrail/src/cli.rs`（`check`/`eval` 引数定義。TASK-4.1-S1・S4）
   - `crates/guardrail/src/exit_code.rs`（終了コード契約。TASK-4.1-S4）
