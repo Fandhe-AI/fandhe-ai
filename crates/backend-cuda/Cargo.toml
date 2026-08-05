@@ -7,3 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# CUDA バックエンド（REQ-2）。無条件依存＋動的ロード方式のため cfg 分離しない
+# （features・default-features は workspace ルートの [workspace.dependencies] で確定済み。
+# member 側で default-features を再指定しても inherited dependency には反映されないため
+# ここでは workspace = true のみを指定する）。
+cudarc.workspace = true
+half.workspace = true

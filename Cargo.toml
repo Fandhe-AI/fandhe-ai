@@ -27,3 +27,63 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
+
+# 許容依存 8 区分（.claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
+# 各クレートは `<name>.workspace = true` で参照し、バージョン更新はこのテーブルのみを
+# 変更すれば全クレートに反映される（TASK-1.1b。イシュー #5）。
+#
+# バージョン選定方針: PoC-v2 実測構成（docs/spec/03-poc/）と同一版を採用し、
+# crates.io 最新 stable が PoC 実測系列と同一マイナー系列ならその最新 patch を採用する。
+# マイナー／メジャーが進んでいる場合は PoC 実測版に安全側で固定する（本テーブルの
+# safetensors がこれに該当。詳細は各行のコメントを参照）。
+#
+# `default-features = false` は inherited dependency では member 側の指定が無視されるため
+# （member 側で再指定すると warning）、ここ（workspace 側）で確定する。
+[workspace.dependencies]
+# CUDA バックエンド（REQ-2）。無条件依存＋動的ロード方式（`dynamic-loading` feature）で
+# CUDA toolkit 非搭載環境でもビルドが成立する（PoC-v2-3 で実証済み。
+# docs/spec/03-poc/poc-v2-3-cuda-gemm/code/rust/Cargo.toml:26-32）。
+# `cuda-13000`（DGX Spark GB10 実機の CUDA 13.0 に合わせた API バージョン feature）は
+# deps-policy.md の記載条件（driver／nvrtc／dynamic-loading／f16）に明示されていないが、
+# cudarc は CUDA API バージョン feature の指定が必須でありビルドできないため、
+# PoC-v2-3・PoC-v2-5 実測構成（docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/Cargo.toml:36-42）
+# を踏襲して採用する。deps-policy.md 自体への feature 追記はユーザー承認事項のため、
+# 本コミットでは行わず別途提案する（イシュー #5 のスコープ外）。
+cudarc = { version = "=0.19.8", default-features = false, features = [
+    "driver",
+    "nvrtc",
+    "dynamic-loading",
+    "cuda-13000",
+    "f16",
+] }
+# Metal バックエンド（REQ-2）。`cfg(target_os = "macos")` 限定（deps-policy.md）。
+# バージョンは PoC-v2-5 実測構成と同一（docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/Cargo.toml:50-52）。
+# ライセンス: objc2-metal のみ Zlib OR Apache-2.0 OR MIT の三重ライセンス（deps-policy.md 記載どおり）。
+objc2 = "=0.6.4"
+objc2-foundation = "=0.3.2"
+objc2-metal = "=0.3.2"
+# ONNX / safetensors 相互運用（REQ-7）。ワイヤフォーマット処理のみに使用し、
+# テンソルへのマッピングは自作する（deps-policy.md）。
+# PoC-v2-6 実測は "0.7"（docs/spec/03-poc/poc-v2-6-interop/code/rust/Cargo.toml:32）。
+# crates.io 最新は 0.8.0 だが PoC 実測系列（0.7 系。最新 patch は 0.7.0 のみ存在）から
+# マイナーが進んでいるため、安全側で PoC 実測系列に固定する（更新は別イシューで提案）。
+safetensors = "=0.7.0"
+# ONNX の protobuf デコードのみに使用する。生成コードは protoc 非依存で手書きし、
+# `prost-build`（protoc ビルド時依存）は使わない（deps-policy.md・PoC-v2-6）。
+# PoC-v2-6 実測は "0.14"（docs/spec/03-poc/poc-v2-6-interop/code/rust/Cargo.toml:35）。
+# 同一マイナー系列の最新 patch（0.14.4）を採用する。
+prost = "=0.14.4"
+# 構造化データのシリアライズ（guardrail・self-repair の設定・判定レポート JSON 等）。
+# PoC-v2-6 実測は "1"（derive feature）。同一メジャー系列の最新 patch を採用する。
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+# CPU 並列カーネル（REQ-2）。PoC-v2-1 で naive/blocked 比 約 6〜8.5 倍改善を実測
+# （docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/rust/Cargo.toml:21）。
+# 同一メジャー系列の最新 patch を採用する。
+rayon = "=1.12.0"
+# f16 数値型。PoC-v2-3/v2-5 実測は "2"（docs/spec/03-poc/poc-v2-3-cuda-gemm/code/rust/Cargo.toml:21）。
+# 同一メジャー系列の最新 patch を採用する。
+half = "=2.7.1"
+# ベンチ計測基盤（bench-harness）。dev-dependencies 限定（deps-policy.md）。
+# PoC 未使用のため crates.io 最新 stable をそのまま採用する。
+criterion = "=0.8.2"
