@@ -1,0 +1,29 @@
+# rust-ai-library の workspace ルート定義。
+#
+# Burn 依存を排した完全自作コア方針（REQ-1 v2。.claude/rules/coding-rust.md）に基づき、
+# tensor-core・autodiff・backend-cpu/cuda/metal・onnx-interop・guardrail・self-repair・
+# bench-harness の 9 クレートを member として明示列挙する（意図しないクレート混入防止のため
+# glob は使わない）。TASK-1.1（docs/spec/05-tasks.md）の骨格作成に対応する。
+#
+# 依存追加（許容 8 区分。.claude/rules/deps-policy.md）は本ファイルでは行わず、
+# ユーザー承認を経た別イシューで導入する。
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/tensor-core",
+    "crates/autodiff",
+    "crates/backend-cpu",
+    "crates/backend-cuda",
+    "crates/backend-metal",
+    "crates/onnx-interop",
+    "crates/guardrail",
+    "crates/self-repair",
+    "crates/bench-harness",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false

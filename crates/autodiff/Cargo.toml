@@ -1,0 +1,9 @@
+[package]
+name = "autodiff"
+description = "動的テープ式自動微分（REQ-1）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

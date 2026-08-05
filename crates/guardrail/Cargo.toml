@@ -1,0 +1,9 @@
+[package]
+name = "guardrail"
+description = "自己修復ループのガードレール（REQ-4）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
