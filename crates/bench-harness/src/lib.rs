@@ -7,5 +7,6 @@
 //! （`.claude/rules/deps-policy.md`）。カーネル側の手動境界検査省略の口実として
 //! 性能計測結果を用いない（REQ-8）。
 //!
-//! 雛形段階（TASK-1.1a）では型・実装を持たない（spec 根拠: `docs/spec/05-tasks.md`
+//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
+//! 要するため別イシューで対応する）では型・実装を持たない（spec 根拠: `docs/spec/05-tasks.md`
 //! TASK-1.1、REQ-8）。
