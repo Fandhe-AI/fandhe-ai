@@ -1,0 +1,9 @@
+[package]
+name = "onnx-interop"
+description = "ONNX / safetensors 相互運用（REQ-7）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]

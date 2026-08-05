@@ -7,7 +7,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 - 想定クレート 9 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
-- 現状 M0（TASK-1.1〜1.3）未着手。Cargo.toml 追加まで CI・Makefile の cargo 系チェックは自動スキップされる
+- 現状 M0 着手中（TASK-1.1 部分実装: workspace `Cargo.toml` と 9 クレート雛形を追加済み。許容依存の `Cargo.toml` への反映はユーザー承認を要するため別イシューで対応する。TASK-1.2〜1.3 は未着手）。CI・Makefile の cargo 系チェックは `Cargo.toml` 追加により有効化済み（`deny.toml` 未追加の deny ジョブのみ自動スキップ継続）
 
 ## Repository Structure
 
@@ -20,6 +20,9 @@ rust-ai-library/
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
+├── Cargo.toml                # workspace 定義（9 クレート）
+├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
+│                             # onnx-interop・guardrail・self-repair・bench-harness（雛形）
 ├── .github/workflows/
 │   ├── ci.yml               # fmt / clippy / test / deny / deps-forbidden / ci-complete
 │   └── update-external.yml  # docs/spec・.claude/skills の自動追従

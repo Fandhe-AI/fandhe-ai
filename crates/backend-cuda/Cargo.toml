@@ -1,0 +1,9 @@
+[package]
+name = "backend-cuda"
+description = "CUDA バックエンド（cudarc 動的ロード。REQ-2）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
