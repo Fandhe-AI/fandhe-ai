@@ -142,7 +142,7 @@ impl Tape {
 /// **借用モデル**: PoC-v2-2 確定 API（`Tape::matmul(&mut self, ...)`、
 /// `docs/spec/03-poc/poc-v2-2-autodiff/README.md:28-31`）は `&mut Tape`
 /// を要求するが、本設計では `Var` 単体を式中で連鎖させたい
-/// （`a.matmul(&b).relu()` 等）ため、`Tape` 内部を `RefCell` で
+/// （`a.matmul(&b)?.relu()` 等）ため、`Tape` 内部を `RefCell` で
 /// 包み、`Var` は共有参照 `&'t Tape` を保持する形へ変更する。
 /// ノード追加は `RefCell::borrow_mut()` 経由の内部可変性で行う。
 /// PoC-v2-2 が確定したのは「動的テープ式（Wengert list）」という
@@ -155,23 +155,59 @@ pub struct Var<'t> { tape: &'t Tape, id: NodeId }
 impl<'t> Var<'t> {
     /// 追跡を外し、現在の値を非追跡の `Tensor<f32>` として取り出す。
     /// テープ内部が `RefCell` のため `Ref<'_, Tensor<f32>>` を返す。
+    ///
+    /// **借用注意**: この `Ref` を保持したまま、同じ `Tape` に対して
+    /// `borrow_mut()` を要する演算（`matmul`/`add` 等のノード追加）を
+    /// 呼ぶと実行時 panic になる（`RefCell` の二重可変借用）。本番
+    /// 経路で panic させないため、値をその場の参照ではなく所有値と
+    /// して持ち出したい場合は代わりに `to_tensor()` を使うこと。
     pub fn value(&self) -> Ref<'_, Tensor<f32>>;
 
-    // 演算セット（3.2 参照）。各メソッドは新しい `Var` を返す。
-    pub fn matmul(&self, other: &Var<'t>) -> Var<'t>;
-    pub fn add(&self, other: &Var<'t>) -> Var<'t>;        // bias broadcast 含む
-    pub fn mul(&self, other: &Var<'t>) -> Var<'t>;
+    /// `value()` の所有値版。`Tensor<f32>` へ複製して返すため `Ref`
+    /// を持ち越さず、直後に同じ `Tape` へノード追加演算を呼んでも
+    /// 借用エラー・panic が起きない（`value()` の借用注意を参照）。
+    pub fn to_tensor(&self) -> Tensor<f32>;
+
+    // 演算セット（3.2 参照）。shape 不整合・不正なブロードキャスト・
+    // 範囲外 dim はすべて失敗しうるため `Result<Var<'t>, AutodiffError>`
+    // を返す（§1「すべての失敗しうる公開 API は Result<T, E> を返す」
+    // 原則、`.claude/rules/coding-rust.md` の unwrap/expect 禁止に従う。
+    // `tensor-core::Tensor` 側の対応 API（transpose/narrow/reshape 等）
+    // が `Result<_, ShapeError>` を返すのとの対称性もこれで揃う）。
+    pub fn matmul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    pub fn add(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError>;    // bias broadcast 含む
+    pub fn mul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+    pub fn sum(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError>; // dim が rank 範囲外なら Err
+    pub fn max(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError>; // 同上
+    pub fn mse_loss(&self, target: &Var<'t>) -> Result<Var<'t>, AutodiffError>; // self/target の shape 不一致を検査
+
+    // relu/exp/tanh は要素ごとの単項演算であり shape を一切変えない
+    // ため、構造的に失敗しえない（PoC-v2-2/v2-5 が実測した演算セット
+    // でも shape 変化を伴わない）。「失敗しうる公開 API」の対象外
+    // として bare `Var<'t>` を返す（原則は失敗しうる API のみに適用）。
     pub fn relu(&self) -> Var<'t>;
     pub fn exp(&self) -> Var<'t>;
     pub fn tanh(&self) -> Var<'t>;
-    pub fn sum(&self, dim: Option<usize>) -> Var<'t>;
-    pub fn max(&self, dim: Option<usize>) -> Var<'t>;
-    pub fn mse_loss(&self, target: &Var<'t>) -> Var<'t>;
 }
 
 impl Tape {
     /// `loss` から逆伝播し、テープ上の全 `Var` に対する勾配を計算する。
     pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError>;
+}
+
+/// autodiff クレートの公開エラー型。順伝播（`Var` の演算メソッド）と
+/// 逆伝播（`Tape::backward`）双方の失敗経路をここに集約する
+/// （旧設計は `Tape::backward` の失敗のみを想定しており、順伝播側の
+/// shape 不整合を表現するエラーが欠落していた）。
+#[derive(Debug)]
+pub enum AutodiffError {
+    /// 順伝播時の shape 不整合（`matmul`/`add`/`mul` の不正な
+    /// ブロードキャスト、`sum`/`max`/`mse_loss` の shape 不一致等）。
+    /// `tensor-core::ShapeError` をラップし、エラー種別を重複定義
+    /// しない。
+    Shape(ShapeError),
+    /// `Tape::backward` 時のグラフ不整合（未接続ノードへの逆伝播要求等）。
+    Backward(String),
 }
 
 /// `backward()` の結果。`NodeId` をキーに勾配テンソルを保持する。
@@ -183,6 +219,32 @@ impl Gradients {
 ```
 
 `no_grad` 相当（勾配追跡を一時的に止める）は、専用フラグ API を設けず「`Tensor<T>` のまま演算する」ことで表現する。`Tensor<T>` と `Var` は別型であるため、追跡なしの経路を選ぶことはコンパイル時に強制される。
+
+### 3.1.1 学習ループにおける Tape のライフサイクル（未決事項として記録）
+
+動的テープ式（Wengert list）では `Tape::var()` を呼ぶたびにノードが
+`nodes: RefCell<Vec<TapeNode>>` へ追加される一方、ノード列をクリアす
+る `reset()`/`clear()` 相当の API は存在しない。`Gradients::get(&self,
+var: &Var)` は `&Var`（延いては `&'t Tape` への借用）をキーに勾配を
+引くため、複数ステップの学習ループでは以下の運用を前提とする設計と
+する:
+
+1. パラメータ自体は非追跡の `Tensor<f32>` として学習ループの外
+   （呼び出し側）で保持する。
+2. 各ステップの冒頭で新しい `Tape::new()` を生成し、パラメータを
+   `tape.var(&param)` で都度テープへ登録する。
+3. 順伝播・`backward()` を実行し、`Gradients` から勾配を読み出して
+   ステップ外で保持しているパラメータ（非追跡 `Tensor<f32>`）を
+   更新する。
+4. ステップ末で `Tape` をスコープアウトさせ破棄する。
+
+`Tape` を学習ループ全体で使い回す運用（§2.1 のコメントが「学習ループ
+の勾配バッファ」と述べているのは `Storage` の再利用最適化の話であり、
+`Tape` 自体を使い回す意図ではない点に注意）はノード列が際限なく肥大
+化するため非推奨とし、`Tape` のドキュメンテーションコメントに明記す
+る。明示的な `reset()`/`clear()` API を別途用意すべきかは、上記のス
+テップごと `Tape::new()` パターンで十分かどうかも含め TASK-1.5 実装
+時に決定する（6-7 参照）。
 
 ### 3.2 演算セット（初期）
 
@@ -232,9 +294,12 @@ PoC-v2-5 の `MetalOps` 公開 API（`gemm`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum
 pub struct DeviceBuffer<T: Element> {
     device: Device,
     shape: Vec<usize>,
-    _marker: PhantomData<T>,
-    // 実体（CUDA デバイスポインタ／Metal MTLBuffer 等）は
-    // 各バックエンド実装内部が保持し、ここには公開しない。
+    /// 実データ（CUDA デバイスポインタ／Metal `MTLBuffer` 等）を指す
+    /// 不透明ハンドル。具体型は各バックエンド実装（`backend-cuda`/
+    /// `backend-metal`）内部で定義し、`tensor-core`/backend 入口から
+    /// は中身を読めない。ここで具体型を確定しない理由・寿命管理の
+    /// 決定時期は 6-5 を参照（TASK-1.9 実装時に確定）。
+    handle: BackendHandle<T>,
 }
 
 /// 各バックエンド（CPU/CUDA/Metal）が実装するカーネル入口。
@@ -261,7 +326,9 @@ pub trait BackendOps {
 }
 ```
 
-`BackendError::DeviceMismatch` は、`gemm`/`add` 等に異なる `Device` に属する `DeviceBuffer` を渡した場合に返す（`DeviceBuffer::device` フィールドで検査可能）。この設計は PoC-v2-5 の `MetalOps` 実測 API（`docs/spec/03-poc/poc-v2-5-backend-numeric-parity/README.md`）をそのまま転記したものではなく、本イシューで追加した拡張である旨を明記する。`DeviceBuffer` 内部表現（CUDA デバイスポインタのラップ方法・Metal `MTLBuffer` の寿命管理等）は TASK-1.9 実装時に確定する。
+`BackendError::DeviceMismatch` は、`gemm`/`add` 等に異なる `Device` に属する `DeviceBuffer` を渡した場合に返す（`DeviceBuffer::device` フィールドで検査可能）。この設計は PoC-v2-5 の `MetalOps` 実測 API（`docs/spec/03-poc/poc-v2-5-backend-numeric-parity/README.md`）をそのまま転記したものではなく、本イシューで追加した拡張である旨を明記する。`DeviceBuffer` 内部表現（`BackendHandle<T>` の具体型・CUDA デバイスポインタのラップ方法・Metal `MTLBuffer` の寿命管理等）は TASK-1.9 実装時に確定する（6-5 参照）。
+
+**`BackendOps` が f32 専用である理由と f16 経路**: `DeviceBuffer<T: Element>` は `Element`（`f32`/`f64`/`i32`/`half::f16`、2.3 参照）全体に対しジェネリックだが、`BackendOps` トレイト v1 のスコープは PoC-v2-5 実測 API（`MetalOps` は f32 のみ実測済み）に合わせて `f32` 固定とする。GPU 推論で使う `half::f16` 経路（許容依存 `half`、deps-policy.md）の入口は本文書では確定しない。`BackendOps` を `T: Element` でジェネリック化するか、`f16` 専用の並行トレイトを追加するかは TASK-1.9 実装時に決定する（6-8 参照）。
 
 ### 4.3 API 契約として明記する数値仕様
 
@@ -292,7 +359,7 @@ pub enum BackendError {
 | 型 | 役割 | 発生源 |
 |----|------|--------|
 | `ShapeError` | テンソル生成・view 操作・reshape の shape 不整合 | `tensor-core` |
-| `AutodiffError` | `Tape::backward` の失敗（グラフ不整合等） | `autodiff` |
+| `AutodiffError` | 順伝播（`Var` の演算メソッド）の shape 不整合、および `Tape::backward` の失敗（グラフ不整合等） | `autodiff` |
 | `BackendError` | バックエンド実行時エラー（CUDA 不在・shape 不一致・デバイス不整合） | backend 入口 |
 
 外部フォーマット（safetensors/ONNX）読み込み時は、長さ・形状の検証を先行させる契約とする（`.claude/rules/security.md` A03 インジェクション対策）。`onnx-interop` クレートの `ShapeError` 送出経路は本設計のスコープ外（REQ-7 系、別イシューで扱う）だが、`tensor-core::Tensor::new`/`from_slice` の実行時 shape 検査がこの検証の受け皿となる設計である点を接続点として明記する。
@@ -304,7 +371,9 @@ pub enum BackendError {
 3. **rank 型載せの最終確定**（2.5）: 本文書は基盤層を実行時 rank、型レベル shape を後続レイヤー限定とする方針を決定として記録した。TASK-10.x 実装時にこの方針で問題がないか再確認すること。
 4. **演算グラフ／融合機構（イシュー #161）との接続点**: `Var`/`Tape` の演算記録が将来の融合機構（TASK-12.1a）とどう接続するかは本文書では設計しない。`Tape` の `Op` 列挙が融合対象の中間表現候補になりうる点のみ接続点として記録する。
 5. **`DeviceBuffer` の内部表現**（4.2）: CUDA デバイスポインタ・Metal `MTLBuffer` の具体的なラップ方法・寿命管理（`Drop` での解放タイミング等）は本文書では確定しない。TASK-1.9 実装時に決定する。
-6. **`Var`/`Tape` の借用モデル**（3.1）: 本文書は productize 時の API 使い勝手を優先し `RefCell` + 共有参照方式を採用したが、PoC-v2-2 確定 API は `&mut Tape` 方式だった。TASK-1.5 実装時に借用チェッカ上の問題が生じた場合は `&mut Tape` 方式へ戻す判断もありうる。
+6. **`Var`/`Tape` の借用モデル**（3.1）: 本文書は productize 時の API 使い勝手を優先し `RefCell` + 共有参照方式を採用したが、PoC-v2-2 確定 API は `&mut Tape` 方式だった。TASK-1.5 実装時に借用チェッカ上の問題が生じた場合は `&mut Tape` 方式へ戻す判断もありうる。この方式は `Var::value()` が `Ref<'_, Tensor<f32>>` を公開シグネチャへ露出する副作用も伴う（`Ref` を保持したまま同じ `Tape` へ `borrow_mut()` を要する演算を呼ぶと panic しうる）。本文書は回避策として所有値を返す `Var::to_tensor()` を追加したが、`value()` 自体を非公開化する・`Ref` を返さない別設計にするといった、より根本的な対処の要否は TASK-1.5 実装時に再検討する。
+7. **`Tape` のライフサイクル（学習ループ）**（3.1.1）: ステップごとに新しい `Tape` を生成し破棄する運用を推奨として記録した。明示的な `reset()`/`clear()` API を別途用意すべきか、`Gradients::get` が `&Var`（＝テープ借用）をキーにする現行設計を維持するか、テープに依存しないハンドル（`VarId` 等）をキーにする形へ変えるかは TASK-1.5 実装時に決定する。
+8. **`BackendOps` の f16 対応**（4.2）: `DeviceBuffer<T: Element>` はジェネリックだが `BackendOps` トレイト v1 は `f32` 固定。GPU 推論で使う `half::f16` 経路の入口設計（トレイトのジェネリック化か並行トレイト追加か）は TASK-1.9 実装時に決定する。
 
 ## スコープ外（out-of-scope-tracking 対象）
 
