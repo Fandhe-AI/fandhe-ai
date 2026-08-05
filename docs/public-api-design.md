@@ -2,7 +2,7 @@
 
 - 対応イシュー: #182（親 #181）
 - 対象クレート: `tensor-core`・`autodiff`・バックエンド入口（`backend-cpu`/`backend-cuda`/`backend-metal` が実装する抽象層）
-- 位置づけ: 本文書は**設計文書のみ**であり、実行可能なコードは含まない。現状リポは M0 未着手で `crates/` も `Cargo.toml` も存在しないため、Rust シグネチャのコンパイル検証は本イシューでは実施しない。TASK-1.4（自作テンソル型 productize）・TASK-1.5（autodiff productize）・TASK-1.9（バックエンド抽象層実装）の各実装イシューで本文書との突合を行うこと（`docs/spec/05-tasks.md:47,54,82`）。
+- 位置づけ: 本文書は**設計文書のみ**であり、実行可能なコードは含まない。TASK-1.1a（#205）で workspace `Cargo.toml`・9 クレートの雛形は作成済みだが、各クレートは空の雛形でありテンソル・autodiff・backend の型は未実装のため、Rust シグネチャのコンパイル検証は本イシューでは実施しない。TASK-1.4（自作テンソル型 productize）・TASK-1.5（autodiff productize）・TASK-1.9（バックエンド抽象層実装）の各実装イシューで本文書との突合を行うこと（`docs/spec/05-tasks.md:47,54,82`）。
 - 対象外: `compat::array`/`compat::Sequential` 等の互換 API 層（REQ-9）の詳細シグネチャ、guardrail/self-repair の CLI 仕様（兄弟イシュー #183）、演算グラフ・カーネル融合機構の API（イシュー #161・TASK-12.1a）。詳細は本文書末尾「スコープ外」を参照。
 
 ## 1. 設計原則
@@ -380,4 +380,4 @@ pub enum BackendError {
 - **compat API 層**（`compat::array`/`compat::Sequential` の詳細シグネチャ）: REQ-9 系の後続タスク。本文書は境界（自作コアの素の API とは別レイヤーであること）のみを 1 章で明記した。
 - **guardrail/self-repair の CLI 仕様**: 兄弟イシュー #183 が担当。
 - **演算グラフ・カーネル融合機構の API**: イシュー #161（TASK-12.1a）。接続点のみ 6.4 に記載。
-- **シグネチャのコンパイル検証・実装**: TASK-1.4（自作テンソル型 productize）以降の実装イシューへ引き継ぐ。M0 未着手のため `crates/`・`Cargo.toml` が存在せず、本イシューでは検証しない。
+- **シグネチャのコンパイル検証・実装**: TASK-1.4（自作テンソル型 productize）以降の実装イシューへ引き継ぐ。workspace 雛形（TASK-1.1a・#205）はクレートが空のため、本イシューでは検証しない。
