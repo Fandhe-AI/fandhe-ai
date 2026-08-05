@@ -1,11 +1,11 @@
-# rust-ai-library-app
+# rust-ai-library
 
 Rust 製 AI/ML ライブラリの実装リポジトリです。Burn 依存を排した完全自作コア（v2 方針）で実装します。
 
 ## 位置づけ
 
 - **仕様・要件定義**: [rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec)（`docs/spec` に submodule 参照）
-- **旧実装（v1・Burn ベース）**: [rust-ai-library](https://github.com/Fandhe-AI/rust-ai-library)（アーカイブ済み。資産の引き継ぎ記録は [v1-assets-inventory.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v1-assets-inventory.md) を参照）
+- **旧実装（v1・Burn ベース）**: [rust-ai-library-v1](https://github.com/Fandhe-AI/rust-ai-library-v1)（アーカイブ済み。資産の引き継ぎ記録は [v1-assets-inventory.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v1-assets-inventory.md) を参照）
 - **立ち上げ手順**: [v2-repo-migration.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v2-repo-migration.md)
 
 ## ステータス
