@@ -118,6 +118,43 @@ fn gemm_parallel_matches_naive_bit_exact() {
     assert_eq!(c_naive, c_parallel);
 }
 
+/// `gemm_parallel` はパネル分割・タスク数を rayon の稼働スレッド数に応じて
+/// 決めるため（`src/gemm.rs` の並列パネル分割ロジック）、スレッド数が
+/// 結果に影響しないことは自明ではない。1・3・16 スレッドの `ThreadPool` を
+/// 明示構築し `install` 内で `gemm_parallel` を実行して、`gemm_naive` との
+/// bit 完全一致（許容誤差なし）をスレッド数によらず確認する（issue #21
+/// 方針コメント
+/// https://github.com/Fandhe-AI/rust-ai-library/issues/21#issuecomment-5200554933
+/// で指定されたレビュー Medium 指摘対応。`tests/reduction.rs` の
+/// `full_reduction_deterministic_across_thread_pools` と同一パターン）。
+/// 形状は NC/KC/MC いずれも複数ブロックを跨ぐ ragged panel
+/// （`gemm_blocked_matches_naive_bit_exact_multi_block` と同種の意図で
+/// M=523 は MC=128 の倍数でない端数パネルを含む）。
+#[test]
+fn gemm_parallel_matches_naive_bit_exact_across_thread_pools() {
+    let (m, n, k) = (523, 600, 700);
+    let a = random_matrix(30, m * k);
+    let b = random_matrix(31, k * n);
+
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+    for num_threads in [1usize, 3, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_parallel = vec![0.0; m * n];
+        pool.install(|| gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "gemm_parallel（num_threads={num_threads}）が gemm_naive と bit 一致しない"
+        );
+    }
+}
+
 // --- 3. FMA 契約の固定（K が大きいストレス形状） ---
 
 /// `acc += a*b`（乗算・加算を別々に丸める）実装への退行で失敗する契約
