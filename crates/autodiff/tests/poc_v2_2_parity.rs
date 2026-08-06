@@ -57,6 +57,22 @@ const D_HIDDEN: usize = 16;
 const D_OUT: usize = 4;
 const SEED: u64 = 0xC0FFEE;
 
+// --- PoC evidence 値（モジュール定数化） ---
+// `poc_loss_value_parity`/`poc_train_repro_determinism` が突合対象とする
+// PoC evidence の実測値そのもの。`poc_evidence_cross_check`（#[ignore]）は
+// これらの定数を実際の evidence ログと突合することで、値のインライン化時の
+// 転記ミスを検出する（別のハードコードリテラルとの比較では転記ミスを
+// すり抜けさせてしまうため、参照元をこの定数に一本化する。#227 Bugbot 指摘）。
+/// `docs/spec/03-poc/poc-v2-2-autodiff/evidence/grad_check.log` 1 行目
+/// `loss(tape)=0.4891096434` の値。
+const POC_LOSS: f64 = 0.4891096434;
+/// `docs/spec/03-poc/poc-v2-2-autodiff/evidence/train_repro.log`
+/// `step=0` 行の `loss=0.512142007262` の値。
+const POC_STEP0_LOSS: f64 = 0.512142007262;
+/// `docs/spec/03-poc/poc-v2-2-autodiff/evidence/train_repro.log`
+/// `step=49`（最終 step）行の `loss=0.240210505450` の値。
+const POC_STEP49_LOSS: f64 = 0.240210505450;
+
 /// PoC `gen_vec`（grad_check.rs/train_repro.rs 共通）の f32 版。
 /// PoC は f64（`rng.next_f32() as f64 * scale`）で乱数系列を生成するが、
 /// productize 後の `autodiff` は f32 のみを扱うため、末尾で `f32` へ
@@ -382,7 +398,6 @@ fn poc_loss_value_parity() {
     let h2b = h2.add(&b2).unwrap();
     let loss = h2b.mse_loss(&y).unwrap();
 
-    const POC_LOSS: f64 = 0.4891096434;
     let ad_loss = f64::from(scalar(&loss.to_tensor()));
     assert!(
         composite_close(ad_loss, POC_LOSS),
@@ -502,7 +517,6 @@ fn poc_train_repro_determinism() {
          （HashMap 等の非決定的走査混入の疑い）"
     );
 
-    const POC_STEP0_LOSS: f64 = 0.512142007262;
     let step0_loss = f64::from(run1[0].0);
     assert!(
         composite_close(step0_loss, POC_STEP0_LOSS),
@@ -522,7 +536,6 @@ fn poc_train_repro_determinism() {
     // 計算が f64 PoC 参照実装の軌跡（lr・パラメータ生成順は同一だが
     // 全経路 f64）から実測で乖離しないことを固定する（相対誤差
     // ~1e-10 オーダーで一致することを実測確認済み）。
-    const POC_STEP49_LOSS: f64 = 0.240210505450;
     let final_loss = run1[STEPS - 1].0;
     let final_loss_f64 = f64::from(final_loss);
     assert!(
@@ -568,8 +581,9 @@ fn poc_evidence_cross_check() {
         .parse()
         .expect("loss(tape)= の値が数値としてパースできない");
     assert!(
-        composite_close(loss_value, 0.4891096434),
-        "poc_loss_value_parity へインライン化した値が evidence とズレている: {loss_value}"
+        composite_close(loss_value, POC_LOSS),
+        "poc_loss_value_parity へインライン化した POC_LOSS が evidence とズレている: \
+         evidence={loss_value} POC_LOSS={POC_LOSS}"
     );
 
     // train_repro.log: "step=0 loss=0.512142007262 loss_bits=..."
@@ -583,7 +597,24 @@ fn poc_evidence_cross_check() {
         .and_then(|s| s.parse().ok())
         .expect("step=0 行から loss= の値がパースできない");
     assert!(
-        composite_close(step0_loss, 0.512142007262),
-        "poc_train_repro_determinism へインライン化した値が evidence とズレている: {step0_loss}"
+        composite_close(step0_loss, POC_STEP0_LOSS),
+        "poc_train_repro_determinism へインライン化した POC_STEP0_LOSS が evidence とズレている: \
+         evidence={step0_loss} POC_STEP0_LOSS={POC_STEP0_LOSS}"
+    );
+
+    // train_repro.log: "step=49 loss=0.240210505450 loss_bits=..."（最終 step）
+    let step49_line = train_repro_text
+        .lines()
+        .find(|l| l.starts_with("step=49 "))
+        .expect("train_repro.log に step=49 行が見つからない");
+    let step49_loss: f64 = step49_line
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("loss="))
+        .and_then(|s| s.parse().ok())
+        .expect("step=49 行から loss= の値がパースできない");
+    assert!(
+        composite_close(step49_loss, POC_STEP49_LOSS),
+        "poc_train_repro_determinism へインライン化した POC_STEP49_LOSS が evidence とズレている: \
+         evidence={step49_loss} POC_STEP49_LOSS={POC_STEP49_LOSS}"
     );
 }
