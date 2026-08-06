@@ -280,7 +280,20 @@ impl<T: Element> Tensor<T> {
     /// 現在のテンソルが行優先で連続配置されているか判定する。
     /// サイズ 0・1 の軸は strides に依らず標準的に許容する
     /// （NumPy 等の慣習に合わせ、当該軸の stride 値は判定に用いない）。
+    ///
+    /// `numel() == 0`（空テンソル）は常に連続とみなす（NumPy 方式）。
+    /// `transpose`／内側軸を長さ 0 まで `narrow` した後の空テンソルは
+    /// 残った軸に非ゼロの stride を保持しうるが、`row_major_strides` は
+    /// サイズ 0 の軸が存在すると外側の stride を 0 に潰す
+    /// （`row_major_strides` の実装コメント参照）ため、要素アクセスが
+    /// 発生しない空テンソルの軸ごと比較では偽陰性（誤って非連続と判定）
+    /// になりうる。`reshape`/`as_slice` はいずれも本関数の結果を経由する
+    /// ため、ここで早期 `true` を返すことで空テンソル同士の
+    /// 有効な reshape・スライス取得を誤って弾かない。
     pub fn is_contiguous(&self) -> bool {
+        if self.numel() == 0 {
+            return true;
+        }
         let expected = row_major_strides(&self.shape);
         for (i, &dim) in self.shape.iter().enumerate() {
             if dim <= 1 {
@@ -552,5 +565,33 @@ mod tests {
         assert!(t.as_slice().is_some());
         let tt = t.transpose(0, 1).unwrap();
         assert!(tt.as_slice().is_none());
+    }
+
+    // Bugbot 指摘（PR #215）: transpose／内側軸を長さ 0 まで narrow した後の
+    // 空テンソル（numel == 0）が is_contiguous で誤って非連続と判定され、
+    // reshape が NonContiguousReshape を返す・as_slice が None を返す不具合の
+    // 回帰テスト。NumPy 方式では空テンソルは常に連続とみなす。
+    #[test]
+    fn empty_tensor_after_transpose_is_contiguous() {
+        let t = Tensor::<f32>::zeros(&[0, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        assert_eq!(tt.shape(), &[3, 0]);
+        assert!(tt.numel() == 0);
+        assert!(tt.is_contiguous());
+        assert!(tt.as_slice().is_some());
+        let r = tt.reshape(&[0]).unwrap();
+        assert_eq!(r.shape(), &[0]);
+    }
+
+    #[test]
+    fn empty_tensor_after_inner_narrow_is_contiguous() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let n = t.narrow(1, 0, 0).unwrap();
+        assert_eq!(n.shape(), &[2, 0]);
+        assert!(n.numel() == 0);
+        assert!(n.is_contiguous());
+        assert!(n.as_slice().is_some());
+        let r = n.reshape(&[0]).unwrap();
+        assert_eq!(r.shape(), &[0]);
     }
 }
