@@ -53,12 +53,14 @@ fn select_error_variant_distinguishes_invalid_ordinal_from_driver_unavailable() 
 
     match result {
         Err(BackendError::DeviceUnavailable(_)) => {
-            // ドライバは検出できたが ordinal 9999 が範囲外だった
-            // （＝実機環境で本当に台数を確認できたケース）。
-            assert!(
-                provider.is_available(),
-                "DeviceUnavailable must only occur when the driver itself is available"
-            );
+            // `device_count()`（ドライバ呼び出し）自体は成功し、ordinal
+            // 9999 が範囲外だったケース。ドライバは検出できたが搭載
+            // デバイスが 0 台のホスト（self-hosted runner で GPU 非搭載
+            // の場合等）では `device_count() == 0` となり、この分岐を
+            // 通りつつも `is_available()`（`enumerate()` が非空である
+            // ことを要求。device.rs 参照）は false になりうる。よって
+            // `is_available()` との一致は要求しない（Bugbot #237 追加
+            // 指摘。zero-device host で本テストが誤って失敗しないため）。
         }
         Err(BackendError::CudaUnavailable(_)) => {
             // ドライバ不在（CI self-hosted の想定パス）。
