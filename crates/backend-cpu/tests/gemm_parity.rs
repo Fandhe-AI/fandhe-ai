@@ -17,6 +17,20 @@
 //! checkout 済みのローカル環境でのみ実行する
 //! （`crates/tensor-core/tests/poc_v2_1_parity.rs` の確立パターンを踏襲。
 //! CI は `docs/spec` submodule を checkout しない）。
+//!
+//! ## #25（TASK-1.6e）で追加した観点
+//!
+//! 上記 1〜4 の既存カバレッジ棚卸しの結果、以下の 3 観点が未補完と判明し
+//! 本ファイルへ追加した（詳細は各セクション「5. 」以降のテスト doc コメント
+//! 参照）。
+//!
+//! 5. **ブロック境界 ±1**: MC(128)/KC(256)/NC(512) の境界ちょうど・前後で
+//!    blocked/parallel が naive と bit 完全一致すること（既存の
+//!    `_multi_block` テストは境界を跨ぐが、境界「ちょうど」は未検証だった）。
+//! 6. **退化非正方形状**: 行ベクトル・列ベクトル（GEMV 相当）・外積相当
+//!    （K=1）の 3 実装 bit 一致。
+//! 7. **極小 m の並列パネル分割**: `m < num_threads` でパネル数が
+//!    スレッド数を下回る端数経路。
 
 use backend_cpu::{GemmError, gemm_blocked, gemm_naive, gemm_parallel};
 use bench_harness::rng::Xorshift64Star;
@@ -280,6 +294,152 @@ fn gemm_zero_m_and_n_is_noop_across_all_three_kernels() {
     let mut c_parallel: Vec<f32> = vec![];
     gemm_parallel(&a, &b, &mut c_parallel, 0, 0, 0).unwrap();
     assert!(c_parallel.is_empty());
+}
+
+// --- 5. ブロック境界 ±1（#25） ---
+
+/// MC(128)・KC(256)・NC(512)（#25 執筆時点の `src/gemm.rs` 定数値）それぞれの
+/// 境界「ちょうど」・±1 を含む代表組で blocked／parallel が naive と bit
+/// 完全一致することを確認する。既存の
+/// `gemm_blocked_matches_naive_bit_exact_multi_block`（200×600×700）は
+/// 境界を複数回跨ぐ形状は押さえているが、境界値ちょうど（`m==128` 等）は
+/// 未検証だった（#25 棚卸しで特定したギャップ）。全直積ではなく
+/// 「MC・KC・NC を 1 つずつ境界値へ振る」3 組に絞り、境界遷移の実質的な
+/// 組合せ数を抑えつつ各定数の境界を独立に押さえる。
+///
+/// `MC`/`KC`/`NC` は `src/gemm.rs` の非公開定数のため本統合テストからは
+/// 参照できず、下記の数値は執筆時点の値のハードコードである（`PARALLEL_THRESHOLD`・
+/// `CHUNK` を参照する elementwise/reduction 側のインライン境界テストとは
+/// 配置方針が異なる）。#24（TASK-1.6d チューニング）でこれらの定数が変わった
+/// 場合、本テストの assert（naive/blocked/parallel の parity）自体は
+/// 境界値によらず成立し続けるため red にはならないが、「境界を狙って
+/// いる」という本コメントの意図は陳腐化する。#24 実施時に本テストの数値も
+/// 併せて見直すこと。
+#[test]
+fn gemm_matches_naive_bit_exact_at_block_boundaries() {
+    // (m, n, k): MC=128 境界／KC=256 境界／NC=512 境界をそれぞれ中心に取る。
+    let cases = [
+        (127usize, 17usize, 19usize),
+        (128, 17, 19),
+        (129, 17, 19),
+        (17, 17, 255),
+        (17, 17, 256),
+        (17, 17, 257),
+        (17, 511, 17),
+        (17, 512, 17),
+        (17, 513, 17),
+    ];
+    for (idx, &(m, n, k)) in cases.iter().enumerate() {
+        let a = random_matrix(100 + idx as u64, m * k);
+        let b = random_matrix(200 + idx as u64, k * n);
+
+        let mut c_naive = vec![0.0; m * n];
+        gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_blocked = vec![0.0; m * n];
+        gemm_blocked(&a, &b, &mut c_blocked, m, n, k).unwrap();
+        assert_eq!(
+            c_naive, c_blocked,
+            "gemm_blocked が境界形状 (m={m}, n={n}, k={k}) で naive と不一致"
+        );
+
+        let mut c_parallel = vec![0.0; m * n];
+        gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+        assert_eq!(
+            c_naive, c_parallel,
+            "gemm_parallel が境界形状 (m={m}, n={n}, k={k}) で naive と不一致"
+        );
+    }
+}
+
+// --- 6. 退化非正方形状（#25） ---
+
+/// 行ベクトル（m=1）・列ベクトル（n=1、GEMV 相当）・外積相当（k=1）の 3 種の
+/// 退化形状で 3 実装が bit 完全一致することを確認する。いずれも通常の
+/// 「両方向とも複数」形状とはループの反復回数が極端に偏るため、
+/// `kernel_block` のオフセット計算が退化次元で誤らないことの回帰テストと
+/// なる（#25 棚卸しで特定したギャップ）。
+#[test]
+fn gemm_matches_naive_bit_exact_for_degenerate_shapes() {
+    // 行ベクトル: (1, n, k)。
+    let (m, n, k) = (1, 300, 40);
+    let a = random_matrix(300, m * k);
+    let b = random_matrix(301, k * n);
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+    let mut c_blocked = vec![0.0; m * n];
+    gemm_blocked(&a, &b, &mut c_blocked, m, n, k).unwrap();
+    assert_eq!(c_naive, c_blocked, "行ベクトル形状で blocked が不一致");
+    let mut c_parallel = vec![0.0; m * n];
+    gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+    assert_eq!(c_naive, c_parallel, "行ベクトル形状で parallel が不一致");
+
+    // 列ベクトル（GEMV 相当）: (m, 1, k)。
+    let (m, n, k) = (300, 1, 40);
+    let a = random_matrix(302, m * k);
+    let b = random_matrix(303, k * n);
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+    let mut c_blocked = vec![0.0; m * n];
+    gemm_blocked(&a, &b, &mut c_blocked, m, n, k).unwrap();
+    assert_eq!(
+        c_naive, c_blocked,
+        "列ベクトル（GEMV）形状で blocked が不一致"
+    );
+    let mut c_parallel = vec![0.0; m * n];
+    gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+    assert_eq!(
+        c_naive, c_parallel,
+        "列ベクトル（GEMV）形状で parallel が不一致"
+    );
+
+    // 外積相当: (m, n, 1)。
+    let (m, n, k) = (40, 40, 1);
+    let a = random_matrix(304, m * k);
+    let b = random_matrix(305, k * n);
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+    let mut c_blocked = vec![0.0; m * n];
+    gemm_blocked(&a, &b, &mut c_blocked, m, n, k).unwrap();
+    assert_eq!(c_naive, c_blocked, "外積相当形状で blocked が不一致");
+    let mut c_parallel = vec![0.0; m * n];
+    gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+    assert_eq!(c_naive, c_parallel, "外積相当形状で parallel が不一致");
+}
+
+// --- 7. 極小 m の並列パネル分割（#25） ---
+
+/// `m` がスレッド数を下回る（1〜2 行）場合、`gemm_parallel` のパネル分割
+/// （`panel_rows = m.div_ceil(num_threads)`）は多くのスレッドがパネルを
+/// 持たない端数経路になる。この経路でも naive と bit 完全一致すること、
+/// かつスレッド数を変えても結果が変わらない（決定性契約）ことを確認する
+/// （#25 棚卸しで特定したギャップ。既存の
+/// `gemm_parallel_matches_naive_bit_exact_across_thread_pools` は
+/// M=523 という「パネル数が十分多い」形状のみを対象としていた）。
+#[test]
+fn gemm_parallel_matches_naive_bit_exact_for_tiny_m_across_thread_pools() {
+    for m in [1usize, 2] {
+        let (n, k) = (37, 53);
+        let a = random_matrix(400 + m as u64, m * k);
+        let b = random_matrix(401 + m as u64, k * n);
+
+        let mut c_naive = vec![0.0; m * n];
+        gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        for num_threads in [1usize, 3, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+            let mut c_parallel = vec![0.0; m * n];
+            pool.install(|| gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+            assert_eq!(
+                c_naive, c_parallel,
+                "gemm_parallel（m={m}, num_threads={num_threads}）が naive と不一致"
+            );
+        }
+    }
 }
 
 // --- エラー経路 ---
