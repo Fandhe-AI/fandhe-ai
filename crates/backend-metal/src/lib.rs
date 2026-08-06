@@ -35,11 +35,20 @@
 //!
 //! 非 macOS 環境ではモジュールごとコンパイル対象外になる（feature フラグなしの cfg ベース。
 //! PoC-v2-5 実証構成・REQ-2）。
+//!
+//! TASK-1.9a（#44）で [`device`] モジュール（[`device::MetalDeviceProvider`]）を追加した。
+//! `tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
+//! （`backend-cpu::CpuDeviceProvider`／`backend-cuda::device::CudaDeviceProvider`）と
+//! 同一 trait で列挙・選択できることを macOS 実機上のテストで検証する。`Device::Metal`
+//! 自体が `cfg(target_os = "macos")` 限定のため、本モジュールもクレート全体でこの cfg を
+//! 付す（非 macOS 環境のビルドに影響を与えない）。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
 pub mod context;
+#[cfg(target_os = "macos")]
+pub mod device;
 #[cfg(target_os = "macos")]
 pub mod error;
 #[cfg(target_os = "macos")]
@@ -64,6 +73,8 @@ unsafe extern "C" {}
 pub use buffer::MetalBuffer;
 #[cfg(target_os = "macos")]
 pub use context::MetalContext;
+#[cfg(target_os = "macos")]
+pub use device::MetalDeviceProvider;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]

@@ -62,6 +62,8 @@ dependencies = [
 name = "backend-cpu"
 version = "0.1.0"
 dependencies = [
+ "backend-cuda",
+ "backend-metal",
  "bench-harness",
  "half",
  "rayon",
@@ -76,6 +78,7 @@ dependencies = [
  "bench-harness",
  "cudarc",
  "half",
+ "tensor-core",
 ]
 
 [[package]]
@@ -88,6 +91,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-metal",
+ "tensor-core",
 ]
 
 [[package]]

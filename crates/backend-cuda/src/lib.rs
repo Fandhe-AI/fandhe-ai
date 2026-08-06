@@ -21,20 +21,29 @@
 //! `NvrtcUnavailable`）を返す（`device.rs`／`nvrtc.rs` のドキュメンテーション
 //! コメント参照）。これにより CUDA 非搭載環境でも panic しない。
 //!
+//! TASK-1.9a（#44）で `device` モジュールに [`device::CudaDeviceProvider`]
+//! （`tensor_core::device::DeviceProvider` の CUDA 実装）を追加した。上記の
+//! `CudaDevice` を内部で経由するため panic 回避ゲートは共通で効く。CPU／Metal
+//! 実装（`backend-cpu::CpuDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
+//! と同一 trait で列挙・選択できることを
+//! `backend-cpu/tests/device_provider_integration.rs` で検証する。CUDA
+//! ドライバ非搭載環境では `is_available() == false`・`enumerate() == Ok(vec![])`
+//! を返す（fail-safe。`device.rs` 内コメント参照）。
+//!
 //! カーネルソース・起動 API は naive 版（#33）・tiled 版（#34。共有メモリ
 //! タイリング `TILE=32`）を追加済み。CUDA toolkit 非搭載ビルドの CI 検証は
 //! #35、実機（DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
-//! `BackendOps`/`BackendError` へのマッピングは TASK-1.9（#43/#44）の
-//! スコープであり、本イシューでは扱わない
-//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7）。
+//! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
+//! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
+//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
 
-mod device;
+pub mod device;
 mod error;
 mod gemm;
 mod kernels;
 mod nvrtc;
 
-pub use device::CudaDevice;
+pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
 pub use nvrtc::compile_ptx;

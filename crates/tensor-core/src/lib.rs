@@ -20,14 +20,26 @@
 //! `tests/tensor_views.rs` が複数 API 組合せの統合テストを担う。
 //! 演算グラフ本体（カーネル融合機構）は後続タスクで追加する（spec 根拠:
 //! `docs/spec/05-tasks.md` TASK-1.4、`docs/public-api-design.md` §2）。
+//!
+//! `device`（TASK-1.9a・#44）は `backend-cpu`／`backend-cuda`／
+//! `backend-metal` が実装するデバイス列挙・選択の共通 trait
+//! （[`device::DeviceProvider`]）・共通型（[`device::Device`]・
+//! [`device::DeviceInfo`]）・エラー型（[`device::BackendError`]）を提供する。
+//! 3 バックエンドクレートはいずれも `tensor-core` に依存するため、trait
+//! 定義をここに置き各バックエンド側で実装する依存逆転構成を取る
+//! （`docs/public-api-design.md` §4）。`DeviceBuffer`（デバイス常駐
+//! バッファ）・`BackendOps`（カーネルディスパッチ）は後続タスク
+//! （TASK-1.9b・1.9c）で追加する。
 
 mod broadcast;
+pub mod device;
 mod element;
 mod error;
 mod ops_shape;
 mod tensor;
 
 pub use broadcast::broadcast_shape;
+pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use element::Element;
 pub use error::ShapeError;
 pub use ops_shape::{
