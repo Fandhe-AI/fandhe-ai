@@ -57,6 +57,18 @@ pub enum CudaError {
     /// A03 インジェクション対策（外部由来の形状値を境界チェックなしに
     /// カーネル引数へ渡さない。`.claude/rules/security.md`）を兼ねる。
     InvalidShape { detail: String },
+
+    /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
+    /// の要件を満たさないデバイス上で要求された。
+    ///
+    /// WMMA f16 経路は compute capability 7.0 以降を要求する（設計メモ
+    /// `docs/cuda-tensor-core-design.md` 7 節「ディスパッチ規則への引き渡し
+    /// 事項」）。`CudaWmmaGemm::new` は NVRTC コンパイルを試みる前に
+    /// `CudaDevice::compute_capability()` でこの下限を検査し、満たさない
+    /// 場合は本 variant を返す（対応する tiled 経路へのフォールバック判断は
+    /// TASK-11.2／#66 のディスパッチ規則側の責務であり、本クレートでは
+    /// 判定のみを行う）。
+    TensorCoreUnsupported { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -80,6 +92,9 @@ impl fmt::Display for CudaError {
             CudaError::Compile(e) => write!(f, "nvrtc compile error: {e:?}"),
             CudaError::InvalidShape { detail } => {
                 write!(f, "invalid GEMM shape: {detail}")
+            }
+            CudaError::TensorCoreUnsupported { detail } => {
+                write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
             }
         }
     }

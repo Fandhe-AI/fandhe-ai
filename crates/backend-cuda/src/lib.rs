@@ -40,14 +40,28 @@
 //! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
 //! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
+//!
+//! TASK-11.1b（#61）で f16 Tensor Core（WMMA）GEMM カーネル
+//! （[`CudaWmmaGemm`]）を追加した。設計は `docs/cuda-tensor-core-design.md`
+//! （#60）で確定済み（方式 A: `#include <mma.h>` の WMMA C++ API・
+//! `m16n16k16` fragment・f32 アキュムレート）。naive／tiled 経路
+//! （`kernels.rs`／`gemm.rs`）とは別ファイル（`kernels_wmma.rs`／
+//! `gemm_wmma.rs`）に分離しており、ディスパッチ規則（どの経路をいつ
+//! 選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
+//! TF32/f32 tensor core 経路（#62）・共有メモリ／タイル基本最適化（#63）・
+//! 実機実測での数値一致検証（#64）・`mma.sync` PTX 直叩き（#187）も
+//! 本イシューのスコープ外である（`docs/cuda-tensor-core-design.md` 参照）。
 
 pub mod device;
 mod error;
 mod gemm;
+mod gemm_wmma;
 mod kernels;
+mod kernels_wmma;
 mod nvrtc;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;

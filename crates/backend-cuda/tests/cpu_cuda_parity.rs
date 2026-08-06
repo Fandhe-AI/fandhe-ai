@@ -28,7 +28,13 @@
 //!   結果として f16 向け tolerance は本イシューでは導入せず、
 //!   `gemm_naive.rs`／`gemm_tiled.rs` の f16 テストは「形状一致＋全要素
 //!   有限」までの検証に強化するに留める（f16 tolerance 設計自体は
-//!   `out-of-scope-tracking.md` に従いスコープ外事項として PR 本文に記録）
+//!   `out-of-scope-tracking.md` に従いスコープ外事項として PR 本文に記録）。
+//!   **例外**: WMMA f16 経路（`tests/cpu_cuda_wmma_parity.rs`・#61）のみ、
+//!   #61 の受け入れ条件「f16 GEMM が複合判定で参照実装と一致する」が
+//!   明示的に複合判定の適用を要求しているため対象とする。本ファイルの
+//!   対象外方針（naive f16 等、他の f16 経路）はそれ以外に適用される。
+//!   判定基準の一般化（複合判定を f16 全般へ拡大すべきか）の検討は
+//!   #186（Tensor Core 経路の数値一致閾値の実測再評価）へ委ねる
 //! - elementwise・reduction は CUDA 側カーネルが未実装のため対象外
 //!   （PoC-v2-5 の判定カバレッジ〈GEMM・elementwise・reduction〉との差異）
 //! - CPU-Metal ペアは #55 のスコープ
