@@ -1,11 +1,15 @@
-//! naive／tiled GEMM の起動 API（NVRTC コンパイル・保持・実行）。
+//! naive／tiled／WMMA(TF32) GEMM の起動 API（NVRTC コンパイル・保持・実行）。
 //!
 //! `CudaGemm` は `crates/tensor-core` の演算グラフ実行（TASK-1.9・#43 で
-//! `BackendOps` へ結線予定）から見て、「`CudaDevice` を渡すと naive／tiled
-//! GEMM カーネル（f32/f16 各 2 種、計 4 カーネル）をコンパイル・保持し、
-//! 以降はホスト側スライスを渡すだけで GPU 実行できる」境界を担う。カーネル
-//! ソース自体は `kernels.rs`（NVRTC 文字列埋め込み）に閉じ込め、本モジュールは
+//! `BackendOps` へ結線予定）から見て、「`CudaDevice` を渡すと naive／tiled／
+//! WMMA(TF32) GEMM カーネル（naive/tiled は f32/f16 各 2 種、WMMA(TF32) は
+//! f32 1 種、計 5 カーネル）をコンパイル・保持し、以降はホスト側スライスを
+//! 渡すだけで GPU 実行できる」境界を担う。カーネルソース自体は
+//! `kernels.rs`（NVRTC 文字列埋め込み）に閉じ込め、本モジュールは
 //! コンパイル結果（`CudaFunction`）の保持とメモリ転送・起動手続きのみを扱う。
+//! WMMA(TF32) 経路（TASK-11.1c・#62）は naive/tiled の 4 カーネルと異なる
+//! ブロック次元契約（[`WMMA_TF32_BLOCK_DIM`]・[`wmma_tf32_launch_config`]）を
+//! 持つため、専用の起動手続き（[`CudaGemm::run_wmma_f32_kernel`]）に分離する。
 //!
 //! **移植元**: `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/rust/src/cuda/mod.rs`
 //! の `CudaGemm::new`／`run_naive_f32`／`run_naive_f16`／`run_tiled_f32`／
@@ -53,6 +57,16 @@ const NAIVE_BLOCK_DIM: (u32, u32, u32) = (16, 16, 1);
 /// スレッドが共有メモリを書かない一方でロード先が欠落し誤った積和になる）。
 const TILED_BLOCK_DIM: (u32, u32, u32) = (kernels::TILE, kernels::TILE, 1);
 
+/// WMMA TF32 GEMM カーネル起動 1 回あたりのブロック次元（128 スレッド = 4 warp、
+/// `kernels::WMMA_TF32_THREADS` を 1 次元ブロックとして起動する）。
+///
+/// `kernels::WMMA_TF32_F32` は `blockDim.x`（線形スレッド ID）から warp を
+/// `warp_id = tid / 32` で導出し、2x2 warp グリッド（`warp_id / 2`／`warp_id % 2`）
+/// へマップする実装のため、ここが `kernels::WMMA_TF32_THREADS` とずれると
+/// 一部 warp が欠落し誤った積和・共有メモリロード漏れが起きる（`TILED_BLOCK_DIM`
+/// と同じ「ホスト側ブロック次元とカーネル内定数の 1:1 対応」契約）。
+const WMMA_TF32_BLOCK_DIM: (u32, u32, u32) = (kernels::WMMA_TF32_THREADS, 1, 1);
+
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
 /// `stream` は [`CudaDevice`] から `Arc` クローンで受け取る（`device.rs` の
@@ -66,6 +80,12 @@ pub struct CudaGemm {
     naive_f16: CudaFunction,
     tiled_f32: CudaFunction,
     tiled_f16: CudaFunction,
+    /// TASK-11.1c（#62）で追加。WMMA（Tensor Core）を用いた TF32 GEMM
+    /// （`kernels::WMMA_TF32_F32`）のコンパイル済みハンドル。#61（f16 WMMA
+    /// GEMM）が本 PR 時点で未マージのため、WMMA 共通基盤（NVRTC コンパイル・
+    /// 起動 API の骨格）はこのフィールドと共に本イシューで最小実装した
+    /// （イシュー #62 実装計画 2 節「安全側の判断」）。
+    wmma_tf32: CudaFunction,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -175,6 +195,51 @@ pub(crate) fn validate_tiled_k_bound(k: u32) -> Result<(), CudaError> {
     Ok(())
 }
 
+/// WMMA TF32 カーネル固有の `k` 追加上限検証。
+///
+/// `kernels::WMMA_TF32_F32` は各 K タイル反復で `t * WMMA_TF32_K_TILE +
+/// local_col`（`local_col` は最大 `WMMA_TF32_K_TILE - 1`）を C の `int` 算術で
+/// 計算するため、`validate_tiled_k_bound`（`kernels::TILE` 基準）と同じ理由で
+/// `k` が `i32::MAX - (WMMA_TF32_K_TILE - 1)` を超えると当該算術が i32 の
+/// 範囲でオーバーフローしうる。`WMMA_TF32_K_TILE`（8）は `TILE`（32）より小さく
+/// 上限自体は緩いが、独立したガードとして分離する（tiled 経路の契約を変更
+/// しないため。`run_wmma_tf32` からのみ呼ばれる）。
+pub(crate) fn validate_wmma_tf32_k_bound(k: u32) -> Result<(), CudaError> {
+    let limit = i32::MAX as u32 - (kernels::WMMA_TF32_K_TILE - 1);
+    if k > limit {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "k must not exceed i32::MAX - (WMMA_TF32_K_TILE - 1) for WMMA TF32 \
+                 kernel tile-index arithmetic: k={k}, limit={limit}, WMMA_TF32_K_TILE={}",
+                kernels::WMMA_TF32_K_TILE
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// `kernels::WMMA_TF32_BLOCK_M`／`WMMA_TF32_BLOCK_N`（ブロックタイル一辺）を
+/// 単位に `m`/`n` を `div_ceil` で包含するグリッド次元を構築する。
+///
+/// naive/tiled 版の [`launch_config`] は「ブロック次元（スレッド形状）＝
+/// タイル一辺」の 1:1 対応を前提にグリッドを導出するが、WMMA カーネルは
+/// スレッド形状（[`WMMA_TF32_BLOCK_DIM`]、4 warp を 1 次元 128 スレッドに
+/// 束ねた形）とタイル一辺（32×32、2×2 warp グリッド）が異なるため、
+/// 専用のグリッド計算関数として分離する。末尾ブロックの余剰スレッドは
+/// カーネル内の手動境界チェック（REQ-8）に委ねる契約は共通。
+fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
+    let grid_dim = (
+        n.div_ceil(kernels::WMMA_TF32_BLOCK_N),
+        m.div_ceil(kernels::WMMA_TF32_BLOCK_M),
+        1,
+    );
+    LaunchConfig {
+        grid_dim,
+        block_dim: WMMA_TF32_BLOCK_DIM,
+        shared_mem_bytes: 0,
+    }
+}
+
 impl CudaGemm {
     /// `device` 上で naive／tiled GEMM カーネル（f32/f16 各 2 種）を NVRTC
     /// コンパイルし保持するハンドルを構築する。
@@ -193,6 +258,12 @@ impl CudaGemm {
         let naive_f16_ptx = compile_ptx(kernels::NAIVE_F16, arch)?;
         let tiled_f32_ptx = compile_ptx(kernels::TILED_F32, arch)?;
         let tiled_f16_ptx = compile_ptx(kernels::TILED_F16, arch)?;
+        // `<mma.h>` は NVRTC 組み込みで解決できないため、include_paths なしの
+        // 初回試行は失敗し `nvrtc::compile_ptx` の 2 段目フォールバック
+        // （`CUDA_INCLUDE_PATH` または既知候補パス）を経由する契約
+        // （`nvrtc.rs` ドキュメンテーションコメント・設計メモ 3.2 節「NVRTC
+        // ヘッダ問題」参照。本モジュールは `compile_ptx` に手を加えない）。
+        let wmma_tf32_ptx = compile_ptx(kernels::WMMA_TF32_F32, arch)?;
 
         let naive_f32 = device
             .context()
@@ -210,6 +281,25 @@ impl CudaGemm {
             .context()
             .load_module(tiled_f16_ptx)?
             .load_function("gemm_tiled_f16")?;
+        let wmma_tf32 = device
+            .context()
+            .load_module(wmma_tf32_ptx)?
+            .load_function("gemm_wmma_tf32")?;
+
+        // `kernels::WMMA_TF32_F32` はブロックタイル（M/N=32）を warp タイル
+        // （WMMA_TF32_FRAG=16）の 2x2 グリッドに割ることを前提にしており、
+        // `WMMA_TF32_THREADS`（128 = 4 warp）ともこの分割数と対応する。この
+        // 不変条件が定数変更で崩れると `warp_row`/`warp_col` が意図しない
+        // 範囲を指しカーネルが誤った積和・共有メモリ範囲を読む（カーネル側の
+        // コンパイル時マクロとは独立して壊れうるため、ここで機械検査する）。
+        debug_assert_eq!(kernels::WMMA_TF32_BLOCK_M % kernels::WMMA_TF32_FRAG, 0);
+        debug_assert_eq!(kernels::WMMA_TF32_BLOCK_N % kernels::WMMA_TF32_FRAG, 0);
+        debug_assert_eq!(
+            (kernels::WMMA_TF32_BLOCK_M / kernels::WMMA_TF32_FRAG)
+                * (kernels::WMMA_TF32_BLOCK_N / kernels::WMMA_TF32_FRAG)
+                * 32,
+            kernels::WMMA_TF32_THREADS
+        );
 
         Ok(Self {
             stream: device.stream().clone(),
@@ -217,6 +307,7 @@ impl CudaGemm {
             naive_f16,
             tiled_f32,
             tiled_f16,
+            wmma_tf32,
         })
     }
 
@@ -284,6 +375,86 @@ impl CudaGemm {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
         self.run_f16_kernel(&self.tiled_f16, a, b, m, n, k, TILED_BLOCK_DIM)
+    }
+
+    /// WMMA（Tensor Core）を用いた TF32 GEMM を実行する。C = A @ B（`m x k` @
+    /// `k x n`）、入出力は f32（内部で TF32 に丸めて Tensor Core へ投入する。
+    /// `kernels::WMMA_TF32_F32` 参照）。
+    ///
+    /// ホスト側形状検証は naive/tiled 版と同じ [`validate_gemm_dims`] に加え、
+    /// WMMA カーネル固有のタイルインデックス算術を保護する
+    /// [`validate_wmma_tf32_k_bound`] を経由する（`validate_tiled_k_bound`
+    /// と同じ考え方だが `kernels::WMMA_TF32_K_TILE`（8）基準で独立して検証する）。
+    /// TASK-11.1c（#62）・REQ-11。
+    pub fn run_wmma_tf32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_wmma_tf32_k_bound(k)?;
+        self.run_wmma_f32_kernel(&self.wmma_tf32, a, b, m, n, k)
+    }
+
+    /// WMMA TF32 カーネル専用の起動手続き。[`Self::run_f32_kernel`] と
+    /// 転送・同期・回収の構造は同一だが、グリッド計算に
+    /// [`wmma_tf32_launch_config`]（ブロックタイル 32×32 基準）を使う点が
+    /// 異なる（`WMMA_TF32_BLOCK_DIM` は 4 warp を束ねた 128 スレッドの
+    /// 1 次元ブロックであり、`launch_config` が前提とする「ブロック次元＝
+    /// タイル一辺」の対応が成立しないため。上記 `wmma_tf32_launch_config`
+    /// ドキュメンテーションコメント参照）。
+    fn run_wmma_f32_kernel(
+        &self,
+        func: &CudaFunction,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        // run_f32_kernel と同一の根拠（下記コメント参照。Cursor Bugbot 指摘
+        // PR #240／#244）。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+        }
+
+        let a_dev = self.stream.clone_htod(a)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        let mut c_dev = self
+            .stream
+            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+
+        let cfg = wmma_tf32_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
+        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
+        // （validate_gemm_dims・validate_wmma_tf32_k_bound）済みの m/n/k から
+        // 導出しており、カーネル内の手動境界チェック（guarded load・
+        // エピローグ store のガード付きコピー。kernels.rs の
+        // WMMA_TF32_F32 ドキュメンテーションコメント参照、REQ-8）と
+        // 合わせて OOB 読み書きが起きない根拠とする。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(&a_dev)
+                .arg(&b_dev)
+                .arg(&mut c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+
+        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        Ok(c_host)
     }
 
     /// f32 カーネル共通の起動手続き（naive/tiled 双方から呼ばれる）。
@@ -548,5 +719,35 @@ mod tests {
         let cfg = launch_config(17, 19, (16, 16, 1));
         assert_eq!(cfg.grid_dim, (2, 2, 1));
         assert_eq!(cfg.block_dim, (16, 16, 1));
+    }
+
+    #[test]
+    fn validate_wmma_tf32_k_bound_accepts_ordinary_k() {
+        assert!(validate_wmma_tf32_k_bound(4096).is_ok());
+        assert!(validate_wmma_tf32_k_bound(0).is_ok());
+    }
+
+    #[test]
+    fn validate_wmma_tf32_k_bound_rejects_k_exceeding_limit() {
+        let limit = i32::MAX as u32 - (kernels::WMMA_TF32_K_TILE - 1);
+        assert!(validate_wmma_tf32_k_bound(limit).is_ok());
+        let err = validate_wmma_tf32_k_bound(limit + 1).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn wmma_tf32_launch_config_grid_dim_covers_m_and_n_via_block_tile_div_ceil() {
+        // 33x31 を 32x32 ブロックタイルで覆うには grid (1, 2) が必要
+        // （div_ceil(31,32)=1 が n=31 に対応する x、div_ceil(33,32)=2 が
+        // m=33 に対応する y。`wmma_tf32_launch_config(m, n)` の呼び出し順は
+        // launch_config と同じく (m, n) だが、grid_dim は (n 由来, m 由来)
+        // の順で構築される）。
+        let cfg = wmma_tf32_launch_config(33, 31);
+        assert_eq!(cfg.grid_dim, (1, 2, 1));
+        // ブロック次元は「タイル一辺」ではなく WMMA_TF32_THREADS（128 スレッド
+        // 1 次元）である点が naive/tiled 版の launch_config と異なる
+        // （wmma_tf32_launch_config ドキュメンテーションコメント参照）。
+        assert_eq!(cfg.block_dim, WMMA_TF32_BLOCK_DIM);
+        assert_eq!(cfg.block_dim, (kernels::WMMA_TF32_THREADS, 1, 1));
     }
 }

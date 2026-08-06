@@ -201,6 +201,188 @@ extern "C" __global__ void gemm_tiled_f16(
 }
 "#;
 
+/// WMMA TF32 GEMM のブロックタイル一辺（M・N とも 32。2x2 warp グリッド）。
+///
+/// `gemm.rs` の `run_wmma_tf32` はグリッド計算（`div_ceil(m/n, WMMA_TF32_BLOCK_*)`）
+/// に、カーネル起動 API（本モジュール外）はブロック次元（後述 `WMMA_TF32_THREADS`）に
+/// この値を用いる。設計メモ（`docs/cuda-tensor-core-design.md` 4.2 節）の
+/// ブロックタイル 128×128・warp タイル 64×64 は #61〜#63 の実測により確定する
+/// 候補値であり、本イシュー（#62、#61 未マージのため WMMA 共通基盤を最小実装する
+/// 安全側判断。イシュー #62 実装計画 2 節）では「共有メモリ配置・タイル形状の
+/// 基本実装」を優先し、正しさを検証しやすい 32×32（2x2 warp グリッド、各 warp が
+/// `m16n16k8` fragment 1 個を直接担当）から開始する。タイル拡大・warp あたり複数
+/// fragment 化は #63 のスコープ。
+pub const WMMA_TF32_BLOCK_M: u32 = 32;
+pub const WMMA_TF32_BLOCK_N: u32 = 32;
+
+/// WMMA TF32 GEMM の K タイル幅。TF32 fragment の K 次元（`m16n16k8`）と一致させ、
+/// 共有メモリへの 1 回のロードがそのまま 1 回の `mma_sync` 入力になるようにする
+/// （設計メモ 4.2 節「k タイル TF32: 8」の候補値をそのまま採用）。
+pub const WMMA_TF32_K_TILE: u32 = 8;
+
+/// WMMA fragment の M・N 一辺（`m16n16k8` の 16）。ブロックタイル 32 を
+/// 16 で割った 2×2 が block 内の warp グリッド次元になる
+/// （`WMMA_TF32_BLOCK_M / WMMA_TF32_FRAG == 2` 等が `gemm.rs` 側の暗黙契約）。
+pub const WMMA_TF32_FRAG: u32 = 16;
+
+/// WMMA TF32 GEMM 1 ブロックあたりのスレッド数（4 warp = 128 スレッド。
+/// `(WMMA_TF32_BLOCK_M / WMMA_TF32_FRAG) * (WMMA_TF32_BLOCK_N / WMMA_TF32_FRAG)`
+/// = 2×2 warp を 1 次元ブロックとして起動する。`gemm.rs::run_wmma_tf32` の
+/// ブロック次元はこの値を x 成分に用いる）。
+pub const WMMA_TF32_THREADS: u32 = 128;
+
+/// WMMA（Tensor Core）を用いた TF32 GEMM。入出力は f32、Tensor Core への投入時に
+/// `wmma::__float_to_tf32` で明示的に丸める（REQ-11・TASK-11.1c・#62）。
+///
+/// **設計根拠**: `docs/cuda-tensor-core-design.md`（#60。3.3 節で方式 A =
+/// WMMA C++ API `<mma.h>` を採用、4.1 節で fragment `m16n16k8`・TF32 精度・
+/// f32 累算を選定）。本カーネルは同メモリの「共有メモリ配置・タイル形状の
+/// 基本実装」（#62 イシュー追記のスコープ）にあたり、レジスタブロッキング・
+/// ダブルバッファリング・ベクトル化ロード等の本格最適化は #63 に委ねる。
+///
+/// **構成**: ブロックタイル `WMMA_TF32_BLOCK_M` x `WMMA_TF32_BLOCK_N`（32×32）を
+/// 4 warp（2×2 グリッド）で分担し、各 warp が `m16n16k8` fragment を 1 個直接
+/// 担当する。K 方向は `WMMA_TF32_K_TILE`（8。fragment の K と一致）単位で
+/// 共有メモリへロード → 全 warp が `load_matrix_sync` → 丸め → `mma_sync` を
+/// 繰り返し、ブロック内 warp 間でグローバルメモリアクセスを共有する
+/// （naive・tiled 版と同じ「共有メモリで再利用する」思想を Tensor Core 経路にも
+/// 適用する）。
+///
+/// # REQ-8（カーネル境界検査規約）
+///
+/// - **入力タイルの guarded load**: `as_tile`／`bs_tile` への共有メモリロードは
+///   `(global_row < m/k && global_col < k/n)` の三項ガードを通し、範囲外要素は
+///   ゼロ充填する（`kernels::TILED_F32` と同じ方式。設計メモ 5 節 1）。これにより
+///   `wmma::load_matrix_sync` は常にゼロ充填済み共有メモリのみを読み、グローバル
+///   メモリへの範囲外アクセスは発生しない。
+/// - **エピローグ store のガード条件**: `wmma::store_matrix_sync` は fragment
+///   （16×16 全体）を無条件で書き込む API であり、境界を跨ぐ warp の店頭書き込み
+///   をそのままグローバル C へ向けると OOB write になりうる。本カーネルは
+///   いったん共有メモリ `c_tile` へ store し、`__syncthreads()` 後に
+///   要素単位で `(global_row < m && global_col < n)` を判定してから
+///   グローバル C へコピーする（設計メモ 5 節 2 の「範囲外の fragment 要素は
+///   書き戻さない」を、store 後のガード付きコピーという形で満たす）。
+/// - K 端（k が `WMMA_TF32_K_TILE` の倍数でない）は `num_k_tiles` を
+///   `TILED_F32` と同じ桁溢れしない式（`(k > 0) ? (k - 1) / K_TILE + 1 : 0`）で
+///   計算し、最終タイルの余剰要素は上記 guarded load のゼロ充填で処理する。
+///
+/// # 数値契約
+///
+/// TF32 は f32 の仮数部 23bit を 10bit に丸めて Tensor Core へ投入する
+/// （`wmma::__float_to_tf32` による明示変換。NVIDIA 公式 `cudaTensorCoreGemm`
+/// サンプルと同じ「load 後に fragment の各要素を変換してから mma_sync に渡す」
+/// 手順を踏襲）。これにより `f32::mul_add`（CPU 参照実装、REQ-2 の FMA 契約統一）
+/// との比較では tiled f32 版より誤差が大きくなりうるが、統一複合判定
+/// （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は既に TF32 前提の複合指標に
+/// 改定済みである（`.claude/rules/coding-rust.md`「バックエンド構成（REQ-2）」・
+/// 設計メモ 6 節）。この閾値自体は本カーネルでは変更しない
+/// （変更はユーザー承認必須。#186 のスコープ）。
+pub const WMMA_TF32_F32: &str = r#"
+#include <mma.h>
+
+using namespace nvcuda;
+
+#define WMMA_TF32_BLOCK_M 32
+#define WMMA_TF32_BLOCK_N 32
+#define WMMA_TF32_K_TILE 8
+#define WMMA_TF32_FRAG 16
+
+extern "C" __global__ void gemm_wmma_tf32(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k)
+{
+    __shared__ float as_tile[WMMA_TF32_BLOCK_M][WMMA_TF32_K_TILE];
+    __shared__ float bs_tile[WMMA_TF32_K_TILE][WMMA_TF32_BLOCK_N];
+    __shared__ float c_tile[WMMA_TF32_BLOCK_M][WMMA_TF32_BLOCK_N];
+
+    const int tid = threadIdx.x;
+    const int num_threads = blockDim.x;
+    const int warp_id = tid / 32;
+    const int warp_row = warp_id / 2;
+    const int warp_col = warp_id % 2;
+
+    const int block_row_base = blockIdx.y * WMMA_TF32_BLOCK_M;
+    const int block_col_base = blockIdx.x * WMMA_TF32_BLOCK_N;
+
+    wmma::fragment<wmma::matrix_a, WMMA_TF32_FRAG, WMMA_TF32_FRAG, WMMA_TF32_K_TILE,
+                   wmma::precision::tf32, wmma::row_major> a_frag;
+    wmma::fragment<wmma::matrix_b, WMMA_TF32_FRAG, WMMA_TF32_FRAG, WMMA_TF32_K_TILE,
+                   wmma::precision::tf32, wmma::row_major> b_frag;
+    wmma::fragment<wmma::accumulator, WMMA_TF32_FRAG, WMMA_TF32_FRAG, WMMA_TF32_K_TILE, float> c_frag;
+    wmma::fill_fragment(c_frag, 0.0f);
+
+    // 桁溢れしない num_k_tiles 計算（TILED_F32 と同じ方式。上記ドキュメンテーション
+    // コメント参照）。
+    int num_k_tiles = (k > 0) ? (k - 1) / WMMA_TF32_K_TILE + 1 : 0;
+
+    for (int t = 0; t < num_k_tiles; ++t) {
+        int k_base = t * WMMA_TF32_K_TILE;
+
+        // REQ-8: A タイルの guarded load。範囲外要素はゼロ充填共有メモリへ
+        // 書く（0 を掛けても acc に寄与しないため数値的にも安全）。
+        for (int idx = tid; idx < WMMA_TF32_BLOCK_M * WMMA_TF32_K_TILE; idx += num_threads) {
+            int local_row = idx / WMMA_TF32_K_TILE;
+            int local_col = idx % WMMA_TF32_K_TILE;
+            int global_row = block_row_base + local_row;
+            int global_col = k_base + local_col;
+            as_tile[local_row][local_col] =
+                (global_row < m && global_col < k) ? a[global_row * k + global_col] : 0.0f;
+        }
+
+        // REQ-8: B タイルの guarded load。A と同じ根拠。
+        for (int idx = tid; idx < WMMA_TF32_K_TILE * WMMA_TF32_BLOCK_N; idx += num_threads) {
+            int local_row = idx / WMMA_TF32_BLOCK_N;
+            int local_col = idx % WMMA_TF32_BLOCK_N;
+            int global_row = k_base + local_row;
+            int global_col = block_col_base + local_col;
+            bs_tile[local_row][local_col] =
+                (global_row < k && global_col < n) ? b[global_row * n + global_col] : 0.0f;
+        }
+
+        __syncthreads();
+
+        wmma::load_matrix_sync(a_frag, &as_tile[warp_row * WMMA_TF32_FRAG][0], WMMA_TF32_K_TILE);
+        wmma::load_matrix_sync(b_frag, &bs_tile[0][warp_col * WMMA_TF32_FRAG], WMMA_TF32_BLOCK_N);
+
+        // TF32 丸め特性（f32 仮数 23bit → 10bit）: fragment の各要素を明示的に
+        // wmma::__float_to_tf32 で変換してから mma_sync へ渡す（NVIDIA
+        // cudaTensorCoreGemm サンプルと同じ手順。上記ドキュメンテーション
+        // コメント「数値契約」参照）。
+        for (int i = 0; i < a_frag.num_elements; ++i) {
+            a_frag.x[i] = wmma::__float_to_tf32(a_frag.x[i]);
+        }
+        for (int i = 0; i < b_frag.num_elements; ++i) {
+            b_frag.x[i] = wmma::__float_to_tf32(b_frag.x[i]);
+        }
+
+        wmma::mma_sync(c_frag, a_frag, b_frag, c_frag);
+
+        __syncthreads();
+    }
+
+    wmma::store_matrix_sync(
+        &c_tile[warp_row * WMMA_TF32_FRAG][warp_col * WMMA_TF32_FRAG],
+        c_frag, WMMA_TF32_BLOCK_N, wmma::mem_row_major);
+    __syncthreads();
+
+    // REQ-8: エピローグ store のガード条件。store_matrix_sync は fragment
+    // 全体（16x16）を無条件で書くため、共有メモリへ一旦 store したうえで
+    // 要素単位のガード付きコピーによりグローバル C への範囲外書き込みを防ぐ
+    // （上記ドキュメンテーションコメント参照）。
+    for (int idx = tid; idx < WMMA_TF32_BLOCK_M * WMMA_TF32_BLOCK_N; idx += num_threads) {
+        int local_row = idx / WMMA_TF32_BLOCK_N;
+        int local_col = idx % WMMA_TF32_BLOCK_N;
+        int global_row = block_row_base + local_row;
+        int global_col = block_col_base + local_col;
+        if (global_row < m && global_col < n) {
+            c[global_row * n + global_col] = c_tile[local_row][local_col];
+        }
+    }
+}
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +408,28 @@ mod tests {
             TILED_F16.contains(&expected),
             "TILED_F16 の `#define TILE` が Rust 側の TILE 定数（{TILE}）と一致しません"
         );
+    }
+
+    /// `WMMA_TF32_BLOCK_M`／`WMMA_TF32_BLOCK_N`／`WMMA_TF32_K_TILE`（Rust 側の
+    /// 「唯一の真実源」）が `WMMA_TF32_F32` カーネルソース内の `#define` と
+    /// 食い違わないことを検査する（`tile_constant_matches_kernel_source_define`
+    /// と同じ理由・同じ検査方式。`gemm.rs::run_wmma_tf32` のグリッド計算は
+    /// この Rust 側定数を使うため、両者が一致しないとホスト側の期待するタイル
+    /// 境界とカーネル実体の共有メモリ配列サイズがずれる）。
+    #[test]
+    fn wmma_tf32_constants_match_kernel_source_defines() {
+        let checks = [
+            ("WMMA_TF32_BLOCK_M", WMMA_TF32_BLOCK_M),
+            ("WMMA_TF32_BLOCK_N", WMMA_TF32_BLOCK_N),
+            ("WMMA_TF32_K_TILE", WMMA_TF32_K_TILE),
+            ("WMMA_TF32_FRAG", WMMA_TF32_FRAG),
+        ];
+        for (name, value) in checks {
+            let expected = format!("#define {name} {value}");
+            assert!(
+                WMMA_TF32_F32.contains(&expected),
+                "WMMA_TF32_F32 の `#define {name}` が Rust 側の定数（{value}）と一致しません"
+            );
+        }
     }
 }
