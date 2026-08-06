@@ -51,19 +51,32 @@
 //! `gemm_wmma.rs`）に分離しており、ディスパッチ規則（どの経路をいつ
 //! 選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
 //! TF32/f32 tensor core 経路（#62）・共有メモリ／タイル基本最適化（#63）・
-//! 実機実測での数値一致検証（#64）・`mma.sync` PTX 直叩き（#187）も
-//! 本イシューのスコープ外である（`docs/cuda-tensor-core-design.md` 参照）。
+//! 実機実測での数値一致検証（#64）は本イシューのスコープ外である
+//! （`docs/cuda-tensor-core-design.md` 参照）。
+//!
+//! TASK-11.1h（#187）で `mma.sync`/`ldmatrix`/`cp.async` PTX 直叩き経路
+//! （[`CudaMmaGemm`]）を追加した。WMMA 経路（cc>=7.0）より厳しい
+//! compute capability 8.0+ ゲートを持つ独立経路であり、`kernels_mma.rs`／
+//! `gemm_mma.rs` に分離している（並行 issue #62/#63 が `gemm.rs`／
+//! `gemm_wmma.rs`／`kernels.rs`／`kernels_wmma.rs` を編集中のため）。
+//! ディスパッチ規則（どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープ
+//! であり本クレートでは未実装。XOR swizzle によるバンクコンフリクト低減
+//! は未実装（`kernels_mma.rs` 冒頭コメント「タイル構成」参照。コンパイル
+//! 未検証環境でのリスク最小化判断）。
 
 pub mod device;
 mod error;
 mod gemm;
+mod gemm_mma;
 mod gemm_wmma;
 mod kernels;
+mod kernels_mma;
 mod kernels_wmma;
 mod nvrtc;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;
