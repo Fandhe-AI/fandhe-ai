@@ -341,28 +341,47 @@ mod tests {
         // m*k は usize（64bit）に収まるが、カーネル側の `row * k + p` は
         // i32 算術のためインデックスがラップしうる（Cursor Bugbot 指摘
         // #240）。m/n/k 個々は i32::MAX 以下でも積が超過するケースを拒否する。
+        //
+        // Cursor Bugbot 指摘（PR #240 再指摘）: a_len/b_len を
+        // validate_gemm_dims の長さチェック（mk/kn との一致検査）を
+        // 通過する値にしないと、意図した i32 積ガードに到達する前に
+        // 長さ不一致エラーで reject されてしまい、このガードを削除しても
+        // テストが pass し続ける（意図した経路をロックできない）。
+        // よって b_len は k*n（このケースは n=1 なので k）に正しく合わせる。
         let m: u32 = 1 << 16; // 65536
+        let n: u32 = 1;
         let k: u32 = 1 << 16; // 65536 → m*k = 2^32 > i32::MAX
         let a_len = (m as usize) * (k as usize);
-        let err = validate_gemm_dims(a_len, 1, m, 1, k).unwrap_err();
+        let b_len = (k as usize) * (n as usize);
+        let err = validate_gemm_dims(a_len, b_len, m, n, k).unwrap_err();
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 
     #[test]
     fn validate_gemm_dims_rejects_kn_product_exceeding_i32_max() {
+        // 上記と同じ理由で a_len を m*k（このケースは m=1 なので k）に
+        // 正しく合わせ、長さチェックを通過させたうえで k*n の積ガードへ
+        // 到達させる。
+        let m: u32 = 1;
         let k: u32 = 1 << 16;
         let n: u32 = 1 << 16;
+        let a_len = (m as usize) * (k as usize);
         let b_len = (k as usize) * (n as usize);
-        let err = validate_gemm_dims(1, b_len, 1, n, k).unwrap_err();
+        let err = validate_gemm_dims(a_len, b_len, m, n, k).unwrap_err();
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 
     #[test]
     fn validate_gemm_dims_rejects_mn_product_exceeding_i32_max() {
+        // 上記と同じ理由で b_len を k*n（このケースは k=1 なので n）に
+        // 正しく合わせ、長さチェックを通過させたうえで m*n の積ガードへ
+        // 到達させる。
         let m: u32 = 1 << 16;
         let n: u32 = 1 << 16;
-        let a_len = m as usize;
-        let err = validate_gemm_dims(a_len, 1, m, n, 1).unwrap_err();
+        let k: u32 = 1;
+        let a_len = (m as usize) * (k as usize);
+        let b_len = (k as usize) * (n as usize);
+        let err = validate_gemm_dims(a_len, b_len, m, n, k).unwrap_err();
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 
