@@ -1,0 +1,233 @@
+//! Tensor Core（WMMA）経路の誤差分布実測ハーネス（TASK-11.1g・#186）。
+//!
+//! REQ-2 受け入れ基準「tensor core（WMMA/mma）化で TF32／f16 累算経路を
+//! 導入する際は当該経路の数値一致閾値を実測に基づき再評価する」の実測
+//! ステップを担う。TF32 経路（[`backend_cuda::CudaGemm::run_wmma_tf32`]。
+//! `tests/gemm_wmma_tf32.rs`）・f16 WMMA 経路
+//! （[`backend_cuda::CudaWmmaGemm::run_f16`]。`tests/cpu_cuda_wmma_parity.rs`）
+//! それぞれについて、形状×シードごとに `backend_cpu::compare` の
+//! `CompareReport`（誤差分布統計）を収集し、REQ-2 統一複合判定の閾値
+//! （`backend_cpu::RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）に
+//! 対する閾値マージンを算出して Markdown 表形式で stdout へ出力する
+//! （`docs/perf/cuda-tensor-core-tolerance-evaluation.md` へ転記する
+//! 想定）。
+//!
+//! **本ハーネスは閾値・判定式を一切変更しない**。`backend_cpu::parity`
+//! の定数・`compare` 関数をそのまま import して使い、ローカル複製・
+//! 緩和は行わない（`.claude/rules/coding-rust.md`「バックエンド間数値
+//! 一致テストの許容誤差を単独で緩和しない」・`delegation-impl.md`
+//! 「実装 Agent にガードレール閾値・テスト許容誤差を緩和させない」）。
+//!
+//! `examples/` に置くのは `gemm_bench.rs`（`crates/backend-cpu/examples/`）
+//! と同じ理由: `dev-dependencies`（`bench-harness`・`backend-cpu`）を
+//! 利用しつつ通常の `cargo test`／CI では実行されず、ビルド検証のみが
+//! CI を通過させるためである（self-hosted runner をベンチ実行で占有
+//! しない。`ci.md`）。
+//!
+//! # 使い方
+//!
+//! ```text
+//! cargo build --release -p backend-cuda --example wmma_tolerance_probe
+//! ./target/release/examples/wmma_tolerance_probe
+//! ```
+//!
+//! CUDA driver／NVRTC 非搭載環境、または Tensor Core 非対応（compute
+//! capability 7.0/8.0 未満）環境では、経路ごとに理由を表示して正常終了
+//! する（`tests/gemm_wmma_tf32.rs`・`tests/cpu_cuda_wmma_parity.rs` と
+//! 同じ環境適応の分岐パターン）。
+
+use backend_cpu::{
+    ABSOLUTE_RESCUE_THRESHOLD, CompareReport, RELATIVE_TOLERANCE, compare, matmul_reference_fma,
+};
+use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaWmmaGemm};
+use bench_harness::rng::Xorshift64Star;
+use half::f16;
+
+/// 形状セット（`tests/gemm_wmma_tf32.rs`・`tests/cpu_cuda_wmma_parity.rs` の
+/// `#[ignore]` 形状網羅テストと同じ形状に、K スイープ（M=N=256 固定で
+/// K=256/1024/4096）を追加し、桁落ち蓄積と K の関係を見る）。
+const SHAPES: &[(&str, u32, u32, u32)] = &[
+    ("32x32x32 (block tile)", 32, 32, 32),
+    ("64x64x64 (block tile x2)", 64, 64, 64),
+    ("128x128x128 (block tile x4)", 128, 128, 128),
+    ("256x256x256 (block tile x8)", 256, 256, 256),
+    ("512x512x512 (block tile x16)", 512, 512, 512),
+    ("17x23x19 (non-multiple edge)", 17, 23, 19),
+    ("33x31x65 (non-multiple edge)", 33, 31, 65),
+    ("100x100x100 (non-multiple edge)", 100, 100, 100),
+    ("130x70x90 (non-multiple edge)", 130, 70, 90),
+    ("64x96x128 (non-square)", 64, 96, 128),
+    ("256x256x256 (K sweep base)", 256, 256, 256),
+    ("256x256x1024 (K sweep)", 256, 256, 1024),
+    ("256x256x4096 (K sweep, PoC-v2-5 stress)", 256, 256, 4096),
+];
+
+/// 各形状 5 シード（5 回計測の中央値方針〈coding-rust.md〉に整合させ、
+/// 単一シードの偶然の一致・不一致に結論を左右されないようにする）。
+const SEEDS: &[u64] = &[1, 2, 3, 4, 5];
+
+fn margin(threshold: f64, observed: f64) -> String {
+    if observed <= 0.0 {
+        "inf".to_string()
+    } else {
+        format!("{:.2}x", threshold / observed)
+    }
+}
+
+fn report_row(context: &str, seed: u64, report: &CompareReport) {
+    println!(
+        "| {context} | {seed} | {}/{} | {:.3e} | {:.3e} | {:.3e} | {:.3e} | {} | {} |",
+        report.fail_count,
+        report.total,
+        report.max_abs_diff,
+        report.mean_abs_diff,
+        report.max_rel_err,
+        report.mean_rel_err,
+        margin(ABSOLUTE_RESCUE_THRESHOLD, report.max_abs_diff),
+        margin(RELATIVE_TOLERANCE, report.max_rel_err),
+    );
+}
+
+fn table_header() {
+    println!(
+        "| shape | seed | fail/total | max_abs_diff | mean_abs_diff | max_rel_err | mean_rel_err | abs margin (1e-5/max) | rel margin (1e-3/max) |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|");
+}
+
+/// TF32 経路（[`CudaGemm::run_wmma_tf32`]）の誤差分布を形状×シードごとに
+/// 計測する。CPU 参照は `matmul_reference_fma`（FMA 契約の唯一の参照点。
+/// `tests/gemm_wmma_tf32.rs::assert_wmma_tf32_parity` と同じ比較方法）。
+fn probe_tf32(gemm: &CudaGemm) {
+    println!("\n## TF32 (`CudaGemm::run_wmma_tf32`)\n");
+    table_header();
+    for &(label, m, n, k) in SHAPES {
+        for &seed in SEEDS {
+            let mut rng = Xorshift64Star::new(seed.wrapping_mul(1000).wrapping_add(m as u64));
+            let a = rng.fill_vec((m as usize) * (k as usize));
+            let b = rng.fill_vec((k as usize) * (n as usize));
+
+            let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+            if matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize).is_err()
+            {
+                println!("| {label} | {seed} | (shape validation error) | - | - | - | - | - | - |");
+                continue;
+            }
+
+            match gemm.run_wmma_tf32(&a, &b, m, n, k) {
+                Ok(c_gpu) => match compare(&c_gpu, &c_ref) {
+                    Ok(report) => report_row(label, seed, &report),
+                    Err(err) => println!(
+                        "| {label} | {seed} | (compare error: {err}) | - | - | - | - | - | - |"
+                    ),
+                },
+                Err(CudaError::WmmaUnavailable { detail }) => {
+                    println!("\n(TF32 WMMA unavailable: {detail})\n");
+                    return;
+                }
+                Err(other) => {
+                    println!("| {label} | {seed} | (run error: {other}) | - | - | - | - | - | - |")
+                }
+            }
+        }
+    }
+}
+
+/// f16 WMMA 経路（[`CudaWmmaGemm::run_f16`]）の誤差分布を形状×シード
+/// ごとに計測する。参照方法は `tests/cpu_cuda_wmma_parity.rs` 冒頭コメント
+/// の 3 手順（f16→f32→参照 matmul→f16 丸め→f32）をそのまま踏襲する。
+fn probe_f16(gemm: &CudaWmmaGemm) {
+    println!("\n## f16 WMMA (`CudaWmmaGemm::run_f16`)\n");
+    table_header();
+    for &(label, m, n, k) in SHAPES {
+        for &seed in SEEDS {
+            let mut rng = Xorshift64Star::new(seed.wrapping_mul(2000).wrapping_add(m as u64));
+            let a_f16: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+            let b_f16: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+            let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+            let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+
+            let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
+            if matmul_reference_fma(
+                &a_f32,
+                &b_f32,
+                &mut c_ref_f32,
+                m as usize,
+                n as usize,
+                k as usize,
+            )
+            .is_err()
+            {
+                println!("| {label} | {seed} | (shape validation error) | - | - | - | - | - | - |");
+                continue;
+            }
+            let c_ref_rounded: Vec<f32> = c_ref_f32
+                .iter()
+                .map(|&x| f16::from_f32(x).to_f32())
+                .collect();
+
+            match gemm.run_f16(&a_f16, &b_f16, m, n, k) {
+                Ok(c_gpu_f16) => {
+                    let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+                    match compare(&c_gpu_f32, &c_ref_rounded) {
+                        Ok(report) => report_row(label, seed, &report),
+                        Err(err) => {
+                            println!(
+                                "| {label} | {seed} | (compare error: {err}) | - | - | - | - | - | - |"
+                            )
+                        }
+                    }
+                }
+                Err(other) => {
+                    println!("| {label} | {seed} | (run error: {other}) | - | - | - | - | - | - |")
+                }
+            }
+        }
+    }
+}
+
+fn main() {
+    println!("# WMMA Tensor Core 経路 誤差分布実測（TASK-11.1g・#186）\n");
+    println!(
+        "閾値（REQ-2 統一複合判定・変更対象外）: RELATIVE_TOLERANCE={RELATIVE_TOLERANCE:e}, \
+         ABSOLUTE_RESCUE_THRESHOLD={ABSOLUTE_RESCUE_THRESHOLD:e}\n"
+    );
+
+    let device = match CudaDevice::new(0) {
+        Ok(dev) => dev,
+        Err(CudaError::DriverUnavailable { detail }) => {
+            println!("CUDA driver 非搭載環境のため計測をスキップします: {detail}");
+            return;
+        }
+        Err(CudaError::Driver(err)) => {
+            println!("CUDA driver 初期化に失敗したため計測をスキップします: {err:?}");
+            return;
+        }
+        Err(other) => {
+            println!("CudaDevice::new が想定外のエラーを返しました: {other}");
+            return;
+        }
+    };
+    println!("device compute capability: {}", device.arch());
+
+    match CudaGemm::new(&device) {
+        Ok(gemm) => probe_tf32(&gemm),
+        Err(CudaError::NvrtcUnavailable { detail }) => {
+            println!("\nNVRTC 非搭載環境のため TF32 経路の計測をスキップします: {detail}");
+        }
+        Err(other) => println!("\nCudaGemm::new が想定外のエラーを返しました: {other}"),
+    }
+
+    match CudaWmmaGemm::new(&device) {
+        Ok(gemm) => probe_f16(&gemm),
+        Err(CudaError::NvrtcUnavailable { detail }) => {
+            println!("\nNVRTC 非搭載環境のため f16 WMMA 経路の計測をスキップします: {detail}");
+        }
+        Err(CudaError::TensorCoreUnsupported { detail }) => {
+            println!(
+                "\ncompute capability 7.0 未満のため f16 WMMA 経路の計測をスキップします: {detail}"
+            );
+        }
+        Err(other) => println!("\nCudaWmmaGemm::new が想定外のエラーを返しました: {other}"),
+    }
+}
