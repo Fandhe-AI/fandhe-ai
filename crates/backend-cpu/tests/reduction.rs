@@ -4,6 +4,11 @@
 //! `src/reduction.rs` のインライン単体テスト（決定性・空縮約・shape 検査）を
 //! 補い、多次元（rank 3）データでの軸指定 sum/max/mean・rank0 全縮約・
 //! 非 contiguous view の bit 一致を検証する。
+//!
+//! #25（TASK-1.6e）棚卸しで、非正方 rank3 の max/mean・非 contiguous
+//! 全縮約の max/mean を追加した（既存は sum 中心のカバレッジだった）。
+//! CHUNK 境界決定性・サイズ 1 軸は `CHUNK` 定数参照のため
+//! `src/reduction.rs` のインライン `#[cfg(test)]` へ追加した。
 
 use backend_cpu::reduction::{ReduceError, max, mean, sum};
 use tensor_core::Tensor;
@@ -169,6 +174,62 @@ fn full_reduction_deterministic_across_thread_pools() {
         .map(|chunk| chunk.iter().fold(0.0f32, |acc, &v| acc + v))
         .fold(0.0f32, |acc, v| acc + v);
     assert_eq!(a.get(&[]).unwrap().to_bits(), naive.to_bits());
+}
+
+/// 非正方 rank3（各次元長が互いに異なる）形状での max/mean 軸別期待値
+/// （#25 棚卸しで特定したギャップ）: 既存の rank3 テストは shape `[2,3,4]`
+/// の sum/max のみで、mean の rank3 は未検証だった。
+#[test]
+fn max_mean_axis_matches_hand_computed_expected_values_non_square_rank3() {
+    // shape [2, 5, 3]（各次元長が互いに異なる非正方形状）。
+    let data: Vec<f32> = (0..30).map(|v| ((v * 53 + 7) % 30) as f32).collect();
+    let t = Tensor::<f32>::new(data, &[2, 5, 3]).unwrap();
+
+    let out_max = max(&t, Some(1)).unwrap();
+    assert_eq!(out_max.shape(), &[2, 3]);
+    for i in 0..2 {
+        for k in 0..3 {
+            let expected = (0..5)
+                .map(|j| t.get(&[i, j, k]).unwrap())
+                .fold(f32::NEG_INFINITY, f32::max);
+            assert_eq!(out_max.get(&[i, k]).unwrap(), expected);
+        }
+    }
+
+    let out_mean = mean(&t, Some(2)).unwrap();
+    assert_eq!(out_mean.shape(), &[2, 5]);
+    for i in 0..2 {
+        for j in 0..5 {
+            let expected: f32 = (0..3).map(|k| t.get(&[i, j, k]).unwrap()).sum::<f32>() / 3.0;
+            assert_eq!(out_mean.get(&[i, j]).unwrap(), expected);
+        }
+    }
+}
+
+/// 非 contiguous view＋`dim=None` 全縮約（`gather_elements` フォールバック
+/// 経路）が contiguous 実体化後と bit 一致することを確認する（#25 棚卸しで
+/// 特定したギャップ: 既存の `non_contiguous_view_matches_contiguous_bitwise`
+/// は全縮約も含むが対象は `sum` のみで、`max`/`mean` は未検証だった）。
+#[test]
+fn non_contiguous_full_reduction_max_mean_matches_contiguous_bitwise() {
+    let t = Tensor::<f32>::new((0..12).map(|v| v as f32 * 1.5 - 3.0).collect(), &[3, 4]).unwrap();
+    let tt = t.transpose(0, 1).unwrap(); // shape [4, 3]、非 contiguous
+    assert!(tt.as_slice().is_none());
+    let c = tt.contiguous();
+
+    let max_view = max(&tt, None).unwrap();
+    let max_contig = max(&c, None).unwrap();
+    assert_eq!(
+        max_view.get(&[]).unwrap().to_bits(),
+        max_contig.get(&[]).unwrap().to_bits()
+    );
+
+    let mean_view = mean(&tt, None).unwrap();
+    let mean_contig = mean(&c, None).unwrap();
+    assert_eq!(
+        mean_view.get(&[]).unwrap().to_bits(),
+        mean_contig.get(&[]).unwrap().to_bits()
+    );
 }
 
 /// 軸範囲外・空テンソルのエラー系。

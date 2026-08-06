@@ -6,6 +6,15 @@
 //! （スライスカーネル・shape 走査ロジック単位の細かい検証）は
 //! `src/elementwise.rs` 内の `#[cfg(test)]` に配置済みであり、本ファイルは
 //! 公開 API を外部クレートと同じ経路で呼び出す統合テストに限定する。
+//!
+//! ## #25（TASK-1.6e）棚卸しメモ
+//!
+//! 空テンソル網羅（`mul`/`exp`/`tanh`・shape バリエーション）・
+//! `PARALLEL_THRESHOLD` 境界・非正方 rank3 broadcast・長さ不一致
+//! `should_panic` 契約は `PARALLEL_THRESHOLD` 等の非公開定数を参照する
+//! ため `src/elementwise.rs` のインライン `#[cfg(test)]` へ追加した
+//! （既存の配置規約どおり）。本ファイルには公開 API のみで組み立てられる
+//! 統合テストとして `mul` の非 contiguous view 一致テストを追加する。
 
 use backend_cpu::{add, exp, mul, relu, tanh};
 use tensor_core::Tensor;
@@ -152,4 +161,25 @@ fn add_empty_tensor_is_empty() {
     let out = add(&a, &b).unwrap();
     assert_eq!(out.shape(), &[0, 3]);
     assert!(out.is_empty());
+}
+
+/// `mul` の非 contiguous view（transpose 後）が `contiguous()` 実体化後と
+/// 一致することを確認する（`add`/`relu` の既存カバレッジを `mul` へ展開。
+/// #25 棚卸しで特定したギャップ）。
+#[test]
+fn mul_with_non_contiguous_view_matches_contiguous() {
+    let a = Tensor::<f32>::new((0..6).map(|v| v as f32 + 1.0).collect(), &[2, 3]).unwrap();
+    let a_t = a.transpose(0, 1).unwrap(); // shape [3, 2]、非 contiguous
+    let b = Tensor::<f32>::new(vec![2.0; 6], &[3, 2]).unwrap();
+
+    let out_view = mul(&a_t, &b).unwrap();
+    let out_contiguous = mul(&a_t.contiguous(), &b).unwrap();
+    for i in 0..3 {
+        for j in 0..2 {
+            assert_eq!(
+                out_view.get(&[i, j]).unwrap(),
+                out_contiguous.get(&[i, j]).unwrap()
+            );
+        }
+    }
 }

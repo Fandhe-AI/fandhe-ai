@@ -461,6 +461,70 @@ mod tests {
         assert_eq!(a.get(&[]).unwrap().to_bits(), naive.to_bits());
     }
 
+    /// `max`／`mean` の CHUNK（4096）境界決定性（#25 棚卸しで特定した
+    /// ギャップ）: 既存の `chunk_boundary_deterministic_sum` は `sum` のみを
+    /// 検証しており、`max_slice` の `par_chunks(CHUNK)` 分割・`mean` の
+    /// 「sum を経由し分母で 1 回だけ除算する」経路は未検証だった。
+    /// `n ∈ {CHUNK-1, CHUNK, CHUNK+1, CHUNK*2+1}` でシングル／マルチスレッド
+    /// プール間の to_bits() 完全一致を確認する。
+    #[test]
+    fn chunk_boundary_deterministic_max_and_mean() {
+        let single = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("failed to build single-thread rayon pool for determinism test");
+        let multi = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("failed to build 4-thread rayon pool for determinism test");
+
+        for n in [CHUNK - 1, CHUNK, CHUNK + 1, CHUNK * 2 + 1] {
+            let data: Vec<f32> = (0..n).map(|i| ((i % 97) as f32) * 0.5 - 3.0).collect();
+            let t = Tensor::<f32>::new(data, &[n]).unwrap();
+
+            let max_a = single.install(|| max(&t, None).unwrap());
+            let max_b = multi.install(|| max(&t, None).unwrap());
+            assert_eq!(
+                max_a.get(&[]).unwrap().to_bits(),
+                max_b.get(&[]).unwrap().to_bits(),
+                "max が n={n} でスレッド数間に不一致"
+            );
+
+            let mean_a = single.install(|| mean(&t, None).unwrap());
+            let mean_b = multi.install(|| mean(&t, None).unwrap());
+            assert_eq!(
+                mean_a.get(&[]).unwrap().to_bits(),
+                mean_b.get(&[]).unwrap().to_bits(),
+                "mean が n={n} でスレッド数間に不一致"
+            );
+        }
+    }
+
+    /// サイズ 1 軸の軸指定 reduction（#25 棚卸しで特定したギャップ）:
+    /// `dim=Some(axis)` で当該軸長が 1 の場合、`sum`/`max` は恒等値
+    /// （縮約対象が要素そのもの）、`mean` は除算 1 回（分母 1）で入力値と
+    /// 一致することを確認する。
+    #[test]
+    fn axis_reduction_with_size_one_axis_is_identity() {
+        let t = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[1, 4]).unwrap();
+
+        let out_sum = sum(&t, Some(0)).unwrap();
+        assert_eq!(out_sum.shape(), &[4]);
+        for i in 0..4 {
+            assert_eq!(out_sum.get(&[i]).unwrap(), t.get(&[0, i]).unwrap());
+        }
+
+        let out_max = max(&t, Some(0)).unwrap();
+        for i in 0..4 {
+            assert_eq!(out_max.get(&[i]).unwrap(), t.get(&[0, i]).unwrap());
+        }
+
+        let out_mean = mean(&t, Some(0)).unwrap();
+        for i in 0..4 {
+            assert_eq!(out_mean.get(&[i]).unwrap(), t.get(&[0, i]).unwrap());
+        }
+    }
+
     #[test]
     fn non_contiguous_axis_reduction_matches_contiguous() {
         let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();

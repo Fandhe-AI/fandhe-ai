@@ -17,11 +17,16 @@
 //! `mean`・軸指定 reduction）を追加した。TASK-1.6d（#24）で `rayon` 並列の粒度・
 //! ブロックサイズ（[`gemm::BlockSizes`]）を実測チューニングし、PoC-v2-1 比の性能改善比
 //! （naive/blocked 比 約 6〜8.5 倍）が本環境でも再現することを確認した
-//! （計測記録: `docs/perf/cpu-gemm-rayon-tuning.md`）。`BackendOps` トレイトからの結線は
-//! TASK-1.9（#43）で行う（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
+//! （計測記録: `docs/perf/cpu-gemm-rayon-tuning.md`）。TASK-1.6f（#184）で [`gemm_blis`]
+//! モジュール（BLIS/GotoBLAS2 5-loop model・`std::arch` intrinsics マイクロカーネル・
+//! A/B packing）を追加した。`gemm` モジュールの関数（naive/blocked/parallel/
+//! parallel_tuned）は #24 の段階比較の参照点として変更しない（公開 API 非破壊。
+//! `gemm_blis` は独立した新規追加）。`BackendOps` トレイトからの結線は TASK-1.9（#43）で
+//! 行う（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 
 mod elementwise;
 pub mod gemm;
+pub mod gemm_blis;
 pub mod reduction;
 
 pub use elementwise::{
@@ -30,3 +35,4 @@ pub use elementwise::{
 pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
+pub use gemm_blis::{gemm_blis, gemm_blis_parallel};

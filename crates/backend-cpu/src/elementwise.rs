@@ -528,6 +528,128 @@ mod tests {
         }
     }
 
+    // --- スライスカーネル層: 閾値境界（#25） ---
+
+    /// `PARALLEL_THRESHOLD` ちょうど・±1 の 3 点で、5 つの `*_slice` カーネル
+    /// すべての逐次/並列切替点が数値一致することを確認する。既存の
+    /// `slice_kernels_above_parallel_threshold_match_sequential` は
+    /// 閾値+17 の 1 点（並列側）のみを確認しており、閾値ちょうど・
+    /// 直下（逐次側）の切替境界は未検証だった（#25 棚卸しで特定した
+    /// ギャップ）。
+    #[test]
+    fn slice_kernels_match_sequential_at_threshold_boundary() {
+        for n in [
+            PARALLEL_THRESHOLD - 1,
+            PARALLEL_THRESHOLD,
+            PARALLEL_THRESHOLD + 1,
+        ] {
+            let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 5.0).collect();
+            let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.002).collect();
+
+            let mut out_par = vec![0.0f32; n];
+            add_slice(&a, &b, &mut out_par);
+            let mut out_seq = vec![0.0f32; n];
+            for ((o, &x), &y) in out_seq.iter_mut().zip(&a).zip(&b) {
+                *o = x + y;
+            }
+            assert_eq!(out_par, out_seq, "add_slice mismatch at n={n}");
+
+            let mut mul_par = vec![0.0f32; n];
+            mul_slice(&a, &b, &mut mul_par);
+            let mut mul_seq = vec![0.0f32; n];
+            for ((o, &x), &y) in mul_seq.iter_mut().zip(&a).zip(&b) {
+                *o = x * y;
+            }
+            assert_eq!(mul_par, mul_seq, "mul_slice mismatch at n={n}");
+
+            let mut relu_par = vec![0.0f32; n];
+            relu_slice(&a, &mut relu_par);
+            let mut relu_seq = vec![0.0f32; n];
+            for (o, &x) in relu_seq.iter_mut().zip(&a) {
+                *o = x.max(0.0);
+            }
+            assert_eq!(relu_par, relu_seq, "relu_slice mismatch at n={n}");
+
+            let mut exp_par = vec![0.0f32; n];
+            exp_slice(&a, &mut exp_par);
+            let mut exp_seq = vec![0.0f32; n];
+            for (o, &x) in exp_seq.iter_mut().zip(&a) {
+                *o = x.exp();
+            }
+            assert_eq!(exp_par, exp_seq, "exp_slice mismatch at n={n}");
+
+            let mut tanh_par = vec![0.0f32; n];
+            tanh_slice(&a, &mut tanh_par);
+            let mut tanh_seq = vec![0.0f32; n];
+            for (o, &x) in tanh_seq.iter_mut().zip(&a) {
+                *o = x.tanh();
+            }
+            assert_eq!(tanh_par, tanh_seq, "tanh_slice mismatch at n={n}");
+        }
+    }
+
+    // --- スライスカーネル層: 長さ不一致 assert 契約（#25） ---
+    //
+    // `*_slice` は TASK-1.9（#43）で `BackendOps` から直接再利用される想定の
+    // pub 関数であり、長さ不一致を `assert_eq!`（release でも有効）で拒否する
+    // 契約を持つ（モジュール doc コメント「スライスカーネル層」参照）。
+    // 以下のテストは通常の `cargo test`（debug assertion 有効ビルド）で
+    // 「長さ不一致がパニックで拒否されること」を固定するもので、
+    // `assert_eq!` から `debug_assert_eq!` への後退を検出できるのは
+    // debug assertion を無効化したビルド（`cargo test --release` 等。
+    // 本リポの CI ゲートには含まれない）で実行した場合に限る。
+
+    #[test]
+    #[should_panic(expected = "add_slice: length mismatch (a vs b)")]
+    fn add_slice_rejects_a_b_length_mismatch() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [1.0, 2.0];
+        let mut out = [0.0; 3];
+        add_slice(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "add_slice: length mismatch (a vs out)")]
+    fn add_slice_rejects_a_out_length_mismatch() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [1.0, 2.0, 3.0];
+        let mut out = [0.0; 2];
+        add_slice(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "mul_slice: length mismatch (a vs b)")]
+    fn mul_slice_rejects_length_mismatch() {
+        let a = [1.0, 2.0];
+        let b = [1.0];
+        let mut out = [0.0; 2];
+        mul_slice(&a, &b, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "relu_slice: length mismatch")]
+    fn relu_slice_rejects_length_mismatch() {
+        let a = [1.0, 2.0];
+        let mut out = [0.0; 1];
+        relu_slice(&a, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "exp_slice: length mismatch")]
+    fn exp_slice_rejects_length_mismatch() {
+        let a = [1.0, 2.0];
+        let mut out = [0.0; 1];
+        exp_slice(&a, &mut out);
+    }
+
+    #[test]
+    #[should_panic(expected = "tanh_slice: length mismatch")]
+    fn tanh_slice_rejects_length_mismatch() {
+        let a = [1.0, 2.0];
+        let mut out = [0.0; 1];
+        tanh_slice(&a, &mut out);
+    }
+
     // --- Tensor 入口層: 境界形状 ---
 
     #[test]
@@ -544,6 +666,63 @@ mod tests {
         let a = Tensor::<f32>::zeros(&[0]).unwrap();
         let out = relu(&a).unwrap();
         assert!(out.is_empty());
+    }
+
+    /// 空テンソルの網羅（#25 棚卸しで特定したギャップ）: 既存カバレッジは
+    /// `add`/`relu` のみで、`mul`（二項）・`exp`/`tanh`（単項 libm 経由）の
+    /// 空入力は未検証だった。shape のバリエーション（`[0]`・`[0,3]`・
+    /// `[3,0]`）も併せて確認する。
+    #[test]
+    fn mul_exp_tanh_empty_tensor_returns_empty() {
+        for shape in [&[0usize][..], &[0, 3][..], &[3, 0][..]] {
+            let a = Tensor::<f32>::zeros(shape).unwrap();
+            let b = Tensor::<f32>::zeros(shape).unwrap();
+
+            let mul_out = mul(&a, &b).unwrap();
+            assert_eq!(mul_out.shape(), shape);
+            assert!(mul_out.is_empty());
+
+            let exp_out = exp(&a).unwrap();
+            assert_eq!(exp_out.shape(), shape);
+            assert!(exp_out.is_empty());
+
+            let tanh_out = tanh(&a).unwrap();
+            assert_eq!(tanh_out.shape(), shape);
+            assert!(tanh_out.is_empty());
+        }
+    }
+
+    /// 片側ゼロサイズ shape を含む broadcast: `[0,3] + [3]` -> `[0,3]`。
+    /// `elementwise_out_shape`（`tensor-core::broadcast_shape` 委譲）は
+    /// 次元 0 と次元 1 の broadcast を許容し（`(a, 1) => a` の分岐で
+    /// `a=0` も一致扱い）、出力は非ゼロ側でなく `0` 側に揃う。実装の受理
+    /// 仕様どおりの結果を固定化する（#25 棚卸しで特定したギャップ）。
+    #[test]
+    fn add_broadcast_with_zero_size_shape() {
+        let a = Tensor::<f32>::zeros(&[0, 3]).unwrap();
+        let b = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let out = add(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[0, 3]);
+        assert!(out.is_empty());
+    }
+
+    /// 非正方 rank3 での broadcast（#25 棚卸しで特定したギャップ）:
+    /// `[2,3,4] * [1,3,1]`。各次元が異なる値を持つ形状で、拡張軸
+    /// （axis 0・axis 2）が正しく stride 0 として読まれることを確認する。
+    #[test]
+    fn mul_broadcast_rank3_non_square_shapes() {
+        let a = Tensor::<f32>::new((0..24).map(|v| v as f32).collect(), &[2, 3, 4]).unwrap();
+        let b = Tensor::<f32>::new(vec![10.0, 20.0, 30.0], &[1, 3, 1]).unwrap();
+        let out = mul(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[2, 3, 4]);
+        for i in 0..2 {
+            for j in 0..3 {
+                for k in 0..4 {
+                    let expected = a.get(&[i, j, k]).unwrap() * b.get(&[0, j, 0]).unwrap();
+                    assert_eq!(out.get(&[i, j, k]).unwrap(), expected);
+                }
+            }
+        }
     }
 
     #[test]
