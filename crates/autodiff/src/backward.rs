@@ -84,16 +84,20 @@ impl Tape {
 
         let mut grads: Vec<Option<Tensor<f32>>> = vec![None; n];
         let loss_shape = nodes[loss.node_id().0].value.shape();
-        let seed = match Tensor::full(loss_shape, 1.0f32) {
-            Ok(t) => t,
-            Err(_) => {
-                debug_assert!(
-                    false,
-                    "Tape::backward: loss 自身の shape での full() 構築が失敗した（契約違反）"
-                );
-                nodes[loss.node_id().0].value.clone()
-            }
-        };
+        // `loss_shape` は既に構築済みの `loss.value`（同 shape のテンソル）から
+        // 取得しているため、現行の `tensor-core` 実装では本分岐は到達不能
+        // （同 shape での `full()` が失敗する経路が存在しない）。ただし
+        // `backward()` は `Result<Gradients, AutodiffError>` を返す設計であり、
+        // 契約違反時に「エラーを返さず loss 自身の値を誤って seed に使う」
+        // フォールバックは値中立でない（`eval.rs` の値中立フォールバック方針に
+        // 反する）。将来の `tensor-core` 実装変更で到達可能になった場合に備え、
+        // `debug_assert!` + 暗黙の誤った値ではなく `Err` を返す安全側の実装とする
+        // （#18 レビュー指摘）。
+        let seed = Tensor::full(loss_shape, 1.0f32).map_err(|err| {
+            AutodiffError::Backward(format!(
+                "loss 自身の shape でのシードテンソル構築に失敗した（契約違反）: {err}"
+            ))
+        })?;
         grads[loss.node_id().0] = Some(seed);
 
         // 発生順とは逆順に走査する（Wengert list の逆伝播。PoC-v2-2の
