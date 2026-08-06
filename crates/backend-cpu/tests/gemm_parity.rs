@@ -18,7 +18,9 @@
 //! （`crates/tensor-core/tests/poc_v2_1_parity.rs` の確立パターンを踏襲。
 //! CI は `docs/spec` submodule を checkout しない）。
 
-use backend_cpu::{GemmError, gemm_blocked, gemm_naive, gemm_parallel};
+use backend_cpu::{
+    BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
+};
 use bench_harness::rng::Xorshift64Star;
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
@@ -151,6 +153,79 @@ fn gemm_parallel_matches_naive_bit_exact_across_thread_pools() {
         assert_eq!(
             c_naive, c_parallel,
             "gemm_parallel（num_threads={num_threads}）が gemm_naive と bit 一致しない"
+        );
+    }
+}
+
+/// #24（TASK-1.6d）で追加した `gemm_parallel_tuned` のオーバーサブスク
+/// リプション係数（`src/gemm.rs` の `BlockSizes`／`gemm_parallel_tuned`
+/// ドキュメンテーションコメント参照）は生成するパネル数のみを変え、
+/// 各パネル内部の演算順序（K 昇順の `mul_add` 累積）を変えないため、
+/// 係数を変えても `gemm_naive` との bit 完全一致が崩れないことを確認する。
+/// パネル数がパネル対象行数（M）を上回る極端な係数（4）も含める
+/// （`gemm_blocked_region` はパネル行数が 0 になるケースを含め安全に
+/// no-op として扱う設計であることの回帰確認でもある）。
+#[test]
+fn gemm_parallel_tuned_matches_naive_bit_exact_across_oversubscription() {
+    let (m, n, k) = (37, 41, 53); // panel_count > m となりうる小さめの M
+    let a = random_matrix(5, m * k);
+    let b = random_matrix(6, k * n);
+
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+    for oversubscription in [1usize, 2, 4] {
+        let mut c_parallel = vec![0.0; m * n];
+        gemm_parallel_tuned(
+            &a,
+            &b,
+            &mut c_parallel,
+            m,
+            n,
+            k,
+            BlockSizes::poc_v2_1_default(),
+            oversubscription,
+        )
+        .unwrap();
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "gemm_parallel_tuned（oversubscription={oversubscription}）が gemm_naive と bit 一致しない"
+        );
+    }
+}
+
+/// `BlockSizes` を PoC-v2-1 既定値以外（MC/KC/NC いずれも変更）に振っても、
+/// ブロック単位の走査順序自体は変えない（`gemm_blocked_region` の実装）
+/// ため bit 完全一致が維持されることを確認する（#24 の A/B 実測スイープが
+/// 前提とする不変条件の直接検証）。
+#[test]
+fn gemm_parallel_tuned_matches_naive_bit_exact_across_block_sizes() {
+    let (m, n, k) = (129, 130, 131);
+    let a = random_matrix(7, m * k);
+    let b = random_matrix(8, k * n);
+
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+    for blocks in [
+        BlockSizes {
+            mc: 64,
+            kc: 128,
+            nc: 256,
+        },
+        BlockSizes {
+            mc: 256,
+            kc: 512,
+            nc: 1024,
+        },
+    ] {
+        let mut c_parallel = vec![0.0; m * n];
+        gemm_parallel_tuned(&a, &b, &mut c_parallel, m, n, k, blocks, 1).unwrap();
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "gemm_parallel_tuned（blocks={blocks:?}）が gemm_naive と bit 一致しない"
         );
     }
 }

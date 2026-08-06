@@ -14,8 +14,11 @@
 //! TASK-1.6a（#21）で GEMM カーネル（[`gemm`] モジュール。naive / blocked / rayon 並列の
 //! 3 段構成）を追加した。TASK-1.6b（#22）で elementwise カーネル（二項演算 `add`・`mul`、
 //! 活性化 `relu`・`exp`・`tanh`）を追加した。TASK-1.6c（#23）で `reduction`（`sum`・`max`・
-//! `mean`・軸指定 reduction）を追加した。`BackendOps` トレイトからの結線は TASK-1.9（#43）で
-//! 行う（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
+//! `mean`・軸指定 reduction）を追加した。TASK-1.6d（#24）で `rayon` 並列の粒度・
+//! ブロックサイズ（[`gemm::BlockSizes`]）を実測チューニングし、PoC-v2-1 比の性能改善比
+//! （naive/blocked 比 約 6〜8.5 倍）が本環境でも再現することを確認した
+//! （計測記録: `docs/perf/cpu-gemm-rayon-tuning.md`）。`BackendOps` トレイトからの結線は
+//! TASK-1.9（#43）で行う（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 
 mod elementwise;
 pub mod gemm;
@@ -24,4 +27,6 @@ pub mod reduction;
 pub use elementwise::{
     add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
 };
-pub use gemm::{GemmError, gemm_blocked, gemm_naive, gemm_parallel};
+pub use gemm::{
+    BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
+};
