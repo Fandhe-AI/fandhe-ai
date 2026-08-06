@@ -31,8 +31,11 @@ impl CpuBackendOps {
 
 /// `Tensor::contiguous()` 実体化後もなお `as_slice()` が `None` を返す
 /// （契約上到達しないはずだが、`Tensor` 実装のバグに対する fail-safe と
-/// して型付きエラーで受ける）場合の変換ヘルパー。
-fn gemm_shape_mismatch(msg: impl std::fmt::Display) -> BackendError {
+/// して型付きエラーで受ける）場合の変換ヘルパー。shape 不一致ではなく
+/// 実行時の契約違反であるため `BackendError::KernelLaunchFailed` を返す
+/// （命名を実際のエラー種別に合わせ `gemm_shape_mismatch` から改名。
+/// Review 指摘対応）。
+fn gemm_contiguity_fail_safe(msg: impl std::fmt::Display) -> BackendError {
     BackendError::KernelLaunchFailed(msg.to_string())
 }
 
@@ -53,12 +56,12 @@ impl BackendOps for CpuBackendOps {
         // `None` を返す契約。`crates/tensor-core/src/tensor.rs` 参照）。
         let a_owned = a.contiguous();
         let b_owned = b.contiguous();
-        let a_slice = a_owned
-            .as_slice()
-            .ok_or_else(|| gemm_shape_mismatch("gemm: lhs not contiguous after contiguous()"))?;
-        let b_slice = b_owned
-            .as_slice()
-            .ok_or_else(|| gemm_shape_mismatch("gemm: rhs not contiguous after contiguous()"))?;
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            gemm_contiguity_fail_safe("gemm: lhs not contiguous after contiguous()")
+        })?;
+        let b_slice = b_owned.as_slice().ok_or_else(|| {
+            gemm_contiguity_fail_safe("gemm: rhs not contiguous after contiguous()")
+        })?;
 
         let mut out = vec![0.0f32; m * n];
         gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)

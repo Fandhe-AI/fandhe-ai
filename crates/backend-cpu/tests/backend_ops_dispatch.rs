@@ -64,6 +64,41 @@ fn same_code_dispatches_gemm_to_cpu_backend_and_matches_known_values() {
 }
 
 #[test]
+fn cpu_gemm_dispatch_handles_non_contiguous_transpose_input() {
+    // `CpuBackendOps::gemm` は非 contiguous な入力を `contiguous()` で
+    // 実体化してから `as_slice()` を呼ぶ経路（crates/backend-cpu/src/
+    // ops.rs）を持つが、既存テストは常に新規生成した contiguous な
+    // テンソルのみを検証していたため回帰保護がなかった（Review 指摘
+    // 対応）。`transpose` で意図的に非 contiguous なビューを作り、同じ
+    // ディスパッチ経由で正しい結果が得られることを確認する。
+    let cpu = CpuBackendOps::new();
+    let ops: Vec<&dyn BackendOps> = vec![&cpu];
+
+    // A^T = [[1, 3], [2, 4]] を transpose で作る（A = [[1, 2], [3, 4]]）。
+    // A^T @ B = [[1,3],[2,4]] @ [[5,6],[7,8]] = [[26, 30], [38, 44]]。
+    let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
+    let a_t = a.transpose(0, 1).expect("valid transpose");
+    assert!(
+        !a_t.is_contiguous(),
+        "transpose した 2x2 テンソルは非 contiguous なはず"
+    );
+    let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
+
+    let result = run_gemm_through_dispatch(&ops, Device::Cpu, &a_t, &b)
+        .expect("non-contiguous cpu gemm must succeed via contiguous() realization");
+
+    assert_eq!(result.shape(), &[2, 2]);
+    let out = result.as_slice().expect("contiguous result");
+    let expected = [26.0f32, 30.0, 38.0, 44.0];
+    for (got, want) in out.iter().zip(expected.iter()) {
+        assert!(
+            (got - want).abs() < 1e-5,
+            "got {got}, want {want}（複合判定 絶対誤差 1e-5 未満。REQ-2）"
+        );
+    }
+}
+
+#[test]
 fn same_code_dispatches_gemm_to_cuda_backend_or_returns_typed_error() {
     let cpu = CpuBackendOps::new();
     let cuda = CudaBackendOps::new(0);
