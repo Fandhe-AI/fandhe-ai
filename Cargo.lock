@@ -62,6 +62,7 @@ dependencies = [
 name = "backend-cpu"
 version = "0.1.0"
 dependencies = [
+ "bench-harness",
  "half",
  "rayon",
  "tensor-core",
