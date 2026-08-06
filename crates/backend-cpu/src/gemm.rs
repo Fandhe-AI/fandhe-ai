@@ -213,35 +213,45 @@ pub fn gemm_blocked(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    gemm_blocked_region(a, b, c, m, n, k, 0, m);
+    // 単一スレッド実行は「パネルが 1 枚（行範囲 [0, m) 全体）だけの並列実行」
+    // と等価なため、`gemm_parallel` と共通のブロッキング本体
+    // （`gemm_blocked_region`）をそのまま呼ぶ（row_start=0 なので `a`・`c`
+    // とも絶対オフセット＝相対オフセットが一致する）。以前は本関数専用の
+    // 絶対オフセット版を別途持っていたが、パネル分割版とロジックが
+    // 完全重複していたため統合した（issue #21 レビュー指摘の Low 項目）。
+    gemm_blocked_region(a, b, c, n, k, 0, m);
     Ok(())
 }
 
-/// `gemm_blocked` の本体。行範囲 `[row_start, row_end)` のみを計算する形に
-/// 切り出してあるのは、`gemm_parallel` が行パネルごとに同じロジックを
-/// 再利用できるようにするため（naive/blocked/parallel でカーネル自体は
-/// 共通化し、並列化の有無だけを差分にする。PoC-v2-1 設計方針）。
-/// 引数検証は呼び出し元の公開入口（`gemm_blocked`）で完了済みの前提。
+/// `gemm_blocked`／`gemm_parallel` 共通のブロッキング本体。`c` はパネル
+/// 先頭が `row_start` 行目に対応するスライス（`gemm_blocked` からは行列
+/// 全体、`gemm_parallel` からは `par_chunks_mut` が返す行パネル）である
+/// ことを想定し、`c` 内部では `row_start` からの相対オフセットでアクセス
+/// する。`a` は関数内部で `row_start*k` を先頭にスライスし直すことで、
+/// `c` と同じ相対オフセットが `a` にも成立するようにする（`gemm_blocked`
+/// は `row_start=0`・`c`＝行列全体を渡すことで絶対オフセットのケースを
+/// 兼ねる）。引数検証は呼び出し元の公開入口（`gemm_blocked`・
+/// `gemm_parallel`）で完了済みの前提。
 #[allow(clippy::too_many_arguments)]
 fn gemm_blocked_region(
     a: &[f32],
     b: &[f32],
     c: &mut [f32],
-    m: usize,
     n: usize,
     k: usize,
     row_start: usize,
     row_end: usize,
 ) {
-    debug_assert!(row_end <= m);
+    let mc_total = row_end - row_start;
+    let a = &a[row_start * k..];
 
     for jc in (0..n).step_by(NC) {
         let nc_len = NC.min(n - jc);
         for pc in (0..k).step_by(KC) {
             let kc_len = KC.min(k - pc);
-            let mut ic = row_start;
-            while ic < row_end {
-                let mc_len = MC.min(row_end - ic);
+            let mut ic = 0;
+            while ic < mc_total {
+                let mc_len = MC.min(mc_total - ic);
                 kernel_block(a, b, c, n, k, ic, ic + mc_len, pc, kc_len, jc, nc_len);
                 ic += MC;
             }
@@ -284,7 +294,7 @@ pub fn gemm_parallel(
     // 下限を MC（128）に固定しないのは、例えば M=512・16 スレッドでは
     // 512/16=32 行のパネルが作れるにもかかわらず MC=128 に切り上げると
     // 4 パネルしか生成されず、16 コア中 4 コアしか稼働しない頭打ちが
-    // 生じるため（`gemm_blocked_region_relative` はパネル内部で MC 単位の
+    // 生じるため（`gemm_blocked_region` はパネル内部で MC 単位の
     // ブロッキングを自前で行うため、パネル行数が MC 未満でも正しく動作
     // する。PoC-v2-1 実測で確立した方針）。
     let num_threads = rayon::current_num_threads().max(1);
@@ -295,56 +305,12 @@ pub fn gemm_parallel(
         .for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            // c_chunk は c[row_start*n .. row_end*n] と同じメモリだが、
-            // gemm_blocked_region は c 全体を絶対オフセットで参照するため、
-            // ここではパネル先頭からの相対オフセットに合わせて呼び出す。
-            gemm_blocked_region_relative(a, b, c_chunk, n, k, row_start, row_end);
+            // c_chunk はパネル先頭が row_start 行目に対応するスライス。
+            // gemm_blocked_region が row_start を基準に a・c 双方の相対
+            // オフセットを揃えるため、パネル境界をそのまま渡せる。
+            gemm_blocked_region(a, b, c_chunk, n, k, row_start, row_end);
         });
     Ok(())
-}
-
-/// `gemm_blocked_region` の相対オフセット版。`c_chunk` はパネル先頭が
-/// `row_start` 行目に対応するスライスであるため、内部で絶対行番号との
-/// ずれを吸収する。呼び出し元（`gemm_parallel`）で shape 検証済みの前提。
-#[allow(clippy::too_many_arguments)]
-fn gemm_blocked_region_relative(
-    a: &[f32],
-    b: &[f32],
-    c_chunk: &mut [f32],
-    n: usize,
-    k: usize,
-    row_start: usize,
-    row_end: usize,
-) {
-    let mc_total = row_end - row_start;
-    for jc in (0..n).step_by(NC) {
-        let nc_len = NC.min(n - jc);
-        for pc in (0..k).step_by(KC) {
-            let kc_len = KC.min(k - pc);
-            let mut ic = 0;
-            while ic < mc_total {
-                let mc_len = MC.min(mc_total - ic);
-                // a は絶対行番号（row_start 起点）、c_chunk はパネル先頭を
-                // 0 とした相対行番号でアクセスする必要があるため、
-                // kernel_block を 2 回に分けず「a 側オフセット + c 側オフセット」
-                // をそれぞれのスライスに事前適用してから共通ロジックを呼ぶ。
-                kernel_block(
-                    &a[row_start * k..],
-                    b,
-                    c_chunk,
-                    n,
-                    k,
-                    ic,
-                    ic + mc_len,
-                    pc,
-                    kc_len,
-                    jc,
-                    nc_len,
-                );
-                ic += MC;
-            }
-        }
-    }
 }
 
 #[cfg(test)]

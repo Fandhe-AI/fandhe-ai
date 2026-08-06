@@ -58,7 +58,12 @@ fn gemm_naive_identity_is_noop() {
 /// もある。
 #[test]
 fn gemm_blocked_matches_naive_bit_exact() {
-    let (m, n, k) = (37, 41, 53); // MC/NC/KC の境界をまたぐ非切りの良い形状
+    // MC=128・KC=256・NC=512 のいずれも 1 ブロックに収まる小規模形状
+    // （jc・pc・ic いずれのブロッキングループも 1 反復のみ）。ブロック
+    // 境界をまたぐ経路の検証は
+    // `gemm_blocked_matches_naive_bit_exact_multi_block` を参照
+    // （issue #21 レビュー指摘: 本ケースは「境界をまたぐ」形状ではない）。
+    let (m, n, k) = (37, 41, 53);
     let a = random_matrix(1, m * k);
     let b = random_matrix(2, k * n);
 
@@ -69,6 +74,32 @@ fn gemm_blocked_matches_naive_bit_exact() {
     gemm_blocked(&a, &b, &mut c_blocked, m, n, k).unwrap();
 
     assert_eq!(c_naive, c_blocked);
+}
+
+/// NC（512）・KC（256）・MC（128）のすべてで複数ブロックを跨ぐ形状
+/// （jc: 512,1088 の 2 反復・pc: 256,512,640 の 3 反復・ic/gemm_parallel の
+/// 並列パネル内 MC ブロッキング: 128 刻みで複数反復）で `gemm_blocked`・
+/// `gemm_parallel` を `gemm_naive` と bit 完全一致比較する（issue #21
+/// レビュー指摘の Medium 項目: 既存テストはすべて jc・pc いずれも 1 反復
+/// のみで、`kernel_block` のオフセット計算〈`(pc+p)*n+jc` 等〉や
+/// `nc_len`/`kc_len` のクランプが複数ブロックにまたがる形状でのみ
+/// 顕在化するバグを検出できていなかった）。
+#[test]
+fn gemm_blocked_matches_naive_bit_exact_multi_block() {
+    let (m, n, k) = (200, 600, 700);
+    let a = random_matrix(20, m * k);
+    let b = random_matrix(21, k * n);
+
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+    let mut c_blocked = vec![0.0; m * n];
+    gemm_blocked(&a, &b, &mut c_blocked, m, n, k).unwrap();
+    assert_eq!(c_naive, c_blocked);
+
+    let mut c_parallel = vec![0.0; m * n];
+    gemm_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+    assert_eq!(c_naive, c_parallel);
 }
 
 #[test]
