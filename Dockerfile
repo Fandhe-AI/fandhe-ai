@@ -9,7 +9,11 @@
 # Fandhe-AI/rust-ai-library-v1 の Dockerfile と同一方針。
 FROM rust:1.88-slim-bookworm
 
-# ビルド・検証に必要な最小ツールのみ導入する（レイヤ削減のため 1 RUN に集約）
+# ビルド・検証に必要な最小ツールのみ導入する（レイヤ削減のため 1 RUN に集約）。
+# aarch64-apple-darwin ターゲットは `make ci` が `build-cross`（TASK-2.1b・イシュー #50）を
+# 経由して必ず要求するため、root（RUSTUP_HOME 既定は /usr/local/rustup で dev ユーザーは
+# 書き込み不可）でイメージビルド時に事前導入しておく。未導入のまま dev ユーザーで
+# `rustup target add` を実行すると権限エラーになるため（PR #238 Bugbot 指摘）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
@@ -18,7 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && rustup component add rustfmt clippy
+    && rustup component add rustfmt clippy \
+    && rustup target add aarch64-apple-darwin
 
 # ホストと UID を合わせやすい非 root ユーザーで作業する（成果物の所有権事故防止）
 ARG UID=1000
