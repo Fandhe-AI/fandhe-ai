@@ -20,6 +20,7 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::validate_gemm_dims;
 use crate::kernels_wmma;
+use crate::kernels_wmma_opt;
 use crate::nvrtc::compile_ptx;
 
 /// WMMA f16 経路が要求する compute capability の下限（major）。
@@ -40,6 +41,13 @@ const MIN_COMPUTE_CAPABILITY_MAJOR: i32 = 7;
 /// 場合はカーネルソース側のスレッド分担ロジックも合わせて見直す必要がある。
 const WMMA_BLOCK_DIM: (u32, u32, u32) = (32, 1, 1);
 
+/// f16 WMMA opt（共有メモリ・タイル最適化版。TASK-11.1d・#63）カーネル
+/// 起動 1 回あたりのブロック次元（128 スレッド = 4 warp、
+/// `kernels_wmma_opt::WMMA_F16_OPT_THREADS` を 1 次元ブロックとして
+/// 起動する。`WMMA_BLOCK_DIM`（1 ブロック = 1 warp）とは独立した契約。
+/// `gemm.rs::WMMA_TF32_OPT_BLOCK_DIM` と同じ理由で専用定数として分離する）。
+const WMMA_OPT_BLOCK_DIM: (u32, u32, u32) = (kernels_wmma_opt::WMMA_F16_OPT_THREADS, 1, 1);
+
 /// f16 WMMA GEMM カーネルのコンパイル済みハンドルを保持する。
 ///
 /// `stream` は `CudaDevice` から `Arc` クローンで受け取る（`gemm.rs::CudaGemm`
@@ -47,6 +55,14 @@ const WMMA_BLOCK_DIM: (u32, u32, u32) = (32, 1, 1);
 pub struct CudaWmmaGemm {
     stream: Arc<CudaStream>,
     wmma_f16: CudaFunction,
+    /// TASK-11.1d（#63）で追加。共有メモリ・タイル最適化版 f16 WMMA
+    /// カーネル（`kernels_wmma_opt::WMMA_F16_OPT`）のコンパイル済みハンドル。
+    /// `gemm.rs::CudaGemm::wmma_tf32_opt` と同じ理由（コンパイル失敗しうる
+    /// 環境が `wmma_f16`〈基本版〉より広い）で `Option` にし、失敗を
+    /// `new` の早期 return に合流させない。`run_f16` はこちらが `Some` なら
+    /// 優先的に使い、`None` なら `wmma_f16`（基本版）へ自動フォールバック
+    /// する。
+    wmma_f16_opt: Option<CudaFunction>,
 }
 
 impl CudaWmmaGemm {
@@ -82,9 +98,42 @@ impl CudaWmmaGemm {
             .load_module(ptx)?
             .load_function("gemm_wmma_f16")?;
 
+        // TASK-11.1d（#63）: `kernels_wmma_opt::WMMA_F16_OPT` の不変条件
+        // （ブロックタイルが warp タイルの倍数・スレッド数が warp 数×32 に
+        // 一致・warp タイルが fragment 辺の 2 倍・パディング行幅が half の
+        // `ldm` 制約〈8 の倍数〉を満たす）をコンパイル時 const アサーション
+        // で機械検査する（`gemm.rs::CudaGemm::new` の TF32 opt 側と同じ方針。
+        // レビュー指摘 #62 の踏襲）。
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_F16_OPT_BLOCK_M
+                .is_multiple_of(kernels_wmma_opt::WMMA_F16_OPT_WARP_TILE)
+        );
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_F16_OPT_BLOCK_N
+                .is_multiple_of(kernels_wmma_opt::WMMA_F16_OPT_WARP_TILE)
+        );
+        const _: () = assert!(
+            (kernels_wmma_opt::WMMA_F16_OPT_BLOCK_M / kernels_wmma_opt::WMMA_F16_OPT_WARP_TILE)
+                * (kernels_wmma_opt::WMMA_F16_OPT_BLOCK_N
+                    / kernels_wmma_opt::WMMA_F16_OPT_WARP_TILE)
+                * 32
+                == kernels_wmma_opt::WMMA_F16_OPT_THREADS
+        );
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_F16_OPT_WARP_TILE == kernels_wmma_opt::WMMA_F16_OPT_FRAG * 2
+        );
+        const _: () = assert!(kernels_wmma_opt::WMMA_F16_OPT_A_PAD.is_multiple_of(8));
+        const _: () = assert!(kernels_wmma_opt::WMMA_F16_OPT_B_PAD.is_multiple_of(8));
+
+        // opt カーネルは基本版と独立にコンパイルし、失敗を `new` の早期
+        // return に合流させない（`Self::wmma_f16_opt` フィールドの
+        // ドキュメンテーションコメント参照）。
+        let wmma_f16_opt = compile_wmma_f16_opt(device, arch).ok();
+
         Ok(Self {
             stream: device.stream().clone(),
             wmma_f16,
+            wmma_f16_opt,
         })
     }
 
@@ -102,6 +151,13 @@ impl CudaWmmaGemm {
     /// tiled の起動モデル前提であり、1 ブロック = 1 warp = `WMMA_TILE x
     /// WMMA_TILE` 要素という WMMA の起動モデルとは異なるため再利用しない
     /// （本関数専用のグリッド計算を用いる）。
+    ///
+    /// **TASK-11.1d（#63）フォールバック方針**: 共有メモリ・タイル最適化版
+    /// （[`Self::wmma_f16_opt`]）が `new` 時点でコンパイル・ロードに成功
+    /// していれば、そちらを優先的に使用する。`None` の場合は基本版
+    /// （[`Self::wmma_f16`]）へ自動フォールバックし、公開シグネチャ・
+    /// 呼び出し側の挙動は変えない（`gemm.rs::CudaGemm::run_wmma_tf32` と
+    /// 同じ設計判断）。
     pub fn run_f16(
         &self,
         a: &[f16],
@@ -127,29 +183,56 @@ impl CudaWmmaGemm {
             return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
         }
 
+        match self.wmma_f16_opt.as_ref() {
+            Some(func) => {
+                let cfg = wmma_opt_launch_config(m, n);
+                self.launch_f16_kernel(func, a, b, m, n, k, cfg)
+            }
+            None => {
+                let cfg = wmma_launch_config(m, n);
+                self.launch_f16_kernel(&self.wmma_f16, a, b, m, n, k, cfg)
+            }
+        }
+    }
+
+    /// f16 WMMA カーネル共通の転送・起動・同期・回収手続き（基本版・opt
+    /// 版どちらの `CudaFunction`／`LaunchConfig` からも呼ばれる。
+    /// [`Self::run_f16`] が m==0/n==0/k==0 の早期 return を終えた後にのみ
+    /// 呼ぶ契約）。
+    #[allow(clippy::too_many_arguments)]
+    fn launch_f16_kernel(
+        &self,
+        func: &CudaFunction,
+        a: &[f16],
+        b: &[f16],
+        m: u32,
+        n: u32,
+        k: u32,
+        cfg: LaunchConfig,
+    ) -> Result<Vec<f16>, CudaError> {
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
         let mut c_dev = self
             .stream
             .alloc_zeros::<f16>((m as usize) * (n as usize))?;
 
-        let cfg = wmma_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
         // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
         // 5 個・型・個数が、ホスト側検証（validate_gemm_dims）済みの
         // m/n/k と 1:1 対応する。カーネル内の手動境界チェック（A/B タイル
-        // guarded load・エピローグ guarded store。kernels_wmma.rs 参照、
-        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。グリッド
-        // 次元は WMMA_TILE 単位の div_ceil で m/n を包含するよう構築して
-        // おり（wmma_launch_config）、末尾タイルの余剰はカーネル内境界
-        // チェックで弾かれる。共有メモリは静的 `__shared__` 配列のみを
-        // 使用するため `shared_mem_bytes` は 0 のままでよい（動的共有
-        // メモリを追加確保しない。gemm.rs::launch_config と同じ構成）。
+        // guarded load・エピローグ guarded store。基本版は
+        // kernels_wmma.rs、opt 版は kernels_wmma_opt.rs 参照、REQ-8）と
+        // 合わせて OOB 読み書きが起きない根拠とする。グリッド次元は
+        // 呼び出し元（`run_f16`）が基本版／opt 版それぞれのタイル単位で
+        // `div_ceil` 構築済み（`wmma_launch_config`／`wmma_opt_launch_config`）
+        // であり、末尾タイルの余剰はカーネル内境界チェックで弾かれる。
+        // 共有メモリは静的 `__shared__` 配列のみを使用するため
+        // `shared_mem_bytes` は 0 のままでよい。
         unsafe {
             self.stream
-                .launch_builder(&self.wmma_f16)
+                .launch_builder(func)
                 .arg(&a_dev)
                 .arg(&b_dev)
                 .arg(&mut c_dev)
@@ -180,6 +263,38 @@ fn wmma_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
+/// f16 WMMA opt カーネル（`kernels_wmma_opt::WMMA_F16_OPT`）を単独で
+/// コンパイル・ロードする。`CudaWmmaGemm::new` から呼ばれ、戻り値の `Err`
+/// は基本版（`wmma_f16`）の可用性から切り離すため `?` で早期 return せず
+/// 呼び出し元で `.ok()` により握りつぶす（`Self::wmma_f16_opt` フィールドの
+/// ドキュメンテーションコメント参照。`gemm.rs::compile_wmma_tf32_opt` と
+/// 同じ設計判断）。
+fn compile_wmma_f16_opt(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
+    let ptx = compile_ptx(kernels_wmma_opt::WMMA_F16_OPT, arch)?;
+    let func = device
+        .context()
+        .load_module(ptx)?
+        .load_function("gemm_wmma_f16_opt")?;
+    Ok(func)
+}
+
+/// [`wmma_launch_config`] の opt 版。ブロックタイル
+/// `kernels_wmma_opt::WMMA_F16_OPT_BLOCK_M/N`（64×64）を単位に `div_ceil`
+/// でグリッドを構築する。末尾ブロックの余剰は opt カーネル内の手動境界
+/// チェック（REQ-8）に委ねる契約は基本版と共通。
+fn wmma_opt_launch_config(m: u32, n: u32) -> LaunchConfig {
+    let grid_dim = (
+        n.div_ceil(kernels_wmma_opt::WMMA_F16_OPT_BLOCK_N),
+        m.div_ceil(kernels_wmma_opt::WMMA_F16_OPT_BLOCK_M),
+        1,
+    );
+    LaunchConfig {
+        grid_dim,
+        block_dim: WMMA_OPT_BLOCK_DIM,
+        shared_mem_bytes: 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +312,22 @@ mod tests {
     #[test]
     fn wmma_launch_config_exact_multiple_shape_has_no_extra_tile() {
         let cfg = wmma_launch_config(32, 48);
+        assert_eq!(cfg.grid_dim, (3, 2, 1));
+    }
+
+    #[test]
+    fn wmma_opt_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
+        // 65x63 を 64x64 ブロックタイルで覆うには grid (1, 2) が必要
+        // （div_ceil(63,64)=1, div_ceil(65,64)=2）。
+        let cfg = wmma_opt_launch_config(65, 63);
+        assert_eq!(cfg.grid_dim, (1, 2, 1));
+        assert_eq!(cfg.block_dim, WMMA_OPT_BLOCK_DIM);
+        assert_eq!(cfg.shared_mem_bytes, 0);
+    }
+
+    #[test]
+    fn wmma_opt_launch_config_exact_multiple_shape_has_no_extra_tile() {
+        let cfg = wmma_opt_launch_config(128, 192);
         assert_eq!(cfg.grid_dim, (3, 2, 1));
     }
 }
