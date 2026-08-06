@@ -85,6 +85,11 @@ name = "bench-harness"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "cudarc",
+ "half",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
 ]
 
 [[package]]
