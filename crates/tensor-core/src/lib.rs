@@ -13,8 +13,12 @@
 //! を追加した。`ops_shape`（TASK-1.4c・#13）は matmul・elementwise・
 //! reduction 等の演算実行時 shape 検査を、`autodiff`（`Var`）・backend
 //! 入口（`DeviceBuffer`）の双方から再利用可能な純粋関数群として提供する。
-//! PoC-v2-1 数値突合の総合テスト（#14・TASK-1.4d）・演算グラフ本体
-//! （カーネル融合機構）は後続タスクで追加する（spec 根拠:
+//! PoC-v2-1 数値突合の総合テスト（TASK-1.4d・#14）は `tests/` に整備済み:
+//! `tests/poc_v2_1_parity.rs` が PoC-v2-1 のテストベクタ移植・
+//! `evidence/dump_case_512.bin` との数値突合（`docs/spec` submodule
+//! checkout が必要なため `#[ignore]` でローカル実行に分離）を、
+//! `tests/tensor_views.rs` が複数 API 組合せの統合テストを担う。
+//! 演算グラフ本体（カーネル融合機構）は後続タスクで追加する（spec 根拠:
 //! `docs/spec/05-tasks.md` TASK-1.4、`docs/public-api-design.md` §2）。
 
 mod broadcast;
