@@ -10,7 +10,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリです。Burn 依存を排
 
 ## ステータス
 
-M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス可否表）は着手中です。TASK-1.1（workspace `Cargo.toml`・9 クレート雛形・許容依存 8 区分の `=x.y.z` 固定・`Cargo.lock` コミット）は完了し、CI の cargo 系チェック（fmt / clippy / test / 依存禁止検査）は有効化・green を確認済みです（TASK-1.2 の依存禁止検査は稼働中）。TASK-1.3（`deny.toml` 導入・ライセンス監査）は未着手です。タスク定義は spec リポの [`05-tasks.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/05-tasks.md)（TASK-1.1〜1.3）、マイルストーンは [`06-roadmap.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/06-roadmap.md)（M0〜M5・全 51 タスク）を参照してください。
+M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス可否表）は着手中です。TASK-1.1（workspace `Cargo.toml`・9 クレート雛形・許容依存 8 区分の `=x.y.z` 固定・`Cargo.lock` コミット）は完了し、CI の cargo 系チェック（fmt / clippy / test / 依存禁止検査）は有効化・green を確認済みです（TASK-1.2 の依存禁止検査は稼働中）。TASK-1.3（`deny.toml` 導入・`docs/license-matrix.md` 作成によるライセンス監査）も完了しています。タスク定義は spec リポの [`05-tasks.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/05-tasks.md)（TASK-1.1〜1.3）、マイルストーンは [`06-roadmap.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/06-roadmap.md)（M0〜M5・全 51 タスク）を参照してください。
 
 ## 実装方針（要点）
 
@@ -26,7 +26,7 @@ M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス�
 1. **判断理由の記録**: 許容依存 8 区分以外を新規追加する場合、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
 2. **バージョン固定**: `Cargo.toml` で `=x.y.z` 完全固定とし、`Cargo.lock` を同一コミットでコミットする
 3. **`docs/license-matrix.md` の同時更新**: 新規・更新する依存のライセンスを確認し、`docs/license-matrix.md`（未作成の場合は同一 PR で作成）を更新する。MPL-2.0 等コピーレフトの推移的混入は推定で記述せず、有効化しうる feature 組合せごとの `cargo tree` 実測で個別に適合確認する
-4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` 導入後。ライセンス監査）が green であることを確認する
+4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` によるライセンス監査）が green であることを確認する
 
 ## 開発環境構築
 
@@ -45,11 +45,11 @@ make setup   # サブモジュール取得 → rustup → lefthook（git hooks�
 | `make lint` | `cargo clippy -D warnings` |
 | `make test` | `cargo test`（実機依存の `#[ignore]` テストは除く） |
 | `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
-| `make deny` | `cargo deny check licenses sources`（依存ライセンス監査） |
+| `make deny` | `cargo deny check licenses sources`（依存ライセンス監査。`cargo-deny` 未導入なら自動導入） |
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
 | `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
 
-`Cargo.toml` は追加済み（TASK-1.1）のため cargo 系ターゲットは実行されます。detect ガード（`HAS_CARGO`／`HAS_DENY` 判定）は冪等セルフヒール方針のフェイルセーフとして残置しており、`deny.toml`（TASK-1.3 で導入予定）のみ現状スキップされます。
+`Cargo.toml`（TASK-1.1）・`deny.toml`（TASK-1.3）はいずれも追加済みのため cargo 系ターゲットは deny を含め全て実行されます。detect ガード（`HAS_CARGO`／`HAS_DENY` 判定）は、CI の detect ステップと同一の冪等セルフヒール方針（`.claude/rules/ci.md`）のフェイルセーフとして残置しています。`cargo-deny` サブコマンドは `make setup` の対象外ですが、`make deny`（`make ci` 経由も含む）実行時に未導入なら `cargo install cargo-deny --locked` で自動導入するため（CI の `deny` ジョブと同一の冪等セルフヒール方針）、クリーンなホスト環境でも追加手順なしで実行できます。開発コンテナ（後述）にはビルド時に導入済みです。
 
 ## Docker 開発環境
 

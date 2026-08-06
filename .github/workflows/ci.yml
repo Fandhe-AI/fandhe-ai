@@ -11,8 +11,9 @@
 # ジョブを success のまま終了させる冪等セルフヒール方針（.claude/rules/ci.md）のフェイルセーフ
 # として残置する（ロジックは変更しない）。ジョブ単位の `if:` ではなく各ステップの `if:` で
 # 判定しているのは、`jobs.<id>.if` は Checkout 前（ワークスペース展開前）に評価されるため
-# `hashFiles('Cargo.toml')` が常に空文字となり判定できないため。deny ジョブのみ `deny.toml`
-# 未追加（TASK-1.3 で導入予定）のため引き続きスキップする。
+# `hashFiles('Cargo.toml')` が常に空文字となり判定できないため。`deny.toml`（TASK-1.3）も
+# 追加済みのため deny ジョブは実行される。detect ガードはいずれかが再消失した場合の
+# フェイルセーフとして残置する。
 #
 # deps-forbidden ジョブは TASK-1.2（依存禁止リストの CI 機械検査）の実装であり、
 # scripts/check-forbidden-deps.sh（Makefile の deps-forbidden ターゲットと共用する単一
@@ -184,7 +185,7 @@ jobs:
         run: cargo test --workspace --all-features
 
   # --------------------------------------------------
-  # cargo deny（依存ライセンス・供給元の監査。deny.toml 追加後に有効化）
+  # cargo deny（依存ライセンス・供給元の監査。deny.toml 追加済み・TASK-1.3 で有効化済み）
   # --------------------------------------------------
   deny:
     name: cargo deny check licenses sources

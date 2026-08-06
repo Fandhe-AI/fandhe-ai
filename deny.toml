@@ -1,0 +1,52 @@
+# cargo-deny 設定。CI の deny ジョブ（.github/workflows/ci.yml `deny:`）・
+# `make deny`（Makefile:107-112）が本ファイルの存在で自動有効化される
+# （.claude/rules/ci.md・detect ステップ）。実測根拠は docs/license-matrix.md
+# （実測日 2026-08-06・Cargo.lock SHA 63748a677a0800257c8175b8fb8bbf187669cbe1）。
+
+[licenses]
+version = 2
+include-dev = true
+# [graph].targets を指定しない（既定で Cargo.lock 全域が対象。docs/license-matrix.md
+# 5 節「Cargo.lock 全域」と一致させる）。ターゲット限定すると UEFI/wasm 等の
+# target-gated 依存（r-efi・wasip2 等）が判定対象から外れ、fail-closed の
+# コピーレフト監視（deps-policy.md）に穴が生じるため、意図的に全域を対象とする。
+# include-dev = true: `criterion`（bench-harness の dev-dependencies 限定。
+# deps-policy.md）とその推移的依存サブツリーは既定（false）だとライセンス
+# 監査から除外されてしまい、docs/license-matrix.md 5 節が明記する
+# 「Cargo.lock 全域」（normal/build/dev 全エッジ）の実測スコープと矛盾する
+# （Bugbot 指摘・PR #211）。dev-dependencies 側もここで fail-closed 監査する。
+#
+# allow は docs/license-matrix.md 5 節「外部 104 パッケージのライセンス分布」
+# （Cargo.lock 全域の cargo metadata --locked 実測）に出現した式を構成する
+# 個別ライセンス識別子（SPDX）を列挙する。OR 結合の式は列挙したいずれか 1 つを
+# 満たせば許可される（cargo-deny の仕様）。r-efi（`… OR LGPL-2.1-or-later`）・
+# wasip2（`Apache-2.0 WITH LLVM-exception OR …`）はいずれも MIT の選択で満たされる
+# （docs/license-matrix.md 6 節の個別判断）。コピーレフト単独ライセンス
+# （GPL/LGPL/MPL 等）は列挙しないため、将来の推移的依存混入は fail-closed で検出される。
+#
+# 本 allow リストは直接依存 8 区分の適合基準（MIT OR Apache-2.0 系）を緩和するものではない。
+# あくまで推移的依存の実測結果を運用化したものであり、allow リストの変更は
+# license-matrix.md の更新とセットでユーザー承認を経る（REQ-5・deps-policy.md）。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSD-2-Clause",
+]
+confidence-threshold = 0.8
+
+[sources]
+# 全依存が crates.io 由来であることを実測済み（docs/license-matrix.md 5 節）。
+# git 依存・代替レジストリの混入をサプライチェーン観点で fail-closed 検出する。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# 依存禁止リスト（.claude/rules/deps-policy.md）は Makefile の deps-forbidden
+# ターゲットで別途 Cargo.lock を機械検査するため、本ファイルでは重複させない。
+multiple-versions = "allow"
