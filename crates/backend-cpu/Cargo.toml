@@ -16,3 +16,10 @@ tensor-core = { path = "../tensor-core" }
 # CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
 rayon.workspace = true
 half.workspace = true
+
+[dev-dependencies]
+# 決定的シード PRNG（`Xorshift64Star`）を GEMM カーネル数値一致テスト（tests/gemm_parity.rs）
+# の入力生成に使う（coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
+# 使う」）。workspace 内クレート同士の path 依存であり、許容依存 8 区分（外部クレート）の
+# 新規追加には当たらない（`bench-harness` が serde を workspace 参照した #29 の先例と同種の判断）。
+bench-harness = { path = "../bench-harness" }
