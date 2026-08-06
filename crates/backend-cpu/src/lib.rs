@@ -37,11 +37,20 @@
 //! 本モジュールの `parity::compare`／`parity::assert_parity`／
 //! `parity::matmul_reference_fma` を共通利用し、ペアごとに判定ロジックを
 //! 重複実装しない想定である（`docs/spec/05-tasks.md` TASK-2.2）。
+//!
+//! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
+//! `tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
+//! （[`gemm_blis::gemm_blis_parallel`]・[`elementwise`] の `add`/`mul`/`relu`/
+//! `exp`/`tanh`・[`reduction`] の `sum`/`max`）への薄い委譲に徹する。CUDA／
+//! Metal 実装（`backend-cuda::ops::CudaBackendOps`／
+//! `backend-metal::ops::MetalBackendOps`）と同一 trait でカーネルディスパッチ
+//! できることを `tests/backend_ops_dispatch.rs` で検証する。
 
 mod device;
 mod elementwise;
 pub mod gemm;
 pub mod gemm_blis;
+mod ops;
 pub mod parity;
 pub mod reduction;
 
@@ -53,6 +62,7 @@ pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
 pub use gemm_blis::{gemm_blis, gemm_blis_parallel};
+pub use ops::CpuBackendOps;
 pub use parity::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
     compare, matmul_reference_fma,

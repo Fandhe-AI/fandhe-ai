@@ -83,6 +83,14 @@
 //! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA／`mma.sync` の
 //! どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは
 //! 未実装。
+//!
+//! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::CudaBackendOps`]）を追加した。
+//! `tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
+//! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
+//! tiled 固定とし、Tensor Core 経路の自動選択は TASK-11.2b・#68 のスコープ）。
+//! elementwise・reduction は GPU カーネル未実装のため
+//! `tensor_core::device::BackendError::Unsupported` を返す
+//! （out-of-scope-tracking.md 対象）。
 
 pub mod device;
 mod error;
@@ -94,6 +102,7 @@ mod kernels_mma;
 mod kernels_wmma;
 mod kernels_wmma_opt;
 mod nvrtc;
+mod ops;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
@@ -101,3 +110,4 @@ pub use gemm::CudaGemm;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;
+pub use ops::CudaBackendOps;

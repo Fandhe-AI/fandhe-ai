@@ -28,9 +28,11 @@
 //! 3 バックエンドクレートはいずれも `tensor-core` に依存するため、trait
 //! 定義をここに置き各バックエンド側で実装する依存逆転構成を取る
 //! （`docs/public-api-design.md` §4）。`DeviceBuffer`（デバイス常駐
-//! バッファ）・`BackendOps`（カーネルディスパッチ）は後続タスク
-//! （TASK-1.9b・1.9c）で追加する。
+//! バッファ）は TASK-1.9b（#45）で追加する。`backend_ops`（TASK-1.9c・
+//! #46）はホスト常駐 `Tensor<f32>` ベースのカーネルディスパッチ
+//! （[`backend_ops::BackendOps`]・[`backend_ops::ops_for`]）を提供する。
 
+mod backend_ops;
 mod broadcast;
 pub mod device;
 mod element;
@@ -38,6 +40,7 @@ mod error;
 mod ops_shape;
 mod tensor;
 
+pub use backend_ops::{BackendOps, ops_for};
 pub use broadcast::broadcast_shape;
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use element::Element;

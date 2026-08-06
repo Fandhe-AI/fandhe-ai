@@ -53,6 +53,14 @@
 //! [`gemm::GemmVariant::SimdgroupTiled`]／[`gemm::MetalGemm::dispatch_auto`] から利用する。
 //! [`tile`] 自体は `objc2` 系 FFI に触れない純粋関数群のため他モジュールと異なり
 //! `cfg(target_os = "macos")` を付けない（[`pad`] と同じ設計判断。Linux でも単体テストが回る）。
+//!
+//! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::MetalBackendOps`]）を追加した。
+//! `tensor_core::backend_ops::BackendOps` の Metal 実装であり、`gemm` は
+//! [`gemm::MetalGemm::dispatch_auto`]（実装済みの動的タイル選択）へ委譲する。
+//! elementwise・reduction は GPU カーネル未実装のため
+//! `tensor_core::device::BackendError::Unsupported` を返す
+//! （out-of-scope-tracking.md 対象）。`device` モジュールと同じく
+//! `cfg(target_os = "macos")` 限定。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -64,6 +72,8 @@ pub mod device;
 pub mod error;
 #[cfg(target_os = "macos")]
 pub mod gemm;
+#[cfg(target_os = "macos")]
+pub mod ops;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
@@ -92,4 +102,6 @@ pub use device::MetalDeviceProvider;
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm};
+#[cfg(target_os = "macos")]
+pub use ops::MetalBackendOps;
 pub use tile::TileConfig;

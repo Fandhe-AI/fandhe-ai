@@ -27,8 +27,9 @@
 //!   実装しない。CUDA 既定有効化の構成決定はユーザー承認必須のため、本
 //!   イシューは列挙と明示選択のみを提供する。
 //!
-//! `DeviceBuffer`／`upload`／`download`（§4.2）・`BackendOps` カーネル
-//! ディスパッチは本イシューのスコープ外（TASK-1.9b・1.9c・#45／#46）。
+//! `DeviceBuffer`／`upload`／`download`（§4.2）は本イシューのスコープ外
+//! （TASK-1.9b・#45）。`BackendOps` カーネルディスパッチは
+//! [`crate::backend_ops`]（TASK-1.9c・#46）を参照。
 
 use std::fmt;
 
@@ -197,6 +198,14 @@ pub enum BackendError {
     /// 対応する `DeviceProvider` 未登録等）。本イシュー（TASK-1.9a）で
     /// 追加した拡張 variant（モジュール冒頭のコメント参照）。
     DeviceUnavailable(String),
+    /// 指定したバックエンドが当該演算のカーネルを未実装であることを表す
+    /// （TASK-1.9c・#46 で追加した拡張 variant）。CUDA／Metal は本イシュー
+    /// 時点で GEMM カーネルのみ実装済みのため、`crate::backend_ops::BackendOps`
+    /// の elementwise・reduction メソッドはこの variant を返す
+    /// fail-safe 実装とする（`panic!`／`unwrap()` しない。
+    /// `.claude/rules/coding-rust.md`）。GPU 側カーネルの実装自体は本
+    /// イシューのスコープ外（out-of-scope-tracking.md 対象）。
+    Unsupported(String),
 }
 
 impl fmt::Display for BackendError {
@@ -210,6 +219,7 @@ impl fmt::Display for BackendError {
             }
             BackendError::KernelLaunchFailed(msg) => write!(f, "kernel launch failed: {msg}"),
             BackendError::DeviceUnavailable(msg) => write!(f, "device unavailable: {msg}"),
+            BackendError::Unsupported(msg) => write!(f, "unsupported operation: {msg}"),
         }
     }
 }
