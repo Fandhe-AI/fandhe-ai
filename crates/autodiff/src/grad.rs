@@ -276,12 +276,38 @@ fn max_vjp(
             for o in 0..outer {
                 for i in 0..inner {
                     let out_idx = o * inner + i;
-                    let target = out_data[out_idx];
+                    // `out_data`/`g_data` の要素数は `reduce_out_shape`
+                    // の契約上 `outer * inner` と一致するはずだが、
+                    // 本ファイルの他ヘルパー（`transpose2d`／
+                    // `unreduce_broadcast` 等）と同様、契約違反時に
+                    // release ビルドで境界外アクセス panic させず
+                    // `debug_assert!` で検知しつつ安全側（当該要素の
+                    // 勾配は 0 のまま）へフォールバックする
+                    // （coding-rust.md「本番経路で unwrap/expect を
+                    // 使わない」方針の趣旨に揃える）。
+                    let (Some(&target), Some(&g_val)) =
+                        (out_data.get(out_idx), g_data.get(out_idx))
+                    else {
+                        debug_assert!(
+                            false,
+                            "max_vjp: out_value/g の要素数が reduce_out_shape の想定と不一致（契約違反）"
+                        );
+                        continue;
+                    };
                     for a in 0..axis_len {
                         let src = (o * axis_len + a) * inner + i;
-                        if in_data[src] == target {
-                            grad[src] = g_data[out_idx];
-                            break;
+                        match in_data.get(src) {
+                            Some(&v) if v == target => {
+                                grad[src] = g_val;
+                                break;
+                            }
+                            Some(_) => {}
+                            None => {
+                                debug_assert!(
+                                    false,
+                                    "max_vjp: input の要素数が in_shape と不一致（契約違反）"
+                                );
+                            }
                         }
                     }
                 }
