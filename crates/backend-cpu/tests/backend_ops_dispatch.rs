@@ -150,14 +150,21 @@ fn same_code_dispatches_gemm_to_metal_backend_or_returns_typed_error() {
     // macOS 実機（GitHub Actions macOS ランナー・self-hosted 実機）では
     // Metal デバイスが通常利用可能なため実カーネルが成功するはずだが、
     // Metal 非対応環境（GPU 無効化等）でも panic せず
-    // `BackendError::DeviceAllocationFailed`／`KernelLaunchFailed` を
-    // 返すことを許容する（fail-safe。`error.rs::MetalError::DeviceUnavailable`
-    // 起因）。
+    // `BackendError::DeviceUnavailable`／`DeviceAllocationFailed`／
+    // `KernelLaunchFailed` を返すことを許容する（fail-safe）。
+    // `MetalBackendOps::gemm` は `MetalContext::new` の失敗（デバイス
+    // 不在。`MetalError::DeviceUnavailable`）を `map_metal_error`
+    // （`backend-metal/src/memory.rs`）経由で
+    // `BackendError::DeviceUnavailable` に統一している
+    // （`backend-metal/src/ops.rs`）ため、この分岐も許容する必要がある
+    // （PR #262 Bugbot 指摘対応）。
     match run_gemm_through_dispatch(&ops, Device::Metal, &a, &b) {
         Ok(result) => {
             assert_eq!(result.shape(), &[2, 2]);
         }
-        Err(BackendError::DeviceAllocationFailed(_)) | Err(BackendError::KernelLaunchFailed(_)) => {
+        Err(BackendError::DeviceUnavailable(_))
+        | Err(BackendError::DeviceAllocationFailed(_))
+        | Err(BackendError::KernelLaunchFailed(_)) => {
             // Metal 非対応環境での期待経路（panic しない）。
         }
         Err(other) => panic!("unexpected error variant for Metal gemm dispatch: {other}"),
