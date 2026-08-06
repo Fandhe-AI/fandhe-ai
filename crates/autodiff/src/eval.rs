@@ -154,8 +154,24 @@ fn unary(input: &Tensor<f32>, op: impl Fn(f32) -> f32) -> Tensor<f32> {
     build_tensor(out, &shape)
 }
 
+/// NaN 伝播する 2 項最大値（IEEE 754 `maximum` セマンティクス相当）。
+///
+/// `f32::max` は非 `NaN` 側のオペランドを返すため、上流で発生した
+/// `NaN` が `relu`/`max` reduction を通過すると forward 値から消え、
+/// テープに記録される数値のデバッグやバックエンド間数値一致検証
+/// （`.claude/rules/coding-rust.md`「相対誤差 1e-3 未満 または絶対誤差
+/// 1e-5 未満」）に影響しうる（Cursor Bugbot 指摘。PR #221）。
+/// いずれかが `NaN` なら `NaN` を返し、伝播を保つ。
+fn nan_propagating_max(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.max(b)
+    }
+}
+
 pub(crate) fn relu(input: &Tensor<f32>) -> Tensor<f32> {
-    unary(input, |v| v.max(0.0))
+    unary(input, |v| nan_propagating_max(v, 0.0))
 }
 
 pub(crate) fn exp(input: &Tensor<f32>) -> Tensor<f32> {
@@ -217,11 +233,11 @@ pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
         None => {
             let m = dense_vec(input)
                 .into_iter()
-                .fold(f32::NEG_INFINITY, f32::max);
+                .fold(f32::NEG_INFINITY, nan_propagating_max);
             build_tensor(vec![m], out_shape)
         }
         Some(axis) => build_tensor(
-            reduce_axis(input, axis, f32::NEG_INFINITY, f32::max),
+            reduce_axis(input, axis, f32::NEG_INFINITY, nan_propagating_max),
             out_shape,
         ),
     }
