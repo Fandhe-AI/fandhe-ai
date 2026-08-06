@@ -123,10 +123,18 @@ REQ-10 の受け入れ基準は「rank を型に載せるか（`Tensor<T, const 
 採用方式は PoC-v2-2 が確定した**動的テープ式**（Wengert list）である（`docs/spec/03-poc/poc-v2-2-autodiff/README.md:170`「採用方式の確定」）。
 
 ```rust
+/// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
+/// ポインタ等値（`ptr::eq`）ではなく専用 ID を用いる理由: スコープ末
+/// で破棄された `Tape` のメモリ領域は後続の `Tape::new()` に再利用さ
+/// れうるため、ポインタ比較は別テープを同一と誤判定する（false
+/// positive）余地が残る。単調増加 ID はプロセス生存中に衝突しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TapeId(u64);
+
 /// 演算を記録する Wengert list。`Var` 上の演算のみがここに記録される。
 /// ノード列は `RefCell` で包み、`Var` からの内部可変性による追記を
 /// 可能にする（借用モデルの詳細は `Var` のドキュメント参照）。
-pub struct Tape { nodes: RefCell<Vec<TapeNode>> }
+pub struct Tape { id: TapeId, nodes: RefCell<Vec<TapeNode>> }
 
 impl Tape {
     pub fn new() -> Tape;
@@ -150,6 +158,16 @@ impl Tape {
 /// 本文書側で productize 時の API 使い勝手を優先し決定する
 /// （TASK-1.5 実装時に借用チェッカ上の問題が出た場合は PoC-v2-2 の
 /// `&mut Tape` 方式へ戻す判断もありうる。決定は実装時に確定する）。
+///
+/// **クロステープ安全性**: ライフタイム `'t` の一致は同一 `Tape` を
+/// 指す証明にはならない（同一スコープに複数の `Tape` が存在する場合、
+/// それぞれの `Var<'t>` は同一の `'t` を持ちうる）。そのため二項演算
+/// （`matmul`/`add`/`mul`/`mse_loss`）・`Tape::backward`・
+/// `Gradients::get` は入口で `self.tape.id` と相手側 `Var`／
+/// `Gradients` が保持する `TapeId` の一致を実行時検査し、不一致なら
+/// 無関係なノードを誤って解決せず `AutodiffError::TapeMismatch` を
+/// 返す（型システムのみでは検出できない誤用のため、実行時 identity
+/// 検査を必須の入口契約とする）。
 pub struct Var<'t> { tape: &'t Tape, id: NodeId }
 
 impl<'t> Var<'t> {
@@ -174,17 +192,26 @@ impl<'t> Var<'t> {
     // 原則、`.claude/rules/coding-rust.md` の unwrap/expect 禁止に従う。
     // `tensor-core::Tensor` 側の対応 API（transpose/narrow/reshape 等）
     // が `Result<_, ShapeError>` を返すのとの対称性もこれで揃う）。
+    //
+    // `matmul`/`add`/`mul`/`mse_loss` は 2 つの `Var<'t>` を受け取る
+    // 二項演算であり、`self.tape.id != other.tape.id` の場合は shape
+    // 検査より前に `Err(AutodiffError::TapeMismatch)` を返す（`Var`
+    // ドキュメントの「クロステープ安全性」参照。foreign な `NodeId`
+    // を無関係なローカルノードへ解決させない）。
     pub fn matmul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
     pub fn add(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError>;    // bias broadcast 含む
     pub fn mul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
     pub fn sum(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError>; // dim が rank 範囲外なら Err
     pub fn max(&self, dim: Option<usize>) -> Result<Var<'t>, AutodiffError>; // 同上
-    pub fn mse_loss(&self, target: &Var<'t>) -> Result<Var<'t>, AutodiffError>; // self/target の shape 不一致を検査
+    pub fn mse_loss(&self, target: &Var<'t>) -> Result<Var<'t>, AutodiffError>; // TapeMismatch・shape 不一致を検査
 
-    // relu/exp/tanh は要素ごとの単項演算であり shape を一切変えない
-    // ため、構造的に失敗しえない（PoC-v2-2/v2-5 が実測した演算セット
-    // でも shape 変化を伴わない）。「失敗しうる公開 API」の対象外
-    // として bare `Var<'t>` を返す（原則は失敗しうる API のみに適用）。
+    // relu/exp/tanh/sum/max は単一の `Var<'t>`（`self`）のみを操作す
+    // る単項演算のため、クロステープ照合の対象外（テープ照合が要る
+    // のは複数 `Var` を突き合わせる二項演算のみ）。relu/exp/tanh は
+    // さらに shape を一切変えない要素ごとの演算であり、構造的に失敗
+    // しえない（PoC-v2-2/v2-5 が実測した演算セットでも shape 変化を
+    // 伴わない）ため「失敗しうる公開 API」の対象外として bare
+    // `Var<'t>` を返す（原則は失敗しうる API のみに適用）。
     pub fn relu(&self) -> Var<'t>;
     pub fn exp(&self) -> Var<'t>;
     pub fn tanh(&self) -> Var<'t>;
@@ -192,6 +219,13 @@ impl<'t> Var<'t> {
 
 impl Tape {
     /// `loss` から逆伝播し、テープ上の全 `Var` に対する勾配を計算する。
+    ///
+    /// **クロステープ安全性**: 引数の型は `&Var<'_>` であり、ライフ
+    /// タイムが消去される（elided）ため型システム単体では `loss` が
+    /// `self` に属するテープ由来かを区別できない。入口で
+    /// `loss.tape.id == self.id` を検査し、不一致なら
+    /// `Err(AutodiffError::TapeMismatch)` を返す（foreign な
+    /// `Var`／`NodeId` をこのテープのグラフへ誤って接続しない）。
     pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError>;
 }
 
@@ -208,13 +242,30 @@ pub enum AutodiffError {
     Shape(ShapeError),
     /// `Tape::backward` 時のグラフ不整合（未接続ノードへの逆伝播要求等）。
     Backward(String),
+    /// 二項演算（`matmul`/`add`/`mul`/`mse_loss`）・`Tape::backward`・
+    /// `Gradients::get` に、識別子が異なる `Tape` に属する `Var` が
+    /// 渡された。`Var` ドキュメントの「クロステープ安全性」参照。
+    /// `Shape`/`Backward` へ折り込まず独立バリアントとするのは、
+    /// 呼び出し側が「shape の不整合」と「そもそも無関係なテープの
+    /// 値を渡した」というプログラミングエラーを区別できるようにする
+    /// ため。
+    TapeMismatch,
 }
 
-/// `backward()` の結果。`NodeId` をキーに勾配テンソルを保持する。
-pub struct Gradients { /* ... */ }
+/// `backward()` の結果。発行元 `Tape` の `TapeId` を保持し、`get()`
+/// で foreign な `Var` を受理しないための照合に使う。`NodeId` を
+/// キーに勾配テンソルを保持する。
+pub struct Gradients { tape_id: TapeId, /* ... */ }
 
 impl Gradients {
-    pub fn get(&self, var: &Var) -> Option<&Tensor<f32>>;
+    /// `var` が発行元 `Tape`（`self.tape_id`）に属さない場合は
+    /// `Err(AutodiffError::TapeMismatch)` を返す（`var.tape.id` との
+    /// 一致検査。`Var` ドキュメントの「クロステープ安全性」参照）。
+    /// 同一テープ由来だがそのノードに勾配が存在しない場合（未使用の
+    /// 葉ノード等）は `Ok(None)` を返す。「foreign な入力」と
+    /// 「正当な入力だが結果が空」を型で区別する（§1「失敗しうる公開
+    /// API は Result<T, E> を返す」原則）。
+    pub fn get(&self, var: &Var) -> Result<Option<&Tensor<f32>>, AutodiffError>;
 }
 ```
 
@@ -225,9 +276,10 @@ impl Gradients {
 動的テープ式（Wengert list）では `Tape::var()` を呼ぶたびにノードが
 `nodes: RefCell<Vec<TapeNode>>` へ追加される一方、ノード列をクリアす
 る `reset()`/`clear()` 相当の API は存在しない。`Gradients::get(&self,
-var: &Var)` は `&Var`（延いては `&'t Tape` への借用）をキーに勾配を
-引くため、複数ステップの学習ループでは以下の運用を前提とする設計と
-する:
+var: &Var) -> Result<Option<&Tensor<f32>>, AutodiffError>` は `&Var`
+（延いては `&'t Tape` への借用、および `TapeId` 一致検査）をキーに
+勾配を引くため、複数ステップの学習ループでは以下の運用を前提とする
+設計とする:
 
 1. パラメータ自体は非追跡の `Tensor<f32>` として学習ループの外
    （呼び出し側）で保持する。
@@ -359,7 +411,7 @@ pub enum BackendError {
 | 型 | 役割 | 発生源 |
 |----|------|--------|
 | `ShapeError` | テンソル生成・view 操作・reshape の shape 不整合 | `tensor-core` |
-| `AutodiffError` | 順伝播（`Var` の演算メソッド）の shape 不整合、および `Tape::backward` の失敗（グラフ不整合等） | `autodiff` |
+| `AutodiffError` | 順伝播（`Var` の演算メソッド）の shape 不整合、`Tape::backward` の失敗（グラフ不整合等）、および二項演算・`backward`・`Gradients::get` におけるクロステープ誤用（`TapeMismatch`） | `autodiff` |
 | `BackendError` | バックエンド実行時エラー（CUDA 不在・shape 不一致・デバイス不整合） | backend 入口 |
 
 外部フォーマット（safetensors/ONNX）読み込み時は、長さ・形状の検証を先行させる契約とする（`.claude/rules/security.md` A03 インジェクション対策）。`onnx-interop` クレートの `ShapeError` 送出経路は本設計のスコープ外（REQ-7 系、別イシューで扱う）だが、`tensor-core::Tensor::new`/`from_slice` の実行時 shape 検査がこの検証の受け皿となる設計である点を接続点として明記する。
@@ -372,7 +424,7 @@ pub enum BackendError {
 4. **演算グラフ／融合機構（イシュー #161）との接続点**: `Var`/`Tape` の演算記録が将来の融合機構（TASK-12.1a）とどう接続するかは本文書では設計しない。`Tape` の `Op` 列挙が融合対象の中間表現候補になりうる点のみ接続点として記録する。
 5. **`DeviceBuffer` の内部表現**（4.2）: CUDA デバイスポインタ・Metal `MTLBuffer` の具体的なラップ方法・寿命管理（`Drop` での解放タイミング等）は本文書では確定しない。TASK-1.9 実装時に決定する。
 6. **`Var`/`Tape` の借用モデル**（3.1）: 本文書は productize 時の API 使い勝手を優先し `RefCell` + 共有参照方式を採用したが、PoC-v2-2 確定 API は `&mut Tape` 方式だった。TASK-1.5 実装時に借用チェッカ上の問題が生じた場合は `&mut Tape` 方式へ戻す判断もありうる。この方式は `Var::value()` が `Ref<'_, Tensor<f32>>` を公開シグネチャへ露出する副作用も伴う（`Ref` を保持したまま同じ `Tape` へ `borrow_mut()` を要する演算を呼ぶと panic しうる）。本文書は回避策として所有値を返す `Var::to_tensor()` を追加したが、`value()` 自体を非公開化する・`Ref` を返さない別設計にするといった、より根本的な対処の要否は TASK-1.5 実装時に再検討する。
-7. **`Tape` のライフサイクル（学習ループ）**（3.1.1）: ステップごとに新しい `Tape` を生成し破棄する運用を推奨として記録した。明示的な `reset()`/`clear()` API を別途用意すべきか、`Gradients::get` が `&Var`（＝テープ借用）をキーにする現行設計を維持するか、テープに依存しないハンドル（`VarId` 等）をキーにする形へ変えるかは TASK-1.5 実装時に決定する。
+7. **`Tape` のライフサイクル（学習ループ）**（3.1.1）: ステップごとに新しい `Tape` を生成し破棄する運用を推奨として記録した。明示的な `reset()`/`clear()` API を別途用意すべきか、`Gradients::get` が `&Var`（＝テープ借用 + `TapeId` 一致検査）をキーにする現行設計を維持するか、テープに依存しないハンドル（`VarId` 等）をキーにする形へ変えるかは TASK-1.5 実装時に決定する。後者へ変える場合も、`VarId` 単独では発行元テープを識別できないため `TapeId` との組（`(TapeId, VarId)`）でキー化し、本文書が導入したクロステープ照合（3.1「クロステープ安全性」）を維持する必要がある。
 8. **`BackendOps` の f16 対応**（4.2）: `DeviceBuffer<T: Element>` はジェネリックだが `BackendOps` トレイト v1 は `f32` 固定。GPU 推論で使う `half::f16` 経路の入口設計（トレイトのジェネリック化か並行トレイト追加か）は TASK-1.9 実装時に決定する。
 
 ## スコープ外（out-of-scope-tracking 対象）
