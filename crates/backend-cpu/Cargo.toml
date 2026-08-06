@@ -23,3 +23,13 @@ half.workspace = true
 # 使う」）。workspace 内クレート同士の path 依存であり、許容依存 8 区分（外部クレート）の
 # 新規追加には当たらない（`bench-harness` が serde を workspace 参照した #29 の先例と同種の判断）。
 bench-harness = { path = "../bench-harness" }
+# TASK-1.9a（#44）の受け入れ条件「3 バックエンドが同一 trait でデバイス列挙・選択できる」を
+# `tests/device_provider_integration.rs` で直接検証するための dev 依存（公開依存グラフを
+# 汚さない。上記 bench-harness と同種の判断）。CUDA は無条件依存のため全 OS で追加する。
+backend-cuda = { path = "../backend-cuda" }
+
+# Metal は `cfg(target_os = "macos")` 限定（deps-policy.md）。backend-metal クレート自体は
+# 非 macOS でもビルド可能（本体が `#[cfg(target_os = "macos")]` で空になるだけ）だが、
+# dev-dependency の追加自体も cfg で絞り不要な依存解決を避ける。
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+backend-metal = { path = "../backend-metal" }

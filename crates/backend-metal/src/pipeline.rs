@@ -45,19 +45,30 @@ pub(crate) type MtlPipeline = ProtocolObject<dyn MTLComputePipelineState>;
 /// `localizedDescription`（構文エラー等の診断文字列）を保持する。
 pub(crate) fn compile_gemm_library(device: &MtlDevice) -> Result<Retained<MtlLibrary>, MetalError> {
     let src = NSString::from_str(GEMM_MSL_SRC);
-
-    // mathMode を明示的に Safe に設定する理由・mathFloatingPointFunctions を
-    // 明示的に Precise に設定する理由は本ファイル冒頭のコメント参照
-    // （PoC-v2-5 実測構成。既定値依存を避ける）。
-    let options = objc2_metal::MTLCompileOptions::new();
-    options.setMathMode(MTLMathMode::Safe);
-    options.setMathFloatingPointFunctions(MTLMathFloatingPointFunctions::Precise);
+    let options = compile_options();
 
     device
         .newLibraryWithSource_options_error(&src, Some(&options))
         .map_err(|err| MetalError::LibraryCompilation {
             message: err.localizedDescription().to_string(),
         })
+}
+
+/// `MathMode::Safe` + `MathFloatingPointFunctions::Precise` を明示した
+/// `MTLCompileOptions` を構築する（設定理由は本ファイル冒頭のコメント参照。
+/// PoC-v2-5 実測構成・REQ-2 前提 (b)）。
+///
+/// [`compile_gemm_library`] から呼ばれるほか、`#[cfg(test)]` の
+/// `compile_options_pins_precise_math_mode`（本ファイル末尾）が返却値の
+/// getter を検査することで、「Precise 明示」の設定漏れ・fast-math への
+/// 退行を GPU デバイス無しでも機械検出できるようにする（TASK-2.2c・#55。
+/// PR #38 Bugbot 指摘: `mathMode=Safe` だけでは transcendental 関数が
+/// fast 経路に落ちる余地が残るため、両フィールドを独立に固定する）。
+pub(crate) fn compile_options() -> Retained<objc2_metal::MTLCompileOptions> {
+    let options = objc2_metal::MTLCompileOptions::new();
+    options.setMathMode(MTLMathMode::Safe);
+    options.setMathFloatingPointFunctions(MTLMathFloatingPointFunctions::Precise);
+    options
 }
 
 /// `library` から `function_name` の関数を取得し `MTLComputePipelineState`
@@ -79,4 +90,34 @@ pub(crate) fn make_pipeline(
         .map_err(|err| MetalError::PipelineCreation {
             message: err.localizedDescription().to_string(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// REQ-2 前提 (b)「Metal は `mathFloatingPointFunctions=Precise` 明示」
+    /// の契約テスト（TASK-2.2c・#55）。`MTLCompileOptions::new()` は GPU
+    /// デバイスを介さない純粋なオブジェクト生成のため `#[ignore]` は付けず、
+    /// macOS 実機上の `cargo test -p backend-metal`（`--ignored` なし）で
+    /// 実行する。
+    ///
+    /// **CI（self-hosted・Linux）では実行されない**点に注意: 本ファイル
+    /// （`pipeline` モジュール）は `lib.rs` の `#[cfg(target_os = "macos")]`
+    /// によりそもそも Linux 上ではコンパイル対象外になる。CI の唯一の
+    /// macOS 経路である `make build-cross`（TASK-2.1b）は
+    /// `cargo build --workspace --locked --target aarch64-apple-darwin`
+    /// であり `--all-targets` を含まないため、test ターゲット自体をビルド
+    /// しない。実機 CI 整備（TASK-1.8e・#42）までは、既定値
+    /// （`MathMode`/`MathFloatingPointFunctions` とも既定 `Fast`）への
+    /// 意図しない退行を検出できるのは macOS 実機での手動実行時のみ。
+    #[test]
+    fn compile_options_pins_safe_math_mode_and_precise_functions() {
+        let options = compile_options();
+        assert_eq!(options.mathMode(), MTLMathMode::Safe);
+        assert_eq!(
+            options.mathFloatingPointFunctions(),
+            MTLMathFloatingPointFunctions::Precise
+        );
+    }
 }
