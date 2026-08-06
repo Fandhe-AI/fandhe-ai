@@ -43,6 +43,12 @@
 //! - FMA 契約（`f32::mul_add`）は積和演算（GEMM。#21）の契約であり、
 //!   elementwise 演算には積和（1 回の乗算結果を別の加算に畳み込む処理）が
 //!   現れないため適用外とする。
+//! - `relu` は `f32::max`（`x.max(0.0)`）を用いるため、Rust の `f32::max`
+//!   仕様どおり NaN 入力を無視し `relu(NaN) == 0.0` を返す（NumPy の
+//!   `maximum(x, 0)`・PyTorch の `relu` は NaN を伝播するため異なる）。本
+//!   モジュールは CPU 参照実装候補であり、GPU バックエンド（CUDA・Metal）が
+//!   NaN 伝播する実装を採る場合は数値一致判定（TASK-2.2）で不一致となりうる
+//!   ため、GPU 側実装時に本挙動との整合を確認すること。
 //!
 //! # 境界検査（REQ-8）
 //!
@@ -69,11 +75,16 @@ const PARALLEL_THRESHOLD: usize = 1 << 15;
 // （Tensor 入口層の fast path）が事前に保証する。この層は `tensor-core` に
 // 依存せず contiguous な `&[f32]` のみを扱う（TASK-1.9 で `BackendOps` から
 // 直接再利用できるようにするための分離）。
+//
+// 長さ不一致は `assert_eq!`（release ビルドでも有効）で検査する。これらは
+// pub 関数であり TASK-1.9（#43）で `BackendOps` から直接再利用される想定
+// のため、契約違反時に `zip` が黙って短い方へ切り詰めて誤った結果を返す
+// （release ビルドで `debug_assert_eq!` は消える）事態を避ける。
 
 /// 要素ごとの加算（`out[i] = a[i] + b[i]`）。加減算のみで libm 非経由。
 pub fn add_slice(a: &[f32], b: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(a.len(), b.len(), "add_slice: length mismatch (a vs b)");
-    debug_assert_eq!(a.len(), out.len(), "add_slice: length mismatch (a vs out)");
+    assert_eq!(a.len(), b.len(), "add_slice: length mismatch (a vs b)");
+    assert_eq!(a.len(), out.len(), "add_slice: length mismatch (a vs out)");
     if a.len() >= PARALLEL_THRESHOLD {
         out.par_iter_mut()
             .zip(a.par_iter())
@@ -88,8 +99,8 @@ pub fn add_slice(a: &[f32], b: &[f32], out: &mut [f32]) {
 
 /// 要素ごとの乗算（`out[i] = a[i] * b[i]`）。乗算のみで libm 非経由。
 pub fn mul_slice(a: &[f32], b: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(a.len(), b.len(), "mul_slice: length mismatch (a vs b)");
-    debug_assert_eq!(a.len(), out.len(), "mul_slice: length mismatch (a vs out)");
+    assert_eq!(a.len(), b.len(), "mul_slice: length mismatch (a vs b)");
+    assert_eq!(a.len(), out.len(), "mul_slice: length mismatch (a vs out)");
     if a.len() >= PARALLEL_THRESHOLD {
         out.par_iter_mut()
             .zip(a.par_iter())
@@ -104,7 +115,7 @@ pub fn mul_slice(a: &[f32], b: &[f32], out: &mut [f32]) {
 
 /// 要素ごとの ReLU（`out[i] = a[i].max(0.0)`）。比較のみで libm 非経由。
 pub fn relu_slice(a: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(a.len(), out.len(), "relu_slice: length mismatch");
+    assert_eq!(a.len(), out.len(), "relu_slice: length mismatch");
     if a.len() >= PARALLEL_THRESHOLD {
         out.par_iter_mut()
             .zip(a.par_iter())
@@ -119,7 +130,7 @@ pub fn relu_slice(a: &[f32], out: &mut [f32]) {
 /// 要素ごとの `exp`（`f32::exp`。libm 経由。モジュール doc コメント
 /// 「数値契約」参照）。
 pub fn exp_slice(a: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(a.len(), out.len(), "exp_slice: length mismatch");
+    assert_eq!(a.len(), out.len(), "exp_slice: length mismatch");
     if a.len() >= PARALLEL_THRESHOLD {
         out.par_iter_mut()
             .zip(a.par_iter())
@@ -134,7 +145,7 @@ pub fn exp_slice(a: &[f32], out: &mut [f32]) {
 /// 要素ごとの `tanh`（`f32::tanh`。libm 経由。モジュール doc コメント
 /// 「数値契約」参照）。
 pub fn tanh_slice(a: &[f32], out: &mut [f32]) {
-    debug_assert_eq!(a.len(), out.len(), "tanh_slice: length mismatch");
+    assert_eq!(a.len(), out.len(), "tanh_slice: length mismatch");
     if a.len() >= PARALLEL_THRESHOLD {
         out.par_iter_mut()
             .zip(a.par_iter())
@@ -301,6 +312,17 @@ mod tests {
     }
 
     #[test]
+    fn relu_slice_nan_input_returns_zero() {
+        // モジュール doc コメント「数値契約」に明記した挙動: `f32::max` 仕様
+        // により NaN は無視され `relu(NaN) == 0.0` を返す（NumPy/PyTorch の
+        // NaN 伝播とは異なる）。GPU バックエンド実装時に整合確認する対象。
+        let a = [f32::NAN, -1.0, 1.0];
+        let mut out = [0.0; 3];
+        relu_slice(&a, &mut out);
+        assert_eq!(out, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
     fn exp_slice_matches_std() {
         let a = [0.0, 1.0, -1.0, 2.5];
         let mut out = [0.0; 4];
@@ -336,6 +358,22 @@ mod tests {
         }
         assert_eq!(out_par, out_seq);
 
+        let mut mul_par = vec![0.0f32; n];
+        mul_slice(&a, &b, &mut mul_par);
+        let mut mul_seq = vec![0.0f32; n];
+        for ((o, &x), &y) in mul_seq.iter_mut().zip(&a).zip(&b) {
+            *o = x * y;
+        }
+        assert_eq!(mul_par, mul_seq);
+
+        let mut relu_par = vec![0.0f32; n];
+        relu_slice(&a, &mut relu_par);
+        let mut relu_seq = vec![0.0f32; n];
+        for (o, &x) in relu_seq.iter_mut().zip(&a) {
+            *o = x.max(0.0);
+        }
+        assert_eq!(relu_par, relu_seq);
+
         let mut exp_par = vec![0.0f32; n];
         exp_slice(&a, &mut exp_par);
         let mut exp_seq = vec![0.0f32; n];
@@ -343,6 +381,14 @@ mod tests {
             *o = x.exp();
         }
         assert_eq!(exp_par, exp_seq);
+
+        let mut tanh_par = vec![0.0f32; n];
+        tanh_slice(&a, &mut tanh_par);
+        let mut tanh_seq = vec![0.0f32; n];
+        for (o, &x) in tanh_seq.iter_mut().zip(&a) {
+            *o = x.tanh();
+        }
+        assert_eq!(tanh_par, tanh_seq);
     }
 
     // --- Tensor 入口層: 数値一致 ---
