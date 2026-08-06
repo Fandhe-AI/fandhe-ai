@@ -293,9 +293,15 @@ extern "C" __global__ void gemm_wmma_tf32(
     float* __restrict__ c,
     int m, int n, int k)
 {
-    __shared__ float as_tile[WMMA_TF32_BLOCK_M][WMMA_TF32_K_TILE];
-    __shared__ float bs_tile[WMMA_TF32_K_TILE][WMMA_TF32_BLOCK_N];
-    __shared__ float c_tile[WMMA_TF32_BLOCK_M][WMMA_TF32_BLOCK_N];
+    // WMMA の load_matrix_sync / store_matrix_sync は 256-bit（32 byte）
+    // アライメントされたポインタを要求する（kernels_wmma.rs の f16 経路と同じ
+    // 制約）。2x2 warp グリッド構成では warp_col=1 がタイル内 64 byte オフセット
+    // を取るため、__align__(32) を明示しないと nvcc 既定の配置ではアライメント
+    // が保証されず、デバイス上での起動失敗や不正な計算結果（サイレント）を
+    // 招きうる。
+    __shared__ __align__(32) float as_tile[WMMA_TF32_BLOCK_M][WMMA_TF32_K_TILE];
+    __shared__ __align__(32) float bs_tile[WMMA_TF32_K_TILE][WMMA_TF32_BLOCK_N];
+    __shared__ __align__(32) float c_tile[WMMA_TF32_BLOCK_M][WMMA_TF32_BLOCK_N];
 
     const int tid = threadIdx.x;
     const int num_threads = blockDim.x;
