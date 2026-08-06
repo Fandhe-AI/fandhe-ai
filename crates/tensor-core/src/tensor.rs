@@ -213,7 +213,20 @@ impl<T: Element> Tensor<T> {
     /// 直接アクセスする際の受け渡し口として想定する。非 contiguous な
     /// テンソル（transpose/narrow 後）は連続領域を保証できないため
     /// `None` を返す。
+    ///
+    /// `numel() == 0`（空テンソル）は `is_contiguous()` が常に `true` を
+    /// 返す契約（上記コメント参照）に合わせ、ここでも無条件に
+    /// `Some(&[])` を返す。連続する `narrow` 呼び出しにより `offset` が
+    /// storage 長を超えて押し出された空テンソルでは
+    /// `offset..offset`（`start == end` だが `start > storage.len()`）が
+    /// `storage.data.get` で `None` になり得るため、要素 0 個の
+    /// アクセスでは storage 範囲検査自体が無意味であることを踏まえ
+    /// 早期 `Some(&[])` で切り上げる（`is_contiguous() == true` ならば
+    /// `as_slice` が必ず成功するという呼び出し元の前提を守るため）。
     pub fn as_slice(&self) -> Option<&[T]> {
+        if self.numel() == 0 {
+            return Some(&[]);
+        }
         if !self.is_contiguous() {
             return None;
         }
@@ -593,5 +606,28 @@ mod tests {
         assert!(n.as_slice().is_some());
         let r = n.reshape(&[0]).unwrap();
         assert_eq!(r.shape(), &[0]);
+    }
+
+    // Bugbot 指摘（PR #215 追加レビュー、commit 86822d6）: numel() == 0 の
+    // early return により is_contiguous は常に true を返すが、連続する
+    // narrow 呼び出しで offset が storage 長を超えて押し出された場合、
+    // as_slice が offset..offset で storage.data.get を呼ぶと start が
+    // 範囲外になり None を返し得る（is_contiguous == true なら as_slice が
+    // 必ず成功するという契約に反する）。offset を storage 長ぎりぎりまで
+    // 押し出す narrow を 2 段階（dim=1 で末尾まで、続けて dim=0 で 1 要素分）
+    // 適用し、offset > storage.len() の空テンソルを作って回帰させる。
+    #[test]
+    fn empty_tensor_with_offset_past_storage_len_as_slice_succeeds() {
+        let t = Tensor::<f32>::zeros(&[1, 3]).unwrap();
+        let n1 = t.narrow(1, 3, 0).unwrap();
+        assert_eq!(n1.shape(), &[1, 0]);
+        let n2 = n1.narrow(0, 1, 0).unwrap();
+        assert_eq!(n2.shape(), &[0, 0]);
+        assert!(n2.numel() == 0);
+        // offset が storage 長（3）を超えて押し出されていることを前提の
+        // 回帰条件として明示する。
+        assert!(n2.offset > n2.storage.data.len());
+        assert!(n2.is_contiguous());
+        assert_eq!(n2.as_slice(), Some(&[][..]));
     }
 }
