@@ -12,6 +12,24 @@
 //! FFI 境界の `unsafe`（objc2 系）は必要最小限に留め理由コメントを付す
 //! （`.claude/rules/security.md`）。
 //!
-//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
-//! 要するため別イシューで対応する）では型・実装を持たない。カーネル本体は TASK-1.8 で追加する
-//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//! TASK-1.8a（#38）でデバイス・コマンドキュー・バッファ管理の基盤（[`context::MetalContext`]・
+//! [`buffer::MetalBuffer`]・[`error::MetalError`]）を実装済み。MSL ライブラリのコンパイル・
+//! パイプライン構築・ディスパッチ経路（naive GEMM）は TASK-1.8b（#39）、simdgroup カーネルは
+//! TASK-1.8c（#40）で追加する（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//!
+//! 非 macOS 環境ではモジュールごとコンパイル対象外になる（feature フラグなしの cfg ベース。
+//! PoC-v2-5 実証構成・REQ-2）。
+
+#[cfg(target_os = "macos")]
+pub mod buffer;
+#[cfg(target_os = "macos")]
+pub mod context;
+#[cfg(target_os = "macos")]
+pub mod error;
+
+#[cfg(target_os = "macos")]
+pub use buffer::MetalBuffer;
+#[cfg(target_os = "macos")]
+pub use context::MetalContext;
+#[cfg(target_os = "macos")]
+pub use error::MetalError;

@@ -1,0 +1,87 @@
+//! Metal デバイス・コマンドキューの基盤（TASK-1.8a・#38）。
+//!
+//! `tensor-core` の演算グラフノードを MSL カーネルへディスパッチする前段
+//! として、システムデフォルトの Metal デバイス取得とコマンドキュー生成を
+//! 一箇所にまとめる。MSL ライブラリのコンパイル・パイプライン構築・
+//! ディスパッチ経路は本イシューのスコープ外（TASK-1.8b・#39 で
+//! `MetalContext` を土台にして追加する）。
+//!
+//! **移植元**: `docs/spec/03-poc/poc-v2-4-metal-gemm/code/rust/src/metal_gemm.rs`
+//! の `MetalGemm::new`（デバイス・キュー取得部分）。PoC は `Option` 返しの
+//! `expect` 呼び出しだったが、本実装は [`MetalError`] を返す `Result` 化
+//! （coding-rust.md「本番経路で unwrap/expect を使わない」）。
+
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{
+    MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLCreateSystemDefaultDevice, MTLDevice,
+};
+
+use crate::error::MetalError;
+
+pub(crate) type MtlDevice = ProtocolObject<dyn MTLDevice>;
+pub(crate) type MtlQueue = ProtocolObject<dyn MTLCommandQueue>;
+
+/// Metal デバイスとコマンドキューを保持するハンドル。
+///
+/// [`crate::buffer::MetalBuffer`] の確保・[`MetalContext::dispatch_sync`]
+/// の同期実行はいずれも本構造体が保持する `device` / `queue` を介して
+/// 行う。TASK-1.8b（#39）以降のパイプライン構築・エンコーダ結線は
+/// 本構造体を土台にして追加される想定であり、公開フィールドは持たせず
+/// アクセサ（[`MetalContext::device`] / [`MetalContext::queue`]）経由に
+/// 限定する。
+pub struct MetalContext {
+    device: Retained<MtlDevice>,
+    queue: Retained<MtlQueue>,
+}
+
+impl MetalContext {
+    /// システムデフォルトの Metal デバイスを取得し、コマンドキューを
+    /// 生成する。デバイスが見つからない・キュー生成に失敗した場合は
+    /// [`MetalError`] を返す（PoC-v2-4 の `Option` 返しを型付きエラーへ
+    /// 置き換え）。
+    pub fn new() -> Result<Self, MetalError> {
+        let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceUnavailable)?;
+        let queue = device
+            .newCommandQueue()
+            .ok_or(MetalError::CommandQueueCreation)?;
+        Ok(Self { device, queue })
+    }
+
+    /// [`crate::buffer::MetalBuffer`] の確保・パイプライン構築
+    /// （TASK-1.8b・#39 以降）から参照される Metal デバイスハンドル。
+    pub fn device(&self) -> &MtlDevice {
+        &self.device
+    }
+
+    /// コマンドバッファ生成に使うコマンドキュー
+    /// （TASK-1.8b・#39 のディスパッチ経路から参照される）。
+    pub fn queue(&self) -> &MtlQueue {
+        &self.queue
+    }
+
+    /// コンピュートエンコーダを生成し `encode` にディスパッチ内容の記録
+    /// を委ね、`commit()` + `waitUntilCompleted()` で完了を待つ同期実行
+    /// ヘルパ。同期方式は PoC-v2-4 の計測境界（`GemmCase::dispatch`）と
+    /// 同一にし、v1 系と揃える（バックエンド間比較の計測条件を崩さない
+    /// ため。呼び出し元は TASK-1.8b・#39 のカーネルディスパッチ実装）。
+    pub fn dispatch_sync<F>(&self, encode: F) -> Result<(), MetalError>
+    where
+        F: FnOnce(&ProtocolObject<dyn MTLComputeCommandEncoder>),
+    {
+        let cmd_buf = self
+            .queue
+            .commandBuffer()
+            .ok_or(MetalError::CommandBufferCreation)?;
+        let encoder = cmd_buf
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreation)?;
+
+        encode(&encoder);
+        encoder.endEncoding();
+        cmd_buf.commit();
+        cmd_buf.waitUntilCompleted();
+        Ok(())
+    }
+}
