@@ -61,10 +61,20 @@
 //! `gemm.rs` に実装している。
 //! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA のどの経路を
 //! いつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
-//! 共有メモリ・タイル基本最適化（レジスタブロッキング・ダブルバッファ
-//! リング・ベクトル化ロード）は #63、実機実測での数値一致検証は #64、
-//! `mma.sync` PTX 直叩きは #187 のスコープであり、いずれも本クレートは
-//! 経路の提供までを扱う（`docs/cuda-tensor-core-design.md` 参照）。
+//! TASK-11.1d（#63）で WMMA(TF32)／f16 WMMA の共有メモリ・タイル最適化版
+//! カーネル（`kernels_wmma_opt::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT`）を追加
+//! した。ブロックタイル 64×64・warp あたり fragment 2×2 個（レジスタ
+//! ブロッキング）・バンクコンフリクト回避パディング・`__syncthreads()`
+//! ベースのダブルバッファリングを適用する（設計は `docs/cuda-tensor-core-
+//! design.md` 4.2 節を正本とする）。公開 API（`CudaGemm::run_wmma_tf32`／
+//! `CudaWmmaGemm::run_f16`）のシグネチャは変更せず、opt カーネルが
+//! `new` 時点でコンパイル・ロードに成功していれば優先的に使用し、失敗
+//! していれば #61/#62 の基本 WMMA カーネルへ自動フォールバックする
+//! （`kernels_wmma_opt.rs` 冒頭ドキュメントコメント参照）。`mma.sync` PTX
+//! 直叩き・`ldmatrix`・`cp.async` マルチステージパイプラインは #187、
+//! 実機実測での数値一致・性能確定は #64 のスコープ。
+//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA のどの経路を
+//! いつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
 
 pub mod device;
 mod error;
@@ -72,6 +82,7 @@ mod gemm;
 mod gemm_wmma;
 mod kernels;
 mod kernels_wmma;
+mod kernels_wmma_opt;
 mod nvrtc;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
