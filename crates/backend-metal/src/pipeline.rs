@@ -26,11 +26,13 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLComputePipelineState, MTLDevice, MTLLibrary, MTLMathFloatingPointFunctions, MTLMathMode,
+    MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary,
+    MTLMathFloatingPointFunctions, MTLMathMode,
 };
 
 use crate::context::MtlDevice;
 use crate::error::MetalError;
+use crate::tile::TileConfig;
 
 /// `shaders/gemm.metal` のソース（naive・tiled・simdgroup の 3 段カーネルを含む）。
 const GEMM_MSL_SRC: &str = include_str!("shaders/gemm.metal");
@@ -84,6 +86,85 @@ pub(crate) fn make_pipeline(
         .newFunctionWithName(&name)
         .ok_or(MetalError::FunctionNotFound {
             name: function_name,
+        })?;
+    device
+        .newComputePipelineStateWithFunction_error(&func)
+        .map_err(|err| MetalError::PipelineCreation {
+            message: err.localizedDescription().to_string(),
+        })
+}
+
+/// `gemm_simdgroup_tiled`（`shaders/gemm.metal`。TASK-1.8f・#188）を
+/// `cfg`（[`TileConfig`]）の MSL function constant（`BM`/`BN`/`BK`/`WM`/
+/// `WN`/`USE_TGP_STAGING`。index 0〜5）を畳み込んだ状態でコンパイル・
+/// パイプライン化する。[`crate::gemm::MetalGemm`] の構成キー → パイプライン
+/// 遅延キャッシュから、構成ごとに 1 回だけ呼ばれる想定
+/// （`newFunctionWithName_constantValues_error` は MSL コンパイラを呼ぶ
+/// 比較的重い処理）。
+///
+/// `library` は [`compile_gemm_library`] が返す `shaders/gemm.metal` 全体の
+/// ライブラリを再利用する（function constant はコンパイル済みライブラリ
+/// から関数を「特殊化」する API であり、ソース側の再コンパイルは不要）。
+pub(crate) fn make_pipeline_with_constants(
+    device: &MtlDevice,
+    library: &MtlLibrary,
+    function_name: &'static str,
+    cfg: TileConfig,
+) -> Result<Retained<MtlPipeline>, MetalError> {
+    let name = NSString::from_str(function_name);
+    let constants = MTLFunctionConstantValues::new();
+
+    // SAFETY: `setConstantValue_type_atIndex` は指定ポインタから
+    // `type` が示すバイト数（ここでは `u32`/`bool` の 4/1 バイト）を
+    // 即座に複製する（`crate::gemm::encode_dispatch` の
+    // `setBytes_length_atIndex` と同じ「即時複製」契約。
+    // objc2-metal 0.3.2 ドキュメント参照）。各ローカル変数は本呼び出し中
+    // 生存しており、型・バイト数は `shaders/gemm.metal` の
+    // `[[function_constant(n)]]` 宣言（`constant uint`/`constant bool`）と
+    // 一致させている。
+    unsafe {
+        let bm = cfg.bm;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&bm).cast(),
+            MTLDataType::UInt,
+            0,
+        );
+        let bn = cfg.bn;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&bn).cast(),
+            MTLDataType::UInt,
+            1,
+        );
+        let bk = cfg.bk;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&bk).cast(),
+            MTLDataType::UInt,
+            2,
+        );
+        let wm = cfg.wm;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&wm).cast(),
+            MTLDataType::UInt,
+            3,
+        );
+        let wn = cfg.wn;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&wn).cast(),
+            MTLDataType::UInt,
+            4,
+        );
+        let staged = cfg.staged;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&staged).cast(),
+            MTLDataType::Bool,
+            5,
+        );
+    }
+
+    let func = library
+        .newFunctionWithName_constantValues_error(&name, &constants)
+        .map_err(|err| MetalError::LibraryCompilation {
+            message: err.localizedDescription().to_string(),
         })?;
     device
         .newComputePipelineStateWithFunction_error(&func)
