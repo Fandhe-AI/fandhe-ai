@@ -37,11 +37,18 @@
 //! 本モジュールの `parity::compare`／`parity::assert_parity`／
 //! `parity::matmul_reference_fma` を共通利用し、ペアごとに判定ロジックを
 //! 重複実装しない想定である（`docs/spec/05-tasks.md` TASK-2.2）。
+//!
+//! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::CpuMemory`]）を追加した。
+//! `tensor_core::buffer::MemoryOps` の CPU 実装であり、`upload`/`download`/
+//! `alloc_zeroed` は FFI を伴わず `Vec<f32>` の複製のみで完結する
+//! （`backend-cuda::CudaMemory`／`backend-metal::MetalMemory` の数値一致の
+//! 参照点。`.claude/rules/coding-rust.md` の「CPU 参照実装」方針）。
 
 mod device;
 mod elementwise;
 pub mod gemm;
 pub mod gemm_blis;
+pub mod memory;
 pub mod parity;
 pub mod reduction;
 
@@ -53,6 +60,7 @@ pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
 pub use gemm_blis::{gemm_blis, gemm_blis_parallel};
+pub use memory::CpuMemory;
 pub use parity::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
     compare, matmul_reference_fma,

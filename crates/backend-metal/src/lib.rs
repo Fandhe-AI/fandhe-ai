@@ -54,6 +54,12 @@
 //! [`tile`] 自体は `objc2` 系 FFI に触れない純粋関数群のため他モジュールと異なり
 //! `cfg(target_os = "macos")` を付けない（[`pad`] と同じ設計判断。Linux でも単体テストが回る）。
 //!
+//! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::MetalMemory`]）を追加した。
+//! `tensor_core::buffer::MemoryOps` の Metal 実装であり、新規 `unsafe` を追加せず
+//! 既存の [`buffer::MetalBuffer`]（`new_with_data`／`new_zeroed`／`read_to_vec`）を
+//! そのまま再利用する。`StorageModeShared`（UMA）のため CUDA のような明示同期は
+//! 不要（`memory.rs` モジュールコメント参照）。
+//!
 //! TASK-11.2b（#68）で GEMM 自動経路選択入口
 //! （[`gemm::MetalGemm::dispatch_backend_auto`]）を追加した。
 //! `tensor_core::dispatch::select_gemm_kernel`（#67 が設計した決定的規則。
@@ -77,6 +83,8 @@ pub mod device;
 pub mod error;
 #[cfg(target_os = "macos")]
 pub mod gemm;
+#[cfg(target_os = "macos")]
+pub mod memory;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
@@ -105,4 +113,6 @@ pub use device::MetalDeviceProvider;
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm};
+#[cfg(target_os = "macos")]
+pub use memory::MetalMemory;
 pub use tile::TileConfig;
