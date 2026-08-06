@@ -11,5 +11,8 @@ publish.workspace = true
 # （features・default-features は workspace ルートの [workspace.dependencies] で確定済み。
 # member 側で default-features を再指定しても inherited dependency には反映されないため
 # ここでは workspace = true のみを指定する）。
+# TASK-2.1a（イシュー #49）でこの無条件依存＋動的ロード構成を正式なバックエンド切替機構と
+# して確定した。CUDA toolkit 非搭載環境でも `cargo build --workspace` が成立することを
+# 確認済み（実行時のみ toolkit を要求する契約は変更しない）。
 cudarc.workspace = true
 half.workspace = true
