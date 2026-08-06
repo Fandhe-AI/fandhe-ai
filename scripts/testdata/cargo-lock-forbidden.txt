@@ -1,0 +1,17 @@
+# scripts/check-forbidden-deps.sh self-test 用フィクスチャ（ネガティブケース）。
+# Cargo.lock 形式の最小抜粋。禁止リスト（.claude/rules/deps-policy.md）に該当する
+# クレートを意図的に混入させ、検査が fail（exit 非 0）することを確認する。
+[[package]]
+name = "half"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "burn-core"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "ndarray"
+version = "0.15.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"

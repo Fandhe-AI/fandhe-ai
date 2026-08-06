@@ -1,0 +1,7 @@
+# scripts/check-forbidden-deps.sh self-test 用フィクスチャ（ポジティブケース）。
+# `cargo tree --prefix none` 出力形式（`<crate> v<version>`）の最小抜粋。
+# 禁止リスト（.claude/rules/deps-policy.md）に該当しない許容依存のみで構成し、
+# FORBIDDEN_TREE_PATTERN による検査が pass（exit 0）することを確認する。
+half v2.4.1
+rayon v1.10.0
+serde v1.0.203

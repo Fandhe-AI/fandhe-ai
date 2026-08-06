@@ -1,0 +1,7 @@
+# scripts/check-forbidden-deps.sh self-test 用フィクスチャ（ネガティブケース）。
+# `cargo tree --prefix none` 出力形式（`<crate> v<version>`）の最小抜粋。
+# 禁止リスト（.claude/rules/deps-policy.md）に該当するクレートを意図的に混入させ、
+# FORBIDDEN_TREE_PATTERN による検査が fail（exit 非 0）することを確認する。
+half v2.4.1
+candle-nn v0.6.0
+ndarray v0.15.6
