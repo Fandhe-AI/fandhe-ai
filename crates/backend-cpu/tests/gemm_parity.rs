@@ -169,6 +169,51 @@ fn gemm_naive_handles_zero_n() {
     assert!(c.is_empty());
 }
 
+/// N=0 は validate_dims が合法とみなす形状（b・c は空スライス）だが、
+/// `gemm_parallel` は `par_chunks_mut(panel_rows * n)` のチャンクサイズが
+/// 0 になりうる経路を持つため、naive／blocked と挙動が食い違う
+/// リグレッションが生じやすい（`gemm_parallel` は本テスト追加前は
+/// この形状でパニックしていた）。3 実装が同じ no-op として振る舞う
+/// ことを固定する（parity 契約。issue #21 レビュー指摘）。
+#[test]
+fn gemm_zero_n_is_noop_across_all_three_kernels() {
+    let a = vec![1.0f32, 2.0];
+    let b: Vec<f32> = vec![];
+
+    let mut c_naive: Vec<f32> = vec![];
+    gemm_naive(&a, &b, &mut c_naive, 1, 0, 2).unwrap();
+    assert!(c_naive.is_empty());
+
+    let mut c_blocked: Vec<f32> = vec![];
+    gemm_blocked(&a, &b, &mut c_blocked, 1, 0, 2).unwrap();
+    assert!(c_blocked.is_empty());
+
+    let mut c_parallel: Vec<f32> = vec![];
+    gemm_parallel(&a, &b, &mut c_parallel, 1, 0, 2).unwrap();
+    assert!(c_parallel.is_empty());
+}
+
+/// M=0・N=0 の組合せでも `gemm_parallel` がパニックしないことを確認する
+/// （`par_chunks_mut` のチャンクサイズ 0 が M=0 単独では顕在化しないため、
+/// N=0 の経路と分けて固定する）。
+#[test]
+fn gemm_zero_m_and_n_is_noop_across_all_three_kernels() {
+    let a: Vec<f32> = vec![];
+    let b: Vec<f32> = vec![];
+
+    let mut c_naive: Vec<f32> = vec![];
+    gemm_naive(&a, &b, &mut c_naive, 0, 0, 0).unwrap();
+    assert!(c_naive.is_empty());
+
+    let mut c_blocked: Vec<f32> = vec![];
+    gemm_blocked(&a, &b, &mut c_blocked, 0, 0, 0).unwrap();
+    assert!(c_blocked.is_empty());
+
+    let mut c_parallel: Vec<f32> = vec![];
+    gemm_parallel(&a, &b, &mut c_parallel, 0, 0, 0).unwrap();
+    assert!(c_parallel.is_empty());
+}
+
 // --- エラー経路 ---
 
 #[test]

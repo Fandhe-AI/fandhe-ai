@@ -267,6 +267,18 @@ pub fn gemm_parallel(
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
 
+    // n == 0 は shape として合法（validate_dims は m*n=0・k*n=0 を許容し、
+    // b・c は空スライスになる）だが、下記 par_chunks_mut(panel_rows * n) は
+    // チャンクサイズが 0 だとパニックする。naive／blocked は該当形状で
+    // ループが単に 0 回になる no-op として振る舞うため（`gemm_blocked_region`
+    // の `for jc in (0..n).step_by(NC)` が空レンジになる）、3 実装間の
+    // parity 契約（`tests/gemm_parity.rs`）を保つよう本関数も明示的に
+    // no-op で返す。新規エラー種別を追加しないのは、この形状自体は
+    // 不正ではなく他 2 実装が正常に受理しているため。
+    if n == 0 {
+        return Ok(());
+    }
+
     // 論理コア数（P+E）ぶんのパネル数を確保することを優先し、各パネルの
     // 行数は「m を num_threads で割った切り上げ」で決める。パネル行数の
     // 下限を MC（128）に固定しないのは、例えば M=512・16 スレッドでは
