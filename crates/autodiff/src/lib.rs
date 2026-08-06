@@ -5,25 +5,32 @@
 //! （`compat::array` 等。REQ-9）はこのテープ機構を薄くラップして呼び出す想定であり、
 //! 本クレート自体には互換レイヤ固有のロジックを持ち込まない。
 //!
-//! TASK-1.5a（本イシュー・#16）でテープ構造（`Tape`/`TapeId`/`NodeId`）・
+//! TASK-1.5a（#16）でテープ構造（`Tape`/`TapeId`/`NodeId`）・
 //! forward 演算群（`Var::matmul`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/
 //! `max`/`mse_loss`）の値計算とノード記録を実装した（spec 根拠:
 //! `docs/spec/05-tasks.md` TASK-1.5、`docs/public-api-design.md` §3）。
 //! `Op`（`tape.rs`・非公開）が各演算の入力 `NodeId` を保持する構造にする
 //! ことで、後続タスクが発生順に記録されたノード列を逆走査できる下地とする。
 //!
+//! TASK-1.5b（本イシュー・#17）で各演算の勾配関数（VJP: vector-Jacobian
+//! product）と `Op` 単位のディスパッチ入口 `vjp()`（`grad.rs`・非公開）
+//! を実装した。数値微分との突合テスト（受け入れ条件）は `grad.rs` 内の
+//! ユニットテストに含む。
+//!
 //! **残スコープ**（本イシューでは実装しない）:
-//! - 各演算の backward 実装（TASK-1.5b・#17）
-//! - `Tape::backward`・`Gradients`（勾配取得 API。TASK-1.5c・#18）
+//! - `Tape::backward`・`Gradients`（勾配取得 API・勾配蓄積。TASK-1.5c・#18）
 //! - PoC-v2-2 数値突合の回帰テスト（TASK-1.5d・#19）
 //!
 //! forward の値計算は `backend-cpu`（TASK-1.6・#20 以降。並行実装中で
 //! 未完）が完成するまでの暫定参照実装（`eval.rs`、非公開）で行い、
 //! TASK-1.9（バックエンド抽象層への接続）で backend 経由の実行に
-//! 差し替える（PoC-v2-2 と同じ構成）。
+//! 差し替える（PoC-v2-2 と同じ構成）。`grad.rs` も同じ `eval.rs` の
+//! ヘルパーを再利用するため、差し替えの影響範囲は forward/backward
+//! 双方でこの 2 ファイルに閉じる。
 
 mod error;
 mod eval;
+mod grad;
 mod tape;
 mod var;
 

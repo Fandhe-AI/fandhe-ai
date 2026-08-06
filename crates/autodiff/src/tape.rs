@@ -43,13 +43,11 @@ pub struct NodeId(pub(crate) usize);
 /// `Var::value`/`to_tensor` 経由で見える設計とする
 /// （`docs/public-api-design.md` §3.2 の演算セットに 1:1 対応）。
 ///
-/// `#[allow(dead_code)]`: 各 variant の入力 `NodeId`/`dim` フィールドは
-/// 本イシュー（TASK-1.5a・forward 記録のみ）では書き込み専用で読み出さ
-/// ない。`Tape::backward`（TASK-1.5c・#18）がノード列を逆走査する際の
-/// 唯一の読み出し元であり、まだ実装していないため clippy の dead_code
-/// 検査を機械的に黙らせるのではなく、読み出し側が別イシューで実装予定
-/// であることを理由として明記する。
-#[allow(dead_code)]
+/// 各 variant の入力 `NodeId`/`dim` フィールドは `grad.rs`（TASK-1.5b・
+/// 本イシュー・#17）の `vjp()` ディスパッチが読み出す（`match *op` で
+/// 各 variant を分解し、入力側 `NodeId` へ勾配を割り当てる）。
+/// `Tape::backward`（TASK-1.5c・#18）はノード列を逆走査しながら
+/// `vjp()` を呼ぶ側であり、`Op` 自体の読み出しはまだ発生しない。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
     /// `Tape::var()` が登録する非追跡入力（葉ノード）。逆伝播の起点

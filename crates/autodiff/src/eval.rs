@@ -32,7 +32,11 @@ use tensor_core::Tensor;
 /// のため、`None` 経路は多次元インデックス走査によるコピーへ
 /// フォールバックする（到達すれば `contiguous()`/`is_contiguous()` の
 /// 契約違反であり、`debug_assert!` で検知可能にする）。
-fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
+///
+/// `pub(crate)`: `grad.rs`（TASK-1.5b・#17）が各演算の VJP 計算・
+/// 数値微分突合テストで forward と同じ稠密化ロジックを再利用する
+/// （数式の実体を 2 か所に別実装しない方針。PoC-v2-2 準拠）。
+pub(crate) fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
     let contiguous = tensor.contiguous();
     if let Some(slice) = contiguous.as_slice() {
         return slice.to_vec();
@@ -63,7 +67,7 @@ fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
 /// ため、`ShapeError` は理論上発生しない。それでも `unwrap()`/`expect()`
 /// を使わない方針のため、失敗時は空テンソルへ安全側フォールスルーする
 /// （`debug_assert!` で契約違反を検知可能にする）。
-fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
+pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     match Tensor::new(data, shape) {
         Ok(t) => t,
         Err(_) => {
