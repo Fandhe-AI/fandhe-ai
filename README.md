@@ -18,6 +18,7 @@ M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス�
 - 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理（workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義。TASK-1.1b）
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査（TASK-1.2）
 - バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 動的ロード・`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成）
+- Metal バインディングは `objc2-metal` 直接（`wgpu` 不採用: 直接比 約 2.3 倍実測・PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal-wgpu-decision.md)）
 
 ### 依存追加・更新フロー
 
