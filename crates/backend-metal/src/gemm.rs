@@ -174,6 +174,9 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
+        // 戻り値の `Dims`（パディング前の実効次元）は使わず検証のためだけに
+        // 呼ぶ。実際に後段で使うのはパディング後の `validate_effective_dims`
+        // が返す `Dims`（`dims`）であるため意図的に破棄する。
         validate_dims(a, b, m, n, k)?;
 
         let (m_eff, n_eff, k_eff) = if variant == GemmVariant::Simdgroup {

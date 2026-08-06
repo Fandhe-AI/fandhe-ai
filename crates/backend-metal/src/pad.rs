@@ -28,23 +28,24 @@ pub fn pad8(x: usize) -> usize {
 /// `src`（`rows`×`cols`、行優先）を `rows_eff`×`cols_eff` へ 0 パディングする。
 ///
 /// サイズが既に一致する場合（`Naive`/`Tiled` 経路等パディング不要な variant）
-/// は複製のみ行い素通しする（[`crate::gemm::MetalGemm::dispatch_variant`]
-/// が variant を問わず本関数を呼べるようにするための分岐）。
-pub fn pad_matrix(
-    src: &[f32],
+/// は `src` をそのまま借用で返し複製しない（[`crate::gemm::MetalGemm::dispatch_variant`]
+/// が variant を問わず本関数を呼べるようにしつつ、パディング不要な経路で
+/// 毎ディスパッチ発生していた不要な全行列コピーを避けるための `Cow` 化）。
+pub fn pad_matrix<'a>(
+    src: &'a [f32],
     rows: usize,
     cols: usize,
     rows_eff: usize,
     cols_eff: usize,
-) -> Vec<f32> {
+) -> std::borrow::Cow<'a, [f32]> {
     if rows == rows_eff && cols == cols_eff {
-        return src.to_vec();
+        return std::borrow::Cow::Borrowed(src);
     }
     let mut out = vec![0.0f32; rows_eff * cols_eff];
     for r in 0..rows {
         out[r * cols_eff..r * cols_eff + cols].copy_from_slice(&src[r * cols..r * cols + cols]);
     }
-    out
+    std::borrow::Cow::Owned(out)
 }
 
 /// [`pad_matrix`] の逆操作。`src`（`rows_eff`×`cols_eff`、行優先）から

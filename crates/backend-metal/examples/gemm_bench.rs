@@ -73,11 +73,11 @@ mod macos_impl {
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
         for size in [512usize, 2048, 4096] {
-            // naive は大サイズで所要時間が過大になりやすいため、
-            // `docs/spec/03-poc/poc-v2-4-metal-gemm/code/rust/src/bin/gemm_bench.rs`
-            // の前例どおり計測回数を落とす（下限 20/20 は
-            // `MeasurementConfig` が強制するためこれ以上は下げられない。
-            // 「5 回計測の中央値」下限〈coding-rust.md〉は満たしたまま）。
+            // naive は大サイズで所要時間が過大になりやすいが、
+            // `MeasurementConfig` の下限（warmup・計測とも 20 回）を
+            // `MeasurementConfig::default()` がすでに満たしているため、
+            // これ以上計測回数を減らす調整はしていない（「5 回計測の
+            // 中央値」下限〈coding-rust.md〉は満たしたまま）。
             let config = MeasurementConfig::default();
 
             let naive = measure(&gemm, &ctx, GemmVariant::Naive, size, &config);
