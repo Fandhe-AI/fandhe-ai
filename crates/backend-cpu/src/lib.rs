@@ -14,3 +14,7 @@
 //! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
 //! 要するため別イシューで対応する）では型・実装を持たない。カーネル本体は TASK-1.6 で追加する
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
+//!
+//! TASK-1.6c（#23）で `reduction`（`sum`・`max`・`mean`・軸指定 reduction）を追加した。
+
+pub mod reduction;

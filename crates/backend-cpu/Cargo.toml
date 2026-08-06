@@ -10,3 +10,7 @@ publish.workspace = true
 # CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
 rayon.workspace = true
 half.workspace = true
+# workspace 内部クレートへの path 依存（deps-policy.md の許容依存 8 区分・ユーザー承認対象の
+# 「外部依存の追加」には該当しない）。reduction カーネル（TASK-1.6c・#23）が
+# `Tensor<f32>`・`reduce_out_shape`（tensor-core::ops_shape）を利用するために必要。
+tensor-core = { path = "../tensor-core" }
