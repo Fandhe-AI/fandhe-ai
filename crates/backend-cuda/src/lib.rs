@@ -59,8 +59,6 @@
 //! として適用する（REQ-2、`.claude/rules/coding-rust.md`）。f16 WMMA 経路
 //! （#61）とは異なり、TF32 経路は naive／tiled 経路と同じ `kernels.rs`／
 //! `gemm.rs` に実装している。
-//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA のどの経路を
-//! いつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
 //! TASK-11.1d（#63）で WMMA(TF32)／f16 WMMA の共有メモリ・タイル最適化版
 //! カーネル（`kernels_wmma_opt::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT`）を追加
 //! した。ブロックタイル 64×64・warp あたり fragment 2×2 個（レジスタ
@@ -70,17 +68,29 @@
 //! `CudaWmmaGemm::run_f16`）のシグネチャは変更せず、opt カーネルが
 //! `new` 時点でコンパイル・ロードに成功していれば優先的に使用し、失敗
 //! していれば #61/#62 の基本 WMMA カーネルへ自動フォールバックする
-//! （`kernels_wmma_opt.rs` 冒頭ドキュメントコメント参照）。`mma.sync` PTX
-//! 直叩き・`ldmatrix`・`cp.async` マルチステージパイプラインは #187、
-//! 実機実測での数値一致・性能確定は #64 のスコープ。
-//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA のどの経路を
-//! いつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
+//! （`kernels_wmma_opt.rs` 冒頭ドキュメントコメント参照）。実機実測での
+//! 数値一致・性能確定は #64 のスコープ。
+//!
+//! TASK-11.1h（#187）で `mma.sync`/`ldmatrix`/`cp.async` PTX 直叩き経路
+//! （[`CudaMmaGemm`]）を追加した。WMMA 経路（cc>=7.0）より厳しい
+//! compute capability 8.0+ ゲートを持つ独立経路であり、`kernels_mma.rs`／
+//! `gemm_mma.rs` に分離している（並行 issue #62/#63 が `gemm.rs`／
+//! `gemm_wmma.rs`／`kernels.rs`／`kernels_wmma.rs` を編集中のため）。
+//! XOR swizzle によるバンクコンフリクト低減は未実装（`kernels_mma.rs`
+//! 冒頭コメント「タイル構成」参照。コンパイル未検証環境でのリスク
+//! 最小化判断）。
+//!
+//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA／`mma.sync` の
+//! どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは
+//! 未実装。
 
 pub mod device;
 mod error;
 mod gemm;
+mod gemm_mma;
 mod gemm_wmma;
 mod kernels;
+mod kernels_mma;
 mod kernels_wmma;
 mod kernels_wmma_opt;
 mod nvrtc;
@@ -88,5 +98,6 @@ mod nvrtc;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;
