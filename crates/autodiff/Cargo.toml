@@ -7,3 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# `Tensor<f32>`（非追跡）を Var の値表現・演算入出力として直接利用する
+# workspace 内 path 依存。deps-policy.md の許容依存 8 区分の対象外
+# （外部クレートではなく workspace member 間の依存のためユーザー承認
+# フローの対象にならない。TASK-1.5a・#16）。
+tensor-core = { path = "../tensor-core" }
