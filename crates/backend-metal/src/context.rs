@@ -11,11 +11,11 @@
 //! `expect` 呼び出しだったが、本実装は [`MetalError`] を返す `Result` 化
 //! （coding-rust.md「本番経路で unwrap/expect を使わない」）。
 
-use objc2::rc::Retained;
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
+    MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice,
 };
 
 use crate::error::MetalError;
@@ -66,22 +66,44 @@ impl MetalContext {
     /// ヘルパ。同期方式は PoC-v2-4 の計測境界（`GemmCase::dispatch`）と
     /// 同一にし、v1 系と揃える（バックエンド間比較の計測条件を崩さない
     /// ため。呼び出し元は TASK-1.8b・#39 のカーネルディスパッチ実装）。
+    ///
+    /// `commandBuffer()` / `computeCommandEncoder()` は autoreleased な
+    /// オブジェクトを返す。Rust バイナリ（test/bench 実行ファイル等）には
+    /// Cocoa アプリのような周囲の autorelease pool が存在しないため、
+    /// `autoreleasepool` で明示的に囲まないと繰り返しディスパッチ
+    /// （特にベンチマークループ）のたびに Metal の一時オブジェクトが
+    /// プロセス寿命分蓄積する。`commit()` は完了を待つだけで成功を返す
+    /// ため、`waitUntilCompleted()` 後にコマンドバッファの `status` を
+    /// 確認しない場合 GPU 側の fault・OOM・discarded work が `Ok(())`
+    /// として握り潰される（出力バッファの古い／不完全な内容を読む無言の
+    /// 数値誤りにつながるため、[`MetalError::CommandBufferExecutionFailed`]
+    /// として呼び出し元へ返す）。
     pub fn dispatch_sync<F>(&self, encode: F) -> Result<(), MetalError>
     where
         F: FnOnce(&ProtocolObject<dyn MTLComputeCommandEncoder>),
     {
-        let cmd_buf = self
-            .queue
-            .commandBuffer()
-            .ok_or(MetalError::CommandBufferCreation)?;
-        let encoder = cmd_buf
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreation)?;
+        autoreleasepool(|_pool| {
+            let cmd_buf = self
+                .queue
+                .commandBuffer()
+                .ok_or(MetalError::CommandBufferCreation)?;
+            let encoder = cmd_buf
+                .computeCommandEncoder()
+                .ok_or(MetalError::ComputeEncoderCreation)?;
 
-        encode(&encoder);
-        encoder.endEncoding();
-        cmd_buf.commit();
-        cmd_buf.waitUntilCompleted();
-        Ok(())
+            encode(&encoder);
+            encoder.endEncoding();
+            cmd_buf.commit();
+            cmd_buf.waitUntilCompleted();
+
+            if cmd_buf.status() == MTLCommandBufferStatus::Error {
+                let message = cmd_buf
+                    .error()
+                    .map(|error| error.localizedDescription().to_string())
+                    .unwrap_or_else(|| "no NSError attached to failed command buffer".to_string());
+                return Err(MetalError::CommandBufferExecutionFailed { message });
+            }
+            Ok(())
+        })
     }
 }

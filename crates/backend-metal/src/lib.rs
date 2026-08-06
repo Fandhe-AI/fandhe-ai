@@ -42,6 +42,19 @@ pub mod context;
 #[cfg(target_os = "macos")]
 pub mod error;
 
+// `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
+// バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
+// test/bench 実行ファイル等 ―― では `MTLCreateSystemDefaultDevice` が nil を
+// 返しうる。Apple の Metal サンプル・Homebrew 経由の CLI ツールが軒並み
+// CoreGraphics をリンクしているのはこのため）。`objc2-core-graphics` は
+// 許容依存 8 区分（`.claude/rules/deps-policy.md`）に含まれず追加はユーザー
+// 承認が要るため、クレート依存を増やさずリンカディレクティブのみで解決する
+// （extern ブロック自体は空でよく、`#[link]` 属性がリンク時に
+// `-framework CoreGraphics` を linker へ伝搬する）。
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {}
+
 #[cfg(target_os = "macos")]
 pub use buffer::MetalBuffer;
 #[cfg(target_os = "macos")]

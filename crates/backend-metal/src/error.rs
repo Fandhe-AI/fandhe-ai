@@ -42,6 +42,16 @@ pub enum MetalError {
     CommandBufferCreation,
     /// `MTLCommandBuffer::computeCommandEncoder` が `None` を返した。
     ComputeEncoderCreation,
+    /// `waitUntilCompleted()` 完了後、コマンドバッファの `status` が
+    /// `MTLCommandBufferStatus::Error` だった（GPU 側の fault・OOM・
+    /// discarded work 等）。`commit()` 自体は成功として返るため、
+    /// [`crate::context::MetalContext::dispatch_sync`] は完了後にこの
+    /// 状態を確認しない限り GPU 側の失敗を `Ok(())` として握り潰して
+    /// しまう（今後の GEMM 実装で出力バッファの古い／不完全な内容を
+    /// 読む無言の数値誤りにつながるため、型付きエラーとして呼び出し元
+    /// へ伝える）。`message` は `MTLCommandBuffer::error()` の
+    /// `NSError` から得た診断用の文字列表現。
+    CommandBufferExecutionFailed { message: String },
 }
 
 impl fmt::Display for MetalError {
@@ -73,6 +83,12 @@ impl fmt::Display for MetalError {
             }
             MetalError::ComputeEncoderCreation => {
                 write!(f, "MTLCommandBuffer::computeCommandEncoder returned None")
+            }
+            MetalError::CommandBufferExecutionFailed { message } => {
+                write!(
+                    f,
+                    "Metal command buffer completed with MTLCommandBufferStatus::Error: {message}"
+                )
             }
         }
     }
