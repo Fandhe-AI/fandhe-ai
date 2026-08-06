@@ -33,6 +33,13 @@ pub(crate) type MtlBuffer = ProtocolObject<dyn MTLBuffer>;
 /// 読み出す。これにより `contents()` から得る生ポインタの読み出し範囲が
 /// 確保時に検証済みのバイト数を超えないことを保証する（REQ-8 の境界検査
 /// 方針を FFI readback 経路にも適用）。
+///
+/// `Debug` を導出しているのは `tests/device_smoke.rs`（`#[ignore]`
+/// 分離だが `cargo test` / `cargo clippy --all-targets` は非実行対象
+/// テストも通常コンパイルするため）の `Result<MetalBuffer, MetalError>`
+/// に対する `unwrap_err()` が `T: Debug` を要求するため（レビュー指摘。
+/// 内部 `Retained<MtlBuffer>` はポインタ相当の識別子として出力される）。
+#[derive(Debug)]
 pub struct MetalBuffer {
     buffer: Retained<MtlBuffer>,
     len: usize,
@@ -64,9 +71,14 @@ impl MetalBuffer {
         let len = data.len();
         let bytes_len = checked_byte_len(len)?;
 
-        let ptr = std::ptr::NonNull::new(data.as_ptr() as *mut c_void).expect(
-            "&[f32] の先頭ポインタは非 null（スライス長 0 は checked_byte_len で拒否済み）",
-        );
+        // SAFETY: `&[f32]` の先頭ポインタは Rust のスライス仕様上つねに
+        // 非 null（長さ 0 でも非 null が保証される）。`checked_byte_len`
+        // が長さ 0 を事前拒否しているためこの分岐に到達する時点で
+        // `data` は非空だが、非 null 性自体はスライス長に関わらず常に
+        // 成立する不変条件であり `expect` で表現すべき失敗系ではない
+        // （coding-rust.md: 本番経路で `unwrap`/`expect` を使わない）ため
+        // `new_unchecked` を用いる。ポインタ・長さともに確保直前に検証済み。
+        let ptr = unsafe { std::ptr::NonNull::new_unchecked(data.as_ptr() as *mut c_void) };
 
         // SAFETY: 上記コメント参照。ポインタ・長さともに確保直前に検証済み。
         let buffer = unsafe {
