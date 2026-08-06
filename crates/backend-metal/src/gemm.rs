@@ -243,6 +243,59 @@ impl MetalGemm {
         self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
     }
 
+    /// バックエンド抽象層からの GEMM 自動経路選択入口（TASK-11.2b・#68）。
+    ///
+    /// `ctx.caps()`（`MetalContext::new` 時にキャッシュした
+    /// `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)` 判定）と `(m, n, k)`
+    /// から `tensor_core::dispatch::select_gemm_kernel` を呼び、その結果
+    /// （[`tensor_core::dispatch::KernelKind`]）を [`GemmVariant`] へ写像
+    /// する（`docs/dispatch-rules-design.md` §5.3 決定表の Metal 側行）:
+    ///
+    /// - `MatrixUnit` → [`Self::dispatch_auto`]（[`tile::select`] による
+    ///   動的タイル選択。「Metal GEMM を実行すると決まった後のタイル構成
+    ///   選択」という別レイヤの責務は [`Self::dispatch_auto`] のドキュ
+    ///   メンテーションコメントどおり変更しない。実装計画 §3.3）
+    /// - `Tiled` → [`GemmVariant::Tiled`]
+    /// - `Naive` → [`GemmVariant::Naive`]（現決定表では Metal 行から到達
+    ///   しないが、`select_gemm_kernel` の将来変更に対する fail-safe と
+    ///   して網羅する）
+    ///
+    /// `dtype` は現時点で `f32` 固定（`BackendOps` v1 が f32 専用のため。
+    /// `docs/public-api-design.md:469`、設計文書 §5.3 注記）。`m`／`n`／`k`
+    /// は `u32` へ飽和変換して形状判定に使う（`u32::MAX` を超える巨大な
+    /// 形状は後段 [`Self::dispatch_variant`] の `validate_dims` が
+    /// `DimensionExceedsU32` として確実に拒否するため、選択段階での
+    /// 変換は判定用途に限定され安全性に影響しない）。
+    pub fn dispatch_backend_auto(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        let shape = tensor_core::dispatch::GemmShape::new(
+            u32::try_from(m).unwrap_or(u32::MAX),
+            u32::try_from(n).unwrap_or(u32::MAX),
+            u32::try_from(k).unwrap_or(u32::MAX),
+        );
+        let kernel = tensor_core::dispatch::select_gemm_kernel(
+            &ctx.caps(),
+            shape,
+            tensor_core::dispatch::DType::F32,
+        );
+        match kernel {
+            tensor_core::dispatch::KernelKind::MatrixUnit => self.dispatch_auto(ctx, a, b, m, n, k),
+            tensor_core::dispatch::KernelKind::Tiled => {
+                self.dispatch_variant(ctx, GemmVariant::Tiled, a, b, m, n, k)
+            }
+            tensor_core::dispatch::KernelKind::Naive => {
+                self.dispatch_variant(ctx, GemmVariant::Naive, a, b, m, n, k)
+            }
+        }
+    }
+
     /// naive GEMM（`C = A @ B`。ゼロ初期化した C へのディスパッチ 1 回のみ、
     /// 蓄積なし）を実行し、結果をホストへ読み出す。[`GemmVariant::Naive`]
     /// で [`Self::dispatch_variant`] へ委譲する薄いラッパー（#39 時点の

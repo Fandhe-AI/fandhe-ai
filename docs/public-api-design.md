@@ -468,6 +468,15 @@ pub trait BackendOps {
 
 **`BackendOps` が f32 専用である理由と f16 経路**: `DeviceBuffer<T: Element>` は `Element`（`f32`/`f64`/`i32`/`half::f16`、2.3 参照）全体に対しジェネリックだが、`BackendOps` トレイト v1 のスコープは PoC-v2-5 実測 API（`MetalOps` は f32 のみ実測済み）に合わせて `f32` 固定とする。GPU 推論で使う `half::f16` 経路（許容依存 `half`、deps-policy.md）の入口は本文書では確定しない。`BackendOps` を `T: Element` でジェネリック化するか、`f16` 専用の並行トレイトを追加するかは TASK-1.9 実装時に決定する（6-8 参照）。
 
+**TASK-1.9b（#45）実装時の突合結果**: `DeviceBuffer<T: Element>`・`upload`/`download` は本節の設計をそのまま `crates/tensor-core/src/buffer.rs` に実装したうえで、`BackendOps` からメモリ操作のみを切り出した `MemoryOps` トレイト（`alloc_zeroed`/`upload`/`download`。f32 固定）を新規追加した。`BackendOps`（`gemm`/`add`/... のカーネルディスパッチ）自体の実装は TASK-1.9c（#46）へ引き継ぐ。以下は本文書からの拡張・確定である:
+
+- `BackendHandle<T>`（本節記載の型パラメータ付き不透明ハンドル）ではなく、`Box<dyn BufferHandle>`（`BufferHandle: Debug + 'static` の object-safe trait、`as_any()` による `Any` ダウンキャスト経由）を採用した（`device.rs` の `&dyn DeviceProvider` 依存逆転構成と同型）。`downcast_handle::<H>()` で各バックエンドが自身の具体型（`CpuBufferHandle`/`CudaBufferHandle`/`MetalBufferHandle`）のみを取り出せる。
+- 解放は RAII に一本化した（明示 `free()` API は設けない）。各バックエンドの具体ハンドルが `Vec<f32>`（CPU）／`CudaSlice<f32>`（CUDA。内部で `Arc<CudaStream>` を co-own し `Drop` でストリーム上に解放）／`Retained<MTLBuffer>`（Metal、既存 `MetalBuffer` 経由）の `Drop` に解放を委ねる。
+- `numel == 0`（空テンソル）は FFI を呼ばず空ハンドルで表現する統一契約とした（Metal の zero-length 確保拒否・CUDA の 0 バイト `cuMemAlloc` 拒否環境との衝突を避けるため）。
+- CUDA の `download` は `clone_dtoh`（内部で `cuMemcpyDtoHAsync` を発行する非同期コピー）の直後に `stream.synchronize()` を挟み、「`download` 復帰時点でホストデータ確定」を全バックエンド共通の同期契約とした。Metal は `StorageModeShared`（UMA）のため追加の同期は不要。
+- `BackendError` に `TransferFailed(String)`（TASK-1.9b で追加。確保済みバッファへのコピー失敗を表す。`DeviceAllocationFailed` は確保自体の失敗と区別する）を追加した（4.4 参照）。
+- f16（`half::f16`）転送経路の入口設計は本イシューでも決定しない（6-8 の未決事項のまま。`.claude/rules/out-of-scope-tracking.md` に沿い後続イシューとして提案する）。
+
 **TASK-1.9c（#46）実装時の突合結果**: `BackendOps`（`crates/tensor-core/src/backend_ops.rs`）は上記案の 8 メソッド（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）をそのまま実装したが、実装開始時点（`git fetch origin main`）で TASK-1.9b（#45。`DeviceBuffer`／`upload`／`download`）が未着地だったため、各メソッドのシグネチャを `&DeviceBuffer<f32>` ではなくホスト常駐 `&Tensor<f32>` を受け取り `Tensor<f32>` を返す形に差し替えた。受け入れ条件（TASK-1.9c）は「同一コードで 3 バックエンドのカーネルが呼び分けられる」であり、既存カーネル入口（CPU `gemm_blis_parallel`・CUDA `CudaGemm::run_tiled_f32`・Metal `MetalGemm::dispatch_auto`）がいずれもホスト常駐 `&[f32]` を受け取り内部で H2D／D2H 転送を完結させる契約のため、`DeviceBuffer` なしで本条件を満たせると判断した。`DeviceBuffer` 版シグネチャへの移行（`upload`／`download` の追加）は #45 マージ後、`BackendOps` の非破壊拡張として TASK-1.9d（#47）以降で検討する。CUDA／Metal は本イシュー時点で GEMM カーネルのみ実装済みのため、elementwise・reduction は `BackendError::Unsupported`（新規追加。`#[non_exhaustive]` のため非破壊）を返す fail-safe 実装とした。複数バックエンド横断のディスパッチ入口は `device::select_from`（TASK-1.9a）と同型の注入式 `backend_ops::ops_for(ops: &[&dyn BackendOps], device: Device) -> Result<&dyn BackendOps, BackendError>` として実装した（`Device::available()` の集約結線を上位層に委ねる設計を踏襲）。
 
 ### 4.3 API 契約として明記する数値仕様
@@ -508,6 +517,8 @@ pub enum BackendError {
 
 **TASK-1.9a（#44）実装時の突合結果**: 上記 5 variant はそのまま実装したうえで、`DeviceUnavailable(String)`（存在しないデバイス・範囲外 ordinal・対応する `DeviceProvider` 未登録等、選択失敗を表す）を追加した。`#[non_exhaustive]` により variant 追加は非破壊拡張である旨が本節のコメントで想定済みのため、本文書の変更なしに追加した。
 
+**TASK-1.9b（#45）実装時の突合結果**: `TransferFailed(String)`（確保済みバッファへのコピー〈`upload`/`download`〉の失敗。`DeviceAllocationFailed` は確保自体の失敗と区別する）を追加した。上記と同じ理由で非破壊拡張として扱う（4.2 の突合結果参照）。
+
 **TASK-1.9c（#46）実装時の突合結果**: `Unsupported(String)`（指定バックエンドが当該演算のカーネルを未実装であることを表す。CUDA／Metal の elementwise・reduction が本イシュー時点で GEMM カーネルのみ実装済みのため使用）を追加した。`#[non_exhaustive]` により非破壊拡張である。
 
 ## 5. エラー型一覧・横断事項
@@ -526,7 +537,7 @@ pub enum BackendError {
 2. **CUDA 既定有効化の構成決定**（4.1）: REQ-2 でも未検証のまま残っている。`Device::available()` が返す既定デバイスの選択ロジックは本文書では確定しない。
 3. **rank 型載せの最終確定**（2.5）: 本文書は基盤層を実行時 rank、型レベル shape を後続レイヤー限定とする方針を決定として記録した。TASK-10.x 実装時にこの方針で問題がないか再確認すること。
 4. **演算グラフ／融合機構（イシュー #161）との接続点**: `Var`/`Tape` の演算記録が将来の融合機構（TASK-12.1a）とどう接続するかは本文書では設計しない。`Tape` の `Op` 列挙が融合対象の中間表現候補になりうる点のみ接続点として記録する。
-5. **`DeviceBuffer` の内部表現**（4.2）: CUDA デバイスポインタ・Metal `MTLBuffer` の具体的なラップ方法・寿命管理（`Drop` での解放タイミング等）は本文書では確定しない。TASK-1.9 実装時に決定する。
+5. **`DeviceBuffer` の内部表現**（4.2）: TASK-1.9b（#45）で確定した。`Box<dyn BufferHandle>`（`Any` ダウンキャスト経由の依存逆転構成）で不透明ハンドルを保持し、解放は各バックエンドの具体ハンドル型の `Drop` に一本化する（4.2 の「TASK-1.9b（#45）実装時の突合結果」参照）。
 6. **`Var`/`Tape` の借用モデル**（3.1）: 本文書は productize 時の API 使い勝手を優先し `RefCell` + 共有参照方式を採用したが、PoC-v2-2 確定 API は `&mut Tape` 方式だった。TASK-1.5 実装時に借用チェッカ上の問題が生じた場合は `&mut Tape` 方式へ戻す判断もありうる。この方式は `Var::value()` が `Ref<'_, Tensor<f32>>` を公開シグネチャへ露出する副作用も伴う（`Ref` を保持したまま同じ `Tape` へ `borrow_mut()` を要する演算を呼ぶと panic しうる）。本文書は回避策として所有値を返す `Var::to_tensor()` を追加したが、`value()` 自体を非公開化する・`Ref` を返さない別設計にするといった、より根本的な対処の要否は TASK-1.5 実装時に再検討する。
 7. **`Tape` のライフサイクル（学習ループ）**（3.1.1）: ステップごとに新しい `Tape` を生成し破棄する運用を推奨として記録した。明示的な `reset()`/`clear()` API を別途用意すべきか、`Gradients::get` が `&Var`（＝テープ借用 + `TapeId` 一致検査）をキーにする現行設計を維持するか、テープに依存しないハンドル（`VarId` 等）をキーにする形へ変えるかは TASK-1.5 実装時に決定する。後者へ変える場合も、`VarId` 単独では発行元テープを識別できないため `TapeId` との組（`(TapeId, VarId)`）でキー化し、本文書が導入したクロステープ照合（3.1「クロステープ安全性」）を維持する必要がある。
 8. **`BackendOps` の f16 対応**（4.2）: `DeviceBuffer<T: Element>` はジェネリックだが `BackendOps` トレイト v1 は `f32` 固定。GPU 推論で使う `half::f16` 経路の入口設計（トレイトのジェネリック化か並行トレイト追加か）は TASK-1.9 実装時に決定する。

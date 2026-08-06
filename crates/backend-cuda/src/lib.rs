@@ -39,8 +39,14 @@
 //! `README.md` 参照）。f16 向け許容誤差の設計・採用（実質的な許容誤差
 //! 変更でありユーザー承認必須）は #36 のスコープ外として未着手のまま
 //! 残す（`tests/cpu_cuda_parity.rs` 冒頭コメント参照）。
-//! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
-//! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
+//! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::CudaMemory`]）を
+//! 追加した。`tensor_core::buffer::MemoryOps` の CUDA 実装であり、
+//! `CudaDevice` 経由でのみ構築できるため上記の panic 回避ゲートを共有
+//! する。既存の `gemm.rs`（`clone_htod`/`alloc_zeros`/`clone_dtoh`）は
+//! 演算内部にホスト⇔デバイス転送を抱えたままとし、本イシューでは
+//! 載せ替えを行わない（TASK-1.9c・#46 のスコープ）。`BackendOps`
+//! トレイト自体（カーネルディスパッチ）へのフルマッピングも
+//! TASK-1.9c（#46）のスコープであり、本クレートではまだ扱わない
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
 //!
 //! TASK-11.1b（#61）で f16 Tensor Core（WMMA）GEMM カーネル
@@ -84,30 +90,45 @@
 //! どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは
 //! 未実装。
 //!
+//! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
+//! 追加した。`tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
+//! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
+//! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。TF32/f32
+//! 経路（`CudaGemm::run_wmma_tf32`・#62）・`mma.sync` 経路（`CudaMmaGemm`・
+//! #187）は、決定表（設計文書 §4）が TF32 既定採用を #186（TASK-11.1g）の
+//! ユーザー承認まで保留と定めているため、現時点の `select_gemm_kernel` の
+//! 自動経路には含めない（f32 は常に Tiled）。既存の `CudaGemm`／
+//! `CudaWmmaGemm`／`CudaMmaGemm` の直接指定 API はテスト・証跡用途
+//! （#70）にそのまま温存する（設計文書 §5.4）。
+//!
 //! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::CudaBackendOps`]）を追加した。
 //! `tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
 //! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
-//! tiled 固定とし、Tensor Core 経路の自動選択は TASK-11.2b・#68 のスコープ）。
-//! elementwise・reduction は GPU カーネル未実装のため
+//! tiled 固定とし、`CudaGemmAuto` を介した Tensor Core 経路の自動選択への
+//! 切替は別スコープ）。elementwise・reduction は GPU カーネル未実装のため
 //! `tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。
 
 pub mod device;
 mod error;
 mod gemm;
+mod gemm_auto;
 mod gemm_mma;
 mod gemm_wmma;
 mod kernels;
 mod kernels_mma;
 mod kernels_wmma;
 mod kernels_wmma_opt;
+pub mod memory;
 mod nvrtc;
 mod ops;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+pub use gemm_auto::CudaGemmAuto;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
+pub use memory::CudaMemory;
 pub use nvrtc::compile_ptx;
 pub use ops::CudaBackendOps;

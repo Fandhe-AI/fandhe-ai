@@ -198,6 +198,16 @@ pub enum BackendError {
     /// 対応する `DeviceProvider` 未登録等）。本イシュー（TASK-1.9a）で
     /// 追加した拡張 variant（モジュール冒頭のコメント参照）。
     DeviceUnavailable(String),
+    /// ホスト⇔デバイス転送（`buffer::MemoryOps::upload`/`download`）が
+    /// 失敗した。TASK-1.9b（#45）で追加した拡張 variant。
+    ///
+    /// `DeviceAllocationFailed` はバッファ確保自体の失敗（VRAM 枯渇等）を
+    /// 表すのに対し、本 variant は確保済みバッファに対するコピー
+    /// （CUDA `cuMemcpyHtoD`/`cuMemcpyDtoH`、Metal readback 等）の失敗を
+    /// 表す（両者を区別することで呼び出し元が「確保からやり直すべきか・
+    /// 転送のみ再試行すべきか」を判別できる）。`#[non_exhaustive]` の
+    /// 非破壊拡張として追加した（モジュール冒頭コメント参照）。
+    TransferFailed(String),
     /// 指定したバックエンドが当該演算のカーネルを未実装であることを表す
     /// （TASK-1.9c・#46 で追加した拡張 variant）。CUDA／Metal は本イシュー
     /// 時点で GEMM カーネルのみ実装済みのため、`crate::backend_ops::BackendOps`
@@ -219,6 +229,7 @@ impl fmt::Display for BackendError {
             }
             BackendError::KernelLaunchFailed(msg) => write!(f, "kernel launch failed: {msg}"),
             BackendError::DeviceUnavailable(msg) => write!(f, "device unavailable: {msg}"),
+            BackendError::TransferFailed(msg) => write!(f, "transfer failed: {msg}"),
             BackendError::Unsupported(msg) => write!(f, "unsupported operation: {msg}"),
         }
     }
@@ -358,6 +369,7 @@ mod tests {
             BackendError::DeviceAllocationFailed("oom".into()),
             BackendError::KernelLaunchFailed("nvrtc compile failed".into()),
             BackendError::DeviceUnavailable("ordinal 9 out of range".into()),
+            BackendError::TransferFailed("clone_dtoh failed".into()),
         ];
 
         for err in errors {

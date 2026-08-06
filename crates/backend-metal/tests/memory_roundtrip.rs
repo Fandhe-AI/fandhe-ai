@@ -1,0 +1,112 @@
+//! `MetalMemory`（TASK-1.9b・#45）に対する実機ロードテスト。
+//!
+//! macOS 実機（Apple Silicon）でのみコンパイル・実行する。CI（self-hosted・Linux）では
+//! `#![cfg(target_os = "macos")]` によりコンパイル対象外になり、`#[ignore]` により通常の
+//! `cargo test` からも除外される（実機依存テストの分離。`.claude/rules/coding-rust.md`。
+//! `tests/device_smoke.rs` と同じ構成）。実行するには macOS 実機で以下を叩く:
+//!
+//! ```sh
+//! cargo test -p backend-metal --test memory_roundtrip -- --ignored --nocapture
+//! ```
+
+#![cfg(target_os = "macos")]
+
+use backend_metal::{MetalContext, MetalMemory};
+use tensor_core::Tensor;
+use tensor_core::buffer::MemoryOps;
+
+/// upload → download の roundtrip が bit 完全一致することを確認する
+/// （受け入れ条件「確保・転送がリークなく動作する」の数値面の裏付け。
+/// tolerance は使わない。`.claude/rules/coding-rust.md`）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn upload_download_roundtrip_is_bit_exact() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let mem = MetalMemory::new(ctx);
+
+    let data: Vec<f32> = (0..1024).map(|i| (i as f32) * 0.25 - 50.0).collect();
+    let tensor = Tensor::<f32>::new(data.clone(), &[32, 32]).unwrap();
+
+    let buf = mem.upload(&tensor).expect("upload は成功するはず");
+    let back = mem.download(&buf).expect("download は成功するはず");
+
+    for i in 0..32 {
+        for j in 0..32 {
+            let expected = data[i * 32 + j];
+            let actual = back.get(&[i, j]).unwrap();
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "roundtrip は bit 完全一致するはず（[{i}, {j}]）"
+            );
+        }
+    }
+}
+
+/// `alloc_zeroed` が全 0 のバッファを返すことを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn alloc_zeroed_returns_all_zero() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let mem = MetalMemory::new(ctx);
+
+    let buf = mem
+        .alloc_zeroed(&[16, 16])
+        .expect("alloc_zeroed は成功するはず");
+    let tensor = mem.download(&buf).expect("download は成功するはず");
+    for i in 0..16 {
+        for j in 0..16 {
+            assert_eq!(tensor.get(&[i, j]).unwrap(), 0.0);
+        }
+    }
+}
+
+/// 空テンソル（numel == 0）が FFI を経由せず roundtrip することを確認
+/// する（`tensor_core::buffer` モジュールコメント「空テンソルの契約」。
+/// `MetalBuffer::new_with_data`/`new_zeroed` は長さ 0 を
+/// `MetalError::ZeroLengthAllocation` として拒否するため、`MetalMemory`
+/// 側の早期 return が正しく機能していないとこのテストは Err で失敗する）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn zero_numel_tensor_roundtrips_without_touching_ffi() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let mem = MetalMemory::new(ctx);
+
+    let empty = Tensor::<f32>::zeros(&[0, 4]).unwrap();
+    let buf = mem
+        .upload(&empty)
+        .expect("空テンソルの upload は FFI を経由せず成功するはず");
+    assert!(buf.is_empty());
+
+    let back = mem
+        .download(&buf)
+        .expect("空バッファの download は成功するはず");
+    assert!(back.is_empty());
+    assert_eq!(back.shape(), &[0, 4]);
+}
+
+/// 反復確保・解放（16MiB 級バッファ × 100 回）でメモリが枯渇しないことを
+/// 確認する（受け入れ条件「リークなく動作する」の直接検証。`MetalBuffer`
+/// が内部で保持する `Retained<MTLBuffer>` の `Drop` が正しく解放して
+/// いれば、毎回同サイズの確保を繰り返しても失敗しない）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn repeated_alloc_drop_cycles_do_not_leak_device_memory() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let mem = MetalMemory::new(ctx);
+
+    // 16MiB / 4 bytes(f32) = 4,194,304 要素。
+    let numel = 4 * 1024 * 1024;
+
+    for _ in 0..100 {
+        let buf = mem
+            .alloc_zeroed(&[numel])
+            .expect("ループ内の alloc_zeroed は成功するはず");
+        drop(buf);
+    }
+
+    let final_buf = mem
+        .alloc_zeroed(&[numel])
+        .expect("100 回の確保・解放サイクル後も確保が成功するはず（リークなし）");
+    drop(final_buf);
+}
