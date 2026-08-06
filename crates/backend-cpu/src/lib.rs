@@ -27,18 +27,25 @@
 //! #185 で変更しない）。`BackendOps` トレイトからの結線は TASK-1.9（#43）で行う
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 //!
+//! TASK-1.9a（#44）で [`device`] モジュール（[`device::CpuDeviceProvider`]）を追加した。
+//! `tensor_core::device::DeviceProvider` の CPU 実装であり、CUDA／Metal 実装
+//! （`backend-cuda::device::CudaDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
+//! と同一 trait で列挙・選択できることを `tests/device_provider_integration.rs` で検証する。
+//!
 //! TASK-2.2a（#53）で [`parity`] モジュール（REQ-2 統一複合判定ユーティリティ・
 //! FMA 契約参照 matmul）を追加した。#54（CPU-CUDA ペア）・#55（CPU-Metal ペア）は
 //! 本モジュールの `parity::compare`／`parity::assert_parity`／
 //! `parity::matmul_reference_fma` を共通利用し、ペアごとに判定ロジックを
 //! 重複実装しない想定である（`docs/spec/05-tasks.md` TASK-2.2）。
 
+mod device;
 mod elementwise;
 pub mod gemm;
 pub mod gemm_blis;
 pub mod parity;
 pub mod reduction;
 
+pub use device::CpuDeviceProvider;
 pub use elementwise::{
     add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
 };
