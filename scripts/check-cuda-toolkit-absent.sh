@@ -25,7 +25,11 @@
 #   assert     搭載を検出したら検出内容を明示して exit 1（CI 用 fail-closed）
 #   self-test  検査ロジック自体の退行検出。偽 nvcc・偽 ldconfig をスタブ注入し「搭載」判定に
 #              なること／全注入変数を「存在しない」値に固定し「非搭載」判定になることを検証する
-#              （実環境の toolkit 有無に依存しないヘルメティックな self-test）
+#              （実環境の toolkit 有無に依存しないヘルメティックな self-test）。加えて、
+#              先頭行でマッチしつつパイプバッファ（既定 64KiB）超の出力を続ける偽 ldconfig
+#              スタブでも「搭載」判定になることを検証し、grep -q とパイプ経由読み取りの
+#              組み合わせによる pipefail 誤検知（Bugbot 指摘・PR #249 / イシュー #35）の
+#              再発を防ぐ
 #
 # 環境変数（self-test 用の注入ポイント。通常運用では既定値のまま使う）:
 #   NVCC_BIN         nvcc コマンド名／パス（既定: nvcc）
@@ -71,6 +75,13 @@ detect_toolkit() {
     if grep -q 'libcudart\.so' <<<"${ldconfig_out}"; then
       found="${found}ldconfig: libcudart.so 登録あり"$'\n'
     fi
+
+    # 情報表示のみ（判定には使わない）。libcuda.so はドライバであり toolkit ではないため
+    # 「非搭載」判定を左右してはならない（TASK-1.7d の主旨に判定を限定する）。上記と
+    # 同一の ldconfig_out を再利用し、ldconfig -p の二重呼び出しを避ける。
+    if grep -q 'libcuda\.so' <<<"${ldconfig_out}"; then
+      echo "情報: libcuda.so（ドライバ）を検出しましたが、toolkit ではないため判定対象外です" >&2
+    fi
   fi
 
   if [ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}" ]; then
@@ -78,16 +89,6 @@ detect_toolkit() {
   fi
   if [ -n "${CUDA_PATH:-}" ] && [ -d "${CUDA_PATH}" ]; then
     found="${found}CUDA_PATH: ${CUDA_PATH}"$'\n'
-  fi
-
-  # 情報表示のみ（判定には使わない）。libcuda.so はドライバであり toolkit ではないため
-  # 「非搭載」判定を左右してはならない（TASK-1.7d の主旨に判定を限定する）。
-  if command -v "${LDCONFIG_BIN}" >/dev/null 2>&1; then
-    local ldconfig_out_info
-    ldconfig_out_info=$("${LDCONFIG_BIN}" -p 2>/dev/null || true)
-    if grep -q 'libcuda\.so' <<<"${ldconfig_out_info}"; then
-      echo "情報: libcuda.so（ドライバ）を検出しましたが、toolkit ではないため判定対象外です" >&2
-    fi
   fi
 
   printf '%s' "${found}"
@@ -149,6 +150,34 @@ self_test() {
   else
     echo "NG: self-test(c) 全注入変数「存在しない」時に搭載と誤判定されました（退行）" >&2
     failed=1
+  fi
+
+  # (d) libnvrtc.so の登録行を先頭に置き、その後にパイプバッファ（既定 64KiB）を
+  # 超える大量の埋め草行を出力する偽 ldconfig スタブを注入 → 「搭載」判定になること。
+  # `echo ... | grep -q` のような形（本スクリプトでは here-string 化済み）は
+  # grep が先頭でマッチして即終了し、埋め草行を書き切る前に上流が SIGPIPE で
+  # 打ち切られると pipefail 下で誤って「非搭載」判定になりうる退行を検出する
+  # （Bugbot 指摘・PR #249 / イシュー #35）。
+  local fake_ldconfig_large="${tmpdir}/ldconfig-large"
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo "\tlibnvrtc.so.12 (libc6,x86-64) => /fake/libnvrtc.so.12"\n'
+    printf 'i=0\n'
+    # shellcheck disable=SC2016 # 生成先スクリプト内で展開させたい変数参照のため意図的にシングルクォート
+    printf 'while [ "$i" -lt 4000 ]; do\n'
+    # shellcheck disable=SC2016 # 同上
+    printf '  echo "\tlibfiller%%d.so.1 (libc6,x86-64) => /fake/libfiller%%d.so.1" "$i" "$i"\n'
+    # shellcheck disable=SC2016 # 同上
+    printf '  i=$((i + 1))\n'
+    printf 'done\n'
+  } >"${fake_ldconfig_large}"
+  chmod +x "${fake_ldconfig_large}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="${fake_ldconfig_large}" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(d) 大量出力＋先頭マッチの偽 ldconfig 注入時に非搭載と判定されました（pipefail 退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(d) 大量出力＋先頭マッチの偽 ldconfig 注入時に搭載と判定されました"
   fi
 
   if [ "${failed}" -ne 0 ]; then
