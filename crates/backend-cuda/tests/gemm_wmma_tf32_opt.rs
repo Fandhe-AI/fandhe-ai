@@ -90,6 +90,16 @@ fn wmma_tf32_opt_parity_smoke_env_adaptive() {
 fn wmma_tf32_opt_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+    // PR #256 レビュー指摘対応: `run_wmma_tf32` は opt カーネル未対応環境で
+    // 基本版へ自動フォールバックするため、この検証がここで opt カーネル
+    // 固有のタイル境界を実際に踏んだことを保証するには、フォールバック
+    // していないことを事前に確認する必要がある（本テストは compute
+    // capability 8.0 以降の実機必須なので opt カーネルは利用可能であるべき）。
+    assert!(
+        gemm.wmma_tf32_opt_available(),
+        "opt kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.wmma_tf32_opt_unavailable_reason()
+    );
 
     let cases: &[(u32, u32, u32)] = &[
         (64, 64, 64),
@@ -113,6 +123,13 @@ fn wmma_tf32_opt_matches_reference_across_shapes() {
 fn wmma_tf32_opt_k4096_stress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+    // PR #256 レビュー指摘対応（上記 wmma_tf32_opt_matches_reference_across_shapes
+    // と同じ根拠）。
+    assert!(
+        gemm.wmma_tf32_opt_available(),
+        "opt kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.wmma_tf32_opt_unavailable_reason()
+    );
 
     assert_wmma_tf32_opt_parity(&gemm, "K4096 stress 512x512x4096", 0xC0FFEE, 512, 512, 4096);
     assert_wmma_tf32_opt_parity(
@@ -180,6 +197,21 @@ fn wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096() {
 
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+    // PR #256 レビュー指摘（chatgpt-codex-connector「Require the optimized
+    // kernel in the optimized benchmark」）対応: `run_wmma_tf32` は opt
+    // カーネルのコンパイル・ロードに失敗すると基本版へ自動フォールバック
+    // するため、この事前チェックなしでは opt カーネルが一度も実行されない
+    // まま本テスト（および parity テスト）が green になりうる。opt カーネル
+    // の可用性をここで断定し、フォールバックを起こさせない
+    // （`gemm.rs::CudaGemm::wmma_tf32_opt_available` ドキュメンテーション
+    // コメント参照）。
+    assert!(
+        gemm.wmma_tf32_opt_available(),
+        "opt kernel must be available on this ignored test runner so that the TFLOPS \
+         comparison actually exercises the optimized kernel rather than silently falling \
+         back to the basic WMMA kernel (reason: {:?})",
+        gemm.wmma_tf32_opt_unavailable_reason()
+    );
 
     let (m, n, k) = (4096u32, 4096u32, 4096u32);
     let mut rng = bench_harness::rng::Xorshift64Star::new(0xACE1);

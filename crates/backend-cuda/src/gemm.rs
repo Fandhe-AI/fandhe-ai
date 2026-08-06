@@ -123,10 +123,11 @@ pub struct CudaGemm {
     /// 影響」参照）。
     wmma_tf32_opt: Option<CudaFunction>,
     /// `wmma_tf32_opt` が `None` の場合の失敗理由。`wmma_tf32_error` と
-    /// 同じ理由で文字列化して保持する（本フィールドは現状デバッグ用途の
-    /// 保持に留まり、`run_wmma_tf32` は基本版が利用可能な限りこの detail
-    /// を表面化させない。基本版も失敗している場合は `wmma_tf32_error` の
-    /// detail が `CudaError::WmmaUnavailable` として表面化する）。
+    /// 同じ理由で文字列化して保持する（`run_wmma_tf32` は基本版が利用可能な
+    /// 限りこの detail を表面化させないが、[`Self::wmma_tf32_opt_error`]
+    /// 経由でテスト・呼び出し側が参照できる。基本版も失敗している場合は
+    /// `wmma_tf32_error` の detail が `CudaError::WmmaUnavailable` として
+    /// 表面化する）。
     wmma_tf32_opt_error: Option<String>,
 }
 
@@ -264,21 +265,43 @@ pub(crate) fn validate_wmma_tf32_k_bound(k: u32) -> Result<(), CudaError> {
 ///
 /// `kernels_wmma_opt::WMMA_TF32_F32_OPT` は各 K タイル反復で
 /// `t * WMMA_TF32_OPT_K_TILE + local_col`（`local_col` は最大
-/// `WMMA_TF32_OPT_K_TILE - 1`）を C の `int` 算術で計算するため、
-/// [`validate_wmma_tf32_k_bound`] と同じ理由で `k` が
-/// `i32::MAX - (WMMA_TF32_OPT_K_TILE - 1)` を超えると当該算術が i32 の
-/// 範囲でオーバーフローしうる。opt 側の K タイル幅（16）は基本版（8）より
-/// 大きく、この上限は基本版よりわずかに厳しい（`run_wmma_tf32` は
-/// opt カーネルが選択された場合にのみこちらを適用し、基本版へ
-/// フォールバックした場合は引き続き [`validate_wmma_tf32_k_bound`] を
-/// 適用する。`run_f16_opt_k_bound` と同じ設計判断）。
+/// `WMMA_TF32_OPT_K_TILE - 1`）を C の `int` 算術で計算する。実際にカーネルが
+/// 計算しうる最大インデックスは `ceil(k / WMMA_TF32_OPT_K_TILE) *
+/// WMMA_TF32_OPT_K_TILE - 1`（`k == 0` のときは計算自体が発生しないため 0）
+/// であり、これが `i32::MAX` を超えると当該算術が i32 の範囲でオーバー
+/// フローしうる。
+///
+/// レビュー指摘（PR #256・chatgpt-codex-connector）: 当初は `i32::MAX -
+/// (WMMA_TF32_OPT_K_TILE - 1)` という定数近似の上限を用いていたが、これは
+/// 「あらゆる余り（`k mod WMMA_TF32_OPT_K_TILE`）のうち最悪ケース（余り 1）」
+/// を仮定した安全側すぎる近似であり、実際には安全な `k`（例:
+/// `k = 2_147_483_633..=2_147_483_640`。最終タイル開始位置が
+/// `2_147_483_632` で最大インデックスはちょうど `i32::MAX` に収まり
+/// オーバーフローしない）まで `InvalidShape` として拒否していた。ここでは
+/// 上記の式をそのまま `u64` 算術で計算し `i32::MAX` と比較することで、
+/// 個々の `k` について厳密に安全性を判定する（`WMMA_TF32_OPT_K_TILE` を
+/// 将来変更しても定数近似のずれが再発しない）。
+///
+/// なお `WMMA_TF32_OPT_K_TILE`（16）は `i32::MAX + 1`（`2^31`）の約数の
+/// ため、[`validate_gemm_dims`] が既に保証する `k <= i32::MAX` の範囲内では
+/// 本関数は理論上常に `Ok` を返す（`ceil(k/16)*16 <= 2^31` が任意の
+/// `k <= i32::MAX` で成立するため）。それでも実行時に厳密計算を残すのは、
+/// この事実が `WMMA_TF32_OPT_K_TILE` の具体値（2 の冪であること）に依存する
+/// 暗黙の前提であり、値の変更時に静かに破綻させないため（`run_wmma_tf32`
+/// が opt カーネル選択時にのみ呼ぶ。基本版へフォールバックした場合は
+/// 引き続き [`validate_wmma_tf32_k_bound`] を適用する）。
 pub(crate) fn validate_wmma_tf32_opt_k_bound(k: u32) -> Result<(), CudaError> {
-    let limit = i32::MAX as u32 - (kernels_wmma_opt::WMMA_TF32_OPT_K_TILE - 1);
-    if k > limit {
+    let tile = kernels_wmma_opt::WMMA_TF32_OPT_K_TILE as u64;
+    let max_computed_index = if k == 0 {
+        0
+    } else {
+        (k as u64).div_ceil(tile) * tile - 1
+    };
+    if max_computed_index > i32::MAX as u64 {
         return Err(CudaError::InvalidShape {
             detail: format!(
-                "k must not exceed i32::MAX - (WMMA_TF32_OPT_K_TILE - 1) for WMMA TF32 opt \
-                 kernel tile-index arithmetic: k={k}, limit={limit}, WMMA_TF32_OPT_K_TILE={}",
+                "k tile-index arithmetic for WMMA TF32 opt kernel would overflow i32: k={k}, \
+                 max_computed_index={max_computed_index}, WMMA_TF32_OPT_K_TILE={}",
                 kernels_wmma_opt::WMMA_TF32_OPT_K_TILE
             ),
         });
@@ -582,6 +605,31 @@ impl CudaGemm {
     /// フォールバックし、公開シグネチャ・呼び出し側の挙動は変えない
     /// （REQ-11 は明示切替 API を提供しない方針。`kernels_wmma_opt.rs`
     /// 冒頭ドキュメントコメント「公開 API への影響」参照）。
+    /// 共有メモリ・タイル最適化版 WMMA(TF32) カーネル（[`Self::wmma_tf32_opt`]）
+    /// が `new` 時点でコンパイル・ロードに成功しているかを返す（TASK-11.1d・
+    /// #63。PR #256 レビュー指摘: chatgpt-codex-connector「Require the
+    /// optimized kernel in the optimized benchmark」対応）。
+    ///
+    /// `run_wmma_tf32` は opt カーネルが `None` の場合に基本版
+    /// （[`Self::wmma_tf32`]）へ自動フォールバックする（公開 API の挙動は
+    /// 変えない設計判断。上記ドキュメンテーションコメント参照）ため、
+    /// `run_wmma_tf32` の戻り値の成否だけでは opt カーネルが実際に実行
+    /// されたかを判定できない。opt カーネル固有の性能・タイル境界を検証
+    /// する受け入れテスト（`tests/gemm_wmma_tf32_opt.rs`）はこの関数で
+    /// 事前に可用性を確認し、フォールバックが起きていないことを保証した
+    /// うえで計測・検証する。
+    pub fn wmma_tf32_opt_available(&self) -> bool {
+        self.wmma_tf32_opt.is_some()
+    }
+
+    /// [`Self::wmma_tf32_opt_available`] が `false` の場合の失敗理由
+    /// （[`Self::wmma_tf32_opt_error`] の公開読み取り口）。opt カーネルが
+    /// 利用可能な場合は `None` を返す。テストが「opt カーネルが使用不能
+    /// だった具体的な理由」をパニックメッセージへ含められるようにする。
+    pub fn wmma_tf32_opt_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_tf32_opt_error.as_deref()
+    }
+
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],
@@ -1029,12 +1077,23 @@ mod tests {
         assert!(validate_wmma_tf32_opt_k_bound(0).is_ok());
     }
 
+    /// PR #256 レビュー指摘（chatgpt-codex-connector）の回帰テスト:
+    /// 旧実装（`i32::MAX - (WMMA_TF32_OPT_K_TILE - 1)` の定数近似）は
+    /// `2_147_483_633..=2_147_483_640` を安全にもかかわらず `InvalidShape`
+    /// として拒否していた。厳密計算版はこの範囲全体を受理し、かつ
+    /// [`validate_gemm_dims`] が許容する上限そのもの（`i32::MAX`）まで
+    /// 一貫して受理する（`WMMA_TF32_OPT_K_TILE`（16）が `i32::MAX + 1`
+    /// （`2^31`）の約数であるため、`k <= i32::MAX` の範囲内で本関数は理論上
+    /// 常に `Ok` になる。関数側ドキュメンテーションコメント参照）。
     #[test]
-    fn validate_wmma_tf32_opt_k_bound_rejects_k_exceeding_limit() {
-        let limit = i32::MAX as u32 - (kernels_wmma_opt::WMMA_TF32_OPT_K_TILE - 1);
-        assert!(validate_wmma_tf32_opt_k_bound(limit).is_ok());
-        let err = validate_wmma_tf32_opt_k_bound(limit + 1).unwrap_err();
-        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    fn validate_wmma_tf32_opt_k_bound_accepts_full_range_up_to_i32_max() {
+        for k in 2_147_483_633u32..=2_147_483_640u32 {
+            assert!(
+                validate_wmma_tf32_opt_k_bound(k).is_ok(),
+                "k={k} must be accepted (largest computed index is exactly i32::MAX, not an overflow)"
+            );
+        }
+        assert!(validate_wmma_tf32_opt_k_bound(i32::MAX as u32).is_ok());
     }
 
     #[test]
