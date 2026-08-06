@@ -1,0 +1,133 @@
+# CUDA Tensor Core（WMMA/mma）カーネル設計メモ
+
+- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）
+- 位置づけ: 本文書は**設計メモのみ**であり、実行可能なカーネル実装は含まない。受け入れ条件は「命令選定・タイル構成・根拠」の 3 要素が記録されていることの 1 点（#60 本文）。
+- 対象外（後続サブタスクのスコープ。重複実装を避けるため明記する）:
+  - #61（11.1b）: f16 WMMA GEMM の実装
+  - #62（11.1c）: TF32/f32 経路の実装
+  - #63（11.1d）: 共有メモリ・タイル基本最適化の実装
+  - #187（11.1h）: `mma.sync` PTX 直叩き・`ldmatrix`・`cp.async` パイプライン・XOR swizzle（本設計では「将来経路」として言及に留める）
+  - #186（11.1g）: TF32/f16 経路の数値一致閾値の実測再評価（閾値の変更はユーザー承認必須。本設計では論点整理のみ）
+  - #66（TASK-11.2）: ディスパッチ規則の設計・実装（本設計では「引き渡し事項」の列挙に留める）
+
+## 1. 前提・現状
+
+- **PoC-v2-3 実測**（`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md`）: tiled f32 GEMM が 1.832 TFLOPS（M=N=K=4096）。同一実機・同一形状での PyTorch f16 実効値は 97.6 TFLOPS（tensor core 経路）。tiled/PyTorch 比は f32 で約 10.3%、f16（自作カーネルは tensor core 未使用のためスカラー実装のまま）で約 1.9%。tensor core 化により「現在の tiled 実装から 1 桁以上の改善余地がある」と見積もられている（同 README「tensor core 化の段階見積もり」節）。
+- **REQ-11**（`docs/spec/04-requirements.md`「REQ-11: 行列演算ユニットの活用」）: CUDA バックエンドで Tensor Core（WMMA/mma）を用いた自作カーネルの実装を受け入れ基準とする。実装完了までは tiled 実装を暫定経路とし、tensor core 化を REQ-8 の CUDA 最適化後下限（暫定 40%）達成の前提条件として明記する。
+- **`crates/backend-cuda` の現状**: `device.rs`（動的ロード・panic 回避ゲート、TASK-1.7a／#32・TASK-1.9a／#44）・`error.rs`・`nvrtc.rs`（NVRTC コンパイル基盤）・`kernels.rs`（`gemm_naive_f32`/`gemm_naive_f16` の CUDA C ソース文字列のみ。tiled 版は未着手）・`gemm.rs`（naive カーネル起動ラッパー）が存在する。`BackendOps`/`BackendError` へのフルマッピングは TASK-1.9c（#46）のスコープであり本クレートでは未実装。tensor core 版カーネルはソース・起動 API ともに未着手であり、本設計メモが実装（#61 以降）の起点になる。
+
+## 2. sm_121（GB10）の Tensor Core 対応状況
+
+- **compute capability**: DGX Spark GB10 は compute capability 12.1（`sm_121`）。RTX 50 系コンシューマ GPU と同じ Blackwell の「コンシューマ系譜」（SM12x）に属する（PoC-v2-3 実機ログ、CUDA SDK 13.0.3・ドライバ 580.159.03）。
+- **命令セット系譜**: SM12x（sm_120/121）の Tensor Core プログラミングモデルは、データセンター系 Blackwell（SM100/`sm_100`）の `tcgen05` 命令・専用メモリ（TMEM）を要求せず、Hopper（SM90）の `wgmma` も要求しない。SM12x は Ampere（SM80）以来の `mma.sync`／WMMA 系プログラミングモデルを維持する（出典: [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)、[Day 3: DGX Spark Unpacked — Kubesimplify](https://blog.kubesimplify.com/day-3-the-dgx-spark-unpacked-gb10-unified-memory-sm-121-and-the-one-reason-this-hardware-exists)）。
+  - この事実は本設計の中心的な前提を確定させる: sm_121 向けカーネルは `wmma::fragment`（C++ API）または `mma.sync.aligned`（PTX）のいずれかで実装可能であり、`tcgen05`/`wgmma` 系の新命令は選択肢に入らない。
+- **対応 fragment shape・精度**（Ampere 系譜の WMMA API 前提）:
+  - f16 入力: `m16n16k16`・`m32n8k16`・`m8n32k16`、累算は f16 または f32
+  - TF32 入力: `m16n16k8`（compute capability 8.0 以降で対応、sm_121 は満たす）
+  - 5th-Gen Tensor Core（Blackwell 系譜共通）は FP8（E4M3）・FP6・FP4（NVFP4）にも対応するが（[NVIDIA Blackwell Architecture](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)）、本イシュー（11.1a〜d）のスコープは PoC-v2-3 が既に f32/f16 で実測している範囲に合わせ f16・TF32・f32 累算に限定する。FP8/FP4 経路の採否は本設計では判断せず、将来検討事項として「6. 後続サブタスク」節に記録する。
+- **NVRTC が `compute_121` を受理するか**: 未検証。PoC-v2-3 の `CudaGemm` は `CudaContext` から取得した compute capability を `--gpu-architecture=compute_XY` に反映する構成（ハードコードした sm 番号への依存を避ける設計、`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md` 実施内容 2 節）であり、この機構が `compute_121` に対しても正しく動作するかは実機での NVRTC コンパイル実行でのみ確認できる。本イシューでは実機プローブを見送った（3 節参照）。**未検証事項として #61 の着手初期に確認する。**
+
+## 3. 命令選定と根拠
+
+### 3.1 比較する 2 方式
+
+| 方式 | 概要 |
+|------|------|
+| A. WMMA C++ API（`#include <mma.h>`、`nvcuda::wmma::fragment`/`load_matrix_sync`/`mma_sync`/`store_matrix_sync`） | CUDA C++ の高レベル API。fragment 型が M/N/K・精度・レイアウトを型で表現し、ロード/ストア/積和が関数呼び出しで完結する |
+| B. インライン PTX（`asm volatile` で `mma.sync.aligned.*` を直接記述） | ヘッダ非依存。PTX ISA の `mma` 命令を文字列アセンブリで直接発行する |
+
+### 3.2 比較軸
+
+1. **NVRTC ヘッダ問題**: NVRTC は CUDA ヘッダを同梱しない。`<mma.h>` を使うには `nvrtcCreateProgram` の呼び出し時に CUDA toolkit の include パス（`<toolkit>/include`）を渡す必要がある（[NVRTC 公式ドキュメント](https://docs.nvidia.com/cuda/nvrtc/index.html)。header 解決は `nvrtcCreateProgram` に渡したヘッダ一覧の後にサーチされる）。これは PoC-v2-3・現行 `crates/backend-cuda` が前提とする「CUDA toolkit 非搭載環境でもビルド成立する」設計（`cudarc` の動的ロード方式、`.claude/rules/deps-policy.md`）と緊張関係にある。**ビルド成立自体は toolkit 非搭載でも保たれる**（NVRTC 呼び出しはビルド時ではなく実行時のため）が、**実行時に toolkit の include パスが見つからない環境では `<mma.h>` を使うカーネルのコンパイルが失敗する**。実機側（DGX Spark）は CUDA SDK 13.0.3 が導入済みのため実行は成立する見込みだが、include パスの解決方法（環境変数 `CUDA_PATH` 由来か、既知パスの探索か）を実装時に確定する必要がある。方式 B はこの依存を持たない。
+2. **記述コスト**: 方式 A は fragment 型・高レベル関数でロード/ストア/積和を表現でき、境界検査（後述 4 節）を通常の C++ 条件分岐で書ける。方式 B は PTX オペランドのレジスタ割当・データレイアウト（`mma.sync` が要求するスレッドあたりの断片配置）を手動管理する必要があり、記述・デバッグコストが高い。
+3. **#187（11.1h: `mma.sync` PTX 直叩き・`ldmatrix`・`cp.async`）への発展性**: #187 は `ldmatrix`（共有メモリからレジスタへの効率的なロード）・`cp.async`（非同期コピーパイプライン）・XOR swizzle（バンクコンフリクト回避）を PTX レベルで扱う。これらは WMMA C++ API では表現できず、いずれ方式 B（PTX）への移行が必要になる。
+
+### 3.3 判断
+
+**#61（f16 WMMA GEMM）・#62（TF32/f32 経路）・#63（タイル最適化）では方式 A（WMMA C++ API、`<mma.h>`）を第一候補とする。** 判断理由:
+
+- 3 軸のうち「NVRTC ヘッダ問題」は実装コスト増（include パス解決ロジックの追加）に留まり、ビルド成立可否そのものを損なわない（前述の通り実行時要求）。一方「記述コスト」「境界検査のしやすさ」は方式 A が明確に優位であり、#61〜#63 段階（初回 tensor core 実装・数値一致検証・基本最適化）では実装速度と正しさの検証しやすさを優先すべき局面である。
+- #187 で PTX 直叩きへ移行する際は、方式 A で確立した fragment 構成・タイル構成・境界検査ロジックの設計知見（本メモの 4〜6 節）をそのまま引き継げる。方式 A → 方式 B の段階移行は「まず高レベル API で正しさを確立し、後で低レベル最適化を積む」という PoC-v2-3 の naive → tiled の段階と同じ考え方に沿う。
+- 安全側判断: 計画時点でリスクとして挙げられていた「NVRTC で `<mma.h>` が使えない/環境依存が強い場合」に該当する事実（実機での動作不可）は未確認のため、現時点では方式 A を採用し、#61 着手時の実機検証（2 節「未検証事項」）で `<mma.h>` の実行時コンパイルが失敗することが判明した場合にのみ方式 B へ切り替える。この切替条件を #61 の受け入れ条件に含めることを推奨する（本メモはその推奨を記録するに留め、#61 の計画側で確定する）。
+
+## 4. fragment・タイル構成
+
+### 4.1 fragment 構成
+
+| 精度 | fragment shape | 累算型 | 対応サブタスク |
+|------|----------------|--------|----------------|
+| f16 | `m16n16k16` | f32（`wmma::accumulator<..., float>`） | #61 |
+| TF32 | `m16n16k8` | f32 | #62 |
+
+- f16 の累算を f32 に固定する根拠: PoC-v2-3 の naive/tiled カーネルは既に「f16 入出力・f32 アキュムレータ」を採用している（`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md` 実施内容 2 節。理由は f16 の仮数部 10bit で K が大きい GEMM をそのままアキュムレートすると桁落ちが急速に蓄積するため）。PyTorch の f16 GEMM も内部で FP32 アキュムレートしており、比較対象と精度前提を揃える目的も PoC-v2-3 から引き継ぐ。tensor core 版でも同じ方針を維持し、既存カーネルとの精度前提の一貫性を保つ。
+- TF32 の fragment shape（`m16n16k8`）は compute capability 8.0 以降の対応要件を満たす（sm_121 は満たす、2 節）。TF32 は f32 相当の入力を内部で 19bit 精度に丸めて Tensor Core で処理する方式であり、f32 の入出力型を保ったまま高速化できる経路として #62 のスコープに位置づける。
+
+### 4.2 タイル構成（候補値）
+
+CUTLASS の階層構造（ブロックタイル → warp タイル → fragment タイル）の一般的な相場を参考に、以下を候補値とする（実測未検証、#61〜#63 での実測により確定・調整する）:
+
+| 階層 | 候補値 | 根拠 |
+|------|--------|------|
+| ブロックタイル（thread block が担当する C の部分行列） | 128×128 | 手書き WMMA GEMM の一般的な出発点。PoC-v2-3 tiled 版の 32×32（共有メモリタイリングのみ）より大きく、Tensor Core 1 命令あたりの計算密度（16×16×16）を複数 warp 分束ねて occupancy を確保する |
+| warp タイル（1 warp が担当する C の部分行列） | 64×64 | 128×128 ブロックタイルを 2×2 の warp グリッドで分割する一般的な構成。1 warp が複数の `m16n16k16` fragment（4×4 個）を反復してアキュムレートする |
+| k タイル | f16: 16／TF32: 8 | fragment shape の K 次元に一致させ、共有メモリへの K 方向ロード単位をそのまま `mma_sync` の入力に使えるようにする |
+| 共有メモリ使用量（見積もり） | A・B 各タイル 128×16（f16, 2byte）× 2（ダブルバッファなし前提）≈ 8KiB 相当 | ブロックタイル 128×128・k タイル 16 の A/B 部分行列のみを保持する場合の概算。SM あたり共有メモリ量（Blackwell 系は 100KiB 超級）に対し余裕があり、複数ブロックの同時常駐（occupancy）を妨げない規模と見積もる。正確な値は実装時に `nvcc`/NVRTC のレジスタ・共有メモリ使用量レポートで確定する |
+| バンクコンフリクト回避 | 共有メモリタイルの行にパディングを加える（例: 16 要素幅の行を 17 要素幅で確保） | PoC-v2-3 tiled 版は素朴な 32×32 タイリングのみでパディング未適用。方式 A（WMMA C++ API）段階では `load_matrix_sync` が leading dimension 引数を取るため、パディングを加えても API 呼び出し側の変更のみで対応できる |
+
+- **#63（タイル基本最適化）との境界**: 上表は #61/#62 の初回実装で採用する初期候補値であり、レジスタブロッキング・ダブルバッファリング・ベクトル化ロードの適用は #63 のスコープとする（PoC-v2-3 README「要因分析」節が指摘する「tiled 実装が自明な最適化しか適用していない」点の解消は #63 で扱う）。
+
+## 5. 境界検査設計（REQ-8）
+
+- **規約**（`.claude/rules/coding-rust.md`「カーネル実装の境界検査（REQ-8）」）: 性能下限・最適化の達成を理由に、シェーダ・カーネル側の手動境界チェックを省略しない。境界検査を無効化する最適化を適用する場合は、手動境界チェックを維持したうえで行う。本規約は CPU（intrinsics）・CUDA（NVRTC/mma）・Metal（simdgroup）の全カーネルに適用される。
+- **設計方針**（#61〜#63 実装時に適用すること）:
+  1. **エッジタイル（M/N/K がタイル倍数でない形状）の guarded load**: ブロックタイル・warp タイルの端で、グローバルメモリの実データ範囲を超える読み出しが発生しうる（M/N/K がタイル寸法の倍数でない場合）。`load_matrix_sync` を無条件に呼ぶ前に、対象範囲がテンソルの実データ内かを判定し、範囲外のスレッド/要素はゼロ充填した共有メモリバッファから読ませる（グローバルメモリへの範囲外アクセス自体は発生させない）。
+  2. **エピローグ store のガード条件**: `store_matrix_sync` で `wmma::accumulator` の内容を C 行列へ書き戻す際も同様に、書き戻し先が実データ範囲内かを判定してから store する。範囲外の fragment 要素は書き戻さない。
+  3. **ベクトル化ロード・タイル端の分岐削減との両立**: #63 でベクトル化ロード（`float4`/`half2` 等）を適用する場合も、上記 1〜2 のガードは境界検査を無効化する形での省略対象にしない。ベクトル幅がタイル端で実データ幅を超える場合は、ベクトル化ロードを行単位のスカラーロードにフォールバックするか、ゼロ充填済み共有メモリ経由で読ませる設計とする。
+  4. 上記は PoC-v2-3 の naive/tiled カーネル（`crates/backend-cuda/src/kernels.rs`）が既に採用している境界検査方針（グローバルメモリ範囲外アクセスを避ける条件分岐）を tensor core 版でも維持する形になる。
+
+## 6. 数値契約
+
+- **複合判定**: バックエンド間・cuBLAS 比較を含む数値一致は統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」（`.claude/rules/coding-rust.md`、REQ-2）を適用する。PoC-v2-3 の f32 vs `torch.matmul` 比較では、より厳しい閾値（相対 1e-4 or 絶対 1e-5）で 262,144 セル中 2 セルが僅かに外れた実績があり、tensor core 版（TF32 丸めを経由する f32 経路含む）でも同種の僅差が生じうることを想定しておく。
+- **TF32 丸め特性との関係**: TF32 は仮数部を 19bit → 10bit 相当に丸めて Tensor Core に投入する（NVIDIA 公式仕様）。これは f32 の入出力型を保ちながら内部精度が TF32 相当に低下することを意味し、f32 tiled カーネル（フル精度の `f32::mul_add`）との比較では TF32 経路の方が誤差が大きくなる可能性がある。REQ-2 は「TF32 前提の複合指標に改定済み」（`.claude/rules/coding-rust.md`「バックエンド構成（REQ-2）」節）であり、現行の複合判定（相対 1e-3 or 絶対 1e-5）は TF32 前提を織り込み済みという位置づけである。tensor core 版 TF32 経路（#62）の実測でこの閾値内に収まるかを確認する。
+- **FMA 契約との整理**: CPU 参照実装は `f32::mul_add` を用い、GPU 側は既定 FMA 契約と揃える方針（`.claude/rules/coding-rust.md`）。WMMA/mma の内部積和順序は cuBLAS 同様に非公開であり、PoC-v2-3 が観測した「積和順序差に起因する丸め誤差」（cuBLAS 比較で 0 近傍セルの相対誤差跳ね上がり）は tensor core 版でも同様に生じうる。この丸め誤差は「カーネル自体の正しさの問題ではない」（CPU 参照実装との比較は既存カーネルで 0 不一致）という PoC-v2-3 の整理を踏襲する。
+- **閾値変更はスコープ外**: 数値一致閾値・ガードレール閾値の変更はユーザー承認必須（`.claude/rules/security.md`「自己修復ループ固有のガードレール」・`delegation-impl.md`「禁止事項」）。#186（TF32/f16 経路の数値一致閾値の実測再評価）は既存閾値が tensor core 実測後に不足すると判明した場合の再評価用に切り出されたサブタスクであり、本設計メモでは閾値の変更判断を行わない。
+
+## 7. ディスパッチ規則への引き渡し事項（TASK-11.2／#66 向け）
+
+TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本メモから引き渡す事項:
+
+- **compute capability 判定**: WMMA f16 経路は compute capability 7.0 以降、TF32 経路は 8.0 以降で有効化可能（sm_121 はいずれも満たす）。cc 7.0 未満（対象外だがフォールバック設計上の下限として記録）では tensor core 経路そのものを無効化し、既存の tiled 経路にフォールバックする。
+- **形状境界**: v1 の autotune 実測知見（M=N=K=512 が境界となる傾向、`docs/spec/04-requirements.md` REQ-11「経路選択」受け入れ基準）は CubeCL 前提の参考値であり、v2 の自作ディスパッチでの再検証を要する。PoC-v2-3 の tiled 実測（512 で PyTorch 比 26.6% 達成、2048/4096 で未達）と合わせて考えると、小規模形状では tensor core 化前でも一定の相対性能を確保できている可能性があり、tensor core 経路への切替境界は「tiled で十分な形状」と「tensor core が必要な形状」を実測に基づき再設定する必要がある。
+- **フォールバック条件**: (1) toolkit 非搭載・NVRTC が `<mma.h>` を解決できない環境、(2) compute capability が WMMA/TF32 の要件を満たさない環境、(3) M/N/K がタイル最小単位（fragment shape）に満たない極小形状、の 3 条件では tiled 経路（既存実装）へフォールバックする設計とすること。
+- これらはディスパッチ規則の設計・実装そのものではなく、#66 が設計時に踏まえるべき前提条件の列挙に留める。
+
+## 8. 後続サブタスク（11.1b〜h）の実装順・検証計画
+
+- **実装順**: #61（f16 WMMA GEMM）→ #62（TF32/f32 経路）→ #63（共有メモリ・タイル基本最適化）→ #66（ディスパッチ規則）→ #186（数値一致閾値の再評価、必要な場合）→ #187（`mma.sync` PTX 直叩き・`ldmatrix`・`cp.async` パイプライン）。この順序は「まず正しさを確立し（f16→TF32/f32）、次にタイル最適化、次にディスパッチへの組み込み、最後に低レベル PTX 最適化」という段階を踏む（3.3 節の判断根拠と整合）。
+- **実機依存テストの `#[ignore]` 分離**: PoC-v2-3・既存 `crates/backend-cuda` の方針を踏襲し、DGX Spark 実機（GB10）でのみ実行可能な数値一致テスト・ベンチマークは `#[ignore]` で分離し、通常 CI（self-hosted、CUDA 非搭載ランナー含む）ではビルド成立のみを検証する（`.claude/rules/ci.md`「実機依存」節）。
+- **5 回計測中央値**: ベンチマークは `.claude/rules/coding-rust.md`「テスト・ベンチ」節に従い 5 回計測の中央値を採用する。PoC-v2-3 と同様、大規模形状（4096 等）で計測時間が過大な場合は計測回数の縮小を許容し、その旨をログ・レポートに明記する。
+- **未検証事項の一覧**（#61 着手時に優先的に解消すべき事項）:
+  1. NVRTC が `--gpu-architecture=compute_121` を受理するか（2 節）
+  2. `<mma.h>` の実行時 include パス解決が DGX Spark 実機の CUDA SDK 13.0.3 環境で成立するか（3.2 節）。不成立の場合は方式 B（インライン PTX）へ切り替える（3.3 節の切替条件）
+  3. 4 節の共有メモリ使用量・occupancy 候補値の実測確認
+  4. TF32 経路の複合判定閾値（相対 1e-3 or 絶対 1e-5）内への収束（6 節）
+
+## 9. 実機検証プローブについて
+
+- 計画（Step 2）は DGX Spark への到達可能性に応じたベストエフォートの実機 NVRTC コンパイル検証プローブを許容していた。本イシューの実行環境（サンドボックス化された git worktree、ネットワーク到達性は SSH エイリアス `local-server` 経由の実機接続を含め未確認・未実施）では実機プローブを実施しなかった。
+- 未検証事項は 8 節の一覧に記録した。#61（f16 WMMA GEMM 実装）の着手初期に実機検証を行う方針は #187 本文の「NVRTC での sm_121 挙動は実装初期に実機検証する」と整合する。
+- 接続情報（SSH エイリアス実体・ホスト名等）は本メモに一切記載していない（PoC-v2-3 の「接続情報は非記載」方針を踏襲、`.claude/rules/security.md`）。
+
+## 10. スコープ外・将来の unsafe 境界
+
+- カーネル起動 API（`cudarc` の `unsafe fn` ラッパー）が唯一の `unsafe` 境界となる設計を、tensor core 版カーネルでも維持する。CUDA C ソース文字列（`kernels.rs` 相当）自体は Rust の `unsafe` を必要としない（NVRTC への文字列渡し・PTX ロードは `cudarc` 側の型で表現される）。実装（#61 以降）では、既存 `crates/backend-cuda/src/gemm.rs` のカーネル起動ラッパーと同様に、理由コメント付きで `unsafe` を最小化しレビュー必須とする（`.claude/rules/security.md`「unsafe」節）。
+- **仕様変更が必要と判断した事項**: 現時点では発見していない。REQ-11 の受け入れ基準（明示切替 API を提供しない方針・証跡方式）と本設計は整合しており、`docs/spec/` 側の変更提案は不要と判断した。
+
+## 参考文献
+
+- [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）
+- [Day 3: DGX Spark Unpacked. GB10, Unified Memory, sm_121, and NVFP4 — Kubesimplify](https://blog.kubesimplify.com/day-3-the-dgx-spark-unpacked-gb10-unified-memory-sm-121-and-the-one-reason-this-hardware-exists)
+- [NVIDIA Blackwell Architecture 公式ページ](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)（5th-Gen Tensor Core の対応精度）
+- [NVRTC 13.3 公式ドキュメント](https://docs.nvidia.com/cuda/nvrtc/index.html)（ヘッダ解決の仕組み、`nvrtcCreateProgram` への渡し方）
+- `docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md`（CUDA tiled GEMM 実測・tensor core 化の段階見積もり）
+- `docs/spec/04-requirements.md`（REQ-2・REQ-8・REQ-11）
