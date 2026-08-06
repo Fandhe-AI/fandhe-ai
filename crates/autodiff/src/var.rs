@@ -72,6 +72,22 @@ impl<'t> Var<'t> {
         Ok(())
     }
 
+    /// この `Var` が属する `Tape` の識別子。`backward.rs`（TASK-1.5c・
+    /// #18）は別モジュールのため `tape` フィールド（private）へ直接
+    /// 触れられず、`Tape::backward`/`Gradients::get` のクロステープ検査
+    /// （`check_same_tape` と同じ「入口で必ず shape・NodeId 解決より前に
+    /// 検査する」契約）にこのアクセサを使う。
+    pub(crate) fn tape_id(&self) -> crate::tape::TapeId {
+        self.tape.id
+    }
+
+    /// この `Var` が指すテープ内ノードの識別子。`backward.rs` が
+    /// `Gradients` から当該ノードの勾配を引くための添字として使う
+    /// （`tape_id()` と同じくクレート内限定公開）。
+    pub(crate) fn node_id(&self) -> NodeId {
+        self.id
+    }
+
     /// 2 次元 `matmul`（`docs/public-api-design.md` §3.2）。
     pub fn matmul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(other)?;

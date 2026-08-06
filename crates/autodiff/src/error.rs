@@ -1,8 +1,9 @@
 //! `autodiff` クレートの公開エラー型。
 //!
-//! 順伝播（`Var` の演算メソッド。TASK-1.5a・本イシュー）と逆伝播
-//! （`Tape::backward`。TASK-1.5c・#18）双方の失敗経路をここに集約する
-//! （spec 根拠: `docs/public-api-design.md` §3.1）。`tensor-core::ShapeError`
+//! 順伝播（`Var` の演算メソッド。TASK-1.5a・#16）と逆伝播
+//! （`Tape::backward`/`Gradients::get`。`backward.rs`・TASK-1.5c・
+//! 本イシュー・#18）双方の失敗経路をここに集約する（spec 根拠:
+//! `docs/public-api-design.md` §3.1）。`tensor-core::ShapeError`
 //! を包む形でラップし、shape 検査ロジック・エラー variant を二重定義しない。
 
 use std::fmt;
@@ -22,10 +23,14 @@ pub enum AutodiffError {
     /// キャスト、`sum`/`max`/`mse_loss` の shape 不一致等）。
     /// `tensor-core::ShapeError` をラップする。
     Shape(ShapeError),
-    /// `Tape::backward`（#18・TASK-1.5c で実装）時のグラフ不整合。
-    /// 本イシュー（TASK-1.5a）では構築箇所を持たないが、`Var`/`Tape`
-    /// 側の演算メソッドと同一エラー型を用いる設計（`docs/public-api-design.md`
-    /// §3.1）に合わせ、公開 API 安定化のため先行して variant を定義する。
+    /// `Tape::backward`（`backward.rs`・TASK-1.5c・#18）時のグラフ不整合
+    /// 用に予約された variant。本イシューが実装するクロステープ検査は
+    /// `TapeMismatch`（下記）で表現でき、`backward()`/`Gradients::get()`
+    /// はいずれも構造的に他の失敗要因を持たないため、現時点で構築箇所
+    /// はまだない。`Var`/`Tape` 側の演算メソッドと同一エラー型を用いる
+    /// 設計（`docs/public-api-design.md` §3.1）に合わせ、将来のグラフ
+    /// 不整合検出（例: 循環検知）に備え公開 API 安定化のため先行して
+    /// variant を定義しておく。
     Backward(String),
     /// 二項演算（`matmul`/`add`/`mul`/`mse_loss`）に、異なる `Tape` に
     /// 属する `Var` が渡された。ライフタイム `'t` の一致は同一 `Tape`

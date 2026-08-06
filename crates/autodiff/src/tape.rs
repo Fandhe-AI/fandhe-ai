@@ -4,8 +4,9 @@
 //! （`docs/spec/03-poc/poc-v2-2-autodiff/README.md:170`）を
 //! `docs/public-api-design.md` §3.1 の productize 済み API 形状で実装する。
 //! `Var`（`var.rs`）の演算メソッドが `Tape::push` を呼んで発生順に
-//! `TapeNode` を追記し、`backward`（TASK-1.5c・#18）はこの記録を逆走査
-//! して勾配を計算する下地として `Op` に入力 `NodeId` を保持させる。
+//! `TapeNode` を追記し、`Tape::backward`（`backward.rs`・TASK-1.5c・
+//! #18）はこの記録を逆走査して勾配を計算する（`Op` が入力 `NodeId` を
+//! 保持するため、逆走査の各ノードから入力ノードを直接辿れる）。
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -34,20 +35,19 @@ static NEXT_TAPE_ID: AtomicU64 = AtomicU64::new(0);
 pub struct NodeId(pub(crate) usize);
 
 /// テープへ記録される演算の種別。入力を `NodeId` で保持することで、
-/// `Tape::backward`（#18・TASK-1.5c）が発生順とは逆順にノード列を
-/// 走査し、各ノードの出力側勾配を入力ノードへ伝播できる下地とする
-/// （本イシューでは逆伝播ロジック自体は実装しない）。
+/// `Tape::backward`（`backward.rs`・#18・TASK-1.5c）が発生順とは逆順に
+/// ノード列を走査し、各ノードの出力側勾配を入力ノードへ伝播できる。
 ///
 /// クレート非公開: `Var`（`var.rs`）の演算メソッドのみが構築し、
 /// 呼び出し側（autodiff クレートの利用者）には値と shape のみが
 /// `Var::value`/`to_tensor` 経由で見える設計とする
 /// （`docs/public-api-design.md` §3.2 の演算セットに 1:1 対応）。
 ///
-/// 各 variant の入力 `NodeId`/`dim` フィールドは `grad.rs`（TASK-1.5b・
-/// 本イシュー・#17）の `vjp()` ディスパッチが読み出す（`match *op` で
-/// 各 variant を分解し、入力側 `NodeId` へ勾配を割り当てる）。
-/// `Tape::backward`（TASK-1.5c・#18）はノード列を逆走査しながら
-/// `vjp()` を呼ぶ側であり、`Op` 自体の読み出しはまだ発生しない。
+/// 各 variant の入力 `NodeId`/`dim` フィールドは `grad.rs`（#17・
+/// TASK-1.5b）の `vjp()` ディスパッチが読み出す（`match *op` で各
+/// variant を分解し、入力側 `NodeId` へ勾配を割り当てる）。
+/// `Tape::backward`（`backward.rs`・#18・TASK-1.5c）はノード列を逆走査
+/// しながら `vjp()` を呼び、返った寄与を入力ノードへ蓄積する側。
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Op {
     /// `Tape::var()` が登録する非追跡入力（葉ノード）。逆伝播の起点
@@ -73,11 +73,10 @@ pub(crate) enum Op {
 /// テープ上の 1 ノード。演算種別（`Op`）と、その演算を順伝播で評価
 /// した結果値を保持する（PoC-v2-2 の `TapeNode { op, value }` 構造を
 /// 踏襲。f64→f32 化は `docs/public-api-design.md` §3.1 の確定事項）。
+/// `op` は `grad.rs` の `vjp()` ディスパッチが `Tape::backward`
+/// （`backward.rs`）の逆走査から読み出す。
 #[derive(Debug)]
 pub(crate) struct TapeNode {
-    // `op` は TASK-1.5c（#18・`Tape::backward`）が逆走査で読み出すまで
-    // 未使用（上記 `Op` の `#[allow(dead_code)]` コメント参照）。
-    #[allow(dead_code)]
     pub(crate) op: Op,
     pub(crate) value: Tensor<f32>,
 }

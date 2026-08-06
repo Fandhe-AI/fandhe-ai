@@ -5,25 +5,17 @@
 //! 「出力側勾配（upstream）→ 各入力 `NodeId` への勾配」の変換層を提供
 //! する（spec 根拠: `docs/spec/05-tasks.md` TASK-1.5、
 //! `docs/spec/03-poc/poc-v2-2-autodiff/code/rust/src/tape.rs` の
-//! backward 実装）。`Tape::backward`（TASK-1.5c・#18）はノード列を
-//! 発生順とは逆順に走査しながら本モジュールの `vjp()` を呼び、返り値
-//! （入力 `NodeId` ごとの勾配寄与）を蓄積する想定であり、**勾配の
-//! 蓄積そのものは本モジュールの責務ではない**（#18 側で複数の出力先
-//! から同一入力ノードへ流入する勾配を合算する）。
+//! backward 実装）。`Tape::backward`（`backward.rs`・TASK-1.5c・#18）は
+//! ノード列を発生順とは逆順に走査しながら本モジュールの `vjp()` を
+//! 呼び、返り値（入力 `NodeId` ごとの勾配寄与）を蓄積する。**勾配の
+//! 蓄積そのものは本モジュールの責務ではない**（`backward.rs` 側で
+//! 複数の出力先から同一入力ノードへ流入する勾配を合算する）。
 //!
 //! 値計算は `eval.rs`（クレート非公開の暫定 CPU 参照実装）のヘルパー
 //! を再利用し、forward と勾配計算で数式の実体を 2 か所に別実装しない
 //! （PoC-v2-2 の方針を踏襲。`eval::matmul` は `f32::mul_add` による
 //! FMA 契約統一済みのため、`MatMul` の VJP もここを経由するだけで
 //! 契約を引き継ぐ）。
-
-// `vjp()` とその内部ヘルパー（`matmul_vjp`/`reduce_to_shape` 等）は、
-// `Tape::backward`（TASK-1.5c・#18）が呼び出し元として実装されるまで
-// 非テストビルドからは到達不能である（`tape.rs` の `Op` enum に対する
-// `#[allow(dead_code)]` と同じ理由。本イシューでは #[cfg(test)] の
-// grad-check テストのみが exercise する）。関数ごとに allow を重複
-// させず、モジュール単位で一括抑制する。
-#![allow(dead_code)]
 
 use tensor_core::Tensor;
 
