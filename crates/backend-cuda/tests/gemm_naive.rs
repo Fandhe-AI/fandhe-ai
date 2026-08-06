@@ -51,10 +51,13 @@ fn new_does_not_panic_and_returns_typed_result() {
 mod validate_gemm_dims_tests {
     // `validate_gemm_dims` は `pub(crate)` のため crate 外の統合テストから
     // 直接は呼べない。デバイス初期化前に検証したい対象（長さ不一致・
-    // オーバーフロー・i32 超過）は `CudaGemm::run_naive_f32`/`run_naive_f16`
-    // 経由でも同じ入口を通るため、`#[ignore]` テスト側（実機必須）で
-    // あわせて検証する。ここでは公開 API から到達できる範囲、すなわち
-    // `CudaError::InvalidShape` の `Display` 実装のみを環境非依存で確認する。
+    // オーバーフロー・i32 超過）は `gemm.rs` 自身の `#[cfg(test)]` mod
+    // （crate 内部）で環境非依存に網羅済み。ここでは公開 API から到達
+    // できる範囲、すなわち `CudaError::InvalidShape` の `Display` 実装
+    // のみを環境非依存で確認する。`CudaGemm::run_naive_f32`/`run_naive_f16`
+    // 経由で同じ検証が実際に GPU 起動より先に効くこと自体は、実機必須の
+    // `#[ignore]` テスト（本ファイル末尾
+    // `run_naive_f32_rejects_length_mismatch_before_launch`）で確認する。
     use backend_cuda::CudaError;
     use std::error::Error;
 
@@ -92,10 +95,17 @@ fn naive_f32_zero_dim_shape_returns_empty_without_launch() {
 }
 
 /// naive f16 GEMM（実機必須）。f16 は仮数部 10bit のため、f32 CPU 参照との
-/// 比較は複合判定（1e-3 相対誤差）をそのまま適用すると表現精度由来の
-/// 差分で不安定になりうる。本テストは「GPU が panic せず妥当な形状の
-/// 出力を返す」ことまでを確認し、判定基準の詳細な妥当性確認（f16 向け
-/// tolerance の要否）は #36（実機テスト整備）へ委ねる。
+/// 比較に複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。f32 前提）
+/// をそのまま適用するのは実質的な許容誤差変更（ユーザー承認必須。
+/// `.claude/rules/coding-rust.md`）にあたる。#36 の検討結果として f16 向け
+/// tolerance は本イシューでは導入せず、本テストは「GPU が panic せず
+/// 妥当な形状の出力を返し、全要素が有限（NaN/Inf なし）」であることまでを
+/// 確認する。入力は `Xorshift64Star::next_f32` の値域 [-1, 1) を丸めた
+/// もの（`fill_vec_f16` ドキュメンテーションコメント参照）で、K=64 の
+/// 積和蓄積でも `f16::MAX`（65504）を超えないため NaN/Inf は実装が正しい
+/// 限り生じない。f16 向け tolerance 設計自体の要否は
+/// `.claude/rules/out-of-scope-tracking.md` に従い PR 本文にスコープ外
+/// 事項として記録する。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn naive_f16_runs_and_returns_expected_shape() {
@@ -114,4 +124,32 @@ fn naive_f16_runs_and_returns_expected_shape() {
         .expect("CudaGemm::run_naive_f16 must succeed on CUDA-equipped test runner");
 
     assert_eq!(c_gpu.len(), (m as usize) * (n as usize));
+    assert!(
+        c_gpu.iter().all(|v| v.is_finite()),
+        "naive f16 GEMM output must not contain NaN/Inf for bounded [-1, 1) inputs"
+    );
+}
+
+/// 公開 API 経由で `validate_gemm_dims` が GPU 起動前に効くことの実機
+/// 検証（#36。`validate_gemm_dims_tests` モジュールコメント参照）。
+/// 長さ不一致の入力を渡した場合、実際に CUDA カーネルが起動される前に
+/// `CudaError::InvalidShape` が返ることを確認する（`gemm.rs:237`
+/// `validate_gemm_dims(...)?` がカーネル起動より先に評価される契約の
+/// 回帰対象）。検証はホスト側のみで完結し GPU 実行を伴わないため実機
+/// 依存ではないが、`CudaDevice::new`／`CudaGemm::new` の構築自体が実機
+/// 必須のため他の実機テストと同様に `#[ignore]` で分離する。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn run_naive_f32_rejects_length_mismatch_before_launch() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("naive kernel compilation must succeed");
+
+    // a の長さが m*k（2*3=6）と不一致（5）。
+    let err = gemm
+        .run_naive_f32(&[1.0, 2.0, 3.0, 4.0, 5.0], &[0.0; 12], 2, 4, 3)
+        .expect_err("length-mismatched a must be rejected before any GPU launch");
+    assert!(
+        matches!(err, CudaError::InvalidShape { .. }),
+        "expected InvalidShape, got: {err}"
+    );
 }

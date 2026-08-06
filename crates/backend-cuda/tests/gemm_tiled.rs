@@ -75,7 +75,8 @@ fn assert_tiled_f32_matches_cpu_reference(gemm: &CudaGemm, seed: u64, m: u32, n:
 /// 1x1x1（num_tiles=1 の最小ケース）・17x23x19・33x31x65（いずれも TILE の
 /// 非整数倍で、末尾タイルのゼロパディング分岐（`kernels.rs` の三項ガード）
 /// を実際に踏む）。CI self-hosted runner は CUDA toolkit 非搭載のため通常
-/// 実行ではスキップされる（実行導線の整備は #36 のスコープ）。
+/// 実行ではスキップされる（実機での実行導線は `make test-ignored-cuda`。
+/// `Makefile`・`README.md` 参照。#36）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn tiled_f32_matches_cpu_reference_across_shapes() {
@@ -151,8 +152,11 @@ fn tiled_f32_zero_dim_shape_returns_empty_without_launch() {
 }
 
 /// tiled f16 GEMM（実機必須）。`tests/gemm_naive.rs` の f16 テストと同じ
-/// 判断（f16 向け tolerance の妥当性確認は #36 へ委ね、本テストは
-/// panic せず妥当な形状の出力を返すことまでを確認する）。
+/// 判断（#36 の検討結果として f16 向け tolerance は本イシューでは導入
+/// せず、panic せず妥当な形状かつ全要素有限〈NaN/Inf なし〉の出力を
+/// 返すことまでを確認する。入力値域と K=64 での安全性の根拠は
+/// `tests/gemm_naive.rs::naive_f16_runs_and_returns_expected_shape` の
+/// ドキュメンテーションコメント参照）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn tiled_f16_runs_and_returns_expected_shape() {
@@ -171,6 +175,10 @@ fn tiled_f16_runs_and_returns_expected_shape() {
         .expect("CudaGemm::run_tiled_f16 must succeed on CUDA-equipped test runner");
 
     assert_eq!(c_gpu.len(), (m as usize) * (n as usize));
+    assert!(
+        c_gpu.iter().all(|v| v.is_finite()),
+        "tiled f16 GEMM output must not contain NaN/Inf for bounded [-1, 1) inputs"
+    );
 }
 
 /// 性能比較テスト（受け入れ条件の本体）: 「tiled GEMM が naive 比で
