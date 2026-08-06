@@ -16,12 +16,13 @@
 //! すべての経路が `Result` を返し、本番経路で `unwrap()`/`expect()` は
 //! 使わない（`.claude/rules/coding-rust.md`）。
 //!
-//! ブロードキャスト規則（NumPy 互換）は本来 #12（TASK-1.4b）の成果物に
-//! 委譲する設計だが、着手時点で #12 は未マージだったため
-//! `elementwise_out_shape` は暫定的に厳密一致のみを検査する
-//! （下記 TODO 参照）。#12 マージ後、本モジュールを rebase してブロード
-//! キャスト機構へ委譲するよう差し替える。
+//! ブロードキャスト規則（NumPy 互換）は #12（TASK-1.4b・`broadcast.rs`）の
+//! 成果物に委譲する。着手時点（TASK-1.4c）では #12 が未マージだったため
+//! `elementwise_out_shape` は一時的に厳密一致のみを検査していたが、#12 が
+//! caaf3c0 でマージ済みとなったため本イシュー（#22・TASK-1.6b）で
+//! `broadcast_shape` への委譲へ差し替える。
 
+use crate::broadcast::broadcast_shape;
 use crate::error::ShapeError;
 use crate::tensor::checked_numel;
 
@@ -66,21 +67,21 @@ pub fn matmul_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Shap
 /// elementwise 二項演算（`add`・`mul`。`docs/public-api-design.md` §3.2）の
 /// 出力 shape を検査・計算する。
 ///
-/// TODO(#12 マージ後): NumPy 互換ブロードキャスト規則（`broadcast_shape`
-/// 相当）へ委譲する。#12（TASK-1.4b）着手時点で未マージのため、本関数は
-/// 暫定的に「shape の完全一致」のみを成立条件とする安全側の実装とし、
-/// 不一致は `ShapeError::ShapeMismatch` で返す。ブロードキャスト成立
-/// ケース（例: `[3, 1]` と `[1, 4]` → `[3, 4]`）は #12 マージ後に対応する。
+/// NumPy 互換ブロードキャスト規則（`broadcast_shape`。#12・TASK-1.4b）へ
+/// 委譲する。不一致（末尾軸から比較して「両者同一」または「片方が 1」の
+/// いずれも満たさない軸がある）は `ShapeError::BroadcastIncompatible` を
+/// 返す。呼び出し元（`backend-cpu` の elementwise カーネル入口。#22・
+/// TASK-1.6b）はここで確定した出力 shape を `Tensor::broadcast_with` へ
+/// 渡し、両オペランドの zero-copy view（stride 0）を取得する想定。
 pub fn elementwise_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
-    require_same_shape(lhs, rhs)?;
-    Ok(lhs.to_vec())
+    broadcast_shape(lhs, rhs)
 }
 
 /// 厳密一致を要求する演算（例: `mse_loss` の予測値と target。
 /// `docs/public-api-design.md` §3.2）の shape 検査。
 ///
-/// `elementwise_out_shape` の暫定実装（ブロードキャスト未対応）からも
-/// 呼ばれる（上記 TODO 参照）。
+/// `elementwise_out_shape`（ブロードキャスト委譲）とは独立した検査であり、
+/// ブロードキャストを許容しない演算から呼ばれる。
 pub fn require_same_shape(lhs: &[usize], rhs: &[usize]) -> Result<(), ShapeError> {
     if lhs != rhs {
         return Err(ShapeError::ShapeMismatch {
@@ -194,14 +195,41 @@ mod tests {
 
     #[test]
     fn elementwise_mismatch_errors() {
+        // [2,3] と [3,2] は末尾軸（3 vs 2）が「同一」「片方が 1」の
+        // いずれも満たさないためブロードキャスト非互換。
         let err = elementwise_out_shape(&[2, 3], &[3, 2]).unwrap_err();
-        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+        assert!(matches!(err, ShapeError::BroadcastIncompatible { .. }));
     }
 
     #[test]
     fn elementwise_scalar_rank0_ok() {
         let out = elementwise_out_shape(&[], &[]).unwrap();
         assert_eq!(out, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn elementwise_broadcast_row_and_column() {
+        // 受け入れ条件対象: NumPy 互換ブロードキャストが期待値と一致する
+        // 代表例（[3,1] と [1,4] → [3,4]）。
+        let out = elementwise_out_shape(&[3, 1], &[1, 4]).unwrap();
+        assert_eq!(out, vec![3, 4]);
+    }
+
+    #[test]
+    fn elementwise_broadcast_rank_difference() {
+        // rank 差分（[2,3] と [3]）の暗黙先頭軸補完。
+        let out = elementwise_out_shape(&[2, 3], &[3]).unwrap();
+        assert_eq!(out, vec![2, 3]);
+    }
+
+    #[test]
+    fn elementwise_broadcast_incompatible_returns_broadcast_incompatible() {
+        let err = elementwise_out_shape(&[2, 3], &[4]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::BroadcastIncompatible { lhs, rhs }
+                if lhs == vec![2, 3] && rhs == vec![4]
+        ));
     }
 
     // --- require_same_shape ---
