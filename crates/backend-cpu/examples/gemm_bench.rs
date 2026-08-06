@@ -65,13 +65,24 @@ fn measure(
     })
     .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
 
+    // `Measurement::q1_secs`／`q3_secs` は所要時間（秒）の四分位であり、
+    // TFLOPS は時間の逆数のため大小関係が反転する（時間が短い q1_secs
+    // ほど TFLOPS は高い）。Cursor Bugbot 指摘 #231: 変換前の変数名
+    // （q1_secs/q3_secs）のまま `tflops_q1`/`tflops_q3` として表示すると
+    // 「q1 は低い方の四分位」という一般的な期待に反し、記録済みの表
+    // （`docs/perf/cpu-gemm-rayon-tuning.md`）でも逆転して見えていた。
+    // ここでは表示ラベルどおり tflops_q1 ≦ tflops_q3（スループットの
+    // 四分位として昇順）になるよう、変換後に値を入れ替えて渡す。
+    let tflops_median = tflops(size, measurement.median_secs);
+    let tflops_q1 = tflops(size, measurement.q3_secs);
+    let tflops_q3 = tflops(size, measurement.q1_secs);
     println!(
-        "kernel={name} size={size} warmup={} iters={} median_tflops={:.4} q1={:.4} q3={:.4} loadavg={:?}",
+        "kernel={name} size={size} warmup={} iters={} median_tflops={:.4} tflops_q1={:.4} tflops_q3={:.4} loadavg={:?}",
         measurement.warmup,
         measurement.iters,
-        tflops(size, measurement.median_secs),
-        tflops(size, measurement.q1_secs),
-        tflops(size, measurement.q3_secs),
+        tflops_median,
+        tflops_q1,
+        tflops_q3,
         loadavg_1min(),
     );
     measurement
@@ -100,16 +111,24 @@ fn run_default(sizes: &[usize]) {
         let blocked = measure("blocked", size, &config, |a, b, c, m, n, k| {
             gemm_blocked(a, b, c, m, n, k).unwrap();
         });
-        let baseline_name;
-        let baseline_median = if size >= 2048 {
-            baseline_name = "blocked";
-            blocked.median_secs
+        // baseline_name は実際に分母として使った median_secs の由来
+        // カーネル名と一致させる（Cursor Bugbot 指摘 #231: 従来は
+        // size<2048 のとき常に "naive" 固定だったが、`.min()` で選ぶのは
+        // naive・blocked のうち実測が速かった方であり、512 の実測では
+        // blocked（0.0012 TFLOPS）が naive（0.0011 TFLOPS）を上回り実際の
+        // 分母だった。ラベルと実値の不一致を防ぐため、比較結果に応じて
+        // 明示的にラベルを選ぶ）。
+        let (baseline_name, baseline_median) = if size >= 2048 {
+            ("blocked", blocked.median_secs)
         } else {
             let naive = measure("naive", size, &config, |a, b, c, m, n, k| {
                 gemm_naive(a, b, c, m, n, k).unwrap();
             });
-            baseline_name = "naive";
-            naive.median_secs.min(blocked.median_secs)
+            if naive.median_secs <= blocked.median_secs {
+                ("naive", naive.median_secs)
+            } else {
+                ("blocked", blocked.median_secs)
+            }
         };
         let parallel = measure("parallel", size, &config, |a, b, c, m, n, k| {
             gemm_parallel_tuned(a, b, c, m, n, k, BlockSizes::poc_v2_1_default(), 1).unwrap();
@@ -131,20 +150,29 @@ fn run_default(sizes: &[usize]) {
 /// 27（=3^3）通りの全数探索は 1 点あたり計測 20/20 回で数十秒かかり
 /// 非現実的なため、「MC → KC → NC の順に、直前で選んだ最良値を固定して
 /// 次のパラメータを振る」座標降下法（9 点）に縮小した（全数探索ではない
-/// 旨を記録に明記する）。各段の「最良値」は本関数が自動選定せず、
-/// 出力された中央値を目視比較して `docs/perf/cpu-gemm-rayon-tuning.md`
-/// へ記録する運用とする（Q1〜Q3 幅を考慮した採否判断は自動化しない）。
+/// 旨を記録に明記する）。各段の median_secs 最小の候補を `best` に反映し
+/// 次段へ引き継ぐ（Cursor Bugbot 指摘 #231 の修正。「最良」の採否自体は
+/// median_secs の単純比較であり、Q1〜Q3 幅を考慮した統計的有意差判定は
+/// 行わない。最終的な採否記録は出力された中央値を目視で
+/// `docs/perf/cpu-gemm-rayon-tuning.md` へ転記する運用とする）。
 fn run_sweep() {
     let config = MeasurementConfig::default();
     println!("threads={}", rayon::current_num_threads());
     println!("loadavg_before={:?}", loadavg_1min());
 
     let size = 2048usize;
-    let best = BlockSizes::poc_v2_1_default();
+    // 座標降下法の「直前で選んだ最良値を固定」を実際に実装する（Cursor
+    // Bugbot 指摘 #231: 従来は `best` を `poc_v2_1_default()` に束縛した
+    // まま各段で `{ mc, ..best }` のように定数側のフィールドしか参照して
+    // おらず、KC・NC 段が MC 段の最良値ではなく常に既定値の周辺を振る
+    // だけになっていた。各段の計測後に `median_secs` 最小の候補で `best`
+    // を更新し、次段へ引き継ぐ）。
+    let mut best = BlockSizes::poc_v2_1_default();
 
+    let mut best_mc_secs = f64::INFINITY;
     for &mc in &[64usize, 128, 256] {
         let blocks = BlockSizes { mc, ..best };
-        measure(
+        let m = measure(
             &format!("sweep_mc={mc}"),
             size,
             &config,
@@ -152,11 +180,16 @@ fn run_sweep() {
                 gemm_parallel_tuned(a, b, c, m, n, k, blocks, 1).unwrap();
             },
         );
+        if m.median_secs < best_mc_secs {
+            best_mc_secs = m.median_secs;
+            best.mc = mc;
+        }
     }
 
+    let mut best_kc_secs = f64::INFINITY;
     for &kc in &[128usize, 256, 512] {
         let blocks = BlockSizes { kc, ..best };
-        measure(
+        let m = measure(
             &format!("sweep_kc={kc}"),
             size,
             &config,
@@ -164,11 +197,16 @@ fn run_sweep() {
                 gemm_parallel_tuned(a, b, c, m, n, k, blocks, 1).unwrap();
             },
         );
+        if m.median_secs < best_kc_secs {
+            best_kc_secs = m.median_secs;
+            best.kc = kc;
+        }
     }
 
+    let mut best_nc_secs = f64::INFINITY;
     for &nc in &[256usize, 512, 1024] {
         let blocks = BlockSizes { nc, ..best };
-        measure(
+        let m = measure(
             &format!("sweep_nc={nc}"),
             size,
             &config,
@@ -176,7 +214,12 @@ fn run_sweep() {
                 gemm_parallel_tuned(a, b, c, m, n, k, blocks, 1).unwrap();
             },
         );
+        if m.median_secs < best_nc_secs {
+            best_nc_secs = m.median_secs;
+            best.nc = nc;
+        }
     }
+    println!("sweep_best mc={} kc={} nc={}", best.mc, best.kc, best.nc);
 
     for &osize in &[512usize, 2048] {
         for &oversub in &[1usize, 2, 4] {

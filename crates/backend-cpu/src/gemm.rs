@@ -100,6 +100,14 @@ pub enum GemmError {
     /// （`checked_mul` によりアクセス前に検出する。OWASP A03 観点。
     /// `.claude/rules/security.md`）。
     DimProductOverflow,
+    /// `BlockSizes` の `mc`／`kc`／`nc` のいずれかが 0（Cursor Bugbot 指摘
+    /// #231: `gemm_parallel_tuned` へ渡す `BlockSizes` はフィールドが
+    /// public かつ未検証で受理されていたため、`nc`／`kc` が 0 だと
+    /// `step_by(0)` がパニックし、`mc` が 0 だと `gemm_blocked_region` の
+    /// 内側 `while` ループが `ic` を進められず無限ループになっていた。
+    /// `oversubscription`（`.max(1)` で下限クランプ済み）と同様に、公開
+    /// 入口の shape 検証で早期に拒否する）。
+    ZeroBlockSize { mc: usize, kc: usize, nc: usize },
 }
 
 impl fmt::Display for GemmError {
@@ -116,6 +124,9 @@ impl fmt::Display for GemmError {
             }
             GemmError::DimProductOverflow => {
                 write!(f, "m*k, k*n or m*n overflows usize")
+            }
+            GemmError::ZeroBlockSize { mc, kc, nc } => {
+                write!(f, "block sizes must be non-zero: mc={mc}, kc={kc}, nc={nc}")
             }
         }
     }
@@ -357,6 +368,22 @@ pub fn gemm_parallel_tuned(
     oversubscription: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
+
+    // `mc`／`kc`／`nc` が 0 だと `gemm_blocked_region` の
+    // `step_by(blocks.nc)`／`step_by(blocks.kc)` がパニックし、`mc` が 0
+    // の場合は内側 `while ic < mc_total { ... ic += blocks.mc; }` が
+    // 無限ループになる（rayon タスク内でのハング）。`BlockSizes` は
+    // フィールドが public で `examples/gemm_bench.rs` から任意値を渡せる
+    // ため、他の公開入口検証（`validate_dims`・`oversubscription` の
+    // `.max(1)` クランプ）と同様に、本体アクセス前に明示的に拒否する
+    // （Cursor Bugbot 指摘 #231。REQ-8 の境界検査省略禁止と同じ思想）。
+    if blocks.mc == 0 || blocks.kc == 0 || blocks.nc == 0 {
+        return Err(GemmError::ZeroBlockSize {
+            mc: blocks.mc,
+            kc: blocks.kc,
+            nc: blocks.nc,
+        });
+    }
 
     // n == 0 は shape として合法（validate_dims は m*n=0・k*n=0 を許容し、
     // b・c は空スライスになる）だが、下記 par_chunks_mut(panel_rows * n) は

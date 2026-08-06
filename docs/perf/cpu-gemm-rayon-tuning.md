@@ -44,15 +44,26 @@ CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
 
 ### M=N=K=512（naive/blocked/parallel 3 実装フル計測、warmup 20・iters 20）
 
-| kernel | median TFLOPS | Q1 | Q3 | loadavg |
+| kernel | median TFLOPS | Q1（TFLOPS 下位四分位） | Q3（TFLOPS 上位四分位） | loadavg |
 |--------|---------------|----|----|---------|
-| blocked | 0.0012 | 0.0012 | 0.0011 | 0.97 |
+| blocked | 0.0012 | 0.0011 | 0.0012 | 0.97 |
 | naive   | 0.0011 | 0.0011 | 0.0011 | 1.29 |
-| parallel | 0.0072 | 0.0077 | 0.0064 | 1.29 |
+| parallel | 0.0072 | 0.0064 | 0.0077 | 1.29 |
+
+（Cursor Bugbot 指摘 #231 の修正: `examples/gemm_bench.rs` の旧実装は
+所要時間の Q1/Q3（`q1_secs`/`q3_secs`）を TFLOPS へ変換する際に順序を
+入れ替えず出力していたため、TFLOPS としての大小関係が反転して表示
+されていた〈時間が短い四分位ほど TFLOPS は高い〉。本表は修正後の
+意味（Q1 ≦ median ≦ Q3、TFLOPS の昇順）に揃えて記載し直したもの。
+実測データそのものは変更していない）。
 
 - `threads=12`（`rayon::current_num_threads()`。実測環境の論理コア数と一致）
 - `loadavg_before=0.96`（計測開始直前の 1 分平均。以降の各計測値と大差なく、他プロセスの明白な高負荷混入は見られない）
-- **improvement_ratio(parallel/naive) = 6.242x**
+- blocked（median 0.0012 TFLOPS）が naive（median 0.0011 TFLOPS）よりわずかに高速であり、実際の分母（baseline）は
+  blocked だった（Cursor Bugbot 指摘 #231: 旧実装は `baseline_name` を size<2048 で常に `"naive"` 固定表示していたが、
+  実際に選ばれていたのは `naive.median_secs.min(blocked.median_secs)` の結果である blocked 側だった。表示ラベルを
+  実装側で修正済み）。
+- **improvement_ratio(parallel/blocked) = 6.242x**
 - **parallel_efficiency = 6.242 / 12 = 0.520**
 
 ### PoC-v2-1 対比

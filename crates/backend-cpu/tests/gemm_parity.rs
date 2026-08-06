@@ -573,6 +573,39 @@ fn gemm_naive_rejects_dim_product_overflow() {
     assert!(matches!(err, GemmError::DimProductOverflow));
 }
 
+/// `BlockSizes` の `mc`／`kc`／`nc` が 0 だと `gemm_blocked_region` の
+/// `step_by(0)` パニック（kc/nc=0）や内側 `while` の無限ループ（mc=0）が
+/// 起きうるため、公開入口で明示的に拒否することを確認する（Cursor
+/// Bugbot 指摘 #231・`.claude/rules/coding-rust.md` REQ-8 の境界検査省略
+/// 禁止）。
+#[test]
+fn gemm_parallel_tuned_rejects_zero_block_sizes() {
+    let a = vec![1.0f32, 2.0, 3.0, 4.0];
+    let b = vec![1.0f32, 2.0, 3.0, 4.0];
+
+    for blocks in [
+        BlockSizes {
+            mc: 0,
+            kc: 4,
+            nc: 4,
+        },
+        BlockSizes {
+            mc: 4,
+            kc: 0,
+            nc: 4,
+        },
+        BlockSizes {
+            mc: 4,
+            kc: 4,
+            nc: 0,
+        },
+    ] {
+        let mut c = vec![0.0f32; 4];
+        let err = gemm_parallel_tuned(&a, &b, &mut c, 2, 2, 2, blocks, 1).unwrap_err();
+        assert!(matches!(err, GemmError::ZeroBlockSize { .. }));
+    }
+}
+
 #[test]
 fn gemm_blocked_and_parallel_reject_same_shape_errors() {
     let a = vec![1.0, 2.0, 3.0];
