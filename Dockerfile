@@ -36,4 +36,10 @@ RUN mkdir -p /usr/local/cargo/registry /work/target \
 USER dev
 WORKDIR /work
 
+# make ci / make deny（deny.toml。TASK-1.3）がクリーンなコンテナでも即実行できるよう、
+# cargo-deny をイメージビルド時に導入しておく（Makefile の deny ターゲット自体も
+# 未導入なら自動導入する自己修復を持つが、初回 docker-ci でのネットワーク依存を避けるため
+# ここで先行導入する。dev ユーザーの CARGO_HOME 配下にインストールされる）。
+RUN cargo install cargo-deny --locked
+
 CMD ["bash"]

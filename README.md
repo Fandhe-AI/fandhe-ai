@@ -45,11 +45,11 @@ make setup   # サブモジュール取得 → rustup → lefthook（git hooks�
 | `make lint` | `cargo clippy -D warnings` |
 | `make test` | `cargo test`（実機依存の `#[ignore]` テストは除く） |
 | `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
-| `make deny` | `cargo deny check licenses sources`（依存ライセンス監査） |
+| `make deny` | `cargo deny check licenses sources`（依存ライセンス監査。`cargo-deny` 未導入なら自動導入） |
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
 | `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
 
-`Cargo.toml`（TASK-1.1）・`deny.toml`（TASK-1.3）はいずれも追加済みのため cargo 系ターゲットは deny を含め全て実行されます。detect ガード（`HAS_CARGO`／`HAS_DENY` 判定）は、CI の detect ステップと同一の冪等セルフヒール方針（`.claude/rules/ci.md`）のフェイルセーフとして残置しています。
+`Cargo.toml`（TASK-1.1）・`deny.toml`（TASK-1.3）はいずれも追加済みのため cargo 系ターゲットは deny を含め全て実行されます。detect ガード（`HAS_CARGO`／`HAS_DENY` 判定）は、CI の detect ステップと同一の冪等セルフヒール方針（`.claude/rules/ci.md`）のフェイルセーフとして残置しています。`cargo-deny` サブコマンドは `make setup` の対象外ですが、`make deny`（`make ci` 経由も含む）実行時に未導入なら `cargo install cargo-deny --locked` で自動導入するため（CI の `deny` ジョブと同一の冪等セルフヒール方針）、クリーンなホスト環境でも追加手順なしで実行できます。開発コンテナ（後述）にはビルド時に導入済みです。
 
 ## Docker 開発環境
 

@@ -113,3 +113,4 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - 依存の追加・更新は本表の更新とセットで行う（**ユーザー承認必須**。REQ-5・deps-policy.md）
 - `deny.toml` の `[licenses]` allow リストの変更（新規ライセンス式の許可）も同じ承認フローに従う。allow リストは本表 5 節の実測結果をそのまま運用化したものであり、単独での緩和は行わない
 - MPL-2.0 等コピーレフト混入の監視は CI の `deny` ジョブ（`cargo deny --locked check licenses sources`）で継続する
+- `deny.toml` の `[licenses]` は `include-dev = true` を明示する。既定値（`false`）のままだと `criterion`（`bench-harness` の `dev-dependencies` 限定）とその推移的依存サブツリーがライセンス監査から漏れ、本表が前提とする「Cargo.lock 全域」（3 節・4 節 #4）の実測スコープと不整合になる（PR #211 Bugbot 指摘）

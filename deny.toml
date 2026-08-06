@@ -5,10 +5,16 @@
 
 [licenses]
 version = 2
+include-dev = true
 # [graph].targets を指定しない（既定で Cargo.lock 全域が対象。docs/license-matrix.md
 # 5 節「Cargo.lock 全域」と一致させる）。ターゲット限定すると UEFI/wasm 等の
 # target-gated 依存（r-efi・wasip2 等）が判定対象から外れ、fail-closed の
 # コピーレフト監視（deps-policy.md）に穴が生じるため、意図的に全域を対象とする。
+# include-dev = true: `criterion`（bench-harness の dev-dependencies 限定。
+# deps-policy.md）とその推移的依存サブツリーは既定（false）だとライセンス
+# 監査から除外されてしまい、docs/license-matrix.md 5 節が明記する
+# 「Cargo.lock 全域」（normal/build/dev 全エッジ）の実測スコープと矛盾する
+# （Bugbot 指摘・PR #211）。dev-dependencies 側もここで fail-closed 監査する。
 #
 # allow は docs/license-matrix.md 5 節「外部 104 パッケージのライセンス分布」
 # （Cargo.lock 全域の cargo metadata --locked 実測）に出現した式を構成する
