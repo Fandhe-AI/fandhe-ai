@@ -11,6 +11,26 @@
 //! カーネルの手動境界検査は最適化を理由に省略しない（REQ-8）。
 //! FFI 境界の `unsafe` は必要最小限に留め理由コメントを付す（`.claude/rules/security.md`）。
 //!
-//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
-//! 要するため別イシューで対応する）では型・実装を持たない。カーネル本体は TASK-1.7 で追加する
-//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.7）。
+//! TASK-1.7a（#32）で、動的ロード・デバイス初期化・NVRTC コンパイルの基盤
+//! （`CudaDevice`・`CudaError`・`compile_ptx`）を追加した。`cudarc` の
+//! `dynamic-loading` feature は `libcuda`/`libnvrtc` が `dlopen` できない
+//! 環境で driver/nvrtc API を直接呼ぶと `Err` ではなく panic するため、
+//! 本クレートの初期化入口（`CudaDevice::new`・`CudaDevice::device_count`・
+//! `compile_ptx`）は `is_culib_present()` による非 panic プローブで
+//! 必ずゲートしてから型付きエラー（`CudaError::DriverUnavailable`／
+//! `NvrtcUnavailable`）を返す（`device.rs`／`nvrtc.rs` のドキュメンテーション
+//! コメント参照）。これにより CUDA 非搭載環境でも panic しない。
+//!
+//! カーネルソース・起動 API（naive/tiled GEMM）は #33/#34、CUDA toolkit
+//! 非搭載ビルドの CI 検証は #35、実機（DGX Spark GB10）依存テストの
+//! `#[ignore]` 分離は #36、`BackendOps`/`BackendError` へのマッピングは
+//! TASK-1.9（#43/#44）のスコープであり、本イシューでは扱わない
+//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7）。
+
+mod device;
+mod error;
+mod nvrtc;
+
+pub use device::CudaDevice;
+pub use error::CudaError;
+pub use nvrtc::compile_ptx;
