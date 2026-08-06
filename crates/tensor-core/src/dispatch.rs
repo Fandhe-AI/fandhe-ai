@@ -85,6 +85,9 @@ pub enum KernelKind {
 /// テクチャ世代対応（WMMA は Volta＝cc 7.0 以降）による**暫定値**であり、
 /// 世代境界の実機再確認は #69（TASK-11.2c）が担当する
 /// （`docs/dispatch-rules-design.md` §2 表・確定度「暫定」欄）。
+/// 実測記録・根拠は `docs/perf/dispatch-boundary-measurement.md` 参照
+/// （#69 時点は cc 7.x 実機が存在せず世代境界自体の実測は据え置き。
+/// 同文書「採用閾値の根拠表」参照）。
 /// `backend-cuda::gemm_wmma::MIN_COMPUTE_CAPABILITY_MAJOR`（`= 7`）と
 /// 値を一致させる契約（本定数が正本。閾値定数は 1 箇所集約する設計
 /// 方針、§3.2「閾値定数は 1 箇所に集約する」）。
@@ -111,6 +114,8 @@ pub const CUDA_TF32_MIN_CC: (i32, i32) = (8, 0);
 /// 等）の実測再検証は #69（TASK-11.2c）が担当する
 /// （`docs/dispatch-rules-design.md` §3.1・§3.2）。CUDA 側には対応する
 /// 形状閾値を設けない非対称設計（§3.2「CUDA との非対称設計の実体」）。
+/// 実測記録・根拠は `docs/perf/dispatch-boundary-measurement.md`
+/// （`crates/backend-metal/tests/dispatch_boundary.rs`）参照。
 pub const METAL_SIMDGROUP_MIN_DIM: u32 = 512;
 
 /// GEMM 実行時に参照するデバイスケイパビリティ（`docs/dispatch-rules-design.md`
