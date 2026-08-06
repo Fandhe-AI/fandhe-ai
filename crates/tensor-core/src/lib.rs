@@ -27,11 +27,17 @@
 //! [`device::DeviceInfo`]）・エラー型（[`device::BackendError`]）を提供する。
 //! 3 バックエンドクレートはいずれも `tensor-core` に依存するため、trait
 //! 定義をここに置き各バックエンド側で実装する依存逆転構成を取る
-//! （`docs/public-api-design.md` §4）。`DeviceBuffer`（デバイス常駐
-//! バッファ）・`BackendOps`（カーネルディスパッチ）は後続タスク
-//! （TASK-1.9b・1.9c）で追加する。
+//! （`docs/public-api-design.md` §4）。
+//!
+//! `buffer`（TASK-1.9b・#45）はデバイス常駐バッファ（[`buffer::DeviceBuffer`]）
+//! と、各バックエンドが実装する確保・アップロード・ダウンロードの共通
+//! 入口（[`buffer::MemoryOps`]）を提供する。解放は各バックエンドの具体
+//! ハンドル型（`Box<dyn buffer::BufferHandle>` の中身）の `Drop` に一本化
+//! する（明示 `free()` API は設けない）。`BackendOps`（カーネル
+//! ディスパッチ本体）は後続タスク（TASK-1.9c・#46）で追加する。
 
 mod broadcast;
+pub mod buffer;
 pub mod device;
 mod element;
 mod error;
@@ -39,6 +45,7 @@ mod ops_shape;
 mod tensor;
 
 pub use broadcast::broadcast_shape;
+pub use buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
 pub use element::Element;
 pub use error::ShapeError;

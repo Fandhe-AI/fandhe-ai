@@ -39,8 +39,14 @@
 //! `README.md` 参照）。f16 向け許容誤差の設計・採用（実質的な許容誤差
 //! 変更でありユーザー承認必須）は #36 のスコープ外として未着手のまま
 //! 残す（`tests/cpu_cuda_parity.rs` 冒頭コメント参照）。
-//! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
-//! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
+//! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::CudaMemory`]）を
+//! 追加した。`tensor_core::buffer::MemoryOps` の CUDA 実装であり、
+//! `CudaDevice` 経由でのみ構築できるため上記の panic 回避ゲートを共有
+//! する。既存の `gemm.rs`（`clone_htod`/`alloc_zeros`/`clone_dtoh`）は
+//! 演算内部にホスト⇔デバイス転送を抱えたままとし、本イシューでは
+//! 載せ替えを行わない（TASK-1.9c・#46 のスコープ）。`BackendOps`
+//! トレイト自体（カーネルディスパッチ）へのフルマッピングも
+//! TASK-1.9c（#46）のスコープであり、本クレートではまだ扱わない
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
 //!
 //! TASK-11.1b（#61）で f16 Tensor Core（WMMA）GEMM カーネル
@@ -93,6 +99,7 @@ mod kernels;
 mod kernels_mma;
 mod kernels_wmma;
 mod kernels_wmma_opt;
+pub mod memory;
 mod nvrtc;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
@@ -100,4 +107,5 @@ pub use error::CudaError;
 pub use gemm::CudaGemm;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
+pub use memory::CudaMemory;
 pub use nvrtc::compile_ptx;
