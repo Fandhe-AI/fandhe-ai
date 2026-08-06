@@ -7,7 +7,7 @@
 //! 分離する（`.claude/rules/coding-rust.md`）。
 
 use backend_cuda::CudaDeviceProvider;
-use tensor_core::device::{Device, DeviceProvider};
+use tensor_core::device::{BackendError, Device, DeviceProvider};
 
 #[test]
 fn enumerate_never_panics_regardless_of_driver_presence() {
@@ -40,6 +40,48 @@ fn select_on_absent_ordinal_returns_typed_error_not_panic() {
     } else {
         assert!(result.is_err());
     }
+}
+
+/// 範囲外 ordinal（不正なリクエスト）と CUDA バックエンド自体が利用不可
+/// （ドライバ不在）を、呼び出し側が variant で区別できることを検証する
+/// （Bugbot #237 指摘 1）。
+#[test]
+fn select_error_variant_distinguishes_invalid_ordinal_from_driver_unavailable() {
+    let provider = CudaDeviceProvider::new();
+
+    let result = provider.select(Device::Cuda(9999));
+
+    match result {
+        Err(BackendError::DeviceUnavailable(_)) => {
+            // ドライバは検出できたが ordinal 9999 が範囲外だった
+            // （＝実機環境で本当に台数を確認できたケース）。
+            assert!(
+                provider.is_available(),
+                "DeviceUnavailable must only occur when the driver itself is available"
+            );
+        }
+        Err(BackendError::CudaUnavailable(_)) => {
+            // ドライバ不在（CI self-hosted の想定パス）。
+            assert!(!provider.is_available());
+        }
+        other => panic!(
+            "select on out-of-range ordinal must return DeviceUnavailable or \
+             CudaUnavailable, got: {other:?}"
+        ),
+    }
+}
+
+/// `is_available` と `enumerate` の整合性を検証する（Bugbot #237 指摘 2）。
+/// `is_available() == true` ならば `enumerate` は必ず非空を返す
+/// （「利用可能」と報告しつつ選択可能なデバイスが 0 件、という矛盾が
+/// 起きないことの確認）。
+#[test]
+fn is_available_is_consistent_with_enumerate() {
+    let provider = CudaDeviceProvider::new();
+
+    let devices = provider.enumerate().expect("enumerate must not error");
+
+    assert_eq!(provider.is_available(), !devices.is_empty());
 }
 
 #[test]

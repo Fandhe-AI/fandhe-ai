@@ -229,7 +229,12 @@ impl DeviceProvider for CudaDeviceProvider {
     }
 
     fn is_available(&self) -> bool {
-        matches!(CudaDevice::device_count(), Ok(count) if count > 0)
+        // `device_count() > 0` だけでは「デバイス数は正だが `enumerate` は
+        // コンテキスト初期化失敗等で全滅させ 0 件を返す」という矛盾が
+        // 生じうる（Bugbot #237 指摘 2）。`enumerate` と同じ探索・除外
+        // ロジック（`probe` 成功のみ数える）を通し、実際に選択可能な
+        // デバイスが 1 件以上あることを条件にする。
+        matches!(self.enumerate(), Ok(devices) if !devices.is_empty())
     }
 
     fn enumerate(&self) -> Result<Vec<DeviceInfo>, BackendError> {
@@ -256,6 +261,20 @@ impl DeviceProvider for CudaDeviceProvider {
                 )));
             }
         };
+        // 範囲外 ordinal（不正なリクエスト）と CUDA バックエンド自体が
+        // 利用不可（ドライバ不在等）を呼び出し側が区別できるよう、
+        // `probe` 前に `device_count()` で ordinal を検証する
+        // （Bugbot #237 指摘 1）。`device_count()` 自体の失敗は
+        // ドライバ不在を意味するため `CudaUnavailable` のまま維持する。
+        let count = match CudaDevice::device_count() {
+            Ok(count) => count,
+            Err(err) => return Err(BackendError::CudaUnavailable(format!("{err}"))),
+        };
+        if ordinal >= count {
+            return Err(BackendError::DeviceUnavailable(format!(
+                "ordinal {ordinal} out of range (found {count} CUDA device(s))"
+            )));
+        }
         Self::probe(ordinal).map_err(|err| BackendError::CudaUnavailable(format!("{err}")))
     }
 }
