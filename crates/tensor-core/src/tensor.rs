@@ -97,7 +97,11 @@ fn row_major_strides(shape: &[usize]) -> Vec<isize> {
 /// 過小アロケーション・境界検査の不整合を招く（OWASP A03 相当の
 /// 不正入力対策。`.claude/rules/security.md`）ため、`usize` の
 /// オーバーフローを検査付きで検出する。
-fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
+///
+/// `pub(crate)`: 演算時 shape 検査（`ops_shape.rs`、#13・TASK-1.4c）が
+/// matmul/reduction の出力 shape 確定時に同じオーバーフロー検査を要求
+/// するため、クレート内で共有する。
+pub(crate) fn checked_numel(shape: &[usize]) -> Result<usize, ShapeError> {
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))

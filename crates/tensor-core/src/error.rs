@@ -1,7 +1,8 @@
 //! `tensor-core` の shape 検査エラー型。
 //!
-//! `ShapeError` はテンソル生成・view 操作・reshape の shape 不整合を
-//! 表す、`tensor-core` の全公開 API が共通して返す型付きエラーである
+//! `ShapeError` はテンソル生成・view 操作・reshape・演算時 shape 検査
+//! （`ops_shape`、TASK-1.4c・#13）の shape 不整合を表す、`tensor-core`
+//! の全公開 API が共通して返す型付きエラーである
 //! （spec 根拠: `docs/public-api-design.md` §2.1.1）。`autodiff` の
 //! `AutodiffError::Shape`・backend 入口の `BackendError::ShapeMismatch`
 //! からラップされる想定（本イシューではラップ側は実装しない）。
@@ -18,9 +19,10 @@ use std::fmt;
 pub enum ShapeError {
     /// 要求される次元数（rank）と実際の次元数が一致しない。
     ///
-    /// 本 variant は `tensor-core` が型定義のみを提供し、本イシュー
-    /// （TASK-1.4a）では構築しない。構築は rank 前提を持つ演算・
-    /// autodiff／backend 入口側の検査（TASK-1.4c 以降、#13）が行う。
+    /// TASK-1.4a（#11）では型定義のみを提供し構築しなかった。本 variant は
+    /// `ops_shape::matmul_out_shape`（TASK-1.4c・#13）が rank ≠ 2 の
+    /// 入力を検出した際に初めて構築する（`docs/public-api-design.md`
+    /// §3.2 の matmul は 2 次元前提）。
     RankMismatch { expected: usize, actual: usize },
 
     /// shape の要素数積とデータ長が一致しない
@@ -67,6 +69,17 @@ pub enum ShapeError {
     /// stride 0 ブロードキャスト方針）。`broadcast_to` 呼び出し時は
     /// `lhs` = 自身の shape・`rhs` = target shape として構築する。
     BroadcastIncompatible { lhs: Vec<usize>, rhs: Vec<usize> },
+
+    /// matmul（`ops_shape::matmul_out_shape`）の内部次元（lhs の最終軸と
+    /// rhs の先頭軸）が一致しない。rank 検査（`RankMismatch`）を通過した
+    /// 2 次元 shape 同士でのみ構築される（TASK-1.4c・#13。
+    /// `docs/public-api-design.md` §3.2）。
+    MatmulDimMismatch { lhs: Vec<usize>, rhs: Vec<usize> },
+
+    /// 厳密一致を要求する演算（`ops_shape::require_same_shape`。
+    /// 例: `mse_loss` の予測値と target）で shape が一致しない
+    /// （TASK-1.4c・#13。`docs/public-api-design.md` §3.2）。
+    ShapeMismatch { lhs: Vec<usize>, rhs: Vec<usize> },
 }
 
 impl fmt::Display for ShapeError {
@@ -106,6 +119,12 @@ impl fmt::Display for ShapeError {
             ),
             ShapeError::BroadcastIncompatible { lhs, rhs } => {
                 write!(f, "cannot broadcast shapes {lhs:?} and {rhs:?}")
+            }
+            ShapeError::MatmulDimMismatch { lhs, rhs } => {
+                write!(f, "matmul dimension mismatch: lhs {lhs:?} rhs {rhs:?}")
+            }
+            ShapeError::ShapeMismatch { lhs, rhs } => {
+                write!(f, "shape mismatch: lhs {lhs:?} rhs {rhs:?}")
             }
         }
     }
