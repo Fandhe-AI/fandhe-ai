@@ -98,8 +98,10 @@ pub const CUDA_WMMA_MIN_CC: (i32, i32) = (7, 0);
 /// 承認まで保留のため、現時点の [`select_gemm_kernel`] 決定表では本定数
 /// は未使用（`cc` ゲートを満たしても f32 は常に [`KernelKind::Tiled`] を
 /// 返す。§4「f32 CUDA TF32: 既定採用を保留」）。将来 TF32 経路が有効化
-/// される際に使う分岐点として先んじて定義のみ行う。
-#[allow(dead_code)]
+/// される際に使う分岐点として先んじて定義のみ行う（`pub mod dispatch`
+/// 配下の `pub const` は外部から到達可能なため `dead_code` lint は元々
+/// 発火しない。#68 レビュー指摘: 何も抑制していない `#[allow(dead_code)]`
+/// を削除した。coding-rust.md「`#[allow]` の安易な追加で黙らせない」）。
 pub const CUDA_TF32_MIN_CC: (i32, i32) = (8, 0);
 
 /// Metal `simdgroup_matrix` 経路を選択する形状下限（`min(M, N, K)`）。
@@ -198,7 +200,21 @@ pub fn select_gemm_kernel(caps: &DeviceCaps, shape: GemmShape, dtype: DType) -> 
     // CUDA compute_capability が Some の呼び出しでは metal_apple7_supported
     // は false（DeviceCaps::cuda コンストラクタ）であるためこの分岐には
     // 入らない。
+    //
+    // 本分岐は dtype を参照しない。`docs/dispatch-rules-design.md` §5.3
+    // の決定表は Metal 行を f32 専用として定義しており（f16 は「該当経路が
+    // 存在しないため本表には含めない」）、唯一の呼び出し元
+    // `MetalGemm::dispatch_backend_auto`（`backend-metal/src/gemm.rs`）も
+    // dtype を F32 固定で呼ぶため現状は到達しない。#68 レビュー指摘:
+    // 将来 Metal f16 経路が追加された際に決定表に定義のない入力組合せを
+    // 暗黙に受理しないよう、ここで明示的に検査する（fail-fast。設計表に
+    // ない組合せを無言で受理するより早期に気付ける方を選ぶ）。
     if caps.metal_apple7_supported {
+        debug_assert_eq!(
+            dtype,
+            DType::F32,
+            "Metal 経路は f32 専用（docs/dispatch-rules-design.md §5.3）。f16 対応時は決定表の拡張が必要"
+        );
         return if shape.min_dim() >= METAL_SIMDGROUP_MIN_DIM {
             KernelKind::MatrixUnit
         } else {
