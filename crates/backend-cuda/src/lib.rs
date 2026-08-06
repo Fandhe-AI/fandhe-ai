@@ -80,13 +80,23 @@
 //! 冒頭コメント「タイル構成」参照。コンパイル未検証環境でのリスク
 //! 最小化判断）。
 //!
-//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA／`mma.sync` の
-//! どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは
-//! 未実装。
+//! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
+//! 追加した。`tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
+//! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
+//! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。TF32/f32
+//! 経路（`CudaGemm::run_wmma_tf32`・#62）・`mma.sync` 経路（`CudaMmaGemm`・
+//! #187）は、決定表（設計文書 §4）が TF32 既定採用を #186（TASK-11.1g）の
+//! ユーザー承認まで保留と定めているため、現時点の `select_gemm_kernel` の
+//! 自動経路には含めない（f32 は常に Tiled）。既存の `CudaGemm`／
+//! `CudaWmmaGemm`／`CudaMmaGemm` の直接指定 API はテスト・証跡用途
+//! （#70）にそのまま温存する（設計文書 §5.4）。`BackendOps` trait への
+//! 結線は TASK-1.9c（#46）のスコープであり、`CudaGemmAuto` はそこから
+//! 呼ばれるだけの構成にできる（`gemm_auto.rs` モジュールコメント参照）。
 
 pub mod device;
 mod error;
 mod gemm;
+mod gemm_auto;
 mod gemm_mma;
 mod gemm_wmma;
 mod kernels;
@@ -98,6 +108,7 @@ mod nvrtc;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+pub use gemm_auto::CudaGemmAuto;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;

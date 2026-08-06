@@ -15,8 +15,9 @@ use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily,
 };
+use tensor_core::dispatch::DeviceCaps;
 
 use crate::error::MetalError;
 
@@ -31,9 +32,18 @@ pub(crate) type MtlQueue = ProtocolObject<dyn MTLCommandQueue>;
 /// 本構造体を土台にして追加される想定であり、公開フィールドは持たせず
 /// アクセサ（[`MetalContext::device`] / [`MetalContext::queue`]）経由に
 /// 限定する。
+///
+/// TASK-11.2b（#68）で `caps`（[`DeviceCaps`]）を追加した。`MTLDevice::
+/// supportsFamily(MTLGPUFamily::Apple7)` の判定結果を `new` 時に 1 回
+/// キャッシュし、[`crate::gemm::MetalGemm::dispatch_backend_auto`] から
+/// `tensor_core::dispatch::select_gemm_kernel` へそのまま渡せるようにする
+/// （`docs/dispatch-rules-design.md` §2.1「判定タイミング: デバイス初期化
+/// 時に 1 回」。ディスパッチ呼び出しごとに `supportsFamily` を再照会
+/// しない）。
 pub struct MetalContext {
     device: Retained<MtlDevice>,
     queue: Retained<MtlQueue>,
+    caps: DeviceCaps,
 }
 
 impl MetalContext {
@@ -41,12 +51,29 @@ impl MetalContext {
     /// 生成する。デバイスが見つからない・キュー生成に失敗した場合は
     /// [`MetalError`] を返す（PoC-v2-4 の `Option` 返しを型付きエラーへ
     /// 置き換え）。
+    ///
+    /// `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)`（`simdgroup_matrix`
+    /// 対応可否の判定材料。`docs/dispatch-rules-design.md` §2 表）もここで
+    /// 1 回だけ評価し [`DeviceCaps`] へキャッシュする（[`Self::caps`]）。
     pub fn new() -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceUnavailable)?;
         let queue = device
             .newCommandQueue()
             .ok_or(MetalError::CommandQueueCreation)?;
-        Ok(Self { device, queue })
+        // `supportsFamily` は objc2-metal が safe メソッドとして提供する
+        // （`MTLDevice.rs` 生成コードに `unsafe` プレフィックスなし。
+        // `device.rs::probe_all` が同様に他の `MTLDevice` メソッドを
+        // unsafe ブロックなしで呼んでいるのと同じ扱い）。判定失敗
+        // （このメソッド自体は bool を返すため失敗はしないが、将来
+        // API が変わり得ない前提を置かない）時は非対応（Apple7 未満）
+        // 扱いに倒す fail-safe とする（§2.2）。
+        let apple7_supported = device.supportsFamily(MTLGPUFamily::Apple7);
+        let caps = DeviceCaps::metal(apple7_supported);
+        Ok(Self {
+            device,
+            queue,
+            caps,
+        })
     }
 
     /// [`crate::buffer::MetalBuffer`] の確保・パイプライン構築
@@ -59,6 +86,13 @@ impl MetalContext {
     /// （TASK-1.8b・#39 のディスパッチ経路から参照される）。
     pub fn queue(&self) -> &MtlQueue {
         &self.queue
+    }
+
+    /// `new` 時にキャッシュした GPU family 判定結果
+    /// （[`crate::gemm::MetalGemm::dispatch_backend_auto`] が
+    /// `select_gemm_kernel` へ渡す `DeviceCaps`。TASK-11.2b・#68）。
+    pub fn caps(&self) -> DeviceCaps {
+        self.caps
     }
 
     /// コンピュートエンコーダを生成し `encode` にディスパッチ内容の記録

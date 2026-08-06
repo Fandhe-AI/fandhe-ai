@@ -26,11 +26,17 @@ use crate::nvrtc::compile_ptx;
 /// WMMA f16 経路が要求する compute capability の下限（major）。
 ///
 /// 設計メモ（`docs/cuda-tensor-core-design.md` 7 節）が記す「WMMA f16 経路は
-/// compute capability 7.0 以降で有効化可能」を実装した定数。`CudaWmmaGemm::new`
-/// はこの下限を NVRTC コンパイル前に検査し、満たさない場合は
-/// `CudaError::TensorCoreUnsupported` を返す（フォールバック判断自体は
-/// TASK-11.2／#66 のディスパッチ規則側の責務）。
-const MIN_COMPUTE_CAPABILITY_MAJOR: i32 = 7;
+/// compute capability 7.0 以降で有効化可能」を実装した契約を、
+/// `tensor_core::dispatch::CUDA_WMMA_MIN_CC`（ディスパッチ規則側の正本
+/// 定数。`docs/dispatch-rules-design.md` §3.2「閾値定数は 1 箇所に集約
+/// する」）の major 値からそのまま導出する。#68 レビュー指摘: 本クレート
+/// 側で独立した定数を持つと #69（TASK-11.2c・閾値実測再確定）で片方のみ
+/// 更新した際に判定不整合が生じうるため、値を複製せず参照する形へ変更
+/// した。`CudaWmmaGemm::new` はこの下限を NVRTC コンパイル前に検査し、
+/// 満たさない場合は `CudaError::TensorCoreUnsupported` を返す
+/// （フォールバック判断自体は TASK-11.2／#66 のディスパッチ規則側の
+/// 責務）。
+const MIN_COMPUTE_CAPABILITY_MAJOR: i32 = tensor_core::dispatch::CUDA_WMMA_MIN_CC.0;
 
 /// `kernels_wmma::WMMA_TILE` に 1:1 対応するブロック次元。
 ///
