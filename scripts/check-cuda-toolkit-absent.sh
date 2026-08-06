@@ -1,0 +1,259 @@
+#!/usr/bin/env bash
+#
+# CUDA toolkit「非搭載」であることを fail-closed で検査する単一ソース
+# （TASK-1.7d・docs/spec/05-tasks.md、イシュー #35）。
+#
+# 背景: backend-cuda は cudarc の dynamic-loading feature による無条件依存＋動的ロード方式
+# （PoC-v2-3・PoC-v2-5）を採用しており、「CUDA toolkit 非搭載環境でもビルドは成立し、
+# 実行時のみ toolkit を要求する」契約である（crates/backend-cuda/src/lib.rs 冒頭コメント）。
+# この契約は runner に toolkit が導入されると暗黙に検証されなくなるため、本スクリプトで
+# 「非搭載であること自体」を機械検査し、CI の build-no-cuda-toolkit ジョブで assert する。
+#
+# 呼び出し元:
+#   - .github/workflows/ci.yml の build-no-cuda-toolkit ジョブ（self-test → assert の順で呼ぶ）
+#   - Makefile の build-no-cuda ターゲット（CI と同一判定をローカル再現。probe でスキップ分岐）
+#
+# 判定対象は toolkit の構成物に限定する（ドライバ libcuda.so は対象外。TASK-1.7d の主旨は
+# 「toolkit 非搭載」の検証であり、ドライバの有無は問わない）:
+#   - nvcc（PATH 上のコンパイラ本体）
+#   - toolkit 標準インストールディレクトリ（/usr/local/cuda*・/opt/cuda*）
+#   - ldconfig 登録済み共有ライブラリ（libnvrtc.so・libcudart.so）
+#   - 環境変数 CUDA_HOME・CUDA_PATH が実在ディレクトリを指す
+#
+# サブコマンド:
+#   probe      非搭載なら exit 0・搭載なら exit 1（メッセージなし。Makefile のスキップ分岐用）
+#   assert     搭載を検出したら検出内容を明示して exit 1（CI 用 fail-closed）
+#   self-test  検査ロジック自体の退行検出。偽 nvcc・偽 ldconfig をスタブ注入し「搭載」判定に
+#              なること／全注入変数を「存在しない」値に固定し「非搭載」判定になることを検証する
+#              （実環境の toolkit 有無に依存しないヘルメティックな self-test）。加えて、
+#              先頭行でマッチしつつパイプバッファ（既定 64KiB）超の出力を続ける偽 ldconfig
+#              スタブでも「搭載」判定になることを検証し、grep -q とパイプ経由読み取りの
+#              組み合わせによる pipefail 誤検知（Bugbot 指摘・PR #249 / イシュー #35）の
+#              再発を防ぐ。さらに CUDA_ROOT_GLOBS のディレクトリスキャン検出と
+#              CUDA_HOME・CUDA_PATH 環境変数検出のそれぞれについても陽性系（実在ディレクトリ
+#              を指す場合に「搭載」判定になること）を検証し、この 2 分岐が他分岐の無効化のみで
+#              素通りしないようにする（Bugbot 指摘・PR #249 / イシュー #35）。加えて、
+#              ldconfig 出力が libcudart.so のみを含み libnvrtc.so を含まないケースでも
+#              単独で「搭載」判定になることを検証し、libcudart.so 検出分岐（detect_toolkit
+#              内の 4 検出カテゴリの 1 つ）が libnvrtc.so 分岐の陽性のみに隠れて未検証のまま
+#              退行しないようにする（Bugbot 指摘・PR #249 / イシュー #35、review comment
+#              3728427431）
+#
+# 環境変数（self-test 用の注入ポイント。通常運用では既定値のまま使う）:
+#   NVCC_BIN         nvcc コマンド名／パス（既定: nvcc）
+#   LDCONFIG_BIN      ldconfig コマンド名／パス（既定: ldconfig）
+#   CUDA_ROOT_GLOBS  toolkit 標準インストールディレクトリの glob（空白区切り。既定は下記）
+set -euo pipefail
+
+NVCC_BIN="${NVCC_BIN:-nvcc}"
+LDCONFIG_BIN="${LDCONFIG_BIN:-ldconfig}"
+CUDA_ROOT_GLOBS="${CUDA_ROOT_GLOBS:-/usr/local/cuda* /opt/cuda*}"
+
+usage() {
+  echo "usage: $0 {probe|assert|self-test}" >&2
+  exit 2
+}
+
+# toolkit 構成物の検出結果を改行区切りで標準出力へ書き出す（空なら非搭載）。
+# probe / assert / self-test の全モードから共通で呼ぶことで検出ロジックを一元化する。
+detect_toolkit() {
+  local found=""
+
+  if command -v "${NVCC_BIN}" >/dev/null 2>&1; then
+    found="${found}nvcc: $(command -v "${NVCC_BIN}")"$'\n'
+  fi
+
+  # shellcheck disable=SC2086 # CUDA_ROOT_GLOBS は空白区切りの glob 列として展開する意図
+  for root in ${CUDA_ROOT_GLOBS}; do
+    if [ -d "${root}" ]; then
+      found="${found}toolkit ディレクトリ: ${root}"$'\n'
+    fi
+  done
+
+  if command -v "${LDCONFIG_BIN}" >/dev/null 2>&1; then
+    local ldconfig_out
+    ldconfig_out=$("${LDCONFIG_BIN}" -p 2>/dev/null || true)
+    # here-string（`<<<`）でパイプを介さず grep に渡す。`echo ... | grep -q` は
+    # grep が最初のマッチで即終了するため、出力がパイプバッファ（既定 64KiB）を
+    # 超える環境では上流の echo が SIGPIPE で打ち切られ、pipefail 下で
+    # マッチ成立時にも非ゼロ終了となりうる（fail-closed 判定の意図しない弱化）。
+    if grep -q 'libnvrtc\.so' <<<"${ldconfig_out}"; then
+      found="${found}ldconfig: libnvrtc.so 登録あり"$'\n'
+    fi
+    if grep -q 'libcudart\.so' <<<"${ldconfig_out}"; then
+      found="${found}ldconfig: libcudart.so 登録あり"$'\n'
+    fi
+
+    # 情報表示のみ（判定には使わない）。libcuda.so はドライバであり toolkit ではないため
+    # 「非搭載」判定を左右してはならない（TASK-1.7d の主旨に判定を限定する）。上記と
+    # 同一の ldconfig_out を再利用し、ldconfig -p の二重呼び出しを避ける。
+    if grep -q 'libcuda\.so' <<<"${ldconfig_out}"; then
+      echo "情報: libcuda.so（ドライバ）を検出しましたが、toolkit ではないため判定対象外です" >&2
+    fi
+  fi
+
+  if [ -n "${CUDA_HOME:-}" ] && [ -d "${CUDA_HOME}" ]; then
+    found="${found}CUDA_HOME: ${CUDA_HOME}"$'\n'
+  fi
+  if [ -n "${CUDA_PATH:-}" ] && [ -d "${CUDA_PATH}" ]; then
+    found="${found}CUDA_PATH: ${CUDA_PATH}"$'\n'
+  fi
+
+  printf '%s' "${found}"
+}
+
+cmd_probe() {
+  local found
+  found=$(detect_toolkit)
+  [ -z "${found}" ]
+}
+
+cmd_assert() {
+  local found
+  found=$(detect_toolkit)
+  if [ -n "${found}" ]; then
+    echo "::error::CUDA toolkit の構成物を検出しました。本ジョブは toolkit 非搭載環境での検証を前提とする。runner へ toolkit を導入した場合はコンテナ内検証への切替を検討すること（TASK-1.7d・イシュー #35）:" >&2
+    echo "${found}" >&2
+    return 1
+  fi
+  echo "OK: CUDA toolkit の構成物は検出されませんでした（非搭載を確認）"
+}
+
+# 検査ロジック自体の退行（判定条件の破損等）を、実環境の toolkit 有無に依存せず検出する。
+self_test() {
+  local failed=0
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # shellcheck disable=SC2064 # tmpdir はこの時点の値で固定して trap に渡す意図
+  trap "rm -rf '${tmpdir}'" RETURN
+
+  # (a) 偽 nvcc スタブを注入 → 「搭載」判定になること
+  local fake_nvcc="${tmpdir}/nvcc"
+  printf '#!/bin/sh\necho fake-nvcc\n' >"${fake_nvcc}"
+  chmod +x "${fake_nvcc}"
+  if (NVCC_BIN="${fake_nvcc}" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(a) 偽 nvcc 注入時に非搭載（probe 成功）と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(a) 偽 nvcc 注入時に搭載と判定されました"
+  fi
+
+  # (b) libnvrtc.so を出力するだけの偽 ldconfig スタブを注入 → 「搭載」判定になること
+  local fake_ldconfig="${tmpdir}/ldconfig"
+  printf '#!/bin/sh\necho "\tlibnvrtc.so.12 (libc6,x86-64) => /fake/libnvrtc.so.12"\n' >"${fake_ldconfig}"
+  chmod +x "${fake_ldconfig}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="${fake_ldconfig}" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(b) 偽 ldconfig（libnvrtc.so 登録）注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(b) 偽 ldconfig（libnvrtc.so 登録）注入時に搭載と判定されました"
+  fi
+
+  # (b2) libcudart.so のみを出力する偽 ldconfig スタブを注入 → 「搭載」判定になること
+  # （libnvrtc.so は含めず、libcudart.so 検出分岐単独の陽性を検証する。この分岐は
+  # (b) の libnvrtc.so 陽性の裏で一度も単独検証されていなかった。Bugbot 指摘・
+  # PR #249 / イシュー #35、review comment 3728427431）
+  local fake_ldconfig_cudart="${tmpdir}/ldconfig-cudart"
+  printf '#!/bin/sh\necho "\tlibcudart.so.12 (libc6,x86-64) => /fake/libcudart.so.12"\n' >"${fake_ldconfig_cudart}"
+  chmod +x "${fake_ldconfig_cudart}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="${fake_ldconfig_cudart}" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(b2) 偽 ldconfig（libcudart.so 登録）注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(b2) 偽 ldconfig（libcudart.so 登録）注入時に搭載と判定されました"
+  fi
+
+  # (c) 全注入変数を「存在しない」値に固定 → 「非搭載」判定になること
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "OK: self-test(c) 全注入変数「存在しない」時に非搭載と判定されました"
+  else
+    echo "NG: self-test(c) 全注入変数「存在しない」時に搭載と誤判定されました（退行）" >&2
+    failed=1
+  fi
+
+  # (d) libnvrtc.so の登録行を先頭に置き、その後にパイプバッファ（既定 64KiB）を
+  # 超える大量の埋め草行を出力する偽 ldconfig スタブを注入 → 「搭載」判定になること。
+  # `echo ... | grep -q` のような形（本スクリプトでは here-string 化済み）は
+  # grep が先頭でマッチして即終了し、埋め草行を書き切る前に上流が SIGPIPE で
+  # 打ち切られると pipefail 下で誤って「非搭載」判定になりうる退行を検出する
+  # （Bugbot 指摘・PR #249 / イシュー #35）。
+  local fake_ldconfig_large="${tmpdir}/ldconfig-large"
+  {
+    printf '#!/bin/sh\n'
+    printf 'echo "\tlibnvrtc.so.12 (libc6,x86-64) => /fake/libnvrtc.so.12"\n'
+    printf 'i=0\n'
+    # shellcheck disable=SC2016 # 生成先スクリプト内で展開させたい変数参照のため意図的にシングルクォート
+    printf 'while [ "$i" -lt 4000 ]; do\n'
+    # shellcheck disable=SC2016 # 同上
+    printf '  echo "\tlibfiller%%d.so.1 (libc6,x86-64) => /fake/libfiller%%d.so.1" "$i" "$i"\n'
+    # shellcheck disable=SC2016 # 同上
+    printf '  i=$((i + 1))\n'
+    printf 'done\n'
+  } >"${fake_ldconfig_large}"
+  chmod +x "${fake_ldconfig_large}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="${fake_ldconfig_large}" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(d) 大量出力＋先頭マッチの偽 ldconfig 注入時に非搭載と判定されました（pipefail 退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(d) 大量出力＋先頭マッチの偽 ldconfig 注入時に搭載と判定されました"
+  fi
+
+  # (e) 実在する一時ディレクトリを CUDA_ROOT_GLOBS に注入 → 「搭載」判定になること
+  # （nvcc・ldconfig・CUDA_HOME・CUDA_PATH は全て「存在しない」値に固定し、この分岐単独の
+  # 検出を検証する。Bugbot 指摘・PR #249 / イシュー #35）
+  local fake_cuda_root="${tmpdir}/cuda-root"
+  mkdir -p "${fake_cuda_root}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="${fake_cuda_root}" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(e) 実在する CUDA_ROOT_GLOBS ディレクトリ注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(e) 実在する CUDA_ROOT_GLOBS ディレクトリ注入時に搭載と判定されました"
+  fi
+
+  # (f) 実在する一時ディレクトリを CUDA_HOME・CUDA_PATH に注入 → 「搭載」判定になること
+  # （nvcc・ldconfig・CUDA_ROOT_GLOBS は全て「存在しない」値に固定し、この分岐単独の
+  # 検出を検証する。Bugbot 指摘・PR #249 / イシュー #35）
+  local fake_cuda_home="${tmpdir}/cuda-home"
+  mkdir -p "${fake_cuda_home}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="${fake_cuda_home}" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(f) 実在する CUDA_HOME 注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(f) 実在する CUDA_HOME 注入時に搭載と判定されました"
+  fi
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="${fake_cuda_home}" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(f) 実在する CUDA_PATH 注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(f) 実在する CUDA_PATH 注入時に搭載と判定されました"
+  fi
+
+  if [ "${failed}" -ne 0 ]; then
+    echo "NG: self-test に失敗しました" >&2
+    return 1
+  fi
+  echo "OK: self-test すべて成功"
+}
+
+case "${1:-}" in
+probe)
+  cmd_probe
+  ;;
+assert)
+  cmd_assert
+  ;;
+self-test)
+  self_test
+  ;;
+*)
+  usage
+  ;;
+esac

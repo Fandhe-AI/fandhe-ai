@@ -25,6 +25,13 @@
 # CUDA 実機（DGX Spark GB10）・Metal 実機依存のテストは #[ignore] で分離されている前提
 # （.claude/rules/coding-rust.md）であり、本ワークフローでは実行しない。
 #
+# build-no-cuda-toolkit ジョブ（TASK-1.7d・イシュー #35）は、build ジョブとは異なり
+# 「CUDA toolkit が非搭載であること自体」を scripts/check-cuda-toolkit-absent.sh の assert
+# サブコマンドで fail-closed 検証したうえで cargo build を実行する。build ジョブは
+# runner の toolkit 搭載状況に関わらず常に green になるため、「toolkit 非搭載環境での
+# ビルド成立」という TASK-1.7 の維持条件（cudarc の dynamic-loading 動的ロード契約）を
+# 暗黙の前提のまま検証されないリスクがある。本ジョブはその前提自体を機械検査に変える。
+#
 # build ジョブ（TASK-2.1b・イシュー #50）は「両プラットフォームで cargo build が green」
 # という受け入れ条件に対応する。macOS 側 self-hosted runner は未登録（repo レベル runner
 # 0 件・既存ジョブは全て Linux self-hosted 上で実行）であり、GitHub ホステッド
@@ -277,6 +284,63 @@ jobs:
         run: cargo check -p backend-metal --tests --target aarch64-apple-darwin
 
   # --------------------------------------------------
+  # CUDA toolkit 非搭載環境でのビルド成立検証（TASK-1.7d・イシュー #35）。
+  # scripts/check-cuda-toolkit-absent.sh（Makefile の build-no-cuda ターゲットと共用する
+  # 単一ソース）で「toolkit 非搭載であること自体」を fail-closed で検証したうえで
+  # cargo build を実行する。runner に将来 toolkit が導入された場合はこのジョブが失敗し、
+  # コンテナ内検証への切替が必要になったことを検知できる。
+  # --------------------------------------------------
+  build-no-cuda-toolkit:
+    name: cargo build (CUDA toolkit 非搭載検証)
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # 検査ロジック自体の退行を、実環境の toolkit 有無に関わらず常時検出する
+      # （deps-forbidden ジョブと同一方針）。cargo 不要のため無条件実行する。
+      - name: 検査ロジックの self-test
+        run: bash scripts/check-cuda-toolkit-absent.sh self-test
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため cargo build（toolkit 非搭載検証）をスキップしました（workspace 作成後に有効化されます）"
+          fi
+
+      # fail-closed: runner に toolkit が導入されていれば「非搭載環境での検証」という
+      # 本ジョブの前提が成立しないため、cargo build の前に明示的に失敗させる。
+      - name: CUDA toolkit 非搭載の検証
+        run: bash scripts/check-cuda-toolkit-absent.sh assert
+
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: cargo build（toolkit 非搭載）
+        if: steps.detect.outputs.has_cargo == 'true'
+        # --locked で Cargo.lock の意図しない書き換え・runner 汚染を防止する（build ジョブと同一方針）。
+        run: cargo build --workspace --locked
+
+  # --------------------------------------------------
   # cargo deny（依存ライセンス・供給元の監査。deny.toml 追加済み・TASK-1.3 で有効化済み）
   # --------------------------------------------------
   deny:
@@ -401,7 +465,7 @@ jobs:
     runs-on: self-hosted
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
     if: ${{ always() }}
-    needs: [fmt, clippy, test, build, deny, deps-forbidden]
+    needs: [fmt, clippy, test, build, build-no-cuda-toolkit, deny, deps-forbidden]
     timeout-minutes: 5
     steps:
       - name: 完遂判定（全 needs ジョブが success であること）
@@ -410,12 +474,13 @@ jobs:
           RESULT_CLIPPY: ${{ needs.clippy.result }}
           RESULT_TEST: ${{ needs.test.result }}
           RESULT_BUILD: ${{ needs.build.result }}
+          RESULT_BUILD_NO_CUDA_TOOLKIT: ${{ needs.build-no-cuda-toolkit.result }}
           RESULT_DENY: ${{ needs.deny.result }}
           RESULT_DEPS_FORBIDDEN: ${{ needs.deps-forbidden.result }}
         run: |
           set -euo pipefail
           ok=1
-          for pair in "fmt:${RESULT_FMT}" "clippy:${RESULT_CLIPPY}" "test:${RESULT_TEST}" "build:${RESULT_BUILD}" "deny:${RESULT_DENY}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}"; do
+          for pair in "fmt:${RESULT_FMT}" "clippy:${RESULT_CLIPPY}" "test:${RESULT_TEST}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deny:${RESULT_DENY}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             if [ "${result}" != "success" ]; then

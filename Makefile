@@ -141,6 +141,25 @@ else
 	@echo "skip: Cargo.toml 未追加のため build-cross をスキップ"
 endif
 
+# CUDA toolkit「非搭載」であることを scripts/check-cuda-toolkit-absent.sh（ci.yml の
+# build-no-cuda-toolkit ジョブと共用する単一ソース）で検証したうえで cargo build を実行する
+# （TASK-1.7d・イシュー #35）。CUDA 実機（DGX Spark GB10 等）で toolkit 搭載環境から
+# `make ci` を実行しても壊れないよう、probe でスキップ分岐する（CI ジョブ側は assert で
+# fail-closed のまま。toolkit 非搭載が確定した環境での検証は `make docker-ci` を使う）。
+.PHONY: build-no-cuda
+build-no-cuda: ## CUDA toolkit 非搭載環境でのビルド成立検証（TASK-1.7d。搭載環境ではスキップ）
+ifdef HAS_CARGO
+	@bash scripts/check-cuda-toolkit-absent.sh self-test
+	@if bash scripts/check-cuda-toolkit-absent.sh probe; then \
+		bash scripts/check-cuda-toolkit-absent.sh assert; \
+		cargo build --workspace --locked; \
+	else \
+		echo "skip: CUDA toolkit 搭載環境のため非搭載検証をスキップ（make docker-ci で検証可能）"; \
+	fi
+else
+	@echo "skip: Cargo.toml 未追加のため build-no-cuda をスキップ"
+endif
+
 # TASK-1.8e（イシュー #42）: `backend-metal` の `#[ignore]` 実機テスト（本ファイルの
 # `tests/`）を Linux CI でも型検査する。`--workspace --all-targets` は bench-harness の
 # dev-dependencies 経由で criterion → alloca（macOS ターゲットではネイティブ C ビルドが
@@ -191,7 +210,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross check-cross-metal-tests test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）
