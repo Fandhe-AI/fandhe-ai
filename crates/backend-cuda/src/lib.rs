@@ -48,10 +48,20 @@
 //! （#60）で確定済み（方式 A: `#include <mma.h>` の WMMA C++ API・
 //! `m16n16k16` fragment・f32 アキュムレート）。naive／tiled 経路
 //! （`kernels.rs`／`gemm.rs`）とは別ファイル（`kernels_wmma.rs`／
-//! `gemm_wmma.rs`）に分離しており、ディスパッチ規則（どの経路をいつ
-//! 選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
-//! TF32/f32 tensor core 経路（#62）・共有メモリ／タイル基本最適化（#63）・
-//! 実機実測での数値一致検証（#64）は本イシューのスコープ外である
+//! `gemm_wmma.rs`）に分離している。
+//!
+//! TASK-11.1c（#62）で WMMA（Tensor Core）を用いた TF32/f32 GEMM
+//! （[`CudaGemm::run_wmma_tf32`]）を追加した。設計は `docs/cuda-tensor-core-design.md`
+//! （#60）を正本とし、fragment `m16n16k8`（TF32 精度・f32 累算）・方式 A
+//! （WMMA C++ API `<mma.h>`）を採用する（REQ-11）。TF32 は f32 の仮数部
+//! 23bit を 10bit に丸めて Tensor Core へ投入するため、統一複合判定
+//! （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は TF32 前提の複合指標
+//! として適用する（REQ-2、`.claude/rules/coding-rust.md`）。f16 WMMA 経路
+//! （#61）とは異なり、TF32 経路は naive／tiled 経路と同じ `kernels.rs`／
+//! `gemm.rs` に実装している。
+//! 共有メモリ・タイル基本最適化（レジスタブロッキング・ダブルバッファ
+//! リング・ベクトル化ロード）は #63、実機実測での数値一致検証は #64 の
+//! スコープであり、いずれも本クレートは経路の提供までを扱う
 //! （`docs/cuda-tensor-core-design.md` 参照）。
 //!
 //! TASK-11.1h（#187）で `mma.sync`/`ldmatrix`/`cp.async` PTX 直叩き経路
@@ -59,10 +69,11 @@
 //! compute capability 8.0+ ゲートを持つ独立経路であり、`kernels_mma.rs`／
 //! `gemm_mma.rs` に分離している（並行 issue #62/#63 が `gemm.rs`／
 //! `gemm_wmma.rs`／`kernels.rs`／`kernels_wmma.rs` を編集中のため）。
-//! ディスパッチ規則（どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープ
-//! であり本クレートでは未実装。XOR swizzle によるバンクコンフリクト低減
-//! は未実装（`kernels_mma.rs` 冒頭コメント「タイル構成」参照。コンパイル
-//! 未検証環境でのリスク最小化判断）。
+//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA／`mma.sync` の
+//! どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは
+//! 未実装。XOR swizzle によるバンクコンフリクト低減は未実装
+//! （`kernels_mma.rs` 冒頭コメント「タイル構成」参照。コンパイル未検証
+//! 環境でのリスク最小化判断）。
 
 pub mod device;
 mod error;
