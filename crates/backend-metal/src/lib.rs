@@ -30,11 +30,14 @@
 //! TASK-1.8a（#38）でデバイス・コマンドキュー・バッファ管理の基盤（[`context::MetalContext`]・
 //! [`buffer::MetalBuffer`]・[`error::MetalError`]）を実装済み。TASK-1.8b（#39）で MSL 実行時
 //! コンパイル・パイプライン構築（[`pipeline`]）・naive GEMM ディスパッチ経路（[`gemm::MetalGemm`]）
-//! を追加した。simdgroup カーネルは TASK-1.8c（#40）で追加する（spec 根拠:
-//! `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//! を追加した。TASK-1.8c（#40）で tiled・simdgroup カーネル（[`gemm::GemmVariant`]・
+//! [`gemm::MetalGemm::dispatch_variant`]）と 8 の倍数パディングユーティリティ（[`pad`]）を
+//! 追加し、`shaders/gemm.metal` の naive/tiled/simdgroup 3 段すべてを実装済みにした
+//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
 //!
 //! 非 macOS 環境ではモジュールごとコンパイル対象外になる（feature フラグなしの cfg ベース。
-//! PoC-v2-5 実証構成・REQ-2）。
+//! PoC-v2-5 実証構成・REQ-2）。[`pad`] のみ `objc2` 系 FFI に触れない純粋関数群のため
+//! `cfg(target_os = "macos")` を付けず、Linux（CI・本実装環境）でも単体テストが回る。
 //!
 //! TASK-1.9a（#44）で [`device`] モジュール（[`device::MetalDeviceProvider`]）を追加した。
 //! `tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
@@ -53,6 +56,7 @@ pub mod device;
 pub mod error;
 #[cfg(target_os = "macos")]
 pub mod gemm;
+pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
 
@@ -78,4 +82,4 @@ pub use device::MetalDeviceProvider;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
-pub use gemm::MetalGemm;
+pub use gemm::{GemmVariant, MetalGemm};

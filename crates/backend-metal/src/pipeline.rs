@@ -4,8 +4,9 @@
 //! を `include_str!` で埋め込み、[`crate::context::MetalContext`] が保持
 //! するデバイス上で `newLibraryWithSource_options_error` によりコンパイル
 //! し、関数名から `MTLComputePipelineState` を構築する。#40（TASK-1.8c）
-//! で simdgroup 版パイプラインを併設する際も本モジュールの
-//! [`compile_library`]・[`make_pipeline`] を再利用できるようにする。
+//! で [`crate::gemm::MetalGemm::new`] が本モジュールの [`compile_gemm_library`]・
+//! [`make_pipeline`] を 3 回呼んで `gemm_tiled`・`gemm_simdgroup` の
+//! パイプラインも併設した（naive 版と同じ関数を再利用）。
 //!
 //! **移植元**: `docs/spec/03-poc/poc-v2-4-metal-gemm/code/rust/src/metal_gemm.rs`
 //! の `MetalGemm::new`（コンパイル・パイプライン構築部分）。PoC は
@@ -31,7 +32,7 @@ use objc2_metal::{
 use crate::context::MtlDevice;
 use crate::error::MetalError;
 
-/// `shaders/gemm.metal` のソース（naive GEMM カーネルを含む）。
+/// `shaders/gemm.metal` のソース（naive・tiled・simdgroup の 3 段カーネルを含む）。
 const GEMM_MSL_SRC: &str = include_str!("shaders/gemm.metal");
 
 pub(crate) type MtlLibrary = ProtocolObject<dyn MTLLibrary>;
@@ -39,7 +40,7 @@ pub(crate) type MtlPipeline = ProtocolObject<dyn MTLComputePipelineState>;
 
 /// `shaders/gemm.metal` を実行時コンパイルして `MTLLibrary` を返す。
 ///
-/// [`crate::gemm::naive`] から、パイプライン構築（[`make_pipeline`]）の
+/// [`crate::gemm::MetalGemm::new`] から、パイプライン構築（[`make_pipeline`]）の
 /// 前段として呼ばれる。エラー時の `message` は `NSError` の
 /// `localizedDescription`（構文エラー等の診断文字列）を保持する。
 pub(crate) fn compile_gemm_library(device: &MtlDevice) -> Result<Retained<MtlLibrary>, MetalError> {
@@ -71,8 +72,8 @@ pub(crate) fn compile_options() -> Retained<objc2_metal::MTLCompileOptions> {
 }
 
 /// `library` から `function_name` の関数を取得し `MTLComputePipelineState`
-/// を構築する。[`crate::gemm::naive`] から `"gemm_naive"` を指定して呼ば
-/// れる。#40（TASK-1.8c）が `"gemm_simdgroup"` で再利用する想定。
+/// を構築する。[`crate::gemm::MetalGemm::new`] から `GemmVariant::function_name()`
+/// （`"gemm_naive"`/`"gemm_tiled"`/`"gemm_simdgroup"`）を指定して 3 回呼ばれる。
 pub(crate) fn make_pipeline(
     device: &MtlDevice,
     library: &MtlLibrary,
