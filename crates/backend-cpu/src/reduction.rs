@@ -223,7 +223,20 @@ pub fn sum(a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, ReduceErr
             };
             vec![total]
         }
-        Some(axis) => axis_reduce(a, axis, 0.0, |acc, v| acc + v),
+        Some(axis) => {
+            let shape = a.shape();
+            // `outer*inner`（`axis_reduce` 内部の `total_out` 計算）は無検査の
+            // `*` だと 0 次元を挟む shape でオーバーフローしうる（max/mean と
+            // 同じ理由。Review 指摘 #23）。呼び出し前に checked_mul で検査し、
+            // オーバーフロー時は panic ではなく型付きエラーを返す
+            // （`.claude/rules/coding-rust.md`「本番経路で unwrap/expect を使わない」）。
+            let outer = checked_product(&shape[..axis])?;
+            let inner = checked_product(&shape[axis + 1..])?;
+            outer
+                .checked_mul(inner)
+                .ok_or(ReduceError::Shape(ShapeError::ElementCountOverflow))?;
+            axis_reduce(a, axis, 0.0, |acc, v| acc + v)
+        }
     };
     Tensor::new(data, &out_shape).map_err(ReduceError::Shape)
 }
@@ -387,6 +400,22 @@ mod tests {
         assert!(matches!(
             mean(&t, None).unwrap_err(),
             ReduceError::EmptyReduction { op: "mean" }
+        ));
+    }
+
+    #[test]
+    fn sum_axis_overflow_returns_error_not_panic() {
+        // Review 指摘（#23）の再現ケース: shape [1<<40, 0, 1<<40], axis=1 は
+        // `checked_numel`（tensor-core）が 0 次元で早期に 0 を経由するため
+        // `Tensor::zeros` 自体は成功するが、`outer * inner`
+        // （= (1<<40) * (1<<40)）は usize 上でオーバーフローする。
+        // max/mean と同様、sum も panic ではなく型付きエラーを返す契約を検証する
+        // （axis_reduce 呼び出し前の checked_mul 検査。reduction.rs:226 付近）。
+        let t = Tensor::<f32>::zeros(&[1usize << 40, 0, 1usize << 40]).unwrap();
+        let err = sum(&t, Some(1)).unwrap_err();
+        assert!(matches!(
+            err,
+            ReduceError::Shape(ShapeError::ElementCountOverflow)
         ));
     }
 
