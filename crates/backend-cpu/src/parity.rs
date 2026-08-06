@@ -116,7 +116,15 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         let scale = xf.abs().max(yf.abs()).max(1e-12);
         let rel = diff / scale;
 
-        let fail = rel >= RELATIVE_TOLERANCE && diff >= ABSOLUTE_RESCUE_THRESHOLD;
+        // 合格条件（REQ-2）を肯定形で先に判定し、その否定を fail とする
+        // （`autodiff::poc_v2_2_parity::composite_close` と同方針）。
+        // NaN vs 有限値・Inf vs 有限値等で `rel`/`diff` が NaN になる場合、
+        // `<` 比較は IEEE 754 上つねに false になるため合格条件が成立せず
+        // fail 側に倒れる。旧実装（`rel >= tol && diff >= tol` を fail と
+        // する否定形）はこの NaN ケースで両辺 false となり誤って合格判定
+        // してしまっていた（Cursor Bugbot 指摘・PR #239）。
+        let pass = rel < RELATIVE_TOLERANCE || diff < ABSOLUTE_RESCUE_THRESHOLD;
+        let fail = !pass;
         if fail {
             fail_count += 1;
         }
@@ -279,6 +287,30 @@ mod tests {
     fn falsification_large_diff_is_detected() {
         let a = [1.0f32, 2.0, 3.0];
         let b = [1.0f32, 2.0, 30.0]; // 3.0 vs 30.0: 相対誤差・絶対誤差とも大
+        let report = compare(&a, &b).unwrap();
+        assert!(!report.passes());
+        assert_eq!(report.fail_count, 1);
+    }
+
+    #[test]
+    fn falsification_nan_mismatch_is_detected() {
+        // PR #239 Cursor Bugbot 指摘の回帰テスト: NaN vs 有限値は
+        // `rel`/`diff` が NaN になり `<` 比較がつねに false になるため、
+        // 合格条件不成立で fail 側に倒れなければならない
+        // （旧実装の `>=` 否定形では両辺 false となり誤って合格していた）。
+        let a = [1.0f32, f32::NAN, 3.0];
+        let b = [1.0f32, 2.0, 3.0];
+        let report = compare(&a, &b).unwrap();
+        assert!(!report.passes());
+        assert_eq!(report.fail_count, 1);
+    }
+
+    #[test]
+    fn falsification_infinite_vs_finite_mismatch_is_detected() {
+        // Inf vs 有限値も同様に diff/rel が非有限になり NaN 比較と
+        // 同じ落とし穴を持つため、独立に回帰させる。
+        let a = [1.0f32, f32::INFINITY, 3.0];
+        let b = [1.0f32, 2.0, 3.0];
         let report = compare(&a, &b).unwrap();
         assert!(!report.passes());
         assert_eq!(report.fail_count, 1);
