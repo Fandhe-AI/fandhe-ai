@@ -8,6 +8,13 @@
 # 許容依存 8 区分（.claude/rules/deps-policy.md）は下記 [workspace.dependencies] で
 # =x.y.z 完全固定として一元導入済み（TASK-1.1b・イシュー #5）。8 区分以外の新規追加・
 # 既存依存のバージョン更新は本ファイルで行わず、ユーザー承認を経た別イシューで対応する。
+#
+# バックエンド切替は feature フラグなしの cfg ベース構成（PoC-v2-5 実証構成。REQ-2）を
+# ライブラリの正式な切替機構として採用する（TASK-2.1a・イシュー #49）。`cudarc`（CUDA）は
+# 無条件依存＋動的ロード方式（`crates/backend-cuda/Cargo.toml`）、`objc2` 系（Metal）は
+# `[target.'cfg(target_os = "macos")'.dependencies]`（`crates/backend-metal/Cargo.toml`）で
+# 非 macOS ビルドから除外する。cfg 分岐は各クレートの Cargo.toml に閉じ、本ファイルの
+# 依存バージョン・feature 指定自体は変更しない（PoC-v2-5 突合済み・機能フラグなし）。
 
 [workspace]
 resolver = "3"
