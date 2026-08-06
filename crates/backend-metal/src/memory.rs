@@ -86,8 +86,19 @@ fn checked_numel(shape: &[usize]) -> Result<usize, MetalError> {
     shape
         .iter()
         .try_fold(1usize, |acc, &dim| acc.checked_mul(dim))
-        .ok_or(MetalError::AllocationSizeOverflow {
-            len: shape.iter().product(),
+        .ok_or_else(|| {
+            // エラー値構築のために `shape.iter().product()`（checked 乗算）を
+            // 再計算しない。`try_fold` が既に検知したのと同じオーバーフロー
+            // 乗算を `product()` で踏むと、debug プロファイル
+            // （overflow-checks 既定 ON）ではここ自体が
+            // `attempt to multiply with overflow` で panic し、本関数が
+            // 防御対象とする入力（shape 由来のオーバーフロー）で目的を
+            // 果たせなくなる（CPU/CUDA 版の `ok_or_else` + 遅延評価パターンに
+            // 揃える）。`wrapping_mul` は overflow-checks の影響を受けず
+            // panic しないため、参考値としての近似 len を安全に算出できる。
+            MetalError::AllocationSizeOverflow {
+                len: shape.iter().fold(1usize, |acc, &dim| acc.wrapping_mul(dim)),
+            }
         })
 }
 
@@ -144,6 +155,16 @@ impl MemoryOps for MetalMemory {
     }
 
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+        // ハンドル型不一致（他バックエンドの `DeviceBuffer` を誤って
+        // 渡した場合）は、CPU 実装（`backend-cpu/src/memory.rs`）と
+        // 同じ `BackendError::DeviceMismatch` に統一する。`MetalError`
+        // には「デバイス確保失敗」「デバイス利用不可」等の既存 variant
+        // しかなく、`map_metal_error` を経由すると実態と異なるエラー種別
+        // （`DeviceUnavailable`）に化けてしまうため、ここで直接判定する
+        // （3 バックエンド共通のハンドル型不一致検出。レビュー指摘対応）。
+        if buffer.downcast_handle::<MetalBufferHandle>().is_none() {
+            return Err(BackendError::DeviceMismatch);
+        }
         self.download_inner(buffer).map_err(map_metal_error)
     }
 }

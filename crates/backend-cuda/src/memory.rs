@@ -179,6 +179,16 @@ impl MemoryOps for CudaMemory {
     }
 
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+        // ハンドル型不一致（他バックエンドの `DeviceBuffer` を誤って
+        // 渡した場合）は、CPU 実装（`backend-cpu/src/memory.rs`）と
+        // 同じ `BackendError::DeviceMismatch` に統一する。`CudaError` を
+        // 経由すると `map_cuda_error` で実態と異なるエラー種別
+        // （`DeviceAllocationFailed`）に化けてしまうため、ここで直接
+        // 判定する（3 バックエンド共通のハンドル型不一致検出。レビュー
+        // 指摘対応）。
+        if buffer.downcast_handle::<CudaBufferHandle>().is_none() {
+            return Err(BackendError::DeviceMismatch);
+        }
         self.download_inner(buffer).map_err(map_cuda_error)
     }
 }
