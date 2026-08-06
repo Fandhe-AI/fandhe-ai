@@ -36,53 +36,35 @@ fn new_compiles_tiled_kernels_or_returns_typed_error_without_panicking() {
     }
 }
 
-/// 複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
-/// `tests/gemm_naive.rs` と同一の判定式（許容誤差は単独緩和しない。
-/// `.claude/rules/coding-rust.md`）。
-const RELATIVE_TOLERANCE: f64 = 1e-3;
-const ABSOLUTE_RESCUE_THRESHOLD: f64 = 1e-5;
-
-/// `a`（GPU 出力）と `b`（CPU 参照）を要素ごとに複合判定し、
-/// 不一致セル数を返す（0 なら PASS）。`tests/gemm_naive.rs` の同名関数と
-/// 同一実装（テストファイル間で共有クレートを新設するほどの重複ではない
-/// ため、意図的にそのまま複製する）。
-fn count_composite_mismatches(a: &[f32], b: &[f32]) -> usize {
-    assert_eq!(a.len(), b.len(), "compare: length mismatch");
-    a.iter()
-        .zip(b.iter())
-        .filter(|&(&x, &y)| {
-            let xf = x as f64;
-            let yf = y as f64;
-            let diff = (xf - yf).abs();
-            let scale = xf.abs().max(yf.abs()).max(1e-12);
-            let rel = diff / scale;
-            rel >= RELATIVE_TOLERANCE && diff >= ABSOLUTE_RESCUE_THRESHOLD
-        })
-        .count()
-}
-
-/// 決定的シードで A・B（f32）を生成し、CPU 参照実装（`gemm_naive`。
-/// `mul_add` FMA 契約）と GPU tiled カーネルの出力を複合判定で照合する。
+/// 決定的シードで A・B（f32）を生成し、CPU 参照実装
+/// （[`backend_cpu::matmul_reference_fma`]。`mul_add` FMA 契約の唯一の
+/// 参照点）と GPU tiled カーネルの出力を [`backend_cpu::assert_parity`]
+/// で照合する。
+///
+/// 判定式・閾値（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は
+/// `backend_cpu::parity` の実体を唯一の参照とし、本ファイルではローカル
+/// 複製しない。旧実装はローカル複製の否定形判定（`rel >= TOL && diff >=
+/// TOL`）を使っており、NaN/Inf 混入時に両辺 false となって誤って合格
+/// 判定してしまう盲点を持っていた（`tests/cpu_cuda_parity.rs` 冒頭
+/// コメント・Cursor Bugbot 指摘・PR #244 参照）。`tests/gemm_naive.rs` は
+/// 既にこの一本化を終えており、本ファイルもそれに揃える。
 fn assert_tiled_f32_matches_cpu_reference(gemm: &CudaGemm, seed: u64, m: u32, n: u32, k: u32) {
     let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
     let a = rng.fill_vec((m as usize) * (k as usize));
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::gemm_naive(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("backend-cpu gemm_naive shape validation must pass for well-formed test input");
+    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
+        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm
         .run_tiled_f32(&a, &b, m, n, k)
         .expect("CudaGemm::run_tiled_f32 must succeed on CUDA-equipped test runner");
 
-    let mismatches = count_composite_mismatches(&c_gpu, &c_ref);
-    assert_eq!(
-        mismatches,
-        0,
-        "tiled f32 GEMM CPU/GPU mismatch: {mismatches}/{} cells failed composite tolerance \
-         (rel<{RELATIVE_TOLERANCE} or abs<{ABSOLUTE_RESCUE_THRESHOLD}), shape m={m} n={n} k={k}",
-        c_ref.len()
+    backend_cpu::assert_parity(
+        &format!("tiled f32 GEMM CPU/GPU parity (shape m={m} n={n} k={k})"),
+        &c_gpu,
+        &c_ref,
     );
 }
 
