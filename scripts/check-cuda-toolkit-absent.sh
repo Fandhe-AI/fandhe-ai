@@ -32,7 +32,12 @@
 #              再発を防ぐ。さらに CUDA_ROOT_GLOBS のディレクトリスキャン検出と
 #              CUDA_HOME・CUDA_PATH 環境変数検出のそれぞれについても陽性系（実在ディレクトリ
 #              を指す場合に「搭載」判定になること）を検証し、この 2 分岐が他分岐の無効化のみで
-#              素通りしないようにする（Bugbot 指摘・PR #249 / イシュー #35）
+#              素通りしないようにする（Bugbot 指摘・PR #249 / イシュー #35）。加えて、
+#              ldconfig 出力が libcudart.so のみを含み libnvrtc.so を含まないケースでも
+#              単独で「搭載」判定になることを検証し、libcudart.so 検出分岐（detect_toolkit
+#              内の 4 検出カテゴリの 1 つ）が libnvrtc.so 分岐の陽性のみに隠れて未検証のまま
+#              退行しないようにする（Bugbot 指摘・PR #249 / イシュー #35、review comment
+#              3728427431）
 #
 # 環境変数（self-test 用の注入ポイント。通常運用では既定値のまま使う）:
 #   NVCC_BIN         nvcc コマンド名／パス（既定: nvcc）
@@ -144,6 +149,21 @@ self_test() {
     failed=1
   else
     echo "OK: self-test(b) 偽 ldconfig（libnvrtc.so 登録）注入時に搭載と判定されました"
+  fi
+
+  # (b2) libcudart.so のみを出力する偽 ldconfig スタブを注入 → 「搭載」判定になること
+  # （libnvrtc.so は含めず、libcudart.so 検出分岐単独の陽性を検証する。この分岐は
+  # (b) の libnvrtc.so 陽性の裏で一度も単独検証されていなかった。Bugbot 指摘・
+  # PR #249 / イシュー #35、review comment 3728427431）
+  local fake_ldconfig_cudart="${tmpdir}/ldconfig-cudart"
+  printf '#!/bin/sh\necho "\tlibcudart.so.12 (libc6,x86-64) => /fake/libcudart.so.12"\n' >"${fake_ldconfig_cudart}"
+  chmod +x "${fake_ldconfig_cudart}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="${fake_ldconfig_cudart}" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(b2) 偽 ldconfig（libcudart.so 登録）注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(b2) 偽 ldconfig（libcudart.so 登録）注入時に搭載と判定されました"
   fi
 
   # (c) 全注入変数を「存在しない」値に固定 → 「非搭載」判定になること
