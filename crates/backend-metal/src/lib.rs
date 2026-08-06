@@ -70,8 +70,15 @@
 //! （[`context::MetalContext::caps`]）。既存の [`gemm::MetalGemm::dispatch`]
 //! （naive）／[`gemm::MetalGemm::dispatch_variant`]（経路直接指定）は
 //! テスト・証跡用途（#70）にそのまま温存する（`docs/dispatch-rules-design.md`
-//! §5.4）。`BackendOps` trait への結線は TASK-1.9c（#46）のスコープであり、
-//! `dispatch_backend_auto` はそこから呼ばれるだけの構成にできる。
+//! §5.4）。
+//!
+//! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::MetalBackendOps`]）を追加した。
+//! `tensor_core::backend_ops::BackendOps` の Metal 実装であり、`gemm` は
+//! [`gemm::MetalGemm::dispatch_auto`]（実装済みの動的タイル選択）へ委譲する。
+//! elementwise・reduction は GPU カーネル未実装のため
+//! `tensor_core::device::BackendError::Unsupported` を返す
+//! （out-of-scope-tracking.md 対象）。`device` モジュールと同じく
+//! `cfg(target_os = "macos")` 限定。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -85,6 +92,8 @@ pub mod error;
 pub mod gemm;
 #[cfg(target_os = "macos")]
 pub mod memory;
+#[cfg(target_os = "macos")]
+pub mod ops;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
@@ -115,4 +124,6 @@ pub use error::MetalError;
 pub use gemm::{GemmVariant, MetalGemm};
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
+#[cfg(target_os = "macos")]
+pub use ops::MetalBackendOps;
 pub use tile::TileConfig;

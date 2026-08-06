@@ -60,7 +60,13 @@ impl MetalMemory {
 /// `KernelLaunchFailed` に寄せる（本モジュールは GEMM ディスパッチを
 /// 行わないため実際には到達しないが、`MetalError` は `#[non_exhaustive]`
 /// であり網羅的 match が書けないため wildcard の受け皿として用意する）。
-fn map_metal_error(err: MetalError) -> BackendError {
+///
+/// `crate::ops`（GEMM ディスパッチ）からも `MetalContext::new` の
+/// エラー変換に再利用される（`pub(crate)`）。`DeviceUnavailable` を
+/// `MetalDeviceProvider::select`（`device.rs`）と同一の
+/// `BackendError::DeviceUnavailable` に統一するため（Bugbot 指摘対応。
+/// PR #262 レビュースレッド）。
+pub(crate) fn map_metal_error(err: MetalError) -> BackendError {
     match err {
         MetalError::ZeroLengthAllocation => {
             BackendError::DeviceAllocationFailed("zero-length allocation requested".to_string())

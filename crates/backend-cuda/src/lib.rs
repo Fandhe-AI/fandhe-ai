@@ -86,6 +86,10 @@
 //! 冒頭コメント「タイル構成」参照。コンパイル未検証環境でのリスク
 //! 最小化判断）。
 //!
+//! ディスパッチ規則（naive／tiled／f16 WMMA／TF32 WMMA／`mma.sync` の
+//! どの経路をいつ選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは
+//! 未実装。
+//!
 //! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
 //! 追加した。`tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
 //! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
@@ -95,9 +99,15 @@
 //! ユーザー承認まで保留と定めているため、現時点の `select_gemm_kernel` の
 //! 自動経路には含めない（f32 は常に Tiled）。既存の `CudaGemm`／
 //! `CudaWmmaGemm`／`CudaMmaGemm` の直接指定 API はテスト・証跡用途
-//! （#70）にそのまま温存する（設計文書 §5.4）。`BackendOps` trait への
-//! 結線は TASK-1.9c（#46）のスコープであり、`CudaGemmAuto` はそこから
-//! 呼ばれるだけの構成にできる（`gemm_auto.rs` モジュールコメント参照）。
+//! （#70）にそのまま温存する（設計文書 §5.4）。
+//!
+//! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::CudaBackendOps`]）を追加した。
+//! `tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
+//! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
+//! tiled 固定とし、`CudaGemmAuto` を介した Tensor Core 経路の自動選択への
+//! 切替は別スコープ）。elementwise・reduction は GPU カーネル未実装のため
+//! `tensor_core::device::BackendError::Unsupported` を返す
+//! （out-of-scope-tracking.md 対象）。
 
 pub mod device;
 mod error;
@@ -111,6 +121,7 @@ mod kernels_wmma;
 mod kernels_wmma_opt;
 pub mod memory;
 mod nvrtc;
+mod ops;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
@@ -120,3 +131,4 @@ pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
 pub use nvrtc::compile_ptx;
+pub use ops::CudaBackendOps;

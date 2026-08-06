@@ -477,6 +477,8 @@ pub trait BackendOps {
 - `BackendError` に `TransferFailed(String)`（TASK-1.9b で追加。確保済みバッファへのコピー失敗を表す。`DeviceAllocationFailed` は確保自体の失敗と区別する）を追加した（4.4 参照）。
 - f16（`half::f16`）転送経路の入口設計は本イシューでも決定しない（6-8 の未決事項のまま。`.claude/rules/out-of-scope-tracking.md` に沿い後続イシューとして提案する）。
 
+**TASK-1.9c（#46）実装時の突合結果**: `BackendOps`（`crates/tensor-core/src/backend_ops.rs`）は上記案の 8 メソッド（`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）をそのまま実装したが、実装開始時点（`git fetch origin main`）で TASK-1.9b（#45。`DeviceBuffer`／`upload`／`download`）が未着地だったため、各メソッドのシグネチャを `&DeviceBuffer<f32>` ではなくホスト常駐 `&Tensor<f32>` を受け取り `Tensor<f32>` を返す形に差し替えた。受け入れ条件（TASK-1.9c）は「同一コードで 3 バックエンドのカーネルが呼び分けられる」であり、既存カーネル入口（CPU `gemm_blis_parallel`・CUDA `CudaGemm::run_tiled_f32`・Metal `MetalGemm::dispatch_auto`）がいずれもホスト常駐 `&[f32]` を受け取り内部で H2D／D2H 転送を完結させる契約のため、`DeviceBuffer` なしで本条件を満たせると判断した。`DeviceBuffer` 版シグネチャへの移行（`upload`／`download` の追加）は #45 マージ後、`BackendOps` の非破壊拡張として TASK-1.9d（#47）以降で検討する。CUDA／Metal は本イシュー時点で GEMM カーネルのみ実装済みのため、elementwise・reduction は `BackendError::Unsupported`（新規追加。`#[non_exhaustive]` のため非破壊）を返す fail-safe 実装とした。複数バックエンド横断のディスパッチ入口は `device::select_from`（TASK-1.9a）と同型の注入式 `backend_ops::ops_for(ops: &[&dyn BackendOps], device: Device) -> Result<&dyn BackendOps, BackendError>` として実装した（`Device::available()` の集約結線を上位層に委ねる設計を踏襲）。
+
 ### 4.3 API 契約として明記する数値仕様
 
 - **バックエンド間数値一致**: 全ペア共通で「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の複合判定（`docs/spec/04-requirements.md` REQ-2、PoC-v2-5 の事前固定判定基準と同一）。
@@ -517,6 +519,8 @@ pub enum BackendError {
 
 **TASK-1.9b（#45）実装時の突合結果**: `TransferFailed(String)`（確保済みバッファへのコピー〈`upload`/`download`〉の失敗。`DeviceAllocationFailed` は確保自体の失敗と区別する）を追加した。上記と同じ理由で非破壊拡張として扱う（4.2 の突合結果参照）。
 
+**TASK-1.9c（#46）実装時の突合結果**: `Unsupported(String)`（指定バックエンドが当該演算のカーネルを未実装であることを表す。CUDA／Metal の elementwise・reduction が本イシュー時点で GEMM カーネルのみ実装済みのため使用）を追加した。`#[non_exhaustive]` により非破壊拡張である。
+
 ## 5. エラー型一覧・横断事項
 
 | 型 | 役割 | 発生源 |
@@ -544,3 +548,7 @@ pub enum BackendError {
 - **guardrail/self-repair の CLI 仕様**: 兄弟イシュー #183 が担当。
 - **演算グラフ・カーネル融合機構の API**: イシュー #161（TASK-12.1a）。接続点のみ 6.4 に記載。
 - **シグネチャのコンパイル検証・実装**: TASK-1.4（自作テンソル型 productize）以降の実装イシューへ引き継ぐ。workspace 雛形（TASK-1.1a・#205）はクレートが空のため、本イシューでは検証しない。
+- **CUDA／Metal の elementwise・reduction カーネル実装**: TASK-1.9c（#46）時点では GEMM カーネルのみ実装済みのため、`BackendOps::add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` は `BackendError::Unsupported` を返す。GPU カーネル本体の実装・引き継ぎ先 Issue の起票はユーザー承認を得て別途行う。
+- **`DeviceBuffer`／`upload`／`download` への `BackendOps` シグネチャ移行**: TASK-1.9b（#45）マージ後、TASK-1.9d（#47）以降で検討する（上記 4.2 突合結果参照）。
+- **既定デバイス選択ロジック・形状／HW 判定によるディスパッチ規則の統合**: 前者はユーザー承認必須（CUDA 既定有効化の構成決定）、後者は TASK-11.2b（#68）の担当（`docs/dispatch-rules-design.md`）。
+- **3 バックエンド網羅の統合テスト**: TASK-1.9d（#47）の担当。

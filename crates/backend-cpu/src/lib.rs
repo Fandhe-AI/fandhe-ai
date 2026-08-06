@@ -43,12 +43,21 @@
 //! `alloc_zeroed` は FFI を伴わず `Vec<f32>` の複製のみで完結する
 //! （`backend-cuda::CudaMemory`／`backend-metal::MetalMemory` の数値一致の
 //! 参照点。`.claude/rules/coding-rust.md` の「CPU 参照実装」方針）。
+//!
+//! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
+//! `tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
+//! （[`gemm_blis::gemm_blis_parallel`]・[`elementwise`] の `add`/`mul`/`relu`/
+//! `exp`/`tanh`・[`reduction`] の `sum`/`max`）への薄い委譲に徹する。CUDA／
+//! Metal 実装（`backend-cuda::ops::CudaBackendOps`／
+//! `backend-metal::ops::MetalBackendOps`）と同一 trait でカーネルディスパッチ
+//! できることを `tests/backend_ops_dispatch.rs` で検証する。
 
 mod device;
 mod elementwise;
 pub mod gemm;
 pub mod gemm_blis;
 pub mod memory;
+mod ops;
 pub mod parity;
 pub mod reduction;
 
@@ -61,6 +70,7 @@ pub use gemm::{
 };
 pub use gemm_blis::{gemm_blis, gemm_blis_parallel};
 pub use memory::CpuMemory;
+pub use ops::CpuBackendOps;
 pub use parity::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
     compare, matmul_reference_fma,
