@@ -18,6 +18,7 @@
 //!   （`.claude/rules/deps-policy.md`: 依存追加はユーザー承認必須のため、自動運転下では追加しない）。
 
 use crate::stats::{self, BenchError, Quartiles};
+use std::hint::black_box;
 use std::time::Instant;
 
 /// TASK-8.1 が定める計測プロトコルの下限（warmup・計測回数とも 20 回以上）。
@@ -88,6 +89,15 @@ pub struct Measurement {
 /// 非同期実行を使う場合は、呼び出し側が `workload` 内で同期呼び出しを行う必要がある
 /// （バックエンド別同期の統一自体は TASK-8.1b・イシュー #28 のスコープ）。
 ///
+/// `workload` はジェネリック（`F: FnMut()`）であるため単相化・インライン化の対象になり、
+/// 副作用を伴わない呼び出しはコンパイラに最適化除去されうる（`criterion` が計測対象の
+/// 呼び出しに `black_box` を必須とするのと同じ理由）。`run` は `workload()` の呼び出しを
+/// `std::hint::black_box` で包み、呼び出し自体が最適化で消えないようにする。ただし
+/// `black_box` はクロージャ内部の計算過程までは保護しないため、`workload` が引数を
+/// 使わずに定数を返す・メモ化結果を返す等の実装であれば内部計算自体は依然として
+/// 最適化されうる。計測対象の入出力は呼び出し側が `workload` 内で `black_box` する
+/// （あるいは計測対象データへの副作用を伴う）ことが前提となる。
+///
 /// # Errors
 ///
 /// - `config` が下限（20/20）未満の場合は `BenchError::ProtocolViolation`
@@ -105,14 +115,23 @@ pub fn run<F: FnMut()>(
         )));
     }
 
-    for _ in 0..config.warmup {
-        workload();
+    // `workload()` の戻り値（`()`）を `black_box` に渡すのは意図的な設計であり、
+    // `unit_arg` lint の対象になるが安易な握り潰しではない。`black_box` の役割は
+    // 「呼び出しの結果を最適化に対して不透明にする」ことにあり、戻り値が unit でも
+    // 呼び出しそのものを最適化除去から保護する効果は保持される（criterion が計測対象の
+    // 呼び出しを `black_box` で包むのと同じ理由。上記 `run` のドキュメンテーションコメント参照）。
+    #[allow(clippy::unit_arg)]
+    {
+        for _ in 0..config.warmup {
+            black_box(workload());
+        }
     }
 
     let mut samples_secs = Vec::with_capacity(config.iters);
+    #[allow(clippy::unit_arg)]
     for _ in 0..config.iters {
         let start = Instant::now();
-        workload();
+        black_box(workload());
         samples_secs.push(start.elapsed().as_secs_f64());
     }
 
@@ -204,5 +223,31 @@ mod tests {
         // median-of-halves 定義（stats::median_q1_q3）により q1 <= median <= q3 が成立する。
         assert!(measurement.q1_secs <= measurement.median_secs);
         assert!(measurement.median_secs <= measurement.q3_secs);
+    }
+
+    #[test]
+    fn run_does_not_optimize_workload_away() {
+        // `workload` はジェネリックのため単相化・インライン化されうる。副作用を伴わない
+        // クロージャの呼び出しがコンパイラに丸ごと除去されると計測値がゼロ近傍に潰れ、
+        // TASK-8.2・TASK-3.2 の合否判定を誤らせる（Review 指摘）。`black_box` による保護が
+        // 機能していれば、ある程度の計算量を持つワークロードで所要時間が確実に正の値になる。
+        let config = MeasurementConfig::new(20, 20).unwrap();
+        let measurement = run(&config, || {
+            let mut acc: u64 = 0;
+            for i in 0..10_000u64 {
+                acc = black_box(acc.wrapping_add(black_box(i)));
+            }
+            black_box(acc);
+        })
+        .expect("計算量のあるワークロードは成功するはず");
+
+        // 最適化除去されていれば samples はほぼ 0 のままになりうるため、
+        // 全サンプルが厳密に正であることまで確認する（受け入れ条件の直接検証）。
+        assert!(
+            measurement.samples_secs.iter().all(|&s| s > 0.0),
+            "black_box 保護が機能していれば全サンプルは正の所要時間を記録するはず: {:?}",
+            measurement.samples_secs
+        );
+        assert!(measurement.median_secs > 0.0);
     }
 }
