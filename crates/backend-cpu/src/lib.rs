@@ -31,11 +31,18 @@
 //! `tensor_core::device::DeviceProvider` の CPU 実装であり、CUDA／Metal 実装
 //! （`backend-cuda::device::CudaDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
 //! と同一 trait で列挙・選択できることを `tests/device_provider_integration.rs` で検証する。
+//!
+//! TASK-2.2a（#53）で [`parity`] モジュール（REQ-2 統一複合判定ユーティリティ・
+//! FMA 契約参照 matmul）を追加した。#54（CPU-CUDA ペア）・#55（CPU-Metal ペア）は
+//! 本モジュールの `parity::compare`／`parity::assert_parity`／
+//! `parity::matmul_reference_fma` を共通利用し、ペアごとに判定ロジックを
+//! 重複実装しない想定である（`docs/spec/05-tasks.md` TASK-2.2）。
 
 mod device;
 mod elementwise;
 pub mod gemm;
 pub mod gemm_blis;
+pub mod parity;
 pub mod reduction;
 
 pub use device::CpuDeviceProvider;
@@ -46,3 +53,7 @@ pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
 pub use gemm_blis::{gemm_blis, gemm_blis_parallel};
+pub use parity::{
+    ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
+    compare, matmul_reference_fma,
+};

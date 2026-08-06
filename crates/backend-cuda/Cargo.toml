@@ -21,3 +21,15 @@ tensor-core = { path = "../tensor-core" }
 # 確認済み（実行時のみ toolkit を要求する契約は変更しない）。
 cudarc.workspace = true
 half.workspace = true
+
+[dev-dependencies]
+# CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
+# （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート
+# 同士の path 依存であり、許容依存 8 区分（外部クレート）の新規追加には
+# 当たらない（`crates/backend-cpu/Cargo.toml:20-25` の bench-harness 依存と
+# 同じ整理）。
+backend-cpu = { path = "../backend-cpu" }
+# 決定的シード PRNG（`Xorshift64Star`）を GEMM 入力生成に使う
+# （coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
+# 使う」）。上記と同じ理由で許容依存 8 区分の対象外。
+bench-harness = { path = "../bench-harness" }

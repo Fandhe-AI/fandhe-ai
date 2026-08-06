@@ -47,6 +47,16 @@ pub enum CudaError {
 
     /// NVRTC コンパイル失敗（構文エラー・`--include-path` 未解決等）。
     Compile(cudarc::nvrtc::CompileError),
+
+    /// GEMM 起動 API（`gemm.rs`）のホスト側形状検証が拒否した入力。
+    ///
+    /// `run_naive_f32`／`run_naive_f16` は GPU へバッファを転送しカーネルを
+    /// 起動する前に、スライス長が `m*k`／`k*n` と一致するか・`m`/`n`/`k` の
+    /// 積が `usize`/`i32` の範囲でオーバーフローしないかを検証する
+    /// （`gemm.rs::validate_gemm_dims` 参照）。この検証は GPU 起動前の
+    /// A03 インジェクション対策（外部由来の形状値を境界チェックなしに
+    /// カーネル引数へ渡さない。`.claude/rules/security.md`）を兼ねる。
+    InvalidShape { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -68,6 +78,9 @@ impl fmt::Display for CudaError {
             // （PoC-v2-3 の `CudaGemmError` と同じ方針。cuda/mod.rs:48・54）。
             CudaError::Driver(e) => write!(f, "cuda driver error: {e:?}"),
             CudaError::Compile(e) => write!(f, "nvrtc compile error: {e:?}"),
+            CudaError::InvalidShape { detail } => {
+                write!(f, "invalid GEMM shape: {detail}")
+            }
         }
     }
 }

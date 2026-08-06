@@ -27,7 +27,14 @@
 //! FFI 境界の `unsafe`（objc2 系）は必要最小限に留め理由コメントを付す
 //! （`.claude/rules/security.md`）。
 //!
-//! カーネル本体は TASK-1.8 で追加する（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//! TASK-1.8a（#38）でデバイス・コマンドキュー・バッファ管理の基盤（[`context::MetalContext`]・
+//! [`buffer::MetalBuffer`]・[`error::MetalError`]）を実装済み。TASK-1.8b（#39）で MSL 実行時
+//! コンパイル・パイプライン構築（[`pipeline`]）・naive GEMM ディスパッチ経路（[`gemm::MetalGemm`]）
+//! を追加した。simdgroup カーネルは TASK-1.8c（#40）で追加する（spec 根拠:
+//! `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//!
+//! 非 macOS 環境ではモジュールごとコンパイル対象外になる（feature フラグなしの cfg ベース。
+//! PoC-v2-5 実証構成・REQ-2）。
 //!
 //! TASK-1.9a（#44）で [`device`] モジュール（[`device::MetalDeviceProvider`]）を追加した。
 //! `tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
@@ -37,7 +44,38 @@
 //! 付す（非 macOS 環境のビルドに影響を与えない）。
 
 #[cfg(target_os = "macos")]
+pub mod buffer;
+#[cfg(target_os = "macos")]
+pub mod context;
+#[cfg(target_os = "macos")]
 pub mod device;
+#[cfg(target_os = "macos")]
+pub mod error;
+#[cfg(target_os = "macos")]
+pub mod gemm;
+#[cfg(target_os = "macos")]
+pub mod pipeline;
+
+// `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
+// バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
+// test/bench 実行ファイル等 ―― では `MTLCreateSystemDefaultDevice` が nil を
+// 返しうる。Apple の Metal サンプル・Homebrew 経由の CLI ツールが軒並み
+// CoreGraphics をリンクしているのはこのため）。`objc2-core-graphics` は
+// 許容依存 8 区分（`.claude/rules/deps-policy.md`）に含まれず追加はユーザー
+// 承認が要るため、クレート依存を増やさずリンカディレクティブのみで解決する
+// （extern ブロック自体は空でよく、`#[link]` 属性がリンク時に
+// `-framework CoreGraphics` を linker へ伝搬する）。
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {}
 
 #[cfg(target_os = "macos")]
+pub use buffer::MetalBuffer;
+#[cfg(target_os = "macos")]
+pub use context::MetalContext;
+#[cfg(target_os = "macos")]
 pub use device::MetalDeviceProvider;
+#[cfg(target_os = "macos")]
+pub use error::MetalError;
+#[cfg(target_os = "macos")]
+pub use gemm::MetalGemm;
