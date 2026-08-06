@@ -60,6 +60,16 @@ pub enum ShapeError {
     /// あるため追加する。
     NonContiguousReshape,
 
+    /// 2 つの shape が NumPy 互換のブロードキャスト規則で両立しない
+    /// （末尾軸から比較し「両者同一」または「片方が 1」を満たせない）。
+    ///
+    /// `broadcast_shape`（`broadcast.rs`）・`Tensor::broadcast_to`／
+    /// `Tensor::broadcast_with`（`tensor.rs`）が構築する
+    /// （#12・TASK-1.4b、`docs/public-api-design.md` §2.1 の
+    /// stride 0 ブロードキャスト方針）。`broadcast_to` 呼び出し時は
+    /// `lhs` = 自身の shape・`rhs` = target shape として構築する。
+    BroadcastIncompatible { lhs: Vec<usize>, rhs: Vec<usize> },
+
     /// matmul（`ops_shape::matmul_out_shape`）の内部次元（lhs の最終軸と
     /// rhs の先頭軸）が一致しない。rank 検査（`RankMismatch`）を通過した
     /// 2 次元 shape 同士でのみ構築される（TASK-1.4c・#13。
@@ -107,6 +117,9 @@ impl fmt::Display for ShapeError {
                 f,
                 "reshape requires a contiguous tensor; call `.contiguous()` first"
             ),
+            ShapeError::BroadcastIncompatible { lhs, rhs } => {
+                write!(f, "cannot broadcast shapes {lhs:?} and {rhs:?}")
+            }
             ShapeError::MatmulDimMismatch { lhs, rhs } => {
                 write!(f, "matmul dimension mismatch: lhs {lhs:?} rhs {rhs:?}")
             }

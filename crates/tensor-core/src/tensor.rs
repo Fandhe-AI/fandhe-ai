@@ -18,6 +18,7 @@
 
 use std::sync::Arc;
 
+use crate::broadcast::{broadcast_shape, broadcast_strides};
 use crate::element::Element;
 use crate::error::ShapeError;
 
@@ -38,9 +39,9 @@ struct Storage<T: Element> {
 /// データコピーなしで表現する。
 ///
 /// メモリレイアウト（行優先 + strides）は PoC-v2-1 の確定事項を
-/// 維持する。`strides` は将来の stride 0 ブロードキャスト（#12）・
-/// 負 stride 拡張に備え `isize` とする（`docs/public-api-design.md`
-/// §2.1）。
+/// 維持する。`strides` は stride 0 ブロードキャスト（`broadcast_to`／
+/// `broadcast_with`。#12・TASK-1.4b）・将来の負 stride 拡張に備え
+/// `isize` とする（`docs/public-api-design.md` §2.1）。
 ///
 /// `Clone` は `Arc` のポインタ複製のみで安価（データコピーを伴わない）。
 /// `PartialEq` は意図的に derive しない: `offset`/`strides` が異なる
@@ -280,10 +281,11 @@ impl<T: Element> Tensor<T> {
         }
         let mut shape = self.shape.clone();
         shape[dim] = len;
-        // 現行実装では strides は常に非負（row_major_strides が生成する
-        // 値のみを保持し、transpose は要素の入れ替えのみで負値を導入しない）
-        // ため、new_offset は常に非負になる。将来 stride 0 ブロードキャスト
-        // （#12）・負 stride を導入する際は本計算式の見直しが必要になる。
+        // stride 0（ブロードキャスト view。#12・TASK-1.4b で導入）でも
+        // `start * 0 == 0` のため new_offset は不変であり、非負 offset の
+        // 前提はそのまま成立する（本計算式の見直しは不要と確認済み）。
+        // strides は依然として非負のみを保持する（transpose は入れ替えの
+        // み・broadcast_strides は拡張軸を 0 にするのみで負値を導入しない）。
         let new_offset = self.offset as isize + start as isize * self.strides[dim];
         debug_assert!(new_offset >= 0, "narrow produced a negative offset");
         Ok(Tensor {
@@ -394,6 +396,62 @@ impl<T: Element> Tensor<T> {
             shape,
             strides,
         }
+    }
+
+    /// `self` を `shape` へブロードキャストした zero-copy view を返す
+    /// （NumPy `broadcast_to` 相当。#12・TASK-1.4b）。
+    ///
+    /// 拡張された軸（元の軸長 1 が `shape` 側で 1 より大きい値に
+    /// 広がる軸）は stride 0 の view になり、`storage` は `Arc` 共有の
+    /// ままデータ複製を伴わない。縮小方向（例: `[2,3]` → `[3]`）や
+    /// 非互換 shape は `ShapeError::BroadcastIncompatible` を返す
+    /// （`lhs` = 自身の shape・`rhs` = `shape`）。
+    ///
+    /// アロケーション（`Storage` 複製）を伴わないため `checked_numel`
+    /// のオーバーフロー検査は本来不要だが、後続の `get`/`contiguous()`
+    /// 呼び出しで扱う要素数が `usize` 範囲を超えないことを構築時点で
+    /// 保証するため、他の生成系 API と同様に事前検査する
+    /// （`.claude/rules/security.md` A03 観点: fail-closed）。
+    pub fn broadcast_to(&self, shape: &[usize]) -> Result<Tensor<T>, ShapeError> {
+        checked_numel(shape)?;
+        if shape.len() < self.shape.len() {
+            return Err(ShapeError::BroadcastIncompatible {
+                lhs: self.shape.clone(),
+                rhs: shape.to_vec(),
+            });
+        }
+        let offset_axes = shape.len() - self.shape.len();
+        for (src_axis, &target_dim) in self.shape.iter().zip(&shape[offset_axes..]) {
+            if *src_axis != target_dim && *src_axis != 1 {
+                return Err(ShapeError::BroadcastIncompatible {
+                    lhs: self.shape.clone(),
+                    rhs: shape.to_vec(),
+                });
+            }
+        }
+        let strides = broadcast_strides(&self.shape, &self.strides, shape.len());
+        Ok(Tensor {
+            storage: Arc::clone(&self.storage),
+            offset: self.offset,
+            shape: shape.to_vec(),
+            strides,
+        })
+    }
+
+    /// 二項演算向け: `self` と `other` を共通の shape（NumPy 互換
+    /// ブロードキャスト規則で決定）へ揃えた view の組を返す
+    /// （#12・TASK-1.4b）。`backend-cpu` の elementwise カーネル
+    /// （#22）・`autodiff` の演算入口（#16〜#18）が二項演算前の
+    /// shape 整合に用いる想定。
+    ///
+    /// 共通 shape の算出は `broadcast_shape` に委譲し、両者を
+    /// `broadcast_to` で view 化する。いずれかが失敗した場合は
+    /// `ShapeError::BroadcastIncompatible` を返す。
+    pub fn broadcast_with(&self, other: &Tensor<T>) -> Result<(Tensor<T>, Tensor<T>), ShapeError> {
+        let shape = broadcast_shape(&self.shape, &other.shape)?;
+        let lhs = self.broadcast_to(&shape)?;
+        let rhs = other.broadcast_to(&shape)?;
+        Ok((lhs, rhs))
     }
 }
 
@@ -633,5 +691,135 @@ mod tests {
         assert!(n2.offset > n2.storage.data.len());
         assert!(n2.is_contiguous());
         assert_eq!(n2.as_slice(), Some(&[][..]));
+    }
+
+    // --- broadcast_to / broadcast_with（#12・TASK-1.4b） ---
+
+    #[test]
+    fn broadcast_to_expands_row_vector_over_matrix() {
+        // PoC-v2-1 の add_broadcasts_row_vector_over_matrix と同じ形状組合せ
+        // ([2,3] + [3]) を broadcast view として再現する（受け入れ条件の
+        // 直接検証: 代表的な形状組合せでブロードキャスト結果が期待値と一致）。
+        let row = Tensor::<f32>::new(vec![10.0, 20.0, 30.0], &[3]).unwrap();
+        let b = row.broadcast_to(&[2, 3]).unwrap();
+        assert_eq!(b.shape(), &[2, 3]);
+        // 補完された先頭軸・拡張されない末尾軸はいずれも stride 0 ではなく、
+        // 補完軸のみ 0（元 shape に軸が存在しないため）。
+        assert_eq!(b.strides(), &[0, 1]);
+        assert!(Arc::ptr_eq(&row.storage, &b.storage));
+        // 両方の行が同じ値を指す（zero-copy 繰り返し読み）。
+        for i in 0..2 {
+            assert_eq!(b.get(&[i, 0]).unwrap(), 10.0);
+            assert_eq!(b.get(&[i, 1]).unwrap(), 20.0);
+            assert_eq!(b.get(&[i, 2]).unwrap(), 30.0);
+        }
+        // 非 contiguous（拡張軸を含む）ため実体化して期待値と突き合わせる。
+        let c = b.contiguous();
+        assert!(c.is_contiguous());
+        let expected = [10.0, 20.0, 30.0, 10.0, 20.0, 30.0];
+        for (i, &v) in expected.iter().enumerate() {
+            assert_eq!(c.get(&[i / 3, i % 3]).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn broadcast_to_leading_axis_size_one_gets_stride_zero() {
+        let t = Tensor::<f32>::new((0..5).map(|v| v as f32).collect(), &[1, 5]).unwrap();
+        let b = t.broadcast_to(&[8, 5]).unwrap();
+        assert_eq!(b.shape(), &[8, 5]);
+        assert_eq!(b.strides(), &[0, 1]);
+        for row in 0..8 {
+            for col in 0..5 {
+                assert_eq!(b.get(&[row, col]).unwrap(), col as f32);
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_to_rejects_shrinking_shape() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = t.broadcast_to(&[3]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::BroadcastIncompatible { lhs, rhs }
+                if lhs == vec![2, 3] && rhs == vec![3]
+        ));
+    }
+
+    #[test]
+    fn broadcast_to_rejects_incompatible_trailing_axis() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = t.broadcast_to(&[2, 4]).unwrap_err();
+        assert!(matches!(err, ShapeError::BroadcastIncompatible { .. }));
+    }
+
+    #[test]
+    fn broadcast_to_scalar_rank_zero() {
+        let t = Tensor::<f32>::new(vec![42.0], &[]).unwrap();
+        let b = t.broadcast_to(&[2, 3]).unwrap();
+        assert_eq!(b.shape(), &[2, 3]);
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(b.get(&[i, j]).unwrap(), 42.0);
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_to_zero_size_axis() {
+        // NumPy 準拠でサイズ 0 軸への broadcast_to は許容される（[3] → [0,3]）。
+        let t = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let b = t.broadcast_to(&[0, 3]).unwrap();
+        assert_eq!(b.shape(), &[0, 3]);
+        assert!(b.is_empty());
+    }
+
+    #[test]
+    fn broadcast_to_element_count_overflow() {
+        let t = Tensor::<f32>::zeros(&[1]).unwrap();
+        let err = t.broadcast_to(&[usize::MAX, 2]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn broadcast_to_composes_with_transpose_and_narrow() {
+        // 転置済み（非標準 strides）view からの broadcast_to、および
+        // narrow との合成が正しく動作することを確認する。
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let tt = t.transpose(0, 1).unwrap(); // shape [3, 2], strides [1, 3]
+        let n = tt.narrow(1, 1, 1).unwrap(); // shape [3, 1]
+        let b = n.broadcast_to(&[3, 4]).unwrap();
+        assert_eq!(b.shape(), &[3, 4]);
+        for row in 0..3 {
+            let expected = t.get(&[1, row]).unwrap();
+            for col in 0..4 {
+                assert_eq!(b.get(&[row, col]).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_with_common_shape_and_zero_copy() {
+        let a = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let b = Tensor::<f32>::new(vec![100.0, 200.0, 300.0], &[3]).unwrap();
+        let (ba, bb) = a.broadcast_with(&b).unwrap();
+        assert_eq!(ba.shape(), &[2, 3]);
+        assert_eq!(bb.shape(), &[2, 3]);
+        assert!(Arc::ptr_eq(&a.storage, &ba.storage));
+        assert!(Arc::ptr_eq(&b.storage, &bb.storage));
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(ba.get(&[i, j]), a.get(&[i, j]));
+                assert_eq!(bb.get(&[i, j]).unwrap(), b.get(&[j]).unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn broadcast_with_incompatible_returns_error() {
+        let a = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let b = Tensor::<f32>::zeros(&[4]).unwrap();
+        let err = a.broadcast_with(&b).unwrap_err();
+        assert!(matches!(err, ShapeError::BroadcastIncompatible { .. }));
     }
 }

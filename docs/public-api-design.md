@@ -77,6 +77,14 @@ pub enum ShapeError {
     /// （`zeros`/`ones`/`full`/`Tensor::new`/`from_slice` がアロケーション
     /// 前に検査する。2.4 参照）。
     ElementCountOverflow,
+    /// 非 contiguous なテンソルに対して `reshape` が呼ばれた
+    /// （2.2.1 の案 A。`.contiguous()` を明示的に呼ぶよう要求する）。
+    NonContiguousReshape,
+    /// 2 つの shape が NumPy 互換のブロードキャスト規則で両立しない
+    /// （`broadcast_shape`／`broadcast_to`／`broadcast_with` が構築。
+    /// #12・TASK-1.4b）。`broadcast_to` では `lhs` = 自身の shape・
+    /// `rhs` = target shape として構築する。
+    BroadcastIncompatible { lhs: Vec<usize>, rhs: Vec<usize> },
 }
 ```
 
@@ -103,7 +111,22 @@ impl<T: Element> Tensor<T> {
     /// 新しい `Tensor` を返す（常にコピーを伴う明示 API）。
     /// contiguous な場合は自身の複製（`Arc` 共有のまま）を返す。
     pub fn contiguous(&self) -> Tensor<T>;
+
+    /// self を target shape へブロードキャストした zero-copy view を返す
+    /// （NumPy `broadcast_to` 相当。拡張された軸は stride 0。#12・TASK-1.4b）。
+    /// 縮小方向・非互換 shape は `BroadcastIncompatible` を返す。
+    pub fn broadcast_to(&self, shape: &[usize]) -> Result<Tensor<T>, ShapeError>;
+
+    /// 二項演算向け: 両テンソルを共通 shape へブロードキャストした
+    /// view の組を返す（backend-cpu の elementwise カーネル・autodiff
+    /// の入口が消費する想定。#12・TASK-1.4b）。
+    pub fn broadcast_with(&self, other: &Tensor<T>) -> Result<(Tensor<T>, Tensor<T>), ShapeError>;
 }
+
+/// NumPy 互換のブロードキャスト後 shape を計算する（`broadcast.rs`）。
+/// 末尾軸から比較し「両者同一」または「片方が 1」なら大きい方を採用する。
+/// rank 差は短い方の先頭に 1 を補完する。不成立は `BroadcastIncompatible`。
+pub fn broadcast_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError>;
 ```
 
 #### 2.2.1 未決事項: 非 contiguous な `reshape` の方針
