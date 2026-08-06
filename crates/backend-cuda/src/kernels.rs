@@ -200,3 +200,31 @@ extern "C" __global__ void gemm_tiled_f16(
     }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TILE`（Rust 側の「唯一の真実源」宣言。本ファイル上記ドキュメント
+    /// コメント参照）が `TILED_F32`／`TILED_F16` の CUDA ソース文字列内の
+    /// `#define TILE` と食い違わないことを検査する。
+    ///
+    /// 両者をリンクする仕組み（コード生成等）が存在しないため、`TILE` の値を
+    /// 変更した際に片方だけ更新し忘れると `TILED_BLOCK_DIM` とカーネル内
+    /// `__shared__` 配列サイズ・ループ範囲がずれ、コンパイルエラーにもならず
+    /// 誤った積和結果を静かに生成しうる（レビュー指摘 #34）。この test は
+    /// その不整合を CI 上（`cargo test -p backend-cuda`。実機不要・文字列
+    /// 突合のみ）で機械検出する。
+    #[test]
+    fn tile_constant_matches_kernel_source_define() {
+        let expected = format!("#define TILE {TILE}");
+        assert!(
+            TILED_F32.contains(&expected),
+            "TILED_F32 の `#define TILE` が Rust 側の TILE 定数（{TILE}）と一致しません"
+        );
+        assert!(
+            TILED_F16.contains(&expected),
+            "TILED_F16 の `#define TILE` が Rust 側の TILE 定数（{TILE}）と一致しません"
+        );
+    }
+}

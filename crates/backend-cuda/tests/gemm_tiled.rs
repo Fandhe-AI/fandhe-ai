@@ -199,7 +199,7 @@ fn tiled_f16_runs_and_returns_expected_shape() {
 /// で中央値を求めて比較する
 /// （`.claude/rules/coding-rust.md` の「ベンチは 5 回計測の中央値を採用」）。
 ///
-/// 判定閾値: PoC-v2-3 実測（README 計測結果節）の 4096 比 naive/tiled =
+/// 判定閾値: PoC-v2-3 実測（README 計測結果節）の 4096 比 tiled/naive =
 /// 1.8316/1.2576 TFLOPS ≒ 1.46 倍に対し、ホスト側転送込み計測（本テストは
 /// `run_*` の呼び出し全体を計測しており、PoC の GPU 実行時間のみの計測とは
 /// 異なる）による希釈と実行環境揺らぎを見込んだ保守値 **1.1 倍以上**とする
