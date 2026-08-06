@@ -203,7 +203,7 @@ impl MetalGemm {
         })?;
 
         let padded_c = c_buf.read_to_vec();
-        Ok(unpad_matrix(&padded_c, m_eff, n_eff, m, n))
+        Ok(unpad_matrix(padded_c, m_eff, n_eff, m, n))
     }
 }
 

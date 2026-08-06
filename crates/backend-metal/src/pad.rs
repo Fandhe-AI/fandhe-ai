@@ -53,15 +53,20 @@ pub fn pad_matrix<'a>(
 ///
 /// [`crate::gemm::MetalGemm::dispatch_variant`] が Metal readback 後の
 /// C バッファ（実効次元）を呼び出し元へ渡す元の m×n 形状へ戻すために呼ぶ。
+/// `src` を値渡し（所有権移動）で受け取り、形状が一致するパディング不要
+/// 経路（`Naive`/`Tiled`、および既にアラインメント済みの `Simdgroup`）では
+/// `src` をそのまま返す（複製しない）。呼び出し元は readback で得た
+/// 所有 `Vec` をそのまま渡すことで、ホスト側の結果メモリを一時的に倍化
+/// させる不要な全体コピーを避ける（レビュー指摘 #246 対応）。
 pub fn unpad_matrix(
-    src: &[f32],
+    src: Vec<f32>,
     rows_eff: usize,
     cols_eff: usize,
     rows: usize,
     cols: usize,
 ) -> Vec<f32> {
     if rows_eff == rows && cols_eff == cols {
-        return src.to_vec();
+        return src;
     }
     let mut out = vec![0.0f32; rows * cols];
     for r in 0..rows {
@@ -109,15 +114,18 @@ mod tests {
     #[test]
     fn unpad_matrix_passthrough_when_size_matches() {
         let src = vec![1.0f32, 2.0, 3.0, 4.0];
-        let out = unpad_matrix(&src, 2, 2, 2, 2);
-        assert_eq!(out, src);
+        let ptr = src.as_ptr();
+        let out = unpad_matrix(src, 2, 2, 2, 2);
+        assert_eq!(out, vec![1.0f32, 2.0, 3.0, 4.0]);
+        // 形状一致時は複製せず所有権が移動することを確認（レビュー指摘 #246 対応）。
+        assert_eq!(out.as_ptr(), ptr);
     }
 
     #[test]
     fn unpad_matrix_is_inverse_of_pad_matrix() {
         let src = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2x3
-        let padded = pad_matrix(&src, 2, 3, 8, 8);
-        let unpadded = unpad_matrix(&padded, 8, 8, 2, 3);
+        let padded = pad_matrix(&src, 2, 3, 8, 8).into_owned();
+        let unpadded = unpad_matrix(padded, 8, 8, 2, 3);
         assert_eq!(unpadded, src);
     }
 
@@ -125,7 +133,7 @@ mod tests {
     fn unpad_matrix_discards_padding_tail() {
         // 8x8 の全 1 行列から先頭 3x5 のみ切り出す。
         let padded = vec![1.0f32; 64];
-        let out = unpad_matrix(&padded, 8, 8, 3, 5);
+        let out = unpad_matrix(padded, 8, 8, 3, 5);
         assert_eq!(out.len(), 15);
         assert!(out.iter().all(|&v| v == 1.0));
     }
