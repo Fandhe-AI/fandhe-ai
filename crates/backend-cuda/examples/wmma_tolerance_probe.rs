@@ -161,13 +161,19 @@ fn error_row(label: &str, seed: u64, reason: &str) {
 ///
 /// 戻り値 `true` は「意図しない計測エラー（shape 検証失敗・`compare` の
 /// 長さ不一致・WMMA 起動時エラー）が 1 件以上発生した」ことを示す。
-/// `CudaError::WmmaUnavailable`（Tensor Core 非対応環境）は意図的スキップ
-/// であり `false` のまま `return` する（#186・PR #257 Codex Review 指摘
-/// 「stress shape で allocation/launch/execution エラーが起きても行を
-/// 出力するだけでプログラムは exit 0 のままになり、部分計測を完了と
-/// 誤認しうる」対応。行は最後まで出力を続け、失敗有無だけを呼び出し元
-/// `main` へ伝播する）。
-fn probe_tf32(gemm: &CudaGemm) -> bool {
+///
+/// `CudaError::WmmaUnavailable` の扱いは `device` の compute capability で
+/// 分岐する（PR #257 Codex Review 再指摘対応。`gemm.rs::CudaGemm::new` の
+/// ドキュメンテーションコメントが明記するとおり、TF32 WMMA 経路は
+/// `TensorCoreUnsupported` のような事前ゲートを持たず、NVRTC コンパイル結果
+/// のみで可否を判定する事後判定方式である。そのため `WmmaUnavailable` は
+/// 「cc<8.0 でカーネルが拒否された（意図的スキップ）」と「cc≥8.0 なのに
+/// `<mma.h>` 解決失敗等でコンパイル・ロードが実際に失敗した（意図しない
+/// 計測エラー）」の両方を表しうる。`compute_capability() < (8, 0)` の場合
+/// のみ意図的スキップとして `false` のまま `return` し、それ以外
+/// （cc≥8.0 での失敗）は想定外エラーとして扱い `had_unexpected_error` を
+/// 立てたうえで計測を打ち切る）。
+fn probe_tf32(device: &CudaDevice, gemm: &CudaGemm) -> bool {
     println!("\n## TF32 (`CudaGemm::run_wmma_tf32`)\n");
     table_header();
     let mut had_unexpected_error = false;
@@ -196,8 +202,24 @@ fn probe_tf32(gemm: &CudaGemm) -> bool {
                     }
                 },
                 Err(CudaError::WmmaUnavailable { detail }) => {
-                    println!("\n(TF32 WMMA unavailable: {detail})\n");
-                    return had_unexpected_error;
+                    let (major, minor) = device.compute_capability();
+                    if (major, minor) < (8, 0) {
+                        println!(
+                            "\n(TF32 WMMA unavailable: compute capability {major}.{minor} \
+                             < 8.0（意図的スキップ）: {detail})\n"
+                        );
+                        return had_unexpected_error;
+                    }
+                    // cc≥8.0 なのにコンパイル・ロードが失敗している。
+                    // Tensor Core 非対応環境ではなく実際のコンパイル・ロード
+                    // 失敗（`<mma.h>` 解決失敗等）であり、部分計測を完了と
+                    // 誤認させないため想定外エラーとして扱う（Codex Review
+                    // 再指摘対応）。
+                    println!(
+                        "\n(TF32 WMMA unavailable despite compute capability {major}.{minor} \
+                         >= 8.0 — unexpected compile/load failure: {detail})\n"
+                    );
+                    return true;
                 }
                 Err(other) => {
                     error_row(label, seed, &format!("unexpected: run error: {other}"));
@@ -289,11 +311,15 @@ fn main() -> std::process::ExitCode {
             println!("CUDA driver 非搭載環境のため計測をスキップします: {detail}");
             return ExitCode::SUCCESS;
         }
-        Err(CudaError::Driver(err)) => {
-            println!("CUDA driver 初期化に失敗したため計測をスキップします: {err:?}");
-            return ExitCode::SUCCESS;
-        }
         Err(other) => {
+            // `CudaError::Driver`（`libcuda` は存在するが `cuInit`／
+            // コンテキスト生成／デバイスメタデータ取得等の driver API
+            // 呼び出し自体が失敗したケース。`error.rs` のドキュメンテーション
+            // コメント参照）は「環境非対応」ではなく実際の driver API 失敗
+            // であり、`DriverUnavailable` と同列にスキップ扱いすると計測ゼロ
+            // のまま exit 0 を返し完了と区別できなくなる（Codex Review
+            // 再指摘対応）。`DriverUnavailable` 以外は全て想定外エラーとして
+            // exit 1 を返す。
             println!("CudaDevice::new が想定外のエラーを返しました: {other}");
             return ExitCode::FAILURE;
         }
@@ -304,7 +330,7 @@ fn main() -> std::process::ExitCode {
 
     match CudaGemm::new(&device) {
         Ok(gemm) => {
-            if probe_tf32(&gemm) {
+            if probe_tf32(&device, &gemm) {
                 had_unexpected_error = true;
             }
         }

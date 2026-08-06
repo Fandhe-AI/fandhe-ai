@@ -89,6 +89,18 @@ pub struct CompareReport {
     pub p999_abs_diff: f64,
     /// fail したセル（`compare` の複合判定で不合格）に限定した `abs_diff` の
     /// 最大値。fail セルが 1 つもない場合は 0.0。
+    ///
+    /// fail セルの `abs_diff` が非有限（NaN・Inf。GPU 側が NaN を返した場合等）
+    /// の場合は `f64::INFINITY` を保持する（#186・PR #257 Codex Review
+    /// 再指摘対応: `0.0f64.max(NaN)` は NaN 側を残さず `0.0` のままになり
+    /// 「fail セルなし」と誤認されるため、非有限 diff は通常の `f64::max`
+    /// 集計に混ぜず `INFINITY` センチネルへ退避する）。呼び出し側は
+    /// この値を集計・表示に使う前に必ず `is_finite()` で確認すること
+    /// （`INFINITY` は「非有限 diff の fail セルが存在した」ことを示す
+    /// センチネルであり、通常の有限値と同じ扱いで平均等の計算に混ぜると
+    /// 結果が汚染される。`wmma_tolerance_probe.rs::report_row` の
+    /// マージン列は `max_abs_diff`（全セル対象。本フィールドとは別集計）を
+    /// 使っており本フィールドの非有限化に影響されない）。
     pub max_fail_abs_diff: f64,
 }
 
@@ -139,13 +151,19 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         let fail = !pass;
         if fail {
             fail_count += 1;
-            // fail セルに限定した abs_diff の最大値。NaN/Inf 由来で diff が
-            // 非有限になった場合 f64::max は非有限側を残さないことがあるが
-            // （`NaN.max(x) == x`）、そのケースは診断値としては無視して
-            // 安全側（有限値優先）に倒れるため許容する（#186・PR #257
-            // Codex Review「絶対誤差救済閾値の根拠は fail セル限定の
-            // 絶対誤差であるべき」対応）。
-            max_fail_abs_diff = max_fail_abs_diff.max(diff);
+            // fail セルに限定した abs_diff の最大値。`f64::max` は NaN を
+            // 相手側の値で置き換えてしまう（`x.max(NaN) == x`）ため、diff が
+            // 非有限（NaN・Inf）のまま `max_fail_abs_diff.max(diff)` を使うと
+            // 既存の有限値がそのまま残り「fail セルなし」（0.0 のまま）と
+            // 誤認されうる（#186・PR #257 Codex Review 再指摘対応）。
+            // 非有限 diff は `f64::INFINITY` センチネルへ退避し、以後
+            // 有限値でこの位置が上書きされない（INFINITY.max(有限値) は
+            // つねに INFINITY のまま）ことを保証する。
+            if diff.is_finite() {
+                max_fail_abs_diff = max_fail_abs_diff.max(diff);
+            } else {
+                max_fail_abs_diff = f64::INFINITY;
+            }
         }
 
         abs_diffs.push(diff);
@@ -323,6 +341,9 @@ mod tests {
         let report = compare(&a, &b).unwrap();
         assert!(!report.passes());
         assert_eq!(report.fail_count, 1);
+        // #186・PR #257 Codex Review 再指摘の回帰: NaN 由来の非有限 diff は
+        // `max_fail_abs_diff` を 0.0（=fail セルなし）のまま隠してはならない。
+        assert_eq!(report.max_fail_abs_diff, f64::INFINITY);
     }
 
     #[test]
@@ -334,6 +355,23 @@ mod tests {
         let report = compare(&a, &b).unwrap();
         assert!(!report.passes());
         assert_eq!(report.fail_count, 1);
+        // Inf 由来の非有限 diff も NaN と同じく INFINITY センチネルで保持する。
+        assert_eq!(report.max_fail_abs_diff, f64::INFINITY);
+    }
+
+    #[test]
+    fn max_fail_abs_diff_is_infinite_sentinel_not_masked_by_earlier_finite_fail() {
+        // #186・PR #257 Codex Review 再指摘の回帰: 非有限 diff の直前に有限
+        // fail セルが存在しても（`max_fail_abs_diff.max(diff)` に
+        // 迂回させない）、非有限センチネルが正しく残ることを固定する。
+        // index0: rel=0.01（有限 fail、abs=0.01）
+        // index1: NaN vs 有限値（非有限 fail）
+        let a = [1.0f32, f32::NAN];
+        let b = [1.01f32, 2.0];
+        let report = compare(&a, &b).unwrap();
+        assert!(!report.passes());
+        assert_eq!(report.fail_count, 2);
+        assert_eq!(report.max_fail_abs_diff, f64::INFINITY);
     }
 
     #[test]
