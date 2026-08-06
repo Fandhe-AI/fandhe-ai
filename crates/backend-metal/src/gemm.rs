@@ -1,36 +1,72 @@
-//! naive GEMM 公開入口（TASK-1.8b・#39）。
+//! GEMM 公開入口（naive: TASK-1.8b・#39／tiled・simdgroup: TASK-1.8c・#40）。
 //!
 //! [`crate::pipeline::compile_gemm_library`]・[`crate::pipeline::make_pipeline`]
-//! でビルドした `gemm_naive` パイプラインを保持する [`MetalGemm`] を介して
-//! [`crate::context::MetalContext::dispatch_sync`] へエンコーダ結線を委ね、
-//! [`crate::buffer::MetalBuffer`] で A・B・C を確保・readback する。
+//! でビルドした `gemm_naive`/`gemm_tiled`/`gemm_simdgroup` の 3 パイプライン
+//! を保持する [`MetalGemm`] を介して [`crate::context::MetalContext::dispatch_sync`]
+//! へエンコーダ結線を委ね、[`crate::buffer::MetalBuffer`] で A・B・C を
+//! 確保・readback する。`GemmVariant::Simdgroup` は [`crate::pad`] で
+//! 8 の倍数へパディングした実効次元でディスパッチし、readback 後に
+//! 元の m×n 形状へ切り出す（呼び出し元へパディングを隠蔽する）。
 //! `backend_cpu::parity::matmul_reference_fma`（本クレートの `dev-dependencies`
-//! 経由）との数値一致（REQ-2 統一複合判定）は `tests/gemm_naive_parity.rs`
-//! で検証する。
+//! 経由）との数値一致（REQ-2 統一複合判定）は `tests/gemm_naive_parity.rs`・
+//! `tests/gemm_simdgroup_parity.rs` で検証する。
 //!
 //! **移植元**: `docs/spec/03-poc/poc-v2-4-metal-gemm/code/rust/src/metal_gemm.rs`
-//! の `MetalGemm::prepare`/`GemmCase::dispatch`（`Naive` variant のみ。
-//! `Tiled`/`Simdgroup` は #40 のスコープ）。PoC の
-//! `unsafe`・`expect` 呼び出しは維持しつつ、確保直前の形状検証を追加し
-//! 型付きエラー化した（coding-rust.md）。
+//! の `MetalGemm::prepare`/`GemmCase::dispatch`。PoC の `unsafe`・`expect`
+//! 呼び出しは維持しつつ、確保直前の形状検証を追加し型付きエラー化した
+//! （coding-rust.md）。
 //!
-//! `MetalGemm` を 1 パイプラインのみで構成する構造にしたのは、#40
-//! （TASK-1.8c）で `pipeline_simdgroup` 等を並べて保持できる形に揃える
-//! ため（`docs/spec/.../metal_gemm.rs` の `MetalGemm { pipeline_naive,
-//! pipeline_tiled, pipeline_simdgroup, .. }` と同型の設計）。
+//! `MetalGemm` は `pipeline_naive`/`pipeline_tiled`/`pipeline_simdgroup` の
+//! 3 パイプラインを並べて保持する（`docs/spec/.../metal_gemm.rs` の
+//! `MetalGemm { pipeline_naive, pipeline_tiled, pipeline_simdgroup, .. }`
+//! と同型の設計。#39 時点は naive のみを productize していた）。
 
 use objc2_metal::{MTLComputeCommandEncoder, MTLSize};
 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
+use crate::pad::{pad_matrix, pad8, unpad_matrix};
 use crate::pipeline::{self, MtlPipeline};
 
-/// threadgroup サイズ（16×16）。PoC-v2-4 実測構成（`metal_gemm.rs` の
-/// naive/tiled 両段で採用）を踏襲する。grid は `div_ceil(16)` で切り上げ、
-/// はみ出す末尾スレッドは `shaders/gemm.metal` 側の手動境界チェック
-/// （REQ-8）で無視される。
+/// threadgroup サイズ（16×16）。`Naive`/`Tiled` 用（PoC-v2-4 実測構成。
+/// `metal_gemm.rs` の naive/tiled 両段で採用）を踏襲する。grid は
+/// `div_ceil(16)` で切り上げ、はみ出す末尾スレッドは `shaders/gemm.metal`
+/// 側の手動境界チェック（REQ-8）で無視される。
 const THREADGROUP_SIDE: usize = 16;
+
+/// `Simdgroup` 用の threadgroup 幅（32 スレッド = 1 simdgroup。高さは 1）。
+/// grid は実効次元（8 の倍数に padding 済み）を 8 で割った値になり、
+/// `div_ceil` は不要（`shaders/gemm.metal` の `gemm_simdgroup` コメント
+/// 参照。1 threadgroup が C の 8×8 タイルを 1 つ担当する）。
+const SIMDGROUP_THREADGROUP_WIDTH: usize = 32;
+
+/// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
+///
+/// [`MetalGemm::dispatch_variant`] が本 enum で選択したパイプラインへ
+/// ディスパッチする（`docs/spec/.../metal_gemm.rs` の `GemmVariant` と
+/// 同型）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GemmVariant {
+    /// 素朴な 3 重ループ（タイル化なし）。
+    Naive,
+    /// threadgroup 共有メモリによるタイル化。
+    Tiled,
+    /// `simdgroup_matrix`（8x8 ハードウェア行列演算命令）。
+    /// m・n・k を 8 の倍数にパディングして実行する。
+    Simdgroup,
+}
+
+impl GemmVariant {
+    /// `shaders/gemm.metal` 内の対応する `kernel` 関数名。
+    fn function_name(self) -> &'static str {
+        match self {
+            GemmVariant::Naive => "gemm_naive",
+            GemmVariant::Tiled => "gemm_tiled",
+            GemmVariant::Simdgroup => "gemm_simdgroup",
+        }
+    }
+}
 
 /// `shaders/gemm.metal` の `Dims` 構造体とレイアウトを一致させる
 /// （`repr(C)`・12 バイト）。`crate::gemm::naive` が形状検証後にここへ
@@ -46,7 +82,7 @@ struct Dims {
     k: u32,
 }
 
-/// naive GEMM パイプラインを保持するハンドル。
+/// naive・tiled・simdgroup の 3 パイプラインを保持するハンドル。
 ///
 /// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
 /// 込み）は比較的重い処理であり、`MetalGemm::new` を 1 回呼んで使い回す
@@ -54,29 +90,44 @@ struct Dims {
 /// TASK-1.8a・#38 の責務分離を維持する）。
 pub struct MetalGemm {
     pipeline_naive: objc2::rc::Retained<MtlPipeline>,
+    pipeline_tiled: objc2::rc::Retained<MtlPipeline>,
+    pipeline_simdgroup: objc2::rc::Retained<MtlPipeline>,
 }
 
 impl MetalGemm {
     /// `shaders/gemm.metal` を `ctx` のデバイス上でコンパイルし、
-    /// `gemm_naive` パイプラインを構築する。
+    /// `gemm_naive`/`gemm_tiled`/`gemm_simdgroup` の 3 パイプラインを
+    /// 構築する。
     pub fn new(ctx: &MetalContext) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
-        let pipeline_naive = pipeline::make_pipeline(ctx.device(), &library, "gemm_naive")?;
-        Ok(Self { pipeline_naive })
+        let pipeline_naive =
+            pipeline::make_pipeline(ctx.device(), &library, GemmVariant::Naive.function_name())?;
+        let pipeline_tiled =
+            pipeline::make_pipeline(ctx.device(), &library, GemmVariant::Tiled.function_name())?;
+        let pipeline_simdgroup = pipeline::make_pipeline(
+            ctx.device(),
+            &library,
+            GemmVariant::Simdgroup.function_name(),
+        )?;
+        Ok(Self {
+            pipeline_naive,
+            pipeline_tiled,
+            pipeline_simdgroup,
+        })
+    }
+
+    fn pipeline_for(&self, variant: GemmVariant) -> &MtlPipeline {
+        match variant {
+            GemmVariant::Naive => &self.pipeline_naive,
+            GemmVariant::Tiled => &self.pipeline_tiled,
+            GemmVariant::Simdgroup => &self.pipeline_simdgroup,
+        }
     }
 
     /// naive GEMM（`C = A @ B`。ゼロ初期化した C へのディスパッチ 1 回のみ、
-    /// 蓄積なし）を実行し、結果をホストへ読み出す。
-    ///
-    /// 形状検証（`m/n/k == 0` 拒否・`a.len() == m*k`・`b.len() == k*n`・
-    /// `checked_mul` によるオーバーフロー検出・`u32::MAX` 超過検出）を
-    /// FFI 呼び出し前に行う（OWASP A03 観点。`.claude/rules/security.md`。
-    /// 将来 safetensors/ONNX 由来の形状がこの経路に流入する前提の前段
-    /// 検証）。検証を通過した後は [`MetalBuffer::new_with_data`]・
-    /// [`MetalBuffer::new_zeroed`] でバッファを確保し、
-    /// [`MetalContext::dispatch_sync`] のクロージャ内でパイプライン・
-    /// バッファ（index 0〜2）・`Dims`（index 3）を結線してディスパッチ
-    /// する。
+    /// 蓄積なし）を実行し、結果をホストへ読み出す。[`GemmVariant::Naive`]
+    /// で [`Self::dispatch_variant`] へ委譲する薄いラッパー（#39 時点の
+    /// 既存呼び出し元・テストを壊さないため温存する。TASK-1.8c・#40）。
     pub fn dispatch(
         &self,
         ctx: &MetalContext,
@@ -86,21 +137,70 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        let dims = validate_dims(a, b, m, n, k)?;
+        self.dispatch_variant(ctx, GemmVariant::Naive, a, b, m, n, k)
+    }
+
+    /// `variant` で選択した GEMM カーネルをディスパッチし、結果をホストへ
+    /// 読み出す（TASK-1.8c・#40）。
+    ///
+    /// 形状検証（`m/n/k == 0` 拒否・`a.len() == m*k`・`b.len() == k*n`・
+    /// `checked_mul` によるオーバーフロー検出・`u32::MAX` 超過検出）を
+    /// FFI 呼び出し前に行う（OWASP A03 観点。`.claude/rules/security.md`。
+    /// 将来 safetensors/ONNX 由来の形状がこの経路に流入する前提の前段
+    /// 検証）。[`GemmVariant::Simdgroup`] の場合はさらに [`pad8`] で
+    /// 実効次元（8 の倍数）を算出し、パディングにより増える積（m_eff*k_eff
+    /// 等）にも同じオーバーフロー・`u32::MAX` 検証を [`validate_effective_dims`]
+    /// で通す（元 shape の検証だけでは実効次元側の桁あふれを見逃すため）。
+    /// [`pad_matrix`] で A・B を実効次元へ 0 パディングしてから
+    /// [`MetalBuffer::new_with_data`]・[`MetalBuffer::new_zeroed`] で
+    /// バッファを確保し、[`MetalContext::dispatch_sync`] のクロージャ内で
+    /// パイプライン・バッファ（index 0〜2）・`Dims`（index 3）を結線して
+    /// ディスパッチする。readback 後は [`unpad_matrix`] で元の m×n 形状へ
+    /// 切り出す（`Naive`/`Tiled` は実効次元 = 元次元のため実質無変換）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: `variant`・`a`・`b`・`m`・
+    /// `n`・`k` を個別引数として持つことで呼び出し側の意図が明確になる
+    /// ため、構造体へのまとめ込みは行わない（`backend_cpu::gemm::kernel_block`
+    /// と同じ判断根拠。理由コメント必須のルール `.claude/rules/coding-rust.md`
+    /// に対応）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_variant(
+        &self,
+        ctx: &MetalContext,
+        variant: GemmVariant,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        validate_dims(a, b, m, n, k)?;
+
+        let (m_eff, n_eff, k_eff) = if variant == GemmVariant::Simdgroup {
+            (pad8(m), pad8(n), pad8(k))
+        } else {
+            (m, n, k)
+        };
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+
+        let a_padded = pad_matrix(a, m, k, m_eff, k_eff);
+        let b_padded = pad_matrix(b, k, n, k_eff, n_eff);
 
         // `MetalBuffer` の確保エラーはそのまま `MetalError`
         // （`crate::error::MetalError`）であり、本関数の戻り値の
         // `Result<_, MetalError>` と型が一致するため変換不要（`?` で
         // そのまま伝播する）。
-        let a_buf = MetalBuffer::new_with_data(ctx, a)?;
-        let b_buf = MetalBuffer::new_with_data(ctx, b)?;
-        let c_buf = MetalBuffer::new_zeroed(ctx, m * n)?;
+        let a_buf = MetalBuffer::new_with_data(ctx, &a_padded)?;
+        let b_buf = MetalBuffer::new_with_data(ctx, &b_padded)?;
+        let c_buf = MetalBuffer::new_zeroed(ctx, m_eff * n_eff)?;
 
+        let pipeline = self.pipeline_for(variant);
         ctx.dispatch_sync(|encoder| {
-            encode_naive_dispatch(encoder, &self.pipeline_naive, &a_buf, &b_buf, &c_buf, dims);
+            encode_dispatch(encoder, pipeline, &a_buf, &b_buf, &c_buf, dims, variant);
         })?;
 
-        Ok(c_buf.read_to_vec())
+        let padded_c = c_buf.read_to_vec();
+        Ok(unpad_matrix(&padded_c, m_eff, n_eff, m, n))
     }
 }
 
@@ -154,17 +254,57 @@ fn validate_dims(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Result<D
     })
 }
 
+/// `GemmVariant::Simdgroup` の実効次元（[`pad8`] で 8 の倍数に切り上げた
+/// m_eff/n_eff/k_eff）に対する `checked_mul` オーバーフロー検出・
+/// `u32::MAX` 超過検出を行う（`Dims` への cast 前検証）。
+///
+/// [`validate_dims`] は元 shape（`a`/`b` の実長さ）に対する検証であり、
+/// パディングにより増加する積（m_eff*k_eff 等）はここで別途検証する
+/// 必要がある（[`MetalGemm::dispatch_variant`] は `validate_dims` 通過後に
+/// 本関数を呼ぶ）。`Naive`/`Tiled` は m_eff/n_eff/k_eff がそのまま
+/// m/n/k と一致するため、`validate_dims` で検証済みの範囲を再確認する
+/// だけで実質的にオーバーフローしない。
+fn validate_effective_dims(m_eff: usize, n_eff: usize, k_eff: usize) -> Result<Dims, MetalError> {
+    m_eff
+        .checked_mul(k_eff)
+        .ok_or(MetalError::DimProductOverflow)?;
+    k_eff
+        .checked_mul(n_eff)
+        .ok_or(MetalError::DimProductOverflow)?;
+    m_eff
+        .checked_mul(n_eff)
+        .ok_or(MetalError::DimProductOverflow)?;
+
+    if m_eff > u32::MAX as usize || n_eff > u32::MAX as usize || k_eff > u32::MAX as usize {
+        return Err(MetalError::DimensionExceedsU32 {
+            m: m_eff,
+            n: n_eff,
+            k: k_eff,
+        });
+    }
+
+    Ok(Dims {
+        m: m_eff as u32,
+        n: n_eff as u32,
+        k: k_eff as u32,
+    })
+}
+
 /// パイプライン設定・バッファ結線（index 0〜2）・`Dims`（index 3）の
 /// `setBytes`・`dispatchThreadgroups_threadsPerThreadgroup` を行う。
-/// [`MetalGemm::dispatch`] が [`MetalContext::dispatch_sync`] のクロージャ
-/// から呼ぶ。
-fn encode_naive_dispatch(
+/// [`MetalGemm::dispatch_variant`] が [`MetalContext::dispatch_sync`]
+/// のクロージャから呼ぶ。`variant` によって threadgroup サイズ・grid
+/// の計算方式が異なる（`Naive`/`Tiled` は 16×16・`div_ceil(16)`、
+/// `Simdgroup` は 32×1・`n_eff/8 × m_eff/8`。`shaders/gemm.metal` の
+/// 各カーネルのディスパッチ形状契約と一致させる）。
+fn encode_dispatch(
     encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
     a_buf: &MetalBuffer,
     b_buf: &MetalBuffer,
     c_buf: &MetalBuffer,
     dims: Dims,
+    variant: GemmVariant,
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -193,11 +333,29 @@ fn encode_naive_dispatch(
         );
     }
 
-    let grid_w = (dims.n as usize).div_ceil(THREADGROUP_SIDE);
-    let grid_h = (dims.m as usize).div_ceil(THREADGROUP_SIDE);
+    // `Simdgroup` は 1 threadgroup（32 スレッド = 1 simdgroup）が C の 8×8
+    // タイルを 1 つ担当するため、grid は実効次元（`dispatch_variant` が
+    // `pad8` で 8 の倍数に揃え済み）をちょうど 8 で割った値になる
+    // （`div_ceil` 不要。`shaders/gemm.metal` の `gemm_simdgroup` と同じ
+    // ディスパッチ形状契約）。`Naive`/`Tiled` は 16×16 threadgroup・
+    // `div_ceil(16)` grid（既存構成を維持）。
+    let (tg_w, tg_h, grid_w, grid_h) = match variant {
+        GemmVariant::Simdgroup => (
+            SIMDGROUP_THREADGROUP_WIDTH,
+            1,
+            (dims.n as usize) / 8,
+            (dims.m as usize) / 8,
+        ),
+        GemmVariant::Naive | GemmVariant::Tiled => (
+            THREADGROUP_SIDE,
+            THREADGROUP_SIDE,
+            (dims.n as usize).div_ceil(THREADGROUP_SIDE),
+            (dims.m as usize).div_ceil(THREADGROUP_SIDE),
+        ),
+    };
     let threads_per_tg = MTLSize {
-        width: THREADGROUP_SIDE,
-        height: THREADGROUP_SIDE,
+        width: tg_w,
+        height: tg_h,
         depth: 1,
     };
     let threadgroups = MTLSize {
@@ -287,5 +445,40 @@ mod tests {
             err,
             MetalError::DimensionExceedsU32 { m, n: 1, k: 1 } if m == over_u32
         ));
+    }
+
+    // --- validate_effective_dims（pure・実機不要） ---
+
+    #[test]
+    fn validate_effective_dims_accepts_padded_shape() {
+        // pad8(37)=40, pad8(41)=48, pad8(53)=56 相当の実効次元。
+        let dims = validate_effective_dims(40, 48, 56).unwrap();
+        assert_eq!((dims.m, dims.n, dims.k), (40, 48, 56));
+    }
+
+    #[test]
+    fn validate_effective_dims_rejects_dim_product_overflow() {
+        let huge = usize::MAX / 2 + 1;
+        let err = validate_effective_dims(huge, huge, 2).unwrap_err();
+        assert!(matches!(err, MetalError::DimProductOverflow));
+    }
+
+    #[test]
+    fn validate_effective_dims_rejects_dimension_exceeding_u32() {
+        let over_u32 = u32::MAX as usize + 1;
+        let err = validate_effective_dims(over_u32, 8, 8).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::DimensionExceedsU32 { m, n: 8, k: 8 } if m == over_u32
+        ));
+    }
+
+    // --- GemmVariant ---
+
+    #[test]
+    fn gemm_variant_function_names_match_shader_kernel_names() {
+        assert_eq!(GemmVariant::Naive.function_name(), "gemm_naive");
+        assert_eq!(GemmVariant::Tiled.function_name(), "gemm_tiled");
+        assert_eq!(GemmVariant::Simdgroup.function_name(), "gemm_simdgroup");
     }
 }
