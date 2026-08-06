@@ -30,12 +30,12 @@
 //! ドライバ非搭載環境では `is_available() == false`・`enumerate() == Ok(vec![])`
 //! を返す（fail-safe。`device.rs` 内コメント参照）。
 //!
-//! カーネルソース・起動 API は naive 版（#33）を追加した。tiled 版は #34、
-//! CUDA toolkit 非搭載ビルドの CI 検証は #35、実機（DGX Spark GB10）依存
-//! テストの `#[ignore]` 分離は #36、`BackendOps`/`BackendError` への
-//! フルマッピング（カーネル起動・メモリ転送）は TASK-1.9c（#46）のスコープ
-//! であり、本クレートでは扱わない（spec 根拠: `docs/spec/05-tasks.md`
-//! TASK-1.7・TASK-1.9）。
+//! カーネルソース・起動 API は naive 版（#33）・tiled 版（#34。共有メモリ
+//! タイリング `TILE=32`）を追加済み。CUDA toolkit 非搭載ビルドの CI 検証は
+//! #35、実機（DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
+//! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
+//! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
+//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
 
 pub mod device;
 mod error;
