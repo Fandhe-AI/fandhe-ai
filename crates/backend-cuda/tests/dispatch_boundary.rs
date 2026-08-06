@@ -192,6 +192,19 @@ fn small_shape_matrix_unit_has_no_floor_tflops_record() {
         .expect("WMMA TF32 measurement must satisfy TASK-8.1 protocol");
         let tiled_f32_compute = tiled_f32_measurement.median_secs - f32_transfer.median_secs;
         let tf32_compute = tf32_measurement.median_secs - f32_transfer.median_secs;
+        // 転送のみ計測が合算計測を下回ること（=計算のみ時間が正）を保証する。
+        // `tests/tensor_core_real_device.rs:235-239` と同じガードで、小形状
+        // （dim=128 等）では計算時間が転送時間と同程度以下になりうるため
+        // 負値・`inf` の TFLOPS が出うる（PR レビュー指摘）。
+        assert!(
+            tiled_f32_compute > 0.0 && tf32_compute > 0.0,
+            "転送のみ計測（f32: {:.6}s）が合算計測（tiled_f32: {:.6}s, wmma_tf32: {:.6}s）を \
+             下回りませんでした（dim={dim}）。計測がプロトコル前提（転送・カーネル実行の直列化）\
+             を満たしていない可能性があります",
+            f32_transfer.median_secs,
+            tiled_f32_measurement.median_secs,
+            tf32_measurement.median_secs,
+        );
         let tiled_f32_tflops = (flops(dim) / tiled_f32_compute) / 1e12;
         let tf32_tflops = (flops(dim) / tf32_compute) / 1e12;
 
@@ -210,6 +223,16 @@ fn small_shape_matrix_unit_has_no_floor_tflops_record() {
         .expect("WMMA f16 measurement must satisfy TASK-8.1 protocol");
         let tiled_f16_compute = tiled_f16_measurement.median_secs - f16_transfer.median_secs;
         let wmma_f16_compute = wmma_f16_measurement.median_secs - f16_transfer.median_secs;
+        // 上記 f32 系と同じ理由の正値ガード（`tests/tensor_core_real_device.rs:235-239`）。
+        assert!(
+            tiled_f16_compute > 0.0 && wmma_f16_compute > 0.0,
+            "転送のみ計測（f16: {:.6}s）が合算計測（tiled_f16: {:.6}s, wmma_f16: {:.6}s）を \
+             下回りませんでした（dim={dim}）。計測がプロトコル前提（転送・カーネル実行の直列化）\
+             を満たしていない可能性があります",
+            f16_transfer.median_secs,
+            tiled_f16_measurement.median_secs,
+            wmma_f16_measurement.median_secs,
+        );
         let tiled_f16_tflops = (flops(dim) / tiled_f16_compute) / 1e12;
         let wmma_f16_tflops = (flops(dim) / wmma_f16_compute) / 1e12;
 
@@ -307,6 +330,19 @@ fn large_shape_mma_pipeline_vs_wmma_tflops_record() {
 
         let wmma_compute = wmma_measurement.median_secs - transfer.median_secs;
         let mma_compute = mma_measurement.median_secs - transfer.median_secs;
+        // 正値ガード（`tests/tensor_core_real_device.rs:235-239` と同じ理由）。
+        // 本関数の対象形状は 2048/4096 と大きく通常は転送時間を大きく
+        // 上回るが、先例と同一の実装として揃え、負値の混入を計測時点で
+        // 検知できるようにする。
+        assert!(
+            wmma_compute > 0.0 && mma_compute > 0.0,
+            "転送のみ計測（{:.6}s）が合算計測（wmma: {:.6}s, mma.sync: {:.6}s）を下回りませんでした \
+             （dim={dim}）。計測がプロトコル前提（転送・カーネル実行の直列化）を満たしていない \
+             可能性があります",
+            transfer.median_secs,
+            wmma_measurement.median_secs,
+            mma_measurement.median_secs,
+        );
         let wmma_tflops = (flops(dim) / wmma_compute) / 1e12;
         let mma_tflops = (flops(dim) / mma_compute) / 1e12;
 

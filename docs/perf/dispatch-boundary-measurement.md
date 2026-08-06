@@ -36,7 +36,7 @@ CUDA の「形状下限なし」設計）。設計文書は `docs/dispatch-rules
 ```sh
 git fetch origin
 git checkout test/69-dispatch-boundary-measurement   # 本イシューの実装ブランチ
-cargo test -p backend-metal --release -- --ignored --nocapture dispatch_boundary
+cargo test -p backend-metal --release --test dispatch_boundary -- --ignored --nocapture
 ```
 
 出力形式（`crates/backend-metal/tests/dispatch_boundary.rs` 参照）:
@@ -45,15 +45,18 @@ cargo test -p backend-metal --release -- --ignored --nocapture dispatch_boundary
   simdgroup_auto_over_tiled=<比率>` 行: `min(M,N,K)` = 256/384/448/512/576/640/768/1024（正方）での
   2 経路比較
 - `dispatch_boundary_route_record dim=<N> min_dim_threshold=512 expected_kernel=<KernelKind>
-  result=parity_pass` 行: 各境界形状で `dispatch_backend_auto` が決定表どおりの経路を選び、
-  CPU 参照実装との複合判定に通過したことの記録
+  route_verified=false result=parity_pass` 行: 各境界形状で `dispatch_backend_auto` の出力が
+  CPU 参照実装との複合判定に通過したことの記録。`expected_kernel` は `select_gemm_kernel` を
+  独立に呼んだ参考値であり、`route_verified=false` が示すとおり実機が実際にその経路を選んだ
+  ことの検証ではない（`dispatch_backend_auto` はカーネル種別を返さないため比較不可。PR レビュー
+  指摘）。経路選択ロジック自体は `tensor-core` 側の `#[cfg(test)]` が別途網羅する
 
 ### CUDA（DGX Spark GB10・compute capability 8.0 以上・NVRTC 搭載）
 
 ```sh
 git fetch origin
 git checkout test/69-dispatch-boundary-measurement
-cargo test -p backend-cuda --release -- --ignored --nocapture dispatch_boundary
+cargo test -p backend-cuda --release --test dispatch_boundary -- --ignored --nocapture
 ```
 
 出力形式（`crates/backend-cuda/tests/dispatch_boundary.rs` 参照）:
@@ -90,16 +93,35 @@ cargo test -p backend-cuda --release -- --ignored --nocapture    # gemm_auto.rs�
 
 ### Metal: 境界形状（tiled 対 simdgroup_matrix 動的タイル選択）
 
-| min(M,N,K) | tiled TFLOPS | simdgroup_auto TFLOPS | auto/tiled | `select_gemm_kernel` 期待経路 | 選択経路一致 | parity |
-|------|------|------|------|------|------|------|
-| 256  | | | | Tiled | | |
-| 384  | | | | Tiled | | |
-| 448  | | | | Tiled | | |
-| 512  | | | | MatrixUnit | | |
-| 576  | | | | MatrixUnit | | |
-| 640  | | | | MatrixUnit | | |
-| 768  | | | | MatrixUnit | | |
-| 1024 | | | | MatrixUnit | | |
+`select_gemm_kernel` 期待経路は `dispatch_boundary_route_record` 行から独立に計算した参考値
+（`route_verified=false`）であり、実機が実際にその経路を選んだことの検証結果ではない
+（`MetalGemm::dispatch_backend_auto` はカーネル種別を返さないため比較不可。上記「計測手順」節
+参照）。「parity」列は `dispatch_backend_auto` の出力と CPU 参照実装との数値一致のみを表す。
+
+下表の TFLOPS は転送時間補正なし（合算計測。`crates/backend-metal/tests/dispatch_boundary.rs`
+冒頭コメント「転送時間補正なし（既知の限定事項）」参照）。`tiled`／`simdgroup_auto` は同一
+dtype・同一バイト数の転送のため比が壊れるほどの歪みはないが、転送コストが一定量
+`auto/tiled` 比を 1.0 側へ寄せるバイアスとして残るため、512 付近のクロスオーバー特定は
+このバイアスを踏まえて解釈すること。
+
+| min(M,N,K) | tiled TFLOPS | simdgroup_auto TFLOPS | auto/tiled | `select_gemm_kernel` 期待経路（参考・未検証） | parity |
+|------|------|------|------|------|------|
+| 256  | | | | Tiled | |
+| 384  | | | | Tiled | |
+| 448  | | | | Tiled | |
+| 512  | | | | MatrixUnit | |
+| 576  | | | | MatrixUnit | |
+| 640  | | | | MatrixUnit | |
+| 768  | | | | MatrixUnit | |
+| 1024 | | | | MatrixUnit | |
+
+`crates/backend-cuda/tests/dispatch_boundary.rs` の各計測は計算のみ時間の正値ガード
+（`assert!(... > 0.0)`。`tests/tensor_core_real_device.rs:235-239` と同じ実装）を持つ。
+実機実行で dim=128 付近においてこのガードが失敗した場合はテストのバグではなく、
+「その形状では計算時間が転送時間（`clone_htod` × 2 + `alloc_zeros` + `synchronize` +
+`clone_dtoh`）と同程度以下」というプロトコル上の観測結果である。その場合は該当形状の
+TFLOPS 値は「計測不能」として記録し、より大きな warmup/計測回数か、より大きな最小形状
+から実測を再開することを検討する（閾値・許容誤差の変更はしない）。
 
 ### CUDA: 小形状（tiled 対 WMMA・形状下限なし規則の検証）
 
