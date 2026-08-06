@@ -96,7 +96,7 @@ fn backend_name_is_cuda() {
 /// 検出し、デバイス名が非空であることを確認する（`.claude/rules/coding-rust.md`
 /// の実機依存テスト分離方針）。
 #[test]
-#[ignore = "実機（CUDA ドライバ搭載環境）が必要。make test-ignored 相当で実行する"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn select_device_zero_on_real_hardware() {
     let provider = CudaDeviceProvider::new();
 

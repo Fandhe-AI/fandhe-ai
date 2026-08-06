@@ -1,11 +1,11 @@
-//! `CudaDevice`／`CudaError` の環境適応型テスト。
+//! `CudaDevice`／`CudaError` の環境適応型テスト＋実機必須の肯定的検証（#36）。
 //!
 //! CUDA 搭載・非搭載どちらの環境でも green になる設計とする。CI
 //! self-hosted runner は CUDA toolkit 非搭載のため、本テストの
 //! `Err(DriverUnavailable)` 分岐が実際に検証される（#35 の前提）。
-//! 実機（DGX Spark GB10）でのみ意味を持つ肯定的検証（デバイス名の
-//! 実値確認等）は #36 のスコープであり、本テストには含めない
-//! （重複防止。`.claude/rules/coding-rust.md` の実機依存分離方針）。
+//! 実機（DGX Spark GB10 等）でのみ意味を持つ肯定的検証（デバイス名の
+//! 実値確認等）は `#[ignore]` 分離のうえ本ファイル末尾に追加する
+//! （`.claude/rules/coding-rust.md` の実機依存分離方針）。
 
 use backend_cuda::{CudaDevice, CudaError};
 
@@ -83,6 +83,41 @@ fn device_count_does_not_panic() {
         }
         Err(other) => panic!("unexpected CudaError variant from device_count: {other}"),
     }
+}
+
+/// 実機（DGX Spark GB10 等）必須の肯定的検証（#36）。
+///
+/// `new_does_not_panic_and_returns_typed_result` の `Ok` 分岐は非搭載環境
+/// では実行されずに終わるため、CUDA 搭載環境で実際に `Ok` になり
+/// メタデータが妥当であることまでは保証していない。本テストはその `Ok`
+/// 分岐を `expect` で強制し、実機で継続的に検証する（機種名（例:
+/// GB10）はハードコードしない。DGX Spark GB10 以外の CUDA 実機でも
+/// 通ることを意図する機種非依存の検証）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn new_returns_ok_with_valid_metadata_on_real_hardware() {
+    let dev = CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+
+    assert!(!dev.name().is_empty(), "device name must not be empty");
+    let (major, minor) = dev.compute_capability();
+    assert!(major > 0, "compute capability major must be positive");
+    assert_eq!(
+        dev.arch(),
+        format!("compute_{major}{minor}"),
+        "arch must be NVRTC --gpu-architecture compatible compute_XY form"
+    );
+    assert_eq!(dev.ordinal(), 0);
+
+    assert!(
+        CudaDevice::is_available(),
+        "is_available() must be true when device 0 initialized successfully"
+    );
+    let count = CudaDevice::device_count()
+        .expect("device_count must succeed once new(0) already succeeded");
+    assert!(
+        count >= 1,
+        "device_count must be >= 1 when new(0) succeeded"
+    );
 }
 
 /// エラー型の単体テスト（環境非依存）: `Display` 表示・`From` 変換・

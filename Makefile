@@ -103,6 +103,18 @@ else
 	@echo "skip: Cargo.toml 未追加のため test-ignored をスキップ"
 endif
 
+# TASK-1.7e（イシュー #36）: `backend-cuda` に限定した実機テスト導線。
+# `test-ignored`（workspace 全体）は Metal 側の #[ignore] テストや他クレートの
+# perf 系テストも巻き込むため、CUDA 実機（DGX Spark GB10 等・Linux）のみで
+# `backend-cuda` を検証したい場合はこちらを使う。
+.PHONY: test-ignored-cuda
+test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する
+ifdef HAS_CARGO
+	cargo test -p backend-cuda -- --ignored --nocapture
+else
+	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
+endif
+
 # macOS runner 未登録の代替として、aarch64-apple-darwin へのクロスターゲットビルドで
 # Metal 有効経路（cfg(target_os = "macos")）のコンパイルを検証する（TASK-2.1b・イシュー #50。
 # 全 9 クレートは lib のみでリンク不要なため、macOS SDK が無い環境でもコンパイル検証が成立する。
