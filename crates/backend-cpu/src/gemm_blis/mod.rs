@@ -55,7 +55,11 @@ use crate::gemm::{GemmError, validate_dims};
 #[cfg(not(target_arch = "x86_64"))]
 use microkernel::Isa;
 use microkernel::Microkernel;
-#[cfg(not(target_arch = "aarch64"))]
+// `mod tests`（`use super::*;` で全取り込み）内のテストが ISA 分岐を問わず
+// `ScalarKernel` を直接参照するため、cfg 条件に `test` を加える
+// （aarch64 の非テストビルドではスカラーカーネル型を経路上使わないが、
+// テストバイナリのコンパイルには必要。#185 レビュー指摘）。
+#[cfg(any(not(target_arch = "aarch64"), test))]
 use microkernel::ScalarKernel;
 use pack::{pack_a, pack_b};
 use rayon::prelude::*;
