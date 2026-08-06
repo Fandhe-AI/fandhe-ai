@@ -315,6 +315,19 @@ impl CudaGemm {
             return Ok(Vec::new());
         }
 
+        // Cursor Bugbot 指摘（PR #244）: `k == 0` の場合 `a`（m*k 要素）・
+        // `b`（k*n 要素）は共に空スライスになり、そのまま `clone_htod` を
+        // 呼ぶと 0 バイトのデバイスバッファ確保を driver に要求する。一部
+        // 環境の CUDA driver は 0 バイト確保を拒否するため（`cudarc` 経由の
+        // `cuMemAlloc` は 0 バイトで `CUDA_ERROR_INVALID_VALUE` を返しうる）、
+        // カーネル起動自体を回避し `m*n` 要素の全 0 ベクタを返す（K 方向の
+        // 累積対象が存在しない = C は全 0 という GEMM の数学的定義どおりの
+        // 契約。`tests/gemm_tiled.rs` の `tiled_f32_zero_k_returns_all_zero`
+        // 参照）。
+        if k == 0 {
+            return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+        }
+
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
         let mut c_dev = self
@@ -367,6 +380,12 @@ impl CudaGemm {
         // run_f32_kernel と同一の根拠（上記コメント参照）。
         if m == 0 || n == 0 {
             return Ok(Vec::new());
+        }
+
+        // run_f32_kernel の k==0 早期 return と同一の根拠（上記コメント
+        // 参照）。
+        if k == 0 {
+            return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
         }
 
         let a_dev = self.stream.clone_htod(a)?;
