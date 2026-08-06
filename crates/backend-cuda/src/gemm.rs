@@ -85,7 +85,22 @@ pub struct CudaGemm {
     /// GEMM）が本 PR 時点で未マージのため、WMMA 共通基盤（NVRTC コンパイル・
     /// 起動 API の骨格）はこのフィールドと共に本イシューで最小実装した
     /// （イシュー #62 実装計画 2 節「安全側の判断」）。
-    wmma_tf32: CudaFunction,
+    ///
+    /// `Option` にする理由（レビュー指摘 #62）: `WMMA_TF32_F32` は
+    /// `#include <mma.h>`（NVRTC の include パス解決が必要）と compute
+    /// capability 8.0 以降を要求し、naive/tiled の 4 カーネル（`#include`
+    /// を使わず全 compute capability で成立）より失敗しうる環境が広い。
+    /// `new` 内でこのコンパイルを `?` により早期 return させると、
+    /// WMMA 経路のコンパイル失敗だけで naive/tiled 4 カーネルまで
+    /// `CudaGemm::new` ごと使用不能になる回帰を招く。`None` は
+    /// コンパイル・ロード失敗を表し、`wmma_tf32_error` に detail を保持
+    /// して `run_wmma_tf32` 呼び出し時にのみ `CudaError::WmmaUnavailable`
+    /// として表面化させる。
+    wmma_tf32: Option<CudaFunction>,
+    /// `wmma_tf32` が `None` の場合の失敗理由（`Display` 済み文字列）。
+    /// `CudaError`（`Compile`/`Driver` 等）は `Clone` を実装しないため、
+    /// `run_wmma_tf32` から再送出できるよう文字列化して保持する。
+    wmma_tf32_error: Option<String>,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -227,6 +242,20 @@ pub(crate) fn validate_wmma_tf32_k_bound(k: u32) -> Result<(), CudaError> {
 /// 束ねた形）とタイル一辺（32×32、2×2 warp グリッド）が異なるため、
 /// 専用のグリッド計算関数として分離する。末尾ブロックの余剰スレッドは
 /// カーネル内の手動境界チェック（REQ-8）に委ねる契約は共通。
+/// WMMA(TF32) カーネル（`kernels::WMMA_TF32_F32`）を単独でコンパイル・
+/// ロードする。`CudaGemm::new` から呼ばれ、戻り値の `Err` は naive/tiled
+/// 4 カーネルの `?` 早期 return には合流させず、呼び出し元で
+/// `wmma_tf32_error` として退避する（[`CudaGemm::wmma_tf32`] フィールドの
+/// ドキュメンテーションコメント参照。レビュー指摘 #62）。
+fn compile_wmma_tf32(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
+    let ptx = compile_ptx(kernels::WMMA_TF32_F32, arch)?;
+    let func = device
+        .context()
+        .load_module(ptx)?
+        .load_function("gemm_wmma_tf32")?;
+    Ok(func)
+}
+
 fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
     let grid_dim = (
         n.div_ceil(kernels::WMMA_TF32_BLOCK_N),
@@ -251,6 +280,16 @@ impl CudaGemm {
     /// "gemm_tiled_f16")`。カーネルコンパイル自体は `CudaDevice::new` と
     /// 同じく `libnvrtc` 不在時に `CudaError::NvrtcUnavailable` を返す
     /// （`compile_ptx` のプローブゲートを経由。panic しない）。
+    ///
+    /// WMMA(TF32) カーネル（`kernels::WMMA_TF32_F32`）のコンパイル・ロードは
+    /// 上記 4 カーネルとは独立に扱う（レビュー指摘 #62）。`#include <mma.h>`
+    /// の解決失敗や compute capability 8.0 未満といった、naive/tiled より
+    /// 広い環境で失敗しうるため、失敗しても `new` 全体を `Err` にせず
+    /// `wmma_tf32` を `None`・detail を `wmma_tf32_error` に保持する
+    /// （[`Self::wmma_tf32`] フィールドのドキュメンテーションコメント
+    /// 参照）。これにより NVRTC が `<mma.h>` を解決できない・compute
+    /// capability 8.0 未満の環境でも naive/tiled 4 カーネルは引き続き
+    /// 使用可能なままになる。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let arch = device.arch();
 
@@ -258,12 +297,6 @@ impl CudaGemm {
         let naive_f16_ptx = compile_ptx(kernels::NAIVE_F16, arch)?;
         let tiled_f32_ptx = compile_ptx(kernels::TILED_F32, arch)?;
         let tiled_f16_ptx = compile_ptx(kernels::TILED_F16, arch)?;
-        // `<mma.h>` は NVRTC 組み込みで解決できないため、include_paths なしの
-        // 初回試行は失敗し `nvrtc::compile_ptx` の 2 段目フォールバック
-        // （`CUDA_INCLUDE_PATH` または既知候補パス）を経由する契約
-        // （`nvrtc.rs` ドキュメンテーションコメント・設計メモ 3.2 節「NVRTC
-        // ヘッダ問題」参照。本モジュールは `compile_ptx` に手を加えない）。
-        let wmma_tf32_ptx = compile_ptx(kernels::WMMA_TF32_F32, arch)?;
 
         let naive_f32 = device
             .context()
@@ -281,25 +314,36 @@ impl CudaGemm {
             .context()
             .load_module(tiled_f16_ptx)?
             .load_function("gemm_tiled_f16")?;
-        let wmma_tf32 = device
-            .context()
-            .load_module(wmma_tf32_ptx)?
-            .load_function("gemm_wmma_tf32")?;
 
         // `kernels::WMMA_TF32_F32` はブロックタイル（M/N=32）を warp タイル
         // （WMMA_TF32_FRAG=16）の 2x2 グリッドに割ることを前提にしており、
         // `WMMA_TF32_THREADS`（128 = 4 warp）ともこの分割数と対応する。この
-        // 不変条件が定数変更で崩れると `warp_row`/`warp_col` が意図しない
-        // 範囲を指しカーネルが誤った積和・共有メモリ範囲を読む（カーネル側の
-        // コンパイル時マクロとは独立して壊れうるため、ここで機械検査する）。
-        debug_assert_eq!(kernels::WMMA_TF32_BLOCK_M % kernels::WMMA_TF32_FRAG, 0);
-        debug_assert_eq!(kernels::WMMA_TF32_BLOCK_N % kernels::WMMA_TF32_FRAG, 0);
-        debug_assert_eq!(
+        // 不変条件はカーネルソースの定数変更で壊れうるため、実行時条件に
+        // 依存しないコンパイル時 const アサーションで機械検査する
+        // （レビュー指摘 #62: `debug_assert_eq!` は release ビルドで消え、
+        // かつ CUDA 非搭載の通常 CI ではこの `new` 自体が実行されないため、
+        // 従来の位置では実質的に検査されていなかった）。
+        const _: () = assert!(kernels::WMMA_TF32_BLOCK_M.is_multiple_of(kernels::WMMA_TF32_FRAG));
+        const _: () = assert!(kernels::WMMA_TF32_BLOCK_N.is_multiple_of(kernels::WMMA_TF32_FRAG));
+        const _: () = assert!(
             (kernels::WMMA_TF32_BLOCK_M / kernels::WMMA_TF32_FRAG)
                 * (kernels::WMMA_TF32_BLOCK_N / kernels::WMMA_TF32_FRAG)
-                * 32,
-            kernels::WMMA_TF32_THREADS
+                * 32
+                == kernels::WMMA_TF32_THREADS
         );
+
+        // `<mma.h>` は NVRTC 組み込みで解決できないため、include_paths なしの
+        // 初回試行は失敗し `nvrtc::compile_ptx` の 2 段目フォールバック
+        // （`CUDA_INCLUDE_PATH` または既知候補パス）を経由する契約
+        // （`nvrtc.rs` ドキュメンテーションコメント・設計メモ 3.2 節「NVRTC
+        // ヘッダ問題」参照。本モジュールは `compile_ptx` に手を加えない）。
+        // 上記 4 カーネルと異なり `?` で早期 return せず、失敗を
+        // `wmma_tf32_error` に退避して naive/tiled の可用性から切り離す
+        // （`Self::wmma_tf32` フィールドのドキュメンテーションコメント参照）。
+        let (wmma_tf32, wmma_tf32_error) = match compile_wmma_tf32(device, arch) {
+            Ok(func) => (Some(func), None),
+            Err(e) => (None, Some(e.to_string())),
+        };
 
         Ok(Self {
             stream: device.stream().clone(),
@@ -308,6 +352,7 @@ impl CudaGemm {
             tiled_f32,
             tiled_f16,
             wmma_tf32,
+            wmma_tf32_error,
         })
     }
 
@@ -386,6 +431,12 @@ impl CudaGemm {
     /// [`validate_wmma_tf32_k_bound`] を経由する（`validate_tiled_k_bound`
     /// と同じ考え方だが `kernels::WMMA_TF32_K_TILE`（8）基準で独立して検証する）。
     /// TASK-11.1c（#62）・REQ-11。
+    ///
+    /// `CudaGemm::new` 時点で WMMA(TF32) カーネルのコンパイル・ロードが
+    /// 失敗していた場合（[`Self::wmma_tf32`] フィールド参照）は
+    /// `CudaError::WmmaUnavailable` を返す。この場合でも naive/tiled 版の
+    /// `run_naive_*`／`run_tiled_*` は道連れにならず引き続き使用できる
+    /// （レビュー指摘 #62）。
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],
@@ -394,9 +445,17 @@ impl CudaGemm {
         n: u32,
         k: u32,
     ) -> Result<Vec<f32>, CudaError> {
+        let func = self
+            .wmma_tf32
+            .as_ref()
+            .ok_or_else(|| CudaError::WmmaUnavailable {
+                detail: self.wmma_tf32_error.clone().unwrap_or_else(|| {
+                    "WMMA(TF32) kernel unavailable for an unknown reason".to_string()
+                }),
+            })?;
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_wmma_tf32_k_bound(k)?;
-        self.run_wmma_f32_kernel(&self.wmma_tf32, a, b, m, n, k)
+        self.run_wmma_f32_kernel(func, a, b, m, n, k)
     }
 
     /// WMMA TF32 カーネル専用の起動手続き。[`Self::run_f32_kernel`] と

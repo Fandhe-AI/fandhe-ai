@@ -45,6 +45,14 @@ fn assert_wmma_tf32_parity(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n:
 /// green とする。CUDA+toolkit+Tensor Core（compute capability 8.0 以降）搭載
 /// 環境でのみ小形状（32×32×32。WMMA ブロックタイル 1 個ぶん）で
 /// `assert_parity` による複合判定を実施する。
+///
+/// レビュー指摘 #62 反映: `CudaGemm::new` は WMMA(TF32) カーネルのコンパイル
+/// 失敗を `Err` として早期 return せず `wmma_tf32_error` に退避する
+/// （`gemm.rs::CudaGemm::new` 参照）ため、`new` はここでは
+/// `NvrtcUnavailable` 以外で失敗しない。WMMA(TF32) 固有の失敗
+/// （`<mma.h>` 未解決・compute capability 8.0 未満）は `run_wmma_tf32` の
+/// `CudaError::WmmaUnavailable` として表面化するため、`new` 成功後に
+/// `run_wmma_tf32` 側で早期 return を判定する。
 #[test]
 fn wmma_tf32_parity_smoke_env_adaptive() {
     let device = match CudaDevice::new(0) {
@@ -61,27 +69,41 @@ fn wmma_tf32_parity_smoke_env_adaptive() {
         Ok(gemm) => gemm,
         Err(CudaError::NvrtcUnavailable { detail }) => {
             // libcuda はあるが libnvrtc が dlopen できない環境（CUDA driver
-            // のみで toolkit 非搭載）。WMMA(TF32) カーネルは `<mma.h>` を
-            // 要求するため toolkit 必須（設計メモ 3.2 節）であり、この分岐は
-            // naive/tiled 版と同じ理由で early return する。
+            // のみで toolkit 非搭載）。naive/tiled 4 カーネルのコンパイルも
+            // NVRTC を要求するため、この分岐で `new` 自体が失敗する。
             assert!(!detail.is_empty());
-            return;
-        }
-        Err(CudaError::Compile(detail)) => {
-            // NVRTC は搭載されているが `<mma.h>` の include パス解決に失敗、
-            // または対象 GPU が compute capability 8.0 未満で TF32 fragment
-            // が NVRTC に受理されない環境。WMMA(TF32) カーネル固有の
-            // 失敗経路であり、naive/tiled のコンパイルには影響しない
-            // （`CudaGemm::new` は naive/tiled/WMMA(TF32) の 5 カーネルを
-            // 一括コンパイルするため、いずれか 1 つの失敗で `Err` になる。
-            // `gemm.rs::CudaGemm::new` 参照）。
-            let _ = detail;
             return;
         }
         Err(other) => panic!("unexpected CudaError variant from CudaGemm::new: {other}"),
     };
 
-    assert_wmma_tf32_parity(&gemm, "smoke 32x32x32", 1, 32, 32, 32);
+    wmma_tf32_parity_or_skip(&gemm, "smoke 32x32x32", 1, 32, 32, 32);
+}
+
+/// `assert_wmma_tf32_parity` のスモークテスト専用版。WMMA(TF32) カーネルが
+/// `CudaGemm::new` 時点でコンパイル・ロードに失敗していた場合
+/// （`CudaError::WmmaUnavailable`。`<mma.h>` 未解決・compute capability 8.0
+/// 未満の環境）は early return 相当として何もせず戻る（レビュー指摘 #62）。
+/// naive/tiled は `new` の時点で既に使用可能であることが確定しているため
+/// 巻き添えにしない。
+fn wmma_tf32_parity_or_skip(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n: u32, k: u32) {
+    let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+    let a = rng.fill_vec((m as usize) * (k as usize));
+    let b = rng.fill_vec((k as usize) * (n as usize));
+
+    let c_gpu = match gemm.run_wmma_tf32(&a, &b, m, n, k) {
+        Ok(c_gpu) => c_gpu,
+        Err(CudaError::WmmaUnavailable { detail }) => {
+            assert!(!detail.is_empty());
+            return;
+        }
+        Err(other) => panic!("unexpected CudaError variant from run_wmma_tf32: {other}"),
+    };
+
+    let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
+        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
@@ -137,4 +159,45 @@ fn wmma_tf32_k4096_stress_poc_v2_5() {
         512,
         4096,
     );
+}
+
+/// `k == 0`（`num_k_tiles == 0` 経路。`kernels.rs` の
+/// `(k > 0) ? (k - 1) / WMMA_TF32_K_TILE + 1 : 0` 参照）で C が全 0 になる
+/// ことを確認する。`tests/gemm_tiled.rs::tiled_f32_zero_k_returns_all_zero`
+/// の WMMA(TF32) 版（レビュー指摘 #62: tiled 版には存在するのに WMMA(TF32)
+/// 版には対応するテストが無いという指摘への対応）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+fn wmma_tf32_zero_k_returns_all_zero() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+    let (m, n, k) = (4u32, 4u32, 0u32);
+    let c = gemm
+        .run_wmma_tf32(&[], &[], m, n, k)
+        .expect("k==0 must be a valid no-accumulation shape, not a launch error");
+    assert_eq!(c.len(), (m as usize) * (n as usize));
+    assert!(c.iter().all(|&v| v == 0.0), "k==0 output must be all zero");
+}
+
+/// m==0／n==0（`backend-cpu::gemm_naive` と同じ no-op 形状）で
+/// `run_wmma_tf32` を呼んでも CUDA 起動自体が発生せず（`gemm.rs` の
+/// `run_wmma_f32_kernel` 早期 return）、空の結果を返すことを実機で確認する。
+/// `tests/gemm_tiled.rs::tiled_f32_zero_dim_shape_returns_empty_without_launch`
+/// の WMMA(TF32) 版（レビュー指摘 #62）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+fn wmma_tf32_zero_dim_shape_returns_empty_without_launch() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+    let c = gemm
+        .run_wmma_tf32(&[], &[1.0, 2.0, 3.0, 4.0], 0, 4, 1)
+        .expect("m==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+
+    let c = gemm
+        .run_wmma_tf32(&[1.0, 2.0], &[], 2, 0, 1)
+        .expect("n==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
 }
