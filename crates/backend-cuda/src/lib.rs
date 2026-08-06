@@ -48,17 +48,47 @@
 //! （#60）で確定済み（方式 A: `#include <mma.h>` の WMMA C++ API・
 //! `m16n16k16` fragment・f32 アキュムレート）。naive／tiled 経路
 //! （`kernels.rs`／`gemm.rs`）とは別ファイル（`kernels_wmma.rs`／
-//! `gemm_wmma.rs`）に分離しており、ディスパッチ規則（どの経路をいつ
-//! 選ぶか）は TASK-11.2（#66）のスコープであり本クレートでは未実装。
-//! TF32/f32 tensor core 経路（#62）・共有メモリ／タイル基本最適化（#63）・
-//! 実機実測での数値一致検証（#64）・`mma.sync` PTX 直叩き（#187）も
-//! 本イシューのスコープ外である（`docs/cuda-tensor-core-design.md` 参照）。
+//! `gemm_wmma.rs`）に分離している。
+//!
+//! TASK-11.1c（#62）で WMMA（Tensor Core）を用いた TF32/f32 GEMM
+//! （[`CudaGemm::run_wmma_tf32`]）を追加した。設計は `docs/cuda-tensor-core-design.md`
+//! （#60）を正本とし、fragment `m16n16k8`（TF32 精度・f32 累算）・方式 A
+//! （WMMA C++ API `<mma.h>`）を採用する（REQ-11）。TF32 は f32 の仮数部
+//! 23bit を 10bit に丸めて Tensor Core へ投入するため、統一複合判定
+//! （相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は TF32 前提の複合指標
+//! として適用する（REQ-2、`.claude/rules/coding-rust.md`）。f16 WMMA 経路
+//! （#61）とは異なり、TF32 経路は naive／tiled 経路と同じ `kernels.rs`／
+//! `gemm.rs` に実装している。
+//! TASK-11.1d（#63）で WMMA(TF32)／f16 WMMA の共有メモリ・タイル最適化版
+//! カーネル（`kernels_wmma_opt::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT`）を追加
+//! した。ブロックタイル 64×64・warp あたり fragment 2×2 個（レジスタ
+//! ブロッキング）・バンクコンフリクト回避パディング・`__syncthreads()`
+//! ベースのダブルバッファリングを適用する（設計は `docs/cuda-tensor-core-
+//! design.md` 4.2 節を正本とする）。公開 API（`CudaGemm::run_wmma_tf32`／
+//! `CudaWmmaGemm::run_f16`）のシグネチャは変更せず、opt カーネルが
+//! `new` 時点でコンパイル・ロードに成功していれば優先的に使用し、失敗
+//! していれば #61/#62 の基本 WMMA カーネルへ自動フォールバックする
+//! （`kernels_wmma_opt.rs` 冒頭ドキュメントコメント参照）。実機実測での
+//! 数値一致・性能確定は #64 のスコープ。
+//!
+//! TASK-11.1h（#187）で `mma.sync`/`ldmatrix`/`cp.async` PTX 直叩き経路
+//! （[`CudaMmaGemm`]）を追加した。WMMA 経路（cc>=7.0）より厳しい
+//! compute capability 8.0+ ゲートを持つ独立経路であり、`kernels_mma.rs`／
+//! `gemm_mma.rs` に分離している（並行 issue #62/#63 が `gemm.rs`／
+//! `gemm_wmma.rs`／`kernels.rs`／`kernels_wmma.rs` を編集中のため）。
+//! XOR swizzle によるバンクコンフリクト低減は未実装（`kernels_mma.rs`
+//! 冒頭コメント「タイル構成」参照。コンパイル未検証環境でのリスク
+//! 最小化判断）。
 //!
 //! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
 //! 追加した。`tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
 //! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
-//! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。既存の
-//! `CudaGemm`／`CudaWmmaGemm` の直接指定 API はテスト・証跡用途
+//! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。TF32/f32
+//! 経路（`CudaGemm::run_wmma_tf32`・#62）・`mma.sync` 経路（`CudaMmaGemm`・
+//! #187）は、決定表（設計文書 §4）が TF32 既定採用を #186（TASK-11.1g）の
+//! ユーザー承認まで保留と定めているため、現時点の `select_gemm_kernel` の
+//! 自動経路には含めない（f32 は常に Tiled）。既存の `CudaGemm`／
+//! `CudaWmmaGemm`／`CudaMmaGemm` の直接指定 API はテスト・証跡用途
 //! （#70）にそのまま温存する（設計文書 §5.4）。`BackendOps` trait への
 //! 結線は TASK-1.9c（#46）のスコープであり、`CudaGemmAuto` はそこから
 //! 呼ばれるだけの構成にできる（`gemm_auto.rs` モジュールコメント参照）。
@@ -67,14 +97,18 @@ pub mod device;
 mod error;
 mod gemm;
 mod gemm_auto;
+mod gemm_mma;
 mod gemm_wmma;
 mod kernels;
+mod kernels_mma;
 mod kernels_wmma;
+mod kernels_wmma_opt;
 mod nvrtc;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
 pub use gemm_auto::CudaGemmAuto;
+pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;

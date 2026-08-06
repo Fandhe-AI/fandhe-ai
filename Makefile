@@ -107,10 +107,14 @@ endif
 # `test-ignored`（workspace 全体）は Metal 側の #[ignore] テストや他クレートの
 # perf 系テストも巻き込むため、CUDA 実機（DGX Spark GB10 等・Linux）のみで
 # `backend-cuda` を検証したい場合はこちらを使う。
+# TASK-11.1e（イシュー #64）: `--release` を既定にする（`test-ignored-metal`
+# と同じ理由。`tests/tensor_core_real_device.rs` の M=N=K=4096 TFLOPS 実測・
+# `tests/gemm_wmma_tf32_opt.rs` の K=4096 ストレスケースは CPU 参照実装
+# 〈`matmul_reference_fma`〉の計算量が大きく debug ビルドでは著しく遅いため）。
 .PHONY: test-ignored-cuda
-test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する
+test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する（release）
 ifdef HAS_CARGO
-	cargo test -p backend-cuda -- --ignored --nocapture
+	cargo test -p backend-cuda --release -- --ignored --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
 endif

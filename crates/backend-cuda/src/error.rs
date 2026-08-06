@@ -69,6 +69,20 @@ pub enum CudaError {
     /// TASK-11.2／#66 のディスパッチ規則側の責務であり、本クレートでは
     /// 判定のみを行う）。
     TensorCoreUnsupported { detail: String },
+
+    /// WMMA(TF32) GEMM カーネル（`kernels::WMMA_TF32_F32`）が `CudaGemm::new`
+    /// 時点でコンパイル・ロードに失敗しており、`run_wmma_tf32` を呼べない
+    /// 状態であることを表す。
+    ///
+    /// `WMMA_TF32_F32` は `#include <mma.h>`（NVRTC の include パス解決が
+    /// 必要）と compute capability 8.0 以降を要求するため、naive/tiled の
+    /// 4 カーネル（`#include` を使わず全 compute capability で成立）より
+    /// 失敗しうる環境が広い（レビュー指摘 #62。実機での `<mma.h>` 解決は
+    /// 未検証）。`CudaGemm::new` はこの失敗を `Err` として早期 return せず
+    /// 本 variant の detail として保持し、naive/tiled 4 カーネルの可用性を
+    /// 道連れにしない（`gemm.rs::CudaGemm::new` ドキュメンテーションコメント
+    /// 参照）。
+    WmmaUnavailable { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -95,6 +109,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
+            }
+            CudaError::WmmaUnavailable { detail } => {
+                write!(f, "WMMA(TF32) GEMM kernel unavailable: {detail}")
             }
         }
     }
