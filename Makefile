@@ -2,8 +2,10 @@
 #
 # `make setup` 一発で開発環境（rustup・lefthook・サブモジュール）を構築し、
 # `make ci` で CI（.github/workflows/ci.yml）と同一のチェックをローカル実行する。
-# Cargo.toml 未追加（M0 の TASK-1.1 で workspace 作成予定）の間、cargo 系ターゲットは
-# CI と同じ方針でスキップする（エラーにしない）。
+# workspace Cargo.toml（TASK-1.1）は追加済みのため cargo 系ターゲットは実行される。
+# HAS_CARGO／HAS_DENY 判定によるスキップ分岐は、CI の detect ステップと同一の
+# 冪等セルフヒール方針（.claude/rules/ci.md）のフェイルセーフとして残置する
+# （deny.toml 未追加＝TASK-1.3 の間は deny ターゲットのみスキップされる）。
 # Docker で環境非依存に開発する場合は docker-* ターゲットを使う（compose.yaml 参照）。
 # Fandhe-AI/rust-ai-library-v1 の Makefile と同一方針。
 

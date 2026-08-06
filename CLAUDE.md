@@ -7,7 +7,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 - 想定クレート 9 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
-- 現状 M0 着手中（TASK-1.1a: workspace `Cargo.toml` と 9 クレート雛形を追加済み。TASK-1.1b: 許容依存 8 区分を `[workspace.dependencies]` に `=x.y.z` 完全固定で反映し `Cargo.lock` をコミット済み。TASK-1.2〜1.3 は未着手）。CI・Makefile の cargo 系チェックは `Cargo.toml` 追加により有効化済み（`deny.toml` 未追加の deny ジョブのみ自動スキップ継続）
+- 現状 M0 着手中（TASK-1.1a: workspace `Cargo.toml` と 9 クレート雛形を追加済み。TASK-1.1b: 許容依存 8 区分を `[workspace.dependencies]` に `=x.y.z` 完全固定で反映し `Cargo.lock` をコミット済み。TASK-1.2: 依存禁止検査は CI 上で稼働中〈green〉。TASK-1.3: `deny.toml` 導入・ライセンス監査は未着手）。CI・Makefile の cargo 系チェックは `Cargo.toml` 追加により有効化済み（`deny.toml` 未追加の deny ジョブのみ自動スキップ継続）
 
 ## Repository Structure
 

@@ -5,8 +5,9 @@
 「具体的な CLI コマンド仕様は Phase 5（タスク分解後の実装リポ側）で定める」と
 明示委譲している事項を、TASK-4.1（`guardrail` 移植・#101 系）・TASK-3.1
 （`self-repair` 骨格移植・#131）・TASK-6.1（CI 常設化・#146）の実装着手前に
-確定する **設計文書**である。コード実装は本イシューのスコープ外（現状 M0 未着手
-で `Cargo.toml`・`crates/` 自体が未作成のため、文書のみが成果物となる）。
+確定する **設計文書**である。コード実装は本イシューのスコープ外（TASK-1.1a で
+`Cargo.toml`・`crates/` 雛形は追加済みだが、`guardrail`・`self-repair` 自体の
+実装着手は TASK-4.1・TASK-3.1 以降のため、本イシューでは文書のみが成果物となる）。
 
 本文書の設計判断は仕様（`docs/spec/04-requirements.md` の REQ 番号）と
 `Fandhe-AI/rust-ai-library-v1`（旧 Burn 基盤リポジトリ、以下「v1」）の実装

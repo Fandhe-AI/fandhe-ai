@@ -10,7 +10,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリです。Burn 依存を排
 
 ## ステータス
 
-M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス可否表）は未着手です。タスク定義は spec リポの [`05-tasks.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/05-tasks.md)（TASK-1.1〜1.3）、マイルストーンは [`06-roadmap.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/06-roadmap.md)（M0〜M5・全 51 タスク）を参照してください。
+M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス可否表）は着手中です。TASK-1.1（workspace `Cargo.toml`・9 クレート雛形・許容依存 8 区分の `=x.y.z` 固定・`Cargo.lock` コミット）は完了し、CI の cargo 系チェック（fmt / clippy / test / 依存禁止検査）は有効化・green を確認済みです（TASK-1.2 の依存禁止検査は稼働中）。TASK-1.3（`deny.toml` 導入・ライセンス監査）は未着手です。タスク定義は spec リポの [`05-tasks.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/05-tasks.md)（TASK-1.1〜1.3）、マイルストーンは [`06-roadmap.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/06-roadmap.md)（M0〜M5・全 51 タスク）を参照してください。
 
 ## 実装方針（要点）
 
@@ -49,7 +49,7 @@ make setup   # サブモジュール取得 → rustup → lefthook（git hooks�
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
 | `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
 
-Cargo.toml 未追加（M0 の TASK-1.1 で workspace 作成予定）の間、cargo 系ターゲットは CI と同じ方針でスキップされます。
+`Cargo.toml` は追加済み（TASK-1.1）のため cargo 系ターゲットは実行されます。detect ガード（`HAS_CARGO`／`HAS_DENY` 判定）は冪等セルフヒール方針のフェイルセーフとして残置しており、`deny.toml`（TASK-1.3 で導入予定）のみ現状スキップされます。
 
 ## Docker 開発環境
 
