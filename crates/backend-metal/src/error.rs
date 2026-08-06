@@ -79,6 +79,16 @@ pub enum MetalError {
     /// `m`・`n`・`k` のいずれかが `u32::MAX` を超え、`shaders/gemm.metal`
     /// の `Dims`（`uint` 3 個）へキャストできない（cast 前検証）。
     DimensionExceedsU32 { m: usize, n: usize, k: usize },
+    /// `memory.rs::MetalMemory::download_inner` で `Tensor::new` に渡した
+    /// `buffer.shape()` と実際に読み出したデータ長が不整合だった（通常
+    /// 到達しない防御的経路。`backend-cuda::CudaError::InvalidShape` と
+    /// 同種）。`detail` は元の `ShapeError` の `Display` 文字列表現を
+    /// 保持し、`MetalError::BufferAllocation { bytes: 0 }` に化けて
+    /// 実態と異なるエラー種別を報告しないようにする（レビュー指摘対応。
+    /// upload_inner 側の同種到達不能パスは `BufferAllocation` を流用
+    /// しているが、こちらは shape 不整合の詳細を保持する必要があるため
+    /// 専用 variant とする）。
+    ShapeMismatch { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -143,6 +153,9 @@ impl fmt::Display for MetalError {
             }
             MetalError::DimensionExceedsU32 { m, n, k } => {
                 write!(f, "gemm dimensions exceed u32::MAX: m={m}, n={n}, k={k}")
+            }
+            MetalError::ShapeMismatch { detail } => {
+                write!(f, "shape mismatch: {detail}")
             }
         }
     }

@@ -74,6 +74,11 @@ fn map_metal_error(err: MetalError) -> BackendError {
         MetalError::DeviceUnavailable | MetalError::CommandQueueCreation => {
             BackendError::DeviceUnavailable(err.to_string())
         }
+        // CUDA 実装（`backend-cuda/src/memory.rs::map_cuda_error`）の
+        // `CudaError::InvalidShape { detail } => BackendError::
+        // DeviceAllocationFailed(detail)` と同じ変換先に揃える
+        // （レビュー指摘対応。detail を保持したまま伝播する）。
+        MetalError::ShapeMismatch { detail } => BackendError::DeviceAllocationFailed(detail),
         other => BackendError::KernelLaunchFailed(other.to_string()),
     }
 }
@@ -141,7 +146,14 @@ impl MetalMemory {
             None => Vec::new(),
             Some(buf) => buf.read_to_vec(),
         };
-        Tensor::new(data, buffer.shape()).map_err(|_| MetalError::BufferAllocation { bytes: 0 })
+        // shape 不整合（通常到達しない防御的経路）を `BufferAllocation
+        // { bytes: 0 }` のような実態と異なる variant に化けさせず、
+        // 元の `ShapeError` の詳細を `MetalError::ShapeMismatch` として
+        // 保持する（CUDA 実装の `CudaError::InvalidShape { detail:
+        // format!(...) }` と同型の防御的経路。レビュー指摘対応）。
+        Tensor::new(data, buffer.shape()).map_err(|err| MetalError::ShapeMismatch {
+            detail: format!("download produced a shape-inconsistent tensor: {err}"),
+        })
     }
 }
 
