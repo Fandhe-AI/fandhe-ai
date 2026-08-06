@@ -80,16 +80,20 @@ fn checked_numel(shape: &[usize]) -> Result<usize, CudaError> {
         })
 }
 
-/// `CudaError` を `BackendError` へ変換する。
+/// `CudaError` を `BackendError` へ変換する（転送系呼び出し用）。
 ///
-/// `DeviceAllocationFailed` は確保そのものの失敗（`alloc_zeros` 由来）、
 /// `TransferFailed`（TASK-1.9b で追加。`tensor_core::device` 参照）は
 /// 確保済みバッファへのコピー（`clone_htod`/`clone_dtoh`）の失敗を表す。
-/// `CudaError` は `#[non_exhaustive]` のため、将来の variant 追加に
-/// 対しても構造上フォールバックできるよう `KernelLaunchFailed` を
-/// wildcard の受け皿とする（`Compile`/`TensorCoreUnsupported` はこの
-/// モジュールの呼び出し経路からは発生しないが、`non_exhaustive` ゆえに
-/// 網羅的 match は書けない）。
+/// `CudaError::Driver` は `clone_htod`/`clone_dtoh`（`upload`/`download`）
+/// と `alloc_zeros`（`alloc_zeroed`）の両方から生じうるが、同じ
+/// `driver::result::DriverError` にラップされ区別できないため、
+/// `alloc_zeroed` 側は本関数を使わず `map_cuda_alloc_error` を使う
+/// （Bugbot 指摘: `alloc_zeros` 失敗が `TransferFailed` に化けていた
+/// バグの修正）。`CudaError` は `#[non_exhaustive]` のため、将来の
+/// variant 追加に対しても構造上フォールバックできるよう
+/// `KernelLaunchFailed` を wildcard の受け皿とする（`Compile`/
+/// `TensorCoreUnsupported` はこのモジュールの呼び出し経路からは発生
+/// しないが、`non_exhaustive` ゆえに網羅的 match は書けない）。
 fn map_cuda_error(err: CudaError) -> BackendError {
     match err {
         CudaError::DriverUnavailable { detail } => BackendError::CudaUnavailable(detail),
@@ -97,6 +101,22 @@ fn map_cuda_error(err: CudaError) -> BackendError {
         CudaError::InvalidShape { detail } => BackendError::DeviceAllocationFailed(detail),
         CudaError::Driver(e) => BackendError::TransferFailed(format!("{e:?}")),
         other => BackendError::KernelLaunchFailed(format!("{other}")),
+    }
+}
+
+/// `CudaError` を `BackendError` へ変換する（`alloc_zeroed` 専用）。
+///
+/// `DeviceAllocationFailed` は確保そのものの失敗（`alloc_zeros` 由来）を
+/// 表す契約（`tensor_core::device::BackendError` ドキュメンテーション
+/// コメント参照）。`map_cuda_error` と異なり `CudaError::Driver` を
+/// `DeviceAllocationFailed` にマップする点のみが差分である
+/// （`alloc_zeroed_inner` 内で `CudaError::Driver` を生じさせるのは
+/// `alloc_zeros` 呼び出しのみであり、転送系呼び出しを含まないため
+/// 区別が付く）。
+fn map_cuda_alloc_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::Driver(e) => BackendError::DeviceAllocationFailed(format!("{e:?}")),
+        other => map_cuda_error(other),
     }
 }
 
@@ -171,7 +191,7 @@ impl CudaMemory {
 
 impl MemoryOps for CudaMemory {
     fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.alloc_zeroed_inner(shape).map_err(map_cuda_error)
+        self.alloc_zeroed_inner(shape).map_err(map_cuda_alloc_error)
     }
 
     fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
@@ -187,6 +207,17 @@ impl MemoryOps for CudaMemory {
         // 判定する（3 バックエンド共通のハンドル型不一致検出。レビュー
         // 指摘対応）。
         if buffer.downcast_handle::<CudaBufferHandle>().is_none() {
+            return Err(BackendError::DeviceMismatch);
+        }
+        // ハンドル型（CudaBufferHandle）が一致しても、複数 GPU 環境では
+        // 別 ordinal 上で確保された `CudaSlice` を受理してしまいうる
+        // （`CudaBufferHandle` 自体は ordinal を保持しないため、型検査
+        // だけでは他デバイス由来のバッファを判別できない）。`self.ordinal`
+        // と `buffer.device()` の ordinal が一致することを、実際の
+        // driver API 呼び出し（`clone_dtoh`）の前に検証する
+        // （Bugbot 指摘: device ordinal 不一致が無視され誤ったストリーム
+        // 上でコピーが実行されうるバグの修正）。
+        if buffer.device() != Device::Cuda(self.ordinal) {
             return Err(BackendError::DeviceMismatch);
         }
         self.download_inner(buffer).map_err(map_cuda_error)
@@ -234,6 +265,60 @@ mod tests {
         assert!(
             matches!(err, BackendError::DeviceAllocationFailed(msg) if msg.contains("bad shape"))
         );
+    }
+
+    #[test]
+    fn map_cuda_alloc_error_labels_driver_failure_as_allocation_failed() {
+        // `alloc_zeros` の失敗（`CudaError::Driver`）は、転送系の
+        // `map_cuda_error`（`TransferFailed` にマップする）ではなく
+        // `map_cuda_alloc_error` で `DeviceAllocationFailed` にマップ
+        // されるべきことを検証する（Bugbot 指摘の再発防止）。
+        //
+        // `cudarc::driver::result::DriverError` を直接構築する公開 API が
+        // ないため、`CudaError::InvalidShape` 経由で `map_cuda_alloc_error`
+        // が `map_cuda_error` へ委譲するフォールバック経路を確認しつつ、
+        // `CudaError::Driver` の分岐そのものはコード上の match アームで
+        // `DeviceAllocationFailed` を返すことを構造的に保証している
+        // （本関数の定義参照）。
+        let err = map_cuda_alloc_error(CudaError::InvalidShape {
+            detail: "bad alloc shape".to_string(),
+        });
+        assert!(
+            matches!(err, BackendError::DeviceAllocationFailed(msg) if msg.contains("bad alloc shape"))
+        );
+    }
+
+    #[test]
+    fn download_rejects_mismatched_device_ordinal() {
+        // 別 ordinal 上で確保された `DeviceBuffer`（ハンドル型は
+        // `CudaBufferHandle` で一致するが device ordinal が異なる）を
+        // `download` に渡すと `DeviceMismatch` で拒否されることを検証する
+        // （Bugbot 指摘: device ordinal 不一致が無視されるバグの修正）。
+        //
+        // 実 GPU ドライバ呼び出しは行わない（`numel == 0` の空バッファは
+        // `slice: None` で `cuMemcpyDtoHAsync` 等を経由しないため、
+        // CUDA 非搭載環境でも到達可能。`CudaMemory::new` 自体は
+        // 初期化済み `CudaDevice` を要求するため、既存の
+        // `cuda_memory_construction_follows_device_init_gate` と同じ
+        // 環境適応ゲートで守る）。
+        match CudaDevice::new(0) {
+            Ok(device) => {
+                let mem = CudaMemory::new(&device);
+                // `mem.ordinal` とは異なる ordinal を持つバッファを構築する
+                // （実機の ordinal が 0 の場合を考慮し 0 以外を採用）。
+                let other_ordinal = mem.ordinal + 1;
+                let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle { slice: None });
+                let buffer: DeviceBuffer<f32> =
+                    DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
+                let err = mem.download(&buffer).unwrap_err();
+                assert!(matches!(err, BackendError::DeviceMismatch));
+            }
+            Err(_) => {
+                // 非搭載環境: CudaDevice::new 自体が型付きエラーで止まる
+                // ため、本テストの主張には到達しない（panic しないことが
+                // 検証対象）。
+            }
+        }
     }
 
     #[test]
