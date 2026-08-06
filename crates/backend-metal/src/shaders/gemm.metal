@@ -72,6 +72,14 @@ kernel void gemm_naive(
 // 内積の丸め方針（FMA 契約。REQ-2）: naive 段と同じ理由で `acc += a*b`
 // （PoC 原文）ではなく `fma()` を明示する（CPU 参照実装 `f32::mul_add`
 // との丸め方針統一。PoC-v2-5 実測確認済み）。
+//
+// バッファオフセットの 64-bit 化（PR #246 Bugbot 指摘対応）: `row * k`・
+// `b_row * n`・`row * n` は `dims.m`/`n`/`k` が個々に `u32::MAX` 未満でも
+// 積が `u32::MAX` を超えうる（例: m=n=k=100000 は各次元は収まるが
+// `row * n` は最大 約 1.0e10 で 32-bit `uint` 溢れによりオフセットが
+// ラップアラウンドし、書き込み先行が黙って不正になる）。`row`/`a_col`/
+// `b_row`/`col` を `size_t`（64-bit）へ昇格してから乗算し、`u32::MAX` 超の
+// 有効な行列サイズでも溢れないようにする。
 constant uint TILE = 16;
 
 kernel void gemm_tiled(
@@ -94,8 +102,10 @@ kernel void gemm_tiled(
         uint a_col = t * TILE + lid.x;
         uint b_row = t * TILE + lid.y;
 
-        tile_a[lid.y][lid.x] = (row < m && a_col < k) ? a[row * k + a_col] : 0.0;
-        tile_b[lid.y][lid.x] = (b_row < k && col < n) ? b[b_row * n + col] : 0.0;
+        tile_a[lid.y][lid.x] =
+            (row < m && a_col < k) ? a[(size_t)row * (size_t)k + (size_t)a_col] : 0.0;
+        tile_b[lid.y][lid.x] =
+            (b_row < k && col < n) ? b[(size_t)b_row * (size_t)n + (size_t)col] : 0.0;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -107,7 +117,7 @@ kernel void gemm_tiled(
     }
 
     if (row < m && col < n) {
-        c[row * n + col] = acc;
+        c[(size_t)row * (size_t)n + (size_t)col] = acc;
     }
 }
 
@@ -134,6 +144,13 @@ kernel void gemm_tiled(
 // （通常の dispatch では `n_eff/8 × m_eff/8` の grid により到達しない
 // 防御的チェックだが、将来 dispatch 側の grid 計算に誤りがあっても
 // 未確保領域への書き込みを起こさないための境界検査として維持する）。
+//
+// バッファオフセットの 64-bit 化（PR #246 Bugbot 指摘対応）: `row0 * dims.k`・
+// `p0 * dims.n`・`row0 * dims.n` は `dims.m`/`n`/`k` が個々に `u32::MAX`
+// 未満でも積が `u32::MAX` を超えうる（tiled 段と同じ懸念。上記コメント
+// 参照）。`row0`/`col0`/`p0` を `size_t`（64-bit）へ昇格してから乗算し、
+// `u32::MAX` 超の有効な行列サイズでもポインタオフセットが溢れないように
+// する。
 kernel void gemm_simdgroup(
     device const float* a [[buffer(0)]],
     device const float* b [[buffer(1)]],
@@ -154,9 +171,9 @@ kernel void gemm_simdgroup(
         uint p0 = t * 8;
         simdgroup_float8x8 a_tile;
         simdgroup_float8x8 b_tile;
-        simdgroup_load(a_tile, a + row0 * dims.k + p0, dims.k);
-        simdgroup_load(b_tile, b + p0 * dims.n + col0, dims.n);
+        simdgroup_load(a_tile, a + (size_t)row0 * (size_t)dims.k + (size_t)p0, dims.k);
+        simdgroup_load(b_tile, b + (size_t)p0 * (size_t)dims.n + (size_t)col0, dims.n);
         simdgroup_multiply_accumulate(acc, a_tile, b_tile, acc);
     }
-    simdgroup_store(acc, c + row0 * dims.n + col0, dims.n);
+    simdgroup_store(acc, c + (size_t)row0 * (size_t)dims.n + (size_t)col0, dims.n);
 }
