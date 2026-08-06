@@ -12,3 +12,10 @@ publish.workspace = true
 # （外部クレートではなく workspace member 間の依存のためユーザー承認
 # フローの対象にならない。TASK-1.5a・#16）。
 tensor-core = { path = "../tensor-core" }
+
+[dev-dependencies]
+# PoC-v2-2 突合テスト（`tests/poc_v2_2_parity.rs`・TASK-1.5d・#19）が
+# 決定的シード生成（`Xorshift64Star`）に使う。workspace 内 path 依存
+# であり、上記 tensor-core 依存と同じ整理（外部クレートではなく
+# workspace member 間の依存のためユーザー承認フローの対象にならない）。
+bench-harness = { path = "../bench-harness" }

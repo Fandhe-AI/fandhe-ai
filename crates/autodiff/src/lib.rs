@@ -23,8 +23,12 @@
 //! 勾配を合算する（PoC-v2-2 の `accumulate()` 相当）。合成関数
 //! end-to-end 勾配の受け入れ条件検証は `tests/backward.rs` に含む。
 //!
-//! **残スコープ**（本イシューでは実装しない）:
-//! - PoC-v2-2 数値突合の回帰テスト（TASK-1.5d・#19）
+//! TASK-1.5d（#19）で PoC-v2-2 数値突合の回帰テストを追加した
+//! （`tests/poc_v2_2_parity.rs`）。PoC-v2-2 の確定ケース（2 層 MLP grad
+//! check・50 step SGD 学習の決定性）を `Tape`/`Var`/`Tape::backward`/
+//! `Gradients` 経由で再現し、PoC evidence（`docs/spec/03-poc/
+//! poc-v2-2-autodiff/evidence/`）の判定結果と整合することを固定する。
+//! これにより #16〜#19（TASK-1.5 全体）が完了する。
 //!
 //! forward の値計算は `backend-cpu`（TASK-1.6・#20 以降。並行実装中で
 //! 未完）が完成するまでの暫定参照実装（`eval.rs`、非公開）で行い、
