@@ -29,7 +29,10 @@
 #              先頭行でマッチしつつパイプバッファ（既定 64KiB）超の出力を続ける偽 ldconfig
 #              スタブでも「搭載」判定になることを検証し、grep -q とパイプ経由読み取りの
 #              組み合わせによる pipefail 誤検知（Bugbot 指摘・PR #249 / イシュー #35）の
-#              再発を防ぐ
+#              再発を防ぐ。さらに CUDA_ROOT_GLOBS のディレクトリスキャン検出と
+#              CUDA_HOME・CUDA_PATH 環境変数検出のそれぞれについても陽性系（実在ディレクトリ
+#              を指す場合に「搭載」判定になること）を検証し、この 2 分岐が他分岐の無効化のみで
+#              素通りしないようにする（Bugbot 指摘・PR #249 / イシュー #35）
 #
 # 環境変数（self-test 用の注入ポイント。通常運用では既定値のまま使う）:
 #   NVCC_BIN         nvcc コマンド名／パス（既定: nvcc）
@@ -178,6 +181,39 @@ self_test() {
     failed=1
   else
     echo "OK: self-test(d) 大量出力＋先頭マッチの偽 ldconfig 注入時に搭載と判定されました"
+  fi
+
+  # (e) 実在する一時ディレクトリを CUDA_ROOT_GLOBS に注入 → 「搭載」判定になること
+  # （nvcc・ldconfig・CUDA_HOME・CUDA_PATH は全て「存在しない」値に固定し、この分岐単独の
+  # 検出を検証する。Bugbot 指摘・PR #249 / イシュー #35）
+  local fake_cuda_root="${tmpdir}/cuda-root"
+  mkdir -p "${fake_cuda_root}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="${fake_cuda_root}" \
+    CUDA_HOME="" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(e) 実在する CUDA_ROOT_GLOBS ディレクトリ注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(e) 実在する CUDA_ROOT_GLOBS ディレクトリ注入時に搭載と判定されました"
+  fi
+
+  # (f) 実在する一時ディレクトリを CUDA_HOME・CUDA_PATH に注入 → 「搭載」判定になること
+  # （nvcc・ldconfig・CUDA_ROOT_GLOBS は全て「存在しない」値に固定し、この分岐単独の
+  # 検出を検証する。Bugbot 指摘・PR #249 / イシュー #35）
+  local fake_cuda_home="${tmpdir}/cuda-home"
+  mkdir -p "${fake_cuda_home}"
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="${fake_cuda_home}" CUDA_PATH="" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(f) 実在する CUDA_HOME 注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(f) 実在する CUDA_HOME 注入時に搭載と判定されました"
+  fi
+  if (NVCC_BIN="/nonexistent-nvcc" LDCONFIG_BIN="/nonexistent-ldconfig" CUDA_ROOT_GLOBS="/nonexistent-cuda-root-*" \
+    CUDA_HOME="" CUDA_PATH="${fake_cuda_home}" cmd_probe) >/dev/null 2>&1; then
+    echo "NG: self-test(f) 実在する CUDA_PATH 注入時に非搭載と判定されました（退行）" >&2
+    failed=1
+  else
+    echo "OK: self-test(f) 実在する CUDA_PATH 注入時に搭載と判定されました"
   fi
 
   if [ "${failed}" -ne 0 ]; then
