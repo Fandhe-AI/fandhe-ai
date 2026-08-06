@@ -76,6 +76,11 @@ fn device_count_does_not_panic() {
         Err(CudaError::DriverUnavailable { detail }) => {
             assert!(!detail.is_empty());
         }
+        Err(CudaError::Driver(_)) => {
+            // libcuda はロードできるが cuInit 等が失敗したケース（ドライバ
+            // バージョン不一致・GPU 非搭載コンテナ等）。`new` 側の同種分岐
+            // （L36-40）と同じ理由で正当なエラーとして許容する。
+        }
         Err(other) => panic!("unexpected CudaError variant from device_count: {other}"),
     }
 }
