@@ -4,12 +4,15 @@
 # （self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・Cargo.toml 検出ガード）
 # と同一方針に揃える（.claude/rules/ci.md）。
 #
-# 現状は Cargo.toml が未追加（M0 の TASK-1.1 で workspace 作成予定）のため、各ジョブは
-# Checkout 直後の `detect` ステップで Cargo.toml の有無を判定し、無ければ以降のステップを
-# `if: steps.detect.outputs.has_cargo == 'true'` でスキップする（ジョブ自体は success の
-# まま終了し、CI を落とさない）。ジョブ単位の `if:` ではなく各ステップの `if:` で
+# workspace `Cargo.toml`（TASK-1.1）は追加済みで、fmt / clippy / test / 依存禁止検査の
+# cargo 系ステップは実行され green である（run 31058207909 で確認済み。イシュー #6）。
+# 各ジョブの Checkout 直後の `detect` ステップによる Cargo.toml 有無判定・
+# `if: steps.detect.outputs.has_cargo == 'true'` ステップガードは、`Cargo.toml` 再消失時にも
+# ジョブを success のまま終了させる冪等セルフヒール方針（.claude/rules/ci.md）のフェイルセーフ
+# として残置する（ロジックは変更しない）。ジョブ単位の `if:` ではなく各ステップの `if:` で
 # 判定しているのは、`jobs.<id>.if` は Checkout 前（ワークスペース展開前）に評価されるため
-# `hashFiles('Cargo.toml')` が常に空文字となり判定できないため。
+# `hashFiles('Cargo.toml')` が常に空文字となり判定できないため。deny ジョブのみ `deny.toml`
+# 未追加（TASK-1.3 で導入予定）のため引き続きスキップする。
 #
 # deps-forbidden ジョブは TASK-1.2（依存禁止リストの CI 機械検査）の実装であり、
 # Cargo.lock を対象に禁止クレート（burn 系一式・cubecl・candle・tch・ndarray。
