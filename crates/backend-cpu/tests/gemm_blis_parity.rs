@@ -40,8 +40,11 @@ fn gemm_blis_identity_is_noop() {
 
 // --- 2. gemm_blis / gemm_blis_parallel が naive と bit 完全一致 ---
 //
-// MR/NR は ISA ごとに異なる（scalar 4x4・neon 8x8・avx2 6x16。
-// `src/gemm_blis/microkernel.rs`）。MC=128・KC=256・NC=512 は
+// MR/NR は ISA ごとに異なる（scalar 4x4・neon 8x8・avx2 6x16・
+// avx512 8x32。`src/gemm_blis/microkernel.rs`）。実行時 ISA ディスパッチ
+// （#185・`microkernel::Isa::detect`）によりどの ISA が選ばれても
+// bit 完全一致するため、本テストは特定 ISA を固定せず実行環境で検出
+// された ISA 経路をそのまま検証する。MC=128・KC=256・NC=512 は
 // `src/gemm_blis/mod.rs` の定数と同じ値。グリッドは各境界（MR/NR の
 // 最小値・MC/KC/NC）を跨ぐよう m・n・k を選ぶ。
 

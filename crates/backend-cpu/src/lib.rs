@@ -16,8 +16,11 @@
 //! 活性化 `relu`・`exp`・`tanh`）を追加した。TASK-1.6c（#23）で `reduction`（`sum`・`max`・
 //! `mean`・軸指定 reduction）を追加した。TASK-1.6f（#184）で [`gemm_blis`] モジュール
 //! （BLIS/GotoBLAS2 5-loop model・`std::arch` intrinsics マイクロカーネル・A/B packing）を
-//! 追加した。`gemm` モジュールの 3 関数（naive/blocked/parallel）は #24 の 3 段階比較の
-//! 参照点として変更しない（公開 API 非破壊。`gemm_blis` は独立した新規追加）。
+//! 追加した。TASK-1.6g（#185）で `gemm_blis`／`gemm_blis_parallel` のマイクロカーネル選択を
+//! コンパイル時 cfg のみから実行時 CPU 機能検出（NEON／AVX2／AVX-512。`gemm_blis::microkernel`
+//! の `Isa::detect`）による dispatch へ拡張した。`gemm` モジュールの 3 関数（naive/blocked/
+//! parallel）は #24 の 3 段階比較の参照点として変更しない（公開 API 非破壊。`gemm_blis` は
+//! 独立した新規追加でシグネチャも #185 で変更しない）。
 //! `BackendOps` トレイトからの結線は TASK-1.9（#43）で行う
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 
