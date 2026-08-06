@@ -64,6 +64,13 @@
 //! 候補）を導入せずに両制約を満たす。バンクコンフリクト低減目的の
 //! パディング適用は #63 のスコープとする（設計メモ 8 節 未検証事項 5）。
 //!
+//! `ldm` 側の制約とは別に、WMMA API は `load_matrix_sync`／
+//! `store_matrix_sync` に渡すベースポインタ自体が 256 bit（32 バイト）
+//! 境界にアライメントされていることを要求する。nvcc の既定の `__shared__`
+//! 変数配置はこの要件を保証しないため、`as_tile`／`bs_tile`／`cs_tile` の
+//! 各宣言に `__align__(32)` を明示する（省略すると実機コンパイル・実行時
+//! に misaligned address でカーネル起動失敗または誤演算を招きうる）。
+//!
 //! # 数値契約
 //!
 //! f16 入出力・f32 内部アキュムレートは `kernels::NAIVE_F16`／
@@ -113,9 +120,9 @@ extern "C" __global__ void gemm_wmma_f16(
     // 同じ 16 要素に固定するため、load_matrix_sync（half, ldm 8 の倍数
     // 要件）と store_matrix_sync（f32, ldm 4 の倍数要件）を追加パディング
     // なしで同時に満たす（本ファイル冒頭ドキュメントコメント「ldm 制約」）。
-    __shared__ __half as_tile[WMMA_M][WMMA_K];
-    __shared__ __half bs_tile[WMMA_K][WMMA_N];
-    __shared__ float cs_tile[WMMA_M][WMMA_N];
+    __shared__ __align__(32) __half as_tile[WMMA_M][WMMA_K];
+    __shared__ __align__(32) __half bs_tile[WMMA_K][WMMA_N];
+    __shared__ __align__(32) float cs_tile[WMMA_M][WMMA_N];
 
     wmma::fragment<wmma::matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> a_frag;
     wmma::fragment<wmma::matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, wmma::row_major> b_frag;
