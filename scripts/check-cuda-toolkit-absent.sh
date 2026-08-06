@@ -61,10 +61,14 @@ detect_toolkit() {
   if command -v "${LDCONFIG_BIN}" >/dev/null 2>&1; then
     local ldconfig_out
     ldconfig_out=$("${LDCONFIG_BIN}" -p 2>/dev/null || true)
-    if echo "${ldconfig_out}" | grep -q 'libnvrtc\.so'; then
+    # here-string（`<<<`）でパイプを介さず grep に渡す。`echo ... | grep -q` は
+    # grep が最初のマッチで即終了するため、出力がパイプバッファ（既定 64KiB）を
+    # 超える環境では上流の echo が SIGPIPE で打ち切られ、pipefail 下で
+    # マッチ成立時にも非ゼロ終了となりうる（fail-closed 判定の意図しない弱化）。
+    if grep -q 'libnvrtc\.so' <<<"${ldconfig_out}"; then
       found="${found}ldconfig: libnvrtc.so 登録あり"$'\n'
     fi
-    if echo "${ldconfig_out}" | grep -q 'libcudart\.so'; then
+    if grep -q 'libcudart\.so' <<<"${ldconfig_out}"; then
       found="${found}ldconfig: libcudart.so 登録あり"$'\n'
     fi
   fi
@@ -79,7 +83,9 @@ detect_toolkit() {
   # 情報表示のみ（判定には使わない）。libcuda.so はドライバであり toolkit ではないため
   # 「非搭載」判定を左右してはならない（TASK-1.7d の主旨に判定を限定する）。
   if command -v "${LDCONFIG_BIN}" >/dev/null 2>&1; then
-    if "${LDCONFIG_BIN}" -p 2>/dev/null | grep -q 'libcuda\.so'; then
+    local ldconfig_out_info
+    ldconfig_out_info=$("${LDCONFIG_BIN}" -p 2>/dev/null || true)
+    if grep -q 'libcuda\.so' <<<"${ldconfig_out_info}"; then
       echo "情報: libcuda.so（ドライバ）を検出しましたが、toolkit ではないため判定対象外です" >&2
     fi
   fi
