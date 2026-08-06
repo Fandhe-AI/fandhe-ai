@@ -13,16 +13,21 @@
 //!   「`workload` クロージャの呼び出しが返った時点で計測対象処理が完了している」ことを
 //!   呼び出し側の責務として前提とするのみで、同期処理そのものは持たない
 //!   （呼び出し側が同期フックとして `workload` の中に同期呼び出しを含める設計）。
-//! - 構造化出力（JSON 等）・プロトコル遵守回帰テストは TASK-8.1c（イシュー #29）のスコープ。
-//!   `Measurement` はプレーンな `f64`/`usize` フィールドに留め、`serde` derive は付与しない
-//!   （`.claude/rules/deps-policy.md`: 依存追加はユーザー承認必須のため、自動運転下では追加しない）。
+//! - 構造化出力（JSON 等）・プロトコル遵守回帰テストは TASK-8.1c（イシュー #29）のスコープであり、
+//!   `report` モジュールが担う。`Measurement` 自体には `serde` derive を付与しない
+//!   （デシリアライズ経路が `MeasurementConfig::new` の下限検証をバイパスしうるため。
+//!   `report::BenchReport` を検証済み DTO として分離する設計は `report` モジュール
+//!   ドキュメント参照）。
 
 use crate::stats::{self, BenchError, Quartiles};
 use std::hint::black_box;
 use std::time::Instant;
 
 /// TASK-8.1 が定める計測プロトコルの下限（warmup・計測回数とも 20 回以上）。
-const MIN_ITERATIONS: usize = 20;
+///
+/// `report` モジュール（TASK-8.1c・イシュー #29）の `BenchReport::validate` が
+/// デシリアライズ後のプロトコル遵守検証（fail-closed）に同じ下限を用いるため `pub(crate)` とする。
+pub(crate) const MIN_ITERATIONS: usize = 20;
 
 /// 計測設定（warmup 回数・計測回数）。
 ///
@@ -75,8 +80,9 @@ pub struct Measurement {
     pub median_secs: f64,
     pub q1_secs: f64,
     pub q3_secs: f64,
-    /// 集計前の全計測サンプル（秒）。TASK-8.1c（イシュー #29）の構造化出力等、
-    /// 中央値・Q1/Q3 以外の再集計が必要になった場合に備えて保持する。
+    /// 集計前の全計測サンプル（秒）。`report::BenchReport::from_measurement`
+    /// （TASK-8.1c・イシュー #29）が guardrail の `bench_measurements_pct` 算出根拠として
+    /// そのまま構造化出力に含める。
     pub samples_secs: Vec<f64>,
     pub warmup: usize,
     pub iters: usize,

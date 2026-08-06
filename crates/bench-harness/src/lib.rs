@@ -37,17 +37,28 @@
 //! 結合（計測区間終端での `wait_idle` 呼び出し）はバックエンド抽象層
 //! （TASK-1.9）側の実装で行う。
 //!
-//! ## 未実装（後続イシューのスコープ）
+//! ## TASK-8.1c: 構造化出力・プロトコル遵守回帰テスト（本イシュー #29 の実装範囲）
 //!
-//! - TASK-8.1c（イシュー #29）: 構造化出力（JSON 等）・プロトコル遵守回帰テスト
+//! [`report`] モジュールが [`Measurement`] を JSON へ構造化出力する [`BenchReport`] を提供する。
+//! `guardrail`（判定レポート・`docs/guardrail-self-repair-cli.md` 2.1 節）・`self-repair`
+//! （検証ゲート・TASK-3.2）からの参照可能性は、本クレートが serde 対応の公開型と
+//! JSON 入出力 API を提供することで担保する（依存方向は `guardrail` → `bench-harness`。
+//! 同 1.4 節）。guardrail / self-repair クレート自体への配線は TASK-3.2・TASK-8.2 の
+//! 後続スコープとし、本イシューでは変更しない（並行実装との同一ファイル編集衝突回避。
+//! `.claude/rules/delegation-impl.md`）。
 //!
-//! 上記スコープ外事項は本クレートの型設計（`serde` 非依存・同期はワークロードクロージャの
-//! 責務とするコメント明記）で後から拡張しやすい形に留めている。
+//! `serde` / `serde_json`（許容依存 8 区分「シリアライズ」・`.claude/rules/deps-policy.md`）は
+//! workspace ルートで `=x.y.z` 完全固定済みであり、`guardrail` クレートに既に参照の先例がある
+//! ため、本クレートからの workspace 参照追加はユーザー承認必須の新規依存追加に当たらないと
+//! 判断した（#27 実装時の「自動運転下では serde derive を追加しない」判断は #27 の
+//! スコープ境界の表明であり、構造化出力自体が実装範囲の本イシューで上書きする）。
 
 mod protocol;
+mod report;
 pub mod rng;
 mod stats;
 pub mod sync;
 
 pub use protocol::{Measurement, MeasurementConfig, run};
+pub use report::{BenchReport, SCHEMA_VERSION};
 pub use stats::{BenchError, Quartiles, median_q1_q3};

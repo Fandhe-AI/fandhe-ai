@@ -13,6 +13,15 @@ publish.workspace = true
 cudarc.workspace = true
 # rng.rs の `fill_vec_f16` が返す f16 ベクトルの型として使用する。
 half.workspace = true
+# 計測結果の構造化出力（report.rs・TASK-8.1c・イシュー #29）に使用する。
+# 許容依存 8 区分「シリアライズ」（.claude/rules/deps-policy.md）に該当し、
+# workspace ルートで =x.y.z 完全固定済み・docs/license-matrix.md 掲載済み。
+# guardrail クレート（crates/guardrail/Cargo.toml）が既に同区分を参照する先例があり、
+# member クレートからの workspace 参照追加は新規依存追加（ユーザー承認必須事項）に
+# 当たらないと判断する（#27 実装時の「自動運転下では serde derive を追加しない」判断は
+# #27 のスコープ境界の表明であり、構造化出力自体が実装範囲の本イシューでは上書きする）。
+serde.workspace = true
+serde_json.workspace = true
 
 # Metal コマンドバッファの完了待ち（sync.rs・TASK-8.1b）に使用する。
 # `cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
