@@ -59,6 +59,19 @@
 //! 既存の [`buffer::MetalBuffer`]（`new_with_data`／`new_zeroed`／`read_to_vec`）を
 //! そのまま再利用する。`StorageModeShared`（UMA）のため CUDA のような明示同期は
 //! 不要（`memory.rs` モジュールコメント参照）。
+//!
+//! TASK-11.2b（#68）で GEMM 自動経路選択入口
+//! （[`gemm::MetalGemm::dispatch_backend_auto`]）を追加した。
+//! `tensor_core::dispatch::select_gemm_kernel`（#67 が設計した決定的規則。
+//! `docs/dispatch-rules-design.md`）が返す経路に従い、`simdgroup_matrix`
+//! （[`gemm::MetalGemm::dispatch_auto`] 経由）／tiled／naive を呼び分ける。
+//! 判定材料となる `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)` は
+//! [`context::MetalContext::new`] 時に 1 回評価しキャッシュする
+//! （[`context::MetalContext::caps`]）。既存の [`gemm::MetalGemm::dispatch`]
+//! （naive）／[`gemm::MetalGemm::dispatch_variant`]（経路直接指定）は
+//! テスト・証跡用途（#70）にそのまま温存する（`docs/dispatch-rules-design.md`
+//! §5.4）。`BackendOps` trait への結線は TASK-1.9c（#46）のスコープであり、
+//! `dispatch_backend_auto` はそこから呼ばれるだけの構成にできる。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
