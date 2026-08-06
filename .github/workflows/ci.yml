@@ -16,8 +16,11 @@
 # フェイルセーフとして残置する。
 #
 # deps-forbidden ジョブは TASK-1.2（依存禁止リストの CI 機械検査）の実装であり、
-# Cargo.lock を対象に禁止クレート（burn 系一式・cubecl・candle・tch・ndarray。
-# .claude/rules/deps-policy.md）の混入を fail-closed で検査する。
+# scripts/check-forbidden-deps.sh（Makefile の deps-forbidden ターゲットと共用する単一
+# ソース）経由で、Cargo.lock と cargo tree 出力の双方を対象に禁止クレート（burn 系一式・
+# cubecl・candle・tch・ndarray。.claude/rules/deps-policy.md）の混入を fail-closed で検査
+# する。検査ロジック自体の退行は scripts/testdata/ の固定 fixture による self-test で
+# 毎回検出する。
 #
 # CUDA 実機（DGX Spark GB10）・Metal 実機依存のテストは #[ignore] で分離されている前提
 # （.claude/rules/coding-rust.md）であり、本ワークフローでは実行しない。
@@ -240,7 +243,8 @@ jobs:
   deps-forbidden:
     name: forbidden dependencies check
     runs-on: self-hosted
-    timeout-minutes: 10
+    # cargo tree 検査（cargo フェッチ・解決を伴う）を追加したため 10 → 15 に引き上げる。
+    timeout-minutes: 15
     steps:
       - name: Checkout
         # persist-credentials: false（fmt ジョブと同一方針）。
@@ -248,21 +252,52 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 依存禁止リストの混入検査
+      # 検査ロジック自体の退行（正規表現の破損・grep 消失等）を、実データの有無に関わらず
+      # 常時検出する（受け入れ条件「禁止クレート混入時に fail-closed で失敗する」の機械検証。
+      # scripts/check-forbidden-deps.sh self-test）。cargo 不要のため無条件実行する。
+      - name: 検査ロジックの self-test
+        run: bash scripts/check-forbidden-deps.sh self-test
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Cargo.lock の依存禁止検査
         run: |
           set -euo pipefail
           if [ ! -f "Cargo.lock" ]; then
             echo "::notice::Cargo.lock が未追加のため依存禁止検査をスキップしました（workspace 作成後に有効化されます）"
             exit 0
           fi
-          # Cargo.lock の `name = "<crate>"` 行を完全一致で検査する（fail-closed）。
-          forbidden='^name = "(burn|burn-[a-z-]+|cubecl|cubecl-[a-z-]+|candle-core|tch|ndarray)"$'
-          if grep -qE "${forbidden}" Cargo.lock; then
-            echo "::error::依存禁止リストのクレートが Cargo.lock に含まれています（.claude/rules/deps-policy.md）:"
-            grep -E "${forbidden}" Cargo.lock
-            exit 1
+          bash scripts/check-forbidden-deps.sh lock Cargo.lock
+
+      # self-hosted runner に rustup が未導入/欠落している場合に備え、後続ステップの
+      # 前提を自己修復する（fmt ジョブと同一方針。冪等。.claude/rules/ci.md）。
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
           fi
-          echo "OK: 依存禁止リストの混入なし"
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: cargo tree の依存禁止検査
+        # Cargo.lock の grep 検査を補強し、cargo tree の依存解決結果（features・build
+        # 依存・cfg(target_os = "macos") 限定の Metal 系依存を含む）に対しても検査する
+        # （TASK-1.2 の成果物「cargo tree 出力の禁止クレート grep 検査」）。
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/check-forbidden-deps.sh tree
 
   # --------------------------------------------------
   # 集約ジョブ（branch protection の required status check はこのジョブのみを指定する）。

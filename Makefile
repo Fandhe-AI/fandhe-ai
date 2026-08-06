@@ -112,21 +112,23 @@ else
 endif
 
 # 依存禁止リスト（deps-policy.md: burn 系・cubecl・candle・tch・ndarray）の混入検査。
-# TASK-1.2 の CI 機械検査と同一の判定をローカルで再現する。Cargo.lock を対象とし、
-# name = "<crate>" の完全一致で fail-closed に判定する。
+# TASK-1.2 の CI 機械検査と同一の判定を scripts/check-forbidden-deps.sh 経由でローカル再現する
+# （検査ロジックは ci.yml の deps-forbidden ジョブと同一スクリプトを共用し、二重管理しない）。
+# self-test で検査ロジック自体の退行を検出したうえで、Cargo.lock（存在すれば）・
+# cargo tree（Cargo.toml があれば）を検査する。
 .PHONY: deps-forbidden
-deps-forbidden: ## 依存禁止リスト（burn 系等）の混入を Cargo.lock から検査する
+deps-forbidden: ## 依存禁止リスト（burn 系等）の混入を検査する（self-test → lock → tree）
+	@bash scripts/check-forbidden-deps.sh self-test
 	@if [ -f Cargo.lock ]; then \
-		forbidden='^name = "(burn|burn-[a-z-]+|cubecl|cubecl-[a-z-]+|candle-core|tch|ndarray)"$$'; \
-		if grep -qE "$$forbidden" Cargo.lock; then \
-			echo "NG: 依存禁止リストのクレートが Cargo.lock に含まれています:" >&2; \
-			grep -E "$$forbidden" Cargo.lock >&2; \
-			exit 1; \
-		fi; \
-		echo "OK: 依存禁止リストの混入なし"; \
+		bash scripts/check-forbidden-deps.sh lock Cargo.lock; \
 	else \
-		echo "skip: Cargo.lock 未追加のため deps-forbidden をスキップ"; \
+		echo "skip: Cargo.lock 未追加のため lock 検査をスキップ"; \
 	fi
+ifdef HAS_CARGO
+	@bash scripts/check-forbidden-deps.sh tree
+else
+	@echo "skip: Cargo.toml 未追加のため cargo tree 検査をスキップ"
+endif
 
 .PHONY: ci
 ci: fmt-check lint test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
