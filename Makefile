@@ -103,6 +103,20 @@ else
 	@echo "skip: Cargo.toml 未追加のため test-ignored をスキップ"
 endif
 
+# macOS runner 未登録の代替として、aarch64-apple-darwin へのクロスターゲットビルドで
+# Metal 有効経路（cfg(target_os = "macos")）のコンパイルを検証する（TASK-2.1b・イシュー #50。
+# 全 9 クレートは lib のみでリンク不要なため、macOS SDK が無い環境でもコンパイル検証が成立する。
+# 詳細は .github/workflows/ci.yml 冒頭コメント・PoC-v2-5 の cfg ベースバックエンド切替構成を参照）。
+.PHONY: build-cross
+build-cross: ## macOS／Linux 両ターゲットの cargo build 検証（TASK-2.1b）
+ifdef HAS_CARGO
+	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
+	cargo build --workspace --locked
+	cargo build --workspace --locked --target aarch64-apple-darwin
+else
+	@echo "skip: Cargo.toml 未追加のため build-cross をスキップ"
+endif
+
 .PHONY: deny
 deny: ## cargo deny check licenses sources（依存ライセンス監査。cargo-deny 未導入なら自動導入）
 ifneq ($(and $(HAS_CARGO),$(HAS_DENY)),)
@@ -136,7 +150,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）
