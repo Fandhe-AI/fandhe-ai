@@ -72,6 +72,8 @@ dependencies = [
 name = "backend-cuda"
 version = "0.1.0"
 dependencies = [
+ "backend-cpu",
+ "bench-harness",
  "cudarc",
  "half",
 ]
