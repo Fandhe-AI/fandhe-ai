@@ -1,0 +1,59 @@
+# cargo-deny 設定。CI の deny ジョブ（.github/workflows/ci.yml `deny:`）・
+# `make deny`（Makefile:107-112）が本ファイルの存在で自動有効化される
+# （.claude/rules/ci.md・detect ステップ）。
+#
+# [licenses] の allow は docs/license-matrix.md 5 節の `cargo tree` /
+# `cargo metadata --locked` 実測（2026-08-06・Cargo.lock SHA 63748a677a0800257c8175b8fb8bbf187669cbe1）で
+# 検出されたライセンス式のみを列挙する。コピーレフト（GPL/LGPL/MPL 単独ライセンス）は
+# 列挙しないため、将来の推移的依存混入は fail-closed で検出される
+# （.claude/rules/deps-policy.md「MPL-2.0 等コピーレフトの推移的混入」の監視方針）。
+#
+# 本 allow リストは直接依存 8 区分の適合基準（MIT OR Apache-2.0 系）を緩和するものではない。
+# あくまで推移的依存の実測結果を運用化したものであり、allow リストの変更は
+# license-matrix.md の更新とセットでユーザー承認を経る（REQ-5・deps-policy.md）。
+
+[graph]
+# 対象ターゲットを明示する（docs/license-matrix.md 4 節の実測範囲と一致させる）。
+# CUDA バックエンドは Linux 系、Metal バックエンドは macOS 系のみで依存が現れる。
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+[licenses]
+version = 2
+# docs/license-matrix.md 5 節「外部 104 パッケージのライセンス分布」に出現した
+# 式を構成する個別ライセンス識別子（SPDX）を列挙する。OR 結合の式は列挙した
+# いずれか 1 つを満たせば許可される（cargo-deny の仕様）。
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSD-2-Clause",
+]
+confidence-threshold = 0.8
+
+# 以下は [graph].targets（Linux 系・aarch64-apple-darwin）では依存グラフに現れないため
+# allow へ列挙しない（docs/license-matrix.md 6 節の個別判断を参照）:
+#   - r-efi（`MIT OR Apache-2.0 OR LGPL-2.1-or-later`）: getrandom の
+#     `*-unknown-uefi` ターゲット向け依存のみ。本リポは UEFI をビルド対象にしない
+#   - wasip2（`Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT`）: wasm32-wasip* 系
+#     ターゲット向け依存のみ。本リポは wasm をビルド対象にしない
+# 将来これらのターゲットを [graph].targets に追加する場合は、本表 5〜6 節の更新と
+# セットで allow リストの再実測が必要（推定での feature 除外回避を禁じる旧 issue #2 の教訓）。
+
+[sources]
+# 全依存が crates.io 由来であることを実測済み（docs/license-matrix.md 5 節）。
+# git 依存・代替レジストリの混入をサプライチェーン観点で fail-closed 検出する。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# 依存禁止リスト（.claude/rules/deps-policy.md）は Makefile の deps-forbidden
+# ターゲットで別途 Cargo.lock を機械検査するため、本ファイルでは重複させない。
+multiple-versions = "allow"
