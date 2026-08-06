@@ -289,7 +289,14 @@ impl CudaGemm {
     /// （[`Self::wmma_tf32`] フィールドのドキュメンテーションコメント
     /// 参照）。これにより NVRTC が `<mma.h>` を解決できない・compute
     /// capability 8.0 未満の環境でも naive/tiled 4 カーネルは引き続き
-    /// 使用可能なままになる。
+    /// 使用可能なままになる。f16 WMMA 経路（`gemm_wmma.rs::CudaWmmaGemm::new`。
+    /// #61）は NVRTC コンパイルを試みる前に `device.compute_capability()` で
+    /// cc≥7.0 を検査し `CudaError::TensorCoreUnsupported` を返す事前ゲート
+    /// 方式だが、本経路は事前ゲートを設けず NVRTC コンパイル結果（成功／
+    /// 失敗）のみで可否を判定する事後判定方式を採る。TF32 WMMA が要求する
+    /// cc≥8.0 は `m16n16k8` TF32 fragment 命令が非対応アーキテクチャ向け
+    /// PTX を生成しようとした際に NVRTC が拒否することで間接的に検査される
+    /// （実機での網羅検証は未実施。`docs/cuda-tensor-core-design.md` 参照）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let arch = device.arch();
 
