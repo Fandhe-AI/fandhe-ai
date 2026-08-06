@@ -17,6 +17,9 @@ half.workspace = true
 # Apple フレームワークへの FFI 境界（REQ-2）。objc2-metal は macOS 専用 API のバインディング
 # のため他 OS ではビルド対象外にする（PoC-v2-5 実証構成。
 # docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/Cargo.toml:44-52）。
+# TASK-2.1a（イシュー #49）でこの target cfg 分離を正式なバックエンド切替機構として確定した。
+# 非 macOS（Linux）ターゲットでは `cargo tree -p backend-metal` に objc2 系が現れないことを
+# 実測確認済み（`cargo build --workspace` も成立する）。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-foundation.workspace = true
