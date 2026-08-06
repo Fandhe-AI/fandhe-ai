@@ -82,6 +82,8 @@ dependencies = [
 name = "backend-metal"
 version = "0.1.0"
 dependencies = [
+ "backend-cpu",
+ "bench-harness",
  "half",
  "objc2",
  "objc2-foundation",

@@ -28,9 +28,10 @@
 //! （`.claude/rules/security.md`）。
 //!
 //! TASK-1.8a（#38）でデバイス・コマンドキュー・バッファ管理の基盤（[`context::MetalContext`]・
-//! [`buffer::MetalBuffer`]・[`error::MetalError`]）を実装済み。MSL ライブラリのコンパイル・
-//! パイプライン構築・ディスパッチ経路（naive GEMM）は TASK-1.8b（#39）、simdgroup カーネルは
-//! TASK-1.8c（#40）で追加する（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//! [`buffer::MetalBuffer`]・[`error::MetalError`]）を実装済み。TASK-1.8b（#39）で MSL 実行時
+//! コンパイル・パイプライン構築（[`pipeline`]）・naive GEMM ディスパッチ経路（[`gemm::MetalGemm`]）
+//! を追加した。simdgroup カーネルは TASK-1.8c（#40）で追加する（spec 根拠:
+//! `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
 //!
 //! 非 macOS 環境ではモジュールごとコンパイル対象外になる（feature フラグなしの cfg ベース。
 //! PoC-v2-5 実証構成・REQ-2）。
@@ -41,6 +42,10 @@ pub mod buffer;
 pub mod context;
 #[cfg(target_os = "macos")]
 pub mod error;
+#[cfg(target_os = "macos")]
+pub mod gemm;
+#[cfg(target_os = "macos")]
+pub mod pipeline;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
@@ -61,3 +66,5 @@ pub use buffer::MetalBuffer;
 pub use context::MetalContext;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
+#[cfg(target_os = "macos")]
+pub use gemm::MetalGemm;

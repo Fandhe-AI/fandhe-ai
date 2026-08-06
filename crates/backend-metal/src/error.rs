@@ -52,6 +52,33 @@ pub enum MetalError {
     /// へ伝える）。`message` は `MTLCommandBuffer::error()` の
     /// `NSError` から得た診断用の文字列表現。
     CommandBufferExecutionFailed { message: String },
+    /// `MTLDevice::newLibraryWithSource_options_error`（`shaders/gemm.metal`
+    /// の実行時コンパイル。TASK-1.8b・#39）が失敗した。`message` は
+    /// `NSError` の `localizedDescription`（構文エラー等の診断文字列）。
+    LibraryCompilation { message: String },
+    /// `MTLLibrary::newFunctionWithName` が `name` に対して `None` を
+    /// 返した（`shaders/gemm.metal` 内の関数名との不一致。呼び出し元の
+    /// 実装誤りであり通常到達しないが、`unwrap`/`expect` を避けるため
+    /// 型付きエラーとして表現する）。
+    FunctionNotFound { name: &'static str },
+    /// `MTLDevice::newComputePipelineStateWithFunction_error` が失敗した。
+    /// `message` は `NSError` の `localizedDescription`。
+    PipelineCreation { message: String },
+    /// GEMM 公開入口（[`crate::gemm`]）の形状検証で `m`・`n`・`k` の
+    /// いずれかが 0 と判定された（`backend_cpu::gemm::GemmError` の
+    /// `ZeroBlockSize` 相当。0 次元は Metal ディスパッチ・境界チェックの
+    /// 前提を崩すため FFI 呼び出し前に拒否する）。
+    ZeroDimension { m: usize, n: usize, k: usize },
+    /// `a`（長さ `m*k` 期待）の要素数が一致しない。
+    ALenMismatch { expected: usize, actual: usize },
+    /// `b`（長さ `k*n` 期待）の要素数が一致しない。
+    BLenMismatch { expected: usize, actual: usize },
+    /// `m*k`・`k*n`・`m*n` のいずれかが `usize` の範囲でオーバーフローする
+    /// （`checked_mul` によりアクセス前に検出する。OWASP A03 観点）。
+    DimProductOverflow,
+    /// `m`・`n`・`k` のいずれかが `u32::MAX` を超え、`shaders/gemm.metal`
+    /// の `Dims`（`uint` 3 個）へキャストできない（cast 前検証）。
+    DimensionExceedsU32 { m: usize, n: usize, k: usize },
 }
 
 impl fmt::Display for MetalError {
@@ -89,6 +116,33 @@ impl fmt::Display for MetalError {
                     f,
                     "Metal command buffer completed with MTLCommandBufferStatus::Error: {message}"
                 )
+            }
+            MetalError::LibraryCompilation { message } => {
+                write!(f, "MSL library compilation failed: {message}")
+            }
+            MetalError::FunctionNotFound { name } => {
+                write!(
+                    f,
+                    "MTLLibrary::newFunctionWithName returned None for \"{name}\""
+                )
+            }
+            MetalError::PipelineCreation { message } => {
+                write!(f, "MTLComputePipelineState creation failed: {message}")
+            }
+            MetalError::ZeroDimension { m, n, k } => {
+                write!(f, "gemm dimensions must be non-zero: m={m}, n={n}, k={k}")
+            }
+            MetalError::ALenMismatch { expected, actual } => {
+                write!(f, "a length mismatch: expected {expected}, actual {actual}")
+            }
+            MetalError::BLenMismatch { expected, actual } => {
+                write!(f, "b length mismatch: expected {expected}, actual {actual}")
+            }
+            MetalError::DimProductOverflow => {
+                write!(f, "m*k, k*n or m*n overflows usize")
+            }
+            MetalError::DimensionExceedsU32 { m, n, k } => {
+                write!(f, "gemm dimensions exceed u32::MAX: m={m}, n={n}, k={k}")
             }
         }
     }
