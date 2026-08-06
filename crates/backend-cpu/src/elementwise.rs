@@ -1,0 +1,530 @@
+//! elementwise カーネル（二項演算 `add`・`mul`、活性化 `relu`・`exp`・`tanh`。
+//! TASK-1.6b・#22）。
+//!
+//! 演算セットは PoC-v2-2／PoC-v2-5 実測済みセット（`docs/public-api-design.md`
+//! §3.2・§4.2 `BackendOps`）に合わせる。`BackendOps` トレイト・`DeviceBuffer`
+//! への接続は TASK-1.9（#43）のスコープであり、本モジュールはそこから後で
+//! 呼び出せる関数ベースのカーネル API のみを提供する（トレイト定義はしない）。
+//! `autodiff` の演算入口（#16〜#18）からも同様に呼ばれる想定。
+//!
+//! # 2 層構成
+//!
+//! 1. **スライスカーネル層**（`*_slice` 関数）: `tensor-core` に依存しない
+//!    低レベル層。両オペランドが contiguous であることを呼び出し元が
+//!    保証した上で呼ぶ契約とする（PoC-v2-5 `cpu_ref.rs` の参照実装
+//!    〈`docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/src/cpu_ref.rs`〉
+//!    を productize したもの）。
+//! 2. **Tensor 入口層**（`add`/`mul`/`relu`/`exp`/`tanh`）: `Tensor<f32>` を
+//!    受け取り `elementwise_out_shape`（NumPy 互換ブロードキャスト。
+//!    `tensor-core::broadcast_shape` 委譲）で出力 shape を確定し、
+//!    contiguous な場合はスライスカーネルへ直行（fast path）、
+//!    非 contiguous（ブロードキャスト view・transpose 後 view 等）な場合は
+//!    strided 反復で読む（general path）。
+//!
+//! # 並列化（rayon）
+//!
+//! 二項演算・活性化はいずれも要素ごとに独立な map 演算であり、演算順序が
+//! 結果に影響しない（浮動小数点の結合則非成立は要素間で加算・乗算を跨がない
+//! elementwise 演算には現れないため無関係）。このため rayon による並列化は
+//! 数値へ影響しない。小サイズ入力での rayon オーバーヘッド（タスク分割・
+//! 同期コスト）を避けるため、要素数が [`PARALLEL_THRESHOLD`] 未満の場合は
+//! 逐次実行にフォールバックする。閾値はベンチ根拠が出るまでの保守的な
+//! 固定値であり、チューニングは #24（TASK-1.6d）のスコープとする。
+//!
+//! # 数値契約（REQ-2・`.claude/rules/coding-rust.md`）
+//!
+//! - `add`/`mul`/`relu` は加減乗算・比較のみで libm を経由しない（PoC-v2-5 で
+//!   backend 間 bit 一致を実測済みの区分）。
+//! - `exp`/`tanh` は `f32::exp`/`f32::tanh`（libm）を使用する。GPU との数値
+//!   突合は統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の
+//!   対象だが、これは TASK-2.2 のスコープであり本モジュールの単体テストは
+//!   CPU 単体の厳密一致（`f32::exp`/`f32::tanh` の直接計算値との一致）まで
+//!   とする。
+//! - FMA 契約（`f32::mul_add`）は積和演算（GEMM。#21）の契約であり、
+//!   elementwise 演算には積和（1 回の乗算結果を別の加算に畳み込む処理）が
+//!   現れないため適用外とする。
+//!
+//! # 境界検査（REQ-8）
+//!
+//! 添字アクセスは Rust の境界検査付きインデックス（スライスの `[]`・
+//! `Tensor::get`）のみを用い、`get_unchecked` 等の unchecked アクセスや
+//! `unsafe` は使わない（本モジュールに `unsafe` は不要）。strided 反復の
+//! offset 計算は `Tensor::get` 内部で `offset + Σ idx[i] * strides[i]` を
+//! `isize` で行う契約（`tensor.rs`）に委ねる。現行 `tensor-core` は負
+//! stride を生成しないため、本モジュールは非負 stride のみを前提とする。
+
+use rayon::prelude::*;
+use tensor_core::{Element, ShapeError, Tensor, elementwise_out_shape};
+
+/// rayon 並列化へ切り替える要素数の下限。
+///
+/// 小サイズ入力ではタスク分割・スレッド同期のオーバーヘッドが逐次実行の
+/// 利得を上回るため、この値未満は逐次実行にフォールバックする
+/// （モジュール doc コメント「並列化」参照。チューニングは #24 のスコープ）。
+const PARALLEL_THRESHOLD: usize = 1 << 15;
+
+// --- スライスカーネル層 ---
+//
+// 全関数共通の契約: `a`（・`b`）と `out` は同じ長さであることを呼び出し元
+// （Tensor 入口層の fast path）が事前に保証する。この層は `tensor-core` に
+// 依存せず contiguous な `&[f32]` のみを扱う（TASK-1.9 で `BackendOps` から
+// 直接再利用できるようにするための分離）。
+
+/// 要素ごとの加算（`out[i] = a[i] + b[i]`）。加減算のみで libm 非経由。
+pub fn add_slice(a: &[f32], b: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(a.len(), b.len(), "add_slice: length mismatch (a vs b)");
+    debug_assert_eq!(a.len(), out.len(), "add_slice: length mismatch (a vs out)");
+    if a.len() >= PARALLEL_THRESHOLD {
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .zip(b.par_iter())
+            .for_each(|((o, &x), &y)| *o = x + y);
+    } else {
+        for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+            *o = x + y;
+        }
+    }
+}
+
+/// 要素ごとの乗算（`out[i] = a[i] * b[i]`）。乗算のみで libm 非経由。
+pub fn mul_slice(a: &[f32], b: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(a.len(), b.len(), "mul_slice: length mismatch (a vs b)");
+    debug_assert_eq!(a.len(), out.len(), "mul_slice: length mismatch (a vs out)");
+    if a.len() >= PARALLEL_THRESHOLD {
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .zip(b.par_iter())
+            .for_each(|((o, &x), &y)| *o = x * y);
+    } else {
+        for ((o, &x), &y) in out.iter_mut().zip(a).zip(b) {
+            *o = x * y;
+        }
+    }
+}
+
+/// 要素ごとの ReLU（`out[i] = a[i].max(0.0)`）。比較のみで libm 非経由。
+pub fn relu_slice(a: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(a.len(), out.len(), "relu_slice: length mismatch");
+    if a.len() >= PARALLEL_THRESHOLD {
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .for_each(|(o, &x)| *o = x.max(0.0));
+    } else {
+        for (o, &x) in out.iter_mut().zip(a) {
+            *o = x.max(0.0);
+        }
+    }
+}
+
+/// 要素ごとの `exp`（`f32::exp`。libm 経由。モジュール doc コメント
+/// 「数値契約」参照）。
+pub fn exp_slice(a: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(a.len(), out.len(), "exp_slice: length mismatch");
+    if a.len() >= PARALLEL_THRESHOLD {
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .for_each(|(o, &x)| *o = x.exp());
+    } else {
+        for (o, &x) in out.iter_mut().zip(a) {
+            *o = x.exp();
+        }
+    }
+}
+
+/// 要素ごとの `tanh`（`f32::tanh`。libm 経由。モジュール doc コメント
+/// 「数値契約」参照）。
+pub fn tanh_slice(a: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(a.len(), out.len(), "tanh_slice: length mismatch");
+    if a.len() >= PARALLEL_THRESHOLD {
+        out.par_iter_mut()
+            .zip(a.par_iter())
+            .for_each(|(o, &x)| *o = x.tanh());
+    } else {
+        for (o, &x) in out.iter_mut().zip(a) {
+            *o = x.tanh();
+        }
+    }
+}
+
+// --- Tensor 入口層 ---
+
+/// 行優先の多次元 index を 1 進める（最終軸から繰り上げ）。
+///
+/// general path（非 contiguous な strided 反復）の内部ヘルパー。`shape` の
+/// 範囲内でのみ繰り上がるため、`Tensor::get` に渡す index は常に軸範囲内
+/// になる（`tensor.rs` の `contiguous()` と同じ走査パターン）。
+fn increment_index(index: &mut [usize], shape: &[usize]) {
+    for axis in (0..shape.len()).rev() {
+        index[axis] += 1;
+        if index[axis] < shape[axis] {
+            return;
+        }
+        index[axis] = 0;
+    }
+}
+
+/// 二項 elementwise 演算の Tensor 入口共通処理。
+///
+/// `elementwise_out_shape`（`tensor-core::broadcast_shape` 委譲）で出力
+/// shape を確定し、`Tensor::broadcast_to` で両オペランドを共通 shape の
+/// view（拡張軸は stride 0 の zero-copy read）に揃える。両 view が
+/// contiguous な場合（ブロードキャスト・view を伴わない同一 shape 入力）は
+/// `slice_kernel` へ直行し、そうでない場合は `Tensor::get` による strided
+/// 反復で読む（`contiguous()` による事前実体化はメモリ倍増を招くため
+/// 行わない。計画の設計方針）。
+fn binary_elementwise(
+    a: &Tensor<f32>,
+    b: &Tensor<f32>,
+    slice_kernel: fn(&[f32], &[f32], &mut [f32]),
+    scalar_kernel: fn(f32, f32) -> f32,
+) -> Result<Tensor<f32>, ShapeError> {
+    let out_shape = elementwise_out_shape(a.shape(), b.shape())?;
+    let ba = a.broadcast_to(&out_shape)?;
+    let bb = b.broadcast_to(&out_shape)?;
+
+    if let (Some(sa), Some(sb)) = (ba.as_slice(), bb.as_slice()) {
+        // fast path: 両 view が contiguous（ブロードキャスト拡張軸を
+        // 含まない・非 contiguous view でない）。
+        let mut out = vec![0.0f32; sa.len()];
+        slice_kernel(sa, sb, &mut out);
+        return Tensor::new(out, &out_shape);
+    }
+
+    // general path: ブロードキャスト拡張軸・非 contiguous view を含む。
+    // 出力 shape 上を行優先で走査しつつ `Tensor::get` で strided に読む。
+    let numel = out_shape.iter().product::<usize>();
+    let mut out = Vec::with_capacity(numel);
+    let mut index = vec![0usize; out_shape.len()];
+    for _ in 0..numel {
+        let x = ba.get(&index);
+        let y = bb.get(&index);
+        debug_assert!(
+            x.is_some() && y.is_some(),
+            "binary_elementwise: shape 走査ロジックのバグにより index {index:?} が範囲外になった"
+        );
+        out.push(scalar_kernel(
+            x.unwrap_or_else(Element::zero),
+            y.unwrap_or_else(Element::zero),
+        ));
+        increment_index(&mut index, &out_shape);
+    }
+    Tensor::new(out, &out_shape)
+}
+
+/// 単項 elementwise 演算（活性化）の Tensor 入口共通処理。shape は不変。
+fn unary_elementwise(
+    a: &Tensor<f32>,
+    slice_kernel: fn(&[f32], &mut [f32]),
+    scalar_kernel: fn(f32) -> f32,
+) -> Result<Tensor<f32>, ShapeError> {
+    if let Some(sa) = a.as_slice() {
+        let mut out = vec![0.0f32; sa.len()];
+        slice_kernel(sa, &mut out);
+        return Tensor::new(out, a.shape());
+    }
+
+    let shape = a.shape();
+    let numel = a.numel();
+    let mut out = Vec::with_capacity(numel);
+    let mut index = vec![0usize; shape.len()];
+    for _ in 0..numel {
+        let x = a.get(&index);
+        debug_assert!(
+            x.is_some(),
+            "unary_elementwise: shape 走査ロジックのバグにより index {index:?} が範囲外になった"
+        );
+        out.push(scalar_kernel(x.unwrap_or_else(Element::zero)));
+        increment_index(&mut index, shape);
+    }
+    Tensor::new(out, shape)
+}
+
+/// 二項加算（ブロードキャスト対応）。`docs/public-api-design.md` §3.2/§4.2
+/// `BackendOps::add` に対応する CPU 参照実装。
+pub fn add(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    binary_elementwise(a, b, add_slice, |x, y| x + y)
+}
+
+/// 二項乗算（ブロードキャスト対応）。`BackendOps::mul` に対応する
+/// CPU 参照実装。
+pub fn mul(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    binary_elementwise(a, b, mul_slice, |x, y| x * y)
+}
+
+/// ReLU 活性化。`BackendOps::relu` に対応する CPU 参照実装。
+pub fn relu(a: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    unary_elementwise(a, relu_slice, |x| x.max(0.0))
+}
+
+/// 指数関数活性化（`f32::exp`）。`BackendOps::exp` に対応する
+/// CPU 参照実装。
+pub fn exp(a: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    unary_elementwise(a, exp_slice, f32::exp)
+}
+
+/// 双曲線正接活性化（`f32::tanh`）。`BackendOps::tanh` に対応する
+/// CPU 参照実装。
+pub fn tanh(a: &Tensor<f32>) -> Result<Tensor<f32>, ShapeError> {
+    unary_elementwise(a, tanh_slice, f32::tanh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- スライスカーネル層 ---
+
+    #[test]
+    fn add_slice_basic() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [10.0, 20.0, 30.0];
+        let mut out = [0.0; 3];
+        add_slice(&a, &b, &mut out);
+        assert_eq!(out, [11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn mul_slice_basic() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [10.0, 20.0, 30.0];
+        let mut out = [0.0; 3];
+        mul_slice(&a, &b, &mut out);
+        assert_eq!(out, [10.0, 40.0, 90.0]);
+    }
+
+    #[test]
+    fn relu_slice_basic() {
+        let a = [-1.0, 0.0, 2.5, -0.001];
+        let mut out = [0.0; 4];
+        relu_slice(&a, &mut out);
+        assert_eq!(out, [0.0, 0.0, 2.5, 0.0]);
+    }
+
+    #[test]
+    fn exp_slice_matches_std() {
+        let a = [0.0, 1.0, -1.0, 2.5];
+        let mut out = [0.0; 4];
+        exp_slice(&a, &mut out);
+        for (o, &x) in out.iter().zip(&a) {
+            assert_eq!(*o, x.exp());
+        }
+    }
+
+    #[test]
+    fn tanh_slice_matches_std() {
+        let a = [0.0, 1.0, -1.0, 2.5];
+        let mut out = [0.0; 4];
+        tanh_slice(&a, &mut out);
+        for (o, &x) in out.iter().zip(&a) {
+            assert_eq!(*o, x.tanh());
+        }
+    }
+
+    #[test]
+    fn slice_kernels_above_parallel_threshold_match_sequential() {
+        // rayon 並列経路と逐次経路で数値が一致することを確認する
+        // （モジュール doc コメント「並列化」: 演算順序に依存しない map 演算）。
+        let n = PARALLEL_THRESHOLD + 17;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.001 - 5.0).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.002).collect();
+
+        let mut out_par = vec![0.0f32; n];
+        add_slice(&a, &b, &mut out_par);
+        let mut out_seq = vec![0.0f32; n];
+        for ((o, &x), &y) in out_seq.iter_mut().zip(&a).zip(&b) {
+            *o = x + y;
+        }
+        assert_eq!(out_par, out_seq);
+
+        let mut exp_par = vec![0.0f32; n];
+        exp_slice(&a, &mut exp_par);
+        let mut exp_seq = vec![0.0f32; n];
+        for (o, &x) in exp_seq.iter_mut().zip(&a) {
+            *o = x.exp();
+        }
+        assert_eq!(exp_par, exp_seq);
+    }
+
+    // --- Tensor 入口層: 数値一致 ---
+
+    #[test]
+    fn add_same_shape() {
+        let a = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::<f32>::new(vec![10.0, 20.0, 30.0, 40.0], &[2, 2]).unwrap();
+        let out = add(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[2, 2]);
+        assert_eq!(out.get(&[0, 0]).unwrap(), 11.0);
+        assert_eq!(out.get(&[1, 1]).unwrap(), 44.0);
+    }
+
+    #[test]
+    fn mul_same_shape() {
+        let a = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::<f32>::new(vec![10.0, 20.0, 30.0, 40.0], &[2, 2]).unwrap();
+        let out = mul(&a, &b).unwrap();
+        assert_eq!(out.get(&[0, 0]).unwrap(), 10.0);
+        assert_eq!(out.get(&[1, 1]).unwrap(), 160.0);
+    }
+
+    #[test]
+    fn relu_tensor_matches_expected() {
+        let a = Tensor::<f32>::new(vec![-1.0, 0.0, 2.5, -0.001], &[4]).unwrap();
+        let out = relu(&a).unwrap();
+        let expected = [0.0, 0.0, 2.5, 0.0];
+        for (i, &v) in expected.iter().enumerate() {
+            assert_eq!(out.get(&[i]).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn exp_tensor_matches_std() {
+        let a = Tensor::<f32>::new(vec![0.0, 1.0, -1.0], &[3]).unwrap();
+        let out = exp(&a).unwrap();
+        for i in 0..3 {
+            assert_eq!(out.get(&[i]).unwrap(), a.get(&[i]).unwrap().exp());
+        }
+    }
+
+    #[test]
+    fn tanh_tensor_matches_std() {
+        let a = Tensor::<f32>::new(vec![0.0, 1.0, -1.0], &[3]).unwrap();
+        let out = tanh(&a).unwrap();
+        for i in 0..3 {
+            assert_eq!(out.get(&[i]).unwrap(), a.get(&[i]).unwrap().tanh());
+        }
+    }
+
+    // --- Tensor 入口層: ブロードキャスト ---
+
+    #[test]
+    fn add_broadcast_row_and_column() {
+        // 受け入れ条件対象の代表例: [3,1] + [1,4] -> [3,4]。
+        let a = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3, 1]).unwrap();
+        let b = Tensor::<f32>::new(vec![10.0, 20.0, 30.0, 40.0], &[1, 4]).unwrap();
+        let out = add(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[3, 4]);
+        for i in 0..3 {
+            for j in 0..4 {
+                let expected = (i as f32 + 1.0) + (j as f32 + 1.0) * 10.0;
+                assert_eq!(out.get(&[i, j]).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn add_bias_row_vector_over_matrix() {
+        // [2,3] + [3]（行ベクトル bias）。PoC-v2-1 の代表的な組合せ。
+        let a = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let bias = Tensor::<f32>::new(vec![100.0, 200.0, 300.0], &[3]).unwrap();
+        let out = add(&a, &bias).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+        for i in 0..2 {
+            for j in 0..3 {
+                assert_eq!(
+                    out.get(&[i, j]).unwrap(),
+                    a.get(&[i, j]).unwrap() + bias.get(&[j]).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mul_scalar_like_shape() {
+        // rank 0（スカラー相当）とのブロードキャスト。
+        let a = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let s = Tensor::<f32>::new(vec![2.0], &[]).unwrap();
+        let out = mul(&a, &s).unwrap();
+        assert_eq!(out.shape(), &[3]);
+        for i in 0..3 {
+            assert_eq!(out.get(&[i]).unwrap(), a.get(&[i]).unwrap() * 2.0);
+        }
+    }
+
+    #[test]
+    fn add_broadcast_incompatible_returns_error() {
+        let a = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let b = Tensor::<f32>::zeros(&[4]).unwrap();
+        let err = add(&a, &b).unwrap_err();
+        assert!(matches!(err, ShapeError::BroadcastIncompatible { .. }));
+    }
+
+    // --- Tensor 入口層: 非 contiguous view 入力 ---
+
+    #[test]
+    fn add_with_transposed_view_matches_contiguous() {
+        let a = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let a_t = a.transpose(0, 1).unwrap(); // shape [3, 2], 非 contiguous
+        let b = Tensor::<f32>::new(vec![1.0, 1.0, 1.0, 1.0, 1.0, 1.0], &[3, 2]).unwrap();
+
+        let out_view = add(&a_t, &b).unwrap();
+        let out_contig = add(&a_t.contiguous(), &b).unwrap();
+
+        assert_eq!(out_view.shape(), &[3, 2]);
+        for i in 0..3 {
+            for j in 0..2 {
+                assert_eq!(
+                    out_view.get(&[i, j]).unwrap(),
+                    out_contig.get(&[i, j]).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn relu_with_narrowed_view_matches_contiguous() {
+        let a = Tensor::<f32>::new(vec![-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0], &[8]).unwrap();
+        let n = a.narrow(0, 2, 4).unwrap(); // [-1.0, 0.0, 1.0, 2.0]、非 contiguous ではないが offset 付き view
+
+        let out_view = relu(&n).unwrap();
+        let out_contig = relu(&n.contiguous()).unwrap();
+        for i in 0..4 {
+            assert_eq!(out_view.get(&[i]).unwrap(), out_contig.get(&[i]).unwrap());
+        }
+    }
+
+    // --- Tensor 入口層: 境界形状 ---
+
+    #[test]
+    fn add_empty_tensor_returns_empty() {
+        let a = Tensor::<f32>::zeros(&[0, 3]).unwrap();
+        let b = Tensor::<f32>::zeros(&[0, 3]).unwrap();
+        let out = add(&a, &b).unwrap();
+        assert_eq!(out.shape(), &[0, 3]);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn relu_empty_tensor_returns_empty() {
+        let a = Tensor::<f32>::zeros(&[0]).unwrap();
+        let out = relu(&a).unwrap();
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn add_single_element() {
+        let a = Tensor::<f32>::new(vec![3.0], &[1]).unwrap();
+        let b = Tensor::<f32>::new(vec![4.0], &[1]).unwrap();
+        let out = add(&a, &b).unwrap();
+        assert_eq!(out.get(&[0]).unwrap(), 7.0);
+    }
+
+    #[test]
+    fn add_around_parallel_threshold_matches_scalar_expected() {
+        // rayon 閾値前後のサイズで Tensor 入口層の数値一致を確認する
+        // （閾値そのもののチューニングは #24 のスコープ）。
+        for n in [
+            PARALLEL_THRESHOLD - 1,
+            PARALLEL_THRESHOLD,
+            PARALLEL_THRESHOLD + 1,
+        ] {
+            let av: Vec<f32> = (0..n).map(|i| i as f32).collect();
+            let bv: Vec<f32> = (0..n).map(|i| (i as f32) * 2.0).collect();
+            let a = Tensor::<f32>::new(av.clone(), &[n]).unwrap();
+            let b = Tensor::<f32>::new(bv.clone(), &[n]).unwrap();
+            let out = add(&a, &b).unwrap();
+            for i in 0..n {
+                assert_eq!(out.get(&[i]).unwrap(), av[i] + bv[i]);
+            }
+        }
+    }
+}

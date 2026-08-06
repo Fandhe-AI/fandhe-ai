@@ -11,6 +11,12 @@
 //! `f32::mul_add` を用いる（PoC-v2-5 の K=4096 ストレスケースで実測確認済み。
 //! `.claude/rules/coding-rust.md`）。カーネルの手動境界検査は最適化を理由に省略しない（REQ-8）。
 //!
-//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
-//! 要するため別イシューで対応する）では型・実装を持たない。カーネル本体は TASK-1.6 で追加する
+//! elementwise カーネル（二項演算 `add`・`mul`、活性化 `relu`・`exp`・`tanh`）を
+//! TASK-1.6b（#22）で追加した。GEMM・reduction 等の残るカーネルは後続タスクで追加する
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
+
+mod elementwise;
+
+pub use elementwise::{
+    add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
+};
