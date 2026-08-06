@@ -13,8 +13,8 @@
 //! cargo test -p backend-metal -- --ignored --nocapture
 //! ```
 //!
-//! 本格的な実機 CI 整備は TASK-1.8e（#42）で行う。本テストはそれまでの間、
-//! 受け入れ条件の手動検証手順を兼ねる。
+//! 実行手順・テスト一覧の正本は `docs/backend-metal-real-device-testing.md`
+//! （TASK-1.8e・#42）を参照する。
 //!
 //! CPU 参照は `backend_cpu::parity::matmul_reference_fma`（FMA 契約の
 //! 唯一の参照点）、判定は `backend_cpu::parity::assert_parity`（REQ-2
@@ -82,6 +82,26 @@ fn tiled_matches_cpu_reference_medium_shape() {
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn simdgroup_matches_cpu_reference_medium_shape() {
     run_case(GemmVariant::Simdgroup, 5, 6, 128, 96, 72);
+}
+
+/// 縮退形状（m=1・n=1・k=1）。tiled は 1 threadgroup 内でほぼ全スレッドが
+/// 手動境界チェックで早期 return する経路、simdgroup は `crate::pad` に
+/// よる 8 の倍数へのパディングとタイル原点の早期 return が実際に効く
+/// 経路を確認する（REQ-8。TASK-1.8e・#42 で追加）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn tiled_matches_cpu_reference_degenerate_shapes() {
+    run_case(GemmVariant::Tiled, 9, 10, 1, 1, 1);
+    run_case(GemmVariant::Tiled, 11, 12, 1, 8, 4);
+    run_case(GemmVariant::Tiled, 13, 14, 8, 1, 4);
+}
+
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn simdgroup_matches_cpu_reference_degenerate_shapes() {
+    run_case(GemmVariant::Simdgroup, 9, 10, 1, 1, 1);
+    run_case(GemmVariant::Simdgroup, 11, 12, 1, 8, 4);
+    run_case(GemmVariant::Simdgroup, 13, 14, 8, 1, 4);
 }
 
 /// K ストレスケース（PoC-v2-5 の FMA 契約実測ケースに対応。m=n=64,

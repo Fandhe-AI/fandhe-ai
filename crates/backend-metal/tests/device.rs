@@ -33,7 +33,7 @@ fn enumerate_never_panics() {
 /// 実機（Metal 対応 Mac）依存の検証。デバイスが実際に 1 件以上検出され、
 /// 名前が非空であることを確認する。
 #[test]
-#[ignore = "実機（Metal 対応 Mac）が必要。make test-ignored 相当で実行する"]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn select_metal_device_on_real_hardware() {
     use tensor_core::device::Device;
 

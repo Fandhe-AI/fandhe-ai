@@ -36,8 +36,8 @@
 //! `.claude/rules/security.md`）を使う。入力生成は
 //! `bench_harness::rng::Xorshift64Star`（決定的シード）。
 //!
-//! 本格的な実機 CI 整備は TASK-1.8e（#42）で行う。本テストはそれまでの間、
-//! 受け入れ条件の手動検証手順を兼ねる。
+//! 実行手順・テスト一覧の正本は `docs/backend-metal-real-device-testing.md`
+//! （TASK-1.8e・#42）を参照する。
 //!
 //! **`tests/gemm_naive_parity.rs`（#39）との関係**: #54（CPU-CUDA ペア・
 //! PR #243）は `backend-cuda` 側の重複判定式を含む旧テストを削除し
