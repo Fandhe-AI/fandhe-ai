@@ -91,7 +91,7 @@ pub(crate) fn validate_gemm_dims(
     // m*n はカーネル引数には現れないが、`alloc_zeros::<f32>((m*n) as usize)`
     // の確保サイズ計算（`gemm.rs::run_f32`/`run_f16`）で使うため、こちらも
     // 起動前に検証する。
-    let _mn = m_usize
+    let mn = m_usize
         .checked_mul(n_usize)
         .ok_or_else(|| CudaError::InvalidShape {
             detail: format!("m*n overflows usize: m={m}, n={n}"),
@@ -114,6 +114,22 @@ pub(crate) fn validate_gemm_dims(
     if m > i32::MAX as u32 || n > i32::MAX as u32 || k > i32::MAX as u32 {
         return Err(CudaError::InvalidShape {
             detail: format!("m/n/k must fit in i32 (kernel argument type): m={m}, n={n}, k={k}"),
+        });
+    }
+
+    // Cursor Bugbot 指摘（PR #240）: `kernels.rs` の naive カーネルは
+    // `row * k + p`／`p * n + col`／`row * n + col` を C の `int`（i32）
+    // 算術で計算する。m/n/k 各々が i32::MAX に収まっていても、その積
+    // （mk・kn・mn）が i32::MAX を超えるとインデックス計算そのものが
+    // 32bit 符号付き整数の範囲でラップし、範囲外読み書きを引き起こしうる。
+    // ここでは実際にカーネルが触れる最大インデックス（各積 - 1）が
+    // i32 に収まることを起動前に検証する。
+    if mk > i32::MAX as usize || kn > i32::MAX as usize || mn > i32::MAX as usize {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "m*k, k*n, m*n must fit in i32 (kernel index arithmetic is 32bit int): \
+                 m={m}, n={n}, k={k}, m*k={mk}, k*n={kn}, m*n={mn}"
+            ),
         });
     }
 
@@ -169,6 +185,17 @@ impl CudaGemm {
     ) -> Result<Vec<f32>, CudaError> {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
 
+        // Cursor Bugbot 指摘（PR #240）: `validate_gemm_dims` は
+        // `backend-cpu::gemm_naive` と同様 m==0／n==0（a/c が空）を no-op
+        // として許容するが、その形状のまま `launch_config` を呼ぶと
+        // grid_dim の x（n 由来）または y（m 由来）が 0 になり、CUDA
+        // ドライバは 0 次元の起動を拒否する。CPU 側の no-op 契約
+        // （`backend-cpu/src/gemm.rs` の `n == 0` 早期 return コメント参照）
+        // に揃え、カーネル起動自体を行わず空の結果を返す。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
         let mut c_dev = self
@@ -214,6 +241,11 @@ impl CudaGemm {
         k: u32,
     ) -> Result<Vec<f16>, CudaError> {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+
+        // run_naive_f32 と同一の根拠（上記コメント参照）。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
 
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
@@ -292,6 +324,45 @@ mod tests {
         let m = (i32::MAX as u32) + 1;
         let a_len = m as usize;
         let err = validate_gemm_dims(a_len, 1, m, 1, 1).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_gemm_dims_accepts_zero_m_or_n_as_noop_shape() {
+        // m==0／n==0 は `backend-cpu::gemm_naive` と同じ no-op 形状として
+        // 許容する（Cursor Bugbot 指摘 #240。カーネル起動自体は `run_naive_*`
+        // 側の早期 return で回避するため、検証自体は拒否しない）。
+        assert!(validate_gemm_dims(0, 3 * 4, 0, 4, 3).is_ok());
+        assert!(validate_gemm_dims(4 * 3, 0, 4, 0, 3).is_ok());
+    }
+
+    #[test]
+    fn validate_gemm_dims_rejects_mk_product_exceeding_i32_max() {
+        // m*k は usize（64bit）に収まるが、カーネル側の `row * k + p` は
+        // i32 算術のためインデックスがラップしうる（Cursor Bugbot 指摘
+        // #240）。m/n/k 個々は i32::MAX 以下でも積が超過するケースを拒否する。
+        let m: u32 = 1 << 16; // 65536
+        let k: u32 = 1 << 16; // 65536 → m*k = 2^32 > i32::MAX
+        let a_len = (m as usize) * (k as usize);
+        let err = validate_gemm_dims(a_len, 1, m, 1, k).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_gemm_dims_rejects_kn_product_exceeding_i32_max() {
+        let k: u32 = 1 << 16;
+        let n: u32 = 1 << 16;
+        let b_len = (k as usize) * (n as usize);
+        let err = validate_gemm_dims(1, b_len, 1, n, k).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_gemm_dims_rejects_mn_product_exceeding_i32_max() {
+        let m: u32 = 1 << 16;
+        let n: u32 = 1 << 16;
+        let a_len = m as usize;
+        let err = validate_gemm_dims(a_len, 1, m, n, 1).unwrap_err();
         assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 

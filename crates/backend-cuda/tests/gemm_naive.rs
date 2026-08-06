@@ -158,6 +158,27 @@ fn naive_f32_matches_cpu_reference_k_stress() {
     assert_naive_f32_matches_cpu_reference(&gemm, 9999, 256, 256, 4096);
 }
 
+/// m==0／n==0（`backend-cpu::gemm_naive` と同じ no-op 形状）で
+/// `run_naive_f32` を呼んでも CUDA 起動そのものが発生せず（`gemm.rs` の
+/// 早期 return）、空の結果を返すことを実機で確認する（Cursor Bugbot
+/// 指摘 #240: 0 次元 grid の起動は CUDA ドライバに拒否される）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn naive_f32_zero_dim_shape_returns_empty_without_launch() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaGemm::new(&device).expect("naive kernel compilation must succeed");
+
+    let c = gemm
+        .run_naive_f32(&[], &[1.0, 2.0, 3.0, 4.0], 0, 4, 1)
+        .expect("m==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+
+    let c = gemm
+        .run_naive_f32(&[1.0, 2.0], &[], 2, 0, 1)
+        .expect("n==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+}
+
 /// naive f16 GEMM（実機必須）。f16 は仮数部 10bit のため、f32 CPU 参照との
 /// 比較は複合判定（1e-3 相対誤差）をそのまま適用すると表現精度由来の
 /// 差分で不安定になりうる。本テストは「GPU が panic せず妥当な形状の
