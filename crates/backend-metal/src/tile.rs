@@ -75,6 +75,15 @@ pub enum TileConfigError {
         bytes: u32,
         max_shared_mem_bytes: u32,
     },
+    /// `(bm/wm)/8`（1 simdgroup が担当する行方向の `simdgroup_float8x8`
+    /// アキュムレータ数）が `shaders/gemm.metal` の `gemm_simdgroup_tiled`
+    /// が確保するローカル配列 `acc[MAX_ACC][MAX_ACC]`（`MAX_ACC = 8`）の
+    /// 行方向上限を超える。カーネル側は `acc_rows`/`acc_cols` の値を検査
+    /// せずローカル配列へ書き込むため、ここで弾かないとレジスタ/スタック
+    /// 破壊（範囲外書き込み）に直結する（レビュー指摘。#188 PR review）。
+    AccRowsExceedsMax { acc_rows: u32, max_acc: u32 },
+    /// 上記の列方向版（`(bn/wn)/8` が `MAX_ACC` を超える）。
+    AccColsExceedsMax { acc_cols: u32, max_acc: u32 },
 }
 
 impl std::fmt::Display for TileConfigError {
@@ -107,6 +116,18 @@ impl std::fmt::Display for TileConfigError {
                     "threadgroup memory {bytes} bytes exceeds device max {max_shared_mem_bytes} bytes"
                 )
             }
+            TileConfigError::AccRowsExceedsMax { acc_rows, max_acc } => {
+                write!(
+                    f,
+                    "(bm/wm)/8={acc_rows} exceeds gemm_simdgroup_tiled acc[][] row limit {max_acc}"
+                )
+            }
+            TileConfigError::AccColsExceedsMax { acc_cols, max_acc } => {
+                write!(
+                    f,
+                    "(bn/wn)/8={acc_cols} exceeds gemm_simdgroup_tiled acc[][] col limit {max_acc}"
+                )
+            }
         }
     }
 }
@@ -126,6 +147,14 @@ impl TileConfig {
         wn: 1,
         staged: false,
     };
+
+    /// `shaders/gemm.metal` の `gemm_simdgroup_tiled` が確保するローカル
+    /// アキュムレータ配列 `simdgroup_float8x8 acc[MAX_ACC][MAX_ACC]` の
+    /// 固定上限（カーネル側 `constexpr uint MAX_ACC = 8;` と 1:1 対応。
+    /// [`validate`](Self::validate) がこの値を超える `(bm/wm)/8`・
+    /// `(bn/wn)/8` を拒否することで、カーネル側のローカル配列への範囲外
+    /// 書き込みを未然に防ぐ）。
+    pub const MAX_ACC: u32 = 8;
 
     /// threadgroup 1 個あたりのスレッド数（`wm*wn*32`。1 simdgroup = 32
     /// スレッド）。`crate::gemm` のディスパッチが
@@ -170,6 +199,25 @@ impl TileConfig {
         }
         if self.bk == 0 || !self.bk.is_multiple_of(8) {
             return Err(TileConfigError::BkNotMultipleOfEight { bk: self.bk });
+        }
+
+        // `shaders/gemm.metal` の `acc[MAX_ACC][MAX_ACC]` ローカル配列は
+        // `acc_rows = (bm/wm)/8`・`acc_cols = (bn/wn)/8` を検査せず添字に
+        // 使うため、ここで弾かないと範囲外書き込み（レジスタ/スタック
+        // 破壊）に直結する（レビュー指摘。#188 PR review）。
+        let acc_rows = (self.bm / self.wm) / 8;
+        if acc_rows > Self::MAX_ACC {
+            return Err(TileConfigError::AccRowsExceedsMax {
+                acc_rows,
+                max_acc: Self::MAX_ACC,
+            });
+        }
+        let acc_cols = (self.bn / self.wn) / 8;
+        if acc_cols > Self::MAX_ACC {
+            return Err(TileConfigError::AccColsExceedsMax {
+                acc_cols,
+                max_acc: Self::MAX_ACC,
+            });
         }
 
         let threads = self.thread_count();
@@ -430,6 +478,50 @@ mod tests {
             TileConfigError::ExceedsSharedMemory {
                 bytes: 8192,
                 max_shared_mem_bytes: 4096
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_acc_rows_exceeding_max() {
+        // bm=128, wm=1 -> acc_rows=(128/1)/8=16 > MAX_ACC=8。
+        // レビュー指摘の再現ケース（#188 PR review）:
+        // カーネル側 acc[MAX_ACC][MAX_ACC] への範囲外書き込みに直結する。
+        let cfg = TileConfig {
+            bm: 128,
+            bn: 8,
+            bk: 8,
+            wm: 1,
+            wn: 1,
+            staged: true,
+        };
+        let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+        assert!(matches!(
+            err,
+            TileConfigError::AccRowsExceedsMax {
+                acc_rows: 16,
+                max_acc: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_acc_cols_exceeding_max() {
+        // bn=128, wn=1 -> acc_cols=(128/1)/8=16 > MAX_ACC=8。
+        let cfg = TileConfig {
+            bm: 8,
+            bn: 128,
+            bk: 8,
+            wm: 1,
+            wn: 1,
+            staged: true,
+        };
+        let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+        assert!(matches!(
+            err,
+            TileConfigError::AccColsExceedsMax {
+                acc_cols: 16,
+                max_acc: 8
             }
         ));
     }

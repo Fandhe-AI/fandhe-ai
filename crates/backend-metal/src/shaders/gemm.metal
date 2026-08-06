@@ -244,7 +244,13 @@ kernel void gemm_simdgroup_tiled(
 
     // アキュムレータ数は最大 8x8 個（BM/BN 512 以下・WM/WN >=1 の実運用
     // 候補では十分な固定上限。`crate::tile::CANDIDATES` の暫定値は
-    // 最大でも 4x4 個に収まる）。
+    // 最大でも 4x4 個に収まる）。本カーネル自体は acc_rows/acc_cols を
+    // 検査しないため、`(BM/WM)/8`・`(BN/WN)/8` が MAX_ACC を超える構成が
+    // 渡されるとこのローカル配列への範囲外書き込みになる。安全性は
+    // 呼び出し元の `crate::tile::TileConfig::validate`（`TileConfig::MAX_ACC`
+    // 定数と 1:1 対応）が [`crate::gemm::MetalGemm::pipeline_for_tile`] の
+    // パイプライン構築前に必ず検査し、超過構成を拒否してフォールバック
+    // することで担保する契約（レビュー指摘。#188 PR review）。
     constexpr uint MAX_ACC = 8;
     uint acc_rows = sub_bm / 8;
     uint acc_cols = sub_bn / 8;
@@ -328,12 +334,26 @@ kernel void gemm_simdgroup_tiled(
             for (uint kk = 0; kk < bk_full8; kk += 8) {
                 for (uint r = 0; r < acc_rows; r++) {
                     uint a_row = sub_row0 + r * 8;
-                    simdgroup_float8x8 a_tile;
-                    simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
+                    // 境界チェック（REQ-8）: `dims.m` は `crate::pad::pad8`
+                    // により常に 8 の倍数へ揃えられ、`a_row` も常に 8 の
+                    // 倍数（`sub_row0`・`r*8` がいずれも 8 の倍数）のため、
+                    // `a_row < dims.m` が成立すれば `a_row+8 <= dims.m` も
+                    // 常に成立し、8 行分の読み出しが実効次元内に収まる
+                    // ことが保証される。不成立時は 0 埋めタイルを使う
+                    // （協調ロード経路の 0 埋めと同じ契約。レビュー指摘。
+                    // #188 PR review）。
+                    simdgroup_float8x8 a_tile = simdgroup_float8x8(0.0f);
+                    if (a_row < dims.m) {
+                        simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
+                    }
                     for (uint c_ = 0; c_ < acc_cols; c_++) {
                         uint b_col = sub_col0 + c_ * 8;
-                        simdgroup_float8x8 b_tile;
-                        simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);
+                        // 上記と同じ理屈（`dims.n` も pad8 済みで 8 の倍数、
+                        // `b_col` も常に 8 の倍数）。
+                        simdgroup_float8x8 b_tile = simdgroup_float8x8(0.0f);
+                        if (b_col < dims.n) {
+                            simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);
+                        }
                         simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
                     }
                 }

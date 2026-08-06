@@ -114,6 +114,29 @@ fn direct_load_path_matches_cpu_reference() {
     run_case(cfg, 30, 31, 256, 256, 256);
 }
 
+/// 直接ロード経路（`staged=false`）かつ `dims.m`/`dims.n`（8 の倍数へ
+/// pad8 済みの実効次元）が `BM`/`BN` を割り切らない境界形状。
+/// `shaders/gemm.metal` の `gemm_simdgroup_tiled` 直接ロード経路が
+/// `a_row < dims.m`・`b_col < dims.n` の境界チェックなしに
+/// `simdgroup_load` すると範囲外読み出しになるケース（レビュー指摘。
+/// #188 PR review。`m=n=k=256`・`bm=bn=32` の組で境界に到達しない
+/// `direct_load_path_matches_cpu_reference` の見落としを補う）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn direct_load_path_matches_cpu_reference_non_multiple_of_tile() {
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: false,
+    };
+    // pad8(100)=104（32 の倍数でない）・pad8(70)=72 で
+    // BM/BN=32 を割り切らない実効次元を作る。
+    run_case(cfg, 32, 33, 100, 70, 70);
+}
+
 /// threadgroup サイズ（BM/BN/BK）いずれの倍数でもない境界形状。
 /// `shaders/gemm.metal` の `gemm_simdgroup_tiled` 手動境界チェック
 /// （ブロック端の早期 return・K タイル端の 0 埋め）が実際に効くケース
