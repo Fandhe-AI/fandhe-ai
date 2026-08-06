@@ -30,9 +30,19 @@
 //! （`docs/public-api-design.md` §4）。`DeviceBuffer`（デバイス常駐
 //! バッファ）・`BackendOps`（カーネルディスパッチ）は後続タスク
 //! （TASK-1.9b・1.9c）で追加する。
+//!
+//! `dispatch`（TASK-11.2b・#68）は行列演算ユニット（CUDA Tensor Core・
+//! Metal `simdgroup_matrix`）経路の決定的な自作ディスパッチ規則
+//! （[`dispatch::select_gemm_kernel`]）を提供する。REQ-11 v2 が定める
+//! 「利用者向け明示切替 API を提供しない」方針のとおり、本モジュールは
+//! `backend-cuda`／`backend-metal` の GEMM 自動経路入口が内部で呼ぶ規則
+//! エンジンであり、`tensor-core` の公開 API 利用者が直接切り替える経路
+//! ではない（設計は `docs/dispatch-rules-design.md`〈#67〉、決定表は
+//! `dispatch` モジュールのドキュメンテーションコメント参照）。
 
 mod broadcast;
 pub mod device;
+pub mod dispatch;
 mod element;
 mod error;
 mod ops_shape;
@@ -40,6 +50,7 @@ mod tensor;
 
 pub use broadcast::broadcast_shape;
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};
+pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use element::Element;
 pub use error::ShapeError;
 pub use ops_shape::{

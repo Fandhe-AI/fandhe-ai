@@ -53,10 +53,20 @@
 //! TF32/f32 tensor core 経路（#62）・共有メモリ／タイル基本最適化（#63）・
 //! 実機実測での数値一致検証（#64）・`mma.sync` PTX 直叩き（#187）も
 //! 本イシューのスコープ外である（`docs/cuda-tensor-core-design.md` 参照）。
+//!
+//! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
+//! 追加した。`tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
+//! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
+//! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。既存の
+//! `CudaGemm`／`CudaWmmaGemm` の直接指定 API はテスト・証跡用途
+//! （#70）にそのまま温存する（設計文書 §5.4）。`BackendOps` trait への
+//! 結線は TASK-1.9c（#46）のスコープであり、`CudaGemmAuto` はそこから
+//! 呼ばれるだけの構成にできる（`gemm_auto.rs` モジュールコメント参照）。
 
 pub mod device;
 mod error;
 mod gemm;
+mod gemm_auto;
 mod gemm_wmma;
 mod kernels;
 mod kernels_wmma;
@@ -65,5 +75,6 @@ mod nvrtc;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
+pub use gemm_auto::CudaGemmAuto;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use nvrtc::compile_ptx;
