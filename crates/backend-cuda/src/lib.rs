@@ -34,7 +34,11 @@
 //! タイリング `TILE=32`）を追加済み。CUDA toolkit 非搭載ビルドの CI 検証は
 //! `.github/workflows/ci.yml` の `build-no-cuda-toolkit` ジョブと
 //! `scripts/check-cuda-toolkit-absent.sh`（TASK-1.7d・#35）で実装済み。
-//! 実機（DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
+//! 実機（DGX Spark GB10 等）依存テストの `#[ignore]` 分離は #36 で
+//! 完了した（実機での実行導線は `make test-ignored-cuda`。`Makefile`・
+//! `README.md` 参照）。f16 向け許容誤差の設計・採用（実質的な許容誤差
+//! 変更でありユーザー承認必須）は #36 のスコープ外として未着手のまま
+//! 残す（`tests/cpu_cuda_parity.rs` 冒頭コメント参照）。
 //! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
 //! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
