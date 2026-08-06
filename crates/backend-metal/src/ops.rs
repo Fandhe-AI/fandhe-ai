@@ -19,6 +19,7 @@ use tensor_core::{BackendOps, Tensor};
 use crate::context::MetalContext;
 use crate::error::MetalError;
 use crate::gemm::MetalGemm;
+use crate::memory::map_metal_error;
 
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
 /// 持たない単一 variant のため（`docs/public-api-design.md` §4.1・
@@ -64,8 +65,13 @@ impl BackendOps for MetalBackendOps {
             .as_slice()
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
-        let ctx = MetalContext::new()
-            .map_err(|e: MetalError| BackendError::DeviceAllocationFailed(e.to_string()))?;
+        // `MetalContext::new` の失敗（デバイス不在等）は
+        // `MetalDeviceProvider::select`（`device.rs`）と同一分類の
+        // `BackendError::DeviceUnavailable` に統一する（`map_metal_error`
+        // 経由。誤って `DeviceAllocationFailed`〈VRAM／アロケータ起因〉
+        // に分類すると、呼び出し側が Metal デバイス不在を検知する経路が
+        // 一方に偏る。Bugbot 指摘対応。PR #262 レビュースレッド）。
+        let ctx = MetalContext::new().map_err(map_metal_error)?;
         let gemm = MetalGemm::new(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = gemm
