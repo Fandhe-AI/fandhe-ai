@@ -34,13 +34,51 @@ use std::fmt;
 ///
 /// PoC-v2-1 実測環境（Apple M4 Max。P コア L1D 128KiB・L2 はコアクラスタ
 /// 共有 16MiB 級）で、A パネル（MC×KC×4B）が L2 に収まる範囲で複数水準を
-/// 試し採用した値（選定根拠は PoC README「設計判断」節に記録。
-/// 再チューニングは #24 のスコープ）。
+/// 試し採用した値（選定根拠は PoC README「設計判断」節に記録）。
+///
+/// #24 実測（`docs/perf/cpu-gemm-rayon-tuning.md`。QEMU Virtual CPU 12
+/// 論理コア環境、M=N=K=2048 での MC/KC/NC 近傍水準の座標降下法スイープ）
+/// では、この PoC 値の近傍に有意な改善が見られなかったため現行値を
+/// 維持した（実測差が Q1〜Q3 幅の内側）。[`BlockSizes`] へパラメータ化した
+/// のは、以降のスイープ実測を再コンパイルなしで `examples/gemm_bench.rs`
+/// から行えるようにするためであり、既定値としては本 PoC 値を使い続ける。
 const MC: usize = 128;
 /// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
 const KC: usize = 256;
 /// 列方向ブロックサイズ（B のパネル幅）。
 const NC: usize = 512;
+
+/// キャッシュブロッキングのブロックサイズ 3 つ組（MC/KC/NC）。
+///
+/// `gemm_blocked`／`gemm_parallel` は既定値（[`BlockSizes::poc_v2_1_default`]。
+/// 上記 `MC`/`KC`/`NC` 定数）で呼ばれる。本構造体でパラメータ化した目的は
+/// #24（TASK-1.6d）のチューニングスイープを `examples/gemm_bench.rs` から
+/// 再コンパイルなしで実行できるようにするためであり、`gemm_blocked_region`
+/// の内部ロジック自体は変更していない（K 方向の加算順序は不変のため
+/// `tests/gemm_parity.rs` の bit-exact 契約に影響しない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockSizes {
+    pub mc: usize,
+    pub kc: usize,
+    pub nc: usize,
+}
+
+impl BlockSizes {
+    /// PoC-v2-1 実測に基づく既定値（`MC`/`KC`/`NC` 定数と同一）。
+    pub const fn poc_v2_1_default() -> Self {
+        Self {
+            mc: MC,
+            kc: KC,
+            nc: NC,
+        }
+    }
+}
+
+impl Default for BlockSizes {
+    fn default() -> Self {
+        Self::poc_v2_1_default()
+    }
+}
 
 /// GEMM カーネル公開入口の shape 検証エラー。
 ///
@@ -62,6 +100,14 @@ pub enum GemmError {
     /// （`checked_mul` によりアクセス前に検出する。OWASP A03 観点。
     /// `.claude/rules/security.md`）。
     DimProductOverflow,
+    /// `BlockSizes` の `mc`／`kc`／`nc` のいずれかが 0（Cursor Bugbot 指摘
+    /// #231: `gemm_parallel_tuned` へ渡す `BlockSizes` はフィールドが
+    /// public かつ未検証で受理されていたため、`nc`／`kc` が 0 だと
+    /// `step_by(0)` がパニックし、`mc` が 0 だと `gemm_blocked_region` の
+    /// 内側 `while` ループが `ic` を進められず無限ループになっていた。
+    /// `oversubscription`（`.max(1)` で下限クランプ済み）と同様に、公開
+    /// 入口の shape 検証で早期に拒否する）。
+    ZeroBlockSize { mc: usize, kc: usize, nc: usize },
 }
 
 impl fmt::Display for GemmError {
@@ -78,6 +124,9 @@ impl fmt::Display for GemmError {
             }
             GemmError::DimProductOverflow => {
                 write!(f, "m*k, k*n or m*n overflows usize")
+            }
+            GemmError::ZeroBlockSize { mc, kc, nc } => {
+                write!(f, "block sizes must be non-zero: mc={mc}, kc={kc}, nc={nc}")
             }
         }
     }
@@ -224,7 +273,7 @@ pub fn gemm_blocked(
     // とも絶対オフセット＝相対オフセットが一致する）。以前は本関数専用の
     // 絶対オフセット版を別途持っていたが、パネル分割版とロジックが
     // 完全重複していたため統合した（issue #21 レビュー指摘の Low 項目）。
-    gemm_blocked_region(a, b, c, n, k, 0, m);
+    gemm_blocked_region(a, b, c, n, k, 0, m, BlockSizes::poc_v2_1_default());
     Ok(())
 }
 
@@ -246,19 +295,20 @@ fn gemm_blocked_region(
     k: usize,
     row_start: usize,
     row_end: usize,
+    blocks: BlockSizes,
 ) {
     let mc_total = row_end - row_start;
     let a = &a[row_start * k..];
 
-    for jc in (0..n).step_by(NC) {
-        let nc_len = NC.min(n - jc);
-        for pc in (0..k).step_by(KC) {
-            let kc_len = KC.min(k - pc);
+    for jc in (0..n).step_by(blocks.nc) {
+        let nc_len = blocks.nc.min(n - jc);
+        for pc in (0..k).step_by(blocks.kc) {
+            let kc_len = blocks.kc.min(k - pc);
             let mut ic = 0;
             while ic < mc_total {
-                let mc_len = MC.min(mc_total - ic);
+                let mc_len = blocks.mc.min(mc_total - ic);
                 kernel_block(a, b, c, n, k, ic, ic + mc_len, pc, kc_len, jc, nc_len);
-                ic += MC;
+                ic += blocks.mc;
             }
         }
     }
@@ -280,13 +330,66 @@ pub fn gemm_parallel(
     n: usize,
     k: usize,
 ) -> Result<(), GemmError> {
+    // オーバーサブスクリプション係数 1（PoC-v2-1 実証構成のまま）・
+    // 既定ブロックサイズで `gemm_parallel_tuned` を呼ぶ薄いラッパー。
+    // #24 実測（`docs/perf/cpu-gemm-rayon-tuning.md`）で係数 2・4 との
+    // 有意差が確認できなかったため、公開 API の既定挙動は変更していない。
+    gemm_parallel_tuned(a, b, c, m, n, k, BlockSizes::poc_v2_1_default(), 1)
+}
+
+/// `gemm_parallel` のチューニング可能版。ブロックサイズ・パネル分割の
+/// オーバーサブスクリプション係数を明示指定できる。
+///
+/// **想定呼び出し元**: `examples/gemm_bench.rs`（#24・TASK-1.6d の A/B 実測
+/// スイープ）。`gemm_parallel` 自身もこの関数を既定パラメータで呼ぶ薄い
+/// ラッパーであるため、チューニング用エントリポイントを追加しても
+/// 本番経路のカーネル本体（`gemm_blocked_region`・`kernel_block`）は
+/// 単一の実装のまま保たれる。
+///
+/// `oversubscription`（1 以上）は生成するパネル数を
+/// `num_threads * oversubscription` に増やすことで、rayon の
+/// work-stealing による負荷平準化の効果を実測するための係数
+/// （PoC-v2-1 は係数 1 相当の「スレッド数と同数のパネル」構成のみを
+/// 検証していた）。
+///
+/// `#[allow(clippy::too_many_arguments)]`: `blocks`・`oversubscription` を
+/// 個別引数のまま追加したのは、`gemm_parallel` からの薄い委譲呼び出しで
+/// 各引数の対応が一目で分かるようにするため（`kernel_block` の同種
+/// `#[allow]` と同じ理由。`.claude/rules/coding-rust.md`）。
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_parallel_tuned(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+    oversubscription: usize,
+) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
+
+    // `mc`／`kc`／`nc` が 0 だと `gemm_blocked_region` の
+    // `step_by(blocks.nc)`／`step_by(blocks.kc)` がパニックし、`mc` が 0
+    // の場合は内側 `while ic < mc_total { ... ic += blocks.mc; }` が
+    // 無限ループになる（rayon タスク内でのハング）。`BlockSizes` は
+    // フィールドが public で `examples/gemm_bench.rs` から任意値を渡せる
+    // ため、他の公開入口検証（`validate_dims`・`oversubscription` の
+    // `.max(1)` クランプ）と同様に、本体アクセス前に明示的に拒否する
+    // （Cursor Bugbot 指摘 #231。REQ-8 の境界検査省略禁止と同じ思想）。
+    if blocks.mc == 0 || blocks.kc == 0 || blocks.nc == 0 {
+        return Err(GemmError::ZeroBlockSize {
+            mc: blocks.mc,
+            kc: blocks.kc,
+            nc: blocks.nc,
+        });
+    }
 
     // n == 0 は shape として合法（validate_dims は m*n=0・k*n=0 を許容し、
     // b・c は空スライスになる）だが、下記 par_chunks_mut(panel_rows * n) は
     // チャンクサイズが 0 だとパニックする。naive／blocked は該当形状で
     // ループが単に 0 回になる no-op として振る舞うため（`gemm_blocked_region`
-    // の `for jc in (0..n).step_by(NC)` が空レンジになる）、3 実装間の
+    // の `for jc in (0..n).step_by(blocks.nc)` が空レンジになる）、3 実装間の
     // parity 契約（`tests/gemm_parity.rs`）を保つよう本関数も明示的に
     // no-op で返す。新規エラー種別を追加しないのは、この形状自体は
     // 不正ではなく他 2 実装が正常に受理しているため。
@@ -294,16 +397,17 @@ pub fn gemm_parallel(
         return Ok(());
     }
 
-    // 論理コア数（P+E）ぶんのパネル数を確保することを優先し、各パネルの
-    // 行数は「m を num_threads で割った切り上げ」で決める。パネル行数の
-    // 下限を MC（128）に固定しないのは、例えば M=512・16 スレッドでは
-    // 512/16=32 行のパネルが作れるにもかかわらず MC=128 に切り上げると
-    // 4 パネルしか生成されず、16 コア中 4 コアしか稼働しない頭打ちが
-    // 生じるため（`gemm_blocked_region` はパネル内部で MC 単位の
-    // ブロッキングを自前で行うため、パネル行数が MC 未満でも正しく動作
-    // する。PoC-v2-1 実測で確立した方針）。
+    // 論理コア数（P+E）× オーバーサブスクリプション係数ぶんのパネル数を
+    // 確保することを優先し、各パネルの行数は「m をパネル数で割った切り
+    // 上げ」で決める。パネル行数の下限を MC（128）に固定しないのは、
+    // 例えば M=512・16 スレッドでは 512/16=32 行のパネルが作れるにも
+    // かかわらず MC=128 に切り上げると 4 パネルしか生成されず、16 コア中
+    // 4 コアしか稼働しない頭打ちが生じるため（`gemm_blocked_region` は
+    // パネル内部で MC 単位のブロッキングを自前で行うため、パネル行数が
+    // MC 未満でも正しく動作する。PoC-v2-1 実測で確立した方針）。
     let num_threads = rayon::current_num_threads().max(1);
-    let panel_rows = m.div_ceil(num_threads).max(1);
+    let panel_count = num_threads.saturating_mul(oversubscription.max(1)).max(1);
+    let panel_rows = m.div_ceil(panel_count).max(1);
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
@@ -313,7 +417,7 @@ pub fn gemm_parallel(
             // c_chunk はパネル先頭が row_start 行目に対応するスライス。
             // gemm_blocked_region が row_start を基準に a・c 双方の相対
             // オフセットを揃えるため、パネル境界をそのまま渡せる。
-            gemm_blocked_region(a, b, c_chunk, n, k, row_start, row_end);
+            gemm_blocked_region(a, b, c_chunk, n, k, row_start, row_end, blocks);
         });
     Ok(())
 }
