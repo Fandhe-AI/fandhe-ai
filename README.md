@@ -46,6 +46,8 @@ make setup   # サブモジュール取得 → rustup → lefthook（git hooks�
 | `make lint` | `cargo clippy -D warnings` |
 | `make test` | `cargo test`（実機依存の `#[ignore]` テストは除く） |
 | `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
+| `make test-ignored-cuda` | CUDA 実機専用: `backend-cuda` の `#[ignore]` 分離テストのみ実行（TASK-1.7e・#36） |
+| `make test-ignored-metal` | Metal 実機専用: `backend-metal` の `#[ignore]` 分離テストのみ実行・release（TASK-1.8e・#42） |
 | `make deny` | `cargo deny check licenses sources`（依存ライセンス監査。`cargo-deny` 未導入なら自動導入） |
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
 | `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
@@ -63,6 +65,28 @@ make docker-ci      # コンテナ内で make ci を実行（環境非依存の�
 ```
 
 コンテナ内で使えるのは CPU（rayon）バックエンドのみです。Metal はホスト macOS 直接実行、CUDA は実機（DGX Spark GB10 等）で実行します（`cudarc` の動的ロード方式のため、CUDA バックエンドの「ビルド」は CUDA toolkit 無しのコンテナでも成立します）。
+
+### CUDA 実機での `#[ignore]` テスト実行
+
+`backend-cuda` の実機依存テスト（形状網羅・K=4096 ストレス・性能比較・デバイスメタデータ肯定的検証等）は通常 CI（self-hosted・CUDA toolkit 非搭載）では `#[ignore]` により除外されます。CUDA ドライバ搭載の実機（DGX Spark GB10 等）で以下を実行してください（TASK-1.7e・#36）。
+
+```bash
+make test-ignored-cuda   # backend-cuda に限定した #[ignore] テスト実行
+# 相当コマンド:
+cargo test -p backend-cuda -- --ignored --nocapture
+```
+
+`backend-cuda` 以外を含む全 `#[ignore]` テスト（Metal 実機分も含む）をまとめて実行したい場合は `make test-ignored`（`cargo test --workspace -- --ignored --nocapture`）を使ってください。
+
+### Metal 実機での `#[ignore]` テスト実行
+
+`backend-metal` の実機依存テスト（デバイス・バッファ基盤・naive/tiled/simdgroup GEMM の CPU 参照実装との数値一致・CPU-Metal ペア回帰等）は通常 CI（self-hosted・Linux）では `cfg(target_os = "macos")` と `#[ignore]` の二重分離により除外されます。Apple Silicon 実機で以下を実行してください（TASK-1.8e・#42。詳細手順・テスト一覧は [`docs/backend-metal-real-device-testing.md`](docs/backend-metal-real-device-testing.md) を参照）。
+
+```bash
+make test-ignored-metal   # backend-metal に限定した #[ignore] テスト実行（release）
+# 相当コマンド:
+cargo test -p backend-metal --release -- --ignored --nocapture
+```
 
 ## CI
 

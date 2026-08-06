@@ -24,8 +24,11 @@
 //! - 対象カーネルは naive GEMM f32 のみ。tiled GEMM の CPU-CUDA ペアは
 //!   #34（tiled 実装）マージ後に本スイートへ追加する
 //! - f16 は複合判定（1e-3/1e-5）が f32 前提であり、適用は実質的な
-//!   許容誤差変更（ユーザー承認必須）にあたるため対象外（`gemm_naive.rs`
-//!   の既存 f16 shape テストを変更せず維持する）。
+//!   許容誤差変更（ユーザー承認必須）にあたるため対象外。#36 の検討
+//!   結果として f16 向け tolerance は本イシューでは導入せず、
+//!   `gemm_naive.rs`／`gemm_tiled.rs` の f16 テストは「形状一致＋全要素
+//!   有限」までの検証に強化するに留める（f16 tolerance 設計自体は
+//!   `out-of-scope-tracking.md` に従いスコープ外事項として PR 本文に記録）。
 //!   **例外**: WMMA f16 経路（`tests/cpu_cuda_wmma_parity.rs`・#61）のみ、
 //!   #61 の受け入れ条件「f16 GEMM が複合判定で参照実装と一致する」が
 //!   明示的に複合判定の適用を要求しているため対象とする。本ファイルの
@@ -106,8 +109,8 @@ fn naive_f32_parity_smoke_env_adaptive() {
 /// 実機（DGX Spark GB10 等）必須の形状網羅テスト。受け入れ条件の本体。
 ///
 /// CI self-hosted runner は CUDA toolkit 非搭載のため通常実行ではスキップ
-/// される（`cargo test -- --ignored` での実機実行を前提とする。実行導線の
-/// 整備は #36 のスコープ）。
+/// される（`cargo test -- --ignored` での実機実行を前提とする。実機での
+/// 実行導線は `make test-ignored-cuda`。`Makefile`・`README.md` 参照。#36）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
 fn naive_f32_matches_reference_across_shapes() {

@@ -103,6 +103,30 @@ else
 	@echo "skip: Cargo.toml 未追加のため test-ignored をスキップ"
 endif
 
+# TASK-1.7e（イシュー #36）: `backend-cuda` に限定した実機テスト導線。
+# `test-ignored`（workspace 全体）は Metal 側の #[ignore] テストや他クレートの
+# perf 系テストも巻き込むため、CUDA 実機（DGX Spark GB10 等・Linux）のみで
+# `backend-cuda` を検証したい場合はこちらを使う。
+.PHONY: test-ignored-cuda
+test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する
+ifdef HAS_CARGO
+	cargo test -p backend-cuda -- --ignored --nocapture
+else
+	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
+endif
+
+# TASK-1.8e（イシュー #42）: `backend-cuda` の `test-ignored-cuda`（#36）と対になる
+# Metal 実機テスト導線。`--release` を既定にする（`tests/cpu_metal_parity.rs` の
+# K=4096 ストレスケース〈`k4096_stress_poc_v2_5`〉が debug ビルドでは著しく遅いため。
+# 各テストファイル冒頭コメントの推奨コマンドと一致させる）。
+.PHONY: test-ignored-metal
+test-ignored-metal: ## Metal 実機専用: backend-metal の #[ignore] 分離テストを実行する（release）
+ifdef HAS_CARGO
+	cargo test -p backend-metal --release -- --ignored --nocapture
+else
+	@echo "skip: Cargo.toml 未追加のため test-ignored-metal をスキップ"
+endif
+
 # macOS runner 未登録の代替として、aarch64-apple-darwin へのクロスターゲットビルドで
 # Metal 有効経路（cfg(target_os = "macos")）のコンパイルを検証する（TASK-2.1b・イシュー #50。
 # 全 9 クレートは lib のみでリンク不要なため、macOS SDK が無い環境でもコンパイル検証が成立する。
@@ -115,6 +139,23 @@ ifdef HAS_CARGO
 	cargo build --workspace --locked --target aarch64-apple-darwin
 else
 	@echo "skip: Cargo.toml 未追加のため build-cross をスキップ"
+endif
+
+# TASK-1.8e（イシュー #42）: `backend-metal` の `#[ignore]` 実機テスト（本ファイルの
+# `tests/`）を Linux CI でも型検査する。`--workspace --all-targets` は bench-harness の
+# dev-dependencies 経由で criterion → alloca（macOS ターゲットではネイティブ C ビルドが
+# 必要）を引き込み、macOS クロスコンパイラ非搭載の self-hosted runner では
+# `cc: error: unrecognized command-line option '-arch'` で失敗することを実測済みのため
+# 採用しない（`-p backend-metal --tests` に限定すれば bench-harness は
+# `[dependencies]`（criterion を含まない）としてのみ解決され、この失敗を回避できる。
+# `cargo check` はリンクを行わないため macOS SDK 非搭載でも成立する）。
+.PHONY: check-cross-metal-tests
+check-cross-metal-tests: ## backend-metal の #[ignore] テストを aarch64-apple-darwin で型検査する
+ifdef HAS_CARGO
+	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
+	cargo check -p backend-metal --tests --target aarch64-apple-darwin
+else
+	@echo "skip: Cargo.toml 未追加のため check-cross-metal-tests をスキップ"
 endif
 
 .PHONY: deny
@@ -150,7 +191,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross check-cross-metal-tests test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）

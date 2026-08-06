@@ -13,8 +13,8 @@
 //! cargo test -p backend-metal -- --ignored --nocapture
 //! ```
 //!
-//! 本格的な実機 CI 整備は TASK-1.8e（#42）で行う。本テストはそれまでの間、
-//! 受け入れ条件の手動検証手順を兼ねる。
+//! 実行手順・テスト一覧の正本は `docs/backend-metal-real-device-testing.md`
+//! （TASK-1.8e・#42）を参照する。
 //!
 //! CPU 参照は `backend_cpu::parity::matmul_reference_fma`（FMA 契約の
 //! 唯一の参照点）、判定は `backend_cpu::parity::assert_parity`（REQ-2
@@ -77,6 +77,46 @@ fn naive_matches_cpu_reference_medium_shape() {
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn naive_matches_cpu_reference_k_stress() {
     run_case(7, 8, 64, 64, 4096);
+}
+
+/// 縮退形状（m=1・n=1・k=1）。threadgroup（16×16）に対して 1 スレッドしか
+/// 有効でなく、`shaders/gemm.metal` の手動境界チェック（`gid.y >= dims.m
+/// || gid.x >= dims.n`）がほぼ全スレッドで早期 return する経路を確認する
+/// （REQ-8。TASK-1.8e・#42 で追加）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn naive_matches_cpu_reference_degenerate_shapes() {
+    run_case(9, 10, 1, 1, 1);
+    run_case(11, 12, 1, 8, 4);
+    run_case(13, 14, 8, 1, 4);
+}
+
+/// `dispatch`（naive の薄いエントリポイント）と `dispatch_variant(&ctx,
+/// GemmVariant::Naive, ..)` が同一結果を返すことを確認する。`dispatch` の
+/// 実装は内部で `dispatch_variant` を呼ぶ委譲であり（`src/gemm.rs`
+/// `dispatch` の doc コメント参照）、本テストは 2 つの入口が乖離しない
+/// ことを固定する回帰である（TASK-1.8e・#42 で追加）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn dispatch_and_dispatch_variant_naive_agree() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("naive GEMM パイプラインの構築に失敗した");
+
+    let (m, n, k) = (33, 65, 17);
+    let a = Xorshift64Star::new(15).fill_vec(m * k);
+    let b = Xorshift64Star::new(16).fill_vec(k * n);
+
+    let via_dispatch = gemm
+        .dispatch(&ctx, &a, &b, m, n, k)
+        .expect("dispatch のディスパッチに失敗した");
+    let via_variant = gemm
+        .dispatch_variant(&ctx, backend_metal::GemmVariant::Naive, &a, &b, m, n, k)
+        .expect("dispatch_variant(Naive) のディスパッチに失敗した");
+
+    assert_eq!(
+        via_dispatch, via_variant,
+        "dispatch と dispatch_variant(Naive) の結果が一致しない（入口 2 経路の乖離）"
+    );
 }
 
 /// 零次元・長さ不一致が FFI 呼び出し前に型付きエラーで拒否されることを
