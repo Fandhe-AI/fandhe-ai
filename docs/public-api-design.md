@@ -16,7 +16,7 @@
 
 ### 2.1 ストレージ分離設計（PoC-v2-1 からの差分）
 
-PoC-v2-1 は `Tensor<T>` を「行優先連続バッファ + `Vec<T>` 所有」で確定した（`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/README.md`「テンソル型の設計判断」表）。同表は所有権の論点で「専用 View 型（`TensorView<'a, T>`）は後続 PoC で必要になった時点で追加する」と明示的に留保しており、**本イシューはその留保されていた追加判断点**を扱う（PoC-v2-1 の確定事項の書き換えではない）。
+PoC-v2-1 は `Tensor<T>` を「行優先連続バッファ + `Vec<T>` 所有」で確定した（`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/README.md`「テンソル型の設計判断」表）。本設計は `Tensor<T>` の所有構造を PoC-v2-1 確定の `Vec<T>` 直接所有から `Arc<Storage<T>>` + `offset` + `strides` へ変更するものであり、**PoC-v2-1 確定事項の明示的変更としてユーザー承認済み**（issue #182 コメント 2026-08-05 参照）。
 
 zero-copy view（reshape/transpose/narrow）を成立させるため、ストレージを共有バッファへ切り出す:
 
@@ -41,6 +41,42 @@ pub struct Tensor<T: Element> {
 /// in-place 更新の最適化余地を残す。
 struct Storage<T: Element> {
     data: Vec<T>,
+}
+```
+
+### 2.1.1 `ShapeError`
+
+`ShapeError` は `tensor-core` の shape 検査（REQ-10、実行時検査基盤）が失敗を報告するための型付きエラーであり、本文書内では 2.2（view 系操作）・2.4（生成系）・3 章（`AutodiffError::Shape` 経由）・4 章（`BackendError::ShapeMismatch` 経由）から参照される。各 variant は本文書内の利用箇所と対応させて列挙する:
+
+```rust
+/// テンソル生成・view 操作・reshape の shape 不整合を表す。`tensor-core`
+/// の全公開 API が共通して返す型であり、`AutodiffError::Shape`・
+/// `BackendError::ShapeMismatch` からラップされる（5 章参照）。
+///
+/// `#[non_exhaustive]` を付す理由: 公開 API 非破壊はガードレール条件
+/// （`.claude/rules/security.md`）であり、後続タスク（TASK-1.4 以降）
+/// で検査項目が増えても呼び出し側の網羅的 match を破壊しないため。
+#[non_exhaustive]
+#[derive(Debug)]
+pub enum ShapeError {
+    /// 要求される次元数（rank）と実際の次元数が一致しない。
+    /// 本 variant のみ `tensor-core` は型定義を提供するだけで、構築は
+    /// rank 前提を持つ autodiff／backend 入口側の検査が行う
+    /// （`matmul`/`mse_loss` 等の 2 次元前提演算。3 章の順伝播検査から
+    /// `AutodiffError::Shape` 経由でラップされて呼び出し側へ届く）。
+    RankMismatch { expected: usize, actual: usize },
+    /// shape の要素数積とデータ長が一致しない（`Tensor::new`/`from_slice`
+    /// が `data.len()` と shape の要素数積を突き合わせる際に返す）。
+    ElementCountMismatch { expected: usize, actual: usize },
+    /// 軸番号（`dim`）がテンソルの rank 範囲外
+    /// （`transpose`/`narrow`/`Var::sum`/`Var::max` の `dim` 引数）。
+    AxisOutOfRange { axis: usize, rank: usize },
+    /// `narrow` の `[start, start+len)` が対象軸のサイズを超える。
+    NarrowOutOfBounds { dim: usize, start: usize, len: usize, dim_size: usize },
+    /// shape の要素数積が `usize` の範囲でオーバーフローする
+    /// （`zeros`/`ones`/`full`/`Tensor::new`/`from_slice` がアロケーション
+    /// 前に検査する。2.4 参照）。
+    ElementCountOverflow,
 }
 ```
 
@@ -85,7 +121,14 @@ impl<T: Element> Tensor<T> {
 /// テンソルが扱える要素型の最小抽象化（PoC-v2-1 の型パラメータ方針）。
 /// `f32`/`f64`/`i32` に加え、GPU バックエンド（CUDA/Metal）で使用する
 /// `half::f16` を実装対象とする。
-pub trait Element: Copy + Send + Sync + 'static { /* ... */ }
+///
+/// `zeros`/`ones`（2.4）がジェネリックな `Tensor<T>` を返す（`Result`
+/// 化後も型 `T` を問わず生成できる）ためには、`T` 自身が加法単位元・
+/// 乗法単位元を生成できる必要がある。そのため `Element` は
+/// `Copy + Send + Sync + 'static` に加え、ゼロ値・単位値の生成
+/// capability を追加境界として要求する（`zero()`/`one()` 相当の
+/// associated fn。具体的なシグネチャは TASK-1.4 productize 時に確定）。
+pub trait Element: Copy + Send + Sync + 'static { /* 追加境界は上記ドキュメンテーションコメント参照 */ }
 ```
 
 ### 2.4 生成系
@@ -97,9 +140,15 @@ impl<T: Element> Tensor<T> {
     /// `ShapeError` を返す。
     pub fn new(data: Vec<T>, shape: &[usize]) -> Result<Tensor<T>, ShapeError>;
 
-    pub fn zeros(shape: &[usize]) -> Tensor<T>;
-    pub fn ones(shape: &[usize]) -> Tensor<T>;
-    pub fn full(shape: &[usize], value: T) -> Tensor<T>;
+    /// shape の要素数積のオーバーフロー（`ShapeError::ElementCountOverflow`）
+    /// またはアロケーション失敗時に `Err` を返す。§1「失敗しうる公開
+    /// API は Result を返す」原則との整合のため `Result` 化する
+    /// （issue #182 コメント 2026-08-05、レビュー Medium 指摘）。
+    pub fn zeros(shape: &[usize]) -> Result<Tensor<T>, ShapeError>;
+    /// `zeros` と同様の理由で `Result` を返す。
+    pub fn ones(shape: &[usize]) -> Result<Tensor<T>, ShapeError>;
+    /// `zeros` と同様の理由で `Result` を返す。
+    pub fn full(shape: &[usize], value: T) -> Result<Tensor<T>, ShapeError>;
     pub fn from_slice(data: &[T], shape: &[usize]) -> Result<Tensor<T>, ShapeError>;
 }
 ```
@@ -233,6 +282,14 @@ impl Tape {
 /// 逆伝播（`Tape::backward`）双方の失敗経路をここに集約する
 /// （旧設計は `Tape::backward` の失敗のみを想定しており、順伝播側の
 /// shape 不整合を表現するエラーが欠落していた）。
+///
+/// `#[non_exhaustive]` を付す理由: 公開 API 非破壊はガードレール条件
+/// （`.claude/rules/security.md`）であり、TASK-1.5 で演算セット（3.2）
+/// が拡張されるたびに新しい失敗要因（Conv 系の padding 不整合等）の
+/// variant 追加を非破壊にするため。issue #182 承認コメントで明示された
+/// のは `ShapeError`・`BackendError` の 2 enum だが、同一の設計一貫性を
+/// 保つため本 enum にも追加適用する。
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum AutodiffError {
     /// 順伝播時の shape 不整合（`matmul`/`add`/`mul` の不正な
@@ -395,6 +452,12 @@ pub trait BackendOps {
 /// バックエンド抽象層のエラー型。CUDA ドライバ不在（`cudarc` の
 /// 動的ロード失敗）は「CUDA toolkit 非搭載環境でもビルド成立する」
 /// という REQ-1 の契約の実行時側の受け皿として、型付きエラーで返す。
+///
+/// `#[non_exhaustive]` を付す理由: 公開 API 非破壊はガードレール条件
+/// （`.claude/rules/security.md`）であり、CUDA/Metal 実装（TASK-1.9）
+/// が進むにつれ想定される実行時失敗（同期エラー・ドライババージョン
+/// 不整合等）の variant 追加を非破壊にするため。
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum BackendError {
     /// `cudarc` の動的ロードに失敗した（CUDA ドライバ・toolkit 不在等）。
@@ -403,6 +466,12 @@ pub enum BackendError {
     ShapeMismatch(ShapeError),
     /// デバイス間でテンソルが混在している等の不整合。
     DeviceMismatch,
+    /// デバイスメモリの確保に失敗した（`upload`/`DeviceBuffer` 確保等。
+    /// VRAM 枯渇・アロケータ失敗を含む）。
+    DeviceAllocationFailed(String),
+    /// カーネル起動に失敗した（CUDA NVRTC のコンパイル・起動エラー、
+    /// Metal `MTLComputeCommandEncoder` のディスパッチ失敗等）。
+    KernelLaunchFailed(String),
 }
 ```
 
@@ -410,9 +479,9 @@ pub enum BackendError {
 
 | 型 | 役割 | 発生源 |
 |----|------|--------|
-| `ShapeError` | テンソル生成・view 操作・reshape の shape 不整合 | `tensor-core` |
-| `AutodiffError` | 順伝播（`Var` の演算メソッド）の shape 不整合、`Tape::backward` の失敗（グラフ不整合等）、および二項演算・`backward`・`Gradients::get` におけるクロステープ誤用（`TapeMismatch`） | `autodiff` |
-| `BackendError` | バックエンド実行時エラー（CUDA 不在・shape 不一致・デバイス不整合） | backend 入口 |
+| `ShapeError` | テンソル生成・view 操作・reshape の shape 不整合（rank 不一致・要素数不一致・軸範囲外・narrow 範囲外・要素数積オーバーフロー。variant 定義は 2.1.1 参照）。`#[non_exhaustive]` | `tensor-core`（`RankMismatch` のみ型定義の提供にとどまり、構築は autodiff／backend 入口。2.1.1 参照） |
+| `AutodiffError` | 順伝播（`Var` の演算メソッド）の shape 不整合、`Tape::backward` の失敗（グラフ不整合等）、および二項演算・`backward`・`Gradients::get` におけるクロステープ誤用（`TapeMismatch`）。`#[non_exhaustive]` | `autodiff` |
+| `BackendError` | バックエンド実行時エラー（CUDA 不在・shape 不一致・デバイス不整合・デバイスメモリ確保失敗・カーネル起動失敗）。`#[non_exhaustive]` | backend 入口 |
 
 外部フォーマット（safetensors/ONNX）読み込み時は、長さ・形状の検証を先行させる契約とする（`.claude/rules/security.md` A03 インジェクション対策）。`onnx-interop` クレートの `ShapeError` 送出経路は本設計のスコープ外（REQ-7 系、別イシューで扱う）だが、`tensor-core::Tensor::new`/`from_slice` の実行時 shape 検査がこの検証の受け皿となる設計である点を接続点として明記する。
 
