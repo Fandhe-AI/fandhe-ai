@@ -177,3 +177,184 @@ kernel void gemm_simdgroup(
     }
     simdgroup_store(acc, c + (size_t)row0 * (size_t)dims.n + (size_t)col0, dims.n);
 }
+
+// 動的タイル選択（TASK-1.8f・#188）: BM/BN/BK/WM/WN パラメータ化 GEMM。
+//
+// `gemm_simdgroup`（1 threadgroup = 1 simdgroup = C の 8x8 タイル 1 つ）は
+// タイルサイズの自由度がなく、MLX steel カーネル方式（BM/BN/BK/WM/WN の
+// パラメータ化＋行列サイズ別動的選択）の性能差の核心に対応できない
+// （イシュー #188 本文・`docs/spec/v2-amendment-proposal-2026-08-06.md`
+// 改定 1 根拠）。本カーネルは 1 threadgroup が C の BM×BN ブロックを担当し、
+// 内部を WM×WN 個の simdgroup（threadgroup スレッド数 = WM*WN*32）で分担
+// する。各 simdgroup は (BM/WM)/8 × (BN/WN)/8 個の `simdgroup_float8x8`
+// アキュムレータを持ち、K 方向を BK 刻みでループする。
+//
+// BM/BN/BK/WM/WN・協調ロード有無（USE_TGP_STAGING）は MSL function
+// constant として与える（`crate::pipeline::make_pipeline_with_constants`
+// が `MTLFunctionConstantValues` 経由でパイプライン構築時に定数畳み込み・
+// ループ展開させる。実行時コンパイル構成のため MLX steel のテンプレート
+// 実体化と同等の効果が得られる。イシュー #188 計画「設計方針」節）。
+// 整除制約（BM は WM*8 の倍数、BN は WN*8 の倍数、BK は 8 の倍数）は
+// Rust 側 `crate::tile::TileConfig::validate` が事前検証する契約であり、
+// カーネル側では前提として扱う。
+constant uint BM [[function_constant(0)]];
+constant uint BN [[function_constant(1)]];
+constant uint BK [[function_constant(2)]];
+constant uint WM [[function_constant(3)]];
+constant uint WN [[function_constant(4)]];
+constant bool USE_TGP_STAGING [[function_constant(5)]];
+
+// threadgroup 共有メモリは function constant でサイズ指定できないため、
+// `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
+// atIndex`（`crate::gemm::encode_dispatch_tiled`）で渡す。A タイル
+// （BM×BK、先頭から）＋ B タイル（BK×BN、A タイルの直後）を 1 領域へ
+// オフセット分割する（`USE_TGP_STAGING=false` の場合は未使用でも
+// エンコード側は 0 バイトのバッファを渡さず最小長で確保する契約
+// （`crate::tile::TileConfig::shared_mem_bytes` が 0 を返す設計。実引数
+// 自体は残しシグネチャを固定しておくことでパイプライン切替を単純化する）。
+kernel void gemm_simdgroup_tiled(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device float* c [[buffer(2)]],
+    constant Dims& dims [[buffer(3)]],
+    threadgroup float* shared_mem [[threadgroup(0)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    // 1 threadgroup が担当する C ブロックの原点（行優先: y=行, x=列）。
+    uint row0 = tgid.y * BM;
+    uint col0 = tgid.x * BN;
+
+    // ブロック全体が実効次元を完全に超える場合は早期 return する
+    // （REQ-8。dispatch 側 grid は div_ceil(BM)/div_ceil(BN) で切り上げる
+    // ため、末尾ブロックは部分的にしか実効次元へ収まらないケースが実際に
+    // 発生する）。
+    if (row0 >= dims.m || col0 >= dims.n) {
+        return;
+    }
+
+    // この simdgroup が担当するブロック内サブ領域（WM×WN 分担）。
+    uint wm_idx = simd_id / WN;
+    uint wn_idx = simd_id % WN;
+    uint sub_bm = BM / WM; // この simdgroup が担当する行幅
+    uint sub_bn = BN / WN; // この simdgroup が担当する列幅
+    uint sub_row0 = row0 + wm_idx * sub_bm;
+    uint sub_col0 = col0 + wn_idx * sub_bn;
+
+    // アキュムレータ数は最大 8x8 個（BM/BN 512 以下・WM/WN >=1 の実運用
+    // 候補では十分な固定上限。`crate::tile::CANDIDATES` の暫定値は
+    // 最大でも 4x4 個に収まる）。
+    constexpr uint MAX_ACC = 8;
+    uint acc_rows = sub_bm / 8;
+    uint acc_cols = sub_bn / 8;
+    simdgroup_float8x8 acc[MAX_ACC][MAX_ACC];
+    for (uint r = 0; r < acc_rows; r++) {
+        for (uint c_ = 0; c_ < acc_cols; c_++) {
+            acc[r][c_] = simdgroup_float8x8(0.0f);
+        }
+    }
+
+    // threadgroup 共有メモリ上の A タイル（BM×BK）・B タイル（BK×BN）
+    // オフセット（`USE_TGP_STAGING=true` の場合のみ使用）。
+    threadgroup float* tile_a = shared_mem;
+    threadgroup float* tile_b = shared_mem + (size_t)BM * (size_t)BK;
+
+    uint k_full_tiles = dims.k / BK;
+    uint k_tail = dims.k - k_full_tiles * BK; // BK の倍数でない末尾（0 埋め扱い）
+    uint k_tile_count = k_full_tiles + (k_tail > 0 ? 1 : 0);
+
+    for (uint t = 0; t < k_tile_count; t++) {
+        uint p0 = t * BK;
+        // 末尾タイルが BK に満たない場合の有効幅（境界チェック。REQ-8）。
+        uint bk_eff = min(BK, dims.k - p0);
+
+        if (USE_TGP_STAGING) {
+            // 協調ロード: threadgroup 内の全スレッド（WM*WN*32 個）で
+            // A タイル（BM*BK 要素）・B タイル（BK*BN 要素）を分担して
+            // 共有メモリへロードする。実効次元・K タイル端をはみ出す
+            // 要素は 0 埋めする（最適化を理由に境界チェックを省略しない。
+            // REQ-8）。
+            uint local_tid = simd_id * 32 + simd_lane;
+            uint threads_total = WM * WN * 32;
+
+            uint a_elems = BM * BK;
+            for (uint idx = local_tid; idx < a_elems; idx += threads_total) {
+                uint r = idx / BK;
+                uint kk = idx % BK;
+                uint global_row = row0 + r;
+                uint global_k = p0 + kk;
+                tile_a[idx] = (kk < bk_eff && global_row < dims.m && global_k < dims.k)
+                    ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k]
+                    : 0.0f;
+            }
+
+            uint b_elems = BK * BN;
+            for (uint idx = local_tid; idx < b_elems; idx += threads_total) {
+                uint kk = idx / BN;
+                uint c_ = idx % BN;
+                uint global_k = p0 + kk;
+                uint global_col = col0 + c_;
+                tile_b[idx] = (kk < bk_eff && global_k < dims.k && global_col < dims.n)
+                    ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col]
+                    : 0.0f;
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (uint kk = 0; kk < BK; kk += 8) {
+                for (uint r = 0; r < acc_rows; r++) {
+                    simdgroup_float8x8 a_tile;
+                    simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)BK + (size_t)kk, BK);
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        simdgroup_float8x8 b_tile;
+                        simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)BN + (size_t)(wn_idx * sub_bn + c_ * 8), BN);
+                        simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
+                    }
+                }
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        } else {
+            // 直接ロード: device メモリから simdgroup ごとに直接
+            // `simdgroup_load` する（協調ロードの同期コストを避ける経路。
+            // BK の倍数でない末尾タイルは 8 要素単位でのみ発行できるため
+            // full な 8 の倍数分のみを直接ロードし、端数（bk_eff が 8 の
+            // 倍数でない残り）は寄与させない。呼び出し元は
+            // `crate::pad::pad8` で k を 8 の倍数へパディング済みの実効
+            // 次元を渡す契約のため、通常この端数は発生しない
+            // （`crate::gemm::MetalGemm::dispatch_auto` 参照）。
+            uint bk_full8 = (bk_eff / 8) * 8;
+            for (uint kk = 0; kk < bk_full8; kk += 8) {
+                for (uint r = 0; r < acc_rows; r++) {
+                    uint a_row = sub_row0 + r * 8;
+                    simdgroup_float8x8 a_tile;
+                    simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        uint b_col = sub_col0 + c_ * 8;
+                        simdgroup_float8x8 b_tile;
+                        simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);
+                        simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
+                    }
+                }
+            }
+        }
+    }
+
+    // ストア: サブブロック原点（`sub_row0`/`sub_col0`）が実効次元を超える
+    // 8x8 タイルは書き込みをスキップする（REQ-8。ブロック端の手動境界
+    // チェックを維持する。最適化を理由に省略しない）。
+    for (uint r = 0; r < acc_rows; r++) {
+        uint out_row = sub_row0 + r * 8;
+        if (out_row >= dims.m) {
+            continue;
+        }
+        for (uint c_ = 0; c_ < acc_cols; c_++) {
+            uint out_col = sub_col0 + c_ * 8;
+            if (out_col >= dims.n) {
+                continue;
+            }
+            simdgroup_store(acc[r][c_], c + (size_t)out_row * (size_t)dims.n + (size_t)out_col, dims.n);
+        }
+    }
+}

@@ -21,13 +21,18 @@
 //! `MetalGemm { pipeline_naive, pipeline_tiled, pipeline_simdgroup, .. }`
 //! と同型の設計。#39 時点は naive のみを productize していた）。
 
-use objc2_metal::{MTLComputeCommandEncoder, MTLSize};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use objc2::rc::Retained;
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLSize};
 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
 use crate::pad::{pad_matrix, pad8, unpad_matrix};
-use crate::pipeline::{self, MtlPipeline};
+use crate::pipeline::{self, MtlLibrary, MtlPipeline};
+use crate::tile::{self, TileConfig};
 
 /// threadgroup サイズ（16×16）。`Naive`/`Tiled` 用（PoC-v2-4 実測構成。
 /// `metal_gemm.rs` の naive/tiled 両段で採用）を踏襲する。grid は
@@ -55,6 +60,13 @@ pub enum GemmVariant {
     /// `simdgroup_matrix`（8x8 ハードウェア行列演算命令）。
     /// m・n・k を 8 の倍数にパディングして実行する。
     Simdgroup,
+    /// 動的タイル選択（TASK-1.8f・#188）。`gemm_simdgroup_tiled` を
+    /// 保持する [`TileConfig`] の MSL function constant（BM/BN/BK/WM/WN・
+    /// `USE_TGP_STAGING`）で特殊化してディスパッチする。行列サイズから
+    /// 構成を自動選択する入口は [`MetalGemm::dispatch_auto`]（[`tile::select`]
+    /// を使う）。`m`・`n`・`k` は `Simdgroup` と同じく 8 の倍数へパディング
+    /// して実行する（[`MetalGemm::dispatch_variant`] 参照）。
+    SimdgroupTiled(TileConfig),
 }
 
 impl GemmVariant {
@@ -64,6 +76,7 @@ impl GemmVariant {
             GemmVariant::Naive => "gemm_naive",
             GemmVariant::Tiled => "gemm_tiled",
             GemmVariant::Simdgroup => "gemm_simdgroup",
+            GemmVariant::SimdgroupTiled(_) => "gemm_simdgroup_tiled",
         }
     }
 }
@@ -92,12 +105,28 @@ pub struct MetalGemm {
     pipeline_naive: objc2::rc::Retained<MtlPipeline>,
     pipeline_tiled: objc2::rc::Retained<MtlPipeline>,
     pipeline_simdgroup: objc2::rc::Retained<MtlPipeline>,
+    /// `gemm_simdgroup_tiled` のコンパイル済みライブラリ（`crate::pipeline::
+    /// make_pipeline_with_constants` が構成キーごとにパイプラインを特殊化
+    /// する際に再利用する。TASK-1.8f・#188）。
+    library: objc2::rc::Retained<MtlLibrary>,
+    /// 構成キー（[`TileConfig`]）→ パイプラインの遅延キャッシュ
+    /// （[`Self::pipeline_for_tile`]）。候補構成は有限個のため、初回
+    /// ディスパッチ時に構築したパイプラインを以降のディスパッチで使い回す
+    /// （`MTLFunctionConstantValues` を介したコンパイルは比較的重い処理。
+    /// イシュー #188 計画「パイプライン管理」節）。`&self` の非可変参照から
+    /// 書き込むため `RefCell` で内部可変性を持たせる（`Retained` は
+    /// 参照カウント型でありスレッド境界を跨がない前提。本クレートの
+    /// ディスパッチは呼び出しごとに同期完了するため並行アクセスは想定しない）。
+    tiled_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
 }
 
 impl MetalGemm {
     /// `shaders/gemm.metal` を `ctx` のデバイス上でコンパイルし、
     /// `gemm_naive`/`gemm_tiled`/`gemm_simdgroup` の 3 パイプラインを
-    /// 構築する。
+    /// 構築する。`gemm_simdgroup_tiled`（TASK-1.8f・#188）はコンパイル済み
+    /// ライブラリのみ保持し、構成別パイプラインは [`Self::pipeline_for_tile`]
+    /// が初回ディスパッチ時に遅延構築する（候補が有限個でも全構成を
+    /// 前もって構築すると起動コストが増えるため）。
     pub fn new(ctx: &MetalContext) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
@@ -113,15 +142,105 @@ impl MetalGemm {
             pipeline_naive,
             pipeline_tiled,
             pipeline_simdgroup,
+            library,
+            tiled_cache: RefCell::new(HashMap::new()),
         })
     }
 
+    /// `Naive`/`Tiled`/`Simdgroup`（構成を持たない固定パイプライン）用。
+    /// `SimdgroupTiled` は構成別に [`Self::pipeline_for_tile`] を使う
+    /// （呼び出し元の [`Self::dispatch_variant`] が variant で分岐するため、
+    /// 本関数へ `SimdgroupTiled` が渡ることはない）。
     fn pipeline_for(&self, variant: GemmVariant) -> &MtlPipeline {
         match variant {
             GemmVariant::Naive => &self.pipeline_naive,
             GemmVariant::Tiled => &self.pipeline_tiled,
             GemmVariant::Simdgroup => &self.pipeline_simdgroup,
+            GemmVariant::SimdgroupTiled(_) => unreachable!(
+                "SimdgroupTiled は dispatch_variant が pipeline_for_tile へ振り分ける（呼び出し元の内部不変条件）"
+            ),
         }
+    }
+
+    /// [`TileConfig`] 候補に対するパイプラインをキャッシュから取得、
+    /// 無ければ構築してキャッシュする（TASK-1.8f・#188）。
+    ///
+    /// `cfg` 自体、または `MTLFunctionConstantValues` によるコンパイル・
+    /// パイプライン構築が失敗した場合（デバイス上限超過等）は
+    /// `crate::tile::fallback_chain` の次候補（最終的には常に妥当な
+    /// [`TileConfig::SINGLE_SIMDGROUP_8X8`]）へ fail-closed でフォール
+    /// バックする（計画「パイプライン管理」節。ガードレール閾値の変更
+    /// ではなく構成選択のフォールバックであり `.claude/rules/security.md`
+    /// の対象外）。返り値は実際に使用する構成（フォールバック後）を含み、
+    /// [`Self::dispatch_variant`] がエンコード時の grid・threadgroup 計算に
+    /// 使う。
+    fn pipeline_for_tile(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+    ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
+        let mut last_err: Option<MetalError> = None;
+
+        for candidate in tile::fallback_chain(cfg) {
+            if let Some(pipeline) = self.tiled_cache.borrow().get(&candidate) {
+                return Ok((Retained::clone(pipeline), candidate));
+            }
+
+            // デバイスの threadgroup メモリ上限（`maxThreadgroupMemoryLength`）
+            // で事前検証する。スレッド数上限（`maxTotalThreadsPerThreadgroup`）
+            // は `MTLComputePipelineState` 構築後にしか取得できないため、
+            // 事前検証は Apple GPU の一般的な上限（1024）を仮定し、構築後に
+            // パイプライン実測値で再検証する（下記）。
+            let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+            if candidate.validate(1024, max_shared_mem_bytes).is_err() {
+                continue;
+            }
+
+            match pipeline::make_pipeline_with_constants(
+                ctx.device(),
+                &self.library,
+                GemmVariant::SimdgroupTiled(candidate).function_name(),
+                candidate,
+            ) {
+                Ok(pipeline) => {
+                    let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
+                    if candidate.thread_count() > actual_max_threads {
+                        continue;
+                    }
+                    self.tiled_cache
+                        .borrow_mut()
+                        .insert(candidate, Retained::clone(&pipeline));
+                    return Ok((pipeline, candidate));
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or(MetalError::PipelineCreation {
+            message: "no tile configuration in fallback chain was accepted".to_string(),
+        }))
+    }
+
+    /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
+    /// [`tile::select`] で [`TileConfig`] を選び、[`GemmVariant::SimdgroupTiled`]
+    /// で [`Self::dispatch_variant`] へ委譲する。バックエンド抽象層からの
+    /// accelerated/tiled 経路選択（#67/#68）とはレイヤが異なる（本関数は
+    /// 「Metal GEMM を実行すると決まった後」のタイル構成選択のみを担う。
+    /// イシュー #188 計画「スコープ外」節）。
+    pub fn dispatch_auto(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        let cfg = tile::select(m, n, k);
+        self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
     }
 
     /// naive GEMM（`C = A @ B`。ゼロ初期化した C へのディスパッチ 1 回のみ、
@@ -179,10 +298,13 @@ impl MetalGemm {
         // が返す `Dims`（`dims`）であるため意図的に破棄する。
         validate_dims(a, b, m, n, k)?;
 
-        let (m_eff, n_eff, k_eff) = if variant == GemmVariant::Simdgroup {
-            (pad8(m), pad8(n), pad8(k))
-        } else {
-            (m, n, k)
+        // `SimdgroupTiled` も `Simdgroup` と同じく `simdgroup_load`/`_store`
+        // が 8x8 タイル単位でしかアクセスできないため、実効次元を 8 の倍数
+        // へパディングする契約は共通（`shaders/gemm.metal` の
+        // `gemm_simdgroup_tiled` 直接ロード経路のコメント参照）。
+        let (m_eff, n_eff, k_eff) = match variant {
+            GemmVariant::Simdgroup | GemmVariant::SimdgroupTiled(_) => (pad8(m), pad8(n), pad8(k)),
+            GemmVariant::Naive | GemmVariant::Tiled => (m, n, k),
         };
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
 
@@ -197,10 +319,36 @@ impl MetalGemm {
         let b_buf = MetalBuffer::new_with_data(ctx, &b_padded)?;
         let c_buf = MetalBuffer::new_zeroed(ctx, m_eff * n_eff)?;
 
-        let pipeline = self.pipeline_for(variant);
-        ctx.dispatch_sync(|encoder| {
-            encode_dispatch(encoder, pipeline, &a_buf, &b_buf, &c_buf, dims, variant);
-        })?;
+        match variant {
+            GemmVariant::SimdgroupTiled(cfg) => {
+                let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
+                ctx.dispatch_sync(|encoder| {
+                    encode_dispatch_tiled(
+                        encoder,
+                        &pipeline,
+                        &a_buf,
+                        &b_buf,
+                        &c_buf,
+                        dims,
+                        resolved_cfg,
+                    );
+                })?;
+            }
+            fixed_variant => {
+                let pipeline = self.pipeline_for(fixed_variant);
+                ctx.dispatch_sync(|encoder| {
+                    encode_dispatch(
+                        encoder,
+                        pipeline,
+                        &a_buf,
+                        &b_buf,
+                        &c_buf,
+                        dims,
+                        fixed_variant,
+                    );
+                })?;
+            }
+        }
 
         let padded_c = c_buf.read_to_vec();
         Ok(unpad_matrix(padded_c, m_eff, n_eff, m, n))
@@ -355,6 +503,9 @@ fn encode_dispatch(
             (dims.n as usize).div_ceil(THREADGROUP_SIDE),
             (dims.m as usize).div_ceil(THREADGROUP_SIDE),
         ),
+        GemmVariant::SimdgroupTiled(_) => unreachable!(
+            "SimdgroupTiled は encode_dispatch_tiled を使う（呼び出し元 dispatch_variant の内部不変条件）"
+        ),
     };
     let threads_per_tg = MTLSize {
         width: tg_w,
@@ -364,6 +515,73 @@ fn encode_dispatch(
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// [`GemmVariant::SimdgroupTiled`] 用のパイプライン設定・バッファ結線・
+/// threadgroup 共有メモリ長設定・ディスパッチ（TASK-1.8f・#188）。
+/// [`MetalGemm::dispatch_variant`] が [`MetalContext::dispatch_sync`] の
+/// クロージャから呼ぶ。`cfg` は [`MetalGemm::pipeline_for_tile`] が
+/// フォールバック解決した後の実際の構成（`resolved_cfg`）。
+///
+/// grid は `div_ceil(dims.n, cfg.bn) × div_ceil(dims.m, cfg.bm)`
+/// （`shaders/gemm.metal` の `gemm_simdgroup_tiled` ブロック分割と一致）、
+/// threadgroup スレッド数は `cfg.thread_count()`（`wm*wn*32`）。
+fn encode_dispatch_tiled(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    a_buf: &MetalBuffer,
+    b_buf: &MetalBuffer,
+    c_buf: &MetalBuffer,
+    dims: Dims,
+    cfg: TileConfig,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2）と同一の
+    // 契約。`a_buf`/`b_buf`/`c_buf` は `dispatch_sync` の同期完了まで
+    // 呼び出し元スタックフレームで生存する。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 2/2）と同一の
+    // 契約（`dims` はローカル変数、長さは `size_of::<Dims>()` と一致）。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&dims).cast(),
+            std::mem::size_of::<Dims>(),
+            3,
+        );
+    }
+
+    // SAFETY: `setThreadgroupMemoryLength_atIndex` は
+    // `dispatchThreadgroups` 時に GPU 側が確保する threadgroup 共有メモリの
+    // バイト長を指定するだけで、即座のメモリアクセスは発生しない。
+    // `shaders/gemm.metal` の `gemm_simdgroup_tiled` は `threadgroup(0)` に
+    // `TileConfig::shared_mem_bytes()`（A タイル BM×BK ＋ B タイル BK×BN）
+    // 分のバイト数を要求する契約。`staged=false`（直接ロード経路）では
+    // 共有メモリを使わず 0 バイトを返すが、`setThreadgroupMemoryLength`
+    // へ 0 を渡すと未定義動作になりうるため最小 4 バイトを下限にする
+    // （カーネル側は `USE_TGP_STAGING=false` の分岐でこの領域へアクセス
+    // しない）。
+    let shared_mem_bytes = cfg.shared_mem_bytes().max(4) as usize;
+    unsafe {
+        encoder.setThreadgroupMemoryLength_atIndex(shared_mem_bytes, 0);
+    }
+
+    let threads_per_tg = MTLSize {
+        width: cfg.thread_count() as usize,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroups = MTLSize {
+        width: (dims.n as usize).div_ceil(cfg.bn as usize),
+        height: (dims.m as usize).div_ceil(cfg.bm as usize),
         depth: 1,
     };
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
@@ -483,5 +701,9 @@ mod tests {
         assert_eq!(GemmVariant::Naive.function_name(), "gemm_naive");
         assert_eq!(GemmVariant::Tiled.function_name(), "gemm_tiled");
         assert_eq!(GemmVariant::Simdgroup.function_name(), "gemm_simdgroup");
+        assert_eq!(
+            GemmVariant::SimdgroupTiled(TileConfig::SINGLE_SIMDGROUP_8X8).function_name(),
+            "gemm_simdgroup_tiled"
+        );
     }
 }

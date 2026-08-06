@@ -45,6 +45,14 @@
 //! 同一 trait で列挙・選択できることを macOS 実機上のテストで検証する。`Device::Metal`
 //! 自体が `cfg(target_os = "macos")` 限定のため、本モジュールもクレート全体でこの cfg を
 //! 付す（非 macOS 環境のビルドに影響を与えない）。
+//!
+//! TASK-1.8f（#188）で動的タイル選択（[`tile`]）を追加した。`gemm_simdgroup`（1 threadgroup =
+//! 1 simdgroup = C の 8×8 タイル 1 つ）はタイルサイズの自由度がなく、MLX steel カーネル方式
+//! （BM/BN/BK/WM/WN のパラメータ化＋行列サイズ別動的選択）の性能差の核心に対応できないため、
+//! `shaders/gemm.metal` に MSL function constant でパラメータ化した `gemm_simdgroup_tiled` を追加し、
+//! [`gemm::GemmVariant::SimdgroupTiled`]／[`gemm::MetalGemm::dispatch_auto`] から利用する。
+//! [`tile`] 自体は `objc2` 系 FFI に触れない純粋関数群のため他モジュールと異なり
+//! `cfg(target_os = "macos")` を付けない（[`pad`] と同じ設計判断。Linux でも単体テストが回る）。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -59,6 +67,7 @@ pub mod gemm;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
+pub mod tile;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
 // バイナリでのみ確実にデバイスを返す（プレーンな CLI バイナリ ―― 本クレートの
@@ -83,3 +92,4 @@ pub use device::MetalDeviceProvider;
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm};
+pub use tile::TileConfig;
