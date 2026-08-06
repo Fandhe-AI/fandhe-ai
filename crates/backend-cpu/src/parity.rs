@@ -68,6 +68,14 @@ impl std::error::Error for ParityError {}
 /// #54/#55 の失敗時診断・`evidence/compare_*.log` 相当のレポート転記に使う
 /// 想定のため、判定結果（[`fail_count`](Self::fail_count)）に加え
 /// 分布統計（max/mean・p50/p99/p99.9）を保持する。
+///
+/// [`max_fail_abs_diff`](Self::max_fail_abs_diff) は #186 Codex Review 指摘
+/// （PR #257）対応で追加した診断フィールド: `max_abs_diff`（全セル対象）と
+/// `max_rel_err`（全セル対象）はそれぞれ別セル由来でありうるため、
+/// `ABSOLUTE_RESCUE_THRESHOLD` 引き上げ案の根拠には「fail したセルに限定した
+/// 絶対誤差の最大値」（＝その値まで閾値を上げれば全 fail セルが救済される
+/// 境界値）を使う必要がある。判定式（`compare` 内の `pass`/`fail`）自体は
+/// 変更していない（単なる集計対象の追加）。
 #[derive(Debug, Clone, Copy)]
 pub struct CompareReport {
     pub total: usize,
@@ -79,6 +87,9 @@ pub struct CompareReport {
     pub p50_abs_diff: f64,
     pub p99_abs_diff: f64,
     pub p999_abs_diff: f64,
+    /// fail したセル（`compare` の複合判定で不合格）に限定した `abs_diff` の
+    /// 最大値。fail セルが 1 つもない場合は 0.0。
+    pub max_fail_abs_diff: f64,
 }
 
 impl CompareReport {
@@ -106,6 +117,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
     let mut abs_diffs: Vec<f64> = Vec::with_capacity(a.len());
     let mut rel_errs: Vec<f64> = Vec::with_capacity(a.len());
     let mut fail_count = 0usize;
+    let mut max_fail_abs_diff = 0.0f64;
 
     for (&x, &y) in a.iter().zip(b.iter()) {
         let xf = x as f64;
@@ -127,6 +139,13 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         let fail = !pass;
         if fail {
             fail_count += 1;
+            // fail セルに限定した abs_diff の最大値。NaN/Inf 由来で diff が
+            // 非有限になった場合 f64::max は非有限側を残さないことがあるが
+            // （`NaN.max(x) == x`）、そのケースは診断値としては無視して
+            // 安全側（有限値優先）に倒れるため許容する（#186・PR #257
+            // Codex Review「絶対誤差救済閾値の根拠は fail セル限定の
+            // 絶対誤差であるべき」対応）。
+            max_fail_abs_diff = max_fail_abs_diff.max(diff);
         }
 
         abs_diffs.push(diff);
@@ -155,6 +174,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         p50_abs_diff,
         p99_abs_diff,
         p999_abs_diff,
+        max_fail_abs_diff,
     })
 }
 
@@ -314,6 +334,33 @@ mod tests {
         let report = compare(&a, &b).unwrap();
         assert!(!report.passes());
         assert_eq!(report.fail_count, 1);
+    }
+
+    #[test]
+    fn max_fail_abs_diff_is_zero_when_no_cell_fails() {
+        let a = [1.0f32, 2.0, 3.0];
+        let b = [1.0005f32, 2.0, 3.0];
+        let report = compare(&a, &b).unwrap();
+        assert!(report.passes());
+        assert_eq!(report.max_fail_abs_diff, 0.0);
+    }
+
+    #[test]
+    fn max_fail_abs_diff_ignores_max_abs_diff_from_a_passing_cell() {
+        // #186・PR #257 Codex Review 回帰: `max_abs_diff`（全セル対象）は
+        // fail していないセル由来でありうるため、`max_fail_abs_diff`
+        // （fail セル限定）と一致しないケースを固定する。
+        // index0: rel=0.01（fail 側。RELATIVE_TOLERANCE=1e-3 超過、
+        //         abs=0.01 も ABSOLUTE_RESCUE_THRESHOLD=1e-5 超過）
+        // index1: abs=100.0（全セル中最大の abs_diff だが、真値が巨大
+        //         なため rel は小さく PASS）
+        let a = [1.0f32, 1.0e6f32];
+        let b = [1.01f32, 1.0e6f32 + 100.0];
+        let report = compare(&a, &b).unwrap();
+        assert!(!report.passes());
+        assert_eq!(report.fail_count, 1);
+        assert!(report.max_abs_diff > report.max_fail_abs_diff);
+        assert!((report.max_fail_abs_diff - 0.01).abs() < 1e-6);
     }
 
     #[test]
