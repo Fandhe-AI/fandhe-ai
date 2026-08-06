@@ -12,10 +12,12 @@
 //! `.claude/rules/coding-rust.md`）。カーネルの手動境界検査は最適化を理由に省略しない（REQ-8）。
 //!
 //! elementwise カーネル（二項演算 `add`・`mul`、活性化 `relu`・`exp`・`tanh`）を
-//! TASK-1.6b（#22）で追加した。GEMM・reduction 等の残るカーネルは後続タスクで追加する
+//! TASK-1.6b（#22）で追加した。TASK-1.6c（#23）で `reduction`（`sum`・`max`・`mean`・
+//! 軸指定 reduction）を追加した。GEMM 等の残るカーネルは後続タスクで追加する
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 
 mod elementwise;
+pub mod reduction;
 
 pub use elementwise::{
     add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,

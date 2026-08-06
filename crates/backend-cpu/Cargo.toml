@@ -9,7 +9,9 @@ publish.workspace = true
 [dependencies]
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
 # ユーザー承認不要（外部依存の新規追加ではない）。elementwise カーネルの入出力型
-# `Tensor<f32>`・shape 検査 `elementwise_out_shape` を利用する（#22・TASK-1.6b）。
+# `Tensor<f32>`・shape 検査 `elementwise_out_shape`（#22・TASK-1.6b）に加え、
+# reduction カーネル（#23・TASK-1.6c）が `reduce_out_shape`（tensor-core::ops_shape）を
+# 利用するために必要。
 tensor-core = { path = "../tensor-core" }
 # CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
 rayon.workspace = true
