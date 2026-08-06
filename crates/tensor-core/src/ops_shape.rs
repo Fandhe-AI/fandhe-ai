@@ -73,8 +73,16 @@ pub fn matmul_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, Shap
 /// 返す。呼び出し元（`backend-cpu` の elementwise カーネル入口。#22・
 /// TASK-1.6b）はここで確定した出力 shape を `Tensor::broadcast_with` へ
 /// 渡し、両オペランドの zero-copy view（stride 0）を取得する想定。
+///
+/// ブロードキャストは出力の各軸を入力軸の最大値まで拡張しうるため、
+/// 出力要素数は `lhs`・`rhs` いずれの要素数より大きくなりうる
+/// （例: `[1, N]` と `[N, 1]` → `[N, N]`）。`matmul_out_shape` と同様に
+/// `checked_numel` で要素数積の `usize` オーバーフローを検査し、
+/// オーバーフロー時は `ShapeError::ElementCountOverflow` を返す。
 pub fn elementwise_out_shape(lhs: &[usize], rhs: &[usize]) -> Result<Vec<usize>, ShapeError> {
-    broadcast_shape(lhs, rhs)
+    let out = broadcast_shape(lhs, rhs)?;
+    checked_numel(&out)?;
+    Ok(out)
 }
 
 /// 厳密一致を要求する演算（例: `mse_loss` の予測値と target。
@@ -230,6 +238,18 @@ mod tests {
             ShapeError::BroadcastIncompatible { lhs, rhs }
                 if lhs == vec![2, 3] && rhs == vec![4]
         ));
+    }
+
+    #[test]
+    fn elementwise_broadcast_overflow() {
+        // ブロードキャストは出力軸を入力の最大値まで拡張しうるため、
+        // 両入力自体は小さくても出力要素数が usize::MAX を超えうる
+        // （例: [1, big] と [big, 1] → [big, big]）。matmul_overflow と
+        // 同様に checked_numel でオーバーフロー検出されることを確認する
+        // （Cursor Bugbot 指摘対応。#22 PR #220）。
+        let big = usize::MAX / 2 + 1;
+        let err = elementwise_out_shape(&[1, big], &[big, 1]).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     // --- require_same_shape ---
