@@ -246,9 +246,10 @@ fn unreduce_broadcast(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>
 /// する**（PyTorch `amax` の均等分配とは異なる、決定的な選択。
 /// PoC-v2-2 のビット一致決定性方針・`train_repro` と整合させるための
 /// 設計判断であり、`compat` 層〈REQ-9〉実装時に PyTorch 互換が必要に
-/// なった場合は要再確認）。`out_value` は forward 記録済みの縮約後
-/// 最大値で、走査中に現れる要素と exact 一致するかで argmax 位置を
-/// 判定する（同一データ・同一 reduction 経路のため bit 一致する）。
+/// なった場合は要再確認。追跡: Issue #224）。`out_value` は forward
+/// 記録済みの縮約後最大値で、走査中に現れる要素と exact 一致するかで
+/// argmax 位置を判定する（同一データ・同一 reduction 経路のため bit
+/// 一致する）。
 fn max_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
@@ -339,8 +340,14 @@ mod tests {
     //! 必須と PoC 自身が明記）だが、本実装は f32 のため中央差分の
     //! 丸め誤差床 `≈ ε_f32 · |L| / h ≈ 1e-4` を踏まえた本イシュー
     //! 新規の grad-check 専用閾値とする（バックエンド間数値一致判定
-    //! 〈相対 1e-3 / 絶対 1e-5〉とは別系統。既存 tolerance の緩和には
-    //! 該当せず、以後の変更はユーザー承認必須）。
+    //! 〈相対 1e-3 / 絶対 1e-5〉とは別系統）。
+    //!
+    //! **注意（ユーザー承認待ち）**: `CLAUDE.md` Conventions・
+    //! `.claude/rules/delegation-impl.md` の「テスト許容誤差の変更は
+    //! ユーザー承認必須」規定は、本件（新規 grad-check 閾値の設定）にも
+    //! 適用されるべきとレビューで指摘された。数学的妥当性は確認済み
+    //! だが正式なユーザー承認は未了のため、承認依頼を Issue #223 に
+    //! 起票済み。値の変更が必要になった場合は同 Issue で追跡する。
     //!
     //! **キンク・タイ回避**: ReLU は `|x| >= 10h` の固定入力のみ、
     //! Max は同値タイのない固定入力のみを使う（固定値のため再生成
@@ -682,25 +689,60 @@ mod tests {
         assert!(dense_vec(&dtarget).is_empty());
     }
 
+    // --- reduce_to_shape（中間軸縮約。ランク同一で先頭・末尾以外の
+    //     軸を broadcast 元へ潰す経路。add/mul の bias broadcast テスト
+    //     は末尾軸・スカラーテストは rank 0 のみで、この経路は未カバー
+    //     だった） ---
+
+    #[test]
+    fn reduce_to_shape_middle_axis_matches_numeric() {
+        // g: [2,4,3] を target_shape [2,1,3]（中間軸 dim=1 が size 1）
+        // へ縮約する。add(a, b) の b 側勾配として同じ経路を通す
+        // （a: [2,4,3]、b: [2,1,3] からの broadcast）。
+        let a = t(
+            &[
+                1.0, -2.0, 3.0, 0.5, -1.0, 2.0, 1.5, -0.5, 2.5, -1.5, 0.5, -2.5, 3.0, -1.0, 0.5,
+                -0.5, 1.0, -1.5, 2.0, -2.0, 0.5, -0.5, 1.5, -1.0,
+            ],
+            &[2, 4, 3],
+        );
+        let b = t(&[0.5, -1.0, 2.0, 1.0, -0.5, 1.5], &[2, 1, 3]);
+        let s = t(
+            &[
+                1.0, -1.0, 2.0, 0.5, 1.0, -0.5, 2.0, -2.0, 0.5, -0.5, 1.5, -1.0, 0.2, -0.2, 0.4,
+                0.1, 0.2, -0.1, 0.4, -0.4, 0.1, -0.1, 0.3, -0.2,
+            ],
+            &[2, 4, 3],
+        );
+
+        let db = reduce_to_shape(&s, b.shape());
+        let num_db = numeric_grad_unary(&b, &s, |x| eval::add(&a, x));
+
+        assert_grad_close("reduce_to_shape(middle axis) dB", &db, &num_db);
+    }
+
     // --- vjp() ディスパッチの疎通確認（#18 との継ぎ目契約） ---
+    //
+    // Low 指摘: MatMul のみが vjp() 経由で疎通確認されており、他の
+    // 8 演算（Add/Mul/Relu/Exp/Tanh/Sum/Max/MseLoss）は内部ヘルパーを
+    // 直接呼ぶ形でしか検証されていなかった。各 match アームの配線
+    // （`nodes[a.0]`/`nodes[b.0]` の対応順序）を通しで検証するため、
+    // 全 9 演算（Leaf を除く）を vjp() 経由でテストする。
+
+    fn leaf_node(value: Tensor<f32>) -> TapeNode {
+        TapeNode {
+            op: Op::Leaf,
+            value,
+        }
+    }
 
     #[test]
     fn vjp_dispatch_matmul_returns_both_inputs() {
-        use crate::tape::{NodeId, Op, TapeNode};
-
         let a = t(&[1.0, 2.0, -1.0, 0.5, 3.0, -2.0], &[2, 3]);
         let b = t(&[0.5, -1.0, 2.0, 1.0, -0.5, 1.5], &[3, 2]);
         let out_value = eval::matmul(&a, &b);
-        let nodes = vec![
-            TapeNode {
-                op: Op::Leaf,
-                value: a,
-            },
-            TapeNode {
-                op: Op::Leaf,
-                value: b,
-            },
-        ];
+        let (expected_da, expected_db) = matmul_vjp(&a, &b, &t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]));
+        let nodes = vec![leaf_node(a), leaf_node(b)];
         let op = Op::MatMul(NodeId(0), NodeId(1));
         let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
 
@@ -709,5 +751,152 @@ mod tests {
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
         assert_eq!(grads[1].0, NodeId(1));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_da));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_db));
+    }
+
+    #[test]
+    fn vjp_dispatch_add_returns_both_inputs_in_order() {
+        let a = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let b = t(&[0.5, 1.5, -1.0, 2.0], &[2, 2]);
+        let g = t(&[1.0, -1.0, 2.0, 0.5], &[2, 2]);
+        let out_value = eval::add(&a, &b);
+        let nodes = vec![leaf_node(a), leaf_node(b)];
+        let op = Op::Add(NodeId(0), NodeId(1));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&g));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&g));
+    }
+
+    #[test]
+    fn vjp_dispatch_mul_returns_both_inputs_in_order() {
+        let a = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let b = t(&[0.5, 1.5, -1.0, 2.0], &[2, 2]);
+        let g = t(&[1.0, -1.0, 2.0, 0.5], &[2, 2]);
+        let out_value = eval::mul(&a, &b);
+        let nodes = vec![leaf_node(a.clone()), leaf_node(b.clone())];
+        let op = Op::Mul(NodeId(0), NodeId(1));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&eval::mul(&g, &b)));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&eval::mul(&g, &a)));
+    }
+
+    #[test]
+    fn vjp_dispatch_relu_returns_single_input() {
+        let a = t(&[2.0, -3.0, 0.5, -0.02], &[2, 2]);
+        let g = t(&[1.0, -1.0, 2.0, 0.5], &[2, 2]);
+        let out_value = eval::relu(&a);
+        let nodes = vec![leaf_node(a.clone())];
+        let op = Op::Relu(NodeId(0));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(
+            dense_vec(&grads[0].1),
+            dense_vec(&elementwise_mul_mask(&g, &a, |v| v > 0.0))
+        );
+    }
+
+    #[test]
+    fn vjp_dispatch_exp_returns_single_input() {
+        let a = t(&[0.5, -1.0, 1.5, -0.3], &[2, 2]);
+        let g = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::exp(&a);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Exp(NodeId(0));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(
+            dense_vec(&grads[0].1),
+            dense_vec(&eval::mul(&g, &out_value))
+        );
+    }
+
+    #[test]
+    fn vjp_dispatch_tanh_returns_single_input() {
+        let a = t(&[0.5, -1.0, 1.5, -0.3], &[2, 2]);
+        let g = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::tanh(&a);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Tanh(NodeId(0));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = eval::mul(&g, &tanh_grad_factor(&out_value));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_sum_returns_single_input() {
+        let a = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let g = t(&[1.0, -1.0, 2.0], &[3]);
+        let out_value = eval::sum(&a, Some(0), &[3]);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Sum {
+            input: NodeId(0),
+            dim: Some(0),
+        };
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = unreduce_broadcast(&g, &[2, 3], Some(0));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_max_returns_single_input() {
+        let a = t(&[1.0, -2.0, 5.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let g = t(&[1.0, -1.0, 2.0], &[3]);
+        let out_value = eval::max(&a, Some(0), &[3]);
+        let nodes = vec![leaf_node(a.clone())];
+        let op = Op::Max {
+            input: NodeId(0),
+            dim: Some(0),
+        };
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = max_vjp(&a, Some(0), &out_value, &g);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_mse_loss_returns_both_inputs_in_order() {
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::mse_loss(&pred, &target);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::MseLoss(NodeId(0), NodeId(1));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
     }
 }
