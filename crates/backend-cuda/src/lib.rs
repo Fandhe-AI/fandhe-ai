@@ -11,6 +11,15 @@
 //! カーネルの手動境界検査は最適化を理由に省略しない（REQ-8）。
 //! FFI 境界の `unsafe` は必要最小限に留め理由コメントを付す（`.claude/rules/security.md`）。
 //!
-//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
-//! 要するため別イシューで対応する）では型・実装を持たない。カーネル本体は TASK-1.7 で追加する
-//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.7）。
+//! カーネル本体は TASK-1.7 で追加する（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.7）。
+//!
+//! TASK-1.9a（#44）で [`device`] モジュール（[`device::CudaDeviceProvider`]）を追加した。
+//! `tensor_core::device::DeviceProvider` の CUDA 実装であり、CPU／Metal 実装
+//! （`backend-cpu::CpuDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）と
+//! 同一 trait で列挙・選択できることを `backend-cpu/tests/device_provider_integration.rs`
+//! で検証する。CUDA ドライバ非搭載環境では `is_available() == false`・
+//! `enumerate() == Ok(vec![])` を返す（fail-safe。モジュール内コメント参照）。
+
+pub mod device;
+
+pub use device::CudaDeviceProvider;

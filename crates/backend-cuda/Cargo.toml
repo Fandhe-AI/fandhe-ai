@@ -7,6 +7,11 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
+# ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
+# 同種の判断）。TASK-1.9a（#44）でデバイス列挙・選択の共通 trait
+# `tensor_core::device::DeviceProvider` を実装するために追加した。
+tensor-core = { path = "../tensor-core" }
 # CUDA バックエンド（REQ-2）。無条件依存＋動的ロード方式のため cfg 分離しない
 # （features・default-features は workspace ルートの [workspace.dependencies] で確定済み。
 # member 側で default-features を再指定しても inherited dependency には反映されないため

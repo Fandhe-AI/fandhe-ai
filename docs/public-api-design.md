@@ -411,6 +411,12 @@ impl Device {
 
 **既定選択の方針（未決事項）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。本文書では既定デバイス選択ロジックを確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
 
+**TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
+
+- `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c／1.9d（#46／#47）へ引き継ぐ。
+- 3 バックエンドが「同一 trait でデバイス列挙・選択できる」（#44 受け入れ条件）ための入口として `DeviceProvider` trait（`backend_name`／`is_available`／`enumerate`／`select`）と `DeviceInfo`（`device`／`name`／`total_memory_bytes`／`compute_units`。`#[non_exhaustive]`）を新規追加した。本文書は §4.2 の `BackendOps`（カーネルディスパッチ）のみを定義しており、デバイス検出・選択専用の trait は記載していなかった。
+- 既定デバイス選択ロジック（本節の未決事項）は本イシューでも実装しない（列挙と明示選択のみを提供する。ユーザー承認が必要な事項のため自動運転では安全側に倒した）。
+
 ### 4.2 カーネル入口トレイト案
 
 PoC-v2-5 の `MetalOps` 公開 API（`gemm`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max`、`docs/spec/03-poc/poc-v2-5-backend-numeric-parity/README.md`）と対称な safe API を、バックエンド抽象層のトレイトとして定義する。`unsafe`/FFI は各バックエンド実装内部（`cudarc`・`objc2` 系呼び出し境界）に閉じ込める。
@@ -497,6 +503,8 @@ pub enum BackendError {
     KernelLaunchFailed(String),
 }
 ```
+
+**TASK-1.9a（#44）実装時の突合結果**: 上記 5 variant はそのまま実装したうえで、`DeviceUnavailable(String)`（存在しないデバイス・範囲外 ordinal・対応する `DeviceProvider` 未登録等、選択失敗を表す）を追加した。`#[non_exhaustive]` により variant 追加は非破壊拡張である旨が本節のコメントで想定済みのため、本文書の変更なしに追加した。
 
 ## 5. エラー型一覧・横断事項
 

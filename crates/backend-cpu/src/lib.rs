@@ -26,12 +26,19 @@
 //! 参照点として変更しない（公開 API 非破壊。`gemm_blis` は独立した新規追加でシグネチャも
 //! #185 で変更しない）。`BackendOps` トレイトからの結線は TASK-1.9（#43）で行う
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
+//!
+//! TASK-1.9a（#44）で [`device`] モジュール（[`device::CpuDeviceProvider`]）を追加した。
+//! `tensor_core::device::DeviceProvider` の CPU 実装であり、CUDA／Metal 実装
+//! （`backend-cuda::device::CudaDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
+//! と同一 trait で列挙・選択できることを `tests/device_provider_integration.rs` で検証する。
 
+mod device;
 mod elementwise;
 pub mod gemm;
 pub mod gemm_blis;
 pub mod reduction;
 
+pub use device::CpuDeviceProvider;
 pub use elementwise::{
     add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
 };

@@ -12,6 +12,17 @@
 //! FFI 境界の `unsafe`（objc2 系）は必要最小限に留め理由コメントを付す
 //! （`.claude/rules/security.md`）。
 //!
-//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
-//! 要するため別イシューで対応する）では型・実装を持たない。カーネル本体は TASK-1.8 で追加する
-//! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//! カーネル本体は TASK-1.8 で追加する（spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
+//!
+//! TASK-1.9a（#44）で [`device`] モジュール（[`device::MetalDeviceProvider`]）を追加した。
+//! `tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
+//! （`backend-cpu::CpuDeviceProvider`／`backend-cuda::device::CudaDeviceProvider`）と
+//! 同一 trait で列挙・選択できることを macOS 実機上のテストで検証する。`Device::Metal`
+//! 自体が `cfg(target_os = "macos")` 限定のため、本モジュールもクレート全体でこの cfg を
+//! 付す（非 macOS 環境のビルドに影響を与えない）。
+
+#[cfg(target_os = "macos")]
+pub mod device;
+
+#[cfg(target_os = "macos")]
+pub use device::MetalDeviceProvider;
