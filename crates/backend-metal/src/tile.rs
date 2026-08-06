@@ -167,6 +167,13 @@ impl TileConfig {
     /// 共有メモリのバイト数（`f32` 4 バイト換算）。`staged=false` の場合は
     /// 直接 `simdgroup_load` するため共有メモリを使わず 0 を返す
     /// （`shaders/gemm.metal` の `USE_TGP_STAGING` 分岐と対応）。
+    ///
+    /// `setThreadgroupMemoryLength` へ渡す実際のバイト長（16 バイト境界
+    /// 整合が必要）は [`crate::gemm`] のディスパッチ側で `.max(16)` して
+    /// 決定する（本メソッドが返す 0 バイトをそのまま渡さない。bugbot
+    /// 指摘・#253 レビュー）。`staged=true` の場合は `bm`/`bk`/`bn` が
+    /// [`TileConfig::validate`] により常に 8 の倍数へ制約されるため、この
+    /// 戻り値は常に 256 以上かつ 16 の倍数になる。
     pub fn shared_mem_bytes(&self) -> u32 {
         if !self.staged {
             return 0;
