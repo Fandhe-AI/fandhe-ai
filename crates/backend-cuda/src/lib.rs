@@ -21,9 +21,9 @@
 //! `NvrtcUnavailable`）を返す（`device.rs`／`nvrtc.rs` のドキュメンテーション
 //! コメント参照）。これにより CUDA 非搭載環境でも panic しない。
 //!
-//! カーネルソース・起動 API は naive 版（#33）を本イシューで追加した。
-//! tiled 版は #34、CUDA toolkit 非搭載ビルドの CI 検証は #35、実機
-//! （DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
+//! カーネルソース・起動 API は naive 版（#33）・tiled 版（#34。共有メモリ
+//! タイリング `TILE=32`）を追加済み。CUDA toolkit 非搭載ビルドの CI 検証は
+//! #35、実機（DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
 //! `BackendOps`/`BackendError` へのマッピングは TASK-1.9（#43/#44）の
 //! スコープであり、本イシューでは扱わない
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7）。
