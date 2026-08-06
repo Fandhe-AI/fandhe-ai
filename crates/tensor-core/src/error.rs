@@ -80,7 +80,12 @@ impl fmt::Display for ShapeError {
             } => write!(
                 f,
                 "narrow out of bounds: dim {dim} range [{start}, {}) exceeds size {dim_size}",
-                start + len
+                // `start.checked_add(len)` が `None`（オーバーフロー）の
+                // 場合でも `Tensor::narrow`（tensor.rs）はこの variant を
+                // そのまま構築しうるため、表示側でも非 checked 加算で
+                // panic しないよう `saturating_add` を用いる
+                // （debug ビルドは overflow-checks=true が既定）。
+                start.saturating_add(*len)
             ),
             ShapeError::ElementCountOverflow => {
                 write!(f, "element count overflow while computing tensor size")

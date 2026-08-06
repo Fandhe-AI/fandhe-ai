@@ -68,6 +68,16 @@ impl<T: Element> std::fmt::Debug for Storage<T> {
 /// 例: `[2, 3, 4]` → `[12, 4, 1]`。PoC-v2-1 の同名関数を `isize` 化して
 /// 移植したもの（`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/rust/src/tensor.rs`）。
 /// サイズ 0 の軸を含む shape（空テンソル）にも対応する。
+///
+/// オーバーフロー方針: 本関数はすべての呼び出し元
+/// （`Tensor::new`/`transpose`/`reshape`/`contiguous`）で事前に
+/// `checked_numel` が `usize` 範囲の要素数積を検証済みの shape に
+/// のみ適用されるため、通常到達しない。それでも `isize` は `usize` より
+/// 表現範囲が狭く理論上超過しうる巨大 shape（実運用ではメモリ確保が
+/// 先に失敗し到達不能）に備え、`checked_mul`（`ElementCountOverflow` を
+/// 返す）ではなく `saturating_mul`（`isize::MAX` へクランプ）を用いる。
+/// 本関数は `Result` を返さない内部ヘルパーであり、strides 計算単独の
+/// オーバーフローを呼び出し元へ伝播する経路を持たないための妥協である。
 fn row_major_strides(shape: &[usize]) -> Vec<isize> {
     let mut strides = vec![0isize; shape.len()];
     let mut acc: isize = 1;
@@ -324,12 +334,20 @@ impl<T: Element> Tensor<T> {
         // `unwrap`/`expect` を使わない方針（`.claude/rules/coding-rust.md`）
         // に沿い、`get` の `None` 分岐は `T::zero()` にフォールバックする
         // 到達不能パスとして扱う（到達すれば shape 走査ロジックのバグ）。
+        // ただし黙って `T::zero()` へ落ちるとリグレッションを検知しづらい
+        // ため、debug ビルドでは `debug_assert!` で到達不能パスを明示的に
+        // panic させ検知可能にする（release ビルドは安全側フォールバックを維持）。
         let shape = self.shape.clone();
         let numel = self.numel();
         let mut data = Vec::with_capacity(numel);
         let mut index = vec![0usize; shape.len()];
         for _ in 0..numel {
-            data.push(self.get(&index).unwrap_or_else(T::zero));
+            let value = self.get(&index);
+            debug_assert!(
+                value.is_some(),
+                "contiguous(): shape 走査ロジックのバグにより index {index:?} が範囲外になった"
+            );
+            data.push(value.unwrap_or_else(T::zero));
             // 行優先順で index をインクリメント（最終軸から繰り上げ）。
             for axis in (0..shape.len()).rev() {
                 index[axis] += 1;
@@ -361,19 +379,19 @@ mod tests {
     #[test]
     fn new_element_count_mismatch() {
         let err = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[2, 2]).unwrap_err();
-        matches!(
+        assert!(matches!(
             err,
             ShapeError::ElementCountMismatch {
                 expected: 4,
                 actual: 3
             }
-        );
+        ));
     }
 
     #[test]
     fn new_element_count_overflow() {
         let err = Tensor::<f32>::zeros(&[usize::MAX, 2]).unwrap_err();
-        matches!(err, ShapeError::ElementCountOverflow);
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
     }
 
     #[test]
@@ -420,7 +438,10 @@ mod tests {
     fn transpose_axis_out_of_range() {
         let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
         let err = t.transpose(0, 5).unwrap_err();
-        matches!(err, ShapeError::AxisOutOfRange { axis: 5, rank: 2 });
+        assert!(matches!(
+            err,
+            ShapeError::AxisOutOfRange { axis: 5, rank: 2 }
+        ));
     }
 
     #[test]
@@ -436,7 +457,7 @@ mod tests {
     fn narrow_out_of_bounds() {
         let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
         let err = t.narrow(1, 2, 2).unwrap_err();
-        matches!(
+        assert!(matches!(
             err,
             ShapeError::NarrowOutOfBounds {
                 dim: 1,
@@ -444,14 +465,37 @@ mod tests {
                 len: 2,
                 dim_size: 3
             }
-        );
+        ));
+    }
+
+    #[test]
+    fn narrow_out_of_bounds_overflow_display_does_not_panic() {
+        // `start.checked_add(len)` がオーバーフローするケース
+        // （`start` が `usize::MAX` 付近）でも `ShapeError` の
+        // `Display` 実装（error.rs）が panic せず整形できることを
+        // 検証する（`saturating_add` によるオーバーフロー回避の回帰テスト）。
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = t.narrow(0, usize::MAX, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::NarrowOutOfBounds {
+                dim: 0,
+                start: usize::MAX,
+                len: 1,
+                dim_size: 2
+            }
+        ));
+        let _ = err.to_string();
     }
 
     #[test]
     fn narrow_axis_out_of_range() {
         let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
         let err = t.narrow(5, 0, 1).unwrap_err();
-        matches!(err, ShapeError::AxisOutOfRange { axis: 5, rank: 2 });
+        assert!(matches!(
+            err,
+            ShapeError::AxisOutOfRange { axis: 5, rank: 2 }
+        ));
     }
 
     #[test]
@@ -466,13 +510,13 @@ mod tests {
     fn reshape_element_count_mismatch() {
         let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
         let err = t.reshape(&[4, 4]).unwrap_err();
-        matches!(
+        assert!(matches!(
             err,
             ShapeError::ElementCountMismatch {
                 expected: 16,
                 actual: 6
             }
-        );
+        ));
     }
 
     #[test]
@@ -480,7 +524,7 @@ mod tests {
         let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
         let tt = t.transpose(0, 1).unwrap();
         let err = tt.reshape(&[6]).unwrap_err();
-        matches!(err, ShapeError::NonContiguousReshape);
+        assert!(matches!(err, ShapeError::NonContiguousReshape));
 
         let c = tt.contiguous();
         assert!(c.is_contiguous());
