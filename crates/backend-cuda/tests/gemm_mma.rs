@@ -129,3 +129,47 @@ fn mma_f16_rejects_non_multiple_of_eight_shape() {
         .expect_err("k=9 is not a multiple of 8 and must be rejected before GPU launch");
     assert!(matches!(err, CudaError::InvalidShape { .. }));
 }
+
+/// PR #255 レビュー指摘の回帰防止: `(m,n,k)=(8,7,0)` は `n=7` が
+/// `validate_mma_alignment` の整列制約（8 の倍数）を満たさないが、
+/// `k==0` の no-op 形状であるため実際にはカーネルを起動せず、整列検証
+/// より前に早期 return で `Ok` を返すべき契約（`gemm_mma.rs::run_f16`
+/// ドキュメンテーションコメント「ホスト側形状検証を 3 段で行う」参照）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
+fn mma_f16_accepts_noop_shape_with_misaligned_n_when_k_is_zero() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
+
+    let c = gemm
+        .run_f16(&[], &[], 8, 7, 0)
+        .expect("k==0 no-op shape with misaligned n must not be rejected by alignment checks");
+    assert_eq!(c, vec![half::f16::ZERO; 8 * 7]);
+}
+
+/// PR #255 レビュー指摘の回帰防止: `m` が大きすぎて
+/// `mma_launch_config` の grid_dim.y（`m.div_ceil(MMA_BM)`）が CUDA の
+/// 65,535 上限を超える形状は、形状・整列検証は満たしていても
+/// `CudaError::InvalidShape` で明示的に拒否されるべき契約
+/// （`gemm_mma.rs::validate_mma_grid_bounds` 参照。この検証がないと
+/// ドライバのカーネル起動時エラーとして現れ、原因の切り分けが難しい）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
+fn mma_f16_rejects_m_exceeding_grid_dim_y_limit() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
+
+    // MMA_BM=32: 65_535 * 32 + 32 = 2_097_152 で div_ceil(m, 32) = 65_536
+    // > 65_535。a/b は形状検証にのみ使われ実際には確保しない大きさなので
+    // 空スライスにせず最小限の妥当な長さで構築する必要はない
+    // （validate_gemm_dims が先に走るため長さは合わせる）。
+    let m: u32 = 65_535 * 32 + 32;
+    let n: u32 = 8;
+    let k: u32 = 8;
+    let a = vec![half::f16::ONE; (m as usize) * (k as usize)];
+    let b = vec![half::f16::ONE; (k as usize) * (n as usize)];
+    let err = gemm
+        .run_f16(&a, &b, m, n, k)
+        .expect_err("m exceeding grid_dim.y's 65,535 limit must be rejected before GPU launch");
+    assert!(matches!(err, CudaError::InvalidShape { .. }));
+}

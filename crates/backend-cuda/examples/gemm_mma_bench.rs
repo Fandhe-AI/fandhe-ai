@@ -75,14 +75,35 @@ fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig
     tflops(size, measurement.median_secs)
 }
 
+/// `mma.sync` 経路のみ H2D/D2H 転送・出力バッファ確保を計測区間の外へ
+/// 出し、GPU 実行（カーネル起動 + 同期）のみを計測する（PR #255 レビュー
+/// 指摘: 転送込みの時間で TFLOPS を算出すると PyTorch の compute-only
+/// 基準〔`PYTORCH_F16_TFLOPS_AT_4096` の比較対象〕と不整合になる）。
+/// tiled f32／WMMA f16 の 2 経路は本 PR のスコープ外（`CudaGemm`・
+/// `CudaWmmaGemm` は既存 API のままとし、本イシューでは変更しない）
+/// のため引き続き転送込みで計測する。
 fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) -> f64 {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
     let b: Vec<f16> = rng.fill_vec_f16(size * size);
 
+    let (a_dev, b_dev) = gemm
+        .upload_f16(&a, &b)
+        .expect("mma.sync f16 upload must succeed on CUDA-equipped runner");
+    let mut c_dev = gemm
+        .alloc_output_f16(size as u32, size as u32)
+        .expect("mma.sync f16 output allocation must succeed on CUDA-equipped runner");
+
     let measurement = bench_run(config, || {
-        gemm.run_f16(&a, &b, size as u32, size as u32, size as u32)
-            .expect("mma.sync f16 GEMM must succeed on CUDA-equipped runner");
+        gemm.launch_f16(
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+            size as u32,
+            size as u32,
+            size as u32,
+        )
+        .expect("mma.sync f16 GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops(size, measurement.median_secs)
@@ -135,6 +156,21 @@ fn main() {
         );
         return;
     }
+
+    // PR #255 レビュー指摘への対処（`measure_mma_f16` 冒頭コメント参照）:
+    // mma_f16_tflops のみ H2D/D2H・出力バッファ確保を計測区間から除外した
+    // 「GPU 実行のみ」の値であり、tiled_f32_tflops／wmma_f16_tflops は
+    // 引き続き転送込みで計測する（tiled/WMMA 経路は本 PR のスコープ外）。
+    // よって mma_over_tiled／mma_over_wmma の比は厳密な apples-to-apples
+    // 比較ではなく mma 側に有利な方向へ偏る。docs/perf/cuda-gemm-mma-pipeline.md
+    // へ転記する際はこの注記も一緒に残すこと。
+    println!(
+        "NOTE: mma_f16_tflops excludes H2D/D2H transfer and output buffer \
+         allocation from the timed region (GPU execution only); \
+         tiled_f32_tflops/wmma_f16_tflops still include them. \
+         mma_over_tiled/mma_over_wmma are therefore NOT apples-to-apples \
+         (biased in mma's favor). See PR #255 review."
+    );
 
     for size in [512usize, 1024, 2048, 4096] {
         let config = MeasurementConfig::default();

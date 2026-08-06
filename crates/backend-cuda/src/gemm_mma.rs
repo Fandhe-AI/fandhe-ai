@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::device::CudaDevice;
@@ -55,6 +55,33 @@ pub(crate) fn validate_mma_alignment(n: u32, k: u32) -> Result<(), CudaError> {
                 "mma.sync/cp.async path requires k % 8 == 0 && n % 8 == 0 \
                  (cp.async 16-byte transfer granularity; kernels_mma.rs \
                  doc comment \"整列制約\"), but got n={n}, k={k}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// CUDA の grid 次元 y/z 成分の上限（65,535。全 compute capability 共通。
+/// x 成分の上限は 2^31-1 と大きく実用的に問題にならないため x は検証
+/// しない）。
+const MAX_GRID_DIM_Y: u32 = 65_535;
+
+/// `mma_launch_config` が構築するグリッドの y 成分（`m.div_ceil(MMA_BM)`）
+/// が CUDA の上限（65,535）を超えないことを検証する（PR #255 レビュー
+/// 指摘。超過するとホスト側の形状・整列検証はすべて通過した上で、
+/// ドライバのカーネル起動が失敗する。`validate_mma_alignment` と同種の
+/// 「経路固有の追加検証」パターン）。
+///
+/// `pub(crate)`: `tests/gemm_mma.rs` から実機非依存の単体テストとして
+/// 直接呼べるようにする（`validate_mma_alignment` と同じ公開範囲方針）。
+pub(crate) fn validate_mma_grid_bounds(m: u32) -> Result<(), CudaError> {
+    let grid_y = m.div_ceil(kernels_mma::MMA_BM);
+    if grid_y > MAX_GRID_DIM_Y {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "mma.sync path grid_dim.y (m.div_ceil(MMA_BM)={grid_y}) exceeds CUDA's \
+                 {MAX_GRID_DIM_Y} limit for grid dimensions y/z (MMA_BM={}); m={m} is too large",
+                kernels_mma::MMA_BM
             ),
         });
     }
@@ -129,10 +156,19 @@ impl CudaMmaGemm {
     /// f32（`kernels_mma::MMA_F16` 参照。数値契約は `CudaWmmaGemm::run_f16`
     /// と同一）。
     ///
-    /// ホスト側形状検証を 2 段で行う: `validate_gemm_dims`（naive/tiled/WMMA
-    /// と共通の一般契約）に加え、[`validate_mma_alignment`]（本経路固有の
-    /// `cp.async` 16 バイト整列制約）。いずれかが失敗すれば
-    /// `CudaError::InvalidShape` を返しカーネル起動しない。
+    /// ホスト側形状検証を 3 段で行う: `validate_gemm_dims`（naive/tiled/WMMA
+    /// と共通の一般契約。スライス長の整合性のみを見るため no-op 形状でも
+    /// 常に先行させる）→ no-op 形状（`m==0 || n==0 || k==0`）の早期
+    /// return → [`validate_mma_alignment`]／[`validate_mma_grid_bounds`]
+    /// （本経路固有の `cp.async` 16 バイト整列制約・grid_dim.y 上限）。
+    ///
+    /// 整列検証・grid 上限検証を no-op 判定より後に置く（PR #255 レビュー
+    /// 指摘）: 例えば `(m,n,k)=(8,7,0)` のような有効な no-op 形状は
+    /// `n=7` が 8 の倍数でないため、整列検証を先に行うと実際には
+    /// カーネルを起動しない形状まで誤って `CudaError::InvalidShape` で
+    /// 拒否してしまう。整列・grid 上限はいずれもカーネル起動時にのみ
+    /// 意味を持つ制約であるため、起動しないと決まった時点（no-op 判定）
+    /// より後で検証すれば十分。
     ///
     /// グリッド次元は `kernels_mma::MMA_BM`/`MMA_BN` 単位の `div_ceil` で
     /// 構築し、末尾タイルの余剰はカーネル内 REQ-8 境界チェック
@@ -146,7 +182,6 @@ impl CudaMmaGemm {
         k: u32,
     ) -> Result<Vec<f16>, CudaError> {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
-        validate_mma_alignment(n, k)?;
 
         // m==0/n==0（0 次元 grid はドライバが拒否する。`gemm.rs::run_f32_kernel`
         // ・`gemm_wmma.rs::run_f16` と同じ根拠）は起動自体を回避する。
@@ -159,43 +194,92 @@ impl CudaMmaGemm {
             return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
         }
 
+        validate_mma_alignment(n, k)?;
+        validate_mma_grid_bounds(m)?;
+
+        let (a_dev, b_dev) = self.upload_f16(a, b)?;
+        let mut c_dev = self.alloc_output_f16(m, n)?;
+        self.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)?;
+        self.download_f16(&c_dev)
+    }
+
+    /// A・B をホスト→デバイスへ転送する（`run_f16` の H2D 部分の切り出し。
+    /// ベンチマークが GPU 実行時間のみを計測できるよう、転送とカーネル
+    /// 実行を分離する。PR #255 レビュー指摘 —— `examples/gemm_mma_bench.rs`
+    /// が転送・バッファ確保込みで TFLOPS を算出していた問題への対処）。
+    pub fn upload_f16(
+        &self,
+        a: &[f16],
+        b: &[f16],
+    ) -> Result<(CudaSlice<f16>, CudaSlice<f16>), CudaError> {
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
-        let mut c_dev = self
-            .stream
-            .alloc_zeros::<f16>((m as usize) * (n as usize))?;
+        Ok((a_dev, b_dev))
+    }
 
+    /// C 用のゼロ初期化デバイスバッファを確保する（`run_f16` のバッファ
+    /// 確保部分の切り出し。[`upload_f16`] と同じ理由でベンチマークから
+    /// 再利用できるよう公開する）。
+    pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<CudaSlice<f16>, CudaError> {
+        Ok(self
+            .stream
+            .alloc_zeros::<f16>((m as usize) * (n as usize))?)
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対してカーネルを起動し、完了を
+    /// 待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。[`upload_f16`]・
+    /// [`alloc_output_f16`] と組み合わせてベンチマークの計測対象を絞る
+    /// ために公開する）。呼び出し前提は `run_f16` と同じ形状検証
+    /// （`validate_gemm_dims`・[`validate_mma_alignment`]・
+    /// [`validate_mma_grid_bounds`]）を済ませていることであり、本関数は
+    /// 検証を再実行しない（`run_f16` から呼ばれる内部経路と、検証済み
+    /// 形状を使い回すベンチマーク双方が呼び出し元となるため）。
+    pub fn launch_f16(
+        &self,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
         let cfg = mma_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
         // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
         // 5 個・型・個数が、ホスト側検証（validate_gemm_dims・
-        // validate_mma_alignment）済みの m/n/k と 1:1 対応する。カーネル内
-        // の手動境界チェック（cp.async src-size ゼロ充填・エピローグ
-        // guarded store。kernels_mma.rs 参照、REQ-8）と合わせて OOB
-        // 読み書きが起きない根拠とする。グリッド次元は MMA_BM/MMA_BN 単位
-        // の div_ceil で m/n を包含するよう構築しており（mma_launch_config）、
-        // 末尾タイルの余剰はカーネル内境界チェックで弾かれる。共有メモリは
-        // 静的 `__shared__` 配列のみを使用するため `shared_mem_bytes` は
-        // 0 のままでよい（`kernels_mma.rs` 冒頭コメント「タイル構成」の
+        // validate_mma_alignment・validate_mma_grid_bounds）済みの m/n/k
+        // と 1:1 対応する（呼び出し元 `run_f16` が保証する。本関数自身は
+        // 検証を再実行しない契約）。カーネル内の手動境界チェック
+        // （cp.async src-size ゼロ充填・エピローグ guarded store。
+        // kernels_mma.rs 参照、REQ-8）と合わせて OOB 読み書きが起きない
+        // 根拠とする。グリッド次元は MMA_BM/MMA_BN 単位の div_ceil で
+        // m/n を包含するよう構築しており（mma_launch_config）、末尾タイル
+        // の余剰はカーネル内境界チェックで弾かれる。共有メモリは静的
+        // `__shared__` 配列のみを使用するため `shared_mem_bytes` は 0 の
+        // ままでよい（`kernels_mma.rs` 冒頭コメント「タイル構成」の
         // 18432B は per-block 静的上限 48KiB 内であり動的共有メモリの
         // 追加確保・`cudaFuncSetAttribute` opt-in は不要）。
         unsafe {
             self.stream
                 .launch_builder(&self.mma_f16)
-                .arg(&a_dev)
-                .arg(&b_dev)
-                .arg(&mut c_dev)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
                 .arg(&m_i)
                 .arg(&n_i)
                 .arg(&k_i)
                 .launch(cfg)?;
         }
         self.stream.synchronize()?;
+        Ok(())
+    }
 
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
-        Ok(c_host)
+    /// C をデバイス→ホストへ転送する（`run_f16` の D2H 部分の切り出し。
+    /// [`upload_f16`] と同じ理由で公開する）。
+    pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
+        Ok(self.stream.clone_dtoh(c_dev)?)
     }
 }
 
@@ -253,5 +337,31 @@ mod tests {
     fn validate_mma_alignment_rejects_non_multiple_k() {
         let err = validate_mma_alignment(64, 17).expect_err("k=17 is not a multiple of 8");
         assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn validate_mma_grid_bounds_accepts_shapes_within_limit() {
+        // MMA_BM=32: div_ceil(65_535 * 32, 32) = 65_535（上限ちょうど）。
+        assert!(validate_mma_grid_bounds(65_535 * kernels_mma::MMA_BM).is_ok());
+    }
+
+    #[test]
+    fn validate_mma_grid_bounds_rejects_m_exceeding_grid_y_limit() {
+        // MMA_BM=32: div_ceil(65_535*32 + 1, 32) = 65_536 > 65_535。
+        let err = validate_mma_grid_bounds(65_535 * kernels_mma::MMA_BM + 1)
+            .expect_err("grid_dim.y must exceed CUDA's 65,535 limit");
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    /// `validate_mma_alignment` 単体では k=0/n=7 は整列制約違反として
+    /// 拒否される（この関数自体は no-op 形状かどうかを考慮しない）。
+    /// `run_f16` が no-op 早期 return をこの検証より前に行うことで
+    /// `(m,n,k)=(8,7,0)` のような有効な no-op 形状を誤って拒否しない
+    /// 契約は、実機依存の統合テスト
+    /// `tests/gemm_mma.rs::mma_f16_accepts_noop_shape_with_misaligned_n_when_k_is_zero`
+    /// （`#[ignore]`）で確認する（PR #255 レビュー指摘）。
+    #[test]
+    fn validate_mma_alignment_rejects_misaligned_n_independent_of_noop_shape() {
+        assert!(validate_mma_alignment(7, 0).is_err());
     }
 }

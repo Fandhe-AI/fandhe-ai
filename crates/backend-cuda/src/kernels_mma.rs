@@ -128,13 +128,17 @@ pub const MMA_WARPS_N: u32 = MMA_BN / MMA_N; // 8
 /// ブロック内スレッド総数（32 スレッド/warp x warp 数）。
 pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
 
-/// `cp.async.wait_group` の即値。`MMA_STAGES - 2` に一致する必要がある
-/// （プロローグで `MMA_STAGES - 1` グループを commit した後、最古の
-/// グループの完了を待つには「直近 `MMA_STAGES - 2` グループの未完了を
-/// 許容する」`wait_group` 即値が必要。標準的なソフトウェアパイプライン
-/// の式。`MMA_STAGES` を変更する場合、カーネルソース中の
-/// `cp.async.wait_group 1;` の即値もあわせて見直すこと）。`gemm_mma.rs`
-/// が起動前の `debug_assert` で参照し、`MMA_STAGES` の実利用を兼ねる。
+/// `cp.async.wait_group` の非最終タイル向け即値。`MMA_STAGES - 2` に
+/// 一致する必要がある（プロローグで `MMA_STAGES - 1` グループを commit
+/// した後、最古のグループの完了を待つには「直近 `MMA_STAGES - 2`
+/// グループの未完了を許容する」`wait_group` 即値が必要。標準的な
+/// ソフトウェアパイプラインの式）。最終 K タイルでは新規 commit が発生
+/// しないため、この即値では最後のグループの完了を保証できず
+/// `wait_group 0` による drain が別途必要（カーネルソース `if (t ==
+/// num_k_tiles - 1)` 分岐。PR #255 レビュー指摘）。`MMA_STAGES` を
+/// 変更する場合、カーネルソース中の `cp.async.wait_group 1;`／`0;` の
+/// 即値と分岐条件もあわせて見直すこと。`gemm_mma.rs` が起動前の
+/// `debug_assert` で参照し、`MMA_STAGES` の実利用を兼ねる。
 pub const MMA_WAIT_GROUP_IMMEDIATE: u32 = MMA_STAGES - 2;
 
 /// 1 ステージあたりの `mma.sync` 呼び出し回数（`BK / MMA_K`。カーネル内
@@ -170,6 +174,21 @@ const _: () = assert!(
 const _: () = assert!(
     MMA_BLOCK_THREADS <= 1024,
     "MMA_BLOCK_THREADS must not exceed CUDA's per-block thread limit (1024)"
+);
+// カーネルソース内 `if (t == num_k_tiles - 1) { wait_group 0 } else { wait_group 1 }`
+// の二値分岐（本ファイル冒頭「命令選定」・`MMA_WAIT_GROUP_IMMEDIATE`
+// ドキュメンテーションコメント参照）は `MMA_STAGES = 3` の下でのみ正しい
+// （一般には `wait_group` の必要値は `min(MMA_STAGES-2, num_k_tiles-t-1)`
+// であり、`MMA_STAGES > 3` では末尾の中間値をこの二値分岐では表現でき
+// ない）。`debug_assert_eq!`（`gemm_mma.rs::CudaMmaGemm::new`）はデバッグ
+// ビルドでのみ検査するのに対し、こちらはリリースビルドでも即座に
+// ビルドエラーとして検出する（PR #255 レビュー指摘。実機コンパイル
+// できないセッションでの安全側の追加ガード）。
+const _: () = assert!(
+    MMA_STAGES == 3,
+    "kernels_mma::MMA_F16 の cp.async drain 分岐は MMA_STAGES=3 前提の \
+     二値分岐（if (t == num_k_tiles - 1)）のため、MMA_STAGES を変更する \
+     場合はカーネルソース側の wait_group 分岐ロジックも合わせて見直すこと"
 );
 
 /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM（f16 入出力・f32 アキュムレート）。
@@ -242,6 +261,19 @@ extern "C" __global__ void gemm_mma_f16(
     // クランプ済みの添字（境界外ポインタを作らないため）。valid は実際の
     // コピーサイズ（16 or 0）を選ぶだけで、アドレス自体は常に確保済み
     // 範囲内を指す。
+    // REQ-8 追補（PR #255 レビュー指摘）: 範囲外チャンク（valid=0）でも
+    // `cp.async.cg.shared.global` のソースアドレスは常に 16 バイト境界に
+    // 整列している必要がある（size=0 でもアドレス自体の整列制約は緩和
+    // されない。cp.async の未定義動作を避けるための PTX 側の要件）。行
+    // ストライド（A は k、B は n）はホスト側 `gemm_mma.rs::run_f16` が
+    // カーネル起動前に必ず `validate_mma_alignment` を経由させることで
+    // 8 の倍数であることを保証するため行方向のクランプ（gr_c）は整列に
+    // 影響しないが、列方向のクランプ（gc_c）を単純に `k-1`/`n-1` にすると
+    // 8 要素境界からずれる。よって直近の 8 要素境界（`((k-1)/8)*8` など）
+    // に切り下げてクランプする。この gr_c 側の整列不問という前提は
+    // `validate_mma_alignment` が起動前に必ず通ることに依存しており、
+    // `run_f16` 側でこの検証呼び出しを外す・順序を変える場合は本コメント
+    // ごと見直すこと。
     #define LOAD_A_STAGE(stage, k0) \
         for (int idx = tid; idx < (BM * BK) / 8; idx += blockDim.x) { \
             int row = idx / (BK / 8); \
@@ -249,7 +281,7 @@ extern "C" __global__ void gemm_mma_f16(
             int gr = block_row0 + row; \
             int gc = (k0) + col0; \
             int gr_c = gr < m ? gr : (m > 0 ? m - 1 : 0); \
-            int gc_c = gc < k ? gc : (k > 0 ? k - 1 : 0); \
+            int gc_c = gc < k ? gc : (k > 0 ? ((k - 1) / 8) * 8 : 0); \
             int valid = (gr < m && gc < k) ? 16 : 0; \
             mma_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * k + gc_c], valid); \
         }
@@ -261,7 +293,7 @@ extern "C" __global__ void gemm_mma_f16(
             int gr = (k0) + row; \
             int gc = block_col0 + col0; \
             int gr_c = gr < k ? gr : (k > 0 ? k - 1 : 0); \
-            int gc_c = gc < n ? gc : (n > 0 ? n - 1 : 0); \
+            int gc_c = gc < n ? gc : (n > 0 ? ((n - 1) / 8) * 8 : 0); \
             int valid = (gr < k && gc < n) ? 16 : 0; \
             mma_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * n + gc_c], valid); \
         }
@@ -284,7 +316,23 @@ extern "C" __global__ void gemm_mma_f16(
         // 参照。`gemm_mma.rs::CudaMmaGemm::new` の `debug_assert_eq!` が
         // この即値との対応を検査する）。最古の commit 済みグループ
         // （compute_stage に対応）の完了を保証する。
-        asm volatile("cp.async.wait_group 1;\n");
+        //
+        // 最終 K タイル（t == num_k_tiles - 1）では下の
+        // `if (next_tile < num_k_tiles)` が false のまま新規 commit が
+        // 発生しないため、`wait_group 1` のままだと最後の cp.async
+        // グループの完了を待たずに ldmatrix/mma.sync が共有メモリを読み
+        // うる（PR #255 レビュー指摘。k<=BK の小 K・16x8x16 smoke test で
+        // 即座に発生しうるレースコンディション）。最終タイルのみ
+        // `wait_group 0`（全 outstanding グループの完了待ち）で drain する。
+        // `MMA_WAIT_GROUP_IMMEDIATE`（`MMA_STAGES - 2` = 1）は
+        // `MMA_STAGES = 3` 固定の下でのみ「最終タイル以外は 1」が正しい値
+        // になる関係にあり、`MMA_STAGES` を変える場合はこの二値分岐自体を
+        // 見直す必要がある。
+        if (t == num_k_tiles - 1) {
+            asm volatile("cp.async.wait_group 0;\n");
+        } else {
+            asm volatile("cp.async.wait_group 1;\n");
+        }
         __syncthreads();
 
         for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {
@@ -295,8 +343,16 @@ extern "C" __global__ void gemm_mma_f16(
 
             // A フラグメント（16x16）: ldmatrix.x4（4 個の 8x8 b16 サブ
             // タイルを 1 命令でロード。本ファイル冒頭コメント「命令選定」）。
-            int a_quad_row = (lane / 8) / 2; // 0..1
-            int a_quad_col = (lane / 8) % 2; // 0..1
+            // ldmatrix.x4 はレーン群 0-7/8-15/16-23/24-31 の順で出力
+            // レジスタ a0/a1/a2/a3 を埋めるが、mma.m16n8k16 が要求する
+            // A フラグメントの象限順序は TL/BL/TR/BR（PTX ISA
+            // mma.m16n8k16 A フラグメントレイアウト）である。行を
+            // レーン群の下位ビット、列を上位ビットへ割り当てることで
+            // a0=TL, a1=BL, a2=TR, a3=BR の順を作る（PR #255 レビュー
+            // 指摘。逆に取ると a1/a2 に TR/BL が入れ替わって載り、
+            // K/M ハーフが入れ替わった不正な結果になる）。
+            int a_quad_row = (lane / 8) % 2; // 0,1,0,1 -> TL,BL,TR,BR の行
+            int a_quad_col = (lane / 8) / 2; // 0,0,1,1 -> TL,BL,TR,BR の列
             int a_row_in_tile = lane % 8;
             __half* a_addr = &as_tile[compute_stage]
                                       [a_row + a_quad_row * 8 + a_row_in_tile]
@@ -449,5 +505,49 @@ mod tests {
     fn mma_tile_dims_satisfy_cp_async_alignment_granularity() {
         assert_eq!(MMA_BK % 8, 0);
         assert_eq!(MMA_BN % 8, 0);
+    }
+
+    /// PR #255 レビュー指摘の回帰防止: 最終 K タイルで `cp.async.wait_group 0`
+    /// による drain 分岐（`if (t == num_k_tiles - 1)`）が存在することを
+    /// ロックする。`wait_group 1` のみだと最終タイルの cp.async 完了を
+    /// 待たずに ldmatrix/mma.sync が共有メモリを読みうる（本ファイル
+    /// `MMA_WAIT_GROUP_IMMEDIATE` ドキュメンテーションコメント参照）。
+    #[test]
+    fn mma_f16_source_drains_final_async_copy_group_before_compute() {
+        assert!(
+            MMA_F16.contains("if (t == num_k_tiles - 1)")
+                && MMA_F16.contains("cp.async.wait_group 0;"),
+            "MMA_F16 に最終 K タイルの cp.async drain 分岐（wait_group 0）が見つかりません"
+        );
+    }
+
+    /// PR #255 レビュー指摘の回帰防止: A/B タイルロードの範囲外チャンク
+    /// （`valid=0` のゼロ充填）でも `cp.async` ソースアドレスの列オフセット
+    /// クランプが 16 バイト（8 要素）境界に切り下げられていることを
+    /// ロックする（`k-1`/`n-1` への素朴なクランプはアラインを崩し
+    /// 未定義動作になりうる。本ファイル `LOAD_A_STAGE`/`LOAD_B_STAGE`
+    /// マクロ直前のコメント参照）。
+    #[test]
+    fn mma_f16_source_zero_fill_clamp_stays_16_byte_aligned() {
+        for needle in ["((k - 1) / 8) * 8", "((n - 1) / 8) * 8"] {
+            assert!(
+                MMA_F16.contains(needle),
+                "MMA_F16 に 16 バイト整列クランプ `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// PR #255 レビュー指摘の回帰防止: A フラグメントの ldmatrix.x4
+    /// 4 象限が mma.m16n8k16 要求順序（TL/BL/TR/BR）どおりに割り当て
+    /// られていることをロックする（レーン群の下位ビットを行、上位ビット
+    /// を列に対応させる式。誤って `(lane/8)/2` を行、`(lane/8)%2` を列に
+    /// すると TL/TR/BL/BR の順になり不正な結果を招く）。
+    #[test]
+    fn mma_f16_source_uses_mma_fragment_quadrant_order_for_a() {
+        assert!(
+            MMA_F16.contains("int a_quad_row = (lane / 8) % 2;")
+                && MMA_F16.contains("int a_quad_col = (lane / 8) / 2;"),
+            "MMA_F16 の A フラグメント象限順序（TL/BL/TR/BR）が見つかりません"
+        );
     }
 }
