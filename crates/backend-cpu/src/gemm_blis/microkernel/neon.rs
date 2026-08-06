@@ -19,6 +19,10 @@ pub const MR: usize = 8;
 /// マイクロカーネルタイルの列数（f32x4 レジスタ 2 本ぶん）。
 pub const NR: usize = 8;
 
+// [`super::super::gemm_blis_region`] の C タイルスタックバッファは
+// `MAX_TILE`（256 要素）固定長で確保するため、コンパイル時に検査する（#185）。
+const _: () = assert!(MR * NR <= 256);
+
 /// [`super::scalar::kernel`] と同一の累積契約（p 昇順・mul_add 連鎖）を
 /// NEON `vfmaq_f32` で実装する。C タイルをレーンごとに独立したレジスタへ
 /// ロードし、レーン間縮約を一切行わないため、`p` ごとの `a[p][i]・b[p][j]`

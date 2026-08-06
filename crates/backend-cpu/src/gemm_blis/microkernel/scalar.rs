@@ -13,6 +13,11 @@ pub const MR: usize = 4;
 /// マイクロカーネルタイルの列数（C の n 方向レーン数）。
 pub const NR: usize = 4;
 
+// [`super::super::gemm_blis_region`] の C タイルスタックバッファは
+// `MAX_TILE`（256 要素・AVX-512 の 8×32 が最大）固定長で確保するため、
+// 全 ISA の MR*NR がこれを超えないことをコンパイル時に検査する（#185）。
+const _: () = assert!(MR * NR <= 256);
+
 /// `ap`（packed A、MR 行×kc_len、p-major）・`bp`（packed B、kc_len×NR、
 /// p-major）から MR×NR の C タイル `c_tile`（row-major、ld=NR）へ
 /// `kc_len` ぶんの寄与を加算する。

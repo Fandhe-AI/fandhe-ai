@@ -4,11 +4,14 @@
 //! `target_feature = "avx2"` ではゲートしない**（レビュー指摘: モジュール
 //! 単位で `target_feature` cfg するとデフォルトビルド〈RUSTFLAGS なし〉で
 //! 本体が一切コンパイルされず、`is_x86_feature_detected!` によるテスト
-//! 限定の実行時検証〈#185 の本番ディスパッチ実装前でもカーネル自体を
-//! CI で検証する計画上の要件〉が不可能になるため）。実際に AVX2+FMA
-//! 命令を発行する [`kernel_unchecked`] は `#[target_feature(enable = ...)]`
-//! で個別にゲートし、それを安全に呼べるかどうかは呼び出し側の条件
-//! （コンパイル時 cfg または実行時 `is_x86_feature_detected!`）に委ねる。
+//! 限定の実行時検証が不可能になるため）。実際に AVX2+FMA 命令を発行する
+//! [`kernel_unchecked`] は `#[target_feature(enable = ...)]` で個別に
+//! ゲートし、それを安全に呼べるかどうかは呼び出し側の条件（コンパイル時
+//! cfg または実行時 `is_x86_feature_detected!`）に委ねる。
+//!
+//! #185（TASK-1.6g）で本番ディスパッチ経路（[`super::Avx2Kernel`]）が
+//! 追加され、`kernel_unchecked` は `Avx2Kernel::try_new()` 経由の実行時
+//! 検出済み呼び出しでも駆動される（テスト限定の直接呼び出しは維持）。
 //!
 //! FMA 契約（REQ-2）: `_mm256_fmadd_ps` は IEEE-754 fused multiply-add
 //! であり、[`super::scalar::kernel`]・[`super::neon`] と丸めが同一になる
@@ -22,6 +25,10 @@ use std::arch::x86_64::{
 pub const MR: usize = 6;
 /// マイクロカーネルタイルの列数（`__m256`〈f32x8〉レジスタ 2 本ぶん）。
 pub const NR: usize = 16;
+
+// [`super::super::gemm_blis_region`] の C タイルスタックバッファは
+// `MAX_TILE`（256 要素）固定長で確保するため、コンパイル時に検査する（#185）。
+const _: () = assert!(MR * NR <= 256);
 
 /// AVX2+FMA を用いる実装本体。`#[target_feature(enable = "avx2,fma")]`
 /// が付くため呼び出しは常に `unsafe`（コンパイラ既定の安全弾）であり、
