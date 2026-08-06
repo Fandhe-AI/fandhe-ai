@@ -43,6 +43,15 @@
 # コンパイル検証。PoC-v2-5 の cfg ベースバックエンド切替構成）。将来 [[bin]] や test
 # バイナリのリンクを伴う検証が必要になった場合はクロスビルドでは不足するため、
 # macOS 実機 runner（runner ラベル明示）の登録が別途必要（スコープ外。PR 本文参照）。
+#
+# TASK-1.8e（イシュー #42）で build ジョブへ追加した「cargo check（backend-metal の
+# #[ignore] テスト・macOS ターゲット）」ステップは、上記 lib-only build の対象外である
+# tests/（#[ignore] 実機テスト。crates/backend-metal/tests/）を型検査のみで検証する
+# （cargo check はリンクを行わないため、test バイナリのリンクが未対応な上記制約下でも
+# 成立する）。`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する
+# 理由は docs/backend-metal-real-device-testing.md 参照（bench-harness の
+# dev-dependencies 経由で criterion → alloca を引き込み、macOS クロスコンパイラ非搭載の
+# self-hosted runner ではネイティブ C ビルドが失敗するため）。
 name: CI
 
 on:
@@ -259,6 +268,20 @@ jobs:
       - name: cargo build（macOS ターゲット・Metal 有効）
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo build --workspace --locked --target aarch64-apple-darwin
+
+      # TASK-1.8e（イシュー #42）: backend-metal の #[ignore] 実機テスト（tests/）を
+      # aarch64-apple-darwin で型検査する。`--workspace --all-targets` は
+      # bench-harness の dev-dependencies 経由で criterion → alloca を引き込み、
+      # macOS クロスコンパイラ非搭載の self-hosted runner では alloca のネイティブ
+      # C ビルドが `cc: unrecognized option '-arch'` で失敗することを実測したため、
+      # `-p backend-metal --tests` に限定する（bench-harness は backend-metal の
+      # dev-dependencies 経由では [dependencies] のみが解決され criterion を含まない。
+      # Makefile の check-cross-metal-tests と同一コマンド）。cargo check はリンクを
+      # 行わないため macOS SDK 非搭載でも成立する（上の build ステップとは異なり
+      # cargo build ではなく cargo check である点に注意）。
+      - name: cargo check（backend-metal の #[ignore] テスト・macOS ターゲット）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo check -p backend-metal --tests --target aarch64-apple-darwin
 
   # --------------------------------------------------
   # CUDA toolkit 非搭載環境でのビルド成立検証（TASK-1.7d・イシュー #35）。

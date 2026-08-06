@@ -10,8 +10,8 @@
 //! cargo test -p backend-metal -- --ignored --nocapture
 //! ```
 //!
-//! 本格的な実機 CI 整備は TASK-1.8e（#42）で行う。本テストはそれまでの間、手動検証の
-//! 手順を兼ねる。
+//! 実行手順・テスト一覧の正本は `docs/backend-metal-real-device-testing.md`
+//! （TASK-1.8e・#42）を参照する。
 
 #![cfg(target_os = "macos")]
 
