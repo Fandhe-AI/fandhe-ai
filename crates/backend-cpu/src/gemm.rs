@@ -89,7 +89,12 @@ impl std::error::Error for GemmError {}
 /// 算出し、オーバーフローとスライス長不整合を本体アクセス前に拒否する
 /// （REQ-8・security.md「外部フォーマットパースは長さ・形状の検証を
 /// 先に行う」と同じ思想を GEMM カーネル入口に適用）。
-fn validate_dims(
+///
+/// `pub(crate)`: TASK-1.6f（#184・`gemm_blis` モジュール）の公開入口
+/// （`gemm_blis`／`gemm_blis_parallel`）が同一クレート内から同じ検証を
+/// 再利用するため（`gemm_naive` との bit 完全一致契約を担保する数値一致
+/// 参照点は本関数のみに統一し、検証ロジックを重複させない）。
+pub(crate) fn validate_dims(
     a: &[f32],
     b: &[f32],
     c: &[f32],
