@@ -32,7 +32,9 @@
 //!
 //! カーネルソース・起動 API は naive 版（#33）・tiled 版（#34。共有メモリ
 //! タイリング `TILE=32`）を追加済み。CUDA toolkit 非搭載ビルドの CI 検証は
-//! #35、実機（DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
+//! `.github/workflows/ci.yml` の `build-no-cuda-toolkit` ジョブと
+//! `scripts/check-cuda-toolkit-absent.sh`（TASK-1.7d・#35）で実装済み。
+//! 実機（DGX Spark GB10）依存テストの `#[ignore]` 分離は #36、
 //! `BackendOps`/`BackendError` へのフルマッピング（カーネル起動・メモリ転送）は
 //! TASK-1.9c（#46）のスコープであり、本クレートでは扱わない
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.7・TASK-1.9）。
