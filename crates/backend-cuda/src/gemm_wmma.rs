@@ -63,6 +63,15 @@ pub struct CudaWmmaGemm {
     /// 優先的に使い、`None` なら `wmma_f16`（基本版）へ自動フォールバック
     /// する。
     wmma_f16_opt: Option<CudaFunction>,
+    /// TASK-11.1e（#64）で追加。`wmma_f16_opt` のコンパイル・ロードが
+    /// 失敗した場合の理由を退避する（`gemm.rs::CudaGemm::wmma_tf32_opt_error`
+    /// と同じ設計判断。PR #256 レビュー指摘「opt 経路の可用性を断定せず
+    /// 計測すると基本版へのサイレントフォールバックで green になりうる」
+    /// を f16 側にも適用し、実機実測テスト
+    /// （`tests/tensor_core_real_device.rs`）が「どのカーネル変種を
+    /// 測ったか」を記録できるようにする）。opt カーネルが利用可能な場合は
+    /// `None`。
+    wmma_f16_opt_error: Option<String>,
 }
 
 impl CudaWmmaGemm {
@@ -127,14 +136,42 @@ impl CudaWmmaGemm {
 
         // opt カーネルは基本版と独立にコンパイルし、失敗を `new` の早期
         // return に合流させない（`Self::wmma_f16_opt` フィールドの
-        // ドキュメンテーションコメント参照）。
-        let wmma_f16_opt = compile_wmma_f16_opt(device, arch).ok();
+        // ドキュメンテーションコメント参照）。失敗理由は
+        // `wmma_f16_opt_error` へ退避し、`wmma_f16_opt_unavailable_reason`
+        // 経由でテストから参照できるようにする（`gemm.rs::CudaGemm::new`
+        // の TF32 opt 側と同じ分岐構造）。
+        let (wmma_f16_opt, wmma_f16_opt_error) = match compile_wmma_f16_opt(device, arch) {
+            Ok(func) => (Some(func), None),
+            Err(err) => (None, Some(err.to_string())),
+        };
 
         Ok(Self {
             stream: device.stream().clone(),
             wmma_f16,
             wmma_f16_opt,
+            wmma_f16_opt_error,
         })
+    }
+
+    /// 共有メモリ・タイル最適化版 f16 WMMA カーネル（[`Self::wmma_f16_opt`]）
+    /// が `new` 時点でコンパイル・ロードに成功しているかを返す（TASK-11.1e・
+    /// #64。`gemm.rs::CudaGemm::wmma_tf32_opt_available` の f16 側鏡写し）。
+    ///
+    /// `run_f16` は opt カーネルが `None` の場合に基本版（[`Self::wmma_f16`]）
+    /// へ自動フォールバックするため、`run_f16` の戻り値の成否だけでは opt
+    /// カーネルが実際に実行されたかを判定できない。実機実測テスト
+    /// （`tests/tensor_core_real_device.rs`）はこの関数で事前に可用性を
+    /// 確認し、フォールバックが起きていないことを保証したうえで計測する。
+    pub fn wmma_f16_opt_available(&self) -> bool {
+        self.wmma_f16_opt.is_some()
+    }
+
+    /// [`Self::wmma_f16_opt_available`] が `false` の場合の失敗理由
+    /// （[`Self::wmma_f16_opt_error`] の公開読み取り口）。opt カーネルが
+    /// 利用可能な場合は `None` を返す。テストが「opt カーネルが使用不能
+    /// だった具体的な理由」をパニックメッセージへ含められるようにする。
+    pub fn wmma_f16_opt_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_f16_opt_error.as_deref()
     }
 
     /// f16 WMMA GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。入出力は

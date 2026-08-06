@@ -191,7 +191,7 @@ fn wmma_tf32_opt_zero_dim_shape_returns_empty_without_launch() {
 /// 保守的な値になる（受け入れ条件は「tiled を上回る」ことであり、両経路
 /// とも同じ転送コストを負担するため相対比較としては妥当）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実測確定は #64"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実測記録は docs/perf/cuda-tensor-core-measurement.md"]
 fn wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096() {
     use std::time::Instant;
 

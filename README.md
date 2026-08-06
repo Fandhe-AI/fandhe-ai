@@ -71,12 +71,14 @@ make docker-ci      # コンテナ内で make ci を実行（環境非依存の�
 `backend-cuda` の実機依存テスト（形状網羅・K=4096 ストレス・性能比較・デバイスメタデータ肯定的検証等）は通常 CI（self-hosted・CUDA toolkit 非搭載）では `#[ignore]` により除外されます。CUDA ドライバ搭載の実機（DGX Spark GB10 等）で以下を実行してください（TASK-1.7e・#36）。
 
 ```bash
-make test-ignored-cuda   # backend-cuda に限定した #[ignore] テスト実行
+make test-ignored-cuda   # backend-cuda に限定した #[ignore] テスト実行（release）
 # 相当コマンド:
-cargo test -p backend-cuda -- --ignored --nocapture
+cargo test -p backend-cuda --release -- --ignored --nocapture
 ```
 
 `backend-cuda` 以外を含む全 `#[ignore]` テスト（Metal 実機分も含む）をまとめて実行したい場合は `make test-ignored`（`cargo test --workspace -- --ignored --nocapture`）を使ってください。
+
+Tensor Core（WMMA TF32／f16）経路の TFLOPS 実測・複合判定通過の記録手順・記録テンプレートは [`docs/perf/cuda-tensor-core-measurement.md`](docs/perf/cuda-tensor-core-measurement.md) を参照してください（TASK-11.1e・#64）。
 
 ### Metal 実機での `#[ignore]` テスト実行
 
