@@ -1,0 +1,17 @@
+# scripts/check-forbidden-deps.sh self-test 用フィクスチャ（ポジティブケース）。
+# Cargo.lock 形式の最小抜粋。禁止リスト（.claude/rules/deps-policy.md）に該当しない
+# 許容依存のみで構成し、検査が pass（exit 0）することを確認する。
+[[package]]
+name = "half"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "rayon"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
+name = "serde"
+version = "1.0.203"
+source = "registry+https://github.com/rust-lang/crates.io-index"

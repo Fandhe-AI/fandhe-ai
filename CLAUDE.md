@@ -24,6 +24,9 @@ rust-ai-library/
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness（雛形）
+├── scripts/
+│   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
+│   └── testdata/             # 上記の self-test 用固定 fixture
 ├── .github/workflows/
 │   ├── ci.yml               # fmt / clippy / test / deny / deps-forbidden / ci-complete
 │   └── update-external.yml  # docs/spec・.claude/skills の自動追従
