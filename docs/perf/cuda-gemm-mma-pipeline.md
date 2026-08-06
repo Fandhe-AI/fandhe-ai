@@ -31,7 +31,7 @@ sm_121（DGX Spark GB10。設計上のターゲット）での挙動はさらに
 - `kernels_mma.rs` 内の `#[cfg(test)]`（tensor core 命令実在検査・タイル定数整合検査・REQ-8 境界チェック実在検査）が
   全て green
 
-未検証の事項（#64／#65 へ引き継ぐ）:
+未検証の事項（#64／#65 へ引き継ぐ。集約先: [`docs/cuda-tensor-core-knowledge.md`](../cuda-tensor-core-knowledge.md) 2.4 節・4 節）:
 
 - NVRTC がインライン PTX（`mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32`・`ldmatrix.sync.aligned.m8n8.x4/x2.trans.shared.b16`・
   `cp.async.cg.shared.global`／`.commit_group`／`.wait_group`）を受理するかどうか
