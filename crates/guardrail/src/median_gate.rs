@@ -38,6 +38,10 @@
 //! 本モジュール経由に限定する運用上の契約とする。型レベルでの強制〈`decision::BenchSignal`
 //! 自体のフィールド非公開化〉は `decision.rs` の変更を伴うため #306 マージ後の後続作業とし、
 //! 本イシューでは行わない）と `bench_harness`（TASK-8.1・マージ済み）のみに依存する。
+//!
+//! 上記のフィールド非公開化・PR #305（`bench_gate.rs`）との統合は
+//! `out-of-scope-tracking.md` の規約に従い親イシュー #111 へ追跡コメントを記録済み
+//! （<https://github.com/Fandhe-AI/rust-ai-library/issues/111#issuecomment-5218294865>）。
 
 use crate::decision::BenchSignal;
 use std::fmt;
