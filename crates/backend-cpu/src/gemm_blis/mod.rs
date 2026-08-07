@@ -149,9 +149,19 @@ pub fn gemm_blis_parallel(
 /// 設けない（OWASP A03・`.claude/rules/security.md`）。
 #[cfg(target_arch = "x86_64")]
 fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows: Range<usize>) {
+    // AVX-512 経路は `avx512_stable` cfg（`backend-cpu` クレートルートの
+    // `build.rs` が AVX-512F intrinsics のコンパイル可否を実測して発行。
+    // [`microkernel::avx512`] モジュールドキュメント参照）が立っている
+    // 場合のみ試す。立っていない rustc では
+    // `Avx512Kernel` 自体がコンパイル対象外のため、AVX2 から直接試行する
+    // （実行 CPU が AVX-512F を持っていてもコンパイラの stable 化状況に
+    // 応じて AVX2 へフォールバックする。数値一致は ISA 間 bit 完全一致
+    // 契約のため結果には影響しない）。
+    #[cfg(avx512_stable)]
     if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
-        gemm_blis_region(kernel, a, b, c, n, k, rows);
-    } else if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
+        return gemm_blis_region(kernel, a, b, c, n, k, rows);
+    }
+    if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
         gemm_blis_region(kernel, a, b, c, n, k, rows);
     } else {
         gemm_blis_region(ScalarKernel, a, b, c, n, k, rows);

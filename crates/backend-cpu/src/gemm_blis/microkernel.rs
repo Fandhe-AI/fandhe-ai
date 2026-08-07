@@ -52,6 +52,15 @@
 //! コンパイルし `target_feature` ではゲートしない（レビュー指摘: モジュール
 //! 単位でゲートすると既定ビルドで本体が一切コンパイルされず、テスト
 //! 限定の実行時検出ガード付き直接検証が不可能になるため）。
+//!
+//! ただし `avx512` モジュールのみ、上記に加えて `avx512_stable` cfg
+//! （`backend-cpu` クレートルートの `build.rs` が、AVX-512F intrinsics と
+//! `#[target_feature(enable = "avx512f")]` を実際にコンパイルする probe を
+//! 実行して発行。バージョン番号の決め打ちではなく実測判定である理由は
+//! `build.rs` のコメント参照。PR #337 の CI 実測: self-hosted runner の
+//! rustc 1.88.0 では `_mm512_*` intrinsics が `stdarch_x86_avx512` unstable
+//! ライブラリ機能のため E0658 でビルド不能）でもゲートする。AVX2 はこの
+//! 制約を受けない（AVX2 intrinsics は長らく stable）。
 
 pub mod scalar;
 
@@ -61,7 +70,7 @@ pub mod neon;
 #[cfg(target_arch = "x86_64")]
 pub mod avx2;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", avx512_stable))]
 pub mod avx512;
 
 use std::sync::OnceLock;
@@ -178,15 +187,18 @@ impl Microkernel for Avx2Kernel {
 }
 
 /// x86_64 AVX-512F トークン。[`Avx512Kernel::try_new`] 経由でのみ構築でき、
-/// これが実行 CPU の AVX-512F 対応を保証する。
-#[cfg(target_arch = "x86_64")]
+/// これが実行 CPU の AVX-512F 対応を保証する。`avx512_stable` cfg
+/// （[`avx512`] モジュールドキュメント参照）が立っている rustc（AVX-512F
+/// intrinsics が stable 化済みと `build.rs` の probe が確認できた場合）
+/// でのみコンパイル対象となる。
+#[cfg(all(target_arch = "x86_64", avx512_stable))]
 #[derive(Clone, Copy)]
 pub struct Avx512Kernel {
     /// [`Avx2Kernel`] と同じ封止パターン。
     _private: (),
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", avx512_stable))]
 impl Avx512Kernel {
     /// 実行 CPU が AVX-512F をサポートする場合のみ `Some` を返す。
     pub(crate) fn try_new() -> Option<Self> {
@@ -198,7 +210,7 @@ impl Avx512Kernel {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", avx512_stable))]
 impl Microkernel for Avx512Kernel {
     const MR: usize = avx512::MR;
     const NR: usize = avx512::NR;
@@ -315,7 +327,7 @@ mod tests {
         assert_eq!(Avx2Kernel::try_new().is_some(), expected);
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", avx512_stable))]
     #[test]
     fn avx512_kernel_try_new_matches_feature_detection() {
         let expected = is_x86_feature_detected!("avx512f");
