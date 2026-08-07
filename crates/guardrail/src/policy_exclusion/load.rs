@@ -573,7 +573,19 @@ assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
 
     #[test]
     fn rejects_duplicate_key_in_exclusion_table() {
-        let toml = r#"
+        // フィクスチャに `with_other_categories_filled` で必須カテゴリ
+        // 3 種を揃える（Bugbot 指摘 #330・PR #330 レビュー再指摘）。
+        // 揃えないと `reject_duplicate_key` が機能しなくなり duplicate な
+        // `id` が後勝ちで静かに上書きされても、後続の
+        // `ensure_required_category_coverage` が別の理由（カテゴリ欠落）で
+        // 先に `InvalidInput` を返してしまい、このテストは
+        // `reject_duplicate_key` の破壊を検出できないまま green で
+        // 居座ってしまう。フィクスチャで網羅チェックを通過させたうえで、
+        // エラーメッセージが `reject_duplicate_key`
+        // （`load.rs:269` 付近）由来の "duplicate key" であることまで
+        // 直接検証し、`ensure_required_category_coverage` 由来のエラーとの
+        // 取り違えを防ぐ。
+        let base = r#"
 schema_version = 1
 
 [[exclusion]]
@@ -588,13 +600,25 @@ action = "human_approval"
 [exclusion.match]
 type = "any_diff_in_paths"
 "#;
-        let err = load_from_str(toml).unwrap_err();
-        assert!(matches!(err, GuardrailError::InvalidInput(_)));
+        let toml = with_other_categories_filled(base, "architecture_change");
+        let err = load_from_str(&toml).unwrap_err();
+        match err {
+            GuardrailError::InvalidInput(message) => {
+                assert!(
+                    message.contains("duplicate key 'id'"),
+                    "expected duplicate-key rejection message, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]
     fn rejects_duplicate_key_in_match_table() {
-        let toml = r#"
+        // 上記 `rejects_duplicate_key_in_exclusion_table` と同じ理由で
+        // 必須カテゴリを埋め草で揃え、`reject_duplicate_key` 由来の
+        // エラーメッセージであることまで検証する（Bugbot 指摘 #330）。
+        let base = r#"
 schema_version = 1
 
 [[exclusion]]
@@ -609,8 +633,17 @@ action = "human_approval"
 type = "any_diff_in_paths"
 type = "any_diff_in_paths"
 "#;
-        let err = load_from_str(toml).unwrap_err();
-        assert!(matches!(err, GuardrailError::InvalidInput(_)));
+        let toml = with_other_categories_filled(base, "architecture_change");
+        let err = load_from_str(&toml).unwrap_err();
+        match err {
+            GuardrailError::InvalidInput(message) => {
+                assert!(
+                    message.contains("duplicate key 'type'"),
+                    "expected duplicate-key rejection message, got: {message}"
+                );
+            }
+            other => panic!("expected InvalidInput, got {other:?}"),
+        }
     }
 
     #[test]
