@@ -45,7 +45,7 @@ use crate::checks;
 use crate::config::Config;
 use crate::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals, decide};
 use crate::error::GuardrailError;
-use crate::exec::SystemCommandRunner;
+use crate::exec::{CommandRunner, SystemCommandRunner};
 use crate::gaming;
 use crate::gates;
 use crate::median_gate;
@@ -154,12 +154,27 @@ fn load_policy_exclusion_config(
 }
 
 /// measured 経路（本番相当計測。`docs/guardrail-self-repair-cli.md` 1.2 節）。
+/// `main.rs` からはこの薄いラッパー（`SystemCommandRunner` 固定）のみを呼ぶ。
+pub fn run_measured(
+    repo_root: &Path,
+    baseline: &str,
+    config: &Config,
+    change_id: Option<String>,
+) -> Result<Report, GuardrailError> {
+    run_measured_with(&SystemCommandRunner, repo_root, baseline, config, change_id)
+}
+
+/// [`run_measured`] の本体。`runner` を注入可能にすることで、
+/// `cargo build`/`test`/`clippy` を実起動せずに measured 経路の
+/// オーケストレーション（実行順序・`decide()` への到達・`Report` 合成）を
+/// 単体テストで固定できる（下記 `#[cfg(test)]` 参照。TASK-4.1c・イシュー #106）。
 ///
 /// 実行順序: `baseline` 実在確認 → 除外リスト評価（ゲート成否に関わらず
 /// 必ず実行。モジュール冒頭「除外リスト評価の実行契約」参照）→ 変更行数・
 /// 公開 API 破壊・ゲーミング疑いの実測 → build/test/clippy ゲート実行 →
 /// `decide()`。
-pub fn run_measured(
+pub(crate) fn run_measured_with(
+    runner: &dyn CommandRunner,
     repo_root: &Path,
     baseline: &str,
     config: &Config,
@@ -176,8 +191,7 @@ pub fn run_measured(
     let api_broken = checks::api_stability::api_broken(repo_root, baseline)?;
     let gaming_suspect = gaming::gaming_suspected(repo_root, baseline)?;
 
-    let runner = SystemCommandRunner;
-    let gates = gates::run_gates(&runner, repo_root)?;
+    let gates = gates::run_gates(runner, repo_root)?;
 
     // D1（計画 3 節）: bench 実計測は本イシューのスコープ外。`decide()` は
     // `NotRun` を逸脱なしとして扱うため（`decision.rs` テスト参照）、
@@ -208,4 +222,174 @@ pub fn run_measured(
         bench_median_pct: 0.0,
     };
     Ok(Report::from_decision(inputs, &decision))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::exec::tests_support::ScriptedRunner;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?} 起動に失敗: {e}"));
+        assert!(
+            output.status.success(),
+            "git {args:?} が失敗: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn commit_all(cwd: &Path, message: &str) {
+        run_git(cwd, &["add", "-A"]);
+        run_git(
+            cwd,
+            &[
+                "-c",
+                "user.email=guardrail-test@example.invalid",
+                "-c",
+                "user.name=guardrail-test",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
+        );
+    }
+
+    fn init_repo(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("guardrail-check-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init", "-q"]);
+        dir
+    }
+
+    fn default_config() -> Config {
+        Config {
+            thresholds: crate::config::Thresholds::builtin(crate::config::PresetName::Default),
+        }
+    }
+
+    /// measured 経路の reject 分岐: `cargo build` 失敗（`ScriptedRunner`
+    /// モック）→ ゲート実行結果によらず `decide()` の判定順序 1.（却下最優先）
+    /// が確定することを、`cargo` を実起動せず固定する。
+    #[test]
+    fn run_measured_with_failing_build_yields_reject() {
+        let dir = init_repo("reject");
+        fs::write(dir.join("README.md"), "baseline\n").unwrap();
+        commit_all(&dir, "baseline");
+        fs::write(dir.join("README.md"), "updated\n").unwrap();
+
+        let runner = ScriptedRunner::new(vec![false]);
+        let config = default_config();
+        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+
+        assert_eq!(report.verdict, crate::decision::Verdict::Reject);
+        assert_eq!(report.signal_source, SignalSource::Measured);
+        assert!(
+            report
+                .reason_conditions
+                .iter()
+                .any(|c| c == "gate_build_failed")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// measured 経路の escalate 分岐: 全ゲート pass だが変更行数が閾値
+    /// （既定 200 行）を超過 → `decide()` の機械エスカレーション条件に到達
+    /// することを固定する。
+    #[test]
+    fn run_measured_with_large_diff_yields_escalate() {
+        let dir = init_repo("escalate");
+        fs::write(dir.join("a.txt"), "baseline\n").unwrap();
+        commit_all(&dir, "baseline");
+        // 変更行数を確実に閾値（200 行）超にするため、300 行の新規内容へ
+        // 置き換える（追加 300 行の diff）。
+        let big_content: String = (0..300).map(|i| format!("line-{i}\n")).collect();
+        fs::write(dir.join("a.txt"), big_content).unwrap();
+
+        let runner = ScriptedRunner::new(vec![true, true, true]);
+        let config = default_config();
+        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+
+        assert_eq!(report.verdict, crate::decision::Verdict::Escalate);
+        assert!(
+            report
+                .reason_conditions
+                .iter()
+                .any(|c| c == "lines_max_exceeded")
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// measured 経路の escalate 分岐（除外リスト match 経由）: `Cargo.toml`
+    /// 変更（`dependency-change` ルール。組み込み既定値）が
+    /// `decide()` の判定順序 2.（無条件エスカレーション）を発火させ、
+    /// `reason_conditions` が `policy_exclusion_match` のみ（機械判定条件が
+    /// 一切参照されず短絡する契約。`decision.rs` 判定順序契約参照）に
+    /// なることを固定する。除外リスト評価がゲート成否によらず必ず実行され
+    /// `DecisionInput` へ実際に到達していることの証跡でもある。
+    #[test]
+    fn run_measured_with_dependency_change_yields_escalate_via_exclusion_match() {
+        let dir = init_repo("exclusion");
+        fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        commit_all(&dir, "baseline");
+        fs::write(
+            dir.join("Cargo.toml"),
+            "[package]\nname = \"x\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+
+        let runner = ScriptedRunner::new(vec![true, true, true]);
+        let config = default_config();
+        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+
+        assert_eq!(report.verdict, crate::decision::Verdict::Escalate);
+        assert_eq!(report.reason_conditions, vec!["policy_exclusion_match"]);
+        assert_eq!(
+            report.applied_exclusion_rule_ids,
+            vec!["dependency-change".to_string()]
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// measured 経路の auto_apply 分岐: 全ゲート pass・閾値内・除外リスト
+    /// 非該当のコメントのみの小変更 → `decide()` が逸脱なしと判定する
+    /// ことを固定する。
+    #[test]
+    fn run_measured_with_clean_small_change_yields_auto_apply() {
+        let dir = init_repo("auto-apply");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+        commit_all(&dir, "baseline");
+        fs::write(
+            dir.join("src/lib.rs"),
+            "// コメント追加\npub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .unwrap();
+
+        let runner = ScriptedRunner::new(vec![true, true, true]);
+        let config = default_config();
+        let report = run_measured_with(&runner, &dir, "HEAD", &config, None).expect("判定に失敗");
+
+        assert_eq!(report.verdict, crate::decision::Verdict::AutoApply);
+        assert!(report.reason_conditions.is_empty());
+        assert!(report.applied_exclusion_rule_ids.is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

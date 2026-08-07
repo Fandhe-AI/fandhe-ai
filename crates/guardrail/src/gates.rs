@@ -104,7 +104,16 @@ mod tests {
         assert_eq!(gates.build, GateSignal::Passed);
         assert_eq!(gates.test, GateSignal::Passed);
         assert_eq!(gates.clippy, GateSignal::Passed);
-        assert_eq!(runner.calls.borrow().len(), 3);
+        // §2.1 が定めるコマンド文字列（モジュール冒頭コメント参照）と
+        // 一字一句一致することを固定する。
+        assert_eq!(
+            *runner.calls.borrow(),
+            vec![
+                "cargo build".to_string(),
+                "cargo test --release".to_string(),
+                "cargo clippy --all-targets -- -D warnings".to_string(),
+            ]
+        );
     }
 
     #[test]
