@@ -55,6 +55,17 @@ pub enum GraphError {
     /// ONNX モデル）。`HashMap::insert` は同名キーを後勝ちで無言上書きするため、
     /// 本クレートが謳う no-silent-skip 契約に従い明示的に拒否する（Bugbot 指摘）。
     DuplicateInitializerName { tensor_name: String },
+    /// ノードの出力名が、既に生成済み（先行ノード出力／initializer／グラフ入力）の
+    /// 名前と衝突する（ONNX が要求するグラフ内 SSA 違反）。`DuplicateInitializerName`
+    /// と同一の欠陥クラス（no-silent-skip 契約。レビュー指摘）。
+    DuplicateOutputName {
+        node_name: String,
+        tensor_name: String,
+    },
+    /// `GraphProto.output` が、initializer／グラフ入力／いずれのノード出力にも
+    /// 属さない名前を宣言している（後段が「グラフは既に妥当である」前提で
+    /// 実装できるようにするための検証。レビュー指摘）。
+    UnknownGraphOutput { tensor_name: String },
 }
 
 impl fmt::Display for GraphError {
@@ -106,6 +117,21 @@ impl fmt::Display for GraphError {
             }
             GraphError::DuplicateInitializerName { tensor_name } => {
                 write!(f, "initializer 名の重複（tensor={tensor_name}）")
+            }
+            GraphError::DuplicateOutputName {
+                node_name,
+                tensor_name,
+            } => {
+                write!(
+                    f,
+                    "出力名の重複（node='{node_name}' tensor={tensor_name}）: 既存の initializer / グラフ入力 / 先行ノード出力と衝突"
+                )
+            }
+            GraphError::UnknownGraphOutput { tensor_name } => {
+                write!(
+                    f,
+                    "GraphProto.output が未生成のテンソルを参照（tensor={tensor_name}）"
+                )
             }
         }
     }
@@ -339,7 +365,30 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
             }
         }
         for output in &node.output {
-            known.insert(output.clone());
+            // `HashSet::insert` は既存要素があっても `false` を返すのみで無言で
+            // 何もしない。戻り値を捨てると「2 ノードが同じ出力名を生成」「ノード
+            // 出力が既存 initializer / グラフ入力名を無言でシャドウ」を見逃す
+            // （`DuplicateInitializerName` と同一の欠陥クラス。レビュー指摘）ため、
+            // 挿入前に既知集合との衝突を明示的に拒否する。
+            if !known.insert(output.clone()) {
+                return Err(GraphError::DuplicateOutputName {
+                    node_name: node.name.clone(),
+                    tensor_name: output.clone(),
+                });
+            }
+        }
+    }
+
+    // グラフ出力（`GraphProto.output`）が initializer／グラフ入力／いずれかの
+    // ノード出力によって実際に生成されているかを検証する。ここを素通りすると、
+    // モジュール冒頭のドキュメントコメントが謳う「後段は『グラフは既に妥当で
+    // ある』前提で実装できる」という契約が破れ、存在しないテンソル名の要求が
+    // #78 のインタープリタまで漏れてしまう（レビュー指摘）。
+    for output in &g.output {
+        if !known.contains(&output.name) {
+            return Err(GraphError::UnknownGraphOutput {
+                tensor_name: output.name.clone(),
+            });
         }
     }
 

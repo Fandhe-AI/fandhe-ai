@@ -439,6 +439,139 @@ fn non_topological_node_order_is_rejected() {
 }
 
 #[test]
+fn unknown_graph_output_is_rejected() {
+    // GraphProto.output が、initializer にもグラフ入力にもどのノード出力にも
+    // 一致しない名前（"nope"）を宣言している。唯一のノードは "y" を生成する
+    // のみで "nope" は誰からも生成されない（レビュー指摘: 未検証コピーの再現）。
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x".to_string()],
+                output: vec!["y".to_string()],
+                name: "n1".to_string(),
+                op_type: "Identity".to_string(),
+                attribute: vec![],
+                domain: String::new(),
+            }],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "nope".to_string(),
+            }],
+        }),
+    };
+    let err = build_graph(&model).expect_err("未生成の出力宣言は拒否されるはず");
+    match err {
+        GraphError::UnknownGraphOutput { tensor_name } => {
+            assert_eq!(tensor_name, "nope");
+        }
+        other => panic!("UnknownGraphOutput を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_node_output_name_is_rejected() {
+    // 2 つのノードがともに出力 "y" を生成する（ONNX が要求するグラフ内 SSA
+    // 違反）。`DuplicateInitializerName` と同一の欠陥クラス（レビュー指摘）。
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![
+                NodeProto {
+                    input: vec!["x".to_string()],
+                    output: vec!["y".to_string()],
+                    name: "n1".to_string(),
+                    op_type: "Identity".to_string(),
+                    attribute: vec![],
+                    domain: String::new(),
+                },
+                NodeProto {
+                    input: vec!["x".to_string()],
+                    output: vec!["y".to_string()],
+                    name: "n2".to_string(),
+                    op_type: "Identity".to_string(),
+                    attribute: vec![],
+                    domain: String::new(),
+                },
+            ],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "y".to_string(),
+            }],
+        }),
+    };
+    let err = build_graph(&model).expect_err("ノード出力名の重複は拒否されるはず");
+    match err {
+        GraphError::DuplicateOutputName {
+            node_name,
+            tensor_name,
+        } => {
+            assert_eq!(node_name, "n2");
+            assert_eq!(tensor_name, "y");
+        }
+        other => panic!("DuplicateOutputName を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn node_output_shadowing_initializer_name_is_rejected() {
+    // ノード出力名が既存 initializer 名と衝突する（無言シャドウの拒否）。
+    let init = TensorProto {
+        name: "w".to_string(),
+        data_type: 1, // FLOAT
+        dims: vec![1],
+        float_data: vec![1.0],
+        int32_data: vec![],
+        int64_data: vec![],
+        raw_data: vec![],
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x".to_string()],
+                output: vec!["w".to_string()],
+                name: "n1".to_string(),
+                op_type: "Identity".to_string(),
+                attribute: vec![],
+                domain: String::new(),
+            }],
+            name: "g".to_string(),
+            initializer: vec![init],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "w".to_string(),
+            }],
+        }),
+    };
+    let err = build_graph(&model)
+        .expect_err("initializer 名を無言シャドウするノード出力は拒否されるはず");
+    match err {
+        GraphError::DuplicateOutputName {
+            node_name,
+            tensor_name,
+        } => {
+            assert_eq!(node_name, "n1");
+            assert_eq!(tensor_name, "w");
+        }
+        other => panic!("DuplicateOutputName を期待したが {other:?}"),
+    }
+}
+
+#[test]
 fn optional_empty_string_input_is_not_treated_as_missing() {
     // ONNX の省略可能入力は空文字列で表される規約（onnx.proto3）。
     // 空文字列入力はトポロジカル順検証の対象外とし、拒否されないことを確認する。
