@@ -19,16 +19,16 @@
 //! されうるため。PR #305 のレビュー指摘を踏襲）。
 
 use bench_harness::{MeasurementConfig, run};
-use guardrail::decision::{
-    BenchSignal, DecisionInput, DecisionThresholds, GateSignal, GateSignals, decide,
-};
+use guardrail::Thresholds;
+use guardrail::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals, decide};
 use guardrail::median_gate::{self, MIN_BENCH_ITERATIONS, MedianGateError};
 use std::hint::black_box;
 
-fn thresholds() -> DecisionThresholds {
-    DecisionThresholds {
+fn thresholds() -> Thresholds {
+    Thresholds {
         lines_max: 200,
-        bench_max_pct: 5.0,
+        bench_median_max_pct: 5.0,
+        bench_runs_min: 5,
     }
 }
 
@@ -99,16 +99,9 @@ fn median_series_flows_into_auto_apply_verdict() {
         .expect("5 件・全有限の系列は成功するはず");
     assert_eq!(bench, BenchSignal::Measured { median_pct: -2.0 });
 
-    let input = DecisionInput::new(
-        thresholds(),
-        10,
-        all_passed_gates(),
-        false,
-        false,
-        bench,
-        Vec::new(),
-    )
-    .expect("矛盾なし入力の構築に失敗");
+    let t = thresholds();
+    let input = DecisionInput::new(&t, 10, all_passed_gates(), false, false, bench, Vec::new())
+        .expect("矛盾なし入力の構築に失敗");
     let decision = decide(&input).expect("判定に失敗");
 
     assert_eq!(decision.verdict().as_machine_id(), "auto_apply");
@@ -126,7 +119,7 @@ fn median_series_flows_into_escalate_verdict() {
         .expect("5 件・全有限の系列は成功するはず");
     assert_eq!(bench, BenchSignal::Measured { median_pct: 8.0 });
 
-    let input = DecisionInput::new(t, 10, all_passed_gates(), false, false, bench, Vec::new())
+    let input = DecisionInput::new(&t, 10, all_passed_gates(), false, false, bench, Vec::new())
         .expect("矛盾なし入力の構築に失敗");
     let decision = decide(&input).expect("判定に失敗");
 
@@ -176,11 +169,11 @@ fn median_at_threshold_boundary_does_not_escalate() {
     assert_eq!(
         bench,
         BenchSignal::Measured {
-            median_pct: t.bench_max_pct
+            median_pct: t.bench_median_max_pct
         }
     );
 
-    let input = DecisionInput::new(t, 10, all_passed_gates(), false, false, bench, Vec::new())
+    let input = DecisionInput::new(&t, 10, all_passed_gates(), false, false, bench, Vec::new())
         .expect("矛盾なし入力の構築に失敗");
     let decision = decide(&input).expect("判定に失敗");
 

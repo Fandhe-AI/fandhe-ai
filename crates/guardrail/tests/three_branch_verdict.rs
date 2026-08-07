@@ -3,28 +3,31 @@
 //!
 //! `guardrail check` CLI バイナリ（`--signals` 注入経由の
 //! `CARGO_BIN_EXE_guardrail` テスト。`docs/guardrail-self-repair-cli.md`
-//! §1.2）は #104（TASK-4.1a・CLI 骨格）が未着手のため本 PR 時点では存在しない。
-//! 計画書 §5 が許容する代替経路（「未整備部分があれば unit テスト側でカバーし
-//! 差分を PR に明記」）に従い、本ファイルは公開ライブラリ API
-//! （[`guardrail::decision`]・[`guardrail::exit_code`]・[`guardrail::report`]）を
-//! クレート境界を跨いで結合するテストとし、CLI バイナリ結線後は #104 が
+//! §1.2）は #104（TASK-4.1a・CLI 骨格）で追加されたが、`main.rs` は現時点
+//! （TASK-4.1a 骨格段階）では判定ロジックを結線せず `Verdict::Escalate` を
+//! 暫定固定で返す（`main.rs` 冒頭コメント参照）。計画書 §5 が許容する代替経路
+//! （「未整備部分があれば unit テスト側でカバーし差分を PR に明記」）に従い、
+//! 本ファイルは公開ライブラリ API（[`guardrail::decision`]・
+//! [`guardrail::exit_code`]・[`guardrail::report`]）をクレート境界を跨いで
+//! 結合するテストとし、CLI が判定ロジックを結線するタイミング（別イシュー）で
 //! `CARGO_BIN_EXE_guardrail` 経由のテストへ差し替える想定とする。
 //!
 //! 「シグナル収集 → `decide()` → レポート出力 → 終了コード」という TASK-4.1c
 //! が接続する経路（計画書 §3 `main.rs`/`src/lib.rs` 行）を、CLI 未着手下では
 //! ライブラリ API 呼び出し列として検証する。
+//!
+//! 閾値は #104（TASK-4.1a）が移植した [`guardrail::config::Thresholds`]
+//! （`guardrail.toml` パースと共有する検証済み型）を経由して構築する
+//! （`decision` モジュールが受け取る契約 API。#105 はこの型を新設せず
+//! そのまま利用する）。
 
-use guardrail::decision::{
-    BenchSignal, DecisionInput, DecisionThresholds, GateSignal, GateSignals, decide,
-};
+use guardrail::config::{PresetName, Thresholds};
+use guardrail::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals, decide};
 use guardrail::exit_code::GuardrailExitCode;
 use guardrail::report::VerdictSection;
 
-fn thresholds() -> DecisionThresholds {
-    DecisionThresholds {
-        lines_max: 200,
-        bench_max_pct: 5.0,
-    }
+fn thresholds() -> Thresholds {
+    Thresholds::builtin(PresetName::Default)
 }
 
 fn all_passed_gates() -> GateSignals {
@@ -39,8 +42,9 @@ fn all_passed_gates() -> GateSignals {
 /// `reasons` 空・終了コード `0`。
 #[test]
 fn auto_apply_case_end_to_end() {
+    let t = thresholds();
     let input = DecisionInput::new(
-        thresholds(),
+        &t,
         10,
         all_passed_gates(),
         false,
@@ -69,7 +73,7 @@ fn auto_apply_case_end_to_end() {
 fn escalate_case_lines_changed_exceeds_threshold() {
     let t = thresholds();
     let input = DecisionInput::new(
-        t,
+        &t,
         t.lines_max + 1,
         all_passed_gates(),
         false,
@@ -91,8 +95,9 @@ fn escalate_case_lines_changed_exceeds_threshold() {
 
 #[test]
 fn escalate_case_public_api_broken() {
+    let t = thresholds();
     let input = DecisionInput::new(
-        thresholds(),
+        &t,
         10,
         all_passed_gates(),
         true,
@@ -117,16 +122,9 @@ fn escalate_case_gate_skipped() {
         test: GateSignal::Skipped,
         clippy: GateSignal::Passed,
     };
-    let input = DecisionInput::new(
-        thresholds(),
-        10,
-        gates,
-        false,
-        false,
-        BenchSignal::NotRun,
-        Vec::new(),
-    )
-    .expect("矛盾なし入力の構築に失敗");
+    let t = thresholds();
+    let input = DecisionInput::new(&t, 10, gates, false, false, BenchSignal::NotRun, Vec::new())
+        .expect("矛盾なし入力の構築に失敗");
     let decision = decide(&input).expect("判定に失敗");
 
     assert_eq!(decision.verdict().as_machine_id(), "escalate");
@@ -142,13 +140,13 @@ fn boundary_and_improvement_bench_do_not_escalate() {
     let t = thresholds();
 
     let at_boundary = DecisionInput::new(
-        t,
+        &t,
         10,
         all_passed_gates(),
         false,
         false,
         BenchSignal::Measured {
-            median_pct: t.bench_max_pct,
+            median_pct: t.bench_median_max_pct,
         },
         Vec::new(),
     )
@@ -162,7 +160,7 @@ fn boundary_and_improvement_bench_do_not_escalate() {
     );
 
     let improvement = DecisionInput::new(
-        t,
+        &t,
         10,
         all_passed_gates(),
         false,
@@ -191,7 +189,7 @@ fn reject_case_gate_failure_takes_priority_over_escalation_conditions() {
         clippy: GateSignal::Skipped,
     };
     let input = DecisionInput::new(
-        t,
+        &t,
         t.lines_max + 1000,
         gates,
         true,
@@ -215,8 +213,9 @@ fn reject_case_gate_failure_takes_priority_over_escalation_conditions() {
 /// `Escalate`（却下時は却下維持＋record）。空なら判定不変。
 #[test]
 fn exclusion_rule_ids_force_escalate_when_signals_are_otherwise_clean() {
+    let t = thresholds();
     let input = DecisionInput::new(
-        thresholds(),
+        &t,
         10,
         all_passed_gates(),
         false,
@@ -241,8 +240,9 @@ fn exclusion_rule_ids_do_not_downgrade_reject() {
         test: GateSignal::Skipped,
         clippy: GateSignal::Skipped,
     };
+    let t = thresholds();
     let input = DecisionInput::new(
-        thresholds(),
+        &t,
         10,
         gates,
         false,
@@ -270,8 +270,9 @@ fn inconsistent_input_is_rejected_before_reaching_decide() {
         test: GateSignal::Skipped,
         clippy: GateSignal::Skipped,
     };
+    let t = thresholds();
     let result = DecisionInput::new(
-        thresholds(),
+        &t,
         10,
         gates,
         false,

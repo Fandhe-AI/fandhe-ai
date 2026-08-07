@@ -134,9 +134,8 @@ impl VerdictSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::decision::{
-        BenchSignal, DecisionInput, DecisionThresholds, GateSignal, GateSignals, decide,
-    };
+    use crate::config::{PresetName, Thresholds};
+    use crate::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals, decide};
 
     #[test]
     fn median_of_odd_length() {
@@ -172,11 +171,8 @@ mod tests {
         assert_eq!(parsed.signal_source, SignalSource::Injected);
     }
 
-    fn thresholds() -> DecisionThresholds {
-        DecisionThresholds {
-            lines_max: 200,
-            bench_max_pct: 5.0,
-        }
+    fn thresholds() -> Thresholds {
+        Thresholds::builtin(PresetName::Default)
     }
 
     fn all_passed_gates() -> GateSignals {
@@ -189,8 +185,9 @@ mod tests {
 
     #[test]
     fn auto_apply_uses_fallback_reason_and_serializes_machine_id() {
+        let t = thresholds();
         let input = DecisionInput::new(
-            thresholds(),
+            &t,
             10,
             all_passed_gates(),
             false,
@@ -218,16 +215,10 @@ mod tests {
             test: GateSignal::Failed,
             clippy: GateSignal::Skipped,
         };
-        let input = DecisionInput::new(
-            thresholds(),
-            10,
-            gates,
-            false,
-            false,
-            BenchSignal::NotRun,
-            Vec::new(),
-        )
-        .expect("矛盾なし入力の構築に失敗");
+        let t = thresholds();
+        let input =
+            DecisionInput::new(&t, 10, gates, false, false, BenchSignal::NotRun, Vec::new())
+                .expect("矛盾なし入力の構築に失敗");
         let decision = decide(&input).expect("判定に失敗");
 
         let section = VerdictSection::from_decision(&decision);
@@ -245,8 +236,9 @@ mod tests {
 
     #[test]
     fn escalate_records_applied_exclusion_rule_ids() {
+        let t = thresholds();
         let input = DecisionInput::new(
-            thresholds(),
+            &t,
             10,
             all_passed_gates(),
             false,

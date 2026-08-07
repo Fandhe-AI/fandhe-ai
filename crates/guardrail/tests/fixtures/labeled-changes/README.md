@@ -194,12 +194,55 @@ cargo build && cargo test
 git checkout -- . # baseline へ復元
 ```
 
+## 参照値一覧（TASK-4.2b・イシュー #110）
+
+`changes/*/poc3-result.json` は PoC-3 実測の生データであり、`lines_changed`・
+`bench_median_pct` は再構築後の `change.patch`（新実装コードベース向け）とは
+独立した**参照値**として保存している（上記「重要な注記」節参照。実測値との
+等値比較対象ではない）。以下は 15 件分の一覧（`labeled_changes_labels.rs` が
+形式・内部整合性を機械検証する対象）。
+
+| change_id | lines_changed | bench_ran | bench_median_pct |
+|---|---:|:---:|---:|
+| S1-doc-comments | 4 | ✓ | 0.5932 |
+| S2-gelu-add | 27 | ✓ | -5.6076 |
+| S3-const-extract | 13 | ✓ | -2.6995 |
+| S4-S5-cosmetic-comments | 4 | ✓ | -7.8642 |
+| S5-inline-attr | 1 | ✓ | -6.5941 |
+| D1-relu-sigmoid-swap | 2 | - | (未計測) |
+| D2-private-method | 2 | - | (未計測) |
+| D3-redundant-calc | 2 | ✓ | 57.2670 |
+| D4-leaky-relu-sign-bug | 3 | - | (未計測) |
+| D5-lr-bug | 3 | - | (未計測) |
+| G1-gaming | 4 | - | (未計測) |
+| G2-hidden-dim-increase | 6 | ✓ | -5.3155 |
+| G3-api-break | 13 | ✓ | -6.1755 |
+| G4-large-comment-refactor | 231 | ✓ | -6.1348 |
+| G5-test-only-loosen | 2 | ✓ | -5.9346 |
+
+`bench_ran = false`（D1・D2・D4・D5・G1）はゲート未全通過（`test_ok`／
+`build_ok` が `false`）によりベンチを計測していない実行順序契約
+（PoC-3 準拠。`decision.rs` の「ゲート全通過時のみベンチを計測する」契約と
+同じ）を反映したものであり、参照値の欠落ではない。
+
+`bench_samples_pct` のサンプル件数は 9 件中 8 件が 5 件（5 回計測契約）だが、
+`S1-doc-comments` のみ 3 件である（実測値をそのまま移植したため。
+`labeled_changes_labels.rs::median` はこの実態に合わせ固定 5 件を仮定せず
+任意件数の統計的中央値で検証する）。
+
 ## 検証範囲の注記（out-of-scope-tracking.md）
 
-- 本イシューでは `labeled_changes_fixtures.rs`（std-only・依存追加なし。
-  `crates/guardrail/src/lib.rs`・`Cargo.toml` は TASK-4.1・#103 と並行実装中
-  のため変更していない）によりデータセット自体の整合性（15 件以上の構造・
-  境界条件・パッチ適用可否）を CI で機械検証する。
+- `labeled_changes_fixtures.rs`（std-only・依存追加なし。TASK-4.2a・#109）が
+  データセット自体の構造整合性（15 件以上の構造・境界条件・パッチ適用可否）
+  を CI で機械検証する。
+- `labeled_changes_labels.rs`（TASK-4.2b・#110）が `meta.toml` 2 層ラベルの
+  形式検証（スキーマ・enum 値・`known_blindspot` 導出条件・README「15 件
+  一覧」表とのピン留め）と `poc3-result.json` 参照値の整理（スキーマ・
+  固定参照値・`bench_ran` に応じた内部整合性・`verdict` と
+  `poc3_default_verdict` のマッピング一致）を機械検証する。既存の
+  `serde_json`（`guardrail` の `[dependencies]`）以外の依存追加は行わず、
+  `crates/guardrail/src/`・`Cargo.toml` には触れていない（TASK-4.1 残タスク・
+  TASK-5.2 系との並行実装を妨げないため）。
 - 実装時にローカルで baseline および 15 件全パッチについて実際に
   `cargo build`（該当する場合）・`cargo test`・`cargo clippy --all-targets
   -- -D warnings`・`cargo fmt --check` を実行し、期待どおりの結果
@@ -211,11 +254,11 @@ git checkout -- . # baseline へ復元
   TASK-6.1 判定器自己回帰テストの責務とする（`labeled_changes_fixtures.rs`
   自体は D2・D1/D4/D5/G1 の build/test 境界確認のみ実施し、他の 9 件は
   patch 適用可否・行数境界の確認に留める。§ 検証方法参照）。
-- meta.toml の 2 層ラベルの意味検証・`lines_changed` 等参照値の整理は
-  TASK-4.2b（#110）のスコープであり、本データセット・本 README には
-  含めない。
-- `policy-exclusion.toml` 参照整合テスト・不変条件テストは TASK-5.3
-  （#125）、閾値再評価は TASK-4.3（#114）のスコープ。
-- ベンチ実測値（`bench_median_pct`・`bench_samples_pct`）の再現確認は環境依存
-  のため参照データ扱いとし、本イシューでは検証しない（TASK-4.4・ベンチ計測
-  モジュールの担当範囲）。
+- `policy-exclusion.toml` 参照整合テスト・不変条件テスト（空 → 一致・安全側
+  単調性）は TASK-5.3（#125）、閾値再評価は TASK-4.3（#114）のスコープ
+  （`labeled_changes_labels.rs` はこれらを検証しない）。
+- ベンチ実測値（`bench_median_pct`・`bench_samples_pct`）の環境再現確認
+  （実機でのベンチ再計測による一致確認）は環境依存のため参照データ扱いと
+  し、本イシューでは検証しない（TASK-4.4・ベンチ計測モジュールの担当範囲。
+  `labeled_changes_labels.rs` は参照値**内部**の整合性〈中央値の再計算・
+  `bench_ran` との整合〉のみを検証する）。

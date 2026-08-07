@@ -1,19 +1,23 @@
 //! 自己修復ループのガードレール。
 //!
-//! `self-repair` クレートが取り込む AI 生成変更を 3 分岐（自動適用・エスカレーション・
-//! 却下）で判定し、判定の迂回経路を作らない（REQ-4。OWASP A08。`.claude/rules/security.md`）。
-//! 判定閾値・ポリシー除外リストの変更は必ず人間（ユーザー）承認を経る運用とし、
-//! 本クレート自体はその契約を強制する側であって、閾値を自己判断で緩和しない
-//! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）資産の
-//! 移植先でもある。
+//! `self-repair` クレートが取り込む AI 生成変更を 3 分岐（自動適用・
+//! エスカレーション・却下）で判定し、判定の迂回経路を作らない（REQ-4。
+//! OWASP A08。`.claude/rules/security.md`）。判定閾値・ポリシー除外リストの
+//! 変更は必ず人間（ユーザー）承認を経る運用とし、本クレート自体はその契約を
+//! 強制する側であって、閾値を自己判断で緩和しない
+//! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）
+//! 資産の移植先でもある。
 //!
-//! # モジュール構成（TASK-4.1a／TASK-4.1c／TASK-4.4a・イシュー #104／#106／#112 合流時点）
+//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c／TASK-4.4a・
+//! イシュー #104／#105／#106／#112 合流時点）
 //! - [`cli`][]: CLI 引数解析（`check`／`eval` サブコマンド。#104 管轄）。
-//! - [`config`][]: `--config` の TOML 設定パース・検証（#104 管轄）。
+//! - [`config`][]: `--config` の TOML 設定パース・検証、および判定閾値
+//!   （[`config::Thresholds`]・プリセット・値域検証。#104 管轄。#105 の
+//!   [`decision`] はこの型を契約 API としてそのまま受け取る）。
 //! - [`signals`][]: `--signals` の JSON シグナル入力型（#104 管轄）。
 //! - [`toml_lite`][]: 依存追加なしの最小 TOML パーサ（`config` から利用。#104 管轄）。
 //! - [`decision`][]: 3 分岐判定ロジック本体（[`decision::decide`]）。評価済み 5 条件
-//!   シグナルから [`decision::Verdict`] を導出する純粋関数（#106 管轄）。
+//!   シグナルから [`decision::Verdict`] を導出する純粋関数（#105 管轄）。
 //! - [`exit_code`][]: `guardrail check`／`guardrail eval` の終了コード契約
 //!   （[`exit_code::GuardrailExitCode`]／[`exit_code::EvalExitCode`]）。
 //!   `Verdict` → 終了コードの変換をここ 1 箇所に閉じ込める。
@@ -43,3 +47,13 @@ pub mod median_gate;
 pub mod report;
 pub mod signals;
 pub mod toml_lite;
+
+pub use config::{PresetName, Thresholds};
+pub use decision::{
+    AUTO_APPLY_FALLBACK_REASON, BenchSignal, Decision, DecisionInput, GateSignal, GateSignals,
+    Reason, Verdict, decide,
+};
+pub use error::GuardrailError;
+pub use exit_code::{EvalExitCode, GuardrailExitCode};
+pub use report::VerdictSection;
+pub use signals::Signals;

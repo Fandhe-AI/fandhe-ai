@@ -192,28 +192,23 @@ fn line_count_boundary_matches_labels() {
 /// `command` を `cwd` で実行し、成否と結合出力（stdout+stderr）を返す。
 /// 引数は配列で渡すため、シェル文字列展開によるインジェクションの余地は
 /// ない（A03 対策。`.claude/rules/security.md`）。
+///
+/// `program == "git"` の場合、親プロセス（本テストを起動した
+/// `cargo test`。lefthook の pre-push フック経由で実行されると git 自身が
+/// 子プロセスへ `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` 等を継承させる）
+/// から漏れ込んだ `GIT_*` 環境変数を明示的に除去する。除去しないと
+/// `current_dir(cwd)` を無視してこのリポジトリ自体（本 worktree の
+/// `.git`）に対して `git init`/`git commit` が実行され、フィクスチャの
+/// 隔離が壊れる（モジュールコメントに明記済みの隔離方針を実際に満たす）。
 fn run(cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> (bool, String) {
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd);
-    // `git commit`／`pre-push` フック経由でこのテストバイナリが起動された場合、
-    // 親プロセスが設定した `GIT_DIR`／`GIT_WORK_TREE`（等）が継承され、`dest`
-    // 配下の隔離作業木に対する `git init`／`git add`／`git commit` が意図せず
-    // 実リポジトリの `.git`（共有 `config`）を指してしまう（並列実行時は
-    // 複数プロセスが同一 `.git/config` のロックファイルを奪い合い失敗し、
-    // 単一スレッド実行時は実リポジトリへ誤ってコミットされる重大な事故になる）。
-    // `prepare_baseline_worktree` のドキュメント通りの隔離を実装レベルで
-    // 保証するため、継承されうる `GIT_*` 環境変数を明示的に除去する。
-    for key in [
-        "GIT_DIR",
-        "GIT_WORK_TREE",
-        "GIT_INDEX_FILE",
-        "GIT_COMMON_DIR",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_CEILING_DIRECTORIES",
-        "GIT_PREFIX",
-    ] {
-        cmd.env_remove(key);
+    if program == "git" {
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
     }
     for (k, v) in envs {
         cmd.env(k, v);
