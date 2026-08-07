@@ -135,10 +135,12 @@ pub fn layer_normalization(
         let out_block = &mut out[o * inner_size..(o + 1) * inner_size];
         for i in 0..inner_size {
             let normalized = (block[i] - mean) * inv_std;
-            let scaled = normalized * scale_slice[i];
+            // Scale 乗算・Bias 加算も分散計算の二乗差累積（上記）と同じ乗算加算
+            // パターンのため、FMA 契約統一方針（`coding-rust.md`）に従い
+            // `mul_add` で統一する（レビュー指摘 #85: ファイル内の一貫性）。
             out_block[i] = match bias_slice {
-                Some(bs) => scaled + bs[i],
-                None => scaled,
+                Some(bs) => normalized.mul_add(scale_slice[i], bs[i]),
+                None => normalized * scale_slice[i],
             };
         }
     }
@@ -349,6 +351,59 @@ mod tests {
             };
             let err = layer_normalization(&x, &scale, None, &attrs).unwrap_err();
             assert!(matches!(err, OpError::InvalidEpsilon { .. }));
+        }
+    }
+
+    #[test]
+    fn outer_size_zero_produces_empty_output() {
+        // shape=[0,4], axis=1 -> outer_size=0（正規化対象ブロックが 0 件）・
+        // inner_size=4（正規化集合自体は空でないため EmptyNormalizedSet 対象外）。
+        // ループが 1 度も実行されないため 0 除算は発生せず、shape=[0,4] の空
+        // テンソルがそのまま返ることを確認する（レビュー指摘 #85: エッジケース）。
+        let x = Tensor::<f32>::zeros(&[0, 4]).unwrap();
+        let scale = Tensor::<f32>::new(vec![1.0, 1.0, 1.0, 1.0], &[4]).unwrap();
+        let attrs = LayerNormAttrs {
+            axis: 1,
+            epsilon: 1e-5,
+        };
+        let y = layer_normalization(&x, &scale, None, &attrs).unwrap();
+        assert_eq!(y.shape(), &[0, 4]);
+    }
+
+    #[test]
+    fn scale_bias_degenerate_shape_broadcasts_across_outer_normalized_dim() {
+        // 正規化集合 shape[axis..] = [3,4] に対し Scale/Bias を縮退形状 [4]
+        // （先頭次元 3 を暗黙拡張）で与えるケース。`Tensor::broadcast_to` の
+        // 単方向ブロードキャストで [3,4] へ拡張されることを確認する
+        // （レビュー指摘 #85: 縮退形状ブロードキャストの直接カバレッジ）。
+        let data: Vec<f32> = (0..24).map(|v| v as f32).collect();
+        let x = Tensor::<f32>::new(data.clone(), &[2, 3, 4]).unwrap();
+        // rank 縮退（先頭次元の暗黙拡張）ケース。
+        let scale_rank_deg = Tensor::<f32>::new(vec![2.0, 2.0, 2.0, 2.0], &[4]).unwrap();
+        let bias_rank_deg = Tensor::<f32>::new(vec![1.0, 1.0, 1.0, 1.0], &[4]).unwrap();
+        // size-1 次元拡張（同 rank・先頭次元が明示的に 1）ケース。上記とは
+        // `Tensor::broadcast_to` 内の別経路（stride-0 拡張 vs 右詰め拡張）を通る。
+        let scale_size1_deg = Tensor::<f32>::new(vec![2.0, 2.0, 2.0, 2.0], &[1, 4]).unwrap();
+        let bias_size1_deg = Tensor::<f32>::new(vec![1.0, 1.0, 1.0, 1.0], &[1, 4]).unwrap();
+        let scale_full = Tensor::<f32>::new(vec![2.0; 12], &[3, 4]).unwrap();
+        let bias_full = Tensor::<f32>::new(vec![1.0; 12], &[3, 4]).unwrap();
+        let attrs = LayerNormAttrs {
+            axis: 1,
+            epsilon: 1e-5,
+        };
+        let y_rank_deg =
+            layer_normalization(&x, &scale_rank_deg, Some(&bias_rank_deg), &attrs).unwrap();
+        let y_size1_deg =
+            layer_normalization(&x, &scale_size1_deg, Some(&bias_size1_deg), &attrs).unwrap();
+        let y_full = layer_normalization(&x, &scale_full, Some(&bias_full), &attrs).unwrap();
+        for i in 0..2 {
+            for j in 0..3 {
+                for k in 0..4 {
+                    let full = y_full.get(&[i, j, k]).unwrap();
+                    assert_eq!(y_rank_deg.get(&[i, j, k]).unwrap(), full);
+                    assert_eq!(y_size1_deg.get(&[i, j, k]).unwrap(), full);
+                }
+            }
         }
     }
 
