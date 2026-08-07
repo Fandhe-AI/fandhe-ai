@@ -252,7 +252,8 @@ fn report_error_and_exit(err: &GuardrailError) -> ExitCode {
         | GuardrailError::Io { .. }
         | GuardrailError::InconsistentDecisionInput { .. }
         | GuardrailError::DiffSpawn { .. }
-        | GuardrailError::DiffFailed { .. } => {
+        | GuardrailError::DiffFailed { .. }
+        | GuardrailError::DiffUnexpectedFormat { .. } => {
             GuardrailExitCode::InternalError.into_process_exit_code()
         }
     }

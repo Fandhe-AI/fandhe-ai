@@ -81,6 +81,20 @@ pub enum GuardrailError {
         exit_code: Option<i32>,
         stderr: String,
     },
+
+    /// [`crate::exclusion_match`] が呼び出した `git diff` は正常終了（exit 0）
+    /// したが、出力が unified diff の想定形状（`diff --git ` ヘッダを含む）を
+    /// 満たさなかった（`diff.external` 外部ツール・`.gitattributes` の
+    /// textconv 等、`-c diff.external=`／`--no-ext-diff`／`--no-textconv` で
+    /// 列挙しきれない未知の出力変形経路の保険）。TASK-5.2b・イシュー #123
+    /// （Bugbot 指摘 Low の再発防止）。
+    ///
+    /// 出力が意図しない形式へ変形されると `is_removed_content_line` 等の
+    /// パターンマッチが無言で全滅し「マッチなし」を返してしまう
+    /// （本モジュールが避けようとしている fail-open。`.claude/rules/security.md`
+    /// A08）ため、`DiffSpawn`／`DiffFailed` と同様にエラーとして伝播し、
+    /// 「match なし」へ丸めない。
+    DiffUnexpectedFormat { command: String, reason: String },
 }
 
 impl fmt::Display for GuardrailError {
@@ -110,6 +124,9 @@ impl fmt::Display for GuardrailError {
                     f,
                     "コマンドが失敗しました: {command} (exit_code={exit_code:?}): {stderr}"
                 )
+            }
+            GuardrailError::DiffUnexpectedFormat { command, reason } => {
+                write!(f, "コマンド出力の形式が想定外です: {command}: {reason}")
             }
         }
     }

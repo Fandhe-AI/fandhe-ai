@@ -44,12 +44,6 @@ use std::process::Command;
 
 use crate::error::GuardrailError;
 
-/// `mod tests` が見つからないファイルを扱う際の安全側番兵。
-/// 「境界不明の場合は全変更行を本番コード扱いにする」（過剰検知はコストに
-/// 留まるが、見逃しは REQ-5 の不変条件「除外リストは安全側にしか作用しない」
-/// に違反するため許容しない）。
-const NO_TESTS_MOD_SENTINEL: u32 = 999_999;
-
 /// `repo_root` を作業木として `git` を起動する共通ヘルパー。
 ///
 /// 祖先プロセス（lefthook の pre-push フック等）から継承された `GIT_DIR`／
@@ -58,6 +52,16 @@ const NO_TESTS_MOD_SENTINEL: u32 = 999_999;
 /// リポジトリ（例: 本 worktree の `.git`）に対して動作してしまい、
 /// 検査対象の取り違えが起こる（`tests/labeled_changes_fixtures.rs::run` と
 /// 同一方針）。
+///
+/// 加えて、diff 出力の形式を変化させうる利用者の `~/.gitconfig`／リポジトリ
+/// ローカル設定（`color.ui = always`・`diff.external` 外部ツール等）を
+/// `-c` で明示的に無効化する。`-c` はコマンドライン引数であり設定ファイル
+/// より優先順位が高いため、継承した `GIT_*` 除去だけでは防げないローカル
+/// `.git/config` 経由の汚染も上書きできる。無効化しないと削除行が `^-`
+/// で始まらなくなり `is_removed_content_line` のパターンマッチが無言で
+/// 全滅し、本モジュールが明示的に避けようとしている fail-open
+/// （match なし＝除外リスト素通り→自動適用方向）そのものを招く
+/// （Review 指摘 Low・#123）。
 fn git_command(repo_root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_root);
@@ -66,6 +70,11 @@ fn git_command(repo_root: &Path) -> Command {
             cmd.env_remove(key);
         }
     }
+    cmd.arg("-c").arg("color.ui=never");
+    cmd.arg("-c").arg("color.diff=never");
+    cmd.arg("-c").arg("color.status=never");
+    cmd.arg("-c").arg("diff.external=");
+    cmd.arg("-c").arg("core.pager=cat");
     cmd
 }
 
@@ -90,6 +99,26 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GuardrailError> {
         });
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `run_git` の diff 系呼び出しの戻り値が unified diff の想定形状
+/// （`diff --git ` ヘッダを含む）かを確認する。空 stdout（差分なし）は
+/// 許容する。
+///
+/// `git_command` の `-c diff.external=`／呼び出し側の `--no-ext-diff`・
+/// `--no-textconv` で既知の変形経路は防いでいるが、`.gitattributes` の
+/// 未知の diff ドライバ設定等、列挙しきれない経路が残りうる。想定外の
+/// 形状であれば「削除行なし」と静かに丸めず
+/// [`GuardrailError::DiffUnexpectedFormat`] として伝播する（fail-closed。
+/// Review 指摘 Low・#123）。
+fn validate_unified_diff_shape(command: &str, stdout: &str) -> Result<(), GuardrailError> {
+    if stdout.is_empty() || stdout.lines().any(|line| line.starts_with("diff --git ")) {
+        return Ok(());
+    }
+    Err(GuardrailError::DiffUnexpectedFormat {
+        command: command.to_string(),
+        reason: "unified diff 形式（'diff --git ' ヘッダ）を含まない出力".to_string(),
+    })
 }
 
 /// unified diff の削除行（`^-` かつファイルヘッダ `^--` ではない）判定。
@@ -163,10 +192,18 @@ pub(crate) fn touches_test_assertion_with_patterns(
     baseline: &str,
     patterns: &[String],
 ) -> Result<bool, GuardrailError> {
-    let stdout = run_git(
-        repo_root,
-        &["diff", "-U0", baseline, "--", ".", ":!Cargo.lock"],
-    )?;
+    let args = [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-U0",
+        baseline,
+        "--",
+        ".",
+        ":!Cargo.lock",
+    ];
+    let stdout = run_git(repo_root, &args)?;
+    validate_unified_diff_shape(&format!("git {}", args.join(" ")), &stdout)?;
     Ok(stdout
         .lines()
         .filter(|line| is_removed_content_line(line))
@@ -191,7 +228,9 @@ fn is_mod_tests_declaration(line: &str) -> bool {
 
 /// `file`（現作業木上のテキスト）中で `mod tests` 宣言が現れる行番号
 /// （1-origin・新ファイル側の座標系）を返す。見つからない場合は `None`
-/// （呼び出し元が [`NO_TESTS_MOD_SENTINEL`] を適用する）。
+/// （呼び出し元 [`touches_prod_logic`] は `mod tests` 宣言の別名（例:
+/// 単数形 `mod test`）等の非標準な境界を「未確認」として扱い、
+/// [`ProdTouch::UnknownBoundary`] へ写像する。Review 指摘 Medium・#123）。
 ///
 /// [`hunk_new_start_lines`] と同じ「現作業木＝new 側」の座標系で行番号を
 /// 数える必要がある（両者の座標系が食い違うと `touches_prod_logic` の
@@ -227,7 +266,17 @@ fn hunk_new_start_lines(
     baseline: &str,
     file: &str,
 ) -> Result<Vec<u32>, GuardrailError> {
-    let stdout = run_git(repo_root, &["diff", "-U0", baseline, "--", file])?;
+    let args = [
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "-U0",
+        baseline,
+        "--",
+        file,
+    ];
+    let stdout = run_git(repo_root, &args)?;
+    validate_unified_diff_shape(&format!("git {}", args.join(" ")), &stdout)?;
     let mut starts = Vec::new();
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("@@ -") {
@@ -255,6 +304,22 @@ fn is_prod_source_path(path: &str) -> bool {
     normalized.ends_with(".rs") && in_src && !in_tests_dir
 }
 
+/// [`touches_prod_logic`] の判定結果。3 値にするのは、`mod tests` 境界が
+/// 非標準名等で特定できない「未確認」状態と、境界が確認できたうえで
+/// 本番コード変更が確認できない状態とを区別するため（Bugbot 指摘 Medium・
+/// #123。詳細は [`touches_prod_logic`] のドキュメント参照）。
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ProdTouch {
+    /// 変更された本番コード候補ファイルすべてで `mod tests` 境界を確認でき、
+    /// いずれのハンクも `mod tests` 内側（＝本番コード変更なし）だった。
+    NotTouched,
+    /// `mod tests` 境界の外側（＝本番コード領域）で変更を確認した。
+    Touched,
+    /// 少なくとも 1 ファイルで `mod tests` 境界を確認できず、本番コード
+    /// 変更の有無を安全に判定できない（`Touched` 未検出の場合のみ成立）。
+    UnknownBoundary,
+}
+
 /// `baseline` と現作業木との差分が本番コード（`src/*.rs`。`tests/` 配下
 /// 除く）に触れているか判定する。
 ///
@@ -265,27 +330,49 @@ fn is_prod_source_path(path: &str) -> bool {
 /// ことで、削除を伴うハンク（`mod tests` 直前の本番コード削除等）でも
 /// 座標系のずれによる見逃しが起きない（[`hunk_new_start_lines`] のドキュメント
 /// 参照。Review 指摘 Medium・#123 で実測確認済み）。
-/// `mod tests` が見つからないファイルは安全側番兵
-/// （[`NO_TESTS_MOD_SENTINEL`]）を用い、全ハンクを本番コード扱いにする
-/// （見つからない＝境界不明を「本番コードではない」と誤判定して見逃す
-/// 方向には倒さない。REQ-5 の不変条件「除外リストは安全側にしか作用
-/// しない」）。
+///
+/// `mod tests` 宣言が見つからないファイル（別名のテストモジュール・
+/// テストモジュールを持たないファイル・削除されたファイル等）は
+/// [`ProdTouch::UnknownBoundary`] を返す（`Touched` が他ファイルで確定
+/// 済みなら優先する）。呼び出し元 [`test_assertion_relaxation_without_prod_change`]
+/// は `UnknownBoundary` を「本番コード変更なしと確認できなかった」＝
+/// match（エスカレーション）方向に倒す。旧実装は安全側番兵で
+/// `touches_prod_logic` 自体を `true`（Touched 相当）へ丸めていたが、
+/// これは overall predicate `!touches_prod_logic` を `false`（match なし＝
+/// エスカレーションなし）にしてしまい、コメントが意図した「安全側」とは
+/// **逆**の結果（境界不明のファイルが自動適用をすり抜ける）を招いていた
+/// （Bugbot 指摘 Medium・#123。REQ-5 の不変条件「除外リストは安全側にしか
+/// 作用しない」を守るには、未確認は Touched とは区別し、末端の match 判定を
+/// 呼び出し元で明示的にエスカレーション方向へ倒す必要がある）。
 ///
 /// 既知の制約（スコープ外・`.claude/rules/out-of-scope-tracking.md`）:
 /// 本判定はファイル中「最初に現れる」`mod tests` 宣言のみを境界として扱う。
 /// 複数の `mod tests` を持つファイル・`mod tests` より後ろに本番コードが
 /// 続く構成には対応しない。
-pub(crate) fn touches_prod_logic(repo_root: &Path, baseline: &str) -> Result<bool, GuardrailError> {
+pub(crate) fn touches_prod_logic(
+    repo_root: &Path,
+    baseline: &str,
+) -> Result<ProdTouch, GuardrailError> {
     let files = changed_files(repo_root, baseline)?;
+    let mut unknown_boundary = false;
     for file in files.iter().filter(|f| is_prod_source_path(f)) {
-        let mod_tests_line =
-            current_mod_tests_line(repo_root, file).unwrap_or(NO_TESTS_MOD_SENTINEL);
         let hunk_starts = hunk_new_start_lines(repo_root, baseline, file)?;
-        if hunk_starts.iter().any(|&start| start < mod_tests_line) {
-            return Ok(true);
+        match current_mod_tests_line(repo_root, file) {
+            Some(mod_tests_line) => {
+                if hunk_starts.iter().any(|&start| start < mod_tests_line) {
+                    return Ok(ProdTouch::Touched);
+                }
+            }
+            None => {
+                unknown_boundary = true;
+            }
         }
     }
-    Ok(false)
+    if unknown_boundary {
+        Ok(ProdTouch::UnknownBoundary)
+    } else {
+        Ok(ProdTouch::NotTouched)
+    }
 }
 
 /// `test-tolerance-loosening` ルール（`policy-exclusion.toml`。#119）の
@@ -297,7 +384,13 @@ pub(crate) fn touches_prod_logic(repo_root: &Path, baseline: &str) -> Result<boo
 /// 1. 削除行に既存アサーション・許容誤差リテラル（`assertion_patterns`。
 ///    典型例: `assert!`／`abs() <`／`1e-[0-9]`。`policy-exclusion.toml` の
 ///    ルール定義と同一契約）が含まれる（テストの緩和が起きている）
-/// 2. 本番コード（`src/*.rs`。`tests/` 配下除く）の変更を伴わない
+/// 2. 本番コード（`src/*.rs`。`tests/` 配下除く）の変更を確認できない
+///    （[`ProdTouch::Touched`] ではない。境界確認済みで確実に変更なしの
+///    場合＝[`ProdTouch::NotTouched`] だけでなく、`mod tests` 境界が非標準
+///    名等で特定できない [`ProdTouch::UnknownBoundary`] の場合も match
+///    （エスカレーション）方向に倒す。安全性を証明できない場合は
+///    「安全」と誤判定して自動適用をすり抜けさせない。Bugbot 指摘 Medium・
+///    #123。詳細は [`touches_prod_logic`] のドキュメント参照）
 ///
 /// 短絡評価: 条件 1 が偽の場合は `touches_prod_logic` の git 呼び出しを
 /// 省略する（無用な子プロセス起動を避ける）。
@@ -309,7 +402,10 @@ pub fn test_assertion_relaxation_without_prod_change(
     if !touches_test_assertion_with_patterns(repo_root, baseline, assertion_patterns)? {
         return Ok(false);
     }
-    Ok(!touches_prod_logic(repo_root, baseline)?)
+    Ok(!matches!(
+        touches_prod_logic(repo_root, baseline)?,
+        ProdTouch::Touched
+    ))
 }
 
 #[cfg(test)]
@@ -603,6 +699,94 @@ mod tests {
         assert!(!is_mod_tests_declaration("mod tests_helpers {"));
         assert!(!is_mod_tests_declaration("mod testsuite {"));
         assert!(!is_mod_tests_declaration("mod other {"));
+    }
+
+    /// ケース 10: `mod tests` 境界が非標準名（単数形 `mod test`）で特定
+    /// できない場合、テスト単独の許容誤差緩和が `true`（エスカレーション）
+    /// になることの回帰確認（Bugbot 指摘 Medium・#123）。
+    ///
+    /// 旧実装は境界不明を `touches_prod_logic` 自体の `true`（本番コード
+    /// 変更あり相当）へ丸めていたため、overall predicate の
+    /// `!touches_prod_logic` が `false` になり、コメントが主張する
+    /// 「安全側」とは逆に、非標準なテストモジュール名を持つファイルが
+    /// 本ルールによるエスカレーションをすり抜けていた。
+    #[test]
+    fn unknown_test_boundary_escalates_instead_of_suppressing_match() {
+        let dir = init_repo("case10");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
+             #[cfg(test)]\nmod test {\n    #[test]\n    fn works() {\n        \
+             assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
+        )
+        .unwrap();
+        commit_all(&dir, "baseline");
+
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
+             #[cfg(test)]\nmod test {\n    #[test]\n    fn works() {\n        \
+             assert!((1.0f32 - 1.0).abs() < 1e-2);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let prod_touch = touches_prod_logic(&dir, "HEAD").unwrap();
+        assert_eq!(
+            prod_touch,
+            ProdTouch::UnknownBoundary,
+            "単数形 mod test は境界として認識されず UnknownBoundary になるはず"
+        );
+
+        let matched =
+            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+                .unwrap();
+        assert!(
+            matched,
+            "mod tests 境界が非標準名で特定できない場合も安全側として \
+             エスカレーション（match=true）すべき（Bugbot 指摘 Medium・#123）"
+        );
+    }
+
+    /// ケース 11: 出力形式を変化させうる利用者の git 設定（`color.ui`・
+    /// `diff.external`）を有効化しても、削除行パターンマッチングが無効化
+    /// されないことの回帰確認（Bugbot 指摘 Low・#123）。
+    #[test]
+    fn hostile_git_config_does_not_defeat_pattern_matching() {
+        let dir = init_repo("case11");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
+             #[cfg(test)]\nmod tests {\n    #[test]\n    fn works() {\n        \
+             assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
+        )
+        .unwrap();
+        commit_all(&dir, "baseline");
+
+        // diff 出力を変形しうるローカル設定を意図的に有効化する
+        // （`-c` はこれらの設定より優先されるはずだが、優先されない場合は
+        // 削除行が `^-` で始まらなくなりパターンマッチが無言で全滅する）。
+        run(&dir, &["config", "--local", "color.ui", "always"]);
+        run(&dir, &["config", "--local", "color.diff", "always"]);
+        run(&dir, &["config", "--local", "diff.external", "cat"]);
+
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n\n\
+             #[cfg(test)]\nmod tests {\n    #[test]\n    fn works() {\n        \
+             assert!((1.0f32 - 1.0).abs() < 1e-2);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let matched =
+            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+                .unwrap();
+        assert!(
+            matched,
+            "利用者の gitconfig（color.ui=always・diff.external）が \
+             パターンマッチングを無効化してはいけない（Bugbot 指摘 Low・#123）"
+        );
     }
 
     /// ケース 7: 不正 baseline ref 等で git diff が失敗 → `Err(DiffFailed)`
