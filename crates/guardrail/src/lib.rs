@@ -39,18 +39,20 @@
 //!   本体（[`decision`]）・3 分岐出力（[`report::VerdictSection`]）とは並行実装のため
 //!   未結線（同モジュールのドキュメント「スコープ境界」参照）。
 //! - [`policy_exclusion`][]: ポリシー除外リスト（REQ-5）の match 方式評価
-//!   （`arch-hyperparameter-change`・`any-diff-in-paths`。TASK-5.2a・イシュー #122
-//!   管轄）。`policy-exclusion.toml` のロード（#119／#124）・[`decision`] との統合
-//!   （#124）は未実装で、本モジュール単体では「変更ファイルパス一覧 ×
-//!   検証済みパターン列 → match 判定」のみを提供する（モジュール冒頭コメント参照）。
+//!   （`arch-hyperparameter-change`・`test-tolerance-loosening`・
+//!   `dependency-change` の 3 カテゴリ）・`policy-exclusion.toml` ロード
+//!   （[`policy_exclusion::load_from_str`]）・[`decision`] との統合
+//!   （[`policy_exclusion::ExclusionEvaluation::effective_rule_ids`] →
+//!   [`decision::DecisionInput::new`] の `exclusion_rule_ids` 引数）まで
+//!   一式（TASK-5.2a〜c・イシュー #122／#123／#124 管轄。統合済み）。
 //! - [`exclusion_match`][]: ポリシー除外リスト（REQ-5・`policy-exclusion.toml`。
 //!   TASK-5.1a・#119 が定義）のうち `test-tolerance-loosening` ルールの match
 //!   述語（[`exclusion_match::test_assertion_relaxation_without_prod_change`]）。
 //!   テスト許容誤差の**単独**緩和（本番コード変更を伴わない）を検知し、
 //!   REQ-4 ゲーミング検知（本番・テスト**同時**変更が対象）がすり抜ける
 //!   PoC-3 既知ブラインドスポット G5 を補う（TASK-5.2b・イシュー #123）。
-//!   `MatchRule` 列挙・`policy-exclusion.toml` ロード・`decide()` への配線は
-//!   `policy_exclusion` モジュール（TASK-5.2a／c・#122／#124）のスコープ。
+//!   評価は `policy_exclusion::ExclusionEvaluation::evaluate` から呼ばれる
+//!   （TASK-5.2c・#124 で配線済み）。
 //!
 //! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
 //! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
@@ -83,5 +85,10 @@ pub use decision::{
 };
 pub use error::GuardrailError;
 pub use exit_code::{EvalExitCode, GuardrailExitCode};
+pub use policy_exclusion::{
+    Action as ExclusionAction, Category as ExclusionCategory, EvaluationContext,
+    ExclusionEvaluation, ExclusionRule, MatchRule as ExclusionMatchRule, PolicyExclusionConfig,
+    builtin_defaults as policy_exclusion_builtin_defaults, load_from_str as load_policy_exclusion,
+};
 pub use report::VerdictSection;
 pub use signals::Signals;
