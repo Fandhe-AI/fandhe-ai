@@ -28,3 +28,14 @@ tensor-core = { path = "../tensor-core" }
 # 追加ではない（`bench-harness` が #29 で行った同種の判断の先例）。
 serde.workspace = true
 serde_json.workspace = true
+# #198: `tests/st_checkpoint.rs` が学習途中状態のチェックポイント検証
+# （`autodiff::nn::Linear`/`Tape`/`autodiff::optim::Sgd` を経由した学習
+# ループ）に使う。ユーザー承認不要（外部依存の新規追加ではない。workspace
+# member 間の path 依存であり、`crates/autodiff/Cargo.toml` の
+# bench-harness dev-dependency と同種の判断。deps-policy.md のユーザー
+# 承認フロー対象外）。
+autodiff = { path = "../autodiff" }
+# #198: 学習データの決定的シード生成（`bench_harness::rng::Xorshift64Star`）
+# に使う。`crates/autodiff/tests/nn_train_convergence.rs` と同一の先例
+# （dev-dependency 経由の再利用のみで新規外部依存の追加ではない）。
+bench-harness = { path = "../bench-harness" }
