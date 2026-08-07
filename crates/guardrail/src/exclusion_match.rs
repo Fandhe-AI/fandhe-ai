@@ -163,25 +163,56 @@ pub(crate) fn touches_test_assertion_with_patterns(
         .any(|line| line_matches_any_pattern(line, patterns)))
 }
 
+/// `line` が `mod tests` 宣言（`mod tests {` 等）そのものか判定する。
+/// 単純な前方一致だと `mod tests_helpers {`／`mod testsuite {` のような
+/// 別モジュールを誤検知するため、`"mod tests"` の直後が識別子継続文字
+/// （英数字・`_`）でないことを境界条件として要求する（Review 指摘 Low。
+/// #123）。
+fn is_mod_tests_declaration(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    match trimmed.strip_prefix("mod tests") {
+        Some(rest) => !matches!(
+            rest.chars().next(),
+            Some(c) if c.is_alphanumeric() || c == '_'
+        ),
+        None => false,
+    }
+}
+
 /// `file`（現作業木上のテキスト）中で `mod tests` 宣言が現れる行番号
-/// （1-origin）を返す。見つからない場合は `None`（呼び出し元が
-/// [`NO_TESTS_MOD_SENTINEL`] を適用する）。
+/// （1-origin・新ファイル側の座標系）を返す。見つからない場合は `None`
+/// （呼び出し元が [`NO_TESTS_MOD_SENTINEL`] を適用する）。
+///
+/// [`hunk_new_start_lines`] と同じ「現作業木＝new 側」の座標系で行番号を
+/// 数える必要がある（両者の座標系が食い違うと `touches_prod_logic` の
+/// 比較が意味を失う。Review 指摘 Medium。#123）。
 fn current_mod_tests_line(repo_root: &Path, file: &str) -> Option<u32> {
     let path = repo_root.join(file);
     let content = std::fs::read_to_string(&path).ok()?;
     content
         .lines()
         .enumerate()
-        .find(|(_, line)| line.trim_start().starts_with("mod tests"))
+        .find(|(_, line)| is_mod_tests_declaration(line))
         .map(|(idx, _)| (idx + 1) as u32)
 }
 
 /// `baseline` と現作業木との差分（`-U0`）における `file` のハンク開始行
-/// （baseline 側 = old 側の行番号）一覧を返す。unified diff ヘッダ
-/// `@@ -oldStart[,oldCount] +newStart[,newCount] @@` の `oldStart` を
+/// （**new 側＝現作業木側**の行番号）一覧を返す。unified diff ヘッダ
+/// `@@ -oldStart[,oldCount] +newStart[,newCount] @@` の `newStart` を
 /// パースする（正規表現は使わず手書きパース。A03 の趣旨と同じくパターン
 /// 起点の処理を避ける）。
-fn hunk_old_start_lines(
+///
+/// old 側ではなく new 側を使う理由: [`current_mod_tests_line`] は現作業木
+/// （new 側）のファイル内容から行番号を数えるため、比較対象のハンク開始行も
+/// 同じ座標系でなければならない。削除を伴うハンク（`oldCount > newCount`）
+/// では old 側行番号と new 側行番号がずれるため、old 側を使うと
+/// `mod tests` 宣言の直前で本番コードを削除するハンクを見逃す
+/// （実測による再現・Review 指摘 Medium。#123）。unified diff の規約上、
+/// `newStart` は「その hunk 直前で最後に残った行」を指す（0 カウントの
+/// 純削除ハンクでも同様）ため、`newStart < mod_tests_line` は
+/// 「`mod tests` の外（＝本番コード領域）で変更が起きた」を安全側に
+/// 判定できる。
+fn hunk_new_start_lines(
     repo_root: &Path,
     baseline: &str,
     file: &str,
@@ -191,11 +222,14 @@ fn hunk_old_start_lines(
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("@@ -") {
             // rest は "oldStart[,oldCount] +newStart[,newCount] @@ ..." の形。
-            // 先頭トークン（カンマ区切りの数値の前半）のみ取り出す。
-            let old_part = rest.split_whitespace().next().unwrap_or("");
-            let old_start_str = old_part.split(',').next().unwrap_or("");
-            if let Ok(old_start) = old_start_str.parse::<u32>() {
-                starts.push(old_start);
+            // "+" 以降のトークン（カンマ区切りの数値の前半）を取り出す。
+            let new_part = rest
+                .split_whitespace()
+                .find_map(|tok| tok.strip_prefix('+'))
+                .unwrap_or("");
+            let new_start_str = new_part.split(',').next().unwrap_or("");
+            if let Ok(new_start) = new_start_str.parse::<u32>() {
+                starts.push(new_start);
             }
         }
     }
@@ -215,19 +249,28 @@ fn is_prod_source_path(path: &str) -> bool {
 /// 除く）に触れているか判定する。
 ///
 /// 判定方法: 変更ファイルのうち本番コード候補ファイルそれぞれについて、
-/// 差分ハンクの baseline 側開始行が、現作業木の当該ファイル中 `mod tests`
-/// 宣言行より前（＝ `mod tests` の外＝本番コード領域）にあるかを見る。
+/// 差分ハンクの **new 側**（現作業木側）開始行が、現作業木の当該ファイル中
+/// `mod tests` 宣言行より前（＝ `mod tests` の外＝本番コード領域）にあるかを
+/// 見る。ハンク開始行・`mod tests` 宣言行の双方を同じ new 側座標系で数える
+/// ことで、削除を伴うハンク（`mod tests` 直前の本番コード削除等）でも
+/// 座標系のずれによる見逃しが起きない（[`hunk_new_start_lines`] のドキュメント
+/// 参照。Review 指摘 Medium・#123 で実測確認済み）。
 /// `mod tests` が見つからないファイルは安全側番兵
 /// （[`NO_TESTS_MOD_SENTINEL`]）を用い、全ハンクを本番コード扱いにする
 /// （見つからない＝境界不明を「本番コードではない」と誤判定して見逃す
 /// 方向には倒さない。REQ-5 の不変条件「除外リストは安全側にしか作用
 /// しない」）。
+///
+/// 既知の制約（スコープ外・`.claude/rules/out-of-scope-tracking.md`）:
+/// 本判定はファイル中「最初に現れる」`mod tests` 宣言のみを境界として扱う。
+/// 複数の `mod tests` を持つファイル・`mod tests` より後ろに本番コードが
+/// 続く構成には対応しない。
 pub(crate) fn touches_prod_logic(repo_root: &Path, baseline: &str) -> Result<bool, GuardrailError> {
     let files = changed_files(repo_root, baseline)?;
     for file in files.iter().filter(|f| is_prod_source_path(f)) {
         let mod_tests_line =
             current_mod_tests_line(repo_root, file).unwrap_or(NO_TESTS_MOD_SENTINEL);
-        let hunk_starts = hunk_old_start_lines(repo_root, baseline, file)?;
+        let hunk_starts = hunk_new_start_lines(repo_root, baseline, file)?;
         if hunk_starts.iter().any(|&start| start < mod_tests_line) {
             return Ok(true);
         }
@@ -493,6 +536,63 @@ mod tests {
             test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
                 .unwrap();
         assert!(matched, "tests/ 配下のみの緩和は match するはず");
+    }
+
+    /// ケース 8: `mod tests` 直前の本番コード削除＋許容誤差緩和（座標系
+    /// 不整合の回帰テスト。Review 指摘 Medium・#123）→ `false`。
+    ///
+    /// old 側の削除行数を k とすると、削除が `mod tests` 直前で終わる場合
+    /// old 側ハンク開始行も new 側の `mod tests` 行番号もともに
+    /// `M - k`（M は削除前の `mod tests` 行番号）になり、old 側座標系で
+    /// 比較すると `M-k < M-k` は常に偽になる（本番コード削除を見逃す）。
+    /// new 側座標系（[`hunk_new_start_lines`]）で比較することで、本番コード
+    /// 削除を伴う変更が正しく `false`（match しない＝エスカレーション対象
+    /// のまま）になることを検証する。
+    #[test]
+    fn prod_deletion_immediately_before_mod_tests_does_not_match() {
+        let dir = init_repo("case8");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn a() {}\npub fn b() {}\npub fn c() {}\n\n\
+             #[cfg(test)]\nmod tests {\n    #[test]\n    fn works() {\n        \
+             assert!((1.0f32 - 1.0).abs() < 1e-6);\n    }\n}\n",
+        )
+        .unwrap();
+        commit_all(&dir, "baseline");
+
+        // `mod tests` 直前の本番関数 b・c を削除しつつ、許容誤差も緩和する
+        // （REQ-4 ゲーミング検知の入力領域＝本番・テスト同時変更に該当する
+        // ケース。本ルールは match してはいけない）。
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn a() {}\n\n\
+             #[cfg(test)]\nmod tests {\n    #[test]\n    fn works() {\n        \
+             assert!((1.0f32 - 1.0).abs() < 1e-2);\n    }\n}\n",
+        )
+        .unwrap();
+
+        let matched =
+            test_assertion_relaxation_without_prod_change(&dir, "HEAD", &default_patterns())
+                .unwrap();
+        assert!(
+            !matched,
+            "mod tests 直前の本番コード削除を伴う場合は match してはいけない \
+             （座標系不整合の回帰。#123）"
+        );
+    }
+
+    /// ケース 9: `mod tests` の単純前方一致では `mod tests_helpers` の
+    /// ような別モジュールを誤検知することの回帰確認（Review 指摘 Low・
+    /// #123）。境界文字を要求する [`is_mod_tests_declaration`] を直接検証する。
+    #[test]
+    fn mod_tests_declaration_requires_word_boundary() {
+        assert!(is_mod_tests_declaration("mod tests {"));
+        assert!(is_mod_tests_declaration("    mod tests {"));
+        assert!(is_mod_tests_declaration("mod tests;"));
+        assert!(!is_mod_tests_declaration("mod tests_helpers {"));
+        assert!(!is_mod_tests_declaration("mod testsuite {"));
+        assert!(!is_mod_tests_declaration("mod other {"));
     }
 
     /// ケース 7: 不正 baseline ref 等で git diff が失敗 → `Err(DiffFailed)`
