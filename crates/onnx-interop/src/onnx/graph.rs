@@ -62,6 +62,11 @@ pub enum GraphError {
         node_name: String,
         tensor_name: String,
     },
+    /// `GraphProto.input` に同名の `ValueInfoProto` が複数含まれる。
+    /// `DuplicateInitializerName`／`DuplicateOutputName` と同一の欠陥クラス
+    /// （no-silent-skip 契約。レビュー指摘 #77）。initializer 名との重複は
+    /// pre-IR-4 の合法パターンのため対象外で、`g.input` 内部の重複のみを拒否する。
+    DuplicateInputName { tensor_name: String },
     /// `GraphProto.output` が、initializer／グラフ入力／いずれのノード出力にも
     /// 属さない名前を宣言している（後段が「グラフは既に妥当である」前提で
     /// 実装できるようにするための検証。レビュー指摘）。
@@ -126,6 +131,9 @@ impl fmt::Display for GraphError {
                     f,
                     "出力名の重複（node='{node_name}' tensor={tensor_name}）: 既存の initializer / グラフ入力 / 先行ノード出力と衝突"
                 )
+            }
+            GraphError::DuplicateInputName { tensor_name } => {
+                write!(f, "グラフ入力名の重複（tensor={tensor_name}）")
             }
             GraphError::UnknownGraphOutput { tensor_name } => {
                 write!(
@@ -349,7 +357,18 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     // ノード出力）の名前集合を逐次拡張しながら、各ノードの入力がすべて既知か
     // 確認する。ONNX は省略可能入力を空文字列で表す規約のためスキップする。
     let mut known: HashSet<String> = initializers.keys().cloned().collect();
+    // `g.input` 内部の重複のみを検出するための専用集合。`known` には
+    // initializer 名が既に入っているため `known.insert` の戻り値だけでは
+    // 「initializer 名との正当な重複（pre-IR-4）」と「`g.input` 内部の
+    // 不正な重複」を区別できない。分離した集合で `g.input` 内部の重複のみを
+    // 明示的に拒否する（no-silent-skip 契約。レビュー指摘 #77）。
+    let mut seen_inputs: HashSet<&str> = HashSet::new();
     for inp in &g.input {
+        if !seen_inputs.insert(inp.name.as_str()) {
+            return Err(GraphError::DuplicateInputName {
+                tensor_name: inp.name.clone(),
+            });
+        }
         known.insert(inp.name.clone());
     }
     for node in &g.node {

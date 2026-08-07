@@ -64,6 +64,34 @@ fn model_onnx_decodes_expected_graph_structure() {
     expect_f32_shape("fc2.bias", &[8]);
     expect_f32_shape("fc3.weight", &[1, 8]);
     expect_f32_shape("fc3.bias", &[1]);
+
+    // AttributeProto（proto.rs のフィールド番号 name=1/f=2/i=3/type=20）を実
+    // fixture の Gemm ノードで検証する。既存の
+    // `attribute_proto_round_trips_with_tensor_field` は同一構造体での
+    // 自己ラウンドトリップのみでタグ番号の誤りを検出できないため、実
+    // fixture decode 経由での属性値アサーションを固定する（レビュー指摘 #77）。
+    const ATTRIBUTE_TYPE_FLOAT: i32 = 1;
+    const ATTRIBUTE_TYPE_INT: i32 = 2;
+    let gemm = graph
+        .nodes
+        .iter()
+        .find(|n| n.name == "/fc1/Gemm")
+        .expect("/fc1/Gemm ノードが存在するはず");
+    let attr = |name: &str| {
+        gemm.attribute
+            .iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("Gemm 属性 '{name}' が見つからないはず"))
+    };
+    let alpha = attr("alpha");
+    assert_eq!(alpha.r#type, ATTRIBUTE_TYPE_FLOAT);
+    assert_eq!(alpha.f, 1.0);
+    let beta = attr("beta");
+    assert_eq!(beta.r#type, ATTRIBUTE_TYPE_FLOAT);
+    assert_eq!(beta.f, 1.0);
+    let trans_b = attr("transB");
+    assert_eq!(trans_b.r#type, ATTRIBUTE_TYPE_INT);
+    assert_eq!(trans_b.i, 1);
 }
 
 // --- slice_repro.onnx: 動的境界 Slice パターン（Shape->Gather->Unsqueeze->Concat->Slice） ---
@@ -94,6 +122,23 @@ fn slice_repro_onnx_decodes_expected_graph_structure() {
     expect_i64("const_4", &[1], &[4]);
     expect_i64("const_starts", &[2], &[0, 0]);
     expect_i64("const_gather_idx", &[1], &[0]);
+
+    // AttributeProto（フィールド番号 i=3/type=20）を実 fixture の Gather
+    // ノードで検証する（model.onnx の Gemm と合わせて実 fixture 経由の
+    // 属性値アサーションを固定する。レビュー指摘 #77）。
+    const ATTRIBUTE_TYPE_INT: i32 = 2;
+    let gather = graph
+        .nodes
+        .iter()
+        .find(|n| n.op_type == "Gather")
+        .expect("Gather ノードが存在するはず");
+    let axis = gather
+        .attribute
+        .iter()
+        .find(|a| a.name == "axis")
+        .expect("Gather 属性 'axis' が見つからないはず");
+    assert_eq!(axis.r#type, ATTRIBUTE_TYPE_INT);
+    assert_eq!(axis.i, 0);
 }
 
 // --- 不正入力の拒否テスト（長さ・形状検証の先行。OWASP A03・security.md） ---
@@ -569,6 +614,86 @@ fn node_output_shadowing_initializer_name_is_rejected() {
         }
         other => panic!("DuplicateOutputName を期待したが {other:?}"),
     }
+}
+
+#[test]
+fn duplicate_graph_input_name_is_rejected_not_silently_absorbed() {
+    // `GraphProto.input` に同名の ValueInfoProto が 2 件存在する（不正な
+    // ONNX モデル）。`HashSet::insert` の戻り値を見ずに無言で吸収すると
+    // `Graph.inputs` に重複名が残ってしまう（レビュー指摘 #77）。
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x".to_string()],
+                output: vec!["y".to_string()],
+                name: "n1".to_string(),
+                op_type: "Identity".to_string(),
+                attribute: vec![],
+                domain: String::new(),
+            }],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![
+                ValueInfoProto {
+                    name: "x".to_string(),
+                },
+                ValueInfoProto {
+                    name: "x".to_string(),
+                },
+            ],
+            output: vec![ValueInfoProto {
+                name: "y".to_string(),
+            }],
+        }),
+    };
+    let err = build_graph(&model).expect_err("グラフ入力名の重複は拒否されるはず");
+    match err {
+        GraphError::DuplicateInputName { tensor_name } => {
+            assert_eq!(tensor_name, "x");
+        }
+        other => panic!("DuplicateInputName を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn graph_input_name_matching_initializer_name_is_accepted() {
+    // グラフ入力名が initializer 名と重複するのは pre-IR-4 の合法パターン
+    // （拒否対象は `g.input` 内部の重複のみ。レビュー指摘 #77 で明示された
+    // 区別を回帰させないための固定テスト）。
+    let init = TensorProto {
+        name: "x".to_string(),
+        data_type: 1, // FLOAT
+        dims: vec![1],
+        float_data: vec![1.0],
+        int32_data: vec![],
+        int64_data: vec![],
+        raw_data: vec![],
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x".to_string()],
+                output: vec!["y".to_string()],
+                name: "n1".to_string(),
+                op_type: "Identity".to_string(),
+                attribute: vec![],
+                domain: String::new(),
+            }],
+            name: "g".to_string(),
+            initializer: vec![init],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "y".to_string(),
+            }],
+        }),
+    };
+    assert!(build_graph(&model).is_ok());
 }
 
 #[test]
