@@ -226,14 +226,42 @@ fn rewrite_path_deps_to_absolute(sandbox: &Path) {
     std::fs::write(&cargo_toml, rewritten).expect("sandbox Cargo.toml 書き換えに失敗");
 }
 
+/// sandbox 内でのみ完結する `git` コマンドを構築する。
+///
+/// `current_dir(sandbox)` だけでは実リポジトリへの誤動作を防げない。本
+/// クレートの `git commit`／`git diff` は `lefthook.yml` の `pre-push.jobs.test`
+/// （`cargo test --workspace`）経由で間接的に実行されうるが、githooks(5) の
+/// 仕様どおり git はフック起動時に `GIT_DIR`／`GIT_WORK_TREE`／
+/// `GIT_INDEX_FILE` 等の `GIT_*` 環境変数を子プロセスへ設定し、それらは
+/// `cargo test` → 本テストバイナリ → `Command::new("git")` まで継承され
+/// うる。継承された `GIT_DIR` は `current_dir` より優先されるため、
+/// これを除去しないと sandbox 内のつもりの `git init`／`git commit` が
+/// 実リポジトリの `.git` を対象にしてしまう（2026-08-07 実測: 本関数
+/// 対応前に sandbox の `git commit` が実リポジトリの現在ブランチ HEAD へ
+/// 実際にコミットしてしまう事故が発生した。#149 PR 対応時に発見・修正。
+/// 該当コミットは `git reset --hard` で復旧済み）。sandbox を実リポジトリ
+/// から完全に独立させるため、継承されうる `GIT_*` 環境変数をすべて明示的
+/// に除去してから起動する。
+fn sandboxed_git_command(sandbox: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(sandbox);
+    for (key, _) in std::env::vars_os() {
+        if let Some(key_str) = key.to_str()
+            && key_str.starts_with("GIT_")
+        {
+            command.env_remove(key_str);
+        }
+    }
+    command
+}
+
 /// `sandbox` を使い捨て git リポジトリ化し、現在の内容を `baseline` コミット
 /// として記録する（diff 由来シグナルの実測用。実リポジトリの git 履歴とは
-/// 独立しており push・fetch は一切行わない）。
+/// 独立しており push・fetch は一切行わない。[`sandboxed_git_command`] の
+/// ドキュメンテーションコメント参照）。
 fn git_init_baseline(sandbox: &Path) {
     let run = |args: &[&str]| {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(sandbox)
+        let output = sandboxed_git_command(sandbox, args)
             .output()
             .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗: {error}"));
         assert!(
@@ -403,9 +431,9 @@ fn measure_signals_for_candidate2(sandbox: &Path) -> MeasuredSignals {
     std::fs::write(&target_path, candidate2_correct_content()).expect("candidate2 書き込みに失敗");
 
     // 1. 変更行数（`git diff --numstat` の insertions+deletions 合計）。
-    let numstat = Command::new("git")
-        .args(["diff", "HEAD", "--numstat", "--", TARGET_FILE])
-        .current_dir(sandbox)
+    // sandbox 隔離の理由は `sandboxed_git_command` のドキュメンテーション
+    // コメント参照。
+    let numstat = sandboxed_git_command(sandbox, &["diff", "HEAD", "--numstat", "--", TARGET_FILE])
         .output()
         .expect("git diff --numstat の起動に失敗");
     assert!(
@@ -424,9 +452,7 @@ fn measure_signals_for_candidate2(sandbox: &Path) -> MeasuredSignals {
         .sum();
 
     // 2. 変更ファイル一覧（policy_exclusion 評価の `changed_files` 実測入力）。
-    let name_only = Command::new("git")
-        .args(["diff", "HEAD", "--name-only"])
-        .current_dir(sandbox)
+    let name_only = sandboxed_git_command(sandbox, &["diff", "HEAD", "--name-only"])
         .output()
         .expect("git diff --name-only の起動に失敗");
     assert!(
@@ -447,11 +473,10 @@ fn measure_signals_for_candidate2(sandbox: &Path) -> MeasuredSignals {
     //     いないことを実測で確認する。fail-open な既定値ではなく
     //     `changed_files`・`git diff --unified=0` の実測結果から導出する）。
     let touches_tests_dir = changed_files.iter().any(|f| f.contains("tests/"));
-    let unified_diff = Command::new("git")
-        .args(["diff", "HEAD", "--unified=0", "--", TARGET_FILE])
-        .current_dir(sandbox)
-        .output()
-        .expect("git diff --unified=0 の起動に失敗");
+    let unified_diff =
+        sandboxed_git_command(sandbox, &["diff", "HEAD", "--unified=0", "--", TARGET_FILE])
+            .output()
+            .expect("git diff --unified=0 の起動に失敗");
     assert!(
         unified_diff.status.success(),
         "git diff --unified=0 が失敗しました"
