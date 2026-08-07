@@ -16,7 +16,7 @@
 use tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
-use crate::nn::init::uniform_init;
+use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, uniform_init};
 use crate::tape::Tape;
 use crate::var::Var;
 
@@ -32,18 +32,23 @@ impl Linear {
     /// 決定的シードで `U(-1/√in_features, 1/√in_features)` の一様初期化
     /// を行う（PyTorch `nn.Linear` 既定初期化と同じ有効範囲。
     /// `nn/init.rs` 参照）。`bias: true` で `[out_features]` の bias を
-    /// 同じ範囲・後続シードで初期化する。
+    /// 同じ範囲・独立した導出シードで初期化する（weight/bias のシード
+    /// 導出は `nn/init.rs::derive_seed` を参照。「同じ呼び出しシードから
+    /// 2 系統を作る」設計上、単純な線形オフセットでは連番呼び出しシード
+    /// で層を重ねる使い方の際に系列が衝突しうるため、ビットミキシング
+    /// で独立させている）。
     ///
-    /// `in_features == 0` または `out_features == 0` は
-    /// `ShapeError::ElementCountOverflow` ではなく実行時に構築できる
-    /// 空テンソル（`tensor-core` はサイズ 0 軸を妥当な shape として扱う。
-    /// `ops_shape.rs` の `matmul_zero_size_axis` 参照）だが、
-    /// `1/√0` は非有限（inf）になるため、本関数は入口で
-    /// `ShapeError::ElementCountOverflow` 相当ではなく明示的に
-    /// `RankMismatch` とは別の失敗要因が必要になる。ここでは
-    /// `in_features == 0` を `ShapeError::AxisOutOfRange { axis: 0,
-    /// rank: 0 }` として弾く（他に適合する既存 variant がないため、
-    /// 「0 番目の軸に有効な次元がない」の意味で転用する）。
+    /// `out_features == 0` は実行時に構築できる空テンソル（`tensor-core`
+    /// はサイズ 0 軸を妥当な shape として扱う。`ops_shape.rs` の
+    /// `matmul_zero_size_axis` 参照）としてそのまま受理する。一方
+    /// `in_features == 0` は `bound = 1/√in_features` が非有限（inf）に
+    /// なるため、テンソル生成に進む前に引数として弾く。この失敗は
+    /// 「生成済み・生成中のテンソルの shape 不整合」ではなく「コンス
+    /// トラクタ引数がそもそも構築不可能」という性質のため、
+    /// `tensor-core::ShapeError` の既存 variant（`RankMismatch` 等）は
+    /// いずれも意味的に適合せず、`AutodiffError::InvalidArgument` で
+    /// 表現する（`error.rs` の doc 参照。review 指摘 #91: 当初
+    /// `ShapeError::AxisOutOfRange` へ転用していたが撤回した）。
     pub fn new(
         in_features: usize,
         out_features: usize,
@@ -51,18 +56,18 @@ impl Linear {
         seed: u64,
     ) -> Result<Linear, AutodiffError> {
         if in_features == 0 {
-            return Err(AutodiffError::Shape(ShapeError::AxisOutOfRange {
-                axis: 0,
-                rank: 0,
-            }));
+            return Err(AutodiffError::InvalidArgument(
+                "Linear::new: in_features must be > 0 (1/sqrt(in_features) would be non-finite)"
+                    .to_string(),
+            ));
         }
         let bound = 1.0 / (in_features as f32).sqrt();
-        let weight_data = uniform_init(in_features * out_features, bound, seed);
+        let weight_seed = derive_seed(seed, WEIGHT_SEED_SALT);
+        let weight_data = uniform_init(in_features * out_features, bound, weight_seed);
         let weight = Tensor::new(weight_data, &[in_features, out_features])?;
         let bias = if bias {
-            // weight と異なるシード系列にするため seed を 1 ずらす
-            // （同一乱数系列の使い回しによる重みとバイアスの相関を避ける）。
-            let bias_data = uniform_init(out_features, bound, seed.wrapping_add(1));
+            let bias_seed = derive_seed(seed, BIAS_SEED_SALT);
+            let bias_data = uniform_init(out_features, bound, bias_seed);
             Some(Tensor::new(bias_data, &[out_features])?)
         } else {
             None

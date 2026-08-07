@@ -11,12 +11,21 @@
 //! - 初期化: 同一シード → 同一重み、異なるシード → 異なる重み、
 //!   値域 `|w| <= 1/√in_features`（`nn/init.rs` の単体テストと役割が
 //!   重複しない、公開 API（`Linear::new`）経由の検証）。
-//! - エラー経路: `in_features` 不一致の入力・bias 長不一致・rank 不正で
-//!   型付きエラーが返る（panic しない）。
+//! - エラー経路: `in_features` 不一致の入力・bias 長不一致・rank 不正・
+//!   `in_features == 0` で、型付きエラー（返る variant まで固定）が
+//!   返る（panic しない）ことと、`out_features == 0` は両コンストラクタ
+//!   経路とも受理する非対称性が意図的であることを確認する
+//!   （review 指摘 #91: Low「エラー variant を固定できていない」
+//!   「`out_features == 0` の境界が非対称」への対応）。
+//! - シード導出: 連番シードで複数層を構築しても層 i の bias と
+//!   層 i+1 の weight が相関しないことを確認する
+//!   （review 指摘 #91: Medium「シードストリーム衝突」への対応。
+//!   `nn/init.rs::derive_seed` の単体テストと役割が重複しない、
+//!   公開 API（`Linear::new`）経由の統合検証）。
 
-use autodiff::Tape;
 use autodiff::nn::Linear;
-use tensor_core::Tensor;
+use autodiff::{AutodiffError, Tape};
+use tensor_core::{ShapeError, Tensor};
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -264,7 +273,13 @@ fn new_without_bias_has_no_bias() {
 fn from_parameters_rejects_weight_rank_mismatch() {
     let w = t(vec![1.0, 2.0, 3.0], &[3]);
     let result = Linear::from_parameters(w, None);
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 2,
+            actual: 1,
+        }))
+    ));
 }
 
 #[test]
@@ -272,7 +287,13 @@ fn from_parameters_rejects_bias_rank_mismatch() {
     let w = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
     let bias = t(vec![1.0, 2.0], &[1, 2]);
     let result = Linear::from_parameters(w, Some(bias));
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(AutodiffError::Shape(ShapeError::RankMismatch {
+            expected: 1,
+            actual: 2,
+        }))
+    ));
 }
 
 #[test]
@@ -280,7 +301,14 @@ fn from_parameters_rejects_bias_length_mismatch() {
     let w = t(vec![1.0, 0.0, 0.0, 1.0, 0.5, 0.5], &[2, 3]);
     let bias = t(vec![1.0, 2.0], &[2]); // out_features=3 のはずが 2
     let result = Linear::from_parameters(w, Some(bias));
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(AutodiffError::Shape(ShapeError::ShapeMismatch { .. }))
+    ));
+    if let Err(AutodiffError::Shape(ShapeError::ShapeMismatch { lhs, rhs })) = result {
+        assert_eq!(lhs, vec![2]);
+        assert_eq!(rhs, vec![3]);
+    }
 }
 
 #[test]
@@ -292,11 +320,63 @@ fn forward_rejects_in_features_mismatch() {
     // in_features=2 のはずが x は shape [1, 3]。
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
     let result = vars.forward(&x);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(AutodiffError::Shape(_))));
 }
 
 #[test]
 fn new_rejects_zero_in_features() {
     let result = Linear::new(0, 4, true, 1);
-    assert!(result.is_err());
+    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+}
+
+#[test]
+fn new_accepts_zero_out_features_symmetrically_via_both_constructors() {
+    // `in_features == 0` は拒否するが `out_features == 0` はテンソル生成
+    // まで到達する意図（サイズ 0 軸は妥当な shape。review 指摘 #91 の
+    // 非対称性 Low 指摘に対する境界固定テスト）ことを、`new`/
+    // `from_parameters` の両経路で確認する。
+    let via_new = Linear::new(4, 0, true, 1).unwrap();
+    assert_eq!(via_new.weight().shape(), &[4, 0]);
+    assert_eq!(via_new.bias().unwrap().shape(), &[0]);
+
+    let w = t(Vec::<f32>::new(), &[4, 0]);
+    let b = t(Vec::<f32>::new(), &[0]);
+    let via_from_parameters = Linear::from_parameters(w, Some(b)).unwrap();
+    assert_eq!(via_from_parameters.weight().shape(), &[4, 0]);
+}
+
+// --- 5. weight/bias シード導出の独立性（review 指摘 #91: Medium） ---
+
+#[test]
+fn sequential_layer_seeds_do_not_produce_correlated_bias_and_next_weight() {
+    // 連番シードで 2 層を構築する自然な使い方
+    // （`Linear::new(a, b, true, 1)` に続けて `Linear::new(b, c, true, 2)`）
+    // で、層 1 の bias と層 2 の weight が同一乱数列の使い回し
+    // （スケール違いなだけの完全相関）にならないことを確認する。
+    let l1 = Linear::new(4, 3, true, 1).unwrap();
+    let l2 = Linear::new(3, 2, true, 2).unwrap();
+
+    let bound1 = 1.0 / (4f32).sqrt();
+    let bound2 = 1.0 / (3f32).sqrt();
+    let l1_bias_normalized: Vec<f32> = l1
+        .bias()
+        .unwrap()
+        .as_slice()
+        .unwrap()
+        .iter()
+        .map(|v| v / bound1)
+        .collect();
+    let l2_weight_normalized: Vec<f32> = l2
+        .weight()
+        .as_slice()
+        .unwrap()
+        .iter()
+        .take(l1_bias_normalized.len())
+        .map(|v| v / bound2)
+        .collect();
+
+    assert_ne!(
+        l1_bias_normalized, l2_weight_normalized,
+        "l1.bias() と l2.weight() が正規化後に完全一致（同一乱数系列の使い回し）"
+    );
 }
