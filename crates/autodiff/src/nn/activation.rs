@@ -13,9 +13,12 @@
 //! （trait 統一は Linear・#91 と合わせて #94/#95 側で設計する）。
 //!
 //! スコープは ReLU・Sigmoid・Tanh の 3 種に限定する。Softmax は損失
-//! 関数（CrossEntropy・#189）と密結合のため対象外、GELU 等の追加活性
-//! 化は必要になった時点の後続イシューに委ねる（イシュー #92 実装計画
-//! §2-3）。
+//! 関数（CrossEntropy）と密結合のため対象外、GELU 等の追加活性化は
+//! 必要になった時点の後続イシューに委ねる（イシュー #92 実装計画
+//! §2-3）。CrossEntropy（#191・親イシュー #189）は log-softmax → NLL を
+//! 個別オペ合成せず 1 個の融合オペ（`tape::Op::CrossEntropyLoss`）として
+//! 実装したため、独立した Softmax プリミティブは結局追加していない
+//! （`nn/loss.rs` 冒頭 doc 参照）。
 
 use crate::var::Var;
 

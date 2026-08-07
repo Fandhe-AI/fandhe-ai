@@ -204,6 +204,54 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
+    /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
+    /// 親イシュー #189）。`self` = logits（追跡対象）、`targets` = 正解
+    /// クラス添字（非追跡・`Tensor<i32>`。勾配は定義されないため
+    /// `Var` にしない。`tape::Op::CrossEntropyLoss` doc 参照）。
+    ///
+    /// 検査順序（本メソッド冒頭 doc の演算メソッド規律に、targets
+    /// 範囲検査〈REQ-8 趣旨の境界外アクセス防止・A03 対策〉を追加）:
+    /// ①`class_dim` 範囲・targets shape 一致（`reduce_out_shape` を
+    /// 再利用。`class_dim >= rank` は `ShapeError::AxisOutOfRange`）
+    /// → ②targets 全添字が `0 <= t < C`（違反は
+    /// `AutodiffError::InvalidArgument`）→ ③forward 値計算
+    /// （`eval::cross_entropy_loss`）→ ④ノード記録。
+    pub fn cross_entropy_loss(
+        &self,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let logits_shape = self.value().shape().to_vec();
+        let expected_targets_shape = reduce_out_shape(&logits_shape, Some(class_dim))?;
+        require_same_shape(targets.shape(), &expected_targets_shape)?;
+
+        // `reduce_out_shape` が成功した時点で `class_dim < logits_shape.len()`
+        // が保証されるため、この添字アクセスは安全（`.claude/rules/
+        // coding-rust.md` REQ-8「境界検査を省略しない」の趣旨に沿い、
+        // 検査済みの添字のみでアクセスする）。
+        let num_classes = logits_shape[class_dim];
+        for t in eval::dense_vec_i32(targets) {
+            if t < 0 || (t as usize) >= num_classes {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "cross_entropy_loss: target 添字 {t} が範囲 [0, {num_classes}) を外れている"
+                )));
+            }
+        }
+
+        let value = eval::cross_entropy_loss(&self.value(), targets, class_dim, reduction);
+        let id = self.tape.push(
+            Op::CrossEntropyLoss {
+                logits: self.id,
+                targets: targets.clone(),
+                class_dim,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
     /// ReLU。shape を変えない要素ごとの演算のため構造的に失敗しえない
     /// （`docs/public-api-design.md` §3.2）。
     pub fn relu(&self) -> Var<'t> {
