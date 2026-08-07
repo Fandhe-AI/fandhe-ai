@@ -13,11 +13,15 @@
 //! TASK-9.1a（#91）で第 1 分割として `Linear`（全結合層）を実装した。
 //! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。#190
 //! （親 #189）で MSE 損失（[`loss`]）を追加し、#191 で CrossEntropy
-//! 損失（同じく [`loss`]）を追加した。gradient clipping・LR スケジューラ
-//! 最小セット（[`optim`]）は #195（親 #192）。SGD/AdamW 本体
-//! （#193/#194）・`compat::Sequential`（#94）は後続イシューのスコープ。
-//! 共通 `Module` trait の定義は本イシューでは行わない
-//! （`compat::Sequential` 設計時に確定する）。
+//! 損失（同じく [`loss`]）を追加した。#194（親 #192）で optimizer の
+//! 第 1 弾として AdamW（[`optim::AdamW`]）を追加した。#195（親 #192）で
+//! gradient clipping・LR スケジューラ最小セット（[`optim::clip`]・
+//! [`optim::lr_scheduler`]）を追加した。SGD 本体は `crate::optim`
+//! （本モジュールとは別モジュール。#193）で実装済み。
+//! `compat::Sequential`（#94）は後続イシューのスコープ。共通 `Module`
+//! trait・共通 `Optimizer` trait の定義は本イシューでは行わない
+//! （`compat::Sequential` 設計時、または `optim` 配下が揃った時点で
+//! 確定する）。
 
 mod init;
 mod linear;
