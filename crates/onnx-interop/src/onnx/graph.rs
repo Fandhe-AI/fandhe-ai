@@ -33,13 +33,27 @@ pub enum GraphError {
     /// `dims` の積（要素数）が `i64`/`usize` の範囲を超える（不正な巨大形状による
     /// 資源枯渇攻撃を拒否する。OWASP A03）。
     ElementCountOverflow { tensor_name: String },
-    /// 実データ（`raw_data` / `float_data` / `int64_data`）の長さが `dims` から
-    /// 導出した期待要素数と一致しない。
+    /// 実データ（`float_data` / `int64_data`）の要素数が `dims` から導出した
+    /// 期待要素数と一致しない（typed data フィールド用。要素数同士の比較）。
     DataLenMismatch {
         tensor_name: String,
         expected_elements: usize,
         actual_elements: usize,
     },
+    /// `raw_data`（バイト列）の長さが `dims` から導出した期待バイト長と一致しない。
+    /// `DataLenMismatch` と分離する理由（Bugbot 指摘）: 要素サイズの倍数でない
+    /// バイト長を要素数へ切り捨て除算すると `expected_elements` と同じ値に丸まり、
+    /// 「期待要素数と実要素数が同じなのにエラー」という自己矛盾した診断になる。
+    /// バイト長のまま報告することで丸めによる矛盾を避ける。
+    RawDataByteLenMismatch {
+        tensor_name: String,
+        expected_bytes: usize,
+        actual_bytes: usize,
+    },
+    /// `GraphProto.initializer` に同名の initializer が複数含まれる（不正な
+    /// ONNX モデル）。`HashMap::insert` は同名キーを後勝ちで無言上書きするため、
+    /// 本クレートが謳う no-silent-skip 契約に従い明示的に拒否する（Bugbot 指摘）。
+    DuplicateInitializerName { tensor_name: String },
 }
 
 impl fmt::Display for GraphError {
@@ -78,6 +92,19 @@ impl fmt::Display for GraphError {
                     f,
                     "データ長不整合（tensor={tensor_name}）: dims から期待される要素数={expected_elements} 実データ要素数={actual_elements}"
                 )
+            }
+            GraphError::RawDataByteLenMismatch {
+                tensor_name,
+                expected_bytes,
+                actual_bytes,
+            } => {
+                write!(
+                    f,
+                    "raw_data バイト長不整合（tensor={tensor_name}）: dims から期待されるバイト長={expected_bytes} 実バイト長={actual_bytes}"
+                )
+            }
+            GraphError::DuplicateInitializerName { tensor_name } => {
+                write!(f, "initializer 名の重複（tensor={tensor_name}）")
             }
         }
     }
@@ -162,10 +189,10 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     }
                 })?;
                 if t.raw_data.len() != expected_bytes {
-                    return Err(GraphError::DataLenMismatch {
+                    return Err(GraphError::RawDataByteLenMismatch {
                         tensor_name: t.name.clone(),
-                        expected_elements,
-                        actual_elements: t.raw_data.len() / 4,
+                        expected_bytes,
+                        actual_bytes: t.raw_data.len(),
                     });
                 }
                 let data: Vec<f32> = t
@@ -199,10 +226,10 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     }
                 })?;
                 if t.raw_data.len() != expected_bytes {
-                    return Err(GraphError::DataLenMismatch {
+                    return Err(GraphError::RawDataByteLenMismatch {
                         tensor_name: t.name.clone(),
-                        expected_elements,
-                        actual_elements: t.raw_data.len() / 8,
+                        expected_bytes,
+                        actual_bytes: t.raw_data.len(),
                     });
                 }
                 // chunks_exact(8) により各チャンクは必ず 8 要素の &[u8] となるため、
@@ -235,9 +262,16 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
 pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     let g: &GraphProto = model.graph.as_ref().ok_or(GraphError::NoGraph)?;
 
+    // `HashMap::insert` は同名キーを後勝ちで無言上書きするため、事前に重複を
+    // 検出して拒否する（不正な ONNX モデル。Bugbot 指摘・no-silent-skip 契約）。
     let mut initializers = HashMap::new();
     for init in &g.initializer {
-        initializers.insert(init.name.clone(), decode_tensor(init)?);
+        let decoded = decode_tensor(init)?;
+        if initializers.insert(init.name.clone(), decoded).is_some() {
+            return Err(GraphError::DuplicateInitializerName {
+                tensor_name: init.name.clone(),
+            });
+        }
     }
 
     // トポロジカル順の検証: 既に生成済み（initializer またはグラフ入力・前段

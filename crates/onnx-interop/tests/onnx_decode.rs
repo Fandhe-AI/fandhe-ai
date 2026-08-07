@@ -140,16 +140,16 @@ fn raw_data_len_mismatch_is_rejected() {
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("raw_data 長不整合は拒否されるはず");
     match err {
-        GraphError::DataLenMismatch {
+        GraphError::RawDataByteLenMismatch {
             tensor_name,
-            expected_elements,
-            actual_elements,
+            expected_bytes,
+            actual_bytes,
         } => {
             assert_eq!(tensor_name, "bad_tensor");
-            assert_eq!(expected_elements, 2);
-            assert_eq!(actual_elements, 1);
+            assert_eq!(expected_bytes, 8);
+            assert_eq!(actual_bytes, 4);
         }
-        other => panic!("DataLenMismatch を期待したが {other:?}"),
+        other => panic!("RawDataByteLenMismatch を期待したが {other:?}"),
     }
 }
 
@@ -271,16 +271,16 @@ fn empty_data_with_nonzero_dims_is_rejected_not_silently_accepted() {
     let model = model_with_single_initializer(t);
     let err = build_graph(&model).expect_err("空データ・非ゼロ dims は拒否されるはず");
     match err {
-        GraphError::DataLenMismatch {
+        GraphError::RawDataByteLenMismatch {
             tensor_name,
-            expected_elements,
-            actual_elements,
+            expected_bytes,
+            actual_bytes,
         } => {
             assert_eq!(tensor_name, "empty_but_nonzero_dims_tensor");
-            assert_eq!(expected_elements, 2);
-            assert_eq!(actual_elements, 0);
+            assert_eq!(expected_bytes, 8);
+            assert_eq!(actual_bytes, 0);
         }
-        other => panic!("DataLenMismatch を期待したが {other:?}"),
+        other => panic!("RawDataByteLenMismatch を期待したが {other:?}"),
     }
 }
 
@@ -306,6 +306,49 @@ fn truly_empty_tensor_dims_zero_is_still_accepted() {
             assert_eq!(shape.as_slice(), &[0]);
         }
         other => panic!("F32 RawTensor を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
+    // 同名の initializer が 2 つ含まれる不正な ONNX モデル。`HashMap::insert`
+    // をそのまま使うと後勝ちで前者が無言上書きされてしまう（Bugbot 指摘）。
+    // no-silent-skip 契約に従い明示的なエラーで拒否することを確認する。
+    let t1 = TensorProto {
+        dims: vec![1],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![1.0],
+        int32_data: vec![],
+        int64_data: vec![],
+        name: "dup".to_string(),
+        raw_data: vec![],
+    };
+    let t2 = TensorProto {
+        dims: vec![1],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![2.0],
+        int32_data: vec![],
+        int64_data: vec![],
+        name: "dup".to_string(),
+        raw_data: vec![],
+    };
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![],
+            name: "g".to_string(),
+            initializer: vec![t1, t2],
+            input: vec![],
+            output: vec![],
+        }),
+    };
+    let err = build_graph(&model).expect_err("initializer 名の重複は拒否されるはず");
+    match err {
+        GraphError::DuplicateInitializerName { tensor_name } => {
+            assert_eq!(tensor_name, "dup");
+        }
+        other => panic!("DuplicateInitializerName を期待したが {other:?}"),
     }
 }
 
