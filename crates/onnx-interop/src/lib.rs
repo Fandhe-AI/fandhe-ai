@@ -27,6 +27,10 @@
 //!   グラフ実行エンジン（decode → 属性値 → 本モジュール呼び出しの結線）は別イシューの
 //!   担当である。属性は proto 由来の型に依存しないプレーンな Rust 構造体・スライスとして
 //!   受け取り、デコード層の実装順序に依存しない。
+//! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
+//!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
+//!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
+//!   「save→load ラウンドトリップで bit 一致」の基盤となる。
 //!
 //! `require_keys` モジュールは非公開（`mod`）とし、型・関数のみ `pub use` で
 //! クレートルートへ再エクスポートする。モジュールを `pub mod` にすると
@@ -42,6 +46,7 @@
 pub mod onnx;
 pub mod ops;
 pub mod st_load;
+pub mod st_save;
 
 mod require_keys;
 pub use require_keys::{LoadError, require_keys};
