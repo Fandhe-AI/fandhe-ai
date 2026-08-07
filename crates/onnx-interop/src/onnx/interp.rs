@@ -396,16 +396,21 @@ fn compute_unsqueeze(env: &HashMap<String, Value>, node: &NodeProto) -> Result<V
 /// 維持する互換シムを備えていた（`interp.rs` 冒頭コメントが「#274 で本例外の
 /// 要否を再検討する」と明記していた箇所）。#274 で `ops::unsqueeze` を真の
 /// 多次元対応にした後もこの特定パターンとの互換性は必要なため、シム自体は
-/// 維持しつつ「1 要素データのみ」に適用範囲を限定する（`numel() != 1` の
-/// 一般的な多次元 i64 入力は `ops::unsqueeze` の真の意味論へ委譲する。
+/// 維持しつつ「`slice_repro.onnx` が実際に生成する形（入力 rank 1・
+/// axes 1 個・1 要素）」のみに適用範囲を限定する（`numel() == 1` だけを条件に
+/// すると rank ≥ 2 の shape=[1,1] 入力や `axes.len() >= 2` の呼び出しにも誤って
+/// 発火し、真の意味論〈`out_rank = t.rank() + axes.len()`〉より小さい rank を
+/// 無言で返してしまう。no-silent-skip 契約〈`graph.rs` 冒頭コメント〉に反するため
+/// `t.rank() == 1 && axes.len() == 1` も併せて要求する）。この条件を外れる
+/// 入力は `ops::unsqueeze` の真の意味論へフォールスルーする。
 /// `run_unsqueeze_i64_supports_multi_dim_input_rank`／
 /// `run_unsqueeze_i64_supports_output_rank_exceeding_one`〈`tests/onnx_interp.rs`〉
-/// が one 要素ではない多次元入力で真の意味論が使われることを固定化する）。
+/// が対象パターン外の入力で真の意味論が使われることを固定化する。
 fn unsqueeze_i64_with_scalar_gather_shim(
     t: &Tensor<i64>,
     axes: &[i64],
 ) -> Result<Value, InterpError> {
-    if t.numel() != 1 {
+    if !(t.rank() == 1 && axes.len() == 1 && t.numel() == 1) {
         return Ok(Value::I64(ops::unsqueeze(t, axes)?));
     }
     // 出力 rank（`t.rank() + axes.len()`）に対する axes 妥当性のみ検査し
@@ -959,10 +964,13 @@ mod tests {
     }
 
     #[test]
-    fn compute_gather_i64_rejects_indices_shape_length_mismatch() {
-        // レビュー指摘（Cursor Bugbot、PR #298）の回帰: f32 パス（`ops::gather`）と
-        // 同様に `OpError::LengthMismatch` で拒否されることを固定化する（イシュー #274 で
-        // `Value::I64` が `Tensor<i64>` 化された後も同じ検査が `ops::gather` 側で働く）。
+    fn compute_gather_i64_accepts_consistent_indices_shape() {
+        // `Value::I64` 経路（`compute_gather` → `ops::gather`）が idx_shape と
+        // 実データ長が一致する妥当な入力で正常に動作することを固定化する
+        // （イシュー #274 で `Value::I64` が `Tensor<i64>` 化された後の回帰）。
+        // 長さ不一致（`OpError::LengthMismatch`）を実際に拒否する検査自体は
+        // `crates/onnx-interop/src/ops/gather.rs` 側のテストが担う（PR #298・
+        // Cursor Bugbot 指摘の回帰ガードはそちらに現存する）。
         let n = node("Gather", vec!["data", "idx"], vec!["y"]);
         let g = empty_graph(vec![n], vec!["data", "idx"], vec!["y"]);
         let mut feeds = StdHashMap::new();
@@ -970,11 +978,6 @@ mod tests {
             "data".to_string(),
             Value::I64(Tensor::<i64>::new(vec![10, 20, 30], &[3]).unwrap()),
         );
-        // idx_shape の積は 3 だが、実データ長は 2（矛盾）。ここでは idx テンソル自体を
-        // shape=[3] で構築できないため、代わりに shape=[2] の妥当なテンソルを与え、
-        // gather 呼び出し内部の idx_shape 引数として渡される shape と実データの整合は
-        // `ops::gather` 側の `expected_len` 検査で保証される（このテストは shape=[3]
-        // の 3 要素 idx で正常に動くことを確認する簡略版に置き換える）。
         feeds.insert(
             "idx".to_string(),
             Value::I64(Tensor::<i64>::new(vec![0, 1], &[2]).unwrap()),
