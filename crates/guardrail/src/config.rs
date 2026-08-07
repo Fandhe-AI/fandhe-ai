@@ -10,6 +10,10 @@
 //! `docs/guardrail-self-repair-cli.md` 2.4 節の探索順序
 //! （`--config` 指定 → `--repo` 直下の `guardrail.toml` → 組み込み既定値）で
 //! 解決される（`main.rs::resolve_config` から呼ばれる）。
+//!
+//! TASK-4.1b（イシュー #105）の判定ロジック本体（[`crate::decision`]）は
+//! ここで定義する [`Thresholds`] をそのまま契約 API として受け取る（競合する
+//! 別形の `Thresholds` 型を `decision` 側で新設しない）。
 
 use std::fs;
 use std::path::{Path, PathBuf};
