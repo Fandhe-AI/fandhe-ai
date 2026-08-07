@@ -9,6 +9,7 @@
 use std::num::NonZeroU32;
 use std::time::Instant;
 
+use crate::error::SelfRepairError;
 use crate::kind::RepairKind;
 use crate::outcome::{AdoptionVerdict, LoopOutcome};
 use crate::report::{AttemptOutcome, AttemptRecord, LoopFailure, LoopReport};
@@ -110,6 +111,31 @@ where
                     error,
                     attempts: attempts.clone(),
                 })?;
+
+            // attempt 番号の単一の真実源はループ側のカウンタ（`attempt`）である。
+            // `Proposal.attempt`（`FixGenerator::generate` が返す pub フィールド）
+            // は本来この値と一致するはずだが、型で強制されておらず、将来の
+            // `FixGenerator` 実装（#133）が誤った/古い値を設定すると
+            // `LoopReport.attempts`（ループ側の attempt を記録）と
+            // `SelfRepairError::Judgement { attempt }`（`VerifiedEvidence::attempt()`
+            // 経由で Proposal 由来の値を記録）の attempt 番号が食い違い、
+            // `.claude/rules/security.md` の「取り込み判断の根拠を追跡可能に
+            // する」を静かに損ないうる（レビュー指摘）。ここで不一致を
+            // fail-closed で検出し、段階実行自体の失敗として扱う。
+            if proposal.attempt != attempt {
+                return Err(LoopFailure {
+                    error: SelfRepairError::FixGeneration {
+                        attempt,
+                        reason: format!(
+                            "fix generator が attempt={attempt} の呼び出しに対し \
+                             proposal.attempt={} を返しました（attempt 番号の単一の \
+                             真実源が破られています）",
+                            proposal.attempt
+                        ),
+                    },
+                    attempts: attempts.clone(),
+                });
+            }
 
             match self
                 .verification_gate
@@ -324,6 +350,34 @@ mod tests {
         }
     }
 
+    /// 取り込み判断段階のテストダブル。呼び出し順に固定の
+    /// [`AdoptionVerdict`] 列を返す（`FixedAdoptionJudge` は毎回同じ verdict
+    /// しか返せず、`Reject { retryable: true }` → 再試行 → 別 verdict という
+    /// runner.rs の状態機械の分岐を検証できないため、これを補うテストダブル。
+    /// レビュー指摘: `AdoptionVerdict::Reject { retryable: true }` の再試行
+    /// 分岐が未テストだった）。
+    struct ScriptedAdoptionJudge {
+        verdicts: RefCell<std::collections::VecDeque<AdoptionVerdict>>,
+    }
+    impl ScriptedAdoptionJudge {
+        fn new(verdicts: Vec<AdoptionVerdict>) -> Self {
+            ScriptedAdoptionJudge {
+                verdicts: RefCell::new(verdicts.into()),
+            }
+        }
+    }
+    impl AdoptionJudge for ScriptedAdoptionJudge {
+        fn judge(&self, _evidence: &VerifiedEvidence) -> Result<AdoptionVerdict, SelfRepairError> {
+            Ok(self
+                .verdicts
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(AdoptionVerdict::Escalate {
+                    reason: "スクリプトの verdict が尽きました（テスト設定不備）".to_string(),
+                }))
+        }
+    }
+
     fn finding(kind: RepairKind) -> Finding {
         Finding::new(kind, "dummy finding for test")
     }
@@ -517,6 +571,40 @@ mod tests {
                 stage: "adoption_judge",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn retryable_rejection_retries_and_then_adopts() {
+        // attempt 1: 検証合格するが取り込み判断が再試行可能な却下を返す
+        // → AdoptionRejectedRetryable を記録して次の試行へ、attempt 2:
+        // 検証合格・取り込み判断が承認 → Adopted。
+        // レビュー指摘: `Reject { retryable: true }` → continue 分岐が
+        // 12 件のテストのいずれからも経由されていなかった。
+        let loop_ = SelfRepairLoop::new(
+            FixedDetector(DetectionOutcome::Finding(finding(RepairKind::BugFix))),
+            RecordingFixGenerator::new(),
+            ScriptedVerificationGate::new(vec![true, true]),
+            ScriptedAdoptionJudge::new(vec![
+                AdoptionVerdict::Reject {
+                    retryable: true,
+                    reason: "一時的な要因のため再試行可能".to_string(),
+                },
+                AdoptionVerdict::Adopt,
+            ]),
+            nz(3),
+        );
+
+        let report = loop_.run(RepairKind::BugFix).expect("run should not error");
+        assert_eq!(report.outcome, LoopOutcome::Adopted);
+        assert_eq!(report.attempt_count(), 2);
+        assert!(matches!(
+            report.attempts[0].outcome,
+            AttemptOutcome::AdoptionRejectedRetryable { .. }
+        ));
+        assert!(matches!(
+            report.attempts[1].outcome,
+            AttemptOutcome::Adopted
         ));
     }
 

@@ -90,10 +90,13 @@ pub struct VerifiedEvidence {
 }
 
 impl VerifiedEvidence {
-    /// [`crate::stages::VerificationGate::verify`] の実装からのみ呼ばれる
-    /// 構築子（`pub(crate)`）。呼び出し元以外（クレート外）からは
-    /// 到達不能であることが本 typestate の安全性の根拠そのものであるため、
-    /// 可視性を緩めない。
+    /// `pub(crate)` 構築子。可視性が保証するのは「クレート外からは到達不能」
+    /// という境界のみであり、本クレート内の任意のコード（`VerificationGate`
+    /// 実装に限らない）から呼び出せる。型システムが強制するのはこのクレート
+    /// 境界までであり、「`VerificationGate::verify` 内でのみ構築する」という
+    /// 運用上の契約（stages.rs モジュールコメント参照）はレビューで担保する。
+    /// 本 typestate の安全性の根拠は「クレート外から検証迂回で構築できない」
+    /// ことであるため、可視性を `pub` へ緩めない。
     ///
     /// 検証ゲート実実行（イシュー #134）が本クレート内に `VerificationGate`
     /// 実装を追加するまでは、本コンストラクタの呼び出し元は

@@ -37,6 +37,15 @@ pub enum DetectionOutcome {
 }
 
 /// 検出された「修正すべき事象」（PoC-2 の検出結果に対応）。
+///
+/// `kind` と `summary` で可視性の方針を意図的に分けている。`kind` は
+/// [`crate::runner::SelfRepairLoop::run`] が `Detector::detect` に渡した
+/// [`RepairKind`] と一致するという不変条件を持ち（種別非依存性テスト
+/// `runner_is_kind_agnostic_across_all_repair_kinds` が検証する契約）、
+/// コンストラクタ経由以外での書き換えを許すと不変条件が壊れうるため
+/// private + アクセサとする。`summary` は人間可読なログ用の自由文字列で
+/// あり、そのような不変条件を持たないため `pub` フィールドで直接公開する
+/// （[`Proposal::description`] と同じ方針）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     kind: RepairKind,
@@ -75,6 +84,15 @@ pub trait Detector {
 }
 
 /// 修正案（PoC-2 の「修正試行」の 1 回分に対応）。
+///
+/// `attempt`・`description` とも不変条件を持たない値のため `pub`
+/// フィールドとする（[`Finding`] の可視性方針の説明を参照）。ただし
+/// `attempt` は [`FixGenerator::generate`] の呼び出し元（`runner.rs`）が
+/// 渡した試行番号と一致するはずの値であり、[`crate::runner::SelfRepairLoop::run`]
+/// はループ側の試行カウンタを単一の真実源として、返された `Proposal.attempt`
+/// との不一致を検査する（レビュー指摘: attempt 番号に単一の真実源がないと
+/// 監査ログ〈`LoopReport`〉とエラー詳細〈`SelfRepairError::Judgement`〉の
+/// attempt 番号が食い違いうる）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Proposal {
     /// 何回目の試行で生成されたか（1 始まり）。
