@@ -23,6 +23,7 @@ rust-ai-library/
 ├── Cargo.toml                # workspace 定義（9 クレート・許容依存 8 区分を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定。TASK-1.3）
+├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c・#117。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness（雛形）
 ├── scripts/
