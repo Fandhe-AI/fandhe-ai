@@ -41,6 +41,19 @@ pub enum AutodiffError {
     /// 本 variant を返す（`docs/public-api-design.md` §3.1
     /// 「クロステープ安全性」）。
     TapeMismatch,
+    /// 呼び出し元が渡した引数がテンソル未生成の段階で構築不可能な
+    /// 組み合わせだった（例: `nn::Linear::new` の `in_features == 0`。
+    /// `1/√in_features` が非有限になるため shape 検査より前に弾く）。
+    ///
+    /// `tensor-core::ShapeError`（`#[non_exhaustive]`）へ variant を
+    /// 追加する案もあったが、`ShapeError` は「テンソル生成・view 操作・
+    /// reshape の shape 不整合」（`tensor-core/src/error.rs` 冒頭）専用の
+    /// 型であり、`nn` 層のコンストラクタ引数検証はその責務外
+    /// （`tensor-core` は `nn` を知らない下位クレート）。そのため
+    /// `autodiff` 側で `ShapeError` をラップしない専用 variant として
+    /// 追加する（review 指摘 #91: 既存 `AxisOutOfRange` への転用は
+    /// 意味不一致だったため撤回）。
+    InvalidArgument(String),
 }
 
 impl From<ShapeError> for AutodiffError {
@@ -56,6 +69,9 @@ impl fmt::Display for AutodiffError {
             AutodiffError::Backward(msg) => write!(f, "backward error: {msg}"),
             AutodiffError::TapeMismatch => {
                 write!(f, "operands belong to different Tape instances")
+            }
+            AutodiffError::InvalidArgument(message) => {
+                write!(f, "invalid argument: {message}")
             }
         }
     }
