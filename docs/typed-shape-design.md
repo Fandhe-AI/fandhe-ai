@@ -4,6 +4,8 @@
 
 本文書は `docs/spec/05-tasks.md` TASK-10.1（REQ-10・Could・M3）を 3 分割した最初のサブタスク（イシュー #98）の成果物であり、**型設計（適用・非適用の境界を含む）の確定のみ**を対象とする。`crates/` 配下の Rust コードは本イシューでは変更しない（並行イシューとのファイル競合防止。`.claude/rules/delegation-impl.md`）。
 
+> **実装後追補（#101・TASK-10.2）**: 後続イシュー #99（実装）では、本節以降の §4 が示す型名（`TypedMatrix`／`TypedVector`／`Linear`）とは異なる型名（`FixedVec`／`FixedMat`／`BatchedFeatures`）・API 形状（GEMM 等の実計算を `kernel` クロージャへ委譲する方式）が採用された。`tensor-core` クレートが計算カーネルを持たずバックエンド抽象層に実計算を委ねる設計（REQ-1/REQ-2）が、本文書執筆時点ではまだ `typed` モジュールの API 形状に反映されていなかったための変更である。設計名と実装名の対応表・変更理由は `docs/typed-shape-limitations.md` 第 1 節を参照。以下の §4 は設計時点の記録としてそのまま残す。
+
 - 実装（型レベル API の追加）: 後続イシュー #99
 - コンパイル成功／失敗テストの整備: 後続イシュー #100
 - 限界の正式ドキュメント化（`docs/typed-shape-limitations.md`、TASK-10.2）: 後続イシュー #101
