@@ -30,6 +30,12 @@
 //! poc-v2-2-autodiff/evidence/`）の判定結果と整合することを固定する。
 //! これにより #16〜#19（TASK-1.5 全体）が完了する。
 //!
+//! TASK-9.1b（#92）で活性化関数プリミティブ `Var::sigmoid`
+//! （`var.rs`・`Op::Sigmoid`・VJP は `grad.rs`）と、互換 API 層
+//! （REQ-9）が積む薄いレイヤー実装群の入口 `nn`（`nn::activation`。
+//! ReLU/Sigmoid/Tanh）を追加した。共通 `Module` trait の定義は
+//! TASK-9.2（#94/#95・`compat::Sequential`）に委ねる。
+//!
 //! forward の値計算は `backend-cpu`（TASK-1.6・#20 以降。並行実装中で
 //! 未完）が完成するまでの暫定参照実装（`eval.rs`、非公開）で行い、
 //! TASK-1.9（バックエンド抽象層への接続）で backend 経由の実行に
