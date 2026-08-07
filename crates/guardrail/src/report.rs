@@ -58,6 +58,67 @@ pub struct Report {
     pub applied_exclusion_rule_ids: Vec<String>,
     pub verdict: Verdict,
     pub reason: String,
+    /// 機械可読の理由 ID 一覧（[`Decision::reason_conditions`] を転記。§2.1
+    /// 追記フィールド。前方互換の追加のため `schema_version` は `"1"` 据え置き）。
+    /// `Report` は `Deserialize` を要する（`report_round_trips_through_json`
+    /// 等）ため `String` 所有型で持つ（`VerdictSection::reason_conditions`
+    /// は `&'static str` のまま。TASK-4.1c・イシュー #106）。
+    pub reason_conditions: Vec<String>,
+}
+
+/// [`Report::from_decision`] が受け取る、判定に依存しない実測値一式。
+///
+/// `verdict`/`reason`/`reason_conditions`/`applied_exclusion_rule_ids` は
+/// 判定結果（[`Decision`]）から一意に導出するため本構造体には含めない
+/// （引数の数が増えても呼び出し側が判定結果と実測値を取り違えないように、
+/// 責務ごとに引数を分離する）。
+#[derive(Debug, Clone)]
+pub struct ReportInputs {
+    pub signal_source: SignalSource,
+    pub change_id: Option<String>,
+    pub lines_changed: u64,
+    pub public_api_broken: bool,
+    pub gaming_suspected: bool,
+    pub build_result: GateOutcome,
+    pub test_result: GateOutcome,
+    pub clippy_result: GateOutcome,
+    pub bench_measurements_pct: Vec<f64>,
+    pub bench_median_pct: f64,
+}
+
+impl Report {
+    /// [`ReportInputs`]（実測値一式）と [`Decision`]（判定結果）から
+    /// `Report` を構築する唯一の合流口（TASK-4.1c・イシュー #106）。
+    ///
+    /// `verdict`/`reason`/`reason_conditions`/`applied_exclusion_rule_ids` は
+    /// 必ず [`VerdictSection::from_decision`] を経由して埋める
+    /// （`.claude/rules/security.md` A08「判定の迂回経路を作らない」。
+    /// `crate::check` の injected／measured 両経路がこの関数のみを通して
+    /// `Report` を構築する）。
+    pub fn from_decision(inputs: ReportInputs, decision: &Decision) -> Self {
+        let section = VerdictSection::from_decision(decision);
+        Report {
+            schema_version: SCHEMA_VERSION.to_string(),
+            signal_source: inputs.signal_source,
+            change_id: inputs.change_id,
+            lines_changed: inputs.lines_changed,
+            public_api_broken: inputs.public_api_broken,
+            gaming_suspected: inputs.gaming_suspected,
+            build_result: inputs.build_result,
+            test_result: inputs.test_result,
+            clippy_result: inputs.clippy_result,
+            bench_measurements_pct: inputs.bench_measurements_pct,
+            bench_median_pct: inputs.bench_median_pct,
+            applied_exclusion_rule_ids: section.applied_exclusion_rule_ids,
+            verdict: decision.verdict(),
+            reason: section.reason,
+            reason_conditions: section
+                .reason_conditions
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        }
+    }
 }
 
 /// 計測値列から中央値を求める。TASK-4.1a では `report.rs` がレポートの整形にのみ
@@ -182,6 +243,7 @@ mod tests {
             applied_exclusion_rule_ids: vec![],
             verdict: Verdict::Escalate,
             reason: "判定ロジック未実装（TASK-4.1b/#105 で移植）".to_string(),
+            reason_conditions: vec!["gate_skipped".to_string()],
         };
         let json = serde_json::to_string(&report).unwrap();
         let parsed: Report = serde_json::from_str(&json).unwrap();
