@@ -245,9 +245,20 @@ mod tests {
     use std::process::Command;
 
     fn run_git(cwd: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(cwd)
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(cwd);
+        // 祖先プロセス（lefthook の pre-push フック等）から継承された
+        // `GIT_DIR`／`GIT_WORK_TREE` 等を除去する。除去しないと `current_dir`
+        // 指定を無視して呼び出し元プロセスのリポジトリ（本 worktree の
+        // `.git`）に対して動作してしまい、フィクスチャ用一時リポジトリの
+        // 隔離が壊れる（`exclusion_match::git_command` と同一方針。#337
+        // レビュー対応時に発覚した並行 push 環境下でのテストフレーク）。
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let output = cmd
             .output()
             .unwrap_or_else(|e| panic!("git {args:?} 起動に失敗: {e}"));
         assert!(

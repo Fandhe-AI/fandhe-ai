@@ -170,11 +170,17 @@ fn measured_clean_tiny_crate_yields_auto_apply_exit_0() {
     .unwrap();
 
     let git = |args: &[&str]| {
-        let status = Command::new("git")
-            .args(args)
-            .current_dir(&dir)
-            .status()
-            .expect("git 起動に失敗");
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(&dir);
+        // 祖先プロセス（lefthook の pre-push フック等）から継承された
+        // `GIT_DIR`／`GIT_WORK_TREE` 等を除去する（`exclusion_match::git_command`
+        // と同一方針。除去しないとフィクスチャ用一時リポジトリの隔離が壊れる）。
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let status = cmd.status().expect("git 起動に失敗");
         assert!(status.success(), "git {args:?} が失敗");
     };
     git(&["init", "-q"]);

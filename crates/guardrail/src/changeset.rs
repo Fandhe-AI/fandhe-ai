@@ -94,12 +94,17 @@ mod tests {
             std::env::temp_dir().join(format!("guardrail-changeset-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let status = std::process::Command::new("git")
-            .arg("init")
-            .arg("-q")
-            .current_dir(&dir)
-            .status()
-            .unwrap();
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("init").arg("-q").current_dir(&dir);
+        // 祖先プロセス（lefthook の pre-push フック等）から継承された
+        // `GIT_DIR`／`GIT_WORK_TREE` 等を除去する（`exclusion_match::git_command`
+        // と同一方針。除去しないとフィクスチャ用一時リポジトリの隔離が壊れる）。
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+        let status = cmd.status().unwrap();
         assert!(status.success());
 
         let err = resolve_baseline_commit(&dir, "this-ref-does-not-exist").unwrap_err();
