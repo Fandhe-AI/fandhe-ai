@@ -23,9 +23,23 @@ fn map_elementwise(
     Tensor::new(data, xc.shape()).map_err(OpError::from)
 }
 
-/// `Relu(x) = max(x, 0)`。
+/// NaN を伝播する `max`。`f32::max` は NaN 入力を暗黙に非 NaN 側へ潰す
+/// （IEEE 754 の `maxNum` 系挙動）ため、`Relu` にそのまま使うと ONNX Runtime・
+/// `autodiff::eval::relu`（`crates/autodiff/src/eval.rs`）の NaN 伝播動作と
+/// 不整合になり、バックエンド数値一致検証で上流の数値破壊（NaN）が
+/// 隠蔽されてしまう。両者の意味論を揃えるため同じ判定を用いる。
+fn nan_propagating_max(a: f32, b: f32) -> f32 {
+    if a.is_nan() || b.is_nan() {
+        f32::NAN
+    } else {
+        a.max(b)
+    }
+}
+
+/// `Relu(x) = max(x, 0)`。NaN 入力は `nan_propagating_max` により NaN のまま返す
+/// （`autodiff::eval::relu` と同じ意味論。ONNX Runtime とも整合する）。
 pub fn relu(x: &Tensor<f32>) -> Result<Tensor<f32>, OpError> {
-    map_elementwise("Relu", x, |v| v.max(0.0))
+    map_elementwise("Relu", x, |v| nan_propagating_max(v, 0.0))
 }
 
 /// `Sigmoid(x) = 1 / (1 + exp(-x))`。
@@ -74,6 +88,17 @@ mod tests {
         for (i, &e) in expected.iter().enumerate() {
             assert_eq!(y.get(&[i]).unwrap(), e);
         }
+    }
+
+    #[test]
+    fn relu_propagates_nan() {
+        // `f32::max` は NaN を暗黙に 0.0 へ潰すため NaN 非伝播バグの回帰確認
+        // （autodiff::eval::relu・ONNX Runtime との整合。#272 レビュー指摘）。
+        let x = Tensor::<f32>::new(vec![f32::NAN, -1.0, 2.0], &[3]).unwrap();
+        let y = relu(&x).unwrap();
+        assert!(y.get(&[0]).unwrap().is_nan());
+        assert_eq!(y.get(&[1]).unwrap(), 0.0);
+        assert_eq!(y.get(&[2]).unwrap(), 2.0);
     }
 
     #[test]
