@@ -90,6 +90,22 @@ impl Linear {
                 actual: weight.rank(),
             }));
         }
+        // `weight.shape()[0]`（in_features）が 0 の場合、`tensor-core::ops_shape::matmul_out_shape`
+        // は `lhs[1]==rhs[0]==0` を zero-K パスとして妥当な shape 扱いで許容してしまうため、
+        // forward はエラーにならず全要素 0.0 の出力を静かに返す（review 指摘 #91）。
+        // `Linear::new` が同条件を `AutodiffError::InvalidArgument` で明示的に拒否しているのに
+        // 対し、safetensors ロード等の外部由来パラメータ入口である `from_parameters` がこの
+        // 検証を欠くと、壊れた／欠損した checkpoint（shape が `[0, N]` に縮退したもの）を
+        // エラーにせず読み込み、学習・推論が常時ゼロ出力のまま進行しうる（A03: 外部由来
+        // パラメータを計算前に検証する契約。`.claude/rules/security.md`）。`out_features == 0`
+        // は妥当な shape として引き続き許容する（`new` と対称。docstring 参照）。
+        if weight.shape()[0] == 0 {
+            return Err(AutodiffError::InvalidArgument(
+                "Linear::from_parameters: weight.shape()[0] (in_features) must be > 0 \
+                 (zero-K matmul would silently produce an all-zero output)"
+                    .to_string(),
+            ));
+        }
         if let Some(ref b) = bias {
             if b.rank() != 1 {
                 return Err(AutodiffError::Shape(ShapeError::RankMismatch {

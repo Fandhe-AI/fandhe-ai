@@ -330,6 +330,21 @@ fn new_rejects_zero_in_features() {
 }
 
 #[test]
+fn from_parameters_rejects_zero_in_features() {
+    // review 指摘 #91（Medium）: `from_parameters` は
+    // `weight.shape()[0] == 0`（in_features）を拒否せず、`forward` も
+    // `tensor-core::ops_shape::matmul_out_shape` の zero-K パスを
+    // 素通りして全要素 0.0 の出力を静かに返してしまっていた。
+    // 壊れた／欠損した checkpoint（in_features 情報が失われ shape が
+    // `[0, N]` に縮退したもの）を読み込んだ場合でもエラーにせず学習・
+    // 推論が進行しうるため、`new` と対称に `AutodiffError::InvalidArgument`
+    // で拒否することを固定する。
+    let w = t(Vec::<f32>::new(), &[0, 4]);
+    let result = Linear::from_parameters(w, None);
+    assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+}
+
+#[test]
 fn new_accepts_zero_out_features_symmetrically_via_both_constructors() {
     // `in_features == 0` は拒否するが `out_features == 0` はテンソル生成
     // まで到達する意図（サイズ 0 軸は妥当な shape。review 指摘 #91 の
