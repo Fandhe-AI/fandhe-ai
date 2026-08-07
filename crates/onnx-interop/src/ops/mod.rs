@@ -33,7 +33,7 @@ mod slice;
 mod softmax;
 
 pub use activation::{erf, relu, sigmoid};
-pub use arith::{add, div, modulo, mul, sqrt};
+pub use arith::{add, add_i64, div, div_i64, mod_i64, modulo, mul, mul_i64, sqrt};
 pub use cast::{
     cast_bool_to_float, cast_f16_to_float, cast_to_bool, cast_to_f16, cast_to_float, cast_to_int64,
     check_supported_cast_target,
