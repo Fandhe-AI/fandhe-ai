@@ -81,6 +81,9 @@ fn forward_values_match_expected() {
     let tanh0 = zero.tanh();
     assert_eq!(tanh0.to_tensor().get(&[0]).unwrap(), 0.0);
 
+    let sigmoid0 = zero.sigmoid();
+    assert_eq!(sigmoid0.to_tensor().get(&[0]).unwrap(), 0.5);
+
     let s = a.sum(None).unwrap();
     assert_eq!(s.to_tensor().get(&[]).unwrap(), 10.0);
     let s_axis0 = a.sum(Some(0)).unwrap();
@@ -157,6 +160,18 @@ fn to_tensor_does_not_hold_borrow_across_node_addition() {
     assert_eq!(val_sum, 3.0);
     let r2 = a.exp();
     assert!(r2.to_tensor().get(&[0]).unwrap() > 0.0);
+}
+
+/// 6b. `Var::sigmoid`（TASK-9.1b・#92）がテープへノードを 1 個追記する
+///     ことを検証する（受け入れ条件「forward 実行時にテープへ演算が
+///     記録される」の Sigmoid 個別確認）。
+#[test]
+fn sigmoid_records_single_node() {
+    let tape = Tape::new();
+    let x = tape.var(&t(vec![1.0, -1.0], &[2]));
+    let before = tape.len();
+    let _ = x.sigmoid();
+    assert_eq!(tape.len(), before + 1);
 }
 
 /// 6. ブロードキャスト付き `add`（bias 加算 `[N,M] + [M]`）の forward 値と

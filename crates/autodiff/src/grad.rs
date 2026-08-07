@@ -24,8 +24,9 @@ use crate::tape::{NodeId, Op, TapeNode};
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
 /// `nodes` から、各入力 `NodeId` への勾配寄与を返す。`out_value` は
-/// 当該ノードの forward 記録値で、`Exp`/`Tanh`/`Max` が再計算を避けて
-/// 再利用する。`Op::Leaf` は入力を持たないため空 `Vec` を返す。
+/// 当該ノードの forward 記録値で、`Exp`/`Tanh`/`Sigmoid`/`Max` が
+/// 再計算を避けて再利用する（`Sigmoid` は TASK-9.1b・#92 で追加）。
+/// `Op::Leaf` は入力を持たないため空 `Vec` を返す。
 pub(crate) fn vjp(
     op: &Op,
     out_value: &Tensor<f32>,
@@ -67,6 +68,14 @@ pub(crate) fn vjp(
         Op::Tanh(a) => {
             // d/dx tanh(x) = 1 - tanh(x)^2。同じく `out_value` を再利用。
             let factor = tanh_grad_factor(out_value);
+            let da = eval::mul(upstream, &factor);
+            vec![(a, da)]
+        }
+        Op::Sigmoid(a) => {
+            // d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))。
+            // `Exp`/`Tanh` と同じく forward 記録値 `out_value`
+            // （= sigmoid(x)）を再利用し再計算しない（TASK-9.1b・#92）。
+            let factor = sigmoid_grad_factor(out_value);
             let da = eval::mul(upstream, &factor);
             vec![(a, da)]
         }
@@ -184,6 +193,16 @@ fn tanh_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
     let data = dense_vec(out_value);
     let out: Vec<f32> = data.iter().map(|&v| 1.0 - v * v).collect();
+    build_tensor(out, &shape)
+}
+
+/// `Sigmoid` の VJP 係数 `sigmoid(x) * (1 - sigmoid(x))` を forward
+/// 記録値 `out_value`（= `sigmoid(x)`）から計算する（TASK-9.1b・#92。
+/// `tanh_grad_factor` と同型の out_value 再利用パターン）。
+fn sigmoid_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
+    let shape = out_value.shape().to_vec();
+    let data = dense_vec(out_value);
+    let out: Vec<f32> = data.iter().map(|&v| v * (1.0 - v)).collect();
     build_tensor(out, &shape)
 }
 
@@ -598,6 +617,39 @@ mod tests {
         assert_grad_close("tanh dA", &da, &num_da);
     }
 
+    // --- Sigmoid（飽和域を含む） ---
+
+    #[test]
+    fn sigmoid_grad_matches_numeric() {
+        let a = t(&[0.5, -1.0, 1.5, -0.3], &[2, 2]);
+        let s = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+
+        let out_value = eval::sigmoid(&a);
+        let g = s.clone();
+        let factor = sigmoid_grad_factor(&out_value);
+        let da = eval::mul(&g, &factor);
+        let num_da = numeric_grad_unary(&a, &s, eval::sigmoid);
+
+        assert_grad_close("sigmoid dA", &da, &num_da);
+    }
+
+    #[test]
+    fn sigmoid_grad_saturated_region_matches_numeric() {
+        // |x| が大きい飽和域（勾配 ≈ 0）でも中央差分と一致することを
+        // 確認する（`eval::sigmoid` の数値安定形が飽和域で NaN/Inf を
+        // 出さないことの間接検証も兼ねる）。
+        let a = t(&[8.0, -8.0, 15.0, -15.0], &[2, 2]);
+        let s = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+
+        let out_value = eval::sigmoid(&a);
+        let g = s.clone();
+        let factor = sigmoid_grad_factor(&out_value);
+        let da = eval::mul(&g, &factor);
+        let num_da = numeric_grad_unary(&a, &s, eval::sigmoid);
+
+        assert_grad_close("sigmoid(saturated) dA", &da, &num_da);
+    }
+
     // --- Sum（dim: None / Some(0) / Some(1)） ---
 
     #[test]
@@ -745,7 +797,8 @@ mod tests {
     // 8 演算（Add/Mul/Relu/Exp/Tanh/Sum/Max/MseLoss）は内部ヘルパーを
     // 直接呼ぶ形でしか検証されていなかった。各 match アームの配線
     // （`nodes[a.0]`/`nodes[b.0]` の対応順序）を通しで検証するため、
-    // 全 9 演算（Leaf を除く）を vjp() 経由でテストする。
+    // 全 9 演算（Leaf を除く）を vjp() 経由でテストする。Sigmoid
+    // （TASK-9.1b・#92）追加により対象は 10 演算に拡大。
 
     fn leaf_node(value: Tensor<f32>) -> TapeNode {
         TapeNode {
@@ -858,6 +911,22 @@ mod tests {
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
         let expected = eval::mul(&g, &tanh_grad_factor(&out_value));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
+    fn vjp_dispatch_sigmoid_returns_single_input() {
+        let a = t(&[0.5, -1.0, 1.5, -0.3], &[2, 2]);
+        let g = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::sigmoid(&a);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Sigmoid(NodeId(0));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = eval::mul(&g, &sigmoid_grad_factor(&out_value));
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
     }
 
