@@ -38,6 +38,11 @@
 //!   計測 API（`run`・`MeasurementConfig`・`median_q1_q3`）を呼び出す実行系。判定ロジック
 //!   本体（[`decision`]）・3 分岐出力（[`report::VerdictSection`]）とは並行実装のため
 //!   未結線（同モジュールのドキュメント「スコープ境界」参照）。
+//! - [`policy_exclusion`][]: ポリシー除外リスト（REQ-5）の match 方式評価
+//!   （`arch-hyperparameter-change`。TASK-5.2a・イシュー #122 管轄）。
+//!   `policy-exclusion.toml` のロード（#119／#124）・[`decision`] との統合
+//!   （#124）は未実装で、本モジュール単体では「変更ファイルパス一覧 ×
+//!   検証済みパターン列 → match 判定」のみを提供する（モジュール冒頭コメント参照）。
 //!
 //! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
 //! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
@@ -45,9 +50,8 @@
 //! を組み合わせて CLI フローを構成するのみで、判定ロジック自体はライブラリ側に置く
 //! （`self-repair` からの lib 呼び出しと CLI 実行が同じロジックを共有するため）。
 //!
-//! ポリシー除外リスト評価（TASK-5.2 系）・`self-repair` 連携（TASK-4.2 以降）は
-//! 本クレートの他モジュールが順次追加する想定であり、本 PR 群のスコープ外
-//! （`.claude/rules/out-of-scope-tracking.md`）。
+//! `self-repair` 連携（TASK-4.2 以降）は本クレートの他モジュールが順次追加する
+//! 想定であり、本 PR 群のスコープ外（`.claude/rules/out-of-scope-tracking.md`）。
 
 pub mod bench_gate;
 pub mod cli;
@@ -58,6 +62,7 @@ pub mod error;
 pub mod eval;
 pub mod exit_code;
 pub mod median_gate;
+pub mod policy_exclusion;
 pub mod report;
 pub mod signals;
 pub mod toml_lite;
