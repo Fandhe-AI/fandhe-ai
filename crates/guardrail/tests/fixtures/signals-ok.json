@@ -1,0 +1,9 @@
+{
+  "lines_changed": 42,
+  "public_api_broken": false,
+  "gaming_suspected": false,
+  "build_result": "pass",
+  "test_result": "pass",
+  "clippy_result": "pass",
+  "bench_measurements_pct": [1.0, 1.2, 0.9, 1.1, 1.05]
+}
