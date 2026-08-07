@@ -148,8 +148,19 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     data: t.float_data.clone(),
                     shape,
                 })
-            } else if !t.raw_data.is_empty() || expected_elements == 0 {
-                let expected_bytes = expected_elements * 4;
+            } else {
+                // raw_data が空でも「dims=[0] 等の空テンソル」と「data フィールドが
+                // 一つも埋まっていない不正入力（例: external_data 参照だが本クレートは
+                // TensorProto.data_location 等を意図的に未定義。プロトコル上は未宣言
+                // フィールドとして無言でスキップされてしまう）」を区別できないため、
+                // 必ず expected_bytes との一致検査を通す（× 0 要素なら 0 バイト一致で
+                // 素通りする）。expected_elements の乗算自体もオーバーフローしうるため
+                // checked_mul で拒否する（巨大 dims による資源枯渇攻撃を弾く。A03）。
+                let expected_bytes = expected_elements.checked_mul(4).ok_or_else(|| {
+                    GraphError::ElementCountOverflow {
+                        tensor_name: t.name.clone(),
+                    }
+                })?;
                 if t.raw_data.len() != expected_bytes {
                     return Err(GraphError::DataLenMismatch {
                         tensor_name: t.name.clone(),
@@ -163,11 +174,6 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .collect();
                 Ok(RawTensor::F32 { data, shape })
-            } else {
-                Ok(RawTensor::F32 {
-                    data: vec![],
-                    shape,
-                })
             }
         }
         super::proto::data_type::INT64 => {
@@ -183,8 +189,15 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     data: t.int64_data.clone(),
                     shape,
                 })
-            } else if !t.raw_data.is_empty() || expected_elements == 0 {
-                let expected_bytes = expected_elements * 8;
+            } else {
+                // FLOAT 分岐と同じ理由（external_data 等で data が一つも埋まらない
+                // 不正入力を「空テンソル」と誤認しないための一致検査。checked_mul で
+                // 乗算オーバーフローも拒否する）。
+                let expected_bytes = expected_elements.checked_mul(8).ok_or_else(|| {
+                    GraphError::ElementCountOverflow {
+                        tensor_name: t.name.clone(),
+                    }
+                })?;
                 if t.raw_data.len() != expected_bytes {
                     return Err(GraphError::DataLenMismatch {
                         tensor_name: t.name.clone(),
@@ -205,11 +218,6 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     })
                     .collect();
                 Ok(RawTensor::I64 { data, shape })
-            } else {
-                Ok(RawTensor::I64 {
-                    data: vec![],
-                    shape,
-                })
             }
         }
         other => Err(GraphError::UnknownDataType {

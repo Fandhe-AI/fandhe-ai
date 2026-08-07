@@ -225,6 +225,91 @@ fn element_count_overflow_is_rejected() {
 }
 
 #[test]
+fn byte_length_multiply_overflow_is_rejected() {
+    // dims の積（要素数）自体は usize に収まるが、要素サイズ（F32=4byte）を
+    // 掛けた際にオーバーフローする境界値（2^62 は usize::MAX / 4 を超える）。
+    // element_count の checked_mul だけでは弾けず、バイト長計算側の checked_mul
+    // が拒否する必要があることの回帰確認（advisor 指摘: expected_bytes の乗算が
+    // 素の `*` だとオーバーフロー時に debug ビルドは panic、release は 0 に
+    // wrap して不正なテンソルを通してしまう）。
+    let t = TensorProto {
+        dims: vec![1i64 << 62],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![],
+        int32_data: vec![],
+        int64_data: vec![],
+        name: "byte_overflow_tensor".to_string(),
+        raw_data: vec![],
+    };
+    let model = model_with_single_initializer(t);
+    let err = build_graph(&model).expect_err("バイト長オーバーフローは拒否されるはず");
+    match err {
+        GraphError::ElementCountOverflow { tensor_name } => {
+            assert_eq!(tensor_name, "byte_overflow_tensor");
+        }
+        other => panic!("ElementCountOverflow を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn empty_data_with_nonzero_dims_is_rejected_not_silently_accepted() {
+    // float_data・raw_data のいずれも空だが dims=[2]（2 要素を期待）の不正入力。
+    // TensorProto.data_location/external_data（本クレートが意図的に未定義）を
+    // 使う参照専用テンソル等がこの形で decode されうるが、無言で「空データの
+    // テンソル」として通してしまうと #78 のインタープリタに矛盾した
+    // RawTensor（shape は 2 要素だが data は空）を渡すことになる（advisor 指摘）。
+    // dims=[0] の真の空テンソルとは区別し、こちらは明示的に拒否する。
+    let t = TensorProto {
+        dims: vec![2],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![],
+        int32_data: vec![],
+        int64_data: vec![],
+        name: "empty_but_nonzero_dims_tensor".to_string(),
+        raw_data: vec![],
+    };
+    let model = model_with_single_initializer(t);
+    let err = build_graph(&model).expect_err("空データ・非ゼロ dims は拒否されるはず");
+    match err {
+        GraphError::DataLenMismatch {
+            tensor_name,
+            expected_elements,
+            actual_elements,
+        } => {
+            assert_eq!(tensor_name, "empty_but_nonzero_dims_tensor");
+            assert_eq!(expected_elements, 2);
+            assert_eq!(actual_elements, 0);
+        }
+        other => panic!("DataLenMismatch を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn truly_empty_tensor_dims_zero_is_still_accepted() {
+    // dims=[0] は「0 要素の空テンソル」を表す正当な値であり、上の
+    // 「dims が非ゼロなのに data が空」の拒否対象と混同してはならない
+    // （回帰確認: 一致検査を expected_bytes==0==raw_data.len() で通す経路）。
+    let t = TensorProto {
+        dims: vec![0],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![],
+        int32_data: vec![],
+        int64_data: vec![],
+        name: "truly_empty_tensor".to_string(),
+        raw_data: vec![],
+    };
+    let model = model_with_single_initializer(t);
+    let graph = build_graph(&model).expect("dims=[0] の空テンソルは受理されるはず");
+    match graph.initializers.get("truly_empty_tensor") {
+        Some(RawTensor::F32 { data, shape }) => {
+            assert!(data.is_empty());
+            assert_eq!(shape.as_slice(), &[0]);
+        }
+        other => panic!("F32 RawTensor を期待したが {other:?}"),
+    }
+}
+
+#[test]
 fn non_topological_node_order_is_rejected() {
     // ノード n1 が、まだどこからも生成されていない "phantom" を入力に取る
     // （トポロジカル順違反）。initializer・グラフ入力のいずれにも属さない。
