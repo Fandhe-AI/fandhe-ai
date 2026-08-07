@@ -1,17 +1,17 @@
-//! ループ全体の結論と、検証通過を型で保証する typestate（TASK-3.1a・イシュー #132・REQ-3）。
+//! ループ全体の結論と、検証通過を型で保証する typestate（TASK-3.1a・イシュー #132・REQ-3。
+//! guardrail シグナル拡張は TASK-3.1d・イシュー #135）。
 //!
 //! [`crate::runner::SelfRepairLoop`] が返す最終結果 [`LoopOutcome`] と、
 //! [`crate::stages::AdoptionJudge`] への入力を検証済みに限定する
 //! [`VerifiedEvidence`] を定義する。
 //!
-//! v1（`Fandhe-AI/rust-ai-library-v1` `tools/self-repair/src/outcome.rs`）の
-//! S2 版は `VerifiedEvidence` が `guardrail::GateSignals`/`guardrail::BenchSignal`
-//! 等の guardrail 型を保持するが、v2 の `guardrail` クレートはまだ移植されて
-//! いない（イシュー #103 が open）。本イシューでは guardrail 非依存の v1 S1
-//! 形（`attempt`・`proposal_summary`・`gate_report` の 3 フィールド）で移植し、
-//! guardrail シグナル（`gates`/`bench`/`lines_changed`/`api_broken`/
-//! `gaming_suspect`/`exclusion_rule_ids`）の追加は guardrail 統合を担う
-//! 後続イシュー（#135）のスコープとする。
+//! v1（`Fandhe-AI/rust-ai-library-v1` `tools/self-repair/src/outcome.rs`）S2 版の
+//! `VerifiedEvidence` は `guardrail::GateSignals`/`guardrail::BenchSignal` 等の
+//! guardrail 型を保持する。v2 の `guardrail` クレートは TASK-4.1 系（イシュー #103・
+//! #104〜#107）で `decision`/`config` モジュールが移植済みのため、本モジュールも
+//! S2 形へ揃え、`gates`/`bench`/`lines_changed`/`api_broken`/`gaming_suspect`/
+//! `exclusion_rule_ids` の 6 シグナルを保持する（[`crate::judge::GuardrailAdoptionJudge`]
+//! がこれらをそのまま `guardrail::DecisionInput::new` へ渡す）。
 
 /// 自己修復ループ 1 回分の最終結論。
 ///
@@ -49,10 +49,10 @@ pub enum LoopOutcome {
 
 /// 取り込み判断（[`crate::stages::AdoptionJudge::judge`]）の結論。
 ///
-/// guardrail 統合（#135）後は `guardrail::decision::Verdict`（却下 >
-/// エスカレーション > 自動適用の優先順序）と同型・同順序に揃える想定
-/// （TASK-3.1 実装計画セクション 3。現時点では guardrail クレート未移植の
-/// ため参照しない）。
+/// `guardrail::decision::Verdict`（却下 > エスカレーション > 自動適用の
+/// 優先順序）と同型・同順序に揃えている（TASK-3.1 実装計画セクション 3。
+/// [`crate::judge::GuardrailAdoptionJudge`] が `Verdict` の 3 variant を
+/// 網羅 match で本型へ変換する。変換の詳細は `judge.rs` 参照）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AdoptionVerdict {
     /// 取り込みを承認する。
@@ -81,15 +81,25 @@ pub enum AdoptionVerdict {
 /// A08: 自己修復ループが取り込む変更はガードレール判定を必ず経由し、判定の
 /// 迂回経路を作らない）。
 ///
-/// guardrail 統合（#135）で `gates`/`bench`/`lines_changed`/`api_broken`/
-/// `gaming_suspect`/`exclusion_rule_ids` の構造化シグナルを追加する想定
-/// （v1 `outcome.rs` S2 版参照）。本イシューでは guardrail 非依存の 3
-/// フィールドのみを保持する。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `gates`/`bench`/`lines_changed`/`api_broken`/`gaming_suspect`/
+/// `exclusion_rule_ids` の 6 フィールドは guardrail 3 分岐判定の入力
+/// （`guardrail::DecisionInput::new`）と 1 対 1 対応する（v1 `outcome.rs` S2
+/// 版を移植。`crate::judge::GuardrailAdoptionJudge::judge` がそのまま
+/// `DecisionInput::new` の引数として渡す）。`bench: guardrail::BenchSignal`
+/// は `f64`（`Measured { median_pct }`）を内包し `Eq` を実装できないため、
+/// 本型の derive からも `Eq` を外している（`PartialEq` は維持。`stages.rs`
+/// の `VerificationOutcome` も本型を内包するため同様に `Eq` を外す）。
+#[derive(Debug, Clone, PartialEq)]
 pub struct VerifiedEvidence {
     attempt: u32,
     proposal_summary: String,
     gate_report: String,
+    gates: guardrail::GateSignals,
+    bench: guardrail::BenchSignal,
+    lines_changed: u64,
+    api_broken: bool,
+    gaming_suspect: bool,
+    exclusion_rule_ids: Vec<String>,
 }
 
 impl VerifiedEvidence {
@@ -105,15 +115,34 @@ impl VerifiedEvidence {
     /// `crate::verify_gates::CargoVerificationGate::verify`（全ゲート通過時。
     /// 本番経路）となった。`runner.rs` の `#[cfg(test)]` テストダブルからも
     /// 引き続き呼ばれる。
+    ///
+    /// `exclusion_rule_ids` を含む 6 シグナルはここでは再検証しない
+    /// （`guardrail::DecisionInput::new` が「ゲート未全通過 +
+    /// `BenchSignal::Measured`」等の矛盾入力を fail-closed に拒否する最終
+    /// 防衛線であり、構築子側での重複検証は行わない方針。v1 のコメント
+    /// 方針を踏襲）。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         attempt: u32,
         proposal_summary: impl Into<String>,
         gate_report: impl Into<String>,
+        gates: guardrail::GateSignals,
+        bench: guardrail::BenchSignal,
+        lines_changed: u64,
+        api_broken: bool,
+        gaming_suspect: bool,
+        exclusion_rule_ids: Vec<String>,
     ) -> Self {
         VerifiedEvidence {
             attempt,
             proposal_summary: proposal_summary.into(),
             gate_report: gate_report.into(),
+            gates,
+            bench,
+            lines_changed,
+            api_broken,
+            gaming_suspect,
+            exclusion_rule_ids,
         }
     }
 
@@ -134,5 +163,44 @@ impl VerifiedEvidence {
     /// ログ埋め込み用）。
     pub fn gate_report(&self) -> &str {
         &self.gate_report
+    }
+
+    /// build/test/clippy 3 ゲートの状態（`guardrail::DecisionInput::new` の
+    /// `gates` 引数にそのまま渡す）。
+    pub fn gates(&self) -> guardrail::GateSignals {
+        self.gates
+    }
+
+    /// ベンチ計測結果（`guardrail::DecisionInput::new` の `bench` 引数に
+    /// そのまま渡す）。
+    pub fn bench(&self) -> &guardrail::BenchSignal {
+        &self.bench
+    }
+
+    /// 変更行数（`guardrail::DecisionInput::new` の `lines_changed` 引数に
+    /// そのまま渡す）。
+    pub fn lines_changed(&self) -> u64 {
+        self.lines_changed
+    }
+
+    /// 公開 API の破壊的変更を検出したか（`guardrail::DecisionInput::new` の
+    /// `api_broken` 引数にそのまま渡す）。
+    pub fn api_broken(&self) -> bool {
+        self.api_broken
+    }
+
+    /// ゲーミング（判定回避）の疑いを検出したか（`guardrail::DecisionInput::new`
+    /// の `gaming_suspect` 引数にそのまま渡す）。
+    pub fn gaming_suspect(&self) -> bool {
+        self.gaming_suspect
+    }
+
+    /// match したポリシー除外リストのルール `id` 一覧（空 = match なし。
+    /// `guardrail::DecisionInput::new` の `exclusion_rule_ids` 引数に
+    /// そのまま渡す。REQ-5: 評価忘れが除外リスト素通りにならないよう
+    /// `DecisionInput::new` 側も必須引数として要求する契約と対称に、
+    /// 本型でも省略可能なデフォルト値を持たせない）。
+    pub fn exclusion_rule_ids(&self) -> &[String] {
+        &self.exclusion_rule_ids
     }
 }

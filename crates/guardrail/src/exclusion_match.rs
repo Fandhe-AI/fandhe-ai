@@ -12,26 +12,46 @@
 //!
 //! # 呼び出し元・責務境界
 //! [`test_assertion_relaxation_without_prod_change`] は
-//! `policy_exclusion::evaluate`（TASK-5.2c・#124 が統合する `MatchRule` 評価器）
-//! から呼ばれ、判定結果は `decision::decide`（既に受け口を持つ
-//! `DecisionInput::exclusion_rule_ids`）へ渡って**無条件**エスカレーションに
-//! 使われる想定。本モジュール自体は `decide()` を呼ばず、`MatchRule` 列挙・
-//! TOML ロードも持たない（`policy_exclusion` モジュール本体は #122／#124 の
-//! スコープ）。
+//! [`crate::policy_exclusion::ExclusionEvaluation::evaluate`]（TASK-5.2c・#124
+//! が統合した `MatchRule` 評価器）から呼ばれ、判定結果は `decision::decide`
+//! （既に受け口を持つ `DecisionInput::exclusion_rule_ids`）へ渡って**無条件**
+//! エスカレーションに使われる（`policy_exclusion::ExclusionEvaluation::effective_rule_ids`
+//! 経由）。本モジュール自体は `decide()` を呼ばず、`MatchRule` 列挙・
+//! TOML ロードも持たない（`policy_exclusion` モジュール本体の責務）。
+//!
+//! [`changed_files_for_policy_exclusion`] も同じ理由で `policy_exclusion`
+//! （`EvaluationContext::from_repo`）専用の変更ファイル一覧取得口として提供する
+//! （`Cargo.lock` を除外しない。下記関数ドキュメント参照）。
 //!
 //! `gaming::check`（REQ-4 側・本番・テスト**同時**変更を対象とする側。
 //! 未移植）とは入力領域が排他的（本モジュールは「本番コード変更**なし**」側
 //! のみを担う）。
 //!
-//! # #124 実装時の申し送り（イシュー #122 レビューからの引き継ぎ）
-//! `policy_exclusion` モジュール（`crates/guardrail/src/policy_exclusion/mod.rs`。
-//! 本ブランチには未存在。`feat/122-any-diff-in-paths` 側で `ExclusionEvaluation`
-//! に `unevaluated_rule_ids: Vec<String>` が追加済み）を実装する際は、
-//! `test_assertion_relaxation_without_prod_change` の判定結果を
-//! `ExclusionEvaluation::evaluate` の `matched_rule_ids` へ計上し、
-//! `MatchRule::TestAssertionRelaxationWithoutProdChange` を `unevaluated_rule_ids`
-//! から外すこと。目印は `evaluate_reports_test_assertion_relaxation_rule_as_unevaluated_not_unmatched`
-//! テスト（詳細はイシュー #123 コメント・#124 コメント参照）。
+//! # #124 統合状態（イシュー #122／#123 からの引き継ぎ完了）
+//! `test_assertion_relaxation_without_prod_change` の判定結果は
+//! `ExclusionEvaluation::evaluate`（`policy_exclusion/mod.rs`）の
+//! `matched_rule_ids` へ計上済み。かつては `unevaluated_rule_ids` へ回っていたが
+//! （#122 レビュー時点の暫定対応）、本統合により `MatchRule::TestAssertionRelaxationWithoutProdChange`
+//! は評価対象になった。
+//!
+//! # 変更ファイルパスの正規化契約
+//! [`changed_files`]／[`changed_files_for_policy_exclusion`] が返すパスは
+//! リポジトリルート相対・先頭 `/` なし・`./` なし・`/` 区切り（git の
+//! `--name-only` 出力形式）である。`git_command` に `-c core.quotePath=false`
+//! を指定し、非 ASCII を含むパスが 8 進数エスケープ表記
+//! （例: `"foo/\346\227\245.rs"`）へ変換されて `PathPattern::matches` の
+//! 単純な文字列比較が無言で不一致になる経路を塞ぐ（Review 指摘 Low・#122。
+//! quotePath は「7bit 非 ASCII をエスケープしない」設定であり、正規化の一部
+//! として明示的に無効化する）。
+//!
+//! 「リポジトリルート相対」は `git_command` が `-C repo_root` で作業木を
+//! 固定し、かつ `diff --name-only <baseline> -- .` の pathspec `.` が
+//! （シェル展開ではなく）`-C` 適用後のカレントディレクトリ＝`repo_root`
+//! を指す前提に立つ。呼び出し元が常に `repo_root`（サブディレクトリでは
+//! ない）を渡す契約を守る限りこの前提は成立する（現状の呼び出し元
+//! （`self-repair`・テスト群）はいずれもリポジトリルートを渡す。将来
+//! `main.rs`（#103）がサブディレクトリから呼ぶ構成へ変える場合は、この
+//! 前提の再検証が必要）。
 //!
 //! # fail-closed 契約（`.claude/rules/security.md` A08）
 //! `git diff` の起動失敗・非ゼロ終了は必ず [`crate::error::GuardrailError`]
@@ -62,6 +82,11 @@ use crate::error::GuardrailError;
 /// 全滅し、本モジュールが明示的に避けようとしている fail-open
 /// （match なし＝除外リスト素通り→自動適用方向）そのものを招く
 /// （Review 指摘 Low・#123）。
+///
+/// `core.quotePath=false` も同じ趣旨で無効化する: 既定（true）だと非 ASCII
+/// パスが 8 進数エスケープ表記で出力され、[`changed_files`] 等の呼び出し元が
+/// `PathPattern::matches` で単純な文字列比較を行う際に無言で不一致になる
+/// （パス正規化契約の一部。モジュール冒頭コメント参照。#124）。
 fn git_command(repo_root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(repo_root);
@@ -75,6 +100,7 @@ fn git_command(repo_root: &Path) -> Command {
     cmd.arg("-c").arg("color.status=never");
     cmd.arg("-c").arg("diff.external=");
     cmd.arg("-c").arg("core.pager=cat");
+    cmd.arg("-c").arg("core.quotePath=false");
     cmd
 }
 
@@ -164,24 +190,53 @@ fn contains_1e_minus_digit(line: &str) -> bool {
     false
 }
 
-/// `baseline` と現作業木との差分で変更されたファイル一覧を返す
-/// （`Cargo.lock` は判定対象外。依存解決の機械的差分をルール判定に
-/// 混入させないため）。`any_diff_in_paths` ルール（TASK-5.2a・#122）も
-/// 将来この関数を共有プリミティブとして再利用する想定。
-pub(crate) fn changed_files(
+/// `git diff --name-only` の共通実装。`exclude_cargo_lock` で `Cargo.lock`
+/// を pathspec 除外するかを切り替える（[`changed_files`]・
+/// [`changed_files_for_policy_exclusion`] の 2 通りの呼び出し口を持つ理由は
+/// 各関数のドキュメント参照）。
+fn changed_files_impl(
     repo_root: &Path,
     baseline: &str,
+    exclude_cargo_lock: bool,
 ) -> Result<Vec<String>, GuardrailError> {
-    let stdout = run_git(
-        repo_root,
-        &["diff", "--name-only", baseline, "--", ".", ":!Cargo.lock"],
-    )?;
+    let mut args = vec!["diff", "--name-only", baseline, "--", "."];
+    if exclude_cargo_lock {
+        args.push(":!Cargo.lock");
+    }
+    let stdout = run_git(repo_root, &args)?;
     Ok(stdout
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .map(str::to_string)
         .collect())
+}
+
+/// `baseline` と現作業木との差分で変更されたファイル一覧を返す
+/// （`Cargo.lock` は判定対象外。依存解決の機械的差分をルール判定に
+/// 混入させないため）。[`touches_prod_logic`]（テスト許容誤差単独緩和判定。
+/// G5 対策）専用の取得口であり、`Cargo.lock` の扱いはその用途に閉じる。
+pub(crate) fn changed_files(
+    repo_root: &Path,
+    baseline: &str,
+) -> Result<Vec<String>, GuardrailError> {
+    changed_files_impl(repo_root, baseline, true)
+}
+
+/// [`crate::policy_exclusion::EvaluationContext::from_repo`] 専用の変更
+/// ファイル一覧取得口。[`changed_files`] と異なり `Cargo.lock` を除外**しない**。
+///
+/// `dependency-change` ルール（TASK-5.1b・#120 で人間承認済み。
+/// `policy-exclusion.toml` 参照）は `paths` に `Cargo.lock` 自体を含むため、
+/// ここで除外してしまうと `Cargo.toml` を伴わない `Cargo.lock` 単独差分
+/// （依存の間接更新等）が黙って `any_diff_in_paths` の判定対象から漏れ、
+/// 無条件エスカレーションが発火しない fail-open 経路になる（計画 3.1 節
+/// 「注意」・`.claude/rules/security.md` A08）。
+pub(crate) fn changed_files_for_policy_exclusion(
+    repo_root: &Path,
+    baseline: &str,
+) -> Result<Vec<String>, GuardrailError> {
+    changed_files_impl(repo_root, baseline, false)
 }
 
 /// `baseline` と現作業木との差分（`-U0`）のうち、削除行が `patterns`
@@ -824,5 +879,35 @@ mod tests {
             Err(GuardrailError::DiffFailed { .. }) => {}
             other => panic!("DiffFailed を期待したが実際は: {other:?}"),
         }
+    }
+
+    /// `core.quotePath=false`（`git_command`）が非 ASCII パスの 8 進数
+    /// エスケープを抑止することを固定する（計画 3.2 節「非 ASCII ファイル名
+    /// を含む一時 git リポジトリでのユニットテスト」・モジュール冒頭
+    /// 「変更ファイルパスの正規化契約」参照）。無効化されていない場合、
+    /// `changed_files_for_policy_exclusion` は `"src/\346\227\245model.rs"`
+    /// のような 8 進数エスケープ表記を返し、`PathPattern::matches` の単純な
+    /// 文字列比較が無言で不一致になる（fail-open。#124）。
+    #[test]
+    fn non_ascii_path_is_not_octal_escaped() {
+        let dir = init_repo("quote-path");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.rs"), "pub fn noop() {}\n").unwrap();
+        commit_all(&dir, "baseline");
+
+        let non_ascii_file = "src/日本語model.rs";
+        fs::write(dir.join(non_ascii_file), "pub fn noop2() {}\n").unwrap();
+        // `git diff <baseline>` は index に存在しないパス（純粋な未追跡ファイル）
+        // を差分に含めない。`add` で index に載せた時点で「baseline のツリーに
+        // 存在しない新規パス」として diff に現れるようになる（commit は不要）。
+        run(&dir, &["add", "-A"]);
+
+        let changed = changed_files_for_policy_exclusion(&dir, "HEAD").unwrap();
+        assert_eq!(
+            changed,
+            vec![non_ascii_file.to_string()],
+            "非 ASCII パスが 8 進数エスケープ表記へ変換されている（core.quotePath \
+             の無効化が効いていない）"
+        );
     }
 }

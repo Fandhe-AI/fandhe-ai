@@ -38,6 +38,11 @@
 //!   [`report::LoopFailure`] がそれまでの試行記録ごとエラーを保持する。
 //! - [`runner`][]: 上記 trait を組み合わせて 1 ループを実行するオーケストレータ
 //!   [`runner::SelfRepairLoop`]。
+//! - [`judge`][]: guardrail 3 分岐判定を [`stages::AdoptionJudge`] として接続する
+//!   [`judge::GuardrailAdoptionJudge`]（TASK-3.1d・#135）。`evidence` の 6 シグナルを
+//!   `guardrail::DecisionInput::new` へそのまま渡し `guardrail::decide` を呼ぶだけの
+//!   薄いアダプタであり、`decide` を経由しない [`outcome::AdoptionVerdict`] 生成経路を
+//!   持たない（A08: 判定の迂回経路を作らない）。
 //! - [`error`][]: 型付きエラー [`error::SelfRepairError`]。
 //! - [`exec`][]: コマンド実行抽象（[`exec::CommandRunner`]・
 //!   [`exec::SystemCommandRunner`]）。[`verify_gates::CargoVerificationGate`]
@@ -55,9 +60,12 @@
 //! - 検証フェーズ 4 ゲートのうちベンチゲート（[`verify_bench::SelfRepairBenchGate`]）
 //!   の [`stages::VerificationGate`] への結線（4 ゲート合成） → イシュー #136 系
 //!   （TASK-3.2）
-//! - guardrail 3 分岐判定との統合（`judge` 相当・[`outcome::VerifiedEvidence`]
-//!   への guardrail シグナル拡張） → イシュー #135（TASK-3.1d。`guardrail`
-//!   クレート自体の CLI 移植〈TASK-4.1〉はイシュー #103 が別途追跡）
+//! - `lines_changed`/`api_broken`/`gaming_suspect`/`exclusion_rule_ids`
+//!   の実測（diff 解析・ポリシー除外リスト評価）
+//!   → [`verify_gates::CargoVerificationGate`] は構築時にこれらを呼び出し元
+//!   から必須引数として受け取るのみで、自ら計測しない（未計測値を fail-open
+//!   な既定値で埋めない。モジュール末尾 `verify_gates` のドキュメント参照）。
+//!   実測経路の配線は #133・TASK-3.3（再実証）のスコープ
 //! - `exec`（コマンド実行抽象）の `guardrail` 側への共通化（`guardrail check`
 //!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
 //!   （本イシュー〈#134〉の PR 本文に記録）
@@ -66,10 +74,12 @@
 //! - CLI バイナリ（`self-repair run`/`verify-log`。
 //!   `docs/guardrail-self-repair-cli.md` 3 節） → 後続タスク（既存イシューで
 //!   追跡済み）
+//! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod candidate;
 pub mod error;
 pub mod exec;
+pub mod judge;
 pub mod kind;
 pub mod outcome;
 pub mod report;
@@ -80,6 +90,7 @@ pub mod verify_gates;
 pub use candidate::{CandidateFix, CandidateFixGenerator};
 pub use error::SelfRepairError;
 pub use exec::{CommandRunner, SystemCommandRunner};
+pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use report::{LoopFailure, LoopReport};

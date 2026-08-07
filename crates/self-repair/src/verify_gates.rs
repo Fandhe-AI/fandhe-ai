@@ -9,12 +9,24 @@
 //! # スコープ境界
 //! - 検証フェーズ 4 ゲートのうちベンチゲート（[`crate::verify_bench::SelfRepairBenchGate`]）
 //!   は本ゲートに含まない。ベンチゲートの `VerificationGate` への結線
-//!   （4 ゲート合成）は #136 系（TASK-3.2）のスコープ。
-//! - guardrail 3 分岐判定との統合・[`crate::outcome::VerifiedEvidence`] への
-//!   構造化シグナル（`gates`/`bench`/`lines_changed` 等）追加は #135
-//!   （TASK-3.1d）のスコープ。本ゲートは guardrail 非依存の v1 S1 形
-//!   （`attempt`・`proposal_summary`・`gate_report` の 3 フィールド）のまま
-//!   [`VerifiedEvidence`] を発行する。
+//!   （4 ゲート合成）は #136 系（TASK-3.2）のスコープ。ベンチ未計測のため
+//!   `verify` が発行する [`VerifiedEvidence`] の `bench` は常に
+//!   `guardrail::BenchSignal::NotRun`（`guardrail::DecisionInput::new` は
+//!   「ゲート全通過 + `NotRun`」を矛盾とはしない。`outcome.rs` 参照）。
+//! - guardrail 3 分岐判定との統合自体は #135（TASK-3.1d）で
+//!   [`crate::judge::GuardrailAdoptionJudge`] として既に main へ統合済みであり、
+//!   [`crate::outcome::VerifiedEvidence`] も guardrail 6 シグナルを保持する
+//!   S2 形（`gates`/`bench`/`lines_changed`/`api_broken`/`gaming_suspect`/
+//!   `exclusion_rule_ids`）に揃っている。ただし本ゲートが実測するのは
+//!   build/test/clippy の合否（`gates`）のみであり、diff 由来の
+//!   `lines_changed`/`api_broken`/`gaming_suspect`/`exclusion_rule_ids` は
+//!   計測しない。未計測値を「0 行・破壊なし・ゲーミング疑いなし」といった
+//!   fail-open な既定値で埋めると `.claude/rules/security.md` A08
+//!   （判定の迂回経路を作らない）に反するため、[`CargoVerificationGate::new`]
+//!   の必須引数として呼び出し元に明示させる（`guardrail::DecisionInput::new`
+//!   の `exclusion_rule_ids` と同じ設計判断）。これら 4 シグナルの実測経路
+//!   （diff 解析・ポリシー除外リスト評価の配線）自体は #133・TASK-3.3
+//!   （再実証）のスコープ。
 //!
 //! # fail-closed 契約
 //! 3 ゲートは build → test --release → clippy の順で逐次実行し、いずれかが
@@ -45,14 +57,42 @@ enum GateStep {
 ///
 /// `R: CommandRunner` はテスト時にスクリプト化したテストダブルを注入できる
 /// よう総称化している（本番経路は [`crate::exec::SystemCommandRunner`]）。
+///
+/// `lines_changed`/`api_broken`/`gaming_suspect`/`exclusion_rule_ids` は
+/// 本ゲートが実測しない diff 由来シグナルであり、構築時に呼び出し元から
+/// 受け取ったものをそのまま [`VerifiedEvidence`] へ渡す（モジュール冒頭
+/// スコープ境界ドキュメント参照）。
 pub struct CargoVerificationGate<R: CommandRunner> {
     workspace: PathBuf,
     runner: R,
+    lines_changed: u64,
+    api_broken: bool,
+    gaming_suspect: bool,
+    exclusion_rule_ids: Vec<String>,
 }
 
 impl<R: CommandRunner> CargoVerificationGate<R> {
-    pub fn new(workspace: PathBuf, runner: R) -> Self {
-        CargoVerificationGate { workspace, runner }
+    /// `lines_changed`/`api_broken`/`gaming_suspect`/`exclusion_rule_ids` は
+    /// 呼び出し元が実測した diff 由来シグナルをそのまま渡す必須引数とする
+    /// （`guardrail::DecisionInput::new` と同じく省略可能なデフォルト値を
+    /// 持たせない。`.claude/rules/security.md` A08）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        workspace: PathBuf,
+        runner: R,
+        lines_changed: u64,
+        api_broken: bool,
+        gaming_suspect: bool,
+        exclusion_rule_ids: Vec<String>,
+    ) -> Self {
+        CargoVerificationGate {
+            workspace,
+            runner,
+            lines_changed,
+            api_broken,
+            gaming_suspect,
+            exclusion_rule_ids,
+        }
     }
 
     /// 1 ゲートを実行し、spawn 失敗は `Err`、非 0 終了は `Ok(GateStep::Failed)`
@@ -131,10 +171,26 @@ impl<R: CommandRunner> VerificationGate for CargoVerificationGate<R> {
         // 全ゲート通過。既存 runner テスト（`runner.rs` の
         // `ScriptedVerificationGate`）の gate_report 文字列形式と揃え、
         // #135 側の差し替えコストを局所化する（実装計画 4.3 節）。
+        //
+        // `gates` は実測（3 ゲートとも Passed）。`bench` はベンチゲート
+        // 未結線（#136 系）のため常に `NotRun`（モジュール冒頭ドキュメント
+        // 参照。`guardrail::DecisionInput::new` は「全ゲート通過 + NotRun」を
+        // 矛盾としない）。diff 由来の 4 シグナルは構築時に受け取った値を
+        // そのまま渡す（自ら計測しない）。
         Ok(VerificationOutcome::Passed(VerifiedEvidence::new(
             proposal.attempt,
             proposal.description.clone(),
             "build=pass test=pass clippy=pass",
+            guardrail::GateSignals {
+                build: guardrail::GateSignal::Passed,
+                test: guardrail::GateSignal::Passed,
+                clippy: guardrail::GateSignal::Passed,
+            },
+            guardrail::BenchSignal::NotRun,
+            self.lines_changed,
+            self.api_broken,
+            self.gaming_suspect,
+            self.exclusion_rule_ids.clone(),
         )))
     }
 }
@@ -219,12 +275,21 @@ mod tests {
         }
     }
 
+    /// diff 由来シグナルをすべて「なし」に固定した `CargoVerificationGate`
+    /// を構築するテストヘルパー（本ゲートは diff 解析を持たないため、
+    /// テストの関心事は 3 ゲートの逐次実行・fail-fast 挙動に限る。
+    /// モジュール冒頭ドキュメント参照）。
+    fn gate_with<R: CommandRunner>(runner: R) -> CargoVerificationGate<R> {
+        CargoVerificationGate::new(PathBuf::from("."), runner, 0, false, false, Vec::new())
+    }
+
     #[test]
     fn all_gates_pass_yields_verified_evidence() {
-        let gate = CargoVerificationGate::new(
-            PathBuf::from("."),
-            ScriptedCommandRunner::new(vec![("build", true), ("test", true), ("clippy", true)]),
-        );
+        let gate = gate_with(ScriptedCommandRunner::new(vec![
+            ("build", true),
+            ("test", true),
+            ("clippy", true),
+        ]));
         let outcome = gate.verify(&proposal(1)).expect("verify should not error");
         match outcome {
             VerificationOutcome::Passed(evidence) => {
@@ -240,10 +305,11 @@ mod tests {
 
     #[test]
     fn build_failure_short_circuits_before_test_and_clippy() {
-        let gate = CargoVerificationGate::new(
-            PathBuf::from("."),
-            ScriptedCommandRunner::new(vec![("build", false), ("test", true), ("clippy", true)]),
-        );
+        let gate = gate_with(ScriptedCommandRunner::new(vec![
+            ("build", false),
+            ("test", true),
+            ("clippy", true),
+        ]));
         let outcome = gate.verify(&proposal(1)).expect("verify should not error");
         match outcome {
             VerificationOutcome::Failed { reason } => {
@@ -257,10 +323,11 @@ mod tests {
 
     #[test]
     fn test_failure_short_circuits_before_clippy() {
-        let gate = CargoVerificationGate::new(
-            PathBuf::from("."),
-            ScriptedCommandRunner::new(vec![("build", true), ("test", false), ("clippy", true)]),
-        );
+        let gate = gate_with(ScriptedCommandRunner::new(vec![
+            ("build", true),
+            ("test", false),
+            ("clippy", true),
+        ]));
         let outcome = gate.verify(&proposal(1)).expect("verify should not error");
         match outcome {
             VerificationOutcome::Failed { reason } => {
@@ -273,10 +340,11 @@ mod tests {
 
     #[test]
     fn clippy_failure_reports_log_tail_in_reason() {
-        let gate = CargoVerificationGate::new(
-            PathBuf::from("."),
-            ScriptedCommandRunner::new(vec![("build", true), ("test", true), ("clippy", false)]),
-        );
+        let gate = gate_with(ScriptedCommandRunner::new(vec![
+            ("build", true),
+            ("test", true),
+            ("clippy", false),
+        ]));
         let outcome = gate.verify(&proposal(1)).expect("verify should not error");
         match outcome {
             VerificationOutcome::Failed { reason } => {
@@ -290,7 +358,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_propagates_as_verification_error_not_failed_outcome() {
-        let gate = CargoVerificationGate::new(PathBuf::from("."), FailingSpawnRunner);
+        let gate = gate_with(FailingSpawnRunner);
         let result = gate.verify(&proposal(3));
         match result {
             Err(SelfRepairError::Verification { attempt, .. }) => {
@@ -302,10 +370,11 @@ mod tests {
 
     #[test]
     fn verified_evidence_attempt_matches_proposal_attempt() {
-        let gate = CargoVerificationGate::new(
-            PathBuf::from("."),
-            ScriptedCommandRunner::new(vec![("build", true), ("test", true), ("clippy", true)]),
-        );
+        let gate = gate_with(ScriptedCommandRunner::new(vec![
+            ("build", true),
+            ("test", true),
+            ("clippy", true),
+        ]));
         let outcome = gate.verify(&proposal(7)).expect("verify should not error");
         match outcome {
             VerificationOutcome::Passed(evidence) => assert_eq!(evidence.attempt(), 7),

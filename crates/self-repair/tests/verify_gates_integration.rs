@@ -49,7 +49,14 @@ fn all_gates_pass_for_valid_fixture_workspace() {
          #[cfg(test)]\nmod tests {\n    #[test]\n    fn trivial() {\n        assert_eq!(1 + 1, 2);\n    }\n}\n",
     );
 
-    let gate = CargoVerificationGate::new(workspace.clone(), SystemCommandRunner::new());
+    let gate = CargoVerificationGate::new(
+        workspace.clone(),
+        SystemCommandRunner::new(),
+        0,
+        false,
+        false,
+        Vec::new(),
+    );
     let proposal = Proposal {
         attempt: 1,
         description: "fixture: 全ゲート通過".to_string(),
@@ -80,7 +87,14 @@ fn build_gate_fails_for_fixture_with_compile_error() {
         "fn main() {\n    let _ = undefined_symbol_for_self_repair_test;\n}\n",
     );
 
-    let gate = CargoVerificationGate::new(workspace.clone(), SystemCommandRunner::new());
+    let gate = CargoVerificationGate::new(
+        workspace.clone(),
+        SystemCommandRunner::new(),
+        0,
+        false,
+        false,
+        Vec::new(),
+    );
     let proposal = Proposal {
         attempt: 1,
         description: "fixture: build 失敗".to_string(),

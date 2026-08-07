@@ -235,8 +235,39 @@ else
 	@echo "skip: Cargo.toml 未追加のため layer1/layer2 をスキップ"
 endif
 
+# AI 自律メンテナンス検証ゲート（build/test/clippy。TASK-6.1c・イシュー #199）。
+# `docs/spec/04-requirements.md` の検証ゲート定義（L34）・非機能要件「REQ-3〜REQ-6 の
+# ガードレール（build/test/clippy/bench）は CI 上で自動実行可能な構成とすること」（L292）
+# に対応する。scripts/run-verification-gates.sh（ci.yml の verification-gates ジョブと
+# 共用する単一ソース）経由で self-test → build → test（--release）→ clippy を直列実行する
+# （guardrail-regression ターゲットと同一方針）。
+.PHONY: verification-gates
+verification-gates: ## AI 自律メンテナンス検証ゲート（build/test/clippy）を実行する
+ifdef HAS_CARGO
+	@bash scripts/run-verification-gates.sh self-test
+	@bash scripts/run-verification-gates.sh build
+	@bash scripts/run-verification-gates.sh test
+	@bash scripts/run-verification-gates.sh clippy
+else
+	@bash scripts/run-verification-gates.sh self-test
+	@echo "skip: Cargo.toml 未追加のため build/test/clippy をスキップ"
+endif
+
+# bench ゲート単体（TASK-6.1c・イシュー #199）。実行時間が長いため verification-gates
+# には含めず、`.github/workflows/verification-gate-bench.yml`（schedule／
+# workflow_dispatch）と同一内容をローカルで再現する独立ターゲットとする。
+.PHONY: verification-gate-bench
+verification-gate-bench: ## bench ゲート（CPU GEMM 計測）を単体実行する
+ifdef HAS_CARGO
+	@bash scripts/run-verification-gates.sh self-test
+	@bash scripts/run-verification-gates.sh bench
+else
+	@bash scripts/run-verification-gates.sh self-test
+	@echo "skip: Cargo.toml 未追加のため bench をスキップ"
+endif
+
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden guardrail-regression ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）

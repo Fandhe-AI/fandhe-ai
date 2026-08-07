@@ -64,6 +64,21 @@
 # として可視化する（2 層検証の合否を単独で追跡可能にし、#148〈TASK-6.1b・schedule 定期
 # 実行〉が同スクリプトを再利用できるようにするため）。テスト実体（TASK-4.2b/4.3a/5.3a/
 # 5.3b/5.4a/5.4b）は既にマージ済みであり、本ジョブはその実行導線の新設に限る。
+#
+# verification-gates ジョブ（TASK-6.1c・イシュー #199）は、`docs/spec/04-requirements.md`
+# が定める REQ-1 非機能要件「CI/CD への統合」節「REQ-3〜REQ-6 のガードレール（build/test/
+# clippy/bench）は CI 上で自動実行可能な構成とすること」・前提条件節「検証済み AI 自律
+# メンテナンス検証ゲート」の検証ゲート定義（節見出しを一次の参照点とする。
+# scripts/run-verification-gates.sh 冒頭コメント参照）に対応する。検証ロジックは
+# scripts/run-verification-gates.sh（Makefile の verification-gates ターゲットと共用する
+# 単一ソース）に集約する。build/test/clippy の 3 ゲートを push/PR 契機で実行し、
+# 「guardrail の検証ゲート列を単一ソースで traceable に実行する導線」（spec 準拠の
+# release テストを含むゲート契約）として独立可視化する（既存 clippy/test ジョブと
+# 一部重複するが、test サブコマンドは spec のゲート定義どおり --release を使う点が
+# 既存 test ジョブ〈debug〉と異なる）。bench ゲートは実行時間を考慮し、独立 workflow
+# `verification-gate-bench.yml`（schedule／workflow_dispatch 契機）に分離する
+# （#148〈TASK-6.1b・schedule 定期実行〉と並行実装中のため、ci.yml への schedule 追加を
+# 避けて衝突面を最小化する）。
 name: CI
 
 on:
@@ -549,6 +564,72 @@ jobs:
         run: bash scripts/run-guardrail-regression.sh layer2
 
   # --------------------------------------------------
+  # AI 自律メンテナンス検証ゲート（build/test/clippy。TASK-6.1c・イシュー #199）。
+  # scripts/run-verification-gates.sh（Makefile の verification-gates ターゲットと共用
+  # する単一ソース）経由で self-test → build → test → clippy を直列実行する
+  # （本ファイル冒頭コメント参照）。bench ゲートは verification-gate-bench.yml
+  # （schedule／workflow_dispatch）に分離する。
+  # --------------------------------------------------
+  verification-gates:
+    name: 検証ゲート（build/test/clippy）
+    runs-on: self-hosted
+    # test サブコマンドが --release を使うため、既存 test ジョブ（45 分）と同等以上を確保する。
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # 検査ロジック自体の退行（bench ワークロード example の無言削除・リネーム）を、
+      # 実行環境の cargo 有無に関わらず常時検出する（deps-forbidden ジョブと同一方針）。
+      - name: 検査ロジックの self-test
+        run: bash scripts/run-verification-gates.sh self-test
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため検証ゲートをスキップしました（workspace 作成後に有効化されます）"
+          fi
+
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: Ensure clippy component
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustup component list --installed | grep -q '^clippy' || rustup component add clippy
+
+      - name: ゲート 1/3（build）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/run-verification-gates.sh build
+
+      - name: ゲート 2/3（test --release）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/run-verification-gates.sh test
+
+      - name: ゲート 3/3（clippy）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/run-verification-gates.sh clippy
+
+  # --------------------------------------------------
   # 集約ジョブ（branch protection の required status check はこのジョブのみを指定する）。
   # bare needs は skipped も success 扱いになるため、明示的に result を検査して
   # fail-closed で判定する（.claude/rules/ci.md）。
@@ -558,7 +639,7 @@ jobs:
     runs-on: self-hosted
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
     if: ${{ always() }}
-    needs: [fmt, clippy, test, build, build-no-cuda-toolkit, deny, deps-forbidden, guardrail-regression]
+    needs: [fmt, clippy, test, build, build-no-cuda-toolkit, deny, deps-forbidden, guardrail-regression, verification-gates]
     timeout-minutes: 5
     steps:
       - name: 完遂判定（全 needs ジョブが success であること）
@@ -571,10 +652,11 @@ jobs:
           RESULT_DENY: ${{ needs.deny.result }}
           RESULT_DEPS_FORBIDDEN: ${{ needs.deps-forbidden.result }}
           RESULT_GUARDRAIL_REGRESSION: ${{ needs.guardrail-regression.result }}
+          RESULT_VERIFICATION_GATES: ${{ needs.verification-gates.result }}
         run: |
           set -euo pipefail
           ok=1
-          for pair in "fmt:${RESULT_FMT}" "clippy:${RESULT_CLIPPY}" "test:${RESULT_TEST}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deny:${RESULT_DENY}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}" "guardrail-regression:${RESULT_GUARDRAIL_REGRESSION}"; do
+          for pair in "fmt:${RESULT_FMT}" "clippy:${RESULT_CLIPPY}" "test:${RESULT_TEST}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deny:${RESULT_DENY}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}" "guardrail-regression:${RESULT_GUARDRAIL_REGRESSION}" "verification-gates:${RESULT_VERIFICATION_GATES}"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             if [ "${result}" != "success" ]; then
