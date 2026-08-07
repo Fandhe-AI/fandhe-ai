@@ -6,6 +6,25 @@
 //! 本クレート自体はその契約を強制する側であって、閾値を自己判断で緩和しない
 //! （`.claude/rules/delegation-impl.md`）。v1 資産の移植先でもある。
 //!
-//! 雛形段階（TASK-1.1 部分実装。許容依存の `Cargo.toml` 反映を除く。反映はユーザー承認を
-//! 要するため別イシューで対応する）では型・実装を持たない（spec 根拠: `docs/spec/05-tasks.md`
-//! TASK-1.1、REQ-4）。
+//! # TASK-4.1a（本イシュー）のスコープ
+//!
+//! CLI 骨格・引数解析・設定（TOML）パースと検証・シグナル JSON 入力型・
+//! 判定レポート JSON 出力・終了コード契約の型定義のみを実装する
+//! （`docs/guardrail-self-repair-cli.md` が正本の設計文書）。5 条件の判定
+//! ロジック本体は TASK-4.1b（#105）、3 分岐出力・判定根拠の作り込みは
+//! TASK-4.1c（#106）、ベンチ計測の bench-harness 付け替えは TASK-4.1d（#107）
+//! で実装する。`self-repair` は本クレートを **lib として直接呼び出す**
+//! （3.4 節。サブプロセス起動は行わない）ため、`main.rs`（バイナリ）とは
+//! 独立して公開 API（`decide` 相当）を提供する設計を維持する。
+//!
+//! `bin/guardrail`（`main.rs`）はここで公開するモジュールを組み合わせて
+//! CLI フローを構成するのみで、判定ロジック自体はライブラリ側に置く
+//! （`self-repair` からの lib 呼び出しと CLI 実行が同じロジックを共有するため）。
+
+pub mod cli;
+pub mod config;
+pub mod error;
+pub mod exit_code;
+pub mod report;
+pub mod signals;
+pub mod toml_lite;
