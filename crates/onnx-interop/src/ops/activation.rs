@@ -1,6 +1,10 @@
-//! ONNX `Relu`／`Sigmoid` 要素ごと活性化オペ（TASK-7.2c）。
+//! ONNX `Relu`／`Sigmoid`（TASK-7.2c）に加え `Erf`（TASK-7.3c・#84）の要素ごと活性化
+//! オペ。いずれも属性を持たない純粋な要素ごと写像であり、入力の shape をそのまま維持する。
 //!
-//! いずれも属性を持たない純粋な要素ごと写像であり、入力の shape をそのまま維持する。
+//! `Erf` は GELU（`0.5 * x * (1 + erf(x / sqrt(2)))`）の構成要素として Attention 系
+//! （TASK-7.3c）で必要になる。Rust std に `erf` は存在せず、許容依存 8 区分
+//! （`.claude/rules/deps-policy.md`）に数学関数クレート（libm 等）は無いため自前近似で
+//! 実装する（依存追加はユーザー承認必須のため行わない）。
 
 use tensor_core::Tensor;
 
@@ -41,6 +45,34 @@ pub fn relu(x: &Tensor<f32>) -> Result<Tensor<f32>, OpError> {
 /// `Sigmoid(x) = 1 / (1 + exp(-x))`。
 pub fn sigmoid(x: &Tensor<f32>) -> Result<Tensor<f32>, OpError> {
     map_elementwise("Sigmoid", x, |v| 1.0 / (1.0 + (-v).exp()))
+}
+
+/// 誤差関数 `erf(x)` の有理多項式近似（Abramowitz & Stegun 7.1.26。最大絶対誤差
+/// 1.5e-7）。`erf` は奇関数（`erf(-x) = -erf(x)`）であるため負値は絶対値で計算してから
+/// 符号を戻す。f32 精度・バックエンド間数値一致の複合判定（相対誤差 1e-3 未満 または
+/// 絶対誤差 1e-5 未満。`.claude/rules/coding-rust.md`）に対し、本近似の誤差上界
+/// 1.5e-7 は十分小さく後続の GELU 計算へ悪影響を与えない。
+fn erf_approx(x: f32) -> f32 {
+    // 定数は原典（Abramowitz & Stegun, Handbook of Mathematical Functions, 7.1.26）の
+    // 係数をそのまま用いる。
+    const A1: f32 = 0.254_829_6;
+    const A2: f32 = -0.284_496_74;
+    const A3: f32 = 1.421_413_8;
+    const A4: f32 = -1.453_152_1;
+    const A5: f32 = 1.061_405_4;
+    const P: f32 = 0.327_591_1;
+
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let ax = x.abs();
+    let t = 1.0 / P.mul_add(ax, 1.0);
+    let poly = ((((A5 * t + A4) * t + A3) * t + A2) * t + A1) * t;
+    let y = 1.0 - poly * (-ax * ax).exp();
+    sign * y
+}
+
+/// `Erf(x)`（誤差関数）。GELU（`0.5 * x * (1 + erf(x / sqrt(2)))`）の構成要素。
+pub fn erf(x: &Tensor<f32>) -> Result<Tensor<f32>, OpError> {
+    map_elementwise("Erf", x, erf_approx)
 }
 
 #[cfg(test)]
@@ -87,5 +119,47 @@ mod tests {
         assert!((y.get(&[0]).unwrap() - 0.5).abs() < tol);
         assert!((y.get(&[1]).unwrap() - 0.731_058_6).abs() < 1e-5);
         assert!((y.get(&[2]).unwrap() - 0.268_941_4).abs() < 1e-5);
+    }
+
+    #[test]
+    fn erf_known_values() {
+        let x = Tensor::<f32>::new(vec![0.0, 1.0, -1.0, 0.5, 2.0], &[5]).unwrap();
+        let y = erf(&x).unwrap();
+        let tol = 1e-6;
+        assert!((y.get(&[0]).unwrap() - 0.0).abs() < tol);
+        assert!((y.get(&[1]).unwrap() - 0.842_700_8).abs() < tol);
+        assert!((y.get(&[2]).unwrap() - (-0.842_700_8)).abs() < tol);
+        assert!((y.get(&[3]).unwrap() - 0.520_499_9).abs() < tol);
+        assert!((y.get(&[4]).unwrap() - 0.995_322_3).abs() < tol);
+    }
+
+    #[test]
+    fn erf_asymptotic_values_converge_to_one() {
+        let x = Tensor::<f32>::new(vec![10.0, -10.0], &[2]).unwrap();
+        let y = erf(&x).unwrap();
+        assert!((y.get(&[0]).unwrap() - 1.0).abs() < 1e-7);
+        assert!((y.get(&[1]).unwrap() - (-1.0)).abs() < 1e-7);
+    }
+
+    #[test]
+    fn erf_is_odd_function() {
+        let x = Tensor::<f32>::new(vec![0.3, 1.7, 2.5], &[3]).unwrap();
+        let neg_x = Tensor::<f32>::new(vec![-0.3, -1.7, -2.5], &[3]).unwrap();
+        let y = erf(&x).unwrap();
+        let y_neg = erf(&neg_x).unwrap();
+        for i in 0..3 {
+            assert!((y.get(&[i]).unwrap() + y_neg.get(&[i]).unwrap()).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn erf_on_non_contiguous_view() {
+        let t = Tensor::<f32>::new(vec![0.0, 1.0, -1.0, 0.5], &[2, 2]).unwrap();
+        let tt = t.transpose(0, 1).unwrap();
+        let y = erf(&tt).unwrap();
+        assert_eq!(y.shape(), &[2, 2]);
+        // tt = [[0.0, -1.0], [1.0, 0.5]]（transpose 後の論理配置）
+        assert!((y.get(&[0, 0]).unwrap() - 0.0).abs() < 1e-6);
+        assert!((y.get(&[1, 0]).unwrap() - 0.842_700_8).abs() < 1e-6);
     }
 }
