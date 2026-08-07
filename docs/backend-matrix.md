@@ -9,7 +9,7 @@ v1 の土台は `docs/spec/03-poc/poc-4-multi-backend/README.md`「バックエ�
 
 - 切替構成（cfg ベース・feature フラグなし）の設計根拠は [`docs/backend-switching-design.md`](./backend-switching-design.md) が正本であり、本ドキュメントでは重複記述しない。
 - 実機（Apple Silicon）テスト実行手順の正本は [`docs/backend-metal-real-device-testing.md`](./backend-metal-real-device-testing.md)。CUDA Tensor Core 経路の詳細知見は [`docs/cuda-tensor-core-knowledge.md`](./cuda-tensor-core-knowledge.md) が正本。いずれも要点のみ引用し詳細は参照に委ねる。
-- **既定 feature 構成の決定（CUDA を既定で有効にするか等）は TASK-2.5（#58）の担当であり、本ドキュメントでは決定しない**（`docs/spec/05-tasks.md` TASK-2.5「前提タスク: TASK-2.4」）。TASK-2.5 は本ファイルへ決定事項を追記する前提の構成にしている。
+- **既定 feature 構成の決定（CUDA を既定で有効にするか等）は TASK-2.5（#58）の担当**（`docs/spec/05-tasks.md` TASK-2.5「前提タスク: TASK-2.4」）。決定事項は 7 節に追記済み。
 - ROCm・Vulkan は REQ-2 で対象外（下記表に「対象外」行として明記）。
 
 ## 2. 検証環境
@@ -91,6 +91,45 @@ REQ-2 受け入れ基準が指定する 2 実機に加え、CI（self-hosted・�
 - **sm_121 の NVRTC 受理可否**: `compute_121` アーキテクチャフラグ・インライン PTX 命令の NVRTC 受理可否はいずれも実機未検証
 - **macOS self-hosted runner 未登録**: Metal 実機 CI ジョブは未整備。追加する場合は runner ラベルで対象 runner を明示する方針（`.claude/rules/ci.md`）
 - 上記はいずれも本ドキュメントの新規スコープではなく、既存イシュー・ドキュメントでの追跡状況をそのまま集約したものである
+
+## 7. 既定 feature 構成の決定（TASK-2.5・#58）
+
+`docs/spec/05-tasks.md` TASK-2.5「`cuda` feature をライブラリの既定 feature に含めるかを、CI 実行時間・配布物のバイナリサイズ・依存クレート数への影響評価を踏まえて決定する」に対応する。担当区分は「共同（影響評価は Claude Code、既定化の可否判断は人間）」。
+
+### 7.1 決定
+
+**バックエンド切替は feature フラグなし cfg ベース構成（2 節・[`docs/backend-switching-design.md`](./backend-switching-design.md)）を既定として維持し、新規 `cuda` feature は追加しない。** CUDA サポートはすべてのビルドに無条件で組み込み、CUDA の要否は実行時の動的ロード可否（`cudarc` dynamic-loading）で決まる。
+
+これは REQ-2 が「未検証のまま残る」と明記した残存課題「バックエンド有効化構成（feature 追加の要否を含む）の決定」（`docs/spec/04-requirements.md` REQ-2 受け入れ基準）を、下記 7.2 の実測に基づき解消するものである。
+
+### 7.2 影響評価（実測値）
+
+計測環境: 本 worktree（Linux・self-hosted 相当、`rustc` は workspace `Cargo.toml` 指定の edition 2024 対応版）。`cudarc =0.19.8`（`driver`／`nvrtc`／`dynamic-loading`／`cuda-13000`／`f16` feature、`Cargo.toml` `[workspace.dependencies]`）を対象とする。3 指標とも本イシューで新規実測し、既存の推定記述は含めない。
+
+| 指標 | 実測値 | 計測方法・出典 |
+|------|--------|----------------|
+| 依存クレート数 | `Cargo.lock` 総パッケージ数 113 に対し、`cudarc` を依存グラフから完全に除いた場合（`backend-cuda` だけでなく、`cudarc` に直接依存する `bench-harness` の `stream.synchronize()` 用途も含めて除去した場合）に**削減されるパッケージは `cudarc` 自身と `libloading` の 2 個のみ（1.8%）**。`cudarc` の他の直接依存（`half`・`rand`・`num-traits`・`libc`・`libm`・`zerocopy`・`proc-macro2`・`syn` 等）はいずれも `rayon`・`half`（workspace 許容依存）・`serde` derive 等の既存経路と共有されており除去されない。なお `backend-cuda` を除いても `cudarc` 自体は残る点に注意（`bench-harness`（`crates/bench-harness/Cargo.toml`）が同期方式統一〈TASK-8.1b〉のため `cudarc` に直接依存しており、`cuda` feature を `backend-cuda` クレート単体に付けても `cudarc` を切り離せない） | `cargo metadata --locked --format-version 1` の resolve グラフで、`cudarc` ノードへの再帰を止めた到達可能集合と、通常の到達可能集合（workspace member 起点、normal+build+dev 全 kind）を比較（scratchpad の解析スクリプト）。`cargo tree -i cudarc`・`cargo tree -i libloading` で cudarc への直接依存元（`backend-cuda`・`bench-harness`）と `libloading` が cudarc 専有であることを確認 |
+| バイナリサイズ | CPU のみ構成（`tensor-core`+`backend-cpu`）と CPU+CUDA 構成（+`backend-cuda`、`CudaDevice::is_available()` を実際に呼び出し driver 動的ロード経路をリンカのデッドコード除去対象から外した構成）の release バイナリ差分は **stripped で 14,712 バイト（約 14.4 KiB、344,200 → 358,912 バイト）・unstripped で 23,248 バイト（約 22.7 KiB、447,176 → 470,424 バイト）**。参考値として、CUDA API を一切呼ばない（型名参照のみの）構成では差分が 80 バイトまで縮む（デッドコード除去がほぼ全体を除去するため。実利用時の下限ではなく非代表値として記録）。`libcudarc` の rlib 自体は 7.26 MiB（`libbackend_cuda` rlib は 712,874 バイト）だが、`cudarc` は動的ロード方式で実 CUDA 共有ライブラリへ静的リンクしないため、実行ファイルへの増分は数十 KiB 規模にとどまる | scratchpad に最小 bin クレート 2 個（`tensor-core`+`backend-cpu` の path 依存のみ／同 +`backend-cuda`）を作成し `cargo build --release` 後のファイルサイズを比較。B 側は `CudaDevice::is_available()` を呼び出す構成で計測（型名参照のみだとデッドコード除去で過小評価になるため是正）。参考値として `target/release/deps/libcudarc-*.rlib`・`libbackend_cuda-*.rlib` サイズを記録 |
+| CI 実行時間 | ローカル `cargo build --release --workspace --timings`（クリーンビルド）で、全 88 コンパイル単位の per-unit 所要時間合計 32.14 秒中、`cudarc`＋`backend-cuda` の合計は **3.57 秒（約 11.1%）**。直近の CI 実行（run #31137297795、PR #267 マージ時）では `cargo build (linux / aarch64-apple-darwin)` ジョブ 57 秒・`build-no-cuda-toolkit`（CUDA toolkit 非搭載検証）ジョブ 1 分 43 秒・`cargo test` ジョブ 62 秒（最長は `cargo deny check licenses sources` の 4 分 37 秒で CUDA 依存量とは無関係）。CUDA を feature 化した場合に削減しうる CI 時間の上限は、全体ビルド時間の 1 割程度にとどまる | `target/cargo-timings/cargo-timing.html` 埋め込みの `UNIT_DATA` を解析（scratchpad のスクリプト）。`gh run view 31137297795 --json jobs` でジョブ別所要時間を取得（読み取りのみ） |
+
+計測用の比較 bin クレート・解析スクリプトはいずれも scratchpad 限定で作成し、本リポジトリへはコミットしていない。
+
+### 7.3 判断根拠
+
+- 3 指標とも CUDA 無条件組み込みの実コストは小さい。依存クレート数は 113 中 2 個（1.8%）、バイナリサイズは実利用時（driver ロード経路を実際に呼び出す構成）で 14〜23 KiB 程度（`cudarc` が動的ロード方式のため実 CUDA ライブラリへの静的リンクを持たないため）、CI 時間はビルド全体の約 1 割にとどまる。`cuda` feature を新設して opt-out 可能にしても、削減できる実コストは限定的である。
+- さらに、`cudarc` は `backend-cuda` だけでなく `bench-harness`（TASK-8.1b・同期方式統一）からも直接依存されているため、**`backend-cuda` クレート単体を feature でくくっても `cudarc` 自体は依存グラフから外れない**。`cudarc` を真に opt-out にするには `bench-harness` の同期方式統一機能も feature 分岐させる必要があり、TASK-2.5 が想定する「`cuda` feature の要否」は実装上 `backend-cuda` 単体の feature 化では完結しない。これは feature 化のコストを追加で押し上げる要因であり、7.1 節の決定（feature 化しない）を補強する。
+- 一方で feature 化した場合に失うものは大きい: [`docs/backend-switching-design.md`](./backend-switching-design.md)「なぜ feature フラグを使わないか」節が指摘する (1) PoC-v2-5 が feature フラグなし構成を直接実証済みであること、(2) v1 の「型エイリアス + Cargo feature」前提は REQ-1 全面改定で消滅していること、(3) feature 組合せ増加による検証マトリクスの組合せ的増大・feature 指定漏れによる経路欠落リスク、の 3 論点は本イシューの実測でも覆らない。
+- CUDA toolkit 非搭載環境でのビルド・実行成立は `build-no-cuda-toolkit` ジョブ（TASK-2.3・#56）が `scripts/check-cuda-toolkit-absent.sh assert` による fail-closed 検証で継続監視しており、`cuda` feature という opt-out 手段がなくても非 CUDA 環境の利用者に実害はない（`CudaDevice::is_available()` が `false` に縮退し `CudaError::DriverUnavailable` を返す型付きエラー契約。3.2 節）。
+
+### 7.4 担当区分と承認
+
+影響評価（7.2 節）は Claude Code が本イシューで実施した。既定化の可否判断（7.1 節の決定案の採否）は人間が行う事項であり、**本イシューに対応する PR のレビュー・マージをもって承認とする**（TASK-2.5 の担当区分「共同」に対応）。
+
+### 7.5 再検討トリガー
+
+- 配布形態が変化した場合（例: crates.io への公開、バイナリ配布形態の追加）は、依存クレート数・バイナリサイズの実コストが変わりうるため 7.2 節の実測を再実施する。
+- 7.2 節の実測値が大幅に悪化した場合（例: `cudarc` のメジャーバージョン更新で静的リンク依存が増える等）も同様に再評価する。
+- 再評価は REQ-2 改定（正本 spec リポジトリ側での対応）とセットで行う。REQ-2 残存課題「バックエンド有効化構成の決定」は本節により実装リポ側では解消済みとして扱うが、spec 本文（`docs/spec/04-requirements.md`）側への反映は `docs/spec/` 編集禁止のため本ドキュメントでは行わない。正本側への反映提案は本イシューに対応する PR 本文に記載し、ユーザー判断に委ねる。
 
 ## 出典一覧
 
