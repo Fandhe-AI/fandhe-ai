@@ -140,8 +140,22 @@ impl PathPattern {
     ///
     /// `path` はマッチャ内部では検証しない（呼び出し側 = `any_diff_in_paths`
     /// が変更ファイル一覧をそのまま渡す設計。パターン側のみ構築時検証で
-    /// fail-closed を担保する）。
+    /// fail-closed を担保する）。呼び出し元は `path` がリポジトリルート相対の
+    /// 正規化済み（先頭 `/` なし・`./` プレフィックスなし・`\` を含まない）
+    /// パスであることを保証する契約を負う（git diff の quoted/octal-escaped
+    /// パス等、非正規化パスは黙って不一致になりうる。正規化は変更ファイル
+    /// 一覧の取得元である #103／#124 側の責務。イシュー #122 レビュー指摘）。
+    /// 契約違反をテスト・開発ビルドで早期検知するため、明らかな非正規化パス
+    /// （先頭 `/`・`\` を含む）は `debug_assert!` で検出する（本番経路では
+    /// `.claude/rules/coding-rust.md` の `unwrap()`/`expect()` 禁止方針に
+    /// 揃え、release ビルドではパニックせず fail-closed な「不一致」を返す）。
     pub fn matches(&self, path: &str) -> bool {
+        debug_assert!(
+            !path.starts_with('/') && !path.contains('\\'),
+            "PathPattern::matches expects a normalized, repo-root-relative path \
+             (no leading '/', no '\\'); got {path:?}. Normalize the changed-file \
+             list before calling matches() (see #103 / #124)."
+        );
         let path_segments: Vec<&str> = path.split('/').collect();
         segments_match(&self.segments, &path_segments)
     }

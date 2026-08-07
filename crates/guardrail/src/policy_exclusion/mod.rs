@@ -13,6 +13,19 @@
 //! - [`any_diff_in_paths`][]: `arch-hyperparameter-change` の match 評価本体
 //!   （#122 管轄）。
 //!
+//! # 未評価ルールと fail-closed（イシュー #122 レビュー指摘対応）
+//! [`MatchRule::TestAssertionRelaxationWithoutProdChange`] は #123（TASK-5.2b）が
+//! 評価ロジックを実装するまで判定不能である。これを
+//! [`ExclusionEvaluation::matched_rule_ids`] の「未マッチ（match しないと評価
+//! 済み）」に混ぜて `false` 扱いすると、呼び出し側（#124）が「安全（未マッチ確定）」
+//! と「未評価（判定不能）」を区別できず、`.claude/rules/security.md` A08 が
+//! 禁止する「発火すべき除外ルールが発火せず自動適用へ倒れる」経路になりうる
+//! （PoC-3 G5: テスト許容誤差の単独緩和ブラインドスポット対策が無効化される）。
+//! これを避けるため、未評価ルールの id は [`ExclusionEvaluation::unevaluated_rule_ids`]
+//! に分離して呼び出し側へ伝播する。#124 は `unevaluated_rule_ids` が空でない
+//! 場合、当該ルールに対応する変更カテゴリを fail-closed（無条件人間承認）側に
+//! 倒す統合を行う想定（評価ロジック自体の実装は #123 が引き継ぐ）。
+//!
 //! # スコープ境界（`.claude/rules/out-of-scope-tracking.md`）
 //! - `policy-exclusion.toml` ファイル自体の移植・TOML ロード機構: #119（TASK-5.1a）・
 //!   #124。`toml` クレートは許容依存 8 区分に非該当のため、`crate::toml_lite`
@@ -20,7 +33,9 @@
 //! - `test_assertion_relaxation_without_prod_change` の評価ロジック: #123（TASK-5.2b）。
 //!   本モジュールは [`MatchRule`] として schema（型定義）のみ用意し、評価対象から
 //!   意図的に除外する（下記 [`ExclusionEvaluation::evaluate`] 参照。#123 との
-//!   並行編集コンフリクトを避けるためファイルを分離してある）
+//!   並行編集コンフリクトを避けるためファイルを分離してある）。未評価である事実
+//!   自体は [`ExclusionEvaluation::unevaluated_rule_ids`] で呼び出し側へ伝播する
+//!   （上記「未評価ルールと fail-closed」参照）
 //! - git diff からの変更ファイル一覧取得・[`crate::decision::Verdict`] との統合:
 //!   #103（TASK-4.1）・#124（TASK-5.2c）
 
@@ -107,9 +122,20 @@ pub fn builtin_defaults() -> Result<PolicyExclusionConfig, PatternError> {
 
 /// ルール集合の評価結果。match したルール id の一覧を保持する
 /// （REQ-5 2026-08-05 v2 注記の `expected_exclusion_rule_ids` と同型）。
+///
+/// `matched_rule_ids`（match しないと評価済み＝安全）と
+/// `unevaluated_rule_ids`（評価ロジック未実装で判定不能）を型で分離する
+/// ことで、呼び出し側（#124）が両者を取り違えて fail-open にならないよう
+/// にする（モジュール冒頭「未評価ルールと fail-closed」参照）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExclusionEvaluation {
     pub matched_rule_ids: Vec<String>,
+    /// 評価ロジック未実装のため判定不能だったルール id
+    /// （TASK-5.2a 時点では `MatchRule::TestAssertionRelaxationWithoutProdChange`
+    /// のみが該当。#123 が評価を実装すれば空集合に近づく）。
+    /// 呼び出し側は本フィールドが空でない場合、対応するルールの
+    /// 変更カテゴリを fail-closed（無条件人間承認）側に倒す必要がある。
+    pub unevaluated_rule_ids: Vec<String>,
 }
 
 impl ExclusionEvaluation {
@@ -120,19 +146,28 @@ impl ExclusionEvaluation {
     /// 意図的に除外する（#123 が実装を追加するまでは match させない。schema
     /// のみ先行定義する計画のため、ここで `unimplemented!()` 等により fail する
     /// と #123 未着手の間クレート全体の評価が壊れてしまい fail-closed の趣旨に
-    /// 反する。未実装ルールは「まだ発火しない」で安全側に倒す）。
+    /// 反する）。ただし「match しない」と「未評価」を混同すると fail-open に
+    /// なる（`.claude/rules/security.md` A08）ため、未評価ルールの id は
+    /// `matched_rule_ids` に含めず `unevaluated_rule_ids` へ分離して返す。
     pub fn evaluate(rules: &[ExclusionRule], changed_files: &[String]) -> Self {
-        let matched_rule_ids = rules
-            .iter()
-            .filter(|rule| match &rule.match_rule {
+        let mut matched_rule_ids = Vec::new();
+        let mut unevaluated_rule_ids = Vec::new();
+        for rule in rules {
+            match &rule.match_rule {
                 MatchRule::AnyDiffInPaths { paths } => {
-                    any_diff_in_paths::any_diff_in_paths(changed_files, paths)
+                    if any_diff_in_paths::any_diff_in_paths(changed_files, paths) {
+                        matched_rule_ids.push(rule.id.clone());
+                    }
                 }
-                MatchRule::TestAssertionRelaxationWithoutProdChange => false,
-            })
-            .map(|rule| rule.id.clone())
-            .collect();
-        ExclusionEvaluation { matched_rule_ids }
+                MatchRule::TestAssertionRelaxationWithoutProdChange => {
+                    unevaluated_rule_ids.push(rule.id.clone());
+                }
+            }
+        }
+        ExclusionEvaluation {
+            matched_rule_ids,
+            unevaluated_rule_ids,
+        }
     }
 }
 
@@ -169,6 +204,7 @@ mod tests {
             evaluation.matched_rule_ids,
             vec!["arch-hyperparameter-change"]
         );
+        assert!(evaluation.unevaluated_rule_ids.is_empty());
     }
 
     #[test]
@@ -177,13 +213,17 @@ mod tests {
         let changed = vec!["README.md".to_string(), "Cargo.toml".to_string()];
         let evaluation = ExclusionEvaluation::evaluate(&config.rules, &changed);
         assert!(evaluation.matched_rule_ids.is_empty());
+        assert!(evaluation.unevaluated_rule_ids.is_empty());
     }
 
     #[test]
-    fn evaluate_never_matches_test_assertion_relaxation_rule_yet() {
-        // #123（TASK-5.2b）の評価ロジック実装までは常に match しないことの
-        // 固定テスト（スコープ境界の回帰検知。実装が入れば #123 側でこのテストを
-        // 更新する）。
+    fn evaluate_reports_test_assertion_relaxation_rule_as_unevaluated_not_unmatched() {
+        // #123（TASK-5.2b）の評価ロジック実装までは判定不能であることを
+        // `unevaluated_rule_ids` で明示する固定テスト（スコープ境界の回帰検知）。
+        // `matched_rule_ids` が空であることは「未マッチ確定（安全）」を意味せず、
+        // 呼び出し側（#124）は `unevaluated_rule_ids` を見て fail-closed に
+        // 倒す必要がある（モジュール冒頭「未評価ルールと fail-closed」参照）。
+        // 実装が入れば #123 側でこのテストを更新する。
         let rule = ExclusionRule {
             id: "test-tolerance-loosening".to_string(),
             category: Category::TestToleranceLoosening,
@@ -193,5 +233,9 @@ mod tests {
         let changed = vec!["crates/tensor-core/tests/regression.rs".to_string()];
         let evaluation = ExclusionEvaluation::evaluate(&[rule], &changed);
         assert!(evaluation.matched_rule_ids.is_empty());
+        assert_eq!(
+            evaluation.unevaluated_rule_ids,
+            vec!["test-tolerance-loosening"]
+        );
     }
 }
