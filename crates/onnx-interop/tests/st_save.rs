@@ -42,6 +42,31 @@ fn load_fixture_weights() -> HashMap<String, Tensor<f32>> {
     load_safetensors_f32(&fixture_path("model.safetensors")).expect("fixture のロードに失敗した")
 }
 
+/// `weight_shapes.json`（PyTorch 側が生成した独立の ground truth）から
+/// 期待 shape を読み込む。`header_has_expected_dtype_shape_and_data_offsets`
+/// が書き出し対象（`original`）からの自己参照ではなく、独立ソースと突き合わせて
+/// shape 破壊バグを検知できるようにするため（レビュー指摘対応）。
+fn load_expected_shapes() -> HashMap<String, Vec<usize>> {
+    let json_str = std::fs::read_to_string(fixture_path("weight_shapes.json"))
+        .expect("weight_shapes.json の読み込みに失敗した");
+    let value: serde_json::Value =
+        serde_json::from_str(&json_str).expect("weight_shapes.json が JSON として解析できない");
+    let obj = value
+        .as_object()
+        .expect("weight_shapes.json がオブジェクトでない");
+    obj.iter()
+        .map(|(k, v)| {
+            let shape: Vec<usize> = v
+                .as_array()
+                .unwrap_or_else(|| panic!("shape が配列でない (key={k})"))
+                .iter()
+                .map(|n| n.as_u64().unwrap() as usize)
+                .collect();
+            (k.clone(), shape)
+        })
+        .collect()
+}
+
 // --- 受け入れ条件（CI 代理検証 1）: PyTorch fixture との bit 一致ラウンドトリップ ---
 
 #[test]
@@ -81,6 +106,11 @@ fn round_trips_pytorch_fixture_with_bit_exact_values() {
 fn header_has_expected_dtype_shape_and_data_offsets() {
     let original = load_fixture_weights();
     let bytes = save_safetensors_f32_to_bytes(&original, None).expect("書き出しに失敗した");
+    // 期待 shape は書き出し対象（original）自体からではなく、独立の ground truth
+    // （PyTorch fixture 生成スクリプトの出力）から取得する。書き出し経路に shape
+    // 破壊バグがあってもこのテストで検知できるようにするため（レビュー指摘対応。
+    // `round_trips_pytorch_fixture_with_bit_exact_values` は bit 一致を別途検証）。
+    let expected_shapes = load_expected_shapes();
 
     // 先頭 8 バイトは LE u64 のヘッダ長（safetensors 仕様）。
     assert!(bytes.len() >= 8, "バイト列がヘッダ長分すら存在しない");
@@ -93,7 +123,10 @@ fn header_has_expected_dtype_shape_and_data_offsets() {
         let entry = &header[key];
         assert_eq!(entry["dtype"], "F32", "dtype mismatch for key {key}");
 
-        let expected_shape: Vec<usize> = original[key].shape().to_vec();
+        let expected_shape: Vec<usize> = expected_shapes
+            .get(key)
+            .unwrap_or_else(|| panic!("weight_shapes.json に key {key} が存在しない"))
+            .clone();
         let actual_shape: Vec<usize> = entry["shape"]
             .as_array()
             .unwrap_or_else(|| panic!("shape が配列でない (key={key})"))

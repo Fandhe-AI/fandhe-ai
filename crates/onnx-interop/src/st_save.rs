@@ -168,6 +168,16 @@ pub fn save_safetensors_f32_to_bytes(
 /// （モジュール冒頭ドキュメント「ファイル書き込みの整合性」参照。同一
 /// ファイルシステム内の `rename` は POSIX 上 atomic なため、途中クラッシュ
 /// でも正規パスには完全なファイルか元のファイルのいずれかのみが存在する）。
+///
+/// # スレッド安全性の契約
+///
+/// 一時ファイル名はプロセス ID とスレッド ID から構成する。同一プロセス内の
+/// 複数スレッドが**同一 `path`** へ同時に本関数を呼んだ場合でもスレッド ID
+/// により一時ファイル名が衝突しない。ただし本関数はチェックポイント書き込み
+/// （通常シングルライタ想定）を意図しており、同一 `path` への並行書き込み
+/// 自体（`rename` の到達順序・最終的にどちらの内容が残るか）はサポート対象
+/// 外である。異なる `path` 宛ての並行書き込みは `file_name` がパスに含まれる
+/// ため元より衝突しない。
 pub fn save_safetensors_f32(
     path: &Path,
     tensors: &HashMap<String, Tensor<f32>>,
@@ -179,12 +189,25 @@ pub fn save_safetensors_f32(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "output".to_string());
-    // プロセス ID を混ぜて同一ディレクトリへの並行書き出し時の一時ファイル
-    // 名衝突を避ける。
-    let tmp_path = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    // プロセス ID + スレッド ID を混ぜて一時ファイル名衝突を避ける
+    // （同一プロセス内の複数スレッドが同一 path へ同時に呼んだ場合の衝突を
+    // 防ぐ。関数冒頭ドキュメント「スレッド安全性の契約」参照）。
+    let tmp_path = dir.join(format!(
+        ".{file_name}.tmp.{}.{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
 
     std::fs::write(&tmp_path, &bytes).map_err(SaveError::Io)?;
-    std::fs::rename(&tmp_path, path).map_err(SaveError::Io)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        // rename 失敗時は書き込み済みの一時ファイルを残さない（best-effort）。
+        // 削除自体が失敗しても rename の元エラーを優先して返す
+        // （チェックポイント用途で残骸ファイルが蓄積するのを防ぐための
+        // 後始末であり、削除失敗を新たなエラーとして呼び出し元に伝える
+        // 必要はない）。
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(SaveError::Io(e));
+    }
     Ok(())
 }
 
