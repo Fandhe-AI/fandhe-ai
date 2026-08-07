@@ -105,6 +105,19 @@ mod tests {
     }
 
     #[test]
+    fn gather_negative_axis() {
+        // 実装計画 3.3 ギャップ観点「axis 負値（`normalize_axis` 経由）」。
+        // data: [2,3], axis=-1（axis 1 相当）, indices=[2,0] -> 列 2, 列 0。
+        let data = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let y = gather(&data, &[2, 0], &[2], -1).unwrap();
+        assert_eq!(y.shape(), &[2, 2]);
+        assert_eq!(y.get(&[0, 0]).unwrap(), 3.0);
+        assert_eq!(y.get(&[0, 1]).unwrap(), 1.0);
+        assert_eq!(y.get(&[1, 0]).unwrap(), 6.0);
+        assert_eq!(y.get(&[1, 1]).unwrap(), 4.0);
+    }
+
+    #[test]
     fn gather_index_out_of_range_rejected() {
         let data = Tensor::<f32>::zeros(&[3, 2]).unwrap();
         let err = gather(&data, &[3], &[1], 0).unwrap_err();

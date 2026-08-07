@@ -23,10 +23,15 @@
 //!   加え MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`）・MVP 形状操作
 //!   オペ（`Cast`／`Reshape`／`Squeeze`／`Transpose`）・Attention 系オペ（`MatMul`／
 //!   `Softmax`／`Erf`。TASK-7.3c・#84）・`LayerNormalization`（TASK-7.3d・#85）を含む。
-//!   `ops` は「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱い、[`onnx`] の
-//!   グラフ実行エンジン（decode → 属性値 → 本モジュール呼び出しの結線）は別イシューの
-//!   担当である。属性は proto 由来の型に依存しないプレーンな Rust 構造体・スライスとして
-//!   受け取り、デコード層の実装順序に依存しない。
+//!   `ops` は「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱う。属性は proto
+//!   由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、デコード層の
+//!   実装順序に依存しない。[`onnx`] のグラフ実行エンジン（decode → 属性値 → 本モジュール
+//!   呼び出しの結線）は別イシューの担当である（TASK-7.2a・#77 で proto デコード・
+//!   トポロジ検証までを提供。`crates/onnx-interop/tests/onnx_decode.rs`）。8 オペの
+//!   単体テスト・PoC-v2-6 数値突合（ONNX 経路）は TASK-7.2d（#80）が
+//!   `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
+//!   `tests/onnx_slice_dynamic_bounds.rs` として整備する（safetensors 経路の同種突合は
+//!   `tests/st_poc_v2_6_match.rs`・#75）。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の

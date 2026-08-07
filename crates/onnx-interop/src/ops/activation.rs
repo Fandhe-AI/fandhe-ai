@@ -122,6 +122,65 @@ mod tests {
     }
 
     #[test]
+    fn sigmoid_near_boundary_does_not_collapse_to_exact_zero_or_one() {
+        // f32 では `1.0 + exp(-x)` が `x >= 17` 付近から厳密に 1.0 へ丸まる
+        // （`exp(-17) ≈ 4.14e-8` は 1.0 の ULP `2^-24 ≈ 5.96e-8` を下回るため）。
+        // そのため「収縮しないこと」を実際に検証できる上限は ±16 が境界（実測値は
+        // 本テスト直上のコメントではなく `sigmoid_saturates_to_correctly_rounded_extremes`
+        // の説明を参照）。ここでは素朴な実装（`inf/inf` の NaN 化等）が本来の閾値より
+        // 手前で誤って 0/1 に潰れていないかを固定化する。
+        let x = Tensor::<f32>::new(vec![16.0, -16.0], &[2]).unwrap();
+        let y = sigmoid(&x).unwrap();
+        let pos = y.get(&[0]).unwrap();
+        let neg = y.get(&[1]).unwrap();
+        assert!(pos.is_finite() && (0.0..=1.0).contains(&pos));
+        assert!(neg.is_finite() && (0.0..=1.0).contains(&neg));
+        assert_ne!(
+            pos, 1.0,
+            "sigmoid(16.0) collapsed to exact 1.0 unexpectedly"
+        );
+        assert_ne!(
+            neg, 0.0,
+            "sigmoid(-16.0) collapsed to exact 0.0 unexpectedly"
+        );
+        assert!(pos > 0.999);
+        assert!(neg < 0.001);
+    }
+
+    #[test]
+    fn sigmoid_saturates_to_correctly_rounded_extremes() {
+        // ±88／±1000 は f32 の丸め誤差の範囲内で厳密に 0.0/1.0 へ収束するのが
+        // *正しい* 丸め結果である（バグではない）。真値 `1 - exp(-88) ≈ 1 - 6.05e-39`
+        // は 1.0 の ULP（`2^-24 ≈ 5.96e-8`）より近く、f32 では 1.0 と区別不能。
+        // 同様に `-1000` 側は `exp(1000)` が f32 上限（`f32::MAX ≈ 3.4e38`）を超えて
+        // `inf` へオーバーフローし `1/(1+inf) = 0.0` となる。逆に `-88` は
+        // `exp(88) ≈ 1.65e38` がまだ有限（非正規化数）に収まるため厳密には潰れない。
+        // 本テストはこれら「収束するケース／しないケース」を実測値に基づき固定化し、
+        // 弱い範囲チェックのみで実質何も検証しない状態（#297 Bugbot 指摘）を防ぐ。
+        let x = Tensor::<f32>::new(vec![88.0, -88.0, 1000.0, -1000.0], &[4]).unwrap();
+        let y = sigmoid(&x).unwrap();
+        for i in 0..4 {
+            let v = y.get(&[i]).unwrap();
+            assert!(
+                v.is_finite(),
+                "sigmoid output must stay finite at index {i}: {v}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&v),
+                "sigmoid output out of [0,1] at index {i}: {v}"
+            );
+        }
+        // +88／+1000: 真値との差が 1.0 の ULP 未満のため厳密に 1.0 へ丸まる（正しい丸め）。
+        assert_eq!(y.get(&[0]).unwrap(), 1.0);
+        assert_eq!(y.get(&[2]).unwrap(), 1.0);
+        // -88: `exp(88)` はまだ f32 で有限（非正規化数）のため厳密な 0.0 には潰れない。
+        assert_ne!(y.get(&[1]).unwrap(), 0.0);
+        assert!(y.get(&[1]).unwrap() < 0.001);
+        // -1000: `exp(1000)` が f32 上限を超えてオーバーフローするため厳密に 0.0。
+        assert_eq!(y.get(&[3]).unwrap(), 0.0);
+    }
+
+    #[test]
     fn erf_known_values() {
         let x = Tensor::<f32>::new(vec![0.0, 1.0, -1.0, 0.5, 2.0], &[5]).unwrap();
         let y = erf(&x).unwrap();
