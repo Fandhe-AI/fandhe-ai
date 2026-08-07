@@ -65,6 +65,17 @@
 //!   （TASK-3.3c・#142）。TASK-3.2 がスコープ外としていた「4 ゲート合成」の
 //!   結線点を、機能追加種別のループ完走実証のために満たす（`verify_composite`
 //!   モジュール冒頭ドキュメント参照）。
+//! - [`sha256`][]: FIPS 180-4 準拠 SHA-256 の自作実装（TASK-3.4・#145）。`sha2`
+//!   クレートは許容依存 8 区分外・依存追加はユーザー承認事項のため、
+//!   `logging` のハッシュチェーン計算専用に std のみで実装する
+//!   （`sha256` モジュール冒頭ドキュメント参照）。
+//! - [`logging`][]: 試行ログの JSON Lines・SHA-256 ハッシュチェーン出力
+//!   （TASK-3.4・#145）。[`report::LoopReport`]/[`report::LoopFailure`] を
+//!   受け取り、追記専用ファイルへ改竄検知可能な形式で記録する
+//!   [`logging::LogWriter`] と、記録済みログの整合性を検証する
+//!   [`logging::verify_chain`] を提供する（`.claude/rules/security.md`:
+//!   ループ試行ログは改竄検知可能な形式で記録し、取り込み判断の根拠を
+//!   追跡可能にする、という要求への対応。詳細は `docs/self-repair-log-format.md`）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -83,8 +94,6 @@
 //! - `exec`（コマンド実行抽象）の `guardrail` 側への共通化（`guardrail check`
 //!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
 //!   （本イシュー〈#134〉の PR 本文に記録）
-//! - ログ形式（`logging` 相当・SHA-256 ハッシュチェーン・`sha2` 依存追加。
-//!   依存追加はユーザー承認事項） → イシュー #145（TASK-3.4）
 //! - CLI バイナリ（`self-repair run`/`verify-log`。
 //!   `docs/guardrail-self-repair-cli.md` 3 節） → 後続タスク（既存イシューで
 //!   追跡済み）
@@ -97,10 +106,12 @@ pub mod exec;
 pub mod feature_addition;
 pub mod judge;
 pub mod kind;
+pub mod logging;
 pub mod outcome;
 pub mod perf_regression;
 pub mod report;
 pub mod runner;
+pub mod sha256;
 pub mod stages;
 pub mod verify_composite;
 pub mod verify_gates;
@@ -115,6 +126,7 @@ pub use exec::{CommandOutput, CommandRunner, SystemCommandRunner};
 pub use feature_addition::{FeatureAdditionDetector, FeatureAdditionFixGenerator};
 pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
+pub use logging::{LogError, LogWriter, verify_chain};
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};
