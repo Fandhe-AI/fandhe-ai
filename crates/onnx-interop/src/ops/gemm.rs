@@ -163,6 +163,56 @@ mod tests {
     }
 
     #[test]
+    fn trans_a_only() {
+        // A: [2,2] (trans_a=true 適用後 A^T=[[1,2],[3,4]])、B: [2,2]（trans_b なし）。
+        // trans_a・trans_b の全 4 組合せ（本テスト・trans_b_only・trans_a_and_trans_b・
+        // plain_matmul_no_bias）を横断してカバーする（実装計画 3.3 ギャップ観点）。
+        let a = Tensor::<f32>::new(vec![1.0, 3.0, 2.0, 4.0], &[2, 2]).unwrap(); // A^T = [[1,2],[3,4]]
+        let b = Tensor::<f32>::new(vec![7.0, 8.0, 9.0, 10.0], &[2, 2]).unwrap();
+        let attrs = GemmAttrs {
+            trans_a: true,
+            ..GemmAttrs::default()
+        };
+        let y = gemm(&a, &b, None, &attrs).unwrap();
+        // A^T @ B = [[1,2],[3,4]] @ [[7,8],[9,10]] = [[1*7+2*9, 1*8+2*10],[3*7+4*9,3*8+4*10]]
+        //         = [[25,28],[57,64]]
+        assert_eq!(y.get(&[0, 0]).unwrap(), 25.0);
+        assert_eq!(y.get(&[0, 1]).unwrap(), 28.0);
+        assert_eq!(y.get(&[1, 0]).unwrap(), 57.0);
+        assert_eq!(y.get(&[1, 1]).unwrap(), 64.0);
+    }
+
+    #[test]
+    fn trans_b_only() {
+        // A: [2,2]（trans_a なし）、B: [2,2] (trans_b=true 適用後 [2,2])。
+        let a = Tensor::<f32>::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::<f32>::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap(); // B^T = [[5,7],[6,8]]
+        let attrs = GemmAttrs {
+            trans_b: true,
+            ..GemmAttrs::default()
+        };
+        let y = gemm(&a, &b, None, &attrs).unwrap();
+        // A @ B^T = [[1,2],[3,4]] @ [[5,7],[6,8]] = [[1*5+2*6,1*7+2*8],[3*5+4*6,3*7+4*8]]
+        //         = [[17,23],[39,53]]
+        assert_eq!(y.get(&[0, 0]).unwrap(), 17.0);
+        assert_eq!(y.get(&[0, 1]).unwrap(), 23.0);
+        assert_eq!(y.get(&[1, 0]).unwrap(), 39.0);
+        assert_eq!(y.get(&[1, 1]).unwrap(), 53.0);
+    }
+
+    #[test]
+    fn c_broadcast_from_scalar_shape() {
+        // `c` が [1] 形状（スカラー相当）の場合も出力 shape [m,n] へブロードキャストされる
+        // （`broadcast_to` へ委譲。ONNX Gemm-13 の `C` はユニ方向ブロードキャスト可）。
+        let a = Tensor::<f32>::new(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]).unwrap();
+        let b = Tensor::<f32>::new(vec![2.0, 3.0, 4.0, 5.0], &[2, 2]).unwrap();
+        let c = Tensor::<f32>::new(vec![10.0], &[1]).unwrap();
+        let y = gemm(&a, &b, Some(&c), &GemmAttrs::default()).unwrap();
+        assert_eq!(y.get(&[0, 0]).unwrap(), 2.0 + 10.0);
+        assert_eq!(y.get(&[1, 1]).unwrap(), 5.0 + 10.0);
+    }
+
+    #[test]
     fn rank_mismatch_rejected() {
         let a = Tensor::<f32>::zeros(&[3]).unwrap();
         let b = Tensor::<f32>::zeros(&[3, 2]).unwrap();

@@ -331,6 +331,23 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_axis_rejected() {
+        // 実装計画 3.3 ギャップ観点。同一軸を `axes` に重複指定した場合を固定化する。
+        let data = Tensor::<f32>::zeros(&[5, 5]).unwrap();
+        let err = slice(
+            &data,
+            &SliceParams {
+                starts: &[0, 1],
+                ends: &[2, 3],
+                axes: Some(&[0, 0]),
+                steps: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, OpError::DuplicateAxis { axis: 0, .. }));
+    }
+
+    #[test]
     fn lengths_mismatch_rejected() {
         let data = Tensor::<f32>::zeros(&[5, 5]).unwrap();
         let err = slice(

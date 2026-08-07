@@ -122,6 +122,30 @@ mod tests {
     }
 
     #[test]
+    fn sigmoid_saturates_without_collapsing_to_exact_zero_or_one() {
+        // ±88 近傍は `(-v).exp()` が f32 のオーバーフロー／アンダーフロー境界に近い
+        // （`exp(88) ≈ 1.65e38` は f32::MAX 手前）。実装計画 3.3 ギャップ観点
+        // 「極値（±88 近傍での sigmoid 飽和が 0/1 に丸まらず有限であること）」を固定化する。
+        let x = Tensor::<f32>::new(vec![88.0, -88.0, 1000.0, -1000.0], &[4]).unwrap();
+        let y = sigmoid(&x).unwrap();
+        for i in 0..4 {
+            let v = y.get(&[i]).unwrap();
+            assert!(
+                v.is_finite(),
+                "sigmoid output must stay finite at index {i}: {v}"
+            );
+            assert!(
+                (0.0..=1.0).contains(&v),
+                "sigmoid output out of [0,1] at index {i}: {v}"
+            );
+        }
+        // +88 は 1.0 に極めて近いが、指数関数のオーバーフローで暗黙に厳密 1.0 へ丸まる
+        // 実装（NaN 化・inf 割り算等）と、有限誤差で漸近する正しい実装を区別する。
+        assert!(y.get(&[0]).unwrap() > 0.999);
+        assert!(y.get(&[1]).unwrap() < 0.001);
+    }
+
+    #[test]
     fn erf_known_values() {
         let x = Tensor::<f32>::new(vec![0.0, 1.0, -1.0, 0.5, 2.0], &[5]).unwrap();
         let y = erf(&x).unwrap();

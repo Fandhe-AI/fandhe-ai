@@ -80,6 +80,13 @@ mod tests {
     }
 
     #[test]
+    fn shape_of_rank_one() {
+        // 実装計画 3.3 ギャップ観点「多次元・rank 1・スカラー的縮退形状」の rank 1 分。
+        let t = Tensor::<f32>::zeros(&[7]).unwrap();
+        assert_eq!(shape(&t), vec![7]);
+    }
+
+    #[test]
     fn unsqueeze_inserts_axis_at_position() {
         let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
         let y = unsqueeze(&t, &[0]).unwrap();
@@ -113,5 +120,14 @@ mod tests {
         let t = Tensor::<f32>::zeros(&[3]).unwrap();
         let err = unsqueeze(&t, &[5]).unwrap_err();
         assert!(matches!(err, OpError::AxisOutOfRange { axis: 5, .. }));
+    }
+
+    #[test]
+    fn unsqueeze_negative_axis_out_of_range_rejected() {
+        // 実装計画 3.3 ギャップ観点「範囲外エラー」の負軸分（正規化後も範囲外の場合）。
+        // out_rank = 1 + 1 = 2 のため [-3, 1] のみ有効。-3 は範囲外。
+        let t = Tensor::<f32>::zeros(&[3]).unwrap();
+        let err = unsqueeze(&t, &[-3]).unwrap_err();
+        assert!(matches!(err, OpError::AxisOutOfRange { axis: -3, .. }));
     }
 }
