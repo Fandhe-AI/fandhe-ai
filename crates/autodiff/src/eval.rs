@@ -267,9 +267,17 @@ pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
     }
 }
 
-/// 平均二乗誤差（スカラー出力）。shape 一致検査（`require_same_shape`）
-/// は呼び出し元が済ませている前提。
-pub(crate) fn mse_loss(pred: &Tensor<f32>, target: &Tensor<f32>) -> Tensor<f32> {
+/// 二乗誤差の縮約（スカラー出力）。shape 一致検査
+/// （`require_same_shape`）は呼び出し元が済ませている前提。`reduction`
+/// で mean（全要素平均）/sum（全要素総和）を切り替える（#190。
+/// `Var::mse_loss_with`（`var.rs`）から呼ばれる）。`numel == 0` は
+/// mean・sum とも 0.0 を返す（mean 側はゼロ除算回避、sum 側は空和が
+/// 数学的に 0 のため元々の定義と一致）。
+pub(crate) fn mse_loss(
+    pred: &Tensor<f32>,
+    target: &Tensor<f32>,
+    reduction: crate::var::Reduction,
+) -> Tensor<f32> {
     let pred_data = dense_vec(pred);
     let target_data = dense_vec(target);
     let numel = pred_data.len();
@@ -281,10 +289,15 @@ pub(crate) fn mse_loss(pred: &Tensor<f32>, target: &Tensor<f32>) -> Tensor<f32> 
             diff * diff
         })
         .sum();
-    let mean = if numel == 0 {
-        0.0
-    } else {
-        sum_sq / numel as f32
+    let out = match reduction {
+        crate::var::Reduction::Mean => {
+            if numel == 0 {
+                0.0
+            } else {
+                sum_sq / numel as f32
+            }
+        }
+        crate::var::Reduction::Sum => sum_sq,
     };
-    build_tensor(vec![mean], &[])
+    build_tensor(vec![out], &[])
 }
