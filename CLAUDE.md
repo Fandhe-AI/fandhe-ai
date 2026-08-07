@@ -28,9 +28,11 @@ rust-ai-library/
 │                             # onnx-interop・guardrail・self-repair・bench-harness（雛形）
 ├── scripts/
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
+│   ├── run-verification-gates.sh # AI 自律メンテナンス検証 4 ゲート（build/test/clippy/bench）の実行ロジック（ci.yml・Makefile 共用。TASK-6.1c）
 │   └── testdata/             # 上記の self-test 用固定 fixture
 ├── .github/workflows/
-│   ├── ci.yml               # fmt / clippy / test / deny / deps-forbidden / ci-complete
+│   ├── ci.yml               # fmt / clippy / test / deny / deps-forbidden / guardrail-regression / verification-gates / ci-complete
+│   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
 │   └── update-external.yml  # docs/spec・.claude/skills の自動追従
 ├── .claude/
 │   ├── agents/              # research / implement / testing / quality / docs
