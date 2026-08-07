@@ -21,6 +21,11 @@
 
 - 実施日時: `loop-report.json` の `started_at_unix_ms`（UNIX ミリ秒）。
 - 実行環境: CPU バックエンドのみ（CUDA・Metal 実機依存なし）。
+- `SELF_REPAIR_REVALIDATION_OUT` を明示的に本ディレクトリへ向けているのは、
+  この記録（`loop-report.json`）を tracked ファイルとして意図的に更新するため。
+  環境変数を省略した場合は `.gitignore` 済みの `target/self-repair-revalidation/
+  bug-fix` へフォールバックし、tracked ファイルを意図せず書き換えない
+  （非破壊に試し実行したい場合はこちらを使う）。
 
 ## 2. 実施手順（ハーネス内部）
 
@@ -90,7 +95,7 @@ verify_gates.rs` のドキュメント参照）ため、取り込み判断自体
 | # | 判定基準 | 本実証での充足状況 |
 |---|---------|---------------------|
 | 1 | `self-repair run --kind bug-fix` の 1 回起動・追加の人間入力なしで終了コード 0（`Verdict::AutoApply`）に到達 | **部分充足**。`self-repair run` CLI バイナリが本イシュー時点で未実装のため、lib 直接呼び出し（`SelfRepairLoop::run`）経由で「1 回起動・追加の人間入力なし」を満たし、最終結論 `LoopOutcome::Adopted`（`guardrail::Verdict::AutoApply` 相当）に到達したことを確認した。CLI 形態での再実施は 7 節参照 |
-| 2 | 検証 4 ゲート（build／test --release／clippy -D warnings／bench）全通過。`guardrail` の 3 分岐判定を lib 直接呼び出しで経由し、迂回経路がないこと | **充足**（3 ゲートは実測・ベンチゲートは機構完走確認。3 節参照）。`guardrail::decide` を唯一の判定経路として使用し、迂回経路は存在しない |
+| 2 | 検証 4 ゲート（build／test --release／clippy -D warnings／bench）全通過。`guardrail` の 3 分岐判定を lib 直接呼び出しで経由し、迂回経路がないこと | **部分充足**（3 ゲートは実測・ベンチゲートは機構完走確認であり候補 diff の実測ではない。3 節・5 行目参照）。`guardrail::decide` を唯一の判定経路として使用し、迂回経路は存在しない |
 | 3 | `--max-attempts` 上限内で完走すること | **充足**。`max_attempts = 2` で attempt 2（正解）にて `Adopted` に到達（`loop-report.json` の `attempt_count`） |
 | 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過すること | **未充足（スコープ外）**。JSON Lines ハッシュチェーンログ・`verify-log` は TASK-3.4（#145）のスコープ。本実証では `LoopReport` 由来の JSON（`loop-report.json`）で試行回数・所要時間・判断根拠を記録した |
 | 5 | ベンチ劣化中央値が承認済み閾値内（5 回計測の中央値採用・単発計測禁止。閾値は変更しない） | **部分充足**。ベンチゲート機構自体は `bench_runs_min`（sandbox の `guardrail.toml` 確定値。5 回）以上・中央値判定で完走し閾値内（`bench_gate_mechanism.median_pct` 参照）。ただし 3 節のとおり合成ワークロードであり候補 diff の実測ではない |

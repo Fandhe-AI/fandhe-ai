@@ -151,8 +151,20 @@ fn create_sandbox() -> PathBuf {
     sandbox
 }
 
-fn cleanup(dir: &Path) {
-    let _ = fs::remove_dir_all(dir);
+/// sandbox を確実に削除する RAII ガード。`create_sandbox` 呼び出し直後に
+/// 生成することで、`find_relu_forward_line`／`guardrail::config::resolve` 等の
+/// `expect()` がループ完走後の早期クリーンアップ（`drop(_sandbox_guard)`）
+/// より前で panic しても、パニックの unwind 経由で `drop` が必ず実行され、
+/// PID ベースの予測可能パス（`create_sandbox` 参照）が `/tmp` に残置されない
+/// （レビュー指摘）。`remove_dir_all` は対象が既に存在しなくてもエラーを無視
+/// するため、早期クリーンアップとパニック時 drop が両方走っても安全
+/// （実際は Rust の所有権により実行されるのはどちらか 1 回のみ）。
+struct SandboxGuard(PathBuf);
+
+impl Drop for SandboxGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 /// `var.rs` を行単位で読み込み、`relu` メソッド本体の forward 呼び出し行を
@@ -251,11 +263,27 @@ fn diff_numstat(sandbox: &Path, baseline: &str) -> (u64, Vec<String>) {
     let mut files = Vec::new();
     for line in stdout.lines() {
         let mut cols = line.splitn(3, '\t');
-        let added = cols.next().unwrap_or("0");
-        let deleted = cols.next().unwrap_or("0");
+        // `added`/`deleted` の解析に失敗した場合（バイナリファイルは
+        // `-`／想定外フォーマット等）は 0 加算で fail-open に埋めない
+        // （ファイル冒頭ドキュメント「diff 由来シグナルの実測」の契約）。
+        // 本題材は `var.rs` 単一テキストファイルのみを変更する想定のため、
+        // 解析失敗はデータの不整合を意味し fail-closed に panic する
+        // （`.claude/rules/security.md` A08）。
+        let added = cols
+            .next()
+            .unwrap_or_else(|| panic!("git diff --numstat の行が想定外です: {line:?}"));
+        let deleted = cols
+            .next()
+            .unwrap_or_else(|| panic!("git diff --numstat の行が想定外です: {line:?}"));
         let path = cols.next().unwrap_or("").to_string();
-        lines_changed += added.parse::<u64>().unwrap_or(0);
-        lines_changed += deleted.parse::<u64>().unwrap_or(0);
+        lines_changed += added.parse::<u64>().unwrap_or_else(|error| {
+            panic!("added 列の解析に失敗しました（fail-open で 0 に丸めない）: {added:?}: {error}")
+        });
+        lines_changed += deleted.parse::<u64>().unwrap_or_else(|error| {
+            panic!(
+                "deleted 列の解析に失敗しました（fail-open で 0 に丸めない）: {deleted:?}: {error}"
+            )
+        });
         if !path.is_empty() {
             files.push(path);
         }
@@ -418,10 +446,16 @@ impl VerificationGate for RevalidationVerificationGate {
 }
 
 /// 完走ログの出力先ディレクトリを決める。環境変数
-/// `SELF_REPAIR_REVALIDATION_OUT`（プロンプト手順・実装計画 3 節ステップ 3 が
-/// 指定する起動方法）が設定されていればそれを使い、未設定時はリポジトリ直下の
-/// `docs/self-repair-revalidation/bug-fix` へフォールバックする（`cargo test`
-/// の CWD に依存しないよう `repo_root()` から導出する）。
+/// `SELF_REPAIR_REVALIDATION_OUT`（README §1・§7 が明示する再現コマンドが
+/// 指定する起動方法。tracked な記録ディレクトリ `docs/self-repair-revalidation/
+/// bug-fix` を意図的に更新する）が設定されていればそれを使う。
+///
+/// 未設定時（例: 素の `cargo test -p self-repair --test revalidation_bug_fix --
+/// --ignored` を README の推奨コマンドなしに実行した場合）は tracked ファイルを
+/// 意図せず書き換えないよう、`.gitignore` 済みの `target/` 配下へフォールバック
+/// する（レビュー指摘: 既定値が tracked ファイルを指すため非破壊に実行する手段が
+/// なかった問題への対応）。`cargo test` の CWD に依存しないよう、いずれも
+/// `repo_root()` から導出する。
 fn output_dir() -> PathBuf {
     match env::var("SELF_REPAIR_REVALIDATION_OUT") {
         Ok(value) => {
@@ -431,18 +465,34 @@ fn output_dir() -> PathBuf {
             } else {
                 // `cargo test` はテストバイナリの CWD をパッケージ
                 // （`crates/self-repair`）のマニフェストディレクトリに設定する
-                // （workspace ルートではない）。プロンプト手順・実装計画 3 節が
-                // 想定する「リポジトリルートからの相対パス」を実行時 CWD に
-                // 依存せず解決するため、`repo_root()` を基点として結合する。
+                // （workspace ルートではない）。README が想定する「リポジトリ
+                // ルートからの相対パス」を実行時 CWD に依存せず解決するため、
+                // `repo_root()` を基点として結合する。
                 repo_root().join(path)
             }
         }
-        Err(_) => repo_root().join("docs/self-repair-revalidation/bug-fix"),
+        Err(_) => repo_root().join("target/self-repair-revalidation/bug-fix"),
     }
 }
 
 fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis() as u64
+}
+
+/// [`build_report_json`] への入力をまとめたパラメータ構造体。
+///
+/// `BenchLog`（`RevalidationVerificationGate` と共有する `Rc<RefCell<..>>`）と
+/// 同じ理由で、引数個数を素朴に増やすのではなく構造化して
+/// `clippy::too_many_arguments` を型レベルで回避する（`BenchLog` の
+/// `type` エイリアスと同じ一貫した方針。`.claude/rules/coding-rust.md`
+/// 「`#[allow]` の安易な追加で黙らせない」）。
+struct ReportJsonInput<'a> {
+    report: &'a self_repair::LoopReport,
+    bench_log: &'a [(u32, Vec<f64>, f64)],
+    thresholds: &'a guardrail::Thresholds,
+    exclusion_rule_ids_by_attempt: &'a [(u32, Vec<String>)],
+    sandbox_commit: &'a str,
+    started_at_unix_ms: u128,
 }
 
 /// 完走ログ（`LoopReport`）を JSON へ変換する。
@@ -453,15 +503,15 @@ fn duration_ms(duration: Duration) -> u64 {
 /// フィールドを手動で `serde_json::Value` へ写す。試行回数・所要時間・判断根拠
 /// （#141 の受け入れ条件）に加え、ベンチゲート機構の完走ログ（合成ワークロード
 /// である旨のラベル付き。本ファイル冒頭ドキュメント参照）も含める。
-#[allow(clippy::too_many_arguments)]
-fn build_report_json(
-    report: &self_repair::LoopReport,
-    bench_log: &[(u32, Vec<f64>, f64)],
-    thresholds: &guardrail::Thresholds,
-    exclusion_rule_ids_by_attempt: &[(u32, Vec<String>)],
-    sandbox_commit: &str,
-    started_at_unix_ms: u128,
-) -> serde_json::Value {
+fn build_report_json(input: &ReportJsonInput<'_>) -> serde_json::Value {
+    let ReportJsonInput {
+        report,
+        bench_log,
+        thresholds,
+        exclusion_rule_ids_by_attempt,
+        sandbox_commit,
+        started_at_unix_ms,
+    } = *input;
     let outcome_json = match &report.outcome {
         self_repair::LoopOutcome::NoActionNeeded => serde_json::json!({"kind": "no_action_needed"}),
         self_repair::LoopOutcome::Adopted => serde_json::json!({"kind": "adopted"}),
@@ -558,6 +608,10 @@ fn bug_fix_loop_completes_without_human_intervention() {
     let loop_start = Instant::now();
 
     let sandbox = create_sandbox();
+    // `sandbox` 構築直後にガードを確保する。以降どの `expect()`/`panic!` で
+    // 異常終了しても sandbox ディレクトリが確実に削除される（`SandboxGuard`
+    // ドキュメント参照）。
+    let _sandbox_guard = SandboxGuard(sandbox.clone());
 
     // バグ注入 → sandbox 内コミット（diff の起点。メイン working copy には
     // 一切触れない）。
@@ -640,14 +694,14 @@ fn bug_fix_loop_completes_without_human_intervention() {
 
     match &run_result {
         Ok(report) => {
-            let json = build_report_json(
+            let json = build_report_json(&ReportJsonInput {
                 report,
-                &bench_log.borrow(),
-                &thresholds,
-                &exclusion_rule_ids_log.borrow(),
-                &injected_commit,
+                bench_log: &bench_log.borrow(),
+                thresholds: &thresholds,
+                exclusion_rule_ids_by_attempt: &exclusion_rule_ids_log.borrow(),
+                sandbox_commit: &injected_commit,
                 started_at_unix_ms,
-            );
+            });
             fs::write(
                 &output_path,
                 serde_json::to_string_pretty(&json).expect("JSON シリアライズに失敗しました"),
@@ -672,7 +726,10 @@ fn bug_fix_loop_completes_without_human_intervention() {
     }
 
     let total_elapsed = loop_start.elapsed();
-    cleanup(&sandbox);
+    // ここまで到達すればループ実行自体は完了しており sandbox は不要になる。
+    // 以降の最終アサーションを待たず早期に削除する（`Drop` を明示的に起動）。
+    // それより前で異常終了した場合も `_sandbox_guard` の `Drop` が保険として働く。
+    drop(_sandbox_guard);
 
     let report = run_result.unwrap_or_else(|failure| {
         panic!(
@@ -705,8 +762,12 @@ fn bug_fix_loop_completes_without_human_intervention() {
         "所要時間が記録されていること"
     );
     for attempt in &report.attempts {
+        // `Duration` は符号なしのため `>= Duration::ZERO` は常に真で何も検証
+        // しない（レビュー指摘）。各試行は build/test/clippy（＋通過試行のみ
+        // ベンチゲート機構）を実際に実行するため、実測所要時間は必ず非ゼロに
+        // なる想定であり `> Duration::ZERO` で意味のある検証にする。
         assert!(
-            attempt.duration >= Duration::ZERO,
+            attempt.duration > Duration::ZERO,
             "各試行の所要時間が記録されていること（attempt={}）",
             attempt.attempt
         );
