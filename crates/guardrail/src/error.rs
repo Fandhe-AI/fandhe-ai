@@ -57,6 +57,44 @@ pub enum GuardrailError {
     /// 「ベンチはゲート全通過時のみ計測する」への違反。呼び出し側バグとみなし
     /// 判定を続行せず拒否する。`.claude/rules/security.md` A08）。
     InconsistentDecisionInput { reason: String },
+
+    /// [`crate::exclusion_match`] のポリシー除外ルール match 判定が呼び出す
+    /// `git diff`／`git apply --check` 等の子プロセス起動自体に失敗した
+    /// （実行ファイル不在・権限不足等）。TASK-5.2b・イシュー #123。
+    ///
+    /// 起動失敗を「match なし」（＝除外リスト素通り→自動適用方向）へ丸めると
+    /// fail-open になるため、必ずエラーとして呼び出し元へ伝播する
+    /// （`.claude/rules/security.md` A08）。
+    DiffSpawn {
+        command: String,
+        source: std::io::Error,
+    },
+
+    /// [`crate::exclusion_match`] が呼び出した `git diff` 系コマンドが非ゼロ
+    /// 終了した（baseline ref が不正・リポジトリ外実行等）。TASK-5.2b・
+    /// イシュー #123。
+    ///
+    /// `DiffSpawn` と同様、fail-closed のため「match なし」へは丸めず
+    /// エラーとして伝播する。
+    DiffFailed {
+        command: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
+
+    /// [`crate::exclusion_match`] が呼び出した `git diff` は正常終了（exit 0）
+    /// したが、出力が unified diff の想定形状（`diff --git ` ヘッダを含む）を
+    /// 満たさなかった（`diff.external` 外部ツール・`.gitattributes` の
+    /// textconv 等、`-c diff.external=`／`--no-ext-diff`／`--no-textconv` で
+    /// 列挙しきれない未知の出力変形経路の保険）。TASK-5.2b・イシュー #123
+    /// （Bugbot 指摘 Low の再発防止）。
+    ///
+    /// 出力が意図しない形式へ変形されると `is_removed_content_line` 等の
+    /// パターンマッチが無言で全滅し「マッチなし」を返してしまう
+    /// （本モジュールが避けようとしている fail-open。`.claude/rules/security.md`
+    /// A08）ため、`DiffSpawn`／`DiffFailed` と同様にエラーとして伝播し、
+    /// 「match なし」へ丸めない。
+    DiffUnexpectedFormat { command: String, reason: String },
 }
 
 impl fmt::Display for GuardrailError {
@@ -74,6 +112,22 @@ impl fmt::Display for GuardrailError {
             GuardrailError::InconsistentDecisionInput { reason } => {
                 write!(f, "判定入力が矛盾しています: {reason}")
             }
+            GuardrailError::DiffSpawn { command, source } => {
+                write!(f, "コマンド起動に失敗しました: {command}: {source}")
+            }
+            GuardrailError::DiffFailed {
+                command,
+                exit_code,
+                stderr,
+            } => {
+                write!(
+                    f,
+                    "コマンドが失敗しました: {command} (exit_code={exit_code:?}): {stderr}"
+                )
+            }
+            GuardrailError::DiffUnexpectedFormat { command, reason } => {
+                write!(f, "コマンド出力の形式が想定外です: {command}: {reason}")
+            }
         }
     }
 }
@@ -82,6 +136,7 @@ impl std::error::Error for GuardrailError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             GuardrailError::Io { source, .. } => Some(source),
+            GuardrailError::DiffSpawn { source, .. } => Some(source),
             _ => None,
         }
     }
