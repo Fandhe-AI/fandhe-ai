@@ -284,16 +284,32 @@ jobs:
         run: cargo check -p backend-metal --tests --target aarch64-apple-darwin
 
   # --------------------------------------------------
-  # CUDA toolkit 非搭載環境でのビルド成立検証（TASK-1.7d・イシュー #35）。
+  # CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・イシュー #35／
+  # TASK-2.3・イシュー #56）。
   # scripts/check-cuda-toolkit-absent.sh（Makefile の build-no-cuda ターゲットと共用する
   # 単一ソース）で「toolkit 非搭載であること自体」を fail-closed で検証したうえで
   # cargo build を実行する。runner に将来 toolkit が導入された場合はこのジョブが失敗し、
   # コンテナ内検証への切替が必要になったことを検知できる。
+  #
+  # TASK-2.3 は spec 上「cuda feature を含まない構成」の検証を求めるが、backend-cuda は
+  # TASK-2.1（#48）で正式化した feature フラグなしの cfg ベース構成（PoC-v2-5）を採用して
+  # おり feature 分岐自体が存在しないため、「CUDA toolkit 非搭載環境でのビルド・実行成立」
+  # に読み替える（spec 自体が PoC-v2-3 の動的ロード方式に基づくと明記しており検証実体は
+  # 一致する。docs/spec/ は編集しない）。
+  #
+  # 実行検証（cargo test）は既存 test ジョブ（TASK-1.7〜1.9d）と責務が異なる: test ジョブは
+  # runner の toolkit 搭載状況を assert しないため、runner に toolkit が導入されると
+  # 「非搭載環境での実行成立」の検証が暗黙に消える（#35 がビルドに対して解決したのと同型の
+  # 問題の実行版）。本ジョブは上記 assert 済みの前提下で cargo test を実行することで、
+  # cudarc の dynamic-loading 経由で CudaDevice::is_available() が false に縮退し、
+  # CudaError::DriverUnavailable へ型付きエラーとして落ちる分岐（panic しない契約）と、
+  # backend-cpu・tensor-core を含む workspace 全体の実行成立を担保する。
   # --------------------------------------------------
   build-no-cuda-toolkit:
-    name: cargo build (CUDA toolkit 非搭載検証)
+    name: cargo build / test (CUDA toolkit 非搭載検証)
     runs-on: self-hosted
-    timeout-minutes: 30
+    # test ステップ追加により既存 test ジョブの上限（45 分）に整合させる。
+    timeout-minutes: 45
     steps:
       - name: Checkout
         # persist-credentials: false（fmt ジョブと同一方針）。
@@ -339,6 +355,14 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         # --locked で Cargo.lock の意図しない書き換え・runner 汚染を防止する（build ジョブと同一方針）。
         run: cargo build --workspace --locked
+
+      # TASK-2.3（#56）: assert 済みの toolkit 非搭載前提下で非 #[ignore] テストを実行し、
+      # 「ビルド成立」だけでなく「実行成立」（DriverUnavailable への型付きエラー縮退・
+      # backend-cpu 経由の演算実行を含む）を検証する。実機必須テストは #[ignore] 分離済み
+      # のため非搭載 runner でも green になる設計（.claude/rules/coding-rust.md）。
+      - name: cargo test（toolkit 非搭載）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test --workspace --locked
 
   # --------------------------------------------------
   # cargo deny（依存ライセンス・供給元の監査。deny.toml 追加済み・TASK-1.3 で有効化済み）

@@ -146,17 +146,22 @@ else
 endif
 
 # CUDA toolkit「非搭載」であることを scripts/check-cuda-toolkit-absent.sh（ci.yml の
-# build-no-cuda-toolkit ジョブと共用する単一ソース）で検証したうえで cargo build を実行する
-# （TASK-1.7d・イシュー #35）。CUDA 実機（DGX Spark GB10 等）で toolkit 搭載環境から
-# `make ci` を実行しても壊れないよう、probe でスキップ分岐する（CI ジョブ側は assert で
-# fail-closed のまま。toolkit 非搭載が確定した環境での検証は `make docker-ci` を使う）。
+# build-no-cuda-toolkit ジョブと共用する単一ソース）で検証したうえで cargo build・
+# cargo test を実行する（TASK-1.7d・イシュー #35／TASK-2.3・イシュー #56。ビルド・実行
+# 成立検証）。CUDA 実機（DGX Spark GB10 等）で toolkit 搭載環境から `make ci` を実行しても
+# 壊れないよう、probe でスキップ分岐する（CI ジョブ側は assert で fail-closed のまま。
+# toolkit 非搭載が確定した環境での検証は `make docker-ci` を使う）。
+# cargo test は非 #[ignore] テストのみを実行し、DriverUnavailable への型付きエラー縮退・
+# backend-cpu 経由の演算実行を含む workspace 全体の「実行成立」を ci.yml と同一内容で
+# ローカル再現する。
 .PHONY: build-no-cuda
-build-no-cuda: ## CUDA toolkit 非搭載環境でのビルド成立検証（TASK-1.7d。搭載環境ではスキップ）
+build-no-cuda: ## CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・TASK-2.3。搭載環境ではスキップ）
 ifdef HAS_CARGO
 	@bash scripts/check-cuda-toolkit-absent.sh self-test
 	@if bash scripts/check-cuda-toolkit-absent.sh probe; then \
 		bash scripts/check-cuda-toolkit-absent.sh assert; \
 		cargo build --workspace --locked; \
+		cargo test --workspace --locked; \
 	else \
 		echo "skip: CUDA toolkit 搭載環境のため非搭載検証をスキップ（make docker-ci で検証可能）"; \
 	fi
