@@ -99,7 +99,13 @@ fn run_check_inner(args: &CheckArgs) -> Result<Report, GuardrailError> {
             test_result: gate_outcome(s.test_result),
             clippy_result: gate_outcome(s.clippy_result),
             bench_measurements_pct: s.bench_measurements_pct.clone(),
-            bench_median_pct: guardrail::report::median(&s.bench_measurements_pct),
+            bench_median_pct: guardrail::report::median(&s.bench_measurements_pct).map_err(
+                |e| {
+                    GuardrailError::InvalidInput(format!(
+                        "bench_measurements_pct の中央値算出に失敗: {e}"
+                    ))
+                },
+            )?,
             applied_exclusion_rule_ids: Vec::new(),
             verdict: Verdict::Escalate,
             reason,
