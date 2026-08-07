@@ -103,15 +103,36 @@ pub const WMMA_TF32_OPT_BLOCK_N: u32 = 64;
 pub const WMMA_TF32_OPT_K_TILE: u32 = 16;
 
 /// TF32 opt GEMM の fragment M・N 一辺（`m16n16k8` の 16）。
+///
+/// Rust 側での実利用は `gemm.rs::CudaGemm::new` 内の
+/// `const _: () = assert!(...)`（ブロックタイル・warp タイルの倍数関係を
+/// コンパイル時検査する）のみで、通常の実行時コードパスからは参照され
+/// ない。rustc 1.88 系の dead-code 解析はネストした無名 `const _` 内から
+/// のみ参照される `pub const` を誤って未使用と判定する（1.92 以降では
+/// 解消済み。`cargo +1.88.0 clippy` と `cargo +1.92.0 clippy` の実測差分で
+/// 確認済み。#149 PR CI 指摘対応）。実行時 `debug_assert` への置換は
+/// 「CUDA 非搭載の通常 CI では `new` 自体が実行されず検査が効かない」
+/// というレビュー指摘 #62 の踏襲事項に反するため行わない。
+#[allow(dead_code)]
 pub const WMMA_TF32_OPT_FRAG: u32 = 16;
 
 /// TF32 opt GEMM の fragment K 一辺（`m16n16k8` の 8）。
 /// `WMMA_TF32_OPT_K_TILE` は必ずこの倍数でなければならない
 /// （`gemm.rs` の const アサーションで検査）。
+///
+/// [`WMMA_TF32_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_TF32_OPT_FRAG_K: u32 = 8;
 
 /// TF32 opt GEMM の warp タイル一辺（32。fragment 辺 16 の 2 倍 =
 /// レジスタブロッキング 2×2）。
+///
+/// [`WMMA_TF32_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_TF32_OPT_WARP_TILE: u32 = 32;
 
 /// TF32 opt GEMM 1 ブロックあたりのスレッド数（4 warp = 128 スレッド。
@@ -125,10 +146,20 @@ pub const WMMA_TF32_OPT_THREADS: u32 = 128;
 /// `K_TILE`（16）に 4 要素加算し、f32 の `ldm` 制約（4 の倍数）を保ちながら
 /// バンクコンフリクトを避ける（設計メモ 4.2 節・本ファイル冒頭
 /// ドキュメンテーションコメント「アライメント」参照）。
+///
+/// [`WMMA_TF32_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_TF32_OPT_A_PAD: u32 = WMMA_TF32_OPT_K_TILE + 4;
 
 /// B タイル（`bs_tile[2][K_TILE][B_PAD]`）の行幅（パディング後）。
 /// `BLOCK_N`（64）に 4 要素加算する。A パディングと同じ根拠。
+///
+/// [`WMMA_TF32_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_TF32_OPT_B_PAD: u32 = WMMA_TF32_OPT_BLOCK_N + 4;
 
 /// WMMA（Tensor Core）を用いた TF32 GEMM の共有メモリ・タイル最適化版
@@ -338,13 +369,33 @@ pub const WMMA_F16_OPT_BLOCK_N: u32 = 64;
 /// は K=16 のため、TF32 opt と異なり共有メモリ K タイル幅とサブステップ
 /// 分割が不要（1 ロード = 1 `mma_sync` 入力。`kernels_wmma.rs::WMMA_TILE`
 /// と同じ値）。
+///
+/// Rust 側での実利用は `gemm_wmma.rs::CudaWmmaGemm::new` 内の
+/// `const _: () = assert!(...)` のみで、通常の実行時コードパスからは
+/// 参照されない。rustc 1.88 系の dead-code 解析はネストした無名 `const _`
+/// 内からのみ参照される `pub const` を誤って未使用と判定する（1.92 以降
+/// では解消済み。`cargo +1.88.0 clippy` と `cargo +1.92.0 clippy` の実測
+/// 差分で確認済み。#149 PR CI 指摘対応）。実行時 `debug_assert` への置換
+/// は「CUDA 非搭載の通常 CI では `new` 自体が実行されず検査が効かない」
+/// というレビュー指摘 #62 の踏襲事項に反するため行わない。
+#[allow(dead_code)]
 pub const WMMA_F16_OPT_FRAG: u32 = 16;
 
 /// f16 opt GEMM の共有メモリ K タイル幅（fragment K と同じ 16）。
+///
+/// [`WMMA_F16_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_F16_OPT_K_TILE: u32 = WMMA_F16_OPT_FRAG;
 
 /// f16 opt GEMM の warp タイル一辺（32。TF32 opt と同じレジスタブロッキング
 /// 2×2）。
+///
+/// [`WMMA_F16_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_F16_OPT_WARP_TILE: u32 = 32;
 
 /// f16 opt GEMM 1 ブロックあたりのスレッド数（4 warp = 128 スレッド。
@@ -355,10 +406,20 @@ pub const WMMA_F16_OPT_THREADS: u32 = 128;
 /// `K_TILE`（16）に 8 要素加算し、half の `ldm` 制約（8 の倍数）を保ちながら
 /// バンクコンフリクトを避ける（`kernels_wmma.rs` 冒頭ドキュメントコメント
 /// 「ldm 制約」参照）。
+///
+/// [`WMMA_F16_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_F16_OPT_A_PAD: u32 = WMMA_F16_OPT_K_TILE + 8;
 
 /// B タイル（`bs_tile[2][K_TILE][B_PAD]`）の行幅（パディング後）。
 /// `BLOCK_N`（64）に 8 要素加算する。A パディングと同じ根拠。
+///
+/// [`WMMA_F16_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub const WMMA_F16_OPT_B_PAD: u32 = WMMA_F16_OPT_BLOCK_N + 8;
 
 /// f16 WMMA GEMM の共有メモリ・タイル最適化版（TASK-11.1d・#63）。

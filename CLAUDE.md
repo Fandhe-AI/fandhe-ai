@@ -47,6 +47,7 @@ rust-ai-library/
     ├── backend-metal-wgpu-decision.md  # Metal バックエンド実装方式（wgpu 非採用）の決定記録
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
     ├── cuda-tensor-core-design.md      # TASK-11.1a WMMA/mma カーネル設計メモ（#60）
+    ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
