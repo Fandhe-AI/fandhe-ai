@@ -15,8 +15,10 @@
 //!   キーマップに対する期待キー集合の充足検査を提供する。キー不足を無言 skip せず
 //!   型付きエラー（[`LoadError`]）で報告する（v1 PoC-6 詰まりポイント #2 対策。詳細は
 //!   `require_keys` モジュールのドキュメンテーションコメント参照）。
-//! - [`onnx`]: ONNX 取り込みの実体（protobuf デコード・内部グラフ構築）。
-//!   spec 根拠: `docs/spec/05-tasks.md` TASK-7.2a、REQ-7。
+//! - [`onnx`]: ONNX 取り込みの実体（protobuf デコード・内部グラフ構築・グラフ実行
+//!   インタープリタ）。spec 根拠: `docs/spec/05-tasks.md` TASK-7.2a〜7.2b、REQ-7。
+//!   [`onnx::interp::run`] は `onnx::graph::build_graph` が構築した `Graph` を
+//!   `op_type` 名で [`ops`] へディスパッチして実行する（TASK-7.2b・#78）。
 //! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83 / TASK-7.3c・#84 /
 //!   TASK-7.3d・#85）: ONNX オペを `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
 //!   8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`）に
@@ -25,13 +27,13 @@
 //!   `Softmax`／`Erf`。TASK-7.3c・#84）・`LayerNormalization`（TASK-7.3d・#85）を含む。
 //!   `ops` は「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱う。属性は proto
 //!   由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、デコード層の
-//!   実装順序に依存しない。[`onnx`] のグラフ実行エンジン（decode → 属性値 → 本モジュール
-//!   呼び出しの結線）は別イシューの担当である（TASK-7.2a・#77 で proto デコード・
-//!   トポロジ検証までを提供。`crates/onnx-interop/tests/onnx_decode.rs`）。8 オペの
-//!   単体テスト・PoC-v2-6 数値突合（ONNX 経路）は TASK-7.2d（#80）が
-//!   `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
-//!   `tests/onnx_slice_dynamic_bounds.rs` として整備する（safetensors 経路の同種突合は
-//!   `tests/st_poc_v2_6_match.rs`・#75）。
+//!   実装順序に依存しない。TASK-7.2 の 8 オペは [`onnx::interp`] がグラフ実行から
+//!   到達可能な状態まで結線済み（TASK-7.2b・#78）。TASK-7.3 系 14 オペのディスパッチ
+//!   結線は #274 で追跡する。8 オペの単体テスト・PoC-v2-6 数値突合（ONNX 経路）は
+//!   TASK-7.2d（#80）が `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
+//!   `tests/onnx_slice_dynamic_bounds.rs` として整備し、decode→build_graph→run の
+//!   全経路突合は `tests/onnx_interp.rs`（TASK-7.2b・#78）が担う（safetensors 経路の
+//!   同種突合は `tests/st_poc_v2_6_match.rs`・#75）。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
