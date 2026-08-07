@@ -38,7 +38,12 @@ use std::fmt;
 ///
 /// `Display` + `std::error::Error` を実装し、呼び出し側が `?` でそのまま伝播できる
 /// （本番経路での `unwrap()`/`expect()` を避けるため。`.claude/rules/coding-rust.md`）。
+///
+/// `#[non_exhaustive]` を付与し、#73 マージ後のロード失敗系バリアント追加（本モジュールの
+/// `//!` 「#73 との関係」節参照）を非破壊にする。同クレート内の `ShapeError`・
+/// `AutodiffError` と同様の方針（クレート外の網羅的 match を破壊的変更にしない）。
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoadError {
     /// 期待キー集合のうちマップに存在しなかったキー名の一覧（ソート済み・重複除去済み）。
     MissingKeys(Vec<String>),
