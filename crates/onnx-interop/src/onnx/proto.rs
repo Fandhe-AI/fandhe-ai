@@ -11,8 +11,10 @@
 //!
 //! `prost::Message::decode` は構造体に未宣言のフィールド番号を protobuf のワイヤ
 //! フォーマット仕様どおり自動的にスキップするため、`TypeProto`（`ValueInfoProto.type`）
-//! 等、本クレートが現時点で使わない再帰的メッセージは意図的に定義しない。#78（インタープリタ
-//! 基盤）・#79（8 オペ実装）で必要になった時点で拡張する。
+//! 等、本クレートが現時点で使わない再帰的メッセージは意図的に定義しない。`AttributeProto`
+//! の `g` / `graphs`（If/Loop/Scan のサブグラフ属性）も同様に #78 のスコープ外として
+//! 意図的に未定義とする。#78（インタープリタ基盤）・#79（8 オペ実装）で必要になった
+//! 時点で拡張する。
 //!
 //! フィールド番号の出典: `onnx==1.22.0` 同梱の `onnx/onnx.proto` を実際に読み、
 //! 該当 6 メッセージのフィールド番号を転記した（PoC-v2-6 で実ファイル
@@ -100,8 +102,6 @@ pub struct TensorProto {
     pub data_type: i32,
     #[prost(float, repeated, tag = "4")]
     pub float_data: Vec<f32>,
-    #[prost(int32, repeated, tag = "5")]
-    pub int32_data: Vec<i32>,
     #[prost(int64, repeated, tag = "7")]
     pub int64_data: Vec<i64>,
     #[prost(string, tag = "8")]

@@ -384,6 +384,14 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
             }
         }
         for output in &node.output {
+            // ONNX は入力側と同様に省略可能出力も空文字列で表す規約
+            // （Dropout の mask・MaxPool の Indices・LSTM/GRU の Y_h/Y_c 等）。
+            // 複数ノードがそれぞれ末尾出力を省略した正当なモデルを
+            // `DuplicateOutputName { tensor_name: "" }` として誤拒否しないよう、
+            // 直前のノード入力側の空文字列スキップと対称に扱う。
+            if output.is_empty() {
+                continue;
+            }
             // `HashSet::insert` は既存要素があっても `false` を返すのみで無言で
             // 何もしない。戻り値を捨てると「2 ノードが同じ出力名を生成」「ノード
             // 出力が既存 initializer / グラフ入力名を無言でシャドウ」を見逃す

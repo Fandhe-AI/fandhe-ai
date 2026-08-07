@@ -177,7 +177,6 @@ fn raw_data_len_mismatch_is_rejected() {
         dims: vec![2],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "bad_tensor".to_string(),
         raw_data: vec![0, 0, 0, 0],
@@ -204,7 +203,6 @@ fn negative_dim_is_rejected() {
         dims: vec![-1],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "neg_dim_tensor".to_string(),
         raw_data: vec![],
@@ -226,7 +224,6 @@ fn unknown_data_type_is_rejected() {
         dims: vec![1],
         data_type: 99, // onnx.proto3 未定義域（本クレート未対応）
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "unknown_dtype_tensor".to_string(),
         raw_data: vec![],
@@ -254,7 +251,6 @@ fn element_count_overflow_is_rejected() {
         dims: vec![i64::MAX, i64::MAX],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "overflow_tensor".to_string(),
         raw_data: vec![],
@@ -281,7 +277,6 @@ fn byte_length_multiply_overflow_is_rejected() {
         dims: vec![1i64 << 62],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "byte_overflow_tensor".to_string(),
         raw_data: vec![],
@@ -308,7 +303,6 @@ fn empty_data_with_nonzero_dims_is_rejected_not_silently_accepted() {
         dims: vec![2],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "empty_but_nonzero_dims_tensor".to_string(),
         raw_data: vec![],
@@ -338,7 +332,6 @@ fn truly_empty_tensor_dims_zero_is_still_accepted() {
         dims: vec![0],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![],
         name: "truly_empty_tensor".to_string(),
         raw_data: vec![],
@@ -364,7 +357,6 @@ fn raw_data_takes_precedence_over_typed_float_data() {
         dims: vec![1],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![1.0],
-        int32_data: vec![],
         int64_data: vec![],
         name: "both_fields".to_string(),
         raw_data: 9.0f32.to_le_bytes().to_vec(),
@@ -386,7 +378,6 @@ fn raw_data_takes_precedence_over_typed_int64_data() {
         dims: vec![1],
         data_type: onnx_interop::onnx::proto::data_type::INT64,
         float_data: vec![],
-        int32_data: vec![],
         int64_data: vec![1],
         name: "both_fields_i64".to_string(),
         raw_data: 9i64.to_le_bytes().to_vec(),
@@ -410,7 +401,6 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
         dims: vec![1],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![1.0],
-        int32_data: vec![],
         int64_data: vec![],
         name: "dup".to_string(),
         raw_data: vec![],
@@ -419,7 +409,6 @@ fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
         dims: vec![1],
         data_type: onnx_interop::onnx::proto::data_type::FLOAT,
         float_data: vec![2.0],
-        int32_data: vec![],
         int64_data: vec![],
         name: "dup".to_string(),
         raw_data: vec![],
@@ -576,7 +565,6 @@ fn node_output_shadowing_initializer_name_is_rejected() {
         data_type: 1, // FLOAT
         dims: vec![1],
         float_data: vec![1.0],
-        int32_data: vec![],
         int64_data: vec![],
         raw_data: vec![],
     };
@@ -667,7 +655,6 @@ fn graph_input_name_matching_initializer_name_is_accepted() {
         data_type: 1, // FLOAT
         dims: vec![1],
         float_data: vec![1.0],
-        int32_data: vec![],
         int64_data: vec![],
         raw_data: vec![],
     };
@@ -726,6 +713,78 @@ fn optional_empty_string_input_is_not_treated_as_missing() {
 }
 
 #[test]
+fn node_with_multiple_optional_empty_outputs_is_accepted() {
+    // ONNX は入力側と同様に出力側も省略可能なものを空文字列で表す規約
+    // （例: MaxPool の Indices・LSTM/GRU の Y_h/Y_c）。1 ノードが複数の
+    // 空文字列出力を持っていても `DuplicateOutputName` を誤検出しないことを
+    // 確認する（グラフ入力側の対称テスト。レビュー指摘 #77）。
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x".to_string()],
+                output: vec!["y".to_string(), String::new(), String::new()],
+                name: "n1".to_string(),
+                op_type: "MaxPool".to_string(),
+                attribute: vec![],
+                domain: String::new(),
+            }],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "y".to_string(),
+            }],
+        }),
+    };
+    assert!(build_graph(&model).is_ok());
+}
+
+#[test]
+fn two_nodes_with_empty_trailing_output_are_both_accepted() {
+    // 2 ノードがそれぞれ末尾出力を空文字列で省略するケース。空文字列出力を
+    // 既知集合との衝突検査対象から除外していないと、2 ノード目で
+    // `DuplicateOutputName { tensor_name: "" }` として誤拒否される
+    // （レビュー指摘 #77）。
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![
+                NodeProto {
+                    input: vec!["x".to_string()],
+                    output: vec!["y1".to_string(), String::new()],
+                    name: "n1".to_string(),
+                    op_type: "MaxPool".to_string(),
+                    attribute: vec![],
+                    domain: String::new(),
+                },
+                NodeProto {
+                    input: vec!["y1".to_string()],
+                    output: vec!["y2".to_string(), String::new()],
+                    name: "n2".to_string(),
+                    op_type: "MaxPool".to_string(),
+                    attribute: vec![],
+                    domain: String::new(),
+                },
+            ],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![ValueInfoProto {
+                name: "y2".to_string(),
+            }],
+        }),
+    };
+    assert!(build_graph(&model).is_ok());
+}
+
+#[test]
 fn model_without_graph_is_rejected() {
     let model = ModelProto {
         ir_version: 8,
@@ -750,7 +809,6 @@ fn attribute_proto_round_trips_with_tensor_field() {
             dims: vec![1],
             data_type: onnx_interop::onnx::proto::data_type::INT64,
             float_data: vec![],
-            int32_data: vec![],
             int64_data: vec![7],
             name: "const_t".to_string(),
             raw_data: vec![],
