@@ -35,10 +35,10 @@
 //!    （REQ-5。security.md「除外リストは判定を迂回させないための最後の砦」）。
 //! 3. **機械エスカレーション**: 却下・除外リスト match のいずれでもなく、
 //!    次のいずれかが成立する場合。
-//!    - `lines_changed > thresholds.lines_max()`
+//!    - `lines_changed > thresholds.lines_max`
 //!    - `api_broken == true`
 //!    - `gaming_suspect == true`
-//!    - [`BenchSignal::Measured`] かつ `median_pct > thresholds.bench_max_pct()`
+//!    - [`BenchSignal::Measured`] かつ `median_pct > thresholds.bench_median_max_pct`
 //!      （正方向の劣化のみを罰する。改善（負値）・境界値ちょうどは罰しない）
 //! 4. **ゲート未全通過エスカレーション**: 却下でも上記 2./3. でもないが、
 //!    `gates.all_passed()` が `false`（一部 `Skipped`）の場合。
@@ -60,7 +60,13 @@ use crate::error::GuardrailError;
 
 /// 3 分岐判定の結論（REQ-4）。severity の高さは `Reject` > `Escalate` >
 /// `AutoApply` の順（[`decide`] のモジュールコメント参照）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` は判定レポート JSON（`crate::report::Report`。
+/// TASK-4.1a・イシュー #104 管轄）が `verdict` フィールドとして本型を直接
+/// シリアライズするために付与する（`snake_case` は `docs/guardrail-self-repair-cli.md`
+/// §2.1 の `"auto_apply"`/`"escalate"`/`"reject"` 表記と一致させる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// 逸脱なし。全ゲート通過・全指標が閾値内。
     AutoApply,
@@ -119,13 +125,13 @@ pub enum Reason {
     GateSkipped,
     /// ポリシー除外リスト設定のルール `rule_id` に match（無条件人間承認。REQ-5）。
     ExclusionMatch { rule_id: String },
-    /// 変更行数が `Thresholds::lines_max()` を超過。
-    LinesMaxExceeded { lines_changed: u32, lines_max: u32 },
+    /// 変更行数が `Thresholds::lines_max` を超過。
+    LinesMaxExceeded { lines_changed: u64, lines_max: u64 },
     /// 公開 API の破壊的変更を検出。
     ApiBroken,
     /// ゲーミング（判定回避）の疑いを検出。
     GamingSuspect,
-    /// ベンチ劣化の中央値が `Thresholds::bench_max_pct()` を超過。
+    /// ベンチ劣化の中央値が `Thresholds::bench_median_max_pct` を超過。
     BenchMedianExceeded { median_pct: f64, bench_max_pct: f64 },
     /// ベンチ計測値が非有限（NaN/inf）。閾値比較を経ずに無条件でエスカレーション
     /// へ回す fail-closed 分岐（NaN が `>` 比較を素通りする回帰を防ぐ）。
@@ -247,7 +253,7 @@ impl GateSignals {
     }
 }
 
-/// ベンチ計測結果（REQ-4 条件 (2)。5 回以上計測の中央値。`Thresholds::bench_runs`
+/// ベンチ計測結果（REQ-4 条件 (2)。5 回以上計測の中央値。`Thresholds::bench_runs_min`
 /// が下限を強制する契約は `config` モジュール側で担保済み）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BenchSignal {
@@ -274,7 +280,7 @@ pub enum BenchSignal {
 #[derive(Debug)]
 pub struct DecisionInput<'a> {
     thresholds: &'a Thresholds,
-    lines_changed: u32,
+    lines_changed: u64,
     gates: GateSignals,
     api_broken: bool,
     gaming_suspect: bool,
@@ -296,7 +302,7 @@ impl<'a> DecisionInput<'a> {
     /// 誤った自動適用を出すより実行失敗させる）。
     pub fn new(
         thresholds: &'a Thresholds,
-        lines_changed: u32,
+        lines_changed: u64,
         gates: GateSignals,
         api_broken: bool,
         gaming_suspect: bool,
@@ -423,10 +429,10 @@ pub fn decide(input: &DecisionInput) -> Result<Decision, GuardrailError> {
     //    透明性を上げる（該当した逸脱を全て列挙）。
     let mut escalation_reasons: Vec<Reason> = Vec::new();
 
-    if input.lines_changed > input.thresholds.lines_max() {
+    if input.lines_changed > input.thresholds.lines_max {
         escalation_reasons.push(Reason::LinesMaxExceeded {
             lines_changed: input.lines_changed,
-            lines_max: input.thresholds.lines_max(),
+            lines_max: input.thresholds.lines_max,
         });
     }
 
@@ -445,12 +451,12 @@ pub fn decide(input: &DecisionInput) -> Result<Decision, GuardrailError> {
         // ため、比較の可否によらず無条件でエスカレーションへ回す。
         if !median_pct.is_finite() {
             escalation_reasons.push(Reason::BenchNonFinite { median_pct });
-        } else if median_pct > input.thresholds.bench_max_pct() {
+        } else if median_pct > input.thresholds.bench_median_max_pct {
             // 正方向の劣化のみを罰する。改善（負値）・境界値ちょうど（`==`）は
             // 閾値内として扱う（PoC-3 準拠。比較演算子は `>` を用いる）。
             escalation_reasons.push(Reason::BenchMedianExceeded {
                 median_pct,
-                bench_max_pct: input.thresholds.bench_max_pct(),
+                bench_max_pct: input.thresholds.bench_median_max_pct,
             });
         }
     }
@@ -500,7 +506,7 @@ mod tests {
     /// テスト全体で使い回す既定プリセットの検証済み閾値
     /// （`lines_max=200`・`bench_max_pct=5.0`・`bench_runs=5`）。
     fn default_thresholds() -> Thresholds {
-        config::Thresholds::builtin(PresetName::Default).expect("組み込み既定値の読み込みに失敗")
+        config::Thresholds::builtin(PresetName::Default)
     }
 
     fn all_passed_gates() -> GateSignals {
@@ -621,7 +627,7 @@ mod tests {
         };
         let input = DecisionInput::new(
             &thresholds,
-            thresholds.lines_max() + 1000,
+            thresholds.lines_max + 1000,
             gates,
             true,
             false,
@@ -639,7 +645,7 @@ mod tests {
         let thresholds = default_thresholds();
         let input = DecisionInput::new(
             &thresholds,
-            thresholds.lines_max() + 1,
+            thresholds.lines_max + 1,
             all_passed_gates(),
             false,
             false,
@@ -701,7 +707,7 @@ mod tests {
             false,
             false,
             BenchSignal::Measured {
-                median_pct: thresholds.bench_max_pct() + 0.01,
+                median_pct: thresholds.bench_median_max_pct + 0.01,
             },
             Vec::new(),
         )
@@ -719,12 +725,12 @@ mod tests {
         let thresholds = default_thresholds();
         let input = DecisionInput::new(
             &thresholds,
-            thresholds.lines_max() + 1,
+            thresholds.lines_max + 1,
             all_passed_gates(),
             true,
             true,
             BenchSignal::Measured {
-                median_pct: thresholds.bench_max_pct() + 1.0,
+                median_pct: thresholds.bench_median_max_pct + 1.0,
             },
             Vec::new(),
         )
@@ -753,7 +759,7 @@ mod tests {
             false,
             false,
             BenchSignal::Measured {
-                median_pct: thresholds.bench_max_pct(),
+                median_pct: thresholds.bench_median_max_pct,
             },
             Vec::new(),
         )

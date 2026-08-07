@@ -1,204 +1,122 @@
-//! 判定シグナルの型（TASK-4.1b・イシュー #105）。
+//! `--signals` が受け取る計測済みシグナル JSON の入力型。
 //!
-//! PoC-3（`docs/spec/03-poc/poc-3-guardrail-validity/code/guardrail.sh`）が
-//! git 差分・build/test/clippy・bench 実行から計測する各シグナルを型として
-//! 定義する。実際のシグナル計測（git 差分からの変更行数・公開 API 破壊検出・
-//! ゲーミング疑い検出、build/test/clippy ゲート実行）は本イシューのスコープ外
-//! （#104・#106・#107 の管轄）であり、本クレートにはまだ実装されていない。
-//! 本モジュールは実測経路が未実装の段階でも判定ロジック（`decision::decide`）
-//! を CI 契約検証可能にするための「契約としてのシグナル入力型」であり、実測
-//! モジュールのマージ時にそちらの出力型と統合される想定（フィールド名は
-//! `guardrail.sh` の出力 JSON キーと 1:1 対応させているため統合コストは
-//! 小さいはずである）。
+//! `docs/guardrail-self-repair-cli.md` 1.2 節「`--signals` の迂回防止」・1.4 節
+//! （bench-harness 付け替え後もスキーマは同一）に対応する CI 契約検証専用パス。
+//! `cli.rs` の入口ガード（環境変数 `GUARDRAIL_ALLOW_INJECTED_SIGNALS=1`）を
+//! 通過した後にのみ `main.rs` から読み込まれる。
 //!
-//! [`crate::decision::decide`] が [`Signals::to_decision_input`] の戻り値
-//! （[`crate::decision::DecisionInput`]）を受け取り
-//! [`crate::decision::Decision`] を返す。CLI からは判定レポートに包んで
-//! 出力する契約（#106 が接続する）。
+//! 2.5 節の方針どおり、シグナル JSON は「必須フィールド欠落の検出のみ」を行い、
+//! 将来のフィールド追加に対する前方互換性を優先する（判定を安全側に倒す性質の
+//! 設定ファイルではないため、`guardrail.toml` のような未知フィールド拒否は行わない。
+//! serde の既定動作＝未知フィールドは無視、をそのまま用いる）。
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::Thresholds;
-use crate::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals};
 use crate::error::GuardrailError;
+use crate::toml_lite::MAX_INPUT_BYTES;
 
-/// 単一変更セットに対する判定入力シグナル一式。
-///
-/// フィールドは PoC-3 の結果 JSON（`guardrail.sh` 出力）のキーと同名にして
-/// いる（`bench_samples_pct` 等の判定に使わない付随情報は本イシューのスコープ
-/// 外の表示層が別途保持する契約とし、ここには含めない）。
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// v1 `signals.rs` 相当の 5 条件入力（`docs/guardrail-self-repair-cli.md` 2.4 節の
+/// 5 条件に対応するシグナル）。`bench_measurements_pct` は REQ-4「5 回以上」の
+/// 受け入れ基準に合わせて長さ検証を行う。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signals {
-    /// 変更行数（挿入+削除。Cargo.lock は対象外。guardrail.sh 1 節）。
-    pub lines_changed: u32,
-    /// 変更行数の上限閾値（プリセット由来）。
-    pub lines_max: u32,
-    /// 公開 API シグネチャ破壊の簡易検出結果（guardrail.sh 2 節）。
-    pub api_broken: bool,
-    /// テスト・本番コード同時変更（ゲーミング疑い）の検出結果（guardrail.sh 3 節）。
-    pub gaming_suspect: bool,
-    /// `cargo build` の成否（guardrail.sh 4 節）。
-    pub build_ok: bool,
-    /// `cargo test --release` の成否。`build_ok` が false の場合は評価されない。
-    pub test_ok: bool,
-    /// `cargo clippy --all-targets -- -D warnings` の成否。
-    pub clippy_ok: bool,
-    /// bench を実行したか（build/test/clippy 全通過時のみ true）。
-    pub bench_ran: bool,
-    /// bench 劣化率の中央値（％。正の値が劣化・負の値が改善）。
-    pub bench_median_pct: f64,
-    /// bench 劣化許容上限（％。プリセット由来）。
-    pub bench_max_pct: f64,
+    pub lines_changed: u64,
+    pub public_api_broken: bool,
+    pub gaming_suspected: bool,
+    pub build_result: GateResult,
+    pub test_result: GateResult,
+    pub clippy_result: GateResult,
+    pub bench_measurements_pct: Vec<f64>,
+}
+
+/// 4 ゲート（build/test/clippy/bench）のうち pass/fail で表現できるものの結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateResult {
+    Pass,
+    Fail,
 }
 
 impl Signals {
-    /// [`crate::decision::decide`] へ渡すための変換。フラットな真偽値
-    /// （`build_ok`/`test_ok`/`clippy_ok`）から [`GateSignals`]
-    /// （`Passed`/`Failed`/`Skipped`）を導出する。
-    ///
-    /// `guardrail.sh` の実行順序契約（build 失敗時は test/clippy を実行しない。
-    /// test 失敗時は clippy を実行する）に合わせ、`build_ok` が false の場合
-    /// のみ test/clippy を `Skipped` として扱う（それ以外は各フィールドの
-    /// 真偽値をそのまま `Passed`/`Failed` へ写像する）。
-    ///
-    /// `DecisionInput::new` は「ゲート全通過でないのにベンチ計測済み」という
-    /// 矛盾入力を fail-closed で拒否するため、本変換もそのままエラーを伝播する
-    /// （security.md A08。判定を迂回しない）。
-    ///
-    /// `exclusion_rule_ids`（match したポリシー除外リストのルール `id`。空 =
-    /// match なし）は呼び出し元が渡す必須引数（評価忘れの fail-open 経路を
-    /// 型で封鎖する契約は `decision::DecisionInput::new` を参照）。
-    pub fn to_decision_input<'a>(
-        &self,
-        thresholds: &'a Thresholds,
-        exclusion_rule_ids: Vec<String>,
-    ) -> Result<DecisionInput<'a>, GuardrailError> {
-        let (test, clippy) = if self.build_ok {
-            (
-                bool_to_gate_signal(self.test_ok),
-                bool_to_gate_signal(self.clippy_ok),
-            )
-        } else {
-            (GateSignal::Skipped, GateSignal::Skipped)
-        };
-        let gates = GateSignals {
-            build: bool_to_gate_signal(self.build_ok),
-            test,
-            clippy,
-        };
-        let bench = if self.bench_ran {
-            BenchSignal::Measured {
-                median_pct: self.bench_median_pct,
-            }
-        } else {
-            BenchSignal::NotRun
-        };
-
-        DecisionInput::new(
-            thresholds,
-            self.lines_changed,
-            gates,
-            self.api_broken,
-            self.gaming_suspect,
-            bench,
-            exclusion_rule_ids,
-        )
-    }
-}
-
-/// `bool`（成否）→ [`GateSignal`]（`Skipped` を含まない 2 値からの変換。
-/// `Skipped` の判定は呼び出し元（[`Signals::to_decision_input`]）が行う）。
-fn bool_to_gate_signal(ok: bool) -> GateSignal {
-    if ok {
-        GateSignal::Passed
-    } else {
-        GateSignal::Failed
+    /// JSON 文字列からデシリアライズする。サイズ上限（A03 対策・2.5 節）は
+    /// `toml_lite::MAX_INPUT_BYTES` を流用し、guardrail.toml と同一の 64 KiB
+    /// 上限をシグナル JSON にも適用する（DoS 的な巨大入力の一律拒否）。
+    pub fn from_json_str(raw: &str) -> Result<Self, GuardrailError> {
+        if raw.len() > MAX_INPUT_BYTES {
+            return Err(GuardrailError::InvalidInput(format!(
+                "signals JSON exceeds {MAX_INPUT_BYTES} byte limit ({} bytes)",
+                raw.len()
+            )));
+        }
+        let signals: Signals = serde_json::from_str(raw)
+            .map_err(|e| GuardrailError::InvalidInput(format!("invalid signals JSON: {e}")))?;
+        // REQ-4「5 回以上」の受け入れ基準（1.2 節が参照する 2.1 節スキーマ注記）。
+        if signals.bench_measurements_pct.len() < 5 {
+            return Err(GuardrailError::InvalidInput(
+                "bench_measurements_pct must contain at least 5 measurements (REQ-4)".to_string(),
+            ));
+        }
+        Ok(signals)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::PresetName;
 
-    fn base_signals() -> Signals {
-        Signals {
-            lines_changed: 10,
-            lines_max: 200,
-            api_broken: false,
-            gaming_suspect: false,
-            build_ok: true,
-            test_ok: true,
-            clippy_ok: true,
-            bench_ran: false,
-            bench_median_pct: 0.0,
-            bench_max_pct: 5.0,
-        }
+    fn valid_json() -> &'static str {
+        r#"{
+            "lines_changed": 42,
+            "public_api_broken": false,
+            "gaming_suspected": false,
+            "build_result": "pass",
+            "test_result": "pass",
+            "clippy_result": "pass",
+            "bench_measurements_pct": [1.0, 1.1, 0.9, 1.2, 1.05]
+        }"#
     }
 
     #[test]
-    fn all_ok_signals_yield_auto_apply() {
-        let thresholds =
-            Thresholds::builtin(PresetName::Default).expect("組み込み既定値の検証に失敗");
-        let signals = base_signals();
-        let input = signals
-            .to_decision_input(&thresholds, Vec::new())
-            .expect("シグナル変換に失敗");
-        let decision = crate::decision::decide(&input).expect("判定に失敗");
-        assert_eq!(decision.verdict(), crate::decision::Verdict::AutoApply);
+    fn parses_valid_signals() {
+        let signals = Signals::from_json_str(valid_json()).unwrap();
+        assert_eq!(signals.lines_changed, 42);
+        assert_eq!(signals.bench_measurements_pct.len(), 5);
     }
 
     #[test]
-    fn build_failure_skips_test_and_clippy() {
-        let thresholds =
-            Thresholds::builtin(PresetName::Default).expect("組み込み既定値の検証に失敗");
-        let signals = Signals {
-            build_ok: false,
-            test_ok: true,
-            clippy_ok: true,
-            ..base_signals()
-        };
-        let input = signals
-            .to_decision_input(&thresholds, Vec::new())
-            .expect("シグナル変換に失敗");
-        let decision = crate::decision::decide(&input).expect("判定に失敗");
-        assert_eq!(decision.verdict(), crate::decision::Verdict::Reject);
-        assert_eq!(decision.reason_conditions(), vec!["gate_build_failed"]);
+    fn rejects_missing_required_field() {
+        let raw = r#"{"lines_changed": 1}"#;
+        let err = Signals::from_json_str(raw).unwrap_err();
+        assert!(matches!(err, GuardrailError::InvalidInput(_)));
     }
 
     #[test]
-    fn bench_ran_true_with_build_failure_is_inconsistent() {
-        let thresholds =
-            Thresholds::builtin(PresetName::Default).expect("組み込み既定値の検証に失敗");
-        let signals = Signals {
-            build_ok: false,
-            bench_ran: true,
-            bench_median_pct: 1.0,
-            ..base_signals()
-        };
-        let err = signals
-            .to_decision_input(&thresholds, Vec::new())
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            GuardrailError::InconsistentDecisionInput { .. }
-        ));
+    fn rejects_fewer_than_five_bench_measurements() {
+        let raw = r#"{
+            "lines_changed": 1,
+            "public_api_broken": false,
+            "gaming_suspected": false,
+            "build_result": "pass",
+            "test_result": "pass",
+            "clippy_result": "pass",
+            "bench_measurements_pct": [1.0, 1.0]
+        }"#;
+        let err = Signals::from_json_str(raw).unwrap_err();
+        assert!(matches!(err, GuardrailError::InvalidInput(_)));
     }
 
     #[test]
-    fn bench_ran_true_with_all_gates_passed_yields_measured_bench() {
-        let thresholds =
-            Thresholds::builtin(PresetName::Default).expect("組み込み既定値の検証に失敗");
-        let signals = Signals {
-            bench_ran: true,
-            bench_median_pct: 6.0,
-            ..base_signals()
-        };
-        let input = signals
-            .to_decision_input(&thresholds, Vec::new())
-            .expect("シグナル変換に失敗");
-        let decision = crate::decision::decide(&input).expect("判定に失敗");
-        assert_eq!(decision.verdict(), crate::decision::Verdict::Escalate);
-        assert_eq!(decision.reason_conditions(), vec!["bench_median_exceeded"]);
+    fn ignores_unknown_fields_for_forward_compat() {
+        let raw = r#"{
+            "lines_changed": 1,
+            "public_api_broken": false,
+            "gaming_suspected": false,
+            "build_result": "pass",
+            "test_result": "pass",
+            "clippy_result": "pass",
+            "bench_measurements_pct": [1.0, 1.0, 1.0, 1.0, 1.0],
+            "future_field": "ignored"
+        }"#;
+        assert!(Signals::from_json_str(raw).is_ok());
     }
 }

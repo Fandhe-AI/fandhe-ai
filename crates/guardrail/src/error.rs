@@ -1,38 +1,59 @@
 //! `guardrail` クレート全体で共有する型付きエラー。
 //!
-//! coding-rust.md / security.md の方針により、本番経路（`config`・`decision`・
-//! `signals` の各検証処理）は `unwrap()` / `expect()` を使わず、失敗理由を
-//! ここで定義した variant で呼び出し元へ返す（security.md A08: 判定を
-//! 迂回して成功終了させない）。CLI 層（#104）は本エラーを
-//! `GuardrailExitCode::Internal`（終了コード `1`）へ変換し、判定不能を
-//! 自動適用（`0`）と明確に分離する（`docs/guardrail-self-repair-cli.md` §2.3
-//! fail-closed 設計）。
+//! `.claude/rules/coding-rust.md`「エラーは型付きエラーとし、本番経路で
+//! `unwrap()` / `expect()` を使わない」に対応する。`thiserror` は
+//! `.claude/rules/deps-policy.md` の許容依存 8 区分に含まれず、依存追加は
+//! ユーザー承認事項のため（`docs/spec/05-tasks.md` TASK-4.1a 計画 2.1 節）、
+//! `std::fmt::Display` / `std::error::Error` を手書きする。
 //!
-//! v1（`Fandhe-AI/rust-ai-library-v1/crates/guardrail/src/error.rs`）は
-//! `thiserror` で 20 種超の variant（設定ファイル I/O・CLI・git・ゲート実行・
-//! eval 等）を定義するが、`thiserror` は v2 の許容依存 8 区分
-//! （`.claude/rules/deps-policy.md`）に含まれず追加はユーザー承認が必須のため
-//! （TASK-4.1b・イシュー #105 は自動運転につき追加を回避する）、本クレートでは
-//! `std::fmt::Display` / `std::error::Error` を手書き実装する。variant は
-//! TASK-4.1b（閾値体系の値域検証）・TASK-4.1c（#106・判定入力の矛盾検出）が
-//! それぞれ必要とする分のみを移植し、ファイル I/O 系 variant（v1 の
-//! `ConfigIo`/`ConfigTooLarge`/`ConfigParse` 等）は CLI・設定ファイルパースを
-//! 担当する #104（TASK-4.1a）が追加する。
+//! `main.rs` はここで定義するバリアントを `exit_code.rs` の終了コード契約
+//! （`docs/guardrail-self-repair-cli.md` 2.3 節）に写像する。本エラー自体は
+//! 終了コードを持たず、「何が起きたか」のみを表す（写像は 1 箇所に閉じ込め、
+//! fail-closed 契約を保つため。`.claude/rules/security.md` A08）。
+//!
+//! `InconsistentDecisionInput` は [`crate::decision::DecisionInput::new`]
+//! （TASK-4.1c・イシュー #106）が検出する入力矛盾（`GateSignals`/`BenchSignal`
+//! の実行順序契約違反）専用のバリアントであり、CLI 引数パース・設定ファイル
+//! 検証由来のエラー（TASK-4.1a・イシュー #104 管轄）とは別 PR で追加された
+//! （`.claude/rules/delegation-impl.md`: 同一ファイルの並行編集回避のため
+//! 各 PR は必要なバリアントのみを追加する運用）。TASK-4.1b（イシュー #105）が
+//! 移植する閾値体系の値域検証は `config.rs`（#104 が定義する `InvalidInput`）
+//! 経由でエラーを返す契約に合流し、本モジュールへ専用バリアントを追加しない。
 
 use std::fmt;
+use std::path::PathBuf;
 
-/// `guardrail` クレート全体のエラー型。
+/// `guardrail` の実行時に起こりうるエラー。
 ///
-/// fail-closed 方針（security.md A05）に基づき、いずれの variant も
-/// 「実行を拒否する」ことを意味し、緩和した既定値へのフォールバックは行わない。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// バリアントは呼び出し元（`main.rs`）が終了コードへ変換する際の分岐単位
+/// と一致させてある。新しい失敗モードを追加する際は、変換表
+/// （`docs/guardrail-self-repair-cli.md` 2.3 節）とセットで見直すこと。
+#[derive(Debug)]
 pub enum GuardrailError {
-    /// 構文は正しいが値域検証（`lines_max` 正整数・`bench_max_pct` 有限正数・
-    /// `bench_runs >= 5` 等、REQ-4 の初期推奨閾値の型的制約）に反した。
-    ConfigInvalidValue { preset: String, reason: String },
+    /// CLI 引数の解析・検証に失敗した（未知引数・値欠落・不正なプリセット名等）。
+    /// 終了コード契約（2.3 節）上は clap 相当の usage エラー区分（`2`）に対応する。
+    UsageError(String),
 
-    /// プリセット名（`strict`/`default`/`loose`）以外の文字列が指定された。
-    UnknownPreset { preset: String },
+    /// `--config` の TOML・`--signals` の JSON など外部入力の読み込み・
+    /// 検証に失敗した（未知フィールド・値域外・サイズ上限超過・必須フィールド欠落等）。
+    /// 内部エラー区分（終了コード `1`）に対応する。
+    InvalidInput(String),
+
+    /// ファイル I/O に失敗した（読み込み・書き込み双方）。
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    /// `--signals` が環境変数 `GUARDRAIL_ALLOW_INJECTED_SIGNALS=1` なしで
+    /// 指定された（1.2 節「`--signals` の迂回防止」入口ガード）。usage エラー
+    /// 区分（終了コード `2`）に対応する。
+    InjectedSignalsNotAllowed,
+
+    /// 判定・評価ロジック本体が未実装であることを示す（TASK-4.1a のスコープ外。
+    /// eval 評価ロジックは #108/#111 で実装する）。
+    /// 内部エラー区分（終了コード `1`）に対応する。
+    NotImplemented(&'static str),
 
     /// [`crate::decision::DecisionInput::new`] が検出した判定入力の矛盾。
     ///
@@ -46,15 +67,16 @@ pub enum GuardrailError {
 impl fmt::Display for GuardrailError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            GuardrailError::ConfigInvalidValue { preset, reason } => {
-                write!(f, "設定値が不正です: preset={preset} ({reason})")
+            GuardrailError::UsageError(msg) => write!(f, "usage error: {msg}"),
+            GuardrailError::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
+            GuardrailError::Io { path, source } => {
+                write!(f, "io error at {}: {source}", path.display())
             }
-            GuardrailError::UnknownPreset { preset } => {
-                write!(
-                    f,
-                    "未定義のプリセットです: {preset}（strict/default/loose のいずれでもありません）"
-                )
-            }
+            GuardrailError::InjectedSignalsNotAllowed => write!(
+                f,
+                "usage error: --signals requires GUARDRAIL_ALLOW_INJECTED_SIGNALS=1"
+            ),
+            GuardrailError::NotImplemented(what) => write!(f, "not implemented: {what}"),
             GuardrailError::InconsistentDecisionInput { reason } => {
                 write!(f, "判定入力が矛盾しています: {reason}")
             }
@@ -62,4 +84,11 @@ impl fmt::Display for GuardrailError {
     }
 }
 
-impl std::error::Error for GuardrailError {}
+impl std::error::Error for GuardrailError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GuardrailError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}

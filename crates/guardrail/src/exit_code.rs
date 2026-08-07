@@ -1,46 +1,48 @@
-//! `guardrail check` の CI 呼び出し契約: 終了コードの一元定義（TASK-4.1c・
-//! イシュー #106）。
+//! `guardrail check` の CI 呼び出し契約: 終了コードの一元定義。
 //!
-//! CI（`.github/workflows/ci.yml`）・自己修復ループ（`self-repair`）の双方が
-//! `guardrail` CLI の終了コードのみを見て後続分岐できるようにするための契約。
+//! `docs/guardrail-self-repair-cli.md` 2.3 節「fail-closed 設計（A08）」が
+//! 要求するとおり、[`crate::decision::Verdict`] / eval 合否から終了コードへの
+//! 変換経路は本モジュール（`GuardrailExitCode::from_verdict` /
+//! `EvalExitCode::from_pass`）のみとし、他の経路から `0`（自動適用・評価合格）
+//! を返せないようにする。`main.rs` はこれらの関数を経由してのみプロセス
+//! 終了コードを決定する（自己修復ループが取り込む変更の判定を迂回する経路を
+//! 作らない。`.claude/rules/security.md` A08）。
 //!
-//! [`crate::decision::Verdict`] → 終了コードの変換は本モジュールの
-//! [`GuardrailExitCode::from_verdict`] **のみ**に閉じ込め、他の経路から `0`
-//! を返せないようにする（`.claude/rules/security.md` A08: 自己修復ループが
-//! 取り込む変更の判定を迂回する経路を作らない）。内部エラー（シグナル入力の
-//! 欠落・JSON 解析失敗等）は「判定不能」であり、自動適用（0）でもエスカレー
-//! ション（10）でも却下（20）でもない別区分（1）として明確に分離する。`2` は
-//! clap の usage エラー（引数解析失敗。#104 管轄）の既定値であるため本 enum
-//! の対象外とする。
+//! `self-repair` から lib として呼び出される際も同じ `Verdict` を経由する
+//! （3.4 節「guardrail 連携方式」。サブプロセス起動ではなく lib 直接呼び出し）。
+//! `Verdict` 自体の定義は判定ロジック本体（[`crate::decision`]。TASK-4.1c・
+//! イシュー #106）が正本であり、本モジュールは終了コードへの写像のみを担う。
 //!
-//! `guardrail eval`（`EvalExitCode`。終了コード 0/30/1）は TASK-4.2/4.3 系
-//! （イシュー #108 以降）の管轄であり本 PR のスコープ外（計画 §7）。
+//! | 値 | 意味 |
+//! |---|---|
+//! | `0`  | 自動適用（`Verdict::AutoApply`） |
+//! | `10` | エスカレーション（`Verdict::Escalate`） |
+//! | `20` | 却下（`Verdict::Reject`） |
+//! | `1`  | 内部エラー（判定不能。シグナル入力・出力書き出しの失敗等） |
+//! | `2`  | usage エラー（clap 相当。#104 管轄） |
 
 use std::process::ExitCode;
 
 use crate::decision::Verdict;
 
-/// CI から見た `guardrail check` の終了コード契約（`docs/guardrail-self-repair-cli.md`
-/// §2.3）。
-///
-/// | 値 | 意味 |
-/// |----|------|
-/// | 0  | 自動適用（`Verdict::AutoApply`） |
-/// | 10 | エスカレーション（`Verdict::Escalate`） |
-/// | 20 | 却下（`Verdict::Reject`） |
-/// | 1  | 内部エラー（判定不能。シグナル入力・出力書き出しの失敗等） |
-/// | 2  | （本 enum の対象外）clap の usage エラー既定値 |
+/// `guardrail check` の終了コード契約（2.3 節）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardrailExitCode {
     AutoApply,
     Escalate,
     Reject,
     InternalError,
+    UsageError,
 }
 
 impl GuardrailExitCode {
-    /// [`Verdict`] から対応する終了コード区分を導出する唯一の変換点
-    /// （判定を迂回する経路なし。`match` は網羅列挙とし `_ =>` を使わない）。
+    /// [`Verdict`] から終了コード区分への唯一の変換経路（判定を迂回する経路
+    /// なし。`match` は網羅列挙とし `_ =>` を使わない）。
+    ///
+    /// 判定ロジック（#105/#106）を経ずにこの関数を直接呼ぶ経路（`main.rs`
+    /// の `run_check`）が、TASK-4.1a 段階では常に `Verdict::Escalate` を渡す
+    /// ことで「判定不能時に自動適用へ倒れない」契約を骨格段階から満たす
+    /// （計画 2.2 節）。
     pub fn from_verdict(verdict: Verdict) -> Self {
         match verdict {
             Verdict::AutoApply => GuardrailExitCode::AutoApply,
@@ -49,20 +51,56 @@ impl GuardrailExitCode {
         }
     }
 
-    /// 実際のプロセス終了コードへの変換（CLI 層〈#104〉の `main` 戻り値に使う
-    /// 想定の値）。
+    /// プロセス終了コード（`u8`）へ変換する。`main.rs` の戻り値に用いる。
     pub fn as_u8(self) -> u8 {
         match self {
             GuardrailExitCode::AutoApply => 0,
             GuardrailExitCode::Escalate => 10,
             GuardrailExitCode::Reject => 20,
             GuardrailExitCode::InternalError => 1,
+            GuardrailExitCode::UsageError => 2,
         }
     }
 
-    /// `std::process::ExitCode` への変換（`fn main() -> ExitCode` 形式で
-    /// CLI 層が返す想定。プロセス終了コード自体は `as_u8()` と同一）。
-    pub fn to_process_exit_code(self) -> ExitCode {
+    pub fn into_process_exit_code(self) -> ExitCode {
+        ExitCode::from(self.as_u8())
+    }
+}
+
+/// `guardrail eval` の終了コード契約（2.3 節）。`check`（`GuardrailExitCode`）
+/// と重複しない値を選定済みで、CI が両者を区別できる（30 = 閾値未達）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalExitCode {
+    Pass,
+    ThresholdNotMet,
+    InternalError,
+    UsageError,
+}
+
+impl EvalExitCode {
+    /// 見逃し率 0% かつ誤検知率 30% 以下（REQ-4 受け入れ基準）の合否から
+    /// 終了コード区分への唯一の変換経路。評価ロジック本体は #108/#111 の
+    /// スコープであり、TASK-4.1a では `eval` 自体が
+    /// `GuardrailError::NotImplemented` で終了するため未使用だが、
+    /// 契約を先に固定しておく（計画 4 節ステップ 2）。
+    pub fn from_pass(pass: bool) -> Self {
+        if pass {
+            EvalExitCode::Pass
+        } else {
+            EvalExitCode::ThresholdNotMet
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            EvalExitCode::Pass => 0,
+            EvalExitCode::ThresholdNotMet => 30,
+            EvalExitCode::InternalError => 1,
+            EvalExitCode::UsageError => 2,
+        }
+    }
+
+    pub fn into_process_exit_code(self) -> ExitCode {
         ExitCode::from(self.as_u8())
     }
 }
@@ -72,44 +110,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn auto_apply_is_exit_zero() {
+    fn from_verdict_maps_all_variants() {
         assert_eq!(
             GuardrailExitCode::from_verdict(Verdict::AutoApply).as_u8(),
             0
         );
-    }
-
-    #[test]
-    fn escalate_is_exit_ten() {
         assert_eq!(
             GuardrailExitCode::from_verdict(Verdict::Escalate).as_u8(),
             10
         );
-    }
-
-    #[test]
-    fn reject_is_exit_twenty() {
         assert_eq!(GuardrailExitCode::from_verdict(Verdict::Reject).as_u8(), 20);
     }
 
     #[test]
-    fn internal_error_is_exit_one() {
+    fn internal_and_usage_error_codes_are_distinct_from_auto_apply() {
         assert_eq!(GuardrailExitCode::InternalError.as_u8(), 1);
+        assert_eq!(GuardrailExitCode::UsageError.as_u8(), 2);
+        assert_ne!(GuardrailExitCode::InternalError.as_u8(), 0);
     }
 
     #[test]
-    fn all_four_variants_have_distinct_codes() {
-        let codes = [
-            GuardrailExitCode::AutoApply.as_u8(),
-            GuardrailExitCode::Escalate.as_u8(),
-            GuardrailExitCode::Reject.as_u8(),
-            GuardrailExitCode::InternalError.as_u8(),
-        ];
-        for i in 0..codes.len() {
-            for j in (i + 1)..codes.len() {
-                assert_ne!(codes[i], codes[j], "終了コードが重複しています: {codes:?}");
-            }
-        }
+    fn from_pass_maps_bool_to_eval_exit_code() {
+        assert_eq!(EvalExitCode::from_pass(true).as_u8(), 0);
+        assert_eq!(EvalExitCode::from_pass(false).as_u8(), 30);
     }
 
     /// `1`（内部エラー）が判定 3 分岐（0/10/20）のいずれとも重複しないこと

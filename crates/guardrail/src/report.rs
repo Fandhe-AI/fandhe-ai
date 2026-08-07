@@ -1,27 +1,86 @@
-//! 判定レポート JSON（`docs/guardrail-self-repair-cli.md` §2.1）のうち、
-//! 3 分岐判定の出力に対応する部分（TASK-4.1c・イシュー #106）。
+//! `guardrail check --output` が書き出す判定レポート JSON（v2 版）。
 //!
-//! §2.1 のフルスキーマ（`schema_version`・`signal_source`・`change_id`・
-//! `lines_changed`・`build_result`・`bench_measurements_pct` 等）は
-//! シグナル収集・CLI 骨格を担う #104（TASK-4.1a）・#105（TASK-4.1b）が
-//! 定義する `Report` 構造体の管轄であり、本モジュールはそこに
-//! `#[serde(flatten)]` で合流させる想定の「判定結果セクション」のみを
-//! 提供する（`.claude/rules/delegation-impl.md`: 同一ファイルの並行編集を
-//! 避けるための分割）。
+//! `docs/guardrail-self-repair-cli.md` 2.1 節のスキーマをそのまま型として
+//! 定義する。REQ-3 データ要件・REQ-6 の回帰テストセット根拠データとして
+//! 再利用可能な形式を維持するため、フィールド名・型は文書と 1 対 1 対応させる。
+//! シリアライズは `serde_json` に一任し、文字列連結で JSON を組み立てない
+//! （2.5 節 A03 対策）。
 //!
-//! `verdict`（機械可読 ID）・`reason`（人間可読理由。複数逸脱時は `; ` 区切り
-//! で連結）・`reason_conditions`（機械可読理由 ID の配列）・
-//! `applied_exclusion_rule_ids`（マッチしたポリシー除外ルール ID）の 4
-//! フィールドは [`crate::decision::Decision`] から一意に導出され、
-//! [`crate::decision::decide`] を経由しない別経路からこれらの値を組み立てる
-//! ことはない（`.claude/rules/security.md` A08「判定の迂回経路を作らない」）。
+//! [`VerdictSection`] は 3 分岐判定の出力（`verdict`・`reason`・
+//! `reason_conditions`・`applied_exclusion_rule_ids`）専用の派生型
+//! （TASK-4.1c・イシュー #106）。[`Report`] は現段階では `verdict`/`reason`
+//! を直接フィールドとして持つ（TASK-4.1a・イシュー #104 の骨格段階では
+//! 判定ロジック〈#105/#106〉を未結線のため、`main.rs` が `Verdict::Escalate`
+//! を暫定固定で埋める）。`VerdictSection::from_decision` は
+//! [`crate::decision::decide`] の結果から一意にこれらの値を導出する経路を
+//! 提供し、CLI 層が判定ロジックを結線する際（#105/#106 以降）に
+//! `Report` へ合流させる想定（`.claude/rules/security.md` A08「判定の
+//! 迂回経路を作らない」）。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-use crate::decision::{AUTO_APPLY_FALLBACK_REASON, Decision};
+use crate::decision::{AUTO_APPLY_FALLBACK_REASON, Decision, Verdict};
+
+/// シグナルの出所。`--signals`（1.2 節 CI 契約検証パス）経由なら `Injected`、
+/// 実シグナル計測（本番相当経路。TASK-4.1a では未実装）なら `Measured`。
+/// REQ-6 の回帰テストセット根拠データは `Measured` のみを採用する（2.1 節）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalSource {
+    Measured,
+    Injected,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GateOutcome {
+    Pass,
+    Fail,
+}
+
+/// 判定レポート JSON のスキーマバージョン。2.1 節の記載どおり `"1"`（初版）で
+/// 据え置く（新規設計文書のため既存消費者との互換負担がない）。
+pub const SCHEMA_VERSION: &str = "1";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Report {
+    pub schema_version: String,
+    pub signal_source: SignalSource,
+    pub change_id: Option<String>,
+    pub lines_changed: u64,
+    pub public_api_broken: bool,
+    pub gaming_suspected: bool,
+    pub build_result: GateOutcome,
+    pub test_result: GateOutcome,
+    pub clippy_result: GateOutcome,
+    pub bench_measurements_pct: Vec<f64>,
+    pub bench_median_pct: f64,
+    pub applied_exclusion_rule_ids: Vec<String>,
+    pub verdict: Verdict,
+    pub reason: String,
+}
+
+/// 昇順ソート済みの計測値列から中央値を求める。TASK-4.1a では `report.rs` が
+/// レポートの整形にのみ用い、判定ロジック（#105/#106）には使わない。
+///
+/// 事前条件: `values` は空でないこと（呼び出し元の `signals.rs` が REQ-4
+/// 「5 回以上」の受け入れ基準として非空・5 件以上を検証済み）。
+pub fn median(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = sorted.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n % 2 == 1 {
+        sorted[n / 2]
+    } else {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    }
+}
 
 /// 判定レポート JSON の「判定結果」セクション（§2.1 の `verdict`・`reason`
-/// 相当フィールド群）。
+/// 相当フィールド群。TASK-4.1c・イシュー #106）。
 ///
 /// `serde_json` のエスケープに出力を一任し、`reason` はテキスト連結時も
 /// [`crate::decision::Reason`] の `Display` 実装（固定フォーマット文字列 +
@@ -75,19 +134,45 @@ impl VerdictSection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{PresetName, Thresholds, ThresholdsRaw};
+    use crate::config::{PresetName, Thresholds};
     use crate::decision::{BenchSignal, DecisionInput, GateSignal, GateSignals, decide};
 
+    #[test]
+    fn median_of_odd_length() {
+        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
+    }
+
+    #[test]
+    fn median_of_even_length() {
+        assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+
+    #[test]
+    fn report_round_trips_through_json() {
+        let report = Report {
+            schema_version: SCHEMA_VERSION.to_string(),
+            signal_source: SignalSource::Injected,
+            change_id: Some("abc123".to_string()),
+            lines_changed: 10,
+            public_api_broken: false,
+            gaming_suspected: false,
+            build_result: GateOutcome::Pass,
+            test_result: GateOutcome::Pass,
+            clippy_result: GateOutcome::Pass,
+            bench_measurements_pct: vec![1.0, 1.0, 1.0, 1.0, 1.0],
+            bench_median_pct: 1.0,
+            applied_exclusion_rule_ids: vec![],
+            verdict: Verdict::Escalate,
+            reason: "判定ロジック未実装（TASK-4.1b/#105 で移植）".to_string(),
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        let parsed: Report = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.verdict, Verdict::Escalate);
+        assert_eq!(parsed.signal_source, SignalSource::Injected);
+    }
+
     fn thresholds() -> Thresholds {
-        Thresholds::from_raw(
-            PresetName::Default,
-            ThresholdsRaw {
-                lines_max: 200,
-                bench_max_pct: 5.0,
-                bench_runs: 5,
-            },
-        )
-        .expect("固定値の検証に失敗")
+        Thresholds::builtin(PresetName::Default)
     }
 
     fn all_passed_gates() -> GateSignals {

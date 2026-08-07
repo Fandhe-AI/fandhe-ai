@@ -1,0 +1,3 @@
+# CLI 統合テスト用の未知フィールド fixture（TASK-4.1a。deny_unknown_fields 検証）。
+[preset.default]
+totally_unknown_field = 1

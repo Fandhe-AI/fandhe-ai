@@ -8,44 +8,47 @@
 //! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）
 //! 資産の移植先でもある。
 //!
-//! TASK-4.1b（イシュー #105）で閾値体系（[`config`]）・判定ロジック本体
-//! （[`decision`]）・シグナル入力型（[`signals`]）・共有エラー型（[`error`]）を
-//! 移植し、TASK-4.1c（イシュー #106）で終了コード契約（[`exit_code`]）・
-//! 判定レポート JSON の「判定結果」セクション（[`report`]）を追加した。CLI 配線・
-//! 設定ファイル（`guardrail.toml`）パース・実シグナル計測（git 差分・ゲート実行等）
-//! は別イシュー（#104・#107 等）の管轄であり、本クレートは lib モジュールのみで
-//! 完結する（spec 根拠: `docs/spec/05-tasks.md` TASK-4.1、REQ-4）。
+//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c・イシュー #104／#105／#106 合流時点）
+//! - [`cli`][]: CLI 引数解析（`check`／`eval` サブコマンド。#104 管轄）。
+//! - [`config`][]: `--config` の TOML 設定パース・検証、および判定閾値
+//!   （[`config::Thresholds`]・プリセット・値域検証。#104 管轄。#105 の
+//!   [`decision`] はこの型を契約 API としてそのまま受け取る）。
+//! - [`signals`][]: `--signals` の JSON シグナル入力型（#104 管轄）。
+//! - [`toml_lite`][]: 依存追加なしの最小 TOML パーサ（`config` から利用。#104 管轄）。
+//! - [`decision`][]: 3 分岐判定ロジック本体（[`decision::decide`]）。評価済み 5 条件
+//!   シグナルから [`decision::Verdict`] を導出する純粋関数（#105 管轄）。
+//! - [`exit_code`][]: `guardrail check`／`guardrail eval` の終了コード契約
+//!   （[`exit_code::GuardrailExitCode`]／[`exit_code::EvalExitCode`]）。
+//!   `Verdict` → 終了コードの変換をここ 1 箇所に閉じ込める。
+//! - [`report`][]: 判定レポート JSON のフルスキーマ（[`report::Report`]。#104 管轄）
+//!   および 3 分岐判定の出力セクション（[`report::VerdictSection`]。#106 管轄）。
+//! - [`error`][]: クレート共通の型付きエラー（[`error::GuardrailError`]）。
 //!
-//! # モジュール構成
-//! - [`error`][]: クレート全体で共有する型付きエラー（`GuardrailError`）
-//! - [`config`][]: 5 条件のうち行数・ベンチの 2 条件が持つ閾値体系
-//!   （`Thresholds`・プリセット・値域検証）
-//! - [`decision`][]: 3 分岐判定ロジック本体（`decide`・`Verdict`・`Reason` 等）
-//! - [`signals`][]: シグナル入力型（`Signals`）から `decision::DecisionInput`
-//!   への変換
-//! - [`exit_code`][]: `guardrail check` の終了コード契約
-//!   （[`exit_code::GuardrailExitCode`]）。`Verdict` → 終了コードの変換を
-//!   ここ 1 箇所に閉じ込める。
-//! - [`report`][]: 判定レポート JSON の「判定結果」セクション
-//!   （[`report::VerdictSection`]）。
+//! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
+//! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
+//! を提供する設計を維持する。`bin/guardrail`（`main.rs`）はここで公開するモジュール
+//! を組み合わせて CLI フローを構成するのみで、判定ロジック自体はライブラリ側に置く
+//! （`self-repair` からの lib 呼び出しと CLI 実行が同じロジックを共有するため）。
 //!
-//! ポリシー除外リスト評価（TASK-5.2 系）・`guardrail eval`・`self-repair` 連携
-//! （TASK-4.2 以降）は本クレートの他モジュールが順次追加する想定であり、
-//! 本イシューのスコープ外（`.claude/rules/out-of-scope-tracking.md`）。
+//! ポリシー除外リスト評価（TASK-5.2 系）・`self-repair` 連携（TASK-4.2 以降）は
+//! 本クレートの他モジュールが順次追加する想定であり、本 PR 群のスコープ外
+//! （`.claude/rules/out-of-scope-tracking.md`）。
 
+pub mod cli;
 pub mod config;
 pub mod decision;
 pub mod error;
 pub mod exit_code;
 pub mod report;
 pub mod signals;
+pub mod toml_lite;
 
-pub use config::{MIN_BENCH_RUNS, PresetName, Thresholds, ThresholdsRaw};
+pub use config::{PresetName, Thresholds};
 pub use decision::{
     AUTO_APPLY_FALLBACK_REASON, BenchSignal, Decision, DecisionInput, GateSignal, GateSignals,
     Reason, Verdict, decide,
 };
 pub use error::GuardrailError;
-pub use exit_code::GuardrailExitCode;
+pub use exit_code::{EvalExitCode, GuardrailExitCode};
 pub use report::VerdictSection;
 pub use signals::Signals;

@@ -1,0 +1,4 @@
+# CLI 統合テスト用の正常系 guardrail.toml fixture（TASK-4.1a）。
+# `[preset.default]` テーブルの一部フィールドのみを上書きする。
+[preset.default]
+lines_max = 150
