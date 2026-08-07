@@ -160,24 +160,6 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
         Ok(BatchedFeatures { inner: t })
     }
 
-    /// `kernel` 実行後の出力を型付きに包む内部専用の境界コンストラクタ。
-    /// `from_tensor` の rank/特徴次元検査に加えてバッチ次元
-    /// （`expected_batch`）も突合する。`matmul_with`/`add_bias_with` が
-    /// 「呼び出し元の入力バッチサイズと出力のバッチサイズが一致する」
-    /// ことまで再検査するために使う（型と実体の乖離防止。REQ-8 の
-    /// カーネル境界検査規約と同趣旨）。公開 `from_tensor` は入力ロード
-    /// 境界用でバッチサイズを未知として許容するため、ここでは分離する。
-    fn from_tensor_with_batch(t: Tensor<T>, expected_batch: usize) -> Result<Self, ShapeError> {
-        let out = Self::from_tensor(t)?;
-        if out.inner.shape()[0] != expected_batch {
-            return Err(ShapeError::ShapeMismatch {
-                lhs: vec![expected_batch, F],
-                rhs: out.inner.shape().to_vec(),
-            });
-        }
-        Ok(out)
-    }
-
     /// 動的層への脱出口。
     pub fn as_tensor(&self) -> &Tensor<T> {
         &self.inner
@@ -204,113 +186,124 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
     /// `kernel` 実行後の出力 shape も `[batch, OUT]` であることを再検査
     /// してから型付きに包む（型と実体の乖離を防ぐ二重防御。境界検査を
     /// 省略しない方針は REQ-8 のカーネル境界検査規約と同趣旨）。
+    /// `BatchedFeatures::from_tensor` は特徴次元（rank・`OUT`）のみを
+    /// 検査し batch 次元は任意長として許容するため、ここでは加えて
+    /// `self.batch_size()` との一致を明示検査する（batch は kernel が
+    /// 変えてはならない次元であり、型パラメータに乗らないぶん実行時
+    /// チェックで境界を張る）。
+    ///
+    /// # 正常系
+    ///
+    /// ```
+    /// use tensor_core::typed::{BatchedFeatures, FixedMat};
+    /// use tensor_core::Tensor;
+    ///
+    /// let x = BatchedFeatures::<f32, 3>::from_tensor(
+    ///     Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap(),
+    /// )
+    /// .unwrap();
+    /// let w = FixedMat::<f32, 3, 4>::from_tensor(Tensor::zeros(&[3, 4]).unwrap()).unwrap();
+    /// let y = x
+    ///     .matmul_with(&w, |a, b| {
+    ///         Ok(Tensor::zeros(&[a.shape()[0], b.shape()[1]]).unwrap())
+    ///     })
+    ///     .unwrap();
+    /// assert_eq!(y.batch_size(), 2);
+    /// ```
+    ///
+    /// # 誤りパターン 1: 内側次元不一致
+    ///
+    /// `BatchedFeatures<f32, 3>` の特徴次元 3 に対し `FixedMat<f32, 4, 5>`
+    /// は入力次元 4 を要求するため型が合わず、コンパイルエラーになる
+    /// （関数引数の型不一致・`E0308`）。
+    ///
+    /// ```compile_fail,E0308
+    /// use tensor_core::typed::{BatchedFeatures, FixedMat};
+    /// use tensor_core::Tensor;
+    ///
+    /// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+    /// let w = FixedMat::<f32, 4, 5>::from_tensor(Tensor::zeros(&[4, 5]).unwrap()).unwrap();
+    /// // 期待: FixedMat<f32, 3, _>。実際: FixedMat<f32, 4, 5> でコンパイルエラー。
+    /// let _y = x.matmul_with(&w, |a, b| {
+    ///     Ok(Tensor::zeros(&[a.shape()[0], b.shape()[1]]).unwrap())
+    /// });
+    /// ```
+    ///
+    /// # 誤りパターン 3: 型の取り違え（転置形）
+    ///
+    /// `FixedMat<f32, IN, OUT>` を期待する箇所へ転置形
+    /// `FixedMat<f32, OUT, IN>` を渡すとコンパイルエラーになる
+    /// （関数引数の型不一致・`E0308`）。
+    ///
+    /// ```compile_fail,E0308
+    /// use tensor_core::typed::{BatchedFeatures, FixedMat};
+    /// use tensor_core::Tensor;
+    ///
+    /// fn apply(x: &BatchedFeatures<f32, 3>, w: &FixedMat<f32, 3, 4>) {
+    ///     let _ = x.matmul_with(w, |a, b| {
+    ///         Ok(Tensor::zeros(&[a.shape()[0], b.shape()[1]]).unwrap())
+    ///     });
+    /// }
+    ///
+    /// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+    /// // 転置形 FixedMat<f32, 4, 3> を渡す誤り。apply は FixedMat<f32, 3, 4> を要求する。
+    /// let w_transposed = FixedMat::<f32, 4, 3>::from_tensor(Tensor::zeros(&[4, 3]).unwrap()).unwrap();
+    /// apply(&x, &w_transposed);
+    /// ```
     pub fn matmul_with<const OUT: usize>(
         &self,
         w: &FixedMat<T, F, OUT>,
         kernel: impl FnOnce(&Tensor<T>, &Tensor<T>) -> Result<Tensor<T>, ShapeError>,
     ) -> Result<BatchedFeatures<T, OUT>, ShapeError> {
         let out = kernel(&self.inner, &w.inner)?;
-        BatchedFeatures::from_tensor_with_batch(out, self.batch_size())
+        let expected_batch = self.batch_size();
+        let result = BatchedFeatures::from_tensor(out)?;
+        if result.batch_size() != expected_batch {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: vec![expected_batch, OUT],
+                rhs: result.inner.shape().to_vec(),
+            });
+        }
+        Ok(result)
     }
 
     /// bias 加算の型付きシグネチャ: 特徴次元 `F` の一致を型で強制する。
-    /// `matmul_with` と同様、実計算は `kernel` に委譲し出力 shape を
-    /// 再検査してから型付きに包む。
+    /// `matmul_with` と同様、実計算は `kernel` に委譲し出力 shape
+    /// （特徴次元・batch 次元とも）を再検査してから型付きに包む。
+    ///
+    /// # 誤りパターン 2: bias 次元不一致
+    ///
+    /// `BatchedFeatures<f32, 3>` に `FixedVec<f32, 4>` を渡すと
+    /// コンパイルエラーになる（関数引数の型不一致・`E0308`）。
+    ///
+    /// ```compile_fail,E0308
+    /// use tensor_core::typed::{BatchedFeatures, FixedVec};
+    /// use tensor_core::Tensor;
+    ///
+    /// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+    /// let b = FixedVec::<f32, 4>::from_tensor(Tensor::zeros(&[4]).unwrap()).unwrap();
+    /// // 期待: FixedVec<f32, 3>。実際: FixedVec<f32, 4> でコンパイルエラー。
+    /// let _y = x.add_bias_with(&b, |a, bias| {
+    ///     Ok(Tensor::zeros(&[a.shape()[0], bias.shape()[0]]).unwrap())
+    /// });
+    /// ```
     pub fn add_bias_with(
         &self,
         b: &FixedVec<T, F>,
         kernel: impl FnOnce(&Tensor<T>, &Tensor<T>) -> Result<Tensor<T>, ShapeError>,
     ) -> Result<BatchedFeatures<T, F>, ShapeError> {
         let out = kernel(&self.inner, &b.inner)?;
-        BatchedFeatures::from_tensor_with_batch(out, self.batch_size())
+        let expected_batch = self.batch_size();
+        let result = BatchedFeatures::from_tensor(out)?;
+        if result.batch_size() != expected_batch {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: vec![expected_batch, F],
+                rhs: result.inner.shape().to_vec(),
+            });
+        }
+        Ok(result)
     }
 }
-
-// --- コンパイルエラー実証（受け入れ条件: shape 不一致がコンパイル
-// エラーになるケースの実証。`trybuild` 等の新規 dev-dependency は
-// 許容依存 8 区分外でユーザー承認必須〈deps-policy.md〉のため、追加
-// 依存ゼロで実証できる rustdoc `compile_fail` doctest を用いる） ---
-
-/// 正常系: `matmul_with` は内側次元が一致していればコンパイル・実行とも
-/// 成功する。
-///
-/// ```
-/// use tensor_core::typed::{BatchedFeatures, FixedMat};
-/// use tensor_core::Tensor;
-///
-/// let x = BatchedFeatures::<f32, 3>::from_tensor(
-///     Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap(),
-/// )
-/// .unwrap();
-/// let w = FixedMat::<f32, 3, 4>::from_tensor(Tensor::zeros(&[3, 4]).unwrap()).unwrap();
-/// let y = x
-///     .matmul_with(&w, |a, b| {
-///         Ok(Tensor::zeros(&[a.shape()[0], b.shape()[1]]).unwrap())
-///     })
-///     .unwrap();
-/// assert_eq!(y.batch_size(), 2);
-/// ```
-///
-/// 誤りパターン 1: `matmul_with` の内側次元不一致
-/// （`BatchedFeatures<f32, 3>` の特徴次元 3 に対し `FixedMat<f32, 4, 5>`
-/// は入力次元 4 を要求するため型が合わず、コンパイルエラーになる）。
-///
-/// ```compile_fail
-/// use tensor_core::typed::{BatchedFeatures, FixedMat};
-/// use tensor_core::Tensor;
-///
-/// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
-/// let w = FixedMat::<f32, 4, 5>::from_tensor(Tensor::zeros(&[4, 5]).unwrap()).unwrap();
-/// // 期待: FixedMat<f32, 3, _>。実際: FixedMat<f32, 4, 5> でコンパイルエラー。
-/// let _y = x.matmul_with(&w, |a, b| {
-///     Ok(Tensor::zeros(&[a.shape()[0], b.shape()[1]]).unwrap())
-/// });
-/// ```
-///
-/// 誤りパターン 2: bias 次元不一致（`BatchedFeatures<f32, 3>` に
-/// `FixedVec<f32, 4>` を渡すとコンパイルエラーになる）。
-///
-/// ```compile_fail
-/// use tensor_core::typed::{BatchedFeatures, FixedVec};
-/// use tensor_core::Tensor;
-///
-/// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
-/// let b = FixedVec::<f32, 4>::from_tensor(Tensor::zeros(&[4]).unwrap()).unwrap();
-/// // 期待: FixedVec<f32, 3>。実際: FixedVec<f32, 4> でコンパイルエラー。
-/// let _y = x.add_bias_with(&b, |a, bias| {
-///     Ok(Tensor::zeros(&[a.shape()[0], bias.shape()[0]]).unwrap())
-/// });
-/// ```
-///
-/// 誤りパターン 3: 型の取り違え（`FixedMat<f32, IN, OUT>` を期待する
-/// 箇所へ転置形 `FixedMat<f32, OUT, IN>` を渡すとコンパイルエラーになる）。
-///
-/// ```compile_fail
-/// use tensor_core::typed::{BatchedFeatures, FixedMat};
-/// use tensor_core::Tensor;
-///
-/// fn apply(x: &BatchedFeatures<f32, 3>, w: &FixedMat<f32, 3, 4>) {
-///     let _ = x.matmul_with(w, |a, b| {
-///         Ok(Tensor::zeros(&[a.shape()[0], b.shape()[1]]).unwrap())
-///     });
-/// }
-///
-/// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
-/// // 転置形 FixedMat<f32, 4, 3> を渡す誤り。apply は FixedMat<f32, 3, 4> を要求する。
-/// let w_transposed = FixedMat::<f32, 4, 3>::from_tensor(Tensor::zeros(&[4, 3]).unwrap()).unwrap();
-/// apply(&x, &w_transposed);
-/// ```
-///
-/// # なぜ `pub` かつ `#[doc(hidden)]` か
-///
-/// rustdoc は `--document-private-items` を渡さない限り非公開アイテムの
-/// doctest をスキップし `cargo test --workspace` で実行されない
-/// （実装レビュー #100 Bugbot 指摘）。本アイテムは上記 doctest を
-/// `cargo test` で確実に実行させるためだけの錨（anchor）であり公開 API
-/// ではないため、`pub` にしつつ `#[doc(hidden)]` で公開ドキュメントには
-/// 出力しない。
-#[doc(hidden)]
-pub fn _doc_anchor() {}
 
 #[cfg(test)]
 mod tests {
@@ -416,6 +409,21 @@ mod tests {
     }
 
     #[test]
+    fn matmul_with_rejects_kernel_output_batch_mismatch() {
+        // kernel が特徴次元は正しいが batch 次元を書き換えて返した場合も
+        // 拒否する（Review 指摘: from_tensor は batch を任意長として許容
+        // するため、matmul_with 側で self.batch_size() との一致を
+        // 明示検査する必要がある）。
+        let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+        let w = FixedMat::<f32, 3, 4>::from_tensor(Tensor::zeros(&[3, 4]).unwrap()).unwrap();
+        let err = x
+            .matmul_with(&w, |_a, _b| Ok(Tensor::zeros(&[7, 4]).unwrap()))
+            .unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { lhs, rhs }
+            if lhs == vec![2, 4] && rhs == vec![7, 4]));
+    }
+
+    #[test]
     fn add_bias_with_composes_types() {
         let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
         let b = FixedVec::<f32, 3>::from_tensor(Tensor::zeros(&[3]).unwrap()).unwrap();
@@ -425,6 +433,30 @@ mod tests {
             })
             .unwrap();
         assert_eq!(y.as_tensor().shape(), &[2, 3]);
+    }
+
+    #[test]
+    fn add_bias_with_rejects_kernel_output_shape_mismatch() {
+        // add_bias_with には happy path のみで shape 不一致の拒否テストが
+        // 無かった（Review 指摘）。特徴次元不一致を検出できることを確認する。
+        let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+        let b = FixedVec::<f32, 3>::from_tensor(Tensor::zeros(&[3]).unwrap()).unwrap();
+        let err = x
+            .add_bias_with(&b, |_a, _bias| Ok(Tensor::zeros(&[2, 5]).unwrap()))
+            .unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+    }
+
+    #[test]
+    fn add_bias_with_rejects_kernel_output_batch_mismatch() {
+        // matmul_with と同様、batch 次元の書き換えも拒否する。
+        let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+        let b = FixedVec::<f32, 3>::from_tensor(Tensor::zeros(&[3]).unwrap()).unwrap();
+        let err = x
+            .add_bias_with(&b, |_a, _bias| Ok(Tensor::zeros(&[9, 3]).unwrap()))
+            .unwrap_err();
+        assert!(matches!(err, ShapeError::ShapeMismatch { lhs, rhs }
+            if lhs == vec![2, 3] && rhs == vec![9, 3]));
     }
 
     #[test]
