@@ -1,0 +1,86 @@
+# AI 自律メンテナンス検証ゲートの bench ゲート（TASK-6.1c・イシュー #199）。
+#
+# `docs/spec/04-requirements.md` の検証ゲート定義（L34）が定める 4 ゲート
+# （build/test/clippy/bench）のうち、bench ゲートのみを独立 workflow に分離する。
+# ci.yml の verification-gates ジョブ（build/test/clippy）は push/PR 契機で実行するが、
+# bench（`crates/backend-cpu/examples/gemm_bench.rs`。bench-harness 計測プロトコル・
+# 決定的シード 0xC0FFEE・warmup/iters 20/20）は計測実行時間が長く push/PR 契機に不向きな
+# ため、schedule／workflow_dispatch 契機に限定する（受け入れ条件「bench は実行時間を
+# 考慮し schedule/手動トリガー可」）。
+#
+# 独立ファイルにする理由: #148（TASK-6.1b・schedule 定期実行）が ci.yml／新規 workflow を
+# 並行編集する可能性が高く、ci.yml への schedule 追加は衝突面が大きい。本ワークフローは
+# scripts/run-verification-gates.sh の bench サブコマンドのみを呼び、他ジョブとは独立に
+# 追加・削除できる。
+#
+# self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・Ensure rustup 冪等
+# パターンは ci.yml と同一方針（.claude/rules/ci.md）。
+#
+# schedule は週 1 回（JST 火曜 03:00 = UTC 月曜 18:00）とし、self-hosted runner を
+# 過度に占有しない頻度に留める。
+name: Verification Gate (bench)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 18 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verification-gate-bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: 検証ゲート（bench）
+    runs-on: self-hosted
+    # 既定計測（size=512/2048/4096・warmup/iters 20/20）は blocked@4096 が支配的で、
+    # ローカル実測（quiet 環境・size=512 の median_tflops≈0.0012 = 約 1.2e9 FLOP/s）を
+    # 2·N^3 で外挿すると blocked@4096 だけで約 76 分（naive は size>=2048 でスキップされる
+    # ため対象外。gemm_bench.rs run_default 参照）。self-hosted runner の共有負荷による
+    # 増加分を見込み 180 分に設定する（schedule/手動トリガー限定のため per-PR 待ち時間には
+    # 影響しない）。
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        # persist-credentials: false（ci.yml と同一方針。checkout 後どのステップも
+        # GITHUB_TOKEN を使わないため、共有 self-hosted runner の workspace にトークンを
+        # 残留させない）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # 検査ロジック自体の退行（bench ワークロード example の無言削除・リネーム）を、
+      # 実行環境の cargo 有無に関わらず常時検出する（ci.yml の各 self-test と同一方針）。
+      - name: 検査ロジックの self-test
+        run: bash scripts/run-verification-gates.sh self-test
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため bench ゲートをスキップしました（workspace 作成後に有効化されます）"
+          fi
+
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: ゲート 4/4（bench）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/run-verification-gates.sh bench

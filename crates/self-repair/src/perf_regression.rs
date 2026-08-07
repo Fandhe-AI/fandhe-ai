@@ -394,6 +394,16 @@ mod tests {
                     proposal.attempt,
                     proposal.description.clone(),
                     "gates: build=pass test=pass clippy=pass bench=pass(median<=5%)",
+                    guardrail::GateSignals {
+                        build: guardrail::GateSignal::Passed,
+                        test: guardrail::GateSignal::Passed,
+                        clippy: guardrail::GateSignal::Passed,
+                    },
+                    guardrail::BenchSignal::Measured { median_pct: 0.0 },
+                    0,
+                    false,
+                    false,
+                    Vec::new(),
                 )))
             } else {
                 Ok(VerificationOutcome::Failed {
