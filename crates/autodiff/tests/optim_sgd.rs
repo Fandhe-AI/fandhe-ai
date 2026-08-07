@@ -286,9 +286,14 @@ fn step_handles_non_contiguous_view_input() {
     let p = tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
         .transpose_2d()
         .unwrap();
-    let g = tensor(vec![0.1, 0.1, 0.1, 0.1], &[2, 2]);
+    // grad は要素ごとに異なる値にする: 全要素同値だと param↔grad の
+    // 要素対応がずれても出力が偶然一致してしまい、テストが対応関係の
+    // 正しさを検証できない（Review 指摘: #193 momentum PR）。
+    let g = tensor(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]);
     assert!(!p.is_contiguous());
     let out = sgd.step(&[&p], &[&g]).unwrap();
+    // p.contiguous() の行優先データは transpose 後の並び [1,3,2,4]。
+    // g は contiguous のため元の並び [0.1,0.2,0.3,0.4] のまま。
     assert_close(
         out[0].get(&[0, 0]).unwrap(),
         1.0 - 0.1 * 0.1,
@@ -296,18 +301,55 @@ fn step_handles_non_contiguous_view_input() {
     );
     assert_close(
         out[0].get(&[0, 1]).unwrap(),
-        3.0 - 0.1 * 0.1,
+        3.0 - 0.1 * 0.2,
         "transpose[0,1]",
     );
     assert_close(
         out[0].get(&[1, 0]).unwrap(),
-        2.0 - 0.1 * 0.1,
+        2.0 - 0.1 * 0.3,
         "transpose[1,0]",
     );
     assert_close(
         out[0].get(&[1, 1]).unwrap(),
-        4.0 - 0.1 * 0.1,
+        4.0 - 0.1 * 0.4,
         "transpose[1,1]",
+    );
+}
+
+#[test]
+fn step_handles_non_contiguous_grad_input() {
+    // param 側は contiguous のまま、grad 側のみ非 contiguous
+    // （transpose view）にする。上のテストが param 側のみを非
+    // contiguous にしていたため、grad 側の正規化経路は未検証だった
+    // （Review 指摘: #193 momentum PR）。
+    let mut sgd = Sgd::new(SgdConfig::new(0.1)).unwrap();
+    let p = tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+    let g = tensor(vec![0.1, 0.2, 0.3, 0.4], &[2, 2])
+        .transpose_2d()
+        .unwrap();
+    assert!(!g.is_contiguous());
+    let out = sgd.step(&[&p], &[&g]).unwrap();
+    // g.contiguous() の行優先データは transpose 後の並び
+    // [0.1,0.3,0.2,0.4]。
+    assert_close(
+        out[0].get(&[0, 0]).unwrap(),
+        1.0 - 0.1 * 0.1,
+        "grad_transpose[0,0]",
+    );
+    assert_close(
+        out[0].get(&[0, 1]).unwrap(),
+        2.0 - 0.1 * 0.3,
+        "grad_transpose[0,1]",
+    );
+    assert_close(
+        out[0].get(&[1, 0]).unwrap(),
+        3.0 - 0.1 * 0.2,
+        "grad_transpose[1,0]",
+    );
+    assert_close(
+        out[0].get(&[1, 1]).unwrap(),
+        4.0 - 0.1 * 0.4,
+        "grad_transpose[1,1]",
     );
 }
 

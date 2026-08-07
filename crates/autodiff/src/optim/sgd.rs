@@ -346,8 +346,32 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_finite_momentum() {
+        let err = Sgd::new(SgdConfig::new(0.1).with_momentum(f32::NAN)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        let err = Sgd::new(SgdConfig::new(0.1).with_momentum(f32::INFINITY)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rejects_non_finite_dampening() {
+        let err = Sgd::new(SgdConfig::new(0.1).with_dampening(f32::NAN)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        let err = Sgd::new(SgdConfig::new(0.1).with_dampening(f32::INFINITY)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
     fn rejects_negative_weight_decay() {
         let err = Sgd::new(SgdConfig::new(0.1).with_weight_decay(-0.01)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn rejects_non_finite_weight_decay() {
+        let err = Sgd::new(SgdConfig::new(0.1).with_weight_decay(f32::NAN)).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+        let err = Sgd::new(SgdConfig::new(0.1).with_weight_decay(f32::INFINITY)).unwrap_err();
         assert!(matches!(err, AutodiffError::InvalidArgument(_)));
     }
 
@@ -463,13 +487,41 @@ mod tests {
         let p = tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
             .transpose_2d()
             .unwrap();
-        let g = tensor(vec![0.1, 0.1, 0.1, 0.1], &[2, 2]);
+        // grad は要素ごとに異なる値にする: 全要素同値だと
+        // param↔grad の要素対応がずれても出力が偶然一致してしまい、
+        // テストが対応関係の正しさを検証できない（Review 指摘: #193
+        // momentum PR）。
+        let g = tensor(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]);
         assert!(!p.is_contiguous());
         let out = sgd.step(&[&p], &[&g]).unwrap();
         // p.contiguous() の行優先データは transpose 後の並び [1,3,2,4]。
+        // g は contiguous のため元の並び [0.1,0.2,0.3,0.4] のまま
+        // （`p[0,0]`↔`g[0,0]`=0.1、`p[0,1]`↔`g[0,1]`=0.2、…）で、
+        // 対応がずれていれば期待値と食い違い検出できる。
         assert!((out[0].get(&[0, 0]).unwrap() - (1.0 - 0.1 * 0.1)).abs() < 1e-6);
-        assert!((out[0].get(&[0, 1]).unwrap() - (3.0 - 0.1 * 0.1)).abs() < 1e-6);
-        assert!((out[0].get(&[1, 0]).unwrap() - (2.0 - 0.1 * 0.1)).abs() < 1e-6);
-        assert!((out[0].get(&[1, 1]).unwrap() - (4.0 - 0.1 * 0.1)).abs() < 1e-6);
+        assert!((out[0].get(&[0, 1]).unwrap() - (3.0 - 0.1 * 0.2)).abs() < 1e-6);
+        assert!((out[0].get(&[1, 0]).unwrap() - (2.0 - 0.1 * 0.3)).abs() < 1e-6);
+        assert!((out[0].get(&[1, 1]).unwrap() - (4.0 - 0.1 * 0.4)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn non_contiguous_grad_is_handled_via_contiguous_normalization() {
+        let mut sgd = Sgd::new(SgdConfig::new(0.1)).unwrap();
+        // param 側は contiguous のまま、grad 側のみ非 contiguous
+        // （transpose view）にする。上のテストが param 側のみを非
+        // contiguous にしていたため、grad 側の正規化経路は未検証
+        // だった（Review 指摘: #193 momentum PR）。
+        let p = tensor(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let g = tensor(vec![0.1, 0.2, 0.3, 0.4], &[2, 2])
+            .transpose_2d()
+            .unwrap();
+        assert!(!g.is_contiguous());
+        let out = sgd.step(&[&p], &[&g]).unwrap();
+        // g.contiguous() の行優先データは transpose 後の並び
+        // [0.1,0.3,0.2,0.4]。
+        assert!((out[0].get(&[0, 0]).unwrap() - (1.0 - 0.1 * 0.1)).abs() < 1e-6);
+        assert!((out[0].get(&[0, 1]).unwrap() - (2.0 - 0.1 * 0.3)).abs() < 1e-6);
+        assert!((out[0].get(&[1, 0]).unwrap() - (3.0 - 0.1 * 0.2)).abs() < 1e-6);
+        assert!((out[0].get(&[1, 1]).unwrap() - (4.0 - 0.1 * 0.4)).abs() < 1e-6);
     }
 }

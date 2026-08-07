@@ -10,8 +10,12 @@
 //! （momentum バッファ等）を自身で保持し、呼び出し元
 //! （`nn::Linear::from_parameters` で更新後パラメータを差し替える側）は
 //! 毎 step 同じ optimizer インスタンスへ `step()` を呼ぶ運用になる
-//! （`nn_train_convergence.rs` のテストローカル `sgd_step` を optimizer
-//! 本体へ格上げしたもの）。
+//! （`nn_train_convergence.rs` のテストローカル `sgd_step`
+//! （momentum 非対応の vanilla SGD、`poc_v2_2_parity.rs::sgd_step` 起源）
+//! と同じ位置付けの更新則を optimizer 本体として実装したもの。
+//! `nn_train_convergence.rs` 側のローカル関数自体は本 PR では未移行の
+//! まま残存しており、テストを本 [`Sgd`] へ切り替える移行は別イシューの
+//! スコープとする）。
 //!
 //! #193（本イシュー）で第 1 分割として [`Sgd`]/[`SgdConfig`]
 //! （momentum・dampening・weight decay・nesterov 対応。PyTorch
