@@ -11,6 +11,38 @@ use tensor_core::{Tensor, broadcast_shape};
 
 use super::error::OpError;
 
+/// バッチ行列積の要素数（`batch`・出力要素数 `out_len`）を `checked_mul` で検査する。
+///
+/// `batch_shape`（ブロードキャスト後のバッチ次元）・`m`（A の行数）・`k`（内部次元）・
+/// `n`（B の列数）から `batch`・`batch*m*n`（出力）・`batch*m*k`（A 実体化サイズ）・
+/// `batch*k*n`（B 実体化サイズ）のいずれかが usize をあふれる場合、外部フォーマット
+/// （ONNX shape 属性）由来の巨大 shape とみなし [`OpError::MatMulElementCountOverflow`]
+/// で拒否する（OWASP A03。`.claude/rules/security.md`）。`matmul` から実体化前に呼ばれる。
+fn checked_matmul_element_counts(
+    batch_shape: &[usize],
+    m: usize,
+    k: usize,
+    n: usize,
+) -> Result<(usize, usize), OpError> {
+    let batch: usize = batch_shape
+        .iter()
+        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    let out_len = batch
+        .checked_mul(m)
+        .and_then(|v| v.checked_mul(n))
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    batch
+        .checked_mul(m)
+        .and_then(|v| v.checked_mul(k))
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    batch
+        .checked_mul(k)
+        .and_then(|v| v.checked_mul(n))
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    Ok((batch, out_len))
+}
+
 /// `MatMul` を計算する（`numpy.matmul` セマンティクス）。
 ///
 /// - rank 0（スカラー）入力は [`OpError::RankMismatch`]（`op: "MatMul(A)"` 等）で拒否する。
@@ -84,6 +116,14 @@ pub fn matmul(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, OpError> 
         });
     }
 
+    // batch * m * n（出力要素数）・batch * m * k・batch * k * n（入力走査量）を
+    // `checked_mul` で検査し、外部フォーマット由来の巨大 shape による usize あふれを
+    // 未然に拒否する（OWASP A03。`.claude/rules/security.md`）。
+    // `broadcast_to`/`contiguous` による実体化（次段）より前に検査することで、
+    // あふれるほど巨大な shape に対して確保を試みてから失敗する（Vec capacity
+    // overflow によるパニック等）事態を避ける。
+    let (batch, out_len) = checked_matmul_element_counts(&batch_shape, m, k, n)?;
+
     // バッチ次元 + 行列 2 軸へブロードキャストしてから実体化する（`as_slice` は連続
     // 領域を要求するため。`gemm.rs` の `trans_a`/`trans_b` 実体化と同一方針）。
     let mut a_bcast_shape = batch_shape.clone();
@@ -95,26 +135,6 @@ pub fn matmul(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, OpError> 
 
     let a_full = a_r.broadcast_to(&a_bcast_shape)?.contiguous();
     let b_full = b_r.broadcast_to(&b_bcast_shape)?.contiguous();
-
-    // batch * m * n（出力要素数）・batch * m * k・batch * k * n（入力走査量）を
-    // `checked_mul` で検査し、外部フォーマット由来の巨大 shape による usize あふれを
-    // 未然に拒否する（OWASP A03。`.claude/rules/security.md`）。
-    let batch: usize = batch_shape
-        .iter()
-        .try_fold(1usize, |acc, &d| acc.checked_mul(d))
-        .ok_or(OpError::MatMulElementCountOverflow)?;
-    let out_len = batch
-        .checked_mul(m)
-        .and_then(|v| v.checked_mul(n))
-        .ok_or(OpError::MatMulElementCountOverflow)?;
-    batch
-        .checked_mul(m)
-        .and_then(|v| v.checked_mul(k))
-        .ok_or(OpError::MatMulElementCountOverflow)?;
-    batch
-        .checked_mul(k)
-        .and_then(|v| v.checked_mul(n))
-        .ok_or(OpError::MatMulElementCountOverflow)?;
 
     let a_slice = a_full
         .as_slice()
@@ -289,6 +309,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn element_count_overflow_rejected_via_batch_product() {
+        // batch_shape 自体の総積が usize をあふれるケース（`try_fold` の checked_mul）。
+        let err = checked_matmul_element_counts(&[usize::MAX, 2], 1, 1, 1).unwrap_err();
+        assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn element_count_overflow_rejected_via_out_len() {
+        // batch は収まるが batch * m * n（出力要素数）があふれるケース。
+        let err = checked_matmul_element_counts(&[2], usize::MAX / 2 + 1, 1, 2).unwrap_err();
+        assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn element_count_overflow_rejected_via_a_realization_size() {
+        // out_len（batch*m*n）は収まるが batch*m*k（A 実体化サイズ）があふれるケース。
+        let err = checked_matmul_element_counts(&[1], 2, usize::MAX / 2 + 1, 1).unwrap_err();
+        assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn element_count_overflow_rejected_via_b_realization_size() {
+        // out_len・batch*m*k は収まるが batch*k*n（B 実体化サイズ）があふれるケース。
+        let err = checked_matmul_element_counts(&[1], 1, 2, usize::MAX / 2 + 1).unwrap_err();
+        assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn element_count_within_bounds_accepted() {
+        let (batch, out_len) = checked_matmul_element_counts(&[2, 3], 4, 5, 6).unwrap();
+        assert_eq!(batch, 6);
+        assert_eq!(out_len, 6 * 4 * 6);
     }
 
     #[test]
