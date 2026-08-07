@@ -21,6 +21,7 @@ use tensor_core::Tensor;
 
 use crate::eval::{self, build_tensor, dense_vec};
 use crate::tape::{NodeId, Op, TapeNode};
+use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
 /// `nodes` から、各入力 `NodeId` への勾配寄与を返す。`out_value` は
@@ -88,9 +89,17 @@ pub(crate) fn vjp(
             let da = max_vjp(&nodes[input.0].value, dim, out_value, upstream);
             vec![(input, da)]
         }
-        Op::MseLoss(pred, target) => {
-            let (dpred, dtarget) =
-                mse_loss_vjp(&nodes[pred.0].value, &nodes[target.0].value, upstream);
+        Op::MseLoss {
+            pred,
+            target,
+            reduction,
+        } => {
+            let (dpred, dtarget) = mse_loss_vjp(
+                &nodes[pred.0].value,
+                &nodes[target.0].value,
+                upstream,
+                reduction,
+            );
             vec![(pred, dpred), (target, dtarget)]
         }
     }
@@ -328,16 +337,19 @@ fn max_vjp(
     build_tensor(grad, &in_shape)
 }
 
-/// `MseLoss(pred, target)` の VJP: `dPred = g · 2(pred − target) / n`、
-/// `dTarget = −dPred`（`g` はスカラー上流勾配）。`n == 0` はゼロ除算を
-/// 避け両方とも zeros を返す。PoC-v2-2 は `target` 側の勾配計算を
-/// スキップしていたが、本実装は数学的に完全な VJP を返す（`target`
-/// 側を使うか捨てるかは #18 の勾配蓄積側の責務であり、ここでは両方
-/// 提供する）。
+/// `MseLoss{pred, target, reduction}` の VJP: `dPred = g · 2(pred −
+/// target) / n`（mean）／`g · 2(pred − target)`（sum）、
+/// `dTarget = −dPred`（`g` はスカラー上流勾配）。#190 で sum 縮約を
+/// 追加（`reduction` 分岐は forward の `eval::mse_loss` と対称）。
+/// `n == 0` は mean・sum ともゼロ除算を避け zeros を返す。PoC-v2-2 は
+/// `target` 側の勾配計算をスキップしていたが、本実装は数学的に完全な
+/// VJP を返す（`target` 側を使うか捨てるかは #18 の勾配蓄積側の責務で
+/// あり、ここでは両方提供する）。
 fn mse_loss_vjp(
     pred: &Tensor<f32>,
     target: &Tensor<f32>,
     g: &Tensor<f32>,
+    reduction: Reduction,
 ) -> (Tensor<f32>, Tensor<f32>) {
     let shape = pred.shape().to_vec();
     let n = pred.numel();
@@ -348,7 +360,10 @@ fn mse_loss_vjp(
     let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
     let pred_data = dense_vec(pred);
     let target_data = dense_vec(target);
-    let scale = g_value * 2.0 / n as f32;
+    let scale = match reduction {
+        Reduction::Mean => g_value * 2.0 / n as f32,
+        Reduction::Sum => g_value * 2.0,
+    };
     let dpred_data: Vec<f32> = pred_data
         .iter()
         .zip(target_data.iter())
@@ -732,29 +747,51 @@ mod tests {
     // --- MseLoss（pred/target 両勾配） ---
 
     #[test]
-    fn mse_loss_grad_matches_numeric() {
+    fn mse_loss_grad_mean_matches_numeric() {
         let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
         let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
         let s = t(&[3.0], &[]);
 
         let g = s.clone();
-        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g);
-        let num_dpred = numeric_grad_unary(&pred, &s, |x| eval::mse_loss(x, &target));
-        let num_dtarget = numeric_grad_unary(&target, &s, |x| eval::mse_loss(&pred, x));
+        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Mean);
+        let num_dpred =
+            numeric_grad_unary(&pred, &s, |x| eval::mse_loss(x, &target, Reduction::Mean));
+        let num_dtarget =
+            numeric_grad_unary(&target, &s, |x| eval::mse_loss(&pred, x, Reduction::Mean));
 
-        assert_grad_close("mse dPred", &dpred, &num_dpred);
-        assert_grad_close("mse dTarget", &dtarget, &num_dtarget);
+        assert_grad_close("mse(mean) dPred", &dpred, &num_dpred);
+        assert_grad_close("mse(mean) dTarget", &dtarget, &num_dtarget);
+    }
+
+    #[test]
+    fn mse_loss_grad_sum_matches_numeric() {
+        // sum 縮約（#190）。scale が `2/n` ではなく `2` になる分岐を
+        // mean と同じ数値微分ハーネスで検証する。
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Sum);
+        let num_dpred =
+            numeric_grad_unary(&pred, &s, |x| eval::mse_loss(x, &target, Reduction::Sum));
+        let num_dtarget =
+            numeric_grad_unary(&target, &s, |x| eval::mse_loss(&pred, x, Reduction::Sum));
+
+        assert_grad_close("mse(sum) dPred", &dpred, &num_dpred);
+        assert_grad_close("mse(sum) dTarget", &dtarget, &num_dtarget);
     }
 
     #[test]
     fn mse_loss_grad_n_zero_is_zero() {
         // numel() == 0 はゼロ除算を避け zeros を返す（ガード条件の
         // 直接検証。中央差分は空テンソルに対して定義できないため
-        // 解析式のみで確認する）。
+        // 解析式のみで確認する）。mean/sum いずれも同じ早期 return
+        // 経路（`n == 0` 分岐）を通るため mean のみ代表して検証する。
         let pred = build_tensor(Vec::new(), &[0]);
         let target = build_tensor(Vec::new(), &[0]);
         let g = t(&[1.0], &[]);
-        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g);
+        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Mean);
         assert!(dense_vec(&dpred).is_empty());
         assert!(dense_vec(&dtarget).is_empty());
     }
@@ -969,20 +1006,49 @@ mod tests {
     }
 
     #[test]
-    fn vjp_dispatch_mse_loss_returns_both_inputs_in_order() {
+    fn vjp_dispatch_mse_loss_mean_returns_both_inputs_in_order() {
         let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
         let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
         let g = t(&[3.0], &[]);
-        let out_value = eval::mse_loss(&pred, &target);
+        let out_value = eval::mse_loss(&pred, &target, Reduction::Mean);
         let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
-        let op = Op::MseLoss(NodeId(0), NodeId(1));
+        let op = Op::MseLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            reduction: Reduction::Mean,
+        };
 
         let grads = vjp(&op, &out_value, &g, &nodes);
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
         assert_eq!(grads[1].0, NodeId(1));
-        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g);
+        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Mean);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_mse_loss_sum_returns_both_inputs_in_order() {
+        // sum 縮約（#190）でも `Op::MseLoss` ディスパッチが reduction を
+        // 正しく `mse_loss_vjp` へ引き渡すことを確認する。
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::mse_loss(&pred, &target, Reduction::Sum);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::MseLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            reduction: Reduction::Sum,
+        };
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Sum);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
         assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
     }

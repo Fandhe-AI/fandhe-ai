@@ -49,6 +49,13 @@
 //! TASK-9.2）とは区別される（`nn/mod.rs` の境界説明を参照）。上記の
 //! 「互換レイヤ固有のロジックを持ち込まない」方針は `compat` 層本体を
 //! 指しており、`nn` モジュールには適用されない。
+//!
+//! #190（親 #189「損失関数（MSE・CrossEntropy）の実装」）で
+//! `Var::mse_loss_with`/[`Reduction`]（mean/sum 縮約）と
+//! `nn::loss::MseLoss`（薄いラッパー）を追加した。既存 `Var::mse_loss`
+//! は `mse_loss_with(target, Reduction::Mean)` への委譲に変更したが、
+//! シグネチャ・既定の意味（mean）は維持する（公開 API 非破壊）。
+//! CrossEntropy 損失は #191 のスコープ。
 
 mod backward;
 mod error;
@@ -61,4 +68,4 @@ mod var;
 pub use backward::Gradients;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};
-pub use var::Var;
+pub use var::{Reduction, Var};

@@ -73,7 +73,16 @@ pub(crate) enum Op {
         input: NodeId,
         dim: Option<usize>,
     },
-    MseLoss(NodeId, NodeId),
+    /// 平均二乗誤差。`reduction` は #190（TASK-9.1c 相当・`nn::loss`）で
+    /// mean/sum の両縮約に対応するため struct variant 化した
+    /// （旧 `MseLoss(NodeId, NodeId)` は mean 固定だった）。
+    /// `crate::var::Reduction` を再利用し、`grad.rs` の `vjp()` が
+    /// `pred`/`target` への勾配スケールを縮約種別ごとに分岐する。
+    MseLoss {
+        pred: NodeId,
+        target: NodeId,
+        reduction: crate::var::Reduction,
+    },
 }
 
 /// テープ上の 1 ノード。演算種別（`Op`）と、その演算を順伝播で評価
