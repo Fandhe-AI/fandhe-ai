@@ -105,6 +105,18 @@ pub enum OpError {
     /// （外部フォーマット由来の巨大 shape による過大メモリ確保・添字あふれを未然に拒否する。
     /// OWASP A03。`.claude/rules/security.md`）。
     MatMulElementCountOverflow,
+
+    /// `LayerNormalization` の `epsilon` 属性が非有限値（`NaN`／`inf`）だった
+    /// （TASK-7.3d・`layer_norm.rs`）。`epsilon` はモデル属性（外部入力）であり、
+    /// 非有限値は分散計算全体を静かに `NaN`／`inf` へ汚染するため事前検査で拒否する
+    /// （`.claude/rules/security.md` A03 相当）。
+    InvalidEpsilon { op: &'static str, epsilon: f32 },
+
+    /// `LayerNormalization` の正規化集合（`x.shape()[axis..]` の要素数積）が 0 だった
+    /// （TASK-7.3d・`layer_norm.rs`。例: `shape=[2,0], axis=1`）。`axis` 自体は
+    /// `[0, rank)` の範囲内であり [`OpError::AxisOutOfRange`] とは原因が異なるため、
+    /// 分散計算の除数 0 割り（`NaN` を静かに生成する）を専用 variant で区別して拒否する。
+    EmptyNormalizedSet { op: &'static str, axis: usize },
 }
 
 impl fmt::Display for OpError {
@@ -176,6 +188,15 @@ impl fmt::Display for OpError {
             }
             OpError::MatMulElementCountOverflow => {
                 write!(f, "MatMul: element count overflow (usize)")
+            }
+            OpError::InvalidEpsilon { op, epsilon } => {
+                write!(f, "{op}: epsilon {epsilon} must be finite")
+            }
+            OpError::EmptyNormalizedSet { op, axis } => {
+                write!(
+                    f,
+                    "{op}: normalized set starting at axis {axis} has 0 elements"
+                )
             }
         }
     }
