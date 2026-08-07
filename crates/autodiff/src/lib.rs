@@ -56,12 +56,21 @@
 //! は `mse_loss_with(target, Reduction::Mean)` への委譲に変更したが、
 //! シグネチャ・既定の意味（mean）は維持する（公開 API 非破壊）。
 //! CrossEntropy 損失は #191 のスコープ。
+//!
+//! #193（親 #192「optimizer（SGD・AdamW）・gradient clipping の実装」）
+//! で optimizer の第 1 分割 `optim::Sgd`/`optim::SgdConfig`（momentum・
+//! dampening・weight decay・nesterov 対応。PyTorch `torch.optim.SGD`
+//! 準拠）を追加した。`nn`（`Tape`/`Var` に直接依存する層プリミティブ）
+//! とは別モジュールとし（`optim/mod.rs` 参照）、既存 `nn`/`lib.rs` 冒頭の
+//! 記述は変更しない。AdamW（#194）・gradient clipping／LR スケジューラ
+//! （#195）は `optim` 配下への後続分割。
 
 mod backward;
 mod error;
 mod eval;
 mod grad;
 pub mod nn;
+pub mod optim;
 mod tape;
 mod var;
 
