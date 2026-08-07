@@ -16,12 +16,14 @@
 //! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。#190
 //! （親 #189）で MSE 損失（[`loss`]）を追加し、#191 で CrossEntropy
 //! 損失（同じく [`loss`]）を追加した。#194（親 #192）で optimizer の
-//! 第 1 弾として AdamW（[`optim::AdamW`]）を追加した。TASK-9.2a（#95）
+//! 第 1 弾として AdamW（[`optim::AdamW`]）を追加した。#195（親 #192）で
+//! gradient clipping・LR スケジューラ最小セット（[`optim::clip`]・
+//! [`optim::lr_scheduler`]）を追加した。SGD 本体は `crate::optim`
+//! （本モジュールとは別モジュール。#193）で実装済み。TASK-9.2a（#95）
 //! で共通 [`Module`] trait（`module.rs`）を確定し、`compat::Sequential`
 //! （`crate::compat::Sequential`）がこれを介して `Linear`・活性化関数を
-//! 均一に扱えるようにした。SGD・gradient clipping（#192 の残りの子
-//! イシュー）は後続イシューのスコープ。共通 `Optimizer` trait の定義は
-//! 本イシューでは行わない（`optim` 配下が揃った時点で確定する）。
+//! 均一に扱えるようにした。共通 `Optimizer` trait の定義は本イシューでは
+//! 行わない（`optim` 配下が揃った時点で確定する）。
 
 mod init;
 mod linear;
