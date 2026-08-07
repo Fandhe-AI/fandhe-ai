@@ -197,6 +197,90 @@ fn raw_data_len_mismatch_is_rejected() {
     }
 }
 
+// --- BOOL／FLOAT16 initializer の復号（イシュー #274） ---
+
+#[test]
+fn bool_tensor_raw_data_decodes_nonzero_as_true() {
+    // ONNX/NumPy 慣習: raw_data は 1 バイト/要素、非ゼロ -> true（`decode_tensor`・
+    // `ops::cast::cast_to_bool` と同じ解釈。`security.md` A03: 外部バイト列の
+    // 変換規則をテストで固定化する）。
+    let t = TensorProto {
+        dims: vec![3],
+        data_type: onnx_interop::onnx::proto::data_type::BOOL,
+        float_data: vec![],
+        int64_data: vec![],
+        name: "bool_tensor".to_string(),
+        raw_data: vec![0x00, 0x01, 0x02],
+    };
+    let model = model_with_single_initializer(t);
+    let graph = build_graph(&model).expect("BOOL raw_data の復号は成功するはず");
+    match graph.initializers.get("bool_tensor") {
+        Some(RawTensor::Bool { data, shape }) => {
+            assert_eq!(shape.as_slice(), &[3]);
+            assert_eq!(data.as_slice(), &[false, true, true]);
+        }
+        other => panic!("RawTensor::Bool を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn bool_tensor_raw_data_byte_len_mismatch_is_rejected() {
+    // dims=[4] は 4 バイト期待だが raw_data は 3 バイトのみ（要素数の積より前に
+    // バイト長を検査する。`decode_tensor` の既存方針と同じ順序）。
+    let t = TensorProto {
+        dims: vec![4],
+        data_type: onnx_interop::onnx::proto::data_type::BOOL,
+        float_data: vec![],
+        int64_data: vec![],
+        name: "bad_bool_tensor".to_string(),
+        raw_data: vec![0x00, 0x01, 0x00],
+    };
+    let model = model_with_single_initializer(t);
+    let err = build_graph(&model).expect_err("BOOL raw_data 長不整合は拒否されるはず");
+    match err {
+        GraphError::RawDataByteLenMismatch {
+            tensor_name,
+            expected_bytes,
+            actual_bytes,
+        } => {
+            assert_eq!(tensor_name, "bad_bool_tensor");
+            assert_eq!(expected_bytes, 4);
+            assert_eq!(actual_bytes, 3);
+        }
+        other => panic!("RawDataByteLenMismatch を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn float16_tensor_raw_data_decodes_little_endian_pairs() {
+    // IEEE754 binary16 のリトルエンディアン 2 バイト/要素（onnx.proto3 `TensorProto`
+    // 仕様）。既知の値（1.0・-2.5）の LE バイト列から正しく復号されることを固定化する。
+    let one = half::f16::from_f32(1.0).to_le_bytes();
+    let neg_two_point_five = half::f16::from_f32(-2.5).to_le_bytes();
+    let mut raw_data = Vec::new();
+    raw_data.extend_from_slice(&one);
+    raw_data.extend_from_slice(&neg_two_point_five);
+
+    let t = TensorProto {
+        dims: vec![2],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT16,
+        float_data: vec![],
+        int64_data: vec![],
+        name: "f16_tensor".to_string(),
+        raw_data,
+    };
+    let model = model_with_single_initializer(t);
+    let graph = build_graph(&model).expect("FLOAT16 raw_data の復号は成功するはず");
+    match graph.initializers.get("f16_tensor") {
+        Some(RawTensor::F16 { data, shape }) => {
+            assert_eq!(shape.as_slice(), &[2]);
+            assert_eq!(data[0].to_f32(), 1.0);
+            assert_eq!(data[1].to_f32(), -2.5);
+        }
+        other => panic!("RawTensor::F16 を期待したが {other:?}"),
+    }
+}
+
 #[test]
 fn negative_dim_is_rejected() {
     let t = TensorProto {

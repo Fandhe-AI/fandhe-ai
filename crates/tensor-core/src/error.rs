@@ -31,8 +31,12 @@ pub enum ShapeError {
     ElementCountMismatch { expected: usize, actual: usize },
 
     /// 軸番号（`dim`）がテンソルの rank 範囲外
-    /// （`transpose`/`narrow` の軸引数）。
+    /// （`transpose`/`narrow`/`permute` の軸引数）。
     AxisOutOfRange { axis: usize, rank: usize },
+
+    /// `permute` の `perm` に同一軸が複数回指定された（順列として不正）。
+    /// `permute`（イシュー #274）専用の検査で構築する。
+    DuplicateAxis { axis: usize },
 
     /// `narrow` の `[start, start+len)` が対象軸のサイズを超える。
     NarrowOutOfBounds {
@@ -94,6 +98,9 @@ impl fmt::Display for ShapeError {
             ),
             ShapeError::AxisOutOfRange { axis, rank } => {
                 write!(f, "axis {axis} out of range for rank {rank}")
+            }
+            ShapeError::DuplicateAxis { axis } => {
+                write!(f, "axis {axis} specified more than once in perm")
             }
             ShapeError::NarrowOutOfBounds {
                 dim,

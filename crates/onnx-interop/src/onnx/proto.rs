@@ -120,7 +120,11 @@ pub struct ValueInfoProto {
 /// onnx.proto3 `TensorProto.DataType`（本クレートが扱う値のみ抜粋）。
 /// 未対応の値は `graph::decode_tensor` が `GraphError::UnknownDataType` で拒否する
 /// （無言 skip は A03〈インジェクション／不正入力〉の観点で禁止。security.md）。
+/// `BOOL`／`FLOAT16` はイシュー #274 で追加（`Cast` の対応範囲拡張に伴う initializer
+/// decode 側の対応）。
 pub mod data_type {
     pub const FLOAT: i32 = 1;
     pub const INT64: i32 = 7;
+    pub const BOOL: i32 = 9;
+    pub const FLOAT16: i32 = 10;
 }

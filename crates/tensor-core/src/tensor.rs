@@ -283,6 +283,43 @@ impl<T: Element> Tensor<T> {
         self.transpose(0, 1)
     }
 
+    /// `perm` が指す軸順へ並べ替える N 階一般対応の転置（`transpose` の 2 軸限定を
+    /// 補う。イシュー #274）。`transpose` と同じ zero-copy 方式（`storage` を
+    /// `Arc::clone` で共有し、`shape`／`strides` の並べ替えのみを行う）。
+    ///
+    /// `perm[k]` は出力軸 `k` が指す入力軸を表す（`out_shape[k] == self.shape()[perm[k]]`。
+    /// ONNX `Transpose` の `perm` 属性と同じ規約。`onnx-interop::ops::shape_transform`
+    /// の呼び出し元がこの規約に依存する）。`perm` の長さが rank と一致しない場合は
+    /// `ShapeError::RankMismatch`、範囲外の軸は `ShapeError::AxisOutOfRange`、重複軸は
+    /// `ShapeError::DuplicateAxis` を返す（perm が `0..rank` の順列であることを保証する）。
+    pub fn permute(&self, perm: &[usize]) -> Result<Tensor<T>, ShapeError> {
+        let rank = self.rank();
+        if perm.len() != rank {
+            return Err(ShapeError::RankMismatch {
+                expected: rank,
+                actual: perm.len(),
+            });
+        }
+        let mut seen = vec![false; rank];
+        for &axis in perm {
+            if axis >= rank {
+                return Err(ShapeError::AxisOutOfRange { axis, rank });
+            }
+            if seen[axis] {
+                return Err(ShapeError::DuplicateAxis { axis });
+            }
+            seen[axis] = true;
+        }
+        let shape: Vec<usize> = perm.iter().map(|&p| self.shape[p]).collect();
+        let strides: Vec<isize> = perm.iter().map(|&p| self.strides[p]).collect();
+        Ok(Tensor {
+            storage: Arc::clone(&self.storage),
+            offset: self.offset,
+            shape,
+            strides,
+        })
+    }
+
     /// 指定軸の `[start, start+len)` をスライスする。offset/shape の
     /// 調整のみで常に zero-copy。
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Result<Tensor<T>, ShapeError> {
@@ -551,6 +588,79 @@ mod tests {
             err,
             ShapeError::AxisOutOfRange { axis: 5, rank: 2 }
         ));
+    }
+
+    #[test]
+    fn permute_identity_is_zero_copy() {
+        let t = Tensor::<f32>::new((0..6).map(|v| v as f32).collect(), &[2, 3]).unwrap();
+        let p = t.permute(&[0, 1]).unwrap();
+        assert_eq!(p.shape(), t.shape());
+        assert_eq!(p.strides(), t.strides());
+        assert!(Arc::ptr_eq(&t.storage, &p.storage));
+    }
+
+    #[test]
+    fn permute_rank3_matches_expected_layout() {
+        // shape [2,3,4]、perm [2,0,1] -> 出力 shape [4,2,3]。
+        // out[c,a,b] == t[a,b,c]（perm[k] は出力軸 k が指す入力軸）。
+        let numel = 2 * 3 * 4;
+        let t = Tensor::<f32>::new((0..numel).map(|v| v as f32).collect(), &[2, 3, 4]).unwrap();
+        let p = t.permute(&[2, 0, 1]).unwrap();
+        assert_eq!(p.shape(), &[4, 2, 3]);
+        assert!(!p.is_contiguous());
+        assert!(Arc::ptr_eq(&t.storage, &p.storage));
+        for a in 0..2 {
+            for b in 0..3 {
+                for c in 0..4 {
+                    assert_eq!(
+                        p.get(&[c, a, b]),
+                        t.get(&[a, b, c]),
+                        "mismatch at a={a} b={b} c={c}"
+                    );
+                }
+            }
+        }
+        // contiguous() 実体化後も同じ論理値を保つ（onnx-interop の
+        // permute(perm).contiguous() 置換パターンの回帰確認。#274）。
+        let pc = p.contiguous();
+        assert!(pc.is_contiguous());
+        for a in 0..2 {
+            for b in 0..3 {
+                for c in 0..4 {
+                    assert_eq!(pc.get(&[c, a, b]), t.get(&[a, b, c]));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn permute_rank_mismatch_rejected() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = t.permute(&[0]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::RankMismatch {
+                expected: 2,
+                actual: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn permute_axis_out_of_range_rejected() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = t.permute(&[0, 5]).unwrap_err();
+        assert!(matches!(
+            err,
+            ShapeError::AxisOutOfRange { axis: 5, rank: 2 }
+        ));
+    }
+
+    #[test]
+    fn permute_duplicate_axis_rejected() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let err = t.permute(&[0, 0]).unwrap_err();
+        assert!(matches!(err, ShapeError::DuplicateAxis { axis: 0 }));
     }
 
     #[test]

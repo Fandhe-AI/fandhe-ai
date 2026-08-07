@@ -7,8 +7,13 @@
 //! ため、`Squeeze` の `axes` は属性ではなく本来は第 2 入力テンソルだが、本モジュールは
 //! decode 層に関知しない単体演算のみを扱う方針（`ops/mod.rs`）に従い、呼び出し元が
 //! 入力テンソルから取り出した `&[i64]` をそのまま受け取る。
+//!
+//! いずれも要素コピー（reshape/squeeze は形状再解釈のみ・transpose は並べ替え）のみで
+//! 算術を伴わないため `T: Element` でジェネリック化し、`Tensor<f32>` に限らず
+//! `Tensor<i64>`／`Tensor<bool>`／`Tensor<half::f16>` にも適用できる
+//! （イシュー #274。インタープリタの `Value` 各 variant から共通で呼ばれる）。
 
-use tensor_core::Tensor;
+use tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;
@@ -21,7 +26,11 @@ use super::normalize_axis;
 /// - `shape` の要素 `-1` は 1 箇所のみ許容し、他の次元から要素数を逆算する
 /// - 要素数の積は `checked_mul` でオーバーフローを検査してから確保する
 ///   （外部フォーマット由来の shape 値を信頼しない。OWASP A03。`.claude/rules/security.md`）
-pub fn reshape(x: &Tensor<f32>, shape: &[i64], allowzero: bool) -> Result<Tensor<f32>, OpError> {
+pub fn reshape<T: Element>(
+    x: &Tensor<T>,
+    shape: &[i64],
+    allowzero: bool,
+) -> Result<Tensor<T>, OpError> {
     let resolved = resolve_reshape_target(shape, x.shape(), allowzero, x.numel())?;
     x.contiguous().reshape(&resolved).map_err(OpError::from)
 }
@@ -96,7 +105,7 @@ fn resolve_reshape_target(
 /// 削除する（opset 13 系仕様。`axes` 入力テンソルが空の場合を「軸指定なし」と区別しない）。
 /// 負軸は `x.rank()` に対して正規化する。対象次元が size 1 でない場合・範囲外・重複は
 /// 型付きエラーを返す（データは不変・shape 再計算のみのため `reshape` に委譲する）。
-pub fn squeeze(x: &Tensor<f32>, axes: Option<&[i64]>) -> Result<Tensor<f32>, OpError> {
+pub fn squeeze<T: Element>(x: &Tensor<T>, axes: Option<&[i64]>) -> Result<Tensor<T>, OpError> {
     let rank = x.rank();
     let shape = x.shape();
 
@@ -153,16 +162,18 @@ pub fn squeeze(x: &Tensor<f32>, axes: Option<&[i64]>) -> Result<Tensor<f32>, OpE
 
 /// `Transpose(data, perm=None)`: `perm` が指す軸順へ並べ替える。
 /// `perm` 省略時は軸順を逆転する（ONNX Transpose 仕様の既定動作）。
-/// `tensor-core::Tensor::transpose` は 2 軸交換のみ対応のため（`crates/tensor-core/src/tensor.rs`）、
-/// N 階一般対応は本モジュール内の [`permute_copy`] で行う（tensor-core への汎用 `permute`
-/// 追加はスコープ外。PR 本文に切り出し候補として記録する。`.claude/rules/out-of-scope-tracking.md`）。
-pub fn transpose(x: &Tensor<f32>, perm: Option<&[i64]>) -> Result<Tensor<f32>, OpError> {
+/// N 階一般対応は `tensor-core::Tensor::permute`（イシュー #274 で追加。zero-copy な
+/// shape／strides 並べ替え）に委譲し、出力契約（呼び出し元に返す新規テンソルは
+/// contiguous）を保つため `.contiguous()` で実体化する（`tensor-core::Tensor::transpose`
+/// は 2 軸交換のみ対応のため、以前は本モジュール内の手書き `permute_copy` で
+/// N 階対応を補っていたが、`permute` 追加によりそちらへ置換した）。
+pub fn transpose<T: Element>(x: &Tensor<T>, perm: Option<&[i64]>) -> Result<Tensor<T>, OpError> {
     let rank = x.rank();
     let resolved_perm: Vec<usize> = match perm {
         Some(perm) => validate_perm(perm, rank)?,
         None => (0..rank).rev().collect(),
     };
-    permute_copy(x, &resolved_perm)
+    Ok(x.permute(&resolved_perm)?.contiguous())
 }
 
 /// `perm` が `0..rank` の順列であることを検証し、正規化済み `usize` 列を返す。
@@ -204,46 +215,6 @@ fn validate_perm(perm: &[i64], rank: usize) -> Result<Vec<usize>, OpError> {
         resolved.push(n);
     }
     Ok(resolved)
-}
-
-/// `perm` に従い出力 shape を並べ替え、多重インデックス走査で contiguous な出力バッファへ
-/// コピーする（N 階一般対応。`transpose(dim0, dim1)` の 2 軸限定を補うヘルパ）。
-/// `x` を先に `contiguous()` してから読むため、`get` は常に `Some` を返す不変条件を持つ
-/// （到達しない `None` 分岐は `NonContiguousInternal` として扱う。coding-rust.md の
-/// panic 回避方針に従い `unwrap`/`expect` は使わない）。
-fn permute_copy(x: &Tensor<f32>, perm: &[usize]) -> Result<Tensor<f32>, OpError> {
-    let src = x.contiguous();
-    let in_shape = src.shape().to_vec();
-    let out_shape: Vec<usize> = perm.iter().map(|&p| in_shape[p]).collect();
-    let numel = src.numel();
-
-    let mut data = Vec::with_capacity(numel);
-    let mut out_index = vec![0usize; out_shape.len()];
-    // `in_index` はループ外で 1 回だけ確保し、要素ごとに上書き再利用する
-    // （数百万要素規模の Transpose でループ内ヒープ確保が支配的コストになるのを避ける。
-    // PR #275 レビュー指摘）。
-    let mut in_index = vec![0usize; in_shape.len()];
-    for _ in 0..numel {
-        // out_index[k] は perm[k] 番目の入力軸に対応するため、入力側インデックスは
-        // perm の逆写像で組み立てる（in_index[perm[k]] = out_index[k]）。
-        for (k, &p) in perm.iter().enumerate() {
-            in_index[p] = out_index[k];
-        }
-        let value = src
-            .get(&in_index)
-            .ok_or(OpError::NonContiguousInternal("Transpose"))?;
-        data.push(value);
-
-        for axis in (0..out_shape.len()).rev() {
-            out_index[axis] += 1;
-            if out_index[axis] < out_shape[axis] {
-                break;
-            }
-            out_index[axis] = 0;
-        }
-    }
-
-    Tensor::new(data, &out_shape).map_err(OpError::from)
 }
 
 #[cfg(test)]

@@ -6,7 +6,12 @@
 //! （spec 根拠: `docs/public-api-design.md` §2.3）。
 //!
 //! 実装対象は `f32`/`f64`/`i32`/`half::f16`（GPU バックエンド CUDA/Metal
-//! が使用する半精度浮動小数点型）。
+//! が使用する半精度浮動小数点型）に加え、`i64`（ONNX `INT64` テンソル・
+//! `onnx-interop` の shape／インデックス系値を型安全に表現するため。イシュー
+//! #274）・`bool`（ONNX `BOOL` テンソルのデコード表現用。同じくイシュー #274）。
+//! `i64`/`bool` はいずれも `onnx-interop` の形状系オペ（コピーのみで算術を伴わない）
+//! でのみ用いる想定であり、`backend_ops`／`dispatch` の算術カーネル dispatch 対象には
+//! 含めない（算術・backend dispatch 対応は本イシューのスコープ外。#274 実装計画 §7）。
 
 use half::f16;
 
@@ -56,5 +61,23 @@ impl Element for f16 {
     }
     fn one() -> Self {
         f16::ONE
+    }
+}
+
+impl Element for i64 {
+    fn zero() -> Self {
+        0
+    }
+    fn one() -> Self {
+        1
+    }
+}
+
+impl Element for bool {
+    fn zero() -> Self {
+        false
+    }
+    fn one() -> Self {
+        true
     }
 }
