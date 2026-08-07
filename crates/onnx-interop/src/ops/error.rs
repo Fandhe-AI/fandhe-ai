@@ -75,6 +75,13 @@ pub enum OpError {
         lhs: Vec<usize>,
         rhs: Vec<usize>,
     },
+
+    /// `Mod` の `fmod=0`（Python 風・整数専用モード）が `f32` 入力に対して
+    /// 要求された（TASK-7.3a・`arith.rs`）。ONNX 仕様上 `fmod=0` は整数入力
+    /// のみ有効であり、`f32` に対して `rem_euclid` 等で代替すると異なる数値
+    /// 意味論を静かに返すことになるため、明示的に拒否する
+    /// （`.claude/rules/security.md` A03 相当の「外部入力の検証」）。
+    UnsupportedFmodMode { op: &'static str },
 }
 
 impl fmt::Display for OpError {
@@ -132,6 +139,10 @@ impl fmt::Display for OpError {
             OpError::ConcatShapeMismatch { axis, lhs, rhs } => write!(
                 f,
                 "Concat: shapes differ outside concat axis {axis} (lhs {lhs:?}, rhs {rhs:?})"
+            ),
+            OpError::UnsupportedFmodMode { op } => write!(
+                f,
+                "{op}: fmod=0 (Python-style, integer-only) is not supported for f32 input; use fmod=1"
             ),
         }
     }

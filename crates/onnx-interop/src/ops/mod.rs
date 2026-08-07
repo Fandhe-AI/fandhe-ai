@@ -1,5 +1,6 @@
 //! ONNX 8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`。
-//! TASK-7.2c・#79）を `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
+//! TASK-7.2c・#79）に加え、MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`。
+//! TASK-7.3a・#82）を `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
 //!
 //! 各関数は「入力テンソル＋属性 → 出力テンソル」の単体演算に限定し、ONNX proto デコード
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
@@ -7,7 +8,9 @@
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。
 
 mod activation;
+mod arith;
 mod concat;
+mod constant;
 mod error;
 mod gather;
 mod gemm;
@@ -15,7 +18,9 @@ mod shape_ops;
 mod slice;
 
 pub use activation::{relu, sigmoid};
+pub use arith::{add, div, modulo, mul, sqrt};
 pub use concat::concat;
+pub use constant::{ConstantValue, constant};
 pub use error::OpError;
 pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};
