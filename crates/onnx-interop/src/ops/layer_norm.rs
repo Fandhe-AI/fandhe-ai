@@ -42,6 +42,9 @@ impl Default for LayerNormAttrs {
 /// `LayerNormalization(x, scale, bias?)` を計算する。
 ///
 /// - `axis` は `x` の rank に対して正規化する（範囲外は [`OpError::AxisOutOfRange`]）。
+///   正規化後の軸が範囲内でも正規化集合（`x.shape()[axis..]`）の要素数積が 0
+///   （例: `shape=[2,0], axis=1`）の場合は分散の除数 0 割りを避けるため
+///   [`OpError::EmptyNormalizedSet`] を返す。
 /// - `epsilon` は非有限値（`NaN`／`inf`）を [`OpError::InvalidEpsilon`] で拒否する。
 ///   `epsilon` はモデル属性（外部入力）であり、`Div`/`Sqrt` が実行時データに対して
 ///   採る IEEE 754 透過方針（`arith.rs`）とは異なり、非有限な属性値は分散計算全体を
@@ -76,14 +79,15 @@ pub fn layer_normalization(
     let inner_size: usize = normalized_shape.iter().product();
     let outer_size: usize = x.shape()[..axis].iter().product();
 
-    // `inner_size == 0`（正規化集合が空）は ONNX 仕様上未定義に近く、分散の除数 0 割りで
-    // 意味のない出力（NaN）を静かに生成しうる。0 要素テンソルは shape 経由で
-    // `Tensor::new`/`zeros` の時点で許容されうるため、ここで明示的に拒否する。
+    // `inner_size == 0`（正規化集合が空。例: shape=[2,0], axis=1）は ONNX 仕様上未定義に
+    // 近く、分散の除数 0 割りで意味のない出力（NaN）を静かに生成しうる。0 要素テンソルは
+    // shape 経由で `Tensor::new`/`zeros` の時点で許容されうるため、ここで明示的に拒否する。
+    // `axis` 自体は `[0, rank)` の範囲内であり [`OpError::AxisOutOfRange`] とは原因が
+    // 異なるため、専用 variant（[`OpError::EmptyNormalizedSet`]）で区別する。
     if inner_size == 0 {
-        return Err(OpError::AxisOutOfRange {
+        return Err(OpError::EmptyNormalizedSet {
             op: "LayerNormalization",
-            axis: attrs.axis,
-            rank,
+            axis,
         });
     }
 
@@ -309,6 +313,20 @@ mod tests {
         };
         let err = layer_normalization(&x, &scale, None, &attrs).unwrap_err();
         assert!(matches!(err, OpError::AxisOutOfRange { axis: 5, .. }));
+    }
+
+    #[test]
+    fn empty_normalized_set_rejected() {
+        // shape=[2,0], axis=1 -> 正規化集合 shape[1..] = [0] は要素数積 0（inner_size=0）。
+        // axis 自体は rank=2 に対し範囲内のため AxisOutOfRange ではなく専用 variant を返す。
+        let x = Tensor::<f32>::zeros(&[2, 0]).unwrap();
+        let scale = Tensor::<f32>::zeros(&[0]).unwrap();
+        let attrs = LayerNormAttrs {
+            axis: 1,
+            epsilon: 1e-5,
+        };
+        let err = layer_normalization(&x, &scale, None, &attrs).unwrap_err();
+        assert!(matches!(err, OpError::EmptyNormalizedSet { axis: 1, .. }));
     }
 
     #[test]

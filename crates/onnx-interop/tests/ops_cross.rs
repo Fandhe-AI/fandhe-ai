@@ -189,27 +189,23 @@ fn stage3_ffn_and_layer_norm() {
     }
 }
 
-/// 15 オペすべてが本ファイル内で少なくとも 1 回呼ばれていることの一覧（コメントのみ。
-/// コンパイル時に強制はできないため、レビュー・#86 参照用の対応表として残す）:
-///
-/// | オペ | 呼び出し箇所 |
-/// |------|-------------|
-/// | Constant | stage1 |
-/// | Shape | stage1 |
-/// | Gather | stage1 |
-/// | Unsqueeze | stage1 |
-/// | Concat | stage1 |
-/// | Slice | stage1 |
-/// | Add | stage2・stage3 |
-/// | Mul | stage2 |
-/// | Div | stage2 |
-/// | Mod | stage2 |
-/// | Sqrt | stage2 |
-/// | Gemm | stage3 |
-/// | Relu | stage3 |
-/// | Sigmoid | stage3 |
-/// | LayerNormalization | stage3 |
-#[test]
-fn all_15_ops_are_exercised_marker() {
-    // 実体は上記表と各 stage テストのみ。本テストはドキュメント用マーカー（常に成功）。
-}
+// 15 オペすべてが本ファイル内で少なくとも 1 回呼ばれていることの一覧（コメントのみ。
+// コンパイル時に強制はできないため、レビュー・#86 参照用の対応表として残す）:
+//
+// | オペ | 呼び出し箇所 |
+// |------|-------------|
+// | Constant | stage1 |
+// | Shape | stage1 |
+// | Gather | stage1 |
+// | Unsqueeze | stage1 |
+// | Concat | stage1 |
+// | Slice | stage1 |
+// | Add | stage2・stage3 |
+// | Mul | stage2 |
+// | Div | stage2 |
+// | Mod | stage2 |
+// | Sqrt | stage2 |
+// | Gemm | stage3 |
+// | Relu | stage3 |
+// | Sigmoid | stage3 |
+// | LayerNormalization | stage3 |
