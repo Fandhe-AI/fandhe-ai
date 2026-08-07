@@ -53,13 +53,31 @@
 //!   薄いアダプタであり、`decide` を経由しない [`outcome::AdoptionVerdict`] 生成経路を
 //!   持たない（A08: 判定の迂回経路を作らない）。
 //! - [`error`][]: 型付きエラー [`error::SelfRepairError`]。
+//! - [`exec`][]: コマンド実行抽象（[`exec::CommandRunner`]・
+//!   [`exec::SystemCommandRunner`]）。[`verify_gates::CargoVerificationGate`]
+//!   が `cargo build`/`test`/`clippy` を起動するのに使う（TASK-3.1c・#134）。
+//! - [`candidate`][]: 修正生成フェーズの候補適用基盤（[`candidate::CandidateFix`]・
+//!   [`candidate::CandidateFixGenerator`]。種別非依存。TASK-3.1c・#134）。
+//! - [`verify_gates`][]: 検証フェーズ 3 ゲート（build/test/clippy）の実実行
+//!   [`verify_gates::CargoVerificationGate`]（TASK-3.1c・#134）。
 //!
-//! # 本クレートが担わない責務（TASK-3.1b・TASK-3.1d 完了時点でのスコープ・
+//! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
-//! - 検証 3 ゲート実実行（`verify`/`cargo_gate` 相当。`VerificationGate` の
-//!   本番実装が [`outcome::VerifiedEvidence`] を実測シグナルから構築する部分）
-//!   → イシュー #134（TASK-3.1c。本クレートは入力型と `AdoptionJudge` への
-//!   接続〈#135〉のみを確定済み）
+//! - 種別別の実候補列の供給（`bug_fix`/`perf_regression`/`feature_addition` の
+//!   `Detector`・`FixGenerator` 骨格自体は TASK-3.1b・イシュー #133 で実装済み
+//!   だが、実 AI 生成修正の動的取得・実運用題材での再実証は TASK-3.3 のスコープ）
+//! - 検証フェーズ 4 ゲートのうちベンチゲート（[`verify_bench::SelfRepairBenchGate`]）
+//!   の [`stages::VerificationGate`] への結線（4 ゲート合成） → イシュー #136 系
+//!   （TASK-3.2）
+//! - `lines_changed`/`api_broken`/`gaming_suspect`/`exclusion_rule_ids`
+//!   の実測（diff 解析・ポリシー除外リスト評価）
+//!   → [`verify_gates::CargoVerificationGate`] は構築時にこれらを呼び出し元
+//!   から必須引数として受け取るのみで、自ら計測しない（未計測値を fail-open
+//!   な既定値で埋めない。モジュール末尾 `verify_gates` のドキュメント参照）。
+//!   実測経路の配線は #133・TASK-3.3（再実証）のスコープ
+//! - `exec`（コマンド実行抽象）の `guardrail` 側への共通化（`guardrail check`
+//!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
+//!   （本イシュー〈#134〉の PR 本文に記録）
 //! - ログ形式（`logging` 相当・SHA-256 ハッシュチェーン・`sha2` 依存追加。
 //!   依存追加はユーザー承認事項） → イシュー #145（TASK-3.4）
 //! - CLI バイナリ（`self-repair run`/`verify-log`。
@@ -79,12 +97,13 @@ pub mod perf_regression;
 pub mod report;
 pub mod runner;
 pub mod stages;
+pub mod verify_gates;
 
 #[cfg(test)]
 pub(crate) mod test_support;
 
 pub use bug_fix::{BugFixDetector, BugFixFixGenerator};
-pub use candidate::CandidateFix;
+pub use candidate::{CandidateFix, CandidateFixGenerator};
 pub use error::SelfRepairError;
 pub use exec::{CommandOutput, CommandRunner, SystemCommandRunner};
 pub use feature_addition::{FeatureAdditionDetector, FeatureAdditionFixGenerator};
@@ -95,6 +114,7 @@ pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionF
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
+pub use verify_gates::CargoVerificationGate;
 
 /// 決定的シード設定ユーティリティ（TASK-4.4b・イシュー #113）。
 ///

@@ -1,124 +1,203 @@
-//! 種別ごとの検出段階（[`crate::bug_fix`]・[`crate::feature_addition`]）が使う
-//! コマンド実行の抽象化（TASK-3.1b・イシュー #133・REQ-3）。
+//! コマンド実行抽象（TASK-3.1b・イシュー #133、TASK-3.1c・イシュー #134・REQ-3）。
 //!
-//! v1（`Fandhe-AI/rust-ai-library-v1` `crates/guardrail/src/exec.rs`）は本 seam を
-//! `guardrail::exec::CommandRunner` として `guardrail` 側に置いていたが、v2
-//! `guardrail` クレートには本イシュー時点で `exec` モジュールが未移植であり
-//! （guardrail 自体の CLI 実行系〈TASK-4.1〉はイシュー #103 が別途追跡）、
-//! guardrail 側への新規追加は並行 guardrail トラック（#134〜#136・#145 等）と
-//! 競合しうる（`.claude/rules/delegation-impl.md`「複数 Agent に同一ファイルを
-//! 並行編集させない」）。そのため本クレート内に v2 新設として置く。検証ゲート
-//! 実実行（#134）が build/test/clippy を起動する際も同一 seam の再利用を想定
-//! する（呼び出し元候補: `crate::stages::VerificationGate` の #134 実装）。
-//! `guardrail` への移設が必要になった場合は `out-of-scope-tracking.md` の
-//! 規約に従い Issue へ記録する（実装計画セクション 7 参照）。
+//! [`crate::verify_gates::CargoVerificationGate`] が `cargo build`/`cargo
+//! test`/`cargo clippy` を起動する際の実行系であり、種別ごとの検出段階
+//! （[`crate::bug_fix::BugFixDetector`]・[`crate::feature_addition::FeatureAdditionDetector`]）
+//! が `cargo test --release` を起動する際にも同一 seam を再利用する。
+//! 移植元は v1 `Fandhe-AI/rust-ai-library-v1` `crates/guardrail/src/exec.rs`
+//! （`docs/spec/v1-assets-inventory.md` L17「改修して再利用」判定）。
 //!
-//! # 呼び出し文脈
-//! - 呼び出し元: [`crate::bug_fix::BugFixDetector`]・
-//!   [`crate::feature_addition::FeatureAdditionDetector`]（いずれも
-//!   `cargo test --release` の起動に使う）
-//! - 呼び出し先: [`SystemCommandRunner`] が `std::process::Command` を実行する
+//! v1 では `guardrail::exec` だったが、本クレート（`self-repair`）内に
+//! 実装を置く。理由: `guardrail` クレート側は本イシューと並行する他イシュー
+//! （`guardrail check` 実シグナル計測経路・TASK-6.1c・#199 等）の編集対象と
+//! なりうるため、`.claude/rules/delegation-impl.md`「複数 Agent に同一
+//! ファイルを並行編集させない」に従い編集対象を本クレートに閉じる。
+//! guardrail 側との実装共通化は out-of-scope（イシュー #134 の PR 参照）。
+//!
+//! # A03（インジェクション）対応
+//! [`CommandRunner::run`] はプログラム名と引数を配列で受け取り
+//! `std::process::Command` へそのまま渡す。シェル（`sh -c` 等）を経由しない
+//! ため、引数中の `;`・`|`・`$()` 等がシェルメタ文字として再解釈されることは
+//! ない（`.claude/rules/security.md` A03・`stages.rs` の #134 向け契約）。
 
 use std::path::Path;
 use std::process::Command;
 
-/// キャプチャするコマンド出力（stdout/stderr 結合）の上限バイト数。
+/// 取り込むログの上限（256 KiB）。
 ///
-/// 巨大な `cargo test` ログを無制限に保持するとメモリを圧迫する
-/// （`.claude/rules/security.md` A03 の外部入力検証と同種の DoS 耐性の思想。
-/// 末尾を優先して保持するのは、失敗原因は末尾に現れることが多いため。
-/// v1 `guardrail::exec::MAX_CAPTURED_LOG_BYTES` と同値）。
-pub const MAX_CAPTURED_LOG_BYTES: usize = 256 * 1024;
+/// `cargo test`・`cargo clippy` の出力は数百 KB に達しうるため、上限なしで
+/// 保持すると監査ログ（`LoopReport`）やエラーメッセージの肥大化・DoS 耐性の
+/// 低下を招く（`.claude/rules/security.md` A03「巨大出力による DoS」）。
+/// v1 `guardrail/src/exec.rs` と同一の上限値を踏襲する。
+const MAX_CAPTURED_LOG_BYTES: usize = 256 * 1024;
 
-/// [`truncate_to_tail`] が切り詰め発生時に先頭へ付与するマーカー文字列。
-const TRUNCATED_LOG_PREFIX: &str = "...(先頭を切り詰め)...";
+/// ログを上限超過で切り詰めた際に先頭へ付与するマーカー。
+const TRUNCATED_LOG_PREFIX: &str = "...(truncated)...\n";
 
-/// コマンド実行結果。exit 成否と結合ログ（上限切り詰め済み）を保持する。
+/// コマンド実行結果（stdout/stderr 結合ログ＋成功可否）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     success: bool,
-    /// stdout/stderr を結合し [`MAX_CAPTURED_LOG_BYTES`] で末尾切り詰めしたログ。
     log_tail: String,
 }
 
 impl CommandOutput {
-    /// テスト・呼び出し元から任意の成否とログで組み立てるための構築子。
-    /// 実プロセス実行結果は [`SystemCommandRunner::run`] が組み立てる。
-    pub fn new(success: bool, log: impl Into<String>) -> Self {
-        let log = log.into();
-        let log_tail = truncate_to_tail(&log, MAX_CAPTURED_LOG_BYTES);
-        CommandOutput { success, log_tail }
-    }
-
-    /// コマンドが 0 終了したかどうか。
+    /// プロセスが 0 終了コードで終了したか（非 0 終了・シグナル終了は
+    /// `false`）。
     pub fn success(&self) -> bool {
         self.success
     }
 
-    /// 末尾切り詰め済みの結合ログ（[`crate::stages::Finding::summary`] 等、
-    /// 失敗理由の要約表示に使う）。
+    /// stdout/stderr を結合し末尾 256 KiB に切り詰めたログ（UTF-8 文字境界
+    /// を尊重して切り詰める。マルチバイト文字の途中で分断しない）。
     pub fn log_tail(&self) -> &str {
         &self.log_tail
     }
-}
 
-/// バイト列を UTF-8 境界を壊さない範囲で末尾 `limit` バイトに切り詰める。
-fn truncate_to_tail(s: &str, limit: usize) -> String {
-    if s.len() <= limit {
-        return s.to_string();
-    }
-    let start = s.len() - limit;
-    let mut start = start;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("{TRUNCATED_LOG_PREFIX}{}", &s[start..])
-}
-
-/// 各 `Detector` 実装から見た「コマンドを 1 つ実行する」ことの抽象。
-///
-/// 実装は [`SystemCommandRunner`]（実プロセス起動）と、テスト用の
-/// [`crate::test_support::ScriptedCommand`] の 2 種類を想定する。
-pub trait CommandRunner {
-    /// `program` を `args` 付きで `cwd` を作業ディレクトリとして実行する。
+    /// stdout/stderr の生バイト列から [`CommandOutput`] を構築する。
     ///
-    /// spawn 自体に失敗した場合（コマンド未インストール等）は `Err` を返す。
-    /// 呼び出し元（[`crate::stages::Detector`] 実装）はこれを
-    /// [`crate::error::SelfRepairError::Detection`] へ変換する（fail-closed。
-    /// `.claude/rules/security.md` A08: 判定不能を通過に倒す経路を作らない）。
-    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput, String>;
+    /// `SystemCommandRunner::run`（本番経路）と `verify_gates.rs` の
+    /// `CommandRunner` テストダブル（スクリプト化したログを構築する
+    /// ユニットテスト）の双方から呼べるよう `pub(crate)` とする。
+    pub(crate) fn from_captured(success: bool, combined: Vec<u8>) -> Self {
+        // `combined` はプロセス出力の生バイト列であり、必ずしも UTF-8 として
+        // 妥当とは限らない。不正なバイト列を含む場合、上限適用前（バイト列の
+        // 段階）で切り詰めてから `String::from_utf8_lossy` を呼ぶと、不正な
+        // 各バイトが置換文字 U+FFFD（3 バイト）へ個別に展開されうるため、
+        // 変換後の文字列長が `MAX_CAPTURED_LOG_BYTES` を大きく超過しうる
+        // （最悪 1 バイトあたり 3 バイトへ膨張＝ 3 倍）。これを避けるため、
+        // 先に lossy 変換して妥当な UTF-8 文字列に正規化してから、文字列側
+        // （`char_indices` による文字境界）で上限を適用する。
+        let decoded = String::from_utf8_lossy(&combined).into_owned();
+        let log_tail = if decoded.len() <= MAX_CAPTURED_LOG_BYTES {
+            decoded
+        } else {
+            // 末尾 MAX_CAPTURED_LOG_BYTES 相当を残す。`decoded` は既に妥当な
+            // UTF-8 文字列なので `char_indices` で文字境界を安全に走査できる
+            // （バイト列時点でのバイトパターン判定は不要）。
+            let cut = decoded.len() - MAX_CAPTURED_LOG_BYTES;
+            let boundary = decoded
+                .char_indices()
+                .map(|(index, _)| index)
+                .find(|&index| index >= cut)
+                .unwrap_or(decoded.len());
+            format!("{TRUNCATED_LOG_PREFIX}{}", &decoded[boundary..])
+        };
+        CommandOutput { success, log_tail }
+    }
 }
 
-/// `std::process::Command` を用いた実プロセス実行の [`CommandRunner`] 実装。
+/// コマンド実行の抽象。[`crate::verify_gates::CargoVerificationGate`] は
+/// この trait 経由でのみ子プロセスを起動し、本番経路は
+/// [`SystemCommandRunner`]、ユニットテストはスクリプト化したテストダブル
+/// （`verify_gates.rs`・`candidate.rs` のテストモジュール参照）を注入する。
+pub trait CommandRunner {
+    /// `program` を `args`（配列）とともに `cwd` で起動し、結果を返す。
+    ///
+    /// spawn 自体に失敗した場合（実行ファイルが存在しない等）は `Err` を
+    /// 返す。プロセスが起動できたが非 0 終了した場合は `Ok` の
+    /// `CommandOutput::success() == false` で表現し、両者を区別する
+    /// （呼び出し元の [`crate::verify_gates::CargoVerificationGate`] が
+    /// spawn 失敗を `SelfRepairError::Verification` として伝播し、
+    /// ゲート不合格〈`Ok`〉と区別する契約と対応する）。
+    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput, ExecError>;
+}
+
+/// [`CommandRunner::run`] の spawn 失敗を表す内部エラー型。
 ///
-/// 引数配列で起動しシェル経由の文字列展開をしない
-/// （`.claude/rules/security.md` A03。v1 `guardrail::exec::SystemCommandRunner`
-/// と同一方針）。`self-repair` 自身が lefthook の pre-push フック等、既存の
-/// git/cargo フック処理系の子プロセスとして呼ばれる可能性があるため、cargo
-/// 起動に影響する環境変数を明示的に除去してから起動する（祖先プロセスの
-/// `CARGO_TARGET_DIR` 等が検出対象ワークスペースの target ディレクトリ・
-/// ロックを意図せず差し替えるのを防ぐ）。
+/// `SelfRepairError` へ変換する責務は呼び出し元（`verify_gates.rs`）が持つ
+/// （`SelfRepairError::Verification { attempt, reason }` は `attempt` を
+/// 知らないと構築できないため、`exec.rs` 単体では `SelfRepairError` を
+/// 直接返さない）。
+#[derive(Debug, Clone)]
+pub struct ExecError {
+    message: String,
+}
+
+impl ExecError {
+    /// `verify_gates.rs` の spawn 失敗テストダブルからも構築できるよう
+    /// `pub(crate)` とする（クレート外からは構築不能。呼び出し元は
+    /// `SystemCommandRunner::run` とテストダブルのみに限られる）。
+    pub(crate) fn new(message: impl Into<String>) -> Self {
+        ExecError {
+            message: message.into(),
+        }
+    }
+
+    /// 人間可読なエラー内容（`SelfRepairError::Verification.reason` へ
+    /// 埋め込む用途）。
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for ExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "コマンド実行に失敗しました: {}", self.message)
+    }
+}
+
+impl std::error::Error for ExecError {}
+
+/// `std::process::Command` による実プロセス実行（[`CommandRunner`] 本番実装）。
 pub struct SystemCommandRunner;
 
+impl SystemCommandRunner {
+    pub fn new() -> Self {
+        SystemCommandRunner
+    }
+}
+
+impl Default for SystemCommandRunner {
+    fn default() -> Self {
+        SystemCommandRunner::new()
+    }
+}
+
 impl CommandRunner for SystemCommandRunner {
-    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput, String> {
-        let output = Command::new(program)
-            .env_remove("CARGO_TARGET_DIR")
-            .env_remove("CARGO_BUILD_TARGET_DIR")
-            .env_remove("CARGO_MAKEFLAGS")
-            .env_remove("RUSTC_WRAPPER")
-            .env_remove("RUSTFLAGS")
-            .current_dir(cwd)
-            .args(args)
+    fn run(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput, ExecError> {
+        let mut command = Command::new(program);
+        command.args(args).current_dir(cwd);
+
+        // 祖先プロセス（lefthook フック・CI・テストハーネス）が
+        // `CARGO_TARGET_DIR` 等のビルド出力先を変える環境変数を設定して
+        // いる場合、子プロセスの `cargo build`/`test`/`clippy` の実行先が
+        // 呼び出し元の意図（`cwd` 配下）とすり替わりうる。検証ゲートが
+        // 検証対象と異なる workspace を build/test する事態を防ぐため、
+        // 明示的に除去してから起動する（v1 `exec.rs` と同一の理由）。
+        // `CARGO_ENCODED_RUSTFLAGS` は `RUSTFLAGS` と同じ rustc フラグを
+        // 伝える等価チャンネルであり、Cargo は両者を等価に扱う
+        // （どちらか一方が設定されていればそちらが優先される）。
+        // `RUSTFLAGS` のみ除去して `CARGO_ENCODED_RUSTFLAGS` を継承したまま
+        // にすると、祖先プロセスがこちらを設定していた場合に検証ビルドの
+        // 挙動が変わりうるため、同様に除去する。
+        // `CARGO_MAKEFLAGS` は cargo が子プロセスへ jobserver（GNU make
+        // 互換のトークンパイプ）を伝搬させる環境変数であり、継承すると
+        // 検証用ビルドが祖先の jobserver からトークンを取得しに行き、
+        // 祖先側の並列度制約や、祖先プロセス終了後のパイプ切断で
+        // ハング／異常終了しうる。`RUSTC_WRAPPER` は sccache 等の
+        // コンパイララッパーを指定する環境変数であり、継承すると
+        // 検証ビルドが祖先と同じラッパー・キャッシュを経由してしまい、
+        // 検証対象と異なるキャッシュ状態の影響を受けうる。いずれも
+        // 検証ゲートの再現性を損なうため、他の変数と同様に除去する。
+        command.env_remove("CARGO_TARGET_DIR");
+        command.env_remove("CARGO_BUILD_TARGET_DIR");
+        command.env_remove("RUSTFLAGS");
+        command.env_remove("CARGO_ENCODED_RUSTFLAGS");
+        command.env_remove("CARGO_MAKEFLAGS");
+        command.env_remove("RUSTC_WRAPPER");
+
+        let output = command
             .output()
-            .map_err(|source| {
-                format!("コマンド起動に失敗しました（program={program}）: {source}")
-            })?;
+            .map_err(|error| ExecError::new(format!("{program} の起動に失敗しました: {error}")))?;
 
-        let mut log = String::from_utf8_lossy(&output.stdout).into_owned();
-        log.push_str(&String::from_utf8_lossy(&output.stderr));
+        let mut combined = output.stdout;
+        combined.extend_from_slice(&output.stderr);
 
-        Ok(CommandOutput::new(output.status.success(), log))
+        Ok(CommandOutput::from_captured(
+            output.status.success(),
+            combined,
+        ))
     }
 }
 
@@ -127,42 +206,83 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncates_long_log_to_tail_and_keeps_utf8_boundary() {
-        let long = "あ".repeat(200_000);
-        let output = CommandOutput::new(true, long.clone());
-        assert!(output.log_tail().len() <= MAX_CAPTURED_LOG_BYTES + TRUNCATED_LOG_PREFIX.len());
-        assert!(output.log_tail().starts_with(TRUNCATED_LOG_PREFIX));
-        assert!(long.len() > MAX_CAPTURED_LOG_BYTES);
+    fn log_tail_keeps_short_output_unmodified() {
+        let output = CommandOutput::from_captured(true, b"hello world".to_vec());
+        assert_eq!(output.log_tail(), "hello world");
+        assert!(output.success());
     }
 
     #[test]
-    fn keeps_short_log_unchanged() {
-        let output = CommandOutput::new(false, "short log");
-        assert_eq!(output.log_tail(), "short log");
+    fn log_tail_truncates_and_prefixes_marker_when_over_limit() {
+        // 上限を大幅に超える ASCII 文字列（文字境界問題を起こさない前提）で
+        // 切り詰め・マーカー付与を確認する。
+        let big = vec![b'a'; MAX_CAPTURED_LOG_BYTES + 100];
+        let output = CommandOutput::from_captured(false, big);
+        assert!(!output.success());
+        assert!(output.log_tail().starts_with(TRUNCATED_LOG_PREFIX));
+        // マーカー分を除いた残りは MAX_CAPTURED_LOG_BYTES 以下。
+        assert!(output.log_tail().len() <= MAX_CAPTURED_LOG_BYTES + TRUNCATED_LOG_PREFIX.len());
+    }
+
+    #[test]
+    fn log_tail_truncation_respects_utf8_char_boundary() {
+        // マルチバイト文字（3 バイトの日本語文字）が上限境界をまたぐ配置で
+        // 構築し、置換文字（U+FFFD）が挿入されないことを確認する。
+        let filler = vec![b'x'; MAX_CAPTURED_LOG_BYTES - 1];
+        let mut bytes = filler;
+        // 境界をまたぐようにマルチバイト文字を追加する。
+        bytes.extend_from_slice("あ".as_bytes());
+        let output = CommandOutput::from_captured(true, bytes);
+        assert!(!output.log_tail().contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn log_tail_stays_within_bound_when_invalid_utf8_expands_via_replacement_chars() {
+        // 不正な UTF-8 バイト列（`0xFF` は単独では継続バイトと誤認されない
+        // ため、旧実装のバイト境界判定だけでは切り詰め対象に残ってしまう）
+        // を上限超過分含める。`String::from_utf8_lossy` は不正バイト 1 個を
+        // U+FFFD（3 バイト）へ展開するため、バイト列側で先に切り詰めてから
+        // 変換すると変換後の文字列が上限の最大約 3 倍まで膨張しうる
+        // （Cursor Bugbot review #4885590407 が指摘した回帰）。文字列化後に
+        // 切り詰める本実装ではこの膨張が起きないことを確認する。
+        let mut bytes = vec![0xFFu8; MAX_CAPTURED_LOG_BYTES + 1024];
+        bytes.extend_from_slice(b"tail-marker");
+        let output = CommandOutput::from_captured(true, bytes);
+        assert!(
+            output.log_tail().len() <= MAX_CAPTURED_LOG_BYTES + TRUNCATED_LOG_PREFIX.len(),
+            "log_tail should stay within the documented bound even for invalid UTF-8 input, got {} bytes",
+            output.log_tail().len()
+        );
+        assert!(output.log_tail().ends_with("tail-marker"));
+    }
+
+    #[test]
+    fn system_command_runner_reports_success_for_zero_exit() {
+        let runner = SystemCommandRunner::new();
+        let cwd = std::env::current_dir().expect("current_dir should be available in tests");
+        let output = runner
+            .run("cargo", &["--version"], &cwd)
+            .expect("cargo --version should spawn successfully");
+        assert!(output.success());
+        assert!(output.log_tail().to_lowercase().contains("cargo"));
+    }
+
+    #[test]
+    fn system_command_runner_reports_failure_for_nonzero_exit() {
+        let runner = SystemCommandRunner::new();
+        let cwd = std::env::current_dir().expect("current_dir should be available in tests");
+        // 存在しないサブコマンドを渡し、非 0 終了を確実に発生させる。
+        let output = runner
+            .run("cargo", &["__self_repair_nonexistent_subcommand__"], &cwd)
+            .expect("cargo should still spawn even if the subcommand is invalid");
         assert!(!output.success());
     }
 
     #[test]
-    fn system_runner_reports_spawn_failure_as_err() {
-        let runner = SystemCommandRunner;
-        let err = runner
-            .run(
-                "this-binary-should-not-exist-self-repair-test",
-                &[],
-                Path::new("."),
-            )
-            .expect_err("存在しないコマンドは Err を返すこと");
-        assert!(err.contains("コマンド起動に失敗しました"));
-    }
-
-    #[test]
-    fn system_runner_runs_real_command() {
-        // 実機非依存の軽量コマンド（`cargo --version`）でスモークする
-        // （実装計画セクション 4 ステップ 9）。
-        let runner = SystemCommandRunner;
-        let output = runner
-            .run("cargo", &["--version"], Path::new("."))
-            .expect("`cargo --version` の起動に失敗");
-        assert!(output.success());
+    fn system_command_runner_errors_on_missing_program() {
+        let runner = SystemCommandRunner::new();
+        let cwd = std::env::current_dir().expect("current_dir should be available in tests");
+        let result = runner.run("self_repair_definitely_not_a_real_binary_xyz", &[], &cwd);
+        assert!(result.is_err());
     }
 }

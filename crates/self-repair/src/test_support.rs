@@ -17,19 +17,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::exec::{CommandOutput, CommandRunner};
+use crate::exec::{CommandOutput, CommandRunner, ExecError};
 
 /// `ScriptedCommand::new` の入力 1 要素分（`(program, args)` と返す結果の組）。
 /// clippy::type_complexity 対応で型エイリアスへ切り出す。
-pub(crate) type ScriptedResponse<'a> = ((&'a str, &'a [&'a str]), Result<CommandOutput, String>);
+pub(crate) type ScriptedResponse<'a> = ((&'a str, &'a [&'a str]), Result<CommandOutput, ExecError>);
 
 /// [`crate::exec::CommandRunner`] のテストダブル。`(program, args)` の組を
 /// キーに事前設定した結果を返す。実 cargo を起動せず検出・生成ロジックのみを
 /// 検証する（実 cargo 実行は [`crate::exec`] のスモークテストで別途検証する）。
 ///
-/// spawn 失敗を模擬する場合は `Err(reason)` を渡す。
+/// spawn 失敗を模擬する場合は `Err(ExecError::new(reason))` を渡す
+/// （`crate::exec::CommandRunner::run` の戻り値型に揃える。TASK-3.1c・#134）。
 pub(crate) struct ScriptedCommand {
-    responses: HashMap<(String, Vec<String>), Result<CommandOutput, String>>,
+    responses: HashMap<(String, Vec<String>), Result<CommandOutput, ExecError>>,
     calls: RefCell<Vec<(String, Vec<String>)>>,
 }
 
@@ -66,16 +67,17 @@ impl ScriptedCommand {
 }
 
 impl CommandRunner for ScriptedCommand {
-    fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> Result<CommandOutput, String> {
+    fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> Result<CommandOutput, ExecError> {
         let key = (
             program.to_string(),
             args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         );
         self.calls.borrow_mut().push(key.clone());
-        self.responses
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| Err(format!("スクリプト未設定の呼び出し: {key:?}")))
+        self.responses.get(&key).cloned().unwrap_or_else(|| {
+            Err(ExecError::new(format!(
+                "スクリプト未設定の呼び出し: {key:?}"
+            )))
+        })
     }
 }
 
@@ -83,11 +85,14 @@ impl CommandRunner for ScriptedCommand {
 /// `Detector` テストが共用する）。
 pub(crate) fn passing_test_response() -> (
     (&'static str, &'static [&'static str]),
-    Result<CommandOutput, String>,
+    Result<CommandOutput, ExecError>,
 ) {
     (
         ("cargo", &["test", "--release"]),
-        Ok(CommandOutput::new(true, "test result: ok")),
+        Ok(CommandOutput::from_captured(
+            true,
+            b"test result: ok".to_vec(),
+        )),
     )
 }
 
@@ -97,11 +102,11 @@ pub(crate) fn failing_test_response(
     log: &'static str,
 ) -> (
     (&'static str, &'static [&'static str]),
-    Result<CommandOutput, String>,
+    Result<CommandOutput, ExecError>,
 ) {
     (
         ("cargo", &["test", "--release"]),
-        Ok(CommandOutput::new(false, log)),
+        Ok(CommandOutput::from_captured(false, log.as_bytes().to_vec())),
     )
 }
 

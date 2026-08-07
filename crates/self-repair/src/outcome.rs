@@ -111,18 +111,16 @@ impl VerifiedEvidence {
     /// 本 typestate の安全性の根拠は「クレート外から検証迂回で構築できない」
     /// ことであるため、可視性を `pub` へ緩めない。
     ///
+    /// 検証ゲート実実行（イシュー #134）により、本コンストラクタの呼び出し元は
+    /// `crate::verify_gates::CargoVerificationGate::verify`（全ゲート通過時。
+    /// 本番経路）となった。`runner.rs` の `#[cfg(test)]` テストダブルからも
+    /// 引き続き呼ばれる。
+    ///
     /// `exclusion_rule_ids` を含む 6 シグナルはここでは再検証しない
     /// （`guardrail::DecisionInput::new` が「ゲート未全通過 +
     /// `BenchSignal::Measured`」等の矛盾入力を fail-closed に拒否する最終
     /// 防衛線であり、構築子側での重複検証は行わない方針。v1 のコメント
     /// 方針を踏襲）。
-    ///
-    /// 検証ゲート実実行（イシュー #134）が本クレート内に `VerificationGate`
-    /// 実装を追加するまでは、本コンストラクタの呼び出し元は
-    /// `runner.rs` の `#[cfg(test)]` テストダブルのみである。`cargo clippy`
-    /// の non-test ビルドでは呼び出し元が存在せず `dead_code` と判定される
-    /// ため、意図的に `#[allow]` する（#134 で実装が追加され次第、外す）。
-    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         attempt: u32,

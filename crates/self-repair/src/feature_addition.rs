@@ -28,6 +28,7 @@
 //! この合成の範囲を超えるため対象外である（PoC-2 発見事項 5）。この境界の
 //! 正式なドキュメント化は後続タスクのスコープ（out-of-scope-tracking.md 準拠）。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::candidate::{CandidateFix, apply_candidate, validate_relative_path};
@@ -75,9 +76,9 @@ impl<R: CommandRunner> Detector for FeatureAdditionDetector<R> {
         let output = self
             .runner
             .run("cargo", &["test", "--release"], &self.workspace)
-            .map_err(|reason| SelfRepairError::Detection {
+            .map_err(|error| SelfRepairError::Detection {
                 kind: "feature_addition",
-                reason,
+                reason: error.message().to_string(),
             })?;
 
         if output.success() {
@@ -118,7 +119,7 @@ pub struct FeatureAdditionFixGenerator {
     /// 各試行の開始前にこの内容へ復元してから候補を適用することで、前試行の
     /// 変更が次の試行に持ち越されないようにする（`BugFixFixGenerator` と同じ
     /// 設計）。
-    baseline: Vec<(PathBuf, String)>,
+    baseline: HashMap<PathBuf, String>,
     candidates: Vec<CandidateFix>,
 }
 
@@ -142,7 +143,7 @@ impl FeatureAdditionFixGenerator {
         candidates: Vec<CandidateFix>,
     ) -> Result<Self, SelfRepairError> {
         let workspace = workspace.into();
-        let mut baseline: Vec<(PathBuf, String)> = Vec::new();
+        let mut baseline: HashMap<PathBuf, String> = HashMap::new();
 
         for candidate in &candidates {
             for (rel_path, _) in &candidate.files {
@@ -159,7 +160,7 @@ impl FeatureAdditionFixGenerator {
                     });
                 }
 
-                if baseline.iter().any(|(p, _)| p == rel_path) {
+                if baseline.contains_key(rel_path) {
                     continue;
                 }
 
@@ -183,7 +184,7 @@ impl FeatureAdditionFixGenerator {
                         ),
                     }
                 })?;
-                baseline.push((rel_path.clone(), content));
+                baseline.insert(rel_path.clone(), content);
             }
         }
 
@@ -206,6 +207,7 @@ impl FixGenerator for FeatureAdditionFixGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::exec::ExecError;
     use crate::test_support::{
         ScriptedCommand, failing_test_response, passing_test_response, unique_temp_dir,
         write_workspace_file,
@@ -249,7 +251,7 @@ mod tests {
             PathBuf::from("/does/not/matter"),
             ScriptedCommand::new(vec![(
                 ("cargo", &["test", "--release"]),
-                Err("コマンド未インストール（scripted failure）".to_string()),
+                Err(ExecError::new("コマンド未インストール（scripted failure）")),
             )]),
         );
         let error = detector
