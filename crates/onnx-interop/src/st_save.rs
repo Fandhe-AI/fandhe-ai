@@ -32,9 +32,13 @@
 //! ## ファイル書き込みの整合性（OWASP A08）
 //!
 //! [`save_safetensors_f32`] は同一ディレクトリの一時ファイルへ書き込んでから
-//! `rename` する。書き込み途中でクラッシュしても、壊れたチェックポイントが
-//! 正規パス（呼び出し元が期待するファイル名）に露出しないようにするため
+//! `rename` する。書き込み処理そのものが失敗・パニックした場合でも、
+//! 正規パス（呼び出し元が期待するファイル名）には元のファイルか存在しない
+//! かのいずれかのみが観測され、部分書き込みの壊れたバイト列が露出しない
 //! （チェックポイント用途での整合性確保。`.claude/rules/security.md`）。
+//! なお本実装は一時ファイルに対する `fsync`（`File::sync_all`）を行わない
+//! ため、`rename` 成功後の電源断・OS クラッシュに対する耐性は保証しない
+//! （プロセスクラッシュ・パニックからの保護のみが対象）。
 //!
 //! ## PyTorch 側での手動検証手順
 //!
@@ -238,6 +242,54 @@ mod tests {
         for (a, b) in out.as_slice().unwrap().iter().zip(expected.iter()) {
             assert_eq!(a.to_bits(), b.to_bits());
         }
+    }
+
+    // `save_with_bare_relative_filename_writes_into_current_dir` はプロセス
+    // 全体の CWD を変更するため、同一テストバイナリ内の他テストと並行実行
+    // されるとレース（他テストの相対パス解決を巻き込む）を起こしうる。
+    // 本ファイル内の他テストは絶対パス（`env!("CARGO_MANIFEST_DIR")` 経由や
+    // `std::env::temp_dir()` 起点の絶対パス）のみを扱うため実害はないが、
+    // 将来の追加テストに備え本 Mutex で CWD 変更区間を直列化する。
+    static CWD_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn save_with_bare_relative_filename_writes_into_current_dir() {
+        // `path.parent()` は単一コンポーネントの相対パス（例:
+        // `Path::new("model.safetensors")`）に対して `None` ではなく
+        // `Some("")` を返す（`unwrap_or_else` のフォールバックには乗らない）。
+        // `Path::new("").join(tmp_name)` は tmp_name 自身の相対パスになり
+        // カレントディレクトリへ書き込まれるため、`save_safetensors_f32` の
+        // ディレクトリ解決ロジック（本ファイル冒頭の一時ファイル配置）が
+        // このケースでも正しくカレントディレクトリを指すことを確認する。
+        let _guard = CWD_MUTATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original_cwd = std::env::current_dir().unwrap();
+        let work_dir = std::env::temp_dir().join(format!(
+            "onnx-interop-st-save-bare-relpath-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::env::set_current_dir(&work_dir).unwrap();
+
+        let mut tensors: HashMap<String, Tensor<f32>> = HashMap::new();
+        tensors.insert("w".to_string(), Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
+        let bare_relative = Path::new("bare_relative_output.safetensors");
+        let result = save_safetensors_f32(bare_relative, &tensors);
+
+        // CWD 復元はアサーション（パニックしうる）より前に行い、パニック時
+        // でも他テストへ CWD 変更の副作用を残さないようにする。
+        std::env::set_current_dir(&original_cwd).unwrap();
+
+        result.expect("バレファイル名（ディレクトリ成分なし）での書き出しに失敗した");
+        let written_path = work_dir.join("bare_relative_output.safetensors");
+        assert!(
+            written_path.exists(),
+            "カレントディレクトリに書き出されていない: {written_path:?}"
+        );
+        let loaded = crate::st_load::load_safetensors_f32(&written_path).unwrap();
+        assert_eq!(loaded["w"].shape(), &[2]);
+
+        let _ = std::fs::remove_dir_all(&work_dir);
     }
 
     #[test]
