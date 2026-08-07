@@ -19,3 +19,10 @@ tensor-core = { path = "../tensor-core" }
 # であり、上記 tensor-core 依存と同じ整理（外部クレートではなく
 # workspace member 間の依存のためユーザー承認フローの対象にならない）。
 bench-harness = { path = "../bench-harness" }
+# AdamW 参照値 JSON（`tests/fixtures/adamw-pytorch-reference/
+# adamw_reference.json`・#194）の読込に使う。`serde`/`serde_json` は
+# workspace で固定済みの許容依存（deps-policy.md）であり、参照するのみ
+# で新規外部依存の追加ではない（`onnx-interop`（#73）・`bench-harness`
+# （#29）が行った同種の判断の先例）。
+serde.workspace = true
+serde_json.workspace = true
