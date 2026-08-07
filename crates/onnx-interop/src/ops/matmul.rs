@@ -91,14 +91,16 @@ pub fn matmul(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, OpError> 
 
     // 1-D 特例のみ実際に軸を挿入する。rank ≥ 2 の入力（transpose 後の非 contiguous view を
     // 含みうる）を無条件に `reshape` すると `ShapeError::NonContiguousReshape` を誤って
-    // 返しうるため、形状変更が不要な場合は元のテンソルをそのまま使う。
+    // 返しうるため、形状変更が不要な場合は元のテンソルをそのまま使う。1-D 側も
+    // `broadcast_to` 由来の非 contiguous view（stride 0）でありうるため、`unsqueeze` と
+    // 同様に `contiguous()` してから `reshape` する（PR #276 レビュー指摘）。
     let a_r = if a_expanded_lhs {
-        a.reshape(&a_shape).map_err(OpError::from)?
+        a.contiguous().reshape(&a_shape).map_err(OpError::from)?
     } else {
         a.clone()
     };
     let b_r = if b_expanded_rhs {
-        b.reshape(&b_shape).map_err(OpError::from)?
+        b.contiguous().reshape(&b_shape).map_err(OpError::from)?
     } else {
         b.clone()
     };
@@ -276,6 +278,22 @@ mod tests {
         assert_eq!(y.shape(), &[2]);
         assert_eq!(y.get(&[0]).unwrap(), 4.0); // 1+0+3
         assert_eq!(y.get(&[1]).unwrap(), 10.0); // 4+0+6
+    }
+
+    #[test]
+    fn matmul_1d_vector_times_matrix_accepts_non_contiguous_broadcast_input() {
+        // PR #276 レビュー指摘: broadcast_to 由来の非 contiguous な rank-1 入力
+        // （stride 0）でも、内部で `contiguous()` してから `reshape` するため
+        // `ShapeError::NonContiguousReshape` を誤って返さないことを確認する。
+        let scalar = Tensor::<f32>::new(vec![2.0], &[]).unwrap();
+        let a = scalar.broadcast_to(&[3]).unwrap();
+        assert!(!a.is_contiguous());
+        let b = Tensor::<f32>::new(vec![1.0, 0.0, 0.0, 1.0, 1.0, 1.0], &[3, 2]).unwrap();
+        let y = matmul(&a, &b).unwrap();
+        assert_eq!(y.shape(), &[2]);
+        // [2,2,2]·[1,0,1] = 4, [2,2,2]·[0,1,1] = 4
+        assert_eq!(y.get(&[0]).unwrap(), 4.0);
+        assert_eq!(y.get(&[1]).unwrap(), 4.0);
     }
 
     #[test]
