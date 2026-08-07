@@ -83,6 +83,13 @@ pub enum OpError {
     /// `Reshape`／`Squeeze` の shape 指定（`-1` の複数指定・非 1 次元への squeeze 等）が
     /// ONNX 仕様上不正（TASK-7.3b・#83）。
     InvalidReshapeSpec { reason: &'static str },
+
+    /// `Mod` の `fmod=0`（Python 風・整数専用モード）が `f32` 入力に対して
+    /// 要求された（TASK-7.3a・`arith.rs`）。ONNX 仕様上 `fmod=0` は整数入力
+    /// のみ有効であり、`f32` に対して `rem_euclid` 等で代替すると異なる数値
+    /// 意味論を静かに返すことになるため、明示的に拒否する
+    /// （`.claude/rules/security.md` A03 相当の「外部入力の検証」）。
+    UnsupportedFmodMode { op: &'static str },
 }
 
 impl fmt::Display for OpError {
@@ -145,6 +152,10 @@ impl fmt::Display for OpError {
                 write!(f, "{op}: unsupported target data type {to}")
             }
             OpError::InvalidReshapeSpec { reason } => write!(f, "Reshape: {reason}"),
+            OpError::UnsupportedFmodMode { op } => write!(
+                f,
+                "{op}: fmod=0 (Python-style, integer-only) is not supported for f32 input; use fmod=1"
+            ),
         }
     }
 }
