@@ -99,6 +99,30 @@ where
             DetectionOutcome::Finding(finding) => finding,
         };
 
+        // `LoopReport.kind` は引数 `kind`（呼び出し元が指定した種別）をそのまま
+        // 記録する一方、後続の `fix_generator`/`verification_gate`/`adoption_judge`
+        // は `finding`（`detector.detect` の戻り値）を消費する。`Detector` の
+        // 実装（#133 のスコープ）が引数と異なる種別の `Finding` を誤って返すと、
+        // 報告される repair kind（`LoopReport.kind`）と実際に行われた作業
+        // （`finding.kind()` が示す種別）が静かに乖離しうる。`proposal.attempt`・
+        // `evidence.attempt()` に対して既に設けている「単一の真実源からの逸脱を
+        // fail-closed で検出する」監査証跡保護（上記コメント参照）と同種の
+        // 問題であるため、ここでも段階実行自体の失敗として扱う（レビュー指摘）。
+        if finding.kind() != kind {
+            return Err(LoopFailure {
+                error: SelfRepairError::Detection {
+                    kind: kind.as_machine_id(),
+                    reason: format!(
+                        "detector が kind={} の呼び出しに対し finding.kind()={} を \
+                         返しました（repair kind の単一の真実源が破られています）",
+                        kind.as_machine_id(),
+                        finding.kind().as_machine_id()
+                    ),
+                },
+                attempts: Vec::new(),
+            });
+        }
+
         let mut attempts = Vec::new();
 
         for attempt in 1..=self.max_attempts.get() {
@@ -784,6 +808,32 @@ mod tests {
             SelfRepairError::FixGeneration { attempt: 1, .. }
         ));
         assert!(failure.attempts.is_empty());
+    }
+
+    #[test]
+    fn detector_kind_mismatch_is_rejected_fail_closed() {
+        // 呼び出し引数は BugFix だが、detector が誤って PerfRegression の
+        // Finding を返す。Bugbot 指摘: `run` が `finding.kind()` と引数
+        // `kind` の一致を検査していなかったため、`LoopReport.kind`（引数を
+        // そのまま記録）と後続処理が実際に消費する `finding` の種別が静かに
+        // 乖離しうる回帰。`proposal.attempt`/`evidence.attempt()` と同種の
+        // fail-closed 検出を確認する。
+        let loop_ = SelfRepairLoop::new(
+            FixedDetector(DetectionOutcome::Finding(finding(
+                RepairKind::PerfRegression,
+            ))),
+            RecordingFixGenerator::new(),
+            ScriptedVerificationGate::new(vec![true]),
+            FixedAdoptionJudge::always(AdoptionVerdict::Adopt),
+            nz(3),
+        );
+
+        let failure = loop_
+            .run(RepairKind::BugFix)
+            .expect_err("kind mismatch should propagate as Err");
+        assert!(matches!(failure.error, SelfRepairError::Detection { .. }));
+        assert!(failure.attempts.is_empty());
+        assert_eq!(loop_.fix_generator.calls.borrow().len(), 0);
     }
 
     #[test]
