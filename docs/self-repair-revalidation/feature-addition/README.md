@@ -2,8 +2,9 @@
 
 `loop-report.json` は
 `crates/self-repair/tests/feature_addition_loop_completion_task_3_3c.rs` の
-実行によって**実測**された完走ログである（捏造・手組みではない。試行のたび
-に本ファイルへ上書きされる）。
+実行によって**実測**された完走ログである（捏造・手組みではない。§「再現手順」
+の環境変数 `SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1` を明示指定して実行した場合の
+み本ファイルへ上書きされる）。
 
 ## 題材・完走判定基準
 
