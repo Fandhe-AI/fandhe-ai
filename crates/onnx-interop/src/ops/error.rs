@@ -81,8 +81,13 @@ pub enum OpError {
     UnsupportedDataType { op: &'static str, to: i64 },
 
     /// `Reshape`／`Squeeze` の shape 指定（`-1` の複数指定・非 1 次元への squeeze 等）が
-    /// ONNX 仕様上不正（TASK-7.3b・#83）。
-    InvalidReshapeSpec { reason: &'static str },
+    /// ONNX 仕様上不正（TASK-7.3b・#83）。`op` は発生元オペ名（`"Reshape"`／`"Squeeze"`）で、
+    /// `Display` 実装が固定で `Reshape:` を名乗り `Squeeze` 由来のエラーを誤診断させるのを防ぐ
+    /// （PR #275 レビュー指摘）。
+    InvalidReshapeSpec {
+        op: &'static str,
+        reason: &'static str,
+    },
 
     /// `Mod` の `fmod=0`（Python 風・整数専用モード）が `f32` 入力に対して
     /// 要求された（TASK-7.3a・`arith.rs`）。ONNX 仕様上 `fmod=0` は整数入力
@@ -151,7 +156,7 @@ impl fmt::Display for OpError {
             OpError::UnsupportedDataType { op, to } => {
                 write!(f, "{op}: unsupported target data type {to}")
             }
-            OpError::InvalidReshapeSpec { reason } => write!(f, "Reshape: {reason}"),
+            OpError::InvalidReshapeSpec { op, reason } => write!(f, "{op}: {reason}"),
             OpError::UnsupportedFmodMode { op } => write!(
                 f,
                 "{op}: fmod=0 (Python-style, integer-only) is not supported for f32 input; use fmod=1"
