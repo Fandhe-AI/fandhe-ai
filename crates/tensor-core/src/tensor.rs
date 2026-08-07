@@ -262,6 +262,27 @@ impl<T: Element> Tensor<T> {
         })
     }
 
+    /// rank 2 テンソル専用の転置（`transpose(0, 1)` への薄い委譲）。
+    ///
+    /// REQ-7（`docs/spec/04-requirements.md`）が明示する API 名。
+    /// safetensors 経由でロードした PyTorch `nn.Linear.weight`
+    /// （`[out_features, in_features]`）を matmul の右辺
+    /// （`[in_features, out_features]`）へ変換する等、呼び出し側が
+    /// **明示的に**転置する用途を想定する（`onnx-interop` クレートの
+    /// safetensors ローダーが暗黙アダプタを設けない方針の一部。
+    /// PoC-v2-6 `mlp.rs` の `Mlp::from_safetensors` と同型）。
+    /// rank ≠ 2 は `ShapeError::RankMismatch` を返す。
+    pub fn transpose_2d(&self) -> Result<Tensor<T>, ShapeError> {
+        let rank = self.rank();
+        if rank != 2 {
+            return Err(ShapeError::RankMismatch {
+                expected: 2,
+                actual: rank,
+            });
+        }
+        self.transpose(0, 1)
+    }
+
     /// 指定軸の `[start, start+len)` をスライスする。offset/shape の
     /// 調整のみで常に zero-copy。
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Result<Tensor<T>, ShapeError> {

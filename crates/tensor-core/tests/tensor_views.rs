@@ -224,3 +224,44 @@ fn single_element_tensor_broadcast_with_larger_shape() {
         }
     }
 }
+
+// --- transpose_2d: #73（TASK-7.1a）safetensors ローダーが
+// `nn.Linear.weight` の明示転置に用いる公開 API の契約確認 ---
+
+#[test]
+fn transpose_2d_swaps_shape_and_preserves_values() {
+    // [out=3, in=2] の PyTorch Linear weight 相当を [in=2, out=3] へ転置する。
+    let src: Vec<f32> = (0..6).map(|v| v as f32).collect();
+    let t = Tensor::<f32>::from_slice(&src, &[3, 2]).unwrap();
+
+    let tt = t.transpose_2d().unwrap();
+    assert_eq!(tt.shape(), &[2, 3]);
+    for i in 0..3 {
+        for j in 0..2 {
+            assert_eq!(tt.get(&[j, i]).unwrap(), t.get(&[i, j]).unwrap());
+        }
+    }
+}
+
+#[test]
+fn transpose_2d_rejects_non_rank_2() {
+    let t = Tensor::<f32>::zeros(&[2, 3, 4]).unwrap();
+    let err = t.transpose_2d().unwrap_err();
+    assert!(matches!(
+        err,
+        ShapeError::RankMismatch {
+            expected: 2,
+            actual: 3
+        }
+    ));
+
+    let v = Tensor::<f32>::zeros(&[5]).unwrap();
+    let err = v.transpose_2d().unwrap_err();
+    assert!(matches!(
+        err,
+        ShapeError::RankMismatch {
+            expected: 2,
+            actual: 1
+        }
+    ));
+}
