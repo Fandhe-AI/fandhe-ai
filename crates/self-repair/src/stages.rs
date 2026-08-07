@@ -118,7 +118,11 @@ pub trait FixGenerator {
 /// `VerificationGate` 実装以外からも呼び出し可能であり、`verify` 内でのみ
 /// 構築する契約は運用上のものである。`outcome.rs` の `VerifiedEvidence` の
 /// doc 参照）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `VerifiedEvidence` が `guardrail::BenchSignal`（`f64` を内包し `Eq` 不可）
+/// を保持するため、本型も derive から `Eq` を外し `PartialEq` のみとする
+/// （`outcome.rs` の `VerifiedEvidence` doc 参照）。
+#[derive(Debug, Clone, PartialEq)]
 pub enum VerificationOutcome {
     Passed(VerifiedEvidence),
     /// 検証不合格（PoC-2: 却下して次の試行へ進む対象）。
@@ -129,9 +133,10 @@ pub enum VerificationOutcome {
 
 /// 検証段階の抽象（種別非依存）。
 ///
-/// 本イシュー（TASK-3.1a）では trait（seam）のみを定義する。実際の
-/// build/test/clippy ゲート実行・`guardrail` 3 分岐判定との統合は #134
-/// （検証ゲート実実行）・#135（guardrail 統合）の責務。
+/// 本 trait（seam）自体は TASK-3.1a（#132）で定義済み。実際の
+/// build/test/clippy ゲート実行は #134（検証ゲート実実行）の責務であり、
+/// 本イシュー（#135）はその出力先である [`VerifiedEvidence`] のシグナル
+/// 形状（guardrail 3 分岐判定の入力と 1 対 1 対応）を確定する。
 pub trait VerificationGate {
     fn verify(&self, proposal: &Proposal) -> Result<VerificationOutcome, SelfRepairError>;
 }
@@ -140,10 +145,11 @@ pub trait VerificationGate {
 ///
 /// 検証済み証跡 [`VerifiedEvidence`] のみを入力に取る（型レベルで検証迂回を
 /// 封じる契約。stages.rs モジュールコメント参照）。出力
-/// [`crate::outcome::AdoptionVerdict`] の 3 値・優先順序は、guardrail 統合後
-/// （#135）に `guardrail::decision::Verdict`（却下 > エスカレーション >
-/// 自動適用）と同型・同順序になる想定である（現時点では guardrail クレートは
-/// 未移植〈イシュー #103〉のため参照しない）。
+/// [`crate::outcome::AdoptionVerdict`] の 3 値・優先順序は
+/// `guardrail::decision::Verdict`（却下 > エスカレーション > 自動適用）と
+/// 同型・同順序である。標準実装は [`crate::judge::GuardrailAdoptionJudge`]
+/// （TASK-3.1d・#135）で、`evidence` の 6 シグナルをそのまま
+/// `guardrail::DecisionInput::new` へ渡し `guardrail::decide` を呼ぶ。
 ///
 /// 実装が `Err(SelfRepairError::Judgement { attempt, .. })` を返す場合は
 /// 固定値・推測値ではなく `evidence.attempt()` を使うこと（v1 PR #170 での

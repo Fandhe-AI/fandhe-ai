@@ -357,13 +357,24 @@ mod tests {
             if passed {
                 self.judge_input_calls.borrow_mut().push(proposal.attempt);
                 // runner.rs のオーケストレーション（呼び出し順序・迂回不能性）
-                // のみを検証するテストダブルであり、guardrail 統合後の 3 分岐
-                // 判定の中身は #135 が別途検証するため、ここでは
-                // guardrail 非依存の S1 形（本イシューのスコープ）の証跡を積む。
+                // のみを検証するテストダブルであり、guardrail 3 分岐判定の
+                // 中身は `judge.rs` が別途検証するため、ここでは全ゲート
+                // Passed・ベンチ未計測・除外リスト match なしの無難な S2 形
+                // （AutoApply 相当）の証跡を積む。
                 Ok(VerificationOutcome::Passed(VerifiedEvidence::new(
                     proposal.attempt,
                     proposal.description.clone(),
                     "gates: build=pass test=pass clippy=pass",
+                    guardrail::GateSignals {
+                        build: guardrail::GateSignal::Passed,
+                        test: guardrail::GateSignal::Passed,
+                        clippy: guardrail::GateSignal::Passed,
+                    },
+                    guardrail::BenchSignal::NotRun,
+                    0,
+                    false,
+                    false,
+                    Vec::new(),
                 )))
             } else {
                 Ok(VerificationOutcome::Failed {
@@ -521,6 +532,16 @@ mod tests {
                 self.wrong_attempt,
                 proposal.description.clone(),
                 "gates: build=pass test=pass clippy=pass",
+                guardrail::GateSignals {
+                    build: guardrail::GateSignal::Passed,
+                    test: guardrail::GateSignal::Passed,
+                    clippy: guardrail::GateSignal::Passed,
+                },
+                guardrail::BenchSignal::NotRun,
+                0,
+                false,
+                false,
+                Vec::new(),
             )))
         }
     }
