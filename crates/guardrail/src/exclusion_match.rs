@@ -23,6 +23,16 @@
 //! 未移植）とは入力領域が排他的（本モジュールは「本番コード変更**なし**」側
 //! のみを担う）。
 //!
+//! # #124 実装時の申し送り（イシュー #122 レビューからの引き継ぎ）
+//! `policy_exclusion` モジュール（`crates/guardrail/src/policy_exclusion/mod.rs`。
+//! 本ブランチには未存在。`feat/122-any-diff-in-paths` 側で `ExclusionEvaluation`
+//! に `unevaluated_rule_ids: Vec<String>` が追加済み）を実装する際は、
+//! `test_assertion_relaxation_without_prod_change` の判定結果を
+//! `ExclusionEvaluation::evaluate` の `matched_rule_ids` へ計上し、
+//! `MatchRule::TestAssertionRelaxationWithoutProdChange` を `unevaluated_rule_ids`
+//! から外すこと。目印は `evaluate_reports_test_assertion_relaxation_rule_as_unevaluated_not_unmatched`
+//! テスト（詳細はイシュー #123 コメント・#124 コメント参照）。
+//!
 //! # fail-closed 契約（`.claude/rules/security.md` A08）
 //! `git diff` の起動失敗・非ゼロ終了は必ず [`crate::error::GuardrailError`]
 //! として伝播し、`false`（match なし＝除外リスト素通り→自動適用方向）へ
