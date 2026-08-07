@@ -29,10 +29,13 @@ rust-ai-library/
 ├── scripts/
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
 │   ├── run-verification-gates.sh # AI 自律メンテナンス検証 4 ゲート（build/test/clippy/bench）の実行ロジック（ci.yml・Makefile 共用。TASK-6.1c）
+│   ├── run-guardrail-regression.sh # guardrail 2 層検証ロジック（ci.yml・schedule 共用。TASK-6.1a）
+│   ├── report-guardrail-schedule-result.sh # schedule 定期実行失敗時の Issue 起票・復旧クローズ（TASK-6.1b）
 │   └── testdata/             # 上記の self-test 用固定 fixture
 ├── .github/workflows/
 │   ├── ci.yml               # fmt / clippy / test / deny / deps-forbidden / guardrail-regression / verification-gates / ci-complete
 │   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
+│   ├── guardrail-regression-schedule.yml # guardrail 2 層検証の schedule 定期実行・失敗時 Issue 可視化（TASK-6.1b）
 │   └── update-external.yml  # docs/spec・.claude/skills の自動追従
 ├── .claude/
 │   ├── agents/              # research / implement / testing / quality / docs

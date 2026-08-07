@@ -1,0 +1,175 @@
+# guardrail 判定器の 2 層検証（REQ-4 判定器単体・REQ-5 除外適用後）を、push/PR が
+# 無い期間も定期的に実行し結果を継続確認する（TASK-6.1b・docs/spec/05-tasks.md、
+# イシュー #148）。
+#
+# TASK-6.1a（#147）で整備した .github/workflows/ci.yml の guardrail-regression ジョブと
+# 検証ロジックを共用する（scripts/run-guardrail-regression.sh が単一ソース。self-test →
+# layer1 → layer2 の順で呼ぶ点も同一）。責務分担は「ci.yml 側は push/PR 契機の PR
+# チェック」「本ワークフローは schedule 契機の定期実行」であり、検証ロジック自体を
+# 二重に持たない。
+#
+# schedule トリガーは default branch（main）上に登録されたワークフロー定義でのみ発火する
+# （GitHub Actions の仕様）。マージ前は workflow_dispatch による構文検証のみが可能で、
+# 実際の schedule 発火・実行結果はマージ後に確認する。
+#
+# report ジョブ（scripts/report-guardrail-schedule-result.sh）は、schedule 実行が
+# push/PR チェックと異なり人の目に触れないため、失敗を追跡用 Issue に可視化する
+# （.claude/rules/security.md A09。ガードレール 3 分岐判定そのものには関与しない
+# 「純粋な可視化」。同 A08 参照）。
+name: Guardrail Regression (schedule)
+
+on:
+  schedule:
+    # 20:30 UTC = 05:30 JST 毎日。0 分ちょうどの混雑帯を避ける（update-external.yml の
+    # 00:00 UTC 実行とも重ならない）。
+    - cron: '30 20 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardrail-regression-schedule
+  # 実行中の検証を途中破棄すると 2 層検証の結果が欠落し「結果継続確認」の趣旨に反するため、
+  # 直列化のみ行い cancel はしない。
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------
+  # 2 層検証本体（ci.yml の guardrail-regression ジョブと同一ステップ構成）
+  # --------------------------------------------------
+  guardrail-regression-scheduled:
+    name: guardrail 2 層検証（定期実行）
+    runs-on: self-hosted
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # actions/checkout v6.0.3（ci.yml と同一 SHA に固定）。
+        # persist-credentials: false: 本ジョブは checkout 後に GITHUB_TOKEN を使わない
+        # （report ジョブのみ issues:write を使う。.claude/rules/ci.md）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # 検査ロジック自体の退行を、実行環境の cargo 有無に関わらず常時検出する
+      # （ci.yml の guardrail-regression ジョブと同一方針）。
+      - name: 検査ロジックの self-test
+        run: bash scripts/run-guardrail-regression.sh self-test
+
+      - name: Cargo.toml の有無を判定
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ -f "Cargo.toml" ]; then
+            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
+            echo "::notice::Cargo.toml が未追加のため guardrail 2 層検証をスキップしました"
+          fi
+
+      # 共有 self-hosted runner のツールチェーンを不要に汚さないよう、未導入の場合のみ
+      # 導入する（冪等。.claude/rules/ci.md の Ensure パターン）。
+      - name: Ensure rustup is installed
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: Sync toolchain
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: rustup show
+
+      - name: 1 層目（REQ-4・判定器単体）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/run-guardrail-regression.sh layer1
+
+      - name: 2 層目（REQ-5・除外適用後）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: bash scripts/run-guardrail-regression.sh layer2
+
+      # 結果継続確認の一次可視化（実行日時・対象 commit SHA を run ごとに残す）。
+      # 失敗検知の可視化そのものは後続 report ジョブが担う。
+      - name: 結果サマリを記録
+        if: always()
+        run: |
+          {
+            echo "### guardrail 2 層検証（定期実行）"
+            echo ""
+            echo "- 実行日時（UTC）: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "- 対象 commit: ${GITHUB_SHA}"
+            echo "- ジョブ結果: ${{ job.status }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # --------------------------------------------------
+  # 失敗検知の可視化（scripts/report-guardrail-schedule-result.sh が単一ソース）
+  # --------------------------------------------------
+  report:
+    name: 結果の可視化（失敗時 Issue 起票・復旧時クローズ）
+    needs: [guardrail-regression-scheduled]
+    # 上流ジョブが失敗・キャンセルされた場合にも必ず実行し、fail-closed で報告する
+    # （.claude/rules/ci.md の ci-complete ジョブと同一方針）。
+    if: ${{ always() }}
+    runs-on: self-hosted
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Issue 起票・追記・クローズのみに限定して昇格する（.claude/rules/ci.md・security.md）。
+      issues: write
+    steps:
+      - name: Checkout
+        # スクリプト取得のみが目的で GITHUB_TOKEN を使う git 操作は行わないため
+        # persist-credentials: false を維持する。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # self-hosted runner に gh CLI がプリインストールされているとは限らないため、
+      # 未導入の場合のみ公式リリースのバイナリを取得して導入する（冪等。sudo 不要・
+      # $HOME 配下のみへの導入で共有 runner のグローバル状態を汚さない。
+      # .claude/rules/ci.md の Ensure rustup / Ensure cargo-deny と同一方針）。
+      # self-test 実行前に置く: self-test は gh をスタブ化して検証するため本ステップの
+      # 有無を検知できず、また本ワークフローの report ジョブは push/PR 契機の CI（ci.yml）
+      # では動かないため、バイナリ欠如は schedule/workflow_dispatch 実行で初めて
+      # 顕在化する（レビュー指摘・#148）。self-test をゲートせず先に導入することで
+      # gh 未導入環境でも self-test 自体が実行できることを保証する。
+      # 本ワークフローの実行環境（self-hosted runner プール）は linux 限定（.github/workflows/
+      # 配下に macOS 向け runner ラベルを指定するジョブは無い）のため、Linux 版バイナリの
+      # 取得のみに対応する。
+      - name: Ensure gh is installed
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            GH_VERSION="2.97.0"
+            ARCH=$(uname -m)
+            case "${ARCH}" in
+              x86_64) GH_ARCH=amd64 ;;
+              aarch64) GH_ARCH=arm64 ;;
+              *)
+                echo "NG: 未対応アーキテクチャです: ${ARCH}" >&2
+                exit 1
+                ;;
+            esac
+            TMP_DIR=$(mktemp -d)
+            trap 'rm -rf "${TMP_DIR}"' EXIT
+            curl --proto '=https' --tlsv1.2 -fsSL \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
+              -o "${TMP_DIR}/gh.tar.gz"
+            tar -xzf "${TMP_DIR}/gh.tar.gz" -C "${TMP_DIR}"
+            mkdir -p "${HOME}/.local/bin"
+            cp "${TMP_DIR}/gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" "${HOME}/.local/bin/gh"
+            echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: 報告ロジックの self-test
+        run: bash scripts/report-guardrail-schedule-result.sh self-test
+
+      - name: 結果を Issue へ可視化
+        env:
+          RESULT: ${{ needs.guardrail-regression-scheduled.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/report-guardrail-schedule-result.sh report
