@@ -53,6 +53,12 @@
 //!   PoC-3 既知ブラインドスポット G5 を補う（TASK-5.2b・イシュー #123）。
 //!   評価は `policy_exclusion::ExclusionEvaluation::evaluate` から呼ばれる
 //!   （TASK-5.2c・#124 で配線済み）。
+//! - [`check`][]: `guardrail check` の計測・判定オーケストレーション本体
+//!   （[`check::run_injected`]／[`check::run_measured`]。TASK-4.1c・イシュー
+//!   #106）。`main.rs` はこのモジュールを呼ぶだけの薄い統合層になる。
+//!   内部の計測実装（`changeset`・`checks`・`exec`・`gaming`・`gates`。
+//!   いずれも非公開モジュール）は `check` からのみ利用され、`main.rs`
+//!   （別クレート）へは公開しない。
 //!
 //! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
 //! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
@@ -64,6 +70,7 @@
 //! 想定であり、本 PR 群のスコープ外（`.claude/rules/out-of-scope-tracking.md`）。
 
 pub mod bench_gate;
+pub mod check;
 pub mod cli;
 pub mod config;
 pub mod decision;
@@ -77,6 +84,15 @@ pub mod policy_exclusion;
 pub mod report;
 pub mod signals;
 pub mod toml_lite;
+
+// measured 経路の計測・実行系（TASK-4.1c・イシュー #106）。`check` モジュール
+// からのみ利用する内部実装であり、`main.rs`（別クレート）へは公開しない
+// （`check::run_injected`/`check::run_measured` のみが CLI 層との境界）。
+mod changeset;
+mod checks;
+mod exec;
+mod gaming;
+mod gates;
 
 pub use config::{PresetName, Thresholds};
 pub use decision::{

@@ -3,14 +3,18 @@
 //! CI・`self-repair` から呼び出される本番相当経路（`docs/guardrail-self-repair-cli.md`
 //! 1.2 節）の CLI 実行フローを構成する。判定ロジック自体は `crates/guardrail`
 //! の lib 側（`self-repair` が直接呼び出す経路。3.4 節）に置く方針のため、
-//! ここでは `cli::parse` → 設定解決 → 入力解決 → レポート生成・出力 →
-//! 終了コード変換、という薄い統合のみを担う。
+//! ここでは `cli::parse` → 設定解決 → `guardrail::check::run_injected`／
+//! `run_measured` 呼び出し → レポート生成・出力 → 終了コード変換、という
+//! 薄い統合のみを担う。
 //!
-//! TASK-4.1a（本イシュー）のスコープでは 5 条件判定ロジック（#105）が
-//! 未実装のため、`check` は常に `Verdict::Escalate`（終了コード `10`）を
-//! 返す暫定固定とする。「判定不能時に自動適用へ倒れない」fail-closed 契約
-//! （`.claude/rules/security.md` A08）を骨格段階から満たすための設計判断
-//! （実装計画 2.2 節）。
+//! TASK-4.1c（イシュー #106）で `guardrail::check`（injected／measured 両経路）
+//! が [`guardrail::decision::decide`] へ結線された。3 分岐（auto_apply/0・
+//! escalate/10・reject/20）は代表ケースで CLI 統合テスト
+//! （`tests/cli_three_branch.rs`）が固定する。判定不能（`--baseline` 実在
+//! 確認失敗・シグナル入力の検証失敗等）は `GuardrailError` として伝播し、
+//! `0`/`10`/`20` のいずれへも丸めず内部エラー（終了コード `1`）または usage
+//! エラー（終了コード `2`）となる（fail-closed 契約。`.claude/rules/security.md`
+//! A08。`report_error_and_exit` 参照）。
 //!
 //! `eval` の評価ロジック本体（全 fixture 一括評価・率集計）は
 //! `guardrail::eval::run`（TASK-4.3a・イシュー #115）へ委譲する。ここでは
@@ -24,15 +28,15 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
+use guardrail::check;
 use guardrail::cli::{self, CheckArgs, Command, EvalArgs, OutputFormat};
 use guardrail::config::{self, PresetName};
-use guardrail::decision::Verdict;
 use guardrail::error::GuardrailError;
 use guardrail::eval;
 use guardrail::eval::report::EvalReport;
 use guardrail::exit_code::{EvalExitCode, GuardrailExitCode};
-use guardrail::report::{GateOutcome, Report, SCHEMA_VERSION, SignalSource};
-use guardrail::signals::{GateResult, Signals};
+use guardrail::report::Report;
+use guardrail::signals::Signals;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -61,80 +65,18 @@ fn run_check(args: CheckArgs) -> ExitCode {
 
 fn run_check_inner(args: &CheckArgs) -> Result<Report, GuardrailError> {
     let preset = PresetName::parse(&args.preset)?;
-    // 設定は現段階では判定ロジック（#105）に渡していないが、値域検証
-    // （config.rs）自体は骨格段階でも通す（不正な guardrail.toml を早期検出する）。
-    let _config = config::resolve(args.config.as_deref(), &args.repo, preset)?;
+    let config = config::resolve(args.config.as_deref(), &args.repo, preset)?;
 
-    let (signal_source, signals) = match &args.signals {
+    match &args.signals {
         Some(path) => {
             let raw = fs::read_to_string(path).map_err(|source| GuardrailError::Io {
                 path: path.clone(),
                 source,
             })?;
-            (SignalSource::Injected, Some(Signals::from_json_str(&raw)?))
+            let signals = Signals::from_json_str(&raw)?;
+            check::run_injected(&signals, &config, args.change_id.clone())
         }
-        None => (SignalSource::Measured, None),
-    };
-
-    let reason = match &signals {
-        // #105/#106 で判定ロジックが移植されるまでは、シグナル入力があっても
-        // 判定は行わず常に escalate とする（実装計画 2.2 節）。
-        Some(_) => "判定ロジック未実装（5 条件判定は TASK-4.1b/#105 で移植予定）。\
-             シグナル入力は受理済みだが判定には未使用"
-            .to_string(),
-        None => "シグナル未取得: 実シグナル計測（本番相当経路）は TASK-4.1b/#105 以降で実装する。\
-             骨格段階では escalate に固定する"
-            .to_string(),
-    };
-
-    let report = match &signals {
-        Some(s) => Report {
-            schema_version: SCHEMA_VERSION.to_string(),
-            signal_source,
-            change_id: args.change_id.clone(),
-            lines_changed: s.lines_changed,
-            public_api_broken: s.public_api_broken,
-            gaming_suspected: s.gaming_suspected,
-            build_result: gate_outcome(s.build_result),
-            test_result: gate_outcome(s.test_result),
-            clippy_result: gate_outcome(s.clippy_result),
-            bench_measurements_pct: s.bench_measurements_pct.clone(),
-            bench_median_pct: guardrail::report::median(&s.bench_measurements_pct).map_err(
-                |e| {
-                    GuardrailError::InvalidInput(format!(
-                        "bench_measurements_pct の中央値算出に失敗: {e}"
-                    ))
-                },
-            )?,
-            applied_exclusion_rule_ids: Vec::new(),
-            verdict: Verdict::Escalate,
-            reason,
-        },
-        None => Report {
-            schema_version: SCHEMA_VERSION.to_string(),
-            signal_source,
-            change_id: args.change_id.clone(),
-            lines_changed: 0,
-            public_api_broken: false,
-            gaming_suspected: false,
-            build_result: GateOutcome::Fail,
-            test_result: GateOutcome::Fail,
-            clippy_result: GateOutcome::Fail,
-            bench_measurements_pct: Vec::new(),
-            bench_median_pct: 0.0,
-            applied_exclusion_rule_ids: Vec::new(),
-            verdict: Verdict::Escalate,
-            reason,
-        },
-    };
-
-    Ok(report)
-}
-
-fn gate_outcome(result: GateResult) -> GateOutcome {
-    match result {
-        GateResult::Pass => GateOutcome::Pass,
-        GateResult::Fail => GateOutcome::Fail,
+        None => check::run_measured(&args.repo, &args.baseline, &config, args.change_id.clone()),
     }
 }
 
@@ -253,7 +195,8 @@ fn report_error_and_exit(err: &GuardrailError) -> ExitCode {
         | GuardrailError::InconsistentDecisionInput { .. }
         | GuardrailError::DiffSpawn { .. }
         | GuardrailError::DiffFailed { .. }
-        | GuardrailError::DiffUnexpectedFormat { .. } => {
+        | GuardrailError::DiffUnexpectedFormat { .. }
+        | GuardrailError::GateSpawn { .. } => {
             GuardrailExitCode::InternalError.into_process_exit_code()
         }
     }

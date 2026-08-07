@@ -95,6 +95,21 @@ pub enum GuardrailError {
     /// A08）ため、`DiffSpawn`／`DiffFailed` と同様にエラーとして伝播し、
     /// 「match なし」へ丸めない。
     DiffUnexpectedFormat { command: String, reason: String },
+
+    /// [`crate::gates::run_gates`] が `cargo build`/`test`/`clippy` を起動する
+    /// 際の子プロセス起動自体の失敗（実行ファイル不在等）。TASK-4.1c・
+    /// イシュー #106。
+    ///
+    /// build/test/clippy の非ゼロ終了（＝ゲート失敗そのもの）は
+    /// `exec::CommandOutput::success` で表現し本バリアントにはしない。
+    /// 起動できないこと自体はゲート結果を判定できない事象のため、
+    /// `GateSignal::Failed` へ丸めず内部エラー（終了コード `1`）として
+    /// 伝播する（`.claude/rules/security.md` A08: 実行失敗と判定失敗を
+    /// 混同しない）。
+    GateSpawn {
+        command: String,
+        source: std::io::Error,
+    },
 }
 
 impl fmt::Display for GuardrailError {
@@ -128,6 +143,9 @@ impl fmt::Display for GuardrailError {
             GuardrailError::DiffUnexpectedFormat { command, reason } => {
                 write!(f, "コマンド出力の形式が想定外です: {command}: {reason}")
             }
+            GuardrailError::GateSpawn { command, source } => {
+                write!(f, "ゲートコマンドの起動に失敗しました: {command}: {source}")
+            }
         }
     }
 }
@@ -137,6 +155,7 @@ impl std::error::Error for GuardrailError {
         match self {
             GuardrailError::Io { source, .. } => Some(source),
             GuardrailError::DiffSpawn { source, .. } => Some(source),
+            GuardrailError::GateSpawn { source, .. } => Some(source),
             _ => None,
         }
     }

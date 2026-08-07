@@ -132,15 +132,25 @@ REQ-3「検証ゲートの計測系付け替え」注記（2026-08-05 v2 注記�
 | `bench_median_pct` | number | 上記計測値の中央値（判定に用いる値） |
 | `applied_exclusion_rule_ids` | string[] | 適用された REQ-5 除外ルールの `id` 一覧（空配列可） |
 | `verdict` | `"auto_apply"` \| `"escalate"` \| `"reject"` | 最終判定（3 分岐。除外リスト適用後） |
-| `reason` | string | 判定理由（人間可読） |
+| `reason` | string | 判定理由（人間可読。複数逸脱時は `"; "` 連結） |
+| `reason_conditions` | string[] | 機械可読の逸脱条件 ID 一覧（CI・自己修復ループの照合用。例: `"lines_max_exceeded"`・`"gate_build_failed"`・`"policy_exclusion_match"`。`auto_apply` 時は空配列。TASK-4.1c・イシュー #106 で追加） |
 
 REQ-3 データ要件・REQ-6 の回帰テストセット根拠データとして再利用可能な形式
 とする。出典: v1 PoC-3 の `guardrail-results/*.json`（`docs/spec/04-requirements.md`
 データ要件 L303 が参照する実測形式）を踏襲し、`applied_exclusion_rule_ids`・
-`schema_version`・`signal_source` を v2 で追加する。`signal_source` は本文書が
-新設するフィールドであり、本文書は新規設計文書で既存実装との互換負担がない
-ため `schema_version` は `"1"`（初版）のまま据え置く（バージョン非対応の既存
-消費者が存在しないため互換性のための版上げは不要）。
+`schema_version`・`signal_source`・`reason_conditions` を v2 で追加する。
+これらは本文書が新設するフィールドであり、本文書は新規設計文書で既存実装との
+互換負担がないため `schema_version` は `"1"`（初版）のまま据え置く（バージョン
+非対応の既存消費者が存在しないため互換性のための版上げは不要。
+`reason_conditions` の追加も前方互換の追記であり同様に版上げ不要）。
+
+`signal_source = "measured"`（本番相当経路）時点の実装状態（TASK-4.1c・
+イシュー #106）: `bench_measurements_pct`/`bench_median_pct` は常に空配列／
+`0.0` を返す。CLI から起動できる bench ワークロードが v2 に未定義のため
+（`bench_gate.rs` は呼び出し側クロージャ前提で未結線。CI 側の bench ゲートは
+`verification-gate-bench.yml` に分離済み）、bench 条件は「未計測」（判定上は
+`decision::BenchSignal::NotRun`＝逸脱なし扱い）として扱う。bench 実計測の
+CLI 結線は別イシュー（親 #111 系）のスコープとする。
 
 ### 2.2 eval レポート JSON（`guardrail eval --output`）
 

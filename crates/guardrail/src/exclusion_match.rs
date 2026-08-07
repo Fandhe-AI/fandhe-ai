@@ -108,7 +108,13 @@ fn git_command(repo_root: &Path) -> Command {
 /// 返す。起動失敗・非ゼロ終了は [`GuardrailError::DiffSpawn`]／
 /// [`GuardrailError::DiffFailed`] としてエラー伝播する（fail-closed。
 /// 「match なし」へ丸めない。モジュール冒頭コメント参照）。
-fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GuardrailError> {
+///
+/// `pub(crate)`: [`crate::checks::diff_lines`]／[`crate::checks::api_stability`]／
+/// [`crate::gaming`]（TASK-4.1c・イシュー #106）も本関数を経由して `git` を
+/// 起動する（`-c core.quotePath=false` 等の diff 出力汚染対策・`GIT_*`
+/// 環境変数除去を単一実装に保つため。モジュール冒頭「変更ファイルパスの
+/// 正規化契約」参照）。
+pub(crate) fn run_git(repo_root: &Path, args: &[&str]) -> Result<String, GuardrailError> {
     let command_display = format!("git {}", args.join(" "));
     let output = git_command(repo_root)
         .args(args)
