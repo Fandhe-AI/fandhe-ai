@@ -274,7 +274,19 @@ impl Isa {
     #[cfg(target_arch = "x86_64")]
     fn detect_uncached() -> Isa {
         let has_avx2_fma = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+        // `avx512_stable` cfg が立っていない rustc では `Avx512Kernel` 自体が
+        // コンパイル対象外となり `dispatch_region`（`super` モジュール）は
+        // AVX-512F 実行 CPU 上でも AVX2/scalar へフォールバックする
+        // （`build.rs` のコメント・本モジュール冒頭のドキュメント参照）。
+        // ここで実行 CPU の avx512f 対応を無条件採用すると、この
+        // introspection API（`Isa::detect`）が実際の dispatch 結果と
+        // 食い違う（Bugbot 指摘: PR #337 review 4886262265・comment
+        // 3738511491）。`avx512_stable` 未設定時は has_avx512f を常に
+        // false とし、実際の dispatch 経路と一致させる。
+        #[cfg(avx512_stable)]
         let has_avx512f = is_x86_feature_detected!("avx512f");
+        #[cfg(not(avx512_stable))]
+        let has_avx512f = false;
         select_isa(has_avx2_fma, has_avx512f)
     }
 
@@ -332,5 +344,18 @@ mod tests {
     fn avx512_kernel_try_new_matches_feature_detection() {
         let expected = is_x86_feature_detected!("avx512f");
         assert_eq!(Avx512Kernel::try_new().is_some(), expected);
+    }
+
+    /// `avx512_stable` cfg 未設定の rustc では `Avx512Kernel` 自体が
+    /// コンパイル対象外となり `super::dispatch_region` は実行 CPU の
+    /// avx512f 対応に関わらず AVX2/scalar のみを試す。この条件下で
+    /// `Isa::detect` が `Isa::Avx512` を返すと、実際の dispatch と
+    /// introspection API（`Isa::detect`）が食い違う（PR #337 review
+    /// 4886262265・comment 3738511491 の Bugbot 指摘）。本テストは
+    /// その食い違いへの回帰を検知する。
+    #[cfg(all(target_arch = "x86_64", not(avx512_stable)))]
+    #[test]
+    fn isa_detect_never_reports_avx512_when_not_stable() {
+        assert_ne!(Isa::detect(), Isa::Avx512);
     }
 }
