@@ -59,6 +59,14 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<取得したパス> \
   cargo test -p onnx-interop -- --ignored --nocapture
 ```
 
+`tests/onnx_decode.rs` の `transformer_onnx_decodes_expected_graph_structure`
+（decode・`build_graph` のみ）に加え、`tests/onnx_transformer_e2e.rs`
+（イシュー #87・TASK-7.4a）が同じ環境変数を使い `decode → build_graph →
+onnx::interp::run` の全経路 end-to-end 推論を実行し、PyTorch 参照出力
+（`tests/fixtures/pytorch-transformer/reference.json`。出自は同ディレクトリの
+`README.md` 参照）と REQ-7 判定式で数値一致を確認する。上記コマンドの
+`--ignored` 一括実行で両テストとも対象になる。
+
 環境変数未設定時はこのテストがスキップされる。`--ignored` を渡さない通常の
 `cargo test` では `#[ignore]` によりそもそも実行対象外となり、`--ignored`
 （`make test-ignored` 等）を渡した場合でも環境変数未設定なら早期 return で
