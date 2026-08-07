@@ -23,6 +23,8 @@
 
 use tensor_core::Tensor;
 
+use crate::var::Reduction;
+
 /// テンソルを行優先連続バッファへ実体化し `Vec<f32>` として取り出す。
 ///
 /// `contiguous()` は非 contiguous な入力（transpose・stride 0
@@ -86,6 +88,35 @@ pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
                 .unwrap_or_else(|_| unreachable!("shape [0] construction cannot fail"))
         }
     }
+}
+
+/// クラス添字テンソル（`Tensor<i32>`）の稠密化。`dense_vec`（上記）の
+/// `i32` 版で、`cross_entropy_loss`（下記）・`Var::cross_entropy_loss`
+/// （`var.rs`。targets 添字の範囲検査）が読み出し専用で使う。
+pub(crate) fn dense_vec_i32(tensor: &Tensor<i32>) -> Vec<i32> {
+    let contiguous = tensor.contiguous();
+    if let Some(slice) = contiguous.as_slice() {
+        return slice.to_vec();
+    }
+    debug_assert!(
+        false,
+        "dense_vec_i32: contiguous() 後の as_slice() が None を返した（契約違反）"
+    );
+    let shape = contiguous.shape().to_vec();
+    let numel = contiguous.numel();
+    let mut out = Vec::with_capacity(numel);
+    let mut index = vec![0usize; shape.len()];
+    for _ in 0..numel {
+        out.push(contiguous.get(&index).unwrap_or(0));
+        for axis in (0..shape.len()).rev() {
+            index[axis] += 1;
+            if index[axis] < shape[axis] {
+                break;
+            }
+            index[axis] = 0;
+        }
+    }
+    out
 }
 
 /// 2 次元 `matmul`（`lhs: [m,k]` × `rhs: [k,n]` → `[m,n]`）。
@@ -300,4 +331,105 @@ pub(crate) fn mse_loss(
         crate::var::Reduction::Sum => sum_sq,
     };
     build_tensor(vec![out], &[])
+}
+
+/// `axis` に沿った数値安定形 softmax（シフト → `exp` → 正規化）。
+/// `cross_entropy_loss`（forward。下記）の log-sum-exp 計算と
+/// `grad.rs::cross_entropy_loss_vjp`（`softmax(x) − onehot(t)`）が同じ
+/// 「シフトして exp・正規化する」実体を共有する（数式の実体を
+/// forward/backward で二重実装しない方針。`grad.rs` 冒頭 doc）。
+/// `pub(crate)`: `grad.rs` が VJP 計算で再利用する。
+pub(crate) fn softmax_along(input: &Tensor<f32>, axis: usize) -> Tensor<f32> {
+    let shape = input.shape().to_vec();
+    let outer: usize = shape[..axis].iter().product();
+    let axis_len = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product();
+    let data = dense_vec(input);
+    let mut out = vec![0f32; data.len()];
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f32::NEG_INFINITY;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max(m, data[idx]);
+            }
+            let mut sum_exp = 0f32;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                let e = (data[idx] - m).exp();
+                out[idx] = e;
+                sum_exp += e;
+            }
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                out[idx] /= sum_exp;
+            }
+        }
+    }
+    build_tensor(out, &shape)
+}
+
+/// CrossEntropy 損失（log-sum-exp 安定化。クラス次元 `class_dim` 指定。
+/// #191・親イシュー #189）。shape 検査（`class_dim` 範囲・targets
+/// shape 一致・targets 添字範囲）は呼び出し元（`var.rs::
+/// Var::cross_entropy_loss`）が済ませている前提。
+///
+/// `class_dim` を除いた添字の組（サンプル）ごとに
+/// `loss = log_sum_exp(logits) − logits[target]`
+/// （`= −log_softmax(logits)[target]`。オーバーフロー回避のシフト量
+/// `m = max_c logits[c]` を経由するため大振幅入力でも有限値を保つ）を
+/// 計算し、`reduction` で集約する。
+///
+/// 空バッチ（サンプル数 `N == 0`）は `mse_loss`（上記）の先例に合わせ
+/// 0.0 を返す（PyTorch は `NaN`。差異は許容: #191 実装計画 §3.3）。
+pub(crate) fn cross_entropy_loss(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let data = dense_vec(logits);
+    let target_data = dense_vec_i32(targets);
+    let n = outer * inner;
+
+    let mut total = 0f32;
+    for o in 0..outer {
+        for i in 0..inner {
+            let mut m = f32::NEG_INFINITY;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                m = nan_propagating_max(m, data[idx]);
+            }
+            let mut sum_exp = 0f32;
+            for a in 0..axis_len {
+                let idx = (o * axis_len + a) * inner + i;
+                sum_exp += (data[idx] - m).exp();
+            }
+            let lse = m + sum_exp.ln();
+            let t = target_data[o * inner + i];
+            // 呼び出し元（`var.rs::Var::cross_entropy_loss`）が
+            // `0 <= t < axis_len` を検査済みの前提。範囲外は契約違反で
+            // あり `unwrap()`/`expect()` を使わず `debug_assert!` で
+            // 検知しつつ安全側（loss 寄与 0）へフォールバックする
+            // （`.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+            let target_logit = if t >= 0 && (t as usize) < axis_len {
+                data[(o * axis_len + t as usize) * inner + i]
+            } else {
+                debug_assert!(false, "cross_entropy_loss: target 添字が範囲外（契約違反）");
+                lse
+            };
+            total += lse - target_logit;
+        }
+    }
+
+    let loss = match reduction {
+        Reduction::Mean if n > 0 => total / n as f32,
+        Reduction::Mean => 0.0,
+        Reduction::Sum => total,
+    };
+    build_tensor(vec![loss], &[])
 }
