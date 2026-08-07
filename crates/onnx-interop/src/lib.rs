@@ -18,7 +18,8 @@
 //! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82）: ONNX オペを `tensor-core::Tensor<f32>` 上の
 //!   純粋関数として提供する。8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／
 //!   `Unsqueeze`／`Concat`／`Slice`）に加え MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／
-//!   `Sqrt`／`Constant`）を含む。ONNX proto デコード（TASK-7.2a）・グラフ実行エンジンは
+//!   `Sqrt`／`Constant`）・`LayerNormalization`（TASK-7.3d・#85）を含む。
+//!   ONNX proto デコード（TASK-7.2a）・グラフ実行エンジンは
 //!   別イシューの担当であり、本モジュールは「入力テンソル＋属性 → 出力テンソル」の
 //!   単体演算のみを扱う（decode → 属性値 → 本モジュール呼び出し、の結線は後続タスクで行う）。
 //!   属性は proto 由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、

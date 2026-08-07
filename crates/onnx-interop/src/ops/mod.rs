@@ -6,6 +6,11 @@
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。
+//!
+//! `LayerNormalization`（TASK-7.3d・#85）を追加済み。`Cast`／`Reshape`／`Squeeze`／
+//! `Transpose`（TASK-7.3b・#83）・`MatMul`／`Softmax`／`Erf`（TASK-7.3c・#84）は
+//! 本イシュー着手時点で未マージのため未実装（`tests/ops_cross.rs` のドキュメンテーション
+//! コメント参照）。
 
 mod activation;
 mod arith;
@@ -14,6 +19,7 @@ mod constant;
 mod error;
 mod gather;
 mod gemm;
+mod layer_norm;
 mod shape_ops;
 mod slice;
 
@@ -24,6 +30,7 @@ pub use constant::{ConstantValue, constant};
 pub use error::OpError;
 pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};
+pub use layer_norm::{LayerNormAttrs, layer_normalization};
 pub use shape_ops::{shape, unsqueeze};
 pub use slice::{SliceParams, slice};
 

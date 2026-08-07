@@ -82,6 +82,12 @@ pub enum OpError {
     /// 意味論を静かに返すことになるため、明示的に拒否する
     /// （`.claude/rules/security.md` A03 相当の「外部入力の検証」）。
     UnsupportedFmodMode { op: &'static str },
+
+    /// `LayerNormalization` の `epsilon` 属性が非有限値（`NaN`／`inf`）だった
+    /// （TASK-7.3d・`layer_norm.rs`）。`epsilon` はモデル属性（外部入力）であり、
+    /// 非有限値は分散計算全体を静かに `NaN`／`inf` へ汚染するため事前検査で拒否する
+    /// （`.claude/rules/security.md` A03 相当）。
+    InvalidEpsilon { op: &'static str, epsilon: f32 },
 }
 
 impl fmt::Display for OpError {
@@ -144,6 +150,9 @@ impl fmt::Display for OpError {
                 f,
                 "{op}: fmod=0 (Python-style, integer-only) is not supported for f32 input; use fmod=1"
             ),
+            OpError::InvalidEpsilon { op, epsilon } => {
+                write!(f, "{op}: epsilon {epsilon} must be finite")
+            }
         }
     }
 }
