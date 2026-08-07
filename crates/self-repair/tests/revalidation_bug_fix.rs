@@ -72,7 +72,8 @@ use self_repair::stages::{Proposal, VerificationGate, VerificationOutcome};
 use self_repair::verify_bench::{MIN_BENCH_ITERATIONS, SelfRepairBenchGate};
 use self_repair::{
     BugFixDetector, BugFixFixGenerator, CandidateFix, CargoVerificationGate,
-    GuardrailAdoptionJudge, RepairKind, SelfRepairError, SelfRepairLoop, SystemCommandRunner,
+    GuardrailAdoptionJudge, LogWriter, RepairKind, SelfRepairError, SelfRepairLoop,
+    SystemCommandRunner, verify_chain,
 };
 
 /// `crates/autodiff/src/var.rs` の workspace 相対パス（sandbox 内でも同一）。
@@ -607,7 +608,7 @@ fn build_report_json(input: &ReportJsonInput<'_>) -> serde_json::Value {
         "started_at_unix_ms": started_at_unix_ms,
         "scope_notes": [
             "self-repair run/verify-log CLI バイナリ未実装のため、lib 直接呼び出し（SelfRepairLoop::run）経由での完走実証である（CLI 経由での再実施は #145 マージ後の後続イシューのスコープ）。",
-            "JSON Lines ハッシュチェーンログ・verify-log 検証は TASK-3.4（#145）のスコープ。",
+            "JSON Lines ハッシュチェーンログ（loop-log.jsonl）は TASK-3.4（#145）実装済みの self_repair::LogWriter/verify_chain を本ハーネスへ結線して出力・検証している。self-repair verify-log CLI（外部コマンド経由の検証）は未実装のままであり、本実証は lib の verify_chain 呼び出しによる検証で充足する（TASK-3.3d・#143）。",
             "ベンチゲート値は機構の完走確認（合成ワークロード）であり、候補 diff に対する劣化率実測ではない（4 ゲート合成の src/ 本体への昇格は #136 系のスコープ）。",
         ],
     })
@@ -712,6 +713,15 @@ fn bug_fix_loop_completes_without_human_intervention() {
     let output_dir_path = output_dir();
     fs::create_dir_all(&output_dir_path).expect("完走ログ出力先ディレクトリの作成に失敗しました");
     let output_path = output_dir_path.join("loop-report.json");
+    // `LogWriter::open` は既存ファイルへ追記継続する（`logging.rs` の
+    // ドキュメント参照）。固定ファイル名（`loop-log.jsonl`）を実行のたび
+    // 削除してから開くことで、本ハーネス 1 回分の実行が「継ぎ足しのない
+    // 単一のチェーン」として `loop-log.jsonl` に対応する状態を保つ
+    // （`loop-report.json` が `fs::write` で毎回上書きされるのと同じ
+    // 「このディレクトリはこの 1 回の実行を記述する」契約を `loop-log.jsonl`
+    // にも揃える。実装計画セクション 4「継ぎ足し防止」）。
+    let log_path = output_dir_path.join("loop-log.jsonl");
+    let _ = fs::remove_file(&log_path);
 
     match &run_result {
         Ok(report) => {
@@ -728,6 +738,21 @@ fn bug_fix_loop_completes_without_human_intervention() {
                 serde_json::to_string_pretty(&json).expect("JSON シリアライズに失敗しました"),
             )
             .expect("loop-report.json の書き込みに失敗しました");
+
+            // TASK-3.4（#145）が実装した改竄検知ログ（security.md「ループ試行
+            // ログは改竄検知可能な形式で記録し、取り込み判断の根拠を追跡可能に
+            // する」）を本再実証ハーネスへ結線する（TASK-3.3d・#143）。
+            // `LoopReport` をそのまま渡すため `build_report_json` の手動 JSON
+            // 化とは独立した経路であり、`self-repair verify-log` CLI が
+            // 未実装の現時点では lib の `verify_chain` 呼び出しが検証手段の
+            // すべてである（README §4 の記載と揃える）。
+            let mut log_writer =
+                LogWriter::open(&log_path).expect("loop-log.jsonl を開けませんでした");
+            log_writer
+                .append_report(report)
+                .expect("loop-log.jsonl への追記に失敗しました");
+            verify_chain(&log_path)
+                .expect("loop-log.jsonl のハッシュチェーン検証に失敗しました（改竄・破損の疑い）");
         }
         Err(failure) => {
             let json = serde_json::json!({
@@ -743,6 +768,18 @@ fn bug_fix_loop_completes_without_human_intervention() {
                 serde_json::to_string_pretty(&json).expect("JSON シリアライズに失敗しました"),
             )
             .expect("loop-report.json（失敗時）の書き込みに失敗しました");
+
+            // 段階実行自体が失敗したケースでも、そこまでの試行の判断根拠を
+            // 改竄検知ログへ残す（`Ok` 分岐と同じ理由。security.md A08
+            // 「取り込み判断の根拠を追跡可能にする」は失敗ケースにも適用される）。
+            let mut log_writer =
+                LogWriter::open(&log_path).expect("loop-log.jsonl を開けませんでした");
+            log_writer
+                .append_failure(failure)
+                .expect("loop-log.jsonl への追記に失敗しました（失敗時）");
+            verify_chain(&log_path).expect(
+                "loop-log.jsonl のハッシュチェーン検証に失敗しました（失敗時。改竄・破損の疑い）",
+            );
         }
     }
 

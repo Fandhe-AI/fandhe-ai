@@ -1,10 +1,10 @@
 # 機能追加種別のループ完走実証（TASK-3.3c・イシュー #142）
 
-`loop-report.json` は
+`loop-report.json`・`loop-log.jsonl` はいずれも
 `crates/self-repair/tests/feature_addition_loop_completion_task_3_3c.rs` の
 実行によって**実測**された完走ログである（捏造・手組みではない。§「再現手順」
 の環境変数 `SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1` を明示指定して実行した場合の
-み本ファイルへ上書きされる）。
+み本ディレクトリへ上書きされる）。
 
 ## 題材・完走判定基準
 
@@ -17,16 +17,18 @@ REQ-3 の v2 追加受け入れ基準（`docs/spec/04-requirements.md:96`）「�
 ## CLI 経由完走との差分（重要・明示）
 
 `docs/guardrail-self-repair-cli.md` §5.1 が定める「`self-repair run` CLI 経由の
-完走」・§5.4「JSON Lines ログのハッシュチェーン検証」は、CLI バイナリ
-（`self-repair run`。未実装）・ログ形式移植（TASK-3.4・イシュー #145。ハッシュ
-チェーン等の改竄検知形式）の両方に依存し、本イシュー（#142）のスコープでは
-ない。
+完走」は、CLI バイナリ（`self-repair run`。未実装）に依存し、本イシュー
+（#142）のスコープではない。
 
 本実証は **lib API 直接呼び出しの実証ハーネス**（統合テスト）として
 [`self_repair::SelfRepairLoop`] を 1 回起動し、`LoopReport` を JSON 化した
-完走ログをここへ記録する。CLI 経由・ハッシュチェーン検証の充足は #145 実装後
-に #144（人間評価）側で判断する。本ディレクトリへの記録配置自体も #143 で
-最終様式が確定するまでの暫定配置である。
+完走ログ（`loop-report.json`）をここへ記録する。§5.4「JSON Lines ログの
+ハッシュチェーン検証」は TASK-3.4（#145）実装済みの `self_repair::LogWriter`/
+`verify_chain` を TASK-3.3d（#143）で本ハーネスへ結線し、`loop-log.jsonl`
+として同じディレクトリへ出力・検証している（外部コマンド `self-repair
+verify-log` CLI は未実装のため、検証は lib 呼び出し経由。詳細は本 README
+末尾「改竄検知ログ」節）。CLI 経由の再実施の充足は #144（人間評価）側で
+判断する。
 
 ## 保守対象・ループ構成
 
@@ -101,13 +103,47 @@ SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1 \
   cargo test -p self-repair --test feature_addition_loop_completion_task_3_3c
 ```
 
+`loop-report.json` と同じ出力先へ改竄検知ログ `loop-log.jsonl` も併せて
+書き出す（次節参照）。`target/` フォールバック・`docs/` 明示書き込みの
+いずれでも、固定ファイル名 `loop-log.jsonl` を実行のたび削除してから
+`LogWriter::open` するため、`loop-report.json` の `fs::write` 上書きと
+同じく「このディレクトリはこの 1 回の実行を記述する」契約を保つ
+（複数回の実行が同一チェーンへ継ぎ足されることはない）。
+
+## 改竄検知ログ（`loop-log.jsonl`）
+
+`loop-log.jsonl` は `docs/self-repair-log-format.md`（TASK-3.4・#145 の正式
+仕様書）が定める JSON Lines・SHA-256 ハッシュチェーン形式である。監査手順・
+フォーマット詳細は同仕様書 6 節を参照。本実証固有の要点のみ以下に示す。
+
+- **段階列**: `loop_start`（`kind: "feature_addition"`）→ `detection` →
+  `attempt`（試行 1: `verification_failed`）→ `attempt`（試行 2:
+  `adopted`）→ `loop_outcome`（`outcome.kind: "adopted"`）の 5 レコード
+  （`loop-report.json` の `attempt_count: 2` と対応）。
+- **検証**: ハーネス自身が書き込み直後に `self_repair::verify_chain` を
+  呼び、`Ok` であることを assert している
+  （`crates/self-repair/tests/feature_addition_loop_completion_task_3_3c.rs`
+  の `write_loop_report`）。第三者が独立に再検証する場合は同じ
+  `verify_chain(path)` を呼べばよい（`self-repair verify-log` 外部コマンドは
+  未実装のため、lib 呼び出しが現時点で唯一の検証手段）。
+- **改竄検知の実効性**: `verify_chain` がフィールド改変・レコード削除・
+  順序入れ替え・未知フィールド注入をいずれも検知することは
+  `crates/self-repair/src/logging.rs` の単体テスト
+  （`verify_chain_detects_stage_field_tampering` 等。詳細は
+  `docs/self-repair-revalidation/bug-fix/README.md` §8 の一覧を参照）で
+  個別に実証済みであり、本ハーネスで同種の負検査を作り直すことはしない。
+- **末尾切り詰めの限界**: `verify_chain` 単体では検知できない
+  （`docs/self-repair-log-format.md` 6 節 3）。外部アンカー運用（同仕様書
+  7 節）は運用指針の文書化のみで自動化実装は行っていない
+  （out-of-scope-tracking.md 準拠）。
+
 ## 対象外（既存イシューで追跡）
 
-- CLI（`self-repair run`）経由の完走 → 後続タスク（`docs/guardrail-self-repair-cli.md`
-  記載のタスクで追跡済み）
-- JSON Lines ログのハッシュチェーン検証（改竄検知形式） → イシュー #145
-  （TASK-3.4）
-- 完走ログの最終的な記録様式・配置場所の確定 → イシュー #143
+- CLI（`self-repair run`/`verify-log`）経由の完走・検証 → 後続タスク
+  （`docs/guardrail-self-repair-cli.md` 記載のタスクで追跡済み）。ログ機構
+  自体（`LogWriter`/`verify_chain`）は TASK-3.4（#145）で実装済み・
+  TASK-3.3d（#143）で本ハーネスへ結線済み（下記「改竄検知ログ」節参照）
+- 完走ログの最終的な記録様式・配置場所の確定 → イシュー #143（本更新で反映）
 - `crates/self-repair/Cargo.toml` は本イシューでは変更していない（並行実装
   中のイシュー #141〈TASK-3.3b〉との編集衝突回避。本テストは
   `verify_bench`／`guardrail` 経由の既存依存のみで完結する）。

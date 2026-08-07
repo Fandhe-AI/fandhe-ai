@@ -21,6 +21,9 @@
 
 - 実施日時: `loop-report.json` の `started_at_unix_ms`（UNIX ミリ秒）。
 - 実行環境: CPU バックエンドのみ（CUDA・Metal 実機依存なし）。
+- 改竄検知ログ: 本ディレクトリの `loop-log.jsonl`（JSON Lines・SHA-256
+  ハッシュチェーン。TASK-3.4・#145 実装済みの `self_repair::LogWriter`/
+  `verify_chain` をハーネスへ結線して出力・検証したもの。8 節参照）。
 - `SELF_REPAIR_REVALIDATION_OUT` を明示的に本ディレクトリへ向けているのは、
   この記録（`loop-report.json`）を tracked ファイルとして意図的に更新するため。
   環境変数を省略した場合は `.gitignore` 済みの `target/self-repair-revalidation/
@@ -56,7 +59,11 @@
    （sandbox 直下の `guardrail.toml`〈TASK-4.3c 確定値〉をそのまま使用）。判定の
    迂回経路はない。
 7. **完走ログ書き出し**: `self_repair::LoopReport`（試行回数・所要時間・判断根拠）
-   を JSON 化し、本ディレクトリの `loop-report.json` へ書き出す。
+   を JSON 化し、本ディレクトリの `loop-report.json` へ書き出す。同時に
+   `self_repair::LogWriter::append_report`（正常終了）／`append_failure`
+   （段階実行自体が失敗した場合）で同一ディレクトリの `loop-log.jsonl` へも
+   ハッシュチェーン形式のレコード列を追記し、書き出し直後に
+   `self_repair::verify_chain` でチェーン整合性を確認する（8 節参照）。
 
 ## 3. 4 ゲート合成についての設計上の制約（重要）
 
@@ -97,7 +104,7 @@ verify_gates.rs` のドキュメント参照）ため、取り込み判断自体
 | 1 | `self-repair run --kind bug-fix` の 1 回起動・追加の人間入力なしで終了コード 0（`Verdict::AutoApply`）に到達 | **部分充足**。`self-repair run` CLI バイナリが本イシュー時点で未実装のため、lib 直接呼び出し（`SelfRepairLoop::run`）経由で「1 回起動・追加の人間入力なし」を満たし、最終結論 `LoopOutcome::Adopted`（`guardrail::Verdict::AutoApply` 相当）に到達したことを確認した。CLI 形態での再実施は 7 節参照 |
 | 2 | 検証 4 ゲート（build／test --release／clippy -D warnings／bench）全通過。`guardrail` の 3 分岐判定を lib 直接呼び出しで経由し、迂回経路がないこと | **部分充足**（3 ゲートは実測・ベンチゲートは機構完走確認であり候補 diff の実測ではない。3 節・5 行目参照）。`guardrail::decide` を唯一の判定経路として使用し、迂回経路は存在しない |
 | 3 | `--max-attempts` 上限内で完走すること | **充足**。`max_attempts = 2` で attempt 2（正解）にて `Adopted` に到達（`loop-report.json` の `attempt_count`） |
-| 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過すること | **未充足（スコープ外）**。JSON Lines ハッシュチェーンログ・`verify-log` は TASK-3.4（#145）のスコープ。本実証では `LoopReport` 由来の JSON（`loop-report.json`）で試行回数・所要時間・判断根拠を記録した |
+| 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過すること | **部分充足**（TASK-3.3d・#143）。TASK-3.4（#145）実装済みの `self_repair::LogWriter`/`verify_chain` を本ハーネスへ結線し、`loop-log.jsonl`（本ディレクトリ）へループ全段階（`loop_start → detection → attempt ×2 → loop_outcome`）を追記・その場でチェーン検証（`verify_chain` が `Ok`）した。外部コマンド `self-repair verify-log` CLI は未実装のため、検証は lib 直接呼び出し経由である（8 節参照） |
 | 5 | ベンチ劣化中央値が承認済み閾値内（5 回計測の中央値採用・単発計測禁止。閾値は変更しない） | **部分充足**。ベンチゲート機構自体は `bench_runs_min`（sandbox の `guardrail.toml` 確定値。5 回）以上・中央値判定で完走し閾値内（`bench_gate_mechanism.median_pct` 参照）。ただし 3 節のとおり合成ワークロードであり候補 diff の実測ではない |
 | 6 | 判定レポート JSON の `signal_source` フィールドが `"measured"` であること | **未充足（スコープ外）**。`signal_source` フィールドは `self-repair run` CLI（`docs/guardrail-self-repair-cli.md` §2.1）の出力仕様であり、CLI 未実装の本イシュー時点では該当フィールド自体が存在しない |
 
@@ -125,8 +132,11 @@ verify_gates.rs` のドキュメント参照）ため、取り込み判断自体
 - **`self-repair run`/`verify-log` CLI バイナリの実装**
   （`docs/guardrail-self-repair-cli.md` §3）: 未実装のため lib 直接呼び出しで
   代替した。CLI 実装後の再実施は CLI 実装タスクの後続イシューのスコープ。
-- **JSON Lines ハッシュチェーンログ・`verify-log` 検証**（判定基準 4）:
-  TASK-3.4（イシュー #145）のスコープ。
+- **`self-repair verify-log` 外部コマンド経由の検証**（判定基準 4）:
+  `loop-log.jsonl` の出力・チェーン検証自体は TASK-3.4（#145）実装済みの
+  `self_repair::LogWriter`/`verify_chain` を本イシュー（#143）で結線済み
+  （8 節参照）。CLI バイナリ経由での再実施は CLI 実装タスクの後続イシューの
+  スコープ。
 - **候補 diff に対するベンチ劣化率実測（真の 4 ゲート合成の `src/` 本体への
   昇格）**（3 節）: `verify_bench::SelfRepairBenchGate` の
   `stages::VerificationGate` への正式結線は #136 系の残作業として親イシューで
@@ -151,3 +161,34 @@ SELF_REPAIR_REVALIDATION_OUT=docs/self-repair-revalidation/bug-fix \
 （`Adopted`）に到達する（実証計画 3 節 (e)「決定的シードで再現可能」の要求に
 対する対応。本題材は乱数を使わない純粋関数のため、決定的シードユーティリティ
 （`guardrail::determinism`）自体は不要である）。
+
+## 8. 改竄検知ログ（`loop-log.jsonl`）の監査手順
+
+`loop-log.jsonl` は `docs/self-repair-log-format.md`（TASK-3.4・#145 の正式
+仕様書）が定める JSON Lines・SHA-256 ハッシュチェーン形式である。監査手順・
+フォーマット詳細は同仕様書 6 節を参照。本実証固有の要点のみ以下に示す。
+
+- **段階列**: `loop_start`（`kind: "bug_fix"`）→ `detection` →
+  `attempt`（attempt 1: `verification_failed`）→ `attempt`（attempt 2:
+  `adopted`）→ `loop_outcome`（`outcome.kind: "adopted"`）の 5 レコード
+  （`loop-report.json` の `attempt_count: 2` と対応）。
+- **検証**: ハーネス自身が書き込み直後に `self_repair::verify_chain` を
+  呼び、`Ok` であることを assert している
+  （`crates/self-repair/tests/revalidation_bug_fix.rs`）。第三者が独立に
+  再検証する場合は同じ `verify_chain(path)` を呼べばよい
+  （`self-repair verify-log` 外部コマンドは未実装のため、lib 呼び出しが
+  現時点で唯一の検証手段）。
+- **改竄検知の実効性**: `verify_chain` がフィールド改変・レコード削除・
+  順序入れ替え・未知フィールド注入をいずれも検知することは
+  `crates/self-repair/src/logging.rs` の単体テスト
+  （`verify_chain_detects_stage_field_tampering`・
+  `verify_chain_detects_recorded_at_field_tampering`・
+  `verify_chain_detects_field_tampering`・
+  `verify_chain_detects_record_deletion`・
+  `verify_chain_detects_record_reordering`・
+  `verify_chain_rejects_unknown_top_level_field_injection`）で個別に
+  実証済みであり、本実証で改めて同種の負検査を作り直すことはしない。
+- **末尾切り詰めの限界**: `verify_chain` 単体では検知できない
+  （`docs/self-repair-log-format.md` 6 節 3）。外部アンカー運用（同仕様書
+  7 節）は運用指針の文書化のみで自動化実装は行っていない
+  （out-of-scope-tracking.md 準拠）。
