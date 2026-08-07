@@ -38,9 +38,14 @@ usage() {
 
 # 固定タイトルに完全一致する open Issue の番号を 1 件だけ返す（無ければ空文字）。
 # 複数一致は起票ロジックの前提が崩れているため fail-closed で異常終了する。
+#
+# --limit は gh CLI 既定の 30 件で打ち切られると、固定タイトルの追跡 Issue が
+# ページ外に出た際に「既存 Issue なし」と誤判定してしまう（review 指摘・#148）。
+# 本リポの open Issue 数は運用上 200 件を大きく超えない想定のため、十分大きい
+# 固定値で明示し、既定値依存の暗黙的な打ち切りを避ける。
 find_open_issue() {
   local json
-  json=$(gh issue list --state open --json number,title)
+  json=$(gh issue list --state open --limit 200 --json number,title)
   local numbers
   numbers=$(printf '%s' "${json}" | jq -r --arg title "${ISSUE_TITLE}" '[.[] | select(.title == $title) | .number] | .[]')
   local count
@@ -231,10 +236,33 @@ self_test_branches() {
   return "${failed}"
 }
 
+# 分岐 5（fail-closed）: 固定タイトルに一致する open Issue が 2 件以上ある異常状態を
+# 検証する。find_open_issue 内部で異常終了するため report は必ず非 0 で終了し、
+# かつ issue create/comment/close のいずれも呼ばれてはならない（起票ロジックの
+# 前提が崩れた状態で誤った Issue 操作を実行しないことの保証。review 指摘・#148）。
+self_test_duplicate_issue_fail_closed() {
+  local failed=0
+
+  setup_gh_stub '[{"number":50,"title":"ci(guardrail): schedule 定期実行の失敗検知（TASK-6.1b）"},{"number":51,"title":"ci(guardrail): schedule 定期実行の失敗検知（TASK-6.1b）"}]'
+  if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/5 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+    echo "NG: 固定タイトルの open Issue が複数存在するのに report が exit 0 になりました" >&2
+    failed=1
+  elif grep -qE '^issue (create|comment|close)' "${self_test_stub_dir}/calls.log"; then
+    echo "NG: 複数一致の fail-closed 時に issue 操作が呼ばれました" >&2
+    failed=1
+  else
+    echo "OK: 固定タイトルの open Issue が複数存在する場合は fail-closed で異常終了し、issue 操作は呼ばれません"
+  fi
+  cleanup_self_test
+
+  return "${failed}"
+}
+
 cmd_self_test() {
   local failed=0
   self_test_arg_validation || failed=1
   self_test_branches || failed=1
+  self_test_duplicate_issue_fail_closed || failed=1
 
   if [ "${failed}" -ne 0 ]; then
     echo "NG: self-test に失敗しました" >&2
