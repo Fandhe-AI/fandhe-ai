@@ -60,23 +60,28 @@ pub struct Report {
     pub reason: String,
 }
 
-/// 昇順ソート済みの計測値列から中央値を求める。TASK-4.1a では `report.rs` が
-/// レポートの整形にのみ用い、判定ロジック（#105/#106）には使わない。
+/// 計測値列から中央値を求める。TASK-4.1a では `report.rs` がレポートの整形にのみ
+/// 用い、判定ロジック（#105/#106）には使わない。
+///
+/// 中央値の定義は `bench_harness::median_q1_q3`（ソート後 `idx = round(p * (n-1))`
+/// 番目の要素を採用する median-of-halves 方式。PoC-v2-1 実測踏襲）にそのまま委譲する。
+/// 本関数がここで独自に「中央 2 値の平均」方式を再実装すると、`bench_gate.rs` の
+/// `BenchSignal::validate`（同じく `median_q1_q3` を用いて `bench_median_pct` の
+/// 再計算・一致検証を行う）と定義が食い違い、偶数件の計測で正当な中央値を
+/// 誤って reject しうる（Bugbot 指摘・#107 PR #305 レビュー）。計測系を
+/// `bench-harness` へ付け替える本イシューの趣旨（`docs/guardrail-self-repair-cli.md`
+/// 1.4 節）にも沿い、中央値の定義は `bench-harness` 側に一本化する。
 ///
 /// 事前条件: `values` は空でないこと（呼び出し元の `signals.rs` が REQ-4
 /// 「5 回以上」の受け入れ基準として非空・5 件以上を検証済み）。
-pub fn median(values: &[f64]) -> f64 {
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let n = sorted.len();
-    if n == 0 {
-        return f64::NAN;
-    }
-    if n % 2 == 1 {
-        sorted[n / 2]
-    } else {
-        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-    }
+///
+/// # Errors
+///
+/// `values` が空、または NaN が混入している場合 `bench_harness::BenchError`
+/// をそのまま返す（本番経路で `unwrap()`/`expect()` を使わない方針。
+/// `.claude/rules/coding-rust.md`）。
+pub fn median(values: &[f64]) -> Result<f64, bench_harness::BenchError> {
+    bench_harness::median_q1_q3(values).map(|q| q.median)
 }
 
 /// 判定レポート JSON の「判定結果」セクション（§2.1 の `verdict`・`reason`
@@ -139,12 +144,25 @@ mod tests {
 
     #[test]
     fn median_of_odd_length() {
-        assert_eq!(median(&[3.0, 1.0, 2.0]), 2.0);
+        assert_eq!(median(&[3.0, 1.0, 2.0]).unwrap(), 2.0);
     }
 
     #[test]
     fn median_of_even_length() {
-        assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+        // `bench_harness::median_q1_q3` の median-of-halves 方式（idx = round(p*(n-1))）に
+        // 委譲するため、n=4 では idx=round(1.5)=2 -> sorted[2]=3.0（「中央 2 値の平均」方式の
+        // 2.5 とは異なる。bench_gate.rs の `BenchSignal::validate` と定義を統一した結果）。
+        assert_eq!(median(&[1.0, 2.0, 3.0, 4.0]).unwrap(), 3.0);
+    }
+
+    #[test]
+    fn median_rejects_empty_values() {
+        assert!(median(&[]).is_err());
+    }
+
+    #[test]
+    fn median_rejects_nan_values() {
+        assert!(median(&[1.0, f64::NAN, 2.0]).is_err());
     }
 
     #[test]

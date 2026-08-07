@@ -329,6 +329,27 @@ mod tests {
     }
 
     #[test]
+    fn report_median_agrees_with_bench_signal_validate_for_even_count() {
+        // `crate::report::median`（判定レポート JSON の `bench_median_pct` 生成経路。
+        // `main.rs` の `--signals` 注入フロー）と `BenchSignal::validate`（本モジュールの
+        // 改竄検知）が同じ中央値定義（`bench_harness::median_q1_q3`）に一本化されている
+        // ことの回帰テスト（Bugbot 指摘・PR #305・#107）。件数が偶数（n=6）の場合、
+        // 「中央 2 値の平均」方式（旧 `report::median`）と index 選択方式
+        // （`median_q1_q3`）は値が乖離するため、この n で検証しないと定義の再乖離を
+        // 検出できない（n=5 等の奇数件では両方式が一致してしまい検出力がない）。
+        let measurements = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let median = crate::report::median(&measurements)
+            .expect("非空・非 NaN のため report::median は成功するはず");
+        let signal = BenchSignal {
+            bench_measurements_pct: measurements,
+            bench_median_pct: median,
+        };
+        signal
+            .validate()
+            .expect("report::median が算出した中央値は BenchSignal::validate を通過するはず");
+    }
+
+    #[test]
     fn harness_bench_gate_rejects_fewer_than_min_iterations() {
         let gate = HarnessBenchGate;
         let config = fast_config();
