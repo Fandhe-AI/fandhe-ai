@@ -11,6 +11,13 @@
 //! 返す暫定固定とする。「判定不能時に自動適用へ倒れない」fail-closed 契約
 //! （`.claude/rules/security.md` A08）を骨格段階から満たすための設計判断
 //! （実装計画 2.2 節）。
+//!
+//! `eval` の評価ロジック本体（全 fixture 一括評価・率集計）は
+//! `guardrail::eval::run`（TASK-4.3a・イシュー #115）へ委譲する。ここでは
+//! 設定解決（`--config`/`--preset`）→ `eval::run` 呼び出し → 出力
+//! （`--format`/`--output`）→ 終了コード変換（`EvalExitCode::from_pass`）
+//! という薄い統合のみを担う（`run_check` と同じ「lib 側にロジックを置き
+//! bin は統合層に留める」方針を踏襲）。
 
 use std::fs;
 use std::io::Write as _;
@@ -21,6 +28,8 @@ use guardrail::cli::{self, CheckArgs, Command, EvalArgs, OutputFormat};
 use guardrail::config::{self, PresetName};
 use guardrail::decision::Verdict;
 use guardrail::error::GuardrailError;
+use guardrail::eval;
+use guardrail::eval::report::EvalReport;
 use guardrail::exit_code::{EvalExitCode, GuardrailExitCode};
 use guardrail::report::{GateOutcome, Report, SCHEMA_VERSION, SignalSource};
 use guardrail::signals::{GateResult, Signals};
@@ -129,29 +138,70 @@ fn gate_outcome(result: GateResult) -> GateOutcome {
     }
 }
 
-/// `guardrail eval` の実行フロー。評価ロジック本体は TASK-4.2/4.3（#108/#111）
-/// のスコープであり、TASK-4.1a では引数解析・入力検証のみ行い未実装エラー
-/// （終了コード `1`）で終了する（実装計画 2.2 節）。
+/// `guardrail eval` の実行フロー。評価ロジック本体は `guardrail::eval::run`
+/// （TASK-4.3a・イシュー #115）に委譲し、ここでは設定解決・出力・終了コード
+/// 変換のみを行う（モジュールコメント参照）。
 fn run_eval(args: EvalArgs) -> ExitCode {
     match run_eval_inner(&args) {
-        Ok(()) => unreachable!("eval evaluation logic is not implemented in TASK-4.1a"),
+        Ok(report) => {
+            emit_eval_report(&report, args.format, args.output.as_deref());
+            EvalExitCode::from_pass(report.pass()).into_process_exit_code()
+        }
         Err(err) => report_error_and_exit(&err),
     }
 }
 
-fn run_eval_inner(args: &EvalArgs) -> Result<(), GuardrailError> {
+fn run_eval_inner(args: &EvalArgs) -> Result<EvalReport, GuardrailError> {
     let preset = PresetName::parse(&args.preset)?;
-    let _config = config::resolve(args.config.as_deref(), &args.repo, preset)?;
-    if !args.dataset.exists() {
-        return Err(GuardrailError::InvalidInput(format!(
-            "dataset directory '{}' does not exist",
-            args.dataset.display()
-        )));
+    let config = config::resolve(args.config.as_deref(), &args.repo, preset)?;
+    eval::run(&args.dataset, &config.thresholds)
+}
+
+/// `eval::EvalReport` を `--format`/`--output` に応じて出力する。`emit_report`
+/// （`check` 用）と同じく serde_json のエスケープに一任し文字列連結で JSON を
+/// 組み立てない（2.5 節 A03 対策）。
+fn emit_eval_report(report: &EvalReport, format: OutputFormat, output: Option<&Path>) {
+    let json = match serde_json::to_string_pretty(report) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("internal error: failed to serialize eval report: {e}");
+            return;
+        }
+    };
+
+    match format {
+        OutputFormat::Json => println!("{json}"),
+        OutputFormat::Text => {
+            println!(
+                "total={} miss_rate={:.2}%(ok={}) false_positive_rate={:.2}%(ok={}) pass={}",
+                report.total_count,
+                report.miss_rate_pct,
+                report.miss_rate_ok,
+                report.false_positive_rate_pct,
+                report.false_positive_rate_ok,
+                report.pass(),
+            );
+            for item in &report.items {
+                println!(
+                    "  {} expected={} actual={} correct={} known_blind_spot={}",
+                    item.change_id,
+                    item.expected_verdict,
+                    item.actual_verdict,
+                    item.correct,
+                    item.known_blind_spot
+                );
+            }
+        }
     }
-    let _ = EvalExitCode::from_pass; // 契約先取りの参照のみ（評価ロジック未実装）。
-    Err(GuardrailError::NotImplemented(
-        "eval evaluation logic (TASK-4.2/4.3, #108/#111)",
-    ))
+
+    if let Some(path) = output
+        && let Err(e) = write_file(path, &json)
+    {
+        eprintln!(
+            "warning: failed to write --output '{}': {e}",
+            path.display()
+        );
+    }
 }
 
 fn emit_report(report: &Report, format: OutputFormat, output: Option<&Path>) {
@@ -200,7 +250,6 @@ fn report_error_and_exit(err: &GuardrailError) -> ExitCode {
         }
         GuardrailError::InvalidInput(_)
         | GuardrailError::Io { .. }
-        | GuardrailError::NotImplemented(_)
         | GuardrailError::InconsistentDecisionInput { .. } => {
             GuardrailExitCode::InternalError.into_process_exit_code()
         }
