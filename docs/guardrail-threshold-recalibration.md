@@ -145,6 +145,36 @@ lines_max／bench_median_max_pct をどのプリセット値に振っても率�
   低いが、より軽微な性能回帰題材を将来追加する場合は実機での再計測を
   検討すべき（TASK-4.4 スコープ）。
 
+## 5. 確定記録（TASK-4.3c・#117）
+
+- **確定閾値**: `default` プリセット（`lines_max=200`・`bench_median_max_pct=5.0`・
+  `bench_runs_min=5`）。上記「3. 候補閾値」節の候補をそのまま確定する。
+- **選定根拠**: 「3. 候補閾値」節に記載済み（3 プリセットとも見逃し率・誤検知率
+  ともに 0% だが、`loose` は G4〈gray・実測 `lines_changed=210`〉を `escalate` から
+  `auto_apply` へ取りこぼす弱点が実測で確認済み。`strict` は `default` に対して
+  追加の検知力向上を示さず margin のみ削る）。本節では根拠を重複記述しない。
+- **数値変更の有無**: **なし**。確定値は `crates/guardrail/src/config.rs` の
+  組み込み既定値（`Thresholds::builtin(PresetName::Default)`）および REQ-4
+  初期推奨値と完全同一である。本イシューは「新規の閾値決定」ではなく
+  「既存承認値（v1・PoC-3 由来）の新実装リポ（v2）データでの再評価結果を
+  踏まえた明示的な確定記録」である。
+- **`guardrail.toml` 新設の判断理由**: 「4. #117 への申し送り事項」に記した
+  2 択（新設せず既定値のまま確定 or 明示的に書き出す）のうち、後者を採用する。
+  `config.rs::resolve` の探索順序（2.4 節）で実際に読まれる `--repo` 直下の
+  位置に承認値を固定して置くことで、閾値が「暗黙の既定値」ではなく
+  「監査可能な設定ファイルとしてコミット履歴に残る値」になる。
+  `crates/guardrail/tests/threshold_calibration.rs` の既存回帰テスト
+  （TASK-4.3b・#116 時点で `--repo` に空の一時ディレクトリを明示指定する設計に
+  済んでいる）はこの新設の影響を受けない。
+- **承認経路**: 本イシュー（#117）に対応する PR のユーザーによる merge を
+  もって、閾値確定の人間承認（`.claude/rules/security.md`「ガードレール閾値の
+  変更は必ず人間承認を経る」）とする。ユーザーが PR を却下した場合は、本節・
+  `guardrail.toml`・`crates/guardrail/tests/threshold_calibration.rs` の
+  追加ピン留めテストの revert のみで巻き戻せる add-only 構成としている
+  （既存の判定体系・`strict`／`loose` プリセット数値・fixture ラベル・
+  テスト許容誤差は一切変更していない）。
+- **確定日**: 2026-08-07。
+
 ## 成果物一覧
 
 ```
@@ -155,5 +185,6 @@ docs/guardrail-recalibration/
 ├── eval-report-loose.json                     # guardrail eval --preset loose の生出力
 └── v2-measured-signals.json                    # v2 再実測シグナル（G4/D3/D2/D1）と実測環境
 scripts/recalibrate-guardrail-thresholds.sh    # 再実測の再現手順（CI 非組み込み）
+guardrail.toml                                  # 確定閾値の明示設定（#117・TASK-4.3c 新設）
 crates/guardrail/tests/threshold_calibration.rs # 3 プリセット掃引・候補閾値ピン留め回帰テスト
 ```

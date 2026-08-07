@@ -23,6 +23,7 @@ rust-ai-library/
 ├── Cargo.toml                # workspace 定義（9 クレート・許容依存 8 区分を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定。TASK-1.3）
+├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c・#117。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness（雛形）
 ├── scripts/
@@ -44,6 +45,7 @@ rust-ai-library/
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
+    ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）
     └── spec/                # 正本 submodule（rust-ai-library-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）

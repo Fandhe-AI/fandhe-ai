@@ -1,0 +1,20 @@
+# guardrail 判定閾値の確定設定（イシュー #117・TASK-4.3c）。
+#
+# `crates/guardrail/src/config.rs::resolve` の探索順序（`--config` 指定 →
+# `--repo` 直下の本ファイル → 組み込み既定値。`docs/guardrail-self-repair-cli.md`
+# 2.4 節）の 2 段目として、ここに書いた値が `--preset` の組み込み既定値へ
+# 優先して適用される。
+#
+# `[preset.default]` の 3 値は `docs/guardrail-threshold-recalibration.md`
+# （TASK-4.3b・#116）で評価した候補閾値をそのまま採用したものであり、
+# `Thresholds::builtin(PresetName::Default)`（config.rs）・REQ-4 初期推奨値と
+# 完全同一で、数値の変更は一切行っていない（`.claude/rules/security.md`
+# 「ガードレール閾値の変更はユーザー承認必須」を踏まえ、本ファイルは
+# 既存承認値の「明示的な確定記録」であって「新規の閾値決定」ではない）。
+# 確定根拠・承認経路は同文書「5. 確定記録（TASK-4.3c・#117）」節を参照。
+#
+# 閾値の変更（数値の書き換え・プリセット追加）は必ずユーザー承認を経ること。
+[preset.default]
+lines_max = 200
+bench_median_max_pct = 5.0
+bench_runs_min = 5

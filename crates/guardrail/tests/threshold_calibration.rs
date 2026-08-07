@@ -20,6 +20,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use guardrail::config::{self, PresetName, Thresholds};
+
 fn guardrail_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_guardrail"))
 }
@@ -183,4 +185,45 @@ fn loose_preset_misses_g4_via_item_level_verdict_while_default_and_strict_catch_
     let _ = std::fs::remove_dir_all(&strict_repo);
     let _ = std::fs::remove_dir_all(&default_repo);
     let _ = std::fs::remove_dir_all(&loose_repo);
+}
+
+/// リポジトリルート直下の `guardrail.toml`（イシュー #117・TASK-4.3c で新設）が
+/// `config::resolve` の探索順序 2 段目（`docs/guardrail-self-repair-cli.md` 2.4
+/// 節）で実際に解決され、承認済み確定値（`docs/guardrail-threshold-recalibration.md`
+/// 「5. 確定記録」節・200／5.0／5）と組み込み既定値
+/// （`Thresholds::builtin(PresetName::Default)`）の両方に一致することをピン留めする。
+/// `guardrail.toml` の無断改変や既定値との意図しない乖離を fail-closed で検知する
+/// （`.claude/rules/security.md`「ガードレール閾値の変更は必ず人間承認を経る」）。
+#[test]
+fn committed_root_guardrail_toml_resolves_to_approved_default_thresholds() {
+    // `crates/guardrail` から見たリポジトリルート（`CARGO_MANIFEST_DIR/../..`）。
+    // 他テストが `--repo` に空の一時ディレクトリを渡しコミット済み設定を意図的に
+    // 迂回するのに対し、本テストは逆にコミット済み `guardrail.toml` そのものを
+    // 対象とする（探索順序 2 段目の実地検証）。
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("リポジトリルートの解決に失敗");
+    assert!(
+        repo_root.join("guardrail.toml").is_file(),
+        "リポジトリルート直下に guardrail.toml が見つからない: {}",
+        repo_root.display()
+    );
+
+    let resolved = config::resolve(None, &repo_root, PresetName::Default)
+        .expect("guardrail.toml の解決に失敗");
+    let approved = Thresholds {
+        lines_max: 200,
+        bench_median_max_pct: 5.0,
+        bench_runs_min: 5,
+    };
+    assert_eq!(
+        resolved.thresholds, approved,
+        "guardrail.toml から解決された値が承認済み確定値（200/5.0/5）と乖離"
+    );
+    assert_eq!(
+        resolved.thresholds,
+        Thresholds::builtin(PresetName::Default),
+        "guardrail.toml の値が組み込み既定値と乖離（本イシューでは数値変更なしのはず）"
+    );
 }

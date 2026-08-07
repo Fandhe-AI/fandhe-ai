@@ -13,7 +13,10 @@
 //! `docs/spec/03-poc/poc-2-ai-self-maintenance/README.md`）が示すループ構造
 //! 「ベースライン確認 → 検出 → 修正試行（複数回。失敗時は却下して再試行）→
 //! 4 ゲート検証 → 取り込み/却下」をそのまま写像したものであり、新規の概念を
-//! 持ち込まない。
+//! 持ち込まない。検証フェーズのベンチゲート（[`verify_bench`]・TASK-3.2a・#137）は
+//! この 4 ゲート検証のうち計測系を担う [`VerificationGate`] 実装として、決定的シード
+//! 再輸出（TASK-4.4b・#113）と同じ理由で `guardrail` 経由に依存を一本化している
+//! （モジュール末尾 `verify_bench` のドキュメント参照）。
 //!
 //! 移植元は `Fandhe-AI/rust-ai-library-v1` `tools/self-repair/src/`
 //! （`docs/spec/v1-assets-inventory.md` L17「改修して再利用」判定）。
@@ -75,3 +78,13 @@ pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
 /// `bench-harness` へ直接依存を重ねず `guardrail` 経由に一本化する
 /// （3 分岐判定を必ず経由させる依存方向と揃える）。
 pub use guardrail::determinism;
+
+/// ベンチゲート（TASK-3.2a・イシュー #137）。
+///
+/// 検証フェーズ 4 ゲートのうちベンチゲートの計測系を `guardrail::bench_gate`
+/// （`bench-harness` 付け替え済み・TASK-4.1d）経由で実行する [`SelfRepairBenchGate`][sbg] を
+/// 提供する。決定的シードと同じ理由で `bench-harness` への直接依存は持たず `guardrail`
+/// 経由に一本化する（モジュール冒頭ドキュメント参照）。
+///
+/// [sbg]: verify_bench::SelfRepairBenchGate
+pub mod verify_bench;
