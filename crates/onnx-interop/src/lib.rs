@@ -15,15 +15,16 @@
 //!   キーマップに対する期待キー集合の充足検査を提供する。キー不足を無言 skip せず
 //!   型付きエラー（[`LoadError`]）で報告する（v1 PoC-6 詰まりポイント #2 対策。詳細は
 //!   `require_keys` モジュールのドキュメンテーションコメント参照）。
-//! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83）: ONNX オペを
+//! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83 / TASK-7.3d・#85）: ONNX オペを
 //!   `tensor-core::Tensor<f32>` 上の純粋関数として提供する。8 オペ（`Gemm`／`Relu`／
 //!   `Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`）に加え MVP 算術オペ
 //!   （`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`）・MVP 形状操作オペ（`Cast`／
-//!   `Reshape`／`Squeeze`／`Transpose`）を含む。ONNX proto デコード（TASK-7.2a）・
-//!   グラフ実行エンジンは別イシューの担当であり、本モジュールは「入力テンソル＋属性 →
-//!   出力テンソル」の単体演算のみを扱う（decode → 属性値 → 本モジュール呼び出し、の結線は
-//!   後続タスクで行う）。属性は proto 由来の型に依存しないプレーンな Rust 構造体・
-//!   スライスとして受け取り、デコード層の実装順序に依存しない。
+//!   `Reshape`／`Squeeze`／`Transpose`）・`LayerNormalization`（TASK-7.3d・#85）を含む。
+//!   ONNX proto デコード（TASK-7.2a）・グラフ実行エンジンは別イシューの担当であり、
+//!   本モジュールは「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱う
+//!   （decode → 属性値 → 本モジュール呼び出し、の結線は後続タスクで行う）。属性は proto
+//!   由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、デコード層の
+//!   実装順序に依存しない。
 //! - ONNX proto デコード経路（TASK-7.2a）は本イシューのスコープ外で未実装。
 //!
 //! `require_keys` モジュールは非公開（`mod`）とし、型・関数のみ `pub use` で

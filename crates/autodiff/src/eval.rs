@@ -186,6 +186,26 @@ pub(crate) fn tanh(input: &Tensor<f32>) -> Tensor<f32> {
     unary(input, f32::tanh)
 }
 
+/// 数値安定形のシグモイド。`x >= 0` は `1/(1+exp(-x))`、`x < 0` は
+/// `exp(x)/(1+exp(x))` を使い分け、大きな負値入力での `exp` オーバー
+/// フロー（`exp(-x)` が `+inf` に発散する経路）を回避する
+/// （TASK-9.1b・#92。`nn::activation::Sigmoid` の forward 実体）。
+/// `NaN` 入力はいずれの分岐も `NaN` を伝播する（`is_sign_negative` は
+/// `NaN` に対して符号ビットで分岐するが、後続の演算が `NaN` を保つため
+/// 結果は変わらない）。
+fn sigmoid_scalar(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0 / (1.0 + (-x).exp())
+    } else {
+        let e = x.exp();
+        e / (1.0 + e)
+    }
+}
+
+pub(crate) fn sigmoid(input: &Tensor<f32>) -> Tensor<f32> {
+    unary(input, sigmoid_scalar)
+}
+
 /// `dim` に沿った reduction（`sum`/`max` 共通の走査ロジック）。
 /// `input` は行優先連続データとして走査し、`axis` を
 /// 「外側（outer）× 走査軸（axis_len）× 内側（inner）」の 3 段に分解

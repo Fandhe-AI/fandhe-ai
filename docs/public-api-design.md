@@ -386,6 +386,15 @@ PoC-v2-2 と PoC-v2-5 で実測済みの演算に合わせる（`docs/spec/03-po
 
 演算セットの拡張（Conv 系・Softmax 等）は後続タスク（TASK-1.5 以降）へ委譲する。
 
+**TASK-9.1b（#92）追加**: `sigmoid`（`1 / (1 + exp(-x))`。数値安定形）を
+基本活性化関数群の一つとして追加した。PoC-v2-2／PoC-v2-5 の実測演算
+セットには含まれないため、追加時は既存の数値微分突合（`grad.rs`）と
+end-to-end backward テスト（`tests/nn_activation.rs`）で受け入れ条件
+を独自に検証した。`BackendOps`（§4.2）への `sigmoid` 追加は本タスクの
+スコープ外とし、`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` と同様に
+CPU 参照実装（`eval.rs`）止まりとする（バックエンド接続差し替え時に
+まとめて対応）。
+
 ## 4. backend 入口公開 API
 
 ### 4.1 デバイス選択

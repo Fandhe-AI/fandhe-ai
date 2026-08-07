@@ -10,11 +10,15 @@
 //! `lib.rs` クレート doc の「互換レイヤ固有のロジックを持ち込まない」は
 //! `compat` 層本体の話であり、本モジュールには適用されない。
 //!
-//! TASK-9.1a（本イシュー・#91）で第 1 分割として `Linear`（全結合層）を
-//! 実装する。活性化関数（#92）・損失関数（#189）・optimizer（#192）・
-//! `compat::Sequential`（#94）は後続イシューのスコープ。
+//! TASK-9.1a（#91）で第 1 分割として `Linear`（全結合層）を実装した。
+//! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。損失関数
+//! （#189）・optimizer（#192）・`compat::Sequential`（#94）は後続イシュー
+//! のスコープ。共通 `Module` trait の定義は本イシューでは行わない
+//! （`compat::Sequential` 設計時に確定する）。
 
 mod init;
 mod linear;
+
+pub mod activation;
 
 pub use linear::{Linear, LinearVars};

@@ -59,6 +59,12 @@ pub(crate) enum Op {
     Relu(NodeId),
     Exp(NodeId),
     Tanh(NodeId),
+    /// シグモイド（`1 / (1 + exp(-x))`）。TASK-9.1b（#92）で
+    /// `nn::activation::Sigmoid`（`nn/activation.rs`）から使う活性化
+    /// プリミティブとして追加。数値安定形の forward は `eval.rs`
+    /// （`eval::sigmoid`）、VJP は `grad.rs`（`out_value` 再利用方式）
+    /// を参照。
+    Sigmoid(NodeId),
     Sum {
         input: NodeId,
         dim: Option<usize>,
