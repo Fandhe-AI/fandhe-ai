@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use onnx_interop::onnx::graph::build_graph;
+use onnx_interop::onnx::graph::{Graph, build_graph};
 use onnx_interop::onnx::interp::{InterpError, Value, run};
 use onnx_interop::onnx::proto::{
     AttributeProto, GraphProto, ModelProto, NodeProto, TensorProto, ValueInfoProto,
@@ -395,4 +395,99 @@ fn run_reads_gemm_attributes_correctly() {
         Value::F32(t) => assert_eq!(t.get(&[0, 0]).unwrap(), 22.0),
         other => panic!("Value::F32 を期待したが {other:?}"),
     }
+}
+
+#[test]
+fn run_rejects_graph_output_not_produced() {
+    // `build_graph` は `GraphProto.output` が未生成の名前を参照していないことを
+    // 静的検証する（`GraphError::UnknownGraphOutput`）ため、`run` 単体の
+    // `InterpError::GraphOutputNotProduced` は通常経路では踏まない。
+    // `Graph` の全フィールドが pub であることを利用し、その不変条件を
+    // あえて破った `Graph` を直接構築して `run` の fail-closed 経路を演習する
+    // （レビュー指摘: エラー variant のカバレッジ補強）。
+    let graph = Graph {
+        nodes: vec![],
+        initializers: HashMap::new(),
+        inputs: vec![],
+        outputs: vec!["not_produced".to_string()],
+    };
+    let err = run(&graph, HashMap::new()).unwrap_err();
+    assert!(matches!(err, InterpError::GraphOutputNotProduced { name } if name == "not_produced"));
+}
+
+#[test]
+fn run_rejects_unsqueeze_i64_when_input_rank_is_not_one() {
+    // i64 直接経路は入力 rank 1 のみサポートする（本ファイル冒頭 `//!`・`interp.rs`
+    // モジュール冒頭コメント参照）。rank 2 の I64 値を feed すると
+    // `I64ShapeUnsupported` で拒否される。
+    let node = NodeProto {
+        input: vec!["x".to_string()],
+        output: vec!["y".to_string()],
+        name: "n_unsqueeze".to_string(),
+        op_type: "Unsqueeze".to_string(),
+        attribute: vec![AttributeProto {
+            name: "axes".to_string(),
+            f: 0.0,
+            i: 0,
+            s: vec![],
+            t: None,
+            floats: vec![],
+            ints: vec![0],
+            r#type: 7, // INTS
+        }],
+        domain: String::new(),
+    };
+    let model = minimal_model_with_node(node, vec!["x"], vec!["y"]);
+    let graph = build_graph(&model).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "x".to_string(),
+        Value::I64 {
+            data: vec![1, 2, 3, 4],
+            shape: vec![2, 2],
+        },
+    );
+    let err = run(&graph, feeds).unwrap_err();
+    assert!(
+        matches!(err, InterpError::I64ShapeUnsupported { node, op, shape } if node == "n_unsqueeze" && op == "Unsqueeze" && shape == vec![2, 2])
+    );
+}
+
+#[test]
+fn run_rejects_unsqueeze_i64_when_output_rank_exceeds_one() {
+    // Medium レビュー指摘の回帰固定: 入力 rank 1 でも axes 挿入後の出力 rank が
+    // 1 を超える場合（[3] + axes=[0] -> 本来 [1,3]）、i64 直接経路は多次元 shape を
+    // 表現できないため `shape: vec![data.len()]` へ無言正規化せず fail-closed に
+    // 拒否する（`I64ShapeUnsupported`）。
+    let node = NodeProto {
+        input: vec!["x".to_string()],
+        output: vec!["y".to_string()],
+        name: "n_unsqueeze".to_string(),
+        op_type: "Unsqueeze".to_string(),
+        attribute: vec![AttributeProto {
+            name: "axes".to_string(),
+            f: 0.0,
+            i: 0,
+            s: vec![],
+            t: None,
+            floats: vec![],
+            ints: vec![0],
+            r#type: 7, // INTS
+        }],
+        domain: String::new(),
+    };
+    let model = minimal_model_with_node(node, vec!["x"], vec!["y"]);
+    let graph = build_graph(&model).unwrap();
+    let mut feeds = HashMap::new();
+    feeds.insert(
+        "x".to_string(),
+        Value::I64 {
+            data: vec![1, 2, 3],
+            shape: vec![3],
+        },
+    );
+    let err = run(&graph, feeds).unwrap_err();
+    assert!(
+        matches!(err, InterpError::I64ShapeUnsupported { node, op, shape } if node == "n_unsqueeze" && op == "Unsqueeze" && shape == vec![3])
+    );
 }

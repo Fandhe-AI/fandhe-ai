@@ -416,9 +416,32 @@ fn compute_unsqueeze(env: &HashMap<String, Value>, node: &NodeProto) -> Result<V
                 });
             }
             validate_axes_for_rank("Unsqueeze", shape.len(), &axes)?;
-            // i64 直接経路は常に 1 次元（本モジュール冒頭コメント参照）。次元追加は
-            // 妥当性検査のみ行いデータ・要素数は不変のため、shape を要素数へ
-            // 正規化する（多次元 rank は追跡しない。#274）。
+            // i64 直接経路は `Value::I64.shape` を「真の ONNX 論理 shape」ではなく
+            // 要素数のみを保持する平坦なブックキーピングとして扱う（本モジュール
+            // 冒頭コメント参照）。axes 挿入後の出力 rank が 1 を超える場合、その
+            // まま `shape: vec![data.len()]` へ丸めると本来の多次元 shape（例:
+            // [3] + axes=[0] -> 本来 [1,3]）を無言で破棄してしまうため、
+            // no-silent-skip 契約に従い fail-closed で拒否する（レビュー指摘）。
+            //
+            // ただし `data.len() == 1` の場合のみ例外的に許容する: `tests/fixtures/
+            // slice_repro.onnx` の実 Gather ノード（`onnx_decode.rs` の
+            // `slice_repro_onnx_decodes_expected_graph_structure` が固定化する
+            // `const_gather_idx` は shape=[1]・data=[0]。真のスカラー index
+            // （dims=[]）ではなく 1 要素配列 index のため、Gather 後も rank 1 の
+            // まま Unsqueeze へ渡る）でも、この後段 `Concat` の i64 分岐は
+            // shape.len()==1 の入力のみ受理する（`compute_concat` 参照）。1 要素
+            // データは rank の解釈が結果に影響しない（並び替えの余地がない）ため、
+            // ここで丸めても no-silent-skip 契約の実害（多次元情報の消失による
+            // 誤ったデータ順序・要素数の混同）は生じない。#274 で真の多次元 i64
+            // shape 追跡を導入する際に本例外の要否を再検討する。
+            let out_rank = shape.len() + axes.len();
+            if out_rank != 1 && data.len() != 1 {
+                return Err(InterpError::I64ShapeUnsupported {
+                    node: node.name.clone(),
+                    op: "Unsqueeze",
+                    shape: shape.clone(),
+                });
+            }
             Ok(Value::I64 {
                 data: data.clone(),
                 shape: vec![data.len()],
