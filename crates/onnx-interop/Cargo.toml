@@ -16,8 +16,9 @@ prost.workspace = true
 # crates/backend-cpu/Cargo.toml）。safetensors パース結果のマッピング先である
 # `Tensor<f32>`・転置 API `transpose_2d()`・shape 検査 `ShapeError`（#73・TASK-7.1a）に加え、
 # 8 オペ（Gemm/Relu/Sigmoid/Shape/Gather/Unsqueeze/Concat/Slice。TASK-7.2c）・MVP 算術オペ
-# （Add/Mul/Div/Mod/Sqrt/Constant。TASK-7.3a）が入出力とする `Tensor<f32>`・stride ベース
-# view API を利用するために必要。
+# （Add/Mul/Div/Mod/Sqrt/Constant。TASK-7.3a）・MVP 形状操作オペ（Cast/Reshape/Squeeze/
+# Transpose。TASK-7.3b）が入出力とする `Tensor<f32>`・stride ベース view API を利用するために
+# 必要。
 tensor-core = { path = "../tensor-core" }
 
 [dev-dependencies]
