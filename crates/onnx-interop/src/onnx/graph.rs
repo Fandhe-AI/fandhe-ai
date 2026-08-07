@@ -17,6 +17,7 @@ use std::fmt;
 /// `expect()` を使わない方針（`coding-rust.md`）に従い、不正入力は必ずこの型で
 /// 呼び出し元へ伝播する。
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GraphError {
     /// `ModelProto` に `graph` フィールドが存在しない。
     NoGraph,
@@ -156,6 +157,13 @@ fn element_count(tensor_name: &str, dims: &[i64]) -> Result<usize, GraphError> {
 ///    期待要素数の一致
 /// 3. 上記を満たして初めてバイト列 -> 数値列の変換を行う
 ///
+/// `raw_data` と typed data フィールド（`float_data`／`int64_data`）が両方
+/// 埋まっている場合は `raw_data` を優先する（ONNX リファレンス実装
+/// （onnxruntime 等）と同じ解決順序。Bugbot 指摘）。typed data を先に見ると、
+/// 細工・不正な形式のモデルが `raw_data` 側と異なる値へデコードされ、かつ
+/// `raw_data` のバイト長検証を一切通らずにすり抜けてしまう（no-silent-skip
+/// 契約違反）ため、両方を無条件で検査対象にする。
+///
 /// 未対応 `data_type` は `UnknownDataType` で拒否する（無言 skip 禁止）。
 fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
     let shape = t.dims.clone();
@@ -163,26 +171,10 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
 
     match t.data_type {
         super::proto::data_type::FLOAT => {
-            if !t.float_data.is_empty() {
-                if t.float_data.len() != expected_elements {
-                    return Err(GraphError::DataLenMismatch {
-                        tensor_name: t.name.clone(),
-                        expected_elements,
-                        actual_elements: t.float_data.len(),
-                    });
-                }
-                Ok(RawTensor::F32 {
-                    data: t.float_data.clone(),
-                    shape,
-                })
-            } else {
-                // raw_data が空でも「dims=[0] 等の空テンソル」と「data フィールドが
-                // 一つも埋まっていない不正入力（例: external_data 参照だが本クレートは
-                // TensorProto.data_location 等を意図的に未定義。プロトコル上は未宣言
-                // フィールドとして無言でスキップされてしまう）」を区別できないため、
-                // 必ず expected_bytes との一致検査を通す（× 0 要素なら 0 バイト一致で
-                // 素通りする）。expected_elements の乗算自体もオーバーフローしうるため
-                // checked_mul で拒否する（巨大 dims による資源枯渇攻撃を弾く。A03）。
+            if !t.raw_data.is_empty() {
+                // raw_data が typed data より優先される（raw_data 優先の解決順序）。
+                // expected_elements の乗算自体もオーバーフローしうるため checked_mul
+                // で拒否する（巨大 dims による資源枯渇攻撃を弾く。A03）。
                 let expected_bytes = expected_elements.checked_mul(4).ok_or_else(|| {
                     GraphError::ElementCountOverflow {
                         tensor_name: t.name.clone(),
@@ -201,10 +193,72 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                     .collect();
                 Ok(RawTensor::F32 { data, shape })
+            } else if !t.float_data.is_empty() {
+                if t.float_data.len() != expected_elements {
+                    return Err(GraphError::DataLenMismatch {
+                        tensor_name: t.name.clone(),
+                        expected_elements,
+                        actual_elements: t.float_data.len(),
+                    });
+                }
+                Ok(RawTensor::F32 {
+                    data: t.float_data.clone(),
+                    shape,
+                })
+            } else {
+                // raw_data・float_data のいずれも空。「dims=[0] 等の空テンソル」と
+                // 「data フィールドが一つも埋まっていない不正入力（例: external_data
+                // 参照だが本クレートは TensorProto.data_location 等を意図的に未定義。
+                // プロトコル上は未宣言フィールドとして無言でスキップされてしまう）」を
+                // 区別できないため、必ず expected_bytes との一致検査を通す（0 要素
+                // なら 0 バイト一致で素通りする）。
+                let expected_bytes = expected_elements.checked_mul(4).ok_or_else(|| {
+                    GraphError::ElementCountOverflow {
+                        tensor_name: t.name.clone(),
+                    }
+                })?;
+                if t.raw_data.len() != expected_bytes {
+                    return Err(GraphError::RawDataByteLenMismatch {
+                        tensor_name: t.name.clone(),
+                        expected_bytes,
+                        actual_bytes: t.raw_data.len(),
+                    });
+                }
+                Ok(RawTensor::F32 {
+                    data: Vec::new(),
+                    shape,
+                })
             }
         }
         super::proto::data_type::INT64 => {
-            if !t.int64_data.is_empty() {
+            if !t.raw_data.is_empty() {
+                // raw_data が typed data より優先される（raw_data 優先の解決順序）。
+                let expected_bytes = expected_elements.checked_mul(8).ok_or_else(|| {
+                    GraphError::ElementCountOverflow {
+                        tensor_name: t.name.clone(),
+                    }
+                })?;
+                if t.raw_data.len() != expected_bytes {
+                    return Err(GraphError::RawDataByteLenMismatch {
+                        tensor_name: t.name.clone(),
+                        expected_bytes,
+                        actual_bytes: t.raw_data.len(),
+                    });
+                }
+                // chunks_exact(8) により各チャンクは必ず 8 要素の &[u8] となるため、
+                // 固定長配列への変換（try_into）は失敗しない。`unwrap()` の代わりに
+                // 固定長配列を直接構築し本番経路の unwrap を避ける（coding-rust.md）。
+                let data: Vec<i64> = t
+                    .raw_data
+                    .chunks_exact(8)
+                    .map(|b| {
+                        let mut buf = [0u8; 8];
+                        buf.copy_from_slice(b);
+                        i64::from_le_bytes(buf)
+                    })
+                    .collect();
+                Ok(RawTensor::I64 { data, shape })
+            } else if !t.int64_data.is_empty() {
                 if t.int64_data.len() != expected_elements {
                     return Err(GraphError::DataLenMismatch {
                         tensor_name: t.name.clone(),
@@ -232,19 +286,10 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                         actual_bytes: t.raw_data.len(),
                     });
                 }
-                // chunks_exact(8) により各チャンクは必ず 8 要素の &[u8] となるため、
-                // 固定長配列への変換（try_into）は失敗しない。`unwrap()` の代わりに
-                // 固定長配列を直接構築し本番経路の unwrap を避ける（coding-rust.md）。
-                let data: Vec<i64> = t
-                    .raw_data
-                    .chunks_exact(8)
-                    .map(|b| {
-                        let mut buf = [0u8; 8];
-                        buf.copy_from_slice(b);
-                        i64::from_le_bytes(buf)
-                    })
-                    .collect();
-                Ok(RawTensor::I64 { data, shape })
+                Ok(RawTensor::I64 {
+                    data: Vec::new(),
+                    shape,
+                })
             }
         }
         other => Err(GraphError::UnknownDataType {

@@ -310,6 +310,53 @@ fn truly_empty_tensor_dims_zero_is_still_accepted() {
 }
 
 #[test]
+fn raw_data_takes_precedence_over_typed_float_data() {
+    // `raw_data` と `float_data` が両方埋まっている細工モデル。ONNX リファレンス
+    // 実装（onnxruntime 等）と同じ解決順序に合わせ、raw_data 側の値
+    // （ここでは 9.0）を採用し、typed data 側（1.0）は無視されるべき
+    // （Bugbot 指摘: typed data が raw_data を無言で shadow していた）。
+    let t = TensorProto {
+        dims: vec![1],
+        data_type: onnx_interop::onnx::proto::data_type::FLOAT,
+        float_data: vec![1.0],
+        int32_data: vec![],
+        int64_data: vec![],
+        name: "both_fields".to_string(),
+        raw_data: 9.0f32.to_le_bytes().to_vec(),
+    };
+    let model = model_with_single_initializer(t);
+    let graph = build_graph(&model).expect("build_graph は成功するはず");
+    match graph.initializers.get("both_fields") {
+        Some(RawTensor::F32 { data, .. }) => {
+            assert_eq!(data.as_slice(), &[9.0]);
+        }
+        other => panic!("F32 RawTensor を期待したが {other:?}"),
+    }
+}
+
+#[test]
+fn raw_data_takes_precedence_over_typed_int64_data() {
+    // FLOAT と同じ解決順序を INT64 でも確認する。
+    let t = TensorProto {
+        dims: vec![1],
+        data_type: onnx_interop::onnx::proto::data_type::INT64,
+        float_data: vec![],
+        int32_data: vec![],
+        int64_data: vec![1],
+        name: "both_fields_i64".to_string(),
+        raw_data: 9i64.to_le_bytes().to_vec(),
+    };
+    let model = model_with_single_initializer(t);
+    let graph = build_graph(&model).expect("build_graph は成功するはず");
+    match graph.initializers.get("both_fields_i64") {
+        Some(RawTensor::I64 { data, .. }) => {
+            assert_eq!(data.as_slice(), &[9]);
+        }
+        other => panic!("I64 RawTensor を期待したが {other:?}"),
+    }
+}
+
+#[test]
 fn duplicate_initializer_name_is_rejected_not_silently_overwritten() {
     // 同名の initializer が 2 つ含まれる不正な ONNX モデル。`HashMap::insert`
     // をそのまま使うと後勝ちで前者が無言上書きされてしまう（Bugbot 指摘）。
