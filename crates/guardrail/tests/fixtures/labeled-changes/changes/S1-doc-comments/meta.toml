@@ -1,0 +1,20 @@
+# ラベル付き変更セット 1 件分のメタデータ（TASK-4.3-S1・イシュー #16）。
+# スキーマ・各フィールドの意味は同ディレクトリ階層上の README.md を参照。
+
+change_id = "S1-doc-comments"
+category = "safe"
+expected_verdict = "auto-apply"
+poc3_default_verdict = "auto-apply"
+known_blindspot = false
+origin = "PoC-3 新規"
+summary = "activations.rs / model.rs にドキュメントコメントのみを追加する（挙動不変・非破壊）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。model.rs を変更しているため、
+# ドキュメントコメントのみの変更であっても arch-hyperparameter-change
+# （`any_diff_in_paths` = 変更内容を問わずパスのみで match）に match し、
+# 除外リスト適用後は escalate となる。判定器のバグではなく、除外リストが
+# 「変更内容の意図（ドキュメントのみか実質的なアーキテクチャ変更か）を区別
+# しない意図的に保守的な設計」であることに由来する（過剰なエスカレーション
+# は REQ-5 の安全側のトレードオフであり見逃しより許容される。
+# tests/guardrail_self_regression.rs モジュールコメント参照）。
+expected_exclusion_rule_ids = ["arch-hyperparameter-change"]
+expected_verdict_after_exclusions = "escalate"

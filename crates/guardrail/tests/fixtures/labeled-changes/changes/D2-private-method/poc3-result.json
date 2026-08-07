@@ -1,0 +1,17 @@
+{
+  "change_id": "D2-private-method",
+  "preset": "default",
+  "lines_changed": 2,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": false,
+  "test_ok": false,
+  "clippy_ok": false,
+  "bench_ran": false,
+  "bench_median_pct": null,
+  "bench_samples_pct": [],
+  "bench_max_pct": 5.0,
+  "verdict": "却下",
+  "reasons": "build失敗; "
+}

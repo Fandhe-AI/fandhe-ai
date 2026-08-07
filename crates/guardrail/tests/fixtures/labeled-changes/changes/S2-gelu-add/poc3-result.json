@@ -1,0 +1,17 @@
+{
+  "change_id": "S2-gelu-add",
+  "preset": "default",
+  "lines_changed": 27,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -5.6076,
+  "bench_samples_pct": [-5.6076,-1.3172,8.1012,-6.8285,-6.4959],
+  "bench_max_pct": 5.0,
+  "verdict": "自動適用",
+  "reasons": "全ゲート green・全指標が閾値内; "
+}

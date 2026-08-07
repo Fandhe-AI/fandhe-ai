@@ -1,0 +1,17 @@
+{
+  "change_id": "G2-hidden-dim-increase",
+  "preset": "default",
+  "lines_changed": 6,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -5.3155,
+  "bench_samples_pct": [-3.3467,-6.1426,-5.3155,-4.0985,-6.8360],
+  "bench_max_pct": 5.0,
+  "verdict": "自動適用",
+  "reasons": "全ゲート green・全指標が閾値内; "
+}
