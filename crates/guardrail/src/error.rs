@@ -50,11 +50,6 @@ pub enum GuardrailError {
     /// 区分（終了コード `2`）に対応する。
     InjectedSignalsNotAllowed,
 
-    /// 判定・評価ロジック本体が未実装であることを示す（TASK-4.1a のスコープ外。
-    /// eval 評価ロジックは #108/#111 で実装する）。
-    /// 内部エラー区分（終了コード `1`）に対応する。
-    NotImplemented(&'static str),
-
     /// [`crate::decision::DecisionInput::new`] が検出した判定入力の矛盾。
     ///
     /// 例: build/test/clippy が全通過していないにもかかわらずベンチ計測結果
@@ -76,7 +71,6 @@ impl fmt::Display for GuardrailError {
                 f,
                 "usage error: --signals requires GUARDRAIL_ALLOW_INJECTED_SIGNALS=1"
             ),
-            GuardrailError::NotImplemented(what) => write!(f, "not implemented: {what}"),
             GuardrailError::InconsistentDecisionInput { reason } => {
                 write!(f, "判定入力が矛盾しています: {reason}")
             }

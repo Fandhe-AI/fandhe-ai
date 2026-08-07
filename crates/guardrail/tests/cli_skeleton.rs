@@ -120,7 +120,13 @@ fn check_with_valid_config_override_still_escalates() {
 }
 
 #[test]
-fn eval_is_not_implemented_exit_code_1() {
+fn eval_with_unresolvable_default_dataset_path_is_internal_error_exit_code_1() {
+    // `--dataset` 既定値（`cli::DEFAULT_DATASET_DIR`）はリポジトリルートからの
+    // 相対パスであり、本テストバイナリの cwd（cargo test 実行時は
+    // `crates/guardrail` パッケージルート）から解決すると存在しない。
+    // `guardrail eval` の評価ロジック本体（`guardrail::eval::run`。
+    // TASK-4.3a・イシュー #115）が実 dataset を一括評価すること自体は
+    // `tests/eval_harness.rs`（`--dataset` を明示指定）で検証する。
     let output = guardrail_bin()
         .args(["eval"])
         .output()
