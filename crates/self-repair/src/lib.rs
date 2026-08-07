@@ -30,6 +30,15 @@
 //!   判別子として使う。
 //! - [`stages`][]: 種別非依存の段階インターフェース（`Detector`/`FixGenerator`/
 //!   `VerificationGate`/`AdoptionJudge`）。
+//! - [`exec`][]・[`candidate`][]・[`bug_fix`][]・[`perf_regression`][]・
+//!   [`feature_addition`][]（TASK-3.1b・イシュー #133）: 検出・可否判断
+//!   フェーズの種別ごとの実装。[`exec::CommandRunner`] はコマンド実行 seam
+//!   （v2 `guardrail` に `exec` モジュールが未移植のため本クレート内に新設。
+//!   `exec` モジュールの doc 参照）、[`candidate::apply_candidate`] は
+//!   `bug_fix`/`feature_addition` 共通の「候補存在確認 → baseline 復元 →
+//!   候補適用」ロジック、[`perf_regression`] は
+//!   `guardrail::median_gate`/`guardrail::Thresholds` に一本化した性能回帰
+//!   検出を提供する。
 //! - [`outcome`][]: ループ全体の結論 [`outcome::LoopOutcome`] と、検証通過を
 //!   型で保証する [`outcome::VerifiedEvidence`]（typestate）。本イシューでは
 //!   guardrail 非依存の v1 S1 形で移植する（`outcome` モジュールコメント参照）。
@@ -45,9 +54,8 @@
 //!   持たない（A08: 判定の迂回経路を作らない）。
 //! - [`error`][]: 型付きエラー [`error::SelfRepairError`]。
 //!
-//! # 本クレートが担わない責務（`.claude/rules/out-of-scope-tracking.md` 準拠）
-//! - 検出・可否判断フェーズの実装（`bug_fix`/`perf_regression`/
-//!   `feature_addition`/`candidate` 相当） → イシュー #133（TASK-3.1b）
+//! # 本クレートが担わない責務（TASK-3.1b・TASK-3.1d 完了時点でのスコープ・
+//! `.claude/rules/out-of-scope-tracking.md` 準拠）
 //! - 検証 3 ゲート実実行（`verify`/`cargo_gate` 相当。`VerificationGate` の
 //!   本番実装が [`outcome::VerifiedEvidence`] を実測シグナルから構築する部分）
 //!   → イシュー #134（TASK-3.1c。本クレートは入力型と `AdoptionJudge` への
@@ -59,18 +67,31 @@
 //!   追跡済み）
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
+pub mod bug_fix;
+pub mod candidate;
 pub mod error;
+pub mod exec;
+pub mod feature_addition;
 pub mod judge;
 pub mod kind;
 pub mod outcome;
+pub mod perf_regression;
 pub mod report;
 pub mod runner;
 pub mod stages;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
+pub use bug_fix::{BugFixDetector, BugFixFixGenerator};
+pub use candidate::CandidateFix;
 pub use error::SelfRepairError;
+pub use exec::{CommandOutput, CommandRunner, SystemCommandRunner};
+pub use feature_addition::{FeatureAdditionDetector, FeatureAdditionFixGenerator};
 pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
+pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
