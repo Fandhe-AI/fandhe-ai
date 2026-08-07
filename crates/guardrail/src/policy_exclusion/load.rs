@@ -168,8 +168,30 @@ pub fn load_from_str(input: &str) -> Result<PolicyExclusionConfig, GuardrailErro
             "policy-exclusion.toml defines no [[exclusion]] rules".to_string(),
         ));
     }
+    ensure_required_category_coverage(&rules)?;
 
     Ok(PolicyExclusionConfig { rules })
+}
+
+/// `architecture_change`・`test_tolerance_loosening`・`dependency_change` の
+/// 3 カテゴリがそれぞれ最低 1 件のルールを持つことを検査する（Bugbot 指摘
+/// #330。無条件エスカレーション対象〈G5・依存変更ルール等〉が設定漏れの
+/// まま自動適用へ進む経路を fail-closed で塞ぐ。`super::builtin_defaults`
+/// との一致は別途 `tests/policy_exclusion_toml_consistency.rs` が保証する）。
+fn ensure_required_category_coverage(rules: &[ExclusionRule]) -> Result<(), GuardrailError> {
+    const REQUIRED: [(Category, &str); 3] = [
+        (Category::ArchitectureChange, "architecture_change"),
+        (Category::TestToleranceLoosening, "test_tolerance_loosening"),
+        (Category::DependencyChange, "dependency_change"),
+    ];
+    for (category, label) in REQUIRED {
+        if !rules.iter().any(|rule| rule.category == category) {
+            return Err(GuardrailError::InvalidInput(format!(
+                "policy-exclusion.toml defines no [[exclusion]] rule for required category '{label}'"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `[[exclusion]]`／`[exclusion.match]` 領域内の 1 行（`key = value`）を
@@ -185,10 +207,12 @@ fn assign_exclusion_field(
     if pending.in_match_table {
         return match key {
             "type" => {
+                reject_duplicate_key(pending.match_type.is_some(), key, line_number)?;
                 pending.match_type = Some(parse_string(value_str, line_number)?);
                 Ok(())
             }
             "assertion_patterns" => {
+                reject_duplicate_key(pending.assertion_patterns.is_some(), key, line_number)?;
                 pending.assertion_patterns = Some(parse_string_array(
                     value_str,
                     line_number,
@@ -202,23 +226,55 @@ fn assign_exclusion_field(
         };
     }
     match key {
-        "id" => pending.id = Some(parse_string(value_str, line_number)?),
-        "category" => pending.category = Some(parse_string(value_str, line_number)?),
-        "description" => pending.description = Some(parse_string(value_str, line_number)?),
-        "rationale" => pending.rationale = Some(parse_string(value_str, line_number)?),
+        "id" => {
+            reject_duplicate_key(pending.id.is_some(), key, line_number)?;
+            pending.id = Some(parse_string(value_str, line_number)?);
+        }
+        "category" => {
+            reject_duplicate_key(pending.category.is_some(), key, line_number)?;
+            pending.category = Some(parse_string(value_str, line_number)?);
+        }
+        "description" => {
+            reject_duplicate_key(pending.description.is_some(), key, line_number)?;
+            pending.description = Some(parse_string(value_str, line_number)?);
+        }
+        "rationale" => {
+            reject_duplicate_key(pending.rationale.is_some(), key, line_number)?;
+            pending.rationale = Some(parse_string(value_str, line_number)?);
+        }
         "paths" => {
+            reject_duplicate_key(pending.paths.is_some(), key, line_number)?;
             pending.paths = Some(parse_string_array(
                 value_str,
                 line_number,
                 /* allow_empty */ false,
             )?)
         }
-        "action" => pending.action = Some(parse_string(value_str, line_number)?),
+        "action" => {
+            reject_duplicate_key(pending.action.is_some(), key, line_number)?;
+            pending.action = Some(parse_string(value_str, line_number)?);
+        }
         other => {
             return Err(GuardrailError::InvalidInput(format!(
                 "line {line_number}: unknown key '{other}' in '[[exclusion]]'"
             )));
         }
+    }
+    Ok(())
+}
+
+/// 同一キーの重複指定を fail-closed で拒否する（Bugbot 指摘 #330・`toml_lite`
+/// と同じ「重複キー拒否」方針を `assign_exclusion_field` にも揃える）。
+/// `already_set` は該当フィールドの `Option` が既に `Some` かどうかを渡す。
+fn reject_duplicate_key(
+    already_set: bool,
+    key: &str,
+    line_number: usize,
+) -> Result<(), GuardrailError> {
+    if already_set {
+        return Err(GuardrailError::InvalidInput(format!(
+            "line {line_number}: duplicate key '{key}'"
+        )));
     }
     Ok(())
 }
@@ -410,10 +466,36 @@ type = "any_diff_in_paths"
         .to_string()
     }
 
+    /// `ensure_required_category_coverage` を満たすための埋め草ルールを
+    /// 生成する（成功系テストが `minimal_valid_toml` 等 1 カテゴリのみでは
+    /// 網羅チェックに落ちるため、テスト対象外の 2 カテゴリを補う）。
+    fn filler_rule(id: &str, category: &str) -> String {
+        format!(
+            "\n[[exclusion]]\nid = \"{id}\"\ncategory = \"{category}\"\ndescription = \"d\"\nrationale = \"r\"\npaths = [\"**/filler-{id}\"]\naction = \"human_approval\"\n\n[exclusion.match]\ntype = \"any_diff_in_paths\"\n"
+        )
+    }
+
+    /// `architecture_change`・`test_tolerance_loosening`・`dependency_change`
+    /// のうち `except_category` 以外を埋め草ルールとして付加した文字列を返す。
+    fn with_other_categories_filled(toml: &str, except_category: &str) -> String {
+        let mut out = toml.to_string();
+        for (id, category) in [
+            ("filler-arch", "architecture_change"),
+            ("filler-tol", "test_tolerance_loosening"),
+            ("filler-dep", "dependency_change"),
+        ] {
+            if category != except_category {
+                out.push_str(&filler_rule(id, category));
+            }
+        }
+        out
+    }
+
     #[test]
     fn parses_any_diff_in_paths_rule() {
-        let config = load_from_str(&minimal_valid_toml()).unwrap();
-        assert_eq!(config.rules.len(), 1);
+        let toml = with_other_categories_filled(&minimal_valid_toml(), "architecture_change");
+        let config = load_from_str(&toml).unwrap();
+        assert_eq!(config.rules.len(), 3);
         let rule = &config.rules[0];
         assert_eq!(rule.id, "arch-hyperparameter-change");
         assert_eq!(rule.category, Category::ArchitectureChange);
@@ -429,7 +511,7 @@ type = "any_diff_in_paths"
 
     #[test]
     fn parses_test_assertion_relaxation_rule_with_patterns() {
-        let toml = r#"
+        let base = r#"
 schema_version = 1
 
 [[exclusion]]
@@ -444,8 +526,9 @@ action = "human_approval"
 type = "test_assertion_relaxation_without_prod_change"
 assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
 "#;
-        let config = load_from_str(toml).unwrap();
-        assert_eq!(config.rules.len(), 1);
+        let toml = with_other_categories_filled(base, "test_tolerance_loosening");
+        let config = load_from_str(&toml).unwrap();
+        assert_eq!(config.rules.len(), 3);
         match &config.rules[0].match_rule {
             MatchRule::TestAssertionRelaxationWithoutProdChange { assertion_patterns } => {
                 assert_eq!(
@@ -464,13 +547,70 @@ assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
     #[test]
     fn parses_multiple_exclusion_entries() {
         let toml = format!(
-            "{}\n[[exclusion]]\nid = \"dependency-change\"\ncategory = \"dependency_change\"\ndescription = \"d\"\nrationale = \"r\"\npaths = [\"**/Cargo.toml\", \"**/Cargo.lock\"]\naction = \"human_approval\"\n\n[exclusion.match]\ntype = \"any_diff_in_paths\"\n",
-            minimal_valid_toml()
+            "{}\n[[exclusion]]\nid = \"dependency-change\"\ncategory = \"dependency_change\"\ndescription = \"d\"\nrationale = \"r\"\npaths = [\"**/Cargo.toml\", \"**/Cargo.lock\"]\naction = \"human_approval\"\n\n[exclusion.match]\ntype = \"any_diff_in_paths\"\n{}",
+            minimal_valid_toml(),
+            filler_rule("filler-tol", "test_tolerance_loosening")
         );
         let config = load_from_str(&toml).unwrap();
-        assert_eq!(config.rules.len(), 2);
+        assert_eq!(config.rules.len(), 3);
         assert_eq!(config.rules[1].id, "dependency-change");
         assert_eq!(config.rules[1].category, Category::DependencyChange);
+    }
+
+    #[test]
+    fn rejects_missing_required_category_coverage() {
+        // `dependency_change` カテゴリのルールが 1 件も存在しない場合、
+        // ルール自体は妥当でも `ensure_required_category_coverage` で
+        // fail-closed に拒否される（Bugbot 指摘 #330）。
+        let toml = with_other_categories_filled(&minimal_valid_toml(), "architecture_change")
+            .replace(
+                "category = \"dependency_change\"",
+                "category = \"architecture_change\"",
+            );
+        let err = load_from_str(&toml).unwrap_err();
+        assert!(matches!(err, GuardrailError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_key_in_exclusion_table() {
+        let toml = r#"
+schema_version = 1
+
+[[exclusion]]
+id = "x"
+id = "y"
+category = "architecture_change"
+description = "d"
+rationale = "r"
+paths = ["**/*.rs"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
+"#;
+        let err = load_from_str(toml).unwrap_err();
+        assert!(matches!(err, GuardrailError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn rejects_duplicate_key_in_match_table() {
+        let toml = r#"
+schema_version = 1
+
+[[exclusion]]
+id = "x"
+category = "architecture_change"
+description = "d"
+rationale = "r"
+paths = ["**/*.rs"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
+type = "any_diff_in_paths"
+"#;
+        let err = load_from_str(toml).unwrap_err();
+        assert!(matches!(err, GuardrailError::InvalidInput(_)));
     }
 
     #[test]
