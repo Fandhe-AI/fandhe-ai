@@ -79,6 +79,12 @@
 # `verification-gate-bench.yml`（schedule／workflow_dispatch 契機）に分離する
 # （#148〈TASK-6.1b・schedule 定期実行〉と並行実装中のため、ci.yml への schedule 追加を
 # 避けて衝突面を最小化する）。
+#
+# .github/workflows/guardrail-regression-schedule.yml（TASK-6.1b・イシュー #148）は、
+# 本ジョブと同一の scripts/run-guardrail-regression.sh を schedule／workflow_dispatch
+# 契機で再利用し、push/PR が無い期間も 2 層検証の正誤を定期的に確認する。失敗時の
+# Issue 起票・復旧時のクローズを行う報告ロジック（scripts/report-guardrail-schedule-
+# result.sh）自体の退行は、上記 self-test ステップで push/PR 契機に常時検知する。
 name: CI
 
 on:
@@ -530,6 +536,12 @@ jobs:
       # 実行環境の cargo 有無に関わらず常時検出する（deps-forbidden ジョブと同一方針）。
       - name: 検査ロジックの self-test
         run: bash scripts/run-guardrail-regression.sh self-test
+
+      # guardrail-regression-schedule.yml の report ジョブが使う報告ロジック
+      # （scripts/report-guardrail-schedule-result.sh）自体の退行を、schedule 発火を
+      # 待たず push/PR 契機で常時検知する（TASK-6.1b・#148。ネットワーク不要・cargo 不要）。
+      - name: schedule 結果報告ロジックの self-test
+        run: bash scripts/report-guardrail-schedule-result.sh self-test
 
       - name: Cargo.toml の有無を判定
         id: detect
