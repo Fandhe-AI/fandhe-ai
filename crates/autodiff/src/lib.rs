@@ -30,21 +30,59 @@
 //! poc-v2-2-autodiff/evidence/`）の判定結果と整合することを固定する。
 //! これにより #16〜#19（TASK-1.5 全体）が完了する。
 //!
+//! TASK-9.1b（#92）で活性化関数プリミティブ `Var::sigmoid`
+//! （`var.rs`・`Op::Sigmoid`・VJP は `grad.rs`）と、互換 API 層
+//! （REQ-9）が積む薄いレイヤー実装群の入口 `nn`（`nn::activation`。
+//! ReLU/Sigmoid/Tanh）を追加した。共通 `Module` trait の定義は
+//! TASK-9.2（#94/#95・`compat::Sequential`）に委ねる。
+//!
 //! forward の値計算は `backend-cpu`（TASK-1.6・#20 以降。並行実装中で
 //! 未完）が完成するまでの暫定参照実装（`eval.rs`、非公開）で行い、
 //! TASK-1.9（バックエンド抽象層への接続）で backend 経由の実行に
 //! 差し替える（PoC-v2-2 と同じ構成）。`grad.rs`・`backward.rs` も同じ
 //! `eval.rs` のヘルパーを再利用するため、差し替えの影響範囲は
 //! forward/backward 双方でこの 1 ファイルに閉じる。
+//!
+//! TASK-9.1a（#91）で `nn` モジュール（`Linear` 等、自作 NN モジュール）
+//! を追加した。`nn` は `Tape`/`Var` に直接依存する自作コア側の部品で
+//! あり、互換 API 層（`compat::array`/`compat::Sequential`。REQ-9・
+//! TASK-9.2）とは区別される（`nn/mod.rs` の境界説明を参照）。上記の
+//! 「互換レイヤ固有のロジックを持ち込まない」方針は `compat` 層本体を
+//! 指しており、`nn` モジュールには適用されない。
+//!
+//! #190（親 #189「損失関数（MSE・CrossEntropy）の実装」）で
+//! `Var::mse_loss_with`/[`Reduction`]（mean/sum 縮約）と
+//! `nn::loss::MseLoss`（薄いラッパー）を追加した。既存 `Var::mse_loss`
+//! は `mse_loss_with(target, Reduction::Mean)` への委譲に変更したが、
+//! シグネチャ・既定の意味（mean）は維持する（公開 API 非破壊）。
+//!
+//! #191（親イシュー #189）で CrossEntropy 損失（log-sum-exp 安定化・
+//! クラス次元指定）を追加した。`Var::cross_entropy_loss`（`var.rs`・
+//! `Op::CrossEntropyLoss`）は log-softmax → NLL を個別オペ合成せず
+//! `MseLoss` と同じ 1 個の融合オペとして実装し、VJP（`grad.rs`）は
+//! 解析形 `softmax(x) − onehot(t)` で閉じる。`nn::loss::
+//! CrossEntropyLoss` はその薄いラッパー。`Reduction`（`Mean`/`Sum`）は
+//! #190 が `var.rs` に定義したものをそのまま再利用する（`nn::loss` 側に
+//! 重複定義は置かない）。
+//!
+//! #193（親 #192「optimizer（SGD・AdamW）・gradient clipping の実装」）
+//! で optimizer の第 1 分割 `optim::Sgd`/`optim::SgdConfig`（momentum・
+//! dampening・weight decay・nesterov 対応。PyTorch `torch.optim.SGD`
+//! 準拠）を追加した。`nn`（`Tape`/`Var` に直接依存する層プリミティブ）
+//! とは別モジュールとし（`optim/mod.rs` 参照）、既存 `nn`/`lib.rs` 冒頭の
+//! 記述は変更しない。AdamW（#194）・gradient clipping／LR スケジューラ
+//! （#195）は `optim` 配下への後続分割。
 
 mod backward;
 mod error;
 mod eval;
 mod grad;
+pub mod nn;
+pub mod optim;
 mod tape;
 mod var;
 
 pub use backward::Gradients;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};
-pub use var::Var;
+pub use var::{Reduction, Var};

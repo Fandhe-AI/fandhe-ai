@@ -1,31 +1,46 @@
 //! ONNX 8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`。
 //! TASK-7.2c・#79）に加え、MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`。
-//! TASK-7.3a・#82）を `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
+//! TASK-7.3a・#82）・MVP 形状操作オペ（`Cast`／`Reshape`／`Squeeze`／`Transpose`。
+//! TASK-7.3b・#83）・Attention 系オペ（`MatMul`／`Softmax`／`Erf`。TASK-7.3c・#84）・
+//! `LayerNormalization`（TASK-7.3d・#85）を `tensor-core::Tensor<f32>` 上の純粋関数として
+//! 提供する。
 //!
 //! 各関数は「入力テンソル＋属性 → 出力テンソル」の単体演算に限定し、ONNX proto デコード
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
-//! 実装順序に依存せず本モジュール単体でテスト・使用できる。
+//! 実装順序に依存せず本モジュール単体でテスト・使用できる。インタープリタのディスパッチ
+//! （op 名 → 本モジュール関数の解決）は #78（未実装・ブランチなし）の担当であり、本モジュールの
+//! 公開関数は現時点でグラフ実行から到達不能（後続の結線待ち）。
 
 mod activation;
 mod arith;
+mod cast;
 mod concat;
 mod constant;
 mod error;
 mod gather;
 mod gemm;
+mod layer_norm;
+mod matmul;
 mod shape_ops;
+mod shape_transform;
 mod slice;
+mod softmax;
 
-pub use activation::{relu, sigmoid};
+pub use activation::{erf, relu, sigmoid};
 pub use arith::{add, div, modulo, mul, sqrt};
+pub use cast::{cast_to_float, cast_to_int64, check_supported_cast_target};
 pub use concat::concat;
 pub use constant::{ConstantValue, constant};
 pub use error::OpError;
 pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};
+pub use layer_norm::{LayerNormAttrs, layer_normalization};
+pub use matmul::matmul;
 pub use shape_ops::{shape, unsqueeze};
+pub use shape_transform::{reshape, squeeze, transpose};
 pub use slice::{SliceParams, slice};
+pub use softmax::softmax;
 
 /// ONNX の負軸表記（`axis < 0` の場合 `axis + rank`）を正規化し、`[0, rank)` の範囲を
 /// 検査する。範囲外の場合は `None`（呼び出し元が `op` 名を添えて `OpError::AxisOutOfRange`

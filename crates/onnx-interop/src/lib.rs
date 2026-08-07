@@ -17,14 +17,16 @@
 //!   `require_keys` モジュールのドキュメンテーションコメント参照）。
 //! - [`onnx`]: ONNX 取り込みの実体（protobuf デコード・内部グラフ構築）。
 //!   spec 根拠: `docs/spec/05-tasks.md` TASK-7.2a、REQ-7。
-//! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82）: ONNX オペを `tensor-core::Tensor<f32>` 上の
-//!   純粋関数として提供する。8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／
-//!   `Unsqueeze`／`Concat`／`Slice`）に加え MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／
-//!   `Sqrt`／`Constant`）を含む。ONNX proto デコード（TASK-7.2a）・グラフ実行エンジンは
-//!   別イシューの担当であり、本モジュールは「入力テンソル＋属性 → 出力テンソル」の
-//!   単体演算のみを扱う（decode → 属性値 → 本モジュール呼び出し、の結線は後続タスクで行う）。
-//!   属性は proto 由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、
-//!   デコード層の実装順序に依存しない。
+//! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83 / TASK-7.3c・#84 /
+//!   TASK-7.3d・#85）: ONNX オペを `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
+//!   8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`）に
+//!   加え MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`）・MVP 形状操作
+//!   オペ（`Cast`／`Reshape`／`Squeeze`／`Transpose`）・Attention 系オペ（`MatMul`／
+//!   `Softmax`／`Erf`。TASK-7.3c・#84）・`LayerNormalization`（TASK-7.3d・#85）を含む。
+//!   `ops` は「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱い、[`onnx`] の
+//!   グラフ実行エンジン（decode → 属性値 → 本モジュール呼び出しの結線）は別イシューの
+//!   担当である。属性は proto 由来の型に依存しないプレーンな Rust 構造体・スライスとして
+//!   受け取り、デコード層の実装順序に依存しない。
 //!
 //! `require_keys` モジュールは非公開（`mod`）とし、型・関数のみ `pub use` で
 //! クレートルートへ再エクスポートする。モジュールを `pub mod` にすると

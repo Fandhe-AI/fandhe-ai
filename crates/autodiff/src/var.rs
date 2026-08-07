@@ -23,6 +23,25 @@ use crate::error::AutodiffError;
 use crate::eval;
 use crate::tape::{NodeId, Op, Tape};
 
+/// `Var::mse_loss_with` の縮約種別（#190・TASK-9.1c 相当。親イシュー
+/// #189「損失関数（MSE・CrossEntropy）の実装」）。PyTorch
+/// `nn.MSELoss(reduction=...)` の `mean`/`sum` に対応する。
+///
+/// `#[non_exhaustive]` とする理由: 将来 `none`（要素ごと損失。PyTorch
+/// `reduction='none'` 相当）を追加しうるが、本イシューでは #190 実装
+/// 計画のスコープ外（out-of-scope-tracking.md 準拠でユーザー承認後に
+/// 別途追加）としたため、追加時に呼び出し側の非網羅的 `match` を破壊
+/// しないようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reduction {
+    /// 全要素平均（`Σ(pred−target)² / n`）。`Var::mse_loss` の既定
+    /// （PyTorch `nn.MSELoss` の既定 `reduction='mean'` と一致）。
+    Mean,
+    /// 全要素総和（`Σ(pred−target)²`）。
+    Sum,
+}
+
 /// テープ上の 1 ノードを指す追跡対象値。値そのものではなく `NodeId` +
 /// テープへの共有参照を保持し、演算のたびにテープへ新しいノードを
 /// 追加する（`docs/public-api-design.md` §3.1）。
@@ -151,14 +170,85 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
-    /// 平均二乗誤差（`self` = 予測値、`target` = 正解値）。
+    /// 平均二乗誤差（`self` = 予測値、`target` = 正解値。全要素平均・
+    /// PyTorch `nn.MSELoss` の既定 `reduction='mean'` 相当）。
+    /// `mse_loss_with(target, Reduction::Mean)` への委譲（#190）。
+    /// 既存呼び出し元（`nn::activation` 系テスト・`tests/backward.rs`
+    /// 等）のシグネチャ・意味を変えないため本メソッドは維持する。
     pub fn mse_loss(&self, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.mse_loss_with(target, Reduction::Mean)
+    }
+
+    /// 平均二乗誤差（`self` = 予測値、`target` = 正解値）。`reduction`
+    /// で mean/sum の縮約種別を選べる（#190。親イシュー #189「損失関数
+    /// （MSE・CrossEntropy）の実装」）。`nn::loss::MseLoss`（`nn/loss.rs`）
+    /// はこのメソッドを呼ぶだけの薄いラッパー（REQ-9）。
+    pub fn mse_loss_with(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(target)?;
         let lhs_shape = self.value().shape().to_vec();
         let rhs_shape = target.value().shape().to_vec();
         require_same_shape(&lhs_shape, &rhs_shape)?;
-        let value = eval::mse_loss(&self.value(), &target.value());
-        let id = self.tape.push(Op::MseLoss(self.id, target.id), value);
+        let value = eval::mse_loss(&self.value(), &target.value(), reduction);
+        let id = self.tape.push(
+            Op::MseLoss {
+                pred: self.id,
+                target: target.id,
+                reduction,
+            },
+            value,
+        );
+        Ok(Var::from_raw(self.tape, id))
+    }
+
+    /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
+    /// 親イシュー #189）。`self` = logits（追跡対象）、`targets` = 正解
+    /// クラス添字（非追跡・`Tensor<i32>`。勾配は定義されないため
+    /// `Var` にしない。`tape::Op::CrossEntropyLoss` doc 参照）。
+    ///
+    /// 検査順序（本メソッド冒頭 doc の演算メソッド規律に、targets
+    /// 範囲検査〈REQ-8 趣旨の境界外アクセス防止・A03 対策〉を追加）:
+    /// ①`class_dim` 範囲・targets shape 一致（`reduce_out_shape` を
+    /// 再利用。`class_dim >= rank` は `ShapeError::AxisOutOfRange`）
+    /// → ②targets 全添字が `0 <= t < C`（違反は
+    /// `AutodiffError::InvalidArgument`）→ ③forward 値計算
+    /// （`eval::cross_entropy_loss`）→ ④ノード記録。
+    pub fn cross_entropy_loss(
+        &self,
+        targets: &Tensor<i32>,
+        class_dim: usize,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
+        let logits_shape = self.value().shape().to_vec();
+        let expected_targets_shape = reduce_out_shape(&logits_shape, Some(class_dim))?;
+        require_same_shape(targets.shape(), &expected_targets_shape)?;
+
+        // `reduce_out_shape` が成功した時点で `class_dim < logits_shape.len()`
+        // が保証されるため、この添字アクセスは安全（`.claude/rules/
+        // coding-rust.md` REQ-8「境界検査を省略しない」の趣旨に沿い、
+        // 検査済みの添字のみでアクセスする）。
+        let num_classes = logits_shape[class_dim];
+        for t in eval::dense_vec_i32(targets) {
+            if t < 0 || (t as usize) >= num_classes {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "cross_entropy_loss: target 添字 {t} が範囲 [0, {num_classes}) を外れている"
+                )));
+            }
+        }
+
+        let value = eval::cross_entropy_loss(&self.value(), targets, class_dim, reduction);
+        let id = self.tape.push(
+            Op::CrossEntropyLoss {
+                logits: self.id,
+                targets: targets.clone(),
+                class_dim,
+                reduction,
+            },
+            value,
+        );
         Ok(Var::from_raw(self.tape, id))
     }
 
@@ -181,6 +271,17 @@ impl<'t> Var<'t> {
     pub fn tanh(&self) -> Var<'t> {
         let value = eval::tanh(&self.value());
         let id = self.tape.push(Op::Tanh(self.id), value);
+        Var::from_raw(self.tape, id)
+    }
+
+    /// 要素ごとのシグモイド（`1 / (1 + exp(-x))`）。`relu`/`exp`/`tanh`
+    /// と同じく shape 不変の単項演算のため構造的に失敗しえない
+    /// （TASK-9.1b・#92。`nn::activation::Sigmoid` の薄いラッパーが
+    /// このメソッドを呼ぶ）。forward は `eval::sigmoid`（数値安定形）
+    /// を使う。
+    pub fn sigmoid(&self) -> Var<'t> {
+        let value = eval::sigmoid(&self.value());
+        let id = self.tape.push(Op::Sigmoid(self.id), value);
         Var::from_raw(self.tape, id)
     }
 }

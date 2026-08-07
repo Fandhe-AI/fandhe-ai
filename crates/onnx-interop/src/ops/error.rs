@@ -76,12 +76,47 @@ pub enum OpError {
         rhs: Vec<usize>,
     },
 
+    /// `Cast` の `to`（ONNX `TensorProto.DataType`）が本クレートの対応範囲
+    /// （`FLOAT(1)`／`INT64(7)`。TASK-7.3b・#83）外だった。
+    UnsupportedDataType { op: &'static str, to: i64 },
+
+    /// `Reshape`／`Squeeze` の shape 指定（`-1` の複数指定・非 1 次元への squeeze 等）が
+    /// ONNX 仕様上不正（TASK-7.3b・#83）。`op` は発生元オペ名（`"Reshape"`／`"Squeeze"`）で、
+    /// `Display` 実装が固定で `Reshape:` を名乗り `Squeeze` 由来のエラーを誤診断させるのを防ぐ
+    /// （PR #275 レビュー指摘）。
+    InvalidReshapeSpec {
+        op: &'static str,
+        reason: &'static str,
+    },
+
     /// `Mod` の `fmod=0`（Python 風・整数専用モード）が `f32` 入力に対して
     /// 要求された（TASK-7.3a・`arith.rs`）。ONNX 仕様上 `fmod=0` は整数入力
     /// のみ有効であり、`f32` に対して `rem_euclid` 等で代替すると異なる数値
     /// 意味論を静かに返すことになるため、明示的に拒否する
     /// （`.claude/rules/security.md` A03 相当の「外部入力の検証」）。
     UnsupportedFmodMode { op: &'static str },
+
+    /// `MatMul` の内部次元（`a` の最終軸と `b` の最後から 2 番目の軸。1-D 特例の軸挿入・
+    /// バッチブロードキャスト適用後）が一致しない（TASK-7.3c・`matmul.rs`）。既存の
+    /// `GemmDimMismatch` は `Gemm` 固有メッセージのため流用せず別 variant とする。
+    MatMulDimMismatch { a: Vec<usize>, b: Vec<usize> },
+
+    /// `MatMul` のバッチ・出力・入力走査量の要素数積が `usize` をオーバーフローする
+    /// （外部フォーマット由来の巨大 shape による過大メモリ確保・添字あふれを未然に拒否する。
+    /// OWASP A03。`.claude/rules/security.md`）。
+    MatMulElementCountOverflow,
+
+    /// `LayerNormalization` の `epsilon` 属性が非有限値（`NaN`／`inf`）だった
+    /// （TASK-7.3d・`layer_norm.rs`）。`epsilon` はモデル属性（外部入力）であり、
+    /// 非有限値は分散計算全体を静かに `NaN`／`inf` へ汚染するため事前検査で拒否する
+    /// （`.claude/rules/security.md` A03 相当）。
+    InvalidEpsilon { op: &'static str, epsilon: f32 },
+
+    /// `LayerNormalization` の正規化集合（`x.shape()[axis..]` の要素数積）が 0 だった
+    /// （TASK-7.3d・`layer_norm.rs`。例: `shape=[2,0], axis=1`）。`axis` 自体は
+    /// `[0, rank)` の範囲内であり [`OpError::AxisOutOfRange`] とは原因が異なるため、
+    /// 分散計算の除数 0 割り（`NaN` を静かに生成する）を専用 variant で区別して拒否する。
+    EmptyNormalizedSet { op: &'static str, axis: usize },
 }
 
 impl fmt::Display for OpError {
@@ -140,10 +175,29 @@ impl fmt::Display for OpError {
                 f,
                 "Concat: shapes differ outside concat axis {axis} (lhs {lhs:?}, rhs {rhs:?})"
             ),
+            OpError::UnsupportedDataType { op, to } => {
+                write!(f, "{op}: unsupported target data type {to}")
+            }
+            OpError::InvalidReshapeSpec { op, reason } => write!(f, "{op}: {reason}"),
             OpError::UnsupportedFmodMode { op } => write!(
                 f,
                 "{op}: fmod=0 (Python-style, integer-only) is not supported for f32 input; use fmod=1"
             ),
+            OpError::MatMulDimMismatch { a, b } => {
+                write!(f, "MatMul: inner dimension mismatch (a {a:?}, b {b:?})")
+            }
+            OpError::MatMulElementCountOverflow => {
+                write!(f, "MatMul: element count overflow (usize)")
+            }
+            OpError::InvalidEpsilon { op, epsilon } => {
+                write!(f, "{op}: epsilon {epsilon} must be finite")
+            }
+            OpError::EmptyNormalizedSet { op, axis } => {
+                write!(
+                    f,
+                    "{op}: normalized set starting at axis {axis} has 0 elements"
+                )
+            }
         }
     }
 }

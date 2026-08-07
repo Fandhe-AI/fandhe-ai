@@ -21,18 +21,24 @@ use tensor_core::Tensor;
 
 use crate::eval::{self, build_tensor, dense_vec};
 use crate::tape::{NodeId, Op, TapeNode};
+use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
 /// `nodes` から、各入力 `NodeId` への勾配寄与を返す。`out_value` は
-/// 当該ノードの forward 記録値で、`Exp`/`Tanh`/`Max` が再計算を避けて
-/// 再利用する。`Op::Leaf` は入力を持たないため空 `Vec` を返す。
+/// 当該ノードの forward 記録値で、`Exp`/`Tanh`/`Sigmoid`/`Max` が
+/// 再計算を避けて再利用する（`Sigmoid` は TASK-9.1b・#92 で追加）。
+/// `Op::Leaf` は入力を持たないため空 `Vec` を返す。
 pub(crate) fn vjp(
     op: &Op,
     out_value: &Tensor<f32>,
     upstream: &Tensor<f32>,
     nodes: &[TapeNode],
 ) -> Vec<(NodeId, Tensor<f32>)> {
-    match *op {
+    // `Op` は `CrossEntropyLoss` の `targets: Tensor<i32>` payload
+    // ゆえに `Copy` を持たない（`tape.rs::Op` doc 参照）。旧
+    // `match *op`（`Copy` 前提の値コピー）を `op.clone()` に置き換え、
+    // それ以外の分岐は変更しない。
+    match op.clone() {
         Op::Leaf => Vec::new(),
         Op::MatMul(a, b) => {
             let (da, db) = matmul_vjp(&nodes[a.0].value, &nodes[b.0].value, upstream);
@@ -70,6 +76,14 @@ pub(crate) fn vjp(
             let da = eval::mul(upstream, &factor);
             vec![(a, da)]
         }
+        Op::Sigmoid(a) => {
+            // d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))。
+            // `Exp`/`Tanh` と同じく forward 記録値 `out_value`
+            // （= sigmoid(x)）を再利用し再計算しない（TASK-9.1b・#92）。
+            let factor = sigmoid_grad_factor(out_value);
+            let da = eval::mul(upstream, &factor);
+            vec![(a, da)]
+        }
         Op::Sum { input, dim } => {
             let input_shape = nodes[input.0].value.shape();
             let da = unreduce_broadcast(upstream, input_shape, dim);
@@ -79,10 +93,36 @@ pub(crate) fn vjp(
             let da = max_vjp(&nodes[input.0].value, dim, out_value, upstream);
             vec![(input, da)]
         }
-        Op::MseLoss(pred, target) => {
-            let (dpred, dtarget) =
-                mse_loss_vjp(&nodes[pred.0].value, &nodes[target.0].value, upstream);
+        Op::MseLoss {
+            pred,
+            target,
+            reduction,
+        } => {
+            let (dpred, dtarget) = mse_loss_vjp(
+                &nodes[pred.0].value,
+                &nodes[target.0].value,
+                upstream,
+                reduction,
+            );
             vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::CrossEntropyLoss {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+        } => {
+            let dlogits = cross_entropy_loss_vjp(
+                &nodes[logits.0].value,
+                &targets,
+                class_dim,
+                reduction,
+                upstream,
+            );
+            // `targets` は非追跡（`Var`/`NodeId` を持たない）ため勾配
+            // 寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
+            // CrossEntropyLoss` doc 参照）。
+            vec![(logits, dlogits)]
         }
     }
 }
@@ -184,6 +224,16 @@ fn tanh_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
     let shape = out_value.shape().to_vec();
     let data = dense_vec(out_value);
     let out: Vec<f32> = data.iter().map(|&v| 1.0 - v * v).collect();
+    build_tensor(out, &shape)
+}
+
+/// `Sigmoid` の VJP 係数 `sigmoid(x) * (1 - sigmoid(x))` を forward
+/// 記録値 `out_value`（= `sigmoid(x)`）から計算する（TASK-9.1b・#92。
+/// `tanh_grad_factor` と同型の out_value 再利用パターン）。
+fn sigmoid_grad_factor(out_value: &Tensor<f32>) -> Tensor<f32> {
+    let shape = out_value.shape().to_vec();
+    let data = dense_vec(out_value);
+    let out: Vec<f32> = data.iter().map(|&v| v * (1.0 - v)).collect();
     build_tensor(out, &shape)
 }
 
@@ -309,16 +359,19 @@ fn max_vjp(
     build_tensor(grad, &in_shape)
 }
 
-/// `MseLoss(pred, target)` の VJP: `dPred = g · 2(pred − target) / n`、
-/// `dTarget = −dPred`（`g` はスカラー上流勾配）。`n == 0` はゼロ除算を
-/// 避け両方とも zeros を返す。PoC-v2-2 は `target` 側の勾配計算を
-/// スキップしていたが、本実装は数学的に完全な VJP を返す（`target`
-/// 側を使うか捨てるかは #18 の勾配蓄積側の責務であり、ここでは両方
-/// 提供する）。
+/// `MseLoss{pred, target, reduction}` の VJP: `dPred = g · 2(pred −
+/// target) / n`（mean）／`g · 2(pred − target)`（sum）、
+/// `dTarget = −dPred`（`g` はスカラー上流勾配）。#190 で sum 縮約を
+/// 追加（`reduction` 分岐は forward の `eval::mse_loss` と対称）。
+/// `n == 0` は mean・sum ともゼロ除算を避け zeros を返す。PoC-v2-2 は
+/// `target` 側の勾配計算をスキップしていたが、本実装は数学的に完全な
+/// VJP を返す（`target` 側を使うか捨てるかは #18 の勾配蓄積側の責務で
+/// あり、ここでは両方提供する）。
 fn mse_loss_vjp(
     pred: &Tensor<f32>,
     target: &Tensor<f32>,
     g: &Tensor<f32>,
+    reduction: Reduction,
 ) -> (Tensor<f32>, Tensor<f32>) {
     let shape = pred.shape().to_vec();
     let n = pred.numel();
@@ -329,7 +382,10 @@ fn mse_loss_vjp(
     let g_value = dense_vec(g).first().copied().unwrap_or(0.0);
     let pred_data = dense_vec(pred);
     let target_data = dense_vec(target);
-    let scale = g_value * 2.0 / n as f32;
+    let scale = match reduction {
+        Reduction::Mean => g_value * 2.0 / n as f32,
+        Reduction::Sum => g_value * 2.0,
+    };
     let dpred_data: Vec<f32> = pred_data
         .iter()
         .zip(target_data.iter())
@@ -339,6 +395,61 @@ fn mse_loss_vjp(
     let dpred = build_tensor(dpred_data, &shape);
     let dtarget = build_tensor(dtarget_data, &shape);
     (dpred, dtarget)
+}
+
+/// `CrossEntropyLoss(logits, targets)` の VJP:
+/// `d loss / d logits[..., c, ...] = (softmax(logits)[..., c, ...] − 1{c == t}) × g`
+/// （`g` はサンプルごとのスカラー係数。`Mean` は `g = upstream / N`、
+/// `Sum` は `g = upstream`。`N` はサンプル数 `= targets.numel()`）。
+/// `eval::softmax_along` を再利用し、forward（`eval::cross_entropy_loss`
+/// の log-sum-exp）と数式の実体を分離しない（`grad.rs` 冒頭 doc）。
+/// `targets` は非追跡のため戻り値は `logits` 側の勾配のみ（呼び出し元
+/// `vjp()` の `CrossEntropyLoss` 分岐参照）。
+fn cross_entropy_loss_vjp(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    upstream: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let n = outer * inner;
+
+    let softmax = eval::softmax_along(logits, class_dim);
+    let mut grad = dense_vec(&softmax);
+    let target_data = eval::dense_vec_i32(targets);
+
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+    let scale = match reduction {
+        Reduction::Mean if n > 0 => g_value / n as f32,
+        Reduction::Mean => 0.0,
+        Reduction::Sum => g_value,
+    };
+
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            // forward（`Var::cross_entropy_loss`）が事前検査済みの前提
+            // （`0 <= t < axis_len`）。範囲外は契約違反であり
+            // `debug_assert!` で検知しつつ onehot 減算をスキップする
+            // 安全側フォールバック（`eval::cross_entropy_loss` と同型の
+            // 契約違反対応）。
+            if t >= 0 && (t as usize) < axis_len {
+                let idx = (o * axis_len + t as usize) * inner + i;
+                grad[idx] -= 1.0;
+            } else {
+                debug_assert!(
+                    false,
+                    "cross_entropy_loss_vjp: target 添字が範囲外（契約違反）"
+                );
+            }
+        }
+    }
+    let scaled: Vec<f32> = grad.iter().map(|&v| v * scale).collect();
+    build_tensor(scaled, &shape)
 }
 
 #[cfg(test)]
@@ -598,6 +709,39 @@ mod tests {
         assert_grad_close("tanh dA", &da, &num_da);
     }
 
+    // --- Sigmoid（飽和域を含む） ---
+
+    #[test]
+    fn sigmoid_grad_matches_numeric() {
+        let a = t(&[0.5, -1.0, 1.5, -0.3], &[2, 2]);
+        let s = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+
+        let out_value = eval::sigmoid(&a);
+        let g = s.clone();
+        let factor = sigmoid_grad_factor(&out_value);
+        let da = eval::mul(&g, &factor);
+        let num_da = numeric_grad_unary(&a, &s, eval::sigmoid);
+
+        assert_grad_close("sigmoid dA", &da, &num_da);
+    }
+
+    #[test]
+    fn sigmoid_grad_saturated_region_matches_numeric() {
+        // |x| が大きい飽和域（勾配 ≈ 0）でも中央差分と一致することを
+        // 確認する（`eval::sigmoid` の数値安定形が飽和域で NaN/Inf を
+        // 出さないことの間接検証も兼ねる）。
+        let a = t(&[8.0, -8.0, 15.0, -15.0], &[2, 2]);
+        let s = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+
+        let out_value = eval::sigmoid(&a);
+        let g = s.clone();
+        let factor = sigmoid_grad_factor(&out_value);
+        let da = eval::mul(&g, &factor);
+        let num_da = numeric_grad_unary(&a, &s, eval::sigmoid);
+
+        assert_grad_close("sigmoid(saturated) dA", &da, &num_da);
+    }
+
     // --- Sum（dim: None / Some(0) / Some(1)） ---
 
     #[test]
@@ -680,31 +824,93 @@ mod tests {
     // --- MseLoss（pred/target 両勾配） ---
 
     #[test]
-    fn mse_loss_grad_matches_numeric() {
+    fn mse_loss_grad_mean_matches_numeric() {
         let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
         let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
         let s = t(&[3.0], &[]);
 
         let g = s.clone();
-        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g);
-        let num_dpred = numeric_grad_unary(&pred, &s, |x| eval::mse_loss(x, &target));
-        let num_dtarget = numeric_grad_unary(&target, &s, |x| eval::mse_loss(&pred, x));
+        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Mean);
+        let num_dpred =
+            numeric_grad_unary(&pred, &s, |x| eval::mse_loss(x, &target, Reduction::Mean));
+        let num_dtarget =
+            numeric_grad_unary(&target, &s, |x| eval::mse_loss(&pred, x, Reduction::Mean));
 
-        assert_grad_close("mse dPred", &dpred, &num_dpred);
-        assert_grad_close("mse dTarget", &dtarget, &num_dtarget);
+        assert_grad_close("mse(mean) dPred", &dpred, &num_dpred);
+        assert_grad_close("mse(mean) dTarget", &dtarget, &num_dtarget);
+    }
+
+    #[test]
+    fn mse_loss_grad_sum_matches_numeric() {
+        // sum 縮約（#190）。scale が `2/n` ではなく `2` になる分岐を
+        // mean と同じ数値微分ハーネスで検証する。
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Sum);
+        let num_dpred =
+            numeric_grad_unary(&pred, &s, |x| eval::mse_loss(x, &target, Reduction::Sum));
+        let num_dtarget =
+            numeric_grad_unary(&target, &s, |x| eval::mse_loss(&pred, x, Reduction::Sum));
+
+        assert_grad_close("mse(sum) dPred", &dpred, &num_dpred);
+        assert_grad_close("mse(sum) dTarget", &dtarget, &num_dtarget);
     }
 
     #[test]
     fn mse_loss_grad_n_zero_is_zero() {
         // numel() == 0 はゼロ除算を避け zeros を返す（ガード条件の
         // 直接検証。中央差分は空テンソルに対して定義できないため
-        // 解析式のみで確認する）。
+        // 解析式のみで確認する）。mean/sum いずれも同じ早期 return
+        // 経路（`n == 0` 分岐）を通るため mean のみ代表して検証する。
         let pred = build_tensor(Vec::new(), &[0]);
         let target = build_tensor(Vec::new(), &[0]);
         let g = t(&[1.0], &[]);
-        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g);
+        let (dpred, dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Mean);
         assert!(dense_vec(&dpred).is_empty());
         assert!(dense_vec(&dtarget).is_empty());
+    }
+
+    // --- CrossEntropyLoss（#191。PyTorch 参照値との突合は
+    //     `tests/nn_cross_entropy.rs`、ここでは既存の
+    //     `numeric_grad_unary`/`assert_grad_close`〈中央差分〉基盤に
+    //     揃えた eval レベルの grad check を行う） ---
+
+    #[test]
+    fn cross_entropy_loss_grad_matches_numeric() {
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        // forward 出力は既に scalar shape [] のため、`s` も scalar
+        // （`mse_loss_grad_matches_numeric` と同じ「射影 s がスカラー」
+        // パターン）。
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let dlogits = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
+        let num_dlogits = numeric_grad_unary(&logits, &s, |x| {
+            eval::cross_entropy_loss(x, &targets, 1, Reduction::Mean)
+        });
+
+        assert_grad_close("cross_entropy_loss(mean) dLogits", &dlogits, &num_dlogits);
+    }
+
+    #[test]
+    fn cross_entropy_loss_grad_sum_matches_numeric() {
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let dlogits = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Sum, &g);
+        let num_dlogits = numeric_grad_unary(&logits, &s, |x| {
+            eval::cross_entropy_loss(x, &targets, 1, Reduction::Sum)
+        });
+
+        assert_grad_close("cross_entropy_loss(sum) dLogits", &dlogits, &num_dlogits);
     }
 
     // --- reduce_to_shape（中間軸縮約。ランク同一で先頭・末尾以外の
@@ -745,7 +951,11 @@ mod tests {
     // 8 演算（Add/Mul/Relu/Exp/Tanh/Sum/Max/MseLoss）は内部ヘルパーを
     // 直接呼ぶ形でしか検証されていなかった。各 match アームの配線
     // （`nodes[a.0]`/`nodes[b.0]` の対応順序）を通しで検証するため、
-    // 全 9 演算（Leaf を除く）を vjp() 経由でテストする。
+    // 全 9 演算（Leaf を除く）を vjp() 経由でテストする。Sigmoid
+    // （TASK-9.1b・#92）追加により対象は 10 演算に拡大。
+    // CrossEntropyLoss（#191）追加により対象は 11 演算に拡大
+    // （Add/Mul/Relu/Exp/Tanh/Sigmoid/Sum/Max/MseLoss/MatMul/
+    // CrossEntropyLoss）。
 
     fn leaf_node(value: Tensor<f32>) -> TapeNode {
         TapeNode {
@@ -862,6 +1072,22 @@ mod tests {
     }
 
     #[test]
+    fn vjp_dispatch_sigmoid_returns_single_input() {
+        let a = t(&[0.5, -1.0, 1.5, -0.3], &[2, 2]);
+        let g = t(&[1.0, -1.0, 0.5, 2.0], &[2, 2]);
+        let out_value = eval::sigmoid(&a);
+        let nodes = vec![leaf_node(a)];
+        let op = Op::Sigmoid(NodeId(0));
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = eval::mul(&g, &sigmoid_grad_factor(&out_value));
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
+    }
+
+    #[test]
     fn vjp_dispatch_sum_returns_single_input() {
         let a = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
         let g = t(&[1.0, -1.0, 2.0], &[3]);
@@ -900,21 +1126,77 @@ mod tests {
     }
 
     #[test]
-    fn vjp_dispatch_mse_loss_returns_both_inputs_in_order() {
+    fn vjp_dispatch_mse_loss_mean_returns_both_inputs_in_order() {
         let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
         let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
         let g = t(&[3.0], &[]);
-        let out_value = eval::mse_loss(&pred, &target);
+        let out_value = eval::mse_loss(&pred, &target, Reduction::Mean);
         let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
-        let op = Op::MseLoss(NodeId(0), NodeId(1));
+        let op = Op::MseLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            reduction: Reduction::Mean,
+        };
 
         let grads = vjp(&op, &out_value, &g, &nodes);
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
         assert_eq!(grads[1].0, NodeId(1));
-        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g);
+        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Mean);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
         assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_mse_loss_sum_returns_both_inputs_in_order() {
+        // sum 縮約（#190）でも `Op::MseLoss` ディスパッチが reduction を
+        // 正しく `mse_loss_vjp` へ引き渡すことを確認する。
+        let pred = t(&[1.0, -2.0, 3.0, 0.5], &[2, 2]);
+        let target = t(&[0.5, -1.0, 2.5, 1.0], &[2, 2]);
+        let g = t(&[3.0], &[]);
+        let out_value = eval::mse_loss(&pred, &target, Reduction::Sum);
+        let nodes = vec![leaf_node(pred.clone()), leaf_node(target.clone())];
+        let op = Op::MseLoss {
+            pred: NodeId(0),
+            target: NodeId(1),
+            reduction: Reduction::Sum,
+        };
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 2);
+        assert_eq!(grads[0].0, NodeId(0));
+        assert_eq!(grads[1].0, NodeId(1));
+        let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g, Reduction::Sum);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
+        assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_cross_entropy_loss_returns_single_input() {
+        // `targets` は非追跡（`NodeId` を持たない Op payload）のため、
+        // `MseLoss`（pred/target 2 系統）とは異なり寄与は `logits` の
+        // 1 系統のみ（`grads.len() == 1`）であることが配線検証の要点
+        // （`tape::Op::CrossEntropyLoss` doc 参照）。
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let g = t(&[3.0], &[]);
+        let out_value = eval::cross_entropy_loss(&logits, &targets, 1, Reduction::Mean);
+        let nodes = vec![leaf_node(logits.clone())];
+        let op = Op::CrossEntropyLoss {
+            logits: NodeId(0),
+            targets: targets.clone(),
+            class_dim: 1,
+            reduction: Reduction::Mean,
+        };
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
     }
 }
