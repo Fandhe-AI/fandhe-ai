@@ -104,19 +104,25 @@ cmd_self_test() {
 
 cmd_layer1() {
   echo "1 層目（REQ-4・判定器単体）: guardrail eval の見逃し率 0%・誤検知率 30% 以下を検証"
+  # --test 引数は LAYER1_TESTS（単一ソース）から生成する。ハードコードすると
+  # LAYER1_TESTS への追加が実行対象に反映されず、self-test は green のまま
+  # 新規テストが未実行になる（Bugbot 指摘・#147）。
+  local test_args=()
+  for name in "${LAYER1_TESTS[@]}"; do
+    test_args+=(--test "${name}")
+  done
   # --locked: Cargo.lock の意図しない書き換え・runner 汚染を防止する（他ジョブと同一方針）。
-  cargo test -p guardrail --locked \
-    --test eval_harness \
-    --test labeled_changes_labels
+  cargo test -p guardrail --locked "${test_args[@]}"
 }
 
 cmd_layer2() {
   echo "2 層目（REQ-5・除外適用後）: 不変条件 (1)(2)・G2/G5 ブラインドスポットの安全側判定を検証"
-  cargo test -p guardrail --locked \
-    --test label_invariant_empty_exclusions \
-    --test label_invariant_safe_side_monotonicity \
-    --test blindspot_g2_regression \
-    --test blindspot_g5_regression
+  # --test 引数は LAYER2_TESTS（単一ソース）から生成する（cmd_layer1 と同一方針）。
+  local test_args=()
+  for name in "${LAYER2_TESTS[@]}"; do
+    test_args+=(--test "${name}")
+  done
+  cargo test -p guardrail --locked "${test_args[@]}"
 }
 
 cmd_all() {
