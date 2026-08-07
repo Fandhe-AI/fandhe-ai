@@ -41,6 +41,18 @@ pub fn softmax(x: &Tensor<f32>, axis: i64) -> Result<Tensor<f32>, OpError> {
     let inner: usize = shape[axis_norm + 1..].iter().product();
 
     let mut out = vec![0f32; slice.len()];
+
+    // `outer`・`axis_len`・`inner` のいずれかが 0（`slice` が空）なら結果も空であり、
+    // ループ本体は何も書き込まない。しかし `checked_numel`（tensor-core）は
+    // `[usize::MAX, 0]` のような「積が 0 になる巨大次元との組合せ」形状を正規に許容する
+    // ため、素朴に `outer`/`inner` をループ境界に使うと空の `slice` に対して
+    // `usize::MAX` 回反復するハングを引き起こしうる（PR #276 Bugbot 指摘。`MatMul` の
+    // 形状検証方針と揃え、空データはループに入る前に早期リターンする。OWASP A03。
+    // `.claude/rules/security.md`）。
+    if slice.is_empty() {
+        return Tensor::new(out, shape).map_err(OpError::from);
+    }
+
     for o in 0..outer {
         for i in 0..inner {
             let base = o * axis_len * inner + i;
@@ -141,5 +153,17 @@ mod tests {
         let x = Tensor::<f32>::zeros(&[2, 3]).unwrap();
         let err = softmax(&x, 5).unwrap_err();
         assert!(matches!(err, OpError::AxisOutOfRange { .. }));
+    }
+
+    #[test]
+    fn softmax_empty_axis_with_huge_sibling_dim_does_not_hang() {
+        // `checked_numel`（tensor-core）は積が 0 になる形状（[usize::MAX, 0] 等）を
+        // 正規に許容するため、`axis` 自体のサイズが 0 で兄弟次元（`outer`）が
+        // `usize::MAX` のような巨大値の場合、素朴な実装だと空データにもかかわらず
+        // `outer` を `usize::MAX` 回反復してハングしうる（PR #276 Bugbot 指摘）。
+        // 空形状は早期リターンし、即座に空結果が返ることを確認する。
+        let x = Tensor::<f32>::new(Vec::new(), &[usize::MAX, 0]).unwrap();
+        let y = softmax(&x, 1).unwrap();
+        assert_eq!(y.shape(), &[usize::MAX, 0]);
     }
 }

@@ -18,6 +18,13 @@ use super::error::OpError;
 /// `batch*k*n`（B 実体化サイズ）のいずれかが usize をあふれる場合、外部フォーマット
 /// （ONNX shape 属性）由来の巨大 shape とみなし [`OpError::MatMulElementCountOverflow`]
 /// で拒否する（OWASP A03。`.claude/rules/security.md`）。`matmul` から実体化前に呼ばれる。
+///
+/// `batch` を含む積（`batch*m*k` 等）だけでなく `m*k`・`k*n`・`m*n`（バッチを含まない
+/// 単一行列サイズ）単体も検査する。`batch` が 0（空バッチ）の場合は `batch*m*k` 等が
+/// 0 になり `batch` 込みの検査を素通りするが、`matmul` 本体はバッチループ内の
+/// ストライド計算（`a_mat_stride = m * k` 等）でバッチに依存しない `m*k`・`k*n`・`m*n`
+/// を直接使うため、ここで別途あふれを検査しないとバッチ次元が空かつ行列次元が巨大な
+/// 入力で debug ビルド時にオーバーフロー panic しうる（PR #276 Bugbot 指摘）。
 fn checked_matmul_element_counts(
     batch_shape: &[usize],
     m: usize,
@@ -39,6 +46,14 @@ fn checked_matmul_element_counts(
     batch
         .checked_mul(k)
         .and_then(|v| v.checked_mul(n))
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    // バッチ非依存のストライド（`matmul` 本体で `a_mat_stride`/`b_mat_stride`/
+    // `out_mat_stride` として使われる）単体のあふれも検査する（上記コメント参照）。
+    m.checked_mul(k)
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    k.checked_mul(n)
+        .ok_or(OpError::MatMulElementCountOverflow)?;
+    m.checked_mul(n)
         .ok_or(OpError::MatMulElementCountOverflow)?;
     Ok((batch, out_len))
 }
@@ -149,6 +164,22 @@ pub fn matmul(a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, OpError> 
     let a_mat_stride = m * k;
     let b_mat_stride = k * n;
     let out_mat_stride = m * n;
+    // `out_len == 0`（`m`・`n`・`batch` いずれかが 0）なら書き込むべき要素は存在しない。
+    // しかし `checked_numel`（tensor-core）は積が 0 になる巨大形状（例: `batch_shape`
+    // に `usize::MAX` を含み `m`/`n` が 0）を正規に許容するため、`batch` をそのまま
+    // ループ境界に使うと空データにもかかわらず `usize::MAX` 回反復してハングしうる
+    // （softmax と同型のハング。PR #276 Bugbot 指摘を踏まえ、レビューが未指摘だった
+    // この経路も同一方針で早期リターンする。OWASP A03。`.claude/rules/security.md`）。
+    if out_len == 0 {
+        let mut out_shape = batch_shape;
+        if !a_expanded_lhs {
+            out_shape.push(m);
+        }
+        if !b_expanded_rhs {
+            out_shape.push(n);
+        }
+        return Tensor::new(out, &out_shape).map_err(OpError::from);
+    }
     for bi in 0..batch {
         let a_mat = &a_slice[bi * a_mat_stride..(bi + 1) * a_mat_stride];
         let b_mat = &b_slice[bi * b_mat_stride..(bi + 1) * b_mat_stride];
@@ -355,6 +386,41 @@ mod tests {
         // out_len・batch*m*k は収まるが batch*k*n（B 実体化サイズ）があふれるケース。
         let err = checked_matmul_element_counts(&[1], 1, 2, usize::MAX / 2 + 1).unwrap_err();
         assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn element_count_overflow_rejected_via_empty_batch_stride() {
+        // batch=0（空バッチ次元）だと batch を含む積（batch*m*k 等）はすべて 0 になり
+        // あふれ検査を素通りするが、`matmul` 本体のストライド計算（`a_mat_stride = m*k`
+        // 等）は batch に依存しない生の m*k を使うため、これ単体を検査しないと空バッチ
+        // かつ巨大な行列次元で見逃す（PR #276 Bugbot 指摘）。
+        let err = checked_matmul_element_counts(&[0], usize::MAX / 2 + 1, 2, 1).unwrap_err();
+        assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn matmul_end_to_end_rejects_empty_batch_with_huge_matrix_dims() {
+        // `checked_matmul_element_counts` の検査だけでなく `matmul` 本体を通し、空
+        // バッチ・巨大行列次元の入力が実体化前にオーバーフロー拒否されることを確認する
+        // （debug ビルドの `a_mat_stride = m * k` パニックを未然に防ぐ経路。
+        // PR #276 Bugbot 指摘）。
+        let a = Tensor::<f32>::new(Vec::new(), &[0, usize::MAX / 2 + 1, 2]).unwrap();
+        let b = Tensor::<f32>::new(Vec::new(), &[0, 2, 1]).unwrap();
+        let err = matmul(&a, &b).unwrap_err();
+        assert!(matches!(err, OpError::MatMulElementCountOverflow));
+    }
+
+    #[test]
+    fn matmul_empty_batch_with_huge_batch_dim_does_not_hang() {
+        // `checked_numel`（tensor-core）が積 0 になる巨大形状（`batch_shape` に
+        // `usize::MAX` を含み `m`/`n` が 0）を許容するため、`out_len == 0` の
+        // ガードなしでは `for bi in 0..batch` が `usize::MAX` 回反復してハングしうる
+        // （softmax と同型のハング。advisor 指摘によりレビュー未指摘経路も同一方針で
+        // 早期リターンする）。
+        let a = Tensor::<f32>::new(Vec::new(), &[usize::MAX, 0, 1]).unwrap();
+        let b = Tensor::<f32>::new(Vec::new(), &[usize::MAX, 1, 0]).unwrap();
+        let y = matmul(&a, &b).unwrap();
+        assert_eq!(y.shape(), &[usize::MAX, 0, 0]);
     }
 
     #[test]
