@@ -53,9 +53,11 @@ pub enum BenchGateError {
     /// bench-harness 側の計測プロトコル違反・統計計算失敗をそのまま包む。
     Measurement(String),
     /// 劣化率算出に使う baseline の中央値が 0（またはそれに近い非有限値を生む値）であり、
-    /// 除算結果が非有限（NaN／inf）になる場合に返す。`median_q1_q3` 自体は非有限値の
-    /// 混入を検査しないため、除算前にこの境界を本モジュール側で明示的に検査する
-    /// （実装計画 #107・レビュー指摘: 非有限値混入の発生源はデシリアライズではなく除算）。
+    /// 除算結果が非有限（NaN／inf）になる場合に返す。`median_q1_q3` は NaN の混入は
+    /// 自身で検査する（`bench_harness::stats::median_q1_q3` が `BenchError::NanSample`
+    /// を返す）が、Infinite（±inf）は個別にチェックしないため通過しうる。この除算自体が
+    /// 非有限値（Infinite）の発生源になりうるため、除算直後にこの境界を本モジュール側で
+    /// 明示的に検査する（実装計画 #107・レビュー指摘）。
     NonFiniteRatio { baseline_median_secs: f64 },
     /// [`BenchSignal`] の反復回数が [`MIN_BENCH_ITERATIONS`] 未満、または
     /// `bench_median_pct` が `bench_measurements_pct` の実際の中央値と一致しない
@@ -111,7 +113,9 @@ impl BenchSignal {
     /// # Errors
     ///
     /// - `measurements_pct.len() < MIN_BENCH_ITERATIONS` の場合 [`BenchGateError::InvalidSignal`]
-    /// - `median_q1_q3` が失敗した場合（空・NaN 混入） [`BenchGateError::Measurement`]
+    /// - `median_q1_q3` が失敗した場合（空・NaN 混入。Infinite は個別チェックしないため
+    ///   通過しうるが、後続の [`Self::validate`] が `bench_measurements_pct` の有限性を
+    ///   検査して拒否する） [`BenchGateError::Measurement`]
     pub fn from_measurements_pct(measurements_pct: Vec<f64>) -> Result<Self, BenchGateError> {
         if measurements_pct.len() < MIN_BENCH_ITERATIONS {
             return Err(BenchGateError::InvalidSignal(format!(
@@ -239,8 +243,9 @@ impl BenchGateRunner for HarnessBenchGate {
 
             let baseline_median_secs = baseline_measurement.median_secs;
             // baseline の中央値が 0（またはそれに近い値）だと除算結果が非有限（NaN／inf）に
-            // なる。`bench_harness::median_q1_q3` は非有限値の混入自体は検査しないため、
-            // 発生源（この除算）で明示的に検査してから系列へ加える
+            // なる。NaN は後段の `bench_harness::median_q1_q3` が自身で検査し
+            // `BenchError::NanSample` を返すが、Infinite（±inf）は個別にチェックせず
+            // 通過しうるため、発生源（この除算）で明示的に検査してから系列へ加える
             // （実装計画 #107・レビュー指摘。A08: silent corruption の防止）。
             let pct = (candidate_measurement.median_secs / baseline_median_secs - 1.0) * 100.0;
             if !pct.is_finite() {
