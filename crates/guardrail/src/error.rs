@@ -62,6 +62,30 @@ pub enum GuardrailError {
     /// 「ベンチはゲート全通過時のみ計測する」への違反。呼び出し側バグとみなし
     /// 判定を続行せず拒否する。`.claude/rules/security.md` A08）。
     InconsistentDecisionInput { reason: String },
+
+    /// [`crate::exclusion_match`] のポリシー除外ルール match 判定が呼び出す
+    /// `git diff`／`git apply --check` 等の子プロセス起動自体に失敗した
+    /// （実行ファイル不在・権限不足等）。TASK-5.2b・イシュー #123。
+    ///
+    /// 起動失敗を「match なし」（＝除外リスト素通り→自動適用方向）へ丸めると
+    /// fail-open になるため、必ずエラーとして呼び出し元へ伝播する
+    /// （`.claude/rules/security.md` A08）。
+    DiffSpawn {
+        command: String,
+        source: std::io::Error,
+    },
+
+    /// [`crate::exclusion_match`] が呼び出した `git diff` 系コマンドが非ゼロ
+    /// 終了した（baseline ref が不正・リポジトリ外実行等）。TASK-5.2b・
+    /// イシュー #123。
+    ///
+    /// `DiffSpawn` と同様、fail-closed のため「match なし」へは丸めず
+    /// エラーとして伝播する。
+    DiffFailed {
+        command: String,
+        exit_code: Option<i32>,
+        stderr: String,
+    },
 }
 
 impl fmt::Display for GuardrailError {
@@ -80,6 +104,19 @@ impl fmt::Display for GuardrailError {
             GuardrailError::InconsistentDecisionInput { reason } => {
                 write!(f, "判定入力が矛盾しています: {reason}")
             }
+            GuardrailError::DiffSpawn { command, source } => {
+                write!(f, "コマンド起動に失敗しました: {command}: {source}")
+            }
+            GuardrailError::DiffFailed {
+                command,
+                exit_code,
+                stderr,
+            } => {
+                write!(
+                    f,
+                    "コマンドが失敗しました: {command} (exit_code={exit_code:?}): {stderr}"
+                )
+            }
         }
     }
 }
@@ -88,6 +125,7 @@ impl std::error::Error for GuardrailError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             GuardrailError::Io { source, .. } => Some(source),
+            GuardrailError::DiffSpawn { source, .. } => Some(source),
             _ => None,
         }
     }

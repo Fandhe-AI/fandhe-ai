@@ -195,7 +195,9 @@ fn report_error_and_exit(err: &GuardrailError) -> ExitCode {
         GuardrailError::InvalidInput(_)
         | GuardrailError::Io { .. }
         | GuardrailError::NotImplemented(_)
-        | GuardrailError::InconsistentDecisionInput { .. } => {
+        | GuardrailError::InconsistentDecisionInput { .. }
+        | GuardrailError::DiffSpawn { .. }
+        | GuardrailError::DiffFailed { .. } => {
             GuardrailExitCode::InternalError.into_process_exit_code()
         }
     }

@@ -30,6 +30,14 @@
 //! - [`determinism`][]: 学習系回帰テスト向け決定的シード設定ユーティリティ
 //!   （TASK-4.4b・イシュー #113 管轄）。`self-repair` は
 //!   `pub use guardrail::determinism;` で再輸出し双方から利用する。
+//! - [`exclusion_match`][]: ポリシー除外リスト（REQ-5・`policy-exclusion.toml`。
+//!   TASK-5.1a・#119 が定義）のうち `test-tolerance-loosening` ルールの match
+//!   述語（[`exclusion_match::test_assertion_relaxation_without_prod_change`]）。
+//!   テスト許容誤差の**単独**緩和（本番コード変更を伴わない）を検知し、
+//!   REQ-4 ゲーミング検知（本番・テスト**同時**変更が対象）がすり抜ける
+//!   PoC-3 既知ブラインドスポット G5 を補う（TASK-5.2b・イシュー #123）。
+//!   `MatchRule` 列挙・`policy-exclusion.toml` ロード・`decide()` への配線は
+//!   `policy_exclusion` モジュール（TASK-5.2a／c・#122／#124）のスコープ。
 //!
 //! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
 //! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
@@ -46,6 +54,7 @@ pub mod config;
 pub mod decision;
 pub mod determinism;
 pub mod error;
+pub mod exclusion_match;
 pub mod exit_code;
 pub mod median_gate;
 pub mod report;
