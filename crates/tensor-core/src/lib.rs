@@ -45,6 +45,13 @@
 //! エンジンであり、`tensor-core` の公開 API 利用者が直接切り替える経路
 //! ではない（設計は `docs/dispatch-rules-design.md`〈#67〉、決定表は
 //! `dispatch` モジュールのドキュメンテーションコメント参照）。
+//!
+//! `typed`（TASK-10.1b・#99）は基盤層（実行時 rank・shape）の上に積む
+//! **後続レイヤー**として、コンパイル時に shape が既知の固定次元層
+//! （全結合層の重み・bias 等）に限定した const generics 型レベル検証
+//! （[`typed::FixedVec`]・[`typed::FixedMat`]・[`typed::BatchedFeatures`]）
+//! を提供する（REQ-10。基盤層自体の rank は実行時のまま変更しない設計
+//! 判断は §2.5 参照。`docs/public-api-design.md`）。
 
 mod backend_ops;
 mod broadcast;
@@ -55,6 +62,7 @@ mod element;
 mod error;
 mod ops_shape;
 mod tensor;
+pub mod typed;
 
 pub use backend_ops::{BackendOps, ops_for};
 pub use broadcast::broadcast_shape;
@@ -67,3 +75,4 @@ pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 pub use tensor::Tensor;
+pub use typed::{BatchedFeatures, FixedMat, FixedVec};

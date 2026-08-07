@@ -55,7 +55,15 @@
 //! `nn::loss::MseLoss`（薄いラッパー）を追加した。既存 `Var::mse_loss`
 //! は `mse_loss_with(target, Reduction::Mean)` への委譲に変更したが、
 //! シグネチャ・既定の意味（mean）は維持する（公開 API 非破壊）。
-//! CrossEntropy 損失は #191 のスコープ。
+//!
+//! #191（親イシュー #189）で CrossEntropy 損失（log-sum-exp 安定化・
+//! クラス次元指定）を追加した。`Var::cross_entropy_loss`（`var.rs`・
+//! `Op::CrossEntropyLoss`）は log-softmax → NLL を個別オペ合成せず
+//! `MseLoss` と同じ 1 個の融合オペとして実装し、VJP（`grad.rs`）は
+//! 解析形 `softmax(x) − onehot(t)` で閉じる。`nn::loss::
+//! CrossEntropyLoss` はその薄いラッパー。`Reduction`（`Mean`/`Sum`）は
+//! #190 が `var.rs` に定義したものをそのまま再利用する（`nn::loss` 側に
+//! 重複定義は置かない）。
 //!
 //! #193（親 #192「optimizer（SGD・AdamW）・gradient clipping の実装」）
 //! で optimizer の第 1 分割 `optim::Sgd`/`optim::SgdConfig`（momentum・
