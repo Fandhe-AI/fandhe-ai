@@ -105,10 +105,31 @@ fn repo_root() -> PathBuf {
 /// ヘルパー。本番経路〈`crates/self-repair/src`〉の
 /// `.claude/rules/coding-rust.md`「unwrap/expect 禁止」はここには適用されない
 /// ——既存の統合テスト（`verify_gates_integration.rs`）と同じ運用）。
+///
+/// `current_dir(cwd)` だけでは sandbox 隔離を保証できない。本クレートの
+/// `git commit`／`git diff` は `lefthook.yml` の `pre-push.jobs.test`
+/// （`cargo test --workspace`）経由で間接的に実行されうるが、githooks(5) の
+/// 仕様どおり git はフック起動時に `GIT_DIR`／`GIT_WORK_TREE`／
+/// `GIT_INDEX_FILE` 等の `GIT_*` 環境変数を子プロセスへ設定し、それらは
+/// `cargo test` → 本テストバイナリ → `Command::new("git")` まで継承されうる。
+/// 継承された `GIT_DIR` は `current_dir` より優先されるため、これを除去
+/// しないと sandbox 内のつもりの `git add`／`git commit` が実リポジトリの
+/// `.git` を対象にしてしまう（`feature_addition_loop_completion_task_3_3c.rs`
+/// の `sandboxed_git_command` と同一の事故パターン・同一の対処。#141 PR
+/// レビュー〈Bugbot High Severity〉指摘）。sandbox を実リポジトリから完全に
+/// 独立させるため、継承されうる `GIT_*` 環境変数をすべて明示的に除去して
+/// から起動する。
 fn git(cwd: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
+    let mut command = Command::new("git");
+    command.args(args).current_dir(cwd);
+    for (key, _) in env::vars_os() {
+        if let Some(key_str) = key.to_str()
+            && key_str.starts_with("GIT_")
+        {
+            command.env_remove(key_str);
+        }
+    }
+    let output = command
         .output()
         .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗しました: {error}"));
     if !output.status.success() {
