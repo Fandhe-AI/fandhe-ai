@@ -1,0 +1,56 @@
+# `guardrail` CLI（crates/guardrail）のポリシー除外リスト初期設定
+# （TASK-5.1a・イシュー #119、REQ-5）。
+#
+# REQ-5（docs/spec/04-requirements.md:121-136）は、ガードレールの機械判定
+# （decision.rs の 5 条件評価）では検知できない変更カテゴリ（モデルアーキテクチャ
+# 変更・テスト許容誤差の単独緩和）を、ポリシーとして無条件に人間承認必須と
+# 定義する仕組みを要求する。PoC-3 発見事項 5（G2: 隠れ層次元数変更・G5:
+# テスト許容誤差単独緩和。docs/spec/03-poc/poc-3-guardrail-validity/README.md:154）
+# はいずれも REQ-4 の機械的シグナルを全て回避し自動適用された実証済み
+# ブラインドスポットであり、本ファイルはその防波堤となる初期除外リストである。
+#
+# 設計の正本は docs/policy-exclusion-design.md（TASK-5.1、承認済み）§4.1 の
+# 記述例 2 件をそのまま採用する（値の追加・変更を含まない。プロダクト判断を
+# 伴う新カテゴリ・パターン追加は本ファイル単独では行わない。「許容依存一覧の
+# 追加・更新、Cargo.toml／Cargo.lock の変更」カテゴリの新設は TASK-5.1b
+# 〈イシュー #120・human-required〉のスコープであり、本ファイルには未反映）。
+#
+# 本ファイルの内容は crates/guardrail/src/policy_exclusion.rs（TASK-5.2・
+# イシュー #121 で実装予定）の builtin_defaults() と完全一致することを回帰
+# テスト repo_root_policy_exclusion_toml_matches_builtin_defaults（同イシュー
+# で追加予定）で保証する設計である（設計 §4「組み込み既定値との数値一致を
+# 回帰テストで保証する」）。乖離は判定迂回経路になり得るため、両者は必ず
+# 同一 PR で同時変更し、ユーザー承認を得ること（.claude/rules/security.md）。
+# 本イシュー（#119）の時点では policy_exclusion.rs・一致回帰テストのいずれも
+# 未実装であり、本ファイルは crates/guardrail の判定フローにまだ組み込まれて
+# いない（TASK-5.2 で統合）。
+#
+# フィールド順序についての注意: TOML の仕様上、`[exclusion.match]` の
+# テーブル見出し後に置かれた key はそのテーブルに属してしまうため、
+# `action` は必ず `[exclusion.match]` セクションより前に記述する
+# （crates/guardrail/src/policy_exclusion.rs のテスト内コメント参照。
+# TASK-5.2 で実装予定）。
+schema_version = 1
+
+[[exclusion]]
+id = "arch-hyperparameter-change"
+category = "architecture_change"
+description = "モデルアーキテクチャ定義ファイル（隠れ層次元数・レイヤー構成等のハイパーパラメータを含む）への変更"
+rationale = "PoC-3 発見事項5（G2: 隠れ層次元数 8→10 拡大）が REQ-4 の機械的シグナル（build/test/clippy/bench/行数/API破壊/ゲーミング検知）を全て回避し自動適用された（docs/spec/03-poc/poc-3-guardrail-validity/README.md）。REQ-5 受け入れ基準1に対応。"
+paths = ["**/src/model*.rs", "**/src/nn/**", "**/src/*model*/**"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
+
+[[exclusion]]
+id = "test-tolerance-loosening"
+category = "test_tolerance_loosening"
+description = "本番コード変更を伴わない、テストの許容誤差・アサーション条件の単独緩和"
+rationale = "PoC-3 発見事項5（G5: leaky_relu 許容誤差 1e-6→1e-2 の単独緩和）が REQ-4 のゲーミング検知（本番コードとテストの同時変更のみ対象）をすり抜けて自動適用された。REQ-5 受け入れ基準2に対応。"
+paths = ["**/*.rs"]
+action = "human_approval"
+
+[exclusion.match]
+type = "test_assertion_relaxation_without_prod_change"
+assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
