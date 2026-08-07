@@ -127,7 +127,14 @@ pub fn builtin_defaults() -> Result<PolicyExclusionConfig, PatternError> {
 /// `unevaluated_rule_ids`（評価ロジック未実装で判定不能）を型で分離する
 /// ことで、呼び出し側（#124）が両者を取り違えて fail-open にならないよう
 /// にする（モジュール冒頭「未評価ルールと fail-closed」参照）。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// `Default` は意図的に derive しない: 既定値
+/// `{matched_rule_ids: [], unevaluated_rule_ids: []}` は「全評価済み・
+/// 未マッチ（安全）」を意味してしまい、`unwrap_or_default()` 等のエラー
+/// パス経由で本型が分離しようとした「未マッチ」と「未評価」の混同を
+/// 再導入しうる（イシュー #122 レビュー指摘）。値が必要な場合は
+/// [`ExclusionEvaluation::evaluate`] を明示的に呼び出すこと。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExclusionEvaluation {
     pub matched_rule_ids: Vec<String>,
     /// 評価ロジック未実装のため判定不能だったルール id

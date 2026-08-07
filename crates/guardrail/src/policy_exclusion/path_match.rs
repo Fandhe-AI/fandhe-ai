@@ -145,10 +145,22 @@ impl PathPattern {
     /// パスであることを保証する契約を負う（git diff の quoted/octal-escaped
     /// パス等、非正規化パスは黙って不一致になりうる。正規化は変更ファイル
     /// 一覧の取得元である #103／#124 側の責務。イシュー #122 レビュー指摘）。
+    ///
+    /// **注意（fail-open 方向のリスク）**: 組み込み既定の 3 パターン
+    /// （[`crate::policy_exclusion::builtin_defaults`]）はいずれも先頭が `**`
+    /// であり、`**` は空セグメントも吸収するため非正規化パス（先頭 `/` 等）
+    /// でも現状は正しく match する（DP 挙動で確認済み）。しかし将来 `**` で
+    /// 始まらないカスタムパターンが TOML ロード等（#124）で導入された場合、
+    /// 非正規化パスに対して沈黙の不一致が起こりうる。これは本モジュール冒頭
+    /// （`mod.rs`）の fail-closed／A08 基準（「発火すべき除外ルールが発火せず
+    /// 自動適用へ倒れる経路を作らない」）に照らすと **fail-open 方向**
+    /// （ルールが発火せず無条件人間承認を経ずに自動適用が通ってしまいうる）
+    /// である。安全側の「不一致」ではない点に注意すること。
     /// 契約違反をテスト・開発ビルドで早期検知するため、明らかな非正規化パス
     /// （先頭 `/`・`\` を含む）は `debug_assert!` で検出する（本番経路では
     /// `.claude/rules/coding-rust.md` の `unwrap()`/`expect()` 禁止方針に
-    /// 揃え、release ビルドではパニックせず fail-closed な「不一致」を返す）。
+    /// 揃え、release ビルドではパニックしない。ただし上記の通りこれは
+    /// 安全側ではなく契約違反の早期検知を目的とした assert に過ぎない）。
     pub fn matches(&self, path: &str) -> bool {
         debug_assert!(
             !path.starts_with('/') && !path.contains('\\'),
@@ -281,6 +293,28 @@ mod tests {
     #[test]
     fn rejects_control_characters() {
         assert!(PathPattern::compile("src/\u{0007}model.rs").is_err());
+    }
+
+    #[test]
+    fn question_mark_matches_exactly_one_character() {
+        // `?` は任意の 1 文字にのみ一致する（0 文字・2 文字以上には一致しない）。
+        let p = PathPattern::compile("src/model?.rs").unwrap();
+        assert!(p.matches("src/model1.rs"));
+        assert!(p.matches("src/modelx.rs"));
+        assert!(!p.matches("src/model.rs"));
+        assert!(!p.matches("src/model12.rs"));
+    }
+
+    #[test]
+    fn pattern_not_starting_with_double_star_requires_exact_prefix() {
+        // 組み込み既定 3 パターンはいずれも `**` 始まりだが、`**` で始まらない
+        // カスタムパターン（#124 で TOML ロードにより理論上導入されうる）は
+        // 正規化済みパスに対しては先頭セグメントの完全一致を要求する
+        // （`matches` のドキュメンテーションコメント「fail-open 方向のリスク」
+        // 参照。将来の回帰検知用）。
+        let p = PathPattern::compile("src/model*.rs").unwrap();
+        assert!(p.matches("src/model_v2.rs"));
+        assert!(!p.matches("crates/x/src/model_v2.rs"));
     }
 
     #[test]
