@@ -59,29 +59,29 @@ impl CommandOutput {
     /// `SystemCommandRunner::run`（本番経路）と `verify_gates.rs` の
     /// `CommandRunner` テストダブル（スクリプト化したログを構築する
     /// ユニットテスト）の双方から呼べるよう `pub(crate)` とする。
-    pub(crate) fn from_captured(success: bool, mut combined: Vec<u8>) -> Self {
-        let log_tail = if combined.len() <= MAX_CAPTURED_LOG_BYTES {
-            String::from_utf8_lossy(&combined).into_owned()
+    pub(crate) fn from_captured(success: bool, combined: Vec<u8>) -> Self {
+        // `combined` はプロセス出力の生バイト列であり、必ずしも UTF-8 として
+        // 妥当とは限らない。不正なバイト列を含む場合、上限適用前（バイト列の
+        // 段階）で切り詰めてから `String::from_utf8_lossy` を呼ぶと、不正な
+        // 各バイトが置換文字 U+FFFD（3 バイト）へ個別に展開されうるため、
+        // 変換後の文字列長が `MAX_CAPTURED_LOG_BYTES` を大きく超過しうる
+        // （最悪 1 バイトあたり 3 バイトへ膨張＝ 3 倍）。これを避けるため、
+        // 先に lossy 変換して妥当な UTF-8 文字列に正規化してから、文字列側
+        // （`char_indices` による文字境界）で上限を適用する。
+        let decoded = String::from_utf8_lossy(&combined).into_owned();
+        let log_tail = if decoded.len() <= MAX_CAPTURED_LOG_BYTES {
+            decoded
         } else {
-            // 末尾 MAX_CAPTURED_LOG_BYTES 相当を残す。UTF-8 文字境界を跨いで
-            // 分断すると `String::from_utf8_lossy` が置換文字を挿入し
-            // ログが読みにくくなるため、境界に達するまで先頭を切り詰める
-            // （v1 `exec.rs` と同一方針）。
-            let cut = combined.len() - MAX_CAPTURED_LOG_BYTES;
-            let mut boundary = cut;
-            // UTF-8 継続バイト（先頭 2 ビットが `10`）の間は境界とみなさず
-            // 前進する。`[u8]` は `str::is_char_boundary` を持たないため
-            // バイトパターンを直接判定する（`combined` はプロセス出力の生
-            // バイト列であり、必ずしも UTF-8 として妥当とは限らないが、
-            // 継続バイト判定自体は妥当性を前提としない）。
-            while boundary < combined.len() && combined[boundary] & 0b1100_0000 == 0b1000_0000 {
-                boundary += 1;
-            }
-            combined.drain(0..boundary);
-            format!(
-                "{TRUNCATED_LOG_PREFIX}{}",
-                String::from_utf8_lossy(&combined)
-            )
+            // 末尾 MAX_CAPTURED_LOG_BYTES 相当を残す。`decoded` は既に妥当な
+            // UTF-8 文字列なので `char_indices` で文字境界を安全に走査できる
+            // （バイト列時点でのバイトパターン判定は不要）。
+            let cut = decoded.len() - MAX_CAPTURED_LOG_BYTES;
+            let boundary = decoded
+                .char_indices()
+                .map(|(index, _)| index)
+                .find(|&index| index >= cut)
+                .unwrap_or(decoded.len());
+            format!("{TRUNCATED_LOG_PREFIX}{}", &decoded[boundary..])
         };
         CommandOutput { success, log_tail }
     }
@@ -234,6 +234,26 @@ mod tests {
         bytes.extend_from_slice("あ".as_bytes());
         let output = CommandOutput::from_captured(true, bytes);
         assert!(!output.log_tail().contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn log_tail_stays_within_bound_when_invalid_utf8_expands_via_replacement_chars() {
+        // 不正な UTF-8 バイト列（`0xFF` は単独では継続バイトと誤認されない
+        // ため、旧実装のバイト境界判定だけでは切り詰め対象に残ってしまう）
+        // を上限超過分含める。`String::from_utf8_lossy` は不正バイト 1 個を
+        // U+FFFD（3 バイト）へ展開するため、バイト列側で先に切り詰めてから
+        // 変換すると変換後の文字列が上限の最大約 3 倍まで膨張しうる
+        // （Cursor Bugbot review #4885590407 が指摘した回帰）。文字列化後に
+        // 切り詰める本実装ではこの膨張が起きないことを確認する。
+        let mut bytes = vec![0xFFu8; MAX_CAPTURED_LOG_BYTES + 1024];
+        bytes.extend_from_slice(b"tail-marker");
+        let output = CommandOutput::from_captured(true, bytes);
+        assert!(
+            output.log_tail().len() <= MAX_CAPTURED_LOG_BYTES + TRUNCATED_LOG_PREFIX.len(),
+            "log_tail should stay within the documented bound even for invalid UTF-8 input, got {} bytes",
+            output.log_tail().len()
+        );
+        assert!(output.log_tail().ends_with("tail-marker"));
     }
 
     #[test]
