@@ -204,7 +204,15 @@ impl Sgd {
         }
 
         let use_momentum = self.config.momentum != 0.0;
-        if use_momentum && let Some(velocity) = &self.velocity {
+        // `use_momentum` ではなく `self.velocity.is_some()` をゲートにする:
+        // 現状 `SgdConfig` は構築後不変で `velocity` は `use_momentum` の
+        // 場合のみ `Some` になるため両者は常に一致するが、下流のループが
+        // `self.velocity.as_ref().map(|v| ... v[i] ...)` で件数検証なしに
+        // 添字アクセスするため、ここでの検証は velocity の有無だけで
+        // 判定し `use_momentum` の値に依存させない。将来 config が可変に
+        // なる等で両者が乖離しても、添字アクセス前に必ず件数・shape が
+        // 検証された状態を保つ（Review 指摘: #193 momentum PR）。
+        if let Some(velocity) = &self.velocity {
             if velocity.len() != params.len() {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "Sgd::step: params.len() ({}) changed from previous step ({}); \
