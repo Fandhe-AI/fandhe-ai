@@ -79,10 +79,9 @@ pub enum EvalExitCode {
 
 impl EvalExitCode {
     /// 見逃し率 0% かつ誤検知率 30% 以下（REQ-4 受け入れ基準）の合否から
-    /// 終了コード区分への唯一の変換経路。評価ロジック本体は #108/#111 の
-    /// スコープであり、TASK-4.1a では `eval` 自体が
-    /// `GuardrailError::NotImplemented` で終了するため未使用だが、
-    /// 契約を先に固定しておく（計画 4 節ステップ 2）。
+    /// 終了コード区分への唯一の変換経路。評価ロジック本体（[`crate::eval::run`]。
+    /// TASK-4.3a・イシュー #115）が返す [`crate::eval::report::EvalReport::pass`]
+    /// を `main.rs::run_eval` がそのまま渡す。
     pub fn from_pass(pass: bool) -> Self {
         if pass {
             EvalExitCode::Pass

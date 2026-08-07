@@ -11,10 +11,11 @@ TASK-5.1（`docs/spec/05-tasks.md:188-193`）は「`policy-exclusion.toml` の
   （`id`／`category`／`description`／`rationale`／`paths`／`match`／`action`）
   はバイト単位で不変とし、値の追加・変更を一切含まない（自動運転の安全側
   判断）。
-- **後続イシュー（#120・TASK-5.1b・human-required）**: REQ-1 の受け皿
+- **本イシュー（#120・TASK-5.1b・human-required）**: REQ-1 の受け皿
   として「許容依存一覧の追加・更新、`Cargo.toml`／`Cargo.lock` の変更」
-  カテゴリを新設する。プロダクト判断を伴うため担当は人間（実装補助は
-  Claude Code 可。`docs/spec/05-tasks.md:193`）。
+  カテゴリ（カテゴリ 3: `dependency_change`）を新設した（§4.1 カテゴリ 3
+  参照）。プロダクト判断を伴うため担当は人間（実装補助は Claude Code。
+  `docs/spec/05-tasks.md:193`）。
 - **後続イシュー（#121・TASK-5.2）**: 除外ルールの match 方式実装・
   ガードレール統合（`crates/guardrail/src/policy_exclusion.rs` の新設・
   組み込み既定値との一致回帰テスト）。
@@ -23,14 +24,14 @@ TASK-5.1（`docs/spec/05-tasks.md:188-193`）は「`policy-exclusion.toml` の
 - **後続イシュー（#128〜#130・TASK-5.4）**: ブラインドスポット（G2/G5）
   回帰テストの移植。
 
-想定読者は、TASK-5.1b（#120）・TASK-5.2（#121・設定ファイル読み込み実装・
-無条件人間承認判定の統合・初期設定ファイルの依存カテゴリ追加）の実装者、
+想定読者は、TASK-5.2（#121・設定ファイル読み込み実装・無条件人間承認
+判定の統合。カテゴリ 3 を含む builtin_defaults() 3 ルール化）の実装者、
 および TASK-5.3（ブラインドスポット回帰テスト・#125・#128〜#130）の
 実装者である。これらが迷わない粒度（スキーマのフィールド名・型・検証規則）
-まで具体化することを目的とし、プロダクト判断を伴うカテゴリの新規追加・
-意味論の拡張は本イシュー（#119）のスコープ外とする（`docs/spec/05-tasks.md`
-TASK-5.1 の担当欄は「人間（実装補助は Claude Code 可）」であり、既存 2
-カテゴリの具体化・忠実移植に限定する）。
+まで具体化することを目的とする。本文書は TASK-5.1a（#119・既存 2
+カテゴリの具体化・忠実移植）と TASK-5.1b（#120・カテゴリ 3 新設）の
+両方を反映済みであり、これ以降のカテゴリ新規追加・意味論の拡張は別
+イシューのスコープとする。
 
 ## 1. 目的・根拠
 
@@ -46,7 +47,7 @@ TASK-5.1 の担当欄は「人間（実装補助は Claude Code 可）」であ�
      セットでのみ人間承認を経て可能とする）
   3. **（v2 追加）** 依存（許容依存一覧・`Cargo.toml`／`Cargo.lock`）の
      追加・更新を除外カテゴリに含めること（REQ-1 の受け皿。TASK-5.1b・
-     #120 のスコープ）
+     #120 で本文書 §4.1 カテゴリ 3 として反映済み）
   4. 除外リストの対象ファイル・対象変更種別を**設定として明示的に定義し、
      更新可能な形で管理**すること。除外ルールは「パス／変更内容パターンに
      マッチした事実のみで発火する」保守的な match 方式とし、変更内容の
@@ -139,9 +140,9 @@ schema_version = 1
 | フィールド | 型 | 必須 | 説明 |
 |---|---|---|---|
 | `id` | 文字列 | 必須 | ルールの一意識別子（例 `arch-hyperparameter-change`）。同一設定ファイル内で重複不可 |
-| `category` | 文字列（列挙） | 必須 | 変更種別。初期値は `"architecture_change"` / `"test_tolerance_loosening"` の 2 値のみ許可（依存変更カテゴリは TASK-5.1b・#120 が追加） |
+| `category` | 文字列（列挙） | 必須 | 変更種別。許可値は `"architecture_change"` / `"test_tolerance_loosening"` / `"dependency_change"`（TASK-5.1b・#120 で追加）の 3 値のみ |
 | `description` | 文字列 | 必須 | 日本語での説明（何を対象とするルールか） |
-| `rationale` | 文字列 | 必須 | 根拠。PoC-3 発見事項 5（G2/G5）・REQ-5 受け入れ基準への参照を含めること |
+| `rationale` | 文字列 | 必須 | 根拠。該当 REQ・PoC 根拠（例: PoC-3 発見事項 5〈G2/G5〉、REQ-5 受け入れ基準、REQ-1）への参照を含めること |
 | `paths` | 文字列配列（glob） | 必須 | 対象ファイルパターン。空配列は不可（4 節参照） |
 | `match` | インラインテーブル | 必須 | 対象変更種別の判定方法（3.3 節） |
 | `action` | 文字列（列挙） | 必須 | 現状 `"human_approval"` のみ許可。fail-closed のため他の値は不可 |
@@ -173,6 +174,18 @@ PoC-3 フィクスチャの標準化されていない単一クレート構成 `
 - **判定**: 変更ファイル一覧のいずれかが `paths` のいずれかの glob に
   一致すれば match（差分の内容・削除行の有無は問わない）。
 - **追加フィールドなし**（`type` のみで判定が完結する）。
+- **契約（TASK-5.1b・#120 の発見事項。TASK-5.2〈#121〉への引き継ぎ）**:
+  上記の入力定義（`git diff --name-only <baseline> -- . ':!Cargo.lock'`
+  相当）はカテゴリ 1（`architecture_change`）の v1 由来の定義をそのまま
+  引き継いだものだが、`':!Cargo.lock'` による `Cargo.lock` の除外は
+  カテゴリ 3（`dependency_change`。§4.1）が `paths` に `**/Cargo.lock` を
+  含める前提と矛盾する。**除外リスト評価（`any_diff_in_paths`）に渡す
+  変更ファイル列挙では `':!Cargo.lock'` 除外を適用してはならない**
+  （`Cargo.lock` 単独の変更、例えば `cargo update` 相当の差分がカテゴリ 3
+  を素通りする判定迂回経路になり得るため。security.md A08）。TASK-5.2
+  実装時は、除外リスト評価専用の変更ファイル列挙関数を用意するか、
+  既存の `changed_files`（v1 `gaming.rs` 由来）から `Cargo.lock` 除外を
+  外した別経路を用意すること。
 
 #### 3.3.2 `type = "test_assertion_relaxation_without_prod_change"`（カテゴリ 2: `test_tolerance_loosening` が使用）
 
@@ -232,14 +245,13 @@ PoC-3 フィクスチャの標準化されていない単一クレート構成 `
   的入力の早期棄却）。
 - **`schema_version`**: `1` 以外はパースエラー（2 節）。
 - **`exclusion` 配列の空・カテゴリ欠落**: 空配列はエラーとする。さらに
-  安全側の規則として、初期 2 カテゴリ（`architecture_change` /
-  `test_tolerance_loosening`）の**両方が最低 1 件ずつ存在しない設定ファイルは
-  エラー**とする（受け入れ基準 1・2 は「無条件で人間承認必須」であり、
-  一方のカテゴリが欠落した設定ファイルを読み込ませて自動適用させてしまう
-  ことは REQ-5 の趣旨に反するため）。**TASK-5.1b（#120）でカテゴリが
-  3 種類に拡張された場合、本規則は「初期 2 カテゴリ＋新設カテゴリの計 3
-  種類がすべて最低 1 件ずつ存在すること」へ更新する想定**（本イシューでは
-  変更しない）。
+  安全側の規則として、**3 カテゴリ（`architecture_change` /
+  `test_tolerance_loosening` / `dependency_change`）のすべてが最低 1 件ずつ
+  存在しない設定ファイルはエラー**とする（受け入れ基準 1・2・3 はいずれも
+  「無条件で人間承認必須」であり、一部のカテゴリが欠落した設定ファイルを
+  読み込ませて自動適用させてしまうことは REQ-5 の趣旨に反するため）。
+  本規則は TASK-5.1b（#120）でカテゴリ 3 を新設したことに伴い確定した
+  （TASK-5.2〈#121〉が `policy_exclusion.rs` の検証ロジックとして実装する）。
 - **未知の `category` / `match.type` / `action`**: パースエラーとする。
   `crates/guardrail/src/decision.rs` の「未知値はワイルドカードで許容せず
   拒否する」方針（`decision.rs:55-56`「`match` は網羅列挙とし `_ =>`
@@ -347,13 +359,61 @@ assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
   （`touches_test_assertion && !touches_prod_logic`）が実質的な絞り込みを
   担うため、`paths` は全 Rust ソースを対象とする広いパターンにしている。
 
+### カテゴリ 3: 依存変更（REQ-1 の受け皿。TASK-5.1b・#120 で新設）
+
+```toml
+[[exclusion]]
+id = "dependency-change"
+category = "dependency_change"
+description = "許容依存一覧の追加・更新、および依存管理ファイル（Cargo.toml／Cargo.lock・deny.toml・docs/license-matrix.md・.claude/rules/deps-policy.md）への変更"
+rationale = "REQ-5 受け入れ基準3（v2 追加。docs/spec/04-requirements.md:121-136）に対応する REQ-1 の受け皿。依存の追加・更新は AI 自律メンテナンスの自動適用対象外（人間承認必須。.claude/rules/deps-policy.md）であり、機械判定の結果によらず無条件で人間承認へ回す。"
+paths = ["**/Cargo.toml", "**/Cargo.lock", "deny.toml", "docs/license-matrix.md", ".claude/rules/deps-policy.md"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
+```
+
+- **`id`／`category` 名の選定理由**: 既存 2 ルールの命名規則（`id` は
+  ケバブケース、`category` はスネークケースの変更種別名）に整合させた。
+- **`paths` 選定理由（保守的に広く取る）**: REQ-5 受け入れ基準 3 の文言上の
+  最小集合は `Cargo.toml`／`Cargo.lock` だが、本リポジトリでは「許容依存
+  一覧」の正本が `.claude/rules/deps-policy.md` であり、同ファイルは
+  依存変更を `docs/license-matrix.md` 更新とセットで行うことを規定する。
+  `deny.toml` はライセンス・ソース許可リストを定める。これらファイルの
+  単独変更も依存ポリシーの実質的変更であるため、`paths` に含めた
+  （安全側。見逃しより過剰エスカレーションを許容する意図されたトレード
+  オフ。1 節「保守的設計のトレードオフ」と同じ設計思想）。
+- **`**/Cargo.toml`／`**/Cargo.lock` が広く一致する点の注記**: これらの
+  glob はテストフィクスチャ内の `baseline/Cargo.toml` 等にも一致し得るが、
+  1 節に既述の「見逃しより過剰エスカレーションを許容する」トレードオフを
+  そのまま踏襲したものであり、意図された挙動である。
+- **match 方式（`any_diff_in_paths` の再利用）**: 新しい `match.type` は
+  追加しない（TASK-5.2 の実装負担・攻撃面を増やさないため）。パス一致
+  のみで発火し差分内容の意図解釈をしない保守的方式は、REQ-5 受け入れ
+  基準 4（match 方式は「パス／変更内容パターンに一致した事実のみで発火」）
+  に適合する。
+- **`Cargo.lock` 列挙契約との関係**: 本カテゴリの `paths` に
+  `**/Cargo.lock` を含めたことで、3.3.1 節に追記した契約（除外リスト
+  評価用の変更ファイル列挙では `':!Cargo.lock'` 除外を適用してはならない）
+  が必要になった。TASK-5.2（#121）はこの契約を満たす実装を行うこと。
+- **フィクスチャ非追加の理由**: 本カテゴリは spec 由来の設計時追加であり、
+  `match` 判定器（`crates/guardrail/src/policy_exclusion.rs`）自体が
+  TASK-5.2（#121）まで未実装であるため、現時点では match することを
+  検証できない。`crates/guardrail/tests/fixtures/labeled-changes/` の
+  15 件は `labeled_changes_labels.rs`・`labeled_changes_fixtures.rs` の
+  GROUND_TRUTH でピン留めされており、フィクスチャ追加はラベル正本の
+  変更を要するためスコープ外とした。TASK-5.2 実装時に要否を確認し、
+  必要なら [`out-of-scope-tracking.md`](../.claude/rules/out-of-scope-tracking.md)
+  の手順でユーザー承認のうえ追加する。
+
 ## 5. 後続タスクへの引き継ぎ事項
 
-- **TASK-5.1b（#120・依存追加カテゴリの新設・human-required）**:
+- **TASK-5.1b（#120・依存追加カテゴリの新設・human-required）**: 完了。
   REQ-1 の受け皿として「許容依存一覧の追加・更新、`Cargo.toml`／
-  `Cargo.lock` の変更」カテゴリを新設する。プロダクト判断（カテゴリ名・
-  対象 `paths`・match 方式の設計）を伴うため担当は人間（実装補助は
-  Claude Code 可）。本イシュー（#119）では新設しない。
+  `Cargo.lock` の変更」カテゴリ（`dependency_change`）を新設した
+  （§4.1 カテゴリ 3 参照）。プロダクト判断（カテゴリ名・対象 `paths`・
+  match 方式の設計）を伴うため担当は人間（実装補助は Claude Code）。
 - **TASK-5.2（#121・除外ルールの match 方式実装・ガードレール統合）**:
   `crates/guardrail/src/policy_exclusion.rs`（想定パス。`crates/guardrail/
   src/config.rs` と同様の構成: `deny_unknown_fields`・
@@ -362,7 +422,12 @@ assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
   `touches_test_assertion` / `touches_prod_logic` / `changed_files` 相当を
   v2 へ移植・再利用する（関数を `pub(crate)` に昇格するか、共通ヘルパーへ
   切り出すかは実装時に判断する）。組み込み既定値との数値一致を回帰テスト
-  で保証する（4 節）。
+  で保証する（4 節）。**TASK-5.1b（#120）からの引き継ぎ**: (1)
+  `builtin_defaults()` は 3 ルール（`arch-hyperparameter-change`・
+  `test-tolerance-loosening`・`dependency-change`）とする。(2) 除外リスト
+  評価用の変更ファイル列挙では `':!Cargo.lock'` 除外を適用しない
+  （3.3.1 節の契約）。(3) `exclusion` 配列の検証は 3 カテゴリすべて最低
+  1 件ずつの存在を要求する（4 節）。
 - **TASK-5.3（#125・2 層ラベルモデルの不変条件回帰テスト）**: 1 節に
   定める不変条件 (1)(2) を機械検証する回帰テストスイートを実装する。
 - **TASK-5.4（#128・#129・#130・ブラインドスポット（G2/G5）回帰テストの
@@ -485,9 +550,9 @@ TASK-5.2（無条件人間承認判定の統合・#121）の実装者を主対�
 
 ### 6.4 除外リスト更新の運用フロー（人間承認必須）
 
-- **変更対象の定義**: `policy-exclusion.toml`（本イシュー #119 で移植・
-  TASK-5.1b・#120 でカテゴリ追加）と組み込み既定値（コード内。TASK-5.2・
-  #121 で実装。4 節参照）の両方。両者は回帰テストで一致を保証するため、
+- **変更対象の定義**: `policy-exclusion.toml`（#119 で移植・TASK-5.1b・
+  #120 でカテゴリ 3 を追加済み）と組み込み既定値（コード内。TASK-5.2・
+  #121 で実装予定。4 節参照）の両方。両者は回帰テストで一致を保証するため、
   **必ず同一 PR で同時に変更**する。
 - **標準フロー**:
   1. **提案**（Issue 起票または PR）: 変更理由・PoC/実測根拠（新規
@@ -517,8 +582,9 @@ TASK-5.2（無条件人間承認判定の統合・#121）の実装者を主対�
   リスト変更を禁止する（`.claude/rules/delegation-impl.md` 禁止事項・
   security.md）。自己修復ループの修正候補差分が `policy-exclusion.toml`
   自体を変更する場合、変更カテゴリ（`architecture_change` /
-  `test_tolerance_loosening` / 依存変更〈TASK-5.1b・#120 で追加予定〉の
-  いずれか、あるいはスキーマ自体の変更）を問わず人間承認が必須である
+  `test_tolerance_loosening` / `dependency_change`〈TASK-5.1b・#120 で
+  新設済み〉のいずれか、あるいはスキーマ自体の変更）を問わず人間承認が
+  必須である
   （除外リストの自己書き換えによる判定迂回を防止するため。REQ-5・
   security.md A08 の核心）。この禁止は 6.1 節の `decide()` 統合設計とは
   独立の運用ルールであり、`policy_exclusion.rs` 自体の変更検知は現時点

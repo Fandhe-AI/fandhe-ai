@@ -8,14 +8,15 @@
 //! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）
 //! 資産の移植先でもある。
 //!
-//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c／TASK-4.1d／TASK-4.4a／TASK-4.4b・
-//! イシュー #104／#105／#106／#107／#112／#113 合流時点）
+//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c／TASK-4.1d／TASK-4.3a／TASK-4.4a／
+//! TASK-4.4b・イシュー #104／#105／#106／#107／#112／#113／#115 合流時点）
 //! - [`cli`][]: CLI 引数解析（`check`／`eval` サブコマンド。#104 管轄）。
 //! - [`config`][]: `--config` の TOML 設定パース・検証、および判定閾値
 //!   （[`config::Thresholds`]・プリセット・値域検証。#104 管轄。#105 の
 //!   [`decision`] はこの型を契約 API としてそのまま受け取る）。
 //! - [`signals`][]: `--signals` の JSON シグナル入力型（#104 管轄）。
-//! - [`toml_lite`][]: 依存追加なしの最小 TOML パーサ（`config` から利用。#104 管轄）。
+//! - [`toml_lite`][]: 依存追加なしの最小 TOML パーサ（`config`／`eval::dataset`
+//!   から利用。#104 管轄。文字列配列対応は #115 が追加）。
 //! - [`decision`][]: 3 分岐判定ロジック本体（[`decision::decide`]）。評価済み 5 条件
 //!   シグナルから [`decision::Verdict`] を導出する純粋関数（#105 管轄）。
 //! - [`exit_code`][]: `guardrail check`／`guardrail eval` の終了コード契約
@@ -23,6 +24,9 @@
 //!   `Verdict` → 終了コードの変換をここ 1 箇所に閉じ込める。
 //! - [`report`][]: 判定レポート JSON のフルスキーマ（[`report::Report`]。#104 管轄）
 //!   および 3 分岐判定の出力セクション（[`report::VerdictSection`]。#106 管轄）。
+//! - [`eval`][]: `guardrail eval`（ラベル付きデータセット一括評価）の評価
+//!   オーケストレーション（[`eval::run`]）・データセット読み込み
+//!   （[`eval::dataset`]）・出力レポート型（[`eval::report`]。TASK-4.3a・#115 管轄）。
 //! - [`error`][]: クレート共通の型付きエラー（[`error::GuardrailError`]）。
 //! - [`median_gate`][]: 5 回以上計測の劣化率系列を検証し、`decision::BenchSignal::Measured`
 //!   （中央値のみ受け取る受け口）を構築する唯一の公開経路（REQ-4「単発計測での閾値判定は
@@ -59,6 +63,7 @@ pub mod config;
 pub mod decision;
 pub mod determinism;
 pub mod error;
+pub mod eval;
 pub mod exclusion_match;
 pub mod exit_code;
 pub mod median_gate;
