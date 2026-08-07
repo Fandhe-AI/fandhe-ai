@@ -104,6 +104,18 @@ pub fn run_injected(
         BenchSignal::Measured { median_pct } => median_pct,
         BenchSignal::NotRun => 0.0,
     };
+    // レポート上の `bench_measurements_pct` は `bench_median_pct` の算出元
+    // 系列である契約（§2.1「bench_median_pct は bench_measurements_pct の
+    // 中央値である」）を保つ。ゲート未全通過で `bench` を `NotRun` に強制
+    // した場合は計測自体が行われていないため、入力された
+    // `signals.bench_measurements_pct`（実行されなかった計測値）をレポート
+    // にそのまま転記せず空にする（Cursor Bugbot 指摘 #337
+    // discussion_r3738322999 対応）。
+    let bench_measurements_pct = if all_passed {
+        signals.bench_measurements_pct.clone()
+    } else {
+        Vec::new()
+    };
 
     let input = DecisionInput::new(
         &config.thresholds,
@@ -125,7 +137,7 @@ pub fn run_injected(
         build_result: gate_outcome_from_signal(gates.build),
         test_result: gate_outcome_from_signal(gates.test),
         clippy_result: gate_outcome_from_signal(gates.clippy),
-        bench_measurements_pct: signals.bench_measurements_pct.clone(),
+        bench_measurements_pct,
         bench_median_pct,
     };
     Ok(Report::from_decision(inputs, &decision))

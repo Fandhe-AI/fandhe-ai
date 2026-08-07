@@ -92,6 +92,20 @@ fn injected_build_failed_signals_yield_reject_exit_20() {
         reason_conditions.iter().any(|c| c == "gate_build_failed"),
         "reason_conditions に gate_build_failed が含まれるはず: {reason_conditions:?}"
     );
+    // §2.1「bench_median_pct は bench_measurements_pct の中央値である」契約
+    // の固定（Cursor Bugbot 指摘 #337 discussion_r3738322999 回帰テスト）。
+    // `signals-reject.json` は build 失敗にもかかわらず
+    // `bench_measurements_pct` を含む fixture であり、ゲート未全通過で
+    // bench が `NotRun` になる場合はレポート上の `bench_measurements_pct`
+    // も空にして `bench_median_pct`（0.0）との整合を保つ必要がある。
+    assert_eq!(value["bench_median_pct"], 0.0);
+    assert!(
+        value["bench_measurements_pct"]
+            .as_array()
+            .expect("bench_measurements_pct should be an array")
+            .is_empty(),
+        "ゲート未全通過（bench NotRun）では bench_measurements_pct も空である必要がある: {value:?}"
+    );
 }
 
 /// 迂回防止の回帰: `--signals` は環境変数ガードなしでは拒否される
