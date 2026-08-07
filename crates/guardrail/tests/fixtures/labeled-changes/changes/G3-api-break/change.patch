@@ -1,0 +1,45 @@
+diff --git a/src/compat.rs b/src/compat.rs
+index dbd206e..cb07751 100644
+--- a/src/compat.rs
++++ b/src/compat.rs
+@@ -46,14 +46,18 @@ impl Sequential {
+ 
+     /// `model.add_linear(in_features, out_features, seed)` のような
+     /// Python 慣習寄りの命名。
++    ///
++    /// G3: 公開シグネチャに `bias: bool` を追加（API 破壊題材。呼び出し元は
++    /// 更新済み）。
+     pub fn add_linear(
+         mut self,
+         n_in: usize,
+         n_out: usize,
++        bias: bool,
+         seed: u64,
+     ) -> Result<Self, AutodiffError> {
+         self.layers.push(LayerKind::Linear(Box::new(Linear::new(
+-            n_in, n_out, true, seed,
++            n_in, n_out, bias, seed,
+         )?)));
+         Ok(self)
+     }
+diff --git a/src/main.rs b/src/main.rs
+index c55cbee..8b4d5d3 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -37,13 +37,13 @@ fn main() {
+         .expect("main: shape とデータ長は一致する");
+     let compat_x = compat_tape.var(&compat_x_tensor);
+     let compat_model = compat::Sequential::new()
+-        .add_linear(2, 8, 0x1)
++        .add_linear(2, 8, true, 0x1)
+         .expect("main: shape は事前に妥当")
+         .add_leaky_relu(0.1)
+-        .add_linear(8, 8, 0x2)
++        .add_linear(8, 8, true, 0x2)
+         .expect("main: shape は事前に妥当")
+         .add_relu()
+-        .add_linear(8, 1, 0x3)
++        .add_linear(8, 1, true, 0x3)
+         .expect("main: shape は事前に妥当");
+     let compat_out = compat_model
+         .forward(&compat_tape, &compat_x)

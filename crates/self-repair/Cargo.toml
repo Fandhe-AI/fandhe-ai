@@ -10,3 +10,8 @@ publish.workspace = true
 # 試行ログ・起動インターフェース入出力の構造化データシリアライズ（REQ-3）。
 serde.workspace = true
 serde_json.workspace = true
+# 3 分岐判定（`guardrail::decision`）を lib として直接呼び出す設計
+# （`docs/guardrail-self-repair-cli.md` 3.4 節）に加え、決定的シード設定
+# ユーティリティ（`guardrail::determinism`・TASK-4.4b）を再輸出するための
+# workspace 内部 path 依存。
+guardrail = { path = "../guardrail" }

@@ -1,0 +1,17 @@
+{
+  "change_id": "D3-redundant-calc",
+  "preset": "default",
+  "lines_changed": 2,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": 57.2670,
+  "bench_samples_pct": [55.302,58.092,56.211,57.325,57.267],
+  "bench_max_pct": 5.0,
+  "verdict": "エスカレーション",
+  "reasons": "ベンチ劣化中央値が閾値超過(+57.2670%>5.0%); "
+}

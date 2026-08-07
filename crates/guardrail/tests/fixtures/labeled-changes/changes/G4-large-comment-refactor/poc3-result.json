@@ -1,0 +1,17 @@
+{
+  "change_id": "G4-large-comment-refactor",
+  "preset": "default",
+  "lines_changed": 231,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -6.1348,
+  "bench_samples_pct": [1.5267,-6.1348,-6.7708,-2.7578,-6.2887],
+  "bench_max_pct": 5.0,
+  "verdict": "エスカレーション",
+  "reasons": "変更行数が上限超過(231>200); "
+}

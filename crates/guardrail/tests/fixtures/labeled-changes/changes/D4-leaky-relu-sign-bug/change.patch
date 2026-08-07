@@ -1,0 +1,20 @@
+diff --git a/src/activations.rs b/src/activations.rs
+index 06782be..31031da 100644
+--- a/src/activations.rs
++++ b/src/activations.rs
+@@ -41,11 +41,12 @@ pub fn sigmoid<'t>(x: &Var<'t>) -> Var<'t> {
+ pub fn leaky_relu<'t>(tape: &'t Tape, x: &Var<'t>, negative_slope: f64) -> Var<'t> {
+     let positive = relu(x);
+     let neg_one = constant(tape, -1.0);
+-    let neg_positive = positive
++    // D4: オペランド順を誤り符号反転（本来は x - positive）。
++    let neg_x = x
+         .mul(&neg_one)
+         .expect("leaky_relu: shape [1] は常に broadcast 可能");
+-    let negative_input = x
+-        .add(&neg_positive)
++    let negative_input = positive
++        .add(&neg_x)
+         .expect("leaky_relu: relu(x) と x は同一 shape");
+     let slope = constant(tape, negative_slope as f32);
+     let negative_part = negative_input

@@ -1,0 +1,17 @@
+{
+  "change_id": "S3-const-extract",
+  "preset": "default",
+  "lines_changed": 13,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -2.6995,
+  "bench_samples_pct": [1.6625,-4.3730,1.0238,-7.1804,-2.6995],
+  "bench_max_pct": 5.0,
+  "verdict": "自動適用",
+  "reasons": "全ゲート green・全指標が閾値内; "
+}

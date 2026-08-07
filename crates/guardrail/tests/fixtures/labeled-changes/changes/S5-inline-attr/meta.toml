@@ -1,0 +1,12 @@
+change_id = "S5-inline-attr"
+category = "safe"
+expected_verdict = "auto-apply"
+poc3_default_verdict = "auto-apply"
+known_blindspot = false
+origin = "PoC-3 新規"
+summary = "activations::relu に #[inline] 属性を付与する（挙動不変）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。activations.rs のみの変更で
+# policy-exclusion.toml のいずれのルールにも match しないため、除外リスト
+# 適用後も expected_verdict と同じ判定になる。
+expected_exclusion_rule_ids = []
+expected_verdict_after_exclusions = "auto-apply"

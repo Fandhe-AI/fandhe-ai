@@ -1,0 +1,17 @@
+{
+  "change_id": "G3-api-break",
+  "preset": "default",
+  "lines_changed": 13,
+  "lines_max": 200,
+  "api_broken": true,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -6.1755,
+  "bench_samples_pct": [-7.1726,-6.1755,-6.8452,-5.2727,-4.9488],
+  "bench_max_pct": 5.0,
+  "verdict": "エスカレーション",
+  "reasons": "公開APIシグネチャの破壊を検知; "
+}
