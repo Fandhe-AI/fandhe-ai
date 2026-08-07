@@ -166,6 +166,14 @@ pub fn transpose(x: &Tensor<f32>, perm: Option<&[i64]>) -> Result<Tensor<f32>, O
 }
 
 /// `perm` が `0..rank` の順列であることを検証し、正規化済み `usize` 列を返す。
+///
+/// ONNX Transpose 仕様の `perm` は `[0, rank)` の値のみを許容し、`Gather`／
+/// `Unsqueeze`／`Concat`／`Slice` の `axis` 属性のような負値ラップアラウンドは
+/// 仕様上定義されていない。そのため他オペと共有する [`normalize_axis`]（負値を
+/// `axis + rank` へ正規化する）は使わず、ここでは非負値のみを受理する
+/// （PR #275 Cursor Bugbot 指摘: 負の perm を正規化すると、不正なモデル
+/// （負インデックスを含む perm）が別の妥当な transpose として黙って実行され、
+/// エラーとして拒否されなくなる）。
 fn validate_perm(perm: &[i64], rank: usize) -> Result<Vec<usize>, OpError> {
     if perm.len() != rank {
         return Err(OpError::LengthMismatch {
@@ -178,11 +186,14 @@ fn validate_perm(perm: &[i64], rank: usize) -> Result<Vec<usize>, OpError> {
     let mut seen = vec![false; rank];
     let mut resolved = Vec::with_capacity(rank);
     for &axis in perm {
-        let n = normalize_axis(axis, rank).ok_or(OpError::AxisOutOfRange {
-            op: "Transpose",
-            axis,
-            rank,
-        })?;
+        if axis < 0 || axis as usize >= rank {
+            return Err(OpError::AxisOutOfRange {
+                op: "Transpose",
+                axis,
+                rank,
+            });
+        }
+        let n = axis as usize;
         if seen[n] {
             return Err(OpError::DuplicateAxis {
                 op: "Transpose",
@@ -380,6 +391,26 @@ mod tests {
             OpError::AxisOutOfRange {
                 op: "Transpose",
                 ..
+            }
+        ));
+    }
+
+    /// PR #275 Cursor Bugbot 指摘: `perm` の負値を `axis + rank` へ正規化して
+    /// 受理してしまうと、不正なモデル（負インデックスを含む perm）が別の妥当な
+    /// transpose として黙って実行されてしまう。ONNX Transpose 仕様は `perm` に
+    /// `[0, rank)` の値のみを要求するため、負値は無条件でエラーとする。
+    #[test]
+    fn transpose_perm_negative_axis_rejected() {
+        let t = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        // [-2, 1] は正規化すれば [0, 1]（恒等 perm）と等価になってしまうが、
+        // ONNX 仕様上は無効な perm として拒否されなければならない。
+        let err = transpose(&t, Some(&[-2, 1])).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::AxisOutOfRange {
+                op: "Transpose",
+                axis: -2,
+                rank: 2,
             }
         ));
     }
