@@ -1,8 +1,10 @@
-//! コマンド実行抽象（TASK-3.1c・イシュー #134・REQ-3）。
+//! コマンド実行抽象（TASK-3.1b・イシュー #133、TASK-3.1c・イシュー #134・REQ-3）。
 //!
 //! [`crate::verify_gates::CargoVerificationGate`] が `cargo build`/`cargo
-//! test`/`cargo clippy` を起動する際の実行系。移植元は v1
-//! `Fandhe-AI/rust-ai-library-v1` `crates/guardrail/src/exec.rs`
+//! test`/`cargo clippy` を起動する際の実行系であり、種別ごとの検出段階
+//! （[`crate::bug_fix::BugFixDetector`]・[`crate::feature_addition::FeatureAdditionDetector`]）
+//! が `cargo test --release` を起動する際にも同一 seam を再利用する。
+//! 移植元は v1 `Fandhe-AI/rust-ai-library-v1` `crates/guardrail/src/exec.rs`
 //! （`docs/spec/v1-assets-inventory.md` L17「改修して再利用」判定）。
 //!
 //! v1 では `guardrail::exec` だったが、本クレート（`self-repair`）内に
@@ -107,7 +109,7 @@ pub trait CommandRunner {
 /// （`SelfRepairError::Verification { attempt, reason }` は `attempt` を
 /// 知らないと構築できないため、`exec.rs` 単体では `SelfRepairError` を
 /// 直接返さない）。
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ExecError {
     message: String,
 }

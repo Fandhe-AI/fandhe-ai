@@ -30,6 +30,15 @@
 //!   判別子として使う。
 //! - [`stages`][]: 種別非依存の段階インターフェース（`Detector`/`FixGenerator`/
 //!   `VerificationGate`/`AdoptionJudge`）。
+//! - [`exec`][]・[`candidate`][]・[`bug_fix`][]・[`perf_regression`][]・
+//!   [`feature_addition`][]（TASK-3.1b・イシュー #133）: 検出・可否判断
+//!   フェーズの種別ごとの実装。[`exec::CommandRunner`] はコマンド実行 seam
+//!   （v2 `guardrail` に `exec` モジュールが未移植のため本クレート内に新設。
+//!   `exec` モジュールの doc 参照）、[`candidate::apply_candidate`] は
+//!   `bug_fix`/`feature_addition` 共通の「候補存在確認 → baseline 復元 →
+//!   候補適用」ロジック、[`perf_regression`] は
+//!   `guardrail::median_gate`/`guardrail::Thresholds` に一本化した性能回帰
+//!   検出を提供する。
 //! - [`outcome`][]: ループ全体の結論 [`outcome::LoopOutcome`] と、検証通過を
 //!   型で保証する [`outcome::VerifiedEvidence`]（typestate）。本イシューでは
 //!   guardrail 非依存の v1 S1 形で移植する（`outcome` モジュールコメント参照）。
@@ -54,9 +63,9 @@
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
-//! - 種別別 Detector・実候補列の供給（`bug_fix`/`perf_regression`/
-//!   `feature_addition` 相当の検出・候補選定ロジック本体） → イシュー #133
-//!   （TASK-3.1b）・TASK-3.3（再実証）
+//! - 種別別の実候補列の供給（`bug_fix`/`perf_regression`/`feature_addition` の
+//!   `Detector`・`FixGenerator` 骨格自体は TASK-3.1b・イシュー #133 で実装済み
+//!   だが、実 AI 生成修正の動的取得・実運用題材での再実証は TASK-3.3 のスコープ）
 //! - 検証フェーズ 4 ゲートのうちベンチゲート（[`verify_bench::SelfRepairBenchGate`]）
 //!   の [`stages::VerificationGate`] への結線（4 ゲート合成） → イシュー #136 系
 //!   （TASK-3.2）
@@ -76,23 +85,32 @@
 //!   追跡済み）
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
+pub mod bug_fix;
 pub mod candidate;
 pub mod error;
 pub mod exec;
+pub mod feature_addition;
 pub mod judge;
 pub mod kind;
 pub mod outcome;
+pub mod perf_regression;
 pub mod report;
 pub mod runner;
 pub mod stages;
 pub mod verify_gates;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
+pub use bug_fix::{BugFixDetector, BugFixFixGenerator};
 pub use candidate::{CandidateFix, CandidateFixGenerator};
 pub use error::SelfRepairError;
-pub use exec::{CommandRunner, SystemCommandRunner};
+pub use exec::{CommandOutput, CommandRunner, SystemCommandRunner};
+pub use feature_addition::{FeatureAdditionDetector, FeatureAdditionFixGenerator};
 pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
+pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};

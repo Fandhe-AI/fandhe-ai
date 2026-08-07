@@ -1,15 +1,26 @@
-//! 修正生成フェーズの候補適用基盤（TASK-3.1c・イシュー #134・REQ-3）。
+//! 候補修正（[`CandidateFix`]）の表現と、attempt 順適用の共通ロジック
+//! （TASK-3.1b・イシュー #133、TASK-3.1c・イシュー #134・REQ-3。移植元は v1
+//! `Fandhe-AI/rust-ai-library-v1` `tools/self-repair/src/candidate.rs`。
+//! `docs/spec/v1-assets-inventory.md` L17「改修して再利用」判定）。
 //!
-//! [`crate::stages::FixGenerator`] の種別非依存な実装 [`CandidateFixGenerator`]
-//! を提供する。移植元は v1 `Fandhe-AI/rust-ai-library-v1`
-//! `tools/self-repair/src/candidate.rs`（`docs/spec/v1-assets-inventory.md`
-//! L17「改修して再利用」判定）。
+//! [`crate::bug_fix::BugFixFixGenerator`]・
+//! [`crate::feature_addition::FeatureAdditionFixGenerator`] の双方が「候補存在
+//! 確認 → baseline 復元 → 候補適用」という同一の適用契約（候補枯渇の
+//! hard-error 経路では baseline 復元によるファイル書き換えを発生させない）を
+//! 持つ。両者から [`apply_candidate`] として共通利用する（構築時検証は種別
+//! ごとに異なるため各モジュールに残す。`feature_addition.rs` の
+//! `is_manifest_path` 等）。
 //!
-//! v1 の種別別 `FixGenerator`（`bug_fix.rs` 等）は検出器（イシュー #133 の
-//! スコープ）と一体だったため、本イシューでは決定的な候補列
-//! （[`CandidateFix`]）を構築時に注入できる基盤までを提供する。種別別の
-//! 候補列供給（実際にどのファイルをどう書き換えるかの判断）は #133・
-//! TASK-3.3（再実証）に委ねる（`.claude/rules/out-of-scope-tracking.md`）。
+//! 種別を持たない汎用の [`crate::stages::FixGenerator`] 実装
+//! [`CandidateFixGenerator`] も本モジュールが提供する（TASK-3.1c・#134）。
+//! v1 の種別別 `FixGenerator`（`bug_fix.rs`・`feature_addition.rs`）は検出器
+//! （種別ごとの `Detector`）と一体だったのに対し、決定的な候補列
+//! （[`CandidateFix`]）さえ構築時に注入できれば種別非依存に組み立てられる
+//! ループ利用者（`verify_gates`・`runner` の新 API 経路）向けに、[`apply_candidate`]
+//! を直接ラップする薄い実装として追加する。既存の種別別 `FixGenerator`
+//! （`bug_fix.rs`・`feature_addition.rs`）を置き換えるものではなく、
+//! いずれも本モジュールの [`apply_candidate`]／[`validate_relative_path`] を
+//! 共通基盤として利用する。
 //!
 //! # A03（インジェクション）対応
 //! [`validate_relative_path`] は絶対パス・`..` 成分を含むパスを構築時に
@@ -27,7 +38,8 @@ use crate::stages::{Finding, FixGenerator, Proposal};
 ///
 /// `path` が絶対パスの場合、または `..`（親ディレクトリ参照）成分を含む
 /// 場合は `Err` を返す。workspace 外への書き込みを構築時に封じる
-/// （`apply_candidate` がファイルシステムへ触れる前に必ず経由させる）。
+/// （`apply_candidate` がファイルシステムへ触れる前に必ず経由させる。
+/// `bug_fix.rs`/`feature_addition.rs` の `new` も構築時検証として呼ぶ）。
 pub fn validate_relative_path(path: &Path) -> Result<(), String> {
     if path.is_absolute() {
         return Err(format!(
@@ -58,10 +70,11 @@ pub struct CandidateFix {
     pub files: Vec<(PathBuf, String)>,
 }
 
-/// `apply_candidate` の baseline（適用前スナップショット）と候補列を保持し、
-/// 実際にファイルシステムへ書き込んで [`Proposal`] を組み立てる。
+/// `candidates[attempt - 1]` を `workspace` へ適用し [`Proposal`] を返す共通本体。
 ///
-/// # 呼び出し順序契約（v1 PR #172 指摘の回帰防止）
+/// 手順（[`crate::bug_fix::BugFixFixGenerator::generate`]・
+/// [`crate::feature_addition::FeatureAdditionFixGenerator::generate`]・
+/// [`CandidateFixGenerator::generate`] が委譲する）:
 /// 1. 候補（`attempt` 番目、1 始まり）の存在確認 — ファイルシステム副作用
 ///    より前に行う。候補枯渇（`attempt` が候補数を超える）を検出した場合は
 ///    baseline 復元を一切行わずに `Err` を返す。これを候補確認より後に
