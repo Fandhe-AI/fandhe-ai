@@ -370,6 +370,20 @@ fn compute_gather(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Valu
                 rank: 1,
             })?;
             let (idx, idx_shape) = get_i64(env, node, idx_name)?;
+            // f32 パス（`ops::gather`）と同様、`idx_shape` の積が実データ長と
+            // 一致するかを検査してから使う。ここを省略すると `idx.len()` から
+            // 構築した `data` と、素通しした `idx_shape` が矛盾した `Value::I64`
+            // （不変条件違反）を生成しうる（レビュー指摘: Cursor Bugbot、PR #298）。
+            let expected_len: usize = idx_shape.iter().product();
+            if idx.len() != expected_len {
+                return Err(OpError::LengthMismatch {
+                    op: "Gather",
+                    name: "indices",
+                    expected: expected_len,
+                    actual: idx.len(),
+                }
+                .into());
+            }
             let dim = data.len() as i64;
             let mut out = Vec::with_capacity(idx.len());
             for &raw in idx {
@@ -686,6 +700,42 @@ mod tests {
         );
         let err = run(&g, feeds).unwrap_err();
         assert!(matches!(err, InterpError::UnsupportedOp(op) if op == "Dropout"));
+    }
+
+    #[test]
+    fn compute_gather_i64_rejects_indices_shape_length_mismatch() {
+        // レビュー指摘（Cursor Bugbot、PR #298）: i64 Gather 分岐が `idx.len()`
+        // から出力を構築する一方 `idx_shape` を素通ししていたため、両者が矛盾する
+        // `Value::I64` を無検査で生成できてしまっていた。f32 パス（`ops::gather`）
+        // 同様に `OpError::LengthMismatch` で拒否されることを固定化する。
+        let n = node("Gather", vec!["data", "idx"], vec!["y"]);
+        let g = empty_graph(vec![n], vec!["data", "idx"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "data".to_string(),
+            Value::I64 {
+                data: vec![10, 20, 30],
+                shape: vec![3],
+            },
+        );
+        // idx_shape の積は 3 だが、実データ長は 2（矛盾）。
+        feeds.insert(
+            "idx".to_string(),
+            Value::I64 {
+                data: vec![0, 1],
+                shape: vec![3],
+            },
+        );
+        let err = run(&g, feeds).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::Op(OpError::LengthMismatch {
+                op: "Gather",
+                name: "indices",
+                expected: 3,
+                actual: 2,
+            })
+        ));
     }
 
     #[test]
