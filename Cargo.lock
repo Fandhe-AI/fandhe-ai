@@ -361,6 +361,7 @@ dependencies = [
 name = "guardrail"
 version = "0.1.0"
 dependencies = [
+ "bench-harness",
  "serde",
  "serde_json",
 ]
