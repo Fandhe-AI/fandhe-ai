@@ -43,13 +43,25 @@ usage() {
 # ページ外に出た際に「既存 Issue なし」と誤判定してしまう（review 指摘・#148）。
 # 本リポの open Issue 数は運用上 200 件を大きく超えない想定のため、十分大きい
 # 固定値で明示し、既定値依存の暗黙的な打ち切りを避ける。
+#
+# gh 側は number/title の TSV 化のみを `--jq`（gh CLI 内蔵の Go 実装。外部 jq 非依存）
+# で行い、タイトル完全一致・複数一致 fail-closed の判定は bash 側に残す
+# （self-hosted runner に外部 jq が未導入でも壊れないようにするため。gh は Issue 操作で
+# 既に必須のため新規ツール依存の追加にはならない。review 指摘・#148 収束指針）。
 find_open_issue() {
-  local json
-  json=$(gh issue list --state open --limit 200 --json number,title)
-  local numbers
-  numbers=$(printf '%s' "${json}" | jq -r --arg title "${ISSUE_TITLE}" '[.[] | select(.title == $title) | .number] | .[]')
-  local count
-  count=$(printf '%s' "${numbers}" | grep -c . || true)
+  local tsv
+  tsv=$(gh issue list --state open --limit 200 --json number,title \
+        --jq '.[] | [.number, .title] | @tsv')
+  local numbers=""
+  local count=0
+  local number title
+  while IFS=$'\t' read -r number title; do
+    [ -z "${number}" ] && continue
+    if [ "${title}" = "${ISSUE_TITLE}" ]; then
+      numbers="${number}"
+      count=$((count + 1))
+    fi
+  done <<<"${tsv}"
   if [ "${count}" -gt 1 ]; then
     echo "NG: 固定タイトルに一致する open Issue が ${count} 件あります（想定は 0 または 1 件）" >&2
     return 1
@@ -146,10 +158,13 @@ self_test_arg_validation() {
   return "${failed}"
 }
 
-# gh スタブ 1 個を配置し、$1 に渡した issue_list_json（gh issue list の応答）を返させる。
+# gh スタブ 1 個を配置し、$1 に渡した issue_list_tsv（`gh issue list --jq '... @tsv'`
+# の応答。number<TAB>title の行形式）を返させる。実 gh の `--jq` は TSV 変換までを
+# 内蔵実装（外部 jq 非依存）で行うため、スタブも同じ形の出力を返せば find_open_issue
+# 側のパース（bash 側でのタイトル完全一致・複数一致判定）をネットワーク不要で検証できる。
 # 記録された呼び出しログは ${self_test_stub_dir}/calls.log に蓄積される。
 setup_gh_stub() {
-  local issue_list_json="$1"
+  local issue_list_tsv="$1"
   self_test_stub_dir=$(mktemp -d)
   : >"${self_test_stub_dir}/calls.log"
   cat >"${self_test_stub_dir}/gh" <<STUB
@@ -157,9 +172,7 @@ setup_gh_stub() {
 echo "\$*" >> "${self_test_stub_dir}/calls.log"
 case "\$1 \$2" in
 "issue list")
-  cat <<'JSON'
-${issue_list_json}
-JSON
+  printf '%s\n' "${issue_list_tsv}"
   ;;
 "issue create"|"issue comment"|"issue close")
   exit 0
@@ -178,7 +191,7 @@ self_test_branches() {
   local failed=0
 
   # 分岐 1: 失敗 + 既存 Issue なし → 新規起票（gh issue create が呼ばれる）。
-  setup_gh_stub '[]'
+  setup_gh_stub ''
   if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/1 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     echo "NG: 失敗時に report が exit 0 になりました" >&2
     failed=1
@@ -191,7 +204,7 @@ self_test_branches() {
   cleanup_self_test
 
   # 分岐 2: 失敗 + 既存 Issue あり → 追記（gh issue comment が呼ばれ、create は呼ばれない）。
-  setup_gh_stub '[{"number":42,"title":"ci(guardrail): schedule 定期実行の失敗検知（TASK-6.1b）"}]'
+  setup_gh_stub "$(printf '42\t%s' "${ISSUE_TITLE}")"
   if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/2 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     echo "NG: 失敗時に report が exit 0 になりました" >&2
     failed=1
@@ -204,7 +217,7 @@ self_test_branches() {
   cleanup_self_test
 
   # 分岐 3: 成功 + 既存 Issue あり → クローズ（comment → close の順で呼ばれる）。
-  setup_gh_stub '[{"number":43,"title":"ci(guardrail): schedule 定期実行の失敗検知（TASK-6.1b）"}]'
+  setup_gh_stub "$(printf '43\t%s' "${ISSUE_TITLE}")"
   if PATH="${self_test_stub_dir}:${PATH}" RESULT=success RUN_URL=https://example.invalid/run/3 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     if grep -q '^issue close 43' "${self_test_stub_dir}/calls.log"; then
       echo "OK: 成功＋既存 Issue あり → issue close が呼ばれました"
@@ -219,7 +232,7 @@ self_test_branches() {
   cleanup_self_test
 
   # 分岐 4: 成功 + 既存 Issue なし → 何もしない（create/comment/close いずれも呼ばれない）。
-  setup_gh_stub '[]'
+  setup_gh_stub ''
   if PATH="${self_test_stub_dir}:${PATH}" RESULT=success RUN_URL=https://example.invalid/run/4 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     if grep -qE '^issue (create|comment|close)' "${self_test_stub_dir}/calls.log"; then
       echo "NG: 成功＋既存 Issue なしで不要な issue 操作が呼ばれました" >&2
@@ -243,7 +256,7 @@ self_test_branches() {
 self_test_duplicate_issue_fail_closed() {
   local failed=0
 
-  setup_gh_stub '[{"number":50,"title":"ci(guardrail): schedule 定期実行の失敗検知（TASK-6.1b）"},{"number":51,"title":"ci(guardrail): schedule 定期実行の失敗検知（TASK-6.1b）"}]'
+  setup_gh_stub "$(printf '50\t%s\n51\t%s' "${ISSUE_TITLE}" "${ISSUE_TITLE}")"
   if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/5 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     echo "NG: 固定タイトルの open Issue が複数存在するのに report が exit 0 になりました" >&2
     failed=1
