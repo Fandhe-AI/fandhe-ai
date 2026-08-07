@@ -36,13 +36,17 @@
 # という受け入れ条件に対応する。macOS 側 self-hosted runner は未登録（repo レベル runner
 # 0 件・既存ジョブは全て Linux self-hosted 上で実行）であり、GitHub ホステッド
 # macos-latest は使用禁止（.claude/rules/ci.md）のため、macOS 検証は Linux runner 上の
-# `aarch64-apple-darwin` クロスターゲットビルドで代替する。全 9 クレートは lib のみ
-# （[[bin]] なし）で `cargo build` はリンカを起動しないため、macOS SDK が無い Linux 上でも
-# `cfg(target_os = "macos")` が有効化され、objc2 / objc2-foundation / objc2-metal を含む
-# Metal 有効経路のコンパイルが検証できる（macOS 実機上の lib-only cargo build と同一の
-# コンパイル検証。PoC-v2-5 の cfg ベースバックエンド切替構成）。将来 [[bin]] や test
-# バイナリのリンクを伴う検証が必要になった場合はクロスビルドでは不足するため、
-# macOS 実機 runner（runner ラベル明示）の登録が別途必要（スコープ外。PR 本文参照）。
+# `aarch64-apple-darwin` クロスターゲットビルドで代替する。`cargo build --lib` は
+# リンカを起動しないため、macOS SDK が無い Linux 上でも `cfg(target_os = "macos")` が
+# 有効化され、objc2 / objc2-foundation / objc2-metal を含む Metal 有効経路のコンパイル
+# 検証ができる（macOS 実機上の lib-only cargo build と同一のコンパイル検証。PoC-v2-5 の
+# cfg ベースバックエンド切替構成）。guardrail クレート（TASK-4.1a・イシュー #104）が
+# `[[bin]]` を持つため、`--workspace` に対する素の `cargo build` はバイナリのリンクを
+# 試みて macOS 用クロスリンカ／SDK 非搭載の Linux runner 上で失敗する
+# （`xcrun --sdk macosx --show-sdk-path` failed 等）。このため本ジョブの macOS ターゲット
+# ビルドは `--lib` を付与し lib クレートのコンパイル検証のみに限定する。bin のリンクを
+# 伴う検証が必要になった場合はクロスビルドでは不足するため、macOS 実機 runner
+# （runner ラベル明示）の登録が別途必要（スコープ外。PR #303 参照）。
 #
 # TASK-1.8e（イシュー #42）で build ジョブへ追加した「cargo check（backend-metal の
 # #[ignore] テスト・macOS ターゲット）」ステップは、上記 lib-only build の対象外である
@@ -265,9 +269,12 @@ jobs:
         # --locked で Cargo.lock の意図しない書き換え・runner 汚染を防止する（deny ジョブと同一方針）。
         run: cargo build --workspace --locked
 
-      - name: cargo build（macOS ターゲット・Metal 有効）
+      # guardrail クレートの `[[bin]]`（TASK-4.1a・イシュー #104）がリンクを要求すると
+      # macOS 用クロスリンカ／SDK 非搭載の Linux runner 上で失敗するため、`--lib` で
+      # lib クレートのコンパイル検証のみに限定する（本ファイル冒頭コメント参照）。
+      - name: cargo build（macOS ターゲット・Metal 有効・lib のみ）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: cargo build --workspace --locked --target aarch64-apple-darwin
+        run: cargo build --workspace --locked --target aarch64-apple-darwin --lib
 
       # TASK-1.8e（イシュー #42）: backend-metal の #[ignore] 実機テスト（tests/）を
       # aarch64-apple-darwin で型検査する。`--workspace --all-targets` は

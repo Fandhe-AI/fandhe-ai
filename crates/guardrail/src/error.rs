@@ -10,6 +10,13 @@
 //! （`docs/guardrail-self-repair-cli.md` 2.3 節）に写像する。本エラー自体は
 //! 終了コードを持たず、「何が起きたか」のみを表す（写像は 1 箇所に閉じ込め、
 //! fail-closed 契約を保つため。`.claude/rules/security.md` A08）。
+//!
+//! `InconsistentDecisionInput` は [`crate::decision::DecisionInput::new`]
+//! （TASK-4.1c・イシュー #106）が検出する入力矛盾（`GateSignals`/`BenchSignal`
+//! の実行順序契約違反）専用のバリアントであり、CLI 引数パース・設定ファイル
+//! 検証由来のエラー（TASK-4.1a・イシュー #104 管轄）とは別 PR で追加された
+//! （`.claude/rules/delegation-impl.md`: 同一ファイルの並行編集回避のため
+//! 各 PR は必要なバリアントのみを追加する運用）。
 
 use std::fmt;
 use std::path::PathBuf;
@@ -42,9 +49,17 @@ pub enum GuardrailError {
     InjectedSignalsNotAllowed,
 
     /// 判定・評価ロジック本体が未実装であることを示す（TASK-4.1a のスコープ外。
-    /// 5 条件判定は #105、eval 評価ロジックは #108/#111 で実装する）。
+    /// eval 評価ロジックは #108/#111 で実装する）。
     /// 内部エラー区分（終了コード `1`）に対応する。
     NotImplemented(&'static str),
+
+    /// [`crate::decision::DecisionInput::new`] が検出した判定入力の矛盾。
+    ///
+    /// 例: build/test/clippy が全通過していないにもかかわらずベンチ計測結果
+    /// （`BenchSignal::Measured`）が渡された場合（PoC-3 の実行順序契約
+    /// 「ベンチはゲート全通過時のみ計測する」への違反。呼び出し側バグとみなし
+    /// 判定を続行せず拒否する。`.claude/rules/security.md` A08）。
+    InconsistentDecisionInput { reason: String },
 }
 
 impl fmt::Display for GuardrailError {
@@ -60,6 +75,9 @@ impl fmt::Display for GuardrailError {
                 "usage error: --signals requires GUARDRAIL_ALLOW_INJECTED_SIGNALS=1"
             ),
             GuardrailError::NotImplemented(what) => write!(f, "not implemented: {what}"),
+            GuardrailError::InconsistentDecisionInput { reason } => {
+                write!(f, "判定入力が矛盾しています: {reason}")
+            }
         }
     }
 }

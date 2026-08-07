@@ -1,38 +1,31 @@
-//! `Verdict` から終了コードへの変換を 1 箇所に閉じ込めるモジュール。
+//! `guardrail check` の CI 呼び出し契約: 終了コードの一元定義。
 //!
 //! `docs/guardrail-self-repair-cli.md` 2.3 節「fail-closed 設計（A08）」が
-//! 要求するとおり、`Verdict` / eval 合否から終了コードへの変換経路は本モジュール
-//! （`GuardrailExitCode::from_verdict` / `EvalExitCode::from_pass`）のみとし、
-//! 他の経路から `0`（自動適用・評価合格）を返せないようにする。`main.rs` は
-//! これらの関数を経由してのみプロセス終了コードを決定する。
+//! 要求するとおり、[`crate::decision::Verdict`] / eval 合否から終了コードへの
+//! 変換経路は本モジュール（`GuardrailExitCode::from_verdict` /
+//! `EvalExitCode::from_pass`）のみとし、他の経路から `0`（自動適用・評価合格）
+//! を返せないようにする。`main.rs` はこれらの関数を経由してのみプロセス
+//! 終了コードを決定する（自己修復ループが取り込む変更の判定を迂回する経路を
+//! 作らない。`.claude/rules/security.md` A08）。
 //!
 //! `self-repair` から lib として呼び出される際も同じ `Verdict` を経由する
 //! （3.4 節「guardrail 連携方式」。サブプロセス起動ではなく lib 直接呼び出し）。
+//! `Verdict` 自体の定義は判定ロジック本体（[`crate::decision`]。TASK-4.1c・
+//! イシュー #106）が正本であり、本モジュールは終了コードへの写像のみを担う。
+//!
+//! | 値 | 意味 |
+//! |---|---|
+//! | `0`  | 自動適用（`Verdict::AutoApply`） |
+//! | `10` | エスカレーション（`Verdict::Escalate`） |
+//! | `20` | 却下（`Verdict::Reject`） |
+//! | `1`  | 内部エラー（判定不能。シグナル入力・出力書き出しの失敗等） |
+//! | `2`  | usage エラー（clap 相当。#104 管轄） |
 
 use std::process::ExitCode;
 
-/// guardrail の 3 分岐判定結果（`docs/guardrail-self-repair-cli.md` 2.1 節）。
-///
-/// 5 条件の判定ロジック自体（#105）・除外リスト適用（#106）は本イシューの
-/// スコープ外。TASK-4.1a では型のみを定義し、`check` サブコマンドは
-/// 判定不能を表す `Escalate` を暫定固定で返す（fail-closed。計画 2.2 節）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Verdict {
-    AutoApply,
-    Escalate,
-    Reject,
-}
+use crate::decision::Verdict;
 
 /// `guardrail check` の終了コード契約（2.3 節）。
-///
-/// | 値 | 意味 |
-/// |---|---|
-/// | `0`  | 自動適用（`Verdict::AutoApply`） |
-/// | `10` | エスカレーション（`Verdict::Escalate`） |
-/// | `20` | 却下（`Verdict::Reject`） |
-/// | `1`  | 内部エラー（判定不能） |
-/// | `2`  | usage エラー |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GuardrailExitCode {
     AutoApply,
@@ -43,7 +36,8 @@ pub enum GuardrailExitCode {
 }
 
 impl GuardrailExitCode {
-    /// `Verdict` から終了コード区分への唯一の変換経路。
+    /// [`Verdict`] から終了コード区分への唯一の変換経路（判定を迂回する経路
+    /// なし。`match` は網羅列挙とし `_ =>` を使わない）。
     ///
     /// 判定ロジック（#105/#106）を経ずにこの関数を直接呼ぶ経路（`main.rs`
     /// の `run_check`）が、TASK-4.1a 段階では常に `Verdict::Escalate` を渡す
@@ -139,5 +133,17 @@ mod tests {
     fn from_pass_maps_bool_to_eval_exit_code() {
         assert_eq!(EvalExitCode::from_pass(true).as_u8(), 0);
         assert_eq!(EvalExitCode::from_pass(false).as_u8(), 30);
+    }
+
+    /// `1`（内部エラー）が判定 3 分岐（0/10/20）のいずれとも重複しないこと
+    /// （判定不能が自動適用〈0〉へ倒れない fail-closed 契約の固定）。
+    #[test]
+    fn internal_error_never_collides_with_a_verdict_code() {
+        for verdict in [Verdict::AutoApply, Verdict::Escalate, Verdict::Reject] {
+            assert_ne!(
+                GuardrailExitCode::InternalError.as_u8(),
+                GuardrailExitCode::from_verdict(verdict).as_u8()
+            );
+        }
     }
 }

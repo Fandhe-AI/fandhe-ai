@@ -19,8 +19,9 @@ use std::process::ExitCode;
 
 use guardrail::cli::{self, CheckArgs, Command, EvalArgs, OutputFormat};
 use guardrail::config::{self, PresetName};
+use guardrail::decision::Verdict;
 use guardrail::error::GuardrailError;
-use guardrail::exit_code::{EvalExitCode, GuardrailExitCode, Verdict};
+use guardrail::exit_code::{EvalExitCode, GuardrailExitCode};
 use guardrail::report::{GateOutcome, Report, SCHEMA_VERSION, SignalSource};
 use guardrail::signals::{GateResult, Signals};
 
@@ -193,7 +194,8 @@ fn report_error_and_exit(err: &GuardrailError) -> ExitCode {
         }
         GuardrailError::InvalidInput(_)
         | GuardrailError::Io { .. }
-        | GuardrailError::NotImplemented(_) => {
+        | GuardrailError::NotImplemented(_)
+        | GuardrailError::InconsistentDecisionInput { .. } => {
             GuardrailExitCode::InternalError.into_process_exit_code()
         }
     }
