@@ -340,10 +340,29 @@ mod tests {
 
     #[test]
     fn harness_bench_gate_measures_five_iterations_with_lightweight_workloads() {
+        // 空クロージャは `Instant::elapsed` がゼロを返しうるため、`baseline_median_secs`
+        // が `NonFiniteRatio` として拒否され success-path テストが偶発的に失敗しうる
+        // （Bugbot 指摘・PR #305）。統合テスト（bench_gate_integration.rs）と同様に
+        // `black_box` 経由で実測時間が確実に非ゼロになる軽量ワークロードへ置き換える。
+        use std::hint::black_box;
         let gate = HarnessBenchGate;
         let config = fast_config();
+        let mut baseline = || {
+            let mut acc: u64 = 0;
+            for i in 0..1_000u64 {
+                acc = black_box(acc.wrapping_add(black_box(i)));
+            }
+            black_box(acc);
+        };
+        let mut candidate = || {
+            let mut acc: u64 = 0;
+            for i in 0..1_000u64 {
+                acc = black_box(acc.wrapping_add(black_box(i)));
+            }
+            black_box(acc);
+        };
         let signal = gate
-            .measure(&config, MIN_BENCH_ITERATIONS, &mut || {}, &mut || {})
+            .measure(&config, MIN_BENCH_ITERATIONS, &mut baseline, &mut candidate)
             .expect("軽量ダミーワークロードは成功するはず");
 
         assert_eq!(signal.bench_measurements_pct.len(), MIN_BENCH_ITERATIONS);
