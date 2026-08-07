@@ -15,7 +15,15 @@
 //!   キーマップに対する期待キー集合の充足検査を提供する。キー不足を無言 skip せず
 //!   型付きエラー（[`LoadError`]）で報告する（v1 PoC-6 詰まりポイント #2 対策。詳細は
 //!   `require_keys` モジュールのドキュメンテーションコメント参照）。
-//! - ONNX 経路（TASK-7.2 以降）は本イシューのスコープ外で未実装。
+//! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82）: ONNX オペを `tensor-core::Tensor<f32>` 上の
+//!   純粋関数として提供する。8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／
+//!   `Unsqueeze`／`Concat`／`Slice`）に加え MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／
+//!   `Sqrt`／`Constant`）を含む。ONNX proto デコード（TASK-7.2a）・グラフ実行エンジンは
+//!   別イシューの担当であり、本モジュールは「入力テンソル＋属性 → 出力テンソル」の
+//!   単体演算のみを扱う（decode → 属性値 → 本モジュール呼び出し、の結線は後続タスクで行う）。
+//!   属性は proto 由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、
+//!   デコード層の実装順序に依存しない。
+//! - ONNX proto デコード経路（TASK-7.2a）は本イシューのスコープ外で未実装。
 //!
 //! `require_keys` モジュールは非公開（`mod`）とし、型・関数のみ `pub use` で
 //! クレートルートへ再エクスポートする。モジュールを `pub mod` にすると
@@ -28,6 +36,7 @@
 //! 衝突はしない）。統合整理の要否はスコープ外事項としてイシュー #74 側で追跡する
 //! （`.claude/rules/out-of-scope-tracking.md`）。
 
+pub mod ops;
 pub mod st_load;
 
 mod require_keys;
