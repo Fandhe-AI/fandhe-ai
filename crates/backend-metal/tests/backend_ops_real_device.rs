@@ -97,12 +97,27 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
     assert_backend_ops_gemm_parity(511, 512, 97, 71, 83);
 }
 
-/// elementwise・reduction の `Unsupported` 契約を実機環境（Metal 利用可）
-/// でも確認する（`backend_ops_dispatch.rs` は Metal デバイス初期化を要する
-/// テストと分離していないため、本ファイルで実機手順の一部として明示する）。
+/// elementwise・reduction の `Unsupported` 契約を検証する。
+///
+/// `MetalBackendOps::add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`
+/// （`backend-metal/src/ops.rs`）はいずれも `MetalContext::new` を呼ばず
+/// 即座に `BackendError::Unsupported` を返す実装（TASK-1.9c スコープ外の
+/// 未実装カーネル用プレースホルダ）のため、本テストは Metal 実機・
+/// デバイス初期化を一切必要としない。他の実機依存テストと同じファイルに
+/// 置かれてはいるが（`MetalBackendOps` 自体が `cfg(target_os = "macos")`
+/// 限定のため非 macOS 環境ではコンパイル対象に入らない）、実機依存では
+/// ないため `#[ignore]` を付けない。macOS 上での通常の
+/// `cargo test -p backend-metal`（`--ignored` なし）で毎回実行され、
+/// `MetalBackendOps::gemm` 以外の 7 演算が `Unsupported` を返し続ける
+/// ことを回帰的に固定する。
+///
+/// `backend_ops_dispatch.rs`（`backend-cpu/tests/`）は `ops_for` 経由の
+/// GEMM ディスパッチのみを検証しており、Metal の elementwise・reduction
+/// カバレッジは含まない（Cursor Bugbot 指摘・PR #264 レビュースレッド。
+/// 旧コメントは誤って「テストと分離していない」と記述していたが、実際は
+/// 「そもそもカバーしていない」が正確な記述である）。
 #[test]
-#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
-fn elementwise_and_reduction_remain_unsupported_on_real_device() {
+fn elementwise_and_reduction_remain_unsupported_without_device_init() {
     let metal = MetalBackendOps::new();
     let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
     let b = a.clone();
