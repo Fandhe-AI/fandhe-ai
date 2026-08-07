@@ -33,9 +33,12 @@
 //! - `test_assertion_relaxation_without_prod_change` の評価ロジック: #123（TASK-5.2b）。
 //!   本モジュールは [`MatchRule`] として schema（型定義）のみ用意し、評価対象から
 //!   意図的に除外する（下記 [`ExclusionEvaluation::evaluate`] 参照。#123 との
-//!   並行編集コンフリクトを避けるためファイルを分離してある）。未評価である事実
-//!   自体は [`ExclusionEvaluation::unevaluated_rule_ids`] で呼び出し側へ伝播する
-//!   （上記「未評価ルールと fail-closed」参照）
+//!   並行編集コンフリクトを避けるためファイルを分離してある）。ただし
+//!   [`builtin_defaults`] にはこの schema のみのルール（`test-tolerance-loosening`）
+//!   を必ず含める（欠落させると `unevaluated_rule_ids` にこのカテゴリが一切
+//!   現れず fail-open してしまうため。イシュー #122 レビュー指摘対応）。未評価
+//!   である事実自体は [`ExclusionEvaluation::unevaluated_rule_ids`] で呼び出し側へ
+//!   伝播する（上記「未評価ルールと fail-closed」参照）
 //! - git diff からの変更ファイル一覧取得・[`crate::decision::Verdict`] との統合:
 //!   #103（TASK-4.1）・#124（TASK-5.2c）
 
@@ -94,10 +97,25 @@ pub struct PolicyExclusionConfig {
     pub rules: Vec<ExclusionRule>,
 }
 
-/// 組み込み既定値: `arch-hyperparameter-change`（v1 `policy-exclusion.toml` §4.1
-/// の値をそのまま採用。値の変更はユーザー承認必須のためこの実装では一切変更
-/// しない。`.claude/rules/security.md`「ガードレール閾値・ポリシー除外リストの
-/// 変更は必ず人間の承認を経る」）。
+/// 組み込み既定値: `docs/policy-exclusion-design.md` §4.1・`policy-exclusion.toml`
+/// が定める初期 2 カテゴリ（`arch-hyperparameter-change`・
+/// `test-tolerance-loosening`）をそのまま採用する。値の変更はユーザー承認必須の
+/// ためこの実装では一切変更しない（`.claude/rules/security.md`「ガードレール
+/// 閾値・ポリシー除外リストの変更は必ず人間の承認を経る」）。
+///
+/// 2 カテゴリとも欠かさず埋め込む理由（イシュー #122 レビュー指摘対応）:
+/// [`ExclusionEvaluation::evaluate`] は「未評価ルールの id」を
+/// `unevaluated_rule_ids` へ分離するが、これはあくまで**渡された `rules`
+/// 引数に含まれるルールのみ**を評価対象とする。`test-tolerance-loosening`
+/// （G5 ブラインドスポット対策。PoC-3 発見事項 5）自体がここで既定値から
+/// 欠落していると、呼び出し側が `builtin_defaults()` の結果を評価しても
+/// `unevaluated_rule_ids` は常に空集合のままになり、「未評価で判定不能」と
+/// 「そもそもカテゴリが存在しない」を区別できず G5 が fail-open のまま黙って
+/// 見逃されてしまう（`.claude/rules/security.md` A08）。`match_rule` は
+/// [`MatchRule::TestAssertionRelaxationWithoutProdChange`] のスキーマのみを
+/// ここに保持し、評価ロジック自体は #123（TASK-5.2b）に委ねる（評価すると
+/// `unevaluated_rule_ids` へ回り、呼び出し側〈#124〉は fail-closed 側へ倒す
+/// 想定。モジュール冒頭「未評価ルールと fail-closed」参照）。
 ///
 /// `.claude/rules/coding-rust.md`「本番経路で `unwrap()`/`expect()` を使わない」
 /// に例外を設けず、パターン構文検証（[`PathPattern::compile`]）の失敗は
@@ -105,18 +123,34 @@ pub struct PolicyExclusionConfig {
 /// 逃げない。呼び出し元は `self-repair` からの lib 直接呼び出しも含むため、
 /// この関数自体をパニックしない契約に保つ）。
 pub fn builtin_defaults() -> Result<PolicyExclusionConfig, PatternError> {
-    let paths = ["**/src/model*.rs", "**/src/nn/**", "**/src/*model*/**"]
+    let arch_paths = ["**/src/model*.rs", "**/src/nn/**", "**/src/*model*/**"]
         .iter()
         .map(|p| PathPattern::compile(p))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok(PolicyExclusionConfig {
-        rules: vec![ExclusionRule {
-            id: "arch-hyperparameter-change".to_string(),
-            category: Category::ArchitectureChange,
-            action: Action::HumanApproval,
-            match_rule: MatchRule::AnyDiffInPaths { paths },
-        }],
+        rules: vec![
+            ExclusionRule {
+                id: "arch-hyperparameter-change".to_string(),
+                category: Category::ArchitectureChange,
+                action: Action::HumanApproval,
+                match_rule: MatchRule::AnyDiffInPaths { paths: arch_paths },
+            },
+            ExclusionRule {
+                id: "test-tolerance-loosening".to_string(),
+                category: Category::TestToleranceLoosening,
+                action: Action::HumanApproval,
+                // 評価ロジックは #123（TASK-5.2b）が実装するまで schema のみ
+                // （`MatchRule::TestAssertionRelaxationWithoutProdChange` は
+                // フィールドを持たない）。`policy-exclusion.toml` §4.1 の
+                // `paths = ["**/*.rs"]`・`assertion_patterns` は評価ロジック
+                // 実装時に #123 が組み込む想定でここでは未使用。
+                // `ExclusionEvaluation::evaluate` はこの variant を必ず
+                // `unevaluated_rule_ids` へ回すため、呼び出し側は本カテゴリを
+                // 常に fail-closed（無条件人間承認）として扱える。
+                match_rule: MatchRule::TestAssertionRelaxationWithoutProdChange,
+            },
+        ],
     })
 }
 
@@ -185,7 +219,7 @@ mod tests {
     #[test]
     fn builtin_defaults_has_arch_hyperparameter_change_rule() {
         let config = builtin_defaults().unwrap();
-        assert_eq!(config.rules.len(), 1);
+        assert_eq!(config.rules.len(), 2);
         let rule = &config.rules[0];
         assert_eq!(rule.id, "arch-hyperparameter-change");
         assert_eq!(rule.category, Category::ArchitectureChange);
@@ -203,7 +237,40 @@ mod tests {
     }
 
     #[test]
+    fn builtin_defaults_has_test_tolerance_loosening_rule_as_schema_only() {
+        // イシュー #122 レビュー指摘対応: `test-tolerance-loosening`
+        // （G5 ブラインドスポット対策）が組み込み既定値に欠落していると、
+        // `evaluate` の `unevaluated_rule_ids` にこのカテゴリが一切現れず
+        // fail-open してしまう（モジュール冒頭「未評価ルールと fail-closed」
+        // 参照）。既定値に必ず含まれ、かつ評価すると未評価扱いになることを
+        // 固定する回帰テスト。
+        let config = builtin_defaults().unwrap();
+        assert_eq!(config.rules.len(), 2);
+        let rule = &config.rules[1];
+        assert_eq!(rule.id, "test-tolerance-loosening");
+        assert_eq!(rule.category, Category::TestToleranceLoosening);
+        assert_eq!(rule.action, Action::HumanApproval);
+        assert_eq!(
+            rule.match_rule,
+            MatchRule::TestAssertionRelaxationWithoutProdChange
+        );
+
+        let changed = vec!["crates/tensor-core/tests/regression.rs".to_string()];
+        let evaluation = ExclusionEvaluation::evaluate(&config.rules, &changed);
+        assert!(evaluation.matched_rule_ids.is_empty());
+        assert_eq!(
+            evaluation.unevaluated_rule_ids,
+            vec!["test-tolerance-loosening"]
+        );
+    }
+
+    #[test]
     fn evaluate_matches_arch_hyperparameter_change_on_model_path() {
+        // `builtin_defaults()` は #122 レビュー指摘対応で
+        // `test-tolerance-loosening`（評価ロジック未実装。#123 が引き継ぐ）も
+        // 含むため、`AnyDiffInPaths` 側の match 判定は個別ルールに絞って検証し、
+        // 未評価ルールが正しく `unevaluated_rule_ids` に分離されることも併せて
+        // 確認する（`matched_rule_ids` に混入しないことが fail-closed の要）。
         let config = builtin_defaults().unwrap();
         let changed = vec!["crates/tensor-core/src/model_mlp.rs".to_string()];
         let evaluation = ExclusionEvaluation::evaluate(&config.rules, &changed);
@@ -211,16 +278,25 @@ mod tests {
             evaluation.matched_rule_ids,
             vec!["arch-hyperparameter-change"]
         );
-        assert!(evaluation.unevaluated_rule_ids.is_empty());
+        assert_eq!(
+            evaluation.unevaluated_rule_ids,
+            vec!["test-tolerance-loosening"]
+        );
     }
 
     #[test]
     fn evaluate_does_not_match_unrelated_changes() {
+        // `arch-hyperparameter-change` は match しないが、`test-tolerance-loosening`
+        // は評価ロジック未実装のため常に `unevaluated_rule_ids` に回る
+        // （空にはならない。上記コメント参照）。
         let config = builtin_defaults().unwrap();
         let changed = vec!["README.md".to_string(), "Cargo.toml".to_string()];
         let evaluation = ExclusionEvaluation::evaluate(&config.rules, &changed);
         assert!(evaluation.matched_rule_ids.is_empty());
-        assert!(evaluation.unevaluated_rule_ids.is_empty());
+        assert_eq!(
+            evaluation.unevaluated_rule_ids,
+            vec!["test-tolerance-loosening"]
+        );
     }
 
     #[test]

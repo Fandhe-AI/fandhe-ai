@@ -46,6 +46,11 @@ fn arch_hyperparameter_change_matches_star_model_star_directory_pattern() {
 
 #[test]
 fn non_target_paths_do_not_match() {
+    // `matched_rule_ids` が空であることのみを安全（未マッチ確定）と誤読
+    // しないよう、`unevaluated_rule_ids`（`test-tolerance-loosening`。評価
+    // ロジックは #123 が引き継ぐ）が必ず non-empty で返ることも併せて固定する
+    // （イシュー #122 レビュー指摘対応。`builtin_defaults()` からこのルールが
+    // 再度欠落した場合に本テストが検知する）。
     let config = builtin_defaults().unwrap();
     let changed = vec![
         "README.md".to_string(),
@@ -54,10 +59,28 @@ fn non_target_paths_do_not_match() {
     ];
     let evaluation = ExclusionEvaluation::evaluate(&config.rules, &changed);
     assert!(evaluation.matched_rule_ids.is_empty());
+    assert_eq!(
+        evaluation.unevaluated_rule_ids,
+        vec!["test-tolerance-loosening"]
+    );
 }
 
 #[test]
 fn builtin_rule_category_is_architecture_change() {
     let config = builtin_defaults().unwrap();
     assert_eq!(config.rules[0].category, Category::ArchitectureChange);
+}
+
+#[test]
+fn builtin_rules_include_test_tolerance_category() {
+    // `builtin_defaults()` は `arch-hyperparameter-change` のみでなく
+    // `test-tolerance-loosening`（G5 ブラインドスポット対策）も必ず含む
+    // ことをクレート外部 API 経由で固定する（イシュー #122 レビュー指摘対応）。
+    let config = builtin_defaults().unwrap();
+    assert!(
+        config
+            .rules
+            .iter()
+            .any(|rule| rule.category == Category::TestToleranceLoosening)
+    );
 }
