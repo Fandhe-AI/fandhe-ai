@@ -1,0 +1,17 @@
+{
+  "change_id": "S5-inline-attr",
+  "preset": "default",
+  "lines_changed": 1,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -6.5941,
+  "bench_samples_pct": [-7.8851,-7.2827,-6.5941,-4.8830,-6.4348],
+  "bench_max_pct": 5.0,
+  "verdict": "自動適用",
+  "reasons": "全ゲート green・全指標が閾値内; "
+}

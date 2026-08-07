@@ -1,0 +1,14 @@
+diff --git a/src/train.rs b/src/train.rs
+index 1d17a13..639ab37 100644
+--- a/src/train.rs
++++ b/src/train.rs
+@@ -47,6 +47,9 @@ pub fn train(
+     epochs: usize,
+     lr: f32,
+ ) -> Result<(Mlp, f32), AutodiffError> {
++    // D5: 学習率を誤って 1 万分の 1 に縮小（本来は呼び出し元の lr を
++    // そのまま使うべき）。
++    let lr = lr / 10000.0;
+     let mut optim = Sgd::new(SgdConfig::new(lr))?;
+     let mut last_loss = f32::MAX;
+ 

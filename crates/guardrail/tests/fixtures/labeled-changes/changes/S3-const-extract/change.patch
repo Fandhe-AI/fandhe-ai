@@ -1,0 +1,27 @@
+diff --git a/src/model.rs b/src/model.rs
+index ef24e0b..f24f5e3 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -18,6 +18,9 @@ const FC1_SEED_SALT: u64 = 0x1;
+ const FC2_SEED_SALT: u64 = 0x2;
+ const FC3_SEED_SALT: u64 = 0x3;
+ 
++/// 隠れ層の次元数（S3: マジックナンバー抽出題材。挙動は変更しない）。
++const HIDDEN_DIM: usize = 8;
++
+ pub struct Mlp {
+     fc1: Linear,
+     fc2: Linear,
+@@ -30,9 +33,9 @@ impl Mlp {
+     /// 導出シードを作り、各層の初期化に独立して使う。
+     pub fn new(seed: u64) -> Result<Mlp, AutodiffError> {
+         Ok(Mlp {
+-            fc1: Linear::new(2, 8, true, seed ^ FC1_SEED_SALT)?,
+-            fc2: Linear::new(8, 8, true, seed ^ FC2_SEED_SALT)?,
+-            fc3: Linear::new(8, 1, true, seed ^ FC3_SEED_SALT)?,
++            fc1: Linear::new(2, HIDDEN_DIM, true, seed ^ FC1_SEED_SALT)?,
++            fc2: Linear::new(HIDDEN_DIM, HIDDEN_DIM, true, seed ^ FC2_SEED_SALT)?,
++            fc3: Linear::new(HIDDEN_DIM, 1, true, seed ^ FC3_SEED_SALT)?,
+         })
+     }
+ 

@@ -1,0 +1,19 @@
+diff --git a/src/model.rs b/src/model.rs
+index ef24e0b..c73e13c 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -29,10 +29,11 @@ impl Mlp {
+     /// 構築する。`seed` から `FC1_SEED_SALT`〜`FC3_SEED_SALT` で 3 系統の
+     /// 導出シードを作り、各層の初期化に独立して使う。
+     pub fn new(seed: u64) -> Result<Mlp, AutodiffError> {
++        // G2: 隠れ層次元数を 8→10 に拡大（アーキテクチャ変更題材）。
+         Ok(Mlp {
+-            fc1: Linear::new(2, 8, true, seed ^ FC1_SEED_SALT)?,
+-            fc2: Linear::new(8, 8, true, seed ^ FC2_SEED_SALT)?,
+-            fc3: Linear::new(8, 1, true, seed ^ FC3_SEED_SALT)?,
++            fc1: Linear::new(2, 10, true, seed ^ FC1_SEED_SALT)?,
++            fc2: Linear::new(10, 10, true, seed ^ FC2_SEED_SALT)?,
++            fc3: Linear::new(10, 1, true, seed ^ FC3_SEED_SALT)?,
+         })
+     }
+ 
