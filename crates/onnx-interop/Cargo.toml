@@ -15,8 +15,10 @@ prost.workspace = true
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu` が同種の判断を行った先例:
 # crates/backend-cpu/Cargo.toml）。safetensors パース結果のマッピング先である
-# `Tensor<f32>`・転置 API `transpose_2d()`・shape 検査 `ShapeError`（#73・TASK-7.1a）を
-# 利用するために必要。
+# `Tensor<f32>`・転置 API `transpose_2d()`・shape 検査 `ShapeError`（#73・TASK-7.1a）に加え、
+# 8 オペ（Gemm/Relu/Sigmoid/Shape/Gather/Unsqueeze/Concat/Slice。TASK-7.2c）・MVP 算術オペ
+# （Add/Mul/Div/Mod/Sqrt/Constant。TASK-7.3a）が入出力とする `Tensor<f32>`・stride ベース
+# view API を利用するために必要。
 tensor-core = { path = "../tensor-core" }
 
 [dev-dependencies]
