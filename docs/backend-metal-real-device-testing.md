@@ -41,6 +41,7 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 | `tests/gemm_naive_parity.rs` | TASK-1.8b（#39） | naive GEMM の CPU 参照実装との複合判定（REQ-2）。境界形状・中規模形状・K ストレス・縮退形状（TASK-1.8e で追加）・`dispatch`/`dispatch_variant(Naive)` 同値性（TASK-1.8e で追加）・不正形状の拒否 |
 | `tests/gemm_simdgroup_parity.rs` | TASK-1.8c（#40） | tiled/simdgroup GEMM の CPU 参照実装との複合判定（REQ-2）。境界形状・中規模形状・K ストレス・縮退形状（TASK-1.8e で追加）・不正形状の拒否 |
 | `tests/cpu_metal_parity.rs` | TASK-2.2c（#55） | CPU-Metal ペアの数値一致回帰（REQ-2 統一複合判定の固定。K=4096 ストレス・境界形状・決定性・falsification） |
+| `tests/backend_ops_real_device.rs` | TASK-1.9d（#47） | `tensor_core::BackendOps`（`MetalBackendOps::gemm`。`dispatch_auto` 動的タイル選択経由）と CPU `BackendOps::gemm` の数値一致（REQ-2）。`tile.rs::select` の動的タイル選択境界（`SMALL=64`）近傍・縦長横長分岐・`ops_for` 経由ディスパッチ・elementwise/reduction の `Unsupported` 契約を含む |
 
 判定は全ファイル共通で `backend_cpu::parity::{compare, assert_parity}`（REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体）を使う。**閾値の独自定義・緩和はしない**（`.claude/rules/security.md`・`.claude/rules/coding-rust.md`）。入力生成は `bench_harness::rng::Xorshift64Star`（決定的シード）で固定する。
 
