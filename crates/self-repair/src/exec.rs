@@ -163,9 +163,16 @@ impl CommandRunner for SystemCommandRunner {
         // 呼び出し元の意図（`cwd` 配下）とすり替わりうる。検証ゲートが
         // 検証対象と異なる workspace を build/test する事態を防ぐため、
         // 明示的に除去してから起動する（v1 `exec.rs` と同一の理由）。
+        // `CARGO_ENCODED_RUSTFLAGS` は `RUSTFLAGS` と同じ rustc フラグを
+        // 伝える等価チャンネルであり、Cargo は両者を等価に扱う
+        // （どちらか一方が設定されていればそちらが優先される）。
+        // `RUSTFLAGS` のみ除去して `CARGO_ENCODED_RUSTFLAGS` を継承したまま
+        // にすると、祖先プロセスがこちらを設定していた場合に検証ビルドの
+        // 挙動が変わりうるため、同様に除去する。
         command.env_remove("CARGO_TARGET_DIR");
         command.env_remove("CARGO_BUILD_TARGET_DIR");
         command.env_remove("RUSTFLAGS");
+        command.env_remove("CARGO_ENCODED_RUSTFLAGS");
 
         let output = command
             .output()
