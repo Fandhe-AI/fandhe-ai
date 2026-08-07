@@ -613,6 +613,23 @@ mod tests {
         );
     }
 
+    /// `validate_unified_diff_shape` の直接検証: 空 stdout・正常な unified
+    /// diff は許容し、`diff --git ` ヘッダを含まない出力（ANSI カラー化等で
+    /// ヘッダが変形された想定）は `DiffUnexpectedFormat` として拒否する
+    /// （Bugbot 指摘 Low・#123）。
+    #[test]
+    fn validate_unified_diff_shape_accepts_normal_output_and_rejects_malformed_output() {
+        assert!(validate_unified_diff_shape("git diff", "").is_ok());
+        assert!(
+            validate_unified_diff_shape("git diff", "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n")
+                .is_ok()
+        );
+        assert!(matches!(
+            validate_unified_diff_shape("git diff", "\x1b[1mdiff --git a/x b/x\x1b[m\n"),
+            Err(GuardrailError::DiffUnexpectedFormat { .. })
+        ));
+    }
+
     /// ケース 6: `tests/` ディレクトリ配下のみの変更（`src/` 外）での
     /// アサーション緩和 → `true`。
     #[test]
