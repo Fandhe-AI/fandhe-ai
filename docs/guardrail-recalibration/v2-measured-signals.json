@@ -1,0 +1,54 @@
+{
+  "$comment": "TASK-4.3b（イシュー #116）: v2 baseline（tensor-core/autodiff 自作コア上のミニ MLP。crates/guardrail/tests/fixtures/labeled-changes/baseline）に対する再実測シグナル。全 15 件の悉皆再実測ではなく、候補閾値の判定を左右しうるシグナルに限定して実測した（docs/guardrail-threshold-recalibration.md『再実測の対象範囲』節を参照）。",
+  "environment": {
+    "rustc_version": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+    "os": "Linux 7.0.0-28-generic x86_64",
+    "cpu": "QEMU Virtual CPU version 2.5+ (12 vCPU)",
+    "measured_at": "2026-08-07",
+    "worktree_commit_base": "c271d23"
+  },
+  "measurements": [
+    {
+      "change_id": "G4-large-comment-refactor",
+      "signal": "lines_changed",
+      "method": "git diff --numstat（baseline を tempdir へコピーし git init 後、change.patch を git apply）",
+      "v2_measured_value": 210,
+      "reference_poc3_value": 231,
+      "note": "v1 の change.patch はそのまま移植できず v2 baseline 向けに再構築されているため実測値は参照値と一致しないが（README『重要な注記』節）、両者とも lines_max=200（strict/default 共通）を超過し、lines_max=400（loose）以内という境界条件は一致する。判定に効く境界（>200 か否か）は再現できている。"
+    },
+    {
+      "change_id": "D3-redundant-calc",
+      "signal": "bench_median_pct",
+      "method": "cargo bench --bench forward_bench を baseline 版・D3 適用版でそれぞれ 5 回実行し、criterion の point estimate（中央値）を採取。変化率 = (D3 median - baseline median) / baseline median * 100",
+      "baseline_bench_runs_us": [8.2870, 8.1253, 8.2770, 8.1191, 8.1646],
+      "baseline_bench_median_us": 8.1646,
+      "patched_bench_runs_us": [14.319, 14.345, 14.354, 14.376, 14.317],
+      "patched_bench_median_us": 14.345,
+      "v2_measured_bench_median_change_pct": 75.696,
+      "reference_poc3_bench_median_pct": 57.267,
+      "note": "v1 実測（57.27%）・v2 実測（75.70%）のいずれも strict（2.5%）/default（5.0%）/loose（10.0%）の全プリセット閾値を大幅に超過し、D3 は 3 プリセットいずれでもベンチゲートで escalate へ倒れる（見逃しなし）。"
+    },
+    {
+      "change_id": "D2-private-method",
+      "signal": "build_ok",
+      "method": "cargo build（change.patch 適用後）",
+      "v2_measured_value": false,
+      "detail": "error[E0599]: no method named `relu` found for struct `Ref<'_, Tensor<f32>>`",
+      "note": "gate spot-check。build 不通過 → reject（category=dangerous・expected_verdict=reject と一致）。"
+    },
+    {
+      "change_id": "D1-relu-sigmoid-swap",
+      "signal": "test_ok",
+      "method": "cargo build → cargo test（change.patch 適用後）",
+      "v2_measured_build_ok": true,
+      "v2_measured_test_ok": false,
+      "detail": "activations::tests::relu_matches_known_values と leaky_relu_matches_known_values が既知正解値と不一致でパニック",
+      "note": "gate spot-check。build 通過・test 不通過 → reject（category=dangerous・expected_verdict=reject と一致）。"
+    }
+  ],
+  "not_remeasured": {
+    "reason": "D1/D2/D4/D5/G1 はいずれか 1 ゲート不通過で reject 確定（ゲート判定は数値の大小に依存しないブール条件のため、代表 2 件〈D1・D2〉の spot-check で判定順序契約の再現を確認すれば十分と判断した）。S1〜S5 は全ゲート通過・ベンチ改善側（v1 実測でマージンが大きい）で auto_apply 確定であり、候補閾値の合否を左右しない。G2・G3・G5 は lines_max・ベンチいずれの数値境界にも該当しない（G2・G5 は既知ブラインドスポットとして gray 固定、G3 は API 破壊フラグによる決定）。詳細は docs/guardrail-threshold-recalibration.md 参照。",
+    "change_ids": ["D4-leaky-relu-sign-bug", "D5-lr-bug", "G1-gaming", "G2-hidden-dim-increase", "G3-api-break", "G5-test-only-loosen", "S1-doc-comments", "S2-gelu-add", "S3-const-extract", "S4-S5-cosmetic-comments", "S5-inline-attr"],
+    "full_15_way_remeasurement_scope": "TASK-4.4（ベンチ計測モジュール）の担当範囲として README『検証範囲の注記』節に既定済み。本イシュー（TASK-4.3b）は候補閾値の算出が目的であり、判定を左右しないシグナルの悉皆再実測は行わない。"
+  }
+}
