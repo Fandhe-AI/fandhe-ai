@@ -38,23 +38,29 @@
 //!   [`report::LoopFailure`] がそれまでの試行記録ごとエラーを保持する。
 //! - [`runner`][]: 上記 trait を組み合わせて 1 ループを実行するオーケストレータ
 //!   [`runner::SelfRepairLoop`]。
+//! - [`judge`][]: guardrail 3 分岐判定を [`stages::AdoptionJudge`] として接続する
+//!   [`judge::GuardrailAdoptionJudge`]（TASK-3.1d・#135）。`evidence` の 6 シグナルを
+//!   `guardrail::DecisionInput::new` へそのまま渡し `guardrail::decide` を呼ぶだけの
+//!   薄いアダプタであり、`decide` を経由しない [`outcome::AdoptionVerdict`] 生成経路を
+//!   持たない（A08: 判定の迂回経路を作らない）。
 //! - [`error`][]: 型付きエラー [`error::SelfRepairError`]。
 //!
-//! # 本クレートが担わない責務（TASK-3.1a 完了時点でのスコープ・
-//! `.claude/rules/out-of-scope-tracking.md` 準拠）
+//! # 本クレートが担わない責務（`.claude/rules/out-of-scope-tracking.md` 準拠）
 //! - 検出・可否判断フェーズの実装（`bug_fix`/`perf_regression`/
 //!   `feature_addition`/`candidate` 相当） → イシュー #133（TASK-3.1b）
-//! - 検証 3 ゲート実実行（`verify`/`cargo_gate` 相当） → イシュー #134（TASK-3.1c）
-//! - guardrail 3 分岐判定との統合（`judge` 相当・[`outcome::VerifiedEvidence`]
-//!   への guardrail シグナル拡張） → イシュー #135（TASK-3.1d。`guardrail`
-//!   クレート自体の CLI 移植〈TASK-4.1〉はイシュー #103 が別途追跡）
+//! - 検証 3 ゲート実実行（`verify`/`cargo_gate` 相当。`VerificationGate` の
+//!   本番実装が [`outcome::VerifiedEvidence`] を実測シグナルから構築する部分）
+//!   → イシュー #134（TASK-3.1c。本クレートは入力型と `AdoptionJudge` への
+//!   接続〈#135〉のみを確定済み）
 //! - ログ形式（`logging` 相当・SHA-256 ハッシュチェーン・`sha2` 依存追加。
 //!   依存追加はユーザー承認事項） → イシュー #145（TASK-3.4）
 //! - CLI バイナリ（`self-repair run`/`verify-log`。
 //!   `docs/guardrail-self-repair-cli.md` 3 節） → 後続タスク（既存イシューで
 //!   追跡済み）
+//! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod error;
+pub mod judge;
 pub mod kind;
 pub mod outcome;
 pub mod report;
@@ -62,6 +68,7 @@ pub mod runner;
 pub mod stages;
 
 pub use error::SelfRepairError;
+pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use report::{LoopFailure, LoopReport};
