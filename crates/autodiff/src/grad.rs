@@ -20,6 +20,7 @@
 use tensor_core::Tensor;
 
 use crate::eval::{self, build_tensor, dense_vec};
+use crate::nn::loss::Reduction;
 use crate::tape::{NodeId, Op, TapeNode};
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -33,7 +34,11 @@ pub(crate) fn vjp(
     upstream: &Tensor<f32>,
     nodes: &[TapeNode],
 ) -> Vec<(NodeId, Tensor<f32>)> {
-    match *op {
+    // `Op` は `CrossEntropyLoss` の `targets: Tensor<i32>` payload
+    // ゆえに `Copy` を持たない（`tape.rs::Op` doc 参照）。旧
+    // `match *op`（`Copy` 前提の値コピー）を `op.clone()` に置き換え、
+    // それ以外の分岐は変更しない。
+    match op.clone() {
         Op::Leaf => Vec::new(),
         Op::MatMul(a, b) => {
             let (da, db) = matmul_vjp(&nodes[a.0].value, &nodes[b.0].value, upstream);
@@ -92,6 +97,24 @@ pub(crate) fn vjp(
             let (dpred, dtarget) =
                 mse_loss_vjp(&nodes[pred.0].value, &nodes[target.0].value, upstream);
             vec![(pred, dpred), (target, dtarget)]
+        }
+        Op::CrossEntropyLoss {
+            logits,
+            targets,
+            class_dim,
+            reduction,
+        } => {
+            let dlogits = cross_entropy_loss_vjp(
+                &nodes[logits.0].value,
+                &targets,
+                class_dim,
+                reduction,
+                upstream,
+            );
+            // `targets` は非追跡（`Var`/`NodeId` を持たない）ため勾配
+            // 寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
+            // CrossEntropyLoss` doc 参照）。
+            vec![(logits, dlogits)]
         }
     }
 }
@@ -358,6 +381,61 @@ fn mse_loss_vjp(
     let dpred = build_tensor(dpred_data, &shape);
     let dtarget = build_tensor(dtarget_data, &shape);
     (dpred, dtarget)
+}
+
+/// `CrossEntropyLoss(logits, targets)` の VJP:
+/// `d loss / d logits[..., c, ...] = (softmax(logits)[..., c, ...] − 1{c == t}) × g`
+/// （`g` はサンプルごとのスカラー係数。`Mean` は `g = upstream / N`、
+/// `Sum` は `g = upstream`。`N` はサンプル数 `= targets.numel()`）。
+/// `eval::softmax_along` を再利用し、forward（`eval::cross_entropy_loss`
+/// の log-sum-exp）と数式の実体を分離しない（`grad.rs` 冒頭 doc）。
+/// `targets` は非追跡のため戻り値は `logits` 側の勾配のみ（呼び出し元
+/// `vjp()` の `CrossEntropyLoss` 分岐参照）。
+fn cross_entropy_loss_vjp(
+    logits: &Tensor<f32>,
+    targets: &Tensor<i32>,
+    class_dim: usize,
+    reduction: Reduction,
+    upstream: &Tensor<f32>,
+) -> Tensor<f32> {
+    let shape = logits.shape().to_vec();
+    let outer: usize = shape[..class_dim].iter().product();
+    let axis_len = shape[class_dim];
+    let inner: usize = shape[class_dim + 1..].iter().product();
+    let n = outer * inner;
+
+    let softmax = eval::softmax_along(logits, class_dim);
+    let mut grad = dense_vec(&softmax);
+    let target_data = eval::dense_vec_i32(targets);
+
+    let g_value = dense_vec(upstream).first().copied().unwrap_or(0.0);
+    let scale = match reduction {
+        Reduction::Mean if n > 0 => g_value / n as f32,
+        Reduction::Mean => 0.0,
+        Reduction::Sum => g_value,
+    };
+
+    for o in 0..outer {
+        for i in 0..inner {
+            let t = target_data[o * inner + i];
+            // forward（`Var::cross_entropy_loss`）が事前検査済みの前提
+            // （`0 <= t < axis_len`）。範囲外は契約違反であり
+            // `debug_assert!` で検知しつつ onehot 減算をスキップする
+            // 安全側フォールバック（`eval::cross_entropy_loss` と同型の
+            // 契約違反対応）。
+            if t >= 0 && (t as usize) < axis_len {
+                let idx = (o * axis_len + t as usize) * inner + i;
+                grad[idx] -= 1.0;
+            } else {
+                debug_assert!(
+                    false,
+                    "cross_entropy_loss_vjp: target 添字が範囲外（契約違反）"
+                );
+            }
+        }
+    }
+    let scaled: Vec<f32> = grad.iter().map(|&v| v * scale).collect();
+    build_tensor(scaled, &shape)
 }
 
 #[cfg(test)]
@@ -759,6 +837,46 @@ mod tests {
         assert!(dense_vec(&dtarget).is_empty());
     }
 
+    // --- CrossEntropyLoss（#191。PyTorch 参照値との突合は
+    //     `tests/nn_cross_entropy.rs`、ここでは既存の
+    //     `numeric_grad_unary`/`assert_grad_close`〈中央差分〉基盤に
+    //     揃えた eval レベルの grad check を行う） ---
+
+    #[test]
+    fn cross_entropy_loss_grad_matches_numeric() {
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        // forward 出力は既に scalar shape [] のため、`s` も scalar
+        // （`mse_loss_grad_matches_numeric` と同じ「射影 s がスカラー」
+        // パターン）。
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let dlogits = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
+        let num_dlogits = numeric_grad_unary(&logits, &s, |x| {
+            eval::cross_entropy_loss(x, &targets, 1, Reduction::Mean)
+        });
+
+        assert_grad_close("cross_entropy_loss(mean) dLogits", &dlogits, &num_dlogits);
+    }
+
+    #[test]
+    fn cross_entropy_loss_grad_sum_matches_numeric() {
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let s = t(&[3.0], &[]);
+
+        let g = s.clone();
+        let dlogits = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Sum, &g);
+        let num_dlogits = numeric_grad_unary(&logits, &s, |x| {
+            eval::cross_entropy_loss(x, &targets, 1, Reduction::Sum)
+        });
+
+        assert_grad_close("cross_entropy_loss(sum) dLogits", &dlogits, &num_dlogits);
+    }
+
     // --- reduce_to_shape（中間軸縮約。ランク同一で先頭・末尾以外の
     //     軸を broadcast 元へ潰す経路。add/mul の bias broadcast テスト
     //     は末尾軸・スカラーテストは rank 0 のみで、この経路は未カバー
@@ -799,6 +917,9 @@ mod tests {
     // （`nodes[a.0]`/`nodes[b.0]` の対応順序）を通しで検証するため、
     // 全 9 演算（Leaf を除く）を vjp() 経由でテストする。Sigmoid
     // （TASK-9.1b・#92）追加により対象は 10 演算に拡大。
+    // CrossEntropyLoss（#191）追加により対象は 11 演算に拡大
+    // （Add/Mul/Relu/Exp/Tanh/Sigmoid/Sum/Max/MseLoss/MatMul/
+    // CrossEntropyLoss）。
 
     fn leaf_node(value: Tensor<f32>) -> TapeNode {
         TapeNode {
@@ -985,5 +1106,32 @@ mod tests {
         let (expected_dpred, expected_dtarget) = mse_loss_vjp(&pred, &target, &g);
         assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected_dpred));
         assert_eq!(dense_vec(&grads[1].1), dense_vec(&expected_dtarget));
+    }
+
+    #[test]
+    fn vjp_dispatch_cross_entropy_loss_returns_single_input() {
+        // `targets` は非追跡（`NodeId` を持たない Op payload）のため、
+        // `MseLoss`（pred/target 2 系統）とは異なり寄与は `logits` の
+        // 1 系統のみ（`grads.len() == 1`）であることが配線検証の要点
+        // （`tape::Op::CrossEntropyLoss` doc 参照）。
+        let logits = t(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
+        let targets = tensor_core::Tensor::new(vec![2i32, 0], &[2])
+            .expect("test fixture: shape とデータ長は事前に一致させている");
+        let g = t(&[3.0], &[]);
+        let out_value = eval::cross_entropy_loss(&logits, &targets, 1, Reduction::Mean);
+        let nodes = vec![leaf_node(logits.clone())];
+        let op = Op::CrossEntropyLoss {
+            logits: NodeId(0),
+            targets: targets.clone(),
+            class_dim: 1,
+            reduction: Reduction::Mean,
+        };
+
+        let grads = vjp(&op, &out_value, &g, &nodes);
+
+        assert_eq!(grads.len(), 1);
+        assert_eq!(grads[0].0, NodeId(0));
+        let expected = cross_entropy_loss_vjp(&logits, &targets, 1, Reduction::Mean, &g);
+        assert_eq!(dense_vec(&grads[0].1), dense_vec(&expected));
     }
 }

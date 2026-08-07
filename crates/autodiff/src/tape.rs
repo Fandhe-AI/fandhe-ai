@@ -44,11 +44,17 @@ pub struct NodeId(pub(crate) usize);
 /// （`docs/public-api-design.md` §3.2 の演算セットに 1:1 対応）。
 ///
 /// 各 variant の入力 `NodeId`/`dim` フィールドは `grad.rs`（#17・
-/// TASK-1.5b）の `vjp()` ディスパッチが読み出す（`match *op` で各
+/// TASK-1.5b）の `vjp()` ディスパッチが読み出す（`op.clone()` して各
 /// variant を分解し、入力側 `NodeId` へ勾配を割り当てる）。
 /// `Tape::backward`（`backward.rs`・#18・TASK-1.5c）はノード列を逆走査
 /// しながら `vjp()` を呼び、返った寄与を入力ノードへ蓄積する側。
-#[derive(Debug, Clone, Copy)]
+///
+/// **`Copy` を持たない理由**: `CrossEntropyLoss`（#191）の `targets` は
+/// クラス添字（`Tensor<i32>`）を直接保持する非追跡ペイロードであり、
+/// `Tensor<T>` は `Clone` のみ（`Copy` 不可）のため `Op` 全体も
+/// `Clone` に留める（`grad.rs::vjp` は `op: &Op` を受け取り
+/// `op.clone()` してから `match` する）。
+#[derive(Debug, Clone)]
 pub(crate) enum Op {
     /// `Tape::var()` が登録する非追跡入力（葉ノード）。逆伝播の起点
     /// にはなるが、それ自体の入力ノードは持たない。
@@ -74,6 +80,22 @@ pub(crate) enum Op {
         dim: Option<usize>,
     },
     MseLoss(NodeId, NodeId),
+    /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
+    /// 親イシュー #189）。log-softmax → NLL を個別オペ合成せず、
+    /// `MseLoss` と同じく forward/backward を解析形で閉じられる
+    /// 1 個の融合オペとして実装する（実装計画 §3.1。PyTorch
+    /// `F.cross_entropy` も内部で同等の融合実装）。
+    ///
+    /// `targets`（クラス添字）は非追跡データのため `Var`/`NodeId` を
+    /// 持たず、`Op` payload に直接 `Tensor<i32>` を埋め込む（勾配は
+    /// `logits` の 1 系統のみ定義され、`targets` 側には流れない。
+    /// `grad.rs::vjp` の `CrossEntropyLoss` 分岐参照）。
+    CrossEntropyLoss {
+        logits: NodeId,
+        targets: Tensor<i32>,
+        class_dim: usize,
+        reduction: crate::nn::loss::Reduction,
+    },
 }
 
 /// テープ上の 1 ノード。演算種別（`Op`）と、その演算を順伝播で評価

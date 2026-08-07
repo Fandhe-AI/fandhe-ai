@@ -49,6 +49,14 @@
 //! TASK-9.2）とは区別される（`nn/mod.rs` の境界説明を参照）。上記の
 //! 「互換レイヤ固有のロジックを持ち込まない」方針は `compat` 層本体を
 //! 指しており、`nn` モジュールには適用されない。
+//!
+//! #191（親イシュー #189）で CrossEntropy 損失（log-sum-exp 安定化・
+//! クラス次元指定）を追加した。`Var::cross_entropy_loss`（`var.rs`・
+//! `Op::CrossEntropyLoss`）は log-softmax → NLL を個別オペ合成せず
+//! `MseLoss` と同じ 1 個の融合オペとして実装し、VJP（`grad.rs`）は
+//! 解析形 `softmax(x) − onehot(t)` で閉じる。`nn::loss::
+//! CrossEntropyLoss` はその薄いラッパー。`nn::loss::Reduction`
+//! （`Mean`/`Sum`）は MSE の reduction 対応（#190）と共有されうる値。
 
 mod backward;
 mod error;
