@@ -15,21 +15,23 @@
 //!   キーマップに対する期待キー集合の充足検査を提供する。キー不足を無言 skip せず
 //!   型付きエラー（[`LoadError`]）で報告する（v1 PoC-6 詰まりポイント #2 対策。詳細は
 //!   `require_keys` モジュールのドキュメンテーションコメント参照）。
+//! - [`onnx`]: ONNX 取り込みの実体（protobuf デコード・内部グラフ構築）。
+//!   spec 根拠: `docs/spec/05-tasks.md` TASK-7.2a、REQ-7。
 //! - [`ops`]（TASK-7.2c・#79 / TASK-7.3a・#82 / TASK-7.3b・#83 / TASK-7.3c・#84 /
 //!   TASK-7.3d・#85）: ONNX オペを `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
 //!   8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`）に
 //!   加え MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`）・MVP 形状操作
 //!   オペ（`Cast`／`Reshape`／`Squeeze`／`Transpose`）・Attention 系オペ（`MatMul`／
 //!   `Softmax`／`Erf`。TASK-7.3c・#84）・`LayerNormalization`（TASK-7.3d・#85）を含む。
-//!   ONNX proto デコード（TASK-7.2a）・グラフ実行エンジンは別イシューの担当であり、
-//!   本モジュールは「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱う
-//!   （decode → 属性値 → 本モジュール呼び出し、の結線は後続タスクで行う）。属性は proto
+//!   `ops` は「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱う。属性は proto
 //!   由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、デコード層の
-//!   実装順序に依存しない。8 オペの単体テスト・PoC-v2-6 数値突合（ONNX 経路）は
-//!   TASK-7.2d（#80）が `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
+//!   実装順序に依存しない。[`onnx`] のグラフ実行エンジン（decode → 属性値 → 本モジュール
+//!   呼び出しの結線）は別イシューの担当である（TASK-7.2a・#77 で proto デコード・
+//!   トポロジ検証までを提供。`crates/onnx-interop/tests/onnx_decode.rs`）。8 オペの
+//!   単体テスト・PoC-v2-6 数値突合（ONNX 経路）は TASK-7.2d（#80）が
+//!   `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
 //!   `tests/onnx_slice_dynamic_bounds.rs` として整備する（safetensors 経路の同種突合は
 //!   `tests/st_poc_v2_6_match.rs`・#75）。
-//! - ONNX proto デコード経路（TASK-7.2a）は本イシューのスコープ外で未実装。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを
 //!   設けない・dtype は F32 のみ）を持つ保存経路。親イシュー #196 の
@@ -46,6 +48,7 @@
 //! 衝突はしない）。統合整理の要否はスコープ外事項としてイシュー #74 側で追跡する
 //! （`.claude/rules/out-of-scope-tracking.md`）。
 
+pub mod onnx;
 pub mod ops;
 pub mod st_load;
 pub mod st_save;
