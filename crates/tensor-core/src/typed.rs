@@ -160,6 +160,24 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
         Ok(BatchedFeatures { inner: t })
     }
 
+    /// `kernel` 実行後の出力を型付きに包む内部専用の境界コンストラクタ。
+    /// `from_tensor` の rank/特徴次元検査に加えてバッチ次元
+    /// （`expected_batch`）も突合する。`matmul_with`/`add_bias_with` が
+    /// 「呼び出し元の入力バッチサイズと出力のバッチサイズが一致する」
+    /// ことまで再検査するために使う（型と実体の乖離防止。REQ-8 の
+    /// カーネル境界検査規約と同趣旨）。公開 `from_tensor` は入力ロード
+    /// 境界用でバッチサイズを未知として許容するため、ここでは分離する。
+    fn from_tensor_with_batch(t: Tensor<T>, expected_batch: usize) -> Result<Self, ShapeError> {
+        let out = Self::from_tensor(t)?;
+        if out.inner.shape()[0] != expected_batch {
+            return Err(ShapeError::ShapeMismatch {
+                lhs: vec![expected_batch, F],
+                rhs: out.inner.shape().to_vec(),
+            });
+        }
+        Ok(out)
+    }
+
     /// 動的層への脱出口。
     pub fn as_tensor(&self) -> &Tensor<T> {
         &self.inner
@@ -192,7 +210,7 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
         kernel: impl FnOnce(&Tensor<T>, &Tensor<T>) -> Result<Tensor<T>, ShapeError>,
     ) -> Result<BatchedFeatures<T, OUT>, ShapeError> {
         let out = kernel(&self.inner, &w.inner)?;
-        BatchedFeatures::from_tensor(out)
+        BatchedFeatures::from_tensor_with_batch(out, self.batch_size())
     }
 
     /// bias 加算の型付きシグネチャ: 特徴次元 `F` の一致を型で強制する。
@@ -204,7 +222,7 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
         kernel: impl FnOnce(&Tensor<T>, &Tensor<T>) -> Result<Tensor<T>, ShapeError>,
     ) -> Result<BatchedFeatures<T, F>, ShapeError> {
         let out = kernel(&self.inner, &b.inner)?;
-        BatchedFeatures::from_tensor(out)
+        BatchedFeatures::from_tensor_with_batch(out, self.batch_size())
     }
 }
 

@@ -22,6 +22,11 @@
 //!   （`matmul_with`/`add_bias_with` とも）。
 //! - `BatchedFeatures::from_tensor` への rank-3 入力（既存テストは
 //!   rank-1 のみを検証していたため、rank 不一致の別パターンを補う）。
+//! - `matmul_with`/`add_bias_with` の出力バッチ次元再検査。`kernel` が
+//!   特徴次元は正しいがバッチ次元だけ誤った出力を返す壊れ方は、特徴
+//!   次元のみを見る `from_tensor` の再検査では検出できなかった
+//!   （実装レビュー #100 指摘。バッチ不一致は `ShapeError::ShapeMismatch`
+//!   で拒否する対称ケースを補う）。
 //!
 //! CI（self-hosted）は `docs/spec`（submodule）を checkout しないため、
 //! 本ファイルは `docs/spec` 配下のいかなるファイルにも依存しない。
@@ -118,6 +123,36 @@ fn add_bias_with_rejects_kernel_output_shape_mismatch() {
 
     let err = x
         .add_bias_with(&b, |_a, _bias| Ok(Tensor::zeros(&[2, 5]).unwrap()))
+        .unwrap_err();
+    assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+}
+
+// --- matmul_with/add_bias_with の出力バッチ次元再検査 ---
+
+#[test]
+fn matmul_with_rejects_kernel_output_batch_mismatch() {
+    // kernel が特徴次元は正しい（OUT=4）が batch を誤って書き換えた
+    // 出力（期待 [2, 4] に対し [99, 4]）を返した場合、from_tensor の
+    // 特徴次元検査だけでは検出できない。呼び出し元の batch_size() との
+    // 突合で拒否されることを確認する。
+    let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+    let w = FixedMat::<f32, 3, 4>::from_tensor(Tensor::zeros(&[3, 4]).unwrap()).unwrap();
+
+    let err = x
+        .matmul_with(&w, |_a, _w| Ok(Tensor::zeros(&[99, 4]).unwrap()))
+        .unwrap_err();
+    assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
+}
+
+#[test]
+fn add_bias_with_rejects_kernel_output_batch_mismatch() {
+    // matmul_with と対称のケース: bias 加算 kernel が特徴次元は正しい
+    // が batch を誤って書き換えた出力を返した場合の拒否を確認する。
+    let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
+    let b = FixedVec::<f32, 3>::from_tensor(Tensor::zeros(&[3]).unwrap()).unwrap();
+
+    let err = x
+        .add_bias_with(&b, |_a, _bias| Ok(Tensor::zeros(&[99, 3]).unwrap()))
         .unwrap_err();
     assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
 }
