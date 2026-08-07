@@ -1,6 +1,7 @@
 //! ONNX 8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`。
 //! TASK-7.2c・#79）に加え、MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`。
-//! TASK-7.3a・#82）を `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
+//! TASK-7.3a・#82）、Attention 系オペ（`MatMul`／`Softmax`／`Erf`。TASK-7.3c・#84）を
+//! `tensor-core::Tensor<f32>` 上の純粋関数として提供する。
 //!
 //! 各関数は「入力テンソル＋属性 → 出力テンソル」の単体演算に限定し、ONNX proto デコード
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
@@ -14,18 +15,22 @@ mod constant;
 mod error;
 mod gather;
 mod gemm;
+mod matmul;
 mod shape_ops;
 mod slice;
+mod softmax;
 
-pub use activation::{relu, sigmoid};
+pub use activation::{erf, relu, sigmoid};
 pub use arith::{add, div, modulo, mul, sqrt};
 pub use concat::concat;
 pub use constant::{ConstantValue, constant};
 pub use error::OpError;
 pub use gather::gather;
 pub use gemm::{GemmAttrs, gemm};
+pub use matmul::matmul;
 pub use shape_ops::{shape, unsqueeze};
 pub use slice::{SliceParams, slice};
+pub use softmax::softmax;
 
 /// ONNX の負軸表記（`axis < 0` の場合 `axis + rank`）を正規化し、`[0, rank)` の範囲を
 /// 検査する。範囲外の場合は `None`（呼び出し元が `op` 名を添えて `OpError::AxisOutOfRange`
