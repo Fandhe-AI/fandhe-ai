@@ -10,20 +10,22 @@
 # ブラインドスポットであり、本ファイルはその防波堤となる初期除外リストである。
 #
 # 設計の正本は docs/policy-exclusion-design.md（TASK-5.1、承認済み）§4.1 の
-# 記述例 2 件をそのまま採用する（値の追加・変更を含まない。プロダクト判断を
-# 伴う新カテゴリ・パターン追加は本ファイル単独では行わない。「許容依存一覧の
-# 追加・更新、Cargo.toml／Cargo.lock の変更」カテゴリの新設は TASK-5.1b
-# 〈イシュー #120・human-required〉のスコープであり、本ファイルには未反映）。
+# 記述例をそのまま採用する。カテゴリ 1・2（TASK-5.1a・イシュー #119）は
+# v1 資産の忠実移植で値不変。カテゴリ 3（依存変更）は TASK-5.1b
+# 〈イシュー #120・human-required〉で新設した（REQ-1 の受け皿。§4.1 カテゴリ 3・
+# §3.4 参照）。プロダクト判断を伴う更なる新カテゴリ・パターン追加は
+# 本ファイル単独では行わない。
 #
 # 本ファイルの内容は crates/guardrail/src/policy_exclusion.rs（TASK-5.2・
 # イシュー #121 で実装予定）の builtin_defaults() と完全一致することを回帰
 # テスト repo_root_policy_exclusion_toml_matches_builtin_defaults（同イシュー
 # で追加予定）で保証する設計である（設計 §4「組み込み既定値との数値一致を
-# 回帰テストで保証する」）。乖離は判定迂回経路になり得るため、両者は必ず
-# 同一 PR で同時変更し、ユーザー承認を得ること（.claude/rules/security.md）。
-# 本イシュー（#119）の時点では policy_exclusion.rs・一致回帰テストのいずれも
-# 未実装であり、本ファイルは crates/guardrail の判定フローにまだ組み込まれて
-# いない（TASK-5.2 で統合）。
+# 回帰テストで保証する」。3 カテゴリすべて最低 1 件ずつ存在することを
+# builtin_defaults() 側でも一致させる）。乖離は判定迂回経路になり得るため、
+# 両者は必ず同一 PR で同時変更し、ユーザー承認を得ること
+# （.claude/rules/security.md）。本イシュー（#119・#120）の時点では
+# policy_exclusion.rs・一致回帰テストのいずれも未実装であり、本ファイルは
+# crates/guardrail の判定フローにまだ組み込まれていない（TASK-5.2 で統合）。
 #
 # フィールド順序についての注意: TOML の仕様上、`[exclusion.match]` の
 # テーブル見出し後に置かれた key はそのテーブルに属してしまうため、
@@ -54,3 +56,14 @@ action = "human_approval"
 [exclusion.match]
 type = "test_assertion_relaxation_without_prod_change"
 assertion_patterns = ["assert!", "abs() <", "1e-[0-9]"]
+
+[[exclusion]]
+id = "dependency-change"
+category = "dependency_change"
+description = "許容依存一覧の追加・更新、および依存管理ファイル（Cargo.toml／Cargo.lock・deny.toml・docs/license-matrix.md・.claude/rules/deps-policy.md）への変更"
+rationale = "REQ-5 受け入れ基準3（v2 追加。docs/spec/04-requirements.md:121-136）に対応する REQ-1 の受け皿。依存の追加・更新は AI 自律メンテナンスの自動適用対象外（人間承認必須。.claude/rules/deps-policy.md）であり、機械判定の結果によらず無条件で人間承認へ回す。"
+paths = ["**/Cargo.toml", "**/Cargo.lock", "deny.toml", "docs/license-matrix.md", ".claude/rules/deps-policy.md"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
