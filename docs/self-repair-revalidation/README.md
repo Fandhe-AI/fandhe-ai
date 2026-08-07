@@ -96,7 +96,7 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 | `self-repair run`/`verify-log` CLI バイナリの実装 | `docs/guardrail-self-repair-cli.md` §3 記載のタスク（後続イシュー） |
 | 候補 diff（バグ修正のワークツリー差分）に対するベンチ劣化率の直接実測・真の 4 ゲート合成の `src/` 本体への昇格 | #136 系 |
 | 外部アンカー運用（末尾切り詰め対策）の自動化実装 | 未起票（`docs/self-repair-log-format.md` 7 節が運用指針のみを文書化。自動化が必要と判断された場合は別途 Issue 化） |
-| 完走可否の人間評価 | #144（TASK-3.3e。本 README・各記録ディレクトリの README・`loop-report.json`／`loop-log.jsonl` を判定基準に照らして評価する） |
+| 完走可否の人間評価 | #144（TASK-3.3e）。評価・判定案は [`completion-judgment.md`](./completion-judgment.md) に記録した |
 
 ## 6. #144（人間評価）向けの評価導線
 
@@ -114,3 +114,7 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
    ものであり、ガードレール閾値・テスト許容誤差の緩和によるものではない
    ことを、各 README の該当節（「3. 4 ゲート合成についての設計上の制約」・
    「シグナルは実測のみ」等）で確認する。
+5. ログ整合性の事前確認（`verify_chain` 実行結果）・判定基準 6 項目の
+   個別評価・REQ-3 受け入れ基準との突合・判定案は
+   [`completion-judgment.md`](./completion-judgment.md) に記録した。
+   人間判定は同文書 8 節の記録欄に行う。
