@@ -9,8 +9,10 @@
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。インタープリタのディスパッチ
-//! （op 名 → 本モジュール関数の解決）は #78（未実装・ブランチなし）の担当であり、本モジュールの
-//! 公開関数は現時点でグラフ実行から到達不能（後続の結線待ち）。
+//! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78）が担い、
+//! 上記 8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／
+//! `Slice`）はグラフ実行から到達可能である。MVP 算術・形状操作・Attention 系・
+//! `LayerNormalization`（TASK-7.3a〜d）のディスパッチ結線は #274 で追跡する。
 
 mod activation;
 mod arith;
