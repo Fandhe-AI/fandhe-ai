@@ -2,17 +2,20 @@
 //! TASK-7.2c・#79）に加え、MVP 算術オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`。
 //! TASK-7.3a・#82）・MVP 形状操作オペ（`Cast`／`Reshape`／`Squeeze`／`Transpose`。
 //! TASK-7.3b・#83）・Attention 系オペ（`MatMul`／`Softmax`／`Erf`。TASK-7.3c・#84）・
-//! `LayerNormalization`（TASK-7.3d・#85）を `tensor-core::Tensor<f32>` 上の純粋関数として
-//! 提供する。
+//! `LayerNormalization`（TASK-7.3d・#85）を提供する。算術・活性化・正規化系
+//! （`arith`／`activation`／`gemm`／`matmul`／`softmax`／`layer_norm`）は
+//! `tensor-core::Tensor<f32>` 専用の純粋関数のまま、形状系（`shape_ops`／
+//! `shape_transform`／`gather`／`concat`／`slice`）は要素コピーのみで算術を伴わないため
+//! `T: Element` でジェネリック化し、`Cast`（`cast`）は dtype ごとに型安全な変換関数を
+//! 個別に提供する（イシュー #274）。
 //!
 //! 各関数は「入力テンソル＋属性 → 出力テンソル」の単体演算に限定し、ONNX proto デコード
 //! （TASK-7.2a）やグラフ実行順序の解決には関与しない。属性は proto 由来の型に依存しない
 //! プレーンな Rust 構造体・スライスで受け取るため、decode 層（`AttributeProto` 等）の
 //! 実装順序に依存せず本モジュール単体でテスト・使用できる。インタープリタのディスパッチ
-//! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78）が担い、
-//! 上記 8 オペ（`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／
-//! `Slice`）はグラフ実行から到達可能である。MVP 算術・形状操作・Attention 系・
-//! `LayerNormalization`（TASK-7.3a〜d）のディスパッチ結線は #274 で追跡する。
+//! （op 名 → 本モジュール関数の解決）は [`crate::onnx::interp`]（TASK-7.2b・#78、
+//! TASK-7.3 系 14 オペの結線は #274 で実装）が担い、全 22 オペがグラフ実行から
+//! 到達可能である。
 
 mod activation;
 mod arith;
@@ -31,7 +34,10 @@ mod softmax;
 
 pub use activation::{erf, relu, sigmoid};
 pub use arith::{add, div, modulo, mul, sqrt};
-pub use cast::{cast_to_float, cast_to_int64, check_supported_cast_target};
+pub use cast::{
+    cast_bool_to_float, cast_f16_to_float, cast_to_bool, cast_to_f16, cast_to_float, cast_to_int64,
+    check_supported_cast_target,
+};
 pub use concat::concat;
 pub use constant::{ConstantValue, constant};
 pub use error::OpError;

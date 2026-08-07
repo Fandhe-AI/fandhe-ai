@@ -156,10 +156,25 @@ impl fmt::Display for GraphError {
 impl std::error::Error for GraphError {}
 
 /// 生の initializer / 定数テンソル（`tensor-core` の型へのマッピング前）。
+/// `Bool`／`F16` はイシュー #274 で追加（`onnx::proto::data_type::BOOL`／`FLOAT16`）。
 #[derive(Clone, Debug, PartialEq)]
 pub enum RawTensor {
-    F32 { data: Vec<f32>, shape: Vec<i64> },
-    I64 { data: Vec<i64>, shape: Vec<i64> },
+    F32 {
+        data: Vec<f32>,
+        shape: Vec<i64>,
+    },
+    I64 {
+        data: Vec<i64>,
+        shape: Vec<i64>,
+    },
+    Bool {
+        data: Vec<bool>,
+        shape: Vec<i64>,
+    },
+    F16 {
+        data: Vec<half::f16>,
+        shape: Vec<i64>,
+    },
 }
 
 /// 実行順が確定したグラフ。`nodes` の順序がトポロジカル順であることは
@@ -208,7 +223,7 @@ fn element_count(tensor_name: &str, dims: &[i64]) -> Result<usize, GraphError> {
 /// 契約違反）ため、両方を無条件で検査対象にする。
 ///
 /// 未対応 `data_type` は `UnknownDataType` で拒否する（無言 skip 禁止）。
-fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
+pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
     let shape = t.dims.clone();
     let expected_elements = element_count(&t.name, &shape)?;
 
@@ -334,6 +349,48 @@ fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                     shape,
                 })
             }
+        }
+        super::proto::data_type::BOOL => {
+            // BOOL は `raw_data` 経由のみ対応する（本クレートの `TensorProto` は
+            // 部分実装〈proto.rs 冒頭コメント〉であり、ONNX 仕様上の typed data
+            // フィールド `int32_data`（BOOL は 1 要素 1 int32 として符号化）は
+            // 意図的に未定義。`transformer.onnx` 等の PyTorch エクスポートは
+            // initializer を一貫して `raw_data` で埋めるため実用上問題ない。
+            // 1 バイト/要素・非ゼロ→true は ONNX/NumPy の bool テンソル慣習
+            // （`onnx-interop::ops::cast::cast_to_bool` と同じ解釈）。
+            let expected_bytes = expected_elements;
+            if t.raw_data.len() != expected_bytes {
+                return Err(GraphError::RawDataByteLenMismatch {
+                    tensor_name: t.name.clone(),
+                    expected_bytes,
+                    actual_bytes: t.raw_data.len(),
+                });
+            }
+            let data: Vec<bool> = t.raw_data.iter().map(|&b| b != 0).collect();
+            Ok(RawTensor::Bool { data, shape })
+        }
+        super::proto::data_type::FLOAT16 => {
+            // FLOAT16 も BOOL と同じ理由で `raw_data` のみ対応する（typed data
+            // フィールド `int32_data` は未定義）。IEEE754 binary16 のリトルエンディアン
+            // 2 バイト/要素（onnx.proto3 `TensorProto` 仕様）。
+            let expected_bytes = expected_elements.checked_mul(2).ok_or_else(|| {
+                GraphError::ElementCountOverflow {
+                    tensor_name: t.name.clone(),
+                }
+            })?;
+            if t.raw_data.len() != expected_bytes {
+                return Err(GraphError::RawDataByteLenMismatch {
+                    tensor_name: t.name.clone(),
+                    expected_bytes,
+                    actual_bytes: t.raw_data.len(),
+                });
+            }
+            let data: Vec<half::f16> = t
+                .raw_data
+                .chunks_exact(2)
+                .map(|b| half::f16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            Ok(RawTensor::F16 { data, shape })
         }
         other => Err(GraphError::UnknownDataType {
             tensor_name: t.name.clone(),

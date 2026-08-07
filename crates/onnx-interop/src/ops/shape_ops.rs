@@ -1,23 +1,25 @@
 //! ONNX `Shape`／`Unsqueeze` オペ（TASK-7.2c）。
 
-use tensor_core::Tensor;
+use tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;
 
 /// `Shape(x)`: `x` の各軸サイズを ONNX 仕様どおり `int64` 相当（`Vec<i64>`）の
-/// 1 次元列で返す。`tensor-core::Element` は `i64` を実装しないため（TASK-1.4a 時点の
-/// 対象型は `f32`/`f64`/`i32`/`half::f16` のみ）、本関数は `Tensor<i64>` ではなく生の
-/// `Vec<i64>` を返す。デコード層が ONNX の `TensorProto`（int64 データ）へ変換する際は
-/// この列をそのまま書き込める。
-pub fn shape(x: &Tensor<f32>) -> Vec<i64> {
+/// 1 次元列で返す。出力自体は常に `Vec<i64>`（デコード層が ONNX の `TensorProto`
+/// 〈int64 データ〉へ変換する際にこの列をそのまま書き込める）だが、対象 `x` は
+/// `T: Element` でジェネリック化し `Tensor<f32>` に限らずどの dtype の入力に対しても
+/// shape 問い合わせができるようにする（イシュー #274。`interp::compute_shape` が
+/// `Value` の全 variant から呼ぶ）。
+pub fn shape<T: Element>(x: &Tensor<T>) -> Vec<i64> {
     x.shape().iter().map(|&d| d as i64).collect()
 }
 
 /// `Unsqueeze(x, axes)`: `axes`（ONNX 負軸表記対応）が指す位置にサイズ 1 の軸を挿入する。
 /// `axes` は出力 rank（`x.rank() + axes.len()`）に対して正規化する（ONNX Unsqueeze-13
-/// 仕様どおり）。重複軸は [`OpError::DuplicateAxis`] を返す。
-pub fn unsqueeze(x: &Tensor<f32>, axes: &[i64]) -> Result<Tensor<f32>, OpError> {
+/// 仕様どおり）。重複軸は [`OpError::DuplicateAxis`] を返す。要素コピーのみで算術を
+/// 伴わないため `T: Element` でジェネリック化する（イシュー #274）。
+pub fn unsqueeze<T: Element>(x: &Tensor<T>, axes: &[i64]) -> Result<Tensor<T>, OpError> {
     let out_rank = x.rank() + axes.len();
     let mut normalized = Vec::with_capacity(axes.len());
     for &axis in axes {

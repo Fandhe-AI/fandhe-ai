@@ -1,15 +1,16 @@
 //! ONNX `Concat` オペ（TASK-7.2c）。
 //!
 //! `axis` 軸に沿って複数テンソルを連結する。`axis` 以外の軸は全入力で一致していなければ
-//! ならない（ONNX Concat-13 仕様）。
+//! ならない（ONNX Concat-13 仕様）。要素コピーのみで算術を伴わないため `T: Element` で
+//! ジェネリック化する（イシュー #274。`interp::Value` の `I64`／`Bool`／`F16` にも適用）。
 
-use tensor_core::Tensor;
+use tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;
 
 /// `Concat(inputs, axis)` を計算する。`inputs` が空の場合は [`OpError::EmptyInputs`]。
-pub fn concat(inputs: &[&Tensor<f32>], axis: i64) -> Result<Tensor<f32>, OpError> {
+pub fn concat<T: Element>(inputs: &[&Tensor<T>], axis: i64) -> Result<Tensor<T>, OpError> {
     let first = *inputs
         .first()
         .ok_or(OpError::EmptyInputs { op: "Concat" })?;
@@ -42,7 +43,7 @@ pub fn concat(inputs: &[&Tensor<f32>], axis: i64) -> Result<Tensor<f32>, OpError
     let outer: usize = first.shape()[..axis].iter().product();
     let inner: usize = first.shape()[axis + 1..].iter().product();
 
-    let contiguous_inputs: Vec<Tensor<f32>> = inputs.iter().map(|t| t.contiguous()).collect();
+    let contiguous_inputs: Vec<Tensor<T>> = inputs.iter().map(|t| t.contiguous()).collect();
     let axis_sizes: Vec<usize> = inputs.iter().map(|t| t.shape()[axis]).collect();
     let total_axis: usize = axis_sizes.iter().sum();
 

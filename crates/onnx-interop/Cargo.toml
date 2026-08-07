@@ -20,6 +20,10 @@ prost.workspace = true
 # Transpose。TASK-7.3b）が入出力とする `Tensor<f32>`・stride ベース view API を利用するために
 # 必要。
 tensor-core = { path = "../tensor-core" }
+# 数値型区分の許容依存（deps-policy.md）。workspace には既に固定済みで
+# `tensor-core`/`backend-cpu` 等が使用中のため新規追加ではない。`onnx-interop` では
+# `Cast(to=FLOAT16)`（イシュー #274）が `half::f16` を直接生成するために必要。
+half.workspace = true
 
 [dev-dependencies]
 # 参照値 JSON（`tests/fixtures/pytorch-reference/st_reference.json`・

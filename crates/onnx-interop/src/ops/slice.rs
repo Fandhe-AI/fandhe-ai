@@ -10,7 +10,7 @@
 //! 省略時は全軸 1）。境界のクランプは NumPy 拡張スライス互換の規則に従う:
 //! `step > 0` は `[0, dim]`・`step < 0` は `[-1, dim-1]` へクランプする。
 
-use tensor_core::Tensor;
+use tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;
@@ -41,7 +41,7 @@ fn row_major_strides(shape: &[usize]) -> Vec<usize> {
 /// `starts`/`ends` の各要素は範囲外・巨大値（ONNX の `INT64_MAX` センチネル等）でも
 /// 常にクランプする（NumPy 拡張スライス互換）ため、決して panic しない。`steps` に 0 が
 /// 含まれる場合のみ [`OpError::InvalidStep`] を返す（無限ループ回避）。
-pub fn slice(data: &Tensor<f32>, params: &SliceParams<'_>) -> Result<Tensor<f32>, OpError> {
+pub fn slice<T: Element>(data: &Tensor<T>, params: &SliceParams<'_>) -> Result<Tensor<T>, OpError> {
     let rank = data.rank();
     let n = params.starts.len();
     if params.ends.len() != n {

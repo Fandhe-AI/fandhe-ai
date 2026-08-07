@@ -2,10 +2,13 @@
 //!
 //! `axis` 軸に沿って `indices` が指す要素を集める。出力 shape は
 //! `data.shape[:axis] + indices_shape + data.shape[axis+1:]`（ONNX Gather-13 仕様）。
-//! `indices` は `tensor-core::Element` が `i64` を実装しないため（`shape_ops` と同じ理由）
-//! 生の `&[i64]` + 形状 `indices_shape` で受け取る。
+//! `indices` 自体は ONNX 仕様上つねに `int64` テンソルであり本関数の型パラメータとは
+//! 別に生の `&[i64]` + 形状 `indices_shape` で受け取るが、`data`（集める対象）は
+//! 要素コピーのみで算術を伴わないため `T: Element` でジェネリック化する
+//! （イシュー #274。`interp::Value` の `F32`／`I64`／`Bool`／`F16` いずれの
+//! `data` に対しても同じ実装で動作する）。
 
-use tensor_core::Tensor;
+use tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;
@@ -15,12 +18,12 @@ use super::normalize_axis;
 /// `indices` の各要素は負値許容（`index + data.shape()[axis]` で正規化。ONNX 仕様）。
 /// 正規化後も範囲外の場合は [`OpError::IndexOutOfRange`]（OWASP A03: 外部入力の範囲検査を
 /// 先に行い、`data_slice` への読み出し前に弾く。`.claude/rules/security.md`）。
-pub fn gather(
-    data: &Tensor<f32>,
+pub fn gather<T: Element>(
+    data: &Tensor<T>,
     indices: &[i64],
     indices_shape: &[usize],
     axis: i64,
-) -> Result<Tensor<f32>, OpError> {
+) -> Result<Tensor<T>, OpError> {
     let rank = data.rank();
     let axis = normalize_axis(axis, rank).ok_or(OpError::AxisOutOfRange {
         op: "Gather",

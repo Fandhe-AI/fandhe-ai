@@ -173,12 +173,15 @@ fn minimal_model_with_node(node: NodeProto, inputs: Vec<&str>, outputs: Vec<&str
 
 #[test]
 fn run_rejects_unsupported_op_type() {
-    // 未対応 op_type（TASK-7.3 系。#274 の担当）は UnsupportedOp で fail-closed に拒否する。
+    // 未対応 op_type（本モジュールが実装する 22 オペのいずれにも属さない。
+    // `LSTM` は TASK-7.3 系にも含まれない未実装 op）は UnsupportedOp で fail-closed に
+    // 拒否する（イシュー #274 で TASK-7.3 系 14 オペ〈`MatMul` 等〉を結線したため、
+    // 未対応オペの代表例を `MatMul` から `LSTM` へ差し替える）。
     let node = NodeProto {
         input: vec!["x".to_string()],
         output: vec!["y".to_string()],
         name: "n1".to_string(),
-        op_type: "MatMul".to_string(),
+        op_type: "LSTM".to_string(),
         attribute: vec![],
         domain: String::new(),
     };
@@ -190,7 +193,7 @@ fn run_rejects_unsupported_op_type() {
         Value::F32(Tensor::<f32>::zeros(&[1]).unwrap()),
     );
     let err = run(&graph, feeds).unwrap_err();
-    assert!(matches!(err, InterpError::UnsupportedOp(op) if op == "MatMul"));
+    assert!(matches!(err, InterpError::UnsupportedOp(op) if op == "LSTM"));
 }
 
 #[test]
@@ -226,10 +229,7 @@ fn run_rejects_type_mismatch_on_gemm_input() {
     let mut feeds = HashMap::new();
     feeds.insert(
         "input".to_string(),
-        Value::I64 {
-            data: vec![0, 0],
-            shape: vec![1, 2],
-        },
+        Value::I64(Tensor::<i64>::new(vec![0, 0], &[1, 2]).unwrap()),
     );
     let err = run(&graph, feeds).unwrap_err();
     assert!(
@@ -416,10 +416,11 @@ fn run_rejects_graph_output_not_produced() {
 }
 
 #[test]
-fn run_rejects_unsqueeze_i64_when_input_rank_is_not_one() {
-    // i64 直接経路は入力 rank 1 のみサポートする（本ファイル冒頭 `//!`・`interp.rs`
-    // モジュール冒頭コメント参照）。rank 2 の I64 値を feed すると
-    // `I64ShapeUnsupported` で拒否される。
+fn run_unsqueeze_i64_supports_multi_dim_input_rank() {
+    // イシュー #274: `Value::I64` を `Tensor<i64>` 化し `ops::unsqueeze`
+    // （`T: Element` ジェネリック）へ委譲するようになったことで、旧実装が
+    // `I64ShapeUnsupported` で拒否していた「入力 rank 1 超」のケースも成功する
+    // （1 次元限定の不変条件を撤廃）。
     let node = NodeProto {
         input: vec!["x".to_string()],
         output: vec!["y".to_string()],
@@ -442,23 +443,23 @@ fn run_rejects_unsqueeze_i64_when_input_rank_is_not_one() {
     let mut feeds = HashMap::new();
     feeds.insert(
         "x".to_string(),
-        Value::I64 {
-            data: vec![1, 2, 3, 4],
-            shape: vec![2, 2],
-        },
+        Value::I64(Tensor::<i64>::new(vec![1, 2, 3, 4], &[2, 2]).unwrap()),
     );
-    let err = run(&graph, feeds).unwrap_err();
-    assert!(
-        matches!(err, InterpError::I64ShapeUnsupported { node, op, shape } if node == "n_unsqueeze" && op == "Unsqueeze" && shape == vec![2, 2])
-    );
+    let result = run(&graph, feeds).unwrap();
+    match &result["y"] {
+        Value::I64(t) => {
+            assert_eq!(t.shape(), &[1, 2, 2]);
+            assert_eq!(t.as_slice().unwrap(), &[1, 2, 3, 4]);
+        }
+        other => panic!("Value::I64 を期待したが {other:?}"),
+    }
 }
 
 #[test]
-fn run_rejects_unsqueeze_i64_when_output_rank_exceeds_one() {
-    // Medium レビュー指摘の回帰固定: 入力 rank 1 でも axes 挿入後の出力 rank が
-    // 1 を超える場合（[3] + axes=[0] -> 本来 [1,3]）、i64 直接経路は多次元 shape を
-    // 表現できないため `shape: vec![data.len()]` へ無言正規化せず fail-closed に
-    // 拒否する（`I64ShapeUnsupported`）。
+fn run_unsqueeze_i64_supports_output_rank_exceeding_one() {
+    // イシュー #274 の回帰固定: 入力 rank 1・axes 挿入後の出力 rank が 1 を超える
+    // ケース（[3] + axes=[0] -> [1,3]）も、`Tensor<i64>` 化により多次元 shape を
+    // 正しく表現できるため無言正規化・fail-closed のいずれも不要になり成功する。
     let node = NodeProto {
         input: vec!["x".to_string()],
         output: vec!["y".to_string()],
@@ -481,13 +482,14 @@ fn run_rejects_unsqueeze_i64_when_output_rank_exceeds_one() {
     let mut feeds = HashMap::new();
     feeds.insert(
         "x".to_string(),
-        Value::I64 {
-            data: vec![1, 2, 3],
-            shape: vec![3],
-        },
+        Value::I64(Tensor::<i64>::new(vec![1, 2, 3], &[3]).unwrap()),
     );
-    let err = run(&graph, feeds).unwrap_err();
-    assert!(
-        matches!(err, InterpError::I64ShapeUnsupported { node, op, shape } if node == "n_unsqueeze" && op == "Unsqueeze" && shape == vec![3])
-    );
+    let result = run(&graph, feeds).unwrap();
+    match &result["y"] {
+        Value::I64(t) => {
+            assert_eq!(t.shape(), &[1, 3]);
+            assert_eq!(t.as_slice().unwrap(), &[1, 2, 3]);
+        }
+        other => panic!("Value::I64 を期待したが {other:?}"),
+    }
 }
