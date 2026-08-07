@@ -87,12 +87,14 @@ fn transformer_onnx_end_to_end_matches_pytorch_reference_within_req7_tolerance()
     let mut feeds = HashMap::new();
     feeds.insert("input".to_string(), Value::F32(input_tensor));
 
-    // 受け入れ条件「推論が完走」の直接固定化。本テスト実装時点の実測では
-    // `/layers.0/self_attn/Div`（`Shape -> Gather -> Div` で head_dim を算出する
-    // 整数除算経路）で `InterpError::TypeMismatch { expected: "f32" }` により
-    // run が失敗することを確認済み（`compute_div`・`crates/onnx-interop/src/
-    // onnx/interp.rs` の F32 限定オペが I64 入力に未対応。TASK-7.3a・#82 の
-    // 残課題。実測詳細は docs/perf/onnx-transformer-e2e-measurement.md 参照）。
+    // 受け入れ条件「推論が完走」の直接固定化。#87 の I64 算術対応
+    // （`compute_add`/`compute_mul`/`compute_div`/`compute_mod`。
+    // `crates/onnx-interop/src/onnx/interp.rs`）により
+    // `/layers.0/self_attn/Div` の `InterpError::TypeMismatch` は解消済みで、
+    // run 自体は成功する。本テスト実装時点の実測で唯一残る失敗点は本関数末尾の
+    // REQ-7 数値一致基準（相対誤差 1e-3）の `assert!` で、16,384 要素中 7 要素が
+    // 超過することを確認済み（次工程 #89 へ引き継ぎ。実測詳細は
+    // docs/perf/onnx-transformer-e2e-measurement.md 参照）。
     // 本テストはこの失敗を隠蔽せず素直に panic させる
     // （no-silent-skip 契約。OWASP A08 の迂回経路を作らない方針に合わせる）。
     let start = Instant::now();
