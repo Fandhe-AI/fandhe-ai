@@ -300,7 +300,17 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
 /// let w_transposed = FixedMat::<f32, 4, 3>::from_tensor(Tensor::zeros(&[4, 3]).unwrap()).unwrap();
 /// apply(&x, &w_transposed);
 /// ```
-fn _doc_anchor() {}
+///
+/// # なぜ `pub` かつ `#[doc(hidden)]` か
+///
+/// rustdoc は `--document-private-items` を渡さない限り非公開アイテムの
+/// doctest をスキップし `cargo test --workspace` で実行されない
+/// （実装レビュー #100 Bugbot 指摘）。本アイテムは上記 doctest を
+/// `cargo test` で確実に実行させるためだけの錨（anchor）であり公開 API
+/// ではないため、`pub` にしつつ `#[doc(hidden)]` で公開ドキュメントには
+/// 出力しない。
+#[doc(hidden)]
+pub fn _doc_anchor() {}
 
 #[cfg(test)]
 mod tests {
