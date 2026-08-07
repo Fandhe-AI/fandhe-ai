@@ -69,20 +69,27 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   互換 API 層そのものではないが、自作コア上でも薄いラッパーが成立し
   得ることを示す傍証として位置づける（`04-requirements.md:200-209`）
 
-## 4. 実装配置（本文書執筆時点）
+## 4. 実装配置（TASK-9.2a・#95 で確定）
 
-- `compat::array()`／`compat::Sequential` 自体の配置クレート・公開名は
-  TASK-9.2a（#95、本文書執筆時点で未マージ）で確定する。9 クレート構成
+- `compat::array()`／`compat::Sequential` は `autodiff::compat` モジュール
+  （`crates/autodiff/src/compat/`）として実装した。9 クレート構成
   （`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・
   `onnx-interop`・`guardrail`・`self-repair`・`bench-harness`）に compat 専用
-  クレートは存在しないため、既存クレート（`autodiff` 等）内のモジュールと
-  なる見込みだが、本文書では確定済みの事実として記述しない
-- Linear 層（TASK-9.1a・#91）も本文書執筆時点で未マージであり、同様に
-  実装詳細を先取りしない
+  クレートは追加しない。`Sequential` が `nn::Linear`/`nn::Module` に依存し、
+  `tensor-core` は `autodiff` に依存できない（下位クレートが上位クレートへ
+  依存すると循環する）ため、`autodiff` 配下以外に置く選択肢はなかった
+- Linear 層（TASK-9.1a・#91）は `crates/autodiff/src/nn/linear.rs` として
+  マージ済み
 - 活性化関数（ReLU・Sigmoid・Tanh）は TASK-9.1b（#92）で実装済み
   （`crates/autodiff/src/nn/activation.rs`）。共通 `Module` trait は
-  同イシュー時点では未定義で、`compat::Sequential` 設計時（TASK-9.2a・#91／
-  #95）に確定する予定（`crates/autodiff/src/nn/mod.rs`）
+  TASK-9.2a（#95）で `crates/autodiff/src/nn/module.rs` に確定し、`Linear`・
+  `Relu`・`Sigmoid`・`Tanh` の 4 実装を持つ（`nn/mod.rs` から
+  `pub use module::Module;`）。`compat::Sequential` はこの trait を介して
+  `Vec<Box<dyn Module>>` で層を均一に扱う
+- `Sequential` 経由の学習（勾配取得・パラメータ更新）は対象外のまま
+  （2 節）。`add_linear` が内部で保持する `Linear` は `LinearVars`
+  （勾配取得の入口）を外部へ公開しないため、`Sequential` からパラメータ・
+  勾配へアクセスする手段が構造的にない
 
 ## 5. 範囲拡張の手続き
 
@@ -106,8 +113,10 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 | `crates/autodiff/src/nn/mod.rs` | compat 層が積む「レイヤー」モジュール群の入口コメント |
 | `.claude/rules/coding-rust.md` | 「互換 API 層は自作コアの上の薄いラッパーに徹する（REQ-9）」 |
 | `.claude/rules/out-of-scope-tracking.md` | 対象外事項の Issue 追跡規約 |
-| イシュー #91（TASK-9.1a・Linear 層） | 本文書執筆時点で未マージ |
+| イシュー #91（TASK-9.1a・Linear 層） | クローズ済み |
 | イシュー #92（TASK-9.1b・基本活性化関数群） | クローズ済み |
-| イシュー #94（TASK-9.2・親） | 本文書執筆時点で未マージ |
-| イシュー #95（TASK-9.2a・compat::array／Sequential 実装） | 本文書執筆時点で未マージ |
-| イシュー #96（TASK-9.2b・本文書） | 本イシュー |
+| イシュー #94（TASK-9.2・親） | クローズ済み |
+| イシュー #95（TASK-9.2a・compat::array／Sequential 実装） | 本イシュー |
+| イシュー #96（TASK-9.2b・本文書） | クローズ済み |
+| `crates/autodiff/src/compat/` | TASK-9.2a（#95）実装済みの `array`／`Sequential` |
+| `crates/autodiff/src/nn/module.rs` | TASK-9.2a（#95）実装済みの共通 `Module` trait |
