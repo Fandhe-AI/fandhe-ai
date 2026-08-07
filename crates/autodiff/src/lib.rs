@@ -36,11 +36,19 @@
 //! 差し替える（PoC-v2-2 と同じ構成）。`grad.rs`・`backward.rs` も同じ
 //! `eval.rs` のヘルパーを再利用するため、差し替えの影響範囲は
 //! forward/backward 双方でこの 1 ファイルに閉じる。
+//!
+//! TASK-9.1a（#91）で `nn` モジュール（`Linear` 等、自作 NN モジュール）
+//! を追加した。`nn` は `Tape`/`Var` に直接依存する自作コア側の部品で
+//! あり、互換 API 層（`compat::array`/`compat::Sequential`。REQ-9・
+//! TASK-9.2）とは区別される（`nn/mod.rs` の境界説明を参照）。上記の
+//! 「互換レイヤ固有のロジックを持ち込まない」方針は `compat` 層本体を
+//! 指しており、`nn` モジュールには適用されない。
 
 mod backward;
 mod error;
 mod eval;
 mod grad;
+pub mod nn;
 mod tape;
 mod var;
 
