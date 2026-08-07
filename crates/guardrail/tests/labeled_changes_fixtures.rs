@@ -192,9 +192,24 @@ fn line_count_boundary_matches_labels() {
 /// `command` を `cwd` で実行し、成否と結合出力（stdout+stderr）を返す。
 /// 引数は配列で渡すため、シェル文字列展開によるインジェクションの余地は
 /// ない（A03 対策。`.claude/rules/security.md`）。
+///
+/// `program == "git"` の場合、親プロセス（本テストを起動した
+/// `cargo test`。lefthook の pre-push フック経由で実行されると git 自身が
+/// 子プロセスへ `GIT_DIR`/`GIT_WORK_TREE`/`GIT_INDEX_FILE` 等を継承させる）
+/// から漏れ込んだ `GIT_*` 環境変数を明示的に除去する。除去しないと
+/// `current_dir(cwd)` を無視してこのリポジトリ自体（本 worktree の
+/// `.git`）に対して `git init`/`git commit` が実行され、フィクスチャの
+/// 隔離が壊れる（モジュールコメントに明記済みの隔離方針を実際に満たす）。
 fn run(cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> (bool, String) {
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd);
+    if program == "git" {
+        for (key, _) in std::env::vars() {
+            if key.starts_with("GIT_") {
+                cmd.env_remove(key);
+            }
+        }
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
