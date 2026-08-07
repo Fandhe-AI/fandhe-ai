@@ -126,6 +126,43 @@ jobs:
         with:
           persist-credentials: false
 
+      # self-hosted runner に gh CLI がプリインストールされているとは限らないため、
+      # 未導入の場合のみ公式リリースのバイナリを取得して導入する（冪等。sudo 不要・
+      # $HOME 配下のみへの導入で共有 runner のグローバル状態を汚さない。
+      # .claude/rules/ci.md の Ensure rustup / Ensure cargo-deny と同一方針）。
+      # self-test 実行前に置く: self-test は gh をスタブ化して検証するため本ステップの
+      # 有無を検知できず、また本ワークフローの report ジョブは push/PR 契機の CI（ci.yml）
+      # では動かないため、バイナリ欠如は schedule/workflow_dispatch 実行で初めて
+      # 顕在化する（レビュー指摘・#148）。self-test をゲートせず先に導入することで
+      # gh 未導入環境でも self-test 自体が実行できることを保証する。
+      # 本ワークフローの実行環境（self-hosted runner プール）は linux 限定（.github/workflows/
+      # 配下に macOS 向け runner ラベルを指定するジョブは無い）のため、Linux 版バイナリの
+      # 取得のみに対応する。
+      - name: Ensure gh is installed
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            GH_VERSION="2.97.0"
+            ARCH=$(uname -m)
+            case "${ARCH}" in
+              x86_64) GH_ARCH=amd64 ;;
+              aarch64) GH_ARCH=arm64 ;;
+              *)
+                echo "NG: 未対応アーキテクチャです: ${ARCH}" >&2
+                exit 1
+                ;;
+            esac
+            TMP_DIR=$(mktemp -d)
+            trap 'rm -rf "${TMP_DIR}"' EXIT
+            curl --proto '=https' --tlsv1.2 -fsSL \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
+              -o "${TMP_DIR}/gh.tar.gz"
+            tar -xzf "${TMP_DIR}/gh.tar.gz" -C "${TMP_DIR}"
+            mkdir -p "${HOME}/.local/bin"
+            cp "${TMP_DIR}/gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" "${HOME}/.local/bin/gh"
+            echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          fi
+
       - name: 報告ロジックの self-test
         run: bash scripts/report-guardrail-schedule-result.sh self-test
 
