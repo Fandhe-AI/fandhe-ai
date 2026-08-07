@@ -195,6 +195,26 @@ fn line_count_boundary_matches_labels() {
 fn run(cwd: &Path, program: &str, args: &[&str], envs: &[(&str, &str)]) -> (bool, String) {
     let mut cmd = Command::new(program);
     cmd.args(args).current_dir(cwd);
+    // `git commit`／`pre-push` フック経由でこのテストバイナリが起動された場合、
+    // 親プロセスが設定した `GIT_DIR`／`GIT_WORK_TREE`（等）が継承され、`dest`
+    // 配下の隔離作業木に対する `git init`／`git add`／`git commit` が意図せず
+    // 実リポジトリの `.git`（共有 `config`）を指してしまう（並列実行時は
+    // 複数プロセスが同一 `.git/config` のロックファイルを奪い合い失敗し、
+    // 単一スレッド実行時は実リポジトリへ誤ってコミットされる重大な事故になる）。
+    // `prepare_baseline_worktree` のドキュメント通りの隔離を実装レベルで
+    // 保証するため、継承されうる `GIT_*` 環境変数を明示的に除去する。
+    for key in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_PREFIX",
+    ] {
+        cmd.env_remove(key);
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
