@@ -59,6 +59,9 @@ ONNX_INTEROP_TRANSFORMER_ONNX=<取得したパス> \
   cargo test -p onnx-interop -- --ignored --nocapture
 ```
 
-環境変数未設定時はこのテストが `#[ignore]` によりスキップされる（CI は
-本リポにコミットされた `model.onnx` / `slice_repro.onnx` のテストのみを常時
-実行する。`.claude/rules/ci.md` の実機依存分離と同じ運用）。
+環境変数未設定時はこのテストがスキップされる。`--ignored` を渡さない通常の
+`cargo test` では `#[ignore]` によりそもそも実行対象外となり、`--ignored`
+（`make test-ignored` 等）を渡した場合でも環境変数未設定なら早期 return で
+スキップする（panic しない）。CI は本リポにコミットされた `model.onnx` /
+`slice_repro.onnx` のテストのみを常時実行する
+（`.claude/rules/ci.md` の実機依存分離と同じ運用）。

@@ -511,8 +511,18 @@ fn attribute_proto_round_trips_with_tensor_field() {
 #[test]
 #[ignore = "12MB の transformer.onnx を非コミット方針としているため。tests/fixtures/README.md の取得手順を参照"]
 fn transformer_onnx_decodes_expected_graph_structure() {
-    let path = std::env::var("ONNX_INTEROP_TRANSFORMER_ONNX")
-        .expect("ONNX_INTEROP_TRANSFORMER_ONNX 環境変数でファイルパスを指定してください");
+    // `cargo test -- --ignored`（`make test-ignored` 含む）は #[ignore] を
+    // 無視して本テストを実行するため、非コミットの transformer.onnx を
+    // 取得していない環境（フィクスチャ未取得のマシン全般）では環境変数が
+    // 未設定になる。その場合は fail ではなく早期 return でスキップし、
+    // ワークスペース全体の --ignored 実行を hard-fail させない
+    // （tests/fixtures/README.md の取得手順を参照。#77 Bugbot 指摘対応）。
+    let Ok(path) = std::env::var("ONNX_INTEROP_TRANSFORMER_ONNX") else {
+        eprintln!(
+            "skip: ONNX_INTEROP_TRANSFORMER_ONNX 未設定のため transformer_onnx_decodes_expected_graph_structure をスキップします（tests/fixtures/README.md 参照）"
+        );
+        return;
+    };
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("読み込み失敗 {path}: {e}"));
     let model = ModelProto::decode(bytes.as_slice()).expect("decode に成功するはず");
     let graph = build_graph(&model).expect("build_graph は成功するはず");
