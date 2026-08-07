@@ -1,0 +1,13 @@
+diff --git a/src/activations.rs b/src/activations.rs
+index 06782be..b58c29c 100644
+--- a/src/activations.rs
++++ b/src/activations.rs
+@@ -26,7 +26,7 @@ fn constant<'t>(tape: &'t Tape, value: f32) -> Var<'t> {
+ 
+ /// ReLU 活性化関数: `max(0, x)`。`nn::activation::Relu` の薄いラッパー。
+ pub fn relu<'t>(x: &Var<'t>) -> Var<'t> {
+-    Relu.forward(x)
++    Sigmoid.forward(x)
+ }
+ 
+ /// Sigmoid 活性化関数: `1 / (1 + exp(-x))`。既知値検証のリファレンス

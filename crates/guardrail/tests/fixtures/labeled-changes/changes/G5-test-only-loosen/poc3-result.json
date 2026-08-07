@@ -1,0 +1,17 @@
+{
+  "change_id": "G5-test-only-loosen",
+  "preset": "default",
+  "lines_changed": 2,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": true,
+  "clippy_ok": true,
+  "bench_ran": true,
+  "bench_median_pct": -5.9346,
+  "bench_samples_pct": [-5.2237,-6.2179,-6.9813,-4.9318,-5.9346],
+  "bench_max_pct": 5.0,
+  "verdict": "自動適用",
+  "reasons": "全ゲート green・全指標が閾値内; "
+}

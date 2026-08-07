@@ -1,0 +1,26 @@
+diff --git a/src/model.rs b/src/model.rs
+index ef24e0b..4091b7d 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -76,6 +76,21 @@ impl Mlp {
+         let a1 = activations::relu(&h1);
+         let h2 = l2v.forward(&a1)?;
+         let a2 = activations::relu(&h2);
++        // D3: 冗長な二重計算（性能回帰題材）。fc2 の順伝播を再計算した
++        // `a2_redundant` を一度加算してから同じ値を減算するため出力の
++        // 値は変わらないが、計算コストが実質倍増する。
++        let h2_redundant = l2v.forward(&a1)?;
++        let a2_redundant = activations::relu(&h2_redundant);
++        let neg_one = tape
++            .var(&tensor_core::Tensor::full(&[1], -1.0f32).expect("forward: shape [1] は常に妥当"));
++        let neg_a2_redundant = a2_redundant
++            .mul(&neg_one)
++            .expect("forward: shape [1] は常に broadcast 可能");
++        let a2 = a2
++            .add(&a2_redundant)
++            .expect("forward: a2 と a2_redundant は同一 shape")
++            .add(&neg_a2_redundant)
++            .expect("forward: a2_redundant 系列は同一 shape");
+         let out = l3v.forward(&a2)?;
+ 
+         Ok((out, l1v, l2v, l3v))

@@ -1,0 +1,24 @@
+diff --git a/src/activations.rs b/src/activations.rs
+index 06782be..856a302 100644
+--- a/src/activations.rs
++++ b/src/activations.rs
+@@ -38,6 +38,7 @@ pub fn sigmoid<'t>(x: &Var<'t>) -> Var<'t> {
+ /// Leaky ReLU 活性化関数: `x >= 0` なら `x`、`x < 0` なら
+ /// `negative_slope * x`。`relu(x) + negative_slope * (x - relu(x))`
+ /// として合成する（`x - relu(x)` は `x` の負部分のみを残す）。
++/// `negative_slope` は通常 0 〜 1 の範囲で指定する（負の入力に対する傾き）。
+ pub fn leaky_relu<'t>(tape: &'t Tape, x: &Var<'t>, negative_slope: f64) -> Var<'t> {
+     let positive = relu(x);
+     let neg_one = constant(tape, -1.0);
+diff --git a/src/model.rs b/src/model.rs
+index ef24e0b..f7ebcf3 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -56,6 +56,7 @@ impl Mlp {
+     }
+ 
+     /// 順伝播。fc1 -> ReLU -> fc2 -> ReLU -> fc3。
++    /// 隠れ層の活性化には ReLU を用いる（`activations::relu`）。
+     ///
+     /// 呼び出し元が「入力・パラメータ・出力すべてが同一 `tape` 上の
+     /// ノード」という不変条件を保てるよう、内部で `bind()` した

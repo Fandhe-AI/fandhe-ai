@@ -1,0 +1,12 @@
+change_id = "D3-redundant-calc"
+category = "dangerous"
+expected_verdict = "escalate"
+poc3_default_verdict = "escalate"
+known_blindspot = false
+origin = "PoC-2 #4 流用"
+summary = "forward に不要な冗長二重計算を挿入する（build/test/clippy は通過するがベンチ劣化でエスカレーション）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。model.rs を変更するため
+# arch-hyperparameter-change（パスのみ match・`any_diff_in_paths`）に match する。
+# expected_verdict が既に escalate のため適用後も同じ判定（フロア効果は生じない）。
+expected_exclusion_rule_ids = ["arch-hyperparameter-change"]
+expected_verdict_after_exclusions = "escalate"

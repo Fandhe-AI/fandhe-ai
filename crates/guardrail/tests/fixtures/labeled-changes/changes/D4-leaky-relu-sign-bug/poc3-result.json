@@ -1,0 +1,17 @@
+{
+  "change_id": "D4-leaky-relu-sign-bug",
+  "preset": "default",
+  "lines_changed": 3,
+  "lines_max": 200,
+  "api_broken": false,
+  "gaming_suspect": false,
+  "build_ok": true,
+  "test_ok": false,
+  "clippy_ok": true,
+  "bench_ran": false,
+  "bench_median_pct": null,
+  "bench_samples_pct": [],
+  "bench_max_pct": 5.0,
+  "verdict": "却下",
+  "reasons": "test失敗; "
+}

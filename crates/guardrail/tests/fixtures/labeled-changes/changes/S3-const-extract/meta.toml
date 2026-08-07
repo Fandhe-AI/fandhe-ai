@@ -1,0 +1,17 @@
+change_id = "S3-const-extract"
+category = "safe"
+expected_verdict = "auto-apply"
+poc3_default_verdict = "auto-apply"
+known_blindspot = false
+origin = "PoC-3 新規"
+summary = "model.rs のマジックナンバー（隠れ層次元 8）を名前付き定数に抽出する（挙動不変）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。model.rs を変更しているため、
+# 定数抽出のみの挙動不変な変更であっても arch-hyperparameter-change
+# （`any_diff_in_paths` = 変更内容を問わずパスのみで match）に match し、
+# 除外リスト適用後は escalate となる。判定器のバグではなく、除外リストが
+# 「変更内容の意図（挙動不変のリファクタか実質的なアーキテクチャ変更か）を
+# 区別しない意図的に保守的な設計」であることに由来する（過剰なエスカレー
+# ションは REQ-5 の安全側のトレードオフであり見逃しより許容される。
+# tests/guardrail_self_regression.rs モジュールコメント参照）。
+expected_exclusion_rule_ids = ["arch-hyperparameter-change"]
+expected_verdict_after_exclusions = "escalate"
