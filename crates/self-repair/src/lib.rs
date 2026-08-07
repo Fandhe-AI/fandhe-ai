@@ -60,6 +60,11 @@
 //!   [`candidate::CandidateFixGenerator`]。種別非依存。TASK-3.1c・#134）。
 //! - [`verify_gates`][]: 検証フェーズ 3 ゲート（build/test/clippy）の実実行
 //!   [`verify_gates::CargoVerificationGate`]（TASK-3.1c・#134）。
+//! - [`verify_composite`][]: 3 ゲート（`verify_gates`）とベンチゲート
+//!   （`verify_bench`）を合成した [`verify_composite::FeatureAdditionCompositeGate`]
+//!   （TASK-3.3c・#142）。TASK-3.2 がスコープ外としていた「4 ゲート合成」の
+//!   結線点を、機能追加種別のループ完走実証のために満たす（`verify_composite`
+//!   モジュール冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -97,6 +102,7 @@ pub mod perf_regression;
 pub mod report;
 pub mod runner;
 pub mod stages;
+pub mod verify_composite;
 pub mod verify_gates;
 
 #[cfg(test)]
@@ -114,6 +120,7 @@ pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionF
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
+pub use verify_composite::FeatureAdditionCompositeGate;
 pub use verify_gates::CargoVerificationGate;
 
 /// 決定的シード設定ユーティリティ（TASK-4.4b・イシュー #113）。

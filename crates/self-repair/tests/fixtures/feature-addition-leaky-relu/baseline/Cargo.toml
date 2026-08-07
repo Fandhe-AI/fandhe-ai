@@ -1,0 +1,29 @@
+# 空の [workspace] テーブル: このフィクスチャ crate をルート workspace
+# （crates/* member 明示列挙）の巻き込みから切り離すための宣言（TASK-3.3c・
+# イシュー #142。`crates/guardrail/tests/fixtures/labeled-changes/baseline/
+# Cargo.toml` と同一方針）。本 crate は「機能追加種別の自己修復ループ完走
+# 実証（TASK-3.3c）の保守対象サンドボックス」であり、ルート workspace へ
+# 参加させると cargo build/clippy/test/fmt の通常 CI 対象へ紛れ込む。
+[workspace]
+
+[package]
+name = "self_repair_feature_addition_leaky_relu_baseline"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+name = "self_repair_feature_addition_leaky_relu_baseline"
+path = "src/lib.rs"
+
+[dependencies]
+# 自作コア（Burn 非依存。REQ-1 v2・.claude/rules/coding-rust.md）の
+# テンソル・autodiff を workspace 内 path 依存として直接参照する
+# （`crates/guardrail/tests/fixtures/labeled-changes/baseline/Cargo.toml`
+# と同じ相対深度・同じ理由）。実証ハーネス
+# （`crates/self-repair/tests/feature_addition_loop_completion_task_3_3c.rs`）
+# は本 crate を一意な一時ディレクトリへコピーしたうえで、この相対パスを
+# 絶対パスへ書き換えてから `cargo` を起動する（コピー先ではこの相対深度が
+# 保たれないため）。
+tensor-core = { path = "../../../../../tensor-core" }
+autodiff = { path = "../../../../../autodiff" }
