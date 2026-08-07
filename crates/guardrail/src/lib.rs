@@ -8,8 +8,8 @@
 //! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）
 //! 資産の移植先でもある。
 //!
-//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c／TASK-4.4a・
-//! イシュー #104／#105／#106／#112 合流時点）
+//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c／TASK-4.4a／TASK-4.4b・
+//! イシュー #104／#105／#106／#112／#113 合流時点）
 //! - [`cli`][]: CLI 引数解析（`check`／`eval` サブコマンド。#104 管轄）。
 //! - [`config`][]: `--config` の TOML 設定パース・検証、および判定閾値
 //!   （[`config::Thresholds`]・プリセット・値域検証。#104 管轄。#105 の
@@ -27,6 +27,9 @@
 //! - [`median_gate`][]: 5 回以上計測の劣化率系列を検証し、`decision::BenchSignal::Measured`
 //!   （中央値のみ受け取る受け口）を構築する唯一の公開経路（REQ-4「単発計測での閾値判定は
 //!   行わないこと」。TASK-4.4a・イシュー #112）。
+//! - [`determinism`][]: 学習系回帰テスト向け決定的シード設定ユーティリティ
+//!   （TASK-4.4b・イシュー #113 管轄）。`self-repair` は
+//!   `pub use guardrail::determinism;` で再輸出し双方から利用する。
 //!
 //! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
 //! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
@@ -41,6 +44,7 @@
 pub mod cli;
 pub mod config;
 pub mod decision;
+pub mod determinism;
 pub mod error;
 pub mod exit_code;
 pub mod median_gate;

@@ -18,8 +18,11 @@ path = "src/main.rs"
 serde.workspace = true
 serde_json.workspace = true
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
-# ユーザー承認不要（外部依存の新規追加ではない）。TASK-4.4a（イシュー #112）が
-# `median_gate` モジュール（5 回以上計測の中央値算出）の唯一の中央値定義として
-# `bench_harness::median_q1_q3` を呼び出すために使用する（依存方向は
-# `guardrail` → `bench-harness`。`docs/guardrail-self-repair-cli.md` 1.4 節）。
+# ユーザー承認不要（外部依存の新規追加ではない）。依存方向は
+# `guardrail` → `bench-harness`（`docs/guardrail-self-repair-cli.md` 1.4 節）。
+# - TASK-4.4a（イシュー #112）: `median_gate` モジュール（5 回以上計測の中央値算出）の
+#   唯一の中央値定義として `bench_harness::median_q1_q3` を呼び出すために使用する。
+# - TASK-4.4b（イシュー #113）: 決定的シードユーティリティ（`determinism.rs`）が
+#   PRNG 本体を再実装せず `Xorshift64Star` を再利用するために使用する
+#   （backend-cpu → bench-harness 等の既存先例あり。`.claude/rules/deps-policy.md`）。
 bench-harness = { path = "../bench-harness" }
