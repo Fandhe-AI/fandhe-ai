@@ -12,8 +12,17 @@ safetensors.workspace = true
 # ONNX の protobuf デコードのみに使用する。生成コードは protoc 非依存で手書きし、
 # prost-build（protoc ビルド時依存）は使わない（PoC-v2-6）。
 prost.workspace = true
-# workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
-# ユーザー承認不要（外部依存の新規追加ではない。backend-cpu の tensor-core path 依存と
-# 同種の判断）。8 オペ（Gemm/Relu/Sigmoid/Shape/Gather/Unsqueeze/Concat/Slice。TASK-7.2c）は
-# いずれも `Tensor<f32>` を入出力とし、`ShapeError`／stride ベース view API を再利用する。
+# ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu` が同種の判断を行った先例:
+# crates/backend-cpu/Cargo.toml）。safetensors パース結果のマッピング先である
+# `Tensor<f32>`・転置 API `transpose_2d()`・shape 検査 `ShapeError`（#73・TASK-7.1a）に加え、
+# 8 オペ（Gemm/Relu/Sigmoid/Shape/Gather/Unsqueeze/Concat/Slice。TASK-7.2c）が入出力に使う
+# `Tensor<f32>`・stride ベース view API を利用するために必要。
 tensor-core = { path = "../tensor-core" }
+
+[dev-dependencies]
+# 参照値 JSON（`tests/fixtures/pytorch-reference/st_reference.json`・
+# `weight_shapes.json`）の読込に使う。`serde`/`serde_json` は workspace で
+# 固定済みの許容依存（deps-policy.md）であり、参照するのみで新規外部依存の
+# 追加ではない（`bench-harness` が #29 で行った同種の判断の先例）。
+serde.workspace = true
+serde_json.workspace = true

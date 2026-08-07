@@ -528,6 +528,8 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "safetensors",
+ "serde",
+ "serde_json",
  "tensor-core",
 ]
 
