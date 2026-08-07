@@ -26,10 +26,15 @@
 //! `Value::F16` は `half::f16`（`Cast(to=FLOAT16)`・BOOL/FLOAT16 initializer decode。
 //! `onnx/graph.rs::decode_tensor`）向けに追加した。
 //!
-//! 算術・活性化・正規化系オペ（`Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`MatMul`／`Softmax`／
-//! `Erf`／`LayerNormalization`）は `ops::*` 側が `Tensor<f32>` 専用のままのため、
-//! 非 F32 入力は [`InterpError::TypeMismatch`] で拒否する（f32 ブリッジによる精度損失
-//! を避けるため暗黙変換はしない。`Cast` を明示的に経由させる）。
+//! 算術・活性化・正規化系オペのうち `Add`／`Mul`／`Div`／`Mod` は `f32`／`i64` の
+//! 両経路に対応する（`ops::*_i64`。イシュー #87 残作業〈TASK-7.4a〉。
+//! `transformer.onnx` の `Shape -> Gather -> Div` 等 head_dim 算出が `i64` 同士の
+//! 算術を要求するため）。`MatMul`／`Softmax`／`Erf`／`LayerNormalization`・
+//! `Sqrt`（ONNX 仕様上 float 型のみ対応）は `ops::*` 側が `Tensor<f32>` 専用のまま
+//! のため、非 F32 入力は [`InterpError::TypeMismatch`] で拒否する。いずれも
+//! `f32`/`i64` 間の暗黙変換はしない（`Cast` を明示的に経由させる。混在ペアも
+//! 同様に拒否する。`compute_add`／`compute_mul`／`compute_div`／`compute_mod`
+//! 参照）。
 //!
 //! ## エラー方針
 //!
@@ -533,31 +538,67 @@ fn get_f16<'a>(
     }
 }
 
-// ---- TASK-7.3a: MVP 算術オペ（イシュー #274 結線）----
+// ---- TASK-7.3a: MVP 算術オペ（イシュー #274 結線。`i64` 対応はイシュー #87
+// 残作業〈TASK-7.4a〉。`transformer.onnx` の `Shape -> Gather -> Div` 等
+// head_dim 算出経路が `i64` 同士の算術を要求する。実測確認済み〈イシュー #87
+// reopen コメント〉）----
 
+/// `(F32, F32)` は既存の `f32` 経路、`(I64, I64)` は `i64` 経路（`ops::*_i64`）
+/// へ分岐する。混在（`F32`/`I64` 相互）は ONNX 仕様上そもそも許容されない
+/// 組み合わせであり、`Cast` を明示的に経由させる既存方針（`compute_cast` 冒頭
+/// コメント）に合わせて暗黙変換せず [`InterpError::TypeMismatch`] で拒否する
+/// （no-silent-skip 契約）。
 fn compute_add(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
-    let a = get_f32(env, node, input_name(node, 0)?)?;
-    let b = get_f32(env, node, input_name(node, 1)?)?;
-    Ok(Value::F32(ops::add(a, b)?))
+    let a = get_value(env, node, input_name(node, 0)?)?;
+    let b = get_value(env, node, input_name(node, 1)?)?;
+    match (a, b) {
+        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::add(a, b)?)),
+        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::add_i64(a, b)?)),
+        _ => Err(InterpError::TypeMismatch {
+            node: node.name.clone(),
+            expected: "f32 or i64 (matching pair)",
+        }),
+    }
 }
 
 fn compute_mul(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
-    let a = get_f32(env, node, input_name(node, 0)?)?;
-    let b = get_f32(env, node, input_name(node, 1)?)?;
-    Ok(Value::F32(ops::mul(a, b)?))
+    let a = get_value(env, node, input_name(node, 0)?)?;
+    let b = get_value(env, node, input_name(node, 1)?)?;
+    match (a, b) {
+        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::mul(a, b)?)),
+        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::mul_i64(a, b)?)),
+        _ => Err(InterpError::TypeMismatch {
+            node: node.name.clone(),
+            expected: "f32 or i64 (matching pair)",
+        }),
+    }
 }
 
 fn compute_div(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
-    let a = get_f32(env, node, input_name(node, 0)?)?;
-    let b = get_f32(env, node, input_name(node, 1)?)?;
-    Ok(Value::F32(ops::div(a, b)?))
+    let a = get_value(env, node, input_name(node, 0)?)?;
+    let b = get_value(env, node, input_name(node, 1)?)?;
+    match (a, b) {
+        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::div(a, b)?)),
+        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::div_i64(a, b)?)),
+        _ => Err(InterpError::TypeMismatch {
+            node: node.name.clone(),
+            expected: "f32 or i64 (matching pair)",
+        }),
+    }
 }
 
 fn compute_mod(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
-    let a = get_f32(env, node, input_name(node, 0)?)?;
-    let b = get_f32(env, node, input_name(node, 1)?)?;
+    let a = get_value(env, node, input_name(node, 0)?)?;
+    let b = get_value(env, node, input_name(node, 1)?)?;
     let fmod = attr_i64(node, "fmod", 0) != 0;
-    Ok(Value::F32(ops::modulo(a, b, fmod)?))
+    match (a, b) {
+        (Value::F32(a), Value::F32(b)) => Ok(Value::F32(ops::modulo(a, b, fmod)?)),
+        (Value::I64(a), Value::I64(b)) => Ok(Value::I64(ops::mod_i64(a, b, fmod)?)),
+        _ => Err(InterpError::TypeMismatch {
+            node: node.name.clone(),
+            expected: "f32 or i64 (matching pair)",
+        }),
+    }
 }
 
 fn compute_sqrt(env: &HashMap<String, Value>, node: &NodeProto) -> Result<Value, InterpError> {
@@ -1088,6 +1129,138 @@ mod tests {
             }
             _ => panic!("Value::F32 を期待"),
         }
+    }
+
+    // ---- i64 版算術オペの結線（イシュー #87 残作業。transformer.onnx の
+    // head_dim 算出〈Shape -> Gather -> Div〉が要求する `i64` 同士の Add/Mul/Div/Mod。
+    // `ops::arith` 側の数値仕様の単体テストは `ops::arith::tests` を参照し、ここでは
+    // `run` 経由のディスパッチ（`compute_add`/`compute_mul`/`compute_div`/
+    // `compute_mod` の (Value, Value) 分岐）のみを確認する）----
+
+    #[test]
+    fn run_end_to_end_add_i64() {
+        let n = node("Add", vec!["a", "b"], vec!["y"]);
+        let g = empty_graph(vec![n], vec!["a", "b"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "a".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![1, 2], &[2]).unwrap()),
+        );
+        feeds.insert(
+            "b".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![10, 20], &[2]).unwrap()),
+        );
+        let result = run(&g, feeds).unwrap();
+        match &result["y"] {
+            Value::I64(t) => assert_eq!(t.as_slice().unwrap(), &[11, 22]),
+            _ => panic!("Value::I64 を期待"),
+        }
+    }
+
+    #[test]
+    fn run_end_to_end_mul_i64() {
+        let n = node("Mul", vec!["a", "b"], vec!["y"]);
+        let g = empty_graph(vec![n], vec!["a", "b"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "a".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![3, 4], &[2]).unwrap()),
+        );
+        feeds.insert(
+            "b".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![5, 6], &[2]).unwrap()),
+        );
+        let result = run(&g, feeds).unwrap();
+        match &result["y"] {
+            Value::I64(t) => assert_eq!(t.as_slice().unwrap(), &[15, 24]),
+            _ => panic!("Value::I64 を期待"),
+        }
+    }
+
+    #[test]
+    fn run_end_to_end_div_i64() {
+        // transformer.onnx の `/layers.0/self_attn/Div`（Gather 由来の head_dim を
+        // 定数で割る整数除算経路）と同型の再現ケース（イシュー #87 実測確認済み）。
+        let n = node("Div", vec!["a", "b"], vec!["y"]);
+        let g = empty_graph(vec![n], vec!["a", "b"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "a".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![8], &[]).unwrap()),
+        );
+        feeds.insert(
+            "b".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![2], &[]).unwrap()),
+        );
+        let result = run(&g, feeds).unwrap();
+        match &result["y"] {
+            Value::I64(t) => assert_eq!(t.as_slice().unwrap(), &[4]),
+            _ => panic!("Value::I64 を期待"),
+        }
+    }
+
+    #[test]
+    fn run_end_to_end_mod_i64() {
+        let n = node_with_attrs(
+            "Mod",
+            vec!["a", "b"],
+            vec!["y"],
+            vec![build_attr_i64("fmod", 1)],
+        );
+        let g = empty_graph(vec![n], vec!["a", "b"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "a".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![7], &[]).unwrap()),
+        );
+        feeds.insert(
+            "b".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![3], &[]).unwrap()),
+        );
+        let result = run(&g, feeds).unwrap();
+        match &result["y"] {
+            Value::I64(t) => assert_eq!(t.as_slice().unwrap(), &[1]),
+            _ => panic!("Value::I64 を期待"),
+        }
+    }
+
+    #[test]
+    fn run_rejects_mixed_f32_i64_div() {
+        // f32/i64 混在は暗黙変換せず拒否する（`Cast` を明示的に経由させる既存方針。
+        // compute_div の (Value, Value) 分岐コメント参照）。
+        let n = node("Div", vec!["a", "b"], vec!["y"]);
+        let g = empty_graph(vec![n], vec!["a", "b"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "a".to_string(),
+            Value::F32(Tensor::<f32>::new(vec![8.0], &[]).unwrap()),
+        );
+        feeds.insert(
+            "b".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![2], &[]).unwrap()),
+        );
+        let err = run(&g, feeds).unwrap_err();
+        assert!(matches!(err, InterpError::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn run_rejects_i64_div_by_zero() {
+        let n = node("Div", vec!["a", "b"], vec!["y"]);
+        let g = empty_graph(vec![n], vec!["a", "b"], vec!["y"]);
+        let mut feeds = StdHashMap::new();
+        feeds.insert(
+            "a".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![1], &[]).unwrap()),
+        );
+        feeds.insert(
+            "b".to_string(),
+            Value::I64(Tensor::<i64>::new(vec![0], &[]).unwrap()),
+        );
+        let err = run(&g, feeds).unwrap_err();
+        assert!(matches!(
+            err,
+            InterpError::Op(OpError::IntegerDivisionFailed { op: "Div" })
+        ));
     }
 
     #[test]

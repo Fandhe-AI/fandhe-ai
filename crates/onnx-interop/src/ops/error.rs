@@ -117,6 +117,21 @@ pub enum OpError {
     /// `[0, rank)` の範囲内であり [`OpError::AxisOutOfRange`] とは原因が異なるため、
     /// 分散計算の除数 0 割り（`NaN` を静かに生成する）を専用 variant で区別して拒否する。
     EmptyNormalizedSet { op: &'static str, axis: usize },
+
+    /// `i64` 版 `Add`／`Mul`（`arith.rs`。イシュー #87 残作業）の `checked_add`／
+    /// `checked_mul` が `None` を返した（`i64` の範囲外）。ONNX の shape 算術
+    /// （`Shape -> Gather` 由来の次元値同士の演算）は外部モデル由来の値のため、
+    /// `f32` と異なり暗黙の wrap（2 の補数折り返し）を許さず型付きエラーで拒否する
+    /// （`.claude/rules/coding-rust.md` 「本番経路で unwrap/expect 禁止」・
+    /// security.md A03 の「外部入力の検証」に準ずる）。
+    IntegerOverflow { op: &'static str },
+
+    /// `i64` 版 `Div`／`Mod`（`arith.rs`）の `checked_div`／`checked_rem` が
+    /// `None` を返した。原因は「除数が 0」または「`i64::MIN / -1`（`i64::MAX` を
+    /// 超えるためオーバーフロー）」のいずれかであり、`checked_div`／`checked_rem`
+    /// はこの 2 ケースを区別せず `None` を返すため 1 variant で両方を表す
+    /// （メッセージも両ケースを明示する）。
+    IntegerDivisionFailed { op: &'static str },
 }
 
 impl fmt::Display for OpError {
@@ -196,6 +211,15 @@ impl fmt::Display for OpError {
                 write!(
                     f,
                     "{op}: normalized set starting at axis {axis} has 0 elements"
+                )
+            }
+            OpError::IntegerOverflow { op } => {
+                write!(f, "{op}: i64 arithmetic overflow")
+            }
+            OpError::IntegerDivisionFailed { op } => {
+                write!(
+                    f,
+                    "{op}: i64 division failed (division by zero or i64::MIN / -1 overflow)"
                 )
             }
         }
