@@ -25,7 +25,10 @@
 //!   本モジュールは「入力テンソル＋属性 → 出力テンソル」の単体演算のみを扱う
 //!   （decode → 属性値 → 本モジュール呼び出し、の結線は後続タスクで行う）。属性は proto
 //!   由来の型に依存しないプレーンな Rust 構造体・スライスとして受け取り、デコード層の
-//!   実装順序に依存しない。
+//!   実装順序に依存しない。8 オペの単体テスト・PoC-v2-6 数値突合（ONNX 経路）は
+//!   TASK-7.2d（#80）が `crates/onnx-interop/tests/onnx_poc_v2_6_match.rs`・
+//!   `tests/onnx_slice_dynamic_bounds.rs` として整備する（safetensors 経路の同種突合は
+//!   `tests/st_poc_v2_6_match.rs`・#75）。
 //! - ONNX proto デコード経路（TASK-7.2a）は本イシューのスコープ外で未実装。
 //! - [`st_save`]: `tensor-core::Tensor<f32>` → safetensors ワイヤフォーマットへの
 //!   書き出し（TASK-7.1c・#197・REQ-7）。[`st_load`] と対称の契約（暗黙アダプタを

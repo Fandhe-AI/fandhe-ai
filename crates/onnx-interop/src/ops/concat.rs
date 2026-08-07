@@ -102,6 +102,35 @@ mod tests {
     }
 
     #[test]
+    fn concat_single_input_is_identity() {
+        // 実装計画 3.3 ギャップ観点「単一入力」。連結対象が 1 つのみでも
+        // shape・値を変えずに（コピーとして）返す。
+        let a = Tensor::<f32>::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let y = concat(&[&a], 0).unwrap();
+        assert_eq!(y.shape(), &[3]);
+        for i in 0..3 {
+            assert_eq!(y.get(&[i]).unwrap(), a.get(&[i]).unwrap());
+        }
+    }
+
+    #[test]
+    fn concat_rank_mismatch_rejected() {
+        // 実装計画 3.3 ギャップ観点「非結合軸の形状不一致エラー」の rank 違い分
+        // （`ConcatShapeMismatch` ではなく `RankMismatch` になることを固定化する）。
+        let a = Tensor::<f32>::zeros(&[2, 3]).unwrap();
+        let b = Tensor::<f32>::zeros(&[2, 3, 1]).unwrap();
+        let err = concat(&[&a, &b], 0).unwrap_err();
+        assert!(matches!(
+            err,
+            OpError::RankMismatch {
+                expected: 2,
+                actual: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn concat_empty_inputs_rejected() {
         let inputs: [&Tensor<f32>; 0] = [];
         let err = concat(&inputs, 0).unwrap_err();
