@@ -19,9 +19,15 @@ serde.workspace = true
 serde_json.workspace = true
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の同種判断を踏襲）。
-# 用途は 2 つ: (1) ベンチゲート計測系の実行系として bench-harness の計測 API
-# （`run`・`MeasurementConfig`・`median_q1_q3`）を呼び出す（TASK-4.1d・#107）。
-# (2) 決定的シードユーティリティ（determinism.rs・TASK-4.4b）が `Xorshift64Star`
-# を再利用し、PRNG 本体を再実装しない（TASK-4.4b）。依存方向は
-# `docs/guardrail-self-repair-cli.md` 1.4 節の既定（guardrail → bench-harness）に従う。
+# 依存方向は `docs/guardrail-self-repair-cli.md` 1.4 節の既定（guardrail → bench-harness）
+# に従う。用途:
+# - ベンチゲート計測系の実行系として bench-harness の計測 API
+#   （`run`・`MeasurementConfig`・`median_q1_q3`）を呼び出す（TASK-4.1d・#107）。
+# - `median_gate` モジュール（5 回以上計測の中央値算出。TASK-4.4a・#112）・
+#   `report::median`（判定レポート JSON の `bench_median_pct` 生成。TASK-4.1a・#104）が
+#   `bench_harness::median_q1_q3` を唯一の中央値定義として呼び出すために使用する
+#   （定義の二重管理防止。#107 レビュー〈PR #305〉指摘対応）。
+# - 決定的シードユーティリティ（determinism.rs・TASK-4.4b）が `Xorshift64Star` を
+#   再利用し、PRNG 本体を再実装しないために使用する（backend-cpu → bench-harness 等の
+#   既存先例あり。`.claude/rules/deps-policy.md`）。
 bench-harness = { path = "../bench-harness" }
