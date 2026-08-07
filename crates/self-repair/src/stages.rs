@@ -39,12 +39,10 @@ pub enum DetectionOutcome {
 /// 検出された「修正すべき事象」（PoC-2 の検出結果に対応）。
 ///
 /// `kind` と `summary` で可視性の方針を意図的に分けている。`kind` は
-/// [`crate::runner::SelfRepairLoop::run`] が `Detector::detect` に渡した
-/// [`RepairKind`] と一致するという不変条件を持ち（種別非依存性テスト
-/// `runner_is_kind_agnostic_across_all_repair_kinds` が検証する契約）、
-/// コンストラクタ経由以外での書き換えを許すと不変条件が壊れうるため
-/// private + アクセサとする。`summary` は人間可読なログ用の自由文字列で
-/// あり、そのような不変条件を持たないため `pub` フィールドで直接公開する
+/// `Finding::new` 経由でのみ設定され、構築後は読み取り専用（外部コードから
+/// 書き換えられない）としたいフィールドのため private + アクセサとする。
+/// `summary` は人間可読なログ用の自由文字列であり、そのような読み取り専用
+/// 制約を必要としないため `pub` フィールドで直接公開する
 /// （[`Proposal::description`] と同じ方針）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -113,9 +111,13 @@ pub trait FixGenerator {
 /// 検証段階の結果。
 ///
 /// `Passed` は [`VerifiedEvidence`] を伴う。`VerifiedEvidence` は
-/// `pub(crate)` コンストラクタしか持たないため、[`VerificationGate::verify`]
-/// を経由せずに構築することはできない（A08 対応。取り込み判断
-/// [`AdoptionJudge::judge`] を検証迂回で呼び出す経路を型レベルで封じる）。
+/// `pub(crate)` コンストラクタしか持たないため、クレート外からは構築できず
+/// [`VerificationGate::verify`] を経由せずに構築することはできない（A08
+/// 対応。取り込み判断 [`AdoptionJudge::judge`] をクレート外から検証迂回で
+/// 呼び出す経路を型レベルで封じる。ただし本クレート内では
+/// `VerificationGate` 実装以外からも呼び出し可能であり、`verify` 内でのみ
+/// 構築する契約は運用上のものである。`outcome.rs` の `VerifiedEvidence` の
+/// doc 参照）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerificationOutcome {
     Passed(VerifiedEvidence),

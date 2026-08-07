@@ -70,13 +70,16 @@ pub enum AdoptionVerdict {
 
 /// 検証（[`crate::stages::VerificationGate::verify`]）を通過した証跡。
 ///
-/// コンストラクタを `pub(crate)` に限定し、本クレート内の
-/// `VerificationGate` 実装（本イシューのテストダブル・検証ゲート実実行を
-/// 担う #134 の実装）だけが構築できるようにしている。これにより
-/// [`crate::stages::AdoptionJudge::judge`] は「検証を経た証跡」以外を
-/// 受け取れず、検証を迂回して取り込み判断へ到達する経路をコンパイル時に
-/// 封じる（`.claude/rules/security.md` A08: 自己修復ループが取り込む変更は
-/// ガードレール判定を必ず経由し、判定の迂回経路を作らない）。
+/// コンストラクタを `pub(crate)` に限定している。これが型として保証するのは
+/// 「クレート外からは構築不能」という境界であり、本クレート内での呼び出し元を
+/// `VerificationGate` 実装に強制するものではない（本クレート内の任意の
+/// コードから呼び出せる。運用上は `VerificationGate::verify` 内でのみ構築する
+/// 契約をレビューで担保する）。これにより
+/// [`crate::stages::AdoptionJudge::judge`] は「クレート外から検証迂回で
+/// 構築された証跡」を受け取れず、クレート境界を越えて検証を迂回し取り込み
+/// 判断へ到達する経路をコンパイル時に封じる（`.claude/rules/security.md`
+/// A08: 自己修復ループが取り込む変更はガードレール判定を必ず経由し、判定の
+/// 迂回経路を作らない）。
 ///
 /// guardrail 統合（#135）で `gates`/`bench`/`lines_changed`/`api_broken`/
 /// `gaming_suspect`/`exclusion_rule_ids` の構造化シグナルを追加する想定

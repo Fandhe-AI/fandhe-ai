@@ -156,6 +156,29 @@ where
                     continue;
                 }
                 VerificationOutcome::Passed(evidence) => {
+                    // `VerifiedEvidence::new` の `attempt` はコンストラクタの
+                    // 自由な `u32` 引数であり、`Proposal.attempt` から自動導出
+                    // されるわけではない（#134 の実実装が誤った値を渡しうる）。
+                    // `SelfRepairError::Judgement { attempt: evidence.attempt() }`
+                    // はこの値をそのまま使うため、`Proposal.attempt` の検査
+                    // （上記）だけでは監査ログの食い違いを防ぎきれない。ループ側
+                    // の attempt カウンタを単一の真実源として、ここでも
+                    // 不一致を fail-closed で検出する。
+                    if evidence.attempt() != attempt {
+                        return Err(LoopFailure {
+                            error: SelfRepairError::Verification {
+                                attempt,
+                                reason: format!(
+                                    "verification gate が attempt={attempt} の呼び出しに対し \
+                                     evidence.attempt()={} を返しました（attempt 番号の単一の \
+                                     真実源が破られています）",
+                                    evidence.attempt()
+                                ),
+                            },
+                            attempts: attempts.clone(),
+                        });
+                    }
+
                     match self
                         .adoption_judge
                         .judge(&evidence)
@@ -441,6 +464,43 @@ mod tests {
         }
     }
 
+    /// 修正生成段階のテストダブル。ループが渡した `attempt` とは無関係に
+    /// `wrong_attempt` を `Proposal.attempt` に設定する（attempt 番号の単一の
+    /// 真実源の不一致検出テスト用。レビュー指摘 Medium #1 の
+    /// `Proposal.attempt` 側の回帰防止）。
+    struct FixGeneratorReturnsWrongAttempt {
+        wrong_attempt: u32,
+    }
+    impl FixGenerator for FixGeneratorReturnsWrongAttempt {
+        fn generate(&self, finding: &Finding, _attempt: u32) -> Result<Proposal, SelfRepairError> {
+            Ok(Proposal {
+                attempt: self.wrong_attempt,
+                description: format!("fix for {}", finding.summary),
+            })
+        }
+    }
+
+    /// 検証段階のテストダブル。検証は常に合格させるが、
+    /// [`VerifiedEvidence::new`] に渡す `attempt` をループが渡した
+    /// `proposal.attempt` とは無関係な `wrong_attempt` にすり替える
+    /// （attempt 番号の単一の真実源の不一致検出テスト用。レビュー指摘
+    /// Medium #1 の `evidence.attempt()` 側の回帰防止。`VerifiedEvidence::new`
+    /// が `pub(crate)` のため本クレート内のテストダブルから直接呼べる
+    /// ことが、outcome.rs の doc が説明する「クレート境界までしか型で
+    /// 強制されない」ことの実地証明でもある）。
+    struct VerificationGateReturnsWrongAttemptEvidence {
+        wrong_attempt: u32,
+    }
+    impl VerificationGate for VerificationGateReturnsWrongAttemptEvidence {
+        fn verify(&self, proposal: &Proposal) -> Result<VerificationOutcome, SelfRepairError> {
+            Ok(VerificationOutcome::Passed(VerifiedEvidence::new(
+                self.wrong_attempt,
+                proposal.description.clone(),
+                "gates: build=pass test=pass clippy=pass",
+            )))
+        }
+    }
+
     /// 取り込み判断段階のテストダブル。常に [`SelfRepairError::Judgement`] を返す。
     ///
     /// `attempt` を固定値ではなく `evidence.attempt()` から取る（v1 PR #170 での
@@ -699,6 +759,59 @@ mod tests {
             failure.attempts[0].outcome,
             AttemptOutcome::VerificationFailed { .. }
         ));
+    }
+
+    #[test]
+    fn fix_generator_attempt_mismatch_is_rejected_fail_closed() {
+        // attempt 1 から FixGenerator がループの attempt（1）とは異なる
+        // proposal.attempt（99）を返す。レビュー指摘 Medium #1: attempt 番号の
+        // 単一の真実源（ループ側のカウンタ）と Proposal.attempt の不一致を
+        // fail-closed で検出することを確認する回帰テスト。verification_gate
+        // へは到達しないため attempts は空のまま。
+        let loop_ = SelfRepairLoop::new(
+            FixedDetector(DetectionOutcome::Finding(finding(RepairKind::BugFix))),
+            FixGeneratorReturnsWrongAttempt { wrong_attempt: 99 },
+            ScriptedVerificationGate::new(vec![true]),
+            FixedAdoptionJudge::always(AdoptionVerdict::Adopt),
+            nz(3),
+        );
+
+        let failure = loop_
+            .run(RepairKind::BugFix)
+            .expect_err("attempt mismatch should propagate as Err");
+        assert!(matches!(
+            failure.error,
+            SelfRepairError::FixGeneration { attempt: 1, .. }
+        ));
+        assert!(failure.attempts.is_empty());
+    }
+
+    #[test]
+    fn verification_evidence_attempt_mismatch_is_rejected_fail_closed() {
+        // attempt 1 で検証が合格するが、VerifiedEvidence が保持する
+        // attempt（99）がループの attempt（1）と食い違う。レビュー指摘
+        // Medium #1 の `evidence.attempt()` 側（advisor 追加指摘）: この
+        // 不一致も fail-closed で検出し、AdoptionJudge へは到達しないことを
+        // 確認する回帰テスト。
+        let judge = FixedAdoptionJudge::always(AdoptionVerdict::Adopt);
+        let loop_ = SelfRepairLoop::new(
+            FixedDetector(DetectionOutcome::Finding(finding(RepairKind::BugFix))),
+            RecordingFixGenerator::new(),
+            VerificationGateReturnsWrongAttemptEvidence { wrong_attempt: 99 },
+            judge,
+            nz(3),
+        );
+
+        let failure = loop_
+            .run(RepairKind::BugFix)
+            .expect_err("evidence attempt mismatch should propagate as Err");
+        assert!(matches!(
+            failure.error,
+            SelfRepairError::Verification { attempt: 1, .. }
+        ));
+        assert!(failure.attempts.is_empty());
+        let SelfRepairLoop { adoption_judge, .. } = &loop_;
+        assert_eq!(adoption_judge.call_count.get(), 0);
     }
 
     #[test]
