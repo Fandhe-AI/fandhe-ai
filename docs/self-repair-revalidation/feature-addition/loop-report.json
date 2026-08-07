@@ -1,0 +1,55 @@
+{
+  "adopted_evidence": {
+    "api_broken": false,
+    "attempt": 2,
+    "bench_measurements_pct": [
+      -0.039567396465323146,
+      -0.00659630606860695,
+      0.013188262446428567,
+      -0.013197835554967785,
+      -10.096096808636846
+    ],
+    "bench_median_pct": -0.013197835554967785,
+    "exclusion_rule_ids": [],
+    "gaming_suspect": false,
+    "gate_report": "build=pass test=pass clippy=pass bench=measured",
+    "lines_changed": 28
+  },
+  "attempt_count": 2,
+  "attempts": [
+    {
+      "attempt": 1,
+      "duration_ms": 3643,
+      "outcome": "VerificationFailed { reason: \"test が失敗しました: \\nrunning 2 tests\\ntest activations::tests::sigmoid_matches_known_values ... ok\\ntest activations::tests::relu_matches_known_values ... ok\\n\\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n\\nrunning 1 test\\ntest leaky_relu_matches_known_values ... FAILED\\n\\nfailures:\\n\\n---- leaky_relu_matches_known_values stdout ----\\n\\nthread 'leaky_relu_matches_known_values' (1962107) panicked at tests/leaky_relu_acceptance.rs:36:9:\\nleaky_relu 出力が既知正解値と不一致: got=0.05, want=0.5\\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\\n\\n\\nfailures:\\n    leaky_relu_matches_known_values\\n\\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n   Compiling self_repair_feature_addition_leaky_relu_baseline v0.1.0 (/tmp/self-repair-feature-addition-task-3-3c-sandbox-1961190)\\n    Finished `release` profile [optimized] target(s) in 0.21s\\n     Running unittests src/lib.rs (target/release/deps/self_repair_feature_addition_leaky_relu_baseline-25b343510c7e0c26)\\n     Running tests/leaky_relu_acceptance.rs (target/release/deps/leaky_relu_acceptance-1261e7c20bed70ef)\\nerror: test failed, to rerun pass `--test leaky_relu_acceptance`\\n\" }"
+    },
+    {
+      "attempt": 2,
+      "duration_ms": 1970,
+      "outcome": "Adopted"
+    }
+  ],
+  "harness_wall_time_ms": 9500,
+  "issue": 142,
+  "measured_signals": {
+    "api_broken": false,
+    "exclusion_rule_ids": [],
+    "gaming_suspect": false,
+    "lines_changed": 28
+  },
+  "notes": [
+    "CLI（self-repair run）経由の完走ではなく lib API 直接呼び出しの実証ハーネス（#142 スコープ判断。docs/self-repair-revalidation/feature-addition/README.md 参照）",
+    "JSON Lines ハッシュチェーン形式（改竄検知）は TASK-3.4（#145）実装後に適用予定",
+    "bench_median_pct・bench_measurements_pct は baseline/candidate 双方に同一の合成ワークロード（leaky_relu_like_workload）を用いた計測であり、実際の leaky_relu 実装差分固有の性能特性は計測していない（既知の制約。verify_composite.rs・README『シグナルは実測のみ』節参照）"
+  ],
+  "outcome": "Adopted",
+  "repair_kind": "FeatureAddition",
+  "signal_source": "measured",
+  "task": "TASK-3.3c",
+  "thresholds": {
+    "bench_median_max_pct": 5.0,
+    "bench_runs_min": 5,
+    "lines_max": 200,
+    "source": "guardrail.toml (preset.default) via guardrail::config::resolve"
+  },
+  "total_duration_ms": 9430
+}
