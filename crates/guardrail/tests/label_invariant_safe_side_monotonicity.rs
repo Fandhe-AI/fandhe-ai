@@ -62,6 +62,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// `meta.toml` の外部入力サイズ上限（DoS 的な巨大入力を拒否する。
 /// `guardrail::toml_lite::MAX_INPUT_BYTES`・`label_invariant_empty_exclusions.rs::
@@ -136,9 +137,13 @@ enum RawValue {
 }
 
 /// `meta.toml` 限定サブセット（フラットな `key = value`＋文字列配列＋
-/// `#` 行コメント）のミニパーサ。対応文法・非対応理由は
-/// `label_invariant_empty_exclusions.rs::parse_flat_toml` と同一（本ファイル
-/// 冒頭 `//!` コメント「依存」節参照）。
+/// `#` 行コメント／行末インラインコメント）のミニパーサ。対応文法・
+/// 非対応理由は `label_invariant_empty_exclusions.rs::parse_flat_toml` と
+/// 概ね同一（本ファイル冒頭 `//!` コメント「依存」節参照）だが、レビュー
+/// 指摘（#127）を受け行末インラインコメント（`key = value  # comment`）を
+/// 追加対応する。複数行配列・引用符内エスケープは非対応のまま（現状の
+/// 15 fixture が単一行形式のみのため実害なし。将来 fixture 追加時は
+/// fail-closed で panic する）。
 fn parse_flat_toml(input: &str) -> Result<BTreeMap<String, RawValue>, String> {
     if input.len() > MAX_META_BYTES {
         return Err(format!(
@@ -159,7 +164,7 @@ fn parse_flat_toml(input: &str) -> Result<BTreeMap<String, RawValue>, String> {
             .split_once('=')
             .ok_or_else(|| format!("line {line_number}: expected 'key = value'"))?;
         let key = key.trim().to_string();
-        let value_str = value_str.trim();
+        let value_str = strip_inline_comment(value_str.trim());
         if key.is_empty() {
             return Err(format!("line {line_number}: empty key"));
         }
@@ -172,6 +177,23 @@ fn parse_flat_toml(input: &str) -> Result<BTreeMap<String, RawValue>, String> {
         map.insert(key, value);
     }
     Ok(map)
+}
+
+/// 行末インラインコメント（`key = value  # comment`）を除去する。引用符
+/// （`"..."`）内の `#` はコメント開始とみなさない（例:
+/// `expected_verdict = "escalate"  # 除外後の判定` の値部分に `#` を含む
+/// 文字列があっても壊れないようにする。現状の 15 fixture に該当例はないが
+/// fail-closed 設計の一環として実装する）。
+fn strip_inline_comment(s: &str) -> &str {
+    let mut in_quotes = false;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '#' if !in_quotes => return s[..idx].trim_end(),
+            _ => {}
+        }
+    }
+    s
 }
 
 /// 値パーサ。`meta.toml` は `known_blindspot` 等の真偽値フィールドも
@@ -193,11 +215,14 @@ fn parse_toml_value(s: &str) -> Option<RawValue> {
             return Some(RawValue::Array(Vec::new()));
         }
         let mut items = Vec::new();
+        // 末尾カンマ（`["a", "b",]`）を許容するため、trim 後に空となる
+        // 末尾要素は読み飛ばす（レビュー指摘 #127）。
         for part in inner.split(',') {
-            let item = part
-                .trim()
-                .strip_prefix('"')
-                .and_then(|r| r.strip_suffix('"'))?;
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let item = part.strip_prefix('"').and_then(|r| r.strip_suffix('"'))?;
             items.push(item.to_string());
         }
         return Some(RawValue::Array(items));
@@ -289,6 +314,24 @@ fn severity(verdict: &str) -> u8 {
     }
 }
 
+/// 全 fixture のロード結果を 1 回だけ計算しプロセス内で共有するキャッシュ。
+/// [`non_empty_exclusion_ids_imply_safe_side_monotonic_verdicts`]・
+/// [`at_least_one_fixture_has_non_empty_exclusion_ids`] の両テストが同じ
+/// 15 件の `meta.toml` を読むため（レビュー指摘 #127: I/O 重複の解消）、
+/// `OnceLock` で最初の呼び出し時にのみディスク読み取り・パースを行う
+/// （`cargo test` の並列テスト実行下でもスレッドセーフに 1 回だけ初期化
+/// される）。件数ガードは呼び出し側で行うため、ここでは fixture 消失時に
+/// 空リストになりうる点をそのまま許容する。
+fn all_checks() -> &'static Vec<SafeSideMonotonicityCheck> {
+    static CACHE: OnceLock<Vec<SafeSideMonotonicityCheck>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        list_change_ids()
+            .iter()
+            .map(|id| load_for_safe_side_monotonicity_check(id))
+            .collect()
+    })
+}
+
 /// 受け入れ条件の本体: 不変条件 (2)「`expected_exclusion_rule_ids` が非空
 /// なら `severity(expected_verdict_after_exclusions) >=
 /// max(severity(expected_verdict), severity(escalate))`」（除外リストは
@@ -305,17 +348,17 @@ fn severity(verdict: &str) -> u8 {
 /// 検証し、明らかに壊れたラベル（空文字列 id）を検知する。
 #[test]
 fn non_empty_exclusion_ids_imply_safe_side_monotonic_verdicts() {
-    let ids = list_change_ids();
+    let checks = all_checks();
     assert_eq!(
-        ids.len(),
+        checks.len(),
         EXPECTED_FIXTURE_COUNT,
-        "changes/ 配下の fixture 総数が README「15 件一覧」と一致しない: {ids:?}"
+        "changes/ 配下の fixture 総数が README「15 件一覧」と一致しない: {:?}",
+        checks.iter().map(|c| &c.change_id).collect::<Vec<_>>()
     );
 
     let escalate_severity = severity("escalate");
 
-    for id in &ids {
-        let checked = load_for_safe_side_monotonicity_check(id);
+    for checked in checks {
         if checked.expected_exclusion_rule_ids.is_empty() {
             continue;
         }
@@ -351,25 +394,36 @@ fn non_empty_exclusion_ids_imply_safe_side_monotonic_verdicts() {
     }
 }
 
-/// 非空虚性ガード: `expected_exclusion_rule_ids` が非空の fixture が
-/// 1 件以上存在することを検証する。全件が空化されて
-/// [`non_empty_exclusion_ids_imply_safe_side_monotonic_verdicts`] の対象が
-/// 消滅したこと（＝実質的に何も検証しなくなったこと）に気づけるようにする
-/// （README「15 件一覧」表時点で非空は S1・S3・D3・G2・G5 の 5 件）。
+/// README「15 件一覧」表時点で `expected_exclusion_rule_ids` が非空の
+/// fixture 数（S1・S3・D3・G2・G5 の 5 件）。件数を具体値でピン留めする
+/// ことで、非空 fixture が個別に空化される改竄（例: 1 件だけ配列を
+/// 空にしつつ `expected_verdict_after_exclusions` を `expected_verdict`
+/// に一致させる改変）を検知する（レビュー指摘 #127）。
+const EXPECTED_NON_EMPTY_EXCLUSION_COUNT: usize = 5;
+
+/// 非空虚性ガード: `expected_exclusion_rule_ids` が非空の fixture 数が
+/// README「15 件一覧」表と一致する（[`EXPECTED_NON_EMPTY_EXCLUSION_COUNT`]
+/// 件）ことを検証する。単なる `>= 1` ではなく具体件数まで固定することで、
+/// 全件空化（[`non_empty_exclusion_ids_imply_safe_side_monotonic_verdicts`]
+/// の対象が消滅し空虚に通過するケース）だけでなく、一部 fixture の
+/// 個別改竄も検知できるようにする。
+///
+/// なお `expected_exclusion_rule_ids` の内容自体（S1 は
+/// `["arch-hyperparameter-change"]` 等）のピン留めは
+/// `labeled_changes_labels.rs`（TASK-4.2b・#110・GROUND_TRUTH 定数）が
+/// 別レイヤーで担う（本ファイル冒頭 `//!` コメント「スコープ境界」節）。
 #[test]
 fn at_least_one_fixture_has_non_empty_exclusion_ids() {
-    let ids = list_change_ids();
-    let non_empty_count = ids
+    let checks = all_checks();
+    let non_empty_count = checks
         .iter()
-        .filter(|id| {
-            !load_for_safe_side_monotonicity_check(id)
-                .expected_exclusion_rule_ids
-                .is_empty()
-        })
+        .filter(|c| !c.expected_exclusion_rule_ids.is_empty())
         .count();
-    assert!(
-        non_empty_count >= 1,
-        "expected_exclusion_rule_ids が非空の fixture が 1 件も存在しない。\
-         不変条件 (2) の検証対象が消滅している可能性がある（non_empty_count=0）"
+    assert_eq!(
+        non_empty_count, EXPECTED_NON_EMPTY_EXCLUSION_COUNT,
+        "expected_exclusion_rule_ids が非空の fixture 数が README「15 件一覧」\
+         （S1・S3・D3・G2・G5 の {EXPECTED_NON_EMPTY_EXCLUSION_COUNT} 件）と\
+         一致しない（実測 {non_empty_count} 件）。不変条件 (2) の検証対象が\
+         消滅または部分的に改竄されている可能性がある"
     );
 }
