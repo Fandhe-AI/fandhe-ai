@@ -108,6 +108,23 @@ pub fn apply_candidate(
         })?;
 
     // 2. baseline 復元。
+    //
+    // `apply_candidate` は `pub`（crate 外からも呼べる公開エントリポイント）
+    // であり、`CandidateFixGenerator::new` の構築時検証（呼び出し元限定の
+    // 経路）だけに依存すると、この関数を直接呼ぶ経路では
+    // `validate_relative_path` を経由せずファイルシステムへ書き込みうる
+    // （絶対パス・`..` セグメントが `workspace.join(path)` 経由で workspace
+    // 外へ脱出する。A03 対応）。書き込みの直前ではなく、他方の走査より
+    // 前に全パスを検証し尽くすことで、一部のファイルだけが書き換わった
+    // 状態で `Err` を返す事態を避ける。
+    for relative_path in baseline.keys() {
+        validate_relative_path(relative_path)
+            .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
+    }
+    for (relative_path, _content) in &candidate.files {
+        validate_relative_path(relative_path)
+            .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
+    }
     for (relative_path, original_content) in baseline {
         let absolute_path = workspace.join(relative_path);
         fs::write(&absolute_path, original_content).map_err(|error| {
@@ -338,6 +355,50 @@ mod tests {
             .generate(&finding, 1)
             .expect("generate should succeed");
         assert_eq!(proposal.attempt, 1);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_candidate_rejects_unsafe_candidate_path_without_touching_filesystem() {
+        // `apply_candidate` は `pub`（crate 外から `CandidateFixGenerator::new`
+        // の構築時検証を経由せず直接呼べる）であるため、この関数自身が
+        // `validate_relative_path` を経由することを確認する（A03 対応。
+        // Cursor Bugbot review id 4885516474 指摘の回帰防止）。
+        let dir = temp_workspace("apply-unsafe-candidate-path");
+        let baseline = HashMap::new();
+        let candidates = vec![CandidateFix {
+            description: "malicious".to_string(),
+            files: vec![(PathBuf::from("../outside.txt"), "pwned".to_string())],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(result.is_err());
+        assert!(!dir.parent().unwrap().join("outside.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_candidate_rejects_unsafe_baseline_path_without_touching_filesystem() {
+        // baseline 側（前回試行の復元対象）も同様に検証対象とする
+        // （baseline は `CandidateFixGenerator::new` が構築するため通常は
+        // 安全だが、`apply_candidate` を直接呼ぶ経路では任意の
+        // `HashMap` を渡せるため、baseline 側の脱出も塞ぐ）。
+        let dir = temp_workspace("apply-unsafe-baseline-path");
+        let mut baseline = HashMap::new();
+        baseline.insert(
+            PathBuf::from("../outside.txt"),
+            "should-not-write".to_string(),
+        );
+        let candidates = vec![CandidateFix {
+            description: "harmless".to_string(),
+            files: vec![(PathBuf::from("target.txt"), "fix".to_string())],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(result.is_err());
+        assert!(!dir.parent().unwrap().join("outside.txt").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

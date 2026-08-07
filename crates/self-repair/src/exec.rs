@@ -171,10 +171,21 @@ impl CommandRunner for SystemCommandRunner {
         // `RUSTFLAGS` のみ除去して `CARGO_ENCODED_RUSTFLAGS` を継承したまま
         // にすると、祖先プロセスがこちらを設定していた場合に検証ビルドの
         // 挙動が変わりうるため、同様に除去する。
+        // `CARGO_MAKEFLAGS` は cargo が子プロセスへ jobserver（GNU make
+        // 互換のトークンパイプ）を伝搬させる環境変数であり、継承すると
+        // 検証用ビルドが祖先の jobserver からトークンを取得しに行き、
+        // 祖先側の並列度制約や、祖先プロセス終了後のパイプ切断で
+        // ハング／異常終了しうる。`RUSTC_WRAPPER` は sccache 等の
+        // コンパイララッパーを指定する環境変数であり、継承すると
+        // 検証ビルドが祖先と同じラッパー・キャッシュを経由してしまい、
+        // 検証対象と異なるキャッシュ状態の影響を受けうる。いずれも
+        // 検証ゲートの再現性を損なうため、他の変数と同様に除去する。
         command.env_remove("CARGO_TARGET_DIR");
         command.env_remove("CARGO_BUILD_TARGET_DIR");
         command.env_remove("RUSTFLAGS");
         command.env_remove("CARGO_ENCODED_RUSTFLAGS");
+        command.env_remove("CARGO_MAKEFLAGS");
+        command.env_remove("RUSTC_WRAPPER");
 
         let output = command
             .output()
