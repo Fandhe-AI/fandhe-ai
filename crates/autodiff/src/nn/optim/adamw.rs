@@ -161,17 +161,13 @@ impl AdamW {
             )));
         }
 
-        self.step_count += 1;
-        self.beta1_pow_t *= self.config.beta1 as f64;
-        self.beta2_pow_t *= self.config.beta2 as f64;
-        let bias_correction1 = 1.0 - self.beta1_pow_t;
-        let bias_correction2 = 1.0 - self.beta2_pow_t;
-        let bias_correction2_sqrt = (bias_correction2.sqrt()) as f32;
-        let step_size = (self.config.lr as f64 / bias_correction1) as f32;
-        let decay_factor = 1.0 - self.config.lr * self.config.weight_decay;
-
-        let mut out = Vec::with_capacity(params_and_grads.len());
-        for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
+        // 副作用（step_count・beta*_pow_t・m/v の更新）を一切加えない
+        // 検証専用フェーズ。全スロットの shape を先に確認しきってから
+        // 状態変更フェーズへ進む（Bugbot 指摘: 形状エラー発生時に
+        // step_count・bias-correction・m/v が部分更新のまま残ると、
+        // 後続の成功する step が誤った t を適用し破損した状態から
+        // 学習してしまうため。検証と状態変更を分離して防ぐ）。
+        for (slot, (param, grad)) in self.states.iter().zip(params_and_grads.iter()) {
             if param.shape() != slot.shape.as_slice() {
                 return Err(AutodiffError::Shape(ShapeError::ShapeMismatch {
                     lhs: param.shape().to_vec(),
@@ -184,7 +180,19 @@ impl AdamW {
                     rhs: param.shape().to_vec(),
                 }));
             }
+        }
 
+        self.step_count += 1;
+        self.beta1_pow_t *= self.config.beta1 as f64;
+        self.beta2_pow_t *= self.config.beta2 as f64;
+        let bias_correction1 = 1.0 - self.beta1_pow_t;
+        let bias_correction2 = 1.0 - self.beta2_pow_t;
+        let bias_correction2_sqrt = (bias_correction2.sqrt()) as f32;
+        let step_size = (self.config.lr as f64 / bias_correction1) as f32;
+        let decay_factor = 1.0 - self.config.lr * self.config.weight_decay;
+
+        let mut out = Vec::with_capacity(params_and_grads.len());
+        for (slot, (param, grad)) in self.states.iter_mut().zip(params_and_grads.iter()) {
             let param_data = dense_vec(param);
             let grad_data = dense_vec(grad);
             let mut new_param = Vec::with_capacity(param_data.len());
@@ -299,6 +307,43 @@ mod tests {
         // 2 回目に空スロット列を渡すとスロット数不一致でエラーになる。
         let result = opt.step(&[]);
         assert!(matches!(result, Err(AutodiffError::InvalidArgument(_))));
+    }
+
+    /// Bugbot 指摘の回帰テスト: 形状エラーで `step` が失敗した場合、
+    /// `step_count`／`beta*_pow_t`／`m`／`v` のいずれも部分更新されず
+    /// 呼び出し前の状態のまま残ることを確認する（状態変更前に全形状
+    /// 検証を完了させる。crates/autodiff/src/nn/optim/adamw.rs 内の
+    /// 検証専用フェーズのコメント参照）。
+    #[test]
+    fn state_not_mutated_after_failed_step() {
+        let mut opt = AdamW::new(AdamWConfig::default()).unwrap();
+        let param1 = t(vec![1.0, 2.0], &[2]);
+        let grad1 = t(vec![0.1, 0.1], &[2]);
+        opt.step(&[(&param1, &grad1)]).unwrap();
+        let step_count_before = opt.step_count();
+
+        // 2 回目呼び出しで shape 不一致を発生させる（grad の shape が
+        // param と一致しない）。
+        let param2 = t(vec![1.0, 2.0], &[2]);
+        let bad_grad = t(vec![0.1, 0.1, 0.1], &[3]);
+        let result = opt.step(&[(&param2, &bad_grad)]);
+        assert!(matches!(result, Err(AutodiffError::Shape(_))));
+        assert_eq!(
+            opt.step_count(),
+            step_count_before,
+            "shape エラー発生時に step_count が進んではならない"
+        );
+
+        // 状態が破損していないことを、同じ入力で 3 回目 step() を
+        // 呼んだ結果が「shape エラーが起きなかった場合の 2 回目の
+        // step()」と一致することで間接的に確認する。
+        let mut opt_ref = AdamW::new(AdamWConfig::default()).unwrap();
+        opt_ref.step(&[(&param1, &grad1)]).unwrap();
+        let param3 = t(vec![1.0, 2.0], &[2]);
+        let grad3 = t(vec![0.1, 0.1], &[2]);
+        let out_after_failed = opt.step(&[(&param3, &grad3)]).unwrap();
+        let out_ref = opt_ref.step(&[(&param3, &grad3)]).unwrap();
+        assert_eq!(dense_vec(&out_after_failed[0]), dense_vec(&out_ref[0]));
     }
 
     #[test]
