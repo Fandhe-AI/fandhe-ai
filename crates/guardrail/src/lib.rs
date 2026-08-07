@@ -8,7 +8,8 @@
 //! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）
 //! 資産の移植先でもある。
 //!
-//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c・イシュー #104／#105／#106 合流時点）
+//! # モジュール構成（TASK-4.1a／TASK-4.1b／TASK-4.1c／TASK-4.1d／TASK-4.4a／TASK-4.4b・
+//! イシュー #104／#105／#106／#107／#112／#113 合流時点）
 //! - [`cli`][]: CLI 引数解析（`check`／`eval` サブコマンド。#104 管轄）。
 //! - [`config`][]: `--config` の TOML 設定パース・検証、および判定閾値
 //!   （[`config::Thresholds`]・プリセット・値域検証。#104 管轄。#105 の
@@ -23,9 +24,16 @@
 //! - [`report`][]: 判定レポート JSON のフルスキーマ（[`report::Report`]。#104 管轄）
 //!   および 3 分岐判定の出力セクション（[`report::VerdictSection`]。#106 管轄）。
 //! - [`error`][]: クレート共通の型付きエラー（[`error::GuardrailError`]）。
+//! - [`median_gate`][]: 5 回以上計測の劣化率系列を検証し、`decision::BenchSignal::Measured`
+//!   （中央値のみ受け取る受け口）を構築する唯一の公開経路（REQ-4「単発計測での閾値判定は
+//!   行わないこと」。TASK-4.4a・イシュー #112）。
 //! - [`determinism`][]: 学習系回帰テスト向け決定的シード設定ユーティリティ
 //!   （TASK-4.4b・イシュー #113 管轄）。`self-repair` は
 //!   `pub use guardrail::determinism;` で再輸出し双方から利用する。
+//! - [`bench_gate`][]: ベンチゲート計測系（TASK-4.1d・#107 管轄）。`bench-harness` の
+//!   計測 API（`run`・`MeasurementConfig`・`median_q1_q3`）を呼び出す実行系。判定ロジック
+//!   本体（[`decision`]）・3 分岐出力（[`report::VerdictSection`]）とは並行実装のため
+//!   未結線（同モジュールのドキュメント「スコープ境界」参照）。
 //! - [`policy_exclusion`][]: ポリシー除外リスト（REQ-5）の match 方式評価
 //!   （`arch-hyperparameter-change`。TASK-5.2a・イシュー #122 管轄）。
 //!   `policy-exclusion.toml` のロード（#119／#124）・[`decision`] との統合
@@ -41,12 +49,14 @@
 //! `self-repair` 連携（TASK-4.2 以降）は本クレートの他モジュールが順次追加する
 //! 想定であり、本 PR 群のスコープ外（`.claude/rules/out-of-scope-tracking.md`）。
 
+pub mod bench_gate;
 pub mod cli;
 pub mod config;
 pub mod decision;
 pub mod determinism;
 pub mod error;
 pub mod exit_code;
+pub mod median_gate;
 pub mod policy_exclusion;
 pub mod report;
 pub mod signals;
