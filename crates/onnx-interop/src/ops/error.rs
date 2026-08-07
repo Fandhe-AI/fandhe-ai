@@ -75,6 +75,14 @@ pub enum OpError {
         lhs: Vec<usize>,
         rhs: Vec<usize>,
     },
+
+    /// `Cast` の `to`（ONNX `TensorProto.DataType`）が本クレートの対応範囲
+    /// （`FLOAT(1)`／`INT64(7)`。TASK-7.3b・#83）外だった。
+    UnsupportedDataType { op: &'static str, to: i64 },
+
+    /// `Reshape`／`Squeeze` の shape 指定（`-1` の複数指定・非 1 次元への squeeze 等）が
+    /// ONNX 仕様上不正（TASK-7.3b・#83）。
+    InvalidReshapeSpec { reason: &'static str },
 }
 
 impl fmt::Display for OpError {
@@ -133,6 +141,10 @@ impl fmt::Display for OpError {
                 f,
                 "Concat: shapes differ outside concat axis {axis} (lhs {lhs:?}, rhs {rhs:?})"
             ),
+            OpError::UnsupportedDataType { op, to } => {
+                write!(f, "{op}: unsupported target data type {to}")
+            }
+            OpError::InvalidReshapeSpec { reason } => write!(f, "Reshape: {reason}"),
         }
     }
 }
