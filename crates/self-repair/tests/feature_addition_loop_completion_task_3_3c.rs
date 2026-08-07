@@ -41,8 +41,8 @@ use std::time::Instant;
 use self_repair::verify_bench::MIN_BENCH_ITERATIONS;
 use self_repair::{
     CandidateFix, CommandRunner, FeatureAdditionCompositeGate, FeatureAdditionDetector,
-    FeatureAdditionFixGenerator, GuardrailAdoptionJudge, RepairKind, SelfRepairLoop,
-    SystemCommandRunner,
+    FeatureAdditionFixGenerator, GuardrailAdoptionJudge, LogWriter, RepairKind, SelfRepairLoop,
+    SystemCommandRunner, verify_chain,
 };
 
 /// baseline フィクスチャの相対パス（`crates/self-repair/tests/fixtures/…`。
@@ -741,7 +741,7 @@ fn write_loop_report(
         "signal_source": "measured",
         "notes": [
             "CLI（self-repair run）経由の完走ではなく lib API 直接呼び出しの実証ハーネス（#142 スコープ判断。docs/self-repair-revalidation/feature-addition/README.md 参照）",
-            "JSON Lines ハッシュチェーン形式（改竄検知）は TASK-3.4（#145）実装後に適用予定",
+            "JSON Lines ハッシュチェーンログ（loop-log.jsonl）は TASK-3.4（#145）実装済みの self_repair::LogWriter/verify_chain を本ハーネスへ結線して出力・検証している。self-repair verify-log CLI（外部コマンド経由の検証）は未実装のままであり、本実証は lib の verify_chain 呼び出しによる検証で充足する（TASK-3.3d・#143）。",
             "bench_median_pct・bench_measurements_pct は baseline/candidate 双方に同一の合成ワークロード（leaky_relu_like_workload）を用いた計測であり、実際の leaky_relu 実装差分固有の性能特性は計測していない（既知の制約。verify_composite.rs・README『シグナルは実測のみ』節参照）",
         ],
     });
@@ -750,15 +750,32 @@ fn write_loop_report(
     // となりうる出力（`docs/` 側）に末尾改行を付与する。
     pretty.push('\n');
 
+    // TASK-3.4（#145）が実装した改竄検知ログ（security.md「ループ試行ログは
+    // 改竄検知可能な形式で記録し、取り込み判断の根拠を追跡可能にする」）を
+    // `loop-report.json` と同じ出力先（target/・明示指定時のみ docs/）へ
+    // 書き出す。`LogWriter::open` は既存ファイルへ追記継続するため、固定
+    // ファイル名（`loop-log.jsonl`）を実行のたび削除してから開き、
+    // 「このディレクトリはこの 1 回の実行を記述する」契約を `loop-report.json`
+    // の `fs::write` 上書きと揃える（`revalidation_bug_fix.rs` と同一方針）。
+    let write_report_and_log = |dir: &std::path::Path| {
+        std::fs::create_dir_all(dir).expect("完走ログ出力先ディレクトリ作成に失敗");
+        std::fs::write(dir.join("loop-report.json"), &pretty)
+            .expect("loop-report.json 書き込みに失敗");
+        let log_path = dir.join("loop-log.jsonl");
+        let _ = std::fs::remove_file(&log_path);
+        let mut log_writer = LogWriter::open(&log_path).expect("loop-log.jsonl を開けませんでした");
+        log_writer
+            .append_report(report)
+            .expect("loop-log.jsonl への追記に失敗しました");
+        verify_chain(&log_path)
+            .expect("loop-log.jsonl のハッシュチェーン検証に失敗しました（改竄・破損の疑い）");
+    };
+
     let target_out_dir = repo_root().join("target/self-repair-revalidation/feature-addition");
-    std::fs::create_dir_all(&target_out_dir).expect("target 出力ディレクトリ作成に失敗");
-    std::fs::write(target_out_dir.join("loop-report.json"), &pretty)
-        .expect("target/loop-report.json 書き込みに失敗");
+    write_report_and_log(&target_out_dir);
 
     if std::env::var("SELF_REPAIR_TASK_3_3C_WRITE_DOCS").as_deref() == Ok("1") {
         let docs_out_dir = repo_root().join("docs/self-repair-revalidation/feature-addition");
-        std::fs::create_dir_all(&docs_out_dir).expect("docs 出力ディレクトリ作成に失敗");
-        std::fs::write(docs_out_dir.join("loop-report.json"), &pretty)
-            .expect("docs/loop-report.json 書き込みに失敗");
+        write_report_and_log(&docs_out_dir);
     }
 }
