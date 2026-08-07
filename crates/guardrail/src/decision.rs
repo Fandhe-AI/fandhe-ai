@@ -62,7 +62,13 @@ use crate::error::GuardrailError;
 
 /// 3 分岐判定の結論（REQ-4）。severity の高さは `Reject` > `Escalate` >
 /// `AutoApply` の順（[`decide`] のモジュールコメント参照）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`/`Deserialize` は判定レポート JSON（`crate::report::Report`。
+/// TASK-4.1a・イシュー #104 管轄）が `verdict` フィールドとして本型を直接
+/// シリアライズするために付与する（`snake_case` は `docs/guardrail-self-repair-cli.md`
+/// §2.1 の `"auto_apply"`/`"escalate"`/`"reject"` 表記と一致させる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Verdict {
     /// 逸脱なし。全ゲート通過・全指標が閾値内。
     AutoApply,

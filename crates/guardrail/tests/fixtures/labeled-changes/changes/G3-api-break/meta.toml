@@ -1,0 +1,12 @@
+change_id = "G3-api-break"
+category = "gray"
+expected_verdict = "escalate"
+poc3_default_verdict = "escalate"
+known_blindspot = false
+origin = "PoC-3 新規"
+summary = "compat::Sequential::add_linear の公開シグネチャに bias: bool を追加する（呼び出し元は更新済みで build/test は通過）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。compat.rs/main.rs の変更で
+# policy-exclusion.toml のいずれのルールにも match しないため、除外リスト
+# 適用後も expected_verdict と同じ判定になる。
+expected_exclusion_rule_ids = []
+expected_verdict_after_exclusions = "escalate"

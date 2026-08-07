@@ -7,24 +7,39 @@
 //! （`.claude/rules/delegation-impl.md`）。v1（`Fandhe-AI/rust-ai-library-v1`）資産の
 //! 移植先でもある。
 //!
-//! # モジュール構成（TASK-4.4a・イシュー #112 時点）
+//! # モジュール構成（TASK-4.1a／TASK-4.1c／TASK-4.4a・イシュー #104／#106／#112 合流時点）
+//! - [`cli`][]: CLI 引数解析（`check`／`eval` サブコマンド。#104 管轄）。
+//! - [`config`][]: `--config` の TOML 設定パース・検証（#104 管轄）。
+//! - [`signals`][]: `--signals` の JSON シグナル入力型（#104 管轄）。
+//! - [`toml_lite`][]: 依存追加なしの最小 TOML パーサ（`config` から利用。#104 管轄）。
 //! - [`decision`][]: 3 分岐判定ロジック本体（[`decision::decide`]）。評価済み 5 条件
-//!   シグナルから [`decision::Verdict`] を導出する純粋関数。
-//! - [`exit_code`][]: `guardrail check` の終了コード契約（[`exit_code::GuardrailExitCode`]）。
+//!   シグナルから [`decision::Verdict`] を導出する純粋関数（#106 管轄）。
+//! - [`exit_code`][]: `guardrail check`／`guardrail eval` の終了コード契約
+//!   （[`exit_code::GuardrailExitCode`]／[`exit_code::EvalExitCode`]）。
 //!   `Verdict` → 終了コードの変換をここ 1 箇所に閉じ込める。
-//! - [`report`][]: 判定レポート JSON の「判定結果」セクション（[`report::VerdictSection`]）。
+//! - [`report`][]: 判定レポート JSON のフルスキーマ（[`report::Report`]。#104 管轄）
+//!   および 3 分岐判定の出力セクション（[`report::VerdictSection`]。#106 管轄）。
 //! - [`error`][]: クレート共通の型付きエラー（[`error::GuardrailError`]）。
 //! - [`median_gate`][]: 5 回以上計測の劣化率系列を検証し、`decision::BenchSignal::Measured`
 //!   （中央値のみ受け取る受け口）を構築する唯一の公開経路（REQ-4「単発計測での閾値判定は
 //!   行わないこと」。TASK-4.4a・イシュー #112）。
 //!
-//! CLI 引数・設定パース・シグナル実測（TASK-4.1a／TASK-4.1b、イシュー #104／#105）、
-//! ポリシー除外リスト評価（TASK-5.2 系）、`guardrail eval`・`self-repair` 連携
-//! （TASK-4.2 以降）は本クレートの他モジュールが順次追加する想定であり、本イシューの
-//! スコープ外（`.claude/rules/out-of-scope-tracking.md`）。
+//! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
+//! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
+//! を提供する設計を維持する。`bin/guardrail`（`main.rs`）はここで公開するモジュール
+//! を組み合わせて CLI フローを構成するのみで、判定ロジック自体はライブラリ側に置く
+//! （`self-repair` からの lib 呼び出しと CLI 実行が同じロジックを共有するため）。
+//!
+//! ポリシー除外リスト評価（TASK-5.2 系）・`self-repair` 連携（TASK-4.2 以降）は
+//! 本クレートの他モジュールが順次追加する想定であり、本 PR 群のスコープ外
+//! （`.claude/rules/out-of-scope-tracking.md`）。
 
+pub mod cli;
+pub mod config;
 pub mod decision;
 pub mod error;
 pub mod exit_code;
 pub mod median_gate;
 pub mod report;
+pub mod signals;
+pub mod toml_lite;

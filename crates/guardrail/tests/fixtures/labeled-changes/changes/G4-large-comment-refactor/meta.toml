@@ -1,0 +1,15 @@
+# 15 件中唯一、変更行数が閾値（200行）を超えることが求められる件（行数閾値
+# エスカレーションの再現条件）。labeled_dataset.rs の diffstat 検証でこの
+# 1 件のみ 200 行超・他 14 件は 200 行以内であることを機械的に検証する。
+change_id = "G4-large-comment-refactor"
+category = "gray"
+expected_verdict = "escalate"
+poc3_default_verdict = "escalate"
+known_blindspot = false
+origin = "PoC-3 新規"
+summary = "compat.rs に大量のドキュメントコメントを追加し変更行数が閾値超過となる（挙動不変）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。compat.rs のみの変更で
+# policy-exclusion.toml のいずれのルールにも match しないため、除外リスト
+# 適用後も expected_verdict と同じ判定になる。
+expected_exclusion_rule_ids = []
+expected_verdict_after_exclusions = "escalate"

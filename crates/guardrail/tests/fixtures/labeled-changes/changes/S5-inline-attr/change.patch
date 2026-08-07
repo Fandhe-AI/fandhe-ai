@@ -1,0 +1,12 @@
+diff --git a/src/activations.rs b/src/activations.rs
+index 06782be..ccf2c4c 100644
+--- a/src/activations.rs
++++ b/src/activations.rs
+@@ -25,6 +25,7 @@ fn constant<'t>(tape: &'t Tape, value: f32) -> Var<'t> {
+ }
+ 
+ /// ReLU 活性化関数: `max(0, x)`。`nn::activation::Relu` の薄いラッパー。
++#[inline]
+ pub fn relu<'t>(x: &Var<'t>) -> Var<'t> {
+     Relu.forward(x)
+ }

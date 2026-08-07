@@ -1,0 +1,24 @@
+diff --git a/src/compat.rs b/src/compat.rs
+index dbd206e..9cba119 100644
+--- a/src/compat.rs
++++ b/src/compat.rs
+@@ -16,6 +16,7 @@ use tensor_core::{ShapeError, Tensor};
+ use crate::activations;
+ 
+ /// numpy 風のテンソル生成: `np::array(data, [rows, cols])`。
++/// `data` の長さは `shape` の積と一致している必要がある。
+ pub fn array(data: Vec<f32>, shape: &[usize]) -> Result<Tensor<f32>, ShapeError> {
+     Tensor::new(data, shape)
+ }
+diff --git a/src/train.rs b/src/train.rs
+index 1d17a13..120090d 100644
+--- a/src/train.rs
++++ b/src/train.rs
+@@ -15,6 +15,7 @@ use crate::model::Mlp;
+ 
+ /// XOR 拡張の合成データセットを生成する。`repeat` 回複製してミニバッチ
+ /// 相当にする。
++/// 生成順序は base_inputs の並びを `repeat` 回繰り返す決定的な順序である。
+ pub fn xor_dataset(repeat: usize) -> (Tensor<f32>, Tensor<f32>) {
+     let base_inputs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
+     let base_targets: [f32; 4] = [0.0, 1.0, 1.0, 0.0];

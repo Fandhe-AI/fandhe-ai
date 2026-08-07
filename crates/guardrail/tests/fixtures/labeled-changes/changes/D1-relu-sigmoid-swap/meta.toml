@@ -1,0 +1,12 @@
+change_id = "D1-relu-sigmoid-swap"
+category = "dangerous"
+expected_verdict = "reject"
+poc3_default_verdict = "reject"
+known_blindspot = false
+origin = "PoC-2 #1 流用"
+summary = "relu の実装を sigmoid にすり替える（既知値回帰テストが失敗し却下される）"
+# REQ-5 適用後挙動のモデル化（イシュー #269）。activations.rs のみの変更で
+# policy-exclusion.toml のいずれのルールにも match しないため、除外リスト
+# 適用後も expected_verdict と同じ判定になる。
+expected_exclusion_rule_ids = []
+expected_verdict_after_exclusions = "reject"
