@@ -218,8 +218,25 @@ else
 	@echo "skip: Cargo.toml 未追加のため cargo tree 検査をスキップ"
 endif
 
+# guardrail 判定器の 2 層検証（TASK-6.1a・イシュー #147）。
+# REQ-4（1 層目・判定器単体）・REQ-5（2 層目・除外適用後）の回帰テストを
+# scripts/run-guardrail-regression.sh（ci.yml の guardrail-regression ジョブと共用する
+# 単一ソース）経由でローカル実行する。self-test → layer1 → layer2 の順で直列実行する
+# `all` サブコマンドを使う（検査ロジック自体の退行を実行環境の cargo 有無に関わらず
+# 常時検出したうえでテストを実行する。deps-forbidden ターゲットと同一方針）。
+.PHONY: guardrail-regression
+guardrail-regression: ## guardrail 判定器の 2 層検証（REQ-4/REQ-5）を実行する
+ifdef HAS_CARGO
+	@bash scripts/run-guardrail-regression.sh self-test
+	@bash scripts/run-guardrail-regression.sh layer1
+	@bash scripts/run-guardrail-regression.sh layer2
+else
+	@bash scripts/run-guardrail-regression.sh self-test
+	@echo "skip: Cargo.toml 未追加のため layer1/layer2 をスキップ"
+endif
+
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden guardrail-regression ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）
