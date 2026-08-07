@@ -96,6 +96,16 @@ pub enum OpError {
     /// （`.claude/rules/security.md` A03 相当の「外部入力の検証」）。
     UnsupportedFmodMode { op: &'static str },
 
+    /// `MatMul` の内部次元（`a` の最終軸と `b` の最後から 2 番目の軸。1-D 特例の軸挿入・
+    /// バッチブロードキャスト適用後）が一致しない（TASK-7.3c・`matmul.rs`）。既存の
+    /// `GemmDimMismatch` は `Gemm` 固有メッセージのため流用せず別 variant とする。
+    MatMulDimMismatch { a: Vec<usize>, b: Vec<usize> },
+
+    /// `MatMul` のバッチ・出力・入力走査量の要素数積が `usize` をオーバーフローする
+    /// （外部フォーマット由来の巨大 shape による過大メモリ確保・添字あふれを未然に拒否する。
+    /// OWASP A03。`.claude/rules/security.md`）。
+    MatMulElementCountOverflow,
+
     /// `LayerNormalization` の `epsilon` 属性が非有限値（`NaN`／`inf`）だった
     /// （TASK-7.3d・`layer_norm.rs`）。`epsilon` はモデル属性（外部入力）であり、
     /// 非有限値は分散計算全体を静かに `NaN`／`inf` へ汚染するため事前検査で拒否する
@@ -173,6 +183,12 @@ impl fmt::Display for OpError {
                 f,
                 "{op}: fmod=0 (Python-style, integer-only) is not supported for f32 input; use fmod=1"
             ),
+            OpError::MatMulDimMismatch { a, b } => {
+                write!(f, "MatMul: inner dimension mismatch (a {a:?}, b {b:?})")
+            }
+            OpError::MatMulElementCountOverflow => {
+                write!(f, "MatMul: element count overflow (usize)")
+            }
             OpError::InvalidEpsilon { op, epsilon } => {
                 write!(f, "{op}: epsilon {epsilon} must be finite")
             }

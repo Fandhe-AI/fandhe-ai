@@ -13,11 +13,13 @@
 //! （`Gemm`／`Relu`／`Sigmoid`／`Shape`／`Gather`／`Unsqueeze`／`Concat`／`Slice`／
 //! `Add`／`Mul`／`Div`／`Mod`／`Sqrt`／`Constant`／`LayerNormalization`）のみを対象とする:
 //!
-//! - TASK-7.3b・#83（`Cast`／`Reshape`／`Squeeze`／`Transpose`）: PR #275 未マージ
-//! - TASK-7.3c・#84（`MatMul`／`Softmax`／`Erf`）: 未着手
+//! - TASK-7.3b・#83（`Cast`／`Reshape`／`Squeeze`／`Transpose`）: PR #275 でマージ済み
+//! - TASK-7.3c・#84（`MatMul`／`Softmax`／`Erf`）: 本 PR（#276）で実装。`main` へのマージ
+//!   時点では未反映（本テストは #85 時点の 15 オペのまま）
 //!
 //! `#86`（TASK-7.4 end-to-end 推論）が本テストを 22 オペ完全カバレッジの根拠として
-//! 前提にしないよう、この節を残す。#83／#84 マージ後に本テストへ追加すること。
+//! 前提にしないよう、この節を残す。#83／#84 マージ後の 22 オペ完全カバレッジ化（`Cast`／
+//! `Reshape`／`Squeeze`／`Transpose`／`MatMul`／`Softmax`／`Erf` の追加）は別途対応する。
 
 use onnx_interop::ops::{
     ConstantValue, GemmAttrs, LayerNormAttrs, SliceParams, add, concat, constant, div, gather,
