@@ -183,4 +183,15 @@ impl<'t> Var<'t> {
         let id = self.tape.push(Op::Tanh(self.id), value);
         Var::from_raw(self.tape, id)
     }
+
+    /// 要素ごとのシグモイド（`1 / (1 + exp(-x))`）。`relu`/`exp`/`tanh`
+    /// と同じく shape 不変の単項演算のため構造的に失敗しえない
+    /// （TASK-9.1b・#92。`nn::activation::Sigmoid` の薄いラッパーが
+    /// このメソッドを呼ぶ）。forward は `eval::sigmoid`（数値安定形）
+    /// を使う。
+    pub fn sigmoid(&self) -> Var<'t> {
+        let value = eval::sigmoid(&self.value());
+        let id = self.tape.push(Op::Sigmoid(self.id), value);
+        Var::from_raw(self.tape, id)
+    }
 }
