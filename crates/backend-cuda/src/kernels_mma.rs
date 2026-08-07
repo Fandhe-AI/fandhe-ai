@@ -154,6 +154,13 @@ pub const MMA_K_STEPS_PER_STAGE: u32 = MMA_BK / MMA_K;
 /// コメント「タイル構成」参照。タイル定数変更時に即座にビルドエラーで
 /// 検出できるよう、実行時 `debug_assert` ではなくコンパイル時定数
 /// アサーションとする）。
+///
+/// 上記の通りコンパイル時 const アサーションのみからの参照であり、実行時
+/// `debug_assert` は意図的に用いない（このコメント自身の設計判断）。その
+/// ため rustc 1.88 系の dead-code 解析はこの `pub const` を誤って未使用と
+/// 判定する（1.92 以降では解消済み。`cargo +1.88.0 clippy` と
+/// `cargo +1.92.0 clippy` の実測差分で確認済み。#149 PR CI 指摘対応）。
+#[allow(dead_code)]
 pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * MMA_STAGES;
 
 // コンパイル時契約検査（タイル定数の内部整合性。実機コンパイルできない

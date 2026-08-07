@@ -223,6 +223,19 @@ pub const WMMA_TF32_K_TILE: u32 = 8;
 /// WMMA fragment の M・N 一辺（`m16n16k8` の 16）。ブロックタイル 32 を
 /// 16 で割った 2×2 が block 内の warp グリッド次元になる
 /// （`WMMA_TF32_BLOCK_M / WMMA_TF32_FRAG == 2` 等が `gemm.rs` 側の暗黙契約）。
+///
+/// Rust 側での実利用は `gemm.rs::CudaGemm::new` 内の
+/// `const _: () = assert!(...)`（ブロックタイル・warp グリッドの倍数関係
+/// をコンパイル時検査する）のみで、通常の実行時コードパスからは参照され
+/// ない（`#[cfg(test)]` の `wmma_tf32_constants_match_kernel_source_defines`
+/// テストからは参照されるが、`cargo clippy --lib`〈非 test 版〉には効かな
+/// い）。rustc 1.88 系の dead-code 解析はネストした無名 `const _` 内から
+/// のみ参照される `pub const` を誤って未使用と判定する（1.92 以降では
+/// 解消済み。`cargo +1.88.0 clippy` と `cargo +1.92.0 clippy` の実測差分で
+/// 確認済み。#149 PR CI 指摘対応）。実行時 `debug_assert` への置換は
+/// 「CUDA 非搭載の通常 CI では `new` 自体が実行されず検査が効かない」
+/// というレビュー指摘 #62 の踏襲事項に反するため行わない。
+#[allow(dead_code)]
 pub const WMMA_TF32_FRAG: u32 = 16;
 
 /// WMMA TF32 GEMM 1 ブロックあたりのスレッド数（4 warp = 128 スレッド。
