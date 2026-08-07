@@ -14,7 +14,10 @@
 //! 重ねず `guardrail` 経由に一本化する」方針と同じ）。`guardrail::bench_gate::
 //! BenchGateRunner::measure` の計測設定（`bench_harness::MeasurementConfig`）は
 //! `self-repair` からは型名として参照できない（`guardrail` が `pub use` で
-//! 再輸出していないため）。本モジュールは計測設定を公開 API に露出させず、
+//! 再輸出していないため）。一方で判定結果型・エラー内部型（[`BenchSignal`]・
+//! [`BenchGateError`]）は本モジュールが `guardrail::bench_gate` から
+//! `pub use` で再輸出しており、呼び出し側がこれらを名指しするために
+//! `guardrail::bench_gate` を直接 import する必要はない。本モジュールは計測設定を公開 API に露出させず、
 //! `Default::default()`（spec 下限 20/20・`bench-harness/src/protocol.rs` 参照）を
 //! 型推論のみで渡すことで、`bench_harness` を直接名指しせずに済ませる（TASK-3.3
 //! で計測対象ワークロード・設定を定義する際の拡張点は、本モジュールを経由せず
@@ -30,8 +33,8 @@
 //! [`SelfRepairBenchGate::run`] のシグネチャ（baseline／candidate クロージャを受けて
 //! 判定用の劣化率系列を返す）に閉じている（実装計画 #137 §3.3・§9 リスク）。
 
-pub use guardrail::bench_gate::MIN_BENCH_ITERATIONS;
-use guardrail::bench_gate::{BenchGateError, BenchGateRunner, BenchSignal, HarnessBenchGate};
+pub use guardrail::bench_gate::{BenchGateError, BenchSignal, MIN_BENCH_ITERATIONS};
+use guardrail::bench_gate::{BenchGateRunner, HarnessBenchGate};
 use std::fmt;
 
 /// 検証フェーズのベンチゲート実行時に自己修復ループへ返すエラー。
@@ -54,7 +57,16 @@ impl fmt::Display for VerifyBenchError {
     }
 }
 
-impl std::error::Error for VerifyBenchError {}
+impl std::error::Error for VerifyBenchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            // `BenchGateError` は `std::error::Error` を実装済み（guardrail 側）。
+            // ここで連結しないと `std::error::Error::source()` ベースのエラーチェーン
+            // 走査（ロギング・診断ツール）が本型で途切れるため、内部エラーへ委譲する。
+            VerifyBenchError::Gate(err) => Some(err),
+        }
+    }
+}
 
 impl From<BenchGateError> for VerifyBenchError {
     fn from(err: BenchGateError) -> Self {

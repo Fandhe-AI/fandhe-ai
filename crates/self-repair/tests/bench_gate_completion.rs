@@ -11,9 +11,14 @@
 //! 参照できず（`verify_bench` モジュール冒頭ドキュメント参照）、本テストは独自の
 //! `BenchGateRunner` モック実装を持たない。エラー伝播（fail-closed）の確認は、
 //! guardrail 側が実際に返す検証エラー（反復回数下限違反）を用いる。
+//!
+//! `BenchSignal`・`BenchGateError` は `self_repair::verify_bench` が `guardrail::
+//! bench_gate` から再輸出しているため、本テストは `guardrail` を直接 import しない
+//! （`verify_bench` モジュール冒頭ドキュメント「依存方向」参照）。
 
-use guardrail::bench_gate::{BenchGateError, BenchSignal};
-use self_repair::verify_bench::{MIN_BENCH_ITERATIONS, SelfRepairBenchGate, VerifyBenchError};
+use self_repair::verify_bench::{
+    BenchGateError, BenchSignal, MIN_BENCH_ITERATIONS, SelfRepairBenchGate, VerifyBenchError,
+};
 use std::hint::black_box;
 
 /// 空クロージャは `Instant::elapsed` がゼロを返しうり、`NonFiniteRatio` として
