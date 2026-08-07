@@ -51,14 +51,21 @@ impl ArrayData for Vec<Vec<f32>> {
     fn into_array_data(self) -> Result<(Vec<f32>, Vec<usize>), AutodiffError> {
         let rows = self.len();
         let cols = self.first().map_or(0, |row| row.len());
-        let mut data = Vec::with_capacity(rows * cols);
-        for (i, row) in self.into_iter().enumerate() {
+        // jagged 検証を `rows * cols` の確保より先に行う（A03: 外部由来
+        // 入力を計算前に検証する契約。`.claude/rules/security.md`）。
+        // 先頭行だけが極端に長く残りの行が短い jagged 入力に対し、
+        // 検証前の `with_capacity(rows * cols)` が巨大確保でメモリ確保
+        // 異常終了しうるため、全行の長さを先に走査してから確保する。
+        for (i, row) in self.iter().enumerate() {
             if row.len() != cols {
                 return Err(AutodiffError::InvalidArgument(format!(
                     "compat::array: jagged 2-D 入力（行 {i} の長さ {} が行 0 の長さ {cols} と不一致）",
                     row.len()
                 )));
             }
+        }
+        let mut data = Vec::with_capacity(rows * cols);
+        for row in self {
             data.extend(row);
         }
         Ok((data, vec![rows, cols]))
