@@ -7,7 +7,8 @@
 //! `enumerate_all`／`select_from` が単一の trait オブジェクト経由で
 //! 3 バックエンドすべてを横断できることを確認する。3 バックエンド網羅の
 //! 本格的な統合テスト（実カーネル呼び出しを含む）は TASK-1.9d（#47）が
-//! 担い、本テストはデバイス抽象層の受け入れ条件（列挙・選択）に限定する。
+//! `backend_ops_integration.rs`（同ディレクトリ）以下で担い、本テストは
+//! デバイス抽象層の受け入れ条件（列挙・選択）に限定する。
 
 use backend_cpu::CpuDeviceProvider;
 use backend_cuda::CudaDeviceProvider;

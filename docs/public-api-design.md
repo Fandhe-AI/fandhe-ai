@@ -413,7 +413,7 @@ impl Device {
 
 **TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
 
-- `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c／1.9d（#46／#47）へ引き継ぐ。
+- `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c（#46）では対象外とし、TASK-1.9d（#47）でも「3 バックエンド統合テストの整備」という受け入れ条件には不要と判断し対象外とした（実装は別途追跡）。
 - 3 バックエンドが「同一 trait でデバイス列挙・選択できる」（#44 受け入れ条件）ための入口として `DeviceProvider` trait（`backend_name`／`is_available`／`enumerate`／`select`）と `DeviceInfo`（`device`／`name`／`total_memory_bytes`／`compute_units`。`#[non_exhaustive]`）を新規追加した。本文書は §4.2 の `BackendOps`（カーネルディスパッチ）のみを定義しており、デバイス検出・選択専用の trait は記載していなかった。
 - 既定デバイス選択ロジック（本節の未決事項）は本イシューでも実装しない（列挙と明示選択のみを提供する。ユーザー承認が必要な事項のため自動運転では安全側に倒した）。
 
@@ -549,6 +549,6 @@ pub enum BackendError {
 - **演算グラフ・カーネル融合機構の API**: イシュー #161（TASK-12.1a）。接続点のみ 6.4 に記載。
 - **シグネチャのコンパイル検証・実装**: TASK-1.4（自作テンソル型 productize）以降の実装イシューへ引き継ぐ。workspace 雛形（TASK-1.1a・#205）はクレートが空のため、本イシューでは検証しない。
 - **CUDA／Metal の elementwise・reduction カーネル実装**: TASK-1.9c（#46）時点では GEMM カーネルのみ実装済みのため、`BackendOps::add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` は `BackendError::Unsupported` を返す。GPU カーネル本体の実装・引き継ぎ先 Issue の起票はユーザー承認を得て別途行う。
-- **`DeviceBuffer`／`upload`／`download` への `BackendOps` シグネチャ移行**: TASK-1.9b（#45）マージ後、TASK-1.9d（#47）以降で検討する（上記 4.2 突合結果参照）。
+- **`DeviceBuffer`／`upload`／`download` への `BackendOps` シグネチャ移行**: TASK-1.9d（#47）では対象外とした（実装は別途追跡。上記 4.2 突合結果参照）。
 - **既定デバイス選択ロジック・形状／HW 判定によるディスパッチ規則の統合**: 前者はユーザー承認必須（CUDA 既定有効化の構成決定）、後者は TASK-11.2b（#68）の担当（`docs/dispatch-rules-design.md`）。
-- **3 バックエンド網羅の統合テスト**: TASK-1.9d（#47）の担当。
+- **3 バックエンド網羅の統合テスト**: TASK-1.9d（#47）で実装完了。CPU 全 8 演算・非 contiguous 入力・エラー経路・端点・3 バックエンド横断エンドツーエンドは `crates/backend-cpu/tests/backend_ops_integration.rs`、CUDA 実機での数値一致は `crates/backend-cuda/tests/backend_ops_real_device.rs`、Metal 実機での数値一致は `crates/backend-metal/tests/backend_ops_real_device.rs`（`#[ignore]` 分離）を参照。

@@ -13,8 +13,12 @@
 //!   不在環境（本 CI 環境は CUDA 非搭載・非 macOS）では型付きエラー
 //!   （`CudaUnavailable` 等）を返すこと（panic しない）を検証する。
 //!   実機での実行検証（GPU 実カーネル一致）は `#[ignore]` 分離し、3
-//!   バックエンド網羅の本格的な統合テストは TASK-1.9d（#47）が担う
-//!   （本テストは受け入れ条件検証に必要な最小限に留める）。
+//!   バックエンド網羅の本格的な統合テストは TASK-1.9d（#47）が
+//!   `backend_ops_integration.rs`（CPU 全 8 演算・非 contiguous・エラー
+//!   経路・端点・3 バックエンド横断エンドツーエンド）・
+//!   `backend-cuda/tests/backend_ops_real_device.rs`・
+//!   `backend-metal/tests/backend_ops_real_device.rs`（実機 `#[ignore]`）で
+//!   引き継いだ（本テストは受け入れ条件検証に必要な最小限に留める）。
 
 use backend_cpu::CpuBackendOps;
 use backend_cuda::CudaBackendOps;
