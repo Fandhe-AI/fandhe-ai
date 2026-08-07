@@ -39,34 +39,53 @@
 //! - [`runner`][]: 上記 trait を組み合わせて 1 ループを実行するオーケストレータ
 //!   [`runner::SelfRepairLoop`]。
 //! - [`error`][]: 型付きエラー [`error::SelfRepairError`]。
+//! - [`exec`][]: コマンド実行抽象（[`exec::CommandRunner`]・
+//!   [`exec::SystemCommandRunner`]）。[`verify_gates::CargoVerificationGate`]
+//!   が `cargo build`/`test`/`clippy` を起動するのに使う（TASK-3.1c・#134）。
+//! - [`candidate`][]: 修正生成フェーズの候補適用基盤（[`candidate::CandidateFix`]・
+//!   [`candidate::CandidateFixGenerator`]。種別非依存。TASK-3.1c・#134）。
+//! - [`verify_gates`][]: 検証フェーズ 3 ゲート（build/test/clippy）の実実行
+//!   [`verify_gates::CargoVerificationGate`]（TASK-3.1c・#134）。
 //!
-//! # 本クレートが担わない責務（TASK-3.1a 完了時点でのスコープ・
+//! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
-//! - 検出・可否判断フェーズの実装（`bug_fix`/`perf_regression`/
-//!   `feature_addition`/`candidate` 相当） → イシュー #133（TASK-3.1b）
-//! - 検証 3 ゲート実実行（`verify`/`cargo_gate` 相当） → イシュー #134（TASK-3.1c）
+//! - 種別別 Detector・実候補列の供給（`bug_fix`/`perf_regression`/
+//!   `feature_addition` 相当の検出・候補選定ロジック本体） → イシュー #133
+//!   （TASK-3.1b）・TASK-3.3（再実証）
+//! - 検証フェーズ 4 ゲートのうちベンチゲート（[`verify_bench::SelfRepairBenchGate`]）
+//!   の [`stages::VerificationGate`] への結線（4 ゲート合成） → イシュー #136 系
+//!   （TASK-3.2）
 //! - guardrail 3 分岐判定との統合（`judge` 相当・[`outcome::VerifiedEvidence`]
 //!   への guardrail シグナル拡張） → イシュー #135（TASK-3.1d。`guardrail`
 //!   クレート自体の CLI 移植〈TASK-4.1〉はイシュー #103 が別途追跡）
+//! - `exec`（コマンド実行抽象）の `guardrail` 側への共通化（`guardrail check`
+//!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
+//!   （本イシュー〈#134〉の PR 本文に記録）
 //! - ログ形式（`logging` 相当・SHA-256 ハッシュチェーン・`sha2` 依存追加。
 //!   依存追加はユーザー承認事項） → イシュー #145（TASK-3.4）
 //! - CLI バイナリ（`self-repair run`/`verify-log`。
 //!   `docs/guardrail-self-repair-cli.md` 3 節） → 後続タスク（既存イシューで
 //!   追跡済み）
 
+pub mod candidate;
 pub mod error;
+pub mod exec;
 pub mod kind;
 pub mod outcome;
 pub mod report;
 pub mod runner;
 pub mod stages;
+pub mod verify_gates;
 
+pub use candidate::{CandidateFix, CandidateFixGenerator};
 pub use error::SelfRepairError;
+pub use exec::{CommandRunner, SystemCommandRunner};
 pub use kind::RepairKind;
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
+pub use verify_gates::CargoVerificationGate;
 
 /// 決定的シード設定ユーティリティ（TASK-4.4b・イシュー #113）。
 ///
