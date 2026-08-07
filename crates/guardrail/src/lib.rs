@@ -20,6 +20,9 @@
 //! - [`report`][]: 判定レポート JSON のフルスキーマ（[`report::Report`]。#104 管轄）
 //!   および 3 分岐判定の出力セクション（[`report::VerdictSection`]。#106 管轄）。
 //! - [`error`][]: クレート共通の型付きエラー（[`error::GuardrailError`]）。
+//! - [`determinism`][]: 学習系回帰テスト向け決定的シード設定ユーティリティ
+//!   （TASK-4.4b・イシュー #113 管轄）。`self-repair` は
+//!   `pub use guardrail::determinism;` で再輸出し双方から利用する。
 //!
 //! `self-repair` は本クレートを **lib として直接呼び出す**（3.4 節。サブプロセス
 //! 起動は行わない）ため、`main.rs`（バイナリ）とは独立して公開 API（`decide` 相当）
@@ -34,6 +37,7 @@
 pub mod cli;
 pub mod config;
 pub mod decision;
+pub mod determinism;
 pub mod error;
 pub mod exit_code;
 pub mod report;
