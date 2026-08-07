@@ -25,8 +25,9 @@
 //! 判断する。
 //!
 //! # シグナルは実測のみ（捏造しない）
-//! `lines_changed`／`exclusion_rule_ids` は候補適用の実差分を sandbox 内の
-//! 使い捨て git リポジトリで実測する（`git diff --numstat`・
+//! `lines_changed`／`exclusion_rule_ids`／`gaming_suspect` は候補適用の実差分
+//! を sandbox 内の使い捨て git リポジトリで実測する（`git diff --numstat`・
+//! `git diff --unified=0`・
 //! `guardrail::policy_exclusion::ExclusionEvaluation::evaluate`）。ベンチは
 //! [`self_repair::verify_composite::FeatureAdditionCompositeGate`] が
 //! `SelfRepairBenchGate`（bench-harness 経由・5 回計測中央値）で実測する。
@@ -50,6 +51,12 @@ const FIXTURE_REL: &str = "tests/fixtures/feature-addition-leaky-relu/baseline";
 /// 機能追加候補が書き換える唯一のファイル（baseline に実在し、新規ファイル
 /// 追加にならないこと。`FeatureAdditionFixGenerator::new` の構築時検証対象）。
 const TARGET_FILE: &str = "src/activations.rs";
+/// `TARGET_FILE` 内の `#[cfg(test)] mod tests` 開始位置を示すマーカー。
+/// `candidate_content`（新規関数の挿入位置）と `mod_tests_start_line`
+/// （`gaming_suspect` 判定の境界行算出）の両方が同一のマーカーを参照する
+/// ことを保証する（2 箇所で別々のマーカー文字列を持つと、片方だけ更新
+/// されて境界の意味がずれる回帰を招くため、`const` で一本化する）。
+const MOD_TESTS_MARKER: &str = "#[cfg(test)]\nmod tests {";
 
 /// sandbox の baseline（`TARGET_FILE`）へ `leaky_relu` を追加した候補内容を
 /// 組み立てる。既存のインポート・`relu`/`sigmoid`・`#[cfg(test)] mod tests`
@@ -81,12 +88,15 @@ fn candidate_content(leaky_relu_fn: &str) -> String {
         "baseline の import ブロックが想定形式と異なる（fixture 更新時に本関数も更新すること）"
     );
 
-    let marker = "#[cfg(test)]\nmod tests {";
     assert!(
-        with_import.contains(marker),
+        with_import.contains(MOD_TESTS_MARKER),
         "baseline に #[cfg(test)] mod tests が見つからない"
     );
-    with_import.replacen(marker, &format!("{leaky_relu_fn}\n{marker}"), 1)
+    with_import.replacen(
+        MOD_TESTS_MARKER,
+        &format!("{leaky_relu_fn}\n{MOD_TESTS_MARKER}"),
+        1,
+    )
 }
 
 /// `constant` ヘルパー（両候補で共通）: shape `[1]` の定数 `Var` を `tape` へ
@@ -256,13 +266,133 @@ fn git_init_baseline(sandbox: &Path) {
 struct MeasuredSignals {
     lines_changed: u64,
     api_broken: bool,
-    /// テスト側の緩和（ゲーミング）疑いの実測値: 変更ファイルに `tests/`
-    /// 配下または baseline の `#[cfg(test)] mod tests` 境界内が含まれるかで
-    /// 判定する（本ハーネスの候補生成は常にテストへ触れない設計だが、
-    /// `signal_source: "measured"` を名乗る以上ハードコードせず changed_files
-    /// から実際に導出する）。
+    /// テスト側の緩和（ゲーミング）疑いの実測値: (a) 変更ファイルパスに
+    /// `tests/` 配下が含まれる、または (b) `TARGET_FILE` の diff ハンクが
+    /// baseline の `#[cfg(test)] mod tests` 境界（行番号）以降の既存行と
+    /// 重なる、のいずれかで判定する（本ハーネスの候補生成は常にテストへ
+    /// 触れない設計だが、`signal_source: "measured"` を名乗る以上ハード
+    /// コードせず `git diff` の実測結果から導出する。
+    /// `measure_signals_for_candidate2`・`diff_touches_boundary` 参照。
+    /// **既知の限界**: `mod tests` marker 直前への隣接挿入〈本ハーネスの
+    /// 挿入位置そのもの〉は境界内と判定しない。既存テスト内容を一切変えず
+    /// `mod tests` の直前に新規 `#[cfg(test)]` ブロックを丸ごと追加する
+    /// ような候補は、本判定では検知できない）。
     gaming_suspect: bool,
     exclusion_rule_ids: Vec<String>,
+}
+
+/// baseline 内容から `MOD_TESTS_MARKER`（`#[cfg(test)]\nmod tests {`）の
+/// 開始行番号（1-indexed）を求める。`git diff` ハンクヘッダの行番号
+/// （1-indexed）と直接比較できるようにするための変換。`candidate_content`
+/// の挿入位置判定と同一のマーカー定数（`MOD_TESTS_MARKER`）を参照する
+/// ことで、境界の意味が 2 箇所でずれる回帰を防ぐ。
+fn mod_tests_start_line(baseline: &str) -> usize {
+    let marker_offset = baseline
+        .find(MOD_TESTS_MARKER)
+        .expect("baseline に #[cfg(test)] mod tests マーカーが見つからない");
+    baseline[..marker_offset].matches('\n').count() + 1
+}
+
+/// `git diff --unified=0` の出力を解析し、旧ファイル側で変更された行範囲の
+/// いずれかが `boundary_line`（1-indexed。`#[cfg(test)] mod tests` の開始行）
+/// **以降の既存行**と重なるかを判定する（ハンクヘッダ `@@ -a,b +c,d @@` の
+/// `-a,b` を旧ファイル側の変更行範囲として読む）。
+///
+/// 純追加ハンク（`b == 0`）は旧ファイルの行を 1 行も変更しない（`a` 行の
+/// 直後に新規行を挿入するのみ）。本ハーネスの候補生成は `mod tests` marker
+/// の直前（`a == boundary_line - 1`）に新規関数を挿入する構成であり、これは
+/// `mod tests` 自体の内容には触れない「隣接挿入」であるため境界内とは
+/// 判定しない（`a >= boundary_line` の場合のみ、挿入位置が `mod tests`
+/// 本文の内部にあるとみなし境界内と判定する）。
+fn diff_touches_boundary(unified_diff: &str, boundary_line: usize) -> bool {
+    unified_diff
+        .lines()
+        .filter(|line| line.starts_with("@@"))
+        .any(|hunk_header| {
+            let Some(old_range) = hunk_header.split(' ').find(|token| token.starts_with('-'))
+            else {
+                return false;
+            };
+            let old_range = old_range.trim_start_matches('-');
+            let mut parts = old_range.splitn(2, ',');
+            let start: usize = match parts.next().and_then(|s| s.parse().ok()) {
+                Some(value) => value,
+                None => return false,
+            };
+            let count: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+            if count == 0 {
+                // 純追加ハンク: 旧ファイルの行は変更されない。挿入位置
+                // （`start` 行の直後）が `mod tests` 本文の内部かどうかで
+                // 判定する（`mod tests` marker 直前への隣接挿入は除外）。
+                start >= boundary_line
+            } else {
+                start + count > boundary_line
+            }
+        })
+}
+
+/// `mod_tests_start_line`／`diff_touches_boundary` の境界判定を、実際の
+/// git 実行なしで検証する（純関数の単体テスト。advisor 指摘: 挙動を green
+/// 化する前後で「調整しただけ」か「正しい境界判定」かを区別できるようにする）。
+#[cfg(test)]
+mod boundary_detection_tests {
+    use super::{diff_touches_boundary, mod_tests_start_line};
+
+    /// 実 fixture（`crates/self-repair/tests/fixtures/…/src/activations.rs`）
+    /// の `#[cfg(test)]` は 24 行目にある（`grep -n` で実測済み）。
+    #[test]
+    fn mod_tests_start_line_matches_real_fixture() {
+        let baseline = std::fs::read_to_string(
+            super::repo_root()
+                .join("crates/self-repair")
+                .join(super::FIXTURE_REL)
+                .join(super::TARGET_FILE),
+        )
+        .expect("baseline fixture ファイルは実在する");
+        assert_eq!(mod_tests_start_line(&baseline), 24);
+    }
+
+    /// 本ハーネスが実際に生成する形（`mod tests` marker 直前への隣接挿入）
+    /// は境界内と判定しない。
+    #[test]
+    fn adjacent_insertion_before_marker_is_not_boundary_touch() {
+        let diff = "@@ -23,0 +24,15 @@\n";
+        assert!(!diff_touches_boundary(diff, 24));
+    }
+
+    /// `mod tests` 本文の内部への挿入は境界内と判定する。
+    #[test]
+    fn insertion_inside_mod_tests_is_boundary_touch() {
+        let diff = "@@ -30,0 +45,3 @@\n";
+        assert!(diff_touches_boundary(diff, 24));
+    }
+
+    /// 既存行 1 行の改変（`assert!` 緩和等を想定）は境界内と判定する。
+    #[test]
+    fn single_line_change_inside_mod_tests_is_boundary_touch() {
+        let diff = "@@ -30 +30 @@\n";
+        assert!(diff_touches_boundary(diff, 24));
+    }
+
+    /// 境界直前で終わる改変（`mod tests` に到達しない）は境界内と判定しない。
+    #[test]
+    fn change_ending_before_boundary_is_not_boundary_touch() {
+        let diff = "@@ -20,3 +20,3 @@\n";
+        assert!(!diff_touches_boundary(diff, 24));
+    }
+
+    /// 境界を跨ぐ改変は境界内と判定する。
+    #[test]
+    fn change_spanning_boundary_is_boundary_touch() {
+        let diff = "@@ -20,11 +20,11 @@\n";
+        assert!(diff_touches_boundary(diff, 24));
+    }
+
+    /// ハンクを含まない diff（無変更）は境界内と判定しない。
+    #[test]
+    fn empty_diff_is_not_boundary_touch() {
+        assert!(!diff_touches_boundary("", 24));
+    }
 }
 
 /// `candidate2`（正実装）を sandbox の working tree に一時的に書き込み、
@@ -308,13 +438,30 @@ fn measure_signals_for_candidate2(sandbox: &Path) -> MeasuredSignals {
         .map(|s| s.to_string())
         .collect();
 
-    // 2b. テスト緩和（ゲーミング）疑いの実測: 変更ファイルが `tests/` 配下を
-    //     含むかで判定する（本ハーネスの候補は `TARGET_FILE`
+    // 2b. テスト緩和（ゲーミング）疑いの実測: (a) 変更ファイルパスに
+    //     `tests/` 配下が含まれるか、(b) `TARGET_FILE` の diff ハンクが
+    //     baseline の `#[cfg(test)] mod tests` 境界行以降と重なるか、の
+    //     いずれかで判定する（本ハーネスの候補は `TARGET_FILE`
     //     〈`src/activations.rs`〉のみを変更する設計であり、`tests/` 配下・
     //     `TARGET_FILE` 内の `#[cfg(test)] mod tests` 境界のいずれにも触れて
     //     いないことを実測で確認する。fail-open な既定値ではなく
-    //     `changed_files` から導出する）。
-    let gaming_suspect = changed_files.iter().any(|f| f.contains("tests/"));
+    //     `changed_files`・`git diff --unified=0` の実測結果から導出する）。
+    let touches_tests_dir = changed_files.iter().any(|f| f.contains("tests/"));
+    let unified_diff = Command::new("git")
+        .args(["diff", "HEAD", "--unified=0", "--", TARGET_FILE])
+        .current_dir(sandbox)
+        .output()
+        .expect("git diff --unified=0 の起動に失敗");
+    assert!(
+        unified_diff.status.success(),
+        "git diff --unified=0 が失敗しました"
+    );
+    let boundary_line = mod_tests_start_line(&baseline);
+    let touches_mod_tests_boundary = diff_touches_boundary(
+        &String::from_utf8_lossy(&unified_diff.stdout),
+        boundary_line,
+    );
+    let gaming_suspect = touches_tests_dir || touches_mod_tests_boundary;
 
     // 3. ポリシー除外リスト評価（guardrail lib 直接呼び出し。組み込み既定値。
     //    `.claude/rules/security.md`「判定の迂回経路を作らない」に沿い、
@@ -332,10 +479,11 @@ fn measure_signals_for_candidate2(sandbox: &Path) -> MeasuredSignals {
 
     // 4. 公開 API 破壊チェック（既存の `pub fn` 行がすべて残存しているか。
     //    候補は追加のみで既存シグネチャを変更しないことを実測する）。
+    let candidate2 = candidate2_correct_content();
     let api_broken = !baseline
         .lines()
         .filter(|line| line.trim_start().starts_with("pub fn "))
-        .all(|line| candidate2_correct_content().contains(line.trim()));
+        .all(|line| candidate2.contains(line.trim()));
 
     // baseline 内容へ復元（実ループが `FeatureAdditionFixGenerator` 経由で
     // 改めて適用するため、ここでの一時書き込みは計測専用）。
@@ -569,9 +717,13 @@ fn write_loop_report(
         "notes": [
             "CLI（self-repair run）経由の完走ではなく lib API 直接呼び出しの実証ハーネス（#142 スコープ判断。docs/self-repair-revalidation/feature-addition/README.md 参照）",
             "JSON Lines ハッシュチェーン形式（改竄検知）は TASK-3.4（#145）実装後に適用予定",
+            "bench_median_pct・bench_measurements_pct は baseline/candidate 双方に同一の合成ワークロード（leaky_relu_like_workload）を用いた計測であり、実際の leaky_relu 実装差分固有の性能特性は計測していない（既知の制約。verify_composite.rs・README『シグナルは実測のみ』節参照）",
         ],
     });
-    let pretty = serde_json::to_string_pretty(&doc).expect("JSON シリアライズに失敗");
+    let mut pretty = serde_json::to_string_pretty(&doc).expect("JSON シリアライズに失敗");
+    // `.editorconfig` の `insert_final_newline` 慣行に合わせ、commit 対象
+    // となりうる出力（`docs/` 側）に末尾改行を付与する。
+    pretty.push('\n');
 
     let target_out_dir = repo_root().join("target/self-repair-revalidation/feature-addition");
     std::fs::create_dir_all(&target_out_dir).expect("target 出力ディレクトリ作成に失敗");

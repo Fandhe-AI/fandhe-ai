@@ -56,14 +56,26 @@ REQ-3 の v2 追加受け入れ基準（`docs/spec/04-requirements.md:96`）「�
   （組み込み既定ルール）の実行結果。
 - `api_broken`: baseline の既存公開関数シグネチャがすべて候補内に保存されて
   いるかの実測比較。
-- `gaming_suspect`: 候補がテストファイル（`tests/leaky_relu_acceptance.rs`・
-  baseline の `mod tests`）を一切変更しないことに基づく（本ハーネスでは
-  固定 `false`。候補生成そのものが「テストファイルへ触れない」よう構成
-  されているため、この判断はハーネス設計上の不変条件であり diff 解析結果
-  ではない）。
+- `gaming_suspect`: (a) 変更ファイルパスに `tests/` 配下が含まれるか、
+  (b) `TARGET_FILE`（`src/activations.rs`）の `git diff --unified=0` ハンクが
+  baseline の `#[cfg(test)] mod tests` 境界行以降と重なるか、のいずれかを
+  `changed_files`・diff ハンク行番号から実測して判定する（本ハーネスの候補
+  生成は「テストファイル・テストモジュールへ触れない」よう構成されているが、
+  `signal_source: "measured"` を名乗る以上ハードコードの `false` 固定では
+  なく、実行のたび diff から導出する。`measure_signals_for_candidate2`・
+  `diff_touches_boundary` 参照）。**既知の限界**: `mod tests` marker 直前
+  への隣接挿入（本ハーネスが実際に候補を挿入する位置そのもの）は境界内と
+  判定しない。既存テスト内容を一切変えず `mod tests` の直前へ新規
+  `#[cfg(test)]` ブロックを丸ごと追加するような候補は、本判定では検知
+  できない（`diff_touches_boundary` doc 参照）。
 - ベンチ: `SelfRepairBenchGate::run`（5 回計測）→
   `guardrail::median_gate::bench_signal_from_measurements` で
-  `guardrail::BenchSignal::Measured` へ変換。
+  `guardrail::BenchSignal::Measured` へ変換。**既知の制約**: baseline・
+  candidate 双方に同一の合成ワークロード（`leaky_relu_like_workload`。
+  `verify_composite.rs` 参照）を渡しており、実際の `leaky_relu` 実装差分の
+  性能特性そのものは計測していない（真の劣化率は構造的に 0% 近傍になる）。
+  `bench_median_pct` は「ベンチゲートの実行経路が実測で機能すること」の
+  実証であり、候補実装固有の性能劣化検出ではない点に留意する。
 
 未計測値を fail-open な既定値で埋めていない（`.claude/rules/security.md` A08）。
 
@@ -99,3 +111,10 @@ SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1 \
 - `crates/self-repair/Cargo.toml` は本イシューでは変更していない（並行実装
   中のイシュー #141〈TASK-3.3b〉との編集衝突回避。本テストは
   `verify_bench`／`guardrail` 経由の既存依存のみで完結する）。
+- `crates/self-repair/tests/fixtures/feature-addition-leaky-relu/baseline/
+  Cargo.lock`（フィクスチャ隔離用の空 `[workspace]` テーブルを持つ独立
+  crate。`crates/guardrail/tests/fixtures/labeled-changes/baseline/` と同じ
+  隔離方針）はリポジトリルート外の `Cargo.lock` であり、`scripts/
+  check-forbidden-deps.sh` の依存禁止検査（ルート `Cargo.lock` のみが対象）
+  の走査範囲外にある。現状フィクスチャ側の依存は `tensor-core`／`autodiff`
+  への path 依存のみで禁止リスト該当なし。
