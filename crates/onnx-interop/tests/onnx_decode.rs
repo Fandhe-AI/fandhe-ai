@@ -646,6 +646,48 @@ fn duplicate_graph_input_name_is_rejected_not_silently_absorbed() {
 }
 
 #[test]
+fn duplicate_graph_output_name_is_rejected_not_silently_absorbed() {
+    // `GraphProto.output` に同名の ValueInfoProto が 2 件存在する（不正な
+    // ONNX モデル）。入力側（duplicate_graph_input_name_is_rejected_not_
+    // silently_absorbed）と対称の検査が無いと `Graph.outputs` に重複名が
+    // 無言で複写され、no-silent-skip 契約と矛盾する（Bugbot 指摘）。
+    let model = ModelProto {
+        ir_version: 8,
+        producer_name: "test".to_string(),
+        graph: Some(GraphProto {
+            node: vec![NodeProto {
+                input: vec!["x".to_string()],
+                output: vec!["y".to_string()],
+                name: "n1".to_string(),
+                op_type: "Identity".to_string(),
+                attribute: vec![],
+                domain: String::new(),
+            }],
+            name: "g".to_string(),
+            initializer: vec![],
+            input: vec![ValueInfoProto {
+                name: "x".to_string(),
+            }],
+            output: vec![
+                ValueInfoProto {
+                    name: "y".to_string(),
+                },
+                ValueInfoProto {
+                    name: "y".to_string(),
+                },
+            ],
+        }),
+    };
+    let err = build_graph(&model).expect_err("グラフ出力名の重複は拒否されるはず");
+    match err {
+        GraphError::DuplicateGraphOutputName { tensor_name } => {
+            assert_eq!(tensor_name, "y");
+        }
+        other => panic!("DuplicateGraphOutputName を期待したが {other:?}"),
+    }
+}
+
+#[test]
 fn graph_input_name_matching_initializer_name_is_accepted() {
     // グラフ入力名が initializer 名と重複するのは pre-IR-4 の合法パターン
     // （拒否対象は `g.input` 内部の重複のみ。レビュー指摘 #77 で明示された

@@ -71,6 +71,12 @@ pub enum GraphError {
     /// 属さない名前を宣言している（後段が「グラフは既に妥当である」前提で
     /// 実装できるようにするための検証。レビュー指摘）。
     UnknownGraphOutput { tensor_name: String },
+    /// `GraphProto.output` に同名の `ValueInfoProto` が複数含まれる。
+    /// `DuplicateInputName` と対称の検査（Bugbot 指摘）: `g.input` 側のみ重複を
+    /// 拒否し `g.output` 側を素通りさせると、不正な重複出力リストがそのまま
+    /// `Graph.outputs` へ複写され、本モジュールが謳う no-silent-skip 契約
+    /// （他の全名前衝突に適用している方針）と矛盾する。
+    DuplicateGraphOutputName { tensor_name: String },
 }
 
 impl fmt::Display for GraphError {
@@ -140,6 +146,9 @@ impl fmt::Display for GraphError {
                     f,
                     "GraphProto.output が未生成のテンソルを参照（tensor={tensor_name}）"
                 )
+            }
+            GraphError::DuplicateGraphOutputName { tensor_name } => {
+                write!(f, "グラフ出力名の重複（tensor={tensor_name}）")
             }
         }
     }
@@ -411,9 +420,19 @@ pub fn build_graph(model: &ModelProto) -> Result<Graph, GraphError> {
     // モジュール冒頭のドキュメントコメントが謳う「後段は『グラフは既に妥当で
     // ある』前提で実装できる」という契約が破れ、存在しないテンソル名の要求が
     // #78 のインタープリタまで漏れてしまう（レビュー指摘）。
+    // `g.output` 内部の重複のみを検出するための専用集合。`seen_inputs` と対称の
+    // 理由（Bugbot 指摘）: `known` には initializer・グラフ入力・ノード出力の
+    // 名前が既に入っており、`known.contains` だけでは重複検出ができないため
+    // 分離した集合で `g.output` 内部の重複のみを明示的に拒否する。
+    let mut seen_outputs: HashSet<&str> = HashSet::new();
     for output in &g.output {
         if !known.contains(&output.name) {
             return Err(GraphError::UnknownGraphOutput {
+                tensor_name: output.name.clone(),
+            });
+        }
+        if !seen_outputs.insert(output.name.as_str()) {
+            return Err(GraphError::DuplicateGraphOutputName {
                 tensor_name: output.name.clone(),
             });
         }
