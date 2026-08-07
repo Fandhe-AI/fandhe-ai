@@ -21,8 +21,26 @@ use tensor_core::{
 
 use crate::error::AutodiffError;
 use crate::eval;
-use crate::nn::loss::Reduction;
 use crate::tape::{NodeId, Op, Tape};
+
+/// `Var::mse_loss_with` の縮約種別（#190・TASK-9.1c 相当。親イシュー
+/// #189「損失関数（MSE・CrossEntropy）の実装」）。PyTorch
+/// `nn.MSELoss(reduction=...)` の `mean`/`sum` に対応する。
+///
+/// `#[non_exhaustive]` とする理由: 将来 `none`（要素ごと損失。PyTorch
+/// `reduction='none'` 相当）を追加しうるが、本イシューでは #190 実装
+/// 計画のスコープ外（out-of-scope-tracking.md 準拠でユーザー承認後に
+/// 別途追加）としたため、追加時に呼び出し側の非網羅的 `match` を破壊
+/// しないようにする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Reduction {
+    /// 全要素平均（`Σ(pred−target)² / n`）。`Var::mse_loss` の既定
+    /// （PyTorch `nn.MSELoss` の既定 `reduction='mean'` と一致）。
+    Mean,
+    /// 全要素総和（`Σ(pred−target)²`）。
+    Sum,
+}
 
 /// テープ上の 1 ノードを指す追跡対象値。値そのものではなく `NodeId` +
 /// テープへの共有参照を保持し、演算のたびにテープへ新しいノードを
@@ -152,14 +170,37 @@ impl<'t> Var<'t> {
         Ok(Var::from_raw(self.tape, id))
     }
 
-    /// 平均二乗誤差（`self` = 予測値、`target` = 正解値）。
+    /// 平均二乗誤差（`self` = 予測値、`target` = 正解値。全要素平均・
+    /// PyTorch `nn.MSELoss` の既定 `reduction='mean'` 相当）。
+    /// `mse_loss_with(target, Reduction::Mean)` への委譲（#190）。
+    /// 既存呼び出し元（`nn::activation` 系テスト・`tests/backward.rs`
+    /// 等）のシグネチャ・意味を変えないため本メソッドは維持する。
     pub fn mse_loss(&self, target: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
+        self.mse_loss_with(target, Reduction::Mean)
+    }
+
+    /// 平均二乗誤差（`self` = 予測値、`target` = 正解値）。`reduction`
+    /// で mean/sum の縮約種別を選べる（#190。親イシュー #189「損失関数
+    /// （MSE・CrossEntropy）の実装」）。`nn::loss::MseLoss`（`nn/loss.rs`）
+    /// はこのメソッドを呼ぶだけの薄いラッパー（REQ-9）。
+    pub fn mse_loss_with(
+        &self,
+        target: &Var<'t>,
+        reduction: Reduction,
+    ) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(target)?;
         let lhs_shape = self.value().shape().to_vec();
         let rhs_shape = target.value().shape().to_vec();
         require_same_shape(&lhs_shape, &rhs_shape)?;
-        let value = eval::mse_loss(&self.value(), &target.value());
-        let id = self.tape.push(Op::MseLoss(self.id, target.id), value);
+        let value = eval::mse_loss(&self.value(), &target.value(), reduction);
+        let id = self.tape.push(
+            Op::MseLoss {
+                pred: self.id,
+                target: target.id,
+                reduction,
+            },
+            value,
+        );
         Ok(Var::from_raw(self.tape, id))
     }
 

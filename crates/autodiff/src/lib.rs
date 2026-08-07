@@ -50,13 +50,20 @@
 //! 「互換レイヤ固有のロジックを持ち込まない」方針は `compat` 層本体を
 //! 指しており、`nn` モジュールには適用されない。
 //!
+//! #190（親 #189「損失関数（MSE・CrossEntropy）の実装」）で
+//! `Var::mse_loss_with`/[`Reduction`]（mean/sum 縮約）と
+//! `nn::loss::MseLoss`（薄いラッパー）を追加した。既存 `Var::mse_loss`
+//! は `mse_loss_with(target, Reduction::Mean)` への委譲に変更したが、
+//! シグネチャ・既定の意味（mean）は維持する（公開 API 非破壊）。
+//!
 //! #191（親イシュー #189）で CrossEntropy 損失（log-sum-exp 安定化・
 //! クラス次元指定）を追加した。`Var::cross_entropy_loss`（`var.rs`・
 //! `Op::CrossEntropyLoss`）は log-softmax → NLL を個別オペ合成せず
 //! `MseLoss` と同じ 1 個の融合オペとして実装し、VJP（`grad.rs`）は
 //! 解析形 `softmax(x) − onehot(t)` で閉じる。`nn::loss::
-//! CrossEntropyLoss` はその薄いラッパー。`nn::loss::Reduction`
-//! （`Mean`/`Sum`）は MSE の reduction 対応（#190）と共有されうる値。
+//! CrossEntropyLoss` はその薄いラッパー。`Reduction`（`Mean`/`Sum`）は
+//! #190 が `var.rs` に定義したものをそのまま再利用する（`nn::loss` 側に
+//! 重複定義は置かない）。
 
 mod backward;
 mod error;
@@ -69,4 +76,4 @@ mod var;
 pub use backward::Gradients;
 pub use error::AutodiffError;
 pub use tape::{NodeId, Tape, TapeId};
-pub use var::Var;
+pub use var::{Reduction, Var};

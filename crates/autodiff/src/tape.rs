@@ -79,7 +79,16 @@ pub(crate) enum Op {
         input: NodeId,
         dim: Option<usize>,
     },
-    MseLoss(NodeId, NodeId),
+    /// 平均二乗誤差。`reduction` は #190（TASK-9.1c 相当・`nn::loss`）で
+    /// mean/sum の両縮約に対応するため struct variant 化した
+    /// （旧 `MseLoss(NodeId, NodeId)` は mean 固定だった）。
+    /// `crate::var::Reduction` を再利用し、`grad.rs` の `vjp()` が
+    /// `pred`/`target` への勾配スケールを縮約種別ごとに分岐する。
+    MseLoss {
+        pred: NodeId,
+        target: NodeId,
+        reduction: crate::var::Reduction,
+    },
     /// CrossEntropy 損失（log-sum-exp 安定化・クラス次元指定。#191・
     /// 親イシュー #189）。log-softmax → NLL を個別オペ合成せず、
     /// `MseLoss` と同じく forward/backward を解析形で閉じられる
@@ -89,12 +98,14 @@ pub(crate) enum Op {
     /// `targets`（クラス添字）は非追跡データのため `Var`/`NodeId` を
     /// 持たず、`Op` payload に直接 `Tensor<i32>` を埋め込む（勾配は
     /// `logits` の 1 系統のみ定義され、`targets` 側には流れない。
-    /// `grad.rs::vjp` の `CrossEntropyLoss` 分岐参照）。
+    /// `grad.rs::vjp` の `CrossEntropyLoss` 分岐参照）。`reduction` は
+    /// `MseLoss` と同じ `crate::var::Reduction`（#190 定義）を再利用する
+    /// （`nn::loss` 側に重複定義は置かない）。
     CrossEntropyLoss {
         logits: NodeId,
         targets: Tensor<i32>,
         class_dim: usize,
-        reduction: crate::nn::loss::Reduction,
+        reduction: crate::var::Reduction,
     },
 }
 

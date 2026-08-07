@@ -11,9 +11,9 @@
 //! `compat` 層本体の話であり、本モジュールには適用されない。
 //!
 //! TASK-9.1a（#91）で第 1 分割として `Linear`（全結合層）を実装した。
-//! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。#191 で
-//! 損失関数（親イシュー #189）のうち CrossEntropy（[`loss`]）を追加
-//! した。MSE の reduction 対応（#190）・optimizer（#192）・
+//! TASK-9.1b（#92）で活性化関数（[`activation`]）を追加した。#190
+//! （親 #189）で MSE 損失（[`loss`]）を追加し、#191 で CrossEntropy
+//! 損失（同じく [`loss`]）を追加した。optimizer（#192）・
 //! `compat::Sequential`（#94）は後続イシューのスコープ。共通 `Module`
 //! trait の定義は本イシューでは行わない（`compat::Sequential` 設計時に
 //! 確定する）。
