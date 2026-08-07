@@ -36,10 +36,9 @@
 //!
 //! 注記: 本コミット時点では #129（`blindspot_g2_regression.rs`）は別ブランチ側
 //! で未マージのため、本ファイル内の `blindspot_g2_regression.rs` への参照
-//! （本節・「除外リスト match 実装との結合範囲についての注記」・「依存
-//! （追加なし）」各節、および `RawValue`・`parse_flat_toml` のドキュメン
-//! テーションコメント）は #129 マージ後に解決する想定である。参照先の不在
-//! はコンパイル・テスト結果に影響しない（コメント中の参照のみ）。
+//! （本節・「除外リスト match 実装との結合範囲についての注記」各節）は
+//! #129 マージ後に解決する想定である。参照先の不在はコンパイル・テスト
+//! 結果に影響しない（コメント中の参照のみ）。
 //!
 //! # 除外リスト match 実装との結合範囲についての注記
 //! `policy-exclusion.toml` の各ルール（パスパターン・変更種別等）から
@@ -58,20 +57,24 @@
 //! スコープ（`blindspot_g2_regression.rs` と同じ整理）。
 //!
 //! # 依存（追加なし）
-//! `meta.toml` の `expected_exclusion_rule_ids`（配列）は `guardrail::toml_lite`
-//! が非対応のため、`blindspot_g2_regression.rs`・
-//! `label_invariant_empty_exclusions.rs` と同一設計の std-only ミニパーサで
-//! パースする（共有ヘルパー化はせずファイル内完結。
-//! `.claude/rules/delegation-impl.md`「複数 Agent に同一ファイルを並行
-//! 編集させない」を踏まえた既存方針を踏襲）。`guardrail::eval::dataset`・
-//! `guardrail::decision`・`guardrail::config` は既存の `[dependencies]` 経由
-//! （lib クレートを直接呼ぶユニット結合テスト）で追加宣言不要。
+//! `meta.toml` の `expected_exclusion_rule_ids`（配列）は
+//! `guardrail::toml_lite::parse`（`TomlValue::StringArray`。TASK-4.3a・#115 で
+//! 配列対応済み）を直接呼んでパースする。`label_invariant_empty_exclusions.rs`・
+//! `labeled_changes_labels.rs` は `toml_lite` が配列非対応だった時期の設計を
+//! 残し std-only ミニパーサをファイル内に個別実装しているが、本ファイルは
+//! それを複製せず lib の公開 API を再利用する（既存 2 ファイルの整理は
+//! 並行イシューとの競合を避けるため本ファイルのスコープ外）。
+//! `guardrail::eval::dataset`・`guardrail::decision`・`guardrail::config` は
+//! 既存の `[dependencies]` 経由（lib クレートを直接呼ぶユニット結合テスト）で
+//! 追加宣言不要。
 //!
 //! # セキュリティ（A03。`.claude/rules/security.md`）
 //! `meta.toml` はリポジトリ内データだが外部フォーマットパースとして扱い、
 //! change_id は文字クラス検証済みの固定文字列リテラルのみを path join に
 //! 使う（ディレクトリ列挙は行わないため既存ファイル群の
-//! `is_valid_change_id` は不要）。64 KiB サイズ上限で DoS 的入力を拒否する。
+//! `is_valid_change_id` は不要）。64 KiB サイズ上限
+//! （`guardrail::toml_lite::MAX_INPUT_BYTES`）は `toml_lite::parse` 内で
+//! 検査され DoS 的入力を拒否する。
 //!
 //! # 整合性（A08。`.claude/rules/security.md`）
 //! ガードレール閾値・除外リストルール・テスト許容誤差は一切変更しない
@@ -85,9 +88,7 @@ use std::path::{Path, PathBuf};
 use guardrail::config::{PresetName, Thresholds};
 use guardrail::decision::{DecisionInput, Verdict, decide};
 use guardrail::eval::dataset;
-
-/// `meta.toml` の外部入力サイズ上限（`label_invariant_*.rs` と同一値）。
-const MAX_META_BYTES: usize = 64 * 1024;
+use guardrail::toml_lite::{self, TomlValue};
 
 /// 検証対象の change_id（G5 固定。本ファイルのスコープは G5 単体）。
 const CHANGE_ID: &str = "G5-test-only-loosen";
@@ -97,92 +98,30 @@ fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/labeled-changes")
 }
 
-/// `meta.toml` 限定サブセットのパース結果 1 値
-/// （`blindspot_g2_regression.rs::RawValue` と同型）。
-#[derive(Debug, Clone, PartialEq)]
-enum RawValue {
-    Str(String),
-    Bool(bool),
-    Array(Vec<String>),
+/// `meta.toml`（テーブルヘッダなしのフラットな `key = value`）を
+/// `guardrail::toml_lite::parse` でパースし、ルートテーブル（キー `""`）を
+/// 返す。`toml_lite` 自体が 64 KiB 上限検査・`#` 行コメント無視・重複キー
+/// 拒否を行うため本ファイルでは再実装しない。
+fn parse_meta_root(path: &Path, input: &str) -> BTreeMap<String, TomlValue> {
+    let doc = toml_lite::parse(input)
+        .unwrap_or_else(|e| panic!("{path:?} のパースに失敗（不正な meta.toml 構文）: {e}"));
+    doc.get("")
+        .unwrap_or_else(|| panic!("{path:?}: ルートテーブルが存在しない"))
+        .clone()
 }
 
-/// `meta.toml` 限定サブセット（フラットな `key = value`＋文字列配列＋
-/// `#` 行コメント）のミニパーサ。対応文法・非対応理由は
-/// `blindspot_g2_regression.rs::parse_flat_toml` と同一。
-fn parse_flat_toml(input: &str) -> Result<BTreeMap<String, RawValue>, String> {
-    if input.len() > MAX_META_BYTES {
-        return Err(format!(
-            "input exceeds {MAX_META_BYTES} byte limit ({} bytes)",
-            input.len()
-        ));
-    }
-
-    let mut map = BTreeMap::new();
-    for (lineno, raw_line) in input.lines().enumerate() {
-        let line_number = lineno + 1;
-        let trimmed = raw_line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let (key, value_str) = trimmed
-            .split_once('=')
-            .ok_or_else(|| format!("line {line_number}: expected 'key = value'"))?;
-        let key = key.trim().to_string();
-        let value_str = value_str.trim();
-        if key.is_empty() {
-            return Err(format!("line {line_number}: empty key"));
-        }
-        if map.contains_key(&key) {
-            return Err(format!("line {line_number}: duplicate key '{key}'"));
-        }
-
-        let value = parse_toml_value(value_str)
-            .ok_or_else(|| format!("line {line_number}: unsupported value '{value_str}'"))?;
-        map.insert(key, value);
-    }
-    Ok(map)
-}
-
-fn parse_toml_value(s: &str) -> Option<RawValue> {
-    if let Some(inner) = s.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-        return Some(RawValue::Str(inner.to_string()));
-    }
-    match s {
-        "true" => return Some(RawValue::Bool(true)),
-        "false" => return Some(RawValue::Bool(false)),
-        _ => {}
-    }
-    if let Some(inner) = s.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-        let inner = inner.trim();
-        if inner.is_empty() {
-            return Some(RawValue::Array(Vec::new()));
-        }
-        let mut items = Vec::new();
-        for part in inner.split(',') {
-            let item = part
-                .trim()
-                .strip_prefix('"')
-                .and_then(|r| r.strip_suffix('"'))?;
-            items.push(item.to_string());
-        }
-        return Some(RawValue::Array(items));
-    }
-    None
-}
-
-fn expect_array(map: &BTreeMap<String, RawValue>, key: &str, id: &str) -> Vec<String> {
+fn expect_array(map: &BTreeMap<String, TomlValue>, key: &str, id: &str) -> Vec<String> {
     match map.get(key) {
-        Some(RawValue::Array(a)) => a.clone(),
+        Some(TomlValue::StringArray(a)) => a.clone(),
         other => {
             panic!("change_id '{id}': フィールド '{key}' は文字列配列である想定だが {other:?}")
         }
     }
 }
 
-fn expect_str(map: &BTreeMap<String, RawValue>, key: &str, id: &str) -> String {
+fn expect_str(map: &BTreeMap<String, TomlValue>, key: &str, id: &str) -> String {
     match map.get(key) {
-        Some(RawValue::Str(s)) => s.clone(),
+        Some(TomlValue::String(s)) => s.clone(),
         other => panic!("change_id '{id}': フィールド '{key}' は文字列である想定だが {other:?}"),
     }
 }
@@ -217,8 +156,7 @@ fn load_g5_exclusion_labels() -> G5ExclusionLabels {
         .join("meta.toml");
     let text =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?} の読み取りに失敗: {e}"));
-    let raw = parse_flat_toml(&text)
-        .unwrap_or_else(|e| panic!("{path:?} のパースに失敗（不正な meta.toml 構文）: {e}"));
+    let raw = parse_meta_root(&path, &text);
     let expected_exclusion_rule_ids = expect_array(&raw, "expected_exclusion_rule_ids", CHANGE_ID);
     let expected_verdict_after_exclusions = verdict_id_to_verdict(&expect_str(
         &raw,
