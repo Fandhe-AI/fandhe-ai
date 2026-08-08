@@ -133,10 +133,11 @@ bench の 4 ゲートを実行する（実 workspace 全体は対象外。実行
 以下は本イシュー（#141）のスコープ外として記録し、後続イシューで追跡する。
 
 - **統合記録の棚卸し**（`docs/self-repair-revalidation/README.md` 充足マトリクス・
-  `completion-judgment.md`）: #143／#144 のスコープとして本 PR では触れない。
+  `completion-judgment.md`）: #143（本 PR）で反映済み。
 - **完走可否の人間評価**: #144（本 README・`loop-report.json` を判定基準に
   照らして評価する）。
-- **実 workspace 全体を対象にした検証**: TASK-3.3 系の別スコープ（3 節参照）。
+- **実 workspace 全体を対象にした検証**: #139（TASK-3.3 本体）の別スコープ
+  （3 節参照）。
 
 ## 7. 再現方法
 

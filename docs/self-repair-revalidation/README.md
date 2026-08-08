@@ -110,7 +110,7 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 | `self-repair run`/`verify-log` CLI バイナリの実装 | **解消済み**（PR #356・#361）。`docs/guardrail-self-repair-cli.md` §3 が正式仕様 |
 | 候補 diff に対するベンチ劣化率の直接実測・真の 4 ゲート合成の `src/` 本体への昇格 | **解消済み**（#137・PR #355。`RepairCompositeGate` が両種別で候補 diff 直接ベンチを実施） |
 | 外部アンカー運用（末尾切り詰め対策）の自動化実装 | 未起票のまま（`docs/self-repair-log-format.md` 7 節が運用指針のみを文書化。自動化が必要と判断された場合は別途 Issue 化） |
-| 実 workspace 全体を対象にした検証 | TASK-3.3 系の別スコープ。検証対象は `crates/autodiff` 単体クレート（実行時間の理由。`bug-fix/README.md` §3 と同一スコーピング判断） |
+| 実 workspace 全体を対象にした検証 | #139（TASK-3.3 本体）の別スコープ。検証対象は `crates/autodiff` 単体クレート（実行時間の理由。`bug-fix/README.md` §3 と同一スコーピング判断） |
 | 完走可否の人間評価 | #144（TASK-3.3e）。評価・判定案は [`completion-judgment.md`](./completion-judgment.md) に記録した |
 
 ## 6. #144（人間評価）向けの評価導線
