@@ -56,16 +56,20 @@
 //!
 //! - probe への引数は許可リスト方式（[`StartupBackend::parse`]）で検証し、
 //!   `Command` の引数配列で子プロセスを起動する（シェル経由の文字列展開を行わない。A03）。
-//! - probe 標準出力は `Command::output` で読み取った後、サイズ上限
-//!   （[`PROBE_STDOUT_LIMIT_BYTES`]）を検査してから `serde_json` により型付きパースし、
-//!   [`StartupReport::validate`] / [`ProbeReport::validate`] のスキーマ検証を経ずに
-//!   生値へアクセスできる経路は設けない（A03・A08）。
+//! - probe 標準出力・標準エラー出力は `Command::spawn` 後に上限付きストリーミング読み取り
+//!   （[`PROBE_STDOUT_LIMIT_BYTES`]／[`PROBE_STDERR_LIMIT_BYTES`]）を行い、超過を検知した
+//!   時点で子プロセスを kill・reap してから拒否する（`Command::output` による全量バッファ
+//!   後の事後チェックでは、上限チェックが効く前に異常肥大化した出力でメモリ枯渇しうるため
+//!   採用しない。PR #360 codex-review 指摘 P1）。上限内に収まった標準出力のみ `serde_json`
+//!   により型付きパースし、[`StartupReport::validate`] / [`ProbeReport::validate`] の
+//!   スキーマ検証を経ずに生値へアクセスできる経路は設けない（A03・A08）。
 //! - 一時キャッシュディレクトリは一意名で [`std::fs::create_dir`]（既存なら失敗）し、
 //!   予測可能パスの事前作成・シンボリックリンク差し替えによる書き込み先誘導を排除する（A01）。
 
 use crate::stats::{self, BenchError as StatsError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,13 +88,20 @@ pub const DEFAULT_STARTUP_TRIALS: usize = 5;
 
 /// probe 子プロセス標準出力の許容上限（バイト）。
 ///
-/// [`run_probe_once`] は `Command::output` で標準出力を全量バッファしたうえで
-/// この上限と比較し、超過時は [`StartupError::ProbeOutputTooLarge`] として拒否する
-/// （読み取り自体を上限で打ち切るストリーミング実装ではない）。probe は同一ビルドの
-/// 第一者バイナリのため、読み取り時点でのメモリ膨張攻撃は現実的な脅威ではなく、
-/// 異常終了・想定外出力（無限ループ等の実装バグ）時の異常データを弾く
-/// fail-closed な検証として上限を設ける（`.claude/rules/security.md` A03）。
+/// [`run_probe_once`] は `Command::spawn` 後に [`read_capped`] で標準出力を
+/// この上限＋1 チャンク分までしか読み取らず、超過を検知した時点で子プロセスを
+/// kill・reap してから [`StartupError::ProbeOutputTooLarge`] を返す（全量バッファ後に
+/// 上限チェックする `Command::output` 方式は、異常肥大化した出力に対しチェックが効く前に
+/// メモリ枯渇しうるため採用しない。PR #360 codex-review 指摘 P1）。probe は同一ビルドの
+/// 第一者バイナリのため通常は超過しないが、異常終了・想定外出力（無限ループ等の実装バグや
+/// `probe_path` 差し替え）時の異常データを打ち切る fail-closed な検証として上限を設ける
+/// （`.claude/rules/security.md` A03）。
 const PROBE_STDOUT_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
+
+/// probe 子プロセス標準エラー出力の許容上限（バイト）。[`PROBE_STDOUT_LIMIT_BYTES`] と
+/// 同じ理由・同じ [`read_capped`] 経路で適用する（旧実装は stderr に上限がなく、
+/// 異常終了時の `ProbeExitFailure` 生成経路がメモリ膨張に無防備だった。PR #360 指摘 P1）。
+const PROBE_STDERR_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
 
 /// コールド／ウォームの試行間で使う一意なディレクトリ名を採番するカウンタ。
 /// プロセス内で複数フェーズ・複数試行を実行しても衝突しないよう、
@@ -525,6 +536,30 @@ fn create_scratch_dir(label: &str) -> Result<PathBuf, StartupError> {
     Ok(leaf)
 }
 
+/// 読み取りストリームを `limit` バイトを超えるまでチャンク単位で読み取る。
+///
+/// [`run_probe_once`] が probe 子プロセスの stdout／stderr パイプに用いる。
+/// `Command::output` のように全量をバッファしてから上限検査する方式だと、
+/// 異常肥大化した出力に対してチェックが効く前にメモリ枯渇しうる（PR #360
+/// codex-review 指摘 P1）。本関数は読み取りループ中に `limit` 超過を検知した
+/// 時点（最大でも 1 チャンク分の超過）で打ち切り、`(読み取り済みバイト列, 超過フラグ)`
+/// を返す。呼び出し側は超過フラグが立った場合、破棄前提のバッファとして扱い、
+/// 子プロセスを kill・reap する。
+fn read_capped<R: Read>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut buf = Vec::with_capacity(limit.min(64 * 1024));
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            return Ok((buf, false));
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > limit {
+            return Ok((buf, true));
+        }
+    }
+}
+
 /// probe を 1 回起動し、外部計測（wall time）と内部計測（[`ProbeReport`]）を得る。
 ///
 /// `cache_dir`: `Some` の場合は子プロセスの `CUDA_CACHE_PATH` にそのディレクトリを設定する
@@ -534,6 +569,12 @@ fn create_scratch_dir(label: &str) -> Result<PathBuf, StartupError> {
 ///
 /// 環境変数の設定は `Command::env`/`env_remove` により**子プロセスのみ**に適用され、
 /// 本ハーネス（親プロセス）・共有環境は変更しない（`.claude/rules/security.md` A08）。
+///
+/// stdout／stderr は `spawn` 後に別スレッドで [`read_capped`] を用い上限付きに読み取る
+/// （2 ストリームを同一スレッドで順に `read_to_end` すると、子プロセスが埋めた側の
+/// パイプバッファが詰まりデッドロックしうるため並行読み取りが必須）。いずれかが上限を
+/// 超過した場合は全量読み切る前に子プロセスを kill・reap し、
+/// [`StartupError::ProbeOutputTooLarge`] を返す。
 fn run_probe_once(
     config: &StartupConfig,
     cache_dir: Option<&Path>,
@@ -553,22 +594,63 @@ fn run_probe_once(
     }
 
     let start = Instant::now();
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| StartupError::Io(format!("probe 起動失敗（{:?}）: {e}", config.probe_path)))?;
+
+    // `Stdio::piped()` を指定しているため取得は必ず成功するが、型上は Option なので
+    // 万一失敗した場合は型付きエラーとして扱う（本番経路で unwrap/expect を使わない方針。
+    // `.claude/rules/coding-rust.md`）。
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| StartupError::Io("probe の stdout パイプ取得に失敗".to_string()))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| StartupError::Io("probe の stderr パイプ取得に失敗".to_string()))?;
+
+    let stdout_handle =
+        std::thread::spawn(move || read_capped(stdout_pipe, PROBE_STDOUT_LIMIT_BYTES));
+    let stderr_handle =
+        std::thread::spawn(move || read_capped(stderr_pipe, PROBE_STDERR_LIMIT_BYTES));
+
+    let (stdout_buf, stdout_exceeded) = stdout_handle
+        .join()
+        .map_err(|_| StartupError::Io("probe stdout 読み取りスレッドが panic した".to_string()))?
+        .map_err(|e| StartupError::Io(format!("probe stdout 読み取り失敗: {e}")))?;
+    let (stderr_buf, stderr_exceeded) = stderr_handle
+        .join()
+        .map_err(|_| StartupError::Io("probe stderr 読み取りスレッドが panic した".to_string()))?
+        .map_err(|e| StartupError::Io(format!("probe stderr 読み取り失敗: {e}")))?;
+
+    if stdout_exceeded || stderr_exceeded {
+        // 上限超過を検知した時点で、残りの出力を読み切る前に子プロセスを終了・回収する
+        // （kill/wait 自体の失敗はすでに異常系のため握りつぶすが、ゾンビプロセス化を
+        // 避けるため wait は必ず試みる）。
+        let _ = child.kill();
+        let _ = child.wait();
+        let overflowed_len = if stdout_exceeded {
+            stdout_buf.len()
+        } else {
+            stderr_buf.len()
+        };
+        return Err(StartupError::ProbeOutputTooLarge(overflowed_len));
+    }
+
+    let status = child
+        .wait()
+        .map_err(|e| StartupError::Io(format!("probe 待機失敗（{:?}）: {e}", config.probe_path)))?;
     let wall_secs = start.elapsed().as_secs_f64();
 
-    if !output.status.success() {
+    if !status.success() {
         return Err(StartupError::ProbeExitFailure {
-            status: output.status.to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: status.to_string(),
+            stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
         });
     }
-    if output.stdout.len() > PROBE_STDOUT_LIMIT_BYTES {
-        return Err(StartupError::ProbeOutputTooLarge(output.stdout.len()));
-    }
 
-    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    let stdout_text = String::from_utf8_lossy(&stdout_buf);
     let probe_report: ProbeReport = serde_json::from_str(stdout_text.trim())
         .map_err(|e| StartupError::ProbeJsonInvalid(e.to_string()))?;
     probe_report.validate(config.backend)?;
@@ -639,6 +721,57 @@ mod tests {
             device_init_secs: device_init,
             first_kernel_secs: first_kernel,
         }
+    }
+
+    /// PR #360 codex-review 指摘 P1 の回帰テスト: `read_capped` は上限以下の入力を
+    /// 全量そのまま読み取り、超過フラグを立てない。
+    #[test]
+    fn read_capped_returns_full_data_when_within_limit() {
+        let data = vec![b'a'; 100];
+        let (buf, exceeded) = read_capped(data.as_slice(), 1000).unwrap();
+        assert_eq!(buf, data);
+        assert!(!exceeded);
+    }
+
+    /// PR #360 codex-review 指摘 P1 の回帰テスト: 上限を超える入力に対しては、
+    /// 入力全量（無制限）を読み切る前に打ち切り、超過フラグを立てる
+    /// （`run_probe_once` はこのフラグを見て子プロセスを kill・reap する）。
+    /// 読み取り量が「上限 + 1 チャンク（64 KiB）」程度に収まることも検証し、
+    /// 全量バッファする旧実装（`Command::output`）との違いを固定する。
+    #[test]
+    fn read_capped_stops_shortly_after_limit_is_exceeded() {
+        let limit = 10;
+        let data = vec![b'x'; 10 * 1024 * 1024]; // 10 MiB。旧実装ならこの量が丸ごとバッファされていた。
+        let (buf, exceeded) = read_capped(data.as_slice(), limit).unwrap();
+        assert!(exceeded);
+        assert!(buf.len() > limit);
+        assert!(
+            buf.len() <= limit + 64 * 1024,
+            "read_capped は上限 + 1 チャンク程度で打ち切るべき（実際: {} バイト）",
+            buf.len()
+        );
+    }
+
+    /// probe が上限を超える標準出力を生成した場合、[`run_probe_once`] が
+    /// `StartupError::ProbeOutputTooLarge` を返し、子プロセスを kill・reap して
+    /// 全量読み切る前に処理を終えることを実機（`/bin/yes` 相当）で検証する。
+    /// `probe_path` 差し替え・実装バグによる無限出力を想定した回帰テスト
+    /// （PR #360 codex-review 指摘 P1）。
+    #[test]
+    fn run_probe_once_rejects_probe_that_emits_unbounded_stdout() {
+        // `yes` は POSIX 環境に共通して存在し、"y\n" を無限に出力し続けるため、
+        // 上限超過検知後に確実に kill しないとテストがハングする実測用の題材として使う。
+        let probe_path = PathBuf::from("/usr/bin/yes");
+        if !probe_path.exists() {
+            eprintln!("skip: /usr/bin/yes が存在しない環境のためスキップ");
+            return;
+        }
+        let config = StartupConfig::new(StartupBackend::Cpu, 1, probe_path).unwrap();
+        let result = run_probe_once(&config, None);
+        assert!(
+            matches!(result, Err(StartupError::ProbeOutputTooLarge(_))),
+            "unbounded stdout は ProbeOutputTooLarge で拒否されるべき: {result:?}"
+        );
     }
 
     #[test]
