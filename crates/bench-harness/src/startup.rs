@@ -913,6 +913,7 @@ pub fn run_phase(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn sample(wall: f64, device_init: f64, first_kernel: f64) -> StartupTrial {
         StartupTrial {
@@ -920,6 +921,35 @@ mod tests {
             device_init_secs: device_init,
             first_kernel_secs: first_kernel,
         }
+    }
+
+    /// `fork`（`Command::spawn`）を呼ぶテストを本テストバイナリ内で相互排他
+    /// する（PR #370 CI 実測: run 31241582991・PR #369/#368 の再試行方式
+    /// だけでは解消しなかった `ETXTBSY` 再燃への対応）。競合の本質は
+    /// 「あるスレッドが一時スクリプトを書き込み用に開いている最中に、別の
+    /// スレッドが `fork` すると、その fork 直後の子プロセスへ書き込み用 fd
+    /// が一時的に継承される（`execve` まで `CLOEXEC` が効かない）ため、
+    /// 元スレッドが自分のスクリプトを `execve` しようとした瞬間にカーネルが
+    /// `ETXTBSY` を返す」というプロセス内競合であり（下記
+    /// `run_probe_once_with_retry_on_text_file_busy` のコメント参照）、
+    /// 書き込みを伴わない `fork`（`run_probe_once_rejects_probe_that_emits_
+    /// unbounded_stdout` の `/usr/bin/yes` 実行等）が「fork する側」として
+    /// 競合に巻き込まれる経路も含むため、`fs::write` を伴うテストだけでなく
+    /// 本モジュール内で `fork` に到達する全テストをこの 1 個のロックで
+    /// 直列化する。`Mutex` 汚染（他テストの panic）が本ロックへ伝播し
+    /// 無関係なテストまで巻き込んで失敗させないよう、
+    /// `.lock().unwrap_or_else(|e| e.into_inner())` でポイズニングを
+    /// 無視する。
+    static FORK_SERIALIZE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// [`FORK_SERIALIZE_LOCK`] を確保した状態で `f` を実行する。ロック待ち
+    /// 時間をテスト側の `elapsed < 10s` 等の計測に含めないよう、
+    /// 呼び出し側は `Instant::now()` の**前**に本関数を呼ぶこと。
+    fn with_fork_serialized<R>(f: impl FnOnce() -> R) -> R {
+        let _guard = FORK_SERIALIZE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        f()
     }
 
     /// `run_probe_once_with_timeout` を呼び出し、直後の `Command::spawn` が
@@ -1000,19 +1030,21 @@ mod tests {
     /// （PR #360 codex-review 指摘 P1）。
     #[test]
     fn run_probe_once_rejects_probe_that_emits_unbounded_stdout() {
-        // `yes` は POSIX 環境に共通して存在し、"y\n" を無限に出力し続けるため、
-        // 上限超過検知後に確実に kill しないとテストがハングする実測用の題材として使う。
-        let probe_path = PathBuf::from("/usr/bin/yes");
-        if !probe_path.exists() {
-            eprintln!("skip: /usr/bin/yes が存在しない環境のためスキップ");
-            return;
-        }
-        let config = StartupConfig::new(StartupBackend::Cpu, 1, probe_path).unwrap();
-        let result = run_probe_once(&config, None);
-        assert!(
-            matches!(result, Err(StartupError::ProbeOutputTooLarge(_))),
-            "unbounded stdout は ProbeOutputTooLarge で拒否されるべき: {result:?}"
-        );
+        with_fork_serialized(|| {
+            // `yes` は POSIX 環境に共通して存在し、"y\n" を無限に出力し続けるため、
+            // 上限超過検知後に確実に kill しないとテストがハングする実測用の題材として使う。
+            let probe_path = PathBuf::from("/usr/bin/yes");
+            if !probe_path.exists() {
+                eprintln!("skip: /usr/bin/yes が存在しない環境のためスキップ");
+                return;
+            }
+            let config = StartupConfig::new(StartupBackend::Cpu, 1, probe_path).unwrap();
+            let result = run_probe_once(&config, None);
+            assert!(
+                matches!(result, Err(StartupError::ProbeOutputTooLarge(_))),
+                "unbounded stdout は ProbeOutputTooLarge で拒否されるべき: {result:?}"
+            );
+        });
     }
 
     /// probe が生存したまま無出力（stdout／stderr いずれも EOF に至らない）になった場合、
@@ -1022,45 +1054,47 @@ mod tests {
     /// 引数を無視して長時間 `sleep` するシェルスクリプトで模擬する。
     #[test]
     fn run_probe_once_returns_probe_timeout_when_process_hangs_without_output() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let script_path = std::env::temp_dir().join(format!(
-            "rust-ai-library-startup-timeout-test-{}-{nanos}.sh",
-            std::process::id()
-        ));
-        // 引数（バックエンド名）を一切参照せず、無出力のまま長時間生存し続ける probe を
-        // 模擬する（`run_probe_once` は probe に対し `config.backend.as_str()` を
-        // 単一引数として渡すが、本スクリプトはそれを無視する）。
-        std::fs::write(&script_path, "#!/bin/sh\nsleep 300\n")
-            .expect("テスト用スクリプトの書き込みに失敗");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path)
-                .expect("テスト用スクリプトの metadata 取得に失敗")
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)
-                .expect("テスト用スクリプトへの実行権限付与に失敗");
-        }
+        with_fork_serialized(|| {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let script_path = std::env::temp_dir().join(format!(
+                "rust-ai-library-startup-timeout-test-{}-{nanos}.sh",
+                std::process::id()
+            ));
+            // 引数（バックエンド名）を一切参照せず、無出力のまま長時間生存し続ける probe を
+            // 模擬する（`run_probe_once` は probe に対し `config.backend.as_str()` を
+            // 単一引数として渡すが、本スクリプトはそれを無視する）。
+            std::fs::write(&script_path, "#!/bin/sh\nsleep 300\n")
+                .expect("テスト用スクリプトの書き込みに失敗");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&script_path)
+                    .expect("テスト用スクリプトの metadata 取得に失敗")
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&script_path, perms)
+                    .expect("テスト用スクリプトへの実行権限付与に失敗");
+            }
 
-        let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
-        let started = Instant::now();
-        let result =
-            run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
-        let elapsed = started.elapsed();
+            let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
+            let started = Instant::now();
+            let result =
+                run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
+            let elapsed = started.elapsed();
 
-        let _ = std::fs::remove_file(&script_path);
+            let _ = std::fs::remove_file(&script_path);
 
-        assert!(
-            matches!(result, Err(StartupError::ProbeTimeout(_))),
-            "無出力のままハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "タイムアウト検知後は速やかに制御が返るべき（実際: {elapsed:?}）"
-        );
+            assert!(
+                matches!(result, Err(StartupError::ProbeTimeout(_))),
+                "無出力のままハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "タイムアウト検知後は速やかに制御が返るべき（実際: {elapsed:?}）"
+            );
+        });
     }
 
     /// probe が stdout／stderr の両方を EOF（クローズ）させた後、プロセス自体は
@@ -1073,49 +1107,51 @@ mod tests {
     /// 分離して再現する。
     #[test]
     fn run_probe_once_returns_probe_timeout_when_process_hangs_after_closing_streams() {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let script_path = std::env::temp_dir().join(format!(
-            "rust-ai-library-startup-timeout-close-streams-test-{}-{nanos}.sh",
-            std::process::id()
-        ));
-        // stdout/stderr へ何か出力した後、明示的に両 fd をクローズしてから長時間
-        // 生存し続ける（`sleep`）。読み取りスレッドは EOF を受け取りループを
-        // 正常に抜けるが、プロセス自体は `PROBE_TIMEOUT` 相当の期限を過ぎても
-        // 終了しない状態を再現する。
-        std::fs::write(
-            &script_path,
-            "#!/bin/sh\necho ok\necho err 1>&2\nexec 1>&- 2>&-\nsleep 300\n",
-        )
-        .expect("テスト用スクリプトの書き込みに失敗");
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path)
-                .expect("テスト用スクリプトの metadata 取得に失敗")
-                .permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms)
-                .expect("テスト用スクリプトへの実行権限付与に失敗");
-        }
+        with_fork_serialized(|| {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let script_path = std::env::temp_dir().join(format!(
+                "rust-ai-library-startup-timeout-close-streams-test-{}-{nanos}.sh",
+                std::process::id()
+            ));
+            // stdout/stderr へ何か出力した後、明示的に両 fd をクローズしてから長時間
+            // 生存し続ける（`sleep`）。読み取りスレッドは EOF を受け取りループを
+            // 正常に抜けるが、プロセス自体は `PROBE_TIMEOUT` 相当の期限を過ぎても
+            // 終了しない状態を再現する。
+            std::fs::write(
+                &script_path,
+                "#!/bin/sh\necho ok\necho err 1>&2\nexec 1>&- 2>&-\nsleep 300\n",
+            )
+            .expect("テスト用スクリプトの書き込みに失敗");
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&script_path)
+                    .expect("テスト用スクリプトの metadata 取得に失敗")
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&script_path, perms)
+                    .expect("テスト用スクリプトへの実行権限付与に失敗");
+            }
 
-        let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
-        let started = Instant::now();
-        let result =
-            run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
-        let elapsed = started.elapsed();
+            let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
+            let started = Instant::now();
+            let result =
+                run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
+            let elapsed = started.elapsed();
 
-        let _ = std::fs::remove_file(&script_path);
+            let _ = std::fs::remove_file(&script_path);
 
-        assert!(
-            matches!(result, Err(StartupError::ProbeTimeout(_))),
-            "stdout/stderr クローズ後にハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
-        );
-        assert!(
-            elapsed < Duration::from_secs(10),
-            "タイムアウト検知後は速やかに制御が返るべき（実際: {elapsed:?}）"
-        );
+            assert!(
+                matches!(result, Err(StartupError::ProbeTimeout(_))),
+                "stdout/stderr クローズ後にハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "タイムアウト検知後は速やかに制御が返るべき（実際: {elapsed:?}）"
+            );
+        });
     }
 
     #[test]

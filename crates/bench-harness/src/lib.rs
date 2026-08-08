@@ -94,6 +94,7 @@
 //! #180（TASK-14.3）のスコープであり、本イシューは実測記録の入力データ生成のみを行う。
 //! CLI は `src/bin/peak_memory_bench.rs`（`make peak-memory-bench` から起動。`Makefile` 参照）。
 
+pub mod alloc_tracker;
 pub mod peak_memory;
 mod protocol;
 mod report;

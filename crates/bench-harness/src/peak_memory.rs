@@ -39,6 +39,18 @@
 //! 区分外のため（`.claude/rules/deps-policy.md`）、本イシューでは実装せず
 //! `None` を返す（スコープ外。#180 への申し送り）。
 //!
+//! `PeakMemoryTrial::gemm_alloc_peak_bytes`（PR #370 codex-review 指摘 P1
+//! 対応。[`crate::alloc_tracker`]）は、上記「計測境界の外側」を CPU
+//! バックエンド限定で埋める: `std::alloc::GlobalAlloc` フックにより
+//! `BackendOps::gemm` 実行区間中の実ヒープ確保量（出力 `Vec<f32>`・BLIS
+//! パッキングバッファを含む）を実測する。`peak_bytes`（`MemoryOps` 経由・
+//! 理論値と一致する決定的な値）とは独立した指標であり、GEMM 実装の内部
+//! パラメータ（ブロッキング係数等）が変わればコード変更なしに値も追従して
+//! 変化する。CUDA（`cudarc` driver 確保）・Metal（`objc2-metal`
+//! `MTLBuffer`）は Rust の `GlobalAlloc` を経由しないため引き続き対象外
+//! （`None`。実 GPU デバイス確保量を測るバックエンド固有の代替手段は
+//! 別イシューのスコープとする。`.claude/rules/out-of-scope-tracking.md`）。
+//!
 //! # 計測手順（1 trial）
 //!
 //! 1. バックエンド入口（`CpuMemory::new()`／`CudaMemory::new(&CudaDevice)`／
@@ -47,7 +59,9 @@
 //! 2. `MemoryOps` 経由で代表ワーキングセットを確保する: `upload(A)`
 //!    （M×K f32）→ `upload(B)`（K×N f32）→ `alloc_zeroed(C)`（M×N f32）
 //! 3. ワーキングセット保持中に `BackendOps::gemm(A, B)` を実行する（所要
-//!    秒数を `gemm_secs` として記録する）
+//!    秒数を `gemm_secs` として記録する）。CPU バックエンドはこの区間の
+//!    直前に `alloc_tracker::reset_peak()` を呼び、直後に
+//!    `gemm_alloc_peak_bytes` を採取する
 //! 4. `peak_allocated_bytes()`（`peak_bytes`）を採取する
 //! 5. `upload`/`alloc_zeroed` で得た 3 バッファを drop し、
 //!    `allocated_bytes()`（`allocated_after_drop_bytes`）が 0 に戻ることを
@@ -295,6 +309,18 @@ pub struct PeakMemoryTrial {
     /// 外部参考値: `/proc/self/status` の `VmHWM`（Linux 限定。モジュール
     /// 冒頭「計測対象の粒度」参照）。取得不能・非対応 OS では `None`。
     pub vm_hwm_bytes: Option<u64>,
+    /// `BackendOps::gemm(A, B)` 実行区間中に実際にヒープ確保された
+    /// バイト数の純増分ピーク（[`crate::alloc_tracker`] 経由。PR #370
+    /// codex-review 指摘 P1 対応）。`peak_bytes` が `MemoryOps` 経由の
+    /// 代表ワーキングセット（A+B+C の理論値と一致する決定的な値）しか
+    /// 計上しないのに対し、本フィールドは GEMM 実装が実際に確保する
+    /// 出力バッファ・パッキングバッファ等を反映する（モジュール冒頭
+    /// 「計測対象の粒度」参照）。CPU バックエンドのみ `Some`
+    /// （`TrackingAllocator` が `System` の代わりにプロセスの
+    /// `#[global_allocator]` として有効化されている場合に限る）。
+    /// CUDA／Metal はデバイス確保が Rust の `GlobalAlloc` を経由しないため
+    /// 常に `None`（`crate::alloc_tracker` モジュール冒頭「適用範囲」参照）。
+    pub gemm_alloc_peak_bytes: Option<u64>,
 }
 
 /// バイト数の分位点（中央値・Q1・Q3）。`startup::QuartileSecs` と同型の
@@ -577,9 +603,14 @@ fn run_cpu_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, Pea
     let buf_c = mem.alloc_zeroed(&[size, size])?;
 
     let ops = backend_cpu::CpuBackendOps::new();
+    // `gemm` 実行区間だけを `alloc_tracker` の計測窓に切り出す（`upload`／
+    // `alloc_zeroed` 自体のホスト側確保を GEMM 内部確保と混同しないため。
+    // PR #370 codex-review 指摘 P1 対応）。
+    crate::alloc_tracker::reset_peak();
     let start = Instant::now();
     ops.gemm(&a, &b)?;
     let gemm_secs = start.elapsed().as_secs_f64();
+    let gemm_alloc_peak_bytes = crate::alloc_tracker::peak_since_reset_bytes();
 
     let peak_bytes = mem.peak_allocated_bytes();
     drop(buf_a);
@@ -592,6 +623,7 @@ fn run_cpu_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, Pea
         allocated_after_drop_bytes,
         gemm_secs,
         vm_hwm_bytes: read_vm_hwm_bytes(),
+        gemm_alloc_peak_bytes,
     })
 }
 
@@ -632,6 +664,10 @@ fn run_cuda_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, Pe
         allocated_after_drop_bytes,
         gemm_secs,
         vm_hwm_bytes: read_vm_hwm_bytes(),
+        // CUDA driver 確保（`cudarc`）は Rust の `GlobalAlloc` を経由しない
+        // ため `alloc_tracker` では観測できない（`crate::alloc_tracker`
+        // モジュール冒頭「適用範囲」参照。PR #370 codex-review 指摘 P1）。
+        gemm_alloc_peak_bytes: None,
     })
 }
 
@@ -667,6 +703,11 @@ fn run_metal_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, P
         allocated_after_drop_bytes,
         gemm_secs,
         vm_hwm_bytes: read_vm_hwm_bytes(),
+        // Metal（`objc2-metal` の `MTLBuffer`）確保は Rust の `GlobalAlloc`
+        // を経由しないため `alloc_tracker` では観測できない
+        // （`crate::alloc_tracker` モジュール冒頭「適用範囲」参照。
+        // PR #370 codex-review 指摘 P1）。
+        gemm_alloc_peak_bytes: None,
     })
 }
 
@@ -786,6 +827,37 @@ mod tests {
                 "drop 後は allocated_bytes が 0 に戻るはず（リーク検査）"
             );
             assert!(trial.gemm_secs.is_finite() && trial.gemm_secs >= 0.0);
+        }
+    }
+
+    /// PR #370 codex-review 指摘 P1 の回帰テスト: `gemm_alloc_peak_bytes`
+    /// が `BackendOps::gemm` の実ヒープ確保（出力 `Vec<f32>`・BLIS
+    /// パッキングバッファ）を実測しており、`MemoryOps` 経由の理論値
+    /// （`peak_bytes`。上のテストが検証する「決定的に A+B+C ちょうど」の値）
+    /// から独立していることを確認する。少なくとも GEMM の出力バッファ
+    /// （`size × size × 4` バイト）分は実測されるはず（`crates/backend-cpu/
+    /// src/ops.rs` の `vec![0.0f32; m * n]` 参照）。この下限は GEMM の
+    /// 内部実装（ブロッキング係数等）を知らなくても導ける唯一の性質であり、
+    /// 実測値そのもの（パッキングバッファ込みの正確な値）は本テストからは
+    /// 予測できない・GEMM の実装詳細に依存する（`alloc_tracker` モジュール
+    /// 冒頭参照）。
+    #[test]
+    fn run_peak_memory_cpu_gemm_alloc_peak_bytes_reflects_real_gemm_allocation() {
+        let size = 256;
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, size, 2).unwrap();
+        let report = run_peak_memory(&config).unwrap();
+
+        let output_buffer_bytes = (size * size * std::mem::size_of::<f32>()) as u64;
+        for trial in &report.samples {
+            let observed = trial.gemm_alloc_peak_bytes.expect(
+                "CPU バックエンドは TrackingAllocator が本テストバイナリの \
+                 #[global_allocator] のため Some のはず",
+            );
+            assert!(
+                observed >= output_buffer_bytes,
+                "gemm_alloc_peak_bytes は少なくとも出力バッファ分（{output_buffer_bytes} \
+                 バイト）は観測されるはず（実測: {observed}）"
+            );
         }
     }
 

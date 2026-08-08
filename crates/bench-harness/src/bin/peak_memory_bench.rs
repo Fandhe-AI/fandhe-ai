@@ -11,12 +11,24 @@
 //! 引数パースは外部 CLI クレートを追加せず `std` のみで実装する（許容依存 8 区分外の
 //! 新規追加を避けるため。`.claude/rules/deps-policy.md`。`startup_bench.rs` と同型の方針）。
 
+use bench_harness::alloc_tracker::TrackingAllocator;
 use bench_harness::peak_memory::{
     DEFAULT_GEMM_SIZE, DEFAULT_PEAK_MEMORY_TRIALS, PeakMemoryBackend, PeakMemoryConfig,
     run_peak_memory,
 };
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+/// 本バイナリ限定で `TrackingAllocator` をプロセスの `#[global_allocator]`
+/// として有効化する（`bench_harness::alloc_tracker` モジュール冒頭
+/// 「適用範囲」参照。PR #370 codex-review 指摘 P1 対応）。`peak_memory::
+/// run_cpu_trial` が呼ぶ `alloc_tracker::reset_peak`／
+/// `peak_since_reset_bytes` は、実際にこの宣言があるバイナリでのみ
+/// `Some` を返す。ライブラリクレート側（`bench_harness::lib.rs`）では
+/// 宣言しないため、本クレートを `dev-dependencies` として参照する他クレート
+/// のテストバイナリには影響しない。
+#[global_allocator]
+static GLOBAL_ALLOCATOR: TrackingAllocator = TrackingAllocator;
 
 #[derive(Debug)]
 struct Args {
