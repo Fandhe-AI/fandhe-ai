@@ -1,7 +1,20 @@
-# cargo-deny 設定。CI の deny ジョブ（.github/workflows/ci.yml `deny:`）・
-# `make deny`（Makefile:107-112）が本ファイルの存在で自動有効化される
-# （.claude/rules/ci.md・detect ステップ）。実測根拠は docs/license-matrix.md
-# （実測日 2026-08-06・Cargo.lock SHA 63748a677a0800257c8175b8fb8bbf187669cbe1）。
+# cargo-deny 設定。CI の deny ジョブ（.github/workflows/ci.yml の rust-ci ジョブ →
+# Fandhe-AI/actions rust-base-ci の deny ジョブ）・`make deny`（Makefile）が本ファイルの
+# 存在で自動有効化され、`cargo deny --locked check advisories bans licenses sources` として
+# 常時実行される（advisories / bans は #353 で追加。licenses の実測根拠は
+# docs/license-matrix.md〈実測日 2026-08-06・Cargo.lock SHA
+# 63748a677a0800257c8175b8fb8bbf187669cbe1〉）。
+
+[advisories]
+# RUSTSEC アドバイザリ監査（vulnerability / unmaintained / unsound / yanked。#353）。
+# 従来 advisories は CI のチェック対象外だったが、ローカル実測
+# （`cargo deny --locked check advisories`）で違反 0 件を確認したうえで有効化した。
+# アドバイザリ DB の取得（$CARGO_HOME/advisory-dbs/ への clone・以降は fetch 更新のみ）は
+# cargo-deny の check 実行に内包される。
+version = 2
+# ignore へアドバイザリ ID を追加する場合は、理由・解消予定（追跡 Issue 番号）を
+# コメント付きで記録し、レビューを必須とする。現時点で ignore が必要な
+# アドバイザリは存在しない。
 
 [licenses]
 version = 2
@@ -47,6 +60,26 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 
 [bans]
+# 重複バージョン・ワイルドカード依存の監査（#353。CI 常時実行は ci.yml の rust-ci
+# ジョブの `deny-checks` 入力に `bans` を明示指定することで有効化）。
 # 依存禁止リスト（.claude/rules/deps-policy.md）は Makefile の deps-forbidden
-# ターゲットで別途 Cargo.lock を機械検査するため、本ファイルでは重複させない。
-multiple-versions = "allow"
+# ターゲットで別途 Cargo.lock を機械検査するため、本ファイルでは重複させない
+# （`deny = [...]` の明示リストは現時点で持たない。追加する場合は
+# `deny = [{ crate = "<name>", reason = "..." }]` 形式で理由を記録し、レビューを必須とする）。
+
+# 同一クレートの複数バージョン混入の検出。許容依存 8 区分を `=x.y.z` 完全固定する
+# 本リポジトリの deps-policy.md 方針では重複は原則発生しない前提だが、推移的依存
+# 経由の重複は依存元側の追随を待つほかなく "deny" ではノイズが上回るため、
+# local-llm-server（PR #571）と同じく警告に留めて CI ログで増加傾向を観測する
+# （#353 実測時点の重複は 0 件）。
+multiple-versions = "warn"
+
+# バージョン要求 `*` の依存宣言を拒否する（バージョン無指定はサプライチェーン上
+# 任意の最新版を受け入れる宣言であり、許容依存 8 区分の `=x.y.z` 完全固定方針
+# （deps-policy.md）に反するため fail-closed で弾く）。
+wildcards = "deny"
+# ワークスペース内 9 クレートは全て `publish = false`（workspace 継承）の private
+# クレートで、相互参照はバージョン無しの path 依存（cargo 上は `*` 扱い）のため、
+# private クレートの path 依存に限り wildcards の対象外とする（cargo-deny の仕様上
+# publish 対象クレートの path 依存には適用されず、その場合は従来どおり deny される）。
+allow-wildcard-paths = true
