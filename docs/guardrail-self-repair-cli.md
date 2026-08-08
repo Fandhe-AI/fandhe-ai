@@ -294,7 +294,23 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 相当の検証を、v1 では持たなかった CLI エントリポイントとして新設する
 （`.claude/rules/security.md`「ループ試行ログは改竄検知可能な形式で記録し、
 取り込み判断の根拠を追跡可能にする」への対応。ログを事後監査する担当者が
-`cargo test` 経由でなく直接検証できる手段を提供する）。
+`cargo test` 経由でなく直接検証できる手段を提供する）。**実装済み**
+（イシュー #145 差し戻し分・完走判定基準 4。`crates/self-repair/src/main.rs`・
+`crates/self-repair/src/cli.rs`）。検証ロジック本体は既存の
+`crates/self-repair/src/logging.rs` の `verify_chain` の単一実装を CLI から
+呼ぶのみとし、二重実装・迂回経路を作らない（`.claude/rules/security.md` A08）。
+
+#### 終了コード（`verify-log`）
+
+3.5 節は `run` の 3 分岐契約（0/10/20/1）であり `verify-log` には verdict が
+ないため、guardrail の usage エラー区分（2.3 節）と整合する以下の契約を
+別途定める:
+
+| 値 | 意味 |
+|---|---|
+| `0` | チェーン整合（改竄なし） |
+| `1` | 検証不合格（`LogError::ChainViolation` = 改竄・欠落検知）および内部エラー（I/O・パース失敗）。fail-closed: 読めないログ・壊れたログも一律に非 0 とする |
+| `2` | usage エラー（`--log` 欠落・未知引数） |
 
 ### 3.3 ログ出力形式
 

@@ -76,6 +76,11 @@
 //!   [`logging::verify_chain`] を提供する（`.claude/rules/security.md`:
 //!   ループ試行ログは改竄検知可能な形式で記録し、取り込み判断の根拠を
 //!   追跡可能にする、という要求への対応。詳細は `docs/self-repair-log-format.md`）。
+//! - [`cli`][]: `self-repair` バイナリ（`src/main.rs`）向けの自作コマンドライン
+//!   引数パーサ（TASK-3.4 残作業・#145）。`verify-log` サブコマンドが
+//!   [`logging::verify_chain`] を CLI から結線し、監査担当者が `cargo test`
+//!   経由でなく直接ログを検証できるようにする（`docs/guardrail-self-repair-cli.md`
+//!   3.2 節。詳細は `cli` モジュール冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -94,13 +99,14 @@
 //! - `exec`（コマンド実行抽象）の `guardrail` 側への共通化（`guardrail check`
 //!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
 //!   （本イシュー〈#134〉の PR 本文に記録）
-//! - CLI バイナリ（`self-repair run`/`verify-log`。
-//!   `docs/guardrail-self-repair-cli.md` 3 節） → 後続タスク（既存イシューで
-//!   追跡済み）
+//! - CLI バイナリ `self-repair run`（`docs/guardrail-self-repair-cli.md`
+//!   3.1 節） → 後続タスク（既存イシューで追跡済み）。`verify-log`（3.2 節）は
+//!   [`cli`]／`src/main.rs` として本イシュー（#145 差し戻し分）で実装済み
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod bug_fix;
 pub mod candidate;
+pub mod cli;
 pub mod error;
 pub mod exec;
 pub mod feature_addition;
