@@ -103,14 +103,28 @@ pub(crate) enum FusionDecision {
 ///      - `dtype != F32` または `contiguous == false` を検出した時点で
 ///        走査全体を打ち切り [`FusionDecision::Fallback`] を返す
 ///        （設計書 §3.2 (e)・セグメント全体を非融合にする方針）。
-///      - セグメントへ追加する。現在のセグメントサイズが
-///        [`MAX_FUSED_CHAIN_LEN`] **未満**であれば、このノードの入力を
-///        `reachable` へ追加して走査を継続する（**上限に達した場合は
-///        追加しない**＝それ以上深いノードへは到達不能になり、後段の
-///        葉抽出で自動的に外部入力として扱われる。設計書 §3.2 (d)）。
+///      - 現在のセグメントサイズが [`MAX_FUSED_CHAIN_LEN`] **に達して
+///        いれば**、このノードはセグメントへ追加せず・入力も
+///        `reachable` へ展開しない（＝それ自身が打ち切り境界となり、
+///        後段の葉抽出で外部入力として扱われる。設計書 §3.2 (d)）。
+///        この判定は「`included` へ挿入する前」に行う。fan-in で同一
+///        ノードが複数経路から `reachable` に入りうるため、挿入後に
+///        上限を検査すると別経路から先に `reachable` 入りしていた
+///        ノードが上限到達後も処理され `included.len()` が上限を
+///        超過しうる（#162 レビュー指摘）。挿入前判定であれば
+///        `included.len()` は走査順・到達経路によらず常に
+///        [`MAX_FUSED_CHAIN_LEN`] 以下に収まる。
+///      - 上限未到達ならセグメントへ追加し、このノードの入力を
+///        `reachable` へ追加して走査を継続する。
 ///    - 融合境界（`Gemm`／`Sum`／`Max`）または `Input` なら、それ自体を
 ///      入力方向へは展開せず、そのノード ID を後段で葉として扱う
-///      （設計書 §3.2 (a)(b)）。
+///      （設計書 §3.2 (a)(b)）。ただしこの時点でも `dtype != F32` または
+///      `contiguous == false` を検出した時点で走査全体を打ち切り
+///      [`FusionDecision::Fallback`] を返す（`graph.rs` の
+///      `OperandShapeMismatch` 周辺コメントが明言する契約: broadcast
+///      view は `push` 時点では拒否せず `contiguous: false` として本
+///      関数の非融合フォールバック判定に委ねられる。境界ノードだから
+///      といって検証を素通りさせない）。
 /// 3. 走査完了後、セグメントに含まれるノードが 1 個でも `dtype`／
 ///    `contiguous` 違反で打ち切られていなければ、セグメントの各ノードが
 ///    参照する入力のうちセグメントに含まれないものを葉として集約する
@@ -151,7 +165,17 @@ pub(crate) fn detect_fusion(graph: &FusionGraph, root: FusionNodeId) -> FusionDe
         let node = graph.node(FusionNodeId(id));
         if !node.op.is_elementwise() {
             // 融合境界（Gemm/Sum/Max）または Input。ここでは展開せず、
-            // 葉抽出（後段）に委ねる。
+            // 葉抽出（後段）に委ねる。ただし葉として使われる以上、
+            // `graph.rs` が明言する「broadcast view は contiguous: false
+            // として非融合判定側〈本関数〉に委ねる」契約の受け手として
+            // ここで検証する（#162 レビュー指摘: 境界ノードの
+            // contiguous/dtype が未検証だった）。
+            if node.meta.dtype != DType::F32 {
+                return FusionDecision::Fallback(FallbackReason::UnsupportedDtype);
+            }
+            if !node.meta.contiguous {
+                return FusionDecision::Fallback(FallbackReason::NonContiguous);
+            }
             continue;
         }
         if node.meta.dtype != DType::F32 {
@@ -161,16 +185,21 @@ pub(crate) fn detect_fusion(graph: &FusionGraph, root: FusionNodeId) -> FusionDe
             return FusionDecision::Fallback(FallbackReason::NonContiguous);
         }
 
-        included.insert(id);
-        if included.len() < MAX_FUSED_CHAIN_LEN {
-            for input in node.op.inputs() {
-                reachable.insert(input.0);
-            }
+        // 上限判定は `included` へ挿入する**前**に行う。fan-in を含む
+        // DAG では同一ノードが複数経路から先に `reachable` へ入りうる
+        // ため、挿入後に上限を検査すると別経路由来のノードが上限到達後
+        // も処理されてしまい `included.len()` が `MAX_FUSED_CHAIN_LEN`
+        // を超過する（#162 レビュー指摘の反例: バランス木 fan-in）。
+        // 挿入前判定なら `included.len()` は到達経路・走査順によらず
+        // 常に上限以下に収まり、上限到達後のノードはそのまま外部入力
+        // （葉）として後段の葉抽出に委ねられる（設計書 §3.2 (d)）。
+        if included.len() >= MAX_FUSED_CHAIN_LEN {
+            continue;
         }
-        // 上限に達した場合はここで入力を reachable へ追加しない
-        // （= それらは後段の葉抽出でセグメント外部の入力として現れる。
-        // 設計書 §3.2 (d)「打ち切り位置より深いノードの出力を葉として
-        // 扱う」の実体）。
+        included.insert(id);
+        for input in node.op.inputs() {
+            reachable.insert(input.0);
+        }
     }
 
     if included.len() < MIN_FUSED_CHAIN_LEN {
@@ -276,12 +305,11 @@ mod tests {
         };
         assert_eq!(seg.nodes.len(), MAX_FUSED_CHAIN_LEN);
         // root から数えて 6 段（chain[1..=6]、末尾 6 要素）のみが
-        // セグメントに含まれ、打ち切り境界（chain[0]）の入力である
-        // 葉ノード x のみが外部入力として残る（chain[0] 自身はセグメント
-        // にもリーフにも含まれない = 実体化不要な中間ノードとして扱わ
-        // れず、単に走査対象外になる。これは「6 段ちょうど」を root 側
-        // から数える仕様の帰結であり、chain[0] の出力は誰からも参照され
-        // ないため実際には未使用ノードになる）。
+        // セグメントに含まれる。打ち切り境界である chain[0] は
+        // chain[1]（セグメントに含まれる）の入力として参照されるため
+        // 未使用ノードにはならず、セグメント外部の入力＝葉として
+        // 扱われる（これが「6 段ちょうど」を root 側から数える仕様の
+        // 帰結）。
         assert_eq!(&seg.nodes, &chain[1..]);
         assert_eq!(seg.leaves, vec![chain[0]]);
     }
@@ -329,6 +357,63 @@ mod tests {
         };
         assert_eq!(seg.nodes, vec![left, right, root]);
         assert_eq!(seg.leaves, vec![a, b, c, d]);
+    }
+
+    /// #162 レビュー指摘の反例: バランス木 fan-in で `MAX_FUSED_CHAIN_LEN`
+    /// が破られないことを検証する（`x=Input; n1..n4=Relu(x)×4;
+    /// n5=Add(n1,n2); n6=Add(n3,n4); n7=Add(n5,n6)=root`）。
+    ///
+    /// 降順走査では n7→n6→n5→n4→n3→n2 の時点で `included.len()==6`
+    /// （上限到達）になるが、n1 は n5 処理時点（`included.len()==3`）で
+    /// 既に `reachable` へ追加済みのため、挿入後に上限を検査する実装
+    /// だと n1 も追加されてしまい `included.len()==7` に達し上限超過と
+    /// なる。挿入前判定であれば n1 は上限到達後の処理対象になっても
+    /// `included` へ追加されず、外部入力（葉）として扱われる。
+    #[test]
+    fn fanin_balanced_tree_does_not_exceed_chain_len_cap() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[8])).unwrap();
+        let n1 = g.push(FusionOp::Relu(x), f32_meta(&[8])).unwrap();
+        let n2 = g.push(FusionOp::Relu(x), f32_meta(&[8])).unwrap();
+        let n3 = g.push(FusionOp::Relu(x), f32_meta(&[8])).unwrap();
+        let n4 = g.push(FusionOp::Relu(x), f32_meta(&[8])).unwrap();
+        let n5 = g.push(FusionOp::Add(n1, n2), f32_meta(&[8])).unwrap();
+        let n6 = g.push(FusionOp::Add(n3, n4), f32_meta(&[8])).unwrap();
+        let n7 = g.push(FusionOp::Add(n5, n6), f32_meta(&[8])).unwrap();
+
+        let decision = detect_fusion(&g, n7);
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        assert!(
+            seg.nodes.len() <= MAX_FUSED_CHAIN_LEN,
+            "MAX_FUSED_CHAIN_LEN を超過した: {} 個",
+            seg.nodes.len()
+        );
+        assert_eq!(seg.nodes, vec![n2, n3, n4, n5, n6, n7]);
+        assert_eq!(seg.leaves, vec![x, n1]);
+    }
+
+    /// #162 レビュー指摘: 葉ノード（融合境界／`Input`）の `contiguous`
+    /// が検証されず、transpose／broadcast view がそのまま `Fuse` として
+    /// 通過してしまう不具合の再発防止。`graph.rs` の
+    /// `OperandShapeMismatch` 周辺コメントが明言する「broadcast view は
+    /// `contiguous: false` として本関数の非融合フォールバックに委ねる」
+    /// 契約を、セグメント内部ノードだけでなく葉ノードでも満たすこと
+    /// を検証する。
+    #[test]
+    fn non_contiguous_leaf_input_falls_back_the_whole_segment() {
+        let mut g = FusionGraph::new();
+        // transpose/broadcast view 相当（contiguous = false）の葉。
+        let x = g.push(FusionOp::Input, non_contiguous_meta(&[4])).unwrap();
+        let n1 = g.push(FusionOp::Relu(x), f32_meta(&[4])).unwrap();
+        let root = g.push(FusionOp::Exp(n1), f32_meta(&[4])).unwrap();
+
+        let decision = detect_fusion(&g, root);
+        assert_eq!(
+            decision,
+            FusionDecision::Fallback(FallbackReason::NonContiguous)
+        );
     }
 
     /// PoC-9 `ew_matmul_ew` 相当: Gemm 境界でセグメントが分断される
