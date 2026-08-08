@@ -1,19 +1,22 @@
 # rust-ai-library の品質ゲート CI。
 #
-# Fandhe-AI/rust-ai-library-v1・local-llm-server・fandhe-multi-platform の ci.yml
-# （self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・Cargo.toml 検出ガード）
-# と同一方針に揃える（.claude/rules/ci.md）。
+# fmt / clippy / test / cargo-deny のベースライン品質ゲートは Fandhe-AI/actions の
+# rust-base-ci reusable workflow（rust-ci ジョブ）へ集約した（イシュー #325。
+# local-llm-server と同型だった重複ジョブ定義の解消）。Cargo.toml 有無を各ステップの
+# `if:` で判定する自己修復方式・rustup の冪等セルフヒール・cargo-deny のバージョン
+# 固定導入は共通 workflow 側の実装を参照（Fandhe-AI/actions の
+# .github/workflows/rust-base-ci.yml および rust-base-ci/README.md）。
 #
-# workspace `Cargo.toml`（TASK-1.1）は追加済みで、fmt / clippy / test / 依存禁止検査の
-# cargo 系ステップは実行され green である（run 31058207909 で確認済み。イシュー #6）。
-# 各ジョブの Checkout 直後の `detect` ステップによる Cargo.toml 有無判定・
+# リポジトリ固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden /
+# guardrail-regression / verification-gates）は引き続き本ファイルで定義する
+# （self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・全ジョブ
+# timeout-minutes 必須は従来どおり .claude/rules/ci.md に従う）。各固有ジョブの
+# Checkout 直後の `detect` ステップによる Cargo.toml 有無判定・
 # `if: steps.detect.outputs.has_cargo == 'true'` ステップガードは、`Cargo.toml` 再消失時にも
-# ジョブを success のまま終了させる冪等セルフヒール方針（.claude/rules/ci.md）のフェイルセーフ
-# として残置する（ロジックは変更しない）。ジョブ単位の `if:` ではなく各ステップの `if:` で
-# 判定しているのは、`jobs.<id>.if` は Checkout 前（ワークスペース展開前）に評価されるため
-# `hashFiles('Cargo.toml')` が常に空文字となり判定できないため。`deny.toml`（TASK-1.3）も
-# 追加済みのため deny ジョブは実行される。detect ガードはいずれかが再消失した場合の
-# フェイルセーフとして残置する。
+# ジョブを success のまま終了させる冪等セルフヒール方針のフェイルセーフとして残置する
+# （ジョブ単位の `if:` ではなく各ステップの `if:` で判定しているのは、`jobs.<id>.if` は
+# Checkout 前〈ワークスペース展開前〉に評価されるため `hashFiles('Cargo.toml')` が常に
+# 空文字となり判定できないため）。
 #
 # deps-forbidden ジョブは TASK-1.2（依存禁止リストの CI 機械検査）の実装であり、
 # scripts/check-forbidden-deps.sh（Makefile の deps-forbidden ターゲットと共用する単一
@@ -102,148 +105,36 @@ concurrency:
 
 jobs:
   # --------------------------------------------------
-  # cargo fmt --check（整形差分の検出）
-  # --------------------------------------------------
-  fmt:
-    name: cargo fmt --check
-    runs-on: self-hosted
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        # actions/checkout v6.0.3（v1 / local-llm-server の ci.yml と同一 SHA に固定）。
-        # docs/spec サブモジュールは fmt/clippy/test に不要なため取得しない（既定で submodules: false）。
-        # persist-credentials: false: checkout 後どのステップも GITHUB_TOKEN を使わないため、
-        # 共有 self-hosted runner の workspace にトークンを残留させない。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-
-      - name: Cargo.toml の有無を判定
-        id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため cargo fmt --check をスキップしました（workspace 作成後に有効化されます）"
-          fi
-
-      # self-hosted runner に rustup が未導入/欠落している場合に備え、後続ステップの
-      # 前提を自己修復する。導入済みなら何もしない（冪等。.claude/rules/ci.md）。
-      - name: Ensure rustup is installed
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
-
-      - name: Sync toolchain
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
-
-      # 共有ツールチェーンを不要に汚さないよう、未導入の場合のみ追加する（冪等）。
-      - name: Ensure rustfmt component
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          rustup component list --installed | grep -q '^rustfmt' || rustup component add rustfmt
-
-      - name: cargo fmt --check
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: cargo fmt --all --check
-
-  # --------------------------------------------------
-  # cargo clippy -- -D warnings（lint ゲート）
-  # --------------------------------------------------
-  clippy:
-    name: cargo clippy
-    runs-on: self-hosted
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        # persist-credentials: false（fmt ジョブと同一方針）。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-
-      - name: Cargo.toml の有無を判定
-        id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため cargo clippy をスキップしました（workspace 作成後に有効化されます）"
-          fi
-
-      - name: Ensure rustup is installed
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
-
-      - name: Sync toolchain
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
-
-      - name: Ensure clippy component
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          rustup component list --installed | grep -q '^clippy' || rustup component add clippy
-
-      - name: cargo clippy
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
-
-  # --------------------------------------------------
-  # cargo test（実機依存の #[ignore] テストは除く）
-  # --------------------------------------------------
-  test:
-    name: cargo test
-    runs-on: self-hosted
-    timeout-minutes: 45
-    steps:
-      - name: Checkout
-        # persist-credentials: false（fmt ジョブと同一方針）。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-
-      - name: Cargo.toml の有無を判定
-        id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ]; then
-            echo "has_cargo=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml が未追加のため cargo test をスキップしました（workspace 作成後に有効化されます）"
-          fi
-
-      - name: Ensure rustup is installed
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
-
-      - name: Sync toolchain
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
-
-      - name: cargo test
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: cargo test --workspace --all-features
+  # fmt / clippy / test / cargo-deny のベースライン品質ゲート（reusable workflow 呼び出し）。
+  # 旧 fmt / clippy / test / deny の 4 ジョブ定義は Fandhe-AI/actions 側へ集約済み。
+  # uses の参照は組織規約によりコミット SHA へ固定する（@main 禁止。更新時は
+  # `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決した SHA へ差し替える）。
+  # deny-checks（advisories bans licenses sources。共通側既定〈advisories licenses
+  # sources〉に bans を追加するため明示指定する。#353。advisories / bans の設定・
+  # 違反 0 件の実測根拠は deny.toml の [advisories] / [bans] 節コメント参照）・
+  # test-timeout-minutes（45。共通側既定 30 より長い移行前の値を維持）以外の入力
+  # （fmt/clippy/deny の timeout・cache〈false。workspace が永続する self-hosted
+  # runner では不要〉）は、共通側の既定値が移行前の本ファイルの値と同一のため
+  # 指定しない。concurrency は reusable workflow の
+  # トップレベルでは機能しないため、従来どおり本ファイル冒頭の concurrency 設定が
+  # 直列化を担う。
+  # 前提: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
+  # 単一真実源として参照する。本移行で追加）。
+  rust-ci:
+    # reusable workflow は呼び出し側が付与した以上の権限を持てないため、
+    # 共通側ジョブが必要とする最小権限をここでも付与する
+    permissions:
+      contents: read
+    uses: Fandhe-AI/actions/.github/workflows/rust-base-ci.yml@5982e2f502a19effc36a7b161660b5a4ea17b886 # main
+    with:
+      # 組織 runner 方針（private リポジトリは self-hosted）。既定値と同値だが
+      # 方針の明示のため省略しない（.claude/rules/ci.md）
+      runner-label: self-hosted
+      # 共通側既定（advisories licenses sources）へ bans を追加（#353）。トークンは
+      # 共通側 deny ジョブが閉じた whitelist と厳密一致で fail-closed 検証する
+      deny-checks: advisories bans licenses sources
+      # 移行前の test ジョブの timeout（45 分）を維持する（共通側既定は 30 分）
+      test-timeout-minutes: 45
 
   # --------------------------------------------------
   # cargo build（TASK-2.1b・イシュー #50）。
@@ -399,56 +290,6 @@ jobs:
       - name: cargo test（toolkit 非搭載）
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo test --workspace --locked
-
-  # --------------------------------------------------
-  # cargo deny（依存ライセンス・供給元の監査。deny.toml 追加済み・TASK-1.3 で有効化済み）
-  # --------------------------------------------------
-  deny:
-    name: cargo deny check licenses sources
-    runs-on: self-hosted
-    timeout-minutes: 20
-    steps:
-      - name: Checkout
-        # persist-credentials: false（fmt ジョブと同一方針）。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          persist-credentials: false
-
-      - name: Cargo.toml と deny.toml の有無を判定
-        id: detect
-        run: |
-          set -euo pipefail
-          if [ -f "Cargo.toml" ] && [ -f "deny.toml" ]; then
-            echo "has_deny=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "has_deny=false" >> "${GITHUB_OUTPUT}"
-            echo "::notice::Cargo.toml または deny.toml が未追加のため cargo deny をスキップしました（TASK-1.3 のライセンス整備後に有効化されます）"
-          fi
-
-      - name: Ensure rustup is installed
-        if: steps.detect.outputs.has_deny == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
-
-      - name: Sync toolchain
-        if: steps.detect.outputs.has_deny == 'true'
-        run: rustup show
-
-      # 未導入の場合のみソースビルドで導入する（冪等。.claude/rules/ci.md）。
-      - name: Ensure cargo-deny is installed
-        if: steps.detect.outputs.has_deny == 'true'
-        run: |
-          set -euo pipefail
-          command -v cargo-deny >/dev/null 2>&1 || cargo install cargo-deny --locked
-
-      # --locked で Cargo.lock の書き換え・runner 汚染を防止する。
-      - name: cargo deny check licenses sources
-        if: steps.detect.outputs.has_deny == 'true'
-        run: cargo deny --locked check licenses sources
 
   # --------------------------------------------------
   # 依存禁止リストの機械検査（TASK-1.2・REQ-1）。
@@ -651,24 +492,23 @@ jobs:
     runs-on: self-hosted
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
     if: ${{ always() }}
-    needs: [fmt, clippy, test, build, build-no-cuda-toolkit, deny, deps-forbidden, guardrail-regression, verification-gates]
+    needs: [rust-ci, build, build-no-cuda-toolkit, deps-forbidden, guardrail-regression, verification-gates]
     timeout-minutes: 5
     steps:
       - name: 完遂判定（全 needs ジョブが success であること）
         env:
-          RESULT_FMT: ${{ needs.fmt.result }}
-          RESULT_CLIPPY: ${{ needs.clippy.result }}
-          RESULT_TEST: ${{ needs.test.result }}
+          # rust-ci は reusable workflow 呼び出しのため、result は共通側の全ジョブ
+          # （fmt / clippy / test / deny / rust-base-ci-complete）を集約した結果になる
+          RESULT_RUST_CI: ${{ needs.rust-ci.result }}
           RESULT_BUILD: ${{ needs.build.result }}
           RESULT_BUILD_NO_CUDA_TOOLKIT: ${{ needs.build-no-cuda-toolkit.result }}
-          RESULT_DENY: ${{ needs.deny.result }}
           RESULT_DEPS_FORBIDDEN: ${{ needs.deps-forbidden.result }}
           RESULT_GUARDRAIL_REGRESSION: ${{ needs.guardrail-regression.result }}
           RESULT_VERIFICATION_GATES: ${{ needs.verification-gates.result }}
         run: |
           set -euo pipefail
           ok=1
-          for pair in "fmt:${RESULT_FMT}" "clippy:${RESULT_CLIPPY}" "test:${RESULT_TEST}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deny:${RESULT_DENY}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}" "guardrail-regression:${RESULT_GUARDRAIL_REGRESSION}" "verification-gates:${RESULT_VERIFICATION_GATES}"; do
+          for pair in "rust-ci:${RESULT_RUST_CI}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}" "guardrail-regression:${RESULT_GUARDRAIL_REGRESSION}" "verification-gates:${RESULT_VERIFICATION_GATES}"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             if [ "${result}" != "success" ]; then

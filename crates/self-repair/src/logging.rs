@@ -457,19 +457,42 @@ fn read_tail_state(path: &Path, file: std::fs::File) -> Result<(u64, String), Lo
     Ok((next_seq, last_hash))
 }
 
+/// [`verify_chain`] の検証結果サマリ。
+///
+/// CLI（`self-repair verify-log`）が成功メッセージに含めることで、監査担当者が
+/// 外部アンカー運用（`docs/self-repair-log-format.md` §7）の記録値と突合できる
+/// ようにする（Review #145 指摘対応。`.claude/rules/security.md` A08「ループ
+/// 試行ログは改竄検知可能な形式で記録し、取り込み判断の根拠を追跡可能にする」の
+/// 意図に沿い、無条件の「整合性を確認しました」だけで終わらせない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifyChainSummary {
+    /// 検証で走査した有効レコード件数（空行は数えない）。
+    pub record_count: u64,
+    /// 最終レコードの `seq`。レコードが 1 件もない場合は `None`
+    /// （`record_count == 0` と等価。呼び出し元が「空ログ」を区別するための
+    /// フィールド）。
+    pub last_seq: Option<u64>,
+    /// 最終レコードの `hash`（16 進文字列）。レコードが 1 件もない場合は
+    /// チェーン起点ハッシュ（[`genesis_hash`]）のままとなる。
+    pub last_hash: String,
+}
+
 /// ログファイル全体のハッシュチェーンを再計算し、改竄（フィールド改変・
 /// レコード削除・順序入れ替え）を検知する。
 ///
 /// 1 箇所でも不一致・パース不能なレコードがあれば直ちに `Err` を返す
 /// （fail-closed。部分的に正しい範囲だけを認める緩い検証はしない。
-/// security.md A08「判定の迂回経路を作らない」と同じ思想）。
+/// security.md A08「判定の迂回経路を作らない」と同じ思想）。成功時は
+/// [`VerifyChainSummary`]（レコード件数・最終 `seq`・最終 `hash`）を返し、
+/// 呼び出し元（CLI 等）が突合材料として提示できるようにする。
 ///
 /// 末尾切り詰め（ファイル末尾の正当なレコードをまるごと削除する改竄）は、
 /// 削除後の最終レコードまでのチェーンが自己無矛盾になってしまうため本関数
-/// 単体では検知できない。検知には別途「最終 `hash` の外部アンカー」
+/// 単体では検知できない（レコード 0 件のファイル・切り詰め後のファイルの
+/// どちらも `Ok` を返しうる）。検知には別途「最終 `hash` の外部アンカー」
 /// （書き込み直後に別経路へ記録する等）が必要であり、その運用は
 /// `docs/self-repair-log-format.md` の外部アンカー運用節に委ねる。
-pub fn verify_chain(path: impl AsRef<Path>) -> Result<(), LogError> {
+pub fn verify_chain(path: impl AsRef<Path>) -> Result<VerifyChainSummary, LogError> {
     let path = path.as_ref();
     let file = std::fs::File::open(path).map_err(|source| LogError::Io {
         path: path.display().to_string(),
@@ -478,6 +501,8 @@ pub fn verify_chain(path: impl AsRef<Path>) -> Result<(), LogError> {
     let reader = BufReader::new(file);
     let mut expected_seq = 0u64;
     let mut expected_prev_hash = genesis_hash();
+    let mut record_count = 0u64;
+    let mut last_seq: Option<u64> = None;
     for line in reader.lines() {
         let line = line.map_err(|source| LogError::Io {
             path: path.display().to_string(),
@@ -516,10 +541,16 @@ pub fn verify_chain(path: impl AsRef<Path>) -> Result<(), LogError> {
                     .to_string(),
             });
         }
+        record_count += 1;
+        last_seq = Some(record.seq);
         expected_seq += 1;
         expected_prev_hash = record.hash;
     }
-    Ok(())
+    Ok(VerifyChainSummary {
+        record_count,
+        last_seq,
+        last_hash: expected_prev_hash,
+    })
 }
 
 #[cfg(test)]
@@ -600,6 +631,58 @@ mod tests {
             vec!["loop_start", "detection", "attempt", "loop_outcome"]
         );
         verify_chain(&log_path).expect("直後の verify_chain が成功すること");
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    /// [`VerifyChainSummary`] がレコード件数・最終 `seq`・最終 `hash` を
+    /// 正しく報告すること（Review #145 指摘対応: CLI 成功メッセージが
+    /// これらの値を突合材料として提示できるようにするための実測根拠）。
+    #[test]
+    fn verify_chain_summary_reports_record_count_and_last_seq_hash() {
+        let log_path = unique_log_path("summary_record_count_and_last_seq_hash");
+        let report = sample_report(
+            LoopOutcome::Adopted,
+            vec![attempt(1, AttemptOutcome::Adopted)],
+        );
+        LogWriter::open(&log_path)
+            .expect("新規ログを開けること")
+            .append_report(&report)
+            .expect("正常ケースの追記に失敗しないこと");
+
+        // loop_start → detection → attempt → loop_outcome の 4 レコード
+        // （このヘルパーが生成する段階列。上のテストで実測済み）。
+        let content = std::fs::read_to_string(&log_path).expect("ログを読めること");
+        let last_line = content
+            .lines()
+            .next_back()
+            .expect("少なくとも 1 行はあること");
+        let last_record: LogRecord =
+            serde_json::from_str(last_line).expect("最終行が JSON として読めること");
+
+        let summary = verify_chain(&log_path).expect("verify_chain が成功すること");
+        assert_eq!(summary.record_count, 4);
+        assert_eq!(summary.last_seq, Some(last_record.seq));
+        assert_eq!(summary.last_hash, last_record.hash);
+        let _ = std::fs::remove_file(&log_path);
+    }
+
+    /// 空（0 バイト）ログに対する `verify_chain` は `Err` にはならないが
+    /// （fail-closed の対象は「壊れている」ことが判定できる場合のみ）、
+    /// `record_count == 0`・`last_seq == None`・`last_hash == genesis_hash()`
+    /// を返すこと。CLI 側（`main.rs::run_verify_log`）はこの値を見て、既定では
+    /// fail-closed に exit 1 とし、`--allow-empty-log` 明示指定時のみ `OK:` では
+    /// なく `WARN:` メッセージ付きで exit 0 に切り替える（PR #356 codex-review
+    /// P1 指摘対応。当初〈Review #145〉は無条件 exit 0 だったが、終了コードのみ
+    /// 見る監査自動化がログ全削除による改竄を見逃す経路だったため変更した）。
+    #[test]
+    fn verify_chain_on_empty_file_returns_zero_record_summary() {
+        let log_path = unique_log_path("empty_file_zero_record_summary");
+        std::fs::write(&log_path, b"").expect("空ファイルを作成できること");
+
+        let summary = verify_chain(&log_path).expect("空ログはチェーン違反ではなく Ok を返すこと");
+        assert_eq!(summary.record_count, 0);
+        assert_eq!(summary.last_seq, None);
+        assert_eq!(summary.last_hash, genesis_hash());
         let _ = std::fs::remove_file(&log_path);
     }
 
