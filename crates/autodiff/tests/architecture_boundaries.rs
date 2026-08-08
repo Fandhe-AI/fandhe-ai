@@ -72,35 +72,80 @@ fn autodiff_src_does_not_reference_concrete_backend_crates() {
 /// §3.5.3 (iii)「`materialize_non_fallible` が `eval.rs` を最終手段として
 /// 使う経路が構造的に失敗しないための前提」）。
 ///
-/// `#[cfg(test)]` ブロック内のテストコード自身（`.unwrap()` を使う
-/// テストアサーション）は対象外とする——本テストの対象は「本番経路
-/// （`#[cfg(test)]` の外側）」のみであり、`mod tests { ... }` 以降は走査
-/// しない（同ファイル内でテストモジュールが末尾にまとまっている構成を
-/// 前提とする単純な行ベース切り出し）。
+/// `#[cfg(test)]` が付与された項目（関数単位の `#[cfg(test)] fn ...`・
+/// 末尾 `mod tests { ... }` のいずれも）はテストコード自身（`.unwrap()`
+/// を使うテストアサーション）とみなし対象外とする——本テストの対象は
+/// 「本番経路（`#[cfg(test)]` が付与されていない項目）」のみである。
+///
+/// ファイル冒頭からの単純な prefix 切り出し（最初の `#[cfg(test)]` より
+/// 前のみを走査）は、`reduce_axis`／`sum`／`max`（TASK-12.1d・#164）の
+/// ように個別関数へ `#[cfg(test)]` を付与しつつその後ろに本番コード
+/// （`mse_loss`／`softmax_along`／`cross_entropy_loss` 等）が続く構成では
+/// 後続の本番コードを丸ごとガード対象から取りこぼす（実装計画時の
+/// 見落とし）。本実装は `#[cfg(test)]` 属性行を検出するたびに、その
+/// 直後に続く項目（次に現れる `{` から対応する `}` までの波括弧ブロック）
+/// だけを中括弧の深さで追跡してスキャン対象から除外し、それ以外の行は
+/// すべて「本番経路」として扱う（`mod tests { ... }` の網羅除外・個別
+/// `#[cfg(test)] fn` の網羅除外の両方をこの単一ロジックで扱える）。
 #[test]
 fn eval_rs_has_no_panic_macros_outside_test_module() {
     let eval_rs = autodiff_crate_root().join("src/eval.rs");
     let content = read_to_string_or_panic(&eval_rs);
-    let before_test_module = content
-        .split("#[cfg(test)]")
-        .next()
-        .expect("split は必ず 1 要素以上を返す");
-    // コメント行（`//`／`///`／`//!`）は規約を説明する散文として
-    // "unwrap()" 等の語を含みうるため、実コードのみを対象とするよう
-    // 行頭が `//` の行を除外する（誤検知防止）。
-    let production_code: String = before_test_module
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let production_code = strip_cfg_test_items(&content);
 
     for forbidden in ["panic!(", "unwrap()", "expect(", "unreachable!("] {
         assert!(
             !production_code.contains(forbidden),
-            "eval.rs の本番経路（#[cfg(test)] より前）に {forbidden} が含まれている\
+            "eval.rs の本番経路（#[cfg(test)] が付与されていない項目）に {forbidden} が含まれている\
              （eval.rs 非 panic 化の契約違反。docs/fusion-graph-design.md §2.5）"
         );
     }
+}
+
+/// `content` から `#[cfg(test)]` が付与された項目（関数・`mod` 等の
+/// 波括弧ブロック）を丸ごと除去し、残りを「本番経路」の行のみを結合した
+/// 文字列として返す（コメント行 `//`／`///`／`//!` も除外する。規約を
+/// 説明する散文が `unwrap()` 等の語を含みうるため誤検知防止）。
+///
+/// `eval_rs_has_no_panic_macros_outside_test_module`（上記）専用の
+/// テストユーティリティ。中括弧の深さのみで項目境界を追跡する単純な
+/// 実装のため、文字列リテラル中の `{`/`}` は非対応（`eval.rs` に該当
+/// パターンが無いことを前提とする）。
+fn strip_cfg_test_items(content: &str) -> String {
+    let mut out = String::new();
+    let mut lines = content.lines().peekable();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if trimmed.starts_with("#[cfg(test)]") {
+            // この属性が付与された項目（次の `{` から対応する `}` まで）
+            // を丸ごと読み飛ばす。属性直後に別の属性（`#[derive(...)]`
+            // 等）が続く場合もあるため、`{` が現れるまで行を読み進める。
+            let mut depth = 0usize;
+            let mut entered = false;
+            for skip_line in lines.by_ref() {
+                for ch in skip_line.chars() {
+                    match ch {
+                        '{' => {
+                            depth += 1;
+                            entered = true;
+                        }
+                        '}' => depth = depth.saturating_sub(1),
+                        _ => {}
+                    }
+                }
+                if entered && depth == 0 {
+                    break;
+                }
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 fn visit_rs_files(dir: &Path, f: &mut impl FnMut(&Path, &str)) {

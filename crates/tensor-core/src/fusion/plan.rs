@@ -133,12 +133,7 @@ impl FusionPlan {
                     FusionOp::Input,
                     super::graph::NodeMeta::new(output_shape.clone(), true, dtype),
                 )
-                .map_err(|err| {
-                    BackendError::ShapeMismatch(crate::error::ShapeError::ElementCountMismatch {
-                        expected: leaf_count,
-                        actual: err.to_string().len().max(1),
-                    })
-                })?;
+                .map_err(from_ops_err)?;
             leaf_ids.push(id);
         }
 
