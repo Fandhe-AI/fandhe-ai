@@ -105,7 +105,9 @@ impl Sequential {
     /// fusion-graph-design.md` §3.4「`Device` → 具体 `BackendOps` の
     /// 構築・結線は `facade` クレート（TASK-9.3）が担う」。`facade` 未
     /// 実装の現時点では呼び出し元がテスト用フィクスチャ等を直接渡す）。
-    pub fn predict(
+    /// 無引数版が必要な場合は [`Sequential::predict`] を使う（codex-review
+    /// 第 19〜21 波・PR #403 の P1 是正で本メソッドから改名した compat 経路）。
+    pub fn predict_with_ops(
         &self,
         input: &Tensor<f32>,
         ops: Box<dyn BackendOps + Send>,
@@ -114,6 +116,17 @@ impl Sequential {
         let input_var = tape.var(input);
         let output = self.forward(&tape, &input_var)?;
         Ok(output.to_tensor())
+    }
+
+    /// 推論の入口（無引数 `ops` 版。codex-review 第 19〜21 波・PR #403 の
+    /// P1 是正で追加した compat 経路）。`default_ops::naive_ops()`（`eval.rs`
+    /// へ委譲する naive CPU 参照実装。具体バックエンドクレートには
+    /// 依存しない）を `ops` に使い [`Sequential::predict_with_ops`] へ
+    /// 委譲する。性能が必要な呼び出し元は `predict_with_ops` へ最適化済み
+    /// `BackendOps` を明示的に渡すこと（`crate::default_ops` モジュール
+    /// 冒頭コメント参照）。
+    pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        self.predict_with_ops(input, crate::default_ops::naive_ops())
     }
 }
 
@@ -138,7 +151,7 @@ mod tests {
         let batch = 3;
         let input = Tensor::new(vec![0.1_f32; batch * 8], &[batch, 8]).unwrap();
         let output = model
-            .predict(&input, crate::test_support::test_ops())
+            .predict_with_ops(&input, crate::test_support::test_ops())
             .unwrap();
 
         assert_eq!(output.shape(), &[batch, 4]);

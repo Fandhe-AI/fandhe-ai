@@ -31,9 +31,48 @@ fn sequential_builds_two_layer_mlp_and_predicts() {
 
     let batch = 5;
     let input = array(vec![vec![0.25_f32; 8]; batch]).unwrap();
-    let output = model.predict(&input, common::naive_ops()).unwrap();
+    // 無引数版 `predict`（codex-review 第 19〜21 波・PR #403 の P1 是正で
+    // 追加した compat 経路）を経由する。
+    let output = model.predict(&input).unwrap();
 
     assert_eq!(output.shape(), &[batch, 4]);
+}
+
+/// 無引数版 `predict` と `predict_with_ops`（naive ops 明示指定）が同一
+/// 出力を返すこと（`predict` は内部で `default_ops::naive_ops()` を渡す
+/// だけの薄い委譲であるため、数値はビット一致する）。
+#[test]
+fn predict_default_matches_predict_with_ops_naive() {
+    let model = Sequential::new()
+        .add_linear(8, 16, SEED1)
+        .unwrap()
+        .add_relu()
+        .add_linear(16, 4, SEED2)
+        .unwrap();
+
+    let input = array(vec![vec![0.25_f32; 8]; 3]).unwrap();
+    let via_default = model.predict(&input).unwrap();
+    let via_explicit = model.predict_with_ops(&input, common::naive_ops()).unwrap();
+
+    assert_eq!(output_dense(&via_default), output_dense(&via_explicit));
+}
+
+/// `Tape::default()`（codex-review 第 19〜21 波・PR #403 の P1 是正で
+/// 追加した compat 経路）が `Tape::new(default_ops::naive_ops())` と同じ
+/// 挙動（forward 演算が記録・実行できる）を持つこと。
+#[test]
+fn tape_default_records_and_evaluates_ops() {
+    let tape = Tape::default();
+    let a = tape.var(&array([[1.0_f32, 2.0], [3.0, 4.0]]).unwrap());
+    let b = tape.var(&array([[5.0_f32, 6.0], [7.0, 8.0]]).unwrap());
+    let c = a.add(&b).unwrap();
+
+    assert_eq!(output_dense(&c.to_tensor()), vec![6.0, 8.0, 10.0, 12.0]);
+
+    // `sum`（非 elementwise・`BackendOps::sum` 経由の即時実行経路。
+    // `default_ops::NaiveOps::sum` の `#[cfg(test)]` 解除を検証する）。
+    let total = c.sum(None).unwrap();
+    assert_eq!(output_dense(&total.to_tensor()), vec![36.0]);
 }
 
 /// `compat::array` から生成したテンソルをそのまま `Sequential::predict`
@@ -47,7 +86,7 @@ fn array_output_feeds_directly_into_sequential_predict() {
         .add_tanh();
 
     let input = array([[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]]).unwrap();
-    let output = model.predict(&input, common::naive_ops()).unwrap();
+    let output = model.predict(&input).unwrap();
 
     assert_eq!(output.shape(), &[2, 2]);
     // tanh の出力は (-1, 1) に収まる。

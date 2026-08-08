@@ -87,6 +87,7 @@
 
 mod backward;
 pub mod compat;
+mod default_ops;
 mod error;
 mod eval;
 mod grad;

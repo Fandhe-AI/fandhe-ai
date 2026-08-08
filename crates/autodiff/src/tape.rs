@@ -214,18 +214,33 @@ impl std::fmt::Debug for Tape {
     }
 }
 
+/// 無引数構築の compat 経路（codex-review 第 19〜21 波・PR #403 の P1
+/// 是正で追加。`docs/public-api-design.md` §4.1「移行手順」追補）。
+/// `default_ops::naive_ops()`（`eval.rs` へ委譲する naive CPU 参照実装。
+/// `backend-cpu` 等の具体バックエンドクレートには依存しない）を `ops` に
+/// 使う。性能が必要な呼び出し元は `Tape::new(ops)` へ最適化済み
+/// `BackendOps` を明示的に渡すこと（`default_ops` モジュール冒頭コメント
+/// 参照）。
+impl Default for Tape {
+    fn default() -> Self {
+        Tape::new(crate::default_ops::naive_ops())
+    }
+}
+
 impl Tape {
-    /// 新しいテープを生成する（TASK-12.1d・#164 の破壊的変更: 無引数
-    /// `Tape::new() -> Tape`・`impl Default for Tape` は削除され、本
-    /// シグネチャへ置き換わる）。`ops` はこのテープ上のすべての
-    /// バックエンド実行（融合実行・per-op フォールバック・`matmul`/
-    /// `sum`/`max` の実行）に使われる必須所有値であり、`facade`
-    /// （TASK-9.3。未実装）の composition root が解決した具体
-    /// `BackendOps` 実装、明示指定した `Device` の結線結果、または
+    /// 新しいテープを生成する（TASK-12.1d・#164 の破壊的変更）。`ops` は
+    /// このテープ上のすべてのバックエンド実行（融合実行・per-op
+    /// フォールバック・`matmul`/`sum`/`max` の実行）に使われる必須所有値
+    /// であり、`facade`（TASK-9.3。未実装）の composition root が解決した
+    /// 具体 `BackendOps` 実装、明示指定した `Device` の結線結果、または
     /// テスト用フィクスチャのいずれかを渡す（`docs/
     /// fusion-graph-design.md` §1・§3.4）。`TapeId` は `NEXT_TAPE_ID`
     /// から新規発行されるため、同時に存在する複数の `Tape` 間で衝突
     /// しない。
+    ///
+    /// **無引数構築が必要な場合**は [`Tape::default`] を使う（codex-review
+    /// 第 19〜21 波・PR #403 の P1 是正で追加した compat 経路。
+    /// `default_ops` モジュール参照）。
     pub fn new(ops: Box<dyn BackendOps + Send>) -> Tape {
         Tape {
             id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),

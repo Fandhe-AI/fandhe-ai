@@ -253,11 +253,15 @@ pub(crate) fn sigmoid(input: &Tensor<f32>) -> Tensor<f32> {
 ///
 /// **TASK-12.1d（#164）**: `Var::sum`/`Var::max`（`var.rs`）の実行は
 /// `eval.rs` 直接呼び出しから `self.tape.ops().sum`/`max`（`BackendOps`
-/// 経由）へ置き換えたため、本関数（および `sum`/`max`。下記）は本番
-/// 経路では呼ばれなくなった。テスト専用フィクスチャ
-/// （`test_support.rs`・統合テストの数値微分突合。`grad.rs` の VJP
-/// テストが期待値計算に使う）としてのみ残す（`#[cfg(test)]`）。
-#[cfg(test)]
+/// 経由）へ置き換えたため、本関数（および `sum`/`max`。下記）は
+/// `Var::sum`/`max` の本番経路では呼ばれなくなった。ただし
+/// **codex-review 第 19〜21 波・PR #403 の P1 是正（2026-08-08 追記）**
+/// で `default_ops::NaiveOps`（`Tape::default()`／
+/// `compat::Sequential::predict` 無引数版が使う compat 用
+/// `BackendOps` 実装）がこの `sum`/`max` に委譲するようになったため、
+/// `#[cfg(test)]` は外し本番ビルドにも含める。統合テストの数値微分
+/// 突合（`test_support.rs`・`grad.rs` の VJP テスト）も引き続き同じ
+/// 実装を使う（数式の実体を二重管理しない）。
 fn reduce_axis(
     input: &Tensor<f32>,
     axis: usize,
@@ -283,8 +287,9 @@ fn reduce_axis(
 }
 
 /// `sum(dim)`。`dim: None` は全要素の総和をスカラー（shape `[]`）で返す。
-/// テスト専用（上記 `reduce_axis` コメント参照。TASK-12.1d・#164）。
-#[cfg(test)]
+/// `Var::sum` の本番経路（`BackendOps::sum`）からは呼ばれないが、
+/// `default_ops::NaiveOps::sum`（compat 経路）とテスト（数値微分突合）が
+/// 使う（上記 `reduce_axis` コメント参照。TASK-12.1d・#164）。
 pub(crate) fn sum(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
     match dim {
         None => {
@@ -301,8 +306,9 @@ pub(crate) fn sum(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
 /// （`fold` の初期値のまま。NumPy の `max` は空配列でエラーにするのが
 /// 慣習だが、本イシューでは shape 検査のみをスコープとし数値的な特殊
 /// ケースの扱いは #19（回帰テスト・数値突合）で確定する）。
-/// テスト専用（`reduce_axis` コメント参照。TASK-12.1d・#164）。
-#[cfg(test)]
+/// `Var::max` の本番経路（`BackendOps::max`）からは呼ばれないが、
+/// `default_ops::NaiveOps::max`（compat 経路）とテスト（数値微分突合）が
+/// 使う（`reduce_axis` コメント参照。TASK-12.1d・#164）。
 pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
     match dim {
         None => {

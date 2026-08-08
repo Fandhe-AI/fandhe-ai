@@ -426,13 +426,13 @@ impl Device {
 
 **サポート境界の宣言（`docs/spec/04-requirements.md:210` の 2026-08-08 追記）**: `facade` が唯一のサポートされる公開 API 面であり、`tensor-core`・`autodiff`・`backend-*` は内部クレート（直接利用は非サポート）である。この宣言により、`autodiff` が `facade` 向けに持つ ops 受け取り構築子（技術上 `pub`）は、サポート外の内部 API であり REQ-12 の「利用者向け融合制御 API」に該当しないと整理する。
 
-**承認済み内容と結線の実装場所（本節が定める `Device` 列挙・`Device::available()` による明示選択という契約自体は変更しない）**: 2026-08-08、AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンドを `Device::Cpu`（`backend-cpu` 実装）とすること」である（この一文は変更しない）。**構成上の結論**は、`facade` の composition root（TASK-9.3）が `Device::Cpu` から `backend-cpu` の `CpuBackendOps` を構築し、`autodiff::Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape`（唯一の公開コンストラクタ。渡された `ops` をそのまま格納する非 fallible 関数。`docs/fusion-graph-design.md` §1）へ渡す、という形に確定した。`autodiff` は `Device` 型にも `backend-cpu`／`backend-cuda`／`backend-metal` のいずれの具体クレートにも依存しない。`facade` を経由して構築した `Tape` はすべて CPU 上での融合実行が既定で・無条件に・透過的に効く。承認の記録場所は本節（本段落）および `docs/fusion-graph-design.md` §6.2「既定バックエンドの供給規則」。この承認は「本節が定める `Device` の既定デバイス選択ロジックを実装する」ことを意味しない——`Device::available()` による列挙・明示選択という契約自体は本節のとおり変更しない。**GPU バックエンド（CUDA／Metal）を既定にするかどうかはこの承認の対象外であり、REQ-2 の 27 組再検証後に別途ユーザー承認を得て決定する**（上記「既定選択の方針」の未決事項は継続する）。`facade`（TASK-9.3）は `Device::Cuda(_)`／`Device::Metal` を明示指定された場合の結線も担うが、その具体的な構築規則は TASK-9.3 の実装時にユーザー承認を得たうえで確定する。
+**承認済み内容と結線の実装場所（本節が定める `Device` 列挙・`Device::available()` による明示選択という契約自体は変更しない）**: 2026-08-08、AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンドを `Device::Cpu`（`backend-cpu` 実装）とすること」である（この一文は変更しない）。**構成上の結論**は、`facade` の composition root（TASK-9.3）が `Device::Cpu` から `backend-cpu` の `CpuBackendOps` を構築し、`autodiff::Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape`（性能を伴う経路の公開コンストラクタ。渡された `ops` をそのまま格納する非 fallible 関数。`docs/fusion-graph-design.md` §1。無引数の compat 経路 `Tape::default()` は下記「互換 API の別名復元」節参照）へ渡す、という形に確定した。`autodiff` は `Device` 型にも `backend-cpu`／`backend-cuda`／`backend-metal` のいずれの具体クレートにも依存しない。`facade` を経由して構築した `Tape` はすべて CPU 上での融合実行が既定で・無条件に・透過的に効く。承認の記録場所は本節（本段落）および `docs/fusion-graph-design.md` §6.2「既定バックエンドの供給規則」。この承認は「本節が定める `Device` の既定デバイス選択ロジックを実装する」ことを意味しない——`Device::available()` による列挙・明示選択という契約自体は本節のとおり変更しない。**GPU バックエンド（CUDA／Metal）を既定にするかどうかはこの承認の対象外であり、REQ-2 の 27 組再検証後に別途ユーザー承認を得て決定する**（上記「既定選択の方針」の未決事項は継続する）。`facade`（TASK-9.3）は `Device::Cuda(_)`／`Device::Metal` を明示指定された場合の結線も担うが、その具体的な構築規則は TASK-9.3 の実装時にユーザー承認を得たうえで確定する。
 
 **破壊的変更（明記して許容する）**: 出荷済みの無引数 `Tape::new() -> Tape`・`impl Default for Tape` は、`Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape` への差し替えに伴い削除される破壊的変更である（`docs/fusion-graph-design.md` §1）。この破壊は REQ-9 の 2026-08-08 追記（`facade` を唯一のサポートされる公開 API 面とし、`autodiff` は直接利用が非サポートの内部クレートとする宣言）を根拠に許容するが、実装コミットは `.claude/rules/conventional-commits.md` の `!`／`BREAKING CHANGE:` 告知を省略しない。`Tape: Debug`・`Tape: Send` という公開契約自体は変更しない。`BackendOps` trait はスーパートレイトの追加を一切受けない（`Tape` が所有する `ops` フィールドの型が `Box<dyn BackendOps + Send>` である点は `Tape: Send` を維持するための trait object 型 bound であり、`BackendOps` を実装する既存クレートのコードには影響しない。詳細は `docs/fusion-graph-design.md` §3.4「`BackendOps` trait 定義自体は変更しない」）。
 
-**移行手順（codex-review 第 19 波・PR #403 の P1 指摘を受け追記）**: なぜ「無引数コンストラクタを残す」「既定バックエンド解決経路を用意する」代替案を採らないかを明記する——`autodiff` は `tests/architecture_boundaries.rs` の `autodiff_cargo_toml_does_not_depend_on_concrete_backends`／`autodiff_src_does_not_reference_concrete_backend_crates` により具体バックエンドクレート（`backend-cpu`／`backend-cuda`／`backend-metal`）への依存を CI で機械検査済みに禁止しているため、`autodiff` 内で既定バックエンドを解決する経路はこの不変条件と両立しない（上記「経緯」節の第 16〜18 波が撤回した構成そのものに戻ってしまう）。唯一の解決先である `facade`（composition root。TASK-9.3）は本イシュー時点で未実装のため、現時点での移行手順は「呼び出し元が具体 `BackendOps` 実装を明示的に渡す」以外にない。
+**移行手順（codex-review 第 19 波・PR #403 の P1 指摘を受け追記）**: なぜ「無引数コンストラクタを残す」「既定バックエンド解決経路を用意する」代替案を採らないかを明記する——`autodiff` は `tests/architecture_boundaries.rs` の `autodiff_cargo_toml_does_not_depend_on_concrete_backends`／`autodiff_src_does_not_reference_concrete_backend_crates` により具体バックエンドクレート（`backend-cpu`／`backend-cuda`／`backend-metal`）への依存を CI で機械検査済みに禁止しているため、`autodiff` 内で既定バックエンドを解決する経路はこの不変条件と両立しない（上記「経緯」節の第 16〜18 波が撤回した構成そのものに戻ってしまう）。唯一の解決先である `facade`（composition root。TASK-9.3）は本イシュー時点で未実装のため、性能を伴う既定バックエンド解決の移行手順は「呼び出し元が具体 `BackendOps` 実装を明示的に渡す」以外にない。
 
-呼び出し元の移行例（`backend-cpu` を使う場合）:
+呼び出し元の移行例（`backend-cpu` を使う場合。性能が必要な経路）:
 
 ```rust
 // 変更前（削除済み）
@@ -444,17 +444,24 @@ let tape = Tape::default();
 let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
 ```
 
-`compat::Sequential::predict` も同様に `ops: Box<dyn BackendOps + Send>` を必須引数として受け取るよう変更した（`crates/autodiff/src/compat/sequential.rs` の `predict` ドキュメンテーションコメントに同じ根拠を記載済み）:
+`compat::Sequential::predict` も同様に、性能が必要な経路は `ops: Box<dyn BackendOps + Send>` を渡す `predict_with_ops` を使う（`crates/autodiff/src/compat/sequential.rs` の `predict_with_ops` ドキュメンテーションコメントに同じ根拠を記載済み）:
 
 ```rust
 // 変更前
 let output = model.predict(&input)?;
 
-// 変更後
-let output = model.predict(&input, Box::new(backend_cpu::CpuBackendOps::new()))?;
+// 変更後（性能が必要な経路）
+let output = model.predict_with_ops(&input, Box::new(backend_cpu::CpuBackendOps::new()))?;
 ```
 
-**影響範囲の確認**: この時点で `Tape::new()`／`Sequential::predict` の呼び出し元は `autodiff` クレート自身のテスト・`onnx-interop`／`guardrail`／`self-repair` の学習ループ fixture に限られ、実装コミット（#164）で全呼び出し元を新シグネチャへ追従済み（`cargo test --workspace` 全 green で確認）。`facade`（TASK-9.3）実装後は composition root がこの `Box::new(backend_cpu::CpuBackendOps::new())` に相当する結線を代行し、利用者が直接 `ops` を組み立てる必要はなくなる（本節冒頭「承認済み内容と結線の実装場所」参照）。
+**互換 API の別名復元（codex-review 第 19〜21 波・PR #403 の P1 是正。2026-08-08 追記）**: 上記「唯一の解決先である `facade` は未実装」という制約自体は変わらないが、codex-review は「既存の無引数コンストラクタ／`Default`／`predict(&Tensor)` を維持したまま解決するか、互換 API を別名で残すこと」を要求し、ドキュメントのみの正当化（本節上記の記述）では P1 判定を解除しなかった（PR #403 第 19〜21 波で同一指摘が再送された）。実装を精査した結果、`autodiff` は forward 値計算の naive 参照実装（`eval.rs`。`backend-cpu`／`backend-cuda`／`backend-metal` のいずれにも依存しない、クレート内部の暫定 CPU 実装）を既に保有しており（`test_support::TestOps` が `#[cfg(test)]` 限定でこれに委譲する形で先行使用していた）、これを本番ビルドへ昇格させても `tests/architecture_boundaries.rs` の不変条件（具体バックエンドクレート非依存）に抵触しない。したがって以下の compat API を追加した（`crates/autodiff/src/default_ops.rs` が実装。`NaiveOps`）:
+
+- `impl Default for Tape`: `Tape::new(default_ops::naive_ops())` に委譲する無引数構築。`Tape::new(ops)` 自体は既存シグネチャのまま変更しない（呼び出し元の大部分を占める `tests/`・`onnx-interop`／`guardrail`／`self-repair` fixture の破壊を避けるため）。
+- `compat::Sequential::predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError>`: 無引数 `ops` 版として復元。内部で `predict_with_ops(input, default_ops::naive_ops())` に委譲する薄いラッパー。従来の 2 引数版は `predict_with_ops` へ改名した。
+
+**性能特性の注意**: `NaiveOps` は融合実行（`FusionPlan`）を経ない逐次実装であり、`backend-cpu` の最適化カーネル（`rayon` 並列・BLIS ブロッキング）と同等の性能を持たない。この compat 経路は「デフォルト値でも動く」ことの保証に徹し、性能が必要な呼び出し元は引き続き `Tape::new(ops)`／`Sequential::predict_with_ops` を使う。`facade`（TASK-9.3）実装後もこのフォールバック経路自体は維持する（`facade` は最適化済み `ops` を組み立てて渡す上位レイヤーであり、本 compat 経路と競合しない）。
+
+**影響範囲の確認**: `Tape::new(ops)`／`Sequential::predict_with_ops`（旧 `predict`）の呼び出し元は `autodiff` クレート自身のテスト・`onnx-interop`／`guardrail`／`self-repair` の学習ループ fixture に限られ、実装コミット（#164）で全呼び出し元を新シグネチャへ追従済み（`cargo test --workspace` 全 green で確認）。上記の compat API 追加（`Default for Tape`／`Sequential::predict`）はこれらの呼び出し元に変更を要求しない加算のみの変更である。`facade`（TASK-9.3）実装後は composition root が `Box::new(backend_cpu::CpuBackendOps::new())` に相当する結線を代行し、利用者が直接 `ops` を組み立てる必要はなくなる（本節冒頭「承認済み内容と結線の実装場所」参照）。
 
 **バージョニング**: 本リポジトリはワークスペース全体で `version = "0.3.0"`（`Cargo.toml`）を用いるが、crates.io 未公開の内部開発版であり、`docs/deps-policy.md`・CI（`deny.toml` の `sources = crates.io 限定`）が示すとおり外部への配布物は存在しない。したがって「正式な破壊的リリース」としてのバージョン切り上げ・移行ガイド配布は該当せず、上記の移行手順を本文書と `docs/fusion-graph-design.md` §1 に記録することが本リポジトリでの等価な措置である。
 
