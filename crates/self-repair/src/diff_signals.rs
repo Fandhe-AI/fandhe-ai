@@ -254,16 +254,29 @@ fn api_signature_touched<R: CommandRunner>(
     }))
 }
 
+/// パス文字列が「テストコード」を指すかを判定する。`Path::components()` で
+/// `tests` コンポーネントの有無を見るため、`tests/foo.rs`（リポジトリ直下）・
+/// `crates/self-repair/tests/foo.rs`（中間パス）のいずれの相対パス表現でも
+/// 一致する（`path.contains("/tests/")` は先頭が `/` を含まない `tests/foo.rs`
+/// を取りこぼすため使わない）。
+fn is_test_path(path: &str) -> bool {
+    Path::new(path)
+        .components()
+        .any(|component| component.as_os_str() == "tests")
+        || path.ends_with("_test.rs")
+}
+
 /// 変更ファイル一覧に「本番コード」と「テストコード」の双方が同時に含まれる
 /// かを検査する（ゲーミング疑いの簡易ヒューリスティック）。移植元:
-/// `tests/revalidation_bug_fix.rs::gaming_suspect`。
+/// `tests/revalidation_bug_fix.rs::gaming_suspect`。`touches_test` /
+/// `touches_prod` は `is_test_path` を共通の判定基準として使うため、
+/// ルート直下 `tests/foo.rs` のようなパスが誤って両方 `false`（または
+/// `touches_prod` 側で誤って `true`）になるブラインドスポットを持たない。
 fn gaming_suspect_from_files(changed_files: &[String]) -> bool {
-    let touches_test = changed_files
+    let touches_test = changed_files.iter().any(|path| is_test_path(path));
+    let touches_prod = changed_files
         .iter()
-        .any(|path| path.contains("/tests/") || path.ends_with("_test.rs"));
-    let touches_prod = changed_files.iter().any(|path| {
-        !path.contains("/tests/") && !path.ends_with("_test.rs") && path.ends_with(".rs")
-    });
+        .any(|path| path.ends_with(".rs") && !is_test_path(path));
     touches_test && touches_prod
 }
 
@@ -456,6 +469,22 @@ mod tests {
     #[test]
     fn gaming_suspect_from_files_false_when_only_prod_touched() {
         let files = vec!["src/lib.rs".to_string()];
+        assert!(!gaming_suspect_from_files(&files));
+    }
+
+    #[test]
+    fn gaming_suspect_from_files_true_when_root_level_tests_dir_touched() {
+        // リポジトリ直下の `tests/foo.rs`（先頭に `/` が付かない相対パス）は
+        // `path.contains("/tests/")` では取りこぼし、かつ `.rs` 拡張子ゆえに
+        // `touches_prod` 側で誤って本番コード扱いされていた回帰ケース
+        // （PR #355 codex-review 指摘。P1）。
+        let files = vec!["src/lib.rs".to_string(), "tests/foo.rs".to_string()];
+        assert!(gaming_suspect_from_files(&files));
+    }
+
+    #[test]
+    fn gaming_suspect_from_files_false_when_only_root_level_tests_dir_touched() {
+        let files = vec!["tests/foo.rs".to_string()];
         assert!(!gaming_suspect_from_files(&files));
     }
 
