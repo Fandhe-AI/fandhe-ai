@@ -65,6 +65,22 @@
 //!   （TASK-3.3c・#142）。TASK-3.2 がスコープ外としていた「4 ゲート合成」の
 //!   結線点を、機能追加種別のループ完走実証のために満たす（`verify_composite`
 //!   モジュール冒頭ドキュメント参照）。
+//! - [`diff_signals`][]: `lines_changed`／`api_broken`／`gaming_suspect`／
+//!   `exclusion_rule_ids` の**試行ごとの**実測（TASK-3.2a・#137）。
+//!   [`verify_gates::CargoVerificationGate`] が構築時固定の必須引数として
+//!   受け取る契約はそのままに、この実測ロジック自体を `tests/` 専用実装から
+//!   `src/` 本体へ昇格する。
+//! - [`verify_bench_direct`][]: ベンチゲートの「候補 diff に対する直接実測」
+//!   （TASK-3.2a・#137）。[`verify_bench_direct::DirectBenchRunner`] が
+//!   baseline commit・候補適用済み作業木の双方を release ビルドし、外部
+//!   タイミング方式で [`verify_bench::SelfRepairBenchGate`]（判定ロジック
+//!   自体は変更しない）へ委譲する。
+//! - [`verify_direct_composite`][]: `diff_signals`・`verify_bench_direct`・
+//!   `verify_gates` を合成した真の 4 ゲート合成
+//!   [`verify_direct_composite::RepairCompositeGate`]（TASK-3.2a・#137）。
+//!   `verify_composite::FeatureAdditionCompositeGate`（合成ワークロード版・
+//!   構築時固定シグナル版）とは別モジュールとして共存する（`verify_direct_composite`
+//!   モジュール冒頭ドキュメント参照）。
 //! - [`sha256`][]: FIPS 180-4 準拠 SHA-256 の自作実装（TASK-3.4・#145）。`sha2`
 //!   クレートは許容依存 8 区分外・依存追加はユーザー承認事項のため、
 //!   `logging` のハッシュチェーン計算専用に std のみで実装する
@@ -76,6 +92,11 @@
 //!   [`logging::verify_chain`] を提供する（`.claude/rules/security.md`:
 //!   ループ試行ログは改竄検知可能な形式で記録し、取り込み判断の根拠を
 //!   追跡可能にする、という要求への対応。詳細は `docs/self-repair-log-format.md`）。
+//! - [`cli`][]: `self-repair` バイナリ（`src/main.rs`）向けの自作コマンドライン
+//!   引数パーサ（TASK-3.4 残作業・#145）。`verify-log` サブコマンドが
+//!   [`logging::verify_chain`] を CLI から結線し、監査担当者が `cargo test`
+//!   経由でなく直接ログを検証できるようにする（`docs/guardrail-self-repair-cli.md`
+//!   3.2 節。詳細は `cli` モジュール冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -94,13 +115,15 @@
 //! - `exec`（コマンド実行抽象）の `guardrail` 側への共通化（`guardrail check`
 //!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
 //!   （本イシュー〈#134〉の PR 本文に記録）
-//! - CLI バイナリ（`self-repair run`/`verify-log`。
-//!   `docs/guardrail-self-repair-cli.md` 3 節） → 後続タスク（既存イシューで
-//!   追跡済み）
+//! - CLI バイナリ `self-repair run`（`docs/guardrail-self-repair-cli.md`
+//!   3.1 節） → 後続タスク（既存イシューで追跡済み）。`verify-log`（3.2 節）は
+//!   [`cli`]／`src/main.rs` として本イシュー（#145 差し戻し分）で実装済み
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod bug_fix;
 pub mod candidate;
+pub mod cli;
+pub mod diff_signals;
 pub mod error;
 pub mod exec;
 pub mod feature_addition;
@@ -113,7 +136,9 @@ pub mod report;
 pub mod runner;
 pub mod sha256;
 pub mod stages;
+pub mod verify_bench_direct;
 pub mod verify_composite;
+pub mod verify_direct_composite;
 pub mod verify_gates;
 
 #[cfg(test)]
@@ -126,13 +151,14 @@ pub use exec::{CommandOutput, CommandRunner, SystemCommandRunner};
 pub use feature_addition::{FeatureAdditionDetector, FeatureAdditionFixGenerator};
 pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
-pub use logging::{LogError, LogWriter, verify_chain};
+pub use logging::{LogError, LogWriter, VerifyChainSummary, verify_chain};
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
 pub use verify_composite::FeatureAdditionCompositeGate;
+pub use verify_direct_composite::{RepairCompositeGate, RepairCompositeGateSpec};
 pub use verify_gates::CargoVerificationGate;
 
 /// 決定的シード設定ユーティリティ（TASK-4.4b・イシュー #113）。
