@@ -192,15 +192,20 @@ impl FusionGraph {
     /// `id` のノードを参照する（`detect.rs` の後方走査から使う）。
     ///
     /// `id` は `push` の不変条件（自ノードより小さい入力 ID のみを許可）
-    /// により常に既存ノードを指すはずだが、本メソッドはその不変条件に
-    /// 依存する呼び出し側からのみ使われる `pub(crate)` API のため、
-    /// 範囲外アクセスは呼び出し側のバグとして扱い `panic` させる
-    /// （`push` が唯一のノード追加経路であり、外部入力の直接検証は
-    /// `push` 側で完結している。本番経路〈ユーザー向け公開 API〉には
-    /// 露出しない `pub(crate)` 内部 API のため `.claude/rules/
-    /// coding-rust.md`「本番経路で unwrap/expect を使わない」の対象外）。
-    pub(crate) fn node(&self, id: FusionNodeId) -> &FusionNode {
-        &self.nodes[id.0]
+    /// により通常は既存ノードを指すが、本メソッドは `pub(crate)` として
+    /// クレート内の広い範囲から呼ばれうる。#163／#164 の結線コードが
+    /// 未検証の `FusionNodeId` をそのまま渡す将来の呼び出しでも範囲外
+    /// アクセスが panic に発展しないよう、範囲検証を本メソッドに一元化し
+    /// `Result` で返す（#399 codex-review 指摘: `pub(crate)` であることは
+    /// `.claude/rules/coding-rust.md`「本番経路で unwrap/expect を使わない」
+    /// の型付きエラー契約を免除する根拠にはならない）。
+    pub(crate) fn node(&self, id: FusionNodeId) -> Result<&FusionNode, FusionGraphError> {
+        self.nodes
+            .get(id.0)
+            .ok_or(FusionGraphError::NodeIdOutOfRange {
+                id: id.0,
+                len: self.nodes.len(),
+            })
     }
 
     /// 新規ノードを追記する。検証を先行させる（OWASP A03。モジュール
@@ -316,12 +321,12 @@ mod tests {
         let relu = g.push(FusionOp::Relu(sum), f32_meta(&[4])).unwrap();
 
         assert_eq!(g.len(), 4);
-        assert_eq!(g.node(relu).op, FusionOp::Relu(sum));
+        assert_eq!(g.node(relu).unwrap().op, FusionOp::Relu(sum));
         // x・y はそれぞれ Add の入力として 1 回ずつ参照される。
-        assert_eq!(g.node(x).use_count, 1);
-        assert_eq!(g.node(y).use_count, 1);
+        assert_eq!(g.node(x).unwrap().use_count, 1);
+        assert_eq!(g.node(y).unwrap().use_count, 1);
         // sum は Relu の入力として 1 回参照される。
-        assert_eq!(g.node(sum).use_count, 1);
+        assert_eq!(g.node(sum).unwrap().use_count, 1);
     }
 
     #[test]
@@ -334,6 +339,17 @@ mod tests {
         assert_eq!(err, FusionGraphError::NodeIdOutOfRange { id: 5, len: 1 });
         // 検証失敗時はノードが追記されない（グラフサイズ不変）。
         assert_eq!(g.len(), 1);
+    }
+
+    #[test]
+    fn node_rejects_out_of_range_id() {
+        // #399 codex-review 指摘: `node` 自体が範囲外 ID を型付きエラーで
+        // 拒否することを直接検証する（push の入力検証を経由しない、
+        // `node` 単独呼び出しの防御境界）。
+        let mut g = FusionGraph::new();
+        let _x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let err = g.node(FusionNodeId(1)).unwrap_err();
+        assert_eq!(err, FusionGraphError::NodeIdOutOfRange { id: 1, len: 1 });
     }
 
     #[test]
@@ -400,6 +416,6 @@ mod tests {
         let a = g.push(FusionOp::Input, f32_meta(&[2, 3])).unwrap();
         let b = g.push(FusionOp::Input, f32_meta(&[3, 5])).unwrap();
         let gemm = g.push(FusionOp::Gemm(a, b), f32_meta(&[2, 5])).unwrap();
-        assert_eq!(g.node(gemm).op, FusionOp::Gemm(a, b));
+        assert_eq!(g.node(gemm).unwrap().op, FusionOp::Gemm(a, b));
     }
 }

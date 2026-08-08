@@ -144,22 +144,15 @@ pub(crate) enum FusionDecision {
 /// `root` が `graph` の範囲外（既存ノード数以上）の場合は
 /// [`FusionGraphError::NodeIdOutOfRange`] を返す（#399 codex-review 指摘:
 /// 本関数は `pub(crate)` だが、後続の本番結線コード（#163／#164）から
-/// 任意の `FusionNodeId` を渡され得るため、`debug_assert!` のみでは
-/// release ビルドで境界検証が失われ `graph.node(root)` の添字アクセスが
-/// 本番経路で panic しうる。呼び出し側のバグ検出という当初の意図は
-/// 型付きエラーとして表現し直し、release ビルドでも同じ検証を維持する）。
+/// 任意の `FusionNodeId` を渡され得る。範囲検証は `FusionGraph::node`
+/// （`graph.rs`）に一元化されており、本関数はそれをそのまま `?` で
+/// 伝播するのみ。呼び出し側のバグ検出という当初の意図は型付きエラー
+/// として表現し直し、release ビルドでも同じ検証を維持する）。
 pub(crate) fn detect_fusion(
     graph: &FusionGraph,
     root: FusionNodeId,
 ) -> Result<FusionDecision, FusionGraphError> {
-    if root.0 >= graph.len() {
-        return Err(FusionGraphError::NodeIdOutOfRange {
-            id: root.0,
-            len: graph.len(),
-        });
-    }
-
-    if !graph.node(root).op.is_elementwise() {
+    if !graph.node(root)?.op.is_elementwise() {
         return Ok(FusionDecision::Fallback(FallbackReason::RootNotElementwise));
     }
 
@@ -179,7 +172,7 @@ pub(crate) fn detect_fusion(
         if !reachable.contains(&id) {
             continue;
         }
-        let node = graph.node(FusionNodeId(id));
+        let node = graph.node(FusionNodeId(id))?;
         if !node.op.is_elementwise() {
             // 融合境界（Gemm/Sum/Max）または Input。ここでは展開せず、
             // 葉抽出（後段）に委ねる。ただし葉として使われる以上、
@@ -228,7 +221,7 @@ pub(crate) fn detect_fusion(
     // 兼ねる。昇順は BTreeSet のイテレーション順そのもの）。
     let mut leaves: BTreeSet<usize> = BTreeSet::new();
     for &id in &included {
-        let node = graph.node(FusionNodeId(id));
+        let node = graph.node(FusionNodeId(id))?;
         for input in node.op.inputs() {
             if !included.contains(&input.0) {
                 leaves.insert(input.0);
@@ -345,7 +338,11 @@ mod tests {
         let c = g.push(FusionOp::Add(b, x), f32_meta(&[8])).unwrap();
         let d = g.push(FusionOp::Relu(c), f32_meta(&[8])).unwrap();
 
-        assert_eq!(g.node(a).use_count, 2, "a は b と c から参照される");
+        assert_eq!(
+            g.node(a).unwrap().use_count,
+            2,
+            "a は b と c から参照される"
+        );
 
         let decision = detect_fusion(&g, d).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
