@@ -25,9 +25,9 @@
     （`docs/spec/04-requirements.md:250`）。GEMM epilogue（bias・activation
     の融合）は別イシュー #203 で拡張する。
 - 利用者向けの融合制御 API は**提供しない**。融合は内部機構としてのみ働き、
-  既存の `Var` 演算経路（`autodiff::eval`）に内部的に組み込む形で実現し、
-  新規の公開エントリ関数は追加しない（経路の具体化は §3.5、`BackendOps`
-  契約との接続は §3.4 で規定する）。
+  `autodiff::Tape` が既に保持する内部状態（`ops`。§3.4）を使う内部
+  実装の一部として実現し、新規の公開エントリ関数は追加しない（適用
+  箇所の具体化は §3.5、`BackendOps` 契約との接続は §3.4 で規定する）。
   - 根拠: REQ-12 受け入れ基準「ライブラリ利用者が明示的に融合を制御する
     API は提供しないこと」（`docs/spec/04-requirements.md:249`）。REQ-11
     読み替え設計（`docs/dispatch-rules-design.md` §1「利用者向けの明示切替
@@ -41,11 +41,12 @@
   - **公開コンストラクタの選択は融合スイッチにならない（codex-review P1
     指摘への回答。本改訂で確定する契約）**: `autodiff::Tape` の公開
     コンストラクタは `Tape::new()`（既存）・`Tape::with_backend(ops)`
-    （§3.4 で新設）の 2 つを持つが、**いずれも同一の内部ディスパッチ
-    経路（`eval::add`／`mul`／`relu`／`exp`／`tanh`。§3.4・§3.5）へ到達
-    する**。融合するか否かはこの内部ディスパッチが判定する次の 2 条件
-    のみで決まり、呼び出し元がどちらの公開コンストラクタを呼んだかには
-    依存しない:
+    （§3.4 で新設）の 2 つを持つが、**いずれも同一の非公開フィールド
+    `ops: Option<Box<dyn BackendOps>>`（§3.4）へ到達し、`Tape::backward`
+    の VJP 連鎖内部（§3.5.2）・将来の複合エントリポイント（§3.5.3）が
+    これを共通して参照する**。融合するか否かはこれらの内部実装が判定
+    する次の 2 条件のみで決まり、呼び出し元がどちらの公開コンストラクタ
+    を呼んだかには依存しない:
     1. **バックエンド解決可否**: 実行に使う `BackendOps` 実装（`ops`）を
        内部方針で解決できたか。`Tape::with_backend(ops)` は解決手段の
        1 つ（呼び出し元が明示供給する）にすぎず、`Tape::new()` も内部で
@@ -57,7 +58,80 @@
       有効化手段ではない（命名・doc コメントも §3.4 でこの理解に統一
       する）。「`with_backend` を呼べば融合し、`new()` は融合しない」と
       いう対応関係を本文書のどこにも記載しない（§3.4・§3.5 の記載を
-      本改訂で統一する）。
+      本改訂で統一する）。「融合対象区間・単一の fallible 呼び出し」の
+      範囲自体は §1「遅延の生存窓は単一の fallible 呼び出しの内部に
+      限定する」（下記）で確定する、より狭い契約に置き換わる。
+  - **遅延の生存窓は単一の fallible 呼び出しの内部に限定する
+    （codex-review 第 5 波 P1 指摘への回答。本改訂で確定する契約。
+    詳細は §3.2・§3.4・§3.5）**: 第 4 波までの設計は `Var::value`／
+    `Var::to_tensor` を非 fallible な公開読み出し境界としたまま、その
+    背後で `Storage::Pending`（未実体化状態）を複数回の独立した公開
+    `Var` 演算呼び出し（`a.add(&b)?.mul(&c)?` のように、各 `?` が別々の
+    呼び出し境界を構成する連鎖）をまたいで持ち越し、実体化失敗を
+    `cache` へ「キャッシュ」して後続の呼び出しで表面化させる方式を
+    採っていた。しかし `value`／`to_tensor` は呼び出し自体が「結果を
+    受け取る」という参照行為であるにもかかわらず、その時点でまだ
+    実体化を試みていない・実体化に失敗していても呼び出し元へ一切
+    通知されない、という**契約破壊**を生む（第 5 波 P1 指摘）。本改訂は
+    実体化を失敗しない境界まで前倒しする案を採る: **`Var` の fallible
+    演算（`add`／`mul`／`matmul`／`sum`／`max`。既に `Result<Var<'_>,
+    AutodiffError>` を返す契約）は、返る前に自分の出力を実体化済みに
+    する**。融合実行の失敗はその演算自身の `Err` として型付きで返り、
+    呼び出し元は結果を受け取った時点で常に実体化済みの値を得る。
+    **`relu`／`exp`／`tanh`（shape 不変の単項演算。「構造的に失敗し
+    えない」という既存設計判断〈`docs/public-api-design.md` §3.2〉に
+    より非 fallible な `fn relu(&self) -> Var<'t>` のまま〈`var.rs:257`
+    以降〉）はこの窓の対象外のままとし、本文書は非 fallible 契約を
+    変更しない**（§3.5.1 で確定する詳細な取り扱いを参照）。したがって
+    利用者が保持する
+    `Var`／公開 `Tensor` は常に実体化済みであり、`value`／`to_tensor`／
+    `get`／`as_slice` の既存非 fallible 契約は完全に不変のまま保たれる
+    （第 4 波で導入した「系統 3」「`Storage::Pending` の `cache` への
+    `Err` キャッシュ」「`value_raw` による内部連鎖読み出しの分離」は
+    本改訂で撤回・削除する。§3.5 で置き換え後の設計を規定する）。
+    融合の効果はこの縮小された窓の内側でのみ得られる（§3.2 (c)・
+    §3.4・§3.5 で具体化）: (a) `Tape::backward` の VJP 連鎖内部（`backward`
+    自体が単一の fallible 呼び出しであり、その内部で複数のノードの
+    VJP 計算を融合しうる）、(b) 単一の fallible 呼び出し内部で複数の
+    elementwise 演算を行う複合エントリポイント（現状の `Var` 演算 API は
+    1 呼び出し 1 演算の粒度であるため、この窓の恩恵は将来
+    `compat::Sequential::forward` 相当〈設計段階。
+    `docs/public-api-design.md`〉や、複数演算を 1 回の `Result` で返す
+    将来の複合演算 API が追加された時点で顕在化する）、(c)
+    `FusionSession::materialize`（§3.4・§3.5.4）の直接呼び出し。**個々の公開
+    `Var` 演算の呼び出しをまたぐ遅延は行わない**。REQ-12 の「透過的
+    融合」（利用者制御 API を提供しないまま融合が働くこと）は、この
+    (a)〜(c) の窓の内側で成立する設計として読み替える。これにより
+    第 1〜4 波で確定した契約（view 適用・融合スイッチ非提供・`Option`
+    へのエラー非流入・公開 `Tensor` 常時実体化）はいずれも「公開
+    `Var` 演算は常に実体化済みの結果を返す」という単純な前提のもとで
+    自動的に成立する（矛盾する記述の整理は §3.2・§3.4・§3.5・§6.1 で
+    横断的に行う）。この縮小の対価として、PoC-9 実測（`ew4`／`ew6`）が
+    示す 2.25〜3.19 倍の高速化は、独立した公開 `Var` 呼び出しをまたぐ
+    elementwise 連鎖（現状の API 形状そのもの）には及ばなくなる。
+    これを初期スコープの受け入れコストとして §6.2 に明示的に記録する
+    （§1 冒頭の PoC-9 実測引用は連鎖検出（#162）が対象とする IR 一般の
+    妥当性根拠として維持しつつ、公開 API を横断した自動適用の主張は
+    ここで撤回する）。
+    - **比較検討: 「`Result` を返す読み出し API を追加し、遅延値は
+      必ずそこから取得させる」案（不採用）**: 第 5 波指摘が挙げるもう
+      一方の選択肢として、`Var::value`／`Var::to_tensor` の非 fallible
+      契約はそのまま残し、代わりに `Var::try_value`／`Tensor::try_get`
+      相当の `Result` 返却アクセサを新設し、遅延値の実体化失敗はそちら
+      からのみ観測させる、という設計も検討した。この案は `Storage`
+      に「まだ誰も実体化を試みていない」という状態が存在し続けること
+      自体は許容するため、利用者が非 fallible な `value`／`to_tensor`
+      を呼んだ場合には引き続き失敗が通知されない契約破壊が残る
+      （新設した `Result` 版を呼ばない限り安全側にならない、いわば
+      オプトインの回避策にすぎない）。加えて、互換 API 層（REQ-9）が
+      前提とする「自作コアの上の薄いラッパーに徹する」方針に対し、
+      遅延値専用の新しい公開アクセサ系列を追加することは公開 API 面を
+      不必要に広げる（第 4 波で系統 1 について行った比較検討と同じ
+      理由）。採用した前倒し案は、公開シグネチャを一切追加せず
+      （`Var` の演算メソッドは既に `Result` を返す契約であり、そこへ
+      実体化失敗を合流させるだけで済む）、かつ「呼び出し自体が結果
+      参照である」という `value`／`to_tensor` の意味論を字義どおり
+      満たせるため、本改訂ではこちらを採用する。
 - transpose を挟む連鎖は**融合しない（非融合フォールバックへ倒す）**。
   - 根拠: PoC-9 実測（`ew_reshape`）は、fusion **有効時**は transpose が
     メタデータ変換のみで融合セグメントへ取り込まれ、fusion **無効時**は
@@ -216,48 +290,64 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
 |---|------|------|
 | (a) | reduction ノード（`sum`／`max`）へ到達 | PoC-9 実測で reduction エピローグは自動融合対象外（§1）。融合境界ノードとして扱う |
 | (b) | `gemm` ノードへ到達 | PoC-9 実測で matmul をまたぐ融合は分断される（§1）。#203（GEMM epilogue 融合）までは境界として扱う |
-| (c) | 遅延ハンドル（§3.4・§3.5）から `Tensor<f32>` への変換（`into_tensor` 等）、および `autodiff` 側の公開読み出し境界（`Var::value`／`Var::to_tensor`・`Gradients::get`。`var.rs:74`・`var.rs:81` 付近）への到達 | 遅延構築されたグラフの結果を呼び出し元へ返す時点で計算が確定していなければならない。`Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更しないが（§3.4）、`Storage<T>`（非公開）は §3.5 のとおり `Pending` バリアントを持ちうる。`Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）自体はデータを読み出さず現在の実体化状態を覗くだけで、実体化を発火させない（§3.5「実体化の発火点」系統 1）。実体化を発火させるのは `autodiff` 側の公開読み出し境界（`Var::value`／`Var::to_tensor`・`Gradients::get`）と §3.2 (a)(b) の境界ノードであり、これらを経由して利用者へ渡る `Tensor` は実体化試行済みであることが保証される（§3.5 参照） |
+| (c) | 遅延ハンドル（§3.4・§3.5）から `Tensor<f32>` への変換（`FusionSession::materialize` 呼び出し）を含む、**単一の fallible 呼び出しが自身の結果を返す直前**（§1「遅延の生存窓は単一の fallible 呼び出しの内部に限定する」） | 遅延構築されたグラフの結果を呼び出し元へ返す時点で計算が確定していなければならない。`Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更せず、`Storage<T>`（非公開）も `Pending` バリアントを持たない（§3.5 で確定。旧稿は `Pending` バリアントを追加していたが本改訂で撤回する）。したがって `Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）にも「未実体化」を表す分岐は存在しない。実体化を発火させるのは、その fallible 呼び出し自身の内部実装（§3.2 (a)(b) の境界ノード到達、または呼び出しが自身の出力を組み立てて `Ok` を返す直前）だけであり、`autodiff` の外へ渡る値・`Var::value`／`Var::to_tensor`／`Gradients::get` が観測する値は常にこの窓の内側で実体化試行済みである（§3.5 参照） |
 | (d) | 連鎖長上限（4〜6 段）到達 | TASK-12.1 の内容規定（4〜6 段程度）。PoC-9 の代表ワークロード規模（`ew4`／`ew6`）とも整合する上限であり、無制限連鎖によるカーネル生成コスト・レジスタ圧の増大を避ける |
 | (e) | 非融合対象パターン検出（transpose 混在等、`NodeMeta.contiguous == false`）| §1・§2.3 の非融合フォールバック方針 |
-| (f) | 異なる `FusionSession` に属する `Pending` 同士が二項演算で合流 | §3.5「既存の演算経路からの遅延連鎖構築」ケース 4（PR #357 review 再指摘 P1-1／P1-2 への回答）。越境する側を即時実体化してから葉ノードとして埋め込む契約とし、セッション間の循環参照・backend 越境転送を構造的に排除する |
 
 ### 3.3 autodiff との関係
 
 動的テープ式 autodiff（PoC-v2-2、`docs/spec/03-poc/poc-v2-2-autodiff/README.md:170`。
-実装は `crates/autodiff/src/tape.rs`・`eval.rs`）は forward 値計算の
-**下層**で融合が透過に働く構成とする。すなわち:
+実装は `crates/autodiff/src/tape.rs`・`eval.rs`）は、**forward・
+backward いずれの実行方式にも透過的に融合が働きうる**構成とする
+（codex-review 第 5 波 P1 指摘を受けた本改訂での訂正: 旧稿「forward
+値計算の下層」という限定は不正確だった。§1 で確定した「単一の
+fallible 呼び出しの内部」という窓は forward・backward のどちらの
+呼び出しにも同じ形で適用される）。すなわち:
 
-- `Var` の演算メソッドが呼ぶ forward 値計算（`eval.rs`）が内部で融合グラフ
-  を構築・実体化する経路を持つ場合でも、`Tape::push` が記録する
-  `Op`（`tape.rs` の `Op` enum、MatMul／Add／Mul／Relu／Exp／Tanh 等）の
-  ノード単位の粒度は変更しない。
-- 勾配計算（VJP、`grad.rs::vjp`）は `Op` 単位のまま変更しない契約とする。
-  融合はあくまで forward 値計算の実行方式（どうカーネルを呼ぶか）の最適化
-  であり、テープが記録する計算グラフの構造（VJP が辿るノード単位）には
-  影響を与えない。
+- `Tape` が記録する `Op`（`tape.rs` の `Op` enum、MatMul／Add／Mul／
+  Relu／Exp／Tanh 等）のノード単位の粒度は、融合の適用有無に関わらず
+  変更しない。
+- 勾配計算（VJP、`grad.rs::vjp`）は `Op` 単位のまま変更しない契約と
+  する。融合はあくまで**ある単一の fallible 呼び出しの内部でどう
+  カーネルを呼ぶか**という実行方式の最適化であり、テープが記録する
+  計算グラフの構造（VJP が辿るノード単位）には影響を与えない。
+- **実質的な適用箇所（§1 で確定した窓に一致する）**: 個々の `Var`
+  fallible 演算メソッド（`add`／`mul`／`matmul`／`sum`／`max`）は
+  1 呼び出し 1 演算の粒度であり、その内部だけで完結する融合機会は
+  実質存在しない（融合対象は複数演算の連鎖であるため。`relu`／
+  `exp`／`tanh` は非 fallible なままこの窓の対象外。§3.5.1）。透過的
+  融合の実質的な適用箇所は `Tape::backward` の VJP 連鎖内部（窓 (a)。
+  §3.5.2）、および将来追加されうる複合エントリポイント（窓 (b)。
+  §1・§3.5.3）に限られる。
 
 ### 3.4 遅延グラフと `BackendOps`・`Tensor` 契約の接続
 
-（PR #357 review 指摘への対応で追加。§1・§3.1〜3.3 は「透過的」「遅延
-構築」という表現のみで、遅延グラフの所有場所・具体的な型・`BackendOps`
-（`crates/tensor-core/src/backend_ops.rs:63`）との接続経路を規定して
-いなかった。`BackendOps` の各メソッドは具体化済みの `Tensor<f32>` を
-受け取り直ちに具体的な `Tensor<f32>` を返す契約であり、`Tensor`
-（`crates/tensor-core/src/tensor.rs:53`）は `Arc<Storage<T>>` を必須で
-保持する公開型としては変わらない。本節はこの契約と遅延グラフをどう接続
-するかを明示する（`Tensor` 自体を経由した実際の伝播経路の具体化は
-§3.5 で行う）。）
+（PR #357 review 指摘への対応で追加。codex-review 第 5 波 P1 指摘を
+受け、本節は §1「遅延の生存窓は単一の fallible 呼び出しの内部に限定
+する」という縮小後の契約に合わせて全面改訂する。§1・§3.1〜3.3 は
+「透過的」「遅延構築」という表現のみで、遅延グラフの所有場所・具体的な
+型・`BackendOps`（`crates/tensor-core/src/backend_ops.rs:63`）との接続
+経路を規定していなかった。`BackendOps` の各メソッドは具体化済みの
+`Tensor<f32>` を受け取り直ちに具体的な `Tensor<f32>` を返す契約であり、
+`Tensor`（`crates/tensor-core/src/tensor.rs:53`）は `Arc<Storage<T>>` を
+必須で保持する公開型としては変わらない。本節はこの契約と遅延グラフを
+どう接続するかを明示する（窓の内側での実際の使用点の具体化は §3.5 で
+行う）。旧稿（第 4 波まで）は遅延グラフを `Tensor` の `Storage` へ
+埋め込み、複数回の独立した公開呼び出しをまたいで持ち越す設計を
+採っていたため、`Storage` から複数箇所で共有されうる `Tensor` の
+`Send + Sync` を保つための `Arc<Mutex<_>>`・`Arc<dyn BackendOps + Send
++ Sync>` 所有モデルを要求していた。本改訂はその前提（遅延グラフが
+`Tensor` を経由して外部へ漏れ出すこと）自体を撤回するため、以下は
+その帰結として全面的に単純化される。）
 
 - **`Tensor` は変更しない**。公開型 `Tensor`（構造体・フィールド型・
   メソッドシグネチャ）は破壊的変更を避ける（公開 API 非破壊はガード
   レール条件、`.claude/rules/security.md`「A08」・
   `docs/spec/04-requirements.md` の REQ-12 受け入れ基準とも整合させる
-  安全側の選択）。ただし `Tensor` が保持する非公開の `Storage<T>`
-  （`tensor.rs:33`。公開 API 面には現れない crate-private 型）自体は
-  §3.5 で「未実体化」を表す内部バリアントを持ちうる拡張を行う。この
-  `Storage` 拡張は `Tensor` の公開契約（構造体の形・メソッド
-  シグネチャ）を変えないため、本項の「`Tensor` は変更しない」という
-  判断とは矛盾しない。
+  安全側の選択）。**非公開の `Storage<T>`（`tensor.rs:33`）にも「未実体化」
+  を表すバリアントは追加しない**（第 4 波までの旧稿は `Storage::Pending`
+  を新設していたが、本改訂で撤回する。§3.5 参照）。`Tensor` は構造体・
+  非公開実装のいずれも本節の変更対象外である。
 - **`BackendOps` trait 自体の契約も変更しない**。既存の各メソッド
   シグネチャ（具体的な `&Tensor<f32>` を受け取り具体的な
   `Result<Tensor<f32>, BackendError>` を返す）は現状のまま維持する。
@@ -269,49 +359,48 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
   （実装は #164 のスコープ。以下は #164 が満たすべき接続契約）:
 
   ```rust
-  /// 遅延構築中の値。§3.5 が規定する既存呼び出し経路（`autodiff::eval`
-  /// の `add`/`mul`/`relu`/`exp`/`tanh`）が、`Tensor` の `Storage` 経由で
-  /// 暗黙に受け渡す（§3.5。利用者向け公開 API・`Var`/`Tensor` のシグネチャ
-  /// はいずれも変更しない）。`Tensor` を置き換えるものではなく、`Tensor`
-  /// とは別の内部表現。
+  /// 単一の fallible 呼び出し（`Tape::backward` 内の VJP 連鎖、または
+  /// 将来の複合エントリポイント。§1）の実行スタック内だけで構築・破棄
+  /// される、融合対象区間 1 本分のグラフビルダー。呼び出し元の関数
+  /// フレームを越えて共有・保持されることはなく、`Tensor`／`Storage`
+  /// のどのフィールドにも格納されない。**`Arc`／`Mutex`／`Send + Sync`
+  /// 境界は一切不要である**（旧稿はこれらを `Storage::Pending` として
+  /// `Tensor` へ埋め込むために要求していたが、その前提自体を §1 で
+  /// 撤回したため本改訂で単純化する）。
+  pub(crate) struct FusionSession<'ops> {
+      graph: FusionGraph,
+      /// このセッションの生存期間だけ借用する `BackendOps` 実装。
+      /// 呼び出し元の関数フレーム内で完結するため所有権を持つ必要が
+      /// ない（下記「ops の受け渡しは借用で足りる」参照）。
+      ops: &'ops dyn BackendOps,
+  }
+
+  /// グラフ構築中に扱う 1 つの中間値。既に確定済みの `Tensor<f32>`
+  /// （葉ノード・外部から渡された既存値）か、`session` 内にまだ実行
+  /// していないノードとして積まれているか（`Pending`）のいずれか。
+  /// `Pending` はこの呼び出しが所有する `FusionSession` のグラフ内に
+  /// のみ存在し、呼び出しの外へ持ち出されることはない。
   pub(crate) enum FusionValue {
-      /// 既に実体化済み（葉ノード・過去の実体化結果）。
       Materialized(Tensor<f32>),
-      /// 未実体化。`session` が保持する `FusionGraph`（§2.2）内の
-      /// `FusionNodeId` を指す。
-      Pending {
-          session: FusionSession,
-          node: FusionNodeId,
-      },
+      Pending(FusionNodeId),
   }
 
-  /// 1 回の融合対象区間（連鎖 1 本）に対応するグラフの所有者。
-  /// `Arc<Mutex<FusionGraph>>` に加え、実体化に使う `BackendOps` 実装
-  /// 自体（`ops`）をセッション生成時点で所有値として捕獲する（下記
-  /// 「ops 解決の所有モデル」参照。単一スレッド内で完結するディスパッチ
-  /// 層のローカル値として構築・破棄される点は変更しない）。
-  #[derive(Clone)]
-  pub(crate) struct FusionSession {
-      graph: std::sync::Arc<std::sync::Mutex<FusionGraph>>,
-      /// このセッションが実体化に使う `BackendOps` 実装（後述「ops 解決の
-      /// 所有モデル」）。`Storage::Pending`（§3.5）に埋め込まれた
-      /// `FusionSession` のクローンだけで、追加引数なしに `&self` の
-      /// `Tensor::get`／`Tensor::as_slice`（§3.2 (c)）から実体化を発火
-      /// できるようにするための必須フィールドである。
-      ops: std::sync::Arc<dyn BackendOps + Send + Sync>,
-  }
-
-  impl FusionValue {
-      /// §3.2 の実体化条件 (a)〜(e) いずれかに到達した時点でディスパッチ層
-      /// が呼ぶ。`Pending` を `Tensor<f32>` へ変換し、以降の消費者
-      /// （呼び出し元・後続の非融合 `BackendOps` 呼び出し）へ渡す。
-      /// `ops` は外部から渡さず `session` が既に保持する値を使う
-      /// （§3.2 (c) が要求する「`&self` のみの `get`／`as_slice` からも
-      /// 呼べる」制約に合わせたシグネチャ）。
-      pub(crate) fn into_tensor(self) -> Result<Tensor<f32>, BackendError> {
-          match self {
+  impl<'ops> FusionSession<'ops> {
+      /// §3.2 の実体化条件 (a)〜(e) のいずれかに到達した時点、または
+      /// 呼び出し元の fallible 関数が自身の結果を返す直前に呼ぶ。
+      /// `FusionValue::Materialized` はそのまま返し、`Pending` は
+      /// `self.graph`／`self.ops` を使って実際に計算する。
+      pub(crate) fn materialize(&self, value: FusionValue) -> Result<Tensor<f32>, BackendError> {
+          match value {
               FusionValue::Materialized(t) => Ok(t),
-              FusionValue::Pending { session, node } => session.materialize(node),
+              FusionValue::Pending(node) => {
+                  // `FusionPlan::from_graph`／`FusionGraph::leaves` の
+                  // シグネチャは下記「`FusionPlan` の構築・葉の収集」で
+                  // 確定する（実装は #163／#164）。
+                  let plan = FusionPlan::from_graph(&self.graph, node);
+                  let leaves: Vec<&Tensor<f32>> = self.graph.leaves().iter().collect();
+                  self.ops.run_fused(&plan, &leaves)
+              }
           }
       }
   }
@@ -321,48 +410,26 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
     `dispatch.rs` の既存方針（`select_gemm_kernel` は環境変数・グローバル
     設定による経路上書きを持たない副作用なしの純関数設計、
     `crates/tensor-core/src/dispatch.rs:9-17`）と整合させるため、融合
-    グラフの所有もディスパッチ層のローカル値（1 連鎖のエントリで生成し
-    連鎖終了で破棄する明示的な値）に限定し、暗黙のグローバル・
-    スレッドローカルレジストリを設けない。
-  - `Arc<Mutex<_>>`（当初案の `Rc<RefCell<_>>` から本改訂で変更。理由は
-    下記）を採る。融合対象区間自体は 1 回のディスパッチ呼び出し内で閉じ
-    スレッドを跨がない（§3.1 の前提は変わらない）が、`FusionSession` は
-    §3.5 のとおり `Storage<T>::Pending`（`Tensor` が `Arc` 経由で複数
-    箇所から共有されうる非公開フィールド）に埋め込まれる。`Element`
-    trait は既に `Copy + Send + Sync + ...`（`crates/tensor-core/src/element.rs:24`）
-    を要求しており、`Tensor<T>`（`Arc<Storage<T>>`）は現状この境界により
-    自動的に `Send + Sync` になる。`Storage::Pending` の内部に
-    `Rc<RefCell<_>>` を置くと `Tensor<T>` から暗黙に `Send`/`Sync` が
-    失われ、`backend-cpu` の `rayon`（`crates/backend-cpu/src/elementwise.rs:62`
-    以降・`gemm.rs:30`）が前提とする「複数スレッドから安全に扱える」
-    という既存の暗黙契約を破壊する非破壊のはずの `Storage` 拡張が実は
-    破壊的変更になってしまう（Cursor Bugbot 想定指摘に先回りする本改訂
-    の変更点）。`Arc<Mutex<_>>` を採ることで `Tensor<T>: Send + Sync` を
-    崩さない。`Mutex` のロック競合は 1 融合セグメント＝1 ディスパッチ
-    呼び出しに閉じるため実務上は無視できる想定（実測は #164 の受け入れ
-    条件に含める）。`Storage::Pending` が保持するもう一方の値
-    `Arc<dyn BackendOps + Send + Sync>`（下記「ops 解決の所有モデル」）が
-    `Send + Sync` であることも同じ理由で必要であり、`Tensor<T>: Send + Sync`
-    は `Arc<Mutex<FusionGraph>>` と `Arc<dyn BackendOps + Send + Sync>` の
-    **両方**が揃って初めて成立する（Codex P1 指摘への回答は次段落）。
-
-  **ops 解決の所有モデル（P1 指摘「実体化時に使用する `BackendOps` を
-  取得できない」への回答）**:
-
-  - `FusionSession::materialize`（内部で `run_fused` を呼ぶ）は、外部から
-    毎回渡される `&dyn BackendOps` ではなく、**セッション生成時に捕獲し
-    所有した `Arc<dyn BackendOps + Send + Sync>`** を使う。理由: `Tensor::get`／
-    `Tensor::as_slice`（`tensor.rs:201`・`tensor.rs:231`、公開 API・
-    `&self` のみで追加引数を取れない）から実体化を発火する契約（§3.2 (c)）
-    である以上、`FusionSession` 自身が実体化に必要な情報をすべて所有値
-    として持っていなければならない。借用 `&dyn BackendOps` はライフタイム
-    を `Tensor`／`Storage` へ伝播でき（`Tensor` は `'static` 相当の寿命を
-    要求される公開型）ないため不採用とする。
-  - **`BackendOps` trait 定義（`backend_ops.rs:82`）自体は変更しない
-    （Codex P1 指摘「`Send + Sync` スーパートレイト追加は既存の外部実装を
-    破壊する」への回答。本改訂で撤回・訂正する）**: 旧稿は `BackendOps`
-    に `Send + Sync` をスーパートレイトとして追加し「既存 3 実装は無条件に
-    満たすため非破壊」としていたが、これは誤りだった。`BackendOps` は
+    グラフの所有もディスパッチ層のローカル値（1 回の fallible 呼び出しの
+    実行中にのみ生成し、その呼び出しが返る前に破棄する明示的な値）に
+    限定し、暗黙のグローバル・スレッドローカルレジストリを設けない。
+  - **`ops` の受け渡しは借用で足りる（codex-review 第 5 波 P1 指摘を
+    受けた本改訂での単純化）**: 旧稿（第 4 波まで）は `FusionSession` を
+    `Arc<Mutex<FusionGraph>>`・`Arc<dyn BackendOps + Send + Sync>` として
+    所有値で保持していた。理由は「`Storage::Pending`（`Tensor` が `Arc`
+    経由で複数箇所から共有されうる非公開フィールド）へ埋め込まれ、
+    `&self` のみの `Tensor::get`／`as_slice` から追加引数なしに実体化を
+    発火できる必要がある」ことだった。本改訂は §1 のとおり `Storage` に
+    `Pending` バリアントを一切追加しない契約へ縮小したため、この前提
+    そのものが消滅する。`FusionSession` は呼び出し元の関数フレーム内で
+    構築され、その関数が返る前に消費し尽くされる（`materialize` を呼び
+    終えたら破棄される）ローカル値であるため、`graph: FusionGraph`
+    （所有値。`Arc`／`Mutex` 不要）・`ops: &'ops dyn BackendOps`
+    （借用。`Arc`／`Send + Sync` 不要）で足りる。`Mutex` によるロック・
+    スレッド越境共有への配慮（旧稿が検討していた懸念）はそもそも
+    生じない。
+  - **`BackendOps` trait 定義（`backend_ops.rs:82`）自体は変更しない**:
+    `Send + Sync` をスーパートレイトとして追加しない。`BackendOps` は
     `pub trait` であり、本リポ外の crate が独自に実装する可能性を
     排除できない（trait 定義側の変更が非破壊かどうかは自クレート内の
     実装数ではなく、trait を実装しうる全ての利用者に対して判定する
@@ -372,207 +439,75 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
     `BackendOps` 実装（内部可変状態に `Rc`／`RefCell` 等を使う実装）は
     コンパイル不能になり、破壊的変更（`!` 接頭辞・`BREAKING CHANGE:` 告知
     が必要な変更。`.claude/rules/conventional-commits.md`）に該当する。
-  - 本改訂は Codex 指摘が挙げた代案「`FusionSession` が保持する専用
-    ラッパー側だけに `Send + Sync` を要求する」を採用する。`BackendOps`
-    trait 定義は変更せず、`FusionSession`／`Tape::with_backend`／
-    `ops_for_arc` 等、融合機構が実際に `Arc` として所有・スレッド境界を
-    越えて保持する箇所でのみ**トレイトオブジェクト側**に
-    `Arc<dyn BackendOps + Send + Sync>` という束縛を課す（trait
-    定義への `Send + Sync` 追加ではなく、trait オブジェクト型の指定に
-    `+ Send + Sync` を付けるだけであり、これは呼び出し側の型注釈に
-    留まる非破壊な変更）。既存の `&dyn BackendOps`（`ops_for` 等、融合を
-    経由しない既存経路。§3.4 冒頭）は今までどおり `Send`／`Sync` を要求
-    しないため、この経路を使う既存の外部実装は本改訂の影響を一切受けない。
-    影響を受けるのは「`Tape::with_backend`／`ops_for_arc` を呼んで
-    backend を明示供給したい」利用者のみであり、その場合に限り自身の
-    `BackendOps` 実装が `Send + Sync` を満たす必要がある（満たさない
-    実装は融合機構への接続 API を呼べずコンパイルエラーになるが、既存の
-    非融合経路は影響を受けず既存コードは変更なしにコンパイルが通り
-    続ける）。
-    `backend-cpu`／`backend-cuda`／`backend-metal` の 3 実装はいずれも
-    内部可変状態を持たないディスパッチ用の空構造体・関数集合であり、
-    この境界を無条件に満たす（CI の
-    `cargo clippy --workspace --all-targets --all-features` で回帰検知
-    できる）。
-  - **`Arc<dyn BackendOps + Send + Sync>` をどの時点で捕獲するか（Codex 再指摘
-    「バックエンドの供給方法が未定義のまま設計を確定している」への回答。
-    本改訂で確定する）**: `FusionSession` を最初に開くのは §3.5 の
-    `eval::add`／`mul`／`relu`／`exp`／`tanh`（`crates/autodiff/src/eval.rs`）
-    だが、これらの関数は**現状シグネチャに `Device`／`BackendOps` を
-    一切持たない**（同ファイル冒頭 doc コメント「`backend-cpu`
-    （TASK-1.6・#20 以降）がまだ未完のため、TASK-1.9（バックエンド抽象層
-    への接続）で backend 経由の実行に置き換えるまでの暫定実装」）。
-    当初案（本節旧稿）は供給元を「#164 が確定する実装詳細」とし、暫定
-    既定値として `Device::Cpu` 固定を排除しない、という**未確定のまま**
-    にしていた。これは 2 点で成立しない: (i) `Var`／`Tensor` は
-    device/backend 情報を一切保持しない設計（§3.4 冒頭「`Tensor` は
-    変更しない」）のため、`Device::Cpu` 固定を選ぶと利用者が選択した
-    CUDA／Metal backend を伝達する経路が存在しないまま既定化され、
-    `docs/public-api-design.md` §4.1「既定デバイス選択ロジック（本節の
-    未決事項）は…実装しない（列挙と明示選択のみを提供する。ユーザー
-    承認が必要な事項のため自動運転では安全側に倒した）」という本リポ
-    全体の確立済み方針（TASK-1.9・#46）に反する。(ii) 一方で供給元を
-    「#164 が確定する」とだけ書くと、公開 API を含む供給契約が本文書
-    （TASK-12.1a の成果物）に存在しないまま後続イシューへ丸投げされる
-    ことになり、これ自体が指摘の対象である。**本節はこの (i)(ii) の
-    論拠を、以降「`Tape::new()` が融合へ到達してはならない理由」としてで
-    はなく「既定バックエンド解決が現時点では不能である理由」として読み
-    替える（PR #357 review 後の P1 指摘「公開コンストラクタの選択が融合
-    スイッチになっている」への回答。§1「公開コンストラクタの選択は融合
-    スイッチにならない」で確定した契約に合わせる本改訂）。** すなわち
-    `Device::Cpu` 固定という**具体的な既定デバイスを本文書で名指しする
-    ことは禁止のまま**であるが、「既定バックエンド解決という内部方針の
-    解決ステップ自体」は §1 の契約が要求する 2 条件の 1 つ（バックエンド
-    解決可否）として存在してよい。本改訂は Codex 指摘文が挙げた代案
-    「`Tape` が backend を所有し生成時に明示選択する」を、供給**手段**の
-    1 つ（`Tape::with_backend`）として採用しつつ、供給契約全体は `Tape`
-    の公開コンストラクタとして今ここで確定する（コード変更自体は #164
-    のスコープ。本書はコード変更を含まないという TASK-12.1a の制約を
-    維持しつつ、公開 API 契約は以下で確定する）:
-
+    この理由は §1 の窓の縮小とは独立に成り立つ（trait 定義への
+    スーパートレイト追加は、それを要求する側の設計がどう変わっても
+    常に破壊的変更である）ため、本改訂でも維持する。上記の単純化に
+    より、`FusionSession`／`Tape::with_backend`（下記）のいずれも
+    `Send + Sync` を要求しない（旧稿はトレイトオブジェクト型の指定にの
+    み `+ Send + Sync` を課していたが、その必要性自体が消滅したため
+    本改訂で撤回する）。
+  - **`ops` をどの時点で・どの形で受け渡すか（codex-review 第 5 波 P1
+    指摘を受けた本改訂での単純化）**: `FusionSession` を開くのは §3.5 の
+    とおり `Tape::backward` の VJP 連鎖内部、または将来の複合エントリ
+    ポイント（§1 (b)）であり、いずれも `Tape` が既に保持する
+    `BackendOps` 実装を使う。`Tape` は非公開フィールドとして
+    `ops: Option<Box<dyn BackendOps>>` を保持する（`None` はバックエンド
+    解決が不能だった場合、`Some` は解決に成功した場合を表す。フィールド
+    追加は `Tape` の構造体を非公開のまま拡張するだけであり、`pub`
+    フィールドを持たない現行の `Tape`（`tape.rs:140`）の公開契約を
+    破らない）。旧稿（第 4 波まで）は `Storage::Pending` へ埋め込むために
+    `Arc<dyn BackendOps + Send + Sync>` の所有値・`ops_for_arc`（`ops_for`
+    の `Arc` 版姉妹関数）を新設していたが、§1 の窓の縮小によりこの前提
+    が消滅したため、本改訂で `Box<dyn BackendOps>`（`Send + Sync` 不要・
+    `ops_for_arc` 新設も不要）へ単純化する。`Tape::backward`（下記）は
+    `self.ops.as_deref()`（`Option<&dyn BackendOps>`）を、VJP 連鎖の
+    融合を行う内部ヘルパーへ**借用として**渡す（§3.4 冒頭「`FusionSession`
+    は借用 `ops: &'ops dyn BackendOps` を保持する」）。`FusionSession` は
+    その呼び出しの実行中だけ生存するローカル値であるため、所有権の移動・
+    `Arc` によるクローンはいずれも不要である。
     ```rust
     impl Tape {
         /// 既存の既定コンストラクタ（`tape.rs:154`）。シグネチャは
         /// 変更しない（非破壊）。**内部では `with_backend` と同一の
-        /// ディスパッチ経路（`eval::add` 等。§3.5）へ到達する**: 既定
-        /// バックエンド解決を内部方針として試み、解決できればそのまま
-        /// `FusionSession` を開始しうる状態で `eval::add` 等を呼ぶ（§1
-        /// 「公開コンストラクタの選択は融合スイッチにならない」）。
-        /// **既定バックエンド解決の具体的な規則（どの `Device` をどう
-        /// 選ぶか）は本文書では確定しない**（`docs/public-api-design.md`
-        /// §4.1「既定デバイス選択ロジックは…実装しない」・本節冒頭 (i)(ii)
-        /// の論拠のとおり、CUDA 既定有効化を含む構成決定はユーザー承認
-        /// 必須のまま未確定。§6.2 に未決事項として記録する）。**この
-        /// 規則が確定するまでの間、`Tape::new()` 経由の既定バックエンド
-        /// 解決は常に失敗し、`eval::add` 等は `FusionSession` を開始
-        /// せず既存の暫定 CPU 参照実装（`eval.rs` 冒頭コメント）へ
-        /// フォールバックする**。これは「`new()` だから融合しない」と
-        /// いう公開 API 起因の分岐ではなく、「バックエンド解決可否」と
-        /// いう内部方針が現時点で不能という判定結果にすぎない（規則が
-        /// 確定すれば `Tape::new()` 経由でも解決に成功しうる）。既存
-        /// テスト資産（TASK-1.5〜1.8 等）はこのパスを使い続けており、
-        /// 現時点の挙動もシグネチャも本改訂で変更しない（非破壊）。
+        /// フィールド（`ops`）へ到達する**: 既定バックエンド解決を内部
+        /// 方針として試み、解決できれば `Some` を、できなければ `None` を
+        /// `self.ops` に保持する（§1「公開コンストラクタの選択は融合
+        /// スイッチにならない」）。**既定バックエンド解決の具体的な規則
+        /// （どの `Device` をどう選ぶか）は本文書では確定しない**
+        /// （`docs/public-api-design.md` §4.1「既定デバイス選択ロジックは
+        /// …実装しない」の方針のとおり、CUDA 既定有効化を含む構成決定は
+        /// ユーザー承認必須のまま未確定。§6.2 に未決事項として記録する）。
+        /// **この規則が確定するまでの間、`Tape::new()` 経由の既定
+        /// バックエンド解決は常に失敗し、`self.ops` は `None` のままと
+        /// なる**。これは「`new()` だから融合しない」という公開 API
+        /// 起因の分岐ではなく、「バックエンド解決可否」という内部方針が
+        /// 現時点で不能という判定結果にすぎない（規則が確定すれば
+        /// `Tape::new()` 経由でも解決に成功しうる）。既存テスト資産
+        /// （TASK-1.5〜1.8 等）はこのパスを使い続けており、現時点の
+        /// 挙動もシグネチャも本改訂で変更しない（非破壊）。
         pub fn new() -> Tape { /* 既存実装のまま */ }
 
         /// バックエンドを明示供給するコンストラクタ（実装は #164。本節が
-        /// 確定する供給契約）。**融合を有効化する手段ではない**（§1）:
-        /// 融合するか否かは §1 の 2 条件（バックエンド解決可否・演算列の
-        /// 融合可否判定）のみで決まり、本コンストラクタは「バックエンド
-        /// 解決」を呼び出し元の明示供給で満たす 1 手段にすぎない。`ops`
-        /// は呼び出し元が明示的に選択した backend を **所有値** として
-        /// 渡す（`ops_for_arc(&providers, device)`。下記「`ops_for` と
-        /// `Arc` の不整合（Codex 再指摘）への回答」参照）。**既定デバイス
+        /// 確定する供給契約。TASK-1.9「backend 経由の実行への置き換え」
+        /// の一環として新設する）。**融合を有効化する手段ではない**
+        /// （§1）: `Tape::backward` が VJP 連鎖内部で融合できるかは
+        /// §1 の 2 条件（バックエンド解決可否・演算列の融合可否判定）
+        /// のみで決まり、本コンストラクタは「バックエンド解決」を
+        /// 呼び出し元の明示供給で満たす 1 手段にすぎない。**既定デバイス
         /// 選択ロジックはここでも導入しない**（`docs/public-api-design.md`
         /// §4.1 の確立済み方針を踏襲。`Device::Cpu` への暗黙フォール
-        /// バックは行わない）。`ops` の型は
-        /// `BackendOps` trait 定義自体は変更せず、本コンストラクタの
-        /// 引数型としてのみ `+ Send + Sync` を課す（上記「ops 解決の
-        /// 所有モデル」で訂正済み。trait への破壊的スーパートレイト追加は
-        /// 行わない）。この束縛により `Arc<dyn BackendOps + Send + Sync>`
-        /// はスレッド境界を越えて `Storage::Pending`（`Tensor<f32>` 経由）へ
-        /// 格納しても `Tensor<T>: Send + Sync`（§3.4 冒頭「`Arc<Mutex<_>>`
-        /// を採ることで…崩さない」）を壊さない。
-        pub fn with_backend(ops: std::sync::Arc<dyn BackendOps + Send + Sync>) -> Tape {
-            /* 既存フィールドに `ops: Arc<dyn BackendOps + Send + Sync>` を追加保持
-               する以外は `Tape::new()` と同じ初期化（実装は #164）。 */
+        /// バックは行わない）。
+        pub fn with_backend(ops: Box<dyn BackendOps>) -> Tape {
+            /* 既存フィールドに `ops: Option<Box<dyn BackendOps>> = Some(ops)`
+               を追加保持する以外は `Tape::new()` と同じ初期化（実装は #164）。 */
         }
     }
     ```
-
-    **`ops_for` と `Arc` の不整合（Codex 再指摘。本改訂で解消）への回答**:
-    当初案は「既存 `ops_for(&providers, device)`（`backend_ops.rs:88-115`）
-    の戻り値をそのまま `Tape::with_backend` へ渡す」としていたが、
-    `ops_for` の戻り値は `Result<&'a dyn BackendOps, BackendError>`（借用）
-    であり、元の所有者（`providers: &[&'a dyn BackendOps]` の各要素が
-    指す実体）の情報なしに `Arc<dyn BackendOps + Send + Sync>` へ変換することはできない
-    （`Arc::new(*borrowed)` は `dyn BackendOps` が `Sized` でないため
-    コンパイルできず、`unsafe` な再構築も行わない）。既存 `ops_for` は
-    §1・§3.4・§3.5 のとおり「`&dyn BackendOps` を直接呼ぶ既存経路（融合
-    非対応のまま据え置く経路）」が使う関数であり、その借用ベースの
-    シグネチャ自体は変更しない（既存呼び出し元・テストへの非破壊）。
-
-    バックエンドを明示供給する経路（`Tape::with_backend`）は、これとは別に
-    `tensor-core` へ次の関数を **非破壊な追加** として新設する（実装は
-    #164。`ops_for` と同じ選択ロジックを `Arc` ベースの入力へ適用する
-    だけの姉妹関数であり、既存 `ops_for` の置き換えではない）:
-
-    ```rust
-    /// `ops_for`（`backend_ops.rs:88`）の `Arc` 版。呼び出し元が
-    /// `Arc<dyn BackendOps + Send + Sync>` として所有する backend 集合（例:
-    /// `vec![Arc::new(CpuOps::new()) as Arc<dyn BackendOps + Send + Sync>, ...]`。
-    /// 各バックエンド実装は元々値として構築されるため、呼び出し元が
-    /// `Arc::new(..)` で包むだけで用意できる）から `device` に一致する
-    /// 実装を選び、参照カウントを 1 増やして clone を返す（実体データの
-    /// コピーは発生しない。`Arc::clone` は O(1)）。`Tape::with_backend`
-    /// が要求する所有値の `Arc<dyn BackendOps + Send + Sync>` はこの関数の戻り値を
-    /// 渡す（`ops_for` の借用戻り値は渡せないため使わない）。
-    ///
-    /// 対応する実装が見つからない場合の挙動（`BackendError::DeviceUnavailable`）
-    /// は `ops_for` と同一の意味論を保つ。
-    pub fn ops_for_arc(
-        ops: &[std::sync::Arc<dyn BackendOps + Send + Sync>],
-        device: Device,
-    ) -> Result<std::sync::Arc<dyn BackendOps + Send + Sync>, BackendError> {
-        ops.iter()
-            .find(|candidate| candidate.device() == device)
-            .cloned()
-            .ok_or_else(|| {
-                BackendError::DeviceUnavailable(format!(
-                    "no BackendOps registered for device {device:?}"
-                ))
-            })
-    }
-    ```
-
-    - `ops_for`（既存）と `ops_for_arc`（新設）はどちらも
-      `tensor-core::backend_ops` に共存し、呼び出し元が持つコレクションの
-      所有形態（借用スライス／`Arc` 所有）に応じて使い分ける。融合の
-      ディスパッチ経路を経由しない既存経路・テストは引き続き `ops_for`
-      を使い、`Tape::with_backend` を呼ぶ経路（backend を明示供給する
-      呼び出し元）は `ops_for_arc` を使う。両者の選択ロジック（`device`
-      一致検索・
-      `DeviceUnavailable` の意味論）は同一であり重複実装ではあるが、
-      戻り値の所有形態が異なる（借用 vs `Arc` clone）ため 1 実装に
-      統合できない（`&'a dyn BackendOps` から `Arc<dyn BackendOps + Send + Sync>` を
-      安全に生成する手段がない、上記のとおり）。
-
-    - `Tape` は非公開フィールドとして `ops: Option<Arc<dyn BackendOps + Send + Sync>>`
-      を追加保持する（`None` は既定バックエンド解決が不能だった場合、
-      `Some` はバックエンド解決に成功した場合を表す。解決手段は
-      `Tape::new()` 経由の内部方針による既定解決、`Tape::with_backend()`
-      経由の明示供給のいずれもありうる。フィールド追加は `Tape` の構造体
-      を非公開のまま拡張するだけであり、`pub` フィールドを持たない現行の
-      `Tape`（`tape.rs:140`）の公開契約を破らない）。
-    - `Var::add`／`mul`／`relu`／`exp`／`tanh`（`var.rs:122` 付近）は
-      `self.tape.ops`（`pub(crate)` アクセサ）を読み、`eval::add` 等へ
-      そのまま渡す。`Var` の**公開**シグネチャは変更しない（§3.4 冒頭の
-      制約を維持）。`eval::add`／`mul`／`relu`／`exp`／`tanh`（いずれも
-      `pub(crate)`）は #164 で `ops: Option<Arc<dyn BackendOps + Send + Sync>>` 引数を
-      追加する。これが TASK-1.9 が本来担う「backend 経由の実行への置き
-      換え」の実体でもあり、フュージョン統合はこの置き換えと**同時に**
-      行う（独立した前提ではなく #164 の作業内容そのものとして扱う）。
-    - `ops` が `None`（バックエンド解決が不能だった場合。現時点では
-      §1「既定バックエンド解決の具体的な規則は本文書で確定しない」
-      （§6.2）ため `Tape::new()` 経由は常にこの分岐を通る）の場合、
-      `eval::add` 等は `FusionSession` を開始せず、`Pending` を生成しない
-      （常に `Storage::Materialized`。§3.5「スコープの明示」と同様の非
-      融合経路）。これにより「バックエンド解決に失敗すれば融合なしの
-      現行動作のまま」という後方互換性が保たれ、`Device::Cpu` への
-      暗黙フォールバックを一切行わない。**この分岐は `Tape::new()` と
-      `Tape::with_backend()` のどちらから呼ばれたかを区別しない**（§1）:
-      両コンストラクタとも `ops` の値（解決結果の有無）だけを見て同じ
-      判定を行う。
-    - これにより「セッション生成時に `Arc<dyn BackendOps + Send + Sync>` を捕獲する」
-      という本節の前提が満たされる: `Tape::with_backend(ops)` で生成した
-      `Tape` 上で `eval::add` が `Pending` を新規に開始する際、
-      `self.tape.ops`（`Some` であることが呼び出し前提）をそのまま
-      `FusionSession::new(ops)` へ渡し、以降の `Pending` 複製（延伸）は
-      すべて同じ `Arc` をクローンして引き継ぐ（§3.5 で具体化）。
-- **実際のカーネル呼び出し経路（`FusionValue::into_tensor` の内部実装が
-  呼ぶ `FusionSession::materialize`）は `BackendOps` の非破壊拡張
-  （デフォルトメソッド）で提供する**。`backend_ops.rs` 冒頭コメントが
-  既に採用している拡張パターン（「`BackendOps` の非破壊拡張（デフォルト
-  メソッド追加等）」`backend_ops.rs:27` 付近）をそのまま踏襲する。
+- **実際のカーネル呼び出し経路（`FusionSession::materialize` が内部で
+  呼ぶ `run_fused`）は `BackendOps` の非破壊拡張（デフォルトメソッド）で
+  提供する**。`backend_ops.rs` 冒頭コメントが既に採用している拡張
+  パターン（「`BackendOps` の非破壊拡張（デフォルトメソッド追加等）」
+  `backend_ops.rs:27` 付近）をそのまま踏襲する。
 
   Cursor Bugbot 指摘（本 PR review）への修正: 当初案は `run_fused` の
   引数型 `FusionPlan` を未定義のまま `pub trait BackendOps`（外部クレート
@@ -631,18 +566,43 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
   /// 内部 IR の表現変更が `FusionPlan` の公開契約に波及しないようにする
   /// ため）。
   pub struct FusionPlan {
-      // `Rc` ではなく `Arc` とする（`FusionSession` の `Arc<Mutex<_>>` 化
-      // と同じ Send/Sync 保持の理由。上記「ops 解決の所有モデル」直前の
-      // 段落参照）。
-      graph: std::sync::Arc<FusionGraph>,
+      // 所有値として構築する（`Arc`／`Rc` は不要）。`FusionSession::materialize`
+      // が `self.graph`〈§3.4 冒頭。ローカル所有の `FusionGraph`〉から
+      // その場で構築し、`run_fused` の呼び出しが終わるまでの間だけ
+      // 生存すれば足りる（旧稿は `Storage::Pending` へ埋め込む前提で
+      // `Arc` 所有・`Send + Sync` 保持を要求していたが、§1 の窓の縮小に
+      // よりこの前提は消滅した。本改訂で単純化する）。
+      graph: FusionGraph,
   }
 
-  // 以下はシグネチャのみを確定するスケッチであり、本体の実装は #163
-  // が担う（§2.1／§2.2／§3.4 冒頭の `FusionOp`／`FusionSession` の
-  // シグネチャスケッチと同じ体裁。「アクセサをいつか追加する」という
-  // 先送りではなく、外部 backend が呼べる関数シグネチャそのものを
-  // 本文書で確定する）。
+  /// `FusionPlan` の構築・葉の収集（codex-review 第 5 波指摘への回答。
+  /// `FusionSession::materialize`〈上記〉が呼ぶ `FusionPlan::from_graph`／
+  /// `FusionGraph::leaves` のシグネチャを本改訂で確定する。「アクセサは
+  /// いずれ追加する」という先送りを避けるため、`impl FusionPlan` の
+  /// 公開 DTO アクセサ〈下記〉と同じ体裁でここに固定する）。
+  impl FusionGraph {
+      /// このグラフに登録済みの葉ノード（`FusionOp::Input`。§2.1）に
+      /// 対応する実体 `Tensor<f32>` を発生順に返す。グラフ構築側
+      /// （`FusionSession` へのノード追加処理。実装は #164）が
+      /// `FusionOp::Input` の追加と同時に記録する（`pub(crate)`。
+      /// `tensor-core` 内から `FusionSession::materialize` のみが呼ぶ）。
+      pub(crate) fn leaves(&self) -> &[Tensor<f32>];
+  }
+
   impl FusionPlan {
+      /// `graph` のうち `root` を出力とする部分グラフから融合対象区間
+      /// （境界ノード Gemm／Sum／Max を含まない、§3.2 (a)(b) で実体化
+      /// 済みの部分より内側）を切り出し、`FusionPlan` を構築する
+      /// （`pub(crate)`。実装は #163／#164。§2.4 の fan-out 情報
+      /// 〈`NodeMeta.use_count`〉もこの構築時に算出し、下記
+      /// `use_count` アクセサへ引き継ぐ）。
+      pub(crate) fn from_graph(graph: &FusionGraph, root: FusionNodeId) -> FusionPlan;
+
+      // 以下はシグネチャのみを確定するスケッチであり、本体の実装は #163
+      // が担う（§2.1／§2.2／§3.4 冒頭の `FusionOp`／`FusionSession` の
+      // シグネチャスケッチと同じ体裁。「アクセサをいつか追加する」という
+      // 先送りではなく、外部 backend が呼べる関数シグネチャそのものを
+      // 本文書で確定する）。
       /// 発生順（トポロジカル順。§2.2「ノードは発生順に `Vec` へ追記」）
       /// で `FusedOpKind` を列挙する。#163 はこの順で辿ることで、各
       /// ノードの入力（`lhs`／`rhs`／`input` が指す `FusedNodeIndex`）が
@@ -697,767 +657,272 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
   }
   ```
 
-  - `FusionSession::materialize` は自身が所有する `self.ops`
-    （`Arc<dyn BackendOps + Send + Sync>`。上記「ops 解決の所有モデル」）から
-    `FusionGraph` を `FusionPlan` へ構築したうえで `self.ops.run_fused(&plan, leaves)`
+  - `FusionSession::materialize` は自身が借用する `self.ops`
+    （`&'ops dyn BackendOps`。§3.4 冒頭）を使い、`self.graph` から
+    `FusionPlan` を構築したうえで `self.ops.run_fused(&plan, leaves)`
     を試し、`BackendError::Unsupported` が返った場合は §4 の fail-safe
     方針に従い、グラフのノードを発生順に辿って既存の
     `add`／`mul`／`relu`／`exp`／`tanh` 呼び出しへ 1 段ずつ逐次
     フォールバックする（融合の有無に関わらず最終結果は同一の数値一致
-    複合判定を満たす。§4）。追加の `ops` 引数を外部から要求しないため、
-    §3.2 (c) の「`&self` のみの `get`／`as_slice` から発火できる」制約を
-    満たす。
-  - `run_fused` はデフォルト実装を持つため、既存の 3 バックエンド
-    実装（CPU／CUDA／Metal）は本節追加時点で override 不要のまま
-    コンパイルが通る（trait の破壊的変更にならない）。`BackendOps`
-    trait 定義自体には手を加えないため（上記「ops 解決の所有モデル」で
-    訂正済み。`Send + Sync` は `Tape::with_backend`／`ops_for_arc` の
-    引数・戻り値型としてのみ課す）、`run_fused` 追加とあわせて既存の
-    外部 `BackendOps` 実装への影響はない。
-- **まとめ（2 件の P1 指摘への回答。本改訂で確定）**: 「遅延値を保持
-  できる `Tensor` 表現への変更」は採らない（`Tensor` 不変）。「別の内部
-  lazy handle」（`FusionValue`／`FusionSession`）を採用する。「連鎖全体を
-  受け取る明示的な内部 API」として `BackendOps::run_fused`（非破壊拡張の
-  デフォルトメソッド）を追加する。グラフの所有は `FusionSession` が
-  `Arc<Mutex<FusionGraph>>` として明示的に保持し（`Tensor<T>: Send + Sync`
-  を壊さないよう `Rc<RefCell<_>>` から本改訂で変更）、実体化に使う
-  `BackendOps` 実装自体も `FusionSession` が `Arc<dyn BackendOps + Send + Sync>` として
-  所有値で保持する（外部から都度渡す借用ではない）。この `Arc<dyn BackendOps + Send + Sync>`
-  はセッションを開始する `eval::add`／`mul`／`relu`／`exp`／`tanh`
-  （`crates/autodiff/src/eval.rs`。現状は device/ops を持たない暫定 CPU
-  参照実装）から供給されるが、その**供給元自体**は本改訂で
-  `Tape::with_backend(ops: Arc<dyn BackendOps + Send + Sync>)`（新規の公開コンストラクタ。
-  上記「`Arc<dyn BackendOps + Send + Sync>` をどの時点で捕獲するか」）として確定した。
-  `Tape::new()` も同一の内部ディスパッチ経路（`eval::add` 等）へ到達し、
-  内部で既定バックエンド解決を試みる（§1「公開コンストラクタの選択は
-  融合スイッチにならない」）。既定バックエンド解決の具体的な規則
-  （`Device::Cpu` 固定を含む、いずれの規則も）は本文書では確定しない
-  （`docs/public-api-design.md` §4.1 の既定デバイス選択ロジック不採用
-  方針を踏襲。§6.2 未決事項）。この規則が確定するまでの間、
-  `Tape::new()` 経由の既定バックエンド解決は常に失敗し、`ops` は `None`
-  のまま `FusionSession` を開始しない後方互換パスを通る（`Device::Cpu`
-  への暗黙フォールバックは行わない）。これは「バックエンド解決可否」と
-  いう内部方針の現時点の解決結果であり、`Tape::new()` という公開 API
-  選択自体が融合を禁じているのではない。#164 は `eval::add` 等への
-  `ops: Option<Arc<dyn BackendOps + Send + Sync>>`
-  引数追加を TASK-1.9 が求める「backend 経由の実行への置き換え」と同時に
-  行う。伝播経路の具体化は §3.5 で規定する。外部 backend
-  （`backend-cpu`／`backend-cuda`／`backend-metal`）が `run_fused` 内で
-  融合グラフの演算内容を読み取る手段も本改訂で確定した: `FusionPlan` は
-  `pub`（フィールド非公開）の不透明ハンドルとし、`impl FusionPlan` の
-  `pub fn ops() -> impl Iterator<Item = FusedOpKind>`／`output_shape`／
-  `dtype`／`leaf_count`／`use_count`（上記コード例）という公開 DTO
-  アクセサ経由でのみ読み取らせる。内部の `pub(crate)` `FusionOp`／
-  `FusionNode`／`FusionGraph`（§2）は非公開のまま変更しない。既存
-  `BackendOps` 呼び出し規約・`Tensor` 表現とは非破壊に接続される。
+    複合判定を満たす。§4）。この呼び出しは §3.2 (c) が指す「単一の
+    fallible 呼び出しが自身の結果を返す直前」に、その呼び出しの関数
+    フレーム内で完結する。
+  - **`run_fused` の追加と「trait 定義自体には手を加えない」の関係
+    （codex-review 第 5 波 P2 指摘への回答。本改訂で文言統一する）**:
+    `run_fused` はデフォルト実装付きのメソッドとして `BackendOps` の
+    trait 定義（`backend_ops.rs:82`）へ追加する。§3.4 冒頭「`BackendOps`
+    trait 自体の契約も変更しない」・「ops 解決の所有モデル」節の
+    「`BackendOps` trait 定義自体は変更しない」は、いずれも既存メソッド
+    （`gemm`／`add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`）の
+    シグネチャ・契約を変更しないこと、および `Send + Sync` を trait の
+    スーパートレイトとして追加しないことを指す限定表現であり、
+    「trait 定義へ一切変更を加えない」という意味ではない（本改訂で
+    誤解の余地を解消する）。統一後の契約は次のとおり: **既存メソッドの
+    契約（シグネチャ・意味論）は一切変更せず、`run_fused` をデフォルト
+    実装付きで trait 定義へ追加する**。デフォルト実装により、既存の
+    3 バックエンド実装（CPU／CUDA／Metal）は本節追加時点で override
+    不要のままコンパイルが通り（trait の破壊的変更にならない）、
+    `BackendOps` を実装する既存クレート（本リポ外の実装を含む）は
+    変更不要である。`Send + Sync` は `run_fused` のシグネチャにも、
+    `Tape::with_backend` の引数型にも課さない（§3.4 冒頭「`ops` の
+    受け渡しは借用で足りる」で確定したとおり、`Storage::Pending` への
+    埋め込みという前提自体が消滅したため、この束縛はもはや不要である）。
+- **まとめ（codex-review 第 5 波 P1 指摘への回答。本改訂で確定）**:
+  「遅延値を保持できる `Tensor` 表現への変更」は採らない（`Tensor`
+  不変。`Storage` にも `Pending` バリアントを追加しない）。融合対象
+  区間の構築・実体化はいずれも「単一の fallible 呼び出しの内部だけで
+  生存するローカル値」（`FusionValue`／`FusionSession`）として行う。
+  「連鎖全体を受け取る明示的な内部 API」として `BackendOps::run_fused`
+  （非破壊拡張のデフォルトメソッド）を追加する。グラフの所有は
+  `FusionSession` が `graph: FusionGraph`（所有値）として保持し、
+  実体化に使う `BackendOps` 実装は `ops: &'ops dyn BackendOps`
+  （借用）として保持する。`Arc`／`Mutex`／`Rc`／`RefCell`／
+  `Send + Sync` はいずれも不要である（旧稿〈第 4 波まで〉はこれらを
+  `Storage::Pending` として `Tensor` へ埋め込むために要求していたが、
+  §1 でその前提自体を撤回したため、本改訂で全面的に単純化した）。
+  `FusionSession` を開くのは `Tape::backward` の VJP 連鎖内部（§3.5）、
+  または将来の複合エントリポイント（§1 (b)）であり、いずれも呼び出し
+  元の関数フレーム内で `Tape` が保持する `ops: Option<Box<dyn
+  BackendOps>>`（新規の公開コンストラクタ `Tape::with_backend(ops:
+  Box<dyn BackendOps>)` による明示供給、または `Tape::new()` の内部
+  既定解決のいずれか）を借用して使う。`Tape::new()` も同一の内部構造
+  （`self.ops`）へ到達し、内部で既定バックエンド解決を試みる（§1
+  「公開コンストラクタの選択は融合スイッチにならない」）。既定
+  バックエンド解決の具体的な規則（`Device::Cpu` 固定を含む、いずれの
+  規則も）は本文書では確定しない（`docs/public-api-design.md` §4.1 の
+  既定デバイス選択ロジック不採用方針を踏襲。§6.2 未決事項）。この規則
+  が確定するまでの間、`Tape::new()` 経由の既定バックエンド解決は常に
+  失敗し、`self.ops` は `None` のまま融合を伴わない既存の非融合経路の
+  みを通る（`Device::Cpu` への暗黙フォールバックは行わない）。これは
+  「バックエンド解決可否」という内部方針の現時点の解決結果であり、
+  `Tape::new()` という公開 API 選択自体が融合を禁じているのではない。
+  外部 backend（`backend-cpu`／`backend-cuda`／`backend-metal`）が
+  `run_fused` 内で融合グラフの演算内容を読み取る手段も本改訂で確定
+  した: `FusionPlan` は `pub`（フィールド非公開）の不透明ハンドルとし、
+  `impl FusionPlan` の `pub fn ops() -> impl Iterator<Item =
+  FusedOpKind>`／`output_shape`／`dtype`／`leaf_count`／`use_count`
+  （上記コード例）という公開 DTO アクセサ経由でのみ読み取らせる。
+  内部の `pub(crate)` `FusionOp`／`FusionNode`／`FusionGraph`（§2）は
+  非公開のまま変更しない。既存 `BackendOps` 呼び出し規約・`Tensor`
+  表現とは非破壊に接続される。使用点の具体化は §3.5 で規定する。
 
-### 3.5 既存の演算経路からの遅延連鎖構築（PR #357 review 追加指摘への対応）
+### 3.5 単一 fallible 呼び出し内での融合適用と公開 `Var` 演算の常時実体化契約
 
-（`docs/fusion-graph-design.md:245` 付近への指摘で追加。§3.4 が定義した
-`FusionValue`／`FusionSession` を「誰が・どの既存呼び出し経路で・複数回
-の `add`／`mul` をまたいで」実際に伝播させるかが未規定だった。利用者が
-書く通常の `Tensor` 演算チェーンは各段が具体化済み `Tensor` を要求する
-契約のため、**この経路では連鎖を構築できない**（§1・§3.4 のとおり
-`&dyn BackendOps` を直接呼ぶ経路は本設計の対象外のまま）。本節は対象
-経路を具体的なコード呼び出し関係まで特定し、伝播の実装点を規定する。)
+（本節は codex-review 第 5 波 P1 指摘を受けて全面改訂する。第 4 波までの
+旧稿は「複数回の独立した公開 `Var` 呼び出し（`a.add(&b)?.mul(&c)?` の
+ような連鎖）をまたいで `Storage::Pending` を持ち越し、実体化失敗は
+`cache` へキャッシュして後続の呼び出しで表面化させる」という設計を
+採っていた。しかし `Var::value`／`Var::to_tensor` は呼び出し自体が
+「結果を受け取る」という参照行為であるにもかかわらず、その時点でまだ
+実体化を試みていない・失敗していても通知されないという契約破壊を生む
+（§1「遅延の生存窓は単一の fallible 呼び出しの内部に限定する」で確定
+した第 5 波 P1 指摘への回答）。本節は縮小後の契約を具体化する。)
 
-- **対象経路の特定**: 融合対応にする経路は「`Var` の演算メソッド
-  （`add`／`mul`／`relu`／`exp`／`tanh`。`crates/autodiff/src/var.rs`）
-  が forward 値計算のために呼ぶ `eval::add`／`eval::mul`／`eval::relu`／
-  `eval::exp`／`eval::tanh`（`crates/autodiff/src/eval.rs`）」に限定する。
-  この経路が「複数回の `add`／`mul` 呼び出しをまたいで」実際に連鎖する
-  唯一の既存経路である理由:
-  - `Var::add`（`var.rs:122` 付近）・`Var::mul`（`var.rs:133` 付近）は、
-    それぞれ独立した呼び出しのたびに `eval::add`／`eval::mul` を呼び、
-    戻り値の `Tensor<f32>` を `Tape::push` でテープノードへ記録する
-    （`var.rs` の①〜④の処理順、ファイル冒頭コメント）。呼び出し元
-    コード（例: `a.add(&b)?.mul(&c)?`）は Rust の通常のメソッドチェーン
-    であり、各段が返す `Var` は次段の入力としてそのまま渡される。
-  - 一方 `ops_for(device).add()`（`BackendOps` を直接呼ぶ経路。
-    `backend_ops.rs:98`）は §1 のとおり対象外のまま据え置く。呼び出し元
-    が `Tensor` を直接操作するこの経路には融合を適用しない。
-- **伝播の実装点（`Storage` 経由。P1 指摘「既存の `&self` 読み出し API
-  では `Pending` を指定どおり実体化できない」への回答。本改訂で具体化）**:
-  `Var::add`/`mul`/… が呼ぶたびに `eval::add` 等へ渡す入力・戻り値は
-  依然として型としては `Tensor<f32>` のままである（`Var`／`Tape`／
-  `Tensor` いずれのシグネチャも変更しない）。複数回の独立した呼び出しを
-  またいで `FusionValue::Pending` を実際に持ち越すには、その
-  `Tensor<f32>` が内部的に「まだ実体化していない」ことを表現できる必要
-  がある。これを `Tensor`（`tensor.rs:52`）自体ではなく、`Tensor` が保持
-  する非公開の `Storage<T>`（`tensor.rs:33`。既に crate-private であり
-  公開 API 面には現れない）側に持たせる。ただし当初案の
-  `enum Storage<T> { Materialized(Vec<T>), Pending(FusionValue) }` は
-  P1 指摘のとおり 2 つの理由で成立しない: (i) `Tensor` は `Arc<Storage<T>>`
-  を共有し、`get`／`as_slice` は `&self` の共有参照しか持たないため、
-  バリアントそのものを `Pending → Materialized` へ置換する操作ができない。
-  (ii) `as_slice` は `Storage` 内部の `Vec<T>` を借用する `&[T]` を返す
-  契約であり、置換を許す `RefCell` 等の内部可変化と併用しても
-  「借用元を書き換えながら借用を返す」ことはできない。本改訂は以下の
-  設計へ変更する（実装は #164 のスコープ。以下は #164 が満たすべき契約）。
+### 3.5.1 公開 `Var` 演算の常時実体化契約
 
+- **`Var` の fallible 演算（`add`／`mul`／`matmul`／`sum`／`max`。既に
+  `Result<Var<'_>, AutodiffError>` を返す契約。`var.rs:111`〜`:159`）は、
+  返る前に自分の出力を実体化済みにする**。`Tape::push` が記録する
+  `nodes[id].value: Tensor<f32>`（`tape.rs`）は常に完成したデータを
+  持ち、`Tensor` が保持する非公開の `Storage<T>`（`tensor.rs:33`）には
+  「未実体化」を表すバリアントを一切追加しない（§3.4 で確定済み）。
+  融合実行の失敗はその演算自身の `Err` として型付きで返る。
+- **`relu`／`exp`／`tanh`（`var.rs:257`〜`:275`。shape 不変の単項演算の
+  ため「構造的に失敗しえない」という既存設計判断〈`docs/public-api-design.md`
+  §3.2〉により非 fallible な `fn ..(&self) -> Var<'t>` のまま。
+  codex-review 第 5 波指摘への回答で本改訂時に事実確認した）は本節の
+  対象外である**: `Err` を返す経路自体を持たないため、この 3 演算は
+  内部で融合グラフの構築・実体化を一切試みず、既存の非 fallible な
+  `eval::relu`／`exp`／`tanh` をそのまま直接呼ぶ（1 呼び出し 1 演算の
+  粒度であり単独では融合機会がないという §3.3 の帰結とも整合する）。
+  これらの unary 演算が VJP の内部計算式（3.5.2 の `tanh` 例のような
+  `mul`／`sub` の連鎖）に現れる場合でも、失敗を運ぶのは `Var::relu`
+  等自身ではなく、それらを呼び出す fallible な `grad.rs::vjp`（§3.5.2）
+  である。
+- この結果、`Var::value`／`Var::to_tensor`（`var.rs:74`・`var.rs:81`
+  付近）・`Gradients::get`・`Tensor::get`／`as_slice`／`contiguous`
+  （`tensor-core` の汎用アクセサ）はいずれも**シグネチャ・意味論を
+  一切変更しない**。「未実体化」による分岐・`OnceLock` によるキャッシュ・
+  実体化を発火させるための特別な内部アクセサ（第 4 波で導入した
+  `Var::value_raw`）はいずれも不要であり、本改訂で新設しない（旧稿の
+  該当記述は撤回する）。`get`／`as_slice` の既存契約「範囲外・非
+  contiguous のみ `None`」もそのまま維持される（実体化に起因する
+  `None` 分岐は存在しない）。
+- `&dyn BackendOps` を直接呼ぶ既存経路（`ops_for` 経由を含む。§1・§3.4）
+  は引き続き本設計の対象外であり、この経路の `Storage` は常に
+  `Materialized` のまま（`ops_for(...).add()` 等の実装は融合グラフを
+  一切構築しない）。
+
+### 3.5.2 窓 (a): `Tape::backward` の VJP 連鎖内部
+
+- `Tape::backward`（`backward.rs:73`。公開シグネチャ
+  `pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError>`
+  は変更しない）は、それ自体が単一の fallible 呼び出しである。内部で
+  テープを逆順に辿り各ノードの VJP（`grad.rs::vjp`。`Op` 単位のまま。
+  §3.3）を計算する過程で、1 つの VJP 計算式が複数の elementwise 演算
+  から成る場合（例: `tanh` の VJP `grad * (1 - y * y)` は `mul`・`sub`
+  の連鎖）、`self.ops`（`Tape` が保持する `Option<Box<dyn BackendOps>>`。
+  §3.4）を借用して `FusionSession` を開き、その VJP 計算の内部だけで
+  完結するグラフを構築・実体化してよい。これが REQ-12「透過的融合」の
+  実質的な適用箇所である（§3.3 で確定した「forward 値計算の下層」の
+  読み替え）。
+- **`Gradients::get` は非 fallible のまま**: `backward` は自身が返す
+  `Gradients` に含まれるすべての勾配 `Tensor` を、`Ok(Gradients { .. })`
+  を返す直前までに実体化し終える（3.5.1 の契約を `backward` 自身の
+  戻り値にも適用した帰結）。したがって `Gradients::get` は追加の
+  実体化発火点を必要としない。
+- **`BackendError` の発生源は `FusionSession::materialize` の直接呼び出し
+  1 箇所のみである（codex-review 第 5 波指摘への回答。本改訂で確定
+  する）**: `eval::dense_vec`（`eval.rs:41`。`grad.rs` が
+  `use crate::eval::{.., dense_vec}` で再利用する。forward 記録値
+  `nodes[id].value: Tensor<f32>` を稠密な `Vec<f32>` として読み出す
+  既存ヘルパー）は 3.5.1 のとおり `Storage` が常に `Materialized` で
+  ある以上、非 fallible なまま変更しない（`-> Vec<f32>`。既存の
+  `ShapeError` を返さない契約〈`eval.rs` 冒頭コメント〉ともそのまま
+  整合する。第 4 波までの旧稿はこれを `Tensor::try_dense`〈`pub` +
+  `#[doc(hidden)]`〉として `Result` 化する設計を採っていたが、`Tensor`
+  自体が実体化していない状態を持ちえない以上その `Result` に到達
+  可能な `Err` 経路が存在しないことが第 5 波で判明したため、本改訂で
+  撤回する）。`BackendError` が発生しうるのは、`grad.rs::vjp` および
+  各演算 VJP 関数（`matmul_vjp` 等）が**自身の VJP 計算式の内部**
+  （例: `tanh` の VJP `grad * (1 - y * y)`）で `FusionSession` を開き
+  `FusionSession::materialize`（§3.4。1 回の呼び出しで `Result<Tensor<f32>,
+  BackendError>` を返す）を呼ぶ場合のみである。この呼び出しを行う
+  `vjp`／各演算 VJP 関数は `Result<_, BackendError>` を返すシグネチャ
+  （いずれも `autodiff` クレート内で完結する `pub(crate)` 関数であり
+  公開 API ではないため非破壊）へ変更し、`?` でそのまま伝播させる。
+  失敗はキャッシュに留まらず直ちに呼び出し元（`backward`）へ伝播する
+  （第 4 波までの旧稿にあった「`cache` へキャッシュされ後続の系統 2
+  経由で表面化する」という間接的な伝播は本改訂で撤回する。伝播は
+  常に同一呼び出し内の `?` による直接伝播である）。`Tape::backward`
+  （公開シグネチャは
+  `Result<Gradients, AutodiffError>` のまま変更しない）は、内部で
+  `vjp(...)` を呼ぶ箇所においてのみ `BackendError` を `AutodiffError`
+  へ変換する。変換は `AutodiffError`（`#[non_exhaustive]`。`error.rs:19`）
+  への非破壊 variant 追加で行う:
   ```rust
-  /// `Storage<T>` の `Pending` が必要とする実体化操作の型消去境界
-  /// （Codex レビュー再指摘への対応。下記「型消去境界」参照）。
-  /// `T` は `Storage<T>` の `T` とそのまま一致させ、`Vec<f32>` を
-  /// `Vec<T>` へ横流しする代入は書かない（型システムに証明させる）。
-  pub(crate) trait Materializer<T: Element>: Send + Sync {
-      /// §3.2 の実体化条件到達時に呼ばれる。成功時は稠密 `Vec<T>` を、
-      /// 失敗時は型付きの `BackendError` を返す（Codex 再指摘「遅延
-      /// 実体化時の `BackendError` が消失する」への回答。下記「失敗
-      /// 経路の扱い」）。`run_fused` は `Unsupported` 以外にも GPU
-      /// 実行・コンパイル・デバイス障害等で失敗しうるため、`Option`
-      /// による握り潰しは行わない。
-      fn materialize(&self) -> Result<Vec<T>, BackendError>;
+  pub enum AutodiffError {
+      // 既存 variant（Shape／Backward／TapeMismatch／InvalidArgument）は変更しない。
+      /// 逆伝播中の実体化・カーネル実行で発生した型付きバックエンド
+      /// エラー（TASK-12.1a／#164。`tensor_core::BackendError` をラップ）。
+      Backend(tensor_core::BackendError),
   }
 
-  /// `f32` 専用の `Materializer` 実装。`FusionSession`／`FusionNodeId`
-  /// （§3.4・§2.2）を保持し、`materialize` 内で
-  /// `session.materialize(node)`（§3.4。`Result<Tensor<f32>, BackendError>`
-  /// を返す）を呼んで稠密化する。`Materializer<f32>` のみを実装し、
-  /// 他の `T`（`i32` 等）向けの実装は存在しない（§2.1 の f32 固定
-  /// スコープをこの 1 impl に閉じ込める）。
-  pub(crate) struct FusionMaterializer {
-      session: FusionSession,
-      node: FusionNodeId,
-  }
-
-  impl Materializer<f32> for FusionMaterializer {
-      fn materialize(&self) -> Result<Vec<f32>, BackendError> {
-          // `.ok()` で握り潰さない： `BackendError` をそのまま呼び出し元
-          // （`StorageData::Pending::cache`。下記）へ伝播させる。
-          self.session
-              .materialize(self.node)
-              .map(|t| /* contiguous().as_slice() 相当の稠密化。下記参照 */ Vec::new())
+  impl From<tensor_core::BackendError> for AutodiffError {
+      fn from(err: tensor_core::BackendError) -> Self {
+          AutodiffError::Backend(err)
       }
   }
-
-  /// バリアントの「置換」ではなく `OnceLock` による一度限りの初期化で
-  /// 実体化を表現する。`Pending` 自体は消えず、内部の `OnceLock` が
-  /// 空 → 実体化済みへ 1 度だけ遷移する（P1 (ii) への回答: `&self` の
-  /// ままキャッシュを書き込める。`RefCell` と異なり、`OnceLock::get`
-  /// は初期化後にそのまま `&Vec<T>` を返せるため「借用元を書き換え
-  /// ながら借用を返す」問題が生じない）。
-  enum StorageData<T: Element> {
-      Materialized(Vec<T>),
-      Pending {
-          /// 実体化結果のキャッシュ。**`Option<Vec<T>>` ではなく
-          /// `Result<Vec<T>, BackendError>` を保持する**（Codex 再指摘
-          /// への回答。旧稿は失敗時に `None` へ丸め、`BackendError` を
-          /// 恒久的に失っていた。`OnceLock::get_or_init`（安定版 API。
-          /// `get_or_try_init` は未安定化）はクロージャの戻り値を型
-          /// そのまま格納できるため、戻り値の型を `Result<..>` にする
-          /// だけで「一度だけ初期化」の性質（`OnceLock` を選んだ理由。
-          /// 上記コメント）を保ったまま失敗理由を保持できる
-          /// （`get_or_try_init` の安定化を待つ必要はない）。
-          /// `BackendError` は再読み出しのたびに `clone` して返せるよう
-          /// `#[derive(Clone)]` を追加する（`device.rs:183` 付近。現状
-          /// `#[derive(Debug)]` のみ）。`BackendError::ShapeMismatch` は
-          /// `ShapeError`（`error.rs:18` 付近）を保持するため、
-          /// `ShapeError` 側にも同様に `#[derive(Clone)]` を追加する
-          /// 必要がある（現状 `#[derive(Debug)]` のみ。`error.rs:19`
-          /// 以降の各 variant は `usize`／`String` フィールドのみで
-          /// 構成され `Clone` 可能）。`#[non_exhaustive]` はいずれも
-          /// derive の妨げにならない（未知 variant を追加する権利を
-          /// 保持するだけで、既知 variant の trait 実装は制限されない）。
-          /// 両者とも既存の `Debug` 実装を維持したまま `Clone` を追加
-          /// するのみであり、公開 API 非破壊のまま拡張できる。
-          /// 読み出し側は複数系統に分岐する（下記「実体化の発火点」）:
-          /// 公開 `get`／`as_slice`（`tensor.rs:201`・`tensor.rs:231`。
-          /// 既存の `Option` 返却契約を変更しない）は `cache` を
-          /// `get_or_init` で発火させない（codex-review 第 3 波 P1 指摘
-          /// への回答。下記「実体化の発火点」系統 1 参照）。`cache.get()`
-          /// による**参照のみ**で既に `Ok` 実体化済みの場合だけ view を
-          /// 適用して `Some` を返し、`Some(Err(_))`（実体化が既に試みられ
-          /// 失敗している）の場合は `None` を返す。**`cache` が未初期化
-          /// （`get()` が `None`）のまま `Tensor::get`／`as_slice` から
-          /// 観測される状況は、下記「公開読み出し境界と内部連鎖読み出しの
-          /// 分離」で規定する不変条件（`autodiff` の外へ渡る `Tensor` は
-          /// 必ず実体化試行済み）のもとでは発生しない内部不変条件であり、
-          /// 公開契約の分岐としては規定しない**（codex-review 第 4 波 P1
-          /// 指摘「有効添字＋contiguous なら必ず `Some` が返るはずの契約を
-          /// 未実体化 `None` が破壊する」への回答。旧稿は「未実体化」も
-          /// 同じ `None` の公開意味論として明記していたが、本改訂で撤回
-          /// する）。境界ノード
-          /// （`gemm`／`sum`／`max`。§3.2 (a)(b)）を実装する
-          /// `eval::matmul`／`eval::sum`／`eval::max` は、`Option` を
-          /// 経由しない新設の `pub(crate)` フォールブルアクセサ経由で
-          /// `BackendError` をそのまま受け取り、自身の戻り値
-          /// （`Result<Tensor<f32>, BackendError>`。下記）として
-          /// 呼び出し元へ伝播する。本番経路で panic しない方針
-          /// （`.claude/rules/coding-rust.md`）と整合。
-          cache: std::sync::OnceLock<Result<Vec<T>, BackendError>>,
-          /// 型消去された実体化操作（下記「型消去境界」参照）。
-          /// `Box<dyn Materializer<T>>` は `T` ごとに別の trait
-          /// （`Materializer<f32>`・`Materializer<i32>`・…）であり、
-          /// `materialize(&self) -> Result<Vec<T>, BackendError>` は
-          /// その `T` をそのまま返す。`Vec<f32>` を `Vec<T>` として代入する箇所は
-          /// どこにも存在しない。
-          source: Box<dyn Materializer<T>>,
-          /// このノードが属する `FusionSession`（§3.4）と、その中での
-          /// `FusionNodeId`（§2.2）。**PR #357 review 再指摘「異なる
-          /// `FusionSession` に属する `Pending` 同士の二項演算合流が
-          /// 未定義」への回答として本改訂で追加する**フィールドである
-          /// （下記「異なるセッション間の合流」参照）。`source` の
-          /// `Box<dyn Materializer<T>>` への型消去（上記「型消去境界」）
-          /// は実体化**結果**の型（`Vec<T>` は `T` ごとに異なる）を
-          /// 隠すためのものであり、`session`／`node` は `T` に依存しない
-          /// 型（`FusionSession` は非総称型、`FusionNodeId` は `usize`
-          /// 相当。§2.2）であるため、これらを `Storage<T>` に直接
-          /// 持たせても型消去境界が要求する性質（`Vec<f32>` を `Vec<T>`
-          /// として代入する箇所を作らない）を壊さない。したがって
-          /// 51d0194（`session`／`node` を `FusionMaterializer` の内部へ
-          /// 押し込めた回）からの後退ではなく、型消去とは独立の理由
-          /// （合流判定に `eval::add` 自身がセッション識別子へ到達する
-          /// 必要がある）による再追加である。
-          session: FusionSession,
-          node: FusionNodeId,
-      },
-  }
-
-  struct Storage<T: Element> {
-      data: StorageData<T>,
-  }
   ```
+  `#[non_exhaustive]` enum への variant 追加・新規 `From` 実装はいずれも
+  公開 API 非破壊（既存の呼び出し元の網羅的 `match` を壊さない。
+  `error.rs:15-18` の既存方針と同じ理由）。`autodiff` は既に
+  `tensor-core` に依存している（`crates/autodiff/Cargo.toml:14`）ため
+  新規依存の追加は不要。`Tape::backward` 内部で `vjp(...)?` と書けば
+  `?` 演算子が `From<BackendError> for AutodiffError` を経由して
+  自動変換する。`error.rs:66` 以降の `impl fmt::Display for
+  AutodiffError` は `match` で全 variant を網羅しているため、`Backend`
+  variant 追加時は対応する `Display` アームの追加も同時に行う（追加を
+  怠るとコンパイルエラーになる。実装時の見落とし防止のため本節に
+  明記する）。
+- `Tape` が記録する `Op` 単位のノード粒度・`grad.rs::vjp` の走査対象
+  （`Op` 列）自体には影響しない（§3.3 の契約を変更しない）。本節が
+  変更するのは `vjp`（`grad.rs:31`）とその内部の全 VJP 関数の
+  **シグネチャ**（`Result<_, BackendError>` 化）のみであり、`Tape`／`Op`
+  の**構造**（ノード粒度・走査順）には影響しない（#164 のスコープに
+  明示的に含める）。
 
-  - **型消去境界（Codex レビュー再指摘「f32 の実体化結果を総称型
-    キャッシュへ格納できない」への回答）**: 当初案（本節旧稿）は
-    `Pending { session: FusionSession, node: FusionNodeId }` を
-    `Storage<T>` に直接埋め込み、「`Pending` は実行時には `T = f32` の
-    場合にしか構築されない」という**実行時契約のみ**で `Vec<f32>` を
-    `Vec<T>` として扱おうとしていた。これは Rust の型システムでは証明
-    できない（`impl<T: Element> Tensor<T>` は総称のままコンパイルされ、
-    `T` が具体的に何であるかをコンパイル時に知らない）ため、指摘のとおり
-    記載どおりには実装できない。本改訂は `Pending` の実体化操作を
-    `Box<dyn Materializer<T>>`（トレイトオブジェクトによる型消去）へ
-    切り出す。`Materializer<T>::materialize(&self) -> Result<Vec<T>, BackendError>`
-    は呼び出し側の `T` をそのまま返す型シグネチャであり、`f32` 専用の
-    `FusionMaterializer` は `Materializer<f32>` だけを実装する。
-    `Storage<i32>::Pending` は型としては構築可能（`Box<dyn Materializer<i32>>`
-    という型自体は存在する）だが、`Materializer<i32>` を実装する型が
-    どこにも定義されないため、**実際に構築するコードを書けるのは
-    `eval::add`／`mul`／`relu`／`exp`／`tanh`（いずれも `Tensor<f32>`
-    のみを引数に取る。`eval.rs` に `i32` 版の対応する演算は存在しない）
-    の `FusionMaterializer` 経由に限られる**。「T=f32 でしか使わない」
-    という契約が実行時の申し合わせではなく、実装可能な型が 1 つしか
-    存在しないという型システム上の事実として保証される。
-    `Tensor<i32>` を扱う経路（`cross_entropy_loss` の `targets` 等、
-    `dense_vec_i32` 経由の読み出し専用パス）は `Pending` を構築する
-    呼び出し元を持たないため、実行時には常に `Materialized` のままで
-    ある。
-  - `eval::add(&a, &b, ops: Option<Arc<dyn BackendOps + Send + Sync>>)` は、`ops` が
-    `None`（バックエンド解決が不能だった場合。呼び出し元が `Tape::new()`
-    経由か `Tape::with_backend()` 経由かは問わない。§3.4「`Arc<dyn
-    BackendOps + Send + Sync>` をどの時点で捕獲するか」）であれば
-    `Pending` を一切生成せず既存の非融合計算へそのままフォールバックする。
-    `ops` が `Some`（バックエンド解決に成功した場合。既定解決の成功・
-    `Tape::with_backend()` 経由の明示供給のいずれも含む）かつ §3.2 の
-    実体化条件 (a)〜(e) のいずれにも未到達であれば、
-    `a`／`b` それぞれの `Storage` が `Materialized` か `Pending` かで
-    次の 4 通りに分岐する（**両者が異なる `FusionSession` に属する
-    `Pending` である場合が本改訂まで未定義だった。PR #357 review
-    再指摘「`(a + b) * (c + d)` のように両入力が別々の `FusionSession`
-    に属する場合が仕様に存在しない」への回答**）:
-    1. **両者とも `Materialized`**: §3.4 のとおり自身が受け取った `ops`
-       から新規に `FusionSession` を開始し、`a`／`b` を葉ノードとして
-       登録したうえで `FusionOp::Add` ノードを追加する（既存記載どおり。
-       変更なし）。
-    2. **一方のみ `Pending`**: `Pending` 側の `FusionSession` へ延伸する。
-       `Materialized` 側は同じセッション内に葉ノード（既存の
-       `Tensor<f32>` 値をそのまま保持するノード。§2.2）として登録して
-       から `FusionOp::Add` ノードを追加する（既存記載「延伸」の意味を
-       明確化。以前の記載は葉ノード登録に触れていなかった）。
-    3. **両者とも `Pending` で同一セッション**（`Arc::ptr_eq` を
-       `FusionSession::graph`〈`Arc<Mutex<FusionGraph>>`。§3.4〉同士に
-       適用して判定。`ops` フィールドでの比較は使わない: 2 つの独立した
-       セッションが同じ `Arc<dyn BackendOps + Send + Sync>` を共有しうるため、`ops` の
-       一致は同一セッションであることを含意しない）: そのセッションへ
-       延伸し、両者の既存 `FusionNodeId` を入力とする `FusionOp::Add`
-       ノードを追加する（既存記載どおり）。
-    4. **両者とも `Pending` で異なるセッション**: **グラフの合流
-       （マージ）は行わない**という結論は維持するが、「`b` の `Pending`
-       をそのまま `a` 側セッションの葉ノードとして埋め込む」という
-       当初案（本節旧稿）は撤回する（Codex レビュー再指摘 P1-1「セッション
-       間参照によって循環グラフとデッドロックを構築できる」・P1-2
-       「異なる backend のテンソルを転送なしで同一カーネルへ渡している」
-       への回答。本項）。代わりに**境界を跨ぐ側（`b`）をこの場で即時
-       実体化してから埋め込む**方式へ変更する。「即時実体化」は新しい
-       発火経路を追加するのではなく、`b` 自身の `Storage::Pending` が
-       既に持つ発火点をこの場で前倒しに呼ぶだけである:
-       - `b` の `Storage::Pending { cache, source, .. }`（§3.5「実行時
-         `T` 制約の解消」参照。`source` は `Box<dyn Materializer<f32>>`
-         ＝ `FusionMaterializer { session: FusionSession（session B）,
-         node }`）の `cache.get_or_init(|| source.materialize())` を
-         **同期的に**呼ぶ。これは下記「実体化の発火点」が §3.2 条件
-         (a)(b) や VJP から呼ぶのと**同一の発火点**であり、新規の API を
-         追加しない。`source.materialize()`（`FusionMaterializer` の
-         `Materializer<f32>` 実装）は内部で `session.materialize(node)`
-         （`b` 自身の `Arc<Mutex<FusionGraph>>` を取得・解放し、`b` 自身
-         が捕獲した `Arc<dyn BackendOps + Send + Sync>` で `run_fused`
-         を実行する。§3.4「ops 解決の所有モデル」の契約はそのまま
-         維持する）を呼んで `Result<Tensor<f32>, BackendError>` を得た
-         のち、稠密化した `Result<Vec<f32>, BackendError>` を返す
-         （`FusionMaterializer::materialize` の定義そのもの。上記
-         「型消去境界」参照）。失敗時は `BackendError` をそのまま
-         呼び出し元（`eval::add` 等）へ伝播する（下記「実体化の発火点」
-         と同じ型付きエラー伝播規約）。
-       - 成功して得た `Vec<f32>` から、`b` とは別の**新規** `Tensor<f32>`
-         （`Storage::Materialized` のみを持つ、`Pending` を経由しない
-         通常の構築経路。`b` の shape をそのまま引き継ぐ）を組み立て、
-         これを `a` 側セッションへ葉ノード登録してから `FusionOp::Add`
-         ノードを追加する（この時点でケース 2「一方のみ `Pending`」の
-         処理へ収束する。`a` 側は `Pending` のまま延伸を継続できる）。
-       - **`b` 自身（呼び出し元が保持し続けるかもしれない元の
-         `Var`／`Tensor<f32>` 値）の `Storage` 変種は変更しない**: `b`
-         はケース分岐上は引き続き `Pending`（§3.5 の `Storage::Pending`
-         は「実体化が発火したか」ではなく「`Pending` として構築された
-         か」を表すタグであり、`cache` が埋まっていても変種は変わらない）
-         のままである。一方 `cache.get_or_init` を `b` 自身の `Storage`
-         に対して直接呼んだため、`b` の `cache` は今回の結果でそのまま
-         埋まっている（`OnceLock::get_or_init` は二重発火しない）。
-         したがって `b` を後で読み出す・再度別の演算へ渡しても再計算は
-         起きない。この「`Storage` 変種は `Pending` のまま、`cache` だけ
-         が先に埋まる」という状態は、下記「循環参照が発生しないことの
-         根拠」の `d = b + c` の議論で `b` が再びケース 4（またはケース
-         3）の分岐対象になる前提としてそのまま使う。
-       - **循環参照が発生しないことの根拠（P1-1 への回答。旧稿の根拠は
-         成立しないことを認める）**: 旧稿は「ノードは自身より前に構築
-         済みのノードしか参照できない DAG 構築規則により、セッション間
-         参照は常に『後から構築されたセッション → 先に構築された
-         セッション』の一方向のみになる」と主張していたが、これは
-         セッションの**構築順**にのみ着目しており、後続の演算がどちら
-         を延伸元に選ぶかには着目していなかったため誤りだった。指摘の
-         具体例で確認する: `c = a + b`（`a` が session A・`b` が
-         session B）はケース 4 の規則（先に評価される側 = `a`）に従い
-         session A を延伸し、`b`（session B）を葉として埋め込む
-         （A → B の参照）。続けて `d = b + c` を構築すると、先に評価
-         される側は `b`（session B）であり、規則に従えば session B を
-         延伸し `c`（session A に属する）を葉として埋め込むことになる
-         （B → A の参照）。これは A・B 間に**双方向**の参照を作り、
-         旧稿が前提としていた一方向性そのものを破る。本改訂後は
-         `Pending` が他セッションの `Pending` を参照する経路自体を
-         作らない（越境時は必ずその場で `Materialized` へ確定させてから
-         埋め込む）ため、セッション間の参照は常に「`Mutex` を解放済みの
-         確定値を指すだけ」になる。`c = a + b` の時点で `b` は即座に
-         実体化されて session A の葉として埋め込まれ、以後 session A
-         からは session B の `Mutex<FusionGraph>` を参照する経路が
-         一切残らない。したがって `d = b + c` を構築しても session B
-         が session A を参照する余地はなく（`c` 自体は session A の
-         `Pending` のままなので、`d = b + c` は `c` 側〈session A〉を
-         即時実体化してから `b`〈session B〉の葉として埋め込む、ケース 4
-         の対称パスを通る）、`Mutex` 同士が互いを待ち合う構造は構築時
-         点で作りようがない（ロック取得順序の議論に頼らない、より強い
-         保証）。
-       - **backend 越境転送が安全であることの根拠（P1-2 への回答）**:
-         `b` の実体化（`source.materialize()` が内部で呼ぶ
-         `session.materialize(node)`）は `b` 自身の `ops`（backend）で
-         行われるが、`session.materialize(node)` の戻り値は常に host
-         常駐の `Tensor<f32>` であり（§3.4「`session.materialize(node)`
-         〈`Result<Tensor<f32>, BackendError>` を返す〉」参照）、それを
-         稠密化した `Vec<f32>`（`FusionMaterializer::materialize` の
-         戻り値。上記）から新規に組み立てる `Tensor<f32>` も同型である。
-         これは実装の規律（「各バックエンドが host へ確定させる契約を
-         守る」という申し合わせ）ではなく、**型として保証される**:
-         `tensor-core::Tensor<T>`
-         （`crates/tensor-core/src/tensor.rs:52`）は `storage:
-         Arc<Storage<T>>` を保持し、`Storage<T>`（同ファイル
-         `tensor.rs:33`）は `data: Vec<T>` フィールドのみを持つ ——
-         デバイスメモリのハンドル・`device: Device` タグを一切持たない
-         構造体である。デバイス常駐データを表す型は別に存在する
-         （`DeviceBuffer<T>`。`crates/tensor-core/src/buffer.rs:130`
-         付近。`device: Device` フィールドを持つ）が、`BackendOps::gemm`
-         （§2.1）を含む本文書の融合対象演算はいずれも `Tensor<f32>` を
-         引数・戻り値とするシグネチャであり `DeviceBuffer` を経由しない。
-         したがって `b` 側バックエンドの `gemm` 実装〈`backend-cpu`／
-         `backend-cuda`／`backend-metal`〉がどのデバイスで計算しようとも、
-         `materialize` が返せる型はコンパイル時点で「デバイス残留情報を
-         持ちえない」`Tensor<f32>` に固定される（§3.4）。`a` 側の
-         `self.ops.run_fused(&plan, leaves)`（`leaves: &[&Tensor<f32>]`）
-         はどの葉も等しく host 常駐の参照として受け取り、必要な
-         デバイス転送（アップロード）は各 `run_fused` 実装内部の責務で
-         ある（§3.4 の default 実装コメント参照）。したがって `a` 側と
-         `b` 側の backend（`ops.device()`）が異なっていても、`b` の
-         実体化結果は `a` 側 `run_fused` へ渡る前に必ず host
-         `Tensor<f32>` を経由するため、GPU/CPU をまたぐデバイスメモリの
-         直接受け渡し（転送を経ない生ポインタ・ハンドルの混在）は構造的
-         に発生しない。これは本改訂で新設する検証ではなく、「実体化は
-         常に host `Tensor<f32>` を返す」という §3.4 の既存契約をケース 4
-         にも一貫して適用した結果であり、`ops.device()` の一致検証や
-         新規の明示的転送 API を追加する必要はない（`DeviceBuffer` を
-         葉に直接持たせる設計へ将来移行する場合はこの前提が崩れるため、
-         その時点で `ops.device()` 一致検証の追加が必要になる。§6.2
-         未決事項へ記録する）。
-       - `(a + b) * (c + d)` のような越境合流では、越境した側
-         （`b` または `d`）の連鎖がその場で実体化されるため、`a`（または
-         `c`）側の 1 回の `run_fused` 呼び出しへ単純化される。単一
-         カーネルへの融合機会が失われる点は旧稿の想定と変わらないため、
-         性能特性の記録は引き続き §6.2 未決事項に残す（下記）。
-    いずれのケースでも、返す `Pending` な `Tensor<f32>`（`OnceLock`
-    未初期化の `Storage::Pending` を積んだだけのプレースホルダ）自体の
-    型・構築規約は変わらない。これが `Tape::push` によりそのまま
-    テープノードの `value` として記録される（`tape.rs` の
-    `nodes[id].value: Tensor<f32>` 自体の型は変わらない）。
-  - 次に呼ばれる `Var::mul`（別の独立した呼び出し）は、直前の
-    `Var::add` が返した `Var` の内部読み出し経路を経由してこの `Pending`
-    な `Tensor<f32>` を読み出し、`eval::mul` へ渡す。**この内部読み出し
-    経路は、下記「公開読み出し境界と内部連鎖読み出しの分離」で新設する
-    `pub(crate)` の非実体化アクセサ `Var::value_raw` であり、公開
-    `Var::value`／
-    `Var::to_tensor`（`var.rs:74`・`var.rs:81` 付近）とは分離する**
-    （codex-review 第 4 波 P1 指摘への回答。下記「公開読み出し境界と
-    内部連鎖読み出しの分離」参照）。こうして**別々の Rust メソッド
-    呼び出しをまたいで** `FusionValue` が連鎖する（§1 冒頭の懸念
-    「複数回の `add`／`mul` 呼び出しをまたいで伝播する呼び出し元が
-    存在しない」への回答: 伝播を担うのは呼び出し元コードではなく
-    `Storage` 内部に隠れた `Pending` 状態であり、呼び出し元は通常どおり
-    `Var` のメソッドを連続して呼ぶだけでよい）。
-  - **実体化の発火点（3 系統。codex-review 第 3 波 P1 指摘「`get`／
-    `as_slice` が `BackendError` を `.ok()` で `None` へ変換する設計は、
-    既存の『範囲外・非 contiguous のみ `None`』という観測可能な契約へ
-    カーネル起動・デバイス割り当て・転送失敗まで混在させる契約破壊」、
-    および第 4 波 P1 指摘「未実体化 `Pending` に対する `get`／`as_slice`
-    は `None` という契約は、現行 API の『有効添字＋contiguous なら必ず
-    `Some`』という観測可能な契約自体を破壊する」への回答で、実体化を
-    **発火させる**経路（系統 2・系統 3）と**参照のみ**を行う経路
-    （系統 1）を明確に分離したうえで、系統 1 から「未実体化」による
-    `None` 分岐そのものを取り除いた）**: `Storage::Pending` の実体化
-    そのもの（`cache.get_or_init(|| source.materialize())`。
-    `source.materialize()` は上記のとおり `Result<Vec<T>, BackendError>`
-    を返す）を呼ぶ発火点は系統 2・系統 3（いずれも下記）と §3.5
-    「異なるセッション間の合流」ケース 4（境界を跨ぐ側をその場で即時
-    実体化する箇所。上記）の計 3 箇所である。**系統 1（公開 `get`／
-    `as_slice`）はこの呼び出しを一切行わない**。
-    - **系統 1（公開 `get`／`as_slice`。`tensor.rs:201`・`tensor.rs:231`
-      付近。シグネチャは変更しない）**: **実体化を内部で試みない**
-      （`get_or_init` を呼ばない。P1 指摘の核心は「読み出し専用に見える
-      公開アクセサがカーネル起動・デバイス割り当て・転送という失敗しうる
-      実行を暗黙に発生させ、その失敗を `.ok()` で握り潰す」点にあり、
-      これを解消するには変換方法を変えるのではなく実行そのものをこの
-      経路から取り除く必要がある）。代わりに `cache.get()`
-      （`OnceLock::get`。**初期化を伴わない参照のみ**）で現在の状態を
-      覗き、`Some(Ok(v))`（=すでに系統 2／系統 3 経由で実体化済み）の
-      場合のみ呼び出し元 `Tensor` の `offset`／`shape`／`strides` を
-      適用した view を `Some` として返す。それ以外（`Some(Err(_))`
-      〈上記 3 発火点のいずれか経由で実体化が既に試みられ失敗している〉）
-      は `None` を返す。**`cache.get()` が `None`（誰も実体化を発火させて
-      いない）のまま系統 1 から観測される状況は、下記「公開読み出し境界と
-      内部連鎖読み出しの分離」で規定する不変条件——`autodiff` クレートの
-      外側（ライブラリ利用者・他クレート）へ渡る `Tensor` は必ず系統 3
-      による実体化試行を経ている——のもとでは発生しない内部不変条件で
-      あり、公開契約の分岐としては規定しない**（codex-review 第 4 波 P1
-      指摘への回答。旧稿は「未実体化」も同じ `None` の公開意味論として
-      明記していたが、これは撤回する。「有効添字＋contiguous なら必ず
-      `Some`」という既存契約は、系統 1 が観測しうる `Tensor` が常に
-      実体化試行済みであることによって保たれる）。既存の「範囲外・非
-      contiguous のみ `None`」契約に残る唯一の追加分岐は
-      `Some(Err(_))`（実体化が既に試みられ失敗している）であり、これは
-      `.ok()` によるその場での変換とは性質が異なる: 系統 1 は
-      `BackendError` を**生成する側になったことが一度もない**
-      （`materialize` を呼ばないため、この経路上で新規に `BackendError`
-      が発生する余地自体がない）。`cache` が `Err` を保持しうるのは上記
-      3 発火点（系統 2〈`try_dense`／`dense_vec`／`vjp`〉、系統 3
-      〈`Var::value`／`Var::to_tensor`。下記〉、または §3.5 ケース 4
-      〈境界を跨ぐ側の即時実体化〉）のいずれかがそれを発火させた場合の
-      みであり、系統 2・ケース 4 はそのときの呼び出し元へ `Result` として
-      そのまま返っている（下記参照。ケース 4 は上記のとおり `eval::add`
-      等へ伝播し、`Tape::backward` 経由なら `AutodiffError::Backend` と
-      して利用者へ到達する。「`Tape::backward` までの型契約」参照）。
-      系統 3 は下記のとおり `cache` へ発火結果を書き込むのみで即座には
-      伝播しないが、同じ `Storage` を後で系統 2 が読む経路（次の `Var`
-      演算・`Tape::backward` の `vjp`）で必ず型付きエラーとして表面化する
-      （下記「系統 3」参照）。すなわち `cache` が `Err` を保持している
-      状況は、いずれ型付きエラーとして報告される（または既に報告済みの）
-      状況としてしか生じない。系統 1 の `None` はそのエラーを新たに握り
-      潰すものではなく、単に「このアクセサでは詳細を再取得できない」と
-      いう既存契約の延長にすぎない。この経路はライブラリ利用者が直接呼び
-      うる汎用アクセサであり、シグネチャ変更は破壊的変更になるため
-      `Option` 契約を維持する（`BackendError` の詳細が必要な呼び出し元は
-      次点の系統 2 のアクセサ、または `FusionSession::materialize`
-      〈§3.4〉を使う）。
-      - **比較検討: `Result` ベースの公開アクセサを別途提供する案**
-        （不採用）: `Tensor::try_get`／`try_as_slice` のような新規
-        `Result<_, BackendError>` 返却アクセサをライブラリ利用者向けに
-        公開する案も検討したが、系統 2 の `try_dense`（`pub` +
-        `#[doc(hidden)]`。下記）が既に内部フォールブル境界として同じ
-        役割を果たしており、これに加えて公開表面へ新しい遅延値向け
-        アクセサ系列を追加することは互換 API 層（REQ-9）が前提とする
-        「自作コアの上の薄いラッパーに徹する」方針に対し公開 API 面を
-        不必要に広げる。現時点では利用者からの要望もないため採用せず、
-        将来ライブラリ利用者から遅延値の型付きエラーを直接取得したい
-        要望が出た時点で改めて検討する（第 4 波の見直し後も本結論は
-        変わらない。系統 3 が `value`／`to_tensor` の既存シグネチャを
-        変えずに実体化試行を保証するため、`Result` ベース公開アクセサを
-        追加する動機自体が生じない）。
-    - **系統 2（`dense_vec` を単一の発火点に統一する）**: 境界ノード
-      （`gemm`／`sum`／`max`。§3.2 (a)(b)）に限らず、**VJP（`grad.rs::vjp`）
-      も forward 記録値を読み出す実質的な実体化境界である**ことが本改訂
-      で判明した（下記「VJP・`Tape` 構造への影響の訂正」参照）。両方の
-      呼び出し元を通じて呼ばれるのは既存の `eval::dense_vec`
-      （`eval.rs:41`。`autodiff` クレート `pub(crate)`、公開 API では
-      ないためシグネチャ変更が可能）1 箇所であるため、実体化の型付き
-      エラー伝播はここ 1 箇所に集約する。
-      - `tensor-core` 側に新設するフォールブルアクセサ
-        `Tensor::try_dense(&self) -> Result<Vec<T>, BackendError>`
-        は **`pub`（`#[doc(hidden)]` 付与）とし `pub(crate)` にはしない**
-        （codex-review 指摘 P1・PR #357: 呼び出し元 `eval::dense_vec` は
-        別クレート `autodiff` に属し、`pub(crate)` は定義元クレート
-        `tensor-core` 内からしか参照できないためコンパイルが通らない。
-        クレート間可視性を Rust は `pub` と `pub(crate)` の間の粒度で
-        提供しないため、ワークスペース内クレートから呼べる最小の可視性
-        は `pub` である）。`#[doc(hidden)]` により `cargo doc` の公開 API
-        一覧・compat API 層（REQ-9）の想定表面には現れず、ライブラリ
-        利用者向けの契約を広げない（`.claude/rules/coding-rust.md`
-        「互換 API 層は自作コアの上の薄いラッパーに徹する」を侵さない）。
-        （`Materialized` は保持する `Vec<T>` を、`Pending` は
-        `cache.get_or_init(...)` で実体化したキャッシュ済み融合出力を、
-        それぞれ**呼び出し元 `Tensor` の基底ストレージ**として扱い、
-        いずれの場合も同一のビュー適用ロジックで呼び出し元 `Tensor` が
-        保持する `offset`／`shape`／`strides` を適用した稠密コピーを
-        返す。`Pending` を「キャッシュ済み融合出力全体をそのまま
-        `.clone()` して返す」旧稿の記述は誤りだった: transpose・
-        narrow・reshape は `Storage::Pending` を共有したまま `Tensor`
-        側の view メタデータのみを変更できる（下記「`offset`／
-        `shape`／`strides` のみを扱う view 系操作」参照）ため、
-        `Pending` を実体化する際に呼び出し元 `Tensor` のビューを
-        適用しなければ、view 演算後に元テンソル全体の値・形状が
-        返ってしまい正当性契約に反する。**戻り値は借用 `&[T]` ではなく
-        所有 `Vec<T>` とする**: `Materialized` であっても strided
-        （transpose・narrow 由来の非連続）view の場合は稠密化に新規
-        `Vec` の確保が必要であり、既存の `as_slice()` が非連続入力に
-        `None` を返す（`tensor.rs:769` `as_slice_contiguous_only`）のと
-        同じ理由で `&[T]` を安全に返せない。`eval::dense_vec` が既に
-        `-> Vec<f32>`（所有値）を返す契約（`eval.rs:41`）と合わせる
-        ことで、既存の稠密化利用パターンをそのまま踏襲する。
-      - `eval::dense_vec` は `tensor.try_dense()` を呼び、`BackendError`
-        を握り潰さず `Result<Vec<f32>, BackendError>` としてそのまま
-        返すようシグネチャを変更する（`-> Vec<f32>` から変更。#164 で
-        `eval::add` が `ops: Option<Arc<dyn BackendOps + Send + Sync>>` を追加するのと
-        同時に行う、§3.4 の変更と一体の作業）。
-      - `dense_vec` の全呼び出し元（`eval::matmul`／`eval::sum`／
-        `eval::max`〈§3.2 (a)(b) の境界ノード。連鎖長上限到達
-        （§3.2 (d)）・非融合パターン検出（§3.2 (e)）を含む〉、および
-        `grad.rs::vjp` とその内部で呼ばれる各演算の VJP 関数
-        （`matmul_vjp` 等、`dense_vec` を呼ぶ全関数）は、`?` 演算子で
-        `BackendError` をそのまま伝播できるよう戻り値を
-        `Result<_, BackendError>` へ変更する。これらはいずれも
-        `autodiff` クレートの `pub(crate)` 内部関数（`eval.rs`・
-        `grad.rs` 双方の非公開シグネチャ）であり、公開 API ではないため
-        この変更自体は非破壊（下記「`Tape::backward` までの型契約
-        （Codex 再指摘）への回答」で公開境界の扱いを別途規定する）。
-        #164 のスコープに `grad.rs` のシグネチャ変更（`vjp` 自体を含む）
-        を明示的に含める（下記「VJP・`Tape` 構造への影響の訂正」参照）。
-  - **失敗経路の扱い（Codex 再指摘への回答。旧稿の「理論上到達しない」
-    という前提を撤回する）**: 旧稿は `materialize` の失敗を「`run_fused`
-    が `Unsupported` を返す場合のみ」と仮定し、`Unsupported` は §4 の
-    fail-safe で必ず逐次フォールバックに吸収されるため実質到達しない
-    契約違反として扱っていた。これは誤りである。`run_fused`
-    （`BackendOps` の非破壊拡張メソッド。上記コード例）は `Unsupported`
-    以外にも、GPU 側カーネル実行失敗（`KernelLaunchFailed`）・NVRTC／MSL
-    コンパイル失敗・デバイス側障害（`DeviceAllocationFailed`・
-    `TransferFailed`）等、実行時に実際に起こりうる理由で
-    `Err(BackendError)` を返しうる（`device.rs:184` 以降の
-    `BackendError` variant 一覧のとおり、これらは実機依存の実行時障害を
-    表す既存 variant であり「グラフ構築時の shape・dtype 検証で排除
-    済みの契約違反」だけではない）。したがって系統 2（`dense_vec` 経由の
-    すべての呼び出し元）の `Result` はこれら実行時障害を型付きエラーと
-    して呼び出し元へ表面化させる必要があり、`debug_assert!` で握り潰す
-    設計は採らない。系統 1（公開 `get`／`as_slice`）は上記「実体化の
-    発火点」のとおり `materialize` を一切呼ばないため、系統 1 自身が
-    この実行時障害を発生させる・観測する経路そのものが存在しない
-    （したがって「詳細を失う」対象がそもそもない。この経路が返す
-    `None` は「非 contiguous 等の理由で稠密データを返せない」という
-    既存契約に、実体化が既に試みられ失敗している場合を加えた意味論の
-    延長にすぎず（上記「実体化の発火点」系統 1 のとおり「未実体化」は
-    この分岐に含まれない）、`BackendError` の変換ではない。呼び出し元が
-    エラー詳細を必要とする場合は系統 2 のアクセサ、または
-    `FusionValue::into_tensor`／`FusionSession::materialize`（§3.4）を
-    経由する必要がある）。
-  - **系統 3（公開読み出し境界 `Var::value`／`Var::to_tensor`。実体化を
-    発火させ、系統 1 が観測しうる `Tensor` を必ず実体化試行済みにする。
-    codex-review 第 4 波 P1 指摘への回答）**: `var.rs:74`（`value`）・
-    `var.rs:81`（`to_tensor`）は `autodiff` クレートの外側（ライブラリ
-    利用者・compat API 層〈REQ-9〉・他クレート）へ `Tensor<f32>` を渡す
-    唯一の経路である。両メソッドは `nodes[id].value` を返す直前に
-    `Storage::Pending` を検知した場合 `cache.get_or_init(||
-    source.materialize())` を呼び、実体化を**発火**させる（系統 2 と
-    同じ `cache` を共有するため、二重発火は起きない。`OnceLock::get_or_init`
-    の性質どおり）。**両メソッドの公開シグネチャ（`fn value(&self) ->
-    Ref<'_, Tensor<f32>>`・`fn to_tensor(&self) -> Tensor<f32>`）は
-    変更しない**（非破壊。下記「公開読み出し境界と内部連鎖読み出しの
-    分離」参照）ため、`materialize` が返す `Result` はここでは呼び出し元へ
-    直接伝播できない。伝播しない代わりに、結果は `cache` へ書き込まれた
-    まま**保持**される（`OnceLock` は一度書き込んだ `Result` を破棄しない）。
-    - 実体化が成功した場合: `cache` は `Ok(_)` を保持し、以後この
-      `Storage` に対する系統 1（`get`／`as_slice`）は常に `Some` の view を
-      返せる（既存の「有効添字＋contiguous なら必ず `Some`」契約が保たれる）。
-    - 実体化が失敗した場合: `cache` は `Err(_)` を保持する。系統 1 は
-      この `Storage` に対して `None` を返す（既存の「詳細を失う」経路。
-      上記）が、**エラー自体は失われない**: 同じ `Storage`
-      （`Arc::clone` により同一の `Tensor`／view から派生した全ての
-      `Tensor` が指す同一の `OnceLock`）を系統 2（次に呼ばれる `Var` の
-      演算・`Tape::backward` の `vjp`）が読む際、`cache.get_or_init` は
-      既に書き込み済みの `Err(_)` をそのまま返す（`OnceLock::get_or_init`
-      は再実行せず既存値を返す）ため、系統 2 経由で `?` により型付き
-      `BackendError` として通常どおり伝播する（`Tape::backward` 経由なら
-      `AutodiffError::Backend` として利用者へ到達する。「`Tape::backward`
-      までの型契約」参照）。すなわち系統 3 が発火させた失敗は、系統 3
-      自身の呼び出し元（`value`／`to_tensor` の呼び出し元）には即座に
-      伝わらないが、**当該テープ上のグラフ構築・`backward` が継続する限り
-      系統 2 のいずれかの経由点で必ず型付きエラーとして表面化する**
-      （テープ構築が `value`／`to_tensor` の呼び出しだけで終わり、以後
-      その `Var` に対する演算も `backward` も呼ばれない場合に限り、失敗が
-      どこにも表面化しないまま終わる。これは「読み出し専用アクセサの
-      戻り値を握り潰す」設計とは異なる: そのようなケースでは、そもそも
-      失敗した計算結果を誰も参照・消費していないため、報告すべき呼び出し
-      元が存在しない）。
-    - **比較検討（第 4 波指摘が提示する案 (1)(2) を採らない理由）**:
-      案 (1)「公開読み出し前に型付きエラーを返せる実体化境界を設ける」・
-      案 (2)「`Result` ベースのアクセサを追加し遅延値はそちらを使う」は
-      いずれも `Var::value`／`Var::to_tensor` の公開シグネチャ変更、また
-      は新規 `Result` 版アクセサの追加を要する。前者は破壊的変更であり
-      不採用（`docs/spec/04-requirements.md` REQ-9 の非破壊方針、および
-      上記「`Tape::backward` までの型契約」で確立した「公開シグネチャは
-      変更せず 2 層契約〈内部は `Result`・公開境界だけが変換〉で解決する」
-      という本文書一貫の方針と整合しない）。後者は上記「比較検討: `Result`
-      ベースの公開アクセサを別途提供する案（不採用）」で述べた公開 API
-      面の不必要な拡大という理由がそのまま当てはまる。採用する案 (3)
-      （利用者から観測可能な `Tensor` に未実体化状態を持たせない）は、
-      両メソッドの公開シグネチャを変えないまま「系統 1 が観測する
-      `Tensor` は必ず実体化試行済み」という不変条件を満たせるため、既存の
-      2 案よりも本文書の非破壊方針・公開 API 最小化方針の双方と整合する。
-  - **公開読み出し境界と内部連鎖読み出しの分離（codex-review 第 4 波 P1
-    指摘への回答。本改訂で新設）**: 系統 3 が `value`／`to_tensor` の
-    呼び出しごとに実体化を発火させると、`Var::add`／`mul`／`matmul`／
-    `sum`／`max`（`var.rs:111`〜`var.rs:171` 付近）が演算オペランドの
-    読み出しに現在使っている公開 `self.value()`（`var.rs:113` 等）を
-    そのまま使い続けた場合、**すべての二項演算がオペランド読み出しの
-    たびに即時実体化してしまい、§1 が要求する「別々の Rust メソッド
-    呼び出しをまたぐ遅延連鎖」自体が成立しなくなる**（系統 3 は融合
-    連鎖を破壊してはならない）。これを避けるため、`autodiff` クレート内
-    限定の非公開アクセサ
-    ```rust
-    impl<'t> Var<'t> {
-        /// `Var::add`／`mul`／`matmul`／`sum`／`max` がオペランドを読む
-        /// ための内部専用アクセサ。`Var::value`（公開・系統 3）と異なり
-        /// 実体化を発火させない（`Storage::Pending` のまま返してよい）。
-        /// クレート境界を跨がないため `pub(crate)` にできる（`try_dense`
-        /// が `pub` + `#[doc(hidden)]` を要した「クレート間可視性の粒度」
-        /// 問題〈上記〉はここでは生じない：呼び出し元 `var.rs` の演算
-        /// メソッド群は定義元と同一クレート）。
-        pub(crate) fn value_raw(&self) -> Ref<'_, Tensor<f32>> {
-            Ref::map(self.tape.nodes.borrow(), |nodes| &nodes[self.id.0].value)
-        }
-    }
-    ```
-    を新設し、`var.rs` の演算メソッド群（`add`／`mul`／`matmul`／`sum`／
-    `max`。上記「次に呼ばれる `Var::mul`…」で述べた連鎖経路）は
-    `self.value()` ではなくこの `value_raw()` を呼ぶよう変更する
-    （`eval::add` 等へ渡す `&Tensor<f32>` は `Pending` のままでよい。§3.5
-    冒頭「既存の演算経路からの遅延連鎖構築」の前提と整合）。**公開
-    `Var::value`（系統 3）はライブラリ利用者・他クレートが直接呼ぶ
-    経路にのみ残り、実体化を発火させる。**この分離により、
-    「`autodiff` クレートの外側へ渡る `Tensor` は必ず実体化試行済み」
-    という不変条件（系統 1 の `None` 契約が前提とする不変条件。上記）を、
-    融合連鎖の遅延性を壊さずに満たせる。`Gradients::get`（`backward.rs`
-    が返す勾配アクセサ）は追加の実体化発火点を必要としない: 勾配値は
-    `grad.rs::vjp` が非融合の `ops_for(...).add()` 等（§3.5「スコープの
-    明示」上記。`Var` の融合連鎖を経由しない生の `Tensor` 演算）で構築
-    するため、勾配 `Tensor` の `Storage` は常に `Materialized` であり
-    `Pending` を経由しない（したがって系統 1 の `None`「未実体化」分岐は
-    そもそも `Gradients::get` の戻り値には現れない）。
-  - `offset`／`shape`／`strides` のみを扱う view 系操作（transpose・
-    narrow・reshape の `Arc::clone(&self.storage)` 経路）はデータを
-    読まないため、`Pending` のまま複製してよい（実体化を強制しない）。
-    ただし §1 のとおり transpose 混在連鎖は非融合フォールバックへ倒す
-    契約（`NodeMeta.contiguous == false`）のため、`FusionOp` へは組み
-    込まず実体化境界として扱う（§3.2 (e) と整合）。**正当性契約
-    （codex-review 再指摘 P1 への回答。本改訂で明記）**: この
-    `Arc::clone` 経路は `Storage::Pending` 自体を複製するだけであり、
-    view 演算後の `Tensor` は複製元と同じ `Storage::Pending` を共有し
-    つつ `offset`／`shape`／`strides` だけが異なる状態になる。この
-    `Tensor` に対する `try_dense`（上記「`Materialized` は保持する
-    `Vec<T>` を…」の改訂契約）・VJP（`dense_vec` 経由）・後続の境界
-    演算はいずれも、
-    複製元テンソル全体ではなく複製後の `Tensor` が保持する
-    `offset`／`shape`／`strides` を適用した結果を受け取らなければ
-    ならない。`try_dense` を「基底ストレージ実体化＋呼び出し元ビュー
-    適用」という単一契約に統一した（上記改訂）のはこれを満たすためで
-    あり、`Pending` 側にだけ別のビュー無視経路が残らないようにする。
-    transpose・narrow・reshape を `Storage::Pending` 上に適用した後の
-    読み出し・VJP の正当性は、#164（ディスパッチ統合。`Storage::Pending`
-    実装）の実装に付随するテストとして #165（テスト）のスコープに
-    含める（§6.1 対応表に反映）。
-- **VJP・`Tape` 構造への影響の訂正（本改訂）**: `Tape` が記録する `Op`
-  単位のノード粒度・`grad.rs::vjp` の走査対象（`Op` 列）自体には影響
-  しない（§3.3 の契約を変更しない。ノードグラフの形は不変）。ただし
-  旧稿は「VJP は `Storage::Pending` を通じて**自動的に**実体化される」
-  と記述しており、これは実体化が失敗しうる事実（上記「失敗経路の
-  扱い」）を踏まえると不正確だった。`grad.rs::vjp`（および内部で呼ぶ
-  `matmul_vjp` 等の各演算 VJP 関数）は forward 記録値
-  （`nodes[id].value: Tensor<f32>`）を読み出す際に `dense_vec`
-  （上記「系統 2」）を経由するため、`Op::Leaf` を除く VJP 呼び出しは
-  実質的に実体化境界であり、`run_fused` の実行時障害を受けて失敗
-  しうる。本改訂は `vjp`（`grad.rs:31`）とその内部の全 VJP 関数の
-  戻り値を `Result<_, BackendError>` 化する（系統 2 と同じ理由）。これは
-  `Tape`／`Op` の**構造**（ノード粒度・走査順）には影響しないが、`vjp`
-  系関数群の**シグネチャ**には影響する（#164 のスコープに明示的に含める。
-  本節冒頭「VJP・`Tape` 構造への非影響」という誤った見出しは本改訂で
-  撤回する）。
+### 3.5.3 窓 (b): 将来の複合エントリポイント
 
-  **`Tape::backward` までの型契約（Codex P1 再指摘「`Result<Gradients,
-  AutodiffError>` に `BackendError` variant も `From<BackendError>` も
-  存在せず、記載どおりの `?` はコンパイルできない」への回答。本改訂で
-  確定する）**: 旧稿は「`BackendError` を型付きで `Tape::backward` まで
-  伝播させる」とだけ記述しており、`backend.rs:73` の既存公開シグネチャ
-  `pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError>`
-  との整合を示さないまま `?` で素通しできるかのように書いていたが、これは
-  誤りだった（`AutodiffError`（`crates/autodiff/src/error.rs:21`）は現状
-  `BackendError` を包む variant も `From<BackendError>` 実装も持たない）。
-  戻り値を `Result<Gradients, BackendError>` 等へ変更することは公開 API の
-  破壊的変更になるため不採用とし、以下の 2 層契約で解決する（#164 の
-  スコープに明示的に含める）:
-  - 内部関数群（`tensor-core` の `Tensor::try_dense`〈`pub` +
-    `#[doc(hidden)]`。上記のとおりクレート境界を跨ぐため `pub(crate)`
-    にはできない〉、および `autodiff` クレート内で完結する
-    `eval::dense_vec`／`grad.rs::vjp`／`matmul_vjp` 等の各演算 VJP 関数
-    〈こちらは呼び出し元・呼び出し先が同一クレート内のため引き続き
-    `pub(crate)` でよい〉）はいずれも `Result<_, BackendError>` のまま
-    `?` で連鎖させる（上記のとおり）。
-  - `Tape::backward`（`backward.rs:73`。公開シグネチャは
-    `Result<Gradients, AutodiffError>` のまま変更しない）は、内部で
-    `vjp(...)` を呼ぶ箇所においてのみ `BackendError` を
-    `AutodiffError` へ変換する。変換は `AutodiffError`
-    （`#[non_exhaustive]`。`error.rs:19`）への非破壊 variant 追加で行う:
-    ```rust
-    pub enum AutodiffError {
-        // 既存 variant（Shape／Backward／TapeMismatch／InvalidArgument）は変更しない。
-        /// 逆伝播中の実体化・カーネル実行で発生した型付きバックエンド
-        /// エラー（TASK-12.1a／#164。`tensor_core::BackendError` をラップ）。
-        Backend(tensor_core::BackendError),
-    }
+- 現状の `Var` 演算 API は 1 呼び出し 1 演算の粒度であり（`add`／`mul`
+  等それぞれが独立した `Result` を返す）、演算単体の内部に複数
+  elementwise 演算を持たないため、この窓の恩恵は現時点では顕在化
+  しない。将来、複数の演算を 1 回の `Result` で返す複合エントリ
+  ポイント（`compat::Sequential::forward` 相当。`docs/public-api-design.md`
+  に設計段階として記載。または将来の「グラフ一括実行」API）が追加
+  された場合、その内部実装は 3.5.2 と同じ要領で `FusionSession` を
+  開き、自身が `Ok` を返す直前に実体化を完了させる契約に従う。この
+  窓は #164 の必須スコープではなく、当該複合 API が実装される時点で
+  適用される（本節はその際に従うべき契約を先に確定しておくもの）。
 
-    impl From<tensor_core::BackendError> for AutodiffError {
-        fn from(err: tensor_core::BackendError) -> Self {
-            AutodiffError::Backend(err)
-        }
-    }
-    ```
-    `#[non_exhaustive]` enum への variant 追加・新規 `From` 実装はいずれも
-    公開 API 非破壊（既存の呼び出し元の網羅的 `match` を壊さない。
-    `error.rs:15-18` の既存方針と同じ理由）。`autodiff` は既に
-    `tensor-core` に依存している（`crates/autodiff/Cargo.toml:14`）ため
-    新規依存の追加は不要。`Tape::backward` 内部で `vjp(...)?` と書けば
-    `?` 演算子が `From<BackendError> for AutodiffError` を経由して
-    自動変換する（`vjp` 自体は `Result<_, BackendError>` を返す関数の
-    まま、`backward` 側だけが `AutodiffError` へ変換する境界になる）。
-  - `error.rs:66` 以降の `impl fmt::Display for AutodiffError` は
-    `match` で全 variant を網羅しているため、`Backend` variant 追加時は
-    対応する `Display` アームの追加も同時に行う（追加を怠るとコンパイル
-    エラーになる。実装時の見落とし防止のため本節に明記する）。
-- **スコープの明示**: 本節が対象とするのは `Var` 経由（autodiff テープ
-  構築）の演算チェーンに限る。`&dyn BackendOps` を直接呼ぶ、autodiff を
-  経由しない生の `Tensor` 操作（§1・§3.4 で既に対象外と明記済み）は
-  引き続き対象外であり、この経路の `Storage` は常に `Materialized` の
-  ままでよい（`ops_for(...).add()` 等の実装は `Pending` を生成しない）。
+### 3.5.4 窓 (c): `FusionSession::materialize` — 融合実行のフォールブルな単一発火点
+
+（本節は codex-review 第 5 波指摘を受けて全面改訂する。第 4 波までの
+旧稿は `tensor-core` 側に `Tensor::try_dense(&self) -> Result<Vec<T>,
+BackendError>` という新設アクセサを置き、そこへ `BackendError` を
+集約する設計を採っていた。しかし 3.5.1 の契約により `Tensor` の
+`Storage` は常に `Materialized` であり、`Pending` は `FusionSession`
+の外へ一切出ない（§3.4）。したがって `Tensor` の `&self` メソッドが
+`FusionSession` へ到達する経路自体が存在せず、`try_dense` の `Result`
+に到達可能な `Err` 経路がない（第 5 波で判明）。本節は撤回し、
+「窓 (c)」の実体を §3.4 で既に定義した `FusionSession::materialize`
+そのものへ置き換える。）
+
+- 3.5.2・3.5.3 の内部実装（VJP 計算・将来の複合エントリポイント）が
+  「これから構築する融合対象区間の結果を確定させる」ために呼ぶ唯一の
+  フォールブルな発火点は `FusionSession::materialize`（§3.4。
+  `pub(crate) fn materialize(&self, value: FusionValue) -> Result<Tensor<f32>,
+  BackendError>`）である。この関数は `FusionValue::Materialized` を
+  そのまま返し、`FusionValue::Pending` は `run_fused` を試みたうえで
+  §4 の fail-safe（逐次フォールバック）に従う（§3.4 で確定済み）。
+- 一方、`Tensor`（既に実体化済み。3.5.1）の値を稠密な `Vec<f32>` として
+  読み出す処理（VJP 計算式が入力に使う既存の forward 記録値の稠密化）
+  は、既存の `eval::dense_vec`（`eval.rs:41`）がそのまま担う。3.5.2で
+  確定したとおり `dense_vec` 自身は非 fallible のまま変更しない
+  （`Tensor::contiguous()`／`as_slice()` の既存の非 fallible 契約の
+  延長であり、この処理自体は失敗しない）。
+- **失敗経路**: `run_fused`（`BackendOps` の非破壊拡張メソッド）は
+  `Unsupported` 以外にも、GPU 側カーネル実行失敗
+  （`KernelLaunchFailed`）・NVRTC／MSL コンパイル失敗・デバイス側
+  障害（`DeviceAllocationFailed`・`TransferFailed`）等、実行時に
+  実際に起こりうる理由で `Err(BackendError)` を返しうる
+  （`device.rs:184` 以降の `BackendError` variant 一覧のとおり）。
+  `FusionSession::materialize` を呼ぶ `vjp`／各演算 VJP 関数（3.5.2）は
+  これらすべてを型付きエラーとして `?` でそのまま伝播させ、
+  `debug_assert!` 等で握り潰さない。
+
+### 3.5.5 view 系操作（transpose・narrow・reshape）
+
+- `offset`／`shape`／`strides` のみを扱う view 系操作
+  （`Arc::clone(&self.storage)` 経路）は、3.5.1 の契約により
+  `Storage` が常に `Materialized` であるため、他の `tensor-core` の
+  既存 view 演算と同様に振る舞う。「未実体化のまま view を複製する」
+  という旧稿（第 4 波まで）の複雑さは、`Storage::Pending` 自体を廃止
+  したことで解消される（本改訂の帰結）。
+- 3.5.2・3.5.3 の内部実装が構築するグラフ（`FusionSession` が保持する
+  ローカルな `FusionGraph`）の内部では、transpose を挟む部分列は
+  §1・§2.3 のとおり非融合フォールバックへ倒す（`NodeMeta.contiguous
+  == false` が §3.2 (e) の実体化条件に対応する）。これは内部の
+  グラフ構築ロジックの挙動であり、公開 `Tensor` の view 契約には
+  一切影響しない。
+
+### 3.5.6 §1 の PoC-9 実測に対する受け入れコスト（再掲）
+
+- §1「遅延の生存窓は単一の fallible 呼び出しの内部に限定する」で
+  確定したとおり、PoC-9 実測（`ew4`／`ew6`）が示す 2.25〜3.19 倍の
+  高速化は、独立した公開 `Var` 呼び出し（`a.add(&b)?.mul(&c)?`）を
+  またぐ elementwise 連鎖には及ばない。この対価は §6.2 に明示的な
+  未決事項として記録する（本節の重複記載は避け、§1・§6.2 を参照する）。
 
 ## 4. バックエンド・規約との契約
 
@@ -1500,8 +965,8 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
 |---|---|
 | #162（連鎖検出） | §2（グラフ表現・ノード種別・メタデータ・fan-out）を用いた融合可能連鎖（elementwise のみで閉じた 4〜6 段の連結成分）の検出アルゴリズム |
 | #163（融合カーネル生成） | §2.4 の fan-out レジスタ内解決方針、§3.4 で確定した `FusionPlan::ops`（`FusedOpKind` 列挙）／`output_shape`／`dtype`／`leaf_count`／`use_count` の公開 DTO アクセサを読んだカーネルソース生成、§4・§5 の境界検査・数値一致・インジェクション対策 |
-| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針・「公開コンストラクタの選択は融合スイッチにならない」契約に基づく融合対応経路の実装（`Tape::new()` を `with_backend` と同一の内部ディスパッチへ結線し、融合可否を §1 の 2 条件〈バックエンド解決可否・演算列の融合可否判定〉だけで決めること。公開 API の選択で分岐させないこと）、§3.2 の実体化条件・§3.4 の `FusionValue`／`FusionSession`／`BackendOps::run_fused` 接続契約（`Arc<Mutex<FusionGraph>>`・`Arc<dyn BackendOps + Send + Sync>` 所有モデル。`BackendOps` trait 定義自体は変更せず `Send + Sync` は融合機構の型注釈側でのみ課す）・§3.4 で確定した `Tape::with_backend(ops)` 新規公開コンストラクタと `eval::add`／`mul`／`relu`／`exp`／`tanh` への `ops: Option<Arc<dyn BackendOps + Send + Sync>>` 引数追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）・§3.5 の `Storage` への `OnceLock` ベース `Pending` バリアント追加と `autodiff::eval` 側の伝播ロジックの実装（§3.5「`Materialized` は保持する `Vec<T>` を…」で確定した `try_dense` の「基底ストレージ実体化＋呼び出し元ビュー適用」契約を含む）・§3.5「`Tape::backward` までの型契約」で確定した `AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）・§3.5「実体化の発火点」系統 3・「公開読み出し境界と内部連鎖読み出しの分離」で確定した `Var::value`／`Var::to_tensor`（公開・シグネチャ変更なし）での実体化発火と、`var.rs` 演算メソッド群（`add`／`mul`／`matmul`／`sum`／`max`）が内部オペランド読み出しに使う非公開 `Var::value_raw`（`pub(crate)`。実体化を発火させない）の新設・置き換え |
-| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、§3.5「正当性契約（codex-review 再指摘 P1 への回答）」で明記した transpose・narrow・reshape を `Storage::Pending` 上に適用した後の `try_dense`／VJP／後続の境界演算が元テンソル全体ではなく view 適用後の値・形状を返すことの検証、**§1「公開コンストラクタの選択は融合スイッチにならない」契約の検証**（同一演算列を `Tape::new()` と `Tape::with_backend(ops)` の双方で実行し、数値結果が数値一致複合判定〈§4〉を満たすこと、および融合の発生有無がどちらのコンストラクタを呼んだかではなく §1 の 2 条件〈バックエンド解決可否・演算列の融合可否判定〉のみで決まることの検証）、**§3.5「実体化の発火点」系統 1〜3 の契約検証**（codex-review 第 3 波・第 4 波 P1 指摘への回答）: (i) `Var::value_raw`（内部連鎖読み出し）経由で連鎖中の未実体化 `Pending`〈`cache.get()` が未初期化〉に対しては `run_fused`／カーネル起動が発生しないこと（`run_fused` 呼び出し回数を数えるカウンタ付き `BackendOps` テスト実装で確認する）、(ii) 公開 `Var::value`／`Var::to_tensor`（系統 3）が返す `Tensor` は常に実体化試行済みであり、有効添字＋contiguous な `get`／`as_slice`（系統 1）呼び出しが必ず `Some` を返すこと（未実体化による `None` が公開境界から一切観測されないことの検証。第 4 波 P1 指摘への回答）、(iii) 系統 2〈`try_dense`〉経由で実体化済みの `Pending` に対する `get`／`as_slice` が view 適用済みの値を `Some` で返すこと、(iv) 系統 3 が発火させた実体化失敗が `cache` に留まり、後続の系統 2（次の `Var` 演算・`Tape::backward`）経由で型付き `BackendError`／`AutodiffError::Backend` として表面化すること、の 4 点を検証 |
+| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針・「公開コンストラクタの選択は融合スイッチにならない」契約・「遅延の生存窓は単一の fallible 呼び出しの内部に限定する」契約（codex-review 第 5 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Send + Sync` 不要）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない。第 5 波 P2 指摘への回答）接続契約、`Tape` の非公開フィールド `ops: Option<Box<dyn BackendOps>>` と新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps>)` の追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。§3.5.1 で確定した「`Var` の fallible 演算（`add`／`mul`／`matmul`／`sum`／`max`）は返る前に自身の出力を実体化済みにする」契約の実装（`relu`／`exp`／`tanh` は非 fallible なまま対象外。`Storage` に `Pending` バリアントは追加しない。`Var::value_raw`・実体化の「系統 1〜3」分岐はいずれも新設しない）。§3.5.2 で確定した `Tape::backward` の VJP 連鎖内部での `FusionSession` 利用・`grad.rs::vjp` とその内部の各演算 VJP 関数の `Result<_, BackendError>` 化（`FusionSession::materialize` の直接呼び出しのみが `BackendError` を発生させる。§3.5.4）・`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。既存の `eval::dense_vec`（forward 記録値の稠密化）は非 fallible のまま変更しない（§3.5.2・§3.5.4） |
+| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「公開コンストラクタの選択は融合スイッチにならない」契約の検証**（同一演算列を `Tape::new()` と `Tape::with_backend(ops)` の双方で実行し、数値結果が数値一致複合判定〈§4〉を満たすこと、および融合の発生有無がどちらのコンストラクタを呼んだかではなく §1 の 2 条件〈バックエンド解決可否・演算列の融合可否判定〉のみで決まることの検証）、**§3.5.1「公開 `Var` 演算の常時実体化契約」の検証**（codex-review 第 5 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出し（`a.add(&b)?.mul(&c)?`）をまたいで `Pending` な状態が一切観測されないこと（各呼び出しの戻り値の `Storage` が常に `Materialized` であることをテスト用アクセサで確認する、または `run_fused` の呼び出しタイミングが各 `Var` 呼び出しの `?` 到達前に必ず完了していることをカウンタ付き `BackendOps` テスト実装で確認する）、(ii) 融合実行の失敗（`run_fused` がテスト用に `Unsupported` 以外の `Err` を返す実装）が、それを引き起こした公開 `Var` 演算自身の `Err` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、その融合が失敗すると `Tape::backward` が `AutodiffError::Backend` を返すこと、かつ成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(iv) §2.4 の fan-out が単一呼び出し内の融合グラフ構築で正しく解決されることの検証 |
 | #203（GEMM epilogue 融合） | §3.2 (b) の `gemm` 境界を bias／activation epilogue まで拡張する設計変更 |
 
 ### 6.2 未決事項（スコープ外）
@@ -1522,6 +987,29 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
   `None` のまま）、実質的に現行の非融合パスと同じ挙動になる（§3.4・
   §3.5 に明記）。既定解決規則の確定は #164 以降、ユーザー承認を得た
   うえで別途検討する。
+- **独立した公開 `Var` 呼び出しをまたぐ elementwise 連鎖融合を行わない
+  受け入れコスト（codex-review 第 5 波 P1 指摘への回答。本改訂で
+  §1「遅延の生存窓は単一の fallible 呼び出しの内部に限定する」を確定
+  した帰結として記録する）**: PoC-9 実測（`ew4`／`ew6`）が示す
+  2.25〜3.19 倍の高速化は、`a.add(&b)?.mul(&c)?` のように独立した公開
+  `Var` 呼び出しをまたぐ elementwise 連鎖で測定されたものである。第 4
+  波までの設計はこの連鎖をまたいで `Storage::Pending` を持ち越すことで
+  この高速化を再現しようとしていたが、`value`／`to_tensor` の非
+  fallible 契約を壊さずには実現できないことが第 5 波 P1 指摘で判明した
+  （§1）。本改訂後の契約（§3.5.1「公開 `Var` 演算は返る前に自身の出力を
+  実体化済みにする」）のもとでは、現状の `Var` 演算 API（1 呼び出し
+  1 演算の粒度）を素朴に使う限り、この高速化は得られない。融合の効果
+  は §1 (a)〜(c) の窓（`Tape::backward` の VJP 連鎖内部・将来の複合
+  エントリポイント・`FusionSession::materialize` の直接呼び出し）に
+  限定される。加えて、実現可能な窓のうち (a) の VJP 計算式は `tanh`
+  の `grad * (1 - y * y)` のように 2〜3 段程度の短い連鎖にとどまり、
+  §1・§3.2 (d) が定める 4〜6 段の連鎖長上限に到達する例は現時点では
+  想定しにくい（複合エントリポイント（b）が追加されれば 4〜6 段規模の
+  連鎖が実現しうる）。これは
+  transpose 非融合（13.89 倍差、上記エントリ）と同種の「正当性・契約
+  健全性を優先した安全側の設計判断による受け入れコスト」であり、
+  #162 以降で複合エントリポイント（§3.5.3「窓 (b)」）を追加すること
+  により部分的に回復しうる拡張候補として記録する。
 - **transpose 混在連鎖のメタデータ融合**: §1・§2.3 のとおり初期スコープ
   では transpose 検出時に非融合フォールバックへ倒すため、v1 fusion 有効
   時の性能水準（PoC-9 `ew_reshape` 実測で最大 13.89 倍差）は初期スコープ
@@ -1548,26 +1036,25 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
   に基づいて設計しているが、REQ-12 自体の文言更新は `docs/spec/`
   正本リポジトリ側の課題であり、本イシューのスコープ外である
   （`docs/spec/` は編集しない。`.claude/rules/delegation-impl.md`）。
-- **異なる `FusionSession` を跨ぐ融合境界の性能特性**: §3.5「異なる
-  セッション間の合流」（PR #357 review 再指摘 P1-1／P1-2 への回答で
-  「合流せず、越境する側をその場で実体化してから葉ノードとして埋め込む」
-  へ確定）の契約は正しさ（循環参照の非発生・backend 越境転送の安全性）
-  を保つが、`(a + b) * (c + d)` のように独立に構築された 2 連鎖が
-  1 つの二項演算で合流する場合、越境した側（`c + d`）はその場で
-  実体化され、`a+b` 側の `run_fused` 呼び出し 1 回へ単純化される
-  （単一カーネルへは融合されない。両連鎖が偶然同一 backend でも
-  同様）。この性能上限（未融合になる境界の頻度・実測影響）は #164 の
-  受け入れ条件には含まれておらず、実装後のベンチ（bench-runner。5 回
-  計測中央値）で計測し、必要なら合流検出・並べ替え等の追加最適化を
-  #162 以降の拡張候補として別途検討する。
+- **異なる `FusionSession` を跨ぐ融合境界の性能特性（本改訂で解消。
+  旧稿の記録を撤回する）**: PR #357 review 再指摘 P1-1／P1-2 が対象と
+  していた「異なる `FusionSession` に属する `Pending` 同士が二項演算で
+  合流する」というシナリオ（`(a + b) * (c + d)` が独立した 2 つの
+  セッションをまたぐケース）は、§1「遅延の生存窓は単一の fallible
+  呼び出しの内部に限定する」の確定により構造的に発生しなくなった:
+  `Pending`（`FusionValue::Pending`）は特定の 1 回の fallible 呼び出し
+  （§3.5.2・§3.5.3）の実行中にのみ存在し、その呼び出しが返る前に必ず
+  実体化されるため、呼び出しをまたいで生き残る `FusionSession` 自体が
+  存在しない。したがって「複数の `FusionSession` が合流する」という
+  状況そのものが起こりえず、本エントリが記録していた性能上限の懸念は
+  対象を失った（旧稿の議論は削除する）。
 - **葉ノードを `DeviceBuffer` 直接参照へ最適化する場合の device 一致
-  検証**: §3.5 ケース 4（PR #357 review 再指摘 P1-2 への回答）は葉が
-  常に host 常駐の `Tensor<f32>` を経由する現行契約に依拠して backend
-  越境転送の安全性を導いている。将来 `run_fused` の葉を `DeviceBuffer`
-  （§4.2。デバイスメモリハンドルを直接保持）へ最適化し host 往復を
-  省く設計に変更する場合、この前提が崩れるため、その時点で葉ごとに
-  `ops.device()` と `DeviceBuffer::device()` の一致を fail-closed で
-  検証する（不一致は型付きエラーで拒否する）契約を新設する必要がある。
-  現行スコープ（TASK-12.1a）では `Tensor<f32>` 経由の host 往復のみを
-  対象とするためこの検証は不要であり、#162 以降の拡張候補として記録
-  する。
+  検証**: §3.4・§3.5.2〜3.5.4 の設計は、融合対象区間の葉が常に host
+  常駐の `Tensor<f32>` を経由する契約に依拠して backend 越境の安全性を
+  保っている。将来 `run_fused` の葉を `DeviceBuffer`（§4.2。デバイス
+  メモリハンドルを直接保持）へ最適化し host 往復を省く設計に変更する
+  場合、この前提が崩れるため、その時点で葉ごとに `ops.device()` と
+  `DeviceBuffer::device()` の一致を fail-closed で検証する（不一致は
+  型付きエラーで拒否する）契約を新設する必要がある。現行スコープ
+  （TASK-12.1a）では `Tensor<f32>` 経由の host 往復のみを対象とする
+  ためこの検証は不要であり、#162 以降の拡張候補として記録する。
