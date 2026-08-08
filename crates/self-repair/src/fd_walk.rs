@@ -131,6 +131,14 @@ mod supported {
         /// 出典: Linux `arch/arm64/include/uapi/asm/fcntl.h`（32-bit ARM 由来の
         /// 値。asm-generic の値〈0o200000/0o400000〉とは異なる。本ファイル
         /// 冒頭 doc 参照）。
+        ///
+        /// 裏付け（aarch64 に asm-generic 値を使うのは誤り）: `libc` crate
+        /// v0.2.174 の `src/unix/linux_like/linux/gnu/b64/aarch64/mod.rs` は
+        /// `O_DIRECTORY = 0x4000`（=0o40000）・`O_NOFOLLOW = 0x8000`
+        /// （=0o100000）を定義し、`b64/x86_64/mod.rs` は `O_NOFOLLOW =
+        /// 0x20000`（=0o400000）を定義する。aarch64 で asm-generic 値を渡すと
+        /// カーネルは `O_DIRECT | O_LARGEFILE` と解釈し symlink 追跡防御が
+        /// 無音で失効するため、この per-arch 分岐は削除してはならない。
         #[cfg(target_arch = "aarch64")]
         pub const O_DIRECTORY: i32 = 0o40000;
         #[cfg(target_arch = "aarch64")]
