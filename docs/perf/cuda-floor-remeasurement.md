@@ -42,7 +42,12 @@ TASK-8.3 の担当欄は「共同（計測実行は Claude Code、下限値の�
   インライン実装とした。マージ後は #158/#159 で `bench-harness` 側の公開 API へ一本化する
   （out-of-scope-tracking 対応）
 - GPU 名が `GB10` を含まない場合は警告行を出力する（PoC-v2-3 参照値と計測機が異なるため比率は参考値。
-  REQ-8「いずれも同一ハードウェア上の同一バックエンド比較」）
+  REQ-8「いずれも同一ハードウェア上の同一バックエンド比較」）。ただし GPU 名一致は WARNING 表示のみに
+  用い、正式な candidate optimized floor の許可条件にはしない（GPU 名の部分一致では同一実機比較を
+  保証できないため。下記「PyTorch 参照値の扱い」節参照。PR #349 codex-review 指摘 P1 対応）
+- f32/f16 それぞれの最良経路は固定優先順位ではなく実測 TFLOPS の大小比較で選ぶ（`best_of` 純関数。
+  同 codex-review 指摘 P1「実測性能を比較せず固定優先順位で『最良値』を選んでいる」対応。選ばれた経路
+  ラベル〈`tiled`/`wmma_tf32`/`wmma_f16`/`mma_f16`〉を出力に含める）
 
 ## 計測手順（DGX Spark GB10 等 CUDA 実機）
 
@@ -53,27 +58,51 @@ git checkout test/157-cuda-floor-remeasurement   # 本イシューの実装ブ�
 # 1. 数値一致確認を先に行う（既存 parity テスト群。閾値は緩和しない）
 cargo test -p backend-cuda --release -- --ignored
 
-# 2. 再実測バイナリを実行
+# 2. （推奨・PR #349 codex-review 指摘 P1 対応）同一実機で PyTorch を再計測し、
+#    候補下限の正式算出に使う env override を用意する。
+#    docs/spec/03-poc/poc-v2-3-cuda-gemm/code/ の計測スクリプトを同一 GB10 個体で
+#    再実行し、得られた 6 値（f32/f16 × 512/2048/4096）と出所を注入する:
+export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="poc-v2-3-cuda-gemm/code/ 再実行, <実施日>, 同一 GB10 個体"
+export CUDA_FLOOR_BENCH_PYTORCH_F32_512=<再計測値>
+export CUDA_FLOOR_BENCH_PYTORCH_F32_2048=<再計測値>
+export CUDA_FLOOR_BENCH_PYTORCH_F32_4096=<再計測値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_512=<再計測値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_2048=<再計測値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_4096=<再計測値>
+
+# 3. 再実測バイナリを実行
 cargo run -p backend-cuda --example cuda_floor_bench --release
 ```
 
 出力形式（`crates/backend-cuda/examples/cuda_floor_bench.rs::main` 参照）:
 
-- `WARNING: ...` 行（GPU 名が GB10 系でない場合のみ）: PyTorch 参照値との比較が参考値に留まる旨
+- `WARNING: ...` 行（GPU 名が GB10 系でない場合のみ）: PyTorch 参照値との比較が参考値に留まる旨。
+  ただしこの GPU 名一致は candidate floor の許可条件ではない（下記「PyTorch 参照値の扱い」参照）
 - `device: name=... compute_capability=...` 行: 計測環境（下表「計測環境」への転記元）
-- `size=<N> tiled_f32_tflops=... wmma_tf32_tflops=... wmma_f16_tflops=... mma_f16_tflops=... f32_best_over_pytorch=... f16_best_over_pytorch=...` 行:
-  形状ごとの経路別 TFLOPS・対 PyTorch 比（f32 は WMMA(TF32) opt 優先、f16 は `mma.sync` 優先の最良値）
+- `pytorch reference provenance: ...` 行: PyTorch 参照値が「同一実機で今回再計測（env override）」か
+  「PoC-v2-3 固定値」かの出所
+- `size=<N> tiled_f32_tflops=... wmma_tf32_tflops=... wmma_f16_tflops=... mma_f16_tflops=... f32_best_path=... f16_best_path=... f32_best_over_pytorch=... f16_best_over_pytorch=...` 行:
+  形状ごとの経路別 TFLOPS・選ばれた最良経路ラベル（`tiled`/`wmma_tf32`/`wmma_f16`/`mma_f16`。実測 TFLOPS の
+  大小比較で選出。固定優先順位ではない）・対 PyTorch 比
 - `CUDA f32 candidate optimized floor ... = N%` / `CUDA f16 candidate optimized floor ... = N%` 行:
-  判定対象形状（2048/4096）の最小比率に丸め規則を適用した候補下限値
+  判定対象形状（2048/4096）の最小比率に丸め規則を適用した候補下限値。**判定対象形状すべてで同一実機
+  再計測値（env override）が使われた場合のみ**出力される。1 サイズでも PoC-v2-3 固定値にフォールバック
+  していれば `n/a`（参考比率のみ表示）になる
 
 ### PyTorch 参照値の扱い
 
-第一義は**同一実機での PyTorch 再計測**（`docs/spec/03-poc/poc-v2-3-cuda-gemm/code/` の計測スクリプトを
-再実行し、同一プロトコル・同一シードで再取得する）。再計測不可の場合は PoC-v2-3 記録値（同一機 GB10 実測、
-`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md`「計測結果」節）を `cuda_floor_bench.rs` に定数として埋め込んだ
-値を使用し、その旨を下表「計測環境」に明記する。
+REQ-8 は「同一ハードウェア上の同一バックエンド比較」を要求するため、正式な candidate optimized floor は
+**同一実機での PyTorch 再計測**（`docs/spec/03-poc/poc-v2-3-cuda-gemm/code/` の計測スクリプトを再実行し、
+同一プロトコル・同一シードで再取得した値）を `CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_{512,2048,4096}` と
+`CUDA_FLOOR_BENCH_PYTORCH_SOURCE`（出所文字列。非空必須）で注入した場合にのみ算出される
+（`cuda_floor_bench.rs::pytorch_f32_ref`/`pytorch_f16_ref`/`print_candidate_floor` 参照）。
 
-PoC-v2-3 実測値（`torch.matmul`, CUDA, DGX Spark GB10, PyTorch 2.13.0+cu130, 5〜20 回中央値）:
+GPU 名が `GB10` を含む場合でも、env override が無ければ下記の PoC-v2-3 固定値が使われ、正式な
+candidate floor は `n/a`（参考比率のみ）になる。GPU 名の部分一致だけでは同一実機比較を保証できない
+ため（PR #349 codex-review 指摘 P1）、固定値だけでは候補下限を確定させない。
+
+PoC-v2-3 実測値（`torch.matmul`, CUDA, DGX Spark GB10, PyTorch 2.13.0+cu130, 5〜20 回中央値。
+env override 未注入時のフォールバック値・参考比率の分母）:
 
 | M=N=K | PyTorch f32 (TFLOPS) | PyTorch f16 (TFLOPS) |
 |-------|----------------------|----------------------|
@@ -100,21 +129,28 @@ PoC-v2-3 実測値（`torch.matmul`, CUDA, DGX Spark GB10, PyTorch 2.13.0+cu130,
 | rustc | （記入: `rustc --version`） |
 | commit SHA | （記入） |
 | 実施日 | （記入） |
-| PyTorch 参照値の出典 | （記入: 同一機再計測 or PoC-v2-3 記録値流用のいずれか） |
+| PyTorch 参照値の出典（`pytorch reference provenance:` 行を転記） | （記入: 同一機再計測〈`CUDA_FLOOR_BENCH_PYTORCH_SOURCE` の値〉or PoC-v2-3 固定値のいずれか） |
 | 計測プロトコル | `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1） |
 | 決定的シード | `0xC0FFEE`（`cuda_floor_bench.rs::SEED`） |
 
 ### 経路×形状 TFLOPS 実測
 
-| M=N=K | tiled f32 | WMMA(TF32) opt | WMMA f16 opt | mma.sync f16 |
-|-------|-----------|-----------------|--------------|--------------|
-| 512（参考値） | | | | |
-| 2048 | | | | |
-| 4096 | | | | |
+| M=N=K | tiled f32 | WMMA(TF32) opt | WMMA f16 opt | mma.sync f16 | f32 最良経路 | f16 最良経路 |
+|-------|-----------|-----------------|--------------|--------------|---------------|---------------|
+| 512（参考値） | | | | | | |
+| 2048 | | | | | | |
+| 4096 | | | | | | |
+
+「f32/f16 最良経路」列は `f32_best_path=`/`f16_best_path=` 出力（`tiled`/`wmma_tf32`/`wmma_f16`/`mma_f16`）を
+転記する。固定優先順位ではなく実測 TFLOPS の大小比較で選ばれる（`cuda_floor_bench.rs::best_of`）。
+
+注意（`measure_mma_f16` ドキュメンテーションコメント参照）: `mma_f16` は H2D/D2H 転送を計測区間の外に
+出しているが `wmma_f16` は転送込みで計測するため、両者の大小比較は mma.sync 側に有利な方向へ偏る
+apples-to-apples でない比較である。f16 最良経路が `mma_f16` の場合はこの注記を所見欄に残すこと。
 
 ### 対 PyTorch 比
 
-| M=N=K | f32 最良（WMMA(TF32) opt 優先） / PyTorch f32 比 | f16 最良（mma.sync 優先） / PyTorch f16 比 |
+| M=N=K | f32 最良（実測大小比較で選出） / PyTorch f32 比 | f16 最良（実測大小比較で選出） / PyTorch f16 比 |
 |-------|----------------------------------------------------|----------------------------------------------|
 | 512（参考値） | | |
 | 2048 | | |
@@ -144,7 +180,9 @@ PoC-v2-3 実測値（`torch.matmul`, CUDA, DGX Spark GB10, PyTorch 2.13.0+cu130,
   tiled f32・WMMA(TF32)・WMMA f16・`mma.sync` の全経路が初期化失敗を検出し理由表示付きで graceful skip、
   パニックなしで正常終了することを確認
 - `cargo test -p backend-cuda --example cuda_floor_bench` — `floor_round` の単体テスト 3 件
-  （仕様例との突合・10% 境界を跨ぐ非減少性・非有限値/負値の防御）が green であることを確認
+  （仕様例との突合・10% 境界を跨ぐ非減少性・非有限値/負値の防御）に加え、`best_of`（最良経路選出。
+  固定優先順位ではなく実測値比較であることの回帰確認）の単体テスト 4 件、計 7 件が green であることを確認
+  （PR #349 codex-review 指摘 P1 対応）
 
 ## 役割分担（二重管理を避ける）
 
