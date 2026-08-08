@@ -52,6 +52,22 @@
 //! （[`typed::FixedVec`]・[`typed::FixedMat`]・[`typed::BatchedFeatures`]）
 //! を提供する（REQ-10。基盤層自体の rank は実行時のまま変更しない設計
 //! 判断は §2.5 参照。`docs/public-api-design.md`）。
+//!
+//! `memory_stats`（TASK-14.1a・#174）はアロケータ計測フックの共通シグネチャ
+//! （[`memory_stats::MemoryStats`]）と、`backend-cpu`／`backend-cuda`／
+//! `backend-metal` が共通利用する計測実装（[`memory_stats::AllocationTracker`]・
+//! [`memory_stats::TrackedAllocation`]）を提供する。`buffer::MemoryOps` とは
+//! 独立したトレイトとして新設し、本イシューでは `backend-cpu` のみが実装する
+//! （CUDA/Metal への組み込みは #175。REQ-14）。
+//!
+//! `pool`（TASK-#201・REQ-14 14-3）は既存 `MemoryOps` 実装を包む opt-in
+//! デコレータ（[`pool::PooledMemory`]）として、サイズクラス別（バイトサイズ
+//! 完全一致）バッファプールを提供する。総量上限・自動破棄（グローバル
+//! LRU）を最初から組み込み、上限超過時の破棄が `memory_stats` の計測
+//! （`allocated_bytes`／`peak_allocated_bytes`）へそのまま反映される設計
+//! （v1 で GEMM 4096³ のピークメモリが理論値の約 17 倍に蓄積した教訓を
+//! 踏まえ、既定を無制限成長にしない安全側判断。`pool` モジュールコメント
+//! 参照）。
 
 mod backend_ops;
 mod broadcast;
@@ -60,7 +76,9 @@ pub mod device;
 pub mod dispatch;
 mod element;
 mod error;
+pub mod memory_stats;
 mod ops_shape;
+pub mod pool;
 mod tensor;
 pub mod typed;
 
@@ -71,8 +89,10 @@ pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use element::Element;
 pub use error::ShapeError;
+pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
+pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};
