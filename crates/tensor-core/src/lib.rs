@@ -68,6 +68,14 @@
 //! （v1 で GEMM 4096³ のピークメモリが理論値の約 17 倍に蓄積した教訓を
 //! 踏まえ、既定を無制限成長にしない安全側判断。`pool` モジュールコメント
 //! 参照）。
+//!
+//! `fusion`（TASK-12.1a・#161 の設計〈`docs/fusion-graph-design.md`〉を
+//! TASK-12.1b・#162 で実装したもの）は演算グラフのカーネル融合機構
+//! （REQ-12）の中間表現（elementwise 5 演算に閉じた `FusionGraph`）と、
+//! 融合可能な elementwise 連鎖（4〜6 段程度）を検出する判定アルゴリズム
+//! （`fusion::detect_fusion`）を提供する。すべて `pub(crate)`（設計書
+//! §2.5「配置は `tensor-core` の 1 か所に閉じる」）であり、融合カーネル
+//! 生成・実行経路への結線は #163／#164 が担当する。
 
 mod backend_ops;
 mod broadcast;
@@ -76,6 +84,7 @@ pub mod device;
 pub mod dispatch;
 mod element;
 mod error;
+mod fusion;
 pub mod memory_stats;
 mod ops_shape;
 pub mod pool;
