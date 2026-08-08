@@ -127,9 +127,15 @@ fn check_measure_serializes_concurrent_callers() {
         })
         .collect();
 
-    for h in handles {
-        h.join()
-            .expect("直列化が破れていれば closure 内の assert_eq! で panic し検出される");
+    // 全 handle を先に join し切ってから検査する: 1 件目の join 直後に
+    // expect すると、途中の panic の unwind で残りの JoinHandle が drop
+    // されて detach される（Cursor Bugbot 指摘）。detach された生存スレッドは
+    // 本ファイルが唯一の #[global_allocator] として依存する前提（L100-105
+    // 「スレッド起動・終了ノイズが他検査の計測区間へ混入する心配はない」）を
+    // 破り、TrackingAllocator 経由の確保が後続検査の計測区間へ混入しうる。
+    let join_results: Vec<_> = handles.into_iter().map(|h| h.join()).collect();
+    for result in join_results {
+        result.expect("直列化が破れていれば closure 内の assert_eq! で panic し検出される");
     }
 }
 
