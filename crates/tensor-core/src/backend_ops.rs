@@ -442,13 +442,22 @@ mod tests {
         // reduction 未実装カーネルと同型の設計。backend_ops.rs 冒頭コメ
         // ント参照）。`MockOps` はこのデフォルトを override しない。
         let ops = MockOps(Device::Cpu);
+        // `from_ops`（`fusion::plan`。TASK-12.1c・#163）は「`Input` エント
+        // リのみで elementwise ノードが 1 個も無い」プランを
+        // `FusionPlanError::NoElementwiseNode` として拒否する契約
+        // （融合する意味が無いため。`plan.rs` ドキュメント参照）ため、本
+        // テストは最小の elementwise ノード（`Relu`）を 1 個含む有効な
+        // プランを使う。
         let plan = crate::fusion::FusionPlan::from_ops(
-            vec![crate::fusion::FusedOpKind::Input { leaf_index: 0 }],
+            vec![
+                crate::fusion::FusedOpKind::Input { leaf_index: 0 },
+                crate::fusion::FusedOpKind::Relu { input: 0 },
+            ],
             vec![4],
             crate::dispatch::DType::F32,
             1,
         )
-        .expect("from_ops should succeed for a trivial identity plan");
+        .expect("from_ops should succeed for a minimal single-op plan");
         let leaf = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
         let leaves: Vec<&Tensor<f32>> = vec![&leaf];
         let result = ops.run_fused(&plan, &leaves);

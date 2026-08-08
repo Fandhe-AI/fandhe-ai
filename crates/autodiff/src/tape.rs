@@ -391,7 +391,18 @@ fn build_lazy_plan(
         }
     };
 
-    let mut ops: Vec<FusedOpKind> = Vec::with_capacity(interior.len());
+    // `FusionPlan::from_ops`（`tensor-core::fusion::plan`）は `ops[0..
+    // leaf_count)` に `FusedOpKind::Input { leaf_index }` が発生順（`0..
+    // leaf_count` を一度ずつ）で並んでいることを構築時に検証する契約
+    // （`plan.rs` の `from_ops` ドキュメント「検証」節）。`node_index` は
+    // 葉を `0..leaf_count` の位置として扱うため、`ops` 自身にもその位置に
+    // 対応する `Input` エントリを明示的に積む必要がある——省略すると
+    // `ops[0]`（先頭の interior エントリ）が「まだ存在しない位置」を
+    // 参照したとみなされ `FusionPlanError::IndexOutOfRange` で拒否される。
+    let mut ops: Vec<FusedOpKind> = Vec::with_capacity(leaf_count + interior.len());
+    for leaf_index in 0..leaf_count {
+        ops.push(FusedOpKind::Input { leaf_index });
+    }
     for &cur in &interior {
         let kind = match &nodes[cur].op {
             Op::Add(a, b) => FusedOpKind::Add {

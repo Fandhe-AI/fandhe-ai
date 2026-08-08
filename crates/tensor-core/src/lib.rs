@@ -73,9 +73,22 @@
 //! TASK-12.1b・#162 で実装したもの）は演算グラフのカーネル融合機構
 //! （REQ-12）の中間表現（elementwise 5 演算に閉じた `FusionGraph`）と、
 //! 融合可能な elementwise 連鎖（4〜6 段程度）を検出する判定アルゴリズム
-//! （`fusion::detect_fusion`）を提供する。すべて `pub(crate)`（設計書
-//! §2.5「配置は `tensor-core` の 1 か所に閉じる」）であり、融合カーネル
-//! 生成・実行経路への結線は #163／#164 が担当する。
+//! （`fusion::detect_fusion`）を提供する。`FusionGraph`／`detect_fusion`
+//! は `pub(crate)`（設計書 §2.5「配置は `tensor-core` の 1 か所に閉じる」）
+//! のまま変更しない。TASK-12.1c・#163 で融合カーネル生成向け公開 DTO
+//! （[`FusionPlan`]・[`FusedOpKind`]・[`FusedNodeIndex`]・
+//! [`FusionPlanError`]。下記 re-export）を追加した——`backend-cpu`／
+//! `backend-cuda`／`backend-metal` が `pub(crate)` の内部融合 IR を経由
+//! せず融合グラフの内容を読み取る唯一の経路である（設計書 §3.4）。
+//! TASK-12.1d・#164 で `BackendOps::run_fused` trait メソッド追加・
+//! `autodiff` 側の遅延評価統合（`crates/autodiff/src/tape.rs` の
+//! `Tape::push_lazy`／`materialize_fallible`／`materialize_non_fallible`）
+//! を実装した。`autodiff` は `tensor-core` 内部の `pub(crate)`
+//! `FusionGraph`／`detect_fusion` を経由せず、自身が保持する遅延ノード
+//! 連鎖を直接 `FusedOpKind` 列へ変換して [`FusionPlan::from_ops`] を
+//! 呼ぶ構成のため（`tensor-core` → `autodiff` の逆依存を作れないため）、
+//! `FusionGraph`／`detect_fusion` は本クレート内では `plan.rs` の
+//! `#[cfg(test)]`（`from_segment` の単体テスト）からのみ使用される。
 
 mod backend_ops;
 mod broadcast;
@@ -98,7 +111,7 @@ pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use element::Element;
 pub use error::ShapeError;
-pub use fusion::{FusedNodeIndex, FusedOpKind, FusionPlan};
+pub use fusion::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,

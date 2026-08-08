@@ -15,46 +15,52 @@
 //!   アルゴリズム（[`detect::detect_fusion`]・[`detect::FusionDecision`]・
 //!   [`detect::FusionSegment`]）。副作用なしの純関数として実装する
 //!   （`dispatch::select_gemm_kernel` と同方針。設計書 §3.4）。
+//! - `plan`（TASK-12.1c 本体・#163）: 融合カーネル生成向け公開 DTO
+//!   （[`plan::FusionPlan`]・[`plan::FusedOpKind`]・
+//!   [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`]）。
+//!   `FusionOp`／`FusionNode`／`FusionGraph`（`graph` モジュール）は
+//!   `pub(crate)` のまま変更しない設計判断（設計書 §2.5）のため、
+//!   `backend-cpu`／`backend-cuda`／`backend-metal` が融合グラフの内容を
+//!   読み取る唯一の経路が `plan` モジュールの公開 DTO である
+//!   （設計書 §3.4「外部 backend が `run_fused` 内で融合グラフの演算
+//!   内容を読み取る手段」）。
 //!
-//! **後続イシューとの責務分界**（設計書 §6.1 対応表）: `graph`／`detect`
-//! （#162）は融合可否の**判定**までを担う。`plan`（本イシュー・#164）は
-//! `FusionPlan` 公開 DTO・`FusionSession`／`FusionValue`・
-//! `BackendOps::run_fused` デフォルト実装を提供し、`autodiff` 側の
-//! 遅延評価統合（`crates/autodiff/src/tape.rs` の `materialize_fallible`／
-//! `materialize_non_fallible`）から `FusionPlan::from_ops` 経由で使われる。
-//! 融合カーネル生成本体（CPU 融合実行器・`backend-cpu` 側の `run_fused`
-//! オーバーライド）は #163（TASK-12.1c）のスコープであり、本イシュー
-//! 時点では #163 が未マージのため `run_fused` はデフォルト実装
-//! （`BackendError::Unsupported`）のまま結線される（`docs/
-//! fusion-graph-design.md` §3.4）。本モジュールの型はすべて `pub(crate)`
-//! （設計書 §2.5「配置は `tensor-core` の 1 か所に閉じる」）だが、
-//! `FusionPlan`／`FusedOpKind`／`FusedNodeIndex`（`plan.rs`）のみ `pub`
-//! （`BackendOps::run_fused` のシグネチャに現れる公開 DTO。privacy
-//! 制約。`plan.rs` 冒頭コメント参照）。
+//! **後続イシューとの責務分界**（設計書 §6.1 対応表・#164 実装で更新）:
+//! `graph`／`detect` は融合可否の**判定**を担い、`plan` は融合対象区間の
+//! **公開 DTO 化・CPU カーネル生成**（`backend-cpu::fused_elementwise`）を
+//! 担う（#163）。`BackendOps::run_fused` trait メソッド追加・`autodiff`
+//! 側の遅延評価統合は #164（TASK-12.1d）で実装した——`autodiff`
+//! （`crates/autodiff/src/tape.rs` の `Tape::push_lazy`／
+//! `materialize_fallible`／`materialize_non_fallible`）は本クレート内部の
+//! `pub(crate)` 型（`graph`／`detect` モジュール）を一切経由せず、自身が
+//! 保持する遅延ノード連鎖を直接 [`plan::FusedOpKind`] 列へ変換して
+//! [`plan::FusionPlan::from_ops`] を呼ぶ（`tensor-core` → `autodiff` の
+//! 逆依存を作れないため。設計書 §3.4「`autodiff` クレート専用の構築経路」）。
+//! `graph`／`detect` モジュールの型はすべて `pub(crate)`（設計書 §2.5
+//! 「配置は `tensor-core` の 1 か所に閉じる」）のまま。`plan` モジュールの
+//! [`plan::FusionPlan`]・[`plan::FusedOpKind`]・[`plan::FusedNodeIndex`]・
+//! [`plan::FusionPlanError`] のみ `pub`（クレートルートから re-export。
+//! 設計書 §3.4 の privacy 制約）。
 //!
-//! `#![allow(dead_code)]`（`detect`／`FusionSession` に限り残存。下記）:
-//! `detect_fusion`（#162 の連鎖検出アルゴリズム）・`FusionSession`
-//! （`tensor-core` 内で `FusionGraph` が既に存在する場合のための内部
-//! 機構）はいずれも #163（融合カーネル生成本体・実際の連鎖検出結線）が
-//! マージされるまでクレート内のどこからも使用されない
-//! （`autodiff` は `detect_fusion`／`FusionSession` を経由せず、自身の
-//! `TapeNode`／`Op` 遅延連鎖を直接 `FusedOpKind` へ変換して
-//! `FusionPlan::from_ops` を呼ぶ。設計書 §3.4「`autodiff::Tape` の
-//! 実体化はこの `FusionSession` を経由しない」）。
+//! `#![allow(dead_code)]`（本ファイルおよび配下の `graph`／`detect`
+//! モジュールへ再帰的に適用される lint スコープ）: `graph::FusionGraph`
+//! の構築 API（`push`）・`detect::detect_fusion`・`plan::FusionPlan::
+//! from_segment` は、上記のとおり `autodiff` 側の統合（#164）が
+//! `FusionGraph`／`detect_fusion` を経由しない構成を採ったため、本クレート
+//! 内では（テスト以外では）どこからも使用されず `-D warnings`
+//! （`.claude/rules/coding-rust.md`）下で dead_code 警告となる。
 //! `crates/backend-cuda/src/kernels_wmma_opt.rs:116` 以降が採る既存
 //! プラクティス（結線待ちコードへの理由付き `#[allow(dead_code)]`）と
-//! 同型であり、結線完了（#163 のマージ）時に撤去する。
-//!
-//! `#![allow(unused_imports)]`: `plan`／`graph` サブモジュールは互いに
-//! `super::graph::X` の形で直接参照する（本 `mod.rs` の再エクスポートを
-//! 経由しない）ため、本ファイルの `pub(crate) use` 群は #163 が
-//! `detect_fusion`／`FusionSession` を実際に結線するまでの間、クレート内
-//! のどこからも `crate::fusion::X` の形では参照されない。将来の結線時に
-//! 参照経路が生まれた際にすぐ使える形（型の一覧性）を保つため、
-//! 撤去はせず本 allow で抑制する（上記 `#[allow(dead_code)]` と同じ
-//! 撤去条件）。
+//! 同型であり、`tensor-core` 内で `FusionGraph` が既に存在する場合の
+//! 構築経路（`from_segment`）を実際に呼ぶ将来の利用者が現れるまで残す
+//! 設計判断とする。`plan` モジュールの公開 DTO・`FusionPlan::from_ops` は
+//! `backend-cpu`（`run_fused` 経由）・`autodiff`（`tape.rs`）から実際に
+//! 使用されるため dead_code 対象外。
 
 #![allow(dead_code)]
+// `FusionGraph`／`detect_fusion`／`FusionPlan::from_segment` は上記のとおり
+// `autodiff` 統合（#164）が経由しない構成のため未使用のまま残る
+// （同じ撤去条件）。
 #![allow(unused_imports)]
 
 mod detect;
@@ -68,5 +74,4 @@ pub(crate) use detect::{
 pub(crate) use graph::{
     FusionGraph, FusionGraphError, FusionNode, FusionNodeId, FusionOp, NodeMeta,
 };
-pub use plan::{FusedNodeIndex, FusedOpKind, FusionPlan};
-pub(crate) use plan::{FusionSession, FusionValue};
+pub use plan::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError};
