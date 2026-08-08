@@ -23,10 +23,16 @@
 //! 戦略リストという異なる構築契約を持ち（`crate::perf_regression`）、
 //! `CommandRunner` ベースの `BugFix`/`FeatureAddition` 系検出器と対称でない。
 //! #142 の対象題材（機能追加）・#141 の対象題材（バグ修正）のいずれも
-//! `perf-regression` を必要としないため、CLI 引数としては受理する
-//! （3.1 節の値域どおり usage エラーにはしない）が実行時は未対応として
-//! 内部エラー（exit 1）を返す。`out-of-scope-tracking.md` 準拠でユーザーへの
-//! 追跡起票要否を確認する事項として記録する（実装計画 §2「スコープ判断」）。
+//! `perf-regression` を必要としないため CLI への結線を行っていない。
+//! `RepairKind` 型自体は 3 variant を持つが、`--kind` の受理値は
+//! `bug-fix`／`feature-addition` の 2 つのみとし、`perf-regression` は
+//! `cli::parse_repair_kind` が usage エラー（exit 2）として拒否する
+//! （values を受理してから実行時に内部エラーを返す従来実装は「3 種別を
+//! 受理する」契約を満たさないという PR #361 codex-review P1 指摘への対応。
+//! `cli.rs::parse_repair_kind` doc 参照）。下記 `RepairKind::PerfRegression`
+//! 分岐は CLI 経由では到達しない防御的なケースとしてのみ残す。
+//! `out-of-scope-tracking.md` 準拠でユーザーへの追跡起票要否を確認する事項
+//! として記録する（実装計画 §2「スコープ判断」）。
 //!
 //! # 終了コード契約
 //! `docs/guardrail-self-repair-cli.md` 3.5 節の `run` 3 分岐契約
@@ -44,7 +50,7 @@
 //! | `10` | エスカレーション | （該当なし） |
 //! | `20` | 却下 | （該当なし） |
 //! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗・sandbox 構築失敗・`--log`／`--output` 書き込み失敗〈`Adopted` でも反映しない。下記「`--log` 一次記録契約」節参照〉）／自動適用後の `--repo` への反映失敗（下記参照） | 検証不合格・内部エラー |
-//! | `2` | usage エラー | usage エラー |
+//! | `2` | usage エラー（`--kind perf-regression` を含む。`cli.rs::parse_repair_kind` 参照） | usage エラー |
 //!
 //! `LoopOutcome` → 終了コードの基本写像（0/10/20/1）は [`exit_code_for_outcome`]
 //! が単独で担うが、`run_run` はその後段で `LoopOutcome::Adopted`（exit 0）の
@@ -328,15 +334,18 @@ fn run_run(args: RunArgs) -> ExitCode {
                 bench_measurement_sink,
             )
         }
-        // `PerfRegressionDetector`/`PerfRegressionFixGenerator` は
-        // `CommandRunner` ベースの検出器と非対称な構築契約（`BenchMeasurer`・
-        // 戦略リスト）を持ち、#141／#142 のいずれも perf-regression 題材を
-        // 必要としない（モジュール冒頭ドキュメント参照）。usage エラー
-        // （値自体は 3.1 節の値域どおり有効）ではなく実行時未対応として
-        // 内部エラー区分の exit 1 を返す。
+        // `cli::parse_repair_kind` が `perf-regression` を usage エラー
+        // （exit 2）として拒否するため、`args.kind` がこの分岐に到達する
+        // ことは CLI 経由では起こらない（PR #361 codex-review P1 指摘
+        // 対応。モジュール冒頭ドキュメント「`--kind perf-regression` は
+        // 本イシューのスコープ外」参照）。`RepairKind` は 3 variant を持つ
+        // 型のため `match` を網羅させる目的でのみ残す防御的なケースであり、
+        // `unreachable!()`/`panic!()`（exit 101。coding-rust.md「本番経路で
+        // `unwrap()`/`expect()` を使わない」と同種の禁則）にはせず、内部
+        // エラー区分の exit 1 を返す。
         RepairKind::PerfRegression => {
             eprintln!(
-                "self-repair run: --kind perf-regression は未対応です（#141/#142 のいずれも本種別を必要としないため未実装。out-of-scope-tracking.md 準拠で追跡要否をユーザーへ確認する）"
+                "self-repair run: --kind perf-regression は未対応です（cli::parse_repair_kind が usage エラーとして拒否するため本来到達しないはずの分岐です。#141/#142 のいずれも本種別を必要としないため未実装のまま。out-of-scope-tracking.md 準拠で追跡要否をユーザーへ確認する）"
             );
             (ExitCode::from(1), None)
         }

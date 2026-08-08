@@ -129,8 +129,11 @@
 //!   `--kind perf-regression` は `PerfRegressionDetector`/
 //!   `PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約
 //!   〈`BenchMeasurer`・戦略リスト〉を持ち #141／#142 いずれも本種別を
-//!   必要としないため実行時未対応〈内部エラー扱い〉のまま。
-//!   `docs/guardrail-self-repair-cli.md` 3.1 節参照）
+//!   必要としないため CLI へ結線しておらず、`cli::parse_repair_kind` が
+//!   値の時点で usage エラー（exit 2）として拒否する〈PR #361 codex-review
+//!   P1 指摘対応: 値を受理してから実行時エラーを返す従来実装は「3 種別を
+//!   受理する」契約を満たさなかった〉。`RepairKind` 型自体は 3 variant の
+//!   ままで変更しない。`docs/guardrail-self-repair-cli.md` 3.1 節参照）
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod bug_fix;

@@ -155,13 +155,32 @@ const RUN_KNOWN_FLAGS: &[&str] = &[
 
 /// `--kind` の値を [`RepairKind`] へ変換する（3.1 節「v1 `RepairKind`:
 /// `BugFix`/`PerfRegression`/`FeatureAddition` を継承」の文字列表現）。
+///
+/// `RepairKind` は 3 variant を持つが、CLI が受理する値は `bug-fix`／
+/// `feature-addition` の 2 つのみとする。`perf-regression` は
+/// `PerfRegressionDetector`/`PerfRegressionFixGenerator` が `BenchMeasurer`・
+/// 戦略リストという他 2 種別（`CommandRunner` ベース）と非対称な構築契約を
+/// 持ち、CLI 側の結線（`main.rs::run_run`）が未実装のため、値として受理して
+/// から実行時に内部エラー（exit 1）を返す従来の実装は「3 種別を受理する」
+/// という契約を満たせていなかった（PR #361 codex-review P1 指摘）。結線が
+/// 完成するまでは usage エラー（exit 2）として値域から明示的に除外し、
+/// `main.rs` 側の実行時未対応分岐は防御的な到達不能ケースとしてのみ残す
+/// （`main.rs` モジュール冒頭ドキュメント「`--kind perf-regression` は
+/// 本イシューのスコープ外」参照）。
 fn parse_repair_kind(value: &str) -> Result<RepairKind, UsageError> {
     match value {
         "bug-fix" => Ok(RepairKind::BugFix),
-        "perf-regression" => Ok(RepairKind::PerfRegression),
         "feature-addition" => Ok(RepairKind::FeatureAddition),
+        "perf-regression" => Err(UsageError(
+            "'--kind perf-regression' is not yet supported by the CLI \
+             (PerfRegressionDetector/PerfRegressionFixGenerator have an asymmetric \
+             construction contract and are not wired into `self-repair run` yet; \
+             tracking-issue follow-up is pending user approval per \
+             out-of-scope-tracking.md; expected bug-fix|feature-addition)"
+                .to_string(),
+        )),
         other => Err(UsageError(format!(
-            "unknown value '{other}' for '--kind' (expected bug-fix|perf-regression|feature-addition)"
+            "unknown value '{other}' for '--kind' (expected bug-fix|feature-addition)"
         ))),
     }
 }
@@ -590,6 +609,54 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.0.contains("--kind"));
+    }
+
+    /// PR #361 codex-review P1 指摘の回帰防止: `--kind perf-regression` は
+    /// `RepairKind` 型としては存在するが、`main.rs::run_run` に結線されて
+    /// いない（実行時は常に内部エラーを返していた）ため、値としても usage
+    /// エラー（exit 2）として拒否し、「3 種別を受理する」という誤った契約を
+    /// 公開しないことを確認する（`parse_repair_kind` doc 参照）。
+    #[test]
+    fn rejects_run_perf_regression_kind_as_unsupported() {
+        let err = parse([
+            "run",
+            "--kind",
+            "perf-regression",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("perf-regression"));
+        assert!(err.0.contains("not yet supported"));
+    }
+
+    /// 上記回帰防止テストと対になる確認: 未知の `--kind` 値（`bogus`）の
+    /// エラーメッセージから `perf-regression` が消えている（値域として
+    /// 案内しなくなった）ことを固定する。二つの `UsageError` 文字列が
+    /// 将来のリファクタで再び食い違うのを防ぐ（advisor 指摘）。
+    #[test]
+    fn unknown_kind_value_message_no_longer_advertises_perf_regression() {
+        let err = parse([
+            "run",
+            "--kind",
+            "bogus",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(!err.0.contains("perf-regression"));
     }
 
     #[test]

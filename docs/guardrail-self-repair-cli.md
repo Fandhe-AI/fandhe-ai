@@ -264,14 +264,20 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 **実装済み**（イシュー #142 差し戻し分・完走判定基準 1。`crates/self-repair/
 src/cli.rs`・`crates/self-repair/src/main.rs`）。#131（TASK-3.1 の CLI 化残
 作業）が未実装のまま closed となり、他に追跡イシューがなかったため #142 の
-スコープとして実装した。`--kind` で `RepairKind` の 3 variant を受理する
-種別非依存の実装であり、#141（バグ修正種別の再実証）からも再利用できる
-（`bug-fix`／`feature-addition` は完全対応、`perf-regression` は下記のとおり
-CLI 引数としては受理するが実行時未対応）。
+スコープとして実装した。`--kind` で `RepairKind` の種別を受理する種別非
+依存の実装であり、#141（バグ修正種別の再実証）からも再利用できる
+（`bug-fix`／`feature-addition` の 2 値のみを CLI が受理する。
+`RepairKind` 型自体は v1 由来の 3 variant〈`BugFix`/`PerfRegression`/
+`FeatureAddition`〉を持つが、`perf-regression` は `PerfRegressionDetector`/
+`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・
+戦略リスト〉を持ち CLI へ結線されていないため、`cli::parse_repair_kind` が
+値の時点で usage エラー〈exit 2〉として拒否する。PR #361 codex-review P1
+指摘対応: 値を受理してから実行時エラーを返す従来実装は「3 種別を受理する」
+契約を満たさなかった）。
 
 | 引数 | 型・既定値 | 説明 |
 |---|---|---|
-| `--kind <bug-fix\|perf-regression\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承）。`perf-regression` は値としては受理するが `main.rs::run_run` が実行時未対応として内部エラー（exit 1）を返す（`PerfRegressionDetector`/`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・戦略リスト〉を持ち、#141／#142 いずれも本種別を必要としないため。out-of-scope-tracking.md 準拠） |
+| `--kind <bug-fix\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承するが、CLI が受理する値は `bug-fix`／`feature-addition` の 2 つのみ）。`perf-regression` を指定した場合は `cli::parse_repair_kind` が usage エラー（exit 2）を返す（`PerfRegressionDetector`/`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・戦略リスト〉を持ち、#141／#142 いずれも本種別を必要とせず CLI 結線が未実装のため。追跡起票要否は out-of-scope-tracking.md 準拠でユーザーへ確認する） |
 | `--repo <path>` | 既定 `.` | 対象リポジトリのルート。ループ全体（候補適用・4 ゲート検証・`git add -A` を含む）は `--repo` を `baseline_commit` の状態で `git clone --local` した隔離 sandbox（`self_repair::sandbox::RunSandbox`）内で完結し、`RepairCompositeGateSpec` の `workspace`／`sandbox_root` にはこの sandbox のパスを使う（`--repo` を直接渡さない）。`LoopOutcome::Adopted` の場合のみ、検証済み差分を `--repo` の作業ツリーへ競合検査つきで反映する（`self_repair::sandbox::reflect_adopted_diff`）。非採用・エラー経路では `--repo` の作業ツリー・index に一切触れない（PR #361 codex-review P0 指摘対応。`crates/self-repair/src/sandbox.rs` モジュール冒頭ドキュメント参照） |
 | `--max-attempts <N>` | 既定 `5`（`NonZeroU32` 制約。0 を許容しない） | 修正試行回数の上限。`docs/self-repair-revalidation-plan.md` §5 基準 3 の承認済み提案値をそのまま既定値として採用した |
 | `--log <path>` | 必須 | JSON Lines ログの出力先（3.3 節）。新規パスなら新規作成、既存パスなら
@@ -375,7 +381,7 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 | `10` | エスカレーション（人間承認待ち。`LoopOutcome::Escalated`） |
 | `20` | 却下（`LoopOutcome::Rejected`） |
 | `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗）／隔離 sandbox の構築失敗／自動適用された差分の `--repo` への反映失敗（下記参照） |
-| `2` | usage エラー（`--kind` 欠落・不正値・`--log` 欠落・`--max-attempts 0`・未知引数等） |
+| `2` | usage エラー（`--kind` 欠落・不正値〈`perf-regression` 指定を含む。3.1 節参照〉・`--log` 欠落・`--max-attempts 0`・未知引数等） |
 
 **`Exhausted`／`NoActionNeeded` の写像（イシュー #142 差し戻し分で追記）**:
 上表は元々 3 分岐＋`LoopFailure` のみを定義しており、

@@ -187,7 +187,9 @@ SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1 \
 - `--kind perf-regression` は `self-repair run` 未対応（`PerfRegressionDetector`/
   `PerfRegressionFixGenerator` が `CommandRunner` ベースの検出器と非対称な
   構築契約〈`BenchMeasurer`・戦略リスト〉を持つため。#141／#142 いずれも
-  本種別を必要としない）
+  本種別を必要としない）。CLI は本値を usage エラー（exit 2）として拒否する
+  （`docs/guardrail-self-repair-cli.md` 3.1 節・PR #361 codex-review P1 指摘
+  対応）
 - `crates/self-repair/tests/fixtures/feature-addition-leaky-relu/baseline/
   Cargo.lock`（フィクスチャ隔離用の空 `[workspace]` テーブルを持つ独立
   crate。`crates/guardrail/tests/fixtures/labeled-changes/baseline/` と同じ
