@@ -49,7 +49,7 @@ TASK-8.3 の担当欄は「共同（計測実行は Claude Code、下限値の�
   〈10.3%→10%・26.6%→25%・1.9%→1%・境界 10%→10%〉と突合済み）。本イシュー着手時点では
   `bench-harness` の TASK-8.2 下限判定モジュール（#151〜#153）が未マージのため
   `cuda_floor_bench.rs::floor_round` にインライン実装していたが、**#158（TASK-8.3d）で
-  `bench_harness::rounding::floor_lower_bound`（公開 API）へ一本化済み**（`docs/perf/performance-floor-decision.md`
+  `bench_harness::floor_lower_bound`（公開 API）へ一本化済み**（`docs/perf/performance-floor-decision.md`
   §6 参照）
 - GPU 名が `GB10` を含まない場合は警告行を出力する（PoC-v2-3 参照値と計測機が異なるため比率は参考値。
   REQ-8「いずれも同一ハードウェア上の同一バックエンド比較」）。ただし GPU 名一致は WARNING 表示のみに
@@ -223,7 +223,7 @@ PyTorch 参照計測（`gemm_bench_torch_cuda.py` が入力テンソルをルー
   tiled f32・WMMA(TF32)・WMMA f16・`mma.sync` の全経路が初期化失敗を検出し理由表示付きで graceful skip、
   パニックなしで正常終了することを確認
 - `cargo test -p backend-cuda --example cuda_floor_bench` — 丸め規則（#158 で
-  `bench_harness::rounding::floor_lower_bound` へ一本化済み。旧 `floor_round`）の単体テスト 3 件
+  `bench_harness::floor_lower_bound` へ一本化済み。旧 `floor_round`）の単体テスト 3 件
   （仕様例との突合・10% 境界を跨ぐ非減少性・非有限値/負値の防御）・`best_of`（f32 最良経路選出。
   固定優先順位ではなく実測値比較であることの回帰確認）の単体テスト 4 件・`f16_candidate_floor_value`
   （計測境界統一後は `wmma_f16`/`mma_f16` の実測比較で選出することの回帰確認。PR #349 codex-review
@@ -244,7 +244,7 @@ PyTorch 参照計測（`gemm_bench_torch_cuda.py` が入力テンソルをルー
   固有の実測記録に限定し、全バックエンド横断の一覧化は #159 に委ねる
 - **丸め規則のモジュール一本化**: `bench-harness` の TASK-8.2 下限判定モジュール（#151〜#153）マージ後、
   `cuda_floor_bench.rs::floor_round` のインライン実装は削除し公開 API へ委譲する予定だったが、
-  **#158（TASK-8.3d）で `bench_harness::rounding::floor_lower_bound` への一本化を実施済み**
+  **#158（TASK-8.3d）で `bench_harness::floor_lower_bound` への一本化を実施済み**
   （`docs/perf/performance-floor-decision.md` §6）
 
 ## 未実施・後続作業

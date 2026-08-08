@@ -59,7 +59,7 @@ Metal f16 の K=4096 ストレスケース許容誤差再評価（#156 が本イ
 1. 各記録テンプレート（`transformer-workload-measurement.md`・`metal-f16-vs-mps-f16.md`・
    `cuda-floor-remeasurement.md`）の記入待ち箇所に実機実測値（中央値・Q1/Q3）を転記する
 2. 判定対象形状（M=N=K=2048・4096 の実測比率の最小値。512 は参考値。REQ-8「判定対象形状」節）を
-   `bench_harness::rounding::floor_lower_bound`（本イシューで一本化。§6 参照）へ適用し候補下限値を得る
+   `bench_harness::floor_lower_bound`（本イシューで一本化。§6 参照）へ適用し候補下限値を得る
 3. 本ドキュメント §3 の確定表を実測結果で更新する
 4. ユーザー承認（PR レビュー・マージ）を経る
 5. `docs/spec/04-requirements.md` REQ-8 節への反映は spec リポジトリ
@@ -78,7 +78,7 @@ Metal f16 の K=4096 ストレスケース許容誤差再評価（#156 が本イ
 ## 6. 丸め規則の一本化（本イシューで実施）
 
 `crates/backend-cuda/examples/cuda_floor_bench.rs` のインライン丸め実装（`floor_round`）を
-`bench_harness::rounding::floor_lower_bound`（TASK-8.2b・#153。fail-closed 入力検証付き）へ
+`bench_harness::floor_lower_bound`（TASK-8.2b・#153。fail-closed 入力検証付き）へ
 一本化した（#157 の out-of-scope 申し送り「マージ後は #158/#159 で一本化する」への対応）。
 既存の丸め規則単体テスト（仕様例突合・境界・非減少性・非有限値/負値防御）は一本化後の API に
 対する回帰テストとして維持している。詳細は同ファイルの変更差分・`docs/perf/cuda-floor-remeasurement.md`
