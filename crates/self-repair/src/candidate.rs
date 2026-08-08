@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::error::SelfRepairError;
@@ -119,6 +120,89 @@ pub(crate) fn reject_symlink_escape(workspace: &Path, relative_path: &Path) -> R
     Ok(())
 }
 
+/// `O_NOFOLLOW`（open 対象の末尾コンポーネントが symlink の場合に open 自体を
+/// 失敗させるフラグ）の値。`libc` 依存は禁止（deps-policy.md 許容依存 8 区分
+/// 外）のため、各 OS の `fcntl.h` 定義値をローカル定数として複製する。
+/// 出典: Linux `include/uapi/asm-generic/fcntl.h`（`0o400000` = `0x20000`）・
+/// macOS `sys/fcntl.h`（`0x0100`）。
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x0100;
+
+/// [`reject_symlink_escape`] は「検査」であり、検査後 [`write_no_follow_symlink`]／
+/// [`read_no_follow_symlink`] が実際に呼ばれるまでの間にパスが symlink へ
+/// 差し替えられると（TOCTOU）追跡してしまう（PR #361 codex-review 第 3 波 P0
+/// 指摘）。本関数は書き込み時の open 自体に `O_NOFOLLOW` を付けることで
+/// 「検査」と「利用」を単一の syscall へ統合し、末尾コンポーネントに関する
+/// TOCTOU の隙をなくす。
+///
+/// 制約: `O_NOFOLLOW` は open 対象パスの末尾コンポーネントにのみ効き、途中
+/// ディレクトリの symlink 差し替えは防がない（`openat`/dir-fd チェーンで
+/// 塞ぐ手段があるが `libc` 依存になるためポリシー上不可。
+/// [`reject_symlink_escape`] の逐次コンポーネント検査が主防御であり、本関数は
+/// 末尾コンポーネントに対する第 2 層の防御に留まる）。
+///
+/// 非 unix（Windows 等）は `O_NOFOLLOW` 相当の open flag が標準ライブラリ
+/// 経由で利用できないため、`fs::remove_file`（symlink 自体を削除し指す先を
+/// 追跡しない）で既存パスを事前除去してから `OpenOptions::create_new`
+/// （`O_CREAT|O_EXCL` 相当。既存パス〈symlink 含む〉が新たに現れれば必ず
+/// 失敗する）で新規作成する。remove から create の間に別プロセスが symlink を
+/// 再設置する狭いレースは残るが、書き込み後に `symlink_metadata` で検知する
+/// だけの方式（対象が symlink なら既に追跡済みで書き込みが完了した後）より
+/// 強い防止になる。
+#[cfg(unix)]
+fn write_no_follow_symlink(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    file.write_all(content.as_bytes())
+}
+
+#[cfg(not(unix))]
+fn write_no_follow_symlink(path: &Path, content: &str) -> std::io::Result<()> {
+    let _ = fs::remove_file(path);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    use std::io::Write as _;
+    file.write_all(content.as_bytes())
+}
+
+/// [`write_no_follow_symlink`] の読み込み版（baseline スナップショット取得に
+/// 使う。`bug_fix.rs`／`feature_addition.rs`／[`CandidateFixGenerator::new`] の
+/// 全 baseline 読み込み経路から呼ばれる）。
+///
+/// unix は `O_NOFOLLOW` 付き open で末尾コンポーネントの symlink 追跡を拒否
+/// する。非 unix は読み込み対象を消すわけにいかないため
+/// `write_no_follow_symlink` と同じ remove-then-create の手は使えず、
+/// [`reject_symlink_escape`] の事前検査のみに依拠する残存 TOCTOU window が
+/// ある。この window は「symlink の指す先の内容が baseline へ取り込まれる」
+/// （workspace 内へ content が入ってくる方向）に留まり、書き込み経路
+/// （workspace 外への書き込み）より影響が限定的なため許容する。
+#[cfg(unix)]
+pub(crate) fn read_no_follow_symlink(path: &Path) -> std::io::Result<String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn read_no_follow_symlink(path: &Path) -> std::io::Result<String> {
+    fs::read_to_string(path)
+}
+
 /// 1 候補修正 = workspace 相対パスと置換後内容の組。
 ///
 /// `description`・`files` とも [`crate::stages::Proposal::description`] と
@@ -160,22 +244,94 @@ struct CandidateFixDto {
     files: Vec<CandidateFileDto>,
 }
 
+/// `--candidates` JSON 外部入力の明示上限（PR #361 codex-review 第 3 波 P1
+/// 指摘: `fs::read_to_string` の全量読み込みにファイルサイズ・候補数・
+/// ファイル数・content 長のいずれも上限がなかった。ガードレール判定閾値では
+/// なくコード内定数〈OWASP A03 対応の入力境界〉であり、値の変更自体は
+/// ユーザー承認を要さないが、既存の再実証入力
+/// （`docs/self-repair-revalidation/*/loop-report.json` 等。最大でも
+/// 数十 KiB・候補数は片手で数えられる程度）を壊さない範囲で余裕を持たせた
+/// 値とする。
+///
+/// `--candidates` JSON ファイル自体のサイズ上限。
+const MAX_CANDIDATES_JSON_BYTES: u64 = 8 * 1024 * 1024;
+/// トップレベル配列（候補数）の上限。
+const MAX_CANDIDATES: usize = 64;
+/// 候補 1 件あたりのファイル数の上限。
+const MAX_FILES_PER_CANDIDATE: usize = 256;
+/// ファイル 1 件あたりの `content` 長（バイト数）の上限。
+const MAX_CONTENT_BYTES: usize = 1024 * 1024;
+/// 全候補・全ファイルの `content` 長の合計上限（`MAX_CANDIDATES` ×
+/// `MAX_FILES_PER_CANDIDATE` × `MAX_CONTENT_BYTES` の最悪ケースは
+/// `MAX_CANDIDATES_JSON_BYTES` を大きく超えるため、JSON 本体のサイズ上限とは
+/// 独立に総量も別途制限する）。
+const MAX_TOTAL_CONTENT_BYTES: usize = 16 * 1024 * 1024;
+
 /// `path` の JSON（`CandidateFixDto` の配列）を読み込み [`CandidateFix`] の列へ
 /// 変換する（`self-repair run` の `main.rs::run_run` から呼ばれる）。
 ///
+/// # 読み込みサイズの境界
+/// `fs::metadata` によるサイズ確認は高速パス（明らかな超過を早期検出し
+/// エラーメッセージへ実サイズを含める）に過ぎない。FIFO・procfs 等
+/// `metadata().len()` が信頼できない特殊ファイルもありうるため、実効的な
+/// 境界は実読み込みを `Read::take(MAX_CANDIDATES_JSON_BYTES + 1)` で
+/// 制限し、返ってきた長さが上限を超えていれば拒否する処理が担う
+/// （`.claude/rules/security.md` A03: 外部入力は構造検証の前にサイズを
+/// 境界づける）。
+///
 /// # Errors
-/// ファイル読み込み失敗・JSON パース失敗（`deny_unknown_fields` によりタイポ
-/// フィールドも検出する。`docs/guardrail-self-repair-cli.md` 2.5 節と同じ
-/// 方針）・候補列が空、のいずれかで [`SelfRepairError::FixGeneration`]
-/// （`attempt: 0` は「試行開始前の候補読み込み段階」を示す）を返す。
+/// ファイル読み込み失敗・サイズ上限超過・JSON パース失敗
+/// （`deny_unknown_fields` によりタイポフィールドも検出する。
+/// `docs/guardrail-self-repair-cli.md` 2.5 節と同じ方針）・候補列が空また
+/// は候補数／ファイル数／content 長の上限超過、のいずれかで
+/// [`SelfRepairError::FixGeneration`]（`attempt: 0` は「試行開始前の候補
+/// 読み込み段階」を示す）を返す。
 pub fn load_candidates_from_json(path: &Path) -> Result<Vec<CandidateFix>, SelfRepairError> {
-    let text = fs::read_to_string(path).map_err(|source| SelfRepairError::FixGeneration {
+    let metadata = fs::metadata(path).map_err(|source| SelfRepairError::FixGeneration {
+        attempt: 0,
+        reason: format!(
+            "候補 JSON のメタデータ取得に失敗しました（path={}）: {source}",
+            path.display()
+        ),
+    })?;
+    if metadata.len() > MAX_CANDIDATES_JSON_BYTES {
+        return Err(SelfRepairError::FixGeneration {
+            attempt: 0,
+            reason: format!(
+                "候補 JSON がサイズ上限（{MAX_CANDIDATES_JSON_BYTES} バイト）を超えています（path={}, size={}）",
+                path.display(),
+                metadata.len()
+            ),
+        });
+    }
+
+    let file = fs::File::open(path).map_err(|source| SelfRepairError::FixGeneration {
         attempt: 0,
         reason: format!(
             "候補 JSON の読み込みに失敗しました（path={}）: {source}",
             path.display()
         ),
     })?;
+    let mut text = String::new();
+    file.take(MAX_CANDIDATES_JSON_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|source| SelfRepairError::FixGeneration {
+            attempt: 0,
+            reason: format!(
+                "候補 JSON の読み込みに失敗しました（path={}）: {source}",
+                path.display()
+            ),
+        })?;
+    if text.len() as u64 > MAX_CANDIDATES_JSON_BYTES {
+        return Err(SelfRepairError::FixGeneration {
+            attempt: 0,
+            reason: format!(
+                "候補 JSON がサイズ上限（{MAX_CANDIDATES_JSON_BYTES} バイト）を超えています（path={}）",
+                path.display()
+            ),
+        });
+    }
+
     let dtos: Vec<CandidateFixDto> =
         serde_json::from_str(&text).map_err(|error| SelfRepairError::FixGeneration {
             attempt: 0,
@@ -190,6 +346,56 @@ pub fn load_candidates_from_json(path: &Path) -> Result<Vec<CandidateFix>, SelfR
             reason: format!("候補 JSON が空です（path={}）", path.display()),
         });
     }
+    if dtos.len() > MAX_CANDIDATES {
+        return Err(SelfRepairError::FixGeneration {
+            attempt: 0,
+            reason: format!(
+                "候補数が上限（{MAX_CANDIDATES}）を超えています（path={}, 候補数={}）",
+                path.display(),
+                dtos.len()
+            ),
+        });
+    }
+
+    // 上限検査（ファイル数・content 長・総量）は serde_json のパース後に
+    // 行うため、JSON 本体のサイズ上限（上記 `Read::take`）が実質的なメモリ
+    // 確保量の境界であり、以下は構造上の妥当性チェックに位置づけられる。
+    let mut total_content_bytes: usize = 0;
+    for dto in &dtos {
+        if dto.files.len() > MAX_FILES_PER_CANDIDATE {
+            return Err(SelfRepairError::FixGeneration {
+                attempt: 0,
+                reason: format!(
+                    "候補あたりのファイル数が上限（{MAX_FILES_PER_CANDIDATE}）を超えています（path={}, ファイル数={}）",
+                    path.display(),
+                    dto.files.len()
+                ),
+            });
+        }
+        for file in &dto.files {
+            if file.content.len() > MAX_CONTENT_BYTES {
+                return Err(SelfRepairError::FixGeneration {
+                    attempt: 0,
+                    reason: format!(
+                        "content 長が上限（{MAX_CONTENT_BYTES} バイト）を超えています（path={}, file={}）",
+                        path.display(),
+                        file.path
+                    ),
+                });
+            }
+            total_content_bytes = total_content_bytes.saturating_add(file.content.len());
+            if total_content_bytes > MAX_TOTAL_CONTENT_BYTES {
+                return Err(SelfRepairError::FixGeneration {
+                    attempt: 0,
+                    reason: format!(
+                        "候補 JSON 全体の content 合計サイズが上限（{MAX_TOTAL_CONTENT_BYTES} バイト）を超えています（path={}）",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    }
+
     Ok(dtos
         .into_iter()
         .map(|dto| CandidateFix {
@@ -267,7 +473,7 @@ pub fn apply_candidate(
     }
     for (relative_path, original_content) in baseline {
         let absolute_path = workspace.join(relative_path);
-        fs::write(&absolute_path, original_content).map_err(|error| {
+        write_no_follow_symlink(&absolute_path, original_content).map_err(|error| {
             SelfRepairError::FixGeneration {
                 attempt,
                 reason: format!(
@@ -281,12 +487,14 @@ pub fn apply_candidate(
     // 3. 候補適用。
     for (relative_path, content) in &candidate.files {
         let absolute_path = workspace.join(relative_path);
-        fs::write(&absolute_path, content).map_err(|error| SelfRepairError::FixGeneration {
-            attempt,
-            reason: format!(
-                "候補修正の適用に失敗しました（{}）: {error}",
-                relative_path.display()
-            ),
+        write_no_follow_symlink(&absolute_path, content).map_err(|error| {
+            SelfRepairError::FixGeneration {
+                attempt,
+                reason: format!(
+                    "候補修正の適用に失敗しました（{}）: {error}",
+                    relative_path.display()
+                ),
+            }
         })?;
     }
 
@@ -333,7 +541,7 @@ impl CandidateFixGenerator {
                     continue;
                 }
                 let absolute_path = workspace.join(relative_path);
-                let original_content = fs::read_to_string(&absolute_path).map_err(|error| {
+                let original_content = read_no_follow_symlink(&absolute_path).map_err(|error| {
                     SelfRepairError::FixGeneration {
                         attempt: 0,
                         reason: format!(
@@ -414,6 +622,67 @@ mod tests {
         assert!(result.is_ok());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_no_follow_symlink_rejects_symlink_target_at_open_time() {
+        // `reject_symlink_escape` の事前検査を経由せず `write_no_follow_symlink`
+        // を直接呼ぶことで、TOCTOU 対策（open 自体が symlink を拒否する）が
+        // 事前検査に依存せず単独で機能することを固定する（PR #361
+        // codex-review 第 3 波 P0 指摘の回帰防止）。
+        let dir = temp_workspace("write-no-follow-reject");
+        let outside_dir = temp_workspace("write-no-follow-reject-outside");
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, "do-not-overwrite").expect("write should succeed in test setup");
+
+        let target = dir.join("target.txt");
+        std::os::unix::fs::symlink(&outside_file, &target)
+            .expect("symlink creation should succeed in test setup");
+
+        let result = write_no_follow_symlink(&target, "pwned");
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_file).expect("read should succeed"),
+            "do-not-overwrite"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_no_follow_symlink_writes_plain_file() {
+        let dir = temp_workspace("write-no-follow-plain");
+        let target = dir.join("target.txt");
+
+        write_no_follow_symlink(&target, "content").expect("write should succeed");
+        assert_eq!(
+            fs::read_to_string(&target).expect("read should succeed"),
+            "content"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_no_follow_symlink_rejects_symlink_target_at_open_time() {
+        let dir = temp_workspace("read-no-follow-reject");
+        let outside_dir = temp_workspace("read-no-follow-reject-outside");
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, "secret-content").expect("write should succeed in test setup");
+
+        let target = dir.join("target.txt");
+        std::os::unix::fs::symlink(&outside_file, &target)
+            .expect("symlink creation should succeed in test setup");
+
+        let result = read_no_follow_symlink(&target);
+        assert!(result.is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     // `std::os::unix::fs::symlink` を使うため unix 限定
@@ -733,6 +1002,73 @@ mod tests {
             r#"[{"description": "x", "files": [], "bogus": true}]"#,
         )
         .expect("一時 JSON の書き込みに失敗");
+        let result = load_candidates_from_json(&path);
+        assert!(result.is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    /// PR #361 codex-review 第 3 波 P1 指摘の回帰防止（ファイルサイズ上限）。
+    /// `MAX_CANDIDATES_JSON_BYTES` を超えるファイルは（JSON として妥当か
+    /// どうかに関わらず）拒否されることを確認する。
+    #[test]
+    fn load_candidates_from_json_rejects_file_size_over_limit() {
+        let path = temp_json_path("oversize-file");
+        // JSON としての妥当性は問わない（サイズ検査がパース前に効くことを
+        // 確認するテストのため、パディングの中身は任意）。
+        let padding = "x".repeat((MAX_CANDIDATES_JSON_BYTES + 1) as usize);
+        fs::write(&path, padding).expect("一時 JSON の書き込みに失敗");
+        let result = load_candidates_from_json(&path);
+        assert!(result.is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 候補数上限（`MAX_CANDIDATES`）超過を拒否することを確認する。
+    #[test]
+    fn load_candidates_from_json_rejects_candidate_count_over_limit() {
+        let path = temp_json_path("too-many-candidates");
+        let candidates: Vec<String> = (0..(MAX_CANDIDATES + 1))
+            .map(|i| format!(r#"{{"description": "c{i}", "files": []}}"#))
+            .collect();
+        fs::write(&path, format!("[{}]", candidates.join(",")))
+            .expect("一時 JSON の書き込みに失敗");
+        let result = load_candidates_from_json(&path);
+        assert!(result.is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    /// 候補数が上限ちょうど（`MAX_CANDIDATES`）の場合は受理されることを
+    /// 確認する（上限超過テストと対になる境界確認）。
+    #[test]
+    fn load_candidates_from_json_accepts_candidate_count_at_limit() {
+        let path = temp_json_path("candidates-at-limit");
+        let candidates: Vec<String> = (0..MAX_CANDIDATES)
+            .map(|i| format!(r#"{{"description": "c{i}", "files": []}}"#))
+            .collect();
+        fs::write(&path, format!("[{}]", candidates.join(",")))
+            .expect("一時 JSON の書き込みに失敗");
+        let result = load_candidates_from_json(&path);
+        assert_eq!(
+            result.expect("上限ちょうどの候補数は受理されるはず").len(),
+            MAX_CANDIDATES
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    /// content 長上限（`MAX_CONTENT_BYTES`）超過を拒否することを確認する
+    /// （ファイルサイズ自体は `MAX_CANDIDATES_JSON_BYTES` 未満に収める。
+    /// ファイルサイズ検査とは独立の検査であることを確認するため）。
+    #[test]
+    fn load_candidates_from_json_rejects_content_over_limit() {
+        let path = temp_json_path("oversize-content");
+        let oversized_content = "x".repeat(MAX_CONTENT_BYTES + 1);
+        let json = format!(
+            r#"[{{"description": "c", "files": [{{"path": "a.txt", "content": "{oversized_content}"}}]}}]"#
+        );
+        assert!(
+            (json.len() as u64) < MAX_CANDIDATES_JSON_BYTES,
+            "このテストはファイルサイズ上限とは独立の content 長検査を確認するためのもの"
+        );
+        fs::write(&path, json).expect("一時 JSON の書き込みに失敗");
         let result = load_candidates_from_json(&path);
         assert!(result.is_err());
         let _ = fs::remove_file(&path);

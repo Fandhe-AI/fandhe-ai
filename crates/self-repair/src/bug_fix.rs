@@ -29,7 +29,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::candidate::{
-    CandidateFix, apply_candidate, reject_symlink_escape, validate_relative_path,
+    CandidateFix, apply_candidate, read_no_follow_symlink, reject_symlink_escape,
+    validate_relative_path,
 };
 use crate::error::SelfRepairError;
 use crate::exec::CommandRunner;
@@ -126,7 +127,7 @@ impl BugFixFixGenerator {
                     continue;
                 }
                 let abs = workspace.join(rel_path);
-                let content = std::fs::read_to_string(&abs).map_err(|source| {
+                let content = read_no_follow_symlink(&abs).map_err(|source| {
                     SelfRepairError::FixGeneration {
                         attempt: 0,
                         reason: format!(

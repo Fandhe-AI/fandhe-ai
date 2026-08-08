@@ -118,6 +118,67 @@ pub struct RunSandbox {
     keep: bool,
 }
 
+/// [`RunSandbox::create`] の本体。`root`（sandbox 先パス）を呼び出し元から
+/// 注入できる形にしたのは、テストで `unique_sandbox_path()`（PID・ナノ秒
+/// タイムスタンプ由来で決定不能）ではなく既知のパスを使い、初期化失敗時に
+/// 「そのパスが削除されているか」を決定的に検証するため
+/// （`tests` モジュール `create_removes_sandbox_directory_when_initialization_fails_after_clone`
+/// 参照）。
+///
+/// # clone 成功後の初期化失敗で一時ディレクトリが残置される問題（P2）
+/// 旧実装は `git clone` → `git checkout --detach` の両方が成功したあとで
+/// はじめて `RunSandbox { root, keep: false }` を構築していた。そのため
+/// `checkout` が失敗すると `RunSandbox`（`Drop` で `root` を削除する唯一の
+/// 主体）が一度も存在せず、clone 済みの sandbox ディレクトリが `Err` 経路で
+/// 残置されていた（PR #361 codex-review 第 3 波 P2 指摘）。
+///
+/// 本実装は `clone` 成功直後に `RunSandbox { root, keep: false }` を構築し、
+/// 以降の初期化ステップ（`checkout`）は構築済みの `sandbox`（cleanup guard
+/// を兼ねる）に対して行う。`checkout` が失敗して `?` で早期 return する際は
+/// ローカル変数 `sandbox` が関数末尾でドロップされ、`Drop for RunSandbox` が
+/// `root` を削除する。`RunSandbox` 自体が cleanup guard であるため、専用の
+/// 別型は導入しない。
+fn create_at(root: PathBuf, repo: &Path, baseline_commit: &str) -> Result<RunSandbox, String> {
+    let repo_abs = fs::canonicalize(repo).map_err(|error| {
+        format!(
+            "--repo の解決に失敗しました（repo={}）: {error}",
+            repo.display()
+        )
+    })?;
+    let repo_str = repo_abs
+        .to_str()
+        .ok_or_else(|| "--repo のパスが UTF-8 ではありません".to_string())?;
+
+    // 同一パスが前回実行の残骸として残っていないことを保証してから clone
+    // する（`git clone` は既存の空でない宛先ディレクトリを拒否するため）。
+    let _ = fs::remove_dir_all(&root);
+    let root_str = root
+        .to_str()
+        .ok_or_else(|| "sandbox パスが UTF-8 ではありません".to_string())?;
+
+    run_git(
+        Path::new("."),
+        &[
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            "--quiet",
+            repo_str,
+            root_str,
+        ],
+    )?;
+
+    // clone 成功直後に `RunSandbox` を構築する（上記ドキュメント参照）。
+    // 以降 `?` で早期 return しても `sandbox` の `Drop` が `root` を削除する。
+    let sandbox = RunSandbox { root, keep: false };
+    run_git(
+        sandbox.root(),
+        &["checkout", "--quiet", "--detach", baseline_commit],
+    )?;
+
+    Ok(sandbox)
+}
+
 impl RunSandbox {
     /// `repo` を `baseline_commit` の状態で `git clone --local --no-hardlinks`
     /// した独立 sandbox を構築する。`--no-hardlinks` は `env::temp_dir()` と
@@ -131,38 +192,7 @@ impl RunSandbox {
     /// するため（`git clone` の既定挙動〈`repo` の HEAD が指す先〉に依存
     /// しない）。
     pub fn create(repo: &Path, baseline_commit: &str) -> Result<Self, String> {
-        let repo_abs = fs::canonicalize(repo).map_err(|error| {
-            format!(
-                "--repo の解決に失敗しました（repo={}）: {error}",
-                repo.display()
-            )
-        })?;
-        let repo_str = repo_abs
-            .to_str()
-            .ok_or_else(|| "--repo のパスが UTF-8 ではありません".to_string())?;
-
-        let root = unique_sandbox_path();
-        // 同一パスが前回実行の残骸として残っていないことを保証してから clone
-        // する（`git clone` は既存の空でない宛先ディレクトリを拒否するため）。
-        let _ = fs::remove_dir_all(&root);
-        let root_str = root
-            .to_str()
-            .ok_or_else(|| "sandbox パスが UTF-8 ではありません".to_string())?;
-
-        run_git(
-            Path::new("."),
-            &[
-                "clone",
-                "--local",
-                "--no-hardlinks",
-                "--quiet",
-                repo_str,
-                root_str,
-            ],
-        )?;
-        run_git(&root, &["checkout", "--quiet", "--detach", baseline_commit])?;
-
-        Ok(RunSandbox { root, keep: false })
+        create_at(unique_sandbox_path(), repo, baseline_commit)
     }
 
     /// sandbox のルートパス（`RepairCompositeGateSpec::workspace`／
@@ -322,6 +352,42 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// P2 回帰防止（PR #361 codex-review 第 3 波指摘）: `git clone` 成功後に
+    /// `git checkout --detach` が失敗した場合でも、clone 済みの sandbox
+    /// ディレクトリが残置されないことを確認する。
+    ///
+    /// `RunSandbox::create` は内部で `unique_sandbox_path()`（PID・ナノ秒
+    /// タイムスタンプ由来）を使うため決定的なパス検証ができない。本テストは
+    /// `create_at` を直接呼び、既知の `root` パスを注入することで
+    /// 「初期化失敗後にそのパスが確実に存在しない」ことを決定的に検証する
+    /// （`create_at` doc コメント参照）。
+    #[test]
+    fn create_removes_sandbox_directory_when_initialization_fails_after_clone() {
+        let repo = unique_test_dir("create-checkout-fails-source");
+        init_repo(&repo);
+        fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
+        git_commit_all(&repo, "baseline commit");
+
+        let root = unique_test_dir("create-checkout-fails-sandbox");
+        // 存在しない commit sha を渡し、clone 成功後の `git checkout --detach`
+        // を確実に失敗させる（40 桁の 16 進数だが実在しないオブジェクト）。
+        let bogus_baseline_commit = "0".repeat(40);
+
+        let result = create_at(root.clone(), &repo, &bogus_baseline_commit);
+        assert!(
+            result.is_err(),
+            "存在しない baseline commit への checkout は失敗するはず"
+        );
+        assert!(
+            !root.exists(),
+            "checkout 失敗時は clone 済みの sandbox ディレクトリが残置されてはならない: {}",
+            root.display()
+        );
+
+        let _ = fs::remove_dir_all(&repo);
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// P0 不変条件 (a): `RunSandbox::create` は `--repo` の作業ツリー・index に
