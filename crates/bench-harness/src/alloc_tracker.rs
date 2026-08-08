@@ -28,13 +28,27 @@
 //! なく [`AtomicUsize`] によるプロセス全体のカウンタを用い、どのスレッドの
 //! 確保も取りこぼさない。
 //!
+//! `PEAK_BYTES`／`BASELINE_BYTES` 自体は個々の読み書きこそアトミックだが、
+//! 「区間の起点を記録する（`reset_peak`）→ 計測対象区間を実行する →
+//! 純増分ピークを読み出す（`peak_since_reset_bytes`）」という一連の
+//! 手順全体は 1 つのアトミック操作ではない。同一プロセス内で計測区間が
+//! 並行・重複すると、一方の `reset_peak` が他方の計測途中の
+//! `BASELINE_BYTES`／`PEAK_BYTES` を上書きし、`gemm_alloc_peak_bytes` が
+//! 過小・過大な値でも「正常」として返ってしまう（PR #370 codex-review
+//! 指摘 P1・alloc_tracker.rs:173 付近）。これを防ぐため、計測区間全体を
+//! [`MEASUREMENT_LOCK`]（`Mutex<()>`）で直列化する [`measure`] を計測の
+//! 唯一の入口とし、`reset_peak`／`peak_since_reset_bytes` は本モジュール
+//! 内部専用（非 `pub`）に格下げする。呼び出し側（`peak_memory::run_cpu_trial`
+//! 等）は `measure` の返す `(戻り値, Option<u64>)` のみを扱う。
+//!
 //! ## 新規依存の追加なし
 //!
-//! `std::alloc::{GlobalAlloc, System}` のみを用いる自作ラッパーであり、
-//! 許容依存 8 区分外の新規クレート追加（`.claude/rules/deps-policy.md`）
-//! には該当しない。
+//! `std::alloc::{GlobalAlloc, System}` と `std::sync::Mutex`（標準ライブラリ）
+//! のみを用いる自作ラッパーであり、許容依存 8 区分外の新規クレート追加
+//! （`.claude/rules/deps-policy.md`）には該当しない。
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 /// プロセス全体で現在生存しているバイト数（`alloc` で加算・`dealloc` で減算）。
@@ -125,7 +139,12 @@ unsafe impl GlobalAlloc for TrackingAllocator {
 /// 計測区間の起点を記録する。`PEAK_BYTES` を現在の生存バイト数まで
 /// 引き下げ、以降の増加分のみを次回の [`peak_since_reset_bytes`] が
 /// 報告するようにする（`MemoryStats::reset_peak()` と同型の意味論）。
-pub fn reset_peak() {
+///
+/// プロセス全体で共有される [`PEAK_BYTES`]／[`BASELINE_BYTES`] への
+/// 書き込みであり、計測区間が並行・重複すると他区間の値を破壊しうる
+/// （PR #370 codex-review 指摘 P1）。そのため本関数は非公開とし、
+/// [`MEASUREMENT_LOCK`] で直列化された [`measure`] の内部でのみ呼ぶ。
+fn reset_peak() {
     let current = CURRENT_BYTES.load(Ordering::Relaxed);
     PEAK_BYTES.store(current, Ordering::Relaxed);
     BASELINE_BYTES.store(current, Ordering::Relaxed);
@@ -135,13 +154,48 @@ pub fn reset_peak() {
 /// 返す。`TrackingAllocator` が実際にプロセスの `#[global_allocator]`
 /// として有効化されていない文脈（`HOOK_ACTIVE` が一度も立っていない）
 /// では `None` を返し、「確保 0 バイトだった」との誤った断定を避ける。
-pub fn peak_since_reset_bytes() -> Option<u64> {
+///
+/// [`reset_peak`] と同様、非公開かつ [`measure`] の内部専用（理由は
+/// [`reset_peak`] のドキュメント参照）。
+fn peak_since_reset_bytes() -> Option<u64> {
     if !HOOK_ACTIVE.load(Ordering::Relaxed) {
         return None;
     }
     let baseline = BASELINE_BYTES.load(Ordering::Relaxed);
     let peak = PEAK_BYTES.load(Ordering::Relaxed);
     Some(peak.saturating_sub(baseline) as u64)
+}
+
+/// `PEAK_BYTES`／`BASELINE_BYTES`（プロセス全体で共有）への計測区間
+/// アクセスを直列化する排他ロック。[`measure`] だけがこれを獲得し、
+/// 「起点記録 → 計測対象実行 → ピーク読み出し」を単一の臨界区間として
+/// 保護する（PR #370 codex-review 指摘 P1・並行するピーク計測がグローバル
+/// 状態を上書きする問題への対応。alloc_tracker.rs:173 付近）。
+static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
+
+/// `f` の実行区間中に生じたプロセス全体のヒープ確保ピーク（純増分。
+/// バイト単位）を計測し、`f` の戻り値と併せて返す唯一の公開計測 API。
+///
+/// [`MEASUREMENT_LOCK`] を `f` の実行完了までホールドし続けることで、
+/// 複数スレッド・複数テストから本関数が並行呼び出しされても
+/// `reset_peak`（起点記録）・`peak_since_reset_bytes`（読み出し）の
+/// ペアが他の計測区間と重ならないことを保証する（PR #370 codex-review
+/// 指摘 P1）。`TrackingAllocator` が有効化されていない文脈では
+/// ピーク値は `None` になる（[`peak_since_reset_bytes`] 参照）。
+///
+/// ロック汚染（`f` 内での panic）時は `Mutex::lock` の `Err` から
+/// 内部ガードを取り出して継続する: 本ロックが保護するのは単純な
+/// アトミックカウンタの読み書き手順のみであり、`f` の panic によって
+/// カウンタ自体が不変条件を破ることはないため（`into_inner()` で
+/// poison を解除しても安全）。
+pub fn measure<R>(f: impl FnOnce() -> R) -> (R, Option<u64>) {
+    let _guard = MEASUREMENT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    reset_peak();
+    let result = f();
+    let peak = peak_since_reset_bytes();
+    (result, peak)
 }
 
 // `cargo test --lib`（本クレートの単体テストバイナリ）に限り
@@ -151,9 +205,8 @@ pub fn peak_since_reset_bytes() -> Option<u64> {
 // ビルドには一切影響しない）。`peak_memory::tests` を含む本クレートの
 // 全単体テストが同一バイナリで実行されるため（Rust の単体テストは
 // クレート単位で 1 バイナリに集約される）、宣言はここ 1 箇所のみで足り、
-// `peak_memory::run_cpu_trial` が呼ぶ `reset_peak`／`peak_since_reset_bytes`
-// もこの宣言により実際に計測できる状態になる（PR #370 codex-review 指摘
-// P1 対応）。
+// `peak_memory::run_cpu_trial` が呼ぶ `measure` もこの宣言により実際に
+// 計測できる状態になる（PR #370 codex-review 指摘 P1 対応）。
 #[cfg(test)]
 #[global_allocator]
 static TEST_GLOBAL_ALLOCATOR: TrackingAllocator = TrackingAllocator;
@@ -162,56 +215,134 @@ static TEST_GLOBAL_ALLOCATOR: TrackingAllocator = TrackingAllocator;
 mod tests {
     use super::*;
 
-    /// 既知サイズのヒープ確保を挟むことで、`reset_peak`／
-    /// `peak_since_reset_bytes` が実際のアロケータイベントを反映すること
-    /// を確認する（PR #370 codex-review 指摘 P1 の回帰テスト）。
+    /// `LEN` バイト確保後のピーク下限判定に許容する雑音マージン。
+    ///
+    /// `PEAK_BYTES`／`BASELINE_BYTES` はプロセス全体で共有されるため、
+    /// `MEASUREMENT_LOCK` で closure 実行を直列化していても、`cargo test`
+    /// のデフォルト並列実行下では他の単体テスト（`measure` を経由しない
+    /// 通常の `Vec` 確保等）による極小サイズの確保・解放が同一カウンタに
+    /// 計上されうる（実測: 64MiB 確保直後のピークが数十バイト程度
+    /// 下振れする事例を確認済み）。`LEN` ぴったりの厳密な下限判定は
+    /// この不可避な雑音でフレーキー化するため、99.9%（0.1% 未満の欠損は
+    /// 許容）を下限とする。ロック非存在（codex-review 指摘 P1 の不具合）
+    /// による破壊はピークがほぼ 0 まで落ち込む規模であり、本マージンは
+    /// それとの区別には十分小さい。
+    const NOISE_TOLERANCE_RATIO: f64 = 0.999;
+
+    /// 既知サイズのヒープ確保を挟むことで、[`measure`] が実際のアロケータ
+    /// イベントを反映することを確認する（PR #370 codex-review 指摘 P1 の
+    /// 回帰テスト）。
     ///
     /// 本カウンタはプロセス全体で共有されるため、`cargo test` のデフォルト
     /// 並列実行下では他の単体テストの確保・解放も同一カウンタへ計上され
     /// うる（`.claude/rules/coding-rust.md` はテストの並列実行自体を禁じて
-    /// いない）。厳密な「ちょうど N バイト」判定は他テストの雑音でフレーキー
-    /// 化するため避け、以下の 2 点で頑健化する: (1) 判定閾値 `LEN` を本
-    /// クレートの他の単体テストが単発で確保する量（数百 KB〜数 MB 台。
+    /// いない）。確保だけでなく `drop` も closure 内（`MEASUREMENT_LOCK`
+    /// 保持区間内）で完結させる: `drop` を `measure` の外に置くと、他の
+    /// テストスレッドが直後にロックを獲得して `reset_peak` した瞬間に
+    /// 割り込みうる（本テストの解放操作が他スレッドの計測開始直前の
+    /// `CURRENT_BYTES` を一時的に押し下げ、相手側の基準値を歪ませる）。
+    /// `PEAK_BYTES` は `fetch_max` でのみ更新される単調増加カウンタの
+    /// ため、closure 内で確保後にすぐ `drop` しても記録済みのピークは
+    /// 失われない。上記に加え、判定閾値 `LEN` を本クレートの他の単体
+    /// テストが単発で確保する量（数百 KB〜数 MB 台。
     /// `run_peak_memory_cpu_matches_theoretical_minimum_for_small_size` の
     /// 256KB 規模等）を大きく上回る 64MiB とし、雑音による誤検出の確率を
-    /// 実務上無視できる水準まで下げる、(2) 「少なくとも LEN バイト」という
-    /// 下限のみを主張し、上限は主張しない。
+    /// 実務上無視できる水準まで下げる。「少なくとも `LEN` バイトの
+    /// [`NOISE_TOLERANCE_RATIO`] 倍」という下限のみを主張し、上限は
+    /// 主張しない（`NOISE_TOLERANCE_RATIO` のドキュメント参照）。
     #[test]
-    fn peak_since_reset_bytes_reflects_real_heap_allocation() {
+    fn measure_reflects_real_heap_allocation() {
         const LEN: usize = 64 * 1024 * 1024;
-        reset_peak();
-        let v: Vec<u8> = vec![0u8; LEN];
+        let (_, peak) = measure(|| {
+            let v: Vec<u8> = vec![0u8; LEN];
+            drop(v);
+        });
 
-        let peak = peak_since_reset_bytes().expect(
+        let peak = peak.expect(
             "TEST_GLOBAL_ALLOCATOR がテストバイナリの #[global_allocator] のため Some のはず",
         );
+        let floor = (LEN as f64 * NOISE_TOLERANCE_RATIO) as u64;
         assert!(
-            peak >= LEN as u64,
-            "{LEN} バイト確保後のピークは少なくとも {LEN} バイトのはず（実測: {peak}）"
+            peak >= floor,
+            "{LEN} バイト確保後のピークは少なくともその {NOISE_TOLERANCE_RATIO} 倍 \
+             （{floor} バイト）のはず（実測: {peak}）"
         );
-
-        drop(v);
     }
 
-    /// `reset_peak` が計測区間を正しく区切ることを確認する: 大きな確保
-    /// （解放済み）の直後に `reset_peak` した場合、新規区間のピークは
-    /// 前区間の確保量を大きく下回る（雑音耐性については上のテストの
-    /// コメント参照。厳密な 0 判定は並列実行下でフレーキー化するため
-    /// 「前区間の確保量の半分未満」という緩い上限のみを主張する）。
+    /// [`measure`] が計測区間を正しく区切ることを確認する: 大きな確保
+    /// （解放済み）の直後に呼んだ [`measure`] は、新規区間のピークが
+    /// 前区間の確保量を大きく下回る（雑音耐性・`drop` を closure 内に
+    /// 収める理由は上のテストのコメント参照。厳密な 0 判定は並列実行下
+    /// でフレーキー化するため「前区間の確保量の半分未満」という緩い
+    /// 上限のみを主張する）。
     #[test]
-    fn reset_peak_clears_previous_interval() {
+    fn measure_clears_previous_interval() {
         const LEN: usize = 64 * 1024 * 1024;
-        reset_peak();
-        let v: Vec<u8> = vec![0u8; LEN];
-        let first_peak = peak_since_reset_bytes().unwrap();
-        assert!(first_peak >= LEN as u64);
-        drop(v);
+        let (_, first_peak) = measure(|| {
+            let v: Vec<u8> = vec![0u8; LEN];
+            drop(v);
+        });
+        let first_peak = first_peak.unwrap();
+        let floor = (LEN as f64 * NOISE_TOLERANCE_RATIO) as u64;
+        assert!(
+            first_peak >= floor,
+            "{LEN} バイト確保後のピークは少なくともその {NOISE_TOLERANCE_RATIO} 倍 \
+             （{floor} バイト）のはず（実測: {first_peak}）"
+        );
 
-        reset_peak();
-        let second_peak = peak_since_reset_bytes().unwrap();
+        let (_, second_peak) = measure(|| {});
+        let second_peak = second_peak.unwrap();
         assert!(
             second_peak < first_peak / 2,
-            "reset_peak 後は前区間の確保量を大きく下回るはず（前区間: {first_peak}・実測: {second_peak}）"
+            "measure 後は前区間の確保量を大きく下回るはず（前区間: {first_peak}・実測: {second_peak}）"
         );
+    }
+
+    /// [`MEASUREMENT_LOCK`] が並行呼び出しを直列化することの回帰テスト
+    /// （codex-review 指摘 P1 の核心）。
+    ///
+    /// バイト数の実測値（`peak_since_reset_bytes` の戻り値）で直列化を
+    /// 検証しない: `PEAK_BYTES`／`BASELINE_BYTES` はプロセス全体の
+    /// `#[global_allocator]` フックが更新する共有カウンタであり、
+    /// `cargo test` のデフォルト並列実行下では本テストの制御が及ばない
+    /// 他の単体テストの確保・解放（`MEASUREMENT_LOCK` を経由しない
+    /// バックグラウンドの雑音）も同じカウンタへ計上されるため、
+    /// バイト数ベースの下限判定は本質的にフレーキーになる（実測で確認
+    /// 済み。上の 2 テストが 64MiB という大きな閾値で雑音を相対的に
+    /// 無視できる水準まで薄めているのに対し、本テストは複数スレッドを
+    /// 同時に走らせる都合上その手法が使えない）。
+    ///
+    /// 代わりに、`measure` が保証すべき不変条件そのもの（closure `f` の
+    /// 実行が他の `measure` 呼び出しの `f` の実行と時間的に重ならない
+    /// こと）を、本テスト専用の [`AtomicUsize`] カウンタで直接検証する。
+    /// `MEASUREMENT_LOCK` が存在しない実装（修正前）では、複数スレッドの
+    /// `f` が同時に実行され `IN_FLIGHT` が 1 を超える瞬間が生じうる。
+    #[test]
+    fn measure_serializes_concurrent_callers() {
+        static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+        const THREADS: usize = 8;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    measure(|| {
+                        let concurrent = IN_FLIGHT.fetch_add(1, Ordering::SeqCst) + 1;
+                        // 他スレッドが割り込む猶予を与えてレースを検出しやすくする。
+                        std::thread::yield_now();
+                        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+                        assert_eq!(
+                            concurrent, 1,
+                            "MEASUREMENT_LOCK が直列化していれば closure 実行中の \
+                             同時実行数は常に 1 のはず（実測: {concurrent}）"
+                        );
+                    });
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join()
+                .expect("直列化が破れていれば closure 内の assert_eq! で panic し検出される");
+        }
     }
 }

@@ -59,9 +59,11 @@
 //! 2. `MemoryOps` 経由で代表ワーキングセットを確保する: `upload(A)`
 //!    （M×K f32）→ `upload(B)`（K×N f32）→ `alloc_zeroed(C)`（M×N f32）
 //! 3. ワーキングセット保持中に `BackendOps::gemm(A, B)` を実行する（所要
-//!    秒数を `gemm_secs` として記録する）。CPU バックエンドはこの区間の
-//!    直前に `alloc_tracker::reset_peak()` を呼び、直後に
-//!    `gemm_alloc_peak_bytes` を採取する
+//!    秒数を `gemm_secs` として記録する）。CPU バックエンドはこの区間を
+//!    `alloc_tracker::measure()`（起点記録〜ピーク読み出しを
+//!    `MEASUREMENT_LOCK` で直列化する唯一の公開計測 API。PR #370
+//!    codex-review 指摘 P1 再指摘対応）で包み、`gemm_alloc_peak_bytes`
+//!    を採取する
 //! 4. `peak_allocated_bytes()`（`peak_bytes`）を採取する
 //! 5. `upload`/`alloc_zeroed` で得た 3 バッファを drop し、
 //!    `allocated_bytes()`（`allocated_after_drop_bytes`）が 0 に戻ることを
@@ -605,12 +607,16 @@ fn run_cpu_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, Pea
     let ops = backend_cpu::CpuBackendOps::new();
     // `gemm` 実行区間だけを `alloc_tracker` の計測窓に切り出す（`upload`／
     // `alloc_zeroed` 自体のホスト側確保を GEMM 内部確保と混同しないため。
-    // PR #370 codex-review 指摘 P1 対応）。
-    crate::alloc_tracker::reset_peak();
+    // PR #370 codex-review 指摘 P1 対応）。`measure` が
+    // `MEASUREMENT_LOCK`（`crate::alloc_tracker` モジュール冒頭
+    // 「スレッド安全性」参照）で起点記録〜ピーク読み出しを直列化する
+    // ため、並行する trial 実行同士でグローバル状態（`PEAK_BYTES`／
+    // `BASELINE_BYTES`）を破壊し合わない（PR #370 codex-review 指摘 P1
+    // 再指摘対応）。
     let start = Instant::now();
-    ops.gemm(&a, &b)?;
+    let (gemm_result, gemm_alloc_peak_bytes) = crate::alloc_tracker::measure(|| ops.gemm(&a, &b));
     let gemm_secs = start.elapsed().as_secs_f64();
-    let gemm_alloc_peak_bytes = crate::alloc_tracker::peak_since_reset_bytes();
+    gemm_result?;
 
     let peak_bytes = mem.peak_allocated_bytes();
     drop(buf_a);
