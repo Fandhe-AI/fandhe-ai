@@ -23,6 +23,8 @@
 //!   `nn/init.rs::derive_seed` の単体テストと役割が重複しない、
 //!   公開 API（`Linear::new`）経由の統合検証）。
 
+mod common;
+
 use autodiff::nn::Linear;
 use autodiff::{AutodiffError, Tape};
 use tensor_core::{ShapeError, Tensor};
@@ -47,7 +49,7 @@ fn forward_matches_hand_computed_expectation_with_bias() {
     let b = t(vec![0.5, -0.5], &[2]);
     let linear = Linear::from_parameters(w, Some(b)).unwrap();
 
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let vars = linear.bind(&tape);
     let xv = tape.var(&x);
     let y = vars.forward(&xv).unwrap();
@@ -69,7 +71,7 @@ fn forward_matches_hand_computed_expectation_without_bias() {
     let w = t(vec![2.0, 0.0, 0.0, 3.0], &[2, 2]);
     let linear = Linear::from_parameters(w, None).unwrap();
 
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let vars = linear.bind(&tape);
     let xv = tape.var(&x);
     let y = vars.forward(&xv).unwrap();
@@ -138,7 +140,7 @@ fn linear_fixture() -> LinearFixture {
 /// 中央差分の各サンプル点でテープを 1 回使い捨てる（`backward.rs` と同じ
 /// パターン。`tape.rs` の学習ループ運用契約）。
 fn forward_loss_sum(x: &Tensor<f32>, w: &Tensor<f32>, b: &Tensor<f32>) -> f32 {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let linear = Linear::from_parameters(w.clone(), Some(b.clone())).unwrap();
     let vars = linear.bind(&tape);
     let xv = tape.var(x);
@@ -177,7 +179,7 @@ fn numeric_grad(target_tensor: &Tensor<f32>, perturb: impl Fn(Tensor<f32>) -> f3
 #[test]
 fn backward_grad_w_matches_numeric() {
     let f = linear_fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let linear = Linear::from_parameters(f.w.clone(), Some(f.b.clone())).unwrap();
     let vars = linear.bind(&tape);
     let xv = tape.var(&f.x);
@@ -196,7 +198,7 @@ fn backward_grad_w_matches_numeric() {
 #[test]
 fn backward_grad_b_matches_numeric_and_is_reduced_over_batch() {
     let f = linear_fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let linear = Linear::from_parameters(f.w.clone(), Some(f.b.clone())).unwrap();
     let vars = linear.bind(&tape);
     let xv = tape.var(&f.x);
@@ -218,7 +220,7 @@ fn backward_grad_b_matches_numeric_and_is_reduced_over_batch() {
 #[test]
 fn backward_grad_x_matches_numeric() {
     let f = linear_fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let linear = Linear::from_parameters(f.w.clone(), Some(f.b.clone())).unwrap();
     let vars = linear.bind(&tape);
     let xv = tape.var(&f.x);
@@ -315,7 +317,7 @@ fn from_parameters_rejects_bias_length_mismatch() {
 fn forward_rejects_in_features_mismatch() {
     let w = t(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
     let linear = Linear::from_parameters(w, None).unwrap();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let vars = linear.bind(&tape);
     // in_features=2 のはずが x は shape [1, 3]。
     let x = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));

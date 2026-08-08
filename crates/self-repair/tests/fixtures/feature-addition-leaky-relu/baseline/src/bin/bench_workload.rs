@@ -55,7 +55,7 @@ fn deterministic_inputs(count: usize) -> Vec<f32> {
 fn run_once(inputs: &[f32]) -> f32 {
     let tensor = Tensor::new(inputs.to_vec(), &[inputs.len()])
         .expect("bench_workload: shape とデータ長は一致させている");
-    let tape = Tape::new();
+    let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
 
     let x_relu = tape.var(&tensor);
     let y_relu = activations::relu(&x_relu);

@@ -160,6 +160,41 @@ impl<T: Element> Tensor<T> {
         })
     }
 
+    /// 総コンストラクタ（TASK-12.1d・#164）: `shape` から `numel` を導出し、
+    /// 添字 `0..numel` を `fill` で埋めて構築する。**構造的に失敗しない**
+    /// （`Result` を返さない）コンストラクタであり、`autodiff::eval`
+    /// （`crates/autodiff/src/eval.rs`）が「shape とデータ長の一致を型で
+    /// 保証する」ことで `unreachable!()` 経由のフォールバックを排除する
+    /// ための土台として追加する（`docs/fusion-graph-design.md` §2.5
+    /// 「eval.rs 非 panic 化の設計方針」）。
+    ///
+    /// 要素数計算は `checked_numel`（本ファイル冒頭）ではなく
+    /// `row_major_strides`（`tensor.rs:82`）と同じ `saturating_mul` 方針を
+    /// 用いる: 本コンストラクタは失敗しないことが要件であり、
+    /// オーバーフローが実際に起きた場合でも `panic!`／`Result::Err` では
+    /// なく飽和させて処理を継続する（呼び出し元はいずれも事前に妥当な
+    /// shape を計算済みのため、実運用でこの飽和経路には到達しない）。
+    ///
+    /// `pub` + `#[doc(hidden)]`: 公開 API ドキュメントには現れない
+    /// クレート間内部契約とする（`autodiff` からのみ使う想定。第 4 波で
+    /// `Tensor::try_dense` に適用したものの第 5 波で撤回されたパターンを、
+    /// 可視性制約が実在する本箇所にのみ再適用する。
+    /// `docs/fusion-graph-design.md` §3.4 と同型の判断）。
+    #[doc(hidden)]
+    pub fn from_shape_fill(shape: &[usize], mut fill: impl FnMut(usize) -> T) -> Tensor<T> {
+        let numel = shape
+            .iter()
+            .fold(1usize, |acc, &dim| acc.saturating_mul(dim));
+        let data: Vec<T> = (0..numel).map(&mut fill).collect();
+        let strides = row_major_strides(shape);
+        Tensor {
+            storage: Arc::new(Storage { data }),
+            offset: 0,
+            shape: shape.to_vec(),
+            strides,
+        }
+    }
+
     /// shape（各軸のサイズ）を返す。
     pub fn shape(&self) -> &[usize] {
         &self.shape

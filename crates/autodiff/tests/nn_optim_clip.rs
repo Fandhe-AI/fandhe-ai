@@ -6,6 +6,8 @@
 //! 渡してテストする。ミニ学習ステップとの統合（backward 由来の実勾配へ
 //! の適用）は `nn_train_convergence.rs` と同型の 2 層 MLP で検証する。
 
+mod common;
+
 use autodiff::Tape;
 use autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
 use tensor_core::Tensor;
@@ -229,7 +231,7 @@ fn clip_applied_to_real_backward_gradients_bounds_update_norm() {
 
     let l1 = Linear::new(D_IN, D_OUT, true, 0x1111_1111).expect("test fixture: shape は事前に妥当");
 
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&x_data);
     let y = tape.var(&y_data);
     let l1v = l1.bind(&tape);

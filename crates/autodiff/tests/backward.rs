@@ -17,6 +17,8 @@
 //! 実測ケース網羅・回帰テスト化は #19（TASK-1.5d）のスコープのため
 //! 含めない。
 
+mod common;
+
 use autodiff::{AutodiffError, Tape};
 use tensor_core::Tensor;
 
@@ -34,7 +36,7 @@ fn scalar(tensor: &Tensor<f32>) -> f32 {
 
 #[test]
 fn mul_self_reference_accumulates_gradient() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]));
 
     // 同一 `Var` を `mul` の両引数に渡す。x のノードへは
@@ -57,7 +59,7 @@ fn mul_self_reference_accumulates_gradient() {
 
 #[test]
 fn add_grad_is_ones_for_both_operands() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let a = tape.var(&t(vec![1.0, -2.0, 3.0], &[3]));
     let b = tape.var(&t(vec![0.5, 1.5, -1.0], &[3]));
 
@@ -116,7 +118,7 @@ fn assert_grad_close(label: &str, analytic: &Tensor<f32>, numeric: &Tensor<f32>)
 /// （f32）を返す。中央差分の各サンプル点でテープを 1 回使い捨てる
 /// （`tape.rs` が前提とする学習ループ運用と同じパターン）。
 fn forward_loss(x: &Tensor<f32>, w: &Tensor<f32>, b: &Tensor<f32>, target: &Tensor<f32>) -> f32 {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(x);
     let wv = tape.var(w);
     let bv = tape.var(b);
@@ -178,7 +180,7 @@ fn mlp_fixture() -> MlpFixture {
 #[test]
 fn mlp_grad_w_matches_numeric() {
     let f = mlp_fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let bv = tape.var(&f.b);
@@ -195,7 +197,7 @@ fn mlp_grad_w_matches_numeric() {
 #[test]
 fn mlp_grad_b_matches_numeric() {
     let f = mlp_fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let bv = tape.var(&f.b);
@@ -212,7 +214,7 @@ fn mlp_grad_b_matches_numeric() {
 #[test]
 fn mlp_grad_x_matches_numeric() {
     let f = mlp_fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let bv = tape.var(&f.b);
@@ -230,7 +232,7 @@ fn mlp_grad_x_matches_numeric() {
 
 #[test]
 fn unreachable_leaf_returns_ok_none() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0], &[2]));
     // loss に一切関与しない葉ノード。
     let unused = tape.var(&t(vec![9.0], &[1]));
@@ -243,8 +245,8 @@ fn unreachable_leaf_returns_ok_none() {
 
 #[test]
 fn backward_with_foreign_tape_var_returns_tape_mismatch() {
-    let tape_a = Tape::new();
-    let tape_b = Tape::new();
+    let tape_a = Tape::new(common::naive_ops());
+    let tape_b = Tape::new(common::naive_ops());
     let loss_a = tape_a.var(&t(vec![1.0], &[1])).sum(None).unwrap();
     // `tape_b` から `backward` を呼びつつ、`tape_a` の loss を渡す。
     let x_b = tape_b.var(&t(vec![2.0], &[1]));
@@ -256,8 +258,8 @@ fn backward_with_foreign_tape_var_returns_tape_mismatch() {
 
 #[test]
 fn gradients_get_with_foreign_tape_var_returns_tape_mismatch() {
-    let tape_a = Tape::new();
-    let tape_b = Tape::new();
+    let tape_a = Tape::new(common::naive_ops());
+    let tape_b = Tape::new(common::naive_ops());
     let x_a = tape_a.var(&t(vec![1.0, 2.0], &[2]));
     let loss_a = x_a.sum(None).unwrap();
     let grads_a = tape_a.backward(&loss_a).unwrap();
@@ -269,7 +271,7 @@ fn gradients_get_with_foreign_tape_var_returns_tape_mismatch() {
 
 #[test]
 fn get_for_var_added_after_backward_returns_ok_none() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0], &[2]));
     let loss = x.sum(None).unwrap();
     let grads = tape.backward(&loss).unwrap();
@@ -286,7 +288,7 @@ fn non_scalar_loss_seed_is_implicit_sum_projection() {
     // （`sum(loss).backward()` 相当）として扱われ、シードは全要素 1。
     // ここでは loss = x（恒等）とし、seed = ones と直接一致することを
     // 確認する（各要素が独立にそのまま出力へ伝わるため）。
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![3.0, -1.0], &[2]));
     let grads = tape.backward(&x).unwrap();
     let dx = grads.get(&x).unwrap().expect("x 自身が loss である");

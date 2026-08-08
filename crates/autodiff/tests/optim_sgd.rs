@@ -18,6 +18,8 @@
 //! 緩和しない（f64 参照 vs f32 実装の差は fixture 側で ~1e-7 オーダーに
 //! 収まる。`gen_sgd_expected.py` 参照）。
 
+mod common;
+
 use autodiff::Tape;
 use autodiff::nn::Linear;
 use autodiff::nn::activation::Relu;
@@ -397,7 +399,7 @@ fn run_regression_training_with_sgd(steps: usize, lr: f32) -> Vec<(f32, u32)> {
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = Tape::new();
+        let tape = Tape::new(common::naive_ops());
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
 

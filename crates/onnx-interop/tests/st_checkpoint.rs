@@ -115,7 +115,7 @@ fn train_steps(
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = Tape::new();
+        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
         let x = tape.var(x_data);
         let y = tape.var(y_data);
 

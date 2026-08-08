@@ -93,6 +93,8 @@ mod grad;
 pub mod nn;
 pub mod optim;
 mod tape;
+#[cfg(test)]
+mod test_support;
 mod var;
 
 pub use backward::Gradients;

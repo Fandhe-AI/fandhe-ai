@@ -98,6 +98,7 @@ pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use element::Element;
 pub use error::ShapeError;
+pub use fusion::{FusedNodeIndex, FusedOpKind, FusionPlan};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,

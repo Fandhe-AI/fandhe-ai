@@ -83,7 +83,12 @@ impl Tape {
         let n = nodes.len();
 
         let mut grads: Vec<Option<Tensor<f32>>> = vec![None; n];
-        let loss_shape = nodes[loss.node_id().0].value.shape();
+        // `loss` 自身が forward 記録済みの未実体化ノード（elementwise の
+        // 遅延グラフの末端）である場合に備え、`materialize_fallible`
+        // （層 1）経由で shape を読む（TASK-12.1d・#164）。
+        let loss_shape = crate::tape::materialize_fallible(&nodes, self.ops(), loss.node_id())?
+            .shape()
+            .to_vec();
         // `loss_shape` は既に構築済みの `loss.value`（同 shape のテンソル）から
         // 取得しているため、現行の `tensor-core` 実装では本分岐は到達不能
         // （同 shape での `full()` が失敗する経路が存在しない）。ただし
@@ -93,7 +98,7 @@ impl Tape {
         // 反する）。将来の `tensor-core` 実装変更で到達可能になった場合に備え、
         // `debug_assert!` + 暗黙の誤った値ではなく `Err` を返す安全側の実装とする
         // （#18 レビュー指摘）。
-        let seed = Tensor::full(loss_shape, 1.0f32).map_err(|err| {
+        let seed = Tensor::full(&loss_shape, 1.0f32).map_err(|err| {
             AutodiffError::Backward(format!(
                 "loss 自身の shape でのシードテンソル構築に失敗した（契約違反）: {err}"
             ))
@@ -112,8 +117,14 @@ impl Tape {
             let Some(upstream) = grads[id].clone() else {
                 continue;
             };
+            // ノード自身の forward 値（`out_value`）を層 1（fallible）
+            // 経由で実体化する。当該ノードが elementwise の遅延グラフ
+            // 末端の場合に備える（TASK-12.1d・#164。`Var::value()`〈層
+            // 2〉は呼ばず、`Unsupported` 以外の失敗は `?` で伝播する）。
+            let node_value =
+                crate::tape::materialize_fallible(&nodes, self.ops(), NodeId(id))?.clone();
             let node = &nodes[id];
-            let contributions = grad::vjp(&node.op, &node.value, &upstream, &nodes);
+            let contributions = grad::vjp(&node.op, &node_value, &upstream, &nodes, self.ops())?;
             for (target, contribution) in contributions {
                 accumulate(&mut grads, target, contribution);
             }

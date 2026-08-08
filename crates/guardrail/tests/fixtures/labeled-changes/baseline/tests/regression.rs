@@ -31,7 +31,7 @@ fn inference_matches_expected_xor() {
     let (x, y) = xor_dataset(8);
     let (model, _loss) = train(model, x, y, 3000, 5e-2).expect("学習ループは失敗しない");
 
-    let tape = Tape::new();
+    let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
     let infer_x =
         tensor_core::Tensor::new(vec![0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], &[4, 2])
             .expect("test fixture: shape とデータ長は一致する");

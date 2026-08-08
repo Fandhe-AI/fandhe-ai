@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn relu_matches_known_values() {
-        let tape = Tape::new();
+        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
         let x = known_input(&tape);
         let y = dense_vec(&relu(&x).to_tensor());
         let expected = [0.0f32, 0.0, 0.0, 0.5, 1.0, 3.0];
@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn sigmoid_matches_known_values() {
-        let tape = Tape::new();
+        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
         let x = known_input(&tape);
         let y = dense_vec(&sigmoid(&x).to_tensor());
         let expected = [

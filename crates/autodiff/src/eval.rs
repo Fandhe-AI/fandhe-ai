@@ -64,30 +64,26 @@ pub(crate) fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
     out
 }
 
-/// `Tensor::new` は shape とデータ長が一致する限り失敗しない。呼び出し
+/// shape とデータ長の一致を型で保証する非 panic 構築（TASK-12.1d・
+/// #164。`docs/fusion-graph-design.md` §2.5「eval.rs 非 panic 化の設計
+/// 方針」）。`Tensor::from_shape_fill`（`tensor-core` 側の総コンスト
+/// ラクタ。`pub` + `#[doc(hidden)]`）は `shape` から `numel` を導出し
+/// `fill` で埋めるため、`data.len()` と `shape` の要素数積が食い違って
+/// も `Result`／`unreachable!()` を経由せず必ず値を返す
+/// （`materialize_non_fallible`〈`tape.rs`〉が要求する「構造的に失敗
+/// しない」契約。`docs/fusion-graph-design.md` §3.5.3 (iii)）。呼び出し
 /// 元（本モジュール内）はすべて事前に shape 検査済みの出力を組み立てる
-/// ため、`ShapeError` は理論上発生しない。それでも `unwrap()`/`expect()`
-/// を使わない方針のため、失敗時は空テンソルへ安全側フォールスルーする
-/// （`debug_assert!` で契約違反を検知可能にする）。
+/// ため、実運用では `data.len()` と `shape` は必ず一致する
+/// （`debug_assert_eq!` で契約違反を検知可能にする。不一致時は
+/// `get(i).copied().unwrap_or(0.0)` により欠落分を `0.0` で安全側に
+/// 埋める）。
 pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    match Tensor::new(data, shape) {
-        Ok(t) => t,
-        Err(_) => {
-            debug_assert!(
-                false,
-                "build_tensor: shape 検査済みのはずのデータ構築が失敗した（契約違反）"
-            );
-            // 契約違反時の安全側フォールバック: 空データ・shape [0] は
-            // 要素数積が 0 で一致するため `Tensor::new` が失敗する条件
-            // （`ElementCountMismatch`/`ElementCountOverflow`）をいずれも
-            // 満たさず、構造的に失敗しえない。到達すれば呼び出し元の
-            // shape 計算ロジックにバグがある（`unwrap_or_else` の分岐は
-            // 型を合わせるためだけの到達不能パスであり、本番経路の
-            // 「失敗しうる入力に対する unwrap」には該当しない）。
-            Tensor::new(Vec::new(), &[0])
-                .unwrap_or_else(|_| unreachable!("shape [0] construction cannot fail"))
-        }
-    }
+    debug_assert_eq!(
+        data.len(),
+        shape.iter().product::<usize>(),
+        "build_tensor: shape 検査済みのはずのデータ長が一致しない（契約違反）"
+    );
+    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0))
 }
 
 /// クラス添字テンソル（`Tensor<i32>`）の稠密化。`dense_vec`（上記）の
@@ -242,6 +238,14 @@ pub(crate) fn sigmoid(input: &Tensor<f32>) -> Tensor<f32> {
 /// 「外側（outer）× 走査軸（axis_len）× 内側（inner）」の 3 段に分解
 /// することで任意軸の縮約を単一ループ構造で表現する
 /// （`dim: None` の全軸縮約は呼び出し元がスカラー特別扱いする）。
+///
+/// **TASK-12.1d（#164）**: `Var::sum`/`Var::max`（`var.rs`）の実行は
+/// `eval.rs` 直接呼び出しから `self.tape.ops().sum`/`max`（`BackendOps`
+/// 経由）へ置き換えたため、本関数（および `sum`/`max`。下記）は本番
+/// 経路では呼ばれなくなった。テスト専用フィクスチャ
+/// （`test_support.rs`・統合テストの数値微分突合。`grad.rs` の VJP
+/// テストが期待値計算に使う）としてのみ残す（`#[cfg(test)]`）。
+#[cfg(test)]
 fn reduce_axis(
     input: &Tensor<f32>,
     axis: usize,
@@ -267,6 +271,8 @@ fn reduce_axis(
 }
 
 /// `sum(dim)`。`dim: None` は全要素の総和をスカラー（shape `[]`）で返す。
+/// テスト専用（上記 `reduce_axis` コメント参照。TASK-12.1d・#164）。
+#[cfg(test)]
 pub(crate) fn sum(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
     match dim {
         None => {
@@ -283,6 +289,8 @@ pub(crate) fn sum(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
 /// （`fold` の初期値のまま。NumPy の `max` は空配列でエラーにするのが
 /// 慣習だが、本イシューでは shape 検査のみをスコープとし数値的な特殊
 /// ケースの扱いは #19（回帰テスト・数値突合）で確定する）。
+/// テスト専用（`reduce_axis` コメント参照。TASK-12.1d・#164）。
+#[cfg(test)]
 pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
     match dim {
         None => {

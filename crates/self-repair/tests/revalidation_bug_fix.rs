@@ -199,6 +199,30 @@ fn detach_autodiff_cargo_toml(sandbox: &Path) {
          （crates/autodiff/Cargo.toml の記法が変わっていないか確認）"
     );
 
+    // TASK-12.1d（#164）: `Tape::new(ops)` の破壊的変更（ops 必須化）に伴い、
+    // `bench_workload_source()`（下記）が生成する `src/bin/bench_workload.rs`
+    // は `Tape::new(...)` へ渡す `BackendOps` 実装を要する。`autodiff` 自身は
+    // `backend-cpu` へ依存しない（設計上の不変条件）ため、この bin 専用の
+    // 依存として `[dependencies]` セクションへ直接追記する（`[dependencies]`
+    // は `dev-dependencies` と異なり通常の `cargo build --release --bin
+    // bench_workload` でも解決される）。`tensor-core` 行の直後（同じ
+    // `[dependencies]` テーブル内）へ挿入することでテーブル境界を跨がない。
+    let backend_cpu_abs = repo_root().join("crates/backend-cpu");
+    let tensor_core_line = format!(r#"path = "{}""#, tensor_core_abs.display());
+    let with_backend_cpu_dep = with_path_deps.replacen(
+        &tensor_core_line,
+        &format!(
+            "{tensor_core_line}\nbackend-cpu = {{ path = \"{}\" }}",
+            backend_cpu_abs.display()
+        ),
+        1,
+    );
+    assert_ne!(
+        with_backend_cpu_dep, with_path_deps,
+        "backend-cpu 依存の追記が適用されなかった（tensor-core 行のテキストが変わっていないか確認）"
+    );
+    let with_path_deps = with_backend_cpu_dep;
+
     let with_dev_deps = with_path_deps
         .replace(
             "serde.workspace = true",
@@ -235,6 +259,7 @@ fn bench_workload_source() -> &'static str {
 //! と同一（本ハーネス〈`tests/revalidation_bug_fix.rs`〉が生成する）。
 
 use autodiff::Tape;
+use backend_cpu::CpuBackendOps;
 use tensor_core::Tensor;
 
 const SEED: u64 = 42;
@@ -256,7 +281,7 @@ fn deterministic_inputs(count: usize) -> Vec<f32> {
 fn run_once(inputs: &[f32]) -> f32 {
     let tensor = Tensor::new(inputs.to_vec(), &[inputs.len()])
         .expect("bench_workload: shape とデータ長は一致させている");
-    let tape = Tape::new();
+    let tape = Tape::new(Box::new(CpuBackendOps::new()));
 
     let x = tape.var(&tensor);
     let y = x.relu();

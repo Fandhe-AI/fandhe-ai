@@ -9,6 +9,8 @@
 //!   （`tests/backward.rs` の MLP テストと同じ構成・許容誤差を再利用。
 //!   `H=1e-3`・相対 1e-2 または絶対 1e-3・`τ=1e-4`）。
 
+mod common;
+
 use autodiff::Tape;
 use tensor_core::Tensor;
 
@@ -26,7 +28,7 @@ fn scalar(tensor: &Tensor<f32>) -> f32 {
 
 #[test]
 fn sigmoid_forward_matches_analytic_values() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![0.0, 1.0, -1.0], &[3]));
     let y = x.sigmoid();
     let out = y.to_tensor();
@@ -45,7 +47,7 @@ fn sigmoid_forward_matches_analytic_values() {
 
 #[test]
 fn tanh_forward_matches_analytic_value() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![1.0], &[1]));
     let y = x.tanh();
     let out = y.to_tensor().get(&[0]).unwrap();
@@ -54,7 +56,7 @@ fn tanh_forward_matches_analytic_value() {
 
 #[test]
 fn relu_forward_matches_analytic_values() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![-2.0, 0.0, 3.0], &[3]));
     let y = x.relu();
     let out = y.to_tensor();
@@ -65,7 +67,7 @@ fn relu_forward_matches_analytic_values() {
 
 #[test]
 fn sigmoid_forward_saturates_without_nan_or_inf_for_large_magnitude_input() {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let x = tape.var(&t(vec![30.0, -30.0, 100.0, -100.0], &[4]));
     let y = x.sigmoid();
     let out = y.to_tensor();
@@ -171,7 +173,7 @@ fn forward_loss(
     target: &Tensor<f32>,
     activation: impl for<'a> Fn(&'a autodiff::Var<'a>) -> autodiff::Var<'a>,
 ) -> f32 {
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(x);
     let wv = tape.var(w);
     let tv = tape.var(target);
@@ -184,7 +186,7 @@ fn forward_loss(
 #[test]
 fn sigmoid_end_to_end_grad_matches_numeric() {
     let f = fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let tv = tape.var(&f.target);
@@ -200,7 +202,7 @@ fn sigmoid_end_to_end_grad_matches_numeric() {
 #[test]
 fn tanh_end_to_end_grad_matches_numeric() {
     let f = fixture();
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let tv = tape.var(&f.target);
@@ -222,7 +224,7 @@ fn relu_end_to_end_grad_matches_numeric() {
     let w = t(vec![0.5, -1.0, 1.5, 0.2], &[2, 2]);
     let target = t(vec![0.1, 0.0, 3.0, 0.0], &[2, 2]);
 
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let xv = tape.var(&x);
     let wv = tape.var(&w);
     let tv = tape.var(&target);
@@ -243,7 +245,7 @@ fn nn_activation_sigmoid_matches_var_sigmoid_end_to_end() {
 
     let f = fixture();
 
-    let tape_a = Tape::new();
+    let tape_a = Tape::new(common::naive_ops());
     let xv_a = tape_a.var(&f.x);
     let wv_a = tape_a.var(&f.w);
     let tv_a = tape_a.var(&f.target);
@@ -252,7 +254,7 @@ fn nn_activation_sigmoid_matches_var_sigmoid_end_to_end() {
     let grads_a = tape_a.backward(&loss_a).unwrap();
     let dw_a = grads_a.get(&wv_a).unwrap().expect("到達する");
 
-    let tape_b = Tape::new();
+    let tape_b = Tape::new(common::naive_ops());
     let xv_b = tape_b.var(&f.x);
     let wv_b = tape_b.var(&f.w);
     let tv_b = tape_b.var(&f.target);

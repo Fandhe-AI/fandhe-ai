@@ -189,6 +189,13 @@ impl FusionGraph {
         self.nodes.is_empty()
     }
 
+    /// 全ノードへの読み取り専用スライス（発生順）。`plan.rs` の
+    /// `FusionPlan::from_graph`／`FusionPlan::ops`（設計書 §3.4 の DTO
+    /// アクセサ）が発生順トポロジカル走査に使う。
+    pub(crate) fn nodes_ref(&self) -> &[FusionNode] {
+        &self.nodes
+    }
+
     /// `id` のノードを参照する（`detect.rs` の後方走査から使う）。
     ///
     /// `id` は `push` の不変条件（自ノードより小さい入力 ID のみを許可）

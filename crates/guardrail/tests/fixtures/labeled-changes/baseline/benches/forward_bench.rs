@@ -16,7 +16,7 @@ fn forward_benchmark(c: &mut Criterion) {
 
     c.bench_function("mlp_forward", |b| {
         b.iter(|| {
-            let tape = Tape::new();
+            let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
             let x_var = tape.var(black_box(&x));
             let (out, _, _, _) = model
                 .forward(&tape, &x_var)

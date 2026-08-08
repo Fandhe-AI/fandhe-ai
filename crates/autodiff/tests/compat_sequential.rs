@@ -6,6 +6,8 @@
 //!
 //! 実機（CUDA/Metal）非依存のため `#[ignore]` 分離は行わない。
 
+mod common;
+
 use autodiff::Tape;
 use autodiff::compat::{Sequential, array};
 use autodiff::nn::Linear;
@@ -29,7 +31,7 @@ fn sequential_builds_two_layer_mlp_and_predicts() {
 
     let batch = 5;
     let input = array(vec![vec![0.25_f32; 8]; batch]).unwrap();
-    let output = model.predict(&input).unwrap();
+    let output = model.predict(&input, common::naive_ops()).unwrap();
 
     assert_eq!(output.shape(), &[batch, 4]);
 }
@@ -45,7 +47,7 @@ fn array_output_feeds_directly_into_sequential_predict() {
         .add_tanh();
 
     let input = array([[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]]).unwrap();
-    let output = model.predict(&input).unwrap();
+    let output = model.predict(&input, common::naive_ops()).unwrap();
 
     assert_eq!(output.shape(), &[2, 2]);
     // tanh の出力は (-1, 1) に収まる。
@@ -67,7 +69,7 @@ fn sequential_forward_matches_manual_nn_forward_bit_exact() {
     let input_tensor = array(vec![vec![0.1_f32, 0.2, 0.3, 0.4], vec![0.5, 0.6, 0.7, 0.8]]).unwrap();
 
     // 手動経路。
-    let manual_tape = Tape::new();
+    let manual_tape = Tape::new(common::naive_ops());
     let manual_input = manual_tape.var(&input_tensor);
     let h = linear1.bind(&manual_tape).forward(&manual_input).unwrap();
     let h = Sigmoid.forward(&h);
@@ -80,7 +82,7 @@ fn sequential_forward_matches_manual_nn_forward_bit_exact() {
         .add_sigmoid()
         .add_linear(6, 3, SEED2)
         .unwrap();
-    let seq_tape = Tape::new();
+    let seq_tape = Tape::new(common::naive_ops());
     let seq_input = seq_tape.var(&input_tensor);
     let seq_output = model.forward(&seq_tape, &seq_input).unwrap();
 
@@ -99,7 +101,7 @@ fn sequential_forward_on_external_tape_reaches_backward() {
         .unwrap()
         .add_relu();
 
-    let tape = Tape::new();
+    let tape = Tape::new(common::naive_ops());
     let input_tensor = array([[0.1_f32, -0.2, 0.3, -0.4]]).unwrap();
     let input = tape.var(&input_tensor);
     let output = model.forward(&tape, &input).unwrap();

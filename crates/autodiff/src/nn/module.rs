@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn linear_module_forward_matches_bind_forward() {
         let linear = Linear::new(3, 2, true, 42).expect("seed=42 は有効な構築引数");
-        let tape = Tape::new();
+        let tape = Tape::new(crate::test_support::test_ops());
         let x = tape.var(&Tensor::new(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap());
 
         let via_module = <Linear as Module>::forward(&linear, &tape, &x).unwrap();
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn relu_module_forward_matches_direct_forward() {
-        let tape = Tape::new();
+        let tape = Tape::new(crate::test_support::test_ops());
         let x = tape.var(&Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
 
         let via_module = <Relu as Module>::forward(&Relu, &tape, &x).unwrap();
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn sigmoid_module_forward_matches_direct_forward() {
-        let tape = Tape::new();
+        let tape = Tape::new(crate::test_support::test_ops());
         let x = tape.var(&Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
 
         let via_module = <Sigmoid as Module>::forward(&Sigmoid, &tape, &x).unwrap();
@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn tanh_module_forward_matches_direct_forward() {
-        let tape = Tape::new();
+        let tape = Tape::new(crate::test_support::test_ops());
         let x = tape.var(&Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
 
         let via_module = <Tanh as Module>::forward(&Tanh, &tape, &x).unwrap();
