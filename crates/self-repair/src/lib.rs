@@ -116,8 +116,14 @@
 //!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
 //!   （本イシュー〈#134〉の PR 本文に記録）
 //! - CLI バイナリ `self-repair run`（`docs/guardrail-self-repair-cli.md`
-//!   3.1 節） → 後続タスク（既存イシューで追跡済み）。`verify-log`（3.2 節）は
-//!   [`cli`]／`src/main.rs` として本イシュー（#145 差し戻し分）で実装済み
+//!   3.1 節）・`verify-log`（3.2 節）はいずれも [`cli`]／`src/main.rs` として
+//!   実装済み（`verify-log` は #145 差し戻し分、`run` は #142 差し戻し分。
+//!   `run` は `--kind bug-fix`／`--kind feature-addition` に完全対応するが、
+//!   `--kind perf-regression` は `PerfRegressionDetector`/
+//!   `PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約
+//!   〈`BenchMeasurer`・戦略リスト〉を持ち #141／#142 いずれも本種別を
+//!   必要としないため実行時未対応〈内部エラー扱い〉のまま。
+//!   `docs/guardrail-self-repair-cli.md` 3.1 節参照）
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod bug_fix;
