@@ -440,13 +440,37 @@ mod tests {
     /// 飽和した状態でさらに確保すると、飽和分は `current` に反映されない
     /// にもかかわらず Drop 時には要求量の全量が減算されるため、後続の
     /// 生存中アロケーションの計上を消してしまっていた
-    /// （`AllocationTracker::on_alloc` の doc コメント参照）。ここでは
-    /// `u64::MAX` バイトのガードで `current` を飽和させたあと 1 バイトの
-    /// ガードを確保し、前者を Drop しても後者の計上が生存し続けることを
-    /// 検査する。
+    /// （`AllocationTracker::on_alloc` の doc コメント参照）。
+    ///
+    /// # regression テストとして意味を持たせる前提（Bugbot 指摘 P2 の修正）
+    ///
+    /// 当初のテストは `current == 0` の状態から `u64::MAX` バイトを確保して
+    /// 飽和させていた。この場合 `huge` の `applied delta` は
+    /// `u64::MAX - 0 == u64::MAX` となり、`bytes`（要求量）と一致してしまう
+    /// ため、Drop 時に旧経路（`on_free(bytes)`）・新経路
+    /// （`on_free(applied)`）のどちらで減算しても `current == 0` に一致し、
+    /// 修正前のバグ実装でもこのテストは失敗しなかった（regression テストと
+    /// して機能していなかった）。
+    ///
+    /// 意味のある regression にするため、飽和発生**前**に `base`
+    /// （500 バイト）という非ゼロの生存アロケーションを作り、`huge` の
+    /// 飽和がその上に積み重なる「部分飽和」状態を作る。この場合
+    /// `huge` の `applied delta` は `u64::MAX - 500` となり `bytes`
+    /// （`u64::MAX`）と**異なる**ため、Drop 時に `bytes` を減算する旧実装は
+    /// `saturating_sub` で 0 に張り付き `base` の 500 バイトごと消してしまう
+    /// （`current == 0` になる）のに対し、`applied` を減算する新実装は
+    /// `base` 分の 500 バイトを正しく残す（`current == 500`）。すなわち
+    /// 修正前のバグでは本テストの `current == 500` アサーションが
+    /// `current == 0` となり失敗する。
     #[test]
     fn saturated_alloc_drop_does_not_erase_other_live_allocation() {
         let tracker = Arc::new(AllocationTracker::new());
+        // 飽和発生前に非ゼロの生存アロケーションを作る（部分飽和状態の
+        // 土台）。これがないと huge の applied delta が bytes と一致して
+        // しまい regression 検出力を失う（上記 doc コメント参照）。
+        let base = TrackedAllocation::new(Arc::clone(&tracker), 500);
+        assert_eq!(tracker.allocated_bytes(), 500);
+
         let huge = TrackedAllocation::new(Arc::clone(&tracker), u64::MAX);
         assert_eq!(tracker.allocated_bytes(), u64::MAX, "current は飽和する");
 
@@ -457,18 +481,22 @@ mod tests {
 
         drop(huge);
         // 修正前は huge の Drop が要求量 u64::MAX をそのまま減算し、
-        // guard 分（実際には計上されていなかった 0）ではなく飽和で失われた
-        // 分まで一緒に消えて current == 0 になっていた。修正後は huge が
-        // 実際に計上した applied delta（u64::MAX）のみを減算するため
-        // current == 0 になり、生存中の guard は元々 current に寄与して
-        // いなかった（applied == 0）ことと矛盾しない。
+        // `saturating_sub` で 0 に張り付いて base（500 バイト。生存中）の
+        // 計上ごと消してしまっていた（current == 0 になり、後続の
+        // `base.allocated_bytes() アサーションが失敗する規模のバグ）。
+        // 修正後は huge が実際に計上した applied delta
+        // （u64::MAX - 500）のみを減算するため、base 分の 500 バイトが
+        // 正しく残る。
         assert_eq!(
             tracker.allocated_bytes(),
-            0,
-            "huge の applied 分のみが減算される"
+            500,
+            "huge の applied 分のみが減算され、base の計上は生存し続ける"
         );
 
         drop(guard);
+        assert_eq!(tracker.allocated_bytes(), 500);
+
+        drop(base);
         assert_eq!(tracker.allocated_bytes(), 0);
     }
 
