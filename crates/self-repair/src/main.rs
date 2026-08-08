@@ -21,12 +21,21 @@
 //!
 //! | 値 | 意味 |
 //! |---|---|
-//! | `0` | チェーン整合（改竄なし） |
-//! | `1` | 検証不合格（`LogError::ChainViolation` = 改竄・欠落検知）および内部エラー（I/O・パース失敗）。fail-closed: 読めない・壊れたログも一律に非 0 とする |
+//! | `0` | チェーン整合（改竄なし）。レコード 0 件（空ログ）は `--allow-empty-log` を明示指定した場合のみ `0` とする |
+//! | `1` | 検証不合格（`LogError::ChainViolation` = 改竄・欠落検知）・内部エラー（I/O・パース失敗）・`--allow-empty-log` 未指定での空ログ検知。fail-closed: 読めない・壊れたログも一律に非 0 とする |
 //! | `2` | usage エラー（`--log` 欠落・未知引数） |
 //!
 //! この変換は本関数（[`report_verify_log_error`]）のみが行い、他の経路から
 //! `0` を返さない（fail-closed。`.claude/rules/security.md` A08）。
+//!
+//! 空ログの扱いは PR #356 codex-review P1 指摘対応で変更した:
+//! 当初は「空ログか末尾切り詰めかを本コマンド単体では区別できない」ことを
+//! 理由に `WARN:` メッセージ付きで exit 0 としていたが、終了コードのみを
+//! 見る監査自動化（`.claude/rules/security.md` A08）にとってはログ全削除の
+//! 改竄を「検証成功」として素通しする経路になっていた。既定を fail-closed
+//! な exit 1 へ変え、空ログを正当な運用として扱いたい呼び出し元は
+//! `--allow-empty-log` を明示指定する（`docs/guardrail-self-repair-cli.md`
+//! 3.2 節も同時更新）。
 
 use std::process::ExitCode;
 
@@ -34,7 +43,10 @@ use self_repair::cli::{self, Command, UsageError, VerifyLogArgs};
 use self_repair::{LogError, VerifyChainSummary, verify_chain};
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `std::env::args()` ではなく `args_os()` を使う理由は `cli` モジュール
+    // 冒頭ドキュメント参照（非 UTF-8 引数での panic を避けるため。PR #356
+    // codex-review P1 指摘対応）。
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
 
     match cli::parse(args) {
         Ok(Command::VerifyLog(verify_log_args)) => run_verify_log(verify_log_args),
@@ -49,12 +61,24 @@ fn run_verify_log(args: VerifyLogArgs) -> ExitCode {
     match verify_chain(&args.log) {
         // レコード 0 件は「チェーン検証エラーなし」であって「改竄されていない
         // ことの証明」ではない（末尾切り詰めで空になったログも同じ結果になる。
-        // `verify_chain` モジュール冒頭ドキュメント参照）。無条件の成功文言では
-        // 誤った安心感を与えるため、外部アンカー突合（docs/self-repair-log-format.md
-        // §7）を促す警告文言に分ける（Review #145 指摘対応）。
+        // `verify_chain` モジュール冒頭ドキュメント参照）。ログ全削除による
+        // 改竄と正当な空ログを区別できないため、既定では fail-closed に
+        // exit 1 とする（PR #356 codex-review P1 指摘対応: 終了コードのみを
+        // 見る監査自動化がこれまでの無条件 exit 0 を「検証成功」として
+        // 見逃していた）。空ログを正当な運用として扱いたい場合のみ
+        // `--allow-empty-log` を明示指定させ、その場合は `WARN:` 付きで
+        // exit 0 のまま外部アンカー突合（docs/self-repair-log-format.md §7）を
+        // 促す。
+        Ok(summary) if summary.record_count == 0 && !args.allow_empty_log => {
+            eprintln!(
+                "self-repair verify-log: ログチェーンにレコードがありません（log={}, records=0）。空ログか末尾切り詰め（ログ全削除を含む改竄）かは本コマンド単体では区別できないため fail-closed で不合格とします。空ログを許容する場合は --allow-empty-log を指定してください",
+                args.log.display()
+            );
+            ExitCode::from(1)
+        }
         Ok(summary) if summary.record_count == 0 => {
             println!(
-                "WARN: ログチェーンにレコードがありません（log={}, records=0）。空ログか末尾切り詰めかは本コマンド単体では区別できません。外部アンカー運用（docs/self-repair-log-format.md 7 節）との突合を確認してください",
+                "WARN: ログチェーンにレコードがありません（log={}, records=0）。--allow-empty-log が指定されているため exit 0 とします。空ログか末尾切り詰めかは本コマンド単体では区別できません。外部アンカー運用（docs/self-repair-log-format.md 7 節）との突合を確認してください",
                 args.log.display()
             );
             ExitCode::from(0)

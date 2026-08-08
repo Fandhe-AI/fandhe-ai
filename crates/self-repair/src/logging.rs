@@ -669,10 +669,11 @@ mod tests {
     /// 空（0 バイト）ログに対する `verify_chain` は `Err` にはならないが
     /// （fail-closed の対象は「壊れている」ことが判定できる場合のみ）、
     /// `record_count == 0`・`last_seq == None`・`last_hash == genesis_hash()`
-    /// を返すこと。CLI 側（`main.rs::run_verify_log`）はこの値を見て
-    /// `OK:` ではなく `WARN:` メッセージに切り替える（Review #145 指摘対応。
-    /// 実機確認: `: > empty.jsonl && self-repair verify-log --log empty.jsonl`
-    /// が exit 0 のまま `WARN:` を出すことを本 PR で確認済み）。
+    /// を返すこと。CLI 側（`main.rs::run_verify_log`）はこの値を見て、既定では
+    /// fail-closed に exit 1 とし、`--allow-empty-log` 明示指定時のみ `OK:` では
+    /// なく `WARN:` メッセージ付きで exit 0 に切り替える（PR #356 codex-review
+    /// P1 指摘対応。当初〈Review #145〉は無条件 exit 0 だったが、終了コードのみ
+    /// 見る監査自動化がログ全削除による改竄を見逃す経路だったため変更した）。
     #[test]
     fn verify_chain_on_empty_file_returns_zero_record_summary() {
         let log_path = unique_log_path("empty_file_zero_record_summary");

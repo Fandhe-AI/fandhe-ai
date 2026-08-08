@@ -86,18 +86,45 @@ fn verify_log_on_valid_chain_exits_zero() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// Review #145 指摘対応: 空（0 バイト）ログに対しては exit 0 のまま
-/// `OK:` ではなく `WARN:` メッセージへ切り替わり、「整合性を確認した」と
-/// 誤読されない文言になっていること。実機確認
-/// （`: > empty.jsonl && self-repair verify-log --log empty.jsonl`）で
-/// 再現した exit=0・従来は無条件の `OK:` だった問題の回帰防止。
+/// PR #356 codex-review P1 指摘対応: 空（0 バイト）ログは `--allow-empty-log`
+/// 未指定では既定で exit 1（検証不合格）とする。終了コードのみを見る監査
+/// 自動化がログ全削除による改竄を「検証成功」として見逃す経路を塞ぐため
+/// （従来の無条件 exit 0 の回帰防止としてこのテストを固定する）。
 #[test]
-fn verify_log_on_empty_file_exits_zero_with_warn_message() {
-    let path = unique_log_path("empty_file");
+fn verify_log_on_empty_file_exits_one_without_allow_empty_log_flag() {
+    let path = unique_log_path("empty_file_default");
     std::fs::write(&path, b"").expect("空ファイルを作成できること");
 
     let output = self_repair_bin()
         .args(["verify-log", "--log", path.to_str().unwrap()])
+        .output()
+        .expect("failed to run self-repair binary");
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("records=0") && stderr.contains("--allow-empty-log"),
+        "stderr に空ログ検知と --allow-empty-log の案内が出ること: {stderr}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Review #145 指摘対応（PR #356 で `--allow-empty-log` 明示指定時の挙動へ
+/// 変更）: 空（0 バイト）ログに `--allow-empty-log` を付けた場合のみ exit 0
+/// のまま `OK:` ではなく `WARN:` メッセージへ切り替わり、「整合性を確認した」
+/// と誤読されない文言になっていること。
+#[test]
+fn verify_log_on_empty_file_with_allow_empty_log_flag_exits_zero_with_warn_message() {
+    let path = unique_log_path("empty_file_allowed");
+    std::fs::write(&path, b"").expect("空ファイルを作成できること");
+
+    let output = self_repair_bin()
+        .args([
+            "verify-log",
+            "--log",
+            path.to_str().unwrap(),
+            "--allow-empty-log",
+        ])
         .output()
         .expect("failed to run self-repair binary");
 
@@ -254,6 +281,36 @@ fn verify_log_on_missing_file_exits_one() {
         .expect("failed to run self-repair binary");
 
     assert_eq!(output.status.code(), Some(1));
+}
+
+/// PR #356 codex-review P1 指摘対応: ファイルシステム上は有効な非 UTF-8 の
+/// `--log` パス（存在しないファイル）を渡しても panic（exit 101）せず、
+/// 文書化された I/O エラー経路の exit 1 に落ちること
+/// （`std::env::args()` ベースの旧実装は非 UTF-8 引数で panic していた）。
+#[cfg(unix)]
+#[test]
+fn verify_log_on_non_utf8_log_path_exits_one_without_panicking() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut log_path = std::env::temp_dir().into_os_string();
+    log_path.push(format!(
+        "/self-repair-cli-verify-log-it-non-utf8-{}-",
+        std::process::id()
+    ));
+    log_path.push(std::ffi::OsStr::from_bytes(b"\xff\xfe.jsonl"));
+
+    let output = self_repair_bin()
+        .arg("verify-log")
+        .arg("--log")
+        .arg(&log_path)
+        .output()
+        .expect("failed to run self-repair binary");
+
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "非 UTF-8 パスでも panic (exit 101) せず fail-closed の exit 1 になること"
+    );
 }
 
 /// 受け入れ条件: 未知のサブコマンド → exit 2（usage エラー）。
