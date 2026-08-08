@@ -67,7 +67,11 @@ use tensor_core::{Element, ShapeError, Tensor, elementwise_out_shape};
 /// 小サイズ入力ではタスク分割・スレッド同期のオーバーヘッドが逐次実行の
 /// 利得を上回るため、この値未満は逐次実行にフォールバックする
 /// （モジュール doc コメント「並列化」参照。チューニングは #24 のスコープ）。
-const PARALLEL_THRESHOLD: usize = 1 << 15;
+///
+/// `pub(crate)`: TASK-12.1c（#163）の `fused_elementwise` モジュールが
+/// 同じ閾値・同じ理由（per-op 演算と同じ要素独立 map 演算のため）で
+/// 逐次／並列を切り替える際に再利用する（マジックナンバーの重複を避ける）。
+pub(crate) const PARALLEL_THRESHOLD: usize = 1 << 15;
 
 // --- スライスカーネル層 ---
 //

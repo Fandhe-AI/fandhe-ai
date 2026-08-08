@@ -15,30 +15,51 @@
 //!   アルゴリズム（[`detect::detect_fusion`]・[`detect::FusionDecision`]・
 //!   [`detect::FusionSegment`]）。副作用なしの純関数として実装する
 //!   （`dispatch::select_gemm_kernel` と同方針。設計書 §3.4）。
+//! - `plan`（TASK-12.1c 本体・#163）: 融合カーネル生成向け公開 DTO
+//!   （[`plan::FusionPlan`]・[`plan::FusedOpKind`]・
+//!   [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`]）。
+//!   `FusionOp`／`FusionNode`／`FusionGraph`（`graph` モジュール）は
+//!   `pub(crate)` のまま変更しない設計判断（設計書 §2.5）のため、
+//!   `backend-cpu`／`backend-cuda`／`backend-metal` が融合グラフの内容を
+//!   読み取る唯一の経路が `plan` モジュールの公開 DTO である
+//!   （設計書 §3.4「外部 backend が `run_fused` 内で融合グラフの演算
+//!   内容を読み取る手段」）。
 //!
-//! **後続イシューとの責務分界**（設計書 §6.1 対応表）: 本モジュールは
-//! 融合可否の**判定**までを担う。融合カーネル生成・`FusionPlan` 公開
-//! DTO アクセサは #163（TASK-12.1c）、`FusionSession`／`FusionValue`／
-//! `BackendOps::run_fused`・`autodiff` 側の遅延評価統合は #164
-//! （TASK-12.1d）が担当し、いずれも本イシュー（#162）のスコープ外
-//! である。本モジュールの型はすべて `pub(crate)`（設計書 §2.5「配置は
-//! `tensor-core` の 1 か所に閉じる」）。
+//! **後続イシューとの責務分界**（設計書 §6.1 対応表・#163 実装で更新）:
+//! 本モジュールは融合可否の**判定**（`detect`）と融合対象区間の**公開
+//! DTO 化・CPU カーネル生成**（`plan`・`backend-cpu::fused_elementwise`）
+//! までを担う。`FusionSession`／`FusionValue`／`BackendOps::run_fused`
+//! trait メソッド追加・`autodiff` 側の遅延評価統合（`Tape::new(ops)` へ
+//! の結線）は #164（TASK-12.1d）が担当し、本イシュー（#163）のスコープ
+//! 外である。`graph`／`detect` モジュールの型はすべて `pub(crate)`
+//! （設計書 §2.5「配置は `tensor-core` の 1 か所に閉じる」）のまま。
+//! `plan` モジュールの [`plan::FusionPlan`]・[`plan::FusedOpKind`]・
+//! [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`] のみ `pub`
+//! （クレートルートから re-export。設計書 §3.4 の privacy 制約）。
 //!
 //! `#![allow(dead_code)]`（本ファイルおよび配下の `graph`／`detect`
-//! モジュールへ再帰的に適用される lint スコープ）: #163／#164 が
-//! `FusionGraph`／`detect_fusion` を実際の融合実行経路へ結線するまでの
-//! 間、本モジュールの型・関数はクレート内のどこからも使用されず
-//! `-D warnings`（`.claude/rules/coding-rust.md`）下で dead_code 警告と
-//! なる。`crates/backend-cuda/src/kernels_wmma_opt.rs:116` 以降が採る
-//! 既存プラクティス（結線待ちコードへの理由付き `#[allow(dead_code)]`）
-//! と同型であり、結線完了（#163／#164 のマージ）時に撤去する。
+//! モジュールへ再帰的に適用される lint スコープ）: `graph::FusionGraph`
+//! の構築 API（`push`）・`detect::detect_fusion` は、#164 が
+//! `FusionSession`／`autodiff` 側の遅延評価統合で実際の融合実行経路へ
+//! 結線するまでの間、本クレート内のどこからも（テスト以外では）使用
+//! されず `-D warnings`（`.claude/rules/coding-rust.md`）下で dead_code
+//! 警告となる。`crates/backend-cuda/src/kernels_wmma_opt.rs:116` 以降が
+//! 採る既存プラクティス（結線待ちコードへの理由付き
+//! `#[allow(dead_code)]`）と同型であり、結線完了（#164 のマージ）時に
+//! 撤去する。`plan` モジュールの公開 DTO・`FusionPlan::from_ops` は
+//! `backend-cpu` から実際に使用されるため dead_code 対象外だが、
+//! `FusionPlan::from_segment`（`pub(crate)`）は #164 の `FusionSession`
+//! 結線までの間、本クレート内では `plan.rs` 自身の `#[cfg(test)]`
+//! からのみ使用されるため、引き続き本 allow の対象に含める。
 
 #![allow(dead_code)]
-// re-export 自体も #163/#164 が結線するまで未使用（上記と同じ撤去条件）。
+// re-export 自体も #164 が FusionSession を結線するまで
+// `FusionGraph`／`detect_fusion` 側は未使用（上記と同じ撤去条件）。
 #![allow(unused_imports)]
 
 mod detect;
 mod graph;
+mod plan;
 
 pub(crate) use detect::{
     FallbackReason, FusionDecision, FusionSegment, MAX_FUSED_CHAIN_LEN, MIN_FUSED_CHAIN_LEN,
@@ -47,3 +68,4 @@ pub(crate) use detect::{
 pub(crate) use graph::{
     FusionGraph, FusionGraphError, FusionNode, FusionNodeId, FusionOp, NodeMeta,
 };
+pub use plan::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError};
