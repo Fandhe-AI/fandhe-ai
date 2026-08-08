@@ -73,6 +73,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// [`StartupReport`] の JSON スキーマバージョン（`report::SCHEMA_VERSION` と同じ手法。
@@ -536,6 +537,14 @@ fn create_scratch_dir(label: &str) -> Result<PathBuf, StartupError> {
     Ok(leaf)
 }
 
+/// [`run_probe_once`] の子プロセス読み取りスレッドがどちらのストリームを
+/// 担当しているかをチャネル越しに親スレッドへ伝えるための識別子。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeStream {
+    Stdout,
+    Stderr,
+}
+
 /// 読み取りストリームを `limit` バイトを超えるまでチャンク単位で読み取る。
 ///
 /// [`run_probe_once`] が probe 子プロセスの stdout／stderr パイプに用いる。
@@ -572,9 +581,19 @@ fn read_capped<R: Read>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>
 ///
 /// stdout／stderr は `spawn` 後に別スレッドで [`read_capped`] を用い上限付きに読み取る
 /// （2 ストリームを同一スレッドで順に `read_to_end` すると、子プロセスが埋めた側の
-/// パイプバッファが詰まりデッドロックしうるため並行読み取りが必須）。いずれかが上限を
-/// 超過した場合は全量読み切る前に子プロセスを kill・reap し、
-/// [`StartupError::ProbeOutputTooLarge`] を返す。
+/// パイプバッファが詰まりデッドロックしうるため並行読み取りが必須）。
+///
+/// 2 スレッドの結果は `mpsc` チャネルで親スレッドへ通知する（`JoinHandle::join` を
+/// stdout → stderr の順に単純に呼ぶ構成は使わない）。stdout 側が上限超過を検知して
+/// 早期終了しても、子プロセスはまだ生きたまま stdout パイプへ書き込み続けようとして
+/// ブロックしうる。子プロセスが stdout 書き込みでブロックしている間は stderr 側の
+/// EOF も届かないため、「stdout join 完了 → stderr join 開始」の順序だと stderr の
+/// join が永久に返らずデッドロックする（PR #360 codex-review 指摘 P1）。
+/// 本実装はどちらのスレッドが先に結果を送っても即座に受信できるよう両者からの
+/// メッセージを同一チャネルで待ち受け、いずれかが上限超過を報告した時点で
+/// （もう一方の完了を待たずに）直ちに子プロセスを kill する。これにより、
+/// もう一方のスレッドが待っていた EOF は子プロセス終了に伴うパイプクローズで
+/// 発生し、ブロックが解消される。
 fn run_probe_once(
     config: &StartupConfig,
     cache_dir: Option<&Path>,
@@ -610,24 +629,65 @@ fn run_probe_once(
         .take()
         .ok_or_else(|| StartupError::Io("probe の stderr パイプ取得に失敗".to_string()))?;
 
-    let stdout_handle =
-        std::thread::spawn(move || read_capped(stdout_pipe, PROBE_STDOUT_LIMIT_BYTES));
-    let stderr_handle =
-        std::thread::spawn(move || read_capped(stderr_pipe, PROBE_STDERR_LIMIT_BYTES));
+    // 各読み取りスレッドの完了通知を単一チャネルへ集約する。送信側は `(ストリーム種別,
+    // read_capped の結果)` を積むだけで、上限超過時の子プロセス kill 判断は
+    // 受信側（親スレッド）が一元的に行う（関数ドキュメント参照）。
+    let (tx, rx) = mpsc::channel::<(ProbeStream, std::io::Result<(Vec<u8>, bool)>)>();
+    let tx_stdout = tx.clone();
+    let stdout_handle = std::thread::spawn(move || {
+        let result = read_capped(stdout_pipe, PROBE_STDOUT_LIMIT_BYTES);
+        let _ = tx_stdout.send((ProbeStream::Stdout, result));
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let result = read_capped(stderr_pipe, PROBE_STDERR_LIMIT_BYTES);
+        let _ = tx.send((ProbeStream::Stderr, result));
+    });
 
-    let (stdout_buf, stdout_exceeded) = stdout_handle
+    let mut stdout_result: Option<std::io::Result<(Vec<u8>, bool)>> = None;
+    let mut stderr_result: Option<std::io::Result<(Vec<u8>, bool)>> = None;
+    let mut killed_for_overflow = false;
+    while stdout_result.is_none() || stderr_result.is_none() {
+        let Ok((stream, result)) = rx.recv() else {
+            // 両送信側が（panic 等で）送信せずに drop された。以降は各スレッドの
+            // join エラーとして検出させるためループを抜ける。
+            break;
+        };
+        if matches!(&result, Ok((_, true))) && !killed_for_overflow {
+            // 上限超過を検知した時点で、もう一方のスレッドの完了を待たずに
+            // 子プロセスを kill する（もう一方が子プロセスの EOF 待ちで
+            // ブロックし続けるのを防ぐ）。
+            let _ = child.kill();
+            killed_for_overflow = true;
+        }
+        match stream {
+            ProbeStream::Stdout => stdout_result = Some(result),
+            ProbeStream::Stderr => stderr_result = Some(result),
+        }
+    }
+
+    stdout_handle
         .join()
-        .map_err(|_| StartupError::Io("probe stdout 読み取りスレッドが panic した".to_string()))?
+        .map_err(|_| StartupError::Io("probe stdout 読み取りスレッドが panic した".to_string()))?;
+    stderr_handle
+        .join()
+        .map_err(|_| StartupError::Io("probe stderr 読み取りスレッドが panic した".to_string()))?;
+
+    let (stdout_buf, stdout_exceeded) = stdout_result
+        .ok_or_else(|| {
+            StartupError::Io("probe stdout 読み取りスレッドが結果を送信せず終了した".to_string())
+        })?
         .map_err(|e| StartupError::Io(format!("probe stdout 読み取り失敗: {e}")))?;
-    let (stderr_buf, stderr_exceeded) = stderr_handle
-        .join()
-        .map_err(|_| StartupError::Io("probe stderr 読み取りスレッドが panic した".to_string()))?
+    let (stderr_buf, stderr_exceeded) = stderr_result
+        .ok_or_else(|| {
+            StartupError::Io("probe stderr 読み取りスレッドが結果を送信せず終了した".to_string())
+        })?
         .map_err(|e| StartupError::Io(format!("probe stderr 読み取り失敗: {e}")))?;
 
     if stdout_exceeded || stderr_exceeded {
-        // 上限超過を検知した時点で、残りの出力を読み切る前に子プロセスを終了・回収する
-        // （kill/wait 自体の失敗はすでに異常系のため握りつぶすが、ゾンビプロセス化を
-        // 避けるため wait は必ず試みる）。
+        // 上限超過時はループ内で既に kill 済みだが、まだ確定していない経路
+        // （例: 送信直後の panic で killed_for_overflow が立たなかった場合）に
+        // 備えて冪等な保険として再度試み、ゾンビプロセス化を避けるため wait は
+        // 必ず試みる（kill/wait 自体の失敗はすでに異常系のため握りつぶす）。
         let _ = child.kill();
         let _ = child.wait();
         let overflowed_len = if stdout_exceeded {
