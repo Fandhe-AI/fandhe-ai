@@ -274,9 +274,23 @@ BACKEND ?= cpu
 TRIALS ?= 5
 .PHONY: startup-bench
 startup-bench: ## プロセス起動コスト計測を実行する（既定 CPU。BACKEND=cuda|metal で切替）
+# BACKEND・TRIALS は make 変数展開でレシピへ直接埋め込まれるため、シェル解釈前の
+# テキスト置換段階で `BACKEND='cpu; <任意コマンド> #'` のような値を渡されるとコマンド注入が
+# 成立しうる（PR #360 codex-review P1 指摘）。ここで許可リスト（cpu|cuda|metal）／数値のみを
+# 検証したうえで、cargo 呼び出し側も二重引用符でシェル引数として単一トークン化する
+# （StartupBackend::parse 側の許可リスト検証はプロセス起動後の防御であり、
+# シェル注入そのものはレシピ側で防ぐ必要がある）。
 ifdef HAS_CARGO
+	@case "$(BACKEND)" in \
+		cpu|cuda|metal) ;; \
+		*) echo "BACKEND は cpu|cuda|metal のいずれかを指定する（指定値: $(BACKEND)）" >&2; exit 1 ;; \
+	esac
+	@case "$(TRIALS)" in \
+		''|*[!0-9]*) echo "TRIALS は数値を指定する（指定値: $(TRIALS)）" >&2; exit 1 ;; \
+		*) ;; \
+	esac
 	cargo build -p bench-harness --release --bins
-	cargo run -p bench-harness --release --bin startup_bench -- --backend $(BACKEND) --trials $(TRIALS)
+	cargo run -p bench-harness --release --bin startup_bench -- --backend "$(BACKEND)" --trials "$(TRIALS)"
 else
 	@echo "skip: Cargo.toml 未追加のため startup-bench をスキップ"
 endif

@@ -99,6 +99,17 @@ pub const PROBE_SCHEMA_VERSION: &str = "1";
 /// 既定の試行回数（1 フェーズあたり。モジュール冒頭ドキュメント参照）。
 pub const DEFAULT_STARTUP_TRIALS: usize = 5;
 
+/// 1 フェーズあたりの試行回数の許容上限。
+///
+/// コールド計測は試行ごとにプロセス spawn ＋一時ディレクトリ作成を伴うため
+/// （[`run_cold`]）、CLI から極端に大きい値（例: `u64::MAX`）を渡されると
+/// [`run_cold`]／[`run_warm`] の `Vec::with_capacity(config.trials)` が
+/// 過大なメモリ確保を試み、通常の [`StartupError`] では回収できない abort や
+/// メモリ枯渇を招く（PR #360 codex-review P1 指摘）。実運用の試行回数
+/// （[`DEFAULT_STARTUP_TRIALS`] 5 回・手動デバッグでの数十〜数百回）を
+/// 十分に超える桁で上限を設け、[`StartupConfig::new`] で fail-closed に拒否する。
+pub const MAX_STARTUP_TRIALS: usize = 10_000;
+
 /// probe 子プロセス標準出力の許容上限（バイト）。
 ///
 /// [`run_probe_once`] は `Command::spawn` 後に [`read_capped`] で標準出力を
@@ -528,7 +539,9 @@ pub struct StartupConfig {
 }
 
 impl StartupConfig {
-    /// `trials` が 1 以上であることを検証して構築する（0 回計測は分位点が定義できないため拒否）。
+    /// `trials` が `1..=MAX_STARTUP_TRIALS` の範囲内であることを検証して構築する
+    /// （0 回計測は分位点が定義できないため拒否・上限超過は過大な `Vec::with_capacity`
+    /// によるリソース枯渇を防ぐため拒否。上限根拠は [`MAX_STARTUP_TRIALS`] 参照）。
     pub fn new(
         backend: StartupBackend,
         trials: usize,
@@ -538,6 +551,11 @@ impl StartupConfig {
             return Err(StartupError::InvalidArgument(
                 "trials は 1 以上を指定する".to_string(),
             ));
+        }
+        if trials > MAX_STARTUP_TRIALS {
+            return Err(StartupError::InvalidArgument(format!(
+                "trials は {MAX_STARTUP_TRIALS} 以下を指定する（指定値: {trials}）"
+            )));
         }
         Ok(Self {
             backend,
@@ -1002,6 +1020,21 @@ mod tests {
     fn startup_config_rejects_zero_trials() {
         let err = StartupConfig::new(StartupBackend::Cpu, 0, "probe").unwrap_err();
         assert!(matches!(err, StartupError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn startup_config_rejects_trials_above_max() {
+        // PR #360 codex-review P1: 過大な trials（例: u64::MAX 相当）を
+        // Vec::with_capacity に到達させる前に拒否する回帰テスト。
+        let err =
+            StartupConfig::new(StartupBackend::Cpu, MAX_STARTUP_TRIALS + 1, "probe").unwrap_err();
+        assert!(matches!(err, StartupError::InvalidArgument(_)));
+        assert!(StartupConfig::new(StartupBackend::Cpu, usize::MAX, "probe").is_err());
+    }
+
+    #[test]
+    fn startup_config_accepts_trials_at_max() {
+        assert!(StartupConfig::new(StartupBackend::Cpu, MAX_STARTUP_TRIALS, "probe").is_ok());
     }
 
     #[test]
