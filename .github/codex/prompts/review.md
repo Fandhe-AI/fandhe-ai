@@ -52,8 +52,12 @@ codex-review.yml、イシュー #326）が読むカスタム prompt（イシュ�
   rayon / half / criterion〈dev 限定〉）以外の依存追加**、または許容依存でも
   `=x.y.z` 完全固定でないバージョン指定・`docs/license-matrix.md` 更新やユーザー承認の
   記録を伴わない依存追加・更新: **P1**
-- **`// SAFETY:`（理由コメント）のない `unsafe`**、および FFI 境界（cudarc・objc2 系）
-  以外での `unsafe` 使用: **P0**
+- **`// SAFETY:`（理由コメント）のない `unsafe`**、および不変条件の根拠が不十分な
+  `unsafe`: **P0**。`unsafe` の使用域は FFI 境界（cudarc・objc2 系）・CPU SIMD
+  intrinsics（backend-cpu のカーネル実装）等の必要最小限に限る規約
+  （.claude/rules/coding-rust.md）のため、これら以外への `unsafe` の拡大は理由の
+  妥当性を読んで判定し、正当化がなければ **P1**（パス一致だけで機械的に P0 に
+  しない）
 - **本番経路（テスト・examples を除くライブラリ・CLI コード）での `.unwrap()` /
   `.expect()`**（panic を境界外へ漏らす経路全般を含む）: **P1**
 - **カーネル実装の手動境界チェック省略**（REQ-8。性能・最適化を理由にした省略は
@@ -66,7 +70,9 @@ codex-review.yml、イシュー #326）が読むカスタム prompt（イシュ�
   実機非依存テストの実機依存化。実機〈DGX Spark GB10・Metal〉依存テストの `#[ignore]`
   分離の解除を含む）: **P1**
 - **CI ワークフローの規約違反**（.claude/rules/ci.md。GitHub ホステッドランナー指定
-  〈本リポジトリは private のため self-hosted 必須〉・`timeout-minutes` 欠落・
+  〈本リポジトリは private のため self-hosted 必須〉・`timeout-minutes` 欠落
+  〈reusable workflow 呼び出しジョブ（`rust-ci` / `codex-review` 等の `uses:` ジョブ）は
+  共通側の各ジョブが timeout を持つため呼び出し側での設定不要であり違反ではない〉・
   action / reusable workflow の SHA 固定でない参照〈`@main` 等〉・`permissions` の
   不要な昇格・`pull_request_target` 等の secrets 露出トリガー追加・`ci-complete` の
   fail-closed 集約判定の弱体化）: **P1**
