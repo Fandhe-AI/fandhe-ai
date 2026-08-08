@@ -68,22 +68,34 @@ pub(crate) fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
 /// #164。`docs/fusion-graph-design.md` §2.5「eval.rs 非 panic 化の設計
 /// 方針」）。`Tensor::from_shape_fill`（`tensor-core` 側の総コンスト
 /// ラクタ。`pub` + `#[doc(hidden)]`）は `shape` から `numel` を導出し
-/// `fill` で埋めるため、`data.len()` と `shape` の要素数積が食い違って
-/// も `Result`／`unreachable!()` を経由せず必ず値を返す
-/// （`materialize_non_fallible`〈`tape.rs`〉が要求する「構造的に失敗
-/// しない」契約。`docs/fusion-graph-design.md` §3.5.3 (iii)）。呼び出し
-/// 元（本モジュール内）はすべて事前に shape 検査済みの出力を組み立てる
-/// ため、実運用では `data.len()` と `shape` は必ず一致する
+/// `fill` で埋める。呼び出し元（本モジュール内）はすべて事前に shape
+/// 検査済みの出力を組み立てるため、実運用では `data.len()` と `shape`
+/// は必ず一致し要素数積のオーバーフローも起こらない
 /// （`debug_assert_eq!` で契約違反を検知可能にする。不一致時は
 /// `get(i).copied().unwrap_or(0.0)` により欠落分を `0.0` で安全側に
 /// 埋める）。
+///
+/// **`from_shape_fill` は shape の要素数積を `checked_numel` で検査する
+/// `Result` を返す（PR #403 codex-review P1 是正。`tensor.rs` の該当
+/// コメント参照）**: `materialize_non_fallible`〈`tape.rs`〉が要求する
+/// 「構造的に失敗しない」契約（`docs/fusion-graph-design.md` §3.5.3
+/// (iii)）を保つため、本関数自体は引き続き必ず値を返す非 panic 関数の
+/// ままとする——`Err`（理論上到達しない契約違反）は `debug_assert!` で
+/// 検知しつつ [`tensor_core::Tensor::scalar`]（真に infallible）による
+/// 安全側フォールバックへ吸収する。
 pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     debug_assert_eq!(
         data.len(),
         shape.iter().product::<usize>(),
         "build_tensor: shape 検査済みのはずのデータ長が一致しない（契約違反）"
     );
-    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0))
+    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0)).unwrap_or_else(|_| {
+        debug_assert!(
+            false,
+            "build_tensor: shape の要素数積がオーバーフローした（契約違反）"
+        );
+        Tensor::scalar(0.0)
+    })
 }
 
 /// クラス添字テンソル（`Tensor<i32>`）の稠密化。`dense_vec`（上記）の

@@ -437,6 +437,27 @@ fn build_lazy_plan(
     Ok((plan, leaves, id))
 }
 
+/// `node.shape` から全要素 `0.0` のテンソルを構築する安全側フォール
+/// バック（PR #403 codex-review P1 是正）。`Tensor::from_shape_fill` は
+/// `tensor-core::checked_numel` による要素数積オーバーフロー検査を
+/// 経る `Result` 返り値になったため（`tensor.rs` の該当コメント参照）、
+/// 本ファイルの契約違反時フォールバック 3 箇所（[`lazy_leaf_value`]・
+/// [`fallback_per_op`]・`eval_fallback`）で共有する。渡す `shape` は
+/// いずれも既存の `TapeNode` から読んだ値（過去に妥当な shape として
+/// 構築済み）であり実運用でオーバーフローは起こらないが、`Err` 分岐は
+/// `debug_assert!` で検知しつつ [`tensor_core::Tensor::scalar`]（真に
+/// infallible）へ吸収し、本番経路 panic 禁止方針
+/// （`.claude/rules/coding-rust.md`）を保つ。
+fn safe_zeros(shape: &[usize]) -> Tensor<f32> {
+    Tensor::from_shape_fill(shape, |_| 0.0).unwrap_or_else(|_| {
+        debug_assert!(
+            false,
+            "safe_zeros: shape の要素数積がオーバーフローした（契約違反）"
+        );
+        Tensor::scalar(0.0)
+    })
+}
+
 /// `interior` 収集ロジックが `_` 分岐（非 elementwise が未実体化のまま
 /// 到達する契約違反）へ到達した場合の安全側フォールバック値。呼び出し元
 /// （`build_lazy_plan`）はこの分岐へ実際には到達しない設計だが、
@@ -463,7 +484,7 @@ fn lazy_leaf_value(node: &TapeNode) -> Tensor<f32> {
                 false,
                 "lazy_leaf_value: 実体化済みのはずのノードが未実体化だった（契約違反）"
             );
-            Tensor::from_shape_fill(&node.shape, |_| 0.0)
+            safe_zeros(&node.shape)
         }
     }
 }
@@ -539,7 +560,7 @@ fn fallback_per_op(
             .value
             .get()
             .cloned()
-            .unwrap_or_else(|| Tensor::from_shape_fill(&nodes[id.0].shape, |_| 0.0)))
+            .unwrap_or_else(|| safe_zeros(&nodes[id.0].shape)))
     })
 }
 
@@ -685,5 +706,5 @@ fn eval_fallback(nodes: &[TapeNode], id: NodeId) -> Tensor<f32> {
     computed
         .get(&id.0)
         .cloned()
-        .unwrap_or_else(|| Tensor::from_shape_fill(&nodes[id.0].shape, |_| 0.0))
+        .unwrap_or_else(|| safe_zeros(&nodes[id.0].shape))
 }

@@ -430,6 +430,34 @@ impl Device {
 
 **破壊的変更（明記して許容する）**: 出荷済みの無引数 `Tape::new() -> Tape`・`impl Default for Tape` は、`Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape` への差し替えに伴い削除される破壊的変更である（`docs/fusion-graph-design.md` §1）。この破壊は REQ-9 の 2026-08-08 追記（`facade` を唯一のサポートされる公開 API 面とし、`autodiff` は直接利用が非サポートの内部クレートとする宣言）を根拠に許容するが、実装コミットは `.claude/rules/conventional-commits.md` の `!`／`BREAKING CHANGE:` 告知を省略しない。`Tape: Debug`・`Tape: Send` という公開契約自体は変更しない。`BackendOps` trait はスーパートレイトの追加を一切受けない（`Tape` が所有する `ops` フィールドの型が `Box<dyn BackendOps + Send>` である点は `Tape: Send` を維持するための trait object 型 bound であり、`BackendOps` を実装する既存クレートのコードには影響しない。詳細は `docs/fusion-graph-design.md` §3.4「`BackendOps` trait 定義自体は変更しない」）。
 
+**移行手順（codex-review 第 19 波・PR #403 の P1 指摘を受け追記）**: なぜ「無引数コンストラクタを残す」「既定バックエンド解決経路を用意する」代替案を採らないかを明記する——`autodiff` は `tests/architecture_boundaries.rs` の `autodiff_cargo_toml_does_not_depend_on_concrete_backends`／`autodiff_src_does_not_reference_concrete_backend_crates` により具体バックエンドクレート（`backend-cpu`／`backend-cuda`／`backend-metal`）への依存を CI で機械検査済みに禁止しているため、`autodiff` 内で既定バックエンドを解決する経路はこの不変条件と両立しない（上記「経緯」節の第 16〜18 波が撤回した構成そのものに戻ってしまう）。唯一の解決先である `facade`（composition root。TASK-9.3）は本イシュー時点で未実装のため、現時点での移行手順は「呼び出し元が具体 `BackendOps` 実装を明示的に渡す」以外にない。
+
+呼び出し元の移行例（`backend-cpu` を使う場合）:
+
+```rust
+// 変更前（削除済み）
+let tape = Tape::new();
+// または
+let tape = Tape::default();
+
+// 変更後
+let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
+```
+
+`compat::Sequential::predict` も同様に `ops: Box<dyn BackendOps + Send>` を必須引数として受け取るよう変更した（`crates/autodiff/src/compat/sequential.rs` の `predict` ドキュメンテーションコメントに同じ根拠を記載済み）:
+
+```rust
+// 変更前
+let output = model.predict(&input)?;
+
+// 変更後
+let output = model.predict(&input, Box::new(backend_cpu::CpuBackendOps::new()))?;
+```
+
+**影響範囲の確認**: この時点で `Tape::new()`／`Sequential::predict` の呼び出し元は `autodiff` クレート自身のテスト・`onnx-interop`／`guardrail`／`self-repair` の学習ループ fixture に限られ、実装コミット（#164）で全呼び出し元を新シグネチャへ追従済み（`cargo test --workspace` 全 green で確認）。`facade`（TASK-9.3）実装後は composition root がこの `Box::new(backend_cpu::CpuBackendOps::new())` に相当する結線を代行し、利用者が直接 `ops` を組み立てる必要はなくなる（本節冒頭「承認済み内容と結線の実装場所」参照）。
+
+**バージョニング**: 本リポジトリはワークスペース全体で `version = "0.3.0"`（`Cargo.toml`）を用いるが、crates.io 未公開の内部開発版であり、`docs/deps-policy.md`・CI（`deny.toml` の `sources = crates.io 限定`）が示すとおり外部への配布物は存在しない。したがって「正式な破壊的リリース」としてのバージョン切り上げ・移行ガイド配布は該当せず、上記の移行手順を本文書と `docs/fusion-graph-design.md` §1 に記録することが本リポジトリでの等価な措置である。
+
 **TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
 
 - `Device::available()` は `tensor-core` から 3 バックエンドクレートを直接参照できないため実装せず、複数 `DeviceProvider`（新規追加。下記）を横断する `enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo>` を同等機能として提供した。集約入口（`Device::available()` をどの層で結線するか）は TASK-1.9c（#46）では対象外とし、TASK-1.9d（#47）でも「3 バックエンド統合テストの整備」という受け入れ条件には不要と判断し対象外とした（実装は別途追跡）。

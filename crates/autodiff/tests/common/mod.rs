@@ -25,7 +25,14 @@ fn dense(t: &Tensor<f32>) -> Vec<f32> {
 }
 
 fn build(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0))
+    // `Tensor::from_shape_fill` は `checked_numel` によるオーバーフロー
+    // 検査を経る `Result` を返す（PR #403 codex-review P1 是正）。本
+    // フィクスチャは shape 検査済みの出力のみを渡す契約のため実運用では
+    // `Err` に到達しないが、テストコードでも `expect` の理由を明記する
+    // （`.claude/rules/code-comment-style.md`）。
+    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0)).expect(
+        "build: 呼び出し元は shape 検査済みの出力のみを渡す契約（フィクスチャ内部不変条件）",
+    )
 }
 
 fn broadcast_binary(
