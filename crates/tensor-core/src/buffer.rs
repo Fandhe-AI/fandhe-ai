@@ -93,7 +93,29 @@ pub trait BufferHandle: fmt::Debug + 'static {
     /// ゼロ初期化を行い、FFI 境界以外での新規 `unsafe` 追加を避ける。
     /// `.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要
     /// 最小限に留める」方針）。
-    fn as_any_mut(&mut self) -> &mut dyn Any;
+    ///
+    /// # 破壊的変更（TASK-#201・workspace 0.2.0 → 0.3.0）
+    ///
+    /// 本メソッドは workspace 内 3 バックエンド（`backend-cpu`／
+    /// `backend-cuda`／`backend-metal`）向けに追加した必須メソッドだが、
+    /// `BufferHandle` はワークスペース外の実装者にも公開されている
+    /// trait であるため、追加自体は SemVer 上の破壊的変更
+    /// （既存の `as_any` のみの実装はこのままではコンパイル不能になる）。
+    /// 移行を強制せず既存実装のビルドを継続させるため、下記の既定実装
+    /// （`unimplemented!` で panic）を用意した。既定実装のままだと
+    /// プールのゼロ初期化経路（`pool::PoolZeroFill::zero_fill` 経由の
+    /// `PooledMemory`）を通した瞬間に panic するため、プール機構を
+    /// 使うバックエンド実装者は必ず `self` を返す 1 行実装で上書きする
+    /// こと（`crates/backend-cpu/src/memory.rs`／`backend-cuda/src/memory.rs`／
+    /// `backend-metal/src/memory.rs` の実装を参照）。
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        unimplemented!(
+            "BufferHandle::as_any_mut に既定実装（panic）以外の実装がありません。\
+             このバッファ型をプール経由（pool::PooledMemory）で使う場合は、\
+             `fn as_any_mut(&mut self) -> &mut dyn Any {{ self }}` を実装してください \
+             （tensor-core 0.2.0 → 0.3.0 の破壊的変更。crates/tensor-core/src/buffer.rs 参照）。"
+        )
+    }
 }
 
 /// デバイス上に確保されたバッファへのハンドル。
