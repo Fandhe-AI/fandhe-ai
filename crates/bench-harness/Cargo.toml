@@ -71,3 +71,18 @@ criterion.workspace = true
 # 循環を許容する（通常依存グラフには現れないため）。既に `onnx-interop`⇄`bench-harness`
 # で同型の循環が存在し本リポでビルド実績がある）。
 onnx-interop = { path = "../onnx-interop" }
+
+# `TrackingAllocator`（`src/alloc_tracker.rs`）の実測値に依存するテストを
+# libtest の既定ハーネス（並列実行）から完全に切り離す専用ターゲット
+# （イシュー #161 PR #357 codex-review 再指摘 P1 対応。`alloc_tracker.rs`
+# モジュール冒頭「テストでの計測検証（プロセス分離）」参照）。
+# `harness = false` により libtest のスレッドプールを経由せず、
+# `tests/alloc_tracker_serial.rs::main()` が各検査関数を単一スレッドで
+# 順番に呼ぶ。これにより「`TrackingAllocator` を `#[global_allocator]`
+# として持つテストバイナリが libtest の既定並列実行下で複数テストを
+# 走らせる」状態そのものが構造的に発生しなくなる（ロック方式では原理的に
+# 塞げなかった干渉を、プロセス分離で根本的に排除する）。
+[[test]]
+name = "alloc_tracker_serial"
+path = "tests/alloc_tracker_serial.rs"
+harness = false

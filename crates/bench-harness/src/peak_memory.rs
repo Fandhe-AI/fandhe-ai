@@ -836,6 +836,121 @@ pub fn run_peak_memory(config: &PeakMemoryConfig) -> Result<PeakMemoryReport, Pe
     PeakMemoryReport::from_trials(config.backend(), config.size(), samples)
 }
 
+/// `peak_memory_bench` CLI（`src/bin/peak_memory_bench.rs`）の解析済み引数。
+///
+/// パース処理・その回帰テストをライブラリ側へ寄せる（イシュー #161 PR #357
+/// codex-review 再指摘 P1 対応）: `peak_memory_bench.rs` は本モジュール冒頭
+/// 「`gemm_alloc_peak_bytes` は `TrackingAllocator` がプロセスの
+/// `#[global_allocator]` として有効化されている場合に限り `Some`」という契約を
+/// 満たすため、`#[cfg(test)]` を付けず常時 `TrackingAllocator` を宣言する
+/// （通常実行でも計測対象のため）。そのため同バイナリの `cargo test --bin`
+/// プロセスは全 `#[test]` がこの `TrackingAllocator` を共有し、libtest の
+/// 既定並列実行下では他テストのスレッド起動・終了に伴う確保・解放が
+/// `gemm_alloc_peak_bytes` を計測する `measure()` 区間へ干渉しうる
+/// （`alloc_tracker` モジュール冒頭「スレッド安全性」参照。テスト関数内
+/// ロックでは `#[test]` 本体の外側で起こる干渉を防げない）。CLI の引数
+/// パース・検証バイパス回帰は `TrackingAllocator` の実測値に依存しないため、
+/// ロジックごと本モジュールへ移し `cargo test --lib`（`TrackingAllocator` を
+/// 宣言しない通常のテストバイナリ）側でテストする。バイナリ本体は
+/// [`parse_peak_memory_cli_args`]／[`emit_peak_memory_report`] を呼ぶだけの
+/// 薄い `main()` になり、`cargo test --bin peak_memory_bench` は `#[test]` を
+/// 一切持たなくなる（干渉源そのものを消す）。
+#[derive(Debug)]
+pub struct PeakMemoryCliArgs {
+    pub backend: PeakMemoryBackend,
+    pub size: usize,
+    pub trials: usize,
+    pub out: Option<std::path::PathBuf>,
+}
+
+/// `--backend <cpu|cuda|metal>`（必須）・`--size <N>`（既定 [`DEFAULT_GEMM_SIZE`]）・
+/// `--trials <N>`（既定 [`DEFAULT_PEAK_MEMORY_TRIALS`]）・`--out <path>`
+/// （省略時は標準出力）を許可リスト方式で解釈する（`startup::parse_args` と同型。
+/// `.claude/rules/security.md` A03）。
+pub fn parse_peak_memory_cli_args(raw: &[String]) -> Result<PeakMemoryCliArgs, String> {
+    let mut backend: Option<PeakMemoryBackend> = None;
+    let mut size = DEFAULT_GEMM_SIZE;
+    let mut trials = DEFAULT_PEAK_MEMORY_TRIALS;
+    let mut out: Option<std::path::PathBuf> = None;
+
+    let mut i = 0;
+    while i < raw.len() {
+        match raw[i].as_str() {
+            "--backend" => {
+                let value = raw
+                    .get(i + 1)
+                    .ok_or_else(|| "--backend には値が必要".to_string())?;
+                backend = Some(PeakMemoryBackend::parse(value).map_err(|e| e.to_string())?);
+                i += 2;
+            }
+            "--size" => {
+                let value = raw
+                    .get(i + 1)
+                    .ok_or_else(|| "--size には値が必要".to_string())?;
+                size = value
+                    .parse::<usize>()
+                    .map_err(|e| format!("--size の値が不正（{value:?}）: {e}"))?;
+                i += 2;
+            }
+            "--trials" => {
+                let value = raw
+                    .get(i + 1)
+                    .ok_or_else(|| "--trials には値が必要".to_string())?;
+                trials = value
+                    .parse::<usize>()
+                    .map_err(|e| format!("--trials の値が不正（{value:?}）: {e}"))?;
+                i += 2;
+            }
+            "--out" => {
+                let value = raw
+                    .get(i + 1)
+                    .ok_or_else(|| "--out には値が必要".to_string())?;
+                out = Some(std::path::PathBuf::from(value));
+                i += 2;
+            }
+            other => {
+                return Err(format!(
+                    "未知の引数 {other:?}（--backend / --size / --trials / --out のいずれかを指定）"
+                ));
+            }
+        }
+    }
+
+    let backend = backend.ok_or_else(|| "--backend <cpu|cuda|metal> は必須".to_string())?;
+    Ok(PeakMemoryCliArgs {
+        backend,
+        size,
+        trials,
+        out,
+    })
+}
+
+/// `peak_memory_bench` CLI の公式出力（標準出力または `--out` 先ファイル）を
+/// 確定する唯一の経路（`main()` から呼ばれる）。
+///
+/// 出力先の分岐（`out`）に関わらず、シリアライズより前に必ず
+/// [`PeakMemoryReport::require_gemm_alloc_tracked`] を通す。`--out` 経路は
+/// `write_to_file()` が内部で同メソッドを呼ぶため元々 fail-closed だったが、
+/// 標準出力（`out: None`。`make peak-memory-bench` の既定経路）は `to_json()` の
+/// みで検証をバイパスできてしまい、CPU の `gemm_alloc_peak_bytes` が `None` または
+/// 過小でも「公式記録」として出力されてしまっていた（PR #370 codex-review 再指摘
+/// P1 対応）。検証を `main()` の分岐の外側・本関数の入口に集約することで、将来
+/// 出力経路を追加しても検証バイパスの抜け道にならない構造にする。
+pub fn emit_peak_memory_report(
+    report: &PeakMemoryReport,
+    out: Option<&Path>,
+) -> Result<(), PeakMemoryError> {
+    report.require_gemm_alloc_tracked()?;
+    match out {
+        Some(path) => report.write_to_file(path),
+        None => {
+            let json = report.to_json()?;
+            println!("{json}");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,36 +1043,14 @@ mod tests {
         }
     }
 
-    /// PR #370 codex-review 指摘 P1 の回帰テスト: `gemm_alloc_peak_bytes`
-    /// が `BackendOps::gemm` の実ヒープ確保（出力 `Vec<f32>`・BLIS
-    /// パッキングバッファ）を実測しており、`MemoryOps` 経由の理論値
-    /// （`peak_bytes`。上のテストが検証する「決定的に A+B+C ちょうど」の値）
-    /// から独立していることを確認する。少なくとも GEMM の出力バッファ
-    /// （`size × size × 4` バイト）分は実測されるはず（`crates/backend-cpu/
-    /// src/ops.rs` の `vec![0.0f32; m * n]` 参照）。この下限は GEMM の
-    /// 内部実装（ブロッキング係数等）を知らなくても導ける唯一の性質であり、
-    /// 実測値そのもの（パッキングバッファ込みの正確な値）は本テストからは
-    /// 予測できない・GEMM の実装詳細に依存する（`alloc_tracker` モジュール
-    /// 冒頭参照）。
-    #[test]
-    fn run_peak_memory_cpu_gemm_alloc_peak_bytes_reflects_real_gemm_allocation() {
-        let size = 256;
-        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, size, 2).unwrap();
-        let report = run_peak_memory(&config).unwrap();
-
-        let output_buffer_bytes = (size * size * std::mem::size_of::<f32>()) as u64;
-        for trial in &report.samples {
-            let observed = trial.gemm_alloc_peak_bytes.expect(
-                "CPU バックエンドは TrackingAllocator が本テストバイナリの \
-                 #[global_allocator] のため Some のはず",
-            );
-            assert!(
-                observed >= output_buffer_bytes,
-                "gemm_alloc_peak_bytes は少なくとも出力バッファ分（{output_buffer_bytes} \
-                 バイト）は観測されるはず（実測: {observed}）"
-            );
-        }
-    }
+    // `run_peak_memory_cpu_gemm_alloc_peak_bytes_reflects_real_gemm_allocation`・
+    // `require_gemm_alloc_tracked_accepts_cpu_report_with_tracking_active`
+    // （実測 `gemm_alloc_peak_bytes` に依存するテスト）は、本テストバイナリ
+    // （`cargo test --lib`）が `TrackingAllocator` を `#[global_allocator]`
+    // 宣言しなくなったため（イシュー #161 PR #357 codex-review 再指摘 P1
+    // 対応。`crate::alloc_tracker` モジュール冒頭「スレッド安全性」参照）、
+    // `tests/alloc_tracker_serial.rs`（`harness = false` の専用プロセス）へ
+    // 移設した。libtest の並列実行を経由しない唯一の場所であるため。
 
     #[test]
     fn report_json_roundtrip_preserves_validation() {
@@ -990,21 +1083,13 @@ mod tests {
         ));
     }
 
-    /// [`PeakMemoryReport::require_gemm_alloc_tracked`] の正常系: 本テストバイナリは
-    /// `crate::alloc_tracker` の `#[cfg(test)]` `#[global_allocator]` 宣言により
-    /// `gemm_alloc_peak_bytes` が `Some` になるため、CPU の公式実測記録と同じ形の
-    /// レポートを素通しできることを確認する（PR #370 codex-review 指摘 P1 再指摘対応）。
-    #[test]
-    fn require_gemm_alloc_tracked_accepts_cpu_report_with_tracking_active() {
-        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 2).unwrap();
-        let report = run_peak_memory(&config).unwrap();
-        assert!(report.require_gemm_alloc_tracked().is_ok());
-    }
-
     /// [`PeakMemoryReport::require_gemm_alloc_tracked`] の fail-closed 挙動: 旧スキーマ
     /// （`gemm_alloc_peak_bytes` 実測前）の CPU レポートを模した `None` を fail-closed で
     /// 拒否することを確認する（本イシューの codex-review P1 指摘そのものの回帰テスト:
     /// 「旧スキーマの実測データが現行スキーマの結果として黙って正常扱いされる」ことを防ぐ）。
+    /// `gemm_alloc_peak_bytes` を手動で `None` に上書きするため、`TrackingAllocator` が
+    /// `#[global_allocator]` として有効化されているかに依存しない
+    /// （`cargo test --lib` で実行可能）。
     #[test]
     fn require_gemm_alloc_tracked_rejects_none_for_cpu() {
         let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
@@ -1018,6 +1103,7 @@ mod tests {
 
     /// [`PeakMemoryReport::require_gemm_alloc_tracked`] は出力バッファ分未満の過小な
     /// 観測値（GEMM 実行区間の実ヒープ確保を捕捉できていない状態）も拒否する。
+    /// 上のテストと同様、手動上書きのため `TrackingAllocator` 有効化に依存しない。
     #[test]
     fn require_gemm_alloc_tracked_rejects_value_below_output_buffer() {
         let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
@@ -1031,6 +1117,7 @@ mod tests {
 
     /// `write_to_file` は素通しではなく必ず `require_gemm_alloc_tracked` を通す
     /// （直接呼び出しではなくファイル I/O 経由でも fail-closed が効くことの確認）。
+    /// 手動上書きのため `TrackingAllocator` 有効化に依存しない。
     #[test]
     fn write_to_file_rejects_report_missing_gemm_alloc_tracking() {
         let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
@@ -1047,5 +1134,95 @@ mod tests {
         // 後始末する（本番経路ではないテストコード限定の best-effort クリーンアップ）。
         let _ = std::fs::remove_file(&path);
         assert!(matches!(result, Err(PeakMemoryError::ProtocolViolation(_))));
+    }
+
+    // --- 以下、`peak_memory_bench` CLI（`src/bin/peak_memory_bench.rs`）の
+    // 引数パース・出力経路回帰テスト（イシュー #161 PR #357 codex-review
+    // 再指摘 P1 対応で本モジュールへ移設。`parse_peak_memory_cli_args`
+    // doc comment 参照）。
+
+    #[test]
+    fn parse_peak_memory_cli_args_requires_backend() {
+        let err = parse_peak_memory_cli_args(&[]).unwrap_err();
+        assert!(err.contains("--backend"));
+    }
+
+    #[test]
+    fn parse_peak_memory_cli_args_accepts_full_form() {
+        let raw: Vec<String> = [
+            "--backend",
+            "cpu",
+            "--size",
+            "128",
+            "--trials",
+            "3",
+            "--out",
+            "out.json",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        let args = parse_peak_memory_cli_args(&raw).unwrap();
+        assert_eq!(args.backend, PeakMemoryBackend::Cpu);
+        assert_eq!(args.size, 128);
+        assert_eq!(args.trials, 3);
+        assert_eq!(args.out, Some(std::path::PathBuf::from("out.json")));
+    }
+
+    #[test]
+    fn parse_peak_memory_cli_args_uses_defaults_when_omitted() {
+        let raw: Vec<String> = ["--backend", "cpu"].into_iter().map(String::from).collect();
+        let args = parse_peak_memory_cli_args(&raw).unwrap();
+        assert_eq!(args.size, DEFAULT_GEMM_SIZE);
+        assert_eq!(args.trials, DEFAULT_PEAK_MEMORY_TRIALS);
+        assert_eq!(args.out, None);
+    }
+
+    #[test]
+    fn parse_peak_memory_cli_args_rejects_unknown_flag() {
+        let raw: Vec<String> = ["--bogus", "x"].into_iter().map(String::from).collect();
+        assert!(parse_peak_memory_cli_args(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_peak_memory_cli_args_rejects_invalid_backend() {
+        let raw: Vec<String> = ["--backend", "gpu"].into_iter().map(String::from).collect();
+        assert!(parse_peak_memory_cli_args(&raw).is_err());
+    }
+
+    /// [`emit_peak_memory_report`] の標準出力経路（`out: None`）が
+    /// `gemm_alloc_peak_bytes` 欠落を fail-closed で拒否することの回帰テスト
+    /// （PR #370 codex-review 再指摘 P1: 「`--out` 省略時は `to_json()` のみが
+    /// 呼ばれ検証をバイパスできていた」欠陥そのものの再現）。手動上書きのため
+    /// `TrackingAllocator` 有効化に依存しない。
+    #[test]
+    fn emit_peak_memory_report_rejects_missing_gemm_alloc_tracking_via_stdout() {
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
+        let mut report = run_peak_memory(&config).unwrap();
+        report.samples[0].gemm_alloc_peak_bytes = None;
+
+        assert!(matches!(
+            emit_peak_memory_report(&report, None),
+            Err(PeakMemoryError::ProtocolViolation(_))
+        ));
+    }
+
+    /// [`emit_peak_memory_report`] の `--out` 経路でも同じ欠陥形が fail-closed で
+    /// 拒否されることを確認する（標準出力経路と対称であることの確認）。
+    #[test]
+    fn emit_peak_memory_report_rejects_missing_gemm_alloc_tracking_via_out_file() {
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
+        let mut report = run_peak_memory(&config).unwrap();
+        report.samples[0].gemm_alloc_peak_bytes = None;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "emit_peak_memory_report_rejects_missing_gemm_alloc_tracking_via_out_file_{}.json",
+            std::process::id()
+        ));
+        let result = emit_peak_memory_report(&report, Some(&path));
+
+        assert!(matches!(result, Err(PeakMemoryError::ProtocolViolation(_))));
+        assert!(!path.exists(), "検証失敗時にファイルを書き出してはならない");
     }
 }
