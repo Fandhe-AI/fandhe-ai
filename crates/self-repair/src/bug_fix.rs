@@ -117,16 +117,19 @@ impl BugFixFixGenerator {
                 if baseline.contains_key(rel_path) {
                     continue;
                 }
-                let abs = workspace.join(rel_path);
-                let content = std::fs::read_to_string(&abs).map_err(|source| {
-                    SelfRepairError::FixGeneration {
-                        attempt: 0,
-                        reason: format!(
-                            "baseline 読み込みに失敗しました（path={}）: {source}",
-                            rel_path.display()
-                        ),
-                    }
-                })?;
+                // baseline スナップショット読み込みは `crate::fd_walk::read_via_fd_walk`
+                // が fd 走査（`openat(O_NOFOLLOW)`）で symlink 追跡を拒否しつつ
+                // 直接読み込む（`crate::fd_walk` モジュール冒頭 doc 参照）。
+                let content =
+                    crate::fd_walk::read_via_fd_walk(&workspace, rel_path).map_err(|source| {
+                        SelfRepairError::FixGeneration {
+                            attempt: 0,
+                            reason: format!(
+                                "baseline 読み込みに失敗しました（path={}）: {source}",
+                                rel_path.display()
+                            ),
+                        }
+                    })?;
                 baseline.insert(rel_path.clone(), content);
             }
         }
@@ -303,6 +306,44 @@ mod tests {
         }];
         let error = BugFixFixGenerator::new(&dir, candidates)
             .expect_err("workspace 外パスは拒否されること");
+        assert!(matches!(
+            error,
+            SelfRepairError::FixGeneration { attempt: 0, .. }
+        ));
+    }
+
+    // `std::os::unix::fs::symlink` を使うため unix 限定（`candidate.rs` の
+    // symlink テストと同じ方針）。
+    #[cfg(unix)]
+    #[test]
+    fn new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content() {
+        // baseline スナップショット読み込み（`crate::fd_walk::read_via_fd_walk`）
+        // は fd 走査で symlink 追跡を拒否するため、書き込み経路
+        // （`apply_candidate`）だけでなく `new` 自体が symlink 経由の候補パス
+        // を拒否することを確認する（`crate::fd_walk` モジュール冒頭 doc 参照。
+        // PR #361 codex-review 第 4 波 P0 指摘の read 側回帰防止）。
+        let dir = unique_temp_dir(
+            "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
+        );
+        let outside_dir = unique_temp_dir(
+            "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content-outside",
+        );
+        std::fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let outside_file = outside_dir.join("secret.rs");
+        std::fs::write(&outside_file, "workspace 外の秘匿内容")
+            .expect("write should succeed in test setup");
+
+        std::fs::create_dir_all(dir.join("src"))
+            .expect("create_dir_all should succeed in test setup");
+        std::os::unix::fs::symlink(&outside_file, dir.join("src/lib.rs"))
+            .expect("symlink creation should succeed in test setup");
+
+        let candidates = vec![CandidateFix {
+            description: "symlink 経由で workspace 外を読ませようとする不正な候補".to_string(),
+            files: vec![(PathBuf::from("src/lib.rs"), "malicious content".to_string())],
+        }];
+        let error = BugFixFixGenerator::new(&dir, candidates)
+            .expect_err("symlink 経由の候補パスは拒否されること");
         assert!(matches!(
             error,
             SelfRepairError::FixGeneration { attempt: 0, .. }

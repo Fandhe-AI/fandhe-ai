@@ -3,53 +3,45 @@
     "api_broken": false,
     "attempt": 2,
     "bench_measurements_pct": [
-      0.001732681844957007,
-      -0.0051975051975072795,
-      -0.02078677960817288,
-      -0.008662658743230356,
-      -0.003465183568107655
+      0.4876067129737649,
+      1.3839730659271687,
+      0.6579035796006938,
+      0.03567371371204775,
+      -0.5902338619425462
     ],
-    "bench_median_pct": -0.0051975051975072795,
+    "bench_median_pct": 0.4876067129737649,
     "exclusion_rule_ids": [],
     "gaming_suspect": false,
-    "gate_report": "build=pass test=pass clippy=pass bench=measured",
+    "gate_report": "build=pass test=pass clippy=pass bench=measured-direct",
     "lines_changed": 28
   },
   "attempt_count": 2,
   "attempts": [
     {
       "attempt": 1,
-      "duration_ms": 3669,
-      "outcome": "VerificationFailed { reason: \"test が失敗しました: \\nrunning 2 tests\\ntest activations::tests::relu_matches_known_values ... ok\\ntest activations::tests::sigmoid_matches_known_values ... ok\\n\\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n\\nrunning 1 test\\ntest leaky_relu_matches_known_values ... FAILED\\n\\nfailures:\\n\\n---- leaky_relu_matches_known_values stdout ----\\n\\nthread 'leaky_relu_matches_known_values' (2358321) panicked at tests/leaky_relu_acceptance.rs:36:9:\\nleaky_relu 出力が既知正解値と不一致: got=0.05, want=0.5\\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\\n\\n\\nfailures:\\n    leaky_relu_matches_known_values\\n\\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n   Compiling self_repair_feature_addition_leaky_relu_baseline v0.1.0 (/tmp/self-repair-feature-addition-task-3-3c-sandbox-2357404)\\n    Finished `release` profile [optimized] target(s) in 0.21s\\n     Running unittests src/lib.rs (target/release/deps/self_repair_feature_addition_leaky_relu_baseline-fdec1be47f2cc4b9)\\n     Running tests/leaky_relu_acceptance.rs (target/release/deps/leaky_relu_acceptance-ac5f14de67f5fce9)\\nerror: test failed, to rerun pass `--test leaky_relu_acceptance`\\n\" }"
+      "duration_ms": 3747,
+      "outcome": "VerificationFailed { reason: \"test が失敗しました: \\nrunning 2 tests\\ntest activations::tests::relu_matches_known_values ... ok\\ntest activations::tests::sigmoid_matches_known_values ... ok\\n\\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n\\nrunning 0 tests\\n\\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n\\nrunning 1 test\\ntest leaky_relu_matches_known_values ... FAILED\\n\\nfailures:\\n\\n---- leaky_relu_matches_known_values stdout ----\\n\\nthread 'leaky_relu_matches_known_values' (4174056) panicked at tests/leaky_relu_acceptance.rs:36:9:\\nleaky_relu 出力が既知正解値と不一致: got=0.05, want=0.5\\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\\n\\n\\nfailures:\\n    leaky_relu_matches_known_values\\n\\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n   Compiling self_repair_feature_addition_leaky_relu_baseline v0.1.0 (/tmp/self-repair-run-sandbox-4172895-1786158858145306650)\\n    Finished `release` profile [optimized] target(s) in 0.23s\\n     Running unittests src/lib.rs (target/release/deps/self_repair_feature_addition_leaky_relu_baseline-ab9090de07dc9a4e)\\n     Running unittests src/bin/bench_workload.rs (target/release/deps/bench_workload-3f6beac6f2d9a94b)\\n     Running tests/leaky_relu_acceptance.rs (target/release/deps/leaky_relu_acceptance-db16a01e21f00553)\\nerror: test failed, to rerun pass `--test leaky_relu_acceptance`\\n\" }"
     },
     {
       "attempt": 2,
-      "duration_ms": 1958,
+      "duration_ms": 37644,
       "outcome": "Adopted"
     }
   ],
-  "harness_wall_time_ms": 9557,
+  "harness_wall_time_ms": 45322,
+  "invocation": "self-repair run --kind feature-addition --repo <sandbox> --max-attempts 5 --log target/self-repair-revalidation/feature-addition/loop-log.jsonl --output target/self-repair-revalidation/feature-addition/loop-report.json --candidates <candidates.json> --bench-bin bench_workload --workload-source src/bin/bench_workload.rs --policy-exclusion policy-exclusion.toml --allow-candidate-exec",
   "issue": 142,
-  "measured_signals": {
-    "api_broken": false,
-    "exclusion_rule_ids": [],
-    "gaming_suspect": false,
-    "lines_changed": 28
-  },
+  "kind": "feature_addition",
   "notes": [
-    "CLI（self-repair run）経由の完走ではなく lib API 直接呼び出しの実証ハーネス（#142 スコープ判断。docs/self-repair-revalidation/feature-addition/README.md 参照）",
-    "JSON Lines ハッシュチェーンログ（loop-log.jsonl）は TASK-3.4（#145）実装済みの self_repair::LogWriter/verify_chain を本ハーネスへ結線して出力・検証している。self-repair verify-log CLI（外部コマンド経由の検証）は未実装のままであり、本実証は lib の verify_chain 呼び出しによる検証で充足する（TASK-3.3d・#143）。",
-    "bench_median_pct・bench_measurements_pct は baseline/candidate 双方に同一の合成ワークロード（leaky_relu_like_workload）を用いた計測であり、実際の leaky_relu 実装差分固有の性能特性は計測していない（既知の制約。verify_composite.rs・README『シグナルは実測のみ』節参照）"
+    "self-repair run CLI（3.1 節。#142 差し戻し分で実装）を 1 回起動する経路へ移行済み。",
+    "self-repair verify-log CLI（外部コマンド経由。#145）でハッシュチェーン検証済み（完走判定基準 4・充足）。",
+    "ベンチは RepairCompositeGate（TASK-3.2a・#137）による候補 diff 直接実測であり、baseline/candidate 双方に合成ワークロードを使う旧版（FeatureAdditionCompositeGate）とは異なる（完走判定基準 5・充足）。",
+    "signal_source=measured（完走判定基準 6・充足）。",
+    "基準 1（exit 0 / Adopted）は充足: diff_signals.rs::api_signature_touched が追加・削除いずれの pub fn 行も一律 api_broken=true としていた再実装バグ（guardrail::checks::api_stability::api_broken の既存意味論〈新規追加は破壊とみなさない〉からの乖離）を修正した結果、PoC-2 題材 (c)（leaky_relu の新規追加。既存 pub fn relu/pub fn sigmoid は不変）は Adopted・exit 0 へ到達する（実測: outcome=Adopted, exit=0）。ガードレールの判定ロジック・閾値・除外リストは変更していない。",
+    "PR #361 codex-review P0 指摘対応（--allow-candidate-exec の追加。docs/guardrail-self-repair-cli.md 3.7 節）に伴い、`invocation` の CLI 引数表記のみを追記更新した（実測値・outcome・attempts 等の計測結果は再計測しておらず変更していない）。"
   ],
   "outcome": "Adopted",
-  "repair_kind": "FeatureAddition",
   "signal_source": "measured",
   "task": "TASK-3.3c",
-  "thresholds": {
-    "bench_median_max_pct": 5.0,
-    "bench_runs_min": 5,
-    "lines_max": 200,
-    "source": "guardrail.toml (preset.default) via guardrail::config::resolve"
-  },
-  "total_duration_ms": 9484
+  "total_duration_ms": 45290
 }

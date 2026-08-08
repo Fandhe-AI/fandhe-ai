@@ -36,6 +36,25 @@
 //!   （`.claude/rules/security.md`「ガードレール閾値・許容誤差の変更は
 //!   ユーザー承認必須」）
 //!
+//! # ポリシー除外設定の固定（PR #361 codex-review P1 指摘対応）
+//! [`RepairCompositeGateSpec::policy_exclusion`] は `crate::diff_signals::
+//! load_policy_exclusion_config` を**候補適用前に一度だけ**呼んで得た
+//! [`guardrail::PolicyExclusionConfig`] 値を受け取る（呼び出し元 `main.rs::
+//! run_run` は sandbox 構築直後・候補未適用の状態でロードする）。以前の
+//! 実装はファイルパスのみを保持し `verify` のたびディスクから再読込して
+//! いたため、sandbox 内（候補適用対象そのもの）の `policy-exclusion.toml`
+//! を候補が書き換え、本来自身の diff に match して人間承認（エスカレー
+//! ション）へ回すはずだったルールを削除・縮小すると、次回以降の `verify`
+//! がその改変済みルールを読み込み match を回避してガードレール判定を
+//! 迂回できた（`guardrail::decision::decide` は `exclusion_rule_ids` が
+//! 1 件以上あれば無条件でエスカレーションへ回す「安全側にしか作用しない」
+//! 設計のため、攻撃方向はルールの**追加**ではなく削除・縮小のみ。A08
+//! 違反。`crate::diff_signals` モジュール冒頭「ポリシー除外設定の信頼境界」
+//! 参照）。`RepairCompositeGate` はこの値を不変のまま保持し、
+//! [`measure_diff_signals`]（`crate::diff_signals`）へ試行ごとに渡すのみで
+//! 再読込しない。多重防御のもう一方は `crate::candidate::apply_candidate`
+//! によるガードレール設定ファイル自体の書き換え拒否。
+//!
 //! # 実行順序（ゲート全通過時のみベンチを計測。既存 2 ゲートと同じ契約）
 //! diff 実測 → build/test/clippy → （通過時のみ）候補 diff 直接ベンチ実測。
 
@@ -66,7 +85,9 @@ pub struct RepairCompositeGate<R: CommandRunner + Clone> {
     sandbox_root: PathBuf,
     /// diff の起点（検出前コミットの sha）。
     baseline_commit: String,
-    policy_exclusion_path: PathBuf,
+    /// 候補適用前に一度だけロードした不変のポリシー除外設定（モジュール冒頭
+    /// 「ポリシー除外設定の固定」参照。試行ごとに再読込しない）。
+    policy_exclusion: guardrail::PolicyExclusionConfig,
     bench_bin: String,
     workload_sources: Vec<String>,
     bench_iterations: usize,
@@ -87,7 +108,11 @@ pub struct RepairCompositeGateSpec<R: CommandRunner + Clone> {
     pub workspace: PathBuf,
     pub sandbox_root: PathBuf,
     pub baseline_commit: String,
-    pub policy_exclusion_path: PathBuf,
+    /// 候補適用前に一度だけロードしたポリシー除外設定（`crate::diff_signals::
+    /// load_policy_exclusion_config` の戻り値。呼び出し元 `main.rs::run_run`
+    /// が sandbox 構築直後・候補未適用の状態でロードする契約。モジュール冒頭
+    /// 「ポリシー除外設定の固定」参照）。
+    pub policy_exclusion: guardrail::PolicyExclusionConfig,
     pub bench_bin: String,
     pub workload_sources: Vec<String>,
     pub bench_iterations: usize,
@@ -100,7 +125,7 @@ impl<R: CommandRunner + Clone> RepairCompositeGate<R> {
             workspace: spec.workspace,
             sandbox_root: spec.sandbox_root,
             baseline_commit: spec.baseline_commit,
-            policy_exclusion_path: spec.policy_exclusion_path,
+            policy_exclusion: spec.policy_exclusion,
             bench_bin: spec.bench_bin,
             workload_sources: spec.workload_sources,
             bench_iterations: spec.bench_iterations,
@@ -141,7 +166,7 @@ impl<R: CommandRunner + Clone> VerificationGate for RepairCompositeGate<R> {
             &self.runner,
             &self.sandbox_root,
             &self.baseline_commit,
-            &self.policy_exclusion_path,
+            &self.policy_exclusion,
         )
         .map_err(|error| SelfRepairError::Verification {
             attempt: proposal.attempt,

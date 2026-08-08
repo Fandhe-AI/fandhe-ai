@@ -261,11 +261,25 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 
 ### 3.1 `self-repair run`
 
+**実装済み**（イシュー #142 差し戻し分・完走判定基準 1。`crates/self-repair/
+src/cli.rs`・`crates/self-repair/src/main.rs`）。#131（TASK-3.1 の CLI 化残
+作業）が未実装のまま closed となり、他に追跡イシューがなかったため #142 の
+スコープとして実装した。`--kind` で `RepairKind` の種別を受理する種別非
+依存の実装であり、#141（バグ修正種別の再実証）からも再利用できる
+（`bug-fix`／`feature-addition` の 2 値のみを CLI が受理する。
+`RepairKind` 型自体は v1 由来の 3 variant〈`BugFix`/`PerfRegression`/
+`FeatureAddition`〉を持つが、`perf-regression` は `PerfRegressionDetector`/
+`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・
+戦略リスト〉を持ち CLI へ結線されていないため、`cli::parse_repair_kind` が
+値の時点で usage エラー〈exit 2〉として拒否する。PR #361 codex-review P1
+指摘対応: 値を受理してから実行時エラーを返す従来実装は「3 種別を受理する」
+契約を満たさなかった）。
+
 | 引数 | 型・既定値 | 説明 |
 |---|---|---|
-| `--kind <bug-fix\|perf-regression\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承） |
-| `--repo <path>` | 既定 `.` | 対象リポジトリのルート |
-| `--max-attempts <N>` | 既定値は初期実装で提案（`NonZeroU32` 制約。0 を許容しない） | 修正試行回数の上限 |
+| `--kind <bug-fix\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承するが、CLI が受理する値は `bug-fix`／`feature-addition` の 2 つのみ）。`perf-regression` を指定した場合は `cli::parse_repair_kind` が usage エラー（exit 2）を返す（`PerfRegressionDetector`/`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・戦略リスト〉を持ち、#141／#142 いずれも本種別を必要とせず CLI 結線が未実装のため。追跡起票要否は out-of-scope-tracking.md 準拠でユーザーへ確認する） |
+| `--repo <path>` | 既定 `.` | 対象リポジトリのルート。ループ全体（候補適用・4 ゲート検証・`git add -A` を含む）は `--repo` を `baseline_commit` の状態で `git clone --local` した隔離 sandbox（`self_repair::sandbox::RunSandbox`）内で完結し、`RepairCompositeGateSpec` の `workspace`／`sandbox_root` にはこの sandbox のパスを使う（`--repo` を直接渡さない）。`LoopOutcome::Adopted` の場合のみ、検証済み差分を `--repo` の作業ツリーへ競合検査つきで反映する（`self_repair::sandbox::reflect_adopted_diff`）。非採用・エラー経路では `--repo` の作業ツリー・index に一切触れない（PR #361 codex-review P0 指摘対応。`crates/self-repair/src/sandbox.rs` モジュール冒頭ドキュメント参照） |
+| `--max-attempts <N>` | 既定 `5`（`NonZeroU32` 制約。0 を許容しない） | 修正試行回数の上限。`docs/self-repair-revalidation-plan.md` §5 基準 3 の承認済み提案値をそのまま既定値として採用した |
 | `--log <path>` | 必須 | JSON Lines ログの出力先（3.3 節）。新規パスなら新規作成、既存パスなら
 末尾から `seq`/`hash` を復元して追記継続する（v1 `LogWriter::open` の
 `read_tail_state` 方式を継承。3.2 節 `verify-log --log` はこれと同一ファイルを
@@ -278,10 +292,21 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 必須・`--output` は任意という非対称を持つ: JSON Lines ログは改竄検知の
 一次記録として常に残す必要があるが、`LoopReport` は呼び出し元がその場で
 消費できれば足りるため） |
+| `--candidates <path>` | 必須 | 事前生成済みの候補修正列（JSON）。3.1 節は候補生成手段を未定義のため #142 差し戻し分で新たに定めた: `[{"description": string, "files": [{"path": string, "content": string}]}]` 形式（`candidate::load_candidates_from_json`）。候補生成手段自体（AI 生成・人手作成）は本 CLI のスコープ外とし、事前に確定済みの候補列を受け取るのみとする |
+| `--bench-bin <name>` | 必須 | 候補 diff 直接ベンチ実測（`RepairCompositeGate`。TASK-3.2a・#137）が `cargo build --release --bin <name>` するワークロード bin 名 |
+| `--workload-source <path>` | 必須（複数指定可） | ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対）。1 回以上必須 |
+| `--policy-exclusion <path>` | 任意（既定 `<sandbox>/policy-exclusion.toml`。上記 `--repo` の隔離 sandbox 直下） | REQ-5 除外ルール設定ファイル。明示指定時はそのパスをそのまま読む（sandbox 相対に読み替えない） |
+| `--allow-candidate-exec` | 必須フラグ（既定 false・値なし） | `--candidates` の候補コードを検証ゲート（`cargo build`／`cargo test`／`cargo clippy`）経由でホスト権限のまま実行することへの明示的な承認。未指定の場合は `cli::parse_run` が usage エラー（exit 2）として拒否し、`main.rs::run_run` へは到達しない（PR #361 codex-review P0 指摘対応。3.7 節「候補実行の信頼境界」参照） |
 
 出力: 標準出力へのテキスト要約（既定）または `--output` 指定時は
 `LoopReport`／`LoopFailure` JSON（上表）＋ 3.3 節の追記専用 JSON Lines
-ログ（`--log`、常に出力）。
+ログ（`--log`、常に出力）。`--output` の JSON は `LoopReport` の基本フィールド
+に加え、最後に `VerificationOutcome::Passed` を返した試行の証跡
+（`adopted_evidence`: `gate_report`／`bench_median_pct`／
+`bench_measurements_pct`／`lines_changed`／`api_broken`／`gaming_suspect`／
+`exclusion_rule_ids`）と `signal_source: "measured"` を含む（`--signals`
+契約検証パス〈2.1 節〉を経由しない実シグナル計測であることの明示。
+`docs/self-repair-revalidation/feature-addition/loop-report.json` が実例）。
 
 ### 3.2 `self-repair verify-log`
 
@@ -353,10 +378,53 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 
 | 値 | 意味 |
 |---|---|
-| `0` | ループが自動適用で完走（最終 verdict = `auto_apply`） |
-| `10` | エスカレーション（人間承認待ち） |
-| `20` | 却下 |
-| `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗） |
+| `0` | ループが自動適用で完走（最終 verdict = `auto_apply`。`LoopOutcome::Adopted`）**かつ** 検証済み差分の `--repo` への反映（下記参照）も成功 |
+| `10` | エスカレーション（人間承認待ち。`LoopOutcome::Escalated`） |
+| `20` | 却下（`LoopOutcome::Rejected`） |
+| `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗）／隔離 sandbox の構築失敗／`--log` 書き込み失敗（下記「`--log`／`--output` 書き込み失敗時の反映可否」参照）／`--output` 書き込み失敗（`--log` は成功済みのため反映は行うが終了コードは非 0 のまま）／自動適用された差分の `--repo` への反映失敗（下記参照） |
+| `2` | usage エラー（`--kind` 欠落・不正値〈`perf-regression` 指定を含む。3.1 節参照〉・`--log` 欠落・`--max-attempts 0`・未知引数等） |
+
+**`Exhausted`／`NoActionNeeded` の写像（イシュー #142 差し戻し分で追記）**:
+上表は元々 3 分岐＋`LoopFailure` のみを定義しており、
+[`self_repair::LoopOutcome`] の残り 2 variant（`Exhausted`＝試行上限到達、
+`NoActionNeeded`＝検出段階で修正不要と判定されそもそもループが開始しな
+かった）を扱っていなかった。いずれも「取り込まれなかった」点は却下と共通
+するが、`Rejected`（3 ゲート・取り込み判断を経た明示的な却下）とは意味が
+異なるため既存の `20` へ丸めず、「完走（exit 0）していない」ことを明確にする
+ため内部エラー区分の **`1`** へ写像すると定める（`main.rs::
+exit_code_for_outcome` のみが行う `LoopOutcome` → 終了コードの基本写像。
+他の経路から `0` を返さない fail-closed 契約。`.claude/rules/security.md` A08）。
+
+**`--log`／`--output` 書き込み失敗時の反映可否（PR #361 codex-review P1・
+Medium 指摘対応で追記）**:
+`--repo` への反映（下記「採用差分の `--repo` への反映失敗」参照）は
+「監査ログ（`--log`）が採用結果を一次記録として残せている」ことのみを
+前提とする。`--log` の書き込み（自己検証込み）が失敗した場合は
+`LoopOutcome::Adopted` であっても反映を一切行わず（`--repo` に触れない）、
+終了コードは `1` になる。一方 `--output`（3.1 節の任意の複製レポート JSON。
+未指定時は標準出力へ要約を出す）の書き込みのみが失敗した場合は、`--log` が
+既に一次記録として残せている以上、反映は通常どおり行い、終了コードのみ
+`1` にする（`--output` の失敗を `--log` と同列に扱うと、監査ログには
+記録済みの正当な採用差分の反映まで過剰にブロックしてしまうため。
+`crates/self-repair/src/main.rs::finish_with_report`／`outcome_for_reflection`
+参照）。
+
+**採用差分の `--repo` への反映失敗（PR #361 codex-review P0 指摘対応で追記）**:
+`run` は `--repo`（人間の作業リポジトリ）を直接検証対象にせず、`baseline_commit`
+の状態で `git clone --local` した隔離 sandbox（`self_repair::sandbox::RunSandbox`）
+内でループ全体（候補適用・4 ゲート検証・`git add -A` を含む）を完結させる
+（`--repo` を直接渡すと、非採用に終わった候補の変更が未コミットの作業
+ツリーへ残置され `git add -A` が無関係な変更まで staged にしてしまう問題が
+あったため。`crates/self-repair/src/sandbox.rs` モジュール冒頭ドキュメント
+参照）。`LoopOutcome::Adopted` の場合のみ、`self_repair::sandbox::
+reflect_adopted_diff` が sandbox の検証済み差分を `--repo` の作業ツリーへ
+`git apply --check` の競合検査つきで反映する。この反映が失敗した場合
+（`--repo` がダーティで sandbox の差分と競合する等）は `--repo` の作業ツリー
+へ一切触れず、`exit_code_for_outcome` が返した `0` を `1` へ上書きする
+（`--log`／`--output` はループの真の結果〈Adopted〉を記録済みのまま変更
+しない。反映失敗時の sandbox は削除せず標準エラー出力に記載されたパスへ
+保持する）。非採用（`Escalated`/`Rejected`）・内部エラー経路では反映処理
+自体を呼ばないため `--repo` に一切触れない。
 
 ### 3.6 骨格の移植スコープ
 
@@ -364,6 +432,88 @@ Detector／FixGenerator／VerificationGate／AdoptionJudge の 4 trait 構成
 （v1 `tools/self-repair/src/stages.rs`）は TASK-3.1 の移植対象であり、本文書
 は CLI 境界（引数・出力・終了コード）のみを確定してスコープを限定する。
 trait 設計自体の詳細は TASK-3.1 実装時に確定する。
+
+### 3.7 候補実行の信頼境界
+
+PR #361 codex-review P0 指摘（main.rs:272 相当）: `self-repair run` は
+`--candidates` の候補コードを、検証ゲート（`RepairCompositeGate`。
+`crates/self-repair/src/verify_gates.rs`・`verify_direct_composite.rs`）が
+sandbox clone 内で `cargo build`／`cargo test --release`／`cargo clippy` を
+実行することで検証する。これは以下の理由により **OS レベルのプロセス・
+権限・ネットワーク隔離ではない**:
+
+- sandbox clone（`crates/self-repair/src/sandbox.rs`。`RunSandbox`）が
+  提供するのは `--repo`（人間の作業リポジトリ）の作業ツリー・index を
+  汚さないための**ファイルシステム上の作業分離**のみである（`git clone
+  --local` による独立 `.git` の構築。3.1 節 `--repo` の項・`sandbox.rs`
+  モジュール冒頭ドキュメント参照）
+- `cargo build`／`cargo test`／`cargo clippy`（`build.rs`・
+  `#[test]` 関数・手続き型マクロを含む）はホストと同一のプロセス・OS
+  ユーザー権限・ネットワーク到達性のまま実行される。悪意ある候補は
+  任意コード実行が可能である
+
+この脅威モデルへの対応として、v2 では次の設計を採る（低権限コンテナ等
+による OS レベル隔離は将来課題とし、実装しない。「対象外」節参照）:
+
+1. **`--candidates` は信頼済み入力に限定する**: 本 CLI が想定する
+   `--candidates` は、本リポジトリの自己修復ループ（検出 → 修正生成 →
+   検証 → 取り込み判断。REQ-3）が生成し、かつ guardrail 3 分岐判定
+   （REQ-4）と組み合わせて運用される候補列であり、出自不明な外部候補を
+   無検証で受理する用途を想定しない
+2. **明示的な承認なしには実行しない**: `--allow-candidate-exec`
+   （3.1 節。既定 false・必須フラグ）を指定しない限り `cli::parse_run`
+   が usage エラー（exit 2）として拒否し、`main.rs::run_run`（検証コマンド
+   実行を含む以降の処理）へは一切到達しない。`--candidates` は必須引数
+   のため、このフラグは実質「候補コードのホスト権限実行を承認する
+   スイッチ」として機能する
+
+OS レベル隔離（低権限コンテナ・ネットワーク遮断による候補検証コマンドの
+サンドボックス実行）は本節が定義する信頼境界の外にある将来課題であり、
+`out-of-scope-tracking.md` 準拠で PR 本文の「対象外」節に追跡する。
+
+### 3.8 除外設定の固定（判定迂回防止）
+
+PR #361 codex-review P1 指摘（main.rs:277 相当）: `--policy-exclusion`
+未指定時の既定パス（`sandbox_root/policy-exclusion.toml`）は候補が書き込み
+可能な sandbox 内にある。旧実装は `RepairCompositeGate::verify` が呼ばれる
+たびこのファイルをディスクから再読込していたため、候補が自身の diff に
+本来 match して人間承認（エスカレーション）へ回すはずだった除外ルールを
+`policy-exclusion.toml` の書き換えで削除・縮小し、match を回避して
+ガードレール判定（REQ-4 の 3 分岐判定）を迂回できる余地があった
+（A08「判定の迂回経路を作らない」違反）。攻撃方向はルールの**追加**では
+ない点に注意: `guardrail::decision::decide` は `exclusion_rule_ids` が
+1 件以上あれば機械判定の結果によらず無条件でエスカレーションへ回す
+「除外リストは安全側にしか作用しない」設計（REQ-5）であり、ルールを
+増やしても判定は緩まない。緩む方向は「本来 match すべきルールを消し
+match させない」ことだけである。
+
+v2 は次の 2 つの防御を組み合わせて塞ぐ:
+
+1. **除外設定の事前固定**: `self_repair::diff_signals::
+   load_policy_exclusion_config` を **候補適用前（sandbox 構築直後・候補
+   未適用の状態）に一度だけ**呼び、返る `guardrail::PolicyExclusionConfig`
+   を `RepairCompositeGateSpec::policy_exclusion` として試行ループ全体で
+   不変値のまま使い回す。`RepairCompositeGate::verify` は以降この値を
+   `crate::diff_signals::measure_diff_signals` へ渡すのみで、ファイルパスを
+   再読込しない。既定パスの場合、この事前固定が読むのは `baseline_commit`
+   時点の内容（`RunSandbox::create` が `git clone --local` で反映した直後の
+   状態）であり、`--repo` の作業ツリー上の未コミット編集は反映されない
+2. **防御的拒否**: 候補（`--candidates`）の変更対象ファイル一覧に
+   `policy-exclusion.toml`／`guardrail.toml`（ファイル名の大文字小文字を
+   区別しない比較）が含まれる場合、`crates/self-repair/src/candidate.rs::
+   apply_candidate` が候補適用前に型付きエラー（`SelfRepairError::
+   FixGeneration`）で無条件拒否する。1 の事前固定と独立した多重防御である。
+   ただしこの判定はファイル名（basename）ベースであり、`--policy-exclusion`
+   に既定と異なるファイル名（例: `my-rules.toml`）を sandbox 内のパスとして
+   指定した運用まではカバーしない。その運用での唯一の防御は 1（事前固定）
+   であり、これは意図した境界である（`--policy-exclusion` に sandbox
+   到達不能な外部パスを指定する運用であれば、候補はそもそもそのファイルへ
+   書き込めない）
+
+いずれもコード上の強制であり、除外リスト・ガードレール閾値そのものの
+変更（値の緩和）はこれまでどおり `.claude/rules/security.md`
+「ガードレール閾値・ポリシー除外リストの変更は必ず人間の承認を経る」に
+従いユーザー承認を要する。
 
 ## 4. スコープ外の明示
 

@@ -97,6 +97,13 @@
 //!   [`logging::verify_chain`] を CLI から結線し、監査担当者が `cargo test`
 //!   経由でなく直接ログを検証できるようにする（`docs/guardrail-self-repair-cli.md`
 //!   3.2 節。詳細は `cli` モジュール冒頭ドキュメント参照）。
+//! - [`sandbox`][]: `self-repair run` CLI が `--repo` の実リポジトリを
+//!   直接汚さないための隔離 sandbox 機構（PR #361 codex-review P0 指摘対応）。
+//!   [`sandbox::RunSandbox::create`] が baseline commit の clone を構築し、
+//!   ループ全体（候補適用・4 ゲート検証・`git add -A` を含む）をその中で
+//!   完結させる。[`sandbox::reflect_adopted_diff`] は `Adopted` の場合のみ
+//!   競合検査つきで `--repo` へ差分を反映する（詳細は `sandbox` モジュール
+//!   冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -116,8 +123,17 @@
 //!   実シグナル計測経路・TASK-6.1c・#199 との統合時に検討） → 未起票
 //!   （本イシュー〈#134〉の PR 本文に記録）
 //! - CLI バイナリ `self-repair run`（`docs/guardrail-self-repair-cli.md`
-//!   3.1 節） → 後続タスク（既存イシューで追跡済み）。`verify-log`（3.2 節）は
-//!   [`cli`]／`src/main.rs` として本イシュー（#145 差し戻し分）で実装済み
+//!   3.1 節）・`verify-log`（3.2 節）はいずれも [`cli`]／`src/main.rs` として
+//!   実装済み（`verify-log` は #145 差し戻し分、`run` は #142 差し戻し分。
+//!   `run` は `--kind bug-fix`／`--kind feature-addition` に完全対応するが、
+//!   `--kind perf-regression` は `PerfRegressionDetector`/
+//!   `PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約
+//!   〈`BenchMeasurer`・戦略リスト〉を持ち #141／#142 いずれも本種別を
+//!   必要としないため CLI へ結線しておらず、`cli::parse_repair_kind` が
+//!   値の時点で usage エラー（exit 2）として拒否する〈PR #361 codex-review
+//!   P1 指摘対応: 値を受理してから実行時エラーを返す従来実装は「3 種別を
+//!   受理する」契約を満たさなかった〉。`RepairKind` 型自体は 3 variant の
+//!   ままで変更しない。`docs/guardrail-self-repair-cli.md` 3.1 節参照）
 //! - guardrail クレート自体の CLI 移植（TASK-4.1）→ イシュー #103 が別途追跡
 
 pub mod bug_fix;
@@ -126,6 +142,7 @@ pub mod cli;
 pub mod diff_signals;
 pub mod error;
 pub mod exec;
+mod fd_walk;
 pub mod feature_addition;
 pub mod judge;
 pub mod kind;
@@ -134,6 +151,7 @@ pub mod outcome;
 pub mod perf_regression;
 pub mod report;
 pub mod runner;
+pub mod sandbox;
 pub mod sha256;
 pub mod stages;
 pub mod verify_bench_direct;
@@ -156,6 +174,7 @@ pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
+pub use sandbox::{RunSandbox, reflect_adopted_diff};
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
 pub use verify_composite::FeatureAdditionCompositeGate;
 pub use verify_direct_composite::{RepairCompositeGate, RepairCompositeGateSpec};

@@ -164,6 +164,17 @@ impl FeatureAdditionFixGenerator {
                     continue;
                 }
 
+                // `abs.is_file()` は symlink を追跡するため、symlink 経由で
+                // workspace 外の実在ファイルを指す候補パスも「既存ファイル」
+                // と判定しうる。この判定はもはやセキュリティ境界ではなく、
+                // 「新規ファイル追加は対象外」という UX 向けエラー文言を
+                // 出すための早期判定に過ぎない（fd 走査によるセキュリティ
+                // 上の正本は直後の `crate::fd_walk::read_via_fd_walk` が
+                // 単独で担保する。`crate::fd_walk` モジュール冒頭 doc 参照。
+                // symlink 経由で `is_file()` が真になっても、続く
+                // `read_via_fd_walk` が `O_NOFOLLOW` 付き fd 走査で改めて
+                // symlink を拒否するため、workspace 外の内容が baseline へ
+                // 取り込まれることはない）。
                 let abs = workspace.join(rel_path);
                 if !abs.is_file() {
                     return Err(SelfRepairError::FixGeneration {
@@ -175,15 +186,16 @@ impl FeatureAdditionFixGenerator {
                     });
                 }
 
-                let content = std::fs::read_to_string(&abs).map_err(|source| {
-                    SelfRepairError::FixGeneration {
-                        attempt: 0,
-                        reason: format!(
-                            "baseline 読み込みに失敗しました（path={}）: {source}",
-                            rel_path.display()
-                        ),
-                    }
-                })?;
+                let content =
+                    crate::fd_walk::read_via_fd_walk(&workspace, rel_path).map_err(|source| {
+                        SelfRepairError::FixGeneration {
+                            attempt: 0,
+                            reason: format!(
+                                "baseline 読み込みに失敗しました（path={}）: {source}",
+                                rel_path.display()
+                            ),
+                        }
+                    })?;
                 baseline.insert(rel_path.clone(), content);
             }
         }
@@ -362,6 +374,45 @@ mod tests {
         }];
         let error = FeatureAdditionFixGenerator::new(&dir, candidates)
             .expect_err("workspace 外パスは拒否されること");
+        assert!(matches!(
+            error,
+            SelfRepairError::FixGeneration { attempt: 0, .. }
+        ));
+    }
+
+    // `std::os::unix::fs::symlink` を使うため unix 限定（`candidate.rs` の
+    // symlink テストと同じ方針）。
+    #[cfg(unix)]
+    #[test]
+    fn new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content() {
+        // `abs.is_file()` は symlink を追跡するため「既存ファイルへの合成
+        // 実装」と誤認しうるが、実際の読み込みは `crate::fd_walk::read_via_fd_walk`
+        // が fd 走査（`O_NOFOLLOW`）で symlink を拒否するため、symlink 経由で
+        // workspace 外の実在ファイルを指す候補パスの内容が読み込まれてしまわ
+        // ないことを確認する（`crate::fd_walk` モジュール冒頭 doc 参照。
+        // PR #361 codex-review 第 4 波 P0 指摘の read 側回帰防止）。
+        let dir = unique_temp_dir(
+            "feature_addition_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
+        );
+        let outside_dir = unique_temp_dir(
+            "feature_addition_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content-outside",
+        );
+        std::fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let outside_file = outside_dir.join("secret.rs");
+        std::fs::write(&outside_file, "workspace 外の秘匿内容")
+            .expect("write should succeed in test setup");
+
+        std::fs::create_dir_all(dir.join("src"))
+            .expect("create_dir_all should succeed in test setup");
+        std::os::unix::fs::symlink(&outside_file, dir.join("src/lib.rs"))
+            .expect("symlink creation should succeed in test setup");
+
+        let candidates = vec![CandidateFix {
+            description: "symlink 経由で workspace 外を読ませようとする不正な候補".to_string(),
+            files: vec![(PathBuf::from("src/lib.rs"), "malicious content".to_string())],
+        }];
+        let error = FeatureAdditionFixGenerator::new(&dir, candidates)
+            .expect_err("symlink 経由の候補パスは拒否されること");
         assert!(matches!(
             error,
             SelfRepairError::FixGeneration { attempt: 0, .. }
