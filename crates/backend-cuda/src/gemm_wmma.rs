@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::device::CudaDevice;
@@ -288,6 +288,90 @@ impl CudaWmmaGemm {
 
         let c_host = self.stream.clone_dtoh(&c_dev)?;
         Ok(c_host)
+    }
+
+    /// A・B（f16）をホスト→デバイスへ転送する（`run_f16` の H2D 部分の
+    /// 切り出し。`gemm_mma.rs::CudaMmaGemm::upload_f16` ・
+    /// `gemm.rs::CudaGemm::upload_f32` と同じ理由でベンチマークが転送と
+    /// カーネル実行を分離できるよう公開する。PR #349 codex-review 指摘
+    /// P1 対応。`gemm.rs::upload_f32` ドキュメンテーションコメント
+    /// 「PyTorch 参照計測」参照）。
+    pub fn upload_f16(
+        &self,
+        a: &[f16],
+        b: &[f16],
+    ) -> Result<(CudaSlice<f16>, CudaSlice<f16>), CudaError> {
+        let a_dev = self.stream.clone_htod(a)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        Ok((a_dev, b_dev))
+    }
+
+    /// C 用のゼロ初期化デバイスバッファを確保する（[`Self::upload_f16`]
+    /// と同じ理由で公開する）。
+    pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<CudaSlice<f16>, CudaError> {
+        Ok(self
+            .stream
+            .alloc_zeros::<f16>((m as usize) * (n as usize))?)
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対して f16 WMMA カーネルを起動
+    /// し、完了を待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。
+    /// [`Self::upload_f16`]・[`Self::alloc_output_f16`] と組み合わせて
+    /// ベンチマークの計測対象を絞るために公開する）。opt カーネルが
+    /// 利用可能ならそちらを使用し、そうでなければ基本版へフォールバック
+    /// する（`run_f16` と同一の選択ロジック `self.wmma_f16_opt.is_some()`
+    /// を用いる）。
+    ///
+    /// safe な公開 API であるため、呼び出し元の事前検証（`run_f16` と同じ
+    /// `validate_gemm_dims`）に依存せず、本関数自身がホスト側形状検証
+    /// および `a_dev`/`b_dev`/`c_dev` のデバイスバッファ長検証を行う
+    /// （PR #349 codex-review 指摘 P0。`gemm.rs::launch_tiled_f32` の
+    /// ドキュメンテーションコメント参照。`run_f16` の m==0/n==0/k==0
+    /// 早期 return はここでは適用しない — 呼び出し元がゼロ次元を渡した
+    /// 場合は 0 要素グリッド起動を CUDA ドライバが拒否する形でエラーに
+    /// なるが、`validate_gemm_dims` は m/n/k=0 を有効な形状として許容する
+    /// ため、この経路の安全性はカーネル起動自体の失敗に委ねられる）。
+    pub fn launch_f16(
+        &self,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+
+        let (func, cfg) = match self.wmma_f16_opt.as_ref() {
+            Some(func) => (func, wmma_opt_launch_config(m, n)),
+            None => (&self.wmma_f16, wmma_launch_config(m, n)),
+        };
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: launch_f16_kernel と同一の根拠。カーネル引数は上記で
+        // 検証済みの m/n/k と 1:1 対応し、カーネル内の手動境界チェック
+        // （基本版は kernels_wmma.rs、opt 版は kernels_wmma_opt.rs 参照、
+        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// C（f16）をデバイス→ホストへ転送する（[`Self::upload_f16`] と同じ
+    /// 理由で公開する）。
+    pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
+        Ok(self.stream.clone_dtoh(c_dev)?)
     }
 }
 
