@@ -40,6 +40,11 @@ use crate::stages::{Finding, FixGenerator, Proposal};
 /// 場合は `Err` を返す。workspace 外への書き込みを構築時に封じる
 /// （`apply_candidate` がファイルシステムへ触れる前に必ず経由させる。
 /// `bug_fix.rs`/`feature_addition.rs` の `new` も構築時検証として呼ぶ）。
+///
+/// これは字句検査（パス文字列の構造のみを見る）であり、workspace 内に
+/// 実在する symlink による脱出（下記 [`reject_symlink_escape`]）は検出
+/// しない。両者は独立した防御であり、`apply_candidate` は書き込み直前に
+/// 双方を経由する。
 pub fn validate_relative_path(path: &Path) -> Result<(), String> {
     if path.is_absolute() {
         return Err(format!(
@@ -53,6 +58,62 @@ pub fn validate_relative_path(path: &Path) -> Result<(), String> {
                 "候補修正のパスに親ディレクトリ参照（..）を含めることはできません: {}",
                 path.display()
             ));
+        }
+    }
+    Ok(())
+}
+
+/// `workspace` 配下に実在する symlink 経由の脱出を拒否する（OWASP A03。
+/// `.claude/rules/security.md`）。
+///
+/// [`validate_relative_path`] はパス文字列の字句（絶対パス・`..`）しか
+/// 見ないため、`--candidates` の外部入力が指す相対パスの途中に
+/// workspace 外を指す symlink（ファイル・ディレクトリいずれも）が実在
+/// すると、`fs::write` がその symlink を追跡して sandbox 外の任意ファイル
+/// を上書きしうる（PR #361 codex-review P0 指摘: `apply_candidate` の
+/// `fs::write(workspace.join(relative_path), ...)` がパストラバーサルの
+/// 経路になる）。
+///
+/// `workspace` から `relative_path` の各コンポーネントを 1 段ずつ
+/// `symlink_metadata`（`fs::metadata` と異なり symlink 自体を追跡しない）
+/// で検査し、途中経路・書き込み先本体のいずれかが symlink であれば
+/// `Err` で fail-closed に拒否する。symlink の指す先が workspace 内か外か
+/// を判定せず一律拒否する（AI 生成候補が正当に symlink を作る必要は
+/// なく、判定を「解決先が workspace 内か」に緩めると
+/// TOCTOU（検査後に指す先が変わる）の余地を残すため）。まだ存在しない
+/// 中間ディレクトリ・新規作成予定のファイル（`NotFound`）は許容する
+/// （通常の新規ファイル書き込みを妨げないため）。
+///
+/// `pub(crate)`: `apply_candidate`（書き込み経路）に加え、
+/// `BugFixFixGenerator::new`／`FeatureAdditionFixGenerator::new`
+/// （baseline スナップショット読み込み経路。`bug_fix.rs`/`feature_addition.rs`）
+/// からも同じ検査を利用する（読み込みも symlink を追跡するため、書き込み
+/// 経路だけを塞いでも読み込み経路から任意ファイルの内容を baseline へ
+/// 取り込みうる余地が残る）。
+pub(crate) fn reject_symlink_escape(workspace: &Path, relative_path: &Path) -> Result<(), String> {
+    let mut current = workspace.to_path_buf();
+    for component in relative_path.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(format!(
+                        "候補修正のパスに symlink が含まれています（workspace 外への書き込みを許すため拒否します）: {}",
+                        current.display()
+                    ));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // 新規作成予定のパス（未実在の中間ディレクトリ・末端
+                // ファイル）は symlink になりようがないため許容する。
+                continue;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "候補修正パスのメタデータ取得に失敗しました（{}）: {error}",
+                    current.display()
+                ));
+            }
         }
     }
     Ok(())
@@ -188,13 +249,20 @@ pub fn apply_candidate(
     // （絶対パス・`..` セグメントが `workspace.join(path)` 経由で workspace
     // 外へ脱出する。A03 対応）。書き込みの直前ではなく、他方の走査より
     // 前に全パスを検証し尽くすことで、一部のファイルだけが書き換わった
-    // 状態で `Err` を返す事態を避ける。
+    // 状態で `Err` を返す事態を避ける。字句検査（`validate_relative_path`）
+    // に加え、workspace 内に実在する symlink 経由の脱出も同じ upfront
+    // 検証で塞ぐ（`reject_symlink_escape` doc 参照。PR #361 codex-review
+    // P0 指摘対応）。
     for relative_path in baseline.keys() {
         validate_relative_path(relative_path)
+            .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
+        reject_symlink_escape(workspace, relative_path)
             .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
     }
     for (relative_path, _content) in &candidate.files {
         validate_relative_path(relative_path)
+            .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
+        reject_symlink_escape(workspace, relative_path)
             .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
     }
     for (relative_path, original_content) in baseline {
@@ -254,6 +322,12 @@ impl CandidateFixGenerator {
         for candidate in &candidates {
             for (relative_path, _content) in &candidate.files {
                 validate_relative_path(relative_path)
+                    .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
+                // symlink 経由の脱出は書き込み（`apply_candidate`）だけで
+                // なく、ここでの baseline スナップショット読み込み
+                // （`fs::read_to_string`）も symlink を追跡するため同じ
+                // 検査を構築時にも通す（`reject_symlink_escape` doc 参照）。
+                reject_symlink_escape(&workspace, relative_path)
                     .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
                 if baseline.contains_key(relative_path) {
                     continue;
@@ -329,6 +403,120 @@ mod tests {
     fn validate_relative_path_accepts_plain_relative_path() {
         let result = validate_relative_path(Path::new("src/lib.rs"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn reject_symlink_escape_accepts_plain_path() {
+        let dir = temp_workspace("symlink-plain");
+        write_file(&dir, "target.txt", "original");
+
+        let result = reject_symlink_escape(&dir, Path::new("target.txt"));
+        assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // `std::os::unix::fs::symlink` を使うため unix 限定
+    // （`tests/cli_run.rs::run_with_non_utf8_kind_value_does_not_panic` と
+    // 同じ方針）。
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlink_escape_rejects_symlink_file_pointing_outside_workspace() {
+        // 候補が指すファイル自体が workspace 外を指す symlink の場合
+        // （codex-review 指摘: `fs::write` が symlink を追跡し sandbox 外の
+        // 任意ファイルを上書きしうる）。
+        let dir = temp_workspace("symlink-file-target");
+        let outside_dir = temp_workspace("symlink-file-outside");
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, "do-not-overwrite").expect("write should succeed in test setup");
+
+        std::os::unix::fs::symlink(&outside_file, dir.join("target.txt"))
+            .expect("symlink creation should succeed in test setup");
+
+        let result = reject_symlink_escape(&dir, Path::new("target.txt"));
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_file).expect("read should succeed"),
+            "do-not-overwrite"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reject_symlink_escape_rejects_symlink_directory_pointing_outside_workspace() {
+        // 途中ディレクトリが workspace 外を指す symlink の場合
+        // （`sub/target.txt` の `sub` が symlink ディレクトリ）。
+        let dir = temp_workspace("symlink-dir-target");
+        let outside_dir = temp_workspace("symlink-dir-outside");
+        fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+
+        std::os::unix::fs::symlink(&outside_dir, dir.join("sub"))
+            .expect("symlink creation should succeed in test setup");
+
+        let result = reject_symlink_escape(&dir, Path::new("sub/target.txt"));
+        assert!(result.is_err());
+        assert!(!outside_dir.join("target.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_candidate_rejects_candidate_via_symlink_file_without_touching_target() {
+        // `apply_candidate` レベルでも symlink 経由の候補パスを拒否し、
+        // symlink の指す先（workspace 外）を書き換えないことを確認する
+        // （PR #361 codex-review P0 指摘の回帰防止）。
+        let dir = temp_workspace("apply-symlink-file");
+        let outside_dir = temp_workspace("apply-symlink-file-outside");
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, "do-not-overwrite").expect("write should succeed in test setup");
+
+        std::os::unix::fs::symlink(&outside_file, dir.join("target.txt"))
+            .expect("symlink creation should succeed in test setup");
+
+        let baseline = HashMap::new();
+        let candidates = vec![CandidateFix {
+            description: "malicious-symlink".to_string(),
+            files: vec![(PathBuf::from("target.txt"), "pwned".to_string())],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_file).expect("read should succeed"),
+            "do-not-overwrite"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_candidate_rejects_candidate_via_symlink_directory_without_touching_target() {
+        let dir = temp_workspace("apply-symlink-dir");
+        let outside_dir = temp_workspace("apply-symlink-dir-outside");
+        fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+
+        std::os::unix::fs::symlink(&outside_dir, dir.join("sub"))
+            .expect("symlink creation should succeed in test setup");
+
+        let baseline = HashMap::new();
+        let candidates = vec![CandidateFix {
+            description: "malicious-symlink-dir".to_string(),
+            files: vec![(PathBuf::from("sub/target.txt"), "pwned".to_string())],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(result.is_err());
+        assert!(!outside_dir.join("target.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     #[test]

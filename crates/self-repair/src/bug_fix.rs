@@ -28,7 +28,9 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::candidate::{CandidateFix, apply_candidate, validate_relative_path};
+use crate::candidate::{
+    CandidateFix, apply_candidate, reject_symlink_escape, validate_relative_path,
+};
 use crate::error::SelfRepairError;
 use crate::exec::CommandRunner;
 use crate::kind::RepairKind;
@@ -113,6 +115,12 @@ impl BugFixFixGenerator {
         for candidate in &candidates {
             for (rel_path, _) in &candidate.files {
                 validate_relative_path(rel_path)
+                    .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
+                // baseline スナップショット読み込み（`fs::read_to_string`）も
+                // symlink を追跡するため、書き込み経路
+                // （`apply_candidate`）と同じ検査を構築時にも通す
+                // （`crate::candidate::reject_symlink_escape` doc 参照）。
+                reject_symlink_escape(&workspace, rel_path)
                     .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
                 if baseline.contains_key(rel_path) {
                     continue;
@@ -303,6 +311,44 @@ mod tests {
         }];
         let error = BugFixFixGenerator::new(&dir, candidates)
             .expect_err("workspace 外パスは拒否されること");
+        assert!(matches!(
+            error,
+            SelfRepairError::FixGeneration { attempt: 0, .. }
+        ));
+    }
+
+    // `std::os::unix::fs::symlink` を使うため unix 限定（`candidate.rs` の
+    // symlink テストと同じ方針）。
+    #[cfg(unix)]
+    #[test]
+    fn new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content() {
+        // baseline スナップショット読み込み（`fs::read_to_string`）も
+        // symlink を追跡するため、書き込み経路（`apply_candidate`）だけで
+        // なく `new` 自体が symlink 経由の候補パスを拒否することを確認する
+        // （`crate::candidate::reject_symlink_escape` doc 参照。PR #361
+        // codex-review P0 指摘の read 側回帰防止）。
+        let dir = unique_temp_dir(
+            "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
+        );
+        let outside_dir = unique_temp_dir(
+            "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content-outside",
+        );
+        std::fs::create_dir_all(&outside_dir).expect("create_dir_all should succeed in test setup");
+        let outside_file = outside_dir.join("secret.rs");
+        std::fs::write(&outside_file, "workspace 外の秘匿内容")
+            .expect("write should succeed in test setup");
+
+        std::fs::create_dir_all(dir.join("src"))
+            .expect("create_dir_all should succeed in test setup");
+        std::os::unix::fs::symlink(&outside_file, dir.join("src/lib.rs"))
+            .expect("symlink creation should succeed in test setup");
+
+        let candidates = vec![CandidateFix {
+            description: "symlink 経由で workspace 外を読ませようとする不正な候補".to_string(),
+            files: vec![(PathBuf::from("src/lib.rs"), "malicious content".to_string())],
+        }];
+        let error = BugFixFixGenerator::new(&dir, candidates)
+            .expect_err("symlink 経由の候補パスは拒否されること");
         assert!(matches!(
             error,
             SelfRepairError::FixGeneration { attempt: 0, .. }

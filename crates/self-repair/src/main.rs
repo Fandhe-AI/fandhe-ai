@@ -43,7 +43,7 @@
 //! | `0` | 自動適用（`Verdict::AutoApply`）かつ `--repo` への反映も成功 | チェーン整合（改竄なし） |
 //! | `10` | エスカレーション | （該当なし） |
 //! | `20` | 却下 | （該当なし） |
-//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗・sandbox 構築失敗）／自動適用後の `--repo` への反映失敗（下記参照） | 検証不合格・内部エラー |
+//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗・sandbox 構築失敗・`--log`／`--output` 書き込み失敗〈`Adopted` でも反映しない。下記「`--log` 一次記録契約」節参照〉）／自動適用後の `--repo` への反映失敗（下記参照） | 検証不合格・内部エラー |
 //! | `2` | usage エラー | usage エラー |
 //!
 //! `LoopOutcome` → 終了コードの基本写像（0/10/20/1）は [`exit_code_for_outcome`]
@@ -60,6 +60,16 @@
 //! 上書きする（`exit_code_for_outcome` が返す `0` を後段で書き換える唯一の
 //! 経路であり、`LoopOutcome` の解釈自体には手を加えない。`--log`／`--output`
 //! はループの真の結果〈Adopted〉を記録済みのまま変更しない）。
+//!
+//! # `--log` 一次記録契約（PR #361 codex-review P1 指摘対応）
+//! `--repo` への反映は「監査ログ（`--log`）が採用結果を一次記録として
+//! 残せている」ことを前提とする。[`execute_loop`] は
+//! [`finish_with_report`] が返す `persisted` フラグ（`--log`／`--output`
+//! 書き込みがいずれも成功したか）を見て、`persisted == false` の場合は
+//! `LoopOutcome::Adopted` であっても `run_run` へ `None` を返す（ログを
+//! 残せていないまま `reflect_adopted_diff` が実リポジトリへ差分反映して
+//! しまう経路を断つ）。エラー経路（ログ書き込み失敗）では `--repo` に
+//! 一切触れない。
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -336,6 +346,14 @@ fn run_run(args: RunArgs) -> ExitCode {
     // ツリーへ競合検査つきで反映する（`reflect_adopted_diff`。`sandbox.rs`
     // モジュール冒頭ドキュメント参照）。非採用・エラー経路では `--repo` に
     // 一切触れない（sandbox の自動削除〈`Drop`〉に任せる）。
+    //
+    // `outcome` は `execute_loop` が `--log`／`--output` の書き込み
+    // （`finish_with_report` の `persisted` フラグ）に成功した場合のみ
+    // `Some` を返す（失敗時は `Adopted` であっても `None` へ落とす）。
+    // そのため本条件は実質「exit_code が Adopted の正常系（0）へ写像
+    // され得た、かつ監査ログを一次記録として残せた」場合のみ真になり、
+    // ログ書き込み失敗時に `--repo` へ反映してしまう経路を閉じる
+    // （PR #361 codex-review P1 指摘対応）。
     if matches!(outcome, Some(LoopOutcome::Adopted)) {
         match reflect_adopted_diff(&args.repo, &sandbox_root, &baseline_commit) {
             Ok(()) => exit_code,
@@ -418,8 +436,15 @@ fn report_run_setup_error(err: &SelfRepairError) -> ExitCode {
 ///
 /// 戻り値の第 2 要素（`Option<LoopOutcome>`）は `run_run` が
 /// [`self_repair::sandbox::reflect_adopted_diff`] を呼ぶべきか（`Adopted` か
-/// どうか）を判定するために使う（`LoopFailure` の場合は `None`。段階の実行
-/// 自体が失敗しており採用判断に到達していないため）。
+/// どうか）を判定するために使う。`None` になるのは次の 2 パターン:
+/// 1. `LoopFailure` の場合（段階の実行自体が失敗しており採用判断に到達
+///    していないため）
+/// 2. `SelfRepairLoop::run` は正常終了（`Ok(LoopReport)`）したが
+///    `finish_with_report` の `--log`／`--output` 書き込みが失敗した場合
+///    （[`outcome_for_reflection`] が `persisted == false` を検知し
+///    `Adopted` であっても `None` へ落とす。PR #361 codex-review P1
+///    指摘対応。監査ログを一次記録として残せていない状態のまま
+///    `--repo` へ反映してしまう経路を断つ）
 #[allow(clippy::too_many_arguments)]
 fn execute_loop<D, F>(
     kind: RepairKind,
@@ -448,17 +473,34 @@ where
     match self_repair_loop.run(kind) {
         Ok(report) => {
             let outcome = report.outcome.clone();
-            let exit_code = finish_with_report(
+            let (exit_code, persisted) = finish_with_report(
                 &report,
                 log_path,
                 output_path,
                 evidence_sink.borrow().clone(),
                 bench_measurement_sink.borrow().clone(),
             );
-            (exit_code, Some(outcome))
+            (exit_code, outcome_for_reflection(outcome, persisted))
         }
         Err(failure) => (finish_with_failure(&failure, log_path, output_path), None),
     }
+}
+
+/// `run_run` の `--repo` 反映判定（`matches!(outcome, Some(LoopOutcome::Adopted))`）
+/// が参照する `outcome` を決める純粋関数（`execute_loop` から切り出し
+/// 単体テスト可能にする）。
+///
+/// `persisted == false`（`--log`／`--output` の書き込み失敗。
+/// [`finish_with_report`] の戻り値）の場合は `outcome` が
+/// `LoopOutcome::Adopted` であっても `None` へ落とし `run_run` へ伝えない
+/// （PR #361 codex-review P1 指摘対応）。`run_run` は
+/// `Some(LoopOutcome::Adopted)` の場合にのみ `reflect_adopted_diff` で
+/// `--repo` の作業ツリーへ差分反映するため、監査ログを一次記録として
+/// 残せていない状態のまま実リポジトリへ反映してしまう経路をここで断つ
+/// （「`--log` は一次記録として常に残す・エラー経路では `--repo` に触れない」
+/// 契約。モジュール冒頭ドキュメント「`--log` 一次記録契約」節参照）。
+fn outcome_for_reflection(outcome: LoopOutcome, persisted: bool) -> Option<LoopOutcome> {
+    if persisted { Some(outcome) } else { None }
 }
 
 /// 正常終了（[`LoopReport`]）を `--log`（[`self_repair::LogWriter::append_report`]。
@@ -469,16 +511,23 @@ where
 /// evidence_sink`／`bench_measurement_sink`）から複製した値であり、
 /// `verify` が最後に `Passed` を返した際の判断根拠を保持する
 /// （`AttemptOutcome::Adopted` 自体は証跡を保持しないため。`report.rs` 参照）。
+///
+/// 戻り値の第 2 要素（`persisted`）は `--log`／`--output` の書き込みが
+/// いずれも成功したかを示す（`execute_loop` が `--repo` への差分反映
+/// 可否を判定する唯一の材料。`ExitCode` は不透明型で値の比較ができない
+/// ため〈`std::process::ExitCode` は `PartialEq` を実装しない〉、
+/// 「exit 0 相当か」を `ExitCode` から逆算せずこの明示フラグで表す。
+/// PR #361 codex-review P1 指摘対応）。
 fn finish_with_report(
     report: &LoopReport,
     log_path: &Path,
     output_path: Option<&Path>,
     evidence: Option<VerifiedEvidence>,
     bench_measurement: Option<DirectBenchSignal>,
-) -> ExitCode {
+) -> (ExitCode, bool) {
     if let Err(message) = append_report_and_verify(report, log_path) {
         eprintln!("self-repair run: ログ出力に失敗しました: {message}");
-        return ExitCode::from(1);
+        return (ExitCode::from(1), false);
     }
     match output_path {
         // 3.1 節「未指定時は標準出力へテキスト要約を出す」契約
@@ -501,11 +550,11 @@ fn finish_with_report(
                 bench_measurement.as_ref(),
             ) {
                 eprintln!("self-repair run: --output 書き出しに失敗しました: {message}");
-                return ExitCode::from(1);
+                return (ExitCode::from(1), false);
             }
         }
     }
-    exit_code_for_outcome(&report.outcome)
+    (exit_code_for_outcome(&report.outcome), true)
 }
 
 /// 異常終了（[`LoopFailure`]。段階の実行自体が失敗）を `--log`
@@ -667,4 +716,77 @@ fn write_json_with_trailing_newline(doc: &serde_json::Value, path: &Path) -> Res
     pretty.push('\n');
     std::fs::write(path, pretty)
         .map_err(|error| format!("{} への書き込みに失敗しました: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`outcome_for_reflection`] が `persisted == true` の場合は `outcome`
+    /// をそのまま透過することを確認する（`--log`／`--output` 書き込み成功時、
+    /// `run_run` が `Adopted` を正しく観測できることの前提）。
+    #[test]
+    fn outcome_for_reflection_passes_through_when_persisted() {
+        let result = outcome_for_reflection(LoopOutcome::Adopted, true);
+        assert_eq!(result, Some(LoopOutcome::Adopted));
+    }
+
+    /// PR #361 codex-review P1 指摘の回帰防止: `persisted == false`
+    /// （`--log`／`--output` 書き込み失敗）の場合、`outcome` が
+    /// `LoopOutcome::Adopted` であっても `None` へ落とすことを確認する。
+    /// `run_run` はこの `None` により `reflect_adopted_diff`
+    /// （`--repo` の作業ツリーへの反映）を呼ばない
+    /// （`matches!(outcome, Some(LoopOutcome::Adopted))` が偽になる）。
+    #[test]
+    fn outcome_for_reflection_suppresses_adopted_when_not_persisted() {
+        let result = outcome_for_reflection(LoopOutcome::Adopted, false);
+        assert_eq!(result, None);
+    }
+
+    /// 非 `Adopted`（`Escalated`）の場合は `persisted` に関わらず
+    /// `run_run` の反映条件（`Some(LoopOutcome::Adopted)` 一致）を満たさない
+    /// ため、`outcome_for_reflection` 自体は透過してよいことを確認する
+    /// （反映抑止は `run_run` 側の `matches!` が担い、本関数は「ログ永続化
+    /// 失敗を握り潰さない」ことのみを責務とする）。
+    #[test]
+    fn outcome_for_reflection_passes_through_non_adopted_when_persisted() {
+        let result = outcome_for_reflection(
+            LoopOutcome::Escalated {
+                reason: "test".to_string(),
+            },
+            true,
+        );
+        assert_eq!(
+            result,
+            Some(LoopOutcome::Escalated {
+                reason: "test".to_string()
+            })
+        );
+    }
+
+    /// [`finish_with_report`] は `--log` の書き込みが失敗した場合（ここでは
+    /// 親ディレクトリが存在しないパスを渡して発生させる）、`outcome` が
+    /// `Adopted` であっても `persisted == false` を返すことを確認する
+    /// （`outcome_for_reflection` 単体テストの前提となる、実際のログ書き込み
+    /// 経路との結合確認）。
+    #[test]
+    fn finish_with_report_reports_not_persisted_on_log_write_failure() {
+        let report = LoopReport {
+            kind: RepairKind::FeatureAddition,
+            outcome: LoopOutcome::Adopted,
+            attempts: Vec::new(),
+            total_duration: std::time::Duration::from_millis(0),
+        };
+        // 存在しないディレクトリ配下のパスを渡し、`LogWriter` の追記処理
+        // （ファイル生成）を確実に失敗させる（`logging.rs::LogWriter::
+        // append_stages` が `OpenOptions::create(true)` で開こうとし、親
+        // ディレクトリ不在により `NotFound` で失敗する）。
+        let log_path = std::env::temp_dir().join(format!(
+            "self-repair-main-test-nonexistent-dir-{}/trial.jsonl",
+            std::process::id()
+        ));
+
+        let (_, persisted) = finish_with_report(&report, &log_path, None, None, None);
+        assert!(!persisted);
+    }
 }
