@@ -85,6 +85,17 @@
 //! 実測の実施・v1 実測値との差分記録は兄弟イシュー #171（TASK-13.1b）のスコープであり、
 //! 本イシューはハーネス整備のみを行う。
 
+//! ## TASK-14.2a: GEMM 4096³ ピークメモリ計測ハーネス（本イシュー #178 の実装範囲）
+//!
+//! [`peak_memory`] モジュールが、TASK-14.1（#173〜#176）で実装済みの内部計測 API
+//! （`tensor_core::memory_stats::MemoryStats`）を用いて GEMM（M=N=K=4096, f32）の
+//! ピークメモリを 3 バックエンドで再現可能に計測するハーネス（[`peak_memory::run_peak_memory`]）を
+//! 提供する。係数の確定・再調整は兄弟イシュー #179（TASK-14.2b）、計測手段の環境差文書化は
+//! #180（TASK-14.3）のスコープであり、本イシューは実測記録の入力データ生成のみを行う。
+//! CLI は `src/bin/peak_memory_bench.rs`（`make peak-memory-bench` から起動。`Makefile` 参照）。
+
+pub mod alloc_tracker;
+pub mod peak_memory;
 mod protocol;
 mod report;
 pub mod rng;
@@ -94,6 +105,11 @@ mod stats;
 pub mod sync;
 mod threshold;
 
+pub use peak_memory::{
+    DEFAULT_GEMM_SIZE, DEFAULT_PEAK_MEMORY_TRIALS, MAX_GEMM_SIZE, MAX_PEAK_MEMORY_TRIALS,
+    PEAK_MEMORY_SCHEMA_VERSION, PeakMemoryBackend, PeakMemoryConfig, PeakMemoryError,
+    PeakMemoryReport, PeakMemoryTrial, QuartileBytes, run_peak_memory,
+};
 pub use protocol::{Measurement, MeasurementConfig, run};
 pub use report::{BenchReport, SCHEMA_VERSION};
 pub use rounding::{RoundingError, floor_lower_bound};
