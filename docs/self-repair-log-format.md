@@ -245,7 +245,11 @@ hash = SHA-256(
 
 取り込み判断の根拠をログのみから復元する手順は次の通り。
 
-1. **チェーン整合性の検証**: `verify_chain(path)` を呼ぶ。全レコードを
+1. **チェーン整合性の検証**: `verify_chain(path)` を呼ぶ（`cargo test` 経由
+   でなく直接検証したい場合は CLI サブコマンド `self-repair verify-log --log
+   <path>` を使う。`docs/guardrail-self-repair-cli.md` 3.2 節・イシュー
+   #145 差し戻し分で実装済み。ロジックは同一の `verify_chain` を呼ぶのみ）。
+   全レコードを
    先頭から再走査し、次の 3 点をいずれも fail-closed に検証する
    （1 箇所でも不一致・パース不能な行があれば直ちに `Err`。部分的に
    正しい範囲だけを認める緩い検証はしない）。
@@ -332,9 +336,10 @@ hash = SHA-256(
 
 ## 9. 未着手事項（スコープ外）
 
-- CLI バイナリ（`self-repair run`/`verify-log`）の実装
+- CLI バイナリ `self-repair run` の実装
   （[`docs/guardrail-self-repair-cli.md`](./guardrail-self-repair-cli.md)
-  3.1〜3.2 節が CLI 境界を確定済みだが、実装自体は後続タスク）
+  3.1 節が CLI 境界を確定済みだが、実装自体は後続タスク）。`verify-log`
+  （3.2 節）はイシュー #145 差し戻し分で実装済み
 - 外部アンカー（7 節）の自動化実装（運用指針の文書化のみで、自動化は行わない）
 - `self-repair` の呼び出し元（`SelfRepairLoop::run` の実行主体）から
   `LogWriter`/`verify_chain` への結線（本イシューはログ機構自体の提供

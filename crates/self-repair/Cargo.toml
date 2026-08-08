@@ -6,6 +6,17 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+# CLI バイナリ（TASK-3.4 残作業・イシュー #145）。lib（`src/lib.rs`）は維持する。
+# `docs/guardrail-self-repair-cli.md` 3.2 節「self-repair verify-log」の実装。
+# `3.1 self-repair run` は未実装（別イシューのスコープ。`lib.rs` モジュール
+# コメント「CLI バイナリ（self-repair run/verify-log）→ 後続タスク」参照）
+# のため、本 bin は verify-log サブコマンドのみを持つ最小骨格とする。将来
+# `run` を追加する際は `cli::Command` へ variant を拡張する形で結線する
+# （guardrail の `check`/`eval` 二本立てと同じ拡張パターン）。
+[[bin]]
+name = "self-repair"
+path = "src/main.rs"
+
 [dependencies]
 # 試行ログ・起動インターフェース入出力の構造化データシリアライズ（REQ-3）。
 serde.workspace = true

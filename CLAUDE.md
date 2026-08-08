@@ -22,7 +22,8 @@ rust-ai-library/
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
 ├── Cargo.toml                # workspace 定義（9 クレート・許容依存 8 区分を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
-├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定。TASK-1.3）
+├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提。#325）
+├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans〈#353〉）
 ├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c・#117。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
 │                             # onnx-interop・guardrail・self-repair・bench-harness（雛形）
@@ -33,7 +34,8 @@ rust-ai-library/
 │   ├── report-guardrail-schedule-result.sh # schedule 定期実行失敗時の Issue 起票・復旧クローズ（TASK-6.1b）
 │   └── testdata/             # 上記の self-test 用固定 fixture
 ├── .github/workflows/
-│   ├── ci.yml               # fmt / clippy / test / deny / deps-forbidden / guardrail-regression / verification-gates / ci-complete
+│   ├── ci.yml               # rust-ci（Fandhe-AI/actions rust-base-ci 呼び出し: fmt / clippy / test / deny。#325）+ 固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / guardrail-regression / verification-gates）+ ci-complete
+│   ├── codex-review.yml     # Codex PR 自動レビュー wrapper（Fandhe-AI/actions codex-review を SHA 固定呼び出し。#326）
 │   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
 │   ├── guardrail-regression-schedule.yml # guardrail 2 層検証の schedule 定期実行・失敗時 Issue 可視化（TASK-6.1b）
 │   └── update-external.yml  # docs/spec・.claude/skills の自動追従

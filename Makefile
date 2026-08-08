@@ -187,14 +187,14 @@ else
 endif
 
 .PHONY: deny
-deny: ## cargo deny check licenses sources（依存ライセンス監査。cargo-deny 未導入なら自動導入）
+deny: ## cargo deny check advisories bans licenses sources（依存監査。cargo-deny 未導入なら自動導入。#353 で advisories / bans 追加）
 ifneq ($(and $(HAS_CARGO),$(HAS_DENY)),)
 	@export PATH="$$HOME/.cargo/bin:$$PATH"; \
 	command -v cargo-deny >/dev/null 2>&1 || { \
 		echo "cargo-deny を導入します"; \
 		cargo install cargo-deny --locked; \
 	}; \
-	cargo deny --locked check licenses sources
+	cargo deny --locked check advisories bans licenses sources
 else
 	@echo "skip: Cargo.toml または deny.toml 未追加のため deny をスキップ"
 endif
