@@ -42,8 +42,7 @@
 //! 入口（`CpuMemory` 等）を単一インスタンスで共有する運用（TASK-14.2 の
 //! ベンチハーネスがこの形を取る想定）で満たせる。
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// バックエンド共通のアロケータ計測 API（PyTorch の `memory_allocated`／
 /// `max_memory_allocated`／`reset_peak_memory_stats` 相当）。
@@ -56,7 +55,10 @@ pub trait MemoryStats {
     fn allocated_bytes(&self) -> u64;
 
     /// このトラッカーを共有しているインスタンス群が観測してきた
-    /// `allocated_bytes()` のピーク値（過去最大値。単調非減少）。
+    /// `allocated_bytes()` のピーク値（直近の `reset_peak` 以降の区間での
+    /// 最大値）。`reset_peak` を挟まない限り単調非減少。`peak >=
+    /// allocated_bytes()` は `reset_peak` 呼び出しの有無によらず常時成立する
+    /// 強不変条件である（[`AllocationTracker`] の同期方式を参照）。
     fn peak_allocated_bytes(&self) -> u64;
 
     /// ピーク値を現在値へリセットする（以降のピーク計測区間を区切る用途。
@@ -65,75 +67,100 @@ pub trait MemoryStats {
 }
 
 /// [`MemoryStats`] を実装するバックエンド入口型（`CpuMemory` 等）が内部に
-/// 保持する計測本体。`current`／`peak` をそれぞれ `AtomicU64` で持ち、
-/// 確保・解放のたびに [`TrackedAllocation`] 経由で更新される。
+/// 保持する計測本体。`current`／`peak` を単一の [`Mutex`] の下に同居させ、
+/// 確保・解放・リセットのすべての操作をそのロックで直列化する。
+/// [`TrackedAllocation`] 経由で `current`・`peak` が更新される。
 ///
-/// メモリオーダリングは全て `Relaxed` を用いる。理由: 本トラッカーは単調
-/// カウンタの読み書きのみを行い、他の共有データへの happens-before 関係を
-/// 要求しない（`current`/`peak` 自体の値の一貫性は各アトミック操作の
-/// atomicity のみで足りる）。`peak` は「`current` に加算した直後の値」で
-/// `fetch_max` するため、`reset_peak()` を挟まない限り常に「ある時点で
-/// 実在した `current` 値以上」を保つ（単調非減少）。
+/// # 同期方式（Mutex 一本化。PR #359 codex-review 指摘 P1 の修正）
 ///
-/// `peak >= current` は**常時**成立する強不変条件ではない点に注意
-/// （PR #359 codex-review 指摘 P1 を受けて明記）。理由は 2 点:
-/// (a) `on_alloc` は `fetch_add`（current 更新）→ `fetch_max`（peak 更新）の
-///     2 手順であり、この間隙を他スレッドの読み取りが観測しうる
-///     （両更新をまたぐ強一貫性が必要ならホットパスではない本用途でも
-///     `Mutex` 化が要るが、統計フックの用途上は許容する）
-/// (b) `reset_peak()` は意図的に peak を current 相当まで引き下げる
-///     （「以降の区間のピーク」を求める設計。次段落参照）
+/// 旧実装は `current`／`peak` をそれぞれ独立の `AtomicU64` として持ち、
+/// `reset_peak()` は `peak.fetch_update` の CAS ループで `current` を
+/// 都度再読込する方式だった。しかしこれは TOCTOU を解消できていなかった:
+/// CAS は「`peak` の**値**が読み取り時から変化していないか」しか検査
+/// できないため、並行する `on_alloc()`（`fetch_max`）が `peak` を
+/// **同じ値へ**更新した場合（新たな確保後の `current` がちょうど既存の
+/// `peak` と同値になるケース。例: `peak == 200` の状態で `current` が
+/// 100 → 200 に増えて `fetch_max(200)` が実行される場合）、`peak` 自体の
+/// ビット列は変化しないため reset 側の CAS は「変化なし」と誤認して成功
+/// し、その確保より前に読んだ古い `current`（例: 100）で `peak` を
+/// 100 に引き下げてしまう。結果、確保が生存中にもかかわらず
+/// `peak_allocated_bytes() < allocated_bytes()` という契約違反が生じうる
+/// （並行確保の値がたまたま既存ピークと一致する場合に限り顕在化するため
+/// 単体テストでの再現率が低く、コードレビューで検出された）。
 ///
-/// `reset_peak()` は「current.load() → peak.store()」の非原子的な 2 手順に
-/// すると、両者の間に別スレッドの `on_alloc()`（`fetch_max`）が割り込んだ
-/// 場合にその新ピークを `store()` が小さい値で上書きしてしまう
-/// （並行確保がリセットにより失われるバグ）。これを避けるため
-/// `peak.fetch_update` の CAS ループで `current` を都度再読込しながら
-/// 更新する。CAS が失敗（＝他スレッドが `peak` を更新済み）した場合は
-/// クロージャが再実行され `current` を読み直すため、「ある時点で実在した
-/// `current` 値」を取りこぼさない。
+/// `current`・`peak` を 1 つの `Mutex` の背後に置き、確保
+/// （`current` 加算 → `peak` 更新の比較）・解放（`current` 減算）・
+/// リセット（`peak = current`）のいずれも「ロック取得 → 両フィールドを
+/// 一括更新 → 解放」という単一の原子操作として行うことで、値の一致に
+/// 依存する検出漏れを構造的に排除する。本トラッカーはホットパス
+/// （GEMM 等の演算カーネル内部）ではなく統計フックの用途に限られるため
+/// （モジュールコメント「計測対象の粒度」参照）、`Mutex` のオーバーヘッドは
+/// 許容する。
+#[derive(Debug, Default, Clone, Copy)]
+struct MemoryCounters {
+    current: u64,
+    peak: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct AllocationTracker {
-    current: AtomicU64,
-    peak: AtomicU64,
+    counters: Mutex<MemoryCounters>,
 }
 
 impl AllocationTracker {
     /// ゼロ初期化された新規トラッカーを構築する。
     pub fn new() -> Self {
-        Self {
-            current: AtomicU64::new(0),
-            peak: AtomicU64::new(0),
-        }
+        Self::default()
+    }
+
+    /// `counters` のロックを取得する。他スレッドがロック保持中に panic
+    /// した場合（poisoned）でも、本トラッカーが保持するのは単調カウンタの
+    /// みで不変条件の破壊が起きないため、`unwrap()` で連鎖 panic させず
+    /// `into_inner()` で中身をそのまま引き継ぐ（本番経路で `unwrap()` を
+    /// 使わない方針。`coding-rust.md`）。
+    fn lock(&self) -> std::sync::MutexGuard<'_, MemoryCounters> {
+        self.counters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// `bytes` 分の確保を計上する。[`TrackedAllocation::new`] からのみ
     /// 呼ばれる（減算経路〈`on_free`〉との対称性を `TrackedAllocation` の
     /// RAII に閉じ込めるため、本メソッド自体は non-pub のまま維持する）。
     fn on_alloc(&self, bytes: u64) {
-        let new_current = self.current.fetch_add(bytes, Ordering::Relaxed) + bytes;
-        // fetch_max は複数スレッドが同時に加算しても「実在した current 値の
-        // 最大」を取り漏らさない（CAS ループ相当を標準ライブラリが内包）。
-        self.peak.fetch_max(new_current, Ordering::Relaxed);
+        let mut counters = self.lock();
+        // saturating を使う理由: 旧 `AtomicU64::fetch_add` はオーバーフロー
+        // 時に暗黙のラップアラウンドをしていたが、`u64` 同士の `+=` は
+        // debug ビルド（`cargo test` 既定）でオーバーフロー panic する。
+        // 統計フックが確保経路を panic させることは避けたいため
+        // `saturating_add` で上限に飽和させる（本番経路で panic しない方針。
+        // `coding-rust.md`）。
+        counters.current = counters.current.saturating_add(bytes);
+        if counters.current > counters.peak {
+            counters.peak = counters.current;
+        }
     }
 
     /// `bytes` 分の解放を計上する。[`TrackedAllocation::drop`] からのみ
     /// 呼ばれる（公開 API にはしない。`on_alloc` と 1:1 で対応する呼び出しを
     /// `TrackedAllocation` の構築・破棄に構造的に紐付けることで、減算過多
-    /// による `fetch_sub` のラップアラウンド〈整数アンダーフロー〉を防ぐ）。
+    /// による整数アンダーフローを防ぐ）。`saturating_sub` は上記 `on_alloc`
+    /// と同じ理由（panic 回避）で用いる保険であり、正常経路では
+    /// `on_alloc`/`on_free` の 1:1 対応により減算過多は起きない想定。
     fn on_free(&self, bytes: u64) {
-        self.current.fetch_sub(bytes, Ordering::Relaxed);
+        let mut counters = self.lock();
+        counters.current = counters.current.saturating_sub(bytes);
     }
 
     /// 現在の確保済みバイト数。[`MemoryStats::allocated_bytes`] の実体
     /// （バックエンド入口型が委譲実装するための公開メソッド）。
     pub fn allocated_bytes(&self) -> u64 {
-        self.current.load(Ordering::Relaxed)
+        self.lock().current
     }
 
     /// ピーク確保済みバイト数。[`MemoryStats::peak_allocated_bytes`] の実体。
     pub fn peak_allocated_bytes(&self) -> u64 {
-        self.peak.load(Ordering::Relaxed)
+        self.lock().peak
     }
 
     /// ピーク値を現在値へリセットする。[`MemoryStats::reset_peak`] の実体。
@@ -143,18 +170,12 @@ impl AllocationTracker {
         // 未計上のピークとして扱われてしまい、直後に allocated_bytes()
         // > peak_allocated_bytes() という矛盾した観測が生じるため避ける）。
         //
-        // `current.load()` → `peak.store()` の非原子的な 2 手順にすると、
-        // その間隙に割り込んだ他スレッドの `on_alloc()`（`fetch_max` による
-        // peak 更新）を `store()` が上書きし、並行確保が失われてしまう
-        // （PR #359 codex-review 指摘 P1）。`fetch_update` の CAS ループで
-        // 都度 `current` を再読込することで、CAS 失敗（＝他スレッドが
-        // 先に `peak` を更新済み）のたびにやり直し、実在した `current` 値を
-        // 取りこぼさないようにする。
-        let _ = self
-            .peak
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |_| {
-                Some(self.current.load(Ordering::Relaxed))
-            });
+        // `current` の読み取りと `peak` への書き込みを同一ロック区間で
+        // 行うため、他スレッドの `on_alloc()` はこの区間の前後どちらかで
+        // 完全に直列化される（構造体コメント「同期方式」参照）。CAS の
+        // 値一致による検出漏れが原理的に発生しない。
+        let mut counters = self.lock();
+        counters.peak = counters.current;
     }
 }
 
@@ -283,8 +304,8 @@ mod tests {
 
     /// 複数スレッドから同時に確保・解放しても panic せず、最終的な
     /// `current` が理論値（0）に一致することを確認するスモークテスト
-    /// （`Relaxed` オーダリングの選択がカウンタの atomicity を損なわない
-    /// ことの実行時裏付け）。
+    /// （`Mutex` による直列化がカウンタの一貫性を損なわないことの
+    /// 実行時裏付け）。
     #[test]
     fn concurrent_alloc_free_smoke_test_converges_to_zero() {
         let tracker = Arc::new(AllocationTracker::new());
@@ -307,15 +328,19 @@ mod tests {
         assert!(tracker.peak_allocated_bytes() >= 8);
     }
 
-    /// PR #359 codex-review 指摘 P1 の再発防止テスト。`reset_peak()` が
-    /// 「`current.load()` → `peak.store()`」の非原子的な 2 手順だった旧実装
-    /// では、その間隙に別スレッドの `on_alloc()`（`fetch_max`）が割り込むと
-    /// 新ピークが `store()` によって上書きされ、`peak_allocated_bytes() <
-    /// allocated_bytes()` という矛盾した観測が生じ得た。スレッド A が確保を
-    /// 繰り返し生存させ続け、スレッド B が並行して `reset_peak()` を連打し、
-    /// 全スレッド join 後（並行中の確保がすべて確定した時点）に
-    /// `peak >= current` を検査することで、`fetch_update` の CAS ループが
-    /// 並行確保を取りこぼしていないことを確認する。
+    /// PR #359 codex-review 指摘 P1 の再発防止テスト。`current`／`peak` を
+    /// 独立の `AtomicU64` として持ち `reset_peak()` を `peak.fetch_update`
+    /// の CAS ループで実装していた旧実装では、並行する `on_alloc()`
+    /// （`fetch_max`）が `peak` を**既存の値と同じ値へ**更新するケース
+    /// （新たな確保後の `current` がちょうど既存の `peak` と一致する場合）
+    /// で CAS が「変化なし」と誤認して成功し、reset 側が読んだ古い
+    /// `current` で `peak` を引き下げてしまう TOCTOU が存在した
+    /// （`AllocationTracker` の doc コメント「同期方式」参照）。値の一致に
+    /// 依存する再現条件のため単体テストでは検出困難だったが、Mutex 一本化
+    /// により構造的に解消済みである。スレッド A が確保を繰り返し生存させ
+    /// 続け、スレッド B が並行して `reset_peak()` を連打し、全スレッド
+    /// join 後（並行中の確保がすべて確定した時点）に `peak >= current` を
+    /// 検査することで、退行がないことを確認する。
     ///
     /// PR #359 Bugbot 指摘（Low）の修正: 旧実装は alloc スレッド側で各
     /// `TrackedAllocation` を確保直後に `drop` していたため、join 後の
