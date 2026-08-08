@@ -11,9 +11,9 @@
 //! 実カーネルを実行できることを保証する）。
 
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, Tensor};
+use tensor_core::{Activation, BackendOps, Tensor};
 
-use crate::gemm_blis::gemm_blis_parallel;
+use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
 use crate::{elementwise, reduction};
 
 /// CPU バックエンドの `BackendOps` 実装。状態を持たないゼロサイズ型
@@ -65,6 +65,65 @@ impl BackendOps for CpuBackendOps {
 
         let mut out = vec![0.0f32; m * n];
         gemm_blis_parallel(a_slice, b_slice, &mut out, m, n, k)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
+    /// `gemm` → `add` → `relu` 合成）を、CPU カーネル内で epilogue を融合
+    /// する [`gemm_blis_bias_act_parallel`] へ差し替える（TASK-12.1f・
+    /// #203）。CUDA／Metal はこのオーバーライドを持たずデフォルト実装
+    /// （非融合合成）を使う（両バックエンドの elementwise 未実装により
+    /// `bias`／`act` 指定時は `Unsupported` を透過的に返す。モジュール
+    /// ドキュメント冒頭・`tensor_core::backend_ops` のコメント参照）。
+    fn gemm_bias_act(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        bias: Option<&Tensor<f32>>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+            .map_err(BackendError::ShapeMismatch)?;
+        let (m, k) = (a.shape()[0], a.shape()[1]);
+        let n = b.shape()[1];
+
+        let a_owned = a.contiguous();
+        let b_owned = b.contiguous();
+        let a_slice = a_owned.as_slice().ok_or_else(|| {
+            gemm_contiguity_fail_safe("gemm_bias_act: lhs not contiguous after contiguous()")
+        })?;
+        let b_slice = b_owned.as_slice().ok_or_else(|| {
+            gemm_contiguity_fail_safe("gemm_bias_act: rhs not contiguous after contiguous()")
+        })?;
+
+        // bias は `[n]` の 1 次元のみ受け付ける（`BackendOps::gemm_bias_act`
+        // のドキュメント契約。デフォルト実装〈`add` の NumPy 互換
+        // ブロードキャスト〉と異なり、融合カーネルは行方向複製のみを
+        // 実装するため、shape 不一致は早期に `ShapeMismatch` で拒否する）。
+        let bias_owned;
+        let bias_slice = match bias {
+            Some(bias) => {
+                if bias.shape() != [n] {
+                    return Err(BackendError::ShapeMismatch(
+                        tensor_core::ShapeError::RankMismatch {
+                            expected: 1,
+                            actual: bias.shape().len(),
+                        },
+                    ));
+                }
+                bias_owned = bias.contiguous();
+                Some(bias_owned.as_slice().ok_or_else(|| {
+                    gemm_contiguity_fail_safe(
+                        "gemm_bias_act: bias not contiguous after contiguous()",
+                    )
+                })?)
+            }
+            None => None,
+        };
+
+        let mut out = vec![0.0f32; m * n];
+        gemm_blis_bias_act_parallel(a_slice, b_slice, &mut out, m, n, k, bias_slice, act)
             .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }

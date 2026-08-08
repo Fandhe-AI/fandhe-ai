@@ -68,6 +68,16 @@
 //! Metal 実装（`backend-cuda::ops::CudaBackendOps`／
 //! `backend-metal::ops::MetalBackendOps`）と同一 trait でカーネルディスパッチ
 //! できることを `tests/backend_ops_dispatch.rs` で検証する。
+//!
+//! TASK-12.1f（#203）で [`gemm_blis::gemm_blis_bias_act_parallel`]（GEMM epilogue
+//! 〈bias 加算・activation〉のカーネル内融合）を追加し、[`ops::CpuBackendOps`] の
+//! `gemm_bias_act`（`tensor_core::BackendOps` のデフォルトメソッド。非融合合成）を
+//! オーバーライドして接続した。非融合実行（`gemm` → `add` → `relu` の 3 パス・中間
+//! `Tensor` 2 個割当）に対する性能改善は `docs/perf/cpu-gemm-epilogue-fusion.md` に
+//! 実測記録している（CUTLASS 系実測の動機は平均 1.38〜1.45 倍。本環境実測は 1.46〜
+//! 2.56 倍）。融合版と非融合合成の bit 完全一致は `tests/gemm_epilogue_parity.rs` で
+//! 検証する。CUDA／Metal は GPU カーネル内 epilogue 融合をスコープ外とし、
+//! `gemm_bias_act` のデフォルト実装（elementwise 未実装のため `Unsupported`）に留める。
 
 mod device;
 mod elementwise;
@@ -85,7 +95,7 @@ pub use elementwise::{
 pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
-pub use gemm_blis::{gemm_blis, gemm_blis_parallel};
+pub use gemm_blis::{gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel};
 pub use memory::CpuMemory;
 pub use ops::CpuBackendOps;
 pub use parity::{

@@ -49,6 +49,25 @@
 use crate::Tensor;
 use crate::device::{BackendError, Device};
 
+/// GEMM epilogue で適用する activation 種別（TASK-12.1f・#203）。
+///
+/// [`BackendOps::gemm_bias_act`] の第 4 引数として渡す。CUTLASS 系実測
+/// （epilogue 融合で平均 1.38〜1.45 倍。イシュー #203）が動機の
+/// Linear+bias+ReLU 相当パターンを表現できれば TASK-12.1f の受け入れ
+/// 条件を満たせるため、まず `Relu` のみを持つ。`#[non_exhaustive]` は
+/// 公開 API 非破壊（ガードレール条件・`.claude/rules/security.md`）を
+/// 保ちながら将来 `Gelu`／`Sigmoid` 等を追加できるようにするため
+/// （呼び出し側の網羅的 match を破壊しない。`GemmError`・`ParityError`
+/// と同方針）。
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation {
+    /// activation なし（bias 加算のみ、または恒等関数）。
+    None,
+    /// `max(x, 0)`。`BackendOps::relu` と同一の定義を epilogue 内で適用する。
+    Relu,
+}
+
 /// 各バックエンド（CPU／CUDA／Metal）が実装するカーネル入口
 /// （`docs/public-api-design.md` §4.2。差分はモジュール冒頭コメント参照）。
 ///
@@ -80,6 +99,56 @@ pub trait BackendOps {
     // reduction（`docs/public-api-design.md` §4.2 と同じ 2 演算）
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError>;
+
+    /// GEMM の epilogue（bias 加算・activation）を融合した
+    /// `act(A @ B + bias)` を計算する（TASK-12.1f・#203）。
+    ///
+    /// `bias` は `[n]`（`B` の列数）の 1 次元テンソルで、`A @ B: [m, n]` の
+    /// 各行へブロードキャスト加算される（`None` の場合は bias 加算を
+    /// 省略する）。`act` は bias 加算後に適用する
+    /// （[`Activation::None`] なら恒等関数）。
+    ///
+    /// # デフォルト実装（非融合合成）
+    ///
+    /// 本メソッドは **デフォルトメソッド**として追加している（`BackendOps`
+    /// の非破壊拡張。公開 API 非破壊はガードレール条件・
+    /// `.claude/rules/security.md`）。デフォルト実装は `gemm` →
+    /// （`bias` があれば）`add`（行方向ブロードキャスト。
+    /// `docs/public-api-design.md` §4.2 のブロードキャスト規約に従い
+    /// `[n]` を `[1, n]` として `[m, n]` へ揃える）→ `act` に応じた
+    /// activation メソッド呼び出しの 3 段合成である。CPU バックエンドは
+    /// [`crate`] を利用する `backend-cpu::ops::CpuBackendOps` がこの
+    /// デフォルトを **カーネル内融合実装でオーバーライド**し、中間
+    /// `Tensor` 2 個の割当・GEMM 結果の再読み出しパスを削減する
+    /// （CUTLASS 系実測で epilogue 融合が平均 1.38〜1.45 倍。動機は
+    /// イシュー #203）。CUDA／Metal はこのデフォルト（非融合合成）へ
+    /// フォールバックする。両バックエンドは本イシュー時点で GEMM
+    /// カーネルのみ実装済みで elementwise 側が
+    /// [`BackendError::Unsupported`] を返すため（モジュール冒頭コメント
+    /// 参照）、`bias.is_some() || act != Activation::None` の場合は
+    /// GPU 側で `Unsupported` を透過的に返す（GPU カーネル内 epilogue
+    /// 融合は #203 のスコープ外。out-of-scope-tracking.md に従いユーザー
+    /// 承認を得て別 Issue で追跡する）。
+    ///
+    /// `bias` の shape が `[n]` でない場合は [`BackendError::ShapeMismatch`]
+    /// を返す（`add` のブロードキャスト判定へ委譲する）。
+    fn gemm_bias_act(
+        &self,
+        a: &Tensor<f32>,
+        b: &Tensor<f32>,
+        bias: Option<&Tensor<f32>>,
+        act: Activation,
+    ) -> Result<Tensor<f32>, BackendError> {
+        let mut out = self.gemm(a, b)?;
+        if let Some(bias) = bias {
+            out = self.add(&out, bias)?;
+        }
+        out = match act {
+            Activation::None => out,
+            Activation::Relu => self.relu(&out)?,
+        };
+        Ok(out)
+    }
 }
 
 /// 複数の `&dyn BackendOps` を横断して `device` に一致する実装を選択する。
@@ -158,9 +227,141 @@ mod tests {
         }
     }
 
+    /// `gemm_bias_act` のデフォルト実装（非融合合成）を数値検証するための
+    /// naive 計算モック。`MockOps`（常に `Unsupported`）と異なり `gemm`／
+    /// `add`／`relu` を実際に計算する（行方向ブロードキャストのみ対応する
+    /// 簡易 `add`。テスト用途のため `Tensor::get`／strided view には
+    /// 対応しない）。
+    struct ComputingMockOps;
+
+    impl BackendOps for ComputingMockOps {
+        fn device(&self) -> Device {
+            Device::Cpu
+        }
+
+        fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            let (m, k) = (a.shape()[0], a.shape()[1]);
+            let n = b.shape()[1];
+            let a_data = a.as_slice().expect("test: a must be contiguous");
+            let b_data = b.as_slice().expect("test: b must be contiguous");
+            let mut out = vec![0.0f32; m * n];
+            for i in 0..m {
+                for j in 0..n {
+                    let mut acc = 0.0f32;
+                    for p in 0..k {
+                        acc = a_data[i * k + p].mul_add(b_data[p * n + j], acc);
+                    }
+                    out[i * n + j] = acc;
+                }
+            }
+            Tensor::new(out, &[m, n]).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            // テストで使う形状のみ対応: `a: [m, n]`・`b: [n]`（行方向
+            // ブロードキャスト）または同一 shape。
+            let a_shape = a.shape().to_vec();
+            let a_data = a.as_slice().expect("test: a must be contiguous");
+            let b_data = b.as_slice().expect("test: b must be contiguous");
+            let out = if b.shape() == a.shape() {
+                a_data
+                    .iter()
+                    .zip(b_data)
+                    .map(|(x, y)| x + y)
+                    .collect::<Vec<_>>()
+            } else if b.shape().len() == 1 && a_shape.len() == 2 && b.shape()[0] == a_shape[1] {
+                let n = a_shape[1];
+                a_data
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, x)| x + b_data[idx % n])
+                    .collect::<Vec<_>>()
+            } else {
+                return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                    expected: a_shape.len(),
+                    actual: b.shape().len(),
+                }));
+            };
+            Tensor::new(out, &a_shape).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn mul(&self, _a: &Tensor<f32>, _b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("computing mock: mul".into()))
+        }
+
+        fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            let data = a.as_slice().expect("test: a must be contiguous");
+            let out = data.iter().map(|x| x.max(0.0)).collect::<Vec<_>>();
+            Tensor::new(out, a.shape()).map_err(BackendError::ShapeMismatch)
+        }
+
+        fn exp(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("computing mock: exp".into()))
+        }
+
+        fn tanh(&self, _a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("computing mock: tanh".into()))
+        }
+
+        fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("computing mock: sum".into()))
+        }
+
+        fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+            Err(BackendError::Unsupported("computing mock: max".into()))
+        }
+    }
+
     /// object-safe であることの型検査を兼ねる（`Box<dyn BackendOps>` が
     /// 構築できることをコンパイル時に確認する）。
     fn assert_object_safe(_ops: &dyn BackendOps) {}
+
+    #[test]
+    fn gemm_bias_act_default_matches_manual_composition() {
+        let ops = ComputingMockOps;
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let bias = Tensor::new(vec![-100.0, 1.0], &[2]).unwrap();
+
+        // A@B = [[19, 22], [43, 50]] → + bias [-100, 1] → [[-81, 23], [-57, 51]]
+        // → relu → [[0, 23], [0, 51]]
+        let out = ops
+            .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)
+            .expect("gemm_bias_act should succeed");
+        assert_eq!(out.as_slice().unwrap(), &[0.0, 23.0, 0.0, 51.0]);
+    }
+
+    #[test]
+    fn gemm_bias_act_default_no_bias_no_act_matches_gemm() {
+        let ops = ComputingMockOps;
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+
+        let plain_gemm = ops.gemm(&a, &b).unwrap();
+        let fused = ops
+            .gemm_bias_act(&a, &b, None, Activation::None)
+            .expect("gemm_bias_act should succeed");
+        assert_eq!(
+            plain_gemm.as_slice().unwrap(),
+            fused.as_slice().unwrap(),
+            "bias=None・act=None は gemm と同一結果のはず"
+        );
+    }
+
+    #[test]
+    fn gemm_bias_act_default_propagates_unsupported_from_composed_ops() {
+        // `MockOps` は `gemm` 自体が `Unsupported` を返すため、
+        // デフォルト実装が最初のステップのエラーをそのまま伝播することを
+        // 検証する（GPU バックエンドが GEMM 自体未実装の場合の fail-safe。
+        // elementwise 未実装〈`add`/`relu` が `Unsupported`〉の伝播は
+        // `backend-cuda`/`backend-metal` の結合テスト側で検証する）。
+        let ops = MockOps(Device::Cpu);
+        let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+
+        let result = ops.gemm_bias_act(&a, &b, None, Activation::Relu);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
+    }
 
     #[test]
     fn ops_for_dispatches_to_matching_device() {

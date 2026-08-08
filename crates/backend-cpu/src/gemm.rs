@@ -108,6 +108,18 @@ pub enum GemmError {
     /// `oversubscription`（`.max(1)` で下限クランプ済み）と同様に、公開
     /// 入口の shape 検証で早期に拒否する）。
     ZeroBlockSize { mc: usize, kc: usize, nc: usize },
+    /// GEMM epilogue（TASK-12.1f・#203）の `bias` 長が `n`（`B` の列数）と
+    /// 一致しない。`gemm_blis::gemm_blis_bias_act_parallel` の公開入口で
+    /// カーネル本体アクセス前に検証する（REQ-8・OWASP A03）。
+    BiasLenMismatch { expected: usize, actual: usize },
+    /// `tensor_core::Activation` の未知 variant（`#[non_exhaustive]`）を
+    /// `gemm_blis::gemm_blis_bias_act_parallel` の epilogue が受け取った。
+    /// 本クレートは `tensor-core` と同一ワークスペースで管理されるため
+    /// 通常到達しないが、`Activation` へ variant が追加され本クレート側の
+    /// epilogue 実装更新が漏れた場合の fail-safe（未知 activation を
+    /// 無視して不正な結果を返さないための型付きエラー。coding-rust.md
+    /// 「本番経路で unwrap/expect を使わない」）。
+    UnsupportedActivation,
 }
 
 impl fmt::Display for GemmError {
@@ -127,6 +139,15 @@ impl fmt::Display for GemmError {
             }
             GemmError::ZeroBlockSize { mc, kc, nc } => {
                 write!(f, "block sizes must be non-zero: mc={mc}, kc={kc}, nc={nc}")
+            }
+            GemmError::UnsupportedActivation => {
+                write!(f, "unsupported (non-exhaustive) Activation variant")
+            }
+            GemmError::BiasLenMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "bias length mismatch: expected {expected}, actual {actual}"
+                )
             }
         }
     }
