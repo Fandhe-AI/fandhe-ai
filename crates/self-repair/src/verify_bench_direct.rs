@@ -176,6 +176,19 @@ fn pinned_sources_untouched<R: CommandRunner>(
             output.log_tail()
         )));
     }
+    // `output.log_tail()` は 256 KiB 超過時に先頭側を切り詰める（`exec.rs`
+    // 参照）。切り詰められたファイル一覧を「改変なし」と誤解析すると
+    // ピン留め違反（ゲーミング）を見逃す fail-open 経路になるため、
+    // `diff_signals::run_git` と同じ方針で fail-closed に拒否する
+    // （Codex レビュー #137 指摘の同種クラス。`args` は `workload_sources`
+    // のみを対象とするため通常は上限に達しないが、防御的に検査する）。
+    if output.truncated() {
+        return Err(DirectBenchError::Setup(
+            "ピン留め検査（git diff --name-only）の出力が 256 KiB 上限で切り詰められました。\
+             ピン留め違反の見逃しを避けるため fail-open な部分解析はせず拒否します（fail-closed）"
+                .to_string(),
+        ));
+    }
     let touched: Vec<String> = output
         .log_tail()
         .lines()

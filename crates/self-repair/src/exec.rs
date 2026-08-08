@@ -39,6 +39,7 @@ const TRUNCATED_LOG_PREFIX: &str = "...(truncated)...\n";
 pub struct CommandOutput {
     success: bool,
     log_tail: String,
+    truncated: bool,
 }
 
 impl CommandOutput {
@@ -52,6 +53,21 @@ impl CommandOutput {
     /// を尊重して切り詰める。マルチバイト文字の途中で分断しない）。
     pub fn log_tail(&self) -> &str {
         &self.log_tail
+    }
+
+    /// `log_tail()` が [`MAX_CAPTURED_LOG_BYTES`] 超過により先頭側を切り詰め
+    /// 済みか（イシュー #137 Codex レビュー指摘）。
+    ///
+    /// `crate::diff_signals::run_git` はこの値を見て、`git diff --numstat`／
+    /// `git diff -U0` 等の構造化出力を切り詰め済みログとして解析しないよう
+    /// fail-closed で拒否する（先頭側のファイル・変更行が黙って欠落し
+    /// `lines_changed` 過少計上・`api_broken` 見逃しに繋がるため。
+    /// `.claude/rules/security.md` A08「判定の迂回経路を作らない」）。
+    /// `CargoVerificationGate`（build/test/clippy ログ）はログを人間可読な
+    /// 診断メッセージとしてのみ扱うため、この値を無視して従来どおり
+    /// 切り詰め済みログをそのまま使ってよい。
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// stdout/stderr の生バイト列から [`CommandOutput`] を構築する。
@@ -69,8 +85,8 @@ impl CommandOutput {
         // 先に lossy 変換して妥当な UTF-8 文字列に正規化してから、文字列側
         // （`char_indices` による文字境界）で上限を適用する。
         let decoded = String::from_utf8_lossy(&combined).into_owned();
-        let log_tail = if decoded.len() <= MAX_CAPTURED_LOG_BYTES {
-            decoded
+        let (log_tail, truncated) = if decoded.len() <= MAX_CAPTURED_LOG_BYTES {
+            (decoded, false)
         } else {
             // 末尾 MAX_CAPTURED_LOG_BYTES 相当を残す。`decoded` は既に妥当な
             // UTF-8 文字列なので `char_indices` で文字境界を安全に走査できる
@@ -81,9 +97,16 @@ impl CommandOutput {
                 .map(|(index, _)| index)
                 .find(|&index| index >= cut)
                 .unwrap_or(decoded.len());
-            format!("{TRUNCATED_LOG_PREFIX}{}", &decoded[boundary..])
+            (
+                format!("{TRUNCATED_LOG_PREFIX}{}", &decoded[boundary..]),
+                true,
+            )
         };
-        CommandOutput { success, log_tail }
+        CommandOutput {
+            success,
+            log_tail,
+            truncated,
+        }
     }
 }
 
@@ -239,6 +262,7 @@ mod tests {
         let output = CommandOutput::from_captured(true, b"hello world".to_vec());
         assert_eq!(output.log_tail(), "hello world");
         assert!(output.success());
+        assert!(!output.truncated(), "上限未満は切り詰めなし扱いのはず");
     }
 
     #[test]
@@ -251,6 +275,10 @@ mod tests {
         assert!(output.log_tail().starts_with(TRUNCATED_LOG_PREFIX));
         // マーカー分を除いた残りは MAX_CAPTURED_LOG_BYTES 以下。
         assert!(output.log_tail().len() <= MAX_CAPTURED_LOG_BYTES + TRUNCATED_LOG_PREFIX.len());
+        assert!(
+            output.truncated(),
+            "上限超過は truncated() で検出できるはず（イシュー #137 Codex レビュー指摘）"
+        );
     }
 
     #[test]

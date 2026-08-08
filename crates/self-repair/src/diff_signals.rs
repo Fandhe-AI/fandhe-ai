@@ -112,6 +112,15 @@ fn validate_commit_ref(baseline_commit: &str) -> Result<(), DiffSignalsError> {
 /// `runner` で `git` を `sandbox_root` を cwd として起動し、標準出力（UTF-8
 /// lossy 変換済み）を返す。非 0 終了・spawn 失敗はいずれも [`Err`]（fail-closed。
 /// stderr は診断用にメッセージへ含める）。
+///
+/// # ログ切り詰めの扱い（Codex レビュー #137 指摘）
+/// [`crate::exec::CommandOutput::log_tail`] は 256 KiB 超過時に**先頭側**を
+/// 切り詰める（`exec.rs` の `MAX_CAPTURED_LOG_BYTES` 参照）。本関数の戻り値は
+/// `diff_numstat`／`api_signature_touched` が `git diff --numstat`／
+/// `git diff -U0` の構造化出力として逐次パースするため、先頭側が欠落した
+/// ログをそのまま解析すると `lines_changed` の過少計上・`api_broken` の
+/// 見逃しに繋がる（fail-closed 契約違反。モジュール冒頭ドキュメント参照）。
+/// `output.truncated()` が真の場合は解析を試みず [`Err`] を返す。
 fn run_git<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
@@ -126,7 +135,56 @@ fn run_git<R: CommandRunner>(
             output.log_tail()
         )));
     }
+    if output.truncated() {
+        return Err(DiffSignalsError::new(format!(
+            "git {args:?} の出力が 256 KiB 上限で切り詰められました。構造化出力の \
+             先頭側欠落により lines_changed／api_broken を誤計測しうるため、\
+             fail-open な部分解析はせず拒否します（fail-closed。\
+             .claude/rules/security.md A08）"
+        )));
+    }
     Ok(output.log_tail().to_string())
+}
+
+/// `sandbox_root` の作業木で未追跡ファイルを含む全ファイルを index へ反映する
+/// （`git add -A -- .`）。
+///
+/// `diff_numstat`／`api_signature_touched`（本モジュール）と
+/// `guardrail::EvaluationContext::from_repo`（`evaluate_exclusion_rules` が
+/// 内部で呼ぶ。`git diff <baseline_commit>` を独自に起動する既存契約であり
+/// `CommandRunner` 注入が効かない点はモジュール冒頭ドキュメント参照）はいずれも
+/// `git diff <baseline_commit> --` 系のコマンドで差分を取得するが、この形式は
+/// **未追跡（新規追加）ファイルを出力に含めない**（Codex レビュー #137 指摘）。
+/// 候補が新規 `.rs` ファイルを追加した場合、`lines_changed`／`api_broken`／
+/// `gaming_suspect` の計測対象から外れ、変更規模・公開 API ガードを迂回しうる
+/// （fail-open）。
+///
+/// `sandbox_root` は `git worktree add --detach` で作られた候補適用専用の
+/// 隔離作業木（呼び出し元 `RepairCompositeGate::verify` の契約。
+/// `crate::verify_bench_direct` モジュール冒頭ドキュメント参照）であり、実リポの
+/// 作業木・index には影響しない。ここで index へ反映しておけば、以降に走る
+/// 全ての `git diff <baseline_commit>` 系コマンド（本モジュール内・guardrail
+/// 内部呼び出しの双方）が新規ファイルを diff 対象に含めるようになる。
+/// staging 失敗（git 未初期化・権限エラー等）は fail-open で無視せず [`Err`]
+/// を返す。
+fn stage_untracked_files<R: CommandRunner>(
+    runner: &R,
+    sandbox_root: &Path,
+) -> Result<(), DiffSignalsError> {
+    let output = runner
+        .run("git", &["add", "-A", "--", "."], sandbox_root)
+        .map_err(|error| {
+            DiffSignalsError::new(format!(
+                "git add -A の起動に失敗（未追跡ファイル反映）: {error}"
+            ))
+        })?;
+    if !output.success() {
+        return Err(DiffSignalsError::new(format!(
+            "git add -A が失敗しました（未追跡ファイル反映）: {}",
+            output.log_tail()
+        )));
+    }
+    Ok(())
 }
 
 /// `baseline_commit` と現在の作業木の diff から `lines_changed`（追加行数＋
@@ -256,6 +314,10 @@ pub fn measure_diff_signals<R: CommandRunner>(
     policy_exclusion_path: &Path,
 ) -> Result<DiffSignals, DiffSignalsError> {
     validate_commit_ref(baseline_commit)?;
+    // 未追跡（新規追加）ファイルも `git diff <baseline_commit>` の対象に含める
+    // ため、以降の全 diff 計測に先立って index へ反映する（`stage_untracked_files`
+    // ドキュメント参照。Codex レビュー #137 指摘）。
+    stage_untracked_files(runner, sandbox_root)?;
     let (lines_changed, changed_files) = diff_numstat(runner, sandbox_root, baseline_commit)?;
     let api_broken = api_signature_touched(runner, sandbox_root, baseline_commit)?;
     let gaming_suspect = gaming_suspect_from_files(&changed_files);
@@ -420,5 +482,109 @@ mod tests {
         )
         .expect_err("spawn 失敗は Err として伝播するはず");
         assert!(err.message().contains("起動に失敗"));
+    }
+
+    /// `stage_untracked_files` → `diff_numstat`／`api_signature_touched` の
+    /// 一連が、実 git リポジトリ上で**未追跡（新規追加）ファイル**を diff
+    /// 計測対象に含めることを確認する（Codex レビュー #137 指摘「未追跡
+    /// ファイルが差分シグナルから完全に除外される」の再発防止）。
+    /// `ScriptedGit` はスクリプト化した固定応答を返すのみで、`git diff
+    /// --numstat` が実際に未追跡ファイルを出力しないという実 git の挙動
+    /// そのものは検証できないため、`SystemCommandRunner` を使った実 git
+    /// リポジトリで検証する。
+    #[test]
+    fn stage_untracked_files_makes_new_file_visible_to_diff_numstat_and_api_signature_touched() {
+        use crate::exec::SystemCommandRunner;
+
+        let sandbox = std::env::temp_dir().join(format!(
+            "self-repair-diff-signals-untracked-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH 以降のはず")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(&sandbox).expect("sandbox ディレクトリ作成に失敗");
+
+        let runner = SystemCommandRunner::new();
+        let run_ok = |args: &[&str]| {
+            let output = runner
+                .run("git", args, &sandbox)
+                .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗: {error}"));
+            assert!(
+                output.success(),
+                "git {args:?} が失敗しました: {}",
+                output.log_tail()
+            );
+        };
+
+        // baseline commit（追跡ファイルを 1 つ持つ）。
+        std::fs::write(sandbox.join("tracked.rs"), "// tracked\n")
+            .expect("tracked.rs 書き込み失敗");
+        run_ok(&["init", "-q"]);
+        run_ok(&["add", "-A"]);
+        run_ok(&[
+            "-c",
+            "user.email=self-repair-137-diff-signals@example.invalid",
+            "-c",
+            "user.name=self-repair-137-diff-signals",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ]);
+        let baseline_output = runner
+            .run("git", &["rev-parse", "HEAD"], &sandbox)
+            .expect("git rev-parse HEAD の起動に失敗");
+        assert!(
+            baseline_output.success(),
+            "git rev-parse HEAD が失敗しました"
+        );
+        let baseline_commit = baseline_output.log_tail().trim().to_string();
+
+        // 未追跡（新規追加）ファイルを作成する。コミットにもステージングにも
+        // 含めない。`pub fn` を含み `api_signature_touched` の検出対象にもする。
+        std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
+        std::fs::write(
+            sandbox.join("src/new_api.rs"),
+            "pub fn something() -> i32 {\n    1\n}\n",
+        )
+        .expect("src/new_api.rs 書き込み失敗");
+
+        // stage 前: 実 git の既知の挙動として未追跡ファイルは diff --numstat
+        // に現れない（このアサーションはテスト対象コードの前提確認であり、
+        // 本テストの主眼は stage 後の挙動）。
+        let (lines_changed_before, files_before) =
+            diff_numstat(&runner, &sandbox, &baseline_commit).expect("diff_numstat 実行に失敗");
+        assert_eq!(
+            lines_changed_before, 0,
+            "stage 前は未追跡ファイルが diff --numstat に現れないはず（前提確認）"
+        );
+        assert!(
+            files_before.is_empty(),
+            "stage 前の変更ファイル一覧は空のはず（前提確認）"
+        );
+
+        // `stage_untracked_files` 適用後は新規ファイルが diff 計測対象に入る。
+        stage_untracked_files(&runner, &sandbox).expect("stage_untracked_files に失敗");
+        let (lines_changed_after, files_after) =
+            diff_numstat(&runner, &sandbox, &baseline_commit).expect("diff_numstat 実行に失敗");
+        assert!(
+            lines_changed_after > 0,
+            "stage 後は新規ファイルの追加行が lines_changed に計上されるはず"
+        );
+        assert!(
+            files_after.iter().any(|path| path == "src/new_api.rs"),
+            "stage 後は新規ファイルが変更ファイル一覧に含まれるはず: {files_after:?}"
+        );
+        let api_broken = api_signature_touched(&runner, &sandbox, &baseline_commit)
+            .expect("api_signature_touched 実行に失敗");
+        assert!(
+            api_broken,
+            "新規ファイルの pub fn は api_signature_touched で検出されるはず"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
 }
