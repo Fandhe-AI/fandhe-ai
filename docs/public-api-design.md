@@ -178,7 +178,7 @@ impl<T: Element> Tensor<T> {
 
 ### 2.5 REQ-10 との関係: rank を型に載せるか
 
-REQ-10 の受け入れ基準は「rank を型に載せるか（`Tensor<T, const R: usize>` 等）は自作 API 設計時に決定し、ドキュメントに記録すること」と要求する（`docs/spec/04-requirements.md:211` 付近、TASK-10.2 対応）。本文書でこれを決定する。
+REQ-10 の受け入れ基準は「rank を型に載せるか（`Tensor<T, const R: usize>` 等）は自作 API 設計時に決定し、ドキュメントに記録すること」と要求する（`docs/spec/04-requirements.md:222` 付近、TASK-10.2 対応）。本文書でこれを決定する。
 
 **決定**: 基盤層の `Tensor<T>` は rank を型パラメータに含めない（実行時 rank）。理由は PoC-v2-1 の確定事項（`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/README.md`「テンソル型の設計判断」表）と同一で、safetensors/ONNX からロードする重みの shape・rank は実行時にしか決まらないため。const generics による型レベル shape 検証は、コンパイル時に shape が既知な層（固定サイズの Linear 層等）に限定した**後続レイヤー**（TASK-10.x）として、基盤 `Tensor<T>` の上に別途構築する。
 
@@ -418,7 +418,17 @@ impl Device {
 }
 ```
 
-**既定選択の方針（未決事項）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。本文書では既定デバイス選択ロジックを確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
+**既定選択の方針（未決事項。ただし CPU 分は下記の承認済み改訂で確定済み）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。GPU バックエンド（CUDA／Metal）を既定で使う規則は本文書では確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
+
+**構成変更（10 クレート化・`facade` composition root への集約。イシュー #52・spec PR #53 マージ済み。第 16〜18 波が到達した「`autodiff` 内結線モジュール」構成は撤回済み）**: `docs/fusion-graph-design.md` §1 に第 16〜18 波の設計変遷・撤回理由の詳細を記録する（本節は結論のみを記す）。第 18 波の codex-review は、9 クレート構成では「利用者に融合制御を許さず（REQ-12）・`autodiff` を `BackendOps` 抽象に限定したまま」既定バックエンド供給の composition root を置く場所が存在しないことを指摘し、仕様側でのクレート構成変更を要求した。**ユーザー承認（spec イシュー #52 → spec PR #53 マージ済み、`docs/spec/04-requirements.md` REQ-1・REQ-9・REQ-12 の 2026-08-08 追記・`docs/spec/05-tasks.md` TASK-9.3・TASK-9.4・TASK-2.5 の 2026-08-08 追記）により、10 クレート目として `facade`（composition root・compat 公開面の 2 責務。`docs/spec/04-requirements.md:50`）を新設する構成へ確定した**。
+
+**`facade` の 2 責務**: (1) composition root——`Device` 識別子から具体 `BackendOps` を構築・結線する。依存形状は `bench-harness` と同型（`backend-cpu` 通常依存・`backend-cuda` は `cudarc` 動的ロードで無条件・`backend-metal` は `cfg(target_os = "macos")` 分離。`docs/spec/05-tasks.md:316` TASK-9.3）。(2) compat 層（REQ-9）の利用者向け公開面（`docs/spec/04-requirements.md:209` の 2026-08-08 追記・`docs/spec/05-tasks.md:322` TASK-9.4）。
+
+**サポート境界の宣言（`docs/spec/04-requirements.md:210` の 2026-08-08 追記）**: `facade` が唯一のサポートされる公開 API 面であり、`tensor-core`・`autodiff`・`backend-*` は内部クレート（直接利用は非サポート）である。この宣言により、`autodiff` が `facade` 向けに持つ ops 受け取り構築子（技術上 `pub`）は、サポート外の内部 API であり REQ-12 の「利用者向け融合制御 API」に該当しないと整理する。
+
+**承認済み内容と結線の実装場所（本節が定める `Device` 列挙・`Device::available()` による明示選択という契約自体は変更しない）**: 2026-08-08、AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンドを `Device::Cpu`（`backend-cpu` 実装）とすること」である（この一文は変更しない）。**構成上の結論**は、`facade` の composition root（TASK-9.3）が `Device::Cpu` から `backend-cpu` の `CpuBackendOps` を構築し、`autodiff::Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape`（唯一の公開コンストラクタ。渡された `ops` をそのまま格納する非 fallible 関数。`docs/fusion-graph-design.md` §1）へ渡す、という形に確定した。`autodiff` は `Device` 型にも `backend-cpu`／`backend-cuda`／`backend-metal` のいずれの具体クレートにも依存しない。`facade` を経由して構築した `Tape` はすべて CPU 上での融合実行が既定で・無条件に・透過的に効く。承認の記録場所は本節（本段落）および `docs/fusion-graph-design.md` §6.2「既定バックエンドの供給規則」。この承認は「本節が定める `Device` の既定デバイス選択ロジックを実装する」ことを意味しない——`Device::available()` による列挙・明示選択という契約自体は本節のとおり変更しない。**GPU バックエンド（CUDA／Metal）を既定にするかどうかはこの承認の対象外であり、REQ-2 の 27 組再検証後に別途ユーザー承認を得て決定する**（上記「既定選択の方針」の未決事項は継続する）。`facade`（TASK-9.3）は `Device::Cuda(_)`／`Device::Metal` を明示指定された場合の結線も担うが、その具体的な構築規則は TASK-9.3 の実装時にユーザー承認を得たうえで確定する。
+
+**破壊的変更（明記して許容する）**: 出荷済みの無引数 `Tape::new() -> Tape`・`impl Default for Tape` は、`Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape` への差し替えに伴い削除される破壊的変更である（`docs/fusion-graph-design.md` §1）。この破壊は REQ-9 の 2026-08-08 追記（`facade` を唯一のサポートされる公開 API 面とし、`autodiff` は直接利用が非サポートの内部クレートとする宣言）を根拠に許容するが、実装コミットは `.claude/rules/conventional-commits.md` の `!`／`BREAKING CHANGE:` 告知を省略しない。`Tape: Debug`・`Tape: Send` という公開契約自体は変更しない。`BackendOps` trait はスーパートレイトの追加を一切受けない（`Tape` が所有する `ops` フィールドの型が `Box<dyn BackendOps + Send>` である点は `Tape: Send` を維持するための trait object 型 bound であり、`BackendOps` を実装する既存クレートのコードには影響しない。詳細は `docs/fusion-graph-design.md` §3.4「`BackendOps` trait 定義自体は変更しない」）。
 
 **TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
 
@@ -555,7 +565,7 @@ pub enum BackendError {
 
 ## スコープ外（out-of-scope-tracking 対象）
 
-- **compat API 層**（`compat::array`/`compat::Sequential` の詳細シグネチャ）: REQ-9 系の後続タスク。本文書は境界（自作コアの素の API とは別レイヤーであること）のみを 1 章で明記した。
+- **compat API 層**（`compat::array`/`compat::Sequential` の詳細シグネチャ）: REQ-9 系の後続タスク（TASK-9.2・TASK-9.4）。本文書は境界（自作コアの素の API とは別レイヤーであること）のみを 1 章で明記した。利用者向け公開面は `facade` クレートに一本化して配置する（2026-08-08 追記・イシュー #52。§4.1 参照）。`tensor-core`・`autodiff`・`backend-*` は内部クレートであり、`facade` が唯一のサポートされる公開 API 面である。
 - **guardrail/self-repair の CLI 仕様**: 兄弟イシュー #183 が担当。
 - **演算グラフ・カーネル融合機構の API**: イシュー #161（TASK-12.1a）。接続点のみ 6.4 に記載。
 - **シグネチャのコンパイル検証・実装**: TASK-1.4（自作テンソル型 productize）以降の実装イシューへ引き継ぐ。workspace 雛形（TASK-1.1a・#205）はクレートが空のため、本イシューでは検証しない。
