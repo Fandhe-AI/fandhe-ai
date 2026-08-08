@@ -29,12 +29,14 @@ pub(crate) const MAX_FUSED_CHAIN_LEN: usize = 6;
 
 /// 融合セグメント成立に要する最小 elementwise ノード数。
 ///
-/// 設計書に明示規定はないが、単一ノードには融合効果がない
-/// （カーネル呼び出し 1 回を融合なしの通常呼び出し 1 回に置き換える
-/// だけで、複数カーネル呼び出しの削減という融合の目的を果たさない）
-/// ため、安全側の実装判断として 2 以上を要求する（#162 §8 に記録済み。
-/// TASK-12.2〈#166〉の実測で見直し可能）。
-pub(crate) const MIN_FUSED_CHAIN_LEN: usize = 2;
+/// `docs/fusion-graph-design.md` §1・本モジュールの初期スコープ規定
+/// 「elementwise 演算連鎖（4〜6 段程度）」（TASK-12.1 の内容規定。
+/// `docs/spec/05-tasks.md:370`）の下限側に合わせ、[`MAX_FUSED_CHAIN_LEN`]
+/// と対になる下限値として 4 を要求する（#399 codex-review 指摘: 2 段
+/// からの融合を許すと初期スコープの「4〜6 段程度」と矛盾する）。
+/// 2〜3 段の短い連鎖はカーネル呼び出し削減効果が小さく PoC-9 実測の
+/// 対象外であるため非融合フォールバックとする。
+pub(crate) const MIN_FUSED_CHAIN_LEN: usize = 4;
 
 /// [`detect_fusion`] が融合しないと判定した理由。呼び出し側（#163 の
 /// `FusionPlan::from_graph` 相当・#165 のテスト）がフォールバック経路を
@@ -239,9 +241,9 @@ mod tests {
         NodeMeta::new(shape.to_vec(), false, DType::F32)
     }
 
-    /// PoC-9 `ew4` 相当: `y = relu(exp(x + w))` 的な 3 段（Add→Exp→Relu）
-    /// では最小長は満たすが、4 段連鎖（Add→Relu→Exp→Tanh）を構成して
-    /// 「4〜6 段程度」の下限側を検証する。
+    /// PoC-9 `ew4` 相当: 4 段連鎖（Add→Relu→Exp→Tanh）を構成して
+    /// 「4〜6 段程度」の下限（[`MIN_FUSED_CHAIN_LEN`]）ちょうどが
+    /// 融合可能と判定されることを検証する。
     #[test]
     fn detects_four_stage_elementwise_chain_as_single_segment() {
         let mut g = FusionGraph::new();
@@ -314,9 +316,10 @@ mod tests {
         assert_eq!(seg.leaves, vec![chain[0]]);
     }
 
-    /// PoC-9 `ew_fanout` 相当: `a = x + y; b = a * a; c = b + x`。
+    /// PoC-9 `ew_fanout` 相当: `a = x + y; b = a * a; c = b + x; d = relu(c)`。
     /// fan-out（a が 2 回参照される）は融合不能条件にしない
-    /// （設計書 §2.4）。
+    /// （設計書 §2.4）。[`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう
+    /// `relu(c)` を末尾に追加している。
     #[test]
     fn fanout_chain_is_detected_as_single_segment_with_correct_use_count() {
         let mut g = FusionGraph::new();
@@ -325,21 +328,23 @@ mod tests {
         let a = g.push(FusionOp::Add(x, y), f32_meta(&[8])).unwrap();
         let b = g.push(FusionOp::Mul(a, a), f32_meta(&[8])).unwrap();
         let c = g.push(FusionOp::Add(b, x), f32_meta(&[8])).unwrap();
+        let d = g.push(FusionOp::Relu(c), f32_meta(&[8])).unwrap();
 
         assert_eq!(g.node(a).use_count, 2, "a は b と c から参照される");
 
-        let decision = detect_fusion(&g, c);
+        let decision = detect_fusion(&g, d);
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
-        assert_eq!(seg.nodes, vec![a, b, c]);
+        assert_eq!(seg.nodes, vec![a, b, c, d]);
         assert_eq!(seg.leaves, vec![x, y]);
     }
 
     /// fan-in: `(a + b) * (c + d)` 形の合流が単一セグメントとして検出
     /// される（`FusionGraph` は DAG 一般をサポートするため fan-in も
     /// 通常ケース。設計書 §6.2「同一テープ内での遅延グラフの合流は
-    /// 正規サポート対象」）。
+    /// 正規サポート対象」）。[`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう
+    /// `relu(root)` を末尾に追加している。
     #[test]
     fn fanin_confluence_is_detected_as_single_segment() {
         let mut g = FusionGraph::new();
@@ -349,13 +354,14 @@ mod tests {
         let d = g.push(FusionOp::Input, f32_meta(&[8])).unwrap();
         let left = g.push(FusionOp::Add(a, b), f32_meta(&[8])).unwrap();
         let right = g.push(FusionOp::Add(c, d), f32_meta(&[8])).unwrap();
-        let root = g.push(FusionOp::Mul(left, right), f32_meta(&[8])).unwrap();
+        let mul = g.push(FusionOp::Mul(left, right), f32_meta(&[8])).unwrap();
+        let root = g.push(FusionOp::Relu(mul), f32_meta(&[8])).unwrap();
 
         let decision = detect_fusion(&g, root);
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
-        assert_eq!(seg.nodes, vec![left, right, root]);
+        assert_eq!(seg.nodes, vec![left, right, mul, root]);
         assert_eq!(seg.leaves, vec![a, b, c, d]);
     }
 
@@ -417,7 +423,8 @@ mod tests {
     }
 
     /// PoC-9 `ew_matmul_ew` 相当: Gemm 境界でセグメントが分断される
-    /// （設計書 §3.2 (b)）。
+    /// （設計書 §3.2 (b)）。[`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう
+    /// `tanh`／2 個目の `relu` を末尾に追加している。
     #[test]
     fn gemm_boundary_splits_the_segment() {
         let mut g = FusionGraph::new();
@@ -426,17 +433,21 @@ mod tests {
         let gemm = g.push(FusionOp::Gemm(a, b), f32_meta(&[4, 4])).unwrap();
         let relu = g.push(FusionOp::Relu(gemm), f32_meta(&[4, 4])).unwrap();
         let exp = g.push(FusionOp::Exp(relu), f32_meta(&[4, 4])).unwrap();
+        let tanh = g.push(FusionOp::Tanh(exp), f32_meta(&[4, 4])).unwrap();
+        let relu2 = g.push(FusionOp::Relu(tanh), f32_meta(&[4, 4])).unwrap();
 
-        let decision = detect_fusion(&g, exp);
+        let decision = detect_fusion(&g, relu2);
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
         // Gemm 自体はセグメントに含まれず、その出力が葉として扱われる。
-        assert_eq!(seg.nodes, vec![relu, exp]);
+        assert_eq!(seg.nodes, vec![relu, exp, tanh, relu2]);
         assert_eq!(seg.leaves, vec![gemm]);
     }
 
     /// Sum／Max 境界も同様にセグメントを分断する（設計書 §3.2 (a)）。
+    /// [`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう sum 側のセグメントに
+    /// `relu2`／`tanh2` を追加している。
     #[test]
     fn sum_and_max_boundary_split_the_segment() {
         let mut g = FusionGraph::new();
@@ -453,12 +464,14 @@ mod tests {
             .unwrap();
         let exp = g.push(FusionOp::Exp(sum), f32_meta(&[4])).unwrap();
         let tanh = g.push(FusionOp::Tanh(exp), f32_meta(&[4])).unwrap();
+        let relu2 = g.push(FusionOp::Relu(tanh), f32_meta(&[4])).unwrap();
+        let tanh2 = g.push(FusionOp::Tanh(relu2), f32_meta(&[4])).unwrap();
 
-        let decision = detect_fusion(&g, tanh);
+        let decision = detect_fusion(&g, tanh2);
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
-        assert_eq!(seg.nodes, vec![exp, tanh]);
+        assert_eq!(seg.nodes, vec![exp, tanh, relu2, tanh2]);
         assert_eq!(seg.leaves, vec![sum]);
 
         // relu 自身を root にすれば、その手前で完結する別セグメントとして
