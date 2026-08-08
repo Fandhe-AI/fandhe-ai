@@ -206,7 +206,8 @@ cargo run -p bench-harness --release --bin peak_memory_bench -- \
 ## スコープ外・申し送り（`.claude/rules/out-of-scope-tracking.md` 準拠）
 
 - **係数の確定・再調整（384MiB 判定）**: 兄弟イシュー #179（TASK-14.2b）が本記録
-  （特に「内部 API 値と外部参考値の乖離」節のデータ）を入力として実施する
+  （特に「内部 API 値と外部参考値の乖離」節のデータ）を入力として実施する。確定結果は
+  `docs/peak-memory-coefficient-decision.md` に記録済み（係数 2.0 を維持・超過なし）
 - **計測手段の環境差文書化**（`docs/peak-memory-measurement-methods.md` 等）: #180
   （TASK-14.3）のスコープ
 - **`BackendOps::gemm` 演算内部の一時確保への計測フック**: CPU バックエンドは
