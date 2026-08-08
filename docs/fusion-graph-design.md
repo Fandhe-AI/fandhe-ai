@@ -677,9 +677,14 @@ elementwise 連鎖に限り透過的に融合が働きうる**構成とする（
 いずれの実行方式にも透過的に融合が働きうる」は実装不能な過大な契約
 だった。理由は次項「backward（VJP）は融合対象外」のとおり。§1 で
 確定した「単一の fallible 呼び出しの内部」という窓自体は forward・
-backward のどちらの呼び出しにも同じ形で適用されるが、**融合される
-対象（forward が記録した elementwise 遅延グラフ）が backward 側には
-存在しない**ため、窓が同じでも実質的に融合が起きるのは forward の
+backward のどちらの呼び出しにも同じ形で適用される。ただし、**backward
+が自ら生成する中間値（VJP 計算式の計算過程）は forward のような
+elementwise 遅延グラフを構成しないため、backward 側に新たな融合対象は
+生じない**——`Tape::backward` が窓に到達するのは、`grad.rs::vjp` の
+入力として forward が既に記録した遅延グラフを読み出す場合に限られ、
+その際に融合されるのはあくまで forward 側の遅延グラフである（下記
+「backward（VJP）は融合対象外」参照）。窓が同じでも実質的に融合が
+起きるのは forward の
 遅延グラフを読み出す箇所に限られる）。すなわち:
 
 - `Tape` が記録する `Op`（`tape.rs` の `Op` enum、MatMul／Add／Mul／
