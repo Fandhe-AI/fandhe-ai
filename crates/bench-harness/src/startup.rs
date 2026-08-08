@@ -343,8 +343,18 @@ impl StartupReport {
         Ok(report)
     }
 
-    /// スキーマ・試行数整合・値の有限性を fail-closed で検証する
+    /// スキーマ・試行数整合・値の有限性・分位点の再計算一致を fail-closed で検証する
     /// （`report::BenchReport::validate` と同型の方針。詳細は同モジュール参照）。
+    ///
+    /// `backend` は許可リスト（[`StartupBackend::parse`]）で検証し、改ざんされた自由文字列を
+    /// 「検証済み DTO」として後続の性能比較に渡さない（#170 レビュー指摘への対応。
+    /// `.claude/rules/security.md` A08）。分位点（`wall_secs`／`device_init_secs`／
+    /// `first_kernel_secs`）は非負性に加え、`samples` から [`stats::median_q1_q3`] で
+    /// 再計算した値と完全一致することを要求する（同関数は決定的な
+    /// ソート＋インデックス選択のみで構成され丸め誤差が入らないため、`==` 比較で安全。
+    /// `stats.rs` の実装参照）。これにより「正常な samples と恣意的な集計値を併記した JSON」を
+    /// 弾く。各 sample についても `wall_secs`（子プロセス全体の外部計測）が
+    /// `first_kernel_secs`（内部計測）以上という契約（モジュール冒頭「計測 2 系統」参照）を検証する。
     pub fn validate(&self) -> Result<(), StartupError> {
         if self.schema_version != STARTUP_SCHEMA_VERSION {
             return Err(StartupError::ProtocolViolation(format!(
@@ -352,6 +362,8 @@ impl StartupReport {
                 self.schema_version
             )));
         }
+        StartupBackend::parse(&self.backend)
+            .map_err(|e| StartupError::ProtocolViolation(format!("backend が許可リスト外: {e}")))?;
         if self.phase != "cold" && self.phase != "warm" {
             return Err(StartupError::ProtocolViolation(format!(
                 "未知の phase: {:?}（cold / warm のいずれかのはず）",
@@ -370,23 +382,7 @@ impl StartupReport {
                 self.trials
             )));
         }
-        for (label, q) in [
-            ("wall_secs", &self.wall_secs),
-            ("device_init_secs", &self.device_init_secs),
-            ("first_kernel_secs", &self.first_kernel_secs),
-        ] {
-            if !(q.median.is_finite() && q.q1.is_finite() && q.q3.is_finite()) {
-                return Err(StartupError::ProtocolViolation(format!(
-                    "{label} に非有限値が含まれている"
-                )));
-            }
-            if !(q.q1 <= q.median && q.median <= q.q3) {
-                return Err(StartupError::ProtocolViolation(format!(
-                    "{label}: q1 <= median <= q3 を満たさない（q1={}, median={}, q3={}）",
-                    q.q1, q.median, q.q3
-                )));
-            }
-        }
+
         for (i, t) in self.samples.iter().enumerate() {
             if !(t.wall_secs.is_finite() && t.wall_secs >= 0.0) {
                 return Err(StartupError::ProtocolViolation(format!(
@@ -407,7 +403,52 @@ impl StartupReport {
                     t.first_kernel_secs, t.device_init_secs
                 )));
             }
+            if !(t.wall_secs.is_finite() && t.wall_secs >= t.first_kernel_secs) {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "samples[{i}] の wall_secs が非有限値、または first_kernel_secs を \
+                     下回る（子プロセス全体の外部計測は内部計測以上のはず）: \
+                     wall={}, first_kernel={}",
+                    t.wall_secs, t.first_kernel_secs
+                )));
+            }
         }
+
+        let wall: Vec<f64> = self.samples.iter().map(|t| t.wall_secs).collect();
+        let device_init: Vec<f64> = self.samples.iter().map(|t| t.device_init_secs).collect();
+        let first_kernel: Vec<f64> = self.samples.iter().map(|t| t.first_kernel_secs).collect();
+
+        for (label, q, recomputed_from) in [
+            ("wall_secs", &self.wall_secs, &wall),
+            ("device_init_secs", &self.device_init_secs, &device_init),
+            ("first_kernel_secs", &self.first_kernel_secs, &first_kernel),
+        ] {
+            if !(q.median.is_finite() && q.q1.is_finite() && q.q3.is_finite()) {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "{label} に非有限値が含まれている"
+                )));
+            }
+            if !(q.q1 >= 0.0 && q.median >= 0.0 && q.q3 >= 0.0) {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "{label} に負の分位点が含まれている（q1={}, median={}, q3={}）",
+                    q.q1, q.median, q.q3
+                )));
+            }
+            if !(q.q1 <= q.median && q.median <= q.q3) {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "{label}: q1 <= median <= q3 を満たさない（q1={}, median={}, q3={}）",
+                    q.q1, q.median, q.q3
+                )));
+            }
+            let recomputed: QuartileSecs = stats::median_q1_q3(recomputed_from)?.into();
+            if recomputed != *q {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "{label}: samples から再計算した分位点と格納値が不一致（改ざんの疑い）: \
+                     recomputed={{median={}, q1={}, q3={}}}, stored={{median={}, q1={}, q3={}}}",
+                    recomputed.median, recomputed.q1, recomputed.q3, q.median, q.q1, q.q3
+                )));
+            }
+        }
+
         Ok(())
     }
 
@@ -688,6 +729,67 @@ mod tests {
             "first_kernel_secs":{"median":0.05,"q1":0.05,"q3":0.05},
             "samples":[{"wall_secs":0.1,"device_init_secs":-999.0,"first_kernel_secs":0.05}]}"#;
         let err = StartupReport::from_json(bad_json).unwrap_err();
+        assert!(matches!(err, StartupError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn startup_report_from_json_rejects_unknown_backend() {
+        // #170 Codex レビュー指摘の再現ケース: backend が許可リスト（cpu/cuda/metal）外の
+        // 自由文字列でも、旧実装は許可リスト検証をしていなかったため受理してしまっていた。
+        let bad_json = format!(
+            r#"{{"schema_version":"{STARTUP_SCHEMA_VERSION}","backend":"bogus","phase":"warm","trials":1,
+            "wall_secs":{{"median":0.1,"q1":0.1,"q3":0.1}},
+            "device_init_secs":{{"median":0.01,"q1":0.01,"q3":0.01}},
+            "first_kernel_secs":{{"median":0.05,"q1":0.05,"q3":0.05}},
+            "samples":[{{"wall_secs":0.1,"device_init_secs":0.01,"first_kernel_secs":0.05}}]}}"#
+        );
+        let err = StartupReport::from_json(&bad_json).unwrap_err();
+        assert!(matches!(err, StartupError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn startup_report_from_json_rejects_negative_quartile() {
+        // #170 Codex レビュー指摘の再現ケース: 分位点が負値でも
+        // 「q1 <= median <= q3」の順序関係だけでは検出できなかった。
+        let bad_json = format!(
+            r#"{{"schema_version":"{STARTUP_SCHEMA_VERSION}","backend":"cpu","phase":"warm","trials":1,
+            "wall_secs":{{"median":-0.1,"q1":-0.2,"q3":-0.05}},
+            "device_init_secs":{{"median":0.01,"q1":0.01,"q3":0.01}},
+            "first_kernel_secs":{{"median":0.05,"q1":0.05,"q3":0.05}},
+            "samples":[{{"wall_secs":0.1,"device_init_secs":0.01,"first_kernel_secs":0.05}}]}}"#
+        );
+        let err = StartupReport::from_json(&bad_json).unwrap_err();
+        assert!(matches!(err, StartupError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn startup_report_from_json_rejects_tampered_aggregate_mismatch() {
+        // #170 Codex レビュー指摘の再現ケース: 正常な samples に対して恣意的な
+        // 集計値（分位点）を併記した JSON は、samples からの再計算比較なしには検出できなかった。
+        let bad_json = format!(
+            r#"{{"schema_version":"{STARTUP_SCHEMA_VERSION}","backend":"cpu","phase":"warm","trials":1,
+            "wall_secs":{{"median":0.001,"q1":0.001,"q3":0.001}},
+            "device_init_secs":{{"median":0.01,"q1":0.01,"q3":0.01}},
+            "first_kernel_secs":{{"median":0.05,"q1":0.05,"q3":0.05}},
+            "samples":[{{"wall_secs":0.1,"device_init_secs":0.01,"first_kernel_secs":0.05}}]}}"#
+        );
+        let err = StartupReport::from_json(&bad_json).unwrap_err();
+        assert!(matches!(err, StartupError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn startup_report_from_json_rejects_wall_secs_below_first_kernel_secs() {
+        // #170 Codex レビュー指摘の再現ケース: 子プロセス全体の外部計測（wall_secs）が
+        // 内部計測（first_kernel_secs）を下回る契約違反は、device_init_secs との
+        // 比較だけでは検出できなかった。
+        let bad_json = format!(
+            r#"{{"schema_version":"{STARTUP_SCHEMA_VERSION}","backend":"cpu","phase":"warm","trials":1,
+            "wall_secs":{{"median":0.02,"q1":0.02,"q3":0.02}},
+            "device_init_secs":{{"median":0.01,"q1":0.01,"q3":0.01}},
+            "first_kernel_secs":{{"median":0.05,"q1":0.05,"q3":0.05}},
+            "samples":[{{"wall_secs":0.02,"device_init_secs":0.01,"first_kernel_secs":0.05}}]}}"#
+        );
+        let err = StartupReport::from_json(&bad_json).unwrap_err();
         assert!(matches!(err, StartupError::ProtocolViolation(_)));
     }
 
