@@ -14,6 +14,14 @@ FROM rust:1.88-slim-bookworm
 # 経由して必ず要求するため、root（RUSTUP_HOME 既定は /usr/local/rustup で dev ユーザーは
 # 書き込み不可）でイメージビルド時に事前導入しておく。未導入のまま dev ユーザーで
 # `rustup target add` を実行すると権限エラーになるため（PR #238 Bugbot 指摘）。
+#
+# stable ツールチェーンの事前導入（イシュー #325）: リポジトリルートの
+# rust-toolchain.toml（channel = "stable"。CI ベースラインの rust-base-ci reusable
+# workflow が前提とする単一真実源）により、/work でマウントされたワークスペースでの
+# cargo / rustup 実行はイメージ既定の 1.88 ではなく stable を解決する。未導入のまま
+# dev ユーザーで cargo を実行すると stable の自動インストールが root 所有の
+# RUSTUP_HOME への書き込みで権限エラーになるため、イメージビルド時に components /
+# target ごと導入しておく（PR #344 Bugbot 指摘）。
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         pkg-config \
@@ -23,7 +31,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && rustup component add rustfmt clippy \
-    && rustup target add aarch64-apple-darwin
+    && rustup target add aarch64-apple-darwin \
+    && rustup toolchain install stable \
+        --component rustfmt \
+        --component clippy \
+        --target aarch64-apple-darwin
 
 # ホストと UID を合わせやすい非 root ユーザーで作業する（成果物の所有権事故防止）
 ARG UID=1000
