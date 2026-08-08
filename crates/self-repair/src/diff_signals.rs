@@ -24,6 +24,16 @@
 //! 埋めず [`Err`] を返す（`.claude/rules/security.md` A08「判定の迂回経路を
 //! 作らない」。`verify_gates.rs` の契約と同じ）。
 //!
+//! 変更ファイル一覧は `git diff --name-status -z`（[`list_changed_files`]）で
+//! 構造化取得する。`git diff --numstat`（`-z` なし）の 3 列目は rename を
+//! `src/{old.rs => new.rs}` という単一フィールドの人間可読表記で返すため、
+//! これをそのまま `git show <baseline>:<file>` のパス引数に使うと必ず失敗し、
+//! その失敗を「baseline に存在しない新規ファイル」へ丸めると rename と同時の
+//! 破壊的変更（既存 `pub fn` 削除等）を見逃す（PR #361 Codex レビュー P1）。
+//! `git show` の失敗は、`list_changed_files` が返すステータスで新規追加
+//! （`ChangedFile::is_newly_added()`）と確認できた場合のみ許容し、それ以外は
+//! [`Err`]（fail-closed）とする（[`show_file_at_baseline`] ドキュメント参照）。
+//!
 //! # A03（インジェクション）対応
 //! `baseline_commit` は git コマンドライン引数へ渡す前に 7〜40 桁の 16 進文字列
 //! であることを検証する（[`validate_commit_ref`]）。検証しない場合、先頭に
@@ -62,6 +72,48 @@ pub struct DiffSignals {
     pub gaming_suspect: bool,
     /// match したポリシー除外リストのルール `id` 一覧（空 = match なし）。
     pub exclusion_rule_ids: Vec<String>,
+}
+
+/// `git diff --name-status -z` の 1 レコード（構造化ステータス＋パス）。
+///
+/// [`list_changed_files`] が構築する。`status` の先頭 1 文字が `'R'`／`'C'`
+/// （rename／copy）の場合のみ `old_path` を `Some` にする（`git` の
+/// `-z` 出力はこの場合のみ旧パス・新パスを別々の NUL 区切りフィールドとして
+/// 出す。それ以外の `A`／`M`／`D`／`T` 等は単一パスであり baseline 側・
+/// 現作業木側で同じパスを指す）。`path` は常に現作業木側のパス（`A` の
+/// 場合のみ baseline 側に対応物がない新規パス）。
+///
+/// # 修正の経緯（PR #361 Codex レビュー P1）
+/// これ以前は `git diff --numstat` の 3 列目をそのままファイルパスとして
+/// 扱っていた。しかし `--numstat`（`-z` なし）は rename を `src/{old.rs =>
+/// new.rs}` という**単一フィールド中の人間可読表記**で返すため、この文字列を
+/// そのまま `git show <baseline>:<file>` のパス引数へ渡すと必ず失敗する。
+/// [`show_file_at_baseline_if_present`] がこの失敗を一律「baseline に存在
+/// しない新規ファイル」（`Ok(None)`）に丸めていたため、rename と同時に
+/// 既存 `pub fn` を削除しても `api_broken=false` になり得た（fail-closed
+/// 違反・A08）。`--name-status -z` は rename／copy を旧パス・新パスの組で
+/// 構造化して返すため、この曖昧さが生じない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChangedFile {
+    /// `git diff --name-status` のステータス文字列（例: `"A"`／`"M"`／`"D"`／
+    /// `"R100"`／`"C100"`）。先頭 1 文字のみを判定に使う。
+    status: String,
+    /// rename／copy の場合のみ `Some`（baseline 側のパス）。
+    old_path: Option<String>,
+    /// 現作業木側のパス（`status` が `"A"` の場合は baseline に対応物がない）。
+    path: String,
+}
+
+impl ChangedFile {
+    /// baseline 側のパス（rename／copy なら旧パス、それ以外は `path` と同一）。
+    fn baseline_path(&self) -> &str {
+        self.old_path.as_deref().unwrap_or(&self.path)
+    }
+
+    /// baseline に対応物を持たない新規追加ファイルか（`status` 先頭が `'A'`）。
+    fn is_newly_added(&self) -> bool {
+        self.status.starts_with('A')
+    }
 }
 
 /// [`measure_diff_signals`] の実測時エラー。
@@ -195,23 +247,31 @@ fn stage_untracked_files<R: CommandRunner>(
 }
 
 /// `baseline_commit` と現在の作業木の diff から `lines_changed`（追加行数＋
-/// 削除行数の合計）・変更ファイル一覧を実測する。移植元:
-/// `tests/revalidation_bug_fix.rs::diff_numstat`（モジュール冒頭ドキュメント
-/// 参照）。バイナリファイル等で `added`/`deleted` 列の解析に失敗した場合、
-/// fail-open な 0 加算にせず [`Err`] を返す（移植元コメントの fail-closed 方針を
-/// そのまま踏襲。本番経路のため `panic!` ではなく型付きエラーにする）。
+/// 削除行数の合計）を実測する。移植元: `tests/revalidation_bug_fix.rs::
+/// diff_numstat`（モジュール冒頭ドキュメント参照）。バイナリファイル等で
+/// `added`/`deleted` 列の解析に失敗した場合、fail-open な 0 加算にせず
+/// [`Err`] を返す（移植元コメントの fail-closed 方針をそのまま踏襲。本番
+/// 経路のため `panic!` ではなく型付きエラーにする）。
+///
+/// # rename 表記と行数計測の独立性（PR #361 Codex レビュー P1）
+/// `--numstat`（`-z` なし）は rename を 3 列目に `src/{old.rs => new.rs}`
+/// という人間可読の単一フィールドで返すが、1・2 列目（追加行数・削除行数）
+/// は rename の有無に関わらずタブ区切りの数値のまま変わらない。本関数は
+/// 3 列目（パス）を読み捨て 1・2 列目のみを合算するため、rename 表記の
+/// 曖昧さに影響されない。ファイルパスが必要な処理（`api_broken`・
+/// `gaming_suspect` の実測）は構造化された [`list_changed_files`]
+/// （`git diff --name-status -z`）側に一本化する。
 fn diff_numstat<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
     baseline_commit: &str,
-) -> Result<(u64, Vec<String>), DiffSignalsError> {
+) -> Result<u64, DiffSignalsError> {
     let stdout = run_git(
         runner,
         sandbox_root,
         &["diff", "--numstat", baseline_commit, "--"],
     )?;
     let mut lines_changed: u64 = 0;
-    let mut files = Vec::new();
     for line in stdout.lines() {
         let mut cols = line.splitn(3, '\t');
         let added = cols.next().ok_or_else(|| {
@@ -220,7 +280,6 @@ fn diff_numstat<R: CommandRunner>(
         let deleted = cols.next().ok_or_else(|| {
             DiffSignalsError::new(format!("git diff --numstat の行が想定外です: {line:?}"))
         })?;
-        let path = cols.next().unwrap_or("").to_string();
         lines_changed += added.parse::<u64>().map_err(|error| {
             DiffSignalsError::new(format!(
                 "added 列の解析に失敗しました（fail-open で 0 に丸めない）: {added:?}: {error}"
@@ -231,11 +290,119 @@ fn diff_numstat<R: CommandRunner>(
                 "deleted 列の解析に失敗しました（fail-open で 0 に丸めない）: {deleted:?}: {error}"
             ))
         })?;
-        if !path.is_empty() {
-            files.push(path);
+    }
+    Ok(lines_changed)
+}
+
+/// トークンが `git diff --name-status` のステータス列として妥当な形式か
+/// （先頭 1 文字が `A`／`M`／`D`／`T`／`U`／`X`／`B`／`R`／`C` のいずれかで、
+/// 残りは数字のみ〈rename／copy の類似度。例: `R100`〉）。
+///
+/// # 存在理由（PR #361 Codex レビュー フォローアップ）
+/// [`run_git`]（延いては [`list_changed_files`]）は stdout と stderr を
+/// 結合したログを返す（`exec.rs::SystemCommandRunner::run` 参照）。
+/// `stage_untracked_files` が直前に走らせる `git add -A` 等は環境によって
+/// stderr へ警告（CRLF 変換警告等）を出しうる。この警告テキストが `-z`
+/// 出力の NUL 区切りストリームへ（NUL 終端なしで）連結されると、警告文の
+/// 断片が「ステータストークン」として読まれ、後続の本来のパストークンを
+/// 巻き込んで誤ってペアリングしうる（レコードのズレ）。本関数でステータス
+/// トークンの形式を検証し、想定外の文字列は「解析失敗」として拒否する
+/// ことで、この巻き込みを fail-open な誤ペアリングではなく fail-closed な
+/// エラーに変える。
+fn is_plausible_status_token(token: &str) -> bool {
+    let mut chars = token.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !matches!(first, 'A' | 'M' | 'D' | 'T' | 'U' | 'X' | 'B' | 'R' | 'C') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_digit())
+}
+
+/// `baseline_commit` と現在の作業木の diff から変更ファイル一覧を
+/// **構造化**して実測する（`git diff --name-status -z`）。
+///
+/// `-z` は各レコードを NUL 区切りで返す（パス自体に含まれ得るタブ・改行・
+/// クォートの曖昧さを避けるため）。rename／copy（ステータス先頭が `'R'`／
+/// `'C'`）のみ、旧パス・新パスが別々の NUL 区切りフィールドとして続く
+/// （実測確認済み: `git diff --name-status -z <baseline> --` は類似度が
+/// rename 検出閾値〈既定 50%〉を上回る変更を `R050\0old\0new\0` の形で返す。
+/// 閾値未満の変更は `D\0old\0` と `A\0new\0` の 2 レコードに分かれ、この
+/// 場合も本関数の対応で問題なく扱える——`D` は baseline 側 = 現作業木側
+/// パスとして扱われ、[`api_signature_touched`] が baseline 内容と「削除
+/// 済み＝空文字列」を比較して破壊を検出する）。他のステータス
+/// （`A`／`M`／`D`／`T` 等）は単一パスのみ続く。各ステータストークンは
+/// [`is_plausible_status_token`] で形式検証する（同関数ドキュメント参照。
+/// stdout/stderr 結合ログでの誤ペアリング対策）。
+///
+/// # 非 UTF-8 パスの扱い
+/// `run_git`（延いては本関数）は `String::from_utf8_lossy` を経由するため
+/// （`exec.rs::CommandOutput::from_captured`）、非 UTF-8 バイト列を含む
+/// パスは置換文字 U+FFFD へ変換される。この場合、後段の処理は fail-open に
+/// ならない: 現作業木側パスが破損すれば `std::fs::read_to_string` が失敗し
+/// 「削除済み＝空文字列」扱い（[`api_signature_touched`]）で安全側（破壊
+/// あり方向）に倒れ、baseline 側パス（`ChangedFile::baseline_path()`）が
+/// 破損すれば `git show` が失敗し、新規追加以外は [`Err`]（fail-closed。
+/// [`show_file_at_baseline`] 参照）になる。
+fn list_changed_files<R: CommandRunner>(
+    runner: &R,
+    sandbox_root: &Path,
+    baseline_commit: &str,
+) -> Result<Vec<ChangedFile>, DiffSignalsError> {
+    let stdout = run_git(
+        runner,
+        sandbox_root,
+        &["diff", "--name-status", "-z", baseline_commit, "--"],
+    )?;
+    let mut tokens = stdout.split('\0');
+    let mut files = Vec::new();
+    while let Some(status) = tokens.next() {
+        if status.is_empty() {
+            // `-z` 出力末尾の NUL によって生じる空トークン（split の仕様上、
+            // 末尾に必ず 1 つ現れる）。ステータス文字列が空になることは
+            // 他になく安全に読み飛ばせる。
+            continue;
+        }
+        if !is_plausible_status_token(status) {
+            return Err(DiffSignalsError::new(format!(
+                "git diff --name-status -z の出力にステータストークンとして不正な \
+                 値が含まれています（stdout/stderr 結合ログへの警告混入等による \
+                 レコードのズレの可能性があるため fail-closed に拒否します。\
+                 .claude/rules/security.md A08）: {status:?}"
+            )));
+        }
+        let is_rename_or_copy = status.starts_with('R') || status.starts_with('C');
+        if is_rename_or_copy {
+            let old_path = tokens.next().ok_or_else(|| {
+                DiffSignalsError::new(format!(
+                    "git diff --name-status -z の rename/copy レコードに旧パスがありません: status={status:?}"
+                ))
+            })?;
+            let new_path = tokens.next().ok_or_else(|| {
+                DiffSignalsError::new(format!(
+                    "git diff --name-status -z の rename/copy レコードに新パスがありません: status={status:?}"
+                ))
+            })?;
+            files.push(ChangedFile {
+                status: status.to_string(),
+                old_path: Some(old_path.to_string()),
+                path: new_path.to_string(),
+            });
+        } else {
+            let path = tokens.next().ok_or_else(|| {
+                DiffSignalsError::new(format!(
+                    "git diff --name-status -z のレコードにパスがありません: status={status:?}"
+                ))
+            })?;
+            files.push(ChangedFile {
+                status: status.to_string(),
+                old_path: None,
+                path: path.to_string(),
+            });
         }
     }
-    Ok((lines_changed, files))
+    Ok(files)
 }
 
 /// シグネチャ行として扱う接頭辞（先頭空白除去後）。`guardrail::checks::
@@ -258,28 +425,33 @@ fn extract_public_signatures(content: &str) -> Vec<String> {
         .collect()
 }
 
-/// `baseline_commit:file` の内容を取得する。`file` が `baseline_commit` 時点に
-/// 存在しない（現作業木で新規追加されたファイル）場合は `Ok(None)` を返す
-/// （新規ファイルは baseline 側にシグネチャを持ちようがなく「破壊」判定の
-/// 対象になり得ないため）。移植元: `guardrail::checks::api_stability::
-/// show_file_at_baseline_if_present`。
+/// `baseline_commit:file` の内容を取得する。呼び出し元（[`api_signature_touched`]）
+/// は `changed_files`（[`list_changed_files`] の構造化ステータス）で
+/// `ChangedFile::is_newly_added()` が真と確認できたファイルについてのみ本関数を
+/// **呼ばない**契約とする。したがって本関数へ渡される `file` は baseline 時点に
+/// 存在するはずであり、`git show` の非 0 終了は「baseline に存在しない」への
+/// fail-open な丸めではなく実測異常として [`Err`]（fail-closed）を返す。
 ///
-/// # fail-open に見える箇所の正当性（A08）
-/// `git show` の非 0 終了を一律「baseline に存在しない」として扱う。これが
-/// 安全なのは、[`measure_diff_signals`] が本関数を呼ぶ前に必ず
-/// `diff_numstat`（`git diff --numstat baseline_commit --`）を実行しており、
-/// `baseline_commit` 自体が無効な参照であれば `diff_numstat` の時点で
-/// [`DiffSignalsError`] として先に拒否される（呼び出し順序に依存した前提。
-/// `guardrail::checks::api_stability` 側と同じ前提〈`check.rs` の実行順序
-/// 契約〉。この順序を変更する場合は本関数の前提の再検証が必要）。
-/// `output.truncated()` の場合は「存在しない」に丸めず [`Err`]（fail-closed。
-/// [`run_git`] と同じ理由）。
-fn show_file_at_baseline_if_present<R: CommandRunner>(
+/// # 修正の経緯（PR #361 Codex レビュー P1）
+/// 旧実装（`show_file_at_baseline_if_present`）は `git show` の非 0 終了を
+/// 一律「baseline に存在しない新規ファイル」（`Ok(None)`）に丸めていた。
+/// [`list_changed_files`] 導入以前は変更ファイル一覧が `--numstat` の
+/// 人間可読パス（rename 時は `src/{old.rs => new.rs}`）由来だったため、
+/// rename されたファイルへの `git show` は常にこの経路で失敗し「新規
+/// ファイル」に丸められていた。rename と同時に既存 `pub fn` を削除した
+/// 変更が `api_broken=false` へすり抜けうる欠陥だった（fail-closed 違反・
+/// A08）。現在は [`list_changed_files`]（`git diff --name-status -z`）が
+/// rename／copy を旧パス・新パスの組として構造化するため、baseline 側の
+/// パス（`ChangedFile::baseline_path()`）を渡せば `git show` は新規追加
+/// 以外で失敗しないはずであり、失敗は実測異常として拒否してよい。
+/// `output.truncated()` の場合も同様に「存在しない」へ丸めず [`Err`]
+/// （fail-closed。[`run_git`] と同じ理由）。
+fn show_file_at_baseline<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
     baseline_commit: &str,
     file: &str,
-) -> Result<Option<String>, DiffSignalsError> {
+) -> Result<String, DiffSignalsError> {
     let path_arg = format!("{baseline_commit}:{file}");
     let output = runner
         .run("git", &["show", &path_arg], sandbox_root)
@@ -287,7 +459,12 @@ fn show_file_at_baseline_if_present<R: CommandRunner>(
             DiffSignalsError::new(format!("git show {path_arg:?} の起動に失敗: {error}"))
         })?;
     if !output.success() {
-        return Ok(None);
+        return Err(DiffSignalsError::new(format!(
+            "git show {path_arg:?} が失敗しました（name-status では新規追加以外と \
+             判定されたファイルのため、baseline に存在するはずでした。fail-open な \
+             『新規ファイル』への丸めはしません。.claude/rules/security.md A08）: {}",
+            output.log_tail()
+        )));
     }
     if output.truncated() {
         return Err(DiffSignalsError::new(format!(
@@ -296,27 +473,38 @@ fn show_file_at_baseline_if_present<R: CommandRunner>(
              （fail-closed。.claude/rules/security.md A08）"
         )));
     }
-    Ok(Some(output.log_tail().to_string()))
+    Ok(output.log_tail().to_string())
 }
 
-/// `changed_files`（[`diff_numstat`] が返す変更ファイル一覧）のうち `.rs`
-/// ファイルについて、baseline 時点に存在した公開シグネチャ行（`pub fn`／
-/// `pub struct`／`pub enum`）が現在の作業木（`sandbox_root` 配下の実ファイル）
-/// から消失していないかを検査する。新規追加ファイル・新規追加シグネチャのみ
-/// の変更は破壊とみなさない（[`DiffSignals::api_broken`] ドキュメント参照。
-/// 移植元: `guardrail::checks::api_stability::api_broken`）。
+/// `changed_files`（[`list_changed_files`] が返す構造化された変更ファイル
+/// 一覧）のうち `.rs` ファイルについて、baseline 時点に存在した公開
+/// シグネチャ行（`pub fn`／`pub struct`／`pub enum`）が現在の作業木
+/// （`sandbox_root` 配下の実ファイル）から消失していないかを検査する。
+/// 新規追加ファイル（`ChangedFile::is_newly_added()`）・新規追加シグネチャ
+/// のみの変更は破壊とみなさない（[`DiffSignals::api_broken`] ドキュメント
+/// 参照。移植元: `guardrail::checks::api_stability::api_broken`）。
+///
+/// rename／copy は `ChangedFile::baseline_path()`（旧パス）で baseline
+/// 内容を取得し、`ChangedFile::path`（新パス）で現作業木の内容を読む
+/// （PR #361 Codex レビュー P1 修正。[`show_file_at_baseline`] ドキュメント
+/// 参照）。
 fn api_signature_touched<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
     baseline_commit: &str,
-    changed_files: &[String],
+    changed_files: &[ChangedFile],
 ) -> Result<bool, DiffSignalsError> {
-    for file in changed_files.iter().filter(|path| path.ends_with(".rs")) {
-        let Some(baseline_content) =
-            show_file_at_baseline_if_present(runner, sandbox_root, baseline_commit, file)?
-        else {
+    for file in changed_files
+        .iter()
+        .filter(|file| file.path.ends_with(".rs"))
+    {
+        if file.is_newly_added() {
+            // baseline に対応物がなく、消失し得るシグネチャがない。
             continue;
-        };
+        }
+
+        let baseline_content =
+            show_file_at_baseline(runner, sandbox_root, baseline_commit, file.baseline_path())?;
         let baseline_sigs = extract_public_signatures(&baseline_content);
         if baseline_sigs.is_empty() {
             continue;
@@ -326,7 +514,8 @@ fn api_signature_touched<R: CommandRunner>(
         // チャが消失＝破壊）。読み取り失敗（権限等）は「消えた」と区別せず
         // 安全側（破壊あり方向）に倒す。`guardrail::checks::api_stability::
         // api_broken` と同一方針。
-        let current_content = std::fs::read_to_string(sandbox_root.join(file)).unwrap_or_default();
+        let current_content =
+            std::fs::read_to_string(sandbox_root.join(&file.path)).unwrap_or_default();
         let current_sigs = extract_public_signatures(&current_content);
 
         if baseline_sigs.iter().any(|sig| !current_sigs.contains(sig)) {
@@ -354,11 +543,20 @@ fn is_test_path(path: &str) -> bool {
 /// `touches_prod` は `is_test_path` を共通の判定基準として使うため、
 /// ルート直下 `tests/foo.rs` のようなパスが誤って両方 `false`（または
 /// `touches_prod` 側で誤って `true`）になるブラインドスポットを持たない。
-fn gaming_suspect_from_files(changed_files: &[String]) -> bool {
-    let touches_test = changed_files.iter().any(|path| is_test_path(path));
-    let touches_prod = changed_files
+///
+/// rename／copy は現パス（`ChangedFile::path`）と旧パス
+/// （`ChangedFile::baseline_path()`）の**両方**を判定対象にする。新パスの
+/// みで判定すると、`tests/foo.rs` を `src/foo.rs` へ rename して本番コードを
+/// 変更したケースが「テストコードを触れていない」に見えてしまう
+/// （逆方向も同様）。
+fn gaming_suspect_from_files(changed_files: &[ChangedFile]) -> bool {
+    let touches_test = changed_files
         .iter()
-        .any(|path| path.ends_with(".rs") && !is_test_path(path));
+        .any(|file| is_test_path(&file.path) || is_test_path(file.baseline_path()));
+    let touches_prod = changed_files.iter().any(|file| {
+        (file.path.ends_with(".rs") && !is_test_path(&file.path))
+            || (file.baseline_path().ends_with(".rs") && !is_test_path(file.baseline_path()))
+    });
     touches_test && touches_prod
 }
 
@@ -413,7 +611,8 @@ pub fn measure_diff_signals<R: CommandRunner>(
     // ため、以降の全 diff 計測に先立って index へ反映する（`stage_untracked_files`
     // ドキュメント参照。Codex レビュー #137 指摘）。
     stage_untracked_files(runner, sandbox_root)?;
-    let (lines_changed, changed_files) = diff_numstat(runner, sandbox_root, baseline_commit)?;
+    let lines_changed = diff_numstat(runner, sandbox_root, baseline_commit)?;
+    let changed_files = list_changed_files(runner, sandbox_root, baseline_commit)?;
     let api_broken = api_signature_touched(runner, sandbox_root, baseline_commit, &changed_files)?;
     let gaming_suspect = gaming_suspect_from_files(&changed_files);
     let exclusion_rule_ids =
@@ -432,15 +631,26 @@ mod tests {
     use crate::exec::{CommandOutput, ExecError};
     use std::cell::RefCell;
 
+    /// テスト用に [`ChangedFile`] を組み立てる補助関数。
+    fn cf(status: &str, old_path: Option<&str>, path: &str) -> ChangedFile {
+        ChangedFile {
+            status: status.to_string(),
+            old_path: old_path.map(str::to_string),
+            path: path.to_string(),
+        }
+    }
+
     /// スクリプト化した `CommandRunner` テストダブル。`args` の先頭から
-    /// `git diff --numstat ...` / `git show <baseline>:<file>` 等を区別して
-    /// 固定応答を返す（`verify_gates.rs` のテストダブルと同種の設計）。
-    /// `show_stdout`／`show_success` は `git show` 呼び出し全件に共通で返す
-    /// 単一の固定応答（本モジュールのテストは 1 ファイルのみを対象とするため
-    /// 十分。`show_success = false` は「baseline に存在しないファイル」を
-    /// 模擬する）。
+    /// `git diff --numstat ...` / `git diff --name-status -z ...` /
+    /// `git show <baseline>:<file>` 等を区別して固定応答を返す
+    /// （`verify_gates.rs` のテストダブルと同種の設計）。`show_stdout`／
+    /// `show_success` は `git show` 呼び出し全件に共通で返す単一の固定応答
+    /// （本モジュールのテストは 1 ファイルのみを対象とするため十分。
+    /// `show_success = false` は「baseline にファイルが存在しない」を模擬する
+    /// 実測異常ケース用）。
     struct ScriptedGit {
         numstat_stdout: String,
+        name_status_stdout: String,
         show_stdout: String,
         show_success: bool,
         calls: RefCell<Vec<Vec<String>>>,
@@ -450,17 +660,19 @@ mod tests {
         fn new(numstat_stdout: &str, show_stdout: &str) -> Self {
             ScriptedGit {
                 numstat_stdout: numstat_stdout.to_string(),
+                name_status_stdout: String::new(),
                 show_stdout: show_stdout.to_string(),
                 show_success: true,
                 calls: RefCell::new(Vec::new()),
             }
         }
 
-        /// `git show` が非 0 終了する（baseline にファイルが存在しない）
-        /// テストダブルを構築する。
-        fn new_missing_at_baseline(numstat_stdout: &str) -> Self {
+        /// `git show` が非 0 終了する（`api_signature_touched` が新規追加と
+        /// 誤認せずに実測異常として拒否すべきケース）テストダブルを構築する。
+        fn new_show_fails(numstat_stdout: &str) -> Self {
             ScriptedGit {
                 numstat_stdout: numstat_stdout.to_string(),
+                name_status_stdout: String::new(),
                 show_stdout: String::new(),
                 show_success: false,
                 calls: RefCell::new(Vec::new()),
@@ -483,10 +695,37 @@ mod tests {
                     true,
                     self.numstat_stdout.clone().into_bytes(),
                 ))
+            } else if args.contains(&"--name-status") {
+                Ok(CommandOutput::from_captured(
+                    true,
+                    self.name_status_stdout.clone().into_bytes(),
+                ))
             } else if args.first() == Some(&"show") {
                 Ok(CommandOutput::from_captured(
                     self.show_success,
                     self.show_stdout.clone().into_bytes(),
+                ))
+            } else {
+                Ok(CommandOutput::from_captured(true, Vec::new()))
+            }
+        }
+    }
+
+    /// `git diff --name-status ...` 呼び出しにのみ固定応答を返すテストダブル
+    /// （[`list_changed_files`] 単体のパース確認用。他の git 呼び出しは
+    /// 到達しない想定のため空成功を返す）。
+    struct NameStatusOnly(String);
+    impl CommandRunner for NameStatusOnly {
+        fn run(
+            &self,
+            _program: &str,
+            args: &[&str],
+            _cwd: &Path,
+        ) -> Result<CommandOutput, ExecError> {
+            if args.contains(&"--name-status") {
+                Ok(CommandOutput::from_captured(
+                    true,
+                    self.0.clone().into_bytes(),
                 ))
             } else {
                 Ok(CommandOutput::from_captured(true, Vec::new()))
@@ -531,10 +770,22 @@ mod tests {
     #[test]
     fn diff_numstat_parses_added_and_deleted_columns() {
         let runner = ScriptedGit::new("3\t1\tsrc/lib.rs\n0\t2\ttests/foo.rs\n", "");
-        let (lines_changed, files) =
+        let lines_changed =
             diff_numstat(&runner, Path::new("/sandbox"), "abc1234").expect("解析成功");
         assert_eq!(lines_changed, 6);
-        assert_eq!(files, vec!["src/lib.rs", "tests/foo.rs"]);
+    }
+
+    /// rename 表記（`src/{old.rs => new.rs}`）を含む `--numstat` 出力でも、
+    /// 1・2 列目（追加行数・削除行数）は rename の影響を受けず正しく合算
+    /// されることを確認する（[`diff_numstat`] ドキュメント「rename 表記と
+    /// 行数計測の独立性」参照。PR #361 Codex レビュー P1 の修正方針の前提
+    /// 確認）。
+    #[test]
+    fn diff_numstat_sums_added_and_deleted_regardless_of_rename_notation_in_path_column() {
+        let runner = ScriptedGit::new("1\t1\tsrc/{old.rs => new.rs}\n", "");
+        let lines_changed =
+            diff_numstat(&runner, Path::new("/sandbox"), "abc1234").expect("解析成功");
+        assert_eq!(lines_changed, 2);
     }
 
     #[test]
@@ -560,7 +811,7 @@ mod tests {
             &runner,
             Path::new("/sandbox"),
             "abc1234",
-            &["src/lib.rs".to_string()],
+            &[cf("M", None, "src/lib.rs")],
         )
         .expect("成功");
         assert!(
@@ -597,7 +848,7 @@ mod tests {
             "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
         );
         let touched =
-            api_signature_touched(&runner, &sandbox, "abc1234", &["src/lib.rs".to_string()])
+            api_signature_touched(&runner, &sandbox, "abc1234", &[cf("M", None, "src/lib.rs")])
                 .expect("成功");
         assert!(
             !touched,
@@ -609,23 +860,112 @@ mod tests {
     }
 
     #[test]
-    fn api_signature_touched_treats_file_missing_at_baseline_as_new_file() {
-        // `git show` が非 0 終了 = baseline 時点にファイルが存在しない
-        // （現作業木での新規追加ファイル）。消失し得るシグネチャがないため
-        // 破壊とはみなさない。
-        let runner = ScriptedGit::new_missing_at_baseline("5\t0\tsrc/new_api.rs\n");
+    fn api_signature_touched_treats_newly_added_status_as_new_file_without_calling_git_show() {
+        // status="A"（新規追加）と確認できる場合、baseline にシグネチャを
+        // 持ちようがないため `git show` を呼ばずスキップする。
+        // `ScriptedGit::new_show_fails` は `git show` が呼ばれると非 0 終了を
+        // 返すテストダブルであり、[`show_file_at_baseline`] は非 0 終了を
+        // 一律 `Err` にする（PR #361 修正後の契約）。したがって、もし
+        // `api_signature_touched` が誤って `git show` を呼び出せば
+        // 本テストの `.expect("成功（git show を呼ばずスキップされるはず）")`
+        // が `Err` を受け取って panic する。この `.expect()` が通ること自体が
+        // 「`git show` を呼んでいない」ことの直接証明になる。
+        let runner = ScriptedGit::new_show_fails("5\t0\tsrc/new_api.rs\n");
         let touched = api_signature_touched(
             &runner,
             Path::new("/sandbox"),
             "abc1234",
-            &["src/new_api.rs".to_string()],
+            &[cf("A", None, "src/new_api.rs")],
+        )
+        .expect("成功（git show を呼ばずスキップされるはず）");
+        assert!(
+            !touched,
+            "status=A（新規追加）のファイルは破壊とみなさないはず"
+        );
+    }
+
+    #[test]
+    fn api_signature_touched_fails_closed_when_git_show_fails_for_non_added_status() {
+        // status="M"（変更）にも関わらず `git show` が非 0 終了する異常系は、
+        // 「新規ファイル」への fail-open な丸めをせず [`DiffSignalsError`]
+        // として拒否する（PR #361 Codex レビュー P1 修正の中核契約）。
+        let runner = ScriptedGit::new_show_fails("1\t0\tsrc/lib.rs\n");
+        let err = api_signature_touched(
+            &runner,
+            Path::new("/sandbox"),
+            "abc1234",
+            &[cf("M", None, "src/lib.rs")],
+        )
+        .expect_err("status=M での git show 失敗は fail-closed に拒否されるはず");
+        assert!(err.message().contains("git show"));
+    }
+
+    /// PR #361 Codex レビュー P1 の中核回帰テスト（要求 (a)）: rename と同時に
+    /// baseline に存在した `pub fn` を削除した場合、baseline 側のパス
+    /// （`old_path`）から `git show` した内容と比較して破壊として検出される。
+    #[test]
+    fn api_signature_touched_flags_pub_fn_removed_during_rename_as_broken() {
+        let runner = ScriptedGit::new(
+            "1\t1\tsrc/old.rs\tsrc/new.rs\n",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn sub(a: i32, b: i32) -> i32 { a - b }\n",
+        );
+        let touched = api_signature_touched(
+            &runner,
+            Path::new("/sandbox"),
+            "abc1234",
+            &[cf("R050", Some("src/old.rs"), "src/new.rs")],
+        )
+        .expect("成功");
+        assert!(
+            touched,
+            "rename と同時に baseline の pub fn sub が消えている場合は破壊として検出 \
+             されるはず（rename 表記を git show のパスへ誤って渡していた旧実装では \
+             この破壊が見逃されていた）"
+        );
+    }
+
+    /// PR #361 Codex レビュー P1 の回帰テスト（要求 (b)）: 内容が同一の純粋な
+    /// rename は破壊として誤検出されない。
+    #[test]
+    fn api_signature_touched_does_not_flag_pure_rename_without_content_change_as_broken() {
+        let sandbox = std::env::temp_dir().join(format!(
+            "self-repair-diff-signals-pure-rename-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH 以降のはず")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
+        std::fs::write(
+            sandbox.join("src/new.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .expect("src/new.rs 書き込み失敗");
+
+        let runner = ScriptedGit::new(
+            "0\t0\tsrc/old.rs\tsrc/new.rs\n",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        );
+        let touched = api_signature_touched(
+            &runner,
+            &sandbox,
+            "abc1234",
+            &[cf("R100", Some("src/old.rs"), "src/new.rs")],
         )
         .expect("成功");
         assert!(
             !touched,
-            "baseline に存在しない新規ファイルは破壊とみなさないはず"
+            "内容が同一の純粋な rename は破壊として誤検出されないはず"
         );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
     }
+
+    // 要求 (c)（新規追加ファイルは従来どおり非破壊扱い）は
+    // `api_signature_touched_treats_newly_added_status_as_new_file_without_calling_git_show`
+    // が同一シナリオでより強く（`git show` を呼んでいないこと自体を）検証
+    // 済みのため、重複するテストはここに置かない。
 
     #[test]
     fn api_signature_touched_ignores_non_rs_files() {
@@ -634,7 +974,7 @@ mod tests {
             &runner,
             Path::new("/sandbox"),
             "abc1234",
-            &["Cargo.toml".to_string()],
+            &[cf("M", None, "Cargo.toml")],
         )
         .expect("成功");
         assert!(!touched, ".rs 以外のファイルは走査対象外のはず");
@@ -642,13 +982,16 @@ mod tests {
 
     #[test]
     fn gaming_suspect_from_files_true_when_prod_and_test_both_touched() {
-        let files = vec!["src/lib.rs".to_string(), "tests/foo_test.rs".to_string()];
+        let files = vec![
+            cf("M", None, "src/lib.rs"),
+            cf("M", None, "tests/foo_test.rs"),
+        ];
         assert!(gaming_suspect_from_files(&files));
     }
 
     #[test]
     fn gaming_suspect_from_files_false_when_only_prod_touched() {
-        let files = vec!["src/lib.rs".to_string()];
+        let files = vec![cf("M", None, "src/lib.rs")];
         assert!(!gaming_suspect_from_files(&files));
     }
 
@@ -658,14 +1001,87 @@ mod tests {
         // `path.contains("/tests/")` では取りこぼし、かつ `.rs` 拡張子ゆえに
         // `touches_prod` 側で誤って本番コード扱いされていた回帰ケース
         // （PR #355 codex-review 指摘。P1）。
-        let files = vec!["src/lib.rs".to_string(), "tests/foo.rs".to_string()];
+        let files = vec![cf("M", None, "src/lib.rs"), cf("M", None, "tests/foo.rs")];
         assert!(gaming_suspect_from_files(&files));
     }
 
     #[test]
     fn gaming_suspect_from_files_false_when_only_root_level_tests_dir_touched() {
-        let files = vec!["tests/foo.rs".to_string()];
+        let files = vec![cf("M", None, "tests/foo.rs")];
         assert!(!gaming_suspect_from_files(&files));
+    }
+
+    /// rename の**旧パス**がテストディレクトリを指す場合も、新パス側のみでは
+    /// 判定漏れするブラインドスポットを持たない（[`gaming_suspect_from_files`]
+    /// ドキュメント参照）。
+    #[test]
+    fn gaming_suspect_from_files_true_when_rename_moves_file_out_of_tests_dir() {
+        let files = vec![
+            cf("R100", Some("tests/foo.rs"), "src/foo.rs"),
+            cf("M", None, "src/lib.rs"),
+        ];
+        assert!(
+            gaming_suspect_from_files(&files),
+            "tests/ から src/ への rename は touches_test 側で検出されるはず"
+        );
+    }
+
+    /// [`list_changed_files`]（`git diff --name-status -z`）の rename/copy
+    /// レコード（旧パス・新パスの 2 フィールド）のパースを確認する。
+    #[test]
+    fn list_changed_files_parses_rename_record_with_old_and_new_path() {
+        let stdout = "R050\0src/old.rs\0src/new.rs\0";
+        let runner = NameStatusOnly(stdout.to_string());
+        let files =
+            list_changed_files(&runner, Path::new("/sandbox"), "abc1234").expect("解析成功");
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].status, "R050");
+        assert_eq!(files[0].old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(files[0].path, "src/new.rs");
+    }
+
+    #[test]
+    fn list_changed_files_parses_non_rename_records_with_single_path() {
+        let stdout = "A\0src/new_api.rs\0M\0src/lib.rs\0D\0src/removed.rs\0";
+        let runner = NameStatusOnly(stdout.to_string());
+        let files =
+            list_changed_files(&runner, Path::new("/sandbox"), "abc1234").expect("解析成功");
+        assert_eq!(files.len(), 3);
+        assert_eq!(files[0].status, "A");
+        assert!(files[0].old_path.is_none());
+        assert_eq!(files[0].path, "src/new_api.rs");
+        assert_eq!(files[1].status, "M");
+        assert_eq!(files[1].path, "src/lib.rs");
+        assert_eq!(files[2].status, "D");
+        assert_eq!(files[2].path, "src/removed.rs");
+    }
+
+    #[test]
+    fn is_plausible_status_token_accepts_known_statuses_and_rejects_others() {
+        assert!(is_plausible_status_token("A"));
+        assert!(is_plausible_status_token("M"));
+        assert!(is_plausible_status_token("D"));
+        assert!(is_plausible_status_token("R050"));
+        assert!(is_plausible_status_token("C100"));
+        assert!(!is_plausible_status_token(""));
+        assert!(!is_plausible_status_token("src/lib.rs"));
+        assert!(!is_plausible_status_token("warning:"));
+    }
+
+    /// `run_git`（延いては [`list_changed_files`]）は stdout/stderr を結合した
+    /// ログを返す（`exec.rs::SystemCommandRunner::run`）。`git add -A`
+    /// （`stage_untracked_files`）等が出す警告テキストが `-z` 出力へ NUL
+    /// 終端なしで連結されると、警告文の断片がステータストークンとして誤って
+    /// 読まれレコードがズレうる。[`is_plausible_status_token`] による検証で
+    /// これを fail-closed な `Err` に変えることを確認する（PR #361 Codex
+    /// レビュー フォローアップ）。
+    #[test]
+    fn list_changed_files_fails_closed_on_stderr_warning_mistaken_for_status_token() {
+        let stdout = "A\0src/new_api.rs\0warning: LF will be replaced by CRLF\0src/lib.rs\0";
+        let runner = NameStatusOnly(stdout.to_string());
+        let err = list_changed_files(&runner, Path::new("/sandbox"), "abc1234")
+            .expect_err("警告文の混入は解析失敗として拒否されるはず");
+        assert!(err.message().contains("warning"));
     }
 
     #[test]
@@ -761,11 +1177,13 @@ mod tests {
         )
         .expect("src/new_api.rs 書き込み失敗");
 
-        // stage 前: 実 git の既知の挙動として未追跡ファイルは diff --numstat
-        // に現れない（このアサーションはテスト対象コードの前提確認であり、
-        // 本テストの主眼は stage 後の挙動）。
-        let (lines_changed_before, files_before) =
+        // stage 前: 実 git の既知の挙動として未追跡ファイルは diff --numstat／
+        // --name-status に現れない（このアサーションはテスト対象コードの
+        // 前提確認であり、本テストの主眼は stage 後の挙動）。
+        let lines_changed_before =
             diff_numstat(&runner, &sandbox, &baseline_commit).expect("diff_numstat 実行に失敗");
+        let files_before = list_changed_files(&runner, &sandbox, &baseline_commit)
+            .expect("list_changed_files 実行に失敗");
         assert_eq!(
             lines_changed_before, 0,
             "stage 前は未追跡ファイルが diff --numstat に現れないはず（前提確認）"
@@ -777,14 +1195,16 @@ mod tests {
 
         // `stage_untracked_files` 適用後は新規ファイルが diff 計測対象に入る。
         stage_untracked_files(&runner, &sandbox).expect("stage_untracked_files に失敗");
-        let (lines_changed_after, files_after) =
+        let lines_changed_after =
             diff_numstat(&runner, &sandbox, &baseline_commit).expect("diff_numstat 実行に失敗");
+        let files_after = list_changed_files(&runner, &sandbox, &baseline_commit)
+            .expect("list_changed_files 実行に失敗");
         assert!(
             lines_changed_after > 0,
             "stage 後は新規ファイルの追加行が lines_changed に計上されるはず"
         );
         assert!(
-            files_after.iter().any(|path| path == "src/new_api.rs"),
+            files_after.iter().any(|file| file.path == "src/new_api.rs"),
             "stage 後は新規ファイルが変更ファイル一覧に含まれるはず: {files_after:?}"
         );
         let api_broken = api_signature_touched(&runner, &sandbox, &baseline_commit, &files_after)
@@ -795,6 +1215,94 @@ mod tests {
              （guardrail::checks::api_stability::api_broken と同一意味論。イシュー #142 \
              差し戻し分: 本アサーションは旧実装の誤った意味論〈新規ファイルの pub fn も \
              一律検出〉を固定していたため反転した）"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// PR #361 Codex レビュー P1 の回帰テスト（要求 (a)）: rename と同時に
+    /// baseline に存在した `pub fn` を削除した場合、実 git リポジトリ上で
+    /// `measure_diff_signals`（公開エントリポイント全体）を通しても
+    /// `api_broken=true` になることを確認する。
+    ///
+    /// 修正前コード（コミット 62815cf）では本テストと同一の操作列で
+    /// `api_broken=false`（fail-closed 違反）になることを実行して確認済み
+    /// （rename 表記が `git show` のパス引数に渡され、非 0 終了が一律
+    /// 「新規ファイル」に丸められていたため）。
+    #[test]
+    fn measure_diff_signals_detects_pub_fn_removal_hidden_behind_rename() {
+        use crate::exec::SystemCommandRunner;
+
+        let sandbox = std::env::temp_dir().join(format!(
+            "self-repair-diff-signals-proof-rename-removal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH 以降のはず")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(sandbox.join("src")).expect("sandbox ディレクトリ作成に失敗");
+
+        let runner = SystemCommandRunner::new();
+        let run_ok = |args: &[&str]| {
+            let output = runner
+                .run("git", args, &sandbox)
+                .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗: {error}"));
+            assert!(
+                output.success(),
+                "git {args:?} が失敗しました: {}",
+                output.log_tail()
+            );
+        };
+
+        std::fs::write(
+            sandbox.join("src/old.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn sub(a: i32, b: i32) -> i32 { a - b }\n",
+        )
+        .expect("src/old.rs 書き込み失敗");
+        run_ok(&["init", "-q"]);
+        run_ok(&["add", "-A"]);
+        run_ok(&[
+            "-c",
+            "user.email=self-repair-361-diff-signals@example.invalid",
+            "-c",
+            "user.name=self-repair-361-diff-signals",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ]);
+        let baseline_output = runner
+            .run("git", &["rev-parse", "HEAD"], &sandbox)
+            .expect("git rev-parse HEAD の起動に失敗");
+        assert!(baseline_output.success(), "git rev-parse HEAD が失敗");
+        let baseline_commit = baseline_output.log_tail().trim().to_string();
+
+        // rename しつつ、rename 前に存在した `pub fn sub` を削除する
+        // （類似度が rename 検出閾値〈既定 50%〉を上回る範囲で本文を維持）。
+        std::fs::remove_file(sandbox.join("src/old.rs")).expect("src/old.rs 削除に失敗");
+        std::fs::write(
+            sandbox.join("src/new.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .expect("src/new.rs 書き込み失敗");
+
+        let policy_exclusion_path = std::env::current_dir()
+            .expect("current_dir 取得に失敗")
+            .ancestors()
+            .find(|dir| dir.join("policy-exclusion.toml").is_file())
+            .map(|dir| dir.join("policy-exclusion.toml"))
+            .expect("リポジトリルートの policy-exclusion.toml が見つからないはず");
+
+        let signals =
+            measure_diff_signals(&runner, &sandbox, &baseline_commit, &policy_exclusion_path)
+                .expect("measure_diff_signals 実行に失敗");
+        assert!(
+            signals.api_broken,
+            "rename と同時に baseline の pub fn sub を削除した場合は api_broken=true \
+             になるはず（PR #361 Codex レビュー P1: rename 表記が git show に渡され \
+             非 0 終了が一律『新規ファイル』に丸められると、この破壊が見逃される）"
         );
 
         let _ = std::fs::remove_dir_all(&sandbox);
