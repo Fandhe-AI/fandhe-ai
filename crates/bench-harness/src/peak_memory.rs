@@ -247,20 +247,28 @@ fn theoretical_min_bytes(size: usize) -> Result<u64, PeakMemoryError> {
 }
 
 /// ピークメモリ計測の実行設定。
+///
+/// フィールドは非公開とし、[`PeakMemoryConfig::new`] の値域検証（`size`・
+/// `trials` の上限・オーバーフロー検査）を必ず経由させる（PR #370
+/// codex-review 指摘 P1 対応: 構造体リテラルによる直接構築を許すと
+/// `run_peak_memory` 内の `Vec::with_capacity(trials)`・`size * size`
+/// 計算が未検証値に到達し、リソース枯渇や整数オーバーフローを招く）。
 #[derive(Debug, Clone, Copy)]
 pub struct PeakMemoryConfig {
-    pub backend: PeakMemoryBackend,
+    backend: PeakMemoryBackend,
     /// GEMM の M=N=K（正方行列のみ対応。REQ-14 代表ワークロードが正方形の
     /// ため、本ハーネスも非正方形をサポートしない）。
-    pub size: usize,
+    size: usize,
     /// 試行回数（[`DEFAULT_PEAK_MEMORY_TRIALS`] 推奨。`startup::StartupConfig`
     /// と同型の理由で `1..=MAX_PEAK_MEMORY_TRIALS` を要求する）。
-    pub trials: usize,
+    trials: usize,
 }
 
 impl PeakMemoryConfig {
     /// `size`・`trials` の値域を検証して構築する（`startup::StartupConfig::new`
     /// と同型の fail-closed 方針。0 は分位点・行列として無意味なため拒否する）。
+    /// 本コンストラクタが `PeakMemoryConfig` を得る唯一の手段であり（フィールド
+    /// 非公開）、`run_peak_memory` へ未検証値が渡る経路を持たない。
     pub fn new(
         backend: PeakMemoryBackend,
         size: usize,
@@ -294,6 +302,21 @@ impl PeakMemoryConfig {
             size,
             trials,
         })
+    }
+
+    /// 計測対象バックエンド。
+    pub fn backend(&self) -> PeakMemoryBackend {
+        self.backend
+    }
+
+    /// GEMM の M=N=K（`1..=MAX_GEMM_SIZE` に検証済み）。
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    /// 試行回数（`1..=MAX_PEAK_MEMORY_TRIALS` に検証済み）。
+    pub fn trials(&self) -> usize {
+        self.trials
     }
 }
 
@@ -732,16 +755,16 @@ fn run_metal_trial(_size: usize, _trial_index: usize) -> Result<PeakMemoryTrial,
 /// `peak_memory_bench` CLI（`src/bin/peak_memory_bench.rs`）・スモークテスト
 /// （`tests/peak_memory_smoke.rs`）から呼ばれる。
 pub fn run_peak_memory(config: &PeakMemoryConfig) -> Result<PeakMemoryReport, PeakMemoryError> {
-    let mut samples = Vec::with_capacity(config.trials);
-    for i in 0..config.trials {
-        let trial = match config.backend {
-            PeakMemoryBackend::Cpu => run_cpu_trial(config.size, i)?,
-            PeakMemoryBackend::Cuda => run_cuda_trial(config.size, i)?,
-            PeakMemoryBackend::Metal => run_metal_trial(config.size, i)?,
+    let mut samples = Vec::with_capacity(config.trials());
+    for i in 0..config.trials() {
+        let trial = match config.backend() {
+            PeakMemoryBackend::Cpu => run_cpu_trial(config.size(), i)?,
+            PeakMemoryBackend::Cuda => run_cuda_trial(config.size(), i)?,
+            PeakMemoryBackend::Metal => run_metal_trial(config.size(), i)?,
         };
         samples.push(trial);
     }
-    PeakMemoryReport::from_trials(config.backend, config.size, samples)
+    PeakMemoryReport::from_trials(config.backend(), config.size(), samples)
 }
 
 #[cfg(test)]
