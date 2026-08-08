@@ -78,9 +78,25 @@
 //! 2.56 倍）。融合版と非融合合成の bit 完全一致は `tests/gemm_epilogue_parity.rs` で
 //! 検証する。CUDA／Metal は GPU カーネル内 epilogue 融合をスコープ外とし、
 //! `gemm_bias_act` のデフォルト実装（elementwise 未実装のため `Unsupported`）に留める。
+//!
+//! TASK-12.1c（#163）で [`fused_elementwise`] モジュール
+//! （[`fused_elementwise::run_fused_elementwise`]）を追加した。
+//! `tensor_core::fusion`（TASK-12.1a〜c・#161〜#163）が検出・生成した
+//! elementwise 連鎖（`tensor_core::FusionPlan`）を、per-op カーネル
+//! （[`elementwise`]）の逐次合成ではなく単一パスのレジスタ内評価で実行
+//! する CPU 参照実装である（PoC-9 `ElemwiseFuse` 方式。詳細は
+//! `fused_elementwise` モジュール冒頭コメント）。`tensor_core::BackendOps::
+//! run_fused`（trait への追加・[`ops::CpuBackendOps`] での override 実装）
+//! への結線は #164 のスコープであり、#163 時点では関数ベースのカーネル
+//! API として独立に提供する（[`gemm`]／[`elementwise`] と同じ「trait
+//! 定義なし・関数ベース」構成）。数値契約は per-op カーネルと完全に
+//! 揃え、融合の有無で許容誤差・演算定義を変えない（`tests/
+//! fused_elementwise_parity.rs` で融合 vs 非融合の数値一致を検証する。
+//! 受け入れ条件）。
 
 mod device;
 mod elementwise;
+pub mod fused_elementwise;
 pub mod gemm;
 pub mod gemm_blis;
 pub mod memory;
@@ -92,6 +108,7 @@ pub use device::CpuDeviceProvider;
 pub use elementwise::{
     add, add_slice, exp, exp_slice, mul, mul_slice, relu, relu_slice, tanh, tanh_slice,
 };
+pub use fused_elementwise::run_fused_elementwise;
 pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
