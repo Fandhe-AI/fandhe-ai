@@ -1,202 +1,266 @@
-//! TASK-3.3b（イシュー #141・REQ-3）: バグ修正種別のループ完走実証。
+//! TASK-3.3b（イシュー #141）: バグ修正種別の自己修復ループを
+//! `self-repair run` CLI 経由で 1 回実行し、実測結果を記録する。
 //!
-//! `docs/self-repair-revalidation-plan.md`（#140・人間承認済み）4.1 節の推奨題材
-//! 「`Var::relu`（`crates/autodiff/src/var.rs`）の実装本体を sigmoid 相当の演算
-//! グラフにすり替える」を、リポジトリ外の一時 sandbox（`git clone --local`）へ
-//! 注入し、`self_repair::SelfRepairLoop`（検出 → 修正試行 1〈誤り・却下〉→
-//! 修正試行 2〈正解・採用〉→ `guardrail::decide` 経由の取り込み判断）が人間介在
-//! なしで完走することを実証する統合テストである。
+//! REQ-3 の v2 追加受け入れ基準（`docs/spec/04-requirements.md:96`）「自作コアに
+//! 対する自己修復ループの人間介在なし完走を新実装リポで再実証する」を、
+//! `docs/self-repair-revalidation-plan.md` §4.1 の推奨題材（`Var::relu`
+//! 〈`crates/autodiff/src/var.rs`〉の実装本体を sigmoid 相当の演算グラフへ
+//! すり替える）で 1 ループ実測する。題材選定・完走判定基準は TASK-3.3a
+//! （#140・PR #322）で人間承認済み。
 //!
-//! # 4 ゲート合成についての設計上の制約（重要）
-//! `crate::verify_gates::CargoVerificationGate`（build/test/clippy の 3 ゲート）と
-//! `crate::verify_bench::SelfRepairBenchGate`（ベンチゲート）の合成（4 ゲート化）は
-//! `crates/self-repair/src/` 本体へまだ結線されていない（#136 系のスコープ。
-//! `lib.rs` モジュールコメント参照）。本テストは `tests/` 配下の統合テストクレート
-//! （`self_repair` を外部クレートとして利用する）であり、
-//! `self_repair::outcome::VerifiedEvidence::new` は `pub(crate)` のため
-//! ここから新しい `VerifiedEvidence`（bench シグナルを差し替えたもの）を構築でき
-//! ない（A08 の型レベル境界。`outcome.rs` のドキュメント参照）。
+//! # CLI 経由への移行（#139 (c) 差し戻し対応。#141 は 2 度目の差し戻し）
+//! 旧版（PR #341）は **lib API 直接呼び出しの実証ハーネス**として
+//! [`self_repair::SelfRepairLoop`] を直接構築していたが、#139 reopen コメント
+//! の判断 (c) 差し戻しにより、完走判定基準 1・2・4・5・6
+//! （`docs/self-repair-revalidation-plan.md` §5）を CLI 経由・
+//! `self-repair verify-log` 外部コマンド経由・候補 diff 直接実測・
+//! `signal_source: "measured"` 付きで満たすことが求められた（#139 ユーザー
+//! 判断コメント・2026-08-08）。機能追加種別（#142）は
+//! `tests/feature_addition_loop_completion_task_3_3c.rs`（PR #361）で同様の
+//! 移行を先行完了しており、本ファイルはその構成をバグ修正種別へ写像する。
+//! `env!("CARGO_BIN_EXE_self-repair")` で実バイナリを **1 回だけ起動**し、
+//! 続けて `self-repair verify-log` を別プロセスとして起動する。
 //!
-//! このため [`RevalidationVerificationGate`]（本ファイル内の
-//! `self_repair::stages::VerificationGate` 実装）は次の 2 段構成を取る:
-//! 1. `CargoVerificationGate::verify` で build/test/clippy 3 ゲートを実行し、
-//!    その戻り値（`bench` フィールドは常に `NotRun`。`verify_gates.rs` の
-//!    ドキュメントが「全ゲート通過 + NotRun」を矛盾としないことを明記）を
-//!    そのまま `guardrail::decide` へ渡す唯一の経路として使う。
-//! 2. 3 ゲート通過後、**別途**ベンチゲート機構（`SelfRepairBenchGate`）を合成
-//!    ワークロード（下記）で実行し、機構自体が `bench_runs_min` 回以上・中央値
-//!    判定で完走し、劣化率が `bench_median_max_pct` 以内であることを fail-closed
-//!    に確認する（閾値超過時は `VerificationOutcome::Failed` として次の試行へ
-//!    回す）。**この計測はベンチゲート機構の完走確認であり、候補 diff（bug fix
-//!    のワークツリー差分）そのものの性能劣化率実測ではない**（sandbox の
-//!    候補ファイルはリポジトリ外の別プロセス空間にあり、本テストプロセスへ
-//!    動的リンクして直接呼び出す経路がないため）。`loop-report.json`／README
-//!    ではこの区別を明示し、「候補 diff に対する劣化率実測」は #136 系
-//!    （4 ゲート合成の `src/` 本体への昇格）の範囲として out-of-scope に記録する
-//!    （`.claude/rules/out-of-scope-tracking.md`）。
+//! # 「準備リポジトリ」（`--repo` への入力）の構成
+//! `self-repair run` の `--repo` は `RunSandbox::create`（`sandbox.rs`）が
+//! `git clone --local` する対象であり、以降の build/test/clippy/bench は
+//! すべてそのクローン先（`--repo` そのものではなく内部隔離 sandbox）を
+//! ワークスペースとして実行される（`main.rs::run_run` 参照）。本ハーネスは
+//! 実 workspace 全体ではなく `crates/autodiff` 1 クレートのみを検証対象と
+//! するため（旧版・`verify_gates_integration.rs` と同じスコーピング判断。
+//! 実行時間の観点）、`crates/autodiff` を一意な一時ディレクトリへ再帰コピー
+//! し、ワークスペース継承（`*.workspace = true`）をすべて実体値へ展開して
+//! 独立 crate 化したうえで、単独の git リポジトリとして `git init` する
+//! （[`prepare_standalone_autodiff_repo`]）。この「準備リポジトリ」の HEAD が
+//! `--repo` の `baseline_commit`（バグ注入済み状態）になる。
 //!
-//! # ガードレール閾値の扱い
-//! `bench_median_max_pct`／`bench_runs_min`／`lines_max` はいずれも本テストで
-//! 再定義しない。sandbox にクローンされたリポジトリ直下の `guardrail.toml`
-//! （TASK-4.3c・#117 確定値）を `guardrail::config::resolve` で読み込み、その値を
-//! そのまま使う（`.claude/rules/security.md`「ガードレール閾値の変更はユーザー
-//! 承認必須」）。
+//! # ベンチワークロード（候補 diff 直接実測。基準 2・5）
+//! [`crate::verify_bench_direct::DirectBenchRunner`] が `--bench-bin`／
+//! `--workload-source` で指定した bin（`src/bin/bench_workload.rs`）を
+//! baseline・候補適用後の双方でビルド・実行し、実行時間を直接比較する
+//! （`RepairCompositeGate`。TASK-3.2a・#137）。本ハーネスが用意する
+//! `bench_workload.rs` は `autodiff::Var::relu` の forward+backward を反復する
+//! 決定的ワークロードであり、`tests/fixtures/feature-addition-leaky-relu/
+//! baseline/src/bin/bench_workload.rs` と同じ計測プロトコル（xorshift64 決定的
+//! 入力・`black_box`）を踏襲する。旧版（`SelfRepairBenchGate` による合成
+//! ワークロード完走確認のみ）とは異なり、本バージョンは候補 diff（`var.rs` の
+//! 実装差分）そのものの性能劣化率を実測する（基準 5 の充足）。
 //!
-//! # diff 由来シグナルの実測
-//! `lines_changed`／`api_broken`／`gaming_suspect`／`exclusion_rule_ids` は
-//! fail-open な既定値で埋めず、各試行の直前に sandbox の実際の git diff から
-//! 実測する（`verify_gates.rs` の契約。詳細は本ファイル内のヘルパー関数を参照）。
-//!
-//! # 実行時間・分離方針
-//! sandbox は本ワークスペース全体ではなく `crates/autodiff` 1 クレートのみを
-//! 検証対象とする（`cargo build`/`test --release`/`clippy` をワークスペース
-//! メンバーディレクトリ内で実行すると、そのメンバーのみがデフォルトビルド対象と
-//! なる cargo の既定動作を利用する）。実 workspace 全体を対象にした完走実証は
-//! TASK-3.3 系の別スコープであり本テストでは行わない
-//! （`verify_gates_integration.rs` の先例コメントと同じ整理）。
-//! それでも cold cache では相応に時間がかかるため通常 CI ジョブでは実行しない
-//! （`#[ignore]`。`.claude/rules/coding-rust.md`「実機依存テストは #[ignore] で
-//! 分離」と同じ運用をコンパイル時間の観点でも適用する）。実機（CUDA・Metal）
-//! 依存はなく CPU バックエンドのみで完走する。
+//! # シグナルは実測のみ（捏造しない）
+//! `lines_changed`／`api_broken`／`gaming_suspect`／`exclusion_rule_ids`・ベンチは
+//! いずれも CLI バイナリ内部の [`self_repair::RepairCompositeGate`] が試行ごとに
+//! sandbox 内の使い捨て git リポジトリを対象に実測する。未計測値を fail-open な
+//! 既定値で埋めない（`.claude/rules/security.md` A08）。
 
-use std::cell::RefCell;
-use std::env;
-use std::fs;
-use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::rc::Rc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
-use self_repair::stages::{Proposal, VerificationGate, VerificationOutcome};
-use self_repair::verify_bench::{MIN_BENCH_ITERATIONS, SelfRepairBenchGate};
-use self_repair::{
-    BugFixDetector, BugFixFixGenerator, CandidateFix, CargoVerificationGate,
-    GuardrailAdoptionJudge, LogWriter, RepairKind, SelfRepairError, SelfRepairLoop,
-    SystemCommandRunner, verify_chain,
-};
+/// バグ注入・修正対象ファイル（`crates/autodiff/src/var.rs`。準備リポジトリ
+/// 相対パスは `src/var.rs`）。
+const TARGET_FILE: &str = "src/var.rs";
+/// ベンチワークロード bin（`RepairCompositeGate` の候補 diff 直接実測が
+/// ピン留め・ビルド対象とする）。
+const WORKLOAD_SOURCE: &str = "src/bin/bench_workload.rs";
+const BENCH_BIN: &str = "bench_workload";
 
-/// `crates/autodiff/src/var.rs` の workspace 相対パス（sandbox 内でも同一）。
-const VAR_RS_RELATIVE: &str = "crates/autodiff/src/var.rs";
-
-/// ベンチゲート機構の試行ごとの計測ログ（attempt 番号・劣化率系列・中央値）。
-/// `RevalidationVerificationGate` と呼び出し元テスト本体が `Rc` で共有する
-/// （型の可読性のため `clippy::type_complexity` を構造的に回避する。
-/// `.claude/rules/coding-rust.md`「`#[allow]` の安易な追加で黙らせない」）。
-type BenchLog = Rc<RefCell<Vec<(u32, Vec<f64>, f64)>>>;
-
-/// 試行ごとに実測したポリシー除外リスト match（attempt 番号・match したルール
-/// id 列）の共有ログ。用途・共有理由は [`BenchLog`] と同じ。
-type ExclusionRuleIdsLog = Rc<RefCell<Vec<(u32, Vec<String>)>>>;
-
-/// リポジトリルート（このテストバイナリをビルドした `self-repair` の
-/// `Cargo.toml` の 2 階層上）。`cargo test` が設定する CWD に依存せず常に
-/// 同じ場所を指すよう、実行時の `current_dir()` ではなくビルド時定数
-/// （`CARGO_MANIFEST_DIR`）から導出する。
+/// リポジトリルート（`crates/self-repair` の 2 階層上）。
 fn repo_root() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("repo root should be resolvable from CARGO_MANIFEST_DIR")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/self-repair の親は crates/")
+        .parent()
+        .expect("crates/ の親はリポジトリルート")
+        .to_path_buf()
 }
 
-/// `git` を `cwd` で起動し、非 0 終了時は panic する（テストセットアップ専用の
-/// ヘルパー。本番経路〈`crates/self-repair/src`〉の
-/// `.claude/rules/coding-rust.md`「unwrap/expect 禁止」はここには適用されない
-/// ——既存の統合テスト（`verify_gates_integration.rs`）と同じ運用）。
-///
-/// `current_dir(cwd)` だけでは sandbox 隔離を保証できない。本クレートの
-/// `git commit`／`git diff` は `lefthook.yml` の `pre-push.jobs.test`
-/// （`cargo test --workspace`）経由で間接的に実行されうるが、githooks(5) の
-/// 仕様どおり git はフック起動時に `GIT_DIR`／`GIT_WORK_TREE`／
-/// `GIT_INDEX_FILE` 等の `GIT_*` 環境変数を子プロセスへ設定し、それらは
-/// `cargo test` → 本テストバイナリ → `Command::new("git")` まで継承されうる。
-/// 継承された `GIT_DIR` は `current_dir` より優先されるため、これを除去
-/// しないと sandbox 内のつもりの `git add`／`git commit` が実リポジトリの
-/// `.git` を対象にしてしまう（`feature_addition_loop_completion_task_3_3c.rs`
-/// の `sandboxed_git_command` と同一の事故パターン・同一の対処。#141 PR
-/// レビュー〈Bugbot High Severity〉指摘）。sandbox を実リポジトリから完全に
-/// 独立させるため、継承されうる `GIT_*` 環境変数をすべて明示的に除去して
-/// から起動する。
-fn git(cwd: &Path, args: &[&str]) -> String {
-    let mut command = Command::new("git");
-    command.args(args).current_dir(cwd);
-    for (key, _) in env::vars_os() {
-        if let Some(key_str) = key.to_str()
-            && key_str.starts_with("GIT_")
-        {
-            command.env_remove(key_str);
-        }
-    }
-    let output = command
-        .output()
-        .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗しました: {error}"));
-    if !output.status.success() {
-        panic!(
-            "git {args:?} が失敗しました（exit={:?}）: stdout={} stderr={}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-/// sandbox（`git clone --local`）を構築する。メイン working copy・共有 git
-/// 状態には一切触れない（並列イシュー実行時のグローバル状態保護。プロンプト
-/// 手順の隔離契約）。以降の git 操作はすべて sandbox 内に閉じる。
-fn create_sandbox() -> PathBuf {
-    let sandbox = env::temp_dir().join(format!(
-        "self-repair-revalidation-bug-fix-{}",
+/// テストごとに衝突しない一時ディレクトリ（`self_repair::test_support` と同じ
+/// `temp_dir() + process::id()` 方式。本ファイルは `tests/` 配下の独立クレート
+/// のため `pub(crate)` ヘルパーを再利用できず、`feature_addition_loop_completion_
+/// task_3_3c.rs` と同型のヘルパーを再実装する）。
+fn unique_sandbox_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "self-repair-revalidation-bug-fix-task-3-3b-{name}-{}",
         std::process::id()
     ));
-    let _ = fs::remove_dir_all(&sandbox);
-    git(
-        Path::new("."),
-        &[
-            "clone",
-            "--local",
-            // `/tmp`（sandbox の作成先）とリポジトリが別ファイルシステム
-            // （別マウント）上にありうる環境（例: worktree がバインドマウント
-            // 上にある CI/コンテナ環境）では、既定のハードリンク複製が
-            // `Invalid cross-device link` で失敗する。`--no-hardlinks` で
-            // 常にファイルコピーへフォールバックし、実行環境に依存せず
-            // sandbox を構築できるようにする。
-            "--no-hardlinks",
-            "--quiet",
-            repo_root().to_str().expect("repo root should be UTF-8"),
-            sandbox.to_str().expect("sandbox path should be UTF-8"),
-        ],
-    );
-    sandbox
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("sandbox ディレクトリ作成に失敗");
+    dir
 }
 
-/// sandbox を確実に削除する RAII ガード。`create_sandbox` 呼び出し直後に
-/// 生成することで、`find_relu_forward_line`／`guardrail::config::resolve` 等の
-/// `expect()` がループ完走後の早期クリーンアップ（`drop(_sandbox_guard)`）
-/// より前で panic しても、パニックの unwind 経由で `drop` が必ず実行され、
-/// PID ベースの予測可能パス（`create_sandbox` 参照）が `/tmp` に残置されない
-/// （レビュー指摘）。`remove_dir_all` は対象が既に存在しなくてもエラーを無視
-/// するため、早期クリーンアップとパニック時 drop が両方走っても安全
-/// （実際は Rust の所有権により実行されるのはどちらか 1 回のみ）。
-struct SandboxGuard(PathBuf);
+/// 単一ファイル用の一時パス（`--candidates` JSON 出力先）。
+fn unique_temp_file(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "self-repair-revalidation-bug-fix-task-3-3b-{name}-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
 
-impl Drop for SandboxGuard {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+/// `src` 配下を再帰的に `dst` へコピーする（`target/`・`.git/` は対象外）。
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("コピー先ディレクトリ作成に失敗");
+    for entry in std::fs::read_dir(src).expect("コピー元ディレクトリの読み取りに失敗")
+    {
+        let entry = entry.expect("ディレクトリエントリの読み取りに失敗");
+        let file_type = entry.file_type().expect("file_type 取得に失敗");
+        let name = entry.file_name();
+        if name == "target" || name == ".git" {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = dst.join(&name);
+        if file_type.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path);
+        } else {
+            std::fs::copy(&src_path, &dst_path).expect("ファイルコピーに失敗");
+        }
     }
+}
+
+/// `crates/autodiff` のコピー（`sandbox`）の `Cargo.toml` を、ルート workspace
+/// への継承（`*.workspace = true`）から切り離し、単独 crate として独立
+/// ビルド可能にする（実装計画 §3.2 手順 2）。
+///
+/// - `version`/`edition`/`license`/`publish` はルート `Cargo.toml`
+///   `[workspace.package]` の実体値へ展開する
+/// - `tensor-core`／`bench-harness`（dev-dependency）への相対 path 依存は、
+///   コピー先では深度が保たれないため実リポジトリへの絶対パスへ書き換える
+/// - `serde`/`serde_json`（dev-dependency）は `[workspace.dependencies]` の
+///   `=x.y.z` 固定値へ実体化する
+/// - 末尾へ空の `[workspace]` テーブルを追記し、親 workspace の巻き込みから
+///   切り離す（`tests/fixtures/feature-addition-leaky-relu/baseline/Cargo.toml`
+///   と同一方針）
+///
+/// 各置換は `assert_ne!` ガード付きで、実リポジトリ側の `Cargo.toml` 構造が
+/// 変化した場合に fail-fast で検出する（レビュー指摘・実装計画 §7 リスク
+/// 対策）。
+fn detach_autodiff_cargo_toml(sandbox: &Path) {
+    let cargo_toml = sandbox.join("Cargo.toml");
+    let content = std::fs::read_to_string(&cargo_toml).expect("sandbox Cargo.toml 読み取りに失敗");
+
+    let with_package_fields = content
+        .replace("version.workspace = true", "version = \"0.3.0\"")
+        .replace("edition.workspace = true", "edition = \"2024\"")
+        .replace(
+            "license.workspace = true",
+            "license = \"MIT OR Apache-2.0\"",
+        )
+        .replace("publish.workspace = true", "publish = false");
+    assert_ne!(
+        with_package_fields, content,
+        "package フィールドの workspace 継承が 1 件も置換されなかった \
+         （crates/autodiff/Cargo.toml の記法が変わっていないか確認）"
+    );
+
+    let tensor_core_abs = repo_root().join("crates/tensor-core");
+    let bench_harness_abs = repo_root().join("crates/bench-harness");
+    let with_path_deps = with_package_fields
+        .replace(
+            r#"path = "../tensor-core""#,
+            &format!(r#"path = "{}""#, tensor_core_abs.display()),
+        )
+        .replace(
+            r#"path = "../bench-harness""#,
+            &format!(r#"path = "{}""#, bench_harness_abs.display()),
+        );
+    assert_ne!(
+        with_path_deps, with_package_fields,
+        "path 依存の書き換えが 1 件も適用されなかった \
+         （crates/autodiff/Cargo.toml の記法が変わっていないか確認）"
+    );
+
+    let with_dev_deps = with_path_deps
+        .replace(
+            "serde.workspace = true",
+            "serde = { version = \"=1.0.229\", features = [\"derive\"] }",
+        )
+        .replace("serde_json.workspace = true", "serde_json = \"=1.0.151\"");
+    assert_ne!(
+        with_dev_deps, with_path_deps,
+        "serde/serde_json の workspace 継承が 1 件も置換されなかった \
+         （crates/autodiff/Cargo.toml の記法が変わっていないか確認）"
+    );
+
+    let detached = format!("{with_dev_deps}\n[workspace]\n");
+    std::fs::write(&cargo_toml, detached).expect("sandbox Cargo.toml 書き換えに失敗");
+}
+
+/// 候補 diff 直接実測（TASK-3.2a・#137）向けの決定的ベンチワークロード
+/// （`WORKLOAD_SOURCE`）を準備リポジトリへ追加する。`autodiff::Var::relu` の
+/// forward+backward を反復する（`tests/fixtures/feature-addition-leaky-relu/
+/// baseline/src/bin/bench_workload.rs` と同じ計測プロトコル: xorshift64 決定的
+/// 入力・`black_box`・1 プロセス実行あたり 10ms 以上の作業量）。
+fn bench_workload_source() -> &'static str {
+    r#"//! 候補 diff 直接実測（TASK-3.2a・イシュー #137）向けの決定的ベンチワークロード。
+//!
+//! `crate::verify_bench_direct::DirectBenchRunner` が baseline commit・候補
+//! 適用済み作業木の双方でこの bin を `cargo build --release --bin
+//! bench_workload` し、生成物を「1 回 exec するだけ」で外部タイミング計測する。
+//! このファイル自体は `DirectBenchSpec::workload_sources` によってピン留めされ、
+//! 候補 diff が改変すると計測前に fail-closed で拒否される（ゲーミング防止）。
+//!
+//! `autodiff::Var::relu` の forward+backward を反復する（TASK-3.3b・#141 の
+//! バグ注入対象と同一 API）。決定的シード・作業量の方針は
+//! `tests/fixtures/feature-addition-leaky-relu/baseline/src/bin/bench_workload.rs`
+//! と同一（本ハーネス〈`tests/revalidation_bug_fix.rs`〉が生成する）。
+
+use autodiff::Tape;
+use tensor_core::Tensor;
+
+const SEED: u64 = 42;
+const ELEMENTS: usize = 4096;
+
+fn deterministic_inputs(count: usize) -> Vec<f32> {
+    let mut state = SEED ^ 0x9E37_79B9_7F4A_7C15;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let unit = (state >> 11) as f64 / (1u64 << 53) as f64;
+        values.push((unit * 4.0 - 2.0) as f32);
+    }
+    values
+}
+
+fn run_once(inputs: &[f32]) -> f32 {
+    let tensor = Tensor::new(inputs.to_vec(), &[inputs.len()])
+        .expect("bench_workload: shape とデータ長は一致させている");
+    let tape = Tape::new();
+
+    let x = tape.var(&tensor);
+    let y = x.relu();
+    let grad = tape
+        .backward(&y)
+        .expect("bench_workload: relu backward は常に成功する");
+    grad.get(&x)
+        .expect("bench_workload: x は同一 tape 上のノード")
+        .map(|g| {
+            g.contiguous()
+                .as_slice()
+                .map(|s| s.iter().sum())
+                .unwrap_or(0.0)
+        })
+        .unwrap_or(0.0)
+}
+
+fn main() {
+    let inputs = deterministic_inputs(ELEMENTS);
+    let mut acc = 0.0f32;
+    for _ in 0..4000u32 {
+        acc = std::hint::black_box(acc + run_once(std::hint::black_box(&inputs)));
+    }
+    std::hint::black_box(acc);
+}
+"#
 }
 
 /// `var.rs` を行単位で読み込み、`relu` メソッド本体の forward 呼び出し行を
-/// 探す。行の内容は呼び出し元が `forward_call_needle` で指定する
-/// （バグ注入前は `let value = eval::relu(&self.value());`、注入後は
-/// `let value = eval::sigmoid(&self.value());` と、状態によって内容が異なる
-/// ため）。文字列一括置換（`str::replace`）ではなく「`pub fn relu` 宣言の
-/// 直後」という行番号ベースで探索範囲を絞るのは、同一テキスト
-/// （`eval::sigmoid(&self.value())`）が `sigmoid` メソッド本体にも存在し、
-/// 素朴な全文検索では `relu` メソッド以外の行を誤って書き換えうるため。
+/// 探す（`pub fn relu(&self)` 宣言の直後という行番号ベースの探索。同一
+/// テキストが `sigmoid` メソッド本体にも存在するため素朴な全文検索は使わない
+/// ——旧版〈PR #341〉のヘルパーをそのまま再利用する）。
 fn find_relu_forward_line(lines: &[String], forward_call_needle: &str) -> usize {
     let relu_fn_idx = lines
         .iter()
@@ -215,10 +279,10 @@ fn find_relu_forward_line(lines: &[String], forward_call_needle: &str) -> usize 
 }
 
 /// バグ注入: `relu` メソッド本体の forward 呼び出しを `eval::relu` → `eval::sigmoid`
-/// へすり替える（`Op::Relu` の登録自体は変更しない。実装計画 4.1 節の推奨題材）。
-/// これにより forward 値は sigmoid 相当になる一方、backward は `Op::Relu` の
-/// 勾配式（`x > 0` の指示関数）のまま計算されるため、既知正解値テスト
-/// （`crates/autodiff/tests/tape_recording.rs` 等）が forward 段階で失敗する。
+/// へすり替える（`Op::Relu` の登録自体は変更しない。#140 承認済み題材）。
+/// forward 値は sigmoid 相当になる一方、backward は `Op::Relu` の勾配式のまま
+/// 計算されるため、既知正解値テスト（`crates/autodiff/tests/backward.rs` 等）が
+/// forward 段階で失敗する。
 fn inject_bug(original: &str) -> String {
     let mut lines: Vec<String> = original.lines().map(str::to_string).collect();
     let idx = find_relu_forward_line(&lines, "let value = eval::relu(&self.value());");
@@ -235,7 +299,7 @@ fn inject_bug(original: &str) -> String {
 
 /// 誤った修正候補（attempt 1）: 注入されたバグ（`eval::sigmoid`）を別の誤り
 /// （`eval::tanh`）に置き換えるだけで、依然として `Op::Relu` の勾配式と forward
-/// 値が一致しない。既知正解値テストは失敗し続けるため、検証ゲートで却下される
+/// 値が一致しない。既知正解値テストは失敗し続けるため検証ゲートで却下される
 /// （PoC-2「修正試行 1: 誤った修正・検証不合格で却下」の写像）。
 fn wrong_fix_content(injected: &str) -> String {
     let mut lines: Vec<String> = injected.lines().map(str::to_string).collect();
@@ -251,583 +315,348 @@ fn wrong_fix_content(injected: &str) -> String {
     joined
 }
 
-/// sandbox の作業木へファイルを書き込み、コミットする（バグ注入コミット専用。
-/// 以降の候補適用は `BugFixFixGenerator` が作業木へ直接書き込むのみでコミット
-/// しない——コミットするのは diff の起点〈baseline〉を確定するこの 1 回のみ）。
-fn write_and_commit(sandbox: &Path, relative: &str, content: &str, message: &str) -> String {
-    fs::write(sandbox.join(relative), content)
-        .unwrap_or_else(|error| panic!("{relative} の書き込みに失敗しました: {error}"));
-    git(sandbox, &["add", "--", relative]);
-    git(
-        sandbox,
-        &[
-            "-c",
-            "user.email=self-repair-revalidation@example.invalid",
-            "-c",
-            "user.name=self-repair-revalidation",
-            "commit",
-            "--quiet",
-            "-m",
-            message,
-        ],
-    );
-    git(sandbox, &["rev-parse", "HEAD"]).trim().to_string()
-}
-
-/// `baseline`（バグ注入コミットの sha）と現在の作業木との diff から
-/// `lines_changed`（追加行数＋削除行数の合計）・変更ファイル一覧を実測する。
-/// `git diff --numstat` は「追加\t削除\tパス」の TSV を返す（`Cargo.lock` 等の
-/// 除外はしない——本題材は `var.rs` 単一ファイルのみを変更する想定であり、
-/// 除外ロジックの要否自体が本題材のスコープ外）。
-fn diff_numstat(sandbox: &Path, baseline: &str) -> (u64, Vec<String>) {
-    let stdout = git(sandbox, &["diff", "--numstat", baseline, "--"]);
-    let mut lines_changed: u64 = 0;
-    let mut files = Vec::new();
-    for line in stdout.lines() {
-        let mut cols = line.splitn(3, '\t');
-        // `added`/`deleted` の解析に失敗した場合（バイナリファイルは
-        // `-`／想定外フォーマット等）は 0 加算で fail-open に埋めない
-        // （ファイル冒頭ドキュメント「diff 由来シグナルの実測」の契約）。
-        // 本題材は `var.rs` 単一テキストファイルのみを変更する想定のため、
-        // 解析失敗はデータの不整合を意味し fail-closed に panic する
-        // （`.claude/rules/security.md` A08）。
-        let added = cols
-            .next()
-            .unwrap_or_else(|| panic!("git diff --numstat の行が想定外です: {line:?}"));
-        let deleted = cols
-            .next()
-            .unwrap_or_else(|| panic!("git diff --numstat の行が想定外です: {line:?}"));
-        let path = cols.next().unwrap_or("").to_string();
-        lines_changed += added.parse::<u64>().unwrap_or_else(|error| {
-            panic!("added 列の解析に失敗しました（fail-open で 0 に丸めない）: {added:?}: {error}")
-        });
-        lines_changed += deleted.parse::<u64>().unwrap_or_else(|error| {
-            panic!(
-                "deleted 列の解析に失敗しました（fail-open で 0 に丸めない）: {deleted:?}: {error}"
-            )
-        });
-        if !path.is_empty() {
-            files.push(path);
+/// sandbox 内でのみ完結する `git` コマンドを構築する。`current_dir(sandbox)`
+/// だけでは実リポジトリへの誤動作を防げない（githooks(5) 経由で継承されうる
+/// `GIT_*` 環境変数が `current_dir` より優先されるため。
+/// `feature_addition_loop_completion_task_3_3c.rs::sandboxed_git_command`・
+/// `sandbox.rs::git_command` と同一の事故パターン・同一の対処。#149 実測）。
+fn sandboxed_git_command(sandbox: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(sandbox);
+    for (key, _) in std::env::vars_os() {
+        if let Some(key_str) = key.to_str()
+            && key_str.starts_with("GIT_")
+        {
+            command.env_remove(key_str);
         }
     }
-    (lines_changed, files)
+    command
 }
 
-/// 公開関数シグネチャ（`pub fn` を含む行）が diff の追加・削除行に現れないかを
-/// 検査する（本題材は関数本体〈1 行〉のみの変更であり、シグネチャ行自体は
-/// 変更されない想定）。`true` = 破壊的変更の疑いあり。
-fn api_signature_touched(sandbox: &Path, baseline: &str) -> bool {
-    let stdout = git(
-        sandbox,
-        &["diff", "--no-color", "-U0", baseline, "--", "*.rs"],
-    );
-    stdout.lines().any(|line| {
-        let content = line
-            .strip_prefix('+')
-            .or_else(|| line.strip_prefix('-'))
-            .unwrap_or("");
-        // 差分ヘッダ行（`+++`/`---`）を誤検出しないよう、`+`/`-` 直後が
-        // さらに `+`/`-` の場合は除外する。
-        !content.starts_with(['+', '-']) && content.trim_start().starts_with("pub fn")
-    })
-}
-
-/// 変更ファイル一覧に「本番コード」と「テストコード」の双方が同時に含まれるかを
-/// 検査する（ゲーミング疑いの簡易ヒューリスティック。本題材は `var.rs`
-/// 単一ファイルのみのため `false` になる想定。実装計画 3 節 6 項）。
-fn gaming_suspect(changed_files: &[String]) -> bool {
-    let touches_test = changed_files
-        .iter()
-        .any(|path| path.contains("/tests/") || path.ends_with("_test.rs"));
-    let touches_prod = changed_files.iter().any(|path| {
-        !path.contains("/tests/") && !path.ends_with("_test.rs") && path.ends_with(".rs")
-    });
-    touches_test && touches_prod
-}
-
-/// `guardrail` のポリシー除外リスト評価（REQ-5）を sandbox 上で実行する。
-/// sandbox 直下の `policy-exclusion.toml`（TASK-5.1・確定値。本テストでは
-/// 一切変更しない）をロードし、`baseline` と現作業木の diff に対して評価する。
-fn evaluate_exclusion_rules(sandbox: &Path, baseline: &str) -> Vec<String> {
-    let toml = fs::read_to_string(sandbox.join("policy-exclusion.toml"))
-        .expect("policy-exclusion.toml の読み込みに失敗しました");
-    let config = guardrail::load_policy_exclusion(&toml)
-        .expect("policy-exclusion.toml のパースに失敗しました");
-    let ctx = guardrail::EvaluationContext::from_repo(sandbox, baseline)
-        .expect("EvaluationContext::from_repo の構築に失敗しました");
-    let evaluation = guardrail::ExclusionEvaluation::evaluate(&config.rules, &ctx)
-        .expect("ポリシー除外リストの評価に失敗しました");
-    evaluation.effective_rule_ids()
-}
-
-/// ベンチゲート機構の合成ワークロード（relu forward 相当の要素毎演算）。
-/// 候補 diff の実測ではない（本ファイル冒頭ドキュメント参照）ため、
-/// baseline・candidate で同一の計算を行う軽量クロージャとする
-/// （`bench_harness::run` の warmup/計測反復に対して短時間で完走させるため）。
-fn synthetic_relu_workload() {
-    let data: Vec<f32> = (0..2048).map(|i| (i as f32 - 1024.0) * 0.01).collect();
-    let mut sum = 0.0f32;
-    for value in &data {
-        sum += value.max(0.0);
-    }
-    std::hint::black_box(sum);
-}
-
-/// build/test/clippy 3 ゲート（`CargoVerificationGate`）＋ベンチゲート機構
-/// 完走確認（`SelfRepairBenchGate`）を合成する `VerificationGate` 実装
-/// （本ファイル冒頭ドキュメント「4 ゲート合成についての設計上の制約」参照）。
-struct RevalidationVerificationGate {
-    /// 検証対象ワークスペース（sandbox の `crates/autodiff`）。
-    workspace: PathBuf,
-    /// sandbox リポジトリのルート（diff・ポリシー除外評価はここを基点にする）。
-    sandbox_root: PathBuf,
-    /// diff の起点（バグ注入コミットの sha）。
-    baseline_commit: String,
-    bench_gate: SelfRepairBenchGate,
-    thresholds: guardrail::Thresholds,
-    bench_iterations: usize,
-    /// ベンチゲート機構の計測結果を試行ごとに記録する（`loop-report.json` へ
-    /// 「機構完走確認」として書き出すための seam。`RefCell` は `verify` が
-    /// `&self` を取る `VerificationGate` trait のシグネチャ制約による。`Rc` は
-    /// `RevalidationVerificationGate` が `SelfRepairLoop::new` に所有権ごと
-    /// 渡された後も、呼び出し元がログ内容を読み出せるよう共有ハンドルとして
-    /// 保持するため（`Rc::clone` で複製した片方をループ実行前に呼び出し元へ
-    /// 残しておく）。
-    bench_log: BenchLog,
-    /// 試行ごとに実測したポリシー除外リスト match（`Rc<RefCell<..>>` の理由は
-    /// `bench_log` と同じ）。
-    exclusion_rule_ids_log: ExclusionRuleIdsLog,
-}
-
-impl VerificationGate for RevalidationVerificationGate {
-    fn verify(&self, proposal: &Proposal) -> Result<VerificationOutcome, SelfRepairError> {
-        // diff 由来シグナルは試行ごとに実測する（候補適用直後の作業木を対象。
-        // fail-open な既定値で埋めない。`verify_gates.rs` の契約）。
-        let (lines_changed, changed_files) =
-            diff_numstat(&self.sandbox_root, &self.baseline_commit);
-        let api_broken = api_signature_touched(&self.sandbox_root, &self.baseline_commit);
-        let suspect = gaming_suspect(&changed_files);
-        let exclusion_rule_ids =
-            evaluate_exclusion_rules(&self.sandbox_root, &self.baseline_commit);
-        self.exclusion_rule_ids_log
-            .borrow_mut()
-            .push((proposal.attempt, exclusion_rule_ids.clone()));
-
-        let cargo_gate = CargoVerificationGate::new(
-            self.workspace.clone(),
-            SystemCommandRunner::new(),
-            lines_changed,
-            api_broken,
-            suspect,
-            exclusion_rule_ids,
-        );
-
-        let outcome = cargo_gate.verify(proposal)?;
-        let evidence = match outcome {
-            VerificationOutcome::Failed { reason } => {
-                return Ok(VerificationOutcome::Failed { reason });
-            }
-            VerificationOutcome::Passed(evidence) => evidence,
-        };
-
-        // 3 ゲート通過後にのみベンチゲート機構を完走させる（PoC-2「検証落ちは
-        // 取り込み判断へ進めず再試行」と同じく、既に不合格が確定した試行で
-        // 追加の計測コストを払わない）。
-        let mut baseline_workload = synthetic_relu_workload;
-        let mut candidate_workload = synthetic_relu_workload;
-        let bench_signal = self
-            .bench_gate
-            .run(
-                self.bench_iterations,
-                &mut baseline_workload,
-                &mut candidate_workload,
-            )
-            .map_err(|error| SelfRepairError::Verification {
-                attempt: proposal.attempt,
-                reason: format!("ベンチゲート機構の完走に失敗しました: {error}"),
-            })?;
-
-        self.bench_log.borrow_mut().push((
-            proposal.attempt,
-            bench_signal.bench_measurements_pct.clone(),
-            bench_signal.bench_median_pct,
-        ));
-
-        if bench_signal.bench_median_pct > self.thresholds.bench_median_max_pct {
-            return Ok(VerificationOutcome::Failed {
-                reason: format!(
-                    "ベンチゲート機構（合成ワークロード）の劣化率中央値が閾値を超過しました: \
-                     {:.4}% > {:.4}%",
-                    bench_signal.bench_median_pct, self.thresholds.bench_median_max_pct
-                ),
-            });
-        }
-
-        Ok(VerificationOutcome::Passed(evidence))
-    }
-}
-
-/// 完走ログの出力先ディレクトリを決める。環境変数
-/// `SELF_REPAIR_REVALIDATION_OUT`（README §1・§7 が明示する再現コマンドが
-/// 指定する起動方法。tracked な記録ディレクトリ `docs/self-repair-revalidation/
-/// bug-fix` を意図的に更新する）が設定されていればそれを使う。
-///
-/// 未設定時（例: 素の `cargo test -p self-repair --test revalidation_bug_fix --
-/// --ignored` を README の推奨コマンドなしに実行した場合）は tracked ファイルを
-/// 意図せず書き換えないよう、`.gitignore` 済みの `target/` 配下へフォールバック
-/// する（レビュー指摘: 既定値が tracked ファイルを指すため非破壊に実行する手段が
-/// なかった問題への対応）。`cargo test` の CWD に依存しないよう、いずれも
-/// `repo_root()` から導出する。
-fn output_dir() -> PathBuf {
-    match env::var("SELF_REPAIR_REVALIDATION_OUT") {
-        Ok(value) => {
-            let path = PathBuf::from(value);
-            if path.is_absolute() {
-                path
-            } else {
-                // `cargo test` はテストバイナリの CWD をパッケージ
-                // （`crates/self-repair`）のマニフェストディレクトリに設定する
-                // （workspace ルートではない）。README が想定する「リポジトリ
-                // ルートからの相対パス」を実行時 CWD に依存せず解決するため、
-                // `repo_root()` を基点として結合する。
-                repo_root().join(path)
-            }
-        }
-        Err(_) => repo_root().join("target/self-repair-revalidation/bug-fix"),
-    }
-}
-
-fn duration_ms(duration: Duration) -> u64 {
-    duration.as_millis() as u64
-}
-
-/// [`build_report_json`] への入力をまとめたパラメータ構造体。
-///
-/// `BenchLog`（`RevalidationVerificationGate` と共有する `Rc<RefCell<..>>`）と
-/// 同じ理由で、引数個数を素朴に増やすのではなく構造化して
-/// `clippy::too_many_arguments` を型レベルで回避する（`BenchLog` の
-/// `type` エイリアスと同じ一貫した方針。`.claude/rules/coding-rust.md`
-/// 「`#[allow]` の安易な追加で黙らせない」）。
-struct ReportJsonInput<'a> {
-    report: &'a self_repair::LoopReport,
-    bench_log: &'a [(u32, Vec<f64>, f64)],
-    thresholds: &'a guardrail::Thresholds,
-    exclusion_rule_ids_by_attempt: &'a [(u32, Vec<String>)],
-    sandbox_commit: &'a str,
-    started_at_unix_ms: u128,
-}
-
-/// 完走ログ（`LoopReport`）を JSON へ変換する。
-///
-/// `self_repair::LoopReport`／`AttemptRecord`／`LoopOutcome`／`AttemptOutcome` は
-/// いずれも `Serialize` を実装していない（`report.rs`・`outcome.rs` のドキュメント
-/// 参照。構造化ログ出力そのものは TASK-3.4・#145 のスコープ）ため、本関数が
-/// フィールドを手動で `serde_json::Value` へ写す。試行回数・所要時間・判断根拠
-/// （#141 の受け入れ条件）に加え、ベンチゲート機構の完走ログ（合成ワークロード
-/// である旨のラベル付き。本ファイル冒頭ドキュメント参照）も含める。
-fn build_report_json(input: &ReportJsonInput<'_>) -> serde_json::Value {
-    let ReportJsonInput {
-        report,
-        bench_log,
-        thresholds,
-        exclusion_rule_ids_by_attempt,
-        sandbox_commit,
-        started_at_unix_ms,
-    } = *input;
-    let outcome_json = match &report.outcome {
-        self_repair::LoopOutcome::NoActionNeeded => serde_json::json!({"kind": "no_action_needed"}),
-        self_repair::LoopOutcome::Adopted => serde_json::json!({"kind": "adopted"}),
-        self_repair::LoopOutcome::Escalated { reason } => {
-            serde_json::json!({"kind": "escalated", "reason": reason})
-        }
-        self_repair::LoopOutcome::Rejected { stage, reason } => {
-            serde_json::json!({"kind": "rejected", "stage": stage, "reason": reason})
-        }
-        self_repair::LoopOutcome::Exhausted => serde_json::json!({"kind": "exhausted"}),
-    };
-
-    let attempts_json: Vec<serde_json::Value> = report
-        .attempts
-        .iter()
-        .map(|attempt| {
-            let (stage, reason): (&str, Option<&str>) = match &attempt.outcome {
-                self_repair::report::AttemptOutcome::VerificationFailed { reason } => {
-                    ("verification_failed", Some(reason.as_str()))
-                }
-                self_repair::report::AttemptOutcome::AdoptionRejectedRetryable { reason } => {
-                    ("adoption_rejected_retryable", Some(reason.as_str()))
-                }
-                self_repair::report::AttemptOutcome::Adopted => ("adopted", None),
-                self_repair::report::AttemptOutcome::Escalated { reason } => {
-                    ("escalated", Some(reason.as_str()))
-                }
-                self_repair::report::AttemptOutcome::RejectedFinal { reason } => {
-                    ("rejected_final", Some(reason.as_str()))
-                }
-            };
-            let bench = bench_log
-                .iter()
-                .find(|(attempt_no, _, _)| *attempt_no == attempt.attempt)
-                .map(|(_, measurements, median)| {
-                    serde_json::json!({
-                        "measurements_pct": measurements,
-                        "median_pct": median,
-                        "note": "ベンチゲート機構の完走確認（合成ワークロード）。候補 diff の性能劣化率実測ではない。",
-                    })
-                });
-            let exclusion_rule_ids = exclusion_rule_ids_by_attempt
-                .iter()
-                .find(|(attempt_no, _)| *attempt_no == attempt.attempt)
-                .map(|(_, ids)| ids.clone())
-                .unwrap_or_default();
-            serde_json::json!({
-                "attempt": attempt.attempt,
-                "duration_ms": duration_ms(attempt.duration),
-                "stage_reached": stage,
-                "reason": reason,
-                "exclusion_rule_ids": exclusion_rule_ids,
-                "bench_gate_mechanism": bench,
-            })
-        })
-        .collect();
-
-    serde_json::json!({
-        "task": "TASK-3.3b",
-        "issue": 141,
-        "kind": report.kind.as_machine_id(),
-        "outcome": outcome_json,
-        "attempt_count": report.attempt_count(),
-        "attempts": attempts_json,
-        "total_duration_ms": duration_ms(report.total_duration),
-        "thresholds": {
-            "lines_max": thresholds.lines_max,
-            "bench_median_max_pct": thresholds.bench_median_max_pct,
-            "bench_runs_min": thresholds.bench_runs_min,
-        },
-        "sandbox_bug_injection_commit": sandbox_commit,
-        "started_at_unix_ms": started_at_unix_ms,
-        "scope_notes": [
-            "self-repair run/verify-log CLI バイナリ未実装のため、lib 直接呼び出し（SelfRepairLoop::run）経由での完走実証である（CLI 経由での再実施は #145 マージ後の後続イシューのスコープ）。",
-            "JSON Lines ハッシュチェーンログ（loop-log.jsonl）は TASK-3.4（#145）実装済みの self_repair::LogWriter/verify_chain を本ハーネスへ結線して出力・検証している。self-repair verify-log CLI（外部コマンド経由の検証）は未実装のままであり、本実証は lib の verify_chain 呼び出しによる検証で充足する（TASK-3.3d・#143）。",
-            "ベンチゲート値は機構の完走確認（合成ワークロード）であり、候補 diff に対する劣化率実測ではない（4 ゲート合成の src/ 本体への昇格は #136 系のスコープ）。",
-        ],
-    })
-}
-
-/// TASK-3.3b（#141）の受け入れ条件本体: バグ修正種別のループが人間介在なしで
-/// 完走し、完走ログ（試行回数・所要時間・判断根拠）が記録されることを確認する。
-#[test]
-#[ignore = "実 workspace メンバー（autodiff）に対する cargo build/test --release/clippy を \
-            複数試行分・繰り返し実行するため長時間かかる。通常 CI ジョブでは実行しない \
-            （.claude/rules/coding-rust.md の実機依存テスト分離と同じ運用をコンパイル \
-            時間の観点で適用）。実行: cargo test -p self-repair --test revalidation_bug_fix \
-            -- --ignored --nocapture"]
-fn bug_fix_loop_completes_without_human_intervention() {
-    let started_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock should be after UNIX_EPOCH")
-        .as_millis();
-    let loop_start = Instant::now();
-
-    let sandbox = create_sandbox();
-    // `sandbox` 構築直後にガードを確保する。以降どの `expect()`/`panic!` で
-    // 異常終了しても sandbox ディレクトリが確実に削除される（`SandboxGuard`
-    // ドキュメント参照）。
-    let _sandbox_guard = SandboxGuard(sandbox.clone());
-
-    // バグ注入 → sandbox 内コミット（diff の起点。メイン working copy には
-    // 一切触れない）。
-    let var_rs_path = sandbox.join(VAR_RS_RELATIVE);
-    let original_content =
-        fs::read_to_string(&var_rs_path).expect("var.rs の読み込みに失敗しました（注入前）");
-    let injected_content = inject_bug(&original_content);
-    let injected_commit = write_and_commit(
-        &sandbox,
-        VAR_RS_RELATIVE,
-        &injected_content,
-        "test: inject relu->sigmoid activation mismatch (revalidation harness, not for merge)",
-    );
-
-    let autodiff_dir = sandbox.join("crates/autodiff");
-
-    // 検出段階: 既知正解値テストの失敗を検出する。
-    let detector = BugFixDetector::new(autodiff_dir.clone(), SystemCommandRunner::new());
-
-    // 修正生成段階: attempt 1（誤り・却下される想定）→ attempt 2（正解・採用）。
-    let candidates = vec![
-        CandidateFix {
-            description: "誤った修正: eval::sigmoid を eval::tanh に置換（依然として \
-                           Op::Relu の勾配式と forward 値が一致しない誤り）"
-                .to_string(),
-            files: vec![(
-                PathBuf::from("src/var.rs"),
-                wrong_fix_content(&injected_content),
-            )],
-        },
-        CandidateFix {
-            description: "正しい修正: relu 実装（eval::relu）を復元".to_string(),
-            files: vec![(PathBuf::from("src/var.rs"), original_content.clone())],
-        },
-    ];
-    let fix_generator = BugFixFixGenerator::new(autodiff_dir.clone(), candidates)
-        .expect("BugFixFixGenerator の構築に失敗しました");
-
-    // 検証段階の閾値: sandbox 直下の guardrail.toml（TASK-4.3c 確定値）を
-    // そのまま読み込む（閾値の再定義・緩和はしない）。
-    let thresholds = guardrail::config::resolve(None, &sandbox, guardrail::PresetName::Default)
-        .expect("guardrail.toml の解決に失敗しました")
-        .thresholds;
-    let bench_iterations = MIN_BENCH_ITERATIONS.max(thresholds.bench_runs_min as usize);
-
-    // `RevalidationVerificationGate` は所有権ごと `SelfRepairLoop::new` へ渡す
-    // （`VerificationGate` trait 境界は値渡し）ため、ループ実行後にも試行ごとの
-    // 計測ログを読み出せるよう `Rc::clone` した片方を呼び出し元に残しておく。
-    let bench_log: BenchLog = Rc::new(RefCell::new(Vec::new()));
-    let exclusion_rule_ids_log: ExclusionRuleIdsLog = Rc::new(RefCell::new(Vec::new()));
-
-    let verification_gate = RevalidationVerificationGate {
-        workspace: autodiff_dir.clone(),
-        sandbox_root: sandbox.clone(),
-        baseline_commit: injected_commit.clone(),
-        bench_gate: SelfRepairBenchGate::new(),
-        thresholds,
-        bench_iterations,
-        bench_log: Rc::clone(&bench_log),
-        exclusion_rule_ids_log: Rc::clone(&exclusion_rule_ids_log),
-    };
-
-    // 取り込み判断段階: `guardrail::decide` を経由するアダプタ（迂回経路なし）。
-    let adoption_judge = GuardrailAdoptionJudge::new(thresholds);
-
-    let max_attempts = NonZeroU32::new(2).expect("2 は非ゼロ");
-    let loop_runner = SelfRepairLoop::new(
-        detector,
-        fix_generator,
-        verification_gate,
-        adoption_judge,
-        max_attempts,
-    );
-
-    let run_result = loop_runner.run(RepairKind::BugFix);
-
-    let output_dir_path = output_dir();
-    fs::create_dir_all(&output_dir_path).expect("完走ログ出力先ディレクトリの作成に失敗しました");
-    let output_path = output_dir_path.join("loop-report.json");
-    // `LogWriter::open` は既存ファイルへ追記継続する（`logging.rs` の
-    // ドキュメント参照）。固定ファイル名（`loop-log.jsonl`）を実行のたび
-    // 削除してから開くことで、本ハーネス 1 回分の実行が「継ぎ足しのない
-    // 単一のチェーン」として `loop-log.jsonl` に対応する状態を保つ
-    // （`loop-report.json` が `fs::write` で毎回上書きされるのと同じ
-    // 「このディレクトリはこの 1 回の実行を記述する」契約を `loop-log.jsonl`
-    // にも揃える。実装計画セクション 4「継ぎ足し防止」）。
-    let log_path = output_dir_path.join("loop-log.jsonl");
-    let _ = fs::remove_file(&log_path);
-
-    match &run_result {
-        Ok(report) => {
-            let json = build_report_json(&ReportJsonInput {
-                report,
-                bench_log: &bench_log.borrow(),
-                thresholds: &thresholds,
-                exclusion_rule_ids_by_attempt: &exclusion_rule_ids_log.borrow(),
-                sandbox_commit: &injected_commit,
-                started_at_unix_ms,
-            });
-            fs::write(
-                &output_path,
-                serde_json::to_string_pretty(&json).expect("JSON シリアライズに失敗しました"),
-            )
-            .expect("loop-report.json の書き込みに失敗しました");
-
-            // TASK-3.4（#145）が実装した改竄検知ログ（security.md「ループ試行
-            // ログは改竄検知可能な形式で記録し、取り込み判断の根拠を追跡可能に
-            // する」）を本再実証ハーネスへ結線する（TASK-3.3d・#143）。
-            // `LoopReport` をそのまま渡すため `build_report_json` の手動 JSON
-            // 化とは独立した経路であり、`self-repair verify-log` CLI が
-            // 未実装の現時点では lib の `verify_chain` 呼び出しが検証手段の
-            // すべてである（README §4 の記載と揃える）。
-            let mut log_writer =
-                LogWriter::open(&log_path).expect("loop-log.jsonl を開けませんでした");
-            log_writer
-                .append_report(report)
-                .expect("loop-log.jsonl への追記に失敗しました");
-            verify_chain(&log_path)
-                .expect("loop-log.jsonl のハッシュチェーン検証に失敗しました（改竄・破損の疑い）");
-        }
-        Err(failure) => {
-            let json = serde_json::json!({
-                "task": "TASK-3.3b",
-                "issue": 141,
-                "outcome": {"kind": "loop_failure"},
-                "error": failure.error.to_string(),
-                "attempt_count": failure.attempts.len(),
-                "started_at_unix_ms": started_at_unix_ms,
-            });
-            fs::write(
-                &output_path,
-                serde_json::to_string_pretty(&json).expect("JSON シリアライズに失敗しました"),
-            )
-            .expect("loop-report.json（失敗時）の書き込みに失敗しました");
-
-            // 段階実行自体が失敗したケースでも、そこまでの試行の判断根拠を
-            // 改竄検知ログへ残す（`Ok` 分岐と同じ理由。security.md A08
-            // 「取り込み判断の根拠を追跡可能にする」は失敗ケースにも適用される）。
-            let mut log_writer =
-                LogWriter::open(&log_path).expect("loop-log.jsonl を開けませんでした");
-            log_writer
-                .append_failure(failure)
-                .expect("loop-log.jsonl への追記に失敗しました（失敗時）");
-            verify_chain(&log_path).expect(
-                "loop-log.jsonl のハッシュチェーン検証に失敗しました（失敗時。改竄・破損の疑い）",
-            );
-        }
-    }
-
-    let total_elapsed = loop_start.elapsed();
-    // ここまで到達すればループ実行自体は完了しており sandbox は不要になる。
-    // 以降の最終アサーションを待たず早期に削除する（`Drop` を明示的に起動）。
-    // それより前で異常終了した場合も `_sandbox_guard` の `Drop` が保険として働く。
-    drop(_sandbox_guard);
-
-    let report = run_result.unwrap_or_else(|failure| {
-        panic!(
-            "自己修復ループが段階実行自体のエラーで終了しました（人間介在なし完走の \
-             受け入れ条件を満たさない）: {failure}"
-        )
-    });
-
-    assert_eq!(
-        report.outcome,
-        self_repair::LoopOutcome::Adopted,
-        "最終 verdict は AutoApply（LoopOutcome::Adopted）である必要があります: {:?}",
-        report.outcome
-    );
-    assert_eq!(
-        report.attempt_count(),
-        2,
-        "attempt 1（誤り・却下）→ attempt 2（正解・採用）の 2 試行で完走する想定です"
-    );
-    match &report.attempts[0].outcome {
-        self_repair::report::AttemptOutcome::VerificationFailed { .. } => {}
-        other => panic!("attempt 1 は検証不合格（VerificationFailed）である想定です: {other:?}"),
-    }
-    match &report.attempts[1].outcome {
-        self_repair::report::AttemptOutcome::Adopted => {}
-        other => panic!("attempt 2 は採用（Adopted）である想定です: {other:?}"),
-    }
-    assert!(
-        total_elapsed > Duration::ZERO,
-        "所要時間が記録されていること"
-    );
-    for attempt in &report.attempts {
-        // `Duration` は符号なしのため `>= Duration::ZERO` は常に真で何も検証
-        // しない（レビュー指摘）。各試行は build/test/clippy（＋通過試行のみ
-        // ベンチゲート機構）を実際に実行するため、実測所要時間は必ず非ゼロに
-        // なる想定であり `> Duration::ZERO` で意味のある検証にする。
+/// `sandbox`（準備リポジトリ）を使い捨て git リポジトリ化し、現在の内容
+/// （バグ注入済み）を `baseline_commit` として記録する。`self-repair run` の
+/// `--repo` はこの sandbox を指す（`RunSandbox::create` が更にこれを
+/// `git clone --local` して内部隔離 sandbox を構築する。`sandbox.rs` doc 参照）。
+fn git_init_baseline(sandbox: &Path) {
+    let run = |args: &[&str]| {
+        let output = sandboxed_git_command(sandbox, args)
+            .output()
+            .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗: {error}"));
         assert!(
-            attempt.duration > Duration::ZERO,
-            "各試行の所要時間が記録されていること（attempt={}）",
-            attempt.attempt
+            output.status.success(),
+            "git {args:?} が失敗しました: {}",
+            String::from_utf8_lossy(&output.stderr)
         );
+    };
+    run(&["init", "-q"]);
+    run(&["add", "-A"]);
+    run(&[
+        "-c",
+        "user.email=self-repair-task-3-3b@example.invalid",
+        "-c",
+        "user.name=self-repair-task-3-3b",
+        "commit",
+        "-q",
+        "-m",
+        "baseline (relu->sigmoid activation mismatch, revalidation harness)",
+    ]);
+}
+
+fn self_repair_bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_self-repair"))
+}
+
+/// 準備リポジトリの `Cargo.lock` を baseline commit 前に生成する。
+///
+/// 実行時に判明した挙動: `crates/autodiff` は workspace member のため単独の
+/// `Cargo.lock` を持たない（ルート `Cargo.lock` を参照する）。detach 後の
+/// 準備リポジトリで `cargo generate-lockfile` を実行せずに `git init` すると、
+/// `Cargo.lock` は baseline commit に含まれず、attempt 1 の 3 ゲート実行
+/// （`cargo build` 等）が初めて生成する未追跡ファイルになる。
+/// [`crate::verify_bench_direct::pinned_sources_untouched`] は
+/// `baseline_commit` との差分に現れる `Cargo.lock` を無条件でピン留め違反
+/// （マニフェスト改変によるゲーミング疑い）とみなすため、これを baseline
+/// 側に確定させておく必要がある（`tests/fixtures/feature-addition-leaky-relu/
+/// baseline/Cargo.lock` が baseline から commit 済みであるのと同じ理由）。
+fn generate_lockfile(sandbox: &Path) {
+    let mut command = Command::new("cargo");
+    command.args(["generate-lockfile"]).current_dir(sandbox);
+    let output = command
+        .output()
+        .unwrap_or_else(|error| panic!("cargo generate-lockfile の起動に失敗: {error}"));
+    assert!(
+        output.status.success(),
+        "cargo generate-lockfile が失敗しました: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `crates/autodiff` を一意な一時ディレクトリへコピーし、workspace 継承の
+/// 実体化・ベンチワークロード追加・バグ注入・git 初期化までを行った「準備
+/// リポジトリ」を構築する。戻り値は `(sandbox_path, injected_var_rs_content,
+/// original_var_rs_content)`（`original` は attempt 2〈正解復元〉の候補内容
+/// として使う）。
+fn prepare_standalone_autodiff_repo() -> (PathBuf, String, String) {
+    let fixture_src = repo_root().join("crates/autodiff");
+    let sandbox = unique_sandbox_dir("prep");
+    copy_dir_recursive(&fixture_src, &sandbox);
+    detach_autodiff_cargo_toml(&sandbox);
+
+    let bin_dir = sandbox.join("src/bin");
+    std::fs::create_dir_all(&bin_dir).expect("src/bin ディレクトリ作成に失敗");
+    std::fs::write(bin_dir.join("bench_workload.rs"), bench_workload_source())
+        .expect("bench_workload.rs の書き込みに失敗");
+
+    // 実 `crates/autodiff` は `.gitignore` を持たず、ルート workspace の
+    // `.gitignore`（`/target` 除外）に依存している。準備リポジトリは単独 git
+    // リポジトリのため、この除外を明示的に持たせないと `cargo build`/`test`
+    // が生成する `target/` 配下のバイナリ成果物が `git add -A`（diff 由来
+    // シグナル実測。`diff_signals.rs`）に巻き込まれ `git diff --numstat` が
+    // バイナリ差分（"-"）を返して `lines_changed` 実測が fail-closed に
+    // panic する（実装時に実測して判明。`tests/fixtures/feature-addition-
+    // leaky-relu/baseline/.gitignore` と同一内容）。
+    std::fs::write(sandbox.join(".gitignore"), "/target\n").expect(".gitignore の書き込みに失敗");
+
+    let var_rs_path = sandbox.join(TARGET_FILE);
+    let original_content =
+        std::fs::read_to_string(&var_rs_path).expect("var.rs の読み込みに失敗しました（注入前）");
+    let injected_content = inject_bug(&original_content);
+    std::fs::write(&var_rs_path, &injected_content).expect("var.rs へのバグ注入書き込みに失敗");
+
+    generate_lockfile(&sandbox);
+    git_init_baseline(&sandbox);
+
+    (sandbox, injected_content, original_content)
+}
+
+/// TASK-3.3b（#141）の受け入れ条件本体: バグ修正種別のループが
+/// `self-repair run` CLI 経由・1 回起動・人間介在なしで完走し、`signal_source:
+/// "measured"`・候補 diff 直接実測ベンチ（基準 2・5）・改竄検知ログ（`verify-log`
+/// CLI・基準 4）を伴うことを確認する。
+#[test]
+#[ignore = "cargo build/test --release/clippy を試行1・2の2系列分・crates/autodiff \
+            全テストスイート込みで実行するため長時間かかる。通常 CI ジョブでは実行しない。\
+            実行: cargo test -p self-repair --test revalidation_bug_fix -- --ignored --nocapture"]
+fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
+    let overall_start = Instant::now();
+
+    // --- 準備リポジトリの構築（バグ注入済み baseline） ---
+    let (sandbox, injected_content, original_content) = prepare_standalone_autodiff_repo();
+
+    // --- 候補列（#140 承認済み題材）を `--candidates` JSON へ書き出す ---
+    let candidates_json = serde_json::json!([
+        {
+            "description": "試行1（誤った修正: eval::sigmoid を eval::tanh に置換。\
+                             依然として Op::Relu の勾配式と forward 値が一致しない）",
+            "files": [{"path": TARGET_FILE, "content": wrong_fix_content(&injected_content)}],
+        },
+        {
+            "description": "試行2（正しい修正: relu 実装〈eval::relu〉を復元）",
+            "files": [{"path": TARGET_FILE, "content": original_content}],
+        },
+    ]);
+    let candidates_path = unique_temp_file("candidates.json");
+    std::fs::write(
+        &candidates_path,
+        serde_json::to_string_pretty(&candidates_json).expect("候補 JSON のシリアライズに失敗"),
+    )
+    .expect("候補 JSON の書き込みに失敗");
+
+    // --- `self-repair run` を 1 回だけ起動する（完走判定基準 1） ---
+    let target_out_dir = repo_root().join("target/self-repair-revalidation/bug-fix");
+    std::fs::create_dir_all(&target_out_dir).expect("完走ログ出力先ディレクトリ作成に失敗");
+    let log_path = target_out_dir.join("loop-log.jsonl");
+    // `LogWriter::open` は既存ファイルへ追記継続するため、固定ファイル名を
+    // 実行のたび削除してから開き「このディレクトリはこの 1 回の実行を記述
+    // する」契約を `loop-report.json` の上書きと揃える。
+    let _ = std::fs::remove_file(&log_path);
+    let output_path = target_out_dir.join("loop-report.json");
+
+    let guardrail_config_path = repo_root().join("guardrail.toml");
+    let policy_exclusion_path = repo_root().join("policy-exclusion.toml");
+    let run_args: Vec<String> = vec![
+        "run".to_string(),
+        "--kind".to_string(),
+        "bug-fix".to_string(),
+        "--repo".to_string(),
+        sandbox.display().to_string(),
+        "--max-attempts".to_string(),
+        "5".to_string(),
+        "--log".to_string(),
+        log_path.display().to_string(),
+        "--output".to_string(),
+        output_path.display().to_string(),
+        "--candidates".to_string(),
+        candidates_path.display().to_string(),
+        "--bench-bin".to_string(),
+        BENCH_BIN.to_string(),
+        "--workload-source".to_string(),
+        WORKLOAD_SOURCE.to_string(),
+        "--config".to_string(),
+        guardrail_config_path.display().to_string(),
+        "--policy-exclusion".to_string(),
+        policy_exclusion_path.display().to_string(),
+        // 本テストは #140 承認済み題材の候補（ハーネス自身が決定的に生成する
+        // 信頼済み入力。`docs/guardrail-self-repair-cli.md` §3.7「候補実行の
+        // 信頼境界」参照）を渡す実証ハーネスであり、`--candidates` の候補
+        // コードを sandbox 内で `cargo build`/`cargo test`/`cargo clippy` として
+        // ホスト権限で実行することを承認する（`feature_addition_loop_
+        // completion_task_3_3c.rs` と同じ根拠）。
+        "--allow-candidate-exec".to_string(),
+    ];
+    let run_output = self_repair_bin()
+        .args(&run_args)
+        .output()
+        .expect("self-repair run の起動に失敗");
+    let run_exit_code = run_output.status.code();
+    assert!(
+        matches!(run_exit_code, Some(0) | Some(10) | Some(20)),
+        "self-repair run は 3 分岐（0/10/20）のいずれかの終端 verdict に到達するはず（内部エラー・usage エラーで終わらない）: exit={run_exit_code:?}, stdout={}, stderr={}",
+        String::from_utf8_lossy(&run_output.stdout),
+        String::from_utf8_lossy(&run_output.stderr)
+    );
+
+    // --- `self-repair verify-log` を外部コマンド経由で検証する（完走判定基準 4） ---
+    let verify_output = self_repair_bin()
+        .args(["verify-log", "--log", log_path.to_str().unwrap()])
+        .output()
+        .expect("self-repair verify-log の起動に失敗");
+    assert_eq!(
+        verify_output.status.code(),
+        Some(0),
+        "loop-log.jsonl のハッシュチェーン検証（CLI 経由）に失敗しました: stdout={}, stderr={}",
+        String::from_utf8_lossy(&verify_output.stdout),
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+
+    // --- `--output` JSON を読み込み、実測結果を検証する ---
+    let report_text =
+        std::fs::read_to_string(&output_path).expect("loop-report.json の読み込みに失敗");
+    let mut report_json: serde_json::Value =
+        serde_json::from_str(&report_text).expect("loop-report.json のパースに失敗");
+
+    assert!(
+        report_json["outcome"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("Adopted")),
+        "relu 実装の復元のみ（既存 pub fn シグネチャは不変）のため api_broken=false と \
+         正しく判定され Adopted が実測結果のはず: {report_json}"
+    );
+    assert_eq!(
+        run_exit_code,
+        Some(0),
+        "Adopted の終了コードは 0 のはず（docs/guardrail-self-repair-cli.md 3.5 節）"
+    );
+    assert_eq!(
+        report_json["attempt_count"], 2,
+        "試行1（検証不合格）→試行2（検証通過・採用）の 2 試行系列であるはず: {report_json}"
+    );
+    let attempts = report_json["attempts"]
+        .as_array()
+        .expect("attempts は配列のはず");
+    assert!(
+        attempts[0]["outcome"]
+            .as_str()
+            .is_some_and(|s| s.contains("VerificationFailed")),
+        "試行1は既知正解値テスト不合格で検証不合格になるはず（完走判定基準 2 の一部）: {:?}",
+        attempts[0]
+    );
+    assert!(
+        attempts[1]["outcome"]
+            .as_str()
+            .is_some_and(|s| s.contains("Adopted")),
+        "試行2は検証通過後に採用されるはず: {:?}",
+        attempts[1]
+    );
+    assert_eq!(
+        report_json["signal_source"], "measured",
+        "--signals 契約検証パスを経由しない実シグナル計測であるはず（完走判定基準 6）: {report_json}"
+    );
+
+    // ベンチが `NotRun` に丸められず候補 diff 直接実測されたことを確認する
+    // （完走判定基準 5。試行2は build/test/clippy 3 ゲートを通過しているため、
+    // `RepairCompositeGate` の実行順序契約〈全ゲート通過後に限りベンチを
+    // 計測する〉によりベンチも実測済みになる）。
+    let adopted_evidence = &report_json["adopted_evidence"];
+    assert!(
+        !adopted_evidence.is_null(),
+        "試行2は検証（3 ゲート＋ベンチ）を通過している以上、その証跡が記録されているはず: {report_json}"
+    );
+    let bench_median_pct = adopted_evidence["bench_median_pct"]
+        .as_f64()
+        .expect("bench_median_pct は NotRun に丸められず有限値のはず（完走判定基準 5）");
+    assert!(bench_median_pct.is_finite());
+    assert!(
+        adopted_evidence["gate_report"]
+            .as_str()
+            .is_some_and(|s| s.contains("bench=measured-direct")),
+        "gate_report は候補 diff 直接実測（RepairCompositeGate）由来であるはず: {adopted_evidence}"
+    );
+    let bench_measurements_pct = adopted_evidence["bench_measurements_pct"]
+        .as_array()
+        .expect("bench_measurements_pct（生の計測系列）が記録されているはず");
+    assert!(
+        bench_measurements_pct.len() >= self_repair::verify_bench::MIN_BENCH_ITERATIONS,
+        "5 回以上の計測系列であるはず（REQ-4 受け入れ基準）: {bench_measurements_pct:?}"
+    );
+    assert!(
+        adopted_evidence["api_broken"].as_bool() == Some(false),
+        "relu 実装本体の復元のみで既存シグネチャは消失していないため api_broken=false のはず: {adopted_evidence}"
+    );
+
+    // 実行コマンドライン（監査・再現性のための記録）を付与する。`--repo`／
+    // `--candidates` は使い捨て sandbox・一時ファイルの絶対パスであり実行の
+    // たび変わる既知の制約のため相対化しない（`feature_addition_loop_
+    // completion_task_3_3c.rs` と同じ方針）。
+    let root = repo_root();
+    let relativize = |absolute: &Path| -> String {
+        absolute
+            .strip_prefix(&root)
+            .map(|relative| relative.display().to_string())
+            .unwrap_or_else(|_| absolute.display().to_string())
+    };
+    let invocation_for_record = format!(
+        "self-repair run --kind bug-fix --repo <sandbox> --max-attempts 5 --log {} --output {} --candidates <candidates.json> --bench-bin {} --workload-source {} --config {} --policy-exclusion {} --allow-candidate-exec",
+        relativize(&log_path),
+        relativize(&output_path),
+        BENCH_BIN,
+        WORKLOAD_SOURCE,
+        relativize(&guardrail_config_path),
+        relativize(&policy_exclusion_path),
+    );
+    report_json["invocation"] = serde_json::json!(invocation_for_record);
+    report_json["harness_wall_time_ms"] = serde_json::json!(overall_start.elapsed().as_millis());
+    report_json["issue"] = serde_json::json!(141);
+    report_json["task"] = serde_json::json!("TASK-3.3b");
+    report_json["notes"] = serde_json::json!([
+        "self-repair run CLI（#142 差し戻し分で実装。PR #361）を 1 回起動する経路へ移行済み（基準 1）。",
+        "self-repair verify-log CLI（外部コマンド経由。#145）でハッシュチェーン検証済み（基準 4・充足）。",
+        "ベンチは RepairCompositeGate（TASK-3.2a・#137）による候補 diff 直接実測であり、baseline/候補それぞれの var.rs 実装差分を直接計測する（旧版の合成ワークロード完走確認とは異なる。基準 2・5・充足）。",
+        "signal_source=measured（基準 6・充足）。",
+        "検証対象は crates/autodiff 1 クレート（準備リポジトリとして workspace 継承から切り離した独立コピー）に限定し、実 workspace 全体は対象外（実行時間の理由。verify_gates_integration.rs と同じスコーピング）。",
+    ]);
+    let mut pretty = serde_json::to_string_pretty(&report_json).expect("JSON シリアライズに失敗");
+    // `.editorconfig` の `insert_final_newline` 慣行に合わせ、commit 対象と
+    // なりうる出力（`docs/` 側）に末尾改行を付与する。
+    pretty.push('\n');
+    std::fs::write(&output_path, &pretty).expect("loop-report.json の再書き込みに失敗");
+
+    // リポジトリに commit 済みの記録（`docs/self-repair-revalidation/bug-fix/`）
+    // の更新は環境変数 `SELF_REPAIR_TASK_3_3B_WRITE_DOCS=1` を明示指定した
+    // 場合のみ行う（既定を `docs/` 直書きにすると `cargo test --workspace` を
+    // 実行するたびに sandbox の一時パスを含む `invocation` が変わり、意図しない
+    // tracked diff が毎回発生してしまうため。`feature_addition_loop_completion_
+    // task_3_3c.rs` と同じ方針）。`self-repair run` を再実行せず、実際に 1 回
+    // だけ起動した本実行の証跡をそのまま複製する。
+    if std::env::var("SELF_REPAIR_TASK_3_3B_WRITE_DOCS").as_deref() == Ok("1") {
+        let docs_out_dir = repo_root().join("docs/self-repair-revalidation/bug-fix");
+        std::fs::create_dir_all(&docs_out_dir).expect("docs 出力先ディレクトリ作成に失敗");
+        std::fs::copy(&output_path, docs_out_dir.join("loop-report.json"))
+            .expect("loop-report.json の docs へのコピーに失敗");
+        std::fs::copy(&log_path, docs_out_dir.join("loop-log.jsonl"))
+            .expect("loop-log.jsonl の docs へのコピーに失敗");
     }
+
+    let _ = std::fs::remove_dir_all(&sandbox);
+    let _ = std::fs::remove_file(&candidates_path);
 }

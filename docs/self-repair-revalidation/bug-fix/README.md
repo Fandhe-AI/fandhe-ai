@@ -4,163 +4,154 @@
 「自作コアに対する自己修復ループの人間介在なし完走を新実装リポで再実証すること」の
 うち、バグ修正種別の実証実行（TASK-3.3b）の記録である。題材・完走判定基準は
 `docs/self-repair-revalidation-plan.md`（TASK-3.3a・#140・人間承認済み）4.1 節・5 節を
-そのまま用いる。
+そのまま用いる（all-or-nothing 6 項目。#140 ユーザー判断で確定・変更していない）。
+
+## 0. 差し戻し履歴（#139 (c)・2 度目）
+
+本イシューは一度 PR #341 で「lib 直接呼び出しハーネス」により完走実証済みだったが、
+#139 のユーザー判断 (c)「差し戻し」（2026-08-08）により reopen された。差し戻しで
+割り当てられた残作業は「基準 2/5/6: バグ修正種別の再実証を CLI 経由・bench 実測・
+`signal_source: "measured"` 付きで再実行」である。本ディレクトリの記録は
+この差し戻し対応（本 PR）の実測結果に更新済みである。旧版（lib 直接呼び出し・
+合成ワークロード完走確認のみ）の内容は git 履歴（PR #341）を参照。
+
+先例: 機能追加種別（#142）は PR #361 で同種の CLI 経由再実証へ移行完了している
+（`crates/self-repair/tests/feature_addition_loop_completion_task_3_3c.rs`・
+`docs/self-repair-revalidation/feature-addition/`）。本ドキュメント・ハーネスは
+その構成をバグ修正種別へ写像したものである。
 
 ## 1. 実施内容
 
 - 題材: `crates/autodiff/src/var.rs` の `Var::relu` 実装本体を sigmoid 相当の演算
-  グラフにすり替えるバグ注入（実証計画 4.1 節の推奨案。PoC-2 題材 (a) の v2 移植）。
+  グラフにすり替えるバグ注入（実証計画 4.1 節の推奨案。PoC-2 題材 (a) の v2 移植。
+  #140 承認済みのまま変更していない）。
 - 実証ハーネス: `crates/self-repair/tests/revalidation_bug_fix.rs`
   （`#[ignore]` 分離の統合テスト。理由はテストのコンパイル前コメント参照）。
+  `self_repair` を lib として直接構築するのではなく、`env!("CARGO_BIN_EXE_
+  self-repair")` で実バイナリを **1 回だけ起動**し、続けて `self-repair
+  verify-log` を別プロセスとして起動する。
 - 実行コマンド:
 
   ```sh
-  SELF_REPAIR_REVALIDATION_OUT=docs/self-repair-revalidation/bug-fix \
+  SELF_REPAIR_TASK_3_3B_WRITE_DOCS=1 \
     cargo test -p self-repair --test revalidation_bug_fix -- --ignored --nocapture
   ```
 
-- 実施日時: `loop-report.json` の `started_at_unix_ms`（UNIX ミリ秒）。
+  環境変数を省略した場合は本ディレクトリ（tracked）を書き換えず、`target/
+  self-repair-revalidation/bug-fix`（`.gitignore` 済み）へのみ出力する
+  （非破壊に試し実行したい場合はこちらを使う。`self-repair run` を docs
+  反映のためだけに再実行しない設計。7 節参照）。
 - 実行環境: CPU バックエンドのみ（CUDA・Metal 実機依存なし）。
 - 改竄検知ログ: 本ディレクトリの `loop-log.jsonl`（JSON Lines・SHA-256
-  ハッシュチェーン。TASK-3.4・#145 実装済みの `self_repair::LogWriter`/
-  `verify_chain` をハーネスへ結線して出力・検証したもの。8 節参照）。
-- `SELF_REPAIR_REVALIDATION_OUT` を明示的に本ディレクトリへ向けているのは、
-  この記録（`loop-report.json`）を tracked ファイルとして意図的に更新するため。
-  環境変数を省略した場合は `.gitignore` 済みの `target/self-repair-revalidation/
-  bug-fix` へフォールバックし、tracked ファイルを意図せず書き換えない
-  （非破壊に試し実行したい場合はこちらを使う）。
+  ハッシュチェーン。CLI バイナリ内部の `self_repair::LogWriter` が `--log`
+  へ書き出したものをそのまま複製）。
 
 ## 2. 実施手順（ハーネス内部）
 
-1. **サンドボックス構築**: 実行中リポジトリを `git clone --local --no-hardlinks`
-   でリポジトリ外の一時ディレクトリへ複製する。以降の git 操作・cargo 実行は
-   すべてこのサンドボックス内に閉じ、メイン working copy・共有 git 状態には
-   一切触れない（並列イシュー実行時のグローバル状態保護）。
-2. **バグ注入**: サンドボックスの `crates/autodiff/src/var.rs` の `relu` メソッド
-   本体（forward 呼び出し行）を `eval::relu` → `eval::sigmoid` へ書き換え、
-   サンドボックス内でコミットする（`Op::Relu` の登録自体は変更しない。backward は
-   `Op::Relu` の勾配式のまま計算されるため、forward・backward の不整合が既知正解値
-   テストで検出される）。このコミットが diff の起点（baseline）になる。
-3. **検出**: `self_repair::BugFixDetector`（`cargo test --release`。検証対象は
-   `crates/autodiff` 1 クレート）が既知正解値テストの失敗を `Finding` として検出。
-4. **修正生成**: `self_repair::BugFixFixGenerator` に決定的な候補列を注入する
-   （PoC-2「修正試行 1: 誤り・却下 → 修正試行 2: 正解・採用」の写像）。
-   - attempt 1（誤り）: `eval::sigmoid` を別の誤り `eval::tanh` に置換するのみで、
-     依然として `Op::Relu` の勾配式と forward 値が一致しない。
-   - attempt 2（正解）: `relu` 実装（`eval::relu`）を復元する。
-5. **検証**: `crates/self-repair/tests/revalidation_bug_fix.rs` 内の
-   `RevalidationVerificationGate`（`self_repair::stages::VerificationGate` 実装）が
-   `self_repair::CargoVerificationGate`（build → test --release → clippy -D
-   warnings の 3 ゲート）と `self_repair::verify_bench::SelfRepairBenchGate`
-   （ベンチゲート機構）を合成して実行する。3 ゲートすべて通過した試行のみ、
-   追加でベンチゲート機構を実行する（3 節「4 ゲート合成についての設計上の制約」
-   参照）。
-6. **取り込み判断**: `self_repair::GuardrailAdoptionJudge` → `guardrail::decide`
-   （sandbox 直下の `guardrail.toml`〈TASK-4.3c 確定値〉をそのまま使用）。判定の
+1. **準備リポジトリの構築**: `crates/autodiff` を一意な一時ディレクトリへ
+   再帰コピーし、`Cargo.toml` の workspace 継承（`version`/`edition`/`license`/
+   `publish`・`tensor-core`/`bench-harness` への相対 path 依存・`serde`/
+   `serde_json`）をすべて実体値へ展開して独立 crate 化する（末尾に空の
+   `[workspace]` テーブルを追記し親 workspace から切り離す）。候補 diff 直接
+   実測（4 節）向けの決定的ベンチワークロード bin（`src/bin/bench_workload.rs`。
+   `autodiff::Var::relu` の forward+backward を反復）を追加し、`Var::relu` の
+   forward 呼び出しを `eval::relu` → `eval::sigmoid` へ書き換える（バグ注入。
+   `Op::Relu` の登録自体は変更しないため backward は勾配式のまま計算され、
+   forward・backward の不整合が既知正解値テストで検出される）。`cargo
+   generate-lockfile` で `Cargo.lock` を確定させたうえで単独の git リポジトリ
+   として `git init`・1 コミット（この HEAD が `baseline_commit` になる）。
+   以降の git 操作・cargo 実行はすべてこの準備リポジトリ・CLI 内部の隔離
+   sandbox に閉じ、メイン working copy・共有 git 状態には一切触れない
+   （並列イシュー実行時のグローバル状態保護）。
+2. **候補列の書き出し**: attempt 1（誤り: `eval::sigmoid` を別の誤り
+   `eval::tanh` に置換するのみ）・attempt 2（正解: `relu` 実装〈`eval::relu`〉
+   の復元）を JSON（`--candidates`）へ書き出す。
+3. **`self-repair run` を 1 回起動**（完走判定基準 1）:
+
+   ```sh
+   self-repair run --kind bug-fix --repo <準備リポジトリ> --max-attempts 5 \
+     --log loop-log.jsonl --output loop-report.json --candidates <candidates.json> \
+     --bench-bin bench_workload --workload-source src/bin/bench_workload.rs \
+     --config guardrail.toml --policy-exclusion policy-exclusion.toml \
+     --allow-candidate-exec
+   ```
+
+   CLI 内部では `--repo`（準備リポジトリ）を `RunSandbox::create` が更に
+   `git clone --local` した隔離 sandbox で、検出（`BugFixDetector`。
+   `cargo test --release`）→ 修正生成（`BugFixFixGenerator`）→ 検証
+   （`RepairCompositeGate`。build/test/clippy -D warnings の 3 ゲート＋
+   候補 diff 直接ベンチ実測）→ 取り込み判断（`GuardrailAdoptionJudge` →
+   `guardrail::decide`。sandbox 直下の `guardrail.toml`・`policy-exclusion.toml`
+   〈確定値・本実証では一切変更しない〉を使用）の 1 ループを実行する。判定の
    迂回経路はない。
-7. **完走ログ書き出し**: `self_repair::LoopReport`（試行回数・所要時間・判断根拠）
-   を JSON 化し、本ディレクトリの `loop-report.json` へ書き出す。同時に
-   `self_repair::LogWriter::append_report`（正常終了）／`append_failure`
-   （段階実行自体が失敗した場合）で同一ディレクトリの `loop-log.jsonl` へも
-   ハッシュチェーン形式のレコード列を追記し、書き出し直後に
-   `self_repair::verify_chain` でチェーン整合性を確認する（8 節参照）。
+4. **`self-repair verify-log` を外部コマンド経由で検証**（完走判定基準 4）:
+   `self-repair verify-log --log loop-log.jsonl` を別プロセスとして起動し、
+   exit 0・`OK:` メッセージを確認する。
+5. **証跡の記録**: `--output` JSON（`loop-report.json`）へ実行コマンドライン
+   （`invocation`）・所要時間・issue/task 番号・充足内訳の注記（`notes`）を
+   追記し、`SELF_REPAIR_TASK_3_3B_WRITE_DOCS=1` 明示時のみ本ディレクトリへ
+   複製する。
 
-## 3. 4 ゲート合成についての設計上の制約（重要）
+## 3. `self-repair run` の検証スコープ
 
-`self_repair::verify_gates::CargoVerificationGate`（build/test/clippy の 3 ゲート）
-と `self_repair::verify_bench::SelfRepairBenchGate`（ベンチゲート）の合成
-（4 ゲート化）は `crates/self-repair/src/` 本体へまだ結線されていない
-（#136 系のスコープ。`crates/self-repair/src/lib.rs` モジュールコメント参照）。
+準備リポジトリ（`crates/autodiff` 単体クレート）を対象に build/test/clippy/
+bench の 4 ゲートを実行する（実 workspace 全体は対象外。実行時間の理由。
+`verify_gates_integration.rs` と同じスコーピング判断）。実機（CUDA・Metal）
+依存はなく CPU バックエンドのみで完走する。
 
-本ハーネスは `tests/` 配下の統合テストクレート（`self_repair` を外部クレートとして
-利用する）であり、`self_repair::outcome::VerifiedEvidence::new` は `pub(crate)`
-のため、ここから新しい `VerifiedEvidence`（bench シグナルを実測値へ差し替えたもの）
-を構築できない（A08 の型レベル境界。`crates/self-repair/src/outcome.rs` の
-ドキュメント参照）。
+## 4. 実証計画 5 節「完走判定基準」との対応（CLI 経由再実証後）
 
-このため、`loop-report.json` の `bench_gate_mechanism` フィールドが記録するベンチ
-計測値は、**ベンチゲート機構自体の完走確認**（合成ワークロード。relu forward
-相当の要素毎演算を baseline・candidate で同一に実行し、`bench_runs_min` 回以上・
-中央値判定で機構が正しく完走し閾値内に収まることを確認するもの）であり、
-**候補 diff（bug fix のワークツリー差分）そのものの性能劣化率実測ではない**。
-候補ファイルはサンドボックス（別プロセス空間）にあり、本テストプロセスへ動的
-リンクして直接呼び出す経路がないため、候補コードそのものをベンチ計測することは
-本ハーネスの構成上できない。
-
-実際に `guardrail::decide` へ渡される `VerifiedEvidence` の `bench` フィールドは、
-`CargoVerificationGate::verify` が返す値（3 ゲート未計測のため常に
-`guardrail::BenchSignal::NotRun`）をそのまま使う。`guardrail::DecisionInput::new`
-は「全ゲート通過 + `NotRun`」を矛盾とはしない（`crates/self-repair/src/
-verify_gates.rs` のドキュメント参照）ため、取り込み判断自体はこの制約の影響を
-受けない（判定の迂回経路にはならない）。
-
-候補 diff に対する劣化率実測（真の 4 ゲート合成の `src/` 本体への昇格）は
-#136 系の残作業として別途追跡する（7 節参照）。
-
-## 4. 実証計画 5 節「完走判定基準」との対応
-
-| # | 判定基準 | 本実証での充足状況 |
-|---|---------|---------------------|
-| 1 | `self-repair run --kind bug-fix` の 1 回起動・追加の人間入力なしで終了コード 0（`Verdict::AutoApply`）に到達 | **部分充足**。`self-repair run` CLI バイナリが本イシュー時点で未実装のため、lib 直接呼び出し（`SelfRepairLoop::run`）経由で「1 回起動・追加の人間入力なし」を満たし、最終結論 `LoopOutcome::Adopted`（`guardrail::Verdict::AutoApply` 相当）に到達したことを確認した。CLI 形態での再実施は 7 節参照 |
-| 2 | 検証 4 ゲート（build／test --release／clippy -D warnings／bench）全通過。`guardrail` の 3 分岐判定を lib 直接呼び出しで経由し、迂回経路がないこと | **部分充足**（3 ゲートは実測・ベンチゲートは機構完走確認であり候補 diff の実測ではない。3 節・5 行目参照）。`guardrail::decide` を唯一の判定経路として使用し、迂回経路は存在しない |
-| 3 | `--max-attempts` 上限内で完走すること | **充足**。`max_attempts = 2` で attempt 2（正解）にて `Adopted` に到達（`loop-report.json` の `attempt_count`） |
-| 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過すること | **部分充足**（TASK-3.3d・#143）。TASK-3.4（#145）実装済みの `self_repair::LogWriter`/`verify_chain` を本ハーネスへ結線し、`loop-log.jsonl`（本ディレクトリ）へループ全段階（`loop_start → detection → attempt ×2 → loop_outcome`）を追記・その場でチェーン検証（`verify_chain` が `Ok`）した。外部コマンド `self-repair verify-log` CLI は未実装のため、検証は lib 直接呼び出し経由である（8 節参照） |
-| 5 | ベンチ劣化中央値が承認済み閾値内（5 回計測の中央値採用・単発計測禁止。閾値は変更しない） | **部分充足**。ベンチゲート機構自体は `bench_runs_min`（sandbox の `guardrail.toml` 確定値。5 回）以上・中央値判定で完走し閾値内（`bench_gate_mechanism.median_pct` 参照）。ただし 3 節のとおり合成ワークロードであり候補 diff の実測ではない |
-| 6 | 判定レポート JSON の `signal_source` フィールドが `"measured"` であること | **未充足（スコープ外）**。`signal_source` フィールドは `self-repair run` CLI（`docs/guardrail-self-repair-cli.md` §2.1）の出力仕様であり、CLI 未実装の本イシュー時点では該当フィールド自体が存在しない |
+| # | 判定基準 | 充足状況 |
+|---|---------|---------|
+| 1 | `self-repair run --kind bug-fix` の 1 回起動・追加の人間入力なしで終了コード 0（`Verdict::AutoApply`）に到達 | **充足**。CLI バイナリ（PR #361）を 1 回起動し、`outcome=Adopted`・`exit=0` に到達した（`loop-report.json` 実測） |
+| 2 | 検証 4 ゲート（build／test --release／clippy -D warnings／bench）全通過。`guardrail` の 3 分岐判定を経由し、迂回経路がないこと | **充足**。`RepairCompositeGate`（TASK-3.2a・#137）が候補 diff（`var.rs`）に対し 4 ゲートを実測し、`gate_report="build=pass test=pass clippy=pass bench=measured-direct"` を記録。`guardrail::decide` を唯一の判定経路として使用 |
+| 3 | `--max-attempts` 上限内で完走すること | **充足**。`--max-attempts 5` のうち attempt 2（正解）で `Adopted` に到達（`attempt_count=2`） |
+| 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過すること | **充足**。`self-repair verify-log` CLI（#145）を外部コマンドとして起動し exit 0・`OK: ... records=5, last_seq=4` を確認した |
+| 5 | ベンチ劣化中央値が承認済み閾値内（5 回計測の中央値採用・単発計測禁止。閾値は変更しない） | **充足**。候補 diff（`var.rs` の relu 実装復元）そのものを `DirectBenchRunner` が直接計測。`bench_measurements_pct` は 5 件（`MIN_BENCH_ITERATIONS`）、中央値は `bench_median_pct` に記録され `guardrail.toml` の `bench_median_max_pct` 閾値内 |
+| 6 | 判定レポート JSON の `signal_source` フィールドが `"measured"` であること | **充足**。`loop-report.json` の `signal_source` は `"measured"`（`--signals` 契約検証パスを経由しない実シグナル計測） |
 
 ## 5. 実行結果サマリ
 
 `loop-report.json` より:
 
-- 最終結論: `LoopOutcome::Adopted`（`guardrail::Verdict::AutoApply` 相当）
-- 試行回数: 2（attempt 1: 検証不合格で却下 → attempt 2: 検証通過・取り込み採用）
-- 合計所要時間: `total_duration_ms`（サンドボックス構築・バグ注入は計測対象外。
-  検出開始から最終結論確定までを計測）
-- attempt 1 の却下理由: `cargo test --release` の既知正解値テスト
-  （`crates/autodiff/tests/backward.rs` の `mlp_grad_*_matches_numeric`）が
-  analytic 勾配と numeric 勾配の不一致で失敗（`eval::tanh` へのすり替えでも
+- 最終結論: `outcome="Adopted"`（終了コード 0）
+- 試行回数: `attempt_count=2`（attempt 1: 検証不合格で却下 → attempt 2: 検証通過・
+  取り込み採用）
+- attempt 1 の却下理由: `cargo test --release`（`BugFixDetector`・
+  `RepairCompositeGate` の test ゲート）が既知正解値テスト
+  （`crates/autodiff/tests/backward.rs` の `mlp_grad_*_matches_numeric`）で
+  analytic 勾配と numeric 勾配の不一致により失敗（`eval::tanh` へのすり替えでも
   forward・backward の不整合は解消しない）
-- attempt 2 の採用理由: 全ゲート通過（build/test/clippy）＋ベンチゲート機構
-  完走（合成ワークロード・劣化率中央値が閾値内）＋ diff 由来シグナル
-  （`lines_changed`・`api_broken`・`gaming_suspect`・`exclusion_rule_ids`）が
-  すべて `guardrail::decide` の自動適用条件を満たした
+- attempt 2 の採用理由: `adopted_evidence` が示す 4 ゲート全通過
+  （`gate_report="build=pass test=pass clippy=pass bench=measured-direct"`）＋
+  診断由来シグナル（`lines_changed`・`api_broken=false`・`gaming_suspect=false`・
+  `exclusion_rule_ids=[]`）＋候補 diff 直接実測ベンチが `guardrail::decide` の
+  自動適用条件をすべて満たした
 
 ## 6. スコープ外事項（`.claude/rules/out-of-scope-tracking.md` 準拠）
 
 以下は本イシュー（#141）のスコープ外として記録し、後続イシューで追跡する。
 
-- **`self-repair run`/`verify-log` CLI バイナリの実装**
-  （`docs/guardrail-self-repair-cli.md` §3）: 未実装のため lib 直接呼び出しで
-  代替した。CLI 実装後の再実施は CLI 実装タスクの後続イシューのスコープ。
-- **`self-repair verify-log` 外部コマンド経由の検証**（判定基準 4）:
-  `loop-log.jsonl` の出力・チェーン検証自体は TASK-3.4（#145）実装済みの
-  `self_repair::LogWriter`/`verify_chain` を本イシュー（#143）で結線済み
-  （8 節参照）。CLI バイナリ経由での再実施は CLI 実装タスクの後続イシューの
-  スコープ。
-- **候補 diff に対するベンチ劣化率実測（真の 4 ゲート合成の `src/` 本体への
-  昇格）**（3 節）: `verify_bench::SelfRepairBenchGate` の
-  `stages::VerificationGate` への正式結線は #136 系の残作業として親イシューで
-  追跡済み。
-- **機能追加種別の完走実証**: #142（本ハーネスのサンドボックス構築・診断
-  ロジック〈`git`／diff／ポリシー除外評価のヘルパー関数〉は #142 で再利用可能な
-  形にできる）。
-- **記録ディレクトリ構成の最終確定・記録整備**: #143。
+- **統合記録の棚卸し**（`docs/self-repair-revalidation/README.md` 充足マトリクス・
+  `completion-judgment.md`）: #143／#144 のスコープとして本 PR では触れない。
 - **完走可否の人間評価**: #144（本 README・`loop-report.json` を判定基準に
   照らして評価する）。
+- **実 workspace 全体を対象にした検証**: TASK-3.3 系の別スコープ（3 節参照）。
 
 ## 7. 再現方法
 
 ```sh
-SELF_REPAIR_REVALIDATION_OUT=docs/self-repair-revalidation/bug-fix \
+SELF_REPAIR_TASK_3_3B_WRITE_DOCS=1 \
   cargo test -p self-repair --test revalidation_bug_fix -- --ignored --nocapture
 ```
 
 候補列（attempt 1・attempt 2 の内容）・検証ゲート・取り込み判断はいずれも決定的
-であり、`guardrail.toml`／`policy-exclusion.toml`（sandbox にクローンされた
-確定値。本実証では一切変更しない）を変えない限り、再実行しても同一の最終結論
-（`Adopted`）に到達する（実証計画 3 節 (e)「決定的シードで再現可能」の要求に
-対する対応。本題材は乱数を使わない純粋関数のため、決定的シードユーティリティ
-（`guardrail::determinism`）自体は不要である）。
+であり、`guardrail.toml`／`policy-exclusion.toml`（本実証では一切変更しない）を
+変えない限り、再実行しても同一の最終結論（`Adopted`）に到達する。ただしベンチ
+計測値（`bench_measurements_pct`・`bench_median_pct`）自体は実行環境の負荷に
+応じて多少変動しうる（5 回計測中央値の採用により単発ノイズは吸収される。
+実装計画 §7 リスク対策）。`--repo`（準備リポジトリ）・`--candidates` の絶対パスは
+使い捨て一時ディレクトリのため実行のたび変わる（`invocation` フィールド参照）。
 
 ## 8. 改竄検知ログ（`loop-log.jsonl`）の監査手順
 
@@ -172,12 +163,10 @@ SELF_REPAIR_REVALIDATION_OUT=docs/self-repair-revalidation/bug-fix \
   `attempt`（attempt 1: `verification_failed`）→ `attempt`（attempt 2:
   `adopted`）→ `loop_outcome`（`outcome.kind: "adopted"`）の 5 レコード
   （`loop-report.json` の `attempt_count: 2` と対応）。
-- **検証**: ハーネス自身が書き込み直後に `self_repair::verify_chain` を
-  呼び、`Ok` であることを assert している
-  （`crates/self-repair/tests/revalidation_bug_fix.rs`）。第三者が独立に
-  再検証する場合は同じ `verify_chain(path)` を呼べばよい
-  （`self-repair verify-log` 外部コマンドは未実装のため、lib 呼び出しが
-  現時点で唯一の検証手段）。
+- **検証**: `self-repair verify-log --log loop-log.jsonl` を独立した外部
+  コマンドとして起動して検証する（完走判定基準 4）。監査担当者は
+  `cargo run -p self-repair -- verify-log --log docs/self-repair-revalidation/
+  bug-fix/loop-log.jsonl` で第三者として再検証できる。
 - **改竄検知の実効性**: `verify_chain` がフィールド改変・レコード削除・
   順序入れ替え・未知フィールド注入をいずれも検知することは
   `crates/self-repair/src/logging.rs` の単体テスト
