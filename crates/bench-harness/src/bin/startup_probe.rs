@@ -120,6 +120,11 @@ fn run_cpu(process_start: Instant, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<(
 /// 使わず、`device_handle` で取得済みの `CudaDevice` を [`backend_cuda::CudaGemm::new`] に
 /// 明示的に渡して GEMM を実行する（`backend_cuda::CudaGemm` は `pub`。`ops.rs` の
 /// `CudaBackendOps::gemm` 実装と同じ手順を、device 再取得なしで踏襲する）。
+///
+/// 注意: `run_tiled_f32` はホスト側スライスを受け取り内部で `clone_htod`／`clone_dtoh`
+/// を行う契約のため、これらの転送コストは `first_kernel_secs` の計測区間に含まれる
+/// （`ProbeReport::first_kernel_secs` のドキュメント参照。PR #360 codex-review 指摘・
+/// Medium「Host transfer included in kernel timing」）。
 fn run_cuda(
     process_start: Instant,
     a: &Tensor<f32>,

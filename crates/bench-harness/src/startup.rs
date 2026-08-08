@@ -45,9 +45,16 @@
 //!
 //! - **内部計測**: probe 子プロセス（[`crate`] の `bin/startup_probe`）が
 //!   `main()` 冒頭の [`std::time::Instant`] から (1) バックエンド初期化完了・
-//!   (2) 初回カーネル完了（`BackendOps::gemm` 呼び出しが同期込みで返った時点。
-//!   `sync` モジュールの契約と同様「ホスト転送を伴わない完了待ち」の後）までを
-//!   自己計測し、`ProbeReport` として標準出力へ 1 行 JSON で出力する。
+//!   (2) 初回カーネル完了（`BackendOps::gemm` 相当の呼び出しが完了待ち込みで
+//!   返った時点）までを自己計測し、`ProbeReport` として標準出力へ 1 行 JSON で
+//!   出力する。CUDA 経路は `CudaGemm::run_tiled_f32` がホスト側スライスを
+//!   受け取り内部で `clone_htod`／`clone_dtoh` を行う契約であるため、(2) の
+//!   区間には「NVRTC コンパイル＋カーネル起動＋完了待ち」に加えホスト⇔デバイス間
+//!   転送コストが含まれる（`sync` モジュールの「ホスト転送を伴わない完了待ち」
+//!   契約とは異なる。転送を除いたカーネル単体計測には `backend-cuda` 側に
+//!   デバイス常駐バッファを扱う新規 API が要る。PR #360 codex-review 指摘・
+//!   Medium「Kernel metric includes host transfers」への対応として、実装を
+//!   変えず本ドキュメントの記述を実測経路に合わせて訂正した）。
 //! - **外部計測**: 本モジュール（親ハーネス）が `Command::spawn` 前後の
 //!   [`std::time::Instant`] で計測する wall time（プロセス生成・動的リンク込み。
 //!   v1 の `time` コマンド計測に対応）。
@@ -258,11 +265,16 @@ pub struct ProbeReport {
     ///
     /// CUDA 経路は `device_init_secs` 計測で取得済みの `CudaDevice` を
     /// `CudaGemm::new` に明示的に渡すため（`startup_probe.rs::run_cuda`）、
-    /// `first_kernel_secs - device_init_secs` は「NVRTC コンパイル＋カーネル起動＋
-    /// 完了待ち」のみを表す（device の二重初期化を含まない。#170 レビュー指摘への
-    /// 対応）。Metal 経路は `MetalBackendOps::gemm` 内部で `MetalContext` が
-    /// 都度再構築される現行実装（本 OS でビルド確認不能のため計測経路は未変更）
-    /// のため、同区間に `MetalContext` 再構築コストが混入しうる
+    /// `first_kernel_secs - device_init_secs` の区間に device の二重初期化は
+    /// 含まれない（#170 レビュー指摘への対応）。ただし `CudaGemm::run_tiled_f32`
+    /// はホスト側スライスを受け取り内部で `clone_htod`／`clone_dtoh` を行う契約
+    /// のため、同区間には「NVRTC コンパイル＋カーネル起動＋完了待ち」に加えて
+    /// ホスト⇔デバイス間転送コストも含まれる（PR #360 codex-review 指摘・Medium
+    /// 「Kernel metric includes host transfers」。転送を含まないカーネル単体計測が
+    /// 要る場合は `backend-cuda` にデバイス常駐バッファを扱う API を追加する必要が
+    /// あり、本タスクのスコープ外）。Metal 経路は `MetalBackendOps::gemm` 内部で
+    /// `MetalContext` が都度再構築される現行実装（本 OS でビルド確認不能のため
+    /// 計測経路は未変更）のため、同区間に `MetalContext` 再構築コストも混入しうる
     /// （`startup_probe.rs::run_metal` のコメント参照）。
     pub first_kernel_secs: f64,
 }
@@ -600,6 +612,13 @@ fn read_capped<R: Read>(mut reader: R, limit: usize) -> std::io::Result<(Vec<u8>
 /// 制御する）。`None` の場合は `CUDA_CACHE_PATH` を明示的に子プロセス環境から除去する
 /// （CPU 計測時や、親プロセスの環境変数を意図せず継承させないための明示化）。
 ///
+/// `CUDA_CACHE_DISABLE` は `cache_dir` の値によらず常に子プロセス環境から除去する。
+/// この変数は driver の JIT キャッシュ機構そのものを無効化するため、親プロセス側の
+/// 環境で `1` が設定されたまま継承させると、`cache_dir` へ独自の `CUDA_CACHE_PATH` を
+/// 与えてもウォームフェーズの priming（1 回目の実行でキャッシュを充填する）が
+/// 効かず、コールド／ウォームの計測結果が無言で同一値に収束してしまう
+/// （PR #360 codex-review 指摘・Medium「Warm phase ignores cache disable」）。
+///
 /// 環境変数の設定は `Command::env`/`env_remove` により**子プロセスのみ**に適用され、
 /// 本ハーネス（親プロセス）・共有環境は変更しない（`.claude/rules/security.md` A08）。
 ///
@@ -646,6 +665,9 @@ fn run_probe_once_with_timeout(
             cmd.env_remove("CUDA_CACHE_PATH");
         }
     }
+    // 親プロセスの `CUDA_CACHE_DISABLE=1` を継承すると `CUDA_CACHE_PATH` の設定が
+    // 無意味化し、ウォームフェーズの priming が機能しなくなる（上記ドキュメント参照）。
+    cmd.env_remove("CUDA_CACHE_DISABLE");
 
     let start = Instant::now();
     let mut child = cmd
