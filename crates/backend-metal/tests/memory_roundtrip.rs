@@ -15,6 +15,7 @@ use backend_metal::{MetalContext, MetalMemory};
 use tensor_core::Tensor;
 use tensor_core::buffer::MemoryOps;
 use tensor_core::device::Device;
+use tensor_core::memory_stats::MemoryStats;
 use tensor_core::pool::{PoolConfig, PooledMemory};
 
 /// upload → download の roundtrip が bit 完全一致することを確認する
@@ -144,4 +145,46 @@ fn pooled_memory_reuses_buffer_and_zero_fills() {
         );
     }
     drop(buf2);
+}
+
+/// TASK-14.1b（#175）: 受け入れ条件「Metal バックエンドでピーク値が
+/// 取得できる」の実機検証。既知サイズ（要素数 `32 * 32` の rank-1 shape
+/// `[1024]`、f32 = 4,096 バイト）を複数同時確保し
+/// `peak_allocated_bytes()` が期待合計と一致すること、
+/// drop 後は `allocated_bytes()` が減少しつつ `peak` が過去最大値を保持
+/// することを確認する（`backend-cuda::tests::memory_real_device` の同名
+/// テストと同種のシナリオを実機で裏付ける）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn peak_allocated_bytes_matches_known_allocation_size() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let mem = MetalMemory::new(ctx);
+    mem.reset_peak();
+
+    let numel = 32 * 32;
+    let expected_bytes = (numel * std::mem::size_of::<f32>()) as u64;
+
+    let a = mem
+        .alloc_zeroed(&[numel])
+        .expect("1 本目の alloc_zeroed は成功するはず");
+    let b = mem
+        .alloc_zeroed(&[numel])
+        .expect("2 本目の alloc_zeroed は成功するはず");
+
+    assert_eq!(mem.allocated_bytes(), expected_bytes * 2);
+    assert_eq!(mem.peak_allocated_bytes(), expected_bytes * 2);
+
+    drop(a);
+    assert_eq!(
+        mem.allocated_bytes(),
+        expected_bytes,
+        "1 本解放後は current が半分に戻るはず"
+    );
+    assert_eq!(
+        mem.peak_allocated_bytes(),
+        expected_bytes * 2,
+        "peak は解放後も同時生存時の合計を保持するはず"
+    );
+
+    drop(b);
 }

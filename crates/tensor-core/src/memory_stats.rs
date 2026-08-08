@@ -9,16 +9,18 @@
 //!
 //! # イシュー分担
 //!
-//! - 本イシュー（#174・TASK-14.1a）: 本モジュールの新設 ＋ `backend-cpu`
+//! - #174（TASK-14.1a）: 本モジュールの新設 ＋ `backend-cpu`
 //!   （`CpuMemory`）への組み込み。受け入れ条件は「CPU バックエンドで
 //!   ピーク値が取得できる」
-//! - #175（TASK-14.1b）: CUDA/Metal のメモリ確保経路（`backend-cuda::CudaMemory`／
-//!   `backend-metal::MetalMemory`）への同フック組み込み（同一シグネチャ維持）
+//! - 本イシュー（#175・TASK-14.1b）: CUDA/Metal のメモリ確保経路
+//!   （`backend-cuda::CudaMemory`／`backend-metal::MetalMemory`）への同
+//!   フック組み込み（同一シグネチャ維持）。組み込み完了済み
+//!   （`CudaMemory`／`MetalMemory` はいずれも [`MemoryStats`] を実装する）
 //! - #176（TASK-14.1c）: 既知確保パターンの期待値一致テストの本格整備
 //!
-//! `buffer::MemoryOps` に必須メソッドとして追加すると既存の `CudaMemory`／
-//! `MetalMemory` 実装（未実装のため）を壊し #175 のスコープを先食いするため、
-//! `MemoryOps` とは独立したトレイトとして新設する（`device.rs`・`buffer.rs`
+//! `buffer::MemoryOps` に必須メソッドとして追加すると `CudaMemory`／
+//! `MetalMemory` 実装（#175 完了前は未実装だった）を壊しかねないため、
+//! `MemoryOps` とは独立したトレイトとして新設した（`device.rs`・`buffer.rs`
 //! と同じ依存逆転構成: trait 定義は `tensor-core`、実装は各バックエンド）。
 //!
 //! # 計測対象の粒度（スコープ外の申し送り）
@@ -31,9 +33,9 @@
 //!
 //! # トラッカーの共有範囲（プロセスグローバルにしない理由）
 //!
-//! [`AllocationTracker`] は `Arc` で `CpuMemory`／将来の `CudaMemory`／
-//! `MetalMemory` インスタンス間に共有させる設計とし、`static` グローバルには
-//! しない。理由は 2 点:
+//! [`AllocationTracker`] は `Arc` で `CpuMemory`／`CudaMemory`／
+//! `MetalMemory`（いずれも #175 完了済み）インスタンス間に共有させる設計とし、
+//! `static` グローバルにはしない。理由は 2 点:
 //! (a) 並列実行される単体テスト間で計数が混線しフレーキーテストの原因になる
 //!     （REQ-4 の偽陽性防止方針と整合）
 //! (b) グローバル可変状態を避ける安全側判断

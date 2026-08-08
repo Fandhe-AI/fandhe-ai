@@ -11,7 +11,10 @@
 //! `alloc_zeroed`/`upload` の確保バイト数を [`AllocationTracker`] へ計上する
 //! ようにした。トラッカーは `CpuMemory` インスタンス間で `Arc` 共有する
 //! （`memory_stats` モジュールコメント「トラッカーの共有範囲」参照。
-//! CUDA/Metal への同フック組み込みは #175）。
+//! CUDA/Metal への同フック組み込みは #175・TASK-14.1b で完了済み。
+//! `backend-cuda::memory::CudaMemory`／`backend-metal::memory::MetalMemory`
+//! も本ファイルと同型の `tracker: Arc<AllocationTracker>` パターンで
+//! `MemoryStats` を実装する）。
 
 use std::any::Any;
 use std::mem::size_of;
