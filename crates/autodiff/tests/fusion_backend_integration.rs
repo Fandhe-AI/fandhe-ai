@@ -226,6 +226,113 @@ fn backward_through_lazy_chain_succeeds_via_materialize_fallible() {
     assert_eq!(grad_x.shape(), &[4]);
 }
 
+/// `backend-cpu::run_fused_elementwise` を模した `BackendOps`
+/// フィクスチャ（Cursor Bugbot・PR #403 是正の回帰テスト用）: leaf の
+/// shape が `FusionPlan::output_shape()` と一致しない（broadcast を
+/// 伴う）場合に `BackendError::ShapeMismatch` を返す。`backend-cpu` は
+/// 実際にこの制約を持つ（`crates/backend-cpu/src/fused_elementwise.rs`
+/// 「leaf i is non-contiguous (broadcast/transpose view)」コメント参照。
+/// 本フィクスチャは非 contiguous 検査の代わりに shape 不一致検査のみを
+/// 単純化して再現する）。
+struct ShapeMismatchOnBroadcastFusedOps {
+    inner: common::NaiveOps,
+}
+
+impl BackendOps for ShapeMismatchOnBroadcastFusedOps {
+    fn device(&self) -> Device {
+        Device::Cpu
+    }
+    fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.gemm(a, b)
+    }
+    fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.add(a, b)
+    }
+    fn mul(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.mul(a, b)
+    }
+    fn relu(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.relu(a)
+    }
+    fn exp(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.exp(a)
+    }
+    fn tanh(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.tanh(a)
+    }
+    fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.sum(a, dim)
+    }
+    fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
+        self.inner.max(a, dim)
+    }
+
+    fn run_fused(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let out_shape = plan.output_shape();
+        if leaves.iter().any(|l| l.shape() != out_shape) {
+            return Err(BackendError::ShapeMismatch(
+                tensor_core::ShapeError::BroadcastIncompatible {
+                    lhs: out_shape.to_vec(),
+                    rhs: leaves
+                        .iter()
+                        .find(|l| l.shape() != out_shape)
+                        .map(|l| l.shape().to_vec())
+                        .unwrap_or_default(),
+                },
+            ));
+        }
+        let mut values: Vec<Tensor<f32>> = Vec::new();
+        for kind in plan.ops() {
+            let v = match kind {
+                FusedOpKind::Input { leaf_index } => leaves[leaf_index].clone(),
+                FusedOpKind::Add { lhs, rhs } => self.inner.add(&values[lhs], &values[rhs])?,
+                FusedOpKind::Mul { lhs, rhs } => self.inner.mul(&values[lhs], &values[rhs])?,
+                FusedOpKind::Relu { input } => self.inner.relu(&values[input])?,
+                FusedOpKind::Exp { input } => self.inner.exp(&values[input])?,
+                FusedOpKind::Tanh { input } => self.inner.tanh(&values[input])?,
+            };
+            values.push(v);
+        }
+        values
+            .last()
+            .cloned()
+            .ok_or_else(|| BackendError::Unsupported("run_fused: empty plan".into()))
+    }
+}
+
+/// Cursor Bugbot 指摘（PR #403）の回帰テスト: bias broadcast
+/// （`[batch, width] + [width]`）を含む遅延連鎖を、broadcast leaf の
+/// 融合実行を拒否する `BackendOps`（[`ShapeMismatchOnBroadcastFusedOps`]）
+/// 上で `sum`（層 1・`materialize_fallible` 経由）まで実体化しても、
+/// `ShapeMismatch` が硬いエラーとして伝播せず per-op フォールバックで
+/// 成功すること。修正前は `materialize_fallible` が `Unsupported` 以外の
+/// `run_fused` エラーをすべて即時 `Err` 化していたため、この構成で
+/// `AutodiffError::Backend(ShapeMismatch)` を返し失敗していた。
+#[test]
+fn broadcast_bias_add_chain_falls_back_on_fused_shape_mismatch() {
+    let ops = ShapeMismatchOnBroadcastFusedOps {
+        inner: common::NaiveOps,
+    };
+    let tape = Tape::new(Box::new(ops));
+    let x = tape.var(&Tensor::new(vec![0.5; 8], &[2, 4]).unwrap());
+    let bias = tape.var(&Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[4]).unwrap());
+    // bias broadcast（[2,4] + [4]）→ relu の 2 段連鎖。leaf の shape が
+    // 揃わないため `run_fused` は `ShapeMismatch` を返す。
+    let h = x.add(&bias).unwrap();
+    let h = h.relu();
+    let loss = h.sum(None).unwrap(); // 層 1（`materialize_fallible`）経由
+    assert_eq!(loss.to_tensor().shape(), &[] as &[usize]);
+
+    // `Tape::backward` も同じ層 1 経路を使うため併せて確認する。
+    let grads = tape.backward(&loss).unwrap();
+    let grad_x = grads.get(&x).unwrap().expect("x は loss に寄与している");
+    assert_eq!(grad_x.shape(), &[2, 4]);
+}
+
 /// `Tape: Send` の静的アサーション（設計書 §3.4「`Tape: Send` を維持する」）。
 #[test]
 fn tape_is_send() {

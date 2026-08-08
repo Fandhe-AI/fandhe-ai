@@ -584,12 +584,24 @@ fn fallback_per_op(
 /// 読み出す際に**必ず**使用する（`docs/fusion-graph-design.md` §3.5.2）。
 /// `Var::value`（層 2）は本関数を呼ばない。
 ///
-/// `run_fused` の失敗のうち `BackendError::Unsupported`（能力不足）
-/// **以外**は eager フォールバックで吸収せず型付きエラーのまま呼び出し
-/// 元へ返す。`Unsupported` の場合のみ `ops` の per-op メソッドへ逐次
-/// フォールバックし、それも失敗すれば `?` で伝播する（§3.5.2 手順 3・4。
-/// `eval.rs` への最終手段フォールバックは層 2 限定であり層 1 では
-/// 使わない）。
+/// `run_fused` の失敗のうち `BackendError::Unsupported`（能力不足）・
+/// `BackendError::ShapeMismatch`（**Cursor Bugbot・PR #403 是正**:
+/// `build_lazy_plan` は broadcast を伴う elementwise 連鎖（`[N,M] + [M]`
+/// の bias add 等）も leaf shape を検査せず `FusionPlan` 化するため、
+/// `run_fused` 実装（`backend-cpu::run_fused_elementwise` 等）が「全 leaf
+/// と出力の shape が同一」という契約を検査して `ShapeMismatch` を返す
+/// ケースが正当に発生しうる。この `ShapeMismatch` は `build_lazy_plan` が
+/// 構築した `FusionPlan` 自体の shape 不整合ではない——各ノードの shape は
+/// `Var::add`/`mul` がグラフ構築時点で `broadcast_shape` により検証済み
+/// （このため `FusionPlan::from_ops` 自体は成功する）——のであり、単に
+/// 「この融合バックエンド実装が broadcast 済み leaf の融合実行に対応
+/// していない」という能力不足を意味する。`Unsupported` と区別せず同じ
+/// フォールバック経路（層 2 の `materialize_non_fallible` が採る「エラー
+/// 種別を区別しない」方針と同じ）に載せる）**以外**は eager フォール
+/// バックで吸収せず型付きエラーのまま呼び出し元へ返す。上記 2 種別の
+/// 場合のみ `ops` の per-op メソッドへ逐次フォールバックし、それも失敗
+/// すれば `?` で伝播する（§3.5.2 手順 3・4。`eval.rs` への最終手段
+/// フォールバックは層 2 限定であり層 1 では使わない）。
 ///
 /// 実体化が完了したら実体化を要求した対象ノード自身の `OnceCell` にのみ
 /// `set()` する（連鎖の途中ノードの `OnceCell` は空のまま残す。融合の
@@ -610,7 +622,11 @@ pub(crate) fn materialize_fallible<'a>(
     let leaf_refs: Vec<&Tensor<f32>> = leaves.iter().collect();
     let computed = match ops.run_fused(&plan, &leaf_refs) {
         Ok(t) => t,
-        Err(BackendError::Unsupported(_)) => {
+        // `Unsupported`／`ShapeMismatch` はいずれも「この融合バックエンド
+        // 実装がこの `FusionPlan` を融合実行する能力を持たない」ことを
+        // 意味する（上記ドキュメンテーションコメント参照。Cursor
+        // Bugbot・PR #403 是正）。per-op フォールバックへ委譲する。
+        Err(BackendError::Unsupported(_)) | Err(BackendError::ShapeMismatch(_)) => {
             fallback_per_op(nodes, ops, id).map_err(AutodiffError::Backend)?
         }
         Err(other) => return Err(AutodiffError::Backend(other)),

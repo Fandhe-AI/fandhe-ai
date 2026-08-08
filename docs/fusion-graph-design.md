@@ -1027,6 +1027,18 @@ elementwise 遅延グラフを構成しないため、backward 側に新たな�
     しない。`Tape: Debug`・`Tape: Send` という公開契約自体は変更しない
     （実装手段は §3.4 上記のとおり手書き `impl fmt::Debug` へ変わる）。
     `BackendOps` trait はスーパートレイトの追加を一切受けない。
+    **追記（2026-08-08・codex-review 第 19〜21 波・PR #403 の P1 是正）**:
+    「唯一の公開コンストラクタ」という上記の記述は、性能を伴う経路
+    （`facade` composition root が結線する最適化済み `BackendOps` を渡す
+    経路）についてのみ真である。`autodiff` は具体バックエンドクレート
+    非依存という不変条件（`tests/architecture_boundaries.rs`）と両立
+    する形で、`eval.rs` の naive 参照実装へ委譲する compat 用
+    `BackendOps`（`default_ops::NaiveOps`）を追加し、これを既定 `ops` と
+    する `impl Default for Tape`・`compat::Sequential::predict(&Tensor)`
+    （無引数 `ops` 版。従来の 2 引数版は `predict_with_ops` へ改名）を
+    復元した。`Tape::new(ops)` 自体のシグネチャは変更していない。詳細・
+    性能特性の注意は `docs/public-api-design.md` §4.1「互換 API の別名
+    復元」節を正とする（本節では要点のみ記す）。
   - **CPU 融合実行の提供元は `backend-cpu`（変更しない）**: `run_fused`
     の CPU 実装（未対応時の fail-safe な参照実装を含む）は `backend-cpu`
     側の `BackendOps` 実装（`run_fused` オーバーライド）として提供する。
@@ -1647,9 +1659,19 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
   の場合に限る。この場合の実体化手順は §3.5.2 の他の呼び出し元
   （`matmul`／`sum`／`max`）と同じ手順 1〜4（`self.ops`〈§1のとおり
   常に埋まっている必須所有値〉を借用し forward の遅延グラフの融合を
-  試みて `Unsupported` のみ `ops` の per-op メソッドへフォールバックし
-  〈それも失敗すれば `?` で伝播する〉、それ以外の失敗はフォールバック
-  せず `?` で伝播する）を用いる。**VJP 計算式そのものの計算**（`vjp()`
+  試みて `Unsupported`／`ShapeMismatch` は `ops` の per-op メソッドへ
+  フォールバックし〈それも失敗すれば `?` で伝播する〉、それ以外の失敗は
+  フォールバックせず `?` で伝播する。**追記（2026-08-08・Cursor
+  Bugbot・PR #403 是正）**: `ShapeMismatch` も `Unsupported` と同じ
+  フォールバック対象へ追加した。`build_lazy_plan` は broadcast を伴う
+  elementwise 連鎖（bias add 等）の leaf shape を検査しないため
+  `FusionPlan` 自体は構築できるが、`run_fused` 実装（`backend-cpu::
+  run_fused_elementwise` 等）側が「全 leaf と出力の shape が同一」を
+  要求し `ShapeMismatch` を返しうる。これは融合バックエンドの能力不足
+  （`Unsupported` と同種）であり、既に `Var::add`／`mul` がグラフ構築
+  時点で `broadcast_shape` により shape 検証済みのため、ユーザー入力
+  由来の genuine な shape エラーがこの分岐に紛れ込むことはない）を用いる。
+  **VJP 計算式そのものの計算**（`vjp()`
   および各 VJP 関数の内部実装）は、この実体化で得た入力 `Tensor` を
   受け取ったあとは融合を経由せず `grad.rs` 既存の `eval.rs` 呼び出し
   （`eval::mul`／`tanh_grad_factor` 等）で直接計算する。
