@@ -2,7 +2,7 @@
 //! わる」の直接検証。
 //!
 //! `BackendOps::run_fused` をオーバーライドした呼び出しカウンタ付き
-//! フィクスチャを `Tape::new(ops)` へ渡し、4 段以上の elementwise 連鎖
+//! フィクスチャを `Tape::new_with_ops(ops)` へ渡し、4 段以上の elementwise 連鎖
 //! （`add`/`mul`/`relu`/`exp`/`tanh`）で `run_fused` が呼ばれること（融合
 //! 経路）と、常時 `Unsupported` を返すフィクスチャで per-op フォール
 //! バックが働き数値一致複合判定（相対誤差 1e-3 未満 または 絶対誤差
@@ -158,7 +158,7 @@ fn run_fused_is_called_for_elementwise_chain_beyond_min_length() {
         inner: common::NaiveOps,
         fused_calls: fused_calls.clone(),
     };
-    let tape = Tape::new(Box::new(ops));
+    let tape = Tape::new_with_ops(Box::new(ops));
     let x = tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
     let out = build_chain(&tape, &x);
 
@@ -179,7 +179,7 @@ fn per_op_fallback_matches_fused_path_numerically() {
     let x_data = vec![0.5f32, -0.5, 1.5, -1.5];
 
     let fused_calls = Arc::new(AtomicUsize::new(0));
-    let fused_tape = Tape::new(Box::new(CountingFusedOps {
+    let fused_tape = Tape::new_with_ops(Box::new(CountingFusedOps {
         inner: common::NaiveOps,
         fused_calls: fused_calls.clone(),
     }));
@@ -190,7 +190,7 @@ fn per_op_fallback_matches_fused_path_numerically() {
         "融合経路の前提（run_fused 呼び出し）が満たされていない"
     );
 
-    let fallback_tape = Tape::new(Box::new(AlwaysUnsupportedFused {
+    let fallback_tape = Tape::new_with_ops(Box::new(AlwaysUnsupportedFused {
         inner: common::NaiveOps,
     }));
     let x_fallback = fallback_tape.var(&Tensor::new(x_data, &[4]).unwrap());
@@ -214,7 +214,7 @@ fn backward_through_lazy_chain_succeeds_via_materialize_fallible() {
     // `Tape::backward`（層 1）が forward 記録済みの未実体化ノードを正しく
     // 実体化しながら逆伝播できることを確認する（`matmul` 等を経由せず、
     // 遅延連鎖の末端を直接 loss にする構成）。
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
     let chain_out = build_chain(&tape, &x);
     let loss = chain_out.sum(None).unwrap();
@@ -317,7 +317,7 @@ fn broadcast_bias_add_chain_falls_back_on_fused_shape_mismatch() {
     let ops = ShapeMismatchOnBroadcastFusedOps {
         inner: common::NaiveOps,
     };
-    let tape = Tape::new(Box::new(ops));
+    let tape = Tape::new_with_ops(Box::new(ops));
     let x = tape.var(&Tensor::new(vec![0.5; 8], &[2, 4]).unwrap());
     let bias = tape.var(&Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[4]).unwrap());
     // bias broadcast（[2,4] + [4]）→ relu の 2 段連鎖。leaf の shape が

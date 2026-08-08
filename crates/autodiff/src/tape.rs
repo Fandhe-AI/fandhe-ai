@@ -30,14 +30,14 @@ use crate::error::AutodiffError;
 /// テープの識別子。プロセス全体で単調増加するカウンタから発行する。
 ///
 /// ポインタ等値（`ptr::eq`）ではなく専用 ID を用いる理由: スコープ末で
-/// 破棄された `Tape` のメモリ領域は後続の `Tape::new(ops)` に再利用され
+/// 破棄された `Tape` のメモリ領域は後続の `Tape::new_with_ops(ops)` に再利用され
 /// うるため、ポインタ比較は別テープを同一と誤判定する（false positive）
 /// 余地が残る（`docs/public-api-design.md` §3.1）。単調増加 ID は
 /// プロセス生存中に衝突しない。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TapeId(u64);
 
-/// プロセス全体で共有する `TapeId` 発行カウンタ。`Tape::new(ops)` からのみ
+/// プロセス全体で共有する `TapeId` 発行カウンタ。`Tape::new_with_ops(ops)` からのみ
 /// インクリメントされる（`fetch_add` は複数スレッドから並行に `Tape` を
 /// 生成しても一意性を保つ）。
 static NEXT_TAPE_ID: AtomicU64 = AtomicU64::new(0);
@@ -182,7 +182,7 @@ pub(crate) struct TapeNode {
 /// 方式（`docs/public-api-design.md` §3.1 が productize 時に許容する
 /// 選択肢）を採用する。
 ///
-/// **`ops` フィールド（TASK-12.1d・#164。必須所有値）**: `Tape::new(ops)`
+/// **`ops` フィールド（TASK-12.1d・#164。必須所有値）**: `Tape::new_with_ops(ops)`
 /// で構築したどの `Tape` でも常に埋まっている（`Option` を経由しない。
 /// `docs/fusion-graph-design.md` §1「`None` に相当する値がそもそも
 /// 存在しない」）。`Box<dyn BackendOps + Send>`（`Send` 境界あり）と
@@ -195,7 +195,7 @@ pub(crate) struct TapeNode {
 ///
 /// **学習ループでの運用**: ノード列をクリアする `reset()`/`clear()`
 /// 相当の API は本イシューでは提供しない。学習ループはステップごとに
-/// 新しい `Tape::new(ops)` を生成・破棄する運用を前提とする
+/// 新しい `Tape::new_with_ops(ops)` を生成・破棄する運用を前提とする
 /// （`docs/public-api-design.md` §3.1.1「未決事項として記録」）。
 pub struct Tape {
     pub(crate) id: TapeId,
@@ -214,21 +214,31 @@ impl std::fmt::Debug for Tape {
     }
 }
 
-/// 無引数構築の compat 経路（codex-review 第 19〜21 波・PR #403 の P1
+/// 無引数構築の compat 経路（codex-review 第 19〜22 波・PR #403 の P1
 /// 是正で追加。`docs/public-api-design.md` §4.1「移行手順」追補）。
-/// `default_ops::naive_ops()`（`eval.rs` へ委譲する naive CPU 参照実装。
-/// `backend-cpu` 等の具体バックエンドクレートには依存しない）を `ops` に
-/// 使う。性能が必要な呼び出し元は `Tape::new(ops)` へ最適化済み
-/// `BackendOps` を明示的に渡すこと（`default_ops` モジュール冒頭コメント
-/// 参照）。
+/// [`Tape::new`]（無引数版）に委譲する。
 impl Default for Tape {
     fn default() -> Self {
-        Tape::new(crate::default_ops::naive_ops())
+        Tape::new()
     }
 }
 
 impl Tape {
-    /// 新しいテープを生成する（TASK-12.1d・#164 の破壊的変更）。`ops` は
+    /// 無引数構築の compat 入口（codex-review 第 22 波・PR #403 の P1
+    /// 是正で復元。既存呼び出し元のソース互換性を壊さないため、TASK-12.1d
+    /// 導入前と同じ無引数シグネチャを維持する）。`ops` には
+    /// `default_ops::naive_ops()`（`eval.rs` へ委譲する naive CPU 参照
+    /// 実装。`backend-cpu` 等の具体バックエンドクレートには依存しない）を
+    /// 使う。性能が必要な呼び出し元は [`Tape::new_with_ops`] へ最適化済み
+    /// `BackendOps` を明示的に渡すこと（`default_ops` モジュール冒頭
+    /// コメント参照）。
+    pub fn new() -> Tape {
+        Tape::new_with_ops(crate::default_ops::naive_ops())
+    }
+
+    /// バックエンドを明示指定してテープを生成する（TASK-12.1d・#164 で
+    /// `Tape::new(ops)` として導入し、codex-review 第 22 波・PR #403 の
+    /// P1 是正で `Tape::new_with_ops` へ改名した）。`ops` は
     /// このテープ上のすべてのバックエンド実行（融合実行・per-op
     /// フォールバック・`matmul`/`sum`/`max` の実行）に使われる必須所有値
     /// であり、`facade`（TASK-9.3。未実装）の composition root が解決した
@@ -238,10 +248,10 @@ impl Tape {
     /// から新規発行されるため、同時に存在する複数の `Tape` 間で衝突
     /// しない。
     ///
-    /// **無引数構築が必要な場合**は [`Tape::default`] を使う（codex-review
-    /// 第 19〜21 波・PR #403 の P1 是正で追加した compat 経路。
-    /// `default_ops` モジュール参照）。
-    pub fn new(ops: Box<dyn BackendOps + Send>) -> Tape {
+    /// **無引数構築が必要な場合**は [`Tape::new`]（または [`Tape::default`]）
+    /// を使う（codex-review 第 19〜22 波・PR #403 の P1 是正で維持した
+    /// compat 経路。`default_ops` モジュール参照）。
+    pub fn new_with_ops(ops: Box<dyn BackendOps + Send>) -> Tape {
         Tape {
             id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),
             nodes: RefCell::new(Vec::new()),

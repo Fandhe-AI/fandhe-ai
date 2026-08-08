@@ -1,6 +1,6 @@
-//! `Tape::default()`／`compat::Sequential::predict`（無引数 `ops` 版）が
-//! 使う naive CPU 参照実装（TASK-12.1d 追補・#164 codex-review 第 19 波
-//! 以降の P1 是正）。
+//! `Tape::new()`／`Tape::default()`／`compat::Sequential::predict`
+//! （無引数 `ops` 版）が使う naive CPU 参照実装（TASK-12.1d 追補・#164
+//! codex-review 第 19 波以降の P1 是正）。
 //!
 //! **背景**: TASK-12.1d は `Tape::new(ops: Box<dyn BackendOps + Send>)`
 //! を必須所有値化し、無引数 `Tape::new()`／`impl Default for Tape`／
@@ -16,14 +16,16 @@
 //! （クレート非公開の naive 参照実装。forward 値計算と数式を共有し、
 //! `test_support::TestOps` と同一の委譲先）へそのまま委譲する
 //! `BackendOps` 実装を、`#[cfg(test)]` 限定ではなく本番ビルドに含める
-//! 形で追加する。
+//! 形で追加する。第 22 波の P1 是正で ops 必須版は `Tape::new_with_ops`
+//! へ改名し、`Tape::new()` を出荷済みシグネチャどおりの無引数 compat
+//! 入口として復元した（`crates/autodiff/src/tape.rs` 参照）。
 //!
 //! **性能特性**: 本実装は融合実行（`FusionPlan::from_ops` 等）を経ない
 //! 逐次 naive 実装であり、`backend-cpu` の最適化カーネル（`rayon` 並列・
 //! BLIS ブロッキング等）と同等の性能を持たない。`Tape::default()`／
 //! `Sequential::predict(&Tensor)`（無引数 `ops` 版）は「デフォルト値でも
 //! 動く」ことを保証する compat 経路に徹し、性能が必要な呼び出し元は
-//! 引き続き `Tape::new(ops)`／`Sequential::predict_with_ops(input, ops)`
+//! 引き続き `Tape::new_with_ops(ops)`／`Sequential::predict_with_ops(input, ops)`
 //! へ最適化済み `BackendOps`（`facade` composition root が結線する
 //! `backend-cpu`／`backend-cuda`／`backend-metal` 等）を明示的に渡す
 //! （`docs/public-api-design.md` §4.1「承認済み内容と結線の実装場所」の

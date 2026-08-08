@@ -34,7 +34,7 @@ fn scalar(tensor: &Tensor<f32>) -> f32 {
 
 #[test]
 fn mse_loss_forward_mean_matches_analytic_value() {
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let pred = tape.var(&t(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]));
     let target = tape.var(&t(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]));
 
@@ -44,7 +44,7 @@ fn mse_loss_forward_mean_matches_analytic_value() {
 
 #[test]
 fn mse_loss_forward_sum_matches_analytic_value() {
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let pred = tape.var(&t(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]));
     let target = tape.var(&t(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]));
 
@@ -57,7 +57,7 @@ fn mse_loss_default_mse_loss_equals_mean_reduction() {
     // 既存 `Var::mse_loss`（mean 固定）は `mse_loss_with(.., Mean)` への
     // 委譲であり、値が完全一致することを確認する（公開 API 非破壊の
     // 直接検証）。
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let pred = tape.var(&t(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]));
     let target = tape.var(&t(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]));
 
@@ -151,7 +151,7 @@ fn forward_loss(
     target: &Tensor<f32>,
     reduction: Reduction,
 ) -> f32 {
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let xv = tape.var(x);
     let wv = tape.var(w);
     let tv = tape.var(target);
@@ -163,7 +163,7 @@ fn forward_loss(
 #[test]
 fn mse_loss_mean_end_to_end_grad_matches_numeric() {
     let f = fixture();
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let tv = tape.var(&f.target);
@@ -179,7 +179,7 @@ fn mse_loss_mean_end_to_end_grad_matches_numeric() {
 #[test]
 fn mse_loss_sum_end_to_end_grad_matches_numeric() {
     let f = fixture();
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let xv = tape.var(&f.x);
     let wv = tape.var(&f.w);
     let tv = tape.var(&f.target);
@@ -198,7 +198,7 @@ fn mse_loss_sum_end_to_end_grad_matches_numeric() {
 fn nn_loss_mse_loss_matches_var_mse_loss_with_end_to_end() {
     let f = fixture();
 
-    let tape_a = Tape::new(common::naive_ops());
+    let tape_a = Tape::new_with_ops(common::naive_ops());
     let xv_a = tape_a.var(&f.x);
     let wv_a = tape_a.var(&f.w);
     let tv_a = tape_a.var(&f.target);
@@ -209,7 +209,7 @@ fn nn_loss_mse_loss_matches_var_mse_loss_with_end_to_end() {
     let grads_a = tape_a.backward(&loss_a).unwrap();
     let dw_a = grads_a.get(&wv_a).unwrap().expect("到達する");
 
-    let tape_b = Tape::new(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
     let xv_b = tape_b.var(&f.x);
     let wv_b = tape_b.var(&f.w);
     let tv_b = tape_b.var(&f.target);
@@ -230,7 +230,7 @@ fn nn_loss_mse_loss_matches_var_mse_loss_with_end_to_end() {
 
 #[test]
 fn mse_loss_with_shape_mismatch_returns_shape_error() {
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let pred = tape.var(&t(vec![1.0, 2.0], &[2]));
     let target = tape.var(&t(vec![1.0, 2.0, 3.0], &[3]));
 
@@ -240,8 +240,8 @@ fn mse_loss_with_shape_mismatch_returns_shape_error() {
 
 #[test]
 fn mse_loss_with_cross_tape_returns_tape_mismatch() {
-    let tape_a = Tape::new(common::naive_ops());
-    let tape_b = Tape::new(common::naive_ops());
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
     let pred = tape_a.var(&t(vec![1.0, 2.0], &[2]));
     let target = tape_b.var(&t(vec![1.0, 2.0], &[2]));
 

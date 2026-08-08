@@ -199,9 +199,9 @@ fn detach_autodiff_cargo_toml(sandbox: &Path) {
          （crates/autodiff/Cargo.toml の記法が変わっていないか確認）"
     );
 
-    // TASK-12.1d（#164）: `Tape::new(ops)` の破壊的変更（ops 必須化）に伴い、
+    // TASK-12.1d（#164）: `Tape::new_with_ops(ops)` の破壊的変更（ops 必須化）に伴い、
     // `bench_workload_source()`（下記）が生成する `src/bin/bench_workload.rs`
-    // は `Tape::new(...)` へ渡す `BackendOps` 実装を要する。`autodiff` 自身は
+    // は `Tape::new_with_ops(...)` へ渡す `BackendOps` 実装を要する。`autodiff` 自身は
     // `backend-cpu` へ依存しない（設計上の不変条件）ため、この bin 専用の
     // 依存として `[dependencies]` セクションへ直接追記する（`[dependencies]`
     // は `dev-dependencies` と異なり通常の `cargo build --release --bin
@@ -281,7 +281,7 @@ fn deterministic_inputs(count: usize) -> Vec<f32> {
 fn run_once(inputs: &[f32]) -> f32 {
     let tensor = Tensor::new(inputs.to_vec(), &[inputs.len()])
         .expect("bench_workload: shape とデータ長は一致させている");
-    let tape = Tape::new(Box::new(CpuBackendOps::new()));
+    let tape = Tape::new_with_ops(Box::new(CpuBackendOps::new()));
 
     let x = tape.var(&tensor);
     let y = x.relu();

@@ -58,7 +58,7 @@ fn predict_default_matches_predict_with_ops_naive() {
 }
 
 /// `Tape::default()`（codex-review 第 19〜21 波・PR #403 の P1 是正で
-/// 追加した compat 経路）が `Tape::new(default_ops::naive_ops())` と同じ
+/// 追加した compat 経路）が `Tape::new_with_ops(default_ops::naive_ops())` と同じ
 /// 挙動（forward 演算が記録・実行できる）を持つこと。
 #[test]
 fn tape_default_records_and_evaluates_ops() {
@@ -108,7 +108,7 @@ fn sequential_forward_matches_manual_nn_forward_bit_exact() {
     let input_tensor = array(vec![vec![0.1_f32, 0.2, 0.3, 0.4], vec![0.5, 0.6, 0.7, 0.8]]).unwrap();
 
     // 手動経路。
-    let manual_tape = Tape::new(common::naive_ops());
+    let manual_tape = Tape::new_with_ops(common::naive_ops());
     let manual_input = manual_tape.var(&input_tensor);
     let h = linear1.bind(&manual_tape).forward(&manual_input).unwrap();
     let h = Sigmoid.forward(&h);
@@ -121,7 +121,7 @@ fn sequential_forward_matches_manual_nn_forward_bit_exact() {
         .add_sigmoid()
         .add_linear(6, 3, SEED2)
         .unwrap();
-    let seq_tape = Tape::new(common::naive_ops());
+    let seq_tape = Tape::new_with_ops(common::naive_ops());
     let seq_input = seq_tape.var(&input_tensor);
     let seq_output = model.forward(&seq_tape, &seq_input).unwrap();
 
@@ -140,7 +140,7 @@ fn sequential_forward_on_external_tape_reaches_backward() {
         .unwrap()
         .add_relu();
 
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let input_tensor = array([[0.1_f32, -0.2, 0.3, -0.4]]).unwrap();
     let input = tape.var(&input_tensor);
     let output = model.forward(&tape, &input).unwrap();

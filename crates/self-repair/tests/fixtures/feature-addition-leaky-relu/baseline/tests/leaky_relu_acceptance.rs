@@ -20,7 +20,7 @@ fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
 
 #[test]
 fn leaky_relu_matches_known_values() {
-    let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
+    let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
     let x_t = Tensor::new(vec![-2.0f32, -0.5, 0.0, 0.5, 1.0, 3.0], &[2, 3])
         .expect("test fixture: shape とデータ長は事前に一致させている");
     let x = tape.var(&x_t);

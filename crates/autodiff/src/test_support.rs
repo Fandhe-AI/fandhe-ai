@@ -2,7 +2,7 @@
 //!
 //! `autodiff` は `backend-cpu`／`backend-cuda`／`backend-metal` のいずれ
 //! にも依存しない（`docs/fusion-graph-design.md` §3.4「`autodiff` は
-//! 具体クレートへの依存を一切持たない」）。`Tape::new(ops)` が必須所有値
+//! 具体クレートへの依存を一切持たない」）。`Tape::new_with_ops(ops)` が必須所有値
 //! `ops: Box<dyn BackendOps + Send>` を要求するため、クレート内の
 //! `#[cfg(test)]` テスト（`src/` 内ユニットテスト。統合テストは
 //! `tests/common/mod.rs` に別途同型のフィクスチャを持つ）はこのモジュール
@@ -67,7 +67,7 @@ impl BackendOps for TestOps {
     }
 }
 
-/// `Tape::new(test_ops())` の形で使う（`src/` 内 `#[cfg(test)]` 専用）。
+/// `Tape::new_with_ops(test_ops())` の形で使う（`src/` 内 `#[cfg(test)]` 専用）。
 pub(crate) fn test_ops() -> Box<dyn BackendOps + Send> {
     Box::new(TestOps)
 }

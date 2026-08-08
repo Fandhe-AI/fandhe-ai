@@ -12,6 +12,15 @@
 
 ## 1. 判断サマリ
 
+> **命名の追補（codex-review 第 22 波・PR #403 の P1 是正。2026-08-08）**:
+> 本節以下で `Tape::new(ops)` と表記している箇所は、ops 必須の公開
+> コンストラクタを指す（TASK-12.1d 時点の名称）。その後 `Tape::new(ops)`
+> は `Tape::new_with_ops(ops)` へ改名し、出荷済みシグネチャどおりの
+> 無引数 `Tape::new()` を compat 入口として復元した
+> （`docs/public-api-design.md` §4.1「互換 API の再改名」節・
+> `crates/autodiff/src/tape.rs` 参照）。本文書は経緯の記録に徹し、
+> 過去の議論箇所の表記は当時の名称のまま残す。
+
 - 融合対象は **elementwise 演算連鎖（4〜6 段程度）** を初期スコープとする
   （TASK-12.1 の内容規定、`docs/spec/05-tasks.md:370`）。reduction エピロー
   グ・matmul／softmax を挟む複合ワークロードは初期スコープ外とする。

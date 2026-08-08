@@ -11,7 +11,7 @@
 //! 検証と矛盾するため）。
 //!
 //! 各テストファイルは `mod common;` で読み込み、`common::naive_ops()` を
-//! `Tape::new(...)` へ渡す。
+//! `Tape::new_with_ops(...)` へ渡す。
 
 #![allow(dead_code)] // テストファイルごとに使う関数が異なるため。
 

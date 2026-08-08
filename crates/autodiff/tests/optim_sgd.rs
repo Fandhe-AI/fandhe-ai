@@ -399,7 +399,7 @@ fn run_regression_training_with_sgd(steps: usize, lr: f32) -> Vec<(f32, u32)> {
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = Tape::new(common::naive_ops());
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
 

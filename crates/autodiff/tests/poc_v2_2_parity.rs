@@ -325,7 +325,7 @@ fn poc_grad_check_mlp_case() {
     );
 
     // --- AD 勾配（公開 API 経由）---
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&case.x);
     let w1 = tape.var(&case.w1);
     let b1 = tape.var(&case.b1);
@@ -385,7 +385,7 @@ fn poc_loss_value_parity() {
     let case = gen_grad_check_case();
     assert_eq!(case.regen_count, 0, "poc_grad_check_mlp_case と同じ前提");
 
-    let tape = Tape::new(common::naive_ops());
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&case.x);
     let w1 = tape.var(&case.w1);
     let b1 = tape.var(&case.b1);
@@ -449,7 +449,7 @@ fn sgd_step(param: &Tensor<f32>, grad: &Tensor<f32>, lr: f32) -> Tensor<f32> {
 /// PoC `bin/train_repro.rs` の 50 step フルバッチ SGD 学習ループを公開
 /// API（`Tape`/`Var`/`Tape::backward`）経由で再現する。ステップごとに
 /// 新規 `Tape` を作る運用は `backward.rs`「学習ループでの運用」節の
-/// 前提と同じ（PoC も同様にステップごとに `Tape::new(common::naive_ops())`）。
+/// 前提と同じ（PoC も同様にステップごとに `Tape::new_with_ops(common::naive_ops())`）。
 /// 各 step の `(loss, loss.to_bits())` を返す。
 fn run_training(steps: usize, lr: f32) -> Vec<(f32, u32)> {
     let case = gen_train_case();
@@ -462,7 +462,7 @@ fn run_training(steps: usize, lr: f32) -> Vec<(f32, u32)> {
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = Tape::new(common::naive_ops());
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&case.x);
         let w1v = tape.var(&w1);
         let b1v = tape.var(&b1);

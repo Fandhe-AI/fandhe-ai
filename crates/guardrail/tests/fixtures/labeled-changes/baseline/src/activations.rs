@@ -83,7 +83,7 @@ mod tests {
     /// TASK-4.2a 検証題材（活性化関数の取り違えバグ。D1/D2/G1）の検出ゲート。
     #[test]
     fn relu_matches_known_values() {
-        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
+        let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
         let x = known_input(&tape);
         let y = dense_vec(&relu(&x).to_tensor());
         let expected = [0.0f32, 0.0, 0.0, 0.5, 1.0, 3.0];
@@ -98,7 +98,7 @@ mod tests {
     /// 数値精度回帰テスト: Sigmoid の既知正解値との誤差を検証する。
     #[test]
     fn sigmoid_matches_known_values() {
-        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
+        let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
         let x = known_input(&tape);
         let y = dense_vec(&sigmoid(&x).to_tensor());
         // 参照値は f64 で `1 / (1 + exp(-x))` を計算した既知正解値。
@@ -122,7 +122,7 @@ mod tests {
     /// 検証する。TASK-4.2a 検証題材（D4・G5）の検出ゲート。
     #[test]
     fn leaky_relu_matches_known_values() {
-        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
+        let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
         let x = known_input(&tape);
         let y = dense_vec(&leaky_relu(&tape, &x, 0.1).to_tensor());
         let expected = [-0.2f32, -0.05, 0.0, 0.5, 1.0, 3.0];
