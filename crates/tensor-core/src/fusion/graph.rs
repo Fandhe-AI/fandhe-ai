@@ -13,6 +13,7 @@
 //! 追記する前に検査し、違反時は [`FusionGraphError`] で拒否する。
 
 use crate::dispatch::DType;
+use crate::error::ShapeError;
 
 /// 融合グラフのノード種別（設計書 §2.1）。
 ///
@@ -115,10 +116,17 @@ pub(crate) struct FusionNode {
 }
 
 /// 融合グラフ構築時の検証エラー（OWASP A03 観点。設計書 §5「グラフ構築
-/// API は `ShapeError` 検証を先行させる」の実体。`tensor-core::ShapeError`
-/// は shape 不整合を汎用的に表す型だが、範囲外ノード ID 検査は融合グラフ
-/// 固有の不変条件〈入力 ID は常に自ノードより小さい〉であるため、既存
-/// `ShapeError` を拡張せず本モジュール専用の型として切り出す）。
+/// API は既存の `ShapeError`（`error.rs:19` 付近）経路をそのまま再利用し、
+/// 融合グラフ構築時に独自の検証経路を新設しない」の実体）。
+///
+/// elementwise binary のオペランド shape 不一致は `tensor-core` 全体で
+/// 共通の [`ShapeError::ShapeMismatch`] をそのまま包んで返す
+/// （`ops_shape.rs`・`typed.rs` と同一のエラー型・パターンマッチ資産を
+/// #163／#165 の融合グラフエラー処理からも使えるようにするため。
+/// レビュー指摘により `FusionGraphError` 独自の同型 variant を廃止）。
+/// 範囲外ノード ID 検査のみは融合グラフ固有の不変条件
+/// 〈入力 ID は常に自ノードより小さい〉であり `ShapeError` に対応する
+/// 概念が存在しないため、`NodeIdOutOfRange` として本型に残す。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FusionGraphError {
     /// 参照した入力 `FusionNodeId` が現在のグラフサイズの範囲外
@@ -127,7 +135,8 @@ pub(crate) enum FusionGraphError {
     /// elementwise binary（`Add`／`Mul`）のオペランド shape が一致しない
     /// （broadcast view はここでは扱わない。`contiguous == false` として
     /// `detect.rs` の非融合フォールバック判定に委ねる設計書 §2.3 の方針）。
-    OperandShapeMismatch { lhs: Vec<usize>, rhs: Vec<usize> },
+    /// 既存 `ShapeError::ShapeMismatch` をそのまま包む。
+    Shape(ShapeError),
 }
 
 impl std::fmt::Display for FusionGraphError {
@@ -139,14 +148,18 @@ impl std::fmt::Display for FusionGraphError {
                     "fusion node id {id} out of range (graph has {len} nodes)"
                 )
             }
-            FusionGraphError::OperandShapeMismatch { lhs, rhs } => {
-                write!(f, "fusion operand shape mismatch: lhs {lhs:?} rhs {rhs:?}")
-            }
+            FusionGraphError::Shape(err) => write!(f, "fusion operand shape error: {err}"),
         }
     }
 }
 
 impl std::error::Error for FusionGraphError {}
+
+impl From<ShapeError> for FusionGraphError {
+    fn from(err: ShapeError) -> Self {
+        FusionGraphError::Shape(err)
+    }
+}
 
 /// 融合グラフ本体（設計書 §2.2）。ノード ID＋隣接（入力エッジ）リストに
 /// よる DAG。`autodiff::Tape` と同様、ノードは発生順に `Vec` へ追記され、
@@ -191,7 +204,8 @@ impl FusionGraph {
     /// 1. `op` が参照する入力 `FusionNodeId` がすべて現在のグラフサイズ
     ///    範囲内にあること（範囲外は [`FusionGraphError::NodeIdOutOfRange`]）
     /// 2. `Add`／`Mul`（elementwise binary）はオペランド shape が一致する
-    ///    こと（不一致は [`FusionGraphError::OperandShapeMismatch`]）
+    ///    こと（不一致は既存 [`ShapeError::ShapeMismatch`] を包んだ
+    ///    [`FusionGraphError::Shape`]）
     ///
     /// 検証を通過した場合のみノードを追記し、参照された入力ノードの
     /// `use_count` を加算する（設計書 §2.4）。
@@ -221,10 +235,11 @@ impl FusionGraph {
             let lhs_shape = &self.nodes[a.0].meta.shape;
             let rhs_shape = &self.nodes[b.0].meta.shape;
             if lhs_shape != rhs_shape {
-                return Err(FusionGraphError::OperandShapeMismatch {
+                return Err(ShapeError::ShapeMismatch {
                     lhs: lhs_shape.clone(),
                     rhs: rhs_shape.clone(),
-                });
+                }
+                .into());
             }
         }
 
@@ -286,10 +301,10 @@ mod tests {
         let err = g.push(FusionOp::Mul(x, y), f32_meta(&[4])).unwrap_err();
         assert_eq!(
             err,
-            FusionGraphError::OperandShapeMismatch {
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
                 lhs: vec![4],
                 rhs: vec![2, 4],
-            }
+            })
         );
         assert_eq!(g.len(), 2);
     }

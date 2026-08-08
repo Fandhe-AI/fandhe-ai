@@ -15,7 +15,7 @@ use std::fmt;
 /// （`.claude/rules/security.md`）であり、後続タスクで検査項目が増えても
 /// 呼び出し側の網羅的 match を破壊しないため。
 #[non_exhaustive]
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShapeError {
     /// 要求される次元数（rank）と実際の次元数が一致しない。
     ///

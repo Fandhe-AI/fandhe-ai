@@ -121,7 +121,7 @@ pub(crate) enum FusionDecision {
 ///      （設計書 §3.2 (a)(b)）。ただしこの時点でも `dtype != F32` または
 ///      `contiguous == false` を検出した時点で走査全体を打ち切り
 ///      [`FusionDecision::Fallback`] を返す（`graph.rs` の
-///      `OperandShapeMismatch` 周辺コメントが明言する契約: broadcast
+///      `FusionGraph::push` の binary shape 検証コメントが明言する契約: broadcast
 ///      view は `push` 時点では拒否せず `contiguous: false` として本
 ///      関数の非融合フォールバック判定に委ねられる。境界ノードだから
 ///      といって検証を素通りさせない）。
@@ -397,7 +397,7 @@ mod tests {
     /// #162 レビュー指摘: 葉ノード（融合境界／`Input`）の `contiguous`
     /// が検証されず、transpose／broadcast view がそのまま `Fuse` として
     /// 通過してしまう不具合の再発防止。`graph.rs` の
-    /// `OperandShapeMismatch` 周辺コメントが明言する「broadcast view は
+    /// `FusionGraph::push` の binary shape 検証コメントが明言する「broadcast view は
     /// `contiguous: false` として本関数の非融合フォールバックに委ねる」
     /// 契約を、セグメント内部ノードだけでなく葉ノードでも満たすこと
     /// を検証する。
