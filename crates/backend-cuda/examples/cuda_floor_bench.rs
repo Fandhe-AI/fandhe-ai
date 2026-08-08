@@ -531,6 +531,67 @@ fn main() {
         }
     };
 
+    // `run_wmma_tf32`/`run_f16` は opt カーネル（共有メモリ・タイル最適化版）
+    // が `new` 時点で利用不能な場合、基本版へ「公開シグネチャ・呼び出し側の
+    // 挙動を変えずに」自動フォールバックする（`gemm.rs::CudaGemm::
+    // run_wmma_tf32`／`gemm_wmma.rs::CudaWmmaGemm::run_f16` ドキュメンテー
+    // ションコメント「フォールバック方針」参照）。呼び出し側からは戻り値の
+    // 成否だけでは opt カーネルが実際に実行されたか判別できないため、本
+    // バイナリは `wmma_tf32_opt_available`／`wmma_f16_opt_available` を
+    // 明示的に確認し、opt カーネルが使用不能な場合は候補下限が REQ-8 の
+    // 「最適化後下限」を代表しない（基本版カーネルの実測に過ぎない）旨を
+    // 警告として出力する。以降 `main` はこの真偽値を `*_opt_confirmed` と
+    // して追跡し、`print_candidate_floor` の確定判定（`confirmed_candidate_
+    // floor`）に `same_hardware` と同様の gate として合成する
+    // （PR #349 未解決スレッド「Opt kernel use not verified」対応。
+    // `docs/perf/cuda-floor-remeasurement.md`「実測バイナリ」節参照）。
+    let f32_opt_confirmed = match &tiled_gemm {
+        Some(g) if g.wmma_tf32_opt_available() => {
+            println!(
+                "f32 optimized kernel: WMMA(TF32) opt AVAILABLE (used for wmma_tf32 measurements below)."
+            );
+            true
+        }
+        Some(g) => {
+            println!(
+                "WARNING: f32 WMMA(TF32) opt kernel UNAVAILABLE ({}); wmma_tf32 measurements in \
+                 this run silently fall back to the basic (non-optimized) WMMA(TF32) kernel \
+                 (`gemm.rs::CudaGemm::run_wmma_tf32` フォールバック方針参照), so they do NOT \
+                 represent the REQ-8 post-optimization floor. The f32 candidate floor below will \
+                 be reported as n/a for this reason.",
+                g.wmma_tf32_opt_unavailable_reason()
+                    .unwrap_or("unknown reason")
+            );
+            false
+        }
+        // tiled_gemm 自体が利用不能な場合は f32 列全体が skip されるため
+        // opt 未確認として扱う（後続の f32_judged_count が 0 のまま残り、
+        // `print_candidate_floor` は「n/a（判定対象サイズ欠測）」を出す）。
+        None => false,
+    };
+    let f16_opt_confirmed = match &wmma_gemm {
+        Some(g) if g.wmma_f16_opt_available() => {
+            println!(
+                "f16 optimized kernel: WMMA f16 opt AVAILABLE (used for wmma_f16 measurements below)."
+            );
+            true
+        }
+        Some(g) => {
+            println!(
+                "WARNING: f16 WMMA opt kernel UNAVAILABLE ({}); wmma_f16 measurements in this \
+                 run silently fall back to the basic (non-optimized) WMMA f16 kernel \
+                 (`gemm_wmma.rs::CudaWmmaGemm::run_f16` フォールバック方針参照). \
+                 `mma.sync` f16 (`mma_f16`) is a separate always-optimized pipeline and is \
+                 unaffected, so the f16 candidate floor may still confirm via `mma_f16` if it \
+                 wins the `best_of` comparison; otherwise it will be reported as n/a.",
+                g.wmma_f16_opt_unavailable_reason()
+                    .unwrap_or("unknown reason")
+            );
+            false
+        }
+        None => false,
+    };
+
     if tiled_gemm.is_none() && wmma_gemm.is_none() && mma_gemm.is_none() {
         println!(
             "backend-cuda cuda_floor_bench: no kernel path available in this environment \
@@ -559,6 +620,14 @@ fn main() {
     let mut f16_same_hardware = true;
     let mut f32_judged_count: usize = 0;
     let mut f16_judged_count: usize = 0;
+    // opt カーネルが実際に使用された経路のみを候補下限の根拠として認める
+    // （`f32_opt_confirmed`／`f16_opt_confirmed` は起動時に一度確認した
+    // opt カーネル可用性。`tiled`／`mma_f16` は opt-vs-basic フォール
+    // バックの対象外〈それぞれ独立した常時最適化済み実装〉のため、選出
+    // ラベルが `wmma_tf32`／`wmma_f16` の場合のみゲートする。未解決スレッド
+    // 「Opt kernel use not verified」対応）。
+    let mut f32_opt_ok = true;
+    let mut f16_opt_ok = true;
 
     for size in std::iter::once(REFERENCE_ONLY_SIZE).chain(JUDGED_SIZES) {
         let config = MeasurementConfig::default();
@@ -655,11 +724,25 @@ fn main() {
                 min_f32_ratio_percent = Some(min_f32_ratio_percent.map_or(r, |m: f64| m.min(r)));
                 f32_same_hardware &= f32_measured;
                 f32_judged_count += 1;
+                // `wmma_tf32` が最良経路として選ばれた判定対象サイズが
+                // 1 つでも opt カーネル未確認（基本版へフォールバック済み）
+                // なら、その回の候補下限は REQ-8「最適化後下限」を代表
+                // しないため確定させない。`tiled` が選ばれた場合は
+                // opt 可用性と無関係（tiled は opt-vs-basic フォール
+                // バックの対象外）なのでゲートしない。
+                if matches!(f32_best, Some((_, "wmma_tf32"))) {
+                    f32_opt_ok &= f32_opt_confirmed;
+                }
             }
             if let Some(r) = f16_ratio_percent {
                 min_f16_ratio_percent = Some(min_f16_ratio_percent.map_or(r, |m: f64| m.min(r)));
                 f16_same_hardware &= f16_measured;
                 f16_judged_count += 1;
+                // f32 側と対称のゲート。`mma_f16`（`mma.sync` パイプライン）
+                // は wmma opt フォールバックと無関係の別実装のため対象外。
+                if matches!(f16_candidate, Some((_, "wmma_f16"))) {
+                    f16_opt_ok &= f16_opt_confirmed;
+                }
             }
         }
     }
@@ -674,12 +757,14 @@ fn main() {
         min_f32_ratio_percent,
         f32_same_hardware,
         f32_judged_count,
+        f32_opt_ok,
     );
     print_candidate_floor(
         "f16",
         min_f16_ratio_percent,
         f16_same_hardware,
         f16_judged_count,
+        f16_opt_ok,
     );
     println!(
         "NOTE: candidate floor values are NOT final. Final floor confirmation is a human \
@@ -690,17 +775,20 @@ fn main() {
 }
 
 /// 判定対象形状（`JUDGED_SIZES`）すべての比率が揃い（`judged_count ==
-/// JUDGED_SIZES.len()`）、かつ同一実機再計測値のみを根拠とする
-/// （`same_hardware == true`）場合にのみ、正式な candidate floor を確定値
-/// として返す。片方でも欠ける場合は `None`（`n/a` 扱い）とする（REQ-8
-/// 「2048・4096 の実測比率の最小値」契約。PR #349 codex-review 指摘 P1
-/// 対応。`print_candidate_floor` から呼ばれ、単体でも回帰テストする）。
+/// JUDGED_SIZES.len()`）、同一実機再計測値のみを根拠とし（`same_hardware
+/// == true`）、かつ選出された経路が opt カーネル未確認のフォールバックに
+/// 依っていない（`opt_ok == true`）場合にのみ、正式な candidate floor を
+/// 確定値として返す。いずれか 1 つでも欠ける場合は `None`（`n/a` 扱い）と
+/// する（REQ-8「2048・4096 の実測比率の最小値」契約。PR #349 codex-review
+/// 指摘 P1・未解決スレッド「Opt kernel use not verified」対応。
+/// `print_candidate_floor` から呼ばれ、単体でも回帰テストする）。
 fn confirmed_candidate_floor(
     min_ratio_percent: Option<f64>,
     same_hardware: bool,
     judged_count: usize,
+    opt_ok: bool,
 ) -> Option<f64> {
-    if same_hardware && judged_count == JUDGED_SIZES.len() {
+    if same_hardware && opt_ok && judged_count == JUDGED_SIZES.len() {
         min_ratio_percent
     } else {
         None
@@ -708,19 +796,21 @@ fn confirmed_candidate_floor(
 }
 
 /// 判定対象形状の最小比率から候補下限値を出力する。`confirmed_candidate_floor`
-/// が `None` を返す場合（`same_hardware == false`、または `judged_count` が
-/// `JUDGED_SIZES.len()` 未満）は、GPU 名が GB10 系であっても正式な
-/// candidate floor を出さず `n/a` とし、参考比率のみ表示する（PR #349
-/// codex-review 指摘 P1 対応。詳細はモジュール冒頭ドキュメンテーション
-/// コメント「PyTorch 参照値の再計測」参照）。
+/// が `None` を返す場合（`same_hardware == false`、`opt_ok == false`、または
+/// `judged_count` が `JUDGED_SIZES.len()` 未満）は、GPU 名が GB10 系で
+/// あっても正式な candidate floor を出さず `n/a` とし、参考比率のみ表示
+/// する（PR #349 codex-review 指摘 P1・未解決スレッド「Opt kernel use not
+/// verified」対応。詳細はモジュール冒頭ドキュメンテーションコメント
+/// 「PyTorch 参照値の再計測」参照）。
 fn print_candidate_floor(
     label: &str,
     min_ratio_percent: Option<f64>,
     same_hardware: bool,
     judged_count: usize,
+    opt_ok: bool,
 ) {
     let all_judged_sizes_present = judged_count == JUDGED_SIZES.len();
-    match confirmed_candidate_floor(min_ratio_percent, same_hardware, judged_count) {
+    match confirmed_candidate_floor(min_ratio_percent, same_hardware, judged_count, opt_ok) {
         Some(r) => println!(
             "CUDA {label} candidate optimized floor (rounding rule applied to min ratio \
              {r:.2}%) = {:.0}% (current provisional REQ-8 value: 40%)",
@@ -728,12 +818,21 @@ fn print_candidate_floor(
         ),
         // 判定対象サイズが欠測している場合は、実機フォールバック起因の
         // n/a よりも「そもそも全形状を評価し切れていない」欠陥のほうが
-        // 根本的なため、`same_hardware` の真偽によらずこの分岐を優先する。
+        // 根本的なため、`same_hardware`／`opt_ok` の真偽によらずこの分岐を
+        // 優先する。
         None if !all_judged_sizes_present => println!(
             "CUDA {label} candidate optimized floor: n/a (one or more judged sizes \
              {JUDGED_SIZES:?} were missing/non-finite in this run; reference-only min ratio over \
              measured judged sizes was {}, but REQ-8 requires the minimum ratio across ALL \
              judged sizes to confirm a candidate floor)",
+            min_ratio_percent.map_or("n/a".to_string(), |r| format!("{r:.2}%"))
+        ),
+        None if !opt_ok => println!(
+            "CUDA {label} candidate optimized floor: n/a (the selected best-of path for one or \
+             more judged sizes was the opt WMMA kernel, but the opt kernel was unavailable in \
+             this environment and silently fell back to the basic kernel; reference-only ratio \
+             {} does NOT represent the REQ-8 post-optimization floor. See the \"f32/f16 optimized \
+             kernel\" warning above for the unavailability reason.)",
             min_ratio_percent.map_or("n/a".to_string(), |r| format!("{r:.2}%"))
         ),
         None if !same_hardware => println!(
@@ -849,15 +948,31 @@ mod tests {
     // ある。
     #[test]
     fn confirmed_candidate_floor_requires_all_judged_sizes_present() {
-        // 両サイズとも計測済み・同一実機根拠 → 確定できる。
-        assert_eq!(confirmed_candidate_floor(Some(45.0), true, 2), Some(45.0));
+        // 両サイズとも計測済み・同一実機根拠・opt カーネル確認済み → 確定できる。
+        assert_eq!(
+            confirmed_candidate_floor(Some(45.0), true, 2, true),
+            Some(45.0)
+        );
         // 1 サイズのみ計測（もう 1 サイズは比率が非有限値等で欠測）
         // → 確定できない（本回帰の主眼）。
-        assert_eq!(confirmed_candidate_floor(Some(45.0), true, 1), None);
+        assert_eq!(confirmed_candidate_floor(Some(45.0), true, 1, true), None);
         // 同一実機根拠が確認できない → 確定できない（既存 P1 対応の維持）。
-        assert_eq!(confirmed_candidate_floor(Some(45.0), false, 2), None);
+        assert_eq!(confirmed_candidate_floor(Some(45.0), false, 2, true), None);
         // どのサイズも計測できていない → 確定できない。
-        assert_eq!(confirmed_candidate_floor(None, true, 2), None);
+        assert_eq!(confirmed_candidate_floor(None, true, 2, true), None);
+    }
+
+    // 未解決スレッド「Opt kernel use not verified」の回帰確認: 選出経路が
+    // opt カーネル未確認のフォールバックに依っていた場合（`opt_ok ==
+    // false`）、他の条件（全判定対象サイズ計測済み・同一実機根拠）が揃って
+    // いても candidate floor を確定させない。
+    #[test]
+    fn confirmed_candidate_floor_requires_opt_kernel_confirmed() {
+        assert_eq!(confirmed_candidate_floor(Some(45.0), true, 2, false), None);
+        assert_eq!(
+            confirmed_candidate_floor(Some(45.0), true, 2, true),
+            Some(45.0)
+        );
     }
 
     // PR #349 codex-review 指摘 P1「実測性能を比較せず固定優先順位で

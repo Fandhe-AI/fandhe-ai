@@ -29,6 +29,15 @@ TASK-8.3 の担当欄は「共同（計測実行は Claude Code、下限値の�
 
 - 計測経路: tiled f32（基準）／WMMA(TF32) opt（f32 最良。opt 不可時は `CudaGemm::run_wmma_tf32` 内部で
   基本版へ自動フォールバック）／WMMA f16 opt／`mma.sync` f16 パイプライン（f16 最良）
+- **opt カーネル可用性の検証**: `run_wmma_tf32`／`run_f16` は opt カーネル未対応環境でも公開シグネチャ
+  を変えず基本版へ自動フォールバックするため、戻り値の成否だけでは opt カーネルが実際に実行されたか
+  判別できない。本バイナリは起動時に `CudaGemm::wmma_tf32_opt_available`／
+  `CudaWmmaGemm::wmma_f16_opt_available` を確認して結果を出力し、判定対象サイズで `wmma_tf32`／
+  `wmma_f16` が最良経路として選ばれたにもかかわらず opt カーネルが未確認（基本版へフォールバック済み）
+  だった場合は、その f32／f16 candidate optimized floor を `n/a` として確定させない（`tiled`・
+  `mma_f16` は opt-vs-basic フォールバックと無関係の別実装のためこのゲートの対象外）。未解決レビュー
+  スレッド「Opt kernel use not verified」（PR #349）対応。実装は `cuda_floor_bench.rs::confirmed_candidate_floor`
+  の `opt_ok` 引数を参照
 - 形状: M=N=K = 512／2048／4096（PoC-v2-3 の PyTorch 参照値と同一形状）
 - 計測プロトコル: `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）・
   決定的シード `0xC0FFEE`
