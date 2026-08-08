@@ -348,7 +348,6 @@ impl MetalGemm {
         validate_dims_f16(a, b, m, n, k)?;
 
         let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
-        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
 
         let a_padded = pad_matrix_f16(a, m, k, m_eff, k_eff);
         let b_padded = pad_matrix_f16(b, k, n, k_eff, n_eff);
@@ -357,19 +356,57 @@ impl MetalGemm {
         let b_buf = MetalHalfBuffer::new_with_data(ctx, &b_padded)?;
         let c_buf = MetalHalfBuffer::new_zeroed(ctx, m_eff * n_eff)?;
 
+        self.dispatch_f16_prepared(ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff)?;
+
+        let padded_c = c_buf.read_to_vec();
+        Ok(unpad_matrix_f16(padded_c, m_eff, n_eff, m, n))
+    }
+
+    /// `gemm_simdgroup_f16` のディスパッチ（エンコード＋コマンドバッファ
+    /// 完了待ち）のみを行う入口（TASK-8.3b・#156 ベンチ計測境界修正。
+    /// PR #346 Bugbot 指摘 2）。
+    ///
+    /// [`Self::dispatch_f16`] はパディング・バッファ確保／アップロード・
+    /// ディスパッチ・readback／アンパディングを一括で行うのに対し、本関数は
+    /// 呼び出し元が事前に確保・アップロード済みの `MetalHalfBuffer`
+    /// （実効次元 `m_eff`/`n_eff`/`k_eff` でパディング済みである前提。
+    /// [`pad8`]／[`crate::pad::pad_matrix_f16`] 参照）に対して
+    /// [`MetalContext::dispatch_sync`] のクロージャ結線のみを行う。
+    ///
+    /// `crates/backend-metal/examples/gemm_f16_bench.rs` が
+    /// `scripts/bench/gemm_bench_torch_mps_f16.py`（オンデバイス `matmul`＋
+    /// `torch.mps.synchronize()` のみを計測）と同一の同期境界で計測する
+    /// ために本関数を使う。バッファ確保・転送・パディング処理は計測外
+    /// （ウォームアップ側）で行う想定（呼び出し元コメント参照）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: `ctx`・`a_buf`・`b_buf`・
+    /// `c_buf`・`m_eff`・`n_eff`・`k_eff` を個別引数として持つことで
+    /// 呼び出し側の意図が明確になるため、構造体へのまとめ込みは行わない
+    /// （`dispatch_variant` と同じ判断根拠。理由コメント必須のルール
+    /// `.claude/rules/coding-rust.md` に対応）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_f16_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalHalfBuffer,
+        b_buf: &MetalHalfBuffer,
+        c_buf: &MetalHalfBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+    ) -> Result<(), MetalError> {
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+
         ctx.dispatch_sync(|encoder| {
             encode_dispatch_f16(
                 encoder,
                 &self.pipeline_simdgroup_f16,
-                &a_buf,
-                &b_buf,
-                &c_buf,
+                a_buf,
+                b_buf,
+                c_buf,
                 dims,
             );
-        })?;
-
-        let padded_c = c_buf.read_to_vec();
-        Ok(unpad_matrix_f16(padded_c, m_eff, n_eff, m, n))
+        })
     }
 
     /// `variant` で選択した GEMM カーネルをディスパッチし、結果をホストへ

@@ -13,6 +13,14 @@
 //! 「同一ハードウェア上の PyTorch とのみ比較」方針。実測記録は
 //! `docs/perf/metal-f16-vs-mps-f16.md` へ転記する）。
 //!
+//! 計測区間は PyTorch 側（`gemm_bench_torch_mps_f16.py::measure` の
+//! `torch.matmul` + `torch.mps.synchronize()` のみ。入力は測定ループの外で
+//! デバイスへ転送済み）と揃え、パディング・バッファ確保／アップロード・
+//! readback／アンパディングは計測ループの外（ウォームアップ側）で行う。
+//! `MetalGemm::dispatch_f16_prepared`（`dispatch_f16` からエンコード＋
+//! コマンドバッファ完了待ちのみを切り出した入口）を使う（PR #346 Bugbot
+//! 指摘 2: 計測区間の不一致修正）。
+//!
 //! `examples/` に置く理由・非 macOS stub の位置づけは `gemm_bench.rs` と
 //! 同一（self-hosted runner をベンチ実行で占有しない・Linux CI でも
 //! ビルド検証のみ通す）。
@@ -31,7 +39,8 @@
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::{MetalContext, MetalGemm};
+    use backend_metal::pad::{pad_matrix_f16, pad8};
+    use backend_metal::{MetalContext, MetalGemm, MetalHalfBuffer};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
     use half::f16;
@@ -45,10 +54,17 @@ mod macos_impl {
         flops / median_secs / 1e12
     }
 
-    /// `m×n×k` の f16 GEMM（`MetalGemm::dispatch_f16`）を計測し、中央値
-    /// TFLOPS を返す。`gemm_bench.rs::measure_shape` の f16 版（ディスパッチ
-    /// 入口が異なるため独立実装。`MetalGemm::dispatch_f16` のドキュメント
-    /// コメント参照）。
+    /// `m×n×k` の f16 GEMM（`MetalGemm::dispatch_f16_prepared`）を計測し、
+    /// 中央値 TFLOPS を返す。`gemm_bench.rs::measure_shape` の f16 版
+    /// （ディスパッチ入口が異なるため独立実装）。
+    ///
+    /// パディング・バッファ確保／アップロードは計測ループの外で 1 回だけ
+    /// 行い、計測対象はディスパッチ（エンコード＋コマンドバッファ完了待ち）
+    /// のみとする。PyTorch 側（`gemm_bench_torch_mps_f16.py::measure`）が
+    /// 入力をループ外でデバイス転送し、ループ内は `matmul` +
+    /// `torch.mps.synchronize()` のみを計測するのと同一の同期境界に揃える
+    /// ため（PR #346 Bugbot 指摘 2）。readback／アンパディングも本ベンチの
+    /// 出力には不要なため計測対象に含めない。
     fn measure(
         gemm: &MetalGemm,
         ctx: &MetalContext,
@@ -61,8 +77,19 @@ mod macos_impl {
         let a: Vec<f16> = rng.fill_vec_f16(m * k);
         let b: Vec<f16> = rng.fill_vec_f16(k * n);
 
+        let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+        let a_padded = pad_matrix_f16(&a, m, k, m_eff, k_eff);
+        let b_padded = pad_matrix_f16(&b, k, n, k_eff, n_eff);
+
+        let a_buf = MetalHalfBuffer::new_with_data(ctx, &a_padded)
+            .expect("A バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
+        let b_buf = MetalHalfBuffer::new_with_data(ctx, &b_padded)
+            .expect("B バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
+        let c_buf = MetalHalfBuffer::new_zeroed(ctx, m_eff * n_eff)
+            .expect("C バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
+
         let measurement = bench_run(config, || {
-            gemm.dispatch_f16(ctx, &a, &b, m, n, k)
+            gemm.dispatch_f16_prepared(ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff)
                 .expect("Metal f16 GEMM ディスパッチに失敗した（実機でのみ実行する前提）");
         })
         .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
