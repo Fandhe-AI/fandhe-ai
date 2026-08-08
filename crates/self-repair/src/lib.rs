@@ -65,6 +65,22 @@
 //!   （TASK-3.3c・#142）。TASK-3.2 がスコープ外としていた「4 ゲート合成」の
 //!   結線点を、機能追加種別のループ完走実証のために満たす（`verify_composite`
 //!   モジュール冒頭ドキュメント参照）。
+//! - [`diff_signals`][]: `lines_changed`／`api_broken`／`gaming_suspect`／
+//!   `exclusion_rule_ids` の**試行ごとの**実測（TASK-3.2a・#137）。
+//!   [`verify_gates::CargoVerificationGate`] が構築時固定の必須引数として
+//!   受け取る契約はそのままに、この実測ロジック自体を `tests/` 専用実装から
+//!   `src/` 本体へ昇格する。
+//! - [`verify_bench_direct`][]: ベンチゲートの「候補 diff に対する直接実測」
+//!   （TASK-3.2a・#137）。[`verify_bench_direct::DirectBenchRunner`] が
+//!   baseline commit・候補適用済み作業木の双方を release ビルドし、外部
+//!   タイミング方式で [`verify_bench::SelfRepairBenchGate`]（判定ロジック
+//!   自体は変更しない）へ委譲する。
+//! - [`verify_direct_composite`][]: `diff_signals`・`verify_bench_direct`・
+//!   `verify_gates` を合成した真の 4 ゲート合成
+//!   [`verify_direct_composite::RepairCompositeGate`]（TASK-3.2a・#137）。
+//!   `verify_composite::FeatureAdditionCompositeGate`（合成ワークロード版・
+//!   構築時固定シグナル版）とは別モジュールとして共存する（`verify_direct_composite`
+//!   モジュール冒頭ドキュメント参照）。
 //! - [`sha256`][]: FIPS 180-4 準拠 SHA-256 の自作実装（TASK-3.4・#145）。`sha2`
 //!   クレートは許容依存 8 区分外・依存追加はユーザー承認事項のため、
 //!   `logging` のハッシュチェーン計算専用に std のみで実装する
@@ -101,6 +117,7 @@
 
 pub mod bug_fix;
 pub mod candidate;
+pub mod diff_signals;
 pub mod error;
 pub mod exec;
 pub mod feature_addition;
@@ -113,7 +130,9 @@ pub mod report;
 pub mod runner;
 pub mod sha256;
 pub mod stages;
+pub mod verify_bench_direct;
 pub mod verify_composite;
+pub mod verify_direct_composite;
 pub mod verify_gates;
 
 #[cfg(test)]
@@ -133,6 +152,7 @@ pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
 pub use verify_composite::FeatureAdditionCompositeGate;
+pub use verify_direct_composite::{RepairCompositeGate, RepairCompositeGateSpec};
 pub use verify_gates::CargoVerificationGate;
 
 /// 決定的シード設定ユーティリティ（TASK-4.4b・イシュー #113）。

@@ -16,6 +16,14 @@ publish = false
 name = "self_repair_feature_addition_leaky_relu_baseline"
 path = "src/lib.rs"
 
+[[bin]]
+# 候補 diff 直接実測（TASK-3.2a・イシュー #137）向けの決定的ベンチワークロード。
+# `crate::verify_bench_direct::DirectBenchSpec::bench_bin` がこの名前を
+# `cargo build --release --bin bench_workload` で指定する
+# （`src/bin/bench_workload.rs` モジュール冒頭ドキュメント参照）。
+name = "bench_workload"
+path = "src/bin/bench_workload.rs"
+
 [dependencies]
 # 自作コア（Burn 非依存。REQ-1 v2・.claude/rules/coding-rust.md）の
 # テンソル・autodiff を workspace 内 path 依存として直接参照する

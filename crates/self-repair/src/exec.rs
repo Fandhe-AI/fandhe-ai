@@ -140,6 +140,13 @@ impl std::fmt::Display for ExecError {
 impl std::error::Error for ExecError {}
 
 /// `std::process::Command` による実プロセス実行（[`CommandRunner`] 本番実装）。
+///
+/// `Clone` を実装する（イシュー #137）。`crate::verify_direct_composite::
+/// RepairCompositeGate<R>` は試行ごとに `R: CommandRunner + Clone` を要求する
+/// `crate::verify_gates::CargoVerificationGate<R>` を**新規構築**する（diff 由来
+/// シグナルを試行ごとに実測し直すため。`verify_direct_composite` モジュール冒頭
+/// ドキュメント参照）。unit struct であり複製に副作用はない。
+#[derive(Debug, Clone)]
 pub struct SystemCommandRunner;
 
 impl SystemCommandRunner {
@@ -186,6 +193,28 @@ impl CommandRunner for SystemCommandRunner {
         command.env_remove("CARGO_ENCODED_RUSTFLAGS");
         command.env_remove("CARGO_MAKEFLAGS");
         command.env_remove("RUSTC_WRAPPER");
+
+        // 祖先プロセス（lefthook の pre-push フック等）から `GIT_DIR`／
+        // `GIT_WORK_TREE`／`GIT_INDEX_FILE` 等の `GIT_*` 環境変数を継承した
+        // 状態で子プロセスを起動すると、本 runner 経由で呼ばれる git 操作
+        // （`crate::diff_signals`・`crate::verify_bench_direct` が `git diff`／
+        // `git worktree add` 等を `SystemCommandRunner::run("git", ..)` 経由で
+        // 起動する。イシュー #137）が `cwd` 指定を無視して呼び出し元プロセスの
+        // リポジトリ（本 worktree の `.git`）を対象にしてしまう
+        // （`tests/revalidation_bug_fix.rs`・
+        // `tests/feature_addition_loop_completion_task_3_3c.rs` の
+        // `sandboxed_git_command` 系ヘルパーが既に踏んだ事故パターンと同一。
+        // 2026-08-07 実測: 対応前に sandbox の `git commit` が実リポジトリの
+        // 現在ブランチ HEAD へ実際にコミットしてしまう事故が発生している）。
+        // `CARGO_TARGET_DIR` 等と同じ理由で本番経路（`SystemCommandRunner`）
+        // 自体に除去を持たせ、呼び出し元ごとに個別対処させない。
+        for (key, _) in std::env::vars_os() {
+            if let Some(key_str) = key.to_str()
+                && key_str.starts_with("GIT_")
+            {
+                command.env_remove(key_str);
+            }
+        }
 
         let output = command
             .output()
