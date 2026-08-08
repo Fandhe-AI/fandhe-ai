@@ -15,7 +15,7 @@ use bench_harness::rng::Xorshift64Star;
 use bench_harness::startup::{PROBE_SCHEMA_VERSION, ProbeReport, StartupBackend};
 use std::process::ExitCode;
 use std::time::Instant;
-use tensor_core::{BackendOps, Tensor};
+use tensor_core::{BackendOps, Tensor, matmul_out_shape};
 
 /// 起動コスト計測用ワークロードの正方行列サイズ。
 ///
@@ -110,11 +110,16 @@ fn run_cpu(process_start: Instant, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<(
 }
 
 /// CUDA 経路: `CudaDevice::new` を明示的に呼び、実際の driver 初期化（動的ロード込み）
-/// コストを `device_init_secs` に含める。`CudaBackendOps::gemm` は呼び出しのたびに
-/// 内部で `CudaDevice::new` を再度呼ぶ契約（`crates/backend-cuda/src/ops.rs` 参照）だが、
-/// これは軽量な再取得であり二重初期化のオーバーヘッドは無視できる
-/// （`CudaDevice::new` は driver 不在時のみ高コストな非 panic プローブを伴う。
-/// `device.rs` 参照。ここでは可用性チェックの意味も兼ねる）。
+/// コストを `device_init_secs` に含める。
+///
+/// `CudaBackendOps::gemm`（`crates/backend-cuda/src/ops.rs`）は呼び出しのたびに内部で
+/// `CudaDevice::new` を再度実行する契約（ハンドル常駐化は TASK-1.9b／1.9d 以降。
+/// `ops.rs` 冒頭コメント参照）であり、これを経由すると `first_kernel_secs` の区間に
+/// 「NVRTC コンパイル＋カーネル起動＋完了待ち」だけでなく二重目のフル device 初期化が
+/// 混入し計測が歪む（レビュー指摘。#170）。そのため本関数では `CudaBackendOps::gemm` を
+/// 使わず、`device_handle` で取得済みの `CudaDevice` を [`backend_cuda::CudaGemm::new`] に
+/// 明示的に渡して GEMM を実行する（`backend_cuda::CudaGemm` は `pub`。`ops.rs` の
+/// `CudaBackendOps::gemm` 実装と同じ手順を、device 再取得なしで踏襲する）。
 fn run_cuda(
     process_start: Instant,
     a: &Tensor<f32>,
@@ -123,12 +128,29 @@ fn run_cuda(
     if !backend_cuda::CudaDevice::is_available() {
         return Err("CUDA driver が利用不可（is_available() == false）".to_string());
     }
-    backend_cuda::CudaDevice::new(0).map_err(|e| format!("CudaDevice::new 失敗: {e}"))?;
+    let device =
+        backend_cuda::CudaDevice::new(0).map_err(|e| format!("CudaDevice::new 失敗: {e}"))?;
     let device_init_secs = process_start.elapsed().as_secs_f64();
 
-    let ops = backend_cuda::CudaBackendOps::new(0);
-    ops.gemm(a, b)
-        .map_err(|e| format!("CUDA gemm 失敗: {e:?}"))?;
+    let out_shape = matmul_out_shape(a.shape(), b.shape())
+        .map_err(|e| format!("GEMM 出力形状の算出失敗: {e:?}"))?;
+    let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
+    let n = b.shape()[1] as u32;
+    let a_owned = a.contiguous();
+    let b_owned = b.contiguous();
+    let a_slice = a_owned
+        .as_slice()
+        .ok_or_else(|| "CUDA gemm: lhs not contiguous".to_string())?;
+    let b_slice = b_owned
+        .as_slice()
+        .ok_or_else(|| "CUDA gemm: rhs not contiguous".to_string())?;
+
+    let gemm =
+        backend_cuda::CudaGemm::new(&device).map_err(|e| format!("CudaGemm::new 失敗: {e}"))?;
+    let out = gemm
+        .run_tiled_f32(a_slice, b_slice, m, n, k)
+        .map_err(|e| format!("CUDA gemm 失敗: {e}"))?;
+    Tensor::new(out, &out_shape).map_err(|e| format!("出力テンソル構築失敗: {e:?}"))?;
     let first_kernel_secs = process_start.elapsed().as_secs_f64();
 
     Ok((device_init_secs, first_kernel_secs))
@@ -148,7 +170,12 @@ fn run_metal(
 ) -> Result<(f64, f64), String> {
     // `MetalContext::new` は Metal デバイス・コマンドキューの取得までを担う
     // （`crates/backend-metal/src/context.rs`）。`MetalBackendOps::gemm` 内部でも
-    // 都度構築されるため、CUDA 経路と同様にここでの呼び出しは可用性チェックを兼ねる。
+    // 都度構築されるため、`first_kernel_secs - device_init_secs` の区間には
+    // 「カーネル実行」だけでなく `MetalContext` の再構築コストも含まれうる
+    // （CUDA 経路と同型の既知の制約。#170 レビュー指摘。本 OS では
+    // ビルド確認できないため CUDA 経路と異なりここでは計測経路自体は変更せず、
+    // 区間の意味をコメントで正確化するに留める。真の解消は `MetalContext` の
+    // ハンドル常駐化以降）。
     backend_metal::MetalContext::new().map_err(|e| format!("MetalContext::new 失敗: {e:?}"))?;
     let device_init_secs = process_start.elapsed().as_secs_f64();
 

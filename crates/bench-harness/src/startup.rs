@@ -56,9 +56,10 @@
 //!
 //! - probe への引数は許可リスト方式（[`StartupBackend::parse`]）で検証し、
 //!   `Command` の引数配列で子プロセスを起動する（シェル経由の文字列展開を行わない。A03）。
-//! - probe 標準出力の JSON は読み取りサイズ上限（[`PROBE_STDOUT_LIMIT_BYTES`]）付きで
-//!   読み取ったうえで `serde_json` により型付きパースし、[`StartupReport::validate`] /
-//!   [`ProbeReport`] のスキーマ検証を経ずに生値へアクセスできる経路は設けない（A03・A08）。
+//! - probe 標準出力は `Command::output` で読み取った後、サイズ上限
+//!   （[`PROBE_STDOUT_LIMIT_BYTES`]）を検査してから `serde_json` により型付きパースし、
+//!   [`StartupReport::validate`] / [`ProbeReport::validate`] のスキーマ検証を経ずに
+//!   生値へアクセスできる経路は設けない（A03・A08）。
 //! - 一時キャッシュディレクトリは一意名で [`std::fs::create_dir`]（既存なら失敗）し、
 //!   予測可能パスの事前作成・シンボリックリンク差し替えによる書き込み先誘導を排除する（A01）。
 
@@ -81,9 +82,14 @@ pub const PROBE_SCHEMA_VERSION: &str = "1";
 /// 既定の試行回数（1 フェーズあたり。モジュール冒頭ドキュメント参照）。
 pub const DEFAULT_STARTUP_TRIALS: usize = 5;
 
-/// probe 子プロセス標準出力の読み取り上限（バイト）。
-/// 外部プロセス出力を無制限に読み込むと、異常終了・想定外出力時のメモリ膨張に
-/// さらされるため上限を設ける（`.claude/rules/security.md` A03: 外部入力の検証）。
+/// probe 子プロセス標準出力の許容上限（バイト）。
+///
+/// [`run_probe_once`] は `Command::output` で標準出力を全量バッファしたうえで
+/// この上限と比較し、超過時は [`StartupError::ProbeOutputTooLarge`] として拒否する
+/// （読み取り自体を上限で打ち切るストリーミング実装ではない）。probe は同一ビルドの
+/// 第一者バイナリのため、読み取り時点でのメモリ膨張攻撃は現実的な脅威ではなく、
+/// 異常終了・想定外出力（無限ループ等の実装バグ）時の異常データを弾く
+/// fail-closed な検証として上限を設ける（`.claude/rules/security.md` A03）。
 const PROBE_STDOUT_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
 
 /// コールド／ウォームの試行間で使う一意なディレクトリ名を採番するカウンタ。
@@ -213,6 +219,15 @@ pub struct ProbeReport {
     /// `main()` 開始から初回カーネル（GEMM）完了（同期込み）までの秒数。
     /// `device_init_secs` 以上になる（デバイス初期化 → NVRTC コンパイル・カーネル起動・
     /// 完了待ちの順で進むため）。
+    ///
+    /// CUDA 経路は `device_init_secs` 計測で取得済みの `CudaDevice` を
+    /// `CudaGemm::new` に明示的に渡すため（`startup_probe.rs::run_cuda`）、
+    /// `first_kernel_secs - device_init_secs` は「NVRTC コンパイル＋カーネル起動＋
+    /// 完了待ち」のみを表す（device の二重初期化を含まない。#170 レビュー指摘への
+    /// 対応）。Metal 経路は `MetalBackendOps::gemm` 内部で `MetalContext` が
+    /// 都度再構築される現行実装（本 OS でビルド確認不能のため計測経路は未変更）
+    /// のため、同区間に `MetalContext` 再構築コストが混入しうる
+    /// （`startup_probe.rs::run_metal` のコメント参照）。
     pub first_kernel_secs: f64,
 }
 
@@ -372,11 +387,25 @@ impl StartupReport {
                 )));
             }
         }
-        for t in &self.samples {
+        for (i, t) in self.samples.iter().enumerate() {
             if !(t.wall_secs.is_finite() && t.wall_secs >= 0.0) {
-                return Err(StartupError::ProtocolViolation(
-                    "samples に非有限値または負の wall_secs が含まれている".to_string(),
-                ));
+                return Err(StartupError::ProtocolViolation(format!(
+                    "samples[{i}] に非有限値または負の wall_secs が含まれている: {}",
+                    t.wall_secs
+                )));
+            }
+            if !(t.device_init_secs.is_finite() && t.device_init_secs >= 0.0) {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "samples[{i}] に非有限値または負の device_init_secs が含まれている: {}",
+                    t.device_init_secs
+                )));
+            }
+            if !(t.first_kernel_secs.is_finite() && t.first_kernel_secs >= t.device_init_secs) {
+                return Err(StartupError::ProtocolViolation(format!(
+                    "samples[{i}] の first_kernel_secs が非有限値、または device_init_secs を \
+                     下回る: first={}, device_init={}",
+                    t.first_kernel_secs, t.device_init_secs
+                )));
             }
         }
         Ok(())
@@ -644,6 +673,21 @@ mod tests {
             "samples":[{{"wall_secs":0.1,"device_init_secs":0.01,"first_kernel_secs":0.05}}]}}"#
         );
         let err = StartupReport::from_json(&bad_json).unwrap_err();
+        assert!(matches!(err, StartupError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn startup_report_from_json_rejects_corrupted_sample_device_init_secs() {
+        // #170 レビュー指摘の再現ケース: samples[0].device_init_secs が
+        // first_kernel_secs を上回る負値でも、quartile（分位点）側の検証だけでは
+        // すり抜けていた（validate() が per-sample の device_init_secs /
+        // first_kernel_secs を検証していなかったため）。
+        let bad_json = r#"{"schema_version":"1","backend":"cpu","phase":"warm","trials":1,
+            "wall_secs":{"median":0.1,"q1":0.1,"q3":0.1},
+            "device_init_secs":{"median":0.01,"q1":0.01,"q3":0.01},
+            "first_kernel_secs":{"median":0.05,"q1":0.05,"q3":0.05},
+            "samples":[{"wall_secs":0.1,"device_init_secs":-999.0,"first_kernel_secs":0.05}]}"#;
+        let err = StartupReport::from_json(bad_json).unwrap_err();
         assert!(matches!(err, StartupError::ProtocolViolation(_)));
     }
 
