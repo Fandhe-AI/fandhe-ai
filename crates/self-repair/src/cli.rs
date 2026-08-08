@@ -87,6 +87,10 @@ where
     }
 }
 
+/// `verify-log` サブコマンドが受理する既知フラグ一覧（`take_value` が値位置の
+/// フラグ誤消費を検出するために参照する。PR #356 codex-review P1 指摘対応）。
+const KNOWN_FLAGS: &[&str] = &["--log", "--allow-empty-log"];
+
 fn parse_verify_log<I>(args: I) -> Result<VerifyLogArgs, UsageError>
 where
     I: Iterator<Item = OsString>,
@@ -103,7 +107,7 @@ where
             ))
         })?;
         match flag_str {
-            "--log" => log = Some(PathBuf::from(take_value(&mut it, flag_str)?)),
+            "--log" => log = Some(PathBuf::from(take_value(&mut it, flag_str, KNOWN_FLAGS)?)),
             "--allow-empty-log" => allow_empty_log = true,
             unknown => {
                 return Err(UsageError(format!(
@@ -123,10 +127,29 @@ where
 /// `--flag value` 形式で次のトークンを値として取り出す。値欠落は usage エラー。
 /// 値は UTF-8 検証しない（`--log` のファイルパスが非 UTF-8 でもそのまま
 /// `OsString` として受理する。モジュール冒頭ドキュメント参照）。
-fn take_value<I>(it: &mut std::iter::Peekable<I>, flag: &str) -> Result<OsString, UsageError>
+///
+/// 次のトークンが `known_flags`（`verify-log` が受理する既知フラグ）と
+/// UTF-8 完全一致する場合は値として消費せず、値欠落の usage エラーとして扱う
+/// （PR #356 codex-review P1 指摘対応: `--log --allow-empty-log` のように値を
+/// 省略された `--log` が後続の既知フラグをファイル名として誤飲し、
+/// `--allow-empty-log` 指定自体を消失させたまま I/O エラー〈exit 1〉に
+/// フォールスルーしていた。値位置に非 UTF-8 や `--` 始まりでも既知フラグでない
+/// 実ファイル名を許容する必要がある場合は `--log=...` 形式や `--` エスケープを
+/// 別途用意する想定とし、本関数は現行の空白区切り構文のみを対象にする）。
+fn take_value<I>(
+    it: &mut std::iter::Peekable<I>,
+    flag: &str,
+    known_flags: &[&str],
+) -> Result<OsString, UsageError>
 where
     I: Iterator<Item = OsString>,
 {
+    if let Some(next) = it.peek()
+        && let Some(next_str) = next.to_str()
+        && known_flags.contains(&next_str)
+    {
+        return Err(UsageError(format!("missing value for '{flag}'")));
+    }
     it.next()
         .ok_or_else(|| UsageError(format!("missing value for '{flag}'")))
 }
@@ -159,6 +182,15 @@ mod tests {
     #[test]
     fn rejects_missing_value_for_log() {
         let err = parse(["verify-log", "--log"]).unwrap_err();
+        assert!(err.0.contains("--log"));
+    }
+
+    /// PR #356 codex-review P1 指摘対応: `--log` の値位置に既知フラグ
+    /// `--allow-empty-log` が来た場合、ファイル名として誤消費せず値欠落の
+    /// usage エラーにする（`take_value` 参照）。
+    #[test]
+    fn rejects_known_flag_as_log_value() {
+        let err = parse(["verify-log", "--log", "--allow-empty-log"]).unwrap_err();
         assert!(err.0.contains("--log"));
     }
 
