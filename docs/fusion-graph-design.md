@@ -50,8 +50,8 @@
     （利用者の範囲をどう限定しても、コンストラクタ選択＝融合スイッチと
     いう構造は `autodiff` の公開 API に残り続ける）。本改訂はこの構造
     自体を解消する: **`autodiff::Tape` の非公開フィールドを `Option`
-    ではなく必須の所有値 `ops: Box<dyn BackendOps>` とし、`Tape` を
-    構築できる 2 つの公開コンストラクタ（`Tape::new()`／
+    ではなく必須の所有値 `ops: Box<dyn BackendOps + Send>` とし、`Tape`
+    を構築できる 2 つの公開コンストラクタ（`Tape::new()`／
     `Tape::with_backend(ops)`）のどちらを経由しても必ず `ops` が
     埋まった状態でしか `Tape` が存在できないようにする**（`Option` を
     経由した「未解決」状態が型として存在しない。第 10 波の懸念
@@ -59,7 +59,11 @@
     なる」は、`None` という値自体をコンパイル時に排除することで解消
     する——「利用者の範囲をどう定義するか」という防御ではなく、
     「融合を無効化できる構築経路がそもそも存在しない」という構造的
-    事実によって REQ-12 を満たす）:
+    事実によって REQ-12 を満たす）。`+ Send` はトレイトオブジェクト型
+    （保持型・`with_backend` の引数型）に課す bound であり、`BackendOps`
+    trait 定義自体へ `Send` をスーパートレイトとして追加するものでは
+    ない（§3.4「`BackendOps` trait 定義自体は変更しない」参照。両者の
+    区別は §3.4 で確定する `Tape: Send` の帰結の節で扱う）:
     ```rust
     // crates/autodiff/src/tape.rs（非公開フィールド。実装は #164）
     pub struct Tape {
@@ -71,34 +75,142 @@
         /// 試みる。`Tape::new()`・`Tape::with_backend(ops)` のどちらで
         /// 構築しても、この後段の融合方針自体は一切変わらない
         /// （変わるのは注入される具体的なバックエンド実装のみ）。
-        ops: Box<dyn BackendOps>,
+        /// `+ Send` は `Tape: Send` を維持するための trait object 型
+        /// bound（§3.4「`Tape: Send` の維持」参照。`BackendOps` trait
+        /// 自体へのスーパートレイト追加ではない）。
+        ops: Box<dyn BackendOps + Send>,
     }
     ```
     - **`Tape::new()`**（既存の既定コンストラクタ。シグネチャは変更
-      しない）: 内部で `backend_cpu::CpuBackendOps::new()`
-      （`crates/backend-cpu/src/ops.rs:27`。引数なし・`Result` を
-      返さない無条件成功のコンストラクタ）を構築し `ops` へ格納する
-      （2026-08-08 ユーザー承認「既定バックエンドを `Device::Cpu`
-      とすること」に基づく確定。承認記録は §6.2「`Tape::new()` が
-      使う既定バックエンドの供給規則」参照）。**これに伴い `autodiff`
-      は `backend-cpu` への workspace path 依存を新規に持つ**
-      （依存方向: `backend-cpu` → `tensor-core`、`autodiff` →
-      `{tensor-core, backend-cpu}`。`backend-cpu` は `autodiff` へ
-      依存しないため循環は生じない。第 9 波が確定した「`autodiff →
-      backend-cpu` の workspace path 依存は追加しない」という契約は
-      本改訂で撤回する——撤回の理由・整理は §3.4「`autodiff →
-      backend-cpu` の workspace path 依存を追加する」参照）。
-      `Tape::new()` を呼ぶすべての経路（compat 層を含む・含まない
-      いずれも）で融合が既定で・透過的に効く。
-    - **`Tape::with_backend(ops: Box<dyn BackendOps>)`**（新設。実装は
-      #164）: 呼び出し元が指定した `BackendOps` 実装（CUDA／Metal
-      加速や決定的なテスト用実装等）を `ops` へ格納する。**バックエンド
-      の明示選択**手段として提供する（`docs/public-api-design.md` §4.1
-      が定める `Device` の「列挙と明示選択」方針と同じ趣旨。`Device`
-      から具体的な `BackendOps` 実装〈CUDA／Metal 加速〉への結線規則
-      自体は §6.2「未決事項として残る部分」が定めるとおり本文書では
-      未確定であり、`Tape::with_backend` はその結線が決まった際の
-      注入口として使う）、
+      しない）: 内部で `tensor_core::default_ops()`（新設、下記
+      「既定バックエンドの供給元を `tensor-core` の provider 抽象へ
+      移す」参照）を参照して `ops` へ格納する。**この結線は
+      `autodiff` が `backend-cpu` という具体クレートの存在を知ることを
+      要求しない**（`autodiff → backend-cpu` の workspace path 依存は
+      追加しない。第 9 波が確定したこの契約を、本改訂〈codex-review
+      第 15 波 P1-a 指摘への回答〉で再確認・維持する。第 14 波が一時
+      導入した「`autodiff` が `backend-cpu` へ直接依存し
+      `backend_cpu::CpuBackendOps::new()` を直接構築する」設計は撤回
+      する）。`Tape::new()` を呼ぶすべての経路（compat 層を含む・含まない
+      いずれも）で融合が既定で・透過的に効く（登録の責務については
+      下記「既定バックエンド provider の登録は結線層の責務」参照）。
+    - **既定バックエンドの供給元を `tensor-core` の provider 抽象へ
+      移す（codex-review 第 15 波 P1-a 指摘への回答。第 14 波が導入した
+      「`autodiff → backend-cpu` の workspace path 依存」・
+      `Tape::new()` 内での `backend_cpu::CpuBackendOps::new()` 直接構築
+      を撤回する）**: 第 14 波は「`autodiff` が具体バックエンド実装への
+      依存を持たない」という第 9 波の不変条件を、`Tape::new()` から
+      `backend-cpu` を直接構築するために撤回していた。この撤回は
+      `device.rs`（TASK-1.9a）・`backend_ops.rs`（TASK-1.9c）が確立
+      済みの依存逆転構成（trait を `tensor-core` に置き `backend-*` が
+      実装する。`tensor-core` → `backend-*` の逆依存を作らない。§2.5
+      参照）と非対称な例外を `autodiff` に持ち込んでいた——`autodiff`
+      は `BackendOps` という抽象だけを知っていればよいはずが、既定
+      バックエンドの解決のためだけに `backend-cpu` という具体クレート
+      への path 依存を新規に負っていた。本改訂はこれを解消する:
+      `tensor-core` に**具体クレートを一切参照しない既定バックエンド
+      provider 登録機構**を新設し、`autodiff` はこの抽象のみに依存する。
+      ```rust
+      // crates/tensor-core/src/backend_ops.rs（新設。実装は #164）
+      use std::sync::OnceLock;
+
+      /// 既定バックエンドの生成関数を保持するグローバル状態。
+      /// `tensor-core` は CPU／CUDA／Metal いずれの具体クレートも
+      /// 参照しない（`device.rs`・`backend_ops.rs` が確立済みの依存
+      /// 逆転構成を維持するため）。関数ポインタ自体は `Send + Sync`
+      /// であり `OnceLock` に格納して健全（Rust の `fn` 型は捕獲する
+      /// 環境を持たないため常に `Send + Sync`）。
+      static DEFAULT_OPS_PROVIDER: OnceLock<fn() -> Box<dyn BackendOps + Send>> =
+          OnceLock::new();
+
+      /// 既定バックエンドの生成関数を登録する。**結線層（下記）専用の
+      /// 機構であり、利用者向けの融合制御 API ではない**（REQ-12 との
+      /// 関係は下記「登録は結線層の責務」参照）。一度登録された provider
+      /// は変更できない（`OnceLock::set`。2 回目以降の呼び出しは
+      /// 「最初に登録した呼び出しが勝つ」規則で `Err` を返すが、
+      /// 呼び出し側〈結線層〉はこれを無視してよい——複数の結線経路が
+      /// 冪等に同じ provider を登録しようとする場合の通常分岐であり、
+      /// `panic!`／`unwrap()` は使わない〈`.claude/rules/coding-rust.md`
+      /// 「コード品質」〉）。戻り値の `bool` は登録に成功したか
+      /// （＝呼び出し時点で未登録だったか）を示す。
+      pub fn set_default_ops_provider(provider: fn() -> Box<dyn BackendOps + Send>) -> bool {
+          DEFAULT_OPS_PROVIDER.set(provider).is_ok()
+      }
+
+      /// 登録済みの既定バックエンド provider を呼び出し、新規
+      /// `BackendOps` 実装を返す。未登録（結線層〈compat 層〉を経由
+      /// しない下位層直接利用・単体テスト等の内部的状況）の場合は
+      /// `None` を返す——呼び出し元（`autodiff::Tape::new()`）はこれを
+      /// 「融合が無効化された」という意味に解釈してはならず、後述の
+      /// fail-safe（従来の eager 実行）へ倒す（下記「未登録時の
+      /// fail-safe」参照）。
+      pub fn default_ops() -> Option<Box<dyn BackendOps + Send>> {
+          DEFAULT_OPS_PROVIDER.get().map(|provider| provider())
+      }
+      ```
+      - **登録は結線層の責務**: REQ-9 の compat 層（`autodiff`・
+        `backend-cpu` 双方に依存できる位置。§6.2「`backend-cpu` の
+        最適化実装の結線層」参照）が、初期化時に
+        `tensor_core::set_default_ops_provider(|| Box::new(backend_cpu::ops::CpuBackendOps::new()))`
+        を呼び既定 provider を登録する。**登録タイミングの具体的な
+        機構**: 新たな依存（`ctor`／`lazy_static` 相当。許容依存 8 区分
+        外であり導入しない）を追加せず、compat 層の各公開エントリ関数
+        （`compat::array`・`Sequential::new` 等）の先頭で冪等な
+        `ensure_default_backend_registered()`（compat 層内部、
+        `pub(crate)`）を呼ぶ。この関数は `set_default_ops_provider` の
+        戻り値（`bool`）を無視してよい呼び出しを毎回行うだけであり
+        （2 回目以降は `OnceLock` が既に埋まっているため何もしない）、
+        `OnceLock` により二重初期化そのものが安全に無害化される。
+        ライブラリとして出荷される公開経路（compat 層）を
+        経由する限り登録は常時行われるため、`Tape::new()`／
+        `Tape::with_backend` いずれのコンストラクタで `Tape` を構築
+        しても融合が透過的に有効であり、**コンストラクタ選択は融合
+        可否に影響しない**（観測面の契約。§1 冒頭「単一の公開構築
+        経路への統合」の帰結をそのまま維持する）。
+      - **登録 API は融合制御 API ではなく結線機構である
+        （REQ-12 との関係）**: `set_default_ops_provider`／
+        `default_ops` は `tensor-core` の crate-internal な結線 API
+        であり、利用者向けに公開されるドキュメント面（compat 層の
+        公開 API）には現れない——**compat 層はこれらを操作する API を
+        利用者へ公開しない**（compat 層内部で 1 度だけ結線に使うのみ。
+        `docs/public-api-design.md` は compat 層の公開面にこれらの
+        関数を含めない）。したがって「利用者が明示的に融合を制御する
+        API は提供しないこと」（REQ-12。`docs/spec/04-requirements.md:249`）
+        には抵触しない。
+      - **未登録時の fail-safe（内部的状況専用）**: `tensor_core::
+        default_ops()` が `None` を返す状況（compat 層を経由しない
+        `autodiff`／`tensor-core` の下位層直接利用、`crates/autodiff`
+        の単体テスト等）では、`Tape::new()` は `autodiff` クレート内
+        限定の `pub(crate)` フォールバック実装（新設、実装は #164）を
+        `ops` へ格納する。このフォールバック実装は **新規のカーネル
+        コードを一切含まない**——`run_fused` は常に
+        `BackendError::Unsupported` を返し（融合を一切試みない）、
+        per-op メソッド（`add`／`mul`／`relu`／`exp`／`tanh`／`gemm`／
+        `sum`／`max`）は既存の `eval.rs`（§2.5「`autodiff` 側の役割」
+        が既に層 2 の最終手段として位置づけている参照実装）への薄い
+        委譲に徹する。したがって第 13 波 P1-b 指摘が撤回させた「`crates/
+        autodiff` 内のコア融合実行器」（`fusion_exec.rs`／
+        `run_core_fused`／`UnaryFusedOp`。数式・並列化を独自実装する
+        設計）とは異なる——このフォールバックは融合を試みず、
+        `eval.rs` の既存計算をラップするだけの状態を持たないユニット
+        構造体（`backend-cpu::ops::CpuBackendOps`〈`crates/backend-cpu/
+        src/ops.rs:23`〉・`backend-metal::ops::MetalBackendOps`
+        〈`crates/backend-metal/src/ops.rs:35`〉と同型の
+        `#[derive(Debug, Default, Clone, Copy)]` ゼロサイズ型）であり
+        `Send` が自動導出される（§3.4「`Tape: Send` の維持」）。**この
+        フォールバックが実際に使われるのは compat 層を経由しない
+        内部的状況に限られる**（結線が常時行われる出荷経路では
+        `default_ops()` が常に `Some` を返すため到達しない。§6.1
+        #165 に到達確認テストを記録する）。
+    - **`Tape::with_backend(ops: Box<dyn BackendOps + Send>)`**（新設。
+      実装は #164）: 呼び出し元が指定した `BackendOps` 実装（CUDA／
+      Metal 加速や決定的なテスト用実装等）を `ops` へ格納する。
+      **バックエンドの明示選択**手段として提供する
+      （`docs/public-api-design.md` §4.1 が定める `Device` の「列挙と
+      明示選択」方針と同じ趣旨。`Device` から具体的な `BackendOps`
+      実装〈CUDA／Metal 加速〉への結線規則自体は §6.2「未決事項として
+      残る部分」が定めるとおり本文書では未確定であり、`Tape::
+      with_backend` はその結線が決まった際の注入口として使う）、
       §3.5 が規定する 3 層の実体化境界に従って記録を遅延し、実体化時に
       `ops.run_fused`（§3.4）を試み、`BackendError::Unsupported` は
       同じ `ops` の per-op メソッドへの逐次呼び出しへフォールバック
@@ -109,12 +221,37 @@
       に従って記録を遅延し、`run_fused` による融合を試みる」という
       後段の挙動を完全に共有する（`FusionSession`／`FusionPlan`／
       `run_fused` は §3.4 のとおりどちらの経路にも同一に関与する）。
-      **選択が変えるのは実行バックエンドの種類（既定の `backend-cpu` か
-      呼び出し元が指定した任意の `BackendOps` 実装か）のみであり、
-      融合の有無ではない**。「`with_backend` だけが融合する」という
-      記述は本改訂の対象文書全体（本文書・`docs/public-api-design.md`）
-      から全廃する（該当箇所は §3.4・§3.5・§6.1・§6.2 で横断的に
-      更新する）。
+      **選択が変えるのは実行バックエンドの種類（`tensor_core::
+      default_ops()` が解決する登録済み provider の結果〈未登録時は
+      `EagerFallbackOps`。§1「未登録時の fail-safe」〉か、呼び出し元が
+      指定した任意の `BackendOps` 実装か）のみであり、融合の有無では
+      ない**。「`with_backend` だけが融合する」という記述は本改訂の
+      対象文書全体（本文書・`docs/public-api-design.md`）から全廃する
+      （該当箇所は §3.4・§3.5・§6.1・§6.2 で横断的に更新する）。
+      **残る REQ-12 面の論点（未登録状態と `Tape::with_backend` の
+      関係を明示する）**: `EagerFallbackOps` は `run_fused` を試みない
+      （常に `Unsupported`）ため、provider 未登録状態の `Tape::new()`
+      と、融合実装を注入した `Tape::with_backend(fusing_ops)` を比べる
+      と挙動が異なる——これは構造としては第 14 波が問題視した「コンス
+      トラクタ選択が融合可否を決める」パターンに似える。しかし本改訂
+      が REQ-12 を満たすと判定する根拠は「利用者の範囲をどう限定
+      するか」ではなく次の事実である: **出荷経路（compat 層が
+      `tensor_core::set_default_ops_provider` を登録済みの状態。§1
+      「登録は結線層の責務」）では `Tape::new()`／`Tape::with_backend`
+      のどちらを呼んでも同一に融合が試みられ、両者の挙動差は消える**。
+      未登録状態（`EagerFallbackOps` が使われる状態）は compat 層の
+      公開 API を経由する限り到達不能なプロセス全体の性質（provider
+      が一度も登録されていないこと）であり、compat 層のどの公開関数の
+      呼び出しからも作り出せない——第 13 波の防御が「利用者の範囲を
+      compat 層に限定する」という**範囲の限定**だったのに対し、本改訂
+      の防御は「compat 層を経由する限りその状態が構造的に発生しない」
+      という**到達可能性の限定**であり、両者は異なる。この差は
+      `EagerFallbackOps`（fail-safe）を導入したことの意図的な代償
+      として認識したうえで受け入れる——fail-safe 自体を撤去すると
+      compat 層を経由しない下位層直接利用・単体テストで `Tape::new()`
+      が構築不能になる（provider 未登録時に `ops` を埋める手段が
+      なくなる）ため、この代償を払わない設計は §1「`ops` は必須所有値」
+      という制約と両立しない。
   - **演算跨ぎの遅延・二項 elementwise 演算の遅延化（codex-review 第 6
     波・第 13 波 P1-a 指摘への回答。詳細は §3.2・§3.4・§3.5）**: 遅延の
     生存窓は「複数回の独立した公開 `Var` 呼び出しをまたぐ」形で持ち
@@ -417,21 +554,34 @@ CUDA／Metal 等）に限り、`autodiff` 自身の `eval.rs` 参照実装への
 再計算を**最終手段**として用いる（§3.5.3。層 1〈fallible 境界〉には
 この最終手段はなく、`ops` の per-op メソッドも失敗すれば
 `AutodiffError::Backend` として `?` で伝播する。§3.5.2 手順 4 と
-同じ扱い）。この最終手段を除けば、`eval.rs` 自体への変更（可視性
-変更・新規モジュール新設のいずれも）は不要である。**`eval.rs` の
-役割の変化（第 13 波までとの相違点）**: 第 13 波までは `Tape::new()`
-（`ops: None`）がすべての演算を `eval.rs` 経由で即時計算する「既定の
-eager 経路」を持っていたため、`eval.rs` は (a) `Tape::new()` の
-全演算パスと (b) 層 2 の最終手段フォールバックという 2 つの役割を
-兼ねていた。本改訂は `Tape::new()` 自身が既定バックエンド（`backend-
-cpu` の `CpuBackendOps`）を注入するため（§1）、(a) の役割は消滅し、
-`eval.rs` は (b) 層 2 の最終手段フォールバックにのみ用いられる（層 1
-では使わない。§3.5.2）。既存の TASK-1.5〜1.8 テスト資産が `Tape::
-new()` を eager 実行として前提していた場合、実行経路が「常に
-`ops.run_fused`／`ops` の per-op メソッド経由」へ変わるため、#164
-実装時に §4 の数値一致複合判定を満たすことを再検証する必要がある
-（許容誤差の緩和はユーザー承認必須。`.claude/rules/coding-rust.md`
-「テスト・ベンチ」・§6.1 #164 参照）。
+同じ扱い）。この最終手段を除けば、`eval.rs` 自体への変更（可視性変更・新規
+モジュール新設のいずれも）は不要である——`EagerFallbackOps`
+（§1「未登録時の fail-safe」）は `crates/autodiff` 内 `pub(crate)`
+のため、同じクレート内の `eval.rs` の既存関数を追加の可視性変更なしに
+呼び出せる（層 1〈fallible 境界〉の `eval.rs` 不使用方針とは独立の、
+未登録時限定の内部呼び出しである）。**`eval.rs` の役割の変化
+（第 13 波までとの相違点。codex-review 第 15 波 P1-a 指摘への回答を
+受け出荷経路と内部的状況を分けて記述する）**: 第 13 波までは
+`Tape::new()`（`ops: None`）がすべての演算を `eval.rs` 経由で即時
+計算する「既定の eager 経路」を持っていたため、`eval.rs` は
+(a) `Tape::new()` の全演算パスと (b) 層 2 の最終手段フォールバック
+という 2 つの役割を兼ねていた。**出荷経路（compat 層が
+`tensor_core::set_default_ops_provider` を登録済みの状態。§1）**では
+`Tape::new()` が `backend-cpu` の `CpuBackendOps` を解決するため、
+(a) の役割は消滅し `eval.rs` は (b) 層 2 の最終手段フォールバックに
+のみ用いられる（層 1 では使わない。§3.5.2）。**compat 層を経由しない
+内部的状況（provider 未登録。§1「未登録時の fail-safe」）に限り**、
+`Tape::new()` が注入する `EagerFallbackOps` の per-op メソッドが
+`eval.rs` へ委譲するため、(a) 相当の役割がこの限定された状況でのみ
+残る——これは新しい役割の追加ではなく、`eval.rs` が元々 (a)(b) 両方の
+実装を提供していたことの帰結が「どの経路から呼ばれるか」という形で
+残存しているに過ぎない（`eval.rs` 自体のコードは変更しない）。既存の
+TASK-1.5〜1.8 テスト資産が `Tape::new()` を eager 実行として前提して
+いた場合、出荷経路での実行経路が「常に `ops.run_fused`／`ops` の
+per-op メソッド経由」へ変わるため、#164 実装時に §4 の数値一致複合
+判定を満たすことを再検証する必要がある（許容誤差の緩和はユーザー
+承認必須。`.claude/rules/coding-rust.md`「テスト・ベンチ」・§6.1
+#164 参照）。
 
 ## 3. 遅延評価境界
 
@@ -688,71 +838,106 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
     が必要な変更。`.claude/rules/conventional-commits.md`）に該当する。
     この理由は §1 の窓の縮小とは独立に成り立つ（trait 定義への
     スーパートレイト追加は、それを要求する側の設計がどう変わっても
-    常に破壊的変更である）ため、本改訂でも維持する。上記の単純化に
-    より、`FusionSession`／`Tape::with_backend`（下記）のいずれも
-    `Send + Sync` を要求しない（旧稿はトレイトオブジェクト型の指定にの
-    み `+ Send + Sync` を課していたが、その必要性自体が消滅したため
-    本改訂で撤回する）。
+    常に破壊的変更である）ため、本改訂でも維持する。**`Sync` は
+    `FusionSession`／`Tape` のいずれの保持型にも一切要求しない**
+    （`Tape` は `RefCell`／`OnceCell` により元々 `!Sync`。§3.5.1）。
+    **`Send` の扱いは保持型ごとに異なる（codex-review 第 15 波 P1-b
+    指摘への回答。本改訂で確定する）**: `FusionSession` の借用型
+    `ops: &'ops dyn BackendOps`（上記「`ops` の受け渡しは借用で足りる」）
+    は `Send` を要求しない（旧稿はトレイトオブジェクト型の指定に
+    `+ Send + Sync` を課していたが、`Storage::Pending` への埋め込み
+    という前提が §1 で消滅したためこの束縛は不要になった）。一方、
+    `Tape` の**所有**フィールド `ops: Box<dyn BackendOps + Send>`
+    （§1）・`Tape::with_backend` の引数型は `+ Send` を課す——これは
+    `BackendOps` trait 定義へのスーパートレイト追加ではなく、`Tape`
+    がこのフィールドを所有する場所（`Box<dyn Trait + Send>` という
+    トレイトオブジェクト型自体への bound）でのみ要求する `Send` で
+    あり、trait を実装する外部クレートの実装コード自体には一切影響
+    しない（`impl BackendOps for T` を書く際に `T: Send` を満たす必要は
+    trait 定義側の制約としては生じない。`Box::new(t) as Box<dyn
+    BackendOps + Send>` という **construction 側**でのみ `T: Send` が
+    要求される。破壊的変更の判定基準は「既存の `impl BackendOps` が
+    コンパイルできなくなるか」であり、これは影響を受けない）。
   - **`ops` をどの時点で・どの形で受け渡すか（codex-review 第 13・14 波
     P1 指摘への回答。第 11〜12 波の `Executor` enum、第 13 波の
     `Option<Box<dyn BackendOps>>` フィールドは、いずれも本改訂で単一の
-    必須所有値 `ops: Box<dyn BackendOps>` フィールドへ置き換える）**:
+    必須所有値 `ops: Box<dyn BackendOps + Send>` フィールドへ置き換える）**:
     materialize ヘルパーが呼ばれるのは §3.5.2 の層 1（`matmul`／`sum`／
     `max`・`Tape::backward` の VJP 連鎖内部）・§3.5.3 の層 2
     （`Var::value`／`Var::to_tensor`／`Gradients::get`）・§3.5.4（連鎖長
     上限到達時）、または将来の複合エントリポイント（§3.5.5）であり、
     いずれも `Tape` が既に保持する非公開フィールド `ops: Box<dyn
-    BackendOps>`（§1）を借用して使う。フィールド追加は `Tape` の構造体
-    を非公開のまま拡張するだけであり、`pub` フィールドを持たない現行の
-    `Tape`（`tape.rs:140`）の公開契約を破らない。**`Option` を採らない
-    理由（第 10・14 波の懸念への回答）**: 第 10 波は `Option<Box<dyn
-    BackendOps>>` を「`None` = 未解決 = 公開コンストラクタが事実上の
-    融合スイッチになる」ことを理由に撤回し、第 13 波は「REQ-12 が保護
-    する『利用者』は compat 層の公開面である」という範囲限定でこの懸念
-    に応じた。第 14 波 P1 指摘は、この範囲限定が `autodiff` の公開 API
-    自体に残る「コンストラクタ選択＝融合スイッチ」という構造そのものを
-    消していないことを問題視した。本改訂は `ops` を `Option` ではなく
-    必須所有値にすることで、この構造自体を型システムで排除する——
-    `None` に相当する値がそもそも存在しないため、「未解決」も「融合
-    スイッチとして機能するコンストラクタ選択」も構築不能である
-    （§1 参照）。**`BackendOps` は `Debug` をスーパートレイトに持たない
-    ため（外部実装を破壊しないための既存方針。下記「`BackendOps` trait
-    定義自体は変更しない」参照）、現行の `#[derive(Debug)]`
-    （`tape.rs:139`）はそのままでは `ops` フィールド追加後にコンパイル
-    できない。#164 では `#[derive(Debug)]` を撤去し、手書き
-    `impl fmt::Debug for Tape` へ置き換える**（`ops` の中身を表示せず
-    `"Tape { .. }"` 等の固定文字列を表示する。`ops` は常に埋まっている
-    ため `None`／`Some` を区別する分岐は不要であり、バックエンド実装の
-    中身〈`Device` を含む〉も表示しない）。これにより `Tape: Debug`
-    という公開契約自体は変更後も維持され（実装手段が `derive` から
-    手書きへ変わるのみ）、公開 API 非破壊の方針
-    （`.claude/rules/security.md`）を満たす。**`Tape: Send` の自動
-    導出への影響（`Debug` と対になる論点として明記する）**: 現行
-    `Tape`（`id: TapeId`・`nodes: RefCell<Vec<TapeNode>>`）は
-    `TapeNode` の値（`Arc<Storage<T>>` を経由する `Tensor<f32>`／
-    `Tensor<i32>`）が `Send` であるため `Tape: Send` が自動導出される。
-    `ops: Box<dyn BackendOps>`（`Send` 境界なし）の追加により、`ops`
-    に実際に格納される `BackendOps` 実装が `Send` でない場合、この
-    自動導出は後退しうる。これは本改訂で新規に持ち込まれる帰結では
-    なく、第 13 波の `ops: Option<Box<dyn BackendOps>>` フィールド
-    追加時点で既に生じていた帰結を本改訂で明示的に記録するものである。
-    `Tape` は元々 `RefCell`／`OnceCell`（§3.5.1）により `!Sync` であり
-    単一スレッド内での利用を前提とする型である（§3.5.1・§3.5.3 の
-    借用規律もこの前提に立つ）ため設計意図とは矛盾しないが、`pub` 型の
-    auto trait 後退は公開 API 非破壊の観点で見落としやすい変化である。
-    #164 実装時に `Send` 自動導出の後退が実際に生じるか（`Tape::new()`
-    が注入する `backend_cpu::CpuBackendOps` が `Send` かどうか、
-    `Tape::with_backend` に渡されうる実装が `Send` かどうかに依存する）
-    を確認し、生じる場合は Conventional Commits の `!`／`BREAKING
-    CHANGE:` 告知の要否を判断すること
-    （`.claude/rules/conventional-commits.md`）。`Tape::backward`
-    （`backward.rs`）・§3.5.1 の materialize ヘルパーはいずれも
-    `self.ops`（`&dyn BackendOps`。`.as_ref()` で得られる借用）を読み、
-    融合を試み `run_fused` を呼ぶ内部ヘルパーへ**借用として**渡す
-    （§3.4 冒頭「`FusionSession` は借用 `ops: &'ops dyn BackendOps` を
-    保持する」）。`FusionSession` はその呼び出しの実行中だけ生存する
-    ローカル値であるため、所有権の移動・`Arc` によるクローンはいずれも
-    不要である。
+    BackendOps + Send>`（§1）を借用して使う。フィールド追加は `Tape` の
+    構造体を非公開のまま拡張するだけであり、`pub` フィールドを持たない
+    現行の `Tape`（`tape.rs:140`）の公開契約を破らない。**`Option` を
+    採らない理由（第 10・14 波の懸念への回答）**: 第 10 波は
+    `Option<Box<dyn BackendOps>>` を「`None` = 未解決 = 公開コンスト
+    ラクタが事実上の融合スイッチになる」ことを理由に撤回し、第 13 波は
+    「REQ-12 が保護する『利用者』は compat 層の公開面である」という
+    範囲限定でこの懸念に応じた。第 14 波 P1 指摘は、この範囲限定が
+    `autodiff` の公開 API 自体に残る「コンストラクタ選択＝融合スイッチ」
+    という構造そのものを消していないことを問題視した。本改訂は `ops`
+    を `Option` ではなく必須所有値にすることで、この構造自体を型
+    システムで排除する——`None` に相当する値がそもそも存在しないため、
+    「未解決」も「融合スイッチとして機能するコンストラクタ選択」も
+    構築不能である（§1 参照。未登録時の fail-safe〈§1「未登録時の
+    fail-safe」〉も `ops` を必須所有値のまま埋め、`Option` を経由しない）。
+    **`BackendOps` は `Debug` をスーパートレイトに持たないため（外部
+    実装を破壊しないための既存方針。上記「`BackendOps` trait 定義自体は
+    変更しない」参照）、現行の `#[derive(Debug)]`（`tape.rs:139`）は
+    そのままでは `ops` フィールド追加後にコンパイルできない。#164 では
+    `#[derive(Debug)]` を撤去し、手書き `impl fmt::Debug for Tape` へ
+    置き換える**（`ops` の中身を表示せず `"Tape { .. }"` 等の固定文字列
+    を表示する。`ops` は常に埋まっているため `None`／`Some` を区別する
+    分岐は不要であり、バックエンド実装の中身〈`Device` を含む〉も表示
+    しない）。これにより `Tape: Debug` という公開契約自体は変更後も
+    維持され（実装手段が `derive` から手書きへ変わるのみ）、公開 API
+    非破壊の方針（`.claude/rules/security.md`）を満たす。
+    **`Tape: Send` を維持する（codex-review 第 15 波 P1-b 指摘への回答。
+    第 14 波が残していた「後退しうる」という留保を本改訂で解消し、
+    `Tape: Send` の維持を本設計として確定する）**: 現行 `Tape`
+    （`id: TapeId`・`nodes: RefCell<Vec<TapeNode>>`）は `TapeNode` の
+    値（`Arc<Storage<T>>` を経由する `Tensor<f32>`／`Tensor<i32>`）が
+    `Send` であるため `Tape: Send` が自動導出される（§1「`ops` の
+    フィールド」節で確定した記述をそのまま踏襲する）。`ops` フィールド
+    を `Box<dyn BackendOps + Send>`（`Send` 境界**あり**。上記
+    「`BackendOps` trait 定義自体は変更しない」節で確定した「保持型・
+    引数型としての `+ Send`」）とすることで、`ops` フィールド自体が
+    常に `Send` を満たす。したがって `Tape` の全フィールド（`id`・
+    `nodes`・`ops`）が `Send` であり、`Tape: Send` の自動導出は後退
+    しない——`Box<dyn BackendOps>`（`Send` 境界なし）のまま追加していた
+    場合にのみ生じえた後退（第 13〜14 波が留保していた懸念）は、
+    `+ Send` を trait object 型へ課すことで発生しない設計として確定
+    する。**既存の 3 バックエンド実装が `Send` を満たすことの確認
+    （実装は #164 だが、設計として本節で事前確認する）**: `CpuBackendOps`
+    （`crates/backend-cpu/src/ops.rs:23`。フィールドを持たないユニット
+    構造体）・`MetalBackendOps`（`crates/backend-metal/src/ops.rs:35`。
+    同じくユニット構造体）はいずれも非 `Send` フィールドを持たないため
+    `Send` が自動導出される。`CudaBackendOps`（`crates/backend-cuda/src/
+    ops.rs:34`〜`:36`。フィールドは `ordinal: usize` のみ）も同様に
+    `Send` が自動導出される（`CudaDevice`／`CudaGemm` 等のデバイス
+    ハンドルは各メソッド呼び出し時に都度構築する設計であり構造体自体は
+    保持しない。`crates/backend-cuda/src/ops.rs` 冒頭コメント参照）。
+    §1「未登録時の fail-safe」が新設する `autodiff` 内限定フォールバック
+    実装も同型（フィールドを持たないユニット構造体）であるため `Send`
+    が自動導出される。したがって `Tape::new()`（provider 経由・
+    fail-safe いずれの経路でも）・`Tape::with_backend`（既存 3 バック
+    エンド実装のいずれを渡す場合でも）で構築した `Tape` は常に
+    `Send` を満たす。`Tape` は元々 `RefCell`／`OnceCell`（§3.5.1）に
+    より `!Sync` であり単一スレッド内での利用を前提とする型である
+    （§3.5.1・§3.5.3 の借用規律もこの前提に立つ）ため、`Sync` は維持
+    しない（維持する契約でもない）。`Tape::backward`（`backward.rs`）・
+    §3.5.1 の materialize ヘルパーはいずれも `self.ops`（`&dyn
+    BackendOps`。`.as_ref()` で得られる借用）を読み、融合を試み
+    `run_fused` を呼ぶ内部ヘルパーへ**借用として**渡す（§3.4 冒頭
+    「`FusionSession` は借用 `ops: &'ops dyn BackendOps` を保持する」）。
+    `FusionSession` はその呼び出しの実行中だけ生存するローカル値で
+    あるため、所有権の移動・`Arc` によるクローンはいずれも不要である。
+    **破壊的変更なし（`docs/public-api-design.md` §4.1 と対を成す確認）**:
+    `Tape::new()`／`Tape::with_backend` のシグネチャ・`Tape: Debug`・
+    `Tape: Send` はいずれも維持され、`BackendOps` trait はスーパー
+    トレイトの追加を一切受けない。Conventional Commits の `!`／
+    `BREAKING CHANGE:` 告知は不要である。
   - **CPU 融合実行の提供元は `backend-cpu`（codex-review 第 13 波 P1-b
     指摘への回答。第 11〜12 波が `crates/autodiff` 内に置いていた
     「コア融合実行器」を撤回する）**: `run_fused` の CPU 実装（未対応
@@ -765,76 +950,94 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
     `backend-cpu` 側の CPU 融合実装（SIMD・rayon 等による最適化を含む）
     の詳細設計は `backend-cpu` の担当範囲であり本文書のスコープ外と
     する（結線のみを本文書で確定する）。
-    - **`autodiff → backend-cpu` の workspace path 依存を追加する
-      （codex-review 第 14 波 P1 指摘への回答。第 9 波 P1 指摘が確定し
-      第 13 波まで維持していた「`autodiff → backend-cpu` の workspace
-      path 依存は追加しない」という契約を、本改訂で撤回する）**: 第 9
-      波は「`autodiff` は具体バックエンド実装への依存を持たない」こと
-      を理由にこの依存追加を禁じ、第 13 波はこれに合わせて `Tape::
-      new()` を eager・非融合のまま据え置き、既定バックエンドの注入を
-      compat 層（REQ-9）の責務としていた。第 14 波 P1 指摘は、この
-      「compat 層が注入する」という設計自体が「`Tape::new()` と
-      `Tape::with_backend(ops)` のどちらを呼ぶかが融合の有無を決める」
-      という構造を温存しており REQ-12 に抵触することを指摘した。本改訂
-      はこれを受け、**既定バックエンドの注入責任を compat 層から
-      `autodiff::Tape::new()` 自身へ一段引き下げる**（§1・§6.2「`Tape::
-      new()` が使う既定バックエンドの供給規則」）。この結果、`crates/
-      autodiff/Cargo.toml` へ `backend-cpu = { path = "../backend-cpu" }`
-      を追加する（deps-policy.md の許容依存 8 区分〈外部クレート〉の
-      対象外であり、workspace member 間の path 依存のためユーザー承認
-      フローの対象にならない。`backend-cpu/Cargo.toml` の既存コメントに
-      あるとおり `tensor-core = { path = "../tensor-core" }` と同種の
-      整理）。**循環依存は生じない**: 依存方向は `backend-cpu` →
-      `tensor-core`、`autodiff` → `{tensor-core, backend-cpu}` であり、
-      `backend-cpu/Cargo.toml`（`[dependencies]` は `tensor-core`／
-      `rayon`／`half` のみ）は `autodiff` へ依存しない。**第 9 波の
-      懸念への回答（撤回の実質的な理由）**: 第 9 波が守ろうとしていた
-      不変条件は「`autodiff` が実際の計算をバックエンド固有カーネルへ
-      直接実装しないこと」であり、「`autodiff` が `backend-cpu` という
-      具体クレートの存在を一切知らないこと」自体が目的ではなかった。
-      本改訂後も `autodiff` は演算の実行をすべて `tensor-core` が定義
-      する `BackendOps` トレイト経由でのみ行い（§2.5「`autodiff` 側の
-      役割」）、`backend-cpu` への依存は「`Tape::new()` が既定インスタ
-      ンス `backend_cpu::CpuBackendOps::new()`（引数なし・
-      `Result` を返さない無条件成功のコンストラクタ、
-      `crates/backend-cpu/src/ops.rs:27`）を構築するため」だけに使う。
-      `autodiff` にカーネルコード（数式・SIMD・並列化実装）が移動する
-      ことはなく、§2.5 が定める責務分界線（`autodiff` は制御のみ、
-      計算は常に `BackendOps` 経由）は変更しない。`with_backend` が
-      受け取る `Box<dyn BackendOps>` は引き続きトレイトオブジェクトで
-      あり、`Tape::new()` 以外の経路（CUDA／Metal 加速・テスト用実装）
-      では呼び出し元が具体型を構築して渡す。
-    - **`backend_ops.rs` は変更しない**: `ops_for`（`backend_ops.rs:171`。
-      借用ベース・候補注入契約）は本改訂の対象外であり変更しない。
-    - **compat 層の結線は不要（簡素化。第 13 波の「compat 層への既定
-      注入」設計を撤回する）**: 既定バックエンドの注入が
-      `autodiff::Tape::new()` 自身の責務になったため、REQ-9 の compat
-      層（`compat::array`／`compat::Sequential` 等）は `Tape` 構築時に
-      **`autodiff::Tape::new()` をそのまま使えばよく、独自の結線
-      （`Tape::with_backend` の呼び出し・`backend-cpu` への直接依存）を
-      必要としない**。compat 層が `tensor-core`／`autodiff` 以外に
-      `backend-cpu` へ依存する必要もなくなる（自作コアの上の薄い
-      ラッパーに徹する REQ-9 の方針とも整合する）。GPU バックエンド
-      （CUDA／Metal）を明示的に使いたい場合、compat 層は引き続き
-      `Tape::with_backend` を選べる（§1「バックエンドの明示選択」）が、
-      これは compat 層固有の実装判断であり本文書は結線を強制しない。
+    - **`autodiff → backend-cpu` の workspace path 依存は追加しない
+      （codex-review 第 15 波 P1-a 指摘への回答。第 14 波が P1 指摘への
+      回答として一時導入した「`autodiff → backend-cpu` の workspace
+      path 依存を追加する」という撤回を、本改訂で再撤回し第 9 波の
+      契約へ戻す）**: 第 9 波は「`autodiff` は具体バックエンド実装への
+      依存を持たない」ことを理由にこの依存追加を禁じていた。第 14 波は
+      「compat 層が注入する」という第 13 波の設計が『`Tape::new()` と
+      `Tape::with_backend(ops)` のどちらを呼ぶかが融合の有無を決める』
+      という構造を温存しており REQ-12 に抵触するという指摘を受け、
+      既定バックエンドの注入責任を compat 層から `autodiff::Tape::
+      new()` 自身へ一段引き下げた。しかし第 14 波の実装手段（`Tape::
+      new()` 内で `backend_cpu::CpuBackendOps::new()` を直接構築し
+      `crates/autodiff/Cargo.toml` へ `backend-cpu = { path =
+      "../backend-cpu" }` を追加する）は、`device.rs`（TASK-1.9a）・
+      `backend_ops.rs`（TASK-1.9c）が確立済みの依存逆転構成（§2.5「配置」
+      参照）と非対称な例外を `autodiff` に持ち込んでいた——「既定
+      バックエンドの注入責任を `autodiff::Tape::new()` が持つこと」と
+      「`autodiff` が `backend-cpu` という具体クレートへ依存すること」
+      は別の問題であり、前者を満たすために後者が必須だったわけではない
+      （codex-review 第 15 波 P1-a 指摘）。**本改訂は注入責任を
+      `autodiff::Tape::new()` に残したまま（第 14 波の到達点は維持する）、
+      具体クレートへの依存だけを `tensor-core` の provider 抽象（上記
+      「既定バックエンドの供給元を `tensor-core` の provider 抽象へ
+      移す」）へ委譲する**。この結果、`crates/autodiff/Cargo.toml` へ
+      `backend-cpu` を追加する必要はなく、依存方向は `backend-cpu` →
+      `tensor-core`、`autodiff` → `tensor-core`（既存のまま）で変わらない
+      （循環依存は生じようがない）。**第 9 波の懸念への回答**: 第 9 波が
+      守ろうとしていた不変条件「`autodiff` が実際の計算をバックエンド
+      固有カーネルへ直接実装しないこと」に加え、本改訂は「`autodiff`
+      が `backend-cpu` という具体クレートの存在を一切知らないこと」も
+      同時に満たす——第 14 波はこの後者を犠牲にしていたが、`tensor-core`
+      の provider 抽象を挟むことで両方を同時に満たせることが判明した
+      ため、犠牲にする理由がなくなった。`autodiff` は演算の実行を
+      すべて `tensor-core` が定義する `BackendOps` トレイト経由でのみ
+      行い（§2.5「`autodiff` 側の役割」）、既定バックエンドの解決も
+      `tensor_core::default_ops()`（`BackendOps` を返す抽象関数）経由に
+      限る。`autodiff` にカーネルコード（数式・SIMD・並列化実装）が
+      移動することはなく、§2.5 が定める責務分界線（`autodiff` は制御
+      のみ、計算は常に `BackendOps` 経由）は変更しない。`with_backend`
+      が受け取る `Box<dyn BackendOps + Send>` は引き続きトレイト
+      オブジェクトであり、明示供給の経路（CUDA／Metal 加速・テスト用
+      実装）では呼び出し元が具体型を構築して渡す。
+    - **`backend_ops.rs` への追加は provider 登録機構のみ**: `ops_for`
+      （`backend_ops.rs:171`。借用ベース・候補注入契約）は本改訂の
+      対象外であり変更しない。`set_default_ops_provider`／
+      `default_ops`（上記）を同ファイルへ追加する。
+    - **compat 層の結線が必要（第 14 波の「結線は不要」という簡素化を
+      撤回する。codex-review 第 15 波 P1-a 指摘への回答）**: 第 14 波は
+      「既定バックエンドの注入が `autodiff::Tape::new()` 自身の責務に
+      なったため、compat 層は独自の結線を必要としない」としていたが、
+      これは注入の**実体**（`backend_cpu::CpuBackendOps::new()` の
+      具体的な構築）まで `autodiff::Tape::new()` が担っていた第 14 波
+      設計に固有の帰結だった。本改訂では実体の構築を `autodiff` から
+      `tensor-core` の provider 抽象越しに行うため、**「`backend-cpu`
+      という具体クレートを知っている場所」が `autodiff` から compat 層
+      へ移る**——REQ-9 の compat 層（`autodiff`・`backend-cpu` 双方に
+      依存できる位置。9 クレート構成に compat 用クレートは現時点で
+      存在しないため、具体的な配置クレートは compat 層実装時に確定
+      する。deps-policy.md の許容依存 8 区分〈外部クレート〉の対象外
+      であり、workspace member 間の path 依存のためユーザー承認フロー
+      の対象にならない点は第 14 波の整理を踏襲する）が、初期化時に
+      `tensor_core::set_default_ops_provider(|| Box::new(backend_cpu::
+      ops::CpuBackendOps::new()))` を呼び既定 provider を登録する
+      **結線責務を持つ**（上記「登録は結線層の責務」参照）。GPU
+      バックエンド（CUDA／Metal）を明示的に使いたい場合、compat 層は
+      引き続き `Tape::with_backend` を選べる（§1「バックエンドの明示
+      選択」）。
     ```rust
     impl Tape {
         /// 既存の既定コンストラクタ（`tape.rs:154`）。シグネチャは
-        /// 変更しない（非破壊）。既定バックエンド `backend_cpu::
-        /// ops::CpuBackendOps::new()`（無条件成功のコンストラクタ）を
-        /// `self.ops` へ格納する（2026-08-08 ユーザー承認に基づく。
-        /// §6.2「`Tape::new()` が使う既定バックエンドの供給規則」）。
-        /// 以後の実行は §3.5 の 3 層の実体化境界に従い、常に融合を
-        /// 試みたうえで `ops` の per-op メソッド・`eval.rs`（層 2 限定）
-        /// へ段階的にフォールバックする——`Tape::with_backend` と完全に
-        /// 同一の実行方針であり、選択が変えるのは注入されるバック
-        /// エンドの種類のみである（§1）。
+        /// 変更しない（非破壊）。`tensor_core::default_ops()`（上記
+        /// provider 抽象）を参照し、登録済みなら結果を、未登録なら
+        /// `autodiff` 内限定フォールバック実装（上記「未登録時の
+        /// fail-safe」）を `self.ops` へ格納する（2026-08-08 ユーザー
+        /// 承認「既定バックエンドを `Device::Cpu` とすること」に基づく
+        /// 確定。承認記録は §6.2「`Tape::new()` が使う既定バックエンド
+        /// の供給規則」）。以後の実行は §3.5 の 3 層の実体化境界に従い、
+        /// 常に融合を試みたうえで `ops` の per-op メソッド・`eval.rs`
+        /// （層 2 限定）へ段階的にフォールバックする——`Tape::
+        /// with_backend` と完全に同一の実行方針であり、選択が変える
+        /// のは注入されるバックエンドの種類のみである（§1）。
         pub fn new() -> Tape {
+            let ops: Box<dyn BackendOps + Send> = tensor_core::default_ops()
+                .unwrap_or_else(|| Box::new(EagerFallbackOps));
             Tape {
                 id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),
                 nodes: RefCell::new(Vec::new()),
-                ops: Box::new(backend_cpu::CpuBackendOps::new()),
+                ops,
             }
         }
 
@@ -843,7 +1046,7 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
         /// の一環として新設する。CUDA／Metal 加速や決定的なテスト用
         /// 実装の注入に使う「バックエンドの明示選択」手段であり、
         /// `Tape::new()` と同一の融合方針を共有する（§1）。
-        pub fn with_backend(ops: Box<dyn BackendOps>) -> Tape {
+        pub fn with_backend(ops: Box<dyn BackendOps + Send>) -> Tape {
             Tape {
                 id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),
                 nodes: RefCell::new(Vec::new()),
@@ -851,6 +1054,13 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
             }
         }
     }
+
+    // `EagerFallbackOps`（`crates/autodiff` 内 `pub(crate)`、実装は
+    // #164）は上記「未登録時の fail-safe」が定める新規カーネルコードを
+    // 含まないユニット構造体。`run_fused` は常に `BackendError::
+    // Unsupported` を返し、per-op メソッドは既存の `eval.rs` 参照実装
+    // への薄い委譲に徹する。`CpuBackendOps`（`crates/backend-cpu/src/
+    // ops.rs:23`）と同型のゼロサイズ型のため `Send` が自動導出される。
     // `impl Default for Tape { fn default() -> Self { Tape::new() } }`
     // （既存実装、変更しない）は `Tape::new()` へ委譲するため、既定
     // バックエンドの注入を自動的に継承する——`Default::default()` は
@@ -1074,10 +1284,17 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
     3 バックエンド実装（CPU／CUDA／Metal）は本節追加時点で override
     不要のままコンパイルが通り（trait の破壊的変更にならない）、
     `BackendOps` を実装する既存クレート（本リポ外の実装を含む）は
-    変更不要である。`Send + Sync` は `run_fused` のシグネチャにも、
-    `Tape::with_backend` の引数型にも課さない（§3.4 冒頭「`ops` の
-    受け渡しは借用で足りる」で確定したとおり、`Storage::Pending` への
-    埋め込みという前提自体が消滅したため、この束縛はもはや不要である）。
+    変更不要である。`Sync` は `run_fused` のシグネチャにも `Tape::
+    with_backend` の引数型にも課さない（§3.4 冒頭「`ops` の受け渡しは
+    借用で足りる」で確定したとおり、`Storage::Pending` への埋め込み
+    という前提自体が消滅したため、この束縛はもはや不要である）。
+    **`Send` は `run_fused` のシグネチャには課さない（trait メソッドの
+    引数・戻り値はいずれも `Send` を要求しない）が、`Tape::
+    with_backend` の引数型は `Box<dyn BackendOps + Send>` として
+    `Send` を課す**（§1「`ops` のフィールド」・上記「`BackendOps`
+    trait 定義自体は変更しない」節で確定した `Tape: Send` 維持のための
+    trait object 型 bound。trait 定義自体へのスーパートレイト追加とは
+    別の話であることを本節でも重ねて明記する）。
 - **まとめ（codex-review 第 13 波 P1-b 指摘への回答。本改訂で最終形へ
   確定する）**: 「遅延値を保持できる `Tensor` 表現への変更」は採らない
   （`Tensor` 不変。`Storage` にも `Pending` バリアントを追加しない）。
@@ -1088,7 +1305,10 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
   グラフの所有は `FusionSession` が `graph: FusionGraph`（所有値）と
   して保持し、実体化に使う `BackendOps` 実装は `ops: &'ops dyn
   BackendOps`（借用）として保持する。`Arc`／`Mutex`／`Rc`／`RefCell`／
-  `Send + Sync` はいずれも不要である。
+  `Send + Sync` はいずれも不要である（**この「不要」は `FusionSession`
+  の借用型に限定される**。`Tape` が所有する `ops: Box<dyn BackendOps +
+  Send>` には `Send` を課す。§3.4「`BackendOps` trait 定義自体は変更
+  しない」節参照）。
   `autodiff` 側の materialize ヘルパーが呼ぶ実行経路は単一である
   （第 11〜12 波の `Executor::Core`／`Executor::Backend` の二経路分岐は
   撤回する）: **`self.ops`（`&dyn BackendOps`。§1 のとおり常に埋まって
@@ -1114,19 +1334,24 @@ with_backend` のどちらで構築した `Tape` の実行経路にも同一に�
   （実体化の発火点が §3.5.1〜3.5.4 の複数箇所に増えたことが変化点で
   あり、「フレーム」の粒度自体は変わらない）。`Tape::new()` は
   **承認済みの単一の既定バックエンド（`backend-cpu` の
-  `CpuBackendOps`）を構造的に必ずハードコードする**（§1・§6.2）。
-  これは `docs/public-api-design.md` §4.1 が定める `Device::
-  available()` に基づく選択ロジックの実装ではない——`Tape::new()` は
-  デバイスを列挙・比較して選ぶのではなく、承認済みの単一の既定を
-  無条件に注入するだけであり、§4.1 が現在も未決事項として残す
+  `CpuBackendOps`）を、`tensor-core` の provider 抽象
+  （`tensor_core::default_ops()`。§1「既定バックエンドの供給元を
+  `tensor-core` の provider 抽象へ移す」）経由で構造的に必ず解決する**
+  （§1・§6.2）。これは `docs/public-api-design.md` §4.1 が定める
+  `Device::available()` に基づく選択ロジックの実装ではない——`Tape::
+  new()` はデバイスを列挙・比較して選ぶのではなく、承認済みの単一の
+  既定を無条件に解決するだけであり、§4.1 が現在も未決事項として残す
   「CUDA を既定で有効化するかどうかの選択ロジック」とは別の論点で
   ある（§6.2 参照）。CPU 融合実行の提供元は `backend-cpu`（§2.5
   「`autodiff` 側の役割」・§3.4「CPU 融合実行の提供元は
-  `backend-cpu`」）であり、`autodiff::Tape::new()` 自身がこれを注入
-  するため、`Tape::new()` を呼ぶすべての経路（REQ-9 の compat 層を
-  含む・含まないいずれも）に融合が常時・透過的に効く（§1）。GPU
-  バックエンド（CUDA／Metal）を既定として使う規則は本文書では確定
-  しない（§6.2 に未決事項として残す）。
+  `backend-cpu`」）であり、REQ-9 の compat 層が `tensor_core::
+  set_default_ops_provider` を通じてこれを既定 provider として登録
+  するため、`Tape::new()` を呼ぶすべての経路（compat 層を含む）に
+  融合が常時・透過的に効く（§1「登録は結線層の責務」）。compat 層を
+  経由しない内部的状況（未登録時）は §1「未登録時の fail-safe」が
+  定める `autodiff` 内限定フォールバックへ倒れる。GPU バックエンド
+  （CUDA／Metal）を既定として使う規則は本文書では確定しない（§6.2 に
+  未決事項として残す）。
   外部 backend（`backend-cpu`／`backend-cuda`／`backend-metal`）が
   `run_fused` 内で融合グラフの演算内容を読み取る手段も本改訂で確定
   した: `FusionPlan` は `pub`（フィールド非公開）の不透明ハンドルとし、
@@ -1589,11 +1814,12 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
   に**実際に `run_fused` が呼ばれバックエンド加速が発生する経路自体を
   観測・検証したいテスト**は、`run_fused` を融合実装（またはカウンタ
   付きテスト用実装）でオーバーライドした `BackendOps` を `Tape::
-  with_backend` で明示供給する必要がある（既定の `Tape::new()` が
-  注入する `backend-cpu` の `CpuBackendOps` 実装がどう `run_fused` を
-  実装するかは `backend-cpu` 側の担当範囲であり、テストが要求する
-  観測点〈カウンタ等〉を持つとは限らない）ことで、加速の発生有無自体
-  を固定する必要がある（§6.2 に記録する）。
+  with_backend` で明示供給する必要がある（出荷経路で `Tape::new()` が
+  `tensor_core::default_ops()` 経由で解決する既定の `backend-cpu` の
+  `CpuBackendOps` 実装がどう `run_fused` を実装するかは `backend-cpu`
+  側の担当範囲であり、テストが要求する観測点〈カウンタ等〉を持つとは
+  限らない）ことで、加速の発生有無自体を固定する必要がある（§6.2 に
+  記録する）。
 
 ## 4. バックエンド・規約との契約
 
@@ -1663,25 +1889,31 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
 |---|---|
 | #162（連鎖検出） | §2（グラフ表現・ノード種別・メタデータ・fan-out）を用いた融合可能連鎖（elementwise のみで閉じた 4〜6 段の連結成分）の検出アルゴリズム |
 | #163（融合カーネル生成） | §2.4 の fan-out レジスタ内解決方針、§3.4 で確定した `FusionPlan::ops`（`FusedOpKind` 列挙）／`output_shape`／`dtype`／`leaf_count`／`use_count` の公開 DTO アクセサを読んだカーネルソース生成、§4・§5 の境界検査・数値一致・インジェクション対策 |
-| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針（第 14 波改訂: 単一の公開構築経路への統合。「compat 層が REQ-12 の『利用者』面を担う」という第 13 波までの範囲限定は撤回する）・「二項 elementwise 演算の遅延化」契約（codex-review 第 6・13・14 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Send + Sync` 不要）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `ops: Box<dyn BackendOps>`（第 10・13・14 波 P1 指摘への回答。`Executor` enum・`Option<Box<dyn BackendOps>>` はいずれも撤回済み。必須所有値へ統合）と、既定バックエンド（`backend_cpu::CpuBackendOps::new()`）を注入する `Tape::new()`（既存シグネチャのまま非破壊）・バックエンドを明示供給する新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps>)` の実装（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。**CPU 融合実行（fail-safe な参照実装を含む）は `backend-cpu` 側の `BackendOps` 実装（`run_fused` オーバーライド）として提供し、`crates/autodiff` 内に新規カーネル実装を持たない**（codex-review 第 13 波 P1-b 指摘への回答。第 11〜12 波の「コア融合実行器」〈`fusion_exec.rs`／`run_core_fused`／`UnaryFusedOp`〉・`eval.rs` の `unary`／`nan_propagating_max` の可視性変更はいずれも撤回する。`eval.rs` は非公開のまま変更せず、層 2 の最終手段フォールバックにのみ用いる）。`tensor-core` の `backend_ops.rs`（`ops_for` を含む）は変更しない。**`crates/autodiff/Cargo.toml` へ `backend-cpu = { path = "../backend-cpu" }` を追加する**（第 9 波 P1 指摘が確定し第 13 波まで維持していた「`autodiff → backend-cpu` の workspace path 依存は追加しない」という契約を、第 14 波 P1 指摘を受けた本改訂で撤回する。§3.4「`autodiff → backend-cpu` の workspace path 依存を追加する」参照。deps-policy.md の許容依存 8 区分の対象外・ユーザー承認フロー対象外の workspace member 間 path 依存であり、`backend-cpu` は `autodiff` へ依存しないため循環は生じない）。**compat 層（REQ-9）の結線は不要**（第 13 波の「compat 層が `Tape` 構築時に `backend-cpu` の `BackendOps` を注入し `Tape::with_backend` を使う」設計は撤回する。compat 層は `autodiff::Tape::new()` をそのまま使えばよい。`docs/public-api-design.md` §4.1 の改訂と対を成す）。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`add`／`mul`／`relu`／`exp`／`tanh` が常に遅延グラフを延長し `matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装。§3.5.2（層 1・fallible 境界。入力読み出しは `Var::value()` を呼ばず専用の `materialize_fallible`〈`pub(crate)`。`run_fused` の失敗のうち `BackendError::Unsupported` のみ `ops` の per-op メソッドへフォールバックし〈それも失敗すれば型付き `AutodiffError::Backend` のまま `?` で伝播する〉、`Unsupported` 以外は最初から per-op メソッドへのフォールバックを試みず型付き `AutodiffError::Backend` のまま `?` で伝播する〉のみを経由する）・§3.5.3（層 2・非 fallible 境界。`materialize_non_fallible` を経由し、融合失敗はエラー種別を問わず `ops` の per-op メソッドへの逐次フォールバックで、それも失敗した場合は `eval.rs` を最終手段として、必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`〈unstable〉は使わない）・§3.5.4（連鎖長上限との相互作用。`add`／`mul` が上限到達時に自身を実体化する場合は層 1 の失敗伝播規約も併せ持つ）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。§3.5.2 の `materialize_fallible` における `OnceCell::set` の `Err`（二重設定。fan-out に伴う二重到達）は `panic!`／`unreachable!()` を使わず通常分岐として扱い、`get()` で読み直した既存値を採用する（`None` 到達時は `AutodiffError::Backward` へ安全側フォールする）。**既存テスト資産（TASK-1.5〜1.8）の再検証**: `Tape::new()` が eager から常時融合実行（既定 `backend-cpu` 経由）へ変わることに伴い、既存テストが §4 の数値一致複合判定を満たすことを再検証する（許容誤差の緩和はユーザー承認必須。`.claude/rules/coding-rust.md`「テスト・ベンチ」）。 |
-| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「単一の公開構築経路への統合」の検証**（`Tape::new()`〈既定バックエンド `backend-cpu`〉・`Tape::with_backend(ops)`〈明示供給バックエンド〉のいずれで構築した `Tape` でも、演算列が §3.2 の判定を満たす限り融合が試みられること〈`run_fused` を融合実装でオーバーライドしたカウンタ付きテスト用 `BackendOps` を `Tape::with_backend` に渡して検証する〉、両者の数値結果が数値一致複合判定〈§4〉を満たすこと、`run_fused` が実際に呼ばれたことをカウンタで確認すること、`Tape::new()` を直接呼ぶ経路・compat 層経由で構築した `Tape` のいずれも利用者の明示指定なしに融合されること〈両者とも同一の融合方針を持つことの確認〉、非融合の数値基準が必要なテストは `run_fused` が常に `BackendError::Unsupported` を返す〈またはさらに per-op メソッドも失敗する〉テスト用 `BackendOps` を `Tape::with_backend` へ注入して基準を固定すること〈`ops: None` という非融合コンストラクタは存在しないため、この基準固定手段を正規の代替として文書化する〉を検証する）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6・8・13 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `add`／`mul`／`relu`／`exp`／`tanh` の混在連鎖（例: `x.add(&y)?.relu().mul(&z)?.exp().tanh()`。二項・単項混在の 4〜6 段）が単一の評価呼び出しへ融合されること（`run_fused` の呼び出し回数が 1 回だけであることを確認する。`run_fused` が `Unsupported` を返す設定では `ops` の per-op メソッドへのフォールバック結果が、`run_fused` が常に `Unsupported` を返すよう固定した非融合基準〈上記〉と同一入力に対し数値一致複合判定〈§4〉を満たす値を返すことも検証する）、(i') **shape エラーが記録時に当該演算の `Err` として即時返ること（実行は遅延済みのまま）**: 不正な shape の `add`／`mul` 呼び出しがその場で `Err(AutodiffError::Shape(_))` を返し、テープにノードが記録されないこと（§1「shape 検証と実行を分離する」の検証）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗の種別ごとの分岐: (ii-a) `run_fused` が `BackendError::Unsupported` を返した場合は `ops` の per-op メソッドへフォールバックし、後続の `matmul`／`sum`／`max` が `Ok` を返すこと（値は数値一致複合判定〈§4〉を満たす）、(ii-b) `run_fused` が `Unsupported` 以外の `Err` を返した場合は、それを引き起こした後続の演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時（エラー種別を問わない）、`Var::value`／`Var::to_tensor` が `panic!` せず、`ops` の per-op メソッド（それも失敗する設定では `eval.rs` の最終手段）へのフォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、`Unsupported` 以外の失敗では `Tape::backward` が `AutodiffError::Backend` を返すこと、`Unsupported` の場合は `ops` の per-op メソッドへのフォールバックにより成功すること、per-op メソッドが構造的に成功する既定の `backend-cpu` を使う場合は常に成功すること、成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも遅延グラフがその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out・fan-in（`(a+b)*(c+d)` 形の合流。§3.5.1「走査順」の DAG 一般化）が単一の融合グラフ構築で正しく解決されることの検証、(viii) **TASK-1.5〜1.8 の既存テスト資産が `Tape::new()` の実行経路変更後も §4 の数値一致複合判定を満たすことの回帰確認**（#164 の再検証をテストとして固定する） |
+| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針（第 14 波改訂: 単一の公開構築経路への統合。「compat 層が REQ-12 の『利用者』面を担う」という第 13 波までの範囲限定は撤回する）・「二項 elementwise 演算の遅延化」契約（codex-review 第 6・13・14 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Sync` 不要）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `ops: Box<dyn BackendOps + Send>`（第 10・13・14・15 波 P1 指摘への回答。`Executor` enum・`Option<Box<dyn BackendOps>>` はいずれも撤回済み。必須所有値へ統合。`+ Send` は `Tape: Send` 維持のための trait object bound）と、既定バックエンドを `tensor_core::default_ops()`（下記の provider 抽象）経由で解決する `Tape::new()`（既存シグネチャのまま非破壊）・バックエンドを明示供給する新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps + Send>)` の実装（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。**`tensor-core` に既定バックエンド provider 登録機構を新設する（codex-review 第 15 波 P1-a 指摘への回答。第 14 波が `autodiff` に直接持ち込んだ `backend-cpu` への workspace path 依存を撤回し置き換える）**: `crates/tensor-core/src/backend_ops.rs` へ `set_default_ops_provider(provider: fn() -> Box<dyn BackendOps + Send>) -> bool`（`OnceLock` ベース・一度だけ登録可・具体クレート非参照）・`default_ops() -> Option<Box<dyn BackendOps + Send>>` を追加する（§1「既定バックエンドの供給元を `tensor-core` の provider 抽象へ移す」のコード例を正本として実装する）。`tensor-core` の `backend_ops.rs`（`ops_for` を含む既存部分）は変更しない。**`crates/autodiff/Cargo.toml` へ `backend-cpu` を追加しない**（第 9 波 P1 指摘が確定した「`autodiff → backend-cpu` の workspace path 依存は追加しない」という契約を、第 14 波の一時的な撤回を経て本改訂で再確定する。`autodiff` は `tensor-core` の provider 抽象のみに依存する）。`Tape::new()` は `tensor_core::default_ops()` を参照し、未登録の場合は `autodiff` 内限定の `EagerFallbackOps`（新設、新規カーネルコードを持たないユニット構造体。`run_fused` は常に `Unsupported`、per-op メソッドは `eval.rs` への薄い委譲）へフォールバックする（§1「未登録時の fail-safe」）。**compat 層（REQ-9）の結線が必要**（第 14 波の「compat 層の結線は不要」という設計は撤回する。compat 層は初期化時に `tensor_core::set_default_ops_provider(|| Box::new(backend_cpu::ops::CpuBackendOps::new()))` を呼び、既定 provider を登録する結線責務を持つ。冪等な `ensure_default_backend_registered()` を compat 層の各公開エントリ関数の先頭で呼ぶ実装とする。`docs/public-api-design.md` §4.1 の改訂と対を成す）。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`add`／`mul`／`relu`／`exp`／`tanh` が常に遅延グラフを延長し `matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装。§3.5.2（層 1・fallible 境界。入力読み出しは `Var::value()` を呼ばず専用の `materialize_fallible`〈`pub(crate)`。`run_fused` の失敗のうち `BackendError::Unsupported` のみ `ops` の per-op メソッドへフォールバックし〈それも失敗すれば型付き `AutodiffError::Backend` のまま `?` で伝播する〉、`Unsupported` 以外は最初から per-op メソッドへのフォールバックを試みず型付き `AutodiffError::Backend` のまま `?` で伝播する〉のみを経由する）・§3.5.3（層 2・非 fallible 境界。`materialize_non_fallible` を経由し、融合失敗はエラー種別を問わず `ops` の per-op メソッドへの逐次フォールバックで、それも失敗した場合は `eval.rs` を最終手段として、必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`〈unstable〉は使わない）・§3.5.4（連鎖長上限との相互作用。`add`／`mul` が上限到達時に自身を実体化する場合は層 1 の失敗伝播規約も併せ持つ）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。§3.5.2 の `materialize_fallible` における `OnceCell::set` の `Err`（二重設定。fan-out に伴う二重到達）は `panic!`／`unreachable!()` を使わず通常分岐として扱い、`get()` で読み直した既存値を採用する（`None` 到達時は `AutodiffError::Backward` へ安全側フォールする）。**既存テスト資産（TASK-1.5〜1.8）の再検証**: `Tape::new()` が eager から常時融合実行（既定 `backend-cpu` 経由）へ変わることに伴い、既存テストが §4 の数値一致複合判定を満たすことを再検証する（許容誤差の緩和はユーザー承認必須。`.claude/rules/coding-rust.md`「テスト・ベンチ」）。**`Tape: Send` の静的アサーション**: `fn assert_send<T: Send>() {}` 等で `Tape: Send` をコンパイル時に固定するテストを追加する（§1「`Tape: Send` を維持する」の帰結の検証。§6.1 #165 参照）。 |
+| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「単一の公開構築経路への統合」の検証**（`Tape::new()`〈既定バックエンド `backend-cpu`〉・`Tape::with_backend(ops)`〈明示供給バックエンド〉のいずれで構築した `Tape` でも、演算列が §3.2 の判定を満たす限り融合が試みられること〈`run_fused` を融合実装でオーバーライドしたカウンタ付きテスト用 `BackendOps` を `Tape::with_backend` に渡して検証する〉、両者の数値結果が数値一致複合判定〈§4〉を満たすこと、`run_fused` が実際に呼ばれたことをカウンタで確認すること、`Tape::new()` を直接呼ぶ経路・compat 層経由で構築した `Tape` のいずれも利用者の明示指定なしに融合されること〈両者とも同一の融合方針を持つことの確認〉、非融合の数値基準が必要なテストは `run_fused` が常に `BackendError::Unsupported` を返す〈またはさらに per-op メソッドも失敗する〉テスト用 `BackendOps` を `Tape::with_backend` へ注入して基準を固定すること〈`ops: None` という非融合コンストラクタは存在しないため、この基準固定手段を正規の代替として文書化する〉を検証する）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6・8・13 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `add`／`mul`／`relu`／`exp`／`tanh` の混在連鎖（例: `x.add(&y)?.relu().mul(&z)?.exp().tanh()`。二項・単項混在の 4〜6 段）が単一の評価呼び出しへ融合されること（`run_fused` の呼び出し回数が 1 回だけであることを確認する。`run_fused` が `Unsupported` を返す設定では `ops` の per-op メソッドへのフォールバック結果が、`run_fused` が常に `Unsupported` を返すよう固定した非融合基準〈上記〉と同一入力に対し数値一致複合判定〈§4〉を満たす値を返すことも検証する）、(i') **shape エラーが記録時に当該演算の `Err` として即時返ること（実行は遅延済みのまま）**: 不正な shape の `add`／`mul` 呼び出しがその場で `Err(AutodiffError::Shape(_))` を返し、テープにノードが記録されないこと（§1「shape 検証と実行を分離する」の検証）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗の種別ごとの分岐: (ii-a) `run_fused` が `BackendError::Unsupported` を返した場合は `ops` の per-op メソッドへフォールバックし、後続の `matmul`／`sum`／`max` が `Ok` を返すこと（値は数値一致複合判定〈§4〉を満たす）、(ii-b) `run_fused` が `Unsupported` 以外の `Err` を返した場合は、それを引き起こした後続の演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時（エラー種別を問わない）、`Var::value`／`Var::to_tensor` が `panic!` せず、`ops` の per-op メソッド（それも失敗する設定では `eval.rs` の最終手段）へのフォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、`Unsupported` 以外の失敗では `Tape::backward` が `AutodiffError::Backend` を返すこと、`Unsupported` の場合は `ops` の per-op メソッドへのフォールバックにより成功すること、per-op メソッドが構造的に成功する既定の `backend-cpu` を使う場合は常に成功すること、成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも遅延グラフがその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out・fan-in（`(a+b)*(c+d)` 形の合流。§3.5.1「走査順」の DAG 一般化）が単一の融合グラフ構築で正しく解決されることの検証、(viii) **TASK-1.5〜1.8 の既存テスト資産が `Tape::new()` の実行経路変更後も §4 の数値一致複合判定を満たすことの回帰確認**（#164 の再検証をテストとして固定する）、(ix) **`tensor-core` の provider 抽象の検証（codex-review 第 15 波 P1-a 指摘への回答）**: `set_default_ops_provider` 未登録状態で `Tape::new()` を呼んだ場合に `EagerFallbackOps`（§1「未登録時の fail-safe」）へフォールバックし、`run_fused` を試みず（呼び出し回数 0）per-op メソッド経由で正しい値を返すこと、`set_default_ops_provider` を呼んだ後は `default_ops()` が登録した provider の生成結果を返すこと、2 回目の `set_default_ops_provider` 呼び出しが `panic!` せず `false` を返すこと（`OnceLock` の一度だけ登録可の契約）、(x) **`Tape: Send` の静的アサーション**（§1「`Tape: Send` を維持する」の検証。`fn assert_send<T: Send>() {}` に `Tape` を渡すコンパイル時テストを追加し、`Tape::new()`・`Tape::with_backend`（`CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps` いずれを渡す場合でも）で構築した `Tape` が `Send` を満たすことを固定する） |
 | #203（GEMM epilogue 融合） | §3.2 (b) の `gemm` 境界を bias／activation epilogue まで拡張する設計変更 |
 
 ### 6.2 未決事項（スコープ外）
 
 - **`Tape::new()` が使う既定バックエンドの供給規則
-  （承認記録を含む。codex-review 第 8・10・13・14 波 P1 指摘への回答）**:
+  （承認記録を含む。codex-review 第 8・10・13・14・15 波 P1 指摘への
+  回答）**:
   - **承認記録（承認内容と本改訂の結論を分けて記録する）**: 2026-08-08、
     AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンド
     を `Device::Cpu`（`backend-cpu` 実装）とすること」である（この
-    一文は過去の波から変更しない）。**本改訂（第 14 波 P1 指摘への
+    一文は過去の波から変更しない）。**本改訂（第 15 波 P1-a 指摘への
     回答）の結論**（この承認に基づき本文書が導出した具体的な結線）は、
-    「`autodiff::Tape::new()` 自身が既定で `backend-cpu` の
-    `CpuBackendOps` を注入する（`ops` フィールドへ格納する）」という
-    ものである——承認は「既定バックエンドを CPU にする」という結論を
-    与え、本改訂はその結論を「`autodiff` クレート自身の既定コンスト
-    ラクタが担う」という結線の形に落とし込んだ（第 11〜14 波の設計
-    変遷を経て到達した形。経緯は下記）。記録場所は本文書（本エントリ）
+    「`autodiff::Tape::new()` が `tensor_core::default_ops()`（新設の
+    provider 抽象。§1「既定バックエンドの供給元を `tensor-core` の
+    provider 抽象へ移す」）を参照して既定バックエンドを解決し、その
+    provider に `backend-cpu` の `CpuBackendOps` を登録する結線責務は
+    REQ-9 の compat 層が持つ」というものである——承認は「既定バック
+    エンドを CPU にする」という結論を与え、本改訂はその結論を「`ops`
+    フィールドが常に埋まっている（`autodiff::Tape::new()` を呼べば
+    常に CPU 融合が効く）」という**観測面の契約**として維持しつつ、
+    「どのクレートが `backend-cpu` という具体クレートを知るか」という
+    **結線の実装場所**を compat 層へ戻す（第 11〜15 波の設計変遷を
+    経て到達した形。経緯は下記）。記録場所は本文書（本エントリ）
     および `docs/public-api-design.md` §4.1（後述の改訂。同文書側も
     承認内容と本改訂の結論を分けて記載する）。**GPU バックエンド
     （CUDA／Metal）を既定として使う規則はこの承認の対象外**であり、
@@ -1699,31 +1931,47 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
     `autodiff` 単体ではない）の責務として再配置した——これにより
     `autodiff::Tape::new()` は `ops: None`（eager・非融合）のまま
     据え置かれ、既定バックエンドの注入は compat 層が `Tape::
-    with_backend` を呼ぶことで行う設計だった。**しかし codex-review
-    第 14 波 P1 指摘は、この第 13 波の設計自体が「`Tape::new()`
-    （非融合）と `Tape::with_backend(ops)`（融合）の選択」という
-    構造を `autodiff` の公開 API に残し続けており、REQ-12「利用者向け
-    融合制御 API を提供しない」に抵触することを指摘した**。本改訂は
-    これを受け、既定バックエンドの注入責務を compat 層から
-    `autodiff::Tape::new()` 自身へ一段引き下げる。**`ops` フィールドも
-    `Option<Box<dyn BackendOps>>` から必須所有値 `Box<dyn BackendOps>`
-    へ変更し**（§1・§3.4）、`Tape::new()`／`Tape::with_backend` の
-    どちらで構築しても同一の融合方針（常に融合を試みる）を持つよう
-    統合した。**この結果、2026-08-08 の承認が対象としていた
-    「`backend-cpu` の `BackendOps` を既定で注入する」という結線は、
-    第 13 波が想定した compat 層ではなく `autodiff::Tape::new()`
-    自身が行使する**（承認は無効化されたのではなく、適用層を再度
-    訂正したうえで行使する）。
+    with_backend` を呼ぶことで行う設計だった。codex-review 第 14 波
+    P1 指摘は、この第 13 波の設計自体が「`Tape::new()`（非融合）と
+    `Tape::with_backend(ops)`（融合）の選択」という構造を `autodiff`
+    の公開 API に残し続けており、REQ-12「利用者向け融合制御 API を
+    提供しない」に抵触することを指摘した。第 14 波はこれを受け、
+    既定バックエンドの注入責務を compat 層から `autodiff::Tape::
+    new()` 自身へ一段引き下げ、`ops` フィールドを `Option<Box<dyn
+    BackendOps>>` から必須所有値 `Box<dyn BackendOps>` へ変更した——
+    ここまでは本改訂でも維持する到達点である。**しかし第 14 波は
+    この引き下げの実装手段として `Tape::new()` 内で `backend_cpu::
+    CpuBackendOps::new()` を直接構築し `crates/autodiff/Cargo.toml`
+    へ `backend-cpu` への workspace path 依存を追加していた。
+    codex-review 第 15 波 P1-a 指摘は、この実装手段が `device.rs`・
+    `backend_ops.rs` が確立済みの依存逆転構成（trait を `tensor-core`
+    に置き `backend-*` が実装する。§2.5「配置」）と非対称な例外を
+    `autodiff` に持ち込んでおり、「注入責務を `Tape::new()` が持つ
+    こと」と「`autodiff` が `backend-cpu` を直接知ること」は独立で
+    あり後者は不要だったと指摘した**。本改訂はこれを受け、**注入
+    責務は `autodiff::Tape::new()` に残したまま（第 14 波の到達点は
+    維持）、具体クレートの構築だけを `tensor-core` の provider 抽象
+    経由へ委譲する**——`autodiff` は具体クレートを知らないまま、
+    provider が返す `Box<dyn BackendOps + Send>` を `ops` へ格納する
+    だけでよい。**この結果、2026-08-08 の承認が対象としていた
+    「`backend-cpu` の `BackendOps` を既定で注入する」という結線の
+    実装者は、`autodiff::Tape::new()`（第 13 波の想定）でも
+    `autodiff` 自身が `backend-cpu` を直接知る形（第 14 波の想定）
+    でもなく、`tensor_core::set_default_ops_provider` を呼ぶ compat
+    層になる**（承認は無効化されたのではなく、適用層を再度訂正した
+    うえで行使する。承認が固定するのは「既定は CPU」という結論のみ
+    であり、結線の実装場所はこの結論から一意に定まらない）。
   - **本改訂後の帰結**: `autodiff::Tape::new()` は承認済みの単一の
-    既定バックエンド（`backend-cpu` の `CpuBackendOps`）を**構造的に
-    必ず**注入する。これは `docs/public-api-design.md` §4.1 が定める
-    `Device::available()` に基づく既定デバイス選択ロジック（複数の
-    候補から動的に選ぶロジック）の実装ではない——`Tape::new()` は
-    デバイスを列挙・比較して選ぶのではなく、承認済みの単一の既定を
-    無条件にハードコードするだけであり、§4.1 の既定デバイス選択
-    ロジック不採用方針とは交差しない（§1・§3.4 参照）。`Tape::new()`
-    を呼ぶすべての経路（REQ-9 の compat 層を含む・含まないいずれも）
-    に CPU 上での融合が既定で・透過的に効く。
+    既定バックエンド（`backend-cpu` の `CpuBackendOps`）を、`tensor_
+    core::default_ops()` 経由で**構造的に必ず**解決する（compat 層が
+    出荷経路で常に登録するため。§1「登録は結線層の責務」）。これは
+    `docs/public-api-design.md` §4.1 が定める `Device::available()`
+    に基づく既定デバイス選択ロジック（複数の候補から動的に選ぶ
+    ロジック）の実装ではない——`Tape::new()` はデバイスを列挙・比較
+    して選ぶのではなく、承認済みの単一の既定を無条件に解決するだけ
+    であり、§4.1 の既定デバイス選択ロジック不採用方針とは交差しない
+    （§1・§3.4 参照）。`Tape::new()` を呼ぶすべての経路（REQ-9 の
+    compat 層を含む）に CPU 上での融合が既定で・透過的に効く。
   - **未決事項として残る部分**: **CUDA／Metal をバックエンド加速として
     既定にする規則は本文書では確定しない**（承認対象外。理由は引き
     続き 2 点: (i) `docs/public-api-design.md` §4.1「既定デバイス選択
@@ -1733,25 +1981,31 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
     加速の既定供給規則の確定には REQ-2 の 27 組再検証後の別途ユーザー
     承認が必要）。GPU 加速バックエンドの既定供給規則の確定は #164
     以降、ユーザー承認を得たうえで別途検討する。
-- **`backend-cpu` の最適化実装の結線層（codex-review 第 9・13・14 波
-  P1 指摘への回答）**: 第 9 波は「CPU 候補を `ops_for` へ注入する結線
-  機構・担当層」を未決事項として記録していた。第 13 波はこの結線層を
-  compat 層として確定していたが、**本改訂（第 14 波 P1 指摘への回答）
-  はこの結線層を `autodiff::Tape::new()` 自身へ変更する**——第 11〜12
-  波が検討していた「`autodiff` 内で完結する既定実行器」案（結線層が
-  既定パスには不要になるという想定）とは異なり、本改訂は「`autodiff`
-  が計算そのものを実装する」のではなく「`autodiff` の既定コンスト
-  ラクタが `backend-cpu` という具体クレートへの依存を持ち、既定
-  インスタンスを構築するだけ」という限定的な結線である（§2.5
-  「`autodiff` 側の役割」は変更しない。計算は常に `BackendOps` 経由）。
-  **`crates/autodiff` は `backend-cpu` への workspace path 依存を持つ**
-  （codex-review 第 9 波 P1 指摘が確定し第 13 波まで維持していた
-  「`autodiff → backend-cpu` の workspace path 依存は追加しない」と
-  いう契約を、本改訂で撤回する。撤回の理由は §3.4「`autodiff →
-  backend-cpu` の workspace path 依存を追加する」参照）。compat
-  クレート（または compat を実装するクレート）は独自の結線を必要と
-  せず、`autodiff::Tape::new()` をそのまま使えばよい（§3.4「compat
-  層の結線は不要」）。
+- **`backend-cpu` の最適化実装の結線層（codex-review 第 9・13・14・15
+  波 P1 指摘への回答。第 15 波でこの結線層の問いに最終的な回答を与える）**:
+  第 9 波は「CPU 候補を `ops_for` へ注入する結線機構・担当層」を未決
+  事項として記録していた。第 13 波はこの結線層を compat 層として確定
+  し、第 14 波は「`autodiff` の既定コンストラクタが `backend-cpu` と
+  いう具体クレートへの依存を持ち、既定インスタンスを構築する」という
+  限定的な結線へ変更したが、これは §2.5「配置」の依存逆転構成と
+  非対称だった（上記「経緯」参照）。**本改訂（第 15 波 P1-a 指摘への
+  回答）は結線層を compat 層へ戻す**——ただし第 13 波と全く同じ形には
+  戻さない。第 13 波は「compat 層が `Tape::with_backend` を呼んで
+  注入する」（＝ `Tape::new()` は非融合のまま）という設計だったが、
+  本改訂は「compat 層が `tensor_core::set_default_ops_provider` を
+  呼んで**登録**し、`autodiff::Tape::new()` 自身が `default_ops()` を
+  参照して**解決**する」という設計であり、`Tape::new()` は融合方針
+  そのものを変えない（第 14 波の到達点をそのまま維持する。§1「単一の
+  公開構築経路への統合」）。**`crates/autodiff` は `backend-cpu` への
+  workspace path 依存を持たない**（codex-review 第 9 波 P1 指摘が
+  確定した契約を、第 14 波の一時的な撤回を経て本改訂で再確定する。
+  再確定の理由は §3.4「`autodiff → backend-cpu` の workspace path
+  依存は追加しない」参照）。REQ-9 の compat 層（9 クレート構成に compat
+  用クレートは現時点で存在しないため、具体的な配置クレートは compat
+  層実装時に確定する）は、初期化時に `tensor_core::
+  set_default_ops_provider(|| Box::new(backend_cpu::ops::
+  CpuBackendOps::new()))` を呼ぶ結線責務を持つ（§3.4「compat 層の
+  結線が必要」）。
 - **transpose 混在連鎖のメタデータ融合**: §1・§2.3 のとおり初期スコープ
   では transpose 検出時に非融合フォールバックへ倒すため、v1 fusion 有効
   時の性能水準（PoC-9 `ew_reshape` 実測で最大 13.89 倍差）は初期スコープ
