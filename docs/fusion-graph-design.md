@@ -944,10 +944,27 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 ### 3.5.2 層 1（fallible 境界）: 後続の fallible `Var` 演算・`Tape::backward` の VJP 連鎖内部
 
 - **後続の fallible `Var` 演算**（`add`／`mul`／`matmul`／`sum`／`max`）
-  が入力側の値（`self.value()`／`other.value()`）を読む際、その入力の
-  `TapeNode.value` が未実体化であれば、この読み出しの内部で実体化を
-  行う。実体化は次の手順で行う（`autodiff` クレート内の
-  `pub(crate)` ヘルパー。実装は #164）:
+  および `Tape::backward` の VJP 連鎖内部は、入力側の値を読む際に
+  `Var::value()`（層 2・非 fallible・実体化失敗を CPU フォールバックで
+  必ず吸収する API。§3.5.3）を**呼ばない**。かわりに専用の内部経路
+  `materialize_fallible`（`autodiff` クレート内の `pub(crate)` フリー
+  関数。`tape.rs` に実装。§3.5.3 の `materialize_non_fallible` と同じ
+  借用規律に合わせ、`nodes.borrow()` で得た共有借用の中身をそのまま
+  受け取るシグネチャとする）を**必ず**使用する契約とする:
+  ```rust
+  fn materialize_fallible<'a>(
+      nodes: &'a [TapeNode],
+      ops: Option<&dyn BackendOps>,
+      id: NodeId,
+  ) -> Result<&'a Tensor<f32>, AutodiffError> { .. }
+  ```
+  `value()` とは別関数であり、`run_fused` の失敗を CPU フォールバック
+  で吸収せず型付きエラーのまま呼び出し元へ返す（実装は #164。
+  codex-review 第 7 波 P1 指摘への回答: `value()` 経由では層 1 が
+  要求する `AutodiffError::Backend` の直接伝播に構造的に到達できない
+  ため、読み出し経路を層ごとに分離する）。この経路は対象の
+  `TapeNode.value` が未実体化であれば、その場で実体化を行う。手順は
+  次のとおり:
   1. 未実体化ノードから入力方向へ、`OnceCell` が埋まっているノードまで
      辿り、間に挟まる `relu`／`exp`／`tanh` の連続列を `FusedOpKind`
      （§3.4）へ変換する（`Op::Relu`/`Exp`/`Tanh` と `FusedOpKind::Relu`/
@@ -956,20 +973,27 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
      §3.4）が `Some(ops)` であれば、`FusionPlan::from_ops`（§3.4。
      `pub` + `#[doc(hidden)]`）で `FusionPlan` を構築し
      `ops.run_fused(&plan, &[&base])` を試す。
-  3. `run_fused` が `Ok` を返せば、または `self.ops` が `None`／
-     `run_fused` が `Err` を返せば、連鎖の各ノードを発生順
-     （§3.5.1「走査順」）に既存の `eval::relu`／`exp`／`tanh` へ
-     1 段ずつ逐次フォールバックする（§4 の fail-safe 方針。CPU
-     参照実装は構造的に失敗しない。§3.5.3 参照）。
-  4. `run_fused` が `Ok` 以外を返し、かつこの呼び出しが「後続の
-     fallible `Var` 演算」の内部（本節）である場合は、**フォール
-     バックせず** `Err(BackendError)` をそのまま
-     `AutodiffError::Backend(BackendError)` へ変換して呼び出し元へ
-     `?` で伝播する。すなわち **層 1 では `run_fused` の失敗は
-     フォールバックしない**（層 2〈§3.5.3〉との違い）。手順 3 の
-     フォールバックは「`run_fused` を試みず `self.ops` が `None`」
-     の場合、または「上限到達時にその場で実体化する必要がある
-     （§3.5.4）が呼び出し元が非 fallible」の場合にのみ適用される。
+  3. `run_fused` が `Ok` を返せば、その融合結果をそのまま実体化値
+     として用いる。`self.ops` が `None`（`run_fused` を試みていない）
+     であれば、連鎖の各ノードを発生順（§3.5.1「走査順」）に既存の
+     `eval::relu`／`exp`／`tanh` へ 1 段ずつ逐次フォールバックする
+     （§4 の fail-safe 方針。CPU 参照実装は構造的に失敗しない。
+     §3.5.3 参照）。**この手順に「`run_fused` が `Err` を返した場合」
+     は含まない**（`Err` の扱いは手順 4 が定める）。
+  4. `run_fused` が `Err` を返した場合、**フォールバックせず**
+     `Err(BackendError)` をそのまま
+     `AutodiffError::Backend(BackendError)` へ変換して
+     `materialize_fallible` の戻り値として呼び出し元へ `?` で伝播
+     する。すなわち **層 1（`materialize_fallible` の内部）では
+     `run_fused` の失敗はフォールバックしない**（層 2〈§3.5.3〉との
+     違い。手順 3・手順 4 は互いに排他な `run_fused` の結果（`Ok`・
+     `None` を試みていない・`Err`）に対応しており矛盾しない）。
+     手順 3 のフォールバックが適用されるのは「`run_fused` を試みず
+     `self.ops` が `None`」の場合のみである（`materialize_fallible`
+     はこの手順 4 のとおり `Err` を非フォールバックで伝播する非
+     フォールバック API であり、「呼び出し元が非 fallible」の場合の
+     取り扱い〈連鎖長上限到達時の層 2 側フォールバック〉は
+     `materialize_fallible` の対象外であり §3.5.3・§3.5.4 が定める）。
   実体化が完了した各ノードの `OnceCell` はその場で `set()` する
   （既に空であることを直前に確認済みのため、`OnceCell::set` の
   `Err` 分岐（二重設定）には構造的に到達しない。到達しないことが
@@ -983,8 +1007,8 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   テープを逆順に辿り各ノードの VJP（`grad.rs::vjp`。`Op` 単位のまま。
   §3.3）を計算する過程で、1 つの VJP 計算式が複数の elementwise 演算
   から成る場合（例: `tanh` の VJP `grad * (1 - y * y)` は `mul`・`sub`
-  の連鎖）も、上記と同じ手順（`self.ops` を借用して融合を試み、失敗は
-  フォールバックせず `?` で伝播する）を用いる。
+  の連鎖）も、上記と同じ `materialize_fallible`（`self.ops` を借用して
+  融合を試み、失敗はフォールバックせず `?` で伝播する）を用いる。
 - **`Gradients::get` は非 fallible のまま**: `backward` は自身が返す
   `Gradients` に含まれるすべての勾配 `Tensor` を、`Ok(Gradients { .. })`
   を返す直前までに実体化し終える。したがって `Gradients::get` は
@@ -1022,6 +1046,15 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 
 ### 3.5.3 層 2（非 fallible 境界）: `Var::value`／`Var::to_tensor` と CPU フォールバック
 
+- **`value()` と `materialize_fallible`（§3.5.2）の役割分担**:
+  `Var::value`／`Var::to_tensor` は本節が定める `materialize_non_fallible`
+  （`run_fused` の失敗を CPU フォールバックで必ず吸収し `panic!` も
+  `Err` も返さない）だけを呼び、§3.5.2 の `materialize_fallible`
+  （`run_fused` の失敗を型付きエラーのまま伝播する）を呼ばない。逆に
+  後続の fallible `Var` 演算・`Tape::backward` は `materialize_fallible`
+  のみを呼び `value()` を呼ばない（§3.5.2）。両者は対象ノードの実体化
+  という同じ責務を、失敗時の扱い（型付き伝播／CPU フォールバック）で
+  排他に分担する。
 - `Var::value`（`var.rs:74`。`-> Ref<'_, Tensor<f32>>`）・
   `Var::to_tensor`（`var.rs:81`。`-> Tensor<f32>`）は**シグネチャを
   一切変更しない**。対象ノードが未実体化であれば、§3.5.2 と同じ
@@ -1092,7 +1125,8 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   試み、失敗したら CPU フォールバック）を使う。
 - 一方、fallible な `Var` 演算・`Tape::backward` の VJP 連鎖内部
   （層 1）が読み出しの過程で上限超過の連鎖に遭遇した場合は、§3.5.2 の
-  手順（融合を試み、失敗は `?` で伝播）にそのまま従う。
+  `materialize_fallible`（融合を試み、失敗は `?` で伝播）にそのまま
+  従う。
 - 上限が「到達させた演算が fallible か非 fallible かにより層 1／層 2
   いずれかへ合流する」（§1・§3.2 (d)）とはこの意味である。
 
@@ -1188,7 +1222,7 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 |---|---|
 | #162（連鎖検出） | §2（グラフ表現・ノード種別・メタデータ・fan-out）を用いた融合可能連鎖（elementwise のみで閉じた 4〜6 段の連結成分）の検出アルゴリズム |
 | #163（融合カーネル生成） | §2.4 の fan-out レジスタ内解決方針、§3.4 で確定した `FusionPlan::ops`（`FusedOpKind` 列挙）／`output_shape`／`dtype`／`leaf_count`／`use_count` の公開 DTO アクセサを読んだカーネルソース生成、§4・§5 の境界検査・数値一致・インジェクション対策 |
-| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針・「公開コンストラクタの選択は融合スイッチにならない」契約・「演算跨ぎの遅延を復活し、実体化を 3 層の境界で規定する」契約（codex-review 第 6 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Send + Sync` 不要）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `ops: Option<Box<dyn BackendOps>>` と新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps>)` の追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`relu`／`exp`／`tanh` が遅延連鎖を延長し `add`／`mul`／`matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装。§3.5.2（層 1・fallible 境界。融合失敗は `?` でそのまま伝播）・§3.5.3（層 2・非 fallible 境界。融合失敗は `eval::relu`／`exp`／`tanh` による CPU 参照実装への逐次フォールバックで必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`（unstable）は使わない）・§3.5.4（連鎖長上限との相互作用）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。既存の `eval::dense_vec`・`eval::relu`／`exp`／`tanh`（CPU 参照実装）は非 fallible のまま変更しない |
+| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針・「公開コンストラクタの選択は融合スイッチにならない」契約・「演算跨ぎの遅延を復活し、実体化を 3 層の境界で規定する」契約（codex-review 第 6 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Send + Sync` 不要）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `ops: Option<Box<dyn BackendOps>>` と新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps>)` の追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`relu`／`exp`／`tanh` が遅延連鎖を延長し `add`／`mul`／`matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装。§3.5.2（層 1・fallible 境界。入力読み出しは `Var::value()` を呼ばず専用の `materialize_fallible`〈`pub(crate)`。`run_fused` の失敗を CPU フォールバックせず型付き `AutodiffError::Backend` のまま `?` で伝播する〉のみを経由する）・§3.5.3（層 2・非 fallible 境界。`materialize_non_fallible` を経由し、融合失敗は `eval::relu`／`exp`／`tanh` による CPU 参照実装への逐次フォールバックで必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`（unstable）は使わない）・§3.5.4（連鎖長上限との相互作用）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。既存の `eval::dense_vec`・`eval::relu`／`exp`／`tanh`（CPU 参照実装）は非 fallible のまま変更しない |
 | #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「公開コンストラクタの選択は融合スイッチにならない」契約の検証**（同一演算列を `Tape::new()` と `Tape::with_backend(ops)` の双方で実行し、数値結果が数値一致複合判定〈§4〉を満たすこと、および融合の発生有無がどちらのコンストラクタを呼んだかではなく §1 の 2 条件〈バックエンド解決可否・演算列の融合可否判定〉のみで決まることの検証）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `relu`／`exp`／`tanh` の連鎖（例: `x.add(&y)?.relu().exp().tanh().relu()`。4 段）が単一の `run_fused` 呼び出しへ融合されること（カウンタ付き `BackendOps` テスト実装で `run_fused` が 1 回だけ呼ばれ、`add` 単体では呼ばれないことを確認する）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗が、それを引き起こした後続の fallible `Var` 演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時、`Var::value`／`Var::to_tensor` が `panic!` せず、CPU フォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、その融合が失敗すると `Tape::backward` が `AutodiffError::Backend` を返すこと、かつ成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも連鎖がその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out が単一の融合グラフ構築で正しく解決されることの検証 |
 | #203（GEMM epilogue 融合） | §3.2 (b) の `gemm` 境界を bias／activation epilogue まで拡張する設計変更 |
 
