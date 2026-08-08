@@ -381,7 +381,7 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 | `0` | ループが自動適用で完走（最終 verdict = `auto_apply`。`LoopOutcome::Adopted`）**かつ** 検証済み差分の `--repo` への反映（下記参照）も成功 |
 | `10` | エスカレーション（人間承認待ち。`LoopOutcome::Escalated`） |
 | `20` | 却下（`LoopOutcome::Rejected`） |
-| `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗）／隔離 sandbox の構築失敗／自動適用された差分の `--repo` への反映失敗（下記参照） |
+| `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗）／隔離 sandbox の構築失敗／`--log` 書き込み失敗（下記「`--log`／`--output` 書き込み失敗時の反映可否」参照）／`--output` 書き込み失敗（`--log` は成功済みのため反映は行うが終了コードは非 0 のまま）／自動適用された差分の `--repo` への反映失敗（下記参照） |
 | `2` | usage エラー（`--kind` 欠落・不正値〈`perf-regression` 指定を含む。3.1 節参照〉・`--log` 欠落・`--max-attempts 0`・未知引数等） |
 
 **`Exhausted`／`NoActionNeeded` の写像（イシュー #142 差し戻し分で追記）**:
@@ -394,6 +394,20 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 ため内部エラー区分の **`1`** へ写像すると定める（`main.rs::
 exit_code_for_outcome` のみが行う `LoopOutcome` → 終了コードの基本写像。
 他の経路から `0` を返さない fail-closed 契約。`.claude/rules/security.md` A08）。
+
+**`--log`／`--output` 書き込み失敗時の反映可否（PR #361 codex-review P1・
+Medium 指摘対応で追記）**:
+`--repo` への反映（下記「採用差分の `--repo` への反映失敗」参照）は
+「監査ログ（`--log`）が採用結果を一次記録として残せている」ことのみを
+前提とする。`--log` の書き込み（自己検証込み）が失敗した場合は
+`LoopOutcome::Adopted` であっても反映を一切行わず（`--repo` に触れない）、
+終了コードは `1` になる。一方 `--output`（3.1 節の任意の複製レポート JSON。
+未指定時は標準出力へ要約を出す）の書き込みのみが失敗した場合は、`--log` が
+既に一次記録として残せている以上、反映は通常どおり行い、終了コードのみ
+`1` にする（`--output` の失敗を `--log` と同列に扱うと、監査ログには
+記録済みの正当な採用差分の反映まで過剰にブロックしてしまうため。
+`crates/self-repair/src/main.rs::finish_with_report`／`outcome_for_reflection`
+参照）。
 
 **採用差分の `--repo` への反映失敗（PR #361 codex-review P0 指摘対応で追記）**:
 `run` は `--repo`（人間の作業リポジトリ）を直接検証対象にせず、`baseline_commit`

@@ -49,7 +49,7 @@
 //! | `0` | 自動適用（`Verdict::AutoApply`）かつ `--repo` への反映も成功 | チェーン整合（改竄なし） |
 //! | `10` | エスカレーション | （該当なし） |
 //! | `20` | 却下 | （該当なし） |
-//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗・sandbox 構築失敗・`--log`／`--output` 書き込み失敗〈`Adopted` でも反映しない。下記「`--log` 一次記録契約」節参照〉）／自動適用後の `--repo` への反映失敗（下記参照） | 検証不合格・内部エラー |
+//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗・sandbox 構築失敗・`--log` 書き込み失敗〈`Adopted` でも反映しない。下記「`--log` 一次記録契約」節参照〉／`--output` 書き込み失敗〈`--log` は成功済みのため反映は行う。同節参照〉）／自動適用後の `--repo` への反映失敗（下記参照） | 検証不合格・内部エラー |
 //! | `2` | usage エラー（`--kind perf-regression` を含む。`cli.rs::parse_repair_kind` 参照） | usage エラー |
 //!
 //! `LoopOutcome` → 終了コードの基本写像（0/10/20/1）は [`exit_code_for_outcome`]
@@ -67,15 +67,22 @@
 //! 経路であり、`LoopOutcome` の解釈自体には手を加えない。`--log`／`--output`
 //! はループの真の結果〈Adopted〉を記録済みのまま変更しない）。
 //!
-//! # `--log` 一次記録契約（PR #361 codex-review P1 指摘対応）
+//! # `--log` 一次記録契約（PR #361 codex-review P1・Medium 指摘対応）
 //! `--repo` への反映は「監査ログ（`--log`）が採用結果を一次記録として
-//! 残せている」ことを前提とする。[`execute_loop`] は
-//! [`finish_with_report`] が返す `persisted` フラグ（`--log`／`--output`
-//! 書き込みがいずれも成功したか）を見て、`persisted == false` の場合は
-//! `LoopOutcome::Adopted` であっても `run_run` へ `None` を返す（ログを
-//! 残せていないまま `reflect_adopted_diff` が実リポジトリへ差分反映して
-//! しまう経路を断つ）。エラー経路（ログ書き込み失敗）では `--repo` に
-//! 一切触れない。
+//! 残せている」ことのみを前提とする。`--output`（任意の複製レポート JSON）の
+//! 書き込み成否は反映可否に影響しない（`--output` は 3.1 節で「未指定時は
+//! 標準出力へ要約を出す」任意の副次出力であり、一次記録は常に `--log` が
+//! 担う）。[`execute_loop`] は [`finish_with_report`] が返す `persisted`
+//! フラグ（`--log` 書き込み〈自己検証込み〉が成功したか。`--output` の成否は
+//! 含まない）を見て、`persisted == false` の場合は `LoopOutcome::Adopted`
+//! であっても `run_run` へ `None` を返す（ログを残せていないまま
+//! `reflect_adopted_diff` が実リポジトリへ差分反映してしまう経路を断つ）。
+//! `--log` 書き込み失敗（エラー経路）では `--repo` に一切触れない。
+//! `--output` 書き込み失敗は終了コードを非 0（`1`）にする（`docs/
+//! guardrail-self-repair-cli.md` 3.5 節参照）が、`--log` が成功していれば
+//! 反映は行う（PR #361 codex-review Medium 指摘: `--output` の失敗を `--log`
+//! と同列に扱うと、監査ログには記録済みの正当な採用差分の反映まで過剰に
+//! ブロックしてしまっていた）。
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -525,8 +532,8 @@ where
 /// が参照する `outcome` を決める純粋関数（`execute_loop` から切り出し
 /// 単体テスト可能にする）。
 ///
-/// `persisted == false`（`--log`／`--output` の書き込み失敗。
-/// [`finish_with_report`] の戻り値）の場合は `outcome` が
+/// `persisted == false`（`--log` の書き込み失敗。`--output` の成否は
+/// 含まない。[`finish_with_report`] の戻り値）の場合は `outcome` が
 /// `LoopOutcome::Adopted` であっても `None` へ落とし `run_run` へ伝えない
 /// （PR #361 codex-review P1 指摘対応）。`run_run` は
 /// `Some(LoopOutcome::Adopted)` の場合にのみ `reflect_adopted_diff` で
@@ -534,6 +541,8 @@ where
 /// 残せていない状態のまま実リポジトリへ反映してしまう経路をここで断つ
 /// （「`--log` は一次記録として常に残す・エラー経路では `--repo` に触れない」
 /// 契約。モジュール冒頭ドキュメント「`--log` 一次記録契約」節参照）。
+/// `--output` の書き込み失敗単独では `persisted` は `false` にならない
+/// （PR #361 codex-review Medium 指摘対応。`finish_with_report` doc 参照）。
 fn outcome_for_reflection(outcome: LoopOutcome, persisted: bool) -> Option<LoopOutcome> {
     if persisted { Some(outcome) } else { None }
 }
@@ -547,12 +556,17 @@ fn outcome_for_reflection(outcome: LoopOutcome, persisted: bool) -> Option<LoopO
 /// `verify` が最後に `Passed` を返した際の判断根拠を保持する
 /// （`AttemptOutcome::Adopted` 自体は証跡を保持しないため。`report.rs` 参照）。
 ///
-/// 戻り値の第 2 要素（`persisted`）は `--log`／`--output` の書き込みが
-/// いずれも成功したかを示す（`execute_loop` が `--repo` への差分反映
-/// 可否を判定する唯一の材料。`ExitCode` は不透明型で値の比較ができない
-/// ため〈`std::process::ExitCode` は `PartialEq` を実装しない〉、
-/// 「exit 0 相当か」を `ExitCode` から逆算せずこの明示フラグで表す。
-/// PR #361 codex-review P1 指摘対応）。
+/// 戻り値の第 2 要素（`persisted`）は `--log`（一次記録・自己検証込み）の
+/// 書き込みが成功したかのみを示す（`--output` の書き込み成否は含めない。
+/// `execute_loop` が `--repo` への差分反映可否を判定する唯一の材料。
+/// `ExitCode` は不透明型で値の比較ができないため〈`std::process::ExitCode`
+/// は `PartialEq` を実装しない〉、「exit 0 相当か」を `ExitCode` から逆算
+/// せずこの明示フラグで表す。PR #361 codex-review P1 指摘対応）。`--output`
+/// の書き込みが失敗しても `persisted` は `true` のまま終了コードのみ `1` に
+/// する（PR #361 codex-review Medium 指摘対応: `--output` は任意の複製
+/// レポートに過ぎず、その書き込み失敗を理由に `--log` へ記録済みの正当な
+/// 採用差分の反映まで抑止すべきではない。モジュール冒頭「`--log` 一次記録
+/// 契約」節参照）。
 fn finish_with_report(
     report: &LoopReport,
     log_path: &Path,
@@ -585,7 +599,13 @@ fn finish_with_report(
                 bench_measurement.as_ref(),
             ) {
                 eprintln!("self-repair run: --output 書き出しに失敗しました: {message}");
-                return (ExitCode::from(1), false);
+                // `--log`（一次記録）は既に書き込み・自己検証済みのため、
+                // `--output`（任意の複製レポート）の書き込み失敗は反映
+                // （`reflect_adopted_diff`）を抑止する理由にしない
+                // （PR #361 codex-review Medium 指摘対応。モジュール冒頭
+                // 「`--log` 一次記録契約」節・[`finish_with_report`] doc
+                // 参照）。終了コードは非 0（1）のまま保つ。
+                return (ExitCode::from(1), true);
             }
         }
     }
@@ -823,5 +843,45 @@ mod tests {
 
         let (_, persisted) = finish_with_report(&report, &log_path, None, None, None);
         assert!(!persisted);
+    }
+
+    /// PR #361 codex-review Medium 指摘の回帰防止: `--log` の書き込みは
+    /// 成功するが `--output` の書き込みが失敗する場合、`persisted == true`
+    /// （`--log` を一次記録として残せているため `run_run` は反映
+    /// `reflect_adopted_diff` を実行してよい）であることを確認する。
+    /// `--log` 側は実在する一時ディレクトリを渡して確実に成功させ、
+    /// `--output` 側のみ親ディレクトリが存在しないパスを渡して失敗させる
+    /// （`finish_with_report_reports_not_persisted_on_log_write_failure` と
+    /// 対になる、`--log` 成功・`--output` 失敗の分岐を単独で踏むテスト）。
+    #[test]
+    fn finish_with_report_persists_when_only_output_write_fails() {
+        let report = LoopReport {
+            kind: RepairKind::FeatureAddition,
+            outcome: LoopOutcome::Adopted,
+            attempts: Vec::new(),
+            total_duration: std::time::Duration::from_millis(0),
+        };
+        let log_dir = std::env::temp_dir().join(format!(
+            "self-repair-main-test-output-fails-log-dir-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&log_dir).expect("log_dir の作成に失敗");
+        let log_path = log_dir.join("trial.jsonl");
+        let output_path = std::env::temp_dir().join(format!(
+            "self-repair-main-test-nonexistent-dir-{}/report.json",
+            std::process::id()
+        ));
+
+        let (exit_code, persisted) =
+            finish_with_report(&report, &log_path, Some(&output_path), None, None);
+        assert!(
+            persisted,
+            "--log が成功していれば --output 失敗単独では persisted は false にならないはず"
+        );
+        // `ExitCode` は `PartialEq` を実装しないため `Debug` 表示で比較する
+        // （`persisted == true` でも終了コードは非 0 のまま保つ契約の確認）。
+        assert_eq!(format!("{exit_code:?}"), format!("{:?}", ExitCode::from(1)));
+
+        let _ = std::fs::remove_dir_all(&log_dir);
     }
 }

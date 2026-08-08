@@ -505,6 +505,30 @@ fn show_file_at_baseline<R: CommandRunner>(
 /// 内容を取得し、`ChangedFile::path`（新パス）で現作業木の内容を読む
 /// （PR #361 Codex レビュー P1 修正。[`show_file_at_baseline`] ドキュメント
 /// 参照）。
+///
+/// # `.rs` → 非 `.rs` rename の扱い（PR #361 codex-review Medium 指摘対応）
+/// 走査対象は「baseline 側パス（`ChangedFile::baseline_path()`）が `.rs`」を
+/// 基準にする（新パスのみを見る `filter(|f| f.path.ends_with(".rs"))` では
+/// なくなった）。baseline 側が `.rs` で新パスが `.rs` でない rename（例:
+/// `src/lib.rs` → `src/lib.txt`）は、新パスがもはやコンパイル対象外である
+/// 以上、baseline に公開シグネチャが 1 つでも存在すれば内容を問わず無条件で
+/// 破壊とみなす（新パスの内容を読んで比較しない。仮に新パスへ同一テキストを
+/// 書き込んだ「内容が同一の rename」であっても、クレートの公開 API 面からは
+/// 消失している）。旧実装（`filter(|f| f.path.ends_with(".rs"))`）は新パスが
+/// `.rs` でないレコードをそもそも走査対象から除外していたため、この rename
+/// で `pub fn` が削除されても `api_broken=false` にすり抜けていた。逆に
+/// baseline 側が `.rs` でない（`.rs` → `.rs` の一部を含む新規追加や、
+/// 非 Rust ファイルからの rename）場合は従来どおりスキップする
+/// （非 Rust ファイルの内容に偶然 `pub fn ` で始まる行があっても誤検知しない）。
+///
+/// copy（`status` 先頭が `'C'`）で baseline 側 `.rs` を非 `.rs` パスへ複製した
+/// 場合も同じ分岐に入り `Ok(true)` になるが、これは複製元 `.rs` 自体は消えず
+/// 公開シグネチャも消失していないため理論上は誤検知（false positive）である。
+/// [`list_changed_files`] は `git diff --name-status -z`（`-C`／
+/// `--find-copies` 未指定）を呼ぶため `'C'` は現状発生しない到達不能ケースだが
+/// （`is_plausible_status_token` が `'C'` を形式上許容しているのは将来
+/// `-C` 系オプションを追加する余地を残すため）、万一発生しても安全側
+/// （破壊あり＝エスカレーション方向）に倒れるだけで A08 違反にはならない。
 fn api_signature_touched<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
@@ -513,7 +537,7 @@ fn api_signature_touched<R: CommandRunner>(
 ) -> Result<bool, DiffSignalsError> {
     for file in changed_files
         .iter()
-        .filter(|file| file.path.ends_with(".rs"))
+        .filter(|file| file.baseline_path().ends_with(".rs"))
     {
         if file.is_newly_added() {
             // baseline に対応物がなく、消失し得るシグネチャがない。
@@ -525,6 +549,14 @@ fn api_signature_touched<R: CommandRunner>(
         let baseline_sigs = extract_public_signatures(&baseline_content);
         if baseline_sigs.is_empty() {
             continue;
+        }
+
+        if !file.path.ends_with(".rs") {
+            // 新パスが `.rs` でない rename/copy: 新パスはもはやコンパイル
+            // 対象外であり、baseline に存在した公開シグネチャは内容を問わず
+            // 全て API 面から消失する（本関数ドキュメント「`.rs` → 非 `.rs`
+            // rename の扱い」参照）。新パスの内容は読まない。
+            return Ok(true);
         }
 
         // ファイルが現作業木から削除されている場合は空文字列扱い（全シグネ
@@ -1012,6 +1044,75 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// PR #361 codex-review Medium 指摘（`Rename API check skips non-rs
+    /// paths`）の回帰防止: `.rs` → 非 `.rs` の rename で baseline の `pub fn`
+    /// が失われる場合、新パスの内容に関わらず破壊として検出されることを
+    /// 確認する。`sandbox` を実ディレクトリにして新パス
+    /// （`src/lib.txt`）へ baseline と**同一のテキスト**を書き込む
+    /// （advisor 指摘: `Path::new("/sandbox")` のまま `read_to_string` を
+    /// 失敗させると「新パスを読んでいないこと」の証明にならない。本テストは
+    /// 新パスに `pub fn` を含む同一内容を置いてもなお破壊と判定される
+    /// ことを検証することで、「新パスの内容を読まずに無条件で破壊とみなす」
+    /// 分岐を通っていることを保証する）。
+    #[test]
+    fn api_signature_touched_flags_rename_from_rs_to_non_rs_as_broken_even_with_identical_content()
+    {
+        let sandbox = std::env::temp_dir().join(format!(
+            "self-repair-diff-signals-rename-rs-to-non-rs-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH 以降のはず")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
+        std::fs::write(
+            sandbox.join("src/lib.txt"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        )
+        .expect("src/lib.txt 書き込み失敗");
+
+        let runner = ScriptedGit::new(
+            "0\t0\tsrc/lib.rs\tsrc/lib.txt\n",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        );
+        let touched = api_signature_touched(
+            &runner,
+            &sandbox,
+            "abc1234",
+            &[cf("R100", Some("src/lib.rs"), "src/lib.txt")],
+        )
+        .expect("成功");
+        assert!(
+            touched,
+            "`.rs` から非 `.rs` への rename は、新パスの内容が baseline と \
+             同一であっても公開シグネチャが API 面から消失するため破壊として \
+             検出されるはず（新パスの内容を読んで比較する旧実装では見逃されて \
+             いた）"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// 上記と対になる確認: 非 `.rs` → `.rs` の rename は baseline 側
+    /// （非 Rust ファイル）に走査対象外として扱われ、破壊として誤検出
+    /// されない。
+    #[test]
+    fn api_signature_touched_does_not_flag_rename_from_non_rs_to_rs() {
+        let runner = ScriptedGit::new("0\t0\tsrc/lib.txt\tsrc/lib.rs\n", "");
+        let touched = api_signature_touched(
+            &runner,
+            Path::new("/sandbox"),
+            "abc1234",
+            &[cf("R100", Some("src/lib.txt"), "src/lib.rs")],
+        )
+        .expect("成功（baseline 側が非 .rs のため git show を呼ばずスキップされるはず）");
+        assert!(
+            !touched,
+            "非 .rs から .rs への rename は baseline 側が走査対象外のため破壊とみなさないはず"
+        );
     }
 
     // 要求 (c)（新規追加ファイルは従来どおり非破壊扱い）は

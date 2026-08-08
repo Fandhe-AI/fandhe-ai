@@ -43,10 +43,30 @@
 //! （02000000）が下記 `raw` モジュールの定数と一致すること、および
 //! `/usr/include/x86_64-linux-gnu/asm/fcntl.h` がアーキ固有の再定義なしに
 //! `asm-generic/fcntl.h` を `#include` するだけであることを確認済み。
-//! `aarch64` は実機でヘッダを確認していないが、Linux カーネルの `asm`
-//! ヘッダはアーキごとに独自定義しない限り `asm-generic` の値を使う設計
-//! であり、x86_64 と同様に `asm-generic` を直接 `#include` するアーキで
-//! ある限り値は一致する（未確認である旨を明示したうえで許容する）。
+//!
+//! **`aarch64` は asm-generic を継承しない**（PR #361 codex-review P0 指摘:
+//! 2026-08-08 修正前は上記 x86_64（asm-generic）値を aarch64 にも共用しており、
+//! 誤りだった）。Linux カーネルの `arch/arm64/include/uapi/asm/fcntl.h` は
+//! 32-bit ARM 由来の値で `O_DIRECTORY`/`O_NOFOLLOW`/`O_DIRECT`/`O_LARGEFILE`
+//! の 4 つを明示的に再定義してから `asm-generic/fcntl.h` を `#include` する
+//! （出典: 上記ヘッダ。`O_DIRECTORY = 040000`・`O_NOFOLLOW = 0100000`・
+//! `O_DIRECT = 0200000`・`O_LARGEFILE = 0400000`）。修正前の値
+//! （asm-generic の `O_DIRECTORY = 0200000`・`O_NOFOLLOW = 0400000`）は
+//! aarch64 の実際の `O_DIRECTORY`/`O_NOFOLLOW` の値ではなく、むしろ aarch64
+//! 側の `O_DIRECT`/`O_LARGEFILE` の値と一致してしまっていた。すなわち
+//! aarch64 上では `openat` に `O_DIRECT | O_LARGEFILE` が渡り、カーネルは
+//! これを無視できるフラグ（少なくとも `O_NOFOLLOW`/`O_DIRECTORY` としては
+//! 無効）として黙って受理するため、symlink 追跡防御が静かに無効化されていた
+//! （fail-open）。`O_RDONLY`/`O_WRONLY`/`O_CREAT`/`O_TRUNC`/`O_CLOEXEC` は
+//! `arch/arm64` 側の再定義対象に含まれておらず asm-generic の値のまま
+//! （同ヘッダで再定義されているのは上記 4 つのみ）。この非対称性を反映し、
+//! 下記 `raw` モジュールはアーキ間で共通の 5 定数（`O_RDONLY`/`O_WRONLY`/
+//! `O_CREAT`/`O_TRUNC`/`O_CLOEXEC`）を `target_arch` cfg の外側に 1 箇所だけ
+//! 定義し、実際にアーキ間で値が異なる `O_DIRECTORY`/`O_NOFOLLOW` の 2 定数
+//! のみを `target_arch` ごとに個別定義する（同じ定数を x86_64/aarch64 双方に
+//! 重複定義すると、x86_64 CI では aarch64 側の定義ミスがコンパイルされず
+//! 検出できない。advisor 指摘）。
+//!
 //! それ以外のアーキテクチャは値を個別確認していないため対象に含めず、
 //! 下記 `unsupported` サブモジュール側の fail-closed 経路へ送る。
 //! 対応判定・実装・フォールバックの整合を単一箇所で保つため、Linux/macOS
@@ -78,24 +98,43 @@ mod supported {
     use std::path::Path;
 
     /// 各 OS の `fcntl.h` 定義値のローカル複製（`libc` 依存禁止のため）。
-    /// 出典: Linux `include/uapi/asm-generic/fcntl.h`（本ファイル冒頭 doc の
-    /// 対応アーキテクチャ〈x86_64/aarch64〉共通の generic 値。それ以外の
-    /// アーキテクチャはこのモジュール自体がコンパイルされないため到達しない）。
+    ///
+    /// # Linux: アーキ共通 5 定数（`O_DIRECTORY`/`O_NOFOLLOW` を除く）
+    /// 出典: Linux `include/uapi/asm-generic/fcntl.h`。`arch/arm64/include/
+    /// uapi/asm/fcntl.h` はこの 5 定数を再定義しないため、本ファイル冒頭 doc の
+    /// 対応アーキテクチャ〈x86_64/aarch64〉双方で asm-generic の値のまま
+    /// 一致する（それ以外のアーキテクチャはこのモジュール自体がコンパイル
+    /// されないため到達しない）。
     #[cfg(target_os = "linux")]
     mod raw {
         pub const O_RDONLY: i32 = 0o0;
         pub const O_WRONLY: i32 = 0o1;
         pub const O_CREAT: i32 = 0o100;
         pub const O_TRUNC: i32 = 0o1000;
-        pub const O_DIRECTORY: i32 = 0o200000;
-        pub const O_NOFOLLOW: i32 = 0o400000;
         /// fork/exec で子プロセスへ fd を継承させない（`execve` 時に自動
         /// close）。security-auditor 監査 Low 指摘対応: `openat` で得た fd
         /// はいずれも self-repair プロセス内でのみ使う一時 fd であり、
         /// `SelfRepairLoop` が起動する `cargo build`/`test`/`clippy` 子
         /// プロセス（`verify_gates.rs`）へ意図せず継承されると fd リーク・
-        /// 情報露出につながるため付与する。
+        /// 情報露出につながるため付与する。`O_CLOEXEC` も `arch/arm64` 側の
+        /// 再定義対象に含まれない（本モジュール冒頭 doc 参照）。
         pub const O_CLOEXEC: i32 = 0o2000000;
+
+        /// `O_DIRECTORY`/`O_NOFOLLOW` はアーキ間で値が異なる（本ファイル冒頭
+        /// doc「`aarch64` は asm-generic を継承しない」参照）。出典: Linux
+        /// `include/uapi/asm-generic/fcntl.h`（x86_64 が使う値）。
+        #[cfg(target_arch = "x86_64")]
+        pub const O_DIRECTORY: i32 = 0o200000;
+        #[cfg(target_arch = "x86_64")]
+        pub const O_NOFOLLOW: i32 = 0o400000;
+
+        /// 出典: Linux `arch/arm64/include/uapi/asm/fcntl.h`（32-bit ARM 由来の
+        /// 値。asm-generic の値〈0o200000/0o400000〉とは異なる。本ファイル
+        /// 冒頭 doc 参照）。
+        #[cfg(target_arch = "aarch64")]
+        pub const O_DIRECTORY: i32 = 0o40000;
+        #[cfg(target_arch = "aarch64")]
+        pub const O_NOFOLLOW: i32 = 0o100000;
     }
 
     /// 出典: macOS `sys/fcntl.h`。

@@ -78,6 +78,15 @@ pub fn validate_relative_path(path: &Path) -> Result<(), String> {
 /// ガードレール判定を迂回しうる（PR #361 codex-review P1 指摘。
 /// `.claude/rules/security.md` A08「判定の迂回経路を作らない」・
 /// 「ガードレール閾値・ポリシー除外リストの変更は必ず人間の承認を経る」）。
+///
+/// # `CurDir`（`.`）コンポーネントを含むパスの扱い（PR #361 codex-review
+/// High 指摘の検証結果）
+/// `policy-exclusion.toml/.` のような末尾 `CurDir` パスで `Path::file_name()`
+/// が `None` を返し本判定をすり抜けるとの指摘があったが、実測では
+/// `std::path::Components` が末尾の `.` を正規化して読み飛ばすため
+/// （`file_name()` は最後の非 `CurDir` コンポーネントを返す）発生しない
+/// （`is_guardrail_config_path_normalizes_trailing_and_embedded_cur_dir`
+/// 参照）。
 fn is_guardrail_config_path(rel: &Path) -> bool {
     const PROTECTED_FILE_NAMES: [&str; 2] = ["policy-exclusion.toml", "guardrail.toml"];
     rel.file_name()
@@ -531,6 +540,32 @@ mod tests {
     fn validate_relative_path_accepts_plain_relative_path() {
         let result = validate_relative_path(Path::new("src/lib.rs"));
         assert!(result.is_ok());
+    }
+
+    /// PR #361 codex-review High 指摘（`CurDir bypasses config write block`）の
+    /// 検証テスト。指摘は `Path::file_name()` が末尾コンポーネントが `.`
+    /// （`CurDir`）の場合に `None` を返すため
+    /// `policy-exclusion.toml/.` のようなパスが `is_guardrail_config_path` を
+    /// すり抜けると主張していたが、`std::path::Components` は末尾以外の `.`
+    /// と同様に末尾の `.` も正規化して読み飛ばすため（`file_name()` の実装は
+    /// `components().next_back()` が最後の非 `CurDir` コンポーネントを返す）、
+    /// 実測では発生しない（本テストの各 assert が実測確認）。回帰防止として
+    /// 固定する。
+    #[test]
+    fn is_guardrail_config_path_normalizes_trailing_and_embedded_cur_dir() {
+        assert!(is_guardrail_config_path(Path::new(
+            "policy-exclusion.toml/."
+        )));
+        assert!(is_guardrail_config_path(Path::new(
+            "./policy-exclusion.toml"
+        )));
+        assert!(is_guardrail_config_path(Path::new(
+            "nested/./policy-exclusion.toml"
+        )));
+        assert!(is_guardrail_config_path(Path::new(
+            "policy-exclusion.toml/./."
+        )));
+        assert!(is_guardrail_config_path(Path::new("guardrail.toml/.")));
     }
 
     #[test]
