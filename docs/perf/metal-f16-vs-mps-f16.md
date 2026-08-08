@@ -142,10 +142,13 @@ f32 の約 2 倍（Apple GPU の一般的傾向）であり、Metal・PyTorch �
 - 本ファイルの「実測結果」節は Apple Silicon 実機での `cargo test -- --ignored`・`cargo run --release`・
   PyTorch スクリプト実行後に埋める
 - 下限値の確定（REQ-8 性能下限表の当該行の更新）は #158（TASK-8.3d・人間担当）が行う。本ファイルの実測結果を
-  入力として使う
+  入力として使う。**下限確定の判断（実測未実施のため「未設定」を維持する据え置き確定案）は
+  `docs/perf/performance-floor-decision.md` を参照**
 - `docs/spec/04-requirements.md`（正本 submodule）の更新は本リポでは行わない。仕様変更は spec リポ側で対応する
   （`.claude/rules/out-of-scope-tracking.md`「仕様変更が必要な場合」）
 - f16 の自動ディスパッチ規則への統合（`docs/dispatch-rules-design.md`）は本イシューのスコープ外
   （実装計画 §3.4「Metal f16 行は含めない」）。REQ-11 系の後続課題として別途追跡する
 - K=4096 ストレスケースが実機で複合判定を外れた場合、#186 と同じ枠組みで許容誤差の再評価が必要かどうかを
-  #158 で判断する（本ファイルは事実の記録のみを担い、閾値変更の判断は行わない）
+  #158 で判断する（本ファイルは事実の記録のみを担い、閾値変更の判断は行わない）。#158 時点では実機結果が
+  存在しないため「判断材料なし・実測後に再評価（許容誤差は変更しない）」と記録した
+  （`docs/perf/performance-floor-decision.md` §5(b)）

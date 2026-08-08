@@ -20,10 +20,12 @@
 //! 参考値として出力するのみで候補下限値の算出には使わない。
 //!
 //! `crates/bench-harness` の TASK-8.2（下限判定モジュール。#151〜#153）は
-//! 本バイナリ実装時点で未マージのため、丸め規則は本ファイル内に純関数
-//! として最小実装する（[`floor_round`]）。TASK-8.2 モジュールが
-//! マージされ次第、#158/#159 でそちらへ一本化する
-//! （実装計画「丸め規則の実装」節。out-of-scope-tracking 対応）。
+//! 本バイナリ実装時点（#157）では未マージだったため、丸め規則を本ファイル内に
+//! `floor_round` として一時的にインライン実装していた。TASK-8.2 モジュールの
+//! マージ後、本イシュー（#158・TASK-8.3d）で
+//! [`bench_harness::rounding::floor_lower_bound`] への一本化を実施済み
+//! （#157 の out-of-scope 申し送り「マージ後は #158/#159 で一本化する」対応。
+//! `docs/perf/performance-floor-decision.md` §6 参照）。
 //!
 //! `examples/` に置くのは、通常の `cargo test`／CI では実行されず
 //! ビルド検証（`cargo build --workspace --all-targets`）のみが CI で走る
@@ -105,6 +107,7 @@
 //! 中央値・Q1・Q3 の記入欄がある。
 
 use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
+use bench_harness::floor_lower_bound;
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
 use half::f16;
@@ -193,24 +196,6 @@ fn pytorch_f16_ref(size: usize, source: &Option<String>) -> (f64, bool) {
         return (v, true);
     }
     (pytorch_f16_fixed(size), false)
-}
-
-/// REQ-8 の丸め規則（v2 統一版）を実装する純関数。
-///
-/// `docs/spec/04-requirements.md`「丸め規則の統一（旧 #4 の解消）」節:
-/// 実測比率（0.0〜1.0 のうち、ここでは % 表現の `f64` を受け取る）が
-/// 10% 以上の場合は 5% 刻みで切り下げ、10% 未満の場合は 1% 刻みで切り
-/// 下げる（条件付き追加ステップは廃止済み・非減少性が数学的に保証される
-/// 規則）。境界（10%）ちょうどの場合は 10% 以上側（5% 刻み）を適用する。
-///
-/// TASK-8.2 の下限判定モジュール（#151〜#153）がマージされ次第、
-/// こちらの実装は削除し公開 API へ委譲する（本ファイル冒頭コメント参照）。
-fn floor_round(ratio_percent: f64) -> f64 {
-    if !ratio_percent.is_finite() || ratio_percent < 0.0 {
-        return 0.0;
-    }
-    let step = if ratio_percent >= 10.0 { 5.0 } else { 1.0 };
-    (ratio_percent / step).floor() * step
 }
 
 fn tflops(size: usize, secs: f64) -> f64 {
@@ -811,11 +796,22 @@ fn print_candidate_floor(
 ) {
     let all_judged_sizes_present = judged_count == JUDGED_SIZES.len();
     match confirmed_candidate_floor(min_ratio_percent, same_hardware, judged_count, opt_ok) {
-        Some(r) => println!(
-            "CUDA {label} candidate optimized floor (rounding rule applied to min ratio \
-             {r:.2}%) = {:.0}% (current provisional REQ-8 value: 40%)",
-            floor_round(r)
-        ),
+        // `floor_lower_bound` (bench-harness, TASK-8.2b/#153) fail-closed に NaN・負値・
+        // 異常大値を拒否する。`r` はここまでの `confirmed_candidate_floor` ゲート
+        // （same_hardware/opt_ok/judged_count 検証済み）を通過した実測比率であり通常は
+        // 有限・非負のはずだが、判定を迂回して不正値を候補下限として確定させない
+        // fail-closed 契約を守るため Err も明示的に扱う（`.claude/rules/security.md` A08）。
+        Some(r) => match floor_lower_bound(r) {
+            Ok(floor) => println!(
+                "CUDA {label} candidate optimized floor (rounding rule applied to min ratio \
+                 {r:.2}%) = {floor}% (current provisional REQ-8 value: 40%)"
+            ),
+            Err(e) => println!(
+                "CUDA {label} candidate optimized floor: n/a (rounding rejected the measured \
+                 ratio {r:.2}%: {e}; treated as a fail-closed measurement anomaly rather than a \
+                 candidate floor)"
+            ),
+        },
         // 判定対象サイズが欠測している場合は、実機フォールバック起因の
         // n/a よりも「そもそも全形状を評価し切れていない」欠陥のほうが
         // 根本的なため、`same_hardware`／`opt_ok` の真偽によらずこの分岐を
@@ -850,10 +846,9 @@ fn print_candidate_floor(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        best_of, confirmed_candidate_floor, f16_candidate_floor_value, floor_round, tflops_sample,
-    };
+    use super::{best_of, confirmed_candidate_floor, f16_candidate_floor_value, tflops_sample};
     use bench_harness::Measurement;
+    use bench_harness::floor_lower_bound;
 
     // PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の契約を
     // 満たせない」の回帰確認: `tflops_sample`（4 経路すべての `measure_*` が
@@ -1012,32 +1007,32 @@ mod tests {
     }
 
     // `docs/spec/04-requirements.md`「丸め規則の統一（旧 #4 の解消）」節の
-    // 例（10.3%→10%・26.6%→25%・境界 10%→10%）との突合。TASK-8.2 モジュール
-    // （#151〜#153）が未マージのため、本ファイルへインライン実装した
-    // 丸め規則の正しさをここで検証する（実装計画 §5「丸め規則をインライン
-    // 実装した場合: 仕様例との突合をレビューで確認」）。
+    // 例（10.3%→10%・26.6%→25%・境界 10%→10%）との突合。丸め規則の実装は
+    // #158（TASK-8.3d）で `bench_harness::rounding::floor_lower_bound` へ
+    // 一本化済みだが、本ファイルからの呼び出し経路でも仕様例との突合が
+    // 成立することを回帰確認する（`docs/perf/performance-floor-decision.md` §6）。
     #[test]
-    fn floor_round_matches_spec_examples() {
-        assert_eq!(floor_round(10.3), 10.0);
-        assert_eq!(floor_round(26.6), 25.0);
-        assert_eq!(floor_round(1.9), 1.0);
-        assert_eq!(floor_round(10.0), 10.0);
-        assert_eq!(floor_round(9.9999), 9.0);
-        assert_eq!(floor_round(5.3), 5.0);
-        assert_eq!(floor_round(23.2), 20.0);
+    fn floor_lower_bound_matches_spec_examples() {
+        assert_eq!(floor_lower_bound(10.3), Ok(10));
+        assert_eq!(floor_lower_bound(26.6), Ok(25));
+        assert_eq!(floor_lower_bound(1.9), Ok(1));
+        assert_eq!(floor_lower_bound(10.0), Ok(10));
+        assert_eq!(floor_lower_bound(9.9999), Ok(9));
+        assert_eq!(floor_lower_bound(5.3), Ok(5));
+        assert_eq!(floor_lower_bound(23.2), Ok(20));
     }
 
     #[test]
-    fn floor_round_is_non_decreasing_across_the_10_percent_boundary() {
+    fn floor_lower_bound_is_non_decreasing_across_the_10_percent_boundary() {
         // v1 の非単調性（16.9%→15%、17.0%→10% のような逆転）が v2 で
         // 解消されていることの回帰確認（`04-requirements.md` 該当節）。
-        let mut prev = 0.0_f64;
+        let mut prev = 0_u32;
         let mut r = 0.0_f64;
         while r <= 50.0 {
-            let floored = floor_round(r);
+            let floored = floor_lower_bound(r).expect("0.0〜50.0 は非負・有限なので成功するはず");
             assert!(
                 floored >= prev,
-                "floor_round は非減少であるべき: r={r} floored={floored} prev={prev}"
+                "floor_lower_bound は非減少であるべき: r={r} floored={floored} prev={prev}"
             );
             prev = floored;
             r += 0.1;
@@ -1045,9 +1040,13 @@ mod tests {
     }
 
     #[test]
-    fn floor_round_rejects_non_finite_and_negative_input() {
-        assert_eq!(floor_round(f64::NAN), 0.0);
-        assert_eq!(floor_round(f64::INFINITY), 0.0);
-        assert_eq!(floor_round(-5.0), 0.0);
+    fn floor_lower_bound_rejects_non_finite_and_negative_input() {
+        // `floor_lower_bound` は旧 `floor_round`（0.0 へフォールバックする fail-open 実装）
+        // と異なり fail-closed（Err）で拒否する（`rounding.rs::RoundingError` ドキュメント
+        // コメント参照）。本バイナリの呼び出し側（`print_candidate_floor`）も Err を
+        // 「候補下限を確定させず n/a とする」経路として明示的に扱う。
+        assert!(floor_lower_bound(f64::NAN).is_err());
+        assert!(floor_lower_bound(f64::INFINITY).is_err());
+        assert!(floor_lower_bound(-5.0).is_err());
     }
 }
