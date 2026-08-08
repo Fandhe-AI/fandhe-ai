@@ -142,6 +142,16 @@ pub(crate) enum FusionGraphError {
     /// `detect.rs` の非融合フォールバック判定に委ねる設計書 §2.3 の方針）。
     /// 既存 `ShapeError::ShapeMismatch` をそのまま包む。
     Shape(ShapeError),
+    /// [`FusionPlan::from_segment`]（`plan.rs`）が走査するノードの `op`
+    /// が elementwise 5 演算（`Add`／`Mul`／`Relu`／`Exp`／`Tanh`）以外
+    /// （`Input`／`Gemm`／`Sum`／`Max`）だった。#162 の連鎖検出
+    /// （`detect.rs::detect_fusion`）は `is_elementwise()` を満たす
+    /// ノードのみを `segment.nodes` へ挿入するため通常経路では到達
+    /// しないが、`segment` と `graph` の不整合（呼び出し元のバグ）を
+    /// 検出する防御的検証として区別する（`NodeIdOutOfRange` は「ID が
+    /// 範囲外」という別の不変条件の違反を表すため意味論的に転用しない。
+    /// レビュー指摘 #163）。
+    UnexpectedOpKind { id: usize },
 }
 
 impl std::fmt::Display for FusionGraphError {
@@ -154,6 +164,12 @@ impl std::fmt::Display for FusionGraphError {
                 )
             }
             FusionGraphError::Shape(err) => write!(f, "fusion operand shape error: {err}"),
+            FusionGraphError::UnexpectedOpKind { id } => {
+                write!(
+                    f,
+                    "fusion segment references node {id} whose op is not one of the 5 elementwise kinds"
+                )
+            }
         }
     }
 }

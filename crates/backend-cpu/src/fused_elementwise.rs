@@ -124,34 +124,65 @@ pub fn run_fused_elementwise(
     let numel: usize = output_shape.iter().product();
     let mut out = vec![0.0f32; numel];
 
+    // レジスタ配列（`ops.len()` 長）はチャンク／逐次ループの外側で 1 回だけ
+    // 確保し、以降は `eval_one` 呼び出し間で使い回す（要素ごとの `Vec`
+    // アロケーションは融合カーネルが目指す「per-op カーネル呼び出し削減に
+    // よるオーバーヘッド低減」という設計意図に反するため。#163 codex-review
+    // 指摘）。並列時は `par_chunks_mut` でチャンクへ分割し、チャンクごとに
+    // 1 本のレジスタバッファを確保して使い回す（チャンク内の要素はすべて
+    // 同一スレッドが逐次処理するため、スレッド間でバッファを共有しない）。
     if numel >= PARALLEL_THRESHOLD {
-        out.par_iter_mut()
+        out.par_chunks_mut(FUSED_CHUNK_SIZE)
             .enumerate()
-            .for_each(|(i, o)| *o = eval_one(&ops, &leaf_slices, output_index, i));
+            .for_each(|(chunk_idx, chunk)| {
+                let mut regs = vec![0.0f32; ops.len()];
+                let base = chunk_idx * FUSED_CHUNK_SIZE;
+                for (offset, o) in chunk.iter_mut().enumerate() {
+                    *o = eval_one(&ops, &leaf_slices, output_index, base + offset, &mut regs);
+                }
+            });
     } else {
+        let mut regs = vec![0.0f32; ops.len()];
         for (i, o) in out.iter_mut().enumerate() {
-            *o = eval_one(&ops, &leaf_slices, output_index, i);
+            *o = eval_one(&ops, &leaf_slices, output_index, i, &mut regs);
         }
     }
 
     Tensor::new(out, output_shape).map_err(BackendError::ShapeMismatch)
 }
 
+/// 並列実行時のチャンク分割単位（`par_chunks_mut` の chunk size）。
+///
+/// チャンクごとにレジスタバッファを 1 本確保して使い回すための単位。
+/// 大きすぎるとロードバランスが偏り、小さすぎるとチャンク数分のバッファ
+/// 確保コストが per-element 確保に近づく。elementwise カーネルの典型的な
+/// キャッシュライン局所性を踏まえた固定値（`elementwise.rs::PARALLEL_THRESHOLD`
+/// と同様、実測に基づくチューニング値ではなく安全側の初期値。将来ベンチ
+/// （bench-harness）で見直す余地あり）。
+const FUSED_CHUNK_SIZE: usize = 4096;
+
 /// 出力要素 `i`（フラット添字）における `ops` 全体の評価結果を返す。
 ///
-/// レジスタ配列（`ops.len()` 長の `Vec<f32>`）へ発生順（トポロジカル順）
-/// に書き込む単一パスのインタープリタ。fan-out（同一ノードが複数ノード
-/// から参照される）はレジスタの再読で解決し、同じ中間値を再計算しない
-/// （`docs/fusion-graph-design.md` §2.4「レジスタ内解決」の実体。
-/// これにより本カーネルのメモリアクセスは葉の読み 1 回・出力の書き
-/// 1 回に閉じる——融合によるカーネル呼び出し削減効果の実体）。
+/// `regs` は呼び出し元（`run_fused_elementwise`）がループ外で 1 回だけ
+/// 確保し使い回す `ops.len()` 長のレジスタバッファ（呼び出しごとの
+/// ヒープ確保を避けるための引数化。#163 codex-review 指摘）。発生順
+/// （トポロジカル順）に書き込む単一パスのインタープリタ。fan-out（同一
+/// ノードが複数ノードから参照される）はレジスタの再読で解決し、同じ
+/// 中間値を再計算しない（`docs/fusion-graph-design.md` §2.4「レジスタ内
+/// 解決」の実体。これにより本カーネルのメモリアクセスは葉の読み 1 回・
+/// 出力の書き 1 回に閉じる——融合によるカーネル呼び出し削減効果の実体）。
 ///
 /// 添字はすべて境界検査付き（`[]`）。`ops`（`FusionPlan` 構築時検証済み）
 /// が保証する「自ノードより手前のみを参照する」不変条件により、
 /// `regs[lhs]`／`regs[rhs]`／`regs[input]` は常にこの時点で計算済みの
 /// 要素を指す。
-fn eval_one(ops: &[FusedOpKind], leaf_slices: &[&[f32]], output_index: usize, i: usize) -> f32 {
-    let mut regs = vec![0.0f32; ops.len()];
+fn eval_one(
+    ops: &[FusedOpKind],
+    leaf_slices: &[&[f32]],
+    output_index: usize,
+    i: usize,
+    regs: &mut [f32],
+) -> f32 {
     for (idx, op) in ops.iter().enumerate() {
         regs[idx] = match *op {
             FusedOpKind::Input { leaf_index } => leaf_slices[leaf_index][i],

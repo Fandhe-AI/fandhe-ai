@@ -123,6 +123,16 @@ pub enum FusionPlanError {
     /// `run_fused_elementwise` がどのレジスタを書き出すべきか判定
     /// できない）。
     LastOpIsInput,
+    /// `output_shape` の要素数積が `usize` でオーバーフローする
+    /// （`tensor-core::tensor::checked_numel` と同じ検査を `from_ops`
+    /// でも行う。`from_segment` 経路は `output_shape` を既存の検証済み
+    /// `Tensor` の shape からのみ導出するため対象外だが、`from_ops` は
+    /// `autodiff` から任意の `Vec<usize>` を直接受け取る公開経路であり、
+    /// `FusionPlan` 単体の型不変条件として shape 妥当性を保証する必要が
+    /// ある。レビュー指摘 #163: 検証を欠くと不正 shape でも構築に成功し、
+    /// 後段〈`backend-cpu::run_fused_elementwise`〉の shape 一致検証に
+    /// 検証責務が漏れ出す）。
+    OutputShapeOverflow,
 }
 
 impl fmt::Display for FusionPlanError {
@@ -151,6 +161,9 @@ impl fmt::Display for FusionPlanError {
                     f,
                     "fusion plan's last op must not be Input (output node contract)"
                 )
+            }
+            FusionPlanError::OutputShapeOverflow => {
+                write!(f, "fusion plan output_shape element count overflows usize")
             }
         }
     }
@@ -200,9 +213,11 @@ impl FusionPlan {
     ///
     /// # エラー
     ///
-    /// `graph.node` が返す [`FusionGraphError::NodeIdOutOfRange`]
-    /// をそのまま伝播する（`segment` が `graph` と整合しない場合の防御。
-    /// 通常は #162 の検出結果をそのまま渡す限り到達しない）。
+    /// `graph.node` が返す [`FusionGraphError::NodeIdOutOfRange`]、または
+    /// `segment.nodes` が elementwise 5 演算以外のノードを含む場合の
+    /// [`FusionGraphError::UnexpectedOpKind`] を返す（いずれも `segment`
+    /// が `graph` と整合しない場合の防御。通常は #162 の検出結果を
+    /// そのまま渡す限り到達しない）。
     pub(crate) fn from_segment(
         graph: &FusionGraph,
         segment: &FusionSegment,
@@ -258,15 +273,12 @@ impl FusionPlan {
                 | FusionOp::Gemm(..)
                 | FusionOp::Sum { .. }
                 | FusionOp::Max { .. } => {
-                    // 到達しない防御的分岐（上記コメント参照）。
-                    // `NodeIdOutOfRange` を意味論的に転用せず、`node_id`
-                    // をそのまま range 情報として報告する（利用者から
-                    // 見て「このノードはセグメントに含まれるべきでは
-                    // なかった」ことが分かる形にする）。
-                    return Err(FusionGraphError::NodeIdOutOfRange {
-                        id: node_id.0,
-                        len: graph.len(),
-                    });
+                    // 到達しない防御的分岐（上記コメント参照）。専用の
+                    // `FusionGraphError::UnexpectedOpKind` を返す
+                    // （`NodeIdOutOfRange` は「ID が範囲外」という別の
+                    // 不変条件の違反を表すため意味論的に転用しない。
+                    // レビュー指摘 #163）。
+                    return Err(FusionGraphError::UnexpectedOpKind { id: node_id.0 });
                 }
             };
             ops.push(kind);
@@ -357,6 +369,13 @@ impl FusionPlan {
         if matches!(ops[ops.len() - 1], FusedOpKind::Input { .. }) {
             return Err(FusionPlanError::LastOpIsInput);
         }
+        // `output_shape` の要素数積オーバーフロー検査（`tensor::
+        // checked_numel` と同方針。`FusionPlanError::OutputShapeOverflow`
+        // ドキュメント参照）。`from_ops` は `autodiff` から任意の
+        // `Vec<usize>` を直接受け取るため、`FusionPlan` 構築時点で
+        // shape の妥当性を確定させる（レビュー指摘 #163）。
+        crate::tensor::checked_numel(&output_shape)
+            .map_err(|_| FusionPlanError::OutputShapeOverflow)?;
 
         let use_counts = compute_use_counts(&ops);
 
@@ -638,6 +657,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, FusionPlanError::LastOpIsInput);
+    }
+
+    #[test]
+    fn from_ops_rejects_output_shape_overflow() {
+        // レビュー指摘 #163 の反例: 要素数積が usize::MAX を超える
+        // `output_shape` を渡しても、他の検査（トポロジカル順・
+        // leaf_count 一致・出力ノード契約）はすべて素通りしてしまう
+        // ため、`from_ops` 単体でオーバーフロー検査を行わない限り
+        // `FusionPlan` が不正な型不変条件を持ったまま構築できてしまう。
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Relu { input: 0 },
+            ],
+            vec![usize::MAX, 2],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, FusionPlanError::OutputShapeOverflow);
     }
 
     #[test]

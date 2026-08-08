@@ -1387,6 +1387,16 @@ elementwise 遅延グラフを構成しないため、backward 側に新たな�
      `from_ops`（末尾が `Input` であることを防御的検証で拒否）の両方が
      この契約に従う。`run_fused_elementwise` はこの契約を読んで出力
      レジスタを決定する。
+  4. **`from_ops` の検証仕様へ `output_shape` の要素数積オーバーフロー
+     検査を追加（push 前レビュー最終回 #163 指摘への回答）**: `from_ops`
+     は `autodiff` から任意の `Vec<usize>` を直接受け取る唯一の公開
+     構築経路であるため、`tensor-core::tensor::checked_numel`
+     （`tensor.rs:104`〜`:109`）と同じ `checked_mul` 畳み込みで
+     `output_shape` の要素数積オーバーフローを検査し、失敗時は新設
+     `FusionPlanError::OutputShapeOverflow` を返す。`from_segment` は
+     `output_shape` を既存の検証済み `Tensor` の shape からのみ導出する
+     ため対象外（この検査を経由しない構築経路が存在しない設計を維持
+     する）。
 
 ### 3.5 演算跨ぎの遅延と 3 層の実体化境界
 
