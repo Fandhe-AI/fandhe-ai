@@ -1,0 +1,10 @@
+# CI ベースライン（Fandhe-AI/actions の rust-base-ci reusable workflow）が前提とする
+# ツールチェーン単一真実源（イシュー #325）。共通側の rust-toolchain-setup action は
+# rustup を `--default-toolchain none` で自己修復導入し、本ファイルへ同期する
+# （rustup show が本ファイルを検出して未導入なら自動インストールする）。
+# channel は移行前 ci.yml の挙動（`--default-toolchain stable` + rustup show）と同じ
+# stable 追従とする。rustfmt / clippy は共通 workflow がジョブごとに冪等追加するため
+# components には列挙しない。リポジトリ固有ジョブ（build / build-no-cuda-toolkit 等）の
+# aarch64-apple-darwin target 追加も従来どおりジョブ側の Ensure ステップで行う。
+[toolchain]
+channel = "stable"
