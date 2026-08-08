@@ -51,6 +51,8 @@ mod pack;
 
 use std::ops::Range;
 
+use tensor_core::Activation;
+
 use crate::gemm::{GemmError, validate_dims};
 #[cfg(not(target_arch = "x86_64"))]
 use microkernel::Isa;
@@ -134,6 +136,121 @@ pub fn gemm_blis_parallel(
             let row_end = (row_start + c_chunk.len() / n).min(m);
             dispatch_region(a, b, c_chunk, n, k, row_start..row_end);
         });
+    Ok(())
+}
+
+/// `gemm_blis_parallel` に GEMM epilogue（bias 加算・activation）を融合した版
+/// （TASK-12.1f・#203）。
+///
+/// 非融合実行（`gemm_blis_parallel` → `add`〈bias〉→ `relu` の 3 パス・
+/// 中間 `Vec<f32>` 2 個割当）に対し、C を行パネル並列で計算した直後（各
+/// パネルがまだキャッシュ熱いうち）に同じ `rayon` タスク内で epilogue を
+/// 適用することで、C の再読み出しパス・中間バッファ割当を削減する
+/// （CUTLASS 系実測で epilogue 融合が平均 1.38〜1.45 倍。動機はイシュー
+/// #203。`docs/perf/cpu-gemm-epilogue-fusion.md` に本環境での実測を記録）。
+///
+/// `bias` は `Some(&[f32])` の場合 `n`（`B` の列数）と同じ長さが必須で、
+/// 各行へ加算される（`docs/public-api-design.md` §4.2 のブロードキャスト
+/// 規約と同じ「`[n]` を行方向へ複製」の意味論。`tensor_core::BackendOps::
+/// gemm_bias_act` のデフォルト実装〈`add` の broadcast〉と等価）。長さ
+/// 不一致は [`GemmError::BiasLenMismatch`]（カーネル本体アクセス前に
+/// 検証。REQ-8・OWASP A03）。
+///
+/// # bit 完全一致契約
+///
+/// epilogue（bias 加算・activation）は要素ごとに独立な演算で、パネル間の
+/// 演算順序（並列実行のタスク分割）に依存しない。したがって本関数の
+/// 結果は「`gemm_blis_parallel` で C を計算した後、全体へ 1 回だけ
+/// bias 加算・activation を適用した結果」と **bit 完全一致**する
+/// （`tests/gemm_epilogue_parity.rs` で検証）。GEMM 本体の FMA 契約
+/// （`f32::mul_add`）・累積順序は `gemm_blis_parallel` から変更しない。
+///
+/// `#[allow(clippy::too_many_arguments)]`: `gemm_blis_parallel`（`a`／`b`／
+/// `c`／`m`／`n`／`k` の 6 引数）に epilogue パラメータ（`bias`／`act`）を
+/// 追加した結果 8 引数になる。GEMM カーネル公開入口の既存慣例
+/// （`crates/backend-cpu/src/gemm.rs` の同 attribute 使用箇所と同方針）に
+/// 従い、構造体化はせず素朴な引数列のまま許容する。
+#[allow(clippy::too_many_arguments)]
+pub fn gemm_blis_bias_act_parallel(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    bias: Option<&[f32]>,
+    act: Activation,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    if let Some(bias) = bias
+        && bias.len() != n
+    {
+        return Err(GemmError::BiasLenMismatch {
+            expected: n,
+            actual: bias.len(),
+        });
+    }
+    // `Activation` は未知 variant（`#[non_exhaustive]`）を早期に拒否する。
+    // `apply_epilogue` 内で検証すると、`try_for_each` が行パネル並列の
+    // 途中パネルまで epilogue を適用した後にエラー終了しうる（`c` が
+    // 部分適用の不定状態で返る）。呼び出し前にここで検証し、GEMM 本体・
+    // epilogue のいずれにも触れない状態でのみエラーを返す。
+    if !matches!(act, Activation::None | Activation::Relu) {
+        return Err(GemmError::UnsupportedActivation);
+    }
+
+    // n == 0 は shape として合法（`gemm_blis_parallel` と同じ理由で
+    // no-op）。epilogue も対象要素が無いため何もすることがない。
+    if n == 0 {
+        return Ok(());
+    }
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let panel_rows = m.div_ceil(num_threads).max(1);
+
+    c.par_chunks_mut(panel_rows * n)
+        .enumerate()
+        .try_for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end);
+            apply_epilogue(c_chunk, n, bias, act)
+        })
+}
+
+/// [`gemm_blis_bias_act_parallel`] の epilogue 適用部（bias 行ブロード
+/// キャスト加算 → activation）。`c_panel` は行パネル 1 つ分（`rows * n`
+/// 要素、`n` 単位の行区切り）を対象とし、境界検査は行・列とも `n`
+/// 由来のスライス長で構造的に保証する（明示 `assert`／`unsafe` を要しない。
+/// REQ-8）。
+///
+/// `Activation` は `#[non_exhaustive]`（`tensor_core::backend_ops`）のため
+/// `_ =>` で未知 variant を静かに無視せず、[`GemmError::UnsupportedActivation`]
+/// を返す（未対応 activation を無視して不正な結果を返す fail-open を避ける。
+/// `tensor-core` と同一ワークスペースで管理されるため通常到達しないが、
+/// variant 追加時に本関数の更新漏れがあれば早期に検出できる）。
+fn apply_epilogue(
+    c_panel: &mut [f32],
+    n: usize,
+    bias: Option<&[f32]>,
+    act: Activation,
+) -> Result<(), GemmError> {
+    if let Some(bias) = bias {
+        for row in c_panel.chunks_mut(n) {
+            for (x, b) in row.iter_mut().zip(bias.iter()) {
+                *x += *b;
+            }
+        }
+    }
+    match act {
+        Activation::None => {}
+        Activation::Relu => {
+            for x in c_panel.iter_mut() {
+                *x = x.max(0.0);
+            }
+        }
+        _ => return Err(GemmError::UnsupportedActivation),
+    }
     Ok(())
 }
 
