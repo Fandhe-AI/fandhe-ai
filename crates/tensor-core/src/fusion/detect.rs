@@ -13,7 +13,7 @@
 //! #164 が担当する（設計書 §6.1）。本モジュールは「融合すべきか・
 //! どこまでか」の判定結果（[`FusionDecision`]）のみを返す。
 
-use super::graph::{FusionGraph, FusionNodeId, FusionOp};
+use super::graph::{FusionGraph, FusionGraphError, FusionNodeId, FusionOp};
 use crate::dispatch::DType;
 
 /// elementwise 連鎖長の上限（TASK-12.1 の内容規定「4〜6 段程度」の
@@ -138,14 +138,29 @@ pub(crate) enum FusionDecision {
 /// elementwise 連鎖が 1 ノードへ合流する `(a+b)*(c+d)` 形）はいずれも
 /// `reachable`（集合）と降順走査により自然に扱える。fan-out はそれ自体
 /// 融合不能条件にしない（設計書 §2.4・PoC-9 `ew_fanout` 実測根拠）。
-pub(crate) fn detect_fusion(graph: &FusionGraph, root: FusionNodeId) -> FusionDecision {
-    debug_assert!(
-        root.0 < graph.len(),
-        "detect_fusion は既存ノードの root でのみ呼ばれる契約（呼び出し側のバグ検出用）"
-    );
+///
+/// # エラー
+///
+/// `root` が `graph` の範囲外（既存ノード数以上）の場合は
+/// [`FusionGraphError::NodeIdOutOfRange`] を返す（#399 codex-review 指摘:
+/// 本関数は `pub(crate)` だが、後続の本番結線コード（#163／#164）から
+/// 任意の `FusionNodeId` を渡され得るため、`debug_assert!` のみでは
+/// release ビルドで境界検証が失われ `graph.node(root)` の添字アクセスが
+/// 本番経路で panic しうる。呼び出し側のバグ検出という当初の意図は
+/// 型付きエラーとして表現し直し、release ビルドでも同じ検証を維持する）。
+pub(crate) fn detect_fusion(
+    graph: &FusionGraph,
+    root: FusionNodeId,
+) -> Result<FusionDecision, FusionGraphError> {
+    if root.0 >= graph.len() {
+        return Err(FusionGraphError::NodeIdOutOfRange {
+            id: root.0,
+            len: graph.len(),
+        });
+    }
 
     if !graph.node(root).op.is_elementwise() {
-        return FusionDecision::Fallback(FallbackReason::RootNotElementwise);
+        return Ok(FusionDecision::Fallback(FallbackReason::RootNotElementwise));
     }
 
     // 到達可能（＝セグメント候補として展開されうる）ノード ID の集合。
@@ -173,18 +188,18 @@ pub(crate) fn detect_fusion(graph: &FusionGraph, root: FusionNodeId) -> FusionDe
             // ここで検証する（#162 レビュー指摘: 境界ノードの
             // contiguous/dtype が未検証だった）。
             if node.meta.dtype != DType::F32 {
-                return FusionDecision::Fallback(FallbackReason::UnsupportedDtype);
+                return Ok(FusionDecision::Fallback(FallbackReason::UnsupportedDtype));
             }
             if !node.meta.contiguous {
-                return FusionDecision::Fallback(FallbackReason::NonContiguous);
+                return Ok(FusionDecision::Fallback(FallbackReason::NonContiguous));
             }
             continue;
         }
         if node.meta.dtype != DType::F32 {
-            return FusionDecision::Fallback(FallbackReason::UnsupportedDtype);
+            return Ok(FusionDecision::Fallback(FallbackReason::UnsupportedDtype));
         }
         if !node.meta.contiguous {
-            return FusionDecision::Fallback(FallbackReason::NonContiguous);
+            return Ok(FusionDecision::Fallback(FallbackReason::NonContiguous));
         }
 
         // 上限判定は `included` へ挿入する**前**に行う。fan-in を含む
@@ -205,7 +220,7 @@ pub(crate) fn detect_fusion(graph: &FusionGraph, root: FusionNodeId) -> FusionDe
     }
 
     if included.len() < MIN_FUSED_CHAIN_LEN {
-        return FusionDecision::Fallback(FallbackReason::ChainTooShort);
+        return Ok(FusionDecision::Fallback(FallbackReason::ChainTooShort));
     }
 
     // 葉抽出: セグメントに含まれる各ノードの入力のうち、セグメントに
@@ -221,11 +236,11 @@ pub(crate) fn detect_fusion(graph: &FusionGraph, root: FusionNodeId) -> FusionDe
         }
     }
 
-    FusionDecision::Fuse(FusionSegment {
+    Ok(FusionDecision::Fuse(FusionSegment {
         nodes: included.into_iter().map(FusionNodeId).collect(),
         leaves: leaves.into_iter().map(FusionNodeId).collect(),
         root,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -254,7 +269,7 @@ mod tests {
         let n3 = g.push(FusionOp::Exp(n2), f32_meta(&[8])).unwrap();
         let n4 = g.push(FusionOp::Tanh(n3), f32_meta(&[8])).unwrap();
 
-        let decision = detect_fusion(&g, n4);
+        let decision = detect_fusion(&g, n4).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -277,7 +292,7 @@ mod tests {
         }
         let root = *chain.last().unwrap();
 
-        let decision = detect_fusion(&g, root);
+        let decision = detect_fusion(&g, root).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -301,7 +316,7 @@ mod tests {
         }
         let root = *chain.last().unwrap();
 
-        let decision = detect_fusion(&g, root);
+        let decision = detect_fusion(&g, root).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -332,7 +347,7 @@ mod tests {
 
         assert_eq!(g.node(a).use_count, 2, "a は b と c から参照される");
 
-        let decision = detect_fusion(&g, d);
+        let decision = detect_fusion(&g, d).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -357,7 +372,7 @@ mod tests {
         let mul = g.push(FusionOp::Mul(left, right), f32_meta(&[8])).unwrap();
         let root = g.push(FusionOp::Relu(mul), f32_meta(&[8])).unwrap();
 
-        let decision = detect_fusion(&g, root);
+        let decision = detect_fusion(&g, root).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -387,7 +402,7 @@ mod tests {
         let n6 = g.push(FusionOp::Add(n3, n4), f32_meta(&[8])).unwrap();
         let n7 = g.push(FusionOp::Add(n5, n6), f32_meta(&[8])).unwrap();
 
-        let decision = detect_fusion(&g, n7);
+        let decision = detect_fusion(&g, n7).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -415,7 +430,7 @@ mod tests {
         let n1 = g.push(FusionOp::Relu(x), f32_meta(&[4])).unwrap();
         let root = g.push(FusionOp::Exp(n1), f32_meta(&[4])).unwrap();
 
-        let decision = detect_fusion(&g, root);
+        let decision = detect_fusion(&g, root).unwrap();
         assert_eq!(
             decision,
             FusionDecision::Fallback(FallbackReason::NonContiguous)
@@ -436,7 +451,7 @@ mod tests {
         let tanh = g.push(FusionOp::Tanh(exp), f32_meta(&[4, 4])).unwrap();
         let relu2 = g.push(FusionOp::Relu(tanh), f32_meta(&[4, 4])).unwrap();
 
-        let decision = detect_fusion(&g, relu2);
+        let decision = detect_fusion(&g, relu2).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -467,7 +482,7 @@ mod tests {
         let relu2 = g.push(FusionOp::Relu(tanh), f32_meta(&[4])).unwrap();
         let tanh2 = g.push(FusionOp::Tanh(relu2), f32_meta(&[4])).unwrap();
 
-        let decision = detect_fusion(&g, tanh2);
+        let decision = detect_fusion(&g, tanh2).unwrap();
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
@@ -476,7 +491,7 @@ mod tests {
 
         // relu 自身を root にすれば、その手前で完結する別セグメントとして
         // 独立に検出できる（sum 側からは辿れない独立した連結成分）。
-        let relu_decision = detect_fusion(&g, relu);
+        let relu_decision = detect_fusion(&g, relu).unwrap();
         let FusionDecision::Fallback(reason) = relu_decision else {
             panic!("expected Fallback (single node < MIN_FUSED_CHAIN_LEN)");
         };
@@ -495,7 +510,7 @@ mod tests {
             .unwrap();
         let root = g.push(FusionOp::Exp(view), f32_meta(&[4])).unwrap();
 
-        let decision = detect_fusion(&g, root);
+        let decision = detect_fusion(&g, root).unwrap();
         assert_eq!(
             decision,
             FusionDecision::Fallback(FallbackReason::NonContiguous)
@@ -509,7 +524,7 @@ mod tests {
         let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
         let root = g.push(FusionOp::Relu(x), f32_meta(&[4])).unwrap();
 
-        let decision = detect_fusion(&g, root);
+        let decision = detect_fusion(&g, root).unwrap();
         assert_eq!(
             decision,
             FusionDecision::Fallback(FallbackReason::ChainTooShort)
@@ -526,7 +541,7 @@ mod tests {
         let b = g.push(FusionOp::Input, f32_meta(&[4, 4])).unwrap();
         let gemm = g.push(FusionOp::Gemm(a, b), f32_meta(&[4, 4])).unwrap();
 
-        let decision = detect_fusion(&g, gemm);
+        let decision = detect_fusion(&g, gemm).unwrap();
         assert_eq!(
             decision,
             FusionDecision::Fallback(FallbackReason::RootNotElementwise)
@@ -544,9 +559,27 @@ mod tests {
         let b = g.push(FusionOp::Mul(a, a), f32_meta(&[8])).unwrap();
         let c = g.push(FusionOp::Add(b, x), f32_meta(&[8])).unwrap();
 
-        let first = detect_fusion(&g, c);
+        let first = detect_fusion(&g, c).unwrap();
         for _ in 0..10 {
-            assert_eq!(detect_fusion(&g, c), first);
+            assert_eq!(detect_fusion(&g, c).unwrap(), first);
         }
+    }
+
+    /// #399 codex-review 指摘の再発防止: 範囲外の `root`（まだ push
+    /// されていないノード ID）を渡した場合、release ビルドでも
+    /// `graph.node(root)` の添字アクセスで panic せず、型付きエラー
+    /// [`FusionGraphError::NodeIdOutOfRange`] を返すことを検証する
+    /// （`debug_assert!` のみに依存していた従来実装は release ビルド
+    /// では検証が消え本番経路の panic になっていた）。
+    #[test]
+    fn out_of_range_root_returns_typed_error_instead_of_panicking() {
+        let mut g = FusionGraph::new();
+        let _x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+
+        let result = detect_fusion(&g, FusionNodeId(5));
+        assert_eq!(
+            result,
+            Err(FusionGraphError::NodeIdOutOfRange { id: 5, len: 1 })
+        );
     }
 }
