@@ -231,14 +231,21 @@
     §1 のとおり `Tape::new(ops)` で構築したどの `Tape` でも常に
     埋まっているため、この非対称性は例外なく常に成り立つ）。バック
     エンド実行の失敗は次の実体化境界（後続の `matmul`／
-    `sum`／`max`・`Tape::backward`・`Var::value`／`to_tensor`）で
-    初めて表面化しうる（§3.5.2 参照）。`value`／`to_tensor` の非
+    `sum`／`max`・`Tape::backward` が VJP の入力として forward 記録済みの
+    未実体化ノードを読み出す時点・`Var::value`／`to_tensor`）で
+    初めて表面化しうる（§3.5.2 参照。**`Tape::backward` 自体が融合の
+    適用箇所になるわけではない**——融合されるのはあくまで forward が
+    記録した elementwise 遅延グラフであり、`grad.rs::vjp` が計算する
+    勾配式そのもの〈例: `tanh` の VJP `grad * (1 - y * y)`〉は融合 IR へ
+    記録されず、常に具体 `Tensor` として直接計算される。§3.3 で確定）。
+    `value`／`to_tensor` の非
     fallible 契約を壊さないよう、実体化の発火点を次の 3 層で規定する
     （型・実装の詳細は §3.5）:
     1. **fallible 境界**: `Var::matmul`／`sum`／`max`（既に
        `Result<Var<'_>, AutodiffError>` を返す契約。非 elementwise の
        実体化境界、§3.2 (a)(b)）が自身の計算のために入力側の未実体化
-       値を必要とする場合、`Tape::backward` の VJP 連鎖内部、および
+       値を必要とする場合、`Tape::backward` が `grad.rs::vjp` の入力
+       として forward 記録済みの未実体化ノードを読み出す場合、および
        §3.2 (d) の連鎖長上限に fallible な演算の呼び出し中に到達した
        場合。`ops`（§1。常に埋まっている必須所有値）の `ops.run_fused`
        が `Unsupported` 以外の失敗を返した場合に限り、型付きエラー
@@ -657,44 +664,75 @@ API でグラフを遅延構築する「明示的遅延バッファ」方式**�
 |---|------|------|
 | (a) | reduction ノード（`sum`／`max`）へ到達 | PoC-9 実測で reduction エピローグは自動融合対象外（§1）。融合境界ノードとして扱う |
 | (b) | `gemm` ノードへ到達 | PoC-9 実測で matmul をまたぐ融合は分断される（§1）。#203（GEMM epilogue 融合）までは境界として扱う |
-| (c) | `Var::value`／`Var::to_tensor`／`Gradients::get`（非 fallible 境界）、または `matmul`／`sum`／`max`・`Tape::backward` の VJP 連鎖内部が入力側の未実体化値を必要とした時点（fallible 境界）。いずれも `autodiff` 側の materialize ヘルパー（§3.5.1〜3.5.3）に帰着する。`ops`（§1。`Tape::new(ops)` で構築したどの `Tape` でも常に埋まっている必須所有値）を使い `FusionPlan::from_ops` を経由して `BackendOps::run_fused` を試み、`BackendError::Unsupported` は同じ `ops` の per-op メソッドへフォールバックする（§3.5.2・§3.5.3。codex-review 第 13 波 P1-b 指摘への回答により、`autodiff` 内の実行主体〈第 11〜12 波の「コア融合実行器」〉は撤回し、フォールバック先を `ops` 自身の既存 per-op メソッドへ一本化する。層 2 に限りそれも失敗した場合の最終手段として `eval.rs` を使う。§2.5「`autodiff` 側の役割」） | `Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更せず、`Storage<T>`（非公開）も `Pending` バリアントを持たない（§3.5.1 で確定）。したがって `Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）にも「未実体化」を表す分岐は存在しない。遅延状態は `autodiff::TapeNode`（`tape.rs`）だけが持つ（§3.5.1）。fallible 境界での実体化失敗は型付きエラーとして `?` で伝播し（層 1。`Unsupported` 以外の失敗時のみ）、非 fallible 境界での実体化失敗は per-op メソッド（必要なら最終手段の `eval.rs`）による再計算で必ず正しい値を返す（層 2。§3.5.4） |
+| (c) | `Var::value`／`Var::to_tensor`／`Gradients::get`（非 fallible 境界）、または `matmul`／`sum`／`max`（入力側の未実体化値を必要とした時点）・`Tape::backward`（`grad.rs::vjp` の入力として forward 記録済みの未実体化ノードを読み出す時点）（fallible 境界）。**融合されるのは forward が記録した elementwise 遅延グラフのみであり、VJP 自体の勾配式は融合対象外**（§3.3）。いずれも `autodiff` 側の materialize ヘルパー（§3.5.1〜3.5.3）に帰着する。`ops`（§1。`Tape::new(ops)` で構築したどの `Tape` でも常に埋まっている必須所有値）を使い `FusionPlan::from_ops` を経由して `BackendOps::run_fused` を試み、`BackendError::Unsupported` は同じ `ops` の per-op メソッドへフォールバックする（§3.5.2・§3.5.3。codex-review 第 13 波 P1-b 指摘への回答により、`autodiff` 内の実行主体〈第 11〜12 波の「コア融合実行器」〉は撤回し、フォールバック先を `ops` 自身の既存 per-op メソッドへ一本化する。層 2 に限りそれも失敗した場合の最終手段として `eval.rs` を使う。§2.5「`autodiff` 側の役割」） | `Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更せず、`Storage<T>`（非公開）も `Pending` バリアントを持たない（§3.5.1 で確定）。したがって `Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）にも「未実体化」を表す分岐は存在しない。遅延状態は `autodiff::TapeNode`（`tape.rs`）だけが持つ（§3.5.1）。fallible 境界での実体化失敗は型付きエラーとして `?` で伝播し（層 1。`Unsupported` 以外の失敗時のみ）、非 fallible 境界での実体化失敗は per-op メソッド（必要なら最終手段の `eval.rs`）による再計算で必ず正しい値を返す（層 2。§3.5.4） |
 | (d) | 連鎖長上限（4〜6 段）到達 | TASK-12.1 の内容規定（4〜6 段程度）。PoC-9 の代表ワークロード規模（`ew4`／`ew6`）とも整合する上限であり、無制限連鎖によるカーネル生成コスト・レジスタ圧の増大を避ける。上限に到達させた演算が `matmul`／`sum`／`max`（fallible）か `add`／`mul`／`relu`／`exp`／`tanh`（非 fallible）かにより (c) の層 1／層 2 いずれかへ合流する（§3.5.3・§3.5.4）。**`add`／`mul` 自身も上限到達時は自分自身のノードを実体化してから返る**ため、この場合の `Var::add`／`mul` は「shape 妥当性 + バックエンド実行結果」の両方を表すことになる（§3.5.4） |
 | (e) | 非融合対象パターン検出（transpose 混在等、`NodeMeta.contiguous == false`）| §1・§2.3 の非融合フォールバック方針 |
 
 ### 3.3 autodiff との関係
 
 動的テープ式 autodiff（PoC-v2-2、`docs/spec/03-poc/poc-v2-2-autodiff/README.md:170`。
-実装は `crates/autodiff/src/tape.rs`・`eval.rs`）は、**forward・
-backward いずれの実行方式にも透過的に融合が働きうる**構成とする
-（codex-review 第 5 波 P1 指摘を受けた本改訂での訂正: 旧稿「forward
-値計算の下層」という限定は不正確だった。§1 で確定した「単一の
-fallible 呼び出しの内部」という窓は forward・backward のどちらの
-呼び出しにも同じ形で適用される）。すなわち:
+実装は `crates/autodiff/src/tape.rs`・`eval.rs`）は、**forward の
+elementwise 連鎖に限り透過的に融合が働きうる**構成とする（codex-review
+第 20 波 P1 指摘への回答による本節の訂正: 旧稿「forward・backward
+いずれの実行方式にも透過的に融合が働きうる」は実装不能な過大な契約
+だった。理由は次項「backward（VJP）は融合対象外」のとおり。§1 で
+確定した「単一の fallible 呼び出しの内部」という窓自体は forward・
+backward のどちらの呼び出しにも同じ形で適用されるが、**融合される
+対象（forward が記録した elementwise 遅延グラフ）が backward 側には
+存在しない**ため、窓が同じでも実質的に融合が起きるのは forward の
+遅延グラフを読み出す箇所に限られる）。すなわち:
 
 - `Tape` が記録する `Op`（`tape.rs` の `Op` enum、MatMul／Add／Mul／
   Relu／Exp／Tanh 等）のノード単位の粒度は、融合の適用有無に関わらず
   変更しない。
-- 勾配計算（VJP、`grad.rs::vjp`）は `Op` 単位のまま変更しない契約と
-  する。融合はあくまで**ある単一の fallible 呼び出しの内部でどう
+- **backward（VJP）は融合対象外（初期スコープ外。codex-review 第 20 波
+  P1 指摘への回答）**: 勾配計算（VJP、`grad.rs::vjp`）は `Op` 単位の
+  まま変更しない契約とし、**VJP が計算する勾配式そのもの**（例:
+  `tanh` の VJP `grad * (1 - y * y)`。`grad.rs::tanh_grad_factor` と
+  `eval::mul` の呼び出しに対応）は融合 IR（`FusedOpKind`。§3.4）へ一切
+  記録せず、常に具体 `Tensor` として直接計算される。理由は 3 点ある:
+  (1) 融合の実体化ヘルパー（`materialize_fallible`。§3.5.2）が走査
+  するのは forward 記録済みの `TapeNode` 遅延部分グラフのみであり、
+  VJP 計算式のために新しく構築される中間値はこの遅延グラフに属さない。
+  (2) `grad.rs::vjp` の実装（`crates/autodiff/src/grad.rs:31`〜）は各
+  演算の VJP 関数（`tanh_grad_factor`／`sigmoid_grad_factor`／
+  `elementwise_mul_mask` 等）を呼び、返り値は最初から具体 `Tensor`
+  であって `TapeNode`／`Op` として記録されない。VJP 計算式を融合する
+  には、これらのヘルパーを遅延グラフへ変換する専用の実装（VJP 用一時
+  グラフ）を新設する必要があり、現行設計にその経路はない。
+  (3) `FusedOpKind`（§3.4）は `Add`／`Mul`／`Relu`／`Exp`／`Tanh` のみを
+  表現でき、`tanh` の VJP が要する `sub`（`1 - y * y`）を表現できない。
+  融合はあくまで**ある単一の fallible 呼び出しの内部でどう
   カーネルを呼ぶか**という実行方式の最適化であり、テープが記録する
   計算グラフの構造（VJP が辿るノード単位）には影響を与えない。
-- **実質的な適用箇所（codex-review 第 6 波・第 13 波 P1-a 指摘を受け
-  本節を確定する。§1「演算跨ぎの遅延・二項 elementwise 演算の遅延化」
-  契約に一致させる）**: 個々の `Var` 演算メソッドの呼び出し粒度自体
-  （1 呼び出し 1 演算）は変更しないが、**`add`／`mul`／`relu`／`exp`／
-  `tanh`（elementwise 5 演算）は常に複数回の独立した公開 `Var` 呼び
-  出しをまたいで遅延（`Pending`）を持ち越せる**（`ops` は §1 のとおり
-  `Tape::new(ops)` で構築したどの `Tape` でも必須所有値として常に
-  埋まっているため、この遅延は例外なく発生する。§3.5.1）ため、
-  `a.add(&b)?.mul(&c)?.relu().exp().tanh()` のような現行公開 API の
-  記述形そのものが 4〜6 段の elementwise 連鎖（二項・単項の混在を
-  含む）を形成しうる。透過的融合の実質的な適用箇所は次の 3 箇所で
-  ある: (i) elementwise の遅延グラフを、後続の `matmul`／`sum`／
-  `max`（非 elementwise の fallible 演算）が入力として読み出す時点
-  （窓 (a)・層 1。§3.5.2）、(ii) `Tape::backward` の VJP 連鎖内部
-  （窓 (a)・層 1。§3.5.2）、(iii) `Var::value`／`Var::to_tensor`／
-  `Gradients::get` が同じ遅延グラフを直接読み出す時点（窓 (a)・層 2、
-  非 fallible 境界。§3.5.3）。将来追加されうる複合エントリポイント
+- **`Tape::backward` と融合の関係は「読み出し」に限られる**:
+  `Tape::backward` が `grad.rs::vjp` の入力として forward 記録済みの
+  未実体化ノード（`nodes[a.0].value` 等）を読み出す場合、その値は
+  forward 側が記録した elementwise 遅延グラフの実体化であり、
+  `materialize_fallible`（§3.5.2）を経由しうる。これは forward の
+  遅延グラフを実体化しているのであって、VJP 自体の計算を融合して
+  いるのではない（上記の区別）。
+- **実質的な適用箇所（codex-review 第 6 波・第 13 波 P1-a 指摘、および
+  第 20 波 P1 指摘を受け本節を確定する。§1「演算跨ぎの遅延・二項
+  elementwise 演算の遅延化」契約に一致させる）**: 個々の `Var` 演算
+  メソッドの呼び出し粒度自体（1 呼び出し 1 演算）は変更しないが、
+  **`add`／`mul`／`relu`／`exp`／`tanh`（elementwise 5 演算）は常に
+  複数回の独立した公開 `Var` 呼び出しをまたいで遅延（`Pending`）を
+  持ち越せる**（`ops` は §1 のとおり `Tape::new(ops)` で構築したどの
+  `Tape` でも必須所有値として常に埋まっているため、この遅延は例外なく
+  発生する。§3.5.1）ため、`a.add(&b)?.mul(&c)?.relu().exp().tanh()`
+  のような現行公開 API の記述形そのものが 4〜6 段の elementwise 連鎖
+  （二項・単項の混在を含む）を形成しうる。透過的融合の実質的な適用
+  箇所は次の 2 箇所である（forward の遅延グラフを読み出す箇所に限る。
+  上記のとおり backward〈VJP〉自体は適用箇所ではない）: (i) elementwise
+  の遅延グラフを、後続の `matmul`／`sum`／`max`（非 elementwise の
+  fallible 演算）または `Tape::backward`（forward 記録済みノードの
+  読み出しとして）が入力として読み出す時点（窓 (a)・層 1。§3.5.2）、
+  (ii) `Var::value`／`Var::to_tensor`／`Gradients::get` が同じ遅延
+  グラフを直接読み出す時点（窓 (a)・層 2、非 fallible 境界。§3.5.3。
+  `Gradients::get` は `grad.rs::vjp` が常に具体 `Tensor` を返す構造
+  ゆえ実際には未実体化ノードに遭遇しないが、契約としては層 2 と同一に
+  扱う。§3.5.3 参照）。将来追加されうる複合エントリポイント
   （窓 (b)。§3.5.5）は現時点では必須スコープ外のまま据え置く。
 
 ### 3.4 遅延グラフと `BackendOps`・`Tensor` 契約の接続
@@ -791,8 +829,9 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   （実装は #164 のスコープ。以下は #164 が満たすべき接続契約）:
 
   ```rust
-  /// 単一の fallible 呼び出し（`Tape::backward` 内の VJP 連鎖、または
-  /// 将来の複合エントリポイント。§1）の実行スタック内だけで構築・破棄
+  /// 単一の fallible 呼び出し（`Var::matmul`／`sum`／`max` が forward の
+  /// elementwise 遅延グラフを入力として読み出す場合、または将来の複合
+  /// エントリポイント。§1）の実行スタック内だけで構築・破棄
   /// される、融合対象区間 1 本分のグラフビルダー。呼び出し元の関数
   /// フレームを越えて共有・保持されることはなく、`Tensor`／`Storage`
   /// のどのフィールドにも格納されない。**`Arc`／`Mutex`／`Send + Sync`
@@ -899,7 +938,8 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
     `Option<Box<dyn BackendOps>>` フィールドは、いずれも本改訂で単一の
     必須所有値 `ops: Box<dyn BackendOps + Send>` フィールドへ置き換える）**:
     materialize ヘルパーが呼ばれるのは §3.5.2 の層 1（`matmul`／`sum`／
-    `max`・`Tape::backward` の VJP 連鎖内部）・§3.5.3 の層 2
+    `max`・`Tape::backward` が forward 記録済みの未実体化ノードを読み
+    出す場合）・§3.5.3 の層 2
     （`Var::value`／`Var::to_tensor`／`Gradients::get`）・§3.5.4（連鎖長
     上限到達時）、または将来の複合エントリポイント（§3.5.5）であり、
     いずれも `Tape` が既に保持する非公開フィールド `ops: Box<dyn
@@ -1278,7 +1318,8 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   `add`／`mul`／`relu`／`exp`／`tanh` は常に自身の出力を実体化せずに
   返す（§3.5.1）。
   いずれの発火点で呼ぶかは §3.5.2 の層 1（`matmul`／`sum`／`max`・
-  `Tape::backward` の VJP 連鎖内部）・§3.5.3 の層 2（`Var::value`／
+  `Tape::backward` が forward 記録済みの未実体化ノードを読み出す
+  場合）・§3.5.3 の層 2（`Var::value`／
   `Var::to_tensor`／`Gradients::get`）・§3.5.4（連鎖長上限到達時。
   fallible／非 fallible いずれの経路にも合流する）、または将来の複合
   エントリポイント（§3.5.5）が決める。呼び出しは「呼び出し元の関数
@@ -1409,10 +1450,12 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
   自体は変わらない（`NodeId` の単調増加が非巡回性を構造的に保証する
   ため）。
 
-### 3.5.2 層 1（fallible 境界）: 後続の fallible `Var` 演算・`Tape::backward` の VJP 連鎖内部
+### 3.5.2 層 1（fallible 境界）: 後続の fallible `Var` 演算・`Tape::backward` による forward 未実体化ノードの読み出し
 
 - **後続の非 elementwise fallible `Var` 演算**（`matmul`／`sum`／`max`）
-  および `Tape::backward` の VJP 連鎖内部は、入力側の値を読む際に
+  および `Tape::backward` が `grad.rs::vjp` の入力として forward
+  記録済みの未実体化ノード（`nodes[a.0].value` 等）を読み出す場合は、
+  入力側の値を読む際に
   `Var::value()`（層 2・非 fallible・実体化失敗を eager フォールバックで
   必ず吸収する API。§3.5.3）を**呼ばない**。かわりに専用の内部経路
   `materialize_fallible`（`autodiff` クレート内の `pub(crate)` フリー
@@ -1482,8 +1525,9 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
      数値一致複合判定を満たすことを再検証する。§2.5「`autodiff` 側の
      役割」）。
   実体化が完了したら、**実体化を要求した対象ノード（手順 1 の起点。
-  `matmul`／`sum`／`max` 自身の入力、または `Tape::backward` の VJP
-  計算が読み出そうとした 1 ノード）自身の `OnceCell` にのみ**その場で
+  `matmul`／`sum`／`max` 自身の入力、または `Tape::backward` が
+  `grad.rs::vjp` の入力として読み出そうとした forward 記録済みの
+  1 ノード）自身の `OnceCell` にのみ**その場で
   `set()` する（連鎖の**途中**にある `add`／`mul`／`relu`／`exp`／
   `tanh` ノードの `OnceCell` は空のまま残る。ここで中間ノードまで
   `set()` してしまうと、まさに §2.5「`autodiff` 側の役割」で明記した
@@ -1501,8 +1545,9 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
   「構造的に到達しない」という前提自体が本設計と整合しない: 層 1 は
   `get_or_try_init`（unstable。§3.5.3 で不採用が確定済み）を使えないため
   「空チェック → 計算 → `set`」という 2 段階の手順にならざるを得ず、
-  §2.4「fan-out の扱い」が既に認めているとおり同一ノードが複数の
-  VJP 連鎖・複数の入力経路から共有されうる本設計では、この 2 段階の間に
+  §2.4「fan-out の扱い」が既に認めているとおり同一ノードが `grad.rs::vjp`
+  の複数の呼び出し・複数の入力経路から共有されうる本設計では、この
+  2 段階の間に
   別経路が同じノードを先に実体化し `set` してしまうことは通常の走査
   結果として起こりうる。`OnceCell` は `!Sync` であり本設計はスレッド間
   競合を前提としない〈単一スレッド内での再入のみ〉ため、「競合」ではなく
@@ -1536,13 +1581,31 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
   `pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError>`
   は変更しない）は、それ自体が単一の fallible 呼び出しである。内部で
   テープを逆順に辿り各ノードの VJP（`grad.rs::vjp`。`Op` 単位のまま。
-  §3.3）を計算する過程で、1 つの VJP 計算式が複数の elementwise 演算
-  から成る場合（例: `tanh` の VJP `grad * (1 - y * y)` は `mul`・`sub`
-  の連鎖）も、上記と同じ `materialize_fallible`（`self.ops`〈§1のとおり
-  常に埋まっている必須所有値〉を借用し融合を試みて `Unsupported` のみ
-  `ops` の per-op メソッドへフォールバックし（それも失敗すれば `?` で
-  伝播する）、それ以外の失敗はフォールバックせず `?` で伝播する。上記
-  手順 2〜4）を用いる。
+  §3.3）を計算する。**この `materialize_fallible` の適用範囲は forward
+  記録済みの遅延部分グラフの読み出しに限られる**（codex-review 第 20
+  波 P1 指摘への回答による訂正。旧稿は「1 つの VJP 計算式が複数の
+  elementwise 演算から成る場合（例: `tanh` の VJP `grad * (1 - y * y)`
+  は `mul`・`sub` の連鎖）も同じ `materialize_fallible` で融合する」と
+  述べていたが、これは実装不能な誤りだった。§3.3 の訂正のとおり、
+  (1) `materialize_fallible` が走査するのは forward 記録済みの
+  `TapeNode` 遅延部分グラフのみで、VJP 計算式が新しく作る中間値は
+  この遅延グラフに属さない、(2) `grad.rs::vjp` の各 VJP 関数（例:
+  `tanh_grad_factor`／`eval::mul`）は最初から具体 `Tensor` を返し、
+  `TapeNode`／`Op` として記録されない、(3) `FusedOpKind` は `sub` を
+  表現できない、の 3 点により `grad * (1 - y * y)` のような VJP 計算式
+  自体を融合 IR へ記録する経路は存在しない）。`Tape::backward` が
+  `materialize_fallible` を使うのは、`grad.rs::vjp` が入力として読む
+  ノード（`nodes[a.0].value` 等。`Op::Mul(a, b)` の `a`／`b` のように、
+  forward が記録した elementwise 遅延グラフの一部でありうる）が未実体化
+  の場合に限る。この場合の実体化手順は §3.5.2 の他の呼び出し元
+  （`matmul`／`sum`／`max`）と同じ手順 1〜4（`self.ops`〈§1のとおり
+  常に埋まっている必須所有値〉を借用し forward の遅延グラフの融合を
+  試みて `Unsupported` のみ `ops` の per-op メソッドへフォールバックし
+  〈それも失敗すれば `?` で伝播する〉、それ以外の失敗はフォールバック
+  せず `?` で伝播する）を用いる。**VJP 計算式そのものの計算**（`vjp()`
+  および各 VJP 関数の内部実装）は、この実体化で得た入力 `Tensor` を
+  受け取ったあとは融合を経由せず `grad.rs` 既存の `eval.rs` 呼び出し
+  （`eval::mul`／`tanh_grad_factor` 等）で直接計算する。
 - **`Gradients::get` は非 fallible のまま**: `backward` は自身が返す
   `Gradients` に含まれるすべての勾配 `Tensor` を、`Ok(Gradients { .. })`
   を返す直前までに実体化し終える。したがって `Gradients::get` は
@@ -1639,9 +1702,13 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
       })
   }
   ```
-- `Gradients::get` も同じ非 fallible 境界として扱う（`backward` が
-  返す直前に全勾配を実体化し終える契約〈§3.5.2〉のもとでは追加の
-  発火点として使われる場面は稀だが、契約としては層 2 と同一に扱う）。
+- `Gradients::get` も同じ非 fallible 境界として扱う。`grad.rs::vjp` の
+  各分岐（`grad.rs:41`〜`:127`）が返す勾配はいずれも `build_tensor`／
+  `eval::*` で構築した具体 `Tensor` であり `TapeNode`／`Op` を経由しない
+  ため（§3.3「backward〈VJP〉は融合対象外」）、`Gradients::get` が
+  未実体化ノードに実際に遭遇することは構造上ない。それでも契約としては
+  層 2 と同一に扱う（将来 VJP 用一時グラフ〈§6.2〉が導入された場合に
+  備えた統一）。
 - **`value()` が `Ref` を保持している最中に他の `Var` の実体化が
   発生しても panic しない**: `Var::value()` は `Ref::map(self.tape
   .nodes.borrow(), |nodes| nodes[self.id.0].value.get_or_init(..))`
@@ -1682,8 +1749,9 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
     「バックエンド実行結果」も表すことになる**（§1「shape 検証と
     実行を分離する」の例外——連鎖長上限到達という構造的な理由により
     実行が即時化されるため。§3.5.1 参照）。
-- 一方、`matmul`／`sum`／`max`・`Tape::backward` の VJP 連鎖内部
-  （層 1）が読み出しの過程で上限超過の遅延部分グラフに遭遇した場合は、
+- 一方、`matmul`／`sum`／`max`・`Tape::backward`（forward 記録済みノード
+  の読み出しとして）（層 1）が読み出しの過程で上限超過の遅延部分グラフに
+  遭遇した場合は、
   §3.5.2 の `materialize_fallible`（融合を試み、失敗は `?` で伝播）に
   そのまま従う。
 - 上限が「到達させた演算が `matmul`／`sum`／`max`（fallible）か
@@ -1862,7 +1930,7 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
 | #162（連鎖検出） | §2（グラフ表現・ノード種別・メタデータ・fan-out）を用いた融合可能連鎖（elementwise のみで閉じた 4〜6 段の連結成分）の検出アルゴリズム |
 | #163（融合カーネル生成） | §2.4 の fan-out レジスタ内解決方針、§3.4 で確定した `FusionPlan::ops`（`FusedOpKind` 列挙）／`output_shape`／`dtype`／`leaf_count`／`use_count` の公開 DTO アクセサを読んだカーネルソース生成、§4・§5 の境界検査・数値一致・インジェクション対策 |
 | #164（ディスパッチ統合） | §1 の「facade 経由の ops 供給・単一公開構築子への統合」（spec#52 確定構成。`autodiff::backend_wiring`・グローバル provider 登録機構はいずれも撤回済み）・「二項 elementwise 演算の遅延化」契約（codex-review 第 6・13・14 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Sync` 不要）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `ops: Box<dyn BackendOps + Send>`（必須所有値。`+ Send` は `Tape: Send` 維持のための trait object bound）と、渡された `ops` をそのまま格納する唯一の公開コンストラクタ `Tape::new(ops: Box<dyn BackendOps + Send>) -> Tape`（§1。出荷済みの無引数 `Tape::new()`・`impl Default for Tape` を置き換える破壊的変更。REQ-9 の 2026-08-08 追記〈`facade` を唯一のサポートされる公開 API 面とする宣言〉を根拠に許容するが、`!`／`BREAKING CHANGE:` 告知は省略しない）の実装（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。`Device` → 具体 `BackendOps` の解決（既定バックエンド供給を含む）は `facade` クレート（TASK-9.3、本イシューのスコープ外）が担い、`autodiff` は `backend-cpu`／`backend-cuda`／`backend-metal` のいずれにも依存しない。`autodiff` 内のユニットテスト（`#[cfg(test)] mod tests { .. }`）は同じ `Tape::new(ops)` へ直接テスト用フィクスチャを渡すことで融合実証・非融合基準比較を行う（別名のテスト専用ヘルパは新設しない）。`tensor-core/src/backend_ops.rs` は provider 登録機構を持たない状態のまま変更しない。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`add`／`mul`／`relu`／`exp`／`tanh` が常に遅延グラフを延長し `matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装。§3.5.2（層 1・fallible 境界。入力読み出しは `Var::value()` を呼ばず専用の `materialize_fallible`〈`pub(crate)`。`run_fused` の失敗のうち `BackendError::Unsupported` のみ `ops` の per-op メソッドへフォールバックし〈それも失敗すれば型付き `AutodiffError::Backend` のまま `?` で伝播する〉、`Unsupported` 以外は最初から per-op メソッドへのフォールバックを試みず型付き `AutodiffError::Backend` のまま `?` で伝播する〉のみを経由する）・§3.5.3（層 2・非 fallible 境界。`materialize_non_fallible` を経由し、融合失敗はエラー種別を問わず `ops` の per-op メソッドへの逐次フォールバックで、それも失敗した場合は `eval.rs` を最終手段として、必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`〈unstable〉は使わない）・§3.5.4（連鎖長上限との相互作用。`add`／`mul` が上限到達時に自身を実体化する場合は層 1 の失敗伝播規約も併せ持つ）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。§3.5.2 の `materialize_fallible` における `OnceCell::set` の `Err`（二重設定。fan-out に伴う二重到達）は `panic!`／`unreachable!()` を使わず通常分岐として扱い、`get()` で読み直した既存値を採用する（`None` 到達時は `AutodiffError::Backward` へ安全側フォールする）。**既存テスト資産（TASK-1.5〜1.8）の再検証**: `Tape::new()` が eager から常時融合実行へ変わることに伴い、既存テストが §4 の数値一致複合判定を満たすことを再検証する（許容誤差の緩和はユーザー承認必須。`.claude/rules/coding-rust.md`「テスト・ベンチ」）。**境界検査テスト**: `crates/autodiff/src/` 配下のソースが `backend-cpu`／`backend-cuda`／`backend-metal` のいずれも参照しないことを固定するテスト（grep ベースまたは同等の検証。`autodiff` の `Cargo.toml` に具体バックエンドクレートへの依存が存在しないことも合わせて確認する）を追加する。**`Tape: Send` の静的アサーション**は #165 (x) の受け入れ条件をそのまま満たすことを本タスクの受け入れ条件とする（二重定義を避けるため検証仕様自体は §6.1 #165 に一本化する）。**`eval.rs` 非 panic 化（codex-review 第 19 波 P1 指摘への回答。設計方針は §2.5「`eval.rs` 非 panic 化の設計方針」）**: `eval.rs::build_tensor`（`eval.rs:72`〜`:91`）が含む `Tensor::new(...).unwrap_or_else(|_| unreachable!(...))` を排除し、`tensor-core` に追加する総 (total) コンストラクタ `Tensor::from_shape_fill`（`pub` + `#[doc(hidden)]`）を用いて shape とデータ長の一致を構築経路の型で保証する構造へ改修することを本タスクの受け入れ条件に加える。`eval.rs` 配下に `panic!`／`unwrap()`／`expect()`／`unreachable!()` が存在しないことを固定するテスト（grep ベースまたは同等の検証。上記の境界検査テストと同様の手法でよい）を追加し、既存の数値計算ロジック（`matmul`／`broadcast_binary`／`unary`／`reduce_axis`／`softmax_along`／`mse_loss`／`cross_entropy_loss` が返す値そのもの）は変更しないため、既存の単体テスト（数値微分突合・shape 検査テスト等）が改修前後で結果不変であることを確認する。 |
-| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「単一の公開構築子への統合」の検証**（`Tape::new(ops)` へ既定バックエンド相当のフィクスチャを渡した場合・別の `ops` を渡した場合のいずれで構築した `Tape` でも、演算列が §3.2 の判定を満たす限り融合が試みられること〈`run_fused` を融合実装でオーバーライドしたカウンタ付きテスト用 `BackendOps` を、`crates/autodiff/src/` 配下のユニットテストから `Tape::new(ops)` に渡して検証する——この検証手段は `crates/autodiff/tests/` の統合テストでは `ops` フィクスチャの構築に必要な非公開型へアクセスできない場合があるため、ユニットテストを正とする〉、両者の数値結果が数値一致複合判定〈§4〉を満たすこと、`run_fused` が実際に呼ばれたことをカウンタで確認すること、`facade` を経由しない直接構築・facade 経由の構築のいずれも利用者の明示指定なしに融合されること〈同一の融合方針を持つことの確認〉、非融合の数値基準が必要なテストは `run_fused` が常に `BackendError::Unsupported` を返す〈またはさらに per-op メソッドも失敗する〉テスト用 `BackendOps` を、同じく `crates/autodiff/src/` 配下のユニットテストから `Tape::new(ops)` へ渡して基準を固定すること〈`ops: None` という非融合コンストラクタは存在しないため、この基準固定手段を正規の代替として文書化する〉を検証する）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6・8・13 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `add`／`mul`／`relu`／`exp`／`tanh` の混在連鎖（例: `x.add(&y)?.relu().mul(&z)?.exp().tanh()`。二項・単項混在の 4〜6 段）が単一の評価呼び出しへ融合されること（`run_fused` の呼び出し回数が 1 回だけであることを確認する。`run_fused` が `Unsupported` を返す設定では `ops` の per-op メソッドへのフォールバック結果が、`run_fused` が常に `Unsupported` を返すよう固定した非融合基準〈上記〉と同一入力に対し数値一致複合判定〈§4〉を満たす値を返すことも検証する）、(i') **shape エラーが記録時に当該演算の `Err` として即時返ること（実行は遅延済みのまま）**: 不正な shape の `add`／`mul` 呼び出しがその場で `Err(AutodiffError::Shape(_))` を返し、テープにノードが記録されないこと（§1「shape 検証と実行を分離する」の検証）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗の種別ごとの分岐: (ii-a) `run_fused` が `BackendError::Unsupported` を返した場合は `ops` の per-op メソッドへフォールバックし、後続の `matmul`／`sum`／`max` が `Ok` を返すこと（値は数値一致複合判定〈§4〉を満たす）、(ii-b) `run_fused` が `Unsupported` 以外の `Err` を返した場合は、それを引き起こした後続の演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時（エラー種別を問わない）、`Var::value`／`Var::to_tensor` が `panic!` せず、`ops` の per-op メソッド（それも失敗する設定では `eval.rs` の最終手段）へのフォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、`Unsupported` 以外の失敗では `Tape::backward` が `AutodiffError::Backend` を返すこと、`Unsupported` の場合は `ops` の per-op メソッドへのフォールバックにより成功すること、per-op メソッドが構造的に成功する既定の `backend-cpu` を使う場合は常に成功すること、成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも遅延グラフがその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out・fan-in（`(a+b)*(c+d)` 形の合流。§3.5.1「走査順」の DAG 一般化）が単一の融合グラフ構築で正しく解決されることの検証、(viii) **TASK-1.5〜1.8 の既存テスト資産が `Tape::new()` の実行経路変更後も §4 の数値一致複合判定を満たすことの回帰確認**（#164 の再検証をテストとして固定する）、(ix) **`autodiff` の依存境界検査**: `crates/autodiff/src/` 配下で `backend-cpu`／`backend-cuda`／`backend-metal` のいずれも参照しないこと（#164 が追加する境界検査テストと同一。#164 の実装がこの検証項目を満たすことをここで受け入れ条件として明記する）、(x) **`Tape: Send` の静的アサーション**（§1「`Tape: Send` を維持する」の検証。`fn assert_send<T: Send>() {}` に `Tape` を渡すコンパイル時テストを追加し、`crates/autodiff/src/` 内で定義するテスト用 `BackendOps` 実装を `Tape::new(ops)` へ渡した場合で構築した `Tape` が `Send` を満たすことを固定する。`CudaBackendOps`／`MetalBackendOps` が `Send` を自動導出することは §1「既存の 3 バックエンド実装が `Send` を満たすことの確認」が示す設計上の file:line 根拠にとどめる——`autodiff` は `backend-cuda`／`backend-metal` への依存を持たないため、これらの具体型を実際に構築してテストへ渡すことは本受け入れ条件に含めない） |
+| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「単一の公開構築子への統合」の検証**（`Tape::new(ops)` へ既定バックエンド相当のフィクスチャを渡した場合・別の `ops` を渡した場合のいずれで構築した `Tape` でも、演算列が §3.2 の判定を満たす限り融合が試みられること〈`run_fused` を融合実装でオーバーライドしたカウンタ付きテスト用 `BackendOps` を、`crates/autodiff/src/` 配下のユニットテストから `Tape::new(ops)` に渡して検証する——この検証手段は `crates/autodiff/tests/` の統合テストでは `ops` フィクスチャの構築に必要な非公開型へアクセスできない場合があるため、ユニットテストを正とする〉、両者の数値結果が数値一致複合判定〈§4〉を満たすこと、`run_fused` が実際に呼ばれたことをカウンタで確認すること、`facade` を経由しない直接構築・facade 経由の構築のいずれも利用者の明示指定なしに融合されること〈同一の融合方針を持つことの確認〉、非融合の数値基準が必要なテストは `run_fused` が常に `BackendError::Unsupported` を返す〈またはさらに per-op メソッドも失敗する〉テスト用 `BackendOps` を、同じく `crates/autodiff/src/` 配下のユニットテストから `Tape::new(ops)` へ渡して基準を固定すること〈`ops: None` という非融合コンストラクタは存在しないため、この基準固定手段を正規の代替として文書化する〉を検証する）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6・8・13 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `add`／`mul`／`relu`／`exp`／`tanh` の混在連鎖（例: `x.add(&y)?.relu().mul(&z)?.exp().tanh()`。二項・単項混在の 4〜6 段）が単一の評価呼び出しへ融合されること（`run_fused` の呼び出し回数が 1 回だけであることを確認する。`run_fused` が `Unsupported` を返す設定では `ops` の per-op メソッドへのフォールバック結果が、`run_fused` が常に `Unsupported` を返すよう固定した非融合基準〈上記〉と同一入力に対し数値一致複合判定〈§4〉を満たす値を返すことも検証する）、(i') **shape エラーが記録時に当該演算の `Err` として即時返ること（実行は遅延済みのまま）**: 不正な shape の `add`／`mul` 呼び出しがその場で `Err(AutodiffError::Shape(_))` を返し、テープにノードが記録されないこと（§1「shape 検証と実行を分離する」の検証）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗の種別ごとの分岐: (ii-a) `run_fused` が `BackendError::Unsupported` を返した場合は `ops` の per-op メソッドへフォールバックし、後続の `matmul`／`sum`／`max` が `Ok` を返すこと（値は数値一致複合判定〈§4〉を満たす）、(ii-b) `run_fused` が `Unsupported` 以外の `Err` を返した場合は、それを引き起こした後続の演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時（エラー種別を問わない）、`Var::value`／`Var::to_tensor` が `panic!` せず、`ops` の per-op メソッド（それも失敗する設定では `eval.rs` の最終手段）へのフォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` が `grad.rs::vjp` の入力として forward 記録済みの未実体化ノードを読み出す際に forward の遅延グラフの融合が発生する場合（§3.5.2）に、`Unsupported` 以外の失敗では `Tape::backward` が `AutodiffError::Backend` を返すこと、`Unsupported` の場合は `ops` の per-op メソッドへのフォールバックにより成功すること、per-op メソッドが構造的に成功する既定の `backend-cpu` を使う場合は常に成功すること、成功時は `Gradients::get` がそのまま非 fallible に値を返せること（`grad.rs::vjp` 自体の勾配式は融合対象外であり具体 `Tensor` として直接計算されることを併せて確認する。§3.3）、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも遅延グラフがその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out・fan-in（`(a+b)*(c+d)` 形の合流。§3.5.1「走査順」の DAG 一般化）が単一の融合グラフ構築で正しく解決されることの検証、(viii) **TASK-1.5〜1.8 の既存テスト資産が `Tape::new()` の実行経路変更後も §4 の数値一致複合判定を満たすことの回帰確認**（#164 の再検証をテストとして固定する）、(ix) **`autodiff` の依存境界検査**: `crates/autodiff/src/` 配下で `backend-cpu`／`backend-cuda`／`backend-metal` のいずれも参照しないこと（#164 が追加する境界検査テストと同一。#164 の実装がこの検証項目を満たすことをここで受け入れ条件として明記する）、(x) **`Tape: Send` の静的アサーション**（§1「`Tape: Send` を維持する」の検証。`fn assert_send<T: Send>() {}` に `Tape` を渡すコンパイル時テストを追加し、`crates/autodiff/src/` 内で定義するテスト用 `BackendOps` 実装を `Tape::new(ops)` へ渡した場合で構築した `Tape` が `Send` を満たすことを固定する。`CudaBackendOps`／`MetalBackendOps` が `Send` を自動導出することは §1「既存の 3 バックエンド実装が `Send` を満たすことの確認」が示す設計上の file:line 根拠にとどめる——`autodiff` は `backend-cuda`／`backend-metal` への依存を持たないため、これらの具体型を実際に構築してテストへ渡すことは本受け入れ条件に含めない） |
 | #203（GEMM epilogue 融合） | §3.2 (b) の `gemm` 境界を bias／activation epilogue まで拡張する設計変更 |
 
 ### 6.2 未決事項（スコープ外）
@@ -1936,6 +2004,18 @@ PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` �
   では達成しない。ストライド付きビューを融合 IR（§2）内で表現・伝播する
   設計（`NodeMeta` へのストライド情報追加等）ができれば transpose を
   融合対象へ含められる可能性があり、#162 以降の拡張候補として記録する。
+- **backward（VJP）融合（初期スコープ外・未確定。codex-review 第 20 波
+  P1 指摘への回答で §3.3 が確定した除外の裏返し）**: `grad.rs::vjp` が
+  計算する勾配式そのもの（例: `tanh` の VJP `grad * (1 - y * y)`）を
+  融合対象に含めるには、少なくとも 2 点の拡張を要する: (i) VJP 計算式
+  専用の一時的な融合グラフを構築する経路（現行の融合 IR は forward が
+  記録した `TapeNode` 遅延グラフのみを走査対象とし、VJP 関数が生成する
+  中間値を記録する仕組みを持たない）、(ii) `FusedOpKind`（§3.4）への
+  演算表現の拡張（`sub` 等、現行は `Add`／`Mul`／`Relu`／`Exp`／`Tanh`
+  のみ）。いずれも本文書では設計を確定しない。TASK-12.2（#163 融合
+  カーネル実装以降）の実測結果を踏まえ、backward 融合が性能上有意な
+  効果を持つかを別途評価したうえで、拡張するかどうかをユーザー承認を
+  得て判断する（本節はあくまで拡張候補の記録であり、確定契約ではない）。
 - **f16 対応**: `BackendOps`（§2.1）・`NodeMeta.dtype`（§2.3）とも現状
   f32 固定であり、f16 融合カーネルの型設計は未着手。`BackendOps` 自体の
   f16 ジェネリック化（`backend_ops.rs` コメント「f16 経路のジェネリック化
