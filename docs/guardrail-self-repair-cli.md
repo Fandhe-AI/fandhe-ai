@@ -457,6 +457,50 @@ OS レベル隔離（低権限コンテナ・ネットワーク遮断による�
 サンドボックス実行）は本節が定義する信頼境界の外にある将来課題であり、
 `out-of-scope-tracking.md` 準拠で PR 本文の「対象外」節に追跡する。
 
+### 3.8 除外設定の固定（判定迂回防止）
+
+PR #361 codex-review P1 指摘（main.rs:277 相当）: `--policy-exclusion`
+未指定時の既定パス（`sandbox_root/policy-exclusion.toml`）は候補が書き込み
+可能な sandbox 内にある。旧実装は `RepairCompositeGate::verify` が呼ばれる
+たびこのファイルをディスクから再読込していたため、候補が自身の diff に
+本来 match して人間承認（エスカレーション）へ回すはずだった除外ルールを
+`policy-exclusion.toml` の書き換えで削除・縮小し、match を回避して
+ガードレール判定（REQ-4 の 3 分岐判定）を迂回できる余地があった
+（A08「判定の迂回経路を作らない」違反）。攻撃方向はルールの**追加**では
+ない点に注意: `guardrail::decision::decide` は `exclusion_rule_ids` が
+1 件以上あれば機械判定の結果によらず無条件でエスカレーションへ回す
+「除外リストは安全側にしか作用しない」設計（REQ-5）であり、ルールを
+増やしても判定は緩まない。緩む方向は「本来 match すべきルールを消し
+match させない」ことだけである。
+
+v2 は次の 2 つの防御を組み合わせて塞ぐ:
+
+1. **除外設定の事前固定**: `self_repair::diff_signals::
+   load_policy_exclusion_config` を **候補適用前（sandbox 構築直後・候補
+   未適用の状態）に一度だけ**呼び、返る `guardrail::PolicyExclusionConfig`
+   を `RepairCompositeGateSpec::policy_exclusion` として試行ループ全体で
+   不変値のまま使い回す。`RepairCompositeGate::verify` は以降この値を
+   `crate::diff_signals::measure_diff_signals` へ渡すのみで、ファイルパスを
+   再読込しない。既定パスの場合、この事前固定が読むのは `baseline_commit`
+   時点の内容（`RunSandbox::create` が `git clone --local` で反映した直後の
+   状態）であり、`--repo` の作業ツリー上の未コミット編集は反映されない
+2. **防御的拒否**: 候補（`--candidates`）の変更対象ファイル一覧に
+   `policy-exclusion.toml`／`guardrail.toml`（ファイル名の大文字小文字を
+   区別しない比較）が含まれる場合、`crates/self-repair/src/candidate.rs::
+   apply_candidate` が候補適用前に型付きエラー（`SelfRepairError::
+   FixGeneration`）で無条件拒否する。1 の事前固定と独立した多重防御である。
+   ただしこの判定はファイル名（basename）ベースであり、`--policy-exclusion`
+   に既定と異なるファイル名（例: `my-rules.toml`）を sandbox 内のパスとして
+   指定した運用まではカバーしない。その運用での唯一の防御は 1（事前固定）
+   であり、これは意図した境界である（`--policy-exclusion` に sandbox
+   到達不能な外部パスを指定する運用であれば、候補はそもそもそのファイルへ
+   書き込めない）
+
+いずれもコード上の強制であり、除外リスト・ガードレール閾値そのものの
+変更（値の緩和）はこれまでどおり `.claude/rules/security.md`
+「ガードレール閾値・ポリシー除外リストの変更は必ず人間の承認を経る」に
+従いユーザー承認を要する。
+
 ## 4. スコープ外の明示
 
 以下は本文書の対象外とし、各タスクへの参照のみ記載する

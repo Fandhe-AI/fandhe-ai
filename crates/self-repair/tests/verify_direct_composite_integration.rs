@@ -174,11 +174,19 @@ fn gate_spec(
     sandbox: &Path,
     baseline_commit: &str,
 ) -> RepairCompositeGateSpec<SystemCommandRunner> {
+    // `main.rs::run_run` と同じ契約: ポリシー除外設定は候補適用前に一度だけ
+    // ロードし、不変値として `RepairCompositeGateSpec` へ渡す（PR #361
+    // codex-review P1 指摘対応。`self_repair::diff_signals::
+    // load_policy_exclusion_config` doc「呼び出し契約」参照）。
+    let policy_exclusion = self_repair::diff_signals::load_policy_exclusion_config(
+        &repo_root().join("policy-exclusion.toml"),
+    )
+    .expect("policy-exclusion.toml のロードに失敗");
     RepairCompositeGateSpec {
         workspace: sandbox.to_path_buf(),
         sandbox_root: sandbox.to_path_buf(),
         baseline_commit: baseline_commit.to_string(),
-        policy_exclusion_path: repo_root().join("policy-exclusion.toml"),
+        policy_exclusion,
         bench_bin: BENCH_BIN.to_string(),
         workload_sources: vec![WORKLOAD_SOURCE.to_string()],
         bench_iterations: self_repair::verify_bench::MIN_BENCH_ITERATIONS,

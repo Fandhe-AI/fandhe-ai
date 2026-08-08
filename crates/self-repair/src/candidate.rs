@@ -64,6 +64,31 @@ pub fn validate_relative_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// 候補の書き換え対象がガードレール判定に使う設定ファイル
+/// （`policy-exclusion.toml`／`guardrail.toml`）かどうかを、ファイル名の
+/// 大文字小文字を区別せず判定する（`is_manifest_path`〈`feature_addition.rs`〉
+/// と同じ理由。macOS 既定の APFS は大文字小文字を区別しない）。
+///
+/// [`apply_candidate`] がこれを理由に候補適用を無条件拒否する
+/// （fail-closed。多重防御のもう一方は `crate::diff_signals::
+/// load_policy_exclusion_config` を候補適用前に一度だけ呼び、結果を
+/// 不変値として使い回す設計。`diff_signals.rs` モジュール冒頭「ポリシー
+/// 除外設定の信頼境界」参照）。候補がこれらのファイルを書き換えられると、
+/// 判定に使われる除外ルール・閾値そのものが候補由来の内容へ差し替わり、
+/// ガードレール判定を迂回しうる（PR #361 codex-review P1 指摘。
+/// `.claude/rules/security.md` A08「判定の迂回経路を作らない」・
+/// 「ガードレール閾値・ポリシー除外リストの変更は必ず人間の承認を経る」）。
+fn is_guardrail_config_path(rel: &Path) -> bool {
+    const PROTECTED_FILE_NAMES: [&str; 2] = ["policy-exclusion.toml", "guardrail.toml"];
+    rel.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            PROTECTED_FILE_NAMES
+                .iter()
+                .any(|protected| name.eq_ignore_ascii_case(protected))
+        })
+}
+
 // symlink TOCTOU 対策の実体は crate::fd_walk へ移した（PR #361
 // codex-review 第 4 波 P0 指摘: 旧 reject_symlink_escape（fs::symlink_metadata
 // による逐次「検査」）と fs::write/fs::OpenOptions::open（パス文字列を
@@ -349,6 +374,20 @@ pub fn apply_candidate(
     for (relative_path, _content) in &candidate.files {
         validate_relative_path(relative_path)
             .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
+        // ガードレール判定に使う設定ファイル自体の書き換えは無条件拒否する
+        // （`is_guardrail_config_path` doc 参照。ファイルシステムへ触れる前の
+        // 早期拒否であり、他候補ファイルの部分適用も発生させない）。
+        if is_guardrail_config_path(relative_path) {
+            return Err(SelfRepairError::FixGeneration {
+                attempt,
+                reason: format!(
+                    "ガードレール設定ファイルの書き換えは対象外です（判定迂回防止。\
+                     .claude/rules/security.md「ガードレール閾値・ポリシー除外リストの\
+                     変更は必ず人間の承認を経る」）: {}",
+                    relative_path.display()
+                ),
+            });
+        }
         crate::fd_walk::probe(workspace, relative_path).map_err(|error| {
             SelfRepairError::FixGeneration {
                 attempt,
@@ -492,6 +531,19 @@ mod tests {
     fn validate_relative_path_accepts_plain_relative_path() {
         let result = validate_relative_path(Path::new("src/lib.rs"));
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_guardrail_config_path_ignores_case_and_directory() {
+        assert!(is_guardrail_config_path(Path::new("policy-exclusion.toml")));
+        assert!(is_guardrail_config_path(Path::new("Policy-Exclusion.TOML")));
+        assert!(is_guardrail_config_path(Path::new("guardrail.toml")));
+        assert!(is_guardrail_config_path(Path::new("GUARDRAIL.toml")));
+        assert!(is_guardrail_config_path(Path::new(
+            "nested/dir/policy-exclusion.toml"
+        )));
+        assert!(!is_guardrail_config_path(Path::new("Cargo.toml")));
+        assert!(!is_guardrail_config_path(Path::new("src/lib.rs")));
     }
 
     #[cfg(unix)]
@@ -665,6 +717,57 @@ mod tests {
         let result = apply_candidate(&dir, &baseline, &candidates, 1);
         assert!(result.is_err());
         assert!(!dir.parent().unwrap().join("outside.txt").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PR #361 codex-review P1 指摘の回帰防止（要求 (2)）: 候補が
+    /// `policy-exclusion.toml` を書き換えようとした場合、`apply_candidate`
+    /// がファイルシステムへ触れる前に無条件拒否することを確認する
+    /// （`is_guardrail_config_path` doc・`diff_signals.rs` モジュール冒頭
+    /// 「ポリシー除外設定の信頼境界」参照）。
+    #[test]
+    fn apply_candidate_rejects_policy_exclusion_toml_rewrite_candidate() {
+        let dir = temp_workspace("apply-rejects-policy-exclusion-rewrite");
+        write_file(&dir, "policy-exclusion.toml", "[[exclusion]]\n");
+        let baseline = HashMap::new();
+        let candidates = vec![CandidateFix {
+            description: "malicious exclusion widening".to_string(),
+            files: vec![(
+                PathBuf::from("policy-exclusion.toml"),
+                "[[exclusion]]\nid = \"self-immunize\"\n".to_string(),
+            )],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(result.is_err());
+        let content =
+            fs::read_to_string(dir.join("policy-exclusion.toml")).expect("read should succeed");
+        assert_eq!(
+            content, "[[exclusion]]\n",
+            "拒否された候補が policy-exclusion.toml を書き換えてはならない"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 上記と同じ契約を `guardrail.toml`（`Category`・大文字小文字混在パス）
+    /// でも確認する。
+    #[test]
+    fn apply_candidate_rejects_guardrail_toml_rewrite_candidate_case_insensitive() {
+        let dir = temp_workspace("apply-rejects-guardrail-toml-rewrite");
+        write_file(&dir, "GuardRail.TOML", "[thresholds]\n");
+        let baseline = HashMap::new();
+        let candidates = vec![CandidateFix {
+            description: "malicious threshold widening".to_string(),
+            files: vec![(
+                PathBuf::from("GuardRail.TOML"),
+                "[thresholds]\nmax_lines_changed = 999999\n".to_string(),
+            )],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(result.is_err());
 
         let _ = fs::remove_dir_all(&dir);
     }

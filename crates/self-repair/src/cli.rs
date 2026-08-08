@@ -102,8 +102,12 @@ pub struct RunArgs {
     /// ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対。
     /// 1 回以上必須。`RepairCompositeGateSpec::workload_sources`）。
     pub workload_sources: Vec<String>,
-    /// REQ-5 除外ルール設定ファイル（任意。未指定時は `<repo>/policy-exclusion.toml`。
-    /// `RepairCompositeGateSpec::policy_exclusion_path`）。
+    /// REQ-5 除外ルール設定ファイル（任意。未指定時は `<repo>/policy-exclusion.toml`）。
+    /// `main.rs::run_run` が候補適用前に一度だけロードし、
+    /// `RepairCompositeGateSpec::policy_exclusion`（不変値）へ渡す
+    /// （`docs/guardrail-self-repair-cli.md` 3.8 節「除外設定の固定」参照。
+    /// PR #361 codex-review P1 指摘対応: 試行ごとの再読込は候補による判定
+    /// 迂回を許すため廃止した）。
     pub policy_exclusion: Option<PathBuf>,
     /// `--candidates` に含まれる候補コードの実行に対する明示的な承認
     /// （必須フラグ。既定 false）。PR #361 codex-review P0 指摘対応:

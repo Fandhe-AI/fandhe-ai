@@ -42,6 +42,23 @@
 //! （`.claude/rules/security.md` A03）。パス引数は `--` 区切りで分離し、
 //! シェル（`sh -c` 等）は一切経由しない（`crate::exec` モジュール冒頭ドキュメント
 //! と同じ設計）。
+//!
+//! # ポリシー除外設定の信頼境界（PR #361 codex-review P1 指摘対応）
+//! [`load_policy_exclusion_config`] は候補適用前に一度だけ呼び出し、返る
+//! [`guardrail::PolicyExclusionConfig`] を試行ループ全体で不変値として使い回す
+//! 契約とする（同関数 doc 参照）。`policy-exclusion.toml` の既定パスは
+//! sandbox 内（候補適用対象そのもの）を指すため、[`measure_diff_signals`]
+//! が呼ばれるたびファイルを再読込する実装だと、候補が自身の diff に本来
+//! match するはずの除外ルールを**削除・縮小**したうえで書き換え、以降の
+//! `verify` にそのルール抜きの状態を読ませて match を回避できてしまう
+//! （攻撃方向は「ルールの追加」ではない: `guardrail::decision::decide` は
+//! `exclusion_rule_ids` が 1 件以上あれば機械判定の結果によらず無条件で
+//! エスカレーションへ回す「安全側にしか作用しない」設計〈`crates/guardrail/
+//! src/decision.rs` モジュール冒頭「判定順序の契約」参照〉であるため、
+//! ルールを増やしても判定は緩まない。緩む方向は「本来 match すべきルールを
+//! 消し match させない」ことだけである。A08「判定の迂回経路を作らない」
+//! 違反。`crate::verify_direct_composite::RepairCompositeGate` が本モジュール
+//! の契約をどう守るかは同モジュールのドキュメント参照）。
 
 use std::path::Path;
 
@@ -560,51 +577,86 @@ fn gaming_suspect_from_files(changed_files: &[ChangedFile]) -> bool {
     touches_test && touches_prod
 }
 
-/// `guardrail` のポリシー除外リスト評価（REQ-5）を `sandbox_root` 上で実行する。
-/// `policy_exclusion_path` の `policy-exclusion.toml` をロードし、
-/// `baseline_commit` と現作業木の diff に対して評価する。移植元:
-/// `tests/revalidation_bug_fix.rs::evaluate_exclusion_rules`（`std::fs::read_to_string`
-/// を用いる点は同一。`guardrail::EvaluationContext::from_repo` 自体が内部で git を
-/// 起動するため、`CommandRunner` 注入はここでは効かない——これは guardrail 側
-/// 公開 API の既存契約であり、本モジュールで変更しない）。
-fn evaluate_exclusion_rules(
-    sandbox_root: &Path,
-    baseline_commit: &str,
+/// `policy_exclusion_path` の `policy-exclusion.toml` を読み込み・パースする。
+///
+/// # 呼び出し契約（PR #361 codex-review P1 指摘対応）
+/// **呼び出し元は候補適用前に一度だけ本関数を呼び、返る [`guardrail::
+/// PolicyExclusionConfig`] を試行ループ全体で使い回さなければならない**
+/// （[`crate::verify_direct_composite::RepairCompositeGate`] が保持する）。
+/// 以前の実装は [`evaluate_exclusion_rules`] 内でこのロードを**試行ごとに**
+/// （`RepairCompositeGate::verify` が呼ばれるたび）行っていた。
+/// `policy_exclusion_path` の既定値（`main.rs::run_run`）は
+/// sandbox 内の書き込み可能なパス（`sandbox_root/policy-exclusion.toml`。
+/// `RunSandbox::create` が `git clone --local` で `baseline_commit` 時点の
+/// 内容を反映した直後の状態）であり、`sandbox_root` は候補適用対象
+/// そのものである。候補が `policy-exclusion.toml` を書き換えて、本来
+/// 自身の diff に match して人間承認（エスカレーション）へ回すはずだった
+/// ルールを削除・縮小すれば、次回以降の `verify` 呼び出しがその改変済み
+/// ルールを読み込み、match を回避してガードレール判定
+/// （`GuardrailAdoptionJudge`）を迂回できてしまう（`guardrail::decision::
+/// decide` は `exclusion_rule_ids` が 1 件以上あれば無条件でエスカレー
+/// ションへ回す「安全側にしか作用しない」設計のため、ルールの**追加**は
+/// 判定を緩めない。A08「判定の迂回経路を作らない」違反となるのは削除・
+/// 縮小方向のみ）。本関数を「sandbox 構築直後・候補未適用の状態」で
+/// 一度だけ呼び、結果を不変値として保持することで、候補による自己免除を
+/// 構造的に防ぐ（多重防御のもう一方は `crate::candidate::apply_candidate`
+/// によるガードレール設定ファイル自体の書き換え拒否）。
+pub fn load_policy_exclusion_config(
     policy_exclusion_path: &Path,
-) -> Result<Vec<String>, DiffSignalsError> {
+) -> Result<guardrail::PolicyExclusionConfig, DiffSignalsError> {
     let toml = std::fs::read_to_string(policy_exclusion_path).map_err(|error| {
         DiffSignalsError::new(format!(
             "{} の読み込みに失敗しました: {error}",
             policy_exclusion_path.display()
         ))
     })?;
-    let config = guardrail::load_policy_exclusion(&toml).map_err(|error| {
+    guardrail::load_policy_exclusion(&toml).map_err(|error| {
         DiffSignalsError::new(format!("policy-exclusion.toml のパースに失敗: {error}"))
-    })?;
+    })
+}
+
+/// `guardrail` のポリシー除外リスト評価（REQ-5）を `sandbox_root` 上で実行する。
+/// `policy_exclusion`（[`load_policy_exclusion_config`] が候補適用前に一度だけ
+/// ロードした不変値。[`load_policy_exclusion_config`] doc「呼び出し契約」
+/// 参照）と `baseline_commit` から現作業木までの diff を突き合わせて評価する。
+/// 移植元: `tests/revalidation_bug_fix.rs::evaluate_exclusion_rules`
+/// （ロード部分は [`load_policy_exclusion_config`] へ分離済み。
+/// `guardrail::EvaluationContext::from_repo` 自体が内部で git を起動するため、
+/// `CommandRunner` 注入はここでは効かない——これは guardrail 側公開 API の
+/// 既存契約であり、本モジュールで変更しない）。
+fn evaluate_exclusion_rules(
+    sandbox_root: &Path,
+    baseline_commit: &str,
+    policy_exclusion: &guardrail::PolicyExclusionConfig,
+) -> Result<Vec<String>, DiffSignalsError> {
     let ctx = guardrail::EvaluationContext::from_repo(sandbox_root, baseline_commit).map_err(
         |error| DiffSignalsError::new(format!("EvaluationContext の構築に失敗: {error}")),
     )?;
-    let evaluation = guardrail::ExclusionEvaluation::evaluate(&config.rules, &ctx)
+    let evaluation = guardrail::ExclusionEvaluation::evaluate(&policy_exclusion.rules, &ctx)
         .map_err(|error| DiffSignalsError::new(format!("除外リスト評価に失敗: {error}")))?;
     Ok(evaluation.effective_rule_ids())
 }
 
-/// `sandbox_root` 上で `baseline_commit` からの diff・ポリシー除外リストを
-/// **試行ごとに**実測し、4 シグナルをまとめて返す
-/// （[`crate::verify_direct_composite::RepairCompositeGate::verify`] から
-/// 候補適用直後の作業木に対して毎試行呼ばれる想定。モジュール冒頭ドキュメント
-/// 参照）。
+/// `sandbox_root` 上で `baseline_commit` からの diff を**試行ごとに**実測し、
+/// 4 シグナルをまとめて返す（[`crate::verify_direct_composite::
+/// RepairCompositeGate::verify`] から候補適用直後の作業木に対して毎試行
+/// 呼ばれる想定。モジュール冒頭ドキュメント参照）。
+///
+/// `policy_exclusion` はポリシー除外リストの評価にのみ使う不変値であり、
+/// 本関数はこれをロードし直さない（[`load_policy_exclusion_config`] doc
+/// 「呼び出し契約」参照。呼び出し元が候補適用前に一度だけロードした値を
+/// 試行ごとに使い回す）。
 ///
 /// # Errors
 ///
-/// `baseline_commit` の形式検証・git 呼び出し・ポリシー除外リストのロード／
-/// 評価のいずれかに失敗した場合 [`DiffSignalsError`]（fail-closed。未計測値を
+/// `baseline_commit` の形式検証・git 呼び出し・ポリシー除外リストの評価の
+/// いずれかに失敗した場合 [`DiffSignalsError`]（fail-closed。未計測値を
 /// 既定値で埋めない）。
 pub fn measure_diff_signals<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
     baseline_commit: &str,
-    policy_exclusion_path: &Path,
+    policy_exclusion: &guardrail::PolicyExclusionConfig,
 ) -> Result<DiffSignals, DiffSignalsError> {
     validate_commit_ref(baseline_commit)?;
     // 未追跡（新規追加）ファイルも `git diff <baseline_commit>` の対象に含める
@@ -616,7 +668,7 @@ pub fn measure_diff_signals<R: CommandRunner>(
     let api_broken = api_signature_touched(runner, sandbox_root, baseline_commit, &changed_files)?;
     let gaming_suspect = gaming_suspect_from_files(&changed_files);
     let exclusion_rule_ids =
-        evaluate_exclusion_rules(sandbox_root, baseline_commit, policy_exclusion_path)?;
+        evaluate_exclusion_rules(sandbox_root, baseline_commit, policy_exclusion)?;
     Ok(DiffSignals {
         lines_changed,
         api_broken,
@@ -1084,6 +1136,15 @@ mod tests {
         assert!(err.message().contains("warning"));
     }
 
+    /// diff 計測に失敗する経路（不正な `baseline_commit`／spawn 失敗）は
+    /// ポリシー除外リスト評価まで到達しないため、ダミーの空ルール
+    /// （`std::fs::read_to_string` を経由しない値）で十分（`evaluate_exclusion_rules`
+    /// が `policy_exclusion` を使うのは全 diff 計測が成功した最後の手順のみ。
+    /// `measure_diff_signals` 本体参照）。
+    fn empty_policy_exclusion() -> guardrail::PolicyExclusionConfig {
+        guardrail::PolicyExclusionConfig { rules: Vec::new() }
+    }
+
     #[test]
     fn measure_diff_signals_rejects_invalid_baseline_commit_before_spawning() {
         let runner = FailingRunner;
@@ -1091,7 +1152,7 @@ mod tests {
             &runner,
             Path::new("/sandbox"),
             "--evil",
-            Path::new("/sandbox/policy-exclusion.toml"),
+            &empty_policy_exclusion(),
         )
         .expect_err("不正な baseline_commit は git 起動前に拒否されるはず");
         assert!(err.message().contains("baseline_commit"));
@@ -1103,7 +1164,7 @@ mod tests {
             &FailingRunner,
             Path::new("/sandbox"),
             "abc1234",
-            Path::new("/sandbox/policy-exclusion.toml"),
+            &empty_policy_exclusion(),
         )
         .expect_err("spawn 失敗は Err として伝播するはず");
         assert!(err.message().contains("起動に失敗"));
@@ -1294,15 +1355,184 @@ mod tests {
             .find(|dir| dir.join("policy-exclusion.toml").is_file())
             .map(|dir| dir.join("policy-exclusion.toml"))
             .expect("リポジトリルートの policy-exclusion.toml が見つからないはず");
+        let policy_exclusion = load_policy_exclusion_config(&policy_exclusion_path)
+            .expect("policy-exclusion.toml のロードに失敗");
 
-        let signals =
-            measure_diff_signals(&runner, &sandbox, &baseline_commit, &policy_exclusion_path)
-                .expect("measure_diff_signals 実行に失敗");
+        let signals = measure_diff_signals(&runner, &sandbox, &baseline_commit, &policy_exclusion)
+            .expect("measure_diff_signals 実行に失敗");
         assert!(
             signals.api_broken,
             "rename と同時に baseline の pub fn sub を削除した場合は api_broken=true \
              になるはず（PR #361 Codex レビュー P1: rename 表記が git show に渡され \
              非 0 終了が一律『新規ファイル』に丸められると、この破壊が見逃される）"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// PR #361 codex-review P1 の回帰テスト（本体）: `policy_exclusion` を
+    /// 候補適用前（本テストでは sandbox 構築直後）に一度だけロードした値は、
+    /// sandbox 内の `policy-exclusion.toml` がその後（例えば候補による
+    /// 書き換えで）縮小・削除されても `measure_diff_signals` の判定には反映
+    /// されないことを確認する。
+    ///
+    /// 実際の迂回方向はルールの**追加**ではなく**削除・縮小**である
+    /// （`guardrail::decision::decide` の判定順序契約: `exclusion_rule_ids`
+    /// が 1 件以上あれば機械判定の結果によらず無条件でエスカレーションへ回る
+    /// 「安全側にしか作用しない」設計。`crates/guardrail/src/decision.rs`
+    /// モジュール冒頭「判定順序の契約」・`crates/guardrail/src/
+    /// policy_exclusion/mod.rs` モジュール冒頭参照）。したがって候補にとって
+    /// 都合が良い迂回は「本来 match して自身をエスカレーションさせるはずの
+    /// ルールを、適用後に消してしまい match させない」方向であり、本テストは
+    /// この方向を検証する（ルール追加は match 件数が増えるだけで、エスカレー
+    /// ションを強めることはあっても弱めない。「追加すれば自分の diff を除外
+    /// できる」という記述は誤りであり、本テストのタイトル・アサーションで
+    /// 訂正する）。
+    #[test]
+    fn measure_diff_signals_uses_policy_exclusion_loaded_before_candidate_application_even_after_sandbox_file_is_narrowed()
+     {
+        use crate::exec::SystemCommandRunner;
+
+        let sandbox = std::env::temp_dir().join(format!(
+            "self-repair-diff-signals-policy-exclusion-fixation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH 以降のはず")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        std::fs::create_dir_all(sandbox.join("src")).expect("sandbox ディレクトリ作成に失敗");
+
+        let runner = SystemCommandRunner::new();
+        let run_ok = |args: &[&str]| {
+            let output = runner
+                .run("git", args, &sandbox)
+                .unwrap_or_else(|error| panic!("git {args:?} の起動に失敗: {error}"));
+            assert!(
+                output.success(),
+                "git {args:?} が失敗しました: {}",
+                output.log_tail()
+            );
+        };
+
+        // baseline: モデル定義ファイル（除外ルール `arch-hyperparameter-change`
+        // 相当の対象パス）を含む。
+        std::fs::write(sandbox.join("src/model.rs"), "pub struct Model;\n")
+            .expect("src/model.rs 書き込み失敗");
+        run_ok(&["init", "-q"]);
+        run_ok(&["add", "-A"]);
+        run_ok(&[
+            "-c",
+            "user.email=self-repair-361-policy-exclusion-fixation@example.invalid",
+            "-c",
+            "user.name=self-repair-361-policy-exclusion-fixation",
+            "commit",
+            "-q",
+            "-m",
+            "baseline",
+        ]);
+        let baseline_output = runner
+            .run("git", &["rev-parse", "HEAD"], &sandbox)
+            .expect("git rev-parse HEAD の起動に失敗");
+        assert!(baseline_output.success(), "git rev-parse HEAD が失敗");
+        let baseline_commit = baseline_output.log_tail().trim().to_string();
+
+        // sandbox 内に、モデル定義ファイルへの変更を match する除外ルールを
+        // 持つ `policy-exclusion.toml` を置く（候補適用前の信頼済み状態を
+        // 模す）。`load_policy_exclusion_config`（→ `guardrail::
+        // load_policy_exclusion`）は 3 カテゴリ（architecture_change／
+        // test_tolerance_loosening／dependency_change）それぞれ最低 1 件の
+        // ルールを要求する（`ensure_required_category_coverage`。#330）ため、
+        // 他 2 カテゴリも本テストの diff には match しないパスで満たす。
+        let policy_exclusion_path = sandbox.join("policy-exclusion.toml");
+        let toml_with_rule = r#"
+schema_version = 1
+
+[[exclusion]]
+id = "arch-hyperparameter-change"
+category = "architecture_change"
+description = "model 定義ファイルへの変更"
+rationale = "回帰テスト用"
+paths = ["**/src/model*.rs"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
+
+[[exclusion]]
+id = "test-tolerance-loosening"
+category = "test_tolerance_loosening"
+description = "テスト許容誤差の単独緩和（本テストの diff には match しない）"
+rationale = "回帰テスト用（schema 要求のダミー）"
+paths = ["**/*.rs"]
+action = "human_approval"
+
+[exclusion.match]
+type = "test_assertion_relaxation_without_prod_change"
+assertion_patterns = ["assert!"]
+
+[[exclusion]]
+id = "dependency-change"
+category = "dependency_change"
+description = "依存管理ファイルへの変更（本テストの diff には match しない）"
+rationale = "回帰テスト用（schema 要求のダミー）"
+paths = ["**/Cargo.toml"]
+action = "human_approval"
+
+[exclusion.match]
+type = "any_diff_in_paths"
+"#;
+        std::fs::write(&policy_exclusion_path, toml_with_rule)
+            .expect("policy-exclusion.toml（ルールあり）書き込み失敗");
+
+        // 「候補適用前に一度だけロード」を模す: ここで読み込んだ値を以降
+        // 不変のまま使い回す（`load_policy_exclusion_config` doc「呼び出し
+        // 契約」参照）。
+        let policy_exclusion_loaded_before_candidate =
+            load_policy_exclusion_config(&policy_exclusion_path)
+                .expect("policy-exclusion.toml（ルールあり）のロードに失敗");
+
+        // モデル定義ファイルを変更する（本来なら `arch-hyperparameter-change`
+        // に match しエスカレーションされるべき変更）。
+        std::fs::write(sandbox.join("src/model.rs"), "pub struct Model2;\n")
+            .expect("src/model.rs 変更に失敗");
+
+        // 悪意ある候補が sandbox 内の `policy-exclusion.toml` を書き換え、
+        // 自身の変更に match していた `arch-hyperparameter-change` の `paths`
+        // を match しないパスへ縮小したことを模す（schema 自体は有効なまま
+        // ——3 カテゴリの要求を満たす——にする点が重要: スキーマ違反で
+        // `Err` になる「安全に失敗する」書き換えではなく、`Ok` のまま
+        // `exclusion_rule_ids` が静かに空になる「危険な」書き換えを再現する）。
+        let toml_with_narrowed_rule = toml_with_rule.replace(
+            r#"paths = ["**/src/model*.rs"]"#,
+            r#"paths = ["**/src/nowhere*.rs"]"#,
+        );
+        assert_ne!(
+            toml_with_narrowed_rule, toml_with_rule,
+            "置換対象の paths 行が見つからないはず（テスト前提の確認）"
+        );
+        std::fs::write(&policy_exclusion_path, &toml_with_narrowed_rule)
+            .expect("policy-exclusion.toml（ルール縮小後）への書き換えに失敗");
+
+        // 事前ロード済みの値（ルールあり）を渡して測定する。
+        let signals = measure_diff_signals(
+            &runner,
+            &sandbox,
+            &baseline_commit,
+            &policy_exclusion_loaded_before_candidate,
+        )
+        .expect("measure_diff_signals 実行に失敗");
+
+        assert_eq!(
+            signals.exclusion_rule_ids,
+            vec!["arch-hyperparameter-change".to_string()],
+            "sandbox 内の policy-exclusion.toml が縮小されても、候補適用前に \
+             ロードした除外ルール（match 済み・本来エスカレーションされる \
+             べきルール）がそのまま反映されなければならない（PR #361 \
+             codex-review P1 指摘の回帰防止: ファイルパスを渡して verify \
+             のたび再読込する実装だと、この時点で exclusion_rule_ids が \
+             空になり、候補が自身の変更をエスカレーションから逃れさせられる）"
         );
 
         let _ = std::fs::remove_dir_all(&sandbox);

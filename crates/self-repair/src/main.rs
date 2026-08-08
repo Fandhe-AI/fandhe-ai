@@ -275,11 +275,30 @@ fn run_run(args: RunArgs) -> ExitCode {
         .policy_exclusion
         .clone()
         .unwrap_or_else(|| sandbox_root.join("policy-exclusion.toml"));
+    // ポリシー除外設定は候補適用前（sandbox 構築直後・候補未適用の時点）に
+    // 一度だけロードし、以降は不変値としてループ全体で使い回す
+    // （`self_repair::diff_signals::load_policy_exclusion_config` doc「呼び出し
+    // 契約」参照）。この時点ではまだ `SelfRepairLoop::run` を呼んでおらず
+    // sandbox には候補が一切適用されていないため、既定パス（sandbox 内）の
+    // 場合ここで読むのは `baseline_commit` 時点の内容（`RunSandbox::create`
+    // が `git clone --local` で反映した直後の状態。`--repo` の作業ツリー上の
+    // 未コミット編集は反映されない）であり、候補が sandbox 内の同ファイルを
+    // 書き換えても以降の判定には反映されない（PR #361 codex-review P1
+    // 指摘対応。`verify_direct_composite.rs` モジュール冒頭「ポリシー除外
+    // 設定の固定」参照）。
+    let policy_exclusion =
+        match self_repair::diff_signals::load_policy_exclusion_config(&policy_exclusion_path) {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("self-repair run: policy-exclusion.toml の解決に失敗しました: {err}");
+                return ExitCode::from(1);
+            }
+        };
     let gate_spec = RepairCompositeGateSpec {
         workspace: sandbox_root.clone(),
         sandbox_root: sandbox_root.clone(),
         baseline_commit: baseline_commit.clone(),
-        policy_exclusion_path,
+        policy_exclusion,
         bench_bin: args.bench_bin.clone(),
         workload_sources: args.workload_sources.clone(),
         bench_iterations: self_repair::verify_bench::MIN_BENCH_ITERATIONS,
