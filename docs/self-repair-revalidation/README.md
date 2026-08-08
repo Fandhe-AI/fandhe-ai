@@ -28,7 +28,7 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 
 | 種別 | 記録先 | 最終結論 | 試行回数 | 合計所要時間 | 判断根拠（要約） |
 |------|--------|---------|---------|-------------|-----------------|
-| バグ修正（TASK-3.3b・#141） | [`bug-fix/`](./bug-fix/) | `LoopOutcome::Adopted` | 2 | 40,323 ms（`loop-report.json` `total_duration_ms`。ハーネス全体の壁時計時間は `harness_wall_time_ms` 40,534 ms） | attempt 1: `cargo test --release` の既知正解値テスト（`mlp_grad_*_matches_numeric`）が analytic/numeric 勾配不一致で失敗し却下。attempt 2: build/test/clippy 全通過＋候補 diff（`var.rs` の relu 実装復元）直接ベンチ実測（劣化率中央値 **-74.86%**。誤って混入させた sigmoid すり替えバグ比での高速化であり、性能改善そのものが目的ではない）＋diff 由来シグナル（`lines_changed=2`・`api_broken=false`・`gaming_suspect=false`）が `guardrail::decide` の自動適用条件を満たし採用 |
+| バグ修正（TASK-3.3b・#141） | [`bug-fix/`](./bug-fix/) | `Adopted`（exit 0） | 2 | 40,323 ms（`loop-report.json` `total_duration_ms`。ハーネス全体の壁時計時間は `harness_wall_time_ms` 40,534 ms） | attempt 1: `cargo test --release` の既知正解値テスト（`mlp_grad_*_matches_numeric`）が analytic/numeric 勾配不一致で失敗し却下。attempt 2: build/test/clippy 全通過＋候補 diff（`var.rs` の relu 実装復元）直接ベンチ実測（劣化率中央値 **-74.86%**。誤って混入させた sigmoid すり替えバグ比での高速化であり、性能改善そのものが目的ではない）＋diff 由来シグナル（`lines_changed=2`・`api_broken=false`・`gaming_suspect=false`）が `guardrail::decide` の自動適用条件を満たし採用 |
 | 機能追加（TASK-3.3c・#142） | [`feature-addition/`](./feature-addition/) | `Adopted`（exit 0） | 2 | 45,290 ms（`loop-report.json` `total_duration_ms`。ハーネス全体の壁時計時間は `harness_wall_time_ms` 45,322 ms） | attempt 1: 符号分岐を欠く誤実装で受け入れ基準テスト（`leaky_relu_matches_known_values`。`got=0.05, want=0.5`）不合格・却下。attempt 2: 既存組み込み演算（`relu`・四則）合成による正実装で build/test/clippy 全通過＋候補 diff 直接ベンチ実測（劣化率中央値 0.49%）＋diff 由来シグナル（`lines_changed=28`・`api_broken=false`・`gaming_suspect=false`）が自動適用条件を満たし採用 |
 
 両種別とも `guardrail.toml`（TASK-4.3c・#117 確定値。`bench_median_max_pct=5.0`・
@@ -47,7 +47,7 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 
 | # | 判定基準 | バグ修正（#141） | 機能追加（#142） |
 |---|---------|------------------|------------------|
-| 1 | `self-repair run` の 1 回起動・追加の人間入力なしで `AutoApply` へ到達 | **充足**（CLI バイナリ〈PR #372〉を 1 回起動し `outcome=Adopted`・exit 0 へ到達） | **充足**（CLI バイナリ〈PR #361〉を 1 回起動し `outcome=Adopted`・exit 0 へ到達） |
+| 1 | `self-repair run` の 1 回起動・追加の人間入力なしで `AutoApply` へ到達 | **充足**（CLI バイナリ〈PR #361〉を 1 回起動し `outcome=Adopted`・exit 0 へ到達。本ハーネス自体の CLI 移行は PR #372） | **充足**（CLI バイナリ〈PR #361〉を 1 回起動し `outcome=Adopted`・exit 0 へ到達） |
 | 2 | 検証 4 ゲート全通過・`guardrail` 3 分岐判定を迂回なく経由 | **充足**（`RepairCompositeGate` が候補 diff〈`var.rs`〉に対し build/test/clippy＋直接ベンチを実測し `gate_report="build=pass test=pass clippy=pass bench=measured-direct"`。`guardrail::decide` を唯一の判定経路として使用） | **充足**（同一機構〈`RepairCompositeGate`〉で build/test/clippy/bench 全ゲート通過。判定は `GuardrailAdoptionJudge` → `guardrail::decide` の単一経路のみ） |
 | 3 | `--max-attempts` 上限内で完走 | 充足（`max_attempts=5` のうち attempt 2 で採用。`attempt_count=2`） | 充足（`max_attempts=5` のうち attempt 2 で採用。`attempt_count=2`） |
 | 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過 | **充足**（`self-repair verify-log` を外部コマンドとして別プロセス起動し exit 0・`records=5, last_seq=4` を確認） | **充足**（同じく外部コマンド経由〈子プロセス起動〉で exit 0 を確認） |

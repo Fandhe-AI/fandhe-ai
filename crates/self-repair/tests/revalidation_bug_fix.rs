@@ -56,6 +56,34 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
+/// 準備リポジトリ（sandbox ディレクトリ）を、`Drop` により確実に削除する
+/// RAII ガード（レビュー指摘への対応。旧版〈PR #341〉が持っていた
+/// `SandboxGuard` を CLI 経由への全面書き換え時に落としていたのを復元する）。
+/// 本テストは複数の `assert!` を通過した後にのみ手動クリーンアップを行う
+/// 構成だったため、途中の `assert!` 失敗（panic）で sandbox（`crates/autodiff`
+/// のフルコピー＋ビルド成果物）が `/tmp` に残置される退行があった。PID
+/// ベースの一時パス（`unique_sandbox_dir`）のため次回実行時には自己回収
+/// されるが、失敗のたびに一時的なディスク消費が発生するため、通常経路・
+/// panic 経路のいずれでも確実に削除する。
+struct SandboxGuard(PathBuf);
+
+impl Drop for SandboxGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// `--candidates` JSON 出力先（一時ファイル）を、`Drop` により確実に削除する
+/// RAII ガード。`SandboxGuard` と同じ理由（panic 時の残置防止）で、
+/// 候補 JSON 側にも同型のガードを用意する。
+struct CandidatesFileGuard(PathBuf);
+
+impl Drop for CandidatesFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// バグ注入・修正対象ファイル（`crates/autodiff/src/var.rs`。準備リポジトリ
 /// 相対パスは `src/var.rs`）。
 const TARGET_FILE: &str = "src/var.rs";
@@ -442,6 +470,9 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
 
     // --- 準備リポジトリの構築（バグ注入済み baseline） ---
     let (sandbox, injected_content, original_content) = prepare_standalone_autodiff_repo();
+    // 以降の assert! が panic しても sandbox が確実に削除されるよう、
+    // 構築直後にガードを取得する（レビュー指摘対応。SandboxGuard doc 参照）。
+    let _sandbox_guard = SandboxGuard(sandbox.clone());
 
     // --- 候補列（#140 承認済み題材）を `--candidates` JSON へ書き出す ---
     let candidates_json = serde_json::json!([
@@ -461,6 +492,9 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
         serde_json::to_string_pretty(&candidates_json).expect("候補 JSON のシリアライズに失敗"),
     )
     .expect("候補 JSON の書き込みに失敗");
+    // 以降の assert! が panic しても候補 JSON が確実に削除されるよう、
+    // 書き込み直後にガードを取得する（CandidatesFileGuard doc 参照）。
+    let _candidates_guard = CandidatesFileGuard(candidates_path.clone());
 
     // --- `self-repair run` を 1 回だけ起動する（完走判定基準 1） ---
     let target_out_dir = repo_root().join("target/self-repair-revalidation/bug-fix");
@@ -657,6 +691,7 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
             .expect("loop-log.jsonl の docs へのコピーに失敗");
     }
 
-    let _ = std::fs::remove_dir_all(&sandbox);
-    let _ = std::fs::remove_file(&candidates_path);
+    // sandbox・候補 JSON は `_sandbox_guard`／`_candidates_guard` の Drop で
+    // 削除される（正常終了・assert! panic のいずれの経路でも確実に削除する
+    // ため、明示的な remove_dir_all／remove_file 呼び出しはここに置かない）。
 }
