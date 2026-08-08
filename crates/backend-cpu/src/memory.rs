@@ -21,6 +21,7 @@ use tensor_core::Tensor;
 use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use tensor_core::device::{BackendError, Device};
 use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
+use tensor_core::pool::PoolZeroFill;
 
 /// CPU バッファの具体ハンドル。ホスト常駐そのものなので `Vec<f32>` を
 /// 直接保持する。`Drop` は `Vec<f32>` の既定 `Drop` に委ねる（RAII 一本化
@@ -40,6 +41,10 @@ struct CpuBufferHandle {
 
 impl BufferHandle for CpuBufferHandle {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
@@ -77,6 +82,30 @@ impl MemoryStats for CpuMemory {
 
     fn reset_peak(&self) {
         self.tracker.reset_peak();
+    }
+}
+
+/// `tensor_core::pool::PooledMemory<CpuMemory>`（TASK-#201・REQ-14 14-3）が
+/// プールから再利用したバッファを返す前に呼ぶゼロ初期化フック。
+/// `handle` を `CpuBufferHandle` へダウンキャストし、`data`（`Vec<f32>`）を
+/// `fill(0.0)` で上書きする（`alloc_zeroed` の「全要素 0」契約を再利用時
+/// にも維持する。前利用データの残留はプロセス内情報漏えいリスクでもある。
+/// `.claude/rules/security.md` A02/A04）。
+impl PoolZeroFill for CpuMemory {
+    fn zero_fill(&self, handle: &mut dyn BufferHandle) -> Result<(), BackendError> {
+        // `&mut dyn BufferHandle`（`PoolZeroFill::zero_fill` のシグネチャ。
+        // `pool.rs` モジュールコメント「ゼロ初期化契約の維持」参照）を
+        // 経由することで、`unsafe` な生ポインタ書き込みなしに安全な
+        // `downcast_mut` + `Vec::fill` だけで完結する（`.claude/rules/
+        // coding-rust.md`「`unsafe` は FFI 境界等の必要最小限に留める」
+        // 方針。ダウンキャスト失敗＝他バックエンドのハンドルが誤って
+        // 渡された等は `PooledMemory` 側の不変条件違反であり通常到達
+        // しないが、`unwrap`/`expect` は使わず型付きエラーで返す）。
+        let Some(cpu_handle) = handle.as_any_mut().downcast_mut::<CpuBufferHandle>() else {
+            return Err(BackendError::DeviceMismatch);
+        };
+        cpu_handle.data.fill(0.0);
+        Ok(())
     }
 }
 
@@ -263,6 +292,10 @@ mod tests {
         struct OtherHandle;
         impl BufferHandle for OtherHandle {
             fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn Any {
                 self
             }
         }
