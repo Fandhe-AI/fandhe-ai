@@ -48,14 +48,28 @@ TASK-14.1（#173〜#176、完了済み）により、`tensor-core::memory_stats:
 ### 運用上の前提
 
 - トラッカー（`AllocationTracker`）はプロセスグローバルな `static` ではなく
-  `Arc` で各バックエンド入口インスタンス間に共有される設計である。これは
-  (a) 並列実行される単体テスト間の計数混線（フレーキーテスト化）を避ける、
-  (b) グローバル可変状態を避ける安全側判断、の 2 点による
+  `Arc` で保持される。共有されるのは**同一インスタンス、またはそのインスタンス
+  の参照（`&CpuMemory` 等）／`clone()` を経由した場合のみ**であり、
+  `CpuMemory::new()`／`CudaMemory::new()`／`MetalMemory::new()` はそれぞれ
+  独立した新規 `AllocationTracker` を生成する（プロセスグローバルにも他
+  インスタンスにも自動では共有されない）。これは (a) 並列実行される単体
+  テスト間の計数混線（フレーキーテスト化）を避ける、(b) グローバル可変
+  状態を避ける安全側判断、の 2 点による
   （`crates/tensor-core/src/memory_stats.rs` モジュールコメント）。
+  `CpuMemory`／`CudaMemory` は `Arc` 保持の `tracker` フィールドを安価に
+  複製できるため `derive(Clone)` を持つが、`MetalMemory` は `MetalContext`
+  が `Clone` を導出していないため `Clone` を持たない（`crates/backend-metal/
+  src/memory.rs` の `MetalMemory` doc コメント参照）。`MetalMemory` を
+  複数箇所で共有したい場合は `clone()` ではなく、単一インスタンスへの
+  参照（`&MetalMemory` や呼び出し側での `Arc<MetalMemory>` 包装）を渡す。
 - spec が言う「プロセス内のピーク値」は、計測対象プロセスがバックエンド入口
-  （`CpuMemory` 等）を単一インスタンスで共有する運用（ベンチハーネスが想定
-  する形）で満たされる。計測区間を区切りたい場合は `reset_peak()` を境界で
-  呼び出す。
+  （`CpuMemory` 等）を単一インスタンスとして生成し、計測に関わる全経路で
+  それを共有する運用（ベンチハーネスが想定する形。共有の具体手段は上記の
+  とおりバックエンドにより異なる）でのみ満たされる。複数箇所で `new()`
+  すると `AllocationTracker` が別々に生成され、`peak_allocated_bytes()` は
+  プロセス内の確保を集約せず、正本とする測定値が過少になる。ベンチハーネス
+  は単一入口インスタンスの共有を必須条件とする。計測区間を区切りたい場合は
+  `reset_peak()` を境界で呼び出す。
 
 ### 計測粒度の制約
 
