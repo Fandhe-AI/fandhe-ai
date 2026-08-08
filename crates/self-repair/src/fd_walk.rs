@@ -355,10 +355,25 @@ mod supported {
     /// 必要がある。本関数は [`walk_to_final`] と同じ fd 走査を行うが、開いた
     /// fd は即座に破棄し内容の読み書きは行わない（検証のみ）。
     ///
-    /// 旧 `reject_symlink_escape` と同じ許容規則を踏襲する: 未実在
-    /// （`NotFound`）の中間ディレクトリ・末端ファイルは「まだ作成されていない
-    /// だけ」として許容し、実在する symlink（`ELOOP`）や非ディレクトリ
-    /// （`ENOTDIR`）等の異常のみを拒否する。
+    /// # 中間ディレクトリの `NotFound` は拒否・末端ファイルの `NotFound` のみ許容
+    /// （PR #361 codex-review 追加指摘 P1 対応）
+    /// [`write_via_fd_walk`] は `O_CREAT` を末端コンポーネントの `openat`
+    /// 呼び出しにのみ渡す（`openat_final`）ため、末端ファイルが未実在
+    /// （`NotFound`）でも新規作成として書き込みが成立する。しかし中間
+    /// ディレクトリ側の走査（`openat_dir`。本関数では下記ループ）は
+    /// `O_CREAT` を持たず `mkdirat` 相当の新規作成を一切行わないため、中間
+    /// ディレクトリが未実在であれば `write_via_fd_walk` は必ず失敗する。
+    /// 本関数が両者を区別せずどちらも許容してしまうと、`apply_candidate` が
+    /// 「先頭 = 既存の書き込み可能パス、後続 = 中間ディレクトリ不在パス」の
+    /// ような候補列を渡した場合に、事前検証を全通過させたまま先頭ファイルを
+    /// 書き換えた後で後続の書き込みが失敗し、「一部だけ書き換わった状態で
+    /// `Err` を返さない」契約に違反する（symlink 検証と異なりファイル
+    /// システムの実際の書き込み能力に起因する非対称性のため、この区別は
+    /// 中間・末端で別々に判定する必要がある）。
+    ///
+    /// 旧 `reject_symlink_escape` と同じ許容規則も踏襲する: 実在する
+    /// symlink（`ELOOP`）や非ディレクトリ（`ENOTDIR`）等の異常は中間・末端
+    /// いずれでも拒否する。
     ///
     /// 本関数の判定と実際の書き込み（[`write_via_fd_walk`]）呼び出しとの間には
     /// 検査後の再解決を挟む余地（TOCTOU window）が理論上存在するが、
@@ -367,7 +382,23 @@ mod supported {
     /// （本関数は「早期失敗によるファイル書き換えの部分適用防止」が目的であり、
     /// symlink 拒否そのものの安全性は保証しない・保証する必要もない）。
     pub(crate) fn probe(workspace: &Path, relative_path: &Path) -> io::Result<()> {
-        match walk_to_final(workspace, relative_path, raw::O_RDONLY) {
+        let parts = split_components(relative_path)?;
+        let (file_part, dir_parts) = parts.split_last().ok_or_else(|| {
+            io::Error::other(format!(
+                "内部不整合: split_components が空の候補パスを返しました（{}）。\
+                 split_components の空チェックを確認してください",
+                relative_path.display()
+            ))
+        })?;
+        let mut current = open_root_dir(workspace)?;
+        for part in dir_parts {
+            // 中間ディレクトリは `write_via_fd_walk` 側も新規作成できない
+            // （上記 doc 参照）ため、`NotFound` を許容せずそのまま拒否する。
+            current = openat_dir(current.as_raw_fd(), part)?;
+        }
+        // 末端ファイルのみ `write_via_fd_walk` が `O_CREAT` で新規作成できる
+        // ため、`NotFound` を「まだ作成されていないだけ」として許容する。
+        match openat_final(current.as_raw_fd(), file_part, raw::O_RDONLY) {
             Ok(_owned) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error),
@@ -573,6 +604,23 @@ mod tests {
 
         let result = probe(&dir, Path::new("src/not_created_yet.rs"));
         assert!(result.is_ok());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn probe_rejects_missing_intermediate_directory() {
+        // PR #361 codex-review 追加指摘 P1: 中間ディレクトリの `NotFound` は
+        // `write_via_fd_walk` が新規作成できないため、末端ファイルの
+        // `NotFound`（許容）と区別して拒否しなければならない。
+        let dir = temp_workspace("probe-missing-intermediate-dir");
+
+        let result = probe(&dir, Path::new("missing/target.rs"));
+        assert!(
+            result.is_err(),
+            "中間ディレクトリ不在のパスは事前検証で拒否されるべきです"
+        );
+        assert!(!dir.join("missing").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

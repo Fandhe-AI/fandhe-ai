@@ -367,6 +367,15 @@ pub fn apply_candidate(
     // 第 4 波 P0 指摘対応。実際の書き込み時にも [`crate::fd_walk::write_via_fd_walk`]
     // が同じ検証を行うため、本ループは「部分適用の防止」のための早期失敗
     // 判定であり、symlink 拒否そのものの安全性は書き込み時の検証が担保する）。
+    // この「部分適用の防止」保証は `probe` が「中間ディレクトリの `NotFound`
+    // を拒否し、末端ファイルの `NotFound` のみ許容する」契約を守ることに
+    // 依存する（PR #361 codex-review 追加指摘 P1 対応。`crate::fd_walk::probe`
+    // doc 参照）。`probe` があらゆる `NotFound` を一律許容すると、`write_via_fd_walk`
+    // が新規作成できない中間ディレクトリ不在の候補が事前検証を通過してしまい、
+    // 先行する書き込み可能な候補だけが適用された状態で後続の書き込みが失敗
+    // しうる（本コメント冒頭の「一部だけ書き換わった状態で `Err` を返さない」
+    // 契約に違反する）。
+
     for relative_path in baseline.keys() {
         validate_relative_path(relative_path)
             .map_err(|reason| SelfRepairError::FixGeneration { attempt, reason })?;
@@ -701,6 +710,49 @@ mod tests {
             fs::read_to_string(dir.join("target.txt")).expect("read should succeed"),
             "untouched"
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_candidate_rejects_missing_intermediate_directory_without_partial_write() {
+        // PR #361 codex-review 追加指摘 P1 回帰テスト。候補の先頭ファイルは
+        // 既存の書き込み可能パス、後続ファイルは中間ディレクトリが未実在の
+        // パス（`missing/target.rs`）とする。旧実装ではあらゆる `NotFound`
+        // を probe が許容していたため、この事前検証を通過したうえで先頭
+        // ファイルが書き換わってから後続の書き込みで失敗し、「一部だけ
+        // 書き換わった状態で `Err` を返さない」契約に違反していた。
+        let dir = temp_workspace("missing-intermediate-dir");
+        write_file(&dir, "target.txt", "original");
+
+        let mut baseline = HashMap::new();
+        baseline.insert(PathBuf::from("target.txt"), "original".to_string());
+
+        let candidates = vec![CandidateFix {
+            description: "partial apply attempt".to_string(),
+            files: vec![
+                (
+                    PathBuf::from("target.txt"),
+                    "should-not-be-written".to_string(),
+                ),
+                (
+                    PathBuf::from("missing/target.rs"),
+                    "should-not-be-written-either".to_string(),
+                ),
+            ],
+        }];
+
+        let result = apply_candidate(&dir, &baseline, &candidates, 1);
+        assert!(
+            result.is_err(),
+            "中間ディレクトリ不在の候補を含む場合は事前検証で拒否されるべきです"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join("target.txt")).expect("read should succeed"),
+            "original",
+            "後続候補の中間ディレクトリ不在により、先頭候補も書き換わってはいけません"
+        );
+        assert!(!dir.join("missing").exists());
 
         let _ = fs::remove_dir_all(&dir);
     }
