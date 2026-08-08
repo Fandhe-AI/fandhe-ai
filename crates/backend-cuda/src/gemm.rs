@@ -34,7 +34,7 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::device::CudaDevice;
@@ -908,6 +908,139 @@ impl CudaGemm {
 
         let c_host = self.stream.clone_dtoh(&c_dev)?;
         Ok(c_host)
+    }
+
+    /// A・B（f32）をホスト→デバイスへ転送する（tiled f32／WMMA(TF32) の
+    /// H2D 部分の切り出し。`gemm_mma.rs::CudaMmaGemm::upload_f16` と同じ
+    /// 理由でベンチマークが転送とカーネル実行を分離できるよう公開する。
+    /// PR #349 codex-review 指摘 P1「PyTorch 参照計測（`torch.matmul`+
+    /// `torch.cuda.synchronize()` のみ。入力テンソルは計測ループ開始前に
+    /// 生成済みで反復ごとの H2D 転送・出力バッファ確保を含まない。
+    /// `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py`
+    /// 実測確認済み）と計測境界を揃える」対応。tiled f32・WMMA(TF32) は
+    /// いずれも入力が f32 のため 1 メソッドで共有する）。
+    pub fn upload_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+    ) -> Result<(CudaSlice<f32>, CudaSlice<f32>), CudaError> {
+        let a_dev = self.stream.clone_htod(a)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        Ok((a_dev, b_dev))
+    }
+
+    /// C 用のゼロ初期化デバイスバッファを確保する（[`Self::upload_f32`] と
+    /// 同じ理由で公開する。tiled f32・WMMA(TF32) で共有）。
+    pub fn alloc_output_f32(&self, m: u32, n: u32) -> Result<CudaSlice<f32>, CudaError> {
+        Ok(self
+            .stream
+            .alloc_zeros::<f32>((m as usize) * (n as usize))?)
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対して tiled f32 カーネルを
+    /// 起動し、完了を待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。
+    /// [`Self::upload_f32`]・[`Self::alloc_output_f32`] と組み合わせて
+    /// ベンチマークの計測対象を絞るために公開する。呼び出し前提は
+    /// `run_tiled_f32` と同じ形状検証（`validate_gemm_dims`・
+    /// `validate_tiled_k_bound`）済み・m>0/n>0/k>0 であることで、本関数は
+    /// 検証・no-op 早期 return を再実行しない（`gemm_mma.rs::launch_f16`
+    /// と同じ契約）。
+    pub fn launch_tiled_f32(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
+        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）は呼び出し元が検証済みの m/n/k
+        // と 1:1 対応し、カーネル内の手動境界チェック（REQ-8）と合わせて
+        // OOB 読み書きが起きない根拠とする。
+        unsafe {
+            self.stream
+                .launch_builder(&self.tiled_f32)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// デバイス常駐済みの A/B/C バッファに対して WMMA(TF32) カーネルを
+    /// 起動し、完了を待つ（[`Self::launch_tiled_f32`] と同じ「GPU 実行
+    /// のみ」契約）。opt カーネルが利用可能ならそちらを使用し、そうで
+    /// なければ基本版へフォールバックする（`run_wmma_tf32` と同一の選択
+    /// ロジック `self.wmma_tf32_opt.is_some()` を用いる。呼び出し元は
+    /// 事前に `run_wmma_tf32` を 1 回 probe 実行して可用性・k 境界検証を
+    /// 済ませている前提であり（`cuda_floor_bench.rs::measure_wmma_tf32`
+    /// 参照）、probe が選んだ経路とここで選ぶ経路が同一の判定式を使うため
+    /// 一致する）。
+    pub fn launch_wmma_tf32(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: run_wmma_f32_kernel／run_wmma_tf32_opt_kernel と同一の
+        // 根拠。カーネル引数は呼び出し元が検証済みの m/n/k と 1:1 対応し、
+        // カーネル内の手動境界チェック（REQ-8）と合わせて OOB 読み書きが
+        // 起きない根拠とする。
+        if let Some(func) = self.wmma_tf32_opt.as_ref() {
+            let cfg = wmma_tf32_opt_launch_config(m, n);
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+        } else if let Some(func) = self.wmma_tf32.as_ref() {
+            let cfg = wmma_tf32_launch_config(m, n);
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+        } else {
+            return Err(CudaError::WmmaUnavailable {
+                detail: "WMMA(TF32) kernel unavailable (neither opt nor basic kernel loaded); \
+                         launch_wmma_tf32 called without a prior successful run_wmma_tf32 probe"
+                    .to_string(),
+            });
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// C（f32）をデバイス→ホストへ転送する（[`Self::upload_f32`] と同じ
+    /// 理由で公開する。tiled f32・WMMA(TF32) で共有）。
+    pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
+        Ok(self.stream.clone_dtoh(c_dev)?)
     }
 }
 

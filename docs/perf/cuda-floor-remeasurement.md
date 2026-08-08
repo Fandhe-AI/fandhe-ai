@@ -48,13 +48,19 @@ TASK-8.3 の担当欄は「共同（計測実行は Claude Code、下限値の�
 - f32 の最良経路は固定優先順位ではなく実測 TFLOPS の大小比較で選ぶ（`best_of` 純関数。同 codex-review
   指摘 P1「実測性能を比較せず固定優先順位で『最良値』を選んでいる」対応。選ばれた経路ラベル
   〈`tiled`/`wmma_tf32`〉を出力に含める）
-- f16 candidate floor は `wmma_f16`（転送込み計測）のみを根拠とする。`mma_f16` は H2D/D2H 転送・
-  出力バッファ確保を計測区間の外に出しており（`measure_mma_f16` 参照）、`tiled_f32`/`wmma_tf32`/
-  `wmma_f16`/PyTorch 参照値と計測範囲が異なるため、`best_of` で単純比較して candidate floor に
-  混入させない（同 codex-review 指摘 P1「候補下限を異なる計測範囲の TFLOPS から算出している」対応。
-  ドキュメントへの偏り注記だけでは候補値の正当性を回復できないとの指摘のため、`f16_candidate_floor_value`
-  で算出対象から機械的に除外する）。`mma_f16` は GPU 実行のみの参考値として出力に残し、
-  `mma_over_wmma_f16(reference-only, not apples-to-apples)=` 比を併記する
+- **計測境界を PyTorch 参照計測と統一する**（PR #349 codex-review 再指摘 P1「PyTorch 参照計測
+  〈`gemm_bench_torch_cuda.py`〉は `torch.matmul`+同期のみを計測し、ホスト転送・反復ごとの確保を
+  含まないのに対し、tiled f32・WMMA(TF32)・WMMA f16 の 3 経路は H2D 転送・出力バッファ確保・D2H 回収
+  込みで計測しており計測範囲が不当に不利だった」対応）。4 経路すべて（tiled f32・WMMA(TF32)・
+  WMMA f16・`mma.sync` f16）を「入力事前配置＋カーネル起動＋同期のみ」の launch-only 境界に揃える
+  （`gemm.rs::CudaGemm::upload_f32`/`launch_tiled_f32`/`launch_wmma_tf32`、
+  `gemm_wmma.rs::CudaWmmaGemm::upload_f16`/`launch_f16`、`gemm_mma.rs::CudaMmaGemm::upload_f16`/
+  `launch_f16` の分割 API を使用）。同一実機再計測を行う場合、PyTorch 側の再計測もこの境界
+  （`gemm_bench_torch_cuda.py` と同一プロトコル）で行うこと
+- f16 candidate floor は `wmma_f16`・`mma_f16` の実測比較（`best_of`）で最良経路を選ぶ。計測境界統一
+  前は `mma_f16` のみ launch-only で計測範囲が異なっていたため candidate floor から除外していたが、
+  上記の境界統一により両経路が同一境界（launch-only）で計測されるようになったため、`best_f32` と
+  対称に実測比較へ戻した（`f16_candidate_floor_value` 参照。PR #349 codex-review 再指摘 P1 対応）
 
 ## 計測手順（DGX Spark GB10 等 CUDA 実機）
 
@@ -67,9 +73,11 @@ cargo test -p backend-cuda --release -- --ignored
 
 # 2. （推奨・PR #349 codex-review 指摘 P1 対応）同一実機で PyTorch を再計測し、
 #    候補下限の正式算出に使う env override を用意する。
-#    docs/spec/03-poc/poc-v2-3-cuda-gemm/code/ の計測スクリプトを同一 GB10 個体で
-#    再実行し、得られた 6 値（f32/f16 × 512/2048/4096）と出所を注入する:
-export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="poc-v2-3-cuda-gemm/code/ 再実行, <実施日>, 同一 GB10 個体"
+#    docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py を同一 GB10 個体で
+#    再実行し、得られた 6 値（f32/f16 × 512/2048/4096）と出所を注入する（同スクリプトは
+#    入力テンソルを計測ループの外で GPU 上に生成し、ループ内では torch.matmul + 同期のみを計測する
+#    ため、上記「計測境界を PyTorch 参照計測と統一する」の境界と一致する）:
+export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py 再実行, <実施日>, 同一 GB10 個体"
 export CUDA_FLOOR_BENCH_PYTORCH_F32_512=<再計測値>
 export CUDA_FLOOR_BENCH_PYTORCH_F32_2048=<再計測値>
 export CUDA_FLOOR_BENCH_PYTORCH_F32_4096=<再計測値>
@@ -88,11 +96,11 @@ cargo run -p backend-cuda --example cuda_floor_bench --release
 - `device: name=... compute_capability=...` 行: 計測環境（下表「計測環境」への転記元）
 - `pytorch reference provenance: ...` 行: PyTorch 参照値が「同一実機で今回再計測（env override）」か
   「PoC-v2-3 固定値」かの出所
-- `size=<N> tiled_f32_tflops=... wmma_tf32_tflops=... wmma_f16_tflops=... mma_f16_tflops=... f32_best_path=... f16_candidate_path=... f32_best_over_pytorch=... f16_candidate_over_pytorch=... (..., mma_over_wmma_f16(reference-only, not apples-to-apples, median-based)=...)` 行:
+- `size=<N> tiled_f32_tflops=... wmma_tf32_tflops=... wmma_f16_tflops=... mma_f16_tflops=... f32_best_path=... f16_candidate_path=... f32_best_over_pytorch=... f16_candidate_over_pytorch=... (..., mma_over_wmma_f16(apples-to-apples, launch-only, median-based)=...)` 行:
   形状ごとの経路別 TFLOPS・f32 最良経路ラベル（`tiled`/`wmma_tf32`。実測 TFLOPS の大小比較で選出。
-  固定優先順位ではない）・f16 candidate floor 経路ラベル（常に `wmma_f16`。`mma_f16` は計測範囲が異なる
-  ため candidate floor には使わない）・対 PyTorch 比・`mma_f16` の参考比（`wmma_f16` 比。
-  apples-to-apples でない旨をラベルに明示）。経路別 TFLOPS 値は
+  固定優先順位ではない）・f16 candidate floor 経路ラベル（`wmma_f16`/`mma_f16`。両経路とも launch-only
+  計測に統一されたため実測 TFLOPS の大小比較で選出）・対 PyTorch 比・`mma_f16` の参考比（`wmma_f16`
+  比。両経路とも launch-only 計測のため apples-to-apples）。経路別 TFLOPS 値は
   `<中央値>(q1=<Q1由来値>,q3=<Q3由来値>)` の形式で中央値・Q1・Q3 を並記する（`bench_harness::run` の
   計測プロトコル〈TASK-8.1〉が返す四分位値を破棄せず記録するため。`cuda_floor_bench.rs::TflopsSample`
   参照。PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の契約を満たせない」対応。経路選択・
@@ -107,8 +115,8 @@ cargo run -p backend-cuda --example cuda_floor_bench --release
 ### PyTorch 参照値の扱い
 
 REQ-8 は「同一ハードウェア上の同一バックエンド比較」を要求するため、正式な candidate optimized floor は
-**同一実機での PyTorch 再計測**（`docs/spec/03-poc/poc-v2-3-cuda-gemm/code/` の計測スクリプトを再実行し、
-同一プロトコル・同一シードで再取得した値）を `CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_{512,2048,4096}` と
+**同一実機での PyTorch 再計測**（`docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py`
+を再実行し、同一プロトコル・同一シードで再取得した値）を `CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_{512,2048,4096}` と
 `CUDA_FLOOR_BENCH_PYTORCH_SOURCE`（出所文字列。非空必須）で注入した場合にのみ算出される
 （`cuda_floor_bench.rs::pytorch_f32_ref`/`pytorch_f16_ref`/`print_candidate_floor` 参照）。
 
@@ -161,18 +169,21 @@ Q1・Q3 の 3 値。`cuda_floor_bench.rs::TflopsSample`。PR #349 codex-review �
 | 4096 | | | | | | | |
 
 「f32 最良経路」列は `f32_best_path=` 出力（`tiled`/`wmma_tf32`）を転記する。固定優先順位ではなく実測
-TFLOPS の中央値の大小比較で選ばれる（`cuda_floor_bench.rs::best_of`）。「f16 candidate 経路」列は常に
-`wmma_f16` になる（`f16_candidate_floor_value` 参照。`mma_f16` は計測範囲が異なるため candidate floor
-には使わない。PR #349 codex-review 指摘 P1 対応）。
+TFLOPS の中央値の大小比較で選ばれる（`cuda_floor_bench.rs::best_of`）。「f16 candidate 経路」列は
+`f16_candidate_path=` 出力（`wmma_f16`/`mma_f16`）を転記する。4 経路すべてが launch-only 計測に統一
+された（下記「計測境界の統一」参照）ため、`f32_best_path` と同じく実測 TFLOPS の中央値の大小比較で
+選ばれる（`f16_candidate_floor_value` 参照。PR #349 codex-review 再指摘 P1 対応）。
 
-注意（`measure_mma_f16` ドキュメンテーションコメント参照）: `mma_f16` は H2D/D2H 転送・出力バッファ確保を
-計測区間の外に出しているが `tiled_f32`/`wmma_tf32`/`wmma_f16`/PyTorch 参照値は転送込みで計測するため、
-`mma_over_wmma_f16` 比は mma.sync 側に有利な方向へ偏る apples-to-apples でない参考値である
-（candidate floor には使わない。所見欄に残す場合はこの注記も添えること）。
+計測境界の統一（PR #349 codex-review 再指摘 P1 対応。`cuda_floor_bench.rs` 冒頭ドキュメンテーション
+コメント「計測境界の統一」参照）: tiled f32・WMMA(TF32)・WMMA f16・`mma.sync` f16 の 4 経路はいずれも
+H2D 転送・出力バッファ確保をループ外で済ませ、GPU 実行（カーネル起動＋同期）のみを計測する。これは
+PyTorch 参照計測（`gemm_bench_torch_cuda.py` が入力テンソルをループ外で GPU 上に生成し `torch.matmul`
++同期のみを計測するプロトコル）と同一の境界であり、`mma_over_wmma_f16` 比は apples-to-apples の
+比較になる。
 
 ### 対 PyTorch 比
 
-| M=N=K | f32 最良（実測大小比較で選出） / PyTorch f32 比 | f16 candidate（`wmma_f16` のみ） / PyTorch f16 比 |
+| M=N=K | f32 最良（実測大小比較で選出） / PyTorch f32 比 | f16 candidate（実測大小比較で選出） / PyTorch f16 比 |
 |-------|----------------------------------------------------|------------------------------------------------------|
 | 512（参考値） | | |
 | 2048 | | |
@@ -204,10 +215,12 @@ TFLOPS の中央値の大小比較で選ばれる（`cuda_floor_bench.rs::best_o
 - `cargo test -p backend-cuda --example cuda_floor_bench` — `floor_round` の単体テスト 3 件
   （仕様例との突合・10% 境界を跨ぐ非減少性・非有限値/負値の防御）・`best_of`（f32 最良経路選出。
   固定優先順位ではなく実測値比較であることの回帰確認）の単体テスト 4 件・`f16_candidate_floor_value`
-  （f16 candidate floor が `wmma_f16` のみを根拠とし `mma_f16` を含めないことの回帰確認）の単体テスト
-  2 件・`confirmed_candidate_floor`（判定対象形状の一部欠測時に candidate floor を確定させないことの
-  回帰確認。PR #349 codex-review 再指摘 P1 対応）の単体テスト 1 件、計 10 件が green であることを確認
-  （PR #349 codex-review 指摘 P1 対応）
+  （計測境界統一後は `wmma_f16`/`mma_f16` の実測比較で選出することの回帰確認。PR #349 codex-review
+  再指摘 P1 対応）の単体テスト 4 件・`confirmed_candidate_floor`（判定対象形状の一部欠測時に
+  candidate floor を確定させないことの回帰確認）の単体テスト 1 件・`tflops_sample`（時間ドメイン
+  Q1/Q3 を TFLOPS ドメインへ漏れなく変換することの回帰確認）の単体テスト 1 件、計 13 件が green
+  であることを確認（`crates/backend-cuda/src/gemm.rs`/`gemm_wmma.rs` の launch-only 分割 API 追加後も
+  `cargo test -p backend-cuda --lib` 58 件 green を維持）
 
 ## 役割分担（二重管理を避ける）
 

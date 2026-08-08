@@ -46,16 +46,18 @@
 //! ## PyTorch 参照値の再計測（PR #349 codex-review 指摘 P1 対応）
 //!
 //! REQ-8「いずれも同一ハードウェア上の同一バックエンド比較」を満たすため、
-//! `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/` の計測スクリプト（または
-//! 同一形状・同一プロトコルの再計測手段）を**本バイナリと同一実機で**
-//! 実行し、得られた値を以下の環境変数で注入できる:
+//! `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py`
+//! （または同一形状・同一プロトコルの再計測手段）を**本バイナリと同一
+//! 実機で**実行し、得られた値を以下の環境変数で注入できる:
 //!
 //! - `CUDA_FLOOR_BENCH_PYTORCH_F32_{512,2048,4096}` / `_F16_{512,2048,4096}`:
-//!   再計測した TFLOPS 値（正の有限浮動小数点数）
+//!   再計測した TFLOPS 値（正の有限浮動小数点数）。再計測は
+//!   `gemm_bench_torch_cuda.py` と同一の計測境界（下記「計測境界の統一」
+//!   節）で行うこと
 //! - `CUDA_FLOOR_BENCH_PYTORCH_SOURCE`: 再計測値の出所を明示する文字列
-//!   （例: `"poc-v2-3-cuda-gemm/code/gemm_bench_torch.py 実行, 2026-08-08,
-//!   同一 GB10 個体"`）。値の注入だけでは根拠不足のため、出所文字列が
-//!   非空でない限り注入値は無視し組み込み固定値へフォールバックする
+//!   （例: `"poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py 実行,
+//!   2026-08-08, 同一 GB10 個体"`）。値の注入だけでは根拠不足のため、出所
+//!   文字列が非空でない限り注入値は無視し組み込み固定値へフォールバックする
 //!
 //! 判定対象形状（2048/4096）の f32・f16 それぞれについて、上記env変数が
 //! 両サイズとも有効な値を持つ場合のみ「同一実機再計測」を根拠とした
@@ -65,6 +67,31 @@
 //! 参考比率のみを表示する（codex-review 指摘「GPU 名の部分一致では
 //! 同一ハードウェア比較を保証できない」対応。GB10 名一致は WARNING 抑制
 //! のみに用い、候補下限の許可条件には使わない）。
+//!
+//! ## 計測境界の統一（PR #349 codex-review 再指摘 P1 対応）
+//!
+//! `gemm_bench_torch_cuda.py`（実測確認済み。同スクリプト L36-51）は
+//! 計測ループの**外側**で入力テンソルを GPU 上に生成し、ループ内では
+//! `torch.cuda.synchronize()` → `torch.matmul(a, b)` →
+//! `torch.cuda.synchronize()` のみを計測する。ホスト→デバイス転送・
+//! 反復ごとの入力確保は計測区間に含まれない。
+//!
+//! 旧実装（本コメント追加前の版）は tiled f32・WMMA(TF32)・WMMA f16 の
+//! 3 経路を H2D 転送＋出力バッファ確保＋カーネル実行＋D2H 回収込みで計測
+//! しており、PyTorch 参照計測より広い区間を計測していた（codex-review
+//! 再指摘 P1「計測範囲の不一致」）。本バイナリは 4 経路すべて（tiled f32・
+//! WMMA(TF32)・WMMA f16・`mma.sync` f16）で PyTorch 参照計測と同じ「入力
+//! 事前配置＋カーネル起動＋同期のみ」の境界に統一する（`measure_*` 各
+//! 関数が `upload_*`／`alloc_output_*`／`launch_*` の分割 API
+//! （`gemm.rs::CudaGemm::upload_f32`／`launch_tiled_f32`／
+//! `launch_wmma_tf32`、`gemm_wmma.rs::CudaWmmaGemm::upload_f16`／
+//! `launch_f16`、`gemm_mma.rs::CudaMmaGemm::upload_f16`／`launch_f16`）を
+//! 使い、H2D/D2H・バッファ確保をループ外に出す）。4 経路の計測境界が
+//! 揃ったことで、f16 candidate floor の算出根拠を `wmma_f16` と
+//! `mma_f16` の実測比較（[`best_of`]）へ戻す（旧実装が計測範囲の不一致を
+//! 理由に `mma_f16` を除外していた判断はこの統一により前提が失われた
+//! ため撤回する。[`f16_candidate_floor_value`] ドキュメンテーション
+//! コメント参照）。
 //!
 //! ## 中央値・Q1・Q3 の出力（PR #349 codex-review 指摘 P1 対応）
 //!
@@ -230,13 +257,26 @@ fn tflops_sample(size: usize, measurement: &Measurement) -> TflopsSample {
     }
 }
 
+/// tiled f32 経路を計測する。H2D 転送・出力バッファ確保はループ外で
+/// 済ませ、`gemm.rs::CudaGemm::launch_tiled_f32`（GPU 実行 + 同期のみ）を
+/// 計測対象とする（PyTorch 参照計測〈`gemm_bench_torch_cuda.py`〉と同一
+/// の境界に揃える。モジュール冒頭ドキュメンテーションコメント「計測境界
+/// の統一」参照）。
 fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> TflopsSample {
     let mut rng = Xorshift64Star::new(SEED);
     let a = rng.fill_vec(size * size);
     let b = rng.fill_vec(size * size);
+    let (m, n, k) = (size as u32, size as u32, size as u32);
+
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&a, &b)
+        .expect("tiled f32 upload must succeed on CUDA-equipped runner");
+    let mut c_dev = gemm
+        .alloc_output_f32(m, n)
+        .expect("tiled f32 output allocation must succeed on CUDA-equipped runner");
 
     let measurement = bench_run(config, || {
-        gemm.run_tiled_f32(&a, &b, size as u32, size as u32, size as u32)
+        gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
             .expect("tiled f32 GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
@@ -254,10 +294,20 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
 /// 使用不能）として表面化しうるほか、opt 版使用時は形状検証・カーネル
 /// 起動由来の他エラーも起こりうる（`gemm.rs::run_wmma_tf32` L594-598・
 /// L641-645 参照）。エラー種別を区別せず panic させると動作している tiled
-/// 計測結果まで失われるため、まず 1 回 probe 実行しエラー時は本計測を
-/// 行わず `None` を返してこの経路のみ skip する（PR #349 Bugbot 指摘
-/// High「WMMA path panics on skip」対応。呼び出し側 `main` は
-/// `Option::and_then` で受け、tiled 側の出力は継続する）。
+/// 計測結果まで失われるため、まず 1 回 `run_wmma_tf32`（転送込みの通常
+/// 経路）で probe 実行しエラー時は本計測を行わず `None` を返してこの経路
+/// のみ skip する（PR #349 Bugbot 指摘 High「WMMA path panics on skip」
+/// 対応。呼び出し側 `main` は `Option::and_then` で受け、tiled 側の出力は
+/// 継続する）。probe が選ぶ経路（opt／基本版）は
+/// `gemm.rs::CudaGemm::launch_wmma_tf32` が同一の判定式
+/// （`wmma_tf32_opt.is_some()`）で選ぶ経路と一致するため、probe 通過後の
+/// launch-only 計測が異なるカーネルを起動することはない
+/// （`launch_wmma_tf32` ドキュメンテーションコメント参照）。
+///
+/// H2D 転送・出力バッファ確保はループ外で済ませ、`launch_wmma_tf32`
+/// （GPU 実行 + 同期のみ）を計測対象とする（PyTorch 参照計測と同一の
+/// 境界に揃える。モジュール冒頭ドキュメンテーションコメント「計測境界の
+/// 統一」参照）。
 fn measure_wmma_tf32(
     gemm: &CudaGemm,
     size: usize,
@@ -266,14 +316,22 @@ fn measure_wmma_tf32(
     let mut rng = Xorshift64Star::new(SEED);
     let a = rng.fill_vec(size * size);
     let b = rng.fill_vec(size * size);
+    let (m, n, k) = (size as u32, size as u32, size as u32);
 
-    if let Err(e) = gemm.run_wmma_tf32(&a, &b, size as u32, size as u32, size as u32) {
+    if let Err(e) = gemm.run_wmma_tf32(&a, &b, m, n, k) {
         println!("WMMA(TF32) unavailable for size={size} ({e}); wmma_tf32 skipped for this size.");
         return None;
     }
 
+    let (a_dev, b_dev) = gemm.upload_f32(&a, &b).expect(
+        "WMMA(TF32) upload must succeed on CUDA-equipped runner (availability probed above)",
+    );
+    let mut c_dev = gemm.alloc_output_f32(m, n).expect(
+        "WMMA(TF32) output allocation must succeed on CUDA-equipped runner (availability probed above)",
+    );
+
     let measurement = bench_run(config, || {
-        gemm.run_wmma_tf32(&a, &b, size as u32, size as u32, size as u32)
+        gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
             .expect(
                 "WMMA(TF32) GEMM must succeed on CUDA-equipped runner (availability probed above)",
             );
@@ -282,26 +340,38 @@ fn measure_wmma_tf32(
     Some(tflops_sample(size, &measurement))
 }
 
+/// H2D 転送・出力バッファ確保はループ外で済ませ、
+/// `gemm_wmma.rs::CudaWmmaGemm::launch_f16`（GPU 実行 + 同期のみ）を
+/// 計測対象とする（PyTorch 参照計測と同一の境界に揃える。モジュール冒頭
+/// ドキュメンテーションコメント「計測境界の統一」参照）。
 fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig) -> TflopsSample {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
     let b: Vec<f16> = rng.fill_vec_f16(size * size);
+    let (m, n, k) = (size as u32, size as u32, size as u32);
+
+    let (a_dev, b_dev) = gemm
+        .upload_f16(&a, &b)
+        .expect("WMMA f16 upload must succeed on CUDA-equipped runner");
+    let mut c_dev = gemm
+        .alloc_output_f16(m, n)
+        .expect("WMMA f16 output allocation must succeed on CUDA-equipped runner");
 
     let measurement = bench_run(config, || {
-        gemm.run_f16(&a, &b, size as u32, size as u32, size as u32)
+        gemm.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)
             .expect("WMMA f16 GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops_sample(size, &measurement)
 }
 
-/// `mma.sync` 経路のみ H2D/D2H 転送・出力バッファ確保を計測区間の外へ
-/// 出し、GPU 実行（カーネル起動 + 同期）のみを計測する（PR #255 レビュー
-/// 指摘への対処。`gemm_mma_bench.rs::measure_mma_f16` と同じ判断を踏襲。
-/// tiled f32・WMMA(TF32)・WMMA f16 の 3 経路は転送込みで計測するため、
-/// mma_over_* 比は厳密な apples-to-apples 比較ではなく mma 側に有利な
-/// 方向へ偏る。`docs/perf/cuda-floor-remeasurement.md` へ転記する際は
-/// この注記も一緒に残すこと）。
+/// H2D/D2H 転送・出力バッファ確保を計測区間の外へ出し、GPU 実行
+/// （カーネル起動 + 同期）のみを計測する（PR #255 レビュー指摘への対処。
+/// `gemm_mma_bench.rs::measure_mma_f16` と同じ判断を踏襲）。4 経路すべて
+/// （tiled f32・WMMA(TF32)・WMMA f16・`mma.sync` f16）が同じ launch-only
+/// 境界で計測されるため（モジュール冒頭ドキュメンテーションコメント
+/// 「計測境界の統一」参照）、`mma_over_wmma_f16` 比は apples-to-apples の
+/// 比較になる。
 fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) -> TflopsSample {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
@@ -371,28 +441,20 @@ fn best_f32(tiled: Option<f64>, wmma_tf32: Option<f64>) -> Option<(f64, &'static
     best_of("tiled", tiled, "wmma_tf32", wmma_tf32)
 }
 
-/// f16 candidate floor の算出には `wmma_f16`（転送込み計測）のみを使う。
+/// f16 最良値（`wmma_f16` と `mma_f16` のうち実測 TFLOPS が大きい方）を
+/// 選ぶ。`best_f32` の f16 側鏡写し。
 ///
-/// `measure_mma_f16` は H2D/D2H 転送・出力バッファ確保を計測区間の外へ
-/// 出しているのに対し、`measure_wmma_f16`・`measure_tiled_f32`・
-/// `measure_wmma_tf32`（さらに PyTorch 参照値の計測プロトコル。
-/// `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/` 参照）は転送・確保込みで
-/// 計測している。異なる計測範囲の値を `best_of` で直接比較し candidate
-/// floor へ混入させると、同一実機でも計測範囲の差が比率・経路選択を
-/// 左右してしまう（PR #349 codex-review 指摘 P1「候補下限を異なる計測
-/// 範囲の TFLOPS から算出している」。ドキュメントへの偏り注記だけでは
-/// 候補値の正当性を回復できないとの指摘のため、コメント修正ではなく
-/// `mma_f16` を candidate floor の算出対象から除外する）。
-///
-/// `mma_f16` は GPU 実行のみの参考値として出力には残し、
-/// `mma_over_wmma_f16` 比（`main` 参照）で `wmma_f16` との相対値を
-/// 併記する。全経路を同一タイミング境界（入力事前配置＋カーネル実行＋
-/// 同期のみ）で揃えて再計測する対応は、tiled f32／WMMA(TF32) の分割
-/// 計測 API（`gemm.rs`）が未整備なため本 PR のスコープ外とし、
-/// `docs/spec/05-tasks.md` TASK-8.3 系のフォローアップで扱う
-/// （out-of-scope-tracking 対応）。
-fn f16_candidate_floor_value(wmma: Option<f64>) -> Option<(f64, &'static str)> {
-    wmma.filter(|v| v.is_finite()).map(|v| (v, "wmma_f16"))
+/// 旧実装（本コメント追加前の版）は `measure_wmma_f16` が転送込み・
+/// `measure_mma_f16` が launch-only という異なる計測範囲を理由に
+/// `mma_f16` を candidate floor から除外していたが、`measure_wmma_f16`
+/// を launch-only 化したことで両経路の計測境界が一致した（モジュール
+/// 冒頭ドキュメンテーションコメント「計測境界の統一」参照。PR #349
+/// codex-review 再指摘 P1 対応）。境界が揃った以上、`best_f32` と対称に
+/// 実測比較で最良経路を選ぶ方が「実測性能を比較せず固定で片方を選ぶ」
+/// ロジックバグ（`best_of` ドキュメンテーションコメント参照）を再導入
+/// しない。
+fn f16_candidate_floor_value(wmma: Option<f64>, mma: Option<f64>) -> Option<(f64, &'static str)> {
+    best_of("wmma_f16", wmma, "mma_f16", mma)
 }
 
 fn main() {
@@ -523,11 +585,13 @@ fn main() {
         // （PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の
         // 契約を満たせない」対応。選択ロジック自体は変更しない）。
         let f32_best = best_f32(tiled.map(|s| s.median), wmma_tf32.map(|s| s.median));
-        // f16 candidate floor は `wmma_f16`（転送込み計測。tiled_f32・
-        // wmma_tf32・PyTorch 参照値と同一の計測範囲）のみを根拠とする
-        // （`f16_candidate_floor_value` ドキュメンテーションコメント参照。
-        // PR #349 codex-review 指摘 P1 対応）。
-        let f16_candidate = f16_candidate_floor_value(wmma_f16.map(|s| s.median));
+        // f16 candidate floor は `wmma_f16`・`mma_f16` の実測比較（両者とも
+        // launch-only 計測。モジュール冒頭ドキュメンテーションコメント
+        // 「計測境界の統一」参照）で最良経路を選ぶ（`f16_candidate_floor_value`
+        // ドキュメンテーションコメント参照。PR #349 codex-review 再指摘 P1
+        // 対応）。
+        let f16_candidate =
+            f16_candidate_floor_value(wmma_f16.map(|s| s.median), mma_f16.map(|s| s.median));
 
         let (pytorch_f32, f32_measured) = pytorch_f32_ref(size, &measured_source);
         let (pytorch_f16, f16_measured) = pytorch_f16_ref(size, &measured_source);
@@ -552,12 +616,12 @@ fn main() {
             .filter(|r| r.is_finite());
         let fmt_ratio = |v: Option<f64>| v.map_or("n/a".to_string(), |x| format!("{x:.2}%"));
         let fmt_path = |v: Option<(f64, &'static str)>| v.map_or("n/a", |(_, p)| p);
-        // `mma_f16` は転送・確保を計測区間の外に出しているため（本ファイル
-        // `measure_mma_f16` ドキュメンテーションコメント参照）candidate
-        // floor には含めない。`wmma_f16` との比は GPU 実行時間のみの
-        // 参考値として併記する（apples-to-apples でない旨を比のラベルに
-        // 明示する）。中央値同士の比較とする（Q1/Q3 は選択・比較には使わず
-        // 付随情報に留める）。
+        // `mma_f16` は `f16_candidate` の算出（`best_of`）にも使われるため
+        // （モジュール冒頭ドキュメンテーションコメント「計測境界の統一」
+        // 参照）、この比は候補下限とは独立した補足情報として `wmma_f16`
+        // との相対値を併記する。両経路とも launch-only 計測のため
+        // apples-to-apples の比較である（中央値同士の比較。Q1/Q3 は選択・
+        // 比較には使わず付随情報に留める）。
         let mma_over_wmma_f16_percent = match (mma_f16, wmma_f16) {
             (Some(m), Some(w))
                 if w.median.is_finite() && w.median > 0.0 && m.median.is_finite() =>
@@ -572,7 +636,7 @@ fn main() {
              mma_f16_tflops={} f32_best_path={} f16_candidate_path={} f32_best_over_pytorch={} \
              f16_candidate_over_pytorch={} (pytorch_f32={:.4} pytorch_f16={:.4}, \
              f32_ref_measured={f32_measured} f16_ref_measured={f16_measured}, \
-             mma_over_wmma_f16(reference-only, not apples-to-apples, median-based)={})",
+             mma_over_wmma_f16(apples-to-apples, launch-only, median-based)={})",
             fmt_sample(tiled),
             fmt_sample(wmma_tf32),
             fmt_sample(wmma_f16),
@@ -729,25 +793,53 @@ mod tests {
         );
     }
 
-    // PR #349 codex-review 指摘 P1「候補下限を異なる計測範囲の TFLOPS から
-    // 算出している」の回帰確認: f16 candidate floor は転送込み計測の
-    // `wmma_f16` のみを根拠とし、H2D/D2H を計測区間の外に出している
-    // `mma_f16` は（`main` 側で別変数として渡されなくなったため）
-    // 混入し得ない。ここでは関数単体として `wmma_f16` 欠測時に `None` を
-    // 返すこと（フォールバック先が存在しないこと）を確認する。
+    // PR #349 codex-review 再指摘 P1「PyTorch 参照計測は転送・反復ごとの
+    // 確保を含まないのに tiled f32・WMMA(TF32)・WMMA f16 の 3 経路は含めて
+    // 計測している」の回帰確認: `measure_wmma_f16`・`measure_mma_f16` が
+    // どちらも launch-only 計測に統一された結果（モジュール冒頭
+    // ドキュメンテーションコメント「計測境界の統一」参照）、
+    // `f16_candidate_floor_value` は `best_f32` と対称に実測比較で最良
+    // 経路を選ぶことを確認する（固定で `wmma_f16` のみを使っていた旧実装
+    // からの回帰防止）。
     #[test]
-    fn f16_candidate_floor_value_uses_wmma_f16_only() {
+    fn f16_candidate_floor_value_picks_larger_of_wmma_and_mma() {
         assert_eq!(
-            f16_candidate_floor_value(Some(42.0)),
+            f16_candidate_floor_value(Some(20.0), Some(10.0)),
+            Some((20.0, "wmma_f16"))
+        );
+        assert_eq!(
+            f16_candidate_floor_value(Some(10.0), Some(20.0)),
+            Some((20.0, "mma_f16"))
+        );
+    }
+
+    #[test]
+    fn f16_candidate_floor_value_falls_back_to_the_only_available_path() {
+        assert_eq!(
+            f16_candidate_floor_value(Some(42.0), None),
             Some((42.0, "wmma_f16"))
         );
-        assert_eq!(f16_candidate_floor_value(None), None);
+        assert_eq!(
+            f16_candidate_floor_value(None, Some(7.0)),
+            Some((7.0, "mma_f16"))
+        );
+        assert_eq!(f16_candidate_floor_value(None, None), None);
     }
 
     #[test]
     fn f16_candidate_floor_value_excludes_non_finite() {
-        assert_eq!(f16_candidate_floor_value(Some(f64::NAN)), None);
-        assert_eq!(f16_candidate_floor_value(Some(f64::INFINITY)), None);
+        assert_eq!(
+            f16_candidate_floor_value(Some(f64::NAN), Some(10.0)),
+            Some((10.0, "mma_f16"))
+        );
+        assert_eq!(
+            f16_candidate_floor_value(Some(10.0), Some(f64::INFINITY)),
+            Some((10.0, "wmma_f16"))
+        );
+        assert_eq!(
+            f16_candidate_floor_value(Some(f64::NAN), Some(f64::INFINITY)),
+            None
+        );
     }
 
     // PR #349 codex-review 再指摘 P1 の回帰確認: 判定対象形状（2048・4096）
