@@ -19,37 +19,47 @@ REQ-3 の v2 追加受け入れ基準（`docs/spec/04-requirements.md:96`）「�
 
 | 基準 | 内容 | 充足 | 備考 |
 |---|---|---|---|
-| 1 | `self-repair run` 1 回起動・追加の人間入力なしで exit 0（`Verdict::AutoApply`） | **未充足** | 実測 outcome=`Escalated`・exit=10。原因は下記「基準 1 が未充足の原因」参照 |
+| 1 | `self-repair run` 1 回起動・追加の人間入力なしで exit 0（`Verdict::AutoApply`） | **充足** | 実測 outcome=`Adopted`・exit=0。修正内容は下記「基準 1 未充足を解消した修正」参照 |
 | 2 | 検証 4 ゲート全通過・guardrail 3 分岐判定を lib 直接呼び出しで経由 | 充足 | 試行 2 は build/test/clippy/bench 全ゲート通過（`gate_report`）。判定は `GuardrailAdoptionJudge` → `guardrail::decide` の単一経路のみ |
 | 3 | `--max-attempts` 上限内で完走 | 充足 | 2 試行（上限 5 以内） |
 | 4 | `self-repair verify-log` のハッシュチェーン検証を通過 | 充足 | 外部コマンド経由（子プロセス起動）で exit 0 を確認 |
-| 5 | ベンチ劣化中央値が承認済み閾値内・5 回計測中央値・**候補 diff 直接実測** | 部分充足 | `RepairCompositeGate`（#137）による直接実測は充足。ただし試行 2 が最終的に Escalated のため「完走」の一部としては成立していない |
+| 5 | ベンチ劣化中央値が承認済み閾値内・5 回計測中央値・**候補 diff 直接実測** | 充足 | `RepairCompositeGate`（#137）による直接実測。試行 2 が Adopted に到達し「完走」の一部として成立 |
 | 6 | `signal_source` が `"measured"` | 充足 | `--signals` 契約検証パスは未使用 |
 
-**基準 1 が未充足のため、all-or-nothing 規則（#140 承認済み）上「人間介在なし
-完走」とは認められない。** #144（人間評価・completion-judgment 再判定）へ
-この結果をそのまま引き継ぐ。
+**全基準を充足するため、all-or-nothing 規則（#140 承認済み）上「人間介在なし
+完走」と認められる。**
 
-### 基準 1 が未充足の原因（実装・実測で判明。ガードレール判定は変更していない）
+### 基準 1 未充足を解消した修正（イシュー #142 再調査・修正）
 
-`crates/self-repair/src/diff_signals.rs::api_signature_touched` は追加・削除
-いずれの `pub fn` 行も「API 破壊」として検出するヒューリスティックであり
-（`tests/verify_direct_composite_integration.rs::
-case_a_harmless_candidate_diff_completes_with_measured_bench` の doc に
-「新規 pub fn 追加はヒューリスティック上検出される想定」と既に明記されている
-既存仕様。TASK-3.2a・#137 由来）、`crates/self-repair/src/judge.rs` は
-`api_broken=true` を無条件で `Escalated` へ写像する
-（`judge::tests::api_broken_yields_escalate`）。PoC-2 題材 (c) の受け入れ
-基準（`tests/leaky_relu_acceptance.rs`）は `pub fn leaky_relu` の追加を
-要求するため、この構成では機能追加種別の候補が自動適用（`Adopted`・exit 0）
-へ到達する経路が存在しない。
+初回の CLI 移行実測（本ドキュメント旧版）では基準 1 が未充足だった。原因は
+`crates/self-repair/src/diff_signals.rs::api_signature_touched` の実装が、
+追加・削除いずれの `pub fn` 行も一律「API 破壊」とみなす簡略化しすぎた
+ヒューリスティックだったことにある。
 
-ヒューリスティックの精緻化（新規追加と既存シグネチャの削除を区別する等）・
-`policy-exclusion.toml` への例外追加はいずれもガードレール判定・除外リストの
-変更でありユーザー承認必須（`.claude/rules/security.md`）のため、本イシュー
-（#142）では変更していない。対応方針（ヒューリスティックの見直しを提案する／
-題材を見直す／基準 1 の解釈を見直す 等）はユーザー判断事項として #142・#144
-側へ引き継ぐ。
+これは検出器の既存仕様からの乖離（実装バグ）であり、ガードレール自体の判定
+ロジック・閾値の問題ではないことが判明した。`guardrail::checks::
+api_stability::api_broken`（`crates/guardrail/src/checks/api_stability.rs`）
+は baseline 時点に存在した公開シグネチャ（`pub fn`／`pub struct`／`pub enum`）
+が現作業木から**消失**したかで破壊を判定しており、新規追加のみの変更は破壊と
+みなさない（同モジュールの `adding_new_pub_fn_is_not_broken` テストが検出器の
+既存仕様として明記・証明している）。しかし `guardrail::checks` は非公開
+モジュール（`mod checks;`）のため `self-repair` から直接呼べず、
+`diff_signals.rs` が独立して同種の意味論を複製する設計だった
+（モジュール冒頭ドキュメント参照）。この複製時に「追加は破壊ではない」という
+区別が欠落し、`git diff -U0` の追加・削除行に `pub fn` が含まれるかのみを
+見る単純化された判定になっていた。
+
+`api_signature_touched` を、guardrail 側と同一の「baseline のシグネチャが
+消失したか」を検査する実装（`git show <baseline>:<file>` で baseline 内容を
+取得し、現在の作業木の内容と行単位比較する）へ修正した。修正はガードレール
+の判定ロジック・閾値・「破壊的変更はエスカレーション」という原則自体には
+一切触れておらず、`self-repair` 側の再実装バグの是正のみである
+（`.claude/rules/security.md`「ガードレール閾値・判定基準の変更はユーザー
+承認必須」に抵触しない）。修正後、PoC-2 題材 (c) の受け入れ基準
+（`tests/leaky_relu_acceptance.rs`）が要求する `pub fn leaky_relu` の新規追加
+（既存 `pub fn relu`／`pub fn sigmoid` のシグネチャは不変）は
+`api_broken=false` と正しく判定され、`Adopted`・exit 0 へ到達するように
+なった。
 
 ## CLI 経由への移行（#139 判断 (c) 差し戻し対応）
 
@@ -98,9 +108,10 @@ DirectBenchRunner`）が試行ごとに sandbox 内の使い捨て git リポジ
 - `lines_changed`: `git diff --numstat` 実測値。
 - `exclusion_rule_ids`: `guardrail::policy_exclusion::ExclusionEvaluation::evaluate`
   （リポジトリルート `policy-exclusion.toml`）の実行結果。
-- `api_broken`: `git diff -U0` 中の追加・削除行に `pub fn` を含むかの実測
-  （「基準 1 が未充足の原因」参照。既存シグネチャの削除だけでなく新規追加も
-  検出する設計）。
+- `api_broken`: baseline 時点の公開シグネチャ（`pub fn`／`pub struct`／
+  `pub enum`）が現在の作業木から消失したかの実測（`guardrail::checks::
+  api_stability::api_broken` と同一意味論。「基準 1 未充足を解消した修正」
+  参照。新規追加のみの変更は破壊とみなさない）。
 - `gaming_suspect`: 変更ファイルパスに `tests/` 配下が含まれるかの実測
   （`gaming_suspect_from_files`）。
 - ベンチ: `DirectBenchRunner::measure`（baseline commit の
@@ -119,10 +130,11 @@ DirectBenchRunner`）が試行ごとに sandbox 内の使い捨て git リポジ
 cargo test -p self-repair --test feature_addition_loop_completion_task_3_3c -- --ignored --nocapture
 ```
 
-本テストは基準 1 が未充足であること自体を固定する実証のため `#[ignore]` で
-分離している（通常 CI では実行しない。理由は `#[ignore = "..."]` の属性
-文字列・テスト関数のドキュメンテーションコメント参照）。実行のたび sandbox
-は一意な一時ディレクトリ（`std::env::temp_dir()`／
+本テストは `cargo build`/`cargo test --release`/`cargo clippy` を試行 1・2 の
+2 系列分実行するため長時間かかり、通常 CI ジョブでは実行しない `#[ignore]`
+（他ゲート系統合テストと同じ理由。理由は `#[ignore = "..."]` の属性文字列・
+テスト関数のドキュメンテーションコメント参照）。実行のたび sandbox は一意な
+一時ディレクトリ（`std::env::temp_dir()`／
 `self-repair-feature-addition-task-3-3c-sandbox-<pid>`）に作られ、テスト
 終了時に削除される。
 
@@ -152,7 +164,7 @@ SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1 \
 
 - **段階列**: `loop_start`（`kind: "feature_addition"`）→ `detection` →
   `attempt`（試行 1: `verification_failed`）→ `attempt`（試行 2:
-  `escalated`）→ `loop_outcome`（`outcome.kind: "escalated"`）の 5 レコード
+  `adopted`）→ `loop_outcome`（`outcome.kind: "adopted"`）の 5 レコード
   （`loop-report.json` の `attempt_count: 2` と対応）。
 - **検証**: `self-repair run` バイナリ自身が書き込み直後に
   `self_repair::verify_chain` で自己検証したうえで、本ハーネスが
@@ -172,9 +184,6 @@ SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1 \
 ## 対象外（既存イシューで追跡）
 
 - 完走ログの最終的な記録様式・配置場所の確定 → イシュー #143
-- 基準 1 未充足への対応方針の確定（ヒューリスティック見直し・題材見直し・
-  基準解釈の見直しのいずれか） → #144（人間評価）・ユーザー判断待ち。
-  `.claude/rules/out-of-scope-tracking.md` 準拠で必要なら別途 Issue 起票する
 - `--kind perf-regression` は `self-repair run` 未対応（`PerfRegressionDetector`/
   `PerfRegressionFixGenerator` が `CommandRunner` ベースの検出器と非対称な
   構築契約〈`BenchMeasurer`・戦略リスト〉を持つため。#141／#142 いずれも
@@ -186,3 +195,7 @@ SELF_REPAIR_TASK_3_3C_WRITE_DOCS=1 \
   check-forbidden-deps.sh` の依存禁止検査（ルート `Cargo.lock` のみが対象）
   の走査範囲外にある。現状フィクスチャ側の依存は `tensor-core`／`autodiff`
   への path 依存のみで禁止リスト該当なし。
+- `diff_signals.rs::api_signature_touched` の既知の限界（`guardrail::checks::
+  api_stability` 側と同一。リネーム検出・引数名のみの変更・1 行関数の本体
+  変更誤検出等）は `crates/guardrail/src/checks/api_stability.rs` モジュール
+  冒頭ドキュメントに記載済みでスコープ外のまま。

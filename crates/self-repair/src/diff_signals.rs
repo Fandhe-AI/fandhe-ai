@@ -45,10 +45,17 @@ pub struct DiffSignals {
     /// `baseline_commit` から現在の作業木までの追加行数＋削除行数の合計
     /// （`git diff --numstat` の実測値）。
     pub lines_changed: u64,
-    /// 追加・削除された行に `pub fn` 宣言が含まれるか（PoC-3 パリティの簡易
-    /// ヒューリスティック。`guardrail::checks::api_stability` と同種の判定だが、
-    /// 当該モジュールは `guardrail` の非公開実装のため本モジュールが独立して
-    /// 実装する）。
+    /// baseline 時点に存在した公開シグネチャ（`pub fn`／`pub struct`／
+    /// `pub enum` の宣言行）が現在の作業木から消失しているか（新規追加のみの
+    /// 変更は破壊とみなさない）。意味論は `guardrail::checks::api_stability::
+    /// api_broken`（`crates/guardrail/src/checks/api_stability.rs`）と同一。
+    /// 当該関数は `guardrail` クレートの非公開実装（`mod checks;`。`lib.rs`
+    /// 参照）のため呼び出せず、本モジュールが同じ意味論を独立して複製する
+    /// （イシュー #142 差し戻し分: 旧実装は追加・削除いずれの `pub fn` 行も
+    /// 一律 `api_broken=true` としており、新規公開関数の追加という機能追加
+    /// 種別の候補が原理的に必ずエスカレーションされる誤った意味論だった。
+    /// `checks/api_stability.rs` の `adding_new_pub_fn_is_not_broken` が
+    /// 検出器の既存仕様〈追加は破壊ではない〉を証明する）。
     pub api_broken: bool,
     /// 変更ファイル一覧に本番コードとテストコードの双方が同時に含まれるか
     /// （ゲーミング疑いの簡易ヒューリスティック）。
@@ -231,27 +238,102 @@ fn diff_numstat<R: CommandRunner>(
     Ok((lines_changed, files))
 }
 
-/// 公開関数シグネチャ（`pub fn` を含む行）が diff の追加・削除行に現れないかを
-/// 検査する。移植元: `tests/revalidation_bug_fix.rs::api_signature_touched`。
+/// シグネチャ行として扱う接頭辞（先頭空白除去後）。`guardrail::checks::
+/// api_stability::PUBLIC_SIGNATURE_PREFIXES` と同一の判定基準（意味論を
+/// 独立複製する理由は [`DiffSignals::api_broken`] のドキュメント参照）。
+const PUBLIC_SIGNATURE_PREFIXES: [&str; 3] = ["pub fn ", "pub struct ", "pub enum "];
+
+/// `content` から公開 API シグネチャ行（トリム済み）を抽出する。移植元:
+/// `guardrail::checks::api_stability::extract_public_signatures`。
+fn extract_public_signatures(content: &str) -> Vec<String> {
+    content
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            PUBLIC_SIGNATURE_PREFIXES
+                .iter()
+                .any(|prefix| line.starts_with(prefix))
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+/// `baseline_commit:file` の内容を取得する。`file` が `baseline_commit` 時点に
+/// 存在しない（現作業木で新規追加されたファイル）場合は `Ok(None)` を返す
+/// （新規ファイルは baseline 側にシグネチャを持ちようがなく「破壊」判定の
+/// 対象になり得ないため）。移植元: `guardrail::checks::api_stability::
+/// show_file_at_baseline_if_present`。
+///
+/// # fail-open に見える箇所の正当性（A08）
+/// `git show` の非 0 終了を一律「baseline に存在しない」として扱う。これが
+/// 安全なのは、[`measure_diff_signals`] が本関数を呼ぶ前に必ず
+/// `diff_numstat`（`git diff --numstat baseline_commit --`）を実行しており、
+/// `baseline_commit` 自体が無効な参照であれば `diff_numstat` の時点で
+/// [`DiffSignalsError`] として先に拒否される（呼び出し順序に依存した前提。
+/// `guardrail::checks::api_stability` 側と同じ前提〈`check.rs` の実行順序
+/// 契約〉。この順序を変更する場合は本関数の前提の再検証が必要）。
+/// `output.truncated()` の場合は「存在しない」に丸めず [`Err`]（fail-closed。
+/// [`run_git`] と同じ理由）。
+fn show_file_at_baseline_if_present<R: CommandRunner>(
+    runner: &R,
+    sandbox_root: &Path,
+    baseline_commit: &str,
+    file: &str,
+) -> Result<Option<String>, DiffSignalsError> {
+    let path_arg = format!("{baseline_commit}:{file}");
+    let output = runner
+        .run("git", &["show", &path_arg], sandbox_root)
+        .map_err(|error| {
+            DiffSignalsError::new(format!("git show {path_arg:?} の起動に失敗: {error}"))
+        })?;
+    if !output.success() {
+        return Ok(None);
+    }
+    if output.truncated() {
+        return Err(DiffSignalsError::new(format!(
+            "git show {path_arg:?} の出力が 256 KiB 上限で切り詰められました。構造化出力の \
+             先頭側欠落により api_broken を見逃しうるため、fail-open な部分解析はせず拒否します \
+             （fail-closed。.claude/rules/security.md A08）"
+        )));
+    }
+    Ok(Some(output.log_tail().to_string()))
+}
+
+/// `changed_files`（[`diff_numstat`] が返す変更ファイル一覧）のうち `.rs`
+/// ファイルについて、baseline 時点に存在した公開シグネチャ行（`pub fn`／
+/// `pub struct`／`pub enum`）が現在の作業木（`sandbox_root` 配下の実ファイル）
+/// から消失していないかを検査する。新規追加ファイル・新規追加シグネチャのみ
+/// の変更は破壊とみなさない（[`DiffSignals::api_broken`] ドキュメント参照。
+/// 移植元: `guardrail::checks::api_stability::api_broken`）。
 fn api_signature_touched<R: CommandRunner>(
     runner: &R,
     sandbox_root: &Path,
     baseline_commit: &str,
+    changed_files: &[String],
 ) -> Result<bool, DiffSignalsError> {
-    let stdout = run_git(
-        runner,
-        sandbox_root,
-        &["diff", "--no-color", "-U0", baseline_commit, "--", "*.rs"],
-    )?;
-    Ok(stdout.lines().any(|line| {
-        let content = line
-            .strip_prefix('+')
-            .or_else(|| line.strip_prefix('-'))
-            .unwrap_or("");
-        // 差分ヘッダ行（`+++`/`---`）を誤検出しないよう、`+`/`-` 直後がさらに
-        // `+`/`-` の場合は除外する。
-        !content.starts_with(['+', '-']) && content.trim_start().starts_with("pub fn")
-    }))
+    for file in changed_files.iter().filter(|path| path.ends_with(".rs")) {
+        let Some(baseline_content) =
+            show_file_at_baseline_if_present(runner, sandbox_root, baseline_commit, file)?
+        else {
+            continue;
+        };
+        let baseline_sigs = extract_public_signatures(&baseline_content);
+        if baseline_sigs.is_empty() {
+            continue;
+        }
+
+        // ファイルが現作業木から削除されている場合は空文字列扱い（全シグネ
+        // チャが消失＝破壊）。読み取り失敗（権限等）は「消えた」と区別せず
+        // 安全側（破壊あり方向）に倒す。`guardrail::checks::api_stability::
+        // api_broken` と同一方針。
+        let current_content = std::fs::read_to_string(sandbox_root.join(file)).unwrap_or_default();
+        let current_sigs = extract_public_signatures(&current_content);
+
+        if baseline_sigs.iter().any(|sig| !current_sigs.contains(sig)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// パス文字列が「テストコード」を指すかを判定する。`Path::components()` で
@@ -332,7 +414,7 @@ pub fn measure_diff_signals<R: CommandRunner>(
     // ドキュメント参照。Codex レビュー #137 指摘）。
     stage_untracked_files(runner, sandbox_root)?;
     let (lines_changed, changed_files) = diff_numstat(runner, sandbox_root, baseline_commit)?;
-    let api_broken = api_signature_touched(runner, sandbox_root, baseline_commit)?;
+    let api_broken = api_signature_touched(runner, sandbox_root, baseline_commit, &changed_files)?;
     let gaming_suspect = gaming_suspect_from_files(&changed_files);
     let exclusion_rule_ids =
         evaluate_exclusion_rules(sandbox_root, baseline_commit, policy_exclusion_path)?;
@@ -351,19 +433,36 @@ mod tests {
     use std::cell::RefCell;
 
     /// スクリプト化した `CommandRunner` テストダブル。`args` の先頭から
-    /// `git diff --numstat ...` / `git diff -U0 ...` 等を区別して固定応答を
-    /// 返す（`verify_gates.rs` のテストダブルと同種の設計）。
+    /// `git diff --numstat ...` / `git show <baseline>:<file>` 等を区別して
+    /// 固定応答を返す（`verify_gates.rs` のテストダブルと同種の設計）。
+    /// `show_stdout`／`show_success` は `git show` 呼び出し全件に共通で返す
+    /// 単一の固定応答（本モジュールのテストは 1 ファイルのみを対象とするため
+    /// 十分。`show_success = false` は「baseline に存在しないファイル」を
+    /// 模擬する）。
     struct ScriptedGit {
         numstat_stdout: String,
-        signature_stdout: String,
+        show_stdout: String,
+        show_success: bool,
         calls: RefCell<Vec<Vec<String>>>,
     }
 
     impl ScriptedGit {
-        fn new(numstat_stdout: &str, signature_stdout: &str) -> Self {
+        fn new(numstat_stdout: &str, show_stdout: &str) -> Self {
             ScriptedGit {
                 numstat_stdout: numstat_stdout.to_string(),
-                signature_stdout: signature_stdout.to_string(),
+                show_stdout: show_stdout.to_string(),
+                show_success: true,
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        /// `git show` が非 0 終了する（baseline にファイルが存在しない）
+        /// テストダブルを構築する。
+        fn new_missing_at_baseline(numstat_stdout: &str) -> Self {
+            ScriptedGit {
+                numstat_stdout: numstat_stdout.to_string(),
+                show_stdout: String::new(),
+                show_success: false,
                 calls: RefCell::new(Vec::new()),
             }
         }
@@ -379,14 +478,19 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(args.iter().map(|s| s.to_string()).collect());
-            let stdout = if args.contains(&"--numstat") {
-                self.numstat_stdout.clone()
-            } else if args.contains(&"-U0") {
-                self.signature_stdout.clone()
+            if args.contains(&"--numstat") {
+                Ok(CommandOutput::from_captured(
+                    true,
+                    self.numstat_stdout.clone().into_bytes(),
+                ))
+            } else if args.first() == Some(&"show") {
+                Ok(CommandOutput::from_captured(
+                    self.show_success,
+                    self.show_stdout.clone().into_bytes(),
+                ))
             } else {
-                String::new()
-            };
-            Ok(CommandOutput::from_captured(true, stdout.into_bytes()))
+                Ok(CommandOutput::from_captured(true, Vec::new()))
+            }
         }
     }
 
@@ -441,23 +545,99 @@ mod tests {
         assert!(err.message().contains("added"));
     }
 
+    /// 意味論は `guardrail::checks::api_stability::api_broken` と同一（同モジュール
+    /// の `removing_pub_fn_is_detected_as_broken`／`adding_new_pub_fn_is_not_broken`
+    /// に対応。イシュー #142 差し戻し分の回帰テスト: 旧実装は追加・削除いずれの
+    /// `pub fn` 行も一律 `true` としており、機能追加種別の候補が新規 `pub fn` を
+    /// 追加しただけで無条件エスカレーションされる誤りがあった）。
     #[test]
-    fn api_signature_touched_detects_pub_fn_in_diff() {
+    fn api_signature_touched_flags_removed_pub_fn_as_broken() {
         let runner = ScriptedGit::new(
-            "",
-            "diff --git a/src/lib.rs b/src/lib.rs\n+pub fn new_api() {}\n",
+            "1\t1\tsrc/lib.rs\n",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn sub(a: i32, b: i32) -> i32 { a - b }\n",
         );
-        let touched =
-            api_signature_touched(&runner, Path::new("/sandbox"), "abc1234").expect("成功");
-        assert!(touched);
+        let touched = api_signature_touched(
+            &runner,
+            Path::new("/sandbox"),
+            "abc1234",
+            &["src/lib.rs".to_string()],
+        )
+        .expect("成功");
+        assert!(
+            touched,
+            "baseline の pub fn sub が消えている場合は破壊として検出されるはず"
+        );
     }
 
     #[test]
-    fn api_signature_touched_ignores_diff_header_lines() {
-        let runner = ScriptedGit::new("", "+++ b/src/lib.rs\n--- a/src/lib.rs\n+let x = 1;\n");
+    fn api_signature_touched_does_not_flag_pure_addition_as_broken() {
+        // baseline の `git show` 応答（`pub fn add` のみ）を返し、現作業木
+        // （`/sandbox/src/lib.rs`）は実在しないパスのため
+        // `std::fs::read_to_string` が失敗し空文字列扱いになる。これでは
+        // 「baseline のシグネチャが全て消えた」ことになり破壊として誤検出
+        // されてしまうため、`sandbox_root` を実ディレクトリにし、現作業木の
+        // 内容（追加後）を実ファイルとして書き込んで検証する。
+        let sandbox = std::env::temp_dir().join(format!(
+            "self-repair-diff-signals-pure-addition-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("システム時刻は UNIX_EPOCH 以降のはず")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(sandbox.join("src")).expect("src ディレクトリ作成に失敗");
+        std::fs::write(
+            sandbox.join("src/lib.rs"),
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\npub fn sub(a: i32, b: i32) -> i32 { a - b }\n",
+        )
+        .expect("src/lib.rs 書き込み失敗");
+
+        let runner = ScriptedGit::new(
+            "1\t0\tsrc/lib.rs\n",
+            "pub fn add(a: i32, b: i32) -> i32 { a + b }\n",
+        );
         let touched =
-            api_signature_touched(&runner, Path::new("/sandbox"), "abc1234").expect("成功");
-        assert!(!touched, "ヘッダ行・非 pub fn 行は検出されないはず");
+            api_signature_touched(&runner, &sandbox, "abc1234", &["src/lib.rs".to_string()])
+                .expect("成功");
+        assert!(
+            !touched,
+            "既存 pub fn を維持したまま新規 pub fn を追加しただけでは破壊とみなさないはず \
+             （guardrail::checks::api_stability::adding_new_pub_fn_is_not_broken と同一意味論）"
+        );
+
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    #[test]
+    fn api_signature_touched_treats_file_missing_at_baseline_as_new_file() {
+        // `git show` が非 0 終了 = baseline 時点にファイルが存在しない
+        // （現作業木での新規追加ファイル）。消失し得るシグネチャがないため
+        // 破壊とはみなさない。
+        let runner = ScriptedGit::new_missing_at_baseline("5\t0\tsrc/new_api.rs\n");
+        let touched = api_signature_touched(
+            &runner,
+            Path::new("/sandbox"),
+            "abc1234",
+            &["src/new_api.rs".to_string()],
+        )
+        .expect("成功");
+        assert!(
+            !touched,
+            "baseline に存在しない新規ファイルは破壊とみなさないはず"
+        );
+    }
+
+    #[test]
+    fn api_signature_touched_ignores_non_rs_files() {
+        let runner = ScriptedGit::new("3\t0\tCargo.toml\n", "");
+        let touched = api_signature_touched(
+            &runner,
+            Path::new("/sandbox"),
+            "abc1234",
+            &["Cargo.toml".to_string()],
+        )
+        .expect("成功");
+        assert!(!touched, ".rs 以外のファイルは走査対象外のはず");
     }
 
     #[test]
@@ -607,11 +787,14 @@ mod tests {
             files_after.iter().any(|path| path == "src/new_api.rs"),
             "stage 後は新規ファイルが変更ファイル一覧に含まれるはず: {files_after:?}"
         );
-        let api_broken = api_signature_touched(&runner, &sandbox, &baseline_commit)
+        let api_broken = api_signature_touched(&runner, &sandbox, &baseline_commit, &files_after)
             .expect("api_signature_touched 実行に失敗");
         assert!(
-            api_broken,
-            "新規ファイルの pub fn は api_signature_touched で検出されるはず"
+            !api_broken,
+            "baseline に存在しない新規ファイルの pub fn 追加は破壊とみなさないはず \
+             （guardrail::checks::api_stability::api_broken と同一意味論。イシュー #142 \
+             差し戻し分: 本アサーションは旧実装の誤った意味論〈新規ファイルの pub fn も \
+             一律検出〉を固定していたため反転した）"
         );
 
         let _ = std::fs::remove_dir_all(&sandbox);

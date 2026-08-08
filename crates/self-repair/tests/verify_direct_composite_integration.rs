@@ -265,14 +265,18 @@ fn case_a_harmless_candidate_diff_completes_with_measured_bench() {
 
     match outcome {
         VerificationOutcome::Passed(evidence) => {
-            // 新規 `pub fn leaky_relu` 追加行を含むため `api_signature_touched`
-            // ヒューリスティック（追加・削除行に `pub fn` を含むか）は `true` に
+            // 新規 `pub fn leaky_relu` を追加するのみで既存 `pub fn relu`／
+            // `pub fn sigmoid` のシグネチャは変更していないため、
+            // `api_signature_touched`（`guardrail::checks::api_stability::
+            // api_broken` と同一意味論。イシュー #142 差し戻し分で修正済み。
+            // `diff_signals.rs` モジュール冒頭ドキュメント参照）は `false` に
             // なる想定（本テストの主眼は「試行ごとに実測されること」であり、
-            // 値そのものの真偽ではない）。
+            // 値そのものは新規追加のみの候補で破壊なしとなることを併せて
+            // 確認する）。
             assert!(evidence.lines_changed() > 0, "実装追加分の diff があるはず");
             assert!(
-                evidence.api_broken(),
-                "新規 pub fn 追加はヒューリスティック上検出される想定"
+                !evidence.api_broken(),
+                "既存シグネチャを維持したままの新規 pub fn 追加は破壊とみなさない想定"
             );
             assert!(!evidence.gaming_suspect(), "本番コードのみの変更のはず");
             assert!(evidence.gate_report().contains("bench=measured-direct"));

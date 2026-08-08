@@ -14,12 +14,24 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 （TASK-3.3d・本イシュー）、#144（TASK-3.3e・人間評価）の入力となる統合結果を
 提供する。
 
+> **注記（#142 再調査による更新。TASK-3.3d/e 側の再評価は #143・#144 が
+> 別途対応）**: 機能追加種別（TASK-3.3c・#142）は、本 README 作成後に
+> `self-repair run` CLI 経由へ移行し（#139 判断 (c) 差し戻し）、さらに
+> `crates/self-repair/src/diff_signals.rs::api_signature_touched` の
+> 誤検出（新規追加のみの `pub fn` 追加を一律「API 破壊」と判定していた
+> 再実装バグ）を修正した。現在の機能追加種別の実測は完走判定基準 1・4・5・6
+> をすべて充足し `LoopOutcome::Adopted`・exit 0 に到達している（詳細・
+> 実測値は [`feature-addition/README.md`](./feature-addition/README.md) を
+> 正とする）。以下 §1〜§6 の数値・判定（特に機能追加列）はこの更新前の
+> lib 直接呼び出し・合成ワークロード時点のものであり、本 README 自体の
+> 全面的な再評価は TASK-3.3d（#143）・TASK-3.3e（#144）側で改めて行う。
+
 ## 1. サマリ
 
 | 種別 | 記録先 | 最終結論 | 試行回数 | 合計所要時間 | 判断根拠（要約） |
 |------|--------|---------|---------|-------------|-----------------|
 | バグ修正（TASK-3.3b・#141） | [`bug-fix/`](./bug-fix/) | `LoopOutcome::Adopted` | 2 | 17,078 ms（`loop-report.json` `total_duration_ms`） | attempt 1: `cargo test --release` の既知正解値テスト（`mlp_grad_*_matches_numeric`）が analytic/numeric 勾配不一致で失敗し却下。attempt 2: build/test/clippy 全通過＋ベンチゲート機構完走（合成ワークロード・劣化率中央値 0.234%）＋diff 由来シグナルが `guardrail::decide` の自動適用条件を満たし採用 |
-| 機能追加（TASK-3.3c・#142） | [`feature-addition/`](./feature-addition/) | `LoopOutcome::Adopted` | 2 | 9,484 ms（`loop-report.json` `total_duration_ms`。ハーネス全体の壁時計時間は `harness_wall_time_ms` 9,557 ms） | attempt 1: 符号分岐を欠く誤実装で受け入れ基準テスト（`leaky_relu_matches_known_values`。`got=0.05, want=0.5`）不合格・却下。attempt 2: 既存組み込み演算（`relu`・四則）合成による正実装で build/test/clippy 全通過＋ベンチ実測（劣化率中央値 -0.0052%）＋diff 由来シグナル（`lines_changed=28`・`api_broken=false`・`gaming_suspect=false`）が自動適用条件を満たし採用 |
+| 機能追加（TASK-3.3c・#142） | [`feature-addition/`](./feature-addition/) | `Adopted`（exit 0） | 2 | 45,290 ms（`loop-report.json` `total_duration_ms`。ハーネス全体の壁時計時間は `harness_wall_time_ms` 45,322 ms。#142 再調査分の更新: `self-repair run` CLI 経由） | attempt 1: 符号分岐を欠く誤実装で受け入れ基準テスト（`leaky_relu_matches_known_values`。`got=0.05, want=0.5`）不合格・却下。attempt 2: 既存組み込み演算（`relu`・四則）合成による正実装で build/test/clippy 全通過＋候補 diff 直接ベンチ実測（劣化率中央値 0.49%）＋diff 由来シグナル（`lines_changed=28`・`api_broken=false`・`gaming_suspect=false`）が自動適用条件を満たし採用 |
 
 両種別とも `guardrail.toml`（TASK-4.3c・#117 確定値。`bench_median_max_pct=5.0`・
 `bench_runs_min=5`・`lines_max=200`）を一切変更せず、`guardrail::decide` を
@@ -39,11 +51,11 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 
 | # | 判定基準 | バグ修正（#141） | 機能追加（#142） |
 |---|---------|------------------|------------------|
-| 1 | `self-repair run` の 1 回起動・追加の人間入力なしで `AutoApply` へ到達 | 部分充足（CLI 未実装・lib 直接呼び出しで代替） | 部分充足（同左） |
-| 2 | 検証 4 ゲート全通過・`guardrail` 3 分岐判定を迂回なく経由 | 部分充足（3 ゲートは実測、ベンチは機構完走確認〈`bench` フィールドは `NotRun` のまま `guardrail::decide` へ渡る〉） | 充足（`FeatureAdditionCompositeGate` が build/test/clippy＋ベンチを全ゲート通過後に実測し、`bench` フィールドが `Measured` として `guardrail::decide` へ渡る。`gate_report: "build=pass test=pass clippy=pass bench=measured"`。§3 参照） |
+| 1 | `self-repair run` の 1 回起動・追加の人間入力なしで `AutoApply` へ到達 | 部分充足（CLI 未実装・lib 直接呼び出しで代替） | **充足**（`self-repair run` CLI を 1 回起動し `Adopted`・exit 0 へ到達。#142 再調査分の更新。冒頭注記・[`feature-addition/README.md`](./feature-addition/README.md) 参照） |
+| 2 | 検証 4 ゲート全通過・`guardrail` 3 分岐判定を迂回なく経由 | 部分充足（3 ゲートは実測、ベンチは機構完走確認〈`bench` フィールドは `NotRun` のまま `guardrail::decide` へ渡る〉） | 充足（`RepairCompositeGate` が build/test/clippy＋候補 diff 直接ベンチを全ゲート通過後に実測し、`bench` フィールドが `Measured` として `guardrail::decide` へ渡る。`gate_report: "build=pass test=pass clippy=pass bench=measured-direct"`。§3 参照） |
 | 3 | `--max-attempts` 上限内で完走 | 充足（`max_attempts=2` で attempt 2 採用） | 充足（`max_attempts=5` で attempt 2 採用） |
-| 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過 | **部分充足（本イシューで新規充足）**。`loop-log.jsonl` を出力・lib `verify_chain` で検証済み。外部コマンド CLI は未実装 | **部分充足（本イシューで新規充足）**。同左 |
-| 5 | ベンチ劣化中央値が承認済み閾値内（5 回計測中央値） | 部分充足（機構完走確認は合成ワークロード。閾値内 0.234% < 5.0%） | 部分充足（判定基準 2 とは異なり計測経路自体は実測だが、baseline・candidate 双方に同一の合成ワークロード〈`leaky_relu_like_workload`〉を用いており、`feature-addition/README.md`「シグナルは実測のみ」節が明記するとおり「真の劣化率は構造的に 0% 近傍になる」——候補実装固有の性能劣化を検出するものではない。閾値内 -0.0052% < 5.0% は経路実測の結果であり、性能特性そのものの実測結果ではない） |
+| 4 | JSON Lines ログのハッシュチェーン検証（`self-repair verify-log`）を通過 | **部分充足（本イシューで新規充足）**。`loop-log.jsonl` を出力・lib `verify_chain` で検証済み。外部コマンド CLI は未実装 | **充足**（`self-repair verify-log` を外部コマンドとして別プロセス起動し exit 0。#142 再調査分の更新） |
+| 5 | ベンチ劣化中央値が承認済み閾値内（5 回計測中央値） | 部分充足（機構完走確認は合成ワークロード。閾値内 0.234% < 5.0%） | **充足**（`DirectBenchRunner` による候補 diff 直接実測〈baseline commit と候補適用済み sandbox 双方の release ビルドを比較〉。閾値内 0.49% < 5.0%。#142 再調査分の更新） |
 | 6 | 判定レポート JSON の `signal_source` が `"measured"` | 未充足（スコープ外。`signal_source` は CLI 出力仕様） | 充足（`loop-report.json.signal_source == "measured"`） |
 
 判定基準 4 が両種別とも「未充足」から「部分充足」へ移行したことが本イシュー
@@ -57,11 +69,12 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
   チェーン。`docs/self-repair-log-format.md` 準拠）を出力した。書き出し
   直後にハーネス自身が `self_repair::verify_chain` を呼び、`Ok`（チェーン
   整合）であることを assert している（テスト成功がその実証）。
-- **充足していないこと**: `self-repair verify-log`
-  （`docs/guardrail-self-repair-cli.md` §3.2 が境界を定める外部コマンド）は
-  CLI バイナリ本体が未実装のため呼び出していない。本実証における「検証を
-  通過した」は **lib 直接呼び出し（`verify_chain` 関数呼び出し）による検証**
-  であり、独立プロセスとしての CLI 経由検証ではない。
+- **充足していないこと（バグ修正種別のみ）**: `self-repair verify-log`
+  （`docs/guardrail-self-repair-cli.md` §3.2 が境界を定める外部コマンド）を
+  バグ修正種別（`bug-fix/`）は呼び出していない（lib 直接呼び出しによる検証
+  のみ）。機能追加種別は #142 再調査分の更新で `self-repair verify-log` を
+  外部コマンドとして別プロセス起動する検証へ移行済み（上表 基準 4・
+  [`feature-addition/README.md`](./feature-addition/README.md) 参照）。
 - 監査手順・改竄検知の実効性（フィールド改変・レコード削除・順序入れ替え・
   未知フィールド注入の検知）は
   [`bug-fix/README.md` §8](./bug-fix/README.md#8-改竄検知ログloop-logjsonlの監査手順) /
@@ -108,12 +121,13 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 3. 生データは `loop-report.json`（試行ごとの理由・診断値の全文）と
    `loop-log.jsonl`（ハッシュチェーン付き段階レコード。§4 の手順で
    `verify_chain` により整合性を確認可能）の両方を参照できる。
-4. §2 の「部分充足」「未充足」区分（バグ修正: 判定基準 1・2・4・5・6、
-   機能追加: 判定基準 1・4・5）がいずれもスコープ外事項（§5。CLI 未実装・
-   4 ゲート合成の `src/` 本体未昇格・合成ワークロード限界等）に起因する
-   ものであり、ガードレール閾値・テスト許容誤差の緩和によるものではない
-   ことを、各 README の該当節（「3. 4 ゲート合成についての設計上の制約」・
-   「シグナルは実測のみ」等）で確認する。
+4. §2 の「部分充足」「未充足」区分（バグ修正: 判定基準 1・2・4・5・6。
+   機能追加は #142 再調査分の更新により基準 1・4・5 とも充足へ移行済み。
+   冒頭注記参照）がいずれもスコープ外事項（§5。CLI 未実装・4 ゲート合成の
+   `src/` 本体未昇格・合成ワークロード限界等）に起因するものであり、
+   ガードレール閾値・テスト許容誤差の緩和によるものではないことを、各
+   README の該当節（「3. 4 ゲート合成についての設計上の制約」・「シグナルは
+   実測のみ」等）で確認する。
 5. ログ整合性の事前確認（`verify_chain` 実行結果）・判定基準 6 項目の
    個別評価・REQ-3 受け入れ基準との突合・判定案は
    [`completion-judgment.md`](./completion-judgment.md) に記録した。

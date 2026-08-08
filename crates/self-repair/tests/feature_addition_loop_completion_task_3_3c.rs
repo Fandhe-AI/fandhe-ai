@@ -7,7 +7,7 @@
 //! 判定基準は TASK-3.3a（#140・PR #322）で人間承認済み
 //! （`docs/self-repair-revalidation-plan.md` §4.2）。
 //!
-//! # CLI 経由への移行（#139 (c) 差し戻し対応）と、実測で判明した基準 1 未充足
+//! # CLI 経由への移行（#139 (c) 差し戻し対応）
 //! 旧版（PR #338）は **lib API 直接呼び出しの実証ハーネス**として
 //! [`self_repair::SelfRepairLoop`] を直接構築していたが、#139 reopen コメント
 //! の判断 (c) 差し戻しにより、完走判定基準 1・4・5
@@ -20,22 +20,24 @@
 //! （`candidate1_wrong_content`／`candidate2_correct_content`。#140 承認済み
 //! 題材）は旧版から変更していない。
 //!
-//! 実装後に実行して判明した事実として、**基準 1（1 回起動・exit 0 到達）は
-//! 現行のガードレール判定では未充足**である。旧版の lib 直接呼び出しハーネスは
-//! 構築時固定の diff 由来シグナル（`FeatureAdditionCompositeGate`）を使って
-//! おり `api_broken` を独自算出していたため Adopted に到達していたが、
-//! CLI 経由（`RepairCompositeGate`・#137）は `diff_signals.rs::
-//! api_signature_touched` の実測を使う。これは追加・削除いずれの `pub fn`
-//! も「API 破壊」とみなすヒューリスティック（`tests/
-//! verify_direct_composite_integration.rs` の doc で「新規 pub fn 追加は
-//! ヒューリスティック上検出される想定」と既に明記されている既存仕様）であり、
-//! PoC-2 題材 (c) の受け入れ基準は `pub fn leaky_relu` の追加を必須とするため、
-//! この構成では機能追加種別が自動適用（Adopted・exit 0）へ到達する経路が
-//! 存在しない。詳細は
-//! [`feature_addition_loop_reaches_escalation_with_measured_evidence`] の
-//! ドキュメンテーションコメント参照。ガードレール判定・除外リストの変更は
-//! ユーザー承認必須（`.claude/rules/security.md`）のため本イシューでは
-//! 変更していない。
+//! # #142 差し戻し分再調査で判明した誤検出とその修正
+//! CLI 経由へ移行した直後の実測では基準 1（1 回起動・exit 0 到達）が
+//! 未充足だった。原因は `crates/self-repair/src/diff_signals.rs::
+//! api_signature_touched` の実装が、追加・削除いずれの `pub fn` 行も一律
+//! 「API 破壊」とみなす簡略化しすぎたヒューリスティックだったことにある。
+//! これは `guardrail::checks::api_stability::api_broken`（`crates/guardrail/
+//! src/checks/api_stability.rs`）が実装する検出器の既存仕様（新規追加のみの
+//! 変更は破壊とみなさない。同モジュールの `adding_new_pub_fn_is_not_broken`
+//! テストが証明）から乖離した、`self-repair` 側の再実装バグだった
+//! （`guardrail::checks` は非公開のため直接呼べず、`diff_signals.rs` が
+//! 独立して意味論を複製する設計だが、複製時に追加／削除の区別が欠落して
+//! いた）。`diff_signals.rs::api_signature_touched` を baseline のシグネチャ
+//! 消失検査（guardrail 側と同一意味論）へ修正した結果、PoC-2 題材 (c)
+//! （`leaky_relu` の新規追加のみで既存 `pub fn relu`/`pub fn sigmoid` の
+//! シグネチャは変更しない）は基準 1 を充足するようになった（本ファイルの
+//! [`feature_addition_loop_reaches_adopted_with_measured_evidence`] 参照）。
+//! ガードレールの判定ロジック・閾値・「破壊的変更はエスカレーション」という
+//! 原則自体は変更していない（`.claude/rules/security.md`）。
 //!
 //! # シグナルは実測のみ（捏造しない）
 //! `lines_changed`／`exclusion_rule_ids`／`gaming_suspect`／ベンチは、CLI
@@ -431,35 +433,20 @@ fn self_repair_bin() -> Command {
 }
 
 /// 完走判定基準 1（`docs/self-repair-revalidation-plan.md` §5「1 回起動・
-/// exit 0」）が現行実装では未充足であることが判明したため（実行して実測。
-/// 下記コメント参照）、`#[ignore]` で分離する（旧版〈PR #338〉には
-/// `#[ignore]` がなかったが、通過させたい主張〈完走〉と実際の到達点
-/// 〈エスカレーション〉が食い違う状態で通常 CI に緑を出さないための意図的な
-/// 分離である。実行: `cargo test -p self-repair --test
-/// feature_addition_loop_completion_task_3_3c -- --ignored --nocapture`）。
-///
-/// # 基準 1 未充足の原因（実測で判明。ガードレール判定は変更していない）
-/// `crates/self-repair/src/diff_signals.rs::api_signature_touched` は追加・
-/// 削除いずれの `pub fn` 行も「API 破壊」として検出するヒューリスティックで
-/// あり（`tests/verify_direct_composite_integration.rs::
-/// case_a_harmless_candidate_diff_completes_with_measured_bench` の doc が
-/// 「新規 pub fn 追加はヒューリスティック上検出される想定」と明記済み）、
-/// `judge.rs::api_broken_yields_escalate` は `api_broken=true` を無条件で
-/// Escalate へ写像する。PoC-2 題材 (c) の受け入れ基準（`tests/
-/// leaky_relu_acceptance.rs`）は `pub fn leaky_relu` の追加を要求するため、
-/// この構成では機能追加種別の候補が Adopted（exit 0）へ到達する経路が
-/// 存在しない。ヒューリスティックの精緻化（追加と削除を区別する等）・
-/// 除外リストの追加はいずれもガードレール判定・除外リストの変更であり
-/// ユーザー承認必須（`.claude/rules/security.md`）のため本イシューでは
-/// 行わない。基準 1 の扱い（許容する／題材か判定器を見直す）はユーザー判断
-/// 事項として summary へ記録する。
+/// exit 0」）を含む全基準の充足を CLI 1 回起動で実測する（モジュール冒頭
+/// 「#142 差し戻し分再調査で判明した誤検出とその修正」参照。`diff_signals.rs::
+/// api_signature_touched` の修正後は Adopted・exit 0 に到達する。以前の
+/// `#[ignore]` 理由（基準 1 未充足）は解消したが、`cargo build`/`cargo test
+/// --release`/`cargo clippy` を試行 1・2 の 2 系列分実行するため長時間かかる
+/// （`tests/revalidation_bug_fix.rs`・`tests/verify_direct_composite_integration.rs`
+/// の他ゲート系統合テストと同じ理由で `#[ignore]` を維持する。
+/// `.claude/rules/coding-rust.md` の実機依存テスト分離と同じ運用をコンパイル
+/// 時間の観点で適用）。
 #[test]
-#[ignore = "基準1(exit 0)未充足: api_signature_touched が新規 pub fn 追加を \
-            api_broken=true とし judge.rs が無条件 Escalate するため、PoC-2 \
-            題材(c)は現行ガードレール判定で Adopted に到達不能（実測確認済み）。\
-            #142 reopen 事項としてユーザー判断待ち。他の基準(2/4/5/6)はこの \
-            テストで検証済み"]
-fn feature_addition_loop_reaches_escalation_with_measured_evidence() {
+#[ignore = "cargo build/test --release/clippy を試行1・2の2系列分実行するため長時間かかる。\
+            通常 CI ジョブでは実行しない。実行: cargo test -p self-repair --test \
+            feature_addition_loop_completion_task_3_3c -- --ignored --nocapture"]
+fn feature_addition_loop_reaches_adopted_with_measured_evidence() {
     let overall_start = Instant::now();
 
     // --- sandbox 準備 ---
@@ -554,24 +541,24 @@ fn feature_addition_loop_reaches_escalation_with_measured_evidence() {
     let mut report_json: serde_json::Value =
         serde_json::from_str(&report_text).expect("loop-report.json のパースに失敗");
 
-    // 基準 1 が未充足である実測結果（Escalated。本関数冒頭ドキュメント参照）を
-    // そのまま固定する。ここを `Adopted` に書き換えて green 化することは
-    // #139 で既に拒否された「(b) 条件付き充足の独断選択」と同種の判断のため
-    // 行わない。
+    // 基準 1（1 回起動・exit 0・Adopted 到達）を含む実測結果を固定する
+    // （モジュール冒頭「#142 差し戻し分再調査で判明した誤検出とその修正」
+    // 参照。`diff_signals.rs::api_signature_touched` 修正後の実測値）。
     assert!(
         report_json["outcome"]
             .as_str()
-            .is_some_and(|s| s.starts_with("Escalated")),
-        "現行のガードレール判定では api_broken=true により Escalated が実測結果のはず（本関数冒頭ドキュメント参照。判定を変えていないため予期せぬ Adopted/Rejected はコード側の回帰を疑う）: {report_json}"
+            .is_some_and(|s| s.starts_with("Adopted")),
+        "diff_signals.rs::api_signature_touched 修正後は leaky_relu の新規追加が \
+         api_broken=false と正しく判定され Adopted が実測結果のはず: {report_json}"
     );
     assert_eq!(
         run_exit_code,
-        Some(10),
-        "Escalated の終了コードは 10 のはず（3.5 節）"
+        Some(0),
+        "Adopted の終了コードは 0 のはず（3.5 節）"
     );
     assert_eq!(
         report_json["attempt_count"], 2,
-        "試行1（検証不合格）→試行2（検証通過するが api_broken でエスカレーション）の 2 試行系列であるはず: {report_json}"
+        "試行1（検証不合格）→試行2（検証通過・採用）の 2 試行系列であるはず: {report_json}"
     );
     let attempts = report_json["attempts"]
         .as_array()
@@ -586,8 +573,8 @@ fn feature_addition_loop_reaches_escalation_with_measured_evidence() {
     assert!(
         attempts[1]["outcome"]
             .as_str()
-            .is_some_and(|s| s.contains("Escalated")),
-        "試行2は検証通過後に api_broken でエスカレーションされるはず: {:?}",
+            .is_some_and(|s| s.contains("Adopted")),
+        "試行2は検証通過後に採用されるはず: {:?}",
         attempts[1]
     );
     assert_eq!(
@@ -624,20 +611,12 @@ fn feature_addition_loop_reaches_escalation_with_measured_evidence() {
         "5 回以上の計測系列であるはず（REQ-4 受け入れ基準）: {bench_measurements_pct:?}"
     );
     assert!(
-        adopted_evidence["api_broken"].as_bool() == Some(true),
-        "エスカレーション理由（api_broken）と証跡が一致するはず: {adopted_evidence}"
+        adopted_evidence["api_broken"].as_bool() == Some(false),
+        "leaky_relu の新規追加のみで既存シグネチャは消失していないため api_broken=false のはず: {adopted_evidence}"
     );
 
-    // sandbox は Escalated（未採用）で終わっているため、`FeatureAdditionFixGenerator`
-    // による候補適用は最終的に baseline へ復元された状態のまま（`generate` は
-    // 各試行の開始前に baseline へ復元してから候補を適用する契約。
-    // `feature_addition.rs` 参照）。よって「採用後の sandbox で受け入れ基準
-    // テストが通る」ことの再確認はここでは行わない（旧版は Adopted 前提の
-    // 検証だったため実施していたが、Escalated では意味を持たない）。
-
     // 実行コマンドライン（監査・再現性のための記録。実装計画 §5 ステップ 8）
-    // を付与し、CLI 未実装だった旧版の notes を実測結果（基準 1 未充足を
-    // 含む）へ更新する。
+    // を付与し、旧版（Escalated 実測）の notes を Adopted 実測結果へ更新する。
     // `--log`／`--output`／`--policy-exclusion` はリポジトリルート配下の
     // 固定パスのため、記録用にはルート相対へ変換する（`--repo`／`--candidates`
     // は使い捨て sandbox・一時ファイルの絶対パスであり本質的に非決定的な
@@ -668,7 +647,7 @@ fn feature_addition_loop_reaches_escalation_with_measured_evidence() {
         "self-repair verify-log CLI（外部コマンド経由。#145）でハッシュチェーン検証済み（完走判定基準 4・充足）。",
         "ベンチは RepairCompositeGate（TASK-3.2a・#137）による候補 diff 直接実測であり、baseline/candidate 双方に合成ワークロードを使う旧版（FeatureAdditionCompositeGate）とは異なる（完走判定基準 5・充足）。",
         "signal_source=measured（完走判定基準 6・充足）。",
-        "基準 1（exit 0 / Adopted）は未充足: diff_signals.rs::api_signature_touched が新規 pub fn 追加を api_broken=true とし、judge.rs が無条件 Escalate するため、PoC-2 題材 (c) は現行のガードレール判定では自動適用へ到達しない（実測: outcome=Escalated, exit=10, reason=『公開 API の破壊的変更が検出されました』）。ヒューリスティック・除外リストの変更はユーザー承認必須のため本イシューでは行わない。#142 reopen 事項としてユーザー判断待ち。",
+        "基準 1（exit 0 / Adopted）は充足: diff_signals.rs::api_signature_touched が追加・削除いずれの pub fn 行も一律 api_broken=true としていた再実装バグ（guardrail::checks::api_stability::api_broken の既存意味論〈新規追加は破壊とみなさない〉からの乖離）を修正した結果、PoC-2 題材 (c)（leaky_relu の新規追加。既存 pub fn relu/pub fn sigmoid は不変）は Adopted・exit 0 へ到達する（実測: outcome=Adopted, exit=0）。ガードレールの判定ロジック・閾値・除外リストは変更していない。",
     ]);
     let mut pretty = serde_json::to_string_pretty(&report_json).expect("JSON シリアライズに失敗");
     // `.editorconfig` の `insert_final_newline` 慣行に合わせ、commit 対象と
