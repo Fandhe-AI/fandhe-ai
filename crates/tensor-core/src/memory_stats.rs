@@ -96,10 +96,37 @@ pub trait MemoryStats {
 /// （GEMM 等の演算カーネル内部）ではなく統計フックの用途に限られるため
 /// （モジュールコメント「計測対象の粒度」参照）、`Mutex` のオーバーヘッドは
 /// 許容する。
+///
+/// # 内部表現を `u128` にする理由（PR #359 codex-review 指摘 P1 の再修正）
+///
+/// 直前の修正（`applied delta` 方式）は `u64::MAX` 飽和後に生じた確保の
+/// 未計上分を「実際に加算できた量」として `TrackedAllocation` に持たせ、
+/// Drop 時に過不足なく減算する設計だった。しかしこれは非対称バグ
+/// （生存中の他アロケーションを消してしまう）は解消した一方、飽和で
+/// **切り捨てられた分自体は二度と計上されない**という別の契約違反を
+/// 残していた。例: `current` が飽和した状態で 1 バイトを確保すると
+/// `applied == 0` として記録され、その後に他の巨大アロケーションが
+/// 解放されて `current` に空きが生じても、この 1 バイトは
+/// `allocated_bytes()` に反映されない（このアロケーションは生存中
+/// なのに数え落とされたまま）。
+///
+/// 実務上あり得る確保バイト数の合計が `u128::MAX`（約 3.4 × 10^38）に
+/// 達することはないため、内部カウンタ（`current`・`peak`）を `u128` で
+/// 保持すれば「飽和で切り捨てる」操作自体が実質的に不要になる。加算・
+/// 減算は常に要求バイト数どおり厳密に行われ、[`TrackedAllocation`] は
+/// 要求量をそのまま保持すればよく（`applied delta` の概念が丸ごと不要
+/// になる）、確保・解放の対称性が構造的に保証される。`u64` への飽和
+/// キャストは [`MemoryStats`] トレイト（PyTorch 互換の `u64` シグネチャ。
+/// モジュールコメント参照）を満たすための**表示境界でのみ**行う
+/// （[`AllocationTracker::allocated_bytes`]／[`AllocationTracker::peak_allocated_bytes`]）。
+/// これにより「内部的には生存し続けているのに二度と計上されない」
+/// 状態が原理的に発生しなくなる: 表示上 `u64::MAX` に飽和していても、
+/// 他の確保が解放されて内部合計が `u64` 範囲に戻れば、次回の読み取りで
+/// 正しい値が復元される。
 #[derive(Debug, Default, Clone, Copy)]
 struct MemoryCounters {
-    current: u64,
-    peak: u64,
+    current: u128,
+    peak: u128,
 }
 
 #[derive(Debug, Default)]
@@ -124,43 +151,58 @@ impl AllocationTracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// `bytes` 分の確保を計上する。[`TrackedAllocation::new`] からのみ
-    /// 呼ばれる（減算経路〈`on_free`〉との対称性を `TrackedAllocation` の
-    /// RAII に閉じ込めるため、本メソッド自体は non-pub のまま維持する）。
+    /// `bytes` 分の確保を内部の `u128` カウンタへ厳密に計上する。
+    /// [`TrackedAllocation::new`] からのみ呼ばれる（減算経路〈`on_free`〉
+    /// との対称性を `TrackedAllocation` の RAII に閉じ込めるため、本
+    /// メソッド自体は non-pub のまま維持する）。
+    ///
+    /// 内部カウンタを `u128` にしたことで（[`MemoryCounters`] の doc
+    /// コメント「内部表現を `u128` にする理由」参照）、`bytes` は常に
+    /// 過不足なく `current` へ反映される。「実際に加算できた量」を別途
+    /// 計算して返す必要がなくなったため、旧 `applied delta` 方式（PR #359
+    /// codex-review 指摘 P1 の初回修正）は本修正で不要になった。
     fn on_alloc(&self, bytes: u64) {
         let mut counters = self.lock();
-        // saturating を使う理由: 旧 `AtomicU64::fetch_add` はオーバーフロー
-        // 時に暗黙のラップアラウンドをしていたが、`u64` 同士の `+=` は
-        // debug ビルド（`cargo test` 既定）でオーバーフロー panic する。
-        // 統計フックが確保経路を panic させることは避けたいため
-        // `saturating_add` で上限に飽和させる（本番経路で panic しない方針。
-        // `coding-rust.md`）。
-        counters.current = counters.current.saturating_add(bytes);
+        // `u128` への加算は現実的な確保量の合計では枯渇しないが、
+        // 本番経路で panic しない方針（`coding-rust.md`）を保険として
+        // 徹底するため `saturating_add` を用いる。
+        counters.current = counters.current.saturating_add(u128::from(bytes));
         if counters.current > counters.peak {
             counters.peak = counters.current;
         }
     }
 
-    /// `bytes` 分の解放を計上する。[`TrackedAllocation::drop`] からのみ
-    /// 呼ばれる（公開 API にはしない。`on_alloc` と 1:1 で対応する呼び出しを
-    /// `TrackedAllocation` の構築・破棄に構造的に紐付けることで、減算過多
-    /// による整数アンダーフローを防ぐ）。`saturating_sub` は上記 `on_alloc`
-    /// と同じ理由（panic 回避）で用いる保険であり、正常経路では
-    /// `on_alloc`/`on_free` の 1:1 対応により減算過多は起きない想定。
+    /// `bytes` 分（[`TrackedAllocation`] が構築時に確保計上したのと同じ
+    /// 要求量）の解放を計上する。[`TrackedAllocation::drop`] からのみ
+    /// 呼ばれる（公開 API にはしない）。内部カウンタが `u128` で厳密な
+    /// ため、`on_alloc`/`on_free` は常に対称であり、飽和時の過剰減算
+    /// （PR #359 codex-review 指摘 P1 の初回修正対象だった非対称バグ）は
+    /// 構造的に発生しない。`saturating_sub` は万一の呼び出し順序不整合に
+    /// 備えた保険（本番経路で panic しない方針）であり、正常経路では
+    /// 減算過多は起きない想定。
     fn on_free(&self, bytes: u64) {
         let mut counters = self.lock();
-        counters.current = counters.current.saturating_sub(bytes);
+        counters.current = counters.current.saturating_sub(u128::from(bytes));
     }
 
     /// 現在の確保済みバイト数。[`MemoryStats::allocated_bytes`] の実体
     /// （バックエンド入口型が委譲実装するための公開メソッド）。
+    ///
+    /// 内部カウンタは `u128` で厳密に保持しており（[`MemoryCounters`] の
+    /// doc コメント参照）、`u64`（[`MemoryStats`] の公開シグネチャ）への
+    /// 飽和キャストはこの読み取り時にのみ行う。したがって内部合計が
+    /// 一時的に `u64::MAX` を超えて表示が飽和していても、その後に他の
+    /// 確保が解放され内部合計が `u64` 範囲へ戻れば、次回の読み取りで
+    /// 正しい値が復元される（表示の飽和が生存中アロケーションの計上を
+    /// 永久に失わせることはない）。
     pub fn allocated_bytes(&self) -> u64 {
-        self.lock().current
+        u64::try_from(self.lock().current).unwrap_or(u64::MAX)
     }
 
     /// ピーク確保済みバイト数。[`MemoryStats::peak_allocated_bytes`] の実体。
+    /// 飽和キャストの扱いは [`Self::allocated_bytes`] と同じ。
     pub fn peak_allocated_bytes(&self) -> u64 {
-        self.lock().peak
+        u64::try_from(self.lock().peak).unwrap_or(u64::MAX)
     }
 
     /// ピーク値を現在値へリセットする。[`MemoryStats::reset_peak`] の実体。
@@ -190,6 +232,11 @@ impl AllocationTracker {
 #[derive(Debug)]
 pub struct TrackedAllocation {
     tracker: Arc<AllocationTracker>,
+    // 要求された確保量をそのまま保持する。内部カウンタが `u128` で厳密な
+    // ため（`AllocationTracker::on_alloc` の doc コメント参照）、`on_alloc`
+    // は要求量を過不足なく計上でき、`applied delta` のような「実際に
+    // 計上できた量」を別途追跡する必要がない。Drop 時にこの値をそのまま
+    // `on_free` へ渡すことで、加算・減算は構造的に対称になる。
     bytes: u64,
 }
 
@@ -404,5 +451,80 @@ mod tests {
         );
         drop(guards);
         drop(baseline);
+    }
+
+    /// PR #359 codex-review 指摘 P1（3 回目）の再発防止テスト。直前の
+    /// 修正（`applied delta` 方式）は Drop 時の非対称な過剰減算は解消した
+    /// ものの、`u64::MAX` 飽和中に確保されたアロケーション（`applied == 0`
+    /// として記録される）が、その後に他の確保が解放されて `current` へ
+    /// 空きが生じても**永久に計上されない**という契約違反を残していた
+    /// （`MemoryCounters` の doc コメント「内部表現を `u128` にする理由」
+    /// 参照）。`allocated_bytes()` の契約は「この瞬間に生存している
+    /// アロケーションの合計」であり、`guard`（1 バイト）は `huge` を
+    /// drop した後も生存し続けているため、`base`（500）+ `guard`（1）=
+    /// 501 が返るべきである。
+    ///
+    /// 旧実装（`applied delta` 方式）では `guard` の `applied` が飽和時に
+    /// 0 として記録されるため、`huge` drop 後も `current == 500` のまま
+    /// （`guard` の 1 バイトが数え落とされたまま）となり、本テストの
+    /// `501` アサーションに失敗する。内部カウンタを `u128` にした本修正
+    /// では `guard` の 1 バイトも厳密に計上され続けるため、表示上の飽和が
+    /// 解けた時点で正しく `501` が復元される。
+    #[test]
+    fn saturated_allocation_is_recounted_once_headroom_reopens() {
+        let tracker = Arc::new(AllocationTracker::new());
+        // 飽和発生前に非ゼロの生存アロケーションを作る（部分飽和状態の
+        // 土台）。
+        let base = TrackedAllocation::new(Arc::clone(&tracker), 500);
+        assert_eq!(tracker.allocated_bytes(), 500);
+
+        let huge = TrackedAllocation::new(Arc::clone(&tracker), u64::MAX);
+        assert_eq!(
+            tracker.allocated_bytes(),
+            u64::MAX,
+            "内部合計が u64 範囲を超えるため表示は u64::MAX に飽和する"
+        );
+
+        let guard = TrackedAllocation::new(Arc::clone(&tracker), 1);
+        // 飽和中の確保でも表示は変わらず u64::MAX のまま（内部カウンタは
+        // u128 で厳密に 1 バイト分加算されているが、表示はまだ飽和圏内）。
+        assert_eq!(tracker.allocated_bytes(), u64::MAX);
+
+        drop(huge);
+        // huge を解放すると内部合計が u64 範囲へ戻り、base（500）+
+        // guard（1）= 501 が正しく復元される。guard は飽和中に確保された
+        // アロケーションだが、数え落とされずに反映されている。
+        assert_eq!(
+            tracker.allocated_bytes(),
+            501,
+            "base（500）と guard（1）が両方とも生存しているため 501 になるはず"
+        );
+
+        drop(guard);
+        assert_eq!(tracker.allocated_bytes(), 500);
+
+        drop(base);
+        assert_eq!(tracker.allocated_bytes(), 0);
+    }
+
+    /// 上記テストの非飽和版: 内部合計が `u64` 範囲に収まる通常の確保・
+    /// 解放順序では表示上の飽和が一切発生せず、複数の生存中アロケーション
+    /// のうち 1 本を解放しても残りの計上が正しく残ることを確認する
+    /// （非飽和経路での回帰防止）。
+    #[test]
+    fn non_saturated_allocations_track_exact_requested_bytes() {
+        let tracker = Arc::new(AllocationTracker::new());
+        let a = TrackedAllocation::new(Arc::clone(&tracker), 1_000);
+        let b = TrackedAllocation::new(Arc::clone(&tracker), 2_000);
+        assert_eq!(tracker.allocated_bytes(), 3_000);
+
+        drop(a);
+        assert_eq!(
+            tracker.allocated_bytes(),
+            2_000,
+            "a の解放分のみが減算され b の計上は生存し続ける"
+        );
+        drop(b);
+        assert_eq!(tracker.allocated_bytes(), 0);
     }
 }
