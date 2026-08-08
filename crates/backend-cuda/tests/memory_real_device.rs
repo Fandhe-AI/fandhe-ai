@@ -14,6 +14,7 @@ use backend_cuda::{CudaDevice, CudaMemory};
 use tensor_core::Tensor;
 use tensor_core::buffer::MemoryOps;
 use tensor_core::device::Device;
+use tensor_core::memory_stats::MemoryStats;
 use tensor_core::pool::{PoolConfig, PooledMemory};
 
 /// upload → download の roundtrip が bit 完全一致することを確認する
@@ -144,4 +145,47 @@ fn pooled_memory_reuses_buffer_and_zero_fills_on_real_hardware() {
         );
     }
     drop(buf2);
+}
+
+/// TASK-14.1b（#175）: 受け入れ条件「CUDA バックエンドでピーク値が
+/// 取得できる」の実機検証。既知サイズ（`[64, 64]` f32 = 16,384 バイト）を
+/// 複数同時確保し `peak_allocated_bytes()` が期待合計と一致すること、
+/// drop 後は `allocated_bytes()` が減少しつつ `peak` が過去最大値を保持
+/// することを確認する（`backend-cpu::memory` の
+/// `peak_allocated_bytes_tracks_sum_of_concurrent_buffers` と同種の
+/// シナリオを実機で裏付ける）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn peak_allocated_bytes_matches_known_allocation_size_on_real_hardware() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let mem = CudaMemory::new(&device);
+    mem.reset_peak();
+
+    let numel = 64 * 64;
+    let expected_bytes = (numel * std::mem::size_of::<f32>()) as u64;
+
+    let a = mem
+        .alloc_zeroed(&[numel])
+        .expect("first alloc_zeroed must succeed");
+    let b = mem
+        .alloc_zeroed(&[numel])
+        .expect("second alloc_zeroed must succeed");
+
+    assert_eq!(mem.allocated_bytes(), expected_bytes * 2);
+    assert_eq!(mem.peak_allocated_bytes(), expected_bytes * 2);
+
+    drop(a);
+    assert_eq!(
+        mem.allocated_bytes(),
+        expected_bytes,
+        "1 本解放後は current が半分に戻るはず"
+    );
+    assert_eq!(
+        mem.peak_allocated_bytes(),
+        expected_bytes * 2,
+        "peak は解放後も同時生存時の合計を保持するはず"
+    );
+
+    drop(b);
 }

@@ -17,6 +17,8 @@
 //! 既に確定している）。
 
 use std::any::Any;
+use std::mem::size_of;
+use std::sync::Arc;
 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
@@ -24,6 +26,7 @@ use crate::error::MetalError;
 use tensor_core::Tensor;
 use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use tensor_core::device::{BackendError, Device};
+use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 use tensor_core::pool::PoolZeroFill;
 
 /// Metal バッファの具体ハンドル。
@@ -33,9 +36,18 @@ use tensor_core::pool::PoolZeroFill;
 /// `new_zeroed` はいずれも長さ 0 を `MetalError::ZeroLengthAllocation`
 /// として FFI 呼び出し前に拒否するため（`buffer.rs::checked_byte_len`）、
 /// 空テンソルはこのハンドル自体を経由して Metal 側の拒否を回避する。
+///
+/// `_alloc`（[`TrackedAllocation`]。TASK-14.1b・#175）は `buffer` より後に
+/// 宣言しており、フィールドは宣言順に drop される Rust の規則により
+/// `buffer`（`MetalBuffer` 内部の `Retained<MtlBuffer>` の解放）の後に
+/// drop される。`TrackedAllocation::drop` は `buffer` の中身を参照せず
+/// 確保時に記録したバイト数を `AllocationTracker` へ返すだけ
+/// （`backend-cpu::CpuBufferHandle`／`backend-cuda::CudaBufferHandle` の
+/// `_alloc` と同型の契約）であるため、drop 順は計測上問題にならない。
 #[derive(Debug)]
 struct MetalBufferHandle {
     buffer: Option<MetalBuffer>,
+    _alloc: TrackedAllocation,
 }
 
 impl BufferHandle for MetalBufferHandle {
@@ -50,14 +62,46 @@ impl BufferHandle for MetalBufferHandle {
 
 /// `MemoryOps` の Metal 実装。[`MetalContext`] を保持し、確保・転送の
 /// たびに `MetalBuffer::new_with_data`／`new_zeroed` へ委譲する。
+///
+/// `tracker`（TASK-14.1b・#175）は `backend-cpu::CpuMemory`／
+/// `backend-cuda::CudaMemory` と同型の計測フックだが、`MetalContext` が
+/// `Clone` を導出していないため（`context.rs` 参照。`Retained<MtlDevice>`／
+/// `Retained<MtlQueue>` の複製可否をこのイシューでは検証しない安全側
+/// 判断）、`MetalMemory` 自体にも `Clone` は付与しない
+/// （out-of-scope。受け入れ条件「3 バックエンドで同一 API からピーク値が
+/// 取得できる」は `MemoryStats` 実装のみを要求し `Clone` を要求しない）。
 pub struct MetalMemory {
     context: MetalContext,
+    tracker: Arc<AllocationTracker>,
 }
 
 impl MetalMemory {
     /// 初期化済みの [`MetalContext`] から `MetalMemory` を構築する。
+    /// 新規の計測系列を持つトラッカーを生成する
+    /// （`backend-cpu::CpuMemory::new` と同型）。
     pub fn new(context: MetalContext) -> Self {
-        Self { context }
+        Self {
+            context,
+            tracker: Arc::new(AllocationTracker::new()),
+        }
+    }
+}
+
+/// [`MemoryStats`] の Metal 実装（TASK-14.1b・#175）。`backend-cpu::
+/// CpuMemory`／`backend-cuda::CudaMemory` と同一シグネチャで `tracker` へ
+/// 委譲する。REQ-14 の受け入れ条件（CPU/CUDA/Metal で同一 API からピーク
+/// 値が取得できる）を満たす。
+impl MemoryStats for MetalMemory {
+    fn allocated_bytes(&self) -> u64 {
+        self.tracker.allocated_bytes()
+    }
+
+    fn peak_allocated_bytes(&self) -> u64 {
+        self.tracker.peak_allocated_bytes()
+    }
+
+    fn reset_peak(&self) {
+        self.tracker.reset_peak();
     }
 }
 
@@ -122,14 +166,47 @@ fn checked_numel(shape: &[usize]) -> Result<usize, MetalError> {
         })
 }
 
+/// `numel` 分の `f32` 確保が消費するバイト数を検査付きで計算する
+/// （TASK-14.1b・#175。計測専用ヘルパー）。
+///
+/// `buffer.rs::checked_byte_len`（`pub(crate)` ではなく private）とは
+/// 名前が同じだが、意図的に**挙動が異なる**: `buffer.rs` 側は
+/// `len == 0` を `MetalError::ZeroLengthAllocation` として拒否する
+/// （FFI 呼び出し前の防御）のに対し、本関数は `numel == 0` を `Ok(0)` で
+/// 通す（空テンソル契約における `TrackedAllocation::new(tracker, 0)` の
+/// no-op 計上に使うため。`buffer.rs` 側の呼び出しは空テンソル経路では
+/// 到達しない〈`alloc_zeroed_inner`／`upload_inner` が `numel == 0` を
+/// FFI 呼び出し前に分岐で回避する〉。`checked_numel` の後段検証として
+/// 配置する点は CPU/CUDA 実装と同型。外部由来の shape がこの経路へ
+/// 流入しうるための OWASP A03 対策）。
+fn checked_byte_len(numel: usize) -> Result<u64, MetalError> {
+    let bytes = numel
+        .checked_mul(size_of::<f32>())
+        .ok_or(MetalError::AllocationSizeOverflow { len: numel })?;
+    Ok(bytes as u64)
+}
+
 impl MetalMemory {
     fn alloc_zeroed_inner(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, MetalError> {
         let numel = checked_numel(shape)?;
+        // 計測（`TrackedAllocation::new`）は確保成功後に行う。確保が
+        // 失敗しうる `?` の前でカウントすると、失敗した確保が一時的に
+        // ピークへ計上されてしまう（`backend-cpu::CpuMemory`／
+        // `backend-cuda::CudaMemory` と同じ順序契約。TASK-14.1b・#175）。
         let handle: Box<dyn BufferHandle> = if numel == 0 {
-            Box::new(MetalBufferHandle { buffer: None })
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
+            Box::new(MetalBufferHandle {
+                buffer: None,
+                _alloc: alloc,
+            })
         } else {
             let buf = MetalBuffer::new_zeroed(&self.context, numel)?;
-            Box::new(MetalBufferHandle { buffer: Some(buf) })
+            let bytes = checked_byte_len(numel)?;
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+            Box::new(MetalBufferHandle {
+                buffer: Some(buf),
+                _alloc: alloc,
+            })
         };
         Ok(DeviceBuffer::new(Device::Metal, shape.to_vec(), handle))
     }
@@ -137,7 +214,11 @@ impl MetalMemory {
     fn upload_inner(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, MetalError> {
         let shape = tensor.shape().to_vec();
         if tensor.numel() == 0 {
-            let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle { buffer: None });
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
+            let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle {
+                buffer: None,
+                _alloc: alloc,
+            });
             return Ok(DeviceBuffer::new(Device::Metal, shape, handle));
         }
         // 非 contiguous な入力は実体化してから転送する（`MemoryOps::upload`
@@ -147,7 +228,12 @@ impl MetalMemory {
             bytes: 0, // contiguous() 直後に as_slice が None を返す到達不能パス。
         })?;
         let buf = MetalBuffer::new_with_data(&self.context, data)?;
-        let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle { buffer: Some(buf) });
+        let bytes = checked_byte_len(data.len())?;
+        let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+        let handle: Box<dyn BufferHandle> = Box::new(MetalBufferHandle {
+            buffer: Some(buf),
+            _alloc: alloc,
+        });
         Ok(DeviceBuffer::new(Device::Metal, shape, handle))
     }
 
@@ -197,11 +283,15 @@ impl MemoryOps for MetalMemory {
 }
 
 /// `tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・REQ-14
-/// 14-3。Metal 側の組み込みは本イシューのスコープ内。実機検証は #175
-/// 完了後）が再利用バッファを返す前に呼ぶゼロ初期化フック。
+/// 14-3）が再利用バッファを返す前に呼ぶゼロ初期化フック。
 /// `MetalBuffer::zero_fill`（`buffer.rs`）へ委譲する（`StorageModeShared`
 /// の CPU 可視アドレスへの直接書き込み。モジュール冒頭コメント
-/// 「既存バッファ書き込みパターン踏襲」参照）。
+/// 「既存バッファ書き込みパターン踏襲」参照）。プール保持中も
+/// `MetalBufferHandle::_alloc`（`TrackedAllocation`。TASK-14.1b・#175）は
+/// 生存し続けるため、「返却されたが未解放のバッファ」も
+/// `allocated_bytes()` に自然に計上され続ける（リークではなく意図した
+/// 挙動。`backend-cuda::memory` の同型コメント参照）。実機でのピーク
+/// 計測の裏取りは TASK-14.2（#177）で実施する。
 impl PoolZeroFill for MetalMemory {
     fn zero_fill(&self, handle: &mut dyn BufferHandle) -> Result<(), BackendError> {
         let Some(metal_handle) = handle.as_any_mut().downcast_mut::<MetalBufferHandle>() else {
@@ -244,5 +334,35 @@ mod tests {
     fn map_metal_error_covers_device_unavailable() {
         let err = map_metal_error(MetalError::DeviceUnavailable);
         assert!(matches!(err, BackendError::DeviceUnavailable(_)));
+    }
+
+    #[test]
+    fn checked_byte_len_rejects_overflow() {
+        let err = checked_byte_len(usize::MAX).unwrap_err();
+        assert!(matches!(err, MetalError::AllocationSizeOverflow { .. }));
+    }
+
+    #[test]
+    fn checked_byte_len_accepts_ordinary_numel_including_zero() {
+        // `buffer.rs::checked_byte_len` とは異なり、本モジュールの
+        // 計測用 `checked_byte_len` は `numel == 0` を `Ok(0)` で通す
+        // （関数 doc コメント「意図的に挙動が異なる」参照）。
+        assert_eq!(checked_byte_len(1024).unwrap(), 4096);
+        assert_eq!(checked_byte_len(0).unwrap(), 0);
+    }
+
+    /// コンパイル時の静的検査。`fn(): T where T: MemoryStats` が
+    /// `MetalMemory`／`PooledMemory<MetalMemory>` に対して呼び出せること
+    /// 自体が、「CPU/CUDA/Metal で同一 API（同一シグネチャの trait）から
+    /// ピーク値が取得できる」という REQ-14 の受け入れ条件を Linux
+    /// self-hosted CI（Metal 非搭載）でも `aarch64-apple-darwin` クロス
+    /// ビルド経由で機械検証する（TASK-14.1b・#175。実機でのピーク実測は
+    /// TASK-14.2・#177 で裏取りする）。
+    fn assert_memory_stats<T: MemoryStats>() {}
+
+    #[test]
+    fn metal_memory_and_pooled_metal_memory_implement_memory_stats() {
+        assert_memory_stats::<MetalMemory>();
+        assert_memory_stats::<tensor_core::pool::PooledMemory<MetalMemory>>();
     }
 }
