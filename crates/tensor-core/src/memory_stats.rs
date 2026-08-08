@@ -124,32 +124,53 @@ impl AllocationTracker {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// `bytes` 分の確保を計上する。[`TrackedAllocation::new`] からのみ
-    /// 呼ばれる（減算経路〈`on_free`〉との対称性を `TrackedAllocation` の
-    /// RAII に閉じ込めるため、本メソッド自体は non-pub のまま維持する）。
-    fn on_alloc(&self, bytes: u64) {
+    /// `bytes` 分の確保を計上し、実際に `current` へ加算できた量（applied
+    /// delta）を返す。[`TrackedAllocation::new`] からのみ呼ばれる（減算経路
+    /// 〈`on_free`〉との対称性を `TrackedAllocation` の RAII に閉じ込めるため、
+    /// 本メソッド自体は non-pub のまま維持する）。
+    ///
+    /// # 戻り値が `bytes` と異なりうる理由（PR #359 codex-review 指摘 P1）
+    ///
+    /// `saturating_add` で `current` が `u64::MAX` に飽和した場合、要求した
+    /// `bytes` の一部（または全部）は `current` に反映されない。呼び出し元
+    /// （[`TrackedAllocation`]）が Drop 時に `bytes`（要求量）をそのまま
+    /// `on_free` へ渡すと、実際には計上されなかった分まで減算してしまい、
+    /// 他の生存中アロケーションの計上を消してしまう非対称なバグになる
+    /// （例: `current == 0` の状態で `u64::MAX` バイトのガードと 1 バイトの
+    /// ガードを連続確保すると `current` は `u64::MAX` のまま飽和し、前者を
+    /// Drop すると `current == 0` になり、後者が生存中でも計上から消える）。
+    /// これを避けるため、本メソッドは「実際に加算できた量」（`applied delta`
+    /// = 加算後の `current` − 加算前の `current`）を返し、呼び出し元は
+    /// `bytes` ではなく本戻り値を保持して Drop 時に渡す。飽和が起きない
+    /// 通常経路では `applied == bytes` であり挙動は変わらない。
+    fn on_alloc(&self, bytes: u64) -> u64 {
         let mut counters = self.lock();
+        let before = counters.current;
         // saturating を使う理由: 旧 `AtomicU64::fetch_add` はオーバーフロー
         // 時に暗黙のラップアラウンドをしていたが、`u64` 同士の `+=` は
         // debug ビルド（`cargo test` 既定）でオーバーフロー panic する。
         // 統計フックが確保経路を panic させることは避けたいため
         // `saturating_add` で上限に飽和させる（本番経路で panic しない方針。
         // `coding-rust.md`）。
-        counters.current = counters.current.saturating_add(bytes);
+        counters.current = before.saturating_add(bytes);
         if counters.current > counters.peak {
             counters.peak = counters.current;
         }
+        counters.current - before
     }
 
-    /// `bytes` 分の解放を計上する。[`TrackedAllocation::drop`] からのみ
-    /// 呼ばれる（公開 API にはしない。`on_alloc` と 1:1 で対応する呼び出しを
-    /// `TrackedAllocation` の構築・破棄に構造的に紐付けることで、減算過多
-    /// による整数アンダーフローを防ぐ）。`saturating_sub` は上記 `on_alloc`
-    /// と同じ理由（panic 回避）で用いる保険であり、正常経路では
-    /// `on_alloc`/`on_free` の 1:1 対応により減算過多は起きない想定。
-    fn on_free(&self, bytes: u64) {
+    /// `applied` 分（[`Self::on_alloc`] が実際に計上した量。要求 `bytes` と
+    /// 飽和時に異なりうる）の解放を計上する。[`TrackedAllocation::drop`]
+    /// からのみ呼ばれる（公開 API にはしない。`on_alloc` の戻り値と 1:1 で
+    /// 対応する呼び出しを `TrackedAllocation` の構築・破棄に構造的に
+    /// 紐付けることで、減算過多による整数アンダーフローと、飽和時の非対称
+    /// な過剰減算〈PR #359 codex-review 指摘 P1〉の両方を防ぐ）。
+    /// `saturating_sub` は上記 `on_alloc` と同じ理由（panic 回避）で用いる
+    /// 保険であり、正常経路では `on_alloc`/`on_free` の 1:1 対応により
+    /// 減算過多は起きない想定。
+    fn on_free(&self, applied: u64) {
         let mut counters = self.lock();
-        counters.current = counters.current.saturating_sub(bytes);
+        counters.current = counters.current.saturating_sub(applied);
     }
 
     /// 現在の確保済みバイト数。[`MemoryStats::allocated_bytes`] の実体
@@ -190,7 +211,14 @@ impl AllocationTracker {
 #[derive(Debug)]
 pub struct TrackedAllocation {
     tracker: Arc<AllocationTracker>,
-    bytes: u64,
+    // 要求された確保量ではなく、`on_alloc` が実際に `current` へ計上できた
+    // 量（applied delta）を保持する。飽和（`u64::MAX` 到達）が起きない
+    // 通常経路では要求量と一致するが、飽和時は異なりうる。Drop 時にこの
+    // 値をそのまま `on_free` へ渡すことで、加算・減算が常に対称になり、
+    // 生存中の他アロケーションの計上を消してしまう非対称バグ（PR #359
+    // codex-review 指摘 P1）を構造的に防ぐ（`AllocationTracker::on_alloc`
+    // の doc コメント参照）。
+    applied: u64,
 }
 
 impl TrackedAllocation {
@@ -199,14 +227,14 @@ impl TrackedAllocation {
     /// 呼び出し自体は許容する（0 バイト加算は現在値・ピークいずれも変化
     /// させない no-op として自然に振る舞う）。
     pub fn new(tracker: Arc<AllocationTracker>, bytes: u64) -> Self {
-        tracker.on_alloc(bytes);
-        Self { tracker, bytes }
+        let applied = tracker.on_alloc(bytes);
+        Self { tracker, applied }
     }
 }
 
 impl Drop for TrackedAllocation {
     fn drop(&mut self) {
-        self.tracker.on_free(self.bytes);
+        self.tracker.on_free(self.applied);
     }
 }
 
@@ -404,5 +432,64 @@ mod tests {
         );
         drop(guards);
         drop(baseline);
+    }
+
+    /// PR #359 codex-review 指摘 P1 の再発防止テスト。旧実装は `on_alloc`
+    /// が要求 `bytes` をそのまま `TrackedAllocation` に保持させ、Drop 時に
+    /// その全量を無条件で `on_free` していた。`current` が `u64::MAX` へ
+    /// 飽和した状態でさらに確保すると、飽和分は `current` に反映されない
+    /// にもかかわらず Drop 時には要求量の全量が減算されるため、後続の
+    /// 生存中アロケーションの計上を消してしまっていた
+    /// （`AllocationTracker::on_alloc` の doc コメント参照）。ここでは
+    /// `u64::MAX` バイトのガードで `current` を飽和させたあと 1 バイトの
+    /// ガードを確保し、前者を Drop しても後者の計上が生存し続けることを
+    /// 検査する。
+    #[test]
+    fn saturated_alloc_drop_does_not_erase_other_live_allocation() {
+        let tracker = Arc::new(AllocationTracker::new());
+        let huge = TrackedAllocation::new(Arc::clone(&tracker), u64::MAX);
+        assert_eq!(tracker.allocated_bytes(), u64::MAX, "current は飽和する");
+
+        let guard = TrackedAllocation::new(Arc::clone(&tracker), 1);
+        // 飽和後の 1 バイト確保は `current` を変化させない（applied delta
+        // が 0 として記録される）ため、`current` は変わらない。
+        assert_eq!(tracker.allocated_bytes(), u64::MAX);
+
+        drop(huge);
+        // 修正前は huge の Drop が要求量 u64::MAX をそのまま減算し、
+        // guard 分（実際には計上されていなかった 0）ではなく飽和で失われた
+        // 分まで一緒に消えて current == 0 になっていた。修正後は huge が
+        // 実際に計上した applied delta（u64::MAX）のみを減算するため
+        // current == 0 になり、生存中の guard は元々 current に寄与して
+        // いなかった（applied == 0）ことと矛盾しない。
+        assert_eq!(
+            tracker.allocated_bytes(),
+            0,
+            "huge の applied 分のみが減算される"
+        );
+
+        drop(guard);
+        assert_eq!(tracker.allocated_bytes(), 0);
+    }
+
+    /// 上記テストの非飽和版: 飽和が起きない通常の確保・解放順序では
+    /// `applied == bytes` が常に成り立ち、複数の生存中アロケーションの
+    /// うち 1 本を解放しても残りの計上が正しく残ることを確認する
+    /// （非飽和経路での回帰防止）。
+    #[test]
+    fn non_saturated_applied_delta_equals_requested_bytes() {
+        let tracker = Arc::new(AllocationTracker::new());
+        let a = TrackedAllocation::new(Arc::clone(&tracker), 1_000);
+        let b = TrackedAllocation::new(Arc::clone(&tracker), 2_000);
+        assert_eq!(tracker.allocated_bytes(), 3_000);
+
+        drop(a);
+        assert_eq!(
+            tracker.allocated_bytes(),
+            2_000,
+            "非飽和時は applied == bytes のため b の計上のみ残る"
+        );
+        drop(b);
+        assert_eq!(tracker.allocated_bytes(), 0);
     }
 }
