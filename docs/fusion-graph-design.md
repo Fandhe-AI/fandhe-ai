@@ -25,9 +25,8 @@
     （`docs/spec/04-requirements.md:250`）。GEMM epilogue（bias・activation
     の融合）は別イシュー #203 で拡張する。
 - 利用者向けの融合制御 API は**提供しない**。融合は内部機構としてのみ働き、
-  `autodiff::Tape` が既に保持する内部状態（`executor`。§3.4）を使う内部
-  実装の一部として実現し、新規の公開エントリ関数は追加しない（適用
-  箇所の具体化は §3.5、`BackendOps` 契約との接続は §3.4 で規定する）。
+  新規の公開エントリ関数は追加しない（適用箇所の具体化は §3.5、
+  `BackendOps` 契約との接続は §3.4 で規定する）。
   - 根拠: REQ-12 受け入れ基準「ライブラリ利用者が明示的に融合を制御する
     API は提供しないこと」（`docs/spec/04-requirements.md:249`）。REQ-11
     読み替え設計（`docs/dispatch-rules-design.md` §1「利用者向けの明示切替
@@ -35,149 +34,139 @@
     判断として踏襲する。**この受け入れ基準が要求するのは「利用者が融合を
     制御する API を提供しないこと」であり、「`&dyn BackendOps` を直接呼ぶ
     既存経路にも融合を透過的に適用すること」までは要求しない**（誤読の
-    余地があったため本改訂で明記。§3.4 参照）。`&dyn BackendOps` を直接
+    余地があったため明記済み。§3.4 参照）。`&dyn BackendOps` を直接
     呼ぶ既存経路（`ops_for` 経由の呼び出し含む）は本設計の変更対象外とし、
     従来どおり eager・非融合のまま維持する。
-  - **既定実行から「バックエンド」「デバイス選択」という概念そのものを
-    除去する（codex-review 第 11 波 P1 指摘への回答。本改訂で確定する
-    契約。第 10 波までの `tensor_core::reference_cpu_ops()` 案を撤回・
-    置き換える）**: 第 10 波は `Tape::new()` の既定解決を
-    `tensor_core::reference_cpu_ops()`（`tensor-core` に置いた
-    `BackendOps` 実装、`Device::Cpu` 固定）に委ねていたが、これは
-    (i) CPU 演算実装（`BackendOps` の具体実装）を `tensor-core` に
-    配置する設計であり、CPU 演算カーネルの実装は `backend-cpu` の責務
-    という既存のクレート分割（`.claude/rules/delegation-impl.md`
-    「`crates/backend-cpu`…REQ-2・REQ-11〜13 系」）と衝突する、
-    (ii) `Tape::new()` が構造的に `Device::Cpu` という既定デバイスを
-    選択することになり、`docs/public-api-design.md` §4.1「既定デバイス
-    選択ロジックは実装しない（列挙と明示選択のみを提供する。ユーザー
-    承認が必要な事項のため自動運転では安全側に倒した）」という確定
-    済み方針と、同文書を改訂せずに融合設計側だけで既定デバイスを確定
-    してしまう点で整合規約違反になる、という 2 点（codex-review 第 11
-    波 P1 指摘）を理由に、本改訂で撤回する。
-
-    根本解消策は「バックエンド」でも「デバイス」でもない**コア融合
-    実行器**（§3.4 で新設）を既定に据えることである。`autodiff::Tape`
-    の非公開フィールドは、`ops: Box<dyn BackendOps>`（第 10 波案）では
-    なく、次の 2 バリアントを持つ非公開 enum `Executor` に置き換える:
+  - **ここでいう「利用者」は compat 層（REQ-9）が公開する面を指す
+    （codex-review 第 13 波 P1-b 指摘への回答。第 10〜12 波の
+    `Executor` enum・コア融合実行器を撤回し、本改訂で最終形へ置き換える。
+    経緯は §6.2「`Tape::new()` が使う既定実行器・加速バックエンドの
+    供給規則」に簡潔に記録する）**: `autodiff::Tape` の非公開フィールドは
+    `ops: Option<Box<dyn BackendOps>>` とする（enum ではなく `Option`。
+    第 10 波は同じ形を「`None` = 未解決 = 公開コンストラクタが事実上の
+    融合スイッチになる」ことを理由に撤回していたが、本改訂ではこの
+    指摘自体への回答を用意したうえで再採用する。下記「`None`／
+    `Some` の非対称性について」参照）:
     ```rust
-    // crates/autodiff/src/tape.rs（`pub(crate)`。実装は #164）
-    pub(crate) enum Executor {
-        /// コア融合実行器（§3.4）。`BackendOps` を実装せず `Device` も
-        /// 持たない、`crates/autodiff` 内で完結する純 Rust 実行器。
-        /// 構造的に失敗しない（`Result` を返さない）。
-        Core,
-        /// `Tape::with_backend` で明示供給されたバックエンド実装。
-        /// `run_fused`（§3.4）によるバックエンド加速を試みる。
-        Backend(Box<dyn BackendOps>),
+    // crates/autodiff/src/tape.rs（非公開フィールド。実装は #164）
+    pub struct Tape {
+        id: TapeId,
+        nodes: RefCell<Vec<TapeNode>>,
+        /// `None`: 従来どおりの eager 実行（`eval.rs` を都度呼ぶ、
+        /// 融合なし。`Tape::new()` の既定）。
+        /// `Some(ops)`: 記録を遅延し、実体化時に `ops.run_fused`
+        /// （§3.4）による融合を試みる（`Tape::with_backend(ops)`）。
+        ops: Option<Box<dyn BackendOps>>,
     }
     ```
-    **`Executor::Core` は「`ops` が未解決」を表す `None` ではなく、常に
-    利用可能な実行器そのものである**（第 10 波が `Option<Box<dyn
-    BackendOps>>` を撤回した理由——`None` = 未解決 = 公開コンストラクタ
-    が事実上の融合スイッチになる——を、本改訂でも再導入しない。`Core`
-    は「穴」ではなく「能力」を表す variant であり、`Tape::new()` は
-    `Executor::Core` を持つ状態で常に返る。§3.5 が規定する実体化の
-    発火点（層 1〈§3.5.2〉・層 2〈§3.5.3〉・将来の複合エントリポイント
-    〈§3.5.5〉）はいずれもこの `Executor` を共通して参照する）。
-
-    融合するか否かは §3.2 の演算列の融合可否判定（実体化条件・
-    `NodeMeta.contiguous` 等、演算列自体の構造から決まる判定）のみで
-    決まり、`Executor::Core`／`Executor::Backend(_)` のどちらを保持
-    しているか、すなわちどちらの公開コンストラクタを呼んだかには
-    依存しない——ただし第 10 波までと異なり、**`autodiff::Var` が
-    構築しうる遅延連鎖（`relu`／`exp`／`tanh` の単項連鎖。§3.5.1）が
-    融合可能なら、どちらの `Executor` バリアントでも必ず融合する**
-    （差が付くのは「融合するか否か」ではなく「どちらの実行器が融合を
-    行うか」のみ）。**この等価性は単項連鎖の範囲に限定される**: コア
-    融合実行器（§3.4）は構造上 `relu`／`exp`／`tanh` の単項連鎖のみを
-    扱い、`FusedOpKind::Add`／`Mul`（`Executor::Backend` 経路が使う
-    DTO）に対応する実行経路を持たない。これは欠落ではなく §3.5.1
-    「切り分け」の帰結である: `add`／`mul` は返る前に自身の出力を
-    必ず実体化するため、二項演算が `autodiff` の遅延連鎖へ入ることは
-    構造的にない（`FusedOpKind::Add`／`Mul` が到達しうるのは
-    `tensor-core` 内で `FusionGraph` が完結する場合〈#162 以降・§2.5〉
-    のみである）。したがって「どちらの `Executor` でも必ず融合する」
-    という等価性は、`autodiff::Var` が実際に構築しうる遅延連鎖の範囲
-    （単項連鎖）でのみ主張しており、`FusionGraph` が扱う演算全体
-    （§2.1）についての主張ではない:
-    - **`Tape::new()`**: `Executor::Core` を既定とする。コア融合実行器
-      は記録済みの `relu`／`exp`／`tanh` 連鎖（§3.5.1）を単一ループで
-      評価し、外部バックエンド・デバイスを一切選択しない（§3.4）。
-      したがって `docs/public-api-design.md` §4.1 の既定デバイス選択
-      不採用方針とは交差せず、同文書の改訂は不要である（§6.2 参照）。
-    - **`Tape::with_backend(ops: Box<dyn BackendOps>)`**: `Executor::
-      Backend(ops)` を保持する。`ops.run_fused`（§3.4）によるバック
-      エンド加速をまず試み、失敗時はコア融合実行器へフォールバックする
-      （§3.5.2・§3.5.3 で確定する失敗時契約。フォールバック後も融合は
-      維持される）。
-    - `with_backend` は「バックエンドを明示供給する」手段であり、融合の
-      有効化手段ではない——両方の `Executor` バリアントとも演算列が
-      §3.2 の判定を満たせば融合するため、この非対称性はそもそも生じ
-      ない。GPU バックエンド（CUDA／Metal）を `Tape::new()` の既定として
-      選択する規則は本文書では確定しない（本改訂により既定実行が
-      そもそもデバイスを選択しなくなったため、この論点自体が消滅した。
-      §6.2 参照）。「融合対象区間・単一の fallible 呼び出し」の範囲
-      自体は §1「遅延の生存窓は単一の fallible 呼び出しの内部に限定
-      する」（下記）で確定する、より狭い契約に置き換わる。
-  - **演算跨ぎの遅延を復活し、実体化を 3 層の境界で規定する
-    （codex-review 第 6 波 P1 指摘への回答。第 5 波で確定した「遅延の
-    生存窓は単一の fallible 呼び出しの内部に限定する」契約を撤回し
-    本改訂で置き換える。詳細は §3.2・§3.4・§3.5）**: 第 5 波は
-    `value`／`to_tensor` の非 fallible 契約を守るため、遅延
-    （`Pending`）の生存窓を 1 回の fallible 呼び出しの内部だけへ縮小
-    した。しかしこの縮小は同時に、TASK-12.1 の中核要件である現行公開
-    API（`a.add(&b)?.relu().exp().tanh()` のように独立した複数回の
-    公開 `Var` 呼び出しをまたぐ連鎖）上での 4〜6 段 elementwise 連鎖の
-    融合を不可能にした（本改訂が解く codex-review 第 6 波 P1 指摘、
-    §3.3 の当該記述の訂正は §3.3 で行う）。本改訂は「複数回の公開
-    `Var` 呼び出しをまたいで遅延を持ち越す」設計を復活させたうえで、
-    `value`／`to_tensor` の非 fallible 契約を壊さないよう実体化の
-    発火点を次の 3 層で規定する（型・実装の詳細は §3.5）:
-    1. **fallible 境界**: `Var::add`／`mul`／`matmul`／`sum`／`max`
-       （既に `Result<Var<'_>, AutodiffError>` を返す契約）が自身の
-       計算のために入力側の未実体化値を必要とする場合、`Tape::backward`
-       の VJP 連鎖内部、および §3.2 (d) の連鎖長上限に fallible な
-       演算の呼び出し中に到達した場合。融合実行を試み、**`Executor::
-       Backend(ops)`（§3.4）を保持しており、かつ `ops.run_fused` が
-       `Unsupported` 以外の失敗を返した場合に限り**型付きエラー
-       （`AutodiffError::Backend(BackendError)`。§3.5.2 で確定済みの
-       variant をそのまま再利用する）として `?` で呼び出し元へ伝播する
-       （バックエンド実行失敗は利用者が結果を受け取るより前に必ず型付き
-       で観測されるべきという第 3〜5 波の契約をそのまま踏襲する）。
-       `Executor::Core`（§3.4。既定）を保持している場合、コア融合実行器
-       は構造的に失敗しないため、この伝播経路自体に到達しない。
+    - **`Tape::new()`**: `ops: None`。**この経路の挙動は現行実装
+      （`tape.rs:154`〜`:159`、`var.rs` の各演算メソッド）と完全に
+      一致し、本改訂による変更対象外である**——`add`／`mul`／
+      `relu`／`exp`／`tanh` はいずれも forward 値を `Tape::push` の
+      直前に `eval.rs` で即時計算し、遅延・融合は一切発生しない
+      （「素の `autodiff::Tape::new()`（ops 未注入）は既存 eager 経路
+      で従来どおり動作し融合しない」という契約をここで確定する）。
+    - **`Tape::with_backend(ops: Box<dyn BackendOps>)`**（新設。実装は
+      #164）: `ops: Some(ops)`。§3.5 が規定する 3 層の実体化境界に
+      従って記録を遅延し、実体化時に `ops.run_fused`（§3.4）を試み、
+      `BackendError::Unsupported` は同じ `ops` の per-op メソッドへの
+      逐次呼び出しへフォールバックする（層 2 に限りそれも失敗した場合
+      は `eval.rs` を最終手段として使う。§3.5.2・§3.5.3）。
+    - **`None`／`Some` の非対称性について（第 10 波の懸念への回答）**:
+      `autodiff` クレート自身の公開 API に限れば、`Tape::new()` と
+      `Tape::with_backend(ops)` のどちらを呼ぶかが文字どおり「融合を
+      行うか否か」を決める（これ自体は否定しない）。しかし REQ-12
+      受け入れ基準が保護する「利用者」は、REQ-9 が定める compat 層
+      （`compat::array`／`compat::Sequential` 等、`docs/public-api-design.md`
+      が定める公開面）の利用者を指し、`autodiff::Tape` の生の
+      コンストラクタを直接選択する主体ではない（compat 層は「自作
+      コアの上の薄いラッパーに徹する」〈REQ-9〉が、ラップする対象で
+      ある `Tape` の構築方法自体は compat 層の内部実装の一部であり、
+      利用者へ公開しない）。**compat 層は `Tape` 構築時に常に
+      `Tape::with_backend` を用い、`backend-cpu` の `BackendOps`
+      実装を注入する**（結線の設計詳細は §3.4「compat 層への既定注入」、
+      承認記録は §6.2「`Tape::new()` が使う既定実行器・加速バックエンド
+      の供給規則」・`docs/public-api-design.md` §4.1 参照）。したがって
+      compat 経由の利用者にとって融合は常時・透過的であり、
+      選択の余地がない——「コンストラクタ選択が融合スイッチになる」
+      という第 10 波の懸念は、REQ-12 が対象とする利用者面（compat 層）
+      では発生しない。`autodiff::Tape::new()` を直接呼ぶ経路（compat 層を
+      経由しない、autodiff クレート単体の下位利用）は本文書が定める
+      「利用者向け融合制御 API」の対象外の、ライブラリ内部の下位層と
+      位置づける。
+  - **演算跨ぎの遅延・二項 elementwise 演算の遅延化（codex-review 第 6
+    波・第 13 波 P1-a 指摘への回答。詳細は §3.2・§3.4・§3.5）**: 遅延の
+    生存窓は「複数回の独立した公開 `Var` 呼び出しをまたぐ」形で持ち
+    越す（`a.add(&b)?.relu().exp().tanh()` のように独立した複数回の
+    公開 `Var` 呼び出しをまたぐ連鎖が融合対象になる）。**単項演算
+    （`relu`／`exp`／`tanh`）だけでなく `add`／`mul`（二項 elementwise
+    演算）も出力を遅延グラフへ保持する**（第 11〜12 波は `add`／`mul`
+    が返る前に必ず自身の出力を実体化する設計だったため PoC-9 実測の
+    `ew4`／`ew6`／`ew_fanout`〈`add`・`mul` の連鎖・fan-out を含む〉が
+    融合対象から外れていた。本改訂でこの限定を解く）。`matmul`／
+    `sum`／`max`（非 elementwise）は引き続き実体化境界のままとする
+    （§3.2 (a)(b)）。**shape 検証と実行（forward 値計算）を分離する**:
+    `add`／`mul` を含むすべての演算は、shape 検証を `Tape::push` に
+    よるノード追加より前に完了し、不正な shape は当該演算の呼び出しが
+    その場で `Err` を返す（記録すらされない）。一方、検証を通過した
+    演算の実際の計算（forward 値の算出）は実体化境界に到達するまで
+    遅延しうる。この分離により、**`Var::add`／`mul` が `Ok` を返す
+    ことは「shape が妥当でノードが記録された」ことのみを意味し、
+    「加算・乗算が計算済みである」ことを意味しなくなる**（`ops: Some`
+    の場合。`ops: None` では従来どおり即時計算されるため両者は一致
+    する）。バックエンド実行の失敗は次の実体化境界（後続の `matmul`／
+    `sum`／`max`・`Tape::backward`・`Var::value`／`to_tensor`）で
+    初めて表面化しうる（§3.5.2 参照）。`value`／`to_tensor` の非
+    fallible 契約を壊さないよう、実体化の発火点を次の 3 層で規定する
+    （型・実装の詳細は §3.5）:
+    1. **fallible 境界**: `Var::matmul`／`sum`／`max`（既に
+       `Result<Var<'_>, AutodiffError>` を返す契約。非 elementwise の
+       実体化境界、§3.2 (a)(b)）が自身の計算のために入力側の未実体化
+       値を必要とする場合、`Tape::backward` の VJP 連鎖内部、および
+       §3.2 (d) の連鎖長上限に fallible な演算の呼び出し中に到達した
+       場合。`ops: Some(ops)`（§1「`None`／`Some` の非対称性」）を
+       保持しており、かつ `ops.run_fused` が `Unsupported` 以外の失敗
+       を返した場合に限り、型付きエラー（`AutodiffError::
+       Backend(BackendError)`。§3.5.2 で確定済みの variant をそのまま
+       再利用する）として `?` で呼び出し元へ伝播する（バックエンド
+       実行失敗は利用者が結果を受け取るより前に必ず型付きで観測
+       されるべきという契約をそのまま踏襲する）。`ops: None`（既定）
+       の場合、この経路は元々 eager 実行のみであり実体化そのものが
+       発生しない。
     2. **非 fallible 境界**: `Var::value`／`Var::to_tensor`
        （`-> Ref<'_, Tensor<f32>>`／`-> Tensor<f32>` の既存シグネチャを
        一切変更しない）・`Gradients::get`、および §3.2 (d) の連鎖長
        上限に非 fallible な演算（`relu`／`exp`／`tanh`）の呼び出し中に
-       到達した場合。融合実行を試み、**`Executor::Backend(ops)` を保持
-       しており `ops.run_fused` が失敗した場合（種別を問わない）は、
-       記録済みの演算列をコア融合実行器（§3.4。構造的に失敗しない
-       純 Rust 実行器）で再計算するフォールバックにより必ず正しい値を
-       返す**。`Executor::Core` を保持している場合はコア融合実行器
-       自体が唯一の実行経路であり、フォールバックという概念が生じない
-       （常に成功する）。誤った値・欠落値・`panic!` のいずれも
-       発生しないため、第 4〜5 波で確定した契約 4（`get`／`as_slice`／
-       `value`／`to_tensor` の非 fallible 契約が観測可能な意味論も
-       含め完全不変）・契約 5（実体化失敗は必ず型付きで通知されるか、
-       利用者に誤った値・欠落値を渡さない）を同時に満たす。フォール
-       バックの発生は内部で観測可能にする（テスト用カウンタ。§6.1
-       #165 に記録）。
-    3. **`relu`／`exp`／`tanh`（`var.rs:257` 以降。shape 不変の単項
-       演算のため「構造的に失敗しえない」という既存設計判断
-       〈`docs/public-api-design.md` §3.2〉により非 fallible な
-       `fn ..(&self) -> Var<'t>` のまま）は自身の出力を実体化しない**
-       まま返す（＝連鎖を延長する）ことを許容する。これが本改訂で
-       4〜6 段連鎖を実現する主要因である（`relu`／`exp`／`tanh` は
-       任意回・任意順に連結できるため、この 3 演算だけで §3.2 (d) の
-       上限まで連鎖を伸ばせる。§3.5.1・§3.5.3 で確定する）。`add`／
-       `mul`／`matmul`／`sum`／`max` は引き続き**返る前に自分の出力を
-       実体化済みにする**（第 5 波の契約を維持。ただし入力側が
-       `relu`／`exp`／`tanh` の遅延連鎖であった場合、その入力の実体化は
-       上記層 1 の fallible 境界として扱う）。融合の効果はこの単項
-       演算の遅延連鎖（層 1・層 2 のいずれかで実体化される）の内側で
-       得られる。
+       到達した場合。`ops: Some(ops)` を保持しており `ops.run_fused`
+       が失敗した場合（種別を問わない）は、記録済みの演算列を
+       `eval.rs` の逐次呼び出し（`ops: None` の eager 経路が使うのと
+       同一の関数。§3.5.3）で再計算するフォールバックにより必ず正しい
+       値を返す。`ops: None` の場合は元々 eager 実行のみであり
+       フォールバックという概念が生じない（常に成功する）。誤った値・
+       欠落値・`panic!` のいずれも発生しないため、契約 4（`get`／
+       `as_slice`／`value`／`to_tensor` の非 fallible 契約が観測可能な
+       意味論も含め完全不変）・契約 5（実体化失敗は必ず型付きで通知
+       されるか、利用者に誤った値・欠落値を渡さない）を同時に満たす。
+       フォールバックの発生は内部で観測可能にする（テスト用カウンタ。
+       §6.1 #165 に記録）。
+    3. **`add`／`mul`／`relu`／`exp`／`tanh`（elementwise 5 演算。
+       `var.rs:122`〜`:141`・`:257` 以降）は `ops: Some(ops)` の場合、
+       自身の出力を実体化しないまま返す（＝遅延グラフを延長する）**。
+       これが本改訂で 4〜6 段連鎖を実現する主要因である。**shape 検証
+       は `Tape::push` によるノード追加より前に完了し、不正な shape は
+       その場で `Err` を返す**（`Var::add`／`mul` の既存の検査順序
+       「①クロステープ検査 → ②shape 検査 → ③forward 値計算 →
+       ④ノード記録」〈`var.rs` 冒頭コメント〉のうち、③を実体化境界へ
+       遅延させるだけであり、①②の順序・即時性は変更しない）。
+       **`Var::add`／`mul` が `Ok` を返すことは「shape が妥当でノードが
+       記録された」ことのみを意味し、加算・乗算が計算済みであることを
+       意味しない**（§1 参照）。`matmul`／`sum`／`max` は引き続き
+       **返る前に自分の出力を実体化済みにする**（非 elementwise の
+       実体化境界。ただし入力側が elementwise 演算の遅延グラフで
+       あった場合、その入力の実体化は上記層 1 の fallible 境界として
+       扱う）。`ops: None` の場合はすべての演算が現行実装どおり
+       即時計算されるため、本項目自体が適用されない（§1「`Tape::
+       new()`」参照）。
     - この結果、利用者が保持する `Var`／公開 `Tensor` の「実体化済み
       かどうか」という状態自体は `autodiff::TapeNode`（`tape.rs`。
       `pub(crate)` 非公開実装）にのみ存在し、`Tensor`／`Storage` へは
@@ -216,11 +205,10 @@
       がプロセス停止に直結するため可用性上望ましくない、(ii) 本番経路
       で `panic!`／`unwrap()`／`expect()` を使わない方針
       （`.claude/rules/coding-rust.md`「コード品質」）に反する。CPU
-      フォールバック案は同じ失敗を検知したうえでコア融合実行器
-      （§3.4。codex-review 第 11 波 P1 指摘への回答により確定した、
-      `crates/autodiff` 内の構造的に失敗しない実行器）へ落とすだけで
-      あり、追加の失敗モードを生まないため本改訂ではこちらを採用しない
-      （不採用の理由の記録として残す）。
+      フォールバック案は同じ失敗を検知したうえで `eval.rs` の逐次実行
+      （`ops: None` の eager 経路と同一の非 fallible な参照実装。§3.4）
+      へ落とすだけであり、追加の失敗モードを生まないため本改訂でも
+      こちらを採用しない（不採用の理由の記録として残す）。
     - **比較検討 3: 「`Storage::Pending` を含む第 4 波までの設計を
       そのまま復活させる」案（不採用）**: 第 4 波は遅延状態を
       `Tensor` の非公開 `Storage<T>`（`tensor.rs:33`）へ埋め込んで
@@ -237,11 +225,14 @@
       「`Storage::Pending` を復活させる」のではなく「`TapeNode` の
       値スロットを遅延可能にする」点が第 4 波との相違であり、第 4 波
       の問題点（`Tensor` への漏出・間接キャッシュ）は再導入しない。
-    - この対価として、PoC-9 実測（`ew4`／`ew6`）が示す 2.25〜3.19 倍の
-      高速化は、`add`／`mul` 等の fallible 演算どうしが直接連続する
-      区間（両者とも即座に実体化されるため）には及ばない。§6.2 の
-      該当エントリはこの範囲に限定して受け入れコストを記録する
-      （撤回・再記録の詳細は §6.2 参照）。
+    - **受け入れコストの解消（codex-review 第 13 波 P1-a 指摘への
+      回答）**: 第 11〜12 波は「`add`／`mul` 等の fallible 演算どうしが
+      直接連続する区間には融合が及ばない」ことを受け入れコストとして
+      記録していたが、本改訂（`add`／`mul` の遅延化）によりこの限定は
+      解消した。PoC-9 実測（`ew4`／`ew6`／`ew_fanout`。いずれも `add`／
+      `mul` の連鎖・fan-out を含む構成）が示す 2.25〜3.19 倍の高速化は、
+      `ops: Some(ops)` を保持する経路であればこの区間にも及ぶ（§6.2 の
+      該当エントリは本改訂で撤回する）。
 - transpose を挟む連鎖は**融合しない（非融合フォールバックへ倒す）**。
   - 根拠: PoC-9 実測（`ew_reshape`）は、fusion **有効時**は transpose が
     メタデータ変換のみで融合セグメントへ取り込まれ、fusion **無効時**は
@@ -370,41 +361,48 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
 配置を採る。融合グラフ自体はバックエンド非依存の中間表現であり、
 `backend-*` 側は融合カーネルの実装（#163）でのみ関与する。
 
-**配置は 2 か所に分かれる（codex-review 第 11 波 P1 指摘を受け明記する。
-§3.4「コア融合実行器」参照）**: 本節が定める融合 IR（`FusionOp`／
+**配置は `tensor-core` の 1 か所に閉じる（codex-review 第 13 波 P1-b
+指摘への回答。第 11〜12 波が導入した「`autodiff` 内のコア融合実行器」を
+撤回し、本改訂で置き換える）**: 本節が定める融合 IR（`FusionOp`／
 `FusionNode`／`FusionGraph`／`FusionPlan`）は `tensor-core` に置き、
-クレート境界を越えて `BackendOps::run_fused`（`Executor::Backend` 経路。
-§3.4）へ渡すバックエンド非依存の中間表現として使う。一方、既定実行器
-である**コア融合実行器**（`Executor::Core`。§3.4）は `crates/autodiff`
-内に置く——`autodiff` 自身が保持する `TapeNode`／`Op`（§3.5.1）を直接
-読み、クレート境界を一切越えないため、本節の IR（`FusionOp` 等）も
-`FusionPlan::from_ops` の DTO 変換も経由しない。いずれも REQ-1
-（`docs/spec/04-requirements.md:43`・`:49`）が自作対象と定める
-「演算グラフ／カーネル融合機構」の一部であり、どちらも `BackendOps` の
-具体実装（＝ `backend-cpu`／`backend-cuda`／`backend-metal` の責務）
-ではない。
+クレート境界を越えて `BackendOps::run_fused`（§3.4）へ渡すバックエンド
+非依存の中間表現として使う。**実行主体（融合カーネルの実装）は
+`autodiff` に置かない**——`crates/autodiff` は演算グラフの記録・
+遅延・実体化制御のみを担い、実際の計算（融合の有無を問わず）は常に
+注入された `BackendOps` 実装（§4.2、`crates/backend-cpu`／
+`backend-cuda`／`backend-metal` が実装する）経由に限る。**CPU 向けの
+融合実行（未対応時の fail-safe な参照実装を含む）は `backend-cpu` 側
+の `BackendOps` 実装（`run_fused` オーバーライド）として提供する**
+——REQ-1（`docs/spec/04-requirements.md:43`・`:49`）が定めるとおり
+CPU 演算カーネルの実装は `backend-cpu` の責務であり、`autodiff` に
+「実体的な CPU カーネル」を新設しない（`.claude/rules/delegation-impl.md`
+「`crates/backend-cpu`…REQ-2・REQ-11〜13 系」とも整合する）。
 
-**責務分界線（codex-review 第 12 波 P1-a 指摘への回答）**: `autodiff`
-内の**コア融合実行器**（§3.4「コア融合実行器」）が担うのは、記録済みの
-演算列の走査・中間 `Tensor` 実体化の除去・単一の評価パスへの合成という
-**実体化制御・オーケストレーションのみ**であり、要素ごとのスカラー計算
-そのもの（`relu`／`exp`／`tanh` の数式）を新たに実装することはない。
-融合の利得の源泉は中間バッファの確保・書き戻しの除去（メモリトラフィック
-削減）にあり、スカラー計算は `crates/autodiff/src/eval.rs` が既に
-`Op` 単位の eager 経路で使っている既存プリミティブ（`unary`
-〈`eval.rs:185`〉・`broadcast_binary`〈`eval.rs:148`〉と、それらへ渡す
-スカラー関数 `nan_propagating_max`〈`eval.rs:200`〉・`f32::exp`・
-`f32::tanh`）をクロージャ合成のうえでそのまま再利用する（実装詳細は
-#164。§3.4「コア融合実行器」参照）。したがって本節が新設するのは
-`crates/autodiff/src/fusion_exec.rs` という**呼び出し順序を制御する
-モジュール**であって、新規の CPU 演算カーネルではない——CPU 向けに
-最適化された融合カーネル（SIMD・rayon 等によるベクトル化・並列化）は
-`backend-cpu` が `BackendOps::run_fused`（`Executor::Backend` 経路）で
-提供する加速経路の責務であり、コア融合実行器（`Executor::Core`。既定
-経路）はその範囲に踏み込まない。この整理により、`crates/autodiff` に
-「実体的な CPU カーネル」を新設するという体裁を取らず、既存の
-`eval.rs` 参照実装を単一の演算グラフ走査でまとめて呼び出す薄い
-オーケストレーション層として位置づける。
+**`autodiff` 側の役割（責務分界線。第 12 波の記述をこの前提に合わせて
+訂正する）**: `autodiff` が担うのは、記録済みの演算列の走査・実体化
+発火点の判定・`FusionPlan::from_ops`（§3.4）によるクレート間 DTO 変換
+という**制御のみ**であり、要素ごとのスカラー計算（`add`／`mul`／
+`relu`／`exp`／`tanh` の数式そのもの）を独自に実装しない。`ops: None`
+（既定。§1）の場合は現行実装どおり `crates/autodiff/src/eval.rs` の
+既存プリミティブ（`eval::add`〈`eval.rs:175`〉・`eval::mul`
+〈`eval.rs:180`〉・`eval::relu`／`exp`／`tanh`〈`eval.rs:208`〜`:216`〉）
+を都度呼ぶ eager 経路のまま変更しない。`ops: Some(ops)` の場合、
+`ops.run_fused` が `BackendError::Unsupported` を返したときの主たる
+フォールバックは、**同じ `ops`（注入された `BackendOps` の実装）の
+既存 per-op メソッド（`ops.add`／`mul`／`relu`／`exp`／`tanh`。§4.2）
+を記録順に逐次呼び出す**ことであり、`eval.rs` を経由しない（§3.5.2
+手順 3・§3.5.3）——これにより「実際の計算は常に注入された `BackendOps`
+経由」という原則を、`run_fused` 失敗時のフォールバックにおいても保つ。
+**例外は 1 か所のみ**: 層 2（非fallible 境界。`Var::value`／
+`Var::to_tensor`）は失敗の種別を問わず必ず正しい値を返す契約のため、
+`ops` の per-op メソッドさえ失敗した場合（対応バックエンドが
+elementwise 未実装の場合。現状の CUDA／Metal 等）に限り、`autodiff`
+自身の `eval.rs` 参照実装への再計算を**最終手段**として用いる
+（§3.5.3。層 1〈fallible 境界〉にはこの最終手段はなく、`ops` の
+per-op メソッドも失敗すれば `AutodiffError::Backend` として `?` で
+伝播する。§3.5.2 手順 4 と同じ扱い）。この最終手段を除けば、
+`eval.rs` 自体への変更（可視性変更・新規モジュール新設のいずれも）は
+不要である。
 
 ## 3. 遅延評価境界
 
@@ -436,8 +434,8 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
 |---|------|------|
 | (a) | reduction ノード（`sum`／`max`）へ到達 | PoC-9 実測で reduction エピローグは自動融合対象外（§1）。融合境界ノードとして扱う |
 | (b) | `gemm` ノードへ到達 | PoC-9 実測で matmul をまたぐ融合は分断される（§1）。#203（GEMM epilogue 融合）までは境界として扱う |
-| (c) | `Var::value`／`Var::to_tensor`／`Gradients::get`（非 fallible 境界）、または fallible な `Var` 演算・`Tape::backward` の VJP 連鎖内部が入力側の未実体化値を必要とした時点（fallible 境界）。いずれも `autodiff` 側の materialize ヘルパー（§3.5.1〜3.5.3）に帰着する。既定（`Executor::Core`）ではコア融合実行器（§3.4）を直接呼び、明示供給時（`Executor::Backend(ops)`）は `FusionPlan::from_ops` を経由して `BackendOps::run_fused` を試みる（失敗時はコア融合実行器へフォールバックする。§3.5.2・§3.5.3）。`tensor-core` 側の `FusionSession::materialize`〈§3.4〉が採る「融合を試み、`Unsupported` は fail-safe で処理する」方針と同じ考え方を、`autodiff` クレート内で完結する形で実装したもの（codex-review 第 6 波・第 11 波 P1 指摘への回答。§1「既定実行から『バックエンド』『デバイス選択』という概念そのものを除去する」） | `Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更せず、`Storage<T>`（非公開）も `Pending` バリアントを持たない（§3.5.1 で確定）。したがって `Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）にも「未実体化」を表す分岐は存在しない。遅延状態は `autodiff::TapeNode`（`tape.rs`）だけが持つ（§3.5.1）。fallible 境界での実体化失敗は型付きエラーとして `?` で伝播し（層 1。`Executor::Backend` の非 `Unsupported` 失敗時のみ）、非 fallible 境界での実体化失敗はコア融合実行器による再計算で必ず正しい値を返す（層 2。§3.5.4） |
-| (d) | 連鎖長上限（4〜6 段）到達 | TASK-12.1 の内容規定（4〜6 段程度）。PoC-9 の代表ワークロード規模（`ew4`／`ew6`）とも整合する上限であり、無制限連鎖によるカーネル生成コスト・レジスタ圧の増大を避ける。上限に到達させた演算が fallible か非 fallible かにより (c) の層 1／層 2 いずれかへ合流する（§3.5.3） |
+| (c) | `Var::value`／`Var::to_tensor`／`Gradients::get`（非 fallible 境界）、または `matmul`／`sum`／`max`・`Tape::backward` の VJP 連鎖内部が入力側の未実体化値を必要とした時点（fallible 境界）。いずれも `autodiff` 側の materialize ヘルパー（§3.5.1〜3.5.3）に帰着する。`ops: None`（既定。§1）では元々すべて即時計算のため実体化そのものが発生しない。`ops: Some(ops)` では `FusionPlan::from_ops` を経由して `BackendOps::run_fused` を試み、`BackendError::Unsupported` は同じ `ops` の per-op メソッドへフォールバックする（§3.5.2・§3.5.3。codex-review 第 13 波 P1-b 指摘への回答により、`autodiff` 内の実行主体〈第 11〜12 波の「コア融合実行器」〉は撤回し、フォールバック先を `ops` 自身の既存 per-op メソッドへ一本化する。層 2 に限りそれも失敗した場合の最終手段として `eval.rs` の既存 eager 経路を使う。§2.5「`autodiff` 側の役割」） | `Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更せず、`Storage<T>`（非公開）も `Pending` バリアントを持たない（§3.5.1 で確定）。したがって `Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）にも「未実体化」を表す分岐は存在しない。遅延状態は `autodiff::TapeNode`（`tape.rs`）だけが持つ（§3.5.1）。fallible 境界での実体化失敗は型付きエラーとして `?` で伝播し（層 1。`Unsupported` 以外の失敗時のみ）、非 fallible 境界での実体化失敗は per-op メソッド（必要なら最終手段の `eval.rs`）による再計算で必ず正しい値を返す（層 2。§3.5.4） |
+| (d) | 連鎖長上限（4〜6 段）到達 | TASK-12.1 の内容規定（4〜6 段程度）。PoC-9 の代表ワークロード規模（`ew4`／`ew6`）とも整合する上限であり、無制限連鎖によるカーネル生成コスト・レジスタ圧の増大を避ける。上限に到達させた演算が `matmul`／`sum`／`max`（fallible）か `add`／`mul`／`relu`／`exp`／`tanh`（非 fallible）かにより (c) の層 1／層 2 いずれかへ合流する（§3.5.3・§3.5.4）。**`add`／`mul` 自身も上限到達時は自分自身のノードを実体化してから返る**ため、この場合の `Var::add`／`mul` は「shape 妥当性 + バックエンド実行結果」の両方を表すことになる（§3.5.4） |
 | (e) | 非融合対象パターン検出（transpose 混在等、`NodeMeta.contiguous == false`）| §1・§2.3 の非融合フォールバック方針 |
 
 ### 3.3 autodiff との関係
@@ -457,67 +455,58 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   する。融合はあくまで**ある単一の fallible 呼び出しの内部でどう
   カーネルを呼ぶか**という実行方式の最適化であり、テープが記録する
   計算グラフの構造（VJP が辿るノード単位）には影響を与えない。
-- **実質的な適用箇所（codex-review 第 6 波 P1 指摘を受け本節を訂正する。
-  §1 で確定した「演算跨ぎの遅延を復活し、実体化を 3 層の境界で規定
-  する」契約に一致させる）**: 個々の `Var` fallible 演算メソッド
-  （`add`／`mul`／`matmul`／`sum`／`max`）自体は 1 呼び出し 1 演算の
-  粒度のままだが、**`relu`／`exp`／`tanh`（非 fallible な単項演算）は
-  複数回の独立した公開 `Var` 呼び出しをまたいで遅延（`Pending`）を
-  持ち越せる**（§3.5.1）ため、`a.add(&b)?.relu().exp().tanh()` の
-  ような現行公開 API の記述形そのものが 4〜6 段の elementwise 連鎖を
-  形成しうる。透過的融合の実質的な適用箇所は次の 3 箇所である:
-  (i) `relu`／`exp`／`tanh` が積み上げた遅延連鎖を、後続の fallible な
-  `Var` 演算が入力として読み出す時点（窓 (a)・層 1。§3.5.2）、
-  (ii) `Tape::backward` の VJP 連鎖内部（窓 (a)・層 1。§3.5.2）、
-  (iii) `Var::value`／`Var::to_tensor`／`Gradients::get` が同じ遅延
-  連鎖を直接読み出す時点（窓 (a)・層 2、非 fallible 境界。§3.5.3）。
-  将来追加されうる複合エントリポイント（窓 (b)。§3.5.5）は現時点では
-  必須スコープ外のまま据え置く。
+- **実質的な適用箇所（codex-review 第 6 波・第 13 波 P1-a 指摘を受け
+  本節を確定する。§1「演算跨ぎの遅延・二項 elementwise 演算の遅延化」
+  契約に一致させる）**: 個々の `Var` 演算メソッドの呼び出し粒度自体
+  （1 呼び出し 1 演算）は変更しないが、**`add`／`mul`／`relu`／`exp`／
+  `tanh`（elementwise 5 演算）は `ops: Some(ops)` の場合、複数回の
+  独立した公開 `Var` 呼び出しをまたいで遅延（`Pending`）を持ち越せる**
+  （§3.5.1）ため、`a.add(&b)?.mul(&c)?.relu().exp().tanh()` のような
+  現行公開 API の記述形そのものが 4〜6 段の elementwise 連鎖（二項・
+  単項の混在を含む）を形成しうる。透過的融合の実質的な適用箇所は
+  次の 3 箇所である: (i) elementwise の遅延グラフを、後続の
+  `matmul`／`sum`／`max`（非 elementwise の fallible 演算）が入力として
+  読み出す時点（窓 (a)・層 1。§3.5.2）、(ii) `Tape::backward` の VJP
+  連鎖内部（窓 (a)・層 1。§3.5.2）、(iii) `Var::value`／
+  `Var::to_tensor`／`Gradients::get` が同じ遅延グラフを直接読み出す
+  時点（窓 (a)・層 2、非 fallible 境界。§3.5.3）。将来追加されうる
+  複合エントリポイント（窓 (b)。§3.5.5）は現時点では必須スコープ外の
+  まま据え置く。`ops: None`（既定）の場合、上記のいずれも「元々即時
+  計算済みの値を読むだけ」に退化し、遅延・融合は発生しない（§1）。
 
 ### 3.4 遅延グラフと `BackendOps`・`Tensor` 契約の接続
 
-**本節の適用範囲（codex-review 第 11 波 P1 指摘への回答。本改訂で追記
-する）**: 本節が定義する `FusionSession`／`FusionPlan`／`FusedOpKind`／
-`BackendOps::run_fused` は、§1 で確定した `Executor::Backend(ops)`
-（`Tape::with_backend` で明示供給されたバックエンドによる融合加速）の
-実行経路にのみ関与する。既定である `Executor::Core`（§1。`Tape::new()`
-が保持する）が使う**コア融合実行器**は、本節後半の「コア融合実行器
-（`Executor::Core`）」箇条項目で別途定義する、`BackendOps` を実装しない・
-`Device` を持たない独立した実装である（「独立」は `BackendOps` トレイト・
-`FusionSession`／`FusionPlan` の DTO 変換を経由しないという構造上の
-独立性を指し、要素ごとのスカラー計算式を独自に再実装するという意味
-ではない。実際には `eval.rs` の既存プリミティブを再利用する。§2.5
-「責務分界線」・§3.4「コア融合実行器」参照）。両者は「記録済みの演算列を、
-その呼び出しのフレーム内で 1 回にまとめて評価する」という同じ役割を、
-片方は自作の外部カーネル生成（NVRTC／MSL 等、#163）、もう片方は
-`crates/autodiff` 内で完結する評価パスの合成（`eval.rs` の既存
-プリミティブを 1 回のパスへまとめるオーケストレーション。#164）で
-実現する点のみが異なる（§3.5.2・§3.5.3 が両者をどう使い分けるかを
-規定する）。以下の `FusionSession`／`FusionPlan` 関連の記述はこの前提
-のもとで読む。
+**本節の適用範囲（codex-review 第 13 波 P1-b 指摘への回答。第 11〜12
+波の「`Executor::Core`／`Executor::Backend` の二経路」を撤回し、本改訂
+で単一経路へ統合する）**: 本節が定義する `FusionSession`／
+`FusionPlan`／`FusedOpKind`／`BackendOps::run_fused` は、`ops:
+Some(ops)`（§1。`Tape::with_backend` で明示供給されたバックエンド）の
+実行経路にのみ関与する。`ops: None`（既定。`Tape::new()`）はこれらを
+一切経由せず、現行実装どおり `eval.rs` を都度呼ぶ eager 経路のまま
+変わらない（§1・§2.5）。**`autodiff` クレート内で完結する独立実行器
+（第 11〜12 波の「コア融合実行器」）は撤回する**——CPU 向けの融合実行
+（`run_fused` の CPU 実装。未対応時の fail-safe な参照実装を含む）は
+`backend-cpu` 側の `BackendOps` 実装として提供し、`autodiff` は演算
+グラフの記録・遅延・実体化制御のみを担う（§2.5「`autodiff` 側の役割」）。
 
-（PR #357 review 指摘への対応で追加。codex-review 第 5 波 P1 指摘を
-受け、本節は §1「遅延の生存窓は単一の fallible 呼び出しの内部に限定
-する」という縮小後の契約に合わせて全面改訂し、さらに第 6 波 P1 指摘を
-受け、本節は「複数の公開 `Var` 呼び出しをまたいで遅延を持ち越す」設計
-（§1・§3.5）が使う実体化契約として再改訂する。§1・§3.1〜3.3 は
-「透過的」「遅延構築」という表現のみで、遅延グラフの所有場所・具体的な
-型・`BackendOps`（`crates/tensor-core/src/backend_ops.rs:63`）との接続
-経路を規定していなかった。`BackendOps` の各メソッドは具体化済みの
-`Tensor<f32>` を受け取り直ちに具体的な `Tensor<f32>` を返す契約であり、
-`Tensor`（`crates/tensor-core/src/tensor.rs:53`）は `Arc<Storage<T>>` を
-必須で保持する公開型としては変わらない。本節はこの契約と遅延グラフを
-どう接続するかを明示する（窓の内側での実際の使用点の具体化は §3.5 で
+（PR #357 review 指摘への対応で追加した節を、codex-review 各波の指摘を
+反映しつつ育ててきた。§1・§3.1〜3.3 は「透過的」「遅延構築」という
+表現のみで、遅延グラフの所有場所・具体的な型・`BackendOps`
+（`crates/tensor-core/src/backend_ops.rs:63`）との接続経路を規定して
+いなかった。`BackendOps` の各メソッドは具体化済みの `Tensor<f32>` を
+受け取り直ちに具体的な `Tensor<f32>` を返す契約であり、`Tensor`
+（`crates/tensor-core/src/tensor.rs:53`）は `Arc<Storage<T>>` を必須で
+保持する公開型としては変わらない。本節はこの契約と遅延グラフをどう
+接続するかを明示する（窓の内側での実際の使用点の具体化は §3.5 で
 行う）。旧稿（第 4 波まで）は遅延グラフを `Tensor` の `Storage` へ
 埋め込み、複数回の独立した公開呼び出しをまたいで持ち越す設計を
 採っていたため、`Storage` から複数箇所で共有されうる `Tensor` の
 `Send + Sync` を保つための `Arc<Mutex<_>>`・`Arc<dyn BackendOps + Send
-+ Sync>` 所有モデルを要求していた。本改訂（第 6 波）は「複数回の公開
-呼び出しをまたぐ遅延の持ち越し」自体は復活させるが、持ち越す場所を
-`Tensor`／`Storage` ではなく `autodiff::TapeNode`（§3.5.1）に限定する
-ため、`Arc<Mutex<_>>`・`Send + Sync` を要求した第 4 波の前提（遅延が
++ Sync>` 所有モデルを要求していた。持ち越す場所を `Tensor`／
+`Storage` ではなく `autodiff::TapeNode`（§3.5.1）に限定するため、
+`Arc<Mutex<_>>`・`Send + Sync` を要求した第 4 波の前提（遅延が
 `Tensor` を経由して外部へ漏れ出すこと）は再導入しない。以下は
-その帰結として単純化されたままの契約である。
+その帰結として単純化された契約である。
 
 - **`FusionPlan` は `tensor-core` と `autodiff` の双方から構築される
   一方、`FusionSession` 自体は `tensor-core` 内限定のまま変わらない
@@ -666,189 +655,110 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
     `Send + Sync` を要求しない（旧稿はトレイトオブジェクト型の指定にの
     み `+ Send + Sync` を課していたが、その必要性自体が消滅したため
     本改訂で撤回する）。
-  - **`ops` をどの時点で・どの形で受け渡すか（codex-review 第 5 波 P1
-    指摘を受けた単純化を、第 6 波 P1 指摘を受け §3.5 の 3 層すべてへ
-    一般化し、第 11 波 P1 指摘を受け `Executor` enum（§1）へ置き換える）**:
-    materialize ヘルパーが呼ばれるのは §3.5.2 の層 1（後続の fallible
-    `Var` 演算・`Tape::backward` の VJP 連鎖内部）・§3.5.3 の層 2
-    （`Var::value`／`Var::to_tensor`／`Gradients::get`）・§3.5.4
-    （連鎖長上限到達時）、または将来の複合エントリポイント（§3.5.5）
-    であり、いずれも `Tape` が既に保持する `Executor`（§1）を使う。
-    `Tape` は非公開フィールドとして `executor: Executor` を保持する
-    （**`Option<Box<dyn BackendOps>>` ではない。codex-review 第 10 波
-    P1-b 指摘・第 11 波 P1 指摘への回答**: `Executor::Core`〈§3.4「コア
-    融合実行器」〉は常時構築に成功する実行器そのものであり、`None` の
-    ような「未解決」を表す状態ではない——`Executor::Core` は「穴」では
-    なく「能力」を表す variant である、という §1 で確定した区別をここで
-    再確認する。フィールド追加は `Tape` の構造体を非公開のまま拡張する
-    だけであり、`pub` フィールドを持たない現行の `Tape`（`tape.rs:140`）
-    の公開契約を破らない）。**`BackendOps` は `Debug` をスーパートレイト
-    に持たないため（`Send + Sync` を追加しない理由〈下記〉と同じ
-    「外部実装を破壊しない」根拠により、本改訂でも追加しない）、現行の
-    `#[derive(Debug)]`（`tape.rs:139`）はそのままでは `executor` フィールド
-    追加後にコンパイルできない。#164 では `#[derive(Debug)]` を撤去し、
-    手書き `impl fmt::Debug for Tape` へ置き換える。**`Executor::Core`
-    は表示すべき `Device` を持たないため、第 10 波までの
-    `self.ops.device()` 表示案（`BackendOps::device` を読む）はそのまま
-    使えない**。本改訂では `Executor` 自体に `Debug` を要求しない最小
-    表示（例: `Executor::Core` なら `"core"`、`Executor::Backend(_)` な
-    ら `"backend"` という固定文字列。バックエンド実装の中身
-    （`Device` を含む）までは表示しない）へ置き換える。これにより
-    `Tape: Debug` という公開契約自体は本改訂後も維持され（実装手段が
-    `derive` から手書きへ変わるのみ）、公開 API 非破壊の方針
-    （`.claude/rules/security.md`）を満たす**。旧稿（第 4 波まで）は
-    `Storage::Pending` へ埋め込むために `Arc<dyn BackendOps + Send +
-    Sync>` の所有値・`ops_for_arc`（`ops_for` の `Arc` 版姉妹関数）を
-    新設していたが、この前提が消滅したため、`Executor::Backend` の
-    内部表現は本改訂でも `Box<dyn BackendOps>`（`Send + Sync` 不要・
-    `ops_for_arc` 新設も不要）のまま維持する（`Tape` 自体が `Clone` を
-    提供しない設計であるため `Arc` の共有所有は不要）。`Tape::backward`
-    （下記）・§3.5.1 の materialize ヘルパーはいずれも `self.executor`
-    を借用し、`Executor::Core` なら§3.4「コア融合実行器」を直接呼び、
-    `Executor::Backend(ops)` なら `ops.as_ref()`（`&dyn BackendOps`。
-    `Box<T>` の `Deref` 経由で直接得られる借用）を融合を行う内部
+  - **`ops` をどの時点で・どの形で受け渡すか（codex-review 第 13 波
+    P1-b 指摘への回答。第 11〜12 波の `Executor` enum を撤回し、単一の
+    `Option<Box<dyn BackendOps>>` フィールドへ置き換える）**: materialize
+    ヘルパーが呼ばれるのは §3.5.2 の層 1（`matmul`／`sum`／`max`・
+    `Tape::backward` の VJP 連鎖内部）・§3.5.3 の層 2（`Var::value`／
+    `Var::to_tensor`／`Gradients::get`）・§3.5.4（連鎖長上限到達時）、
+    または将来の複合エントリポイント（§3.5.5）であり、いずれも `Tape`
+    が既に保持する非公開フィールド `ops: Option<Box<dyn BackendOps>>`
+    （§1）を借用して使う。フィールド追加は `Tape` の構造体を非公開の
+    まま拡張するだけであり、`pub` フィールドを持たない現行の `Tape`
+    （`tape.rs:140`）の公開契約を破らない。**`Option` の採否（第 10 波
+    の懸念への回答）**: 第 10 波は同型の `Option<Box<dyn BackendOps>>`
+    を「`None` = 未解決 = 公開コンストラクタが事実上の融合スイッチに
+    なる」ことを理由に撤回していたが、その懸念自体は §1「`None`／
+    `Some` の非対称性について」で回答済みである——REQ-12 が保護する
+    「利用者」は compat 層（REQ-9）の公開面であり、compat 層は常に
+    `Tape::with_backend` を使うため、`autodiff` クレート自身の 2 つの
+    コンストラクタが存在すること自体は REQ-12 への抵触ではない。
+    `None` は「未解決」ではなく「eager 実行という、それ自体で完結した
+    既定の実行方式」を表す（現行実装〈`tape.rs`・`var.rs`〉と完全に
+    一致する）。**`BackendOps` は `Debug` をスーパートレイトに持たない
+    ため（外部実装を破壊しないための既存方針。下記「`BackendOps` trait
+    定義自体は変更しない」参照）、現行の `#[derive(Debug)]`
+    （`tape.rs:139`）はそのままでは `ops` フィールド追加後にコンパイル
+    できない。#164 では `#[derive(Debug)]` を撤去し、手書き
+    `impl fmt::Debug for Tape` へ置き換える**（`ops: None` なら
+    `"eager"`、`ops: Some(_)` なら `"backend"` という固定文字列を表示
+    し、バックエンド実装の中身〈`Device` を含む〉までは表示しない）。
+    これにより `Tape: Debug` という公開契約自体は変更後も維持され
+    （実装手段が `derive` から手書きへ変わるのみ）、公開 API 非破壊の
+    方針（`.claude/rules/security.md`）を満たす。`Tape::backward`
+    （`backward.rs`）・§3.5.1 の materialize ヘルパーはいずれも
+    `self.ops`（`Option<&dyn BackendOps>`。`.as_deref()` で得られる
+    借用）を読み、`Some(ops)` なら融合を試み `run_fused` を呼ぶ内部
     ヘルパーへ**借用として**渡す（§3.4 冒頭「`FusionSession` は借用
     `ops: &'ops dyn BackendOps` を保持する」）。`FusionSession` は
     その呼び出しの実行中だけ生存するローカル値であるため、所有権の移動・
     `Arc` によるクローンはいずれも不要である。
-  - **コア融合実行器（`Executor::Core`。codex-review 第 11 波 P1 指摘
-    への回答。第 10 波の `tensor_core::reference_cpu_ops()`／
-    `ReferenceCpuOps` を撤回し、本改訂で置き換える）**: 第 10 波は
-    「`Tape::new()` が構造的に必ず解決する既定 `BackendOps` 実装」を
-    `tensor-core` に `ReferenceCpuOps` として配置していたが、これは
-    (i) CPU 演算カーネルの実装を `tensor-core` へ持ち込む点で
-    `backend-cpu` の責務境界と衝突し、(ii) `Device::Cpu` を返す
-    `BackendOps` 実装である以上、`Tape::new()` は構造的に「デバイス
-    `Cpu` を選択している」ことになり、`docs/public-api-design.md` §4.1
-    の既定デバイス選択ロジック不採用方針と交差する、という 2 点の
-    codex-review 第 11 波 P1 指摘を理由に撤回する。
-
-    根本解消策は、`BackendOps` を実装せず `Device` も持たない**コア
-    融合実行器**を `crates/autodiff` 内に置くことである。これは
-    §1 で導入した `Executor::Core` が指す実体であり、`tensor-core` の
-    トレイト定義・依存逆転構成（`backend_ops.rs:1-8`）を一切経由しない
-    （「`tensor-core` 側で `BackendOps` として振る舞う既定実装」という
-    第 10 波の前提そのものを取り除く）:
-    ```rust
-    // crates/autodiff/src/fusion_exec.rs（新設。実装は #164）
-    //
-    //! コア融合実行器（`Executor::Core`。§1・§3.4）。
-    //!
-    //! 記録済みの `relu`／`exp`／`tanh` 連鎖（§3.5.1 の `TapeNode` 遅延
-    //! チェーン）を、中間 `Tensor<f32>` を都度アロケートせず単一の評価
-    //! パスへ合成してから評価する、`crates/autodiff` 内で完結する実行器。
-    //! REQ-1（`docs/spec/04-requirements.md:43`・`:49`）が自作対象と定める
-    //! 「演算グラフ／カーネル融合機構」のうち、外部カーネル生成（NVRTC／
-    //! MSL、#163）を持たない代表実装がこれにあたる。**本モジュールが
-    //! 新設するのは演算グラフの走査・中間実体化の除去という
-    //! オーケストレーションのみであり、要素ごとのスカラー計算（`relu`／
-    //! `exp`／`tanh` の数式）を独自に実装しない**（codex-review 第 12 波
-    //! P1-a 指摘への回答。§2.5「責務分界線」参照）。
-    //!
-    //! **`eval.rs` との関係**: `eval.rs`（本クレート）は `Op` 単位で
-    //! 1 演算ずつ値計算を行う参照実装であり、モジュール冒頭コメントが
-    //! 明記するとおり、`backend-cpu` 完成後の TASK-1.9 で置き換わるのは
-    //! **`Op` 単位のディスパッチ先**（`Var` の各演算メソッドが forward
-    //! 値計算のためにどの実行主体を呼ぶか）である。`eval.rs` が定義する
-    //! 要素ごとのスカラー演算そのもの（`unary`〈`eval.rs:185`〉に渡す
-    //! `nan_propagating_max`〈`eval.rs:200`〉・`f32::exp`・`f32::tanh`）
-    //! は `autodiff` 自身の core numeric primitive として `backend-cpu`
-    //! の到来後も存続し、削除・置換の対象にならない。本モジュールは
-    //! これらの既存プリミティブをクロージャ合成で 1 回のパスへまとめる
-    //! だけであり、`eval.rs` の値計算ロジックを複製しない——複製すれば
-    //! 同じ数式が 2 か所に存在し、将来 NaN 伝播契約（PR #221）等を
-    //! 修正する際に 2 か所を同期する必要が生じてしまう。したがって
-    //! `eval.rs` の `unary`（`fn unary`）・`nan_propagating_max`
-    //! （いずれも現状モジュール非公開）は #164 で `pub(crate)` へ
-    //! 可視性のみ変更する（シグネチャ・アルゴリズムは変更しない）。
-    //! `broadcast_binary`〈`eval.rs:148`〉は本節が扱う単項連鎖では
-    //! 未使用だが、同じ理由（既存プリミティブの可視性のみ拡張して
-    //! 再利用する設計方針）により、将来二項演算を遅延連鎖へ含める
-    //! 拡張（§6.2）が入る場合も同じパターンを踏襲する。
-    //!
-    //! **失敗しない契約**: 入力は §3.5.1 で shape 検証済みの `TapeNode`
-    //! 遅延連鎖のみであり、`relu`／`exp`／`tanh` はいずれも
-    //! `-> Tensor<f32>`（非 fallible）で閉じる。`eval::unary` も
-    //! `-> Tensor<f32>`（`Result` を返さない）ため、本実行器がこれを
-    //! 1 回だけ呼ぶ構成でも非 fallible 契約（§3.5.2 手順 2・§3.5.3
-    //! 「構造的に失敗しない」）はそのまま成り立つ。
-    //!
-    //! **CPU 最適化との責務分界（§2.5）**: 本関数はクロージャ合成
-    //! （`Box<dyn Fn(f32) -> f32>` の `fold` 等）で `chain` を 1 個の
-    //! スカラー関数へまとめてから `eval::unary` を 1 回だけ呼ぶ、という
-    //! 制御構造のみを提供する。要素ごとの動的ディスパッチ自体はコストを
-    //! 伴うが、その最適化（SIMD ベクトル化・rayon 並列化を伴う融合
-    //! カーネル）は `backend-cpu` が `BackendOps::run_fused`
-    //! （`Executor::Backend` 経路）で提供する加速経路の責務であり、本
-    //! 関数（`Executor::Core`。既定経路）のスコープには含めない。
-    // chain（Relu／Exp／Tanh）を eval.rs 既存のスカラー関数
-    // （nan_propagating_max／f32::exp／f32::tanh。数式は複製しない）へ
-    // マッピングしたうえで 1 個の合成クロージャへ fold し、
-    // eval::unary(input, composed)（eval.rs:185。可視性のみ pub(crate)
-    // へ変更）を 1 回だけ呼ぶ。dense_vec・build_tensor の呼び出しは
-    // eval::unary 内部に既に含まれるため、本関数はそれらを直接呼ばない
-    // （中間 Tensor を作らない。実装は #164）。
-    pub(crate) fn run_core_fused(chain: &[UnaryFusedOp], input: &Tensor<f32>) -> Tensor<f32>;
-
-    /// `UnaryFusedOp` は §3.5.1 の `Op::Relu`/`Exp`/`Tanh` をそのまま
-    /// 転写した、コア融合実行器専用の内部列挙（`pub(crate)`）。
-    /// `tensor-core::FusedOpKind`（§3.4 上記）とは別物である:
-    /// `FusedOpKind` はクレート境界を越えて `BackendOps::run_fused`
-    /// （`Executor::Backend` 経路）へ渡す DTO であるのに対し、コア融合
-    /// 実行器は `autodiff` 内で完結するため DTO 変換を経由せず
-    /// `TapeNode`／`Op`（§3.5.1）を直接読む。
-    pub(crate) enum UnaryFusedOp {
-        Relu,
-        Exp,
-        Tanh,
-    }
-    ```
-    - **`tensor-core`・`backend-cpu` への依存は生じない**:
+  - **CPU 融合実行の提供元は `backend-cpu`（codex-review 第 13 波 P1-b
+    指摘への回答。第 11〜12 波が `crates/autodiff` 内に置いていた
+    「コア融合実行器」を撤回する）**: `run_fused` の CPU 実装（未対応
+    時の fail-safe な参照実装を含む）は `backend-cpu` 側の `BackendOps`
+    実装（`run_fused` オーバーライド）として提供する。`crates/
+    autodiff` は演算グラフの記録・遅延・実体化制御のみを担い、実行は
+    常に注入された `BackendOps`（`ops: Some(ops)`）経由に限る。
+    `ops: None` の場合は §2.5 のとおり `eval.rs` の既存関数を都度呼ぶ
+    eager 経路のままであり、`autodiff` 内に新たなカーネル実装（第
+    11〜12 波の `fusion_exec.rs`／`run_core_fused`／`UnaryFusedOp`）は
+    新設しない。`backend-cpu` 側の CPU 融合実装（SIMD・rayon 等による
+    最適化を含む）の詳細設計は `backend-cpu` の担当範囲であり本文書の
+    スコープ外とする（結線のみを本文書で確定する）。
+    - **`autodiff → backend-cpu` の workspace path 依存は追加しない**:
       `crates/autodiff/Cargo.toml` は変更しない（`tensor-core` のみへの
       既存依存を維持する。codex-review 第 9 波 P1 指摘が確定した
       「`autodiff` は具体バックエンド実装への依存を持たない」契約を
-      引き続き満たす。本改訂は依存方向を変えるどころか、`autodiff` が
-      `tensor-core::backend_ops` の trait 実装詳細に依存する経路
-      （第 10 波の `reference_cpu_ops()` 呼び出し）そのものを消す）。
-    - **`backend_ops.rs` は変更しない**: 第 10 波が追加していた
-      `ReferenceCpuOps`／`reference_cpu_ops()`／`lib.rs:85` の
-      再エクスポート追加はいずれも撤回する。`ops_for`（`backend_ops.rs:171`。
-      借用ベース・候補注入契約）は元々変更対象外のままであり、本改訂
-      でも変更しない。
+      引き続き満たす）。`with_backend` が受け取る `Box<dyn BackendOps>`
+      はトレイトオブジェクトであり、呼び出し元（compat 層。下記
+      「compat 層への既定注入」）が `backend-cpu::ops::CpuBackendOps`
+      等の具体型を構築して渡す——`autodiff` は `BackendOps` という
+      トレイト定義（`tensor-core` 側）のみを知り、実装クレートを知る
+      必要がない。
+    - **`backend_ops.rs` は変更しない**: `ops_for`（`backend_ops.rs:171`。
+      借用ベース・候補注入契約）は本改訂の対象外であり変更しない。
+    - **compat 層への既定注入（codex-review 第 13 波 P1-b 指摘への
+      回答。2026-08-08 の承認記録は §6.2「`Tape::new()` が使う既定
+      実行器・加速バックエンドの供給規則」参照）**: REQ-9 の compat 層
+      （`docs/public-api-design.md` が定める公開面。`compat::array`／
+      `compat::Sequential` 等）は、内部で `Tape` を構築する際に常に
+      `Tape::with_backend(Box::new(backend_cpu::ops::CpuBackendOps::
+      new()))`（具体的な結線箇所・呼び出し規約は `docs/public-api-
+      design.md` 側で確定する。本文書は「compat 層が `backend-cpu` の
+      `BackendOps` を注入する」という契約のみを固定する）を用いる。
+      compat クレート（または compat を実装するクレート）は
+      `tensor-core`／`autodiff`／`backend-cpu` の全てに依存できる
+      REQ-9 の公開層であり、`autodiff → backend-cpu` の逆依存を作らず
+      にこの結線を行える唯一の層である。この注入により、compat 経由の
+      利用者には融合が常時・透過的に効く（§1）。`autodiff::Tape::new()`
+      を直接呼ぶ経路（compat を経由しない下位利用）は `ops: None` の
+      まま、従来どおり eager・非融合で動作する。
     ```rust
     impl Tape {
         /// 既存の既定コンストラクタ（`tape.rs:154`）。シグネチャは
-        /// 変更しない（非破壊）。`self.executor` を `Executor::Core`
-        /// （§1・上記コア融合実行器）で初期化する。**この初期化は
-        /// バックエンド解決を一切行わない**（`Result` を返さない、
-        /// 失敗分岐そのものが存在しない構築）ため、`Tape::new()` は
-        /// 常に §3.5 が規定する実体化の発火点を経由できる状態で返る
-        /// （§1「既定実行から『バックエンド』『デバイス選択』という
-        /// 概念そのものを除去する」）。GPU バックエンド（CUDA／Metal）
-        /// を明示供給せず既定で使う手段は本文書では確定しない（既定
-        /// 実行がそもそもデバイスを選択しないため、この論点自体が
-        /// §6.2 の別の形の未決事項へ縮小する）。
+        /// 変更しない（非破壊）。`self.ops` を `None`（§1「`Tape::
+        /// new()`」）で初期化する。**この経路の挙動は現行実装と完全に
+        /// 一致し、本改訂による変更対象外である**（eager・非融合）。
         pub fn new() -> Tape {
             Tape {
                 id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),
                 nodes: RefCell::new(Vec::new()),
-                executor: Executor::Core,
+                ops: None,
             }
         }
 
         /// バックエンドを明示供給するコンストラクタ（実装は #164。本節が
         /// 確定する供給契約。TASK-1.9「backend 経由の実行への置き換え」
-        /// の一環として新設する）。**融合を有効化する手段ではない**
-        /// （§1）: 演算列が §3.2 の融合可否判定を満たせば `Executor::
-        /// Core`（`Tape::new()`）でも `Executor::Backend(ops)`（本
-        /// コンストラクタ）でも同様に融合する。本コンストラクタは
-        /// `ops` によるバックエンド加速を明示供給する 1 手段にすぎず、
-        /// 既定デバイス選択ロジックは持たない。
+        /// の一環として新設する。`docs/public-api-design.md` §4.1 の
+        /// 改訂〈本改訂で追記〉が定める compat 層の既定結線は、この
+        /// コンストラクタへ `backend-cpu` の `BackendOps` を渡す形で
+        /// 実装する）。
         pub fn with_backend(ops: Box<dyn BackendOps>) -> Tape {
             Tape {
                 id: TapeId(NEXT_TAPE_ID.fetch_add(1, Ordering::Relaxed)),
                 nodes: RefCell::new(Vec::new()),
-                executor: Executor::Backend(ops),
+                ops: Some(ops),
             }
         }
     }
@@ -1047,13 +957,13 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
     自体が使われる場合（§3.4 冒頭「`FusionSession` は `tensor-core` 内で
     `FusionGraph` が既に存在する場合のための内部機構として残す」。#162
     の連鎖検出が `tensor-core` 内で完結する将来のユースケース）に限定
-    される**。`autodiff::Tape` の既定経路（`Executor::Core`）はこの
-    `FusionSession` を経由しない（`tensor-core` → `autodiff` の逆依存を
-    作れないため、`tensor-core` 内のフォールバックは `autodiff` のコア
-    融合実行器を参照できず、既存の `add`／`mul`／`relu`／`exp`／`tanh`
-    呼び出しへの逐次フォールバックのままで正しい。§3.5.2・§3.5.3 が
-    規定するのは `autodiff` 側の `Executor::Backend(ops)` 経路の失敗時
-    契約であり、本節とは別の契約である）。
+    される**。`autodiff::Tape` の実体化（§3.5）はこの `FusionSession`
+    を経由しない（`tensor-core` → `autodiff` の逆依存を作れないため）。
+    `autodiff` 側は `FusionPlan::from_ops` + `BackendOps::run_fused` を
+    直接呼び、`Unsupported` のときは同じ `ops` の per-op メソッドへ
+    フォールバックする（層 2 に限りそれも失敗した場合の最終手段として
+    `eval.rs` を使う。§3.5.2・§3.5.3。本節とは別の、`autodiff` クレート
+    内で完結する契約である）。
   - **`run_fused` の追加と「trait 定義自体には手を加えない」の関係
     （codex-review 第 5 波 P2 指摘への回答。本改訂で文言統一する）**:
     `run_fused` はデフォルト実装付きのメソッドとして `BackendOps` の
@@ -1074,66 +984,51 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
     `Tape::with_backend` の引数型にも課さない（§3.4 冒頭「`ops` の
     受け渡しは借用で足りる」で確定したとおり、`Storage::Pending` への
     埋め込みという前提自体が消滅したため、この束縛はもはや不要である）。
-- **まとめ（codex-review 第 5 波 P1 指摘への回答。本改訂で確定）**:
-  「遅延値を保持できる `Tensor` 表現への変更」は採らない（`Tensor`
-  不変。`Storage` にも `Pending` バリアントを追加しない）。融合対象
-  区間の構築・実体化はいずれも「単一の fallible 呼び出しの内部だけで
-  生存するローカル値」（`FusionValue`／`FusionSession`）として行う。
-  「連鎖全体を受け取る明示的な内部 API」として `BackendOps::run_fused`
-  （非破壊拡張のデフォルトメソッド）を追加する。グラフの所有は
-  `FusionSession` が `graph: FusionGraph`（所有値）として保持し、
-  実体化に使う `BackendOps` 実装は `ops: &'ops dyn BackendOps`
-  （借用）として保持する。`Arc`／`Mutex`／`Rc`／`RefCell`／
-  `Send + Sync` はいずれも不要である（旧稿〈第 4 波まで〉はこれらを
-  `Storage::Pending` として `Tensor` へ埋め込むために要求していたが、
-  §1 でその前提自体を撤回したため、本改訂で全面的に単純化した）。
-  `autodiff` 側の materialize ヘルパーが呼ぶ実行経路は、`Tape` が
-  保持する `Executor`（§1。`Executor::Core`／`Executor::Backend(ops)`）
-  のいずれかによって次のとおり分岐する（codex-review 第 11 波 P1
-  指摘への回答。第 10 波までの「`ops: Box<dyn BackendOps>` を借用して
-  `FusionPlan::from_ops` + `BackendOps::run_fused` を直接呼ぶ」という
-  単一経路の記述を訂正する）:
-  - **`Executor::Core`**（`Tape::new()` の既定）: コア融合実行器
-    （§3.4「コア融合実行器」）を直接呼ぶ。`FusionSession`／
-    `FusionPlan`／`FusedOpKind` はいずれも経由しない（これらは
-    `Executor::Backend` 経路専用の DTO・クレート間契約であり、
-    コア融合実行器は同じ `autodiff` クレート内の `TapeNode`／`Op`
-    〈§3.5.1〉を直接読む）。この経路は構造的に失敗しない。
-  - **`Executor::Backend(ops)`**（`Tape::with_backend` で明示供給）:
-    `FusionPlan::from_ops` + `BackendOps::run_fused` を直接呼ぶ
-    （`FusionSession` は経由しない。上記「`FusionPlan` は `tensor-core`
-    と `autodiff` の双方から構築される」参照）。`run_fused` が失敗した
-    場合はコア融合実行器へフォールバックする（§3.5.2・§3.5.3 で確定
-    する種別ごとの契約）。
-  いずれの経路を呼ぶかは §3.5.2 の層 1（後続の fallible `Var` 演算・
+- **まとめ（codex-review 第 13 波 P1-b 指摘への回答。本改訂で最終形へ
+  確定する）**: 「遅延値を保持できる `Tensor` 表現への変更」は採らない
+  （`Tensor` 不変。`Storage` にも `Pending` バリアントを追加しない）。
+  融合対象区間の構築・実体化はいずれも「単一の fallible 呼び出しの
+  内部だけで生存するローカル値」（`FusionValue`／`FusionSession`）と
+  して行う。「連鎖全体を受け取る明示的な内部 API」として
+  `BackendOps::run_fused`（非破壊拡張のデフォルトメソッド）を追加する。
+  グラフの所有は `FusionSession` が `graph: FusionGraph`（所有値）と
+  して保持し、実体化に使う `BackendOps` 実装は `ops: &'ops dyn
+  BackendOps`（借用）として保持する。`Arc`／`Mutex`／`Rc`／`RefCell`／
+  `Send + Sync` はいずれも不要である。
+  `autodiff` 側の materialize ヘルパーが呼ぶ実行経路は単一である
+  （第 11〜12 波の `Executor::Core`／`Executor::Backend` の二経路分岐は
+  撤回する）: **`self.ops`（`Option<&dyn BackendOps>`）が `Some(ops)`
+  の場合のみ** `FusionPlan::from_ops` + `BackendOps::run_fused` を直接
+  呼び（`FusionSession` は経由しない。上記「`FusionPlan` は
+  `tensor-core` と `autodiff` の双方から構築される」参照）、失敗した
+  場合は §3.5.2・§3.5.3 が確定する種別ごとの契約に従って、まず `ops`
+  自身の既存 per-op メソッド（`add`／`mul`／`relu`／`exp`／`tanh`）へ
+  逐次フォールバックし、層 2（非 fallible 境界）に限りそれも失敗した
+  場合の最終手段として `eval.rs` の既存関数へフォールバックする（§2.5
+  「`autodiff` 側の役割」）。**`self.ops` が `None` の場合、この
+  経路自体に到達しない**（§1・§2.5「`autodiff` 側の役割」）——`add`／
+  `mul`／`relu`／`exp`／`tanh` はいずれも現行実装どおり `Tape::push`
+  の直前に forward 値を即時計算しており、遅延グラフそのものが構築
+  されない。
+  いずれの経路を呼ぶかは §3.5.2 の層 1（`matmul`／`sum`／`max`・
   `Tape::backward` の VJP 連鎖内部）・§3.5.3 の層 2（`Var::value`／
   `Var::to_tensor`／`Gradients::get`）・§3.5.4（連鎖長上限到達時。
   fallible／非 fallible いずれの経路にも合流する）、または将来の複合
   エントリポイント（§3.5.5）が決める。呼び出しは「呼び出し元の関数
   フレーム内だけで完結する」という性質（`FusionSession` について
-  上記コード例のドキュメンテーションコメントが述べる性質と同じ）を
-  `Executor::Core`／`Executor::Backend` のいずれでも保つ（実体化の
-  発火点が §3.5.1〜3.5.4 の複数箇所に増えたことが変化点であり、
-  「フレーム」の粒度自体は変わらない）。`Tape::new()` は `Executor::
-  Core` を保持する状態で**構造的に必ず**返る（§1「既定実行から
-  『バックエンド』『デバイス選択』という概念そのものを除去する」）。
-  CPU 以外のデバイス（`Device::Cuda`／`Device::Metal`）を既定選択する
-  規則は本文書では確定しない——ただし本改訂により、この論点はもはや
-  「`Tape::new()` の既定デバイスをどう選ぶか」ではなく「production が
-  加速バックエンドをどう供給するか」という別の問いへ縮小している
-  （`Tape::new()` 自体はデバイスを選択しないため。§6.2 参照）。
-  `docs/public-api-design.md` §4.1 の既定デバイス選択ロジック不採用
-  方針は、既定実行がそもそもデバイス選択を行わない本設計のもとでは
-  抵触しようがなく、同文書の改訂は不要である。コア融合実行器は
-  `autodiff` 内で完結する既定実装であり、`backend-cpu` 等の最適化
-  実装を候補として注入する結線層は既定経路には不要である
-  （codex-review 第 9 波 P1 指摘が確定した「`autodiff` は具体バックエンド
-  実装への依存を持たない」契約は本改訂でも維持する。§3.4「`tensor-core`・
-  `backend-cpu` への依存は生じない」参照）。最適化実装（`backend-cpu::
-  ops::CpuBackendOps` 等）への差し替えは `Tape::with_backend` による明示
-  供給、または将来 §6.2「backend-cpu の最適化実装への差し替え」で
-  検討する登録機構のいずれかで行う将来拡張であり、`Tape::new()` の
-  挙動には影響しない。
+  上記コード例のドキュメンテーションコメントが述べる性質と同じ）を保つ
+  （実体化の発火点が §3.5.1〜3.5.4 の複数箇所に増えたことが変化点で
+  あり、「フレーム」の粒度自体は変わらない）。`Tape::new()` は
+  `ops: None` を保持する状態で**構造的に必ず**返り、`docs/public-api-
+  design.md` §4.1 の既定デバイス選択ロジック不採用方針とは交差しない
+  （`Tape::new()` 自体がデバイス選択を一切行わないため。§6.2 参照）。
+  CPU 融合実行の提供元は `backend-cpu`（§2.5「`autodiff` 側の役割」・
+  §3.4「CPU 融合実行の提供元は `backend-cpu`」）であり、compat 層
+  （REQ-9。`docs/public-api-design.md` §4.1 の改訂参照）が `Tape::
+  with_backend` で `backend-cpu` の `BackendOps` を注入することで
+  compat 経由の利用者に融合が常時・透過的に効く（§1）。GPU バック
+  エンド（CUDA／Metal）を compat 層の既定として使う規則は本文書では
+  確定しない（§6.2 に未決事項として残す）。
   外部 backend（`backend-cpu`／`backend-cuda`／`backend-metal`）が
   `run_fused` 内で融合グラフの演算内容を読み取る手段も本改訂で確定
   した: `FusionPlan` は `pub`（フィールド非公開）の不透明ハンドルとし、
@@ -1146,21 +1041,25 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 
 ### 3.5 演算跨ぎの遅延と 3 層の実体化境界
 
-（本節は codex-review 第 6 波 P1 指摘を受けて全面改訂する。第 5 波の
-旧稿は `Var` の fallible 演算が返る前に自分の出力を必ず実体化する
-契約（本節でも層 1 の一部として維持する）を根拠に、遅延の生存窓を
-1 回の呼び出し内部だけに縮小していた。しかしこれは TASK-12.1 の中核
-要件である「現行公開 API 上での 4〜6 段 elementwise 連鎖の融合」を
-不可能にする（第 6 波 P1 指摘、§1・§3.3）。本節は「複数回の独立した
-公開 `Var` 呼び出しをまたいで遅延を持ち越す」設計を、`value`／
-`to_tensor` の非 fallible 契約を壊さない形で復活させる。)
+（本節は codex-review 第 6 波・第 13 波 P1-a 指摘を受けて確定する。
+「複数回の独立した公開 `Var` 呼び出しをまたいで遅延を持ち越す」設計を、
+`value`／`to_tensor` の非 fallible 契約を壊さない形で成立させる。
+第 13 波は、単項演算（`relu`／`exp`／`tanh`）に限定していた遅延対象を
+`add`／`mul`（二項 elementwise 演算）にも拡張した——TASK-12.1 の中核
+要件は「現行公開 API 上での 4〜6 段 elementwise 連鎖の融合」であり、
+PoC-9 実測（`ew4`／`ew6`／`ew_fanout`）が示す構成は `add`／`mul` の
+連鎖・fan-out を含むため、単項演算限定では対象範囲が実測条件と一致
+しなかった。）
 
 ### 3.5.1 `TapeNode` の構造と遅延を許容する演算の切り分け
 
 - 遅延状態は `autodiff::TapeNode`（`tape.rs:118`。`pub(crate)`）だけに
   持たせ、`tensor-core` の `Tensor`／`Storage<T>`（`tensor.rs:33`）は
-  一切変更しない（§3.4 で確定済み）。`TapeNode` を次のとおり拡張する
-  （実装は #164）:
+  一切変更しない（§3.4 で確定済み）。`ops: None`（既定）の場合は
+  `value` を `Tape::push` の直前に `OnceCell::from(...)` として即座に
+  埋める（現行実装と同じ即時計算。§1「`Tape::new()`」）ため、以下の
+  拡張は `ops: Some(ops)` の場合にのみ意味を持つ。`TapeNode` を次の
+  とおり拡張する（実装は #164）:
   ```rust
   pub(crate) struct TapeNode {
       pub(crate) op: Op,
@@ -1183,48 +1082,64 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
       pub(crate) value: std::cell::OnceCell<Tensor<f32>>,
   }
   ```
-- **遅延を許容する演算とその場で実体化する演算の切り分け**: `relu`／
-  `exp`／`tanh`（`var.rs:257` 以降。shape 不変の単項演算のため
-  「構造的に失敗しえない」という既存設計判断〈`docs/public-api-design.md`
-  §3.2〉により非 fallible な `fn ..(&self) -> Var<'t>` のまま）は
-  `Tape::push` 時に `value` を空の `OnceCell` のまま記録し、**自身の
-  出力を実体化せずに返す**（連鎖を延長する）。これが本改訂で 4〜6 段
-  連鎖を実現する主要因である: `relu`／`exp`／`tanh` は任意回・任意順
-  に連結できるため、`a.relu().exp().tanh().relu()`（4 段）のように
-  §3.2 (d) の連鎖長上限まで単独で連鎖を伸ばせる。一方 `add`／`mul`／
-  `matmul`／`sum`／`max`（`Result<Var<'_>, AutodiffError>` を返す
-  fallible 演算。`var.rs:111`〜`:159`）は、第 5 波の契約を維持し
-  **返る前に自分の出力を実体化済みにする**（`OnceCell` を埋めてから
-  返す）。これらの演算は shape 検証を実体化前に完了できる（上記
-  `shape` フィールドのみを読む）が、実際の計算（`eval::add` 等）には
-  入力の具体値が要るため、入力が `relu`／`exp`／`tanh` の遅延連鎖で
-  あった場合はその実体化を自身の実行の一部として行う（§3.5.2 の
-  「層 1」）。この `OnceCell` の埋め込みも §3.5.2 が定める通常分岐規定
-  （`set` の `Err` は「他経路が先にこのノードを実体化済み」という
-  fan-out に伴う二重到達として扱い、`panic!`／`unreachable!()` を使わず
-  `get()` で読み直した既存値を採用する。codex-review 第 12 波 P1-b
-  指摘への回答）にそのまま従う。
+- **遅延を許容する演算とその場で実体化する演算の切り分け（codex-review
+  第 13 波 P1-a 指摘への回答。単項演算限定を撤回する）**: `ops:
+  Some(ops)` の場合、elementwise 5 演算——`add`／`mul`（`var.rs:122`〜
+  `:141`。`Result<Var<'_>, AutodiffError>` を返す）と `relu`／`exp`／
+  `tanh`（`var.rs:257` 以降。非 fallible な `fn ..(&self) -> Var<'t>`）
+  ——はいずれも `Tape::push` 時に `value` を空の `OnceCell` のまま記録
+  し、**自身の出力を実体化せずに返す**（遅延グラフを延長する）。これが
+  4〜6 段連鎖を実現する主要因である。**shape 検証と実行を分離する**:
+  `add`／`mul` は既存の検査順序「①クロステープ検査 → ②shape 検査 →
+  ③forward 値計算 → ④ノード記録」（`var.rs` 冒頭コメント）のうち、
+  ①②は従来どおり `Tape::push` より前に即時実行し、不正な shape は
+  ノードを記録せずその場で `Err` を返す。③（`eval::add`／`mul` の
+  呼び出し）だけを実体化境界まで遅延させる。**したがって `Var::add`／
+  `mul` が `Ok` を返すことは「shape が妥当でノードが記録された」ことの
+  みを意味し、「加算・乗算が計算済みである」ことを意味しない**（§1
+  参照。バックエンド実行の失敗は次の実体化境界で初めて表面化しうる）。
+  一方 `matmul`／`sum`／`max`（非 elementwise。`var.rs:111`〜`:119`・
+  `:144`〜`:171`）は、**返る前に自分の出力を実体化済みにする**
+  （`OnceCell` を埋めてから返す）。これらの演算は shape 検証を実体化前
+  に完了できる（`shape` フィールドのみを読む）が、実際の計算には入力
+  の具体値が要るため、入力が elementwise の遅延グラフであった場合は
+  その実体化を自身の実行の一部として行う（§3.5.2 の「層 1」）。この
+  `OnceCell` の埋め込みは §3.5.2 が定める通常分岐規定（`set` の `Err`
+  は「他経路が先にこのノードを実体化済み」という fan-out に伴う二重
+  到達として扱い、`panic!`／`unreachable!()` を使わず `get()` で読み
+  直した既存値を採用する）にそのまま従う。`ops: None`（既定）の場合、
+  上記の遅延は一切発生せず、すべての演算が現行実装どおり即時計算
+  される（§1）。
 - **葉ノード（`Op::Leaf`）は常に実体化済み**: `Tape::var(&tensor)`
   （`tape.rs:164`）は呼び出し時点で既に具体的な `Tensor<f32>` を受け
   取るため、`value` を即座に `OnceCell::from(tensor.clone())` で埋めて
   push する。これにより「実体化されていないノードの入力を遡ると、
   有限回で必ず実体化済みノードまたは `Op::Leaf` に到達する」という
   帰納法の基底が成り立つ。
-- **走査順が既に発生順トポロジカル順であること**: `Tape::push`
-  （`tape.rs:186`〜`:190`）は `NodeId(nodes.len())` を採番してから
-  追記するため、あるノードの入力 `NodeId` は常に自分自身の `NodeId`
-  より小さい。したがって遅延連鎖を先頭（未実体化の最も古いノード）
-  から辿る際、単純な逆方向の連結リスト走査（各ノードの入力 `NodeId`
-  を辿る）だけでよく、循環検出・グラフ探索アルゴリズムは不要である
-  （§2 の `FusionGraph`／連結成分検出とは異なり、`autodiff` 側の遅延
-  連鎖は常に単純な線形チェーンである。なぜなら `relu`／`exp`／`tanh`
-  はいずれも入力 1 個の単項演算だからである）。
+- **走査順が既に発生順トポロジカル順であること（DAG 一般化。codex-review
+  第 13 波 P1-a 指摘への回答）**: `Tape::push`（`tape.rs:186`〜`:190`）
+  は `NodeId(nodes.len())` を採番してから追記するため、あるノードの
+  入力 `NodeId` は常に自分自身の `NodeId` より小さい。この事実は
+  `add`／`mul` が入力 2 個を持つようになった本改訂後も変わらず、
+  遅延グラフは常に非巡回（DAG）である——**ただし `add`／`mul` の遅延
+  化により、遅延グラフは「単純な線形チェーン」ではなく一般の DAG に
+  なる**（第 12 波までの「`relu`／`exp`／`tanh` はいずれも入力 1 個の
+  単項演算だから常に線形チェーン」という記述は撤回する。例:
+  `(a.add(&b)?).mul(&c.add(&d)?)?` のように、2 つの独立した `add` の
+  遅延ノードが 1 つの `mul` ノードへ合流する fan-in や、同じノードを
+  複数の後続演算が参照する fan-out〈§2.4 と同種の懸念。§6.2「異なる
+  `Tape` を跨ぐ融合境界」参照〉が実際に生じうる）。それでも「あるノード
+  の入力 `NodeId` は常に自分より小さい」という不変条件だけで、実体化
+  対象ノードから入力方向へ辿る走査は常に停止し（有限回で葉ノードまたは
+  実体化済みノードに到達する）、循環検出アルゴリズムは不要という結論
+  自体は変わらない（`NodeId` の単調増加が非巡回性を構造的に保証する
+  ため）。
 
 ### 3.5.2 層 1（fallible 境界）: 後続の fallible `Var` 演算・`Tape::backward` の VJP 連鎖内部
 
-- **後続の fallible `Var` 演算**（`add`／`mul`／`matmul`／`sum`／`max`）
+- **後続の非 elementwise fallible `Var` 演算**（`matmul`／`sum`／`max`）
   および `Tape::backward` の VJP 連鎖内部は、入力側の値を読む際に
-  `Var::value()`（層 2・非 fallible・実体化失敗を CPU フォールバックで
+  `Var::value()`（層 2・非 fallible・実体化失敗を eager フォールバックで
   必ず吸収する API。§3.5.3）を**呼ばない**。かわりに専用の内部経路
   `materialize_fallible`（`autodiff` クレート内の `pub(crate)` フリー
   関数。`tape.rs` に実装。§3.5.3 の `materialize_non_fallible` と同じ
@@ -1233,75 +1148,73 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   ```rust
   fn materialize_fallible<'a>(
       nodes: &'a [TapeNode],
-      executor: &Executor,
+      ops: Option<&dyn BackendOps>,
       id: NodeId,
   ) -> Result<&'a Tensor<f32>, AutodiffError> { .. }
   ```
-  `value()` とは別関数であり、`Executor::Backend(ops)` を保持している
-  場合の `run_fused` の失敗のうち `BackendError::Unsupported`（実行
-  開始前に判明する能力不足）**以外**は CPU フォールバックで吸収せず
-  型付きエラーのまま呼び出し元へ返す（`Unsupported` の扱いは下記手順 3
-  を参照。§4 の fail-safe 方針を層 1 でも一貫させる、codex-review 第 8
-  波 P1 指摘への回答）。実装は #164。codex-review 第 7 波 P1 指摘への
-  回答: `value()` 経由では層 1 が要求する `AutodiffError::Backend` の
-  直接伝播に構造的に到達できないため、読み出し経路を層ごとに分離する）。
+  `value()` とは別関数であり、`ops: Some(ops)` を保持している場合の
+  `run_fused` の失敗のうち `BackendError::Unsupported`（実行開始前に
+  判明する能力不足）**以外**は eager フォールバックで吸収せず型付き
+  エラーのまま呼び出し元へ返す（`Unsupported` の扱いは下記手順 3 を
+  参照。§4 の fail-safe 方針を層 1 でも一貫させる）。実装は #164。
+  `value()` 経由では層 1 が要求する `AutodiffError::Backend` の直接
+  伝播に構造的に到達できないため、読み出し経路を層ごとに分離する。
   この経路は対象の `TapeNode.value` が未実体化であれば、その場で実体化
   を行う。手順は次のとおり:
   1. 未実体化ノードから入力方向へ、`OnceCell` が埋まっているノードまで
-     辿り、間に挟まる `relu`／`exp`／`tanh` の連続列を得る（§3.5.1
-     「走査順」）。
-  2. `executor` を借用し、次のいずれかで実体化を試みる（codex-review
-     第 11 波 P1 指摘への回答。`Executor::Core`／`Executor::Backend`
-     で経路が分岐する）:
-     - **`Executor::Core`**: コア融合実行器（§3.4）へ連鎖をそのまま
-       渡す。`TapeNode`／`Op` を直接読むため `FusedOpKind` への変換・
-       `FusionPlan::from_ops` はいずれも経由しない。この経路は
-       構造的に失敗しない（`Result` を返さず、下記手順 3・4 の分岐に
-       到達しない）。
-     - **`Executor::Backend(ops)`**: 連鎖を `FusedOpKind`（§3.4）へ
-       変換し（`Op::Relu`/`Exp`/`Tanh` と `FusedOpKind::Relu`/`Exp`/
-       `Tanh` は 1:1 対応。§2.1・§3.4）、`FusionPlan::from_ops`
-       （§3.4。`pub` + `#[doc(hidden)]`）で `FusionPlan` を構築した
-       うえで `ops.run_fused(&plan, &[&base])` を試す。
-  3. `Executor::Backend(ops)` で `run_fused` が `Ok` を返せば、その
-     融合結果をそのまま実体化値として用いる。**`run_fused` が
-     `Err(BackendError::Unsupported(_))` を返した場合**は、連鎖の
-     各ノードをコア融合実行器（§3.4。構造的に失敗しない）で再計算する
-     （§4 の fail-safe 方針）。このフォールバックは記録済みの演算列
-     から正しい値を再計算するのみであり、`Err` を呼び出し元へ流入
-     させない（第 3 波契約「エラーを `Option` へ流入させない」と矛盾
-     しない。§4）。`Executor::Core` を保持している場合は手順 2 の時点
-     で既にコア融合実行器のみを使っているため、本手順の分岐自体に
-     到達しない。
-  4. `Executor::Backend(ops)` で `run_fused` が `Err(BackendError::
-     Unsupported(_))` **以外**の `Err`（起動失敗・メモリ割り当て失敗・
-     転送失敗等、実行開始後に判明する障害。`run_fused` を融合実装で
-     オーバーライドした `BackendOps`〈#163・将来の `backend-cpu` 最適化
-     実装等〉が返しうる）を返した場合、**コア融合実行器へフォール
-     バックせず** `Err(BackendError)` をそのまま
-     `AutodiffError::Backend(BackendError)` へ変換して
-     `materialize_fallible` の戻り値として呼び出し元へ `?` で伝播
-     する。すなわち **層 1（`materialize_fallible` の内部）で
-     `Executor::Backend` を使う場合、`Unsupported` 以外の `run_fused`
-     の失敗はフォールバックしない**（層 2〈§3.5.3〉との違い。層 2 は
-     エラー種別を問わず常にフォールバックする。§3.5.3 参照）。手順 3・
-     手順 4 は互いに排他な `run_fused` の結果（`Ok`・`Unsupported`・
-     `Unsupported` 以外の `Err`）に対応しており矛盾しない。`Executor::
-     Core`（既定。§1）を使う fallible `Var` 演算（TASK-1.5〜1.8 の
-     既存テスト資産が使う経路を含む）は、コア融合実行器が構造的に
-     失敗しないため常に成功する。
+     辿り、間に挟まる `add`／`mul`／`relu`／`exp`／`tanh` の遅延部分
+     グラフ（§3.5.1「走査順」。一般に DAG）を得る。
+  2. `ops` を借用し、`Some(ops)` の場合、遅延部分グラフを
+     `FusedOpKind`（§3.4）の列へ変換し（`Op::Add`/`Mul`/`Relu`/`Exp`/
+     `Tanh` と `FusedOpKind::Add`/`Mul`/`Relu`/`Exp`/`Tanh` は 1:1
+     対応。§2.1・§3.4）、`FusionPlan::from_ops`（§3.4。`pub` +
+     `#[doc(hidden)]`）で `FusionPlan` を構築したうえで
+     `ops.run_fused(&plan, &leaves)` を試す。`ops: None` の場合、
+     この経路自体に到達しない（§3.5.1「切り分け」のとおり `ops: None`
+     では遅延グラフが構築されず、既に実体化済みの値を読むだけである）。
+  3. `run_fused` が `Ok` を返せば、その融合結果をそのまま実体化値として
+     用いる。**`run_fused` が `Err(BackendError::Unsupported(_))` を
+     返した場合**は、遅延部分グラフの各ノードをトポロジカル順に
+     **同じ `ops`（注入された `BackendOps` の実装）の既存 per-op
+     メソッド**（`ops.add`／`mul`／`relu`／`exp`／`tanh`。§4.2）で
+     逐次再計算する（§4 の fail-safe 方針。§2.5「`autodiff` 側の役割」
+     が定めるとおり、実際の計算は常に注入された `BackendOps` 経由に
+     限る）。この逐次呼び出しがさらに失敗した場合（対応バックエンドが
+     elementwise 未実装〈`BackendError::Unsupported`〉の場合を含む）、
+     層 1 にはこれ以上のフォールバックがないため、その `Err` をそのまま
+     `AutodiffError::Backend(BackendError)` として `?` で伝播する
+     （手順 4 と同じ扱い。`eval.rs` への最終手段フォールバックは層 2
+     〈§3.5.3〉限定であり、層 1 では使わない）。`run_fused` の
+     `Unsupported` フォールバック自体は記録済みの演算列から正しい値を
+     再計算するのみであり、`Err` を呼び出し元へ流入させない（「エラー
+     を `Option` へ流入させない」契約と矛盾しない。§4）。
+  4. `run_fused` が `Err(BackendError::Unsupported(_))` **以外**の
+     `Err`（起動失敗・メモリ割り当て失敗・転送失敗等、実行開始後に
+     判明する障害。`run_fused` をオーバーライドした `BackendOps`
+     〈`backend-cpu`／`backend-cuda`／`backend-metal` の融合実装〉が
+     返しうる）を返した場合、**per-op メソッドへのフォールバックも
+     試みず** `Err(BackendError)` をそのまま `AutodiffError::Backend
+     (BackendError)` へ変換して `materialize_fallible` の戻り値として
+     呼び出し元へ `?` で伝播する。すなわち **層 1（`materialize_
+     fallible` の内部）では、`Unsupported` 以外の `run_fused` の失敗は
+     フォールバックしない**（層 2〈§3.5.3〉との違い。層 2 はエラー
+     種別を問わず常にフォールバックする。§3.5.3 参照）。手順 3・手順 4
+     は互いに排他な `run_fused` の結果（`Ok`・`Unsupported`・
+     `Unsupported` 以外の `Err`）に対応しており矛盾しない。`ops: None`
+     （既定。§1）を使う演算（TASK-1.5〜1.8 の既存テスト資産が使う経路
+     を含む）は、実体化そのものが発生しないため常に成功する（元々
+     即時計算済みの値を読むだけである）。
   実体化が完了したら、**実体化を要求した対象ノード（手順 1 の起点。
-  fallible 演算自身の出力、または `Tape::backward` の VJP 計算が読み
-  出そうとした 1 ノード）自身の `OnceCell` にのみ**その場で `set()` する
-  （codex-review 第 12 波 P1-a 指摘を受け明記する: 連鎖の**途中**にある
-  `relu`／`exp`／`tanh` ノードの `OnceCell` は空のまま残る。ここで
-  中間ノードまで `set()` してしまうと、まさに §2.5「責務分界線」・
-  §3.4 で明記した「中間 `Tensor` 実体化の除去」というコア融合実行器の
-  利得そのものを打ち消してしまう。したがって同じ中間ノードを別の
-  `Var` から後で独立に読み出す場合は、その都度手順 1 の走査からやり
-  直し、コア融合実行器で連鎖を再評価する——結果はキャッシュされないが
-  数値は §3.5.7 のとおり非融合 eager 経路とビット単位で一致するため、
-  この非キャッシュは正しさに影響しない）。
+  `matmul`／`sum`／`max` 自身の入力、または `Tape::backward` の VJP
+  計算が読み出そうとした 1 ノード）自身の `OnceCell` にのみ**その場で
+  `set()` する（連鎖の**途中**にある `add`／`mul`／`relu`／`exp`／
+  `tanh` ノードの `OnceCell` は空のまま残る。ここで中間ノードまで
+  `set()` してしまうと、まさに §2.5「`autodiff` 側の役割」で明記した
+  「中間 `Tensor` 実体化の除去」という融合の利得そのものを打ち消して
+  しまう。したがって同じ中間ノードを別の `Var` から後で独立に読み出す
+  場合は、その都度手順 1 の走査からやり直し、遅延部分グラフを再評価
+  する——結果はキャッシュされないが数値は §3.5.7 のとおり非融合 eager
+  経路と一致するため、この非キャッシュは正しさに影響しない）。
   **`OnceCell::set` の `Err`（二重設定）は通常分岐として扱う
   （codex-review 第 12 波 P1-b 指摘への回答。旧稿は「既に空であることを
   直前に確認済みのため構造的に到達しない」として `Err` を
@@ -1345,11 +1258,11 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   テープを逆順に辿り各ノードの VJP（`grad.rs::vjp`。`Op` 単位のまま。
   §3.3）を計算する過程で、1 つの VJP 計算式が複数の elementwise 演算
   から成る場合（例: `tanh` の VJP `grad * (1 - y * y)` は `mul`・`sub`
-  の連鎖）も、上記と同じ `materialize_fallible`（`self.executor` を
-  借用し、`Executor::Core` ならコア融合実行器を直接使い、`Executor::
-  Backend(ops)` なら融合を試みて `Unsupported` のみコア融合実行器へ
-  フォールバックし、それ以外の失敗はフォールバックせず `?` で伝播する。
-  上記手順 2〜4）を用いる。
+  の連鎖）も、上記と同じ `materialize_fallible`（`self.ops` を借用し、
+  `Some(ops)` なら融合を試みて `Unsupported` のみ `ops` の per-op
+  メソッドへフォールバックし（それも失敗すれば `?` で伝播する）、
+  それ以外の失敗はフォールバックせず `?` で伝播する。`None` なら
+  実体化そのものが発生しない。上記手順 2〜4）を用いる。
 - **`Gradients::get` は非 fallible のまま**: `backward` は自身が返す
   `Gradients` に含まれるすべての勾配 `Tensor` を、`Ok(Gradients { .. })`
   を返す直前までに実体化し終える。したがって `Gradients::get` は
@@ -1385,43 +1298,50 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   （ノード粒度・走査順）には影響しない（#164 のスコープに明示的に
   含める）。
 
-### 3.5.3 層 2（非 fallible 境界）: `Var::value`／`Var::to_tensor` と CPU フォールバック
+### 3.5.3 層 2（非 fallible 境界）: `Var::value`／`Var::to_tensor` とフォールバック
 
 - **`value()` と `materialize_fallible`（§3.5.2）の役割分担**:
   `Var::value`／`Var::to_tensor` は本節が定める `materialize_non_fallible`
-  （`Executor::Backend` を使う場合の `run_fused` の失敗をコア融合実行器
-  へのフォールバックで必ず吸収し `panic!` も `Err` も返さない）だけを
-  呼び、§3.5.2 の `materialize_fallible`（`Executor::Backend` を使う
-  場合の `run_fused` の失敗のうち `Unsupported` 以外は型付きエラーの
-  まま伝播する）を呼ばない。逆に後続の fallible `Var` 演算・
-  `Tape::backward` は `materialize_fallible` のみを呼び `value()` を
-  呼ばない（§3.5.2）。両者は対象ノードの実体化という同じ責務を、
-  `Executor::Backend` 使用時の失敗時の扱い（型付き伝播／コア融合実行器
-  へのフォールバック）で排他に分担する。`Executor::Core` を使う場合は
-  両関数ともコア融合実行器を直接呼ぶだけであり、この使い分けはそもそも
-  発生しない（構造的に失敗しないため）。
+  （`ops: Some(ops)` を使う場合の `run_fused` の失敗を `ops` の per-op
+  メソッドへのフォールバック、さらにそれも失敗した場合は `eval.rs`
+  への最終手段フォールバックで必ず吸収し `panic!` も `Err` も返さない）
+  だけを呼び、§3.5.2 の `materialize_fallible`（`ops: Some(ops)` を
+  使う場合の `run_fused` の失敗のうち `Unsupported` 以外は型付きエラー
+  のまま伝播する）を呼ばない。逆に `matmul`／`sum`／`max`・`Tape::
+  backward` は `materialize_fallible` のみを呼び `value()` を呼ばない
+  （§3.5.2）。両者は対象ノードの実体化という同じ責務を、`ops:
+  Some(ops)` 使用時の失敗時の扱い（型付き伝播／段階的フォールバック）で
+  排他に
+  分担する。`ops: None` を使う場合は両関数とも実体化そのものが発生
+  しないため、この使い分けはそもそも生じない。
 - `Var::value`（`var.rs:74`。`-> Ref<'_, Tensor<f32>>`）・
   `Var::to_tensor`（`var.rs:81`。`-> Tensor<f32>`）は**シグネチャを
   一切変更しない**。対象ノードが未実体化であれば、§3.5.2 と同じ
-  手順 1・2 で実体化を試みるが、**`Executor::Backend(ops)` を保持して
-  おり `ops.run_fused` が `Ok` 以外を返した場合は `Err` を呼び出し元へ
-  伝播せず**（層 1〈§3.5.2〉と異なり、`BackendError::Unsupported` か
-  否かでエラー種別を区別しない。非 fallible な `value`／`to_tensor` は
-  失敗の種別に関わらず必ず正しい値を返す契約〈第 4〜5 波で確定した
-  契約 4・5〉のため、本改訂〈codex-review 第 8・11 波 P1〉でもこの
-  層 2 の挙動自体は変更しない）、記録済みの `relu`／`exp`／`tanh` の
-  連鎖をコア融合実行器（§3.4。構造的に失敗しない純 Rust 実行器）で
-  再計算し、必ず `Tensor<f32>` を返す**。`Executor::Core` を保持して
-  いる場合はこの再計算経路が唯一の実行経路である（フォールバックでは
-  なく通常経路）。`OnceCell::get_or_init`（`&self` で呼べる、
-  `FnOnce() -> T` の非 fallible なクロージャを取る）にこの「
-  （`Executor::Backend` なら）融合加速を試み、失敗したらコア融合実行器
-  で再計算する」処理全体を渡せばよく、`get_or_try_init`（unstable）
-  は使わない。この経路は構造的に失敗しない（§3.5.1 の shape 検証は
-  各演算の呼び出し時点で既に完了しており、コア融合実行器自身も
-  `-> Tensor<f32>`（非 fallible）である。§3.5.4 も参照）ため、
-  `Var::value`／`Var::to_tensor` は誤った値・欠落値を返すことも
-  `panic!` することもない。
+  手順 1・2 で `run_fused` による実体化を試みるが、**`ops: Some(ops)`
+  を保持しており `ops.run_fused` が `Ok` 以外を返した場合は `Err` を
+  呼び出し元へ伝播せず**（層 1〈§3.5.2〉と異なり、`BackendError::
+  Unsupported` か否かでエラー種別を区別しない。非 fallible な
+  `value`／`to_tensor` は失敗の種別に関わらず必ず正しい値を返す契約
+  〈契約 4・5〉のため層 2 の挙動自体はこの区別を持たない）、まず §3.5.2
+  手順 3 と同じ **`ops` 自身の既存 per-op メソッド**（`ops.add`／
+  `mul`／`relu`／`exp`／`tanh`）をトポロジカル順に逐次呼び出して
+  再計算を試みる（§2.5「`autodiff` 側の役割」）。**この per-op
+  フォールバックさえ失敗した場合（対応バックエンドが elementwise
+  未実装の場合等、エラー種別を問わない）に限り、`autodiff` 自身の
+  `eval.rs` の既存関数（トポロジカル順に逐次呼び出し。構造的に失敗
+  しない参照実装）を最終手段として用いて再計算し、必ず `Tensor<f32>`
+  を返す**（§2.5 で確定した層 2 限定の例外）。`ops: None` を保持して
+  いる場合はこの再計算経路自体に到達せず、既に実体化済みの値を読む
+  だけである。
+  `OnceCell::get_or_init`（`&self` で呼べる、`FnOnce() -> T` の非
+  fallible なクロージャを取る）にこの「（`ops: Some` なら）融合加速を
+  試み、失敗したら `ops` の per-op メソッドで再計算し、それも失敗
+  したら `eval.rs` を最終手段として再計算する」処理全体を渡せばよく、
+  `get_or_try_init`（unstable）は使わない。この経路は構造的に失敗しない
+  （§3.5.1 の shape 検証は各演算の呼び出し時点で既に完了しており、
+  `eval.rs` の各関数自身も `-> Tensor<f32>`（非 fallible）である。
+  §3.5.4 も参照）ため、`Var::value`／`Var::to_tensor` は誤った値・
+  欠落値を返すことも `panic!` することもない。
   ```rust
   // materialize ヘルパー（`tape.rs` 内 `pub(crate)`。イメージ）。
   // `nodes` は `self.tape.nodes.borrow()` で得た共有借用であり、
@@ -1429,14 +1349,15 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   // 同じ共有借用を再利用する（`borrow_mut()` を一切要求しない）。
   fn materialize_non_fallible<'a>(
       nodes: &'a Vec<TapeNode>,
-      executor: &Executor,
+      ops: Option<&dyn BackendOps>,
       id: NodeId,
   ) -> &'a Tensor<f32> {
       nodes[id.0].value.get_or_init(|| {
-          // `Executor::Core` ならコア融合実行器を直接呼ぶ。
-          // `Executor::Backend(ops)` なら手順 1・2（§3.5.2）で
-          // 融合加速を試み、失敗したらコア融合実行器で再計算する
-          // （§3.5.4）。
+          // `ops: Some(ops)` なら手順 1・2（§3.5.2）で融合加速を試み、
+          // 失敗したら `ops` の per-op メソッドで逐次再計算し、それも
+          // 失敗したら `eval.rs` を最終手段として再計算する（§3.5.4）。
+          // `ops: None` の場合はこのクロージャ自体が呼ばれない
+          // （`value` は `Tape::push` の時点で常に埋まっている）。
       })
   }
   ```
@@ -1468,25 +1389,34 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 
 ### 3.5.4 連鎖長上限（§3.2 (d)）との相互作用
 
-- `relu`／`exp`／`tanh` が `TapeNode` を push する直前に、自身が延長
-  しようとしている遅延連鎖の長さ（未実体化の連続する入力ノード数 + 1）
-  を数える。§3.2 (d) の上限（4〜6 段。具体的な段数は #164 実装時に
-  確定する）に達する場合、**その場で自分自身のノードを実体化してから
-  返す**（連鎖はここでリセットされ、次の演算から新しい連鎖として
-  数え直す）。`relu`／`exp`／`tanh` 自身は非 fallible なままである
-  ため、この実体化は §3.5.3 の非 fallible 境界（層 2）の手順（融合を
-  試み、失敗したら CPU フォールバック）を使う。
-- 一方、fallible な `Var` 演算・`Tape::backward` の VJP 連鎖内部
-  （層 1）が読み出しの過程で上限超過の連鎖に遭遇した場合は、§3.5.2 の
-  `materialize_fallible`（融合を試み、失敗は `?` で伝播）にそのまま
-  従う。
-- 上限が「到達させた演算が fallible か非 fallible かにより層 1／層 2
-  いずれかへ合流する」（§1・§3.2 (d)）とはこの意味である。
+- `ops: Some(ops)` の場合、`add`／`mul`／`relu`／`exp`／`tanh` が
+  `TapeNode` を push する直前に、自身が延長しようとしている遅延部分
+  グラフの長さ（未実体化の連続する入力ノード数 + 1）を数える。§3.2 (d)
+  の上限（4〜6 段。具体的な段数は #164 実装時に確定する）に達する
+  場合、**その場で自分自身のノードを実体化してから返す**（遅延部分
+  グラフはここでリセットされ、次の演算から新しく数え直す）。
+  - `relu`／`exp`／`tanh`（非 fallible）の実体化は §3.5.3 の非
+    fallible 境界（層 2）の手順（融合を試み、失敗したら段階的に
+    フォールバック）を使う。
+  - `add`／`mul` の実体化は §3.5.2 の fallible 境界（層 1）の手順
+    （融合を試み、`Unsupported` 以外の失敗は `?` で伝播）を使う。
+    **この場合の `Var::add`／`mul` は「shape 妥当性」に加えて
+    「バックエンド実行結果」も表すことになる**（§1「shape 検証と
+    実行を分離する」の例外——連鎖長上限到達という構造的な理由により
+    実行が即時化されるため。§3.5.1 参照）。
+- 一方、`matmul`／`sum`／`max`・`Tape::backward` の VJP 連鎖内部
+  （層 1）が読み出しの過程で上限超過の遅延部分グラフに遭遇した場合は、
+  §3.5.2 の `materialize_fallible`（融合を試み、失敗は `?` で伝播）に
+  そのまま従う。
+- 上限が「到達させた演算が `matmul`／`sum`／`max`（fallible）か
+  `add`／`mul`／`relu`／`exp`／`tanh`（非 fallible。ただし `add`／
+  `mul` は自身の実体化時のみ層 1 の失敗伝播規約も併せ持つ）かにより
+  層 1／層 2 いずれかへ合流する」（§1・§3.2 (d)）とはこの意味である。
 
 ### 3.5.5 窓 (b): 将来の複合エントリポイント
 
 - 現状の `Var` 演算 API は 1 呼び出し 1 演算の粒度であるが、§3.5.1〜
-  3.5.4 の設計により `relu`／`exp`／`tanh` の連鎖に限れば複数回の
+  3.5.4 の設計により elementwise 5 演算の遅延グラフに限れば複数回の
   呼び出しをまたいで融合が働く。将来、複数の演算を 1 回の `Result`
   で返す複合エントリポイント（`compat::Sequential::forward` 相当。
   `docs/public-api-design.md` に設計段階として記載。または将来の
@@ -1505,65 +1435,61 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 - §3.5.1〜3.5.4 の内部実装が構築する融合グラフ（`FusionPlan`）の
   内部では、transpose を挟む部分列は §1・§2.3 のとおり非融合
   フォールバックへ倒す（`NodeMeta.contiguous == false` が §3.2 (e)
-  の実体化条件に対応する）。`relu`／`exp`／`tanh` の遅延連鎖は
-  shape 不変の単項演算のみで構成されるため、この境界条件が実際に
-  作用するのは #163／#164 が transpose を伴う演算を融合対象へ拡張
-  する場合に限られる（現状スコープでは transpose 系操作は遅延連鎖に
-  含まれない）。
+  の実体化条件に対応する）。elementwise 5 演算はいずれも shape 不変
+  または広義の broadcast shape のみで完結し、transpose を含まないため、
+  この境界条件が実際に作用するのは #163／#164 が transpose を伴う演算
+  を融合対象へ拡張する場合に限られる（現状スコープでは transpose 系
+  操作は遅延部分グラフに含まれない）。
 
-### 3.5.7 コア融合実行器フォールバックの数値面の注意
+### 3.5.7 フォールバック（`ops: Some(ops)` の融合失敗時）の数値面の注意
 
-- §3.5.3 のコア融合実行器へのフォールバックが選ばれた場合（`Executor::
-  Backend(ops)` を使用しており `ops.run_fused` が失敗した場合）、
-  その区間の結果は `run_fused` が成功していた場合と数値的に完全一致
-  しない可能性がある。**差の発生源（codex-review 第 11 波 P1 指摘を
-  受け訂正する）**: コア融合実行器が評価するのは `relu`／`exp`／
-  `tanh` の単項連鎖のみであり乗算加算（積和）を行わないため、この
-  区間には FMA 契約の違いは生じない。差は超越関数（`exp`／`tanh`）の
-  具体実装の違い（コア融合実行器の `f32::exp`／`f32::tanh` と、GPU
-  側カーネルの組み込み超越関数命令）に由来する。一方、FMA 契約統一
-  （`f32::mul_add` を用いる。`.claude/rules/coding-rust.md`「バック
-  エンド構成（REQ-2）」）は `gemm` 等の積和を伴う演算に引き続き適用
-  される契約であり、これは `Executor::Backend` 側（バックエンド加速・
-  #163 の融合カーネル）の関心事である。いずれの発生源であっても、この
-  差は**バックエンド間数値一致で既に許容されている複合判定「相対誤差
-  1e-3 未満 または絶対誤差 1e-5 未満」（§4）と同じ性質の差であり、
-  フォールバックはこの判定の対象外側へ逸脱しない**。融合の有無・
-  フォールバックの発生有無によってテスト許容誤差を緩和する実装は
-  認めない（§4・§5 A08 の既存方針をそのまま適用する）。
-  **非融合 eager 経路との一致は差ではなく保証になる（codex-review
-  第 12 波 P1-a 指摘を受け追記する）**: コア融合実行器は §2.5・§3.4 の
-  とおり `eval.rs` の既存プリミティブ（`nan_propagating_max`・
-  `f32::exp`・`f32::tanh`）を関数レベルでそのまま再利用するため、
-  `Executor::Core` 経路で計算された融合結果は、同じ演算列を非融合
-  eager 経路（`eval::relu`／`exp`／`tanh` を 1 演算ずつ呼ぶ経路）で
-  計算した結果とビット単位で一致する。上記の差分（許容誤差の対象）が
-  生じるのはあくまで `Executor::Backend` の GPU 組み込み超越関数実装
-  との比較のみであり、コア融合実行器自体が新たな数値差の発生源に
-  なることはない。
-- **run-to-run 非決定性としての扱い（codex-review 第 11 波 P1 指摘を
-  受け本節を訂正する）**: 本改訂（§1・§3.4）により `Tape::new()` の
-  既定 `Executor::Core` は常にコア融合実行器で融合する——第 10 波
-  までの記述（`Tape::new()` は `run_fused` を持たないため常に CPU
-  フォールバックが発生し、その意味で決定的である）はもはや成立しない
-  （既定経路自体が融合された結果を返すため）。したがって `Tape::new()`
-  の既定経路は「融合されるか否か」という観点では決定的である（演算列
-  が §3.2 の判定を満たす限り常に融合される）。一方、`Executor::
-  Backend(ops)` を使う場合の `run_fused` の成否（デバイス障害・一時的
-  なリソース枯渇等）は決定的シード設定（学習系回帰テストの基本方針。
-  `.claude/rules/coding-rust.md`「テスト・ベンチ」）で制御できない
-  新しい非決定性の発生源になりうる。学習系回帰テストが「加速
-  バックエンドの融合成功／コア融合実行器へのフォールバック」いずれで
-  実行されたかに依存しない結果を要求する場合は、テスト側で使用する
-  `BackendOps` 実装を **`Tape::with_backend` に決定的なテスト用実装を
-  渡すことで固定する**必要がある。§6.1 #165 (i) のように**実際に
-  `run_fused` が呼ばれバックエンド加速が発生する経路自体を観測・検証
-  したいテスト**は、`run_fused` を融合実装（またはカウンタ付きテスト
-  用実装）でオーバーライドした `BackendOps` を `Tape::with_backend` で
-  明示供給する必要がある（`Executor::Core` は `BackendOps` を実装
-  しないため `run_fused` 呼び出し自体が発生せず、バックエンド加速の
-  発生を観測する目的では使えない）ことで、加速の発生有無自体を固定
-  する必要がある（§6.2 に記録する）。
+- §3.5.2・§3.5.3 のフォールバックには 2 段階ある: 主たるフォールバック
+  は**同じ `ops` の per-op メソッド**（`ops.add`／`mul`／`relu`／
+  `exp`／`tanh`）への逐次呼び出しであり、`eval.rs` は層 2（非
+  fallible 境界）に限りそれも失敗した場合の**最終手段**として使う
+  （§2.5「`autodiff` 側の役割」）。それぞれ数値面の性質が異なる。
+  - **per-op メソッドへのフォールバック**（層 1・層 2 共通の主経路）:
+    `run_fused` が成功していた場合と数値的に完全一致しない可能性が
+    ある。**差の発生源**: `run_fused`（融合カーネル。#163）は乗算・
+    加算の連鎖を 1 カーネル内で FMA 契約（`f32::mul_add`。
+    `.claude/rules/coding-rust.md`「バックエンド構成（REQ-2）」）や
+    SIMD／rayon 並列化を用いて評価しうるのに対し、per-op メソッドは
+    同じ `ops` 実装の非融合カーネルを 1 段ずつ逐次呼ぶため、中間結果の
+    丸め・命令選択が異なりうる。超越関数（`exp`／`tanh`）についても
+    同様に、融合カーネルとバックエンド既存の非融合カーネルとで具体
+    実装が異なりうる。この差は**バックエンド間数値一致で既に許容
+    されている複合判定「相対誤差 1e-3 未満 または絶対誤差 1e-5 未満」
+    （§4）と同じ性質の差であり、フォールバックはこの判定の対象外側へ
+    逸脱しない**。融合の有無・フォールバックの発生有無によってテスト
+    許容誤差を緩和する実装は認めない（§4・§5 A08 の既存方針をそのまま
+    適用する）。
+  - **`eval.rs` への最終手段フォールバック**（層 2 限定）: `eval.rs`
+    の逐次実行は `ops: None`（eager 経路。既定）が同じ演算列に対して
+    呼ぶのと同一の関数（`eval::add`／`mul`／`relu`／`exp`／`tanh`）を
+    同じ順序で呼ぶため、`ops: None` で同じ演算列を計算した結果と
+    ビット単位で一致する。この一致は `eval.rs` 最終手段の経路にのみ
+    成り立つ保証であり、`run_fused` 成功時や per-op メソッドへの
+    フォールバック（融合カーネル・バックエンド固有の非融合カーネルの
+    実装。SIMD／rayon 並列化や FMA 契約を含みうる）との比較には
+    及ばない（上記のとおり複合判定〈§4〉の対象として扱う）。
+- **run-to-run 非決定性としての扱い**: `ops: None`（既定。`Tape::
+  new()`）は常に eager 実行のみであり、融合・非融合の区別自体が
+  存在しない（決定的）。一方、`ops: Some(ops)` を使う場合の
+  `run_fused` の成否（デバイス障害・一時的なリソース枯渇等）は決定的
+  シード設定（学習系回帰テストの基本方針。`.claude/rules/coding-rust.md`
+  「テスト・ベンチ」）で制御できない新しい非決定性の発生源になりうる。
+  学習系回帰テストが「バックエンド融合成功／`eval.rs` へのフォール
+  バック」いずれで実行されたかに依存しない結果を要求する場合は、
+  テスト側で使用する `BackendOps` 実装を **`Tape::with_backend` に
+  決定的なテスト用実装を渡すことで固定する**必要がある。§6.1 #165 (i)
+  のように**実際に `run_fused` が呼ばれバックエンド加速が発生する
+  経路自体を観測・検証したいテスト**は、`run_fused` を融合実装
+  （またはカウンタ付きテスト用実装）でオーバーライドした `BackendOps`
+  を `Tape::with_backend` で
+  明示供給する必要がある（`ops: None`〈`Tape::new()`〉では
+  `run_fused` 呼び出し自体が発生せず、バックエンド加速の発生を観測
+  する目的では使えない）ことで、加速の発生有無自体を固定する必要が
+  ある（§6.2 に記録する）。
 
 ## 4. バックエンド・規約との契約
 
@@ -1578,32 +1504,40 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   融合による最適化（ベクトル化ロード・タイル端の分岐削減等）を適用する
   場合も、手動境界チェックを維持したうえで行う。CPU（intrinsics）・
   CUDA（NVRTC/mma）・Metal（simdgroup）いずれの融合カーネルにも適用する。
-- **`BackendError::Unsupported` の fail-safe 契約（codex-review 第 8・11
-  波 P1 指摘への回答。§3.5.2・§3.5.3 の全節で一貫させる）**: `Executor::
-  Backend(ops)` を使用しており、`ops` の未実装カーネル・非対応バック
+- **`BackendError::Unsupported` の fail-safe 契約（codex-review 第 8・
+  13 波 P1 指摘への回答。§3.5.2・§3.5.3 の全節で一貫させる）**: `ops:
+  Some(ops)` を使用しており、`ops` の未実装カーネル・非対応バック
   エンド（実行開始前に判明する能力不足）が `BackendError::Unsupported`
-  （`crates/tensor-core/src/device.rs:218`）を返した場合は、コア融合
-  実行器（§3.4）へのフォールバックによる fail-safe とする既存方針を
-  踏襲する（`backend_ops.rs` の elementwise・reduction 未実装カーネルに
-  対する既存の fail-safe 設計と同型）。**このフォールバックは融合を
-  取り下げるものではない**（コア融合実行器も融合を行うため。第 10 波
-  までの「非融合経路である CPU eager 逐次実行へのフォールバック」という
-  記述は撤回する）。**このフォールバックは層 1（fallible 境界。§3.5.2
-  手順 3）・層 2（非 fallible 境界。§3.5.3）の両方に一貫して適用する**:
-  `run_fused` のデフォルト実装（§3.4）が返す `Unsupported` は、呼び出し
-  元が fallible な `Var` 演算であっても非 fallible な `value`／
-  `to_tensor` であっても同じコア融合実行器フォールバックへ倒れる。
-  一方、実行開始後に判明する障害（起動失敗・メモリ割り当て失敗・転送
-  失敗等、`Unsupported` 以外の `Err`）は層 1 では `AutodiffError::
-  Backend` として型付き伝播し（§3.5.2 手順 4）、層 2 では引き続きコア
-  融合実行器へのフォールバックで吸収する（§3.5.3。非 fallible API は
-  失敗の種別を問わず必ず正しい値を返す契約のため）。このフォール
-  バックは記録済みの演算列をコア融合実行器で正しく再計算するだけで
-  あり、`Err`／`None` を `Option` へ流入させることはない（第 3 波契約
-  「エラーを `Option` へ流入させない」と矛盾しない）。`Executor::Core`
-  を使用する既定経路では `run_fused` 自体が呼ばれないため、この
-  `Unsupported` フォールバックは発生しない（コア融合実行器が唯一の
-  実行経路である）。
+  （`crates/tensor-core/src/device.rs:218`）を返した場合は、**同じ
+  `ops` の既存 per-op メソッド**（`add`／`mul`／`relu`／`exp`／
+  `tanh`）への逐次フォールバックによる fail-safe とする既存方針を
+  踏襲する（`backend_ops.rs` の elementwise・reduction 未実装カーネル
+  に対する既存の fail-safe 設計と同型）。**このフォールバックは融合を
+  取り下げるが、実際の計算は依然として注入された `BackendOps`（`ops`）
+  経由のままである**（§2.5「`autodiff` 側の役割」。第 11〜12 波は
+  `crates/autodiff` 内の「コア融合実行器」がフォールバック先だったが
+  その実行器は撤回済みであり、本改訂のフォールバック先は `ops` 自身の
+  非融合カーネルである。融合カーネル自体のバグ検出という §6.1 #165 の
+  検証意図は変わらない）。**このフォールバックは層 1（fallible 境界。
+  §3.5.2 手順 3）・層 2（非 fallible 境界。§3.5.3）の両方に一貫して
+  適用する**: `run_fused` のデフォルト実装（§3.4）が返す `Unsupported`
+  は、呼び出し元が `matmul`／`sum`／`max` であっても非 fallible な
+  `value`／`to_tensor` であっても同じ per-op メソッドへのフォール
+  バックへ倒れる。一方、実行開始後に判明する障害（起動失敗・メモリ
+  割り当て失敗・転送失敗等、`Unsupported` 以外の `Err`）は層 1 では
+  `AutodiffError::Backend` として型付き伝播し（§3.5.2 手順 4）、層 2
+  では引き続き per-op メソッドへのフォールバックで吸収する（§3.5.3。
+  非 fallible API は失敗の種別を問わず必ず正しい値を返す契約のため）。
+  **層 2 に限り、per-op メソッドへのフォールバックも失敗した場合
+  （対応バックエンドが elementwise 未実装の場合等）、`autodiff` 自身の
+  `eval.rs` を最終手段として用いる**（§2.5・§3.5.3。層 1 にはこの
+  最終手段がなく、`AutodiffError::Backend` として `?` で伝播する）。
+  これらのフォールバックは記録済みの演算列を正しく再計算するだけで
+  あり、`Err`／`None` を `Option` へ流入させることはない（「エラーを
+  `Option` へ流入させない」契約と矛盾しない）。`ops: None` を使用する
+  既定経路では `run_fused` 自体が呼ばれないため、この `Unsupported`
+  フォールバック
+  は発生しない（実体化そのものが発生しないため）。
 - グラフ構築 API はテンソル shape／stride の検証を先行させる。既存の
   `ShapeError`（`crates/tensor-core/src/error.rs:19`）経路をそのまま
   再利用し、融合グラフ構築時に独自の検証経路を新設しない（§5 参照）。
@@ -1627,85 +1561,74 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
 |---|---|
 | #162（連鎖検出） | §2（グラフ表現・ノード種別・メタデータ・fan-out）を用いた融合可能連鎖（elementwise のみで閉じた 4〜6 段の連結成分）の検出アルゴリズム |
 | #163（融合カーネル生成） | §2.4 の fan-out レジスタ内解決方針、§3.4 で確定した `FusionPlan::ops`（`FusedOpKind` 列挙）／`output_shape`／`dtype`／`leaf_count`／`use_count` の公開 DTO アクセサを読んだカーネルソース生成、§4・§5 の境界検査・数値一致・インジェクション対策 |
-| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針・「既定実行から『バックエンド』『デバイス選択』という概念そのものを除去する」契約・「演算跨ぎの遅延を復活し、実体化を 3 層の境界で規定する」契約（codex-review 第 6・11 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Send + Sync` 不要。`Executor::Backend` 経路専用）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`。同じく `Executor::Backend` 経路専用）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `executor: Executor`（`enum Executor { Core, Backend(Box<dyn BackendOps>) }`。codex-review 第 10・11 波 P1 指摘への回答）と新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps>)` の追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。**コア融合実行器（`crates/autodiff` 内の新規モジュール。§3.4「コア融合実行器」）の実装と、`Tape::new()` がこれを既定実行器として構築する production 結線の実装**（codex-review 第 10・11 波 P1 指摘への回答。第 10 波が確定した `tensor_core::reference_cpu_ops()`〈`tensor-core` に `BackendOps` 実装を配置し `Device::Cpu` を返す設計〉は、CPU 演算実装の配置がクレート責務境界〈`backend-cpu` の責務〉と衝突する点、および `Tape::new()` が構造的に `Device::Cpu` という既定デバイスを選択してしまい `docs/public-api-design.md` §4.1 の既定デバイス選択ロジック不採用方針と交差する点を理由に、本改訂で撤回・置き換え済み）: コア融合実行器は `crates/autodiff` 内で完結し（`BackendOps` を実装せず `Device` を持たない）、外部クレート・結線層を必要とせず `Tape::new()` を構造的に必ず成功させる。`tensor-core` の `backend_ops.rs`（`ops_for` を含む）は変更しない。`autodiff` は引き続き `tensor-core` のみに依存し、`autodiff → backend-cpu` の workspace path 依存は追加しない。**本イシューの完了条件は「`Tape::new()` がコア融合実行器（`Executor::Core`）へ構造的に必ず解決すること」を含む**（`backend-cpu` 最適化実装への差し替え登録機構は §6.2「backend-cpu の最適化実装への差し替え」に将来拡張として残す）。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`relu`／`exp`／`tanh` が遅延連鎖を延長し `add`／`mul`／`matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装。§3.5.2（層 1・fallible 境界。入力読み出しは `Var::value()` を呼ばず専用の `materialize_fallible`〈`pub(crate)`。`Executor::Core` はコア融合実行器を直接使い構造的に失敗しない。`Executor::Backend` は `run_fused` の失敗のうち `BackendError::Unsupported` のみコア融合実行器へフォールバックし、それ以外は型付き `AutodiffError::Backend` のまま `?` で伝播する。codex-review 第 8・11 波 P1 指摘への回答〉のみを経由する）・§3.5.3（層 2・非 fallible 境界。`materialize_non_fallible` を経由し、`Executor::Core` はコア融合実行器を直接使い、`Executor::Backend` の融合失敗はエラー種別を問わずコア融合実行器への逐次フォールバックで必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`（unstable）は使わない）・§3.5.4（連鎖長上限との相互作用）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。既存の `eval::dense_vec`・`eval::relu`／`exp`／`tanh`（`Op` 単位の CPU 参照実装。呼び出しシグネチャ）は非 fallible のまま変更しない。コア融合実行器（`fusion_exec.rs`）は別モジュールとして新設するが、要素ごとのスカラー計算は複製せず、`eval.rs` 内部の共有プリミティブ（`unary`〈`eval.rs:185`〉・`nan_propagating_max`〈`eval.rs:200`〉。現状モジュール非公開）を `pub(crate)` へ可視性のみ変更したうえでクロージャ合成により再利用する（§2.5「責務分界線」・§3.4「コア融合実行器」の「`eval.rs` との関係」参照。codex-review 第 12 波 P1-a 指摘への回答）。§3.5.2 の `materialize_fallible` における `OnceCell::set` の `Err`（二重設定）は `panic!`／`unreachable!()` を使わず通常分岐として扱い、`get()` で読み直した既存値を採用する（`None` 到達時は `AutodiffError::Backward` へ安全側フォールする。codex-review 第 12 波 P1-b 指摘への回答） |
-| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「既定実行から『バックエンド』『デバイス選択』という概念そのものを除去する」契約の検証**（同一演算列を `Tape::new()`〈`Executor::Core`〉と `Tape::with_backend(ops)`〈`Executor::Backend`。`run_fused` を融合実装でオーバーライドしたカウンタ付きテスト実装を渡す〉の双方で実行し、(a) いずれも融合された結果を返すこと〈演算列が §3.2 の判定を満たす限り、どちらの `Executor` でも融合が発生する〉、(b) 両者の数値結果が数値一致複合判定〈§4〉を満たすこと、(c) コア融合実行器とバックエンド加速の数値差はいずれも §4 の複合判定の範囲内に収まること、を検証する。`Executor::Backend` 側はカウンタにより `run_fused` が実際に呼ばれたことも確認する）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6・8・11 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `relu`／`exp`／`tanh` の連鎖（例: `x.add(&y)?.relu().exp().tanh().relu()`。4 段）が単一の評価呼び出しへ融合されること（`Executor::Core` ではコア融合実行器の呼び出し回数を、`Tape::with_backend` へ渡したカウンタ付き `BackendOps` テスト実装では `run_fused` の呼び出し回数を、それぞれ 1 回だけ・`add` 単体では呼ばれないことを確認する。両経路とも「コア融合実行器と eager 参照経路〈`eval::relu`／`exp`／`tanh` を 1 段ずつ呼ぶ経路〉が同一入力に対し数値一致複合判定〈§4〉を満たす値を返すこと」も検証する）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗の種別ごとの分岐: (ii-a) `Executor::Backend` で `run_fused` が `BackendError::Unsupported` を返した場合はコア融合実行器へフォールバックし、後続の fallible `Var` 演算が `Ok` を返すこと（値は数値一致複合判定〈§4〉を満たす）、(ii-b) `run_fused` が `Unsupported` 以外の `Err` を返した場合は、それを引き起こした後続の fallible `Var` 演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時（エラー種別を問わない）、`Var::value`／`Var::to_tensor` が `panic!` せず、コア融合実行器へのフォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、`Executor::Backend` で `Unsupported` 以外の失敗では `Tape::backward` が `AutodiffError::Backend` を返すこと、`Unsupported` の場合はコア融合実行器へのフォールバックにより成功すること、`Executor::Core` では常に成功すること、成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも連鎖がその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out が単一の融合グラフ構築で正しく解決されることの検証 |
+| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針・「compat 層が REQ-12 の『利用者』面を担う」整理・「二項 elementwise 演算の遅延化」契約（codex-review 第 6・13 波 P1 指摘への回答）に基づく融合対応経路の実装。§3.4 で確定した `FusionValue`／`FusionSession`（借用ベース・`Arc`／`Mutex`／`Send + Sync` 不要）・`FusionPlan::from_ops`（`autodiff` 専用のクレート間構築経路。`pub` + `#[doc(hidden)]`）／`BackendOps::run_fused`（デフォルト実装付きで trait 定義へ追加。既存メソッドの契約は変更しない）接続契約、`Tape` の非公開フィールド `ops: Option<Box<dyn BackendOps>>`（第 10・13 波 P1 指摘への回答。`Executor` enum は撤回済み）と新規公開コンストラクタ `Tape::with_backend(ops: Box<dyn BackendOps>)` の追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）。**CPU 融合実行（fail-safe な参照実装を含む）は `backend-cpu` 側の `BackendOps` 実装（`run_fused` オーバーライド）として提供し、`crates/autodiff` 内に新規カーネル実装を持たない**（codex-review 第 13 波 P1-b 指摘への回答。第 11〜12 波の「コア融合実行器」〈`fusion_exec.rs`／`run_core_fused`／`UnaryFusedOp`〉・`eval.rs` の `unary`／`nan_propagating_max` の可視性変更はいずれも撤回する。`eval.rs` は非公開のまま変更しない）。`tensor-core` の `backend_ops.rs`（`ops_for` を含む）は変更しない。`autodiff` は引き続き `tensor-core` のみに依存し、`autodiff → backend-cpu` の workspace path 依存は追加しない。**compat 層（REQ-9。実装クレートは別途決定）が `Tape` 構築時に `backend-cpu` の `BackendOps` を注入し `Tape::with_backend` を使う結線の実装**（`docs/public-api-design.md` §4.1 の改訂と対を成す。§3.4「compat 層への既定注入」参照）。§3.5.1 で確定した `TapeNode`（`shape: Vec<usize>` ＋ `value: OnceCell<Tensor<f32>>`）への拡張と、`ops: Some(ops)` の場合に `add`／`mul`／`relu`／`exp`／`tanh` が遅延グラフを延長し `matmul`／`sum`／`max` が返る前に自身の出力を実体化する切り分けの実装（`ops: None` は現行実装のまま変更しない）。§3.5.2（層 1・fallible 境界。入力読み出しは `Var::value()` を呼ばず専用の `materialize_fallible`〈`pub(crate)`。`ops: Some(ops)` は `run_fused` の失敗のうち `BackendError::Unsupported` のみ `ops` の per-op メソッドへフォールバックし〈それも失敗すれば型付き `AutodiffError::Backend` のまま `?` で伝播する〉、`Unsupported` 以外は最初から per-op メソッドへのフォールバックを試みず型付き `AutodiffError::Backend` のまま `?` で伝播する〉のみを経由する）・§3.5.3（層 2・非 fallible 境界。`materialize_non_fallible` を経由し、`ops: Some(ops)` の融合失敗はエラー種別を問わず `ops` の per-op メソッドへの逐次フォールバックで、それも失敗した場合は `eval.rs` を最終手段として、必ず成功させる。`OnceCell::get_or_init` を使い `get_or_try_init`〈unstable〉は使わない）・§3.5.4（連鎖長上限との相互作用。`add`／`mul` が上限到達時に自身を実体化する場合は層 1 の失敗伝播規約も併せ持つ）の実装。`AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む）。§3.5.2 の `materialize_fallible` における `OnceCell::set` の `Err`（二重設定。fan-out に伴う二重到達）は `panic!`／`unreachable!()` を使わず通常分岐として扱い、`get()` で読み直した既存値を採用する（`None` 到達時は `AutodiffError::Backward` へ安全側フォールする） |
+| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、**§1「`None`／`Some` の非対称性」・compat 層への既定注入の検証**（`Tape::new()`〈`ops: None`〉が常に eager・非融合のまま動作すること、`Tape::with_backend(ops)`〈`ops: Some(ops)`。`run_fused` を融合実装でオーバーライドしたカウンタ付きテスト実装を渡す〉では演算列が §3.2 の判定を満たす限り融合された結果を返すこと、両者の数値結果が数値一致複合判定〈§4〉を満たすこと、`run_fused` が実際に呼ばれたことをカウンタで確認すること、compat 層経由で構築した `Tape` が利用者の明示指定なしに融合されること〈compat 層のテストとして〉を検証する）、**§3.5「演算跨ぎの遅延と 3 層の実体化境界」の検証**（codex-review 第 6・8・13 波 P1 指摘への回答）: (i) 独立した公開 `Var` 呼び出しをまたぐ `add`／`mul`／`relu`／`exp`／`tanh` の混在連鎖（例: `x.add(&y)?.relu().mul(&z)?.exp().tanh()`。二項・単項混在の 4〜6 段）が単一の評価呼び出しへ融合されること（`run_fused` の呼び出し回数が 1 回だけであることを確認する。`run_fused` が `Unsupported` を返す設定では `ops` の per-op メソッドへのフォールバック結果が非融合 eager 経路〈`ops: None`〉と同一入力に対し数値一致複合判定〈§4〉を満たす値を返すことも検証する）、(i') **shape エラーが記録時に当該演算の `Err` として即時返ること（実行は遅延済みのまま）**: 不正な shape の `add`／`mul` 呼び出しがその場で `Err(AutodiffError::Shape(_))` を返し、テープにノードが記録されないこと（§1「shape 検証と実行を分離する」の検証）、(ii) 層 1（fallible 境界。§3.5.2）での融合失敗の種別ごとの分岐: (ii-a) `run_fused` が `BackendError::Unsupported` を返した場合は `ops` の per-op メソッドへフォールバックし、後続の `matmul`／`sum`／`max` が `Ok` を返すこと（値は数値一致複合判定〈§4〉を満たす）、(ii-b) `run_fused` が `Unsupported` 以外の `Err` を返した場合は、それを引き起こした後続の演算自身の `Err(AutodiffError::Backend)` として直接返ること（キャッシュ経由の遅延表面化が発生しないこと）、(iii) 層 2（非 fallible 境界。§3.5.3）での融合失敗時（エラー種別を問わない）、`Var::value`／`Var::to_tensor` が `panic!` せず、`ops` の per-op メソッド（それも失敗する設定では `eval.rs` の最終手段）へのフォールバックで計算した値と融合が成功していた場合の値が数値一致複合判定〈§4〉を満たすこと（フォールバックは値の正しさを保証するのみで #163 の融合カーネル自体のバグを隠さないことの検証。フォールバック発生をテスト用カウンタで観測できることも確認する）、(iv) `x.value()` で得た `Ref` を保持したまま別の未実体化 `Var` の `value()`／`to_tensor()` を呼んでも panic しないこと（§3.5.3「`value()` が `Ref` を保持している最中…」の検証）、(v) `Tape::backward` の VJP 連鎖内部で融合が発生する場合（§3.5.2）に、`Unsupported` 以外の失敗では `Tape::backward` が `AutodiffError::Backend` を返すこと、`Unsupported` の場合は `ops` の per-op メソッドへのフォールバックにより成功すること、`ops: None` では常に成功すること、成功時は `Gradients::get` がそのまま非 fallible に値を返せること、(vi) §3.5.4 の連鎖長上限に到達した場合に fallible／非 fallible いずれの経路でも遅延グラフがその場でリセットされ、後続の演算が正しい実体化済み値を入力として使えること、(vii) §2.4 の fan-out・fan-in（`(a+b)*(c+d)` 形の合流。§3.5.1「走査順」の DAG 一般化）が単一の融合グラフ構築で正しく解決されることの検証 |
 | #203（GEMM epilogue 融合） | §3.2 (b) の `gemm` 境界を bias／activation epilogue まで拡張する設計変更 |
 
 ### 6.2 未決事項（スコープ外）
 
 - **`Tape::new()` が使う既定実行器・加速バックエンドの供給規則
-  （codex-review 第 8・10・11 波 P1 指摘への回答。本改訂で問い自体を
-  再定義する）**: 第 10 波までは本エントリを「`Tape::new()` が使う
-  既定バックエンド解決の具体的な規則（CPU 分は確定・GPU 分は未決）」
-  として記録し、2026-08-08 のユーザー承認（`Tape::new()` の既定解決先
-  を `Device::Cpu` 固定の `tensor_core::reference_cpu_ops()` とする
-  第 10 波案の確定）を経ていた。本改訂（§1・§3.4。codex-review 第 11
-  波 P1 指摘）はその第 10 波案自体を、CPU 演算実装の配置がクレート
-  責務境界と衝突する点・`docs/public-api-design.md` §4.1 の既定
-  デバイス選択ロジック不採用方針と交差する点を理由に撤回した。**この
-  撤回により、2026-08-08 の承認（`Device::Cpu` 確定）が対象としていた
-  設計そのものが本改訂で置き換わったため、当該承認は結果的に行使
-  不要になった**（承認自体が誤りだったのではなく、承認対象の設計を
-  後続レビューで根本的に作り直した結果、その承認を必要とする分岐が
-  文書から消えたという経緯として履歴に残す。`docs/public-api-design.md`
-  は「既定実行がそもそもデバイスを選択しない」設計へ変わったことで
-  同文書の §4.1 と交差しなくなったため、**改訂不要**である）。
-
-  本改訂後の `Tape::new()` は `Executor::Core`（§1・§3.4「コア融合
-  実行器」）へ**構造的に必ず**解決する——`Executor::Core` は
-  `BackendOps` を実装せず `Device` も持たないため、この解決は「デバイス
-  `Cpu` を選ぶ」ことと同義ではない（デバイス選択という操作自体が
-  発生しない）。**CUDA／Metal をバックエンド加速として既定で使う規則は
-  本文書では確定しない**（本エントリとして未決事項に残す。ただし
-  問いの形は変わっている——「`Tape::new()` の既定デバイスをどう選ぶか」
-  ではなく「production が `Tape::with_backend` へどのバックエンドを
-  供給するか」という、既定実行の外側の問いへ縮小した）。理由は
-  引き続き 2 点: (i) `docs/public-api-design.md` §4.1「既定デバイス
-  選択ロジックは…実装しない（列挙と明示選択のみを提供する。ユーザー
-  承認が必要な事項のため自動運転では安全側に倒した）」という本リポ
-  全体の確立済み方針、(ii) REQ-2 が「CUDA 既定有効化の構成決定」を
-  未検証のまま残している（`docs/spec/04-requirements.md` REQ-2 受け
-  入れ基準）ため、GPU 加速の既定供給規則の確定には REQ-2 の 27 組
-  再検証後の別途ユーザー承認が必要。加速バックエンドの既定供給規則の
-  確定は #164 以降、ユーザー承認を得たうえで別途検討する。
-- **`backend-cpu` の最適化実装への差し替え（codex-review 第 9 波 P1
-  指摘への回答。第 10 波で縮小・第 11 波で実装場所を訂正して確定する）**:
-  第 9 波は「CPU 候補を `ops_for` へ注入する結線機構・担当層」を未決
-  事項として記録していたが、`Tape::new()` の既定実行器が `crates/
-  autodiff` 内で完結するコア融合実行器（§3.4）へ構造的に固定される
-  ため、**既定パスについては結線層が不要になった**（このエントリの
-  主題は解消済み。第 10 波は撤回した `tensor_core::reference_cpu_ops()`
-  を「参照実装」として位置付けていたが、その実装場所は `tensor-core`
-  ではなく `crates/autodiff` 内のコア融合実行器へ変わった）。一方、
-  コア融合実行器は純 Rust ループのみで rayon 並列・BLIS 風ブロッキング
-  等の最適化を持たないため、性能が必要な経路では `backend-cpu::ops::
-  CpuBackendOps`（`ops.rs:42`）等の最適化実装へ差し替える手段が引き
-  続き有用である。差し替え手段のうち `Tape::with_backend(ops)` による
-  明示供給は本改訂（§1・§3.4）で確定済みだが、**「production 側の
-  組み立て層が既定で最適化実装を選ぶための登録機構」（例: レジストリ
-  関数の新設・cfg ベースの静的差し替え等）の担当層・具体的な機構は
-  本文書では確定しない**（将来拡張として #164 以降のスコープに残す。
-  `crates/autodiff` は `tensor-core` のみへの依存を維持したまま
-  `backend-cpu` を直接参照しないため、いずれの機構を採るにせよ
-  `autodiff → backend-cpu` の workspace path 依存は追加しない契約
-  〈codex-review 第 9 波 P1 指摘が確定した契約。§3.4「`tensor-core`・
-  `backend-cpu` への依存は生じない」〉を崩さないこと）。
-- **（第 6 波で撤回）独立した公開 `Var` 呼び出しをまたぐ elementwise
-  連鎖融合を行わない受け入れコスト**: 第 5 波はこのエントリで
-  「`a.add(&b)?.mul(&c)?` のように独立した公開 `Var` 呼び出しをまたぐ
-  elementwise 連鎖は融合されない」ことを受け入れコストとして記録して
-  いたが、これは TASK-12.1 の中核要件そのものを満たさないという
-  codex-review 第 6 波 P1 指摘により撤回された。本改訂（§1・§3.5）で
-  `relu`／`exp`／`tanh` の遅延連鎖が複数回の公開 `Var` 呼び出しを
-  またいで融合対象になったため、このエントリは受け入れコストでは
-  なくなった。**残る限定（撤回ではなく縮小として記録する）**:
-  `add`／`mul`／`matmul`／`sum`／`max` どうしが直接連続する区間
-  （両者とも層 1 で即座に実体化される。§3.5.1）には融合が及ばない。
-  PoC-9 実測（`ew4`／`ew6`）の正確な演算構成が unary 演算主体で
-  あることを前提に本改訂の設計判断（§3.5.1「切り分け」）を行っており、
-  binary 演算どうしが連続する区間への拡張（構造的な shape 追跡を
-  `add`／`mul` にも適用する設計）は #162 以降の拡張候補として別途
-  検討する。
+  （承認記録を含む。codex-review 第 8・10・13 波 P1 指摘への回答）**:
+  - **承認記録（承認内容と本改訂の結論を分けて記録する）**: 2026-08-08、
+    AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンド
+    を `Device::Cpu`（`backend-cpu` 実装）とすること」である。**本改訂の
+    結論**（この承認に基づき本文書が導出した具体的な結線）は、
+    「`autodiff::Tape::new()`（クレート単体）の既定は `ops: None`
+    （eager・非融合。現行実装を変更しない）のまま保ち、REQ-9 の compat
+    層が `Tape` を構築する際に既定で `backend-cpu` の `BackendOps` を
+    注入する（`Tape::with_backend` を使う）」というものである——承認は
+    「既定バックエンドを CPU にする」という結論を与え、本改訂はその
+    結論を「`autodiff` 単体ではなく compat 層で実装する」という結線の
+    形に落とし込んだ（第 11〜13 波の設計変遷を経て到達した形。経緯は
+    下記）。記録場所は本文書（本エントリ）および `docs/public-api-
+    design.md` §4.1（後述の改訂。同文書側も承認内容と本改訂の結論を
+    分けて記載する）。**GPU バックエンド（CUDA／Metal）を compat 層
+    の既定として使う規則はこの承認の対象外**であり、別途 REQ-2 の 27
+    組再検証後にユーザー承認を得て決定する（未決事項として本エントリ
+    の末尾に残す）。
+  - **経緯（簡潔）**: 第 10 波は `Tape::new()`（autodiff 単体）の既定
+    解決先を `Device::Cpu` 固定の `tensor_core::reference_cpu_ops()`
+    とする案を確定していたが、CPU 演算実装の配置がクレート責務境界と
+    衝突する点を理由に第 11 波で撤回し、`crates/autodiff` 内で完結する
+    「コア融合実行器」（`Executor::Core`）へ置き換えた。しかし
+    codex-review 第 13 波 P1-b 指摘は、CPU 融合実行の主体を `autodiff`
+    に置くこと自体（コア融合実行器という設計）を撤回するよう求めた。
+    本改訂はこれを受け、CPU 融合実行の提供元を `backend-cpu` の
+    `BackendOps` 実装へ戻し、その注入を **compat 層**（REQ-9 の公開
+    面。`autodiff` 単体ではない）の責務として再配置した。**この
+    再配置により、2026-08-08 の承認が対象としていた「`backend-cpu` の
+    `BackendOps` を既定で注入する」という結線そのものが、`autodiff`
+    単体ではなく compat 層で行使される形で本改訂に組み込まれる**
+    （承認は無効化されたのではなく、適用層を訂正したうえで行使する）。
+  - **本改訂後の帰結**: `autodiff::Tape::new()` は `ops: None` へ
+    **構造的に必ず**解決し（デバイス選択を一切行わない）、
+    `docs/public-api-design.md` §4.1 の既定デバイス選択ロジック不採用
+    方針とは交差しない（§1・§3.4 参照）。compat 層は `Tape::
+    with_backend` で `backend-cpu` の `BackendOps` を注入するため、
+    compat 経由の利用者には CPU 上での融合が既定で・透過的に効く。
+  - **未決事項として残る部分**: **CUDA／Metal をバックエンド加速として
+    compat 層の既定にする規則は本文書では確定しない**（承認対象外。
+    理由は引き続き 2 点: (i) `docs/public-api-design.md` §4.1「既定
+    デバイス選択ロジックは…実装しない」という本リポ全体の確立済み
+    方針、(ii) REQ-2 が「CUDA 既定有効化の構成決定」を未検証のまま
+    残している〈`docs/spec/04-requirements.md` REQ-2 受け入れ基準〉
+    ため、GPU 加速の既定供給規則の確定には REQ-2 の 27 組再検証後の
+    別途ユーザー承認が必要）。GPU 加速バックエンドの既定供給規則の
+    確定は #164 以降、ユーザー承認を得たうえで別途検討する。
+- **`backend-cpu` の最適化実装の結線層（codex-review 第 9・13 波 P1
+  指摘への回答）**: 第 9 波は「CPU 候補を `ops_for` へ注入する結線
+  機構・担当層」を未決事項として記録していた。本改訂（§3.4「compat
+  層への既定注入」）は、この結線層を **compat 層**（REQ-9。`Tape`
+  構築時に `backend-cpu::ops::CpuBackendOps` 等を `Tape::with_backend`
+  で注入する）として確定した——第 11〜12 波が検討していた「`autodiff`
+  内で完結する既定実行器」案（結線層が既定パスには不要になるという
+  想定）は撤回済みである。`crates/autodiff` は `tensor-core` のみへの
+  依存を維持したまま `backend-cpu` を直接参照しない（`autodiff →
+  backend-cpu` の workspace path 依存は追加しない。codex-review 第 9
+  波 P1 指摘が確定した契約。§3.4「`autodiff → backend-cpu` の
+  workspace path 依存は追加しない」参照）。compat クレート（または
+  compat を実装するクレート）が `tensor-core`／`autodiff`／
+  `backend-cpu` の全てに依存できる唯一の層であり、この結線を担う。
 - **transpose 混在連鎖のメタデータ融合**: §1・§2.3 のとおり初期スコープ
   では transpose 検出時に非融合フォールバックへ倒すため、v1 fusion 有効
   時の性能水準（PoC-9 `ew_reshape` 実測で最大 13.89 倍差）は初期スコープ
@@ -1732,35 +1655,32 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   に基づいて設計しているが、REQ-12 自体の文言更新は `docs/spec/`
   正本リポジトリ側の課題であり、本イシューのスコープ外である
   （`docs/spec/` は編集しない。`.claude/rules/delegation-impl.md`）。
-- **異なる `Tape` を跨ぐ融合境界（第 5 波で「解消」と記録した内容を
-  第 6 波で再オープンし、解決方針を訂正する）**: PR #357 review 再
-  指摘 P1-1／P1-2 が対象としていた「独立した `Pending` 同士が二項
-  演算で合流する」というシナリオ（`(a + b) * (c + d)` が独立した
-  2 つの遅延連鎖をまたぐケース）は、第 5 波では「`FusionSession` は
-  1 回の fallible 呼び出し内でしか生存しないため構造的に発生しない」
-  として解消済みと記録していた。本改訂（§1・§3.5）は演算跨ぎの遅延を
-  復活させたため、この懸念は形を変えて**再び生じうる**: `(a + b) *
-  (c + d)` のように、それぞれ独立した遅延連鎖を持つ 2 つの `Var`
-  （`a+b` の連鎖と `c+d` の連鎖）が `mul` で合流するケースである。
-  ただし本改訂の設計（§3.5.1）では、遅延連鎖を延長できるのは `relu`／
-  `exp`／`tanh`（すべて入力 1 個の単項演算）のみであり、`add`／
-  `mul` 自身は遅延連鎖を延長せず返る前に実体化する（§3.5.2）ため、
-  「2 つの遅延連鎖が 1 つの二項演算へ合流する」状況自体は生じない
-  （合流点となる `mul` 呼び出しは、両オペランドをそれぞれ独立に
-  §3.5.2 の手順で実体化してから `eval::mul` を呼ぶ）。**別テープ間の
-  合流**（`check_same_tape`／`var.rs:87`〜`:92` が既に拒否する
-  `AutodiffError::TapeMismatch`）はこれと別の懸念であり、遅延連鎖は
-  常に単一の `Tape` の `nodes: RefCell<Vec<TapeNode>>` の内部だけで
-  構築されるため（§3.5.1 の走査順の前提「あるノードの入力 `NodeId`
-  は常に自分より小さい」は同一 `Tape` 内でのみ意味を持つ）、別テープの
-  ノードが遅延連鎖に紛れ込むことはない（`check_same_tape` は演算入口
-  で shape 検証より前に呼ばれる既存の検査であり、本改訂でも変更しない）。
-  したがって本エントリの懸念は本改訂の設計（`relu`／`exp`／`tanh`
-  限定の単項連鎖）の範囲では発生しないと結論する一方、§6.2 冒頭で
-  記録した「binary 演算どうしが連続する区間への拡張」を将来行う場合は、
-  この合流シナリオへの対処（合流点での実体化の強制、または合流を
-  許容する場合の `FusionGraph` 側の連結成分検出〈§2〉の再設計）を
-  同時に検討する必要がある拡張候補として記録する。
+- **同一テープ内での遅延グラフの合流（fan-in）は正規サポート対象、
+  異なる `Tape` を跨ぐ合流は既存検査により構造的に排除される
+  （codex-review 第 6・13 波 P1 指摘を受け、本改訂で最終確定する）**:
+  PR #357 review 再指摘 P1-1／P1-2 が対象としていた「独立した
+  `Pending` 同士が二項演算で合流する」というシナリオ（`(a + b) *
+  (c + d)` が独立した 2 つの遅延グラフをまたぐケース）は、第 5 波
+  以前は `add`／`mul` 自身が遅延化されない設計だったため発生せず、
+  第 11〜12 波（`relu`／`exp`／`tanh` の単項連鎖限定）でも `add`／
+  `mul` が遅延グラフを延長しないため発生しなかった。**本改訂（§1・
+  §3.5.1「切り分け」）は `add`／`mul` 自身も遅延化したため、この
+  合流シナリオは同一 `Tape` 内で実際に生じる**: `(a.add(&b)?).mul(
+  &(c.add(&d)?))?` のように、それぞれ独立した遅延ノードを持つ 2 つの
+  `Var`（`a+b` のノードと `c+d` のノード）が `mul` の 2 入力として
+  合流する fan-in である。これは欠陥ではなく §3.5.1「走査順」で
+  DAG へ一般化した設計がそのまま対応する対象であり、`FusionPlan::
+  from_ops`（§3.4）を構築する際に両オペランドの遅延ノードをそれぞれ
+  独立にグラフへ取り込めばよい（§2.4 の fan-out と対称の関係にある。
+  #162／#164 の連鎖検出・グラフ構築アルゴリズムが扱う通常のケース
+  として実装する）。**別テープ間の合流**（`check_same_tape`／
+  `var.rs:87`〜`:92` が既に拒否する `AutodiffError::TapeMismatch`）は
+  これと別の懸念であり、遅延グラフは常に単一の `Tape` の `nodes:
+  RefCell<Vec<TapeNode>>` の内部だけで構築されるため（§3.5.1 の走査順
+  の前提「あるノードの入力 `NodeId` は常に自分より小さい」は同一
+  `Tape` 内でのみ意味を持つ）、別テープのノードが遅延グラフに紛れ込む
+  ことはない（`check_same_tape` は演算入口で shape 検証より前に呼ばれる
+  既存の検査であり、本改訂でも変更しない）。
 - **葉ノードを `DeviceBuffer` 直接参照へ最適化する場合の device 一致
   検証**: §3.4・§3.5.2〜3.5.4 の設計は、融合対象区間の葉が常に host
   常駐の `Tensor<f32>` を経由する契約に依拠して backend 越境の安全性を
@@ -1771,27 +1691,27 @@ fallible 呼び出しの内部」という窓は forward・backward のどちら
   型付きエラーで拒否する）契約を新設する必要がある。現行スコープ
   （TASK-12.1a）では `Tensor<f32>` 経由の host 往復のみを対象とする
   ためこの検証は不要であり、#162 以降の拡張候補として記録する。
-- **コア融合実行器フォールバック（§3.5.3・§3.5.7）が持ち込む run-to-run
-  非決定性（codex-review 第 11 波 P1 指摘を受け、§3.5.7 と整合させて
-  訂正する）**: `Executor::Backend(ops)` を使用する場合の `run_fused`
-  の成否はデバイス障害・一時的なリソース枯渇等の環境要因に左右され
-  うるため、決定的シード設定（`.claude/rules/coding-rust.md`「テスト・
-  ベンチ」）だけでは「バックエンド加速が成功したかコア融合実行器へ
-  フォールバックしたか」を再現できない場合がある。両経路の結果は §4
-  の数値一致複合判定を満たすことを #165 で検証するが（§6.1 #165
-  (iii)）、学習系回帰テストが bit-exact に近い再現性を要求する場合は、
-  テスト側で使用する `BackendOps` 実装を**決定的なテスト用実装を
-  `Tape::with_backend` に渡すことで固定する**（詳細・理由は §3.5.7
-  「run-to-run 非決定性としての扱い」を参照。`Tape::new()`〈`Executor::
-  Core`〉は常にコア融合実行器で融合するため、この非決定性は
-  `Executor::Backend` を明示供給した場合にのみ生じる）。#164 の実装
+- **フォールバック（§3.5.3・§3.5.7）が持ち込む run-to-run 非決定性**:
+  `ops: Some(ops)` を使用する場合の `run_fused` の成否はデバイス障害・
+  一時的なリソース枯渇等の環境要因に左右されうるため、決定的シード
+  設定（`.claude/rules/coding-rust.md`「テスト・ベンチ」）だけでは
+  「バックエンド融合が成功したか `ops` の per-op メソッドへフォール
+  バックしたか（さらに `eval.rs` の最終手段まで倒れたか）」を再現
+  できない場合がある。各経路の結果は §4 の数値一致複合判定を満たす
+  ことを #165 で検証するが（§6.1 #165 (iii)）、学習系回帰テストが
+  bit-exact に近い再現性を要求する場合は、テスト側で使用する
+  `BackendOps` 実装を**決定的なテスト用実装を `Tape::with_backend`
+  に渡すことで固定する**（詳細・理由は §3.5.7「run-to-run 非決定性
+  としての扱い」を参照。`Tape::new()`〈`ops: None`〉は常に eager
+  実行のみであり融合・非融合の区別自体が存在しないため、この非決定性
+  は `ops: Some(ops)` を明示供給した場合にのみ生じる）。#164 の実装
   ガイドとして記録する。
-- **コア融合実行器フォールバックは融合カーネル（#163）自体の正しさを
-  保証しない（本改訂で新規に記録する）**: §3.5.3 のコア融合実行器へ
-  のフォールバックは `run_fused` が失敗した場合に利用者へ正しい値を
-  返すための安全網であり、`run_fused` が誤った値を「成功」として
-  返す不具合（#163 の
-  融合カーネル生成バグ）を検出・防止するものではない。#165 は
-  フォールバック経路の値と融合成功時の値を突き合わせるテスト
-  （§6.1 #165 (iii)）を融合カーネルの正しさの検証としても位置付け、
-  フォールバックの存在を理由にこの突き合わせテストを省略しない。
+- **フォールバックは融合カーネル（#163）自体の正しさを保証しない**:
+  §3.5.2・§3.5.3 のフォールバック（`ops` の per-op メソッド、層 2 限定
+  の `eval.rs` 最終手段のいずれも）は `run_fused` が失敗した場合に
+  利用者へ正しい値を返すための安全網であり、`run_fused` が誤った値を
+  「成功」として返す不具合（#163 の融合カーネル生成バグ）を検出・
+  防止するものではない。#165 はフォールバック経路の値と融合成功時の
+  値を突き合わせるテスト（§6.1 #165 (iii)）を融合カーネルの
+  正しさの検証としても位置付け、フォールバックの存在を理由にこの
+  突き合わせテストを省略しない。

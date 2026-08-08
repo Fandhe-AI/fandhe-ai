@@ -418,7 +418,9 @@ impl Device {
 }
 ```
 
-**既定選択の方針（未決事項）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。本文書では既定デバイス選択ロジックを確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
+**既定選択の方針（未決事項。ただし CPU 分は下記の承認済み改訂で確定済み）**: CUDA を既定で有効化するかどうかの具体的な構成決定は REQ-2 でも未検証のまま残っている（`docs/spec/04-requirements.md` REQ-2 受け入れ基準「バックエンド有効化構成」の項）。GPU バックエンド（CUDA／Metal）を既定で使う規則は本文書では確定しない。TASK-1.9 実装時にユーザー承認を得て決定すること。
+
+**承認済み改訂（compat 層の既定 = CPU バックエンド注入。TASK-12.1a・#161・codex-review 第 13 波 P1-b 指摘への回答）**: 2026-08-08、AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンドを `Device::Cpu`（`backend-cpu` 実装）とすること」である。**本改訂の結論**（この承認に基づき `docs/fusion-graph-design.md` が導出した具体的な結線。第 11〜13 波の設計変遷を経て到達した形）は次のとおり——本節が定める `Device` 列挙・`Device::available()` による明示選択という契約自体は変更しないが、**REQ-9 の compat 層（`compat::array`／`compat::Sequential` 等）が内部で `autodiff::Tape` を構築する際は、既定で `backend-cpu` の `BackendOps` 実装を注入する**（`autodiff::Tape::with_backend(ops)` を使う。`autodiff::Tape::new()` 自体の既定は eager・非融合のまま変更しない）。これにより compat 経由の利用者には CPU 上での融合実行（`docs/fusion-graph-design.md`。TASK-12.1a）が既定で・透過的に効く。承認の記録場所は本節（本段落）および `docs/fusion-graph-design.md` §6.2「`Tape::new()` が使う既定実行器・加速バックエンドの供給規則」（結線の設計詳細・経緯を記載）。この承認は「本節が定める `Device` の既定デバイス選択ロジックを実装する」ことを意味しない——`Device::available()` による列挙・明示選択という契約自体は本節のとおり変更しない。承認が確定するのは「compat 層という 1 つの上位レイヤーが、内部実装として CPU バックエンドを既定注入する」という、`autodiff` クレート単体の外側で完結する結線判断のみである。**GPU バックエンド（CUDA／Metal）を compat 層の既定にするかどうかはこの承認の対象外であり、REQ-2 の 27 組再検証後に別途ユーザー承認を得て決定する**（上記「既定選択の方針」の未決事項は継続する）。
 
 **TASK-1.9a（#44）実装時の突合結果**: `Device`（`Cpu`／`Cuda(usize)`／`Metal`）は本節のシグネチャをそのまま `crates/tensor-core/src/device.rs` に実装した。以下は本文書からの拡張・保留であり、実装コメントにも同旨を記載している。
 
