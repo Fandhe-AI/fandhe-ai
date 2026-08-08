@@ -421,14 +421,18 @@ fn generate_lockfile(sandbox: &Path) {
 
 /// `crates/autodiff` を一意な一時ディレクトリへコピーし、workspace 継承の
 /// 実体化・ベンチワークロード追加・バグ注入・git 初期化までを行った「準備
-/// リポジトリ」を構築する。戻り値は `(sandbox_path, injected_var_rs_content,
+/// リポジトリ」を構築する。`sandbox` は呼び出し元が [`unique_sandbox_dir`]
+/// で確保済みのディレクトリを渡す（`SandboxGuard` を本関数呼び出し前に
+/// 取得できるようにするため。関数内で新規作成すると、内部の `assert!`／
+/// `assert_ne!`〈`detach_autodiff_cargo_toml`・`generate_lockfile`・
+/// `git_init_baseline`〉が panic した場合に sandbox がガード対象外のまま
+/// 残置してしまう）。戻り値は `(injected_var_rs_content,
 /// original_var_rs_content)`（`original` は attempt 2〈正解復元〉の候補内容
 /// として使う）。
-fn prepare_standalone_autodiff_repo() -> (PathBuf, String, String) {
+fn prepare_standalone_autodiff_repo(sandbox: &Path) -> (String, String) {
     let fixture_src = repo_root().join("crates/autodiff");
-    let sandbox = unique_sandbox_dir("prep");
-    copy_dir_recursive(&fixture_src, &sandbox);
-    detach_autodiff_cargo_toml(&sandbox);
+    copy_dir_recursive(&fixture_src, sandbox);
+    detach_autodiff_cargo_toml(sandbox);
 
     let bin_dir = sandbox.join("src/bin");
     std::fs::create_dir_all(&bin_dir).expect("src/bin ディレクトリ作成に失敗");
@@ -451,10 +455,10 @@ fn prepare_standalone_autodiff_repo() -> (PathBuf, String, String) {
     let injected_content = inject_bug(&original_content);
     std::fs::write(&var_rs_path, &injected_content).expect("var.rs へのバグ注入書き込みに失敗");
 
-    generate_lockfile(&sandbox);
-    git_init_baseline(&sandbox);
+    generate_lockfile(sandbox);
+    git_init_baseline(sandbox);
 
-    (sandbox, injected_content, original_content)
+    (injected_content, original_content)
 }
 
 /// TASK-3.3b（#141）の受け入れ条件本体: バグ修正種別のループが
@@ -469,10 +473,13 @@ fn bug_fix_loop_reaches_adopted_with_measured_evidence() {
     let overall_start = Instant::now();
 
     // --- 準備リポジトリの構築（バグ注入済み baseline） ---
-    let (sandbox, injected_content, original_content) = prepare_standalone_autodiff_repo();
-    // 以降の assert! が panic しても sandbox が確実に削除されるよう、
-    // 構築直後にガードを取得する（レビュー指摘対応。SandboxGuard doc 参照）。
+    // sandbox は `prepare_standalone_autodiff_repo` 呼び出し前に確保し、
+    // 直後にガードを取得する。関数内部の `assert!`／`assert_ne!` が panic
+    // しても sandbox が確実に削除されるようにするため（レビュー指摘対応。
+    // `SandboxGuard`／`prepare_standalone_autodiff_repo` doc 参照）。
+    let sandbox = unique_sandbox_dir("prep");
     let _sandbox_guard = SandboxGuard(sandbox.clone());
+    let (injected_content, original_content) = prepare_standalone_autodiff_repo(&sandbox);
 
     // --- 候補列（#140 承認済み題材）を `--candidates` JSON へ書き出す ---
     let candidates_json = serde_json::json!([
