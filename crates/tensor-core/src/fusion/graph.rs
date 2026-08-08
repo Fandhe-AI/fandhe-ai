@@ -152,6 +152,17 @@ pub(crate) enum FusionGraphError {
     /// 範囲外」という別の不変条件の違反を表すため意味論的に転用しない。
     /// レビュー指摘 #163）。
     UnexpectedOpKind { id: usize },
+    /// [`FusionPlan::from_segment`]（`plan.rs`）が Add／Mul／Relu／Exp／
+    /// Tanh のオペランドとして参照する元 `FusionNodeId` が、`segment`
+    /// の再番号付け表（`leaves` ＋ `nodes` から構築した `index_of`）に
+    /// 存在しない（`segment.nodes` の走査順序に対し、参照先の
+    /// `FusionNodeId` が `segment.leaves` にも `segment.nodes` にも
+    /// 含まれない）。`segment` と `graph` の不整合（呼び出し元のバグ）を
+    /// 検出する防御的検証として `UnexpectedOpKind` と同様に区別する
+    /// （レビュー指摘 #400: `index_of[&id]` の直接添字アクセスは
+    /// 不整合な `segment` に対して panic するため、`HashMap::get` と
+    /// 本 variant による fail-closed な処理へ置き換える）。
+    DanglingOperandReference { id: usize },
 }
 
 impl std::fmt::Display for FusionGraphError {
@@ -168,6 +179,12 @@ impl std::fmt::Display for FusionGraphError {
                 write!(
                     f,
                     "fusion segment references node {id} whose op is not one of the 5 elementwise kinds"
+                )
+            }
+            FusionGraphError::DanglingOperandReference { id } => {
+                write!(
+                    f,
+                    "fusion segment operand references node {id} which is absent from the segment's leaves/nodes"
                 )
             }
         }

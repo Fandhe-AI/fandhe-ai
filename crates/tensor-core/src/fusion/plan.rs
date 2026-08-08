@@ -115,6 +115,15 @@ pub enum FusionPlanError {
     },
     /// `ops` 内の `Input` エントリ数が宣言された `leaf_count` と一致しない。
     LeafCountMismatch { declared: usize, actual: usize },
+    /// `ops` 内に同じ `leaf_index` を持つ `Input` エントリが 2 個以上
+    /// 存在する（レビュー指摘 #400: `leaf_count` 個数一致と各
+    /// `leaf_index < leaf_count` の検証だけでは、例えば
+    /// `leaf_count == 2` に対し `leaf_index: 0` を 2 個・`leaf_index: 1`
+    /// を 0 個並べる入力を検出できない。この場合 `leaf_index: 1` が
+    /// 一度も使われないまま融合結果が非融合結果と静かに乖離しうるため、
+    /// 各 `leaf_index` が `0..leaf_count` に一度ずつ出現することを
+    /// 型付きエラーで拒否する）。
+    DuplicateLeafIndex { leaf_index: usize },
     /// `ops` が空、または `Input` エントリのみで構成される（elementwise
     /// ノードが 1 個も無い＝融合する意味がない）。
     NoElementwiseNode,
@@ -153,6 +162,9 @@ impl fmt::Display for FusionPlanError {
                 f,
                 "fusion plan leaf_count mismatch: declared={declared}, actual Input entries={actual}"
             ),
+            FusionPlanError::DuplicateLeafIndex { leaf_index } => {
+                write!(f, "fusion plan has duplicate Input leaf_index {leaf_index}")
+            }
             FusionPlanError::NoElementwiseNode => {
                 write!(f, "fusion plan has no elementwise node (Input-only ops)")
             }
@@ -213,11 +225,14 @@ impl FusionPlan {
     ///
     /// # エラー
     ///
-    /// `graph.node` が返す [`FusionGraphError::NodeIdOutOfRange`]、または
+    /// `graph.node` が返す [`FusionGraphError::NodeIdOutOfRange`]、
     /// `segment.nodes` が elementwise 5 演算以外のノードを含む場合の
-    /// [`FusionGraphError::UnexpectedOpKind`] を返す（いずれも `segment`
-    /// が `graph` と整合しない場合の防御。通常は #162 の検出結果を
-    /// そのまま渡す限り到達しない）。
+    /// [`FusionGraphError::UnexpectedOpKind`]、または Add／Mul／Relu／
+    /// Exp／Tanh のオペランドが再番号付け表に存在しない場合の
+    /// [`FusionGraphError::DanglingOperandReference`] を返す（いずれも
+    /// `segment` が `graph` と整合しない場合の防御。通常は #162 の検出
+    /// 結果をそのまま渡す限り到達しない。レビュー指摘 #400: 従来は
+    /// `index_of[&id]` の直接添字アクセスで panic していた）。
     pub(crate) fn from_segment(
         graph: &FusionGraph,
         segment: &FusionSegment,
@@ -253,21 +268,21 @@ impl FusionPlan {
             // `segment` が渡された場合の防御的検証）。
             let kind = match &node.op {
                 FusionOp::Add(a, b) => FusedOpKind::Add {
-                    lhs: index_of[&a.0],
-                    rhs: index_of[&b.0],
+                    lhs: lookup_index(&index_of, a.0)?,
+                    rhs: lookup_index(&index_of, b.0)?,
                 },
                 FusionOp::Mul(a, b) => FusedOpKind::Mul {
-                    lhs: index_of[&a.0],
-                    rhs: index_of[&b.0],
+                    lhs: lookup_index(&index_of, a.0)?,
+                    rhs: lookup_index(&index_of, b.0)?,
                 },
                 FusionOp::Relu(a) => FusedOpKind::Relu {
-                    input: index_of[&a.0],
+                    input: lookup_index(&index_of, a.0)?,
                 },
                 FusionOp::Exp(a) => FusedOpKind::Exp {
-                    input: index_of[&a.0],
+                    input: lookup_index(&index_of, a.0)?,
                 },
                 FusionOp::Tanh(a) => FusedOpKind::Tanh {
-                    input: index_of[&a.0],
+                    input: lookup_index(&index_of, a.0)?,
                 },
                 FusionOp::Input
                 | FusionOp::Gemm(..)
@@ -315,6 +330,10 @@ impl FusionPlan {
     ///   と同じ「入力は常に自ノードより小さい」契約）
     /// - `Input { leaf_index }` の `leaf_index` は `leaf_count` 未満であること
     /// - `ops` 内の `Input` エントリ数が `leaf_count` と一致すること
+    /// - 各 `leaf_index` が `0..leaf_count` に重複なく一度ずつ出現すること
+    ///   （レビュー指摘 #400: 個数一致・範囲チェックのみでは
+    ///   `leaf_index` の重複〈他の leaf が未使用のまま融合結果が
+    ///   非融合結果と静かに乖離しうる〉を見逃す）
     /// - `ops` が空でなく、`Input` 以外のノードを最低 1 個含むこと
     /// - `ops` の末尾エントリが `Input` でないこと（モジュール冒頭
     ///   「出力ノードの契約」）
@@ -331,6 +350,11 @@ impl FusionPlan {
 
         let mut input_count = 0usize;
         let mut has_elementwise = false;
+        // `leaf_index` ごとの出現済みフラグ（レビュー指摘 #400:
+        // `leaf_count` 個数一致・範囲チェックだけでは重複した
+        // `leaf_index` を見逃す。`0..leaf_count` へ一度ずつ出現する
+        // ことをここで確定する）。
+        let mut leaf_seen = vec![false; leaf_count];
         for (at, op) in ops.iter().enumerate() {
             match *op {
                 FusedOpKind::Input { leaf_index } => {
@@ -340,6 +364,9 @@ impl FusionPlan {
                             leaf_index,
                             leaf_count,
                         });
+                    }
+                    if std::mem::replace(&mut leaf_seen[leaf_index], true) {
+                        return Err(FusionPlanError::DuplicateLeafIndex { leaf_index });
                     }
                 }
                 FusedOpKind::Add { lhs, rhs } | FusedOpKind::Mul { lhs, rhs } => {
@@ -427,6 +454,25 @@ impl FusionPlan {
     pub fn use_count(&self, node: FusedNodeIndex) -> usize {
         self.use_counts.get(node).copied().unwrap_or(0)
     }
+}
+
+/// `index_of`（元の `FusionNodeId(usize)` -> プラン内 [`FusedNodeIndex`]
+/// の再番号付け表）から `id` を引く（[`FusionPlan::from_segment`] 専用
+/// ヘルパー）。`segment` と `graph` が整合していれば `segment.nodes` が
+/// 参照するオペランドは必ず `segment.leaves` または手前の
+/// `segment.nodes` に含まれ本関数は成功するが、呼び出し元のバグにより
+/// `segment` が `graph` と不整合な場合（レビュー指摘 #400: 従来の
+/// `index_of[&id]` 直接添字アクセスは未検出のまま panic していた）に
+/// [`FusionGraphError::DanglingOperandReference`] を返す fail-closed な
+/// 経路とする。
+fn lookup_index(
+    index_of: &HashMap<usize, FusedNodeIndex>,
+    id: usize,
+) -> Result<FusedNodeIndex, FusionGraphError> {
+    index_of
+        .get(&id)
+        .copied()
+        .ok_or(FusionGraphError::DanglingOperandReference { id })
 }
 
 /// `at` より手前（トポロジカル順で先行するノード）を指しているかを
@@ -572,6 +618,39 @@ mod tests {
         assert!(matches!(ops[7], FusedOpKind::Relu { .. }));
     }
 
+    /// レビュー指摘 #400（P1）: `segment` が `graph` と不整合な場合
+    /// （呼び出し元のバグにより、あるノードが参照するオペランドが
+    /// `segment.leaves`／`segment.nodes` のいずれにも含まれない）でも
+    /// `from_segment` が panic せず [`FusionGraphError::
+    /// DanglingOperandReference`] を返すことを固定する。従来は
+    /// `index_of[&id]` の直接添字アクセスで panic していた。
+    #[test]
+    fn from_segment_rejects_dangling_operand_reference() {
+        // (a+b)*(c+d) 形の fan-in（`from_segment_fan_in_confluence` と
+        // 同型。連鎖長 4 で最小連鎖長を満たし Fuse 判定される）。
+        let mut g = FusionGraph::new();
+        let a = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let b = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let c = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let d = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let ab = g.push(FusionOp::Add(a, b), f32_meta(&[4])).unwrap();
+        let cd = g.push(FusionOp::Add(c, d), f32_meta(&[4])).unwrap();
+        let prod = g.push(FusionOp::Mul(ab, cd), f32_meta(&[4])).unwrap();
+        let out = g.push(FusionOp::Relu(prod), f32_meta(&[4])).unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let mut segment = match decision {
+            FusionDecision::Fuse(seg) => seg,
+            other => panic!("expected Fuse, got {other:?}"),
+        };
+        // `segment` を人為的に `graph` と不整合にする: `ab` が参照する
+        // `a` を leaves から取り除く（呼び出し元のバグを模擬）。
+        segment.leaves.retain(|id| *id != a);
+
+        let err = FusionPlan::from_segment(&g, &segment).unwrap_err();
+        assert_eq!(err, FusionGraphError::DanglingOperandReference { id: a.0 });
+    }
+
     #[test]
     fn from_ops_rejects_forward_reference() {
         let err = FusionPlan::from_ops(
@@ -606,6 +685,25 @@ mod tests {
                 leaf_count: 1
             }
         );
+    }
+
+    /// レビュー指摘 #400（P2）: `leaf_count` 個数一致・範囲チェックのみ
+    /// では `leaf_index` の重複（`leaf_count=2` に対し `leaf_index: 0`
+    /// を 2 個並べ `leaf_index: 1` を欠落させる入力）を検出できない。
+    #[test]
+    fn from_ops_rejects_duplicate_leaf_index() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Input { leaf_index: 0 }, // leaf_index: 1 が欠落・0 が重複
+                FusedOpKind::Relu { input: 0 },
+            ],
+            vec![4],
+            DType::F32,
+            2,
+        )
+        .unwrap_err();
+        assert_eq!(err, FusionPlanError::DuplicateLeafIndex { leaf_index: 0 });
     }
 
     #[test]
