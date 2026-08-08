@@ -465,6 +465,20 @@ impl<M: MemoryOps + PoolZeroFill> MemoryOps for PooledMemory<M> {
 
         let buffer = self.inner.alloc_zeroed(shape)?;
         let device = buffer.device();
+        // 再利用経路（上の `try_acquire` 分岐）はハンドル自体からデバイス
+        // を復元できず（`BufferHandle` は `device()` を持たない）構築時に
+        // 渡された `self.device` をそのまま `DeviceBuffer::new` へ渡す。
+        // その前提を保つには「`self.device` は常に `inner` の実確保先と
+        // 一致する」という不変条件が必要で、ここで実測値と照合しておかない
+        // と、`inner` が構築時指定と異なるデバイスへ確保する構成（誤設定・
+        // 将来の `inner` 実装変更）で初回は正しいデバイス、プール再利用後は
+        // 誤ったデバイスを報告する状態依存の不整合になる（`download` での
+        // 誤判定・誤ディスパッチを招く）。不一致時はプールへ格納せず
+        // `BackendError::DeviceMismatch` を返し、以後の全確保が同じ不整合を
+        // 継承するのを防ぐ。
+        if device != self.device {
+            return Err(BackendError::DeviceMismatch);
+        }
         let shape_vec = buffer.shape().to_vec();
         let handle = buffer.into_handle();
         let pooled = PooledBufferHandle::new(handle, Arc::downgrade(&self.core), bytes);
@@ -631,6 +645,35 @@ mod tests {
             "再利用時はゼロ初期化契約を再適用するはず"
         );
         drop(buf2);
+    }
+
+    /// `PooledMemory::new` に渡した `device` が `inner` の実確保先
+    /// （`MockMemory::alloc_zeroed` は常に `Device::Cpu` へ確保する）と
+    /// 一致しない場合、`alloc_zeroed` は `BackendError::DeviceMismatch`
+    /// を返しプールへ格納しないことを検証する（codex-review 指摘・
+    /// `crates/tensor-core/src/pool.rs:390` の再利用時未検証 device
+    /// 修正の回帰テスト）。プールに格納されないため、以後の同サイズ
+    /// 確保も毎回この検証を経て失敗し続け、状態依存で誤ったデバイスを
+    /// 報告することがない。
+    #[test]
+    fn device_mismatch_on_fresh_alloc_returns_error_and_is_not_pooled() {
+        let mem = PooledMemory::new(MockMemory::new(), Device::Cuda(0), PoolConfig::default());
+
+        let err = mem.alloc_zeroed(&[64]).unwrap_err();
+        assert!(
+            matches!(err, BackendError::DeviceMismatch),
+            "device 不一致は BackendError::DeviceMismatch を返すはず（実測 {err:?}）"
+        );
+        assert_eq!(
+            mem.pooled_bytes(),
+            0,
+            "device 不一致のバッファはプールへ格納されないはず"
+        );
+
+        // 不一致は 1 度限りの取りこぼしではなく、以後も再現し続ける
+        // （プールに紛れ込まず、都度 inner から実測して検出される）。
+        let err2 = mem.alloc_zeroed(&[64]).unwrap_err();
+        assert!(matches!(err2, BackendError::DeviceMismatch));
     }
 
     /// 異なるサイズはバケット分離され再利用されないことを検証する
