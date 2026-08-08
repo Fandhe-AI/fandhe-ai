@@ -70,7 +70,20 @@ def measure(device: torch.device, size: int) -> float:
     """`size x size x size` の f16 GEMM を計測し、中央値 TFLOPS を返す
     （`bench-harness::protocol::run` と同じ「warmup → 計測 → 中央値」構成。
     同期境界はホスト転送を伴わない `torch.mps.synchronize()`。ファイル
-    冒頭コメント参照）。"""
+    冒頭コメント参照）。
+
+    出力テンソル `c_buf` はループ外で事前確保し、`torch.mm(..., out=c_buf)`
+    でループ内は書き込み先を使い回す。Rust 側（`gemm_f16_bench.rs`）は
+    `c_buf` をループ外で確保しディスパッチと完了待ちのみを計測するため、
+    PyTorch 側で `torch.matmul(a, b)` の戻り値生成（毎回の新規テンソル
+    割り当て）を計測に含めると同一同期境界の契約が崩れ、Metal/PyTorch 比が
+    不当に高く出て REQ-8 の下限決定を誤らせる（#346 codex-review 指摘）。
+    `torch.matmul` ではなく 2 次元専用の `torch.mm` を使う理由: 本スクリプトの
+    入力 `a`／`b` は常に正方 2 次元行列であり、`torch.matmul` の `out=` は
+    次元・ブロードキャストの組み合わせによって MPS backend 側の `out=`
+    カーネル登録が未整備な場合がある（PyTorch のバージョンに依存する既知の
+    制約）のに対し、`torch.mm` は 2 次元行列積に特化し `out=` 対応が
+    より安定している。"""
     generator = torch.Generator().manual_seed(SEED)
     a = torch.rand((size, size), generator=generator, dtype=torch.float32).to(
         device=device, dtype=torch.float16
@@ -78,15 +91,16 @@ def measure(device: torch.device, size: int) -> float:
     b = torch.rand((size, size), generator=generator, dtype=torch.float32).to(
         device=device, dtype=torch.float16
     )
+    c_buf = torch.empty((size, size), device=device, dtype=torch.float16)
 
     for _ in range(WARMUP_ITERS):
-        torch.matmul(a, b)
+        torch.mm(a, b, out=c_buf)
     torch.mps.synchronize()
 
     secs: list[float] = []
     for _ in range(MEASURE_ITERS):
         start = time.perf_counter()
-        torch.matmul(a, b)
+        torch.mm(a, b, out=c_buf)
         torch.mps.synchronize()
         secs.append(time.perf_counter() - start)
 
