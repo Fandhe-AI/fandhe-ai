@@ -73,6 +73,26 @@ pub enum MetalError {
     ALenMismatch { expected: usize, actual: usize },
     /// `b`（長さ `k*n` 期待）の要素数が一致しない。
     BLenMismatch { expected: usize, actual: usize },
+    /// `c`（長さ `m*n` 期待）の要素数が一致しない。`crate::gemm::
+    /// MetalGemm::dispatch_f16_prepared_unverified` が呼び出し元から渡された
+    /// `c_buf`（`MetalHalfBuffer`）の実長を検証する際に使う（PR #346
+    /// codex-review P1-1 指摘。公開コンストラクタで任意長のバッファを
+    /// 渡せるため、エンコード前に厳密な長さ検証を行う必要がある）。
+    CLenMismatch { expected: usize, actual: usize },
+    /// `crate::gemm::MetalGemm::dispatch_f16_prepared_unverified` の実効
+    /// 次元（`m_eff`/`n_eff`/`k_eff`）のいずれかが 8 の倍数でない
+    /// （PR #346 codex-review P1-1 指摘。`shaders/gemm.metal` の
+    /// `gemm_simdgroup_f16` は 1 threadgroup = C の 8×8 タイル 1 つを
+    /// 前提とし、grid 計算（`crate::gemm::encode_dispatch_f16` の
+    /// `dims.n / 8`・`dims.m / 8`）が非 8 倍数では末尾タイルを黙って
+    /// 計算しない。`dispatch_f16_unverified` 経由（`pad8` 済み）では常に
+    /// 満たされるが、`dispatch_f16_prepared_unverified` を直接呼ぶ経路
+    /// 向けに明示検証する）。
+    NotEightAligned {
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+    },
     /// `m*k`・`k*n`・`m*n` のいずれかが `usize` の範囲でオーバーフローする
     /// （`checked_mul` によりアクセス前に検出する。OWASP A03 観点）。
     DimProductOverflow,
@@ -147,6 +167,19 @@ impl fmt::Display for MetalError {
             }
             MetalError::BLenMismatch { expected, actual } => {
                 write!(f, "b length mismatch: expected {expected}, actual {actual}")
+            }
+            MetalError::CLenMismatch { expected, actual } => {
+                write!(f, "c length mismatch: expected {expected}, actual {actual}")
+            }
+            MetalError::NotEightAligned {
+                m_eff,
+                n_eff,
+                k_eff,
+            } => {
+                write!(
+                    f,
+                    "effective dims must be multiples of 8: m_eff={m_eff}, n_eff={n_eff}, k_eff={k_eff}"
+                )
             }
             MetalError::DimProductOverflow => {
                 write!(f, "m*k, k*n or m*n overflows usize")
