@@ -320,10 +320,17 @@ impl CudaWmmaGemm {
     /// ベンチマークの計測対象を絞るために公開する）。opt カーネルが
     /// 利用可能ならそちらを使用し、そうでなければ基本版へフォールバック
     /// する（`run_f16` と同一の選択ロジック `self.wmma_f16_opt.is_some()`
-    /// を用いる。呼び出し前提は `run_f16` と同じ形状検証
-    /// （`validate_gemm_dims`）済み・m>0/n>0/k>0 であることで、本関数は
-    /// 検証・no-op 早期 return を再実行しない（`gemm_mma.rs::launch_f16`
-    /// と同じ契約）。
+    /// を用いる）。
+    ///
+    /// safe な公開 API であるため、呼び出し元の事前検証（`run_f16` と同じ
+    /// `validate_gemm_dims`）に依存せず、本関数自身がホスト側形状検証
+    /// および `a_dev`/`b_dev`/`c_dev` のデバイスバッファ長検証を行う
+    /// （PR #349 codex-review 指摘 P0。`gemm.rs::launch_tiled_f32` の
+    /// ドキュメンテーションコメント参照。`run_f16` の m==0/n==0/k==0
+    /// 早期 return はここでは適用しない — 呼び出し元がゼロ次元を渡した
+    /// 場合は 0 要素グリッド起動を CUDA ドライバが拒否する形でエラーに
+    /// なるが、`validate_gemm_dims` は m/n/k=0 を有効な形状として許容する
+    /// ため、この経路の安全性はカーネル起動自体の失敗に委ねられる）。
     pub fn launch_f16(
         &self,
         a_dev: &CudaSlice<f16>,
@@ -333,14 +340,17 @@ impl CudaWmmaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+
         let (func, cfg) = match self.wmma_f16_opt.as_ref() {
             Some(func) => (func, wmma_opt_launch_config(m, n)),
             None => (&self.wmma_f16, wmma_launch_config(m, n)),
         };
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: launch_f16_kernel と同一の根拠。カーネル引数は呼び出し元
-        // が検証済みの m/n/k と 1:1 対応し、カーネル内の手動境界チェック
+        // SAFETY: launch_f16_kernel と同一の根拠。カーネル引数は上記で
+        // 検証済みの m/n/k と 1:1 対応し、カーネル内の手動境界チェック
         // （基本版は kernels_wmma.rs、opt 版は kernels_wmma_opt.rs 参照、
         // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。
         unsafe {

@@ -214,6 +214,30 @@ pub(crate) fn validate_gemm_dims(
     Ok(())
 }
 
+/// 出力バッファ `c_dev` の長さが `m*n` と一致することを検証する。
+///
+/// `launch_tiled_f32`／`launch_wmma_tf32`（`gemm_wmma.rs::launch_f16` も
+/// 同様）は `run_*` 系と異なり出力バッファをカーネル起動側で確保せず
+/// 呼び出し元から受け取るため、[`validate_gemm_dims`] が検証する
+/// 「`a_len`/`b_len` が `m*k`/`k*n` と一致する」だけでは C 側の OOB
+/// 書き込みを防げない。PR #349 codex-review 指摘 P0（safe な公開起動 API
+/// がバッファ境界検証を省略していた）を受けて追加した、C バッファ専用の
+/// 検証。`pub(crate)`: `gemm_wmma.rs::launch_f16` からも呼べるよう
+/// クレート内に公開範囲を限定する。
+pub(crate) fn validate_output_len(c_len: usize, m: u32, n: u32) -> Result<(), CudaError> {
+    let mn = (m as usize)
+        .checked_mul(n as usize)
+        .ok_or_else(|| CudaError::InvalidShape {
+            detail: format!("m*n overflows usize: m={m}, n={n}"),
+        })?;
+    if c_len != mn {
+        return Err(CudaError::InvalidShape {
+            detail: format!("c length mismatch: expected {mn} (m*n), actual {c_len}"),
+        });
+    }
+    Ok(())
+}
+
 /// tiled カーネル専用の `k` 追加上限検証。
 ///
 /// tiled カーネル（`kernels::TILED_F32`/`TILED_F16`）は各タイル反復で
@@ -940,11 +964,17 @@ impl CudaGemm {
     /// デバイス常駐済みの A/B/C バッファに対して tiled f32 カーネルを
     /// 起動し、完了を待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。
     /// [`Self::upload_f32`]・[`Self::alloc_output_f32`] と組み合わせて
-    /// ベンチマークの計測対象を絞るために公開する。呼び出し前提は
-    /// `run_tiled_f32` と同じ形状検証（`validate_gemm_dims`・
-    /// `validate_tiled_k_bound`）済み・m>0/n>0/k>0 であることで、本関数は
-    /// 検証・no-op 早期 return を再実行しない（`gemm_mma.rs::launch_f16`
-    /// と同じ契約）。
+    /// ベンチマークの計測対象を絞るために公開する。
+    ///
+    /// PR #349 codex-review 指摘 P0（`launch_*` 系は `pub fn` でありながら
+    /// `CudaSlice` 長・`m/n/k` の整合・`i32` 変換上限・tiled 固有の `k` 上限
+    /// を検証せずに `unsafe` launch へ渡していた）を受け、`run_tiled_f32`
+    /// と同じ検証（[`validate_gemm_dims`]・[`validate_tiled_k_bound`]）に
+    /// 加え、デバイスバッファ長（`a_dev`/`b_dev`/`c_dev`）が `m/n/k` と
+    /// 1:1 対応することを起動前に検証する（safe な公開 API である以上、
+    /// 呼び出し元の契約違反〈短い A/B/C と大きな次元の組み合わせ〉から
+    /// 独立して GPU 側 OOB を防ぐ必要があるため、呼び出し元が事前検証済みで
+    /// あることを前提にした検証省略はしない）。
     pub fn launch_tiled_f32(
         &self,
         a_dev: &CudaSlice<f32>,
@@ -954,11 +984,15 @@ impl CudaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+
         let cfg = launch_config(m, n, TILED_BLOCK_DIM);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: run_f32_kernel と同一の根拠。カーネル引数
-        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）は呼び出し元が検証済みの m/n/k
+        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）は上記で検証済みの m/n/k
         // と 1:1 対応し、カーネル内の手動境界チェック（REQ-8）と合わせて
         // OOB 読み書きが起きない根拠とする。
         unsafe {
@@ -981,10 +1015,14 @@ impl CudaGemm {
     /// のみ」契約）。opt カーネルが利用可能ならそちらを使用し、そうで
     /// なければ基本版へフォールバックする（`run_wmma_tf32` と同一の選択
     /// ロジック `self.wmma_tf32_opt.is_some()` を用いる。呼び出し元は
-    /// 事前に `run_wmma_tf32` を 1 回 probe 実行して可用性・k 境界検証を
-    /// 済ませている前提であり（`cuda_floor_bench.rs::measure_wmma_tf32`
-    /// 参照）、probe が選んだ経路とここで選ぶ経路が同一の判定式を使うため
-    /// 一致する）。
+    /// 事前に `run_wmma_tf32` を 1 回 probe 実行して可用性を確認している
+    /// 前提だが（`cuda_floor_bench.rs::measure_wmma_tf32` 参照）、本関数
+    /// 自体は safe な公開 API のため、選択される経路（opt／基本）ごとに
+    /// 必要な `k` 境界検証（[`validate_wmma_tf32_opt_k_bound`]／
+    /// [`validate_wmma_tf32_k_bound`]）とデバイスバッファ長検証を
+    /// 呼び出し元の事前検証に依存せず自前で行う（PR #349 codex-review
+    /// 指摘 P0。[`Self::launch_tiled_f32`] のドキュメンテーションコメント
+    /// 参照）。
     pub fn launch_wmma_tf32(
         &self,
         a_dev: &CudaSlice<f32>,
@@ -994,13 +1032,16 @@ impl CudaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_output_len(c_dev.len(), m, n)?;
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: run_wmma_f32_kernel／run_wmma_tf32_opt_kernel と同一の
-        // 根拠。カーネル引数は呼び出し元が検証済みの m/n/k と 1:1 対応し、
-        // カーネル内の手動境界チェック（REQ-8）と合わせて OOB 読み書きが
-        // 起きない根拠とする。
+        // 根拠。カーネル引数は上記・各分岐内で検証済みの m/n/k と 1:1
+        // 対応し、カーネル内の手動境界チェック（REQ-8）と合わせて OOB
+        // 読み書きが起きない根拠とする。
         if let Some(func) = self.wmma_tf32_opt.as_ref() {
+            validate_wmma_tf32_opt_k_bound(k)?;
             let cfg = wmma_tf32_opt_launch_config(m, n);
             unsafe {
                 self.stream
@@ -1014,6 +1055,7 @@ impl CudaGemm {
                     .launch(cfg)?;
             }
         } else if let Some(func) = self.wmma_tf32.as_ref() {
+            validate_wmma_tf32_k_bound(k)?;
             let cfg = wmma_tf32_launch_config(m, n);
             unsafe {
                 self.stream
