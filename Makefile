@@ -266,6 +266,21 @@ else
 	@echo "skip: Cargo.toml 未追加のため bench をスキップ"
 endif
 
+# 起動コスト計測ハーネス（TASK-13.1a・イシュー #170）。CI には組み込まない
+# （実測の実施・v1 実測値との差分記録は兄弟イシュー #171・TASK-13.1b のスコープ。
+# ここでは #171 が再現に使う導線のみを提供する。既定はホスト CPU バックエンド、
+# `BACKEND=cuda`／`BACKEND=metal`（実機限定）で切り替える）。
+BACKEND ?= cpu
+TRIALS ?= 5
+.PHONY: startup-bench
+startup-bench: ## プロセス起動コスト計測を実行する（既定 CPU。BACKEND=cuda|metal で切替）
+ifdef HAS_CARGO
+	cargo build -p bench-harness --release --bins
+	cargo run -p bench-harness --release --bin startup_bench -- --backend $(BACKEND) --trials $(TRIALS)
+else
+	@echo "skip: Cargo.toml 未追加のため startup-bench をスキップ"
+endif
+
 .PHONY: ci
 ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
