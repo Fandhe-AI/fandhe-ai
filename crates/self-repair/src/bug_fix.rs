@@ -28,10 +28,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::candidate::{
-    CandidateFix, apply_candidate, read_no_follow_symlink, reject_symlink_escape,
-    validate_relative_path,
-};
+use crate::candidate::{CandidateFix, apply_candidate, validate_relative_path};
 use crate::error::SelfRepairError;
 use crate::exec::CommandRunner;
 use crate::kind::RepairKind;
@@ -117,25 +114,22 @@ impl BugFixFixGenerator {
             for (rel_path, _) in &candidate.files {
                 validate_relative_path(rel_path)
                     .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
-                // baseline スナップショット読み込み（`fs::read_to_string`）も
-                // symlink を追跡するため、書き込み経路
-                // （`apply_candidate`）と同じ検査を構築時にも通す
-                // （`crate::candidate::reject_symlink_escape` doc 参照）。
-                reject_symlink_escape(&workspace, rel_path)
-                    .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
                 if baseline.contains_key(rel_path) {
                     continue;
                 }
-                let abs = workspace.join(rel_path);
-                let content = read_no_follow_symlink(&abs).map_err(|source| {
-                    SelfRepairError::FixGeneration {
-                        attempt: 0,
-                        reason: format!(
-                            "baseline 読み込みに失敗しました（path={}）: {source}",
-                            rel_path.display()
-                        ),
-                    }
-                })?;
+                // baseline スナップショット読み込みは `crate::fd_walk::read_via_fd_walk`
+                // が fd 走査（`openat(O_NOFOLLOW)`）で symlink 追跡を拒否しつつ
+                // 直接読み込む（`crate::fd_walk` モジュール冒頭 doc 参照）。
+                let content =
+                    crate::fd_walk::read_via_fd_walk(&workspace, rel_path).map_err(|source| {
+                        SelfRepairError::FixGeneration {
+                            attempt: 0,
+                            reason: format!(
+                                "baseline 読み込みに失敗しました（path={}）: {source}",
+                                rel_path.display()
+                            ),
+                        }
+                    })?;
                 baseline.insert(rel_path.clone(), content);
             }
         }
@@ -323,11 +317,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content() {
-        // baseline スナップショット読み込み（`fs::read_to_string`）も
-        // symlink を追跡するため、書き込み経路（`apply_candidate`）だけで
-        // なく `new` 自体が symlink 経由の候補パスを拒否することを確認する
-        // （`crate::candidate::reject_symlink_escape` doc 参照。PR #361
-        // codex-review P0 指摘の read 側回帰防止）。
+        // baseline スナップショット読み込み（`crate::fd_walk::read_via_fd_walk`）
+        // は fd 走査で symlink 追跡を拒否するため、書き込み経路
+        // （`apply_candidate`）だけでなく `new` 自体が symlink 経由の候補パス
+        // を拒否することを確認する（`crate::fd_walk` モジュール冒頭 doc 参照。
+        // PR #361 codex-review 第 4 波 P0 指摘の read 側回帰防止）。
         let dir = unique_temp_dir(
             "bug_fix_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
         );

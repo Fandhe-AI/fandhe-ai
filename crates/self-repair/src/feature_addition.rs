@@ -31,10 +31,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::candidate::{
-    CandidateFix, apply_candidate, read_no_follow_symlink, reject_symlink_escape,
-    validate_relative_path,
-};
+use crate::candidate::{CandidateFix, apply_candidate, validate_relative_path};
 use crate::error::SelfRepairError;
 use crate::exec::CommandRunner;
 use crate::kind::RepairKind;
@@ -167,13 +164,17 @@ impl FeatureAdditionFixGenerator {
                     continue;
                 }
 
-                // `abs.is_file()`／`fs::read_to_string` はいずれも symlink を
-                // 追跡するため、baseline スナップショット読み込みの前に
-                // 書き込み経路（`apply_candidate`）と同じ検査を通す
-                // （`crate::candidate::reject_symlink_escape` doc 参照）。
-                reject_symlink_escape(&workspace, rel_path)
-                    .map_err(|reason| SelfRepairError::FixGeneration { attempt: 0, reason })?;
-
+                // `abs.is_file()` は symlink を追跡するため、symlink 経由で
+                // workspace 外の実在ファイルを指す候補パスも「既存ファイル」
+                // と判定しうる。この判定はもはやセキュリティ境界ではなく、
+                // 「新規ファイル追加は対象外」という UX 向けエラー文言を
+                // 出すための早期判定に過ぎない（fd 走査によるセキュリティ
+                // 上の正本は直後の `crate::fd_walk::read_via_fd_walk` が
+                // 単独で担保する。`crate::fd_walk` モジュール冒頭 doc 参照。
+                // symlink 経由で `is_file()` が真になっても、続く
+                // `read_via_fd_walk` が `O_NOFOLLOW` 付き fd 走査で改めて
+                // symlink を拒否するため、workspace 外の内容が baseline へ
+                // 取り込まれることはない）。
                 let abs = workspace.join(rel_path);
                 if !abs.is_file() {
                     return Err(SelfRepairError::FixGeneration {
@@ -185,15 +186,16 @@ impl FeatureAdditionFixGenerator {
                     });
                 }
 
-                let content = read_no_follow_symlink(&abs).map_err(|source| {
-                    SelfRepairError::FixGeneration {
-                        attempt: 0,
-                        reason: format!(
-                            "baseline 読み込みに失敗しました（path={}）: {source}",
-                            rel_path.display()
-                        ),
-                    }
-                })?;
+                let content =
+                    crate::fd_walk::read_via_fd_walk(&workspace, rel_path).map_err(|source| {
+                        SelfRepairError::FixGeneration {
+                            attempt: 0,
+                            reason: format!(
+                                "baseline 読み込みに失敗しました（path={}）: {source}",
+                                rel_path.display()
+                            ),
+                        }
+                    })?;
                 baseline.insert(rel_path.clone(), content);
             }
         }
@@ -383,11 +385,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content() {
-        // `abs.is_file()`／`fs::read_to_string` はいずれも symlink を追跡する
-        // ため、symlink 経由で workspace 外の実在ファイルを指す候補パスが
-        // 「既存ファイルへの合成実装」と誤認され読み込まれてしまわないことを
-        // 確認する（`crate::candidate::reject_symlink_escape` doc 参照。
-        // PR #361 codex-review P0 指摘の read 側回帰防止）。
+        // `abs.is_file()` は symlink を追跡するため「既存ファイルへの合成
+        // 実装」と誤認しうるが、実際の読み込みは `crate::fd_walk::read_via_fd_walk`
+        // が fd 走査（`O_NOFOLLOW`）で symlink を拒否するため、symlink 経由で
+        // workspace 外の実在ファイルを指す候補パスの内容が読み込まれてしまわ
+        // ないことを確認する（`crate::fd_walk` モジュール冒頭 doc 参照。
+        // PR #361 codex-review 第 4 波 P0 指摘の read 側回帰防止）。
         let dir = unique_temp_dir(
             "feature_addition_new_rejects_baseline_snapshot_via_symlink_without_leaking_outside_content",
         );

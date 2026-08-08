@@ -139,6 +139,7 @@ pub mod cli;
 pub mod diff_signals;
 pub mod error;
 pub mod exec;
+mod fd_walk;
 pub mod feature_addition;
 pub mod judge;
 pub mod kind;
