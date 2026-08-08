@@ -14,8 +14,8 @@ v1（Burn/CubeCL）では GEMM 4096³ でピークメモリが理論値 192MiB �
 `tensor_core::pool::PooledMemory<M>` は既存 `MemoryOps` 実装
 （`CpuMemory`／`CudaMemory`／`MetalMemory`）を包むデコレータであり、
 既定の確保経路（素の `MemoryOps` 実装を直接使う経路）は変更しない。
-既定有効化の構成判断は PoC-v2 実測・#202 の係数維持テスト後に行う
-（安全側判断）。
+既定有効化の構成判断は PoC-v2 実測・TASK-14.2 の GEMM 4096³ 実測後に行う
+（安全側判断。#202 で明示解放 API・係数維持テストは整備済み）。
 
 ## サイズクラス方針: バイトサイズ完全一致
 
@@ -109,21 +109,38 @@ CPU 実装は `unsafe` な生ポインタ書き込みなしに `downcast_mut` �
 （`buffer.rs` の「空テンソル（numel == 0）の契約」を `PooledMemory` でも
 維持する）。
 
-## #202 向け内部解放フック
+## 明示解放 API（公開済み・#202）
 
-明示解放 API の公開・係数維持テストは #202 のスコープである。本実装は
-`PoolCore::clear_all`（`pub(crate)`）としてプール全保持分を即座に解放する
-内部フックのみ用意し、公開 API 化（`PooledMemory` からの `pub` メソッド
-追加）は #202 に委ねる。
+REQ-14 14-3「維持できない場合はプール解放 API を提供」に対応し、
+`PooledMemory::release_all_pooled`（`crates/tensor-core/src/pool.rs`）を
+公開済みである。内部的には `PoolCore::clear_all`（`pub(crate)`）を呼び、
+プールがアイドル保持している全バッファを即座に実解放する（戻り値は解放
+バイト数）。貸出中（生存中の `DeviceBuffer`）のバッファには影響せず、
+解放後も `PooledMemory` は `config` を維持したまま通常どおり利用できる。
+
+「解放 API 後にピークが理論値近傍へ戻る」という #202 の受け入れ条件は
+`crates/backend-cpu/tests/pooled_memory_integration.rs` の
+`release_api_restores_peak_to_theoretical_working_set` で直接検証する。
+`memory_stats::AllocationTracker::peak_allocated_bytes` は単調増加の
+high-water mark であり解放だけでは下がらないため、検証は
+(1) `release_all_pooled()` 直後の `allocated_bytes() == 0`（実際にメモリが
+戻ったことの直接証拠）と (2) `reset_peak()` で新区間を区切ってからの
+代表ワークロード再計測（ピーク自体が理論値へ戻ることの確認）の 2 段構成
+とする。係数維持の回帰は同ファイルの
+`coefficient_stays_within_2x_for_repeated_same_shape_workload` が担う。
 
 ## スコープ外・申し送り
 
 - **サイズクラス丸め**（冪等 2 乗切り上げ等）: capacity と論理 numel の
   分離・`download` 契約の拡張が前提。
 - **`upload` 経路の再利用**: `upload_into` の同期契約設計が前提。
-- **プールの既定有効化**の構成判断: PoC-v2 の GEMM 4096³ 実測後。
-- **明示解放 API の公開・係数維持テスト**: #202。
+- **プールの既定有効化**の構成判断: #202 の係数維持テストでは CPU 経路の
+  小規模 shape のみを検証しており、GEMM 4096³ での実測は TASK-14.2
+  （`docs/spec/05-tasks.md`）に委ねる。既定有効化はその実測後に判断する。
 - **CUDA/Metal の計測反映の実機検証**: #175 完了後（本イシューでは
   `PoolZeroFill` 実装とフックのみ用意し、`#[ignore]` 実機テストを
   `crates/backend-cuda/tests/memory_real_device.rs`・
   `crates/backend-metal/tests/memory_roundtrip.rs` に追加した）。
+- **CUDA/Metal での `release_all_pooled` 実機検証**: #175 系の `#[ignore]`
+  実機テスト整備に委ねる（`PooledMemory` 層 API はバックエンド非依存の
+  ため、本イシューでは CPU 統合テストで受け入れ条件を充足する）。

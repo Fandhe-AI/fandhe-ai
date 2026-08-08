@@ -85,12 +85,14 @@
 //! （`buffer.rs` モジュールコメント「空テンソル（numel == 0）の契約」を
 //! `PooledMemory` でも維持する）。
 //!
-//! # #202 向け内部解放フック
+//! # 明示解放 API（REQ-14 14-3・#202）
 //!
-//! 明示解放 API の公開・係数維持テストは #202 のスコープである。本モジュール
-//! は `PoolCore::clear_all`（`pub(crate)`）としてプール全保持分を即座に
-//! 解放する内部フックのみ用意し、公開 API 化（`PooledMemory` からの
-//! `pub` メソッド追加）は #202 に委ねる。
+//! [`PooledMemory::release_all_pooled`] はプールがアイドル保持している
+//! 全バッファを即座に実解放する公開 API である（`PoolCore::clear_all` を
+//! 呼ぶ）。貸出中（生存中の `DeviceBuffer`）のバッファには影響しない
+//! （`PoolCore` はアイドル分〈`buckets`〉のみを保持するため）。解放後も
+//! `PooledMemory` 自体は引き続き利用可能（`config` は維持され、以後の
+//! `alloc_zeroed` は通常どおりプールへ蓄積を再開する）。
 
 use std::any::Any;
 use std::collections::{BTreeMap, VecDeque};
@@ -239,21 +241,28 @@ impl PoolCore {
         self.total_bytes
     }
 
-    /// プール保持分を即座に全て解放する内部フック（モジュール冒頭
-    /// 「#202 向け内部解放フック」参照）。`pub(crate)` に留め、公開 API
-    /// 化は #202 に委ねる。
+    /// プール保持分を即座に全て解放する内部フック（[`PooledMemory::release_all_pooled`]
+    /// の実体。REQ-14 14-3 の明示解放 API。公開済み・#202）。戻り値は解放した
+    /// バイト数（呼び出し前の `total_bytes`）。
     ///
-    /// `#[allow(dead_code)]` の理由: 本イシュー（#201）では `PooledMemory`
-    /// 側に本フックを呼ぶ公開メソッドをまだ追加しない（明示解放 API の
-    /// 設計・係数維持テストは #202 のスコープ）ため、現時点で呼び出し元が
-    /// 存在せず構造的に未使用となる。安易な黙らせではなく、#202 が
-    /// `PooledMemory::release_all_pooled` 等の公開メソッドからこの
-    /// `pub(crate)` 関数を呼ぶまでの一時的な状態であることを明示する。
-    #[allow(dead_code)]
-    pub(crate) fn clear_all(&mut self) {
+    /// `self.buckets.clear()` は各バケットの `VecDeque<PoolEntry>` を drop し、
+    /// 内包する `Box<dyn BufferHandle>` も連鎖して drop される。この `drop`
+    /// が各バックエンドの `TrackedAllocation::drop`（`memory_stats` モジュール
+    /// 参照）を経由して `AllocationTracker::allocated_bytes` を即座に減算する
+    /// （モジュール冒頭「計測反映」節と同じ機構。追加実装不要）。
+    ///
+    /// 呼び出し元は `PooledMemory::release_all_pooled`（`self.core.lock()` で
+    /// `PoolCore` のロックを保持しつつ本メソッドを呼ぶ）のみである。
+    /// `PoolEntry.handle` は常にバックエンド具体ハンドル（`inner`。
+    /// `PooledBufferHandle::drop` はプールへ返却する際 `self.inner` のみを
+    /// push し、`PooledBufferHandle` 自身を push することはない）であるため、
+    /// ここでの drop がこの `Mutex` へ再入することは構造的に起きない。
+    pub(crate) fn clear_all(&mut self) -> u64 {
+        let freed = self.total_bytes;
         self.buckets.clear();
         self.order.clear();
         self.total_bytes = 0;
+        freed
     }
 }
 
@@ -423,6 +432,24 @@ impl<M> PooledMemory<M> {
         match self.core.lock() {
             Ok(core) => core.total_bytes(),
             Err(poisoned) => poisoned.into_inner().total_bytes(),
+        }
+    }
+
+    /// プールがアイドル保持している全バッファを即座に実解放する
+    /// （REQ-14 14-3 の明示解放 API。モジュール冒頭「明示解放 API」参照）。
+    /// 戻り値は解放したバイト数。貸出中（生存中の `DeviceBuffer`）の
+    /// バッファには影響しない。解放後もプールは引き続き利用可能
+    /// （`config` は維持される）。
+    ///
+    /// lock poisoning 時も `pooled_bytes`／`try_acquire` と同じ方針
+    /// （`memory_stats::AllocationTracker::lock` と同種）でそのまま処理を
+    /// 継続する（本トラッカーは構造体状態の破壊が起きない操作のみを
+    /// 行うため。`.claude/rules/coding-rust.md`「本番経路で `unwrap()` を
+    /// 使わない」方針）。
+    pub fn release_all_pooled(&self) -> u64 {
+        match self.core.lock() {
+            Ok(mut core) => core.clear_all(),
+            Err(poisoned) => poisoned.into_inner().clear_all(),
         }
     }
 
@@ -825,5 +852,96 @@ mod tests {
             256,
             "peak はこのシナリオでは同時生存が 256 バイトを超えないため据え置き"
         );
+    }
+
+    /// `release_all_pooled` がアイドル保持分を即座に実解放することを検証する
+    /// （#202 受け入れ条件そのものの tensor-core 側単体検証）。
+    /// `allocated_bytes() == 0` は `MockHandle` 内の `TrackedAllocation` が
+    /// 実際に `Drop` されたことの直接証拠であり（`memory_stats` の契約:
+    /// `on_free` は `TrackedAllocation::drop` からのみ呼ばれる）、追加の
+    /// フラグを持ち出さずとも実解放を裏付ける。
+    #[test]
+    fn release_all_pooled_frees_idle_buffers_immediately() {
+        let mem = PooledMemory::new(MockMemory::new(), Device::Cpu, PoolConfig::default());
+
+        let buf_a = mem.alloc_zeroed(&[64]).unwrap(); // 256 バイト
+        let buf_b = mem.alloc_zeroed(&[128]).unwrap(); // 512 バイト（別バケット）
+        drop(buf_a);
+        drop(buf_b);
+        assert_eq!(mem.pooled_bytes(), 256 + 512);
+        assert_eq!(mem.allocated_bytes(), 256 + 512);
+
+        let freed = mem.release_all_pooled();
+        assert_eq!(
+            freed, 768,
+            "戻り値は解放したバイト数（呼び出し前の pooled_bytes）のはず"
+        );
+        assert_eq!(mem.pooled_bytes(), 0, "解放後はアイドル保持が空になるはず");
+        assert_eq!(
+            mem.allocated_bytes(),
+            0,
+            "解放後は内部ハンドルが Drop され allocated_bytes が即座に 0 になるはず"
+        );
+    }
+
+    /// 貸出中（生存中）のバッファは `release_all_pooled` の影響を受けない
+    /// ことを検証する。
+    #[test]
+    fn release_all_pooled_does_not_affect_live_buffers() {
+        let mem = PooledMemory::new(MockMemory::new(), Device::Cpu, PoolConfig::default());
+
+        let idle = mem.alloc_zeroed(&[64]).unwrap(); // 256 バイト
+        drop(idle); // プールへ返却（アイドル化）
+        let live = mem.alloc_zeroed(&[128]).unwrap(); // 512 バイト・生存中のまま保持
+        assert_eq!(mem.allocated_bytes(), 256 + 512);
+
+        let freed = mem.release_all_pooled();
+        assert_eq!(freed, 256, "アイドル保持分（256 バイト）のみ解放されるはず");
+        assert_eq!(
+            mem.allocated_bytes(),
+            512,
+            "生存中バッファの分は解放されず残るはず"
+        );
+
+        // 生存バッファは解放後も無事に download 可能であるはず。
+        let tensor = mem.download(&live).unwrap();
+        assert_eq!(tensor.shape(), &[128]);
+        drop(live);
+    }
+
+    /// 解放後もプールが再び通常どおり再利用可能であることを検証する
+    /// （`config` が維持され、alloc → drop → alloc で再度プール再利用が
+    /// 効く回帰）。
+    #[test]
+    fn pool_remains_usable_after_release() {
+        let mem = PooledMemory::new(MockMemory::new(), Device::Cpu, PoolConfig::default());
+
+        let buf1 = mem.alloc_zeroed(&[64]).unwrap();
+        drop(buf1);
+        mem.release_all_pooled();
+        assert_eq!(mem.pooled_bytes(), 0);
+
+        let alloc_count_before = mem.inner().alloc_count.get();
+        let buf2 = mem.alloc_zeroed(&[64]).unwrap(); // 解放済みのため新規確保
+        assert_eq!(mem.inner().alloc_count.get(), alloc_count_before + 1);
+        drop(buf2); // プールへ返却
+        assert_eq!(mem.pooled_bytes(), 256);
+
+        let alloc_count_before2 = mem.inner().alloc_count.get();
+        let buf3 = mem.alloc_zeroed(&[64]).unwrap(); // 今度は再利用されるはず
+        assert_eq!(
+            mem.inner().alloc_count.get(),
+            alloc_count_before2,
+            "release_all_pooled 後も通常のプール再利用は機能し続けるはず"
+        );
+        drop(buf3);
+    }
+
+    /// 空プールへの `release_all_pooled` は 0 を返し panic しないことを
+    /// 検証する。
+    #[test]
+    fn release_on_empty_pool_returns_zero() {
+        let mem = PooledMemory::new(MockMemory::new(), Device::Cpu, PoolConfig::default());
+        assert_eq!(mem.release_all_pooled(), 0);
     }
 }

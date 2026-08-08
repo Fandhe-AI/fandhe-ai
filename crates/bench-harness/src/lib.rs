@@ -71,10 +71,25 @@
 //! 合否判定は利用側の TASK-8.2a（#152）が本モジュールを呼び出して行う想定であり、本モジュール
 //! 自体は下限値を保持しない。
 
+//! ## TASK-13.1a: 起動コスト計測ハーネス（本イシュー #170 の実装範囲）
+//!
+//! [`startup`] モジュールが、プロセス起動〜初回カーネル完了までのコストを
+//! コールド／ウォーム双方で再現可能に計測するハーネス（[`startup::run_phase`]）を提供する。
+//! v1（CubeCL/Burn 前提）はウォーム時 約 1.9〜2.7 倍・コールド時 約 21〜24 倍
+//! （PyTorch 比。PoC-5）の起動コストを観測していたが、v2 自作カーネル（CUDA は NVRTC
+//! 実行時コンパイル・autotune 探索なし）は前提が異なるため、コールド／ウォームの定義を
+//! v2 向けに再設計している（[`startup`] モジュールドキュメント参照）。
+//!
+//! 計測される側の probe バイナリは `src/bin/startup_probe.rs`、計測を駆動する CLI は
+//! `src/bin/startup_bench.rs`（`make startup-bench` から起動。`Makefile` 参照）。
+//! 実測の実施・v1 実測値との差分記録は兄弟イシュー #171（TASK-13.1b）のスコープであり、
+//! 本イシューはハーネス整備のみを行う。
+
 mod protocol;
 mod report;
 pub mod rng;
 mod rounding;
+pub mod startup;
 mod stats;
 pub mod sync;
 mod threshold;
