@@ -922,6 +922,48 @@ mod tests {
         }
     }
 
+    /// `run_probe_once_with_timeout` を呼び出し、直後の `Command::spawn` が
+    /// `ETXTBSY`（"Text file busy"、os error 26）で失敗した場合のみ短い待機を
+    /// 挟んで再試行するテスト専用ヘルパー。原因はプロセス内競合である:
+    /// `cargo test` は本テストを含む複数テストを並列スレッドで実行しており、
+    /// あるスレッドの `Command::spawn`（`fork` 直後・`execve` 直前）が、別の
+    /// スレッドが自分自身の一時スクリプトへ `std::fs::write` で書き込み用に
+    /// 開いている fd を `fork` によって一時的に継承した状態と重なると、
+    /// カーネルは「そのスクリプト実行ファイルが書き込み用に開かれている」と
+    /// 見なし `ETXTBSY` を返す（`fork` で継承された fd は `execve` まで
+    /// `CLOEXEC` が効かないため。Go 標準ライブラリ `os/exec` が同種の競合に
+    /// 対し再試行するのと同じ理由。issue #180 PR #369 CI 実測、
+    /// run 31241160310）。`ProbeTimeout` を検証したい本来のアサーションを、
+    /// このプロセス内競合による一過性の `ETXTBSY` で揺らさないための再試行に
+    /// 限定し、それ以外のエラーは即座に返す。
+    fn run_probe_once_with_retry_on_text_file_busy(
+        config: &StartupConfig,
+        timeout: Duration,
+    ) -> Result<StartupTrial, StartupError> {
+        const MAX_ATTEMPTS: u32 = 5;
+        const RETRY_BACKOFF: Duration = Duration::from_millis(50);
+
+        let mut last_err = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            match run_probe_once_with_timeout(config, None, timeout) {
+                Ok(outcome) => return Ok(outcome),
+                // "os error 26" は libc の strerror ではなく Rust `io::Error` の
+                // Display 実装が付与する固定サフィックスであるため、runner の
+                // ロケール設定に左右されず判定できる。
+                Err(StartupError::Io(msg)) if msg.contains("os error 26") => {
+                    eprintln!(
+                        "retry {}/{MAX_ATTEMPTS}: probe 起動が ETXTBSY で失敗（{msg}）。再試行する",
+                        attempt + 1
+                    );
+                    last_err = Some(StartupError::Io(msg));
+                    std::thread::sleep(RETRY_BACKOFF);
+                }
+                other => return other,
+            }
+        }
+        Err(last_err.expect("MAX_ATTEMPTS > 0 のため必ず Some"))
+    }
+
     /// PR #360 codex-review 指摘 P1 の回帰テスト: `read_capped` は上限以下の入力を
     /// 全量そのまま読み取り、超過フラグを立てない。
     #[test]
@@ -1005,7 +1047,8 @@ mod tests {
 
         let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
         let started = Instant::now();
-        let result = run_probe_once_with_timeout(&config, None, Duration::from_millis(200));
+        let result =
+            run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
         let elapsed = started.elapsed();
 
         let _ = std::fs::remove_file(&script_path);
@@ -1059,7 +1102,8 @@ mod tests {
 
         let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
         let started = Instant::now();
-        let result = run_probe_once_with_timeout(&config, None, Duration::from_millis(200));
+        let result =
+            run_probe_once_with_retry_on_text_file_busy(&config, Duration::from_millis(200));
         let elapsed = started.elapsed();
 
         let _ = std::fs::remove_file(&script_path);
