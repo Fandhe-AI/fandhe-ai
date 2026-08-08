@@ -143,15 +143,14 @@ const O_NOFOLLOW: i32 = 0x0100;
 /// [`reject_symlink_escape`] の逐次コンポーネント検査が主防御であり、本関数は
 /// 末尾コンポーネントに対する第 2 層の防御に留まる）。
 ///
-/// 非 unix（Windows 等）は `O_NOFOLLOW` 相当の open flag が標準ライブラリ
-/// 経由で利用できないため、`fs::remove_file`（symlink 自体を削除し指す先を
-/// 追跡しない）で既存パスを事前除去してから `OpenOptions::create_new`
-/// （`O_CREAT|O_EXCL` 相当。既存パス〈symlink 含む〉が新たに現れれば必ず
-/// 失敗する）で新規作成する。remove から create の間に別プロセスが symlink を
-/// 再設置する狭いレースは残るが、書き込み後に `symlink_metadata` で検知する
-/// だけの方式（対象が symlink なら既に追跡済みで書き込みが完了した後）より
-/// 強い防止になる。
-#[cfg(unix)]
+/// `O_NOFOLLOW` の値定義は Linux・macOS のみ持つ（[`O_NOFOLLOW`] doc 参照）。
+/// これ以外の全ターゲット（FreeBSD 等の他 Unix・Windows）は
+/// [`write_via_temp_rename`] へフォールバックする（PR #361 codex-review
+/// 指摘 1・2: 旧実装は `#[cfg(not(unix))]` で `O_NOFOLLOW` 定義のないターゲット
+/// を含む Unix 全般をこの cfg で誤って捕捉しビルド不能にしていた上、
+/// フォールバック自体も `remove_file` → `create_new` の順で失敗時に元ファイル
+/// を失う実装だった）。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn write_no_follow_symlink(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt;
@@ -164,29 +163,125 @@ fn write_no_follow_symlink(path: &Path, content: &str) -> std::io::Result<()> {
     file.write_all(content.as_bytes())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn write_no_follow_symlink(path: &Path, content: &str) -> std::io::Result<()> {
-    let _ = fs::remove_file(path);
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    write_via_temp_rename(path, content)
+}
+
+/// [`write_no_follow_symlink`] の Linux/macOS 以外向けフォールバック本体
+/// （PR #361 codex-review 指摘 2 対応）。
+///
+/// `path` と同一ディレクトリに一意名の一時ファイルを `create_new`
+/// （`O_CREAT|O_EXCL` 相当。既存パスがあれば必ず失敗する）で作成し全量書き込み
+/// ＋ flush した後、`path` を `fs::rename` で置換する。書き込み・flush・
+/// rename 前 symlink 再検査のいずれかが失敗した場合は一時ファイルを削除し
+/// `path` には一切触れないため、旧実装（`remove_file` 先行）と異なり失敗時に
+/// 元ファイルを喪失しない。
+///
+/// rename 直前の `symlink_metadata` 再検査は
+/// [`reject_symlink_escape`] の事前検査と本関数呼び出しの間の TOCTOU window
+/// を縮小する防御であり、`fs::rename` 自体が対象パスの symlink を追跡しない
+/// （symlink エントリ自体を置き換える）ため、この再検査を通過せず symlink の
+/// 指す先が書き換わることはそもそもない。再検査は fail-closed の早期拒否に
+/// 過ぎない。
+///
+/// 注意: `fs::rename` は新しい inode で置換するため、`path` の既存パーミッション・
+/// 所有者は引き継がれない。self-repair の候補適用はユーザー所有の workspace
+/// 内ファイルへの書き込みに限られ、パーミッション・所有権の保持は要件外
+/// （baseline 復元・候補適用いずれも内容の一致のみを検証する）のため許容する。
+///
+/// `#[cfg(test)]` でも Linux/macOS 上でコンパイル対象に含める。フォールバック
+/// 経路は通常ビルドでは非対象 OS 上でしか使われず CI（Linux self-hosted）では
+/// 検証されないため、テストのみこの関数を直接呼び動作を固定する
+/// （下記 `write_via_temp_rename_*` テスト参照）。
+#[cfg(any(test, not(any(target_os = "linux", target_os = "macos"))))]
+fn write_via_temp_rename(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write as _;
-    file.write_all(content.as_bytes())
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::other(format!(
+            "書き込み先パスにファイル名がありません: {}",
+            path.display()
+        ))
+    })?;
+
+    // 一意な一時ファイル名を生成する。プロセス ID だけでは同一プロセス内の
+    // 複数呼び出し（`apply_candidate` の baseline 復元・候補適用の連続呼び出し
+    // 等）で衝突しうるため単調カウンタも混ぜ、`create_new` が
+    // `AlreadyExists` を返した場合はカウンタを進めて再試行する。
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mut last_error = None;
+    for _ in 0..8 {
+        let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp_path = parent.join(format!(
+            ".{}.tmp-{}-{counter}",
+            file_name.to_string_lossy(),
+            std::process::id()
+        ));
+
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+
+        if let Err(error) = file
+            .write_all(content.as_bytes())
+            .and_then(|()| file.flush())
+        {
+            drop(file);
+            let _ = fs::remove_file(&tmp_path);
+            return Err(error);
+        }
+        drop(file);
+
+        // rename 直前の symlink 再検査（TOCTOU window 縮小。上記 doc 参照）。
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(std::io::Error::other(format!(
+                    "書き込み先が symlink です（追跡を拒否します）: {}",
+                    path.display()
+                )));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(error);
+            }
+        }
+
+        return fs::rename(&tmp_path, path).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp_path);
+        });
+    }
+    Err(last_error.unwrap_or_else(|| {
+        std::io::Error::other("一時ファイル名の生成に失敗しました（再試行上限超過）")
+    }))
 }
 
 /// [`write_no_follow_symlink`] の読み込み版（baseline スナップショット取得に
 /// 使う。`bug_fix.rs`／`feature_addition.rs`／[`CandidateFixGenerator::new`] の
 /// 全 baseline 読み込み経路から呼ばれる）。
 ///
-/// unix は `O_NOFOLLOW` 付き open で末尾コンポーネントの symlink 追跡を拒否
-/// する。非 unix は読み込み対象を消すわけにいかないため
-/// `write_no_follow_symlink` と同じ remove-then-create の手は使えず、
+/// Linux・macOS（`O_NOFOLLOW` の値定義を持つターゲット。[`O_NOFOLLOW`] doc
+/// 参照）は `O_NOFOLLOW` 付き open で末尾コンポーネントの symlink 追跡を拒否
+/// する。それ以外（FreeBSD 等の他 Unix・Windows）は読み込み対象を消すわけに
+/// いかないため [`write_via_temp_rename`] と同じ一時ファイル方式は使えず、
 /// [`reject_symlink_escape`] の事前検査のみに依拠する残存 TOCTOU window が
 /// ある。この window は「symlink の指す先の内容が baseline へ取り込まれる」
 /// （workspace 内へ content が入ってくる方向）に留まり、書き込み経路
 /// （workspace 外への書き込み）より影響が限定的なため許容する。
-#[cfg(unix)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn read_no_follow_symlink(path: &Path) -> std::io::Result<String> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = fs::OpenOptions::new()
@@ -198,7 +293,7 @@ pub(crate) fn read_no_follow_symlink(path: &Path) -> std::io::Result<String> {
     Ok(content)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub(crate) fn read_no_follow_symlink(path: &Path) -> std::io::Result<String> {
     fs::read_to_string(path)
 }
@@ -661,6 +756,110 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&target).expect("read should succeed"),
             "content"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // Linux/macOS 以外向けフォールバック（`write_via_temp_rename`）の動作固定
+    // （PR #361 codex-review 指摘 2 の回帰防止）。フォールバックは通常ビルド
+    // では非対象 OS 上でしか使われないため、`#[cfg(test)]` により Linux
+    // 上でも直接呼んで検証する（`write_via_temp_rename` の doc 参照）。
+    #[test]
+    fn write_via_temp_rename_replaces_existing_file_and_cleans_up_temp() {
+        let dir = temp_workspace("temp-rename-replace");
+        let target = dir.join("target.txt");
+        fs::write(&target, "original").expect("write should succeed in test setup");
+
+        write_via_temp_rename(&target, "replaced").expect("write should succeed");
+        assert_eq!(
+            fs::read_to_string(&target).expect("read should succeed"),
+            "replaced"
+        );
+
+        // 一時ファイルが残存していないことを確認する（cleanup バグの回帰防止）。
+        let leftover_tmp_entries: Vec<_> = fs::read_dir(&dir)
+            .expect("read_dir should succeed")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".target.txt.tmp-")
+            })
+            .collect();
+        assert!(
+            leftover_tmp_entries.is_empty(),
+            "一時ファイルが残存しています: {leftover_tmp_entries:?}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_via_temp_rename_rejects_symlink_target_without_touching_outside_file() {
+        // `fs::rename` 自体は symlink を追跡しないため書き込み経路として
+        // 安全だが、rename 直前の `symlink_metadata` 再検査により早期に
+        // fail-closed で拒否することを確認する（`write_via_temp_rename` doc
+        // 参照）。
+        let dir = temp_workspace("temp-rename-reject-symlink");
+        let outside_dir = temp_workspace("temp-rename-reject-symlink-outside");
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, "do-not-overwrite").expect("write should succeed in test setup");
+
+        let target = dir.join("target.txt");
+        std::os::unix::fs::symlink(&outside_file, &target)
+            .expect("symlink creation should succeed in test setup");
+
+        let result = write_via_temp_rename(&target, "pwned");
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_file).expect("read should succeed"),
+            "do-not-overwrite"
+        );
+        // symlink 自体もこの経路で書き換わっていないことを確認する。
+        assert!(
+            fs::symlink_metadata(&target)
+                .expect("symlink_metadata should succeed")
+                .file_type()
+                .is_symlink()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    #[test]
+    fn write_via_temp_rename_on_rename_failure_keeps_destination_and_removes_temp() {
+        // `write_via_temp_rename` doc の「失敗時は一時ファイルを削除し `path`
+        // には一切触れない」を固定する（PR #361 codex-review 指摘 2 の
+        // 核心）。書き込み先を空でないディレクトリにすると `fs::rename`
+        // （通常ファイル → ディレクトリ）が root 権限下でも決定的に失敗する
+        // （`EISDIR` 相当）ため、chmod によるパーミッション操作
+        // （root では無視され得るため不採用）より確実にロールバック経路を
+        // 駆動できる。
+        let dir = temp_workspace("temp-rename-failure");
+        let dest = dir.join("target");
+        fs::create_dir_all(&dest).expect("create_dir_all should succeed in test setup");
+        fs::write(dest.join("keep.txt"), "keep").expect("write should succeed in test setup");
+
+        let result = write_via_temp_rename(&dest, "pwned");
+        assert!(result.is_err());
+        // 置換先ディレクトリの既存内容が無傷であることを確認する。
+        assert_eq!(
+            fs::read_to_string(dest.join("keep.txt")).expect("read should succeed"),
+            "keep"
+        );
+        // 一時ファイルが残存していないことを確認する。
+        let leftover_tmp_entries: Vec<_> = fs::read_dir(&dir)
+            .expect("read_dir should succeed")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".target.tmp-"))
+            .collect();
+        assert!(
+            leftover_tmp_entries.is_empty(),
+            "一時ファイルが残存しています: {leftover_tmp_entries:?}"
         );
 
         let _ = fs::remove_dir_all(&dir);
