@@ -237,6 +237,15 @@ impl Drop for RunSandbox {
 /// 一切触れずにエラーを返す（呼び出し元 `main.rs` が sandbox のパスを
 /// エラーメッセージに含めて調査可能にする）。検査を通過した場合のみ実際に
 /// 適用する。
+///
+/// # 空 diff は `Err` を返す（fail-closed。PR #361 codex-review 第 4 波 P1 指摘）
+/// `LoopOutcome::Adopted` は「baseline との非空差分が存在する」ことを前提とする
+/// 状態のはずだが、その前提はこの関数の外側（採用判定・検証ゲート）では型で
+/// 保証されていない。過去の実装は空 diff を「反映不要」として `Ok(())` を返して
+/// いたが、これは「反映すべき差分がない」ケースと「反映に成功した」ケースを
+/// 呼び出し元から区別不能にし、`--repo` を一切変更しないまま exit 0（修復成功）
+/// を報告しうる欠陥だった。本実装は空 diff を契約違反として明示的に `Err` を
+/// 返し、`main.rs::run_run` が内部エラー区分（exit 1）へ写像する。
 pub fn reflect_adopted_diff(
     repo: &Path,
     sandbox: &Path,
@@ -254,11 +263,21 @@ pub fn reflect_adopted_diff(
         ],
     )?;
     if patch.is_empty() {
-        // 採用された候補が baseline と差分を持たない（理論上は
-        // `RepairCompositeGate` の 4 シグナル実測・build/test/clippy が
-        // すべて空 diff で通過することはないはずだが、念のため反映不要として
-        // fail-closed に早期 return する。`repo` には一切触れない）。
-        return Ok(());
+        // 空 diff は契約違反として明示的に失敗させる（fail-closed）。
+        //
+        // `LoopOutcome::Adopted` は「採用された変更が存在する」ことを前提とする
+        // 状態のはずだが、その前提はこの関数の外側（採用判定・検証ゲート）では
+        // 型で保証されていない。ここで `Ok(())` を返すと、呼び出し元
+        // `main.rs::run_run` は「反映すべき差分がない」ことと「反映に成功した」
+        // ことを区別できず、`--repo` を一切変更しないまま exit 0（修復成功）を
+        // 報告してしまう（PR #361 codex-review 第 4 波 P1 指摘）。
+        // それを防ぐため、空 diff の Adopted は呼び出し元がエラーとして検知
+        // できるよう明示的に `Err` を返す。
+        return Err(
+            "反映対象の差分が空です（Adopted 候補は baseline と非空の差分を持つ前提が破れて\
+             います）。--repo は変更していません"
+                .to_string(),
+        );
     }
     apply_patch(repo, &patch, true)?;
     apply_patch(repo, &patch, false)
@@ -509,6 +528,43 @@ mod tests {
         assert_eq!(
             dirty_before, dirty_after,
             "反映失敗時は --repo の作業ツリーが一切変化してはならない"
+        );
+
+        sandbox.keep();
+        let _ = fs::remove_dir_all(sandbox.root());
+        let _ = fs::remove_dir_all(&repo);
+    }
+
+    /// P1 回帰防止（PR #361 codex-review 第 4 波指摘）: sandbox の作業木が
+    /// `baseline_commit` と同一（空 diff）の場合、`reflect_adopted_diff` は
+    /// `Ok(())` を返さず fail-closed に `Err` を返す。空 diff の `Adopted` を
+    /// 「反映不要の成功」として扱うと、`--repo` を一切変更しないまま
+    /// exit 0（修復成功）を報告できてしまうため（`main.rs::run_run` は
+    /// この `Err` を内部エラー区分 exit 1 へ写像する）。
+    #[test]
+    fn reflect_adopted_diff_rejects_empty_diff_instead_of_reporting_success() {
+        let repo = unique_test_dir("reflect-empty-diff-source");
+        init_repo(&repo);
+        fs::write(repo.join("a.txt"), "baseline\n").expect("a.txt 書き込みに失敗");
+        git_commit_all(&repo, "baseline commit");
+        let baseline = head_commit(&repo);
+
+        // sandbox は作成直後（baseline と同一内容）のまま何も変更しない。
+        let mut sandbox = RunSandbox::create(&repo, &baseline).expect("RunSandbox::create に失敗");
+
+        let before =
+            fs::read_to_string(repo.join("a.txt")).expect("--repo の a.txt 読み取りに失敗");
+
+        let result = reflect_adopted_diff(&repo, sandbox.root(), &baseline);
+        assert!(
+            result.is_err(),
+            "sandbox と baseline が同一（空 diff）の場合は Err を返すはず"
+        );
+
+        let after = fs::read_to_string(repo.join("a.txt")).expect("--repo の a.txt 読み取りに失敗");
+        assert_eq!(
+            before, after,
+            "空 diff のエラー経路では --repo の作業ツリーが一切変化してはならない"
         );
 
         sandbox.keep();
