@@ -29,6 +29,7 @@ use crate::error::CudaError;
 use tensor_core::Tensor;
 use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use tensor_core::device::{BackendError, Device};
+use tensor_core::pool::PoolZeroFill;
 
 /// CUDA バッファの具体ハンドル。
 ///
@@ -44,6 +45,10 @@ struct CudaBufferHandle {
 
 impl BufferHandle for CudaBufferHandle {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
@@ -221,6 +226,31 @@ impl MemoryOps for CudaMemory {
             return Err(BackendError::DeviceMismatch);
         }
         self.download_inner(buffer).map_err(map_cuda_error)
+    }
+}
+
+/// `tensor_core::pool::PooledMemory<CudaMemory>`（TASK-#201・REQ-14 14-3。
+/// CUDA 側の組み込みは本イシューのスコープ内。計測反映の実機検証は #175
+/// 完了後）が再利用バッファを返す前に呼ぶゼロ初期化フック。
+/// `CudaStream::memset_zeros`（`cudarc-0.19.8/src/driver/safe/core.rs`）で
+/// デバイス側のメモリを直接ゼロクリアする（ホスト往復なし。`alloc_zeros`
+/// と同じストリーム上の非同期メモリ操作）。
+impl PoolZeroFill for CudaMemory {
+    fn zero_fill(&self, handle: &mut dyn BufferHandle) -> Result<(), BackendError> {
+        let Some(cuda_handle) = handle.as_any_mut().downcast_mut::<CudaBufferHandle>() else {
+            return Err(BackendError::DeviceMismatch);
+        };
+        // 空ハンドル（`numel == 0`）は `pool.rs::PooledMemory::alloc_zeroed`
+        // が空テンソル契約によりそもそもプールを介さない経路で扱うため
+        // 到達しない想定だが、`CudaBufferHandle::slice` が `None` の場合に
+        // 備えて no-op として安全に振る舞う（`buffer.rs` モジュールコメント
+        // 「空テンソルの契約」と同じ扱い）。
+        let Some(slice) = cuda_handle.slice.as_mut() else {
+            return Ok(());
+        };
+        self.stream
+            .memset_zeros(slice)
+            .map_err(|e| BackendError::DeviceAllocationFailed(format!("{e:?}")))
     }
 }
 
