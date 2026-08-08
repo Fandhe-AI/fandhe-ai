@@ -65,6 +65,11 @@
 //!   スキーマ検証を経ずに生値へアクセスできる経路は設けない（A03・A08）。
 //! - 一時キャッシュディレクトリは一意名で [`std::fs::create_dir`]（既存なら失敗）し、
 //!   予測可能パスの事前作成・シンボリックリンク差し替えによる書き込み先誘導を排除する（A01）。
+//! - probe 1 回の実行は [`PROBE_TIMEOUT`] を上限とし、`mpsc::Receiver::recv_timeout` で
+//!   監視する。GPU ドライバ・カーネル停止等により probe が生存したまま無出力になっても
+//!   `run_probe_once`（延いては `startup_bench`）が無期限にハングしないよう、上限超過時は
+//!   子プロセスを kill・reap して型付きエラー（[`StartupError::ProbeTimeout`]）を返す
+//!   （PR #360 codex-review 指摘 P1）。
 
 use crate::stats::{self, BenchError as StatsError};
 use serde::{Deserialize, Serialize};
@@ -74,7 +79,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// [`StartupReport`] の JSON スキーマバージョン（`report::SCHEMA_VERSION` と同じ手法。
 /// 未知バージョンは [`StartupReport::validate`] が fail-closed で拒否する）。
@@ -104,6 +109,19 @@ const PROBE_STDOUT_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
 /// 異常終了時の `ProbeExitFailure` 生成経路がメモリ膨張に無防備だった。PR #360 指摘 P1）。
 const PROBE_STDERR_LIMIT_BYTES: usize = 1 << 20; // 1 MiB
 
+/// probe 子プロセス 1 回の起動あたりに許容する最大経過時間。
+///
+/// [`run_probe_once`] は stdout／stderr 読み取りスレッドからの通知を [`mpsc::Receiver::recv_timeout`]
+/// で待ち受け、`start`（`Command::spawn` 直後）からの経過がこの上限を超えた時点で
+/// [`StartupError::ProbeTimeout`] を返す。無条件の `rx.recv()`（タイムアウトなし）は、
+/// GPU ドライバ・カーネル側が停止し probe プロセスが生存したまま無出力（stdout／stderr
+/// いずれのパイプも EOF に至らない）になった場合、読み取りスレッドの `read()` 自体が
+/// 戻ってこないため `run_probe_once`（延いては `startup_bench` 全体）を無期限にハングさせる
+/// （PR #360 codex-review 指摘 P1）。上限超過を検知した時点で [`std::process::Child::kill`]・
+/// `wait` により子プロセスを回収し、パイプの書き込み端を閉じることで読み取りスレッドの
+/// `read()` に EOF を届けて終了させる（`ProbeOutputTooLarge` 経路と同じ回収パターン）。
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// コールド／ウォームの試行間で使う一意なディレクトリ名を採番するカウンタ。
 /// プロセス内で複数フェーズ・複数試行を実行しても衝突しないよう、
 /// タイムスタンプ（ナノ秒）・プロセス ID に加えて用いる（`scratch_dir` 参照）。
@@ -123,6 +141,9 @@ pub enum StartupError {
     ProbeExitFailure { status: String, stderr: String },
     /// probe 標準出力が [`PROBE_STDOUT_LIMIT_BYTES`] を超過した。
     ProbeOutputTooLarge(usize),
+    /// probe の 1 回の実行が [`PROBE_TIMEOUT`] を超過した（GPU ドライバ・カーネル停止等による
+    /// ハングを検知し、子プロセスを kill・reap した後に返す）。
+    ProbeTimeout(Duration),
     /// probe 標準出力の JSON デコードに失敗した。
     ProbeJsonInvalid(String),
     /// スキーマバージョン不一致・値域逸脱などプロトコル違反（fail-closed 拒否）。
@@ -141,6 +162,9 @@ impl fmt::Display for StartupError {
             }
             StartupError::ProbeOutputTooLarge(len) => {
                 write!(f, "probe 標準出力が上限を超過（{len} バイト）")
+            }
+            StartupError::ProbeTimeout(timeout) => {
+                write!(f, "probe の実行が上限時間を超過（{timeout:?}）")
             }
             StartupError::ProbeJsonInvalid(msg) => {
                 write!(f, "probe 標準出力の JSON 解析失敗: {msg}")
@@ -598,6 +622,17 @@ fn run_probe_once(
     config: &StartupConfig,
     cache_dir: Option<&Path>,
 ) -> Result<StartupTrial, StartupError> {
+    run_probe_once_with_timeout(config, cache_dir, PROBE_TIMEOUT)
+}
+
+/// [`run_probe_once`] の本体。`timeout` を外部から注入できるようにし、テストが
+/// [`PROBE_TIMEOUT`]（既定 60 秒）を待たずにタイムアウト経路を再現できるようにする
+/// （`tests` モジュール `run_probe_once_rejects_probe_that_hangs_without_output` 参照）。
+fn run_probe_once_with_timeout(
+    config: &StartupConfig,
+    cache_dir: Option<&Path>,
+    timeout: Duration,
+) -> Result<StartupTrial, StartupError> {
     let mut cmd = Command::new(&config.probe_path);
     cmd.arg(config.backend.as_str());
     cmd.stdin(Stdio::null());
@@ -643,26 +678,66 @@ fn run_probe_once(
         let _ = tx.send((ProbeStream::Stderr, result));
     });
 
+    // `start`（spawn 直後）からの絶対期限。`rx.recv()`（タイムアウトなし）ではなく
+    // `recv_timeout` を用いることで、GPU ドライバ・カーネル停止等により probe が
+    // 生存したまま無出力になるケース（読み取りスレッドの `read()` 自体が戻らない）
+    // でも [`PROBE_TIMEOUT`] を超えた時点で確実に制御を取り戻す（PR #360 codex-review
+    // 指摘 P1。関数ドキュメント参照）。
+    let deadline = start + timeout;
     let mut stdout_result: Option<std::io::Result<(Vec<u8>, bool)>> = None;
     let mut stderr_result: Option<std::io::Result<(Vec<u8>, bool)>> = None;
     let mut killed_for_overflow = false;
+    let mut timed_out = false;
     while stdout_result.is_none() || stderr_result.is_none() {
-        let Ok((stream, result)) = rx.recv() else {
-            // 両送信側が（panic 等で）送信せずに drop された。以降は各スレッドの
-            // join エラーとして検出させるためループを抜ける。
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            timed_out = true;
             break;
-        };
-        if matches!(&result, Ok((_, true))) && !killed_for_overflow {
-            // 上限超過を検知した時点で、もう一方のスレッドの完了を待たずに
-            // 子プロセスを kill する（もう一方が子プロセスの EOF 待ちで
-            // ブロックし続けるのを防ぐ）。
-            let _ = child.kill();
-            killed_for_overflow = true;
         }
-        match stream {
-            ProbeStream::Stdout => stdout_result = Some(result),
-            ProbeStream::Stderr => stderr_result = Some(result),
+        match rx.recv_timeout(remaining) {
+            Ok((stream, result)) => {
+                if matches!(&result, Ok((_, true))) && !killed_for_overflow {
+                    // 上限超過を検知した時点で、もう一方のスレッドの完了を待たずに
+                    // 子プロセスを kill する（もう一方が子プロセスの EOF 待ちで
+                    // ブロックし続けるのを防ぐ）。
+                    let _ = child.kill();
+                    killed_for_overflow = true;
+                }
+                match stream {
+                    ProbeStream::Stdout => stdout_result = Some(result),
+                    ProbeStream::Stderr => stderr_result = Some(result),
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                timed_out = true;
+                break;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // 両送信側が（panic 等で）送信せずに drop された。以降は各スレッドの
+                // join エラーとして検出させるためループを抜ける。
+                break;
+            }
         }
+    }
+
+    if timed_out {
+        // 上限時間超過: 直接の子プロセスを kill・reap する（`wait` を挟むことでゾンビ化を
+        // 避ける）。ここで `stdout_handle`/`stderr_handle` を `join` してはならない
+        // （回帰テスト `run_probe_once_returns_probe_timeout_when_process_hangs_without_output`
+        // が実測で確認した通り、直接の子プロセスが自身の子（孫プロセス）へパイプの
+        // 書き込み端 fd を継承させていた場合、直接の子を kill してもパイプは
+        // クローズされず、孫プロセスが生き続ける限り読み取りスレッドの `read()` は
+        // EOF を受け取れず永久に返らない。Rust 標準ライブラリに `JoinHandle` の
+        // タイムアウト付き join は存在しないため、`join` を呼ぶと `ProbeTimeout` の
+        // 意味＝「上限時間で確実に制御を返す」が破綻する）。読み取りスレッドは
+        // join せず切り離し、バックグラウンドで動作したまま関数を抜ける
+        // （最終的にプロセス終了時に回収される。孫プロセスの残存は probe 自体の
+        // 実装バグ・GPU ドライバ側の問題であり、本ハーネス側では検知だけを保証する）。
+        let _ = child.kill();
+        let _ = child.wait();
+        drop(stdout_handle);
+        drop(stderr_handle);
+        return Err(StartupError::ProbeTimeout(start.elapsed()));
     }
 
     stdout_handle
@@ -831,6 +906,53 @@ mod tests {
         assert!(
             matches!(result, Err(StartupError::ProbeOutputTooLarge(_))),
             "unbounded stdout は ProbeOutputTooLarge で拒否されるべき: {result:?}"
+        );
+    }
+
+    /// probe が生存したまま無出力（stdout／stderr いずれも EOF に至らない）になった場合、
+    /// [`run_probe_once`] が無期限にハングせず [`StartupError::ProbeTimeout`] を返し、
+    /// 子プロセスを kill・reap して速やかに制御を返すことを検証する（PR #360 codex-review
+    /// 指摘 P1 の回帰テスト）。GPU ドライバ・カーネル停止による probe ハングを、
+    /// 引数を無視して長時間 `sleep` するシェルスクリプトで模擬する。
+    #[test]
+    fn run_probe_once_returns_probe_timeout_when_process_hangs_without_output() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let script_path = std::env::temp_dir().join(format!(
+            "rust-ai-library-startup-timeout-test-{}-{nanos}.sh",
+            std::process::id()
+        ));
+        // 引数（バックエンド名）を一切参照せず、無出力のまま長時間生存し続ける probe を
+        // 模擬する（`run_probe_once` は probe に対し `config.backend.as_str()` を
+        // 単一引数として渡すが、本スクリプトはそれを無視する）。
+        std::fs::write(&script_path, "#!/bin/sh\nsleep 300\n")
+            .expect("テスト用スクリプトの書き込みに失敗");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("テスト用スクリプトの metadata 取得に失敗")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms)
+                .expect("テスト用スクリプトへの実行権限付与に失敗");
+        }
+
+        let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
+        let started = Instant::now();
+        let result = run_probe_once_with_timeout(&config, None, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        let _ = std::fs::remove_file(&script_path);
+
+        assert!(
+            matches!(result, Err(StartupError::ProbeTimeout(_))),
+            "無出力のままハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "タイムアウト検知後は速やかに制御が返るべき（実際: {elapsed:?}）"
         );
     }
 
