@@ -132,7 +132,7 @@ pub use exec::{CommandOutput, CommandRunner, SystemCommandRunner};
 pub use feature_addition::{FeatureAdditionDetector, FeatureAdditionFixGenerator};
 pub use judge::GuardrailAdoptionJudge;
 pub use kind::RepairKind;
-pub use logging::{LogError, LogWriter, verify_chain};
+pub use logging::{LogError, LogWriter, VerifyChainSummary, verify_chain};
 pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};

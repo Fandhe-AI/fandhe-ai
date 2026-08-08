@@ -31,7 +31,7 @@
 use std::process::ExitCode;
 
 use self_repair::cli::{self, Command, UsageError, VerifyLogArgs};
-use self_repair::{LogError, verify_chain};
+use self_repair::{LogError, VerifyChainSummary, verify_chain};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -47,12 +47,51 @@ fn main() -> ExitCode {
 /// と同一方針。ロジックは lib 側 [`self_repair::verify_chain`] に一本化）。
 fn run_verify_log(args: VerifyLogArgs) -> ExitCode {
     match verify_chain(&args.log) {
-        Ok(()) => {
+        // レコード 0 件は「チェーン検証エラーなし」であって「改竄されていない
+        // ことの証明」ではない（末尾切り詰めで空になったログも同じ結果になる。
+        // `verify_chain` モジュール冒頭ドキュメント参照）。無条件の成功文言では
+        // 誤った安心感を与えるため、外部アンカー突合（docs/self-repair-log-format.md
+        // §7）を促す警告文言に分ける（Review #145 指摘対応）。
+        Ok(summary) if summary.record_count == 0 => {
             println!(
-                "OK: ログチェーンの整合性を確認しました（log={}）",
+                "WARN: ログチェーンにレコードがありません（log={}, records=0）。空ログか末尾切り詰めかは本コマンド単体では区別できません。外部アンカー運用（docs/self-repair-log-format.md 7 節）との突合を確認してください",
                 args.log.display()
             );
             ExitCode::from(0)
+        }
+        // `record_count > 0` の分岐でのみ到達する。`verify_chain` の実装上
+        // `record_count > 0` は `last_seq.is_some()` と等価であり、この分岐に
+        // 限れば `None` は生じない（`unwrap_or_default()` で握り潰すと万一の
+        // 不整合時に `last_seq=0` を誤表示しうるため、`Some` を明示的に照合する）。
+        Ok(VerifyChainSummary {
+            record_count,
+            last_seq: Some(last_seq),
+            last_hash,
+        }) => {
+            // 監査担当者が外部アンカー（書き込み直後に別経路へ記録した最終
+            // hash・seq）と突合できるよう、成功メッセージにレコード件数・
+            // 最終 seq・最終 hash を含める（security.md A08 の意図。
+            // `verify_chain` モジュール冒頭ドキュメント参照）。
+            println!(
+                "OK: ログチェーンの整合性を確認しました（log={}, records={}, last_seq={}, last_hash={}）",
+                args.log.display(),
+                record_count,
+                last_seq,
+                last_hash
+            );
+            ExitCode::from(0)
+        }
+        // record_count > 0 かつ last_seq == None は verify_chain の不変条件上
+        // 到達しないはずだが、将来の実装変更でこの不変条件が崩れた場合に
+        // 静かに誤った「OK」を出さないよう、fail-closed でエラー扱いにする
+        // （security.md A08「判定の迂回経路を作らない」と同じ思想）。
+        Ok(summary) => {
+            eprintln!(
+                "self-repair verify-log: 内部不整合を検知しました（log={}, records={}, last_seq=None）。verify_chain の実装を確認してください",
+                args.log.display(),
+                summary.record_count
+            );
+            ExitCode::from(1)
         }
         Err(err) => report_verify_log_error(&err),
     }

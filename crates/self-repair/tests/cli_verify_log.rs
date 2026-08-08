@@ -51,7 +51,13 @@ fn write_valid_log(path: &std::path::Path) {
         .expect("LoopReport の追記に失敗しないこと");
 }
 
-/// 受け入れ条件: 正常チェーン → exit 0。
+/// 受け入れ条件: 正常チェーン → exit 0。加えて Review #145 指摘対応:
+/// stdout の `OK:` メッセージが監査担当者の外部アンカー突合材料
+/// （レコード件数・最終 `seq`・最終 `hash`）を含むこと
+/// （`docs/self-repair-log-format.md` 7 節・`docs/guardrail-self-repair-cli.md`
+/// 3.2 節の exit 0 契約）。`write_valid_log` は 1 回の `append_report` で
+/// `loop_start → detection → attempt → loop_outcome` の 4 レコードを書くため
+/// `records=4`・`last_seq=3` になる（`logging.rs::append_stages` 参照）。
 #[test]
 fn verify_log_on_valid_chain_exits_zero() {
     let path = unique_log_path("valid_chain");
@@ -63,6 +69,48 @@ fn verify_log_on_valid_chain_exits_zero() {
         .expect("failed to run self-repair binary");
 
     assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("OK:") && stdout.contains("records=4") && stdout.contains("last_seq=3"),
+        "stdout に件数・最終 seq を含む OK メッセージが出ること: {stdout}"
+    );
+    let last_hash_field = stdout
+        .split("last_hash=")
+        .nth(1)
+        .and_then(|rest| rest.split('）').next())
+        .unwrap_or("");
+    assert!(
+        last_hash_field.len() >= 32,
+        "stdout の last_hash が空でなくハッシュ長を持つこと: {stdout}"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Review #145 指摘対応: 空（0 バイト）ログに対しては exit 0 のまま
+/// `OK:` ではなく `WARN:` メッセージへ切り替わり、「整合性を確認した」と
+/// 誤読されない文言になっていること。実機確認
+/// （`: > empty.jsonl && self-repair verify-log --log empty.jsonl`）で
+/// 再現した exit=0・従来は無条件の `OK:` だった問題の回帰防止。
+#[test]
+fn verify_log_on_empty_file_exits_zero_with_warn_message() {
+    let path = unique_log_path("empty_file");
+    std::fs::write(&path, b"").expect("空ファイルを作成できること");
+
+    let output = self_repair_bin()
+        .args(["verify-log", "--log", path.to_str().unwrap()])
+        .output()
+        .expect("failed to run self-repair binary");
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("WARN:") && stdout.contains("records=0"),
+        "stdout に空ログを示す WARN メッセージが出ること: {stdout}"
+    );
+    assert!(
+        !stdout.contains("OK:"),
+        "空ログでは無条件の OK 文言を出さないこと: {stdout}"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
