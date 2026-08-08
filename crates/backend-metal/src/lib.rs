@@ -79,6 +79,17 @@
 //! `tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。`device` モジュールと同じく
 //! `cfg(target_os = "macos")` 限定。
+//!
+//! TASK-8.3b（#156）で REQ-8「Metal f16 対 PyTorch MPS f16」の実測対象と
+//! なる f16 GEMM カーネル（`shaders/gemm.metal` の `gemm_simdgroup_f16`。
+//! A/B/累算いずれも `simdgroup_half8x8` 統一。カーネル冒頭コメントに
+//! 精度契約の判断根拠を記載）と、その明示ディスパッチ入口
+//! （[`gemm::MetalGemm::dispatch_f16`]）を追加した。既存の
+//! [`gemm::MetalGemm::dispatch_auto`]／`dispatch_backend_auto`（f32 専用の
+//! 自動経路選択）はそのまま変更していない（f16 の自動ディスパッチ統合は
+//! 本 TASK のスコープ外。`docs/dispatch-rules-design.md` 参照）。f16 専用の
+//! Metal バッファ型 [`half_buffer::MetalHalfBuffer`] を新設し、既存
+//! [`buffer::MetalBuffer`]（f32 専用）のシグネチャには一切手を入れていない。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -90,6 +101,8 @@ pub mod device;
 pub mod error;
 #[cfg(target_os = "macos")]
 pub mod gemm;
+#[cfg(target_os = "macos")]
+pub mod half_buffer;
 #[cfg(target_os = "macos")]
 pub mod memory;
 #[cfg(target_os = "macos")]
@@ -122,6 +135,8 @@ pub use device::MetalDeviceProvider;
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm};
+#[cfg(target_os = "macos")]
+pub use half_buffer::MetalHalfBuffer;
 #[cfg(target_os = "macos")]
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]

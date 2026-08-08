@@ -30,7 +30,8 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, 
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
-use crate::pad::{pad_matrix, pad8, unpad_matrix};
+use crate::half_buffer::MetalHalfBuffer;
+use crate::pad::{pad_matrix, pad_matrix_f16, pad8, unpad_matrix, unpad_matrix_f16};
 use crate::pipeline::{self, MtlLibrary, MtlPipeline};
 use crate::tile::{self, TileConfig};
 
@@ -105,6 +106,11 @@ pub struct MetalGemm {
     pipeline_naive: objc2::rc::Retained<MtlPipeline>,
     pipeline_tiled: objc2::rc::Retained<MtlPipeline>,
     pipeline_simdgroup: objc2::rc::Retained<MtlPipeline>,
+    /// `gemm_simdgroup_f16`（TASK-8.3b・#156）のパイプライン。
+    /// [`Self::dispatch_f16`] からのみ参照する（`GemmVariant` には含めない。
+    /// f16 経路は `dispatch_variant` の既存分岐に統合しない設計判断。
+    /// `crate::lib` クレートコメント参照）。
+    pipeline_simdgroup_f16: objc2::rc::Retained<MtlPipeline>,
     /// `gemm_simdgroup_tiled` のコンパイル済みライブラリ（`crate::pipeline::
     /// make_pipeline_with_constants` が構成キーごとにパイプラインを特殊化
     /// する際に再利用する。TASK-1.8f・#188）。
@@ -138,10 +144,16 @@ impl MetalGemm {
             &library,
             GemmVariant::Simdgroup.function_name(),
         )?;
+        // TASK-8.3b（#156）: `gemm_simdgroup_f16` は `GemmVariant` に含めず
+        // 独立したパイプラインとして保持する（`Self::dispatch_f16` からのみ
+        // 参照。上記フィールドコメント参照）。
+        let pipeline_simdgroup_f16 =
+            pipeline::make_pipeline(ctx.device(), &library, "gemm_simdgroup_f16")?;
         Ok(Self {
             pipeline_naive,
             pipeline_tiled,
             pipeline_simdgroup,
+            pipeline_simdgroup_f16,
             library,
             tiled_cache: RefCell::new(HashMap::new()),
         })
@@ -312,6 +324,54 @@ impl MetalGemm {
         self.dispatch_variant(ctx, GemmVariant::Naive, a, b, m, n, k)
     }
 
+    /// f16 GEMM（`C = A @ B`。TASK-8.3b・#156）を実行し、結果をホストへ
+    /// 読み出す。`gemm_simdgroup_f16`（`shaders/gemm.metal`）のみを対象と
+    /// する明示ディスパッチ入口であり、[`Self::dispatch_auto`]／
+    /// `dispatch_backend_auto`（f32 専用の自動経路選択）とは独立している
+    /// （`crate::lib` クレートコメント「f16 の自動ディスパッチ統合は
+    /// 本 TASK のスコープ外」）。
+    ///
+    /// `Simdgroup`（f32 版）と同じく [`pad8`] で実効次元（8 の倍数）を
+    /// 算出し、[`pad_matrix_f16`] で A・B を 0 パディングしてから
+    /// [`MetalHalfBuffer`] を確保・ディスパッチする。readback 後は
+    /// [`unpad_matrix_f16`] で元の m×n 形状へ切り出す。累算精度契約
+    /// （half 統一）は `gemm_simdgroup_f16` 冒頭コメント参照。
+    pub fn dispatch_f16(
+        &self,
+        ctx: &MetalContext,
+        a: &[half::f16],
+        b: &[half::f16],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<half::f16>, MetalError> {
+        validate_dims_f16(a, b, m, n, k)?;
+
+        let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+
+        let a_padded = pad_matrix_f16(a, m, k, m_eff, k_eff);
+        let b_padded = pad_matrix_f16(b, k, n, k_eff, n_eff);
+
+        let a_buf = MetalHalfBuffer::new_with_data(ctx, &a_padded)?;
+        let b_buf = MetalHalfBuffer::new_with_data(ctx, &b_padded)?;
+        let c_buf = MetalHalfBuffer::new_zeroed(ctx, m_eff * n_eff)?;
+
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_f16(
+                encoder,
+                &self.pipeline_simdgroup_f16,
+                &a_buf,
+                &b_buf,
+                &c_buf,
+                dims,
+            );
+        })?;
+
+        let padded_c = c_buf.read_to_vec();
+        Ok(unpad_matrix_f16(padded_c, m_eff, n_eff, m, n))
+    }
+
     /// `variant` で選択した GEMM カーネルをディスパッチし、結果をホストへ
     /// 読み出す（TASK-1.8c・#40）。
     ///
@@ -458,6 +518,51 @@ fn validate_dims(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Result<D
     })
 }
 
+/// [`validate_dims`] の f16 版（TASK-8.3b・#156）。判定ロジック自体は
+/// 要素数（`.len()`）にのみ依存し dtype に非依存のため中身は同一だが、
+/// `MetalGemm::dispatch_f16` の入力型（`&[half::f16]`）に合わせて独立実装
+/// する（`validate_dims`（f32 版）と同じ判断根拠: クレートをまたいだ検証
+/// ロジック共有はスコープ外という既存方針を型違いの同クレート内複製にも
+/// 適用する）。
+fn validate_dims_f16(
+    a: &[half::f16],
+    b: &[half::f16],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Dims, MetalError> {
+    if m == 0 || n == 0 || k == 0 {
+        return Err(MetalError::ZeroDimension { m, n, k });
+    }
+
+    let mk = m.checked_mul(k).ok_or(MetalError::DimProductOverflow)?;
+    let kn = k.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+    m.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+
+    if m > u32::MAX as usize || n > u32::MAX as usize || k > u32::MAX as usize {
+        return Err(MetalError::DimensionExceedsU32 { m, n, k });
+    }
+
+    if a.len() != mk {
+        return Err(MetalError::ALenMismatch {
+            expected: mk,
+            actual: a.len(),
+        });
+    }
+    if b.len() != kn {
+        return Err(MetalError::BLenMismatch {
+            expected: kn,
+            actual: b.len(),
+        });
+    }
+
+    Ok(Dims {
+        m: m as u32,
+        n: n as u32,
+        k: k as u32,
+    })
+}
+
 /// `GemmVariant::Simdgroup` の実効次元（[`pad8`] で 8 の倍数に切り上げた
 /// m_eff/n_eff/k_eff）に対する `checked_mul` オーバーフロー検出・
 /// `u32::MAX` 超過検出を行う（`Dims` への cast 前検証）。
@@ -568,6 +673,54 @@ fn encode_dispatch(
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// `gemm_simdgroup_f16`（TASK-8.3b・#156）用のパイプライン設定・
+/// バッファ結線・ディスパッチ。[`MetalGemm::dispatch_f16`] が
+/// [`MetalContext::dispatch_sync`] のクロージャから呼ぶ。threadgroup・
+/// grid の計算方式は `encode_dispatch` の `GemmVariant::Simdgroup` 分岐と
+/// 同一（1 threadgroup = 1 simdgroup = C の 8×8 タイル 1 つ。`dims` は
+/// 呼び出し元が [`pad8`] で 8 の倍数へ揃え済みの実効次元）。
+fn encode_dispatch_f16(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    a_buf: &MetalHalfBuffer,
+    b_buf: &MetalHalfBuffer,
+    c_buf: &MetalHalfBuffer,
+    dims: Dims,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2）と同一の
+    // 契約（`a_buf`/`b_buf`/`c_buf` は `dispatch_sync` の同期完了まで
+    // 呼び出し元スタックフレームで生存する）。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 2/2）と同一の
+    // 契約（`dims` はローカル変数、長さは `size_of::<Dims>()` と一致）。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&dims).cast(),
+            std::mem::size_of::<Dims>(),
+            3,
+        );
+    }
+
+    let threads_per_tg = MTLSize {
+        width: SIMDGROUP_THREADGROUP_WIDTH,
+        height: 1,
+        depth: 1,
+    };
+    let threadgroups = MTLSize {
+        width: (dims.n as usize) / 8,
+        height: (dims.m as usize) / 8,
         depth: 1,
     };
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
@@ -754,6 +907,49 @@ mod tests {
         assert!(matches!(
             err,
             MetalError::DimensionExceedsU32 { m, n: 8, k: 8 } if m == over_u32
+        ));
+    }
+
+    // --- validate_dims_f16（pure・実機不要。TASK-8.3b・#156） ---
+
+    #[test]
+    fn validate_dims_f16_accepts_valid_shape() {
+        let a = vec![half::f16::from_f32(0.0); 6]; // m=2, k=3
+        let b = vec![half::f16::from_f32(0.0); 12]; // k=3, n=4
+        let dims = validate_dims_f16(&a, &b, 2, 4, 3).unwrap();
+        assert_eq!((dims.m, dims.n, dims.k), (2, 4, 3));
+    }
+
+    #[test]
+    fn validate_dims_f16_rejects_zero_k() {
+        let err = validate_dims_f16(&[], &[], 2, 4, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::ZeroDimension { m: 2, n: 4, k: 0 }
+        ));
+    }
+
+    #[test]
+    fn validate_dims_f16_rejects_a_len_mismatch() {
+        let a = vec![half::f16::from_f32(0.0); 5]; // m*k=6 を期待
+        let b = vec![half::f16::from_f32(0.0); 12];
+        let err = validate_dims_f16(&a, &b, 2, 4, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::ALenMismatch {
+                expected: 6,
+                actual: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_dims_f16_rejects_dimension_exceeding_u32() {
+        let over_u32 = u32::MAX as usize + 1;
+        let err = validate_dims_f16(&[], &[], over_u32, 1, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::DimensionExceedsU32 { m, n: 1, k: 1 } if m == over_u32
         ));
     }
 

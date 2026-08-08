@@ -178,6 +178,77 @@ kernel void gemm_simdgroup(
     simdgroup_store(acc, c + (size_t)row0 * (size_t)dims.n + (size_t)col0, dims.n);
 }
 
+// f16 GEMM（TASK-8.3b・#156）: REQ-8「自作カーネルでの f16 実測」の実測対象
+// カーネル。`gemm_simdgroup`（f32 版）と同じく 1 threadgroup = 1 simdgroup が
+// C の 8x8 タイルを 1 つ担当する構成をそのまま half 型へ写し替える。
+//
+// **累算精度契約（実装計画 3.1 節の判断）**: A・B・C（アキュムレータ含む）
+// すべて `simdgroup_half8x8`（half 型統一）とする。MSL 仕様
+// （`simdgroup_matrix<T,Cols,Rows>`・`simdgroup_multiply_accumulate(d,a,b,c)`
+// はいずれも単一の型パラメータ `T` に対するテンプレートであり、
+// `apple-silicon` スキル `references/msl/data-types.md`・
+// `simdgroup-functions.md` のいずれにも「A/B が half・C が float」という
+// 混在型オーバーロードは記載がない（Linux 実装環境では Metal コンパイラで
+// 実地検証もできない）。未確認のオーバーロードを推定で使うより、仕様上
+// 確実に成立する単一型テンプレートを選ぶ（advisor 助言）。
+//
+// この選択は CUDA 側 WMMA f16（`kernels_wmma.rs::gemm_wmma_f16`。
+// `f32.f16.f16.f32`。f32 累算）と精度契約が異なる点に注意
+// （`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節に明記する）。half
+// 累算は f32 累算より桁落ちしやすく、K が大きいストレスケース（K=4096 等）
+// では複合判定（REQ-2）を外れる可能性が高い。実機で外れた場合も緩和せず
+// 事実を記録し #158（下限確定）へ引き継ぐ（`.claude/rules/coding-rust.md`
+// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」）。
+//
+// `ACC_T` を単一の typedef にしておくことで、実機で
+// `simdgroup_float8x8` 混在アキュムレータが実際に使えると判明した場合に
+// この 1 行（と `c` バッファの型・`crate::gemm::dispatch_f16` の出力型）
+// だけを変更すれば切替できるようにする（reversible な設計。advisor 助言）。
+// 現状は half 統一のため `ACC_T == MM_T`。
+typedef simdgroup_half8x8 MM_T; // A・B の simdgroup タイル型
+typedef simdgroup_half8x8 ACC_T; // アキュムレータ型（現状 half 統一）
+
+// **手動境界チェック（REQ-8）**: `gemm_simdgroup`（f32 版）と同じ契約。
+// `dims.m`/`n`/`k` は `crate::gemm::MetalGemm::dispatch_f16` が
+// `crate::pad::pad8` で 8 の倍数に切り上げた実効次元であり、呼び出し元が
+// A・B・C バッファもその実効次元ぶん確保・0 パディング済みであることを
+// 前提とする。タイル原点（`row0`/`col0`）が実効次元を超える場合の早期
+// return は、通常の dispatch（`n_eff/8 × m_eff/8` の grid）では到達しない
+// 防御的チェックだが、性能上の下限・最適化の達成を理由に境界チェック自体を
+// 省略しない方針（REQ-8）に従い明示的に残す（`gemm_simdgroup` 冒頭コメント
+// と同じ判断）。
+//
+// バッファオフセットの 64-bit 化: `gemm_simdgroup`（PR #246 Bugbot 指摘
+// 対応）と同じ理由で `row0`/`col0`/`p0` を `size_t` へ昇格してから乗算する
+// （`u32::MAX` 超の有効な行列サイズでもポインタオフセットが溢れないように
+// する）。
+kernel void gemm_simdgroup_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device half* c [[buffer(2)]],
+    constant Dims& dims [[buffer(3)]],
+    uint2 tgid [[threadgroup_position_in_grid]]
+) {
+    uint row0 = tgid.y * 8;
+    uint col0 = tgid.x * 8;
+
+    if (row0 >= dims.m || col0 >= dims.n) {
+        return;
+    }
+
+    ACC_T acc = ACC_T(static_cast<half>(0.0h));
+    uint k_tiles = dims.k / 8;
+    for (uint t = 0; t < k_tiles; t++) {
+        uint p0 = t * 8;
+        MM_T a_tile;
+        MM_T b_tile;
+        simdgroup_load(a_tile, a + (size_t)row0 * (size_t)dims.k + (size_t)p0, dims.k);
+        simdgroup_load(b_tile, b + (size_t)p0 * (size_t)dims.n + (size_t)col0, dims.n);
+        simdgroup_multiply_accumulate(acc, a_tile, b_tile, acc);
+    }
+    simdgroup_store(acc, c + (size_t)row0 * (size_t)dims.n + (size_t)col0, dims.n);
+}
+
 // 動的タイル選択（TASK-1.8f・#188）: BM/BN/BK/WM/WN パラメータ化 GEMM。
 //
 // `gemm_simdgroup`（1 threadgroup = 1 simdgroup = C の 8x8 タイル 1 つ）は

@@ -38,3 +38,42 @@ fn gemm_metal_source_uses_simdgroup_matrix_instructions() {
         );
     }
 }
+
+/// REQ-11・TASK-8.3b（#156）の証跡: `gemm_simdgroup_f16` が半精度
+/// simdgroup 行列型（`simdgroup_half8x8`）と行列演算ユニット命令
+/// （`simdgroup_load`/`simdgroup_multiply_accumulate`/`simdgroup_store`）を
+/// 実際に使用していることをロックする（CUDA 側
+/// `wmma_f16_source_uses_wmma_instructions` と同方針。
+/// `docs/matrix-unit-dispatch.md` の命令実在一覧表が参照する）。
+#[test]
+fn gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions() {
+    for needle in [
+        "kernel void gemm_simdgroup_f16(",
+        "simdgroup_half8x8",
+        "simdgroup_load",
+        "simdgroup_multiply_accumulate",
+        "simdgroup_store",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal の gemm_simdgroup_f16 に `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// REQ-8 の証跡: `gemm_simdgroup_f16` が手動境界チェック
+/// （タイル原点が実効次元を超える場合の早期 return）を維持していることを
+/// ロックする（`gemm_metal_source_uses_simdgroup_matrix_instructions` と
+/// 対になる検査。性能上の下限・最適化の達成を理由に境界チェックを省略
+/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。
+#[test]
+fn gemm_simdgroup_f16_source_retains_req8_boundary_guard() {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_f16(")
+        .expect("gemm_simdgroup_f16 カーネル本体が見つかりません");
+    let kernel_body = &GEMM_METAL_SOURCE[kernel_start..];
+    assert!(
+        kernel_body.contains("if (row0 >= dims.m || col0 >= dims.n)"),
+        "gemm_simdgroup_f16 に REQ-8 手動境界チェックが見つかりません"
+    );
+}

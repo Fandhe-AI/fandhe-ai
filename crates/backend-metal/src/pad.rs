@@ -75,6 +75,49 @@ pub fn unpad_matrix(
     out
 }
 
+/// [`pad_matrix`] の f16 版（TASK-8.3b・#156）。
+/// `crate::gemm::MetalGemm::dispatch_f16` が `gemm_simdgroup_f16`
+/// （half 型統一 simdgroup タイル。`shaders/gemm.metal` 参照）向けに A・B を
+/// 8 の倍数の実効次元へ 0 パディングする際に呼ぶ。0 パディングが数値に
+/// 影響しない理由は [`pad_matrix`] のモジュールコメントと同じ（`half` の
+/// `0.0` も `0 * x = 0` の寄与を持つ）。
+pub fn pad_matrix_f16<'a>(
+    src: &'a [half::f16],
+    rows: usize,
+    cols: usize,
+    rows_eff: usize,
+    cols_eff: usize,
+) -> std::borrow::Cow<'a, [half::f16]> {
+    if rows == rows_eff && cols == cols_eff {
+        return std::borrow::Cow::Borrowed(src);
+    }
+    let mut out = vec![half::f16::from_f32(0.0); rows_eff * cols_eff];
+    for r in 0..rows {
+        out[r * cols_eff..r * cols_eff + cols].copy_from_slice(&src[r * cols..r * cols + cols]);
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// [`unpad_matrix`] の f16 版（TASK-8.3b・#156）。[`crate::gemm::MetalGemm::dispatch_f16`]
+/// が Metal readback 後の C バッファ（実効次元。half 型）を呼び出し元へ渡す
+/// 元の m×n 形状へ戻すために呼ぶ。
+pub fn unpad_matrix_f16(
+    src: Vec<half::f16>,
+    rows_eff: usize,
+    cols_eff: usize,
+    rows: usize,
+    cols: usize,
+) -> Vec<half::f16> {
+    if rows_eff == rows && cols_eff == cols {
+        return src;
+    }
+    let mut out = vec![half::f16::from_f32(0.0); rows * cols];
+    for r in 0..rows {
+        out[r * cols..r * cols + cols].copy_from_slice(&src[r * cols_eff..r * cols_eff + cols]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,5 +179,57 @@ mod tests {
         let out = unpad_matrix(padded, 8, 8, 3, 5);
         assert_eq!(out.len(), 15);
         assert!(out.iter().all(|&v| v == 1.0));
+    }
+
+    // --- f16 版（TASK-8.3b・#156。pad_matrix/unpad_matrix と同じ検証を型だけ差し替え） ---
+
+    #[test]
+    fn pad_matrix_f16_passthrough_when_size_matches() {
+        let src = vec![
+            half::f16::from_f32(1.0),
+            half::f16::from_f32(2.0),
+            half::f16::from_f32(3.0),
+            half::f16::from_f32(4.0),
+        ];
+        let out = pad_matrix_f16(&src, 2, 2, 2, 2);
+        assert_eq!(out.as_ref(), src.as_slice());
+    }
+
+    #[test]
+    fn pad_matrix_f16_zero_pads_rows_and_cols() {
+        let src: Vec<half::f16> = (1..=6).map(|v| half::f16::from_f32(v as f32)).collect();
+        let out = pad_matrix_f16(&src, 2, 3, 4, 8);
+        assert_eq!(out.len(), 4 * 8);
+        let zero = half::f16::from_f32(0.0);
+        assert_eq!(
+            &out[0..8],
+            &[
+                half::f16::from_f32(1.0),
+                half::f16::from_f32(2.0),
+                half::f16::from_f32(3.0),
+                zero,
+                zero,
+                zero,
+                zero,
+                zero,
+            ]
+        );
+        assert!(out[16..32].iter().all(|&v| v == zero));
+    }
+
+    #[test]
+    fn unpad_matrix_f16_is_inverse_of_pad_matrix_f16() {
+        let src: Vec<half::f16> = (1..=6).map(|v| half::f16::from_f32(v as f32)).collect();
+        let padded = pad_matrix_f16(&src, 2, 3, 8, 8).into_owned();
+        let unpadded = unpad_matrix_f16(padded, 8, 8, 2, 3);
+        assert_eq!(unpadded, src);
+    }
+
+    #[test]
+    fn unpad_matrix_f16_passthrough_preserves_ownership() {
+        let src = vec![half::f16::from_f32(1.0), half::f16::from_f32(2.0)];
+        let ptr = src.as_ptr();
+        let out = unpad_matrix_f16(src, 1, 2, 1, 2);
+        assert_eq!(out.as_ptr(), ptr);
     }
 }
