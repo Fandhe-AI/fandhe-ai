@@ -53,12 +53,24 @@
 //! 判断した（#27 実装時の「自動運転下では serde derive を追加しない」判断は #27 の
 //! スコープ境界の表明であり、構造化出力自体が実装範囲の本イシューで上書きする）。
 
+//! ## TASK-8.2b: 丸め規則の共通ロジック（本イシュー #153 の実装範囲）
+//!
+//! [`floor_lower_bound`] が REQ-8 の性能下限丸め規則（実測比率 10% 以上は 5% 刻み、
+//! 10% 未満は 1% 刻み、境界は 5% 刻み側、条件付き追加ステップなし）をバックエンド非依存の
+//! 純粋関数として提供する。旧 #4 の非単調性（v1 の「境界近傍でさらに 1 段」規則が生んでいた
+//! 実測値逆転）は本規則で解消済みであることをテストで担保する
+//! （`docs/spec/04-requirements.md:171`）。段階的下限表（CPU 5%・CUDA f32 10% 等）の保持と
+//! 合否判定は利用側の TASK-8.2a（#152）が本モジュールを呼び出して行う想定であり、本モジュール
+//! 自体は下限値を保持しない。
+
 mod protocol;
 mod report;
 pub mod rng;
+mod rounding;
 mod stats;
 pub mod sync;
 
 pub use protocol::{Measurement, MeasurementConfig, run};
 pub use report::{BenchReport, SCHEMA_VERSION};
+pub use rounding::{RoundingError, floor_lower_bound};
 pub use stats::{BenchError, Quartiles, median_q1_q3};
