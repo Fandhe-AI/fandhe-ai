@@ -111,7 +111,7 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
 | 候補 diff に対するベンチ劣化率の直接実測・真の 4 ゲート合成の `src/` 本体への昇格 | **解消済み**（#137・PR #355。`RepairCompositeGate` が両種別で候補 diff 直接ベンチを実施） |
 | 外部アンカー運用（末尾切り詰め対策）の自動化実装 | 未起票のまま（`docs/self-repair-log-format.md` 7 節が運用指針のみを文書化。自動化が必要と判断された場合は別途 Issue 化） |
 | 実 workspace 全体を対象にした検証 | #139（TASK-3.3 本体）の別スコープ。検証対象は `crates/autodiff` 単体クレート（実行時間の理由。`bug-fix/README.md` §3 と同一スコーピング判断） |
-| 完走可否の人間評価 | #144（TASK-3.3e）。評価・判定案は [`completion-judgment.md`](./completion-judgment.md) に記録した |
+| 完走可否の人間評価 | #144（TASK-3.3e）。全面再評価済み（判定基準 6 項目・両種別とも「充足」）。評価・判定案は [`completion-judgment.md`](./completion-judgment.md) に記録し、最終判定は同文書 8.2 節に人間が記入する |
 
 ## 6. #144（人間評価）向けの評価導線
 
@@ -131,7 +131,8 @@ TASK-3.3（`docs/spec/05-tasks.md:144`）「自作コア上での自己修復ル
    （`bug-fix/README.md` §3・`feature-addition/README.md`「シグナルは実測
    のみ」等）で確認する。
 5. ログ整合性の事前確認（`verify-log` 実行結果）・判定基準 6 項目の
-   個別評価・REQ-3 受け入れ基準との突合・判定案は
+   個別評価・REQ-3 受け入れ基準との突合・AI 起草判定案は
    [`completion-judgment.md`](./completion-judgment.md) に記録した。
    同文書 §3〜§8 の全面再評価（all-or-nothing 規則の再適用を含む）は
-   #144 側で行う。人間判定は同文書 8 節の記録欄に行う。
+   #144 側で完了しており、一次結果は「充足」である（同文書 5 節）。
+   人間による最終判定は同文書 8.2 節の記録欄に行う。
