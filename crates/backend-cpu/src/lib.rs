@@ -43,6 +43,10 @@
 //! `alloc_zeroed` は FFI を伴わず `Vec<f32>` の複製のみで完結する
 //! （`backend-cuda::CudaMemory`／`backend-metal::MetalMemory` の数値一致の
 //! 参照点。`.claude/rules/coding-rust.md` の「CPU 参照実装」方針）。
+//! TASK-14.1a（#174）で `tensor_core::memory_stats::MemoryStats` を実装し、
+//! 確保済みバイト数のピーク値を取得できるようにした（`CpuMemory` は
+//! `Arc<AllocationTracker>` を共有する非 `Copy` 型に変更。CUDA/Metal への
+//! 同フック組み込みは #175）。
 //!
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
 //! `tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
