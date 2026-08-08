@@ -5,7 +5,8 @@
 //! 決め打ち・`read_to_vec() -> Vec<f32>`）を変更すると `crate::gemm` の
 //! 既存 f32 経路・既存パリティテスト全体へ波及するため、f16 専用の平行な
 //! 型を新設して既存コードに触れない設計にする（実装計画 §2 の判断）。
-//! `crate::gemm::MetalGemm::dispatch_f16` が [`MetalHalfBuffer::new_with_data`]
+//! `crate::gemm::MetalGemm::dispatch_f16_unverified` が
+//! [`MetalHalfBuffer::new_with_data`]
 //! で A・B（half）を、`gemm_simdgroup_f16`（`shaders/gemm.metal`）の出力
 //! C（half。累算精度契約は同カーネルのコメント参照）は
 //! [`MetalHalfBuffer::new_zeroed`] で確保する。

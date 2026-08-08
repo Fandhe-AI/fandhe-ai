@@ -23,9 +23,10 @@
 //! # f16 適用の位置づけ（`cpu_cuda_wmma_parity.rs` 冒頭コメントと同じ整理）
 //!
 //! 本ファイルは #156 の受け入れ条件「実測記録が残されている」に対応する
-//! 実測手段の一部であり、`gemm_simdgroup_f16` 経路（[`backend_metal::MetalGemm::dispatch_f16`]）
-//! にのみ複合判定を適用する明示的な例外として扱う（他の f16 経路一般を
-//! 対象化するものではない）。
+//! 実測手段の一部であり、`gemm_simdgroup_f16` 経路
+//! （[`backend_metal::MetalGemm::dispatch_f16_unverified`]）にのみ複合判定を
+//! 適用する明示的な例外として扱う（他の f16 経路一般を対象化するものでは
+//! ない）。
 //!
 //! # 累算精度契約（`shaders/gemm.metal::gemm_simdgroup_f16` と同一の注意）
 //!
@@ -86,8 +87,8 @@ fn assert_metal_f16_parity(
         .collect();
 
     let c_gpu_f16 = gemm
-        .dispatch_f16(ctx, &a_f16, &b_f16, m, n, k)
-        .expect("MetalGemm::dispatch_f16 must succeed on Metal-equipped test runner");
+        .dispatch_f16_unverified(ctx, &a_f16, &b_f16, m, n, k)
+        .expect("MetalGemm::dispatch_f16_unverified must succeed on Metal-equipped test runner");
     let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
 
     assert_parity(context, &c_gpu_f32, &c_ref_rounded);
@@ -163,14 +164,70 @@ fn f16_dispatch_is_bit_deterministic_across_runs() {
     let b: Vec<f16> = rng.fill_vec_f16(k * n);
 
     let first = gemm
-        .dispatch_f16(&ctx, &a, &b, m, n, k)
-        .expect("1 回目の dispatch_f16 に失敗した");
+        .dispatch_f16_unverified(&ctx, &a, &b, m, n, k)
+        .expect("1 回目の dispatch_f16_unverified に失敗した");
     let second = gemm
-        .dispatch_f16(&ctx, &a, &b, m, n, k)
-        .expect("2 回目の dispatch_f16 に失敗した");
+        .dispatch_f16_unverified(&ctx, &a, &b, m, n, k)
+        .expect("2 回目の dispatch_f16_unverified に失敗した");
 
     assert_eq!(
         first, second,
-        "同一入力の 2 回 dispatch_f16 が bit 完全一致しない"
+        "同一入力の 2 回 dispatch_f16_unverified が bit 完全一致しない"
+    );
+}
+
+/// `MetalGemm::dispatch_f16_prepared_unverified` の入力検証回帰（PR #346 codex-review
+/// P1-1 指摘）。呼び出し元が公開コンストラクタ（`MetalHalfBuffer::
+/// new_with_data`/`new_zeroed`）で確保した任意長のバッファを渡せるため、
+/// `a_buf`/`b_buf`/`c_buf` の実長が実効次元（m_eff*k_eff 等）と一致しない
+/// 場合・実効次元が 8 の倍数でない場合にエンコード前でエラーを返し、
+/// Metal カーネルへ到達しないことを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs() {
+    use backend_metal::error::MetalError;
+    use backend_metal::half_buffer::MetalHalfBuffer;
+
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した（f16 含む）");
+
+    // m_eff=n_eff=k_eff=8（8x8x8 タイル 1 個分）の正しいバッファ長は
+    // 8*8=64 要素。ここでは意図的に短い（32 要素）バッファを渡す。
+    let short = vec![f16::from_f32(0.0); 32];
+    let correct = vec![f16::from_f32(0.0); 64];
+    let a_buf = MetalHalfBuffer::new_with_data(&ctx, &short).expect("a_buf 確保に失敗した");
+    let b_buf = MetalHalfBuffer::new_with_data(&ctx, &correct).expect("b_buf 確保に失敗した");
+    let c_buf = MetalHalfBuffer::new_zeroed(&ctx, 64).expect("c_buf 確保に失敗した");
+
+    let err = gemm
+        .dispatch_f16_prepared_unverified(&ctx, &a_buf, &b_buf, &c_buf, 8, 8, 8)
+        .expect_err(
+            "短い a_buf に対して dispatch_f16_prepared_unverified はエラーを返す必要がある",
+        );
+    assert!(
+        matches!(
+            err,
+            MetalError::ALenMismatch {
+                expected: 64,
+                actual: 32,
+            }
+        ),
+        "unexpected error: {err:?}"
+    );
+
+    // 実効次元が 8 の倍数でない場合（バッファ長は正しくても）拒否する。
+    let a_buf9 = MetalHalfBuffer::new_with_data(&ctx, &[f16::from_f32(0.0); 72])
+        .expect("a_buf9 確保に失敗した");
+    let b_buf9 = MetalHalfBuffer::new_with_data(&ctx, &[f16::from_f32(0.0); 72])
+        .expect("b_buf9 確保に失敗した");
+    let c_buf9 = MetalHalfBuffer::new_zeroed(&ctx, 81).expect("c_buf9 確保に失敗した");
+    let err = gemm
+        .dispatch_f16_prepared_unverified(&ctx, &a_buf9, &b_buf9, &c_buf9, 9, 9, 8)
+        .expect_err(
+            "非 8 の倍数の実効次元に対して dispatch_f16_prepared_unverified はエラーを返す必要がある",
+        );
+    assert!(
+        matches!(err, MetalError::NotEightAligned { .. }),
+        "unexpected error: {err:?}"
     );
 }

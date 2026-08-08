@@ -107,7 +107,7 @@ pub struct MetalGemm {
     pipeline_tiled: objc2::rc::Retained<MtlPipeline>,
     pipeline_simdgroup: objc2::rc::Retained<MtlPipeline>,
     /// `gemm_simdgroup_f16`（TASK-8.3b・#156）のパイプライン。
-    /// [`Self::dispatch_f16`] からのみ参照する（`GemmVariant` には含めない。
+    /// [`Self::dispatch_f16_unverified`] からのみ参照する（`GemmVariant` には含めない。
     /// f16 経路は `dispatch_variant` の既存分岐に統合しない設計判断。
     /// `crate::lib` クレートコメント参照）。
     pipeline_simdgroup_f16: objc2::rc::Retained<MtlPipeline>,
@@ -145,7 +145,7 @@ impl MetalGemm {
             GemmVariant::Simdgroup.function_name(),
         )?;
         // TASK-8.3b（#156）: `gemm_simdgroup_f16` は `GemmVariant` に含めず
-        // 独立したパイプラインとして保持する（`Self::dispatch_f16` からのみ
+        // 独立したパイプラインとして保持する（`Self::dispatch_f16_unverified` からのみ
         // 参照。上記フィールドコメント参照）。
         let pipeline_simdgroup_f16 =
             pipeline::make_pipeline(ctx.device(), &library, "gemm_simdgroup_f16")?;
@@ -331,12 +331,29 @@ impl MetalGemm {
     /// （`crate::lib` クレートコメント「f16 の自動ディスパッチ統合は
     /// 本 TASK のスコープ外」）。
     ///
+    /// # 精度未検証（PR #346 codex-review P1-2 指摘。`_unverified` suffix）
+    ///
+    /// `gemm_simdgroup_f16` は A・B・累算のすべてに `simdgroup_half8x8`
+    /// （half 型統一）を使う（`shaders/gemm.metal::gemm_simdgroup_f16`
+    /// 冒頭コメント「累算精度契約」参照）。CUDA 側 WMMA f16（f32 累算）とは
+    /// 精度契約が異なり、K が大きい形状では REQ-2 複合判定（相対誤差
+    /// 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる可能性が高いことが
+    /// ドキュメント上の分析（`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」
+    /// 節）では判明済みだが、Metal 実機・Metal コンパイラでの実測検証は
+    /// 未実施（本実装セッションは Linux worktree のため）。呼び出し前に
+    /// 精度リスクを理解した上で使うことを明示するため、関数名に
+    /// `_unverified` を付け `#[doc(hidden)]` とする（本来のパブリック
+    /// ドキュメントには載せず、意図的に呼び出す利用者のみが到達できる
+    /// ようにする）。検証・下限確定は #158（TASK-8.3d・人間担当）が行い、
+    /// 検証が済むまで `dispatch_auto`／`dispatch_backend_auto`（production
+    /// 経路）へは統合しない。
+    ///
     /// `Simdgroup`（f32 版）と同じく [`pad8`] で実効次元（8 の倍数）を
     /// 算出し、[`pad_matrix_f16`] で A・B を 0 パディングしてから
     /// [`MetalHalfBuffer`] を確保・ディスパッチする。readback 後は
-    /// [`unpad_matrix_f16`] で元の m×n 形状へ切り出す。累算精度契約
-    /// （half 統一）は `gemm_simdgroup_f16` 冒頭コメント参照。
-    pub fn dispatch_f16(
+    /// [`unpad_matrix_f16`] で元の m×n 形状へ切り出す。
+    #[doc(hidden)]
+    pub fn dispatch_f16_unverified(
         &self,
         ctx: &MetalContext,
         a: &[half::f16],
@@ -351,10 +368,10 @@ impl MetalGemm {
         // `pad_matrix_f16`／`m_eff * n_eff`（バッファ確保サイズ算出）より
         // 前に実効次元のオーバーフロー／`u32` 範囲検証を行う（f32 側の
         // `dispatch_variant` と同じ順序。PR #346 Bugbot 指摘: 本チェックを
-        // `dispatch_f16_prepared` 内のみに委ねると、大きな padding 後の
-        // shape に対してこのパディング処理・確保サイズ計算が検証前に
-        // 実行されてしまう）。戻り値の `Dims` は
-        // `dispatch_f16_prepared` 側で改めて算出するため破棄する。
+        // `dispatch_f16_prepared_unverified` 内のみに委ねると、大きな
+        // padding 後の shape に対してこのパディング処理・確保サイズ計算が
+        // 検証前に実行されてしまう）。戻り値の `Dims` は
+        // `dispatch_f16_prepared_unverified` 側で改めて算出するため破棄する。
         validate_effective_dims(m_eff, n_eff, k_eff)?;
 
         let a_padded = pad_matrix_f16(a, m, k, m_eff, k_eff);
@@ -364,7 +381,7 @@ impl MetalGemm {
         let b_buf = MetalHalfBuffer::new_with_data(ctx, &b_padded)?;
         let c_buf = MetalHalfBuffer::new_zeroed(ctx, m_eff * n_eff)?;
 
-        self.dispatch_f16_prepared(ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff)?;
+        self.dispatch_f16_prepared_unverified(ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff)?;
 
         let padded_c = c_buf.read_to_vec();
         Ok(unpad_matrix_f16(padded_c, m_eff, n_eff, m, n))
@@ -374,12 +391,20 @@ impl MetalGemm {
     /// 完了待ち）のみを行う入口（TASK-8.3b・#156 ベンチ計測境界修正。
     /// PR #346 Bugbot 指摘 2）。
     ///
-    /// [`Self::dispatch_f16`] はパディング・バッファ確保／アップロード・
-    /// ディスパッチ・readback／アンパディングを一括で行うのに対し、本関数は
-    /// 呼び出し元が事前に確保・アップロード済みの `MetalHalfBuffer`
-    /// （実効次元 `m_eff`/`n_eff`/`k_eff` でパディング済みである前提。
-    /// [`pad8`]／[`crate::pad::pad_matrix_f16`] 参照）に対して
-    /// [`MetalContext::dispatch_sync`] のクロージャ結線のみを行う。
+    /// 精度未検証である理由・`_unverified` suffix・`#[doc(hidden)]` の
+    /// 判断根拠は [`Self::dispatch_f16_unverified`] のドキュメント
+    /// コメント（PR #346 codex-review P1-2 指摘）を参照。
+    ///
+    /// [`Self::dispatch_f16_unverified`] はパディング・バッファ確保／
+    /// アップロード・ディスパッチ・readback／アンパディングを一括で行うのに
+    /// 対し、本関数は呼び出し元が事前に確保・アップロード済みの
+    /// `MetalHalfBuffer`（実効次元 `m_eff`/`n_eff`/`k_eff` でパディング
+    /// 済みである前提。[`pad8`]／[`crate::pad::pad_matrix_f16`] 参照）に
+    /// 対して [`MetalContext::dispatch_sync`] のクロージャ結線のみを行う。
+    /// 呼び出し元が `pad8` を経由せず任意の `m_eff`/`n_eff`/`k_eff`・
+    /// バッファ長を渡せるため、[`validate_prepared_inputs`] で 8 の倍数・
+    /// バッファ長一致をエンコード前に検証する（PR #346 codex-review
+    /// P1-1 指摘）。
     ///
     /// `crates/backend-metal/examples/gemm_f16_bench.rs` が
     /// `scripts/bench/gemm_bench_torch_mps_f16.py`（オンデバイス `matmul`＋
@@ -393,7 +418,8 @@ impl MetalGemm {
     /// （`dispatch_variant` と同じ判断根拠。理由コメント必須のルール
     /// `.claude/rules/coding-rust.md` に対応）。
     #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_f16_prepared(
+    #[doc(hidden)]
+    pub fn dispatch_f16_prepared_unverified(
         &self,
         ctx: &MetalContext,
         a_buf: &MetalHalfBuffer,
@@ -404,6 +430,7 @@ impl MetalGemm {
         k_eff: usize,
     ) -> Result<(), MetalError> {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+        validate_prepared_inputs(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
         ctx.dispatch_sync(|encoder| {
             encode_dispatch_f16(
@@ -565,7 +592,7 @@ fn validate_dims(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Result<D
 
 /// [`validate_dims`] の f16 版（TASK-8.3b・#156）。判定ロジック自体は
 /// 要素数（`.len()`）にのみ依存し dtype に非依存のため中身は同一だが、
-/// `MetalGemm::dispatch_f16` の入力型（`&[half::f16]`）に合わせて独立実装
+/// `MetalGemm::dispatch_f16_unverified` の入力型（`&[half::f16]`）に合わせて独立実装
 /// する（`validate_dims`（f32 版）と同じ判断根拠: クレートをまたいだ検証
 /// ロジック共有はスコープ外という既存方針を型違いの同クレート内複製にも
 /// 適用する）。
@@ -617,7 +644,11 @@ fn validate_dims_f16(
 /// 必要がある（[`MetalGemm::dispatch_variant`] は `validate_dims` 通過後に
 /// 本関数を呼ぶ）。`Naive`/`Tiled` は m_eff/n_eff/k_eff がそのまま
 /// m/n/k と一致するため、`validate_dims` で検証済みの範囲を再確認する
-/// だけで実質的にオーバーフローしない。
+/// だけで実質的にオーバーフローしない（`Naive`/`Tiled` は 8 の倍数ではない
+/// 任意の m/n/k を許容する必要があるため、8 の倍数検証は本関数には含めない。
+/// `Simdgroup`（f32）は [`pad8`] 済みの実効次元を渡すため常に 8 の倍数だが、
+/// `gemm_simdgroup_f16_unverified` 専用の [`validate_prepared_inputs`] は
+/// `pad8` を経由しない呼び出し元を想定し、8 の倍数検証を別途持つ）。
 fn validate_effective_dims(m_eff: usize, n_eff: usize, k_eff: usize) -> Result<Dims, MetalError> {
     m_eff
         .checked_mul(k_eff)
@@ -642,6 +673,71 @@ fn validate_effective_dims(m_eff: usize, n_eff: usize, k_eff: usize) -> Result<D
         n: n_eff as u32,
         k: k_eff as u32,
     })
+}
+
+/// [`MetalGemm::dispatch_f16_prepared_unverified`] の入力検証（PR #346
+/// codex-review P1-1 指摘）。
+///
+/// `dispatch_f16_prepared_unverified` は公開入口であり、呼び出し元が
+/// [`MetalHalfBuffer::new_with_data`]／[`MetalHalfBuffer::new_zeroed`]
+/// （いずれも公開コンストラクタ）で任意長のバッファを渡せ、`m_eff`/
+/// `n_eff`/`k_eff` も [`pad8`] を経由せず直接渡せる。[`validate_effective_dims`]
+/// は積のオーバーフロー・`u32::MAX` 超過のみを検証するため、本関数は
+/// エンコード（`encode_dispatch_f16`）前に以下 2 点を追加検証する:
+///
+/// 1. `m_eff`/`n_eff`/`k_eff` がいずれも 8 の倍数であること
+///    （`gemm_simdgroup_f16_unverified` は 1 threadgroup = C の 8×8 タイル
+///    1 つを前提に grid を `n_eff/8 × m_eff/8` で算出する。`encode_dispatch_f16`
+///    参照。非 8 倍数では末尾タイルを黙って計算しない）
+/// 2. `a_buf.len() == m_eff*k_eff`・`b_buf.len() == k_eff*n_eff`・
+///    `c_buf.len() == m_eff*n_eff`（不一致のまま進むと短いバッファでは
+///    Metal カーネルが範囲外アクセスしうる。shader 側の手動境界チェック
+///    〈REQ-8〉はスレッド数の範囲は守るが、バッファ自体の確保長不足までは
+///    検出できない）
+///
+/// [`validate_effective_dims`] 通過後にのみ呼ばれる前提のため、
+/// `m_eff*k_eff` 等の積は `usize` の範囲でオーバーフローしないことが
+/// 保証されている（`checked_mul` を再度呼ぶ必要はない）。
+fn validate_prepared_inputs(
+    a_buf: &MetalHalfBuffer,
+    b_buf: &MetalHalfBuffer,
+    c_buf: &MetalHalfBuffer,
+    m_eff: usize,
+    n_eff: usize,
+    k_eff: usize,
+) -> Result<(), MetalError> {
+    if !m_eff.is_multiple_of(8) || !n_eff.is_multiple_of(8) || !k_eff.is_multiple_of(8) {
+        return Err(MetalError::NotEightAligned {
+            m_eff,
+            n_eff,
+            k_eff,
+        });
+    }
+
+    let mk = m_eff * k_eff;
+    let kn = k_eff * n_eff;
+    let mn = m_eff * n_eff;
+
+    if a_buf.len() != mk {
+        return Err(MetalError::ALenMismatch {
+            expected: mk,
+            actual: a_buf.len(),
+        });
+    }
+    if b_buf.len() != kn {
+        return Err(MetalError::BLenMismatch {
+            expected: kn,
+            actual: b_buf.len(),
+        });
+    }
+    if c_buf.len() != mn {
+        return Err(MetalError::CLenMismatch {
+            expected: mn,
+            actual: c_buf.len(),
+        });
+    }
+
+    Ok(())
 }
 
 /// パイプライン設定・バッファ結線（index 0〜2）・`Dims`（index 3）の
@@ -724,7 +820,7 @@ fn encode_dispatch(
 }
 
 /// `gemm_simdgroup_f16`（TASK-8.3b・#156）用のパイプライン設定・
-/// バッファ結線・ディスパッチ。[`MetalGemm::dispatch_f16`] が
+/// バッファ結線・ディスパッチ。[`MetalGemm::dispatch_f16_prepared_unverified`] が
 /// [`MetalContext::dispatch_sync`] のクロージャから呼ぶ。threadgroup・
 /// grid の計算方式は `encode_dispatch` の `GemmVariant::Simdgroup` 分岐と
 /// 同一（1 threadgroup = 1 simdgroup = C の 8×8 タイル 1 つ。`dims` は
@@ -954,6 +1050,13 @@ mod tests {
             MetalError::DimensionExceedsU32 { m, n: 8, k: 8 } if m == over_u32
         ));
     }
+
+    // `validate_prepared_inputs`（PR #346 codex-review P1-1 指摘の入力検証）
+    // は引数に `&MetalHalfBuffer` を取るため Linux 上の pure 単体テストが
+    // 書けない（`MetalHalfBuffer` の確保に Metal デバイスが必要）。8 の倍数・
+    // バッファ長不一致の両方の拒否は `tests/cpu_metal_f16_parity.rs::
+    // f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs`
+    // （`#[ignore]`・Metal 実機依存）で検証する。
 
     // --- validate_dims_f16（pure・実機不要。TASK-8.3b・#156） ---
 

@@ -84,12 +84,20 @@
 //! なる f16 GEMM カーネル（`shaders/gemm.metal` の `gemm_simdgroup_f16`。
 //! A/B/累算いずれも `simdgroup_half8x8` 統一。カーネル冒頭コメントに
 //! 精度契約の判断根拠を記載）と、その明示ディスパッチ入口
-//! （[`gemm::MetalGemm::dispatch_f16`]）を追加した。既存の
+//! （`gemm::MetalGemm::dispatch_f16_unverified`）を追加した。既存の
 //! [`gemm::MetalGemm::dispatch_auto`]／`dispatch_backend_auto`（f32 専用の
 //! 自動経路選択）はそのまま変更していない（f16 の自動ディスパッチ統合は
 //! 本 TASK のスコープ外。`docs/dispatch-rules-design.md` 参照）。f16 専用の
 //! Metal バッファ型 [`half_buffer::MetalHalfBuffer`] を新設し、既存
 //! [`buffer::MetalBuffer`]（f32 専用）のシグネチャには一切手を入れていない。
+//!
+//! `dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` は関数名に
+//! `_unverified` を付け `#[doc(hidden)]` としている（PR #346 codex-review
+//! P1-2 指摘。`gemm_simdgroup_f16` は half 累算のため REQ-2 複合判定を
+//! 満たすかどうかが Metal 実機で未検証であり、production 経路
+//! （`dispatch_auto`／`dispatch_backend_auto`）へは検証〈#158〉が済むまで
+//! 統合しない。詳細は [`gemm::MetalGemm::dispatch_f16_unverified`] の
+//! ドキュメントコメントを参照）。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;

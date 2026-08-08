@@ -23,7 +23,7 @@ REQ-8 性能下限表（`docs/spec/04-requirements.md`）の「Metal f16 対 PyT
 
 - `cargo check -p backend-metal --tests --examples --target aarch64-apple-darwin`（`Makefile` の
   `check-cross-metal-tests` と同一方式。`--examples` を追加して `gemm_f16_bench.rs` も対象に含めた）で、
-  `gemm_simdgroup_f16` の Rust／objc2 側結線（`crate::gemm::dispatch_f16`・`crate::half_buffer::MetalHalfBuffer`・
+  `gemm_simdgroup_f16` の Rust／objc2 側結線（`crate::gemm::dispatch_f16_unverified`・`crate::half_buffer::MetalHalfBuffer`・
   `crate::pipeline::make_pipeline`）が**型として**コンパイル可能であることを確認済み（クロスターゲット
   ビルドのため実際のリンク・実行は検証できない。`make build-cross` は本 Linux 環境に macOS SDK が無く
   リンクエラーになるため実行できず、`cargo check`（型検査のみ）に留めている点に注意）
@@ -50,7 +50,14 @@ REQ-2 複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満
 （#186〈`docs/perf/cuda-tensor-core-tolerance-evaluation.md`〉で CUDA f16 WMMA も K≥512 で閾値超過が実測されて
 おり、half 累算の Metal 側では同様かそれ以上の結果が想定される）。`shaders/gemm.metal` は `MM_T`/`ACC_T` の
 typedef を切り出しており、実機で混在精度オーバーロードが確認できた場合は `ACC_T` の型変更（と `c` バッファ・
-`MetalGemm::dispatch_f16` の出力型の追随変更）で切替可能にしてある。
+`MetalGemm::dispatch_f16_unverified` の出力型の追随変更）で切替可能にしてある。
+
+**公開 API 上の扱い（PR #346 codex-review P1-2 指摘への対応）**: 上記の通り精度契約が Metal 実機・
+Metal コンパイラで一度も実行検証されていないため、`MetalGemm::dispatch_f16`／`dispatch_f16_prepared` は
+`dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` へ改名し `#[doc(hidden)]` を付けた（公開
+ドキュメントには載せず、意図的に呼び出す利用者のみが到達できるようにする）。検証（本ファイルの実測結果
+記入・#158 での下限確定）が済むまで `dispatch_auto`／`dispatch_backend_auto`（production 経路）へは統合
+しない。
 
 ## 計測手順（Apple Silicon 実機）
 

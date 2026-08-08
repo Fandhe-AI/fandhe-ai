@@ -76,7 +76,7 @@ pub fn unpad_matrix(
 }
 
 /// [`pad_matrix`] の f16 版（TASK-8.3b・#156）。
-/// `crate::gemm::MetalGemm::dispatch_f16` が `gemm_simdgroup_f16`
+/// `crate::gemm::MetalGemm::dispatch_f16_unverified` が `gemm_simdgroup_f16`
 /// （half 型統一 simdgroup タイル。`shaders/gemm.metal` 参照）向けに A・B を
 /// 8 の倍数の実効次元へ 0 パディングする際に呼ぶ。0 パディングが数値に
 /// 影響しない理由は [`pad_matrix`] のモジュールコメントと同じ（`half` の
@@ -98,7 +98,8 @@ pub fn pad_matrix_f16<'a>(
     std::borrow::Cow::Owned(out)
 }
 
-/// [`unpad_matrix`] の f16 版（TASK-8.3b・#156）。[`crate::gemm::MetalGemm::dispatch_f16`]
+/// [`unpad_matrix`] の f16 版（TASK-8.3b・#156）。
+/// [`crate::gemm::MetalGemm::dispatch_f16_unverified`]
 /// が Metal readback 後の C バッファ（実効次元。half 型）を呼び出し元へ渡す
 /// 元の m×n 形状へ戻すために呼ぶ。
 pub fn unpad_matrix_f16(
