@@ -317,16 +317,28 @@ fn best_f32(tiled: Option<f64>, wmma_tf32: Option<f64>) -> Option<(f64, &'static
     best_of("tiled", tiled, "wmma_tf32", wmma_tf32)
 }
 
-/// f16 最良値（WMMA f16 opt と `mma.sync` のうち実測 TFLOPS が大きい方）を
-/// 選ぶ（`docs/cuda-tensor-core-design.md` の到達目標経路）。
+/// f16 candidate floor の算出には `wmma_f16`（転送込み計測）のみを使う。
 ///
-/// 注意: `measure_mma_f16` は H2D/D2H 転送を計測区間の外に出しているが
-/// `measure_wmma_f16` は転送込みで計測するため（本ファイル
-/// `measure_mma_f16` ドキュメンテーションコメント参照）、両者の単純な
-/// 大小比較は mma.sync 側に有利な方向へ偏る apples-to-apples でない比較
-/// である。選ばれた経路ラベルを出力に含め、転記時にこの注記を残すこと。
-fn best_f16(wmma: Option<f64>, mma: Option<f64>) -> Option<(f64, &'static str)> {
-    best_of("wmma_f16", wmma, "mma_f16", mma)
+/// `measure_mma_f16` は H2D/D2H 転送・出力バッファ確保を計測区間の外へ
+/// 出しているのに対し、`measure_wmma_f16`・`measure_tiled_f32`・
+/// `measure_wmma_tf32`（さらに PyTorch 参照値の計測プロトコル。
+/// `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/` 参照）は転送・確保込みで
+/// 計測している。異なる計測範囲の値を `best_of` で直接比較し candidate
+/// floor へ混入させると、同一実機でも計測範囲の差が比率・経路選択を
+/// 左右してしまう（PR #349 codex-review 指摘 P1「候補下限を異なる計測
+/// 範囲の TFLOPS から算出している」。ドキュメントへの偏り注記だけでは
+/// 候補値の正当性を回復できないとの指摘のため、コメント修正ではなく
+/// `mma_f16` を candidate floor の算出対象から除外する）。
+///
+/// `mma_f16` は GPU 実行のみの参考値として出力には残し、
+/// `mma_over_wmma_f16` 比（`main` 参照）で `wmma_f16` との相対値を
+/// 併記する。全経路を同一タイミング境界（入力事前配置＋カーネル実行＋
+/// 同期のみ）で揃えて再計測する対応は、tiled f32／WMMA(TF32) の分割
+/// 計測 API（`gemm.rs`）が未整備なため本 PR のスコープ外とし、
+/// `docs/spec/05-tasks.md` TASK-8.3 系のフォローアップで扱う
+/// （out-of-scope-tracking 対応）。
+fn f16_candidate_floor_value(wmma: Option<f64>) -> Option<(f64, &'static str)> {
+    wmma.filter(|v| v.is_finite()).map(|v| (v, "wmma_f16"))
 }
 
 fn main() {
@@ -443,7 +455,11 @@ fn main() {
         let mma_f16 = mma_gemm.as_ref().map(|g| measure_mma_f16(g, size, &config));
 
         let f32_best = best_f32(tiled, wmma_tf32);
-        let f16_best = best_f16(wmma_f16, mma_f16);
+        // f16 candidate floor は `wmma_f16`（転送込み計測。tiled_f32・
+        // wmma_tf32・PyTorch 参照値と同一の計測範囲）のみを根拠とする
+        // （`f16_candidate_floor_value` ドキュメンテーションコメント参照。
+        // PR #349 codex-review 指摘 P1 対応）。
+        let f16_candidate = f16_candidate_floor_value(wmma_f16);
 
         let (pytorch_f32, f32_measured) = pytorch_f32_ref(size, &measured_source);
         let (pytorch_f16, f16_measured) = pytorch_f16_ref(size, &measured_source);
@@ -452,27 +468,38 @@ fn main() {
         let f32_ratio_percent = f32_best
             .map(|(v, _)| v / pytorch_f32 * 100.0)
             .filter(|r| r.is_finite());
-        let f16_ratio_percent = f16_best
+        let f16_ratio_percent = f16_candidate
             .map(|(v, _)| v / pytorch_f16 * 100.0)
             .filter(|r| r.is_finite());
         let fmt_ratio = |v: Option<f64>| v.map_or("n/a".to_string(), |x| format!("{x:.2}%"));
         let fmt_path = |v: Option<(f64, &'static str)>| v.map_or("n/a", |(_, p)| p);
+        // `mma_f16` は転送・確保を計測区間の外に出しているため（本ファイル
+        // `measure_mma_f16` ドキュメンテーションコメント参照）candidate
+        // floor には含めない。`wmma_f16` との比は GPU 実行時間のみの
+        // 参考値として併記する（apples-to-apples でない旨を比のラベルに
+        // 明示する）。
+        let mma_over_wmma_f16_percent = match (mma_f16, wmma_f16) {
+            (Some(m), Some(w)) if w.is_finite() && w > 0.0 && m.is_finite() => Some(m / w * 100.0),
+            _ => None,
+        };
 
         println!(
             "size={size} tiled_f32_tflops={} wmma_tf32_tflops={} wmma_f16_tflops={} \
-             mma_f16_tflops={} f32_best_path={} f16_best_path={} f32_best_over_pytorch={} \
-             f16_best_over_pytorch={} (pytorch_f32={:.4} pytorch_f16={:.4}, \
-             f32_ref_measured={f32_measured} f16_ref_measured={f16_measured})",
+             mma_f16_tflops={} f32_best_path={} f16_candidate_path={} f32_best_over_pytorch={} \
+             f16_candidate_over_pytorch={} (pytorch_f32={:.4} pytorch_f16={:.4}, \
+             f32_ref_measured={f32_measured} f16_ref_measured={f16_measured}, \
+             mma_over_wmma_f16(reference-only, not apples-to-apples)={})",
             fmt(tiled),
             fmt(wmma_tf32),
             fmt(wmma_f16),
             fmt(mma_f16),
             fmt_path(f32_best),
-            fmt_path(f16_best),
+            fmt_path(f16_candidate),
             fmt_ratio(f32_ratio_percent),
             fmt_ratio(f16_ratio_percent),
             pytorch_f32,
             pytorch_f16,
+            fmt_ratio(mma_over_wmma_f16_percent),
         );
 
         if JUDGED_SIZES.contains(&size) {
@@ -528,7 +555,28 @@ fn print_candidate_floor(label: &str, min_ratio_percent: Option<f64>, same_hardw
 
 #[cfg(test)]
 mod tests {
-    use super::{best_of, floor_round};
+    use super::{best_of, f16_candidate_floor_value, floor_round};
+
+    // PR #349 codex-review 指摘 P1「候補下限を異なる計測範囲の TFLOPS から
+    // 算出している」の回帰確認: f16 candidate floor は転送込み計測の
+    // `wmma_f16` のみを根拠とし、H2D/D2H を計測区間の外に出している
+    // `mma_f16` は（`main` 側で別変数として渡されなくなったため）
+    // 混入し得ない。ここでは関数単体として `wmma_f16` 欠測時に `None` を
+    // 返すこと（フォールバック先が存在しないこと）を確認する。
+    #[test]
+    fn f16_candidate_floor_value_uses_wmma_f16_only() {
+        assert_eq!(
+            f16_candidate_floor_value(Some(42.0)),
+            Some((42.0, "wmma_f16"))
+        );
+        assert_eq!(f16_candidate_floor_value(None), None);
+    }
+
+    #[test]
+    fn f16_candidate_floor_value_excludes_non_finite() {
+        assert_eq!(f16_candidate_floor_value(Some(f64::NAN)), None);
+        assert_eq!(f16_candidate_floor_value(Some(f64::INFINITY)), None);
+    }
 
     // PR #349 codex-review 指摘 P1「実測性能を比較せず固定優先順位で
     // 『最良値』を選んでいる」の回帰確認。固定優先（旧実装は常に
