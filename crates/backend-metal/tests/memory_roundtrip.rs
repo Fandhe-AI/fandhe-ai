@@ -148,8 +148,9 @@ fn pooled_memory_reuses_buffer_and_zero_fills() {
 }
 
 /// TASK-14.1b（#175）: 受け入れ条件「Metal バックエンドでピーク値が
-/// 取得できる」の実機検証。既知サイズ（`[32, 32]` f32 = 4,096 バイト）を
-/// 複数同時確保し `peak_allocated_bytes()` が期待合計と一致すること、
+/// 取得できる」の実機検証。既知サイズ（要素数 `32 * 32` の rank-1 shape
+/// `[1024]`、f32 = 4,096 バイト）を複数同時確保し
+/// `peak_allocated_bytes()` が期待合計と一致すること、
 /// drop 後は `allocated_bytes()` が減少しつつ `peak` が過去最大値を保持
 /// することを確認する（`backend-cuda::tests::memory_real_device` の同名
 /// テストと同種のシナリオを実機で裏付ける）。
