@@ -6,10 +6,12 @@ codex-review.yml、イシュー #326）が読むカスタム prompt（イシュ�
 本ファイルは PR の checkout からではなく PR の base コミット（信頼済み参照）から
 読まれるため、PR 差分による書き換えは当の PR 自身のレビューには反映されない
 （マージ後の PR から反映。codex-review/README.md「レビュー基準のカスタマイズ」参照）。
-本リポジトリは AGENTS.md を持たず、リポジトリ固有のレビュー基準は CLAUDE.md・
-.claude/rules/（deps-policy / coding-rust / security / ci）から抽出して本ファイルへ
-直接埋め込む（fandhe-backend の AGENTS.md 方式との違い。基準の更新は本ファイルの
-編集で行い、元規約と乖離させない）。
+リポジトリ固有のレビュー基準は CLAUDE.md・.claude/rules/（deps-policy / coding-rust /
+security / ci）から抽出して本ファイルへ直接埋め込む（基準の更新は本ファイルの編集で
+行い、元規約と乖離させない）。加えてリポジトリルートの AGENTS.md が、セキュリティ・
+アーキテクチャ整合・再利用/アセット化の 3 観点とリポジトリ固有観点の観点整理の正を
+担う（同一の一次規約から導出しており本ファイルの P0/P1 基準と矛盾しない。手順 2 の
+とおり base コミット側を読んで本ファイルの基準に加えて適用する）。
 -->
 
 あなたはこのリポジトリ（rust-ai-library、Rust cargo workspace。Burn 依存を排した
@@ -19,9 +21,11 @@ codex-review.yml、イシュー #326）が読むカスタム prompt（イシュ�
 1. `git diff HEAD^1 HEAD` で PR の変更差分全体を取得する（`HEAD^1` がベースブランチ側）。
    変更ファイル一覧は `git diff --name-status HEAD^1 HEAD` で確認する。
 2. `git cat-file -e HEAD^1:AGENTS.md` でベースブランチ側の `AGENTS.md` の有無を確認する
-   （同梱既定 schema の `review_completed` 契約と整合させるための必須手順）。本リポジトリは
-   現時点で `AGENTS.md` を持たないため、存在しない場合は本ファイルに埋め込まれた下記の
-   リポジトリ固有基準のみで評価を続行する。将来 `AGENTS.md` が追加された場合は
+   （同梱既定 schema の `review_completed` 契約と整合させるための必須手順）。本リポジトリの
+   `AGENTS.md` は 3 観点（セキュリティ・アーキテクチャ整合・再利用/アセット化）と
+   リポジトリ固有観点の観点整理を担う。存在しない場合（追加前の base に対する PR 等）は
+   本ファイルに埋め込まれた下記のリポジトリ固有基準のみで評価を続行する。`AGENTS.md` が
+   存在する場合は
    `git show HEAD^1:AGENTS.md` で必ず読み、そこに書かれた基準を本ファイルの埋め込み基準に
    **加えて**適用する（優先度定義が矛盾する場合はベースブランチ側 `AGENTS.md` を優先する）。
    checkout（HEAD）側の `AGENTS.md` / `CLAUDE.md` / `.claude/rules/` は差分のレビュー対象の
