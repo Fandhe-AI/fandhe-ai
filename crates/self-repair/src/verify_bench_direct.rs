@@ -26,10 +26,18 @@
 //! 実装計画 §3.1 対案比較）。加えて、候補 diff がベンチワークロードのソース
 //! （`workload_sources`）自体を改変して「軽くして速く見せる」ゲーミングを
 //! [`DirectBenchRunner::measure`] の最初の実質ステップで fail-closed に拒否する
-//! （[`pinned_sources_untouched`]。実装計画 §3.2）。ビルド設定（`.cargo/config.toml`
-//! 等）経由の間接的ゲーミングは残余リスクであり、既存の `gaming_suspect`
-//! ヒューリスティック・ポリシー除外評価・guardrail 3 分岐判定に委ねる
-//! （本モジュールでは検出しない。out-of-scope-tracking.md 準拠でスコープ外）。
+//! （[`pinned_sources_untouched`]。実装計画 §3.2）。
+//!
+//! [`pinned_sources_untouched`] は `workload_sources` に列挙されたベンチ
+//! ターゲット実体だけでなく、`sandbox_root` 配下の全差分ファイルから
+//! **マニフェスト（`Cargo.toml`／`Cargo.lock`）・ビルドスクリプト（`build.rs`）・
+//! Cargo 設定（`.cargo/config.toml`／`.cargo/config`）に該当するものすべて**を
+//! ピン留め対象へ含める（`[[bin]].path` の付け替え・`[profile.release]`
+//! 改変・`build.rs` 経由の間接的なビルド条件操作でのゲーミング迂回を防ぐ。
+//! Codex レビュー #355 P1 指摘対応）。上記に該当しない未知のビルド系ファイル
+//! 種別を経由した迂回は既存の `gaming_suspect` ヒューリスティック・ポリシー
+//! 除外評価・guardrail 3 分岐判定に委ねる残余リスクとする（out-of-scope-
+//! tracking.md 準拠でスコープ外）。
 //!
 //! # A03（インジェクション）対応
 //! `crate::diff_signals::validate_commit_ref` と同じ 16 進 commit sha 検証を
@@ -99,7 +107,9 @@ pub struct DirectBenchSpec {
     pub bench_bin: String,
     /// ゲーミング防止のためピン留めするワークロードソースファイル
     /// （`sandbox_root` 相対パス。`git diff --name-only` で候補 diff がこれらを
-    /// 変更していないか検査する）。
+    /// 変更していないか検査する）。マニフェスト・ビルドスクリプト・Cargo 設定は
+    /// ここに列挙せずとも [`pinned_sources_untouched`] が自動でピン留め対象に
+    /// 含める（モジュール冒頭「ゲーミング防止」参照）。
     pub workload_sources: Vec<String>,
     /// ベンチゲート機構（[`SelfRepairBenchGate::run`]）へ渡す反復回数
     /// （[`crate::verify_bench::MIN_BENCH_ITERATIONS`] 以上であることは
@@ -157,16 +167,76 @@ fn validate_commit_ref(baseline_commit: &str) -> Result<(), DirectBenchError> {
     }
 }
 
-/// 候補 diff がベンチワークロードソース（`spec.workload_sources`）自体を
+/// `path`（`sandbox_root` 相対）が `spec.workload_sources` に明示列挙されて
+/// いるか、マニフェスト（`Cargo.toml`／`Cargo.lock`）・ビルドスクリプト
+/// （`build.rs`）・Cargo 設定（`.cargo/config.toml`／`.cargo/config`）の
+/// いずれかに該当するかを判定する（ピン留め対象の全体像。モジュール冒頭
+/// 「ゲーミング防止」参照。Codex レビュー #355 P1 指摘対応）。ディレクトリ
+/// 位置を問わず判定する（`crates/*/Cargo.toml` 等のワークスペース内配置も
+/// 拾う）ことで、候補 diff が `[[bin]].path` の付け替えや `[profile.release]`
+/// 改変・`build.rs` 経由の間接的なビルド条件操作でゲーミングを迂回する経路を
+/// 塞ぐ。
+fn is_pinned_path(path: &str, workload_sources: &[String]) -> bool {
+    if workload_sources.iter().any(|source| source == path) {
+        return true;
+    }
+    let file_name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if matches!(file_name, "Cargo.toml" | "Cargo.lock" | "build.rs") {
+        return true;
+    }
+    // `.cargo/config.toml`（新形式）・`.cargo/config`（旧形式。cargo は両対応）
+    // のいずれかで終わるパスをピン留め対象とする。ワークスペースルート以外
+    // （ネストした `.cargo/` 等）に配置される場合も拾えるよう suffix 一致で
+    // 判定する。
+    path.ends_with(".cargo/config.toml") || path.ends_with(".cargo/config")
+}
+
+/// `sandbox_root` の作業木で未追跡ファイルを含む全ファイルを index へ反映する
+/// （`git add -A -- .`）。`crate::diff_signals::stage_untracked_files` と同一の
+/// 理由・同一のコマンドだが、両モジュールを跨いだ `pub(crate)` 共有はしない
+/// （`verify_bench_direct.rs` 冒頭「A03 対応」節・`validate_commit_ref` と同じ
+/// 独立モジュール構成の判断）。`git diff <baseline_commit>` は**未追跡（新規
+/// 追加）ファイルを出力に含めない**ため、候補 diff が新規 `build.rs`・
+/// `.cargo/config.toml` を追加してピン留め検査を迂回するのを防ぐには、diff の
+/// 前に index へ反映しておく必要がある（`diff_signals.rs` が解決したのと同じ
+/// 問題クラス。Codex レビュー #355 P1 指摘対応。追跡済みファイルへの変更のみ
+/// では新規追加ファイルを見逃す fail-open 経路になる）。
+fn stage_untracked_files<R: CommandRunner>(
+    runner: &R,
+    sandbox_root: &Path,
+) -> Result<(), DirectBenchError> {
+    let output = runner
+        .run("git", &["add", "-A", "--", "."], sandbox_root)
+        .map_err(|error| {
+            DirectBenchError::Setup(format!(
+                "git add -A の起動に失敗（未追跡ファイル反映）: {error}"
+            ))
+        })?;
+    if !output.success() {
+        return Err(DirectBenchError::Setup(format!(
+            "git add -A が失敗しました（未追跡ファイル反映）: {}",
+            output.log_tail()
+        )));
+    }
+    Ok(())
+}
+
+/// 候補 diff がベンチワークロードソース（`spec.workload_sources`）に加え、
+/// マニフェスト・ビルドスクリプト・Cargo 設定（[`is_pinned_path`]）を
 /// 変更していないか検査する（ゲーミング防止。モジュール冒頭ドキュメント参照）。
+/// `spec.workload_sources` のみへ絞った `git diff -- <pathspec>` ではなく
+/// `sandbox_root` 全体の差分を取得したうえで [`is_pinned_path`] によって
+/// 事後フィルタする（候補 diff がどこにマニフェスト・ビルド設定を追加・変更しても
+/// 見逃さないため。Codex レビュー #355 P1 指摘対応）。
 fn pinned_sources_untouched<R: CommandRunner>(
     runner: &R,
     spec: &DirectBenchSpec,
 ) -> Result<(), DirectBenchError> {
-    let mut args = vec!["diff", "--name-only", spec.baseline_commit.as_str(), "--"];
-    for source in &spec.workload_sources {
-        args.push(source.as_str());
-    }
+    stage_untracked_files(runner, &spec.sandbox_root)?;
+    let args = ["diff", "--name-only", spec.baseline_commit.as_str()];
     let output = runner
         .run("git", &args, &spec.sandbox_root)
         .map_err(|error| DirectBenchError::Setup(format!("ピン留め検査の起動に失敗: {error}")))?;
@@ -180,8 +250,9 @@ fn pinned_sources_untouched<R: CommandRunner>(
     // 参照）。切り詰められたファイル一覧を「改変なし」と誤解析すると
     // ピン留め違反（ゲーミング）を見逃す fail-open 経路になるため、
     // `diff_signals::run_git` と同じ方針で fail-closed に拒否する
-    // （Codex レビュー #137 指摘の同種クラス。`args` は `workload_sources`
-    // のみを対象とするため通常は上限に達しないが、防御的に検査する）。
+    // （Codex レビュー #137 指摘の同種クラス。本検査は sandbox_root 全体の
+    // 差分を取得するため `workload_sources` のみを対象にしていた旧実装より
+    // 上限に達しやすく、この防御の重要性が増している）。
     if output.truncated() {
         return Err(DirectBenchError::Setup(
             "ピン留め検査（git diff --name-only）の出力が 256 KiB 上限で切り詰められました。\
@@ -192,8 +263,9 @@ fn pinned_sources_untouched<R: CommandRunner>(
     let touched: Vec<String> = output
         .log_tail()
         .lines()
-        .map(str::to_string)
         .filter(|line| !line.is_empty())
+        .filter(|line| is_pinned_path(line, &spec.workload_sources))
+        .map(str::to_string)
         .collect();
     if touched.is_empty() {
         Ok(())
@@ -424,8 +496,95 @@ mod tests {
             }
             other => panic!("expected WorkloadPinningViolation, got {other:?}"),
         }
-        // ピン留め検査（diff）のみ呼ばれ、worktree/build には到達しない。
-        assert_eq!(runner.calls.borrow().len(), 1);
+        // ピン留め検査（未追跡ファイル反映の add・diff）のみ呼ばれ、
+        // worktree/build には到達しない。
+        assert_eq!(runner.calls.borrow().len(), 2);
+    }
+
+    /// Codex レビュー #355 P1 指摘の回帰テスト: `workload_sources` に明示
+    /// 列挙していない `Cargo.toml`（`[[bin]].path` の付け替え・
+    /// `[profile.release]` 改変等の温床）が候補 diff で改変された場合も
+    /// ピン留め違反として拒否されることを確認する。
+    #[test]
+    fn measure_rejects_manifest_change_even_when_not_listed_in_workload_sources() {
+        let runner = ScriptedRunner::new(vec![("diff", true, "Cargo.toml\n")]);
+        let err = DirectBenchRunner
+            .measure(&runner, &spec())
+            .expect_err("Cargo.toml 改変は拒否されるはず");
+        match err {
+            DirectBenchError::WorkloadPinningViolation { touched } => {
+                assert_eq!(touched, vec!["Cargo.toml".to_string()]);
+            }
+            other => panic!("expected WorkloadPinningViolation, got {other:?}"),
+        }
+    }
+
+    /// 同上（`build.rs`・ネストした `.cargo/config.toml` も同様に検出する）。
+    #[test]
+    fn measure_rejects_build_script_and_cargo_config_changes() {
+        let runner = ScriptedRunner::new(vec![(
+            "diff",
+            true,
+            "build.rs\n.cargo/config.toml\nunrelated/README.md\n",
+        )]);
+        let err = DirectBenchRunner
+            .measure(&runner, &spec())
+            .expect_err("build.rs・.cargo/config.toml 改変は拒否されるはず");
+        match err {
+            DirectBenchError::WorkloadPinningViolation { touched } => {
+                assert_eq!(
+                    touched,
+                    vec!["build.rs".to_string(), ".cargo/config.toml".to_string()]
+                );
+            }
+            other => panic!("expected WorkloadPinningViolation, got {other:?}"),
+        }
+    }
+
+    /// ピン留め対象に該当しない無関係ファイルのみの変更は許容される
+    /// （回帰防止: フィルタが過剰検知しないことの確認）。
+    #[test]
+    fn measure_allows_unrelated_file_changes() {
+        let runner = ScriptedRunner::new(vec![
+            ("diff", true, "src/lib.rs\n"),
+            ("worktree", true, ""),
+            ("build", false, ""),
+        ]);
+        let err = DirectBenchRunner
+            .measure(&runner, &spec())
+            .expect_err("build 失敗で止まるはず（ピン留めでは止まらない）");
+        assert!(
+            matches!(err, DirectBenchError::Setup(_)),
+            "ピン留め違反ではなく build 失敗として扱われるはず: {err:?}"
+        );
+    }
+
+    /// Codex レビュー #355 P1 指摘の回帰テスト: 候補 diff が `Cargo.toml`・
+    /// `build.rs` 等を**新規追加**した場合も `git diff` の前に `git add -A`
+    /// で index 反映してから検査するため見逃さないことを確認する（未追跡
+    /// ファイルは `git diff <baseline_commit>` 単体では検出できない。
+    /// `stage_untracked_files` ドキュメント参照）。
+    #[test]
+    fn measure_stages_untracked_files_before_pinning_diff() {
+        let runner = ScriptedRunner::new(vec![("diff", true, "src/lib.rs\n")]);
+        let _ = DirectBenchRunner.measure(&runner, &spec());
+        let calls = runner.calls.borrow();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("git add -A -- ."),
+            "git diff の前に git add -A で未追跡ファイルを index 反映するはず"
+        );
+    }
+
+    /// 未追跡ファイル反映（`git add -A`）自体が失敗した場合も fail-closed に
+    /// 拒否する（`Setup` エラー。ピン留め違反の見逃しより安全側に倒す）。
+    #[test]
+    fn measure_fails_closed_when_staging_untracked_files_fails() {
+        let runner = ScriptedRunner::new(vec![("add", false, "")]);
+        let err = DirectBenchRunner
+            .measure(&runner, &spec())
+            .expect_err("git add -A 失敗は拒否されるはず");
+        assert!(matches!(err, DirectBenchError::Setup(_)));
     }
 
     #[test]
