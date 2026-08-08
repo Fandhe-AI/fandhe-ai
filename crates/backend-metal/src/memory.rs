@@ -2,9 +2,13 @@
 //!
 //! `tensor_core::buffer::MemoryOps` の Metal 実装。既存の
 //! [`crate::buffer::MetalBuffer`]（TASK-1.8a・#38。`new_with_data`／
-//! `new_zeroed`／`read_to_vec`）をそのまま再利用し、新規 `unsafe` を
-//! 追加しない（`.claude/rules/security.md` の「unsafe は必要最小限」
-//! 方針。FFI 境界の safety 根拠は `buffer.rs` 側に既に記載済み）。
+//! `new_zeroed`／`read_to_vec`）をそのまま再利用する。本モジュール
+//! 自体は新規 `unsafe` を追加しない（`.claude/rules/security.md` の
+//! 「unsafe は必要最小限」方針。FFI 境界の safety 根拠は `buffer.rs`
+//! 側に集約済み）。TASK-#201（REQ-14 14-3）で追加した
+//! [`MetalBuffer::zero_fill`] のみ、`read_to_vec` と対になる書き込み版
+//! FFI アクセスとして `buffer.rs` 側に 1 箇所追加している
+//! （`buffer.rs` モジュールコメント「Safety 境界」参照）。
 //!
 //! `StorageModeShared`（Apple Silicon の UMA。`buffer.rs` モジュール
 //! コメント参照）を用いるため、CUDA のような明示的な非同期転送・
@@ -20,6 +24,7 @@ use crate::error::MetalError;
 use tensor_core::Tensor;
 use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use tensor_core::device::{BackendError, Device};
+use tensor_core::pool::PoolZeroFill;
 
 /// Metal バッファの具体ハンドル。
 ///
@@ -35,6 +40,10 @@ struct MetalBufferHandle {
 
 impl BufferHandle for MetalBufferHandle {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
@@ -184,6 +193,28 @@ impl MemoryOps for MetalMemory {
             return Err(BackendError::DeviceMismatch);
         }
         self.download_inner(buffer).map_err(map_metal_error)
+    }
+}
+
+/// `tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・REQ-14
+/// 14-3。Metal 側の組み込みは本イシューのスコープ内。実機検証は #175
+/// 完了後）が再利用バッファを返す前に呼ぶゼロ初期化フック。
+/// `MetalBuffer::zero_fill`（`buffer.rs`）へ委譲する（`StorageModeShared`
+/// の CPU 可視アドレスへの直接書き込み。モジュール冒頭コメント
+/// 「既存バッファ書き込みパターン踏襲」参照）。
+impl PoolZeroFill for MetalMemory {
+    fn zero_fill(&self, handle: &mut dyn BufferHandle) -> Result<(), BackendError> {
+        let Some(metal_handle) = handle.as_any_mut().downcast_mut::<MetalBufferHandle>() else {
+            return Err(BackendError::DeviceMismatch);
+        };
+        // 空ハンドル（`numel == 0`）は `pool.rs::PooledMemory::alloc_zeroed`
+        // が空テンソル契約によりそもそもプールを介さない経路で扱うため
+        // 到達しない想定だが、`buffer` が `None` の場合に備えて no-op
+        // として安全に振る舞う（CUDA 実装と同じ防御的分岐）。
+        if let Some(buf) = metal_handle.buffer.as_ref() {
+            buf.zero_fill();
+        }
+        Ok(())
     }
 }
 

@@ -59,7 +59,7 @@ fn checked_byte_len(len: usize) -> Result<usize, MetalError> {
 impl MetalBuffer {
     /// `data` の内容を Metal バッファへアップロードして確保する。
     ///
-    /// # Safety 境界（`unsafe` 使用箇所 1/2）
+    /// # Safety 境界（`unsafe` 使用箇所 1/3）
     /// `newBufferWithBytes_length_options` は `data` の先頭ポインタから
     /// `bytes_len` バイトを読み取って複製する。`bytes_len` は直前の
     /// `checked_byte_len(data.len())` により `data` の実バイト長と一致する
@@ -127,7 +127,7 @@ impl MetalBuffer {
 
     /// バッファの内容をホストへ読み出す。
     ///
-    /// # Safety 境界（`unsafe` 使用箇所 2/2）
+    /// # Safety 境界（`unsafe` 使用箇所 2/3）
     /// `contents()` は `StorageModeShared` バッファの CPU 可視アドレスを
     /// 返す（確保時に `MTLResourceOptions::StorageModeShared` を指定して
     /// いるため CPU から直接参照可能）。読み出す要素数は確保時に記録した
@@ -140,5 +140,37 @@ impl MetalBuffer {
         let slice: &[f32] =
             unsafe { std::slice::from_raw_parts(ptr.as_ptr() as *const f32, self.len) };
         slice.to_vec()
+    }
+
+    /// バッファの内容を全要素 0 で上書きする。
+    ///
+    /// `tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・
+    /// REQ-14 14-3）がプールから再利用したバッファへ、`alloc_zeroed` の
+    /// 「全要素 0」契約を再適用するために呼ぶ（`memory.rs::PoolZeroFill`
+    /// 実装から呼ばれる想定。Metal 実機検証は #175 完了後）。
+    ///
+    /// # Safety 境界（`unsafe` 使用箇所 3/3。`read_to_vec` の書き込み版）
+    /// `contents()` は `StorageModeShared` バッファの CPU 可視アドレスを
+    /// 返す（確保時に `MTLResourceOptions::StorageModeShared` を指定して
+    /// いるため CPU から直接書き込み可能。`new_with_data`/`new_zeroed`
+    /// モジュールコメント参照）。書き込む要素数は確保時に記録した
+    /// `self.len`（確保時の `checked_byte_len` で検証済みのバイト数に
+    /// 対応する要素数）に限定しており、確保バイト数を超えて書くことは
+    /// ない。呼び出し元（`PooledMemory::alloc_zeroed`）はプールから
+    /// 取り出した直後・呼び出し元へ返す前の排他所有段階でのみ本メソッドを
+    /// 呼ぶため、ホスト側からの他のエイリアスは存在しない。GPU 側との
+    /// 同時アクセスについては、本メソッド自体は GPU 実行完了の待機を
+    /// 行わない（`MTLCommandBuffer` の完了同期は `crate::ops` の GEMM
+    /// ディスパッチ経路が担う）。プールへ返却されるバッファは
+    /// `download`／GEMM 出力読み出しが完了した後に `Drop` されたもので
+    /// あることが呼び出し元（`PooledMemory`）側の運用契約であり、本
+    /// メソッドはその契約が守られている前提で安全である（契約破棄時の
+    /// 挙動は他の `unsafe` 読み書き経路と同様に呼び出し元の責務とする）。
+    pub(crate) fn zero_fill(&self) {
+        let ptr = self.buffer.contents();
+        // SAFETY: 上記コメント参照。`self.len` は確保時に検証済みの要素数。
+        let slice: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(ptr.as_ptr() as *mut f32, self.len) };
+        slice.fill(0.0);
     }
 }
