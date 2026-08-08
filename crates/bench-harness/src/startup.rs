@@ -813,9 +813,33 @@ fn run_probe_once_with_timeout(
         return Err(StartupError::ProbeOutputTooLarge(overflowed_len));
     }
 
-    let status = child
-        .wait()
-        .map_err(|e| StartupError::Io(format!("probe 待機失敗（{:?}）: {e}", config.probe_path)))?;
+    // ストリーム読み取り（stdout/stderr）は上記ループで既に上限内に完了しているが、
+    // probe プロセス自体の終了は別事象である。両ストリームが EOF になった後も
+    // プロセスが終了しない場合（GPU/native runtime の異常・probe 実装の退行で fd を
+    // クローズしたまま停止する等）、無条件の `child.wait()` は無期限にブロックしうる。
+    // ストリーム監視と同一の絶対期限 `deadline` まで `try_wait` でポーリングし、
+    // 超過時は kill・reap して `ProbeTimeout` を返すことで、「実行時間を必ず制限する」
+    // という本関数の契約をプロセス終了待ちにも一貫して適用する
+    // （PR #360 codex-review 指摘 P1。実行ログ run_id 31239140596）。
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(StartupError::ProbeTimeout(start.elapsed()));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => {
+                return Err(StartupError::Io(format!(
+                    "probe 待機失敗（{:?}）: {e}",
+                    config.probe_path
+                )));
+            }
+        }
+    };
     let wall_secs = start.elapsed().as_secs_f64();
 
     if !status.success() {
@@ -989,6 +1013,60 @@ mod tests {
         assert!(
             matches!(result, Err(StartupError::ProbeTimeout(_))),
             "無出力のままハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "タイムアウト検知後は速やかに制御が返るべき（実際: {elapsed:?}）"
+        );
+    }
+
+    /// probe が stdout／stderr の両方を EOF（クローズ）させた後、プロセス自体は
+    /// 終了せず生存し続けるケース（GPU/native runtime の異常・probe 実装の退行を想定）
+    /// でも [`run_probe_once`] が無期限にハングせず [`StartupError::ProbeTimeout`] を
+    /// 返すことを検証する（PR #360 codex-review 指摘 P1。実行ログ run_id 31239140596。
+    /// ストリーム監視ループを正常に抜けた後の `child.wait()` が期限を見ずに無条件で
+    /// 呼ばれていた退行の回帰テスト）。シェル側で `exec 1>&- 2>&-` により明示的に
+    /// fd をクローズしてから `sleep` することで、パイプの EOF とプロセス終了とを
+    /// 分離して再現する。
+    #[test]
+    fn run_probe_once_returns_probe_timeout_when_process_hangs_after_closing_streams() {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let script_path = std::env::temp_dir().join(format!(
+            "rust-ai-library-startup-timeout-close-streams-test-{}-{nanos}.sh",
+            std::process::id()
+        ));
+        // stdout/stderr へ何か出力した後、明示的に両 fd をクローズしてから長時間
+        // 生存し続ける（`sleep`）。読み取りスレッドは EOF を受け取りループを
+        // 正常に抜けるが、プロセス自体は `PROBE_TIMEOUT` 相当の期限を過ぎても
+        // 終了しない状態を再現する。
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\necho ok\necho err 1>&2\nexec 1>&- 2>&-\nsleep 300\n",
+        )
+        .expect("テスト用スクリプトの書き込みに失敗");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("テスト用スクリプトの metadata 取得に失敗")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms)
+                .expect("テスト用スクリプトへの実行権限付与に失敗");
+        }
+
+        let config = StartupConfig::new(StartupBackend::Cpu, 1, script_path.clone()).unwrap();
+        let started = Instant::now();
+        let result = run_probe_once_with_timeout(&config, None, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        let _ = std::fs::remove_file(&script_path);
+
+        assert!(
+            matches!(result, Err(StartupError::ProbeTimeout(_))),
+            "stdout/stderr クローズ後にハングする probe は ProbeTimeout で拒否されるべき: {result:?}"
         );
         assert!(
             elapsed < Duration::from_secs(10),
