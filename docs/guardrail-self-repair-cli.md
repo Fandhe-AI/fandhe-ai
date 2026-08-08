@@ -261,11 +261,19 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 
 ### 3.1 `self-repair run`
 
+**実装済み**（イシュー #142 差し戻し分・完走判定基準 1。`crates/self-repair/
+src/cli.rs`・`crates/self-repair/src/main.rs`）。#131（TASK-3.1 の CLI 化残
+作業）が未実装のまま closed となり、他に追跡イシューがなかったため #142 の
+スコープとして実装した。`--kind` で `RepairKind` の 3 variant を受理する
+種別非依存の実装であり、#141（バグ修正種別の再実証）からも再利用できる
+（`bug-fix`／`feature-addition` は完全対応、`perf-regression` は下記のとおり
+CLI 引数としては受理するが実行時未対応）。
+
 | 引数 | 型・既定値 | 説明 |
 |---|---|---|
-| `--kind <bug-fix\|perf-regression\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承） |
-| `--repo <path>` | 既定 `.` | 対象リポジトリのルート |
-| `--max-attempts <N>` | 既定値は初期実装で提案（`NonZeroU32` 制約。0 を許容しない） | 修正試行回数の上限 |
+| `--kind <bug-fix\|perf-regression\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承）。`perf-regression` は値としては受理するが `main.rs::run_run` が実行時未対応として内部エラー（exit 1）を返す（`PerfRegressionDetector`/`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・戦略リスト〉を持ち、#141／#142 いずれも本種別を必要としないため。out-of-scope-tracking.md 準拠） |
+| `--repo <path>` | 既定 `.` | 対象リポジトリのルート。`RepairCompositeGateSpec` の `workspace`／`sandbox_root` 双方に使う |
+| `--max-attempts <N>` | 既定 `5`（`NonZeroU32` 制約。0 を許容しない） | 修正試行回数の上限。`docs/self-repair-revalidation-plan.md` §5 基準 3 の承認済み提案値をそのまま既定値として採用した |
 | `--log <path>` | 必須 | JSON Lines ログの出力先（3.3 節）。新規パスなら新規作成、既存パスなら
 末尾から `seq`/`hash` を復元して追記継続する（v1 `LogWriter::open` の
 `read_tail_state` 方式を継承。3.2 節 `verify-log --log` はこれと同一ファイルを
@@ -278,10 +286,20 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 必須・`--output` は任意という非対称を持つ: JSON Lines ログは改竄検知の
 一次記録として常に残す必要があるが、`LoopReport` は呼び出し元がその場で
 消費できれば足りるため） |
+| `--candidates <path>` | 必須 | 事前生成済みの候補修正列（JSON）。3.1 節は候補生成手段を未定義のため #142 差し戻し分で新たに定めた: `[{"description": string, "files": [{"path": string, "content": string}]}]` 形式（`candidate::load_candidates_from_json`）。候補生成手段自体（AI 生成・人手作成）は本 CLI のスコープ外とし、事前に確定済みの候補列を受け取るのみとする |
+| `--bench-bin <name>` | 必須 | 候補 diff 直接ベンチ実測（`RepairCompositeGate`。TASK-3.2a・#137）が `cargo build --release --bin <name>` するワークロード bin 名 |
+| `--workload-source <path>` | 必須（複数指定可） | ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対）。1 回以上必須 |
+| `--policy-exclusion <path>` | 任意（既定 `<repo>/policy-exclusion.toml`） | REQ-5 除外ルール設定ファイル |
 
 出力: 標準出力へのテキスト要約（既定）または `--output` 指定時は
 `LoopReport`／`LoopFailure` JSON（上表）＋ 3.3 節の追記専用 JSON Lines
-ログ（`--log`、常に出力）。
+ログ（`--log`、常に出力）。`--output` の JSON は `LoopReport` の基本フィールド
+に加え、最後に `VerificationOutcome::Passed` を返した試行の証跡
+（`adopted_evidence`: `gate_report`／`bench_median_pct`／
+`bench_measurements_pct`／`lines_changed`／`api_broken`／`gaming_suspect`／
+`exclusion_rule_ids`）と `signal_source: "measured"` を含む（`--signals`
+契約検証パス〈2.1 節〉を経由しない実シグナル計測であることの明示。
+`docs/self-repair-revalidation/feature-addition/loop-report.json` が実例）。
 
 ### 3.2 `self-repair verify-log`
 
@@ -353,10 +371,22 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 
 | 値 | 意味 |
 |---|---|
-| `0` | ループが自動適用で完走（最終 verdict = `auto_apply`） |
-| `10` | エスカレーション（人間承認待ち） |
-| `20` | 却下 |
+| `0` | ループが自動適用で完走（最終 verdict = `auto_apply`。`LoopOutcome::Adopted`） |
+| `10` | エスカレーション（人間承認待ち。`LoopOutcome::Escalated`） |
+| `20` | 却下（`LoopOutcome::Rejected`） |
 | `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗） |
+| `2` | usage エラー（`--kind` 欠落・不正値・`--log` 欠落・`--max-attempts 0`・未知引数等） |
+
+**`Exhausted`／`NoActionNeeded` の写像（イシュー #142 差し戻し分で追記）**:
+上表は元々 3 分岐＋`LoopFailure` のみを定義しており、
+[`self_repair::LoopOutcome`] の残り 2 variant（`Exhausted`＝試行上限到達、
+`NoActionNeeded`＝検出段階で修正不要と判定されそもそもループが開始しな
+かった）を扱っていなかった。いずれも「取り込まれなかった」点は却下と共通
+するが、`Rejected`（3 ゲート・取り込み判断を経た明示的な却下）とは意味が
+異なるため既存の `20` へ丸めず、「完走（exit 0）していない」ことを明確にする
+ため内部エラー区分の **`1`** へ写像すると定める（`main.rs::
+exit_code_for_outcome` のみが行う写像。他の経路から `0` を返さない
+fail-closed 契約。`.claude/rules/security.md` A08）。
 
 ### 3.6 骨格の移植スコープ
 

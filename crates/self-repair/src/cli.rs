@@ -5,12 +5,15 @@
 //! 依存追加はユーザー承認事項のため、`crates/guardrail/src/cli.rs` と同じ
 //! 方針で `std::env::args` ベースの自作パースを行う。
 //!
-//! 現時点で結線済みのサブコマンドは `verify-log`
-//! （`docs/guardrail-self-repair-cli.md` 3.2 節）のみである。`run`
-//! （同 3.1 節）は別イシューのスコープ（`crate::lib` モジュールコメント
-//! 「CLI バイナリ（self-repair run/verify-log）→ 後続タスク」参照）のため
-//! 未実装であり、[`Command`] へ variant を追加する形で拡張する想定
-//! （guardrail の `check`/`eval` 二本立てと同じ拡張パターン）。
+//! 結線済みのサブコマンドは `verify-log`（`docs/guardrail-self-repair-cli.md`
+//! 3.2 節）と `run`（同 3.1 節。イシュー #142 差し戻し分・完走判定基準 1
+//! で実装）の 2 つ。`run` は #131 が担当だったが未実装のまま closed になり、
+//! 他に追跡イシューがないため #142 のスコープとして本モジュールへ拡張した
+//! （実装計画 §2「スコープ判断」参照）。`--kind` で `RepairKind` の 3
+//! variant を受理する種別非依存の実装とし、`self-repair` バイナリを必要と
+//! する他イシュー（#141 のバグ修正種別再実証等）からも再利用できるようにする
+//! （guardrail の `check`/`eval` 二本立てと同じ拡張パターンで
+//! [`Command::VerifyLog`] と併存させる）。
 //!
 //! # 引数の受け渡しは `OsString`（PR #356 codex-review P1 指摘対応）
 //!
@@ -23,7 +26,10 @@
 //! 一本化）。`--log` の値自体は UTF-8 検証せず `PathBuf` へそのまま渡す。
 
 use std::ffi::{OsStr, OsString};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
+
+use crate::kind::RepairKind;
 
 /// CLI 引数の解析・検証に失敗した（未知引数・値欠落・不正なサブコマンド等）。
 /// `docs/guardrail-self-repair-cli.md` 3.2 節には verify-log 固有の終了コード
@@ -55,11 +61,55 @@ pub struct VerifyLogArgs {
     pub allow_empty_log: bool,
 }
 
-/// 本バイナリが受理するサブコマンド。`run`（3.1 節）は未実装
-/// （モジュールコメント参照）のため variant を持たない。
+/// `self-repair run`（3.1 節）の引数。`--kind` で対象種別を選び、以降の
+/// 段階構築（検出・修正生成・検証・取り込み判断）を `main.rs::run_run` が
+/// 種別ごとに分岐する（`SelfRepairLoop<D, F, V, J>` は型パラメータのため、
+/// 実行時に選んだ種別に応じた具体型を選ぶ分岐は `cli.rs` ではなく `main.rs`
+/// 側の責務）。
+///
+/// 3.1 節の表にない `--candidates`／`--bench-bin`／`--workload-source`／
+/// `--policy-exclusion` は、同節が候補生成手段・ベンチ仕様の受け渡しを
+/// 未定義としているため、本イシュー（#142 差し戻し分）で新たに定めて
+/// `docs/guardrail-self-repair-cli.md` へ追記する（実装計画 §3.1）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunArgs {
+    /// 対象種別（必須）。
+    pub kind: RepairKind,
+    /// 対象リポジトリのルート（既定 `.`）。`RepairCompositeGateSpec` の
+    /// `workspace`／`sandbox_root` 双方に使う（検証対象ワークスペースと
+    /// diff・ベンチ実測の基点は同一という前提。実証ハーネスの sandbox 構成
+    /// と同じ）。
+    pub repo: PathBuf,
+    /// 修正試行回数の上限（既定 5。`docs/self-repair-revalidation-plan.md`
+    /// §5 基準 3 の承認済み提案値をそのまま既定値として採用する）。
+    pub max_attempts: NonZeroU32,
+    /// JSON Lines ログの出力先（必須。3.3 節）。
+    pub log: PathBuf,
+    /// guardrail 判定閾値の設定ファイル（任意。未指定時は `guardrail::config::resolve`
+    /// が `--repo` 直下探索 → 組み込み既定値の順で解決する。2.4 節と共通）。
+    pub config: Option<PathBuf>,
+    /// `LoopReport`／`LoopFailure` JSON の書き出し先（任意）。
+    pub output: Option<PathBuf>,
+    /// 事前生成された候補修正列（JSON。必須）。`candidate::load_candidates_from_json`
+    /// が `CandidateFix` へ変換する。候補生成手段自体（AI 生成・人手作成）は
+    /// 本 CLI のスコープ外とし、事前に確定済みの候補列を受け取るのみとする
+    /// （実装計画 §3.1「追加引数」）。
+    pub candidates: PathBuf,
+    /// ベンチワークロードの `[[bin]]` 名（必須。`RepairCompositeGateSpec::bench_bin`）。
+    pub bench_bin: String,
+    /// ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対。
+    /// 1 回以上必須。`RepairCompositeGateSpec::workload_sources`）。
+    pub workload_sources: Vec<String>,
+    /// REQ-5 除外ルール設定ファイル（任意。未指定時は `<repo>/policy-exclusion.toml`。
+    /// `RepairCompositeGateSpec::policy_exclusion_path`）。
+    pub policy_exclusion: Option<PathBuf>,
+}
+
+/// 本バイナリが受理するサブコマンド。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     VerifyLog(VerifyLogArgs),
+    Run(RunArgs),
 }
 
 /// `std::env::args_os()` の実引数（プログラム名を除く）を受け取ってパースする。
@@ -76,15 +126,183 @@ where
         .next()
         .ok_or_else(|| UsageError("missing subcommand (verify-log)".to_string()))?;
     let subcommand = subcommand.to_str().ok_or_else(|| {
-        UsageError("subcommand must be valid UTF-8 (expected verify-log)".to_string())
+        UsageError("subcommand must be valid UTF-8 (expected run or verify-log)".to_string())
     })?;
 
     match subcommand {
         "verify-log" => parse_verify_log(it).map(Command::VerifyLog),
+        "run" => parse_run(it).map(Command::Run),
         other => Err(UsageError(format!(
-            "unknown subcommand '{other}' (expected verify-log)"
+            "unknown subcommand '{other}' (expected run or verify-log)"
         ))),
     }
+}
+
+/// `run` サブコマンドが受理する既知フラグ一覧（`KNOWN_FLAGS` と同じ役割。
+/// `take_value` の値位置フラグ誤消費検出に使う）。
+const RUN_KNOWN_FLAGS: &[&str] = &[
+    "--kind",
+    "--repo",
+    "--max-attempts",
+    "--log",
+    "--config",
+    "--output",
+    "--candidates",
+    "--bench-bin",
+    "--workload-source",
+    "--policy-exclusion",
+];
+
+/// `--kind` の値を [`RepairKind`] へ変換する（3.1 節「v1 `RepairKind`:
+/// `BugFix`/`PerfRegression`/`FeatureAddition` を継承」の文字列表現）。
+fn parse_repair_kind(value: &str) -> Result<RepairKind, UsageError> {
+    match value {
+        "bug-fix" => Ok(RepairKind::BugFix),
+        "perf-regression" => Ok(RepairKind::PerfRegression),
+        "feature-addition" => Ok(RepairKind::FeatureAddition),
+        other => Err(UsageError(format!(
+            "unknown value '{other}' for '--kind' (expected bug-fix|perf-regression|feature-addition)"
+        ))),
+    }
+}
+
+fn parse_run<I>(args: I) -> Result<RunArgs, UsageError>
+where
+    I: Iterator<Item = OsString>,
+{
+    let mut kind: Option<RepairKind> = None;
+    let mut repo: Option<PathBuf> = None;
+    let mut max_attempts: Option<NonZeroU32> = None;
+    let mut log: Option<PathBuf> = None;
+    let mut config: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut candidates: Option<PathBuf> = None;
+    let mut bench_bin: Option<String> = None;
+    let mut workload_sources: Vec<String> = Vec::new();
+    let mut policy_exclusion: Option<PathBuf> = None;
+
+    let mut it = args.peekable();
+    while let Some(flag) = it.next() {
+        let flag_str = flag.to_str().ok_or_else(|| {
+            UsageError(format!(
+                "argument '{}' must be valid UTF-8",
+                flag.to_string_lossy()
+            ))
+        })?;
+        match flag_str {
+            "--kind" => {
+                let value = take_value(&mut it, flag_str, RUN_KNOWN_FLAGS)?;
+                let value_str = value
+                    .to_str()
+                    .ok_or_else(|| UsageError("--kind must be valid UTF-8".to_string()))?;
+                kind = Some(parse_repair_kind(value_str)?);
+            }
+            "--repo" => {
+                repo = Some(PathBuf::from(take_value(
+                    &mut it,
+                    flag_str,
+                    RUN_KNOWN_FLAGS,
+                )?))
+            }
+            "--max-attempts" => {
+                let value = take_value(&mut it, flag_str, RUN_KNOWN_FLAGS)?;
+                let value_str = value
+                    .to_str()
+                    .ok_or_else(|| UsageError("--max-attempts must be valid UTF-8".to_string()))?;
+                let parsed: u32 = value_str.parse().map_err(|_| {
+                    UsageError(format!(
+                        "--max-attempts must be a positive integer (got '{value_str}')"
+                    ))
+                })?;
+                max_attempts = Some(NonZeroU32::new(parsed).ok_or_else(|| {
+                    UsageError("--max-attempts must be >= 1 (0 is rejected)".to_string())
+                })?);
+            }
+            "--log" => {
+                log = Some(PathBuf::from(take_value(
+                    &mut it,
+                    flag_str,
+                    RUN_KNOWN_FLAGS,
+                )?))
+            }
+            "--config" => {
+                config = Some(PathBuf::from(take_value(
+                    &mut it,
+                    flag_str,
+                    RUN_KNOWN_FLAGS,
+                )?))
+            }
+            "--output" => {
+                output = Some(PathBuf::from(take_value(
+                    &mut it,
+                    flag_str,
+                    RUN_KNOWN_FLAGS,
+                )?))
+            }
+            "--candidates" => {
+                candidates = Some(PathBuf::from(take_value(
+                    &mut it,
+                    flag_str,
+                    RUN_KNOWN_FLAGS,
+                )?))
+            }
+            "--bench-bin" => {
+                let value = take_value(&mut it, flag_str, RUN_KNOWN_FLAGS)?;
+                let value_str = value
+                    .to_str()
+                    .ok_or_else(|| UsageError("--bench-bin must be valid UTF-8".to_string()))?;
+                bench_bin = Some(value_str.to_string());
+            }
+            "--workload-source" => {
+                let value = take_value(&mut it, flag_str, RUN_KNOWN_FLAGS)?;
+                let value_str = value.to_str().ok_or_else(|| {
+                    UsageError("--workload-source must be valid UTF-8".to_string())
+                })?;
+                workload_sources.push(value_str.to_string());
+            }
+            "--policy-exclusion" => {
+                policy_exclusion = Some(PathBuf::from(take_value(
+                    &mut it,
+                    flag_str,
+                    RUN_KNOWN_FLAGS,
+                )?))
+            }
+            unknown => {
+                return Err(UsageError(format!(
+                    "unknown argument '{unknown}' for 'self-repair run'"
+                )));
+            }
+        }
+    }
+
+    let kind = kind.ok_or_else(|| UsageError("missing required argument '--kind'".to_string()))?;
+    let log = log.ok_or_else(|| UsageError("missing required argument '--log'".to_string()))?;
+    let candidates = candidates
+        .ok_or_else(|| UsageError("missing required argument '--candidates'".to_string()))?;
+    let bench_bin = bench_bin
+        .ok_or_else(|| UsageError("missing required argument '--bench-bin'".to_string()))?;
+    if workload_sources.is_empty() {
+        return Err(UsageError(
+            "missing required argument '--workload-source' (specify at least once)".to_string(),
+        ));
+    }
+    let repo = repo.unwrap_or_else(|| PathBuf::from("."));
+    let max_attempts = max_attempts.unwrap_or_else(|| {
+        NonZeroU32::new(5).expect("5 は非ゼロ（docs/self-repair-revalidation-plan.md §5 基準 3）")
+    });
+
+    Ok(RunArgs {
+        kind,
+        repo,
+        max_attempts,
+        log,
+        config,
+        output,
+        candidates,
+        bench_bin,
+        workload_sources,
+        policy_exclusion,
+    })
 }
 
 /// `verify-log` サブコマンドが受理する既知フラグ一覧（`take_value` が値位置の
@@ -161,7 +379,9 @@ mod tests {
     #[test]
     fn parses_verify_log_with_log_arg() {
         let cmd = parse(["verify-log", "--log", "trial.jsonl"]).unwrap();
-        let Command::VerifyLog(args) = cmd;
+        let Command::VerifyLog(args) = cmd else {
+            panic!("expected Command::VerifyLog")
+        };
         assert_eq!(args.log, PathBuf::from("trial.jsonl"));
         assert!(!args.allow_empty_log);
     }
@@ -169,7 +389,9 @@ mod tests {
     #[test]
     fn parses_verify_log_with_allow_empty_log_flag() {
         let cmd = parse(["verify-log", "--log", "trial.jsonl", "--allow-empty-log"]).unwrap();
-        let Command::VerifyLog(args) = cmd;
+        let Command::VerifyLog(args) = cmd else {
+            panic!("expected Command::VerifyLog")
+        };
         assert!(args.allow_empty_log);
     }
 
@@ -227,7 +449,9 @@ mod tests {
             non_utf8_log.clone(),
         ])
         .unwrap();
-        let Command::VerifyLog(args) = cmd;
+        let Command::VerifyLog(args) = cmd else {
+            panic!("expected Command::VerifyLog")
+        };
         assert_eq!(args.log, PathBuf::from(non_utf8_log));
     }
 
@@ -241,5 +465,261 @@ mod tests {
         let non_utf8_subcommand = OsStr::from_bytes(b"\xff\xfe").to_os_string();
         let err = parse([non_utf8_subcommand]).unwrap_err();
         assert!(err.0.contains("UTF-8"));
+    }
+
+    /// `run` の必須引数（`--kind`／`--log`／`--candidates`／`--bench-bin`／
+    /// `--workload-source` 1 回以上）をすべて満たす最小構成が通ること・
+    /// 未指定の任意引数が既定値（`--repo` = `.`／`--max-attempts` = 5）に
+    /// なることを確認する。
+    #[test]
+    fn parses_run_with_required_args_and_defaults() {
+        let cmd = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "bench_workload",
+            "--workload-source",
+            "src/bin/bench_workload.rs",
+        ])
+        .unwrap();
+        let Command::Run(args) = cmd else {
+            panic!("expected Command::Run")
+        };
+        assert_eq!(args.kind, RepairKind::FeatureAddition);
+        assert_eq!(args.repo, PathBuf::from("."));
+        assert_eq!(args.max_attempts, NonZeroU32::new(5).unwrap());
+        assert_eq!(args.log, PathBuf::from("trial.jsonl"));
+        assert_eq!(args.candidates, PathBuf::from("candidates.json"));
+        assert_eq!(args.bench_bin, "bench_workload");
+        assert_eq!(
+            args.workload_sources,
+            vec!["src/bin/bench_workload.rs".to_string()]
+        );
+        assert_eq!(args.config, None);
+        assert_eq!(args.output, None);
+        assert_eq!(args.policy_exclusion, None);
+    }
+
+    /// `--workload-source` を複数回指定すると累積されること（ゲーミング防止の
+    /// ピン留め対象が複数ファイルにまたがるケースを想定）。
+    #[test]
+    fn parses_run_with_repeated_workload_source_and_overrides() {
+        let cmd = parse([
+            "run",
+            "--kind",
+            "bug-fix",
+            "--repo",
+            "/tmp/sandbox",
+            "--max-attempts",
+            "3",
+            "--log",
+            "trial.jsonl",
+            "--config",
+            "guardrail.toml",
+            "--output",
+            "report.json",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "bench_workload",
+            "--workload-source",
+            "src/bin/bench_workload.rs",
+            "--workload-source",
+            "src/lib.rs",
+            "--policy-exclusion",
+            "policy-exclusion.toml",
+        ])
+        .unwrap();
+        let Command::Run(args) = cmd else {
+            panic!("expected Command::Run")
+        };
+        assert_eq!(args.kind, RepairKind::BugFix);
+        assert_eq!(args.repo, PathBuf::from("/tmp/sandbox"));
+        assert_eq!(args.max_attempts, NonZeroU32::new(3).unwrap());
+        assert_eq!(args.config, Some(PathBuf::from("guardrail.toml")));
+        assert_eq!(args.output, Some(PathBuf::from("report.json")));
+        assert_eq!(
+            args.workload_sources,
+            vec![
+                "src/bin/bench_workload.rs".to_string(),
+                "src/lib.rs".to_string()
+            ]
+        );
+        assert_eq!(
+            args.policy_exclusion,
+            Some(PathBuf::from("policy-exclusion.toml"))
+        );
+    }
+
+    #[test]
+    fn rejects_run_missing_kind() {
+        let err = parse([
+            "run",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--kind"));
+    }
+
+    #[test]
+    fn rejects_run_unknown_kind_value() {
+        let err = parse([
+            "run",
+            "--kind",
+            "bogus",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--kind"));
+    }
+
+    #[test]
+    fn rejects_run_missing_log() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--log"));
+    }
+
+    #[test]
+    fn rejects_run_missing_candidates() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--candidates"));
+    }
+
+    #[test]
+    fn rejects_run_missing_bench_bin() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--workload-source",
+            "s",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--bench-bin"));
+    }
+
+    #[test]
+    fn rejects_run_missing_workload_source() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--workload-source"));
+    }
+
+    #[test]
+    fn rejects_run_zero_max_attempts() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+            "--max-attempts",
+            "0",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--max-attempts"));
+    }
+
+    #[test]
+    fn rejects_run_non_numeric_max_attempts() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+            "--max-attempts",
+            "abc",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--max-attempts"));
+    }
+
+    #[test]
+    fn rejects_run_unknown_argument() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "b",
+            "--workload-source",
+            "s",
+            "--bogus",
+            "x",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--bogus"));
     }
 }

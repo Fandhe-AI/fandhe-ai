@@ -1,55 +1,87 @@
-//! `self-repair` バイナリのエントリポイント（TASK-3.4 残作業・イシュー #145）。
+//! `self-repair` バイナリのエントリポイント（TASK-3.4 残作業・イシュー #145・
+//! `run` サブコマンドはイシュー #142 差し戻し分・完走判定基準 1）。
 //!
-//! `docs/guardrail-self-repair-cli.md` 3.2 節「self-repair verify-log」の
-//! CLI エントリポイント。試行ログ（JSON Lines・SHA-256 ハッシュチェーン。
-//! 3.3 節）の整合性検証（改竄検知）を、`cargo test` を経由せず監査担当者が
-//! 直接実行できる手段として提供する（`.claude/rules/security.md`
-//! 「ループ試行ログは改竄検知可能な形式で記録し、取り込み判断の根拠を
-//! 追跡可能にする」への対応）。
+//! `docs/guardrail-self-repair-cli.md` 3.1 節「self-repair run」・3.2 節
+//! 「self-repair verify-log」の CLI エントリポイント。`run` は検出 → 修正
+//! 試行 → 検証 → 取り込み判断の 1 ループを [`self_repair::SelfRepairLoop`]
+//! へそのまま委譲する薄い統合であり（3.4 節「guardrail を lib として直接
+//! 呼び出す」設計をループ全体にも敷衍する）、`verify-log` は試行ログ
+//! （JSON Lines・SHA-256 ハッシュチェーン。3.3 節）の整合性検証（改竄検知）を、
+//! `cargo test` を経由せず監査担当者が直接実行できる手段として提供する
+//! （`.claude/rules/security.md`「ループ試行ログは改竄検知可能な形式で記録し、
+//! 取り込み判断の根拠を追跡可能にする」への対応）。
 //!
-//! 検証ロジック本体は lib 側の [`self_repair::verify_chain`]（`logging.rs`。
-//! TASK-3.4・#145 本体・PR #340）の単一実装のみを呼び出し、CLI 側で検証を
-//! 二重実装・迂回する経路は持たない（判定の迂回経路を作らない。
-//! `.claude/rules/security.md` A08）。`run`（3.1 節）は別イシューのスコープの
-//! ため未実装（`cli.rs` モジュールコメント参照）。
+//! `run` の段階実装（検出・修正生成・検証・取り込み判断）はいずれも
+//! `self_repair` lib の既存実装（`BugFixDetector`／`FeatureAdditionDetector`・
+//! `BugFixFixGenerator`／`FeatureAdditionFixGenerator`・`RepairCompositeGate`・
+//! `GuardrailAdoptionJudge`）をそのまま呼ぶのみで、判定ロジックの二重実装・
+//! 迂回経路は持たない（`.claude/rules/security.md` A08）。`verify_chain` も
+//! 同様に単一実装のみを呼ぶ（[`report_verify_log_error`] 参照）。
 //!
-//! # 終了コード契約（`verify-log`）
-//! `docs/guardrail-self-repair-cli.md` 3.5 節は `run` の 3 分岐契約
-//! （0/10/20/1）であり `verify-log` には verdict がないため、guardrail の
-//! usage エラー区分（2.3 節）と整合する以下の契約を本イシュー差し戻し分で
-//! 新たに定める（3.2 節へ追記済み）:
+//! # `--kind perf-regression` は本イシューのスコープ外
+//! `PerfRegressionDetector`/`PerfRegressionFixGenerator` は `BenchMeasurer`／
+//! 戦略リストという異なる構築契約を持ち（`crate::perf_regression`）、
+//! `CommandRunner` ベースの `BugFix`/`FeatureAddition` 系検出器と対称でない。
+//! #142 の対象題材（機能追加）・#141 の対象題材（バグ修正）のいずれも
+//! `perf-regression` を必要としないため、CLI 引数としては受理する
+//! （3.1 節の値域どおり usage エラーにはしない）が実行時は未対応として
+//! 内部エラー（exit 1）を返す。`out-of-scope-tracking.md` 準拠でユーザーへの
+//! 追跡起票要否を確認する事項として記録する（実装計画 §2「スコープ判断」）。
 //!
-//! | 値 | 意味 |
-//! |---|---|
-//! | `0` | チェーン整合（改竄なし）。レコード 0 件（空ログ）は `--allow-empty-log` を明示指定した場合のみ `0` とする |
-//! | `1` | 検証不合格（`LogError::ChainViolation` = 改竄・欠落検知）・内部エラー（I/O・パース失敗）・`--allow-empty-log` 未指定での空ログ検知。fail-closed: 読めない・壊れたログも一律に非 0 とする |
-//! | `2` | usage エラー（`--log` 欠落・未知引数） |
+//! # 終了コード契約
+//! `docs/guardrail-self-repair-cli.md` 3.5 節の `run` 3 分岐契約
+//! （0/10/20/1）を [`exit_code_for_outcome`] のみが担う（fail-closed。
+//! `.claude/rules/security.md` A08「判定の迂回経路を作らない」）。同節は
+//! `LoopOutcome::Exhausted`／`NoActionNeeded` を明示しないため、本イシュー
+//! 差し戻し分で「完走失敗を正常終了〈0〉と誤認させない」方針のもと `1`
+//! （内部エラー区分）へ写像すると定め、`docs/guardrail-self-repair-cli.md`
+//! 3.5 節へ追記した（実装計画 §3.1）。`verify-log` 固有の契約は
+//! [`report_verify_log_error`] 側のドキュメント参照:
 //!
-//! この変換は本関数（[`report_verify_log_error`]）のみが行い、他の経路から
-//! `0` を返さない（fail-closed。`.claude/rules/security.md` A08）。
-//!
-//! 空ログの扱いは PR #356 codex-review P1 指摘対応で変更した:
-//! 当初は「空ログか末尾切り詰めかを本コマンド単体では区別できない」ことを
-//! 理由に `WARN:` メッセージ付きで exit 0 としていたが、終了コードのみを
-//! 見る監査自動化（`.claude/rules/security.md` A08）にとってはログ全削除の
-//! 改竄を「検証成功」として素通しする経路になっていた。既定を fail-closed
-//! な exit 1 へ変え、空ログを正当な運用として扱いたい呼び出し元は
-//! `--allow-empty-log` を明示指定する（`docs/guardrail-self-repair-cli.md`
-//! 3.2 節も同時更新）。
+//! | 値 | 意味（`run`） | 意味（`verify-log`） |
+//! |---|---|---|
+//! | `0` | 自動適用（`Verdict::AutoApply`） | チェーン整合（改竄なし） |
+//! | `10` | エスカレーション | （該当なし） |
+//! | `20` | 却下 | （該当なし） |
+//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗） | 検証不合格・内部エラー |
+//! | `2` | usage エラー | usage エラー |
 
-use std::process::ExitCode;
+use std::cell::RefCell;
+use std::ffi::OsString;
+use std::num::NonZeroU32;
+use std::path::Path;
+use std::process::{Command as ProcessCommand, ExitCode};
+use std::rc::Rc;
 
-use self_repair::cli::{self, Command, UsageError, VerifyLogArgs};
-use self_repair::{LogError, VerifyChainSummary, verify_chain};
+use self_repair::candidate::load_candidates_from_json;
+use self_repair::cli::{self, Command, RunArgs, UsageError, VerifyLogArgs};
+use self_repair::outcome::VerifiedEvidence;
+use self_repair::stages::{Detector, FixGenerator};
+use self_repair::verify_bench::BenchSignal as DirectBenchSignal;
+use self_repair::{
+    BugFixDetector, BugFixFixGenerator, CandidateFix, FeatureAdditionDetector,
+    FeatureAdditionFixGenerator, GuardrailAdoptionJudge, LogError, LoopFailure, LoopReport,
+    RepairCompositeGate, RepairCompositeGateSpec, RepairKind, SelfRepairError, SelfRepairLoop,
+    SystemCommandRunner, VerifyChainSummary, verify_chain,
+};
+
+/// [`RepairCompositeGate::evidence_sink`] の戻り値型（`execute_loop` が
+/// ループ実行前に取得し、実行後の証跡観測に使う。型名で意図を明示するための
+/// エイリアス）。
+type EvidenceSink = Rc<RefCell<Option<VerifiedEvidence>>>;
+/// [`RepairCompositeGate::bench_measurement_sink`] の戻り値型（[`EvidenceSink`]
+/// と同じ理由のエイリアス）。
+type BenchMeasurementSink = Rc<RefCell<Option<DirectBenchSignal>>>;
 
 fn main() -> ExitCode {
     // `std::env::args()` ではなく `args_os()` を使う理由は `cli` モジュール
     // 冒頭ドキュメント参照（非 UTF-8 引数での panic を避けるため。PR #356
     // codex-review P1 指摘対応）。
-    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
     match cli::parse(args) {
         Ok(Command::VerifyLog(verify_log_args)) => run_verify_log(verify_log_args),
+        Ok(Command::Run(run_args)) => run_run(run_args),
         Err(err) => report_usage_error_and_exit(&err),
     }
 }
@@ -136,4 +168,436 @@ fn report_verify_log_error(err: &LogError) -> ExitCode {
 fn report_usage_error_and_exit(err: &UsageError) -> ExitCode {
     eprintln!("self-repair: {err}");
     ExitCode::from(2)
+}
+
+/// `self-repair run` の実行フロー（3.1 節・実装計画 §3.1）。
+///
+/// 1. `--repo` の HEAD を `baseline_commit` として解決する
+/// 2. `--candidates` の JSON を [`CandidateFix`] へ変換する
+/// 3. `--config` を [`guardrail::config::resolve`] で解決する（`guardrail.toml`
+///    閾値・除外リストの緩和はここでは一切行わない。`.claude/rules/security.md`）
+/// 4. `--kind` に応じ検出器・修正生成器の具体型を選ぶ（[`RepairCompositeGate`]・
+///    [`GuardrailAdoptionJudge`] は種別非依存のため共有する）
+/// 5. [`SelfRepairLoop::run`] を 1 回実行し、`--log`（常に）・`--output`
+///    （任意）へ結果を書き出す
+///
+/// 各ステップの失敗は usage エラー（引数自体の問題）ではなく実行時エラー
+/// として扱い、[`exit_code_for_outcome`] とは別に内部エラー区分の終了コード
+/// `1` を返す（3.5 節）。
+fn run_run(args: RunArgs) -> ExitCode {
+    let baseline_commit = match resolve_baseline_commit(&args.repo) {
+        Ok(sha) => sha,
+        Err(message) => {
+            eprintln!("self-repair run: {message}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let candidates: Vec<CandidateFix> = match load_candidates_from_json(&args.candidates) {
+        Ok(candidates) => candidates,
+        Err(err) => {
+            eprintln!("self-repair run: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let config = match guardrail::config::resolve(
+        args.config.as_deref(),
+        &args.repo,
+        guardrail::PresetName::Default,
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("self-repair run: guardrail.toml の解決に失敗しました: {err}");
+            return ExitCode::from(1);
+        }
+    };
+
+    // diff・ベンチの計測系（`RepairCompositeGate`）は種別非依存であり、
+    // `verify_direct_composite.rs` モジュール冒頭ドキュメントどおり build/
+    // test/clippy の逐次実行・fail-fast 判定・ベンチ判定への変換を再実装
+    // しない（このゲート 1 インスタンスを BugFix/FeatureAddition 双方の
+    // 分岐で共有する）。
+    let policy_exclusion_path = args
+        .policy_exclusion
+        .clone()
+        .unwrap_or_else(|| args.repo.join("policy-exclusion.toml"));
+    let gate_spec = RepairCompositeGateSpec {
+        workspace: args.repo.clone(),
+        sandbox_root: args.repo.clone(),
+        baseline_commit,
+        policy_exclusion_path,
+        bench_bin: args.bench_bin.clone(),
+        workload_sources: args.workload_sources.clone(),
+        bench_iterations: self_repair::verify_bench::MIN_BENCH_ITERATIONS,
+        runner: SystemCommandRunner::new(),
+    };
+    let verification_gate = RepairCompositeGate::new(gate_spec);
+    // `SelfRepairLoop::new` はゲートを値ごと（所有権を）受け取るため、ループ
+    // 実行後もベンチ実測・4 シグナルを観測できるよう `Rc` 複製を先に取得して
+    // おく（`--output` の `adopted_evidence` フィールド用。
+    // `tests/feature_addition_loop_completion_task_3_3c.rs`（旧 lib 直接呼び出し
+    // ハーネス）と同じ観測手段を CLI 本体側へ移した。`verify_direct_composite.rs`
+    // の `evidence_sink`／`bench_measurement_sink` doc 参照）。
+    let evidence_sink = verification_gate.evidence_sink();
+    let bench_measurement_sink = verification_gate.bench_measurement_sink();
+    let adoption_judge = GuardrailAdoptionJudge::new(config.thresholds);
+
+    // `SelfRepairLoop<D, F, V, J>` は型パラメータのため、実行時に選んだ
+    // `--kind` に応じた具体型（`D`/`F`）の選択は分岐ごとに行う
+    // （`cli.rs` モジュール冒頭ドキュメント参照）。
+    match args.kind {
+        RepairKind::BugFix => {
+            let detector = BugFixDetector::new(args.repo.clone(), SystemCommandRunner::new());
+            let fix_generator = match BugFixFixGenerator::new(args.repo.clone(), candidates) {
+                Ok(generator) => generator,
+                Err(err) => return report_run_setup_error(&err),
+            };
+            execute_loop(
+                args.kind,
+                detector,
+                fix_generator,
+                verification_gate,
+                adoption_judge,
+                args.max_attempts,
+                &args.log,
+                args.output.as_deref(),
+                evidence_sink,
+                bench_measurement_sink,
+            )
+        }
+        RepairKind::FeatureAddition => {
+            let detector =
+                FeatureAdditionDetector::new(args.repo.clone(), SystemCommandRunner::new());
+            let fix_generator =
+                match FeatureAdditionFixGenerator::new(args.repo.clone(), candidates) {
+                    Ok(generator) => generator,
+                    Err(err) => return report_run_setup_error(&err),
+                };
+            execute_loop(
+                args.kind,
+                detector,
+                fix_generator,
+                verification_gate,
+                adoption_judge,
+                args.max_attempts,
+                &args.log,
+                args.output.as_deref(),
+                evidence_sink,
+                bench_measurement_sink,
+            )
+        }
+        // `PerfRegressionDetector`/`PerfRegressionFixGenerator` は
+        // `CommandRunner` ベースの検出器と非対称な構築契約（`BenchMeasurer`・
+        // 戦略リスト）を持ち、#141／#142 のいずれも perf-regression 題材を
+        // 必要としない（モジュール冒頭ドキュメント参照）。usage エラー
+        // （値自体は 3.1 節の値域どおり有効）ではなく実行時未対応として
+        // 内部エラー区分の exit 1 を返す。
+        RepairKind::PerfRegression => {
+            eprintln!(
+                "self-repair run: --kind perf-regression は未対応です（#141/#142 のいずれも本種別を必要としないため未実装。out-of-scope-tracking.md 準拠で追跡要否をユーザーへ確認する）"
+            );
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `--repo` の HEAD を `git rev-parse HEAD` で解決する（`RepairCompositeGateSpec::
+/// baseline_commit` の入力）。
+///
+/// sandbox の使い捨て git リポジトリに対して呼ばれる場合（実証ハーネスの
+/// 想定用途）も、`lefthook.yml` の `pre-push` フック経由で本バイナリが
+/// 起動されるケースを含め、githooks(5) が子プロセスへ継承させる `GIT_*`
+/// 環境変数（`GIT_DIR`／`GIT_WORK_TREE`／`GIT_INDEX_FILE` 等）が `current_dir`
+/// より優先されてしまう。継承された `GIT_DIR` を除去せずに `--repo` の
+/// sandbox で `git rev-parse` を実行すると、実リポジトリの HEAD を誤って
+/// 参照しうる（`tests/feature_addition_loop_completion_task_3_3c.rs::
+/// sandboxed_git_command` の doc に記録された 2026-08-07 実測の事故と同種の
+/// リスク。advisor 指摘: 本番経路〈`main.rs`〉にも同じ隔離を適用する必要が
+/// ある）。sandbox 用テストヘルパーと同じ方式で `GIT_*` を明示的に除去する。
+fn resolve_baseline_commit(repo: &Path) -> Result<String, String> {
+    let mut command = ProcessCommand::new("git");
+    command.args(["rev-parse", "HEAD"]).current_dir(repo);
+    for (key, _) in std::env::vars_os() {
+        if let Some(key_str) = key.to_str()
+            && key_str.starts_with("GIT_")
+        {
+            command.env_remove(key_str);
+        }
+    }
+    let output = command.output().map_err(|error| {
+        format!(
+            "git rev-parse HEAD の起動に失敗しました（repo={}）: {error}",
+            repo.display()
+        )
+    })?;
+    if !output.status.success() {
+        return Err(format!(
+            "git rev-parse HEAD が失敗しました（repo={}）: {}",
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// `BugFixFixGenerator::new`／`FeatureAdditionFixGenerator::new`（候補パス
+/// 検証。`crate::candidate::validate_relative_path` 等）の構築時エラーを
+/// 内部エラー区分（exit 1）へ変換する。usage エラー（exit 2）にしない理由:
+/// エラーの原因は引数の構文ではなく `--candidates` の中身（外部入力）が
+/// workspace の構造検証に違反したことであり、`UsageError` の意味（未知引数・
+/// 値欠落）とは異なる。
+fn report_run_setup_error(err: &SelfRepairError) -> ExitCode {
+    eprintln!("self-repair run: 段階の構築に失敗しました: {err}");
+    ExitCode::from(1)
+}
+
+/// [`SelfRepairLoop::new`]・[`SelfRepairLoop::run`] を実行し、結果を `--log`
+/// （常に）・`--output`（任意）へ書き出したうえで終了コードへ変換する
+/// （`run_run` の `RepairKind::BugFix`／`RepairKind::FeatureAddition` 分岐が
+/// 共有する本体。`D`/`F` のみ型パラメータとし、`V`＝[`RepairCompositeGate`]・
+/// `J`＝[`GuardrailAdoptionJudge`] は種別非依存のため固定する）。
+#[allow(clippy::too_many_arguments)]
+fn execute_loop<D, F>(
+    kind: RepairKind,
+    detector: D,
+    fix_generator: F,
+    verification_gate: RepairCompositeGate<SystemCommandRunner>,
+    adoption_judge: GuardrailAdoptionJudge,
+    max_attempts: NonZeroU32,
+    log_path: &Path,
+    output_path: Option<&Path>,
+    evidence_sink: EvidenceSink,
+    bench_measurement_sink: BenchMeasurementSink,
+) -> ExitCode
+where
+    D: Detector,
+    F: FixGenerator,
+{
+    let self_repair_loop = SelfRepairLoop::new(
+        detector,
+        fix_generator,
+        verification_gate,
+        adoption_judge,
+        max_attempts,
+    );
+
+    match self_repair_loop.run(kind) {
+        Ok(report) => finish_with_report(
+            &report,
+            log_path,
+            output_path,
+            evidence_sink.borrow().clone(),
+            bench_measurement_sink.borrow().clone(),
+        ),
+        Err(failure) => finish_with_failure(&failure, log_path, output_path),
+    }
+}
+
+/// 正常終了（[`LoopReport`]）を `--log`（[`self_repair::LogWriter::append_report`]。
+/// 追記後に [`verify_chain`] で自己検証する。実装計画 §3.1「ログ出力」）・
+/// `--output`（任意。JSON 化）へ書き出し、[`exit_code_for_outcome`] で
+/// 終了コードへ変換する。`evidence`／`bench_measurement` は `execute_loop` が
+/// ループ実行前に取得した `Rc<RefCell<..>>`（`RepairCompositeGate::
+/// evidence_sink`／`bench_measurement_sink`）から複製した値であり、
+/// `verify` が最後に `Passed` を返した際の判断根拠を保持する
+/// （`AttemptOutcome::Adopted` 自体は証跡を保持しないため。`report.rs` 参照）。
+fn finish_with_report(
+    report: &LoopReport,
+    log_path: &Path,
+    output_path: Option<&Path>,
+    evidence: Option<VerifiedEvidence>,
+    bench_measurement: Option<DirectBenchSignal>,
+) -> ExitCode {
+    if let Err(message) = append_report_and_verify(report, log_path) {
+        eprintln!("self-repair run: ログ出力に失敗しました: {message}");
+        return ExitCode::from(1);
+    }
+    match output_path {
+        // 3.1 節「未指定時は標準出力へテキスト要約を出す」契約
+        // （`--output` は任意・`--log` は必須という非対称の埋め合わせ:
+        // JSON Lines ログは常に残すが、その場で消費できれば足りる
+        // `LoopReport` は指定時のみファイル化する）。
+        None => {
+            println!(
+                "self-repair run: kind={} outcome={:?} attempts={}",
+                report.kind.as_machine_id(),
+                report.outcome,
+                report.attempt_count()
+            );
+        }
+        Some(output_path) => {
+            if let Err(message) = write_report_json(
+                report,
+                output_path,
+                evidence.as_ref(),
+                bench_measurement.as_ref(),
+            ) {
+                eprintln!("self-repair run: --output 書き出しに失敗しました: {message}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    exit_code_for_outcome(&report.outcome)
+}
+
+/// 異常終了（[`LoopFailure`]。段階の実行自体が失敗）を `--log`
+/// （[`self_repair::LogWriter::append_failure`]）・`--output`（任意）へ
+/// 書き出し、内部エラー区分の exit 1 を返す（3.5 節「内部エラー」）。
+fn finish_with_failure(
+    failure: &LoopFailure,
+    log_path: &Path,
+    output_path: Option<&Path>,
+) -> ExitCode {
+    if let Err(message) = append_failure_and_verify(failure, log_path) {
+        eprintln!("self-repair run: ログ出力に失敗しました: {message}");
+        return ExitCode::from(1);
+    }
+    match output_path {
+        None => eprintln!("self-repair run: {failure}"),
+        Some(output_path) => {
+            if let Err(message) = write_failure_json(failure, output_path) {
+                eprintln!("self-repair run: --output 書き出しに失敗しました: {message}");
+                return ExitCode::from(1);
+            }
+            eprintln!("self-repair run: {failure}");
+        }
+    }
+    ExitCode::from(1)
+}
+
+/// `--log` を開いて [`LoopReport`] を追記し、書き込み直後に [`verify_chain`]
+/// で自己検証する（実装計画 §3.1「ログ出力: … 書き込み後に verify_chain で
+/// 自己検証する」）。
+fn append_report_and_verify(report: &LoopReport, log_path: &Path) -> Result<(), LogError> {
+    let mut writer = self_repair::LogWriter::open(log_path)?;
+    writer.append_report(report)?;
+    verify_chain(log_path)?;
+    Ok(())
+}
+
+/// [`append_report_and_verify`] の [`LoopFailure`] 版（`append_failure` を使う）。
+fn append_failure_and_verify(failure: &LoopFailure, log_path: &Path) -> Result<(), LogError> {
+    let mut writer = self_repair::LogWriter::open(log_path)?;
+    writer.append_failure(failure)?;
+    verify_chain(log_path)?;
+    Ok(())
+}
+
+/// [`self_repair::LoopOutcome`] を 3.5 節の終了コードへ変換する唯一の関数
+/// （fail-closed。他の経路から `0` を返さない。`.claude/rules/security.md` A08）。
+/// 全 variant を明示 match し `_ =>` を使わない（`outcome.rs`／`report.rs`
+/// と同じ fail-closed 方針。新 variant 追加時にコンパイルエラーで検出する）。
+fn exit_code_for_outcome(outcome: &self_repair::LoopOutcome) -> ExitCode {
+    use self_repair::LoopOutcome;
+    match outcome {
+        LoopOutcome::Adopted => ExitCode::from(0),
+        LoopOutcome::Escalated { .. } => ExitCode::from(10),
+        LoopOutcome::Rejected { .. } => ExitCode::from(20),
+        // 3.5 節は 3 分岐＋LoopFailure(1) のみを定義し `NoActionNeeded`
+        // （検出段階で修正不要と判定・そもそもループ未開始）を含まない。
+        // 「取り込まれなかった」点は却下と共通するが正常完走の主張はできない
+        // ため、内部エラー区分（exit 1）へ写像する（本関数のみが行う写像。
+        // 実装計画 §3.1）。
+        LoopOutcome::NoActionNeeded => ExitCode::from(1),
+        // `Exhausted`（試行上限到達）も 3.5 節が未定義のため、完走判定基準 1
+        // 「1 回起動・追加の人間入力なしで exit 0」を満たせなかった場合を
+        // 「エラーではない正常終了」と誤認させないよう、同じく exit 1 へ
+        // 写像する（`docs/guardrail-self-repair-cli.md` 3.5 節へ追記済み）。
+        LoopOutcome::Exhausted => ExitCode::from(1),
+    }
+}
+
+/// `--output` 向けの [`LoopReport`] JSON 化（v1 `tools/self-repair/src/report.rs`
+/// を踏襲。`LoopReport` 自体は `serde::Serialize` を実装しないため
+/// `serde_json::json!` で手組みする。`tests/feature_addition_loop_completion_
+/// task_3_3c.rs::write_loop_report` と同型の変換方針）。
+fn write_report_json(
+    report: &LoopReport,
+    output_path: &Path,
+    evidence: Option<&VerifiedEvidence>,
+    bench_measurement: Option<&DirectBenchSignal>,
+) -> Result<(), String> {
+    let attempts_json: Vec<serde_json::Value> = report
+        .attempts
+        .iter()
+        .map(|attempt| {
+            serde_json::json!({
+                "attempt": attempt.attempt,
+                "duration_ms": attempt.duration.as_millis(),
+                "outcome": format!("{:?}", attempt.outcome),
+            })
+        })
+        .collect();
+
+    // 完走判定基準 5・6（`docs/self-repair-revalidation-plan.md` §5）が求める
+    // 「候補 diff 直接実測」「signal_source: measured」の証跡を、`execute_loop`
+    // が取得した `evidence_sink`／`bench_measurement_sink` の複製から埋める
+    // （`RepairCompositeGate::verify` は毎試行 diff を実測するため
+    // `bench=measured-direct` を含む `gate_report` になる。`verify_direct_composite.rs`
+    // 参照）。`evidence` は「最後に `Passed` を返した verify 呼び出し」の
+    // スナップショットであり、`report.outcome == Adopted` の場合はその採用に
+    // 至った試行の証跡と一致する。
+    let adopted_evidence_json = evidence.map(|evidence| {
+        let bench_median_pct = match evidence.bench() {
+            guardrail::BenchSignal::Measured { median_pct } => Some(*median_pct),
+            guardrail::BenchSignal::NotRun => None,
+        };
+        serde_json::json!({
+            "attempt": evidence.attempt(),
+            "gate_report": evidence.gate_report(),
+            "bench_median_pct": bench_median_pct,
+            "bench_measurements_pct": bench_measurement
+                .map(|measurement| measurement.bench_measurements_pct.clone()),
+            "lines_changed": evidence.lines_changed(),
+            "api_broken": evidence.api_broken(),
+            "gaming_suspect": evidence.gaming_suspect(),
+            "exclusion_rule_ids": evidence.exclusion_rule_ids(),
+        })
+    });
+
+    let doc = serde_json::json!({
+        "kind": report.kind.as_machine_id(),
+        "outcome": format!("{:?}", report.outcome),
+        "attempt_count": report.attempt_count(),
+        "attempts": attempts_json,
+        "total_duration_ms": report.total_duration.as_millis(),
+        "adopted_evidence": adopted_evidence_json,
+        // `--signals` 契約検証パス（`guardrail check`。2.1 節）を経由しない
+        // 実シグナル計測経路であることを明示する（同節の `signal_source`
+        // フィールドと同じ語彙。REQ-6 の回帰テストセット根拠データとしての
+        // 採用可否をこのフィールドで機械判定可能にする）。
+        "signal_source": "measured",
+    });
+    write_json_with_trailing_newline(&doc, output_path)
+}
+
+/// [`write_report_json`] の [`LoopFailure`] 版。
+fn write_failure_json(failure: &LoopFailure, output_path: &Path) -> Result<(), String> {
+    let attempts_json: Vec<serde_json::Value> = failure
+        .attempts
+        .iter()
+        .map(|attempt| {
+            serde_json::json!({
+                "attempt": attempt.attempt,
+                "duration_ms": attempt.duration.as_millis(),
+                "outcome": format!("{:?}", attempt.outcome),
+            })
+        })
+        .collect();
+    let doc = serde_json::json!({
+        "error": failure.error.to_string(),
+        "attempts": attempts_json,
+    });
+    write_json_with_trailing_newline(&doc, output_path)
+}
+
+/// `.editorconfig` の `insert_final_newline` 慣行に合わせ、末尾改行付きで
+/// pretty-print JSON を書き出す共通処理。
+fn write_json_with_trailing_newline(doc: &serde_json::Value, path: &Path) -> Result<(), String> {
+    let mut pretty = serde_json::to_string_pretty(doc)
+        .map_err(|error| format!("JSON シリアライズに失敗しました: {error}"))?;
+    pretty.push('\n');
+    std::fs::write(path, pretty)
+        .map_err(|error| format!("{} への書き込みに失敗しました: {error}", path.display()))
 }

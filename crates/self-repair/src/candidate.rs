@@ -70,6 +70,78 @@ pub struct CandidateFix {
     pub files: Vec<(PathBuf, String)>,
 }
 
+/// `self-repair run --candidates <path>` の JSON 外部入力境界（イシュー #142
+/// 差し戻し分・実装計画 §3.1「追加引数」）。
+///
+/// `--candidates` は事前生成済みの候補列（AI 生成・人手作成いずれも想定。
+/// 生成手段自体は本 CLI のスコープ外）を JSON で受け取る唯一の経路であり、
+/// [`load_candidates_from_json`] が [`CandidateFix`] へ変換したうえで
+/// [`crate::bug_fix::BugFixFixGenerator::new`]／
+/// [`crate::feature_addition::FeatureAdditionFixGenerator::new`] へそのまま渡す。
+/// workspace 外パス・`Cargo.toml` 書き換え等の検証は変換後にこれら `new` が
+/// 既存の構築時検証（`validate_relative_path`・`is_manifest_path`）で行うため
+/// 本モジュールでは再実装しない（A03: 外部入力はまず構造検証してから既存の
+/// 検証済み経路へ渡す）。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateFileDto {
+    /// workspace 相対パス（`CandidateFix::files` のパス側）。
+    path: String,
+    /// 置換後の全内容。
+    content: String,
+}
+
+/// `--candidates` JSON のトップレベル配列要素 1 件分。
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateFixDto {
+    description: String,
+    files: Vec<CandidateFileDto>,
+}
+
+/// `path` の JSON（`CandidateFixDto` の配列）を読み込み [`CandidateFix`] の列へ
+/// 変換する（`self-repair run` の `main.rs::run_run` から呼ばれる）。
+///
+/// # Errors
+/// ファイル読み込み失敗・JSON パース失敗（`deny_unknown_fields` によりタイポ
+/// フィールドも検出する。`docs/guardrail-self-repair-cli.md` 2.5 節と同じ
+/// 方針）・候補列が空、のいずれかで [`SelfRepairError::FixGeneration`]
+/// （`attempt: 0` は「試行開始前の候補読み込み段階」を示す）を返す。
+pub fn load_candidates_from_json(path: &Path) -> Result<Vec<CandidateFix>, SelfRepairError> {
+    let text = fs::read_to_string(path).map_err(|source| SelfRepairError::FixGeneration {
+        attempt: 0,
+        reason: format!(
+            "候補 JSON の読み込みに失敗しました（path={}）: {source}",
+            path.display()
+        ),
+    })?;
+    let dtos: Vec<CandidateFixDto> =
+        serde_json::from_str(&text).map_err(|error| SelfRepairError::FixGeneration {
+            attempt: 0,
+            reason: format!(
+                "候補 JSON のパースに失敗しました（path={}）: {error}",
+                path.display()
+            ),
+        })?;
+    if dtos.is_empty() {
+        return Err(SelfRepairError::FixGeneration {
+            attempt: 0,
+            reason: format!("候補 JSON が空です（path={}）", path.display()),
+        });
+    }
+    Ok(dtos
+        .into_iter()
+        .map(|dto| CandidateFix {
+            description: dto.description,
+            files: dto
+                .files
+                .into_iter()
+                .map(|file| (PathBuf::from(file.path), file.content))
+                .collect(),
+        })
+        .collect())
+}
+
 /// `candidates[attempt - 1]` を `workspace` へ適用し [`Proposal`] を返す共通本体。
 ///
 /// 手順（[`crate::bug_fix::BugFixFixGenerator::generate`]・
@@ -413,5 +485,68 @@ mod tests {
         let result = CandidateFixGenerator::new(dir.clone(), candidates);
         assert!(result.is_err());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--candidates` JSON 読み込み専用の一時ファイルパス（`temp_workspace`
+    /// と同じ `temp_dir() + process::id()` 方式だがディレクトリではなく単一
+    /// ファイルを扱う）。
+    fn temp_json_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "self-repair-candidate-json-{name}-{}.json",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn load_candidates_from_json_parses_valid_input() {
+        let path = temp_json_path("valid");
+        fs::write(
+            &path,
+            r#"[
+                {"description": "試行1", "files": [{"path": "src/lib.rs", "content": "fn a() {}"}]},
+                {"description": "試行2", "files": [{"path": "src/lib.rs", "content": "fn b() {}"}]}
+            ]"#,
+        )
+        .expect("一時 JSON の書き込みに失敗");
+
+        let candidates = load_candidates_from_json(&path).expect("パースに成功するはず");
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].description, "試行1");
+        assert_eq!(
+            candidates[1].files,
+            vec![(PathBuf::from("src/lib.rs"), "fn b() {}".to_string())]
+        );
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_candidates_from_json_rejects_missing_file() {
+        let path = temp_json_path("missing");
+        let _ = fs::remove_file(&path);
+        let result = load_candidates_from_json(&path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_candidates_from_json_rejects_empty_array() {
+        let path = temp_json_path("empty");
+        fs::write(&path, "[]").expect("一時 JSON の書き込みに失敗");
+        let result = load_candidates_from_json(&path);
+        assert!(result.is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_candidates_from_json_rejects_unknown_field() {
+        let path = temp_json_path("unknown-field");
+        fs::write(
+            &path,
+            r#"[{"description": "x", "files": [], "bogus": true}]"#,
+        )
+        .expect("一時 JSON の書き込みに失敗");
+        let result = load_candidates_from_json(&path);
+        assert!(result.is_err());
+        let _ = fs::remove_file(&path);
     }
 }
