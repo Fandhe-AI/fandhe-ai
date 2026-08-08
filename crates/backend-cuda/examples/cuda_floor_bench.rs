@@ -65,10 +65,21 @@
 //! 参考比率のみを表示する（codex-review 指摘「GPU 名の部分一致では
 //! 同一ハードウェア比較を保証できない」対応。GB10 名一致は WARNING 抑制
 //! のみに用い、候補下限の許可条件には使わない）。
+//!
+//! ## 中央値・Q1・Q3 の出力（PR #349 codex-review 指摘 P1 対応）
+//!
+//! `bench_harness::run` の計測プロトコル（TASK-8.1。warmup 20 回・計測
+//! 20 回・中央値/Q1/Q3）が返す四分位値を破棄すると、実測のばらつき・
+//! 再現性を記録・検証できなくなる。本バイナリの各経路別 TFLOPS 出力は
+//! `<中央値>(q1=<Q1由来値>,q3=<Q3由来値>)` の形式で 3 値を並記する
+//! （[`TflopsSample`] 参照。経路選択・候補下限の算出ロジック自体は
+//! 引き続き中央値のみを根拠とする。変更は出力・記録範囲の拡張のみ）。
+//! `docs/perf/cuda-floor-remeasurement.md`「経路×形状 TFLOPS 実測」表にも
+//! 中央値・Q1・Q3 の記入欄がある。
 
 use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
 use bench_harness::rng::Xorshift64Star;
-use bench_harness::{MeasurementConfig, run as bench_run};
+use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
 use half::f16;
 
 /// 決定的シード（`gemm_mma_bench.rs`・PoC-v2-3 と同一値。過去実測・他
@@ -175,12 +186,51 @@ fn floor_round(ratio_percent: f64) -> f64 {
     (ratio_percent / step).floor() * step
 }
 
-fn tflops(size: usize, median_secs: f64) -> f64 {
+fn tflops(size: usize, secs: f64) -> f64 {
     let flops = 2.0 * (size as f64).powi(3);
-    flops / median_secs / 1e12
+    flops / secs / 1e12
 }
 
-fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
+/// 単一形状・単一経路の計測結果を TFLOPS 換算した中央値・Q1・Q3。
+///
+/// `bench_harness::run`（TASK-8.1 計測プロトコル。warmup 20 回・計測 20 回・
+/// 中央値/Q1/Q3）が返す `Measurement` の時間ドメイン値を `tflops` で
+/// TFLOPS ドメインへ変換して保持する。中央値だけを抜き出して Q1/Q3 を
+/// 捨てると実測のばらつき・再現性を記録・検証できなくなるため
+/// （PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の契約を
+/// 満たせない」対応）、`main` の出力行・
+/// `docs/perf/cuda-floor-remeasurement.md` への転記の両方でこの 3 値を
+/// 保持したまま伝播させる。
+///
+/// `tflops` は時間について単調減少（時間が短いほど TFLOPS は大きい）ため、
+/// 時間ドメインの Q1（下位 25%＝速い方のサンプル）を変換した値は
+/// TFLOPS ドメインでは中央値より大きい側、Q3（上位 25%＝遅い方）を
+/// 変換した値は小さい側になりうる。フィールド名は変換元
+/// （`q1_secs`/`q3_secs`）に揃え、時間ドメインの由来を追いやすくする
+/// （TFLOPS ドメインでの大小関係をフィールド名に含めて誤解を招かない
+/// ため）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TflopsSample {
+    median: f64,
+    tflops_from_q1_secs: f64,
+    tflops_from_q3_secs: f64,
+}
+
+/// `bench_harness::run` が返す時間ドメインの `Measurement` を
+/// `TflopsSample`（TFLOPS ドメイン）へ変換する唯一の変換経路。
+/// 4 経路すべての `measure_*` 関数がこの関数を経由することで、
+/// 変換ロジックの重複（コピー漏れによる変換忘れ）を防ぐ
+/// （advisor 指摘: 4 箇所へインライン展開すると回帰時の抜け漏れの
+/// 温床になる）。
+fn tflops_sample(size: usize, measurement: &Measurement) -> TflopsSample {
+    TflopsSample {
+        median: tflops(size, measurement.median_secs),
+        tflops_from_q1_secs: tflops(size, measurement.q1_secs),
+        tflops_from_q3_secs: tflops(size, measurement.q3_secs),
+    }
+}
+
+fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> TflopsSample {
     let mut rng = Xorshift64Star::new(SEED);
     let a = rng.fill_vec(size * size);
     let b = rng.fill_vec(size * size);
@@ -190,7 +240,7 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
             .expect("tiled f32 GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    tflops(size, measurement.median_secs)
+    tflops_sample(size, &measurement)
 }
 
 /// f32 最良経路（WMMA(TF32) opt。共有メモリ・タイル最適化版が利用不能
@@ -208,7 +258,11 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
 /// 行わず `None` を返してこの経路のみ skip する（PR #349 Bugbot 指摘
 /// High「WMMA path panics on skip」対応。呼び出し側 `main` は
 /// `Option::and_then` で受け、tiled 側の出力は継続する）。
-fn measure_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> Option<f64> {
+fn measure_wmma_tf32(
+    gemm: &CudaGemm,
+    size: usize,
+    config: &MeasurementConfig,
+) -> Option<TflopsSample> {
     let mut rng = Xorshift64Star::new(SEED);
     let a = rng.fill_vec(size * size);
     let b = rng.fill_vec(size * size);
@@ -225,10 +279,10 @@ fn measure_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
             );
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    Some(tflops(size, measurement.median_secs))
+    Some(tflops_sample(size, &measurement))
 }
 
-fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig) -> f64 {
+fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig) -> TflopsSample {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
     let b: Vec<f16> = rng.fill_vec_f16(size * size);
@@ -238,7 +292,7 @@ fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig
             .expect("WMMA f16 GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    tflops(size, measurement.median_secs)
+    tflops_sample(size, &measurement)
 }
 
 /// `mma.sync` 経路のみ H2D/D2H 転送・出力バッファ確保を計測区間の外へ
@@ -248,7 +302,7 @@ fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig
 /// mma_over_* 比は厳密な apples-to-apples 比較ではなく mma 側に有利な
 /// 方向へ偏る。`docs/perf/cuda-floor-remeasurement.md` へ転記する際は
 /// この注記も一緒に残すこと）。
-fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) -> f64 {
+fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) -> TflopsSample {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f16> = rng.fill_vec_f16(size * size);
     let b: Vec<f16> = rng.fill_vec_f16(size * size);
@@ -272,7 +326,7 @@ fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) 
         .expect("mma.sync f16 GEMM must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    tflops(size, measurement.median_secs)
+    tflops_sample(size, &measurement)
 }
 
 /// 2 経路の実測値のうち大きい方（＝実際に速い方）を選ぶ。両方存在する
@@ -463,17 +517,33 @@ fn main() {
             .map(|g| measure_wmma_f16(g, size, &config));
         let mma_f16 = mma_gemm.as_ref().map(|g| measure_mma_f16(g, size, &config));
 
-        let f32_best = best_f32(tiled, wmma_tf32);
+        // 経路選択・候補下限の算出は中央値（`TflopsSample::median`）のみを
+        // 根拠とする（従来どおり）。Q1/Q3 は選択には使わず、出力行・
+        // ドキュメント転記用の付随情報として別途 `fmt_sample` で出す
+        // （PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の
+        // 契約を満たせない」対応。選択ロジック自体は変更しない）。
+        let f32_best = best_f32(tiled.map(|s| s.median), wmma_tf32.map(|s| s.median));
         // f16 candidate floor は `wmma_f16`（転送込み計測。tiled_f32・
         // wmma_tf32・PyTorch 参照値と同一の計測範囲）のみを根拠とする
         // （`f16_candidate_floor_value` ドキュメンテーションコメント参照。
         // PR #349 codex-review 指摘 P1 対応）。
-        let f16_candidate = f16_candidate_floor_value(wmma_f16);
+        let f16_candidate = f16_candidate_floor_value(wmma_f16.map(|s| s.median));
 
         let (pytorch_f32, f32_measured) = pytorch_f32_ref(size, &measured_source);
         let (pytorch_f16, f16_measured) = pytorch_f16_ref(size, &measured_source);
 
-        let fmt = |v: Option<f64>| v.map_or("n/a".to_string(), |x| format!("{x:.4}"));
+        // 中央値・時間ドメイン Q1/Q3 由来の TFLOPS 値を並記する
+        // （`TflopsSample` ドキュメンテーションコメント参照。実測の
+        // ばらつき・再現性を出力行・ドキュメント転記の両方で追跡可能に
+        // する）。
+        let fmt_sample = |v: Option<TflopsSample>| {
+            v.map_or("n/a".to_string(), |s| {
+                format!(
+                    "{:.4}(q1={:.4},q3={:.4})",
+                    s.median, s.tflops_from_q1_secs, s.tflops_from_q3_secs
+                )
+            })
+        };
         let f32_ratio_percent = f32_best
             .map(|(v, _)| v / pytorch_f32 * 100.0)
             .filter(|r| r.is_finite());
@@ -486,9 +556,14 @@ fn main() {
         // `measure_mma_f16` ドキュメンテーションコメント参照）candidate
         // floor には含めない。`wmma_f16` との比は GPU 実行時間のみの
         // 参考値として併記する（apples-to-apples でない旨を比のラベルに
-        // 明示する）。
+        // 明示する）。中央値同士の比較とする（Q1/Q3 は選択・比較には使わず
+        // 付随情報に留める）。
         let mma_over_wmma_f16_percent = match (mma_f16, wmma_f16) {
-            (Some(m), Some(w)) if w.is_finite() && w > 0.0 && m.is_finite() => Some(m / w * 100.0),
+            (Some(m), Some(w))
+                if w.median.is_finite() && w.median > 0.0 && m.median.is_finite() =>
+            {
+                Some(m.median / w.median * 100.0)
+            }
             _ => None,
         };
 
@@ -497,11 +572,11 @@ fn main() {
              mma_f16_tflops={} f32_best_path={} f16_candidate_path={} f32_best_over_pytorch={} \
              f16_candidate_over_pytorch={} (pytorch_f32={:.4} pytorch_f16={:.4}, \
              f32_ref_measured={f32_measured} f16_ref_measured={f16_measured}, \
-             mma_over_wmma_f16(reference-only, not apples-to-apples)={})",
-            fmt(tiled),
-            fmt(wmma_tf32),
-            fmt(wmma_f16),
-            fmt(mma_f16),
+             mma_over_wmma_f16(reference-only, not apples-to-apples, median-based)={})",
+            fmt_sample(tiled),
+            fmt_sample(wmma_tf32),
+            fmt_sample(wmma_f16),
+            fmt_sample(mma_f16),
             fmt_path(f32_best),
             fmt_path(f16_candidate),
             fmt_ratio(f32_ratio_percent),
@@ -612,7 +687,47 @@ fn print_candidate_floor(
 
 #[cfg(test)]
 mod tests {
-    use super::{best_of, confirmed_candidate_floor, f16_candidate_floor_value, floor_round};
+    use super::{
+        best_of, confirmed_candidate_floor, f16_candidate_floor_value, floor_round, tflops_sample,
+    };
+    use bench_harness::Measurement;
+
+    // PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の契約を
+    // 満たせない」の回帰確認: `tflops_sample`（4 経路すべての `measure_*` が
+    // 経由する唯一の変換経路。重複実装を防ぐための共通化）が
+    // `Measurement` の時間ドメイン 3 値を漏れなく TFLOPS ドメインへ変換する
+    // こと、かつ `tflops` が時間について単調減少写像であるため
+    // `q1_secs < median_secs < q3_secs`（速い方が下位 25%）のとき
+    // TFLOPS ドメインでは大小関係が反転すること（`TflopsSample`
+    // ドキュメンテーションコメント参照）を確認する。
+    #[test]
+    fn tflops_sample_converts_all_three_quartiles_and_inverts_time_domain_ordering() {
+        let measurement = Measurement {
+            median_secs: 2.0,
+            q1_secs: 1.0,
+            q3_secs: 4.0,
+            samples_secs: vec![1.0, 2.0, 4.0],
+            warmup: 20,
+            iters: 20,
+        };
+        let sample = tflops_sample(512, &measurement);
+        // 時間ドメインでは q1_secs(1.0) < median_secs(2.0) < q3_secs(4.0)。
+        // TFLOPS ドメインでは短い時間ほど高 TFLOPS のため大小関係が反転する。
+        assert!(sample.tflops_from_q1_secs > sample.median);
+        assert!(sample.median > sample.tflops_from_q3_secs);
+        // 変換元 secs から独立に算出した期待値とも一致することを確認する
+        // （`tflops` を経由した換算そのものが正しいことの担保）。
+        let flops = 2.0 * 512.0_f64.powi(3);
+        assert_eq!(sample.median, flops / measurement.median_secs / 1e12);
+        assert_eq!(
+            sample.tflops_from_q1_secs,
+            flops / measurement.q1_secs / 1e12
+        );
+        assert_eq!(
+            sample.tflops_from_q3_secs,
+            flops / measurement.q3_secs / 1e12
+        );
+    }
 
     // PR #349 codex-review 指摘 P1「候補下限を異なる計測範囲の TFLOPS から
     // 算出している」の回帰確認: f16 candidate floor は転送込み計測の

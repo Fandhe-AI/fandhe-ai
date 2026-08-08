@@ -88,11 +88,15 @@ cargo run -p backend-cuda --example cuda_floor_bench --release
 - `device: name=... compute_capability=...` 行: 計測環境（下表「計測環境」への転記元）
 - `pytorch reference provenance: ...` 行: PyTorch 参照値が「同一実機で今回再計測（env override）」か
   「PoC-v2-3 固定値」かの出所
-- `size=<N> tiled_f32_tflops=... wmma_tf32_tflops=... wmma_f16_tflops=... mma_f16_tflops=... f32_best_path=... f16_candidate_path=... f32_best_over_pytorch=... f16_candidate_over_pytorch=... (..., mma_over_wmma_f16(reference-only, not apples-to-apples)=...)` 行:
+- `size=<N> tiled_f32_tflops=... wmma_tf32_tflops=... wmma_f16_tflops=... mma_f16_tflops=... f32_best_path=... f16_candidate_path=... f32_best_over_pytorch=... f16_candidate_over_pytorch=... (..., mma_over_wmma_f16(reference-only, not apples-to-apples, median-based)=...)` 行:
   形状ごとの経路別 TFLOPS・f32 最良経路ラベル（`tiled`/`wmma_tf32`。実測 TFLOPS の大小比較で選出。
   固定優先順位ではない）・f16 candidate floor 経路ラベル（常に `wmma_f16`。`mma_f16` は計測範囲が異なる
   ため candidate floor には使わない）・対 PyTorch 比・`mma_f16` の参考比（`wmma_f16` 比。
-  apples-to-apples でない旨をラベルに明示）
+  apples-to-apples でない旨をラベルに明示）。経路別 TFLOPS 値は
+  `<中央値>(q1=<Q1由来値>,q3=<Q3由来値>)` の形式で中央値・Q1・Q3 を並記する（`bench_harness::run` の
+  計測プロトコル〈TASK-8.1〉が返す四分位値を破棄せず記録するため。`cuda_floor_bench.rs::TflopsSample`
+  参照。PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の契約を満たせない」対応。経路選択・
+  候補下限の算出は引き続き中央値のみを根拠とする）
 - `CUDA f32 candidate optimized floor ... = N%` / `CUDA f16 candidate optimized floor ... = N%` 行:
   判定対象形状（2048/4096）の最小比率に丸め規則を適用した候補下限値。**判定対象形状すべての比率が
   計測でき、かつ全形状で同一実機再計測値（env override）が使われた場合のみ**出力される。1 サイズでも
@@ -146,16 +150,20 @@ env override 未注入時のフォールバック値・参考比率の分母）:
 
 ### 経路×形状 TFLOPS 実測
 
-| M=N=K | tiled f32 | WMMA(TF32) opt | WMMA f16 opt | mma.sync f16 | f32 最良経路 | f16 candidate 経路 | mma_over_wmma_f16（参考比） |
-|-------|-----------|-----------------|--------------|--------------|---------------|---------------------|-------------------------------|
+各セルは `<中央値>(q1=<Q1由来値>,q3=<Q3由来値>)` の形式で `size=<N> ...` 出力行から転記する（中央値・
+Q1・Q3 の 3 値。`cuda_floor_bench.rs::TflopsSample`。PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており
+実測記録の契約を満たせない」対応。経路選択・候補下限の算出は引き続き中央値のみを根拠とする）。
+
+| M=N=K | tiled f32（中央値/Q1/Q3） | WMMA(TF32) opt（中央値/Q1/Q3） | WMMA f16 opt（中央値/Q1/Q3） | mma.sync f16（中央値/Q1/Q3） | f32 最良経路 | f16 candidate 経路 | mma_over_wmma_f16（参考比・中央値ベース） |
+|-------|-----------------------------|-----------------------------------|-----------------------------------|-------------------------------------|---------------|---------------------|-----------------------------------------------|
 | 512（参考値） | | | | | | | |
 | 2048 | | | | | | | |
 | 4096 | | | | | | | |
 
 「f32 最良経路」列は `f32_best_path=` 出力（`tiled`/`wmma_tf32`）を転記する。固定優先順位ではなく実測
-TFLOPS の大小比較で選ばれる（`cuda_floor_bench.rs::best_of`）。「f16 candidate 経路」列は常に `wmma_f16`
-になる（`f16_candidate_floor_value` 参照。`mma_f16` は計測範囲が異なるため candidate floor には使わない。
-PR #349 codex-review 指摘 P1 対応）。
+TFLOPS の中央値の大小比較で選ばれる（`cuda_floor_bench.rs::best_of`）。「f16 candidate 経路」列は常に
+`wmma_f16` になる（`f16_candidate_floor_value` 参照。`mma_f16` は計測範囲が異なるため candidate floor
+には使わない。PR #349 codex-review 指摘 P1 対応）。
 
 注意（`measure_mma_f16` ドキュメンテーションコメント参照）: `mma_f16` は H2D/D2H 転送・出力バッファ確保を
 計測区間の外に出しているが `tiled_f32`/`wmma_tf32`/`wmma_f16`/PyTorch 参照値は転送込みで計測するため、
@@ -197,7 +205,9 @@ PR #349 codex-review 指摘 P1 対応）。
   （仕様例との突合・10% 境界を跨ぐ非減少性・非有限値/負値の防御）・`best_of`（f32 最良経路選出。
   固定優先順位ではなく実測値比較であることの回帰確認）の単体テスト 4 件・`f16_candidate_floor_value`
   （f16 candidate floor が `wmma_f16` のみを根拠とし `mma_f16` を含めないことの回帰確認）の単体テスト
-  2 件、計 9 件が green であることを確認（PR #349 codex-review 指摘 P1 対応）
+  2 件・`confirmed_candidate_floor`（判定対象形状の一部欠測時に candidate floor を確定させないことの
+  回帰確認。PR #349 codex-review 再指摘 P1 対応）の単体テスト 1 件、計 10 件が green であることを確認
+  （PR #349 codex-review 指摘 P1 対応）
 
 ## 役割分担（二重管理を避ける）
 
