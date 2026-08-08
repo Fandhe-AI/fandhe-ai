@@ -9,8 +9,13 @@
 //! [`FusionGraph::push`] は構築時に検証を先行させる
 //! （OWASP A03 観点。`.claude/rules/security.md`・設計書 §5）:
 //! 入力 `FusionNodeId` が既存ノードの範囲内にあること、elementwise
-//! binary（`Add`／`Mul`）のオペランド shape が一致することを、ノードを
-//! 追記する前に検査し、違反時は [`FusionGraphError`] で拒否する。
+//! binary（`Add`／`Mul`）のオペランド shape が一致すること、さらに
+//! elementwise（unary／binary いずれも）の出力 shape（呼び出し側が渡す
+//! `meta.shape`）が入力 shape と恒等であること（設計書 §2.3「elementwise
+//! の出力 shape は入力の shape フィールドだけを読めば求まる」恒等計算の
+//! 前提）を、ノードを追記する前に検査し、違反時は [`FusionGraphError`]
+//! で拒否する。呼び出し側（#163／#164）が誤った出力 shape を渡すバグを
+//! 構築時に検出する検証境界としての役割を担う。
 
 use crate::dispatch::DType;
 use crate::error::ShapeError;
@@ -224,8 +229,8 @@ impl FusionGraph {
             }
         }
 
-        // elementwise binary のみ shape 一致を要求する（`Gemm` は
-        // `[m, k] @ [k, n]` のように内部次元のみ一致すればよく、この
+        // elementwise binary のみオペランド shape 一致を要求する（`Gemm`
+        // は `[m, k] @ [k, n]` のように内部次元のみ一致すればよく、この
         // 検証は elementwise 連鎖検出の前提を保つためのもの。設計書
         // §2.3「broadcast view は contiguous == false として非融合判定
         // 側で扱う」により、shape が完全一致しないブロードキャストは
@@ -241,6 +246,44 @@ impl FusionGraph {
                 }
                 .into());
             }
+        }
+
+        // elementwise（unary／binary）は出力 shape が入力 shape と恒等
+        // でなければならない（設計書 §2.3「elementwise の出力 shape は
+        // 入力の shape フィールドだけを読めば求まる」恒等計算という前提）。
+        // 呼び出し側が渡す `meta.shape`（このノード自身の出力 shape）が
+        // この恒等性から外れていないかを構築時に検査する。これを怠ると
+        // `detect.rs`（#163／#164）の連鎖検出が誤った出力 shape を信じて
+        // 走査することになり、呼び出し側のバグを検出できない
+        // （push 前レビュー指摘。モジュール冒頭コメント「構築時に検証を
+        // 先行させる」の対象に含める）。
+        match &op {
+            FusionOp::Add(a, _) | FusionOp::Mul(a, _) => {
+                // binary は rhs との一致を上の検査で確認済みのため、lhs
+                // との一致のみ確認すれば三者の恒等性が揃う。
+                let operand_shape = &self.nodes[a.0].meta.shape;
+                if operand_shape != &meta.shape {
+                    return Err(ShapeError::ShapeMismatch {
+                        lhs: meta.shape.clone(),
+                        rhs: operand_shape.clone(),
+                    }
+                    .into());
+                }
+            }
+            FusionOp::Relu(a) | FusionOp::Exp(a) | FusionOp::Tanh(a) => {
+                let input_shape = &self.nodes[a.0].meta.shape;
+                if input_shape != &meta.shape {
+                    return Err(ShapeError::ShapeMismatch {
+                        lhs: meta.shape.clone(),
+                        rhs: input_shape.clone(),
+                    }
+                    .into());
+                }
+            }
+            // `Input`・`Gemm`・`Sum`・`Max` は出力 shape が入力の恒等関数
+            // ではない（`Input` は外部から与えられ、`Gemm`／`Sum`／`Max`
+            // は融合境界としてここでは検証しない。設計書 §2.1）。
+            FusionOp::Input | FusionOp::Gemm(..) | FusionOp::Sum { .. } | FusionOp::Max { .. } => {}
         }
 
         let new_id = FusionNodeId(self.nodes.len());
@@ -304,6 +347,46 @@ mod tests {
             FusionGraphError::Shape(ShapeError::ShapeMismatch {
                 lhs: vec![4],
                 rhs: vec![2, 4],
+            })
+        );
+        assert_eq!(g.len(), 2);
+    }
+
+    #[test]
+    fn push_rejects_unary_output_shape_mismatch() {
+        // Relu は恒等 shape のはず。呼び出し側が誤った meta.shape（[999]）
+        // を渡した場合、入力（[4]）との不一致として拒否されなければ
+        // ならない（push 前レビュー指摘: unary の出力 shape は無検証で
+        // 通過していた）。
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let err = g.push(FusionOp::Relu(x), f32_meta(&[999])).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![999],
+                rhs: vec![4],
+            })
+        );
+        // 検証失敗時はノードが追記されない（グラフサイズ不変）。
+        assert_eq!(g.len(), 1);
+    }
+
+    #[test]
+    fn push_rejects_binary_output_shape_mismatch() {
+        // オペランド同士（x・y）は shape 一致するが、meta.shape（このノード
+        // 自身の出力 shape）が [999] と偽った場合は別途拒否されなければ
+        // ならない（push 前レビュー指摘: オペランド一致検査だけでは
+        // meta.shape 自体の恒等性は検証できていなかった）。
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let y = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let err = g.push(FusionOp::Add(x, y), f32_meta(&[999])).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![999],
+                rhs: vec![4],
             })
         );
         assert_eq!(g.len(), 2);
