@@ -430,10 +430,19 @@ fn main() {
     // している場合のみ `true` を維持する（1 サイズでも固定値フォール
     // バックが混じれば正式な candidate floor を出さない。PR #349
     // codex-review 指摘 P1 対応）。
+    // `*_judged_count` は比率が `Some`（非有限値等での欠測でない）だった
+    // 判定対象サイズの個数を数える。`JUDGED_SIZES.len()` に満たない場合は
+    // 一部形状が欠測したまま残りの形状だけで正式な candidate floor が
+    // 確定してしまうため（PR #349 codex-review 指摘 P1 再指摘対応）、
+    // `print_candidate_floor` には全形状が揃った場合のみ「確定可能」として
+    // 渡す（`min_ratio_percent` はそのまま、`same_hardware` は
+    // `judged_count == JUDGED_SIZES.len()` 条件を合成した値を渡す）。
     let mut min_f32_ratio_percent: Option<f64> = None;
     let mut min_f16_ratio_percent: Option<f64> = None;
     let mut f32_same_hardware = true;
     let mut f16_same_hardware = true;
+    let mut f32_judged_count: usize = 0;
+    let mut f16_judged_count: usize = 0;
 
     for size in std::iter::once(REFERENCE_ONLY_SIZE).chain(JUDGED_SIZES) {
         let config = MeasurementConfig::default();
@@ -506,10 +515,12 @@ fn main() {
             if let Some(r) = f32_ratio_percent {
                 min_f32_ratio_percent = Some(min_f32_ratio_percent.map_or(r, |m: f64| m.min(r)));
                 f32_same_hardware &= f32_measured;
+                f32_judged_count += 1;
             }
             if let Some(r) = f16_ratio_percent {
                 min_f16_ratio_percent = Some(min_f16_ratio_percent.map_or(r, |m: f64| m.min(r)));
                 f16_same_hardware &= f16_measured;
+                f16_judged_count += 1;
             }
         }
     }
@@ -519,8 +530,18 @@ fn main() {
          judged shapes (REQ-8): M=N=K in {JUDGED_SIZES:?} (size={REFERENCE_ONLY_SIZE} is \
          reference-only, excluded from candidate floor)"
     );
-    print_candidate_floor("f32", min_f32_ratio_percent, f32_same_hardware);
-    print_candidate_floor("f16", min_f16_ratio_percent, f16_same_hardware);
+    print_candidate_floor(
+        "f32",
+        min_f32_ratio_percent,
+        f32_same_hardware,
+        f32_judged_count,
+    );
+    print_candidate_floor(
+        "f16",
+        min_f16_ratio_percent,
+        f16_same_hardware,
+        f16_judged_count,
+    );
     println!(
         "NOTE: candidate floor values are NOT final. Final floor confirmation is a human \
          decision (TASK-8.3 担当: 共同（計測実行は Claude Code、下限値の最終確定は人間）). \
@@ -529,24 +550,60 @@ fn main() {
     );
 }
 
-/// 判定対象形状の最小比率から候補下限値を出力する。`same_hardware` が
-/// `false`（固定値フォールバックが 1 サイズでも混入）の場合は、GPU 名が
-/// GB10 系であっても正式な candidate floor を出さず `n/a` とし、参考比率
-/// のみ表示する（PR #349 codex-review 指摘 P1 対応。詳細はモジュール冒頭
-/// ドキュメンテーションコメント「PyTorch 参照値の再計測」参照）。
-fn print_candidate_floor(label: &str, min_ratio_percent: Option<f64>, same_hardware: bool) {
-    match (min_ratio_percent, same_hardware) {
-        (Some(r), true) => println!(
+/// 判定対象形状（`JUDGED_SIZES`）すべての比率が揃い（`judged_count ==
+/// JUDGED_SIZES.len()`）、かつ同一実機再計測値のみを根拠とする
+/// （`same_hardware == true`）場合にのみ、正式な candidate floor を確定値
+/// として返す。片方でも欠ける場合は `None`（`n/a` 扱い）とする（REQ-8
+/// 「2048・4096 の実測比率の最小値」契約。PR #349 codex-review 指摘 P1
+/// 対応。`print_candidate_floor` から呼ばれ、単体でも回帰テストする）。
+fn confirmed_candidate_floor(
+    min_ratio_percent: Option<f64>,
+    same_hardware: bool,
+    judged_count: usize,
+) -> Option<f64> {
+    if same_hardware && judged_count == JUDGED_SIZES.len() {
+        min_ratio_percent
+    } else {
+        None
+    }
+}
+
+/// 判定対象形状の最小比率から候補下限値を出力する。`confirmed_candidate_floor`
+/// が `None` を返す場合（`same_hardware == false`、または `judged_count` が
+/// `JUDGED_SIZES.len()` 未満）は、GPU 名が GB10 系であっても正式な
+/// candidate floor を出さず `n/a` とし、参考比率のみ表示する（PR #349
+/// codex-review 指摘 P1 対応。詳細はモジュール冒頭ドキュメンテーション
+/// コメント「PyTorch 参照値の再計測」参照）。
+fn print_candidate_floor(
+    label: &str,
+    min_ratio_percent: Option<f64>,
+    same_hardware: bool,
+    judged_count: usize,
+) {
+    let all_judged_sizes_present = judged_count == JUDGED_SIZES.len();
+    match confirmed_candidate_floor(min_ratio_percent, same_hardware, judged_count) {
+        Some(r) => println!(
             "CUDA {label} candidate optimized floor (rounding rule applied to min ratio \
              {r:.2}%) = {:.0}% (current provisional REQ-8 value: 40%)",
             floor_round(r)
         ),
-        (Some(r), false) => println!(
-            "CUDA {label} candidate optimized floor: n/a (same-hardware re-measured PyTorch \
-             baseline not confirmed for all judged sizes; reference-only ratio {r:.2}% uses \
-             PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)"
+        // 判定対象サイズが欠測している場合は、実機フォールバック起因の
+        // n/a よりも「そもそも全形状を評価し切れていない」欠陥のほうが
+        // 根本的なため、`same_hardware` の真偽によらずこの分岐を優先する。
+        None if !all_judged_sizes_present => println!(
+            "CUDA {label} candidate optimized floor: n/a (one or more judged sizes \
+             {JUDGED_SIZES:?} were missing/non-finite in this run; reference-only min ratio over \
+             measured judged sizes was {}, but REQ-8 requires the minimum ratio across ALL \
+             judged sizes to confirm a candidate floor)",
+            min_ratio_percent.map_or("n/a".to_string(), |r| format!("{r:.2}%"))
         ),
-        (None, _) => println!(
+        None if !same_hardware => println!(
+            "CUDA {label} candidate optimized floor: n/a (same-hardware re-measured PyTorch \
+             baseline not confirmed for all judged sizes; reference-only ratio {} uses \
+             PoC-v2-3 fixed values, see CUDA_FLOOR_BENCH_PYTORCH_SOURCE in module doc)",
+            min_ratio_percent.map_or("n/a".to_string(), |r| format!("{r:.2}%"))
+        ),
+        None => println!(
             "CUDA {label} candidate optimized floor: n/a (no judged-size measurement available \
              in this environment)"
         ),
@@ -555,7 +612,7 @@ fn print_candidate_floor(label: &str, min_ratio_percent: Option<f64>, same_hardw
 
 #[cfg(test)]
 mod tests {
-    use super::{best_of, f16_candidate_floor_value, floor_round};
+    use super::{best_of, confirmed_candidate_floor, f16_candidate_floor_value, floor_round};
 
     // PR #349 codex-review 指摘 P1「候補下限を異なる計測範囲の TFLOPS から
     // 算出している」の回帰確認: f16 candidate floor は転送込み計測の
@@ -576,6 +633,24 @@ mod tests {
     fn f16_candidate_floor_value_excludes_non_finite() {
         assert_eq!(f16_candidate_floor_value(Some(f64::NAN)), None);
         assert_eq!(f16_candidate_floor_value(Some(f64::INFINITY)), None);
+    }
+
+    // PR #349 codex-review 再指摘 P1 の回帰確認: 判定対象形状（2048・4096）
+    // の一部が欠測（比率が非有限値等で `None`）しても、残りの形状だけから
+    // 正式な candidate floor が確定してしまわないこと。`JUDGED_SIZES.len()`
+    // は 2 のため、`judged_count == 1`（片方欠測）は `None` を返す必要が
+    // ある。
+    #[test]
+    fn confirmed_candidate_floor_requires_all_judged_sizes_present() {
+        // 両サイズとも計測済み・同一実機根拠 → 確定できる。
+        assert_eq!(confirmed_candidate_floor(Some(45.0), true, 2), Some(45.0));
+        // 1 サイズのみ計測（もう 1 サイズは比率が非有限値等で欠測）
+        // → 確定できない（本回帰の主眼）。
+        assert_eq!(confirmed_candidate_floor(Some(45.0), true, 1), None);
+        // 同一実機根拠が確認できない → 確定できない（既存 P1 対応の維持）。
+        assert_eq!(confirmed_candidate_floor(Some(45.0), false, 2), None);
+        // どのサイズも計測できていない → 確定できない。
+        assert_eq!(confirmed_candidate_floor(None, true, 2), None);
     }
 
     // PR #349 codex-review 指摘 P1「実測性能を比較せず固定優先順位で

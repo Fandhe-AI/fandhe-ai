@@ -94,9 +94,11 @@ cargo run -p backend-cuda --example cuda_floor_bench --release
   ため candidate floor には使わない）・対 PyTorch 比・`mma_f16` の参考比（`wmma_f16` 比。
   apples-to-apples でない旨をラベルに明示）
 - `CUDA f32 candidate optimized floor ... = N%` / `CUDA f16 candidate optimized floor ... = N%` 行:
-  判定対象形状（2048/4096）の最小比率に丸め規則を適用した候補下限値。**判定対象形状すべてで同一実機
-  再計測値（env override）が使われた場合のみ**出力される。1 サイズでも PoC-v2-3 固定値にフォールバック
-  していれば `n/a`（参考比率のみ表示）になる
+  判定対象形状（2048/4096）の最小比率に丸め規則を適用した候補下限値。**判定対象形状すべての比率が
+  計測でき、かつ全形状で同一実機再計測値（env override）が使われた場合のみ**出力される。1 サイズでも
+  PoC-v2-3 固定値にフォールバックしていれば `n/a`（参考比率のみ表示）になる。1 サイズでも比率が
+  非有限値等で欠測（`None`）した場合も同様に `n/a` になる（残りの形状だけから確定させない。PR #349
+  codex-review 再指摘 P1 対応）
 
 ### PyTorch 参照値の扱い
 
