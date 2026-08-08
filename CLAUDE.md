@@ -52,6 +52,7 @@ rust-ai-library/
     ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
+    ├── performance-targets.md # REQ-8 段階的下限の全バックエンド横断一覧（TASK-8.4・#159）
     ├── public-api-design.md            # compat API 層の公開 API 設計（REQ-9）
     ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）
     └── spec/                # 正本 submodule（rust-ai-library-spec。編集禁止）
