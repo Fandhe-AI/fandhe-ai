@@ -109,11 +109,13 @@ jobs:
   # 旧 fmt / clippy / test / deny の 4 ジョブ定義は Fandhe-AI/actions 側へ集約済み。
   # uses の参照は組織規約によりコミット SHA へ固定する（@main 禁止。更新時は
   # `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決した SHA へ差し替える）。
-  # deny-checks（licenses sources。移行前の deny ジョブと同一。advisories を含む共通側
-  # 既定値とは異なるため明示指定する）・test-timeout-minutes（45。共通側既定 30 より
-  # 長い移行前の値を維持）以外の入力（fmt/clippy/deny の timeout・cache〈false。
-  # workspace が永続する self-hosted runner では不要〉）は、共通側の既定値が移行前の
-  # 本ファイルの値と同一のため指定しない。concurrency は reusable workflow の
+  # deny-checks（advisories bans licenses sources。共通側既定〈advisories licenses
+  # sources〉に bans を追加するため明示指定する。#353。advisories / bans の設定・
+  # 違反 0 件の実測根拠は deny.toml の [advisories] / [bans] 節コメント参照）・
+  # test-timeout-minutes（45。共通側既定 30 より長い移行前の値を維持）以外の入力
+  # （fmt/clippy/deny の timeout・cache〈false。workspace が永続する self-hosted
+  # runner では不要〉）は、共通側の既定値が移行前の本ファイルの値と同一のため
+  # 指定しない。concurrency は reusable workflow の
   # トップレベルでは機能しないため、従来どおり本ファイル冒頭の concurrency 設定が
   # 直列化を担う。
   # 前提: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
@@ -128,9 +130,9 @@ jobs:
       # 組織 runner 方針（private リポジトリは self-hosted）。既定値と同値だが
       # 方針の明示のため省略しない（.claude/rules/ci.md）
       runner-label: self-hosted
-      # 移行前の deny ジョブ（cargo deny check licenses sources）の対象を維持する。
-      # advisories の追加は従来からのスコープ外事項の踏襲として行わない
-      deny-checks: licenses sources
+      # 共通側既定（advisories licenses sources）へ bans を追加（#353）。トークンは
+      # 共通側 deny ジョブが閉じた whitelist と厳密一致で fail-closed 検証する
+      deny-checks: advisories bans licenses sources
       # 移行前の test ジョブの timeout（45 分）を維持する（共通側既定は 30 分）
       test-timeout-minutes: 45
 
