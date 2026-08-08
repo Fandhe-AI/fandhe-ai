@@ -48,6 +48,19 @@
 //! `Arc<AllocationTracker>` を共有する非 `Copy` 型に変更。CUDA/Metal への
 //! 同フック組み込みは #175）。
 //!
+//! **破壊的変更（`backend-cpu` 0.2.0。PR #359 codex-review 指摘 P1 を受けて
+//! ここに移行手引きを明記）**: 従来 `CpuMemory` はフィールドを持たない
+//! unit struct（`Copy`）だったため `let mem = CpuMemory;` のような直接構築が
+//! 可能だったが、本変更でトラッカー（`Arc<AllocationTracker>`）を保持する
+//! ようになり `Copy` を外した。ワークスペース内に unit struct 構築や
+//! `Copy` 依存箇所が無いことは確認済みだが、外部呼び出し側は次のとおり
+//! 移行する:
+//! - `CpuMemory` → [`CpuMemory::new()`]（または `CpuMemory::default()`。
+//!   いずれも新規の計測系列を持つトラッカーを生成する）
+//! - `Copy` 依存（暗黙コピーでの使い回し）→ `Clone`（`clone()` は
+//!   同一計測系列〈トラッカー〉の共有を意味し、暗黙コピーとは意味が異なる
+//!   点に注意。ピークを集約したい場合は明示的に `clone()` する）
+//!
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
 //! `tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
 //! （[`gemm_blis::gemm_blis_parallel`]・[`elementwise`] の `add`/`mul`/`relu`/

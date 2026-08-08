@@ -72,8 +72,26 @@ pub trait MemoryStats {
 /// カウンタの読み書きのみを行い、他の共有データへの happens-before 関係を
 /// 要求しない（`current`/`peak` 自体の値の一貫性は各アトミック操作の
 /// atomicity のみで足りる）。`peak` は「`current` に加算した直後の値」で
-/// `fetch_max` するため、並行アクセス下でも常に「ある時点で実在した
-/// `current` 値以上」を保つ（単調非減少）。
+/// `fetch_max` するため、`reset_peak()` を挟まない限り常に「ある時点で
+/// 実在した `current` 値以上」を保つ（単調非減少）。
+///
+/// `peak >= current` は**常時**成立する強不変条件ではない点に注意
+/// （PR #359 codex-review 指摘 P1 を受けて明記）。理由は 2 点:
+/// (a) `on_alloc` は `fetch_add`（current 更新）→ `fetch_max`（peak 更新）の
+///     2 手順であり、この間隙を他スレッドの読み取りが観測しうる
+///     （両更新をまたぐ強一貫性が必要ならホットパスではない本用途でも
+///     `Mutex` 化が要るが、統計フックの用途上は許容する）
+/// (b) `reset_peak()` は意図的に peak を current 相当まで引き下げる
+///     （「以降の区間のピーク」を求める設計。次段落参照）
+///
+/// `reset_peak()` は「current.load() → peak.store()」の非原子的な 2 手順に
+/// すると、両者の間に別スレッドの `on_alloc()`（`fetch_max`）が割り込んだ
+/// 場合にその新ピークを `store()` が小さい値で上書きしてしまう
+/// （並行確保がリセットにより失われるバグ）。これを避けるため
+/// `peak.fetch_update` の CAS ループで `current` を都度再読込しながら
+/// 更新する。CAS が失敗（＝他スレッドが `peak` を更新済み）した場合は
+/// クロージャが再実行され `current` を読み直すため、「ある時点で実在した
+/// `current` 値」を取りこぼさない。
 #[derive(Debug, Default)]
 pub struct AllocationTracker {
     current: AtomicU64,
@@ -124,8 +142,19 @@ impl AllocationTracker {
         // 現在値まで引き下げる（0 に戻すと生存中のアロケーションが
         // 未計上のピークとして扱われてしまい、直後に allocated_bytes()
         // > peak_allocated_bytes() という矛盾した観測が生じるため避ける）。
-        let current = self.current.load(Ordering::Relaxed);
-        self.peak.store(current, Ordering::Relaxed);
+        //
+        // `current.load()` → `peak.store()` の非原子的な 2 手順にすると、
+        // その間隙に割り込んだ他スレッドの `on_alloc()`（`fetch_max` による
+        // peak 更新）を `store()` が上書きし、並行確保が失われてしまう
+        // （PR #359 codex-review 指摘 P1）。`fetch_update` の CAS ループで
+        // 都度 `current` を再読込することで、CAS 失敗（＝他スレッドが
+        // 先に `peak` を更新済み）のたびにやり直し、実在した `current` 値を
+        // 取りこぼさないようにする。
+        let _ = self
+            .peak
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |_| {
+                Some(self.current.load(Ordering::Relaxed))
+            });
     }
 }
 
@@ -276,5 +305,56 @@ mod tests {
 
         assert_eq!(tracker.allocated_bytes(), 0);
         assert!(tracker.peak_allocated_bytes() >= 8);
+    }
+
+    /// PR #359 codex-review 指摘 P1 の再発防止テスト。`reset_peak()` が
+    /// 「`current.load()` → `peak.store()`」の非原子的な 2 手順だった旧実装
+    /// では、その間隙に別スレッドの `on_alloc()`（`fetch_max`）が割り込むと
+    /// 新ピークが `store()` によって上書きされ、`peak_allocated_bytes() <
+    /// allocated_bytes()` という矛盾した観測が生じ得た。スレッド A が確保を
+    /// 繰り返し生存させ続け、スレッド B が並行して `reset_peak()` を連打し、
+    /// 全スレッド join 後（並行中の確保がすべて確定した時点）に
+    /// `peak >= current` を検査することで、`fetch_update` の CAS ループが
+    /// 並行確保を取りこぼしていないことを確認する。
+    #[test]
+    fn reset_peak_does_not_lose_concurrent_allocations() {
+        let tracker = Arc::new(AllocationTracker::new());
+        // ベースライン確保: テスト全体を通じて生存させ、current > 0 を保つ
+        // （reset_peak が 0 側に潰れていないかも合わせて検査できる）。
+        let baseline = TrackedAllocation::new(Arc::clone(&tracker), 1);
+
+        let alloc_thread = {
+            let tracker = Arc::clone(&tracker);
+            thread::spawn(move || {
+                for _ in 0..2000 {
+                    let guard = TrackedAllocation::new(Arc::clone(&tracker), 64);
+                    drop(guard);
+                }
+            })
+        };
+        let reset_thread = {
+            let tracker = Arc::clone(&tracker);
+            thread::spawn(move || {
+                for _ in 0..2000 {
+                    tracker.reset_peak();
+                }
+            })
+        };
+
+        alloc_thread
+            .join()
+            .expect("確保スレッドが panic せずに完了する");
+        reset_thread
+            .join()
+            .expect("reset_peak スレッドが panic せずに完了する");
+
+        assert!(
+            tracker.peak_allocated_bytes() >= tracker.allocated_bytes(),
+            "全スレッド join 後は peak >= current が成立するはず \
+             （peak={}, current={}）",
+            tracker.peak_allocated_bytes(),
+            tracker.allocated_bytes()
+        );
+        drop(baseline);
     }
 }
