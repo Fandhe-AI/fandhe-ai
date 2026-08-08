@@ -300,6 +300,37 @@ else
 	@echo "skip: Cargo.toml 未追加のため startup-bench をスキップ"
 endif
 
+# GEMM ピークメモリ計測ハーネス（TASK-14.2a・イシュー #178）。CI には組み込まない
+# （REQ-14 の代表ワークロード〈M=N=K=4096〉は数百 MB〜数 GB の確保・GEMM 実行を伴い
+# 通常 CI ジョブとしては重いため。CI 実行可能なスモークテストは
+# `crates/bench-harness/tests/peak_memory_smoke.rs` が別途担う）。既定はホスト CPU
+# バックエンド・REQ-14 代表サイズ、`BACKEND=cuda`／`BACKEND=metal`（実機限定）・
+# `SIZE=<N>` で切り替える。BACKEND・TRIALS の export・シェル注入対策は
+# `startup-bench` ターゲットと同一方針（上記コメント参照）。SIZE も同様に export し、
+# レシピ側で数値のみを許可リスト検証してから cargo 呼び出しへ渡す。
+SIZE ?= 4096
+export SIZE
+.PHONY: peak-memory-bench
+peak-memory-bench: ## GEMM ピークメモリ計測を実行する（既定 CPU・4096³。BACKEND=cuda|metal・SIZE=N で切替）
+ifdef HAS_CARGO
+	@case "$$BACKEND" in \
+		cpu|cuda|metal) ;; \
+		*) echo "BACKEND は cpu|cuda|metal のいずれかを指定する（指定値: $$BACKEND）" >&2; exit 1 ;; \
+	esac
+	@case "$$TRIALS" in \
+		''|*[!0-9]*) echo "TRIALS は数値を指定する（指定値: $$TRIALS）" >&2; exit 1 ;; \
+		*) ;; \
+	esac
+	@case "$$SIZE" in \
+		''|*[!0-9]*) echo "SIZE は数値を指定する（指定値: $$SIZE）" >&2; exit 1 ;; \
+		*) ;; \
+	esac
+	cargo build -p bench-harness --release --bins
+	cargo run -p bench-harness --release --bin peak_memory_bench -- --backend "$$BACKEND" --size "$$SIZE" --trials "$$TRIALS"
+else
+	@echo "skip: Cargo.toml 未追加のため peak-memory-bench をスキップ"
+endif
+
 .PHONY: ci
 ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
