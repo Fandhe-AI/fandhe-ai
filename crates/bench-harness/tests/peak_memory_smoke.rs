@@ -6,7 +6,11 @@
 //! 本ファイルは小サイズ（256³）で `bench_harness::peak_memory` の公開契約
 //! （内部計測 API 値の決定性・リーク検査・JSON ラウンドトリップ）のみを
 //! 検証する。4096³ 実測本体は `docs/perf/gemm-peak-memory-measurement.md`
-//! （#178 実測記録。手動実行 `make peak-memory-bench` 経由）が担う。
+//! （#178 実測記録。手動実行 `make peak-memory-bench` 経由）が担う。本ファイルは
+//! それとは別に、当該実測記録の生データ（`docs/perf/peak-memory/cpu-run{1,2}.json`）を
+//! 実際に読み込み、現行スキーマ（`gemm_alloc_peak_bytes` 込み）を満たしていることを
+//! 自己保証する（`committed_cpu_peak_memory_reports_have_gemm_alloc_peak_bytes_tracked`。
+//! PR #370 codex-review 指摘 P1 再指摘対応）。
 //!
 //! CUDA/Metal の実機依存経路は `#[ignore]` で分離する
 //! （`.claude/rules/coding-rust.md`「実機依存テストは #[ignore] で分離」）。
@@ -14,6 +18,7 @@
 use bench_harness::peak_memory::{
     PeakMemoryBackend, PeakMemoryConfig, PeakMemoryReport, run_peak_memory,
 };
+use std::path::Path;
 
 /// 受け入れ条件「CPU バックエンドでピーク値が取得できる」の統合テスト版:
 /// `MemoryOps` 経由の確保（A・B・C の 3 バッファ）のみが計上され、理論最小
@@ -81,4 +86,44 @@ fn metal_peak_memory_matches_theoretical_minimum() {
     let report = run_peak_memory(&config).expect("Metal 実機環境でのみ成功する");
     let expected_bytes: u64 = 3 * 256 * 256 * 4;
     assert_eq!(report.theoretical_min_bytes, expected_bytes);
+}
+
+/// `docs/perf/peak-memory/cpu-run1.json`・`cpu-run2.json`（#178 実測記録本体。
+/// `docs/perf/gemm-peak-memory-measurement.md` が参照する生データ）を実際に読み込み、
+/// 現行スキーマ（`gemm_alloc_peak_bytes` を含む）の実測結果として自己保証する。
+///
+/// PR #370 codex-review 指摘 P1 の回帰テスト: 「`gemm_alloc_peak_bytes` フィールド追加後も
+/// 旧スキーマ（当該フィールド欠落）の JSON が `PeakMemoryReport::from_json`（`Option` の
+/// 欠落は serde により `None` として受理される）を素通ししてしまい、`validate` も CPU 側の
+/// `None` を拒否していなかった」ことを直接検証する。ファイル不在・パース失敗・
+/// `require_gemm_alloc_tracked` 失敗のいずれも本テストの失敗として扱う（skip しない。
+/// スキップは検査の迂回になるため許容しない）。
+#[test]
+fn committed_cpu_peak_memory_reports_have_gemm_alloc_peak_bytes_tracked() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR は cargo test 実行時に必ず設定される");
+    let peak_memory_dir = Path::new(&manifest_dir)
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/bench-harness からリポジトリルートへ 2 階層上れるはず")
+        .join("docs/perf/peak-memory");
+
+    for filename in ["cpu-run1.json", "cpu-run2.json"] {
+        let path = peak_memory_dir.join(filename);
+        let json = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{path:?} の読み込みに失敗: {e}"));
+        let report = PeakMemoryReport::from_json(&json)
+            .unwrap_or_else(|e| panic!("{path:?} は現行スキーマの検証を通過するはず: {e}"));
+
+        assert_eq!(report.backend, "cpu", "{path:?} は CPU 実測記録のはず");
+        report.require_gemm_alloc_tracked().unwrap_or_else(|e| {
+            panic!("{path:?} は gemm_alloc_peak_bytes が実測された現行の実測データのはず: {e}")
+        });
+        for (i, trial) in report.samples.iter().enumerate() {
+            assert!(
+                trial.gemm_alloc_peak_bytes.is_some(),
+                "{path:?} の samples[{i}] は gemm_alloc_peak_bytes が Some のはず"
+            );
+        }
+    }
 }

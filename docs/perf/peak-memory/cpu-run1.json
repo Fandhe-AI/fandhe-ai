@@ -13,40 +13,45 @@
     "q3": 201326592
   },
   "gemm_secs": {
-    "median": 0.22357755,
-    "q1": 0.217701259,
-    "q3": 0.227739593
+    "median": 0.21652063,
+    "q1": 0.214425293,
+    "q3": 0.219111383
   },
   "samples": [
     {
       "peak_bytes": 201326592,
       "allocated_after_drop_bytes": 0,
-      "gemm_secs": 0.227739593,
-      "vm_hwm_bytes": 346431488
+      "gemm_secs": 0.20590016,
+      "vm_hwm_bytes": 346324992,
+      "gemm_alloc_peak_bytes": 75150200
     },
     {
       "peak_bytes": 201326592,
       "allocated_after_drop_bytes": 0,
-      "gemm_secs": 0.217701259,
-      "vm_hwm_bytes": 346431488
+      "gemm_secs": 0.214425293,
+      "vm_hwm_bytes": 346324992,
+      "gemm_alloc_peak_bytes": 75071568
     },
     {
       "peak_bytes": 201326592,
       "allocated_after_drop_bytes": 0,
-      "gemm_secs": 0.22357755,
-      "vm_hwm_bytes": 346431488
+      "gemm_secs": 0.219111383,
+      "vm_hwm_bytes": 346324992,
+      "gemm_alloc_peak_bytes": 75065424
     },
     {
       "peak_bytes": 201326592,
       "allocated_after_drop_bytes": 0,
-      "gemm_secs": 0.207123967,
-      "vm_hwm_bytes": 346431488
+      "gemm_secs": 0.21652063,
+      "vm_hwm_bytes": 346324992,
+      "gemm_alloc_peak_bytes": 75065424
     },
     {
       "peak_bytes": 201326592,
       "allocated_after_drop_bytes": 0,
-      "gemm_secs": 0.235663604,
-      "vm_hwm_bytes": 346431488
+      "gemm_secs": 0.219263947,
+      "vm_hwm_bytes": 346324992,
+      "gemm_alloc_peak_bytes": 75059280
     }
   ]
 }

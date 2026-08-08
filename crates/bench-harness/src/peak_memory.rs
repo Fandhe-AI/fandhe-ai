@@ -68,7 +68,12 @@
 //! 5. `upload`/`alloc_zeroed` で得た 3 バッファを drop し、
 //!    `allocated_bytes()`（`allocated_after_drop_bytes`）が 0 に戻ることを
 //!    リーク検査として記録する（[`PeakMemoryReport::validate`] が
-//!    fail-closed で強制する）
+//!    fail-closed で強制する）。[`PeakMemoryReport::write_to_file`] は
+//!    さらに [`PeakMemoryReport::require_gemm_alloc_tracked`] を通し、
+//!    CPU バックエンドの公式実測記録では `gemm_alloc_peak_bytes` が
+//!    `Some`（かつ出力バッファ分以上）であることを fail-closed に強制する
+//!    （PR #370 codex-review 指摘 P1 再指摘対応: 旧スキーマの実測データが
+//!    現行スキーマの結果として黙って正常扱いされることを防ぐ）
 //!
 //! 試行回数は既定 [`DEFAULT_PEAK_MEMORY_TRIALS`]（5 回）・中央値を採用する
 //! （`.claude/rules/coding-rust.md` ベンチ規約）。行列データは
@@ -553,6 +558,65 @@ impl PeakMemoryReport {
         Ok(())
     }
 
+    /// CPU バックエンドの `gemm_alloc_peak_bytes` が実測されていることを fail-closed に
+    /// 検証する（PR #370 codex-review 指摘 P1 再指摘対応）。
+    ///
+    /// [`Self::validate`] とは別関数に分離する: `gemm_alloc_peak_bytes` は
+    /// `TrackingAllocator` がプロセスの `#[global_allocator]` として実際に有効化されて
+    /// いる場合に限り `Some` になる契約（[`PeakMemoryTrial::gemm_alloc_peak_bytes`] doc
+    /// comment参照）であり、これは `peak_memory_bench` バイナリ（`src/bin/
+    /// peak_memory_bench.rs`）だけが満たす。ライブラリ API を経由する他クレート・
+    /// 統合テスト（`tests/peak_memory_smoke.rs` 等、`TrackingAllocator` を
+    /// `#[global_allocator]` 宣言しないバイナリ）では意図的に `None` になりうるため、
+    /// これを [`Self::validate`]（`from_json`／`to_json` が常に経由する汎用 DTO 検証）で
+    /// 強制すると正当な呼び出し経路まで壊してしまう。本メソッドは「公式の実測記録として
+    /// 永続化する直前」（[`Self::write_to_file`]）にのみ適用する、狭いスコープの
+    /// fail-closed ゲートである。
+    ///
+    /// CPU は各 sample の `gemm_alloc_peak_bytes` が `Some` かつ出力バッファ分
+    /// （`m * n * size_of::<f32>()`）以上であることを要求する（ゼロ・過小な観測値や、
+    /// 本指標の実測実装前に採取した旧スキーマデータの紛れ込みを検出する）。CUDA／Metal は
+    /// デバイス確保が `GlobalAlloc` を経由しないため常に `None` であることを要求する
+    /// （契約からの逸脱＝実装ミスを検出する）。
+    pub fn require_gemm_alloc_tracked(&self) -> Result<(), PeakMemoryError> {
+        let output_buffer_bytes = self
+            .m
+            .checked_mul(self.n)
+            .and_then(|n| n.checked_mul(std::mem::size_of::<f32>()))
+            .map(|v| v as u64);
+
+        for (i, t) in self.samples.iter().enumerate() {
+            match (self.backend.as_str(), t.gemm_alloc_peak_bytes) {
+                ("cpu", None) => {
+                    return Err(PeakMemoryError::ProtocolViolation(format!(
+                        "samples[{i}] の gemm_alloc_peak_bytes が None（CPU の公式実測記録は \
+                         TrackingAllocator により常に Some のはず。旧スキーマの実測データが \
+                         紛れ込んでいる可能性がある）"
+                    )));
+                }
+                ("cpu", Some(observed)) => {
+                    if let Some(min_expected) = output_buffer_bytes
+                        && observed < min_expected
+                    {
+                        return Err(PeakMemoryError::ProtocolViolation(format!(
+                            "samples[{i}] の gemm_alloc_peak_bytes（{observed}）が \
+                             出力バッファ分の下限（{min_expected}）を下回っている \
+                             （GEMM 実行区間の実ヒープ確保が観測できていない）"
+                        )));
+                    }
+                }
+                (backend, Some(_)) if backend != "cpu" => {
+                    return Err(PeakMemoryError::ProtocolViolation(format!(
+                        "samples[{i}] の gemm_alloc_peak_bytes が {backend} バックエンドで \
+                         Some（GlobalAlloc を経由しないため常に None のはず）"
+                    )));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     /// JSON へシリアライズする（書き出し前に [`Self::validate`] を実行する）。
     pub fn to_json(&self) -> Result<String, PeakMemoryError> {
         self.validate()?;
@@ -568,9 +632,14 @@ impl PeakMemoryReport {
         Ok(report)
     }
 
-    /// `--out` 指定先へ書き出す（[`Self::to_json`] を経由。呼び出し元
-    /// CLI から共有するための薄いヘルパー）。
+    /// `--out` 指定先へ書き出す（[`Self::to_json`] を経由。呼び出し元 CLI
+    /// （`peak_memory_bench`）から共有するための薄いヘルパー）。書き出し前に
+    /// [`Self::require_gemm_alloc_tracked`] を通し、公式の実測記録として永続化する
+    /// レポートが `gemm_alloc_peak_bytes` 契約を満たしていることを fail-closed に
+    /// 強制する（PR #370 codex-review 指摘 P1 再指摘対応。[`Self::
+    /// require_gemm_alloc_tracked`] doc comment 参照）。
     pub fn write_to_file(&self, path: &Path) -> Result<(), PeakMemoryError> {
+        self.require_gemm_alloc_tracked()?;
         let json = self.to_json()?;
         std::fs::write(path, json)
             .map_err(|e| PeakMemoryError::Io(format!("出力ファイル書き込み失敗（{path:?}）: {e}")))
@@ -919,5 +988,64 @@ mod tests {
             report.validate(),
             Err(PeakMemoryError::ProtocolViolation(_))
         ));
+    }
+
+    /// [`PeakMemoryReport::require_gemm_alloc_tracked`] の正常系: 本テストバイナリは
+    /// `crate::alloc_tracker` の `#[cfg(test)]` `#[global_allocator]` 宣言により
+    /// `gemm_alloc_peak_bytes` が `Some` になるため、CPU の公式実測記録と同じ形の
+    /// レポートを素通しできることを確認する（PR #370 codex-review 指摘 P1 再指摘対応）。
+    #[test]
+    fn require_gemm_alloc_tracked_accepts_cpu_report_with_tracking_active() {
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 2).unwrap();
+        let report = run_peak_memory(&config).unwrap();
+        assert!(report.require_gemm_alloc_tracked().is_ok());
+    }
+
+    /// [`PeakMemoryReport::require_gemm_alloc_tracked`] の fail-closed 挙動: 旧スキーマ
+    /// （`gemm_alloc_peak_bytes` 実測前）の CPU レポートを模した `None` を fail-closed で
+    /// 拒否することを確認する（本イシューの codex-review P1 指摘そのものの回帰テスト:
+    /// 「旧スキーマの実測データが現行スキーマの結果として黙って正常扱いされる」ことを防ぐ）。
+    #[test]
+    fn require_gemm_alloc_tracked_rejects_none_for_cpu() {
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
+        let mut report = run_peak_memory(&config).unwrap();
+        report.samples[0].gemm_alloc_peak_bytes = None;
+        assert!(matches!(
+            report.require_gemm_alloc_tracked(),
+            Err(PeakMemoryError::ProtocolViolation(_))
+        ));
+    }
+
+    /// [`PeakMemoryReport::require_gemm_alloc_tracked`] は出力バッファ分未満の過小な
+    /// 観測値（GEMM 実行区間の実ヒープ確保を捕捉できていない状態）も拒否する。
+    #[test]
+    fn require_gemm_alloc_tracked_rejects_value_below_output_buffer() {
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
+        let mut report = run_peak_memory(&config).unwrap();
+        report.samples[0].gemm_alloc_peak_bytes = Some(1);
+        assert!(matches!(
+            report.require_gemm_alloc_tracked(),
+            Err(PeakMemoryError::ProtocolViolation(_))
+        ));
+    }
+
+    /// `write_to_file` は素通しではなく必ず `require_gemm_alloc_tracked` を通す
+    /// （直接呼び出しではなくファイル I/O 経由でも fail-closed が効くことの確認）。
+    #[test]
+    fn write_to_file_rejects_report_missing_gemm_alloc_tracking() {
+        let config = PeakMemoryConfig::new(PeakMemoryBackend::Cpu, 32, 1).unwrap();
+        let mut report = run_peak_memory(&config).unwrap();
+        report.samples[0].gemm_alloc_peak_bytes = None;
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "peak_memory_write_to_file_test_{}.json",
+            std::process::id()
+        ));
+        let result = report.write_to_file(&path);
+        // 失敗経路の確認が主目的のため、書き出しに成功してしまった場合に備えて
+        // 後始末する（本番経路ではないテストコード限定の best-effort クリーンアップ）。
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(result, Err(PeakMemoryError::ProtocolViolation(_))));
     }
 }
