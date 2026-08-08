@@ -40,11 +40,26 @@
 //!
 //! | 値 | 意味（`run`） | 意味（`verify-log`） |
 //! |---|---|---|
-//! | `0` | 自動適用（`Verdict::AutoApply`） | チェーン整合（改竄なし） |
+//! | `0` | 自動適用（`Verdict::AutoApply`）かつ `--repo` への反映も成功 | チェーン整合（改竄なし） |
 //! | `10` | エスカレーション | （該当なし） |
 //! | `20` | 却下 | （該当なし） |
-//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗） | 検証不合格・内部エラー |
+//! | `1` | 内部エラー（`LoopFailure`・`Exhausted`・`NoActionNeeded`・段階構築失敗・sandbox 構築失敗）／自動適用後の `--repo` への反映失敗（下記参照） | 検証不合格・内部エラー |
 //! | `2` | usage エラー | usage エラー |
+//!
+//! `LoopOutcome` → 終了コードの基本写像（0/10/20/1）は [`exit_code_for_outcome`]
+//! が単独で担うが、`run_run` はその後段で `LoopOutcome::Adopted`（exit 0）の
+//! 場合のみ [`self_repair::sandbox::reflect_adopted_diff`] を呼び、隔離
+//! sandbox（[`self_repair::sandbox::RunSandbox`]）内で検証済みの差分を
+//! `--repo` の作業ツリーへ競合検査つきで反映する（PR #361 codex-review P0
+//! 指摘対応: `--repo` に人間の作業リポジトリを直接渡すと、非採用に終わった
+//! 候補の変更が未コミットの作業ツリーへ残置され `git add -A` が無関係な
+//! 変更まで staged にしてしまう問題があった。`sandbox.rs` モジュール冒頭
+//! ドキュメント参照）。この反映が失敗した場合（`--repo` がダーティで競合
+//! する等）は、ループ自体は `Adopted` で完走していても `--repo` への反映が
+//! できていないためプロセス全体としては完了しておらず、終了コードを `1` へ
+//! 上書きする（`exit_code_for_outcome` が返す `0` を後段で書き換える唯一の
+//! 経路であり、`LoopOutcome` の解釈自体には手を加えない。`--log`／`--output`
+//! はループの真の結果〈Adopted〉を記録済みのまま変更しない）。
 
 use std::cell::RefCell;
 use std::ffi::OsString;
@@ -56,13 +71,14 @@ use std::rc::Rc;
 use self_repair::candidate::load_candidates_from_json;
 use self_repair::cli::{self, Command, RunArgs, UsageError, VerifyLogArgs};
 use self_repair::outcome::VerifiedEvidence;
+use self_repair::sandbox::{RunSandbox, reflect_adopted_diff};
 use self_repair::stages::{Detector, FixGenerator};
 use self_repair::verify_bench::BenchSignal as DirectBenchSignal;
 use self_repair::{
     BugFixDetector, BugFixFixGenerator, CandidateFix, FeatureAdditionDetector,
-    FeatureAdditionFixGenerator, GuardrailAdoptionJudge, LogError, LoopFailure, LoopReport,
-    RepairCompositeGate, RepairCompositeGateSpec, RepairKind, SelfRepairError, SelfRepairLoop,
-    SystemCommandRunner, VerifyChainSummary, verify_chain,
+    FeatureAdditionFixGenerator, GuardrailAdoptionJudge, LogError, LoopFailure, LoopOutcome,
+    LoopReport, RepairCompositeGate, RepairCompositeGateSpec, RepairKind, SelfRepairError,
+    SelfRepairLoop, SystemCommandRunner, VerifyChainSummary, verify_chain,
 };
 
 /// [`RepairCompositeGate::evidence_sink`] の戻り値型（`execute_loop` が
@@ -213,19 +229,33 @@ fn run_run(args: RunArgs) -> ExitCode {
         }
     };
 
+    // `--repo`（人間の作業リポジトリ）の作業ツリー・index には一切触れず、
+    // ループ全体（候補適用・4 ゲート検証・`git add -A` を含む）を隔離
+    // sandbox 内で完結させる（PR #361 codex-review P0 指摘対応。`sandbox.rs`
+    // モジュール冒頭ドキュメント参照）。
+    let mut sandbox = match RunSandbox::create(&args.repo, &baseline_commit) {
+        Ok(sandbox) => sandbox,
+        Err(message) => {
+            eprintln!("self-repair run: 検証用 sandbox の構築に失敗しました: {message}");
+            return ExitCode::from(1);
+        }
+    };
+    let sandbox_root = sandbox.root().to_path_buf();
+
     // diff・ベンチの計測系（`RepairCompositeGate`）は種別非依存であり、
     // `verify_direct_composite.rs` モジュール冒頭ドキュメントどおり build/
     // test/clippy の逐次実行・fail-fast 判定・ベンチ判定への変換を再実装
     // しない（このゲート 1 インスタンスを BugFix/FeatureAddition 双方の
-    // 分岐で共有する）。
+    // 分岐で共有する）。`workspace`／`sandbox_root` はいずれも隔離 sandbox
+    // を指す（`--repo` を直接渡さない。`sandbox.rs` 参照）。
     let policy_exclusion_path = args
         .policy_exclusion
         .clone()
-        .unwrap_or_else(|| args.repo.join("policy-exclusion.toml"));
+        .unwrap_or_else(|| sandbox_root.join("policy-exclusion.toml"));
     let gate_spec = RepairCompositeGateSpec {
-        workspace: args.repo.clone(),
-        sandbox_root: args.repo.clone(),
-        baseline_commit,
+        workspace: sandbox_root.clone(),
+        sandbox_root: sandbox_root.clone(),
+        baseline_commit: baseline_commit.clone(),
         policy_exclusion_path,
         bench_bin: args.bench_bin.clone(),
         workload_sources: args.workload_sources.clone(),
@@ -245,11 +275,12 @@ fn run_run(args: RunArgs) -> ExitCode {
 
     // `SelfRepairLoop<D, F, V, J>` は型パラメータのため、実行時に選んだ
     // `--kind` に応じた具体型（`D`/`F`）の選択は分岐ごとに行う
-    // （`cli.rs` モジュール冒頭ドキュメント参照）。
-    match args.kind {
+    // （`cli.rs` モジュール冒頭ドキュメント参照）。検出器・修正生成器の
+    // workspace も sandbox を指す（`--repo` を直接渡さない）。
+    let (exit_code, outcome) = match args.kind {
         RepairKind::BugFix => {
-            let detector = BugFixDetector::new(args.repo.clone(), SystemCommandRunner::new());
-            let fix_generator = match BugFixFixGenerator::new(args.repo.clone(), candidates) {
+            let detector = BugFixDetector::new(sandbox_root.clone(), SystemCommandRunner::new());
+            let fix_generator = match BugFixFixGenerator::new(sandbox_root.clone(), candidates) {
                 Ok(generator) => generator,
                 Err(err) => return report_run_setup_error(&err),
             };
@@ -268,9 +299,9 @@ fn run_run(args: RunArgs) -> ExitCode {
         }
         RepairKind::FeatureAddition => {
             let detector =
-                FeatureAdditionDetector::new(args.repo.clone(), SystemCommandRunner::new());
+                FeatureAdditionDetector::new(sandbox_root.clone(), SystemCommandRunner::new());
             let fix_generator =
-                match FeatureAdditionFixGenerator::new(args.repo.clone(), candidates) {
+                match FeatureAdditionFixGenerator::new(sandbox_root.clone(), candidates) {
                     Ok(generator) => generator,
                     Err(err) => return report_run_setup_error(&err),
                 };
@@ -297,8 +328,35 @@ fn run_run(args: RunArgs) -> ExitCode {
             eprintln!(
                 "self-repair run: --kind perf-regression は未対応です（#141/#142 のいずれも本種別を必要としないため未実装。out-of-scope-tracking.md 準拠で追跡要否をユーザーへ確認する）"
             );
-            ExitCode::from(1)
+            (ExitCode::from(1), None)
         }
+    };
+
+    // `LoopOutcome::Adopted` の場合のみ、検証済み差分を `--repo` の作業
+    // ツリーへ競合検査つきで反映する（`reflect_adopted_diff`。`sandbox.rs`
+    // モジュール冒頭ドキュメント参照）。非採用・エラー経路では `--repo` に
+    // 一切触れない（sandbox の自動削除〈`Drop`〉に任せる）。
+    if matches!(outcome, Some(LoopOutcome::Adopted)) {
+        match reflect_adopted_diff(&args.repo, &sandbox_root, &baseline_commit) {
+            Ok(()) => exit_code,
+            Err(message) => {
+                // 反映に失敗した sandbox は調査対象として残す（`Drop` の
+                // 自動削除を抑止する）。ログ・`--output` は既にループの
+                // 真の結果（Adopted）を記録済みだが、`--repo` への反映が
+                // できなかった以上、プロセス全体としては完了していない
+                // ため終了コードは内部エラー区分の 1 で上書きする
+                // （`docs/guardrail-self-repair-cli.md` 3.5 節「採用差分の
+                // 作業ツリー反映失敗」参照）。
+                eprintln!(
+                    "self-repair run: 採用された差分を --repo の作業ツリーへ反映できませんでした: {message}（調査用に sandbox を保持します: {}）",
+                    sandbox_root.display()
+                );
+                sandbox.keep();
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        exit_code
     }
 }
 
@@ -357,6 +415,11 @@ fn report_run_setup_error(err: &SelfRepairError) -> ExitCode {
 /// （`run_run` の `RepairKind::BugFix`／`RepairKind::FeatureAddition` 分岐が
 /// 共有する本体。`D`/`F` のみ型パラメータとし、`V`＝[`RepairCompositeGate`]・
 /// `J`＝[`GuardrailAdoptionJudge`] は種別非依存のため固定する）。
+///
+/// 戻り値の第 2 要素（`Option<LoopOutcome>`）は `run_run` が
+/// [`self_repair::sandbox::reflect_adopted_diff`] を呼ぶべきか（`Adopted` か
+/// どうか）を判定するために使う（`LoopFailure` の場合は `None`。段階の実行
+/// 自体が失敗しており採用判断に到達していないため）。
 #[allow(clippy::too_many_arguments)]
 fn execute_loop<D, F>(
     kind: RepairKind,
@@ -369,7 +432,7 @@ fn execute_loop<D, F>(
     output_path: Option<&Path>,
     evidence_sink: EvidenceSink,
     bench_measurement_sink: BenchMeasurementSink,
-) -> ExitCode
+) -> (ExitCode, Option<LoopOutcome>)
 where
     D: Detector,
     F: FixGenerator,
@@ -383,14 +446,18 @@ where
     );
 
     match self_repair_loop.run(kind) {
-        Ok(report) => finish_with_report(
-            &report,
-            log_path,
-            output_path,
-            evidence_sink.borrow().clone(),
-            bench_measurement_sink.borrow().clone(),
-        ),
-        Err(failure) => finish_with_failure(&failure, log_path, output_path),
+        Ok(report) => {
+            let outcome = report.outcome.clone();
+            let exit_code = finish_with_report(
+                &report,
+                log_path,
+                output_path,
+                evidence_sink.borrow().clone(),
+                bench_measurement_sink.borrow().clone(),
+            );
+            (exit_code, Some(outcome))
+        }
+        Err(failure) => (finish_with_failure(&failure, log_path, output_path), None),
     }
 }
 

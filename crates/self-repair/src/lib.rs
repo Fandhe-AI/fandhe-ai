@@ -97,6 +97,13 @@
 //!   [`logging::verify_chain`] を CLI から結線し、監査担当者が `cargo test`
 //!   経由でなく直接ログを検証できるようにする（`docs/guardrail-self-repair-cli.md`
 //!   3.2 節。詳細は `cli` モジュール冒頭ドキュメント参照）。
+//! - [`sandbox`][]: `self-repair run` CLI が `--repo` の実リポジトリを
+//!   直接汚さないための隔離 sandbox 機構（PR #361 codex-review P0 指摘対応）。
+//!   [`sandbox::RunSandbox::create`] が baseline commit の clone を構築し、
+//!   ループ全体（候補適用・4 ゲート検証・`git add -A` を含む）をその中で
+//!   完結させる。[`sandbox::reflect_adopted_diff`] は `Adopted` の場合のみ
+//!   競合検査つきで `--repo` へ差分を反映する（詳細は `sandbox` モジュール
+//!   冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -140,6 +147,7 @@ pub mod outcome;
 pub mod perf_regression;
 pub mod report;
 pub mod runner;
+pub mod sandbox;
 pub mod sha256;
 pub mod stages;
 pub mod verify_bench_direct;
@@ -162,6 +170,7 @@ pub use outcome::{AdoptionVerdict, LoopOutcome, VerifiedEvidence};
 pub use perf_regression::{BenchMeasurer, PerfRegressionDetector, PerfRegressionFixGenerator};
 pub use report::{LoopFailure, LoopReport};
 pub use runner::SelfRepairLoop;
+pub use sandbox::{RunSandbox, reflect_adopted_diff};
 pub use stages::{AdoptionJudge, Detector, FixGenerator, VerificationGate};
 pub use verify_composite::FeatureAdditionCompositeGate;
 pub use verify_direct_composite::{RepairCompositeGate, RepairCompositeGateSpec};

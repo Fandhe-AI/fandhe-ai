@@ -272,7 +272,7 @@ CLI 引数としては受理するが実行時未対応）。
 | 引数 | 型・既定値 | 説明 |
 |---|---|---|
 | `--kind <bug-fix\|perf-regression\|feature-addition>` | 必須 | 対象種別（v1 `RepairKind`: `BugFix`/`PerfRegression`/`FeatureAddition` を継承）。`perf-regression` は値としては受理するが `main.rs::run_run` が実行時未対応として内部エラー（exit 1）を返す（`PerfRegressionDetector`/`PerfRegressionFixGenerator` が他 2 種別と非対称な構築契約〈`BenchMeasurer`・戦略リスト〉を持ち、#141／#142 いずれも本種別を必要としないため。out-of-scope-tracking.md 準拠） |
-| `--repo <path>` | 既定 `.` | 対象リポジトリのルート。`RepairCompositeGateSpec` の `workspace`／`sandbox_root` 双方に使う |
+| `--repo <path>` | 既定 `.` | 対象リポジトリのルート。ループ全体（候補適用・4 ゲート検証・`git add -A` を含む）は `--repo` を `baseline_commit` の状態で `git clone --local` した隔離 sandbox（`self_repair::sandbox::RunSandbox`）内で完結し、`RepairCompositeGateSpec` の `workspace`／`sandbox_root` にはこの sandbox のパスを使う（`--repo` を直接渡さない）。`LoopOutcome::Adopted` の場合のみ、検証済み差分を `--repo` の作業ツリーへ競合検査つきで反映する（`self_repair::sandbox::reflect_adopted_diff`）。非採用・エラー経路では `--repo` の作業ツリー・index に一切触れない（PR #361 codex-review P0 指摘対応。`crates/self-repair/src/sandbox.rs` モジュール冒頭ドキュメント参照） |
 | `--max-attempts <N>` | 既定 `5`（`NonZeroU32` 制約。0 を許容しない） | 修正試行回数の上限。`docs/self-repair-revalidation-plan.md` §5 基準 3 の承認済み提案値をそのまま既定値として採用した |
 | `--log <path>` | 必須 | JSON Lines ログの出力先（3.3 節）。新規パスなら新規作成、既存パスなら
 末尾から `seq`/`hash` を復元して追記継続する（v1 `LogWriter::open` の
@@ -289,7 +289,7 @@ CLI 引数としては受理するが実行時未対応）。
 | `--candidates <path>` | 必須 | 事前生成済みの候補修正列（JSON）。3.1 節は候補生成手段を未定義のため #142 差し戻し分で新たに定めた: `[{"description": string, "files": [{"path": string, "content": string}]}]` 形式（`candidate::load_candidates_from_json`）。候補生成手段自体（AI 生成・人手作成）は本 CLI のスコープ外とし、事前に確定済みの候補列を受け取るのみとする |
 | `--bench-bin <name>` | 必須 | 候補 diff 直接ベンチ実測（`RepairCompositeGate`。TASK-3.2a・#137）が `cargo build --release --bin <name>` するワークロード bin 名 |
 | `--workload-source <path>` | 必須（複数指定可） | ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対）。1 回以上必須 |
-| `--policy-exclusion <path>` | 任意（既定 `<repo>/policy-exclusion.toml`） | REQ-5 除外ルール設定ファイル |
+| `--policy-exclusion <path>` | 任意（既定 `<sandbox>/policy-exclusion.toml`。上記 `--repo` の隔離 sandbox 直下） | REQ-5 除外ルール設定ファイル。明示指定時はそのパスをそのまま読む（sandbox 相対に読み替えない） |
 
 出力: 標準出力へのテキスト要約（既定）または `--output` 指定時は
 `LoopReport`／`LoopFailure` JSON（上表）＋ 3.3 節の追記専用 JSON Lines
@@ -371,10 +371,10 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 
 | 値 | 意味 |
 |---|---|
-| `0` | ループが自動適用で完走（最終 verdict = `auto_apply`。`LoopOutcome::Adopted`） |
+| `0` | ループが自動適用で完走（最終 verdict = `auto_apply`。`LoopOutcome::Adopted`）**かつ** 検証済み差分の `--repo` への反映（下記参照）も成功 |
 | `10` | エスカレーション（人間承認待ち。`LoopOutcome::Escalated`） |
 | `20` | 却下（`LoopOutcome::Rejected`） |
-| `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗） |
+| `1` | 内部エラー（`LoopFailure`。段階の実行自体が失敗）／隔離 sandbox の構築失敗／自動適用された差分の `--repo` への反映失敗（下記参照） |
 | `2` | usage エラー（`--kind` 欠落・不正値・`--log` 欠落・`--max-attempts 0`・未知引数等） |
 
 **`Exhausted`／`NoActionNeeded` の写像（イシュー #142 差し戻し分で追記）**:
@@ -385,8 +385,25 @@ self-repair の終了コードは guardrail の 3 分岐契約（2.3 節）と�
 するが、`Rejected`（3 ゲート・取り込み判断を経た明示的な却下）とは意味が
 異なるため既存の `20` へ丸めず、「完走（exit 0）していない」ことを明確にする
 ため内部エラー区分の **`1`** へ写像すると定める（`main.rs::
-exit_code_for_outcome` のみが行う写像。他の経路から `0` を返さない
-fail-closed 契約。`.claude/rules/security.md` A08）。
+exit_code_for_outcome` のみが行う `LoopOutcome` → 終了コードの基本写像。
+他の経路から `0` を返さない fail-closed 契約。`.claude/rules/security.md` A08）。
+
+**採用差分の `--repo` への反映失敗（PR #361 codex-review P0 指摘対応で追記）**:
+`run` は `--repo`（人間の作業リポジトリ）を直接検証対象にせず、`baseline_commit`
+の状態で `git clone --local` した隔離 sandbox（`self_repair::sandbox::RunSandbox`）
+内でループ全体（候補適用・4 ゲート検証・`git add -A` を含む）を完結させる
+（`--repo` を直接渡すと、非採用に終わった候補の変更が未コミットの作業
+ツリーへ残置され `git add -A` が無関係な変更まで staged にしてしまう問題が
+あったため。`crates/self-repair/src/sandbox.rs` モジュール冒頭ドキュメント
+参照）。`LoopOutcome::Adopted` の場合のみ、`self_repair::sandbox::
+reflect_adopted_diff` が sandbox の検証済み差分を `--repo` の作業ツリーへ
+`git apply --check` の競合検査つきで反映する。この反映が失敗した場合
+（`--repo` がダーティで sandbox の差分と競合する等）は `--repo` の作業ツリー
+へ一切触れず、`exit_code_for_outcome` が返した `0` を `1` へ上書きする
+（`--log`／`--output` はループの真の結果〈Adopted〉を記録済みのまま変更
+しない。反映失敗時の sandbox は削除せず標準エラー出力に記載されたパスへ
+保持する）。非採用（`Escalated`/`Rejected`）・内部エラー経路では反映処理
+自体を呼ばないため `--repo` に一切触れない。
 
 ### 3.6 骨格の移植スコープ
 
