@@ -342,3 +342,86 @@ fn case_b_workload_source_tampering_is_rejected_fail_closed() {
         "ベンチ実測段階のエラーであるはず: {message}"
     );
 }
+
+/// `relu` を「関数的には等価だが 10 倍の再計算を行う」実装へ置き換えた候補
+/// diff を組み立てる（Case C 専用。完走判定基準 5「候補 diff に対する直接
+/// 実測」の実証: baseline と候補で異なる計算量の実装を比較し、劣化率が
+/// 検出されることを確認するため）。`Relu.forward` の冪等性
+/// （`relu(relu(x)) == relu(x)`。負値は 0 のまま、非負値はそのまま通る）を
+/// 利用し、forward 値・勾配のいずれも変えずにテープのノード数のみを 10 倍に
+/// 増やす。これにより `relu_matches_known_values`／`sigmoid_matches_known_values`
+/// （`activations.rs` 自身の既知値テスト）と `leaky_relu_matches_known_values`
+/// （`leaky_relu` は `relu` の合成のため連鎖律の指示関数の積が単一の指示関数と
+/// 一致し、勾配も不変）はいずれも通過したまま、build/test/clippy 3 ゲートを
+/// 通過させつつ、候補 diff（`relu` の実装のみ）に固有の性能劣化を発生させる。
+fn slow_relu_candidate_content(baseline_with_leaky_relu: &str) -> String {
+    let original_relu_body = "pub fn relu<'t>(x: &Var<'t>) -> Var<'t> {\n    Relu.forward(x)\n}\n";
+    assert!(
+        baseline_with_leaky_relu.contains(original_relu_body),
+        "baseline の relu 実装が想定形式と異なる（fixture 更新時に本関数も更新すること）"
+    );
+    let slow_relu_body = "pub fn relu<'t>(x: &Var<'t>) -> Var<'t> {\n    \
+         // case_c（issue #137 統合テスト候補）: relu(relu(x)) == relu(x) の冪等性を\n    \
+         // 利用し、値・勾配を変えずにテープのノード数のみ 10 倍にする（候補固有の\n    \
+         // 性能劣化を意図的に注入する検証専用の実装）。\n    \
+         let mut out = Relu.forward(x);\n    \
+         for _ in 0..9 {\n        \
+         out = Relu.forward(&out);\n    \
+         }\n    \
+         out\n}\n";
+    baseline_with_leaky_relu.replacen(original_relu_body, slow_relu_body, 1)
+}
+
+/// Case C（候補固有の劣化検出。完走判定基準 5 対応）: baseline と候補で
+/// 異なる `relu` 実装（候補は関数的に等価だが 10 倍のノード数）を比較すると、
+/// `DirectBenchRunner`（候補 diff 直接実測）の中央値劣化率が
+/// `guardrail::Thresholds::builtin(PresetName::Default).bench_median_max_pct`
+/// （読み取るのみ・閾値は変更しない）を大きく超過することを確認する
+/// （実装計画 §5 Step 5 Case C・#139 reopen コメントの直接目的）。
+#[test]
+#[ignore = "release ビルド 2 系統（baseline worktree・candidate）＋ cargo build/test/clippy を \
+            実行するため長時間かかる。通常 CI ジョブでは実行しない。実行: \
+            cargo test -p self-repair --test verify_direct_composite_integration \
+            case_c -- --ignored --nocapture"]
+fn case_c_candidate_specific_slowdown_is_detected_by_direct_measurement() {
+    let (_guard, sandbox, baseline_commit) = build_sandbox("case-c");
+
+    let activations_path = sandbox.join("src/activations.rs");
+    let original_activations =
+        std::fs::read_to_string(&activations_path).expect("activations.rs 読み取り失敗");
+    let with_leaky_relu = leaky_relu_candidate_content(&original_activations);
+    let with_slow_relu = slow_relu_candidate_content(&with_leaky_relu);
+    std::fs::write(&activations_path, with_slow_relu).expect("activations.rs 書き込み失敗");
+
+    let gate = RepairCompositeGate::new(gate_spec(&sandbox, &baseline_commit));
+    let outcome = gate
+        .verify(&Proposal {
+            attempt: 1,
+            description: "case_c: relu with 10x redundant recomputation".to_string(),
+        })
+        .expect("verify 自体はエラーにならないはず（既知値テストは変わらず通過する）");
+
+    let VerificationOutcome::Passed(_) = outcome else {
+        panic!("Case C は build/test/clippy を通過し Passed になる想定（既知値は不変）");
+    };
+
+    let bench_sink = {
+        // `RepairCompositeGate` は `verify` 内で `last_bench_measurement` へ
+        // 書き込む（`evidence_sink`/`bench_measurement_sink` は `verify` 呼び出し
+        // 前に取得する契約だが、本テストは単発 `verify` のみのため事後取得でも
+        // 同じ `Rc` を経由して観測できる）。
+        gate.bench_measurement_sink()
+    };
+    let bench = bench_sink
+        .borrow()
+        .clone()
+        .expect("bench_measurement_sink に候補 diff 直接実測の結果が観測されているはず");
+
+    let thresholds = guardrail::Thresholds::builtin(guardrail::PresetName::Default);
+    assert!(
+        bench.bench_median_pct > thresholds.bench_median_max_pct,
+        "候補固有の 10 倍再計算は閾値（{}%）を大きく超える劣化率として検出される想定: 実測中央値={}%",
+        thresholds.bench_median_max_pct,
+        bench.bench_median_pct
+    );
+}
