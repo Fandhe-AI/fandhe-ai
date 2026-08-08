@@ -1058,9 +1058,19 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
         一覧・compat API 層（REQ-9）の想定表面には現れず、ライブラリ
         利用者向けの契約を広げない（`.claude/rules/coding-rust.md`
         「互換 API 層は自作コアの上の薄いラッパーに徹する」を侵さない）。
-        （`Materialized` なら `offset`／`shape`／`strides` を反映した
-        稠密コピーを返す。`Pending` なら `cache.get_or_init(...)` の
-        結果を `.clone()` して返す）。**戻り値は借用 `&[T]` ではなく
+        （`Materialized` は保持する `Vec<T>` を、`Pending` は
+        `cache.get_or_init(...)` で実体化したキャッシュ済み融合出力を、
+        それぞれ**呼び出し元 `Tensor` の基底ストレージ**として扱い、
+        いずれの場合も同一のビュー適用ロジックで呼び出し元 `Tensor` が
+        保持する `offset`／`shape`／`strides` を適用した稠密コピーを
+        返す。`Pending` を「キャッシュ済み融合出力全体をそのまま
+        `.clone()` して返す」旧稿の記述は誤りだった: transpose・
+        narrow・reshape は `Storage::Pending` を共有したまま `Tensor`
+        側の view メタデータのみを変更できる（下記「`offset`／
+        `shape`／`strides` のみを扱う view 系操作」参照）ため、
+        `Pending` を実体化する際に呼び出し元 `Tensor` のビューを
+        適用しなければ、view 演算後に元テンソル全体の値・形状が
+        返ってしまい正当性契約に反する。**戻り値は借用 `&[T]` ではなく
         所有 `Vec<T>` とする**: `Materialized` であっても strided
         （transpose・narrow 由来の非連続）view の場合は稠密化に新規
         `Vec` の確保が必要であり、既存の `as_slice()` が非連続入力に
@@ -1112,7 +1122,23 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
     読まないため、`Pending` のまま複製してよい（実体化を強制しない）。
     ただし §1 のとおり transpose 混在連鎖は非融合フォールバックへ倒す
     契約（`NodeMeta.contiguous == false`）のため、`FusionOp` へは組み
-    込まず実体化境界として扱う（§3.2 (e) と整合）。
+    込まず実体化境界として扱う（§3.2 (e) と整合）。**正当性契約
+    （codex-review 再指摘 P1 への回答。本改訂で明記）**: この
+    `Arc::clone` 経路は `Storage::Pending` 自体を複製するだけであり、
+    view 演算後の `Tensor` は複製元と同じ `Storage::Pending` を共有し
+    つつ `offset`／`shape`／`strides` だけが異なる状態になる。この
+    `Tensor` に対する `try_dense`（上記「`Materialized` は保持する
+    `Vec<T>` を…」の改訂契約）・VJP（`dense_vec` 経由）・後続の境界
+    演算はいずれも、
+    複製元テンソル全体ではなく複製後の `Tensor` が保持する
+    `offset`／`shape`／`strides` を適用した結果を受け取らなければ
+    ならない。`try_dense` を「基底ストレージ実体化＋呼び出し元ビュー
+    適用」という単一契約に統一した（上記改訂）のはこれを満たすためで
+    あり、`Pending` 側にだけ別のビュー無視経路が残らないようにする。
+    transpose・narrow・reshape を `Storage::Pending` 上に適用した後の
+    読み出し・VJP の正当性は、#164（ディスパッチ統合。`Storage::Pending`
+    実装）の実装に付随するテストとして #165（テスト）のスコープに
+    含める（§6.1 対応表に反映）。
 - **VJP・`Tape` 構造への影響の訂正（本改訂）**: `Tape` が記録する `Op`
   単位のノード粒度・`grad.rs::vjp` の走査対象（`Op` 列）自体には影響
   しない（§3.3 の契約を変更しない。ノードグラフの形は不変）。ただし
@@ -1227,8 +1253,8 @@ fan-out（1 つのノード出力が複数ノードから参照される）は `
 |---|---|
 | #162（連鎖検出） | §2（グラフ表現・ノード種別・メタデータ・fan-out）を用いた融合可能連鎖（elementwise のみで閉じた 4〜6 段の連結成分）の検出アルゴリズム |
 | #163（融合カーネル生成） | §2.4 の fan-out レジスタ内解決方針、§3.4 で確定した `FusionPlan::ops`（`FusedOpKind` 列挙）／`output_shape`／`dtype`／`leaf_count`／`use_count` の公開 DTO アクセサを読んだカーネルソース生成、§4・§5 の境界検査・数値一致・インジェクション対策 |
-| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針に基づく融合対応経路の実装、§3.2 の実体化条件・§3.4 の `FusionValue`／`FusionSession`／`BackendOps::run_fused` 接続契約（`Arc<Mutex<FusionGraph>>`・`Arc<dyn BackendOps + Send + Sync>` 所有モデル。`BackendOps` trait 定義自体は変更せず `Send + Sync` は融合機構の型注釈側でのみ課す）・§3.4 で確定した `Tape::with_backend(ops)` 新規公開コンストラクタと `eval::add`／`mul`／`relu`／`exp`／`tanh` への `ops: Option<Arc<dyn BackendOps + Send + Sync>>` 引数追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）・§3.5 の `Storage` への `OnceLock` ベース `Pending` バリアント追加と `autodiff::eval` 側の伝播ロジックの実装・§3.5「`Tape::backward` までの型契約」で確定した `AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む） |
-| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証 |
+| #164（ディスパッチ統合） | §1 の「利用者向け制御 API を提供しない」方針に基づく融合対応経路の実装、§3.2 の実体化条件・§3.4 の `FusionValue`／`FusionSession`／`BackendOps::run_fused` 接続契約（`Arc<Mutex<FusionGraph>>`・`Arc<dyn BackendOps + Send + Sync>` 所有モデル。`BackendOps` trait 定義自体は変更せず `Send + Sync` は融合機構の型注釈側でのみ課す）・§3.4 で確定した `Tape::with_backend(ops)` 新規公開コンストラクタと `eval::add`／`mul`／`relu`／`exp`／`tanh` への `ops: Option<Arc<dyn BackendOps + Send + Sync>>` 引数追加（＝ TASK-1.9 の backend 経由実行への置き換えと同時実施）・§3.5 の `Storage` への `OnceLock` ベース `Pending` バリアント追加と `autodiff::eval` 側の伝播ロジックの実装（§3.5「`Materialized` は保持する `Vec<T>` を…」で確定した `try_dense` の「基底ストレージ実体化＋呼び出し元ビュー適用」契約を含む）・§3.5「`Tape::backward` までの型契約」で確定した `AutodiffError::Backend(BackendError)` variant と `From<BackendError>` 実装の追加（`Display` アーム追加を含む） |
+| #165（テスト） | §1・§2.3 の transpose 非融合フォールバック、§2.4 の fan-out 融合、§3.3 の autodiff 契約（VJP がノード単位のまま変わらないこと）の検証、§3.5「正当性契約（codex-review 再指摘 P1 への回答）」で明記した transpose・narrow・reshape を `Storage::Pending` 上に適用した後の `try_dense`／VJP／後続の境界演算が元テンソル全体ではなく view 適用後の値・形状を返すことの検証 |
 | #203（GEMM epilogue 融合） | §3.2 (b) の `gemm` 境界を bias／activation epilogue まで拡張する設計変更 |
 
 ### 6.2 未決事項（スコープ外）
