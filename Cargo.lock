@@ -101,6 +101,8 @@ name = "bench-harness"
 version = "0.3.0"
 dependencies = [
  "backend-cpu",
+ "backend-cuda",
+ "backend-metal",
  "criterion",
  "cudarc",
  "half",
