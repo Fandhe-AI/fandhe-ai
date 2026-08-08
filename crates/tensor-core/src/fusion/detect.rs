@@ -326,8 +326,20 @@ mod tests {
 
     /// PoC-9 `ew_fanout` 相当: `a = x + y; b = a * a; c = b + x; d = relu(c)`。
     /// fan-out（a が 2 回参照される）は融合不能条件にしない
-    /// （設計書 §2.4）。[`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう
-    /// `relu(c)` を末尾に追加している。
+    /// （設計書 §2.4）。`d = relu(c)` はテストのための水増しではなく、
+    /// `docs/spec/03-poc/poc-9-kernel-fusion/README.md:46` が定義する
+    /// `ew_fanout` パターン本体（`a=x+y; b=a*a; c=b+x; sigmoid(c)`）の
+    /// 4 段目 `sigmoid(c)` に対応する（`FusionOp` は `Sigmoid` を
+    /// 持たないため、同じく非 fallible な単項 elementwise 演算である
+    /// `Relu` で代替する）。設計書 §2.4 の引用（`a = x + y; b = a * a;
+    /// c = b + x` まで）は「`a` が 2 回消費される」点を説明するための
+    /// 省略引用であり、実際の PoC-9 パターン自体が既に 4 段構成である
+    /// ため、本テストは [`MIN_FUSED_CHAIN_LEN`] の初期スコープ内に
+    /// 収まる（#399 codex-review 指摘への回答、Bugbot 指摘への回答:
+    /// 3 段版 `Add→Mul→Add` を融合対象にする設計要求は存在しない。
+    /// その反例テストは
+    /// [`three_stage_fanout_chain_falls_back_below_minimum_length`] を
+    /// 参照）。
     #[test]
     fn fanout_chain_is_detected_as_single_segment_with_correct_use_count() {
         let mut g = FusionGraph::new();
@@ -352,11 +364,43 @@ mod tests {
         assert_eq!(seg.leaves, vec![x, y]);
     }
 
+    /// Bugbot 指摘（PR #399 review thread）への直接の回答: 設計書 §2.4 の
+    /// `a = x + y; b = a * a; c = b + x`（`sigmoid(c)` を含まない省略
+    /// 引用）をそのまま 3 段の `Add→Mul→Add` として構成した場合は
+    /// [`MIN_FUSED_CHAIN_LEN`]（4）未満であり非融合フォールバックとなる
+    /// ことを明示的に固定する。これは回帰ではなく、TASK-12.1 の内容規定
+    /// 「elementwise 演算連鎖（4〜6 段程度）を初期スコープとする」
+    /// （`docs/spec/05-tasks.md:370`・`docs/fusion-graph-design.md:15`）
+    /// の下限側そのものである。実際の PoC-9 `ew_fanout` パターン本体は
+    /// `docs/spec/03-poc/poc-9-kernel-fusion/README.md:46` のとおり
+    /// `sigmoid(c)` を含む 4 段構成であり、
+    /// [`fanout_chain_is_detected_as_single_segment_with_correct_use_count`]
+    /// がその 4 段版（`Relu` で `Sigmoid` 代替）を融合可能として検証済み
+    /// のため、3 段版が非融合になっても設計上要求されるパターンの取りこぼしにはならない。
+    #[test]
+    fn three_stage_fanout_chain_falls_back_below_minimum_length() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[8])).unwrap();
+        let y = g.push(FusionOp::Input, f32_meta(&[8])).unwrap();
+        let a = g.push(FusionOp::Add(x, y), f32_meta(&[8])).unwrap();
+        let b = g.push(FusionOp::Mul(a, a), f32_meta(&[8])).unwrap();
+        let c = g.push(FusionOp::Add(b, x), f32_meta(&[8])).unwrap();
+
+        let decision = detect_fusion(&g, c).unwrap();
+        assert_eq!(
+            decision,
+            FusionDecision::Fallback(FallbackReason::ChainTooShort)
+        );
+    }
+
     /// fan-in: `(a + b) * (c + d)` 形の合流が単一セグメントとして検出
     /// される（`FusionGraph` は DAG 一般をサポートするため fan-in も
     /// 通常ケース。設計書 §6.2「同一テープ内での遅延グラフの合流は
-    /// 正規サポート対象」）。[`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう
-    /// `relu(root)` を末尾に追加している。
+    /// 正規サポート対象」）。elementwise 連鎖の初期スコープ（4〜6 段。
+    /// `docs/fusion-graph-design.md:15`・`docs/spec/05-tasks.md:370`
+    /// TASK-12.1）に収まる構成にするため `relu(root)` を末尾に追加して
+    /// いる（[`MIN_FUSED_CHAIN_LEN`] を満たすための水増しではなく、
+    /// スコープ内の代表例として構成している）。
     #[test]
     fn fanin_confluence_is_detected_as_single_segment() {
         let mut g = FusionGraph::new();
@@ -435,8 +479,10 @@ mod tests {
     }
 
     /// PoC-9 `ew_matmul_ew` 相当: Gemm 境界でセグメントが分断される
-    /// （設計書 §3.2 (b)）。[`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう
-    /// `tanh`／2 個目の `relu` を末尾に追加している。
+    /// （設計書 §3.2 (b)）。elementwise 連鎖の初期スコープ（4〜6 段。
+    /// `docs/fusion-graph-design.md:15`・`docs/spec/05-tasks.md:370`
+    /// TASK-12.1）に収まる構成にするため `tanh`／2 個目の `relu` を
+    /// 末尾に追加している。
     #[test]
     fn gemm_boundary_splits_the_segment() {
         let mut g = FusionGraph::new();
@@ -458,7 +504,9 @@ mod tests {
     }
 
     /// Sum／Max 境界も同様にセグメントを分断する（設計書 §3.2 (a)）。
-    /// [`MIN_FUSED_CHAIN_LEN`]（4）を満たすよう sum 側のセグメントに
+    /// elementwise 連鎖の初期スコープ（4〜6 段。
+    /// `docs/fusion-graph-design.md:15`・`docs/spec/05-tasks.md:370`
+    /// TASK-12.1）に収まる構成にするため sum 側のセグメントに
     /// `relu2`／`tanh2` を追加している。
     #[test]
     fn sum_and_max_boundary_split_the_segment() {
