@@ -288,13 +288,36 @@ v1（`tools/self-repair/`）は lib クレートのみで CLI バイナリを持
 | 引数 | 型・既定値 | 説明 |
 |---|---|---|
 | `--log <path>` | 必須 | 検証対象の JSON Lines ログ |
+| `--allow-empty-log` | 任意フラグ（既定 false） | レコード 0 件（空ログ）を明示的に許容する。指定なしでは空ログを検証不合格（exit 1）として扱う（PR #356 codex-review P1 指摘対応。下表参照） |
 
 ハッシュチェーンの整合性検証（改竄検知）を行う。v1 の
 `docs/self-repair-log-format.md`（TASK-3.2-S2）6 節が定める `verify_chain`
 相当の検証を、v1 では持たなかった CLI エントリポイントとして新設する
 （`.claude/rules/security.md`「ループ試行ログは改竄検知可能な形式で記録し、
 取り込み判断の根拠を追跡可能にする」への対応。ログを事後監査する担当者が
-`cargo test` 経由でなく直接検証できる手段を提供する）。
+`cargo test` 経由でなく直接検証できる手段を提供する）。**実装済み**
+（イシュー #145 差し戻し分・完走判定基準 4。`crates/self-repair/src/main.rs`・
+`crates/self-repair/src/cli.rs`）。検証ロジック本体は既存の
+`crates/self-repair/src/logging.rs` の `verify_chain` の単一実装を CLI から
+呼ぶのみとし、二重実装・迂回経路を作らない（`.claude/rules/security.md` A08）。
+
+#### 終了コード（`verify-log`）
+
+3.5 節は `run` の 3 分岐契約（0/10/20/1）であり `verify-log` には verdict が
+ないため、guardrail の usage エラー区分（2.3 節）と整合する以下の契約を
+別途定める:
+
+| 値 | 意味 |
+|---|---|
+| `0` | チェーン整合（改竄なし）。標準出力にレコード件数・最終 `seq`・最終 `hash` を含む `OK:` メッセージを出す（監査担当者が外部アンカー運用・`docs/self-repair-log-format.md` 7 節と突合できるようにするため。Review #145 指摘対応）。レコード 0 件（空ログ・末尾切り詰めのいずれか区別不能）の場合は `--allow-empty-log` を明示指定したときのみ同じ `0` のまま `OK:` ではなく `WARN:` メッセージに変える（未指定時は下段の `1` を参照） |
+| `1` | 検証不合格（`LogError::ChainViolation` = 改竄・欠落検知）・内部エラー（I/O・パース失敗）・`--allow-empty-log` 未指定でのレコード 0 件検知（PR #356 codex-review P1 指摘対応: 終了コードのみを見る監査自動化がログ全削除による改竄を「検証成功」として見逃す経路を塞ぐため、既定を fail-closed に変更）。fail-closed: 読めないログ・壊れたログも一律に非 0 とする |
+| `2` | usage エラー（`--log` 欠落・未知引数） |
+
+非 UTF-8 の `--log` パス（ファイルシステム上は有効だが OS 文字列として
+UTF-8 でない値）を渡しても panic（exit 101）しないこと。CLI 引数は
+`std::env::args_os()` ベースで受け取り、サブコマンド名・フラグ名のみを
+UTF-8 として検証する（`--log` の値自体は検証しない。PR #356 codex-review
+P1 指摘対応。`crates/self-repair/src/cli.rs` モジュール冒頭ドキュメント参照）。
 
 ### 3.3 ログ出力形式
 
