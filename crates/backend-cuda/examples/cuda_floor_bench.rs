@@ -122,17 +122,35 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
 /// な場合は `CudaGemm::run_wmma_tf32` 内部で基本版 WMMA(TF32) へ自動
 /// フォールバックする。`gemm.rs::run_wmma_tf32` 冒頭ドキュメンテーション
 /// コメント「TASK-11.1d（#63）フォールバック方針」参照）。
-fn measure_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
+///
+/// `CudaGemm::new` の成功は tiled/naive カーネルの準備のみを保証し、
+/// WMMA(TF32)（opt・基本版とも）はオプションである。`run_wmma_tf32` 呼び出し
+/// 時に `CudaError::WmmaUnavailable`（cc<8.0 や `mma.h` 非搭載環境で両方
+/// 使用不能）として表面化しうるほか、opt 版使用時は形状検証・カーネル
+/// 起動由来の他エラーも起こりうる（`gemm.rs::run_wmma_tf32` L594-598・
+/// L641-645 参照）。エラー種別を区別せず panic させると動作している tiled
+/// 計測結果まで失われるため、まず 1 回 probe 実行しエラー時は本計測を
+/// 行わず `None` を返してこの経路のみ skip する（PR #349 Bugbot 指摘
+/// High「WMMA path panics on skip」対応。呼び出し側 `main` は
+/// `Option::and_then` で受け、tiled 側の出力は継続する）。
+fn measure_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> Option<f64> {
     let mut rng = Xorshift64Star::new(SEED);
     let a = rng.fill_vec(size * size);
     let b = rng.fill_vec(size * size);
 
+    if let Err(e) = gemm.run_wmma_tf32(&a, &b, size as u32, size as u32, size as u32) {
+        println!("WMMA(TF32) unavailable for size={size} ({e}); wmma_tf32 skipped for this size.");
+        return None;
+    }
+
     let measurement = bench_run(config, || {
         gemm.run_wmma_tf32(&a, &b, size as u32, size as u32, size as u32)
-            .expect("WMMA(TF32) GEMM must succeed on CUDA-equipped runner");
+            .expect(
+                "WMMA(TF32) GEMM must succeed on CUDA-equipped runner (availability probed above)",
+            );
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    tflops(size, measurement.median_secs)
+    Some(tflops(size, measurement.median_secs))
 }
 
 fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig) -> f64 {
@@ -273,9 +291,14 @@ fn main() {
         let tiled = tiled_gemm
             .as_ref()
             .map(|g| measure_tiled_f32(g, size, &config));
+        // `measure_wmma_tf32` は `CudaError::WmmaUnavailable`（cc<8.0 や
+        // `mma.h` 非搭載環境）を probe した場合 `None` を返す（`and_then`
+        // でネストした `Option<Option<f64>>` を平坦化する。上記
+        // `measure_wmma_tf32` ドキュメンテーションコメント参照。PR #349
+        // Bugbot 指摘 High 対応）。
         let wmma_tf32 = tiled_gemm
             .as_ref()
-            .map(|g| measure_wmma_tf32(g, size, &config));
+            .and_then(|g| measure_wmma_tf32(g, size, &config));
         let wmma_f16 = wmma_gemm
             .as_ref()
             .map(|g| measure_wmma_f16(g, size, &config));
