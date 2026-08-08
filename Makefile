@@ -272,25 +272,30 @@ endif
 # `BACKEND=cuda`／`BACKEND=metal`（実機限定）で切り替える）。
 BACKEND ?= cpu
 TRIALS ?= 5
-.PHONY: startup-bench
-startup-bench: ## プロセス起動コスト計測を実行する（既定 CPU。BACKEND=cuda|metal で切替）
-# BACKEND・TRIALS は make 変数展開でレシピへ直接埋め込まれるため、シェル解釈前の
-# テキスト置換段階で `BACKEND='cpu; <任意コマンド> #'` のような値を渡されるとコマンド注入が
-# 成立しうる（PR #360 codex-review P1 指摘）。ここで許可リスト（cpu|cuda|metal）／数値のみを
-# 検証したうえで、cargo 呼び出し側も二重引用符でシェル引数として単一トークン化する
+# BACKEND・TRIALS を `export` して環境変数として子シェルへ渡す。make の `$(VAR)` 展開は
+# レシピ本文へのテキスト置換であり、値に `"` や改行・`;` 等のシェル構文を含めると
+# 二重引用符で囲んでも引用符を閉じられてしまいコマンド注入が成立する（PR #360
+# codex-review P1 指摘。二重引用符化だけでは防げない）。環境変数は execve の環境ブロック
+# 経由でシェルへ渡るため、テキスト置換段階を経由せず値がレシピの再解釈対象にならない。
+# レシピ側では `$$BACKEND`／`$$TRIALS`（シェル変数参照）でのみ読み、許可リスト
+# （cpu|cuda|metal）／数値のみを検証したうえで cargo 呼び出しへ二重引用符で渡す
 # （StartupBackend::parse 側の許可リスト検証はプロセス起動後の防御であり、
 # シェル注入そのものはレシピ側で防ぐ必要がある）。
+export BACKEND
+export TRIALS
+.PHONY: startup-bench
+startup-bench: ## プロセス起動コスト計測を実行する（既定 CPU。BACKEND=cuda|metal で切替）
 ifdef HAS_CARGO
-	@case "$(BACKEND)" in \
+	@case "$$BACKEND" in \
 		cpu|cuda|metal) ;; \
-		*) echo "BACKEND は cpu|cuda|metal のいずれかを指定する（指定値: $(BACKEND)）" >&2; exit 1 ;; \
+		*) echo "BACKEND は cpu|cuda|metal のいずれかを指定する（指定値: $$BACKEND）" >&2; exit 1 ;; \
 	esac
-	@case "$(TRIALS)" in \
-		''|*[!0-9]*) echo "TRIALS は数値を指定する（指定値: $(TRIALS)）" >&2; exit 1 ;; \
+	@case "$$TRIALS" in \
+		''|*[!0-9]*) echo "TRIALS は数値を指定する（指定値: $$TRIALS）" >&2; exit 1 ;; \
 		*) ;; \
 	esac
 	cargo build -p bench-harness --release --bins
-	cargo run -p bench-harness --release --bin startup_bench -- --backend "$(BACKEND)" --trials "$(TRIALS)"
+	cargo run -p bench-harness --release --bin startup_bench -- --backend "$$BACKEND" --trials "$$TRIALS"
 else
 	@echo "skip: Cargo.toml 未追加のため startup-bench をスキップ"
 endif
