@@ -31,7 +31,22 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# PR #359 codex-review 指摘 P1: TASK-14.1a（#174）で `backend-cpu::CpuMemory`
+# の公開 API を破壊的変更（unit struct・Copy → フィールド付き struct・Clone。
+# `crates/backend-cpu/src/lib.rs` の移行手引き参照）したため、Cargo SemVer の
+# 0.x 系ルール（0.x では breaking change は minor 桁を上げる）に従い
+# 0.1.0 → 0.2.0 とする。ワークスペース全 9 クレートが `version.workspace = true`
+# を参照するため足並みを揃える（各クレート間の内部依存はいずれも
+# バージョン指定なしの `path = ...` のため、本バンプ自体は他クレートの
+# 依存解決に影響しない）。
+#
+# PR #362 codex-review 指摘 P1: TASK-#201 で `tensor-core::BufferHandle`
+# （公開 trait）に必須メソッド `as_any_mut` を追加したのも同様に SemVer 上の
+# 破壊的変更（既定実装を用意しコンパイル breakage 自体は回避したが、
+# 既定実装のままだとプール経由利用時に panic するため利用者へ告知が必要。
+# `crates/tensor-core/src/buffer.rs::BufferHandle::as_any_mut` のドキュメント
+# コメント参照）。0.x 系ルールに従い 0.2.0 → 0.3.0 とする。
+version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false

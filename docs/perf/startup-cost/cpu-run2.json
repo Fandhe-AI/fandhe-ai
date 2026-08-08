@@ -1,0 +1,95 @@
+[{
+  "schema_version": "1",
+  "backend": "cpu",
+  "phase": "cold",
+  "trials": 5,
+  "wall_secs": {
+    "median": 0.003022928,
+    "q1": 0.00253025,
+    "q3": 0.003223738
+  },
+  "device_init_secs": {
+    "median": 0.000404876,
+    "q1": 0.000326506,
+    "q3": 0.000490687
+  },
+  "first_kernel_secs": {
+    "median": 0.00206487,
+    "q1": 0.001886798,
+    "q3": 0.002191544
+  },
+  "samples": [
+    {
+      "wall_secs": 0.003223738,
+      "device_init_secs": 0.000490687,
+      "first_kernel_secs": 0.00206487
+    },
+    {
+      "wall_secs": 0.00253025,
+      "device_init_secs": 0.000326506,
+      "first_kernel_secs": 0.001886798
+    },
+    {
+      "wall_secs": 0.002478028,
+      "device_init_secs": 0.000312378,
+      "first_kernel_secs": 0.00182726
+    },
+    {
+      "wall_secs": 0.003552784,
+      "device_init_secs": 0.000559865,
+      "first_kernel_secs": 0.002419009
+    },
+    {
+      "wall_secs": 0.003022928,
+      "device_init_secs": 0.000404876,
+      "first_kernel_secs": 0.002191544
+    }
+  ]
+},{
+  "schema_version": "1",
+  "backend": "cpu",
+  "phase": "warm",
+  "trials": 5,
+  "wall_secs": {
+    "median": 0.003299705,
+    "q1": 0.002604967,
+    "q3": 0.003453114
+  },
+  "device_init_secs": {
+    "median": 0.000555998,
+    "q1": 0.000406649,
+    "q3": 0.000559421
+  },
+  "first_kernel_secs": {
+    "median": 0.002274152,
+    "q1": 0.001872214,
+    "q3": 0.002419311
+  },
+  "samples": [
+    {
+      "wall_secs": 0.002604967,
+      "device_init_secs": 0.000406649,
+      "first_kernel_secs": 0.001795191
+    },
+    {
+      "wall_secs": 0.003453114,
+      "device_init_secs": 0.00056027,
+      "first_kernel_secs": 0.002419311
+    },
+    {
+      "wall_secs": 0.003299705,
+      "device_init_secs": 0.000555998,
+      "first_kernel_secs": 0.002274152
+    },
+    {
+      "wall_secs": 0.002523501,
+      "device_init_secs": 0.000314595,
+      "first_kernel_secs": 0.001872214
+    },
+    {
+      "wall_secs": 0.00378455,
+      "device_init_secs": 0.000559421,
+      "first_kernel_secs": 0.002719841
+    }
+  ]
+}]

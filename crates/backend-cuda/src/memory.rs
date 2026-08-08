@@ -20,6 +20,7 @@
 //! 一本化方針）。
 
 use std::any::Any;
+use std::mem::size_of;
 use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream};
@@ -29,6 +30,8 @@ use crate::error::CudaError;
 use tensor_core::Tensor;
 use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 use tensor_core::device::{BackendError, Device};
+use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
+use tensor_core::pool::PoolZeroFill;
 
 /// CUDA バッファの具体ハンドル。
 ///
@@ -37,13 +40,31 @@ use tensor_core::device::{BackendError, Device};
 /// （一部環境の driver は 0 バイト確保を拒否する。`gemm.rs` の `k == 0`
 /// 早期 return コメントと同じ理由）。`CudaSlice<T>` は `#[derive(Debug)]`
 /// されているため本型も `Debug` を導出できる。
+///
+/// `_alloc`（[`TrackedAllocation`]）は TASK-14.1b（#175）で追加した。
+/// `slice` より後に宣言しているため、フィールドは宣言順に drop される
+/// Rust の規則により `slice`（`CudaSlice::drop` が `cuMemFreeAsync`／
+/// `cuMemFree` をストリーム上で発行する。モジュール冒頭コメント「解放は
+/// `CudaSlice` の `Drop` に一本化する」参照）の後に `_alloc` が drop
+/// される。`TrackedAllocation::drop` は `slice` の中身を参照せず、確保時に
+/// 記録したバイト数を `AllocationTracker` へ返すだけ（`backend-cpu::
+/// CpuBufferHandle` の `_alloc` と同型のコメント。`memory_stats.rs`
+/// モジュールコメント「トラッカーの共有範囲」参照）であるため、
+/// `cuMemFreeAsync` の実処理が非同期であっても計測上の問題にはならない
+/// （計測は「ハンドル Drop 時点の論理解放」を数える。CPU と同一の
+/// 「確保済みバイト数」セマンティクス）。
 #[derive(Debug)]
 struct CudaBufferHandle {
     slice: Option<CudaSlice<f32>>,
+    _alloc: TrackedAllocation,
 }
 
 impl BufferHandle for CudaBufferHandle {
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
@@ -52,21 +73,64 @@ impl BufferHandle for CudaBufferHandle {
 /// ハンドルからのみ構築できる（受け入れ条件「CUDA 非搭載環境で実行時に
 /// panic せず型付きエラーが返る」を、確保・転送呼び出し前の構築段階から
 /// 一貫させるため）。
+///
+/// `tracker`（TASK-14.1b・#175）は `Arc` で共有されるため `Clone` は
+/// 「同一計測系列への参照複製」を意味する（`backend-cpu::CpuMemory` の
+/// `Clone` doc コメントと同型の契約）。`stream`（`Arc<CudaStream>`）・
+/// `ordinal`（`usize`）はいずれも安価に複製できるため、`derive(Clone)`
+/// で構造体全体を複製しても新たな driver リソースは確保されない。
+#[derive(Clone)]
 pub struct CudaMemory {
     stream: Arc<CudaStream>,
     ordinal: usize,
+    tracker: Arc<AllocationTracker>,
 }
 
 impl CudaMemory {
     /// 初期化済みの [`CudaDevice`] から `CudaMemory` を構築する。
     /// `device.stream()` を `Arc` クローンで共有する（`gemm.rs::CudaGemm::new`
-    /// と同じ共有契約）。
+    /// と同じ共有契約）。新規の計測系列を持つトラッカーを生成する
+    /// （`backend-cpu::CpuMemory::new` と同型。同一プロセス内でピークを
+    /// 集約したい場合は `clone()` でトラッカーを共有する）。
     pub fn new(device: &CudaDevice) -> Self {
         Self {
             stream: device.stream().clone(),
             ordinal: device.ordinal(),
+            tracker: Arc::new(AllocationTracker::new()),
         }
     }
+}
+
+/// [`MemoryStats`] の CUDA 実装（TASK-14.1b・#175）。`backend-cpu::
+/// CpuMemory` と同一シグネチャで `tracker` へ委譲する。REQ-14 の受け入れ
+/// 条件（CPU/CUDA/Metal で同一 API からピーク値が取得できる）を満たす。
+impl MemoryStats for CudaMemory {
+    fn allocated_bytes(&self) -> u64 {
+        self.tracker.allocated_bytes()
+    }
+
+    fn peak_allocated_bytes(&self) -> u64 {
+        self.tracker.peak_allocated_bytes()
+    }
+
+    fn reset_peak(&self) {
+        self.tracker.reset_peak();
+    }
+}
+
+/// `numel` 分の `f32` 確保が消費するバイト数を検査付きで計算する
+/// （TASK-14.1b・#175。`backend-cpu::memory::checked_byte_len` と同型の
+/// checked 乗算。`checked_numel` の後段検証として配置する。外部由来の
+/// shape がこの経路へ流入しうるための OWASP A03 対策）。計測専用の
+/// ヘルパーであり、確保サイズ自体は `checked_numel`／`cudarc` 側の検証を
+/// 経由済みのため、本関数はオーバーフロー時のみ `CudaError` を返す。
+fn checked_byte_len(numel: usize) -> Result<u64, CudaError> {
+    let bytes = numel
+        .checked_mul(size_of::<f32>())
+        .ok_or_else(|| CudaError::InvalidShape {
+            detail: format!("allocation byte length overflows usize: numel={numel}"),
+        })?;
+    Ok(bytes as u64)
 }
 
 /// shape の要素数積を検査付きで計算する（`gemm.rs::validate_gemm_dims` と
@@ -123,13 +187,29 @@ fn map_cuda_alloc_error(err: CudaError) -> BackendError {
 impl CudaMemory {
     fn alloc_zeroed_inner(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, CudaError> {
         let numel = checked_numel(shape)?;
+        // 計測（`TrackedAllocation::new`）は確保成功後に行う。確保が
+        // 失敗しうる `?` の前でカウントすると、失敗した確保が一時的に
+        // ピークへ計上されてしまう（`backend-cpu::CpuMemory` と同じ順序
+        // 契約。TASK-14.1b・#175）。
         let handle: Box<dyn BufferHandle> = if numel == 0 {
             // 空テンソルの契約（`tensor_core::buffer` モジュールコメント）:
-            // FFI を呼ばず空ハンドルを返す。
-            Box::new(CudaBufferHandle { slice: None })
+            // FFI を呼ばず空ハンドルを返す。0 バイトの `TrackedAllocation`
+            // は current・peak いずれも変化させない no-op（`memory_stats`
+            // モジュールコメント参照）だが、他バックエンドと契約を対称に
+            // 保つため明示的に保持する。
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
+            Box::new(CudaBufferHandle {
+                slice: None,
+                _alloc: alloc,
+            })
         } else {
             let slice = self.stream.alloc_zeros::<f32>(numel)?;
-            Box::new(CudaBufferHandle { slice: Some(slice) })
+            let bytes = checked_byte_len(numel)?;
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+            Box::new(CudaBufferHandle {
+                slice: Some(slice),
+                _alloc: alloc,
+            })
         };
         Ok(DeviceBuffer::new(
             Device::Cuda(self.ordinal),
@@ -141,7 +221,11 @@ impl CudaMemory {
     fn upload_inner(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, CudaError> {
         let shape = tensor.shape().to_vec();
         if tensor.numel() == 0 {
-            let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle { slice: None });
+            let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
+            let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                slice: None,
+                _alloc: alloc,
+            });
             return Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle));
         }
         // 非 contiguous な入力は実体化してから転送する（`MemoryOps::upload`
@@ -155,7 +239,12 @@ impl CudaMemory {
                     .to_string(),
             })?;
         let slice = self.stream.clone_htod(data)?;
-        let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle { slice: Some(slice) });
+        let bytes = checked_byte_len(data.len())?;
+        let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), bytes);
+        let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+            slice: Some(slice),
+            _alloc: alloc,
+        });
         Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle))
     }
 
@@ -221,6 +310,35 @@ impl MemoryOps for CudaMemory {
             return Err(BackendError::DeviceMismatch);
         }
         self.download_inner(buffer).map_err(map_cuda_error)
+    }
+}
+
+/// `tensor_core::pool::PooledMemory<CudaMemory>`（TASK-#201・REQ-14 14-3）
+/// が再利用バッファを返す前に呼ぶゼロ初期化フック。プール保持中も
+/// `CudaBufferHandle::_alloc`（`TrackedAllocation`）は生存し続けるため、
+/// 「返却されたが未解放のバッファ」も `allocated_bytes()` に自然に計上
+/// され続ける（リークではなく意図した挙動。`tensor_core::pool` モジュール
+/// の `MemoryStats for PooledMemory<M>` 転送実装〈`pool.rs`〉参照）。
+/// 実機でのピーク計測の裏取りは TASK-14.2（#177）で実施する。
+/// `CudaStream::memset_zeros`（`cudarc-0.19.8/src/driver/safe/core.rs`）で
+/// デバイス側のメモリを直接ゼロクリアする（ホスト往復なし。`alloc_zeros`
+/// と同じストリーム上の非同期メモリ操作）。
+impl PoolZeroFill for CudaMemory {
+    fn zero_fill(&self, handle: &mut dyn BufferHandle) -> Result<(), BackendError> {
+        let Some(cuda_handle) = handle.as_any_mut().downcast_mut::<CudaBufferHandle>() else {
+            return Err(BackendError::DeviceMismatch);
+        };
+        // 空ハンドル（`numel == 0`）は `pool.rs::PooledMemory::alloc_zeroed`
+        // が空テンソル契約によりそもそもプールを介さない経路で扱うため
+        // 到達しない想定だが、`CudaBufferHandle::slice` が `None` の場合に
+        // 備えて no-op として安全に振る舞う（`buffer.rs` モジュールコメント
+        // 「空テンソルの契約」と同じ扱い）。
+        let Some(slice) = cuda_handle.slice.as_mut() else {
+            return Ok(());
+        };
+        self.stream
+            .memset_zeros(slice)
+            .map_err(|e| BackendError::DeviceAllocationFailed(format!("{e:?}")))
     }
 }
 
@@ -307,7 +425,11 @@ mod tests {
                 // `mem.ordinal` とは異なる ordinal を持つバッファを構築する
                 // （実機の ordinal が 0 の場合を考慮し 0 以外を採用）。
                 let other_ordinal = mem.ordinal + 1;
-                let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle { slice: None });
+                let alloc = TrackedAllocation::new(Arc::clone(&mem.tracker), 0);
+                let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
+                    slice: None,
+                    _alloc: alloc,
+                });
                 let buffer: DeviceBuffer<f32> =
                     DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
                 let err = mem.download(&buffer).unwrap_err();
@@ -331,5 +453,31 @@ mod tests {
     fn checked_numel_accepts_ordinary_shape() {
         assert_eq!(checked_numel(&[2, 3, 4]).unwrap(), 24);
         assert_eq!(checked_numel(&[0, 3]).unwrap(), 0);
+    }
+
+    #[test]
+    fn checked_byte_len_rejects_overflow() {
+        let err = checked_byte_len(usize::MAX).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    #[test]
+    fn checked_byte_len_accepts_ordinary_numel() {
+        assert_eq!(checked_byte_len(1024).unwrap(), 4096);
+        assert_eq!(checked_byte_len(0).unwrap(), 0);
+    }
+
+    /// コンパイル時の静的検査。`fn(): T where T: MemoryStats` が
+    /// `CudaMemory`／`PooledMemory<CudaMemory>` に対して呼び出せること
+    /// 自体が、「CPU/CUDA/Metal で同一 API（同一シグネチャの trait）から
+    /// ピーク値が取得できる」という REQ-14 の受け入れ条件を Linux
+    /// self-hosted CI（実機非搭載）でも機械検証する（TASK-14.1b・#175。
+    /// 実機でのピーク実測は TASK-14.2・#177 で裏取りする）。
+    fn assert_memory_stats<T: MemoryStats>() {}
+
+    #[test]
+    fn cuda_memory_and_pooled_cuda_memory_implement_memory_stats() {
+        assert_memory_stats::<CudaMemory>();
+        assert_memory_stats::<tensor_core::pool::PooledMemory<CudaMemory>>();
     }
 }

@@ -53,6 +53,7 @@ v1 前提を廃した理由そのものである。
 | CUDA | [`kernels_wmma_opt.rs`](../crates/backend-cuda/src/kernels_wmma_opt.rs) | TF32/f16 最適化版（ダブルバッファリング） | 上記 wmma 系一式（TF32 版は `wmma::__float_to_tf32` を含む） | `wmma_tf32_opt_source_uses_wmma_instructions`・`wmma_f16_opt_source_uses_wmma_instructions` |
 | CUDA | [`kernels_mma.rs`](../crates/backend-cuda/src/kernels_mma.rs) | 低レベル PTX 経路（`gemm_mma_f16`） | `mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32`・`ldmatrix.sync.aligned.m8n8.x4.shared.b16`・`ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16`・`cp.async.cg.shared.global`・`cp.async.commit_group`・`cp.async.wait_group` | `mma_f16_source_uses_mma_sync_ldmatrix_cp_async_instructions` |
 | Metal | [`gemm.metal`](../crates/backend-metal/src/shaders/gemm.metal) | `gemm_simdgroup`・`gemm_simdgroup_tiled` | `simdgroup_float8x8`・`simdgroup_load`・`simdgroup_multiply_accumulate`・`simdgroup_store` | [`shader_source_evidence.rs::gemm_metal_source_uses_simdgroup_matrix_instructions`](../crates/backend-metal/tests/shader_source_evidence.rs)（本 #70 で追加） |
+| Metal | [`gemm.metal`](../crates/backend-metal/src/shaders/gemm.metal) | `gemm_simdgroup_f16`（TASK-8.3b・#156。f16・累算含め `simdgroup_half8x8` 統一。CUDA WMMA f16 の f32 累算とは精度契約が異なる） | `simdgroup_half8x8`・`simdgroup_load`・`simdgroup_multiply_accumulate`・`simdgroup_store` | [`shader_source_evidence.rs::gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions`](../crates/backend-metal/tests/shader_source_evidence.rs)・[`gemm_simdgroup_f16_source_retains_req8_boundary_guard`](../crates/backend-metal/tests/shader_source_evidence.rs)（本 #156 で追加） |
 
 各ファイルは REQ-8（境界検査の維持方針）に基づく手動境界チェックの実在
 検査（`wmma_f16_source_retains_req8_boundary_guards` 等）も併設している。
@@ -106,6 +107,7 @@ TASK-11.2・#68）が `DeviceCaps`／`GemmShape`／`DType` から `KernelKind`
 | [`docs/perf/cuda-gemm-mma-pipeline.md`](./perf/cuda-gemm-mma-pipeline.md) | #187（TASK-11.1h）。mma パイプライン実測 | 実測未実施（記入待ちテンプレート） |
 | [`docs/perf/cuda-tensor-core-tolerance-evaluation.md`](./perf/cuda-tensor-core-tolerance-evaluation.md) | #186（TASK-11.1g）。数値一致閾値の再評価 | RTX 3060（sm_86）実測済み・**閾値超過が判明**（次節参照） |
 | [`docs/perf/metal-gemm-dynamic-tile.md`](./perf/metal-gemm-dynamic-tile.md) | #188。Metal simdgroup／動的タイル実測 | 実測未実施（記入待ちテンプレート） |
+| [`docs/perf/metal-f16-vs-mps-f16.md`](./perf/metal-f16-vs-mps-f16.md) | #156（TASK-8.3b）。REQ-8 性能下限表「Metal f16 対 PyTorch MPS f16」の唯一の未実測行に対応 | 実測未実施（記入待ちテンプレート。数値一致回帰テスト・命令実在検査は Linux での型検査のみ済み） |
 | [`docs/perf/dispatch-boundary-measurement.md`](./perf/dispatch-boundary-measurement.md) | #69。境界形状 256〜1024 の経路比較 | 実測未実施（記入待ちテンプレート） |
 
 実機実行後の転記フロー: 実機（DGX Spark GB10・Apple Silicon 等）確保後に

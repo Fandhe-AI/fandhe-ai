@@ -229,11 +229,16 @@ impl CudaMmaGemm {
     /// デバイス常駐済みの A/B/C バッファに対してカーネルを起動し、完了を
     /// 待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。[`upload_f16`]・
     /// [`alloc_output_f16`] と組み合わせてベンチマークの計測対象を絞る
-    /// ために公開する）。呼び出し前提は `run_f16` と同じ形状検証
-    /// （`validate_gemm_dims`・[`validate_mma_alignment`]・
-    /// [`validate_mma_grid_bounds`]）を済ませていることであり、本関数は
-    /// 検証を再実行しない（`run_f16` から呼ばれる内部経路と、検証済み
-    /// 形状を使い回すベンチマーク双方が呼び出し元となるため）。
+    /// ために公開する）。
+    ///
+    /// safe な公開 API であるため、呼び出し元（`run_f16` あるいは
+    /// ベンチマーク）の事前検証に依存せず、本関数自身が `run_f16` と同じ
+    /// 形状検証（`validate_gemm_dims`・[`validate_mma_alignment`]・
+    /// [`validate_mma_grid_bounds`]）およびデバイスバッファ長検証
+    /// （`a_dev`/`b_dev`/`c_dev`）を行う（PR #349 codex-review 指摘 P0。
+    /// `gemm.rs::launch_tiled_f32` のドキュメンテーションコメント参照。
+    /// `gemm_wmma.rs::launch_f16` には同種の指摘があったが本関数は指摘に
+    /// 明示されていなかった — 同一パターンの脆弱性のため一貫して修正する）。
     pub fn launch_f16(
         &self,
         a_dev: &CudaSlice<f16>,
@@ -243,15 +248,18 @@ impl CudaMmaGemm {
         n: u32,
         k: u32,
     ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_mma_alignment(n, k)?;
+        validate_mma_grid_bounds(m)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+
         let cfg = mma_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
         // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ a.len()/
         // b.len()/(m*n) 要素の確保済みデバイスバッファ）と m_i/n_i/k_i の
-        // 5 個・型・個数が、ホスト側検証（validate_gemm_dims・
-        // validate_mma_alignment・validate_mma_grid_bounds）済みの m/n/k
-        // と 1:1 対応する（呼び出し元 `run_f16` が保証する。本関数自身は
-        // 検証を再実行しない契約）。カーネル内の手動境界チェック
+        // 5 個・型・個数が、上記で検証済みの m/n/k と 1:1 対応する。
+        // カーネル内の手動境界チェック
         // （cp.async src-size ゼロ充填・エピローグ guarded store。
         // kernels_mma.rs 参照、REQ-8）と合わせて OOB 読み書きが起きない
         // 根拠とする。グリッド次元は MMA_BM/MMA_BN 単位の div_ceil で

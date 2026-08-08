@@ -13,6 +13,9 @@
 use backend_cuda::{CudaDevice, CudaMemory};
 use tensor_core::Tensor;
 use tensor_core::buffer::MemoryOps;
+use tensor_core::device::Device;
+use tensor_core::memory_stats::MemoryStats;
+use tensor_core::pool::{PoolConfig, PooledMemory};
 
 /// upload → download の roundtrip が bit 完全一致することを確認する
 /// （受け入れ条件「確保・転送がリークなく動作する」の数値面の裏付け。
@@ -106,4 +109,84 @@ fn repeated_alloc_drop_cycles_do_not_leak_device_memory() {
         .alloc_zeroed(&[numel])
         .expect("allocation after 100 alloc/drop cycles must still succeed (no leak)");
     drop(final_buf);
+}
+
+/// TASK-#201（REQ-14 14-3）: `PooledMemory<CudaMemory>` 経由の確保・再利用が
+/// 実機（CUDA memset を含む `PoolZeroFill::zero_fill`）で正しく動作し、
+/// 再利用バッファが全 0 で観測できることを確認する（`PoolZeroFill for
+/// CudaMemory` の受け入れ条件。`backend-cpu` 側の `pooled_memory_integration.rs`
+/// と同種のシナリオを実機で裏付ける）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn pooled_memory_reuses_buffer_and_zero_fills_on_real_hardware() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let inner = CudaMemory::new(&device);
+    let mem = PooledMemory::new(inner, Device::Cuda(device.ordinal()), PoolConfig::default());
+
+    let numel = 1024;
+    let buf1 = mem
+        .alloc_zeroed(&[numel])
+        .expect("first alloc_zeroed must succeed");
+    drop(buf1); // プールへ返却
+
+    // 同一サイズの再確保でプールから再利用される（下位 `alloc_zeros` を
+    // 再度叩かない）。`memset_zeros` によるゼロ初期化が実機で正しく
+    // 機能することを `download` で確認する。
+    let buf2 = mem
+        .alloc_zeroed(&[numel])
+        .expect("reused alloc_zeroed must succeed");
+    let tensor = mem.download(&buf2).expect("download must succeed");
+    for i in 0..numel {
+        assert_eq!(
+            tensor.get(&[i]).unwrap(),
+            0.0,
+            "reused buffer must be zero-filled by CudaStream::memset_zeros at index {i}"
+        );
+    }
+    drop(buf2);
+}
+
+/// TASK-14.1b（#175）: 受け入れ条件「CUDA バックエンドでピーク値が
+/// 取得できる」の実機検証。既知サイズ（要素数 `64 * 64` の rank-1 shape
+/// `[4096]`、f32 = 16,384 バイト）を複数同時確保し
+/// `peak_allocated_bytes()` が期待合計と一致すること、
+/// drop 後は `allocated_bytes()` が減少しつつ `peak` が過去最大値を保持
+/// することを確認する（`backend-cpu::memory` の
+/// `peak_allocated_bytes_tracks_sum_of_concurrent_buffers` と同種の
+/// シナリオを実機で裏付ける）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn peak_allocated_bytes_matches_known_allocation_size_on_real_hardware() {
+    let device =
+        CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
+    let mem = CudaMemory::new(&device);
+    mem.reset_peak();
+
+    let numel = 64 * 64;
+    let expected_bytes = (numel * std::mem::size_of::<f32>()) as u64;
+
+    let a = mem
+        .alloc_zeroed(&[numel])
+        .expect("first alloc_zeroed must succeed");
+    let b = mem
+        .alloc_zeroed(&[numel])
+        .expect("second alloc_zeroed must succeed");
+
+    assert_eq!(mem.allocated_bytes(), expected_bytes * 2);
+    assert_eq!(mem.peak_allocated_bytes(), expected_bytes * 2);
+
+    drop(a);
+    assert_eq!(
+        mem.allocated_bytes(),
+        expected_bytes,
+        "1 本解放後は current が半分に戻るはず"
+    );
+    assert_eq!(
+        mem.peak_allocated_bytes(),
+        expected_bytes * 2,
+        "peak は解放後も同時生存時の合計を保持するはず"
+    );
+
+    drop(b);
 }

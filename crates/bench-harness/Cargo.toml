@@ -23,12 +23,41 @@ half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
-# Metal コマンドバッファの完了待ち（sync.rs・TASK-8.1b）に使用する。
-# `cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
+# TASK-13.1a（イシュー #170）: 起動コスト計測 probe バイナリ（src/bin/startup_probe.rs）・
+# CLI（src/bin/startup_bench.rs）は本クレートの [[bin]] ターゲットであり、Cargo は
+# 通常ビルド（`cargo build`／`cargo run --bin`）時に bin ターゲットへ
+# [dev-dependencies] を供給しない（`cargo build -p bench-harness --bins` で実際に確認済み。
+# [dev-dependencies] のみだと bin ビルドが `unresolved import` で失敗する）ため、
+# CPU／CUDA バックエンド経路で使う `tensor-core`／`backend-cpu`／`backend-cuda` は
+# 通常 [dependencies] として追加する（macOS 限定の `backend-metal` は下記
+# `[target.'cfg(target_os = "macos")'.dependencies]` を参照）。
+#
+# 循環依存の検討: `backend-cpu`／`backend-cuda` は自身のテスト用に本クレートを
+# dev-dependency として参照する（`crates/backend-cpu/Cargo.toml`・
+# `crates/backend-cuda/Cargo.toml`）。本変更により
+# 「backend-cpu(test-bin) → bench-harness(dev-dep) → backend-cpu(normal-dep, lib)」
+# という経路が生まれるが、後段の `backend-cpu(lib)` は前段の `backend-cpu` パッケージが
+# 通常ビルドする lib ターゲットと同一ノードを再利用するのみで、Cargo のユニットグラフ上は
+# DAG（有向非巡回）のまま成立する（lib ターゲットへの依存はテストバイナリ経由の
+# 循環を作らない。Cargo が許容する「dev-dependency はパッケージ自身への逆依存を許す」
+# 一般則の一種）。ユーザー承認不要（外部依存の新規追加ではない。workspace member 間の
+# path 依存であり、これまでの dev-dependency 循環の先例と同様の内部整理）。
+tensor-core = { path = "../tensor-core" }
+# 最適化済み自作カーネル（BLIS 型 GEMM・rayon 並列。`CpuBackendOps::gemm`）を
+# probe バイナリの CPU 経路（`startup_probe.rs::run_cpu`）の計測対象として使う。
+backend-cpu = { path = "../backend-cpu" }
+# probe バイナリの CUDA 経路（`startup_probe.rs::run_cuda`）が
+# `CudaBackendOps::gemm`／`CudaDevice::{is_available,new}` を使うために必要。
+backend-cuda = { path = "../backend-cuda" }
+
+# Metal コマンドバッファの完了待ち（sync.rs・TASK-8.1b）、および probe バイナリの
+# Metal 経路（`startup_probe.rs::run_metal`。`MetalBackendOps::gemm`／`MetalContext::new`）
+# に使用する。`cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-metal.workspace = true
+backend-metal = { path = "../backend-metal" }
 
 # criterion は dev-dependencies 限定（deps-policy.md）。5 回計測の中央値を採用する
 # ベンチ規約（.claude/rules/coding-rust.md）の実行基盤として使用する。
@@ -37,17 +66,8 @@ criterion.workspace = true
 # TASK-8.3a（イシュー #155）: Transformer 複合ワークロード実測用テスト
 # （tests/transformer_workload.rs）が forward 計算を合成するために使う。
 # ユーザー承認不要（外部依存の新規追加ではない。workspace member 間の path 依存であり、
-# `backend-cpu`／`onnx-interop`／`autodiff` の各 Cargo.toml が既に本クレートを
-# dev-dependency として参照する先例と対称の関係になる。`onnx-interop`
-# （`bench-harness` を dev-dep として参照。crates/onnx-interop/Cargo.toml）との間で
-# dev-dependency の循環が生じるが、Cargo は dev-dependencies のみで構成される循環を
-# 許容する（通常依存グラフには現れないため）。既に `backend-cpu`⇄`bench-harness`・
-# `onnx-interop`⇄`bench-harness` で同型の循環が存在し本リポでビルド実績がある）。
-tensor-core = { path = "../tensor-core" }
-# 最適化済み自作カーネル（BLIS 型 GEMM・rayon 並列。`CpuBackendOps::gemm`）を
-# QKV・出力射影・FFN の 2D GEMM 計測対象として使うために必要（REQ-8「自作カーネルでの
-# Transformer ブロック実測」の趣旨。docs/perf/transformer-workload-measurement.md 参照）。
-backend-cpu = { path = "../backend-cpu" }
-# softmax・LayerNormalization・Erf（GELU 合成）・バッチ MatMul・Add・Mul・Reshape・
-# Transpose の naive 実装（`onnx_interop::ops`）を forward 計算の構成要素として使う。
+# `onnx-interop`（`bench-harness` を dev-dep として参照。crates/onnx-interop/Cargo.toml）
+# との間で dev-dependency の循環が生じるが、Cargo は dev-dependencies のみで構成される
+# 循環を許容する（通常依存グラフには現れないため）。既に `onnx-interop`⇄`bench-harness`
+# で同型の循環が存在し本リポでビルド実績がある）。
 onnx-interop = { path = "../onnx-interop" }

@@ -43,6 +43,23 @@
 //! `alloc_zeroed` は FFI を伴わず `Vec<f32>` の複製のみで完結する
 //! （`backend-cuda::CudaMemory`／`backend-metal::MetalMemory` の数値一致の
 //! 参照点。`.claude/rules/coding-rust.md` の「CPU 参照実装」方針）。
+//! TASK-14.1a（#174）で `tensor_core::memory_stats::MemoryStats` を実装し、
+//! 確保済みバイト数のピーク値を取得できるようにした（`CpuMemory` は
+//! `Arc<AllocationTracker>` を共有する非 `Copy` 型に変更。CUDA/Metal への
+//! 同フック組み込みは #175）。
+//!
+//! **破壊的変更（`backend-cpu` 0.2.0。PR #359 codex-review 指摘 P1 を受けて
+//! ここに移行手引きを明記）**: 従来 `CpuMemory` はフィールドを持たない
+//! unit struct（`Copy`）だったため `let mem = CpuMemory;` のような直接構築が
+//! 可能だったが、本変更でトラッカー（`Arc<AllocationTracker>`）を保持する
+//! ようになり `Copy` を外した。ワークスペース内に unit struct 構築や
+//! `Copy` 依存箇所が無いことは確認済みだが、外部呼び出し側は次のとおり
+//! 移行する:
+//! - `CpuMemory` → [`CpuMemory::new()`]（または `CpuMemory::default()`。
+//!   いずれも新規の計測系列を持つトラッカーを生成する）
+//! - `Copy` 依存（暗黙コピーでの使い回し）→ `Clone`（`clone()` は
+//!   同一計測系列〈トラッカー〉の共有を意味し、暗黙コピーとは意味が異なる
+//!   点に注意。ピークを集約したい場合は明示的に `clone()` する）
 //!
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
 //! `tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
@@ -51,6 +68,16 @@
 //! Metal 実装（`backend-cuda::ops::CudaBackendOps`／
 //! `backend-metal::ops::MetalBackendOps`）と同一 trait でカーネルディスパッチ
 //! できることを `tests/backend_ops_dispatch.rs` で検証する。
+//!
+//! TASK-12.1f（#203）で [`gemm_blis::gemm_blis_bias_act_parallel`]（GEMM epilogue
+//! 〈bias 加算・activation〉のカーネル内融合）を追加し、[`ops::CpuBackendOps`] の
+//! `gemm_bias_act`（`tensor_core::BackendOps` のデフォルトメソッド。非融合合成）を
+//! オーバーライドして接続した。非融合実行（`gemm` → `add` → `relu` の 3 パス・中間
+//! `Tensor` 2 個割当）に対する性能改善は `docs/perf/cpu-gemm-epilogue-fusion.md` に
+//! 実測記録している（CUTLASS 系実測の動機は平均 1.38〜1.45 倍。本環境実測は 1.46〜
+//! 2.56 倍）。融合版と非融合合成の bit 完全一致は `tests/gemm_epilogue_parity.rs` で
+//! 検証する。CUDA／Metal は GPU カーネル内 epilogue 融合をスコープ外とし、
+//! `gemm_bias_act` のデフォルト実装（elementwise 未実装のため `Unsupported`）に留める。
 
 mod device;
 mod elementwise;
@@ -68,7 +95,7 @@ pub use elementwise::{
 pub use gemm::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
-pub use gemm_blis::{gemm_blis, gemm_blis_parallel};
+pub use gemm_blis::{gemm_blis, gemm_blis_bias_act_parallel, gemm_blis_parallel};
 pub use memory::CpuMemory;
 pub use ops::CpuBackendOps;
 pub use parity::{
