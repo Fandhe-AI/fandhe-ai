@@ -100,14 +100,17 @@ dependencies = [
 name = "bench-harness"
 version = "0.1.0"
 dependencies = [
+ "backend-cpu",
  "criterion",
  "cudarc",
  "half",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
+ "onnx-interop",
  "serde",
  "serde_json",
+ "tensor-core",
 ]
 
 [[package]]
