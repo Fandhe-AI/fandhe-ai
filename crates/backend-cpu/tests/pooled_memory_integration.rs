@@ -118,3 +118,118 @@ fn pooled_buffer_roundtrips_through_download() {
     assert_eq!(tensor.shape(), &[4]);
     assert_eq!(tensor.as_slice().unwrap(), &[0.0f32; 4]);
 }
+
+/// #202 受け入れ条件そのものの直接検証:
+/// 「解放 API 後にピークが理論値近傍へ戻る」（`docs/memory-pool-design.md`・
+/// REQ-14 14-3）を `CpuMemory` 実バックエンドで確認する。
+///
+/// `peak_allocated_bytes` は `AllocationTracker` の契約上、単調増加の
+/// high-water mark であり解放だけでは下がらない
+/// （`crates/tensor-core/src/memory_stats.rs` の `MemoryStats::peak_allocated_bytes`
+/// ドキュメンテーションコメント参照）。そのため検証は 2 段構成にする:
+///
+/// 1. **主張明（プールが実際に空になったことの直接証拠）**:
+///    `release_all_pooled()` 直後の `allocated_bytes() == 0`・
+///    `pooled_bytes() == 0` を主アサーションとする。これは
+///    `reset_peak()` を経由しない、メモリが実際に戻ったことそのものの
+///    証拠である。
+/// 2. **副次的な実証（ピーク自体の回復）**: `peak_allocated_bytes` は解放
+///    だけでは下がらないため、「ピークが理論値へ戻る」ことを観測するには
+///    `reset_peak()`（peak を現在値へ再基準化。`memory_stats.rs` の
+///    `reset_peak` 契約）を挟んだ新区間での再計測が構造的に必要となる。
+///    再基準化後に代表ワークロード（A・B・C の 3 バッファ）を確保し、
+///    ピークが理論最小ワーキングセット（3 バッファの合計）と一致し、
+///    REQ-14 14-3 の係数上限（2 倍以内。緩和はユーザー承認必須。
+///    `.claude/rules/coding-rust.md`）を満たすことを確認する。
+#[test]
+fn release_api_restores_peak_to_theoretical_working_set() {
+    let mem = PooledMemory::new(CpuMemory::new(), Device::Cpu, PoolConfig::default());
+
+    // 1. プール蓄積状態を作る: 異サイズの GEMM 様パターンを複数反復し、
+    //    バケットが分かれてアイドル保持が理論ワーキングセットを大きく
+    //    超えて蓄積することを事前に確認する。
+    for k in 1..=4usize {
+        let a = mem.alloc_zeroed(&[64 * k]).unwrap();
+        let b = mem.alloc_zeroed(&[128 * k]).unwrap();
+        let c = mem.alloc_zeroed(&[32 * k]).unwrap();
+        drop(a);
+        drop(b);
+        drop(c);
+    }
+    let accumulated_pooled = mem.pooled_bytes();
+    // 理論最小ワーキングセット（k=1 の A・B・C 合計。後段で使う代表値）。
+    let theoretical_working_set: u64 = (64 + 128 + 32) * 4; // f32 4 バイト
+    assert!(
+        accumulated_pooled > theoretical_working_set * 2,
+        "事前条件: プール蓄積が理論ワーキングセットの 2 倍を大きく超えている \
+         はず（実測 pooled_bytes={accumulated_pooled}, 理論値={theoretical_working_set}）"
+    );
+
+    // 2. 主アサーション: release_all_pooled 後は実際にメモリが戻っている
+    //    （reset_peak を経由しない直接証拠）。
+    let freed = mem.release_all_pooled();
+    assert_eq!(freed, accumulated_pooled);
+    assert_eq!(
+        mem.allocated_bytes(),
+        0,
+        "release_all_pooled 後は allocated_bytes が 0 になるはず"
+    );
+    assert_eq!(mem.pooled_bytes(), 0);
+
+    // 3. 副次的な実証: reset_peak で新しい計測区間を区切り、代表ワーク
+    //    ロード 1 回分（A・B・C）を確保してピークが理論値近傍へ戻ることを
+    //    確認する（`peak_allocated_bytes` の単調増加契約により、reset を
+    //    挟まないと過去の蓄積ピークが残ったままになるため必須の手順）。
+    mem.reset_peak();
+    assert_eq!(
+        mem.peak_allocated_bytes(),
+        0,
+        "reset_peak 直後は allocated_bytes（解放済みで 0）へ再基準化されるはず"
+    );
+
+    let a = mem.alloc_zeroed(&[64]).unwrap();
+    let b = mem.alloc_zeroed(&[128]).unwrap();
+    let c = mem.alloc_zeroed(&[32]).unwrap();
+    let peak_after = mem.peak_allocated_bytes();
+    assert_eq!(
+        peak_after, theoretical_working_set,
+        "CPU 経路は決定的なため、代表ワークロード 1 回分のピークは理論値と \
+         一致するはず（実測 {peak_after}, 理論値 {theoretical_working_set}）"
+    );
+    assert!(
+        peak_after <= theoretical_working_set * 2,
+        "REQ-14 14-3 の係数上限（2 倍以内）を満たすはず（実測 {peak_after}, \
+         理論値 {theoretical_working_set}。この係数は緩和禁止＝ユーザー承認必須）"
+    );
+    drop(a);
+    drop(b);
+    drop(c);
+}
+
+/// 同一 shape の反復ワークロード（プール再利用が支配的なケース）で、
+/// ピークが理論最小ワーキングセットの 2 倍以内に収まり続けることを検証する
+/// （REQ-14 14-3 の係数維持回帰。`PoolConfig::default` の 128MiB 上限設計が
+/// 意図どおり機能することの確認）。
+#[test]
+fn coefficient_stays_within_2x_for_repeated_same_shape_workload() {
+    let mem = PooledMemory::new(CpuMemory::new(), Device::Cpu, PoolConfig::default());
+    let theoretical_working_set: u64 = (64 + 128 + 32) * 4; // A・B・C 合計バイト数
+
+    mem.reset_peak();
+    for _ in 0..8 {
+        let a = mem.alloc_zeroed(&[64]).unwrap();
+        let b = mem.alloc_zeroed(&[128]).unwrap();
+        let c = mem.alloc_zeroed(&[32]).unwrap();
+        drop(a);
+        drop(b);
+        drop(c);
+    }
+    let peak = mem.peak_allocated_bytes();
+    assert!(
+        peak <= theoretical_working_set * 2,
+        "同一 shape 反復では係数 2 倍以内に収まり続けるはず（実測 {peak}, \
+         理論値 {theoretical_working_set}。係数は緩和禁止＝ユーザー承認必須）"
+    );
+
+    mem.release_all_pooled();
+}
