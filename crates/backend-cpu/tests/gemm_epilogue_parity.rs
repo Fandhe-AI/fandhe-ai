@@ -219,13 +219,86 @@ fn cpu_backend_ops_gemm_bias_act_handles_non_contiguous_input() {
     assert_eq!(fused.as_slice().unwrap(), expected.as_slice());
 }
 
+/// bias が `[n]` ちょうどではない shape でも、`out_shape`（`[m, n]`）へ
+/// ブロードキャスト可能な場合は非融合パス（`gemm` → `add` → act）へ
+/// フォールバックして成功する（デフォルト実装と同一の意味論。
+/// Issue #203 Review 指摘: 融合パス専用の独自厳格検証が `[n]` ちょうど
+/// でない broadcast 可能 shape〈本ケースは `out_shape` と同一の `[2, 2]`〉を
+/// 無条件拒否し、デフォルト実装〈CUDA／Metal がフォールバックする経路〉
+/// と挙動が食い違っていたことの回帰防止）。
 #[test]
-fn cpu_backend_ops_gemm_bias_act_rejects_bias_rank_mismatch() {
+fn cpu_backend_ops_gemm_bias_act_falls_back_for_broadcastable_non_row_bias() {
     let ops = CpuBackendOps::new();
     let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
     let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
-    // bias は本来 [2] のはずが 2 次元。
+    // bias は `[n]`（= `[2]`）ちょうどではないが `out_shape` と同一の
+    // `[2, 2]`。`add` の同一 shape 加算として成功するはず。
     let bias = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+
+    let fused = ops
+        .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)
+        .expect("out_shape と同一 shape の bias は非融合フォールバックで成功するはず");
+
+    let plain = ops.gemm(&a, &b).expect("gemm 経路との比較用");
+    let plain_data = plain.as_slice().unwrap();
+    let bias_data = bias.as_slice().unwrap();
+    let expected: Vec<f32> = plain_data
+        .iter()
+        .zip(bias_data)
+        .map(|(c, bi)| (c + bi).max(0.0))
+        .collect();
+
+    assert_eq!(fused.as_slice().unwrap(), expected.as_slice());
+}
+
+/// bias が `[1]`（スカラー相当）や `[1, n]` のような、レビューで名指しで
+/// 指摘された broadcast 可能 shape（`[n]` ちょうどではない）でも成功する
+/// ことを確認する（`m != n` の非正方 shape で `[n]` との取り違えを排除）。
+#[test]
+fn cpu_backend_ops_gemm_bias_act_falls_back_for_scalar_and_row_vector_bias() {
+    let ops = CpuBackendOps::new();
+    // a: [2, 2]・b: [2, 3] -> out: [2, 3]（n = 3）。
+    let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+    let b = Tensor::new(vec![1.0, 0.0, 1.0, 0.0, 1.0, 1.0], &[2, 3]).unwrap();
+    let plain = ops.gemm(&a, &b).expect("gemm 経路との比較用");
+    let plain_data = plain.as_slice().unwrap().to_vec();
+
+    // bias: [1]（スカラー。全要素へ同一値を加算）。
+    let bias_scalar = Tensor::new(vec![10.0], &[1]).unwrap();
+    let fused_scalar = ops
+        .gemm_bias_act(&a, &b, Some(&bias_scalar), Activation::None)
+        .expect("[1] は broadcast 可能なので成功するはず");
+    let expected_scalar: Vec<f32> = plain_data.iter().map(|c| c + 10.0).collect();
+    assert_eq!(fused_scalar.as_slice().unwrap(), expected_scalar.as_slice());
+
+    // bias: [1, n]（行ベクトルを rank 2 で表現。`[n]` とは shape が異なる）。
+    let bias_row = Tensor::new(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
+    let fused_row = ops
+        .gemm_bias_act(&a, &b, Some(&bias_row), Activation::None)
+        .expect("[1, n] は broadcast 可能なので成功するはず");
+    let bias_row_data = [1.0f32, 2.0, 3.0];
+    let expected_row: Vec<f32> = plain_data
+        .chunks(3)
+        .flat_map(|row| {
+            row.iter()
+                .zip(bias_row_data)
+                .map(|(c, bi)| c + bi)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(fused_row.as_slice().unwrap(), expected_row.as_slice());
+}
+
+/// broadcast 不能な shape（`out_shape` の末尾軸と一致せず・1 でもない）は
+/// `ShapeMismatch` を返す（`add` のブロードキャスト判定への委譲経路）。
+#[test]
+fn cpu_backend_ops_gemm_bias_act_rejects_non_broadcastable_bias() {
+    let ops = CpuBackendOps::new();
+    let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+    let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+    // n = 2 に対し bias 長 3（`[1]`・`[2]`・`[2, 2]` のいずれとも
+    // 一致せず broadcast 不能）。
+    let bias = Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap();
 
     let err = ops
         .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)

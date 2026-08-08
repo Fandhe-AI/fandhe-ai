@@ -130,8 +130,12 @@ pub trait BackendOps {
     /// 融合は #203 のスコープ外。out-of-scope-tracking.md に従いユーザー
     /// 承認を得て別 Issue で追跡する）。
     ///
-    /// `bias` の shape が `[n]` でない場合は [`BackendError::ShapeMismatch`]
-    /// を返す（`add` のブロードキャスト判定へ委譲する）。
+    /// `bias` の shape が `[n]` の場合（CPU バックエンドでは融合カーネルの
+    /// 対応範囲）はそのまま計算する。`[n]` でない場合は `add` の NumPy
+    /// 互換ブロードキャスト判定へ委譲し、`out: [m, n]` へブロードキャスト
+    /// **不能**な場合にのみ [`BackendError::ShapeMismatch`] を返す
+    /// （`[1]`・`[1, n]`・`[m, n]` 等ブロードキャスト可能な shape は
+    /// 成功する。CPU／CUDA／Metal で同一の意味論。#203 Review 指摘）。
     fn gemm_bias_act(
         &self,
         a: &Tensor<f32>,

@@ -76,6 +76,23 @@ impl BackendOps for CpuBackendOps {
     /// （非融合合成）を使う（両バックエンドの elementwise 未実装により
     /// `bias`／`act` 指定時は `Unsupported` を透過的に返す。モジュール
     /// ドキュメント冒頭・`tensor_core::backend_ops` のコメント参照）。
+    ///
+    /// 融合カーネル（[`gemm_blis_bias_act_parallel`]）は bias の行方向
+    /// 複製（shape が厳密に `[n]`）のみ対応する。`bias.shape() == [1]` の
+    /// ようなブロードキャスト可能だが `[n]` ちょうどでない shape は、
+    /// デフォルト実装と同じ `gemm` → `add`（NumPy 互換ブロードキャスト。
+    /// `crate::elementwise::add` 経由）→ act の非融合パスへフォールバック
+    /// する。こうしないと `BackendOps::gemm_bias_act` の同一メソッドが
+    /// CPU では拒否し CUDA／Metal のデフォルト実装では成功するという
+    /// バックエンド依存の挙動差が生じる（Issue #203 Review 指摘）。
+    /// 非融合パスへ落ちる場合も `gemm_blis_bias_act_parallel` の
+    /// `BiasLenMismatch` 検証（カーネル本体アクセス前に検証。REQ-8・
+    /// OWASP A03）と同じ順序契約を保つため、`self.gemm` を実行する前に
+    /// `tensor_core::broadcast_shape` でブロードキャスト可否のみ先に
+    /// 検証する（m×n×k の GEMM 本体を実行してから失敗が判明する、という
+    /// 順序にしない）。エラーは `broadcast_shape` のものをそのまま返す
+    /// （誤った `ShapeError` variant を独自に組み立てて診断精度を
+    /// 落とさない）。
     fn gemm_bias_act(
         &self,
         a: &Tensor<f32>,
@@ -88,6 +105,36 @@ impl BackendOps for CpuBackendOps {
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
 
+        if let Some(bias) = bias
+            && bias.shape() != [n]
+        {
+            // 融合カーネルの対応範囲外（行方向複製の厳密一致ではない
+            // shape）。デフォルト実装と同じ 3 段合成へフォールバックする。
+            // GEMM 本体を実行する前にブロードキャスト可否を検証する
+            // （REQ-8・OWASP A03。`gemm_blis` の `BiasLenMismatch` と
+            // 同じ「カーネル本体アクセス前に検証」の順序契約）。
+            tensor_core::broadcast_shape(&out_shape, bias.shape())
+                .map_err(BackendError::ShapeMismatch)?;
+            let mut out = self.gemm(a, b)?;
+            out = self.add(&out, bias)?;
+            out = match act {
+                Activation::None => out,
+                Activation::Relu => self.relu(&out)?,
+                // `Activation` は `#[non_exhaustive]`（`tensor-core` 側で
+                // 将来 variant 追加を見込む）。融合カーネル側
+                // （`gemm_blis_bias_act_parallel` 内 `apply_epilogue`）も
+                // `_ =>` で未知 variant を静かに無視せず拒否する方針
+                // （同ファイル該当コメント参照）と合わせ、ここでも黙って
+                // 恒等関数として扱わず明示的に拒否する。
+                _ => {
+                    return Err(BackendError::Unsupported(format!(
+                        "gemm_bias_act: unsupported activation {act:?} in non-fused fallback path"
+                    )));
+                }
+            };
+            return Ok(out);
+        }
+
         let a_owned = a.contiguous();
         let b_owned = b.contiguous();
         let a_slice = a_owned.as_slice().ok_or_else(|| {
@@ -97,21 +144,11 @@ impl BackendOps for CpuBackendOps {
             gemm_contiguity_fail_safe("gemm_bias_act: rhs not contiguous after contiguous()")
         })?;
 
-        // bias は `[n]` の 1 次元のみ受け付ける（`BackendOps::gemm_bias_act`
-        // のドキュメント契約。デフォルト実装〈`add` の NumPy 互換
-        // ブロードキャスト〉と異なり、融合カーネルは行方向複製のみを
-        // 実装するため、shape 不一致は早期に `ShapeMismatch` で拒否する）。
+        // ここに到達するのは bias が `None`、または shape が厳密に `[n]`
+        // の場合のみ（上の早期リターンで他ケースは処理済み）。
         let bias_owned;
         let bias_slice = match bias {
             Some(bias) => {
-                if bias.shape() != [n] {
-                    return Err(BackendError::ShapeMismatch(
-                        tensor_core::ShapeError::RankMismatch {
-                            expected: 1,
-                            actual: bias.shape().len(),
-                        },
-                    ));
-                }
                 bias_owned = bias.contiguous();
                 Some(bias_owned.as_slice().ok_or_else(|| {
                     gemm_contiguity_fail_safe(
