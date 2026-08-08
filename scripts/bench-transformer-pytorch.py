@@ -59,29 +59,34 @@ SEED = 155_083  # Rust 側（bench-harness の SEED 定数）とイシュー番�
 
 
 def median_q1_q3(samples: list[float]) -> tuple[float, float, float]:
-    """`bench_harness::stats::median_q1_q3`（median-of-halves 定義）と同じ分位点定義。
+    """`bench_harness::stats::median_q1_q3`（`crates/bench-harness/src/stats.rs`）と
+    同じ分位点定義。
 
-    `docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/rust/src/bin/gemm_bench.rs:17-25`
-    が定める線形補間ではなく median-of-halves（下半分・上半分それぞれの中央値）を
-    採用し、Rust 側 `stats::median_q1_q3` の定義と厳密に一致させる（PoC-5 先例の
-    `median_iqr`〈線形補間版〉とは分位点の定義が異なる点に注意）。
+    ソート後、`idx = round(p * (n - 1))`（`p = 0.5/0.25/0.75`）番目の要素をそのまま
+    採用する（線形補間なし・区間の中央値の平均でもない）。PR #345 レビュー
+    （Bugbot 指摘）で、以前の実装（下半分・上半分それぞれの中央値を平均する
+    median-of-halves 方式）が `bench_harness::stats::median_q1_q3` の実際の定義と
+    一致していないと判明したため修正した。`round` は Python 標準の
+    round-half-to-even ではなく Rust `f64::round`（round-half-away-from-zero）と
+    同じ丸めが必要である。`p * (n - 1)` がちょうど `.5` に当たる（タイになる）
+    ケースは珍しくない: 例えば `p=0.5` かつ `n` が偶数のとき `n-1` は奇数となり
+    `(n-1)/2` は必ず `.5` タイになる（本ベンチマークの `n=20` もこのケース。
+    `idx=9.5` で `round-half-to-even` なら 10、`round-half-away-from-zero` でも
+    10 のため今回のサンプルでは両者が偶然一致するが、`n=10` 等では 4 対 5 に
+    分岐する）。境界ケースを取りこぼさないよう `math.floor(x + 0.5)` で明示的に
+    round-half-away-from-zero を実装する。
     """
+    import math
+
     s = sorted(samples)
     n = len(s)
 
-    def median_of(xs: list[float]) -> float:
-        m = len(xs)
-        mid = m // 2
-        if m % 2 == 1:
-            return xs[mid]
-        return (xs[mid - 1] + xs[mid]) / 2.0
+    def pick(p: float) -> float:
+        idx = int(math.floor(p * (n - 1) + 0.5))
+        idx = min(idx, n - 1)
+        return s[idx]
 
-    median = median_of(s)
-    lower_end = n // 2
-    upper_start = (n + 1) // 2
-    q1 = median_of(s[:lower_end])
-    q3 = median_of(s[upper_start:])
-    return median, q1, q3
+    return pick(0.5), pick(0.25), pick(0.75)
 
 
 def resolve_device(device_arg: str):

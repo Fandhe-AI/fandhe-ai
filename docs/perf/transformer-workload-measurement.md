@@ -55,7 +55,8 @@ python3 -m venv /path/to/venv
 - Rust 側: `bench_harness::report::BenchReport::to_json`（`schema_version`・`warmup`／`iters`（20/20 以上）・
   `median_secs`／`q1_secs`／`q3_secs`／`samples_secs`。TASK-8.1 準拠）
 - PyTorch 側: `scripts/bench-transformer-pytorch.py` が同形の JSON（`median_secs`／`q1_secs`／`q3_secs`。
-  分位点定義は `bench_harness::stats::median_q1_q3` と同じ median-of-halves で統一）を出力する
+  分位点定義は `bench_harness::stats::median_q1_q3` と同じ「ソート後 `idx = round(p*(n-1))` 番目の
+  要素を採用」方式で統一）を出力する
 
 ## 実測結果（本セッション環境。参考値）
 
@@ -77,7 +78,7 @@ python3 -m venv /path/to/venv
 | 実装 | バックエンド | median | Q1 | Q3 | 対 PyTorch 比（median） |
 |------|------|------|------|------|------|
 | Rust（自作コア。GEMM は BLIS 型並列、attention 行列積は naive） | CPU | 0.424358 | 0.419382 | 0.426337 | 1.00（基準） |
-| PyTorch 2.13.0+cpu（`nn.TransformerEncoderLayer`） | CPU | 0.025859 | 0.024305 | 0.029436 | 約 16.4 倍高速（Rust は PyTorch の約 6.1% の速度） |
+| PyTorch 2.13.0+cpu（`nn.TransformerEncoderLayer`） | CPU | 0.026077 | 0.024677 | 0.027008 | 約 16.3 倍高速（Rust は PyTorch の約 6.1% の速度） |
 
 生の `BenchReport` JSON（Rust 側。`samples_secs` は 20 サンプル全件）:
 
@@ -88,7 +89,7 @@ python3 -m venv /path/to/venv
 PyTorch 側 JSON:
 
 ```json
-{"schema_version":"1","name":"transformer-block-forward-pytorch","backend":"cpu","framework":"pytorch","framework_version":"2.13.0+cpu","warmup":20,"iters":20,"median_secs":0.02585924598679412,"q1_secs":0.024304653008584864,"q3_secs":0.029435677482979372,"samples_secs":[0.022971405007410794,0.025220120995072648,0.03186345598078333,0.02658404898829758,0.02607715199701488,0.02525348900235258,0.050119535997509956,0.039101143018342555,0.04466192799736746,0.026961330004269257,0.0221065680088941,0.02333180099958554,0.023094684991519898,0.025641339976573363,0.02393205201951787,0.026193958008661866,0.027007898985175416,0.02496066500316374,0.02467725399765186,0.03574399001081474]}
+{"schema_version":"1","name":"transformer-block-forward-pytorch","backend":"cpu","framework":"pytorch","framework_version":"2.13.0+cpu","warmup":20,"iters":20,"median_secs":0.02607715199701488,"q1_secs":0.02467725399765186,"q3_secs":0.027007898985175416,"samples_secs":[0.022971405007410794,0.025220120995072648,0.03186345598078333,0.02658404898829758,0.02607715199701488,0.02525348900235258,0.050119535997509956,0.039101143018342555,0.04466192799736746,0.026961330004269257,0.0221065680088941,0.02333180099958554,0.023094684991519898,0.025641339976573363,0.02393205201951787,0.026193958008661866,0.027007898985175416,0.02496066500316374,0.02467725399765186,0.03574399001081474]}
 ```
 
 ### 解釈上の注意（下限確定〈#158〉への申し送り）
