@@ -21,341 +21,388 @@
 //! 全体パス解決）は一切使わない。
 //!
 //! # プラットフォーム
-//! Linux・macOS のみ対応する。`openat`/`O_NOFOLLOW`/`O_DIRECTORY` 等のフラグ
-//! 値は各 OS の `fcntl.h` を出典として本ファイル内にローカル複製する
-//! （`libc` 依存は禁止。deps-policy.md 許容依存 8 区分外）。self-repair CLI の
-//! 実行環境は self-hosted の Linux/macOS runner のみであり、それ以外の
-//! ターゲットでは値の出典を保証できないため、限定的なフォールバック
-//! （旧: 一時ファイル + rename 方式）は用意せず `io::Error` で fail-closed に
-//! 候補適用そのものを拒否する（ユーザー指示。安全側に倒す。下記
-//! `unsupported_platform_error` 参照）。
+//! Linux（`x86_64`/`aarch64` に限定）・macOS のみ対応する。
+//! `openat`/`O_NOFOLLOW`/`O_DIRECTORY` 等のフラグ値は各 OS の `fcntl.h` を
+//! 出典として本ファイル内にローカル複製する（`libc` 依存は禁止。
+//! deps-policy.md 許容依存 8 区分外）。self-repair CLI の実行環境は
+//! self-hosted の Linux（x86_64/aarch64）/macOS runner のみであり、
+//! それ以外のプラットフォーム・アーキテクチャでは値の出典を保証できないため、
+//! 限定的なフォールバック（旧: 一時ファイル + rename 方式）は用意せず
+//! `io::Error` で fail-closed に候補適用そのものを拒否する（ユーザー指示。
+//! 安全側に倒す。下記 `unsupported_platform_error` 参照）。
 //!
-//! # 呼び出し元
-//! [`crate::candidate::apply_candidate`]（baseline 復元・候補適用の書き込み
-//! 経路）・[`crate::candidate::CandidateFixGenerator::new`]・
-//! [`crate::bug_fix::BugFixFixGenerator::new`]・
-//! [`crate::feature_addition::FeatureAdditionFixGenerator::new`]（baseline
-//! スナップショット読み込み経路）から利用する。呼び出し元は本モジュールの
-//! 前に必ず [`crate::candidate::validate_relative_path`]（絶対パス・`..`
-//! 成分の字句拒否）を経由させる（本モジュールは字句検査を行わず、`..` 成分を
-//! 渡されると `openat` がそのまま親ディレクトリへ遡ってしまう）。
+//! Linux 側は `target_os = "linux"` だけでなく `target_arch` も
+//! `x86_64`/`aarch64` に限定する（PR #361 codex-review P0 指摘: `target_os =
+//! "linux"` のみの判定は mips/parisc/sparc/alpha 等、`O_NOFOLLOW`/
+//! `O_DIRECTORY`/`O_CLOEXEC` の値が `asm-generic/fcntl.h` と異なりうる
+//! アーキテクチャも含んでしまい、それらの実行環境では誤った定数値で
+//! `openat` を呼び出し symlink 追跡が意図せず有効化されうる〈fail-open〉。
+//! self-repair CLI の実行対象は self-hosted runner の x86_64/aarch64 のみ。
+//! `x86_64-linux-gnu` の `/usr/include/asm-generic/fcntl.h` を実機で確認し、
+//! `O_DIRECTORY`（0200000）・`O_NOFOLLOW`（0400000）・`O_CLOEXEC`
+//! （02000000）が下記 `raw` モジュールの定数と一致すること、および
+//! `/usr/include/x86_64-linux-gnu/asm/fcntl.h` がアーキ固有の再定義なしに
+//! `asm-generic/fcntl.h` を `#include` するだけであることを確認済み。
+//! `aarch64` は実機でヘッダを確認していないが、Linux カーネルの `asm`
+//! ヘッダはアーキごとに独自定義しない限り `asm-generic` の値を使う設計
+//! であり、x86_64 と同様に `asm-generic` を直接 `#include` するアーキで
+//! ある限り値は一致する（未確認である旨を明示したうえで許容する）。
+//! それ以外のアーキテクチャは値を個別確認していないため対象に含めず、
+//! 下記 `unsupported` サブモジュール側の fail-closed 経路へ送る。
+//! 対応判定・実装・フォールバックの整合を単一箇所で保つため、Linux/macOS
+//! 専用実装は本ファイル内の `supported` サブモジュール 1 つにまとめる
+//! （下記 `cfg` 境界を参照）。
 
-// `io`・`Path` は fail-closed フォールバック（下記
-// `cfg(not(any(target_os = "linux", target_os = "macos")))` 側）のシグネチャ
-// にも必要なため無条件 import とする。それ以外（`fs`・`CString`・fd 型・
-// C 型・Unix 拡張 trait）は Linux/macOS 専用実装でのみ使うため cfg で
-// 絞り込む。無条件 import すると Windows では `std::os::fd`/`std::os::unix`
-// 自体が存在せずビルド不能になり、他の Unix 系（FreeBSD 等）では未使用
-// import が `-D warnings` で拒否される（PR #361 codex-review 指摘 1 と同型の
-// 不具合を fd_walk 側で再発させないための cfg 分離）。
-use std::io;
-use std::path::Path;
+/// Linux（`x86_64`/`aarch64` に限定。モジュール冒頭 doc 参照）・macOS
+/// 専用実装。`openat`/`O_NOFOLLOW` 等の値の出典が保証できるプラットフォーム・
+/// アーキテクチャの組のみをこのモジュールの cfg 境界に含める。対応判定は
+/// この 1 箇所にのみ書き、末尾の `unsupported` サブモジュール側は本 cfg の
+/// 否定（`not(...)`）を使うことで実装・フォールバックの cfg 不一致を
+/// 構造的に防ぐ。
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
+mod supported {
+    use std::ffi::CString;
+    use std::fs;
+    use std::io;
+    use std::io::{Read as _, Write as _};
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Component;
+    use std::path::Path;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::ffi::CString;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::fs;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::io::{Read as _, Write as _};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::raw::{c_char, c_int, c_uint};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::os::unix::ffi::OsStrExt as _;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::path::Component;
+    /// 各 OS の `fcntl.h` 定義値のローカル複製（`libc` 依存禁止のため）。
+    /// 出典: Linux `include/uapi/asm-generic/fcntl.h`（本ファイル冒頭 doc の
+    /// 対応アーキテクチャ〈x86_64/aarch64〉共通の generic 値。それ以外の
+    /// アーキテクチャはこのモジュール自体がコンパイルされないため到達しない）。
+    #[cfg(target_os = "linux")]
+    mod raw {
+        pub const O_RDONLY: i32 = 0o0;
+        pub const O_WRONLY: i32 = 0o1;
+        pub const O_CREAT: i32 = 0o100;
+        pub const O_TRUNC: i32 = 0o1000;
+        pub const O_DIRECTORY: i32 = 0o200000;
+        pub const O_NOFOLLOW: i32 = 0o400000;
+        /// fork/exec で子プロセスへ fd を継承させない（`execve` 時に自動
+        /// close）。security-auditor 監査 Low 指摘対応: `openat` で得た fd
+        /// はいずれも self-repair プロセス内でのみ使う一時 fd であり、
+        /// `SelfRepairLoop` が起動する `cargo build`/`test`/`clippy` 子
+        /// プロセス（`verify_gates.rs`）へ意図せず継承されると fd リーク・
+        /// 情報露出につながるため付与する。
+        pub const O_CLOEXEC: i32 = 0o2000000;
+    }
 
-/// 各 OS の `fcntl.h` 定義値のローカル複製（`libc` 依存禁止のため）。
-/// 出典: Linux `include/uapi/asm-generic/fcntl.h`（x86_64/aarch64 共通の
-/// generic 値。mips/parisc/sparc/alpha 等の非 asm-generic アーキテクチャでは
-/// 値が異なるが、self-repair CLI の実行対象アーキテクチャ外のため未対応
-/// ＝ 下記 `cfg(not(...))` フォールバック側で fail-closed に拒否する）。
-#[cfg(target_os = "linux")]
-mod raw {
-    pub const O_RDONLY: i32 = 0o0;
-    pub const O_WRONLY: i32 = 0o1;
-    pub const O_CREAT: i32 = 0o100;
-    pub const O_TRUNC: i32 = 0o1000;
-    pub const O_DIRECTORY: i32 = 0o200000;
-    pub const O_NOFOLLOW: i32 = 0o400000;
-    /// fork/exec で子プロセスへ fd を継承させない（`execve` 時に自動 close）。
-    /// security-auditor 監査 Low 指摘対応: `openat` で得た fd はいずれも
-    /// self-repair プロセス内でのみ使う一時 fd であり、`SelfRepairLoop` が
-    /// 起動する `cargo build`/`test`/`clippy` 子プロセス（`verify_gates.rs`）
-    /// へ意図せず継承されると fd リーク・情報露出につながるため付与する。
-    pub const O_CLOEXEC: i32 = 0o2000000;
-}
+    /// 出典: macOS `sys/fcntl.h`。
+    #[cfg(target_os = "macos")]
+    mod raw {
+        pub const O_RDONLY: i32 = 0x0000;
+        pub const O_WRONLY: i32 = 0x0001;
+        pub const O_CREAT: i32 = 0x0200;
+        pub const O_TRUNC: i32 = 0x0400;
+        pub const O_DIRECTORY: i32 = 0x100000;
+        pub const O_NOFOLLOW: i32 = 0x0100;
+        /// 上記 Linux 側 `O_CLOEXEC` と同じ理由で付与する。
+        pub const O_CLOEXEC: i32 = 0x1000000;
+    }
 
-/// 出典: macOS `sys/fcntl.h`。
-#[cfg(target_os = "macos")]
-mod raw {
-    pub const O_RDONLY: i32 = 0x0000;
-    pub const O_WRONLY: i32 = 0x0001;
-    pub const O_CREAT: i32 = 0x0200;
-    pub const O_TRUNC: i32 = 0x0400;
-    pub const O_DIRECTORY: i32 = 0x100000;
-    pub const O_NOFOLLOW: i32 = 0x0100;
-    /// 上記 Linux 側 `O_CLOEXEC` と同じ理由で付与する。
-    pub const O_CLOEXEC: i32 = 0x1000000;
-}
+    // `openat(2)` の FFI 宣言。C 側のシグネチャは
+    // `int openat(int dirfd, const char *pathname, int flags, ...)` で
+    // `mode_t` 引数（`O_CREAT` 使用時のみ意味を持つ）は可変長引数側にある。
+    // 固定 4 引数として宣言すると呼び出し規約が可変長引数と異なる ABI
+    // （例: `aarch64-apple-darwin` は可変長引数をスタック経由で渡す）で
+    // `mode` が読めない不整合を起こすため、Rust 側も `...` 可変長引数として
+    // 宣言し、`O_CREAT` を渡す呼び出しでのみ `mode` 実引数を追加する
+    // （下記 openat_dir/openat_final 参照）。
+    unsafe extern "C" {
+        fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
+    }
 
-// `openat(2)` の FFI 宣言。C 側のシグネチャは
-// `int openat(int dirfd, const char *pathname, int flags, ...)` で
-// `mode_t` 引数（`O_CREAT` 使用時のみ意味を持つ）は可変長引数側にある。
-// 固定 4 引数として宣言すると呼び出し規約が可変長引数と異なる ABI
-// （例: `aarch64-apple-darwin` は可変長引数をスタック経由で渡す）で
-// `mode` が読めない不整合を起こすため、Rust 側も `...` 可変長引数として
-// 宣言し、`O_CREAT` を渡す呼び出しでのみ `mode` 実引数を追加する
-// （下記 openat_dir/openat_final 参照）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-unsafe extern "C" {
-    fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
-}
-
-/// 相対パスをコンポーネント単位の NUL 終端文字列列へ分解する。
-///
-/// 呼び出し元は事前に [`crate::candidate::validate_relative_path`] を経由
-/// させる契約のため、ここに到達するのは通常 `Normal`（1 コンポーネント
-/// あたり 1 段のディレクトリ／ファイル名）のみである。それ以外
-/// （`RootDir`・`Prefix`・`ParentDir`）が渡された場合は契約違反として
-/// fail-closed に拒否する（`openat` へ `..` をそのまま渡すと親ディレクトリへ
-/// 遡ってしまうため、ここでの防御は多重化の意味を持つ）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn split_components(relative_path: &Path) -> io::Result<Vec<CString>> {
-    let mut parts = Vec::new();
-    for component in relative_path.components() {
-        match component {
-            Component::Normal(part) => {
-                let cstring = CString::new(part.as_bytes()).map_err(|_| {
-                    io::Error::other(format!(
-                        "候補修正のパスに NUL バイトを含むコンポーネントがあります: {}",
+    /// 相対パスをコンポーネント単位の NUL 終端文字列列へ分解する。
+    ///
+    /// 呼び出し元は事前に [`crate::candidate::validate_relative_path`] を
+    /// 経由させる契約のため、ここに到達するのは通常 `Normal`（1 コンポーネント
+    /// あたり 1 段のディレクトリ／ファイル名）のみである。それ以外
+    /// （`RootDir`・`Prefix`・`ParentDir`）が渡された場合は契約違反として
+    /// fail-closed に拒否する（`openat` へ `..` をそのまま渡すと親ディレクトリへ
+    /// 遡ってしまうため、ここでの防御は多重化の意味を持つ）。
+    fn split_components(relative_path: &Path) -> io::Result<Vec<CString>> {
+        let mut parts = Vec::new();
+        for component in relative_path.components() {
+            match component {
+                Component::Normal(part) => {
+                    let cstring = CString::new(part.as_bytes()).map_err(|_| {
+                        io::Error::other(format!(
+                            "候補修正のパスに NUL バイトを含むコンポーネントがあります: {}",
+                            relative_path.display()
+                        ))
+                    })?;
+                    parts.push(cstring);
+                }
+                Component::CurDir => continue,
+                other => {
+                    return Err(io::Error::other(format!(
+                        "候補修正のパスに許可されないコンポーネント（{other:?}）が含まれます: {}",
                         relative_path.display()
-                    ))
-                })?;
-                parts.push(cstring);
-            }
-            Component::CurDir => continue,
-            other => {
-                return Err(io::Error::other(format!(
-                    "候補修正のパスに許可されないコンポーネント（{other:?}）が含まれます: {}",
-                    relative_path.display()
-                )));
+                    )));
+                }
             }
         }
+        if parts.is_empty() {
+            return Err(io::Error::other(format!(
+                "候補修正のパスが空です: {}",
+                relative_path.display()
+            )));
+        }
+        Ok(parts)
     }
-    if parts.is_empty() {
-        return Err(io::Error::other(format!(
-            "候補修正のパスが空です: {}",
-            relative_path.display()
-        )));
+
+    /// `workspace` を dir-fd として開く（fd 走査チェーンの起点）。
+    ///
+    /// `workspace` 自体は sandbox.rs が管理する信頼済みルート（self-repair が
+    /// 自ら作成した一時ディレクトリ）であり、途中ディレクトリの symlink
+    /// 差し替え防御の対象は `workspace` からの相対パス側（[`walk_to_final`]）
+    /// である。ルート自体は std の安全な API（`fs::OpenOptions`）で開けるため
+    /// `unsafe` を使わない（`O_DIRECTORY` を `custom_flags` で付与し、
+    /// ディレクトリでなければ open 自体を失敗させる）。
+    fn open_root_dir(workspace: &Path) -> io::Result<OwnedFd> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(raw::O_DIRECTORY)
+            .open(workspace)?;
+        Ok(OwnedFd::from(file))
     }
-    Ok(parts)
-}
 
-/// `workspace` を dir-fd として開く（fd 走査チェーンの起点）。
-///
-/// `workspace` 自体は sandbox.rs が管理する信頼済みルート（self-repair が
-/// 自ら作成した一時ディレクトリ）であり、途中ディレクトリの symlink
-/// 差し替え防御の対象は `workspace` からの相対パス側（[`walk_to_final`]）
-/// である。ルート自体は std の安全な API（`fs::OpenOptions`）で開けるため
-/// `unsafe` を使わない（`O_DIRECTORY` を `custom_flags` で付与し、
-/// ディレクトリでなければ open 自体を失敗させる）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn open_root_dir(workspace: &Path) -> io::Result<OwnedFd> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(raw::O_DIRECTORY)
-        .open(workspace)?;
-    Ok(OwnedFd::from(file))
-}
-
-/// 途中ディレクトリを 1 段開く（`O_NOFOLLOW | O_DIRECTORY`）。
-///
-/// `name` が symlink または非ディレクトリであれば `openat` 自体が
-/// `ELOOP`/`ENOTDIR` で失敗する。「symlink でないことの検証」と
-/// 「次段の起点として開くこと」が単一の syscall に統合されるため、
-/// モジュール冒頭 doc が説明する TOCTOU window がここには存在しない。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn openat_dir(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
-    // `O_CLOEXEC` を付与し、この dir-fd が子プロセス（cargo build/test/clippy
-    // 等）へ継承されないようにする（security-auditor 監査 Low 指摘対応。
-    // `raw::O_CLOEXEC` doc 参照）。
-    let flags = raw::O_DIRECTORY | raw::O_NOFOLLOW | raw::O_RDONLY | raw::O_CLOEXEC;
-    // SAFETY: FFI 境界（TOCTOU 排除のための openat 呼び出し。モジュール冒頭
-    // doc 参照）。`parent` は呼び出し元（[`walk_to_final`]）が直前の
-    // `open_root_dir`/`openat_dir` 呼び出しで取得した有効な dir-fd であり、
-    // `name` は [`split_components`] が生成した NUL 終端済み `CString` から
-    // 得た有効なポインタである。`O_CREAT` を含まない固定 3 引数呼び出しの
-    // ため可変長引数側の `mode` は渡さない（[`openat`] doc 参照）。
-    let fd = unsafe { openat(parent, name.as_ptr(), flags) };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
+    /// 途中ディレクトリを 1 段開く（`O_NOFOLLOW | O_DIRECTORY`）。
+    ///
+    /// `name` が symlink または非ディレクトリであれば `openat` 自体が
+    /// `ELOOP`/`ENOTDIR` で失敗する。「symlink でないことの検証」と
+    /// 「次段の起点として開くこと」が単一の syscall に統合されるため、
+    /// モジュール冒頭 doc が説明する TOCTOU window がここには存在しない。
+    fn openat_dir(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
+        // `O_CLOEXEC` を付与し、この dir-fd が子プロセス（cargo build/test/clippy
+        // 等）へ継承されないようにする（security-auditor 監査 Low 指摘対応。
+        // `raw::O_CLOEXEC` doc 参照）。
+        let flags = raw::O_DIRECTORY | raw::O_NOFOLLOW | raw::O_RDONLY | raw::O_CLOEXEC;
+        // SAFETY: FFI 境界（TOCTOU 排除のための openat 呼び出し。モジュール冒頭
+        // doc 参照）。`parent` は呼び出し元（[`walk_to_final`]）が直前の
+        // `open_root_dir`/`openat_dir` 呼び出しで取得した有効な dir-fd であり、
+        // `name` は [`split_components`] が生成した NUL 終端済み `CString` から
+        // 得た有効なポインタである。`O_CREAT` を含まない固定 3 引数呼び出しの
+        // ため可変長引数側の `mode` は渡さない（[`openat`] doc 参照）。
+        let fd = unsafe { openat(parent, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: `fd` は直前の `openat(2)` 呼び出しが返した新規かつ有効な
+        // 所有 fd（他に所有者はいない）。`OwnedFd` でラップし、以後の close(2)
+        // を std の `Drop` 実装に委譲することで close 漏れ（fd リーク）を防ぐ。
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    // SAFETY: `fd` は直前の `openat(2)` 呼び出しが返した新規かつ有効な
-    // 所有 fd（他に所有者はいない）。`OwnedFd` でラップし、以後の close(2)
-    // を std の `Drop` 実装に委譲することで close 漏れ（fd リーク）を防ぐ。
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
 
-/// 末尾コンポーネント（ファイル本体）を開く（`O_NOFOLLOW` 必須）。
-///
-/// `extra_flags` に `O_CREAT` を含む場合のみ `mode`（`0o600`）を可変長引数
-/// として渡す（[`openat`] doc 参照。C 側で `mode_t` は `O_CREAT` 未指定時は
-/// 未評価だが、可変長引数の有無自体が呼び出し規約に影響するため実引数の
-/// 個数を一致させる）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn openat_final(parent: RawFd, name: &CString, extra_flags: i32) -> io::Result<OwnedFd> {
-    // `O_CLOEXEC` を付与する理由は `openat_dir` と同じ（`raw::O_CLOEXEC` doc
-    // 参照）。末尾コンポーネントの fd は `fs::File` へ変換後 `write_all`/
-    // `read_to_string` にのみ使うが、経路の途中で早期 return する可能性が
-    // あるため無条件に付与する。
-    let flags = extra_flags | raw::O_NOFOLLOW | raw::O_CLOEXEC;
-    let fd = if extra_flags & raw::O_CREAT != 0 {
-        let mode: c_uint = 0o600;
-        // SAFETY: openat_dir と同じ契約（parent は検証済み dir-fd・name は
-        // NUL 終端済み）。O_CREAT を渡すため mode を可変長引数側に追加する。
-        unsafe { openat(parent, name.as_ptr(), flags, mode) }
-    } else {
-        // SAFETY: 同上。O_CREAT を含まないため mode は渡さない。
-        unsafe { openat(parent, name.as_ptr(), flags) }
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
+    /// 末尾コンポーネント（ファイル本体）を開く（`O_NOFOLLOW` 必須）。
+    ///
+    /// `extra_flags` に `O_CREAT` を含む場合のみ `mode`（`0o600`）を可変長引数
+    /// として渡す（[`openat`] doc 参照。C 側で `mode_t` は `O_CREAT` 未指定時は
+    /// 未評価だが、可変長引数の有無自体が呼び出し規約に影響するため実引数の
+    /// 個数を一致させる）。
+    fn openat_final(parent: RawFd, name: &CString, extra_flags: i32) -> io::Result<OwnedFd> {
+        // `O_CLOEXEC` を付与する理由は `openat_dir` と同じ（`raw::O_CLOEXEC` doc
+        // 参照）。末尾コンポーネントの fd は `fs::File` へ変換後 `write_all`/
+        // `read_to_string` にのみ使うが、経路の途中で早期 return する可能性が
+        // あるため無条件に付与する。
+        let flags = extra_flags | raw::O_NOFOLLOW | raw::O_CLOEXEC;
+        let fd = if extra_flags & raw::O_CREAT != 0 {
+            let mode: c_uint = 0o600;
+            // SAFETY: openat_dir と同じ契約（parent は検証済み dir-fd・name は
+            // NUL 終端済み）。O_CREAT を渡すため mode を可変長引数側に追加する。
+            unsafe { openat(parent, name.as_ptr(), flags, mode) }
+        } else {
+            // SAFETY: 同上。O_CREAT を含まないため mode は渡さない。
+            unsafe { openat(parent, name.as_ptr(), flags) }
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat_dir と同じ契約（新規かつ有効な所有 fd を OwnedFd で
+        // ラップし close を Drop に委譲する）。
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
-    // SAFETY: openat_dir と同じ契約（新規かつ有効な所有 fd を OwnedFd で
-    // ラップし close を Drop に委譲する）。
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
 
-/// `workspace` から `relative_path` を fd 走査で辿り、末尾コンポーネントを
-/// `final_flags`（`O_RDONLY` または `O_WRONLY | O_CREAT | O_TRUNC`）で開く。
-///
-/// [`read_via_fd_walk`]・[`write_via_fd_walk`]・[`probe`] の共通実体。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-fn walk_to_final(workspace: &Path, relative_path: &Path, final_flags: i32) -> io::Result<OwnedFd> {
-    let parts = split_components(relative_path)?;
-    // `split_last` は `(末尾要素, 残り全部)` を返す。ここでの末尾要素が
-    // ファイル本体（`file_part`）、残りが先頭からの中間ディレクトリ列
-    // （`dir_parts`）である。`split_components` は末尾で空 `Vec` を明示的に
-    // 拒否しているため `None` はここでは到達しないはずだが、本番経路で
-    // `expect()` を使わない（coding-rust.md「本番経路で unwrap()/expect() を
-    // 使わない」）ため型付きエラーへ変換する（security-auditor 監査 Low
-    // 指摘対応）。
-    let (file_part, dir_parts) = parts.split_last().ok_or_else(|| {
-        io::Error::other(format!(
-            "内部不整合: split_components が空の候補パスを返しました（{}）。\
-             split_components の空チェックを確認してください",
-            relative_path.display()
-        ))
-    })?;
-    let mut current = open_root_dir(workspace)?;
-    for part in dir_parts {
-        current = openat_dir(current.as_raw_fd(), part)?;
+    /// `workspace` から `relative_path` を fd 走査で辿り、末尾コンポーネントを
+    /// `final_flags`（`O_RDONLY` または `O_WRONLY | O_CREAT | O_TRUNC`）で開く。
+    ///
+    /// [`read_via_fd_walk`]・[`write_via_fd_walk`]・[`probe`] の共通実体。
+    fn walk_to_final(
+        workspace: &Path,
+        relative_path: &Path,
+        final_flags: i32,
+    ) -> io::Result<OwnedFd> {
+        let parts = split_components(relative_path)?;
+        // `split_last` は `(末尾要素, 残り全部)` を返す。ここでの末尾要素が
+        // ファイル本体（`file_part`）、残りが先頭からの中間ディレクトリ列
+        // （`dir_parts`）である。`split_components` は末尾で空 `Vec` を明示的に
+        // 拒否しているため `None` はここでは到達しないはずだが、本番経路で
+        // `expect()` を使わない（coding-rust.md「本番経路で unwrap()/expect() を
+        // 使わない」）ため型付きエラーへ変換する（security-auditor 監査 Low
+        // 指摘対応）。
+        let (file_part, dir_parts) = parts.split_last().ok_or_else(|| {
+            io::Error::other(format!(
+                "内部不整合: split_components が空の候補パスを返しました（{}）。\
+                 split_components の空チェックを確認してください",
+                relative_path.display()
+            ))
+        })?;
+        let mut current = open_root_dir(workspace)?;
+        for part in dir_parts {
+            current = openat_dir(current.as_raw_fd(), part)?;
+        }
+        openat_final(current.as_raw_fd(), file_part, final_flags)
     }
-    openat_final(current.as_raw_fd(), file_part, final_flags)
-}
 
-/// baseline 復元・候補適用が使う書き込み経路。
-///
-/// `O_WRONLY | O_CREAT | O_TRUNC` で開く。生成 AI 候補は既存モジュール内の
-/// 合成実装に限定され（`feature_addition.rs` の新規ファイル拒否）、
-/// baseline はいずれのコンストラクタも「読み込みに成功した」パスからのみ
-/// 構築される（＝親ディレクトリは常に実在する）ため、本番経路で `O_CREAT`
-/// が実際に新規ファイルを作る場面はない。新規作成の動作自体は
-/// [`crate::candidate`] レベルの `apply_candidate` を直接呼ぶ経路（`pub`
-/// API）でも成立しうるため、汎用性のためのサポートとして残している
-/// （`mkdirat` による中間ディレクトリの新規作成はスコープ外 — 現状の呼び出し
-/// 元にその要求がない）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn write_via_fd_walk(
-    workspace: &Path,
-    relative_path: &Path,
-    content: &str,
-) -> io::Result<()> {
-    let owned = walk_to_final(
-        workspace,
-        relative_path,
-        raw::O_WRONLY | raw::O_CREAT | raw::O_TRUNC,
-    )?;
-    let mut file = fs::File::from(owned);
-    file.write_all(content.as_bytes())
-}
+    /// baseline 復元・候補適用が使う書き込み経路。
+    ///
+    /// `O_WRONLY | O_CREAT | O_TRUNC` で開く。生成 AI 候補は既存モジュール内の
+    /// 合成実装に限定され（`feature_addition.rs` の新規ファイル拒否）、
+    /// baseline はいずれのコンストラクタも「読み込みに成功した」パスからのみ
+    /// 構築される（＝親ディレクトリは常に実在する）ため、本番経路で `O_CREAT`
+    /// が実際に新規ファイルを作る場面はない。新規作成の動作自体は
+    /// [`crate::candidate`] レベルの `apply_candidate` を直接呼ぶ経路（`pub`
+    /// API）でも成立しうるため、汎用性のためのサポートとして残している
+    /// （`mkdirat` による中間ディレクトリの新規作成はスコープ外 — 現状の呼び出し
+    /// 元にその要求がない）。
+    pub(crate) fn write_via_fd_walk(
+        workspace: &Path,
+        relative_path: &Path,
+        content: &str,
+    ) -> io::Result<()> {
+        let owned = walk_to_final(
+            workspace,
+            relative_path,
+            raw::O_WRONLY | raw::O_CREAT | raw::O_TRUNC,
+        )?;
+        let mut file = fs::File::from(owned);
+        file.write_all(content.as_bytes())
+    }
 
-/// baseline スナップショット取得が使う読み込み経路。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn read_via_fd_walk(workspace: &Path, relative_path: &Path) -> io::Result<String> {
-    let owned = walk_to_final(workspace, relative_path, raw::O_RDONLY)?;
-    let mut file = fs::File::from(owned);
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
-    Ok(content)
-}
+    /// baseline スナップショット取得が使う読み込み経路。
+    pub(crate) fn read_via_fd_walk(workspace: &Path, relative_path: &Path) -> io::Result<String> {
+        let owned = walk_to_final(workspace, relative_path, raw::O_RDONLY)?;
+        let mut file = fs::File::from(owned);
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        Ok(content)
+    }
 
-/// `apply_candidate` の upfront 一括検証専用の「歩くだけ」プローブ。
-///
-/// [`crate::candidate::apply_candidate`] は「候補が複数ファイルにまたがる
-/// 場合、一部だけ書き換わった状態で `Err` を返さない」契約を持つ（doc
-/// 参照）。これを実現するには実際の書き込みより前に全パスを検証し尽くす
-/// 必要がある。本関数は [`walk_to_final`] と同じ fd 走査を行うが、開いた
-/// fd は即座に破棄し内容の読み書きは行わない（検証のみ）。
-///
-/// 旧 `reject_symlink_escape` と同じ許容規則を踏襲する: 未実在
-/// （`NotFound`）の中間ディレクトリ・末端ファイルは「まだ作成されていない
-/// だけ」として許容し、実在する symlink（`ELOOP`）や非ディレクトリ
-/// （`ENOTDIR`）等の異常のみを拒否する。
-///
-/// 本関数の判定と実際の書き込み（[`write_via_fd_walk`]）呼び出しとの間には
-/// 検査後の再解決を挟む余地（TOCTOU window）が理論上存在するが、
-/// [`write_via_fd_walk`] 自身が呼び出し時に改めて `O_NOFOLLOW` 付きで
-/// fd 走査するため、この window を悪用しても最終的な書き込みは拒否される
-/// （本関数は「早期失敗によるファイル書き換えの部分適用防止」が目的であり、
-/// symlink 拒否そのものの安全性は保証しない・保証する必要もない）。
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) fn probe(workspace: &Path, relative_path: &Path) -> io::Result<()> {
-    match walk_to_final(workspace, relative_path, raw::O_RDONLY) {
-        Ok(_owned) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+    /// `apply_candidate` の upfront 一括検証専用の「歩くだけ」プローブ。
+    ///
+    /// [`crate::candidate::apply_candidate`] は「候補が複数ファイルにまたがる
+    /// 場合、一部だけ書き換わった状態で `Err` を返さない」契約を持つ（doc
+    /// 参照）。これを実現するには実際の書き込みより前に全パスを検証し尽くす
+    /// 必要がある。本関数は [`walk_to_final`] と同じ fd 走査を行うが、開いた
+    /// fd は即座に破棄し内容の読み書きは行わない（検証のみ）。
+    ///
+    /// 旧 `reject_symlink_escape` と同じ許容規則を踏襲する: 未実在
+    /// （`NotFound`）の中間ディレクトリ・末端ファイルは「まだ作成されていない
+    /// だけ」として許容し、実在する symlink（`ELOOP`）や非ディレクトリ
+    /// （`ENOTDIR`）等の異常のみを拒否する。
+    ///
+    /// 本関数の判定と実際の書き込み（[`write_via_fd_walk`]）呼び出しとの間には
+    /// 検査後の再解決を挟む余地（TOCTOU window）が理論上存在するが、
+    /// [`write_via_fd_walk`] 自身が呼び出し時に改めて `O_NOFOLLOW` 付きで
+    /// fd 走査するため、この window を悪用しても最終的な書き込みは拒否される
+    /// （本関数は「早期失敗によるファイル書き換えの部分適用防止」が目的であり、
+    /// symlink 拒否そのものの安全性は保証しない・保証する必要もない）。
+    pub(crate) fn probe(workspace: &Path, relative_path: &Path) -> io::Result<()> {
+        match walk_to_final(workspace, relative_path, raw::O_RDONLY) {
+            Ok(_owned) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 }
 
-/// Linux・macOS 以外向けの fail-closed フォールバック（モジュール冒頭 doc
-/// 参照）。`O_NOFOLLOW`/`O_DIRECTORY` の値の出典を持たないターゲットでは
-/// 候補適用そのものを一律拒否する。
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn unsupported_platform_error() -> io::Error {
-    io::Error::other(
-        "候補修正の適用は Linux・macOS のみサポートします（fd 走査ベースの \
-         symlink TOCTOU 対策〈openat の O_NOFOLLOW〉が定義された値を持つ \
-         プラットフォームに限定されるため、それ以外では fail-closed に \
-         拒否します）",
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+))]
+pub(crate) use supported::{probe, read_via_fd_walk, write_via_fd_walk};
+
+/// 上記 `supported` モジュールの cfg 境界に含まれないプラットフォーム・
+/// アーキテクチャ向けの fail-closed フォールバック（モジュール冒頭 doc
+/// 参照）。`O_NOFOLLOW`/`O_DIRECTORY` の値の出典を持たない組み合わせでは
+/// 候補適用そのものを一律拒否する。cfg は `supported` 側の否定であるため、
+/// 両者は必ず排他的かつ網羅的になる（片方にのみ実装がある・両方に実装が
+/// ないという不一致が構造的に起こらない）。
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+)))]
+mod unsupported {
+    use std::io;
+    use std::path::Path;
+
+    fn unsupported_platform_error() -> io::Error {
+        io::Error::other(
+            "候補修正の適用は Linux（x86_64/aarch64）・macOS のみサポートします \
+             （fd 走査ベースの symlink TOCTOU 対策〈openat の O_NOFOLLOW〉が \
+             定義された値を持つプラットフォーム・アーキテクチャに限定されるため、\
+             それ以外では fail-closed に拒否します）",
+        )
+    }
+
+    pub(crate) fn write_via_fd_walk(
+        _workspace: &Path,
+        _relative_path: &Path,
+        _content: &str,
+    ) -> io::Result<()> {
+        Err(unsupported_platform_error())
+    }
+
+    pub(crate) fn read_via_fd_walk(_workspace: &Path, _relative_path: &Path) -> io::Result<String> {
+        Err(unsupported_platform_error())
+    }
+
+    pub(crate) fn probe(_workspace: &Path, _relative_path: &Path) -> io::Result<()> {
+        Err(unsupported_platform_error())
+    }
+}
+
+#[cfg(not(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos"
+)))]
+pub(crate) use unsupported::{probe, read_via_fd_walk, write_via_fd_walk};
+
+#[cfg(all(
+    test,
+    any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        target_os = "macos"
     )
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn write_via_fd_walk(
-    _workspace: &Path,
-    _relative_path: &Path,
-    _content: &str,
-) -> io::Result<()> {
-    Err(unsupported_platform_error())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn read_via_fd_walk(_workspace: &Path, _relative_path: &Path) -> io::Result<String> {
-    Err(unsupported_platform_error())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn probe(_workspace: &Path, _relative_path: &Path) -> io::Result<()> {
-    Err(unsupported_platform_error())
-}
-
-#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+))]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
 
     fn temp_workspace(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
