@@ -1,0 +1,18 @@
+# CI ベースライン（Fandhe-AI/actions の rust-base-ci reusable workflow）が前提とする
+# ツールチェーン単一真実源（イシュー #325）。共通側の rust-toolchain-setup action は
+# rustup を `--default-toolchain none` で自己修復導入し、本ファイルへ同期する
+# （rustup show が本ファイルを検出して未導入なら自動インストールする）。
+# channel は移行前 ci.yml の挙動（`--default-toolchain stable` + rustup show）と同じ
+# stable 追従とする。
+# components に rustfmt / clippy を列挙するのは（共通 workflow がジョブごとに冪等追加
+# する local-llm-server では列挙していない）本リポジトリ固有の理由による: self-repair の
+# 検証ゲート（crates/self-repair/src/verify_gates.rs）はリポジトリ外の sandbox
+# （rust-toolchain.toml が及ばない一時ディレクトリ）で cargo clippy を起動するため、
+# 「clippy component を持たない stable」が runner に居ると rust-ci の test ジョブが
+# 落ちる（PR #344 CI 実測）。components を単一真実源に列挙しておけば、本ファイルを
+# 同期するどのジョブでも stable へ両 component が確実に導入される。
+# リポジトリ固有ジョブ（build / build-no-cuda-toolkit 等）の aarch64-apple-darwin
+# target 追加は従来どおりジョブ側の Ensure ステップで行う。
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
