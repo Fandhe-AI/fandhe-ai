@@ -79,6 +79,12 @@ mod raw {
     pub const O_TRUNC: i32 = 0o1000;
     pub const O_DIRECTORY: i32 = 0o200000;
     pub const O_NOFOLLOW: i32 = 0o400000;
+    /// fork/exec で子プロセスへ fd を継承させない（`execve` 時に自動 close）。
+    /// security-auditor 監査 Low 指摘対応: `openat` で得た fd はいずれも
+    /// self-repair プロセス内でのみ使う一時 fd であり、`SelfRepairLoop` が
+    /// 起動する `cargo build`/`test`/`clippy` 子プロセス（`verify_gates.rs`）
+    /// へ意図せず継承されると fd リーク・情報露出につながるため付与する。
+    pub const O_CLOEXEC: i32 = 0o2000000;
 }
 
 /// 出典: macOS `sys/fcntl.h`。
@@ -90,6 +96,8 @@ mod raw {
     pub const O_TRUNC: i32 = 0x0400;
     pub const O_DIRECTORY: i32 = 0x100000;
     pub const O_NOFOLLOW: i32 = 0x0100;
+    /// 上記 Linux 側 `O_CLOEXEC` と同じ理由で付与する。
+    pub const O_CLOEXEC: i32 = 0x1000000;
 }
 
 // `openat(2)` の FFI 宣言。C 側のシグネチャは
@@ -171,7 +179,10 @@ fn open_root_dir(workspace: &Path) -> io::Result<OwnedFd> {
 /// モジュール冒頭 doc が説明する TOCTOU window がここには存在しない。
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn openat_dir(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
-    let flags = raw::O_DIRECTORY | raw::O_NOFOLLOW | raw::O_RDONLY;
+    // `O_CLOEXEC` を付与し、この dir-fd が子プロセス（cargo build/test/clippy
+    // 等）へ継承されないようにする（security-auditor 監査 Low 指摘対応。
+    // `raw::O_CLOEXEC` doc 参照）。
+    let flags = raw::O_DIRECTORY | raw::O_NOFOLLOW | raw::O_RDONLY | raw::O_CLOEXEC;
     // SAFETY: FFI 境界（TOCTOU 排除のための openat 呼び出し。モジュール冒頭
     // doc 参照）。`parent` は呼び出し元（[`walk_to_final`]）が直前の
     // `open_root_dir`/`openat_dir` 呼び出しで取得した有効な dir-fd であり、
@@ -196,7 +207,11 @@ fn openat_dir(parent: RawFd, name: &CString) -> io::Result<OwnedFd> {
 /// 個数を一致させる）。
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn openat_final(parent: RawFd, name: &CString, extra_flags: i32) -> io::Result<OwnedFd> {
-    let flags = extra_flags | raw::O_NOFOLLOW;
+    // `O_CLOEXEC` を付与する理由は `openat_dir` と同じ（`raw::O_CLOEXEC` doc
+    // 参照）。末尾コンポーネントの fd は `fs::File` へ変換後 `write_all`/
+    // `read_to_string` にのみ使うが、経路の途中で早期 return する可能性が
+    // あるため無条件に付与する。
+    let flags = extra_flags | raw::O_NOFOLLOW | raw::O_CLOEXEC;
     let fd = if extra_flags & raw::O_CREAT != 0 {
         let mode: c_uint = 0o600;
         // SAFETY: openat_dir と同じ契約（parent は検証済み dir-fd・name は
@@ -223,10 +238,18 @@ fn walk_to_final(workspace: &Path, relative_path: &Path, final_flags: i32) -> io
     let parts = split_components(relative_path)?;
     // `split_last` は `(末尾要素, 残り全部)` を返す。ここでの末尾要素が
     // ファイル本体（`file_part`）、残りが先頭からの中間ディレクトリ列
-    // （`dir_parts`）である。
-    let (file_part, dir_parts) = parts
-        .split_last()
-        .expect("split_components は空 Vec を返さない（上の空チェック参照）");
+    // （`dir_parts`）である。`split_components` は末尾で空 `Vec` を明示的に
+    // 拒否しているため `None` はここでは到達しないはずだが、本番経路で
+    // `expect()` を使わない（coding-rust.md「本番経路で unwrap()/expect() を
+    // 使わない」）ため型付きエラーへ変換する（security-auditor 監査 Low
+    // 指摘対応）。
+    let (file_part, dir_parts) = parts.split_last().ok_or_else(|| {
+        io::Error::other(format!(
+            "内部不整合: split_components が空の候補パスを返しました（{}）。\
+             split_components の空チェックを確認してください",
+            relative_path.display()
+        ))
+    })?;
     let mut current = open_root_dir(workspace)?;
     for part in dir_parts {
         current = openat_dir(current.as_raw_fd(), part)?;
