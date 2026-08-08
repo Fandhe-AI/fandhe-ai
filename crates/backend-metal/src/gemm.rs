@@ -348,6 +348,14 @@ impl MetalGemm {
         validate_dims_f16(a, b, m, n, k)?;
 
         let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+        // `pad_matrix_f16`／`m_eff * n_eff`（バッファ確保サイズ算出）より
+        // 前に実効次元のオーバーフロー／`u32` 範囲検証を行う（f32 側の
+        // `dispatch_variant` と同じ順序。PR #346 Bugbot 指摘: 本チェックを
+        // `dispatch_f16_prepared` 内のみに委ねると、大きな padding 後の
+        // shape に対してこのパディング処理・確保サイズ計算が検証前に
+        // 実行されてしまう）。戻り値の `Dims` は
+        // `dispatch_f16_prepared` 側で改めて算出するため破棄する。
+        validate_effective_dims(m_eff, n_eff, k_eff)?;
 
         let a_padded = pad_matrix_f16(a, m, k, m_eff, k_eff);
         let b_padded = pad_matrix_f16(b, k, n, k_eff, n_eff);
