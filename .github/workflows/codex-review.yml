@@ -1,0 +1,34 @@
+# OpenAI Codex CLI による PR 自動レビュー（Fandhe-AI/actions の codex-review reusable
+# workflow を SHA 固定で呼び出す薄い wrapper。イシュー #326）。
+# Fandhe-AI/actions の codex-review/templates/codex-review.private.yml（private リポジトリ
+# 向けテンプレート）を導入手順（codex-review/README.md「セットアップ」）どおりコピーし、
+# <SHA> を差し替えたもの。fandhe-backend / local-llm-server の同名 wrapper と同型。
+# 実装本体・多層防御の設計コメントは共通側 .github/workflows/codex-review.yml を参照。
+# 有効化スイッチは Actions variable CODEX_HOME_DIR（未設定の間は codex ジョブが skip
+# される fail-closed 設計。runner 側の準備が済むまでレビューは実行されない）。
+name: Codex PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+# reusable workflow のトップレベル concurrency は機能しないため呼び出し側で設定する
+concurrency:
+  group: codex-review-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  codex-review:
+    # <SHA> は Fandhe-AI/actions のコミット SHA で固定する（@main 不可）
+    uses: Fandhe-AI/actions/.github/workflows/codex-review.yml@5982e2f502a19effc36a7b161660b5a4ea17b886 # main
+    permissions:
+      contents: read
+      pull-requests: write
+    # private リポジトリでは runner 既定値（codex ジョブ: codex / コメント投稿ジョブ:
+    # self-hosted）が組織 runner 方針に合致するため、runner ラベルの指定は不要。
+    # 詳細は Fandhe-AI/actions の docs/runner-policy.md・
+    # docs/codex-review-runner-exception.md を参照。
