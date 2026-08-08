@@ -52,13 +52,26 @@
 //! ため、本クレートからの workspace 参照追加はユーザー承認必須の新規依存追加に当たらないと
 //! 判断した（#27 実装時の「自動運転下では serde derive を追加しない」判断は #27 の
 //! スコープ境界の表明であり、構造化出力自体が実装範囲の本イシューで上書きする）。
+//!
+//! ## TASK-8.2a: 段階的下限表の自動合否判定（本イシュー #152 の実装範囲）
+//!
+//! [`threshold`] モジュールが REQ-8 段階的下限表（バックエンド×dtype×段階）をデータ化し、
+//! [`BenchReport`] 同士（自作実装対 PyTorch 参照実装）から実測比率を算出して合否を
+//! 自動判定する（[`threshold::judge`]）。丸め規則（10% 以上 5% 刻み・10% 未満 1% 刻み）の
+//! 共通ロジック化は別イシュー（TASK-8.2b）のスコープであり、本モジュールは spec 側で
+//! 丸め規則適用済みの確定定数（[`threshold::floor_spec`]）を保持するのみに留める。
 
 mod protocol;
 mod report;
 pub mod rng;
 mod stats;
 pub mod sync;
+mod threshold;
 
 pub use protocol::{Measurement, MeasurementConfig, run};
 pub use report::{BenchReport, SCHEMA_VERSION};
 pub use stats::{BenchError, Quartiles, median_q1_q3};
+pub use threshold::{
+    BackendDtype, FloorJudgment, FloorSpec, Stage, THRESHOLD_SCHEMA_VERSION, Verdict, floor_spec,
+    judge,
+};
