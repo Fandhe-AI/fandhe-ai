@@ -20,11 +20,23 @@
 
 use std::fmt;
 
+/// 実測比率（パーセント値）の妥当性上限。
+///
+/// 実測比率は「対 PyTorch の所要時間比」であり、常識的には数百 % 程度に収まる
+/// （実装が参照実装よりわずかに遅い場合でも高々数倍）。この上限を大きく超える値は
+/// 丸め規則の入力として尤もらしくなく、参照実装側の計測時間がゼロに近い等の
+/// 計測異常（レポート破損・ゼロ除算的な比率爆発）を疑うべき fail-closed 対象とする
+/// （Review 指摘: 負値側のみ fail-closed で上限側が fail-open だった非対称性の解消）。
+/// `docs/spec/04-requirements.md` REQ-8 の丸め例（最大 23.2%）に対し十分な余裕を持たせつつ、
+/// `floor_lower_bound(1e12)` のような明らかな異常値を `u32` への飽和キャストで
+/// 「もっともらしい」下限として黙って受理しないための閾値である。
+const MAX_PLAUSIBLE_PERCENT: f64 = 1_000.0;
+
 /// [`floor_lower_bound`] の入力検証エラー。
 ///
 /// 実測比率は計測レポート（JSON 等の外部入力）由来となりうるため、
 /// 本番経路で `unwrap()` / `expect()` を使わない方針（`.claude/rules/coding-rust.md`）に従い、
-/// NaN・無限大・負値を fail-closed に拒否する。ガードレール（将来配線）が丸め結果を
+/// NaN・無限大・負値・異常な大値を fail-closed に拒否する。ガードレール（将来配線）が丸め結果を
 /// 性能下限の合否判定に用いる以上、判定不能な入力を黙って通さないことが重要となる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoundingError {
@@ -32,6 +44,8 @@ pub enum RoundingError {
     NonFinite,
     /// 実測比率が負（計測異常。所要時間・スループット比が負になることはない）。
     Negative,
+    /// 実測比率が妥当性上限（`MAX_PLAUSIBLE_PERCENT`、非公開定数）を超える（計測異常の可能性が高い）。
+    TooLarge,
 }
 
 impl fmt::Display for RoundingError {
@@ -39,6 +53,10 @@ impl fmt::Display for RoundingError {
         match self {
             RoundingError::NonFinite => write!(f, "実測比率が NaN または無限大で判定不能"),
             RoundingError::Negative => write!(f, "実測比率が負であり計測異常の可能性がある"),
+            RoundingError::TooLarge => write!(
+                f,
+                "実測比率が上限（{MAX_PLAUSIBLE_PERCENT}%）を超えており計測異常の可能性がある"
+            ),
         }
     }
 }
@@ -63,12 +81,19 @@ impl std::error::Error for RoundingError {}
 ///
 /// - `measured_percent` が NaN または無限大の場合は [`RoundingError::NonFinite`]
 /// - `measured_percent` が負の場合は [`RoundingError::Negative`]
+/// - `measured_percent` が妥当性上限（`MAX_PLAUSIBLE_PERCENT`、非公開定数）を超える場合は
+///   [`RoundingError::TooLarge`]
+///   （計測異常により比率が爆発したケースを、`u32` への飽和キャストで「もっともらしい」
+///   下限として黙って通さないための fail-closed 拒否。負値側の拒否と対称にする）
 pub fn floor_lower_bound(measured_percent: f64) -> Result<u32, RoundingError> {
     if !measured_percent.is_finite() {
         return Err(RoundingError::NonFinite);
     }
     if measured_percent < 0.0 {
         return Err(RoundingError::Negative);
+    }
+    if measured_percent > MAX_PLAUSIBLE_PERCENT {
+        return Err(RoundingError::TooLarge);
     }
 
     // 境界（10% ちょうど）は `>=` により 5% 刻み側（10% 以上側）を適用する
@@ -182,5 +207,24 @@ mod tests {
     #[test]
     fn negative_is_rejected() {
         assert_eq!(floor_lower_bound(-0.1), Err(RoundingError::Negative));
+    }
+
+    #[test]
+    fn too_large_is_rejected() {
+        // Review 指摘: 参照実装側の計測時間がゼロに近い等の計測異常で比率が爆発した場合、
+        // 上限チェックなしでは `(x/step).floor()*step` が `u32` へ飽和キャストされ
+        // 「もっともらしい」下限を黙って返してしまっていた（floor_lower_bound(1e12) が
+        // RoundingError にならず 4294967295 を返す非対称性）。上限超過を fail-closed で拒否する。
+        assert_eq!(floor_lower_bound(1e12), Err(RoundingError::TooLarge));
+        assert_eq!(
+            floor_lower_bound(MAX_PLAUSIBLE_PERCENT + 0.1),
+            Err(RoundingError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn max_plausible_percent_boundary_is_accepted() {
+        // 上限ちょうどは許容側（拒否しない）。
+        assert_eq!(floor_lower_bound(MAX_PLAUSIBLE_PERCENT), Ok(1_000));
     }
 }
