@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn forward_mean_matches_var_mse_loss() {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let pred = tape.var(&tensor_core::Tensor::new(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]).unwrap());
         let target =
             tape.var(&tensor_core::Tensor::new(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]).unwrap());
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn forward_sum_matches_var_mse_loss_with() {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let pred = tape.var(&tensor_core::Tensor::new(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]).unwrap());
         let target =
             tape.var(&tensor_core::Tensor::new(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]).unwrap());
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn forward_propagates_shape_mismatch_error() {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let pred = tape.var(&tensor_core::Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
         let target = tape.var(&tensor_core::Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap());
 

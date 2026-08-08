@@ -6,6 +6,8 @@
 //! shape 不整合・クロステープ検査の異常系、`RefCell` 借用モデルの
 //! 回帰も併せて検証する（実機依存なし。CI 実行可能）。
 
+mod common;
+
 use autodiff::{AutodiffError, Tape};
 use tensor_core::Tensor;
 
@@ -17,7 +19,7 @@ fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
 ///    ノード数が発生順に増加することを検証する（受け入れ条件の直接検証）。
 #[test]
 fn forward_execution_records_nodes_in_order() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     assert!(tape.is_empty());
 
     // x: [2,2], w: [2,2], b: [2] (bias broadcast), target: [2,2]
@@ -48,7 +50,7 @@ fn forward_execution_records_nodes_in_order() {
 ///    期待値と一致することを確認する。
 #[test]
 fn forward_values_match_expected() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
 
     let a = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]));
     let b = tape.var(&t(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]));
@@ -99,7 +101,7 @@ fn forward_values_match_expected() {
 ///    sum の dim 範囲外）が `AutodiffError::Shape(..)` を返すことを検証する。
 #[test]
 fn shape_mismatches_return_shape_error() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
 
     let a = tape.var(&t(vec![1.0, 2.0, 3.0], &[1, 3]));
     let bad_rhs = tape.var(&t(vec![1.0, 2.0], &[2, 1]));
@@ -120,8 +122,8 @@ fn shape_mismatches_return_shape_error() {
 ///    ことを検証する（クロステープ安全性。`docs/public-api-design.md` §3.1）。
 #[test]
 fn cross_tape_operations_return_tape_mismatch() {
-    let tape_a = Tape::new();
-    let tape_b = Tape::new();
+    let tape_a = Tape::new_with_ops(common::naive_ops());
+    let tape_b = Tape::new_with_ops(common::naive_ops());
 
     let a = tape_a.var(&t(vec![1.0, 2.0], &[2]));
     let b = tape_b.var(&t(vec![1.0, 2.0], &[2]));
@@ -145,7 +147,7 @@ fn cross_tape_operations_return_tape_mismatch() {
 ///    ことを検証する（`RefCell` 借用モデルの回帰テスト）。
 #[test]
 fn to_tensor_does_not_hold_borrow_across_node_addition() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let a = tape.var(&t(vec![1.0, 2.0], &[2]));
     let owned = a.to_tensor();
     assert_eq!(owned.get(&[0]).unwrap(), 1.0);
@@ -167,7 +169,7 @@ fn to_tensor_does_not_hold_borrow_across_node_addition() {
 ///     記録される」の Sigmoid 個別確認）。
 #[test]
 fn sigmoid_records_single_node() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, -1.0], &[2]));
     let before = tape.len();
     let _ = x.sigmoid();
@@ -178,7 +180,7 @@ fn sigmoid_records_single_node() {
 ///    記録を検証する。
 #[test]
 fn broadcast_add_bias_over_matrix() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&t(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]));
     let bias = tape.var(&t(vec![10.0, 20.0, 30.0], &[3]));
     let before = tape.len();

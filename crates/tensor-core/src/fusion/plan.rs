@@ -47,7 +47,9 @@
 
 use super::detect::FusionSegment;
 use super::graph::{FusionGraph, FusionGraphError, FusionOp};
+use crate::device::BackendError;
 use crate::dispatch::DType;
+use crate::error::ShapeError;
 use std::collections::HashMap;
 use std::fmt;
 
@@ -182,6 +184,57 @@ impl fmt::Display for FusionPlanError {
 }
 
 impl std::error::Error for FusionPlanError {}
+
+/// [`FusionPlanError`] を [`BackendError`] へ変換する（TASK-12.1d・
+/// #164）。`autodiff::tape::build_lazy_plan`
+/// （`crates/autodiff/src/tape.rs`）は自身の遅延ノード連鎖から組み立てた
+/// `ops` を [`FusionPlan::from_ops`] へ渡し、戻り値を `Result<_,
+/// BackendError>`（層 1／層 2 の実体化ヘルパーが共通で扱うエラー型。
+/// `AutodiffError::Backend` 経由で呼び出し元へ伝播する）へ `?` でそのまま
+/// 合流させる契約のため、この変換が必要になる。`from_ops` の防御的検証
+/// エラーは実運用では到達しない想定（本モジュール冒頭「構築経路」参照）
+/// のため、各 variant を対応する [`ShapeError::ElementCountMismatch`]／
+/// [`ShapeError::ElementCountOverflow`] へロスありで丸める（`autodiff`
+/// 側は `Unsupported` と区別さえできればよく、fail-safe な per-op
+/// フォールバック〈`materialize_fallible`〉へ委ねる設計とは独立に、この
+/// 変換自体は「型不変条件違反」を表す `ShapeMismatch` 系へ寄せる）。
+impl From<FusionPlanError> for BackendError {
+    fn from(err: FusionPlanError) -> Self {
+        match err {
+            FusionPlanError::IndexOutOfRange { index, at } => {
+                BackendError::ShapeMismatch(ShapeError::ElementCountMismatch {
+                    expected: at,
+                    actual: index,
+                })
+            }
+            FusionPlanError::LeafIndexOutOfRange {
+                leaf_index,
+                leaf_count,
+            } => BackendError::ShapeMismatch(ShapeError::ElementCountMismatch {
+                expected: leaf_count,
+                actual: leaf_index,
+            }),
+            FusionPlanError::LeafCountMismatch { declared, actual } => {
+                BackendError::ShapeMismatch(ShapeError::ElementCountMismatch {
+                    expected: declared,
+                    actual,
+                })
+            }
+            FusionPlanError::DuplicateLeafIndex { leaf_index } => {
+                BackendError::ShapeMismatch(ShapeError::ElementCountMismatch {
+                    expected: leaf_index,
+                    actual: leaf_index,
+                })
+            }
+            FusionPlanError::NoElementwiseNode | FusionPlanError::LastOpIsInput => {
+                BackendError::Unsupported(err.to_string())
+            }
+            FusionPlanError::OutputShapeOverflow => {
+                BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
+            }
+        }
+    }
+}
 
 /// `run_fused`（`BackendOps` の非破壊拡張。実装は #164）へ渡す公開の
 /// 不透明ハンドル。`BackendOps` は `pub trait`（`backend-cpu`／

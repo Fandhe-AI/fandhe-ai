@@ -17,10 +17,11 @@
 //! FMA 契約統一済みのため、`MatMul` の VJP もここを経由するだけで
 //! 契約を引き継ぐ）。
 
-use tensor_core::Tensor;
+use tensor_core::{BackendOps, Tensor};
 
+use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
-use crate::tape::{NodeId, Op, TapeNode};
+use crate::tape::{NodeId, Op, TapeNode, materialize_fallible};
 use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -28,32 +29,43 @@ use crate::var::Reduction;
 /// 当該ノードの forward 記録値で、`Exp`/`Tanh`/`Sigmoid`/`Max` が
 /// 再計算を避けて再利用する（`Sigmoid` は TASK-9.1b・#92 で追加）。
 /// `Op::Leaf` は入力を持たないため空 `Vec` を返す。
+///
+/// **TASK-12.1d（#164）**: `Add`／`Sum` の入力 shape は `TapeNode.shape`
+/// （実体化なしに算出済み。`tape.rs`）から直接読み、実体化を要求しない
+/// （`docs/fusion-graph-design.md` §3.5.1）。`MatMul`／`Mul`／`Relu`／
+/// `Max`／`MseLoss`／`CrossEntropyLoss` は入力の実際の値を要するため、
+/// forward 記録済みの未実体化ノードを [`materialize_fallible`]（層 1。
+/// `run_fused` の失敗のうち `Unsupported` 以外は `?` で伝播する）経由で
+/// 読む（`Var::value`〈層 2〉は呼ばない。§3.5.2）。
 pub(crate) fn vjp(
     op: &Op,
     out_value: &Tensor<f32>,
     upstream: &Tensor<f32>,
     nodes: &[TapeNode],
-) -> Vec<(NodeId, Tensor<f32>)> {
+    ops: &dyn BackendOps,
+) -> Result<Vec<(NodeId, Tensor<f32>)>, AutodiffError> {
     // `Op` は `CrossEntropyLoss` の `targets: Tensor<i32>` payload
     // ゆえに `Copy` を持たない（`tape.rs::Op` doc 参照）。旧
     // `match *op`（`Copy` 前提の値コピー）を `op.clone()` に置き換え、
     // それ以外の分岐は変更しない。
-    match op.clone() {
+    let contributions = match op.clone() {
         Op::Leaf => Vec::new(),
         Op::MatMul(a, b) => {
-            let (da, db) = matmul_vjp(&nodes[a.0].value, &nodes[b.0].value, upstream);
+            let a_val = materialize_fallible(nodes, ops, a)?;
+            let b_val = materialize_fallible(nodes, ops, b)?;
+            let (da, db) = matmul_vjp(a_val, b_val, upstream);
             vec![(a, da), (b, db)]
         }
         Op::Add(a, b) => {
-            let a_shape = nodes[a.0].value.shape();
-            let b_shape = nodes[b.0].value.shape();
+            let a_shape = &nodes[a.0].shape;
+            let b_shape = &nodes[b.0].shape;
             let da = reduce_to_shape(upstream, a_shape);
             let db = reduce_to_shape(upstream, b_shape);
             vec![(a, da), (b, db)]
         }
         Op::Mul(a, b) => {
-            let a_val = &nodes[a.0].value;
-            let b_val = &nodes[b.0].value;
+            let a_val = materialize_fallible(nodes, ops, a)?;
+            let b_val = materialize_fallible(nodes, ops, b)?;
             let da = reduce_to_shape(&eval::mul(upstream, b_val), a_val.shape());
             let db = reduce_to_shape(&eval::mul(upstream, a_val), b_val.shape());
             vec![(a, da), (b, db)]
@@ -61,7 +73,8 @@ pub(crate) fn vjp(
         Op::Relu(a) => {
             // 劣勾配は x = 0 で 0 とする（PoC-v2-2 準拠）。NaN 入力は
             // マスク不成立（`v > 0.0` が false）となり勾配 0 を返す。
-            let da = elementwise_mul_mask(upstream, &nodes[a.0].value, |v| v > 0.0);
+            let a_val = materialize_fallible(nodes, ops, a)?;
+            let da = elementwise_mul_mask(upstream, a_val, |v| v > 0.0);
             vec![(a, da)]
         }
         Op::Exp(a) => {
@@ -85,12 +98,13 @@ pub(crate) fn vjp(
             vec![(a, da)]
         }
         Op::Sum { input, dim } => {
-            let input_shape = nodes[input.0].value.shape();
+            let input_shape = &nodes[input.0].shape;
             let da = unreduce_broadcast(upstream, input_shape, dim);
             vec![(input, da)]
         }
         Op::Max { input, dim } => {
-            let da = max_vjp(&nodes[input.0].value, dim, out_value, upstream);
+            let input_val = materialize_fallible(nodes, ops, input)?;
+            let da = max_vjp(input_val, dim, out_value, upstream);
             vec![(input, da)]
         }
         Op::MseLoss {
@@ -98,12 +112,9 @@ pub(crate) fn vjp(
             target,
             reduction,
         } => {
-            let (dpred, dtarget) = mse_loss_vjp(
-                &nodes[pred.0].value,
-                &nodes[target.0].value,
-                upstream,
-                reduction,
-            );
+            let pred_val = materialize_fallible(nodes, ops, pred)?;
+            let target_val = materialize_fallible(nodes, ops, target)?;
+            let (dpred, dtarget) = mse_loss_vjp(pred_val, target_val, upstream, reduction);
             vec![(pred, dpred), (target, dtarget)]
         }
         Op::CrossEntropyLoss {
@@ -112,19 +123,16 @@ pub(crate) fn vjp(
             class_dim,
             reduction,
         } => {
-            let dlogits = cross_entropy_loss_vjp(
-                &nodes[logits.0].value,
-                &targets,
-                class_dim,
-                reduction,
-                upstream,
-            );
+            let logits_val = materialize_fallible(nodes, ops, logits)?;
+            let dlogits =
+                cross_entropy_loss_vjp(logits_val, &targets, class_dim, reduction, upstream);
             // `targets` は非追跡（`Var`/`NodeId` を持たない）ため勾配
             // 寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
             // CrossEntropyLoss` doc 参照）。
             vec![(logits, dlogits)]
         }
-    }
+    };
+    Ok(contributions)
 }
 
 /// 2 次元 `matmul` の転置。shape 検査は forward（`Var::matmul` →
@@ -958,10 +966,24 @@ mod tests {
     // CrossEntropyLoss）。
 
     fn leaf_node(value: Tensor<f32>) -> TapeNode {
+        // `TapeNode`（TASK-12.1d・#164）は `shape` を独立フィールドとして
+        // 持ち、`value` は `OnceCell` になった。テスト用の葉ノードは
+        // 常に実体化済み（`OnceCell::from`）として構築する。
+        let shape = value.shape().to_vec();
         TapeNode {
             op: Op::Leaf,
-            value,
+            shape,
+            value: std::cell::OnceCell::from(value),
         }
+    }
+
+    /// `vjp()` の第 5 引数（`ops: &dyn BackendOps`）用テストフィクスチャ。
+    /// 本モジュールのテストはすべて `leaf_node` で葉ノード（常に実体化
+    /// 済み）のみを組み立てるため `materialize_fallible` は早期リターン
+    /// し、`ops` の実体は使われない（`crate::test_support::TestOps` を
+    /// 形式的に渡すのみ）。
+    fn test_ops() -> crate::test_support::TestOps {
+        crate::test_support::TestOps
     }
 
     #[test]
@@ -974,7 +996,7 @@ mod tests {
         let op = Op::MatMul(NodeId(0), NodeId(1));
         let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -992,7 +1014,7 @@ mod tests {
         let nodes = vec![leaf_node(a), leaf_node(b)];
         let op = Op::Add(NodeId(0), NodeId(1));
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1010,7 +1032,7 @@ mod tests {
         let nodes = vec![leaf_node(a.clone()), leaf_node(b.clone())];
         let op = Op::Mul(NodeId(0), NodeId(1));
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1027,7 +1049,7 @@ mod tests {
         let nodes = vec![leaf_node(a.clone())];
         let op = Op::Relu(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1045,7 +1067,7 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Exp(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1063,7 +1085,7 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Tanh(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1079,7 +1101,7 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Sigmoid(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1098,7 +1120,7 @@ mod tests {
             dim: Some(0),
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1117,7 +1139,7 @@ mod tests {
             dim: Some(0),
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1138,7 +1160,7 @@ mod tests {
             reduction: Reduction::Mean,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1163,7 +1185,7 @@ mod tests {
             reduction: Reduction::Sum,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1192,7 +1214,7 @@ mod tests {
             reduction: Reduction::Mean,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes);
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));

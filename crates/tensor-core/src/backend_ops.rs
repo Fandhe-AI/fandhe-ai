@@ -48,6 +48,7 @@
 
 use crate::Tensor;
 use crate::device::{BackendError, Device};
+use crate::fusion::FusionPlan;
 
 /// GEMM epilogue で適用する activation 種別（TASK-12.1f・#203）。
 ///
@@ -152,6 +153,32 @@ pub trait BackendOps {
             Activation::Relu => self.relu(&out)?,
         };
         Ok(out)
+    }
+
+    /// 融合グラフ（#162 が検出した elementwise 連鎖・#163 が生成する
+    /// カーネル）を 1 回のカーネル呼び出しで実行する（TASK-12.1d・#164）。
+    ///
+    /// `gemm_bias_act` と同型の非破壊拡張（デフォルトメソッド追加）。
+    /// デフォルト実装は `BackendError::Unsupported` を返す fail-safe
+    /// （既存 elementwise・reduction 未実装カーネルと同じ設計）であり、
+    /// `autodiff::Tape` の実体化経路（`materialize_fallible`／
+    /// `materialize_non_fallible`。`crates/autodiff/src/tape.rs`）は
+    /// `Unsupported` を検出した場合に `leaves` を使わず `self`（同じ
+    /// `ops`）の per-op メソッド（`add`／`mul`／`relu`／`exp`／`tanh`）へ
+    /// 逐次フォールバックする契約（`docs/fusion-graph-design.md` §3.4・
+    /// §3.5.2・§3.5.3）。CPU 融合実行の提供元は `backend-cpu` 側の
+    /// `run_fused` オーバーライド（#163 のスコープ。本イシュー〈#164〉
+    /// 時点では #163 が未マージのため、CPU 側も本デフォルト実装のまま
+    /// フォールバックする）。CUDA／Metal は融合カーネル生成が未実装の間
+    /// このデフォルトへフォールバックする。
+    fn run_fused(
+        &self,
+        _plan: &FusionPlan,
+        _leaves: &[&Tensor<f32>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "run_fused: default fail-safe (no fusion kernel available)".into(),
+        ))
     }
 }
 
@@ -406,5 +433,34 @@ mod tests {
             actual: 1,
         });
         assert!(!shape_err.to_string().is_empty());
+    }
+
+    #[test]
+    fn run_fused_default_returns_unsupported() {
+        // `run_fused`（TASK-12.1d・#164）のデフォルト実装は `Unsupported`
+        // を返す fail-safe（`gemm_bias_act` 等の既存 elementwise・
+        // reduction 未実装カーネルと同型の設計。backend_ops.rs 冒頭コメ
+        // ント参照）。`MockOps` はこのデフォルトを override しない。
+        let ops = MockOps(Device::Cpu);
+        // `from_ops`（`fusion::plan`。TASK-12.1c・#163）は「`Input` エント
+        // リのみで elementwise ノードが 1 個も無い」プランを
+        // `FusionPlanError::NoElementwiseNode` として拒否する契約
+        // （融合する意味が無いため。`plan.rs` ドキュメント参照）ため、本
+        // テストは最小の elementwise ノード（`Relu`）を 1 個含む有効な
+        // プランを使う。
+        let plan = crate::fusion::FusionPlan::from_ops(
+            vec![
+                crate::fusion::FusedOpKind::Input { leaf_index: 0 },
+                crate::fusion::FusedOpKind::Relu { input: 0 },
+            ],
+            vec![4],
+            crate::dispatch::DType::F32,
+            1,
+        )
+        .expect("from_ops should succeed for a minimal single-op plan");
+        let leaf = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let leaves: Vec<&Tensor<f32>> = vec![&leaf];
+        let result = ops.run_fused(&plan, &leaves);
+        assert!(matches!(result, Err(BackendError::Unsupported(_))));
     }
 }

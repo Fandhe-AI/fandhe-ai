@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn relu_forward_matches_var_relu() {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let x = tape.var(&tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
         let before = tape.len();
 
@@ -87,7 +87,7 @@ mod tests {
 
     #[test]
     fn sigmoid_forward_matches_var_sigmoid() {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let x = tape.var(&tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
         let before = tape.len();
 
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn tanh_forward_matches_var_tanh() {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let x = tape.var(&tensor_core::Tensor::new(vec![-1.0, 2.0], &[2]).unwrap());
         let before = tape.len();
 

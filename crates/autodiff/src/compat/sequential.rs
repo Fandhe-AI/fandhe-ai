@@ -15,7 +15,7 @@
 //! 本イシューのスコープ外として PR 本文に記録する
 //! （`.claude/rules/out-of-scope-tracking.md`）。
 
-use tensor_core::Tensor;
+use tensor_core::{BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::nn::activation::{Relu, Sigmoid, Tanh};
@@ -98,11 +98,35 @@ impl Sequential {
     /// `Tensor<f32>` を返す（`Tape` はこの呼び出しのスコープ内で破棄
     /// される。`nn/linear.rs` の「`Tape` はステップごとに生成・破棄
     /// される前提」と同じ運用）。
-    pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
-        let tape = Tape::new();
+    ///
+    /// **TASK-12.1d（#164）**: `Tape::new_with_ops(ops)` の破壊的変更に伴い `ops`
+    /// を引数で受け取る（`autodiff` は具体バックエンドへ依存しないため
+    /// `backend-cpu` 等の解決は呼び出し元の責務。`docs/
+    /// fusion-graph-design.md` §3.4「`Device` → 具体 `BackendOps` の
+    /// 構築・結線は `facade` クレート（TASK-9.3）が担う」。`facade` 未
+    /// 実装の現時点では呼び出し元がテスト用フィクスチャ等を直接渡す）。
+    /// 無引数版が必要な場合は [`Sequential::predict`] を使う（codex-review
+    /// 第 19〜21 波・PR #403 の P1 是正で本メソッドから改名した compat 経路）。
+    pub fn predict_with_ops(
+        &self,
+        input: &Tensor<f32>,
+        ops: Box<dyn BackendOps + Send>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let tape = Tape::new_with_ops(ops);
         let input_var = tape.var(input);
         let output = self.forward(&tape, &input_var)?;
         Ok(output.to_tensor())
+    }
+
+    /// 推論の入口（無引数 `ops` 版。codex-review 第 19〜21 波・PR #403 の
+    /// P1 是正で追加した compat 経路）。`default_ops::naive_ops()`（`eval.rs`
+    /// へ委譲する naive CPU 参照実装。具体バックエンドクレートには
+    /// 依存しない）を `ops` に使い [`Sequential::predict_with_ops`] へ
+    /// 委譲する。性能が必要な呼び出し元は `predict_with_ops` へ最適化済み
+    /// `BackendOps` を明示的に渡すこと（`crate::default_ops` モジュール
+    /// 冒頭コメント参照）。
+    pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        self.predict_with_ops(input, crate::default_ops::naive_ops())
     }
 }
 
@@ -126,7 +150,9 @@ mod tests {
 
         let batch = 3;
         let input = Tensor::new(vec![0.1_f32; batch * 8], &[batch, 8]).unwrap();
-        let output = model.predict(&input).unwrap();
+        let output = model
+            .predict_with_ops(&input, crate::test_support::test_ops())
+            .unwrap();
 
         assert_eq!(output.shape(), &[batch, 4]);
     }
@@ -146,7 +172,7 @@ mod tests {
         let input_tensor = Tensor::new(input_data, &[batch, 8]).unwrap();
 
         // 手動経路: Linear -> ReLU -> Linear を直接組み立てる。
-        let manual_tape = Tape::new();
+        let manual_tape = Tape::new_with_ops(crate::test_support::test_ops());
         let manual_input = manual_tape.var(&input_tensor);
         let h = linear1.bind(&manual_tape).forward(&manual_input).unwrap();
         let h = h.relu();
@@ -156,7 +182,7 @@ mod tests {
         let model = Sequential {
             layers: vec![Box::new(linear1), Box::new(Relu), Box::new(linear2)],
         };
-        let seq_tape = Tape::new();
+        let seq_tape = Tape::new_with_ops(crate::test_support::test_ops());
         let seq_input = seq_tape.var(&input_tensor);
         let seq_output = model.forward(&seq_tape, &seq_input).unwrap();
 
@@ -175,7 +201,7 @@ mod tests {
             .unwrap()
             .add_sigmoid();
 
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let input = tape.var(&Tensor::new(vec![0.1_f32, 0.2, 0.3, 0.4], &[1, 4]).unwrap());
         let output = model.forward(&tape, &input).unwrap();
         let loss = output.sum(None).unwrap();

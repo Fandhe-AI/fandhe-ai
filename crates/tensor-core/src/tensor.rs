@@ -160,6 +160,74 @@ impl<T: Element> Tensor<T> {
         })
     }
 
+    /// 総コンストラクタ（TASK-12.1d・#164）: `shape` から `numel` を導出し、
+    /// 添字 `0..numel` を `fill` で埋めて構築する。`autodiff::eval`
+    /// （`crates/autodiff/src/eval.rs`）が「shape とデータ長の一致を型で
+    /// 保証する」ことで `unreachable!()` 経由のフォールバックを排除する
+    /// ための土台として追加した（`docs/fusion-graph-design.md` §2.5
+    /// 「eval.rs 非 panic 化の設計方針」）。
+    ///
+    /// **要素数計算は `checked_numel`（本ファイル冒頭）を使い `Result` を
+    /// 返す（PR #403 codex-review P1 是正）**: 本関数は `pub`（技術上
+    /// `#[doc(hidden)]` だが可視性としては公開）のクレート間契約であり、
+    /// 任意の `shape`（例: `[usize::MAX, 2]`）を渡す呼び出しを排除できない。
+    /// 旧実装は `row_major_strides`（`tensor.rs:82`）と同じ
+    /// `saturating_mul` で要素数積を `usize::MAX` へ飽和させたまま
+    /// `(0..numel).collect()` していたため、そのような shape を渡すと
+    /// 実質最大サイズの allocation を試み OOM abort／allocation panic を
+    /// 起こしうる公開 DoS 経路になっていた（本番経路 panic 禁止規約
+    /// `.claude/rules/coding-rust.md` にも反する）。`checked_numel` による
+    /// 事前検査でオーバーフロー shape を `Err(ShapeError::
+    /// ElementCountOverflow)` として弾き、呼び出し元に型付きエラーとして
+    /// 伝播させる。
+    ///
+    /// `autodiff::eval::build_tensor`（`from_shape_fill` の唯一の内部
+    /// 呼び出し元）は shape 検査済みの出力のみを渡す契約のため実運用では
+    /// `Err` に到達しない。それでも `eval.rs` は本番経路で `panic!`／
+    /// `unwrap()`／`expect()`／`unreachable!()` を使わない方針
+    /// （`tests/architecture_boundaries.rs` で機械検査）のため、`Err` 分岐
+    /// は `debug_assert!` で契約違反を検知しつつ [`Tensor::scalar`]（真に
+    /// infallible）を安全側フォールバックとして返す設計にした。
+    ///
+    /// `pub` + `#[doc(hidden)]`: 公開 API ドキュメントには現れない
+    /// クレート間内部契約とする（`autodiff` からのみ使う想定。第 4 波で
+    /// `Tensor::try_dense` に適用したものの第 5 波で撤回されたパターンを、
+    /// 可視性制約が実在する本箇所にのみ再適用する。
+    /// `docs/fusion-graph-design.md` §3.4 と同型の判断）。
+    #[doc(hidden)]
+    pub fn from_shape_fill(
+        shape: &[usize],
+        mut fill: impl FnMut(usize) -> T,
+    ) -> Result<Tensor<T>, ShapeError> {
+        let numel = checked_numel(shape)?;
+        let data: Vec<T> = (0..numel).map(&mut fill).collect();
+        let strides = row_major_strides(shape);
+        Ok(Tensor {
+            storage: Arc::new(Storage { data }),
+            offset: 0,
+            shape: shape.to_vec(),
+            strides,
+        })
+    }
+
+    /// rank-0（スカラー）テンソルを構築する真に infallible なコンスト
+    /// ラクタ（PR #403 codex-review P1 是正の一環で新設）。shape `[]` の
+    /// 要素数積は空 iterator の乗法単位元 `1` であり、`checked_numel` は
+    /// 一度も `checked_mul` を呼ばずに `Ok(1)` を返す——すなわち
+    /// [`Tensor::from_shape_fill`] と異なりオーバーフロー分岐が構造的に
+    /// 存在しない。`autodiff::eval::build_tensor`・`autodiff::tape` の
+    /// 各種安全側フォールバック（契約違反検知後にダミー値を返す経路）が、
+    /// `from_shape_fill` の `Result` を経由せず本番経路 panic 禁止規約を
+    /// 満たすために使う。
+    pub fn scalar(value: T) -> Tensor<T> {
+        Tensor {
+            storage: Arc::new(Storage { data: vec![value] }),
+            offset: 0,
+            shape: Vec::new(),
+            strides: Vec::new(),
+        }
+    }
+
     /// shape（各軸のサイズ）を返す。
     pub fn shape(&self) -> &[usize] {
         &self.shape
@@ -563,6 +631,37 @@ mod tests {
         let t = Tensor::<f32>::zeros(&[0, 3]).unwrap();
         assert!(t.is_empty());
         assert_eq!(t.numel(), 0);
+    }
+
+    /// PR #403 codex-review P1 是正の回帰テスト: `from_shape_fill` に
+    /// 要素数積がオーバーフローする shape（`[usize::MAX, 2]`）を渡すと、
+    /// 巨大 allocation を試みる前に `ShapeError::ElementCountOverflow` を
+    /// 返して拒否すること（`checked_numel` 経由の検査。`fill` クロージャ
+    /// は一度も呼ばれないため OOM abort・allocation panic のいずれも
+    /// 起こらない）。
+    #[test]
+    fn from_shape_fill_rejects_overflowing_shape() {
+        let err = Tensor::<f32>::from_shape_fill(&[usize::MAX, 2], |_| 0.0).unwrap_err();
+        assert!(matches!(err, ShapeError::ElementCountOverflow));
+    }
+
+    #[test]
+    fn from_shape_fill_builds_expected_tensor() {
+        let t = Tensor::<f32>::from_shape_fill(&[2, 2], |i| i as f32).unwrap();
+        assert_eq!(t.shape(), &[2, 2]);
+        assert_eq!(t.get(&[0, 0]), Some(0.0));
+        assert_eq!(t.get(&[1, 1]), Some(3.0));
+    }
+
+    /// `Tensor::scalar` は shape `[]` 固定のため `checked_numel` が
+    /// 一度も `checked_mul` を呼ばず常に成功する（infallible な設計の
+    /// 根拠。`tensor.rs` の該当ドキュメンテーションコメント参照）。
+    #[test]
+    fn scalar_builds_rank0_tensor() {
+        let t = Tensor::scalar(42.0f32);
+        assert_eq!(t.shape(), &[] as &[usize]);
+        assert_eq!(t.numel(), 1);
+        assert_eq!(t.get(&[]), Some(42.0));
     }
 
     #[test]

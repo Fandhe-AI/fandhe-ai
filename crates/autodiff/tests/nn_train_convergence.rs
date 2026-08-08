@@ -38,6 +38,8 @@
 //!
 //! 実機（CUDA/Metal）非依存のため `#[ignore]` 分離は行わない。
 
+mod common;
+
 use autodiff::Tape;
 use autodiff::nn::Linear;
 use autodiff::nn::activation::{Relu, Sigmoid};
@@ -127,7 +129,7 @@ fn run_regression_training(steps: usize, lr: f32) -> Vec<(f32, u32)> {
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
 
@@ -251,7 +253,7 @@ fn regression_mlp_diverges_with_different_seed() {
 
     let mut other_log: Vec<(f32, u32)> = Vec::with_capacity(STEPS);
     for _ in 0..STEPS {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
         let l1v = l1.bind(&tape);
@@ -345,7 +347,7 @@ fn sigmoid_xor_converges() {
     let mut losses = Vec::with_capacity(STEPS);
 
     for _ in 0..STEPS {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
 

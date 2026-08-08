@@ -43,3 +43,10 @@ autodiff = { path = "../autodiff" }
 # に使う。`crates/autodiff/tests/nn_train_convergence.rs` と同一の先例
 # （dev-dependency 経由の再利用のみで新規外部依存の追加ではない）。
 bench-harness = { path = "../bench-harness" }
+# TASK-12.1d（#164）: `autodiff::Tape::new(ops)` の破壊的変更（ops 必須
+# 化）に伴い、`tests/st_checkpoint.rs` が学習ループで使う `Tape` の
+# 構築に `CpuBackendOps` を渡す必要がある。ユーザー承認不要（外部依存の
+# 新規追加ではない。workspace 内 path 依存であり、上記 `autodiff`／
+# `bench-harness` dev-dependency と同種の判断。deps-policy.md のユーザー
+# 承認フロー対象外）。
+backend-cpu = { path = "../backend-cpu" }

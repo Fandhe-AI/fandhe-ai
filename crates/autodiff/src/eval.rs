@@ -64,30 +64,38 @@ pub(crate) fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
     out
 }
 
-/// `Tensor::new` は shape とデータ長が一致する限り失敗しない。呼び出し
-/// 元（本モジュール内）はすべて事前に shape 検査済みの出力を組み立てる
-/// ため、`ShapeError` は理論上発生しない。それでも `unwrap()`/`expect()`
-/// を使わない方針のため、失敗時は空テンソルへ安全側フォールスルーする
-/// （`debug_assert!` で契約違反を検知可能にする）。
+/// shape とデータ長の一致を型で保証する非 panic 構築（TASK-12.1d・
+/// #164。`docs/fusion-graph-design.md` §2.5「eval.rs 非 panic 化の設計
+/// 方針」）。`Tensor::from_shape_fill`（`tensor-core` 側の総コンスト
+/// ラクタ。`pub` + `#[doc(hidden)]`）は `shape` から `numel` を導出し
+/// `fill` で埋める。呼び出し元（本モジュール内）はすべて事前に shape
+/// 検査済みの出力を組み立てるため、実運用では `data.len()` と `shape`
+/// は必ず一致し要素数積のオーバーフローも起こらない
+/// （`debug_assert_eq!` で契約違反を検知可能にする。不一致時は
+/// `get(i).copied().unwrap_or(0.0)` により欠落分を `0.0` で安全側に
+/// 埋める）。
+///
+/// **`from_shape_fill` は shape の要素数積を `checked_numel` で検査する
+/// `Result` を返す（PR #403 codex-review P1 是正。`tensor.rs` の該当
+/// コメント参照）**: `materialize_non_fallible`〈`tape.rs`〉が要求する
+/// 「構造的に失敗しない」契約（`docs/fusion-graph-design.md` §3.5.3
+/// (iii)）を保つため、本関数自体は引き続き必ず値を返す非 panic 関数の
+/// ままとする——`Err`（理論上到達しない契約違反）は `debug_assert!` で
+/// 検知しつつ [`tensor_core::Tensor::scalar`]（真に infallible）による
+/// 安全側フォールバックへ吸収する。
 pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
-    match Tensor::new(data, shape) {
-        Ok(t) => t,
-        Err(_) => {
-            debug_assert!(
-                false,
-                "build_tensor: shape 検査済みのはずのデータ構築が失敗した（契約違反）"
-            );
-            // 契約違反時の安全側フォールバック: 空データ・shape [0] は
-            // 要素数積が 0 で一致するため `Tensor::new` が失敗する条件
-            // （`ElementCountMismatch`/`ElementCountOverflow`）をいずれも
-            // 満たさず、構造的に失敗しえない。到達すれば呼び出し元の
-            // shape 計算ロジックにバグがある（`unwrap_or_else` の分岐は
-            // 型を合わせるためだけの到達不能パスであり、本番経路の
-            // 「失敗しうる入力に対する unwrap」には該当しない）。
-            Tensor::new(Vec::new(), &[0])
-                .unwrap_or_else(|_| unreachable!("shape [0] construction cannot fail"))
-        }
-    }
+    debug_assert_eq!(
+        data.len(),
+        shape.iter().product::<usize>(),
+        "build_tensor: shape 検査済みのはずのデータ長が一致しない（契約違反）"
+    );
+    Tensor::from_shape_fill(shape, |i| data.get(i).copied().unwrap_or(0.0)).unwrap_or_else(|_| {
+        debug_assert!(
+            false,
+            "build_tensor: shape の要素数積がオーバーフローした（契約違反）"
+        );
+        Tensor::scalar(0.0)
+    })
 }
 
 /// クラス添字テンソル（`Tensor<i32>`）の稠密化。`dense_vec`（上記）の
@@ -242,6 +250,18 @@ pub(crate) fn sigmoid(input: &Tensor<f32>) -> Tensor<f32> {
 /// 「外側（outer）× 走査軸（axis_len）× 内側（inner）」の 3 段に分解
 /// することで任意軸の縮約を単一ループ構造で表現する
 /// （`dim: None` の全軸縮約は呼び出し元がスカラー特別扱いする）。
+///
+/// **TASK-12.1d（#164）**: `Var::sum`/`Var::max`（`var.rs`）の実行は
+/// `eval.rs` 直接呼び出しから `self.tape.ops().sum`/`max`（`BackendOps`
+/// 経由）へ置き換えたため、本関数（および `sum`/`max`。下記）は
+/// `Var::sum`/`max` の本番経路では呼ばれなくなった。ただし
+/// **codex-review 第 19〜21 波・PR #403 の P1 是正（2026-08-08 追記）**
+/// で `default_ops::NaiveOps`（`Tape::default()`／
+/// `compat::Sequential::predict` 無引数版が使う compat 用
+/// `BackendOps` 実装）がこの `sum`/`max` に委譲するようになったため、
+/// `#[cfg(test)]` は外し本番ビルドにも含める。統合テストの数値微分
+/// 突合（`test_support.rs`・`grad.rs` の VJP テスト）も引き続き同じ
+/// 実装を使う（数式の実体を二重管理しない）。
 fn reduce_axis(
     input: &Tensor<f32>,
     axis: usize,
@@ -267,6 +287,9 @@ fn reduce_axis(
 }
 
 /// `sum(dim)`。`dim: None` は全要素の総和をスカラー（shape `[]`）で返す。
+/// `Var::sum` の本番経路（`BackendOps::sum`）からは呼ばれないが、
+/// `default_ops::NaiveOps::sum`（compat 経路）とテスト（数値微分突合）が
+/// 使う（上記 `reduce_axis` コメント参照。TASK-12.1d・#164）。
 pub(crate) fn sum(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
     match dim {
         None => {
@@ -283,6 +306,9 @@ pub(crate) fn sum(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) 
 /// （`fold` の初期値のまま。NumPy の `max` は空配列でエラーにするのが
 /// 慣習だが、本イシューでは shape 検査のみをスコープとし数値的な特殊
 /// ケースの扱いは #19（回帰テスト・数値突合）で確定する）。
+/// `Var::max` の本番経路（`BackendOps::max`）からは呼ばれないが、
+/// `default_ops::NaiveOps::max`（compat 経路）とテスト（数値微分突合）が
+/// 使う（`reduce_axis` コメント参照。TASK-12.1d・#164）。
 pub(crate) fn max(input: &Tensor<f32>, dim: Option<usize>, out_shape: &[usize]) -> Tensor<f32> {
     match dim {
         None => {

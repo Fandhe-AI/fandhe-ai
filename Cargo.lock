@@ -535,6 +535,7 @@ name = "onnx-interop"
 version = "0.3.0"
 dependencies = [
  "autodiff",
+ "backend-cpu",
  "bench-harness",
  "half",
  "prost",

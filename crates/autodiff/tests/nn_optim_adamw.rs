@@ -16,6 +16,8 @@
 //! 済み）のみを参照し、`docs/spec` 配下のいかなるファイルにも依存
 //! しない。
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -218,7 +220,7 @@ fn mlp_converges_with_adamw() {
     let mut final_loss = 0.0f32;
 
     for _ in 0..STEPS {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&x_data);
         let y = tape.var(&y_data);
 

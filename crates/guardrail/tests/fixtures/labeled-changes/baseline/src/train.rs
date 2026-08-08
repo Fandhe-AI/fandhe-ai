@@ -51,7 +51,7 @@ pub fn train(
     let mut last_loss = f32::MAX;
 
     for _ in 0..epochs {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
         let x_var = tape.var(&x);
         let y_var = tape.var(&y);
 

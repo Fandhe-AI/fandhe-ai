@@ -29,6 +29,11 @@ path = "src/main.rs"
 # path 依存自体は member 外からでも解決できる（Cargo の通常の path 依存機構）。
 tensor-core = { path = "../../../../../tensor-core" }
 autodiff = { path = "../../../../../autodiff" }
+# TASK-12.1d（#164）: `autodiff::Tape::new(ops)` の破壊的変更（ops 必須化）
+# に伴い、本 fixture の学習・推論コードが `Tape` 構築時に渡す
+# `CpuBackendOps` を workspace 内 path 依存として追加する（上記
+# tensor-core/autodiff と同一方針。ユーザー承認フロー対象外）。
+backend-cpu = { path = "../../../../../backend-cpu" }
 
 [dev-dependencies]
 # 決定的シード生成（`Xorshift64Star`）に使う。autodiff 側の学習収束テスト

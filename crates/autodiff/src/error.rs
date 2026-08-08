@@ -24,13 +24,15 @@ pub enum AutodiffError {
     /// `tensor-core::ShapeError` をラップする。
     Shape(ShapeError),
     /// `Tape::backward`（`backward.rs`・TASK-1.5c・#18）時のグラフ不整合
-    /// 用に予約された variant。本イシューが実装するクロステープ検査は
-    /// `TapeMismatch`（下記）で表現でき、`backward()`/`Gradients::get()`
-    /// はいずれも構造的に他の失敗要因を持たないため、現時点で構築箇所
-    /// はまだない。`Var`/`Tape` 側の演算メソッドと同一エラー型を用いる
-    /// 設計（`docs/public-api-design.md` §3.1）に合わせ、将来のグラフ
-    /// 不整合検出（例: 循環検知）に備え公開 API 安定化のため先行して
-    /// variant を定義しておく。
+    /// 用に予約された variant。当初はクロステープ検査
+    /// （`TapeMismatch`。下記）で表現できる範囲のみを想定し構築箇所を
+    /// 持たなかったが、TASK-12.1d（#164）の遅延評価統合で
+    /// `materialize_fallible`（`tape.rs`）の `OnceCell` 不変条件違反
+    /// （`set`/`get` の理論上到達しないはずの `None` 分岐）検出用途に
+    /// 転用する（`docs/fusion-graph-design.md` §3.5.2「`OnceCell::set`
+    /// の `Err` は通常分岐として扱う」節。`materialize_fallible` は
+    /// `&'a Tensor<f32>` を返す関数であり `None` 分岐で捏造した値への
+    /// 参照を作れないため、安全側のフォール先を型付きエラーとする）。
     Backward(String),
     /// 二項演算（`matmul`/`add`/`mul`/`mse_loss`）に、異なる `Tape` に
     /// 属する `Var` が渡された。ライフタイム `'t` の一致は同一 `Tape`
@@ -54,11 +56,23 @@ pub enum AutodiffError {
     /// 追加する（review 指摘 #91: 既存 `AxisOutOfRange` への転用は
     /// 意味不一致だったため撤回）。
     InvalidArgument(String),
+    /// 融合実行・実体化（TASK-12.1d・#164。`materialize_fallible`。
+    /// `tape.rs`）で発生した型付きバックエンドエラー。
+    /// `tensor_core::BackendError` をラップする（`docs/
+    /// fusion-graph-design.md` §3.5.2「層 1 は `Unsupported` 以外の
+    /// `run_fused` の失敗をフォールバックせずそのまま伝播する」）。
+    Backend(tensor_core::BackendError),
 }
 
 impl From<ShapeError> for AutodiffError {
     fn from(err: ShapeError) -> Self {
         AutodiffError::Shape(err)
+    }
+}
+
+impl From<tensor_core::BackendError> for AutodiffError {
+    fn from(err: tensor_core::BackendError) -> Self {
+        AutodiffError::Backend(err)
     }
 }
 
@@ -73,6 +87,7 @@ impl fmt::Display for AutodiffError {
             AutodiffError::InvalidArgument(message) => {
                 write!(f, "invalid argument: {message}")
             }
+            AutodiffError::Backend(err) => write!(f, "backend error: {err}"),
         }
     }
 }

@@ -51,6 +51,8 @@
 // （evidence）忠実性を優先する理由をここに明記する）。
 #![allow(clippy::excessive_precision)]
 
+mod common;
+
 use autodiff::{AutodiffError, Tape};
 use tensor_core::Tensor;
 
@@ -97,7 +99,7 @@ fn assert_scalar_close(label: &str, actual: f32, expected: f32) {
 
 #[test]
 fn matches_pytorch_reference_case1_basic_mean() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let logits = tape.var(&f32_tensor(
         &[1.0, 2.0, 0.5, 0.1, -0.5, 2.0, -1.0, 0.0, 1.0, 2.0, 1.0, 0.0],
         &[4, 3],
@@ -136,7 +138,7 @@ fn matches_pytorch_reference_case1_basic_mean() {
 
 #[test]
 fn matches_pytorch_reference_case1_basic_sum() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let logits = tape.var(&f32_tensor(
         &[1.0, 2.0, 0.5, 0.1, -0.5, 2.0, -1.0, 0.0, 1.0, 2.0, 1.0, 0.0],
         &[4, 3],
@@ -177,7 +179,7 @@ fn matches_pytorch_reference_case1_basic_sum() {
 
 #[test]
 fn matches_pytorch_reference_case2_class_dim1_mean() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let logits = tape.var(&f32_tensor(
         &[
             0.5, -1.0, 2.0, 0.3, 1.5, 0.2, -0.5, 1.0, -1.0, 0.5, 1.0, -0.3, 0.1, 0.2, -0.3, 0.4,
@@ -231,7 +233,7 @@ fn matches_pytorch_reference_case2_class_dim1_mean() {
 
 #[test]
 fn matches_pytorch_reference_case2_class_dim1_sum() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let logits = tape.var(&f32_tensor(
         &[
             0.5, -1.0, 2.0, 0.3, 1.5, 0.2, -0.5, 1.0, -1.0, 0.5, 1.0, -0.3, 0.1, 0.2, -0.3, 0.4,
@@ -287,7 +289,7 @@ fn matches_pytorch_reference_case2_class_dim1_sum() {
 
 #[test]
 fn stable_for_large_magnitude_logits() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let logits = tape.var(&f32_tensor(
         &[
             1000.0, 1000.1, 999.9, -1000.0, -999.9, -1000.2, 10000.0, 9999.5, 10000.2,
@@ -332,7 +334,7 @@ fn stable_for_large_magnitude_logits() {
         ],
     );
 
-    let tape_sum = Tape::new();
+    let tape_sum = Tape::new_with_ops(common::naive_ops());
     let logits_sum = tape_sum.var(&f32_tensor(
         &[
             1000.0, 1000.1, 999.9, -1000.0, -999.9, -1000.2, 10000.0, 9999.5, 10000.2,
@@ -373,7 +375,7 @@ fn numeric_grad_cross_entropy(
     let mut grad = vec![0f32; data.len()];
 
     let eval_loss = |data: &[f32]| -> f64 {
-        let tape = Tape::new();
+        let tape = Tape::new_with_ops(common::naive_ops());
         let x = tape.var(&f32_tensor(data, &shape));
         let loss = x.cross_entropy_loss(targets, class_dim, reduction).unwrap();
         dense(&loss.to_tensor())[0] as f64
@@ -396,7 +398,7 @@ fn grad_matches_numeric_central_difference() {
     let logits = f32_tensor(&[1.0, -2.0, 3.0, 0.5, -1.0, 2.0], &[2, 3]);
     let targets = i32_tensor(&[2, 0], &[2]);
 
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&logits);
     let loss = x.cross_entropy_loss(&targets, 1, Reduction::Mean).unwrap();
     let grads = tape.backward(&loss).unwrap();
@@ -419,7 +421,7 @@ fn grad_matches_numeric_central_difference() {
 
 #[test]
 fn nn_loss_wrapper_matches_var_method_directly() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&f32_tensor(&[1.0, 2.0, 0.5, -1.0, 0.0, 1.0], &[2, 3]));
     let targets = i32_tensor(&[1, 2], &[2]);
     let before = tape.len();
@@ -443,7 +445,7 @@ fn nn_loss_wrapper_matches_var_method_directly() {
 
 #[test]
 fn errors_when_class_dim_out_of_range() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&f32_tensor(&[1.0, 2.0, 0.5, -1.0, 0.0, 1.0], &[2, 3]));
     let targets = i32_tensor(&[1, 2], &[2]);
 
@@ -455,7 +457,7 @@ fn errors_when_class_dim_out_of_range() {
 
 #[test]
 fn errors_when_targets_shape_mismatches() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&f32_tensor(&[1.0, 2.0, 0.5, -1.0, 0.0, 1.0], &[2, 3]));
     // 期待 shape は [2]（class_dim=1 を除去）だが [3] を渡す。
     let targets = i32_tensor(&[1, 2, 0], &[3]);
@@ -468,7 +470,7 @@ fn errors_when_targets_shape_mismatches() {
 
 #[test]
 fn errors_when_target_index_out_of_range_high() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&f32_tensor(&[1.0, 2.0, 0.5, -1.0, 0.0, 1.0], &[2, 3]));
     // class_dim=1 のサイズは 3（0..3 が妥当）だが 3 を渡す（範囲外）。
     let targets = i32_tensor(&[3, 0], &[2]);
@@ -481,7 +483,7 @@ fn errors_when_target_index_out_of_range_high() {
 
 #[test]
 fn errors_when_target_index_negative() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&f32_tensor(&[1.0, 2.0, 0.5, -1.0, 0.0, 1.0], &[2, 3]));
     let targets = i32_tensor(&[-1, 0], &[2]);
 
@@ -493,7 +495,7 @@ fn errors_when_target_index_negative() {
 
 #[test]
 fn errors_for_rank0_logits() {
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let x = tape.var(&f32_tensor(&[1.0], &[]));
     let targets = i32_tensor(&[0], &[]);
 
@@ -509,7 +511,7 @@ fn errors_for_rank0_logits() {
 #[test]
 fn end_to_end_linear_then_cross_entropy_backward_reaches_all_params() {
     let linear = autodiff::nn::Linear::new(3, 4, true, 42).unwrap();
-    let tape = Tape::new();
+    let tape = Tape::new_with_ops(common::naive_ops());
     let vars = linear.bind(&tape);
 
     let input = tape.var(&f32_tensor(&[0.5, -1.0, 2.0, 1.0, 0.0, -0.5], &[2, 3]));

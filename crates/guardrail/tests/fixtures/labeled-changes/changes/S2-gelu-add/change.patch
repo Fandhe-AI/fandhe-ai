@@ -51,7 +51,7 @@ index 06782be..c3dba62 100644
 +    /// 誤差を検証する。
 +    #[test]
 +    fn gelu_approx_matches_known_values() {
-+        let tape = Tape::new();
++        let tape = Tape::new(Box::new(backend_cpu::CpuBackendOps::new()));
 +        let x = known_input(&tape);
 +        let y = dense_vec(&gelu_approx(&tape, &x).to_tensor());
 +        // 参照値は f64 で tanh 近似 GELU を計算した既知正解値。

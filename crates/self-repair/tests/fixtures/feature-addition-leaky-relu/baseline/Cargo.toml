@@ -35,3 +35,8 @@ path = "src/bin/bench_workload.rs"
 # 保たれないため）。
 tensor-core = { path = "../../../../../tensor-core" }
 autodiff = { path = "../../../../../autodiff" }
+# TASK-12.1d（#164）: `autodiff::Tape::new(ops)` の破壊的変更（ops 必須化）
+# に伴い、本 fixture の学習・推論コードが `Tape` 構築時に渡す
+# `CpuBackendOps` を workspace 内 path 依存として追加する（上記
+# tensor-core/autodiff と同一方針。ユーザー承認フロー対象外）。
+backend-cpu = { path = "../../../../../backend-cpu" }

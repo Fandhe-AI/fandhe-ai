@@ -80,8 +80,15 @@
 //! [`FusionPlanError`]。下記 re-export）を追加した——`backend-cpu`／
 //! `backend-cuda`／`backend-metal` が `pub(crate)` の内部融合 IR を経由
 //! せず融合グラフの内容を読み取る唯一の経路である（設計書 §3.4）。
-//! `FusionSession`／`FusionValue`・`BackendOps::run_fused` trait メソッド
-//! 追加・`autodiff` 側の遅延評価統合は #164 が担当する。
+//! TASK-12.1d・#164 で `BackendOps::run_fused` trait メソッド追加・
+//! `autodiff` 側の遅延評価統合（`crates/autodiff/src/tape.rs` の
+//! `Tape::push_lazy`／`materialize_fallible`／`materialize_non_fallible`）
+//! を実装した。`autodiff` は `tensor-core` 内部の `pub(crate)`
+//! `FusionGraph`／`detect_fusion` を経由せず、自身が保持する遅延ノード
+//! 連鎖を直接 `FusedOpKind` 列へ変換して [`FusionPlan::from_ops`] を
+//! 呼ぶ構成のため（`tensor-core` → `autodiff` の逆依存を作れないため）、
+//! `FusionGraph`／`detect_fusion` は本クレート内では `plan.rs` の
+//! `#[cfg(test)]`（`from_segment` の単体テスト）からのみ使用される。
 
 mod backend_ops;
 mod broadcast;

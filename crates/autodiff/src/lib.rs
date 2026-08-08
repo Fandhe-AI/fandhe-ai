@@ -87,12 +87,15 @@
 
 mod backward;
 pub mod compat;
+mod default_ops;
 mod error;
 mod eval;
 mod grad;
 pub mod nn;
 pub mod optim;
 mod tape;
+#[cfg(test)]
+mod test_support;
 mod var;
 
 pub use backward::Gradients;

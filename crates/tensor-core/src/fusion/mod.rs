@@ -25,36 +25,42 @@
 //!   （設計書 §3.4「外部 backend が `run_fused` 内で融合グラフの演算
 //!   内容を読み取る手段」）。
 //!
-//! **後続イシューとの責務分界**（設計書 §6.1 対応表・#163 実装で更新）:
-//! 本モジュールは融合可否の**判定**（`detect`）と融合対象区間の**公開
-//! DTO 化・CPU カーネル生成**（`plan`・`backend-cpu::fused_elementwise`）
-//! までを担う。`FusionSession`／`FusionValue`／`BackendOps::run_fused`
-//! trait メソッド追加・`autodiff` 側の遅延評価統合（`Tape::new(ops)` へ
-//! の結線）は #164（TASK-12.1d）が担当し、本イシュー（#163）のスコープ
-//! 外である。`graph`／`detect` モジュールの型はすべて `pub(crate)`
-//! （設計書 §2.5「配置は `tensor-core` の 1 か所に閉じる」）のまま。
-//! `plan` モジュールの [`plan::FusionPlan`]・[`plan::FusedOpKind`]・
-//! [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`] のみ `pub`
-//! （クレートルートから re-export。設計書 §3.4 の privacy 制約）。
+//! **後続イシューとの責務分界**（設計書 §6.1 対応表・#164 実装で更新）:
+//! `graph`／`detect` は融合可否の**判定**を担い、`plan` は融合対象区間の
+//! **公開 DTO 化・CPU カーネル生成**（`backend-cpu::fused_elementwise`）を
+//! 担う（#163）。`BackendOps::run_fused` trait メソッド追加・`autodiff`
+//! 側の遅延評価統合は #164（TASK-12.1d）で実装した——`autodiff`
+//! （`crates/autodiff/src/tape.rs` の `Tape::push_lazy`／
+//! `materialize_fallible`／`materialize_non_fallible`）は本クレート内部の
+//! `pub(crate)` 型（`graph`／`detect` モジュール）を一切経由せず、自身が
+//! 保持する遅延ノード連鎖を直接 [`plan::FusedOpKind`] 列へ変換して
+//! [`plan::FusionPlan::from_ops`] を呼ぶ（`tensor-core` → `autodiff` の
+//! 逆依存を作れないため。設計書 §3.4「`autodiff` クレート専用の構築経路」）。
+//! `graph`／`detect` モジュールの型はすべて `pub(crate)`（設計書 §2.5
+//! 「配置は `tensor-core` の 1 か所に閉じる」）のまま。`plan` モジュールの
+//! [`plan::FusionPlan`]・[`plan::FusedOpKind`]・[`plan::FusedNodeIndex`]・
+//! [`plan::FusionPlanError`] のみ `pub`（クレートルートから re-export。
+//! 設計書 §3.4 の privacy 制約）。
 //!
 //! `#![allow(dead_code)]`（本ファイルおよび配下の `graph`／`detect`
 //! モジュールへ再帰的に適用される lint スコープ）: `graph::FusionGraph`
-//! の構築 API（`push`）・`detect::detect_fusion` は、#164 が
-//! `FusionSession`／`autodiff` 側の遅延評価統合で実際の融合実行経路へ
-//! 結線するまでの間、本クレート内のどこからも（テスト以外では）使用
-//! されず `-D warnings`（`.claude/rules/coding-rust.md`）下で dead_code
-//! 警告となる。`crates/backend-cuda/src/kernels_wmma_opt.rs:116` 以降が
-//! 採る既存プラクティス（結線待ちコードへの理由付き
-//! `#[allow(dead_code)]`）と同型であり、結線完了（#164 のマージ）時に
-//! 撤去する。`plan` モジュールの公開 DTO・`FusionPlan::from_ops` は
-//! `backend-cpu` から実際に使用されるため dead_code 対象外だが、
-//! `FusionPlan::from_segment`（`pub(crate)`）は #164 の `FusionSession`
-//! 結線までの間、本クレート内では `plan.rs` 自身の `#[cfg(test)]`
-//! からのみ使用されるため、引き続き本 allow の対象に含める。
+//! の構築 API（`push`）・`detect::detect_fusion`・`plan::FusionPlan::
+//! from_segment` は、上記のとおり `autodiff` 側の統合（#164）が
+//! `FusionGraph`／`detect_fusion` を経由しない構成を採ったため、本クレート
+//! 内では（テスト以外では）どこからも使用されず `-D warnings`
+//! （`.claude/rules/coding-rust.md`）下で dead_code 警告となる。
+//! `crates/backend-cuda/src/kernels_wmma_opt.rs:116` 以降が採る既存
+//! プラクティス（結線待ちコードへの理由付き `#[allow(dead_code)]`）と
+//! 同型であり、`tensor-core` 内で `FusionGraph` が既に存在する場合の
+//! 構築経路（`from_segment`）を実際に呼ぶ将来の利用者が現れるまで残す
+//! 設計判断とする。`plan` モジュールの公開 DTO・`FusionPlan::from_ops` は
+//! `backend-cpu`（`run_fused` 経由）・`autodiff`（`tape.rs`）から実際に
+//! 使用されるため dead_code 対象外。
 
 #![allow(dead_code)]
-// re-export 自体も #164 が FusionSession を結線するまで
-// `FusionGraph`／`detect_fusion` 側は未使用（上記と同じ撤去条件）。
+// `FusionGraph`／`detect_fusion`／`FusionPlan::from_segment` は上記のとおり
+// `autodiff` 統合（#164）が経由しない構成のため未使用のまま残る
+// （同じ撤去条件）。
 #![allow(unused_imports)]
 
 mod detect;

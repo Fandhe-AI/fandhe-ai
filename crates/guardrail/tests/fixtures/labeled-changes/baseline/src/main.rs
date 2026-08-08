@@ -14,7 +14,7 @@ fn main() {
     let (model, final_loss) = train(model, x, y, 500, 1e-2).expect("main: 学習ループは失敗しない");
     println!("最終 loss = {final_loss:.6}");
 
-    let infer_tape = Tape::new();
+    let infer_tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
     let infer_x = Tensor::new(vec![0.0f32, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], &[4, 2])
         .expect("main: shape とデータ長は一致する");
     let infer_x_var = infer_tape.var(&infer_x);
@@ -32,7 +32,7 @@ fn main() {
     }
 
     println!("=== 互換 API 層デモ（LeakyReLU 追加後） ===");
-    let compat_tape = Tape::new();
+    let compat_tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
     let compat_x_tensor = compat::array(vec![0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0], &[4, 2])
         .expect("main: shape とデータ長は一致する");
     let compat_x = compat_tape.var(&compat_x_tensor);
