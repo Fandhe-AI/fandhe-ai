@@ -24,6 +24,7 @@ fmt / clippy / test / cargo-deny の 4 ジョブ実体は Fandhe-AI/actions の 
 - private リポジトリ向けテンプレート（Fandhe-AI/actions `codex-review/templates/codex-review.private.yml`）を正とし、独自改変しない（`<SHA>` の差し替えとコメント追記のみ）
 - runner ラベルは指定しない（reusable workflow の既定値: codex ジョブ `codex` / コメント投稿ジョブ `self-hosted` が組織 runner 方針に合致するため）
 - 有効化スイッチは Actions variable `CODEX_HOME_DIR`（org 側供給あり。未設定なら codex ジョブが skip される fail-closed 設計）
+- レビュー基準は `.github/codex/prompts/review.md`（カスタム版、イシュー #376）を正とする。本リポジトリは AGENTS.md を持たず、CLAUDE.md・`.claude/rules/` から抽出したリポジトリ固有基準（P0/P1 格上げ項目）を prompt へ直接埋め込む方式（fandhe-backend の AGENTS.md 方式との意図的な差分）。規約側（deps-policy / coding-rust / security / ci）を変更した際は prompt の基準との乖離を確認する。制御ファイルは PR の base コミットから読まれるため、変更はマージ後の PR から反映される（当の PR 自身のレビューには反映されない）
 
 ## ワークフロー設計（Fandhe-AI/local-llm-server・fandhe-multi-platform と同一方針。本リポ固有ジョブに適用）
 
