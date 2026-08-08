@@ -85,6 +85,15 @@ use crate::tensor::Tensor;
 pub trait BufferHandle: fmt::Debug + 'static {
     /// `downcast_handle` から呼ばれる。実装は常に `self` を返すだけでよい。
     fn as_any(&self) -> &dyn Any;
+
+    /// `as_any` の可変版。`pool::PoolZeroFill::zero_fill`（TASK-#201）が
+    /// プールから再利用した直後（まだ他に共有されていない排他所有の
+    /// 段階）のバッファへ書き込むために使う。実装は `as_any` と同じく
+    /// 常に `self` を返すだけでよい（この可変アクセス経路のみで
+    /// ゼロ初期化を行い、FFI 境界以外での新規 `unsafe` 追加を避ける。
+    /// `.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要
+    /// 最小限に留める」方針）。
+    fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
 /// デバイス上に確保されたバッファへのハンドル。
@@ -149,6 +158,20 @@ impl<T: Element> DeviceBuffer<T> {
     pub fn downcast_handle<H: BufferHandle>(&self) -> Option<&H> {
         self.handle.as_any().downcast_ref::<H>()
     }
+
+    /// 内部ハンドルの所有権を取り出す（`downcast_handle` は参照しか返さない）。
+    ///
+    /// `pool`（TASK-#201）が確保直後の `DeviceBuffer` を `PooledBufferHandle`
+    /// で包み直す（返却時にプールへ戻せるようにする）ために所有権移転が
+    /// 必要であり、そのための唯一の入口として `pub(crate)` 限定で追加する。
+    /// `tensor-core` の外からハンドルの所有権を直接奪える一般公開 API には
+    /// しない（本モジュール冒頭「解放方針（RAII 一本化）」を壊さないため、
+    /// 呼び出し元は取り出した `Box<dyn BufferHandle>` を必ず別の
+    /// `DeviceBuffer`／`BufferHandle` 実装（`PooledBufferHandle` 等）に
+    /// 移し替え、解放責務を引き継ぐことを前提とする）。
+    pub(crate) fn into_handle(self) -> Box<dyn BufferHandle> {
+        self.handle
+    }
 }
 
 /// 各バックエンド（CPU/CUDA/Metal）が実装するメモリ操作の共通入口
@@ -212,6 +235,10 @@ mod tests {
         fn as_any(&self) -> &dyn Any {
             self
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
     }
 
     impl Drop for MockHandle {
@@ -226,6 +253,10 @@ mod tests {
 
     impl BufferHandle for OtherHandle {
         fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
     }
