@@ -316,6 +316,15 @@ mod tests {
     /// 全スレッド join 後（並行中の確保がすべて確定した時点）に
     /// `peak >= current` を検査することで、`fetch_update` の CAS ループが
     /// 並行確保を取りこぼしていないことを確認する。
+    ///
+    /// PR #359 Bugbot 指摘（Low）の修正: 旧実装は alloc スレッド側で各
+    /// `TrackedAllocation` を確保直後に `drop` していたため、join 後の
+    /// `current` はベースライン（1 バイト）のみに縮退し、`peak >= current`
+    /// が競合の有無によらず自明に成立してしまい、並行ピークの取りこぼしを
+    /// 実質検証できていなかった。ここでは各確保を `Vec` に集めて join まで
+    /// 生存させ、`current` が確保スレッドの活動を反映した非自明な値になる
+    /// ようにすることで、`reset_peak()` 実行中の実確保状態に対して
+    /// アサーションが意味を持つようにする。
     #[test]
     fn reset_peak_does_not_lose_concurrent_allocations() {
         let tracker = Arc::new(AllocationTracker::new());
@@ -326,10 +335,14 @@ mod tests {
         let alloc_thread = {
             let tracker = Arc::clone(&tracker);
             thread::spawn(move || {
+                // join まで生存させる: 即 drop すると current が
+                // ベースラインのみに縮退し reset_peak との競合を
+                // 検証できなくなる（PR #359 Bugbot 指摘）。
+                let mut guards = Vec::with_capacity(2000);
                 for _ in 0..2000 {
-                    let guard = TrackedAllocation::new(Arc::clone(&tracker), 64);
-                    drop(guard);
+                    guards.push(TrackedAllocation::new(Arc::clone(&tracker), 64));
                 }
+                guards
             })
         };
         let reset_thread = {
@@ -341,7 +354,7 @@ mod tests {
             })
         };
 
-        alloc_thread
+        let guards = alloc_thread
             .join()
             .expect("確保スレッドが panic せずに完了する");
         reset_thread
@@ -355,6 +368,16 @@ mod tests {
             tracker.peak_allocated_bytes(),
             tracker.allocated_bytes()
         );
+        // guards 生存中（drop 前）の current は「ベースライン + 2000 件分」
+        // に達しているはずであり、alloc スレッドの確保が実際に join まで
+        // 生き続けていたことを裏付ける（このアサーションがないと Vec に
+        // 集めた意図がテストコード上で検証されないまま暗黙の前提になる）。
+        assert_eq!(
+            tracker.allocated_bytes(),
+            1 + 2000 * 64,
+            "join 直後・drop 前は全確保が生存しているはず"
+        );
+        drop(guards);
         drop(baseline);
     }
 }
