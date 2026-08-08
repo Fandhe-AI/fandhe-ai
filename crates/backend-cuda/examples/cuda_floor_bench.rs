@@ -267,7 +267,7 @@ fn main() {
     let mut min_f32_ratio_percent: Option<f64> = None;
     let mut min_f16_ratio_percent: Option<f64> = None;
 
-    for size in [REFERENCE_ONLY_SIZE, 2048, 4096] {
+    for size in std::iter::once(REFERENCE_ONLY_SIZE).chain(JUDGED_SIZES) {
         let config = MeasurementConfig::default();
 
         let tiled = tiled_gemm
