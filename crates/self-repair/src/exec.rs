@@ -39,6 +39,7 @@ const TRUNCATED_LOG_PREFIX: &str = "...(truncated)...\n";
 pub struct CommandOutput {
     success: bool,
     log_tail: String,
+    truncated: bool,
 }
 
 impl CommandOutput {
@@ -52,6 +53,21 @@ impl CommandOutput {
     /// を尊重して切り詰める。マルチバイト文字の途中で分断しない）。
     pub fn log_tail(&self) -> &str {
         &self.log_tail
+    }
+
+    /// `log_tail()` が [`MAX_CAPTURED_LOG_BYTES`] 超過により先頭側を切り詰め
+    /// 済みか（イシュー #137 Codex レビュー指摘）。
+    ///
+    /// `crate::diff_signals::run_git` はこの値を見て、`git diff --numstat`／
+    /// `git diff -U0` 等の構造化出力を切り詰め済みログとして解析しないよう
+    /// fail-closed で拒否する（先頭側のファイル・変更行が黙って欠落し
+    /// `lines_changed` 過少計上・`api_broken` 見逃しに繋がるため。
+    /// `.claude/rules/security.md` A08「判定の迂回経路を作らない」）。
+    /// `CargoVerificationGate`（build/test/clippy ログ）はログを人間可読な
+    /// 診断メッセージとしてのみ扱うため、この値を無視して従来どおり
+    /// 切り詰め済みログをそのまま使ってよい。
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 
     /// stdout/stderr の生バイト列から [`CommandOutput`] を構築する。
@@ -69,8 +85,8 @@ impl CommandOutput {
         // 先に lossy 変換して妥当な UTF-8 文字列に正規化してから、文字列側
         // （`char_indices` による文字境界）で上限を適用する。
         let decoded = String::from_utf8_lossy(&combined).into_owned();
-        let log_tail = if decoded.len() <= MAX_CAPTURED_LOG_BYTES {
-            decoded
+        let (log_tail, truncated) = if decoded.len() <= MAX_CAPTURED_LOG_BYTES {
+            (decoded, false)
         } else {
             // 末尾 MAX_CAPTURED_LOG_BYTES 相当を残す。`decoded` は既に妥当な
             // UTF-8 文字列なので `char_indices` で文字境界を安全に走査できる
@@ -81,9 +97,16 @@ impl CommandOutput {
                 .map(|(index, _)| index)
                 .find(|&index| index >= cut)
                 .unwrap_or(decoded.len());
-            format!("{TRUNCATED_LOG_PREFIX}{}", &decoded[boundary..])
+            (
+                format!("{TRUNCATED_LOG_PREFIX}{}", &decoded[boundary..]),
+                true,
+            )
         };
-        CommandOutput { success, log_tail }
+        CommandOutput {
+            success,
+            log_tail,
+            truncated,
+        }
     }
 }
 
@@ -140,6 +163,13 @@ impl std::fmt::Display for ExecError {
 impl std::error::Error for ExecError {}
 
 /// `std::process::Command` による実プロセス実行（[`CommandRunner`] 本番実装）。
+///
+/// `Clone` を実装する（イシュー #137）。`crate::verify_direct_composite::
+/// RepairCompositeGate<R>` は試行ごとに `R: CommandRunner + Clone` を要求する
+/// `crate::verify_gates::CargoVerificationGate<R>` を**新規構築**する（diff 由来
+/// シグナルを試行ごとに実測し直すため。`verify_direct_composite` モジュール冒頭
+/// ドキュメント参照）。unit struct であり複製に副作用はない。
+#[derive(Debug, Clone)]
 pub struct SystemCommandRunner;
 
 impl SystemCommandRunner {
@@ -187,6 +217,28 @@ impl CommandRunner for SystemCommandRunner {
         command.env_remove("CARGO_MAKEFLAGS");
         command.env_remove("RUSTC_WRAPPER");
 
+        // 祖先プロセス（lefthook の pre-push フック等）から `GIT_DIR`／
+        // `GIT_WORK_TREE`／`GIT_INDEX_FILE` 等の `GIT_*` 環境変数を継承した
+        // 状態で子プロセスを起動すると、本 runner 経由で呼ばれる git 操作
+        // （`crate::diff_signals`・`crate::verify_bench_direct` が `git diff`／
+        // `git worktree add` 等を `SystemCommandRunner::run("git", ..)` 経由で
+        // 起動する。イシュー #137）が `cwd` 指定を無視して呼び出し元プロセスの
+        // リポジトリ（本 worktree の `.git`）を対象にしてしまう
+        // （`tests/revalidation_bug_fix.rs`・
+        // `tests/feature_addition_loop_completion_task_3_3c.rs` の
+        // `sandboxed_git_command` 系ヘルパーが既に踏んだ事故パターンと同一。
+        // 2026-08-07 実測: 対応前に sandbox の `git commit` が実リポジトリの
+        // 現在ブランチ HEAD へ実際にコミットしてしまう事故が発生している）。
+        // `CARGO_TARGET_DIR` 等と同じ理由で本番経路（`SystemCommandRunner`）
+        // 自体に除去を持たせ、呼び出し元ごとに個別対処させない。
+        for (key, _) in std::env::vars_os() {
+            if let Some(key_str) = key.to_str()
+                && key_str.starts_with("GIT_")
+            {
+                command.env_remove(key_str);
+            }
+        }
+
         let output = command
             .output()
             .map_err(|error| ExecError::new(format!("{program} の起動に失敗しました: {error}")))?;
@@ -210,6 +262,7 @@ mod tests {
         let output = CommandOutput::from_captured(true, b"hello world".to_vec());
         assert_eq!(output.log_tail(), "hello world");
         assert!(output.success());
+        assert!(!output.truncated(), "上限未満は切り詰めなし扱いのはず");
     }
 
     #[test]
@@ -222,6 +275,10 @@ mod tests {
         assert!(output.log_tail().starts_with(TRUNCATED_LOG_PREFIX));
         // マーカー分を除いた残りは MAX_CAPTURED_LOG_BYTES 以下。
         assert!(output.log_tail().len() <= MAX_CAPTURED_LOG_BYTES + TRUNCATED_LOG_PREFIX.len());
+        assert!(
+            output.truncated(),
+            "上限超過は truncated() で検出できるはず（イシュー #137 Codex レビュー指摘）"
+        );
     }
 
     #[test]
