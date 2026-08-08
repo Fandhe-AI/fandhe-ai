@@ -29,7 +29,7 @@
     }
   ],
   "harness_wall_time_ms": 45322,
-  "invocation": "self-repair run --kind feature-addition --repo <sandbox> --max-attempts 5 --log target/self-repair-revalidation/feature-addition/loop-log.jsonl --output target/self-repair-revalidation/feature-addition/loop-report.json --candidates <candidates.json> --bench-bin bench_workload --workload-source src/bin/bench_workload.rs --policy-exclusion policy-exclusion.toml",
+  "invocation": "self-repair run --kind feature-addition --repo <sandbox> --max-attempts 5 --log target/self-repair-revalidation/feature-addition/loop-log.jsonl --output target/self-repair-revalidation/feature-addition/loop-report.json --candidates <candidates.json> --bench-bin bench_workload --workload-source src/bin/bench_workload.rs --policy-exclusion policy-exclusion.toml --allow-candidate-exec",
   "issue": 142,
   "kind": "feature_addition",
   "notes": [
@@ -37,7 +37,8 @@
     "self-repair verify-log CLI（外部コマンド経由。#145）でハッシュチェーン検証済み（完走判定基準 4・充足）。",
     "ベンチは RepairCompositeGate（TASK-3.2a・#137）による候補 diff 直接実測であり、baseline/candidate 双方に合成ワークロードを使う旧版（FeatureAdditionCompositeGate）とは異なる（完走判定基準 5・充足）。",
     "signal_source=measured（完走判定基準 6・充足）。",
-    "基準 1（exit 0 / Adopted）は充足: diff_signals.rs::api_signature_touched が追加・削除いずれの pub fn 行も一律 api_broken=true としていた再実装バグ（guardrail::checks::api_stability::api_broken の既存意味論〈新規追加は破壊とみなさない〉からの乖離）を修正した結果、PoC-2 題材 (c)（leaky_relu の新規追加。既存 pub fn relu/pub fn sigmoid は不変）は Adopted・exit 0 へ到達する（実測: outcome=Adopted, exit=0）。ガードレールの判定ロジック・閾値・除外リストは変更していない。"
+    "基準 1（exit 0 / Adopted）は充足: diff_signals.rs::api_signature_touched が追加・削除いずれの pub fn 行も一律 api_broken=true としていた再実装バグ（guardrail::checks::api_stability::api_broken の既存意味論〈新規追加は破壊とみなさない〉からの乖離）を修正した結果、PoC-2 題材 (c)（leaky_relu の新規追加。既存 pub fn relu/pub fn sigmoid は不変）は Adopted・exit 0 へ到達する（実測: outcome=Adopted, exit=0）。ガードレールの判定ロジック・閾値・除外リストは変更していない。",
+    "PR #361 codex-review P0 指摘対応（--allow-candidate-exec の追加。docs/guardrail-self-repair-cli.md 3.7 節）に伴い、`invocation` の CLI 引数表記のみを追記更新した（実測値・outcome・attempts 等の計測結果は再計測しておらず変更していない）。"
   ],
   "outcome": "Adopted",
   "signal_source": "measured",

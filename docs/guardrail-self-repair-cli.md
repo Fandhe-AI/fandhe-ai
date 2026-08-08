@@ -296,6 +296,7 @@ src/cli.rs`・`crates/self-repair/src/main.rs`）。#131（TASK-3.1 の CLI 化�
 | `--bench-bin <name>` | 必須 | 候補 diff 直接ベンチ実測（`RepairCompositeGate`。TASK-3.2a・#137）が `cargo build --release --bin <name>` するワークロード bin 名 |
 | `--workload-source <path>` | 必須（複数指定可） | ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対）。1 回以上必須 |
 | `--policy-exclusion <path>` | 任意（既定 `<sandbox>/policy-exclusion.toml`。上記 `--repo` の隔離 sandbox 直下） | REQ-5 除外ルール設定ファイル。明示指定時はそのパスをそのまま読む（sandbox 相対に読み替えない） |
+| `--allow-candidate-exec` | 必須フラグ（既定 false・値なし） | `--candidates` の候補コードを検証ゲート（`cargo build`／`cargo test`／`cargo clippy`）経由でホスト権限のまま実行することへの明示的な承認。未指定の場合は `cli::parse_run` が usage エラー（exit 2）として拒否し、`main.rs::run_run` へは到達しない（PR #361 codex-review P0 指摘対応。3.7 節「候補実行の信頼境界」参照） |
 
 出力: 標準出力へのテキスト要約（既定）または `--output` 指定時は
 `LoopReport`／`LoopFailure` JSON（上表）＋ 3.3 節の追記専用 JSON Lines
@@ -417,6 +418,44 @@ Detector／FixGenerator／VerificationGate／AdoptionJudge の 4 trait 構成
 （v1 `tools/self-repair/src/stages.rs`）は TASK-3.1 の移植対象であり、本文書
 は CLI 境界（引数・出力・終了コード）のみを確定してスコープを限定する。
 trait 設計自体の詳細は TASK-3.1 実装時に確定する。
+
+### 3.7 候補実行の信頼境界
+
+PR #361 codex-review P0 指摘（main.rs:272 相当）: `self-repair run` は
+`--candidates` の候補コードを、検証ゲート（`RepairCompositeGate`。
+`crates/self-repair/src/verify_gates.rs`・`verify_direct_composite.rs`）が
+sandbox clone 内で `cargo build`／`cargo test --release`／`cargo clippy` を
+実行することで検証する。これは以下の理由により **OS レベルのプロセス・
+権限・ネットワーク隔離ではない**:
+
+- sandbox clone（`crates/self-repair/src/sandbox.rs`。`RunSandbox`）が
+  提供するのは `--repo`（人間の作業リポジトリ）の作業ツリー・index を
+  汚さないための**ファイルシステム上の作業分離**のみである（`git clone
+  --local` による独立 `.git` の構築。3.1 節 `--repo` の項・`sandbox.rs`
+  モジュール冒頭ドキュメント参照）
+- `cargo build`／`cargo test`／`cargo clippy`（`build.rs`・
+  `#[test]` 関数・手続き型マクロを含む）はホストと同一のプロセス・OS
+  ユーザー権限・ネットワーク到達性のまま実行される。悪意ある候補は
+  任意コード実行が可能である
+
+この脅威モデルへの対応として、v2 では次の設計を採る（低権限コンテナ等
+による OS レベル隔離は将来課題とし、実装しない。「対象外」節参照）:
+
+1. **`--candidates` は信頼済み入力に限定する**: 本 CLI が想定する
+   `--candidates` は、本リポジトリの自己修復ループ（検出 → 修正生成 →
+   検証 → 取り込み判断。REQ-3）が生成し、かつ guardrail 3 分岐判定
+   （REQ-4）と組み合わせて運用される候補列であり、出自不明な外部候補を
+   無検証で受理する用途を想定しない
+2. **明示的な承認なしには実行しない**: `--allow-candidate-exec`
+   （3.1 節。既定 false・必須フラグ）を指定しない限り `cli::parse_run`
+   が usage エラー（exit 2）として拒否し、`main.rs::run_run`（検証コマンド
+   実行を含む以降の処理）へは一切到達しない。`--candidates` は必須引数
+   のため、このフラグは実質「候補コードのホスト権限実行を承認する
+   スイッチ」として機能する
+
+OS レベル隔離（低権限コンテナ・ネットワーク遮断による候補検証コマンドの
+サンドボックス実行）は本節が定義する信頼境界の外にある将来課題であり、
+`out-of-scope-tracking.md` 準拠で PR 本文の「対象外」節に追跡する。
 
 ## 4. スコープ外の明示
 

@@ -505,6 +505,14 @@ fn feature_addition_loop_reaches_adopted_with_measured_evidence() {
         WORKLOAD_SOURCE.to_string(),
         "--policy-exclusion".to_string(),
         policy_exclusion_path.display().to_string(),
+        // 本テストは `docs/self-repair-revalidation/feature-addition/` 配下の
+        // 候補列（自己修復ループが実証計画〈#140〉に沿って生成した信頼済み
+        // 入力。`docs/guardrail-self-repair-cli.md` 3.7 節「候補実行の信頼
+        // 境界」参照）を渡す実証ハーネスであり、`--candidates` の候補コードを
+        // sandbox 内で `cargo build`/`cargo test`/`cargo clippy` として
+        // ホスト権限で実行することを承認する（PR #361 codex-review P0
+        // 指摘対応）。
+        "--allow-candidate-exec".to_string(),
     ];
     let run_output = self_repair_bin()
         .args(&run_args)
@@ -631,7 +639,7 @@ fn feature_addition_loop_reaches_adopted_with_measured_evidence() {
             .unwrap_or_else(|_| absolute.display().to_string())
     };
     let invocation_for_record = format!(
-        "self-repair run --kind feature-addition --repo <sandbox> --max-attempts 5 --log {} --output {} --candidates <candidates.json> --bench-bin {} --workload-source {} --policy-exclusion {}",
+        "self-repair run --kind feature-addition --repo <sandbox> --max-attempts 5 --log {} --output {} --candidates <candidates.json> --bench-bin {} --workload-source {} --policy-exclusion {} --allow-candidate-exec",
         relativize(&log_path),
         relativize(&output_path),
         BENCH_BIN,

@@ -158,6 +158,43 @@ fn run_with_non_utf8_kind_value_does_not_panic() {
     assert_eq!(output.status.code(), Some(2));
 }
 
+/// PR #361 codex-review P0 指摘対応の回帰防止（main.rs:272 相当。
+/// `docs/guardrail-self-repair-cli.md` 3.7 節「候補実行の信頼境界」）:
+/// `--allow-candidate-exec` を指定しない場合、他の必須引数（`--repo` を
+/// 含む）を満たしていても usage エラー（exit 2）で拒否されることを実
+/// バイナリ起動で確認する。`--repo` に実在しないパスを渡しているため、
+/// `main.rs::run_run`（`resolve_baseline_commit`・sandbox 構築）まで
+/// 到達していれば `git rev-parse` の失敗で exit 1 になるはずであり、
+/// exit 2 が返ることは `cli::parse_run` の段階（sandbox 構築・候補コード
+/// 実行のいずれにも到達する前）で拒否されていることの証拠になる。
+#[test]
+fn run_without_allow_candidate_exec_is_rejected_before_touching_repo() {
+    let output = self_repair_bin()
+        .args([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--repo",
+            "/nonexistent/self-repair-cli-run-test-repo",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "bench_workload",
+            "--workload-source",
+            "src/bin/bench_workload.rs",
+        ])
+        .output()
+        .expect("failed to run self-repair binary");
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--allow-candidate-exec"),
+        "stderr: {stderr}"
+    );
+}
+
 /// `run`／`verify-log` のいずれでもないサブコマンドは usage エラー（exit 2）
 /// になる（`cli.rs::parse` のエラーメッセージが `run`／`verify-log` 両方を
 /// 案内することの回帰確認）。

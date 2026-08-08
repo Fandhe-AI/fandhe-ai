@@ -204,6 +204,13 @@ fn report_usage_error_and_exit(err: &UsageError) -> ExitCode {
 
 /// `self-repair run` の実行フロー（3.1 節・実装計画 §3.1）。
 ///
+/// 0. `--candidates` の候補コード実行に対する明示的な承認
+///    （`--allow-candidate-exec`）は `cli::parse_run` が構築時に必須検証
+///    しており（[`RunArgs::allow_candidate_exec`] doc・PR #361 codex-review
+///    P0 指摘対応）、未指定の場合は本関数へ到達する前に usage エラー
+///    （exit 2）で拒否される。以降のステップはすべてこの承認済み前提の
+///    もとで候補コードを実行する（`docs/guardrail-self-repair-cli.md`
+///    「候補実行の信頼境界」節参照）。
 /// 1. `--repo` の HEAD を `baseline_commit` として解決する
 /// 2. `--candidates` の JSON を [`CandidateFix`] へ変換する
 /// 3. `--config` を [`guardrail::config::resolve`] で解決する（`guardrail.toml`

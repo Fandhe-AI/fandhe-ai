@@ -71,6 +71,8 @@ pub struct VerifyLogArgs {
 /// `--policy-exclusion` は、同節が候補生成手段・ベンチ仕様の受け渡しを
 /// 未定義としているため、本イシュー（#142 差し戻し分）で新たに定めて
 /// `docs/guardrail-self-repair-cli.md` へ追記する（実装計画 §3.1）。
+/// `--allow-candidate-exec`（必須フラグ）は PR #361 codex-review P0
+/// 指摘対応で追加した（[`RunArgs::allow_candidate_exec`] 参照）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunArgs {
     /// 対象種別（必須）。
@@ -103,6 +105,23 @@ pub struct RunArgs {
     /// REQ-5 除外ルール設定ファイル（任意。未指定時は `<repo>/policy-exclusion.toml`。
     /// `RepairCompositeGateSpec::policy_exclusion_path`）。
     pub policy_exclusion: Option<PathBuf>,
+    /// `--candidates` に含まれる候補コードの実行に対する明示的な承認
+    /// （必須フラグ。既定 false）。PR #361 codex-review P0 指摘対応:
+    /// `--candidates` の候補コードは検証フェーズ（`RepairCompositeGate`。
+    /// `verify_gates.rs`／`verify_direct_composite.rs`）で `cargo build`／
+    /// `cargo test`／`cargo clippy` としてホスト権限のまま実行される。
+    /// `RunSandbox`（`sandbox.rs`）はファイルシステム上の作業ツリー分離
+    /// （`--repo` の作業ツリー・index を汚さない）のみを提供し、プロセス・
+    /// 権限・ネットワークの隔離は行わない（`sandbox.rs` モジュール冒頭
+    /// ドキュメント参照）。悪意ある候補（`build.rs`・テストコード）が任意
+    /// コード実行しうるため、OS レベル隔離を実装するまでの間は「信頼済み
+    /// 候補に限り、明示的な承認なしには実行しない」設計とし
+    /// （`docs/guardrail-self-repair-cli.md`「候補実行の信頼境界」節参照）、
+    /// `--allow-candidate-exec` を指定しない限り `parse_run` が usage エラー
+    /// （exit 2）として拒否する。フラグは常に `true` の状態でのみ
+    /// `RunArgs` を構築できるため（`parse_run` 末尾の検証）、値そのものは
+    /// 情報としてのみ保持する。
+    pub allow_candidate_exec: bool,
 }
 
 /// 本バイナリが受理するサブコマンド。
@@ -151,6 +170,7 @@ const RUN_KNOWN_FLAGS: &[&str] = &[
     "--bench-bin",
     "--workload-source",
     "--policy-exclusion",
+    "--allow-candidate-exec",
 ];
 
 /// `--kind` の値を [`RepairKind`] へ変換する（3.1 節「v1 `RepairKind`:
@@ -199,6 +219,7 @@ where
     let mut bench_bin: Option<String> = None;
     let mut workload_sources: Vec<String> = Vec::new();
     let mut policy_exclusion: Option<PathBuf> = None;
+    let mut allow_candidate_exec = false;
 
     let mut it = args.peekable();
     while let Some(flag) = it.next() {
@@ -286,6 +307,7 @@ where
                     RUN_KNOWN_FLAGS,
                 )?))
             }
+            "--allow-candidate-exec" => allow_candidate_exec = true,
             unknown => {
                 return Err(UsageError(format!(
                     "unknown argument '{unknown}' for 'self-repair run'"
@@ -305,6 +327,24 @@ where
             "missing required argument '--workload-source' (specify at least once)".to_string(),
         ));
     }
+    // PR #361 codex-review P0 指摘対応: `--candidates` は必須のため
+    // `self-repair run` の全呼び出しが候補コードを実行しうる。sandbox clone
+    // （`sandbox.rs`）はファイルシステム上の作業ツリー分離のみでプロセス・
+    // 権限・ネットワークを隔離しないため、明示的な承認（`--allow-candidate-exec`）
+    // なしにはここで usage エラーとして拒否する（fail-closed。`RunArgs` は
+    // このフラグが true の場合にのみ構築されるため、以降の実行経路
+    // 〈`main.rs::run_run`〉に到達する前に構造的に拒否が保証される）。
+    // `RunArgs` フィールド doc・`docs/guardrail-self-repair-cli.md`
+    // 「候補実行の信頼境界」節参照。
+    if !allow_candidate_exec {
+        return Err(UsageError(
+            "refusing to run: '--candidates' code is executed via cargo build/test/clippy \
+             with host process privileges (the sandbox clone only isolates the filesystem \
+             work tree, not process/privilege/network access). Pass --allow-candidate-exec \
+             only for trusted candidates to acknowledge this and proceed"
+                .to_string(),
+        ));
+    }
     let repo = repo.unwrap_or_else(|| PathBuf::from("."));
     let max_attempts = max_attempts.unwrap_or_else(|| {
         NonZeroU32::new(5).expect("5 は非ゼロ（docs/self-repair-revalidation-plan.md §5 基準 3）")
@@ -321,6 +361,7 @@ where
         bench_bin,
         workload_sources,
         policy_exclusion,
+        allow_candidate_exec,
     })
 }
 
@@ -504,6 +545,7 @@ mod tests {
             "bench_workload",
             "--workload-source",
             "src/bin/bench_workload.rs",
+            "--allow-candidate-exec",
         ])
         .unwrap();
         let Command::Run(args) = cmd else {
@@ -522,6 +564,31 @@ mod tests {
         assert_eq!(args.config, None);
         assert_eq!(args.output, None);
         assert_eq!(args.policy_exclusion, None);
+        assert!(args.allow_candidate_exec);
+    }
+
+    /// PR #361 codex-review P0 指摘対応の回帰防止: `--allow-candidate-exec`
+    /// を指定しない場合、他の必須引数を全て満たしていても usage エラー
+    /// （exit 2 相当。`main.rs::report_usage_error_and_exit` 参照）として
+    /// 拒否されることを確認する（`--candidates` の候補コードが明示的な
+    /// 承認なしに実行されない設計。`RunArgs::allow_candidate_exec` doc 参照）。
+    #[test]
+    fn rejects_run_without_allow_candidate_exec() {
+        let err = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "bench_workload",
+            "--workload-source",
+            "src/bin/bench_workload.rs",
+        ])
+        .unwrap_err();
+        assert!(err.0.contains("--allow-candidate-exec"));
     }
 
     /// `--workload-source` を複数回指定すると累積されること（ゲーミング防止の
@@ -552,12 +619,14 @@ mod tests {
             "src/lib.rs",
             "--policy-exclusion",
             "policy-exclusion.toml",
+            "--allow-candidate-exec",
         ])
         .unwrap();
         let Command::Run(args) = cmd else {
             panic!("expected Command::Run")
         };
         assert_eq!(args.kind, RepairKind::BugFix);
+        assert!(args.allow_candidate_exec);
         assert_eq!(args.repo, PathBuf::from("/tmp/sandbox"));
         assert_eq!(args.max_attempts, NonZeroU32::new(3).unwrap());
         assert_eq!(args.config, Some(PathBuf::from("guardrail.toml")));
