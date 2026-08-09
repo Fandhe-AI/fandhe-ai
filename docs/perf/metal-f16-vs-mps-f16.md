@@ -6,58 +6,67 @@ REQ-8 性能下限表（`docs/spec/04-requirements.md`）の「Metal f16 対 PyT
 されていた。本ファイルは v2 で新規に自作した Metal f16 カーネル（`gemm_simdgroup_f16`）の実測手順・記録
 テンプレートを整備する。**下限値そのものの確定は #158（TASK-8.3d・人間担当）であり本イシューのスコープ外。**
 
-## 状態: 実測未実施（macOS 実機なし。実装環境は Linux）
+## 状態: 数値一致は実機検証済み（イシュー #380）。TFLOPS 実測は未実施
 
-本実装セッションは Linux worktree（`.claude/worktrees/wf_e6a16ce7-361-23`）で行っており、Metal 実機
-（Apple Silicon）・PyTorch MPS 実行環境が同一セッションで使用できない。本ファイルは計測手順・記録
-テンプレートのみを整備し、実測は Apple Silicon 実機で下記手順を実行した後、テンプレートへ結果を転記する
-運用とする（`docs/perf/metal-gemm-dynamic-tile.md`〈#188〉・`docs/perf/cuda-gemm-mma-pipeline.md`〈#187〉と
-同じ運用方針）。
+本ファイルは当初 Linux worktree で作成され、Metal 実機・PyTorch MPS 実行環境が同一セッションで使用できな
+かったため計測手順・記録テンプレートのみを整備していた。イシュー #380 で Apple Silicon 実機
+（M4 Max・macOS 26.6）を用いて `tests/cpu_metal_f16_parity.rs`（数値一致回帰テスト 6 件）・
+`tests/shader_source_evidence.rs`（命令実在検査）を実行し、MSL 構文検証（`gemm_simdgroup_f16` を含む
+`gemm.metal` 全体のコンパイル）・数値一致（複合判定）の両方を確認済み（詳細は下記「数値一致」節）。
+**TFLOPS 実測（Metal f16 対 PyTorch MPS f16 の性能比較）は #380 のスコープ外であり、引き続き未実施**
+（下記「計測手順」以降のテンプレートに従い後続イシューで実施する）。
 
-**明記**: 下記「検証済み事項」に記載する数値一致回帰テスト（`tests/cpu_metal_f16_parity.rs`）・命令実在検査
-（`tests/shader_source_evidence.rs`）は、Linux 環境で**型検査（`cargo check --tests --target aarch64-apple-darwin`）
-のみ**を通しており、Metal 実機・Metal コンパイラ上で**一度も実行されていない**。パリティ PASS・性能実測の
-いずれも本ファイル執筆時点では確認できていない。
+イシュー #380（Apple Silicon 実機・M4 Max・macOS 26.6・`stable-aarch64-apple-darwin`）で以下を実機検証済み:
 
-代わりに以下は本実装セッションで検証済み:
+- `crates/backend-metal/src/shaders/gemm.metal` の `gemm_simdgroup_f16`（`gemm_naive`/`gemm_tiled`/
+  `gemm_simdgroup`/`gemm_simdgroup_tiled` を含む `gemm.metal` 全体）が `MetalGemm::new` の
+  `newLibraryWithSource` で実機コンパイル成功する（**MSL 構文検証は完了**。当初の懸念「実機での最初の
+  実行が構文検証を兼ねる」は成立し、かつ pass した）
+- `tests/cpu_metal_f16_parity.rs` 6 件全件が `cargo test -p backend-metal --release -- --ignored --nocapture`
+  で PASS（数値一致は下記「数値一致」節を参照）
+- `tests/shader_source_evidence.rs`（`include_str!` ベースの文字列検査のみ。`cfg(target_os = "macos")`
+  不要で Linux CI でも実行可能）は実機セッションでも green
 
-- `cargo check -p backend-metal --tests --examples --target aarch64-apple-darwin`（`Makefile` の
-  `check-cross-metal-tests` と同一方式。`--examples` を追加して `gemm_f16_bench.rs` も対象に含めた）で、
-  `gemm_simdgroup_f16` の Rust／objc2 側結線（`crate::gemm::dispatch_f16_unverified`・`crate::half_buffer::MetalHalfBuffer`・
-  `crate::pipeline::make_pipeline`）が**型として**コンパイル可能であることを確認済み（クロスターゲット
-  ビルドのため実際のリンク・実行は検証できない。`make build-cross` は本 Linux 環境に macOS SDK が無く
-  リンクエラーになるため実行できず、`cargo check`（型検査のみ）に留めている点に注意）
-- `crate::pad::pad_matrix_f16`/`unpad_matrix_f16`（GPU 非依存の純粋関数）は Linux 上の
-  `cargo test -p backend-metal --lib` で単体テスト済み（本 PR に含む。`objc2` 系 FFI に触れないため）
-- `crates/backend-metal/src/shaders/gemm.metal` の `gemm_simdgroup_f16` カーネル自体（MSL 構文・
-  `simdgroup_load`/`simdgroup_multiply_accumulate`/`simdgroup_store` の呼び出し形）は Metal コンパイラでの
-  構文検証を実施できていない（Linux 環境に Metal コンパイラが存在しないため）。**実機での最初の実行が
-  構文検証を兼ねる**点に注意（`metal-gemm-dynamic-tile.md` と同じ注意書き）
-- `tests/shader_source_evidence.rs`（`objc2` 系 FFI に触れない `include_str!` ベースの文字列検査のみ）は
-  Linux で実際に実行し green を確認済み（`gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions`・
-  `gemm_simdgroup_f16_source_retains_req8_boundary_guard`）
+Linux 実装環境時点で検証済みだった事項（`cargo check --tests --target aarch64-apple-darwin` による型検査
+のみ・`crate::pad::pad_matrix_f16`/`unpad_matrix_f16` の単体テスト）は上記の実機実行で上書き・補完された。
 
-## 精度契約（実装計画 §3.1 の判断。CUDA 側との差異）
+## 精度契約（イシュー #380 の実機検証で確定。実装計画 §3.1 の half 統一判断から変更）
 
-`gemm_simdgroup_f16` は A・B・累算のすべてに `simdgroup_half8x8`（half 型統一）を使う。理由:
-`apple-silicon` スキル（`references/msl/data-types.md`・`references/msl/simdgroup-functions.md`）のいずれにも
-「A/B が half・累算が float」という混在精度オーバーロードの記載がなく、Linux 実装環境では Metal コンパイラで
-実地検証もできないため、未確認のオーバーロードを推定で使わず仕様上確実に成立する単一型テンプレートを選んだ。
+`gemm_simdgroup_f16` は当初（実装計画 §3.1・Linux 実装環境時点）A・B・累算のすべてに
+`simdgroup_half8x8`（half 型統一）を使っていた。理由: `apple-silicon` スキル
+（`references/msl/data-types.md`・`references/msl/simdgroup-functions.md`）のいずれにも「A/B が half・累算が
+float」という混在精度オーバーロードの記載がなく、Linux 実装環境では Metal コンパイラで実地検証もできない
+ため、未確認のオーバーロードを推定で使わず仕様上確実に成立する単一型テンプレートを選んでいた。
 
-これは CUDA 側 WMMA f16（`crates/backend-cuda/src/kernels_wmma.rs::gemm_wmma_f16`。`f32.f16.f16.f32` 累算）とは
-**異なる精度契約**である。half 累算は f32 累算より桁落ちしやすく、K が大きいストレスケース（K=4096）では
-REQ-2 複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる可能性が高い
-（#186〈`docs/perf/cuda-tensor-core-tolerance-evaluation.md`〉で CUDA f16 WMMA も K≥512 で閾値超過が実測されて
-おり、half 累算の Metal 側では同様かそれ以上の結果が想定される）。`shaders/gemm.metal` は `MM_T`/`ACC_T` の
-typedef を切り出しており、実機で混在精度オーバーロードが確認できた場合は `ACC_T` の型変更（と `c` バッファ・
-`MetalGemm::dispatch_f16_unverified` の出力型の追随変更）で切替可能にしてある。
+イシュー #380 で Apple Silicon 実機（M4 Max・macOS 26.6）を用い、`MTLDevice.makeLibrary(source:)`
+ランタイムコンパイルによる spike を実施し以下が判明した:
 
-**公開 API 上の扱い（PR #346 codex-review P1-2 指摘への対応）**: 上記の通り精度契約が Metal 実機・
-Metal コンパイラで一度も実行検証されていないため、`MetalGemm::dispatch_f16`／`dispatch_f16_prepared` は
-`dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` へ改名し `#[doc(hidden)]` を付けた（公開
-ドキュメントには載せず、意図的に呼び出す利用者のみが到達できるようにする）。検証（本ファイルの実測結果
-記入・#158 での下限確定）が済むまで `dispatch_auto`／`dispatch_backend_auto`（production 経路）へは統合
-しない。
+1. `simdgroup_multiply_accumulate(simdgroup_float8x8&, simdgroup_half8x8, simdgroup_half8x8,
+   simdgroup_float8x8)` は**コンパイル成功**する（A/B=half・アキュムレータ=float の混在オーバーロードは
+   実在する）。
+2. ただし `simdgroup_store(simdgroup_float8x8, device half*)` は**コンパイル不可**
+   （診断: `deduced conflicting types for parameter 'T' ('float' vs. 'half')`）。float アキュムレータを
+   half 出力バッファへ直接 store する経路は存在しない。
+
+この 2 点から、`simdgroup_float8x8` → `threadgroup float` へ一旦 store → `threadgroup_barrier` で同期 →
+スレッド単位で `(half)` へ変換して `device half*` へ書き戻す 2 段エピローグ（変種 B）を採用し、
+`ACC_T` を `simdgroup_float8x8`（f32 累算）へ変更した（`shaders/gemm.metal::gemm_simdgroup_f16` 本体
+参照）。変種 B を選ぶ理由: `device float*` へ直接 store する変種 A（C 転送バイト数が 2 倍になり本ファイルの
+比較手法・後続 #383 の前提を壊す）ではなく、`dispatch_f16_prepared_unverified` のシグネチャ・
+`MetalHalfBuffer` の `c_buf`・C バッファの転送バイト数を変えずに済むため。
+
+この変更により CUDA 側 WMMA f16（`crates/backend-cuda/src/kernels_wmma.rs::gemm_wmma_f16`。
+`f32.f16.f16.f32` 累算）と**精度契約が整合した**。half 累算時点（実装計画時点）の実機実測では
+K=4096 ストレスケースで 60155/65536 要素（max_rel_err 1.992・max_abs_diff 1.562）が REQ-2 複合判定
+（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を外れていたが、f32 累算化後は同一形状で複合判定 green を
+実機確認済み（詳細は下記「数値一致」節）。本変更は判定式・閾値・`backend_cpu::parity` を一切変更しない
+「累算精度の向上」であり、「許容誤差の緩和」ではない。
+
+**公開 API 上の扱い（PR #346 codex-review P1-2 指摘への対応）**: `MetalGemm::dispatch_f16`／
+`dispatch_f16_prepared` は `dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` へ改名し
+`#[doc(hidden)]` を付けている（公開ドキュメントには載せず、意図的に呼び出す利用者のみが到達できるように
+する）。数値一致は #380 で実機検証済みだが、`dispatch_auto`／`dispatch_backend_auto`（production 経路）への
+統合はスコープ外のため `_unverified` suffix・`#[doc(hidden)]` は当面維持する。
 
 ## 計測手順（Apple Silicon 実機）
 
@@ -108,15 +117,22 @@ python3 scripts/bench/gemm_bench_torch_mps_f16.py
 | 決定的シード | `0xC0FFEE`（両スクリプト共通） |
 | 同期境界 | Rust: コマンドバッファ完了待ち／PyTorch: `torch.mps.synchronize()`（ホスト転送を伴わない完了待ち。REQ-8 v2 方針） |
 
-### 数値一致（`cpu_metal_f16_parity.rs`。受け入れ条件の前提）
+### 数値一致（`cpu_metal_f16_parity.rs`。受け入れ条件の前提。イシュー #380 実機実測。M4 Max・macOS 26.6）
 
-| ケース | 判定 | 備考（FAIL 時は fail_count・max_abs_diff・max_rel_err を記載） |
+累算精度契約変更（half 統一 → f32 累算。本ファイル「精度契約」節）の before/after。before は実装計画時点の
+half 統一アキュムレータでの実機実測、after は #380 の f32 累算化後の実機実測。
+
+| ケース | before（half 累算） | after（f32 累算） |
 |------|------|------|
-| f16_parity_baseline_8x8x8 | （記入: PASS/FAIL） | |
-| f16_parity_baseline_shape_512 | （記入: PASS/FAIL） | |
-| f16_parity_boundary_shapes_non_multiple_of_eight | （記入: PASS/FAIL） | |
-| f16_k4096_stress | （記入: PASS/FAIL） | half 累算のため FAIL の可能性が高い（本ファイル「精度契約」節参照） |
-| f16_dispatch_is_bit_deterministic_across_runs | （記入: PASS/FAIL） | |
+| f16_parity_baseline_8x8x8（8×8×8） | FAIL: fail_count=7/64・max_rel_err=1.171e-2・max_abs_diff=1.953e-3 | PASS |
+| f16_parity_boundary_shapes_non_multiple_of_eight（17×19×23） | FAIL: fail_count=92/323・max_rel_err=4.754e-2・max_abs_diff=7.812e-3 | PASS |
+| f16_parity_baseline_shape_512（512³） | FAIL: fail_count=203946/262144・max_rel_err=1.998e0・max_abs_diff=2.500e-1 | PASS |
+| f16_k4096_stress（256×256×4096） | FAIL: fail_count=60155/65536・max_rel_err=1.992e0・max_abs_diff=1.562e0 | PASS |
+| f16_dispatch_is_bit_deterministic_across_runs | PASS | PASS |
+| f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs | PASS | PASS |
+
+6 件全件が after（f32 累算）で PASS。judgement 式・閾値・`backend_cpu::parity` は変更していない
+（`git diff -- crates/backend-cpu/src/parity.rs` は空）。
 
 ### TFLOPS 比較（Metal f16 対 PyTorch MPS f16）
 

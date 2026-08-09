@@ -44,12 +44,18 @@ fn gemm_metal_source_uses_simdgroup_matrix_instructions() {
 /// 切り出す。
 ///
 /// 開始位置を `kernel void gemm_simdgroup_f16(` ではなく直前の `typedef` 行に
-/// 取る理由: 実際の行列型（`simdgroup_half8x8`）はカーネル本体内ではなく
-/// この typedef 行にのみ現れる（本体は型エイリアス `MM_T`/`ACC_T` を使う。
-/// L208-209）。`typedef` 行はこの f16 カーネル専用（f32 版 `gemm_simdgroup`
-/// は L154-179 で既に完結しており typedef より前）であり、かつ f16 カーネル
-/// 本体全体を包含するため、命令実在検査・REQ-8 境界チェック検査の両方に
-/// 安全に使える。
+/// 取る理由: `MM_T`（A・B のタイル型）の実際の行列型 `simdgroup_half8x8` は
+/// カーネル本体内ではなくこの typedef 行にのみ現れる（本体は型エイリアス
+/// `MM_T`/`ACC_T` を使う）。`typedef` 行はこの f16 カーネル専用（f32 版
+/// `gemm_simdgroup` は typedef より前で既に完結している）であり、かつ f16
+/// カーネル本体全体を包含するため、命令実在検査・REQ-8 境界チェック検査の
+/// 両方に安全に使える。
+///
+/// なお `ACC_T`（アキュムレータ型）はイシュー #380 で `simdgroup_float8x8`
+/// （f32 累算）に変更済みだが、`simdgroup_half8x8` typedef 自体（`MM_T` の
+/// 定義）はこの範囲の開始アンカーとして変更後も維持される（本ファイル末尾
+/// `gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions` が
+/// この typedef 行の存在に依存する）。
 ///
 /// 検索対象を `GEMM_METAL_SOURCE` 全文のままにすると、`gemm_simdgroup`
 /// （f32 版。L154〜）が同じ `simdgroup_load`/`simdgroup_multiply_accumulate`/

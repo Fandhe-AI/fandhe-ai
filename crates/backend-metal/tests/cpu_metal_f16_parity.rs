@@ -30,12 +30,15 @@
 //!
 //! # 累算精度契約（`shaders/gemm.metal::gemm_simdgroup_f16` と同一の注意）
 //!
-//! `gemm_simdgroup_f16` は A・B・累算すべて `simdgroup_half8x8`（half 統一）
-//! を使う（MSL の混在精度オーバーロードは未確認のため。カーネル冒頭
-//! コメント参照）。CUDA 側 WMMA f16（`f32.f16.f16.f32`。f32 累算）とは
-//! 精度契約が異なり、Metal 側は桁落ちしやすい。K が大きいケース
-//! （`k4096_stress`）で複合判定を外れる可能性が高く、その場合も緩和せず
-//! FAIL 事実を記録する（`.claude/rules/coding-rust.md`）。
+//! `gemm_simdgroup_f16` は A・B に `simdgroup_half8x8`、アキュムレータに
+//! `simdgroup_float8x8`（f32 累算）を使う（カーネル冒頭コメント参照）。
+//! イシュー #380 の Apple Silicon 実機 spike で「A/B=half・アキュムレータ=
+//! float の混在オーバーロードは実在するが `simdgroup_store` は float→half
+//! 直接変換に非対応」と判明し、f32 累算 + スレッド単位 half 変換の
+//! 2 段エピローグへ変更済み（実装計画時点の half 統一からの変更）。CUDA 側
+//! WMMA f16（`f32.f16.f16.f32`。f32 累算）と精度契約が整合する。実機実測
+//! （M4 Max・macOS 26.6）で本ファイル 6 件全件が複合判定 green であることを
+//! 確認済み（`docs/backend-metal-real-device-testing.md`）。
 //!
 //! # 実行環境
 //!
@@ -126,11 +129,13 @@ fn f16_parity_boundary_shapes_non_multiple_of_eight() {
     assert_metal_f16_parity(&ctx, &gemm, "f16 boundary 130x70x90", 122, 130, 70, 90);
 }
 
-/// K 大のストレスケース（PoC-v2-5 準拠の積和蓄積検証。half 累算の桁落ち
-/// 耐性を確認する中核ケース）。累算精度契約が f32 版と異なるため
-/// （ファイル冒頭コメント参照）、複合判定を外れる可能性がある形状。
-/// 外れた場合も緩和せず FAIL 事実を `docs/perf/metal-f16-vs-mps-f16.md`
-/// へ記録し #158（下限確定）へ引き継ぐ。
+/// K 大のストレスケース（PoC-v2-5 準拠の積和蓄積検証。f32 累算の桁落ち
+/// 耐性を確認する中核ケース）。実装計画時点（half 統一アキュムレータ）の
+/// 実機実測では 60155/65536 要素が複合判定を外れていたが、イシュー #380 の
+/// f32 累算化（ファイル冒頭コメント参照）後は実機（M4 Max・macOS 26.6）で
+/// green を確認済み。今後複合判定を外れた場合も緩和せず FAIL 事実を
+/// `docs/perf/metal-f16-vs-mps-f16.md` へ記録し #386（REQ-8 Metal f16 下限
+/// 確定）へ引き継ぐ。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn f16_k4096_stress() {
