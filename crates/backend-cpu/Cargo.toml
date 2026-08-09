@@ -27,6 +27,14 @@ bench-harness = { path = "../bench-harness" }
 # `tests/device_provider_integration.rs` で直接検証するための dev 依存（公開依存グラフを
 # 汚さない。上記 bench-harness と同種の判断）。CUDA は無条件依存のため全 OS で追加する。
 backend-cuda = { path = "../backend-cuda" }
+# TASK-12.2a（#167）の融合効果実測ハーネス（`tests/fusion_effect_perf.rs`）が
+# `autodiff::Tape` 経由の遅延評価（`push_lazy`／`materialize_*`）で融合条件・
+# 非融合条件を within-harness 比較するための dev 依存。workspace 内クレート
+# 同士の path 依存であり外部依存の新規追加ではない（上記 bench-harness・
+# backend-cuda と同種の判断）。**逆方向は禁止**: `autodiff` → `backend-cpu` の
+# 依存は `crates/autodiff/tests/architecture_boundaries.rs` が dev 依存も含め
+# 機械検査しているため、本ハーネスは backend-cpu 側に置く。
+autodiff = { path = "../autodiff" }
 
 # Metal は `cfg(target_os = "macos")` 限定（deps-policy.md）。backend-metal クレート自体は
 # 非 macOS でもビルド可能（本体が `#[cfg(target_os = "macos")]` で空になるだけ）だが、

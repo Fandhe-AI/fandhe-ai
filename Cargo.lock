@@ -64,6 +64,7 @@ dependencies = [
 name = "backend-cpu"
 version = "0.3.0"
 dependencies = [
+ "autodiff",
  "backend-cuda",
  "backend-metal",
  "bench-harness",
