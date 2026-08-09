@@ -56,25 +56,41 @@ ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
 git clone / fetch は使わない（ノード側に GitHub 認証鍵が無く HTTPS も不通。過去の `git push ssh://...` が 2 回目以降ハングした実績）。作業 worktree のルートで以下を実行：
 
 ```bash
-# 転送元コミット SHA を .rev-stamp に記録（ノード側で検証対象リビジョン確認の唯一の手段）
+# 転送元コミットを記録してから rsync する（ノード側に .git を置かないため、
+# ノード上で検証対象リビジョンを確認する唯一の手段になる）
 git rev-parse HEAD > .rev-stamp
 
-rsync -a --delete \
-  --exclude 'target/' --exclude '.git/' --exclude '_/' --exclude '.codex/' \
+# --filter=':- .gitignore' で .gitignore を rsync のフィルタとして適用する
+# （rsync は .gitignore を自動参照しないため、指定しないと .env*・
+#  .claude/settings.local.json・.venv*/ 等の Git 管理外ファイルまで共有実機へ
+#  転送される。codex-review P0 指摘対応）。
+# --delete-excluded は受け側に残った除外対象ファイルも削除する（過去の転送で
+# 残った管理外ファイルを回収する）。ビルドキャッシュは同期ツリー外の
+# CARGO_TARGET_DIR に置くため、この削除では失われない。
+# .env* / .claude/settings.local.json / .venv*/ は .gitignore でも除外されるが、
+# 秘密情報の転送は fail-closed で防ぐため明示的にも除外する（多層防御）。
+rsync -a --delete --delete-excluded \
+  --filter=':- .gitignore' \
+  --exclude '.git/' --exclude '.codex/' \
+  --exclude '.env*' --exclude '.claude/settings.local.json' --exclude '.venv*/' \
   ./ local.fandhe.spark-dbd9:~/work/rust-ai-library-run/
 
 rm .rev-stamp
 
-# 転送直後にノード側でリビジョン確認（古いカーネルの数値を記録する事故を防ぐ）
+# 転送後にノード側で必ずリビジョンを確認する（古いカーネルの数値を記録する事故を防ぐ）
 ssh local.fandhe.spark-dbd9 'cat ~/work/rust-ai-library-run/.rev-stamp'
+
+# 秘密情報が渡っていないことを確認する（初回・フィルタ変更時）
+ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
+  find . -name ".env*" -o -name "settings.local.json" | head'
 ```
 
 ### 注意
 
-- ノード側の作業ディレクトリ: `~/work/rust-ai-library-run`
-- rsync で `target/` を除外のため、以降のビルドは warm（キャッシュ残存）
-- `~/work/rust-ai-library`（末尾 `-run` なし）は 2026-08-04 時点の古い checkout（コミット `8a9d640`）。**使わない**
-- `docs/spec`（submodule）の実体も worktree のコピーとして転送される（PyTorch 参照スクリプトが submodule 配下にあるため）
+- ノード側の作業ディレクトリは `~/work/rust-ai-library-run`（ソースのみ。ビルドキャッシュは置かない）
+- **ビルドキャッシュは同期ツリー外の `$HOME/work/target-rust-ai-library` に置く**（`CARGO_TARGET_DIR` で指定）。同期ツリー内に `target/` を置くと `--delete-excluded` で消えるため、この分離が前提。この構成なら再 rsync 後もキャッシュが残り warm ビルドになる（実測: 再 rsync 後も 176MB のキャッシュが残存し `--ignored` テストが 0.29s で pass）
+- `~/work/rust-ai-library`（末尾 `-run` なし）は 2026-08-04 時点の古い checkout（`8a9d640`）。使わない
+- `docs/spec`（submodule）の実体も worktree のコピーとして転送される（PyTorch 参照スクリプトが submodule 配下にあるため必要）
 
 ## 4. ビルド・テスト実行
 
@@ -83,14 +99,15 @@ ssh local.fandhe.spark-dbd9 'cat ~/work/rust-ai-library-run/.rev-stamp'
 ```bash
 ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release -- --ignored --nocapture'
 ```
 
 ### 4.2 パフォーマンス
 
-- cold build（`cargo build --workspace --release --all-targets`）: 数十秒（backend-cuda 単体 13.77s 実測）
+- cold build（`cargo build -p backend-cuda --release --all-targets`・外部 `CARGO_TARGET_DIR` 新規作成時）: 6.28s 実測
 - warm build（キャッシュ残存後）: 0.1s 未満
-- 実機テスト（`backend-cuda::select_device_zero_on_real_hardware`・`--ignored`）: pass 確認済み
+- `tests/device.rs` の `select_device_zero_on_real_hardware`（`--ignored`）: 実機で pass 済み
 
 ### 4.3 既知の warning
 
@@ -103,10 +120,9 @@ ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
 ```bash
 ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
   setsid nohup env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release -- --ignored --nocapture \
   > $HOME/work/cuda-test.log 2>&1 < /dev/null & echo started'
-
-# 進捗確認は tail でポーリング
 ssh local.fandhe.spark-dbd9 'tail -5 $HOME/work/cuda-test.log'
 ```
 
