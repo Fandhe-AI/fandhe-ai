@@ -111,7 +111,6 @@
 //!   が候補実行 3 経路（`main.rs::run_run` の `gate_spec.runner`・
 //!   `BugFixDetector`・`FeatureAdditionDetector`）へ適用する（詳細は
 //!   `isolation`・`docs/self-repair-candidate-isolation.md` 参照）。
-//!   冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
