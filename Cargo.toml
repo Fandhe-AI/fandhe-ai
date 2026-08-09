@@ -67,11 +67,10 @@ publish = false
 # CUDA toolkit 非搭載環境でもビルドが成立する（PoC-v2-3 で実証済み。
 # docs/spec/03-poc/poc-v2-3-cuda-gemm/code/rust/Cargo.toml:26-32）。
 # `cuda-13000`（DGX Spark GB10 実機の CUDA 13.0 に合わせた API バージョン feature）は
-# deps-policy.md の記載条件（driver／nvrtc／dynamic-loading／f16）に明示されていないが、
-# cudarc は CUDA API バージョン feature の指定が必須でありビルドできないため、
+# cudarc の CUDA API バージョン feature の指定が必須でありビルドできないため、
 # PoC-v2-3・PoC-v2-5 実測構成（docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/Cargo.toml:36-42）
-# を踏襲して採用する。deps-policy.md 自体への feature 追記はユーザー承認事項のため、
-# 本コミットでは行わず別途提案する（イシュー #5 のスコープ外）。
+# を踏襲して採用する。deps-policy.md の記載条件（driver／nvrtc／dynamic-loading／cuda-13000／f16）
+# に反映済み（イシュー #412 でユーザー承認。ライセンス実測は docs/license-matrix.md 4 節）。
 cudarc = { version = "=0.19.8", default-features = false, features = [
     "driver",
     "nvrtc",

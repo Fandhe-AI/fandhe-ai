@@ -58,6 +58,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 | 3 | `cargo tree --locked --workspace -e normal,build --target aarch64-apple-darwin` | 全 113 行。`objc2`/`objc2-foundation`/`objc2-metal`/`objc2-core-foundation`/`dispatch2` 系が新規出現（`grep -c objc2` で 12 件）。他は #1 と共通 |
 | 4 | `cargo tree --locked --workspace -e normal,build,dev` | #1 に加え `bench-harness` の `[dev-dependencies]` として `criterion v0.8.2` 以下のサブツリー（`alloca`・`clap`・`plotters`・`regex` 等）が追加出現。コピーレフトライセンスの新規混入なし |
 | 5 | `cargo metadata --locked --format-version 1` によるライセンス集計 | 5 節参照。Cargo.lock 全域（上記 1〜4 の上限集合）を対象とする |
+| 6 | `cargo tree --locked -p cudarc -e normal,build`（イシュー #412。`cuda-13000` feature 込みの現行 `[workspace.dependencies]` 構成） | `cudarc v0.19.8` の直接依存は `half v2.7.1`・`libloading v0.9.0` の 2 件のみ（`cuda-13000` は API バージョン feature でありサブツリーの依存パッケージを追加しない）。推移的依存（`num-traits`・`rand`／`rand_chacha`／`rand_core`・`rand_distr`・`zerocopy`／`zerocopy-derive`・`getrandom`・`libc`・`cfg-if`・`libm`・`autocfg`・`proc-macro2`・`quote`・`syn`・`unicode-ident`・`ppv-lite86` 等）はすべて 5 節のライセンス分布（MIT OR Apache-2.0 系・許諾的ライセンス）の範囲内。コピーレフト（GPL/LGPL/MPL）の新規混入なし |
 
 いずれも実行時に `Cargo.lock` が変更されていないこと（`git status` で無差分）を確認済み。
 
@@ -107,6 +108,13 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - `rustc 1.96.0 (ac68faa20 2026-05-25)` / `cargo 1.96.0 (30a34c682 2026-05-25)`
 - 対象 `Cargo.lock` のコミット SHA: `63748a677a0800257c8175b8fb8bbf187669cbe1`（origin/main）
 - 実測コマンドはすべて worktree ルート（`Cargo.toml` と同階層）で `--locked` 付きで実行し、実行後 `git status` で `Cargo.lock` に差分がないことを確認した
+
+### 追加実測（イシュー #412・`cuda-13000` feature 整合。4 節 #6）
+
+- 実測日: 2026-08-09
+- `rustc 1.96.0 (ac68faa20 2026-05-25)` / `cargo 1.96.0 (30a34c682 2026-05-25)`
+- 対象 `Cargo.lock` のコミット SHA: `ef221531ec5710c973a26f52f165386117089a31`（origin/main）
+- `cargo tree --locked -p cudarc -e normal,build` 実行後 `git status --porcelain` で `Cargo.lock` に差分がないことを確認した
 
 ## 8. 運用
 
