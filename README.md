@@ -14,7 +14,7 @@ M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス�
 
 ## 実装方針（要点）
 
-- 想定クレート 9 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`
+- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root・compat 公開面）
 - 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理（workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義。TASK-1.1b）
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査（TASK-1.2）
 - バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 動的ロード・`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成。詳細 → [`docs/backend-switching-design.md`](docs/backend-switching-design.md)）
