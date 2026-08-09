@@ -104,6 +104,14 @@
 //!   完結させる。[`sandbox::reflect_adopted_diff`] は `Adopted` の場合のみ
 //!   競合検査つきで `--repo` へ差分を反映する（詳細は `sandbox` モジュール
 //!   冒頭ドキュメント参照）。
+//! - [`isolation`][]: 候補実行の OS レベル縦深防御（イシュー #414・A08）。
+//!   環境変数 allowlist・`HOME`/`TMPDIR` 書き込み先制限（既定有効）と、
+//!   `unshare` による opt-in ネットワーク隔離を提供する
+//!   [`isolation::ExecIsolation`]。[`exec::SystemCommandRunner::isolated`]
+//!   が候補実行 3 経路（`main.rs::run_run` の `gate_spec.runner`・
+//!   `BugFixDetector`・`FeatureAdditionDetector`）へ適用する（詳細は
+//!   `isolation`・`docs/self-repair-candidate-isolation.md` 参照）。
+//!   冒頭ドキュメント参照）。
 //!
 //! # 本クレートが担わない責務（TASK-3.1c 完了時点でのスコープ・
 //! `.claude/rules/out-of-scope-tracking.md` 準拠）
@@ -144,6 +152,7 @@ pub mod error;
 pub mod exec;
 mod fd_walk;
 pub mod feature_addition;
+pub mod isolation;
 pub mod judge;
 pub mod kind;
 pub mod logging;

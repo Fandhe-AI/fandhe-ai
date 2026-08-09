@@ -126,6 +126,16 @@ pub struct RunArgs {
     /// `RunArgs` を構築できるため（`parse_run` 末尾の検証）、値そのものは
     /// 情報としてのみ保持する。
     pub allow_candidate_exec: bool,
+    /// 候補実行に対する `unshare` ベースのネットワーク隔離を有効化する
+    /// （任意フラグ・値なし・既定 false。イシュー #414）。
+    ///
+    /// `main.rs::run_run` は本フラグが true の場合のみ
+    /// `crate::isolation::ExecIsolation::probe_unshare_net` で可用性を事前
+    /// 確認し、失敗時は内部エラー区分（exit 1）で fail-closed に拒否する
+    /// （黙ってネットワーク隔離なしへ劣化させない。`isolation` モジュール
+    /// 冒頭ドキュメント参照）。環境変数遮断・書き込み先制限（`ExecIsolation`
+    /// の他の防御）は本フラグと無関係に候補実行経路で既定有効となる。
+    pub isolate_network: bool,
 }
 
 /// 本バイナリが受理するサブコマンド。
@@ -175,6 +185,7 @@ const RUN_KNOWN_FLAGS: &[&str] = &[
     "--workload-source",
     "--policy-exclusion",
     "--allow-candidate-exec",
+    "--isolate-network",
 ];
 
 /// `--kind` の値を [`RepairKind`] へ変換する（3.1 節「v1 `RepairKind`:
@@ -224,6 +235,7 @@ where
     let mut workload_sources: Vec<String> = Vec::new();
     let mut policy_exclusion: Option<PathBuf> = None;
     let mut allow_candidate_exec = false;
+    let mut isolate_network = false;
 
     let mut it = args.peekable();
     while let Some(flag) = it.next() {
@@ -312,6 +324,7 @@ where
                 )?))
             }
             "--allow-candidate-exec" => allow_candidate_exec = true,
+            "--isolate-network" => isolate_network = true,
             unknown => {
                 return Err(UsageError(format!(
                     "unknown argument '{unknown}' for 'self-repair run'"
@@ -366,6 +379,7 @@ where
         workload_sources,
         policy_exclusion,
         allow_candidate_exec,
+        isolate_network,
     })
 }
 
@@ -569,6 +583,36 @@ mod tests {
         assert_eq!(args.output, None);
         assert_eq!(args.policy_exclusion, None);
         assert!(args.allow_candidate_exec);
+        assert!(
+            !args.isolate_network,
+            "--isolate-network 未指定時は既定 false のはず（イシュー #414）"
+        );
+    }
+
+    /// イシュー #414: `--isolate-network` を指定した場合に `true` へパースされる
+    /// こと。
+    #[test]
+    fn parses_run_with_isolate_network_flag() {
+        let cmd = parse([
+            "run",
+            "--kind",
+            "feature-addition",
+            "--log",
+            "trial.jsonl",
+            "--candidates",
+            "candidates.json",
+            "--bench-bin",
+            "bench_workload",
+            "--workload-source",
+            "src/bin/bench_workload.rs",
+            "--allow-candidate-exec",
+            "--isolate-network",
+        ])
+        .unwrap();
+        let Command::Run(args) = cmd else {
+            panic!("expected Command::Run")
+        };
+        assert!(args.isolate_network);
     }
 
     /// PR #361 codex-review P0 指摘対応の回帰防止: `--allow-candidate-exec`

@@ -23,6 +23,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use crate::isolation::ExecIsolation;
+
 /// 取り込むログの上限（256 KiB）。
 ///
 /// `cargo test`・`cargo clippy` の出力は数百 KB に達しうるため、上限なしで
@@ -168,13 +170,33 @@ impl std::error::Error for ExecError {}
 /// RepairCompositeGate<R>` は試行ごとに `R: CommandRunner + Clone` を要求する
 /// `crate::verify_gates::CargoVerificationGate<R>` を**新規構築**する（diff 由来
 /// シグナルを試行ごとに実測し直すため。`verify_direct_composite` モジュール冒頭
-/// ドキュメント参照）。unit struct であり複製に副作用はない。
+/// ドキュメント参照）。`isolation` フィールドを持つが複製に副作用はない
+/// （`ExecIsolation` は設定値のみを保持する）。
+///
+/// # `new()` と `isolated()` の使い分け（イシュー #414）
+/// [`SystemCommandRunner::new`] は従来どおりの挙動（`run` 内の個別 deny-list・
+/// 網羅遮断なし）を維持し、既存の呼び出し元・テストとの互換を保つ。
+/// [`SystemCommandRunner::isolated`] は環境変数 allowlist・`HOME`/`TMPDIR`
+/// 付け替え・（設定されていれば）`unshare` によるネットワーク隔離を適用する
+/// 候補実行専用の構成であり、`main.rs::run_run` が `--candidates` を実行する
+/// 3 経路（`gate_spec.runner`・`BugFixDetector`・`FeatureAdditionDetector`）に
+/// のみ使う（`isolation` モジュール冒頭ドキュメント参照）。
 #[derive(Debug, Clone)]
-pub struct SystemCommandRunner;
+pub struct SystemCommandRunner {
+    isolation: Option<ExecIsolation>,
+}
 
 impl SystemCommandRunner {
     pub fn new() -> Self {
-        SystemCommandRunner
+        SystemCommandRunner { isolation: None }
+    }
+
+    /// 候補実行の縦深防御（`isolation` モジュール参照）を適用する
+    /// `SystemCommandRunner` を構築する。
+    pub fn isolated(isolation: ExecIsolation) -> Self {
+        SystemCommandRunner {
+            isolation: Some(isolation),
+        }
     }
 }
 
@@ -186,8 +208,43 @@ impl Default for SystemCommandRunner {
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput, ExecError> {
+        // `isolation` が設定されている場合のみ、ネットワーク隔離が有効なら
+        // argv を `unshare` ラップへ差し替える（`Inherit` の場合は no-op で
+        // 元の `program`/`args` のまま。`isolation.rs::ExecIsolation::
+        // wrap_argv_for_network_isolation` doc 参照）。
+        let (effective_program, owned_args);
+        let (program, args): (&str, &[&str]) = match &self.isolation {
+            Some(isolation) => {
+                let (wrapped_program, wrapped_args) =
+                    isolation.wrap_argv_for_network_isolation(program, args);
+                effective_program = wrapped_program;
+                owned_args = wrapped_args;
+                (effective_program, owned_args.as_slice())
+            }
+            None => (program, args),
+        };
+
         let mut command = Command::new(program);
         command.args(args).current_dir(cwd);
+
+        if let Some(isolation) = &self.isolation {
+            // 候補実行経路: 環境変数を allowlist 方式で遮断し、`HOME`/`TMPDIR`
+            // を sandbox 配下へ付け替える（`isolation.rs::ExecIsolation::apply`
+            // doc 参照）。以降の `env_remove` 個別指定は `env_clear` 後は
+            // 不要だが、`new()` 経路との差分を最小化するため分岐で早期
+            // return はせず、`apply` 適用後にそのまま従来の spawn ロジックへ
+            // 合流させる。
+            isolation.apply(&mut command);
+            let output = command.output().map_err(|error| {
+                ExecError::new(format!("{program} の起動に失敗しました: {error}"))
+            })?;
+            let mut combined = output.stdout;
+            combined.extend_from_slice(&output.stderr);
+            return Ok(CommandOutput::from_captured(
+                output.status.success(),
+                combined,
+            ));
+        }
 
         // 祖先プロセス（lefthook フック・CI・テストハーネス）が
         // `CARGO_TARGET_DIR` 等のビルド出力先を変える環境変数を設定して
