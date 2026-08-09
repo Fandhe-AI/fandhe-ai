@@ -297,7 +297,7 @@ src/cli.rs`・`crates/self-repair/src/main.rs`）。#131（TASK-3.1 の CLI 化�
 | `--workload-source <path>` | 必須（複数指定可） | ゲーミング防止のためピン留めするワークロードソース（`--repo` 相対）。1 回以上必須 |
 | `--policy-exclusion <path>` | 任意（既定 `<sandbox>/policy-exclusion.toml`。上記 `--repo` の隔離 sandbox 直下） | REQ-5 除外ルール設定ファイル。明示指定時はそのパスをそのまま読む（sandbox 相対に読み替えない） |
 | `--allow-candidate-exec` | 必須フラグ（既定 false・値なし） | `--candidates` の候補コードを検証ゲート（`cargo build`／`cargo test`／`cargo clippy`）経由でホスト権限のまま実行することへの明示的な承認。未指定の場合は `cli::parse_run` が usage エラー（exit 2）として拒否し、`main.rs::run_run` へは到達しない（PR #361 codex-review P0 指摘対応。3.7 節「候補実行の信頼境界」参照） |
-| `--isolate-network` | 任意フラグ（既定 false・値なし） | 候補実行に `unshare --user --map-root-user --net` による network namespace 分離を追加する（イシュー #414）。指定時は `main.rs::run_run` が `crate::isolation::ExecIsolation::probe_unshare_net` で可用性を事前確認し、失敗（user namespace 禁止環境等）した場合は黙って劣化させず内部エラー区分（exit 1）で拒否する（fail-closed）。環境変数 allowlist・`HOME`/`TMPDIR` の sandbox 配下への付け替えは本フラグと無関係に候補実行経路で既定有効（3.7 節参照） |
+| `--isolate-network` | 任意フラグ（既定 false・値なし） | 候補実行に `unshare --user --map-current-user --net` による network namespace 分離を追加する（イシュー #414。`--map-current-user` は namespace 内でも現在の uid のまま実行し、`--map-root-user`〈擬似 root〉を避けて不要な特権付与をしない）。指定時は `main.rs::run_run` が `crate::isolation::ExecIsolation::probe_unshare_net` で可用性を事前確認し、失敗（user namespace 禁止環境・`--map-current-user` 未対応の古い util-linux 等）した場合は黙って劣化させず内部エラー区分（exit 1）で拒否する（fail-closed）。環境変数 allowlist・`HOME`/`TMPDIR` の専用ディレクトリ（`--repo` の隔離 sandbox の**外側**。3.7 節参照）への付け替えは本フラグと無関係に候補実行経路で既定有効 |
 
 出力: 標準出力へのテキスト要約（既定）または `--output` 指定時は
 `LoopReport`／`LoopFailure` JSON（上表）＋ 3.3 節の追記専用 JSON Lines
@@ -475,16 +475,25 @@ sandbox clone 内で `cargo build`／`cargo test --release`／`cargo clippy` を
      （`PATH`／`CARGO_HOME`／`RUSTUP_HOME`／`TERM`／`LANG`／`LC_ALL` のみ
      再注入）方式で祖先プロセス（CI・lefthook フック・開発シェル）の
      秘密情報（API キー・トークン）が候補コードへ継承されるのを遮断する
-   - **書き込み先の制限（既定有効）**: `HOME`／`TMPDIR` を sandbox 配下の
-     専用ディレクトリ（`<sandbox>/.self-repair-isolation/{home,tmp}`）へ
-     付け替え、候補の `build.rs`／テストが `$HOME`・`/tmp` の実体へ書き
-     込むのを sandbox 配下（削除対象）へ誘導する
+   - **書き込み先の制限（既定有効）**: `HOME`／`TMPDIR` を、`--repo` の
+     隔離 sandbox（`RunSandbox::root()`）の**外側**（兄弟ディレクトリ。
+     `<sandbox>-isolation/{home,tmp}`）の専用ディレクトリへ付け替え、
+     候補の `build.rs`／テストが `$HOME`・`/tmp` の実体へ書き込むのを
+     専用ディレクトリ（使い捨て）へ誘導する。sandbox の**内側**に置かない
+     のは、`RepairCompositeGate::verify` が検証のたび sandbox 内で
+     `git add -A` して diff を計測するため、内側に置くと候補の書き込みが
+     diff シグナル（`lines_changed`／`api_broken` 等）を汚染してしまう
+     ため（イシュー #414 レビュー対応）
    - **ネットワーク遮断（`--isolate-network` 指定時の opt-in）**:
-     `unshare --user --map-root-user --net` による network namespace
-     分離。root 不要・依存クレート不要だが container/CI 環境で user
-     namespace が禁止されている場合があるため既定 off とし、指定時は
-     事前 probe（`ExecIsolation::probe_unshare_net`）が失敗したら黙って
-     劣化させず exit 1 で拒否する（fail-closed）
+     `unshare --user --map-current-user --net` による network namespace
+     分離。`--map-root-user`（namespace 内で擬似 root へマップ）ではなく
+     `--map-current-user`（現在の uid のまま）を使い、ネットワーク遮断
+     という目的に対し不要な特権を候補コードへ付与しない。root 不要・
+     依存クレート不要だが container/CI 環境で user namespace が禁止
+     されている場合や `--map-current-user` 未対応の古い util-linux
+     （2.38 未満）の場合があるため既定 off とし、指定時は事前 probe
+     （`ExecIsolation::probe_unshare_net`）が失敗したら黙って劣化させず
+     exit 1 で拒否する（fail-closed）
 
    採否判断の詳細・残余リスク（プロセス・OS ユーザー権限自体は非分離の
    まま・`CARGO_HOME` 共有によるキャッシュ汚染の理論的余地）・将来課題

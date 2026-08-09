@@ -2,7 +2,9 @@
 //! #414・実装計画 §4 ステップ 5「統合（`tests/` 配下）」）。
 //!
 //! `crate::isolation::ExecIsolation::probe_unshare_net` は `unshare --user
-//! --map-root-user --net true` の可用性に依存し、実行環境（self-hosted
+//! --map-current-user --net true`（`isolation.rs::UNSHARE_NET_FLAGS`。
+//! イシュー #414 レビュー対応で `--map-root-user` から narrower privilege へ
+//! 変更済み）の可用性に依存し、実行環境（self-hosted
 //! runner・開発コンテナ・ユーザーのローカル環境）によって成否が変わる
 //! （user namespace が禁止されている container/CI 環境がありうるため。
 //! `docs/self-repair-candidate-isolation.md` 2 節）。本ファイルは probe の
@@ -58,13 +60,15 @@ fn git(dir: &Path, args: &[&str]) {
     );
 }
 
-/// `unshare --user --map-root-user --net true` を直接試行し、この実行環境で
-/// network namespace 分離が可能かを判定する（`isolation.rs::
-/// ExecIsolation::probe_unshare_net` と同じコマンドをテスト側で独立に再実行
-/// し、本体の probe 結果に応じてアサーションを分岐するため）。
+/// `unshare --user --map-current-user --net true` を直接試行し、この実行
+/// 環境で network namespace 分離が可能かを判定する（`isolation.rs::
+/// ExecIsolation::probe_unshare_net` と同じフラグをテスト側で独立に再実行
+/// し、本体の probe 結果に応じてアサーションを分岐するため。フラグが本体
+/// 側〈`isolation.rs::UNSHARE_NET_FLAGS`〉と desync すると、この skip-guard
+/// の判定が本体の実際の probe 結果と食い違う）。
 fn host_supports_unshare_net() -> bool {
     Command::new("unshare")
-        .args(["--user", "--map-root-user", "--net", "true"])
+        .args(["--user", "--map-current-user", "--net", "true"])
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -103,7 +107,7 @@ fn write_minimal_candidates(path: &Path) {
 fn run_with_isolate_network_fails_closed_when_unshare_net_unavailable() {
     if host_supports_unshare_net() {
         eprintln!(
-            "skip: この実行環境は unshare --user --map-root-user --net を許可しているため、\
+            "skip: この実行環境は unshare --user --map-current-user --net を許可しているため、\
              fail-closed 拒否パスを再現できません（`docs/self-repair-candidate-isolation.md` \
              2 節が想定する user namespace 禁止環境ではないための early-return）"
         );
