@@ -4,6 +4,11 @@ target/
 # ローカル作業ディレクトリ（git 管理外）
 _/
 
+# Python venv（PyTorch 参照計測用。docs/perf/metal-f16-vs-mps-f16.md の
+# `python3 -m venv .venv-mps-bench` 手順がリポジトリルートに作る。数 GB になるため
+# 誤コミットを防ぐ。docs/real-hardware-verification-env.md 7 節）
+.venv*/
+
 # macOS
 .DS_Store
 
