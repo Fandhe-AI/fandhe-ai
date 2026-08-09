@@ -12,9 +12,11 @@
 //! でないと forward できない（`nn/linear.rs` の `Tape` ライフサイクル
 //! 節参照）。活性化関数側は `tape` を使わないが、`Box<dyn Module>` を
 //! 均一に扱うため同じ引数を受け取る。この「毎呼び出しで葉ノードを
-//! 登録し直す」契約は推論・1 ステップ forward 用であり、学習（勾配
-//! 取得・パラメータ更新）には対応しない（`compat::Sequential` 側の
-//! スコープ外事項として記録。`docs/compat-api-scope.md` 参照）。
+//! 登録し直す」契約は推論・1 ステップ forward 用である。学習（勾配
+//! 取得・パラメータ更新）は #294（`compat::Sequential::bind`・
+//! `compat/sequential.rs` の `SequentialVars`）で対応済み: 下記
+//! `as_linear`/`as_linear_mut` が `Sequential` から学習可能パラメータ
+//! （`Linear`）を層順に取り出すためのダウンキャストフックを提供する。
 
 use crate::error::AutodiffError;
 use crate::nn::activation::{Relu, Sigmoid, Tanh};
@@ -26,6 +28,26 @@ use crate::var::Var;
 pub trait Module {
     /// このステップの `tape` 上で 1 回分の forward を計算する。
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError>;
+
+    /// 学習可能パラメータを持つ層（現状 `Linear` のみ）への読み取り
+    /// アクセスフック。既定実装は `None`（活性化関数など無状態の層は
+    /// オーバーライドしない）。`std::any::Any` による動的ダウンキャスト
+    /// ではなくこの明示的フックを選ぶ理由: `compat` 層が対象とするレイヤー
+    /// 集合は `docs/compat-api-scope.md` §1 で 3 種（Linear・
+    /// ReLU/Sigmoid/Tanh）に閉じており、種類を増やすたびに `Any` の
+    /// ダウンキャスト先を推測する曖昧さを避け、対応する層がここに
+    /// 列挙されているかどうかで閉集合であることをコードとして保つため
+    /// （#294。呼び出し元は `compat::Sequential::bind`/
+    /// `trainable_parameters`/`apply_parameters`）。
+    fn as_linear(&self) -> Option<&Linear> {
+        None
+    }
+
+    /// [`Module::as_linear`] の可変版。`compat::Sequential::apply_parameters`
+    /// が optimizer 更新後の `Tensor<f32>` を層へ書き戻す入口として使う。
+    fn as_linear_mut(&mut self) -> Option<&mut Linear> {
+        None
+    }
 }
 
 /// `Linear::bind(tape)` で当該ステップの葉ノードを登録してから
@@ -33,6 +55,14 @@ pub trait Module {
 impl Module for Linear {
     fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.bind(tape).forward(input)
+    }
+
+    fn as_linear(&self) -> Option<&Linear> {
+        Some(self)
+    }
+
+    fn as_linear_mut(&mut self) -> Option<&mut Linear> {
+        Some(self)
     }
 }
 

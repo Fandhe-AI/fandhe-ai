@@ -25,11 +25,12 @@
 //!
 //! **対象範囲**（`docs/compat-api-scope.md` §1〜2）: レイヤーは
 //! Linear・ReLU・Sigmoid・Tanh の 3 種限定。`Sequential` 経由の学習
-//! （勾配取得・パラメータ更新）は対象外（`sequential.rs` 冒頭 doc・
-//! PR 本文の「対象外（out-of-scope）」節参照）。
+//! （勾配取得・パラメータ更新）は #294 で対応済み（`sequential.rs`
+//! 冒頭 doc・[`SequentialVars`] 参照。`fit()`/`compile()` 等の高水準
+//! 学習ループ API は引き続き対象外）。
 
 mod array;
 mod sequential;
 
 pub use array::{ArrayData, array};
-pub use sequential::Sequential;
+pub use sequential::{Sequential, SequentialVars};

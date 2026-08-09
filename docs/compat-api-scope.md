@@ -30,6 +30,14 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 対象範囲はこの 3 種（配列生成関数・Sequential ビルダー・基本レイヤー／活性化の
 薄いラッパー）に限定する。
 
+- **`Sequential` の学習パラメータ取得 API・optimizer 接続**（#294）:
+  `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/autodiff/src/
+  compat/sequential.rs`）経由で学習可能パラメータ（`Linear` 層の
+  `weight`/`bias`）・勾配へアクセスできる。`Sequential::trainable_parameters`/
+  `Sequential::apply_parameters` と組み合わせ `crate::optim::Sgd`・
+  `crate::nn::optim::AdamW` へ接続する（4 節参照）。`fit()`/`compile()`
+  等の高水準学習ループ API は 2 節のとおり引き続き対象外
+
 ## 2. 対象外（out of scope）
 
 - 全方位の Python API 網羅を明示的に対象外とする（`04-requirements.md:206`・
@@ -94,10 +102,16 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   `Relu`・`Sigmoid`・`Tanh` の 4 実装を持つ（`nn/mod.rs` から
   `pub use module::Module;`）。`compat::Sequential` はこの trait を介して
   `Vec<Box<dyn Module>>` で層を均一に扱う
-- `Sequential` 経由の学習（勾配取得・パラメータ更新）は対象外のまま
-  （2 節）。`add_linear` が内部で保持する `Linear` は `LinearVars`
-  （勾配取得の入口）を外部へ公開しないため、`Sequential` からパラメータ・
-  勾配へアクセスする手段が構造的にない
+- `Sequential` 経由の学習（勾配取得・パラメータ更新）は #294
+  （`crates/autodiff/src/compat/sequential.rs` の `SequentialVars`・
+  `crates/autodiff/src/nn/module.rs` の `Module::as_linear`/
+  `as_linear_mut`）で対応済み。当初（#95）は `add_linear` が内部で保持
+  する `Linear` の `LinearVars`（勾配取得の入口）を外部へ公開せず
+  「`Sequential` からパラメータ・勾配へアクセスする手段が構造的にない」
+  としていたが、`Module` trait への `as_linear`/`as_linear_mut` 追加
+  （既定実装 `None`。活性化層は非オーバーライドのため非破壊）により
+  解消した。`fit()`/`compile()` 等の高水準学習ループ API は 1 節注記の
+  とおり引き続き対象外
 
 ## 5. 範囲拡張の手続き
 
