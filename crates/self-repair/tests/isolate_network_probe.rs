@@ -47,10 +47,38 @@ fn unique_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// `dir` で `git` を起動するコマンドを構築する。継承されうる `GIT_*`
+/// 環境変数（`GIT_DIR`／`GIT_WORK_TREE`／`GIT_INDEX_FILE` 等）を明示的に
+/// 除去してから起動する。
+///
+/// `current_dir(dir)` だけでは一時ディレクトリへの隔離を保証できない。
+/// `lefthook.yml` の `pre-push.jobs.test`（`cargo test --workspace`）経由で
+/// 本テストバイナリが起動されるケースを含め、githooks(5) の仕様どおり git は
+/// フック起動時に `GIT_DIR`／`GIT_WORK_TREE`／`GIT_INDEX_FILE` 等の `GIT_*`
+/// 環境変数を子プロセスへ設定し、それが `Command::new("git")` まで継承され
+/// うる。継承された `GIT_DIR` は `current_dir` より優先されるため、これを
+/// 除去しないと一時ディレクトリのつもりの `git init` がメインリポジトリの
+/// `.git` を対象に再実行され、`GIT_WORK_TREE` が伴わない再 init のため
+/// `core.bare = true` が書き込まれてメインリポジトリが壊れる（実測: pre-push
+/// フック配下で本ヘルパー対応前に発生）。`sandbox.rs::git_command`・
+/// `main.rs::resolve_baseline_commit`・`exec.rs`（`SystemCommandRunner::run`
+/// 内の `GIT_*` 除去）・`tests/feature_addition_loop_completion_task_3_3c.rs::
+/// sandboxed_git_command` と同一の対処。
+fn git_command(dir: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir);
+    for (key, _) in std::env::vars_os() {
+        if let Some(key_str) = key.to_str()
+            && key_str.starts_with("GIT_")
+        {
+            command.env_remove(key_str);
+        }
+    }
+    command
+}
+
 fn git(dir: &Path, args: &[&str]) {
-    let status = Command::new("git")
-        .args(args)
-        .current_dir(dir)
+    let status = git_command(dir, args)
         .status()
         .expect("git コマンドの起動に失敗");
     assert!(
