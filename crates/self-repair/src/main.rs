@@ -93,6 +93,7 @@ use std::rc::Rc;
 
 use self_repair::candidate::load_candidates_from_json;
 use self_repair::cli::{self, Command, RunArgs, UsageError, VerifyLogArgs};
+use self_repair::isolation::{ExecIsolation, NetworkIsolation, candidate_home_dirs};
 use self_repair::outcome::VerifiedEvidence;
 use self_repair::sandbox::{RunSandbox, reflect_adopted_diff};
 use self_repair::stages::{Detector, FixGenerator};
@@ -103,6 +104,40 @@ use self_repair::{
     LoopReport, RepairCompositeGate, RepairCompositeGateSpec, RepairKind, SelfRepairError,
     SelfRepairLoop, SystemCommandRunner, VerifyChainSummary, verify_chain,
 };
+
+/// 候補実行用の隔離ディレクトリ（`isolation::candidate_home_dirs` が返す
+/// `home`／`tmp` の共通の親。`sandbox_root` の**外側**〈兄弟ディレクトリ〉）
+/// の後始末を保証する RAII guard（イシュー #414 レビュー対応）。
+///
+/// `candidate_home_dirs` は `sandbox_root`（`git add -A` で diff 計測される
+/// git worktree。`RunSandbox::root()`）の内側に置くと、候補の `build.rs`／
+/// テストが `$HOME`／`$TMPDIR` へ書き込んだファイルが diff シグナルを汚染
+/// するため意図的に外側へ置く（`isolation.rs::candidate_home_dirs` doc
+/// 参照）。その結果 `RunSandbox::Drop`（`sandbox_root` 配下のみ削除）では
+/// 回収されなくなるため、`run_run` がこの guard を局所変数として保持し、
+/// 早期 return を含む全経路で関数末尾のスコープ終了時に `Drop` させる。
+struct IsolationDirsGuard {
+    base: std::path::PathBuf,
+}
+
+impl IsolationDirsGuard {
+    /// `candidate_home_dirs` が返す `home` パスの親ディレクトリ（`home`／
+    /// `tmp` 双方の共通の親。`isolation.rs::candidate_home_dirs` 契約）を
+    /// 後始末対象として保持する。
+    fn new(candidate_home: &Path) -> Self {
+        let base = candidate_home
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| candidate_home.to_path_buf());
+        IsolationDirsGuard { base }
+    }
+}
+
+impl Drop for IsolationDirsGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.base);
+    }
+}
 
 /// [`RepairCompositeGate::evidence_sink`] の戻り値型（`execute_loop` が
 /// ループ実行前に取得し、実行後の証跡観測に使う。型名で意図を明示するための
@@ -272,6 +307,47 @@ fn run_run(args: RunArgs) -> ExitCode {
     };
     let sandbox_root = sandbox.root().to_path_buf();
 
+    // 候補実行の縦深防御（イシュー #414・A08）: 環境変数遮断・書き込み先制限
+    // は候補実行経路（`gate_spec.runner`・`BugFixDetector`・
+    // `FeatureAdditionDetector`）で既定有効とする。`--isolate-network` 指定時は
+    // `unshare` の可用性を probe で事前確認し、失敗時は黙って劣化させず
+    // 内部エラー区分（exit 1）で拒否する（`isolation` モジュール冒頭
+    // ドキュメント・`docs/self-repair-candidate-isolation.md` 参照）。
+    if args.isolate_network
+        && let Err(message) = ExecIsolation::probe_unshare_net()
+    {
+        eprintln!(
+            "self-repair run: --isolate-network が指定されましたが、この実行環境では \
+             ネットワーク隔離を利用できません（fail-closed のためネットワーク隔離なしへは \
+             劣化させず実行を中止します）: {message}"
+        );
+        return ExitCode::from(1);
+    }
+    // `candidate_home_dirs` は `sandbox_root`（`git add -A` で diff 計測される
+    // git worktree）の**外側**（兄弟ディレクトリ）を返す契約（イシュー #414
+    // レビュー対応。`isolation.rs::candidate_home_dirs` doc 参照）。そのため
+    // `sandbox`（`RunSandbox`）の `Drop` では回収されず、本関数側で
+    // `IsolationDirsGuard` により後始末する（早期 return を含む全経路で
+    // 構築後は必ず `Drop` される。関数末尾の `Adopted` 反映失敗時に
+    // `sandbox.keep()` で調査用に sandbox 本体を残す場合でも、隔離
+    // ディレクトリ自体は候補実行専用の使い捨てであり調査対象ではないため
+    // 引き続き削除する）。
+    let (candidate_home, candidate_tmp) = candidate_home_dirs(&sandbox_root);
+    let _isolation_dirs_guard = IsolationDirsGuard::new(&candidate_home);
+    for dir in [&candidate_home, &candidate_tmp] {
+        if let Err(error) = std::fs::create_dir_all(dir) {
+            eprintln!(
+                "self-repair run: 候補実行用の隔離ディレクトリ作成に失敗しました（{}）: {error}",
+                dir.display()
+            );
+            return ExitCode::from(1);
+        }
+    }
+    let mut exec_isolation = ExecIsolation::new(candidate_home, candidate_tmp);
+    if args.isolate_network {
+        exec_isolation = exec_isolation.with_network_isolation(NetworkIsolation::UnshareNet);
+    }
+
     // diff・ベンチの計測系（`RepairCompositeGate`）は種別非依存であり、
     // `verify_direct_composite.rs` モジュール冒頭ドキュメントどおり build/
     // test/clippy の逐次実行・fail-fast 判定・ベンチ判定への変換を再実装
@@ -309,7 +385,7 @@ fn run_run(args: RunArgs) -> ExitCode {
         bench_bin: args.bench_bin.clone(),
         workload_sources: args.workload_sources.clone(),
         bench_iterations: self_repair::verify_bench::MIN_BENCH_ITERATIONS,
-        runner: SystemCommandRunner::new(),
+        runner: SystemCommandRunner::isolated(exec_isolation.clone()),
     };
     let verification_gate = RepairCompositeGate::new(gate_spec);
     // `SelfRepairLoop::new` はゲートを値ごと（所有権を）受け取るため、ループ
@@ -328,7 +404,10 @@ fn run_run(args: RunArgs) -> ExitCode {
     // workspace も sandbox を指す（`--repo` を直接渡さない）。
     let (exit_code, outcome) = match args.kind {
         RepairKind::BugFix => {
-            let detector = BugFixDetector::new(sandbox_root.clone(), SystemCommandRunner::new());
+            let detector = BugFixDetector::new(
+                sandbox_root.clone(),
+                SystemCommandRunner::isolated(exec_isolation.clone()),
+            );
             let fix_generator = match BugFixFixGenerator::new(sandbox_root.clone(), candidates) {
                 Ok(generator) => generator,
                 Err(err) => return report_run_setup_error(&err),
@@ -347,8 +426,10 @@ fn run_run(args: RunArgs) -> ExitCode {
             )
         }
         RepairKind::FeatureAddition => {
-            let detector =
-                FeatureAdditionDetector::new(sandbox_root.clone(), SystemCommandRunner::new());
+            let detector = FeatureAdditionDetector::new(
+                sandbox_root.clone(),
+                SystemCommandRunner::isolated(exec_isolation.clone()),
+            );
             let fix_generator =
                 match FeatureAdditionFixGenerator::new(sandbox_root.clone(), candidates) {
                     Ok(generator) => generator,
