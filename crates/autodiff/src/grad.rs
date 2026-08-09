@@ -974,7 +974,7 @@ mod tests {
             op: Op::Leaf,
             shape,
             value: std::cell::OnceCell::from(value),
-            lazy_depth: 0,
+            lazy_chain_size: 0,
         }
     }
 

@@ -159,18 +159,30 @@ impl<'t> Var<'t> {
     /// 「shape が妥当でノードが記録された」ことのみを意味し「加算が
     /// 計算済み」であることを意味しない。設計書 §3.5.1）。
     ///
-    /// **連鎖長上限（#404・設計書 §3.5.4）**: `push_lazy` が返す
-    /// `at_limit` が `true`（新規ノードの連鎖段数が `MAX_FUSED_CHAIN_LEN`
-    /// に到達）の場合、層 1（[`materialize_fallible`]）でその場実体化
-    /// する。この場合 `Ok` の意味は「shape が妥当でノードが記録され
+    /// **連鎖長上限（#404・設計書 §3.5.4）**: `push_lazy` を呼ぶ**前**に
+    /// [`Tape::pre_materialize_for_binary_merge`] で fan-in 事前実体化を
+    /// 行う（2 本の未実体化枝を合流させた結果が単独で上限を超えるなら
+    /// 大きい方の枝を先に実体化する。codex-review PR #406 の P1 是正。
+    /// push 後の自己実体化だけでは fan-in を防げないため必須）。続けて
+    /// `push_lazy` が返す `at_limit` が `true`（新規ノードの
+    /// `lazy_chain_size` が `MAX_FUSED_CHAIN_LEN` に到達）の場合、層 1
+    /// （[`materialize_fallible`]）でその場実体化する。**いずれの実体化
+    /// も**発生した場合、`Ok` の意味は「shape が妥当でノードが記録され
     /// **かつバックエンド実行が成功した**」へ拡張される（同じ層 1 契約
     /// を持つ `matmul`/`sum`/`max` と同型の `Ok` 意味）。実体化失敗は
-    /// `?` でそのまま伝播する。
+    /// （事前実体化・push 後の自己実体化のいずれも）`?` でそのまま伝播
+    /// する。
     pub fn add(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(other)?;
         let lhs_shape = self.shape();
         let rhs_shape = other.shape();
         let out_shape = broadcast_shape(&lhs_shape, &rhs_shape)?;
+        // fan-in 事前実体化（#404・codex-review PR #406 の P1 是正）:
+        // 2 本の未実体化枝を合流させる前に、合流後サイズが上限を超える
+        // なら大きい方の枝を先に実体化する（`Tape::
+        // pre_materialize_for_binary_merge` のドキュメント参照）。
+        self.tape
+            .pre_materialize_for_binary_merge(self.id, other.id)?;
         let (id, at_limit) = self.tape.push_lazy(Op::Add(self.id, other.id), out_shape);
         if at_limit {
             let nodes = self.tape.nodes.borrow();
@@ -180,13 +192,18 @@ impl<'t> Var<'t> {
     }
 
     /// ブロードキャスト付き要素ごとの乗算。elementwise 5 演算の 1 つ
-    /// （`add` と同じ遅延契約・連鎖長上限での自己実体化契約。
-    /// TASK-12.1d・#164・#404）。
+    /// （`add` と同じ遅延契約・fan-in 事前実体化契約・連鎖長上限での
+    /// 自己実体化契約。`Ok` の意味の拡張も `add` と同型。
+    /// TASK-12.1d・#164・#404・codex-review PR #406）。
     pub fn mul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(other)?;
         let lhs_shape = self.shape();
         let rhs_shape = other.shape();
         let out_shape = broadcast_shape(&lhs_shape, &rhs_shape)?;
+        // fan-in 事前実体化（`add` と同じ契約。#404・codex-review PR #406
+        // の P1 是正）。
+        self.tape
+            .pre_materialize_for_binary_merge(self.id, other.id)?;
         let (id, at_limit) = self.tape.push_lazy(Op::Mul(self.id, other.id), out_shape);
         if at_limit {
             let nodes = self.tape.nodes.borrow();

@@ -401,3 +401,166 @@ fn fan_out_at_limit_boundary_does_not_panic() {
     let ref_a = ref_shared.add(&ref_bias).unwrap().to_tensor();
     assert_tensors_close(&a_val, &ref_a);
 }
+
+#[test]
+fn balanced_fan_in_add_never_exceeds_chain_limit() {
+    // codex-review PR #406 の P1 是正の回帰テスト（fan-in 反例）:
+    // それぞれ独立に 3 ノードの未実体化枝を構築し、両方を 1 回の
+    // `add` で合流させる。旧実装（`effective_depth`。入力の最大値 + 1）
+    // では合流後の段数が 4（<MAX_FUSED_CHAIN_LEN）のままと誤判定され、
+    // `build_lazy_plan` が実際には 7 ノード（3 + 3 + 1）を単一の
+    // `FusionPlan` に収容してしまい `MAX_FUSED_CHAIN_LEN`（= 6）契約を
+    // 破っていた。`Tape::pre_materialize_for_binary_merge`
+    // （`crates/autodiff/src/tape.rs`）による事前実体化後は、
+    // `RecordingFusedOps` が記録する **すべての** `run_fused` 呼び出しの
+    // interior 数が `MAX_FUSED_CHAIN_LEN` 以下に収まる。
+    let fused_calls = Arc::new(AtomicUsize::new(0));
+    let interior_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ops = RecordingFusedOps {
+        inner: common::NaiveOps,
+        fused_calls: fused_calls.clone(),
+        interior_sizes: interior_sizes.clone(),
+    };
+    let tape = Tape::new_with_ops(Box::new(ops));
+    let x1 = tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
+    let x2 = tape.var(&Tensor::new(vec![-0.2, 0.3, -0.4, 0.6], &[4]).unwrap());
+
+    // 各枝は 3 ノード（add→relu→add）で、いずれも上限（6）未満のため
+    // push 時点ではまだ実体化されない。
+    let branch_a = build_linear_chain(&tape, &x1, 3);
+    let branch_b = build_linear_chain(&tape, &x2, 3);
+
+    // fan-in: 独立した 2 枝を 1 回の add で合流させる。事前実体化なしなら
+    // 合流ノードの interior は 3 + 3 + 1 = 7 で上限超過。
+    let merged = branch_a.add(&branch_b).unwrap();
+    let result = merged.to_tensor();
+
+    for &interior in interior_sizes.lock().unwrap().iter() {
+        assert!(
+            interior <= MAX_FUSED_CHAIN_LEN,
+            "fan-in 合流を含む run_fused 呼び出しの interior 数が上限を超えた: \
+             {interior} > {MAX_FUSED_CHAIN_LEN}"
+        );
+    }
+    assert!(
+        fused_calls.load(Ordering::SeqCst) >= 1,
+        "少なくとも 1 回は run_fused が呼ばれるはず"
+    );
+
+    let ref_tape = Tape::new_with_ops(Box::new(AlwaysUnsupportedFused {
+        inner: common::NaiveOps,
+    }));
+    let ref_x1 = ref_tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
+    let ref_x2 = ref_tape.var(&Tensor::new(vec![-0.2, 0.3, -0.4, 0.6], &[4]).unwrap());
+    let ref_branch_a = build_linear_chain(&ref_tape, &ref_x1, 3);
+    let ref_branch_b = build_linear_chain(&ref_tape, &ref_x2, 3);
+    let ref_result = ref_branch_a.add(&ref_branch_b).unwrap().to_tensor();
+
+    assert_tensors_close(&result, &ref_result);
+}
+
+#[test]
+fn symmetric_max_size_fan_in_add_never_exceeds_chain_limit() {
+    // balanced_fan_in（3 + 3）に加え、両枝ともに許容最大サイズ
+    // （`MAX_FUSED_CHAIN_LEN − 1` = 5）でも interior が上限を超えない
+    // ことを検証する境界ケース。5 は「自己実体化されずに残りうる
+    // 未実体化ノードの最大サイズ」（`pre_materialize_for_binary_merge`
+    // のドキュメント参照）。
+    let fused_calls = Arc::new(AtomicUsize::new(0));
+    let interior_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ops = RecordingFusedOps {
+        inner: common::NaiveOps,
+        fused_calls: fused_calls.clone(),
+        interior_sizes: interior_sizes.clone(),
+    };
+    let tape = Tape::new_with_ops(Box::new(ops));
+    let x1 = tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
+    let x2 = tape.var(&Tensor::new(vec![-0.2, 0.3, -0.4, 0.6], &[4]).unwrap());
+
+    let branch_a = build_linear_chain(&tape, &x1, MAX_FUSED_CHAIN_LEN - 1);
+    let branch_b = build_linear_chain(&tape, &x2, MAX_FUSED_CHAIN_LEN - 1);
+    let merged = branch_a.add(&branch_b).unwrap();
+    let result = merged.to_tensor();
+
+    for &interior in interior_sizes.lock().unwrap().iter() {
+        assert!(
+            interior <= MAX_FUSED_CHAIN_LEN,
+            "対称最大サイズ fan-in 合流の run_fused 呼び出しの interior 数が上限を超えた: \
+             {interior} > {MAX_FUSED_CHAIN_LEN}"
+        );
+    }
+    assert!(fused_calls.load(Ordering::SeqCst) >= 1);
+
+    let ref_tape = Tape::new_with_ops(Box::new(AlwaysUnsupportedFused {
+        inner: common::NaiveOps,
+    }));
+    let ref_x1 = ref_tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
+    let ref_x2 = ref_tape.var(&Tensor::new(vec![-0.2, 0.3, -0.4, 0.6], &[4]).unwrap());
+    let ref_branch_a = build_linear_chain(&ref_tape, &ref_x1, MAX_FUSED_CHAIN_LEN - 1);
+    let ref_branch_b = build_linear_chain(&ref_tape, &ref_x2, MAX_FUSED_CHAIN_LEN - 1);
+    let ref_result = ref_branch_a.add(&ref_branch_b).unwrap().to_tensor();
+
+    assert_tensors_close(&result, &ref_result);
+}
+
+#[test]
+fn asymmetric_fan_in_add_materializes_larger_branch_regardless_of_side() {
+    // `pre_materialize_for_binary_merge` の `if size_a >= size_b { a }
+    // else { b }` 分岐のうち、`else`（右側 `b` が大きい）分岐を明示的に
+    // 踏む回帰テスト（`balanced_fan_in`／`symmetric_max_size_fan_in` は
+    // いずれも `size_a >= size_b` のため `a` 分岐しか踏まない）。
+    // 小さい枝（2 ノード）を左に、大きい枝（`MAX_FUSED_CHAIN_LEN − 1` =
+    // 5 ノード）を右に置き、`2 + 5 + 1 = 8 > 6` で事前実体化が発火し、
+    // かつ「小さい方ではなく大きい方（右側）が実体化される」ことを
+    // interior 数の実測（大きい方の実体化で interior 5、続く合流で
+    // interior 3）で検証する。
+    let fused_calls = Arc::new(AtomicUsize::new(0));
+    let interior_sizes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let ops = RecordingFusedOps {
+        inner: common::NaiveOps,
+        fused_calls: fused_calls.clone(),
+        interior_sizes: interior_sizes.clone(),
+    };
+    let tape = Tape::new_with_ops(Box::new(ops));
+    let x1 = tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
+    let x2 = tape.var(&Tensor::new(vec![-0.2, 0.3, -0.4, 0.6], &[4]).unwrap());
+
+    let branch_small = build_linear_chain(&tape, &x1, 2);
+    let branch_big = build_linear_chain(&tape, &x2, MAX_FUSED_CHAIN_LEN - 1);
+    let merged = branch_small.add(&branch_big).unwrap();
+    let result = merged.to_tensor();
+
+    let sizes = interior_sizes.lock().unwrap();
+    for &interior in sizes.iter() {
+        assert!(
+            interior <= MAX_FUSED_CHAIN_LEN,
+            "非対称 fan-in 合流の run_fused 呼び出しの interior 数が上限を超えた: \
+             {interior} > {MAX_FUSED_CHAIN_LEN}"
+        );
+    }
+    // 事前実体化で「大きい方（5 ノード）」が実体化されたことを直接
+    // 確認する（`interior == 5` の呼び出しが記録されているはず。もし
+    // 誤って「小さい方（2 ノード）」を実体化する実装に退行すると、
+    // 最終合流の interior が `2 + 5 + 1 = 8` となり上記ループで
+    // 上限超過として検出されるが、ここでは実体化対象そのものも
+    // 直接検証する）。
+    assert!(
+        sizes.contains(&(MAX_FUSED_CHAIN_LEN - 1)),
+        "大きい方の枝（{} ノード）が事前実体化されたはずが、記録された \
+         interior 数に含まれない: {sizes:?}",
+        MAX_FUSED_CHAIN_LEN - 1
+    );
+    drop(sizes);
+    assert!(fused_calls.load(Ordering::SeqCst) >= 1);
+
+    let ref_tape = Tape::new_with_ops(Box::new(AlwaysUnsupportedFused {
+        inner: common::NaiveOps,
+    }));
+    let ref_x1 = ref_tape.var(&Tensor::new(vec![0.5, -0.5, 1.5, -1.5], &[4]).unwrap());
+    let ref_x2 = ref_tape.var(&Tensor::new(vec![-0.2, 0.3, -0.4, 0.6], &[4]).unwrap());
+    let ref_branch_small = build_linear_chain(&ref_tape, &ref_x1, 2);
+    let ref_branch_big = build_linear_chain(&ref_tape, &ref_x2, MAX_FUSED_CHAIN_LEN - 1);
+    let ref_result = ref_branch_small.add(&ref_branch_big).unwrap().to_tensor();
+
+    assert_tensors_close(&result, &ref_result);
+}
