@@ -241,6 +241,8 @@ cargo test -p onnx-interop                                              # pass�
 - REQ-7 数値一致基準の超過（近ゼロ参照値での相対誤差拡大、7/16384 要素）の切り分け・対応方針決定
   （ユーザー承認が必要なため、本セッションでは判定式・許容誤差を変更しない。#87 の実装報告に
   out-of-scope 項目として記録する）
+  - 切り分け実施・帰結（実装改善では解消不能・判定式の構造的性質が支配的）は #413
+    `docs/perf/onnx-transformer-e2e-error-analysis.md` に記録済み
 - REQ-7 側のステータス更新（受け入れ基準チェックボックスの反映等）が必要な場合、`docs/spec/`
   は本リポで編集しないため spec リポ（`Fandhe-AI/rust-ai-library-spec`）側での対応をユーザーに
   提案するに留める
