@@ -490,8 +490,11 @@ jobs:
   ci-complete:
     name: ci-complete
     runs-on: self-hosted
+    # 判定のみのジョブのため権限は一切不要（workflow レベルの contents: read も継承しない）。
+    permissions: {}
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
     if: ${{ always() }}
+    # ジョブを追加したら必ずこの needs（および下の完遂判定の検査対象）へ追加する。
     needs: [rust-ci, build, build-no-cuda-toolkit, deps-forbidden, guardrail-regression, verification-gates]
     timeout-minutes: 5
     steps:
