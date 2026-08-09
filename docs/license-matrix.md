@@ -99,7 +99,7 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - **`foldhash v0.2.0`**（Zlib）: 許諾的ライセンス。適合と判断する
 - **`objc2-metal`/`objc2-core-foundation`/`dispatch2`**（Zlib OR Apache-2.0 OR MIT）: 2 節の `objc2-metal` と同様、MIT を選択すれば適合する
 - **`memchr`等**（Unlicense OR MIT）: MIT を選択すれば適合する
-- **`zerocopy v0.8.55`**（BSD-2-Clause OR Apache-2.0 OR MIT）: MIT を選択すれば適合する
+- **`zerocopy v0.8.56`**（BSD-2-Clause OR Apache-2.0 OR MIT）: MIT を選択すれば適合する
 - **`wasip2`等**（Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT）: MIT を選択すれば適合する（LLVM 例外条項の受諾は不要）
 
 ## 7. 実測環境の記録
@@ -115,6 +115,13 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - `rustc 1.96.0 (ac68faa20 2026-05-25)` / `cargo 1.96.0 (30a34c682 2026-05-25)`
 - 対象 `Cargo.lock` のコミット SHA: `ef221531ec5710c973a26f52f165386117089a31`（origin/main）
 - `cargo tree --locked -p cudarc -e normal,build` 実行後 `git status --porcelain` で `Cargo.lock` に差分がないことを確認した
+
+### 追加実測（イシュー #425・zerocopy 記録乖離の解消。6 節）
+
+- 実測日: 2026-08-09
+- `rustc 1.96.0 (ac68faa20 2026-05-25)` / `cargo 1.96.0 (30a34c682 2026-05-25)`
+- 対象 `Cargo.lock` のコミット SHA: `65dea84463472db78ab5dfcb7205b69cf43f4c1b`（origin/main）
+- `cargo metadata --locked --format-version 1` で `zerocopy`／`zerocopy-derive` の `version`・`license` を抽出し、両パッケージとも `v0.8.56`・`BSD-2-Clause OR Apache-2.0 OR MIT`（6 節記載の `v0.8.55` から**バージョンのみ更新、ライセンス式は不変**）であることを確認した。実行後 `git status --porcelain Cargo.lock` で差分がないことを確認した（依存・バージョン自体は変更していない）
 
 ## 8. 運用
 
