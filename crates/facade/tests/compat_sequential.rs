@@ -19,13 +19,33 @@
 //! いることの確認）を保った。`Tape::default()` 単体の確認
 //! （`tape_default_records_and_evaluates_ops`）は compat 非依存のため
 //! `crates/autodiff/tests/tape_recording.rs` に残置している。
+//!
+//! **`facade::Tape`（newtype）と `autodiff::Tape`（生の型）の使い分け
+//! （codex-review PR #424 P1 是正）**: `facade::compat::Sequential::
+//! forward`／`bind` は公開シグネチャに `facade::Tape` を取る（`src/lib.rs`
+//! モジュール doc「`Tape`（composition root が構築する値）の扱い」参照）。
+//! 本ファイルは「naive 参照実装」（融合を経ない per-op 逐次実装との
+//! REQ-2 複合判定）を構築するために `autodiff::nn::Linear`／
+//! `autodiff::nn::activation` を直接呼ぶ手動 forward を使う箇所があり、
+//! そこでは `autodiff::Tape::new_with_ops(Box::new(CpuBackendOps::new()))`
+//! （`facade::tape()` と同じ ops 構成を明示的に組み立てたもの。テスト
+//! フィクスチャのみで許容される内部 API 直接利用。`Sequential::forward`
+//! 自体には渡さない）を使う。
 
 use autodiff::Tape;
 use autodiff::nn::Linear;
 use autodiff::nn::activation::Sigmoid;
+use backend_cpu::CpuBackendOps;
 use backend_cpu::parity::assert_parity;
 use facade::compat::{Sequential, array};
 use tensor_core::Tensor;
+
+/// `facade::tape()` と同じ ops 構成（既定 CPU・`CpuBackendOps`・融合
+/// 有効）の生 `autodiff::Tape` を構築する（テストフィクスチャ専用。
+/// モジュール冒頭 doc 参照）。
+fn raw_facade_equivalent_tape() -> Tape {
+    Tape::new_with_ops(Box::new(CpuBackendOps::new()))
+}
 
 const SEED1: u64 = 7001;
 const SEED2: u64 = 7002;
@@ -80,9 +100,19 @@ fn predict_matches_manual_forward_and_naive_reference() {
     );
 
     // (b) naive 参照実装（autodiff::Tape::new()）との REQ-2 複合判定。
+    // `facade::compat::Sequential::forward` は `facade::Tape` のみを
+    // 受け取る（本ファイル冒頭 doc 参照）ため、naive 側は `model` と
+    // 同一シード・同一層構成（Linear(8,16,SEED1)→ReLU→Linear(16,4,SEED2)）
+    // を `autodiff::nn::Linear`／`Var::relu` で直接組み立てる（モデル
+    // 構造は `sequential_forward_matches_manual_nn_forward_bit_exact` の
+    // 手動経路と同型）。
     let naive_tape = Tape::new();
     let naive_input = naive_tape.var(&input);
-    let naive_output = model.forward(&naive_tape, &naive_input).unwrap();
+    let naive_l1 = Linear::new(8, 16, true, SEED1).unwrap();
+    let naive_l2 = Linear::new(16, 4, true, SEED2).unwrap();
+    let naive_h = naive_l1.bind(&naive_tape).forward(&naive_input).unwrap();
+    let naive_h = naive_h.relu();
+    let naive_output = naive_l2.bind(&naive_tape).forward(&naive_h).unwrap();
     assert_parity(
         "Sequential::predict（既定 CPU・融合経路）vs autodiff::Tape::new()（NaiveOps 非融合参照）",
         &output_dense(&via_predict),
@@ -122,8 +152,11 @@ fn sequential_forward_matches_manual_nn_forward_bit_exact() {
 
     let input_tensor = array(vec![vec![0.1_f32, 0.2, 0.3, 0.4], vec![0.5, 0.6, 0.7, 0.8]]).unwrap();
 
-    // 手動経路。
-    let manual_tape = facade::tape();
+    // 手動経路。`Linear::bind` は `&autodiff::Tape` を要求するため
+    // `facade::tape()` ではなく生の `autodiff::Tape` を使う（本ファイル
+    // 冒頭 doc「facade::Tape（newtype）と autodiff::Tape（生の型）の
+    // 使い分け」参照。ops 構成は facade::tape() と同一）。
+    let manual_tape = raw_facade_equivalent_tape();
     let manual_input = manual_tape.var(&input_tensor);
     let h = linear1.bind(&manual_tape).forward(&manual_input).unwrap();
     let h = Sigmoid.forward(&h);

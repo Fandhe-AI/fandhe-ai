@@ -21,7 +21,9 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
 
 - **本文書が定める対象範囲（1〜2 節）は `facade::compat` として提供される
   公開面を指す**（4.2 節参照。旧 `autodiff::compat` は TASK-9.4 で
-  `facade::compat` へ移設済み）
+  `facade::compat` へ移設済み。**移行期間中は `autodiff::compat` に
+  非推奨シム〈`#[deprecated]`〉を残し、既存コードのソース互換性を保つ**。
+  4.3 節参照。codex-review PR #424 P1 是正）
 - `autodiff` の `Tape::new_with_ops`／`nn::Module` 実装等、compat 層が内部で
   依拠する API は Rust の可視性としては `pub`（`autodiff` クレートの
   ドキュメント上は到達可能）だが、**サポート境界上は内部 API** であり、
@@ -166,6 +168,41 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   `Linear`・`activation` 等）を `pub` API として提供し続けるが、これは
   「サポート境界」節（0 節）が定めるとおり内部クレートとしての公開であり、
   compat 層を経由しない直接利用はサポート対象外である
+- `facade::compat::Sequential` の `forward`／`bind` は `autodiff::Tape`
+  （内部クレートの生の型）を直接引数に取らず、`facade` 所有の newtype
+  `facade::Tape`（`crates/facade/src/lib.rs`）を取る。`Var`・
+  `Gradients`・`AutodiffError`・`LinearVars`（`autodiff` 由来）・
+  `Tensor`（`tensor-core` 由来）は迂回経路を持たない値型・エラー型のため
+  `facade` の正式な公開契約として再エクスポートし、`compat` の公開
+  シグネチャはこの再エクスポートパスを使う（codex-review PR #424 P1
+  是正・`crates/facade/tests/api_surface.rs` の機械検査と整合）
+
+### 4.3 移行期間中のソース互換シム（codex-review PR #424 P1 是正）
+
+`compat` 公開面の唯一のサポート対象実装は 4.2 節のとおり `facade::compat`
+だが、TASK-9.4（#411）が `autodiff::compat` モジュール自体を互換 shim
+なしで削除したことで、`autodiff::compat::{array, Sequential,
+SequentialVars}` を利用する既存コードが破壊されるという P1 指摘
+（codex-review PR #424・ベース側レビュー基準「公開 API の破壊的変更は
+P1」）を受けた是正である。
+
+- `crates/autodiff/src/compat/`（`mod.rs`／`array.rs`／`sequential.rs`）に
+  移設前の実装を複製して残す（`facade` は `autodiff` に依存する構造の
+  ため、`autodiff::compat` から `facade::compat` へ委譲することはできない
+  ―― 依存方向が逆になり循環する。したがって委譲ではなく実装の複製に
+  よってのみソース互換を保てる）
+- 復元対象は codex-review が指摘した 3 つの公開項目（`array`・
+  `Sequential`・`SequentialVars`）に限る。旧 `predict_with_ops`（任意
+  `BackendOps` 実装を注入できる推論入口）は 2 節のとおり REQ-12 違反の
+  ため意図的に対象外のままとし、本シムでも復元しない。`Sequential::
+  predict` は移設前と同じ挙動（`default_ops::naive_ops()` による naive
+  CPU 参照実装）を維持する
+- `array`／`Sequential`／`SequentialVars` は `#[deprecated]` を付与し、
+  `facade::compat` への移行を促す（`crates/autodiff/src/compat/mod.rs`
+  モジュール doc 参照）
+- 撤去予定: `facade::compat` への移行が完了し利用実績が確認でき次第、
+  別イシューで本シムごと削除する（`.claude/rules/out-of-scope-tracking.md`
+  対象）
 
 ## 5. 範囲拡張の手続き
 

@@ -476,6 +476,7 @@ let output = model.predict_with_ops(&input, Box::new(backend_cpu::CpuBackendOps:
 - **`predict_with_ops`（任意 `BackendOps` 注入経路）を公開面から撤去**: `facade::compat::Sequential` は `predict_with_ops` を持たない（破壊的変更）。理由は REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」・`crates/facade/tests/api_surface.rs` の機械検査（`pub fn` が `BackendOps` を直接受け取ることを禁止）との整合。ops を明示的に選びたい内部用途は `Sequential::forward(&Tape, &Var)`（`BackendOps` を受け取らない）へ呼び出し元が任意に構築した `Tape` を渡せば足りる
 - **`autodiff` 自身の無引数 compat 経路（`Tape::new()`／`Tape::default()`／`default_ops::NaiveOps`）は変更なし**: これらは `autodiff` クレート単体で「デフォルト値でも動く」ことを保証する経路であり、`facade::compat::Sequential::predict` の結線先変更とは独立に維持する
 - 詳細な設計判断・出典は `docs/compat-api-scope.md` §0（サポート境界）・§4.2（TASK-9.4 移設確定）を正とする（本節は概要のみ）
+- **移行期間中のソース互換シム（codex-review PR #424 P1 是正・2026-08-09 追記）**: `autodiff::compat` モジュール自体の削除は、`autodiff::compat::{array, Sequential, SequentialVars}` を利用する既存コードを互換 shim なしに破壊する破壊的変更だったため、`crates/autodiff/src/compat/` に `#[deprecated]` を付与した非推奨シムとして実装を複製して残した（`predict_with_ops` は 2 節のとおり撤去対象のため復元しない）。詳細は `docs/compat-api-scope.md` §4.3 を正とする
 
 **バージョニング**: 本リポジトリはワークスペース全体で `version = "0.3.0"`（`Cargo.toml`）を用いるが、crates.io 未公開の内部開発版であり、`docs/deps-policy.md`・CI（`deny.toml` の `sources = crates.io 限定`）が示すとおり外部への配布物は存在しない。したがって「正式な破壊的リリース」としてのバージョン切り上げ・移行ガイド配布は該当せず、上記の移行手順を本文書と `docs/fusion-graph-design.md` §1 に記録することが本リポジトリでの等価な措置である。
 

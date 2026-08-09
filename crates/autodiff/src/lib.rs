@@ -9,11 +9,16 @@
 //! 一切漏らさない（依存方向は `compat` → `nn`/`var`/`tape` の一方向で、逆
 //! 方向の `use` はない）という設計方針は継続する。
 //!
-//! **TASK-9.4（イシュー #411）で `compat` モジュール自体は `facade::compat`
-//! へ移設した**（10 クレート化・`facade` 新設〈TASK-9.3・#410〉を受け、
-//! compat 公開面を composition root と同じ `facade` クレートへ一本化する
-//! サポート境界の明文化。`docs/compat-api-scope.md`「サポート境界」節・
-//! `docs/spec/04-requirements.md:209-210` の 2026-08-08 追記参照）。本
+//! **TASK-9.4（イシュー #411）で `compat` の唯一のサポート対象実装は
+//! `facade::compat` へ移設した**（10 クレート化・`facade` 新設〈TASK-9.3・
+//! #410〉を受け、compat 公開面を composition root と同じ `facade`
+//! クレートへ一本化するサポート境界の明文化。`docs/compat-api-scope.md`
+//! 「サポート境界」節・`docs/spec/04-requirements.md:209-210` の
+//! 2026-08-08 追記参照）。**移行期間中は本クレートの `compat` モジュール
+//! （`pub mod compat`・非推奨シム）に旧実装を複製して残し、既存の
+//! `autodiff::compat::{array, Sequential, SequentialVars}` 利用コードの
+//! ソース互換性を保つ**（codex-review PR #424 P1 是正。詳細は
+//! `crates/autodiff/src/compat/mod.rs` モジュール doc 参照）。本
 //! クレート（`autodiff`）はこの移設後も compat 層が依拠する `Tape`/`Var`/
 //! `nn`（`Module`・`Linear`・`activation` 等）を `pub` API として提供し
 //! 続ける内部クレートである（利用者が `autodiff` を直接使うことは
@@ -94,12 +99,14 @@
 //! ビルダー）を実装した。`Sequential` は `nn::Module` 経由で `Linear`・
 //! 活性化関数（ReLU・Sigmoid・Tanh）を均一に扱う（対象範囲は
 //! `docs/compat-api-scope.md` 準拠。学習〈勾配取得・パラメータ更新〉は
-//! 当時対象外）。**TASK-9.4（#411）でこの `compat` モジュール自体を
-//! `facade::compat` へ移設した**（本ファイル冒頭のクレート doc 参照。
-//! `nn::Module`・`Linear`・`activation` 等、`compat` が依拠する `nn` 側の
-//! 部品は本クレートに残る）。
+//! 当時対象外）。**TASK-9.4（#411）で唯一のサポート対象実装を
+//! `facade::compat` へ移設し、本クレートの `compat` モジュールは移行期間中
+//! のソース互換シムとして実装を複製して残した**（本ファイル冒頭の
+//! クレート doc・`compat/mod.rs` 参照。`nn::Module`・`Linear`・
+//! `activation` 等、`compat` が依拠する `nn` 側の部品は本クレートに残る）。
 
 mod backward;
+pub mod compat;
 mod default_ops;
 mod error;
 mod eval;

@@ -99,11 +99,16 @@ fn facade_public_functions_do_not_accept_backend_ops_argument() {
 /// 公開関数 `tape_for` の入力が [`facade::Device`] 識別子のみであることの
 /// コンパイル時検証（受入基準 2）。型シグネチャが変わればこのテスト自体が
 /// コンパイルエラーになるため、宣言的な固定として機能する。
+///
+/// 戻り値の型注釈は `facade::Tape`（newtype。`autodiff::Tape` ではない）
+/// である点も併せて固定する（codex-review PR #424 P1 是正: `autodiff::Tape`
+/// を facade の公開シグネチャへ直接露出させない。`src/lib.rs` モジュール
+/// doc「`Tape`（composition root が構築する値）の扱い」参照）。
 #[test]
 fn tape_for_accepts_device_identifier_only() {
     // `Device::Cpu` は常に構築可能（デバイス列挙・検証不要）。
     let device: facade::Device = facade::Device::Cpu;
-    let result: Result<autodiff::Tape, facade::BackendError> = facade::tape_for(device);
+    let result: Result<facade::Tape, facade::BackendError> = facade::tape_for(device);
     assert!(result.is_ok(), "Device::Cpu の tape_for は常に成功するはず");
 }
 
@@ -127,5 +132,31 @@ fn tape_reexport_wires_cpu_backend_ops() {
         tape_fn_body.contains("CpuBackendOps"),
         "facade::tape() の本体が CpuBackendOps を構築していない\
          （既定バックエンド＝CPU の構造的裏付けが崩れている）"
+    );
+}
+
+/// `crates/facade/src/compat/` の `pub fn` シグネチャが `autodiff::Tape`
+/// （生の内部クレート型）を直接引数に取っていないことを固定する
+/// （codex-review PR #424 P1 是正: 内部クレートの型を facade の公開
+/// シグネチャへ直接露出させない。`facade::Tape`〈newtype〉のみを取る
+/// べきこと・`src/lib.rs` モジュール doc「`Tape`（composition root が
+/// 構築する値）の扱い」参照）。
+#[test]
+fn compat_public_functions_do_not_accept_raw_autodiff_tape_argument() {
+    let compat_dir = facade_crate_root().join("src/compat");
+    let mut offending = Vec::new();
+    visit_rs_files(&compat_dir, &mut |path, content| {
+        for line in content.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("pub fn") && trimmed.contains("autodiff::Tape") {
+                offending.push(format!("{}: `{trimmed}`", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade::compat の pub fn が autodiff::Tape（生の内部クレート型）を\
+         直接引数に取っている（内部クレートの型が公開シグネチャへ露出。\
+         facade::Tape〈newtype〉を使うべき）: {offending:?}"
     );
 }

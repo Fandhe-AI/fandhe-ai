@@ -157,7 +157,13 @@ fn manual_sgd_step(
     y_data: &Tensor<f32>,
     sgd: &mut Sgd,
 ) -> Result<(f32, [Tensor<f32>; 4]), AutodiffError> {
-    let tape = facade::tape();
+    // `Linear::bind`／`Module::forward` は `&autodiff::Tape` を要求する
+    // ため（`compat::Sequential` の公開シグネチャとは異なり、本関数は
+    // `nn::Linear` を直接使う手動ループのテストフィクスチャ）、
+    // `facade::tape()` ではなく同じ ops 構成の生 `autodiff::Tape` を使う
+    // （`crates/facade/tests/compat_sequential.rs::raw_facade_equivalent_tape`
+    // と同型）。
+    let tape = autodiff::Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
     let x = tape.var(x_data);
     let y = tape.var(y_data);
 

@@ -1,58 +1,66 @@
 //! Keras `Sequential` 慣習のレイヤー積み上げビルダー（TASK-9.2a・
-//! #95。TASK-9.4・#411 で `autodiff::compat` から本クレートへ移設）。
-//! 数値ロジックは一切持たず、`autodiff::nn::Module` 実装
-//! （`Linear`・`Relu`・`Sigmoid`・`Tanh`）をメソッドチェーンで積み上げ、
-//! `forward`/`predict` で `nn::Module::forward` へ委譲するだけの薄い
-//! ビルダー（REQ-9）。対象レイヤーは `docs/compat-api-scope.md` §1 の
-//! 3 種限定（Linear・ReLU/Sigmoid/Tanh。Softmax・GELU・Conv 等は範囲
-//! 拡張の手続き〈同 §5〉を経ずに追加しない）。
+//! #95）の**非推奨シム**（TASK-9.4・#411）。
+//!
+//! 唯一のサポート対象実装は `facade::compat::sequential::Sequential`
+//! （`crates/facade/src/compat/sequential.rs`）。本ファイルは移設前の
+//! ソース互換のためだけに実装を複製して残す（`compat/mod.rs` モジュール
+//! doc 参照。`autodiff` は `facade` に依存できないため委譲不可）。
+//!
+//! 数値ロジックは一切持たず、`nn::Module` 実装（`Linear`・`Relu`・
+//! `Sigmoid`・`Tanh`）をメソッドチェーンで積み上げ、`forward`/`predict` で
+//! `nn::Module::forward` へ委譲するだけの薄いビルダー（REQ-9）。対象
+//! レイヤーは `docs/compat-api-scope.md` §1 の 3 種限定（Linear・
+//! ReLU/Sigmoid/Tanh。Softmax・GELU・Conv 等は範囲拡張の手続き〈同 §5〉を
+//! 経ずに追加しない）。
+//!
+//! **`predict` の結線**: 旧 `predict_with_ops`（任意 `BackendOps` 注入
+//! 経路）は `facade::compat::Sequential` 側で撤去済み（REQ-12「任意
+//! `BackendOps` 実装を注入できる公開 API を設けない」・`docs/
+//! compat-api-scope.md` §2）であり、本シムでも復元しない。`predict` は
+//! 移設前と同じ挙動（`default_ops::naive_ops()` による naive CPU 参照
+//! 実装。具体バックエンドクレートに依存しない）を維持する。
 //!
 //! **学習（勾配取得・パラメータ更新。#294 で対応済み）**: [`Sequential::bind`]
 //! が返す [`SequentialVars`] を経由して `LinearVars`（勾配取得の入口。
 //! `Tape::backward` 後に `Gradients::get(&vars.weight)` する経路）へ
 //! アクセスできる。[`Sequential::trainable_parameters`]/
-//! [`Sequential::apply_parameters`] と組み合わせ、`autodiff::optim::Sgd`・
-//! `autodiff::nn::optim::AdamW` の位置対応契約にそのまま渡せる。
-//!
-//! **`predict` の既定結線（TASK-9.4・#411）**: `predict` は本クレートの
-//! composition root（[`crate::tape`]。既定 CPU・`CpuBackendOps`・融合
-//! 有効）で `Tape` を構築して forward する。旧 `autodiff::compat` 版が
-//! 依存していた naive 参照実装（`autodiff::default_ops::naive_ops()`。
-//! クレート非公開）は facade から到達できないため、この結線先の変更に
-//! 伴い旧 `predict_with_ops`（任意 `BackendOps` 注入経路）は公開面から
-//! 撤去した（REQ-12「任意 `BackendOps` 実装を注入できる公開 API を
-//! 設けない」・`crates/facade/tests/api_surface.rs` の機械検査と整合。
-//! `compat/mod.rs` モジュール doc 参照）。ops を明示的に選びたい内部用途
-//! は [`Sequential::forward`]（[`crate::Tape`] を受け取るだけで
-//! `BackendOps` は受け取らない）へ、呼び出し元が任意に構築した `Tape` を
-//! 渡せば足りる。
-//!
-//! **公開シグネチャの型（codex-review PR #424 P1 是正）**: `forward`／
-//! `bind`／`predict` 等は `autodiff::Tape` を直接引数に取らず、本クレート
-//! 所有の newtype [`crate::Tape`] を取る（`crate::lib.rs` モジュール doc
-//! 「`Tape`（composition root が構築する値）の扱い」参照）。`Var`・
-//! `Gradients`・`AutodiffError`・`LinearVars`・`Tensor` は `crate::`
-//! 経由（facade の正式な再エクスポート）で参照する。
+//! [`Sequential::apply_parameters`] と組み合わせ、`crate::optim::Sgd`・
+//! `crate::nn::optim::AdamW` の位置対応契約（`optim/sgd.rs`・
+//! `nn/optim/adamw.rs`）にそのまま渡せる。
 
-use crate::{AutodiffError, Gradients, LinearVars, Tape, Tensor, Var};
-use autodiff::nn::activation::{Relu, Sigmoid, Tanh};
-use autodiff::nn::{Linear, Module};
+use tensor_core::Tensor;
+
+use crate::Gradients;
+use crate::error::AutodiffError;
+use crate::nn::activation::{Relu, Sigmoid, Tanh};
+use crate::nn::{Linear, LinearVars, Module};
+use crate::tape::Tape;
+use crate::var::Var;
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
-/// 推論を実行する。層は `nn::Module`（`autodiff::nn::module`）実装として
+/// 推論を実行する。層は `nn::Module`（`crate::nn::module`）実装として
 /// `Vec<Box<dyn Module>>` に格納するため、種類の異なる層（`Linear` と
 /// 活性化関数）を同じ列で扱える。
+///
+/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::Sequential` へ移行
+/// すること（本ファイル冒頭 doc 参照）。
+#[deprecated(
+    since = "0.0.0",
+    note = "facade::compat::Sequential へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
+)]
 pub struct Sequential {
     layers: Vec<Box<dyn Module>>,
 }
 
+#[allow(deprecated)] // Sequential 自体が非推奨シム（本ファイル冒頭 doc 参照）。
 impl Default for Sequential {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[allow(deprecated)]
 impl Sequential {
     pub fn new() -> Self {
         Sequential { layers: Vec::new() }
@@ -60,7 +68,7 @@ impl Sequential {
 
     /// 全結合層を追加する（bias あり既定。PyTorch `nn.Linear` の既定
     /// `bias=True` と揃える）。`Linear::new` が `Result` を返す
-    /// （`in_features == 0` を拒否する。`autodiff::nn::linear` 参照）ため、
+    /// （`in_features == 0` を拒否する。`nn/linear.rs` 参照）ため、
     /// 本メソッドも `Result<Self, AutodiffError>` を返し `?` で連鎖
     /// できるようにする。
     pub fn add_linear(
@@ -96,35 +104,27 @@ impl Sequential {
     /// 積み上げた層を先頭から順に `Module::forward` へ委譲する。
     /// 呼び出し元が用意した `tape` 上で 1 回分の forward を計算する
     /// （`Linear::bind` がステップごとに葉ノードを登録し直す契約に従う。
-    /// `autodiff::nn::module` 参照）。外部 `Tape` 上で呼ぶことで
+    /// `nn/module.rs` 参照）。外部 `Tape` 上で呼ぶことで
     /// `Tape::backward` までグラフ記録がつながる（推論だけでなく
     /// grad check 等の用途にも使える）。
     pub fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
         for layer in &self.layers {
-            // `nn::Module::forward` は `&autodiff::Tape` を要求する
-            // （`autodiff` クレート側の trait 定義のため facade newtype
-            // には書き換えられない）。`tape.0`（`pub(crate)` フィールド）
-            // 経由で内部の生 `Tape` を取り出す（本ファイル冒頭 doc
-            // 「公開シグネチャの型」参照）。
-            current = layer.forward(&tape.0, &current)?;
+            current = layer.forward(tape, &current)?;
         }
         Ok(current)
     }
 
     /// 推論の入口（受け入れ条件「Sequential でのモデル構築・推論が
-    /// 動作する」を満たす API）。内部で [`crate::tape`]（本クレートの
-    /// composition root。既定 CPU・`CpuBackendOps`・融合有効）で 1
-    /// ステップ分の `Tape` を生成し `forward` を呼んだ後 `to_tensor()`
+    /// 動作する」を満たす API）。内部で 1 ステップ分の `Tape` を
+    /// `default_ops::naive_ops()`（naive CPU 参照実装。具体バックエンド
+    /// クレートに依存しない）で構築し `forward` を呼んだ後 `to_tensor()`
     /// で追跡を外した `Tensor<f32>` を返す（`Tape` はこの呼び出しの
-    /// スコープ内で破棄される。`autodiff::nn::linear` の「`Tape` は
-    /// ステップごとに生成・破棄される前提」と同じ運用）。
-    ///
-    /// **TASK-9.4（#411）**: 旧 `autodiff::compat` 版が持っていた
-    /// `predict_with_ops`（任意 `BackendOps` 注入経路）は本移設で公開面
-    /// から撤去した（モジュール doc 参照）。
+    /// スコープ内で破棄される。`nn/linear.rs` の「`Tape` はステップごとに
+    /// 生成・破棄される前提」と同じ運用）。移設前と同じ挙動を維持する
+    /// （本ファイル冒頭 doc 参照）。
     pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
-        let tape = crate::tape();
+        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
         let input_var = tape.var(input);
         let output = self.forward(&tape, &input_var)?;
         Ok(output.to_tensor())
@@ -138,18 +138,13 @@ impl Sequential {
     /// 返る `SequentialVars` は `&'m Sequential`（`self`）と `&'t Tape`
     /// の両方を借用する。このハンドルが生きている間は
     /// [`Sequential::apply_parameters`]（`&mut self` を要求）を呼べない
-    /// （ステップ途中でのパラメータ書き換えを借用検査で静的に防ぐ設計。
-    /// 呼び出し元は `bind` 以降の一連の処理をブロックスコープで囲み、
-    /// スコープを抜けてから `apply_parameters` を呼ぶ運用とする。
-    /// `crates/facade/tests/compat_sequential_train.rs` に実例がある）。
+    /// （ステップ途中でのパラメータ書き換えを借用検査で静的に防ぐ設計）。
     pub fn bind<'m, 't>(&'m self, tape: &'t Tape) -> SequentialVars<'m, 't> {
-        // `Linear::bind` も `&autodiff::Tape` を要求する（`forward` と
-        // 同じ理由。`tape.0` 経由で取り出す）。
         let linears = self
             .layers
             .iter()
             .filter_map(|layer| layer.as_linear())
-            .map(|linear| linear.bind(&tape.0))
+            .map(|linear| linear.bind(tape))
             .collect();
         SequentialVars {
             model: self,
@@ -159,8 +154,9 @@ impl Sequential {
 
     /// 学習可能パラメータ（`Linear` 層の `weight`/`bias`）への参照列を
     /// 層の追加順・各層内は weight → bias（`Some` の場合のみ）の順で
-    /// 返す。`autodiff::optim::Sgd::step`/`autodiff::nn::optim::AdamW::step`
-    /// の位置対応契約にそのまま渡せる。この順序契約は
+    /// 返す。`crate::optim::Sgd::step`/`crate::nn::optim::AdamW::step`
+    /// の位置対応契約にそのまま渡せる（`optim/sgd.rs`・
+    /// `nn/optim/adamw.rs`）。この順序契約は
     /// [`SequentialVars::trainable_vars`]/[`SequentialVars::trainable_grads`]/
     /// [`Sequential::apply_parameters`] と共通（#294 の設計不変条件）。
     pub fn trainable_parameters(&self) -> Vec<&Tensor<f32>> {
@@ -178,39 +174,20 @@ impl Sequential {
 
     /// optimizer（`Sgd::step`/`AdamW::step`）が返した更新後テンソル列を
     /// [`Sequential::trainable_parameters`] と同じ順序契約で各 `Linear`
-    /// 層へ書き戻す。内部で `Linear::from_parameters`（`autodiff::nn::linear`）
+    /// 層へ書き戻す。内部で `Linear::from_parameters`（`nn/linear.rs`）
     /// により層を再構築するため、compat 層自身は shape 検証ロジックを
     /// 重複実装しない（REQ-9「薄いラッパーに徹する」）。
     ///
-    /// **`Linear::from_parameters` が検証する範囲（それ以上は検証しない）**:
-    /// 検証は新しい `weight`/`bias` 単体の内部整合性（`weight` が rank 2・
-    /// `weight.shape()[0] > 0`・`bias` を渡す場合は `bias.shape() ==
-    /// [weight.shape()[1]]`）に限られ、**置換前の層の shape や隣接層との
-    /// 整合性とは比較しない**（`autodiff::nn::linear::Linear::from_parameters`
-    /// docstring 参照）。したがって例えば `in_features`/`out_features` を
-    /// 変えてしまう更新（optimizer 側のバグ等）は `apply_parameters` 自身
-    /// ではエラーにならず、後続の `forward`（`matmul` の shape 不整合）で
-    /// 初めて顕在化する。
-    ///
     /// # エラー
     /// - `updated` の要素数が `trainable_parameters()` の件数と不一致
-    ///   → `AutodiffError::InvalidArgument`（fail-closed。位置対応契約が
-    ///   崩れたまま一部の層だけ更新して黙って続行しない。`.claude/rules/
-    ///   security.md` A03）
-    /// - 個々のテンソルが上記の内部整合性検証に反する（例: bias の shape
-    ///   が対応する weight の out_features と食い違う）→
-    ///   `Linear::from_parameters` 由来の `AutodiffError::Shape`
+    ///   → `AutodiffError::InvalidArgument`（fail-closed）
+    /// - 個々のテンソルが `Linear::from_parameters` の内部整合性検証に
+    ///   反する → `AutodiffError::Shape`
     ///
     /// **アトミック性（two-pass）**: `updated` は 1 パス目で全層分を検証込みで
-    /// `Linear::from_parameters` に通し、実際の代入（`self.layers` への
-    /// 書き戻し）は全件の検証が成功した後の 2 パス目でまとめて行う。層ごとに
-    /// 検証と代入を同時に行うと、途中の層（例: 2 層目）で shape 不整合エラーが
-    /// 起きた際に、既に代入済みの前段の層は新パラメータのまま・未処理の後続層は
-    /// 旧パラメータのままという不整合な混在状態がモデルに残ってしまう
-    /// （呼び出し側は `Err` を受け取るにもかかわらず一部だけ更新されて
-    /// 見える。fail-closed 違反。`.claude/rules/security.md` A03。
-    /// review 指摘 #294）。two-pass にすることで、エラー時は呼び出し前の
-    /// 状態を完全に維持する。
+    /// `Linear::from_parameters` に通し、実際の代入は全件の検証が成功した
+    /// 後の 2 パス目でまとめて行う（`.claude/rules/security.md` A03。
+    /// review 指摘 #294）。
     pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
         // trainable_parameters() と同じ順序（層の追加順）で学習可能層への
         // 可変参照を先に集める。まだ何も書き換えない。
@@ -266,42 +243,26 @@ impl Sequential {
 /// `Linear` 層の混在列）を再現するため、`linears`（`Linear` 層のみを
 /// 層順に抽出した `LinearVars` 列）は `Vec<Box<dyn Module>>` の添字とは
 /// 別に独立して保持する。
+///
+/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::sequential::
+/// SequentialVars` へ移行すること（本ファイル冒頭 doc 参照）。
+#[deprecated(
+    since = "0.0.0",
+    note = "facade::compat::sequential::SequentialVars へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
+)]
+#[allow(deprecated)] // フィールド型 Sequential 自体も非推奨シム（本ファイル冒頭 doc 参照）。
 pub struct SequentialVars<'m, 't> {
     model: &'m Sequential,
     linears: Vec<LinearVars<'t>>,
 }
 
+#[allow(deprecated)] // SequentialVars 自体が非推奨シム（本ファイル冒頭 doc 参照）。
 impl<'m, 't> SequentialVars<'m, 't> {
     /// 学習用 forward。`Linear` 層は [`Sequential::bind`] で既に
     /// 登録済みの `LinearVars`（`self.linears`。層出現順の添字対応）を
     /// 使い、活性化層は `Module::forward` へ委譲する。
-    ///
-    /// **`Linear::bind` を再度呼ばない理由**: `Module::forward`
-    /// （`autodiff::nn::module`）の `Linear` 実装は呼び出しのたびに
-    /// `self.bind(tape)` して新しい葉ノードを作る（推論用の使い捨て
-    /// 契約）。学習用 forward がこの経路を使うと、`bind` 時点で
-    /// 取得した `LinearVars`（[`SequentialVars::trainable_vars`]/
-    /// [`SequentialVars::trainable_grads`] が参照する `Var`）が forward
-    /// のテープ記録に含まれず、`Tape::backward` 後の `Gradients::get`
-    /// が到達不能（`Ok(None)`）を返してしまう。そのため学習用 forward
-    /// は必ず `self.linears` に保持済みの `LinearVars::forward` を使う。
     pub fn forward(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
-        // `self.linears` は `model.layers` から `Linear` 層のみを同じ順序で
-        // 抽出したもの（`Sequential::bind` 参照）のため、`Linear` 層に
-        // 出会うたびにイテレータから 1 件ずつ消費すれば `model.layers`
-        // 側の走査順と対応が取れる。添字アクセス（`self.linears[i]`）では
-        // なくイテレータの `next()` を使う理由: 両者の対応は `bind`/
-        // `forward` が同じ `as_linear().is_some()` 述語で層を数えている
-        // ことに依存する不変条件であり、この不変条件自体は `self.model`
-        // が `bind` 時点の `&'m Sequential` を保持し続ける（借用が生きた
-        // ままの `SequentialVars` からは `model.layers` を書き換えられない）
-        // ため現状は構造的に破れない。したがってこの `ok_or_else` 分岐は
-        // 現状のコード構成では到達しない防御コードである。将来この関数・
-        // `bind` のいずれかを書き換えて上記の対応関係が崩れた場合に、
-        // 添字アクセスが本番経路で panic するのを避け fail-closed
-        // （`InvalidArgument`）にするための保険として残す
-        // （`.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
         let mut linears = self.linears.iter();
         for layer in &self.model.layers {
             if layer.as_linear().is_some() {
@@ -314,9 +275,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward(&current)?;
             } else {
-                // 活性化層は `nn::Module::forward` へ委譲する（`&autodiff::Tape`
-                // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
-                current = layer.forward(&tape.0, &current)?;
+                current = layer.forward(tape, &current)?;
             }
         }
         Ok(current)
@@ -343,15 +302,9 @@ impl<'m, 't> SequentialVars<'m, 't> {
 
     /// `Tape::backward` の結果 `grads` から、同じ順序契約
     /// （`trainable_vars`/`trainable_parameters` と共通）で勾配参照列を
-    /// 収集する。
-    ///
-    /// 勾配が存在しないパラメータ（loss へ未到達。`Gradients::get` が
-    /// `Ok(None)` を返す場合）は黙って除外せず `InvalidArgument` にする
-    /// （fail-closed）: 除外してしまうと戻り値の件数が
-    /// `trainable_parameters()` の件数より少なくなり、
-    /// `Sgd::step`/`AdamW::step` の位置対応契約（`params[i]` ↔ `grads[i]`）
-    /// が呼び出し元の意図と無関係にずれて、誤ったパラメータへ誤った
-    /// 勾配を適用しかねないため（`.claude/rules/security.md` A03）。
+    /// 収集する。勾配が存在しないパラメータ（loss へ未到達）は黙って
+    /// 除外せず `InvalidArgument` にする（fail-closed。
+    /// `.claude/rules/security.md` A03）。
     pub fn trainable_grads<'g>(
         &self,
         grads: &'g Gradients,
@@ -382,21 +335,13 @@ impl<'m, 't> SequentialVars<'m, 't> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // 非推奨シム自身のテスト（本ファイル冒頭 doc 参照）。
 mod tests {
     use super::*;
+    use crate::eval::dense_vec;
 
     const SEED1: u64 = 1001;
     const SEED2: u64 = 2002;
-
-    /// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API
-    /// のみを使用。旧 `autodiff::eval::dense_vec`〈クレート非公開〉の
-    /// 代替。`compat/array.rs` のテストヘルパーと同型）。
-    fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
-        t.contiguous()
-            .as_slice()
-            .expect("contiguous() 直後は必ず as_slice() が Some を返す")
-            .to_vec()
-    }
 
     #[test]
     fn sequential_builds_and_predicts_two_layer_mlp() {
@@ -430,20 +375,17 @@ mod tests {
         let input_tensor = Tensor::new(input_data, &[batch, 8]).unwrap();
 
         // 手動経路: Linear -> ReLU -> Linear を直接組み立てる。
-        // `Linear::bind` は `&autodiff::Tape` を要求するため `manual_tape.0`
-        // （同一クレート内なので `pub(crate)` フィールドへアクセス可能）
-        // 経由で内部の生 Tape を渡す。
-        let manual_tape = crate::tape();
+        let manual_tape = Tape::new_with_ops(crate::test_support::test_ops());
         let manual_input = manual_tape.var(&input_tensor);
-        let h = linear1.bind(&manual_tape.0).forward(&manual_input).unwrap();
+        let h = linear1.bind(&manual_tape).forward(&manual_input).unwrap();
         let h = h.relu();
-        let manual_output = linear2.bind(&manual_tape.0).forward(&h).unwrap();
+        let manual_output = linear2.bind(&manual_tape).forward(&h).unwrap();
 
         // Sequential 経路: 同じ Linear インスタンスを Module として積む。
         let model = Sequential {
             layers: vec![Box::new(linear1), Box::new(Relu), Box::new(linear2)],
         };
-        let seq_tape = crate::tape();
+        let seq_tape = Tape::new_with_ops(crate::test_support::test_ops());
         let seq_input = seq_tape.var(&input_tensor);
         let seq_output = model.forward(&seq_tape, &seq_input).unwrap();
 
@@ -462,7 +404,7 @@ mod tests {
             .unwrap()
             .add_sigmoid();
 
-        let tape = crate::tape();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let input = tape.var(&Tensor::new(vec![0.1_f32, 0.2, 0.3, 0.4], &[1, 4]).unwrap());
         let output = model.forward(&tape, &input).unwrap();
         let loss = output.sum(None).unwrap();
@@ -480,11 +422,8 @@ mod tests {
     #[test]
     fn add_linear_propagates_invalid_argument() {
         // in_features == 0 は Linear::new が拒否する
-        // （1/sqrt(in_features) が非有限になるため。autodiff::nn::linear 参照）。
+        // （1/sqrt(in_features) が非有限になるため。nn/linear.rs 参照）。
         // add_linear はこれをそのまま Result で伝播する。
-        // `Sequential` は `Box<dyn Module>` を保持し `Debug` を実装しない
-        // ため、`unwrap_err()`（`Ok` 側にも `Debug` を要求する）は使わず
-        // `match` で値を取り出す。
         let result = Sequential::new().add_linear(0, 4, SEED1);
         match result {
             Err(err) => assert!(matches!(err, AutodiffError::InvalidArgument(_))),
@@ -506,7 +445,7 @@ mod tests {
             layers: vec![Box::new(l1), Box::new(Relu), Box::new(l2)],
         };
 
-        let tape = crate::tape();
+        let tape = Tape::new_with_ops(crate::test_support::test_ops());
         let bound = model.bind(&tape);
 
         assert_eq!(bound.linears().len(), 2);
@@ -532,7 +471,7 @@ mod tests {
                 Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
             ],
         };
-        let module_tape = crate::tape();
+        let module_tape = Tape::new_with_ops(crate::test_support::test_ops());
         let module_input = module_tape.var(&input_tensor);
         let module_output = module_model.forward(&module_tape, &module_input).unwrap();
 
@@ -544,7 +483,7 @@ mod tests {
                 Box::new(Linear::new(16, 4, true, SEED2).unwrap()),
             ],
         };
-        let train_tape = crate::tape();
+        let train_tape = Tape::new_with_ops(crate::test_support::test_ops());
         let bound = train_model.bind(&train_tape);
         let train_input = train_tape.var(&input_tensor);
         let train_output = bound.forward(&train_tape, &train_input).unwrap();
@@ -588,9 +527,6 @@ mod tests {
         let mut model = Sequential::new().add_linear(4, 3, SEED1).unwrap();
         // weight は rank 2 の妥当な shape（[4, 3]）だが、bias の shape が
         // weight.shape()[1]（out_features=3）と食い違う（[5]）ケース。
-        // `Linear::from_parameters` の bias 検証（`autodiff::nn::linear`）
-        // がこれを拒否することを確認する（`apply_parameters` は
-        // 検証ロジックを重複実装せず委譲するだけ、という設計の裏付け）。
         let weight = Tensor::new(vec![0.0f32; 12], &[4, 3]).unwrap();
         let bad_bias = Tensor::new(vec![0.0f32; 5], &[5]).unwrap();
         let err = model.apply_parameters(vec![weight, bad_bias]).unwrap_err();
@@ -599,13 +535,7 @@ mod tests {
 
     #[test]
     fn apply_parameters_leaves_model_unchanged_on_excess_element_count() {
-        // two-pass 化の回帰テスト（review 指摘 #294 の Medium 項目、後半）:
-        // 修正前は `if updated.next().is_some()` の超過件数チェックが
-        // 全層への代入完了「後」に走っていたため、この分岐で `Err` を
-        // 返すケースでも実際には全層が新パラメータへ更新済みという
-        // 不整合（呼び出し側はエラー扱いなのにモデルは書き換わっている）
-        // があった。two-pass では代入前に検証（超過チェックを含む）が
-        // 完了するため、この場合もモデルは元の値のまま残ることを確認する。
+        // two-pass 化の回帰テスト（review 指摘 #294 の Medium 項目、後半）。
         let mut model = Sequential::new().add_linear(2, 1, SEED1).unwrap();
         let original_params: Vec<Tensor<f32>> =
             model.trainable_parameters().into_iter().cloned().collect();
@@ -649,10 +579,8 @@ mod tests {
     fn apply_parameters_updates_bias_less_layer() {
         // `apply_parameters` の has_bias == false 分岐（bias を渡さず
         // weight のみ消費する経路）を直接カバーする。`Sequential::add_linear`
-        // は常に bias ありの層しか組み立てられないため（公開 API からは
-        // 到達不能。review 指摘 #294）、bias なし `Linear::new` を内部
-        // コンストラクタ（`Sequential { layers: ... }`。同一クレート内の
-        // テストのみ使用可能）で直接組み込んで検証する。
+        // は常に bias ありの層しか組み立てられないため、bias なし
+        // `Linear::new` を内部コンストラクタで直接組み込んで検証する。
         let linear = Linear::new(2, 1, false, SEED1).unwrap();
         let mut model = Sequential {
             layers: vec![Box::new(linear)],
@@ -673,11 +601,7 @@ mod tests {
 
     #[test]
     fn apply_parameters_leaves_model_unchanged_on_mid_sequence_shape_error() {
-        // two-pass 化（review 指摘 #294 の Medium 項目）の回帰テスト:
-        // 2 層目で shape 不整合エラーが起きても、検証は代入前に全件完了する
-        // ため 1 層目（先に走査される層）はエラー前の値のまま保持される
-        // （部分適用によるモデルの不整合な混在状態を防ぐ。
-        // `.claude/rules/security.md` A03）。
+        // two-pass 化（review 指摘 #294 の Medium 項目）の回帰テスト。
         let mut model = Sequential::new()
             .add_linear(2, 3, SEED1)
             .unwrap()
