@@ -25,7 +25,15 @@ use crate::dispatch::DType;
 /// 許容誤差ではなく実装判断の定数のため変更にユーザー承認は要さないが、
 /// TASK-12.2（#166・実測）で見直し可能な形で定数化しておく
 /// （実装計画イシュー #162 §8「リスク・判断の記録」）。
-pub(crate) const MAX_FUSED_CHAIN_LEN: usize = 6;
+///
+/// **単一真実源（#404）**: 本定数は `detect_fusion`（本モジュール）に
+/// 加え、`autodiff::tape::Tape::push_lazy` の push 時上限適用（設計書
+/// §3.5.4）からも参照される。`crate::fusion::mod.rs` の `pub use` を
+/// 経由してクレートルート（`tensor_core::MAX_FUSED_CHAIN_LEN`）から
+/// 公開する（`autodiff` → `tensor-core` の依存方向のみで完結し、逆依存
+/// を作らない）。値の重複定義を避けるため、遅延評価経路側で同名の
+/// 定数を再定義しないこと。
+pub const MAX_FUSED_CHAIN_LEN: usize = 6;
 
 /// 融合セグメント成立に要する最小 elementwise ノード数。
 ///

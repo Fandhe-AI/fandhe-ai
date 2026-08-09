@@ -158,23 +158,57 @@ impl<'t> Var<'t> {
     /// （③）は実体化境界まで遅延させる（`push_lazy`。`Ok` を返すことは
     /// 「shape が妥当でノードが記録された」ことのみを意味し「加算が
     /// 計算済み」であることを意味しない。設計書 §3.5.1）。
+    ///
+    /// **連鎖長上限（#404・設計書 §3.5.4）**: `push_lazy` を呼ぶ**前**に
+    /// [`Tape::pre_materialize_for_binary_merge`] で fan-in 事前実体化を
+    /// 行う（2 本の未実体化枝を合流させた結果が単独で上限を超えるなら
+    /// 大きい方の枝を先に実体化する。codex-review PR #406 の P1 是正。
+    /// push 後の自己実体化だけでは fan-in を防げないため必須）。続けて
+    /// `push_lazy` が返す `at_limit` が `true`（新規ノードの
+    /// `lazy_chain_size` が `MAX_FUSED_CHAIN_LEN` に到達）の場合、層 1
+    /// （[`materialize_fallible`]）でその場実体化する。**いずれの実体化
+    /// も**発生した場合、`Ok` の意味は「shape が妥当でノードが記録され
+    /// **かつバックエンド実行が成功した**」へ拡張される（同じ層 1 契約
+    /// を持つ `matmul`/`sum`/`max` と同型の `Ok` 意味）。実体化失敗は
+    /// （事前実体化・push 後の自己実体化のいずれも）`?` でそのまま伝播
+    /// する。
     pub fn add(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(other)?;
         let lhs_shape = self.shape();
         let rhs_shape = other.shape();
         let out_shape = broadcast_shape(&lhs_shape, &rhs_shape)?;
-        let id = self.tape.push_lazy(Op::Add(self.id, other.id), out_shape);
+        // fan-in 事前実体化（#404・codex-review PR #406 の P1 是正）:
+        // 2 本の未実体化枝を合流させる前に、合流後サイズが上限を超える
+        // なら大きい方の枝を先に実体化する（`Tape::
+        // pre_materialize_for_binary_merge` のドキュメント参照）。
+        self.tape
+            .pre_materialize_for_binary_merge(self.id, other.id)?;
+        let (id, at_limit) = self.tape.push_lazy(Op::Add(self.id, other.id), out_shape);
+        if at_limit {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), id)?;
+        }
         Ok(Var::from_raw(self.tape, id))
     }
 
     /// ブロードキャスト付き要素ごとの乗算。elementwise 5 演算の 1 つ
-    /// （`add` と同じ遅延契約。TASK-12.1d・#164）。
+    /// （`add` と同じ遅延契約・fan-in 事前実体化契約・連鎖長上限での
+    /// 自己実体化契約。`Ok` の意味の拡張も `add` と同型。
+    /// TASK-12.1d・#164・#404・codex-review PR #406）。
     pub fn mul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(other)?;
         let lhs_shape = self.shape();
         let rhs_shape = other.shape();
         let out_shape = broadcast_shape(&lhs_shape, &rhs_shape)?;
-        let id = self.tape.push_lazy(Op::Mul(self.id, other.id), out_shape);
+        // fan-in 事前実体化（`add` と同じ契約。#404・codex-review PR #406
+        // の P1 是正）。
+        self.tape
+            .pre_materialize_for_binary_merge(self.id, other.id)?;
+        let (id, at_limit) = self.tape.push_lazy(Op::Mul(self.id, other.id), out_shape);
+        if at_limit {
+            let nodes = self.tape.nodes.borrow();
+            materialize_fallible(&nodes, self.tape.ops(), id)?;
+        }
         Ok(Var::from_raw(self.tape, id))
     }
 
@@ -321,23 +355,42 @@ impl<'t> Var<'t> {
     /// ReLU。shape を変えない要素ごとの演算のため構造的に失敗しえない
     /// （`docs/public-api-design.md` §3.2）。elementwise 5 演算の 1 つ
     /// （`add`/`mul` と同じ遅延契約。TASK-12.1d・#164）。
+    ///
+    /// **連鎖長上限（#404・設計書 §3.5.4）**: 非 fallible な単項演算
+    /// のため、上限到達時は層 2（[`materialize_non_fallible`]）でその場
+    /// 実体化する（`add`/`mul` の層 1 とは異なり、必ず値が入り
+    /// panic／`Err` を返さない）。
     pub fn relu(&self) -> Var<'t> {
         let shape = self.shape();
-        let id = self.tape.push_lazy(Op::Relu(self.id), shape);
+        let (id, at_limit) = self.tape.push_lazy(Op::Relu(self.id), shape);
+        if at_limit {
+            let nodes = self.tape.nodes.borrow();
+            materialize_non_fallible(&nodes, self.tape.ops(), id);
+        }
         Var::from_raw(self.tape, id)
     }
 
-    /// 要素ごとの指数関数。elementwise 5 演算の 1 つ（遅延契約）。
+    /// 要素ごとの指数関数。elementwise 5 演算の 1 つ（`relu` と同じ
+    /// 遅延契約・連鎖長上限での自己実体化契約。#404）。
     pub fn exp(&self) -> Var<'t> {
         let shape = self.shape();
-        let id = self.tape.push_lazy(Op::Exp(self.id), shape);
+        let (id, at_limit) = self.tape.push_lazy(Op::Exp(self.id), shape);
+        if at_limit {
+            let nodes = self.tape.nodes.borrow();
+            materialize_non_fallible(&nodes, self.tape.ops(), id);
+        }
         Var::from_raw(self.tape, id)
     }
 
-    /// 要素ごとの双曲線正接。elementwise 5 演算の 1 つ（遅延契約）。
+    /// 要素ごとの双曲線正接。elementwise 5 演算の 1 つ（`relu` と同じ
+    /// 遅延契約・連鎖長上限での自己実体化契約。#404）。
     pub fn tanh(&self) -> Var<'t> {
         let shape = self.shape();
-        let id = self.tape.push_lazy(Op::Tanh(self.id), shape);
+        let (id, at_limit) = self.tape.push_lazy(Op::Tanh(self.id), shape);
+        if at_limit {
+            let nodes = self.tape.nodes.borrow();
+            materialize_non_fallible(&nodes, self.tape.ops(), id);
+        }
         Var::from_raw(self.tape, id)
     }
 

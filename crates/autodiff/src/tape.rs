@@ -23,7 +23,9 @@
 use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tensor_core::{BackendError, BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+use tensor_core::{
+    BackendError, BackendOps, DType, FusedOpKind, FusionPlan, MAX_FUSED_CHAIN_LEN, Tensor,
+};
 
 use crate::error::AutodiffError;
 
@@ -163,11 +165,32 @@ impl Op {
 /// 即座に埋める。`OnceCell::get_or_init`／`set` はいずれも `&self`
 /// （共有参照）で呼べるため、`RefCell<Vec<TapeNode>>` の `borrow()`
 /// （共有借用）だけで埋められる。
+///
+/// `lazy_chain_size`（#404・設計書 §3.5.4。codex-review PR #406 の P1
+/// 是正で `lazy_depth`〈最大値ベース〉から改名・再設計）: このノードを
+/// 起点として `build_lazy_plan` が実際に収容する**未実体化 interior
+/// ノード数の上界**。`push_eager`（実体化済みノード）は常に 0。
+/// `push_lazy` は入力ノードの**実効サイズ**（入力が実体化済みなら 0、
+/// 未実体化なら格納済み `lazy_chain_size`）の**総和** + 1 を格納する
+/// （`Tape::push_lazy` のドキュメント参照）。
+///
+/// **最大値ではなく総和を使う理由**: fan-in（複数の未実体化枝を 1 個の
+/// `Op::Add`/`Op::Mul` で合流させる形）では `build_lazy_plan` が両枝の
+/// interior を合算して 1 個の `FusionPlan` に収容するため、「両入力の
+/// 段数の最大値 + 1」（旧 `effective_depth`）は `build_lazy_plan` が
+/// 実際に集める interior ノード数を過小評価しうる（例: 3 ノードの枝
+/// 2 本を `add` で結合すると最大値ベースでは 4 だが実際の interior は
+/// 7。codex-review PR #406 指摘の反例）。総和ベースであれば diamond 型
+/// DAG（同一祖先を複数経路が共有する場合）で重複カウントし過大評価に
+/// なりうるが、それは「早めに自己実体化する」方向の安全側の誤差
+/// （融合機会をわずかに減らすのみで `MAX_FUSED_CHAIN_LEN` 契約は破らない。
+/// [`Tape::effective_subtree_size`] のドキュメント参照）。
 #[derive(Debug)]
 pub(crate) struct TapeNode {
     pub(crate) op: Op,
     pub(crate) shape: Vec<usize>,
     pub(crate) value: OnceCell<Tensor<f32>>,
+    pub(crate) lazy_chain_size: usize,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -301,8 +324,51 @@ impl Tape {
             op,
             shape,
             value: OnceCell::from(value),
+            lazy_chain_size: 0,
         });
         id
+    }
+
+    /// **fan-in 事前実体化（#404・codex-review PR #406 の P1 是正）**:
+    /// `Var::add`/`mul`（二項 elementwise の 2 演算のみ。`relu`/`exp`/
+    /// `tanh` は単項のため呼ぶ必要がない）が `push_lazy` を呼ぶ**前**に
+    /// 必ず呼ぶ契約とする。2 本の未実体化枝を 1 個の演算で合流させる
+    /// fan-in では、`push_lazy` 後の自己実体化（`at_limit`）だけでは
+    /// 手遅れになりうる——たとえば `lazy_chain_size` 3 の枝を 2 本
+    /// `add` で結合すると新規ノードの必要サイズは `3 + 3 + 1 = 7` で
+    /// あり、この時点で自己実体化しても `build_lazy_plan` が集める
+    /// interior は既に 7 ノードで `MAX_FUSED_CHAIN_LEN`（= 6）を超えて
+    /// しまう（codex-review PR #406 指摘の反例）。
+    ///
+    /// そこで合流**前**に「2 入力の未実体化サイズ合計 + 1 が上限を
+    /// 超えるか」を検査し、超える場合は**大きい方の枝のみ**を
+    /// [`materialize_fallible`] でその場実体化する。小さい方の枝の
+    /// `lazy_chain_size` は常に `MAX_FUSED_CHAIN_LEN − 1` 以下で有界
+    /// （どの未実体化ノードも push 時点で上限未満だったものしか残ら
+    /// ない、という [`Tape::push_lazy`] の不変条件）であるため、大きい
+    /// 方を実体化（サイズ 0 化）すれば残りは「小さい方のサイズ + 1」
+    /// ≤ `MAX_FUSED_CHAIN_LEN` に必ず収まり、両方を実体化する必要はない。
+    pub(crate) fn pre_materialize_for_binary_merge(
+        &self,
+        a: NodeId,
+        b: NodeId,
+    ) -> Result<(), AutodiffError> {
+        let nodes = self.nodes.borrow();
+        let size_of = |id: NodeId| -> usize {
+            let node = &nodes[id.0];
+            if node.value.get().is_some() {
+                0
+            } else {
+                node.lazy_chain_size
+            }
+        };
+        let size_a = size_of(a);
+        let size_b = size_of(b);
+        if size_a + size_b + 1 > MAX_FUSED_CHAIN_LEN {
+            let larger = if size_a >= size_b { a } else { b };
+            materialize_fallible(&nodes, self.ops(), larger)?;
+        }
+        Ok(())
     }
 
     /// **elementwise 5 演算（`add`/`mul`/`relu`/`exp`/`tanh`）専用**の
@@ -311,16 +377,72 @@ impl Tape {
     /// 主要因。`docs/fusion-graph-design.md` §3.5.1）。`shape` は構造的に
     /// 確定済みの出力 shape（呼び出し元が `broadcast_shape` 等で計算
     /// 済み）を渡す。
-    pub(crate) fn push_lazy(&self, op: Op, shape: Vec<usize>) -> NodeId {
+    ///
+    /// **連鎖長上限適用（#404・設計書 §3.5.4。codex-review PR #406 の
+    /// P1 是正で最大値ベースから総和ベースへ再設計）**: 戻り値の第 2
+    /// 要素は「新規ノードの `lazy_chain_size` が `MAX_FUSED_CHAIN_LEN`
+    /// 以上に達したか」を表す。`true` の場合、呼び出し元（`Var::add`/
+    /// `mul`/`relu`/`exp`/`tanh`）は返った `NodeId` を層 1（fallible。
+    /// `add`/`mul`）または層 2（非 fallible。`relu`/`exp`/`tanh`）で
+    /// **その場**実体化する契約（「上限到達時点でその場の演算を実体化
+    /// してから連鎖を再開する」）。自己実体化により以後このノードは
+    /// `value.get().is_some()` となるため、[`Tape::effective_subtree_size`]
+    /// はこれを 0 として扱い、連鎖のリセットが状態更新なしで自然に成立
+    /// する。
+    pub(crate) fn push_lazy(&self, op: Op, shape: Vec<usize>) -> (NodeId, bool) {
         debug_assert!(op.is_lazy_elementwise());
         let mut nodes = self.nodes.borrow_mut();
+        let size = Tape::effective_subtree_size(&nodes, &op);
+        let at_limit = size >= MAX_FUSED_CHAIN_LEN;
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
             shape,
             value: OnceCell::new(),
+            lazy_chain_size: size,
         });
-        id
+        (id, at_limit)
+    }
+
+    /// `push_lazy` が新規ノードに割り当てる `lazy_chain_size` を、入力
+    /// ノードの**実効サイズ**（実体化済みなら 0、未実体化なら格納済み
+    /// `lazy_chain_size`）の**総和** + 1 として計算する（#404・設計書
+    /// §3.5.4。codex-review PR #406 の P1 是正）。
+    ///
+    /// **総和（最大値ではない）が必須の理由**: `build_lazy_plan` は
+    /// 「新規ノードから到達可能な未実体化ノード全体」を 1 個の
+    /// `FusionPlan` に収容する。fan-in（`Op::Add`/`Op::Mul` が 2 本の
+    /// 独立した未実体化枝を合流させる形）では interior 総数は両枝の
+    /// ノード数の**合計**であり、最大値ではない。旧実装（`max_input_depth + 1`）はこの合流を考慮せず「入力のうち深い方の段数 + 1」しか見ないため、それぞれ 3 ノードの枝を 2 本 `add` で結合すると実際の interior は 7 ノードなのに旧指標は 4 のままとなり、`MAX_FUSED_CHAIN_LEN`（= 6）契約を静かに破っていた（codex-review PR #406 指摘の反例）。
+    ///
+    /// **過大評価は安全側**: diamond 型 DAG（同一祖先ノードを複数の
+    /// 経路が共有する場合）では総和が実際の distinct interior 数を
+    /// 超えて重複カウントしうるが、`build_lazy_plan` が実際に集める
+    /// distinct interior 数は必ずこの総和以下になるため、上限判定は
+    /// 常に安全側（早めの自己実体化）に倒れる。加えて、途中ノードが
+    /// `push_lazy` 後に別経路（`Var::value` 等）で実体化されても格納済み
+    /// `lazy_chain_size` はその場では更新しないため、後続ノードのサイズ
+    /// 計算が実際より大きくなる場合があるが、これも同じく安全側の誤差
+    /// であり融合機会をわずかに減らすのみで正しさには影響しない
+    /// （実装計画 §2「連鎖長（段数）の定義と追跡」参照）。
+    fn effective_subtree_size(nodes: &[TapeNode], op: &Op) -> usize {
+        let input_size = |id: NodeId| -> usize {
+            let node = &nodes[id.0];
+            if node.value.get().is_some() {
+                0
+            } else {
+                node.lazy_chain_size
+            }
+        };
+        let total_input_size = match op {
+            Op::Add(a, b) | Op::Mul(a, b) => input_size(*a) + input_size(*b),
+            Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) => input_size(*a),
+            // `push_lazy` は `debug_assert!(op.is_lazy_elementwise())` に
+            // より elementwise 5 演算専用。到達しない分岐だが `match` の
+            // 網羅性のため安全側で 0 を返す（本番経路 panic 禁止方針）。
+            _ => 0,
+        };
+        total_input_size + 1
     }
 }
 
@@ -344,18 +466,36 @@ impl Tape {
 /// fusion-graph-design.md` §3.5.1「走査順が既に発生順トポロジカル順で
 /// あること」）: `id.0` から `0` へ向けた降順の単純な線形スキャンだけで
 /// 「参照済みノードをそれより手前で必ず処理し終えている」ことが保証
-/// される。**連鎖長上限（設計書 §3.2 (d)・§3.5.4）は本実装では適用しない
-/// （scope reduction。#164 実装ノート）**: `push_lazy` 時点でのその場
-/// 実体化による上限適用は追加の状態追跡を要する。
+/// される。
 ///
-/// `#167`（`CpuBackendOps::run_fused` を融合カーネルへ結線。コミット
-/// 8e2981f）で「`run_fused` が常に `Unsupported`」という前提が崩れた
-/// 後も、本関数への上限適用はまだ実装していない — 深い／長い
-/// elementwise 連鎖は無制限に単一の `FusionPlan` へ融合され、下記
-/// `node_index` の線形探索により連鎖長 n に対し構築コストが O(n²) に
-/// なる。ドキュメント（`docs/kernel-fusion.md` §3 表 5 行目）は本関数の
-/// 実態（未実装）に合わせて記述済み。上限適用の実装自体は
-/// `out-of-scope-tracking.md` の手順に従い #404 で追跡する。
+/// **連鎖長上限は push 時点で適用済み（#404・設計書 §3.5.4。
+/// codex-review PR #406 の P1 是正で fan-in 反例を修正）**:
+/// `Tape::push_lazy` が新規ノードの `lazy_chain_size`
+/// （[`Tape::effective_subtree_size`]。未実体化入力の**総和** + 1）を
+/// 計算し、`MAX_FUSED_CHAIN_LEN`（= 6）に到達した時点で呼び出し元
+/// （`Var::add`/`mul`/`relu`/`exp`/`tanh`）がそのノードをその場で自己
+/// 実体化する（層 1／層 2。`var.rs` 参照）。
+///
+/// **二項演算（`add`/`mul`）は push 前の fan-in 事前実体化も必須**
+/// （[`Tape::pre_materialize_for_binary_merge`]）: push 後の自己実体化
+/// だけでは「2 本の未実体化枝を 1 回の演算で合流させた結果、新規ノード
+/// 自身の `interior` が単独で `MAX_FUSED_CHAIN_LEN` を超える」ケース
+/// （fan-in）を防げない——たとえば `lazy_chain_size` 3 の枝を 2 本
+/// `add` で結合すると、push 後に自己実体化しても集める interior は
+/// 既に 7 ノードになってしまう（codex-review PR #406 指摘の反例）。
+/// そのため `Var::add`/`mul` は `push_lazy` を呼ぶ**前**に
+/// `pre_materialize_for_binary_merge` で「合流後サイズが上限を超える
+/// なら大きい方の枝を先に実体化する」ことで、push 時点で常に
+/// `lazy_chain_size ≤ MAX_FUSED_CHAIN_LEN` に収まることを保証する。
+///
+/// 以上 2 段の適用により、本関数が呼ばれた時点で `id` を起点とする
+/// 未実体化 elementwise 連結成分（`interior`）の distinct ノード数は
+/// 常に `lazy_chain_size`（したがって `MAX_FUSED_CHAIN_LEN`）以下で
+/// 有界であり（各ノードは push 時点で上限以下だったものしか未実体化の
+/// まま残らない。diamond 型 DAG による重複カウントは上限判定を安全側
+/// 〈早期実体化〉に倒すのみでこの上界を破らない）、下記 `node_index`
+/// の線形探索（interior 数 n に対し構築コスト O(n²)）も定数上限で
+/// 有界化されている。
 fn build_lazy_plan(
     nodes: &[TapeNode],
     id: NodeId,
@@ -409,6 +549,21 @@ fn build_lazy_plan(
         }
     }
     interior.reverse(); // 発生順（トポロジカル順）へ揃える
+
+    // push 時上限適用（#404。codex-review PR #406 の P1 是正で
+    // `lazy_chain_size`〈総和ベース〉へ再設計）の不変条件を防御的に
+    // 検査する（本番経路では panic させないため debug_assert に限る。
+    // `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+    // fan-in を含むどの部分グラフでも distinct interior 数は
+    // `lazy_chain_size`（総和ベース。diamond 型 DAG による重複カウントは
+    // 安全側の過大評価）以下であり、二項演算は `pre_materialize_for_
+    // binary_merge` の事前実体化により push 時点で `lazy_chain_size` が
+    // 常に `MAX_FUSED_CHAIN_LEN` 以下に収まるため、interior は常に
+    // `MAX_FUSED_CHAIN_LEN` 以下で有界となる。
+    debug_assert!(
+        interior.len() <= MAX_FUSED_CHAIN_LEN,
+        "build_lazy_plan: interior が push 時上限適用（#404）の不変条件を超えた（契約違反）"
+    );
 
     let leaf_count = leaf_order.len();
     let node_index = |n: usize, interior: &[usize]| -> usize {
