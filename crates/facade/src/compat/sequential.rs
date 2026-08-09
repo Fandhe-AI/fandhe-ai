@@ -179,27 +179,41 @@ impl Sequential {
     /// optimizer（`Sgd::step`/`AdamW::step`）が返した更新後テンソル列を
     /// [`Sequential::trainable_parameters`] と同じ順序契約で各 `Linear`
     /// 層へ書き戻す。内部で `Linear::from_parameters`（`autodiff::nn::linear`）
-    /// により層を再構築するため、compat 層自身は shape 検証ロジックを
-    /// 重複実装しない（REQ-9「薄いラッパーに徹する」）。
+    /// により層を再構築するため、compat 層自身は新パラメータ単体の内部
+    /// 整合性検証ロジックを重複実装しない（REQ-9「薄いラッパーに徹する」）。
+    /// ただし**置換前の層 shape との一致検証**（次段落）は
+    /// `Linear::from_parameters` の責務範囲外（層の存在を知らない）なので、
+    /// `apply_parameters` 自身の契約として本メソッドが担う（#426）。
     ///
-    /// **`Linear::from_parameters` が検証する範囲（それ以上は検証しない）**:
-    /// 検証は新しい `weight`/`bias` 単体の内部整合性（`weight` が rank 2・
-    /// `weight.shape()[0] > 0`・`bias` を渡す場合は `bias.shape() ==
-    /// [weight.shape()[1]]`）に限られ、**置換前の層の shape や隣接層との
-    /// 整合性とは比較しない**（`autodiff::nn::linear::Linear::from_parameters`
-    /// docstring 参照）。したがって例えば `in_features`/`out_features` を
-    /// 変えてしまう更新（optimizer 側のバグ等）は `apply_parameters` 自身
-    /// ではエラーにならず、後続の `forward`（`matmul` の shape 不整合）で
-    /// 初めて顕在化する。
+    /// **置換前 shape との完全一致検証（#426。codex-review PR #420 P2 是正）**:
+    /// 1 パス目で `Linear::from_parameters` を呼ぶ前に、各層の新
+    /// `weight.shape()` が置換前の `weight.shape()` と完全一致することを
+    /// 検査する（不一致なら層序数・expected/actual を含む
+    /// `AutodiffError::InvalidArgument`）。bias 側の置換前一致は独立検査
+    /// せず、`Linear::from_parameters` の bias 検証（`bias.shape() ==
+    /// [weight.shape()[1]]`）に委譲する: weight が置換前と完全一致した
+    /// 状態でこの bias 検証が通れば、bias の out_features 側も自動的に
+    /// 置換前と一致するため（REQ-9「薄いラッパーに徹する」。独立実装は
+    /// しない）。
+    ///
+    /// **層間整合は本検証に内包される**: 層 i の out_features と層 i+1 の
+    /// in_features の整合は「置換前モデルが満たしていた水準」を shape 非
+    /// 変更の更新が破り得ないことにより、置換前 shape との一致検証へ
+    /// 帰着する。したがって隣接層比較を独立実装しない。**この検証により
+    /// `apply_parameters` は shape を変えない optimizer 更新専用の契約と
+    /// なる**: 層幅を変える意図的な「リサイズ」用途は本メソッドのサポート
+    /// 対象外（そのような用途が必要になった場合は別 API として設計する）。
     ///
     /// # エラー
     /// - `updated` の要素数が `trainable_parameters()` の件数と不一致
     ///   → `AutodiffError::InvalidArgument`（fail-closed。位置対応契約が
     ///   崩れたまま一部の層だけ更新して黙って続行しない。`.claude/rules/
     ///   security.md` A03）
-    /// - 個々のテンソルが上記の内部整合性検証に反する（例: bias の shape
-    ///   が対応する weight の out_features と食い違う）→
-    ///   `Linear::from_parameters` 由来の `AutodiffError::Shape`
+    /// - 新しい `weight` の shape が置換前の同一層の `weight` の shape と
+    ///   不一致 → `AutodiffError::InvalidArgument`（#426。上記参照）
+    /// - 個々のテンソルが `Linear::from_parameters` の内部整合性検証に
+    ///   反する（例: bias の shape が対応する weight の out_features と
+    ///   食い違う）→ `Linear::from_parameters` 由来の `AutodiffError::Shape`
     ///
     /// **アトミック性（two-pass）**: `updated` は 1 パス目で全層分を検証込みで
     /// `Linear::from_parameters` に通し、実際の代入（`self.layers` への
@@ -210,7 +224,8 @@ impl Sequential {
     /// （呼び出し側は `Err` を受け取るにもかかわらず一部だけ更新されて
     /// 見える。fail-closed 違反。`.claude/rules/security.md` A03。
     /// review 指摘 #294）。two-pass にすることで、エラー時は呼び出し前の
-    /// 状態を完全に維持する。
+    /// 状態を完全に維持する。#426 の shape 検証も同じ 1 パス目（代入前）に
+    /// 置くため、この不変条件は変わらない。
     pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
         // trainable_parameters() と同じ順序（層の追加順）で学習可能層への
         // 可変参照を先に集める。まだ何も書き換えない。
@@ -223,7 +238,7 @@ impl Sequential {
         let mut updated = updated.into_iter();
         // 1 パス目: 検証込みで新しい Linear を全層分構築する（代入は未実施）。
         let mut rebuilt = Vec::with_capacity(linears.len());
-        for linear in &linears {
+        for (layer_index, linear) in linears.iter().enumerate() {
             let has_bias = linear.bias().is_some();
             let new_weight = updated.next().ok_or_else(|| {
                 AutodiffError::InvalidArgument(
@@ -232,6 +247,18 @@ impl Sequential {
                         .to_string(),
                 )
             })?;
+            // #426: 置換前 shape との完全一致検証（層間整合を内包する設計。
+            // メソッド doc 参照）。`Linear::from_parameters` 呼び出し前に
+            // 行い、shape が変わる更新を fail-closed で拒否する。
+            let expected_shape = linear.weight().shape();
+            if new_weight.shape() != expected_shape {
+                return Err(AutodiffError::InvalidArgument(format!(
+                    "Sequential::apply_parameters: layer {layer_index} weight shape changed \
+                     from {expected_shape:?} to {:?} (apply_parameters only supports \
+                     shape-preserving updates; #426)",
+                    new_weight.shape()
+                )));
+            }
             let new_bias = if has_bias {
                 Some(updated.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
@@ -589,8 +616,10 @@ mod tests {
         // weight は rank 2 の妥当な shape（[4, 3]）だが、bias の shape が
         // weight.shape()[1]（out_features=3）と食い違う（[5]）ケース。
         // `Linear::from_parameters` の bias 検証（`autodiff::nn::linear`）
-        // がこれを拒否することを確認する（`apply_parameters` は
-        // 検証ロジックを重複実装せず委譲するだけ、という設計の裏付け）。
+        // がこれを拒否することを確認する（`apply_parameters` は新パラメータ
+        // 単体の内部整合性検証を重複実装せず委譲する、という設計の裏付け。
+        // 置換前 shape との一致検証〈#426〉は本テストの weight 側では
+        // 通過するため、ここで拒否されるのは委譲先の bias 検証由来）。
         let weight = Tensor::new(vec![0.0f32; 12], &[4, 3]).unwrap();
         let bad_bias = Tensor::new(vec![0.0f32; 5], &[5]).unwrap();
         let err = model.apply_parameters(vec![weight, bad_bias]).unwrap_err();
@@ -701,6 +730,95 @@ mod tests {
         assert!(matches!(err, AutodiffError::Shape(_)));
 
         // 1 層目を含め全パラメータがエラー前の値のまま残っていること。
+        let after_params = model.trainable_parameters();
+        assert_eq!(original_params.len(), after_params.len());
+        for (before, after) in original_params.iter().zip(after_params.iter()) {
+            assert_eq!(dense_vec(before), dense_vec(after));
+        }
+    }
+
+    // =================================================================
+    // #426: apply_parameters の置換前 shape 一致検証
+    // =================================================================
+
+    #[test]
+    fn apply_parameters_rejects_weight_shape_change() {
+        // 新 weight（[3, 3]）は `Linear::from_parameters` の単体検証
+        // （rank 2・in_features > 0・bias 整合）は通過するが、置換前の
+        // weight shape（[4, 3]）とは一致しない。#426 の検証がこれを
+        // 拒否し、モデルは不変のまま残ることを確認する。
+        let mut model = Sequential::new().add_linear(4, 3, SEED1).unwrap();
+        let original_params: Vec<Tensor<f32>> =
+            model.trainable_parameters().into_iter().cloned().collect();
+
+        let new_weight = Tensor::new(vec![0.0f32; 9], &[3, 3]).unwrap();
+        let new_bias = Tensor::new(vec![0.0f32; 3], &[3]).unwrap();
+        let err = model
+            .apply_parameters(vec![new_weight, new_bias])
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let after_params = model.trainable_parameters();
+        assert_eq!(original_params.len(), after_params.len());
+        for (before, after) in original_params.iter().zip(after_params.iter()) {
+            assert_eq!(dense_vec(before), dense_vec(after));
+        }
+    }
+
+    #[test]
+    fn apply_parameters_rejects_interlayer_consistent_resize() {
+        // 層間整合（層 1 の out_features == 層 2 の in_features）は
+        // 保たれているが、置換前の層幅（2→3→1）自体を変える更新
+        // （2→4→1）を渡すケース。#426 の設計判断
+        // （「層間整合は置換前 shape 一致に内包される。リサイズは非
+        // サポート」）どおり拒否されることを固定する。
+        let mut model = Sequential::new()
+            .add_linear(2, 3, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(3, 1, SEED2)
+            .unwrap();
+
+        let l1_weight = Tensor::new(vec![0.0f32; 8], &[2, 4]).unwrap();
+        let l1_bias = Tensor::new(vec![0.0f32; 4], &[4]).unwrap();
+        let l2_weight = Tensor::new(vec![0.0f32; 4], &[4, 1]).unwrap();
+        let l2_bias = Tensor::new(vec![0.0f32; 1], &[1]).unwrap();
+
+        let err = model
+            .apply_parameters(vec![l1_weight, l1_bias, l2_weight, l2_bias])
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    #[test]
+    fn apply_parameters_leaves_model_unchanged_on_mid_sequence_weight_shape_error() {
+        // #426 の two-pass 非退行確認: 2 層目の weight shape のみ不一致に
+        // した場合でも、1 層目（先に走査される層）を含む全パラメータが
+        // エラー前の値のまま保持されることを確認する
+        // （既存 `..._on_mid_sequence_shape_error` と同型。#294 の
+        // 設計不変条件が #426 の検証にも及ぶことの回帰テスト）。
+        let mut model = Sequential::new()
+            .add_linear(2, 3, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(3, 1, SEED2)
+            .unwrap();
+
+        let original_params: Vec<Tensor<f32>> =
+            model.trainable_parameters().into_iter().cloned().collect();
+
+        // 1 層目（weight, bias）は妥当な shape、2 層目の weight のみ
+        // 置換前 shape（[3, 1]）と食い違う shape（[3, 2]）にする。
+        let l1_weight = Tensor::new(vec![9.0f32; 6], &[2, 3]).unwrap();
+        let l1_bias = Tensor::new(vec![9.0f32; 3], &[3]).unwrap();
+        let l2_weight = Tensor::new(vec![9.0f32; 6], &[3, 2]).unwrap();
+        let l2_bias = Tensor::new(vec![9.0f32; 2], &[2]).unwrap();
+
+        let err = model
+            .apply_parameters(vec![l1_weight, l1_bias, l2_weight, l2_bias])
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
         let after_params = model.trainable_parameters();
         assert_eq!(original_params.len(), after_params.len());
         for (before, after) in original_params.iter().zip(after_params.iter()) {
