@@ -42,6 +42,14 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
     `crates/autodiff/src/nn/activation.rs` 冒頭コメント）・GELU 等の
     追加活性化関数（必要になった時点で後続イシューに切り出す）
   - pandas 等、numpy／Keras 以外の Python ライブラリとの互換
+  - `amax`/`max` 縮約 API（PyTorch `torch.amax` 相当）は対象外。
+    `crates/autodiff/src/grad.rs` の `max_vjp` は同値タイ発生時「最初
+    に現れる最大要素 1 箇所のみ」へ勾配を伝播する先勝ち決定的挙動を
+    採用しており、PyTorch `amax` の均等分配とは異なる（PoC-v2-2 の
+    ビット一致決定性方針との整合を優先した設計判断。#224 で再確認
+    済み・変更なし）。compat／facade（REQ-9 追記・#52）の公開面に
+    `amax` 相当の縮約 API を追加する段階になった場合にのみ、PyTorch
+    互換（均等分配）の要否を改めて判断する
 - 対象外要望が生じた場合の受け皿は 2 通り。
   - 実装リポ側で追跡が完結する事項: `.claude/rules/out-of-scope-tracking.md`
     の規約に沿って Issue で追跡する
