@@ -55,7 +55,10 @@
 //! 構築経路（`from_segment`）を実際に呼ぶ将来の利用者が現れるまで残す
 //! 設計判断とする。`plan` モジュールの公開 DTO・`FusionPlan::from_ops` は
 //! `backend-cpu`（`run_fused` 経由）・`autodiff`（`tape.rs`）から実際に
-//! 使用されるため dead_code 対象外。
+//! 使用されるため dead_code 対象外。`detect::MAX_FUSED_CHAIN_LEN` も
+//! `autodiff::tape` の push 時上限適用（#404）が参照する単一真実源と
+//! なったため dead_code 対象外（`detect_fusion` 自体は未結線のまま
+//! dead_code スコープに残る）。
 
 #![allow(dead_code)]
 // `FusionGraph`／`detect_fusion`／`FusionPlan::from_segment` は上記のとおり
@@ -68,9 +71,12 @@ mod graph;
 mod plan;
 
 pub(crate) use detect::{
-    FallbackReason, FusionDecision, FusionSegment, MAX_FUSED_CHAIN_LEN, MIN_FUSED_CHAIN_LEN,
-    detect_fusion,
+    FallbackReason, FusionDecision, FusionSegment, MIN_FUSED_CHAIN_LEN, detect_fusion,
 };
+// `autodiff::tape` の push 時上限適用（#404）が参照する単一真実源
+// として `pub` 昇格（`detect.rs` の doc comment 参照）。クレートルート
+// （`lib.rs`）で再 re-export する。
+pub use detect::MAX_FUSED_CHAIN_LEN;
 pub(crate) use graph::{
     FusionGraph, FusionGraphError, FusionNode, FusionNodeId, FusionOp, NodeMeta,
 };

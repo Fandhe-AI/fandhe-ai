@@ -23,7 +23,9 @@
 use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tensor_core::{BackendError, BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+use tensor_core::{
+    BackendError, BackendOps, DType, FusedOpKind, FusionPlan, MAX_FUSED_CHAIN_LEN, Tensor,
+};
 
 use crate::error::AutodiffError;
 
@@ -163,11 +165,21 @@ impl Op {
 /// 即座に埋める。`OnceCell::get_or_init`／`set` はいずれも `&self`
 /// （共有参照）で呼べるため、`RefCell<Vec<TapeNode>>` の `borrow()`
 /// （共有借用）だけで埋められる。
+///
+/// `lazy_depth`（#404・設計書 §3.5.4）: 遅延 elementwise 連鎖の
+/// push 時点での段数。`push_eager`（実体化済みノード）は常に 0。
+/// `push_lazy` は入力ノードの**実効 depth**（入力が実体化済みなら 0、
+/// 未実体化なら格納済み `lazy_depth`）の最大値 + 1 を格納する
+/// （`Tape::push_lazy` のドキュメント参照）。`build_lazy_plan` 呼び出し
+/// 時点では常に「push 時に上限未満だった」ノードのみが未実体化のまま
+/// 残るため、interior は `MAX_FUSED_CHAIN_LEN` 未満で有界になる
+/// （不変条件。同関数のドキュメント参照）。
 #[derive(Debug)]
 pub(crate) struct TapeNode {
     pub(crate) op: Op,
     pub(crate) shape: Vec<usize>,
     pub(crate) value: OnceCell<Tensor<f32>>,
+    pub(crate) lazy_depth: usize,
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
@@ -301,6 +313,7 @@ impl Tape {
             op,
             shape,
             value: OnceCell::from(value),
+            lazy_depth: 0,
         });
         id
     }
@@ -311,16 +324,60 @@ impl Tape {
     /// 主要因。`docs/fusion-graph-design.md` §3.5.1）。`shape` は構造的に
     /// 確定済みの出力 shape（呼び出し元が `broadcast_shape` 等で計算
     /// 済み）を渡す。
-    pub(crate) fn push_lazy(&self, op: Op, shape: Vec<usize>) -> NodeId {
+    ///
+    /// **連鎖長上限適用（#404・設計書 §3.5.4）**: 戻り値の第 2 要素は
+    /// 「新規ノードの `lazy_depth` が `MAX_FUSED_CHAIN_LEN` 以上に達した
+    /// か」を表す。`true` の場合、呼び出し元（`Var::add`/`mul`/`relu`/
+    /// `exp`/`tanh`）は返った `NodeId` を層 1（fallible。`add`/`mul`）
+    /// または層 2（非 fallible。`relu`/`exp`/`tanh`）で**その場**実体化
+    /// する契約（「上限到達時点でその場の演算を実体化してから連鎖を
+    /// 再開する」）。自己実体化により以後このノードは
+    /// `value.get().is_some()` となるため、[`Tape::effective_depth`] は
+    /// これを 0 として扱い、連鎖のリセットが状態更新なしで自然に成立
+    /// する。
+    pub(crate) fn push_lazy(&self, op: Op, shape: Vec<usize>) -> (NodeId, bool) {
         debug_assert!(op.is_lazy_elementwise());
         let mut nodes = self.nodes.borrow_mut();
+        let depth = Tape::effective_depth(&nodes, &op);
+        let at_limit = depth >= MAX_FUSED_CHAIN_LEN;
         let id = NodeId(nodes.len());
         nodes.push(TapeNode {
             op,
             shape,
             value: OnceCell::new(),
+            lazy_depth: depth,
         });
-        id
+        (id, at_limit)
+    }
+
+    /// `push_lazy` が新規ノードに割り当てる `lazy_depth` を、入力
+    /// ノードの**実効 depth**（実体化済みなら 0、未実体化なら格納済み
+    /// `lazy_depth`）の最大値 + 1 として計算する（#404・設計書 §3.5.4）。
+    ///
+    /// **過大評価は安全側**: 途中ノードが `push_lazy` 後に別経路
+    /// （`Var::value` 等）で実体化されても格納済み `lazy_depth` はその
+    /// 場では更新しない。そのため後続ノードの depth 計算が実際より
+    /// 大きくなる場合があるが、これは「早めに自己実体化する」方向の
+    /// 誤差であり融合機会をわずかに減らすのみで正しさには影響しない
+    /// （実装計画 §2「連鎖長（段数）の定義と追跡」参照）。
+    fn effective_depth(nodes: &[TapeNode], op: &Op) -> usize {
+        let input_depth = |id: NodeId| -> usize {
+            let node = &nodes[id.0];
+            if node.value.get().is_some() {
+                0
+            } else {
+                node.lazy_depth
+            }
+        };
+        let max_input_depth = match op {
+            Op::Add(a, b) | Op::Mul(a, b) => input_depth(*a).max(input_depth(*b)),
+            Op::Relu(a) | Op::Exp(a) | Op::Tanh(a) => input_depth(*a),
+            // `push_lazy` は `debug_assert!(op.is_lazy_elementwise())` に
+            // より elementwise 5 演算専用。到達しない分岐だが `match` の
+            // 網羅性のため安全側で 0 を返す（本番経路 panic 禁止方針）。
+            _ => 0,
+        };
+        max_input_depth + 1
     }
 }
 
@@ -344,18 +401,20 @@ impl Tape {
 /// fusion-graph-design.md` §3.5.1「走査順が既に発生順トポロジカル順で
 /// あること」）: `id.0` から `0` へ向けた降順の単純な線形スキャンだけで
 /// 「参照済みノードをそれより手前で必ず処理し終えている」ことが保証
-/// される。**連鎖長上限（設計書 §3.2 (d)・§3.5.4）は本実装では適用しない
-/// （scope reduction。#164 実装ノート）**: `push_lazy` 時点でのその場
-/// 実体化による上限適用は追加の状態追跡を要する。
+/// される。
 ///
-/// `#167`（`CpuBackendOps::run_fused` を融合カーネルへ結線。コミット
-/// 8e2981f）で「`run_fused` が常に `Unsupported`」という前提が崩れた
-/// 後も、本関数への上限適用はまだ実装していない — 深い／長い
-/// elementwise 連鎖は無制限に単一の `FusionPlan` へ融合され、下記
-/// `node_index` の線形探索により連鎖長 n に対し構築コストが O(n²) に
-/// なる。ドキュメント（`docs/kernel-fusion.md` §3 表 5 行目）は本関数の
-/// 実態（未実装）に合わせて記述済み。上限適用の実装自体は
-/// `out-of-scope-tracking.md` の手順に従い #404 で追跡する。
+/// **連鎖長上限は push 時点で適用済み（#404・設計書 §3.5.4）**:
+/// `Tape::push_lazy` が新規ノードの `lazy_depth` を計算し、
+/// `MAX_FUSED_CHAIN_LEN`（= 6）に到達した時点で呼び出し元（`Var::add`/
+/// `mul`/`relu`/`exp`/`tanh`）がそのノードをその場で自己実体化する
+/// （層 1／層 2。`var.rs` 参照）。そのため本関数が呼ばれた時点で `id`
+/// を起点とする未実体化 elementwise 連結成分（`interior`）のノード数は
+/// 常に `MAX_FUSED_CHAIN_LEN` 未満で有界であり（各ノードは push 時点で
+/// 上限未満だったものしか未実体化のまま残らない）、下記 `node_index`
+/// の線形探索（連鎖長 n に対し構築コスト O(n²)）も定数上限で有界化
+/// されている。fan-out を伴う二分木状の部分グラフでは `interior` の
+/// ノード数が depth を超えうる（depth d に対し最大 2^d − 1 ノード）が、
+/// d 自体が `MAX_FUSED_CHAIN_LEN` 未満で有界なため構造的に発散しない。
 fn build_lazy_plan(
     nodes: &[TapeNode],
     id: NodeId,
@@ -409,6 +468,17 @@ fn build_lazy_plan(
         }
     }
     interior.reverse(); // 発生順（トポロジカル順）へ揃える
+
+    // push 時上限適用（#404）の不変条件を防御的に検査する
+    // （本番経路では panic させないため debug_assert に限る。
+    // `.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
+    // fan-out を伴う二分木状の部分グラフでは depth d に対し最大
+    // 2^d − 1 ノードまで interior が膨らみうるが、d 自体が
+    // `MAX_FUSED_CHAIN_LEN` 未満で有界なため上限は定数で抑えられる。
+    debug_assert!(
+        interior.len() < (1usize << MAX_FUSED_CHAIN_LEN),
+        "build_lazy_plan: interior が push 時上限適用（#404）の不変条件を超えた（契約違反）"
+    );
 
     let leaf_count = leaf_order.len();
     let node_index = |n: usize, interior: &[usize]| -> usize {

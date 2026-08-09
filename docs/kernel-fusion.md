@@ -61,9 +61,11 @@
     分断する（§3.2 (a)(b)）。
   - 各ノードの `NodeMeta.contiguous == true`（transpose／broadcast view
     を含まない）こと（§2.3・§2.1 の非融合フォールバック判定）。
-  - 連鎖長が 4〜6 段の上限に収まること（§3.2 (d)。**設計上の想定であり、
-    `crates/autodiff/src/tape.rs::build_lazy_plan` では未実装**。上限
-    適用の実装は #404 で追跡する。詳細は §3 表 5 行目を参照）。
+  - 連鎖長が 4〜6 段の上限に収まること（§3.2 (d)。`Tape::push_lazy`
+    （`crates/autodiff/src/tape.rs`）が push 時点で `lazy_depth`（新規
+    ノードの連鎖段数）を計算し、`tensor_core::MAX_FUSED_CHAIN_LEN`
+    （= 6）到達時点でその場の演算を実体化してから連鎖を再開する
+    **実装済み**（#404）。詳細は §3 表 5 行目を参照）。
   - `dtype` は `DType::F32` 固定（`BackendOps` の現行スコープに合わせる。
     §2.1・§2.3）。f16 融合は §4 の未決事項。
 - **利用者の記述形との対応**: 独立した複数回の公開 `Var` 呼び出し
@@ -117,7 +119,7 @@ v1 PoC-9（Metal 実機、Burn/CubeCL 前提）の実測知見に基づく判断
 | 2 | matmul を挟む連鎖 | `gemm` ノードで融合セグメントが分断される（GEMM 本体は §2.2 の epilogue 融合対象だが、matmul をまたいだ elementwise 連鎖全体の融合ではない） | `docs/fusion-graph-design.md` §3.2 (b)。PoC-9 `ew_matmul_ew`（matmul 前後は個別カーネルのまま） |
 | 3 | softmax 単体・attention 系連鎖 | 融合機構の対象外（softmax は組込み複合演算として別実装であり、本融合 IR の `FusionOp` enum に含まれない） | REQ-12 受け入れ基準（`docs/spec/04-requirements.md:255`）。PoC-9 `softmax`・`attention_chain`（融合の影響をほぼ受けない、または部分的） |
 | 4 | transpose 混在連鎖 | `NodeMeta.contiguous == false` を検出した時点で融合セグメントを打ち切り、非融合フォールバックへ倒す（初期スコープでは transpose を融合対象に含めない）。**実測（#167、5 回計測の中央値）**: 融合条件（`run_fused` を試みて `Unsupported` で失敗 → per-op フォールバック再実行の 2 段経路）と非融合条件（最初から per-op 経路のみ）の速度比中央値は 0.981x（ほぼ互角）。5 回のレンジは 0.865〜1.581x と QEMU 仮想 CPU のノイズで大きくばらつくため、フォールバック試行コストは実測上ノイズに埋もれる程度であり明確な悪化とは言えない（当初予測の「速度比 ≈ 1.0」を裏付ける結果。計測条件・5 回分の内訳は `docs/perf/cpu-elementwise-fusion-effect.md` §5 を参照） | `docs/fusion-graph-design.md` §1「transpose を挟む連鎖は融合しない」・§2.3。実測: `docs/perf/cpu-elementwise-fusion-effect.md` §5 |
-| 5 | 連鎖長が 4〜6 段の上限を超える | **設計上は**上限到達時点でその場の演算を実体化してから連鎖を再開する想定だが、`crates/autodiff/src/tape.rs::build_lazy_plan`（ライブで実行される遅延評価経路）ではこの上限適用ロジックが未実装（scope reduction。#164 実装ノート）。`tensor-core::fusion::detect::MAX_FUSED_CHAIN_LEN` は `detect_fusion`／`FusionGraph` 経由でのみ参照され、autodiff の遅延評価パスからは呼ばれない dead code（`#[allow(dead_code)]` 付き）。現状は連鎖長に上限なく単一 `FusionPlan` へ融合されるため、`build_lazy_plan` 内 `node_index` の線形探索により連鎖長 n に対し構築コストが O(n²) になる。実装は #404 で追跡する | `docs/fusion-graph-design.md` §3.2 (d)。実装ギャップの検出は #167 ブランチの Review、追跡は #404 |
+| 5 | 連鎖長が 4〜6 段の上限を超える | 上限到達時点でその場の演算を実体化してから連鎖を再開する（実装済み・#404）。`Tape::push_lazy`（`crates/autodiff/src/tape.rs`）が新規ノードの `lazy_depth`（入力の実効 depth の最大値 + 1）を計算し、`tensor_core::MAX_FUSED_CHAIN_LEN`（= 6。`crates/tensor-core/src/fusion/detect.rs` を単一真実源とし遅延評価経路と結線済み）到達時に呼び出し元（`Var::add`/`mul`/`relu`/`exp`/`tanh`）がその場実体化する。以後このノードは実体化済み扱いとなり連鎖のカウントが自然にリセットされるため、`build_lazy_plan` が構築する `interior` は常に上限未満で有界（`node_index` の線形探索コストも定数上限で抑えられる） | `docs/fusion-graph-design.md` §3.2 (d)・§3.5.4。実装は #404 |
 | 6 | backward（VJP）の勾配式計算 | `grad.rs::vjp` が計算する勾配式そのもの（例: `tanh` の VJP `grad * (1 - y * y)`）は融合 IR に記録されず、常に具体 `Tensor` として直接計算される。融合されるのは forward が記録した elementwise 遅延グラフを `Tape::backward` が読み出す箇所のみ | `docs/fusion-graph-design.md` §3.3「backward（VJP）は融合対象外」 |
 
 ### v1 PoC-9 実測の位置づけ

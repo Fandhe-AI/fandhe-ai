@@ -111,7 +111,9 @@ pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use element::Element;
 pub use error::ShapeError;
-pub use fusion::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError};
+// `MAX_FUSED_CHAIN_LEN`（#404）: `autodiff::tape` の push 時上限適用が
+// 参照する単一真実源（`fusion/detect.rs` の doc comment 参照）。
+pub use fusion::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_FUSED_CHAIN_LEN};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
