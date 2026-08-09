@@ -662,6 +662,63 @@ fn run_probe_once(
     run_probe_once_with_timeout(config, cache_dir, PROBE_TIMEOUT)
 }
 
+/// `JoinHandle::join` が返す `Err` payload（`Box<dyn Any + Send>`）から panic メッセージを
+/// 復元する。`panic!("...")` は `&'static str`、`panic!("{...}")` / `.expect(...)` 等の
+/// フォーマット付き panic は `String` を payload に持つため、この 2 型を優先して試す
+/// （イシュー #415: 従来は `map_err(|_| ...)` で payload を握りつぶし、panic の原因文字列が
+/// 失われていた）。[`join_probe_reader_threads`] から呼ばれる。
+fn panic_payload_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(s) => (*s).to_string(),
+            Err(_) => "（非文字列の panic payload のためメッセージを復元できない）".to_string(),
+        },
+    }
+}
+
+/// probe の stdout / stderr 読み取りスレッド 2 本を非短絡（両方 join し切ってから判定）で
+/// join し、panic 時はメッセージを保全したまま [`StartupError::Io`] へ変換する。
+///
+/// [`run_probe_once_with_timeout`] のタイムアウトなし経路（読み取りが正常に完了した場合）
+/// から呼ばれる。旧実装は `stdout_handle.join()?` が `Err` を返した時点で早期 return し、
+/// (1) panic payload を `map_err(|_| ...)` で捨てて汎用メッセージへ丸め、(2) stderr 側の
+/// ハンドルが join されないまま detach される、という 2 つの問題があった（イシュー #415。
+/// PR #397 `tests/alloc_tracker_serial.rs` L136-139 の「全ハンドル非短絡 join」パターンと
+/// 同型の修正）。
+///
+/// なお、タイムアウト経路（[`run_probe_once_with_timeout`] 内 `timed_out` 分岐）は孫プロセスの
+/// fd 継承により `join` がブロックしうるため意図的に join せず detach する。その方針は本関数の
+/// 対象外であり変更しない。
+fn join_probe_reader_threads(
+    stdout_handle: std::thread::JoinHandle<()>,
+    stderr_handle: std::thread::JoinHandle<()>,
+) -> Result<(), StartupError> {
+    // 先に両方の join を評価し切ってから結果を検査する（1 本目が `Err` でも 2 本目の
+    // join を必ず実行する。短絡すると 2 本目が detach され panic 情報が失われる）。
+    let results = [
+        ("stdout", stdout_handle.join()),
+        ("stderr", stderr_handle.join()),
+    ];
+
+    let messages: Vec<String> = results
+        .into_iter()
+        .filter_map(|(label, result)| match result {
+            Ok(()) => None,
+            Err(payload) => Some(format!(
+                "probe {label} 読み取りスレッドが panic した: {}",
+                panic_payload_message(payload)
+            )),
+        })
+        .collect();
+
+    if messages.is_empty() {
+        Ok(())
+    } else {
+        Err(StartupError::Io(messages.join(" / ")))
+    }
+}
+
 /// [`run_probe_once`] の本体。`timeout` を外部から注入できるようにし、テストが
 /// [`PROBE_TIMEOUT`]（既定 60 秒）を待たずにタイムアウト経路を再現できるようにする
 /// （`tests` モジュール `run_probe_once_rejects_probe_that_hangs_without_output` 参照）。
@@ -780,12 +837,7 @@ fn run_probe_once_with_timeout(
         return Err(StartupError::ProbeTimeout(start.elapsed()));
     }
 
-    stdout_handle
-        .join()
-        .map_err(|_| StartupError::Io("probe stdout 読み取りスレッドが panic した".to_string()))?;
-    stderr_handle
-        .join()
-        .map_err(|_| StartupError::Io("probe stderr 読み取りスレッドが panic した".to_string()))?;
+    join_probe_reader_threads(stdout_handle, stderr_handle)?;
 
     let (stdout_buf, stdout_exceeded) = stdout_result
         .ok_or_else(|| {
@@ -1352,5 +1404,99 @@ mod tests {
         assert_ne!(a, b, "同一ラベルでも呼び出しごとに一意なパスになるはず");
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+    }
+
+    // --- イシュー #415: `join_probe_reader_threads` / `panic_payload_message` の回帰テスト ---
+    //
+    // 意図的に panic するスレッドを生成する。`std::panic::set_hook` は差し替えない
+    // （グローバル状態でテスト並列実行に波及するため。標準の panic ログ出力は許容する）。
+
+    #[test]
+    fn panic_payload_message_recovers_str_and_string_payloads() {
+        let str_payload: Box<dyn std::any::Any + Send> = Box::new("固定文字列 panic");
+        assert_eq!(panic_payload_message(str_payload), "固定文字列 panic");
+
+        let string_payload: Box<dyn std::any::Any + Send> =
+            Box::new(format!("format 付き panic: {}", 42));
+        assert_eq!(
+            panic_payload_message(string_payload),
+            "format 付き panic: 42"
+        );
+
+        // 非文字列 payload（`std::panic::panic_any` 等）はフォールバック文言になる。
+        let other_payload: Box<dyn std::any::Any + Send> = Box::new(42usize);
+        assert_eq!(
+            panic_payload_message(other_payload),
+            "（非文字列の panic payload のためメッセージを復元できない）"
+        );
+    }
+
+    #[test]
+    fn join_probe_reader_threads_preserves_panic_message() {
+        let stdout_handle = std::thread::spawn(|| {
+            panic!("stdout 読み取り側の既知の panic メッセージ");
+        });
+        let stderr_handle = std::thread::spawn(|| {});
+
+        let err = join_probe_reader_threads(stdout_handle, stderr_handle).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("stdout 読み取り側の既知の panic メッセージ"),
+            "panic メッセージが保全されているはず: {message}"
+        );
+    }
+
+    #[test]
+    fn join_probe_reader_threads_joins_both_even_if_first_panics() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        let stderr_completed = Arc::new(AtomicBool::new(false));
+        let stderr_completed_clone = Arc::clone(&stderr_completed);
+
+        let stdout_handle = std::thread::spawn(|| {
+            panic!("stdout 側が先に panic する");
+        });
+        let stderr_handle = std::thread::spawn(move || {
+            // stdout 側の panic 直後に stderr 側が終了してもレースしないよう
+            // 短い sleep を挟んでから完了フラグを立てる。
+            std::thread::sleep(Duration::from_millis(20));
+            stderr_completed_clone.store(true, AtomicOrdering::SeqCst);
+        });
+
+        let _ = join_probe_reader_threads(stdout_handle, stderr_handle);
+
+        assert!(
+            stderr_completed.load(AtomicOrdering::SeqCst),
+            "stdout 側が panic しても stderr 側は detach されず join されているはず"
+        );
+    }
+
+    #[test]
+    fn join_probe_reader_threads_reports_both_panics() {
+        let stdout_handle = std::thread::spawn(|| {
+            panic!("stdout 側の panic メッセージ");
+        });
+        let stderr_handle = std::thread::spawn(|| {
+            panic!("stderr 側の panic メッセージ");
+        });
+
+        let err = join_probe_reader_threads(stdout_handle, stderr_handle).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("stdout 側の panic メッセージ"),
+            "stdout 側の panic メッセージが含まれるはず: {message}"
+        );
+        assert!(
+            message.contains("stderr 側の panic メッセージ"),
+            "stderr 側の panic メッセージも含まれるはず: {message}"
+        );
+    }
+
+    #[test]
+    fn join_probe_reader_threads_succeeds_when_both_complete() {
+        let stdout_handle = std::thread::spawn(|| {});
+        let stderr_handle = std::thread::spawn(|| {});
+        assert!(join_probe_reader_threads(stdout_handle, stderr_handle).is_ok());
     }
 }
