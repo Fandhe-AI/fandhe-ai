@@ -301,15 +301,15 @@ fn unreduce_broadcast(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>
 ///
 /// Issue #224（先勝ち挙動の再確認。compat 層〈REQ-9〉実装時に要再確認
 /// としていた事項）の結論: **本挙動を維持する（変更なし）**。
-/// `autodiff::compat`（TASK-9.2a・#95 で実装済み）の公開面は
-/// `array()`／`Sequential`（Linear・ReLU・Sigmoid・Tanh）に限定され
-/// （`docs/compat-api-scope.md` §1〜2）、`max`/`amax` 相当 API が存在
-/// しないため PyTorch 互換を要求する利用者向け経路が現時点でない。
-/// 均等分配へ変更すると勾配値そのものが変わり上記の決定性方針と衝突
-/// するため、先勝ちを維持する。再検討条件: compat／facade（REQ-9 追
-/// 記・#52）の公開面に `amax` 相当の縮約 API を追加する段階になった
-/// 場合にのみ PyTorch 互換の要否を改めて判断する（`docs/compat-api-scope.md`
-/// にも記録）。
+/// compat 層（TASK-9.2a・#95 で実装。TASK-9.4・#411 で `facade::compat`
+/// へ移設済み）の公開面は `array()`／`Sequential`（Linear・ReLU・
+/// Sigmoid・Tanh）に限定され（`docs/compat-api-scope.md` §1〜2）、
+/// `max`/`amax` 相当 API が存在しないため PyTorch 互換を要求する利用者
+/// 向け経路が現時点でない。均等分配へ変更すると勾配値そのものが変わり
+/// 上記の決定性方針と衝突するため、先勝ちを維持する。再検討条件:
+/// `facade::compat`（REQ-9 追記・#52）の公開面に `amax` 相当の縮約 API を
+/// 追加する段階になった場合にのみ PyTorch 互換の要否を改めて判断する
+/// （`docs/compat-api-scope.md` にも記録）。
 fn max_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,

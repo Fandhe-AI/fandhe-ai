@@ -12,9 +12,11 @@
 //!    直接参照しない構造的境界（REQ-9・`docs/fusion-graph-design.md`
 //!    §3.4「`autodiff` は具体クレートへの依存を一切持たない」）を、
 //!    上位でここに一本化する。
-//! 2. **compat 公開面**（`compat::array`／`compat::Sequential` 相当）:
-//!    TASK-9.4（別イシュー）で本クレートへ移設する。本イシュー時点では
-//!    未実装。
+//! 2. **compat 公開面**（[`compat::array`]／[`compat::Sequential`]）:
+//!    TASK-9.4（イシュー #411）で `autodiff::compat` から本クレートへ
+//!    移設し実装済み。サポート境界の明文化（`facade` が唯一のサポート
+//!    対象公開 API 面であり `tensor-core`／`autodiff`／`backend-*` は
+//!    内部クレート）は `docs/compat-api-scope.md` を参照。
 //!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
@@ -24,9 +26,27 @@
 //! `tensor_core::BackendOps` は本クレートから再エクスポートしない
 //! （`facade::Tape::new_with_ops(ops)` という経路がサポート面に露出すると
 //! 「任意 `BackendOps` 実装を注入できる公開 API を設けない」（REQ-12）と
-//! 矛盾するため。戻り値の `autodiff::Tape` は型名を書かずにメソッド
-//! （`var` 等）を呼べるため利用に支障はない）。この制約は
-//! `tests/api_surface.rs` がソース走査で機械的に固定する。
+//! 矛盾するため）。この制約は `tests/api_surface.rs` がソース走査で
+//! 機械的に固定する。
+//!
+//! **`Tape`（composition root が構築する値）の扱い（codex-review PR #424
+//! P1 是正）**: [`tape`]・[`tape_for`] の戻り値は `autodiff::Tape` を
+//! そのまま返すのではなく、本クレート所有の newtype [`Tape`] でラップする。
+//! `autodiff::Tape` を素通しすると `Tape::new_with_ops` という
+//! `BackendOps` 注入経路が facade 型として到達可能になり REQ-12 と矛盾する
+//! ため、[`Tape`] は [`Tape::var`]／[`Tape::backward`] の 2 メソッドのみを
+//! 再委譲する（構築は [`tape`]／[`tape_for`] 経由のみで、`autodiff::Tape`
+//! の任意構築経路は到達不能なまま）。[`compat::Sequential::forward`]／
+//! [`compat::Sequential::bind`] もこの [`Tape`] 型を引数に取る（旧実装は
+//! `autodiff::Tape` を直に引数へ取っており、内部クレートの型が facade の
+//! 公開シグネチャへ直接露出していた。codex-review 指摘）。
+//!
+//! **`Var`／`Gradients`／`AutodiffError`／`LinearVars`（`autodiff` 由来）・
+//! `Tensor`（`tensor_core` 由来）の扱い**: これらは `BackendOps` 注入の
+//! 迂回経路を持たない値型・エラー型であるため、`facade` の正式な公開契約
+//! として本クレートから再エクスポートする（下記 `pub use`）。
+//! `compat::{array, Sequential}` の公開シグネチャはこの再エクスポート
+//! パス（`crate::{AutodiffError, Tensor}` 等）を使う。
 //!
 //! # `Device::Cuda(_)`／`Device::Metal` の構築規則
 //!
@@ -46,25 +66,73 @@
 //! （`docs/public-api-design.md` §4.1 の未決事項を尊重。
 //! out-of-scope-tracking.md 対象）。
 
-use autodiff::Tape;
 use tensor_core::device::select_from;
 use tensor_core::{BackendOps, DeviceProvider};
 
-// 公開面として再エクスポートする型はこの 2 つのみ（モジュール冒頭
-// 「公開面の設計」参照）。`Tape`・`BackendOps` は意図的に含めない。
-pub use tensor_core::{BackendError, Device};
+/// numpy/Keras 慣習の互換 API 層（compat 公開面。TASK-9.4・#411）。
+/// [`compat::array`]・[`compat::Sequential`] を提供する（詳細はモジュール
+/// doc・`docs/compat-api-scope.md` 参照）。
+pub mod compat;
+
+// 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
+// `autodiff::Tape`（生の型）・`tensor_core::BackendOps` は意図的に含めない
+// （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
+// REQ-12）。`Var`／`Gradients`／`AutodiffError`／`LinearVars`・`Tensor` は
+// 迂回経路を持たない値型・エラー型のため facade の正式な公開契約として
+// 再エクスポートする（codex-review PR #424 P1 是正）。
+pub use autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
+pub use tensor_core::{BackendError, Device, Tensor};
+
+/// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の
+/// newtype ラッパー（codex-review PR #424 P1 是正）。
+///
+/// `autodiff::Tape` をそのまま公開すると `Tape::new_with_ops(ops)`
+/// （任意 `BackendOps` 注入経路）が facade の型として到達可能になり
+/// REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」と
+/// 矛盾する。本型は内部の `autodiff::Tape`（フィールド `0`。`pub(crate)`
+/// のためクレート外から直接構築・分解できない）が持つメソッドのうち
+/// [`Tape::var`]／[`Tape::backward`] のみを再委譲し、それ以外（特に
+/// `new_with_ops`）を到達不能に保つ。構築できるのは [`tape`]／[`tape_for`]
+/// のみ（`pub(crate)` タプルフィールドのため crate 外からのフィールド
+/// アクセス・構築は不能。`tests/api_surface.rs` が機械的に固定する）。
+pub struct Tape(pub(crate) autodiff::Tape);
+
+impl std::fmt::Debug for Tape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 内部の `autodiff::Tape` も同じ理由（`ops` が `Debug` 非実装）で
+        // `finish_non_exhaustive` を使う（`autodiff::tape::Tape` の
+        // `Debug` 実装と同じ方針。`crates/autodiff/src/tape.rs` 参照）。
+        f.debug_struct("Tape").finish_non_exhaustive()
+    }
+}
+
+impl Tape {
+    /// 入力テンソルをテープ上の葉ノード `Var` として登録する
+    /// （`autodiff::Tape::var` への委譲）。
+    pub fn var(&self, tensor: &Tensor<f32>) -> Var<'_> {
+        self.0.var(tensor)
+    }
+
+    /// `loss` から逆伝播し勾配を計算する（`autodiff::Tape::backward`
+    /// への委譲）。
+    pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
+        self.0.backward(loss)
+    }
+}
 
 /// 既定バックエンド（CPU・TASK-2.5 ユーザー承認済み。
-/// `docs/public-api-design.md:429`）で [`autodiff::Tape`] を構築する。
+/// `docs/public-api-design.md:429`）で [`Tape`] を構築する。
 ///
 /// CPU は常に利用可能であるため非 fallible。`CpuBackendOps::new()`
 /// （`run_fused` を `run_fused_elementwise` へオーバーライド済み＝融合
 /// 有効。`crates/backend-cpu/src/ops.rs`）を結線する唯一の入口。
 pub fn tape() -> Tape {
-    Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()))
+    Tape(autodiff::Tape::new_with_ops(Box::new(
+        backend_cpu::CpuBackendOps::new(),
+    )))
 }
 
-/// 指定した [`Device`] へ明示的に結線した [`autodiff::Tape`] を構築する。
+/// 指定した [`Device`] へ明示的に結線した [`Tape`] を構築する。
 ///
 /// 存在しないデバイス・範囲外 ordinal・driver 不在は [`BackendError`]
 /// を返す（fail-fast。本番経路で `panic!`／`unwrap()` しない。
@@ -72,7 +140,7 @@ pub fn tape() -> Tape {
 /// 参照。
 pub fn tape_for(device: Device) -> Result<Tape, BackendError> {
     let ops = resolve_ops(device)?;
-    Ok(Tape::new_with_ops(ops))
+    Ok(Tape(autodiff::Tape::new_with_ops(ops)))
 }
 
 /// `device` に対応する具体 `BackendOps` を解決する（非公開）。

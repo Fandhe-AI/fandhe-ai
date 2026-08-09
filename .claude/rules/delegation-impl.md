@@ -9,7 +9,7 @@
 
 | 対象 | 委譲先 | 補足 |
 |------|--------|------|
-| `Cargo.toml`・workspace 骨格・`crates/tensor-core`・`crates/autodiff`・compat API 層 | core-builder | TASK-1.x・REQ-1・REQ-9〜10 系 |
+| `Cargo.toml`・workspace 骨格・`crates/tensor-core`・`crates/autodiff`・`crates/facade`（composition root・compat API 層。TASK-9.4・#411 で `autodiff::compat` から移設） | core-builder | TASK-1.x・REQ-1・REQ-9〜10 系 |
 | `crates/backend-cpu`・`crates/backend-cuda`・`crates/backend-metal`・数値一致回帰テスト | backend-builder | TASK-2.x・REQ-2・REQ-11〜13 系 |
 | `crates/onnx-interop`（safetensors / prost 自前取り込み） | interop-builder | REQ-7 系 |
 | `crates/guardrail`・`crates/self-repair`・`crates/bench-harness` | runtime-builder | TASK-3.x〜6.x・REQ-3〜6・REQ-8 系 |

@@ -26,6 +26,30 @@ use backend_cpu::CpuBackendOps;
 use backend_cpu::parity::assert_parity;
 use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
+/// `facade::Tape`（newtype）・`autodiff::Tape`（生の型）のいずれからも
+/// `var()` を呼べるようにする、本テストファイル専用のローカル trait
+/// （codex-review PR #424 P1 是正で `facade::tape()` の戻り値型が
+/// `autodiff::Tape` から `facade::Tape` newtype へ変わったことに伴う
+/// 対応。本 trait は facade の公開契約ではなく、単に「融合経路
+/// （`facade::tape()`）と非融合参照実装（`autodiff::Tape::new()`）の
+/// 両方に同じ `run_chain_on` を適用したい」というテストの都合のみで
+/// 導入する）。
+trait VarSource {
+    fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_>;
+}
+
+impl VarSource for facade::Tape {
+    fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_> {
+        self.var(tensor)
+    }
+}
+
+impl VarSource for Tape {
+    fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_> {
+        self.var(tensor)
+    }
+}
+
 /// 決定的な入力値（固定値リテラル。facade へ dev-dep を増やさないため
 /// `bench-harness::Xorshift64Star` 等の乱数ユーティリティは使わず、
 /// 符号混在の代表値を直接列挙する。イシュー #410 実装計画 §3
@@ -39,10 +63,11 @@ fn leaf_b() -> Tensor<f32> {
 }
 
 /// `facade::tape()` 上で `add`→`mul`→`relu`→`exp`→`tanh` の 5 段連鎖を
-/// 実行し、最終 `Var` を返す。
-fn run_chain_on(tape: &Tape) -> Var<'_> {
-    let a = tape.var(&leaf_a());
-    let b = tape.var(&leaf_b());
+/// 実行し、最終 `Var` を返す。[`VarSource`] 経由で `facade::Tape`
+/// （newtype）・`autodiff::Tape`（生の型）の両方に適用できる。
+fn run_chain_on<T: VarSource>(tape: &T) -> Var<'_> {
+    let a = tape.make_var(&leaf_a());
+    let b = tape.make_var(&leaf_b());
     let added = a.add(&b).expect("add: shape 一致");
     let multiplied = added.mul(&a).expect("mul: shape 一致");
     let relued = multiplied.relu();

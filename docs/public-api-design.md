@@ -426,7 +426,7 @@ impl Device {
 
 **サポート境界の宣言（`docs/spec/04-requirements.md:210` の 2026-08-08 追記）**: `facade` が唯一のサポートされる公開 API 面であり、`tensor-core`・`autodiff`・`backend-*` は内部クレート（直接利用は非サポート）である。この宣言により、`autodiff` が `facade` 向けに持つ ops 受け取り構築子（技術上 `pub`）は、サポート外の内部 API であり REQ-12 の「利用者向け融合制御 API」に該当しないと整理する。
 
-**実装状況（イシュー #410・TASK-9.3。2026-08-09 追記）**: 上記 (1) composition root は実装済み（`crates/facade/src/lib.rs`）。公開関数は `facade::tape()`（既定 CPU）・`facade::tape_for(Device) -> Result<Tape, BackendError>`（明示指定）の 2 つのみで、`Tape`・`BackendOps` は再エクスポートしない（`crates/facade/tests/api_surface.rs` が機械的に固定）。`Device::Cuda(_)`／`Device::Metal` の構築規則（下記段落）はこの実装で確定した。(2) compat 公開面は TASK-9.4（別イシュー）へ引き続き引き継ぐ。
+**実装状況（イシュー #410・TASK-9.3。2026-08-09 追記）**: 上記 (1) composition root は実装済み（`crates/facade/src/lib.rs`）。公開関数は `facade::tape()`（既定 CPU）・`facade::tape_for(Device) -> Result<Tape, BackendError>`（明示指定）の 2 つのみで、`Tape`・`BackendOps` は再エクスポートしない（`crates/facade/tests/api_surface.rs` が機械的に固定）。`Device::Cuda(_)`／`Device::Metal` の構築規則（下記段落）はこの実装で確定した。**(2) compat 公開面は TASK-9.4（イシュー #411）で実装済み**（`crates/facade/src/compat/`。旧 `autodiff::compat` からの移設。詳細は下記「互換 API の再改名」節に続く「compat 層の facade 移設」節、および `docs/compat-api-scope.md` §0・§4.2 を参照）。
 
 **承認済み内容と結線の実装場所（本節が定める `Device` 列挙・`Device::available()` による明示選択という契約自体は変更しない）**: 2026-08-08、AskUserQuestion によりユーザーが**承認した内容**は「既定バックエンドを `Device::Cpu`（`backend-cpu` 実装）とすること」である（この一文は変更しない）。**構成上の結論**は、`facade` の composition root（TASK-9.3）が `Device::Cpu` から `backend-cpu` の `CpuBackendOps` を構築し、`autodiff::Tape::new_with_ops(ops: Box<dyn BackendOps + Send>) -> Tape`（性能を伴う経路の公開コンストラクタ。渡された `ops` をそのまま格納する非 fallible 関数。`docs/fusion-graph-design.md` §1。codex-review 第 22 波・PR #403 の P1 是正で `Tape::new(ops)` から改名。無引数の compat 経路 `Tape::new()`／`Tape::default()` は下記「互換 API の別名復元」節参照）へ渡す、という形に確定した。`autodiff` は `Device` 型にも `backend-cpu`／`backend-cuda`／`backend-metal` のいずれの具体クレートにも依存しない。`facade` を経由して構築した `Tape` はすべて CPU 上での融合実行が既定で・無条件に・透過的に効く。承認の記録場所は本節（本段落）および `docs/fusion-graph-design.md` §6.2「既定バックエンドの供給規則」。この承認は「本節が定める `Device` の既定デバイス選択ロジックを実装する」ことを意味しない——`Device::available()` による列挙・明示選択という契約自体は本節のとおり変更しない。**GPU バックエンド（CUDA／Metal）を既定にするかどうかはこの承認の対象外であり、REQ-2 の 27 組再検証後に別途ユーザー承認を得て決定する**（上記「既定選択の方針」の未決事項は継続する）。`facade`（TASK-9.3）は `Device::Cuda(_)`／`Device::Metal` を明示指定された場合の結線も担うが、その具体的な構築規則は TASK-9.3 の実装時にユーザー承認を得たうえで確定する。
 
@@ -447,15 +447,17 @@ let tape = Tape::default();
 let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
 ```
 
-`compat::Sequential::predict` も同様に、性能が必要な経路は `ops: Box<dyn BackendOps + Send>` を渡す `predict_with_ops` を使う（`crates/autodiff/src/compat/sequential.rs` の `predict_with_ops` ドキュメンテーションコメントに同じ根拠を記載済み）:
+`compat::Sequential::predict` も同様に、当時（本節記述時点・`facade` 未実装下）は性能が必要な経路として `ops: Box<dyn BackendOps + Send>` を渡す `predict_with_ops` を使う設計だった:
 
 ```rust
 // 変更前
 let output = model.predict(&input)?;
 
-// 変更後（性能が必要な経路）
+// 変更後（性能が必要な経路。当時の設計。下記「compat 層の facade 移設」節で撤去済み）
 let output = model.predict_with_ops(&input, Box::new(backend_cpu::CpuBackendOps::new()))?;
 ```
+
+**この `predict_with_ops` は TASK-9.4（イシュー #411。2026-08-09 追記）で公開面から撤去した**。詳細は下記「compat 層の facade 移設（TASK-9.4）」節を参照。
 
 **互換 API の別名復元（codex-review 第 19〜21 波・PR #403 の P1 是正。2026-08-08 追記）**: 上記「唯一の解決先である `facade` は未実装」という制約自体は変わらないが、codex-review は「既存の無引数コンストラクタ／`Default`／`predict(&Tensor)` を維持したまま解決するか、互換 API を別名で残すこと」を要求し、ドキュメントのみの正当化（本節上記の記述）では P1 判定を解除しなかった（PR #403 第 19〜21 波で同一指摘が再送された）。実装を精査した結果、`autodiff` は forward 値計算の naive 参照実装（`eval.rs`。`backend-cpu`／`backend-cuda`／`backend-metal` のいずれにも依存しない、クレート内部の暫定 CPU 実装）を既に保有しており（`test_support::TestOps` が `#[cfg(test)]` 限定でこれに委譲する形で先行使用していた）、これを本番ビルドへ昇格させても `tests/architecture_boundaries.rs` の不変条件（具体バックエンドクレート非依存）に抵触しない。したがって以下の compat API を追加した（`crates/autodiff/src/default_ops.rs` が実装。`NaiveOps`）:
 
@@ -466,7 +468,16 @@ let output = model.predict_with_ops(&input, Box::new(backend_cpu::CpuBackendOps:
 
 **互換 API の再改名（codex-review 第 22 波・PR #403 の P1 是正。2026-08-08 追記）**: 上記「互換 API の別名復元」節で追加した `Tape::new(ops)`（ops 必須のまま）＋別名 `Tape::default()` という組み合わせでは、codex-review は「既存の無引数 `Tape::new()` シグネチャそのものを破壊している」という P1 判定を解除しなかった（PR #403 第 22 波で同一指摘が再送された。`Default` の追加は `Tape::new()` という呼び出し式自体のソース互換性を回復しないため）。そこで `Tape::new(ops)` を `Tape::new_with_ops(ops)` へ改名し、`Tape::new()`（無引数）を出荷済みシグネチャのまま compat 入口として復元した。`impl Default for Tape` は `Tape::new()` に委譲する薄いラッパーへ変更した（`Tape::new_with_ops` への直接委譲から変更）。`Sequential::predict`／`predict_with_ops` の命名（無引数版が既定名・明示 `ops` 版が `_with_ops` 接尾辞）と対称になる形に揃えている。
 
-**影響範囲の確認**: `Tape::new_with_ops(ops)`／`Sequential::predict_with_ops`（旧 `predict`）の呼び出し元は `autodiff` クレート自身のテスト・`onnx-interop`／`guardrail`／`self-repair` の学習ループ fixture に限られ、`Tape::new(ops)` → `Tape::new_with_ops(ops)` の改名コミットで全呼び出し元を新シグネチャへ追従済み（`cargo test --workspace` 全 green で確認）。上記の compat API 追加（`Default for Tape`／`Sequential::predict`／無引数 `Tape::new()`）はこれらの呼び出し元に変更を要求しない加算のみの変更である。`facade`（TASK-9.3）実装後は composition root が `Box::new(backend_cpu::CpuBackendOps::new())` に相当する結線を代行し、利用者が直接 `ops` を組み立てる必要はなくなる（本節冒頭「承認済み内容と結線の実装場所」参照）。
+**影響範囲の確認**: `Tape::new_with_ops(ops)` の呼び出し元は `autodiff` クレート自身のテスト・`onnx-interop`／`guardrail`／`self-repair` の学習ループ fixture に限られ、`Tape::new(ops)` → `Tape::new_with_ops(ops)` の改名コミットで全呼び出し元を新シグネチャへ追従済み（`cargo test --workspace` 全 green で確認）。上記の compat API 追加（`Default for Tape`／`Sequential::predict`／無引数 `Tape::new()`）はこれらの呼び出し元に変更を要求しない加算のみの変更である。`facade`（TASK-9.3）実装後は composition root が `Box::new(backend_cpu::CpuBackendOps::new())` に相当する結線を代行し、利用者が直接 `ops` を組み立てる必要はなくなる（本節冒頭「承認済み内容と結線の実装場所」参照）。
+
+**compat 層の facade 移設（TASK-9.4・イシュー #411。2026-08-09 追記）**: 上記の各節は `facade`（TASK-9.3）未実装下での compat 層（`autodiff::compat`）の設計判断を記録したものである。`facade` 実装完了（イシュー #410）を受け、TASK-9.4（#411）で compat 公開面（`compat::array`／`compat::Sequential`）を `autodiff::compat` から `facade::compat`（`crates/facade/src/compat/`）へ移設し、あわせて以下を変更した。
+
+- **`Sequential::predict` の既定結線先を変更**: 旧 `autodiff::compat` 版は `default_ops::naive_ops()`（融合を経ない逐次 `NaiveOps`）へ委譲していたが、`facade::compat` 版は `facade::tape()`（composition root・`CpuBackendOps`・融合有効）へ委譲する。「`facade` 経由なら既定バックエンドが透過的に効く」（本節冒頭「承認済み内容と結線の実装場所」）という方針と、compat 経由の `predict` を初めて整合させた変更である
+- **`predict_with_ops`（任意 `BackendOps` 注入経路）を公開面から撤去**: `facade::compat::Sequential` は `predict_with_ops` を持たない（破壊的変更）。理由は REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」・`crates/facade/tests/api_surface.rs` の機械検査（`pub fn` が `BackendOps` を直接受け取ることを禁止）との整合。ops を明示的に選びたい内部用途は `Sequential::forward(&Tape, &Var)`（`BackendOps` を受け取らない）へ呼び出し元が任意に構築した `Tape` を渡せば足りる
+- **`autodiff` 自身の無引数 compat 経路（`Tape::new()`／`Tape::default()`／`default_ops::NaiveOps`）は変更なし**: これらは `autodiff` クレート単体で「デフォルト値でも動く」ことを保証する経路であり、`facade::compat::Sequential::predict` の結線先変更とは独立に維持する
+- 詳細な設計判断・出典は `docs/compat-api-scope.md` §0（サポート境界）・§4.2（TASK-9.4 移設確定）を正とする（本節は概要のみ）
+- **移行期間中のソース互換シム（codex-review PR #424 P1 是正・2026-08-09 追記）**: `autodiff::compat` モジュール自体の削除は、`autodiff::compat::{array, Sequential, SequentialVars}` を利用する既存コードを互換 shim なしに破壊する破壊的変更だったため、`crates/autodiff/src/compat/` に `#[deprecated]` を付与した非推奨シムとして実装を複製して残した。詳細は `docs/compat-api-scope.md` §4.3 を正とする
+- **`predict_with_ops` の再復元（codex-review PR #424 P1 是正・2 巡目・2026-08-09 追記）**: 上記の非推奨シムから `predict_with_ops` を意図的に除外していたが、REQ-12 が制約するのは 0 節「サポート境界」が定める唯一のサポート対象公開 API 面（`facade`）であり、内部クレート `autodiff` 上の移行期間中シムは対象外という区別を codex-review が P1 として指摘した。`crates/autodiff/src/compat/sequential.rs` へ `predict_with_ops`（`Box<dyn BackendOps + Send>` 引数版）を `#[deprecated]` 付きで復元し、`predict` はこれへ委譲する。`facade::compat::Sequential` 側は引き続き `predict_with_ops` を持たない（476 行目のとおり REQ-12 はここで効く）。詳細は `docs/compat-api-scope.md` §4.4 を正とする
 
 **バージョニング**: 本リポジトリはワークスペース全体で `version = "0.3.0"`（`Cargo.toml`）を用いるが、crates.io 未公開の内部開発版であり、`docs/deps-policy.md`・CI（`deny.toml` の `sources = crates.io 限定`）が示すとおり外部への配布物は存在しない。したがって「正式な破壊的リリース」としてのバージョン切り上げ・移行ガイド配布は該当せず、上記の移行手順を本文書と `docs/fusion-graph-design.md` §1 に記録することが本リポジトリでの等価な措置である。
 

@@ -1,9 +1,5 @@
-//! numpy `np.array` 慣習のテンソル生成入口（TASK-9.2a・#95）。
-//!
-//! **非推奨シム（TASK-9.4・#411）**: 唯一のサポート対象実装は
-//! `facade::compat::array`（`crates/facade/src/compat/array.rs`）。
-//! 本ファイルは移設前の実装を移行期間中のソース互換のためだけに残す
-//! （`compat/mod.rs` モジュール doc 参照）。
+//! numpy `np.array` 慣習のテンソル生成入口（TASK-9.2a・#95。
+//! TASK-9.4・#411 で `autodiff::compat` から本クレートへ移設）。
 //!
 //! `compat::array()` は 1-D/2-D の Rust ネイティブ構造から
 //! `tensor_core::Tensor<f32>` を組み立てるだけの薄いラッパーで、
@@ -14,20 +10,19 @@
 //! `Tensor::new` の要素数積検査だけでは jagged 入力を個別に指摘できない
 //! ため。A03: 外部由来入力を計算前に検証する契約。`.claude/rules/
 //! security.md`）。
+//!
+//! エラー型は `autodiff::AutodiffError` をそのまま使う（compat 層は
+//! `tensor-core`／`autodiff` いずれの pub API のみに依存し、独自の
+//! エラー型を新設しない。REQ-9「薄いラッパーに徹する」）。
+//!
+//! 公開シグネチャは `crate::{AutodiffError, Tensor}`（facade の正式な
+//! 再エクスポート）経由で参照する（codex-review PR #424 P1 是正。
+//! `crate::lib.rs` モジュール doc 参照）。
 
-use tensor_core::Tensor;
-
-use crate::error::AutodiffError;
+use crate::{AutodiffError, Tensor};
 
 /// `compat::array()` が受理する入力の変換 trait。numpy `np.array` の
 /// 「ネストしたリスト/配列から shape を推論する」慣習を模す。
-///
-/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::array::ArrayData` が
-/// 唯一のサポート対象実装（`compat/mod.rs` モジュール doc 参照）。
-#[deprecated(
-    since = "0.0.0",
-    note = "facade::compat::array::ArrayData へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
-)]
 pub trait ArrayData {
     /// 行優先で平坦化したデータ列と shape を返す。jagged 入力はここで
     /// 検証し `AutodiffError::InvalidArgument` を返す（モジュール doc
@@ -36,7 +31,6 @@ pub trait ArrayData {
 }
 
 /// 1-D: `Vec<f32>` → shape `[n]`。
-#[allow(deprecated)] // ArrayData 自体が非推奨シム（本ファイル冒頭 doc 参照）。
 impl ArrayData for Vec<f32> {
     fn into_array_data(self) -> Result<(Vec<f32>, Vec<usize>), AutodiffError> {
         let n = self.len();
@@ -45,7 +39,6 @@ impl ArrayData for Vec<f32> {
 }
 
 /// 1-D: `&[f32]` → shape `[n]`（借用入力向け。複製して所有データにする）。
-#[allow(deprecated)]
 impl ArrayData for &[f32] {
     fn into_array_data(self) -> Result<(Vec<f32>, Vec<usize>), AutodiffError> {
         Ok((self.to_vec(), vec![self.len()]))
@@ -53,7 +46,6 @@ impl ArrayData for &[f32] {
 }
 
 /// 1-D 配列リテラル `[f32; N]` → shape `[N]`。
-#[allow(deprecated)]
 impl<const N: usize> ArrayData for [f32; N] {
     fn into_array_data(self) -> Result<(Vec<f32>, Vec<usize>), AutodiffError> {
         Ok((self.to_vec(), vec![N]))
@@ -62,7 +54,6 @@ impl<const N: usize> ArrayData for [f32; N] {
 
 /// 2-D: `Vec<Vec<f32>>` → 行優先で平坦化し shape `[rows, cols]`。
 /// 行長不一致（jagged）は計算前に検出する（モジュール doc 参照）。
-#[allow(deprecated)]
 impl ArrayData for Vec<Vec<f32>> {
     fn into_array_data(self) -> Result<(Vec<f32>, Vec<usize>), AutodiffError> {
         let rows = self.len();
@@ -90,7 +81,6 @@ impl ArrayData for Vec<Vec<f32>> {
 
 /// 2-D 配列リテラル `[[f32; N]; M]` → shape `[M, N]`（固定長のため
 /// 行長は型で保証され jagged になりえない。検証不要）。
-#[allow(deprecated)]
 impl<const M: usize, const N: usize> ArrayData for [[f32; N]; M] {
     fn into_array_data(self) -> Result<(Vec<f32>, Vec<usize>), AutodiffError> {
         let mut data = Vec::with_capacity(M * N);
@@ -105,24 +95,26 @@ impl<const M: usize, const N: usize> ArrayData for [[f32; N]; M] {
 /// `[f32; N]`）・2-D（`Vec<Vec<f32>>`/`[[f32; N]; M]`）を受理し、
 /// ネストから shape を推論して `tensor_core::Tensor<f32>` を返す
 /// （`Tensor::new` への委譲のみ。モジュール doc 参照）。
-///
-/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::array` へ移行する
-/// こと（`compat/mod.rs` モジュール doc 参照）。
-#[deprecated(
-    since = "0.0.0",
-    note = "facade::compat::array へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
-)]
-#[allow(deprecated)] // ArrayData 境界自体が非推奨のため。
 pub fn array<A: ArrayData>(data: A) -> Result<Tensor<f32>, AutodiffError> {
     let (flat, shape) = data.into_array_data()?;
     Ok(Tensor::new(flat, &shape)?)
 }
 
 #[cfg(test)]
-#[allow(deprecated)] // 非推奨シム自身のテスト（本ファイル冒頭 doc 参照）。
 mod tests {
     use super::*;
-    use crate::eval::dense_vec;
+
+    /// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API
+    /// のみを使用。旧 `autodiff::eval::dense_vec`〈クレート非公開〉の
+    /// 代替。`crates/facade/tests/fusion_default_parity.rs` の
+    /// `as_slice()` 直接利用と同じ発想だが、本テストは `contiguous()`
+    /// 前提を明示するため一段挟む）。
+    fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
+        t.contiguous()
+            .as_slice()
+            .expect("contiguous() 直後は必ず as_slice() が Some を返す")
+            .to_vec()
+    }
 
     #[test]
     fn array_1d_vec_infers_shape() {

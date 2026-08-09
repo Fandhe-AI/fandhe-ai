@@ -30,3 +30,13 @@ backend-cuda = { path = "../backend-cuda" }
 # `cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
 [target.'cfg(target_os = "macos")'.dependencies]
 backend-metal = { path = "../backend-metal" }
+
+# TASK-9.4（#411）: compat 層の移設に伴い追加。学習系統合テスト
+# （`tests/compat_sequential_train.rs`）が決定的シード駆動のデータ生成に
+# `bench_harness::rng::Xorshift64Star` を使う（`.claude/rules/
+# coding-rust.md`「学習系回帰テストには決定的シード設定ユーティリティを
+# 使う」）。外部クレートの新規追加ではなく workspace member 間の path
+# 依存のため、`Cargo.toml` 冒頭コメントの判断（ユーザー承認不要・
+# `docs/license-matrix.md` 更新不要）と同じ扱いとする。
+[dev-dependencies]
+bench-harness = { path = "../bench-harness" }

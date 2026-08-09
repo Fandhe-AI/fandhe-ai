@@ -323,6 +323,7 @@ dependencies = [
  "backend-cpu",
  "backend-cuda",
  "backend-metal",
+ "bench-harness",
  "tensor-core",
 ]
 

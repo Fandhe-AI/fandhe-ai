@@ -1,36 +1,43 @@
-//! numpy/Keras 慣習の互換 API 層（REQ-9・TASK-9.2a・#95）。
+//! numpy/Keras 慣習の互換 API 層（REQ-9・TASK-9.2a・#95）の**非推奨シム**。
 //!
-//! `autodiff` の自作コア（`Tape`/`Var`/`nn`）の上に薄いラッパーを被せ、
-//! Python 慣習寄りの入口を提供する。テンソル生成は [`array`]
-//! （numpy `np.array` 慣習）、レイヤー積み上げは [`Sequential`]
-//! （Keras `Sequential` 慣習）。数値ロジック・shape 検査は一切持ち込まず
-//! `tensor-core::Tensor::new`／`nn::Module` へ委譲する（REQ-9「互換 API
-//! 層は自作コアの上の薄いラッパーに徹する」・`.claude/rules/
-//! coding-rust.md`）。
+//! **TASK-9.4（#411）で `compat` の唯一のサポート対象実装は `facade::compat`
+//! へ移設した**（`docs/compat-api-scope.md` §0「サポート境界」・
+//! `crates/facade/src/compat/`）。以後の新規開発・ドキュメントは
+//! `facade::compat::{array, Sequential}` を正とする。
 //!
-//! **配置の確定（TASK-9.2a）**: `docs/compat-api-scope.md` §4 が
-//! 「9 クレート構成に compat 専用クレートは存在しないため、既存クレート
-//! （`autodiff` 等）内のモジュールとなる見込み」としていた点を、本
-//! モジュール（`autodiff::compat`）として確定する。`Sequential` は
-//! `nn::Linear`/`nn::Module` に依存し、`tensor-core` は `autodiff` に
-//! 依存できない（下位クレートが上位クレートへ依存すると循環する）ため、
-//! `autodiff` 配下以外に置く選択肢はない。新規クレードは作らず、
-//! CLAUDE.md の「想定クレート 9 個」を維持する。
+//! 本モジュールは移設前の `autodiff::compat::{array, Sequential,
+//! SequentialVars}` を利用する既存コードのソース互換性のみを保つ
+//! **移行期間中の非推奨シム**である（codex-review PR #424 P1 是正。
+//! 移設それ自体が破壊的変更である一方、公開 API パスの即時撤去は
+//! `.claude/rules/coding-rust.md`／ベース側レビュー基準「公開 API の
+//! 破壊的変更は P1」に反するため、移行期間を設ける）。
 //!
-//! `lib.rs` クレート doc の「本クレート自体には互換レイヤ固有のロジック
-//! を持ち込まない」は、「compat 層は本モジュールに隔離し、コア
-//! （`tape`/`var`/`nn`）へ互換慣習を漏らさない」という境界記述として
-//! 引き継ぐ（`nn` 側は `compat` を一切 `use` しない。依存方向は
-//! `compat` → `nn`/`var`/`tape` の一方向）。
+//! - 実装は `facade::compat` 側と論理的に重複する（意図的な重複。
+//!   `autodiff` は `facade` に依存できない〈依存方向が逆〉ため、
+//!   委譲ではなくコードの複製によってのみソース互換を保てる）
+//! - `Sequential::predict` は移設前と同じ挙動（`default_ops::naive_ops()`
+//!   による naive CPU 参照実装。具体バックエンドクレートに依存しない）を
+//!   維持する。旧 `predict_with_ops`（任意 `BackendOps` 注入経路）は
+//!   `facade::compat::Sequential` 側で既に撤去済み（REQ-12「任意
+//!   `BackendOps` 実装を注入できる公開 API を設けない」）のため、本シムでも
+//!   復元しない（撤去自体は破壊的変更として維持する。`docs/
+//!   compat-api-scope.md` §2）
+//! - 撤去予定: `facade::compat` への移行が完了し利用実績が確認でき次第、
+//!   別イシューで本モジュールごと削除する（`.claude/rules/
+//!   out-of-scope-tracking.md` 対象。撤去時期は正本 spec の改定を要さない
+//!   実装リポ側の判断）
 //!
-//! **対象範囲**（`docs/compat-api-scope.md` §1〜2）: レイヤーは
-//! Linear・ReLU・Sigmoid・Tanh の 3 種限定。`Sequential` 経由の学習
-//! （勾配取得・パラメータ更新）は #294 で対応済み（`sequential.rs`
-//! 冒頭 doc・[`SequentialVars`] 参照。`fit()`/`compile()` 等の高水準
-//! 学習ループ API は引き続き対象外）。
+//! **配置の経緯（TASK-9.2a 時点の確定・履歴）**: `docs/compat-api-scope.md`
+//! §4.1 参照。`Sequential` は `nn::Linear`/`nn::Module` に依存し、
+//! `tensor-core` は `autodiff` に依存できない（下位クレートが上位クレートへ
+//! 依存すると循環する）ため、当時は `autodiff` 配下以外に置く選択肢が
+//! なかった。TASK-9.3（facade 新設・#410）以降は `facade` が compat の
+//! 正式な置き場所となった。
 
 mod array;
 mod sequential;
 
+#[allow(deprecated)] // 非推奨シム自身の再エクスポート（本モジュール doc 参照）。
 pub use array::{ArrayData, array};
+#[allow(deprecated)]
 pub use sequential::{Sequential, SequentialVars};

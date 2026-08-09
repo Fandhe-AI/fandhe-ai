@@ -195,3 +195,40 @@ fn broadcast_add_bias_over_matrix() {
     assert_eq!(out.get(&[1, 1]).unwrap(), 25.0);
     assert_eq!(out.get(&[1, 2]).unwrap(), 36.0);
 }
+
+/// 7. `Tape::default()`（codex-review 第 19〜21 波・PR #403 の P1 是正で
+///    追加した compat 経路）が `Tape::new_with_ops(default_ops::naive_ops())`
+///    と同じ挙動（forward 演算が記録・実行できる）を持つこと。
+///
+///    **TASK-9.4（#411）での位置づけ**: このテストはもともと
+///    `crates/autodiff/tests/compat_sequential.rs`（`autodiff::compat`
+///    経由の統合テスト）にあったが、対象は `compat::Sequential`/
+///    `compat::array` ではなく `Tape::default()` 単体の挙動であるため、
+///    compat 層が `facade::compat` へ移設された後も本ファイル（`autodiff`
+///    の公開 API のみを使う `Tape` 系テスト）に残置する。入力生成は
+///    `compat::array`（移設先: `facade::compat::array`）ではなく
+///    `tensor_core::Tensor::new`（`autodiff` の直接の依存先）を直接使う
+///    よう置き換えた。
+#[test]
+fn tape_default_records_and_evaluates_ops() {
+    let tape = Tape::default();
+    let a = tape.var(&t(vec![1.0_f32, 2.0, 3.0, 4.0], &[2, 2]));
+    let b = tape.var(&t(vec![5.0_f32, 6.0, 7.0, 8.0], &[2, 2]));
+    let c = a.add(&b).unwrap();
+
+    assert_eq!(dense_vec(&c.to_tensor()), vec![6.0, 8.0, 10.0, 12.0]);
+
+    // `sum`（非 elementwise・`BackendOps::sum` 経由の即時実行経路。
+    // `default_ops::NaiveOps::sum` の `#[cfg(test)]` 解除を検証する）。
+    let total = c.sum(None).unwrap();
+    assert_eq!(dense_vec(&total.to_tensor()), vec![36.0]);
+}
+
+/// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API のみを
+/// 使用。`crates/facade/src/compat/array.rs` のテストヘルパーと同型）。
+fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
+    t.contiguous()
+        .as_slice()
+        .expect("contiguous() 直後は必ず as_slice() が Some を返す")
+        .to_vec()
+}

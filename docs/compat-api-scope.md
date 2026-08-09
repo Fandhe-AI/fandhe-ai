@@ -11,6 +11,33 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
 レイヤーであること」という境界のみを 1 章で明記し（同ファイル 6・13・556 行目）、
 詳細範囲は REQ-9 系後続タスクへ委譲している。本文書はその受け皿である。
 
+## 0. サポート境界（TASK-9.4・REQ-9 の 2026-08-08 追記・イシュー #411）
+
+`facade` クレートが**唯一のサポートされる公開 API 面**である。`tensor-core`／
+`autodiff`／`backend-cpu`／`backend-cuda`／`backend-metal` は内部クレートで
+あり、これらを `facade` を経由せず直接利用することはサポート対象外とする
+（出典: `docs/spec/04-requirements.md:209-210` の 2026-08-08 追記・
+`docs/spec/05-tasks.md:322` TASK-9.4）。
+
+- **本文書が定める対象範囲（1〜2 節）は `facade::compat` として提供される
+  公開面を指す**（4.2 節参照。旧 `autodiff::compat` は TASK-9.4 で
+  `facade::compat` へ移設済み。**移行期間中は `autodiff::compat` に
+  非推奨シム〈`#[deprecated]`〉を残し、既存コードのソース互換性を保つ**。
+  4.3 節参照。codex-review PR #424 P1 是正）
+- `autodiff` の `Tape::new_with_ops`／`nn::Module` 実装等、compat 層が内部で
+  依拠する API は Rust の可視性としては `pub`（`autodiff` クレートの
+  ドキュメント上は到達可能）だが、**サポート境界上は内部 API** であり、
+  REQ-12「利用者向け融合制御 API」・REQ-9「互換 API 層」のいずれにも
+  該当しない。技術的に `pub` であることと、利用者向けにサポートされる
+  公開面であることは区別する
+- `facade::tape()`／`facade::tape_for(Device)`（composition root。
+  `crates/facade/src/lib.rs`）と `facade::compat::{array, Sequential}`
+  （本文書が定める compat 公開面）の 2 つが、利用者が使うことを想定する
+  唯一の入口である
+- サポート境界の変更（内部クレートの直接利用をサポート対象に含める等）は
+  正本 spec リポジトリ側での REQ-9／REQ-12 受け入れ基準の改定を要する
+  （5 節「範囲拡張の手続き」と同じ手続き）
+
 ## 1. 対象範囲（in scope）
 
 REQ-9 の受け入れ基準（`docs/spec/04-requirements.md:203-206`）・
@@ -31,11 +58,12 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 薄いラッパー）に限定する。
 
 - **`Sequential` の学習パラメータ取得 API・optimizer 接続**（#294）:
-  `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/autodiff/src/
-  compat/sequential.rs`）経由で学習可能パラメータ（`Linear` 層の
-  `weight`/`bias`）・勾配へアクセスできる。`Sequential::trainable_parameters`/
-  `Sequential::apply_parameters` と組み合わせ `crate::optim::Sgd`・
-  `crate::nn::optim::AdamW` へ接続する（4 節参照）。`fit()`/`compile()`
+  `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/facade/src/
+  compat/sequential.rs`。TASK-9.4・#411 で `autodiff::compat` から移設。
+  4.2 節参照）経由で学習可能パラメータ（`Linear` 層の `weight`/`bias`）・
+  勾配へアクセスできる。`Sequential::trainable_parameters`/
+  `Sequential::apply_parameters` と組み合わせ `autodiff::optim::Sgd`・
+  `autodiff::nn::optim::AdamW` へ接続する（4 節参照）。`fit()`/`compile()`
   等の高水準学習ループ API は 2 節のとおり引き続き対象外
 
 ## 2. 対象外（out of scope）
@@ -58,6 +86,13 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
     済み・変更なし）。compat／facade（REQ-9 追記・#52）の公開面に
     `amax` 相当の縮約 API を追加する段階になった場合にのみ、PyTorch
     互換（均等分配）の要否を改めて判断する
+  - **任意 `BackendOps` 実装を注入できる推論入口**（旧 `Sequential::
+    predict_with_ops`）は対象外。TASK-9.4（#411）で公開面から撤去した
+    （破壊的変更。REQ-12「任意 `BackendOps` 実装を注入できる公開 API を
+    設けない」・`crates/facade/tests/api_surface.rs` の機械検査と整合
+    させるため。0 節・4.2 節参照）。`Sequential::predict` は既定バック
+    エンド（`facade::tape()`。TASK-2.5 ユーザー承認済み）へ透過的に
+    結線される
 - 対象外要望が生じた場合の受け皿は 2 通り。
   - 実装リポ側で追跡が完結する事項: `.claude/rules/out-of-scope-tracking.md`
     の規約に沿って Issue で追跡する
@@ -85,13 +120,15 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   互換 API 層そのものではないが、自作コア上でも薄いラッパーが成立し
   得ることを示す傍証として位置づける（`04-requirements.md:200-209`）
 
-## 4. 実装配置（TASK-9.2a・#95 で確定）
+## 4. 実装配置
+
+### 4.1 TASK-9.2a（#95）時点の確定（履歴）
 
 - `compat::array()`／`compat::Sequential` は `autodiff::compat` モジュール
-  （`crates/autodiff/src/compat/`）として実装した。9 クレート構成
+  （`crates/autodiff/src/compat/`）として実装した。当時の 9 クレート構成
   （`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・
   `onnx-interop`・`guardrail`・`self-repair`・`bench-harness`）に compat 専用
-  クレートは追加しない。`Sequential` が `nn::Linear`/`nn::Module` に依存し、
+  クレートは追加しなかった。`Sequential` が `nn::Linear`/`nn::Module` に依存し、
   `tensor-core` は `autodiff` に依存できない（下位クレートが上位クレートへ
   依存すると循環する）ため、`autodiff` 配下以外に置く選択肢はなかった
 - Linear 層（TASK-9.1a・#91）は `crates/autodiff/src/nn/linear.rs` として
@@ -112,6 +149,83 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   （既定実装 `None`。活性化層は非オーバーライドのため非破壊）により
   解消した。`fit()`/`compile()` 等の高水準学習ループ API は 1 節注記の
   とおり引き続き対象外
+
+### 4.2 TASK-9.4（#411）での移設確定（現行）
+
+- 10 クレート化（イシュー #52・`facade` クレート新設。TASK-9.3・#410 で
+  composition root の実装が先行完了）を受け、compat 公開面（`compat::array`／
+  `compat::Sequential`）を `autodiff::compat` から **`facade::compat`
+  （`crates/facade/src/compat/`）へ移設した**。4.1 節が前提としていた
+  「9 クレート構成に compat 専用クレートは存在しない」という制約が
+  `facade` 新設により解消したための再配置である
+- `predict_with_ops`（任意 `BackendOps` 実装を注入できる推論入口）は本移設
+  で公開面から撤去した（破壊的変更）。`facade::compat::Sequential::predict`
+  は `facade::tape()`（composition root・既定 CPU・`CpuBackendOps`・融合
+  有効）へ結線済みであり、ops を明示指定する経路（旧 `predict_with_ops`）は
+  REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」・
+  `crates/facade/tests/api_surface.rs` の機械検査と矛盾するため維持しない
+- `autodiff` は compat 層が依拠する `Tape`／`Var`／`nn`（`Module`・
+  `Linear`・`activation` 等）を `pub` API として提供し続けるが、これは
+  「サポート境界」節（0 節）が定めるとおり内部クレートとしての公開であり、
+  compat 層を経由しない直接利用はサポート対象外である
+- `facade::compat::Sequential` の `forward`／`bind` は `autodiff::Tape`
+  （内部クレートの生の型）を直接引数に取らず、`facade` 所有の newtype
+  `facade::Tape`（`crates/facade/src/lib.rs`）を取る。`Var`・
+  `Gradients`・`AutodiffError`・`LinearVars`（`autodiff` 由来）・
+  `Tensor`（`tensor-core` 由来）は迂回経路を持たない値型・エラー型のため
+  `facade` の正式な公開契約として再エクスポートし、`compat` の公開
+  シグネチャはこの再エクスポートパスを使う（codex-review PR #424 P1
+  是正・`crates/facade/tests/api_surface.rs` の機械検査と整合）
+
+### 4.3 移行期間中のソース互換シム（codex-review PR #424 P1 是正）
+
+`compat` 公開面の唯一のサポート対象実装は 4.2 節のとおり `facade::compat`
+だが、TASK-9.4（#411）が `autodiff::compat` モジュール自体を互換 shim
+なしで削除したことで、`autodiff::compat::{array, Sequential,
+SequentialVars}` を利用する既存コードが破壊されるという P1 指摘
+（codex-review PR #424・ベース側レビュー基準「公開 API の破壊的変更は
+P1」）を受けた是正である。
+
+- `crates/autodiff/src/compat/`（`mod.rs`／`array.rs`／`sequential.rs`）に
+  移設前の実装を複製して残す（`facade` は `autodiff` に依存する構造の
+  ため、`autodiff::compat` から `facade::compat` へ委譲することはできない
+  ―― 依存方向が逆になり循環する。したがって委譲ではなく実装の複製に
+  よってのみソース互換を保てる）
+- 復元対象は codex-review が指摘した 3 つの公開項目（`array`・
+  `Sequential`・`SequentialVars`）。`Sequential::predict` は移設前と
+  同じ挙動（`default_ops::naive_ops()` による naive CPU 参照実装）を
+  維持する
+- `array`／`Sequential`／`SequentialVars` は `#[deprecated]` を付与し、
+  `facade::compat` への移行を促す（`crates/autodiff/src/compat/mod.rs`
+  モジュール doc 参照）
+- 撤去予定: `facade::compat` への移行が完了し利用実績が確認でき次第、
+  別イシューで本シムごと削除する（`.claude/rules/out-of-scope-tracking.md`
+  対象）
+
+### 4.4 `predict_with_ops` の再復元（codex-review PR #424 P1 是正・2 巡目）
+
+4.3 節の初回是正では旧 `predict_with_ops`（任意 `BackendOps` 実装を注入
+できる推論入口）を「REQ-12 違反のため復元しない」としていたが、これは
+誤りだった。REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」
+は 0 節が定める**サポート対象公開 API 面（= `facade`）**を対象とする制約
+であり、`autodiff::compat` の非推奨シムは移行期間中のソース互換シム
+（サポート対象公開面ではない）であるため REQ-12 の対象外である。codex-review
+はこの区別を踏まえ「`predict_with_ops` を `#[deprecated]` 付きで維持する」
+ことを P1 として指摘し、本節でこれに従い復元した。
+
+- `crates/autodiff/src/compat/sequential.rs` に `predict_with_ops`
+  （`Box<dyn BackendOps + Send>` を受け取る版）を `#[deprecated]` 付きで
+  復元し、`predict`（無引数版）はこれへ委譲する（移設前の実装と同一。
+  4.2 節「PR #403 の P1 是正で `predict`/`predict_with_ops` に分離」の
+  形へ戻す）
+- **`facade::compat::Sequential` 側には追加しない**（4.2 節の判断は維持。
+  `facade` は唯一のサポート対象公開面であり、ops 注入経路を設けない
+  という REQ-12 の制約はここでこそ効く）
+- 1 節「対象外（out of scope）」の「任意 `BackendOps` 実装を注入できる
+  推論入口は対象外」との記述は、`facade::compat`（サポート対象公開面）
+  の対象範囲についての記述であり、本節の `autodiff::compat` 非推奨
+  シムでの復元と矛盾しない（0 節「技術的に `pub` であることと、利用者
+  向けにサポートされる公開面であることは区別する」を参照）
 
 ## 5. 範囲拡張の手続き
 
@@ -138,7 +252,12 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 | イシュー #91（TASK-9.1a・Linear 層） | クローズ済み |
 | イシュー #92（TASK-9.1b・基本活性化関数群） | クローズ済み |
 | イシュー #94（TASK-9.2・親） | クローズ済み |
-| イシュー #95（TASK-9.2a・compat::array／Sequential 実装） | 本イシュー |
+| イシュー #95（TASK-9.2a・compat::array／Sequential 実装） | クローズ済み |
 | イシュー #96（TASK-9.2b・本文書） | クローズ済み |
-| `crates/autodiff/src/compat/` | TASK-9.2a（#95）実装済みの `array`／`Sequential` |
-| `crates/autodiff/src/nn/module.rs` | TASK-9.2a（#95）実装済みの共通 `Module` trait |
+| イシュー #410（TASK-9.3・`facade` クレート新設・composition root） | クローズ済み |
+| イシュー #411（TASK-9.4・compat 層の facade への移設・サポート境界明文化） | 本イシュー |
+| `crates/autodiff/src/compat/`（削除済み） | TASK-9.2a（#95）実装・TASK-9.4（#411）で `crates/facade/src/compat/` へ移設 |
+| `crates/facade/src/compat/` | TASK-9.4（#411）移設先の `array`／`Sequential`（現行の compat 公開面） |
+| `crates/autodiff/src/nn/module.rs` | TASK-9.2a（#95）実装済みの共通 `Module` trait（現行も `autodiff` 側に残置） |
+| `docs/spec/04-requirements.md:209-210` | REQ-9 の 2026-08-08 追記（サポート境界の明文化） |
+| `docs/spec/05-tasks.md:322` | TASK-9.4 |
