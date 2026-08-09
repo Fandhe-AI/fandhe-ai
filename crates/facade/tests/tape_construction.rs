@@ -2,13 +2,25 @@
 //!
 //! `facade::tape()`（既定 CPU）・`facade::tape_for(Device)`（明示指定）の
 //! 両経路で構築した `Tape` 上で forward → backward が成立することを固定
-//! する。CUDA 経路は実行環境適応型（driver 有無どちらでも green）とし、
-//! CUDA 実機テストの `#[ignore]` 分離方針（`.claude/rules/coding-rust.md`）
-//! とは別に、`backend_cuda::CudaDevice::is_available()` で分岐する
-//! fail-safe な検証にとどめる（実機必須の性能計測等は含まないため）。
+//! する。CUDA 経路は実行環境適応型（driver 有無・選択可能デバイス数
+//! いずれの組み合わせでも green）とし、CUDA 実機テストの `#[ignore]`
+//! 分離方針（`.claude/rules/coding-rust.md`）とは別に、
+//! `backend_cuda::CudaDeviceProvider::is_available()`（`enumerate` と
+//! 同じ探索・除外ロジックを通し、選択可能デバイスが 1 件以上あることを
+//! 条件にする `.claude/rules/coding-rust.md` 前提の強い判定。
+//! `crates/backend-cuda/src/device.rs` の `is_available` doc 参照）で
+//! 分岐する fail-safe な検証にとどめる（実機必須の性能計測等は含まない
+//! ため）。`CudaDevice::is_available()`（`libcuda` の有無のみを見る弱い
+//! 判定）は使わない: driver はあるが選択可能な GPU が 0 台のホストでは
+//! 弱い判定が `true` を返す一方 `facade::tape_for` は
+//! `CudaDeviceProvider::select` 経由で `Err` を返すため、弱い判定に
+//! 依拠すると本テストの `Ok` 分岐が誤って `panic` する（PR #423 Bugbot
+//! 指摘 `385da921-0618-4dfb-8cfc-4ea9bb59411e`）。
 
+use backend_cuda::CudaDeviceProvider;
 use facade::Device;
 use tensor_core::Tensor;
+use tensor_core::device::DeviceProvider;
 
 fn sample_tensor() -> Tensor<f32> {
     Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("sample tensor は shape が一致する")
@@ -45,12 +57,15 @@ fn tape_for_cpu_succeeds_and_matches_default_semantics() {
 }
 
 /// `facade::tape_for(Device::Cuda(0))`: 実行環境適応型。
-/// `backend_cuda::CudaDevice::is_available()` が `true` の環境（CUDA
-/// driver 搭載・`CudaDeviceProvider::select` によるデバイス存在検証成功）
-/// では `Ok` を返すこと、`false` の環境（driver 非搭載。CI self-hosted
-/// の既定）では panic せず `Err(BackendError::CudaUnavailable(_))` を
-/// 返すことを検証する（CI self-hosted runner の CUDA 有無どちらでも
-/// green。イシュー #410 実装計画 §3「tests/tape_construction.rs」）。
+/// `backend_cuda::CudaDeviceProvider::is_available()`（`enumerate` と
+/// 同じロジックで選択可能デバイスの有無まで見る強い判定。モジュール
+/// 冒頭コメント参照）が `true` の環境（CUDA driver 搭載・選択可能な
+/// GPU が 1 台以上存在）では `Ok` を返すこと、`false` の環境（driver
+/// 非搭載、または driver はあるが選択可能デバイスが 0 台。CI
+/// self-hosted の既定）では panic せず
+/// `Err(BackendError::CudaUnavailable(_))` を返すことを検証する（CI
+/// self-hosted runner の CUDA 有無どちらでも green。イシュー #410
+/// 実装計画 §3「tests/tape_construction.rs」）。
 ///
 /// **意図的に forward 実行までは検証しない**: driver（`libcuda`）検出と
 /// NVRTC（`libnvrtc`。カーネルコンパイルに必要）搭載は独立した環境
@@ -64,7 +79,7 @@ fn tape_for_cpu_succeeds_and_matches_default_semantics() {
 #[test]
 fn tape_for_cuda_adapts_to_runtime_availability() {
     let result = facade::tape_for(Device::Cuda(0));
-    if backend_cuda::CudaDevice::is_available() {
+    if CudaDeviceProvider::new().is_available() {
         let _tape = result.expect("CUDA driver 搭載環境では結線が成功するはず");
     } else {
         let err = result.expect_err("CUDA driver 非搭載環境では失敗するはず");
