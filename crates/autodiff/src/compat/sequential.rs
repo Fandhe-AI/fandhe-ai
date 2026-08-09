@@ -13,12 +13,19 @@
 //! ReLU/Sigmoid/Tanh。Softmax・GELU・Conv 等は範囲拡張の手続き〈同 §5〉を
 //! 経ずに追加しない）。
 //!
-//! **`predict` の結線**: 旧 `predict_with_ops`（任意 `BackendOps` 注入
-//! 経路）は `facade::compat::Sequential` 側で撤去済み（REQ-12「任意
-//! `BackendOps` 実装を注入できる公開 API を設けない」・`docs/
-//! compat-api-scope.md` §2）であり、本シムでも復元しない。`predict` は
-//! 移設前と同じ挙動（`default_ops::naive_ops()` による naive CPU 参照
-//! 実装。具体バックエンドクレートに依存しない）を維持する。
+//! **`predict`／`predict_with_ops` の結線**: REQ-12「任意 `BackendOps`
+//! 実装を注入できる公開 API を設けない」は**唯一のサポート対象公開 API 面**
+//! である `facade`（`CLAUDE.md` 「`facade` が唯一のサポートされる公開 API
+//! 面であり `tensor-core`・`autodiff`・`backend-*` は内部クレート」）を
+//! 対象とする制約であり、`facade::compat::Sequential` 側では
+//! `predict_with_ops` 相当の注入経路を設けない（`docs/compat-api-scope.md`
+//! §2）。一方で本シムは内部クレート `autodiff` 上の**移行期間中のソース
+//! 互換シム**（サポート対象公開 API 面ではない）であるため、移設前に存在
+//! した `predict_with_ops`（任意 `BackendOps` 注入経路）を `#[deprecated]`
+//! 付きで復元し既存呼び出し元のコンパイルを壊さない。`predict`（無引数版）
+//! は `default_ops::naive_ops()`（naive CPU 参照実装。具体バックエンド
+//! クレートに依存しない）を `ops` に使い `predict_with_ops` へ委譲する
+//! （移設前と同じ挙動）。
 //!
 //! **学習（勾配取得・パラメータ更新。#294 で対応済み）**: [`Sequential::bind`]
 //! が返す [`SequentialVars`] を経由して `LinearVars`（勾配取得の入口。
@@ -28,7 +35,7 @@
 //! `crate::nn::optim::AdamW` の位置対応契約（`optim/sgd.rs`・
 //! `nn/optim/adamw.rs`）にそのまま渡せる。
 
-use tensor_core::Tensor;
+use tensor_core::{BackendOps, Tensor};
 
 use crate::Gradients;
 use crate::error::AutodiffError;
@@ -115,19 +122,39 @@ impl Sequential {
         Ok(current)
     }
 
-    /// 推論の入口（受け入れ条件「Sequential でのモデル構築・推論が
-    /// 動作する」を満たす API）。内部で 1 ステップ分の `Tape` を
-    /// `default_ops::naive_ops()`（naive CPU 参照実装。具体バックエンド
-    /// クレートに依存しない）で構築し `forward` を呼んだ後 `to_tensor()`
-    /// で追跡を外した `Tensor<f32>` を返す（`Tape` はこの呼び出しの
-    /// スコープ内で破棄される。`nn/linear.rs` の「`Tape` はステップごとに
-    /// 生成・破棄される前提」と同じ運用）。移設前と同じ挙動を維持する
-    /// （本ファイル冒頭 doc 参照）。
-    pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
-        let tape = Tape::new_with_ops(crate::default_ops::naive_ops());
+    /// 推論の入口（任意 `ops` 指定版。移行期間中のソース互換シムとして
+    /// 移設前の実装を復元。本ファイル冒頭 doc 参照。`autodiff` は具体
+    /// バックエンドへ依存しないため `backend-cpu` 等の解決は呼び出し元の
+    /// 責務）。内部で 1 ステップ分の `Tape` を `ops` で構築し `forward` を
+    /// 呼んだ後 `to_tensor()` で追跡を外した `Tensor<f32>` を返す（`Tape`
+    /// はこの呼び出しのスコープ内で破棄される。`nn/linear.rs` の「`Tape`
+    /// はステップごとに生成・破棄される前提」と同じ運用）。無引数版が
+    /// 必要な場合は [`Sequential::predict`] を使う。
+    #[deprecated(
+        since = "0.0.0",
+        note = "facade::compat::Sequential へ移設済み（TASK-9.4・#411）。facade は \
+                REQ-12 に従い ops 注入経路を公開しないため、性能最適化された ops を \
+                明示指定したい場合を除き facade::compat::Sequential::predict を使うこと"
+    )]
+    pub fn predict_with_ops(
+        &self,
+        input: &Tensor<f32>,
+        ops: Box<dyn BackendOps + Send>,
+    ) -> Result<Tensor<f32>, AutodiffError> {
+        let tape = Tape::new_with_ops(ops);
         let input_var = tape.var(input);
         let output = self.forward(&tape, &input_var)?;
         Ok(output.to_tensor())
+    }
+
+    /// 推論の入口（無引数 `ops` 版。受け入れ条件「Sequential でのモデル
+    /// 構築・推論が動作する」を満たす API）。`default_ops::naive_ops()`
+    /// （naive CPU 参照実装。具体バックエンドクレートに依存しない）を
+    /// `ops` に使い [`Sequential::predict_with_ops`] へ委譲する（移設前と
+    /// 同じ挙動を維持。本ファイル冒頭 doc 参照）。
+    #[allow(deprecated)] // predict_with_ops 自体が非推奨シム（本ファイル冒頭 doc 参照）。
+    pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
+        self.predict_with_ops(input, crate::default_ops::naive_ops())
     }
 
     /// 学習ステップの入口（#294）。このステップの `tape` へ全 `Linear`
@@ -358,6 +385,34 @@ mod tests {
         let output = model.predict(&input).unwrap();
 
         assert_eq!(output.shape(), &[batch, 4]);
+    }
+
+    #[test]
+    #[allow(deprecated)] // predict_with_ops 自体が非推奨シム（本ファイル冒頭 doc 参照）。
+    fn predict_delegates_to_predict_with_ops_naive_ops_bit_exact() {
+        // 復元した `predict_with_ops`（codex-review PR #424 P1 是正・2 巡目。
+        // `docs/compat-api-scope.md` §4.4）の回帰テスト: `predict`（無引数版）
+        // が `default_ops::naive_ops()` を渡した `predict_with_ops` へ委譲する
+        // という契約（本ファイル `predict` の doc コメント）をビット一致で
+        // 固定する。同一演算列のため tolerance は新設しない
+        // （coding-rust.md「許容誤差を単独で緩和しない」の趣旨）。
+        let model = Sequential::new()
+            .add_linear(8, 16, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(16, 4, SEED2)
+            .unwrap();
+
+        let batch = 3;
+        let input = Tensor::new(vec![0.1_f32; batch * 8], &[batch, 8]).unwrap();
+
+        let via_predict = model.predict(&input).unwrap();
+        let via_predict_with_ops = model
+            .predict_with_ops(&input, crate::default_ops::naive_ops())
+            .unwrap();
+
+        assert_eq!(via_predict.shape(), via_predict_with_ops.shape());
+        assert_eq!(dense_vec(&via_predict), dense_vec(&via_predict_with_ops));
     }
 
     #[test]

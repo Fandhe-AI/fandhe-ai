@@ -192,17 +192,40 @@ P1」）を受けた是正である。
   ―― 依存方向が逆になり循環する。したがって委譲ではなく実装の複製に
   よってのみソース互換を保てる）
 - 復元対象は codex-review が指摘した 3 つの公開項目（`array`・
-  `Sequential`・`SequentialVars`）に限る。旧 `predict_with_ops`（任意
-  `BackendOps` 実装を注入できる推論入口）は 2 節のとおり REQ-12 違反の
-  ため意図的に対象外のままとし、本シムでも復元しない。`Sequential::
-  predict` は移設前と同じ挙動（`default_ops::naive_ops()` による naive
-  CPU 参照実装）を維持する
+  `Sequential`・`SequentialVars`）。`Sequential::predict` は移設前と
+  同じ挙動（`default_ops::naive_ops()` による naive CPU 参照実装）を
+  維持する
 - `array`／`Sequential`／`SequentialVars` は `#[deprecated]` を付与し、
   `facade::compat` への移行を促す（`crates/autodiff/src/compat/mod.rs`
   モジュール doc 参照）
 - 撤去予定: `facade::compat` への移行が完了し利用実績が確認でき次第、
   別イシューで本シムごと削除する（`.claude/rules/out-of-scope-tracking.md`
   対象）
+
+### 4.4 `predict_with_ops` の再復元（codex-review PR #424 P1 是正・2 巡目）
+
+4.3 節の初回是正では旧 `predict_with_ops`（任意 `BackendOps` 実装を注入
+できる推論入口）を「REQ-12 違反のため復元しない」としていたが、これは
+誤りだった。REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」
+は 0 節が定める**サポート対象公開 API 面（= `facade`）**を対象とする制約
+であり、`autodiff::compat` の非推奨シムは移行期間中のソース互換シム
+（サポート対象公開面ではない）であるため REQ-12 の対象外である。codex-review
+はこの区別を踏まえ「`predict_with_ops` を `#[deprecated]` 付きで維持する」
+ことを P1 として指摘し、本節でこれに従い復元した。
+
+- `crates/autodiff/src/compat/sequential.rs` に `predict_with_ops`
+  （`Box<dyn BackendOps + Send>` を受け取る版）を `#[deprecated]` 付きで
+  復元し、`predict`（無引数版）はこれへ委譲する（移設前の実装と同一。
+  4.2 節「PR #403 の P1 是正で `predict`/`predict_with_ops` に分離」の
+  形へ戻す）
+- **`facade::compat::Sequential` 側には追加しない**（4.2 節の判断は維持。
+  `facade` は唯一のサポート対象公開面であり、ops 注入経路を設けない
+  という REQ-12 の制約はここでこそ効く）
+- 1 節「対象外（out of scope）」の「任意 `BackendOps` 実装を注入できる
+  推論入口は対象外」との記述は、`facade::compat`（サポート対象公開面）
+  の対象範囲についての記述であり、本節の `autodiff::compat` 非推奨
+  シムでの復元と矛盾しない（0 節「技術的に `pub` であることと、利用者
+  向けにサポートされる公開面であることは区別する」を参照）
 
 ## 5. 範囲拡張の手続き
 
