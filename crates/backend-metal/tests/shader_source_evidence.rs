@@ -99,6 +99,35 @@ fn gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions() {
     }
 }
 
+/// イシュー #380 の証跡: `gemm_simdgroup_f16` のアキュムレータ型 `ACC_T` が
+/// `simdgroup_float8x8`（f32 累算）で定義されていることを CI（Linux
+/// self-hosted）上でロックする。
+///
+/// 背景: `gemm_simdgroup_f16` の実機パリティテスト
+/// （`crates/backend-metal/tests/gemm_simdgroup_parity.rs` 等）は Metal
+/// 実機依存のため `#[ignore]` で分離されており通常 CI では実行されない
+/// （本ファイル冒頭のとおり Linux CI では `include_str!` した文字列の
+/// 検査のみで完結する）。
+/// そのため #380 で導入した `ACC_T = simdgroup_float8x8` への変更
+/// （`MM_T`＝`simdgroup_half8x8` はロード型のまま据え置き、累算のみ f32 化）
+/// を、`typedef` 行の文字列としてここで固定しないと、将来
+/// `simdgroup_half8x8` へ差し戻す退行が発生しても通常 CI は green のまま
+/// 通過してしまい、実機 `#[ignore]` テストでのみ検出される弱い保護しか
+/// 残らない（PR #434 Bugbot 指摘 review_id 4891802188 への対応）。
+#[test]
+fn gemm_simdgroup_f16_source_uses_f32_accumulator_type() {
+    let kernel_body = gemm_simdgroup_f16_kernel_body();
+    for needle in [
+        "typedef simdgroup_half8x8 MM_T;",
+        "typedef simdgroup_float8x8 ACC_T;",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm.metal の gemm_simdgroup_f16 に `{needle}` が見つかりません（f32 累算への変更が失われていないか確認する）"
+        );
+    }
+}
+
 /// REQ-8 の証跡: `gemm_simdgroup_f16` が手動境界チェック
 /// （タイル原点が実効次元を超える場合の早期 return）を維持していることを
 /// ロックする（`gemm_metal_source_uses_simdgroup_matrix_instructions` と
