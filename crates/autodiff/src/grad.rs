@@ -295,11 +295,21 @@ fn unreduce_broadcast(g: &Tensor<f32>, input_shape: &[usize], dim: Option<usize>
 /// 伝播する。**同値タイは「最初に現れる最大要素 1 箇所のみ」へ伝播
 /// する**（PyTorch `amax` の均等分配とは異なる、決定的な選択。
 /// PoC-v2-2 のビット一致決定性方針・`train_repro` と整合させるための
-/// 設計判断であり、`compat` 層〈REQ-9〉実装時に PyTorch 互換が必要に
-/// なった場合は要再確認。追跡: Issue #224）。`out_value` は forward
-/// 記録済みの縮約後最大値で、走査中に現れる要素と exact 一致するかで
-/// argmax 位置を判定する（同一データ・同一 reduction 経路のため bit
-/// 一致する）。
+/// 設計判断）。`out_value` は forward 記録済みの縮約後最大値で、走査中
+/// に現れる要素と exact 一致するかで argmax 位置を判定する（同一デー
+/// タ・同一 reduction 経路のため bit 一致する）。
+///
+/// Issue #224（先勝ち挙動の再確認。compat 層〈REQ-9〉実装時に要再確認
+/// としていた事項）の結論: **本挙動を維持する（変更なし）**。
+/// `autodiff::compat`（TASK-9.2a・#95 で実装済み）の公開面は
+/// `array()`／`Sequential`（Linear・ReLU・Sigmoid・Tanh）に限定され
+/// （`docs/compat-api-scope.md` §1〜2）、`max`/`amax` 相当 API が存在
+/// しないため PyTorch 互換を要求する利用者向け経路が現時点でない。
+/// 均等分配へ変更すると勾配値そのものが変わり上記の決定性方針と衝突
+/// するため、先勝ちを維持する。再検討条件: compat／facade（REQ-9 追
+/// 記・#52）の公開面に `amax` 相当の縮約 API を追加する段階になった
+/// 場合にのみ PyTorch 互換の要否を改めて判断する（`docs/compat-api-scope.md`
+/// にも記録）。
 fn max_vjp(
     input: &Tensor<f32>,
     dim: Option<usize>,
@@ -827,6 +837,52 @@ mod tests {
         let num_da = numeric_grad_unary(&a, &s, |x| eval::max(x, Some(1), &[2]));
 
         assert_grad_close("max(dim=1) dA", &da, &num_da);
+    }
+
+    // --- Max（同値タイ。#224: 先勝ち決定的挙動の回帰固定） ---
+    //
+    // タイ発生時は最大値位置が複数あり数値微分（中央差分）が定義でき
+    // ないため、上記の同値タイなしケースとは異なり厳密値アサーション
+    // （数値微分比較なし）で「最初に現れる最大要素 1 箇所のみに勾配が
+    // 伝播し、他はゼロになる」先勝ち挙動そのものを固定する。
+
+    #[test]
+    fn max_grad_dim_none_tie_first_wins() {
+        // 最大値 5.0 がインデックス 1・3 の 2 箇所に現れるタイケース。
+        let a = t(&[1.0, 5.0, 3.0, 5.0], &[4]);
+        let g = t(&[2.0], &[]);
+
+        let out_value = eval::max(&a, None, &[]);
+        let da = max_vjp(&a, None, &out_value, &g);
+        let grad = dense_vec(&da);
+
+        assert_eq!(
+            grad,
+            vec![0.0, 2.0, 0.0, 0.0],
+            "max(None) タイ時は最初に現れる最大要素（idx=1）のみへ伝播するはず"
+        );
+        // 勾配総量が上流勾配 g と一致すること（先勝ちでも保存量は保たれる）。
+        assert_eq!(grad.iter().sum::<f32>(), 2.0);
+    }
+
+    #[test]
+    fn max_grad_dim_axis_tie_first_wins() {
+        // shape [2, 3]。行 0 は列 0・2 が 5.0 でタイ、行 1 はタイなし。
+        let a = t(&[5.0, 1.0, 5.0, 1.0, -2.0, 4.0], &[2, 3]);
+        let g = t(&[3.0, 7.0], &[2]);
+
+        let out_value = eval::max(&a, Some(1), &[2]);
+        let da = max_vjp(&a, Some(1), &out_value, &g);
+        let grad = dense_vec(&da);
+
+        assert_eq!(
+            grad,
+            vec![3.0, 0.0, 0.0, 0.0, 0.0, 7.0],
+            "max(dim=1) タイ行（行 0）は軸方向で最初の最大要素（列 0）のみへ伝播するはず"
+        );
+        // 各 (outer) スライスごとに勾配総量が上流勾配 g[outer] と一致すること。
+        assert_eq!(grad[0..3].iter().sum::<f32>(), 3.0);
+        assert_eq!(grad[3..6].iter().sum::<f32>(), 7.0);
     }
 
     // --- MseLoss（pred/target 両勾配） ---
