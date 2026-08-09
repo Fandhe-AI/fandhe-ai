@@ -34,16 +34,28 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 
 ## テスト一覧と対応 REQ/TASK
 
-| ファイル | 対応 TASK/Issue | 検証内容 |
-|---------|-----------------|---------|
-| `tests/device.rs` | TASK-1.9a（#44） | `MetalDeviceProvider` の実機デバイス選択（`select_metal_device_on_real_hardware`） |
-| `tests/device_smoke.rs` | TASK-1.8a（#38） | デバイス初期化・コマンドキュー・バッファ確保・readback・不正長入力の拒否（OWASP A03） |
-| `tests/gemm_naive_parity.rs` | TASK-1.8b（#39） | naive GEMM の CPU 参照実装との複合判定（REQ-2）。境界形状・中規模形状・K ストレス・縮退形状（TASK-1.8e で追加）・`dispatch`/`dispatch_variant(Naive)` 同値性（TASK-1.8e で追加）・不正形状の拒否 |
-| `tests/gemm_simdgroup_parity.rs` | TASK-1.8c（#40） | tiled/simdgroup GEMM の CPU 参照実装との複合判定（REQ-2）。境界形状・中規模形状・K ストレス・縮退形状（TASK-1.8e で追加）・不正形状の拒否 |
-| `tests/cpu_metal_parity.rs` | TASK-2.2c（#55） | CPU-Metal ペアの数値一致回帰（REQ-2 統一複合判定の固定。K=4096 ストレス・境界形状・決定性・falsification） |
-| `tests/backend_ops_real_device.rs` | TASK-1.9d（#47） | `tensor_core::BackendOps`（`MetalBackendOps::gemm`。`dispatch_auto` 動的タイル選択経由）と CPU `BackendOps::gemm` の数値一致（REQ-2）。`tile.rs::select` の動的タイル選択境界（`SMALL=64`）近傍・縦長横長分岐・`ops_for` 経由ディスパッチ・elementwise/reduction の `Unsupported` 契約を含む |
+`crates/backend-metal/tests/` は 12 ファイル。うち 11 ファイルが `#[ignore]` 実機テストを持ち、合計 52 件
+（イシュー #380 実機実測で確定。件数根拠は per-file 合計を正とする。`cargo test` 出力の
+`N filtered out` 行は lib unittest ターゲットが非 `#[ignore]` テストを除外した数で偶然の一致にすぎず
+根拠に使わない）。残る 1 ファイル（`shader_source_evidence.rs`）は `#[ignore]` を持たず Linux CI でも実行
+される。
 
-判定は全ファイル共通で `backend_cpu::parity::{compare, assert_parity}`（REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体）を使う。**閾値の独自定義・緩和はしない**（`.claude/rules/security.md`・`.claude/rules/coding-rust.md`）。入力生成は `bench_harness::rng::Xorshift64Star`（決定的シード）で固定する。
+| ファイル | `#[ignore]` 件数 | 対応 TASK/Issue | 検証内容 |
+|---------|:---:|-----------------|---------|
+| `tests/device.rs` | 1 | TASK-1.9a（#44） | `MetalDeviceProvider` の実機デバイス選択（`select_metal_device_on_real_hardware`） |
+| `tests/device_smoke.rs` | 3 | TASK-1.8a（#38） | デバイス初期化・コマンドキュー・バッファ確保・readback・不正長入力の拒否（OWASP A03） |
+| `tests/gemm_naive_parity.rs` | 6 | TASK-1.8b（#39） | naive GEMM の CPU 参照実装との複合判定（REQ-2）。境界形状・中規模形状・K ストレス・縮退形状・`dispatch`/`dispatch_variant(Naive)` 同値性・不正形状の拒否 |
+| `tests/gemm_simdgroup_parity.rs` | 9 | TASK-1.8c（#40） | tiled/simdgroup GEMM の CPU 参照実装との複合判定（REQ-2）。境界形状・中規模形状・K ストレス・縮退形状・不正形状の拒否 |
+| `tests/cpu_metal_parity.rs` | 5 | TASK-2.2c（#55） | CPU-Metal ペアの数値一致回帰（REQ-2 統一複合判定の固定。K=4096 ストレス・境界形状・決定性・falsification） |
+| `tests/backend_ops_real_device.rs` | 5 | TASK-1.9d（#47） | `tensor_core::BackendOps`（`MetalBackendOps::gemm`。`dispatch_auto` 動的タイル選択経由）と CPU `BackendOps::gemm` の数値一致（REQ-2）。`tile.rs::select` の動的タイル選択境界（`SMALL=64`）近傍・縦長横長分岐・`ops_for` 経由ディスパッチ・elementwise/reduction の `Unsupported` 契約を含む |
+| `tests/gemm_auto_parity.rs` | 3 | TASK-1.8f 前段 | `dispatch_backend_auto` の閾値前後（境界 511/512）での CPU 参照一致 |
+| `tests/gemm_dynamic_tile_parity.rs` | 6 | TASK-1.8f（#188） | 動的タイル選択（`dispatch_auto`）の全タイル候補・非倍数形状・K ストレスでの CPU 参照一致 |
+| `tests/cpu_metal_f16_parity.rs` | 6 | TASK-8.3b（#156） | `gemm_simdgroup_f16` の CPU 参照一致（8×8×8 基準・512 基準・非倍数境界・K=4096 ストレス・決定性・不正入力の拒否）。累算精度契約はイシュー #380 で f32 累算へ変更済み（`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節） |
+| `tests/dispatch_boundary.rs` | 2 | #382 前段 | `dispatch_auto` の境界形状 TFLOPS 記録・`dispatch_backend_auto` のルーティング検証（TFLOPS 数値の転記は #382 のスコープ） |
+| `tests/memory_roundtrip.rs` | 6 | TASK-2.1 系 | メモリ確保・ゼロ初期化・プール再利用・アップロード/ダウンロード roundtrip・リーク検査 |
+| `tests/shader_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | TASK-11.3（#70） | `gemm.metal` の行列演算ユニット命令（`simdgroup_matrix` API）実在検査・REQ-8 境界チェック維持検査 |
+
+判定は数値一致系ファイル共通で `backend_cpu::parity::{compare, assert_parity}`（REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体）を使う。**閾値の独自定義・緩和はしない**（`.claude/rules/security.md`・`.claude/rules/coding-rust.md`）。入力生成は `bench_harness::rng::Xorshift64Star`（決定的シード）で固定する。
 
 ## Linux CI での型検査（macOS runner 未登録の代替）
 
@@ -68,11 +80,46 @@ cc: error: unrecognized command-line option '-mmacosx-version-min=11.0'
 
 ## 実機実行の実測状況
 
-TASK-1.8e（#42）実装時点では、本ドキュメントの手順自体は Linux 環境からは実行不能（Apple Silicon 実機が必要）のため、上記コマンドが実際に green になることの実測はユーザー側での確認を依頼する。実装環境で機械検証済みなのは以下の項目である。
+TASK-1.8e（#42）実装時点では、本ドキュメントの手順自体は Linux 環境からは実行不能（Apple Silicon 実機が必要）のため、上記コマンドが実際に green になることの実測はユーザー側での確認を依頼していた。**イシュー #380 で実機実測が完了し、以下の内容で確定した。**
+
+### 実行環境（#380）
+
+| 項目 | 値 |
+|------|-----|
+| チップ | Apple M4 Max（メモリ 64GB） |
+| OS | macOS 26.6（build 25G72） |
+| toolchain | `stable-aarch64-apple-darwin`（`rust-toolchain.toml` の override 適用） |
+
+### 実行結果（`make test-ignored-metal`。`--no-fail-fast --test-threads=1` で全 12 バイナリを中断なく実行）
+
+52 件全件 PASS（0 FAIL）。内訳は上記「テスト一覧と対応 REQ/TASK」表の `#[ignore]` 件数列のとおり。
+
+実装計画時点のインベントリでは `cpu_metal_f16_parity.rs` の 4 件（`f16_parity_baseline_8x8x8`・
+`f16_parity_boundary_shapes_non_multiple_of_eight`・`f16_parity_baseline_shape_512`・`f16_k4096_stress`）が
+`gemm_simdgroup_f16` の累算精度契約（half 統一アキュムレータ）に起因して REQ-2 複合判定を外れていたが、
+根本原因を修正（アキュムレータを `simdgroup_float8x8`〈f32 累算〉へ変更。詳細は
+`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節）した結果、6 件全件が green になった
+（`backend_cpu::parity` の判定式・閾値は無変更。「許容誤差の緩和」ではなく「累算精度の向上」）。
+
+MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイムコンパイル。`gemm_naive`/`gemm_tiled`/
+`gemm_simdgroup`/`gemm_simdgroup_f16`/`gemm_simdgroup_tiled` の全タイル候補 function constant 組合せを含む）
+も実機コンパイル成功を確認済み。
+
+### 運用上の注記
+
+- インベントリ確認・記録用の再実行は `--no-fail-fast`（cargo は既定で最初に失敗したテストバイナリで
+  中断するため、全 12 バイナリの結果を 1 回の実行で取得するには必須）・`--test-threads=1`（GPU 競合による
+  計測揺れを排除）を付けて行う。**正本コマンド `make test-ignored-metal` はこれらのフラグを付けない**
+  （デバッグ・インベントリ用途と受入チェック用途を分離する。`Makefile` は変更していない）
+- `dispatch_boundary.rs::boundary_shapes_tflops_record` は TFLOPS を出力するが本ドキュメントでは
+  pass/fail のみを記録対象とする。数値を `docs/perf/dispatch-boundary-measurement.md` へ転記するのは
+  別イシュー（#382。#382 は #381 依存）のスコープ
+
+過去に機械検証済みだった以下の項目は、上記の実機実行によって補完・上書きされた:
 
 - `cargo test --workspace --all-features`（`#[ignore]` テストが実行されないログの確認 = 「通常 CI では除外される」の検証）
 - `cargo check -p backend-metal --tests --target aarch64-apple-darwin`（型検査成立の確認）
-- `cargo fmt --all --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`（Linux ホスト分）
+- `cargo fmt --all --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`（Linux ホスト分。#380 では実機側でも再確認済み）
 
 ## 将来課題（スコープ外）
 

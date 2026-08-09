@@ -331,22 +331,21 @@ impl MetalGemm {
     /// （`crate::lib` クレートコメント「f16 の自動ディスパッチ統合は
     /// 本 TASK のスコープ外」）。
     ///
-    /// # 精度未検証（PR #346 codex-review P1-2 指摘。`_unverified` suffix）
+    /// # 精度検証状況（イシュー #380 で実機検証済み。`_unverified` suffix は維持）
     ///
-    /// `gemm_simdgroup_f16` は A・B・累算のすべてに `simdgroup_half8x8`
-    /// （half 型統一）を使う（`shaders/gemm.metal::gemm_simdgroup_f16`
-    /// 冒頭コメント「累算精度契約」参照）。CUDA 側 WMMA f16（f32 累算）とは
-    /// 精度契約が異なり、K が大きい形状では REQ-2 複合判定（相対誤差
-    /// 1e-3 未満 または 絶対誤差 1e-5 未満）を外れる可能性が高いことが
-    /// ドキュメント上の分析（`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」
-    /// 節）では判明済みだが、Metal 実機・Metal コンパイラでの実測検証は
-    /// 未実施（本実装セッションは Linux worktree のため）。呼び出し前に
-    /// 精度リスクを理解した上で使うことを明示するため、関数名に
-    /// `_unverified` を付け `#[doc(hidden)]` とする（本来のパブリック
-    /// ドキュメントには載せず、意図的に呼び出す利用者のみが到達できる
-    /// ようにする）。検証・下限確定は #158（TASK-8.3d・人間担当）が行い、
-    /// 検証が済むまで `dispatch_auto`／`dispatch_backend_auto`（production
-    /// 経路）へは統合しない。
+    /// `gemm_simdgroup_f16` は A・B に `simdgroup_half8x8`、アキュムレータに
+    /// `simdgroup_float8x8`（f32 累算）を使う（`shaders/gemm.metal::
+    /// gemm_simdgroup_f16` 冒頭コメント「累算精度契約」参照。実装計画時点の
+    /// half 統一判断はイシュー #380 の実機 spike で `simdgroup_float8x8`
+    /// アキュムレータが実在すると判明し変更済み）。CUDA 側 WMMA f16
+    /// （`f32.f16.f16.f32`。f32 累算）と精度契約が整合しており、Apple
+    /// Silicon 実機（M4 Max・macOS 26.6）での `cpu_metal_f16_parity.rs`
+    /// 6 件が REQ-2 複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）
+    /// で green であることを実測確認済み（`docs/backend-metal-real-device-
+    /// testing.md`）。`_unverified` suffix・`#[doc(hidden)]` は当面維持する
+    /// （本関数は `dispatch_auto`／`dispatch_backend_auto`（production 経路）
+    /// へまだ統合されていないため。統合可否・suffix 見直しは別イシューの
+    /// スコープとする）。
     ///
     /// `Simdgroup`（f32 版）と同じく [`pad8`] で実効次元（8 の倍数）を
     /// 算出し、[`pad_matrix_f16`] で A・B を 0 パディングしてから

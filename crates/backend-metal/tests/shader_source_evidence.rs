@@ -44,12 +44,18 @@ fn gemm_metal_source_uses_simdgroup_matrix_instructions() {
 /// 切り出す。
 ///
 /// 開始位置を `kernel void gemm_simdgroup_f16(` ではなく直前の `typedef` 行に
-/// 取る理由: 実際の行列型（`simdgroup_half8x8`）はカーネル本体内ではなく
-/// この typedef 行にのみ現れる（本体は型エイリアス `MM_T`/`ACC_T` を使う。
-/// L208-209）。`typedef` 行はこの f16 カーネル専用（f32 版 `gemm_simdgroup`
-/// は L154-179 で既に完結しており typedef より前）であり、かつ f16 カーネル
-/// 本体全体を包含するため、命令実在検査・REQ-8 境界チェック検査の両方に
-/// 安全に使える。
+/// 取る理由: `MM_T`（A・B のタイル型）の実際の行列型 `simdgroup_half8x8` は
+/// カーネル本体内ではなくこの typedef 行にのみ現れる（本体は型エイリアス
+/// `MM_T`/`ACC_T` を使う）。`typedef` 行はこの f16 カーネル専用（f32 版
+/// `gemm_simdgroup` は typedef より前で既に完結している）であり、かつ f16
+/// カーネル本体全体を包含するため、命令実在検査・REQ-8 境界チェック検査の
+/// 両方に安全に使える。
+///
+/// なお `ACC_T`（アキュムレータ型）はイシュー #380 で `simdgroup_float8x8`
+/// （f32 累算）に変更済みだが、`simdgroup_half8x8` typedef 自体（`MM_T` の
+/// 定義）はこの範囲の開始アンカーとして変更後も維持される（本ファイル末尾
+/// `gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions` が
+/// この typedef 行の存在に依存する）。
 ///
 /// 検索対象を `GEMM_METAL_SOURCE` 全文のままにすると、`gemm_simdgroup`
 /// （f32 版。L154〜）が同じ `simdgroup_load`/`simdgroup_multiply_accumulate`/
@@ -89,6 +95,35 @@ fn gemm_simdgroup_f16_source_uses_simdgroup_half_matrix_instructions() {
         assert!(
             kernel_body.contains(needle),
             "gemm.metal の gemm_simdgroup_f16 に `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #380 の証跡: `gemm_simdgroup_f16` のアキュムレータ型 `ACC_T` が
+/// `simdgroup_float8x8`（f32 累算）で定義されていることを CI（Linux
+/// self-hosted）上でロックする。
+///
+/// 背景: `gemm_simdgroup_f16` の実機パリティテスト
+/// （`crates/backend-metal/tests/gemm_simdgroup_parity.rs` 等）は Metal
+/// 実機依存のため `#[ignore]` で分離されており通常 CI では実行されない
+/// （本ファイル冒頭のとおり Linux CI では `include_str!` した文字列の
+/// 検査のみで完結する）。
+/// そのため #380 で導入した `ACC_T = simdgroup_float8x8` への変更
+/// （`MM_T`＝`simdgroup_half8x8` はロード型のまま据え置き、累算のみ f32 化）
+/// を、`typedef` 行の文字列としてここで固定しないと、将来
+/// `simdgroup_half8x8` へ差し戻す退行が発生しても通常 CI は green のまま
+/// 通過してしまい、実機 `#[ignore]` テストでのみ検出される弱い保護しか
+/// 残らない（PR #434 Bugbot 指摘 review_id 4891802188 への対応）。
+#[test]
+fn gemm_simdgroup_f16_source_uses_f32_accumulator_type() {
+    let kernel_body = gemm_simdgroup_f16_kernel_body();
+    for needle in [
+        "typedef simdgroup_half8x8 MM_T;",
+        "typedef simdgroup_float8x8 ACC_T;",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm.metal の gemm_simdgroup_f16 に `{needle}` が見つかりません（f32 累算への変更が失われていないか確認する）"
         );
     }
 }

@@ -3,24 +3,17 @@
 イシュー #188「perf(backend-metal): TASK-1.8f 動的タイル選択（行列サイズ別パラメータ化）の実装」の実測記録テンプレート。
 受け入れ条件「動的タイル選択（`dispatch_auto`）が simdgroup 版（TASK-1.8c・#40）比で性能向上を示す実測記録」に対応する。
 
-## 状態: 実測未実施（macOS 実機なし。実装環境は Linux）
+## 状態: MSL 構文検証・数値一致は実機検証済み（イシュー #380）。TFLOPS 実測は未実施
 
-本実装セッションは Linux worktree（`.claude/worktrees/wf_13f23f1a-da1-182`）で行っており、Metal 実機
-（Apple Silicon）が同一セッションで使用できない。本ファイルは計測手順・記録テンプレートのみを整備し、
-実測は Apple Silicon 実機で `cargo run -p backend-metal --example gemm_bench --release` を実行した後、
-下記テンプレートへ結果を転記する運用とする。実機 CI 整備自体はイシュー #42（TASK-1.8e）のスコープ。
-
-代わりに以下は本実装セッションで検証済み:
-
-- `cargo check` / `cargo clippy --all-targets -- -D warnings` を `--target aarch64-apple-darwin` で実行し、
-  `gemm_simdgroup_tiled` の Rust／objc2 側結線（`crate::gemm`・`crate::pipeline`）がコンパイル可能であることを
-  クロスターゲットビルドで確認済み（`Makefile` の `build-cross` と同一方式）
-- `crate::tile`（`TileConfig`・`select`・`fallback_chain`・`validate`）は GPU 非依存の純粋関数のため、
-  Linux 上の `cargo test -p backend-metal` で単体テスト済み（23 tests pass。本 PR に含む）
-- `crates/backend-metal/shaders/gemm.metal` の `gemm_simdgroup_tiled` カーネル自体（MSL 構文・
-  `simdgroup_load`/`simdgroup_multiply_accumulate`/`simdgroup_store` の呼び出し形）は Metal コンパイラでの
-  構文検証を実施できていない（Linux 環境に Metal コンパイラが存在しないため）。**実機での最初の実行が
-  構文検証を兼ねる**点に注意
+本ファイルは当初 Linux worktree で作成され、Metal 実機（Apple Silicon）が同一セッションで使用できなかった
+ため計測手順・記録テンプレートのみを整備していた。イシュー #380 で Apple Silicon 実機
+（M4 Max・macOS 26.6・`stable-aarch64-apple-darwin`）を用い、`gemm_simdgroup_tiled` を含む `gemm.metal` 全体
+が `MetalGemm::new` の `newLibraryWithSource` で実機コンパイル成功し（**MSL 構文検証は完了**。当初懸念して
+いた「実機での最初の実行が構文検証を兼ねる」は成立し、pass した）、`gemm_dynamic_tile_parity.rs`
+（全タイル候補の function constant 組合せを含む 6 件）が数値一致で PASS することを確認済み
+（`docs/backend-metal-real-device-testing.md`）。**TFLOPS 実測（本ファイルの主目的である simdgroup 版との
+性能比較）は #380 のスコープ外であり、引き続き未実施**（下記テンプレートに従い後続イシュー〈#382 系〉で
+実施する）。実機 CI 整備自体はイシュー #42（TASK-1.8e）のスコープ。
 
 ## 計測手順（Apple Silicon 実機）
 
