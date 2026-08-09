@@ -93,8 +93,12 @@ fn transformer_onnx_end_to_end_matches_pytorch_reference_within_req7_tolerance()
     // `/layers.0/self_attn/Div` の `InterpError::TypeMismatch` は解消済みで、
     // run 自体は成功する。本テスト実装時点の実測で唯一残る失敗点は本関数末尾の
     // REQ-7 数値一致基準（相対誤差 1e-3）の `assert!` で、16,384 要素中 7 要素が
-    // 超過することを確認済み（次工程 #89 へ引き継ぎ。実測詳細は
-    // docs/perf/onnx-transformer-e2e-measurement.md 参照）。
+    // 超過することを確認済み。#413 で erf 精度改善・主要オペ累積の f64 化を含む
+    // 実装改善を試みたが、最も強い改善（`erf` 高精度化 + `MatMul`/`Gemm`/
+    // `LayerNormalization`/`Softmax` 累積の f64 化）を適用しても 1 要素が残存し
+    // 解消しないことを確認した（判定式が近ゼロ参照値で相対誤差を拡大する構造的性質が
+    // 支配的。実測詳細・spec への改善提案は
+    // docs/perf/onnx-transformer-e2e-error-analysis.md 参照）。
     // 本テストはこの失敗を隠蔽せず素直に panic させる
     // （no-silent-skip 契約。OWASP A08 の迂回経路を作らない方針に合わせる）。
     let start = Instant::now();
