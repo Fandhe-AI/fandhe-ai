@@ -182,31 +182,43 @@ kernel void gemm_simdgroup(
 // カーネル。`gemm_simdgroup`（f32 版）と同じく 1 threadgroup = 1 simdgroup が
 // C の 8x8 タイルを 1 つ担当する構成をそのまま half 型へ写し替える。
 //
-// **累算精度契約（実装計画 3.1 節の判断）**: A・B・C（アキュムレータ含む）
-// すべて `simdgroup_half8x8`（half 型統一）とする。MSL 仕様
-// （`simdgroup_matrix<T,Cols,Rows>`・`simdgroup_multiply_accumulate(d,a,b,c)`
-// はいずれも単一の型パラメータ `T` に対するテンプレートであり、
-// `apple-silicon` スキル `references/msl/data-types.md`・
-// `simdgroup-functions.md` のいずれにも「A/B が half・C が float」という
-// 混在型オーバーロードは記載がない（Linux 実装環境では Metal コンパイラで
-// 実地検証もできない）。未確認のオーバーロードを推定で使うより、仕様上
-// 確実に成立する単一型テンプレートを選ぶ（advisor 助言）。
+// **累算精度契約（イシュー #380 実機検証で確定。実装計画時点の half 統一
+// 判断から変更）**: A・B は `simdgroup_half8x8`（`MM_T`）のまま、
+// アキュムレータ（`ACC_T`）は `simdgroup_float8x8` の f32 累算とする。
+// 実装計画時点（Linux 実装環境）では「A/B が half・C が float という
+// 混在型オーバーロードは `apple-silicon` スキルの参照ドキュメントに記載が
+// なく、実地検証もできない」ことを理由に half 統一を選んでいたが、Apple
+// Silicon 実機（M4 Max・macOS 26.6）での `MTLDevice.makeLibrary(source:)`
+// ランタイムコンパイルによる spike で以下が判明した:
 //
-// この選択は CUDA 側 WMMA f16（`kernels_wmma.rs::gemm_wmma_f16`。
-// `f32.f16.f16.f32`。f32 累算）と精度契約が異なる点に注意
-// （`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節に明記する）。half
-// 累算は f32 累算より桁落ちしやすく、K が大きいストレスケース（K=4096 等）
-// では複合判定（REQ-2）を外れる可能性が高い。実機で外れた場合も緩和せず
-// 事実を記録し #158（下限確定）へ引き継ぐ（`.claude/rules/coding-rust.md`
-// 「バックエンド間数値一致テストの許容誤差を単独で緩和しない」）。
+//   1. `simdgroup_multiply_accumulate(simdgroup_float8x8&, simdgroup_half8x8,
+//      simdgroup_half8x8, simdgroup_float8x8)` はコンパイル成功する
+//      （A/B=half・アキュムレータ=float の混在オーバーロードは実在する）。
+//   2. ただし `simdgroup_store(simdgroup_float8x8, device half*)` は
+//      コンパイル不可（診断: "deduced conflicting types for parameter 'T'
+//      ('float' vs. 'half')"）。float アキュムレータを half 出力バッファへ
+//      直接 store する経路は存在しない。
 //
-// `ACC_T` を単一の typedef にしておくことで、実機で
-// `simdgroup_float8x8` 混在アキュムレータが実際に使えると判明した場合に
-// この 1 行（と `c` バッファの型・`crate::gemm::dispatch_f16` の出力型）
-// だけを変更すれば切替できるようにする（reversible な設計。advisor 助言）。
-// 現状は half 統一のため `ACC_T == MM_T`。
-typedef simdgroup_half8x8 MM_T; // A・B の simdgroup タイル型
-typedef simdgroup_half8x8 ACC_T; // アキュムレータ型（現状 half 統一）
+// この 2 点から、`simdgroup_float8x8` → `threadgroup float` へ一旦
+// `simdgroup_store` → `threadgroup_barrier` で同期 → スレッド単位で
+// `(half)` へ変換して `device half*` へ書き戻す、という 2 段エピローグ
+// （変種 B）を採用する。`device float*` へ直接 store する変種 A ではなく
+// 変種 B を選ぶ理由: `dispatch_f16_prepared_unverified` のシグネチャ・
+// `MetalHalfBuffer` の `c_buf`・C バッファの転送バイト数を変えずに済み、
+// #383（f16 対 PyTorch MPS f16 実測）の比較手法・
+// `f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs` の
+// 入力検証契約（`MetalError::ALenMismatch { expected: 64, actual: 32 }`）が
+// 無傷で保たれる。
+//
+// 本変更は CPU 参照実装（`backend_cpu::parity::matmul_reference_fma`。
+// f32 累算 → 最後に 1 回だけ f16 へ丸め）との累算精度契約を一致させる
+// ものであり、`.claude/rules/coding-rust.md` の FMA 契約統一方針（CPU
+// 参照は `f32::mul_add`、GPU 側の既定 FMA 契約と揃える）、および CUDA 側
+// WMMA f16（`kernels_wmma.rs::gemm_wmma_f16`。`f32.f16.f16.f32`。f32 累算）
+// との整合を高める（REQ-2 複合判定の閾値・`backend_cpu::parity` は無変更。
+// 「許容誤差の緩和」ではなく「累算精度の向上」）。
+typedef simdgroup_half8x8 MM_T; // A・B の simdgroup タイル型（half のまま）
+typedef simdgroup_float8x8 ACC_T; // アキュムレータ型（f32 累算。#380 で変更）
 
 // **手動境界チェック（REQ-8）**: `gemm_simdgroup`（f32 版）と同じ契約。
 // `dims.m`/`n`/`k` は `crate::gemm::MetalGemm::dispatch_f16` が
@@ -222,12 +234,23 @@ typedef simdgroup_half8x8 ACC_T; // アキュムレータ型（現状 half 統�
 // 対応）と同じ理由で `row0`/`col0`/`p0` を `size_t` へ昇格してから乗算する
 // （`u32::MAX` 超の有効な行列サイズでもポインタオフセットが溢れないように
 // する）。
+//
+// エピローグの `threadgroup float stage[64]` は 8x8 タイル 1 つ分の
+// 固定サイズ静的配列であり、`gemm_simdgroup_tiled` の動的共有メモリ
+// （`setThreadgroupMemoryLength_atIndex`）とは別経路のため、本カーネルの
+// dispatch 側（`encode_dispatch_f16`）に動的長さ設定を追加する必要はない。
+// `thread_index_in_threadgroup` は `encode_dispatch_f16`
+// （`crate::gemm::gemm.rs`）が `threads_per_tg = SIMDGROUP_THREADGROUP_WIDTH
+// = 32` で dispatch する前提（`gemm_simdgroup` と同一の 1 threadgroup = 1
+// simdgroup 構成）にもとづき、32 スレッドで 64 要素をストライド 2 巡で
+// 書き戻す。
 kernel void gemm_simdgroup_f16(
     device const half* a [[buffer(0)]],
     device const half* b [[buffer(1)]],
     device half* c [[buffer(2)]],
     constant Dims& dims [[buffer(3)]],
-    uint2 tgid [[threadgroup_position_in_grid]]
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]]
 ) {
     uint row0 = tgid.y * 8;
     uint col0 = tgid.x * 8;
@@ -236,7 +259,7 @@ kernel void gemm_simdgroup_f16(
         return;
     }
 
-    ACC_T acc = ACC_T(static_cast<half>(0.0h));
+    ACC_T acc = ACC_T(0.0f);
     uint k_tiles = dims.k / 8;
     for (uint t = 0; t < k_tiles; t++) {
         uint p0 = t * 8;
@@ -246,7 +269,31 @@ kernel void gemm_simdgroup_f16(
         simdgroup_load(b_tile, b + (size_t)p0 * (size_t)dims.n + (size_t)col0, dims.n);
         simdgroup_multiply_accumulate(acc, a_tile, b_tile, acc);
     }
-    simdgroup_store(acc, c + (size_t)row0 * (size_t)dims.n + (size_t)col0, dims.n);
+
+    // 変種 B（#380 spike 実測で確定）: f32 アキュムレータを一旦
+    // threadgroup メモリへ f32 のまま store し、全スレッド完了を
+    // `threadgroup_barrier` で同期してから、各スレッドが担当要素を
+    // half へ変換して `device half*` の C バッファへ書き戻す。
+    // `simdgroup_store(simdgroup_float8x8, device half*)` は型不一致で
+    // コンパイル不可（spike で確認済み）なため、f32 アキュムレータから
+    // 直接 half バッファへ store することはできない。
+    threadgroup float stage[64];
+    simdgroup_store(acc, stage, 8);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // stage はタイル内ローカル座標（行優先・ストライド 8）で埋まっている
+    // 一方、`c` は行列全体のストライド `dims.n` を持つため、書き戻し時に
+    // タイルローカル添字 (r, col) からグローバル添字
+    // `(row0 + r) * dims.n + col0 + col` への写像を明示的に行う
+    // （ストライドを取り違えると `f16_parity_baseline_8x8x8`
+    // （dims.n == 8 のため写像ミスが露見しない）は通っても、非正方・
+    // 大型形状（`dims.n != 8`）でパリティ FAIL として現れる）。
+    for (uint i = tid; i < 64; i += 32u) { // 32 = Rust 側 SIMDGROUP_THREADGROUP_WIDTH（gemm.rs）と一致
+        uint r = i / 8;
+        uint col = i % 8;
+        size_t dst = (size_t)(row0 + r) * (size_t)dims.n + (size_t)(col0 + col);
+        c[dst] = (half)stage[i];
+    }
 }
 
 // 動的タイル選択（TASK-1.8f・#188）: BM/BN/BK/WM/WN パラメータ化 GEMM。
