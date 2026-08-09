@@ -4,7 +4,7 @@
 
 | 区分 | クレート | 条件 |
 |------|---------|------|
-| CUDA | `cudarc`（`driver`／`nvrtc`／`dynamic-loading`／`f16` feature） | 無条件依存。動的ロード方式（CUDA toolkit 非搭載環境でもビルド成立） |
+| CUDA | `cudarc`（`driver`／`nvrtc`／`dynamic-loading`／`cuda-13000`／`f16` feature） | 無条件依存。動的ロード方式（CUDA toolkit 非搭載環境でもビルド成立）。`cuda-13000` は cudarc の CUDA API バージョン feature（指定必須。未指定ではビルド不能）で、DGX Spark GB10 実機の CUDA 13.0 系・PoC-v2-3／PoC-v2-5 実測構成を踏襲した採用。イシュー #412 でユーザー承認済み。ライセンス実測は `docs/license-matrix.md` 4 節を参照 |
 | Metal | `objc2`・`objc2-foundation`・`objc2-metal` | `cfg(target_os = "macos")` 限定 |
 | 相互運用 | `safetensors` | ワイヤフォーマット処理のみ（テンソルへのマッピングは自作） |
 | 相互運用 | `prost` | ONNX の protobuf デコードのみ。`prost-build`（`protoc` ビルド時依存）は使わない（手書き derive。PoC-v2-6） |
