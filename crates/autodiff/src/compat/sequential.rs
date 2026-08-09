@@ -201,12 +201,30 @@ impl Sequential {
     /// - 個々のテンソルが上記の内部整合性検証に反する（例: bias の shape
     ///   が対応する weight の out_features と食い違う）→
     ///   `Linear::from_parameters` 由来の `AutodiffError::Shape`
+    ///
+    /// **アトミック性（two-pass）**: `updated` は 1 パス目で全層分を検証込みで
+    /// `Linear::from_parameters` に通し、実際の代入（`self.layers` への
+    /// 書き戻し）は全件の検証が成功した後の 2 パス目でまとめて行う。層ごとに
+    /// 検証と代入を同時に行うと、途中の層（例: 2 層目）で shape 不整合エラーが
+    /// 起きた際に、既に代入済みの前段の層は新パラメータのまま・未処理の後続層は
+    /// 旧パラメータのままという不整合な混在状態がモデルに残ってしまう
+    /// （呼び出し側は `Err` を受け取るにもかかわらず一部だけ更新されて
+    /// 見える。fail-closed 違反。`.claude/rules/security.md` A03。
+    /// review 指摘 #294）。two-pass にすることで、エラー時は呼び出し前の
+    /// 状態を完全に維持する。
     pub fn apply_parameters(&mut self, updated: Vec<Tensor<f32>>) -> Result<(), AutodiffError> {
+        // trainable_parameters() と同じ順序（層の追加順）で学習可能層への
+        // 可変参照を先に集める。まだ何も書き換えない。
+        let linears: Vec<&mut Linear> = self
+            .layers
+            .iter_mut()
+            .filter_map(|layer| layer.as_linear_mut())
+            .collect();
+
         let mut updated = updated.into_iter();
-        for layer in &mut self.layers {
-            let Some(linear) = layer.as_linear_mut() else {
-                continue;
-            };
+        // 1 パス目: 検証込みで新しい Linear を全層分構築する（代入は未実施）。
+        let mut rebuilt = Vec::with_capacity(linears.len());
+        for linear in &linears {
             let has_bias = linear.bias().is_some();
             let new_weight = updated.next().ok_or_else(|| {
                 AutodiffError::InvalidArgument(
@@ -226,7 +244,7 @@ impl Sequential {
             } else {
                 None
             };
-            *linear = Linear::from_parameters(new_weight, new_bias)?;
+            rebuilt.push(Linear::from_parameters(new_weight, new_bias)?);
         }
         if updated.next().is_some() {
             return Err(AutodiffError::InvalidArgument(
@@ -234,6 +252,11 @@ impl Sequential {
                  trainable_parameters()"
                     .to_string(),
             ));
+        }
+        // 2 パス目: ここに到達した時点で件数・shape 検証は全件完了しているため、
+        // 代入自体は失敗し得ない。
+        for (linear, new_linear) in linears.into_iter().zip(rebuilt) {
+            *linear = new_linear;
         }
         Ok(())
     }
@@ -271,9 +294,14 @@ impl<'m, 't> SequentialVars<'m, 't> {
         // 側の走査順と対応が取れる。添字アクセス（`self.linears[i]`）では
         // なくイテレータの `next()` を使う理由: 両者の対応は `bind`/
         // `forward` が同じ `as_linear().is_some()` 述語で層を数えている
-        // ことに依存する不変条件であり、将来どちらかの実装が変わって
-        // 対応が崩れた場合でも、添字アクセスが本番経路で panic するのを
-        // 避け fail-closed（`InvalidArgument`）にする
+        // ことに依存する不変条件であり、この不変条件自体は `self.model`
+        // が `bind` 時点の `&'m Sequential` を保持し続ける（借用が生きた
+        // ままの `SequentialVars` からは `model.layers` を書き換えられない）
+        // ため現状は構造的に破れない。したがってこの `ok_or_else` 分岐は
+        // 現状のコード構成では到達しない防御コードである。将来この関数・
+        // `bind` のいずれかを書き換えて上記の対応関係が崩れた場合に、
+        // 添字アクセスが本番経路で panic するのを避け fail-closed
+        // （`InvalidArgument`）にするための保険として残す
         // （`.claude/rules/coding-rust.md` 本番経路 panic 禁止方針）。
         let mut linears = self.linears.iter();
         for layer in &self.model.layers {
@@ -281,7 +309,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 let vars = linears.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
                         "SequentialVars::forward: bind 済み LinearVars が model.layers の \
-                         Linear 層数より少ない（bind 後に model.layers が変化した可能性がある）"
+                         Linear 層数より少ない（bind/forward 間の Linear 層数対応が崩れた）"
                             .to_string(),
                     )
                 })?;
@@ -558,6 +586,36 @@ mod tests {
     }
 
     #[test]
+    fn apply_parameters_leaves_model_unchanged_on_excess_element_count() {
+        // two-pass 化の回帰テスト（review 指摘 #294 の Medium 項目、後半）:
+        // 修正前は `if updated.next().is_some()` の超過件数チェックが
+        // 全層への代入完了「後」に走っていたため、この分岐で `Err` を
+        // 返すケースでも実際には全層が新パラメータへ更新済みという
+        // 不整合（呼び出し側はエラー扱いなのにモデルは書き換わっている）
+        // があった。two-pass では代入前に検証（超過チェックを含む）が
+        // 完了するため、この場合もモデルは元の値のまま残ることを確認する。
+        let mut model = Sequential::new().add_linear(2, 1, SEED1).unwrap();
+        let original_params: Vec<Tensor<f32>> =
+            model.trainable_parameters().into_iter().cloned().collect();
+
+        // trainable_parameters() は [weight, bias] の 2 件を要求するが
+        // 3 件目（余剰）を渡す。
+        let weight = Tensor::new(vec![9.0f32, 9.0], &[2, 1]).unwrap();
+        let bias = Tensor::new(vec![9.0f32], &[1]).unwrap();
+        let extra = Tensor::new(vec![9.0f32], &[1]).unwrap();
+        let err = model
+            .apply_parameters(vec![weight, bias, extra])
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+
+        let after_params = model.trainable_parameters();
+        assert_eq!(original_params.len(), after_params.len());
+        for (before, after) in original_params.iter().zip(after_params.iter()) {
+            assert_eq!(dense_vec(before), dense_vec(after));
+        }
+    }
+
+    #[test]
     fn apply_parameters_updates_weights_used_by_subsequent_predict() {
         // apply_parameters で書き戻した値が実際に以後の forward に
         // 反映されることを確認する（薄いラッパー性の実証: compat 層は
@@ -575,5 +633,70 @@ mod tests {
             .unwrap();
         // weight=0 のため matmul 項は 0、bias=7.0 のみが出力される。
         assert!((output.get(&[0, 0]).unwrap() - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_parameters_updates_bias_less_layer() {
+        // `apply_parameters` の has_bias == false 分岐（bias を渡さず
+        // weight のみ消費する経路）を直接カバーする。`Sequential::add_linear`
+        // は常に bias ありの層しか組み立てられないため（公開 API からは
+        // 到達不能。review 指摘 #294）、bias なし `Linear::new` を内部
+        // コンストラクタ（`Sequential { layers: ... }`。同一クレート内の
+        // テストのみ使用可能）で直接組み込んで検証する。
+        let linear = Linear::new(2, 1, false, SEED1).unwrap();
+        let mut model = Sequential {
+            layers: vec![Box::new(linear)],
+        };
+
+        // has_bias == false のため trainable_parameters()/apply_parameters()
+        // は weight 1 件のみを要求する。
+        assert_eq!(model.trainable_parameters().len(), 1);
+
+        let zero_weight = Tensor::new(vec![0.0f32, 0.0], &[2, 1]).unwrap();
+        model.apply_parameters(vec![zero_weight]).unwrap();
+
+        let input = Tensor::new(vec![1.0f32, 2.0], &[1, 2]).unwrap();
+        let output = model
+            .predict_with_ops(&input, crate::test_support::test_ops())
+            .unwrap();
+        // weight=0・bias なしのため出力は 0.0。
+        assert!((output.get(&[0, 0]).unwrap()).abs() < 1e-6);
+    }
+
+    #[test]
+    fn apply_parameters_leaves_model_unchanged_on_mid_sequence_shape_error() {
+        // two-pass 化（review 指摘 #294 の Medium 項目）の回帰テスト:
+        // 2 層目で shape 不整合エラーが起きても、検証は代入前に全件完了する
+        // ため 1 層目（先に走査される層）はエラー前の値のまま保持される
+        // （部分適用によるモデルの不整合な混在状態を防ぐ。
+        // `.claude/rules/security.md` A03）。
+        let mut model = Sequential::new()
+            .add_linear(2, 3, SEED1)
+            .unwrap()
+            .add_relu()
+            .add_linear(3, 1, SEED2)
+            .unwrap();
+
+        let original_params: Vec<Tensor<f32>> =
+            model.trainable_parameters().into_iter().cloned().collect();
+
+        // 1 層目（weight, bias）は妥当な shape、2 層目の bias は
+        // out_features=1 と食い違う shape（[5]）にして拒否させる。
+        let l1_weight = Tensor::new(vec![9.0f32; 6], &[2, 3]).unwrap();
+        let l1_bias = Tensor::new(vec![9.0f32; 3], &[3]).unwrap();
+        let l2_weight = Tensor::new(vec![9.0f32; 3], &[3, 1]).unwrap();
+        let l2_bad_bias = Tensor::new(vec![9.0f32; 5], &[5]).unwrap();
+
+        let err = model
+            .apply_parameters(vec![l1_weight, l1_bias, l2_weight, l2_bad_bias])
+            .unwrap_err();
+        assert!(matches!(err, AutodiffError::Shape(_)));
+
+        // 1 層目を含め全パラメータがエラー前の値のまま残っていること。
+        let after_params = model.trainable_parameters();
+        assert_eq!(original_params.len(), after_params.len());
+        for (before, after) in original_params.iter().zip(after_params.iter()) {
+            assert_eq!(dense_vec(before), dense_vec(after));
+        }
     }
 }
