@@ -264,7 +264,7 @@ impl Tape {
     /// P1 是正で `Tape::new_with_ops` へ改名した）。`ops` は
     /// このテープ上のすべてのバックエンド実行（融合実行・per-op
     /// フォールバック・`matmul`/`sum`/`max` の実行）に使われる必須所有値
-    /// であり、`facade`（TASK-9.3。未実装）の composition root が解決した
+    /// であり、`facade`（TASK-9.3・イシュー #410 で実装済み）の composition root が解決した
     /// 具体 `BackendOps` 実装、明示指定した `Device` の結線結果、または
     /// テスト用フィクスチャのいずれかを渡す（`docs/
     /// fusion-graph-design.md` §1・§3.4）。`TapeId` は `NEXT_TAPE_ID`

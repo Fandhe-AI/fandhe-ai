@@ -1,0 +1,91 @@
+//! composition root の結線検証（受入基準 1）。
+//!
+//! `facade::tape()`（既定 CPU）・`facade::tape_for(Device)`（明示指定）の
+//! 両経路で構築した `Tape` 上で forward → backward が成立することを固定
+//! する。CUDA 経路は実行環境適応型（driver 有無どちらでも green）とし、
+//! CUDA 実機テストの `#[ignore]` 分離方針（`.claude/rules/coding-rust.md`）
+//! とは別に、`backend_cuda::CudaDevice::is_available()` で分岐する
+//! fail-safe な検証にとどめる（実機必須の性能計測等は含まないため）。
+
+use facade::Device;
+use tensor_core::Tensor;
+
+fn sample_tensor() -> Tensor<f32> {
+    Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("sample tensor は shape が一致する")
+}
+
+/// `facade::tape()`（既定 CPU）上で forward・backward が成立する。
+#[test]
+fn default_tape_forward_backward_succeeds() {
+    let tape = facade::tape();
+    let a = tape.var(&sample_tensor());
+    let b = tape.var(&sample_tensor());
+    let sum = a.add(&b).expect("add は shape 一致で成功する");
+    let loss = sum.sum(None).expect("sum は成功する");
+
+    let grads = tape.backward(&loss).expect("backward は成功する");
+    assert!(
+        grads.get(&a).expect("tape 一致").is_some(),
+        "a への勾配が伝播しているはず"
+    );
+}
+
+/// `facade::tape_for(Device::Cpu)` は常に `Ok` を返し、既定 `tape()` と
+/// 同様に forward・backward が成立する。
+#[test]
+fn tape_for_cpu_succeeds_and_matches_default_semantics() {
+    let tape = facade::tape_for(Device::Cpu).expect("CPU は常に利用可能");
+    let a = tape.var(&sample_tensor());
+    let b = tape.var(&sample_tensor());
+    let product = a.mul(&b).expect("mul は shape 一致で成功する");
+    let loss = product.sum(None).expect("sum は成功する");
+
+    let grads = tape.backward(&loss).expect("backward は成功する");
+    assert!(grads.get(&a).expect("tape 一致").is_some());
+}
+
+/// `facade::tape_for(Device::Cuda(0))`: 実行環境適応型。
+/// `backend_cuda::CudaDevice::is_available()` が `true` の環境（CUDA
+/// driver 搭載・`CudaDeviceProvider::select` によるデバイス存在検証成功）
+/// では `Ok` を返すこと、`false` の環境（driver 非搭載。CI self-hosted
+/// の既定）では panic せず `Err(BackendError::CudaUnavailable(_))` を
+/// 返すことを検証する（CI self-hosted runner の CUDA 有無どちらでも
+/// green。イシュー #410 実装計画 §3「tests/tape_construction.rs」）。
+///
+/// **意図的に forward 実行までは検証しない**: driver（`libcuda`）検出と
+/// NVRTC（`libnvrtc`。カーネルコンパイルに必要）搭載は独立した環境
+/// 前提であり、「driver は検出できるが NVRTC toolkit は未搭載」の
+/// 環境が実在する（このためのフォールバックが `cudarc`
+/// 動的ロード方式・`build-no-cuda-toolkit` CI ジョブの存在理由でもある。
+/// `.claude/rules/ci.md`）。composition root（本クレート）の責務は
+/// `Device` → `BackendOps` の**結線**であり、GPU カーネルの実行可否は
+/// `backend-cuda` クレート自身の実機テストが担う（本テストのスコープ
+/// 外）。
+#[test]
+fn tape_for_cuda_adapts_to_runtime_availability() {
+    let result = facade::tape_for(Device::Cuda(0));
+    if backend_cuda::CudaDevice::is_available() {
+        let _tape = result.expect("CUDA driver 搭載環境では結線が成功するはず");
+    } else {
+        let err = result.expect_err("CUDA driver 非搭載環境では失敗するはず");
+        assert!(
+            matches!(
+                err,
+                tensor_core::BackendError::CudaUnavailable(_)
+                    | tensor_core::BackendError::DeviceUnavailable(_)
+            ),
+            "CUDA 不在時のエラーは CudaUnavailable/DeviceUnavailable のいずれかのはず: {err:?}"
+        );
+    }
+}
+
+/// 範囲外 ordinal（`usize::MAX`）は `Err` になる（fail-fast。
+/// panic しないことを固定する）。
+#[test]
+fn tape_for_cuda_out_of_range_ordinal_returns_err() {
+    let result = facade::tape_for(Device::Cuda(usize::MAX));
+    assert!(
+        result.is_err(),
+        "範囲外 ordinal（usize::MAX）は Err を返すはず"
+    );
+}
