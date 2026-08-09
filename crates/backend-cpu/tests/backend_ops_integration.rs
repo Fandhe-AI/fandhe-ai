@@ -24,7 +24,7 @@ use backend_cpu::parity::{assert_parity, matmul_reference_fma};
 use backend_cuda::CudaBackendOps;
 use bench_harness::rng::Xorshift64Star;
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, Tensor, ops_for};
+use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor, ops_for};
 
 #[cfg(target_os = "macos")]
 use backend_metal::MetalBackendOps;
@@ -451,4 +451,63 @@ fn end_to_end_dispatch_metal_matches_cpu_when_available_or_returns_typed_error()
         }
         Err(other) => panic!("unexpected error variant for Metal end-to-end dispatch: {other}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// 4. `run_fused` の結線ガード（#167 実装時に発見した結線ギャップの回帰
+//    テスト。TASK-12.1 系列〈#163・#164〉が「相手のスコープ」と委ね合った
+//    結果 `CpuBackendOps` は `run_fused` をオーバーライドしておらず、
+//    デフォルト実装〈`Unsupported` fail-safe〉のまま融合カーネルが
+//    一度も起動しない状態だった。本テストはマージ前は
+//    `BackendError::Unsupported` で失敗する＝結線漏れの回帰を検知する。
+// ---------------------------------------------------------------------
+
+/// `&dyn BackendOps` 経由の `run_fused` が `Ok` を返し（デフォルト
+/// `Unsupported` へフォールバックしていないこと）、結果が per-op 逐次
+/// 合成（非融合基準）と REQ-2 複合判定で一致することを固定する。
+/// プランは `fused_elementwise_parity.rs` の ew4（add→relu→exp→tanh）と
+/// 同型（`tensor_core::FusionPlan::from_ops` はクレート間構築経路。
+/// `docs/kernel-fusion.md` §3.4 根拠）。
+#[test]
+fn cpu_run_fused_via_backend_ops_is_wired_and_matches_sequential_composition() {
+    let cpu = CpuBackendOps::new();
+    let ops: Vec<&dyn BackendOps> = vec![&cpu];
+    let selected = ops_for(&ops, Device::Cpu).expect("cpu ops registered");
+
+    let shape = vec![1usize << 10];
+    let x_data = Xorshift64Star::new(301).fill_vec(shape[0]);
+    let y_data = Xorshift64Star::new(302).fill_vec(shape[0]);
+    let x = Tensor::new(x_data, &shape).expect("valid tensor");
+    let y = Tensor::new(y_data, &shape).expect("valid tensor");
+
+    // ops: 0=Input(x) 1=Input(y) 2=Add(0,1) 3=Relu(2) 4=Exp(3) 5=Tanh(4)
+    let plan = FusionPlan::from_ops(
+        vec![
+            FusedOpKind::Input { leaf_index: 0 },
+            FusedOpKind::Input { leaf_index: 1 },
+            FusedOpKind::Add { lhs: 0, rhs: 1 },
+            FusedOpKind::Relu { input: 2 },
+            FusedOpKind::Exp { input: 3 },
+            FusedOpKind::Tanh { input: 4 },
+        ],
+        shape,
+        DType::F32,
+        2,
+    )
+    .expect("well-formed fusion plan");
+
+    let fused = selected
+        .run_fused(&plan, &[&x, &y])
+        .expect("run_fused must be wired to the fusion kernel (not the Unsupported default)");
+
+    let a = selected.add(&x, &y).expect("cpu add always succeeds");
+    let b = selected.relu(&a).expect("cpu relu always succeeds");
+    let c = selected.exp(&b).expect("cpu exp always succeeds");
+    let expected = selected.tanh(&c).expect("cpu tanh always succeeds");
+
+    assert_parity(
+        "run_fused via BackendOps vs sequential per-op composition",
+        fused.as_slice().expect("contiguous fused result"),
+        expected.as_slice().expect("contiguous sequential result"),
+    );
 }

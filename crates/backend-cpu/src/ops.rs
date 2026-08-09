@@ -11,10 +11,10 @@
 //! 実カーネルを実行できることを保証する）。
 
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, Tensor};
+use tensor_core::{Activation, BackendOps, FusionPlan, Tensor};
 
 use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
-use crate::{elementwise, reduction};
+use crate::{elementwise, fused_elementwise, reduction};
 
 /// CPU バックエンドの `BackendOps` 実装。状態を持たないゼロサイズ型
 /// （CPU カーネルはホストメモリのみを扱い、CUDA `CudaDevice`／Metal
@@ -191,6 +191,45 @@ impl BackendOps for CpuBackendOps {
 
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         reduction::max(a, dim).map_err(reduce_error_to_backend_error)
+    }
+
+    /// [`tensor_core::BackendOps::run_fused`] のデフォルト実装（`Unsupported`
+    /// fail-safe）を、CPU 単一パス融合カーネル
+    /// [`fused_elementwise::run_fused_elementwise`] へ差し替える。
+    ///
+    /// # 結線ギャップの経緯（#167 実装時に発見）
+    /// TASK-12.1 系列は融合 IR（#163・PR #400）と CPU カーネル本体
+    /// （#164・PR #403）の双方をマージ済みだったが、#400 は「CPU 融合実行
+    /// への結線は #164 のスコープ」、#403 は「`run_fused` オーバーライドの
+    /// 提供元は backend-cpu 側（#163 のスコープ）」としており、双方が
+    /// 相手に委ねた結果、本オーバーライドが一度も追加されず
+    /// `CpuBackendOps` は常にデフォルト `Unsupported` を返して per-op
+    /// フォールバックに倒れていた（融合カーネルが実行系上で一度も起動
+    /// しない状態）。TASK-12.2a（本イシュー #167）の受け入れ条件は
+    /// 「融合効果の実測記録」であり、この状態では融合条件と非融合条件が
+    /// 区別不能で実測が構造的に不可能なため、本イシューの前提ステップと
+    /// してここで結線する（新規設計を含まない・両先行イシューの設計文書
+    /// が明示的に予定していた結線であることが安全側判断の根拠）。
+    ///
+    /// # 呼び出し元
+    /// `autodiff::tape` の遅延評価 2 層（`materialize_fallible`／
+    /// `materialize_non_fallible`）から `BackendOps::run_fused` 経由で
+    /// 呼ばれる。CUDA／Metal は融合カーネル生成が未実装のためデフォルト
+    /// （`Unsupported`）のままとし、呼び出し元の per-op フォールバックへ
+    /// 委ねる（本オーバーライドは CPU 限定）。
+    ///
+    /// # 数値契約
+    /// `run_fused_elementwise` は per-op 逐次合成と同一スカラー演算
+    /// （`f32::mul_add` を用いない単純四則・超越関数）で構成されるため
+    /// 数値は不変。REQ-2 複合判定（相対誤差 1e-3 未満 または絶対誤差
+    /// 1e-5 未満）での一致は
+    /// `crates/backend-cpu/tests/fused_elementwise_parity.rs` で検証済み。
+    fn run_fused(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        fused_elementwise::run_fused_elementwise(plan, leaves)
     }
 }
 
