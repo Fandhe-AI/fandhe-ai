@@ -114,10 +114,14 @@ impl BackendOps for NonFusedCpuOps {
 }
 
 fn seeded_tensor_unit_range(seed: u64, shape: &[usize]) -> Tensor<f32> {
-    // `[-1, 1)` へスケール（exp のオーバーフロー回避。§3 計測プロトコル）。
+    // `Xorshift64Star::next_f32()` は既に `[-1, 1)` を返す
+    // （`crates/bench-harness/src/rng.rs` 参照）ため、ここで追加の
+    // `* 2.0 - 1.0` スケーリングをしない（二重スケーリングで
+    // `[-3, 1)` になっていたバグの修正。exp のオーバーフロー回避の
+    // 意図する範囲は `[-1, 1)` のまま。§3 計測プロトコル）。
     let numel: usize = shape.iter().product();
     let mut rng = Xorshift64Star::new(seed);
-    let data: Vec<f32> = (0..numel).map(|_| rng.next_f32() * 2.0 - 1.0).collect();
+    let data: Vec<f32> = (0..numel).map(|_| rng.next_f32()).collect();
     Tensor::new(data, shape).unwrap()
 }
 
