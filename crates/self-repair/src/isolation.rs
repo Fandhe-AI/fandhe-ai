@@ -358,6 +358,15 @@ mod tests {
         // 実行前の環境設定を外部から直接観測できないため、実際に子プロセス
         // （シェル非経由の `printenv` 直接起動）を起動して確認する
         // （実装計画 §4 ステップ 5 unit テスト方針）。
+        // SAFETY: `env::set_var` / `env::remove_var` はプロセス全体の環境変数
+        // テーブルを書き換えるため、他スレッドが同時に環境変数を読み書きしている
+        // と data race になりうる。本クレート（`crates/self-repair`）の
+        // テストバイナリ内でプロセス環境変数を読み書きするのはこの 1 テスト
+        // （`apply_clears_ancestor_environment_and_reinjects_allowlist_only`）
+        // のみであり（`grep -rn "set_var\|remove_var\|env::var" crates/self-repair/src`
+        // で確認済み。他テストは `std::env::temp_dir`／`Command::env` 等
+        // プロセス環境変数を経由しない API のみを使う）、他スレッドから
+        // 並行して環境変数へアクセスされることはない。
         unsafe {
             env::set_var("SELF_REPAIR_TEST_SECRET", "must-not-leak");
         }
@@ -370,6 +379,9 @@ mod tests {
         isolation.apply(&mut command);
         let output = command.output().expect("printenv の起動に失敗");
 
+        // SAFETY: 上記 set_var と同一テスト内の対のクリーンアップ。他スレッドが
+        // 並行して環境変数へアクセスしないことの根拠は set_var 側のコメントに
+        // 記載の通り（本クレートで環境変数を読み書きするのはこのテストのみ）。
         unsafe {
             env::remove_var("SELF_REPAIR_TEST_SECRET");
         }
