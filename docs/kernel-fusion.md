@@ -11,17 +11,17 @@
 >
 > - **設計正本**: `docs/fusion-graph-design.md`（TASK-12.1a・#161。融合
 >   IR・実体化境界・`BackendOps` 契約接続の確定設計）
-> - **実測正本**: #167 の実測記録（TASK-12.2a）、および `docs/perf/
->   cpu-gemm-epilogue-fusion.md`（TASK-12.1f・#203。GEMM epilogue 融合の
->   実測）
-> - **本文書の執筆時点の状態**: TASK-12.1 系列（連鎖検出 #162・融合カー
->   ネル生成 #163・ディスパッチ統合 #164・テスト #165）と TASK-12.2a
->   （#167）はいずれも本文書執筆時点で未マージ（`git log --oneline --
->   grep` に該当コミットなし。2026-08-08 時点）である。elementwise 連鎖
->   融合そのものの実測値は本文書では**未実測**として扱い、実在する
->   実測（GEMM epilogue 融合・PoC-9 参考値）のみを出典付きで記載する
->   （`docs/performance-targets.md` の「下限を設定しない」「未実測」
->   表記と同じ流儀。実測値の捏造・推定記述はしない）。
+> - **実測正本**: `docs/perf/cpu-elementwise-fusion-effect.md`
+>   （TASK-12.2a・#167。elementwise 連鎖・fan-out・transpose 混在の実測）、
+>   および `docs/perf/cpu-gemm-epilogue-fusion.md`（TASK-12.1f・#203。
+>   GEMM epilogue 融合の実測）
+> - **本文書の更新時点の状態**: TASK-12.2a（#167）で elementwise 連鎖
+>   融合の実測を実施済み（実測正本: `docs/perf/
+>   cpu-elementwise-fusion-effect.md`）。#167 の実装時点で
+>   `CpuBackendOps::run_fused` が融合カーネルへ未結線（TASK-12.1 系列
+>   〈#163・#164〉が結線を相手のスコープと委ね合っていたギャップ）で
+>   あることが判明したため、同イシューの前提ステップとして結線を実施
+>   したうえで実測している（詳細は同記録 §0）。
 
 ## 1. 判断サマリ
 
@@ -71,6 +71,13 @@
   elementwise 演算の遅延化」）。融合の成否は `Tape::new(ops)`（§1）へ渡
   された `ops` の具体的な実装によらず同一方針であり、利用者が明示的に
   融合を切り替える経路は存在しない（判断サマリ (d)）。
+- **実測（CPU・TASK-12.2a・#167。出典: `docs/perf/
+  cpu-elementwise-fusion-effect.md`「実測結果」節）**: `ew4`（4 段連鎖）・
+  `ew6`（6 段連鎖）・`ew_fanout`（fan-out）のいずれも非融合（per-op
+  フォールバック）比 **1.43〜1.53 倍**の改善（20 回中央値。全パターンで
+  融合が非融合を上回る）。PoC-9（v1・Metal 実機）の定性的傾向（連鎖・
+  fan-out で融合が有意に効く）と一致する（絶対値は実行系の違いにより
+  異なるため直接比較しない）。数値一致は REQ-2 統一複合判定で確認済み。
 
 ### 2.2 GEMM epilogue 融合
 
@@ -106,7 +113,7 @@ v1 PoC-9（Metal 実機、Burn/CubeCL 前提）の実測知見に基づく判断
 | 1 | reduction エピローグ（`.sum()`／`.max()`） | 融合セグメントが `sum`／`max` ノードで打ち切られる（連鎖部分のみ融合、reduction 自体は融合対象外） | `docs/fusion-graph-design.md` §3.2 (a)。PoC-9 `ew_reduce`（連鎖部分は `ElemwiseFuse` に融合されるが `.sum()` は別カーネル群） |
 | 2 | matmul を挟む連鎖 | `gemm` ノードで融合セグメントが分断される（GEMM 本体は §2.2 の epilogue 融合対象だが、matmul をまたいだ elementwise 連鎖全体の融合ではない） | `docs/fusion-graph-design.md` §3.2 (b)。PoC-9 `ew_matmul_ew`（matmul 前後は個別カーネルのまま） |
 | 3 | softmax 単体・attention 系連鎖 | 融合機構の対象外（softmax は組込み複合演算として別実装であり、本融合 IR の `FusionOp` enum に含まれない） | REQ-12 受け入れ基準（`docs/spec/04-requirements.md:255`）。PoC-9 `softmax`・`attention_chain`（融合の影響をほぼ受けない、または部分的） |
-| 4 | transpose 混在連鎖 | `NodeMeta.contiguous == false` を検出した時点で融合セグメントを打ち切り、非融合フォールバックへ倒す（初期スコープでは transpose を融合対象に含めない） | `docs/fusion-graph-design.md` §1「transpose を挟む連鎖は融合しない」・§2.3 |
+| 4 | transpose 混在連鎖 | `NodeMeta.contiguous == false` を検出した時点で融合セグメントを打ち切り、非融合フォールバックへ倒す（初期スコープでは transpose を融合対象に含めない）。**実測（#167）**: 融合を試みてから `Unsupported` で失敗し per-op フォールバックへ再実行する 2 段の経路を踏むため、最初から per-op 経路のみを通る非融合条件よりわずかに**遅くなる**（速度比 0.707x。当初予測の「速度比 ≈ 1.0」ではなくフォールバック試行コストが実測で確認された） | `docs/fusion-graph-design.md` §1「transpose を挟む連鎖は融合しない」・§2.3。実測: `docs/perf/cpu-elementwise-fusion-effect.md` §5 |
 | 5 | 連鎖長が 4〜6 段の上限を超える | 上限到達時点でその場の演算を実体化してから連鎖を再開する（連鎖全体が 1 カーネルにはならない） | `docs/fusion-graph-design.md` §3.2 (d) |
 | 6 | backward（VJP）の勾配式計算 | `grad.rs::vjp` が計算する勾配式そのもの（例: `tanh` の VJP `grad * (1 - y * y)`）は融合 IR に記録されず、常に具体 `Tensor` として直接計算される。融合されるのは forward が記録した elementwise 遅延グラフを `Tape::backward` が読み出す箇所のみ | `docs/fusion-graph-design.md` §3.3「backward（VJP）は融合対象外」 |
 
@@ -161,7 +168,7 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
 | 実測対象 | 記録 | 状態 |
 |---|---|---|
 | GEMM epilogue 融合（CPU、TASK-12.1f・#203） | `docs/perf/cpu-gemm-epilogue-fusion.md` | 実測済み（1.46〜2.56 倍、5 形状） |
-| elementwise 連鎖・fan-out・transpose 混在の融合効果（v2、TASK-12.2a・#167） | #167 の実測記録（本文書執筆時点で未マージ） | **未実測**（#167 の実測記録を正とする） |
+| elementwise 連鎖・fan-out・transpose 混在の融合効果（v2、TASK-12.2a・#167） | `docs/perf/cpu-elementwise-fusion-effect.md` | 実測済み（連鎖・fan-out: 1.43〜1.53 倍改善。transpose 混在: 融合側が悪化〈0.707x〉） |
 | v1 参考値（Burn/CubeCL 前提、Metal 実機） | `docs/spec/03-poc/poc-9-kernel-fusion/README.md` | 実測済み（v1 保証値であり v2 の保証値ではない。§3 参照） |
 
 ## 6. 将来拡張・スコープ外
