@@ -2,12 +2,22 @@
 //!
 //! `tensor-core` が定義するテンソル型・演算グラフの上に、順伝播で実行した演算を
 //! 動的テープへ記録し逆伝播で勾配を計算する（REQ-1 v2）。互換 API 層
-//! （[`compat::array`]／[`compat::Sequential`] 等。REQ-9）はこのテープ機構を
+//! （`compat::array`／`compat::Sequential` 等。REQ-9）はこのテープ機構を
 //! 薄くラップして呼び出す。TASK-9.2a（#95）で `compat` モジュールへの隔離を
 //! 確定した: 互換 API 層固有のロジック（numpy/Keras 慣習の入出力変換）は
-//! `compat` モジュール（`compat/mod.rs`）に閉じ込め、コア（`tape`/`var`/`nn`）
-//! 側へは互換慣習を一切漏らさない（依存方向は `compat` → `nn`/`var`/`tape` の
-//! 一方向で、逆方向の `use` はない）。
+//! `compat` モジュールに閉じ込め、コア（`tape`/`var`/`nn`）側へは互換慣習を
+//! 一切漏らさない（依存方向は `compat` → `nn`/`var`/`tape` の一方向で、逆
+//! 方向の `use` はない）という設計方針は継続する。
+//!
+//! **TASK-9.4（イシュー #411）で `compat` モジュール自体は `facade::compat`
+//! へ移設した**（10 クレート化・`facade` 新設〈TASK-9.3・#410〉を受け、
+//! compat 公開面を composition root と同じ `facade` クレートへ一本化する
+//! サポート境界の明文化。`docs/compat-api-scope.md`「サポート境界」節・
+//! `docs/spec/04-requirements.md:209-210` の 2026-08-08 追記参照）。本
+//! クレート（`autodiff`）はこの移設後も compat 層が依拠する `Tape`/`Var`/
+//! `nn`（`Module`・`Linear`・`activation` 等）を `pub` API として提供し
+//! 続ける内部クレートである（利用者が `autodiff` を直接使うことは
+//! サポート対象外。同ドキュメント参照）。
 //!
 //! TASK-1.5a（#16）でテープ構造（`Tape`/`TapeId`/`NodeId`）・
 //! forward 演算群（`Var::matmul`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/
@@ -77,16 +87,19 @@
 //! 記述は変更しない。AdamW（#194）・gradient clipping／LR スケジューラ
 //! （#195）は `optim` 配下への後続分割。
 //!
-//! TASK-9.2a（#95）で互換 API 層（`compat`）を追加した。共通
-//! `nn::Module` trait（`nn/module.rs`）を確定し、`compat::array`
-//! （numpy `np.array` 慣習のテンソル生成）・`compat::Sequential`
-//! （Keras `Sequential` 慣習のレイヤー積み上げビルダー）を実装した。
-//! `Sequential` は `nn::Module` 経由で `Linear`・活性化関数（ReLU・
-//! Sigmoid・Tanh）を均一に扱う（対象範囲は `docs/compat-api-scope.md`
-//! 準拠。学習〈勾配取得・パラメータ更新〉は対象外）。
+//! TASK-9.2a（#95）で互換 API 層（当時は本クレート内の `compat`
+//! モジュール）を追加した。共通 `nn::Module` trait（`nn/module.rs`）を
+//! 確定し、`compat::array`（numpy `np.array` 慣習のテンソル生成）・
+//! `compat::Sequential`（Keras `Sequential` 慣習のレイヤー積み上げ
+//! ビルダー）を実装した。`Sequential` は `nn::Module` 経由で `Linear`・
+//! 活性化関数（ReLU・Sigmoid・Tanh）を均一に扱う（対象範囲は
+//! `docs/compat-api-scope.md` 準拠。学習〈勾配取得・パラメータ更新〉は
+//! 当時対象外）。**TASK-9.4（#411）でこの `compat` モジュール自体を
+//! `facade::compat` へ移設した**（本ファイル冒頭のクレート doc 参照。
+//! `nn::Module`・`Linear`・`activation` 等、`compat` が依拠する `nn` 側の
+//! 部品は本クレートに残る）。
 
 mod backward;
-pub mod compat;
 mod default_ops;
 mod error;
 mod eval;

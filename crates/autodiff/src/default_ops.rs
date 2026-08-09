@@ -1,6 +1,15 @@
-//! `Tape::new()`／`Tape::default()`／`compat::Sequential::predict`
-//! （無引数 `ops` 版）が使う naive CPU 参照実装（TASK-12.1d 追補・#164
-//! codex-review 第 19 波以降の P1 是正）。
+//! `Tape::new()`／`Tape::default()`（無引数 `ops` 版）が使う naive CPU
+//! 参照実装（TASK-12.1d 追補・#164 codex-review 第 19 波以降の P1
+//! 是正）。
+//!
+//! **TASK-9.4（#411）での位置づけ変更**: compat 層（旧
+//! `autodiff::compat::Sequential::predict`）は `facade::compat` へ移設
+//! されたのに伴い、`predict` の既定結線先を本モジュール（`NaiveOps`・
+//! 融合を経ない逐次参照実装）から [`facade::tape`]（composition root・
+//! `CpuBackendOps`・融合有効）へ変更した（`crates/facade/src/compat/
+//! sequential.rs` 参照）。本モジュールは `Tape::new()`／`Tape::default()`
+//! （無引数構築の compat 経路。`autodiff` クレート単体でも「デフォルト
+//! 値で動く」ことを保証する）の実装としてのみ残る。
 //!
 //! **背景**: TASK-12.1d は `Tape::new(ops: Box<dyn BackendOps + Send>)`
 //! を必須所有値化し、無引数 `Tape::new()`／`impl Default for Tape`／
@@ -22,16 +31,14 @@
 //!
 //! **性能特性**: 本実装は融合実行（`FusionPlan::from_ops` 等）を経ない
 //! 逐次 naive 実装であり、`backend-cpu` の最適化カーネル（`rayon` 並列・
-//! BLIS ブロッキング等）と同等の性能を持たない。`Tape::default()`／
-//! `Sequential::predict(&Tensor)`（無引数 `ops` 版）は「デフォルト値でも
-//! 動く」ことを保証する compat 経路に徹し、性能が必要な呼び出し元は
-//! 引き続き `Tape::new_with_ops(ops)`／`Sequential::predict_with_ops(input, ops)`
+//! BLIS ブロッキング等）と同等の性能を持たない。`Tape::default()`は
+//! 「デフォルト値でも動く」ことを保証する `autodiff` 単体の compat
+//! 経路に徹し、性能が必要な呼び出し元は引き続き `Tape::new_with_ops(ops)`
 //! へ最適化済み `BackendOps`（`facade` composition root が結線する
-//! `backend-cpu`／`backend-cuda`／`backend-metal` 等）を明示的に渡す
-//! （`docs/public-api-design.md` §4.1「承認済み内容と結線の実装場所」の
-//! 既定バックエンド方針とは独立: 本モジュールは `facade` 未実装下での
-//! 暫定 compat であり、`facade` 実装後もこのフォールバック経路自体は
-//! 維持する）。
+//! `backend-cpu`／`backend-cuda`／`backend-metal` 等）を明示的に渡すか、
+//! `facade` の compat 公開面（`facade::compat::Sequential::predict`）を
+//! 使う（既定で `facade::tape()`＝`CpuBackendOps` へ結線済み。
+//! `docs/public-api-design.md` §4.1「承認済み内容と結線の実装場所」）。
 
 use tensor_core::{BackendError, BackendOps, Device, Tensor, broadcast_shape, matmul_out_shape};
 
@@ -94,10 +101,9 @@ impl BackendOps for NaiveOps {
     /// エラーを返す（`eval::max` 自身は `f32::NEG_INFINITY` を返す
     /// テスト向けの寛容な挙動だが、`backend-cpu::CpuBackendOps::max`
     /// （`reduction::ReduceError::EmptyReduction` → `KernelLaunchFailed`）
-    /// と挙動を揃えるための追加検査。`Tape::default()`／
-    /// `Sequential::predict` の compat 経路と最適化バックエンド経路とで
-    /// 同一入力に対する挙動を分岐させない。`sum` は単位元 0 を持つため
-    /// 本検査は不要）。
+    /// と挙動を揃えるための追加検査。`Tape::default()` の compat 経路と
+    /// 最適化バックエンド経路とで同一入力に対する挙動を分岐させない。
+    /// `sum` は単位元 0 を持つため本検査は不要）。
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         let shape = a.shape().to_vec();
         let out_shape =
@@ -125,8 +131,8 @@ impl BackendOps for NaiveOps {
     }
 }
 
-/// `Tape::default()`／`Sequential::predict(&Tensor)`（無引数 `ops` 版）が
-/// 使う既定 `ops`（[`NaiveOps`]）を組み立てる。
+/// `Tape::default()`（無引数 `ops` 版）が使う既定 `ops`（[`NaiveOps`]）
+/// を組み立てる。
 pub(crate) fn naive_ops() -> Box<dyn BackendOps + Send> {
     Box::new(NaiveOps)
 }

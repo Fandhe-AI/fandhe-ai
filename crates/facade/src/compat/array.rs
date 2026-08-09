@@ -1,4 +1,5 @@
-//! numpy `np.array` 慣習のテンソル生成入口（TASK-9.2a・#95）。
+//! numpy `np.array` 慣習のテンソル生成入口（TASK-9.2a・#95。
+//! TASK-9.4・#411 で `autodiff::compat` から本クレートへ移設）。
 //!
 //! `compat::array()` は 1-D/2-D の Rust ネイティブ構造から
 //! `tensor_core::Tensor<f32>` を組み立てるだけの薄いラッパーで、
@@ -9,10 +10,13 @@
 //! `Tensor::new` の要素数積検査だけでは jagged 入力を個別に指摘できない
 //! ため。A03: 外部由来入力を計算前に検証する契約。`.claude/rules/
 //! security.md`）。
+//!
+//! エラー型は `autodiff::AutodiffError` をそのまま使う（compat 層は
+//! `tensor-core`／`autodiff` いずれの pub API のみに依存し、独自の
+//! エラー型を新設しない。REQ-9「薄いラッパーに徹する」）。
 
+use autodiff::AutodiffError;
 use tensor_core::Tensor;
-
-use crate::error::AutodiffError;
 
 /// `compat::array()` が受理する入力の変換 trait。numpy `np.array` の
 /// 「ネストしたリスト/配列から shape を推論する」慣習を模す。
@@ -96,7 +100,18 @@ pub fn array<A: ArrayData>(data: A) -> Result<Tensor<f32>, AutodiffError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::dense_vec;
+
+    /// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API
+    /// のみを使用。旧 `autodiff::eval::dense_vec`〈クレート非公開〉の
+    /// 代替。`crates/facade/tests/fusion_default_parity.rs` の
+    /// `as_slice()` 直接利用と同じ発想だが、本テストは `contiguous()`
+    /// 前提を明示するため一段挟む）。
+    fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
+        t.contiguous()
+            .as_slice()
+            .expect("contiguous() 直後は必ず as_slice() が Some を返す")
+            .to_vec()
+    }
 
     #[test]
     fn array_1d_vec_infers_shape() {

@@ -7,7 +7,12 @@
 //! していないこと、(b) `pub fn` のシグネチャが `BackendOps` を引数として
 //! 直接受け取っていないことを固定する。利用者向け公開面が [`Device`]
 //! 識別子のみに限定される（`facade::tape()`／`facade::tape_for(Device)`）
-//! ことの構造的裏付け。
+//! ことの構造的裏付け。**`visit_rs_files` は `src/` 配下を再帰走査する
+//! ため、TASK-9.4（#411）で追加した `src/compat/`（`compat::array`／
+//! `compat::Sequential`。旧 `autodiff::compat` からの移設）も自動的に
+//! 走査対象へ含まれる**（旧 `compat::Sequential::predict_with_ops` は
+//! `BackendOps` を直接引数に取っていたため、移設後の `facade::compat`
+//! がこれを公開していないことも本テストが機械的に固定する）。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、

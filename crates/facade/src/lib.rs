@@ -12,9 +12,11 @@
 //!    直接参照しない構造的境界（REQ-9・`docs/fusion-graph-design.md`
 //!    §3.4「`autodiff` は具体クレートへの依存を一切持たない」）を、
 //!    上位でここに一本化する。
-//! 2. **compat 公開面**（`compat::array`／`compat::Sequential` 相当）:
-//!    TASK-9.4（別イシュー）で本クレートへ移設する。本イシュー時点では
-//!    未実装。
+//! 2. **compat 公開面**（[`compat::array`]／[`compat::Sequential`]）:
+//!    TASK-9.4（イシュー #411）で `autodiff::compat` から本クレートへ
+//!    移設し実装済み。サポート境界の明文化（`facade` が唯一のサポート
+//!    対象公開 API 面であり `tensor-core`／`autodiff`／`backend-*` は
+//!    内部クレート）は `docs/compat-api-scope.md` を参照。
 //!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
@@ -49,6 +51,11 @@
 use autodiff::Tape;
 use tensor_core::device::select_from;
 use tensor_core::{BackendOps, DeviceProvider};
+
+/// numpy/Keras 慣習の互換 API 層（compat 公開面。TASK-9.4・#411）。
+/// [`compat::array`]・[`compat::Sequential`] を提供する（詳細はモジュール
+/// doc・`docs/compat-api-scope.md` 参照）。
+pub mod compat;
 
 // 公開面として再エクスポートする型はこの 2 つのみ（モジュール冒頭
 // 「公開面の設計」参照）。`Tape`・`BackendOps` は意図的に含めない。

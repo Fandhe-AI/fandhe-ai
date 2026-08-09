@@ -1,6 +1,7 @@
 //! 共通 `Module` trait（TASK-9.2a・#95）。
 //!
-//! `compat::Sequential`（`compat/sequential.rs`）がレイヤーの列を
+//! `Sequential`（当時 `autodiff::compat::sequential`。TASK-9.4・#411 で
+//! `facade::compat::sequential` へ移設）がレイヤーの列を
 //! `Vec<Box<dyn Module>>` として保持し、種類の異なる `nn` の部品
 //! （`Linear`・活性化関数）を統一シグネチャで呼べるようにするための
 //! 最小 trait。`nn/mod.rs` が「共通 `Module` trait の定義は

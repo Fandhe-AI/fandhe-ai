@@ -4,7 +4,7 @@
 
 Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。
 
-- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（TASK-9.3・イシュー #410 で新設。composition root・compat 公開面）
+- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（TASK-9.3・イシュー #410 で新設した composition root に、TASK-9.4・イシュー #411 で `autodiff::compat` から compat 公開面〈`compat::array`・`compat::Sequential`〉を移設済み。`facade` が唯一のサポートされる公開 API 面であり `tensor-core`・`autodiff`・`backend-*` は内部クレート。`docs/compat-api-scope.md` §0）
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
 - 現状 M0 着手中（TASK-1.1a: workspace `Cargo.toml` と 9 クレート雛形を追加済み。TASK-1.1b: 許容依存 8 区分を `[workspace.dependencies]` に `=x.y.z` 完全固定で反映し `Cargo.lock` をコミット済み。TASK-1.2: 依存禁止検査は CI 上で稼働中〈green〉。TASK-1.3: `deny.toml` 導入・`docs/license-matrix.md` 作成済み）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
@@ -26,7 +26,7 @@ rust-ai-library/
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans〈#353〉）
 ├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c・#117。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
-│                             # onnx-interop・guardrail・self-repair・bench-harness・facade（雛形）
+│                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）
 ├── scripts/
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
 │   ├── run-verification-gates.sh # AI 自律メンテナンス検証 4 ゲート（build/test/clippy/bench）の実行ロジック（ci.yml・Makefile 共用。TASK-6.1c）
@@ -82,7 +82,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 |---------|---------------|------|-------|
 | research | explorer | コードベース・docs/spec 横断調査（読み取り専用） | sonnet |
 | research | reference-researcher | cudarc/CUDA・objc2/Metal・safetensors/ONNX 等の外部仕様調査 | sonnet |
-| implement | core-builder | `tensor-core`・`autodiff`・workspace 骨格・compat API 層 | sonnet |
+| implement | core-builder | `tensor-core`・`autodiff`・workspace 骨格・`facade`（composition root・compat API 層） | sonnet |
 | implement | backend-builder | `backend-cpu`・`backend-cuda`・`backend-metal`・数値一致回帰テスト | sonnet |
 | implement | interop-builder | `onnx-interop`（safetensors / prost 自前取り込み） | sonnet |
 | implement | runtime-builder | `guardrail`・`self-repair`・`bench-harness` | sonnet |
