@@ -71,17 +71,20 @@ fn cpu_f32_initial_release_fails_when_below_floor() {
 }
 
 #[test]
-fn cuda_f32_optimized_provisional_floor_is_flagged() {
+fn cuda_f32_optimized_confirmed_floor_is_not_flagged_provisional() {
     let own = own_report("cuda", 1.0);
-    // ratio = 0.5/1.0*100 = 50% >= 最適化後暫定下限 40%。
+    // ratio = 0.5/1.0*100 = 50% >= 最適化後下限 25%（#393 で確定）。
     let pytorch = pytorch_report_with_median("cuda", 0.5);
 
     let j = judge(&own, &pytorch, BackendDtype::CudaF32, Stage::Optimized).unwrap();
     assert_eq!(j.verdict, Verdict::Pass);
-    assert_eq!(j.floor_percent, Some(40.0));
-    // CUDA 最適化後下限は tensor core 実装未完了を前提とした暫定値
-    // （REQ-8: 「tensor core 実装完了後の実測で本値を再確定すること」）。
-    assert_eq!(j.floor_provisional, Some(true));
+    assert_eq!(j.floor_percent, Some(25.0));
+    // CUDA 最適化後下限はイシュー #393（PR #444 実測・2026-08-10 ユーザー承認）で
+    // 40%（暫定）→ 25%（確定）へ再確定済み。承認記録の限定条件（候補算出経路
+    // `wmma_tf32` が #389 §5.3 の数値一致 parity 恒常 fail 対象と一致・#186 解決後の
+    // 再確認）は `docs/perf/performance-floor-decision.md` §9 で追跡し、`provisional`
+    // フラグでは表現しない（`.claude/rules/coding-rust.md`）。
+    assert_eq!(j.floor_provisional, Some(false));
 }
 
 #[test]

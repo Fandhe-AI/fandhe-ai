@@ -17,14 +17,14 @@ Metal f16 初期リリース下限の確定）で確定した値をそのまま�
 
 ## 2. v2 段階的下限表（正）
 
-`docs/perf/performance-floor-decision.md` §3・§8（#386）・`crates/bench-harness/src/threshold.rs::floor_spec`
+`docs/perf/performance-floor-decision.md` §3・§8（#386）・§9（#393）・`crates/bench-harness/src/threshold.rs::floor_spec`
 と同一値。
 
 | バックエンド・精度（比較対象・実機） | 実測比率の最小値（2048/4096、出典） | 初期リリース下限 | 最適化後下限 | 状態 |
 |---|---|---|---|---|
 | CPU 対 PyTorch CPU（Apple M4 Max、PyTorch 2.13.0 macOS arm64） | 5.3%（`03-poc/poc-v2-1-tensor-cpu-gemm/README.md`「計測結果」節） | **5%** | **20%** | 確定 |
-| CUDA f32 対 PyTorch CUDA（DGX Spark GB10、PyTorch 2.13.0+cu130） | 10.3%（`03-poc/poc-v2-3-cuda-gemm/README.md`「計測結果」節） | **10%** | **40%** | 初期リリース: 確定／最適化後: **暫定**（GB10+NVRTC 実機再実測待ち。`docs/perf/cuda-floor-remeasurement.md`・#157） |
-| CUDA f16 対 PyTorch f16（同上） | 1.9%（同 README「計測結果」節、tensor core 未使用） | **下限を設定しない**（脚注参照） | **40%** | 初期リリース: 未設定（構造的に指標無意味）／最適化後: **暫定**（#157 と同一理由） |
+| CUDA f32 対 PyTorch CUDA（DGX Spark GB10、PyTorch 2.13.0+cu130） | 25.64〜25.69%（`docs/perf/cuda-floor-remeasurement.md`「実測結果（#390 実機実測）」節、size=4096 が最小） | **10%** | **25%** | 初期リリース: 確定／最適化後: **確定**（#393・実機実測に基づく。限定条件: 候補経路 `wmma_tf32` は #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続） |
+| CUDA f16 対 PyTorch f16（同上） | 12.97%（同上、size=2048 が最小） | **下限を設定しない**（脚注参照） | **10%** | 初期リリース: 未設定（構造的に指標無意味）／最適化後: **確定**（#393・実機実測に基づく。限定条件: 候補経路 `mma_f16` は #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続） |
 | Metal f32 対 PyTorch MPS（Apple M4 Max、PyTorch 2.13.0） | 23.2%（`03-poc/poc-v2-4-metal-gemm/README.md`「PyTorch MPS 比」表、size=4096） | **20%** | **30%** | 確定 |
 | Metal f16 対 PyTorch MPS f16（同上） | 18.6%（`docs/perf/metal-f16-vs-mps-f16.md`「実測結果」節、size=4096。#383） | **15%** | **未設定** | 初期リリース: 確定（#386・実機実測に基づく。数値一致 #380 全 PASS・限定条件なし）／最適化後: 未設定（今後の最適化タスクで再確定。#386 承認記録） |
 | Transformer 複合ワークロード（attention/softmax/LayerNorm を含む複合演算） | 非実機参考値 約 6.1%（QEMU 仮想 CPU） | **下限を設定しない** | **下限を設定しない** | 未実測（`docs/perf/transformer-workload-measurement.md`・#155。QEMU 参考値は naive 経路混入・非実機の 2 重下振れ要因を含むため根拠に使わない） |
@@ -34,10 +34,12 @@ Metal f16 初期リリース下限の確定）で確定した値をそのまま�
   tensor core（WMMA/mma）実装完了後、下記 §3 の丸め規則を適用して初期リリース下限を確定する。
   それまでは実測値 1.9% を制約事項として記録するに留める（REQ-8 脚注）。
 - 「確定」は暫定値ではないことを示す。多くは `docs/perf/performance-floor-decision.md`（#158）で
-  実機実測なしのまま据え置き確定した値だが、Metal f16 初期リリースのみ実機実測（#383）に基づき
-  #386（§8）で確定した値である。「暫定」は tensor core 実装完了後の実機再実測で再確定する値。
+  実機実測なしのまま据え置き確定した値だが、Metal f16 初期リリースは実機実測（#383）に基づき
+  #386（§8）で、CUDA f32/f16 最適化後は実機実測（#390）に基づき #393（§9）で、それぞれ確定した
+  値である。「暫定」は tensor core 実装完了後の実機再実測で再確定する値（本表には現存しない）。
   「未設定」は実機実測が未実施、または実測はあるが下限を設定しない判断（Metal f16 最適化後）の
-  ため下限自体を設定していない状態。
+  ため下限自体を設定していない状態。CUDA f32/f16 最適化後の「確定」には限定条件が付く（候補算出
+  経路が数値一致 parity 恒常 fail 対象と一致・#186 解決後の再確認を要する。§6 参照）。
 
 ## 3. 丸め規則
 
@@ -91,10 +93,20 @@ v2 では各バックエンドのカーネルを個別に自作するため最�
 
 ## 6. 未確定領域と再確定手順
 
-暫定・未設定行（CUDA f32/f16 最適化後・Metal f16 最適化後・Transformer 複合ワークロード。
-Metal f16 初期リリースは #386 で確定済みのため対象外）は、実機実測
+暫定・未設定行（Metal f16 最適化後・Transformer 複合ワークロード。Metal f16 初期リリースは
+#386、CUDA f32/f16 最適化後は #393 でそれぞれ確定済みのため対象外）は、実機実測
 （Apple M4 Max・DGX Spark GB10）が揃い次第、以下の手順で再確定する
 （`docs/perf/performance-floor-decision.md` §4 を要約）。
+
+**CUDA f32/f16 最適化後の限定付き再確認（#393 承認記録）**: #393 で確定した下限（25%／10%）は
+候補算出経路（`wmma_tf32`・`mma_f16`）が #389 §5.3 の数値一致 parity 恒常 fail 対象と一致した
+ままの実測値であり、承認記録に「#186（REQ-2 閾値改定）の解決後に本下限値を再確認する」限定
+条件が付されている。#186 は 2026-08-06 に close 済みだが、閾値定数
+（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）自体は変更されておらず
+（`docs/perf/cuda-tensor-core-tolerance-evaluation.md` §4「結論」）、TF32/f16 Tensor Core 経路の
+複合判定改定は REQ-2 改定として spec リポジトリ側対応待ちのままである。よってこの限定条件は
+継続しており、当該改定が解決し parity green の経路で再実測できるようになった時点で下限値の
+再確認（必要なら再確定）を行う（値の再変更は新たなユーザー承認事項）。
 
 1. 各記録テンプレート（`docs/perf/transformer-workload-measurement.md`・
    `docs/perf/metal-f16-vs-mps-f16.md`・`docs/perf/cuda-floor-remeasurement.md`）の記入待ち箇所に
