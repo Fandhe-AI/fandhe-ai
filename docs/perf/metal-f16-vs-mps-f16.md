@@ -6,15 +6,16 @@ REQ-8 性能下限表（`docs/spec/04-requirements.md`）の「Metal f16 対 PyT
 されていた。本ファイルは v2 で新規に自作した Metal f16 カーネル（`gemm_simdgroup_f16`）の実測手順・記録
 テンプレートを整備する。**下限値そのものの確定は #158（TASK-8.3d・人間担当）であり本イシューのスコープ外。**
 
-## 状態: 数値一致は実機検証済み（イシュー #380）。TFLOPS 実測は未実施
+## 状態: 数値一致は実機検証済み（イシュー #380）。TFLOPS 実測はイシュー #383 で完了
 
 本ファイルは当初 Linux worktree で作成され、Metal 実機・PyTorch MPS 実行環境が同一セッションで使用できな
 かったため計測手順・記録テンプレートのみを整備していた。イシュー #380 で Apple Silicon 実機
 （M4 Max・macOS 26.6）を用いて `tests/cpu_metal_f16_parity.rs`（数値一致回帰テスト 6 件）・
 `tests/shader_source_evidence.rs`（命令実在検査）を実行し、MSL 構文検証（`gemm_simdgroup_f16` を含む
 `gemm.metal` 全体のコンパイル）・数値一致（複合判定）の両方を確認済み（詳細は下記「数値一致」節）。
-**TFLOPS 実測（Metal f16 対 PyTorch MPS f16 の性能比較）は #380 のスコープ外であり、引き続き未実施**
-（下記「計測手順」以降のテンプレートに従い後続イシューで実施する）。
+**TFLOPS 実測（Metal f16 対 PyTorch MPS f16 の性能比較）はイシュー #383 で実施し、下記「実測結果」節に
+記録済み。REQ-8 性能下限表の当該行の下限値確定はイシュー #386（人間承認）のスコープであり、本イシューでは
+行わない。**
 
 イシュー #380（Apple Silicon 実機・M4 Max・macOS 26.6・`stable-aarch64-apple-darwin`）で以下を実機検証済み:
 
@@ -74,7 +75,7 @@ K=4096 ストレスケースで 60155/65536 要素（max_rel_err 1.992・max_abs
 
 ```sh
 git fetch origin
-git checkout test/156-metal-f16-vs-mps-f16   # 本イシューの実装ブランチ
+git checkout perf/383-metal-f16-vs-mps-f16   # イシュー #383 の実装ブランチ（origin/main〈3f72039 以降〉から作成）
 cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
 ```
 
@@ -102,20 +103,22 @@ python3 scripts/bench/gemm_bench_torch_mps_f16.py
 
 出力形式: `size=<N> pytorch_mps_f16_tflops=<値>` 行を同一形状で出力する。
 
-## 実測結果（記入待ち）
+## 実測結果（イシュー #383・実機実測済み）
 
 ### 計測環境
 
 | 項目 | 値 |
 |------|-----|
-| GPU | （記入: 例 Apple M4 Max） |
-| OS | （記入: macOS バージョン） |
-| rustc | （記入: `rustc --version`） |
-| torch | （記入: `python3 -c "import torch; print(torch.__version__)"`） |
-| 計測プロトコル（Rust 側） | `bench-harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1） |
-| 計測プロトコル（PyTorch 側） | warmup 20 回・計測 20 回・`time.perf_counter()` 中央値（`scripts/bench/gemm_bench_torch_mps_f16.py`） |
+| GPU | Apple M4 Max（64GB） |
+| OS | macOS 26.6（build 25G72） |
+| rustc | 1.96.0（`stable-aarch64-apple-darwin`） |
+| torch | 2.13.0（`.venv-mps-bench`。リポジトリ管理外の一時 venv。`torch.backends.mps.is_available() == True` 確認済み） |
+| 計測リビジョン | `3f7203975887ef3836a003db888b56c29232ccf6`（`git rev-parse HEAD`。#380 の f32 累算エピローグ変更を含む。`git merge-base --is-ancestor 3f72039 HEAD` で確認） |
+| 計測プロトコル（Rust 側） | `bench-harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）を **プロセス単位で 5 回独立実行**し、size ごとに 5 個の TFLOPS 値の中央値を採用（`docs/perf/cpu-elementwise-fusion-effect.md` §0-a・§4 と同一方式） |
+| 計測プロトコル（PyTorch 側） | warmup 20 回・計測 20 回・`time.perf_counter()` 中央値（`scripts/bench/gemm_bench_torch_mps_f16.py`）を同様に **5 回独立実行**し、size ごとに中央値を採用 |
 | 決定的シード | `0xC0FFEE`（両スクリプト共通） |
 | 同期境界 | Rust: コマンドバッファ完了待ち／PyTorch: `torch.mps.synchronize()`（ホスト転送を伴わない完了待ち。REQ-8 v2 方針） |
+| GPU 排他 | Rust 側・PyTorch 側は同時実行しない。各ラン前後に `pgrep -fl "gemm_bench\|gemm_f16_bench\|gemm_bench_torch_mps_f16"` で他プロセスとの競合がないことを確認（競合検出時は破棄・取り直す運用だが、本計測では競合は検出されなかった） |
 
 ### 数値一致（`cpu_metal_f16_parity.rs`。受け入れ条件の前提。イシュー #380 実機実測。M4 Max・macOS 26.6）
 
@@ -134,37 +137,86 @@ half 統一アキュムレータでの実機実測、after は #380 の f32 累�
 6 件全件が after（f32 累算）で PASS。judgement 式・閾値・`backend_cpu::parity` は変更していない
 （`git diff -- crates/backend-cpu/src/parity.rs` は空）。
 
+**イシュー #383（計測リビジョン `3f72039`）での再確認**: TFLOPS 実測に先立ち同一 SHA で
+`cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity` を再実行し、
+6 件全件（`f16_parity_baseline_8x8x8`・`f16_parity_boundary_shapes_non_multiple_of_eight`・
+`f16_parity_baseline_shape_512`・`f16_k4096_stress`・`f16_dispatch_is_bit_deterministic_across_runs`・
+`f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs`）が PASS することを確認済み
+（数値一致は #380 実機実測時と同一の f32 累算エピローグのままであり、本イシューでは緩和・変更していない）。
+
 ### TFLOPS 比較（Metal f16 対 PyTorch MPS f16）
 
-| size | Metal f16 TFLOPS（simdgroup） | PyTorch MPS f16 TFLOPS | Metal/PyTorch 比 |
-|------|------|------|------|
-| 512  | | | |
-| 1024 | | | |
-| 2048 | | | |
-| 4096 | | | |
+Rust 側・PyTorch 側それぞれ 5 プロセス独立実行の結果。「中央値」は size ごとの 5 個の TFLOPS 値の中央値、
+「比」は **Metal 側 5 回中央値 ÷ PyTorch 側 5 回中央値**（size ごとの比の中央値ではない。REQ-8 の比較定義に
+合わせた算出方法）。
 
-REQ-8 の主指標は 2048/4096（512 は起動オーバーヘッド支配のため参考値。PoC-v2-4 先例）。
+| size | Metal f16 TFLOPS（simdgroup。5 回中央値） | Metal レンジ | PyTorch MPS f16 TFLOPS（5 回中央値） | PyTorch レンジ | Metal/PyTorch 比 |
+|------|------|------|------|------|------|
+| 512  | 1.1554 | 0.9379〜1.1799 | 1.2055 | 0.9761〜1.5592 | 0.9584（≒ 95.8%） |
+| 1024 | 2.1777 | 2.1403〜2.1899 | 5.5679 | 3.8260〜5.7458 | 0.3911（≒ 39.1%） |
+| 2048 | 2.4426 | 2.3171〜2.4591 | 11.2803 | 10.6343〜12.9570 | 0.2165（≒ 21.6%） |
+| 4096 | 2.2411 | 2.1379〜2.5029 | 12.0605 | 11.6667〜12.8414 | 0.1858（≒ 18.6%） |
+
+REQ-8 の主指標は 2048/4096（512 は起動オーバーヘッド支配のため参考値。PoC-v2-4 先例）。**主指標の比は
+21.6%（size=2048）・18.6%（size=4096）であり、PyTorch MPS f16 に対して Metal 自作カーネルは大きく劣後する
+実測結果となった。** これはカーネル最適化の要否を示す事実であり、本イシューではカーネル最適化・下限設定・
+許容誤差の変更は一切行わない（#386/#387 へ引き継ぐ）。
+
+#### 5 回生値（付録）
+
+| size | Metal f16 TFLOPS（run1〜5） | PyTorch MPS f16 TFLOPS（run1〜5） |
+|------|------|------|
+| 512  | 0.9379 / 1.1799 / 1.1639 / 1.1554 / 1.1498 | 1.5592 / 1.3484 / 0.9761 / 1.0246 / 1.2055 |
+| 1024 | 2.1822 / 2.1777 / 2.1899 / 2.1403 / 2.1619 | 5.7161 / 5.7458 / 5.5679 / 3.8260 / 4.2866 |
+| 2048 | 2.4552 / 2.4426 / 2.4591 / 2.4202 / 2.3171 | 12.9570 / 10.6343 / 11.3686 / 11.2326 / 11.2803 |
+| 4096 | 2.5029 / 2.5027 / 2.2411 / 2.1379 / 2.1992 | 12.8414 / 12.5233 / 12.0605 / 11.7053 / 11.6667 |
+
+生ログは実機実測時の標準出力をそのまま転記した値であり、外挿・推定値は含まない
+（`.claude/rules/coding-rust.md`「テスト・ベンチ」節: 5 回計測の中央値を採用する方針）。
 
 ### 参考: PoC-v2-4 f32 実測との対比
 
 PoC-v2-4（Apple M4 Max・size=4096）の f32 実測: simdgroup 3.134 TFLOPS 対 PyTorch MPS（f32）13.505 TFLOPS
-（比 ≒ 23.2%。`docs/spec/03-poc/poc-v2-4-metal-gemm/README.md`「計測結果」節）。f16 は理論ピーク演算性能が
-f32 の約 2 倍（Apple GPU の一般的傾向）であり、Metal・PyTorch 双方が同程度にこの倍率を享受するかどうかが
-比較対象になる。half 累算（本カーネルの精度契約）が性能に与える影響（f32 累算より高速か、桁落ち対策の
-追加命令で相殺されるか）は実測後に本節へ追記する。
+（比 ≒ 23.2%。`docs/spec/03-poc/poc-v2-4-metal-gemm/README.md`「計測結果」節）。
+
+**前提の更新（#383 時点）**: PoC-v2-4 時点および実装計画 §3.1 時点の f16 カーネルは half 統一アキュムレータ
+だったが、現行カーネル（#380 で変更）は **`simdgroup_float8x8` による f32 累算 ＋ threadgroup 経由の 2 段
+エピローグ（`threadgroup_barrier` を伴う）**である（本ファイル「精度契約」節）。したがって「half 累算が
+性能に与える影響」ではなく、**f32 累算化・2 段エピローグのオーバーヘッドが f16 の理論的な速度優位（Apple GPU
+は一般に f16 が f32 の約 2 倍の理論ピーク演算性能を持つ）をどれだけ相殺しているか**が論点になる。
+
+実測結果（size=4096）を PoC-v2-4 の f32 実測と対比すると、Metal 側は f32 3.134 TFLOPS に対し f16 2.2411
+TFLOPS（f32 の約 71.5%）であり、**f16 は f32 の理論上の速度優位を得られず、PoC-v2-4 の f32 実測を下回っている**
+（この結論は f32 baseline に PoC-v2-4 を用いた場合のものであり、baseline の選び方に依存する。後述の追記参照）。
+PyTorch 側は f32 13.505 TFLOPS に対し f16 12.0605 TFLOPS（f32 の約 89.3%）であり同様の傾向はあるが Metal 側
+ほど顕著ではない。したがって Metal/PyTorch 比の低下（f32 23.2% → f16 18.6%、size=4096）は、PyTorch 側の
+f16 性能低下より Metal 側の f16 性能低下（2 段エピローグの `threadgroup_barrier` 同期コスト等が疑われるが、
+本イシューでは原因分析・最適化は行わず事実の記録に留める）が相対的に大きいことを示唆する。
+
+**追記（本ファイル rebase 時点。#437 で #381 が完了）**: `docs/perf/metal-gemm-dynamic-tile.md` の
+TFLOPS 実測欄は #437 で記入済みとなった。同一実機（M4 Max）の `gemm_simdgroup`（f32・simdgroup 単独。本節が
+対比対象とする現行 f16 カーネルと同じ実行系列）の canonical 値は size=4096 で 1.7432 TFLOPS
+（`docs/perf/metal-gemm-dynamic-tile.md` run1）であり、上記 PoC-v2-4 の 3.134 TFLOPS より低い。#437 自身が
+「本実測の絶対 TFLOPS が PoC-v2-4 実測値より低い」（外部ディスプレイ接続によるコンポジタ負荷等の計測衛生条件
+の差、`docs/perf/metal-gemm-dynamic-tile.md`「計測衛生」節参照）と明記しており、PoC-v2-4・#437・本ファイルの
+3 実測はいずれも異なるセッション・計測衛生条件下のものであるため、絶対値同士の対比精度には限界がある
+（f32 baseline をどちらに取るかで「f16 が f32 実測を下回る」という上記結論の解釈が変わりうる）。本イシュー
+では f32 baseline の選定基準を新たに定義せず、上記は元々の実装計画・本イシュー着手時点で参照可能だった
+PoC-v2-4 を主対比として維持する。#437 との対比を含めた要因分析は、上記のとおり **#387** のスコープとする。
 
 ## 未実施・後続作業
 
-- 本ファイルの「実測結果」節は Apple Silicon 実機での `cargo test -- --ignored`・`cargo run --release`・
-  PyTorch スクリプト実行後に埋める
-- 下限値の確定（REQ-8 性能下限表の当該行の更新）は #158（TASK-8.3d・人間担当）が行う。本ファイルの実測結果を
-  入力として使う。**下限確定の判断（実測未実施のため「未設定」を維持する据え置き確定案）は
-  `docs/perf/performance-floor-decision.md` を参照**
+- ~~本ファイルの「実測結果」節は Apple Silicon 実機での `cargo test -- --ignored`・`cargo run --release`・
+  PyTorch スクリプト実行後に埋める~~ → **イシュー #383 で完了**（本ファイル「実測結果」節）
+- 下限値の確定（REQ-8 性能下限表の当該行の更新）は **#386**（人間承認）が行う。本ファイルの実測結果を
+  入力として使う。**下限確定の判断は `docs/perf/performance-floor-decision.md` を参照**（本イシューでは
+  同ファイルの §2/§3/§5(b) を更新していない。「#156: 実測未実施」の記述は本イシューの実測完了により陳腐化
+  したが、下限確定は #386 のスコープであるため本イシューでは書き換えない）
 - `docs/spec/04-requirements.md`（正本 submodule）の更新は本リポでは行わない。仕様変更は spec リポ側で対応する
   （`.claude/rules/out-of-scope-tracking.md`「仕様変更が必要な場合」）
 - f16 の自動ディスパッチ規則への統合（`docs/dispatch-rules-design.md`）は本イシューのスコープ外
   （実装計画 §3.4「Metal f16 行は含めない」）。REQ-11 系の後続課題として別途追跡する
-- K=4096 ストレスケースが実機で複合判定を外れた場合、#186 と同じ枠組みで許容誤差の再評価が必要かどうかを
-  #158 で判断する（本ファイルは事実の記録のみを担い、閾値変更の判断は行わない）。#158 時点では実機結果が
-  存在しないため「判断材料なし・実測後に再評価（許容誤差は変更しない）」と記録した
-  （`docs/perf/performance-floor-decision.md` §5(b)）
+- K=4096 ストレスケースは #383 の再確認でも複合判定 PASS のままであり、許容誤差の再評価は不要（本ファイルは
+  事実の記録のみを担い、閾値変更の判断は行わない）
+- Metal/PyTorch 比が主指標（2048/4096）で 2 割前後に留まった実測事実の総括・要因分析は **#387** へ引き継ぐ
+  （本イシューではカーネル最適化を行わない）
