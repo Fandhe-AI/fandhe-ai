@@ -126,3 +126,24 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
 
 - **macOS（Metal 実機）self-hosted runner の登録と実機 CI ジョブの追加**: runner 未登録のため TASK-1.8e では実施しない。追加する場合は runner ラベルで対象 runner を明示する（`.claude/rules/ci.md`）
 - **CUDA 側の同種整備**: `backend-cuda` は既に `make test-ignored-cuda`（TASK-1.7e・#36）で整備済み。本ドキュメントはその Metal 版に相当する
+
+以下は Metal 実機検証・ベンチ計測トラッキングツリー（親 #379）完了時点（イシュー #387・総括反映）で
+残存が確認された未実施項目の集約（受け入れ条件「残存する未実施項目を明示的に記録する」への対応）:
+
+- **`METAL_SIMDGROUP_MIN_DIM` 変更提案（384 への引き下げ）の実施**: #382 で記録済みの変更提案はコード
+  未変更のまま。実施は別レビュー・別 PR・ユーザー承認を要する（[`docs/perf/dispatch-boundary-measurement.md`](./perf/dispatch-boundary-measurement.md)
+  「`METAL_SIMDGROUP_MIN_DIM` の妥当性判定（#382）」節）。連動して `crate::tile::select`/`CANDIDATES` の
+  「暫定値」コメント更新も同一の別 PR まで据え置く（[`docs/perf/metal-gemm-dynamic-tile.md`](./perf/metal-gemm-dynamic-tile.md)
+  「未実施・後続作業」節）
+- **bench-harness の Metal 版起動コスト `#[ignore]` E2E テスト未追加**: 起動コスト実測（#384）自体は
+  完了済みだが、回帰検出用の `#[ignore]` E2E テストの追加は本ツリーのスコープ外のまま
+  （[`docs/perf/startup-cost-measurement.md`](./perf/startup-cost-measurement.md)「後続」節）
+- **Transformer 複合ワークロードの Metal 実機実測は記入待ちのまま**: 本ツリー（#379）の対象外（#155 系）。
+  実機（Apple M4 Max・DGX Spark GB10）値は未実測（[`docs/perf/transformer-workload-measurement.md`](./perf/transformer-workload-measurement.md)
+  「実機実測（記入待ち）」節）
+- **f16 の自動ディスパッチ規則への統合はスコープ外のまま**: `docs/dispatch-rules-design.md` への統合は
+  実装計画時点から対象外（[`docs/perf/metal-f16-vs-mps-f16.md`](./perf/metal-f16-vs-mps-f16.md)「未実施・
+  後続作業」節）。REQ-11 系の後続課題として別途追跡する
+- **短命プロセス対応方針の再判定は TASK-13.2（#172・人間判断）待ち**: CUDA（#391）・Metal（#384）の起動
+  コスト転記完了によりトリガー自体は消化済みだが、再判定・方針決定は人間判断のスコープであり本ツリーでは
+  行わない（[`docs/short-lived-process-decision.md`](./short-lived-process-decision.md)「再判定トリガー」節）

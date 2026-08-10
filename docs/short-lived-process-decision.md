@@ -33,7 +33,7 @@ TASK-13.1 実測記録（`docs/perf/startup-cost-measurement.md`）の要点:
 |------------|------|------|
 | CPU | 実測済み | コールド／ウォームがほぼ同値（run1 first_kernel 中央値: コールド 2.117ms／ウォーム 2.132ms、差 0.015ms。`docs/perf/startup-cost-measurement.md:54-57,85-91`）。JIT を持たないため、短命プロセスでも起動コストが実用上の障害にならないことをミリ秒オーダーで確認済み |
 | CUDA | 実機未実施 | NVRTC 実行時コンパイルがディスク非永続の契約として残存する（`backend-cuda/src/nvrtc.rs`）。動的ロード契約自体は実地確認済みだが（`docs/perf/startup-cost-measurement.md:93-108`）、実際のカーネル起動コストの定量値は DGX Spark GB10 実機実測が必要で、本セッションでは未実施 |
-| Metal | 実機未実施 | ドライバ側 JIT キャッシュに相当する永続機構を `crates/backend-metal` 側で明示的に扱っておらず、CPU 同様コールド／ウォーム差がほぼ生じない可能性があるが、これも実機実測で確認する必要があり未実施（`docs/perf/startup-cost-measurement.md:132-143`） |
+| Metal | 実機実測済み（#384） | ドライバ側 JIT キャッシュに相当する永続機構を `crates/backend-metal` 側で明示的に扱っていないが、実機実測（イシュー #384。`docs/perf/startup-cost-measurement.md`「Metal 実測結果」節）の結果、中央値ベースでは cold ≒ warm を確認済み（`MetalGemm::new` が `gemm.metal` を毎プロセス runtime コンパイルする契約自体は残存するが、CUDA 同様 autotune 探索はなく near-cold 観測点〈第 1 サンプル〉のみコンパイルコストと見られる突出〈first_kernel 約 2.6 倍〉を確認。同記録参照） |
 
 実測記録自身が「CUDA/Metal 実機転記が完了するまでは、本記録の CPU 実測部分・構造差分の定性分析のみを
 判断材料として扱う」（`docs/perf/startup-cost-measurement.md:216-217`）と明記しており、本決定もこの制約を
@@ -73,6 +73,13 @@ TASK-13.1 実測記録（`docs/perf/startup-cost-measurement.md`）の要点:
 
 再判定時は、転記された実測値が「ms オーダーでコールド／ウォーム差が実用上無視できる」水準かどうかを基準に、
 短命プロセスユースケースを初期スコープに含めるかどうかを判断し直す。
+
+**事実追記（イシュー #387。`docs/peak-memory-coefficient-decision.md` の #385 事実追記と同型式）**: 上記
+2 条件はいずれも転記完了済みである（CUDA: イシュー #391、Metal: イシュー #384。`docs/perf/startup-cost-
+measurement.md`「CUDA 実測結果」節・「Metal 実測結果」節）。したがって本節冒頭のトリガー自体は消化済みだが、
+**トリガー消化に基づく本決定（未対応）の再判定・方針決定そのものは TASK-13.2（イシュー #172・担当: 人間）の
+スコープであり、本イシュー（#387・総括反映）では行わない**。本イシューはドキュメントの実測状況の事実反映に
+留め、`human-required` の判断を代行しない（本ドキュメント「決定の位置づけ（承認経路）」節の方針を踏襲）。
 
 ## 除外事項への追記文案（申し送り。spec リポジトリ側での対応を要する）
 
