@@ -160,6 +160,13 @@ mod tests {
         assert_eq!(floor_lower_bound(1.9), Ok(1));
     }
 
+    #[test]
+    fn spec_metal_f16_measured_ratio() {
+        // Metal f16 対 PyTorch MPS f16（Apple M4 Max、#383 実測・#386 承認記録）:
+        // 判定対象形状の最小比率 18.6%（size=4096）は 10% 以上のため 5% 刻み切り下げ → 15%。
+        assert_eq!(floor_lower_bound(18.6), Ok(15));
+    }
+
     // --- 旧 #4 非単調性の解消確認 ---
 
     #[test]

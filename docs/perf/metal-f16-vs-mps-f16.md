@@ -208,10 +208,12 @@ PoC-v2-4 を主対比として維持する。#437 との対比を含めた要因
 
 - ~~本ファイルの「実測結果」節は Apple Silicon 実機での `cargo test -- --ignored`・`cargo run --release`・
   PyTorch スクリプト実行後に埋める~~ → **イシュー #383 で完了**（本ファイル「実測結果」節）
-- 下限値の確定（REQ-8 性能下限表の当該行の更新）は **#386**（人間承認）が行う。本ファイルの実測結果を
+- ~~下限値の確定（REQ-8 性能下限表の当該行の更新）は **#386**（人間承認）が行う。本ファイルの実測結果を
   入力として使う。**下限確定の判断は `docs/perf/performance-floor-decision.md` を参照**（本イシューでは
   同ファイルの §2/§3/§5(b) を更新していない。「#156: 実測未実施」の記述は本イシューの実測完了により陳腐化
-  したが、下限確定は #386 のスコープであるため本イシューでは書き換えない）
+  したが、下限確定は #386 のスコープであるため本イシューでは書き換えない）~~ → **#386 で完了**（初期リリース
+  下限 15% を確定。`docs/perf/performance-floor-decision.md` §2/§3 に参照注記・§5(b) に解消記録・§8 に
+  確定記録を追加済み。`crates/bench-harness/src/threshold.rs::floor_spec` も更新済み）
 - `docs/spec/04-requirements.md`（正本 submodule）の更新は本リポでは行わない。仕様変更は spec リポ側で対応する
   （`.claude/rules/out-of-scope-tracking.md`「仕様変更が必要な場合」）
 - f16 の自動ディスパッチ規則への統合（`docs/dispatch-rules-design.md`）は本イシューのスコープ外

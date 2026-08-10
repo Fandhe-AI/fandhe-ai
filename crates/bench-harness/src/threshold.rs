@@ -20,6 +20,10 @@
 //! 各行のコメントに PoC 出典を併記する（`.claude/rules/code-comment-style.md`）。
 //! spec 改定（例: #151 で提案中の最適化後下限一律引き上げ案）が確定した場合は
 //! [`floor_spec`] の定数のみを更新すれば追従できる（判定ロジック自体は不変）。
+//!
+//! **例外（Metal f16 初期リリース行）**: イシュー #386（人間承認・`docs/perf/performance-floor-decision.md`
+//! §8）で 15% に確定済みだが、spec 側（2026-08-05 版）への反映は未実施（spec リポジトリ側対応待ち）。
+//! 本モジュールの値が一時的に spec 表へ先行する（先例 #158 §5(a) と同じ運用）。
 
 use crate::report::BenchReport;
 use crate::stats::BenchError;
@@ -69,10 +73,11 @@ pub enum Stage {
 /// 下限の設定状態。
 ///
 /// REQ-8 下限表は「下限を設定しない」（例: CUDA f16 初期リリース。tensor core 未使用の
-/// スカラー実装同士の比較は指標として無意味）と「未設定」（例: Metal f16 初期リリース。
-/// 単に未実測）という 2 種類の「下限なし」状態を持つが、いずれも判定結果を
-/// `Verdict::NotApplicable`（Pass でも Fail でもない）として扱う点は共通のため、
-/// 本 enum では区別せず `reason` に出典を記録するのみとする。
+/// スカラー実装同士の比較は指標として無意味）と「未設定」（例: Metal f16 最適化後。
+/// 自作カーネルでの追加最適化後の実測を待つ段階。Metal f16 初期リリースはイシュー #386 で
+/// 15% に確定済みのため本 enum 上は `Ratio` へ移行した）という 2 種類の「下限なし」状態を
+/// 持つが、いずれも判定結果を `Verdict::NotApplicable`（Pass でも Fail でもない）として
+/// 扱う点は共通のため、本 enum では区別せず `reason` に出典を記録するのみとする。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FloorSpec {
     /// 下限（PyTorch 比パーセント）が設定されている行。
@@ -137,12 +142,20 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
             percent: 30.0,
             provisional: false,
         },
-        // v2 PoC で未実測のため未設定（REQ-8）。
-        (MetalF16, InitialRelease) => FloorSpec::NotSet {
-            reason: "v2 PoC で未実測のため未設定（REQ-8）",
+        // Metal f16 対 PyTorch MPS f16（Apple M4 Max）。実測 18.6%（#383・size=4096。
+        // `docs/perf/metal-f16-vs-mps-f16.md`「実測結果」節、10% 以上のため 5% 刻み切り下げ）。
+        // 数値一致（`cpu_metal_f16_parity.rs` 6 件）は #380 の f32 累算化後に全 PASS 済みのため
+        // 限定条件は付けない。イシュー #386 のユーザー承認記録（2026-08-10）で確定
+        // （`docs/perf/performance-floor-decision.md` §8）。spec 表（2026-08-05 版）への反映は
+        // spec リポジトリ側対応待ち（本モジュール冒頭コメント「例外」節参照）。
+        (MetalF16, InitialRelease) => FloorSpec::Ratio {
+            percent: 15.0,
+            provisional: false,
         },
+        // 初期リリース下限は #386 で確定済み（15%）。最適化後は今後の最適化タスクの実測に基づき
+        // 丸め規則で再確定する（REQ-8・#386 承認記録。カーネル最適化・要因分析は #387 のスコープ）。
         (MetalF16, Optimized) => FloorSpec::NotSet {
-            reason: "自作カーネルでの f16 実測後に本規則（丸め規則）で設定する（REQ-8）",
+            reason: "初期リリース下限は #386 で確定済み（15%）。最適化後は今後の最適化タスクの実測に基づき丸め規則で再確定する（REQ-8・#386 承認記録）",
         },
     }
 }
@@ -462,13 +475,44 @@ mod tests {
     }
 
     #[test]
-    fn metal_f16_both_stages_are_not_applicable() {
+    fn metal_f16_initial_floor_15_percent_boundary() {
+        // own.median=1.0 に対し pytorch.median=0.15 -> ratio = 0.15/1.0*100 = 15.0（下限ちょうど）。
+        // イシュー #386 承認記録（実測 18.6% に丸め規則を適用した確定値）の境界を
+        // 既存の cuda_f32_initial_floor_10_percent_boundary と同型で固定する。
+        let own = report("metal", 1.0, 0.9, 1.1);
+
+        let pytorch_pass = report("metal", 0.15, 0.135, 0.165);
+        let pass = judge(
+            &own,
+            &pytorch_pass,
+            BackendDtype::MetalF16,
+            Stage::InitialRelease,
+        )
+        .unwrap();
+        assert_eq!(pass.verdict, Verdict::Pass);
+        assert_eq!(pass.floor_percent, Some(15.0));
+        assert_eq!(pass.floor_provisional, Some(false));
+
+        let pytorch_fail = report("metal", 0.149, 0.134, 0.164);
+        let fail = judge(
+            &own,
+            &pytorch_fail,
+            BackendDtype::MetalF16,
+            Stage::InitialRelease,
+        )
+        .unwrap();
+        assert_eq!(fail.verdict, Verdict::Fail);
+    }
+
+    #[test]
+    fn metal_f16_optimized_is_not_applicable() {
+        // 最適化後段階は #386 では設定しない（承認記録どおり今後の最適化タスクで再確定）。
         let own = report("metal", 1.0, 0.9, 1.1);
         let pytorch = report("metal", 0.5, 0.45, 0.55);
-        for stage in [Stage::InitialRelease, Stage::Optimized] {
-            let j = judge(&own, &pytorch, BackendDtype::MetalF16, stage).unwrap();
-            assert_eq!(j.verdict, Verdict::NotApplicable);
-        }
+        let j = judge(&own, &pytorch, BackendDtype::MetalF16, Stage::Optimized).unwrap();
+        assert_eq!(j.verdict, Verdict::NotApplicable);
+        assert_eq!(j.floor_percent, None);
+        assert_eq!(j.floor_provisional, None);
     }
 
     #[test]
