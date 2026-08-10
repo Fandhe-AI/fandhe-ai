@@ -4,7 +4,8 @@ description: >
   親イシュー配下のサブイシュー（孫含む）を依存順を保ちつつ worktree で並列に自動実装・push 前 review・PR 作成・CI 監視・squash merge まで一括自動化。
   「イシューツリーを並列実装」「配下のサブイシューをまとめて実装」「ツリー全体を並列で実装して」「イシュー階層を自動開発」で使用。
   per-issue 計画立案（Plan: セッション継承モデル）→実装（Implement: sonnet）の分業。push 前 review（Review 通過後にのみ push・PR 作成して CI を 1 回だけ起動）。
-  外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。並列度（parallel）と依存（dependsOn）で実行順を制御。
+  外部チェック構成は args の externalChecks で明示（[] で「なし」を確定して不要待機なし・未指定なら自動マージ停止）。
+  squash merge の自動実行は autoMerge を true 明示した場合のみ（既定は無効 = fail-closed で PR をマージ可能状態のまま停止）。並列度（parallel）と依存（dependsOn）で実行順を制御。
   単一イシューの実装は implement-issue、PR レビューは implement-review-pr を参照。
 user-invocable: true
 argument-hint: "<親イシュー番号> [マージ先ブランチ（省略時 main）] [並列度（省略時 3）]"
@@ -40,17 +41,18 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
     "parent": "<親イシュー番号>",
     "branch": "<マージ先ブランチ（省略時 main）>",
     "parallel": "<並列度 1〜8（省略時 3）>",
-    "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>"
+    "externalChecks": "<外部チェック App slug の配列（例: [\"cursor\"]。使用しない場合は []）>",
+    "autoMerge": "<自動マージの明示 opt-in（boolean。true 明示時のみ squash merge を自動実行。省略時 false = マージ可能状態で停止）>"
   }
 }
 ```
 
-例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済みでマージする場合:
+例: 親イシュー `#42` の配下を `main` へ、並列度 3・Cursor Bugbot 導入済み・自動マージ opt-in でマージする場合:
 
 ```json
 {
   "scriptPath": ".claude/skills/implement-issue-tree/script/implement-issue-tree.js",
-  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"] }
+  "args": { "parent": 42, "branch": "main", "parallel": 3, "externalChecks": ["cursor"], "autoMerge": true }
 }
 ```
 
@@ -62,6 +64,7 @@ Workflow ツールで `scriptPath` にこのスキルディレクトリ内の `s
 | `branch` | 任意 | `main` | マージ先ブランチ。不正な文字を含む場合はエラー |
 | `parallel` | 任意 | `3` | 並列実行数（1〜8）。`1` を指定すると実質的に直列実行になる |
 | `externalChecks` | 任意 | 未指定 | GitHub Actions 以外の外部チェック App slug の配列（最大 10 件、slug 形式は英小文字・数字・ハイフン）。**未指定と `[]` は意味が異なる** |
+| `autoMerge` | 任意 | `false` | 自動マージの明示 opt-in（boolean）。**未指定は自動マージ無効**（Issue #165 の fail-closed）。`true` を明示した場合のみ squash merge まで自動実行する。無効時も実装・push 前 Review・PR 作成・CI 監視・fix ループは従来どおり自動で進み、PR はマージ可能状態の `blocked` で停止する。boolean 以外はエラーで停止（誤記を黙って読み替えない） |
 
 **`externalChecks` の 3 状態（Issue #147）:**
 
@@ -111,8 +114,8 @@ gh pr list --state merged --limit 3 --json headRefOid --jq '.[].headRefOid' \
 
 各末端イシューに着手する前に、残骸 worktree / ブランチが存在するかを確認する。**既存作業がなければ Recover をスキップして Plan へ進む**。既存作業がある場合は Recover phase（セッション継承モデルのエージェント）が「途中作業を継続できるか」を判断し、その結果に応じて以下のどちらかへ分岐する。
 
-- **continue（継続）**: 既存 branch をそのまま checkout し、回復ブリーフ（done / remaining / broken の要約）を Implement へ渡して続きから実装する。Plan はスキップされる。Recover が直接 Review へ進むことはなく、継続作業は必ず Implement → Review → Merge を経由する。旧 worktree の削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全する（退避されていない未コミット変更を欠いたまま継続すると不完全な実装になるため、削除だけを飛ばして継続することはしない）。
-- **discard（破棄）**: 既存 worktree と branch を削除し、通常の Plan → Implement（新規 branch）で再実行する。削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。
+- **continue（継続）**: 既存 branch をそのまま checkout し、回復ブリーフ（done / remaining / broken の要約）を Implement へ渡して続きから実装する。Plan はスキップされる。Recover が直接 Review へ進むことはなく、継続作業は必ず Implement → Review → Merge を経由する。旧 worktree の削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全する（退避されていない未コミット変更を欠いたまま継続すると不完全な実装になるため、削除だけを飛ばして継続することはしない）。加えて、旧 worktree の掃除と `implementing` / `reviewing` 遷移の完了を状態更新の戻り値で確認できなかった場合も先へ進まず `failed` で保全する（旧 worktree が branch を掴んだままだと新 worktree が同一 branch を checkout できず、`reviewing` 未永続化のまま続行すると重複実装につながるため。discard 側の掃除完了確認と対）。
+- **discard（破棄）**: 既存 worktree と branch を削除し、通常の Plan → Implement（新規 branch）で再実行する。削除は **WIP 退避の完了が検証できた場合のみ**実行する（後述の削除ゲート）。検証できない場合は残骸を削除せず `failed` で保全し、次回ランの Recover に委ねる。加えて、worktree / branch の掃除完了を状態更新の戻り値で確認できなかった場合も Plan へ進まず `failed` で保全する（branch 残存下で再 Plan すると `git checkout -B` が WIP commit を orphan 化するため）。
 
 **Recover の判断軸は Review とは別**である。Review は「実装が正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。
 
@@ -239,26 +242,29 @@ PR 作成が失敗した場合は `failed` として記録し、`branch` を保�
 
 `gh pr checks --watch` で CI を監視し、以下の全条件を満たした場合のみ squash merge する。
 
-**監視とマージ実行の分離（Issue #145）:** このステップは 2 つのエージェントに分かれる。実行基盤がエージェント単位のツール権限制御を提供しないため、これは権限の剥奪ではなく**コンテキスト分離**（未信頼テキストをマージ実行主体へ入れない）である。残存リスクと必要な基盤対応は「非信頼データの扱い」項目 5 を参照。
+**自動マージは opt-in（Issue #165）:** squash merge の自動実行は `args.autoMerge: true` を明示した場合のみ行う。既定（未指定）では、実装・push 前 Review・PR 作成・CI 監視・fix ループまでは従来どおり自動で進み、全マージ条件を満たしても新規マージは実行せず、PR をマージ可能状態のまま `blocked`（`blockedReason: quality`）+ `pr` 保持で終端する。monitor が `ready`（虚偽含む）を返してもホストが `expectedHeadSha` を空文字へ強制し、merge-exec は `gh pr merge` を含まない回復専用経路（空 sha 経路）に固定されるため、**ホストが指示する正規経路からの新規マージ**は成立しない（Issue #168 の機構を流用したホスト側ゲート。opt-in 判定はホストの決定的コード = args パースのみで行い、モデル出力・未信頼テキストに依存しない）。`blocked` + `pr` は次回ランの monitoring 再開対象のため、`autoMerge: true` を付けた再実行 1 回でマージまで完結する（または人間が GitHub 上でマージする）。**残存リスク（既定無効時も同じ）**: このゲートが閉じるのは正規経路（ホストが merge-exec へ渡す指示）だけである。monitor は既定無効時も従来どおり未信頼の PR レビュー本文を読み、merge-exec と同一の Bash・`gh` 認証コンテキストで動作するため、プロンプトインジェクション成立時に monitor 自身が `gh pr merge` を直接実行する経路は `autoMerge` の値にかかわらず技術的に残る（「非信頼データの扱い」項目 5 参照）。したがって既定無効は未承認マージの不成立を保証する強制境界ではなく、正規経路を決定的コードで閉じる多層防御の一層である。`autoMerge` の値にかかわらず branch protection の必須レビュー・マージ後の人間レビューを併用すること。
+
+**監視とマージ実行の分離（Issue #145）・merged 自己申告の独立確認（Issue #160）:** このステップは監視・マージ実行・独立確認の 3 つのエージェントに分かれる。実行基盤がエージェント単位のツール権限制御を提供しないため、これは権限の剥奪ではなく**コンテキスト分離**（未信頼テキストをマージ実行主体へ入れない）である。残存リスクと必要な基盤対応は「非信頼データの扱い」項目 5 を参照。
 - **監視エージェント（monitor）**: CI・外部チェック・レビュースレッドを確認し、`state`（`ready` / `needs-fix` / `unresolved-comments` / `timeout` / `blocked`）と `headSha`（40 桁）を返す助言的判定のみを行う。PR レビュー本文という未信頼データを読むため、`gh pr merge` / `gh issue close` / `gh pr edit` / resolve mutation の実行権限を持たない。
 - **マージ実行エージェント（merge-exec）**: 監視が `ready` を返したときにホストが起動する。レビュー本文・Issue 本文・**チェック名**を一切読まず、PR の `state` / `headRefOid` / `mergeable`（enum・sha）、チェックの**状態別件数**（`gh pr checks <N> --json state --jq '[.[].state] | group_by(.) | map({state: .[0], count: length})'`。素の `gh pr checks` や `--json name / description / link` は使わない）、未解決レビュースレッドの**件数のみ**（GraphQL から `comments` を外して body を取得しない）、および `args.externalChecks` で確定した外部チェック App について HEAD sha に対する**件数と状態 enum のみ**（`--jq` で正規化。App 名・チェック名・body 等のテキストは取得しない）を自ら再取得して検証し、全条件を満たす場合にのみ squash merge とイシュークローズを実行する。監視時点の HEAD sha と一致しない場合はマージせず辞退する（監視後に push された未検証のコミットをマージしない）。マージは `gh pr merge <N> --squash --delete-branch --match-head-commit <監視時点の sha>` で実行し、照合とマージの間に push される競合（TOCTOU）を GitHub 側の条件評価で塞ぐ。
   - チェック名を除外するのは、名称が PR 側の workflow / job / matrix 定義から生成される外部由来テキストであり、マージ権限を持つ実行主体のコンテキストへ命令文を持ち込む経路になるため（PR #150 codex-review P0 対応）。外部チェックの**件数**（非負整数）と `.conclusion` / `.status` の**状態 enum** は任意テキストを注入できる媒体ではないため、この理由づけの対象外として `--jq` 正規化つきの取得のみを許可する（Issue #146 / #155）。App の絞り込みは、`args` 入力時に slug 形式（英小文字・数字・ハイフン、39 文字以内）へ検証済みの値との `app.slug` 一致で行い、App 名・description・output はコンテキストへ入れない。
   - 外部チェックの再検証を監視エージェント側だけに置かないのは、未信頼テキストを読む監視の判定は「マージを試みてよい」という起動条件にすぎず、ゲートの証拠にできないため。
-  - 監視が有効な `headSha`（40 桁）を返さなかった場合も merge-exec は起動するが、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。
+  - 監視が有効な `headSha`（40 桁）を返さなかった場合も merge-exec は起動するが、新規マージは行わず「PR が既に MERGED ならイシュークローズ確認のみ」に限定される（前回ランでマージ済み・状態記録に失敗した PR の回復パスを保ちつつ fail-closed を維持する）。この限定はプロンプト解釈に任せず、マージ実行手順の文面もホスト側で分岐し、空 sha 経路のプロンプトには `gh pr merge` / `--match-head-commit` を一切含めずイシュークローズ確認のみを出力する（Issue #161）。外部チェック構成が未確定のラン（`externalChecks` 未指定）では、監視が headSha を返していてもホストが `expectedHeadSha` を強制的に空にし、この回復専用経路のみを許可する（Issue #168）。
   - マージ成功でもイシューのクローズを確認できない場合（`issueClosed: false`）は `merged` として終端せず再監視でクローズを再試行し、監視回数を使い切った場合は「PR はマージ済みだがクローズ未確認」として `blocked` で終端する（次回実行の monitoring 再開で回復する）。
-  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green` / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、`external-review-missing` → blocked（Issue #146 / #155。同一ラン内で再監視しても到着を保証できないため fail-open せず終端し、チェック到着後の再実行で monitoring 再開により継続する。終端理由には確定済み slug 一覧と「解消しない場合は slug の誤記・当該 App 未導入を疑い、App の導入状況を確認するか当該 slug を `args.externalChecks` から除外する」旨を添える）、enum 外 → systemic failure、へマッピングされる。
+- **独立確認エージェント（merge-verify、Issue #160）**: merge-exec が `merged: true` を返しても、ホストはそれを未検証のモデル出力として扱い無条件受理しない。`merged: true` は `reason` が `merged` / `already-merged` と整合する場合のみ受理候補とし（不整合・enum 外は systemic failure として `failed` 終端・halt カウント対象）、さらに merge-exec とは別コンテキストの読み取り専用エージェントが `gh pr view <N> --json state,headRefOid,mergeCommit` の取得値のみを返し、ホストが `state` の完全一致（`MERGED`）と監視時点 HEAD sha との一致（`sanitizeSha` 通過値。前回ランでマージ済み・headSha 未記録の already-merged 回復経路では比較対象がないため state のみ）を厳密再検証する。裏付けられない場合（state 不一致・HEAD 不一致・取得不能・無効応答）は fail-closed で `blocked`（`blockedReason: quality`）で終端し、worktree 削除・`dependsOn` 後続イシューの解放は行わない。`blocked` + `pr` は次回ランの monitoring 再開対象のため、実際にマージ済みなら already-merged 経路で自然回復する。返却 schema は自由文フィールドを持たず、確認エージェントはレビュー本文・Issue 本文・コメント・チェック名を一切読まない（ホストのログ・note には enum 完全一致・`sanitizeSha` 通過済みの検証値のみを合成する）。
+  - 辞退理由（`reason`）はホスト側で `head-moved` / `checks-not-green`（許容外 state の存在に加え、チェック総数 0 件・`gh pr checks` 非ゼロ終了の fail-closed 辞退を含む。Issue #159） / `merge-failed` → 再監視、`unresolved-threads` → fix ループ（ただし手元にスレッド内容の構造化一覧がない場合は fix を起動せず再監視し、監視エージェントに内容を収集させる）、`not-mergeable` → fix ループ、`pr-closed` → blocked、`external-review-missing` → blocked（Issue #146 / #155。同一ラン内で再監視しても到着を保証できないため fail-open せず終端し、チェック到着後の再実行で monitoring 再開により継続する。終端理由には確定済み slug 一覧と「解消しない場合は slug の誤記・当該 App 未導入を疑い、App の導入状況を確認するか当該 slug を `args.externalChecks` から除外する」旨を添える。合格条件の提示は App 種別で出し分ける: cursor は「HEAD sha に対する cursor[bot] レビューの到着のみ（state 不問。Bugbot は APPROVED を返さないため APPROVED を待たない）」、cursor 以外の slug は「check-run の合格 conclusion、check-run 0 件時のみ APPROVED レビューへフォールバック」を明記する）、enum 外 → systemic failure、へマッピングされる。
 
 **マージ実行条件:**
-1. **CI 全 green**: 全チェックが success / neutral / skipped で完了し、failure / cancelled / timed_out が 0 件かつ pending / queued / in_progress が 0 件であること。pending が残るなら監視を継続する。
+1. **CI 全 green**: 全チェックが success / neutral / skipped で完了し、failure / cancelled / timed_out が 0 件かつ pending / queued / in_progress が 0 件であること。pending が残るなら監視を継続する。かつ**チェック総数が 1 件以上存在する**こと。0 件は green とみなさず、監視側は最大 10 分の再確認後に `blocked`（quality）で停止する（Issue #159。workflow の `on:` 条件・パスフィルタによる全 job スキップや required workflow 未配置で CI が一度も起動していない PR を自動マージしない fail-closed。merge-exec 側もチェック総数 0 件・`gh pr checks` の非ゼロ終了を `checks-not-green` として辞退する）。
 2. **外部チェック指摘なし**（または「外部チェックなし」が `args.externalChecks: []` で確定していること）: `args.externalChecks` と Step 1 の観測結果に基づき後述の待機手順を実施する。構成が確定できない場合・確定済みの外部チェック App について HEAD sha に対する合格の根拠（許容 conclusion の check-run、または APPROVED レビュー）を確認できない場合はマージしない（Issue #155。「指定した App のチェックが緑」ではなく「指定した App のチェックが**存在し**かつ緑」を条件とする）。
 3. **未解決レビューコメントなし**: GraphQL API で全スレッドが resolved 済みであること。**スレッドの resolve は常に人間が GitHub 上で行う。自動フロー（fix エージェント・オーケストレータを含むどのエージェント・どの経路）も resolve mutation を実行しない**（修正済みの指摘のスレッドも自動では resolve しない）。fix エージェントが検討した結果 **fix 不能・現イシューのスコープ外と判断したコメント**は、その場で Issue 化せず、対応しない理由と対応案を「実装対象外（out-of-scope）の扱い」節の手順に従い **PR 本文の「対象外（out-of-scope）」節に記録する**（自動フローの責務は記録まで）。記録されたスレッドも未解決のまま残るため、人間が resolve しない限り監視は unresolved-comments → blocked へ落ち、最終レポートでの issue 化承認・手動 resolve の判断に乗る。**P0/P1 相当・セキュリティ上の指摘（脆弱性・認証認可・秘密情報露出・破壊的操作等）は「対応不要・スコープ外」の記録のみで済ませることを禁止する**（修正するか、修正不能なら blocked としてユーザー判断へ委ねる。判断がつかない場合は安全側に倒し P0/P1 相当として扱う）。**Issue 化の要否はユーザー承認前に確定させない**（Issue 化の実行判断は同節の手順 3・4 に従い最終レポート確認時にユーザー承認のうえで実施する）。
 
 `gh pr checks --watch` が終了しても「watch が終わった」だけで合格にしない。`gh pr checks ${prNumber}` の出力で全チェックの結論を列挙して確認する。pending が残る場合は再 watch する。failure 等があれば修正エージェント（fix）へ渡す。
 
 **外部チェック待機の 4 分岐（`args.externalChecks` と Step 1 の観測結果による）:**
-- **確定不能（`externalChecks` 未指定）**: 外部レビューを省略してよいか判断できないため、CI の結果にかかわらず `state: blocked` で停止する（Issue #147）。ホスト側にも同じゲートがあり、監視エージェントが `ready` を返しても merge-exec を起動せず `blocked` で終端する（プロンプト + ホストの二重検証）。停止理由には観測結果（参考値）と再実行用の `args` 例が記録され、`blocked` + `pr` は次回ランの monitoring 再開対象となる。
+- **確定不能（`externalChecks` 未指定）**: 外部レビューを省略してよいか判断できないため、CI の結果にかかわらず `state: blocked` で停止する（Issue #147）。ホスト側にも同じゲートがあり、監視エージェントが `ready` を返しても**新規マージ**は行わず `blocked` で終端する（プロンプト + ホストの二重検証）。停止理由には観測結果（参考値）と再実行用の `args` 例が記録され、`blocked` + `pr` は次回ランの monitoring 再開対象となる。ただし PR が既に `MERGED` の場合（前回ランでマージ済み・状態記録に失敗した PR）のクローズ・状態記録の回復は、ホストが `expectedHeadSha` を空に固定した回復専用 merge-exec（プロンプトに `gh pr merge` を含まない空 sha 経路）+ merge-verify の `state=MERGED` 独立確認を経て `merged` 終端できる（Issue #168。新規マージ経路は開かず、PR がマージ済みでなければ従来どおり未確定理由の `blocked` で終端する）。
 - **外部チェックなし確定（`externalChecks: []`）**: 外部レビュー待機はスキップする。CI 全 green と未解決スレッドなしのみで判定する。
-- **cursor（Cursor Bugbot）**: cursor[bot] によるレビュー待機フローを実行する。HEAD push から 1 分以上経過しても Bugbot が開始しない場合のみ `@cursor review` を 1 回だけ催促する（再投稿はしない）。HEAD sha に対する cursor[bot] レビューの到着を最大 10 分待ち、到着すれば指摘解決を待ってからマージする。**到着しない場合は「レビューなし」とみなさず `state: blocked` で停止する**（Issue #146。App の障害・遅延・起動失敗時にレビューゲートを迂回させないための fail-closed。レビュー到着後に再実行すれば monitoring 再開で継続する）。
+- **cursor（Cursor Bugbot）**: cursor[bot] によるレビュー待機フローを実行する。**HEAD sha に対するレビューが不在なら `@cursor review` を 1 回だけ催促する**（再投稿はしない）。Bugbot は**自動実行では指摘 0 件のときレビューを投稿せず check-run のみを completed にする**ため、レビュー不在を「指摘なし」と解釈してはならない（この場合に催促しないと指摘なしの PR が恒久的に blocked になる）。明示依頼なら指摘 0 件でも「新規指摘なし」のレビューが投稿される。check-run は催促してよいタイミングの判定（`queued` / `in_progress` なら待つ）と失敗検出（許容外 conclusion なら `needs-fix`）にのみ使い、合格 conclusion を「指摘なし」の根拠にはしない（指摘ありでも `success` / `neutral` の双方が観測される）。HEAD sha に対する cursor[bot] レビューの到着を最大 10 分待ち、到着すれば指摘解決を待ってからマージする。**到着しない場合は「レビューなし」とみなさず `state: blocked` で停止する**（Issue #146。App の障害・遅延・起動失敗時にレビューゲートを迂回させないための fail-closed。レビュー到着後に再実行すれば monitoring 再開で継続する）。
 - **cursor 以外の外部チェック（例: sonarcloud）**: `gh pr checks --watch`（CI 監視）は「**存在する**チェックが緑になったか」しか保証せず、App がそもそも起動していなければ何も監視しないまま全 green と判定される。そのため App ごとに **HEAD sha に対する check-run の起動そのもの**を確認する（Issue #155。従来はこの確認がなく、`externalChecks: ["sonarcloud"]` と明示しても SonarCloud が未起動のままマージできる fail-open だった）。0 件なら最大 10 分待って再確認し、それでも 0 件なら `state: blocked` で停止する。check-run を作らずレビューのみ投稿する App のために `<slug>[bot]` レビューの HEAD sha 一致もフォールバックとして確認する（**レビューは `state` まで検証する**。合格にできるのは「`APPROVED` が 1 件以上、かつ `CHANGES_REQUESTED` / `COMMENTED` / `PENDING` が 0 件」の場合のみで、否定的レビューが `APPROVED` と併存する場合も不合格とする。merge-exec はレビュー本文を読まず内容を評価できないため、評価できないものは fail-closed で不合格とする。`DISMISSED` は GitHub 上で無効化済みのため判定に含めない）。
   - cursor と他 App を併記した構成（例: `["cursor", "sonarcloud"]`）では、cursor のレビュー到着確認に加えて他 App の起動確認も併せて実施する。
   - `blocked` が再実行でも解消しない場合は slug の誤記、または当該 App が対象リポジトリで動作していない可能性がある。App の導入状況を確認するか、`args.externalChecks` から当該 slug を除外して再実行する。
@@ -374,7 +380,7 @@ open のサブイシューが残っている場合、または受入基準が未
   Issue 化は本レポート確認 → ユーザー承認のうえ実施する（承認なしに Issue 操作をしない。手順は「実装対象外（out-of-scope）の扱い」手順 3・4 と同様）
 ```
 
-返却値: `parent` / `baseBranch` / `parallel` / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
+返却値: `parent` / `baseBranch` / `parallel` / `autoMerge`（自動マージが有効だったか。`false` のランはマージ条件を満たしたイシューも `blocked` + `pr` で終端し、マージ待ち PR 一覧として追跡する。Issue #165） / `externalChecks`（確定した外部チェック App 一覧） / `externalChecksConfirmed`（構成が確定していたか。`false` のイシューは自動マージされない） / `externalChecksObserved`（観測ベースの参考値） / `total` / `done`（各イシューの status。blocked / failed で未解決コメントがあれば `unresolvedComments`、fix 対象外の判断ログがあれば `outOfScope` を含む） / `failures` / `notStarted` / `halted`。
 
 ## 検証
 
@@ -427,7 +433,8 @@ grep -n "PATCH_EOF\|boundaryNonce" script/implement-issue-tree.js
 
 # worktree 削除の安全性（Issue #139 / #142 / #148）
 # 1. 使い捨て worktree（review / pr-create）が削除されず記録のみであること
-grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree" script/implement-issue-tree.js
+#    （所有権マーカー照合による回収も不採用 — マーカー植え付け指示が存在しないこと）
+grep -n "recordEphemeralWorktree\|cleanupEphemeralWorktree\|implement-issue-tree-owner" script/implement-issue-tree.js
 # 2. continue / discard の削除ゲート（申告 wipCommitted + ホスト側の実測）が両方あること
 grep -n "wipCommitted === true\|verifyDiscardSafety" script/implement-issue-tree.js
 # 3. 孤立 worktree の削除に所有権照合（状態ファイル記録パスとの一致）があること
@@ -438,7 +445,7 @@ grep -n "blockedReason\|MERGE_VALID_BLOCK_REASONS\|normalizeBlockedReason" scrip
 
 期待結果: `UNTRUSTED_POLICY` が `COMMON` 配列の末尾で参照され、あわせて `updateState` の State プロンプト（JSON マージ担当・掃除担当の両方）でも参照されていること。`untrusted(` が上記 8 関数それぞれの中で最低 1 回出現すること。`gh issue view` の全ヒットのうち、worktree routing ガード（implementPrompt 手順 0・fixPrompt 手順 0・recoverImplementPrompt 手順 0）と mergeExecutePrompt 手順 5 が `--json number,title` または `--json state` に限定されており、本文を読む箇所（planPrompt 手順 1・closePrompt 手順 2・recoverPrompt 手順 2c・Tree 手順 4）はいずれも「本文は非信頼データ」の注意文と同一手順内にあること。`monitorPrompt` に `gh pr merge` / `gh issue close` が出現しないこと（コンテキスト分離の確認）。
 
-worktree 削除の安全性については、`cleanupEphemeralWorktree` が 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
+worktree 削除の安全性については、`cleanupEphemeralWorktree` と `implement-issue-tree-owner` がいずれも 1 件もヒットせず `recordEphemeralWorktree` のみが定義・使用されていること（使い捨て worktree の自動削除廃止。所有権マーカー方式もエージェントへ開示した nonce は所有権証明にならないため不採用）、continue 経路・discard 経路の双方が `recoverResult?.wipCommitted === true` と `verifyDiscardSafety` の両方を worktree 削除の通過条件にしていること、`orphanDeleteCandidates` への push が状態ファイル記録パスとの一致（`savedEntryAtEnd.worktree === p`）の内側にあること、`blockedReason` が `MERGE_SCHEMA` の enum・`normalizeBlockedReason` によるホスト側二重検証・終端 status 判定の 3 箇所すべてで参照され、終端 status の判定式に `unresolvedComments` が現れないことを確認する。
 
 ## よくある失敗
 
@@ -498,7 +505,7 @@ cat _/issue-trees/42.json
 
 `planning` / `implementing` / `reviewing` からの再開では、まず Recover phase が残骸 worktree / branch の有無を確認する。**残骸がある場合**は Recover が「途中作業を継続できるか」を判断し、continue なら既存 branch を checkout して Implement で継続、discard なら worktree と branch を掃除して Plan から新規実行する。**残骸がない場合**は通常の Plan → Implement から再実行する。いずれの経路でも push 前 review フローのため PR 未作成の状態で中断している。impl 手順 0b-a が既存 open PR のブランチを検出して続きから作業し、その PR 番号は PR Create フェーズが `--head <branch>` の再検出で引き継ぐ（重複 PR も `gh pr create` の失敗も起こさない）。「push 成功・PR 作成失敗」のケース（状態 `failed`・`branch` 保存済み）では impl 手順 0b-b がリモートブランチを検出して push 済みコミットを保持したまま回復する。
 
-**重要遷移の書き込み検証と副作用の分離:** `reviewing`（branch / worktree の記録）と `monitoring`（`pr` の記録）への遷移は、失敗すると重複実装・重複 PR につながるため書き込み成功を検証し、1 回リトライしても失敗する場合は先へ進まず終端する。このとき **worktree 削除を同じ `updateState` 呼び出しに載せない**（Issue #143）。`updateState` は「JSON マージ」と「掃除」の AND を 1 つの `ok` として返すため、状態書き込みは成功して削除だけが失敗した場合（worktree が locked、Recover の discard で既に削除済み等）でも書き込み失敗と誤認され、正常に実装できたイシューが `failed` 終端になる。旧 worktree の削除は書き込み成功後に別呼び出し（`preserveWorktreeField: true`）で非致命的に行い、失敗はラン終了時の最終スイープに委ねる。同様に、Low 指摘の PR コメント投稿は `monitoring` 遷移（`pr` の永続化）より**後**に、かつ try/catch 付きで行う（Issue #136。投稿失敗・例外で PR 番号が未保存のまま `failed` 終端になると、次回実行が monitoring 再開経路へ入れず既存 PR を放置したまま重複 PR を作りうる）。
+**重要遷移の書き込み検証と副作用の分離:** `reviewing`（branch / worktree の記録）と `monitoring`（`pr` の記録）への遷移は、失敗すると重複実装・重複 PR につながるため書き込み成功を検証し、1 回リトライしても失敗する場合は先へ進まず終端する。この検証は通常経路だけでなく Recover の continue 経路（回復 Implement 後の `reviewing` 遷移）にも同じ契約で適用される。このとき **worktree 削除を同じ `updateState` 呼び出しに載せない**（Issue #143）。`updateState` は「JSON マージ」と「掃除」の AND を 1 つの `ok` として返すため、状態書き込みは成功して削除だけが失敗した場合（worktree が locked、Recover の discard で既に削除済み等）でも書き込み失敗と誤認され、正常に実装できたイシューが `failed` 終端になる。旧 worktree の削除は書き込み成功後に別呼び出し（`preserveWorktreeField: true`）で非致命的に行い、失敗はラン終了時の最終スイープに委ねる。同様に、Low 指摘の PR コメント投稿は `monitoring` 遷移（`pr` の永続化）より**後**に、かつ try/catch 付きで行う（Issue #136。投稿失敗・例外で PR 番号が未保存のまま `failed` 終端になると、次回実行が monitoring 再開経路へ入れず既存 PR を放置したまま重複 PR を作りうる）。
 
 **Recover の判断軸は Review とは別**である。Review は「正しいか・マージできるか」を判定するのに対し、Recover は「この途中作業から継続するのが妥当か」を判断する。動かない・未完成でも方向が妥当なら continue（残りは Implement が完成させる）。未 commit 変更は Recover が WIP commit として branch へ退避してから worktree を削除するため、continue / discard どちらの経路でもデータを失わない。worktree の削除は continue / discard いずれでも退避完了を申告・実測の 2 段で検証してから行う（Step 2 の削除ゲート参照）。
 
@@ -521,6 +528,7 @@ cat _/issue-trees/42.json
 | isolation ランタイムが発行した worktree ID / path との照合 | ランタイムは作成パスをホストへ返さないため、照合材料そのものが存在しない |
 | 状態ファイル記録済みパスを保護する消極的レジストリ | 並列実行では別イシューの Implement エージェントが `worktreePath` を返す前＝未登録の窓があり、その窓を塞げない |
 | エージェント起動前後の `git worktree list` 差分 | 並列の worktree 作成と競合して一意に定まらず、レースで誤削除に倒れる |
+| ホスト発行 nonce をエージェント自身に cwd へ所有権マーカーとして書かせ、ラン終了時にマーカー照合の上で回収する | nonce は未信頼データ（diff・PR 本文）を処理するエージェント自身へプロンプトで開示されるため所持証明にならない。プロンプトインジェクションを受けたエージェントが `git worktree list` から別の clean worktree を選び、既知の nonce をその配下へ書いてそのパスを返せば、状態ファイル未登録の worktree（利用者の手動 worktree・並行ラン）を全ゲート通過で削除できてしまう。ランタイムが作成パスをホストへ返さない以上、「信頼済みホストが実際に作成・登録したパス」を削除根拠にできず、自動削除は復活させない |
 
 **ラン終了時に worktree スイープを実行する**。個別の削除経路が状態ファイル書き込み失敗等で取りこぼした残骸を回収する最終防衛線であり、クローズ（merged / closed）に至ったイシューの実装 worktree（impl / fix）を残さないことを保証する。使い捨て worktree（review / pr-create）は前述のとおり削除を試みないためスイープの対象外であり、ログ一覧から手動で掃除する。削除対象は**本ラン内で削除を試みた worktree パスの集合**と、後述の孤立 worktree スキャンでブランチ名一致・merged / closed 確定した worktree に限定され、かつ `git worktree list` に実在するものだけを削除する。「観測した全パスから保持リストを引く」方式は採らない（状態ファイルへの書き込みが失敗した worktree が「削除候補には載るが保持リストには載らない」状態になり、実装中・レビュー中の worktree が未コミット変更ごと消える。書き込み失敗が fail-safe ではなく fail-destructive に倒れる）。パスの命名規約からの推測は行わないため、並行して走る別ランの worktree・利用者が手動で作った worktree は構造的に対象になり得ない（ホスト側の worktree 命名規約に依存しない設計。命名規約に依存した絞り込みは、規約の想定が外れたときの失敗方向が `git worktree remove --force` による削除過多になるため採用しない）。観測がゼロなら削除を一切行わない（fail-safe）。保持されるのは failed / blocked / monitoring イシューが記録した worktree で（monitoring は halt 等で中断したイシュー。状態ファイルが指す worktree の実体だけ消えると乖離が生じるため保持する）、ブランチは削除しない（未 push のコミットを持つ可能性があるため、ブランチの寿命は worktree の寿命と切り離す）。スイープ結果は Workflow の返却値 `sweptWorktrees` で確認できる。
 
@@ -647,16 +655,16 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 4. **構造化抽出の限定と driver 側検証**: Tree エージェントが返す `dependsOn` は「イシュー番号（正の整数）のみ」に限定し、driver 側（スクリプト本体）で各要素を `assertInt` で検証する。`title` / `state` の型検証も同様に driver 側で行う（スキーマ宣言のみに依存しない）。
 5. **コンテキスト分離（未信頼テキストと破壊的操作を同じ実行主体に置かない）**: 破壊的・不可逆な操作（merge / close / worktree・branch 削除）を行う実行主体のコンテキストへ、未信頼テキスト（レビュー本文・Issue 本文・チェック名・patch の自由文）を一切入れない。
    **これは強制的なセキュリティ境界ではない**（後述の実行基盤の制約を参照）。攻撃者が制御可能なテキストを読む主体を「実行しない主体」に寄せることで、注入が成功しても直接には破壊的操作へ到達しないようにする多層防御の一層である。
-   - **Merge フェーズ（Issue #145）**: PR レビュー本文を読む監視エージェントは `gh pr merge` / `gh issue close` を持たない。マージ実行は、レビュー本文を読まず checks・HEAD sha・未解決スレッド数のみを自ら再取得して検証する別エージェントに限定する（Step 6 参照）。
+   - **Merge フェーズ（Issue #145 / #160）**: PR レビュー本文を読む監視エージェントは `gh pr merge` / `gh issue close` を持たない。マージ実行は、レビュー本文を読まず checks・HEAD sha・未解決スレッド数のみを自ら再取得して検証する別エージェントに限定する（Step 6 参照）。さらに merge-exec の `merged` 自己申告も未検証のモデル出力として扱い、ホストの reason 整合ゲート + 独立確認エージェント（merge-verify。読み取り専用・`state` / `headRefOid` のみ取得）の二重化を通過した場合にのみ受理する（Issue #160）。確認エージェントもモデル出力であり強制境界ではないが、merge-exec と merge-verify が同時に虚偽を返す場合のみ突破される多層防御として機能する。
    - **State フェーズ（Issue #144）**: 状態ファイルへマージする patch JSON は `note` / `summary` 等の未信頼由来の自由文を含むため、使い捨て nonce のデータ境界で隔離し（固定の ```json フェンス・固定 HEREDOC デリミタは境界を偽装されうるため廃止）、`UNTRUSTED_POLICY` を State プロンプトにも適用する。さらに JSON マージ担当と worktree / branch 掃除担当を別エージェントに分け、自由文と削除権限が同じ実行主体に同居しないようにする。掃除側が受け取るのは `sanitizeWorktreePath` / `isValidBranchName` 検証済みの値と固定文言のみ。JSON マージが失敗した場合は掃除を実行しない（回復情報を永続化できていない状態で worktree / branch を削除しないための fail-safe。削除意図は最終スイープの候補に登録済みのため残骸は後で回収される）。
-   - **実行基盤の制約と残存リスク（重要）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証コンテキストを持つため、注入に従った監視エージェントが `gh pr merge` を直接実行する経路は**技術的には残る**。したがって本節の分離は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」であり、CI・独立検証（merge-exec の再取得検証）・`--match-head-commit` による HEAD 固定と合わせた多層防御として機能する。
+   - **実行基盤の制約と残存リスク（重要）**: Workflow ランタイムはスクリプト自身に `process` / `fs` / shell を与えず、`agent()` 単位の読み取り専用 credential・ツール allowlist も提供しない。分割後の各エージェントは同じ Bash・同じ `gh` 認証コンテキストを持つため、注入に従った監視エージェントが `gh pr merge` を直接実行する経路は**技術的には残る**。したがって本節の分離は「権限の剥奪」ではなく「未信頼テキストと破壊的操作のコンテキスト分離」であり、CI・独立検証（merge-exec の再取得検証）・`--match-head-commit` による HEAD 固定と合わせた多層防御として機能する。このため自動マージは既定で無効・明示 opt-in（`args.autoMerge: true`。Issue #165 の fail-closed）とし、ホストが正規経路（merge-exec への指示）で新規マージを実行するランを残存リスクを理解した人間の明示的な選択に限定する。ただしこのゲートは正規経路のみを閉じるものであり、monitor は既定無効時も未信頼テキストを読み同一の Bash・`gh` 認証コンテキストで動作するため、注入された monitor 自身が `gh pr merge` を直接実行する経路は `autoMerge` の値にかかわらず残る（既定無効は未承認マージの不成立を保証しない。Step 6 参照）。基盤が per-agent のツール allowlist / read-only credential を提供した時点で monitor へ適用し、既定を見直す。
    - 強制境界にするには実行基盤側の対応（監視エージェントへ読み取り専用トークンを渡す、`gh pr merge` / `gh issue close` を拒否するツール allowlist を `agent()` に指定できるようにする、ホスト側の決定的コードでマージを実行する）が必要であり、現時点の Workflow ランタイムでは提供されていない。導入先でこのスキルを利用する際は、この残存リスクを前提に PR の最終確認（人間によるマージ後レビュー・branch protection の必須レビュー設定）を併用すること。
 
 残存リスクとして、自然言語インジェクションは境界タグ + 取り扱い規則でも確率的にしか防げない。push 前 Review フェーズ・CI・Bugbot・squash merge 前の Merge フェーズ監視が最終防衛線であることに留意する。
 
 ## 注意事項
 
-- **ユーザー承認なしで PR 作成・merge まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する
+- **ユーザー承認なしで PR 作成まで自動実行する**ため、事前に親イシュー番号・ブランチ・並列度を慎重に確認する。**merge の自動実行は `args.autoMerge: true` の明示時のみ**（既定は無効。Issue #165 の fail-closed。マージ条件を満たした PR はマージ可能状態の `blocked` で停止し、`autoMerge: true` を付けた再実行の monitoring 再開、または人間の GitHub 上でのマージで完了する）。既定無効が閉じるのはホスト正規経路のみで、注入された monitor 自身によるマージ実行経路は残る（Step 6・「非信頼データの扱い」項目 5 参照。`autoMerge` の値にかかわらず branch protection の必須レビューを併用する）
 - `parallel` は 1〜8 の整数のみ有効。整数以外・範囲外は既定の 3 にフォールバックする。並列度を上げるほど API レート制限・CI キューの逼迫に注意する
 - レビュースレッドの resolve（解決済み化）は自動フローのどのエージェント・どの経路でも実行されない（自動 resolve 機能は撤去済み）。自動フローは PR 本文への記録までで停止し、未解決スレッドは blocked → 最終レポートで issue 化承認を判断する。resolve は常に人間が GitHub 上で行い、resolve 後の再実行（または監視継続中の resolve）でマージ条件が再判定される
 - 各 implement / fix は独立した worktree で隔離実行されるが、メイン working copy のブランチ・共有設定などグローバル状態は変更しない
@@ -665,9 +673,11 @@ GitHub 由来のテキスト（Issue タイトル・本文・PR 本文・レビ�
 - シェルコマンドの変数は必ず `"${var}"` でクォートする（コマンドインジェクション対策）。GitHub API から取得した文字列はプロンプト埋め込み前にサニタイズされる
 - 1 イシューの失敗では停止せず次へ進むが、3 イシュー連続失敗で新規着手を停止（halt）する
 - マージ前に **CI は全チェックが success/neutral/skipped で完了（pending/failure 0 件）であること**を明示確認する（`gh pr checks --watch` が終わっただけでは合格にせず、全チェックの結論を列挙して確認する）
-- 外部チェック（Cursor Bugbot 等）の構成は `args.externalChecks` で明示する。Step 1（Tree フェーズ）の観測（直近 3 件の merged PR 分析）は参考値にすぎず、明示がない限り自動マージを停止する。Bugbot 待機・`@cursor review` 催促を省略できるのは `externalChecks: []` で「外部チェックなし」を確定した場合のみ
+- マージ前に **チェックが 1 件以上存在すること**を確認する。チェック総数 0 件・`gh pr checks` の非ゼロ終了（チェック不在エラー・取得不能を含む）は green とみなさず、監視側は `blocked`（quality）で停止し、merge-exec 側は `checks-not-green` で辞退する（Issue #159。CI 未起動の PR を自動マージしない fail-closed）
+- 外部チェック（Cursor Bugbot 等）の構成は `args.externalChecks` で明示する。Step 1（Tree フェーズ）の観測（直近 3 件の merged PR 分析）は参考値にすぎず、明示がない限り**新規マージ**を停止する（PR が既に `MERGED` の場合のクローズ・状態記録回復のみ、空 sha 固定の回復専用 merge-exec + merge-verify 経由で `merged` 終端できる。Issue #168）。Bugbot 待機・`@cursor review` 催促を省略できるのは `externalChecks: []` で「外部チェックなし」を確定した場合のみ
 - `args.externalChecks` で明示した外部チェック App は、slug を問わず **HEAD sha に対する起動の確認**をマージの必須条件とする（Issue #155。cursor だけでなく sonarcloud 等も検証する）。cursor はレビューが 1 件以上到着していること（内容評価は監視側の needs-fix 判定が担う。Bugbot は APPROVED を出さないため state は問わない）、cursor 以外は check-run が 1 件以上ならその全件が許容 conclusion であること（failure・未完了があれば APPROVED レビューが存在しても不合格）、check-run が 0 件のときに限り「APPROVED レビューが 1 件以上かつ CHANGES_REQUESTED / COMMENTED / PENDING が 0 件」であることを条件とする。待機上限（最大 10 分）内に起動を確認できなければ「チェックなし」とみなさず `blocked` で停止する（App の障害・遅延・起動失敗時にゲートを迂回しない fail-closed）。マージ実行エージェント側でも App ごとに件数・状態 enum のみを再取得して独立に検証する
 - マージ前に **レビューコメントが全て解決済みであること**を確認する（未解決コメントがある場合はマージしない）
+- **merged 終端は独立確認を通過した場合のみ**確定する。merge-exec の `merged: true` は `reason`（`merged` / `already-merged`）との整合を必須とし（不整合は systemic failure として `failed` 終端）、さらに読み取り専用の merge-verify エージェントで `state=MERGED` と監視時点 HEAD sha の一致を独立確認できた場合にのみ merged として扱う。確認不能・不一致は `blocked`（quality）で fail-closed し、実際にマージ済みなら次回ランの monitoring 再開（already-merged 経路）で回復する（Issue #160）
 - コミット・PR 作成は Conventional Commits に従う（`.claude/rules/conventional-commits.md`）。セキュリティ問題を検出した場合は修正してから進む（`.claude/rules/security.md`）
 - **中断・失敗後に手動で worktree を削除したり削除確認に答えたりする必要はない**。再実行時に Recover phase が per-issue で継続可否を判断し、作業のある worktree は continue（Implement で継続）または discard（削除 → Plan から新規）に振り分ける。continue / discard いずれの worktree 削除も WIP 退避の完了を検証できた場合のみ実行され、検証できない場合は残骸を保全して `failed` にする（データ損失より停滞を選ぶ fail-safe）。なお review / pr-create の使い捨て worktree は自動削除しない方針のため、ラン終了時のログ一覧を見て必要に応じ手動で掃除する
 
