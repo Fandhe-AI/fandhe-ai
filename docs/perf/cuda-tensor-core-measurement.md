@@ -83,18 +83,24 @@ cargo test -p backend-cuda --release -- --ignored --nocapture wmma_
 
 tiled f32 の TFLOPS が PoC-v2-3 実測値（1.832 TFLOPS）を大きく下回っている点・WMMA opt 経路が tiled を
 明確に上回らない点は、5.1 節が示す並列実行時の計測歪みの影響を受けた可能性が高く、本ファイル単独では
-「実機の実性能」と断定しない（#390/#391 に引き継ぐ）。
+「実機の実性能」と断定しない。**#390 が単一プロセス逐次実行での突合を完了済み**（次項参照）。
 
-**tiled f32 基準値の突合（重要）**: 上表の tiled f32（0.189〜0.233 TFLOPS。`tensor_core_real_device.rs::
-tensor_core_tflops_record` 実測）は、同じ M=N=K=4096 形状を別バイナリ（`gemm_wmma_tf32_opt.rs::
-wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`）で計測した tiled f32 基準値 1.187〜1.237 TFLOPS と
-約 5 倍乖離している（詳細・原因分析は
+**tiled f32 基準値の突合（#390 で結論確定）**: 上表の tiled f32（0.189〜0.233 TFLOPS。
+`tensor_core_real_device.rs::tensor_core_tflops_record` 実測）は、同じ M=N=K=4096 形状を別バイナリ
+（`gemm_wmma_tf32_opt.rs::wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`）で計測した tiled f32 基準値
+1.187〜1.237 TFLOPS と約 5 倍乖離していた（詳細・原因分析は
 [`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) 5.1 節「tiled f32
 基準値の突合」を参照）。`tensor_core_tflops_record` は同一バイナリ内に GPU を使う
-`tensor_core_parity_record` を併載しており、直後の並列競合フレーキー性の記述（5.1 節）と整合する形で
-低い方の値も歪んでいる疑いが強い。したがって上表から導いた「対 PoC-v2-3 約 10〜25%」という評価は
-過小評価の可能性があり、**どちらの値が実機の実性能に近いかは本ファイル単独では確定できない**
-（直列実行下での再測定を #390／#391 に引き継ぐ）。
+`tensor_core_parity_record` を併載しており、並列競合フレーキー性（5.1 節）と整合する形で低い方の値も
+歪んでいる疑いが強かった。**#390**（`docs/perf/cuda-floor-remeasurement.md`「tiled f32 @4096 の
+バイナリ間乖離の突合結果」節）が、並列競合のない単一プロセス逐次実行の `cuda_floor_bench` で
+3 回反復計測した結果、tiled f32 @4096 は **1.9729〜1.9817 TFLOPS**（中央値 1.9775 TFLOPS）を記録し、
+上記いずれの既存値よりも高いことを確認した。これにより「並列実行が低い方の値〈0.189〜0.233
+TFLOPS〉を歪めた」という推定は裏付けられたが、直列再実行値（1.187〜1.237 TFLOPS）との約 1.6〜1.7 倍
+の残差は未解明のまま #391（起動コスト計測）に引き継がれている。したがって本節の「対 PoC-v2-3 約
+10〜25%」という評価は過小評価だった可能性が高く、より高い基準値（対 PoC-v2-3 比 約 108%）が実態に
+近いと考えられる。詳細は `docs/perf/cuda-floor-remeasurement.md` を正本とし、本ファイルでは二重管理
+しない。
 
 ### 複合判定通過（M=N=K=512。TF32／f16）
 
@@ -120,5 +126,7 @@ f16 経路（他形状・K=4096 ストレスケースを含む）・その他形
 
 ## 未実施・後続作業
 
-- 実測完了（#389）。TFLOPS の並列競合影響切り分け・PyTorch 比の精緻化は #390／#391 に、複合判定
-  fail の閾値再評価は #186 に引き渡し済み（本ファイル・`../backend-cuda-real-device-testing.md` 参照）
+- 実測完了（#389）。tiled f32 @4096 のバイナリ間乖離突合は **#390 で完了**（本ファイル「tiled f32
+  基準値の突合」節・`docs/perf/cuda-floor-remeasurement.md` 参照）。残る TFLOPS 計測プロトコル頑健性
+  （直列再実行値との約 1.6〜1.7 倍の残差・`wmma_f16` run 間ばらつき）は #391 に、複合判定 fail の
+  閾値再評価は #186 に引き渡し済み（本ファイル・`../backend-cuda-real-device-testing.md` 参照）
