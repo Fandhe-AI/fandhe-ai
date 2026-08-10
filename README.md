@@ -90,6 +90,14 @@ make test-ignored-metal   # backend-metal に限定した #[ignore] テスト実
 cargo test -p backend-metal --release -- --ignored --nocapture
 ```
 
+**実測状況**（Metal 実機検証・ベンチ計測トラッキングツリー、親 #379。2026-08-10 完了）: 上記
+`#[ignore]` テスト 52 件は Apple Silicon 実機（M4 Max・macOS 26.6）で green を実測確認済み（#380）。
+続けて f32 GEMM 4 段（naive/tiled/simdgroup/dynamic-tile）・境界形状 TFLOPS・f16 GEMM 対 PyTorch MPS
+f16・起動コスト・ピークメモリのベンチ実測を完了し（#381〜#385）、REQ-8「Metal f16 初期リリース」の
+性能下限を 15% に確定した（#386・人間承認済み）。詳細出典は
+[`docs/backend-metal-real-device-testing.md`](docs/backend-metal-real-device-testing.md)・
+[`docs/performance-targets.md`](docs/performance-targets.md) を参照。
+
 ## CI
 
 - CI はすべて **self-hosted runner** で実行します（`.claude/rules/ci.md`）
