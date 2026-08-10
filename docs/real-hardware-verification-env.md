@@ -186,6 +186,7 @@ torch が未導入。venv 作成手順（`python3 -m venv .venv-mps-bench` → `
 - `docs/perf/cuda-floor-remeasurement.md`（CUDA 参照値）
 - `docs/perf/metal-f16-vs-mps-f16.md`（Metal MPS 比較）
 - `docs/perf/startup-cost-measurement.md`（起動時間計測）
+- `docs/backend-cuda-real-device-testing.md`（CUDA 実機 `#[ignore]` テスト 51 件の実行結果・失敗と対処。#389）
 
 ### 重要な制約
 
