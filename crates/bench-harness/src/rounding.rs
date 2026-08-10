@@ -167,6 +167,20 @@ mod tests {
         assert_eq!(floor_lower_bound(18.6), Ok(15));
     }
 
+    #[test]
+    fn spec_cuda_f32_optimized_measured_ratio() {
+        // CUDA f32 対 PyTorch CUDA（最適化後、DGX Spark GB10、#390 実測・#393 承認記録）:
+        // 判定対象形状の最小比率 25.64%（size=4096）は 10% 以上のため 5% 刻み切り下げ → 25%。
+        assert_eq!(floor_lower_bound(25.64), Ok(25));
+    }
+
+    #[test]
+    fn spec_cuda_f16_optimized_measured_ratio() {
+        // CUDA f16 対 PyTorch f16（最適化後、DGX Spark GB10、#390 実測・#393 承認記録）:
+        // 判定対象形状の最小比率 12.97%（size=2048）は 10% 以上のため 5% 刻み切り下げ → 10%。
+        assert_eq!(floor_lower_bound(12.97), Ok(10));
+    }
+
     // --- 旧 #4 非単調性の解消確認 ---
 
     #[test]

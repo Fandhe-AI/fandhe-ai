@@ -24,6 +24,11 @@
 //! **例外（Metal f16 初期リリース行）**: イシュー #386（人間承認・`docs/perf/performance-floor-decision.md`
 //! §8）で 15% に確定済みだが、spec 側（2026-08-05 版）への反映は未実施（spec リポジトリ側対応待ち）。
 //! 本モジュールの値が一時的に spec 表へ先行する（先例 #158 §5(a) と同じ運用）。
+//!
+//! **例外（CUDA f32/f16 最適化後行）**: イシュー #393（人間承認・`docs/perf/performance-floor-decision.md`
+//! §9）で 25%／10% に確定済みだが、同じく spec 側への反映は spec リポジトリ側対応待ち。承認記録に
+//! 限定条件（候補算出経路が #389 §5.3 の数値一致 parity 恒常 fail 対象と一致・#186 解決後の再確認）が
+//! 付されており、`(CudaF32, Optimized)`／`(CudaF16, Optimized)` 各行のコメントに詳細を記載する。
 
 use crate::report::BenchReport;
 use crate::stats::BenchError;
@@ -116,21 +121,44 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
             percent: 10.0,
             provisional: false,
         },
-        // tensor core（WMMA/mma）化前提の見積もりだが f32/f16 混同の外挿を避けた保守的な暫定値
-        // （REQ-8: 「tensor core 実装完了後の実測で本値を再確定すること」）。
+        // CUDA f32 対 PyTorch CUDA（最適化後、DGX Spark GB10）。暫定 40% は #390（PR #444）の
+        // 実機実測（tiled f32 基準・WMMA(TF32) opt 候補、3 run 完全一致）で再確定した:
+        // 判定対象形状（M=N=K=2048/4096）の実測比率最小値 25.64〜25.69%（4096 側が最小）に
+        // `bench_harness::floor_lower_bound` を適用し 25%（10% 以上のため 5% 刻み切り下げ）。
+        // イシュー #393 のユーザー承認記録（2026-08-10）で確定
+        // （`docs/perf/performance-floor-decision.md` §9）。`provisional: false` とする根拠:
+        // 暫定値の解消条件（「tensor core 実装完了後の実測で再確定すること」）を実測再確定によって
+        // 満たしたため。
+        //
+        // 限定条件（承認記録に明記。追跡は #393 参照）:
+        // - 候補算出経路 `wmma_tf32` は #389 §5.3 の数値一致 parity 恒常 fail 対象と一致する
+        //   （`docs/perf/cuda-floor-remeasurement.md`「数値一致（parity）状態の限定条件」節）
+        // - 本承認は「実測基準でゲートを機能させ、今後の最適化で性能を改善していく」方針による
+        // - #186（REQ-2 閾値改定）は 2026-08-06 に close 済みだが、閾値定数自体は変更されておらず
+        //   （commit 紐付けなし）、TF32/f16 Tensor Core 経路の複合判定改定は spec リポ側対応待ちの
+        //   ままである。よって「#186 解決後に本下限値を再確認する」限定条件は継続する
+        //   （parity green の経路で再実測し、必要なら再確定する）
+        // - spec 表（2026-08-05 版）への反映は spec リポジトリ側対応待ち（本モジュール冒頭コメント
+        //   「例外」節参照）
         (CudaF32, Optimized) => FloorSpec::Ratio {
-            percent: 40.0,
-            provisional: true,
+            percent: 25.0,
+            provisional: false,
         },
         // 実測 1.9%（PoC-v2-3）は tensor core 未使用のスカラー実装同士の比較であり、
         // 指標として無意味なため下限を設定しない（REQ-8 脚注「CUDA f16 の扱い」）。
         (CudaF16, InitialRelease) => FloorSpec::NotSet {
             reason: "tensor core 未実装のスカラー実装同士の比較（実測 1.9%）は指標として無意味なため下限を設定しない（REQ-8 脚注）",
         },
-        // f32 と同一水準の見積もり（tensor core 前提。理由は CudaF32/Optimized と同じ）。
+        // CUDA f16 対 PyTorch f16（最適化後、DGX Spark GB10）。暫定 40% は #390（PR #444）の
+        // 実機実測（`mma.sync` f16 パイプライン候補、3 run 完全一致）で再確定した:
+        // 判定対象形状の実測比率最小値 12.97%（2048 側が最小）に `floor_lower_bound` を適用し
+        // 10%（10% 以上のため 5% 刻み切り下げ）。イシュー #393 のユーザー承認記録（2026-08-10）で
+        // 確定（`docs/perf/performance-floor-decision.md` §9）。`provisional: false` とする根拠・
+        // 限定条件は CudaF32/Optimized と同一（候補算出経路は `mma_f16`。#389 §5.3 の parity
+        // 恒常 fail 対象と一致・#186 解決後の再確認を継続）。
         (CudaF16, Optimized) => FloorSpec::Ratio {
-            percent: 40.0,
-            provisional: true,
+            percent: 10.0,
+            provisional: false,
         },
         // Metal f32 対 PyTorch MPS（Apple M4 Max）。実測 23.2%（PoC-v2-4、10% 以上のため 5% 刻み切り下げ）。
         (MetalF32, InitialRelease) => FloorSpec::Ratio {

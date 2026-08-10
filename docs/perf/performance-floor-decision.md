@@ -39,9 +39,9 @@
 | CPU 対 PyTorch CPU | 初期リリース | 5% | 確定（変更なし） | PoC-v2-1 実測 5.3%（10% 未満 1% 刻み切り下げ）。確定済み値であり本イシュー対象外 |
 | CPU 対 PyTorch CPU | 最適化後 | 20% | 確定（変更なし） | NEON intrinsics 実効効率見積もりに基づく確定値（暫定値ではない）。本イシュー対象外 |
 | CUDA f32 対 PyTorch CUDA | 初期リリース | 10% | 確定（変更なし） | PoC-v2-3 実測 10.3%（10% 以上 5% 刻み切り下げ）。確定済み値であり本イシュー対象外 |
-| CUDA f32 対 PyTorch CUDA | 最適化後 | 40%（暫定） | **暫定維持** | #157: 実機（GB10+NVRTC）再実測なし。candidate floor は `n/a`。再確定条件は §4 に従う |
+| CUDA f32 対 PyTorch CUDA | 最適化後 | 40%（暫定） | **暫定維持**（当時。**→ §9 で 25% に確定〈#393〉**） | #157: 実機（GB10+NVRTC）再実測なし。candidate floor は `n/a`。再確定条件は §4 に従う |
 | CUDA f16 対 PyTorch f16 | 初期リリース | 下限を設定しない | **未設定維持** | tensor core 未使用のスカラー実装同士の比較（実測 1.9%）は指標として無意味（REQ-8 脚注）。本イシュー対象外 |
-| CUDA f16 対 PyTorch f16 | 最適化後 | 40%（暫定） | **暫定維持** | CUDA f32/最適化後と同一理由（#157） |
+| CUDA f16 対 PyTorch f16 | 最適化後 | 40%（暫定） | **暫定維持**（当時。**→ §9 で 10% に確定〈#393〉**） | CUDA f32/最適化後と同一理由（#157） |
 | Metal f32 対 PyTorch MPS | 初期リリース | 20% | 確定（変更なし） | PoC-v2-4 実測 23.2%（10% 以上 5% 刻み切り下げ）。確定済み値であり本イシュー対象外 |
 | Metal f32 対 PyTorch MPS | 最適化後 | 30% | 確定（変更なし） | PoC-v2-4 事前固定判定基準を据え置いた確定値（暫定値ではない）。本イシュー対象外 |
 | Metal f16 対 PyTorch MPS f16 | 初期リリース | 未設定 | **未設定維持**（当時。**→ §8 で 15% に確定〈#386〉**） | #156: 実測未実施（手順・テンプレート整備のみ） |
@@ -92,8 +92,8 @@ Metal f16 の K=4096 ストレスケース許容誤差再評価（#156 が本イ
 - `docs/perf/transformer-workload-measurement.md`（#155）
 - `docs/perf/metal-f16-vs-mps-f16.md`（#156・#380・#383）
 - `docs/perf/cuda-floor-remeasurement.md`（#157）
-- `docs/performance-targets.md`（TASK-8.4・#159。本ドキュメントを入力として全バックエンド横断の一覧を整備する。#386 §8 も入力に追加済み）
-- `crates/bench-harness/src/threshold.rs`（REQ-8 下限表のデータ化・自動合否判定。#386 で Metal f16 初期リリース行のみ更新）
+- `docs/performance-targets.md`（TASK-8.4・#159。本ドキュメントを入力として全バックエンド横断の一覧を整備する。#386 §8・#393 §9 も入力に追加済み）
+- `crates/bench-harness/src/threshold.rs`（REQ-8 下限表のデータ化・自動合否判定。#386 で Metal f16 初期リリース行、#393 で CUDA f32/f16 最適化後行を更新）
 - `crates/bench-harness/src/rounding.rs`（丸め規則の公開 API。TASK-8.2b・#153）
 
 ## 8. 追補（#386・2026-08-10）: Metal f16 初期リリース下限の確定
@@ -138,3 +138,68 @@ Metal f16 初期リリース段階の性能下限として**確定**する（暫
 `docs/spec/04-requirements.md`（2026-08-05 版）REQ-8 表への反映は spec リポジトリ
 （Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（§5(a) と同じ扱い。
 本リポでは `docs/spec/` submodule を編集しない）。
+
+## 9. 追補（#393・2026-08-10）: CUDA f32/f16 最適化後下限の確定
+
+§3 の CUDA f32/f16 最適化後行は「実機（GB10+NVRTC）再実測なし」を理由に暫定 40% 維持と
+据え置いたが、その後の実測完了を受けてイシュー #393 で再確定した。本節はその確定内容を
+追記する（§3 の歴史的記録は書き換えず、該当行に本節への参照注記のみ付す）。
+
+### 入力
+
+- **TFLOPS 実測**: イシュー #390（PR #444）。計測環境 DGX Spark GB10・CUDA 13.0 系
+  （`docs/perf/cuda-floor-remeasurement.md`「実測結果（#390 実機実測）」節）。3 run 反復実行の
+  うえ、同一実機で PyTorch 参照値も再計測した。判定対象形状（M=N=K=2048・4096）の実測比率
+  最小値: f32 = **25.64〜25.69%**（4096 側が最小、3 run とも安定）、f16 = **12.97%**
+  （2048 側が最小、3 run とも同一値）。候補算出経路は f32 = `wmma_tf32`（WMMA(TF32) opt）、
+  f16 = `mma_f16`（`mma.sync` パイプライン）（同ドキュメント「丸め適用後の候補下限値」節）
+- **数値一致（parity）の限定条件**: 候補算出経路（`wmma_tf32`・`mma_f16`）はいずれも #389 §5.3
+  が示す数値一致 parity の恒常 fail 対象と一致する（`cuda-floor-remeasurement.md`「数値一致
+  （parity）状態の限定条件」節）。§8（Metal f16）と異なり、本追補は parity 未達のまま実測基準の
+  下限を確定する点が承認記録の限定条件として明記されている
+
+### 判断
+
+`bench_harness::floor_lower_bound(25.64)` = **25%**、`floor_lower_bound(12.97)` = **10%**
+（いずれも 10% 以上のため 5% 刻み切り下げ。`crates/bench-harness/src/rounding.rs::
+spec_cuda_f32_optimized_measured_ratio`／`spec_cuda_f16_optimized_measured_ratio` で機械的に
+固定）を CUDA f32/f16 最適化後段階の性能下限として**確定**する（暫定値ではない）。
+
+`provisional: false` とする根拠: 暫定 40% の解消条件は「tensor core 実装完了後の実測で本値を
+再確定すること」（`docs/spec/04-requirements.md:180-181`）であり、#390 の実機実測がこの条件を
+満たしたため。ただし §8（Metal f16 初期リリース）とは異なり、本追補は数値一致 parity が
+恒常 fail の経路をそのまま採用しており、下限値そのものに限定条件を付ける。
+
+### 承認記録
+
+イシュー #393 のコメント（2026-08-10・リポジトリオーナー aLiz-Nancy・author association: MEMBER）
+に上記判断のユーザー承認記録が存在する。先例 #158 §1・#386 と同じく、本追補の最終成立は本
+イシュー #393 の PR レビュー・マージ（人間承認）による。
+
+承認コメントに明記された限定条件（本追補で追跡する）:
+
+1. 候補算出経路（`wmma_tf32`・`mma_f16`）は #389 §5.3 の数値一致 parity 未達対象と一致する
+2. 本承認は「実測基準でゲートを機能させ、今後の最適化で性能を改善していく」方針による
+3. **#186（REQ-2 閾値改定）の解決後に本下限値を再確認する**こと（parity green の経路で
+   再実測し、必要なら再確定する）。#186 は 2026-08-06 に close 済みだが、閾値定数
+   （`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）自体は変更されておらず
+   （close コミット紐付けなし。`docs/perf/cuda-tensor-core-tolerance-evaluation.md` §4「結論」）、
+   TF32/f16 Tensor Core 経路の複合判定改定は REQ-2 改定として spec リポジトリ側対応待ちの
+   ままである。よって本限定条件は**解消しておらず、継続する**（本追補では下限値を変更しない。
+   値の再変更は新たなユーザー承認事項）
+
+### 反映箇所
+
+- `crates/bench-harness/src/threshold.rs::floor_spec`: `(CudaF32, Optimized)` を
+  `FloorSpec::Ratio { percent: 40.0, provisional: true }` から
+  `FloorSpec::Ratio { percent: 25.0, provisional: false }` へ、`(CudaF16, Optimized)` を
+  `FloorSpec::Ratio { percent: 40.0, provisional: true }` から
+  `FloorSpec::Ratio { percent: 10.0, provisional: false }` へ更新（本追補とセットで実施）
+- `crates/bench-harness/src/rounding.rs`: spec 実測値再現テスト 2 件を追加（本追補とセットで実施）
+- `docs/performance-targets.md` §2・§6: 転記整合（本追補とセットで実施）
+
+### spec 反映
+
+`docs/spec/04-requirements.md`（2026-08-05 版）REQ-8 表への反映は spec リポジトリ
+（Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（§5(a)・§8「spec 反映」と
+同じ扱い。本リポでは `docs/spec/` submodule を編集しない）。
