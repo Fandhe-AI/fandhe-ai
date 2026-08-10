@@ -182,7 +182,7 @@ green」と記載するが、実態は #389（`docs/backend-cuda-real-device-tes
 | commit SHA | `815ee0dc122d80fcae0c53d29f6d6c5907a97c29`（`.rev-stamp` とノード側転送後の値が一致確認済み） |
 | 実施日 | 2026-08-10 |
 | PyTorch 参照値の出典（`pytorch reference provenance:` 行を転記） | 同一機再計測（`CUDA_FLOOR_BENCH_PYTORCH_SOURCE="poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), 2026-08-10, 同一 GB10 個体 spark-dbd9"`） |
-| 計測プロトコル | `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）。**イシュー #390 受け入れ条件の文言は「5 回中央値」だが、正本ドキュメント本節が規定する 20 回計測の中央値（5 回中央値より強い統計的根拠）を採用しており、`cuda_floor_bench.rs::MeasurementConfig`（warmup 20／計測 20）を「5 回」に書き換える体裁合わせ改変は行わない** |
+| 計測プロトコル | `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）。**イシュー #390 受け入れ条件の文言は「5 回中央値」だが、本イシューは正本 `docs/spec/05-tasks.md` TASK-8.1 が定める warmup 20 回以上・計測 20 回以上の下限（`bench_harness::protocol::MeasurementConfig::MIN_ITERATIONS = 20`。`crates/bench-harness/src/protocol.rs:30,58-69`）に従う。この下限は `MeasurementConfig::new` が `iters < 20` を `BenchError::ProtocolViolation` で拒否するハード制約であり（同ファイル `:64-67`。回避 API なし）、5 回計測へ再集計する経路自体が存在しない。`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値を採用し」との不一致は本イシュー由来ではなく、イシュー #27 時点で既に検出・記録済みの正本（spec）と実装リポ側規約ファイルの既知の乖離であり（`crates/bench-harness/src/lib.rs:17-25` 参照。同箇所はユーザー承認を経ていないため rule ファイル側は変更せず不一致の明記に留めると結論済み）、本イシューはその既定の TASK-8.1 プロトコルを踏襲したに過ぎない。`coding-rust.md` 側の訂正は `.claude/rules/out-of-scope-tracking.md` の規約に従いユーザー承認を得たうえで行う必要があり、計測イシューである本ドキュメントの範囲外とする** |
 | 決定的シード | `0xC0FFEE`（`cuda_floor_bench.rs::SEED`） |
 | GPU 排他性（実行前後） | `utilization.gpu` 0%。常駐は ComfyUI（170MiB）・Kokoro TTS（870MiB）のみ。3 回のバイナリ実行・PyTorch 再計測いずれの前後も第三プロセスの介在なし |
 | 反復回数 | `cuda_floor_bench` を 3 回反復実行（run1/run2/run3）。下表は各形状・各経路の 3 run 間中央値を採用し、run 間のばらつきをレンジとして注記する |
