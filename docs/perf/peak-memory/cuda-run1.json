@@ -1,0 +1,57 @@
+{
+  "schema_version": "1",
+  "backend": "cuda",
+  "m": 4096,
+  "n": 4096,
+  "k": 4096,
+  "dtype": "f32",
+  "trials": 5,
+  "theoretical_min_bytes": 201326592,
+  "peak_bytes": {
+    "median": 201326592,
+    "q1": 201326592,
+    "q3": 201326592
+  },
+  "gemm_secs": {
+    "median": 0.210158324,
+    "q1": 0.209846915,
+    "q3": 0.214925371
+  },
+  "samples": [
+    {
+      "peak_bytes": 201326592,
+      "allocated_after_drop_bytes": 0,
+      "gemm_secs": 0.222699875,
+      "vm_hwm_bytes": 371097600,
+      "gemm_alloc_peak_bytes": null
+    },
+    {
+      "peak_bytes": 201326592,
+      "allocated_after_drop_bytes": 0,
+      "gemm_secs": 0.209712163,
+      "vm_hwm_bytes": 377319424,
+      "gemm_alloc_peak_bytes": null
+    },
+    {
+      "peak_bytes": 201326592,
+      "allocated_after_drop_bytes": 0,
+      "gemm_secs": 0.209846915,
+      "vm_hwm_bytes": 381747200,
+      "gemm_alloc_peak_bytes": null
+    },
+    {
+      "peak_bytes": 201326592,
+      "allocated_after_drop_bytes": 0,
+      "gemm_secs": 0.210158324,
+      "vm_hwm_bytes": 382824448,
+      "gemm_alloc_peak_bytes": null
+    },
+    {
+      "peak_bytes": 201326592,
+      "allocated_after_drop_bytes": 0,
+      "gemm_secs": 0.214925371,
+      "vm_hwm_bytes": 386506752,
+      "gemm_alloc_peak_bytes": null
+    }
+  ]
+}

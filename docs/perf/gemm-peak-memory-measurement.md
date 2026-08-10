@@ -11,23 +11,25 @@
 本記録を入力として実施する。計測手段の環境差文書化は #180（TASK-14.3）のスコープであり、
 本ドキュメントは実測データの記録に留める。
 
-## 状態: CPU 実測済み・Metal 実機実測済み（#385）・CUDA 実機未実施
+## 状態: CPU 実測済み・Metal 実機実測済み（#385）・CUDA 実機実測済み（#392）
 
 本実装セッションは Linux x86_64（QEMU/KVM 仮想化環境、NVIDIA RTX 3060 passthrough）
 worktree で行っており、`libnvrtc`（CUDA toolkit）が導入されていない
 （`ldconfig -p | grep nvrtc` で未検出）。「Metal（Apple Silicon）実機はこのセッションから
 利用できない」という当時の前提は、イシュー #385（本記録内「Metal 実機実測結果」節）で
 Apple Silicon 実機（Apple M4 Max・macOS 26.6）から直接実行し解消済みである。CUDA
-（DGX Spark GB10）は依然未実施のまま（下記「CUDA/Metal 実機実測の再現手順」節・
-`docs/peak-memory-coefficient-decision.md`「再判定トリガー」節を参照）。
+（DGX Spark GB10）についても、イシュー #392（本記録内「CUDA 実機実測結果」節）で
+実機（NVIDIA GB10・CUDA 13.0）から SSH リモート実行し解消済みである。
 
 既存の先例（`docs/perf/startup-cost-measurement.md`〈#171〉・
 `docs/perf/dispatch-boundary-measurement.md`〈#69〉・
-`docs/perf/cuda-tensor-core-measurement.md`〈#64〉）と同じ運用を採る:
+`docs/perf/cuda-tensor-core-measurement.md`〈#64〉）と同じ運用を採った:
 **CPU は本セッションで実測を完了**し、**CUDA（DGX Spark GB10）・Metal（Apple Silicon）は
-再現可能な計測手順と結果転記テンプレートのみを整備**して「実機未実施」と明記する。
-CUDA については、動的ロード契約により本環境でも実行時に panic せず型付きエラーへ
-fail-closed に倒れることを実地確認した（「CUDA 実行時エラーの実地確認」節）。
+当初、再現可能な計測手順と結果転記テンプレートのみを整備**して「実機未実施」と明記して
+いたが、Metal は #385・CUDA は #392 でそれぞれ実機実測を完了し解消済みである。
+CUDA については、当初の本環境（libnvrtc 未導入）でも動的ロード契約により実行時に panic
+せず型付きエラーへ fail-closed に倒れることを実地確認していた（「CUDA 実行時エラーの
+実地確認」節。当時の記録として維持する）。
 
 ## 環境
 
@@ -56,6 +58,27 @@ fail-closed に倒れることを実地確認した（「CUDA 実行時エラー
 | 計測日 | 2026-08-10 |
 | 実行方式 | ローカル直接実行（SSH・転送不要。`docs/real-hardware-verification-env.md` 7.1 節
   「Mac 上でそのまま実行」） |
+
+### 環境（CUDA。イシュー #392）
+
+| 項目 | 値 |
+|------|-----|
+| GPU | NVIDIA GB10（sm_121。`nvidia-smi -L` 実測。driver 580.159.03） |
+| OS | Linux 6.17.0-1026-nvidia aarch64（`uname -srm` 実測） |
+| CUDA | 13.0.88（`nvcc --version` 実測。`V13.0.88`） |
+| toolchain / rustc | `stable`・rustc 1.97.0 (2d8144b78 2026-07-07)（`rustc --version` 実測） |
+| ビルドプロファイル | `--release`（`cargo build -p bench-harness --release --bins`） |
+| 計測リビジョン | `4ba5365a0d7e68fd54b50412f268278465503a40`（`.rev-stamp` 実測。転送後に
+  `ssh … cat .rev-stamp` で worktree の `git rev-parse HEAD` と一致確認済み） |
+| 計測日 | 2026-08-10 |
+| 実行方式 | SSH リモート実行・rsync 転送（`local.fandhe.spark-dbd9`。
+  `docs/real-hardware-verification-env.md` 2〜3 節） |
+| 実行コマンド | `$CARGO_TARGET_DIR/release/peak_memory_bench --backend cuda --trials 5
+  --out docs/perf/peak-memory/cuda-run{1,2}.json`（ビルド済みバイナリを直接実行。
+  `cargo run` 経由にすると孫プロセスの計測混入を避けにくいため回避。PR #445 と同型） |
+| GPU 占有状況（計測前後） | 計測前後とも常駐 2 プロセスのみ（ComfyUI 約 170MiB・
+  Kokoro TTS 約 870MiB）・`utilization.gpu` 0%（`nvidia-smi --query-compute-apps` /
+  `--query-gpu=utilization.gpu` 実測。他プロセスの介入なし） |
 
 ## 計測方法
 
@@ -267,11 +290,81 @@ RSS が `MTLBuffer` 相当の確保も含みうることと整合する。**こ�
 おり（`ps ax` 実測。PR #437／イシュー #381 のベンチとの競合なし）、`gemm_secs` は
 他プロセス由来の変動を含まない。
 
-## CUDA/Metal 実機実測の再現手順（Metal は実測済み。CUDA は未実施。転記テンプレート）
+## CUDA 実機実測結果（イシュー #392）
 
-DGX Spark GB10（CUDA 実機）で実測する場合は、以下と同一のコマンド・同一のバイナリで
-再現できる（Metal は上記「Metal 実機実測結果」節で実施済みであり、同一手順を
-`--backend metal` で実行したものである）:
+`peak_memory_bench --backend cuda --trials 5` を `--out` 付きで 2 セット実行した（実行
+環境は上記「環境（CUDA。イシュー #392）」節）。生 JSON は
+`docs/perf/peak-memory/cuda-run1.json`・`cuda-run2.json`（全試行の `samples` 込み）。
+再現性確認として `make peak-memory-bench BACKEND=cuda TRIALS=5`（`--out` なし）も
+1 回実行し、`#[ignore]` 分離済みスモークテスト
+`cuda_peak_memory_matches_theoretical_minimum`（256³）も実機で実行・pass 済み。
+
+| セット | peak_bytes（中央値 / Q1 / Q3） | 理論最小 | 対理論比 | gemm_secs（中央値 / Q1 / Q3, 秒） | vm_hwm_bytes（参考値） | gemm_alloc_peak_bytes |
+|---|---|---|---|---|---|---|
+| cuda-run1 | 201,326,592 / 201,326,592 / 201,326,592 | 201,326,592 | 1.000 | 0.210158 / 0.209847 / 0.214925 | 371,097,600〜386,506,752（trial 毎に単調増加） | -（`GlobalAlloc` 非経由。CUDA 契約） |
+| cuda-run2 | 201,326,592 / 201,326,592 / 201,326,592 | 201,326,592 | 1.000 | 0.204331 / 0.204243 / 0.206938 | 371,138,560〜382,996,480（trial 毎に単調増加） | - |
+
+**内部計測 API のピーク値は run1・run2 とも 5 試行すべてで決定的に 201,326,592 バイト
+（192MiB）ちょうど**であり、理論最小ワーキングセットと完全一致した（対理論比 1.000）。
+`allocated_after_drop_bytes` は全 10 trial（2 セット × 5 試行）で 0 を記録し、リークは
+検出されなかった。`gemm_alloc_peak_bytes` は全 10 trial で `null`（CUDA は `cudarc` の
+driver 確保が Rust の `GlobalAlloc` を経由しないため契約どおり）。run1／run2 間で
+`peak_bytes` は完全一致（再現性確認）。
+
+### AC2: 係数上限（384MiB 以内 = 対理論比 2.0 以内）の充足可否
+
+**内部 API 値（対理論比 1.000）は REQ-14 初期リリース係数上限 2.0 を余裕をもって満たす**
+（超過なし。上限値 2.0 は本イシューでは変更しない。変更はユーザー承認必須。
+`.claude/rules/coding-rust.md`・`docs/real-hardware-verification-env.md`）。
+
+### 計測境界の限界（CUDA 固有。「計測境界（重要）」節の適用）
+
+CUDA の `peak_bytes` も CPU・Metal 同様「計測境界（重要）」節のとおり `MemoryOps` 経由
+（`upload(A)`・`upload(B)`・`alloc_zeroed(C)`）の確保のみを計上する。
+`CudaGemm::run_tiled_f32`（`crates/backend-cuda/src/ops.rs`）がカーネル実行のために
+stream 上へ直接確保するバッファは計測対象外である。したがって **対理論比が 1.000 に
+張り付くのは「CUDA のワーキングセットが理論最小どおりだった」ことの証明ではなく、
+この計測手法の設計上の性質**（`MemoryOps` 経由の 3 バッファ以外を計上しない契約）で
+あることを踏まえて数値を読む必要がある（Metal 節と同じ注意喚起）。
+
+**Metal と異なり、実機ノードが Linux aarch64 のため `vm_hwm_bytes`
+（`/proc/self/status` の `VmHWM`。`read_vm_hwm_bytes` は `#[cfg(target_os = "linux")]`
+実装）は全 10 trial で non-null が実測できた**（上表参照。CPU と同様の外部対照が存在
+する）。ただし GB10 は統合メモリアーキテクチャであり、`cudarc` のデバイス確保が
+プロセスの RSS（`VmHWM`）に計上されるか否かは本イシューでは断定できない。このため
+`vm_hwm_bytes` は CPU 節と同じ「参考値」に留め、**対理論比の算出には用いない**
+（判定対象は内部計測 API 値のみ。`docs/peak-memory-coefficient-decision.md`
+「2. 判定対象の定義」）。`vm_hwm_bytes` は trial が進むごとに単調増加しているが、これは
+`VmHWM` がプロセス全体の生涯ピーク値であり 5 trial 目までに到達した最大値が記録される
+という CPU 節と同じ性質（`gemm-peak-memory-measurement.md`「内部 API 値と外部参考値の
+乖離」節）による。
+
+### gemm_secs の解釈（CUDA 固有）
+
+`CudaBackendOps::gemm`（`crates/backend-cuda/src/ops.rs:79`）は呼び出しごとに
+`CudaGemm::new`（NVRTC ランタイムコンパイル）を実行するため、`gemm_secs` は
+「NVRTC ソース→PTX コンパイル＋H2D/D2H 転送＋カーネル実行」の合計であり、CPU の
+`gemm_secs`（カーネル実行のみ）とは直接比較できない。イシュー #391（TASK-14.1 系
+CUDA 起動コスト実測）の知見「NVRTC source→PTX コンパイルは `CUDA_CACHE_PATH` の
+設定に関係なく毎プロセス発生し、キャッシュが効くのはドライバ側 PTX→SASS 変換のみ」
+（`docs/perf/startup-cost-measurement.md`〈#391〉CUDA 節参照）がこの現象の根拠である。
+両セットの `samples`（生 JSON 参照）を確認したが、run1・run2 とも 5 試行間の差は
+小さく（run1: 0.2097〜0.2227 秒、run2: 0.2023〜0.2159 秒）、Metal 節で観測されたような
+明確な初回外れ値は見られなかった。外れ値の取捨選択は行わず全 5 試行で中央値を算出した。
+
+### 再現性確認
+
+run1・run2 の 2 セットとも内部 API ピーク値は完全に同一（201,326,592 バイト）であり、
+`gemm_secs` の中央値も 0.210158 秒・0.204331 秒と近い値（差 約 3%）で安定していた。
+`make peak-memory-bench BACKEND=cuda TRIALS=5`（`--out` なし）経路の中央値
+（0.217090 秒）は run1 の Q1〜Q3（0.209847〜0.214925 秒）よりわずかに高いが、NVRTC
+コンパイルコストの試行間変動（同経路の 2 trial 目が 0.829344 秒の外れ値を含む）を
+踏まえると同オーダーの値であり、実行方式（ビルド済みバイナリ直接実行 対
+`cargo run` 経由）による系統的な乖離ではないと判断する。
+
+## CUDA/Metal 実機実測の再現手順（CPU・Metal・CUDA いずれも実測済み）
+
+以下のコマンド・同一のバイナリで再現できる（`--backend cpu|cuda|metal` を切り替える）:
 
 ```bash
 cargo build -p bench-harness --release --bins
@@ -281,19 +374,13 @@ cargo run -p bench-harness --release --bin peak_memory_bench -- \
   --backend cuda --trials 5 --out docs/perf/peak-memory/cuda-run2.json
 ```
 
-転記テンプレート（CUDA 実機実測後、上記 CPU・Metal 実測結果と同型の表を追記する）:
-
-| セット | peak_bytes（中央値 / Q1 / Q3） | 理論最小ワーキングセット | 対理論比 | gemm_secs（中央値 / Q1 / Q3, 秒） | vm_hwm_bytes（参考値） | gemm_alloc_peak_bytes（参考値。CUDA は `GlobalAlloc` 非経由につき常に「-」） |
-|--------|-------------------------------|------------------------|---------|-----------------------------------|------------------------|---------------------------------------------------------------------------------------|
-| run1（CUDA） | (未実施) | 201,326,592 | (未実施) | (未実施) | (未実施) | - |
-| run2（CUDA） | (未実施) | 201,326,592 | (未実施) | (未実施) | (未実施) | - |
-
 CUDA 実機実測時は `crates/bench-harness/tests/peak_memory_smoke.rs` の
 `cuda_peak_memory_matches_theoretical_minimum`（`#[ignore]` 分離済み）を
 `cargo test -p bench-harness --release --test peak_memory_smoke -- --ignored --exact
 cuda_peak_memory_matches_theoretical_minimum` で実行し、内部 API 値が理論最小
-ワーキングセットと一致することも合わせて確認することを推奨する（Metal 側の同種テスト
-`metal_peak_memory_matches_theoretical_minimum` は本イシューで実行・pass 済み）。
+ワーキングセットと一致することも合わせて確認することを推奨する（本イシュー #392・
+Metal 側の同種テスト `metal_peak_memory_matches_theoretical_minimum` はいずれも
+実行・pass 済み）。
 
 ## スコープ外・申し送り（`.claude/rules/out-of-scope-tracking.md` 準拠）
 
@@ -312,8 +399,8 @@ cuda_peak_memory_matches_theoretical_minimum` で実行し、内部 API 値が�
 - **`VmHWM` とのなお約 66.7〜66.8MiB の残差の内訳分解**: `gemm_alloc_peak_bytes` の計測境界
   （`BackendOps::gemm` 実行区間中の純増分のみ）の外側にある要因（プロセス起動時の初期ヒープ・
   rayon ワーカースレッドのスタック確保等）の内訳分解は本イシューでは行わない
-- **CUDA（DGX Spark GB10）の実機実測**: 転記テンプレート運用のまま未実施
-  （Metal〈Apple Silicon〉はイシュー #385 で実施済み。「Metal 実機実測結果」節参照）
+- **CUDA（DGX Spark GB10）の実機実測**: イシュー #392 で実施済み（「CUDA 実機実測結果」
+  節参照。Metal〈Apple Silicon〉はイシュー #385 で実施済み）
 - **macOS の `getrusage`（`ru_maxrss`）相当の実装**: `libc` クレートの新規追加が必要になるため
   （許容依存 8 区分外。`.claude/rules/deps-policy.md`）、本イシューでは実装しない
   （`vm_hwm_bytes` は macOS では常に `None`）。必要であれば #180 または新規 Issue で
@@ -328,3 +415,5 @@ cuda_peak_memory_matches_theoretical_minimum` で実行し、内部 API 値が�
 - `docs/perf/peak-memory/cpu-run2.json`
 - `docs/perf/peak-memory/metal-run1.json`（イシュー #385）
 - `docs/perf/peak-memory/metal-run2.json`（イシュー #385）
+- `docs/perf/peak-memory/cuda-run1.json`（イシュー #392）
+- `docs/perf/peak-memory/cuda-run2.json`（イシュー #392）
