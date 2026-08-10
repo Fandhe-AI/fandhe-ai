@@ -176,9 +176,11 @@ cargo bench -p backend-metal --bench gemm_metal_f32 --release -- --ignored
 
 ### 7.2 PyTorch MPS 参照計測
 
-torch が未導入。venv 作成手順（`python3 -m venv .venv-mps-bench` → `pip install torch`）の正本は `docs/perf/metal-f16-vs-mps-f16.md`。venv はリポジトリ管理外に置く。
+torch は system には未導入。venv 作成手順（`python3 -m venv .venv-mps-bench` → `pip install torch`）の正本は `docs/perf/metal-f16-vs-mps-f16.md`。venv はリポジトリ管理外に置く（`.venv*/` は `.gitignore` 済み）。
 
 実測スクリプト: `scripts/bench/gemm_bench_torch_mps_f16.py`
+
+イシュー #383 実測時点の実測事実: `python3 -m venv .venv-mps-bench && ./.venv-mps-bench/bin/pip install torch` で torch 2.13.0（Python 3.12.12・`cp312-cp312-macosx_14_0_arm64` ホイール）が導入され、`torch.backends.mps.is_available() == True` を確認済み（Apple M4 Max・macOS 26.6）。venv はワークツリー直下に作成し、計測後もコミットしていない。
 
 ## 8. 結果の記録先
 
