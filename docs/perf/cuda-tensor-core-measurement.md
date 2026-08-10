@@ -85,16 +85,28 @@ tiled f32 の TFLOPS が PoC-v2-3 実測値（1.832 TFLOPS）を大きく下回�
 明確に上回らない点は、5.1 節が示す並列実行時の計測歪みの影響を受けた可能性が高く、本ファイル単独では
 「実機の実性能」と断定しない（#390/#391 に引き継ぐ）。
 
-### 複合判定通過（M=N=K=512。TF32）
+**tiled f32 基準値の突合（重要）**: 上表の tiled f32（0.189〜0.233 TFLOPS。`tensor_core_real_device.rs::
+tensor_core_tflops_record` 実測）は、同じ M=N=K=4096 形状を別バイナリ（`gemm_wmma_tf32_opt.rs::
+wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`）で計測した tiled f32 基準値 1.187〜1.237 TFLOPS と
+約 5 倍乖離している（詳細・原因分析は
+[`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) 5.1 節「tiled f32
+基準値の突合」を参照）。`tensor_core_tflops_record` は同一バイナリ内に GPU を使う
+`tensor_core_parity_record` を併載しており、直後の並列競合フレーキー性の記述（5.1 節）と整合する形で
+低い方の値も歪んでいる疑いが強い。したがって上表から導いた「対 PoC-v2-3 約 10〜25%」という評価は
+過小評価の可能性があり、**どちらの値が実機の実性能に近いかは本ファイル単独では確定できない**
+（直列実行下での再測定を #390／#391 に引き継ぐ）。
+
+### 複合判定通過（M=N=K=512。TF32／f16）
 
 | 経路 | 判定 | 備考 |
 |------|------|------|
 | WMMA TF32（`tensor_core_parity_record`） | **fail**（fail_count=42493/262144, mean_abs_diff=1.574e-3） | `backend_cpu::assert_parity`（相対 1e-3 未満 または 絶対 1e-5 未満）。恒常的 fail |
+| WMMA f16（`tensor_core_parity_record`） | **未計測（到達せず）** | `tensor_core_parity_record` は TF32 判定（`backend_cpu::assert_parity`。`#[track_caller]` 付き `assert!` で FAIL 時に panic する）を先に実行するため、TF32 側が panic した時点で同一テスト関数内の f16 判定コードには到達しない（`crates/backend-cuda/tests/tensor_core_real_device.rs::tensor_core_parity_record` 参照）。512×512×512 形状での f16 実測値はこのテストからは得られない |
 
 複合判定が実機で外れたため、許容誤差は緩和せず、実測値を上記の通り記録したうえで #186 の閾値実測
 再評価へ引き渡した（`.claude/rules/security.md`「ガードレール閾値・テスト許容誤差の変更は必ず人間の
 承認を経る」・`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で緩和しない」）。
-f16 経路・その他形状での parity 実測を含む完全な内訳は
+f16 経路（他形状・K=4096 ストレスケースを含む）・その他形状での parity 実測を含む完全な内訳は
 [`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) 5.3 節を参照。
 
 ## 関連イシューとの役割分担（二重管理を避ける）
