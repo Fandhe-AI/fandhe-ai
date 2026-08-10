@@ -88,13 +88,22 @@ fn mma_f16_zero_dim_shape_returns_empty_without_launch() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
 
+    // `validate_gemm_dims`（`gemm_mma.rs::run_f16` が m==0/n==0 の早期
+    // return より先に必ず呼ぶ）は no-op 形状でも a.len()==m*k・
+    // b.len()==k*n の厳密一致を要求する（`gemm_wmma.rs::run_f16` の
+    // 同種テストと同じ契約）。m=0,n=8,k=8 の no-op では b は k*n=64
+    // 要素必要（実機実行で b.len()=8 の不一致により `InvalidShape` を
+    // 誤検出することが判明。#389 実機テスト初回実行で発覚したテスト側の
+    // バッファ長不備の修正であり、`validate_gemm_dims` 側の検証順序・
+    // 契約は変更しない）。
     let c = gemm
-        .run_f16(&[], &[half::f16::ONE; 8], 0, 8, 8)
+        .run_f16(&[], &[half::f16::ONE; 64], 0, 8, 8)
         .expect("m==0 must be treated as a no-op, not a driver launch error");
     assert!(c.is_empty());
 
+    // n=0,m=8,k=8 の no-op では a は m*k=64 要素必要（同上）。
     let c = gemm
-        .run_f16(&[half::f16::ONE; 8], &[], 8, 0, 8)
+        .run_f16(&[half::f16::ONE; 64], &[], 8, 0, 8)
         .expect("n==0 must be treated as a no-op, not a driver launch error");
     assert!(c.is_empty());
 }

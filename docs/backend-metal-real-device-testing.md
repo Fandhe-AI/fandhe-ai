@@ -51,7 +51,7 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 | `tests/gemm_auto_parity.rs` | 3 | TASK-1.8f 前段 | `dispatch_backend_auto` の閾値前後（境界 511/512）での CPU 参照一致 |
 | `tests/gemm_dynamic_tile_parity.rs` | 6 | TASK-1.8f（#188） | 動的タイル選択（`dispatch_auto`）の全タイル候補・非倍数形状・K ストレスでの CPU 参照一致 |
 | `tests/cpu_metal_f16_parity.rs` | 6 | TASK-8.3b（#156） | `gemm_simdgroup_f16` の CPU 参照一致（8×8×8 基準・512 基準・非倍数境界・K=4096 ストレス・決定性・不正入力の拒否）。累算精度契約はイシュー #380 で f32 累算へ変更済み（`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節） |
-| `tests/dispatch_boundary.rs` | 2 | #382 前段 | `dispatch_auto` の境界形状 TFLOPS 記録・`dispatch_backend_auto` のルーティング検証（TFLOPS 数値の転記は #382 のスコープ） |
+| `tests/dispatch_boundary.rs` | 2 | #382 | `dispatch_auto` の境界形状 TFLOPS 記録・`dispatch_backend_auto` の出力と CPU 参照実装との数値一致検証（実機が実際にどの経路を選んだかの検証ではない。`route_verified=false`）。TFLOPS 数値の転記・`METAL_SIMDGROUP_MIN_DIM` の妥当性判定は #382 で実施済み（`docs/perf/dispatch-boundary-measurement.md`） |
 | `tests/memory_roundtrip.rs` | 6 | TASK-2.1 系 | メモリ確保・ゼロ初期化・プール再利用・アップロード/ダウンロード roundtrip・リーク検査 |
 | `tests/shader_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | TASK-11.3（#70） | `gemm.metal` の行列演算ユニット命令（`simdgroup_matrix` API）実在検査・REQ-8 境界チェック維持検査 |
 
@@ -112,8 +112,9 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
   計測揺れを排除）を付けて行う。**正本コマンド `make test-ignored-metal` はこれらのフラグを付けない**
   （デバッグ・インベントリ用途と受入チェック用途を分離する。`Makefile` は変更していない）
 - `dispatch_boundary.rs::boundary_shapes_tflops_record` は TFLOPS を出力するが本ドキュメントでは
-  pass/fail のみを記録対象とする。数値を `docs/perf/dispatch-boundary-measurement.md` へ転記するのは
-  別イシュー（#382。#382 は #381 依存）のスコープ
+  pass/fail のみを記録対象とする。数値の `docs/perf/dispatch-boundary-measurement.md` への転記・
+  `METAL_SIMDGROUP_MIN_DIM` の妥当性判定は #382 で完了済み（判定: 変更提案あり・提案値 384。
+  コード未変更・実施は別レビュー・別 PR・ユーザー承認）
 
 過去に機械検証済みだった以下の項目は、上記の実機実行によって補完・上書きされた:
 
@@ -125,3 +126,24 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
 
 - **macOS（Metal 実機）self-hosted runner の登録と実機 CI ジョブの追加**: runner 未登録のため TASK-1.8e では実施しない。追加する場合は runner ラベルで対象 runner を明示する（`.claude/rules/ci.md`）
 - **CUDA 側の同種整備**: `backend-cuda` は既に `make test-ignored-cuda`（TASK-1.7e・#36）で整備済み。本ドキュメントはその Metal 版に相当する
+
+以下は Metal 実機検証・ベンチ計測トラッキングツリー（親 #379）完了時点（イシュー #387・総括反映）で
+残存が確認された未実施項目の集約（受け入れ条件「残存する未実施項目を明示的に記録する」への対応）:
+
+- **`METAL_SIMDGROUP_MIN_DIM` 変更提案（384 への引き下げ）の実施**: #382 で記録済みの変更提案はコード
+  未変更のまま。実施は別レビュー・別 PR・ユーザー承認を要する（[`docs/perf/dispatch-boundary-measurement.md`](./perf/dispatch-boundary-measurement.md)
+  「`METAL_SIMDGROUP_MIN_DIM` の妥当性判定（#382）」節）。連動して `crate::tile::select`/`CANDIDATES` の
+  「暫定値」コメント更新も同一の別 PR まで据え置く（[`docs/perf/metal-gemm-dynamic-tile.md`](./perf/metal-gemm-dynamic-tile.md)
+  「未実施・後続作業」節）
+- **bench-harness の Metal 版起動コスト `#[ignore]` E2E テスト未追加**: 起動コスト実測（#384）自体は
+  完了済みだが、回帰検出用の `#[ignore]` E2E テストの追加は本ツリーのスコープ外のまま
+  （[`docs/perf/startup-cost-measurement.md`](./perf/startup-cost-measurement.md)「後続」節）
+- **Transformer 複合ワークロードの Metal 実機実測は記入待ちのまま**: 本ツリー（#379）の対象外（#155 系）。
+  実機（Apple M4 Max・DGX Spark GB10）値は未実測（[`docs/perf/transformer-workload-measurement.md`](./perf/transformer-workload-measurement.md)
+  「実機実測（記入待ち）」節）
+- **f16 の自動ディスパッチ規則への統合はスコープ外のまま**: `docs/dispatch-rules-design.md` への統合は
+  実装計画時点から対象外（[`docs/perf/metal-f16-vs-mps-f16.md`](./perf/metal-f16-vs-mps-f16.md)「未実施・
+  後続作業」節）。REQ-11 系の後続課題として別途追跡する
+- **短命プロセス対応方針の再判定は TASK-13.2（#172・人間判断）待ち**: CUDA（#391）・Metal（#384）の起動
+  コスト転記完了によりトリガー自体は消化済みだが、再判定・方針決定は人間判断のスコープであり本ツリーでは
+  行わない（[`docs/short-lived-process-decision.md`](./short-lived-process-decision.md)「再判定トリガー」節）

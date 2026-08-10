@@ -1112,4 +1112,33 @@ mod tests {
             "gemm_simdgroup_tiled"
         );
     }
+
+    // --- SIMDGROUP_THREADGROUP_WIDTH と gemm.metal のハードコード結合 ---
+
+    /// `gemm.metal` の `include_str!` 済みソース全文。`gemm_simdgroup_f16`
+    /// エピローグ書き戻しループ（`for (uint i = tid; i < 64; i += 32u)`）が
+    /// `SIMDGROUP_THREADGROUP_WIDTH` と一致していることを機械検証するために
+    /// 使う（このモジュール自体はビルド対象ではなく文字列検査のみ）。
+    const GEMM_METAL_SOURCE_FOR_WIDTH_CHECK: &str = include_str!("shaders/gemm.metal");
+
+    /// レビュー指摘（イシュー #383）: `gemm_simdgroup_f16` のエピローグ
+    /// 書き戻しループの刻み幅 `32u` は `encode_dispatch_f16` が dispatch する
+    /// threadgroup 幅 `SIMDGROUP_THREADGROUP_WIDTH` とコメントで結合を明示
+    /// しているだけで、両者の一致を機械的にロックする専用テストがなかった
+    /// （Rust 側定数を変更しても shader 側の `32u` が追随せずサイレントに
+    /// 欠落／過剰書き込みが起きうる）。本テストは `SIMDGROUP_THREADGROUP_WIDTH`
+    /// の実値から生成した `{n}u` リテラルが `gemm.metal` のエピローグ
+    /// ループ刻み幅として実在することを contains 検査でロックし、値の乖離を
+    /// 検出可能にする（`crates/backend-metal/tests/shader_source_evidence.rs`
+    /// と同じ静的検査方式。Linux CI で GPU 実機不要）。
+    #[test]
+    fn simdgroup_f16_epilogue_stride_matches_threadgroup_width_constant() {
+        let expected_stride = format!("i += {SIMDGROUP_THREADGROUP_WIDTH}u");
+        assert!(
+            GEMM_METAL_SOURCE_FOR_WIDTH_CHECK.contains(&expected_stride),
+            "gemm.metal の gemm_simdgroup_f16 エピローグ刻み幅が \
+             SIMDGROUP_THREADGROUP_WIDTH（{SIMDGROUP_THREADGROUP_WIDTH}）と \
+             一致しません。`{expected_stride}` が見つかりませんでした"
+        );
+    }
 }

@@ -127,3 +127,101 @@ fn committed_cpu_peak_memory_reports_have_gemm_alloc_peak_bytes_tracked() {
         }
     }
 }
+
+/// `docs/perf/peak-memory/metal-run1.json`・`metal-run2.json`（イシュー #385
+/// 実測記録本体。`docs/perf/gemm-peak-memory-measurement.md` の Metal 実機実測結果
+/// 節が参照する生データ）を実際に読み込み、Metal 契約（`gemm_alloc_peak_bytes` が
+/// 常に `None`。`GlobalAlloc` フックは CPU 専用で Metal の `MTLBuffer` 確保は
+/// これを経由しない。`crates/bench-harness/src/peak_memory.rs` モジュールコメント
+/// 「計測対象の粒度」参照）を満たすスキーマとして自己保証する。
+///
+/// `committed_cpu_peak_memory_reports_have_gemm_alloc_peak_bytes_tracked` の Metal
+/// ミラー。JSON の読み込みと DTO 検証のみで GPU を必要としないため `#[ignore]` に
+/// せず、`cfg(target_os = "macos")` でも囲まない（Linux の通常 CI でも実行し、
+/// コミット済み実測データの改ざん・スキーマ退行を継続的に検出する）。ファイル不在・
+/// パース失敗・`require_gemm_alloc_tracked` 失敗のいずれも本テストの失敗として扱う
+/// （skip しない。CPU 版と同じ fail-closed 方針）。
+#[test]
+fn committed_metal_peak_memory_reports_have_theoretical_minimum_peak_bytes() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR は cargo test 実行時に必ず設定される");
+    let peak_memory_dir = Path::new(&manifest_dir)
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/bench-harness からリポジトリルートへ 2 階層上れるはず")
+        .join("docs/perf/peak-memory");
+
+    for filename in ["metal-run1.json", "metal-run2.json"] {
+        let path = peak_memory_dir.join(filename);
+        let json = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{path:?} の読み込みに失敗: {e}"));
+        let report = PeakMemoryReport::from_json(&json)
+            .unwrap_or_else(|e| panic!("{path:?} は現行スキーマの検証を通過するはず: {e}"));
+
+        assert_eq!(report.backend, "metal", "{path:?} は Metal 実測記録のはず");
+        assert_eq!(
+            report.theoretical_min_bytes, 201_326_592,
+            "{path:?} は REQ-14 代表ワークロード（M=N=K=4096, f32）の理論最小ワーキングセットのはず"
+        );
+        report.require_gemm_alloc_tracked().unwrap_or_else(|e| {
+            panic!(
+                "{path:?} は Metal 契約（gemm_alloc_peak_bytes が全 trial で None）を満たすはず: {e}"
+            )
+        });
+        for (i, trial) in report.samples.iter().enumerate() {
+            assert!(
+                trial.gemm_alloc_peak_bytes.is_none(),
+                "{path:?} の samples[{i}] は Metal が GlobalAlloc 非経由のため gemm_alloc_peak_bytes が None のはず"
+            );
+        }
+    }
+}
+
+/// `docs/perf/peak-memory/cuda-run1.json`・`cuda-run2.json`（イシュー #392
+/// 実測記録本体。`docs/perf/gemm-peak-memory-measurement.md` の CUDA 実機実測結果
+/// 節が参照する生データ）を実際に読み込み、CUDA 契約（`gemm_alloc_peak_bytes` が
+/// 常に `None`。`cudarc` の driver 確保は Rust の `GlobalAlloc` を経由しない。
+/// `crates/bench-harness/src/peak_memory.rs::run_cuda_trial` 参照）を満たす
+/// スキーマとして自己保証する。
+///
+/// `committed_metal_peak_memory_reports_have_theoretical_minimum_peak_bytes` の
+/// 直接ミラー（CUDA 版）。JSON の読み込みと DTO 検証のみで GPU を必要としないため
+/// `#[ignore]` にせず、`cfg` でも囲まない（Linux の通常 CI・CUDA 非搭載環境でも実行し、
+/// コミット済み実測データの改ざん・スキーマ退行を継続的に検出する）。ファイル不在・
+/// パース失敗・`require_gemm_alloc_tracked` 失敗のいずれも本テストの失敗として扱う
+/// （skip しない。CPU・Metal 版と同じ fail-closed 方針）。
+#[test]
+fn committed_cuda_peak_memory_reports_have_theoretical_minimum_peak_bytes() {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR は cargo test 実行時に必ず設定される");
+    let peak_memory_dir = Path::new(&manifest_dir)
+        .parent()
+        .and_then(Path::parent)
+        .expect("crates/bench-harness からリポジトリルートへ 2 階層上れるはず")
+        .join("docs/perf/peak-memory");
+
+    for filename in ["cuda-run1.json", "cuda-run2.json"] {
+        let path = peak_memory_dir.join(filename);
+        let json = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{path:?} の読み込みに失敗: {e}"));
+        let report = PeakMemoryReport::from_json(&json)
+            .unwrap_or_else(|e| panic!("{path:?} は現行スキーマの検証を通過するはず: {e}"));
+
+        assert_eq!(report.backend, "cuda", "{path:?} は CUDA 実測記録のはず");
+        assert_eq!(
+            report.theoretical_min_bytes, 201_326_592,
+            "{path:?} は REQ-14 代表ワークロード（M=N=K=4096, f32）の理論最小ワーキングセットのはず"
+        );
+        report.require_gemm_alloc_tracked().unwrap_or_else(|e| {
+            panic!(
+                "{path:?} は CUDA 契約（gemm_alloc_peak_bytes が全 trial で None）を満たすはず: {e}"
+            )
+        });
+        for (i, trial) in report.samples.iter().enumerate() {
+            assert!(
+                trial.gemm_alloc_peak_bytes.is_none(),
+                "{path:?} の samples[{i}] は CUDA が GlobalAlloc 非経由のため gemm_alloc_peak_bytes が None のはず"
+            );
+        }
+    }
+}

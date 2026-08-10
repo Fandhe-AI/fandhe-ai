@@ -1,0 +1,95 @@
+[{
+  "schema_version": "1",
+  "backend": "cuda",
+  "phase": "cold",
+  "trials": 5,
+  "wall_secs": {
+    "median": 0.621301494,
+    "q1": 0.618455456,
+    "q3": 0.621382063
+  },
+  "device_init_secs": {
+    "median": 0.196358385,
+    "q1": 0.193665624,
+    "q3": 0.199981272
+  },
+  "first_kernel_secs": {
+    "median": 0.510810289,
+    "q1": 0.507335881,
+    "q3": 0.510860396
+  },
+  "samples": [
+    {
+      "wall_secs": 0.621447663,
+      "device_init_secs": 0.199981272,
+      "first_kernel_secs": 0.513023405
+    },
+    {
+      "wall_secs": 0.612233444,
+      "device_init_secs": 0.193573004,
+      "first_kernel_secs": 0.503279838
+    },
+    {
+      "wall_secs": 0.621301494,
+      "device_init_secs": 0.200574202,
+      "first_kernel_secs": 0.510810289
+    },
+    {
+      "wall_secs": 0.621382063,
+      "device_init_secs": 0.196358385,
+      "first_kernel_secs": 0.510860396
+    },
+    {
+      "wall_secs": 0.618455456,
+      "device_init_secs": 0.193665624,
+      "first_kernel_secs": 0.507335881
+    }
+  ]
+},{
+  "schema_version": "1",
+  "backend": "cuda",
+  "phase": "warm",
+  "trials": 5,
+  "wall_secs": {
+    "median": 0.419263535,
+    "q1": 0.418323617,
+    "q3": 0.419709889
+  },
+  "device_init_secs": {
+    "median": 0.192542905,
+    "q1": 0.191216987,
+    "q3": 0.19265281
+  },
+  "first_kernel_secs": {
+    "median": 0.308080183,
+    "q1": 0.307476132,
+    "q3": 0.310231052
+  },
+  "samples": [
+    {
+      "wall_secs": 0.416840281,
+      "device_init_secs": 0.190635497,
+      "first_kernel_secs": 0.307476132
+    },
+    {
+      "wall_secs": 0.419263535,
+      "device_init_secs": 0.192542905,
+      "first_kernel_secs": 0.310231052
+    },
+    {
+      "wall_secs": 0.419709889,
+      "device_init_secs": 0.19265281,
+      "first_kernel_secs": 0.308080183
+    },
+    {
+      "wall_secs": 0.420703399,
+      "device_init_secs": 0.195235888,
+      "first_kernel_secs": 0.312141034
+    },
+    {
+      "wall_secs": 0.418323617,
+      "device_init_secs": 0.191216987,
+      "first_kernel_secs": 0.307166748
+    }
+  ]
+}]

@@ -3,7 +3,14 @@
 イシュー #64「test(backend-cuda): TASK-11.1e 実機実測・数値一致検証（`#[ignore]` 分離）」の実測記録テンプレート。
 受け入れ条件「実機実測記録（TFLOPS・複合判定通過）が残されている」に対応する。
 
-## 状態: 実測未実施（実装環境は Linux＋RTX 3060・libnvrtc 非搭載のため NVRTC コンパイル不可）
+## 状態: 実測完了（DGX Spark GB10。#389）
+
+下記「実測結果」節は #389（CUDA 実機 `#[ignore]` テスト 51 件の実行・結果記録）で DGX Spark GB10 実機
+実行時に埋めた。詳細な失敗内訳・エスカレーション先は
+[`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) を正とし、本ファイルは
+本セッション由来のテンプレート節への転記のみに留める（二重管理を避ける）。
+
+## 参考: 本ファイル作成時点（実装環境は Linux＋RTX 3060・libnvrtc 非搭載）の制約記録
 
 本実装セッションの環境は Linux（RTX 3060、compute capability 8.6）だが CUDA toolkit（`libnvrtc`）が
 未搭載のため、WMMA カーネルの NVRTC コンパイル・実行検証はできない。toolkit の導入はグローバル状態の
@@ -49,41 +56,64 @@ cargo test -p backend-cuda --release -- --ignored --nocapture tensor_core_
 cargo test -p backend-cuda --release -- --ignored --nocapture wmma_
 ```
 
-## 実測結果（記入待ち）
+## 実測結果（#389・2026-08-10 実測）
 
 ### 計測環境
 
 | 項目 | 値 |
 |------|-----|
-| GPU（`CudaDevice::name()`） | （記入: 例 NVIDIA GB10） |
-| compute capability（`CudaDevice::compute_capability()`） | （記入: 例 (12, 1)） |
-| arch（`CudaDevice::arch()`） | （記入） |
-| driver バージョン | （記入: `nvidia-smi` 出力等） |
-| rustc | （記入: `rustc --version`） |
-| commit SHA | （記入） |
-| 実施日 | （記入） |
+| GPU（`CudaDevice::name()`） | NVIDIA GB10 |
+| compute capability（`CudaDevice::compute_capability()`） | (12, 1) |
+| arch（`CudaDevice::arch()`） | `compute_121` |
+| driver バージョン | 580.159.03 |
+| rustc | 1.97.0 (2d8144b78 2026-07-07) |
+| commit SHA | `720bf633e12471526a31dbe632a86bbe2150a8f4` |
+| 実施日 | 2026-08-10 |
 | 計測プロトコル | `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1） |
 | 決定的シード | tiled/TF32: `0xACE1`、WMMA f16: `0xBEEF01`（`tests/tensor_core_real_device.rs::tensor_core_tflops_record`） |
 
-### TFLOPS 実測（M=N=K=4096）
+### TFLOPS 実測（M=N=K=4096。単発〈並列〉実行時点の値。並列競合の影響は
+`../backend-cuda-real-device-testing.md` 5.1 節参照）
 
-| 経路 | opt 可用性 | median TFLOPS | Q1 TFLOPS | Q3 TFLOPS | 対 tiled 比 | 対 PoC-v2-3（1.832 TFLOPS）比 |
-|------|------|------|------|------|------|------|
-| tiled f32（基準） | - | | | | 1.00 | |
-| WMMA TF32（opt） | （記入: true/false） | | | | | |
-| WMMA f16（opt） | （記入: true/false） | | | | | |
+| 経路 | opt 可用性 | median TFLOPS | 対 tiled 比 | 対 PoC-v2-3（1.832 TFLOPS）比 |
+|------|------|------|------|------|
+| tiled f32（基準） | - | 0.189〜0.233 | 1.00 | 約 10〜13% |
+| WMMA TF32（opt） | true | 0.201〜0.251 | 約 1.06〜1.08 倍 | 約 11〜14% |
+| WMMA f16（opt） | true | 0.380〜0.466 | 約 2.0 倍 | 約 21〜25% |
 
-### 複合判定通過（M=N=K=512）
+tiled f32 の TFLOPS が PoC-v2-3 実測値（1.832 TFLOPS）を大きく下回っている点・WMMA opt 経路が tiled を
+明確に上回らない点は、5.1 節が示す並列実行時の計測歪みの影響を受けた可能性が高く、本ファイル単独では
+「実機の実性能」と断定しない。**#390 が単一プロセス逐次実行での突合を完了済み**（次項参照）。
+
+**tiled f32 基準値の突合（#390 で結論確定）**: 上表の tiled f32（0.189〜0.233 TFLOPS。
+`tensor_core_real_device.rs::tensor_core_tflops_record` 実測）は、同じ M=N=K=4096 形状を別バイナリ
+（`gemm_wmma_tf32_opt.rs::wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`）で計測した tiled f32 基準値
+1.187〜1.237 TFLOPS と約 5 倍乖離していた（詳細・原因分析は
+[`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) 5.1 節「tiled f32
+基準値の突合」を参照）。`tensor_core_tflops_record` は同一バイナリ内に GPU を使う
+`tensor_core_parity_record` を併載しており、並列競合フレーキー性（5.1 節）と整合する形で低い方の値も
+歪んでいる疑いが強かった。**#390**（`docs/perf/cuda-floor-remeasurement.md`「tiled f32 @4096 の
+バイナリ間乖離の突合結果」節）が、並列競合のない単一プロセス逐次実行の `cuda_floor_bench` で
+3 回反復計測した結果、tiled f32 @4096 は **1.9729〜1.9817 TFLOPS**（中央値 1.9775 TFLOPS）を記録し、
+上記いずれの既存値よりも高いことを確認した。これにより「並列実行が低い方の値〈0.189〜0.233
+TFLOPS〉を歪めた」という推定は裏付けられたが、直列再実行値（1.187〜1.237 TFLOPS）との約 1.6〜1.7 倍
+の残差は未解明のまま #391（起動コスト計測）に引き継がれている。したがって本節の「対 PoC-v2-3 約
+10〜25%」という評価は過小評価だった可能性が高く、より高い基準値（対 PoC-v2-3 比 約 108%）が実態に
+近いと考えられる。詳細は `docs/perf/cuda-floor-remeasurement.md` を正本とし、本ファイルでは二重管理
+しない。
+
+### 複合判定通過（M=N=K=512。TF32／f16）
 
 | 経路 | 判定 | 備考 |
 |------|------|------|
-| WMMA TF32（opt） | （記入: pass/fail） | `backend_cpu::assert_parity`（相対 1e-3 未満 または 絶対 1e-5 未満） |
-| WMMA f16（opt） | （記入: pass/fail） | 同上（f16→f32 参照計算→f16 丸め→f32 化の量子化手順。`tests/cpu_cuda_wmma_parity.rs` と同一） |
+| WMMA TF32（`tensor_core_parity_record`） | **fail**（fail_count=42493/262144, mean_abs_diff=1.574e-3） | `backend_cpu::assert_parity`（相対 1e-3 未満 または 絶対 1e-5 未満）。恒常的 fail |
+| WMMA f16（`tensor_core_parity_record`） | **未計測（到達せず）** | `tensor_core_parity_record` は TF32 判定（`backend_cpu::assert_parity`。`#[track_caller]` 付き `assert!` で FAIL 時に panic する）を先に実行するため、TF32 側が panic した時点で同一テスト関数内の f16 判定コードには到達しない（`crates/backend-cuda/tests/tensor_core_real_device.rs::tensor_core_parity_record` 参照）。512×512×512 形状での f16 実測値はこのテストからは得られない |
 
-複合判定が実機で外れた場合は許容誤差を緩和せず、本節に実測値・エラー内容を記録したうえで #186 の
-閾値実測再評価へ引き渡す（`.claude/rules/security.md`「ガードレール閾値・テスト許容誤差の変更は必ず
-人間の承認を経る」・`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で
-緩和しない」）。
+複合判定が実機で外れたため、許容誤差は緩和せず、実測値を上記の通り記録したうえで #186 の閾値実測
+再評価へ引き渡した（`.claude/rules/security.md`「ガードレール閾値・テスト許容誤差の変更は必ず人間の
+承認を経る」・`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で緩和しない」）。
+f16 経路（他形状・K=4096 ストレスケースを含む）・その他形状での parity 実測を含む完全な内訳は
+[`../backend-cuda-real-device-testing.md`](../backend-cuda-real-device-testing.md) 5.3 節を参照。
 
 ## 関連イシューとの役割分担（二重管理を避ける）
 
@@ -96,7 +126,7 @@ cargo test -p backend-cuda --release -- --ignored --nocapture wmma_
 
 ## 未実施・後続作業
 
-- 本ファイルの「実測結果」節は DGX Spark GB10 等 CUDA 実機での `make test-ignored-cuda` 実行後に埋める
-  （実機アクセス確保後の作業。新規 Issue 起票はユーザー承認が必要なため本セッションでは行わない）
-- 実測値が閾値境界付近・PoC-v2-3 比で予期しない結果の場合、本節に根拠を追記したうえで #186／#187 との
-  役割分担に従って後続対応を切り出す
+- 実測完了（#389）。tiled f32 @4096 のバイナリ間乖離突合は **#390 で完了**（本ファイル「tiled f32
+  基準値の突合」節・`docs/perf/cuda-floor-remeasurement.md` 参照）。残る TFLOPS 計測プロトコル頑健性
+  （直列再実行値との約 1.6〜1.7 倍の残差・`wmma_f16` run 間ばらつき）は #391 に、複合判定 fail の
+  閾値再評価は #186 に引き渡し済み（本ファイル・`../backend-cuda-real-device-testing.md` 参照）
