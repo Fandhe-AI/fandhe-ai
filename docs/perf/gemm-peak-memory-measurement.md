@@ -11,12 +11,15 @@
 本記録を入力として実施する。計測手段の環境差文書化は #180（TASK-14.3）のスコープであり、
 本ドキュメントは実測データの記録に留める。
 
-## 状態: CPU 実測済み・CUDA/Metal 実機未実施
+## 状態: CPU 実測済み・Metal 実機実測済み（#385）・CUDA 実機未実施
 
 本実装セッションは Linux x86_64（QEMU/KVM 仮想化環境、NVIDIA RTX 3060 passthrough）
 worktree で行っており、`libnvrtc`（CUDA toolkit）が導入されていない
-（`ldconfig -p | grep nvrtc` で未検出）。Metal（Apple Silicon）実機はこのセッションから
-利用できない。
+（`ldconfig -p | grep nvrtc` で未検出）。「Metal（Apple Silicon）実機はこのセッションから
+利用できない」という当時の前提は、イシュー #385（本記録内「Metal 実機実測結果」節）で
+Apple Silicon 実機（Apple M4 Max・macOS 26.6）から直接実行し解消済みである。CUDA
+（DGX Spark GB10）は依然未実施のまま（下記「CUDA/Metal 実機実測の再現手順」節・
+`docs/peak-memory-coefficient-decision.md`「再判定トリガー」節を参照）。
 
 既存の先例（`docs/perf/startup-cost-measurement.md`〈#171〉・
 `docs/perf/dispatch-boundary-measurement.md`〈#69〉・
@@ -39,6 +42,20 @@ fail-closed に倒れることを実地確認した（「CUDA 実行時エラー
 `cpu-run1.json`／`cpu-run2.json` は PR #370 codex-review 指摘 P1（`gemm_alloc_peak_bytes`
 未実装時点の旧スキーマ実測データが残存していた）を受け、`gemm_alloc_peak_bytes`
 実装後の同一環境・同一手順（上表）で再実測した値に更新済み（本節以下の数値も同時に更新）。
+
+### 環境（Metal。イシュー #385）
+
+| 項目 | 値 |
+|------|-----|
+| チップ | Apple M4 Max（`sysctl -n machdep.cpu.brand_string` 実測。依存イシュー #380 の
+  `docs/backend-metal-real-device-testing.md`「実行環境（#380）」節と同一実機） |
+| OS | macOS 26.6（build 25G72。`sw_vers` 実測） |
+| rustc | 1.96.0 (ac68faa20 2026-05-25)（`rustc --version` 実測） |
+| toolchain | `stable-aarch64-apple-darwin`（`rust-toolchain.toml` 単一真実源） |
+| ビルドプロファイル | `--release`（`cargo build -p bench-harness --release --bins`） |
+| 計測日 | 2026-08-10 |
+| 実行方式 | ローカル直接実行（SSH・転送不要。`docs/real-hardware-verification-env.md` 7.1 節
+  「Mac 上でそのまま実行」） |
 
 ## 計測方法
 
@@ -177,10 +194,84 @@ not on the library search path
 `PeakMemoryError::Backend` として型付きエラーが呼び出し元へ返る（fail-closed 契約の実地確認。
 `crates/backend-cuda/src/device.rs` の動的ロードゲート方針と整合）。
 
-## CUDA/Metal 実機実測の再現手順（未実施。転記テンプレート）
+## Metal 実機実測結果（イシュー #385）
 
-DGX Spark GB10（CUDA 実機）・Apple Silicon（Metal 実機）で実測する場合は、以下と同一の
-コマンド・同一のバイナリで再現できる:
+`peak_memory_bench --backend metal --trials 5` を `--out` 付きで 2 セット実行した（実行
+環境は上記「環境（Metal。イシュー #385）」節）。生 JSON は
+`docs/perf/peak-memory/metal-run1.json`・`metal-run2.json`（全試行の `samples` 込み）。
+
+| セット | peak_bytes（中央値 / Q1 / Q3） | 理論最小 | 対理論比 | gemm_secs（中央値 / Q1 / Q3, 秒） | vm_hwm_bytes | gemm_alloc_peak_bytes |
+|---|---|---|---|---|---|---|
+| metal-run1 | 201,326,592 / 201,326,592 / 201,326,592 | 201,326,592 | 1.000 | 0.050730 / 0.049709 / 0.050758 | -（macOS 未実装） | -（`GlobalAlloc` 非経由） |
+| metal-run2 | 201,326,592 / 201,326,592 / 201,326,592 | 201,326,592 | 1.000 | 0.048812 / 0.048437 / 0.049373 | - | - |
+
+**内部計測 API のピーク値は run1・run2 とも 5 試行すべてで決定的に 201,326,592 バイト
+（192MiB）ちょうど**であり、理論最小ワーキングセットと完全一致した（対理論比 1.000）。
+`allocated_after_drop_bytes` は全 10 trial（2 セット × 5 試行）で 0 を記録し、リークは
+検出されなかった。run1／run2 間で `peak_bytes` は完全一致（再現性確認）、`gemm_secs`
+中央値の差は約 4%（0.050730 秒 対 0.048812 秒）に収まった。
+
+### AC2: 係数上限（384MiB 以内 = 対理論比 2.0 以内）の充足可否
+
+**内部 API 値（対理論比 1.000）は REQ-14 初期リリース係数上限 2.0 を余裕をもって満たす**
+（超過なし。上限値 2.0 は本イシューでは変更しない。変更はユーザー承認必須。
+`.claude/rules/coding-rust.md`・`docs/real-hardware-verification-env.md`）。
+
+### 計測境界の限界（Metal 固有。「計測境界（重要）」節の適用）
+
+Metal の `peak_bytes` も CPU 同様「計測境界（重要）」節のとおり `MemoryOps` 経由
+（`upload(A)`・`upload(B)`・`alloc_zeroed(C)`）の確保のみを計上する。`MetalGemm`
+（`crates/backend-metal/src/ops.rs`）がカーネル実行のために直接確保する `MTLBuffer`
+（`objc2-metal` 経由）は計測対象外である。したがって **対理論比が 1.000 に張り付くのは
+「Metal のワーキングセットが理論最小どおりだった」ことの証明ではなく、この計測手法の
+設計上の性質**（`MemoryOps` 経由の 3 バッファ以外を計上しない契約）であることを踏まえて
+数値を読む必要がある。
+
+CPU 実測では `VmHWM`（約 1.72 倍）という外部対照があったが、**macOS では
+`vm_hwm_bytes` が構造的に `None`**（`read_vm_hwm_bytes` は `#[cfg(target_os = "linux")]`
+実装のみ。`libc` クレートの新規追加は許容依存 8 区分外のため実装しない既存判断。
+「スコープ外・申し送り」節参照）であり、`gemm_alloc_peak_bytes` も Metal は契約上常に
+`None`（`GlobalAlloc` を経由しないため）。したがって内部 API 値に対するプロセス／デバイス
+レベルの相互検証手段が macOS には構造的に存在しない。
+
+参考として、ビルド済みバイナリを `/usr/bin/time -l` で直接計測した（`cargo run` 経由に
+すると孫プロセスのピーク RSS が確実に合算されないため回避）:
+
+```
+/usr/bin/time -l ./target/release/peak_memory_bench --backend metal --trials 5
+```
+
+- `maximum resident set size`: 552,386,560 バイト（約 526.8MiB。理論最小の約 2.74 倍）
+- `peak memory footprint`: 711,345,040 バイト（約 678.4MiB。理論最小の約 3.53 倍）
+
+いずれも理論最小ワーキングセット（192MiB）を大きく上回る妥当な値であり（サニティゲート
+「約 200MiB を下回れば誤計測」は満たさない＝正常値）、Apple Silicon の統合メモリでは
+RSS が `MTLBuffer` 相当の確保も含みうることと整合する。**この値は「ハーネス外の粗い
+参考値」に留め、内部 API 値との厳密比較（対理論比の算出等）には用いない**（プロセス
+起動オーバーヘッド・Metal デバイス／ライブラリの内部確保・シェーダコンパイル用バッファ等
+の内訳分解は行わない）。実 `MTLBuffer` 確保量そのものの計測フックは既存申し送りどおり
+別イシューのスコープである。
+
+### `gemm_secs` の解釈（Metal 固有）
+
+`MetalBackendOps::gemm`（`crates/backend-metal/src/ops.rs:74-76`）は呼び出しごとに
+`MetalContext::new()` と `MetalGemm::new(&ctx)`（`gemm.metal` のランタイム MSL コンパイル
+とパイプライン構築）を実行する。`run_metal_trial`
+（`crates/bench-harness/src/peak_memory.rs:788` 付近）の計測窓はこの `ops.gemm()`
+呼び出し全体を含むため、**Metal の `gemm_secs` は「デバイス／ライブラリ構築＋シェーダ
+コンパイル＋カーネル実行」の合計**であり、CPU の `gemm_secs`（カーネル実行のみ）とは
+直接比較できない。両セットの `samples`（生 JSON 参照）を確認したところ、run1 の 1 trial 目
+（0.064219 秒）が他 4 trial（0.048〜0.051 秒）より明確に大きく、初回のシェーダコンパイル
+コストが乗った外れ値と考えられる。run2 では同様の外れ値は観測されなかった（1 trial 目
+0.052226 秒は他との差が小さい）。計測時に他プロセスの GPU 負荷がないことを事前確認して
+おり（`ps ax` 実測。PR #437／イシュー #381 のベンチとの競合なし）、`gemm_secs` は
+他プロセス由来の変動を含まない。
+
+## CUDA/Metal 実機実測の再現手順（Metal は実測済み。CUDA は未実施。転記テンプレート）
+
+DGX Spark GB10（CUDA 実機）で実測する場合は、以下と同一のコマンド・同一のバイナリで
+再現できる（Metal は上記「Metal 実機実測結果」節で実施済みであり、同一手順を
+`--backend metal` で実行したものである）:
 
 ```bash
 cargo build -p bench-harness --release --bins
@@ -188,20 +279,21 @@ cargo run -p bench-harness --release --bin peak_memory_bench -- \
   --backend cuda --trials 5 --out docs/perf/peak-memory/cuda-run1.json
 cargo run -p bench-harness --release --bin peak_memory_bench -- \
   --backend cuda --trials 5 --out docs/perf/peak-memory/cuda-run2.json
-# Metal は --backend metal に置き換え、cuda-run*.json → metal-run*.json
 ```
 
-転記テンプレート（実機実測後、上記 CPU 実測結果と同型の表を追記する）:
+転記テンプレート（CUDA 実機実測後、上記 CPU・Metal 実測結果と同型の表を追記する）:
 
-| セット | peak_bytes（中央値 / Q1 / Q3） | 理論最小ワーキングセット | 対理論比 | gemm_secs（中央値 / Q1 / Q3, 秒） | vm_hwm_bytes（参考値。Metal は取得不能につき「-」） | gemm_alloc_peak_bytes（参考値。CUDA/Metal は `GlobalAlloc` 非経由につき常に「-」） |
-|--------|-------------------------------|------------------------|---------|-----------------------------------|------------------------------------------------------|---------------------------------------------------------------------------------------|
-| run1（CUDA/Metal） | (未実施) | 201,326,592 | (未実施) | (未実施) | (未実施) | - |
-| run2（CUDA/Metal） | (未実施) | 201,326,592 | (未実施) | (未実施) | (未実施) | - |
+| セット | peak_bytes（中央値 / Q1 / Q3） | 理論最小ワーキングセット | 対理論比 | gemm_secs（中央値 / Q1 / Q3, 秒） | vm_hwm_bytes（参考値） | gemm_alloc_peak_bytes（参考値。CUDA は `GlobalAlloc` 非経由につき常に「-」） |
+|--------|-------------------------------|------------------------|---------|-----------------------------------|------------------------|---------------------------------------------------------------------------------------|
+| run1（CUDA） | (未実施) | 201,326,592 | (未実施) | (未実施) | (未実施) | - |
+| run2（CUDA） | (未実施) | 201,326,592 | (未実施) | (未実施) | (未実施) | - |
 
-実機実測時は `crates/bench-harness/tests/peak_memory_smoke.rs` の
-`cuda_peak_memory_matches_theoretical_minimum`／`metal_peak_memory_matches_theoretical_minimum`
-（`#[ignore]` 分離済み）を `cargo test -p bench-harness -- --ignored` で実行し、内部 API 値が
-理論最小ワーキングセットと一致することも合わせて確認することを推奨する。
+CUDA 実機実測時は `crates/bench-harness/tests/peak_memory_smoke.rs` の
+`cuda_peak_memory_matches_theoretical_minimum`（`#[ignore]` 分離済み）を
+`cargo test -p bench-harness --release --test peak_memory_smoke -- --ignored --exact
+cuda_peak_memory_matches_theoretical_minimum` で実行し、内部 API 値が理論最小
+ワーキングセットと一致することも合わせて確認することを推奨する（Metal 側の同種テスト
+`metal_peak_memory_matches_theoretical_minimum` は本イシューで実行・pass 済み）。
 
 ## スコープ外・申し送り（`.claude/rules/out-of-scope-tracking.md` 準拠）
 
@@ -220,14 +312,19 @@ cargo run -p bench-harness --release --bin peak_memory_bench -- \
 - **`VmHWM` とのなお約 66.7〜66.8MiB の残差の内訳分解**: `gemm_alloc_peak_bytes` の計測境界
   （`BackendOps::gemm` 実行区間中の純増分のみ）の外側にある要因（プロセス起動時の初期ヒープ・
   rayon ワーカースレッドのスタック確保等）の内訳分解は本イシューでは行わない
-- **CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機実測**: 転記テンプレート運用。
-  実機実施時は同一バイナリ・同一コマンドで再現可能
+- **CUDA（DGX Spark GB10）の実機実測**: 転記テンプレート運用のまま未実施
+  （Metal〈Apple Silicon〉はイシュー #385 で実施済み。「Metal 実機実測結果」節参照）
 - **macOS の `getrusage`（`ru_maxrss`）相当の実装**: `libc` クレートの新規追加が必要になるため
   （許容依存 8 区分外。`.claude/rules/deps-policy.md`）、本イシューでは実装しない
   （`vm_hwm_bytes` は macOS では常に `None`）。必要であれば #180 または新規 Issue で
   ユーザー承認を得たうえで検討する
+- **実 `MTLBuffer` 確保量の計測フック（`objc2-metal` 側）**: 「Metal 実機実測結果」節の
+  計測境界の限界に記載のとおり、`MetalGemm` が直接確保するデバイスバッファは計測対象外の
+  ままであり、実装は別イシューのスコープとする（#385 では実施しない）
 
 ## 生データ
 
 - `docs/perf/peak-memory/cpu-run1.json`
 - `docs/perf/peak-memory/cpu-run2.json`
+- `docs/perf/peak-memory/metal-run1.json`（イシュー #385）
+- `docs/perf/peak-memory/metal-run2.json`（イシュー #385）
