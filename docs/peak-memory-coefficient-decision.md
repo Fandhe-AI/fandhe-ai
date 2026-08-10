@@ -88,21 +88,27 @@ REQ-14 の判定対象（内部計測 API 値）では対理論比 1.000 で係�
 
 ## 再判定トリガー
 
-**CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機実測の転記が完了した時点で、本判定を
-再確認すること。** 現時点の確定は CPU バックエンドの実測に基づくものであり、CUDA・Metal は
-実機未実施（`docs/perf/gemm-peak-memory-measurement.md`「状態: CPU 実測済み・CUDA/Metal
-実機未実施」節）である。転記手順は同記録「CUDA/Metal 実機実測の再現手順（未実施。転記
-テンプレート）」節（`:180-204`）を参照する（`docs/short-lived-process-decision.md` と同型の
-再判定トリガー方式）。
+CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機実測の転記が完了した時点で、本判定を
+再確認することとしていた（`docs/short-lived-process-decision.md` と同型の再判定トリガー
+方式）。**Metal は #385・CUDA は #392 でそれぞれ実機実測が完了し、3 バックエンドすべての
+再判定トリガーを消化済みである**（下記「事実追記」参照）。
 
 再判定の結果、CUDA・Metal のいずれかで対理論比が 2.0 を超えることが判明した場合は、
-`.claude/rules/security.md` の承認要件に従いユーザー承認を得たうえで係数の再調整を検討する。
+`.claude/rules/security.md` の承認要件に従いユーザー承認を得たうえで係数の再調整を検討する
+（今回はいずれも超過なし。詳細は「事実追記」参照）。
 
 **事実追記（イシュー #385）**: Metal（Apple Silicon）実機実測が完了し、対理論比は 1.000
 （`docs/perf/gemm-peak-memory-measurement.md`「Metal 実機実測結果」節）であり超過なし。
-係数 2.0 は無変更のまま維持する。CUDA（DGX Spark GB10）は依然未実施のため、上記
-「条件付き確定」はそのまま維持し、係数の再調整・上限値の変更は行わない
-（ユーザー承認必須の対象は未発生）。
+係数 2.0 は無変更のまま維持する。
+
+**事実追記（イシュー #392）**: CUDA（DGX Spark GB10）実機実測が完了し、対理論比は 1.000
+（`docs/perf/gemm-peak-memory-measurement.md`「CUDA 実機実測結果」節。run1・run2 とも
+201,326,592 バイトで理論最小と完全一致）であり超過なし。`vm_hwm_bytes` は Linux 実機の
+ため全 trial で non-null が実測できたが、GB10 の統合メモリではデバイス確保が RSS に
+計上されるか断定できないため参考値に留め対理論比算出には用いていない（同記録「計測境界
+の限界（CUDA 固有）」節）。CPU・Metal・CUDA の全 3 バックエンドで実測が完了し、いずれも
+係数超過なしとなったため、係数 2.0 は無変更のまま維持し、下記「確定の範囲と条件」を
+条件付き確定から確定へ更新する（ユーザー承認必須の対象は未発生）。
 
 ## spec リポ側への申し送りメモ
 
@@ -114,29 +120,36 @@ REQ-14 受け入れ基準への反映が必要」と定めている。本決定�
 > REQ-14 の係数上限（初期リリース 2 倍以内 = 384MiB 以内）について、TASK-14.2（#177〜#179）
 > による実測の結果、CPU バックエンドでは内部計測 API のピーク値が理論最小ワーキングセット
 > と完全一致（対理論比 1.000）し、係数超過は確認されなかった。係数は 2.0 のまま変更不要と
-> 判断し確定した（実装リポ `docs/peak-memory-coefficient-decision.md` 参照）。ただし CUDA
-> （DGX Spark GB10）・Metal（Apple Silicon）は実機未実施のため、本確定は CPU に限った条件付き
-> 確定である。実機実測の転記完了後に再判定する。
+> 判断し確定した（実装リポ `docs/peak-memory-coefficient-decision.md` 参照）。その後、Metal
+> （Apple Silicon・#385）・CUDA（DGX Spark GB10・#392）の実機実測も完了し、いずれも対理論比
+> 1.000 で係数超過は確認されなかった。CPU・Metal・CUDA の全バックエンドで実測に基づく確定
+> となっている。
 
 ## 確定の範囲と条件
 
+**CPU・Metal・CUDA いずれも実機実測に基づき確定した（係数 2.0 を維持。超過なし）。**
+
 - **CPU バックエンド**: 実測に基づき確定（対理論比 1.000、係数 2.0 を維持）
-- **CUDA・Metal バックエンド**: 実機未実施のため、上記「再判定トリガー」節の条件付き確定
-  （転記完了時に再確認する）
+- **Metal バックエンド**: イシュー #385 の実機実測に基づき確定（対理論比 1.000、係数 2.0 を維持）
+- **CUDA バックエンド**: イシュー #392 の実機実測に基づき確定（対理論比 1.000、係数 2.0 を維持。
+  `vm_hwm_bytes` は参考値に留め判定には用いていない）
 
 ## スコープ外
 
 - **プールの既定有効化の構成判断**: `docs/memory-pool-design.md`「プールの既定有効化」節
   （`:137-139`）が申し送り済み（#202 系）。本決定では扱わない
-- **CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機実測の実施自体**: 上記「再判定
-  トリガー」節のとおり、転記テンプレート運用として申し送る
+- **CUDA（DGX Spark GB10）・Metal（Apple Silicon）実機実測の実施自体**: それぞれ #392・
+  #385 で実施済み（上記「事実追記」参照）
 - **`VmHWM` 残差（約 66.7〜66.8MiB）の内訳分解**: `docs/perf/gemm-peak-memory-measurement.md`
   「スコープ外・申し送り」節（`:219-221`）が申し送り済み。本決定では扱わない
 
 ## 参考
 
-- `docs/perf/gemm-peak-memory-measurement.md`（#178・TASK-14.2a 実測記録）
-- `docs/perf/peak-memory/cpu-run1.json`・`cpu-run2.json`（生データ）
+- `docs/perf/gemm-peak-memory-measurement.md`（#178・TASK-14.2a 実測記録。#385・#392 で
+  Metal・CUDA 実機実測結果を追記済み）
+- `docs/perf/peak-memory/cpu-run1.json`・`cpu-run2.json`（CPU 生データ）
+- `docs/perf/peak-memory/metal-run1.json`・`metal-run2.json`（Metal 生データ。#385）
+- `docs/perf/peak-memory/cuda-run1.json`・`cuda-run2.json`（CUDA 生データ。#392）
 - `docs/peak-memory-measurement-methods.md`（#180・TASK-14.3 計測手段の環境差文書化）
 - `docs/memory-pool-design.md`（プール導入時の係数維持設計）
 - `docs/spec/04-requirements.md`（REQ-14）
