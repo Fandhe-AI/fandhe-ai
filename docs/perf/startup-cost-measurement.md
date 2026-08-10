@@ -109,7 +109,7 @@ Apple Silicon 実機（Apple M4 Max）で `./target/release/startup_bench --back
 | toolchain | stable（`rust-toolchain.toml` 準拠） |
 | rustc | 1.96.0（`rustc --version` 実測） |
 | MSL コンパイラ版 | 取得不可（`xcrun metal --version` が `missing Metal Toolchain` エラー。本ホストに Metal Toolchain 単体コンポーネントが別途導入されていない。`backend-metal` のビルド・実行自体は Xcode 付属ランタイムで成立しており計測に影響なし） |
-| 計測リビジョン | `3f7203975887ef3836a003db888b56c29232ccf6`（`origin/main`。`git rev-parse HEAD`） |
+| 計測リビジョン | `3f7203975887ef3836a003db888b56c29232ccf6`（`perf/384-metal-startup-cost` ブランチの計測時点の HEAD。本 PR マージ前で main 未マージ。`git rev-parse HEAD`） |
 | ビルドプロファイル | `--release`（`cargo build -p bench-harness --release --bins`） |
 | 実施日 | 2026-08-10 |
 | 実行コマンド | `./target/release/startup_bench --backend metal --trials 5 --out docs/perf/startup-cost/metal-run{1,2}.json` および `make startup-bench BACKEND=metal TRIALS=5` |
@@ -181,7 +181,7 @@ cold/warm フラグは Metal 実行に対して実質的に同一条件（両方
 run1 cold 第 1 サンプルのみであり、これも「本プロセスにとっての 1 回目」を意味する
 だけでシステムキャッシュの状態までは保証しない限界がある。
 
-
+## CUDA 動的ロード契約の実地確認（実測値としては扱わない）
 
 `make startup-bench BACKEND=cuda TRIALS=5` を実行し、以下の型付きエラーで fail-closed に
 失敗することを確認した:
