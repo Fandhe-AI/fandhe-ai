@@ -51,7 +51,7 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 | `tests/gemm_auto_parity.rs` | 3 | TASK-1.8f 前段 | `dispatch_backend_auto` の閾値前後（境界 511/512）での CPU 参照一致 |
 | `tests/gemm_dynamic_tile_parity.rs` | 6 | TASK-1.8f（#188） | 動的タイル選択（`dispatch_auto`）の全タイル候補・非倍数形状・K ストレスでの CPU 参照一致 |
 | `tests/cpu_metal_f16_parity.rs` | 6 | TASK-8.3b（#156） | `gemm_simdgroup_f16` の CPU 参照一致（8×8×8 基準・512 基準・非倍数境界・K=4096 ストレス・決定性・不正入力の拒否）。累算精度契約はイシュー #380 で f32 累算へ変更済み（`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節） |
-| `tests/dispatch_boundary.rs` | 2 | #382 前段 | `dispatch_auto` の境界形状 TFLOPS 記録・`dispatch_backend_auto` のルーティング検証（TFLOPS 数値の転記は #382 のスコープ） |
+| `tests/dispatch_boundary.rs` | 2 | #382 | `dispatch_auto` の境界形状 TFLOPS 記録・`dispatch_backend_auto` の出力と CPU 参照実装との数値一致検証（実機が実際にどの経路を選んだかの検証ではない。`route_verified=false`）。TFLOPS 数値の転記・`METAL_SIMDGROUP_MIN_DIM` の妥当性判定は #382 で実施済み（`docs/perf/dispatch-boundary-measurement.md`） |
 | `tests/memory_roundtrip.rs` | 6 | TASK-2.1 系 | メモリ確保・ゼロ初期化・プール再利用・アップロード/ダウンロード roundtrip・リーク検査 |
 | `tests/shader_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | TASK-11.3（#70） | `gemm.metal` の行列演算ユニット命令（`simdgroup_matrix` API）実在検査・REQ-8 境界チェック維持検査 |
 
@@ -112,8 +112,9 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
   計測揺れを排除）を付けて行う。**正本コマンド `make test-ignored-metal` はこれらのフラグを付けない**
   （デバッグ・インベントリ用途と受入チェック用途を分離する。`Makefile` は変更していない）
 - `dispatch_boundary.rs::boundary_shapes_tflops_record` は TFLOPS を出力するが本ドキュメントでは
-  pass/fail のみを記録対象とする。数値を `docs/perf/dispatch-boundary-measurement.md` へ転記するのは
-  別イシュー（#382。#382 は #381 依存）のスコープ
+  pass/fail のみを記録対象とする。数値の `docs/perf/dispatch-boundary-measurement.md` への転記・
+  `METAL_SIMDGROUP_MIN_DIM` の妥当性判定は #382 で完了済み（判定: 変更提案あり・提案値 384。
+  コード未変更・実施は別レビュー・別 PR・ユーザー承認）
 
 過去に機械検証済みだった以下の項目は、上記の実機実行によって補完・上書きされた:
 
