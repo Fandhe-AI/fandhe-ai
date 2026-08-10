@@ -1,0 +1,95 @@
+[{
+  "schema_version": "1",
+  "backend": "metal",
+  "phase": "cold",
+  "trials": 5,
+  "wall_secs": {
+    "median": 0.047984,
+    "q1": 0.046510291,
+    "q3": 0.048664875
+  },
+  "device_init_secs": {
+    "median": 0.037786167,
+    "q1": 0.033870125,
+    "q3": 0.038083584
+  },
+  "first_kernel_secs": {
+    "median": 0.043885,
+    "q1": 0.042250833,
+    "q3": 0.044475334
+  },
+  "samples": [
+    {
+      "wall_secs": 0.048866208,
+      "device_init_secs": 0.038083584,
+      "first_kernel_secs": 0.044752875
+    },
+    {
+      "wall_secs": 0.047984,
+      "device_init_secs": 0.037786167,
+      "first_kernel_secs": 0.043885
+    },
+    {
+      "wall_secs": 0.048664875,
+      "device_init_secs": 0.038216834,
+      "first_kernel_secs": 0.044475334
+    },
+    {
+      "wall_secs": 0.04433175,
+      "device_init_secs": 0.03338475,
+      "first_kernel_secs": 0.039956417
+    },
+    {
+      "wall_secs": 0.046510291,
+      "device_init_secs": 0.033870125,
+      "first_kernel_secs": 0.042250833
+    }
+  ]
+},{
+  "schema_version": "1",
+  "backend": "metal",
+  "phase": "warm",
+  "trials": 5,
+  "wall_secs": {
+    "median": 0.047101958,
+    "q1": 0.0460315,
+    "q3": 0.0479585
+  },
+  "device_init_secs": {
+    "median": 0.035312083,
+    "q1": 0.035073417,
+    "q3": 0.035555583
+  },
+  "first_kernel_secs": {
+    "median": 0.042784667,
+    "q1": 0.04182825,
+    "q3": 0.043533083
+  },
+  "samples": [
+    {
+      "wall_secs": 0.0460315,
+      "device_init_secs": 0.035073417,
+      "first_kernel_secs": 0.04182825
+    },
+    {
+      "wall_secs": 0.050302959,
+      "device_init_secs": 0.039402375,
+      "first_kernel_secs": 0.0458205
+    },
+    {
+      "wall_secs": 0.0479585,
+      "device_init_secs": 0.035555583,
+      "first_kernel_secs": 0.043533083
+    },
+    {
+      "wall_secs": 0.047101958,
+      "device_init_secs": 0.035312083,
+      "first_kernel_secs": 0.042784667
+    },
+    {
+      "wall_secs": 0.045351958,
+      "device_init_secs": 0.034344375,
+      "first_kernel_secs": 0.041124625
+    }
+  ]
+}]
