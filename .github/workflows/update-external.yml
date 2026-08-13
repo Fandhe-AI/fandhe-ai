@@ -54,6 +54,11 @@ jobs:
         # （後続ステップの git 操作が認証情報を必要とするため）。
         # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意。
         # 下記 secrets.SUBMODULE_PAT 参照）。
+        # docs/spec は private 維持方針（#463。2026-08-14 決定）。本リポジトリを
+        # public 化した後も docs/spec 自体は private のまま残すため、GITHUB_TOKEN
+        # フォールバックでは submodule を取得できなくなる。org secret
+        # SUBMODULE_PAT（visibility=all で全リポジトリに供給）が実効的な取得経路であり、
+        # public 化後もこの構成のまま機能する（#463 で org secret 実測確認済み）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           # base-branch: main と整合させる。workflow_dispatch で main 以外の
