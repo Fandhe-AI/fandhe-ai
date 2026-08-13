@@ -16,7 +16,7 @@ rust-ai-library/
 ├── CLAUDE.md                # 本ファイル
 ├── README.md                # 開発環境構築・実装方針の要点
 ├── LICENSE-APACHE           # Apache License 2.0 全文（MIT/Apache-2.0 デュアルライセンス。#462）
-├── LICENSE-MIT               # MIT ライセンス本文（同上）
+├── LICENSE-MIT              # MIT ライセンス本文（同上）
 ├── Makefile                 # make setup / ci / docker-* タスクランナー
 ├── lefthook.yml             # git hooks（rustfmt-check・secrets-guard・commit-msg・pre-push）
 ├── .editorconfig            # インデント・改行規約
