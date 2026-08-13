@@ -24,7 +24,7 @@ fmt / clippy / test / cargo-deny の 4 ジョブ実体は Fandhe-AI/actions の 
 `.github/workflows/codex-review.yml` は Fandhe-AI/actions の codex-review reusable workflow を SHA 固定で呼び出す薄い wrapper（イシュー #326・PR #350。fandhe-backend / local-llm-server と同型）。
 
 - **public 区分向けテンプレート**（Fandhe-AI/actions `codex-review/templates/codex-review.public.yml`）を正とし、独自改変しない（`<SHA>` の差し替えとコメント追記のみ。wrapper の実切替は Phase 2 #469。それまでは private テンプレート準拠の wrapper が残存するが違反として扱わない）
-- runner ラベルは**ジョブごとに分ける**: codex 実行ジョブは指定しない（reusable workflow の既定値 `codex`。codex-home 方式の認証情報を持つ self-hosted 専用 runner が「runner」節の唯一の例外）。**PR コメント投稿ジョブ（`post-feedback-runner-label`）は `ubuntu-latest` を明示指定する**（資格情報に触れないため public 区分の既定に従う）
+- runner ラベルは**ジョブごとに分ける**: codex 実行ジョブは指定しない（reusable workflow の既定値 `codex`。codex-home 方式の認証情報を持つ self-hosted 専用 runner が「runner」節の唯一の例外）。**PR コメント投稿ジョブ（`post-feedback-runner-label`）は `ubuntu-latest` を明示指定する**（資格情報に触れないため public 区分の既定に従う）。`codex-review.public.yml` 側で `post-feedback-runner-label` の既定値が既に `ubuntu-latest` かどうかは Fandhe-AI/actions 側の実体（本リポからは未確認）に依存する。Phase 2（#469）でテンプレート実体を確認し、既定値と一致する場合でも「独自改変しない」方針との整合を取ったうえで明示指定の要否を確定する
 - 有効化スイッチは Actions variable `CODEX_HOME_DIR`（org 側供給あり。未設定なら codex ジョブが skip される fail-closed 設計）
 - レビュー基準は `.github/codex/prompts/review.md`（カスタム版、イシュー #376）と `AGENTS.md`（リポジトリ観点の正。両者の優先度定義が矛盾する場合は AGENTS.md を優先）を正とする。CLAUDE.md・`.claude/rules/` から抽出したリポジトリ固有基準（P0/P1 格上げ項目）を両ファイルへ整合させて反映する方式。規約側（deps-policy / coding-rust / security / ci）を変更した際は prompt・AGENTS.md 双方との乖離を確認する。制御ファイルは PR の base コミットから読まれるため、変更はマージ後の PR から反映される（当の PR 自身のレビューには反映されない）
 
