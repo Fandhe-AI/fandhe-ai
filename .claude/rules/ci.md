@@ -4,7 +4,7 @@
 
 - **CI ジョブは GitHub ホステッドランナー（`runs-on: ubuntu-latest` 等の標準スペック）を既定とする**。`runs-on: self-hosted`・larger runner（有料の大型ホステッドランナー）は使わない。本規約は組織 runner 方針（可視性で runner を決める: public は GitHub ホステッド／private は self-hosted）の **public 側**の適用であり、正は Fandhe-AI/actions の `docs/runner-policy.md`（本節では書き写さずドリフト防止）
 - **CI 品質ゲート系ジョブにおける唯一の例外**: codex-review reusable workflow の codex 実行ジョブ（`runner-label: codex`。codex-home 方式の認証情報を runner 上に配置する構成のため self-hosted な codex 専用 runner を使用）。例外は codex 実行ジョブに閉じ、PR コメント投稿ジョブ（`post-feedback-runner-label`）は資格情報に触れないため `ubuntu-latest` を明示指定する（詳細は「codex-review」節）。実機（CUDA/Metal）依存ジョブは本節の例外規定と別枠であり、`docs/runner-policy.md` の例外整理に従い将来 self-hosted で追加しうる（詳細は「実機依存」節）
-- **移行期の注記**: 本規約は public 化に先行する反転（#457 Phase 1・#464）であり、既存 workflow（`.github/workflows/*.yml`）の `runs-on: self-hosted` の実体移行は Phase 2（#459 配下 #465〜#469）で実施する。移行完了までの既存記述の残存は違反として扱わないが、新規・変更ジョブは新方針に従う
+- **移行期の注記（適用順序の根拠）**: 本リポジトリの GitHub 可視性は `gh repo view Fandhe-AI/rust-ai-library --json visibility,isPrivate` で `{"isPrivate":false,"visibility":"PUBLIC"}`（2026-08-14 実測）であり、組織 runner 方針の public 側が既に適用対象である。一方 `docs/runner-policy.md` §2 の対象リポジトリ一覧は本リポジトリを未だ private 区分に残しており、その区分更新は Fandhe-AI/actions#471（`dependsOn: #470`）で別 PR として追跡中（未マージ）。本規約の反転（#457 Phase 1・#464）は、公開前トラッキング（#457）が Phase 1（規約先行反転）→ Phase 2（workflow 実体移行 #465〜#469）→ Phase 3（visibility 変更 #470・org 一覧更新 #471）の順で計画したユーザー承認済みの段取りに従うものであり、実測済みの可視性を後追いで文書へ反映する位置づけである。既存 workflow（`.github/workflows/*.yml`）の `runs-on: self-hosted` の実体移行は Phase 2（#459 配下 #465〜#469）で実施する。移行完了までの既存記述の残存は違反として扱わないが、新規・変更ジョブは新方針に従う
 - runner 種別に依らず、ハングしたジョブが runner を無期限占有するのを防ぐため**全ジョブに `timeout-minutes` を必ず設定する**（reusable workflow 呼び出しジョブは共通側の各ジョブが timeout を持つため呼び出し側での設定は不要）
 
 ## ベースライン品質ゲート（rust-base-ci reusable workflow）
