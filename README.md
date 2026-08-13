@@ -107,3 +107,9 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 ## 開発体制（Claude Code）
 
 `.claude/` に Claude Code の運用体系（Agents・Rules・Skills・hooks）を整備しています。概要は [CLAUDE.md](./CLAUDE.md) を参照してください。
+
+## ライセンス
+
+本プロジェクトは [MIT ライセンス](./LICENSE-MIT) と [Apache License 2.0](./LICENSE-APACHE) の
+デュアルライセンスで提供されます。あなたが本プロジェクトへ提出する Contribution は、明示的な
+別段の定めがない限り、上記デュアルライセンスの下で提供されるものとみなされます。
