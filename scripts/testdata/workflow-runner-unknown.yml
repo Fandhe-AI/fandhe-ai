@@ -1,0 +1,15 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（イシュー #472）。
+# self-hosted という語は含まないが、唯一の許容形（ubuntu-latest 完全一致）以外の
+# runner 宣言を含むため「唯一の許容形検査」で fail するはず（larger runner 名・
+# ブロックシーケンス形式のいずれも許容形と一致しないパースの取りこぼしを検証する）。
+name: dummy
+
+jobs:
+  larger-runner:
+    runs-on: ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  block-sequence-runner:
+    runs-on:
+      - custom-legacy-label
+    timeout-minutes: 5

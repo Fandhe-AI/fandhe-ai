@@ -1,0 +1,23 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の適合 fixture（イシュー #472）。
+# .github/workflows/ の検査スキャン範囲外（scripts/testdata/）に置くため、この
+# ファイル自体が check サブコマンドを fail させることはない。
+#
+# コメント内の self-hosted 言及（このコメント自体を含む）は検査対象外であることを
+# 検証する意図的な仕掛け: self-hosted という語をこの行に書いても pass するはず。
+name: dummy
+
+jobs:
+  example:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: dummy step
+        run: echo "ok"
+
+  reusable-call:
+    runner-label: ubuntu-latest
+    timeout-minutes: 5
+
+  post-feedback:
+    post-feedback-runner-label: ubuntu-latest
+    timeout-minutes: 5

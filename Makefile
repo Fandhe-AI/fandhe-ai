@@ -218,6 +218,16 @@ else
 	@echo "skip: Cargo.toml 未追加のため cargo tree 検査をスキップ"
 endif
 
+# self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
+# ci.yml の runner-policy ジョブと共用する scripts/check-workflow-runner-policy.sh 経由で、
+# .github/workflows/ 配下の非コメント行への self-hosted 再導入・唯一の許容形
+# （ubuntu-latest 完全一致）以外の runner 宣言をローカルで検査する
+# （deps-forbidden ターゲットと同一方針。self-test → check の順で直列実行する）。
+.PHONY: runner-policy
+runner-policy: ## self-hosted runner 逆戻り防止の fail-closed 契約検査を実行する
+	@bash scripts/check-workflow-runner-policy.sh self-test
+	@bash scripts/check-workflow-runner-policy.sh check
+
 # guardrail 判定器の 2 層検証（TASK-6.1a・イシュー #147）。
 # REQ-4（1 層目・判定器単体）・REQ-5（2 層目・除外適用後）の回帰テストを
 # scripts/run-guardrail-regression.sh（ci.yml の guardrail-regression ジョブと共用する
@@ -332,7 +342,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）
