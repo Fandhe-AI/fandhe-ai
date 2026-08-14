@@ -465,6 +465,29 @@ class _Parser:
             self.line_start = self.pos
         return "\n".join(lines)
 
+    # ---- マッピングへの格納（フロー形式・ブロック形式共用） ----
+
+    def store_mapping_entry(self, result, key, value):
+        """マッピングへ 1 エントリを格納する。キー重複は fail-closed で拒否する。
+
+        重複キーを後勝ち（`result[key] = value` の素朴な上書き）で格納すると、
+        同一マッピングに `runs-on: self-hosted` と `runs-on: ubuntu-latest` を
+        この順で書くだけで禁止宣言が消え、検査が許容値しか見ない fail-open に
+        なる（PR #626 codex-review P0 指摘）。GitHub Actions 側がどちらの値を
+        採用するかに依存せず、重複そのものを YamlSubsetError で違反側へ倒す。
+        引用・エスケープ表記のキー（`"runs-on"` 等）は parse_key_token の時点で
+        同一文字列へデコード済みのため、ここでの照合は walk の RUNNER_KEYS 照合と
+        同じ前後空白除去後の文字列比較で行う（正規化後に衝突する表記揺れも拒否）。
+        """
+        normalized = key.strip()
+        for existing_key in result:
+            if existing_key.strip() == normalized:
+                raise YamlSubsetError(
+                    f"キーが重複しています（行 {self.line}。fail-closed: "
+                    f"後勝ち格納による禁止宣言の上書き迂回を拒否）: {key!r}"
+                )
+        result[key] = value
+
     # ---- フローコレクション ----
 
     def skip_flow_ws_and_comments(self):
@@ -521,7 +544,7 @@ class _Parser:
                 self.getc()
                 self.skip_flow_ws_and_comments()
                 value = self.parse_flow_value()
-            result[key] = value
+            self.store_mapping_entry(result, key, value)
             self.skip_flow_ws_and_comments()
             c = self.peekc()
             if c == ",":
@@ -593,7 +616,7 @@ class _Parser:
                 raise YamlSubsetError(f"':' が見つかりません（行 {self.line}）")
             self.getc()
             value = self.parse_value_after_colon(indent)
-        result[key] = value
+        self.store_mapping_entry(result, key, value)
 
     def parse_block_mapping(self, indent):
         """`indent` 列でのブロックマッピングを読む。呼び出し元は 2 種類ある:

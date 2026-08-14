@@ -72,8 +72,9 @@ self_test() {
   )
   # ネガティブ fixture: いずれも fail すること。素直な違反（forbidden）・許容形外
   # （unknown: larger runner・ブロックシーケンス・式展開）に加え、PR #626 の
-  # codex-review が P0/P1 指摘した YAML 表記トリック迂回（trick-*）と YAML パース
-  # 不能（invalid: fail-closed の検証）を含む。
+  # codex-review が P0/P1 指摘した YAML 表記トリック迂回（trick-*。キー重複による
+  # 禁止宣言の後勝ち上書き〈trick-duplicate-*〉を含む）と YAML パース不能
+  # （invalid: fail-closed の検証）を含む。
   local violation_fixtures=(
     "${testdata}/workflow-runner-forbidden.yml"
     "${testdata}/workflow-runner-unknown.yml"
@@ -81,6 +82,9 @@ self_test() {
     "${testdata}/workflow-runner-trick-flow-mapping.yml"
     "${testdata}/workflow-runner-trick-multiline-key.yml"
     "${testdata}/workflow-runner-trick-comment-in-string.yml"
+    "${testdata}/workflow-runner-trick-duplicate-block-key.yml"
+    "${testdata}/workflow-runner-trick-duplicate-flow-key.yml"
+    "${testdata}/workflow-runner-trick-duplicate-quoted-key.yml"
     "${testdata}/workflow-runner-invalid.yml"
   )
   local failed=0

@@ -1,0 +1,8 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（PR #626 codex-review P0 指摘）。
+# フローマッピング（`{ ... }`）内で同一キー runs-on を self-hosted → ubuntu-latest の順に
+# 重複宣言する。ブロック形式と同じく後勝ち格納だと禁止宣言が上書きで消えるため、
+# キー重複を YamlSubsetError で fail-closed に拒否して fail するはず。
+name: dummy
+
+jobs:
+  duplicate-flow: { runs-on: self-hosted, runs-on: ubuntu-latest, timeout-minutes: 5 }
