@@ -91,16 +91,38 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 /// 理由に省略しない（REQ-8。`.claude/rules/coding-rust.md`「カーネル実装の
 /// 境界検査」は計測用カーネルにも適用する。イシュー #482 実装計画
 /// §2 共通契約）。
+///
+/// **`a`/`b` を `volatile` 経由でアクセスする（イシュー #482 Cursor Bugbot
+/// 指摘・PR #635 追加コミット）**: ping-pong により反復間の RAW 依存
+/// （`b[i]` は前反復の `a[i]` に依存、逆も同様）を作っても、その依存は
+/// 「同一スレッドが同一アドレスを順に読み書きする」だけの単純な逐次
+/// アクセスであり、他スレッドはそのアドレスへ一切触れない
+/// （`__restrict__` によりエイリアシングも否定済み）。このため NVRTC は
+/// `a[i]`/`b[i]` を実際の global メモリ往復なしにレジスタへ昇格
+/// （store-to-load forwarding／mem2reg 相当）でき、`repeats` 回の反復の
+/// うち実際に global メモリへ到達するのは最後の 1 回分の書き込みだけに
+/// 削減されうる（可視な副作用は最終値のみのため。とくに `n` が
+/// `bw_grid_dim` によりスレッドあたり約 1 要素になる L2 計測ケースで
+/// 起きやすい）。これが成立すると `measure_bandwidth_secs` が
+/// `BW_LAUNCH_REPEATS` で割って正規化する前提（反復ごとに実メモリ
+/// トラフィックが発生する）が崩れ、`bandwidth_gbps` が最大 `repeats`
+/// 倍（本バイナリでは 64 倍）過大評価されうる。対策として `a`/`b` を
+/// `volatile` ポインタ経由でアクセスし、各反復の読み出し・書き込みを
+/// 最適化で除去・並べ替え不能な実メモリアクセスとして強制する
+/// （C++/CUDA の `volatile` は「観測可能な副作用」として扱われるため
+/// コンパイラは削除・キャッシュできない）。
 const BW_COPY_F32: &str = r#"
 extern "C" __global__ void bw_copy_f32(float* __restrict__ a, float* __restrict__ b, int n, int repeats) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
+    volatile float* va = a;
+    volatile float* vb = b;
     for (int r = 0; r < repeats; ++r) {
         for (int i = idx; i < n; i += stride) {
             if ((r & 1) == 0) {
-                b[i] = a[i] + 1.0f;
+                vb[i] = va[i] + 1.0f;
             } else {
-                a[i] = b[i] + 1.0f;
+                va[i] = vb[i] + 1.0f;
             }
         }
     }
