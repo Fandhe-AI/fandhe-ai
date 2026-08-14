@@ -79,3 +79,15 @@ jobs:
       -
         name: dash only nested step
         run: echo "ok"
+
+  # `key:` の次行に単独でスカラー値だけが続く形（インデント継続によるプレーン
+  # スカラーで、`|`／`>` インジケータなし）。cursor[bot] review 4936370341
+  # （PR #626）指摘: parse_node_body が `-`／`{`／`[`／`|`／`>` 以外を無条件に
+  # parse_block_mapping へディスパッチしていたため、この形の準拠 workflow
+  # YAML を「':' が見つかりません」として fail-closed で誤って拒否していた。
+  # 修正後は runs-on の値が正しくスカラー `ubuntu-latest` として読み取れ
+  # pass することを検証する。
+  nested-scalar-value:
+    runs-on:
+      ubuntu-latest
+    timeout-minutes: 5

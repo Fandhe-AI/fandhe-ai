@@ -742,7 +742,23 @@ class _Parser:
         return self.parse_node_body(nxt_indent)
 
     def parse_node_body(self, indent):
-        """カーソルが列 `indent` のノード先頭にある状態でディスパッチする。"""
+        """カーソルが列 `indent` のノード先頭にある状態でディスパッチする。
+
+        `key:` の次行に、ブロックシーケンス／フローコレクション／ブロックスカラー
+        いずれでもないインデント付き内容が続く場合、それはネストしたブロック
+        マッピングとは限らない。YAML はインデント継続だけで複数行にまたがる
+        プレーンスカラー（明示的な `|`／`>` インジケータなし）を許すため、
+        `key:` の値が単なるプレーン／クォート済みスカラーであるケースが存在する
+        （例: `runs-on:` の次行に単独で `ubuntu-latest`）。旧実装は `-`／`{`／
+        `[`／`|`／`>` 以外を無条件に `parse_block_mapping` へディスパッチして
+        おり、`_looks_like_mapping_key`（`- key: value` 圧縮記法の判別で既に
+        使っている「次に `:` + 空白/改行/EOF が続くか」の先読み）を経由しない
+        ため、この形のスカラー値が `parse_mapping_entry_into` 内で `':' が
+        見つかりません` として fail-closed 誤検知していた（cursor[bot] 指摘
+        review 4936370341・PR #626。`- ` 圧縮記法側は既に同じ先読みで判別済み
+        だったため非対称だった）。`parse_inline_node` と同じ先読みロジックを
+        ここでも使い、マッピングかスカラーかを事前に判別することで対称にする。
+        """
         c = self.peekc()
         if c == "":
             raise YamlSubsetError("ノードの内容がありません（fail-closed）")
@@ -758,7 +774,19 @@ class _Parser:
             return v
         if c in ("|", ">"):
             return self.parse_block_scalar(indent)
-        return self.parse_block_mapping(indent)
+        if c == "?" or self._looks_like_mapping_key():
+            return self.parse_block_mapping(indent)
+        if c == '"':
+            v = self.parse_double_quoted()
+            self.expect_end_of_line()
+            return v
+        if c == "'":
+            v = self.parse_single_quoted()
+            self.expect_end_of_line()
+            return v
+        v = self.parse_plain_scalar_value_block()
+        self.expect_end_of_line()
+        return v
 
     def parse_document(self):
         self.skip_blank_lines_and_comments()
