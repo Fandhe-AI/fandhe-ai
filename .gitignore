@@ -23,3 +23,9 @@ _/
 
 # 環境変数
 .env*
+
+# 実機検証環境の実値（内部ホスト名・内部 venv パス等）。
+# 公開リポジトリの追跡ファイルからは docs/real-hardware-verification-env.md 等で
+# プレースホルダ化済み（イシュー #461）。実値は各自ローカルで
+# docs/real-hardware-verification-env.local.md.example をコピーして作成する。
+docs/real-hardware-verification-env.local.md

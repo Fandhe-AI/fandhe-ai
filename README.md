@@ -5,7 +5,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリです。Burn 依存を排
 ## 位置づけ
 
 - **仕様・要件定義**: [rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec)（`docs/spec` に submodule 参照。**private リポジトリとして意図的に非公開を維持**する方針であり、アクセス権のない環境（アクセス権を持たない外部ユーザーによる clone 等）からは submodule を解決できません。#463）
-- **旧実装（v1・Burn ベース）**: [rust-ai-library-v1](https://github.com/Fandhe-AI/rust-ai-library-v1)（アーカイブ済み。資産の引き継ぎ記録は [v1-assets-inventory.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v1-assets-inventory.md) を参照）
+- **旧実装（v1・Burn ベース）**: [rust-ai-library-v1](https://github.com/Fandhe-AI/rust-ai-library-v1)（アーカイブ済み・**private リポジトリ**。アクセス権のない外部ユーザーからはリンク先を解決できません。資産の引き継ぎ記録は [v1-assets-inventory.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v1-assets-inventory.md)〈同じく private な `rust-ai-library-spec` 配下〉を参照。#461）
 - **立ち上げ手順**: [v2-repo-migration.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v2-repo-migration.md)
 
 ## ステータス

@@ -71,13 +71,13 @@ CUDA については、当初の本環境（libnvrtc 未導入）でも動的ロ
 | 計測リビジョン | `4ba5365a0d7e68fd54b50412f268278465503a40`（`.rev-stamp` 実測。転送後に
   `ssh … cat .rev-stamp` で worktree の `git rev-parse HEAD` と一致確認済み） |
 | 計測日 | 2026-08-10 |
-| 実行方式 | SSH リモート実行・rsync 転送（`local.fandhe.spark-dbd9`。
+| 実行方式 | SSH リモート実行・rsync 転送（`<cuda-node>`。
   `docs/real-hardware-verification-env.md` 2〜3 節） |
 | 実行コマンド | `$CARGO_TARGET_DIR/release/peak_memory_bench --backend cuda --trials 5
   --out docs/perf/peak-memory/cuda-run{1,2}.json`（ビルド済みバイナリを直接実行。
   `cargo run` 経由にすると孫プロセスの計測混入を避けにくいため回避。PR #445 と同型） |
-| GPU 占有状況（計測前後） | 計測前後とも常駐 2 プロセスのみ（ComfyUI 約 170MiB・
-  Kokoro TTS 約 870MiB）・`utilization.gpu` 0%（`nvidia-smi --query-compute-apps` /
+| GPU 占有状況（計測前後） | 計測前後とも常駐 2 プロセスのみ（実名・使用量はローカル版
+  `docs/real-hardware-verification-env.local.md` 参照）・`utilization.gpu` 0%（`nvidia-smi --query-compute-apps` /
   `--query-gpu=utilization.gpu` 実測。他プロセスの介入なし） |
 
 ## 計測方法
