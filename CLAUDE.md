@@ -37,7 +37,7 @@ rust-ai-library/
 │   └── testdata/             # 上記の self-test 用固定 fixture
 ├── .github/workflows/
 │   ├── ci.yml               # rust-ci（Fandhe-AI/actions rust-base-ci 呼び出し: fmt / clippy / test / deny。#325）+ 固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / guardrail-regression / verification-gates）+ ci-complete
-│   ├── codex-review.yml     # Codex PR 自動レビュー wrapper（Fandhe-AI/actions codex-review を SHA 固定呼び出し。#326）
+│   ├── codex-review.yml     # Codex PR 自動レビュー wrapper（Fandhe-AI/actions codex-review を SHA 固定呼び出し。#326。public 構成〈post-feedback-runner-label: ubuntu-latest〉へ切替済み。#469）
 │   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
 │   ├── guardrail-regression-schedule.yml # guardrail 2 層検証の schedule 定期実行・失敗時 Issue 可視化（TASK-6.1b）
 │   └── update-external.yml  # docs/spec・.claude/skills の自動追従
