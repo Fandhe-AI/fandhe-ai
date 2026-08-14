@@ -131,22 +131,28 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - **位置づけ**: GEMM 性能改善トラッキング（ルート #479／Phase A 親 #480）の A-3 タスク。Phase B（TMA 前提の最適化タスク群 B-12〜B-14）を条件付き起票してよいかを、プロダクションコードへ触れる前に確定するための spike（調査・記録タスク）。#61 以降で確立した WMMA／`mma.sync` 経路（1〜10 節）とは独立した調査であり、本節はカーネル実装を追加しない。
 - **CUTLASS 側の根拠**: CUTLASS では `CUTE_ARCH_TMA_SM120_ENABLED` が SM121（`"a"` サフィックス無し・`__CUDA_ARCH__ == 1210`）でも有効化される設計になっている（`include/cute/arch/config.hpp:154-158`・`include/cutlass/arch/config.h:197-204`。2026-08 時点の CUTLASS ソース調査）。CUTLASS は nvcc オフラインコンパイルの CuTe C++ DSL 経由であり、本リポジトリの NVRTC 実行時コンパイル・生 PTX インラインアセンブリ方式とは経路が異なるため、この根拠がそのまま NVRTC 経路にも当てはまるかは別途確認が必要（本プローブの目的そのもの）。
 - **プローブテストの場所**: `crates/backend-cuda/tests/tma_probe_real_device.rs`（`#[ignore]` 分離。2 節「9 節」と同じく DGX Spark GB10 等 sm_121 実機必須）。
-  - `tma_nvrtc_compile_probe`: mbarrier 初期化 + `cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes` による 1 タイル転送の最小 inline PTX カーネルを `compute_121`／`compute_121a`／`compute_121f` の 3 arch で NVRTC コンパイルし、成否・エラーメッセージ全文を記録する。
-  - `tma_execution_probe`: `compute_121` でコンパイル成功した場合に、64x64 f32 global テンソルから `cuTensorMapEncodeTiled` で生成した `CUtensorMap` 経由で 16x16 タイルを実転送し、ソース領域とのビット等値比較で検証する。
+  - `tma_nvrtc_compile_probe`: mbarrier 初期化 + `cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes`（`cluster` variant）／`cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes`（`cta` variant）による 1 タイル転送の最小 inline PTX カーネル 2 variant を、`compute_121`／`compute_121a`／`compute_121f` の 3 arch × 2 variant（計 6 組み合わせ）で NVRTC コンパイルし、成否・エラーメッセージ全文を記録する（`cluster`／`cta` 両スコープを probe する理由は本ファイル該当ソースコメント参照。sm_120/121 では `CUTE_ARCH_TMA_SM120_ENABLED` パスが `shared::cta` opcode を発行する設計であるため、cluster のみの probe では「TMA は sm_121 で使えない」と誤って記録しうる）。
+  - `tma_execution_probe`（cluster variant）／`tma_execution_probe_cta`（cta variant）: 各 variant について `compute_121` → `compute_121a` → `compute_121f` の順にコンパイルを試み、最初に成功した arch のみで実行する（`compute_121` 固定だと、`compute_121` が拒否され代替 arch のみ成功する環境で実行可能性を確認できないため。PR #634 codex-review 指摘対応）。64x64 f32 global テンソルから `cuTensorMapEncodeTiled` で生成した `CUtensorMap` 経由で 16x16 タイルを実転送し、ソース領域とのビット等値比較で検証する。
   - 実行コマンド: `cargo test -p backend-cuda --release -- --ignored --nocapture tma`
+- **判定条件（記録表の読み方）**: 実行成否は variant（cluster／cta）ごとに独立して評価する。コンパイル成功 arch が複数あっても実行は「その variant で最初にコンパイル成功した 1 arch」のみで行うため、実行しなかった arch の実行成否列は「対象外（未選択 arch）」と記録する。cluster と cta は完全に独立した命令列（本節冒頭「CUTLASS 側の根拠」参照）のため、一方の失敗が他方の成否を意味しない。
 - **実行環境（本イシューの実行結果）**: 実装セッションはサンドボックス化された git worktree であり、DGX Spark 実機への到達性（SSH 接続を含む）を確認できなかった（9 節と同型の制約）。よって以下の記録表は**実行待ち**のまま残す。**結論（B-12〜B-14 起票要否）は推測で埋めない**（実装計画 §3 Step 3「安全側フォールバック」の方針どおり）。
 
 ### 記録表（実行待ち）
 
-| arch | コンパイル成否 | エラーメッセージ要旨 | 実行成否（`tma_execution_probe`） |
-|------|--------------|----------------------|-----------------------------------|
-| `compute_121` | 未実行 | — | 未実行 |
-| `compute_121a` | 未実行 | — | 対象外（`tma_execution_probe` は `compute_121` 成功時のみ実行） |
-| `compute_121f` | 未実行 | — | 対象外（同上） |
+| arch | variant | コンパイル成否 | エラーメッセージ要旨 | 実行成否 |
+|------|---------|--------------|----------------------|----------|
+| `compute_121` | cluster | 未実行 | — | 未実行 |
+| `compute_121a` | cluster | 未実行 | — | 対象外（未選択 arch） |
+| `compute_121f` | cluster | 未実行 | — | 対象外（未選択 arch） |
+| `compute_121` | cta | 未実行 | — | 未実行 |
+| `compute_121a` | cta | 未実行 | — | 対象外（未選択 arch） |
+| `compute_121f` | cta | 未実行 | — | 対象外（未選択 arch） |
 
 ### 結論欄（実行待ち）
 
-- B-12〜B-14 の起票要否: **未確定**。実機での `cargo test -p backend-cuda --release -- --ignored --nocapture tma` 実行後、上記記録表を実測値で更新し、`compute_121`（または `compute_121a`/`compute_121f`）でのコンパイル・実行がいずれも成功した場合は起票要（起票自体は `out-of-scope-tracking.md` に従いユーザー承認のうえ別途実施）、いずれも失敗した場合は起票不要と明記する運用とする。
+- B-12〜B-14 の起票要否: **未確定**。実機での `cargo test -p backend-cuda --release -- --ignored --nocapture tma` 実行後、上記記録表を実測値で更新する。判定基準は variant 別に以下のとおりとする（推測で埋めず、実測後にこの基準を機械的に適用する）。
+  - cluster・cta のいずれか一方でもコンパイル・実行が成功: 起票要（起票自体は `out-of-scope-tracking.md` に従いユーザー承認のうえ別途実施）。本ファイル冒頭コメント「CUTLASS 側の根拠」のとおり sm_120/121 では `CUTE_ARCH_TMA_SM120_ENABLED` パスが `shared::cta` opcode を発行する設計のため、**cta 単独の成功でも cluster の失敗は非ブロッキングとして扱う**（cta 成功のみで起票要と判定してよい）。
+  - cluster・cta のいずれも全 arch でコンパイルまたは実行が失敗: 起票不要。
 - 実機実行手順は `docs/real-hardware-verification-env.md`（接続情報・実ホスト名は同ドキュメントの `*.local.md` 参照方式に従い本節には記載しない）。
 
 ## 参考文献
