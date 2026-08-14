@@ -35,7 +35,7 @@
 #   2. 許容形検査: キー名が runner 宣言（runs-on / runner-label /
 #      post-feedback-runner-label。前後空白を除去して照合）である全マッピングエントリを
 #      再帰走査で収集し、値が ALLOWED_RUNNER_VALUES（標準 GitHub ホステッドランナーの
-#      `-latest` ラベル集合。下記定数コメント参照）のいずれかとの完全一致でなければ
+#      安定ラベルの明示 allowlist。下記定数コメント参照）のいずれかとの完全一致でなければ
 #      違反とする（larger runner 名・式展開 `${{ ... }}`・配列・group 指定・null は
 #      すべて違反側）
 #   3. 構造の fail-closed: YAML パース失敗・ドキュメントがマッピングでない・対象
@@ -837,18 +837,23 @@ def load_all(text):
     return [] if doc is None else [doc]
 
 
-# 許容形: runner 宣言の値はこの集合のいずれかとの完全一致のみ許す
-# （`ubuntu-latest-8-cores` 等の larger runner は前方一致でも不許可。ci.md「runner」節）。
-# 標準 GitHub ホステッドランナーの `-latest` ラベルに限定する（PR #626 の codex-review
-# P1 指摘: 旧実装は `ubuntu-latest` 単独の完全一致に限定しており、ci.md 冒頭「runner」節
-# が許可する「ubuntu-latest 等の標準スペック」〈例: macOS 標準ランナーを使う Metal 関連
-# ジョブの将来追加〉まで一律に違反として遮断していた）。バージョン固定ラベル
-# （`ubuntu-24.04`・`macos-14` 等）は本リポでの実使用実績がなく、GitHub 側の対応
-# バージョン変遷を記憶だけで列挙すると一覧が陳腐化するため意図的に含めない。追加が
-# 必要になった時点で本定数への明示的な拡張（レビュー必須）を行う設計とし、実機
-# self-hosted ジョブの将来追加（ci.md「実機依存」節）と同じ「許容形の意図的な拡張」
-# パターンに揃える。
-ALLOWED_RUNNER_VALUES = frozenset({"ubuntu-latest", "macos-latest", "windows-latest"})
+# 許容形: runner 宣言の値はこの集合のいずれかとの完全一致のみ許す（fail-closed 既定）。
+# 標準 GitHub ホステッドランナーの安定ラベルのみを固定集合として明示列挙する
+# （.claude/rules/ci.md「runner」節が許可する「`runs-on: ubuntu-latest` 等の標準スペック」
+# の機械化。PR #626 の codex-review P1 指摘: 旧実装は `ubuntu-latest` 単独の完全一致に
+# 限定しており、ci.md が許可する他の標準ホステッドランナー〈例: macOS 標準ランナーを
+# 使う Metal 関連ジョブの将来追加〉まで一律に違反として遮断していた）。
+# ここに列挙しないラベルは全て違反側に倒す: `self-hosted`・larger runner
+# （`ubuntu-latest-8-cores`・`macos-latest-xlarge` 等。前方一致でも不許可）・
+# runner group 指定・式展開 `${{ ... }}`・配列でのラベル合成・arm 系
+# （`ubuntu-24.04-arm` 等）・preview 系ラベル。集合への追加は「許容形の意図的な拡張」
+# としてレビューを経て行う（実機 self-hosted ジョブの将来追加〈ci.md「実機依存」節〉と
+# 同じパターン）。
+ALLOWED_RUNNER_VALUES = frozenset({
+    "ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04",
+    "macos-latest", "macos-15", "macos-14",
+    "windows-latest", "windows-2025", "windows-2022",
+})
 # runner 宣言と見なすキー名（runs-on に加え、reusable workflow への runner 指定入力
 # runner-label / post-feedback-runner-label 経由の逆戻りも検知対象とする）。
 RUNNER_KEYS = {"runs-on", "runner-label", "post-feedback-runner-label"}

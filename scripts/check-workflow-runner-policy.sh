@@ -19,9 +19,10 @@
 # 承認必須〈deps-policy.md〉であり、バージョン固定・導入ステップ・license-matrix 更新を
 # 伴わない「ubuntu-latest 標準搭載」前提は fail-closed の趣旨に反する。詳細・対応範囲は
 # .py 冒頭のパーサー方針コメントを参照）。
-# 検査方針（許容形リスト = 標準 GitHub ホステッドランナーの `-latest` ラベル集合
-# 〈ubuntu-latest・macos-latest・windows-latest〉との完全一致・runs-on / runner-label /
-# post-feedback-runner-label を対象・codex-review の例外の扱い）の詳細は .py 冒頭を参照。
+# 検査方針（許容形リスト = 標準 GitHub ホステッドランナーの安定ラベルの明示 allowlist
+# 〈ALLOWED_RUNNER_VALUES。`-latest` ラベルとバージョン固定ラベルの固定集合〉との
+# 完全一致・runs-on / runner-label / post-feedback-runner-label を対象・codex-review の
+# 例外の扱い）の詳細は .py 冒頭を参照。
 #
 # 呼び出し元:
 #   - .github/workflows/ci.yml の runner-policy ジョブ（self-test → check の順で呼ぶ）
@@ -65,9 +66,10 @@ check() {
 
 self_test() {
   local testdata="${SCRIPT_DIR}/testdata"
-  # ポジティブ fixture: 許容形リスト（ubuntu-latest・macos-latest・windows-latest の
-  # いずれかとの完全一致）のみで構成され pass すること（コメント内の self-hosted
-  # 言及・引用文字列内の `#` を誤検出しないことの検証を兼ねる）。
+  # ポジティブ fixture: 許容形リスト（標準ホステッドランナーの明示 allowlist
+  # 〈ALLOWED_RUNNER_VALUES〉のいずれかとの完全一致）のみで構成され pass すること
+  # （コメント内の self-hosted 言及・引用文字列内の `#` を誤検出しないことの検証を
+  # 兼ねる）。
   local clean_fixtures=(
     "${testdata}/workflow-runner-clean.yml"
   )

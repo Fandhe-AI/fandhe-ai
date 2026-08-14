@@ -1,8 +1,8 @@
 # scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（イシュー #472）。
-# self-hosted という語は含まないが、許容形リスト（ubuntu-latest・macos-latest・
-# windows-latest のいずれとも完全一致しない）以外の runner 宣言を含むため「許容形検査」
-# で fail するはず（larger runner 名・バージョン固定ラベル・ブロックシーケンス形式・
-# 式展開・キー表記の等価系のいずれも許容形と一致しない）。
+# self-hosted という語は含まないが、許容形リスト（標準ホステッドランナーの明示
+# allowlist〈ALLOWED_RUNNER_VALUES〉のいずれとも完全一致しない）以外の runner 宣言を
+# 含むため「許容形検査」で fail するはず（larger runner 名・arm 系ラベル・ブロック
+# シーケンス形式・式展開・キー表記の等価系のいずれも許容形と一致しない）。
 name: dummy
 
 jobs:
@@ -36,10 +36,15 @@ jobs:
     "runs\x2Don": ubuntu-latest-8-cores
     timeout-minutes: 5
 
-  # バージョン固定ラベルは意図的に許容形集合へ含めていない（scripts/
-  # check-workflow-runner-policy.py の ALLOWED_RUNNER_VALUES コメント参照）。
-  # 追加が必要になった時点でのレビュー必須な明示的拡張であることを、この
-  # fixture で fail 側に固定して検証する。
-  versioned-label-not-allowed:
-    runs-on: macos-14
+  # larger runner（有料の大型ホステッドランナー）は allowlist ラベルへの前方一致でも
+  # 不許可（ci.md「runner」節）。macOS 系 larger runner が fail 側であることを固定する
+  # （ubuntu 系 larger runner は上記 larger-runner ジョブが固定済み）。
+  macos-larger-runner-not-allowed:
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 5
+
+  # arm 系・preview 系ラベルは allowlist に列挙しない限り違反（fail-closed 既定。
+  # 追加はレビューを経た ALLOWED_RUNNER_VALUES の明示的な拡張で行う）。
+  arm-label-not-allowed:
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 5

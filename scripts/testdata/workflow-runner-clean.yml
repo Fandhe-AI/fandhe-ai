@@ -92,16 +92,31 @@ jobs:
       ubuntu-latest
     timeout-minutes: 5
 
-  # 許容形は ubuntu-latest 単独ではなく、標準 GitHub ホステッドランナーの `-latest`
-  # ラベル集合（ubuntu-latest・macos-latest・windows-latest）である（PR #626
-  # codex-review P1 指摘: ubuntu-latest 完全一致のみへの限定は ci.md 冒頭「runner」節
-  # が許可する「ubuntu-latest 等の標準スペック」〈例: Metal 関連ジョブでの macOS
-  # 標準ランナー採用〉まで一律に遮断していた）。macos-latest・windows-latest も
-  # pass することを検証する。
+  # 許容形は ubuntu-latest 単独ではなく、標準 GitHub ホステッドランナーの安定ラベルの
+  # 明示 allowlist（scripts/check-workflow-runner-policy.py の ALLOWED_RUNNER_VALUES）
+  # である（PR #626 codex-review P1 指摘: ubuntu-latest 完全一致のみへの限定は ci.md
+  # 冒頭「runner」節が許可する「ubuntu-latest 等の標準スペック」〈例: Metal 関連
+  # ジョブでの macOS 標準ランナー採用〉まで一律に遮断していた）。macos-latest・
+  # windows-latest も pass することを検証する。
   macos-standard-runner:
     runs-on: macos-latest
     timeout-minutes: 5
 
   windows-standard-runner:
     runs-on: windows-latest
+    timeout-minutes: 5
+
+  # バージョン固定の標準ホステッドラベル（ubuntu-24.04・macos-14・windows-2022 等）も
+  # allowlist に含まれ pass することを検証する（larger runner・arm 系はあくまで違反側。
+  # workflow-runner-unknown.yml が fail 側を固定する）。
+  ubuntu-versioned-runner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+  macos-versioned-runner:
+    runs-on: macos-14
+    timeout-minutes: 5
+
+  windows-versioned-runner:
+    runs-on: windows-2022
     timeout-minutes: 5
