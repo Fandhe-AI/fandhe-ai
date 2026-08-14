@@ -167,7 +167,6 @@ schema: `.github/codex/review-schema.json`）自体を変更する差分の評�
 不存在時も評価は完遂できる）。全手順を完遂できた場合のみ `review_completed: true` とする。
 
 出力は指定された JSON スキーマ（summary + findings + review_completed + resolved_threads）に
-従うこと。指摘が
-1 件もない場合は `findings` を空配列にし、`summary` に確認した観点（本ファイルの
+従うこと。指摘が 1 件もない場合は `findings` を空配列にし、`summary` に確認した観点（本ファイルの
 リポジトリ固有基準で評価した旨を含む）を簡潔に書く。すべて日本語で書き、コード識別子・
 crate 名・コマンドは原語のままとする。
