@@ -9,14 +9,49 @@
 #
 # リポジトリ固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden /
 # guardrail-regression / verification-gates）は引き続き本ファイルで定義する
-# （self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・全ジョブ
-# timeout-minutes 必須は従来どおり .claude/rules/ci.md に従う）。各固有ジョブの
-# Checkout 直後の `detect` ステップによる Cargo.toml 有無判定・
-# `if: steps.detect.outputs.has_cargo == 'true'` ステップガードは、`Cargo.toml` 再消失時にも
-# ジョブを success のまま終了させる冪等セルフヒール方針のフェイルセーフとして残置する
-# （ジョブ単位の `if:` ではなく各ステップの `if:` で判定しているのは、`jobs.<id>.if` は
-# Checkout 前〈ワークスペース展開前〉に評価されるため `hashFiles('Cargo.toml')` が常に
-# 空文字となり判定できないため）。
+# （permissions 最小・SHA 固定・concurrency 直列化・全ジョブ timeout-minutes 必須は
+# 従来どおり .claude/rules/ci.md に従う）。各固有ジョブの Checkout 直後の `detect`
+# ステップによる Cargo.toml 有無判定・`if: steps.detect.outputs.has_cargo == 'true'`
+# ステップガードは、`Cargo.toml` 再消失時にもジョブを success のまま終了させる
+# 冪等セルフヒール方針のフェイルセーフとして残置する（ジョブ単位の `if:` ではなく
+# 各ステップの `if:` で判定しているのは、`jobs.<id>.if` は Checkout 前
+# 〈ワークスペース展開前〉に評価されるため `hashFiles('Cargo.toml')` が常に空文字となり
+# 判定できないため）。
+#
+# build / build-no-cuda-toolkit / deps-forbidden の 3 ジョブは、リポジトリ public 化に
+# 伴う CI ホステッドランナー移行（トラッキング #457／Phase 2 親 #459。Phase 1〈#464〉で
+# runner 方針が「public = ubuntu-latest 既定・self-hosted 禁止」へ反転済み）に対応し、
+# `runs-on: ubuntu-latest`（使い捨て VM）へ移行済み（イシュー #466）。
+# guardrail-regression・verification-gates・ci-complete は #467／#468 の別スコープとして
+# 引き続き self-hosted のまま残る（本ファイルの当該ブロックは本イシューでは変更しない）。
+#
+# 使い捨て VM ではジョブ間で依存解決・ビルド成果物を再利用できないため、上記 3 ジョブに
+# `actions/cache`（SHA 固定）による 2 層キャッシュを導入する（後続 #467／#468 が踏襲する
+# キャッシュ設計）:
+#   - cargo registry（3 ジョブ共通・共有）: `~/.cargo/registry/{index,cache}/`・
+#     `~/.cargo/git/db/` を対象に `cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}`
+#     キーで保存・復元する。依存は `=x.y.z` 完全固定＋Cargo.lock コミット済み
+#     （.claude/rules/deps-policy.md）のため、Cargo.lock のハッシュで依存セットが一意に
+#     決まる。フルミス時は `restore-keys` の前方一致（`cargo-registry-${{ runner.os }}-`）で
+#     直近キャッシュから部分復元する
+#   - target（build・build-no-cuda-toolkit のジョブ別）: `target/` を対象に
+#     `target-<job-id>-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}`
+#     キーで保存・復元する。toolchain 定義変更時に古い rustc の成果物へ増分ビルドしない
+#     ためキーに `rust-toolchain.toml` を含める（stable のマイナー更新自体は cargo 側の
+#     フィンガープリント再ビルドで安全に処理される）。build（Linux debug +
+#     aarch64-apple-darwin クロス lib + backend-metal check）と build-no-cuda-toolkit
+#     （Linux debug + test 成果物）で target 内容が異なるためジョブ別に分離する
+#     （混在させると復元・保存サイズが無駄に膨らむ）
+#   - deps-forbidden は `cargo tree`（依存解決・フェッチのみでビルドしない）のみ実行する
+#     ため registry キャッシュのみとし target キャッシュは持たない
+#   - 保存タイミングは `actions/cache` 既定（ジョブ成功時・完全一致キー存在時は再保存
+#     なし）とする。ソース変更のみでは target キャッシュを更新しない設計であり、依存
+#     コンパイルの再利用が支配的な高速化要因であるため、コミットごとの保存は
+#     キャッシュ容量（リポジトリ上限・LRU 退避）の浪費になる
+#   - ブランチスコープ（GitHub Actions cache の既定挙動）: PR ブランチで保存した
+#     キャッシュは当該 PR に閉じ、main（push トリガー）で保存したキャッシュが全 PR の
+#     共通ベースになる。fork PR がベースキャッシュを汚染できない性質もこの既定挙動で
+#     担保される（A08 ソフトウェア・データ整合性）
 #
 # deps-forbidden ジョブは TASK-1.2（依存禁止リストの CI 機械検査）の実装であり、
 # scripts/check-forbidden-deps.sh（Makefile の deps-forbidden ターゲットと共用する単一
@@ -144,7 +179,10 @@ jobs:
   # --------------------------------------------------
   build:
     name: cargo build (linux / aarch64-apple-darwin)
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #466）。使い捨て VM
+    # のため actions/cache による依存・成果物の再利用を下記ステップで行う
+    # （本ファイル冒頭コメントのキャッシュ設計参照）。
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -164,18 +202,13 @@ jobs:
             echo "::notice::Cargo.toml が未追加のため cargo build をスキップしました（workspace 作成後に有効化されます）"
           fi
 
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml（stable + rustfmt/clippy）へ同期する（rust-ci ジョブが使う
+      # 共通側 composite action と同一実装。SHA は
+      # `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決。追跡 ref: main）。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
-
-      - name: Sync toolchain
-        if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
       # 共有ツールチェーンを不要に汚さないよう、未導入の場合のみ追加する（冪等。.claude/rules/ci.md）。
       - name: Ensure aarch64-apple-darwin target
@@ -183,6 +216,31 @@ jobs:
         run: |
           set -euo pipefail
           rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
+
+      # cargo registry（3 ジョブ共通・本ファイル冒頭コメントのキャッシュ設計参照）。
+      # SHA は v4 系最新タグ v4.3.0 を `gh api repos/actions/cache/git/refs/tags/v4.3.0`
+      # で解決（追跡 ref: v4.3.0）。
+      - name: Cache cargo registry
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      # target（build ジョブ専用。本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: Cache cargo target
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: target-build-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            target-build-${{ runner.os }}-
 
       - name: cargo build（Linux ホスト）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -234,7 +292,10 @@ jobs:
   # --------------------------------------------------
   build-no-cuda-toolkit:
     name: cargo build / test (CUDA toolkit 非搭載検証)
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #466）。ubuntu-latest
+    # 標準イメージは CUDA toolkit 非搭載であり、本ジョブが検証する前提
+    # （scripts/check-cuda-toolkit-absent.sh assert）と自然に合致する。
+    runs-on: ubuntu-latest
     # test ステップ追加により既存 test ジョブの上限（45 分）に整合させる。
     timeout-minutes: 45
     steps:
@@ -265,18 +326,34 @@ jobs:
       - name: CUDA toolkit 非搭載の検証
         run: bash scripts/check-cuda-toolkit-absent.sh assert
 
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
-      - name: Sync toolchain
+      # cargo registry（3 ジョブ共通・本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      # target（build-no-cuda-toolkit ジョブ専用。本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: Cache cargo target
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: target-build-no-cuda-toolkit-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            target-build-no-cuda-toolkit-${{ runner.os }}-
 
       - name: cargo build（toolkit 非搭載）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -299,7 +376,8 @@ jobs:
   # --------------------------------------------------
   deps-forbidden:
     name: forbidden dependencies check
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #466）。
+    runs-on: ubuntu-latest
     # cargo tree 検査（cargo フェッチ・解決を伴う）を追加したため 10 → 15 に引き上げる。
     timeout-minutes: 15
     steps:
@@ -334,20 +412,25 @@ jobs:
           fi
           bash scripts/check-forbidden-deps.sh lock Cargo.lock
 
-      # self-hosted runner に rustup が未導入/欠落している場合に備え、後続ステップの
-      # 前提を自己修復する（fmt ジョブと同一方針。冪等。.claude/rules/ci.md）。
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
-      - name: Sync toolchain
+      # cargo registry のみ（cargo tree は依存解決・フェッチのみでビルドしないため target
+      # キャッシュは不要。本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
       - name: cargo tree の依存禁止検査
         # Cargo.lock の grep 検査を補強し、cargo tree の依存解決結果（features・build
