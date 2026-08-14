@@ -33,7 +33,11 @@
 #
 # 使い捨て VM ではジョブ間で依存解決・ビルド成果物を再利用できないため、上記の
 # cargo 系ジョブ（rust-ci を除く 5 ジョブ）に `actions/cache`（SHA 固定）による 2 層
-# キャッシュを導入する（#466 で確立し #467 が踏襲したキャッシュ設計）:
+# キャッシュを導入する（#466 で確立し #467 が踏襲したキャッシュ設計）。rust-ci
+# ジョブ（reusable workflow 呼び出し）は呼び出し側からステップを注入できないため
+# 本節の対象外だが、共通側 `cache: true` 入力の有効化（#622）により同方針の
+# キャッシュが共通側実装で有効化済み。詳細・#466 設計との差分と許容理由は
+# rust-ci ジョブ直上のコメント参照:
 #   - cargo registry（5 ジョブ共通・共有）: `~/.cargo/registry/{index,cache}/`・
 #     `~/.cargo/git/db/` を対象に `cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}`
 #     キーで保存・復元する。依存は `=x.y.z` 完全固定＋Cargo.lock コミット済み
@@ -179,13 +183,52 @@ jobs:
   # licenses sources。共通側既定〈advisories licenses sources〉に bans を追加するため
   # 明示指定する。#353。advisories / bans の設定・違反 0 件の実測根拠は deny.toml の
   # [advisories] / [bans] 節コメント参照）・test-timeout-minutes（45。共通側既定 30
-  # より長い移行前の値を維持。#465 の Phase 2 移行）以外の入力（fmt/clippy/deny の
-  # timeout・cache〈false。ホステッド（使い捨て VM）向けのキャッシュ設計〈キー構成・
-  # restore-keys〉は #466（build 系 3 ジョブのみが対象で本ジョブはスコープ外）とは別に
-  # #622 で確立する〉）は、共通側の既定値が本リポジトリの意図と
-  # 同一のため指定しない。concurrency は reusable workflow の
-  # トップレベルでは機能しないため、従来どおり本ファイル冒頭の concurrency 設定が
-  # 直列化を担う。
+  # より長い移行前の値を維持。#465 の Phase 2 移行）・cache（true。#622。下記コメント
+  # 参照）以外の入力（fmt/clippy/deny の timeout・cache-key-prefix 等）は、共通側の
+  # 既定値が本リポジトリの意図と同一のため指定しない。concurrency は reusable
+  # workflow のトップレベルでは機能しないため、従来どおり本ファイル冒頭の
+  # concurrency 設定が直列化を担う。
+  #
+  # cache: true（#622。ホステッド〈使い捨て VM〉向けキャッシュ設計の確立）。
+  # 共通側 `cache` 入力の既定値は self-hosted の永続 workspace 前提の `false` の
+  # ため、ホステッドでのオーバーライドとして明示指定する（`type: boolean`。
+  # pin SHA `fed9c07d`〈下記 uses 参照〉の共通側 workflow 定義で確認済み）。
+  # reusable workflow は呼び出し側からステップを注入できない構造上の制約が
+  # あるため、選択肢は「共通側 `cache` 入力の利用」か「共通側 Fandhe-AI/actions
+  # の改修」の 2 つのみであり、共通側実装を実測確認したうえで前者を採用した
+  # （#618 の rust-toolchain-setup 判断と同型）。
+  # 共通側実装（Fandhe-AI/actions .github/workflows/rust-base-ci.yml、
+  # pin SHA `fed9c07d` 時点）は `actions/cache`（SHA 固定 v6.1.0）を
+  # `${{ inputs.cache-key-prefix }}-${{ runner.os }}-<job>-${{ hashFiles('**/Cargo.lock') }}`
+  # キー（prefix 前方一致の restore-keys 付き）でジョブ別に有効化する設計であり、
+  # 対象パスは fmt / clippy / test ジョブが
+  # `~/.cargo/registry/index`・`~/.cargo/registry/cache`・`~/.cargo/git/db`・
+  # `target` の 4 パス、deny ジョブは `cargo tree` 相当（依存解決のみでビルド
+  # しない）のため `target` を含まない registry 3 パスのみ。下記の本ファイル側
+  # キャッシュ（#466・#467）と同方針（ジョブ別キー分離・Cargo.lock ハッシュ・
+  # prefix 前方一致・保存タイミングは actions/cache 既定・ブランチスコープに
+  # よる fork PR 汚染防止）を持つ。`cache-key-prefix`（既定 `rust-base-ci`）は
+  # 同一 self-hosted runner を複数リポジトリで共有する際の衝突回避用のため
+  # ホステッド（リポジトリスコープの Actions cache）では不要と判断し既定のまま
+  # 指定しない（二重管理回避の原則）。
+  #
+  # #466 設計との差分と許容理由（本ジョブは共通側実装に従うため下記は本リポ側で
+  # 制御できない差分だが、安全性への影響がないことを確認済み）:
+  #   - target キーに rust-toolchain.toml のハッシュを含まない: stable
+  #     チャネル更新時は cargo 側のフィンガープリント再ビルドで安全に処理される
+  #     （#466 コメント自身が明記済みの性質）。安全性は等価で最適性のみ僅かに劣る
+  #   - `hashFiles('**/Cargo.lock')`（#466 側は `'Cargo.lock'`）: ルート単一
+  #     Cargo.lock 構成＋submodule 非 checkout のため実質同一
+  #   - fmt ジョブにも target を含むキャッシュがある: fmt はビルドしないため
+  #     実質空キャッシュで無害（容量浪費は僅少）
+  #   - cargo-deny バイナリ（`~/.cargo/bin`）はキャッシュ対象外（共通側の設計
+  #     範囲。上記のとおり deny ジョブの cache path は registry のみ）:
+  #     deny ジョブの timeout 既定は共通側 `deny-timeout-minutes` 入力で 20 分
+  #     （pin SHA `fed9c07d` 時点の既定値。本ジョブでは未上書きのためそのまま
+  #     適用）であり、cargo-deny 単体の所要時間はこれを十分下回るため現時点で
+  #     恒常対策は不要と判断する。共通側改善は Issue 起票にユーザー承認が
+  #     要るため本変更では見送る（out-of-scope-tracking.md）
+  #
   # 前提: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
   # 単一真実源として参照する。本移行で追加）。
   rust-ci:
@@ -208,6 +251,9 @@ jobs:
       # https://github.com/Fandhe-AI/rust-ai-library/actions/runs/31769466364/job/94672194814）
       # であり 35 分を大幅に下回るため 45 分を維持で確定した（60 分への引き上げは不要）
       test-timeout-minutes: 45
+      # ホステッド（使い捨て VM）向けキャッシュ設計の確立（#622）。詳細は本ジョブ
+      # 直上のコメント参照
+      cache: true
 
   # --------------------------------------------------
   # cargo build（TASK-2.1b・イシュー #50）。
