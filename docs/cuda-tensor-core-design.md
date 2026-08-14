@@ -26,6 +26,7 @@
   - TF32 入力: `m16n16k8`（compute capability 8.0 以降で対応、sm_121 は満たす）
   - 5th-Gen Tensor Core（Blackwell 系譜共通）は FP8（E4M3）・FP6・FP4（NVFP4）にも対応するが（[NVIDIA Blackwell Architecture](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)）、本イシュー（11.1a〜d）のスコープは PoC-v2-3 が既に f32/f16 で実測している範囲に合わせ f16・TF32・f32 累算に限定する。FP8/FP4 経路の採否は本設計では判断せず、将来検討事項として「6. 後続サブタスク」節に記録する。
 - **NVRTC が `compute_121` を受理するか**: 未検証。PoC-v2-3 の `CudaGemm` は `CudaContext` から取得した compute capability を `--gpu-architecture=compute_XY` に反映する構成（ハードコードした sm 番号への依存を避ける設計、`docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md` 実施内容 2 節）であり、この機構が `compute_121` に対しても正しく動作するかは実機での NVRTC コンパイル実行でのみ確認できる。本イシューでは実機プローブを見送った（3 節参照）。**未検証事項として #61 の着手初期に確認する。**
+- **TMA（`cp.async.bulk.tensor`）が sm_121 で使えるか**: GEMM 性能改善ロードマップ（#479／#480）の Phase B 起票要否を判断するための独立プローブを #483 で実施した。詳細・記録表は 11 節「TMA（cp.async.bulk.tensor）sm_121 プローブ（#483）」を参照（未検証のまま本イシュー時点では記録待ち）。
 
 ## 3. 命令選定と根拠
 
@@ -118,17 +119,42 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - 計画（Step 2）は DGX Spark への到達可能性に応じたベストエフォートの実機 NVRTC コンパイル検証プローブを許容していた。本イシューの実行環境（サンドボックス化された git worktree、ネットワーク到達性は SSH エイリアス `local-server` 経由の実機接続を含め未確認・未実施）では実機プローブを実施しなかった。
 - 未検証事項は 8 節の一覧に記録した。#61（f16 WMMA GEMM 実装）の着手初期に実機検証を行う方針は #187 本文の「NVRTC での sm_121 挙動は実装初期に実機検証する」と整合する。
 - 接続情報（SSH エイリアス実体・ホスト名等）は本メモに一切記載していない（PoC-v2-3 の「接続情報は非記載」方針を踏襲、`.claude/rules/security.md`）。
+- **TMA プローブ（#483）も同型の到達不能ベストエフォート**: 本節と同じ理由（サンドボックス化された git worktree からの実機到達性未確認）により、11 節「TMA（cp.async.bulk.tensor）sm_121 プローブ」の記録表は実行待ちのまま残している。
 
 ## 10. スコープ外・将来の unsafe 境界
 
 - カーネル起動 API（`cudarc` の `unsafe fn` ラッパー）が唯一の `unsafe` 境界となる設計を、tensor core 版カーネルでも維持する。CUDA C ソース文字列（`kernels.rs` 相当）自体は Rust の `unsafe` を必要としない（NVRTC への文字列渡し・PTX ロードは `cudarc` 側の型で表現される）。実装（#61 以降）では、既存 `crates/backend-cuda/src/gemm.rs` のカーネル起動ラッパーと同様に、理由コメント付きで `unsafe` を最小化しレビュー必須とする（`.claude/rules/security.md`「unsafe」節）。
 - **仕様変更が必要と判断した事項**: 現時点では発見していない。REQ-11 の受け入れ基準（明示切替 API を提供しない方針・証跡方式）と本設計は整合しており、`docs/spec/` 側の変更提案は不要と判断した。
 
+## 11. TMA（cp.async.bulk.tensor）sm_121 プローブ（#483）
+
+- **位置づけ**: GEMM 性能改善トラッキング（ルート #479／Phase A 親 #480）の A-3 タスク。Phase B（TMA 前提の最適化タスク群 B-12〜B-14）を条件付き起票してよいかを、プロダクションコードへ触れる前に確定するための spike（調査・記録タスク）。#61 以降で確立した WMMA／`mma.sync` 経路（1〜10 節）とは独立した調査であり、本節はカーネル実装を追加しない。
+- **CUTLASS 側の根拠**: CUTLASS では `CUTE_ARCH_TMA_SM120_ENABLED` が SM121（`"a"` サフィックス無し・`__CUDA_ARCH__ == 1210`）でも有効化される設計になっている（`include/cute/arch/config.hpp:154-158`・`include/cutlass/arch/config.h:197-204`。2026-08 時点の CUTLASS ソース調査）。CUTLASS は nvcc オフラインコンパイルの CuTe C++ DSL 経由であり、本リポジトリの NVRTC 実行時コンパイル・生 PTX インラインアセンブリ方式とは経路が異なるため、この根拠がそのまま NVRTC 経路にも当てはまるかは別途確認が必要（本プローブの目的そのもの）。
+- **プローブテストの場所**: `crates/backend-cuda/tests/tma_probe_real_device.rs`（`#[ignore]` 分離。2 節「9 節」と同じく DGX Spark GB10 等 sm_121 実機必須）。
+  - `tma_nvrtc_compile_probe`: mbarrier 初期化 + `cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes` による 1 タイル転送の最小 inline PTX カーネルを `compute_121`／`compute_121a`／`compute_121f` の 3 arch で NVRTC コンパイルし、成否・エラーメッセージ全文を記録する。
+  - `tma_execution_probe`: `compute_121` でコンパイル成功した場合に、64x64 f32 global テンソルから `cuTensorMapEncodeTiled` で生成した `CUtensorMap` 経由で 16x16 タイルを実転送し、ソース領域とのビット等値比較で検証する。
+  - 実行コマンド: `cargo test -p backend-cuda --release -- --ignored --nocapture tma`
+- **実行環境（本イシューの実行結果）**: 実装セッションはサンドボックス化された git worktree であり、DGX Spark 実機への到達性（SSH 接続を含む）を確認できなかった（9 節と同型の制約）。よって以下の記録表は**実行待ち**のまま残す。**結論（B-12〜B-14 起票要否）は推測で埋めない**（実装計画 §3 Step 3「安全側フォールバック」の方針どおり）。
+
+### 記録表（実行待ち）
+
+| arch | コンパイル成否 | エラーメッセージ要旨 | 実行成否（`tma_execution_probe`） |
+|------|--------------|----------------------|-----------------------------------|
+| `compute_121` | 未実行 | — | 未実行 |
+| `compute_121a` | 未実行 | — | 対象外（`tma_execution_probe` は `compute_121` 成功時のみ実行） |
+| `compute_121f` | 未実行 | — | 対象外（同上） |
+
+### 結論欄（実行待ち）
+
+- B-12〜B-14 の起票要否: **未確定**。実機での `cargo test -p backend-cuda --release -- --ignored --nocapture tma` 実行後、上記記録表を実測値で更新し、`compute_121`（または `compute_121a`/`compute_121f`）でのコンパイル・実行がいずれも成功した場合は起票要（起票自体は `out-of-scope-tracking.md` に従いユーザー承認のうえ別途実施）、いずれも失敗した場合は起票不要と明記する運用とする。
+- 実機実行手順は `docs/real-hardware-verification-env.md`（接続情報・実ホスト名は同ドキュメントの `*.local.md` 参照方式に従い本節には記載しない）。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）
 - [Day 3: DGX Spark Unpacked. GB10, Unified Memory, sm_121, and NVFP4 — Kubesimplify](https://blog.kubesimplify.com/day-3-the-dgx-spark-unpacked-gb10-unified-memory-sm-121-and-the-one-reason-this-hardware-exists)
 - [NVIDIA Blackwell Architecture 公式ページ](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)（5th-Gen Tensor Core の対応精度）
+- CUTLASS（`Fandhe-AI` 外部リポジトリ調査。`include/cute/arch/config.hpp`・`include/cutlass/arch/config.h`）: SM121 での `CUTE_ARCH_TMA_SM120_ENABLED` 有効化根拠（#483）
 - [NVRTC 13.3 公式ドキュメント](https://docs.nvidia.com/cuda/nvrtc/index.html)（ヘッダ解決の仕組み、`nvrtcCreateProgram` への渡し方）
 - `docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md`（CUDA tiled GEMM 実測・tensor core 化の段階見積もり）
 - `docs/spec/04-requirements.md`（REQ-2・REQ-8・REQ-11）
