@@ -13,11 +13,34 @@
 # scripts/run-verification-gates.sh の bench サブコマンドのみを呼び、他ジョブとは独立に
 # 追加・削除できる。
 #
-# self-hosted 前提・permissions 最小・SHA 固定・concurrency 直列化・Ensure rustup 冪等
-# パターンは ci.yml と同一方針（.claude/rules/ci.md）。
+# ubuntu-latest（ホステッド）前提・permissions 最小・SHA 固定・concurrency 直列化パターンは
+# ci.yml と同一方針（.claude/rules/ci.md）。public 化に伴うホステッドランナー移行
+# （#457 Phase 2・イシュー #468）で self-hosted から移行済み。
 #
-# schedule は週 1 回（JST 火曜 03:00 = UTC 月曜 18:00）とし、self-hosted runner を
-# 過度に占有しない頻度に留める。
+# schedule は週 1 回（JST 火曜 03:00 = UTC 月曜 18:00）の頻度を維持する（ホステッド移行に
+# 伴う変更理由なし。使い捨て VM のため runner 占有の懸念自体は解消されたが、計測の性質上
+# 高頻度実行を要しないため据え置く）。
+#
+# --------------------------------------------------
+# bench ノイズ対策の判断（イシュー #468）
+# --------------------------------------------------
+# 結論: 現方式（実行成立のみを判定・計測値は記録のみ）を維持する。
+#
+# 現行 bench ゲート（scripts/run-verification-gates.sh の bench サブコマンド →
+# crates/backend-cpu/examples/gemm_bench.rs）は median TFLOPS・improvement_ratio を
+# 標準出力へ記録するのみで、pass/fail の閾値判定を持たない（exit code はコマンドの実行
+# 成立のみを表す。baseline 比較・劣化率閾値判定・`guardrail check` との結線は #103 残
+# スコープ〈TASK-8.2〉として run-verification-gates.sh 冒頭コメントに明示済み）。
+# したがって、共有ホステッドランナーのノイズで閾値判定が不安定化した fandhe-backend の
+# 先例に相当する構造が本リポの bench ゲートには現時点で存在しない。ubuntu-latest への
+# 移行はノイズにより計測値の参考性（絶対値としての信頼度）を下げるが、green/red の
+# ジョブ判定自体を不安定化させない。よって閾値・許容誤差の変更は発生せず、ユーザー承認
+# 事項もない。
+#
+# 将来 TASK-8.2 で閾値判定を bench ゲートへ結線する際の設計注意（このコメントを起点に
+# 参照すること）: ホステッド共有ランナーの計測値を絶対値の閾値判定に直接使わない。
+# 相対比較（同一 run 内での複数構成比較・実行毎の改善率）や実機（DGX Spark GB10 / Mac
+# Metal）計測を判定の前提にする。
 name: Verification Gate (bench)
 
 on:
@@ -35,19 +58,22 @@ concurrency:
 jobs:
   bench:
     name: 検証ゲート（bench）
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #468）。使い捨て VM
+    # のため actions/cache による依存の再利用を下記ステップで行う（ci.yml の build 系
+    # ジョブ・#466 で確立したキャッシュ設計と同一方針）。
+    runs-on: ubuntu-latest
     # 既定計測（size=512/2048/4096・warmup/iters 20/20）は blocked@4096 が支配的で、
     # ローカル実測（quiet 環境・size=512 の median_tflops≈0.0012 = 約 1.2e9 FLOP/s）を
     # 2·N^3 で外挿すると blocked@4096 だけで約 76 分（naive は size>=2048 でスキップされる
-    # ため対象外。gemm_bench.rs run_default 参照）。self-hosted runner の共有負荷による
-    # 増加分を見込み 180 分に設定する（schedule/手動トリガー限定のため per-PR 待ち時間には
-    # 影響しない）。
+    # ため対象外。gemm_bench.rs run_default 参照）。ホステッド共有 vCPU の負荷による増加分を
+    # 見込み 180 分を当面維持する（ジョブ上限 360 分に対し余裕あり。schedule/手動トリガー
+    # 限定のため per-PR 待ち時間には影響しない。実測が不足する場合は 300 分程度まで
+    # 引き上げる。#468）。
     timeout-minutes: 180
     steps:
       - name: Checkout
         # persist-credentials: false（ci.yml と同一方針。checkout 後どのステップも
-        # GITHUB_TOKEN を使わないため、共有 self-hosted runner の workspace にトークンを
-        # 残留させない）。
+        # GITHUB_TOKEN を使わないため、使い捨て VM の workspace にトークンを残留させない）。
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           persist-credentials: false
@@ -68,19 +94,38 @@ jobs:
             echo "::notice::Cargo.toml が未追加のため bench ゲートをスキップしました（workspace 作成後に有効化されます）"
           fi
 
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml へ同期する（ci.yml の各ジョブと同一方針）。旧「Ensure rustup is
+      # installed」「Sync toolchain」の 2 手動ステップを置換する。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
-      - name: Sync toolchain
+      # cargo registry（ci.yml の build 系ジョブと共通のキー構成。#466 で確立したキャッシュ
+      # 設計を踏襲する）。
+      - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
+      # target キャッシュは追加しない（イシュー #468 の判断。ci.yml build 系ジョブの
+      # 「キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合は縮小策を #468 以降で
+      # 検討する」という前方参照〈L596-599 付近コメント〉をここで解消する）。
+      # 本ジョブは週 1 回（schedule cron '0 18 * * 1'）実行のため、7 日間未アクセスで
+      # 失効する actions/cache の既定挙動と実行間隔がほぼ一致し、次回実行までにキャッシュが
+      # 失効している可能性が高く restore ヒット率が低い。加えて release ビルドの target/
+      # はキャッシュ中で最大級のエントリになりやすく、リポジトリ全体で共有される
+      # キャッシュ容量（10GB・LRU 退避）を圧迫して build 系ジョブ等が使う頻出キーを
+      # 追い出しかねない。本ジョブの所要時間は GEMM 計測（約 76 分〜）が支配的でビルド
+      # 時間の短縮効果は相対的に小さいため、target キャッシュの追加は見送り registry
+      # キャッシュのみとする。
       - name: ゲート 4/4（bench）
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/run-verification-gates.sh bench
