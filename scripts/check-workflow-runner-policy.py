@@ -366,8 +366,31 @@ class _Parser:
         return "".join(buf).strip()
 
     def _looks_like_mapping_key(self):
-        """先読みのみ（位置を進めない）。この行に平坦キーの終端 `: ` が現れるかを見て、
-        `- key: value` 圧縮マッピングと単なる平坦スカラー項目を判別する。"""
+        """先読みのみ（呼び出し前後で位置を復元する）。`- key: value` 圧縮マッピングと
+        単なる平坦スカラー項目を判別する。
+
+        プレーンスカラーは quote-blind な走査で十分（プレーンキーの中に
+        `: `（コロン＋空白等）が現れた時点で、それ自体が YAML 上そこでキーが
+        終端する規則のため）。一方クォート済み項目（`- "hello: world"` 等）は
+        文字列本体に `: ` を含みうるため、quote-blind 走査のままだと
+        シーケンス項目を圧縮マッピングと誤認し、後続の `expect_end_of_line` が
+        `"key"` 直後の余り文字列を拒否する fail-closed 誤検知を起こす
+        （cursor[bot] review #4936090383 指摘・PR #626）。クォート開始の場合は
+        既存の `parse_key_token`（`parse_double_quoted`／`parse_single_quoted`。
+        エスケープ・行継続・折り畳みを正しく扱う）で実際に 1 トークン読み切って
+        から直後が `: ` 終端かを確認し、判定後に位置を必ず復元する。"""
+        c = self.peekc()
+        if c in ('"', "'"):
+            saved_pos, saved_line, saved_line_start = self.pos, self.line, self.line_start
+            try:
+                try:
+                    self.parse_key_token()
+                except YamlSubsetError:
+                    return False
+                self.skip_inline_spaces()
+                return self.peekc() == ":" and self.peekc(1) in (" ", "\t", "\n", "")
+            finally:
+                self.pos, self.line, self.line_start = saved_pos, saved_line, saved_line_start
         i = self.pos
         while True:
             c = self.text[i] if i < self.n else ""
@@ -647,11 +670,14 @@ class _Parser:
         if c in ("|", ">"):
             return self.parse_block_scalar(col)
         # `- "key": value` のようなクォート済みキーの圧縮マッピングを、単なる
-        # クォート済みスカラー値より先に判定する。`_looks_like_mapping_key` は
-        # クォートの有無に関わらず行内の平坦キー終端 `: ` を先読みするため、
-        # クォート分岐より後段に置くと `"key"` の時点で値として消費されてしまい
-        # 後続の `: value` が `expect_end_of_line` で拒否される
-        # （fail-closed 誤検知。cursor[bot] review #4935626935 指摘・PR #626）。
+        # クォート済みスカラー値より先に判定する。クォート分岐より後段に置くと
+        # `"key"` の時点で値として消費されてしまい、後続の `: value` が
+        # `expect_end_of_line` で拒否される（fail-closed 誤検知。
+        # cursor[bot] review #4935626935 指摘・PR #626）。`_looks_like_mapping_key`
+        # 自体はクォート済みトークンを実際に読み切ってから判定するため、
+        # `- "hello: world"` のような非マッピングのクォート済みシーケンス項目を
+        # 誤ってマッピングと判定することはない（cursor[bot] review #4936090383
+        # 指摘・同 PR で修正）。
         if c == "?" or self._looks_like_mapping_key():
             return self.parse_block_mapping(col)
         if c == '"':

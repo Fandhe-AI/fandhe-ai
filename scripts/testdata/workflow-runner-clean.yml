@@ -48,3 +48,19 @@ jobs:
     steps:
       - "name": quoted key step
         run: echo "ok"
+
+  # クォート済みスカラーのシーケンス項目（圧縮マッピングのキーではない）が
+  # 本文中に `: `（コロン＋空白）を含むケース。cursor[bot] review #4936090383
+  # （PR #626）指摘: `_looks_like_mapping_key` の quote-blind な先読みが
+  # `"label: with colon"` のような単なる引用文字列を圧縮マッピングと誤認し、
+  # 後続の `expect_end_of_line` が余り文字列を拒否して fail-closed で誤って
+  # fail していた。クォート済みトークンを実際に読み切ってから判定する修正後は
+  # ここで pass することを検証する。
+  quoted-sequence-scalar-with-colon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        include:
+          - "label: with colon"
+          - 'single quoted: also with colon'
