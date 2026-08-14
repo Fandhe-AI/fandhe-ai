@@ -3,6 +3,8 @@
 実機依存の測定・テスト実行時に、どのマシンで・どうやってビルド・テスト・計測を回すかを判断するための環境構成記録。issue #379（Mac Metal）・#388（DGX Spark CUDA）配下の実装エージェントが本ドキュメント内の情報だけで実行判断できることを前提とする。
 
 > **公開版に関する注記（イシュー #461）**: 本ドキュメントは公開リポジトリ向けに、内部ホスト名・内部 venv パス・常駐サービスの実名をプレースホルダへ置換済み。実値（SSH ホスト名等）は Git 管理外の `docs/real-hardware-verification-env.local.md`（`docs/real-hardware-verification-env.local.md.example` をコピーして作成）を参照する。実行判断に必要な手順の構造・注意点はこの公開版のみで完結する。
+>
+> **実行前の準備（codex-review 指摘対応）**: 本ドキュメントのコード例は `<cuda-node>` の実ホスト名をシェル変数 `CUDA_NODE` として参照する（`ssh "$CUDA_NODE" '...'` の形。山括弧のプレースホルダをそのまま貼り付けて実行すると、POSIX shell がリダイレクト（`<`）と解釈しホストが存在せず入力元ファイルが見つからないエラーで失敗する）。実行前に `export CUDA_NODE=<実ホスト名>`（実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）を設定してから各コード例を実行する。
 
 ## 1. 対象と役割分担
 
@@ -29,10 +31,10 @@ Mac 上では CUDA テストは実行不可（hardware 非対応）。
 
 ### 2.2 環境変数・PATH の制約
 
-**非ログイン shell（`ssh host 'command'`）の PATH に cargo・nvcc が含まれていない**。以下の形式で実行を指定する（`<cuda-node>` は実ホスト名。`docs/real-hardware-verification-env.local.md` 参照）：
+**非ログイン shell（`ssh host 'command'`）の PATH に cargo・nvcc が含まれていない**。以下の形式で実行を指定する（`CUDA_NODE` の設定はファイル冒頭の注記を参照）：
 
 ```bash
-ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
   cargo test -p backend-cuda --release -- --ignored --nocapture'
 ```
@@ -75,15 +77,15 @@ rsync -a --delete --delete-excluded \
   --filter=':- .gitignore' \
   --exclude '.git/' --exclude '.codex/' \
   --exclude '.env*' --exclude '.claude/settings.local.json' --exclude '.venv*/' \
-  ./ <cuda-node>:~/work/rust-ai-library-run/
+  ./ "$CUDA_NODE":~/work/rust-ai-library-run/
 
 rm .rev-stamp
 
 # 転送後にノード側で必ずリビジョンを確認する（古いカーネルの数値を記録する事故を防ぐ）
-ssh <cuda-node> 'cat ~/work/rust-ai-library-run/.rev-stamp'
+ssh "$CUDA_NODE" 'cat ~/work/rust-ai-library-run/.rev-stamp'
 
 # 秘密情報が渡っていないことを確認する（初回・フィルタ変更時）
-ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   find . -name ".env*" -o -name "settings.local.json" | head'
 ```
 
@@ -99,7 +101,7 @@ ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
 ### 4.1 基本形式
 
 ```bash
-ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release -- --ignored --nocapture'
@@ -120,12 +122,12 @@ ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
 `ssh` は cargo が fd を保持する限り返らないため、ログへリダイレクトして親プロセスから切り離す：
 
 ```bash
-ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   setsid nohup env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release -- --ignored --nocapture \
   > $HOME/work/cuda-test.log 2>&1 < /dev/null & echo started'
-ssh <cuda-node> 'tail -5 $HOME/work/cuda-test.log'
+ssh "$CUDA_NODE" 'tail -5 $HOME/work/cuda-test.log'
 ```
 
 ## 5. PyTorch 参照値の再計測（同一実機）
@@ -143,7 +145,7 @@ ssh <cuda-node> 'tail -5 $HOME/work/cuda-test.log'
 ### 6.1 計測前後の占有状況確認
 
 ```bash
-ssh <cuda-node> 'nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; \
+ssh "$CUDA_NODE" 'nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; \
   nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'
 ```
 

@@ -311,6 +311,8 @@ CudaGemm::new 失敗: CUDA NVRTC library unavailable: libnvrtc dynamic library n
 
 転送・実行方法の正本は `docs/real-hardware-verification-env.md`（2〜4 節）。
 git clone/fetch はノード側で使えないため rsync で転送する（同ドキュメント 3 節）。
+実行前に `export CUDA_NODE=<実ホスト名>`（同ドキュメント冒頭の注記・
+`docs/real-hardware-verification-env.local.md` 参照）を設定する。
 
 ```sh
 # Mac 側 worktree ルートで実行（.rev-stamp によるリビジョン記録・rsync 転送）
@@ -318,12 +320,12 @@ git rev-parse HEAD > .rev-stamp
 rsync -a --delete --delete-excluded --filter=':- .gitignore' \
   --exclude '.git/' --exclude '.codex/' --exclude '.env*' \
   --exclude '.claude/settings.local.json' --exclude '.venv*/' \
-  ./ <cuda-node>:~/work/rust-ai-library-run/
+  ./ "$CUDA_NODE":~/work/rust-ai-library-run/
 rm .rev-stamp
 
 # ノード側で実行（--out は同期ツリー外の $HOME/work/ に置く。--delete-excluded で
 # 消えないようにするため）
-ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   make startup-bench BACKEND=cuda TRIALS=5'

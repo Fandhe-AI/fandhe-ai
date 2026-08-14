@@ -26,8 +26,11 @@
 
 ## 2. 実行コマンド
 
+実行前に `export CUDA_NODE=<実ホスト名>`（`docs/real-hardware-verification-env.md` 冒頭の注記・
+`docs/real-hardware-verification-env.local.md` 参照）を設定する。
+
 ```sh
-ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture'
