@@ -40,7 +40,10 @@ jobs:
   # --------------------------------------------------
   guardrail-regression-scheduled:
     name: guardrail 2 層検証（定期実行）
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #468）。ci.yml の
+    # guardrail-regression ジョブ（#466/#467 で移行済み）と同一パターンを踏襲する
+    # （使い捨て VM のため actions/cache による依存の再利用を下記ステップで行う）。
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - name: Checkout
@@ -67,20 +70,40 @@ jobs:
             echo "::notice::Cargo.toml が未追加のため guardrail 2 層検証をスキップしました"
           fi
 
-      # 共有 self-hosted runner のツールチェーンを不要に汚さないよう、未導入の場合のみ
-      # 導入する（冪等。.claude/rules/ci.md の Ensure パターン）。
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml へ同期する（ci.yml の guardrail-regression ジョブと同一方針）。
+      # 旧「Ensure rustup is installed」「Sync toolchain」の 2 手動ステップを置換する。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
-      - name: Sync toolchain
+      # cargo registry（ci.yml の build 系ジョブと共通のキー構成。#466 で確立したキャッシュ
+      # 設計を踏襲する）。
+      - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      # target: ci.yml の guardrail-regression ジョブ（main への push 契機で先に走る）が
+      # 保存するキャッシュと同一キーを使う。ビルド内容が同一（guardrail クレートの debug
+      # テスト成果物のみ）であり、schedule 実行は main の最新 target キャッシュを restore
+      # できる。完全一致ヒット時は actions/cache が再保存しないためキャッシュ容量も
+      # 浪費しない（イシュー #468 の判断）。
+      - name: Cache cargo target
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: target-guardrail-regression-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            target-guardrail-regression-${{ runner.os }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -112,7 +135,9 @@ jobs:
     # 上流ジョブが失敗・キャンセルされた場合にも必ず実行し、fail-closed で報告する
     # （.claude/rules/ci.md の ci-complete ジョブと同一方針）。
     if: ${{ always() }}
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #468）。issues:write
+    # のみの最小昇格ジョブであり永続環境を必要としないため ubuntu-latest へ移行する。
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -126,18 +151,17 @@ jobs:
         with:
           persist-credentials: false
 
-      # self-hosted runner に gh CLI がプリインストールされているとは限らないため、
-      # 未導入の場合のみ公式リリースのバイナリを取得して導入する（冪等。sudo 不要・
-      # $HOME 配下のみへの導入で共有 runner のグローバル状態を汚さない。
+      # ubuntu-latest には gh CLI がプリインストール済みのため本ステップは実質 no-op で
+      # 通過する（イシュー #468・ホステッドランナー移行）。バージョン固定ダウンロードは
+      # プリインストールされていない場合（ランナーイメージ変更等）のフェイルセーフとして
+      # 維持する（冪等。$HOME 配下のみへの導入で使い捨て VM 外へ影響しない。
       # .claude/rules/ci.md の Ensure rustup / Ensure cargo-deny と同一方針）。
       # self-test 実行前に置く: self-test は gh をスタブ化して検証するため本ステップの
       # 有無を検知できず、また本ワークフローの report ジョブは push/PR 契機の CI（ci.yml）
       # では動かないため、バイナリ欠如は schedule/workflow_dispatch 実行で初めて
       # 顕在化する（レビュー指摘・#148）。self-test をゲートせず先に導入することで
       # gh 未導入環境でも self-test 自体が実行できることを保証する。
-      # 本ワークフローの実行環境（self-hosted runner プール）は linux 限定（.github/workflows/
-      # 配下に macOS 向け runner ラベルを指定するジョブは無い）のため、Linux 版バイナリの
-      # 取得のみに対応する。
+      # ubuntu-latest（linux）前提のため、Linux 版バイナリの取得のみに対応する。
       - name: Ensure gh is installed
         run: |
           set -euo pipefail

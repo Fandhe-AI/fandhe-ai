@@ -1,12 +1,17 @@
 # 外部ソース（docs/spec サブモジュール・エージェントスキル）の自動追従ワークフロー。
 #
 # Fandhe-AI/fandhe-multi-platform の update-external.yml と同一方針
-# （self-hosted・permissions 最小・Fandhe-AI/actions の共通アクション利用）。本リポジトリは
+# （permissions 最小・Fandhe-AI/actions の共通アクション利用）。本リポジトリは
 # 更新対象が「docs/spec（Fandhe-AI/rust-ai-library-spec サブモジュール）」
 # 「.claude/skills 配下のエージェントスキル（skills-lock.json 管理）」の 2 種のみで、
 # 参考リポジトリの submodule/skill ジョブ構成をそのまま適用できる（大きな読み替えなし）。
 # Rust コード未実装（Cargo.toml なし）だが、本ワークフローは cargo を一切呼び出さないため
 # Cargo.toml 存在チェックのガードは不要。
+#
+# runs-on: public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #468）で
+# self-hosted から ubuntu-latest へ変更した（upstream との差分理由。.claude/rules/ci.md
+# update-external.yml 節）。secrets 経路（SUBMODULE_PAT フォールバック）・permissions・
+# persist-credentials・auto-merge 変数は本イシューでは不変（受け入れ条件）。
 name: Update external sources
 
 on:
@@ -38,8 +43,8 @@ jobs:
   submodule:
     name: Update submodule references
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "submodule"]'), inputs.target) }}
-    runs-on: self-hosted
-    # self-hosted runner はハングしたジョブに無期限占有されうるため、多層防御として
+    runs-on: ubuntu-latest
+    # ハングしたジョブが runner を無期限占有するのを防ぐため、多層防御として
     # timeout を必ず設定する。
     timeout-minutes: 15
     permissions:
@@ -91,7 +96,7 @@ jobs:
   skills:
     name: Update agent skills
     if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "skill"]'), inputs.target) }}
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
