@@ -1,0 +1,9 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（PR #626 P0 指摘）。
+# 引用文字列内の `#` は YAML コメントではないが、旧実装のコメント除去
+# （`${line%%#*}`）は文字列内かを区別せず同一行の以降を切り捨て、同じ行の
+# `runs-on: self-hosted` を見逃した。実 YAML パーサーは文字列内 `#` をコメントと
+# 誤認しないため検出され fail するはず。
+name: dummy
+
+jobs:
+  hash-in-string: { name: "prefix # not-a-comment", runs-on: self-hosted }

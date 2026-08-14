@@ -7,7 +7,7 @@
 # 固定導入は共通 workflow 側の実装を参照（Fandhe-AI/actions の
 # .github/workflows/rust-base-ci.yml および rust-base-ci/README.md）。
 #
-# リポジトリ固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden /
+# リポジトリ固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / runner-policy /
 # guardrail-regression / verification-gates）は引き続き本ファイルで定義する
 # （permissions 最小・SHA 固定・concurrency 直列化・全ジョブ timeout-minutes 必須は
 # 従来どおり .claude/rules/ci.md に従う）。各固有ジョブの Checkout 直後の `detect`
@@ -72,6 +72,23 @@
 # cubecl・candle・tch・ndarray。.claude/rules/deps-policy.md）の混入を fail-closed で検査
 # する。検査ロジック自体の退行は scripts/testdata/ の固定 fixture による self-test で
 # 毎回検出する。
+#
+# runner-policy ジョブ（イシュー #472）は、#457 Phase 2 で完了した
+# self-hosted → ubuntu-latest 移行（.claude/rules/ci.md「runner」節）の逆戻り防止の
+# ための fail-closed 契約検査である。scripts/check-workflow-runner-policy.sh
+# （Makefile の runner-policy ターゲットと共用する単一ソース。検査本体は
+# python3 標準ライブラリのみの check-workflow-runner-policy.py（追加パッケージ導入
+# 不要。PyYAML 等の外部依存を使わない理由は同ファイル冒頭コメント参照）。PR #626
+# レビュー指摘の YAML 表記トリック迂回を実パーサー方式で遮断）経由で、.github/workflows/ 配下に
+# self-hosted が再導入されていないこと、runner 宣言（runs-on / runner-label /
+# post-feedback-runner-label）が許容形リスト（標準 GitHub ホステッドランナーの
+# `-latest` ラベル集合: ubuntu-latest・macos-latest・windows-latest）のいずれかとの
+# 完全一致であることを検査する。deps-forbidden ジョブと同様、
+# scripts/testdata/ の固定 fixture（clean/forbidden/unknown/trick-*/invalid）による self-test で
+# 検査ロジック自体の退行を毎回検出する。codex-review wrapper の codex 実行ジョブ
+# （runner-label 非指定＝reusable workflow 既定値 `codex` に委譲）は本リポ側ファイルに
+# runner 宣言が現れないため自然に検査対象外となる（scripts/check-workflow-runner-policy.sh
+# 冒頭コメント参照）。
 #
 # CUDA 実機（DGX Spark GB10）・Metal 実機依存のテストは #[ignore] で分離されている前提
 # （.claude/rules/coding-rust.md）であり、本ワークフローでは実行しない。
@@ -461,6 +478,40 @@ jobs:
         run: bash scripts/check-forbidden-deps.sh tree
 
   # --------------------------------------------------
+  # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
+  # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
+  # 移行完了した（.claude/rules/ci.md「runner」節）が、以後 self-hosted を再導入しても
+  # 機械的に検知する仕組みがなかった。scripts/check-workflow-runner-policy.sh
+  # （Makefile の runner-policy ターゲットと共用する単一ソース。検査本体は python3
+  # 標準ライブラリのみの check-workflow-runner-policy.py。追加パッケージ導入不要。
+  # PyYAML 等の外部依存を使わない理由は同ファイル冒頭コメント参照）経由で、デコード後の
+  # YAML 構造に対する self-hosted 出現・許容形リスト（標準 GitHub ホステッドランナーの
+  # `-latest` ラベル集合: ubuntu-latest・macos-latest・windows-latest）以外の runner
+  # 宣言を fail-closed で検査する
+  # （PR #626 レビュー指摘の YAML 表記トリック迂回を実パーサー方式で遮断）。
+  # cargo 不要のため rustup セットアップは行わない。
+  # --------------------------------------------------
+  runner-policy:
+    name: workflow runner policy check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        # persist-credentials: false（fmt ジョブと同一方針）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # 検査ロジック自体の退行（正規表現の破損等）を、実データの有無に関わらず常時検出する
+      # （受け入れ条件「検査自体の self-test がある」の機械検証。deps-forbidden ジョブと
+      # 同一方針）。
+      - name: 検査ロジックの self-test
+        run: bash scripts/check-workflow-runner-policy.sh self-test
+
+      - name: .github/workflows/ の runner 契約検査
+        run: bash scripts/check-workflow-runner-policy.sh check
+
+  # --------------------------------------------------
   # guardrail 判定器の 2 層検証（TASK-6.1a・イシュー #147）。
   # REQ-4（1 層目・判定器単体）・REQ-5（2 層目・除外適用後）の回帰テストを
   # scripts/run-guardrail-regression.sh 経由で実行する（本ファイル冒頭コメント参照）。
@@ -645,7 +696,7 @@ jobs:
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
     if: ${{ always() }}
     # ジョブを追加したら必ずこの needs（および下の完遂判定の検査対象）へ追加する。
-    needs: [rust-ci, build, build-no-cuda-toolkit, deps-forbidden, guardrail-regression, verification-gates]
+    needs: [rust-ci, build, build-no-cuda-toolkit, deps-forbidden, runner-policy, guardrail-regression, verification-gates]
     timeout-minutes: 5
     steps:
       - name: 完遂判定（全 needs ジョブが success であること）
@@ -656,12 +707,13 @@ jobs:
           RESULT_BUILD: ${{ needs.build.result }}
           RESULT_BUILD_NO_CUDA_TOOLKIT: ${{ needs.build-no-cuda-toolkit.result }}
           RESULT_DEPS_FORBIDDEN: ${{ needs.deps-forbidden.result }}
+          RESULT_RUNNER_POLICY: ${{ needs.runner-policy.result }}
           RESULT_GUARDRAIL_REGRESSION: ${{ needs.guardrail-regression.result }}
           RESULT_VERIFICATION_GATES: ${{ needs.verification-gates.result }}
         run: |
           set -euo pipefail
           ok=1
-          for pair in "rust-ci:${RESULT_RUST_CI}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}" "guardrail-regression:${RESULT_GUARDRAIL_REGRESSION}" "verification-gates:${RESULT_VERIFICATION_GATES}"; do
+          for pair in "rust-ci:${RESULT_RUST_CI}" "build:${RESULT_BUILD}" "build-no-cuda-toolkit:${RESULT_BUILD_NO_CUDA_TOOLKIT}" "deps-forbidden:${RESULT_DEPS_FORBIDDEN}" "runner-policy:${RESULT_RUNNER_POLICY}" "guardrail-regression:${RESULT_GUARDRAIL_REGRESSION}" "verification-gates:${RESULT_VERIFICATION_GATES}"; do
             name="${pair%%:*}"
             result="${pair#*:}"
             if [ "${result}" != "success" ]; then

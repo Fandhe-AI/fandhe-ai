@@ -10,6 +10,15 @@
 FROM rust:1.88-slim-bookworm
 
 # ビルド・検証に必要な最小ツールのみ導入する（レイヤ削減のため 1 RUN に集約）。
+# python3（イシュー #472・PR #626 codex-review 指摘）: make ci の runner-policy
+# ターゲット（scripts/check-workflow-runner-policy.sh）が呼ぶ検査本体
+# scripts/check-workflow-runner-policy.py は python3 標準ライブラリのみで実装されて
+# いる（外部 PyPI パッケージへの依存は deps-policy.md 上ユーザー承認必須のため意図的
+# に避けている）が、コンテナ側に python3 自体が無いと fail-closed 設計
+# （check-workflow-runner-policy.sh の ensure_python）により make docker-ci が必ず
+# 失敗していた。Debian bookworm 標準の python3 パッケージ（追加 PyPI パッケージなし）
+# を導入し、README が案内する環境非依存の検証経路（make docker-shell / docker-ci）を
+# 復旧する。
 # aarch64-apple-darwin ターゲットは `make ci` が `build-cross`（TASK-2.1b・イシュー #50）を
 # 経由して必ず要求するため、root（RUSTUP_HOME 既定は /usr/local/rustup で dev ユーザーは
 # 書き込み不可）でイメージビルド時に事前導入しておく。未導入のまま dev ユーザーで
@@ -29,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         make \
         curl \
         ca-certificates \
+        python3 \
     && rm -rf /var/lib/apt/lists/* \
     && rustup component add rustfmt clippy \
     && rustup target add aarch64-apple-darwin \

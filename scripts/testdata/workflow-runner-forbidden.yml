@@ -1,0 +1,11 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（イシュー #472）。
+# 非コメント行に runs-on: self-hosted を含み、禁止トークン検査で fail するはず。
+name: dummy
+
+jobs:
+  example:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: dummy step
+        run: echo "ok"

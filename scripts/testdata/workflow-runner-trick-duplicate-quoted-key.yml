@@ -1,0 +1,15 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（PR #626 codex-review P0 指摘）。
+# 引用形キー `"runs-on"` と素の runs-on は表記が異なるがデコード後は同一文字列へ
+# 正規化される。素朴な dict 格納でも `"runs-on"` と runs-on は同一キーとして後勝ちに
+# なるため、正規化後の衝突もキー重複として YamlSubsetError で fail-closed に拒否して
+# fail するはず。
+name: dummy
+
+jobs:
+  duplicate-quoted:
+    "runs-on": self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: dummy step
+        run: echo "ok"

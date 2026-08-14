@@ -1,0 +1,50 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（イシュー #472）。
+# self-hosted という語は含まないが、許容形リスト（標準ホステッドランナーの明示
+# allowlist〈ALLOWED_RUNNER_VALUES〉のいずれとも完全一致しない）以外の runner 宣言を
+# 含むため「許容形検査」で fail するはず（larger runner 名・arm 系ラベル・ブロック
+# シーケンス形式・式展開・キー表記の等価系のいずれも許容形と一致しない）。
+name: dummy
+
+jobs:
+  larger-runner:
+    runs-on: ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  block-sequence-runner:
+    runs-on:
+      - custom-legacy-label
+    timeout-minutes: 5
+
+  expression-runner:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+
+  # 引用キー・コロン前空白（YAML デコード後はいずれも同じ mapping key `runs-on`。
+  # イシュー #472 P1 codex-review 指摘）で larger runner を宣言する迂回パターン。
+  quoted-key-bypass:
+    "runs-on": ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  space-before-colon-bypass:
+    runs-on : ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  # `\x2D` は YAML double-quoted scalar のエスケープとしてハイフンにデコードされる
+  # （イシュー #472 P0 codex-review 指摘）。字面に `runs-on` という部分文字列が
+  # 現れなくても、デコード後のキーは runs-on になるため検出され fail するはず。
+  escaped-hex-key-bypass:
+    "runs\x2Don": ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  # larger runner（有料の大型ホステッドランナー）は allowlist ラベルへの前方一致でも
+  # 不許可（ci.md「runner」節）。macOS 系 larger runner が fail 側であることを固定する
+  # （ubuntu 系 larger runner は上記 larger-runner ジョブが固定済み）。
+  macos-larger-runner-not-allowed:
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 5
+
+  # arm 系・preview 系ラベルは allowlist に列挙しない限り違反（fail-closed 既定。
+  # 追加はレビューを経た ALLOWED_RUNNER_VALUES の明示的な拡張で行う）。
+  arm-label-not-allowed:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5

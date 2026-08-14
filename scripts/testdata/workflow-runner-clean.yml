@@ -1,0 +1,122 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の適合 fixture（イシュー #472）。
+# .github/workflows/ の検査スキャン範囲外（scripts/testdata/）に置くため、この
+# ファイル自体が check サブコマンドを fail させることはない。
+#
+# コメント内の self-hosted 言及（このコメント自体を含む）は検査対象外であることを
+# 検証する意図的な仕掛け: self-hosted という語をこの行に書いても pass するはず。
+name: dummy
+
+jobs:
+  example:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: dummy step
+        run: echo "ok"
+      # 引用文字列内の `#` は YAML コメントではない。実 YAML パーサー方式では文字列
+      # として正しく扱われ、誤検出も行の切り捨ても起きないことを検証する。
+      - name: hash in quoted string
+        run: echo "prefix # not-a-comment"
+
+  reusable-call:
+    runner-label: ubuntu-latest
+    timeout-minutes: 5
+
+  post-feedback:
+    post-feedback-runner-label: ubuntu-latest
+    timeout-minutes: 5
+
+  # 引用キー・コロン前空白は YAML デコード後は同じ mapping key `runs-on` に正規化
+  # される（イシュー #472 P1 codex-review 指摘）。値が ubuntu-latest 完全一致で
+  # あればこれらの表記でも pass することを検証する。
+  quoted-key:
+    "runs-on": ubuntu-latest
+    timeout-minutes: 5
+
+  space-before-colon:
+    runs-on : ubuntu-latest
+    timeout-minutes: 5
+
+  # `- "key": value` 圧縮マッピング（シーケンス項目内の引用キー）。cursor[bot]
+  # review #4935626935（PR #626）指摘: parse_inline_node がクォート済みスカラー値
+  # と圧縮マッピングの判別を誤ると、この形の準拠 workflow が fail-closed で
+  # 誤って fail する。ここでは steps 配下の複数キーのうち 1 つを引用しても
+  # pass することを検証する。
+  quoted-step-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - "name": quoted key step
+        run: echo "ok"
+
+  # クォート済みスカラーのシーケンス項目（圧縮マッピングのキーではない）が
+  # 本文中に `: `（コロン＋空白）を含むケース。cursor[bot] review #4936090383
+  # （PR #626）指摘: `_looks_like_mapping_key` の quote-blind な先読みが
+  # `"label: with colon"` のような単なる引用文字列を圧縮マッピングと誤認し、
+  # 後続の `expect_end_of_line` が余り文字列を拒否して fail-closed で誤って
+  # fail していた。クォート済みトークンを実際に読み切ってから判定する修正後は
+  # ここで pass することを検証する。
+  quoted-sequence-scalar-with-colon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        include:
+          - "label: with colon"
+          - 'single quoted: also with colon'
+
+  # ブロックシーケンス項目が `-` 単独行（末尾が改行）＋インデントされた
+  # ネストマッピングという形。Cursor Bugbot 指摘 876ad41b-460f-4686-8abc-
+  # 0706148f93e4（PR #626）: parse_sequence_item が `-` 単独行を無条件に
+  # null item とみなし parse_optional_nested_block を呼ばずに return して
+  # いたため、`- ` 空白付き＋改行（同義のはずの表記）とは非対称に、この形の
+  # 準拠 workflow YAML を誤って fail-closed で拒否していた。修正後は
+  # steps 配下のネストしたマッピングが正しく読み取れ pass することを検証する。
+  dash-only-nested-block:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      -
+        name: dash only nested step
+        run: echo "ok"
+
+  # `key:` の次行に単独でスカラー値だけが続く形（インデント継続によるプレーン
+  # スカラーで、`|`／`>` インジケータなし）。cursor[bot] review 4936370341
+  # （PR #626）指摘: parse_node_body が `-`／`{`／`[`／`|`／`>` 以外を無条件に
+  # parse_block_mapping へディスパッチしていたため、この形の準拠 workflow
+  # YAML を「':' が見つかりません」として fail-closed で誤って拒否していた。
+  # 修正後は runs-on の値が正しくスカラー `ubuntu-latest` として読み取れ
+  # pass することを検証する。
+  nested-scalar-value:
+    runs-on:
+      ubuntu-latest
+    timeout-minutes: 5
+
+  # 許容形は ubuntu-latest 単独ではなく、標準 GitHub ホステッドランナーの安定ラベルの
+  # 明示 allowlist（scripts/check-workflow-runner-policy.py の ALLOWED_RUNNER_VALUES）
+  # である（PR #626 codex-review P1 指摘: ubuntu-latest 完全一致のみへの限定は ci.md
+  # 冒頭「runner」節が許可する「ubuntu-latest 等の標準スペック」〈例: Metal 関連
+  # ジョブでの macOS 標準ランナー採用〉まで一律に遮断していた）。macos-latest・
+  # windows-latest も pass することを検証する。
+  macos-standard-runner:
+    runs-on: macos-latest
+    timeout-minutes: 5
+
+  windows-standard-runner:
+    runs-on: windows-latest
+    timeout-minutes: 5
+
+  # バージョン固定の標準ホステッドラベル（ubuntu-24.04・macos-14・windows-2022 等）も
+  # allowlist に含まれ pass することを検証する（larger runner・arm 系はあくまで違反側。
+  # workflow-runner-unknown.yml が fail 側を固定する）。
+  ubuntu-versioned-runner:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+  macos-versioned-runner:
+    runs-on: macos-14
+    timeout-minutes: 5
+
+  windows-versioned-runner:
+    runs-on: windows-2022
+    timeout-minutes: 5
