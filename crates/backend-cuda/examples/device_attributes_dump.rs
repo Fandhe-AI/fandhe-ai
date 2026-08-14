@@ -69,17 +69,39 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 /// 発生し続けるため、小サイズ計測〈L2 常駐バッファ〉では償却できていな
 /// かった。`measure_bandwidth_secs` のドキュメンテーションコメント参照）。
 ///
+/// **`a`/`b` 間の ping-pong で `repeats` 反復を最適化から保護する（イシュー
+/// #482 codex-review 指摘。PR #635）**: 当初は `src`（不変）→`dst` の
+/// 単方向コピーを `repeats` 回繰り返す実装だったが、各反復が全く同じ
+/// アドレスへ全く同じ値を書くだけで反復間に観測可能な依存がないため、
+/// NVRTC（LLVM/NVVM ベース）の冗長ストア除去最適化が最後の 1 回を残して
+/// 残りを削除しうる（トリップ回数 `repeats` はカーネル引数＝実行時の値
+/// でありコンパイル時には不明だが、ループ本体がループ不変〈毎回同一
+/// アドレス・同一値〉であることの排除にはトリップ回数の静的知識は不要）。
+/// これが成立すると実質 1 回分の転送時間を `repeats` で割ることになり
+/// `bandwidth_gbps` が帯域を `repeats` 倍（本バイナリでは 64 倍）
+/// 過大評価する。対策として `a`/`b` を反復ごとに読み出し役・書き込み役
+/// として入れ替える（ping-pong）よう変更した: 各反復の書き込み先アドレス
+/// および書き込む値は前反復の結果に依存して変化する〈r=0: b=a+1、
+/// r=1: a=b+1、…〉ため、次反復の読み出しが前反復の書き込みに真に依存する
+/// （global メモリ経由の RAW 依存）。ストアの宛先・値のいずれも
+/// ループ不変ではなくなるため、冗長ストア除去は適用できず `repeats` 回
+/// 分の実メモリトラフィック（読み出し＋書き込み）が保証される。
+///
 /// 手動境界チェック（内側ループの `i < n` 条件）は最適化・計測目的を
 /// 理由に省略しない（REQ-8。`.claude/rules/coding-rust.md`「カーネル実装の
 /// 境界検査」は計測用カーネルにも適用する。イシュー #482 実装計画
 /// §2 共通契約）。
 const BW_COPY_F32: &str = r#"
-extern "C" __global__ void bw_copy_f32(const float* __restrict__ src, float* __restrict__ dst, int n, int repeats) {
+extern "C" __global__ void bw_copy_f32(float* __restrict__ a, float* __restrict__ b, int n, int repeats) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
     for (int r = 0; r < repeats; ++r) {
         for (int i = idx; i < n; i += stride) {
-            dst[i] = src[i] + 1.0f;
+            if ((r & 1) == 0) {
+                b[i] = a[i] + 1.0f;
+            } else {
+                a[i] = b[i] + 1.0f;
+            }
         }
     }
 }
@@ -148,10 +170,11 @@ fn compile_bw_copy(device: &CudaDevice, arch: &str) -> Result<CudaFunction, Cuda
 /// ヘッドは `repeats` に依らない定数として計測秒数へ加算され、反復回数を
 /// 増やすほど転送時間に対する相対比率が小さくなる（定数 `BW_LAUNCH_REPEATS`
 /// のドキュメンテーションコメント参照。イシュー #482 codex-review 指摘。
-/// PR #635）。バッファの初期値は帯域計測の正当性に無関係（読み出し値を
-/// そのまま書き戻すだけ）のため `alloc_zeros` で確保し、ホスト⇔デバイス
-/// 転送は計測区間の外に置く（`cuda_floor_bench.rs` と同じ「計測境界の
-/// 統一」方針）。
+/// PR #635）。バッファの初期値は帯域計測の正当性に無関係（`a`/`b` を
+/// ping-pong で読み書きするだけで最終値を利用しない。`BW_COPY_F32`
+/// ドキュメンテーションコメント参照）のため `alloc_zeros` で確保し、
+/// ホスト⇔デバイス転送は計測区間の外に置く（`cuda_floor_bench.rs` と
+/// 同じ「計測境界の統一」方針）。
 fn measure_bandwidth_secs(
     device: &CudaDevice,
     func: &CudaFunction,
@@ -159,8 +182,11 @@ fn measure_bandwidth_secs(
     sm_count: u32,
 ) -> Result<f64, CudaError> {
     let stream = device.stream();
-    let src = stream.alloc_zeros::<f32>(n)?;
-    let mut dst = stream.alloc_zeros::<f32>(n)?;
+    // `a`/`b` は共にカーネル内で読み出し役・書き込み役を ping-pong で
+    // 入れ替えるため両方 `mut`（`BW_COPY_F32` ドキュメンテーションコメント
+    // 「`a`/`b` 間の ping-pong で `repeats` 反復を最適化から保護する」参照）。
+    let mut a = stream.alloc_zeros::<f32>(n)?;
+    let mut b = stream.alloc_zeros::<f32>(n)?;
     let n_i = n as i32;
     let repeats_i = BW_LAUNCH_REPEATS as i32;
     let cfg = LaunchConfig {
@@ -176,19 +202,20 @@ fn measure_bandwidth_secs(
         // ため（定数 `BW_LAUNCH_REPEATS` のドキュメンテーションコメント
         // 参照）、起動 1 回・同期 1 回に統一する。
         //
-        // SAFETY: `src`/`dst` は直前に `n` 要素で確保済みで `n_i == n`
+        // SAFETY: `a`/`b` は直前に `n` 要素で確保済みで `n_i == n`
         // （usize→i32 変換は `n` が呼び出し元でバッファ確保に使った値と
         // 同一のためオーバーフローしない）。カーネル側の内側ループは
         // `i < n` を毎回検査するため（`BW_COPY_F32` 定義参照）、起動側の
         // グリッド構成に関わらず OOB アクセスは発生しない。`repeats` 回の
-        // カーネル内反復は `dst[i] = src[i] + 1.0f` を毎回同じ入力に対して
-        // 計算し直すだけなので数値的にも安全（`src` は不変・`dst` は毎回
-        // 同じ値へ上書きされる）。
+        // カーネル内反復は `a`/`b` を読み出し役・書き込み役として交互に
+        // 入れ替えるだけで、各反復内では常に一方から読み一方へ書く
+        // （同一反復内での読み書き対象は別バッファのため read-after-write
+        // ハザードはない。`BW_COPY_F32` ドキュメンテーションコメント参照）。
         unsafe {
             stream
                 .launch_builder(func)
-                .arg(&src)
-                .arg(&mut dst)
+                .arg(&mut a)
+                .arg(&mut b)
                 .arg(&n_i)
                 .arg(&repeats_i)
                 .launch(cfg)
