@@ -46,6 +46,20 @@
 #           現れない複合マッピングは唯一の許容形検査（行内 `key:` 一致）を素通りする。
 #           `?` インジケータ自体が通常の workflow ファイルでは使われないため、
 #           出現した時点で無条件に違反とする
+#        c. 複数行にまたがる二重引用スカラー（イシュー #472 P0 codex-review 再指摘）。
+#           `RUNNER_KEY_PATTERN`／`ESCAPED_QUOTED_KEY_PATTERN` はいずれも行単位で
+#           照合するため、`"runs-\` \n `on": ubuntu-latest-8-cores` のように
+#           double-quoted scalar を行継続（末尾 `\` によるエスケープ改行）や折り畳み
+#           改行で複数行に分割したキーは、各行単体では完全なキーもエスケープ付き
+#           引用キーも現れず素通りする。意味解析（複数行の連結・エスケープ解決）は
+#           行わず、代わりに「行頭（インデント除く）が `"` で始まり、かつその行の
+#           `"` 出現数が奇数」であること（＝キー位置の二重引用スカラーがその行で
+#           閉じきらず次行へまたがっている）自体を異常な表記として検出し無条件に
+#           違反とする。行頭 `"` に絞るのは `run: |` ブロックスカラー内のシェル
+#           スクリプト（`result="${pair#*:}"`・`echo "..."` 等、行頭は `"` にならず
+#           `"` の出現数も通常偶数）を誤検出しないため（本リポの実 workflow
+#           ファイルで実測確認済み）。本スクリプト self-test の clean fixture で
+#           回帰を検証する
 #
 # 例外の扱い（意図的に検査対象外となる構成。.claude/rules/ci.md「codex-review」節）:
 #   codex-review wrapper の codex 実行ジョブは runner-label を非指定とし reusable
@@ -88,6 +102,10 @@ ESCAPED_QUOTED_KEY_PATTERN='"[^"]*\\[^"]*" *:'
 #    本リポの workflow ファイルでは使用実績がなく、fail-closed 側に倒すことを優先し
 #    区別しない。
 EXPLICIT_KEY_INDICATOR_PATTERN='^[[:space:]]*\?([[:space:]]|$)'
+# c. 複数行にまたがる二重引用スカラーの検出には固定の正規表現では対応できない
+#    （「奇数個の `"`」は行単位の集計が必要なため、grep -E の 1 パターンには
+#    落とし込めない）。check_workflow_text 内で行ごとに `"` の出現数を数えて判定する
+#    （上記コメント方針 3-c 参照）。
 
 usage() {
   echo "usage: $0 {check|self-test}" >&2
@@ -152,6 +170,33 @@ check_workflow_text() {
   if [ -n "${explicit_key_lines}" ]; then
     echo "::error::${label} に YAML 明示キー形式（'?' インジケータ）が見つかりました（キーと値が別行の複合マッピングは唯一の許容形検査を素通りしうるため、出現した時点で無条件に違反とします）:" >&2
     echo "${explicit_key_lines}" >&2
+    failed=1
+  fi
+
+  # c. 複数行にまたがる二重引用スカラーの検出（上記コメント方針 3-c 参照）。
+  #    YAML の block mapping ではキーは行頭（インデント除く）に置かれるため、
+  #    「行頭（空白除く）が `"` で始まる」行に絞ったうえで `"` の出現数を数え、
+  #    奇数個であれば「この行でキーの二重引用スカラーが閉じきらず次行以降へ
+  #    またがっている」証跡として違反にする。`run: |` 等のブロックスカラー内の
+  #    シェルスクリプトは通常キー位置ではなく行頭が `"` にならない（例:
+  #    `result="${pair#*:}"`・`echo "..."`）ため、この絞り込みで誤検出しない
+  #    （本リポの実 workflow ファイルで実測確認済み）。行番号付きで報告するため
+  #    grep ではなく行単位ループで数える。
+  local multiline_quote_lines=""
+  local ln=0
+  local qcount
+  while IFS= read -r line; do
+    ln=$((ln + 1))
+    if [[ "${line}" =~ ^[[:space:]]*\" ]]; then
+      qcount=$(grep -o '"' <<<"${line}" | wc -l)
+      if [ $((qcount % 2)) -ne 0 ]; then
+        multiline_quote_lines+="${ln}:${line}"$'\n'
+      fi
+    fi
+  done <<<"${stripped}"
+  if [ -n "${multiline_quote_lines}" ]; then
+    echo "::error::${label} に複数行にまたがる二重引用スカラー（引用符の数が奇数の行）が見つかりました（行末バックスラッシュによる行継続でキーを分割し検査を迂回しうるため、意味解析せず無条件に違反とします）:" >&2
+    echo -n "${multiline_quote_lines}" >&2
     failed=1
   fi
 

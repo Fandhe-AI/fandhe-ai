@@ -48,3 +48,15 @@ jobs:
     ? runs-on
     : ubuntu-latest-8-cores
     timeout-minutes: 5
+
+  # 複数行にまたがる二重引用スカラーでの迂回パターン（イシュー #472 P0 codex-review
+  # 再指摘）。YAML の double-quoted scalar は末尾の `\`（バックスラッシュ）で行を
+  # エスケープ改行でき、`"runs-\` \n `on": ...` は折り畳みなしで連結され
+  # "runs-on" キーとして解釈されうる。各行単体では RUNNER_KEY_PATTERN の完全な
+  # キーも ESCAPED_QUOTED_KEY_PATTERN の同一行エスケープ引用キーも現れないため、
+  # 行単位の照合だけでは素通りする。値も self-hosted を含まないため、未知のキー
+  # 表記検査（二重引用符の出現数が奇数の行）で fail するはず。
+  multiline-quoted-key-bypass:
+    "runs-\
+on": ubuntu-latest-8-cores
+    timeout-minutes: 5
