@@ -81,9 +81,9 @@
 # 暗黙の前提のまま検証されないリスクがある。本ジョブはその前提自体を機械検査に変える。
 #
 # build ジョブ（TASK-2.1b・イシュー #50）は「両プラットフォームで cargo build が green」
-# という受け入れ条件に対応する。macOS 側 self-hosted runner は未登録（repo レベル runner
-# 0 件・既存ジョブは全て Linux self-hosted 上で実行）であり、GitHub ホステッド
-# macos-latest は使用禁止（.claude/rules/ci.md）のため、macOS 検証は Linux runner 上の
+# という受け入れ条件に対応する。本ワークフローは macOS runner を一切使用せず全ジョブ
+# ubuntu-latest 上で実行する構成のため（macos-latest 採否自体は #457 Phase 2 の枠外・
+# 未検討。billing 等の追加考慮が必要）、macOS 検証は Linux runner 上の
 # `aarch64-apple-darwin` クロスターゲットビルドで代替する。`cargo build --lib` は
 # リンカを起動しないため、macOS SDK が無い Linux 上でも `cfg(target_os = "macos")` が
 # 有効化され、objc2 / objc2-foundation / objc2-metal を含む Metal 有効経路のコンパイル
@@ -103,7 +103,7 @@
 # 成立する）。`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する
 # 理由は docs/backend-metal-real-device-testing.md 参照（bench-harness の
 # dev-dependencies 経由で criterion → alloca を引き込み、macOS クロスコンパイラ非搭載の
-# self-hosted runner ではネイティブ C ビルドが失敗するため）。
+# Linux runner ではネイティブ C ビルドが失敗するため）。
 #
 # guardrail-regression ジョブ（TASK-6.1a・イシュー #147）は、guardrail 判定器の 2 層検証
 # （REQ-4「判定器単体」・REQ-5「除外適用後」）を push/PR 契機で実行する。検証ロジックは
@@ -267,7 +267,7 @@ jobs:
       # TASK-1.8e（イシュー #42）: backend-metal の #[ignore] 実機テスト（tests/）を
       # aarch64-apple-darwin で型検査する。`--workspace --all-targets` は
       # bench-harness の dev-dependencies 経由で criterion → alloca を引き込み、
-      # macOS クロスコンパイラ非搭載の self-hosted runner では alloca のネイティブ
+      # macOS クロスコンパイラ非搭載の Linux runner では alloca のネイティブ
       # C ビルドが `cc: unrecognized option '-arch'` で失敗することを実測したため、
       # `-p backend-metal --tests` に限定する（bench-harness は backend-metal の
       # dev-dependencies 経由では [dependencies] のみが解決され criterion を含まない。
