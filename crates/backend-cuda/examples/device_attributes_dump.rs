@@ -117,10 +117,15 @@ fn compile_bw_copy(device: &CudaDevice, arch: &str) -> Result<CudaFunction, Cuda
 /// `n` 要素（f32）の src/dst バッファに対して `bw_copy_f32` を
 /// `bench_harness::run`（warmup 20 回・計測 20 回以上・中央値/Q1/Q3。
 /// `.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」の下限を
-/// 満たす）で計測し、中央値秒を返す。バッファの初期値は帯域計測の
-/// 正当性に無関係（読み出し値をそのまま書き戻すだけ）のため
-/// `alloc_zeros` で確保し、ホスト⇔デバイス転送は計測区間の外・かつ
-/// ループ外に置く（`cuda_floor_bench.rs` と同じ「計測境界の統一」方針）。
+/// 満たす）で計測する。1 サンプルは `BW_LAUNCH_REPEATS` 回連続起動 + 1 回
+/// 同期のため、返す秒数は計測した中央値を `BW_LAUNCH_REPEATS` で割った
+/// **起動 1 回あたり**の正規化値（`bandwidth_gbps` が前提とする「1 回の
+/// 起動で 2N 要素分のトラフィック」という単位に揃えるため。定数
+/// `BW_LAUNCH_REPEATS` のドキュメンテーションコメント参照）。バッファの
+/// 初期値は帯域計測の正当性に無関係（読み出し値をそのまま書き戻すだけ）
+/// のため `alloc_zeros` で確保し、ホスト⇔デバイス転送は計測区間の外・
+/// かつループ外に置く（`cuda_floor_bench.rs` と同じ「計測境界の統一」
+/// 方針）。
 fn measure_bandwidth_secs(
     device: &CudaDevice,
     func: &CudaFunction,
