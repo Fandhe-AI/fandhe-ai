@@ -72,22 +72,53 @@ extern "C" __global__ void probe_setmaxnreg_dec(
 }
 "#;
 
-/// `setmaxnreg.dec` → 計算 → `setmaxnreg.inc` の往復パターン
-/// （CUTLASS の `warpgroup_reg_dealloc`/`warpgroup_reg_alloc` に相当する
-/// 使い方を模す。producer/consumer warp specialization の典型形）。
+/// `setmaxnreg.dec`／`setmaxnreg.inc` を producer/consumer warpgroup で
+/// 非対称に発行するパターン（CUTLASS の `warpgroup_reg_dealloc`/
+/// `warpgroup_reg_alloc` に相当する使い方を模す。producer/consumer warp
+/// specialization の典型形。以前の実装は全 warp が dec→inc を順に実行する
+/// 対称往復のみだったため producer/consumer 間の非対称レジスタ再配分を
+/// 検証できておらず、イシュー #484 レビュー指摘で本構成に修正した）。
+///
+/// PTX ISA 上 `setmaxnreg` は warpgroup（連続 128 スレッド）単位で全
+/// スレッドが同一命令列を実行することを要求する（本ファイル冒頭コメント）
+/// ため、producer/consumer の非対称性は同一 warpgroup 内の warp 間では
+/// 表現できず、**warpgroup 単位**で表現する。本カーネルは 1 ブロック =
+/// 2 warpgroup（256 スレッド。[`PRODUCER_CONSUMER_BLOCK_DIM`]）で起動し、
+/// `threadIdx.x / 128`（warpgroup ごとに値が揃うため分岐は warpgroup 内で
+/// 収束する）で判定した warpgroup 0 を producer（`setmaxnreg.dec` のみを
+/// 発行してレジスタ予算を解放する側）、warpgroup 1 を consumer
+/// （`setmaxnreg.inc` のみを発行して producer が解放した分を確保する側）
+/// とする。
+///
+/// dec/inc の値（24 / 232。8 の倍数・[24, 256] の許容範囲内）は、
+/// `__launch_bounds__(256)`（カーネル宣言に付与）によりコンパイラの
+/// ベースライン割り当てをブロック内 256 スレッド構成に対してヒントした
+/// うえで CUTLASS の一般的な producer/consumer 値域を踏襲したものであり、
+/// **正確なベースライン register/thread 数を本プローブが確定できているわけ
+/// ではない**（`--maxrregcount` 等の明示指定は行っていない）。したがって
+/// `.dec`/`.inc` が要求するレジスタ予算総量が実際に成立するかは本プローブ
+/// の実測（`try_load_and_run` の launch/synchronize 失敗捕捉。本ファイル
+/// 冒頭「使えないという結論も spike の正当な成果」）に委ねる。失敗時は
+/// 「命令自体が拒否された」（真の不可）と「本プローブの値の組み合わせが
+/// このベースラインでは不成立だった」（値の再選定が必要）を区別できない
+/// 点を `docs/cuda-tensor-core-design.md` への転記時に明記すること。
 const PROBE_SETMAXNREG_INCDEC: &str = r#"
-extern "C" __global__ void probe_setmaxnreg_incdec(
+extern "C" __global__ void __launch_bounds__(256) probe_setmaxnreg_incdec(
     const float* __restrict__ in,
     float* __restrict__ out,
     int n)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    asm volatile("setmaxnreg.dec.sync.aligned.u32 64;");
+    int warpgroup_id = threadIdx.x / 128;
+    if (warpgroup_id == 0) {
+        asm volatile("setmaxnreg.dec.sync.aligned.u32 24;");
+    } else {
+        asm volatile("setmaxnreg.inc.sync.aligned.u32 232;");
+    }
     float v = 0.0f;
     if (idx < n) {
         v = in[idx] * 2.0f;
     }
-    asm volatile("setmaxnreg.inc.sync.aligned.u32 128;");
     if (idx < n) {
         out[idx] = v;
     }
@@ -96,8 +127,8 @@ extern "C" __global__ void probe_setmaxnreg_incdec(
 
 /// [`PROBE_SETMAXNREG_DEC`] から `asm volatile("setmaxnreg.dec...")` の
 /// 1 行だけを除いた対照カーネル（それ以外はバイト単位で同一）。
-/// （[`CONTROL_INCDEC`] は dec/inc の 2 行を除いた対照カーネルであり、
-/// 除く行数が異なる点に注意）。
+/// （[`CONTROL_INCDEC`] は `PROBE_SETMAXNREG_INCDEC` の warpgroup 分岐
+/// ごと asm 2 行を除いた対照カーネルであり、除く内容が異なる点に注意）。
 ///
 /// `compile_ptx` の失敗は「`setmaxnreg` 命令自体が拒否された」以外に、
 /// `libnvrtc` 不在（`CudaError::NvrtcUnavailable`）や include パス解決
@@ -120,6 +151,10 @@ extern "C" __global__ void control_dec(
 "#;
 
 /// [`PROBE_SETMAXNREG_INCDEC`] の対照カーネル（[`CONTROL_DEC`] と同じ目的）。
+/// `warpgroup_id` による producer/consumer 分岐と両方の `asm volatile`
+/// （dec・inc）を除いた点以外は [`PROBE_SETMAXNREG_INCDEC`] と同一の
+/// 計算・書き込みを行う（同一ブロック次元 [`PRODUCER_CONSUMER_BLOCK_DIM`]
+/// で起動することを前提とする）。
 const CONTROL_INCDEC: &str = r#"
 extern "C" __global__ void control_incdec(
     const float* __restrict__ in,
@@ -141,13 +176,21 @@ extern "C" __global__ void control_incdec(
 /// warpgroup 単位の命令のため、ここが 128 の倍数からずれると一部 warp が
 /// 命令列から欠落し未定義動作になる（`gemm.rs::WMMA_TF32_BLOCK_DIM` と
 /// 同じ「ホスト側ブロック次元とカーネル内命令の 1:1 対応」契約）。
+/// [`PROBE_SETMAXNREG_DEC`]／[`CONTROL_DEC`]（1 warpgroup のみで完結する
+/// 片道パターン）に用いる。
 const WARPGROUP_BLOCK_DIM: (u32, u32, u32) = (128, 1, 1);
 
-fn launch_config(n: u32) -> LaunchConfig {
-    let grid_x = n.div_ceil(WARPGROUP_BLOCK_DIM.0);
+/// producer/consumer 2 warpgroup 分のブロック次元（256 スレッド = 8 warp）。
+/// [`PROBE_SETMAXNREG_INCDEC`] は `threadIdx.x / 128` が 0 の warpgroup を
+/// producer（dec）・1 の warpgroup を consumer（inc）として扱うため、1
+/// ブロックに必ず 2 warpgroup（256 スレッド）を割り当てる。
+const PRODUCER_CONSUMER_BLOCK_DIM: (u32, u32, u32) = (256, 1, 1);
+
+fn launch_config(n: u32, block_dim: (u32, u32, u32)) -> LaunchConfig {
+    let grid_x = n.div_ceil(block_dim.0);
     LaunchConfig {
         grid_dim: (grid_x, 1, 1),
-        block_dim: WARPGROUP_BLOCK_DIM,
+        block_dim,
         shared_mem_bytes: 0,
     }
 }
@@ -221,10 +264,17 @@ fn try_compile(
 /// こと。対照カーネル〈`CONTROL_DEC`/`CONTROL_INCDEC`〉や
 /// arch-accelerated 版のコンパイル確認専用ラベル
 /// 〈`..._arch_accelerated`〉は本関数へは渡さない＝実行しない）。
+///
+/// `block_dim` は呼び出し元が `src` の warpgroup 構成に合わせて指定する
+/// （[`WARPGROUP_BLOCK_DIM`]＝1 warpgroup／[`PRODUCER_CONSUMER_BLOCK_DIM`]
+/// ＝producer・consumer 2 warpgroup）。`n`（256 要素固定）は
+/// [`PRODUCER_CONSUMER_BLOCK_DIM`] でも 1 ブロックに収まり producer・
+/// consumer 双方の warpgroup が確実に起動される値として選んでいる。
 fn try_load_and_run(
     device: &CudaDevice,
     label: &str,
     ptx: cudarc::nvrtc::Ptx,
+    block_dim: (u32, u32, u32),
     expected: impl Fn(f32) -> f32,
 ) {
     let n: u32 = 256;
@@ -261,7 +311,7 @@ fn try_load_and_run(
         .alloc_zeros::<f32>(n as usize)
         .expect("alloc_zeros must succeed on CUDA-equipped test runner");
 
-    let cfg = launch_config(n);
+    let cfg = launch_config(n, block_dim);
     let n_i = n as i32;
 
     // SAFETY: カーネル引数（in_dev/out_dev/n_i）はホスト側で確保・検証済み
@@ -369,7 +419,13 @@ fn setmaxnreg_dec_probe() {
         CONTROL_DEC,
         arch,
     ) {
-        try_load_and_run(&device, "probe_setmaxnreg_dec", ptx, |x| x + 1.0);
+        try_load_and_run(
+            &device,
+            "probe_setmaxnreg_dec",
+            ptx,
+            WARPGROUP_BLOCK_DIM,
+            |x| x + 1.0,
+        );
     }
 
     // 参考追試: arch-accelerated 版（`compute_XYa`）が NVRTC に受理される
@@ -383,13 +439,14 @@ fn setmaxnreg_dec_probe() {
     );
 }
 
-/// `setmaxnreg.dec` → 計算 → `setmaxnreg.inc` の往復パターンの実機プローブ
-/// （producer/consumer warp specialization の典型形を模す）。
+/// producer warpgroup が `setmaxnreg.dec`、consumer warpgroup が
+/// `setmaxnreg.inc` を発行する非対称パターン（[`PROBE_SETMAXNREG_INCDEC`]
+/// 参照）の実機プローブ。
 ///
 /// `setmaxnreg_dec_probe` と同様、`device.arch()` に加え arch-accelerated
 /// 版（`<arch>a`）でのコンパイル受理可否も追試する。B-3
 /// （タイル拡大時のレジスタ予算設計）が引き継ぐのは producer/consumer
-/// 往復パターン（本テスト）側であり、`setmaxnreg.dec` 単体（片道）版より
+/// 非対称パターン（本テスト）側であり、`setmaxnreg.dec` 単体（片道）版より
 /// 情報価値が高いため、dec 版の拒否予測が的中した場合に備えてこちらでも
 /// 追試を欠かさない。
 #[test]
@@ -415,7 +472,13 @@ fn setmaxnreg_incdec_probe() {
         CONTROL_INCDEC,
         arch,
     ) {
-        try_load_and_run(&device, "probe_setmaxnreg_incdec", ptx, |x| x * 2.0);
+        try_load_and_run(
+            &device,
+            "probe_setmaxnreg_incdec",
+            ptx,
+            PRODUCER_CONSUMER_BLOCK_DIM,
+            |x| x * 2.0,
+        );
     }
 
     // 参考追試: arch-accelerated 版（`compute_XYa`）が NVRTC に受理される
