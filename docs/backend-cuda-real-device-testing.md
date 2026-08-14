@@ -11,7 +11,7 @@
 
 | 項目 | 値 |
 |------|-----|
-| ノード | `local.fandhe.spark-dbd9`（DGX Spark GB10） |
+| ノード | `<cuda-node>`（DGX Spark GB10。実ホスト名は `docs/real-hardware-verification-env.local.md` 参照） |
 | GPU | NVIDIA GB10（sm_121） |
 | compute capability（`CudaDevice::compute_capability()`） | (12, 1) |
 | arch（`CudaDevice::arch()`） | `compute_121` |
@@ -22,12 +22,12 @@
 | cargo | 1.97.0 (c980f4866 2026-06-30) |
 | 検証対象 commit | `720bf633e12471526a31dbe632a86bbe2150a8f4`（`.rev-stamp` 一致確認済み） |
 | 実施日 | 2026-08-10 |
-| GPU 占有状況（実行前後） | `utilization.gpu` 0%。常駐は ComfyUI（170MiB）・Kokoro TTS（870MiB）のみ（`nvidia-smi --query-compute-apps`） |
+| GPU 占有状況（実行前後） | `utilization.gpu` 0%。常駐サービス 2 プロセスのみ（実名・使用量はローカル版 `docs/real-hardware-verification-env.local.md` 参照。`nvidia-smi --query-compute-apps`） |
 
 ## 2. 実行コマンド
 
 ```sh
-ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
+ssh <cuda-node> 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture'
@@ -104,7 +104,7 @@ grep -rnE '^\s*#\[ignore' crates/backend-cuda/tests/*.rs | wc -l   # => 51
 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096` | fail（0.259/0.250 TFLOPS、tiled f32 1.187〜1.237 TFLOPS を下回る） | **ok**（8.92s） |
 
 いずれも GPU 占有状況を `nvidia-smi --query-compute-apps` で再確認したうえで直列再実行しており、常駐
-サービス（ComfyUI・Kokoro）以外のプロセスは介在していない。実機の性能・計測プロトコル自体の問題では
+サービス（実名はローカル版 `docs/real-hardware-verification-env.local.md` 参照）以外のプロセスは介在していない。実機の性能・計測プロトコル自体の問題では
 なく、**同一テストバイナリ内の並列実行による GPU 時間分割が原因**と判断する。コード変更は行っていない
 （テスト自体の並列度制御は本イシューのスコープ外。並列実行下での安定計測が必要な場合は別途 issue で
 `#[test]` の直列化属性付与を検討する。7 節参照）。
