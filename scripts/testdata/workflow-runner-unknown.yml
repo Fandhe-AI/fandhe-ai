@@ -2,6 +2,10 @@
 # self-hosted という語は含まないが、唯一の許容形（ubuntu-latest 完全一致）以外の
 # runner 宣言を含むため「唯一の許容形検査」で fail するはず（larger runner 名・
 # ブロックシーケンス形式のいずれも許容形と一致しないパースの取りこぼしを検証する）。
+#
+# 加えて、P0 codex-review 指摘（イシュー #472）に対応する「未知のキー表記検査」の
+# ネガティブケース（エスケープ付き二重引用キー・YAML 明示キー形式）も含む。値に
+# self-hosted／許容外 runner 名が現れなくても fail することを検証する。
 name: dummy
 
 jobs:
@@ -24,4 +28,23 @@ jobs:
   # コロン前空白（YAML としては同じく `runs-on` キー）での迂回パターン。
   space-before-colon-bypass:
     runs-on : ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  # エスケープを含む二重引用キーでの迂回パターン（イシュー #472 P0 codex-review
+  # 指摘）。`\x2D` は YAML の double-quoted scalar エスケープとしてハイフンに
+  # デコードされ、GitHub Actions からは "runs-on" キーとして解釈されうる一方、
+  # 字面には `runs-on` という部分文字列が現れないため「唯一の許容形検査」の
+  # RUNNER_KEY_PATTERN だけでは宣言として抽出できない。値も self-hosted を含まない
+  # ため、未知のキー表記検査（バックスラッシュ付き引用キー）で fail するはず。
+  escaped-key-bypass:
+    "runs\x2Don": ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  # YAML 明示キー形式（`? key` インジケータ）での迂回パターン（イシュー #472 P0
+  # codex-review 指摘）。キーと値が別行になり同一行に `key:` が現れないため
+  # 唯一の許容形検査の行内一致では検出できない。未知のキー表記検査（`?`
+  # インジケータの出現）で fail するはず。
+  explicit-key-bypass:
+    ? runs-on
+    : ubuntu-latest-8-cores
     timeout-minutes: 5

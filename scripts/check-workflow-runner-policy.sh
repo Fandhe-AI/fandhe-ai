@@ -30,6 +30,22 @@
 #      完全一致でなければ違反とする（larger runner 名・matrix/式展開
 #      `${{ ... }}`・ブロックシーケンス形式の値なし行は「未知の形」として違反側に倒す。
 #      パースの取りこぼしで fail-open にならない設計）
+#   3. 未知のキー表記検査（イシュー #472 P0 codex-review 指摘）: 正規表現による
+#      YAML 構文の完全な再実装（エスケープ・複合キー表記の意味解析）は避け、代わりに
+#      「本検査が安全に解釈できないキー表記が存在する」こと自体を検出して無条件に
+#      違反とする（許容形かどうかを判定できない＝違反、という fail-closed 側への
+#      倒し方。値を読み取れないので `ubuntu-latest` 判定を試みない）:
+#        a. バックスラッシュを含む二重引用キー（例: `"runs\x2Don": ...`）。YAML の
+#           double-quoted scalar は `\xHH`／`\uHHHH` 等のエスケープをデコードするため、
+#           キーの字面が `runs-on` 等と一致しなくても GitHub Actions からは一致した
+#           キーとして解釈されうる。エスケープの意味解析（デコード）はせず、
+#           「エスケープを含む引用キーが 1 つでも存在する」こと自体を通常の
+#           workflow では起こり得ない異常な表記として違反にする
+#        b. YAML の明示キー形式（`? key` インジケータ）。`? runs-on` \n
+#           `: ubuntu-latest-8-cores` のように、キーと値が別行かつキー行に `:` が
+#           現れない複合マッピングは唯一の許容形検査（行内 `key:` 一致）を素通りする。
+#           `?` インジケータ自体が通常の workflow ファイルでは使われないため、
+#           出現した時点で無条件に違反とする
 #
 # 例外の扱い（意図的に検査対象外となる構成。.claude/rules/ci.md「codex-review」節）:
 #   codex-review wrapper の codex 実行ジョブは runner-label を非指定とし reusable
@@ -56,6 +72,22 @@ ALLOWED_RUNNER_VALUE='ubuntu-latest'
 # 網羅で fail-closed を維持する。deps-policy.md の許容依存 8 区分に YAML パーサーは
 # 含まれない）。
 RUNNER_KEY_PATTERN='["'\''"]?(runs-on|runner-label|post-feedback-runner-label)["'\''"]? *:'
+
+# 未知のキー表記検査（イシュー #472 P0 codex-review 指摘）用パターン。
+# 「唯一の許容形検査」が読み取れる字面の宣言行を前提としているのに対し、この 2 つは
+# 本検査がそもそも安全に意味解析できない YAML 表記であることそのものを検出する
+# （検出できたら直ちに違反。デコードや意味解釈は行わない。上記コメント方針 3 参照）。
+#
+# a. バックスラッシュエスケープを含む二重引用キー: `"` で始まり `\` を含み `"` で
+#    閉じたのち任意個の空白を挟んで `:` が続く行。単純な文字列内バックスラッシュ
+#    （例: Windows パスを値として書く場合）は値側であって mapping key ではないため
+#    本パターン（`:` が直後に続くもの）には一致しない。
+ESCAPED_QUOTED_KEY_PATTERN='"[^"]*\\[^"]*" *:'
+# b. YAML 明示キー形式のインジケータ（`? key` の `?`）。行頭（前後の空白を許容）に
+#    `?` があり、その直後が空白または行末であるもの。フロー内 `?`（`{? a: b}` 等）は
+#    本リポの workflow ファイルでは使用実績がなく、fail-closed 側に倒すことを優先し
+#    区別しない。
+EXPLICIT_KEY_INDICATOR_PATTERN='^[[:space:]]*\?([[:space:]]|$)'
 
 usage() {
   echo "usage: $0 {check|self-test}" >&2
@@ -104,10 +136,29 @@ check_workflow_text() {
     fi
   fi
 
+  # 3. 未知のキー表記検査。上記コメント方針 3 参照。値が何であるかに関わらず、
+  #    本検査が安全に意味解析できないキー表記が 1 行でも存在すれば違反とする
+  #    （デコードして許容形か判定する、という経路を作らない）。
+  local escaped_key_lines
+  escaped_key_lines=$(echo "${stripped}" | grep -E "${ESCAPED_QUOTED_KEY_PATTERN}" || true)
+  if [ -n "${escaped_key_lines}" ]; then
+    echo "::error::${label} にエスケープを含む二重引用キーが見つかりました（YAML の \\xHH／\\uHHHH 等のエスケープはキー名を変えうるため、本検査では意味解析せず無条件に違反とします。.claude/rules/ci.md「runner」節）:" >&2
+    echo "${escaped_key_lines}" >&2
+    failed=1
+  fi
+
+  local explicit_key_lines
+  explicit_key_lines=$(echo "${stripped}" | grep -nE "${EXPLICIT_KEY_INDICATOR_PATTERN}" || true)
+  if [ -n "${explicit_key_lines}" ]; then
+    echo "::error::${label} に YAML 明示キー形式（'?' インジケータ）が見つかりました（キーと値が別行の複合マッピングは唯一の許容形検査を素通りしうるため、出現した時点で無条件に違反とします）:" >&2
+    echo "${explicit_key_lines}" >&2
+    failed=1
+  fi
+
   if [ "${failed}" -ne 0 ]; then
     return 1
   fi
-  echo "OK: ${label} は runner 契約（${ALLOWED_RUNNER_VALUE} 完全一致・self-hosted 不在）に適合"
+  echo "OK: ${label} は runner 契約（${ALLOWED_RUNNER_VALUE} 完全一致・self-hosted 不在・既知のキー表記のみ）に適合"
 }
 
 check() {
