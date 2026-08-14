@@ -71,3 +71,18 @@ on": ubuntu-latest-8-cores
   flow-mapping-multiline-quoted-key-bypass:
     x: { "runs-\
 on": ubuntu-latest-8-cores }
+
+  # フローマッピング開始点より手前に他のキーが同一行に存在する迂回パターン
+  # （イシュー #472 P0 codex-review 再指摘・Cursor Bugbot 同旨指摘
+  # 「Flow-mapping key bypass missed」）。上記
+  # flow-mapping-multiline-quoted-key-bypass の修正（行頭からの読み飛ばし対象に
+  # `{`／`,`／`[` を追加）は「行頭から連続する空白／`{`／`,`／`[` の直後が `"`」で
+  # あることを要求するため、`job: { name: test, "runs-\` のようにフロー
+  # マッピング開始点（`{`）より手前に `job:`・`name: test,` という他の内容が
+  # 同一行にあると、行頭からの連続性が破れ素通りする。値も self-hosted・
+  # 許容外 runner 名の字面を含まないため、非アンカー化した未知のキー表記検査
+  # （行中のどこであれ `{`／`,`／`[` の直後に `"` が来て、かつ `"` の出現数が
+  # 奇数）で fail するはず。
+  same-line-prefix-flow-mapping-multiline-quoted-key-bypass:
+    job: { name: test, "runs-\
+on": ubuntu-latest-8-cores }
