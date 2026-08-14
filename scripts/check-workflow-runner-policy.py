@@ -637,20 +637,29 @@ class _Parser:
         return result
 
     def parse_sequence_item(self, indent):
-        """カーソルが `-` の位置にある状態で 1 項目を読む。"""
+        """カーソルが `-` の位置にある状態で 1 項目を読む。
+
+        `- ` の直後がインデント付きネストブロック（マッピング／シーケンス）で
+        終わる場合、`-` 単独行（末尾が改行/EOF/コメント）と `- ` 空白付き行
+        （空白の後に改行/EOF/コメント）は同義でなければならない（YAML の
+        ブロックシーケンス仕様）。旧実装は `-` 単独行を無条件に null item と
+        みなし `parse_optional_nested_block` を呼ばずに return していたため、
+        `-` 単独行の直後にインデントされたマッピングが続く正当な workflow
+        YAML を誤って fail-closed で拒否していた（Cursor Bugbot 指摘
+        876ad41b-460f-4686-8abc-0706148f93e4・PR #626）。`skip_inline_spaces`
+        は空白が無くても no-op のため、両ケースを同一分岐に統合して対称に
+        扱う。
+        """
         if not (self.peekc() == "-" and self.peekc(1) in (" ", "\n", "")):
             raise YamlSubsetError(f"シーケンス項目 '-' が見つかりません（行 {self.line}）")
         self.getc()
-        if self.peekc() == " ":
-            self.skip_inline_spaces()
-            c = self.peekc()
-            if c in ("", "\n") or c == "#":
-                self.expect_end_of_line()
-                return self.parse_optional_nested_block(indent)
-            start_col = self.col
-            return self.parse_inline_node(start_col)
-        self.expect_end_of_line()
-        return None
+        self.skip_inline_spaces()
+        c = self.peekc()
+        if c in ("", "\n") or c == "#":
+            self.expect_end_of_line()
+            return self.parse_optional_nested_block(indent)
+        start_col = self.col
+        return self.parse_inline_node(start_col)
 
     def parse_inline_node(self, col):
         """`- ` の直後、同一行に続くノードを読む（圧縮マッピング記法が主用途）。"""

@@ -64,3 +64,18 @@ jobs:
         include:
           - "label: with colon"
           - 'single quoted: also with colon'
+
+  # ブロックシーケンス項目が `-` 単独行（末尾が改行）＋インデントされた
+  # ネストマッピングという形。Cursor Bugbot 指摘 876ad41b-460f-4686-8abc-
+  # 0706148f93e4（PR #626）: parse_sequence_item が `-` 単独行を無条件に
+  # null item とみなし parse_optional_nested_block を呼ばずに return して
+  # いたため、`- ` 空白付き＋改行（同義のはずの表記）とは非対称に、この形の
+  # 準拠 workflow YAML を誤って fail-closed で拒否していた。修正後は
+  # steps 配下のネストしたマッピングが正しく読み取れ pass することを検証する。
+  dash-only-nested-block:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      -
+        name: dash only nested step
+        run: echo "ok"
