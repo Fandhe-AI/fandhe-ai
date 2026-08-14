@@ -91,3 +91,17 @@ jobs:
     runs-on:
       ubuntu-latest
     timeout-minutes: 5
+
+  # 許容形は ubuntu-latest 単独ではなく、標準 GitHub ホステッドランナーの `-latest`
+  # ラベル集合（ubuntu-latest・macos-latest・windows-latest）である（PR #626
+  # codex-review P1 指摘: ubuntu-latest 完全一致のみへの限定は ci.md 冒頭「runner」節
+  # が許可する「ubuntu-latest 等の標準スペック」〈例: Metal 関連ジョブでの macOS
+  # 標準ランナー採用〉まで一律に遮断していた）。macos-latest・windows-latest も
+  # pass することを検証する。
+  macos-standard-runner:
+    runs-on: macos-latest
+    timeout-minutes: 5
+
+  windows-standard-runner:
+    runs-on: windows-latest
+    timeout-minutes: 5

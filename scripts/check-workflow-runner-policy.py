@@ -18,7 +18,7 @@
 # 依存の追加・更新はユーザー承認必須（.claude/rules/deps-policy.md・CLAUDE.md
 # Conventions）だが、本検査は自律運転（ユーザー承認待ち不可）の中断作業を引き継ぐ形で
 # 完成させる必要があり、承認を得られない以上は新規依存を前提にできない。そのため
-# 「唯一の許容形に一致しなければ違反」という fail-closed 方針をパーサー自体にも適用し、
+# 「許容形リストに一致しなければ違反」という fail-closed 方針をパーサー自体にも適用し、
 # 対応できない構文（アンカー・エイリアス・タグ・tab インデント・複合キー・複数
 # ドキュメント区切り `---` 等）は例外を送出して違反側へ倒す設計にすることで、
 # 依存を増やさずに PR #626 で指摘された表記トリック（下記 scripts/testdata/
@@ -28,14 +28,16 @@
 # ため、この範囲に閉じたパーサーで実用上十分と判断した（本ファイル冒頭コメントの
 # 対応範囲を参照）。
 #
-# 検査方針（fail-closed。許可リスト方式ではなく「唯一の許容形に一致しなければ違反」）:
+# 検査方針（fail-closed。許可リスト方式ではなく「許容形リストに一致しなければ違反」）:
 #   1. 禁止トークン検査: デコード後の全スカラー文字列（キー・値とも）に `self-hosted` が
 #      現れたら違反とする（コメントはパース時点で消えるため、コメント内の言及は
 #      自然に検査対象外になる）
-#   2. 唯一の許容形検査: キー名が runner 宣言（runs-on / runner-label /
+#   2. 許容形検査: キー名が runner 宣言（runs-on / runner-label /
 #      post-feedback-runner-label。前後空白を除去して照合）である全マッピングエントリを
-#      再帰走査で収集し、値が文字列 `ubuntu-latest` の完全一致でなければ違反とする
-#      （larger runner 名・式展開 `${{ ... }}`・配列・group 指定・null はすべて違反側）
+#      再帰走査で収集し、値が ALLOWED_RUNNER_VALUES（標準 GitHub ホステッドランナーの
+#      `-latest` ラベル集合。下記定数コメント参照）のいずれかとの完全一致でなければ
+#      違反とする（larger runner 名・式展開 `${{ ... }}`・配列・group 指定・null は
+#      すべて違反側）
 #   3. 構造の fail-closed: YAML パース失敗・ドキュメントがマッピングでない・対象
 #      ディレクトリ不在・対象ファイル 0 件は、スキップせず全て失敗として扱う
 #      （検査の空振りで green にならない設計）
@@ -835,9 +837,18 @@ def load_all(text):
     return [] if doc is None else [doc]
 
 
-# 唯一の許容形: runner 宣言の値はこの文字列との完全一致のみ許す
+# 許容形: runner 宣言の値はこの集合のいずれかとの完全一致のみ許す
 # （`ubuntu-latest-8-cores` 等の larger runner は前方一致でも不許可。ci.md「runner」節）。
-ALLOWED_RUNNER_VALUE = "ubuntu-latest"
+# 標準 GitHub ホステッドランナーの `-latest` ラベルに限定する（PR #626 の codex-review
+# P1 指摘: 旧実装は `ubuntu-latest` 単独の完全一致に限定しており、ci.md 冒頭「runner」節
+# が許可する「ubuntu-latest 等の標準スペック」〈例: macOS 標準ランナーを使う Metal 関連
+# ジョブの将来追加〉まで一律に違反として遮断していた）。バージョン固定ラベル
+# （`ubuntu-24.04`・`macos-14` 等）は本リポでの実使用実績がなく、GitHub 側の対応
+# バージョン変遷を記憶だけで列挙すると一覧が陳腐化するため意図的に含めない。追加が
+# 必要になった時点で本定数への明示的な拡張（レビュー必須）を行う設計とし、実機
+# self-hosted ジョブの将来追加（ci.md「実機依存」節）と同じ「許容形の意図的な拡張」
+# パターンに揃える。
+ALLOWED_RUNNER_VALUES = frozenset({"ubuntu-latest", "macos-latest", "windows-latest"})
 # runner 宣言と見なすキー名（runs-on に加え、reusable workflow への runner 指定入力
 # runner-label / post-feedback-runner-label 経由の逆戻りも検知対象とする）。
 RUNNER_KEYS = {"runs-on", "runner-label", "post-feedback-runner-label"}
@@ -862,10 +873,11 @@ def walk(node, path, violations, visited):
             key_label = key if isinstance(key, str) else repr(key)
             child_path = f"{path}.{key_label}" if path else str(key_label)
             if isinstance(key, str) and key.strip() in RUNNER_KEYS:
-                if not (isinstance(value, str) and value == ALLOWED_RUNNER_VALUE):
+                if not (isinstance(value, str) and value in ALLOWED_RUNNER_VALUES):
+                    allowed_repr = ", ".join(sorted(repr(v) for v in ALLOWED_RUNNER_VALUES))
                     violations.append(
-                        f"{child_path}: runner 宣言の値が唯一の許容形"
-                        f"（文字列 {ALLOWED_RUNNER_VALUE!r} 完全一致）ではありません: {value!r}"
+                        f"{child_path}: runner 宣言の値が許容形"
+                        f"（{allowed_repr} のいずれかとの完全一致）ではありません: {value!r}"
                     )
             # キー自体も走査する（文字列キー内の禁止トークン・複合キーの検知）。
             walk(key, f"{child_path}(key)", violations, visited)
@@ -910,17 +922,18 @@ def check_file(file_path):
 
 def report(label, violations):
     """1 ファイル分の判定結果を出力し、適合なら True を返す。"""
+    allowed_summary = "/".join(sorted(ALLOWED_RUNNER_VALUES))
     if violations:
         print(
             f"::error::{label} が runner 契約"
-            f"（{ALLOWED_RUNNER_VALUE} 完全一致・{BANNED_TOKEN} 不在。"
+            f"（{allowed_summary} のいずれかとの完全一致・{BANNED_TOKEN} 不在。"
             ".claude/rules/ci.md「runner」節）に違反しています:",
             file=sys.stderr,
         )
         for violation in violations:
             print(f"  - {violation}", file=sys.stderr)
         return False
-    print(f"OK: {label} は runner 契約（{ALLOWED_RUNNER_VALUE} 完全一致・{BANNED_TOKEN} 不在）に適合")
+    print(f"OK: {label} は runner 契約（{allowed_summary} のいずれかとの完全一致・{BANNED_TOKEN} 不在）に適合")
     return True
 
 

@@ -1,7 +1,8 @@
 # scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（イシュー #472）。
-# self-hosted という語は含まないが、唯一の許容形（文字列 ubuntu-latest 完全一致）以外の
-# runner 宣言を含むため「唯一の許容形検査」で fail するはず（larger runner 名・
-# ブロックシーケンス形式・式展開・キー表記の等価系のいずれも許容形と一致しない）。
+# self-hosted という語は含まないが、許容形リスト（ubuntu-latest・macos-latest・
+# windows-latest のいずれとも完全一致しない）以外の runner 宣言を含むため「許容形検査」
+# で fail するはず（larger runner 名・バージョン固定ラベル・ブロックシーケンス形式・
+# 式展開・キー表記の等価系のいずれも許容形と一致しない）。
 name: dummy
 
 jobs:
@@ -33,4 +34,12 @@ jobs:
   # 現れなくても、デコード後のキーは runs-on になるため検出され fail するはず。
   escaped-hex-key-bypass:
     "runs\x2Don": ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  # バージョン固定ラベルは意図的に許容形集合へ含めていない（scripts/
+  # check-workflow-runner-policy.py の ALLOWED_RUNNER_VALUES コメント参照）。
+  # 追加が必要になった時点でのレビュー必須な明示的拡張であることを、この
+  # fixture で fail 側に固定して検証する。
+  versioned-label-not-allowed:
+    runs-on: macos-14
     timeout-minutes: 5
