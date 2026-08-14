@@ -78,6 +78,22 @@ extern "C" __global__ void bw_copy_f32(const float* __restrict__ src, float* __r
 /// 持たない。一般的な occupancy 確保値として 256 を用いる）。
 const BW_BLOCK_THREADS: u32 = 256;
 
+/// 1 計測サンプルあたりのカーネル起動繰り返し回数。L2 常駐サイズの
+/// 小バッファはカーネル実行そのものが数マイクロ秒程度になり、
+/// `stream.synchronize()` 込みの 1 回計測ではカーネル起動・同期の
+/// オーバーヘッドが支配的になって帯域ではなくオーバーヘッドを測って
+/// しまう（イシュー #482 Review 指摘: RTX 3060 動作検証で
+/// `l2` 実効帯域〈190.42 GB/s〉が `global` 実効帯域〈324.26 GB/s〉を
+/// 下回った事象。L2 常駐コピーが global より遅いのは物理的にありえず、
+/// median_secs=6µs という極小区間では起動＋同期コストが支配的だった）。
+/// 同一バッファに対し `BW_LAUNCH_REPEATS` 回連続起動してから 1 回だけ
+/// `synchronize()` することで、起動・同期コストを繰り返し回数で償却し
+/// 実データ転送時間の比率を高める（`measure_bandwidth_secs` が返す秒数は
+/// 繰り返し回数で割った「起動 1 回あたり」の値）。global（256 MiB）側は
+/// 元々転送時間がオーバーヘッドを大きく上回るため実測値への影響は小さいが、
+/// 両区分で同一の計測境界を使うことで比較可能性を保つ。
+const BW_LAUNCH_REPEATS: u32 = 64;
+
 /// grid-stride ループでバッファ全体を確実にカバーしつつ、SM 数に応じて
 /// 十分な並列度（1 SM あたり複数ブロック）を確保するグリッド次元を返す。
 /// `n` 要素を `BW_BLOCK_THREADS` で割った必要ブロック数と、SM 数ベースの
@@ -122,19 +138,27 @@ fn measure_bandwidth_secs(
     };
 
     let measurement = bench_run(&MeasurementConfig::default(), || {
-        // SAFETY: `src`/`dst` は直前に `n` 要素で確保済みで `n_i == n`
-        // （usize→i32 変換は `n` が呼び出し元でバッファ確保に使った値と
-        // 同一のためオーバーフローしない）。カーネル側の grid-stride
-        // ループは `i < n` を毎回検査するため（`BW_COPY_F32` 定義参照）、
-        // 起動側のグリッド構成に関わらず OOB アクセスは発生しない。
-        unsafe {
-            stream
-                .launch_builder(func)
-                .arg(&src)
-                .arg(&mut dst)
-                .arg(&n_i)
-                .launch(cfg)
-                .expect("bw_copy_f32 launch must succeed on CUDA-equipped runner");
+        // `BW_LAUNCH_REPEATS` 回連続で起動してから 1 回だけ同期する
+        // （起動・同期オーバーヘッドの償却。定数のドキュメンテーション
+        // コメント参照）。
+        for _ in 0..BW_LAUNCH_REPEATS {
+            // SAFETY: `src`/`dst` は直前に `n` 要素で確保済みで `n_i == n`
+            // （usize→i32 変換は `n` が呼び出し元でバッファ確保に使った値と
+            // 同一のためオーバーフローしない）。カーネル側の grid-stride
+            // ループは `i < n` を毎回検査するため（`BW_COPY_F32` 定義参照）、
+            // 起動側のグリッド構成に関わらず OOB アクセスは発生しない。
+            // 同一 src/dst への繰り返し起動は `dst[i] = src[i] + 1.0f` を
+            // 毎回同じ入力に対して計算し直すだけなので数値的にも安全
+            // （`src` は不変・`dst` は毎回同じ値へ上書きされる）。
+            unsafe {
+                stream
+                    .launch_builder(func)
+                    .arg(&src)
+                    .arg(&mut dst)
+                    .arg(&n_i)
+                    .launch(cfg)
+                    .expect("bw_copy_f32 launch must succeed on CUDA-equipped runner");
+            }
         }
         // カーネル起動は非同期のため、`synchronize()` を計測区間（このクロージャ）
         // 内に含めないと `Instant` の計測が起動オーバーヘッドのみを捉え、実行完了を
@@ -147,7 +171,10 @@ fn measure_bandwidth_secs(
             .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    Ok(measurement.median_secs)
+    // `BW_LAUNCH_REPEATS` 回分の合計秒数を計測しているため、起動 1 回あたり
+    // （= `bandwidth_gbps` が前提とする 2N 要素分のトラフィック 1 回分）の
+    // 秒数へ正規化して返す。
+    Ok(measurement.median_secs / f64::from(BW_LAUNCH_REPEATS))
 }
 
 /// 2N 要素分（読み出し N・書き込み N）の f32 トラフィックから実効帯域
@@ -318,22 +345,36 @@ fn main() {
     // global より 1 桁小さい固定値へフォールバックする（fail-soft。
     // 属性ダンプ自体の失敗は上のセクションで既に可視化済みのため、ここでは
     // 帯域計測を継続する）。
-    let l2_n: usize = match l2_cache_bytes {
-        Some(bytes) if bytes > 0 => ((bytes as usize) / 4 / std::mem::size_of::<f32>()).max(1024),
+    let (l2_n, l2_size_is_fallback): (usize, bool) = match l2_cache_bytes {
+        Some(bytes) if bytes > 0 => (
+            ((bytes as usize) / 4 / std::mem::size_of::<f32>()).max(1024),
+            false,
+        ),
         _ => {
             println!(
                 "WARNING: L2_CACHE_SIZE attribute unavailable; falling back to a fixed small \
                  buffer size for the L2 measurement (result may not reflect actual L2 residency)."
             );
-            global_n / 16
+            (global_n / 16, true)
         }
     };
     match measure_bandwidth_secs(&device, &func, l2_n, sm_count) {
         Ok(secs) => {
             let gbps = bandwidth_gbps(l2_n, secs);
+            // `l2_size_is_fallback` の場合、バッファサイズは L2_CACHE_SIZE
+            // 実測値ではなく固定フォールバック値（`global_n / 16`）であり
+            // L2 常駐を保証しない。そのままラベル "l2:" で出力すると
+            // `docs/perf/sm121-device-attributes.md` の表へ誤って L2 実測値
+            // として転記される危険があるため（イシュー #482 Review 指摘）、
+            // ラベルを明確に区別し転記不可であることを明示する。
+            let label = if l2_size_is_fallback {
+                "l2_FALLBACK_SIZE_UNRELIABLE_DO_NOT_TRANSCRIBE"
+            } else {
+                "l2"
+            };
             println!(
-                "l2: n={l2_n} (src+dst={} bytes, L2_CACHE_SIZE={:?} bytes) median_secs={secs:.6} \
-                 bandwidth={gbps:.2} GB/s bytes_per_cycle={:.4}",
+                "{label}: n={l2_n} (src+dst={} bytes, L2_CACHE_SIZE={:?} bytes) \
+                 median_secs={secs:.6} bandwidth={gbps:.2} GB/s bytes_per_cycle={:.4}",
                 2 * l2_n * std::mem::size_of::<f32>(),
                 l2_cache_bytes,
                 bytes_per_cycle(gbps, clock_khz)

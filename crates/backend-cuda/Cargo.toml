@@ -6,6 +6,18 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[example]]
+# `cargo test --workspace`（Makefile の `test` ターゲット・CI の rust-ci
+# test ジョブが使うコマンド）は既定では example ターゲットの `test = false`
+# のため、`#[cfg(test)] mod tests` を持つ example はテストハーネスがビルド
+# されるだけで実行されない（`cargo test -p backend-cuda --example
+# device_attributes_dump` の明示指定時のみ実行される）。本 example が追加
+# した `bw_grid_dim`・`bandwidth_gbps`・`bytes_per_cycle` の単体テストを
+# CI で確実に実行するため `test = true` を明示する（イシュー #482 Review
+# 指摘）。
+name = "device_attributes_dump"
+test = true
+
 [dependencies]
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
