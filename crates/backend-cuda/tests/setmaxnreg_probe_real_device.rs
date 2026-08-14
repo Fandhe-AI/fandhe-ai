@@ -94,8 +94,10 @@ extern "C" __global__ void probe_setmaxnreg_incdec(
 }
 "#;
 
-/// [`PROBE_SETMAXNREG_DEC`] から `asm volatile("setmaxnreg...")` の 2 行だけ
-/// を除いた対照カーネル（それ以外はバイト単位で同一）。
+/// [`PROBE_SETMAXNREG_DEC`] から `asm volatile("setmaxnreg.dec...")` の
+/// 1 行だけを除いた対照カーネル（それ以外はバイト単位で同一）。
+/// （[`CONTROL_INCDEC`] は dec/inc の 2 行を除いた対照カーネルであり、
+/// 除く行数が異なる点に注意）。
 ///
 /// `compile_ptx` の失敗は「`setmaxnreg` 命令自体が拒否された」以外に、
 /// `libnvrtc` 不在（`CudaError::NvrtcUnavailable`）や include パス解決
@@ -317,8 +319,19 @@ fn try_load_and_run(
             );
         }
         Some((&x, &y)) => {
-            println!(
-                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} result=success \
+            // `result=success` は「命令が受理され実行が完走した」ことしか
+            // 意味しない。ここは実行が完走した *うえで* 出力が期待値と
+            // 一致しない＝レジスタ再配分によるデータ破壊が疑われる最も
+            // 危険なケースであり、`docs/cuda-tensor-core-design.md` への
+            // 転記運用（grep・人間による転記）で `result=success` のみを見て
+            // 「使用可」と誤読されるのを防ぐため、`result=corrupted` という
+            // 別ラベルで記録したうえで `panic`（テスト失敗）させる。
+            // 冒頭コメントの「命令の受理可否は panic させない」方針は
+            // コンパイル・ロード・起動・同期の失敗（=setmaxnreg 自体が拒否
+            // された）に限った例外であり、実行が完走したのに数値が壊れて
+            // いるケースまでは対象外とする。
+            panic!(
+                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} result=corrupted \
                  output_matches_expected=false sample_input={x} sample_output={y} \
                  sample_expected={}",
                 expected(x)
@@ -372,6 +385,13 @@ fn setmaxnreg_dec_probe() {
 
 /// `setmaxnreg.dec` → 計算 → `setmaxnreg.inc` の往復パターンの実機プローブ
 /// （producer/consumer warp specialization の典型形を模す）。
+///
+/// `setmaxnreg_dec_probe` と同様、`device.arch()` に加え arch-accelerated
+/// 版（`<arch>a`）でのコンパイル受理可否も追試する。B-3
+/// （タイル拡大時のレジスタ予算設計）が引き継ぐのは producer/consumer
+/// 往復パターン（本テスト）側であり、`setmaxnreg.dec` 単体（片道）版より
+/// 情報価値が高いため、dec 版の拒否予測が的中した場合に備えてこちらでも
+/// 追試を欠かさない。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10、compute capability 12.1 相当）必須。\
             実測記録は docs/cuda-tensor-core-design.md「setmaxnreg プローブ結果（#484）」節"]
@@ -385,6 +405,10 @@ fn setmaxnreg_incdec_probe() {
     );
 
     let arch = device.arch();
+    let arch_accelerated = format!("{arch}a");
+
+    // 素の compute_XY（本命シナリオ: arch-accelerated feature のため
+    // 拒否される可能性が高い）。
     if let Some(ptx) = try_compile(
         "probe_setmaxnreg_incdec",
         PROBE_SETMAXNREG_INCDEC,
@@ -393,4 +417,14 @@ fn setmaxnreg_incdec_probe() {
     ) {
         try_load_and_run(&device, "probe_setmaxnreg_incdec", ptx, |x| x * 2.0);
     }
+
+    // 参考追試: arch-accelerated 版（`compute_XYa`）が NVRTC に受理される
+    // かどうかも記録する（`setmaxnreg_dec_probe` と同型。実行までは行わず
+    // 受理可否のみ。受理された場合の実行検証は B-3 着手時に改めて設計する）。
+    let _ = try_compile(
+        "probe_setmaxnreg_incdec_arch_accelerated",
+        PROBE_SETMAXNREG_INCDEC,
+        CONTROL_INCDEC,
+        &arch_accelerated,
+    );
 }
