@@ -159,8 +159,8 @@ schema: `.github/codex/review-schema.json`）自体を変更する差分の評�
 手順 1（`git diff HEAD^1 HEAD` / `--name-status` による差分取得）・手順 2
 （`git cat-file -e HEAD^1:AGENTS.md` によるベースブランチ側 `AGENTS.md` の有無確認と、
 存在する場合の読み取り）を実行環境の制約（サンドボックス権限不足等）で完遂できなかった
-場合は、`review_completed: false` とし、`findings` は空配列、`summary` に失敗理由
-（実行できなかったコマンドとエラー内容）を具体的に書くこと。空の diff（変更なしと判定
+場合は、`review_completed: false` とし、`findings` と `resolved_threads` は空配列、
+`summary` に失敗理由（実行できなかったコマンドとエラー内容）を具体的に書くこと。空の diff（変更なしと判定
 できた場合）や `AGENTS.md` の不存在（`git cat-file -e` が正常に「存在しない」と判定
 できた場合。本リポジトリの現状）は失敗ではなく通常のレビュー結果として扱う（コマンド
 自体が実行できたかどうかで判定する。基準は本ファイルに埋め込み済みのため `AGENTS.md`
