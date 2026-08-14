@@ -22,7 +22,7 @@ Phase F の人間承認タスク（#577）のスコープであり、本ドキ�
 | CUDA f32 | `wmma_tf32`（Rust 側入口 `CudaGemm::run_wmma_tf32`／`CudaGemm::launch_wmma_tf32`〈`crates/backend-cuda/src/gemm.rs:657,1026`〉。NVRTC カーネル本体は opt 経路 `gemm_wmma_tf32_opt`〈`crates/backend-cuda/src/kernels_wmma_opt.rs:196`〉、基本版 `gemm_wmma_tf32`〈`crates/backend-cuda/src/kernels.rs:303`〉） | DGX Spark GB10 | PyTorch 2.13.0+cu130（同一 GB10 個体で #390 実機再計測） | 4096 が最小（25.64〜25.69%） | `docs/perf/cuda-floor-remeasurement.md`「実測結果（#390 実機実測・DGX Spark GB10・実施日 2026-08-10）」節（該当表は同ファイル 200〜233 行付近） |
 | CUDA f16 | `mma_f16`（`mma.sync` パイプライン。launch-only 計測へ境界統一済み。NVRTC カーネル本体 `gemm_mma_f16`〈`crates/backend-cuda/src/kernels_mma.rs:234`〉） | 同上 | 同上 | 2048 が最小（12.97%） | 同上 |
 | Metal f32 | **2 系列併記**（§2 参照）: (a) PoC-v2-4 旧 simdgroup カーネル・バッファ常駐前提の計測、(b) 現行 `gemm_simdgroup_tiled`〈`crates/backend-metal/src/shaders/gemm.metal:333`〉＋動的タイル選択入口 `MetalGemm::dispatch_auto`〈`crates/backend-metal/src/gemm.rs:245`〉・アップロード/readback 込みの計測 | Apple M4 Max | PyTorch 2.13.0 | 4096（系列 (a) の 23.2% が現行下限の分子。系列 (b) は対 PyTorch 比 未算出） | `docs/spec/03-poc/poc-v2-4-metal-gemm/README.md`「PyTorch MPS 比」表・`docs/perf/metal-gemm-dynamic-tile.md`「実測結果（イシュー #381・2026-08-10 実測）」「PoC-v2-4・REQ-8 との関係」節 |
-| Metal f16 | `gemm_f16`（simdgroup 経路。ベンチ入口 `examples/gemm_f16_bench.rs`〈`crates/backend-metal/src/shaders/gemm.metal:247` の `gemm_simdgroup_f16` カーネルを使用〉） | Apple M4 Max | PyTorch 2.13.0（MPS f16） | 4096 が最小（18.6%。2048 は 21.6%） | `docs/perf/metal-f16-vs-mps-f16.md`「実測結果（イシュー #383・実機実測済み）」節（該当行は同ファイル 157〜158 行付近） |
+| Metal f16 | `gemm_simdgroup_f16`（simdgroup 経路。MSL カーネル本体〈`crates/backend-metal/src/shaders/gemm.metal:247`〉。Rust 側計測入口 `MetalGemm::dispatch_f16_prepared_unverified`〈`crates/backend-metal/src/gemm.rs:421`〉、ベンチ入口 `examples/gemm_f16_bench.rs`〉） | Apple M4 Max | PyTorch 2.13.0（MPS f16） | 4096 が最小（18.6%。2048 は 21.6%） | `docs/perf/metal-f16-vs-mps-f16.md`「実測結果（イシュー #383・実機実測済み）」節（該当行は同ファイル 157〜158 行付近） |
 
 補足:
 
@@ -67,29 +67,40 @@ run 間ばらつきの一例としてのみ扱う）。
 
 ### 基準系列の決定（判断案）
 
-**基準系列は本ドキュメントでは確定しない**（系列 (a)・(b) いずれも単独では §4 の計測プロトコルを
-満たさないため）。
+**基準系列は本ドキュメントでは確定しない**。ただし系列 (a)・(b) は同列の理由で除外されるわけではない
+（「プロトコル適合性」と「再現性」は別問題として分けて扱う）:
+
+- 系列 (a)（PoC-v2-4・バッファ常駐前提）は §4 の計測プロトコルに**適合する**歴史的基準である
+  （§4「warmup 20 回以上・計測 20 回以上の中央値・Q1/Q3 を記録する（PoC-v2-1/3/4 はすべて本条件で
+  実施済み）」・「同期方式は『ホスト転送を伴わない完了待ち』で統一する」の双方を PoC-v2-4 計測時点で
+  満たしている。§2「同一カーネル（naive/tiled/simdgroup）で系列 (a) が系列 (b) を上回るのは…(a) は
+  バッファ常駐前提」の記述の通り、系列 (a) はホスト転送を計測区間外に置く構成である）。ただし現行
+  f32 API（`dispatch`／`dispatch_variant`／`dispatch_auto`／`dispatch_backend_auto`）には同型の
+  prepared（バッファ常駐）入口が存在しないため、**現時点では再計測により再現できない**（後述 2）。
+- 系列 (b)（現行 `dispatch_auto`・転送込み）は 1 ディスパッチごとに A・B アップロードと C readback を
+  計測区間に含む構成のため、単独では §4 の同期方式契約（「ホスト転送を伴わない完了待ち」。REQ-8 5 行・
+  全バックエンド共通で比較 2 系列の境界を揃えれば良いという相対規定ではない）を**満たさない**。
 
 理由:
 
-1. `docs/performance-targets.md` §4「計測プロトコル」は「同期方式は『ホスト転送を伴わない完了待ち』
-   で統一する」と定めており、これは REQ-8 5 行・全バックエンド共通の契約である（比較する 2 系列の
-   境界を揃えれば良いという相対的な規定ではない）。系列 (b)（現行 `dispatch_auto`）は 1 ディスパッチ
-   ごとに A・B アップロードと C readback を計測区間に含む構成のため、単独でこの契約を満たさない。
-   よって系列 (b) への一本化は §4 と整合しない。
+1. 系列 (b)（現行 `dispatch_auto`）は 1 ディスパッチごとに A・B アップロードと C readback を計測区間に
+   含む構成のため、単独で §4 の同期方式契約を満たさない。よって系列 (b) への一本化は §4 と整合しない。
 2. §4 準拠のバッファ常駐（ホスト転送を計測区間外に置く）計測入口は、Metal f16 側にはすでに存在する
    （`MetalGemm::dispatch_f16_prepared_unverified`〈`crates/backend-metal/src/gemm.rs:421`〉。
    `crates/backend-metal/examples/gemm_f16_bench.rs` のドキュメンテーションコメント「パディング・
    バッファ確保／アップロードは計測ループの外で 1 回だけ行い、計測対象はディスパッチ（エンコード＋
-   コマンドバッファ完了待ち）のみ」を参照）。一方 f32 側（`dispatch`／`dispatch_variant`／
-   `dispatch_auto`／`dispatch_backend_auto`）には同型の prepared 入口が存在せず、現行ベンチ入口
-   （`crates/backend-metal/examples/gemm_bench.rs`）を素朴に再実行しても §4 準拠の計測は再現できない。
+   コマンドバッファ完了待ち）のみ」を参照）。一方 f32 側には同型の prepared 入口が存在せず、現行
+   ベンチ入口（`crates/backend-metal/examples/gemm_bench.rs`）を素朴に再実行しても系列 (a) と同一の
+   計測境界を再現できない。これは系列 (a) 自体が §4 に不適合であることを示すものではなく、現行 API
+   での**再現性の問題**である。
 3. 既確定の下限（初期リリース 20%・最適化後 30%。分子 23.2% は系列 (a) 由来）は本ドキュメントでは
-   **変更しない**。以降の Metal f32 目標値の基準系列を確定するには、(i) f16 と同型の §4 準拠 prepared
-   ディスパッチ入口を f32 側にも用意したうえで PyTorch MPS 側も同一の転送除外境界で再計測するか、
-   (ii) §4 の計測プロトコル自体を正式な承認付き変更として改定するか、いずれかが前提となる。両者とも
-   コード変更・プロトコル改定を伴い本イシュー（ドキュメントの分母・分子突合のみ）のスコープ外であり、
-   別タスクとして切り出す。下限値への反映は従来どおり Phase F（#577・人間承認）で判断する。
+   **変更しない**。系列 (a) は §4 に適合する歴史的基準であり分子 23.2% の適格性は本整理により損なわれ
+   ないが、再現性の問題（理由 2）があるため以降の Metal f32 目標値の基準系列を確定するには、
+   (i) f16 と同型の §4 準拠 prepared ディスパッチ入口を f32 側にも用意したうえで PyTorch MPS 側も
+   同一の転送除外境界で再計測するか、(ii) §4 の計測プロトコル自体を正式な承認付き変更として改定するか、
+   いずれかが前提となる。両者ともコード変更・プロトコル改定を伴い本イシュー（ドキュメントの分母・
+   分子突合のみ）のスコープ外であり、別タスクとして切り出す。下限値への反映は従来どおり
+   Phase F（#577・人間承認）で判断する。
 
 ## §3 CPU 対象実機の決定と E-8 スイープ対象の確定
 
