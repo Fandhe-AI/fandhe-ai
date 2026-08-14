@@ -9,9 +9,11 @@
 # Cargo.toml 存在チェックのガードは不要。
 #
 # runs-on: public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #468）で
-# self-hosted から ubuntu-latest へ変更した（upstream との差分理由。.claude/rules/ci.md
-# update-external.yml 節）。secrets 経路（SUBMODULE_PAT フォールバック）・permissions・
-# persist-credentials・auto-merge 変数は本イシューでは不変（受け入れ条件）。
+# self-hosted から ubuntu-latest へ変更した（upstream との差分理由。組織 runner 方針の
+# public 側適用〈.claude/rules/ci.md『runner』節〉に従う。update-external.yml 節が定める
+# 「upstream をほぼ変更せず流用する」方針とは別軸の変更であり、その方針を破るものではない）。
+# secrets 経路（SUBMODULE_PAT フォールバック）・permissions・persist-credentials・
+# auto-merge 変数は本イシューでは不変（受け入れ条件）。
 name: Update external sources
 
 on:
