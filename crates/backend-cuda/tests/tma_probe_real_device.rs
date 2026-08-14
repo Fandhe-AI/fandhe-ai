@@ -72,6 +72,17 @@ use cudarc::driver::{DevicePtr, DevicePtrMut};
 
 use backend_cuda::CudaDevice;
 
+/// [`tma_nvrtc_compile_probe`]・[`tma_execution_probe`]・
+/// [`tma_execution_probe_cta`] が共通で試す arch の優先順位付きリスト
+/// （#483 受け入れ基準の判定基準「`compute_121` または
+/// `compute_121a`/`compute_121f` でコンパイル・実行成功」に対応）。
+///
+/// コンパイルプローブと実行プローブで別々に arch リストを持つと、
+/// 一方だけ更新してもう一方が古いまま残るドリフト（PR #634 codex-review
+/// 指摘: 実行プローブが `compute_121` 固定で代替 arch のみ成功する環境の
+/// 実行可能性を検証できない）が再発しうるため、単一の const へ集約する。
+const PROBE_ARCHS: [&str; 3] = ["compute_121", "compute_121a", "compute_121f"];
+
 /// TMA プローブの最小 inline PTX カーネル（NVRTC 向け）。`shared::cluster`
 /// スコープ版（[`TMA_PROBE_KERNEL_CTA`] は `shared::cta` スコープ版。
 /// 本ファイル冒頭コメント「cluster / cta 両スコープを probe する理由」
@@ -382,6 +393,49 @@ fn probe_compile(
     }
 }
 
+/// [`tma_execution_probe`]・[`tma_execution_probe_cta`] が実行対象の arch を
+/// 選ぶための共通ロジック（PR #634 codex-review 指摘対応）。
+///
+/// [`PROBE_ARCHS`] を優先順位（`compute_121` → `compute_121a` →
+/// `compute_121f`）どおりに試し、最初にコンパイル成功した arch を返す。
+/// `compute_121` が拒否され代替 arch のみが成功する環境でも、その arch で
+/// 実行可能性を検証できるようにする（#483 受け入れ基準の判定基準
+/// 「`compute_121` または `compute_121a`/`compute_121f` でコンパイル・実行
+/// 成功」に対応。本ファイル冒頭コメント「cluster / cta 両スコープを probe
+/// する理由」と同じ動機）。
+///
+/// 全 arch が失敗した場合は [`tma_nvrtc_compile_probe`] と同じ
+/// `variant=… arch=… result=failure detail=…` 形式で各 arch の失敗を記録
+/// してから、全エラーメッセージを連結した理由で `panic` する（実行プローブ
+/// 単独で見ても、どの arch が何のエラーで拒否されたか
+/// `docs/cuda-tensor-core-design.md` の記録表へ転記できるようにするため。
+/// silent green を許さない方針は変えない）。
+fn select_compiling_arch(variant: &'static str, kernel_src: &'static str) -> &'static str {
+    let mut failures: Vec<String> = Vec::new();
+    for arch in PROBE_ARCHS {
+        match backend_cuda::compile_ptx(kernel_src, arch) {
+            Ok(_ptx) => {
+                println!(
+                    "tma_compile_probe variant={variant} arch={arch} result=success (selected for execution probe)"
+                );
+                return arch;
+            }
+            Err(err) => {
+                println!(
+                    "tma_compile_probe variant={variant} arch={arch} result=failure detail={err:?}"
+                );
+                failures.push(format!("arch={arch} detail={err}"));
+            }
+        }
+    }
+    panic!(
+        "TMA probe kernel (variant={variant}) failed to compile for every arch in \
+         PROBE_ARCHS ({PROBE_ARCHS:?}); cannot select an arch to execute. Failures: \
+         {}",
+        failures.join("; ")
+    );
+}
+
 /// コンパイルプローブ本体（#483 受け入れ基準 1・2）。
 ///
 /// `compute_121`／`compute_121a`／`compute_121f` の 3 arch × cluster/cta
@@ -406,13 +460,12 @@ fn tma_nvrtc_compile_probe() {
         device.arch()
     );
 
-    let archs: [&'static str; 3] = ["compute_121", "compute_121a", "compute_121f"];
     let variants: [(&'static str, &'static str); 2] =
         [("cluster", TMA_PROBE_KERNEL), ("cta", TMA_PROBE_KERNEL_CTA)];
     let results: Vec<CompileProbeResult> = variants
         .into_iter()
         .flat_map(|(variant, kernel_src)| {
-            archs
+            PROBE_ARCHS
                 .into_iter()
                 .map(move |arch| probe_compile(variant, kernel_src, arch))
         })
@@ -464,17 +517,21 @@ unsafe impl cudarc::driver::DeviceRepr for TensorMapArg {}
 
 /// TMA 実行プローブ本体（#483 受け入れ基準 1）。
 ///
-/// [`tma_nvrtc_compile_probe`] がコンパイル成功と記録した arch（優先:
-/// `compute_121`）で [`TMA_PROBE_KERNEL`] をロードし、64x64 の f32 global
-/// テンソルから `(0,0)` 起点の 16x16 タイルを `cuTensorMapEncodeTiled` で
-/// 生成した `CUtensorMap` 経由で転送する。転送されたタイルをホストへ回収し
+/// [`select_compiling_arch`] で [`PROBE_ARCHS`]（`compute_121` →
+/// `compute_121a` → `compute_121f`）を順に試し、最初にコンパイル成功した
+/// arch で [`TMA_PROBE_KERNEL`] をロードし、64x64 の f32 global テンソルから
+/// `(0,0)` 起点の 16x16 タイルを `cuTensorMapEncodeTiled` で生成した
+/// `CUtensorMap` 経由で転送する。転送されたタイルをホストへ回収し
 /// ソース領域とのビット等値比較で検証する（純粋コピーのため許容誤差の
 /// 概念を持ち込まない = tolerance 変更なしの共通契約と整合。
-/// `.claude/rules/coding-rust.md`）。
+/// `.claude/rules/coding-rust.md`）。`compute_121` 固定だと、`compute_121`
+/// が拒否され代替 arch のみ成功する環境で実行可能性を確認できない
+/// （PR #634 codex-review 指摘対応）。
 ///
-/// `compute_121` でのコンパイル・ロードが失敗した場合は実行を試みず
-/// `.expect` で失敗を顕在化させる（コンパイルプローブが失敗を記録した
-/// 環境で実行プローブだけ silent green になることを避ける）。
+/// [`PROBE_ARCHS`] 全 arch でコンパイルが失敗した場合は実行を試みず
+/// [`select_compiling_arch`] 内の `panic` で失敗を顕在化させる
+/// （コンパイルプローブが失敗を記録した環境で実行プローブだけ silent
+/// green になることを避ける）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、sm_121）必須。実測記録は docs/cuda-tensor-core-design.md「TMA sm_121 プローブ」節"]
 fn tma_execution_probe() {
@@ -486,8 +543,10 @@ fn tma_execution_probe() {
 
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
-    let ptx = backend_cuda::compile_ptx(TMA_PROBE_KERNEL, "compute_121").expect(
-        "TMA probe kernel must compile for compute_121 (see tma_nvrtc_compile_probe record)",
+    let selected_arch = select_compiling_arch("cluster", TMA_PROBE_KERNEL);
+    let ptx = backend_cuda::compile_ptx(TMA_PROBE_KERNEL, selected_arch).expect(
+        "TMA probe kernel must compile for the arch select_compiling_arch just selected \
+         (recompiling here avoids threading a Ptx value out of the selection helper)",
     );
 
     // `cudarc::driver::safe::CudaModule`/`CudaFunction` は raw `CUmodule`/
@@ -661,8 +720,8 @@ fn tma_execution_probe() {
     );
 
     println!(
-        "tma_execution_probe arch=compute_121 result=success tile=16x16 global=64x64 \
-         bitwise_match=true"
+        "tma_execution_probe variant=cluster arch={selected_arch} result=success tile=16x16 \
+         global=64x64 bitwise_match=true"
     );
 
     // SAFETY: `cu_module` はこの時点で以降どこからも参照されない
@@ -678,20 +737,23 @@ fn tma_execution_probe() {
 ///
 /// [`tma_execution_probe`]（`shared::cluster` スコープ・[`TMA_PROBE_KERNEL`]）
 /// と対になる `shared::cta` スコープ版で、[`TMA_PROBE_KERNEL_CTA`] を
-/// `compute_121` でロードし同じ 64x64 → 16x16 タイル転送・ビット等値比較を
-/// 行う（本ファイル冒頭コメント「cluster / cta 両スコープを probe する
-/// 理由」参照）。`shared::cta` はクラスタ起動を要求しないため、
-/// [`tma_execution_probe`] のように raw `cuLaunchKernelEx` を使う必要はなく
-/// `cudarc::driver::result::launch_kernel`（`cuLaunchKernel` の薄い
+/// [`select_compiling_arch`] で [`PROBE_ARCHS`] から選んだ arch でロードし
+/// 同じ 64x64 → 16x16 タイル転送・ビット等値比較を行う（本ファイル冒頭
+/// コメント「cluster / cta 両スコープを probe する理由」参照）。
+/// `compute_121` 固定だと、`compute_121` が拒否され代替 arch のみ成功する
+/// 環境で実行可能性を確認できない（[`tma_execution_probe`] と同じ理由。
+/// PR #634 codex-review 指摘対応）。`shared::cta` はクラスタ起動を要求しない
+/// ため、[`tma_execution_probe`] のように raw `cuLaunchKernelEx` を使う必要
+/// はなく `cudarc::driver::result::launch_kernel`（`cuLaunchKernel` の薄い
 /// ラッパー）で起動する。ただし `cudarc::driver::safe::CudaModule` は
 /// 依然として raw `CUfunction` を公開しないため、モジュールロード自体は
 /// [`tma_execution_probe`] と同じ `cudarc::driver::result::module` 経路を
 /// 使う。
 ///
-/// `compute_121` でのコンパイル・ロードが失敗した場合は実行を試みず
-/// `.expect` で失敗を顕在化させる（[`tma_execution_probe`] と同じ方針。
-/// コンパイルプローブが失敗を記録した環境で実行プローブだけ silent green
-/// になることを避ける）。
+/// [`PROBE_ARCHS`] 全 arch でコンパイルが失敗した場合は実行を試みず
+/// [`select_compiling_arch`] 内の `panic` で失敗を顕在化させる
+/// （[`tma_execution_probe`] と同じ方針。コンパイルプローブが失敗を記録した
+/// 環境で実行プローブだけ silent green になることを避ける）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、sm_121）必須。実測記録は docs/cuda-tensor-core-design.md「TMA sm_121 プローブ」節"]
 fn tma_execution_probe_cta() {
@@ -703,9 +765,11 @@ fn tma_execution_probe_cta() {
 
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
-    let ptx = backend_cuda::compile_ptx(TMA_PROBE_KERNEL_CTA, "compute_121").expect(
-        "TMA probe kernel (cta variant) must compile for compute_121 \
-         (see tma_nvrtc_compile_probe record)",
+    let selected_arch = select_compiling_arch("cta", TMA_PROBE_KERNEL_CTA);
+    let ptx = backend_cuda::compile_ptx(TMA_PROBE_KERNEL_CTA, selected_arch).expect(
+        "TMA probe kernel (cta variant) must compile for the arch select_compiling_arch \
+         just selected (recompiling here avoids threading a Ptx value out of the \
+         selection helper)",
     );
 
     // SAFETY: [`tma_execution_probe`] の同名ステップと同じ契約
@@ -830,8 +894,8 @@ fn tma_execution_probe_cta() {
     );
 
     println!(
-        "tma_execution_probe_cta arch=compute_121 result=success tile=16x16 global=64x64 \
-         bitwise_match=true"
+        "tma_execution_probe_cta variant=cta arch={selected_arch} result=success tile=16x16 \
+         global=64x64 bitwise_match=true"
     );
 
     // SAFETY: [`tma_execution_probe`] の同名ステップと同じ契約
