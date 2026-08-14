@@ -8,12 +8,17 @@
 # scripts/testdata/ fixture + self-test サブコマンド + ci.yml ジョブと Makefile の共用）に
 # 従う。
 #
-# 検査本体は scripts/check-workflow-runner-policy.py（python3 + PyYAML）に分離してある。
+# 検査本体は scripts/check-workflow-runner-policy.py（python3 標準ライブラリのみ。
+# 追加依存なしの自前 YAML サブセットパーサー方式）に分離してある。
 # grep/パターン照合ではなく実 YAML パーサー方式を採るのは、PR #626 の codex-review で
 # テキスト照合ベースの旧実装が YAML 表記トリック（エスケープ済みキー `"runs-on"`・
 # 複数行 double-quoted キー・フローマッピング内キー・明示キー `?`・引用文字列内 `#` に
 # よるコメント切り捨て誤動作等）で迂回可能と P0/P1 指摘されたため。デコード後の構造に
 # 対して検査すれば表記揺れはパーサーが正規化し、パターン増築なしに構造的に遮断できる。
+# PyYAML 等の外部依存は使わない（イシュー #472 再開時の追加指摘。依存の追加はユーザー
+# 承認必須〈deps-policy.md〉であり、バージョン固定・導入ステップ・license-matrix 更新を
+# 伴わない「ubuntu-latest 標準搭載」前提は fail-closed の趣旨に反する。詳細・対応範囲は
+# .py 冒頭のパーサー方針コメントを参照）。
 # 検査方針（唯一の許容形 ubuntu-latest 完全一致・runs-on / runner-label /
 # post-feedback-runner-label を対象・codex-review の例外の扱い）の詳細は .py 冒頭を参照。
 #
@@ -28,9 +33,9 @@
 #              自体の退行を検出する（受け入れ条件「self-hosted 再導入で CI が fail
 #              する」の機械検証）
 #
-# fail-closed の前提: python3 または PyYAML が利用不可の場合は検査をスキップせず失敗
-# させる（GitHub ホステッドランナー〈ubuntu-latest〉には両者とも標準搭載。macOS
-# ローカルで PyYAML 不在なら `pip3 install pyyaml` で導入する）。
+# fail-closed の前提: python3 が利用不可の場合は検査をスキップせず失敗させる
+# （GitHub ホステッドランナー〈ubuntu-latest〉には標準搭載。外部パッケージの導入は
+# 一切不要）。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

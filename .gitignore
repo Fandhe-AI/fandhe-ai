@@ -29,3 +29,4 @@ _/
 # プレースホルダ化済み（イシュー #461）。実値は各自ローカルで
 # docs/real-hardware-verification-env.local.md.example をコピーして作成する。
 docs/real-hardware-verification-env.local.md
+__pycache__/

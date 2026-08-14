@@ -77,8 +77,9 @@
 # self-hosted → ubuntu-latest 移行（.claude/rules/ci.md「runner」節）の逆戻り防止の
 # ための fail-closed 契約検査である。scripts/check-workflow-runner-policy.sh
 # （Makefile の runner-policy ターゲットと共用する単一ソース。検査本体は
-# python3 + PyYAML の check-workflow-runner-policy.py。PR #626 レビュー指摘の
-# YAML 表記トリック迂回を実パーサー方式で遮断）経由で、.github/workflows/ 配下に
+# python3 標準ライブラリのみの check-workflow-runner-policy.py（追加パッケージ導入
+# 不要。PyYAML 等の外部依存を使わない理由は同ファイル冒頭コメント参照）。PR #626
+# レビュー指摘の YAML 表記トリック迂回を実パーサー方式で遮断）経由で、.github/workflows/ 配下に
 # self-hosted が再導入されていないこと、runner 宣言（runs-on / runner-label /
 # post-feedback-runner-label）が唯一の許容形（ubuntu-latest 完全一致）であることを
 # 検査する。deps-forbidden ジョブと同様、
@@ -480,9 +481,10 @@ jobs:
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
   # 移行完了した（.claude/rules/ci.md「runner」節）が、以後 self-hosted を再導入しても
   # 機械的に検知する仕組みがなかった。scripts/check-workflow-runner-policy.sh
-  # （Makefile の runner-policy ターゲットと共用する単一ソース。検査本体は python3 +
-  # PyYAML の check-workflow-runner-policy.py。ubuntu-latest に標準搭載のため追加導入
-  # ステップ不要）経由で、デコード後の YAML 構造に対する self-hosted 出現・唯一の
+  # （Makefile の runner-policy ターゲットと共用する単一ソース。検査本体は python3
+  # 標準ライブラリのみの check-workflow-runner-policy.py。追加パッケージ導入不要。
+  # PyYAML 等の外部依存を使わない理由は同ファイル冒頭コメント参照）経由で、デコード後の
+  # YAML 構造に対する self-hosted 出現・唯一の
   # 許容形（ubuntu-latest 完全一致）以外の runner 宣言を fail-closed で検査する
   # （PR #626 レビュー指摘の YAML 表記トリック迂回を実パーサー方式で遮断）。
   # cargo 不要のため rustup セットアップは行わない。
