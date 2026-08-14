@@ -48,16 +48,22 @@ Phase F の人間承認タスク（#577）のスコープであり、本ドキ�
 
 ### 「1024 以降 2.2〜2.4 TFLOPS プラトー」の帰属
 
-この値域は以下 2 箇所の実測に対応する（`docs/perf/metal-gemm-dynamic-tile.md` の該当節）:
+この値域は「候補構成別（size=2048 固定・協調ロード有無比較）」表の `staged` 系列にのみ対応する
+（`docs/perf/metal-gemm-dynamic-tile.md`「候補構成別」節）: `bm64_bn64_bk16_staged` 2.3572 TFLOPS・
+`bm32_bn32_bk16_staged` 2.4030 TFLOPS。
 
-- 「候補構成別（size=2048 固定・協調ロード有無比較）」表の `staged` 系列: `bm64_bn64_bk16_staged`
-  2.3572 TFLOPS・`bm32_bn32_bk16_staged` 2.4030 TFLOPS（同ファイル「候補構成別」表）
-- run2/run3（Appendix の再現性確認ラン）における `dynamic-tile-auto` の値域
+Appendix の再現性確認ラン（run2/run3）における `dynamic-tile-auto` の値は、この帰属の裏付けには
+**ならない**。run2 は size 1024/2048/4096 で 1.3981/2.4505/2.1868 TFLOPS、run3 は 1.3392/2.1593/2.4974
+TFLOPS であり、size=1024 はいずれも 1.3 TFLOPS 台でプラトー値域（2.2〜2.4 TFLOPS）の外にあるうえ、
+size=2048→4096 の傾向も run2（下降）と run3（上昇）で逆向きであり、両者は run 間で一貫した傾向を
+示さない。よって run2/run3 は「1024 以降 2.2〜2.4 TFLOPS プラトー」の根拠には含めない（正方形状の
+run 間ばらつきの一例としてのみ扱う）。
 
 一方、正方形状の canonical run1 系列（size 1024→2048→4096 で 1.2909→2.5001→3.0283 TFLOPS と
-**単調増加**）はこのプラトーを示さない。よって「1024 以降 2.2〜2.4 TFLOPS プラトー」は候補構成別
-の staged 系列（size=2048 固定でのパラメータ探索）と run2/run3 の再現ばらつきに由来するものであり、
-canonical run1 の正方形状スケーリングとは別系列である。A-7（#487）の定量診断はこの帰属を前提に行う。
+**単調増加**）もこのプラトーを示さない。よって「1024 以降 2.2〜2.4 TFLOPS プラトー」は候補構成別
+の staged 系列（size=2048 固定でのパラメータ探索）に限定された観測であり、canonical run1 の正方
+形状スケーリングとも run2/run3 の再現ばらつきとも別系列として扱う。A-7（#487）の定量診断はこの
+限定された帰属（staged 系列のみ）を前提に行う。
 
 ### 基準系列の決定（判断案）
 
@@ -65,8 +71,13 @@ canonical run1 の正方形状スケーリングとは別系列である。A-7�
 
 理由:
 
-1. 利用者が実際に観測するのは公開経路（`dispatch_auto`）であり、系列 (a) の旧カーネルは現行
-   コードベースに存在せず再計測できない。
+1. 利用者が実際に観測するのは公開経路（`dispatch_auto`）である。`gemm_naive`／`gemm_tiled`／
+   `gemm_simdgroup` カーネル自体は現行 `crates/backend-metal/src/shaders/gemm.metal`（43・85・154
+   行）に現存するが、現行のベンチ入口（`crates/backend-metal/examples/gemm_bench.rs`）は
+   `MetalGemm::dispatch_variant`／`dispatch_auto` 経由（1 ディスパッチごとに A・B アップロードと C
+   readback を含む）でのみ計測する構成であり、PoC-v2-4 が用いたバッファ常駐前提（アップロード
+   /readback を計測範囲外に置く）の計測ハーネス自体は現行コードベースに存在しない。よって系列 (a)
+   の数値は現行ベンチ入口を素朴に再実行しても再現できない（ハーネスの新規実装が必要）。
 2. REQ-8 は同一ハードウェア・同一計測境界での比較を前提とする（`docs/performance-targets.md`
    §4「計測プロトコル」）。系列 (a) と (b) の境界差は上表の通り無視できない。
 3. 既確定の下限（初期リリース 20%・最適化後 30%。分子 23.2% は系列 (a) 由来）は本ドキュメントでは
