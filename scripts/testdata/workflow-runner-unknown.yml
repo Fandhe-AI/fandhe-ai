@@ -13,3 +13,15 @@ jobs:
     runs-on:
       - custom-legacy-label
     timeout-minutes: 5
+
+  # 引用キー（YAML として同じ mapping key `runs-on` になる）で larger runner を
+  # 宣言する迂回パターン。素朴な `runs-on:`（非引用・コロン直後）一致だけでは
+  # 検出できず fail-open になりうる（イシュー #472 P1 codex-review 指摘）。
+  quoted-key-bypass:
+    "runs-on": ubuntu-latest-8-cores
+    timeout-minutes: 5
+
+  # コロン前空白（YAML としては同じく `runs-on` キー）での迂回パターン。
+  space-before-colon-bypass:
+    runs-on : ubuntu-latest-8-cores
+    timeout-minutes: 5

@@ -21,3 +21,14 @@ jobs:
   post-feedback:
     post-feedback-runner-label: ubuntu-latest
     timeout-minutes: 5
+
+  # 引用キー・コロン前空白でも同じ mapping key として解釈される有効な YAML 表記
+  # （イシュー #472 P1 codex-review 指摘）。値が ubuntu-latest 完全一致であれば
+  # これらの表記でも pass することを検証する。
+  quoted-key:
+    "runs-on": ubuntu-latest
+    timeout-minutes: 5
+
+  space-before-colon:
+    runs-on : ubuntu-latest
+    timeout-minutes: 5

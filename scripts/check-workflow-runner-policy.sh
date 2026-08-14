@@ -24,8 +24,10 @@
 #   1. 禁止トークン検査: 各行のコメント（# 以降）を除去した後 `self-hosted` の出現を
 #      違反とする
 #   2. 唯一の許容形検査: コメント除去後の `runs-on:`／`runner-label:`／
-#      `post-feedback-runner-label:` の宣言行を全て列挙し、値が `ubuntu-latest` の
-#      スカラー完全一致でなければ違反とする（larger runner 名・matrix/式展開
+#      `post-feedback-runner-label:`（引用キー `"runs-on":`／`'runs-on':`・コロン前
+#      空白 `runs-on :` 等の有効な YAML 表記の等価系を含む。イシュー #472 P1
+#      codex-review 指摘）の宣言行を全て列挙し、値が `ubuntu-latest` のスカラー
+#      完全一致でなければ違反とする（larger runner 名・matrix/式展開
 #      `${{ ... }}`・ブロックシーケンス形式の値なし行は「未知の形」として違反側に倒す。
 #      パースの取りこぼしで fail-open にならない設計）
 #
@@ -44,7 +46,16 @@ set -euo pipefail
 
 ALLOWED_RUNNER_VALUE='ubuntu-latest'
 # runner 宣言のキー名（コロン込み・行頭の空白は許容するため正規表現側で吸収する）。
-RUNNER_KEY_PATTERN='(runs-on|runner-label|post-feedback-runner-label):'
+# YAML の mapping key は素の識別子以外に引用キー（`"runs-on":` / `'runs-on':`）や
+# コロン前の空白（`runs-on :`）でも同じキーとして解釈される（イシュー #472 P1
+# codex-review 指摘）。これらは文字列としては非引用・コロン直後のパターンに一致
+# しないため、素朴な `key:` 一致だけでは fail-closed の前提（唯一の許容形以外は
+# 違反）を素通りしてしまう。キー名の前後に任意 1 文字の引用符（`"`／`'`）・
+# コロン前の空白を許容するよう拡張し、有効な YAML 表記の等価系をすべて宣言として
+# 検出する（本物の YAML パーサーを新規依存として導入しないため、正規表現側の
+# 網羅で fail-closed を維持する。deps-policy.md の許容依存 8 区分に YAML パーサーは
+# 含まれない）。
+RUNNER_KEY_PATTERN='["'\''"]?(runs-on|runner-label|post-feedback-runner-label)["'\''"]? *:'
 
 usage() {
   echo "usage: $0 {check|self-test}" >&2
