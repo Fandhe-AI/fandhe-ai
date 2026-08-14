@@ -277,17 +277,36 @@ fn main() {
             // 実測時に誤ってフォールバック版（基本 WMMA(TF32)）を
             // プロファイルする事故を防ぐため、opt カーネルの可用性を
             // 明示する（`cuda_floor_bench.rs` の先例と同じ判断）。
+            //
+            // `CudaGemm::launch_wmma_tf32` は opt カーネル未ロード時に基本
+            // カーネルへ自動フォールバックし（両方未ロードの場合のみ
+            // `CudaError::WmmaUnavailable` を返す。`gemm.rs::launch_wmma_tf32`
+            // 参照）、本バイナリはこの経路には依存しない。「単一経路・単一
+            // 形状のみを計測する」契約（モジュール冒頭ドキュメンテーション
+            // コメント参照）上、opt カーネル不在時に基本カーネルへ黙って
+            // フォールバックして計測を続けると、診断対象と異なるカーネルの
+            // ncu 結果を正常計測として生成してしまう（PR #637 codex-review
+            // 指摘）。加えて、もし opt・基本の両方が未ロードであれば
+            // フォールバック先の `launch_wmma_tf32` 自体が
+            // `CudaError::WmmaUnavailable` を返し、起動ループ側の `.expect()`
+            // が panic していた（`CudaDevice::new`／`CudaMmaGemm::new` が
+            // 徹底している fail-soft skip 方針に反する。PR #637 Cursor
+            // Bugbot 指摘）。よって opt カーネル不在時はフォールバック
+            // させず、起動ループへ入る前に非 0 終了せず早期 return して
+            // skip する（`cuda_floor_bench.rs` の環境非対応スキップと同じ
+            // 判断: panic ではなく理由を表示して終了する）。
             if gemm.wmma_tf32_opt_available() {
                 println!("wmma_tf32 opt kernel: AVAILABLE (used for this run's launches).");
             } else {
                 println!(
-                    "WARNING: wmma_tf32 opt kernel UNAVAILABLE ({}); launches in this run \
-                     silently fall back to the basic (non-optimized) WMMA(TF32) kernel, so ncu \
-                     results do NOT represent the opt-kernel data-reuse characteristics under \
-                     diagnosis.",
+                    "backend-cuda gemm_profile_target: wmma_tf32 opt kernel unavailable ({}); \
+                     skipping instead of falling back to the basic (non-optimized) WMMA(TF32) \
+                     kernel, because ncu results for the fallback kernel would not represent the \
+                     opt-kernel data-reuse characteristics under diagnosis.",
                     gemm.wmma_tf32_opt_unavailable_reason()
                         .unwrap_or("unknown reason")
                 );
+                return;
             }
 
             let a = rng.fill_vec((m as usize) * (k as usize));
