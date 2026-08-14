@@ -25,8 +25,11 @@
 # guardrail-regression・verification-gates・ci-complete も同設計を踏襲して
 # `runs-on: ubuntu-latest` へ移行済み（イシュー #467。ci-complete の移行は PR #619
 # 〈#466〉が「#467 または #468 消化時の対応が自然」と明示委譲した残件をここで引き取った）。
-# これにより ci.yml 内の `runs-on: self-hosted` は解消済み（rust-ci ジョブの
-# `runner-label: self-hosted` 入力は別スコープ〈イシュー #465〉）。
+# これにより ci.yml 内の `runs-on: self-hosted` は解消済み。rust-ci ジョブの
+# `runner-label` 入力（別スコープ〈イシュー #465〉）も `ubuntu-latest` へ切替済みで、
+# ci.yml は self-hosted 参照を持たない（rust-ci 呼び出し先の共通側 reusable workflow
+# 自体の入力既定値が `self-hosted` であることは別問題。「rust-base-ci reusable
+# workflow」節参照）。
 #
 # 使い捨て VM ではジョブ間で依存解決・ビルド成果物を再利用できないため、上記の
 # cargo 系ジョブ（rust-ci を除く 5 ジョブ）に `actions/cache`（SHA 固定）による 2 層
@@ -183,9 +186,10 @@ jobs:
       # 共通側 deny ジョブが閉じた whitelist と厳密一致で fail-closed 検証する
       deny-checks: advisories bans licenses sources
       # ホステッド（使い捨て VM）移行後も、まずは移行前と同じ 45 分を維持する
-      # （共通側既定は 30 分）。#465 の PR CI 実測（コールドスタートの所要時間）を見て、
-      # 35 分以下なら 45 分を維持・超過なら 60 分へ引き上げ、
-      # .claude/rules/ci.md 側の記述も同一 PR で同期更新する
+      # （共通側既定は 30 分）。#465 の PR #618 実測: rust-ci / cargo test は 2m9s
+      # （04:18:38〜04:20:47 UTC。
+      # https://github.com/Fandhe-AI/rust-ai-library/actions/runs/31769466364/job/94672194814）
+      # であり 35 分を大幅に下回るため 45 分を維持で確定した（60 分への引き上げは不要）
       test-timeout-minutes: 45
 
   # --------------------------------------------------
