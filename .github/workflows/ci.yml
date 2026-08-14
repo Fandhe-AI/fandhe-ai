@@ -22,28 +22,38 @@
 # 伴う CI ホステッドランナー移行（トラッキング #457／Phase 2 親 #459。Phase 1〈#464〉で
 # runner 方針が「public = ubuntu-latest 既定・self-hosted 禁止」へ反転済み）に対応し、
 # `runs-on: ubuntu-latest`（使い捨て VM）へ移行済み（イシュー #466）。
-# guardrail-regression・verification-gates・ci-complete は #467／#468 の別スコープとして
-# 引き続き self-hosted のまま残る（本ファイルの当該ブロックは本イシューでは変更しない）。
+# guardrail-regression・verification-gates・ci-complete も同設計を踏襲して
+# `runs-on: ubuntu-latest` へ移行済み（イシュー #467。ci-complete の移行は PR #619
+# 〈#466〉が「#467 または #468 消化時の対応が自然」と明示委譲した残件をここで引き取った）。
+# これにより ci.yml 内の `runs-on: self-hosted` は解消済み（rust-ci ジョブの
+# `runner-label: self-hosted` 入力は別スコープ〈イシュー #465〉）。
 #
-# 使い捨て VM ではジョブ間で依存解決・ビルド成果物を再利用できないため、上記 3 ジョブに
-# `actions/cache`（SHA 固定）による 2 層キャッシュを導入する（後続 #467／#468 が踏襲する
-# キャッシュ設計）:
-#   - cargo registry（3 ジョブ共通・共有）: `~/.cargo/registry/{index,cache}/`・
+# 使い捨て VM ではジョブ間で依存解決・ビルド成果物を再利用できないため、上記の
+# cargo 系ジョブ（rust-ci を除く 5 ジョブ）に `actions/cache`（SHA 固定）による 2 層
+# キャッシュを導入する（#466 で確立し #467 が踏襲したキャッシュ設計）:
+#   - cargo registry（5 ジョブ共通・共有）: `~/.cargo/registry/{index,cache}/`・
 #     `~/.cargo/git/db/` を対象に `cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}`
 #     キーで保存・復元する。依存は `=x.y.z` 完全固定＋Cargo.lock コミット済み
 #     （.claude/rules/deps-policy.md）のため、Cargo.lock のハッシュで依存セットが一意に
 #     決まる。フルミス時は `restore-keys` の前方一致（`cargo-registry-${{ runner.os }}-`）で
 #     直近キャッシュから部分復元する
-#   - target（build・build-no-cuda-toolkit のジョブ別）: `target/` を対象に
+#   - target（build・build-no-cuda-toolkit・guardrail-regression・verification-gates の
+#     ジョブ別）: `target/` を対象に
 #     `target-<job-id>-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}`
 #     キーで保存・復元する。toolchain 定義変更時に古い rustc の成果物へ増分ビルドしない
 #     ためキーに `rust-toolchain.toml` を含める（stable のマイナー更新自体は cargo 側の
 #     フィンガープリント再ビルドで安全に処理される）。build（Linux debug +
-#     aarch64-apple-darwin クロス lib + backend-metal check）と build-no-cuda-toolkit
-#     （Linux debug + test 成果物）で target 内容が異なるためジョブ別に分離する
-#     （混在させると復元・保存サイズが無駄に膨らむ）
+#     aarch64-apple-darwin クロス lib + backend-metal check）・build-no-cuda-toolkit
+#     （Linux debug + test 成果物）・guardrail-regression（guardrail クレートの debug
+#     テスト成果物）・verification-gates（debug build + release test + clippy 成果物）で
+#     target 内容がジョブごとに異なるため分離する（混在させると復元・保存サイズが
+#     無駄に膨らむ。verification-gates は他ジョブより成果物が大きくなりうるため、
+#     キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合の縮小策〈release のみ
+#     保存する等〉は #468 以降の判断に委ねる）
 #   - deps-forbidden は `cargo tree`（依存解決・フェッチのみでビルドしない）のみ実行する
 #     ため registry キャッシュのみとし target キャッシュは持たない
+#   - ci-complete は checkout・toolchain セットアップを行わない判定専用ジョブのため
+#     キャッシュを持たない
 #   - 保存タイミングは `actions/cache` 既定（ジョブ成功時・完全一致キー存在時は再保存
 #     なし）とする。ソース変更のみでは target キャッシュを更新しない設計であり、依存
 #     コンパイルの再利用が支配的な高速化要因であるため、コミットごとの保存は
@@ -71,9 +81,9 @@
 # 暗黙の前提のまま検証されないリスクがある。本ジョブはその前提自体を機械検査に変える。
 #
 # build ジョブ（TASK-2.1b・イシュー #50）は「両プラットフォームで cargo build が green」
-# という受け入れ条件に対応する。macOS 側 self-hosted runner は未登録（repo レベル runner
-# 0 件・既存ジョブは全て Linux self-hosted 上で実行）であり、GitHub ホステッド
-# macos-latest は使用禁止（.claude/rules/ci.md）のため、macOS 検証は Linux runner 上の
+# という受け入れ条件に対応する。本ワークフローは macOS runner を一切使用せず全ジョブ
+# ubuntu-latest 上で実行する構成のため（macos-latest 採否自体は #457 Phase 2 の枠外・
+# 未検討。billing 等の追加考慮が必要）、macOS 検証は Linux runner 上の
 # `aarch64-apple-darwin` クロスターゲットビルドで代替する。`cargo build --lib` は
 # リンカを起動しないため、macOS SDK が無い Linux 上でも `cfg(target_os = "macos")` が
 # 有効化され、objc2 / objc2-foundation / objc2-metal を含む Metal 有効経路のコンパイル
@@ -93,7 +103,7 @@
 # 成立する）。`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する
 # 理由は docs/backend-metal-real-device-testing.md 参照（bench-harness の
 # dev-dependencies 経由で criterion → alloca を引き込み、macOS クロスコンパイラ非搭載の
-# self-hosted runner ではネイティブ C ビルドが失敗するため）。
+# Linux runner ではネイティブ C ビルドが失敗するため）。
 #
 # guardrail-regression ジョブ（TASK-6.1a・イシュー #147）は、guardrail 判定器の 2 層検証
 # （REQ-4「判定器単体」・REQ-5「除外適用後」）を push/PR 契機で実行する。検証ロジックは
@@ -257,7 +267,7 @@ jobs:
       # TASK-1.8e（イシュー #42）: backend-metal の #[ignore] 実機テスト（tests/）を
       # aarch64-apple-darwin で型検査する。`--workspace --all-targets` は
       # bench-harness の dev-dependencies 経由で criterion → alloca を引き込み、
-      # macOS クロスコンパイラ非搭載の self-hosted runner では alloca のネイティブ
+      # macOS クロスコンパイラ非搭載の Linux runner では alloca のネイティブ
       # C ビルドが `cc: unrecognized option '-arch'` で失敗することを実測したため、
       # `-p backend-metal --tests` に限定する（bench-harness は backend-metal の
       # dev-dependencies 経由では [dependencies] のみが解決され criterion を含まない。
@@ -446,7 +456,11 @@ jobs:
   # --------------------------------------------------
   guardrail-regression:
     name: guardrail 2 層検証（REQ-4/REQ-5）
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #467）。使い捨て VM
+    # のため actions/cache による依存の再利用を下記ステップで行う
+    # （本ファイル冒頭コメントのキャッシュ設計参照。#466 で確立した build 系ジョブと
+    # 同一方針を踏襲する）。
+    runs-on: ubuntu-latest
     # guardrail クレート単体のビルド・テストのみのため、test ジョブ（45 分）より短く設定する。
     timeout-minutes: 30
     steps:
@@ -478,18 +492,36 @@ jobs:
             echo "::notice::Cargo.toml が未追加のため guardrail 2 層検証をスキップしました（workspace 作成後に有効化されます）"
           fi
 
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
+      # 旧「Ensure rustup is installed」「Sync toolchain」の 2 手動ステップを置換する。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
-      - name: Sync toolchain
+      # cargo registry（build 系ジョブと共通・本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      # target（guardrail-regression ジョブ専用。guardrail クレートの debug テスト
+      # 成果物のみのため他ジョブと内容が異なり分離する。本ファイル冒頭コメント参照）。
+      - name: Cache cargo target
+        if: steps.detect.outputs.has_cargo == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: target-guardrail-regression-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            target-guardrail-regression-${{ runner.os }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -508,7 +540,11 @@ jobs:
   # --------------------------------------------------
   verification-gates:
     name: 検証ゲート（build/test/clippy）
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #467）。使い捨て VM
+    # のため actions/cache による依存の再利用を下記ステップで行う
+    # （本ファイル冒頭コメントのキャッシュ設計参照。#466 で確立した build 系ジョブと
+    # 同一方針を踏襲する）。
+    runs-on: ubuntu-latest
     # test サブコマンドが --release を使うため、既存 test ジョブ（45 分）と同等以上を確保する。
     timeout-minutes: 60
     steps:
@@ -534,24 +570,41 @@ jobs:
             echo "::notice::Cargo.toml が未追加のため検証ゲートをスキップしました（workspace 作成後に有効化されます）"
           fi
 
-      - name: Ensure rustup is installed
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml（stable + rustfmt/clippy）へ同期する（build ジョブと同一方針。
+      # 本ファイル冒頭コメント参照）。旧「Ensure rustup is installed」「Sync toolchain」
+      # 「Ensure clippy component」の 3 手動ステップを置換する。clippy component は
+      # rust-toolchain.toml の components 列挙（単一真実源）経由で rust-toolchain-setup
+      # が同期するため、手動 Ensure ステップは不要になる。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          if ! command -v rustup >/dev/null 2>&1; then
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
-            echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          fi
+        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
 
-      - name: Sync toolchain
+      # cargo registry（build 系ジョブと共通・本ファイル冒頭コメントのキャッシュ設計参照）。
+      - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
-        run: rustup show
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
 
-      - name: Ensure clippy component
+      # target（verification-gates ジョブ専用。debug build + release test + clippy の
+      # 成果物を含み他ジョブと内容が大きく異なるため分離する。本ファイル冒頭コメント参照。
+      # キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合は release のみ保存する等の
+      # 縮小策を #468 以降で検討する）。
+      - name: Cache cargo target
         if: steps.detect.outputs.has_cargo == 'true'
-        run: |
-          set -euo pipefail
-          rustup component list --installed | grep -q '^clippy' || rustup component add clippy
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: target-verification-gates-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            target-verification-gates-${{ runner.os }}-
 
       - name: ゲート 1/3（build）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -572,7 +625,10 @@ jobs:
   # --------------------------------------------------
   ci-complete:
     name: ci-complete
-    runs-on: self-hosted
+    # public 化に伴うホステッドランナー移行（#457 Phase 2）。判定のみのジョブのため
+    # checkout・toolchain セットアップは不要（PR #619〈#466〉が明示委譲した残件を
+    # イシュー #467 で引き取り、ci.yml 内の self-hosted ジョブを解消する）。
+    runs-on: ubuntu-latest
     # 判定のみのジョブのため権限は一切不要（workflow レベルの contents: read も継承しない）。
     permissions: {}
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
