@@ -13,15 +13,15 @@ cp docs/real-hardware-verification-env.local.md.example docs/real-hardware-verif
 # docs/real-hardware-verification-env.local.md を編集して以下のキーを埋める
 ```
 
-## 埋めるキー一覧
+## 埋めるキー一覧（コピー先で「実値」列を埋める）
 
-| キー | 用途 | 公開版での参照箇所 |
-|------|------|-------------------|
-| CUDA 実機ノードの SSH ホスト名 | シェル変数 `CUDA_NODE`（`export CUDA_NODE="<実ホスト名>"` してから `ssh "$CUDA_NODE" '...'` を実行する。山括弧のプレースホルダは `export` 自体も含め未クォートだと shell のリダイレクトと誤解釈されるため常にダブルクォートで囲む） | docs/real-hardware-verification-env.md 2〜6 節 |
-| 他ノード名一覧（計測に不向きなノード） | ノード選定理由の根拠 | docs/real-hardware-verification-env.md 2.4 節 |
-| 常駐サービスの実名・GPU メモリ使用量 | ノード選定理由・停止禁止事項の根拠 | docs/real-hardware-verification-env.md 2.4・6.2 節 |
-| PyTorch 参照計測用 venv の絶対パス | `python` 実行パス | docs/real-hardware-verification-env.md 5.1 節 |
-| CUDA ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 3〜4 節 |
+| キー | 実値（コピー先で記入） | 用途 | 公開版での参照箇所 |
+|------|----------------------|------|-------------------|
+| CUDA 実機ノードの SSH ホスト名 | `CUDA_NODE=<ここに実ホスト名>` | シェル変数 `CUDA_NODE`（`export CUDA_NODE="<実ホスト名>"` してから `ssh "$CUDA_NODE" '...'` を実行する。山括弧のプレースホルダは `export` 自体も含め未クォートだと shell のリダイレクトと誤解釈されるため常にダブルクォートで囲む） | docs/real-hardware-verification-env.md 2〜6 節 |
+| 他ノード名一覧（計測に不向きなノード） | `<ここにノード名を列挙>` | ノード選定理由の根拠 | docs/real-hardware-verification-env.md 2.4 節 |
+| 常駐サービスの実名・GPU メモリ使用量 | `<ここにサービス名と使用量を列挙>` | ノード選定理由・停止禁止事項の根拠 | docs/real-hardware-verification-env.md 2.4・6.2 節 |
+| PyTorch 参照計測用 venv の絶対パス | `PYTORCH_VENV_PYTHON=<ここに絶対パス>` | `python` 実行パス | docs/real-hardware-verification-env.md 5.1 節 |
+| CUDA ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 3〜4 節 |
 
 ## 注意
 

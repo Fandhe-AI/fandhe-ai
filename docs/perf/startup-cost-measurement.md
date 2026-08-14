@@ -320,6 +320,7 @@ git rev-parse HEAD > .rev-stamp
 rsync -a --delete --delete-excluded --filter=':- .gitignore' \
   --exclude '.git/' --exclude '.codex/' --exclude '.env*' \
   --exclude '.claude/settings.local.json' --exclude '.venv*/' \
+  --exclude 'real-hardware-verification-env.local.md' \
   ./ "$CUDA_NODE":~/work/rust-ai-library-run/
 rm .rev-stamp
 
