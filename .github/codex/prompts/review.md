@@ -100,13 +100,20 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 - **テストの弱体化**（受け入れ基準対応テストの削除、`#[ignore]` 追加によるごまかし、
   実機非依存テストの実機依存化。実機〈DGX Spark GB10・Metal〉依存テストの `#[ignore]`
   分離の解除を含む）: **P1**
-- **CI ワークフローの規約違反**（.claude/rules/ci.md。GitHub ホステッドランナー指定
-  〈本リポジトリは private のため self-hosted 必須〉・`timeout-minutes` 欠落
-  〈reusable workflow 呼び出しジョブ（`rust-ci` / `codex-review` 等の `uses:` ジョブ）は
-  共通側の各ジョブが timeout を持つため呼び出し側での設定不要であり違反ではない〉・
-  action / reusable workflow の SHA 固定でない参照〈`@main` 等〉・`permissions` の
-  不要な昇格・`pull_request_target` 等の secrets 露出トリガー追加・`ci-complete` の
+- **CI ワークフローの規約違反**（.claude/rules/ci.md。`runs-on: self-hosted` の指定・
+  self-hosted への逆戻り〈本リポジトリは public 区分のため GitHub ホステッド
+  （`ubuntu-latest`）既定。例外は codex-review の codex 実行ジョブのみ。Phase 2
+  （#465〜#469）完了までは既存 workflow に `runs-on: self-hosted` が残存するため、
+  差分で新規追加・変更された箇所のみを判定対象とし、既存行の残存のみでは指摘しない〉・
+  larger runner の使用・`timeout-minutes` 欠落〈reusable workflow 呼び出しジョブ
+  （`rust-ci` / `codex-review` 等の `uses:` ジョブ）は共通側の各ジョブが timeout を
+  持つため呼び出し側での設定不要であり違反ではない〉・action / reusable workflow の
+  SHA 固定でない参照〈`@main` 等〉・`permissions` の不要な昇格・`ci-complete` の
   fail-closed 集約判定の弱体化）: **P1**
+- **fork PR へ secrets を露出するトリガーの追加**（`pull_request_target`・secrets を
+  渡す `workflow_run` 等。public 化により fork PR が現実化するため独立項目とする。
+  codex 専用 runner（唯一の self-hosted 例外・永続環境）に対する fork PR 実行拒否等の
+  多層防御の弱体化を含む）: **P0**
 - **`docs/spec/` サブモジュール実体の書き換え**（仕様の正本は rust-ai-library-spec
   リポジトリであり本リポでは編集禁止。submodule ポインタの前進自体は通常の更新として
   扱う）: **P1**

@@ -104,7 +104,7 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 | `.claude/rules/delegation-impl.md` | 作成・編集フェーズの委譲マッピング・実装フロー標準 |
 | `.claude/rules/coding-rust.md` | 完全自作コア方針・cfg ベースバックエンド・FMA 契約統一・品質基準 |
 | `.claude/rules/deps-policy.md` | 許容依存 8 区分・`=x.y.z` 完全固定・禁止リスト・ライセンス要件 |
-| `.claude/rules/ci.md` | **CI は self-hosted 必須**・timeout 必須・SHA 固定・fail-closed 集約 |
+| `.claude/rules/ci.md` | **CI は GitHub ホステッド（`ubuntu-latest`）既定**（例外は codex-review の codex 実行ジョブのみ）・fork PR 対策・timeout 必須・SHA 固定・fail-closed 集約 |
 | `.claude/rules/security.md` | OWASP Top 10・秘密情報混入防止・自己修復ループのガードレール |
 | `.claude/rules/japanese-style.md` | 日本語出力スタイル |
 | `.claude/rules/conventional-commits.md` | Conventional Commits 詳細規約（`--no-verify` 禁止） |
@@ -132,5 +132,5 @@ main はコンテキスト消費を抑えるため判断と統合に専念し、
 
 ## hooks（settings.json）
 
-- **SessionStart**: 日本語・委譲・完全自作コア・CI self-hosted・Conventional Commits のリマインダーを表示する
+- **SessionStart**: 日本語・委譲・完全自作コア・CI は GitHub ホステッド・Conventional Commits のリマインダーを表示する
 - **PostToolUse**（Edit|Write）: `.rs` 編集時に rustfmt を自動適用する（Cargo.toml の edition を検出。未追加時は 2021 フォールバック）

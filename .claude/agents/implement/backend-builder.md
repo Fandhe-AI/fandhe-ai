@@ -20,7 +20,7 @@ tools: [Read, Grep, Glob, Edit, Write, Bash]
 - バックエンド切替は feature フラグなしの **cfg ベース**を基本とする（`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成）
 - CUDA toolkit 非搭載環境でのビルド成立を維持する（`cudarc` の dynamic-loading。非必須依存の要件）
 - 丸め方針（FMA 契約）をバックエンド間で統一する（CPU 参照実装は `f32::mul_add`。PoC-v2-5 の確認実験）
-- 実機（DGX Spark GB10 / Metal 実機）依存テストは `#[ignore]` で分離し、CI（self-hosted）で実行可能なテストと区別する
+- 実機（DGX Spark GB10 / Metal 実機）依存テストは `#[ignore]` で分離し、CI（GitHub ホステッド既定。移行中は現行 self-hosted。`.claude/rules/ci.md`）で実行可能なテストと区別する
 - `.claude/rules/coding-rust.md`・`code-comment-style.md` に準拠する
 
 ## 完了時の確認
