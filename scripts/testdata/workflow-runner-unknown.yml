@@ -86,3 +86,15 @@ on": ubuntu-latest-8-cores }
   same-line-prefix-flow-mapping-multiline-quoted-key-bypass:
     job: { name: test, "runs-\
 on": ubuntu-latest-8-cores }
+
+  # フロー形式内の YAML 明示キー（`?` インジケータ）による迂回パターン
+  # （イシュー #472 P0 codex-review 再指摘）。`x: { ? runs-on : ubuntu-latest-8-cores }`
+  # は GitHub Actions には `runs-on` の明示キーとして解釈され得る一方、当初の
+  # EXPLICIT_KEY_INDICATOR_PATTERN は行頭（前後の空白のみ許容）の `?` しか検出
+  # できず、フロー内（`{` 直後）の `?` を素通りしていた。二重引用符を含まないため
+  # 3-c（複数行引用スカラー検査）には一致せず、明示キー検査（行頭 or
+  # `{`／`,`／`[` 直後のいずれかに `?` が来る）単体の修正効果を検証する。値も
+  # self-hosted・許容外 runner 名の字面を含まないため、明示キー検査で fail する
+  # はず。
+  flow-explicit-key-bypass:
+    x: { ? runs-on : ubuntu-latest-8-cores }
