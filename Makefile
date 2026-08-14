@@ -219,9 +219,11 @@ else
 endif
 
 # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
-# ci.yml の runner-policy ジョブと共用する scripts/check-workflow-runner-policy.sh 経由で、
-# .github/workflows/ 配下の非コメント行への self-hosted 再導入・唯一の許容形
-# （ubuntu-latest 完全一致）以外の runner 宣言をローカルで検査する
+# ci.yml の runner-policy ジョブと共用する scripts/check-workflow-runner-policy.sh
+# （検査本体は python3 + PyYAML の check-workflow-runner-policy.py。ローカルで PyYAML
+# 不在なら fail し `pip3 install pyyaml` を案内する fail-closed 設計）経由で、
+# .github/workflows/ 配下への self-hosted 再導入・唯一の許容形（ubuntu-latest 完全一致）
+# 以外の runner 宣言をローカルで検査する
 # （deps-forbidden ターゲットと同一方針。self-test → check の順で直列実行する）。
 .PHONY: runner-policy
 runner-policy: ## self-hosted runner 逆戻り防止の fail-closed 契約検査を実行する

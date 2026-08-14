@@ -1,11 +1,7 @@
 # scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（イシュー #472）。
-# self-hosted という語は含まないが、唯一の許容形（ubuntu-latest 完全一致）以外の
+# self-hosted という語は含まないが、唯一の許容形（文字列 ubuntu-latest 完全一致）以外の
 # runner 宣言を含むため「唯一の許容形検査」で fail するはず（larger runner 名・
-# ブロックシーケンス形式のいずれも許容形と一致しないパースの取りこぼしを検証する）。
-#
-# 加えて、P0 codex-review 指摘（イシュー #472）に対応する「未知のキー表記検査」の
-# ネガティブケース（エスケープ付き二重引用キー・YAML 明示キー形式）も含む。値に
-# self-hosted／許容外 runner 名が現れなくても fail することを検証する。
+# ブロックシーケンス形式・式展開・キー表記の等価系のいずれも許容形と一致しない）。
 name: dummy
 
 jobs:
@@ -18,83 +14,23 @@ jobs:
       - custom-legacy-label
     timeout-minutes: 5
 
-  # 引用キー（YAML として同じ mapping key `runs-on` になる）で larger runner を
-  # 宣言する迂回パターン。素朴な `runs-on:`（非引用・コロン直後）一致だけでは
-  # 検出できず fail-open になりうる（イシュー #472 P1 codex-review 指摘）。
+  expression-runner:
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+
+  # 引用キー・コロン前空白（YAML デコード後はいずれも同じ mapping key `runs-on`。
+  # イシュー #472 P1 codex-review 指摘）で larger runner を宣言する迂回パターン。
   quoted-key-bypass:
     "runs-on": ubuntu-latest-8-cores
     timeout-minutes: 5
 
-  # コロン前空白（YAML としては同じく `runs-on` キー）での迂回パターン。
   space-before-colon-bypass:
     runs-on : ubuntu-latest-8-cores
     timeout-minutes: 5
 
-  # エスケープを含む二重引用キーでの迂回パターン（イシュー #472 P0 codex-review
-  # 指摘）。`\x2D` は YAML の double-quoted scalar エスケープとしてハイフンに
-  # デコードされ、GitHub Actions からは "runs-on" キーとして解釈されうる一方、
-  # 字面には `runs-on` という部分文字列が現れないため「唯一の許容形検査」の
-  # RUNNER_KEY_PATTERN だけでは宣言として抽出できない。値も self-hosted を含まない
-  # ため、未知のキー表記検査（バックスラッシュ付き引用キー）で fail するはず。
-  escaped-key-bypass:
+  # `\x2D` は YAML double-quoted scalar のエスケープとしてハイフンにデコードされる
+  # （イシュー #472 P0 codex-review 指摘）。字面に `runs-on` という部分文字列が
+  # 現れなくても、デコード後のキーは runs-on になるため検出され fail するはず。
+  escaped-hex-key-bypass:
     "runs\x2Don": ubuntu-latest-8-cores
     timeout-minutes: 5
-
-  # YAML 明示キー形式（`? key` インジケータ）での迂回パターン（イシュー #472 P0
-  # codex-review 指摘）。キーと値が別行になり同一行に `key:` が現れないため
-  # 唯一の許容形検査の行内一致では検出できない。未知のキー表記検査（`?`
-  # インジケータの出現）で fail するはず。
-  explicit-key-bypass:
-    ? runs-on
-    : ubuntu-latest-8-cores
-    timeout-minutes: 5
-
-  # 複数行にまたがる二重引用スカラーでの迂回パターン（イシュー #472 P0 codex-review
-  # 再指摘）。YAML の double-quoted scalar は末尾の `\`（バックスラッシュ）で行を
-  # エスケープ改行でき、`"runs-\` \n `on": ...` は折り畳みなしで連結され
-  # "runs-on" キーとして解釈されうる。各行単体では RUNNER_KEY_PATTERN の完全な
-  # キーも ESCAPED_QUOTED_KEY_PATTERN の同一行エスケープ引用キーも現れないため、
-  # 行単位の照合だけでは素通りする。値も self-hosted を含まないため、未知のキー
-  # 表記検査（二重引用符の出現数が奇数の行）で fail するはず。
-  multiline-quoted-key-bypass:
-    "runs-\
-on": ubuntu-latest-8-cores
-    timeout-minutes: 5
-
-  # フローマッピング内で複数行にまたがる二重引用キーによる迂回パターン
-  # （イシュー #472 P0 codex-review 再指摘）。上記 multiline-quoted-key-bypass は
-  # block mapping（行頭が直接 `"`）だったが、フローマッピング（`{ ... }`）内では
-  # `"` の直前に `{` が来るため、行頭（インデント除く）のみを見る判定では
-  # 素通りする。値も self-hosted・許容外 runner 名の字面を含まないため、未知の
-  # キー表記検査（フローマッピングの開始区切り文字を読み飛ばした上での二重引用符
-  # 出現数が奇数の行）で fail するはず。
-  flow-mapping-multiline-quoted-key-bypass:
-    x: { "runs-\
-on": ubuntu-latest-8-cores }
-
-  # フローマッピング開始点より手前に他のキーが同一行に存在する迂回パターン
-  # （イシュー #472 P0 codex-review 再指摘・Cursor Bugbot 同旨指摘
-  # 「Flow-mapping key bypass missed」）。上記
-  # flow-mapping-multiline-quoted-key-bypass の修正（行頭からの読み飛ばし対象に
-  # `{`／`,`／`[` を追加）は「行頭から連続する空白／`{`／`,`／`[` の直後が `"`」で
-  # あることを要求するため、`job: { name: test, "runs-\` のようにフロー
-  # マッピング開始点（`{`）より手前に `job:`・`name: test,` という他の内容が
-  # 同一行にあると、行頭からの連続性が破れ素通りする。値も self-hosted・
-  # 許容外 runner 名の字面を含まないため、非アンカー化した未知のキー表記検査
-  # （行中のどこであれ `{`／`,`／`[` の直後に `"` が来て、かつ `"` の出現数が
-  # 奇数）で fail するはず。
-  same-line-prefix-flow-mapping-multiline-quoted-key-bypass:
-    job: { name: test, "runs-\
-on": ubuntu-latest-8-cores }
-
-  # フロー形式内の YAML 明示キー（`?` インジケータ）による迂回パターン
-  # （イシュー #472 P0 codex-review 再指摘）。`x: { ? runs-on : ubuntu-latest-8-cores }`
-  # は GitHub Actions には `runs-on` の明示キーとして解釈され得る一方、当初の
-  # EXPLICIT_KEY_INDICATOR_PATTERN は行頭（前後の空白のみ許容）の `?` しか検出
-  # できず、フロー内（`{` 直後）の `?` を素通りしていた。二重引用符を含まないため
-  # 3-c（複数行引用スカラー検査）には一致せず、明示キー検査（行頭 or
-  # `{`／`,`／`[` 直後のいずれかに `?` が来る）単体の修正効果を検証する。値も
-  # self-hosted・許容外 runner 名の字面を含まないため、明示キー検査で fail する
-  # はず。
-  flow-explicit-key-bypass:
-    x: { ? runs-on : ubuntu-latest-8-cores }

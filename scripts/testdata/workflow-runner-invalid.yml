@@ -1,0 +1,6 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（fail-closed 検証）。
+# YAML としてパース不能なファイルは、検査をスキップして pass にせず fail するはず
+# （パース失敗を成功側へ倒すと検査全体が迂回可能になるため）。
+name: dummy
+jobs: [unclosed-sequence
+  broken: { flow

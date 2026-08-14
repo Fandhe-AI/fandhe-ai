@@ -1,0 +1,14 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（PR #626 P0 指摘）。
+# キーを引用符でエスケープした `"runs-on"`・`'runs-on'` は、テキスト照合では素の
+# `runs-on:` パターンに一致せず迂回できたが、YAML デコード後はどちらもキー文字列
+# runs-on に正規化されるため検出され fail するはず。
+name: dummy
+
+jobs:
+  double-quoted-key:
+    "runs-on": self-hosted
+    timeout-minutes: 5
+
+  single-quoted-key:
+    'runs-on': ubuntu-latest-8-cores
+    timeout-minutes: 5

@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 #
-# self-hosted runner の逆戻り防止を fail-closed で検査する単一ソース（イシュー #472）。
+# self-hosted runner の逆戻り防止を fail-closed で検査する呼び出し面（イシュー #472）。
 # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ
 # 移行完了した（.claude/rules/ci.md「runner（GitHub ホステッド既定）」節）が、以後
-# self-hosted を再導入しても機械的に検知する仕組みがなかった。fandhe-frontend の
-# workflow_runner_policy.rs（runner 宣言を機械列挙し唯一の許容形と突合する fail-closed
-# 検査）の設計思想を、本リポの既存契約検査パターン（scripts/check-forbidden-deps.sh:
-# 単一ソースのシェルスクリプト + scripts/testdata/ fixture + self-test サブコマンド +
-# ci.yml ジョブと Makefile の共用）へ移植したもの。
+# self-hosted を再導入しても機械的に検知する仕組みがなかったため追加した契約検査。
+# 本リポの既存契約検査パターン（scripts/check-forbidden-deps.sh: 単一ソースのスクリプト +
+# scripts/testdata/ fixture + self-test サブコマンド + ci.yml ジョブと Makefile の共用）に
+# 従う。
+#
+# 検査本体は scripts/check-workflow-runner-policy.py（python3 + PyYAML）に分離してある。
+# grep/パターン照合ではなく実 YAML パーサー方式を採るのは、PR #626 の codex-review で
+# テキスト照合ベースの旧実装が YAML 表記トリック（エスケープ済みキー `"runs-on"`・
+# 複数行 double-quoted キー・フローマッピング内キー・明示キー `?`・引用文字列内 `#` に
+# よるコメント切り捨て誤動作等）で迂回可能と P0/P1 指摘されたため。デコード後の構造に
+# 対して検査すれば表記揺れはパーサーが正規化し、パターン増築なしに構造的に遮断できる。
+# 検査方針（唯一の許容形 ubuntu-latest 完全一致・runs-on / runner-label /
+# post-feedback-runner-label を対象・codex-review の例外の扱い）の詳細は .py 冒頭を参照。
 #
 # 呼び出し元:
 #   - .github/workflows/ci.yml の runner-policy ジョブ（self-test → check の順で呼ぶ）
@@ -15,312 +23,88 @@
 #
 # サブコマンド:
 #   check      .github/workflows/ 配下の *.yml・*.yaml を対象に runner 宣言を検査する
-#   self-test  scripts/testdata/ の固定 fixture（clean/forbidden/unknown）に対し
-#              ポジティブ・ネガティブ判定を行い、本スクリプトの検査ロジック自体の
-#              退行を検出する（受け入れ条件「self-hosted 再導入で CI が fail する」の
-#              機械検証）
+#   self-test  scripts/testdata/ の固定 fixture に対しポジティブ（clean は pass）・
+#              ネガティブ（違反・トリック fixture は fail）判定を行い、検査ロジック
+#              自体の退行を検出する（受け入れ条件「self-hosted 再導入で CI が fail
+#              する」の機械検証）
 #
-# 検査方針（fail-closed。許可リスト方式ではなく「唯一の許容形に一致しなければ違反」）:
-#   1. 禁止トークン検査: 各行のコメント（# 以降）を除去した後 `self-hosted` の出現を
-#      違反とする
-#   2. 唯一の許容形検査: コメント除去後の `runs-on:`／`runner-label:`／
-#      `post-feedback-runner-label:`（引用キー `"runs-on":`／`'runs-on':`・コロン前
-#      空白 `runs-on :` 等の有効な YAML 表記の等価系を含む。イシュー #472 P1
-#      codex-review 指摘）の宣言行を全て列挙し、値が `ubuntu-latest` のスカラー
-#      完全一致でなければ違反とする（larger runner 名・matrix/式展開
-#      `${{ ... }}`・ブロックシーケンス形式の値なし行は「未知の形」として違反側に倒す。
-#      パースの取りこぼしで fail-open にならない設計）
-#   3. 未知のキー表記検査（イシュー #472 P0 codex-review 指摘）: 正規表現による
-#      YAML 構文の完全な再実装（エスケープ・複合キー表記の意味解析）は避け、代わりに
-#      「本検査が安全に解釈できないキー表記が存在する」こと自体を検出して無条件に
-#      違反とする（許容形かどうかを判定できない＝違反、という fail-closed 側への
-#      倒し方。値を読み取れないので `ubuntu-latest` 判定を試みない）:
-#        a. バックスラッシュを含む二重引用キー（例: `"runs\x2Don": ...`）。YAML の
-#           double-quoted scalar は `\xHH`／`\uHHHH` 等のエスケープをデコードするため、
-#           キーの字面が `runs-on` 等と一致しなくても GitHub Actions からは一致した
-#           キーとして解釈されうる。エスケープの意味解析（デコード）はせず、
-#           「エスケープを含む引用キーが 1 つでも存在する」こと自体を通常の
-#           workflow では起こり得ない異常な表記として違反にする
-#        b. YAML の明示キー形式（`? key` インジケータ）。`? runs-on` \n
-#           `: ubuntu-latest-8-cores` のように、キーと値が別行かつキー行に `:` が
-#           現れない複合マッピングは唯一の許容形検査（行内 `key:` 一致）を素通りする。
-#           `?` インジケータ自体が通常の workflow ファイルでは使われないため、
-#           出現した時点で無条件に違反とする。当初は行頭アンカーのみで判定していたが、
-#           フローマッピング内の明示キー（`{ ? "runs-` \n `on": ubuntu-latest-8-cores }`
-#           のように `?` の直前に `{`／`,`／`[` が来る形）は GitHub Actions からは
-#           `runs-on` の明示キーとして解釈されうる一方、行頭アンカー判定では検出でき
-#           ないことが判明した（イシュー #472 P0 codex-review 再指摘）。3-c の複数行
-#           引用キー検出と同じ非アンカー検索方式（行頭 or `{`／`,`／`[` 直後のいずれか）
-#           へ統一し、フロー内 `?` も無条件に違反とする
-#        c. 複数行にまたがる二重引用スカラー（イシュー #472 P0 codex-review 再指摘）。
-#           `RUNNER_KEY_PATTERN`／`ESCAPED_QUOTED_KEY_PATTERN` はいずれも行単位で
-#           照合するため、`"runs-\` \n `on": ubuntu-latest-8-cores` のように
-#           double-quoted scalar を行継続（末尾 `\` によるエスケープ改行）や折り畳み
-#           改行で複数行に分割したキーは、各行単体では完全なキーもエスケープ付き
-#           引用キーも現れず素通りする。意味解析（複数行の連結・エスケープ解決）は
-#           行わず、代わりに「行頭（インデント・フローマッピングの開始区切り文字
-#           `{`／`,`／`[` と空白を除く）が `"` で始まり、かつその行の `"` 出現数が
-#           奇数」であること（＝キー位置の二重引用スカラーがその行で閉じきらず
-#           次行へまたがっている）自体を異常な表記として検出し無条件に違反とする。
-#           当初はインデント（空白）のみを読み飛ばして判定していたが、フロー
-#           マッピング内（`{ "runs-` \n `on": ubuntu-latest-8-cores }` のように
-#           引用符の直前に `{`／`,`／`[` が来る形）はこの判定を素通りすることが
-#           判明した（イシュー #472 P0 codex-review 再指摘）。その修正（行頭からの
-#           読み飛ばし対象に `{`／`,`／`[` を追加）後も、`job: { name: test,
-#           "runs-\` \n `on": ubuntu-latest-8-cores, ... }` のように、フロー
-#           マッピング開始前に他のキー（`job:`・`name: test,` 等）が同一行に
-#           存在すると、行頭からの読み飛ばし条件（`^[[:blank:],{\[]*\"`。行頭から
-#           連続する空白／`{`／`,`／`[` の直後が `"`）は満たされず、この形を
-#           見逃すことが判明した（イシュー #472 P0 codex-review 再指摘・
-#           Cursor Bugbot 同旨指摘「Flow-mapping key bypass missed」）。行頭からの
-#           連続性を要求する設計では「フローマッピング開始点より手前に何らかの
-#           内容がある」形を原理的に拾えないため、判定を「行頭に限定した読み飛ばし」
-#           から「行中のどこであっても `{`／`,`／`[` の直後（空白を挟んでよい）に
-#           `"` が来るか、または行頭（空白のみを挟んで）に `"` が来るか」の
-#           非アンカー検索へ変更した。すなわち quoted key の直前文脈だけを見て
-#           判定し、その手前にどんな内容があるかは問わない。誤検出防止（`run: |`
-#           ブロックスカラー内のシェルスクリプト）は従来どおり `"` の出現数の
-#           偶奇判定が担う: `result="${pair#*:}"`・`echo "..."`・
-#           `curl ... "https://..."` 等は `{`／`,`／`[` の直後に `"` が来る文脈を
-#           持たず（本リポの実 workflow ファイルで実測確認済み。コメント除去の
-#           単純さ〈`#` の文字列内出現を区別しない〉に起因して偶数のはずの `"`
-#           出現数が奇数に化けるケース〈`result="${pair#*:}"`・
-#           `echo "### ..."` 等〉が実在するが、いずれも `{`／`,`／`[` 直後の
-#           文脈に一致しないため新しい非アンカー検索でも誤検出しない）、この
-#           変更でも false positive にならないことを確認済み。本スクリプト
-#           self-test の clean fixture・新規 negative fixture（同一行に他キーを
-#           伴うフローマッピング内複数行引用キー）で回帰を検証する
-#
-# 例外の扱い（意図的に検査対象外となる構成。.claude/rules/ci.md「codex-review」節）:
-#   codex-review wrapper の codex 実行ジョブは runner-label を非指定とし reusable
-#   workflow の既定値 `codex`（codex-home 方式の認証情報を持つ self-hosted 専用 runner）
-#   に委譲する設計のため、本リポ側ファイルに runner 宣言が現れず本検査の対象外と
-#   なる。将来 `codex` 等のラベルを明示する場合は、それは本スクリプトの許容形の
-#   意図的な拡張（レビュー必須）を要する。実機（CUDA/Metal）ジョブの将来的な例外追加
-#   （ci.md「実機依存」節）も同様に、その時点での許容形拡張として扱う。
-#
-# fail-closed の追加防御:
-#   .github/workflows/ が存在しない・対象ファイルが 0 件の場合も失敗とする
-#   （ディレクトリ改名等で検査が空振りしても green にならない）。
+# fail-closed の前提: python3 または PyYAML が利用不可の場合は検査をスキップせず失敗
+# させる（GitHub ホステッドランナー〈ubuntu-latest〉には両者とも標準搭載。macOS
+# ローカルで PyYAML 不在なら `pip3 install pyyaml` で導入する）。
 set -euo pipefail
 
-ALLOWED_RUNNER_VALUE='ubuntu-latest'
-# runner 宣言のキー名（コロン込み・行頭の空白は許容するため正規表現側で吸収する）。
-# YAML の mapping key は素の識別子以外に引用キー（`"runs-on":` / `'runs-on':`）や
-# コロン前の空白（`runs-on :`）でも同じキーとして解釈される（イシュー #472 P1
-# codex-review 指摘）。これらは文字列としては非引用・コロン直後のパターンに一致
-# しないため、素朴な `key:` 一致だけでは fail-closed の前提（唯一の許容形以外は
-# 違反）を素通りしてしまう。キー名の前後に任意 1 文字の引用符（`"`／`'`）・
-# コロン前の空白を許容するよう拡張し、有効な YAML 表記の等価系をすべて宣言として
-# 検出する（本物の YAML パーサーを新規依存として導入しないため、正規表現側の
-# 網羅で fail-closed を維持する。deps-policy.md の許容依存 8 区分に YAML パーサーは
-# 含まれない）。
-RUNNER_KEY_PATTERN='["'\''"]?(runs-on|runner-label|post-feedback-runner-label)["'\''"]? *:'
-
-# 未知のキー表記検査（イシュー #472 P0 codex-review 指摘）用パターン。
-# 「唯一の許容形検査」が読み取れる字面の宣言行を前提としているのに対し、この 2 つは
-# 本検査がそもそも安全に意味解析できない YAML 表記であることそのものを検出する
-# （検出できたら直ちに違反。デコードや意味解釈は行わない。上記コメント方針 3 参照）。
-#
-# a. バックスラッシュエスケープを含む二重引用キー: `"` で始まり `\` を含み `"` で
-#    閉じたのち任意個の空白を挟んで `:` が続く行。単純な文字列内バックスラッシュ
-#    （例: Windows パスを値として書く場合）は値側であって mapping key ではないため
-#    本パターン（`:` が直後に続くもの）には一致しない。
-ESCAPED_QUOTED_KEY_PATTERN='"[^"]*\\[^"]*" *:'
-# b. YAML 明示キー形式のインジケータ（`? key` の `?`）。block mapping の行頭
-#    （前後の空白を許容）に `?` があり、その直後が空白または行末であるものに加え、
-#    フローマッピング内（`{ ? "runs-` \n `on": ... }` のように、`?` の直前に
-#    `{`／`,`／`[`（空白を挟んでよい）が来る）も同様に検出する（イシュー #472 P0
-#    codex-review 再指摘）。行頭アンカーのみの判定では、上記 3-c のフロー
-#    マッピング複数行引用キー検出と同型の迂回（`?` をフロー開始直後・カンマ直後に
-#    置いて行頭アンカーを外す）を素通りするため、3-c と同じ非アンカー検索方式
-#    （行頭 or `{`／`,`／`[` 直後のいずれか）へ統一した。
-EXPLICIT_KEY_INDICATOR_PATTERN='(^[[:blank:]]*\?([[:blank:]]|$))|([,{\[][[:blank:]]*\?([[:blank:]]|$))'
-# c. 複数行にまたがる二重引用スカラーの検出には固定の正規表現では対応できない
-#    （「奇数個の `"`」は行単位の集計が必要なため、grep -E の 1 パターンには
-#    落とし込めない）。check_workflow_text 内で行ごとに `"` の出現数を数えて判定する
-#    （上記コメント方針 3-c 参照）。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHECKER="${SCRIPT_DIR}/check-workflow-runner-policy.py"
 
 usage() {
   echo "usage: $0 {check|self-test}" >&2
   exit 2
 }
 
-# 1 ファイル分のテキストに対する検査本体。check（実ファイル）と self_test（固定
-# fixture）の双方から呼ぶ共通経路とすることで、self-test がパターン退行を確実に
-# 検出できるようにする（check-forbidden-deps.sh の check_tree_text と同型の設計）。
-check_workflow_text() {
-  local label="$1"
-  local text="$2"
-  # `#` 以降のコメントを除去したテキストに対して検査する（コメント内の self-hosted
-  # 言及・説明文を誤検出しない）。行ごとにシェルのパラメータ展開（`${line%%#*}`）で
-  # 除去する（sed 起動なしで完結させ、SC2001 のスタイル指摘も回避する）。
-  local stripped=""
-  local line
-  while IFS= read -r line; do
-    stripped+="${line%%#*}"$'\n'
-  done <<<"${text}"
-  local failed=0
-
-  # 1. 禁止トークン検査。
-  if echo "${stripped}" | grep -qw 'self-hosted'; then
-    echo "::error::${label} に self-hosted runner の宣言が含まれています（.claude/rules/ci.md「runner」節。GitHub ホステッド既定への移行〈#457 Phase 2〉に反する）:" >&2
-    echo "${stripped}" | grep -nw 'self-hosted' >&2
-    failed=1
-  fi
-
-  # 2. 唯一の許容形検査。runner 宣言行を全て抽出し、値が ubuntu-latest の
-  # スカラー完全一致でない行を違反とする。
-  #    - 値なし行（ブロックシーケンス形式 `runs-on:` のみで次行以降に `- xxx`）は
-  #      キーの直後に値が続かないため、この抽出パターンでは「値が空/一致しない」
-  #      側に自然に倒れ違反として検出される
-  #    - 式展開（`${{ ... }}`）・larger runner 名（`ubuntu-latest-8-cores` 等）は
-  #      いずれも ubuntu-latest との完全一致にならないため違反として検出される
-  local declarations
-  declarations=$(echo "${stripped}" | grep -E "${RUNNER_KEY_PATTERN}" || true)
-  if [ -n "${declarations}" ]; then
-    local bad_lines
-    bad_lines=$(echo "${declarations}" | grep -vE ": *${ALLOWED_RUNNER_VALUE} *\$" || true)
-    if [ -n "${bad_lines}" ]; then
-      echo "::error::${label} に唯一の許容形（runner-label/runs-on = ${ALLOWED_RUNNER_VALUE} 完全一致）以外の runner 宣言が含まれています:" >&2
-      echo "${bad_lines}" >&2
-      failed=1
-    fi
-  fi
-
-  # 3. 未知のキー表記検査。上記コメント方針 3 参照。値が何であるかに関わらず、
-  #    本検査が安全に意味解析できないキー表記が 1 行でも存在すれば違反とする
-  #    （デコードして許容形か判定する、という経路を作らない）。
-  local escaped_key_lines
-  escaped_key_lines=$(echo "${stripped}" | grep -E "${ESCAPED_QUOTED_KEY_PATTERN}" || true)
-  if [ -n "${escaped_key_lines}" ]; then
-    echo "::error::${label} にエスケープを含む二重引用キーが見つかりました（YAML の \\xHH／\\uHHHH 等のエスケープはキー名を変えうるため、本検査では意味解析せず無条件に違反とします。.claude/rules/ci.md「runner」節）:" >&2
-    echo "${escaped_key_lines}" >&2
-    failed=1
-  fi
-
-  local explicit_key_lines
-  explicit_key_lines=$(echo "${stripped}" | grep -nE "${EXPLICIT_KEY_INDICATOR_PATTERN}" || true)
-  if [ -n "${explicit_key_lines}" ]; then
-    echo "::error::${label} に YAML 明示キー形式（'?' インジケータ）が見つかりました（キーと値が別行の複合マッピングは唯一の許容形検査を素通りしうるため、出現した時点で無条件に違反とします）:" >&2
-    echo "${explicit_key_lines}" >&2
-    failed=1
-  fi
-
-  # c. 複数行にまたがる二重引用スカラーの検出（上記コメント方針 3-c 参照）。
-  #    YAML の block mapping ではキーは行頭（インデント除く）に置かれるが、
-  #    フローマッピング（`{ "runs-` \n `on": ubuntu-latest-8-cores }`）内では
-  #    引用符の直前に `{`／`,`／`[` が来ることがある（イシュー #472 P0
-  #    codex-review 再指摘）。さらに、そのフローマッピング開始点より手前に
-  #    他のキー（`job: { name: test, "runs-\` のような同一行の先行内容）が
-  #    あると「行頭から連続する空白／`{`／`,`／`[` の直後が `"`」というアンカー
-  #    条件を満たさず素通りする（イシュー #472 P0 codex-review 再指摘・
-  #    Cursor Bugbot 同旨指摘）。よって判定を非アンカー化し、「行頭（空白のみ
-  #    挟んで）に `"` が来る」か「行中のどこであれ `{`／`,`／`[` の直後（空白を
-  #    挟んでよい）に `"` が来る」のいずれかを行全体から検索する。マッチした
-  #    行はさらに `"` の出現数が奇数であることを確認し、奇数であれば「この行で
-  #    キーの二重引用スカラーが閉じきらず次行以降へまたがっている」証跡として
-  #    違反にする。`run: |` 等のブロックスカラー内のシェルスクリプトは通常
-  #    `{`／`,`／`[` の直後が `"` になる文脈を持たない（例: `result="${pair#*:}"`・
-  #    `echo "..."`・`curl ... "https://..."`）ため、非アンカー化後もこの絞り込みで
-  #    誤検出しない（本リポの実 workflow ファイルで実測確認済み）。行番号付きで
-  #    報告するため grep ではなく行単位ループで数える。
-  local multiline_quote_lines=""
-  local ln=0
-  local qcount
-  while IFS= read -r line; do
-    ln=$((ln + 1))
-    if [[ "${line}" =~ ^[[:blank:]]*\" || "${line}" =~ [,{\[][[:blank:]]*\" ]]; then
-      qcount=$(grep -o '"' <<<"${line}" | wc -l)
-      if [ $((qcount % 2)) -ne 0 ]; then
-        multiline_quote_lines+="${ln}:${line}"$'\n'
-      fi
-    fi
-  done <<<"${stripped}"
-  if [ -n "${multiline_quote_lines}" ]; then
-    echo "::error::${label} に複数行にまたがる二重引用スカラー（引用符の数が奇数の行）が見つかりました（行末バックスラッシュによる行継続でキーを分割し検査を迂回しうるため、意味解析せず無条件に違反とします）:" >&2
-    echo -n "${multiline_quote_lines}" >&2
-    failed=1
-  fi
-
-  if [ "${failed}" -ne 0 ]; then
+# fail-closed: 検査本体の実行手段が無い場合、スキップして成功にせず失敗させる。
+ensure_python() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "::error::python3 が見つかりません。runner 契約検査は実行できないため失敗とします（fail-closed）。python3 を導入してください。" >&2
     return 1
   fi
-  echo "OK: ${label} は runner 契約（${ALLOWED_RUNNER_VALUE} 完全一致・self-hosted 不在・既知のキー表記のみ）に適合"
+  if [ ! -f "${CHECKER}" ]; then
+    echo "::error::検査本体（${CHECKER}）が見つかりません（fail-closed）" >&2
+    return 1
+  fi
 }
 
 check() {
-  local workflow_dir=".github/workflows"
-  if [ ! -d "${workflow_dir}" ]; then
-    echo "::error::${workflow_dir} が見つかりません（fail-closed: 検査対象ディレクトリの消失を違反として扱う）" >&2
-    return 1
-  fi
-
-  local files=()
-  local f
-  while IFS= read -r -d '' f; do
-    files+=("${f}")
-  done < <(find "${workflow_dir}" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print0 | sort -z)
-
-  if [ "${#files[@]}" -eq 0 ]; then
-    echo "::error::${workflow_dir} に *.yml/*.yaml が見つかりません（fail-closed: 対象 0 件を違反として扱う）" >&2
-    return 1
-  fi
-
-  local failed=0
-  for f in "${files[@]}"; do
-    if ! check_workflow_text "${f}" "$(cat "${f}")"; then
-      failed=1
-    fi
-  done
-
-  if [ "${failed}" -ne 0 ]; then
-    return 1
-  fi
-  echo "OK: ${#files[@]} 件の workflow ファイルすべてが runner 契約に適合"
+  python3 "${CHECKER}" check
 }
 
 self_test() {
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  local clean="${script_dir}/testdata/workflow-runner-clean.yml"
-  local forbidden="${script_dir}/testdata/workflow-runner-forbidden.yml"
-  local unknown="${script_dir}/testdata/workflow-runner-unknown.yml"
+  local testdata="${SCRIPT_DIR}/testdata"
+  # ポジティブ fixture: 唯一の許容形（ubuntu-latest 完全一致）のみで構成され pass する
+  # こと（コメント内の self-hosted 言及・引用文字列内の `#` を誤検出しないことの検証
+  # を兼ねる）。
+  local clean_fixtures=(
+    "${testdata}/workflow-runner-clean.yml"
+  )
+  # ネガティブ fixture: いずれも fail すること。素直な違反（forbidden）・許容形外
+  # （unknown: larger runner・ブロックシーケンス・式展開）に加え、PR #626 の
+  # codex-review が P0/P1 指摘した YAML 表記トリック迂回（trick-*）と YAML パース
+  # 不能（invalid: fail-closed の検証）を含む。
+  local violation_fixtures=(
+    "${testdata}/workflow-runner-forbidden.yml"
+    "${testdata}/workflow-runner-unknown.yml"
+    "${testdata}/workflow-runner-trick-escaped-key.yml"
+    "${testdata}/workflow-runner-trick-flow-mapping.yml"
+    "${testdata}/workflow-runner-trick-multiline-key.yml"
+    "${testdata}/workflow-runner-trick-comment-in-string.yml"
+    "${testdata}/workflow-runner-invalid.yml"
+  )
   local failed=0
+  local f
 
-  for f in "${clean}" "${forbidden}" "${unknown}"; do
+  for f in "${clean_fixtures[@]}" "${violation_fixtures[@]}"; do
     if [ ! -f "${f}" ]; then
       echo "NG: self-test fixture が見つかりません（${f}）" >&2
       return 1
     fi
   done
 
-  # ポジティブ: ubuntu-latest のみ・コメント内 self-hosted を含む clean fixture は
-  # pass すること（コメント誤検出がないことの検証を兼ねる）。
-  if check_workflow_text "self-test clean fixture" "$(cat "${clean}")" >/dev/null; then
-    echo "self-test OK: clean fixture は pass する"
-  else
-    echo "self-test NG: clean fixture が誤って fail した（検査ロジックが誤検出している）" >&2
-    failed=1
-  fi
+  for f in "${clean_fixtures[@]}"; do
+    if python3 "${CHECKER}" check-file "${f}" >/dev/null; then
+      echo "self-test OK: $(basename "${f}") は pass する"
+    else
+      echo "self-test NG: $(basename "${f}") が誤って fail した（検査ロジックが誤検出している）" >&2
+      failed=1
+    fi
+  done
 
-  # ネガティブ: 非コメント行に self-hosted を含む forbidden fixture は fail すること
-  # （受け入れ条件「self-hosted 再導入で CI が fail する」の機械検証）。
-  if check_workflow_text "self-test forbidden fixture" "$(cat "${forbidden}")" >/dev/null 2>&1; then
-    echo "self-test NG: forbidden fixture が誤って pass した（検査ロジックが退行している）" >&2
-    failed=1
-  else
-    echo "self-test OK: forbidden fixture は fail する"
-  fi
-
-  # ネガティブ: 許容形以外の runner 宣言（larger runner 名・ブロックシーケンス形式等）
-  # を含む unknown fixture は fail すること（fail-open 側への取りこぼしがないことの検証）。
-  if check_workflow_text "self-test unknown fixture" "$(cat "${unknown}")" >/dev/null 2>&1; then
-    echo "self-test NG: unknown fixture が誤って pass した（検査ロジックが退行している）" >&2
-    failed=1
-  else
-    echo "self-test OK: unknown fixture は fail する"
-  fi
+  for f in "${violation_fixtures[@]}"; do
+    if python3 "${CHECKER}" check-file "${f}" >/dev/null 2>&1; then
+      echo "self-test NG: $(basename "${f}") が誤って pass した（検査ロジックが退行している）" >&2
+      failed=1
+    else
+      echo "self-test OK: $(basename "${f}") は fail する"
+    fi
+  done
 
   if [ "${failed}" -ne 0 ]; then
     return 1
@@ -332,9 +116,11 @@ main() {
   local subcommand="${1:-}"
   case "${subcommand}" in
     check)
+      ensure_python
       check
       ;;
     self-test)
+      ensure_python
       self_test
       ;;
     *)

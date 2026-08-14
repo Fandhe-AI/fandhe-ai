@@ -1,0 +1,13 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（PR #626 P0 指摘）。
+# フローマッピング（`{ ... }`）内の runner 宣言・`{` だけ前置して次行へ続く形は、
+# 行単位のテキスト照合では取りこぼしうるが、YAML デコード後は通常のマッピング
+# エントリに正規化されるため検出され fail するはず。
+name: dummy
+
+jobs:
+  inline-flow: { runs-on: self-hosted, timeout-minutes: 5 }
+
+  multiline-flow: {
+    "runs-on":
+      self-hosted,
+    timeout-minutes: 5 }

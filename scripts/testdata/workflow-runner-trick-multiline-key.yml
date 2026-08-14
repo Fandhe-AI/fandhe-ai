@@ -1,0 +1,17 @@
+# scripts/check-workflow-runner-policy.sh self-test 用の違反 fixture（PR #626 P0 指摘）。
+# 複数行 double-quoted キー（`"runs-\` + 改行 + `on"`）・明示キー `?` 形式は、行単位の
+# テキスト照合では `runs-on` という連続文字列が現れず迂回できたが、YAML デコード後は
+# キー文字列 runs-on に正規化されるため検出され fail するはず。
+name: dummy
+
+jobs:
+  explicit-multiline-key:
+    ? "runs-\
+      on"
+    : self-hosted
+    timeout-minutes: 5
+
+  explicit-key:
+    ? "runner-label"
+    : codex
+    timeout-minutes: 5
