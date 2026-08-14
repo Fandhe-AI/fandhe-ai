@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo 'rust-ai-library: 日本語でやりとり / 作業は subagent へ委譲し main 消費を抑える (delegation.md, delegation-impl.md) / 完全自作コア・依存は許容 8 区分のみで =x.y.z 固定 (deps-policy.md) / CI は self-hosted (ci.md) / Conventional Commits 厳守 (--no-verify 禁止) / implement-issue は計画承認後に実装'"
+            "command": "echo 'rust-ai-library: 日本語でやりとり / 作業は subagent へ委譲し main 消費を抑える (delegation.md, delegation-impl.md) / 完全自作コア・依存は許容 8 区分のみで =x.y.z 固定 (deps-policy.md) / CI は GitHub ホステッド (ci.md) / Conventional Commits 厳守 (--no-verify 禁止) / implement-issue は計画承認後に実装'"
           }
         ]
       }

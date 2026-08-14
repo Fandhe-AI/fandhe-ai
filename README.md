@@ -70,7 +70,7 @@ make docker-ci      # コンテナ内で make ci を実行（環境非依存の�
 
 ### CUDA 実機での `#[ignore]` テスト実行
 
-`backend-cuda` の実機依存テスト（形状網羅・K=4096 ストレス・性能比較・デバイスメタデータ肯定的検証等）は通常 CI（self-hosted・CUDA toolkit 非搭載）では `#[ignore]` により除外されます。CUDA ドライバ搭載の実機（DGX Spark GB10 等）で以下を実行してください（TASK-1.7e・#36）。
+`backend-cuda` の実機依存テスト（形状網羅・K=4096 ストレス・性能比較・デバイスメタデータ肯定的検証等）は通常 CI（現行 self-hosted・CUDA toolkit 非搭載。Phase 2 #465〜#469 でホステッド化予定。方針は [`.claude/rules/ci.md`](.claude/rules/ci.md)）では `#[ignore]` により除外されます。CUDA ドライバ搭載の実機（DGX Spark GB10 等）で以下を実行してください（TASK-1.7e・#36）。
 
 ```bash
 make test-ignored-cuda   # backend-cuda に限定した #[ignore] テスト実行（release）
@@ -84,7 +84,7 @@ Tensor Core（WMMA TF32／f16）経路の TFLOPS 実測・複合判定通過の�
 
 ### Metal 実機での `#[ignore]` テスト実行
 
-`backend-metal` の実機依存テスト（デバイス・バッファ基盤・naive/tiled/simdgroup GEMM の CPU 参照実装との数値一致・CPU-Metal ペア回帰等）は通常 CI（self-hosted・Linux）では `cfg(target_os = "macos")` と `#[ignore]` の二重分離により除外されます。Apple Silicon 実機で以下を実行してください（TASK-1.8e・#42。詳細手順・テスト一覧は [`docs/backend-metal-real-device-testing.md`](docs/backend-metal-real-device-testing.md) を参照）。
+`backend-metal` の実機依存テスト（デバイス・バッファ基盤・naive/tiled/simdgroup GEMM の CPU 参照実装との数値一致・CPU-Metal ペア回帰等）は通常 CI（現行 self-hosted・Linux。Phase 2 #465〜#469 でホステッド化予定）では `cfg(target_os = "macos")` と `#[ignore]` の二重分離により除外されます。Apple Silicon 実機で以下を実行してください（TASK-1.8e・#42。詳細手順・テスト一覧は [`docs/backend-metal-real-device-testing.md`](docs/backend-metal-real-device-testing.md) を参照）。
 
 ```bash
 make test-ignored-metal   # backend-metal に限定した #[ignore] テスト実行（release）
@@ -102,7 +102,7 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 
 ## CI
 
-- CI はすべて **self-hosted runner** で実行します（`.claude/rules/ci.md`）
+- CI ランナー方針は GitHub ホステッド（`ubuntu-latest`）既定へ反転済み（public 区分。例外は codex-review の codex 実行ジョブのみ。`.claude/rules/ci.md`）。既存 workflow の `runs-on: self-hosted` の実体移行は Phase 2（#465〜#469）で実施中で、移行完了までは現行どおり self-hosted runner で実行します
 - `ci.yml`: fmt / clippy / test / deny / 依存禁止検査（TASK-1.2）＋集約ジョブ `ci-complete`（branch protection にはこれのみを指定）
 - `update-external.yml`: `docs/spec` サブモジュールと `.claude/skills` の自動追従（毎日 09:00 JST。PR label: `dependencies`・`automated`）。`docs/spec` は private リポジトリのため、org secret `SUBMODULE_PAT`（visibility=all）を優先参照して取得します（`GITHUB_TOKEN` はフォールバックのみで、public 化後も private submodule は取得できません。#463）
 
