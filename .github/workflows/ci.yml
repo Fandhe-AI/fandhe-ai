@@ -151,7 +151,8 @@ jobs:
   # [advisories] / [bans] 節コメント参照）・test-timeout-minutes（45。共通側既定 30
   # より長い移行前の値を維持。#465 の Phase 2 移行）以外の入力（fmt/clippy/deny の
   # timeout・cache〈false。ホステッド（使い捨て VM）向けのキャッシュ設計〈キー構成・
-  # restore-keys〉は #466 で確立する〉）は、共通側の既定値が本リポジトリの意図と
+  # restore-keys〉は #466（build 系 3 ジョブのみが対象で本ジョブはスコープ外）とは別に
+  # #622 で確立する〉）は、共通側の既定値が本リポジトリの意図と
   # 同一のため指定しない。concurrency は reusable workflow の
   # トップレベルでは機能しないため、従来どおり本ファイル冒頭の concurrency 設定が
   # 直列化を担う。
