@@ -71,12 +71,15 @@ git rev-parse HEAD > .rev-stamp
 # --delete-excluded は受け側に残った除外対象ファイルも削除する（過去の転送で
 # 残った管理外ファイルを回収する）。ビルドキャッシュは同期ツリー外の
 # CARGO_TARGET_DIR に置くため、この削除では失われない。
-# .env* / .claude/settings.local.json / .venv*/ は .gitignore でも除外されるが、
-# 秘密情報の転送は fail-closed で防ぐため明示的にも除外する（多層防御）。
+# .env* / .claude/settings.local.json / .venv*/ / real-hardware-verification-env.local.md
+# は .gitignore でも除外されるが、秘密情報・内部実値の転送は fail-closed で防ぐため
+# 明示的にも除外する（多層防御。.local.md は内部ホスト名・パスの実値を持つため、
+# gitignore フィルタが省略・誤設定された場合でも共有ノードへ渡さない）。
 rsync -a --delete --delete-excluded \
   --filter=':- .gitignore' \
   --exclude '.git/' --exclude '.codex/' \
   --exclude '.env*' --exclude '.claude/settings.local.json' --exclude '.venv*/' \
+  --exclude 'real-hardware-verification-env.local.md' \
   ./ "$CUDA_NODE":~/work/rust-ai-library-run/
 
 rm .rev-stamp
@@ -84,9 +87,10 @@ rm .rev-stamp
 # 転送後にノード側で必ずリビジョンを確認する（古いカーネルの数値を記録する事故を防ぐ）
 ssh "$CUDA_NODE" 'cat ~/work/rust-ai-library-run/.rev-stamp'
 
-# 秘密情報が渡っていないことを確認する（初回・フィルタ変更時）
+# 秘密情報・内部実値が渡っていないことを確認する（初回・フィルタ変更時）
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
-  find . -name ".env*" -o -name "settings.local.json" | head'
+  find . -name ".env*" -o -name "settings.local.json" \
+    -o -name "real-hardware-verification-env.local.md" | head'
 ```
 
 ### 注意

@@ -1,7 +1,9 @@
 # 実機検証環境（ローカル実値）テンプレート
 
 `docs/real-hardware-verification-env.md`（公開版・手順の正本）で `<cuda-node>` 等のプレースホルダに
-置き換わっている実値をここに書く。このファイル自体は Git 管理外（`.gitignore` 参照）。
+置き換わっている実値を書くためのテンプレート。**この `.example` ファイル自体は Git の追跡対象**であり、
+実値を書いてはならない。Git 管理外（`.gitignore` 参照）なのはコピー先の
+`docs/real-hardware-verification-env.local.md` である。
 実値は書かず、コピーしてから各自のローカル環境で埋めること（イシュー #461。公開前監査）。
 
 ## 使い方
@@ -23,5 +25,5 @@ cp docs/real-hardware-verification-env.local.md.example docs/real-hardware-verif
 
 ## 注意
 
-- このファイルには実値を書いてよいが、コミット・PR・issue コメントには一切転記しない
+- 実値を書いてよいのはコピー先のローカルファイル（`docs/real-hardware-verification-env.local.md`）のみ。この `.example`（追跡対象）には書かない。またローカルファイルの実値もコミット・PR・issue コメントには一切転記しない
 - 内容に秘密情報（パスワード・トークン）は含めない（SSH は鍵認証・エージェント転送を前提とし、鍵材料自体もこのファイルに書かない）
