@@ -25,8 +25,11 @@
 # guardrail-regression・verification-gates・ci-complete も同設計を踏襲して
 # `runs-on: ubuntu-latest` へ移行済み（イシュー #467。ci-complete の移行は PR #619
 # 〈#466〉が「#467 または #468 消化時の対応が自然」と明示委譲した残件をここで引き取った）。
-# これにより ci.yml 内の `runs-on: self-hosted` は解消済み（rust-ci ジョブの
-# `runner-label: self-hosted` 入力は別スコープ〈イシュー #465〉）。
+# これにより ci.yml 内の `runs-on: self-hosted` は解消済み。rust-ci ジョブの
+# `runner-label` 入力（別スコープ〈イシュー #465〉）も `ubuntu-latest` へ切替済みで、
+# ci.yml は self-hosted 参照を持たない（rust-ci 呼び出し先の共通側 reusable workflow
+# 自体の入力既定値が `self-hosted` であることは別問題。「rust-base-ci reusable
+# workflow」節参照）。
 #
 # 使い捨て VM ではジョブ間で依存解決・ビルド成果物を再利用できないため、上記の
 # cargo 系ジョブ（rust-ci を除く 5 ジョブ）に `actions/cache`（SHA 固定）による 2 層
@@ -154,13 +157,16 @@ jobs:
   # 旧 fmt / clippy / test / deny の 4 ジョブ定義は Fandhe-AI/actions 側へ集約済み。
   # uses の参照は組織規約によりコミット SHA へ固定する（@main 禁止。更新時は
   # `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決した SHA へ差し替える）。
-  # deny-checks（advisories bans licenses sources。共通側既定〈advisories licenses
-  # sources〉に bans を追加するため明示指定する。#353。advisories / bans の設定・
-  # 違反 0 件の実測根拠は deny.toml の [advisories] / [bans] 節コメント参照）・
-  # test-timeout-minutes（45。共通側既定 30 より長い移行前の値を維持）以外の入力
-  # （fmt/clippy/deny の timeout・cache〈false。workspace が永続する self-hosted
-  # runner では不要〉）は、共通側の既定値が移行前の本ファイルの値と同一のため
-  # 指定しない。concurrency は reusable workflow の
+  # runner-label（ubuntu-latest。public 区分〈#457 Phase 1・#464〉への反転を明示する
+  # オーバーライド。共通側入力の既定値は self-hosted）・deny-checks（advisories bans
+  # licenses sources。共通側既定〈advisories licenses sources〉に bans を追加するため
+  # 明示指定する。#353。advisories / bans の設定・違反 0 件の実測根拠は deny.toml の
+  # [advisories] / [bans] 節コメント参照）・test-timeout-minutes（45。共通側既定 30
+  # より長い移行前の値を維持。#465 の Phase 2 移行）以外の入力（fmt/clippy/deny の
+  # timeout・cache〈false。ホステッド（使い捨て VM）向けのキャッシュ設計〈キー構成・
+  # restore-keys〉は #466（build 系 3 ジョブのみが対象で本ジョブはスコープ外）とは別に
+  # #622 で確立する〉）は、共通側の既定値が本リポジトリの意図と
+  # 同一のため指定しない。concurrency は reusable workflow の
   # トップレベルでは機能しないため、従来どおり本ファイル冒頭の concurrency 設定が
   # 直列化を担う。
   # 前提: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
@@ -172,13 +178,18 @@ jobs:
       contents: read
     uses: Fandhe-AI/actions/.github/workflows/rust-base-ci.yml@fed9c07d98367f77e5e2b63bca38843f46feee96 # main
     with:
-      # 組織 runner 方針（private リポジトリは self-hosted）。既定値と同値だが
-      # 方針の明示のため省略しない（.claude/rules/ci.md）
-      runner-label: self-hosted
+      # public 区分（GitHub ホステッド既定。#457 Phase 1・#464 で反転）。共通側入力の
+      # 既定値は self-hosted のため、public 区分への反転を明示するオーバーライドとして
+      # 必須（.claude/rules/ci.md）
+      runner-label: ubuntu-latest
       # 共通側既定（advisories licenses sources）へ bans を追加（#353）。トークンは
       # 共通側 deny ジョブが閉じた whitelist と厳密一致で fail-closed 検証する
       deny-checks: advisories bans licenses sources
-      # 移行前の test ジョブの timeout（45 分）を維持する（共通側既定は 30 分）
+      # ホステッド（使い捨て VM）移行後も、まずは移行前と同じ 45 分を維持する
+      # （共通側既定は 30 分）。#465 の PR #618 実測: rust-ci / cargo test は 2m9s
+      # （04:18:38〜04:20:47 UTC。
+      # https://github.com/Fandhe-AI/rust-ai-library/actions/runs/31769466364/job/94672194814）
+      # であり 35 分を大幅に下回るため 45 分を維持で確定した（60 分への引き上げは不要）
       test-timeout-minutes: 45
 
   # --------------------------------------------------
