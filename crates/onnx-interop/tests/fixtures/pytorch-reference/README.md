@@ -2,7 +2,7 @@
 
 `#73`（TASK-7.1a・REQ-7）の `tests/st_load.rs` が参照する固定 fixture。
 `docs/spec/03-poc/poc-v2-6-interop/code/fixtures/`（PoC-v2-6・PR 由来）から
-そのままコピーした（コピー元は変更・削除していない）。CI（self-hosted）は
+そのままコピーした（コピー元は変更・削除していない）。CI は
 `docs/spec`（submodule）を checkout しないため（`crates/tensor-core/tests/
 tensor_views.rs` 冒頭コメント参照）、テストが依存する fixture は本クレート
 配下に複製して持つ。

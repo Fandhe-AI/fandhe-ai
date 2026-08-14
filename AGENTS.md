@@ -113,9 +113,9 @@
   `.unwrap()` / `.expect()`、panic を境界外へ漏らす経路は P1。エラーは型付きエラーと
   する
 - **CI 規約（P1）**: GitHub ホステッド（`ubuntu-latest`）既定（public 区分。例外は
-  codex-review の codex 実行ジョブのみ）・self-hosted への逆戻りは P1（Phase 2
-  #465〜#469 完了までの既存 `runs-on: self-hosted` の残存自体は違反ではない）・
-  larger runner（有料の大型ホステッドランナー）の使用・
+  codex-review の codex 実行ジョブのみ）・self-hosted への逆戻りは P1（#457 Phase 1〜3
+  完了・移行済み。`runs-on: self-hosted` の出現は `runner-policy` 契約検査〈#472〉でも
+  fail する）・larger runner（有料の大型ホステッドランナー）の使用・
   `timeout-minutes` 必須（reusable workflow 呼び出しジョブを除く）・action /
   reusable workflow の SHA 固定・`permissions` 最小化・`ci-complete` の fail-closed
   集約判定の維持（`.claude/rules/ci.md`）。`pull_request_target` 等の fork PR へ

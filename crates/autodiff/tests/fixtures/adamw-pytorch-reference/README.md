@@ -4,8 +4,8 @@
 実装」）の `tests/nn_optim_adamw.rs::adamw_matches_pytorch_reference` が
 参照する固定フィクスチャ。`onnx-interop` の
 `tests/fixtures/pytorch-reference/README.md`（#73 先例）と同じ方針で、
-生成条件・sha256 を記録した状態で JSON をコミットする。CI
-（self-hosted）は Python/PyTorch に依存せず、コミット済み JSON のみを
+生成条件・sha256 を記録した状態で JSON をコミットする。CI は
+Python/PyTorch に依存せず、コミット済み JSON のみを
 読む（`.claude/rules/ci.md`「グローバル状態を汚す処理を workflow に
 書かない」）。
 

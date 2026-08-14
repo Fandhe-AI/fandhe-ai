@@ -102,9 +102,8 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   分離の解除を含む）: **P1**
 - **CI ワークフローの規約違反**（.claude/rules/ci.md。`runs-on: self-hosted` の指定・
   self-hosted への逆戻り〈本リポジトリは public 区分のため GitHub ホステッド
-  （`ubuntu-latest`）既定。例外は codex-review の codex 実行ジョブのみ。Phase 2
-  （#465〜#469）完了までは既存 workflow に `runs-on: self-hosted` が残存するため、
-  差分で新規追加・変更された箇所のみを判定対象とし、既存行の残存のみでは指摘しない〉・
+  （`ubuntu-latest`）既定。例外は codex-review の codex 実行ジョブのみ。#457 Phase 1〜3
+  完了・移行済みのため、既存行の残存を含め `runs-on: self-hosted` の出現は一律指摘対象〉・
   larger runner の使用・`timeout-minutes` 欠落〈reusable workflow 呼び出しジョブ
   （`rust-ci` / `codex-review` 等の `uses:` ジョブ）は共通側の各ジョブが timeout を
   持つため呼び出し側での設定不要であり違反ではない〉・action / reusable workflow の

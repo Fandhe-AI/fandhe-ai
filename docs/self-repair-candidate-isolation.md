@@ -36,6 +36,11 @@
 git 操作（`diff_signals` 等）も同一 runner を経由するため同じ遮断下に置く
 （`GIT_*` 除去の既存契約は allowlist 方式で自然に包含される）。
 
+（注記: e・f 行の「self-hosted」は本イシュー #414 判断当時の CI 実行環境。
+CI は #457 で GitHub ホステッドへ移行済みだが、判断そのもの〈重い外部ツール・
+OS 依存の可搬性欠如による不採用〉は runner 種別に依らず妥当なため本節の
+判断は変更しない）
+
 ## 3. 実装
 
 - `crates/self-repair/src/isolation.rs`: `ExecIsolation` 設定型（環境変数

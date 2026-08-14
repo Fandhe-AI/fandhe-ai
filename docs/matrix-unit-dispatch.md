@@ -23,7 +23,7 @@ REQ-11 の充足は次の 2 本立てで証跡化する。
    PTX `mma.sync`・`ldmatrix`・`cp.async`、Metal `simdgroup_float8x8` 系）が
    リポジトリ内の手書きカーネルソース文字列中に実在することを、
    `#[cfg(test)]` の contains 検査で機械検証する。GPU 実機を必要とせず
-   Linux CI（self-hosted）上で完結する。
+   Linux CI（GitHub ホステッド）上で完結する。
 2. **性能発現**（実測証跡）: `docs/perf/` 配下の各ドキュメントに、実機
    （DGX Spark GB10・Apple Silicon 等）実行後の TFLOPS・数値一致判定結果を
    記録する。実測値の記録責務は各 perf ドキュメントが担い、本ドキュメントは

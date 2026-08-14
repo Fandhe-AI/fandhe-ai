@@ -4,7 +4,8 @@
 # コンテナ内で使えるのは CPU（rayon）バックエンドのみ:
 # - Metal はホスト macOS 直接実行のみ（コンテナから GPU 不可視。objc2 系は
 #   cfg(target_os = "macos") 分離のため Linux コンテナではコンパイル対象外）
-# - CUDA は実機（DGX Spark GB10 等）の self-hosted runner / ホスト実行が前提
+# - CUDA は実機（DGX Spark GB10 等）でのホスト実行が前提（実機 CI ジョブを追加する
+#   場合は `.claude/rules/ci.md`「実機依存」節）
 #   （cudarc の動的ロード方式のため「ビルド」は CUDA toolkit 無しの本コンテナでも成立する）
 # Fandhe-AI/rust-ai-library-v1 の Dockerfile と同一方針。
 FROM rust:1.88-slim-bookworm

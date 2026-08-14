@@ -211,7 +211,7 @@ fail であり、本イシューのスコープ内〈テスト実行・結果記
 
 ## 6. `#[ignore]` 分離が通常 CI で機械的に効いている根拠
 
-`docs/backend-metal-real-device-testing.md` と同型の確認。Mac（CUDA 非搭載）・CI（self-hosted・CUDA
+`docs/backend-metal-real-device-testing.md` と同型の確認。Mac（CUDA 非搭載）・CI（GitHub ホステッド・CUDA
 toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p backend-cuda`（`--ignored` なし）を実行すると、
 本ファイルが対象とする 51 件はすべて `#[ignore]` によりスキップされ、環境適応スモークテスト
 （`*_parity_smoke_env_adaptive` 等）のみが実行される。これらは `CudaDevice::new` が
