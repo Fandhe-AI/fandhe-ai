@@ -646,6 +646,14 @@ class _Parser:
             return v
         if c in ("|", ">"):
             return self.parse_block_scalar(col)
+        # `- "key": value` のようなクォート済みキーの圧縮マッピングを、単なる
+        # クォート済みスカラー値より先に判定する。`_looks_like_mapping_key` は
+        # クォートの有無に関わらず行内の平坦キー終端 `: ` を先読みするため、
+        # クォート分岐より後段に置くと `"key"` の時点で値として消費されてしまい
+        # 後続の `: value` が `expect_end_of_line` で拒否される
+        # （fail-closed 誤検知。cursor[bot] review #4935626935 指摘・PR #626）。
+        if c == "?" or self._looks_like_mapping_key():
+            return self.parse_block_mapping(col)
         if c == '"':
             v = self.parse_double_quoted()
             self.expect_end_of_line()
@@ -654,8 +662,6 @@ class _Parser:
             v = self.parse_single_quoted()
             self.expect_end_of_line()
             return v
-        if c == "?" or self._looks_like_mapping_key():
-            return self.parse_block_mapping(col)
         v = self.parse_plain_scalar_value_block()
         self.expect_end_of_line()
         return v

@@ -36,3 +36,15 @@ jobs:
   space-before-colon:
     runs-on : ubuntu-latest
     timeout-minutes: 5
+
+  # `- "key": value` 圧縮マッピング（シーケンス項目内の引用キー）。cursor[bot]
+  # review #4935626935（PR #626）指摘: parse_inline_node がクォート済みスカラー値
+  # と圧縮マッピングの判別を誤ると、この形の準拠 workflow が fail-closed で
+  # 誤って fail する。ここでは steps 配下の複数キーのうち 1 つを引用しても
+  # pass することを検証する。
+  quoted-step-key:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - "name": quoted key step
+        run: echo "ok"
