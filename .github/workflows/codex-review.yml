@@ -1,8 +1,10 @@
 # OpenAI Codex CLI による PR 自動レビュー（Fandhe-AI/actions の codex-review reusable
 # workflow を SHA 固定で呼び出す薄い wrapper。イシュー #326）。
-# Fandhe-AI/actions の codex-review/templates/codex-review.private.yml（private リポジトリ
+# Fandhe-AI/actions の codex-review/templates/codex-review.public.yml（public リポジトリ
 # 向けテンプレート）を導入手順（codex-review/README.md「セットアップ」）どおりコピーし、
 # <SHA> を差し替えたもの。fandhe-backend / local-llm-server の同名 wrapper と同型。
+# public 化トラッキング（#457）Phase 2（#459 配下）のイシュー #469 で private テンプレート
+# 準拠から本テンプレートへ切替済み（`.claude/rules/ci.md`「codex-review」節参照）。
 # 実装本体・多層防御の設計コメントは共通側 .github/workflows/codex-review.yml を参照。
 # 有効化スイッチは Actions variable CODEX_HOME_DIR（未設定の間は codex ジョブが skip
 # される fail-closed 設計。runner 側の準備が済むまでレビューは実行されない）。
@@ -28,7 +30,15 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
-    # private リポジトリでは runner 既定値（codex ジョブ: codex / コメント投稿ジョブ:
-    # self-hosted）が組織 runner 方針に合致するため、runner ラベルの指定は不要。
-    # 詳細は Fandhe-AI/actions の docs/runner-policy.md・
-    # docs/codex-review-runner-exception.md を参照。
+    # codex ジョブは runner-label（既定値 codex）のまま、public リポジトリでも self-hosted な
+    # codex 専用 runner を使う。これは組織 runner 方針で認められた唯一の例外であり、
+    # fork PR では workflow 側が fail-closed で実行を拒否する。ここでは指定しない。
+    with:
+      # post-feedback-runner-label の既定値は self-hosted であり、public リポジトリでは
+      # 組織 runner 方針（public は GitHub ホステッド）に反する。資格情報に触れない
+      # コメント投稿ジョブなので、必ず ubuntu-latest を明示的に渡すこと。
+      # 詳細は docs/runner-policy.md「3. 例外: codex-review」を参照。
+      post-feedback-runner-label: ubuntu-latest
+      # P2/P3 もブロック対象へ追加したい場合は block-priorities を渡す
+      # （既定は "P0,P1"。P0/P1 は除外不可で、P2/P3 の追加のみ調整できる）:
+      # block-priorities: "P0,P1,P2"
