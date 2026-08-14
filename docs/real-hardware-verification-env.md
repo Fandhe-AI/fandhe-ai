@@ -2,16 +2,20 @@
 
 実機依存の測定・テスト実行時に、どのマシンで・どうやってビルド・テスト・計測を回すかを判断するための環境構成記録。issue #379（Mac Metal）・#388（DGX Spark CUDA）配下の実装エージェントが本ドキュメント内の情報だけで実行判断できることを前提とする。
 
+> **公開版に関する注記（イシュー #461）**: 本ドキュメントは公開リポジトリ向けに、内部ホスト名・内部 venv パス・常駐サービスの実名をプレースホルダへ置換済み。実値（SSH ホスト名等）は Git 管理外の `docs/real-hardware-verification-env.local.md`（`docs/real-hardware-verification-env.local.md.example` をコピーして作成）を参照する。実行判断に必要な手順の構造・注意点はこの公開版のみで完結する。
+>
+> **実行前の準備（codex-review 指摘対応）**: 本ドキュメントのコード例は `<cuda-node>` の実ホスト名をシェル変数 `CUDA_NODE` として参照する（`ssh "$CUDA_NODE" '...'` の形。山括弧のプレースホルダをそのまま貼り付けて実行すると、POSIX shell がリダイレクト（`<`）と解釈しホストが存在せず入力元ファイルが見つからないエラーで失敗する）。実行前に `export CUDA_NODE="<実ホスト名>"`（山括弧を含む値は未クォートだと `export` 自体も同じくリダイレクトと誤解釈されるためクォート必須。実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）を設定してから各コード例を実行する。
+
 ## 1. 対象と役割分担
 
 | 環境 | 用途 | 実行方法 |
 |------|------|---------|
 | Mac（Apple M4 Max・64GB・macOS 26.6） | Metal バックエンド実機テスト・ベンチ（#379） | ローカル直接実行 |
-| DGX Spark GB10（node4 = `local.fandhe.spark-dbd9`） | CUDA バックエンド実機テスト・ベンチ（#388） | SSH リモート実行 |
+| DGX Spark GB10（`<cuda-node>`） | CUDA バックエンド実機テスト・ベンチ（#388） | SSH リモート実行 |
 
 Mac 上では CUDA テストは実行不可（hardware 非対応）。
 
-## 2. CUDA 実機ノード（`local.fandhe.spark-dbd9`）
+## 2. CUDA 実機ノード（`<cuda-node>`）
 
 ### 2.1 ハードウェア・OS・ツールチェーン仕様（2026-08-09 実測）
 
@@ -27,10 +31,10 @@ Mac 上では CUDA テストは実行不可（hardware 非対応）。
 
 ### 2.2 環境変数・PATH の制約
 
-**非ログイン shell（`ssh host 'command'`）の PATH に cargo・nvcc が含まれていない**。以下の形式で実行を指定する：
+**非ログイン shell（`ssh host 'command'`）の PATH に cargo・nvcc が含まれていない**。以下の形式で実行を指定する（`CUDA_NODE` の設定はファイル冒頭の注記を参照）：
 
 ```bash
-ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
   cargo test -p backend-cuda --release -- --ignored --nocapture'
 ```
@@ -49,9 +53,9 @@ ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
 
 ### 2.4 ノード選定理由
 
-他ノード（`spark-3eb8` / `spark-b2c6` / `spark-e194` / `spark-939e`）は常駐サービスが GPU メモリを占有しており計測に不向き。`spark-dbd9` は常駐が ComfyUI（170MiB）と Kokoro TTS（870MiB）のみで GPU utilization 0% のため計測ノードとして最適。
+他ノード（実名はローカル版 `docs/real-hardware-verification-env.local.md` 参照）は常駐サービスが GPU メモリを占有しており計測に不向き。`<cuda-node>` は常駐サービスの GPU 使用量が小さく GPU utilization 0% のため計測ノードとして最適（常駐サービスの内訳・実測値はローカル版参照）。
 
-## 3. コード転送（Mac → `spark-dbd9`）
+## 3. コード転送（Mac → `<cuda-node>`）
 
 git clone / fetch は使わない（ノード側に GitHub 認証鍵が無く HTTPS も不通。過去の `git push ssh://...` が 2 回目以降ハングした実績）。作業 worktree のルートで以下を実行：
 
@@ -67,29 +71,33 @@ git rev-parse HEAD > .rev-stamp
 # --delete-excluded は受け側に残った除外対象ファイルも削除する（過去の転送で
 # 残った管理外ファイルを回収する）。ビルドキャッシュは同期ツリー外の
 # CARGO_TARGET_DIR に置くため、この削除では失われない。
-# .env* / .claude/settings.local.json / .venv*/ は .gitignore でも除外されるが、
-# 秘密情報の転送は fail-closed で防ぐため明示的にも除外する（多層防御）。
+# .env* / .claude/settings.local.json / .venv*/ / real-hardware-verification-env.local.md
+# は .gitignore でも除外されるが、秘密情報・内部実値の転送は fail-closed で防ぐため
+# 明示的にも除外する（多層防御。.local.md は内部ホスト名・パスの実値を持つため、
+# gitignore フィルタが省略・誤設定された場合でも共有ノードへ渡さない）。
 rsync -a --delete --delete-excluded \
   --filter=':- .gitignore' \
   --exclude '.git/' --exclude '.codex/' \
   --exclude '.env*' --exclude '.claude/settings.local.json' --exclude '.venv*/' \
-  ./ local.fandhe.spark-dbd9:~/work/rust-ai-library-run/
+  --exclude 'real-hardware-verification-env.local.md' \
+  ./ "$CUDA_NODE":~/work/rust-ai-library-run/
 
 rm .rev-stamp
 
 # 転送後にノード側で必ずリビジョンを確認する（古いカーネルの数値を記録する事故を防ぐ）
-ssh local.fandhe.spark-dbd9 'cat ~/work/rust-ai-library-run/.rev-stamp'
+ssh "$CUDA_NODE" 'cat ~/work/rust-ai-library-run/.rev-stamp'
 
-# 秘密情報が渡っていないことを確認する（初回・フィルタ変更時）
-ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
-  find . -name ".env*" -o -name "settings.local.json" | head'
+# 秘密情報・内部実値が渡っていないことを確認する（初回・フィルタ変更時）
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  find . -name ".env*" -o -name "settings.local.json" \
+    -o -name "real-hardware-verification-env.local.md" | head'
 ```
 
 ### 注意
 
 - ノード側の作業ディレクトリは `~/work/rust-ai-library-run`（ソースのみ。ビルドキャッシュは置かない）
 - **ビルドキャッシュは同期ツリー外の `$HOME/work/target-rust-ai-library` に置く**（`CARGO_TARGET_DIR` で指定）。同期ツリー内に `target/` を置くと `--delete-excluded` で消えるため、この分離が前提。この構成なら再 rsync 後もキャッシュが残り warm ビルドになる（実測: 再 rsync 後も 176MB のキャッシュが残存し `--ignored` テストが 0.29s で pass）
-- `~/work/rust-ai-library`（末尾 `-run` なし）は 2026-08-04 時点の古い checkout（`8a9d640`）。使わない
+- `~/work/rust-ai-library`（末尾 `-run` なし）は 2026-08-04 時点の古い checkout。使わない
 - `docs/spec`（submodule）の実体も worktree のコピーとして転送される（PyTorch 参照スクリプトが submodule 配下にあるため必要）
 
 ## 4. ビルド・テスト実行
@@ -97,7 +105,7 @@ ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
 ### 4.1 基本形式
 
 ```bash
-ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release -- --ignored --nocapture'
@@ -118,25 +126,19 @@ ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
 `ssh` は cargo が fd を保持する限り返らないため、ログへリダイレクトして親プロセスから切り離す：
 
 ```bash
-ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   setsid nohup env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   cargo test -p backend-cuda --release -- --ignored --nocapture \
   > $HOME/work/cuda-test.log 2>&1 < /dev/null & echo started'
-ssh local.fandhe.spark-dbd9 'tail -5 $HOME/work/cuda-test.log'
+ssh "$CUDA_NODE" 'tail -5 $HOME/work/cuda-test.log'
 ```
 
 ## 5. PyTorch 参照値の再計測（同一実機）
 
 ### 5.1 venv の利用
 
-ノードには system torch が無い。以下の既存 venv を**読み取り利用のみ**とする（追加・更新はしない）：
-
-```bash
-/opt/llm-infra/comfyui-env/bin/python  # torch 2.13.0+cu130・torch.cuda.is_available() = True
-# または
-/opt/llm-infra/venvs/kokoro/bin/python3  # 同一バージョン
-```
+ノードには system torch が無い。実ホスト上の既存 venv（実パスは `docs/real-hardware-verification-env.local.md` 参照）を**読み取り利用のみ**とする（追加・更新はしない）。venv は torch 2.13.0+cu130（`torch.cuda.is_available() == True`）。
 
 ### 5.2 実行手順
 
@@ -147,7 +149,7 @@ ssh local.fandhe.spark-dbd9 'tail -5 $HOME/work/cuda-test.log'
 ### 6.1 計測前後の占有状況確認
 
 ```bash
-ssh local.fandhe.spark-dbd9 'nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; \
+ssh "$CUDA_NODE" 'nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; \
   nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'
 ```
 
@@ -155,7 +157,7 @@ ssh local.fandhe.spark-dbd9 'nvidia-smi --query-compute-apps=pid,process_name,us
 
 ### 6.2 常駐サービス
 
-**常駐サービス（ComfyUI・Kokoro TTS・vLLM）を停止してはいけない**。ノードは 2026-07-12 以降 sudoers の NOPASSWD が削除済みで、非対話 sudo は使用不可。停止・再開は人間の対話的 sudo が必要な運用（先例: node3 の `vllm-node3` はオペレーターが対話的に停止 → ベンチ → 再開・応答確認を実施）。停止が必要と判断した場合は**エージェントが実行せずユーザーへ確認する**。
+**常駐サービス（実名はローカル版参照）を停止してはいけない**。ノードは 2026-07-12 以降 sudoers の NOPASSWD が削除済みで、非対話 sudo は使用不可。停止・再開は人間の対話的 sudo が必要な運用（先例: 他ノードの常駐サービスをオペレーターが対話的に停止 → ベンチ → 再開・応答確認を実施）。停止が必要と判断した場合は**エージェントが実行せずユーザーへ確認する**。
 
 ### 6.3 メモリ判定の方法
 

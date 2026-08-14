@@ -1,0 +1,29 @@
+# 実機検証環境（ローカル実値）テンプレート
+
+`docs/real-hardware-verification-env.md`（公開版・手順の正本）で `<cuda-node>` 等のプレースホルダに
+置き換わっている実値を書くためのテンプレート。**この `.example` ファイル自体は Git の追跡対象**であり、
+実値を書いてはならない。Git 管理外（`.gitignore` 参照）なのはコピー先の
+`docs/real-hardware-verification-env.local.md` である。
+実値は書かず、コピーしてから各自のローカル環境で埋めること（イシュー #461。公開前監査）。
+
+## 使い方
+
+```bash
+cp docs/real-hardware-verification-env.local.md.example docs/real-hardware-verification-env.local.md
+# docs/real-hardware-verification-env.local.md を編集して以下のキーを埋める
+```
+
+## 埋めるキー一覧（コピー先で「実値」列を埋める）
+
+| キー | 実値（コピー先で記入） | 用途 | 公開版での参照箇所 |
+|------|----------------------|------|-------------------|
+| CUDA 実機ノードの SSH ホスト名 | `CUDA_NODE=<ここに実ホスト名>` | シェル変数 `CUDA_NODE`（`export CUDA_NODE="<実ホスト名>"` してから `ssh "$CUDA_NODE" '...'` を実行する。山括弧のプレースホルダは `export` 自体も含め未クォートだと shell のリダイレクトと誤解釈されるため常にダブルクォートで囲む） | docs/real-hardware-verification-env.md 2〜6 節 |
+| 他ノード名一覧（計測に不向きなノード） | `<ここにノード名を列挙>` | ノード選定理由の根拠 | docs/real-hardware-verification-env.md 2.4 節 |
+| 常駐サービスの実名・GPU メモリ使用量 | `<ここにサービス名と使用量を列挙>` | ノード選定理由・停止禁止事項の根拠 | docs/real-hardware-verification-env.md 2.4・6.2 節 |
+| PyTorch 参照計測用 venv の絶対パス | `PYTORCH_VENV_PYTHON=<ここに絶対パス>` | `python` 実行パス | docs/real-hardware-verification-env.md 5.1 節 |
+| CUDA ノードのユーザー名・作業ディレクトリ（`~/work/...` 以外に差異があれば） | `<ここにユーザー名・ディレクトリ>` | rsync 転送先・ビルドコマンド | docs/real-hardware-verification-env.md 3〜4 節 |
+
+## 注意
+
+- 実値を書いてよいのはコピー先のローカルファイル（`docs/real-hardware-verification-env.local.md`）のみ。この `.example`（追跡対象）には書かない。またローカルファイルの実値もコミット・PR・issue コメントには一切転記しない
+- 内容に秘密情報（パスワード・トークン）は含めない（SSH は鍵認証・エージェント転送を前提とし、鍵材料自体もこのファイルに書かない）

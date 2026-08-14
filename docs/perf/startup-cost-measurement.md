@@ -185,7 +185,7 @@ run1 cold 第 1 サンプルのみであり、これも「本プロセスにと�
 ## CUDA 実測結果
 
 イシュー #391（REQ-13・本ドキュメント CUDA 節の実機実測）の実測。DGX Spark GB10
-実機（`local.fandhe.spark-dbd9`。`docs/real-hardware-verification-env.md` 2 節）で
+実機（`<cuda-node>`。`docs/real-hardware-verification-env.md` 2 節）で
 `./target/release/startup_bench --backend cuda --trials 5` を `--out` 付きで 2 セット
 実行し、`StartupReport`（コールド／ウォーム別、5 試行の中央値＋Q1/Q3）を取得した。
 生 JSON は `docs/perf/startup-cost/cuda-run1.json`・`cuda-run2.json`（全試行の
@@ -205,7 +205,7 @@ TRIALS=5`（`--out` なし・標準出力）も 1 回実行した。
 | ビルドプロファイル | `--release`（`cargo build -p bench-harness --release --bins`） |
 | 実施日 | 2026-08-10 |
 | 実行コマンド | `./target/release/startup_bench --backend cuda --trials 5 --out docs/perf/startup-cost/cuda-run{1,2}.json` および `make startup-bench BACKEND=cuda TRIALS=5` |
-| GPU 占有状況 | 計測前後とも常駐 2 プロセス（ComfyUI 170MiB・Kokoro TTS 870MiB）のみ・`utilization.gpu` 0%（`docs/real-hardware-verification-env.md` 6.1 節の手順で確認） |
+| GPU 占有状況 | 計測前後とも常駐 2 プロセスのみ（実名・使用量はローカル版 `docs/real-hardware-verification-env.local.md` 参照）・`utilization.gpu` 0%（`docs/real-hardware-verification-env.md` 6.1 節の手順で確認） |
 
 ### 内部計測（`device_init_secs`・`first_kernel_secs`。probe プロセス内 `Instant` 計測）
 
@@ -311,6 +311,8 @@ CudaGemm::new 失敗: CUDA NVRTC library unavailable: libnvrtc dynamic library n
 
 転送・実行方法の正本は `docs/real-hardware-verification-env.md`（2〜4 節）。
 git clone/fetch はノード側で使えないため rsync で転送する（同ドキュメント 3 節）。
+実行前に `export CUDA_NODE="<実ホスト名>"`（山括弧のクォート必須。未クォートだと `export` 自体がリダイレクトと誤解釈される。同ドキュメント冒頭の注記・
+`docs/real-hardware-verification-env.local.md` 参照）を設定する。
 
 ```sh
 # Mac 側 worktree ルートで実行（.rev-stamp によるリビジョン記録・rsync 転送）
@@ -318,12 +320,13 @@ git rev-parse HEAD > .rev-stamp
 rsync -a --delete --delete-excluded --filter=':- .gitignore' \
   --exclude '.git/' --exclude '.codex/' --exclude '.env*' \
   --exclude '.claude/settings.local.json' --exclude '.venv*/' \
-  ./ local.fandhe.spark-dbd9:~/work/rust-ai-library-run/
+  --exclude 'real-hardware-verification-env.local.md' \
+  ./ "$CUDA_NODE":~/work/rust-ai-library-run/
 rm .rev-stamp
 
 # ノード側で実行（--out は同期ツリー外の $HOME/work/ に置く。--delete-excluded で
 # 消えないようにするため）
-ssh local.fandhe.spark-dbd9 'cd ~/work/rust-ai-library-run && \
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
   make startup-bench BACKEND=cuda TRIALS=5'
@@ -467,7 +470,7 @@ autotune を持たない静的ディスパッチ（v2）が起動コストの観
 ### 検証（イシュー #391・DGX Spark GB10 実機で実施）
 
 - 計測前後で `nvidia-smi --query-compute-apps` を確認し、常駐 2 プロセス
-  （ComfyUI・Kokoro TTS）のみ・`utilization.gpu` 0% であることを確認（「CUDA 実測結果」
+  （実名はローカル版 `docs/real-hardware-verification-env.local.md` 参照）のみ・`utilization.gpu` 0% であることを確認（「CUDA 実測結果」
   節「実行環境」表）
 - `./target/release/startup_bench --backend cuda --trials 5` を `--out` 付きで 2 回
   （`cuda-run1.json`・`cuda-run2.json`）実行し、いずれも `ProbeTimeout`・
