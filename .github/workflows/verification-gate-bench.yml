@@ -126,6 +126,17 @@ jobs:
       # 追い出しかねない。本ジョブの所要時間は GEMM 計測（約 76 分〜）が支配的でビルド
       # 時間の短縮効果は相対的に小さいため、target キャッシュの追加は見送り registry
       # キャッシュのみとする。
+      #
+      # 失敗可視化（Issue 起票等）は本ワークフローに設けない（イシュー #468 の判断）。
+      # guardrail-regression-schedule.yml の report ジョブ（scripts/report-guardrail-schedule-result.sh
+      # による Issue 起票・復旧クローズ）とは異なり、本ジョブは schedule 実行かつ
+      # 「実行成立のみを判定・計測値は記録のみ」で pass/fail の閾値判定を持たない
+      # （本ファイル冒頭「bench ノイズ対策の判断（イシュー #468）」参照）。閾値判定を
+      # 持たないゲートに対して失敗通知の仕組みを先行導入すると、通知内容（何が閾値割れ
+      # したか）を欠いたまま「実行が失敗した」事実のみを Issue 化することになり、
+      # TASK-8.2（閾値判定の結線）着手前に運用コストだけが先行する。ホステッド移行に
+      # 伴うタイムアウト到達確率の上昇分を含め、失敗可視化の要否は TASK-8.2 の閾値判定
+      # 結線とあわせて #468 以降で再検討する。
       - name: ゲート 4/4（bench）
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/run-verification-gates.sh bench
