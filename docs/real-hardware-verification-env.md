@@ -4,7 +4,7 @@
 
 > **公開版に関する注記（イシュー #461）**: 本ドキュメントは公開リポジトリ向けに、内部ホスト名・内部 venv パス・常駐サービスの実名をプレースホルダへ置換済み。実値（SSH ホスト名等）は Git 管理外の `docs/real-hardware-verification-env.local.md`（`docs/real-hardware-verification-env.local.md.example` をコピーして作成）を参照する。実行判断に必要な手順の構造・注意点はこの公開版のみで完結する。
 >
-> **実行前の準備（codex-review 指摘対応）**: 本ドキュメントのコード例は `<cuda-node>` の実ホスト名をシェル変数 `CUDA_NODE` として参照する（`ssh "$CUDA_NODE" '...'` の形。山括弧のプレースホルダをそのまま貼り付けて実行すると、POSIX shell がリダイレクト（`<`）と解釈しホストが存在せず入力元ファイルが見つからないエラーで失敗する）。実行前に `export CUDA_NODE=<実ホスト名>`（実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）を設定してから各コード例を実行する。
+> **実行前の準備（codex-review 指摘対応）**: 本ドキュメントのコード例は `<cuda-node>` の実ホスト名をシェル変数 `CUDA_NODE` として参照する（`ssh "$CUDA_NODE" '...'` の形。山括弧のプレースホルダをそのまま貼り付けて実行すると、POSIX shell がリダイレクト（`<`）と解釈しホストが存在せず入力元ファイルが見つからないエラーで失敗する）。実行前に `export CUDA_NODE="<実ホスト名>"`（山括弧を含む値は未クォートだと `export` 自体も同じくリダイレクトと誤解釈されるためクォート必須。実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）を設定してから各コード例を実行する。
 
 ## 1. 対象と役割分担
 

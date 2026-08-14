@@ -26,7 +26,7 @@
 
 ## 2. 実行コマンド
 
-実行前に `export CUDA_NODE=<実ホスト名>`（`docs/real-hardware-verification-env.md` 冒頭の注記・
+実行前に `export CUDA_NODE="<実ホスト名>"`（山括弧のクォート必須。未クォートだと `export` 自体がリダイレクトと誤解釈される。`docs/real-hardware-verification-env.md` 冒頭の注記・
 `docs/real-hardware-verification-env.local.md` 参照）を設定する。
 
 ```sh
