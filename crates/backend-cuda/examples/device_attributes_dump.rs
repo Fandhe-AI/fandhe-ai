@@ -56,19 +56,31 @@ use cudarc::driver::sys::CUdevice_attribute;
 use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 
 /// grid-stride の単純コピー（+1）カーネル。読み出し帯域・書き込み帯域を
-/// 両方含めて 1 回の起動で 2N 要素分のメモリトラフィックを生成する
-/// （STREAM ベンチマークの `copy` 相当）。
+/// 両方含めて 1 回の反復（内側ループ 1 周）で 2N 要素分のメモリトラフィック
+/// を生成する（STREAM ベンチマークの `copy` 相当）。
 ///
-/// 手動境界チェック（`i < n` ループ条件）は最適化・計測目的を理由に
-/// 省略しない（REQ-8。`.claude/rules/coding-rust.md`「カーネル実装の
+/// `repeats` 引数でカーネル**内部**で同じコピーを繰り返す（外側ループ）。
+/// カーネル起動そのものは呼び出し側で 1 回のみ行う設計とすることで、
+/// 起動オーバーヘッドを `repeats` に依らず定数（起動 1 回分）に固定し、
+/// 転送時間だけを `repeats` 倍に伸ばして相対的に希釈する（イシュー #482
+/// codex-review 指摘: 呼び出し側で `repeats` 回連続 `launch` する旧方式は
+/// 最後の `synchronize()` の固定コストは償却できるが、起動そのものの
+/// コスト〈GPU 側キュー投入・カーネルディスパッチ〉は起動回数に比例して
+/// 発生し続けるため、小サイズ計測〈L2 常駐バッファ〉では償却できていな
+/// かった。`measure_bandwidth_secs` のドキュメンテーションコメント参照）。
+///
+/// 手動境界チェック（内側ループの `i < n` 条件）は最適化・計測目的を
+/// 理由に省略しない（REQ-8。`.claude/rules/coding-rust.md`「カーネル実装の
 /// 境界検査」は計測用カーネルにも適用する。イシュー #482 実装計画
 /// §2 共通契約）。
 const BW_COPY_F32: &str = r#"
-extern "C" __global__ void bw_copy_f32(const float* __restrict__ src, float* __restrict__ dst, int n) {
+extern "C" __global__ void bw_copy_f32(const float* __restrict__ src, float* __restrict__ dst, int n, int repeats) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
-    for (int i = idx; i < n; i += stride) {
-        dst[i] = src[i] + 1.0f;
+    for (int r = 0; r < repeats; ++r) {
+        for (int i = idx; i < n; i += stride) {
+            dst[i] = src[i] + 1.0f;
+        }
     }
 }
 "#;
@@ -78,20 +90,30 @@ extern "C" __global__ void bw_copy_f32(const float* __restrict__ src, float* __r
 /// 持たない。一般的な occupancy 確保値として 256 を用いる）。
 const BW_BLOCK_THREADS: u32 = 256;
 
-/// 1 計測サンプルあたりのカーネル起動繰り返し回数。L2 常駐サイズの
-/// 小バッファはカーネル実行そのものが数マイクロ秒程度になり、
-/// `stream.synchronize()` 込みの 1 回計測ではカーネル起動・同期の
-/// オーバーヘッドが支配的になって帯域ではなくオーバーヘッドを測って
-/// しまう（イシュー #482 Review 指摘: RTX 3060 動作検証で
-/// `l2` 実効帯域〈190.42 GB/s〉が `global` 実効帯域〈324.26 GB/s〉を
-/// 下回った事象。L2 常駐コピーが global より遅いのは物理的にありえず、
-/// median_secs=6µs という極小区間では起動＋同期コストが支配的だった）。
-/// 同一バッファに対し `BW_LAUNCH_REPEATS` 回連続起動してから 1 回だけ
-/// `synchronize()` することで、起動・同期コストを繰り返し回数で償却し
-/// 実データ転送時間の比率を高める（`measure_bandwidth_secs` が返す秒数は
-/// 繰り返し回数で割った「起動 1 回あたり」の値）。global（256 MiB）側は
-/// 元々転送時間がオーバーヘッドを大きく上回るため実測値への影響は小さいが、
-/// 両区分で同一の計測境界を使うことで比較可能性を保つ。
+/// 1 計測サンプルあたりの「カーネル内部での」コピー繰り返し回数
+/// （`bw_copy_f32` の `repeats` 引数へ渡す）。L2 常駐サイズの小バッファは
+/// カーネル実行そのものが数マイクロ秒程度になり、`stream.synchronize()`
+/// 込みの 1 回計測ではカーネル起動・同期のオーバーヘッドが支配的になって
+/// 帯域ではなくオーバーヘッドを測ってしまう（イシュー #482 Review 指摘:
+/// RTX 3060 動作検証で `l2` 実効帯域〈190.42 GB/s〉が `global` 実効帯域
+/// 〈324.26 GB/s〉を下回った事象。L2 常駐コピーが global より遅いのは
+/// 物理的にありえず、median_secs=6µs という極小区間では起動＋同期コスト
+/// が支配的だった）。
+///
+/// **旧方式の限界（イシュー #482 codex-review 指摘。PR #635）**: 当初は
+/// 呼び出し側で `launch` を `BW_LAUNCH_REPEATS` 回連続実行してから 1 回
+/// だけ `synchronize()` する方式だったが、これは `synchronize()` の
+/// 固定コストしか償却できず、カーネル起動そのもの（GPU 側キュー投入・
+/// ディスパッチ）のコストは起動回数に比例して発生し続けるため、小サイズ
+/// 計測では依然として起動オーバーヘッドが支配的になり得た。現方式は
+/// `repeats` をカーネル**内部**の外側ループへ渡し、呼び出し側の起動は
+/// 常に 1 回のみとすることで、起動コストを `repeats` に依らない定数
+/// （起動 1 回分）に固定し、転送時間だけを `repeats` 倍に伸ばして
+/// 相対的に希釈する（`measure_bandwidth_secs` が返す秒数は計測した秒数を
+/// `BW_LAUNCH_REPEATS` で割った「反復 1 回あたり」の値）。global
+/// （256 MiB）側は元々転送時間がオーバーヘッドを大きく上回るため実測値
+/// への影響は小さいが、両区分で同一の計測境界を使うことで比較可能性を
+/// 保つ。
 const BW_LAUNCH_REPEATS: u32 = 64;
 
 /// grid-stride ループでバッファ全体を確実にカバーしつつ、SM 数に応じて
@@ -117,15 +139,19 @@ fn compile_bw_copy(device: &CudaDevice, arch: &str) -> Result<CudaFunction, Cuda
 /// `n` 要素（f32）の src/dst バッファに対して `bw_copy_f32` を
 /// `bench_harness::run`（warmup 20 回・計測 20 回以上・中央値/Q1/Q3。
 /// `.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」の下限を
-/// 満たす）で計測する。1 サンプルは `BW_LAUNCH_REPEATS` 回連続起動 + 1 回
-/// 同期のため、返す秒数は計測した中央値を `BW_LAUNCH_REPEATS` で割った
-/// **起動 1 回あたり**の正規化値（`bandwidth_gbps` が前提とする「1 回の
-/// 起動で 2N 要素分のトラフィック」という単位に揃えるため。定数
-/// `BW_LAUNCH_REPEATS` のドキュメンテーションコメント参照）。バッファの
-/// 初期値は帯域計測の正当性に無関係（読み出し値をそのまま書き戻すだけ）
-/// のため `alloc_zeros` で確保し、ホスト⇔デバイス転送は計測区間の外・
-/// かつループ外に置く（`cuda_floor_bench.rs` と同じ「計測境界の統一」
-/// 方針）。
+/// 満たす）で計測する。1 サンプルは **カーネル起動 1 回**（`repeats`
+/// 引数に `BW_LAUNCH_REPEATS` を渡し、コピーの反復はカーネル内部の
+/// 外側ループで行う）+ 1 回同期のため、返す秒数は計測した中央値を
+/// `BW_LAUNCH_REPEATS` で割った**反復 1 回あたり**の正規化値
+/// （`bandwidth_gbps` が前提とする「1 回の反復で 2N 要素分のトラフィック」
+/// という単位に揃えるため）。起動そのものが 1 回のみのため起動オーバー
+/// ヘッドは `repeats` に依らない定数として計測秒数へ加算され、反復回数を
+/// 増やすほど転送時間に対する相対比率が小さくなる（定数 `BW_LAUNCH_REPEATS`
+/// のドキュメンテーションコメント参照。イシュー #482 codex-review 指摘。
+/// PR #635）。バッファの初期値は帯域計測の正当性に無関係（読み出し値を
+/// そのまま書き戻すだけ）のため `alloc_zeros` で確保し、ホスト⇔デバイス
+/// 転送は計測区間の外に置く（`cuda_floor_bench.rs` と同じ「計測境界の
+/// 統一」方針）。
 fn measure_bandwidth_secs(
     device: &CudaDevice,
     func: &CudaFunction,
@@ -136,6 +162,7 @@ fn measure_bandwidth_secs(
     let src = stream.alloc_zeros::<f32>(n)?;
     let mut dst = stream.alloc_zeros::<f32>(n)?;
     let n_i = n as i32;
+    let repeats_i = BW_LAUNCH_REPEATS as i32;
     let cfg = LaunchConfig {
         grid_dim: (bw_grid_dim(n, sm_count), 1, 1),
         block_dim: (BW_BLOCK_THREADS, 1, 1),
@@ -143,27 +170,29 @@ fn measure_bandwidth_secs(
     };
 
     let measurement = bench_run(&MeasurementConfig::default(), || {
-        // `BW_LAUNCH_REPEATS` 回連続で起動してから 1 回だけ同期する
-        // （起動・同期オーバーヘッドの償却。定数のドキュメンテーション
-        // コメント参照）。
-        for _ in 0..BW_LAUNCH_REPEATS {
-            // SAFETY: `src`/`dst` は直前に `n` 要素で確保済みで `n_i == n`
-            // （usize→i32 変換は `n` が呼び出し元でバッファ確保に使った値と
-            // 同一のためオーバーフローしない）。カーネル側の grid-stride
-            // ループは `i < n` を毎回検査するため（`BW_COPY_F32` 定義参照）、
-            // 起動側のグリッド構成に関わらず OOB アクセスは発生しない。
-            // 同一 src/dst への繰り返し起動は `dst[i] = src[i] + 1.0f` を
-            // 毎回同じ入力に対して計算し直すだけなので数値的にも安全
-            // （`src` は不変・`dst` は毎回同じ値へ上書きされる）。
-            unsafe {
-                stream
-                    .launch_builder(func)
-                    .arg(&src)
-                    .arg(&mut dst)
-                    .arg(&n_i)
-                    .launch(cfg)
-                    .expect("bw_copy_f32 launch must succeed on CUDA-equipped runner");
-            }
+        // カーネル起動は 1 回のみ行い、コピーの `BW_LAUNCH_REPEATS` 回反復は
+        // カーネル内部の外側ループ（`repeats` 引数）に委ねる。呼び出し側で
+        // 複数回 `launch` する旧方式は起動コストそのものを償却できなかった
+        // ため（定数 `BW_LAUNCH_REPEATS` のドキュメンテーションコメント
+        // 参照）、起動 1 回・同期 1 回に統一する。
+        //
+        // SAFETY: `src`/`dst` は直前に `n` 要素で確保済みで `n_i == n`
+        // （usize→i32 変換は `n` が呼び出し元でバッファ確保に使った値と
+        // 同一のためオーバーフローしない）。カーネル側の内側ループは
+        // `i < n` を毎回検査するため（`BW_COPY_F32` 定義参照）、起動側の
+        // グリッド構成に関わらず OOB アクセスは発生しない。`repeats` 回の
+        // カーネル内反復は `dst[i] = src[i] + 1.0f` を毎回同じ入力に対して
+        // 計算し直すだけなので数値的にも安全（`src` は不変・`dst` は毎回
+        // 同じ値へ上書きされる）。
+        unsafe {
+            stream
+                .launch_builder(func)
+                .arg(&src)
+                .arg(&mut dst)
+                .arg(&n_i)
+                .arg(&repeats_i)
+                .launch(cfg)
+                .expect("bw_copy_f32 launch must succeed on CUDA-equipped runner");
         }
         // カーネル起動は非同期のため、`synchronize()` を計測区間（このクロージャ）
         // 内に含めないと `Instant` の計測が起動オーバーヘッドのみを捉え、実行完了を
@@ -176,9 +205,9 @@ fn measure_bandwidth_secs(
             .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    // `BW_LAUNCH_REPEATS` 回分の合計秒数を計測しているため、起動 1 回あたり
-    // （= `bandwidth_gbps` が前提とする 2N 要素分のトラフィック 1 回分）の
-    // 秒数へ正規化して返す。
+    // カーネル内で `BW_LAUNCH_REPEATS` 回分の反復を実行した 1 起動分の
+    // 秒数を計測しているため、反復 1 回あたり（= `bandwidth_gbps` が
+    // 前提とする 2N 要素分のトラフィック 1 回分）の秒数へ正規化して返す。
     Ok(measurement.median_secs / f64::from(BW_LAUNCH_REPEATS))
 }
 
