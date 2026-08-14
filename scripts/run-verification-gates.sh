@@ -22,7 +22,7 @@
 # bench ゲートは `crates/backend-cpu/examples/gemm_bench.rs`（bench-harness 計測プロトコル・
 # 決定的シード 0xC0FFEE・warmup/iters 20/20。TASK-8.1）を実ワークロードとして使う。CPU
 # バックエンドのみが対象で CUDA/Metal の bench example は実機必須のため対象外とする
-# （self-hosted Linux runner で実行可能な範囲に限定）。`guardrail check` 自身が 4 ゲートを
+# （Linux CI runner〈GitHub ホステッド〉で実行可能な範囲に限定）。`guardrail check` 自身が 4 ゲートを
 # 起動して baseline 比較・劣化率閾値判定を行う結線（#103 残スコープ・TASK-8.2）は本スクリプト
 # の範囲外であり、本スクリプトは「CI ジョブとして実行可能にする」導線に留める。
 #
@@ -52,7 +52,7 @@
 #   - 計測結果の構造化保存（`BenchReport` JSON の artifact 化）
 set -euo pipefail
 
-# bench ゲートの実ワークロード（CPU バックエンドのみ。self-hosted Linux runner で
+# bench ゲートの実ワークロード（CPU バックエンドのみ。Linux CI runner（GitHub ホステッド）で
 # 実行可能な bench example。CUDA/Metal は実機必須のため対象外）。
 BENCH_EXAMPLE_PATH="crates/backend-cpu/examples/gemm_bench.rs"
 

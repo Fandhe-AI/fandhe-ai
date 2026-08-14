@@ -92,7 +92,7 @@ else
 	@echo "skip: Cargo.toml 未追加のため test をスキップ"
 endif
 
-# CI（Linux self-hosted）では実行不可・実機でのみ使用する #[ignore] 分離テスト
+# CI（Linux ホステッド。実機非搭載）では実行不可・実機でのみ使用する #[ignore] 分離テスト
 # （coding-rust.md・ci.md の実機分離規約）。Metal は Apple Silicon 実機、
 # CUDA は DGX Spark GB10 等の NVIDIA GPU 実機で実行する。
 .PHONY: test-ignored
@@ -172,7 +172,8 @@ endif
 # TASK-1.8e（イシュー #42）: `backend-metal` の `#[ignore]` 実機テスト（本ファイルの
 # `tests/`）を Linux CI でも型検査する。`--workspace --all-targets` は bench-harness の
 # dev-dependencies 経由で criterion → alloca（macOS ターゲットではネイティブ C ビルドが
-# 必要）を引き込み、macOS クロスコンパイラ非搭載の self-hosted runner では
+# 必要）を引き込み、macOS クロスコンパイラ非搭載の Linux CI runner（実測当時は
+# self-hosted。#457 で GitHub ホステッドへ移行済みだが技術的前提は不変）では
 # `cc: error: unrecognized command-line option '-arch'` で失敗することを実測済みのため
 # 採用しない（`-p backend-metal --tests` に限定すれば bench-harness は
 # `[dependencies]`（criterion を含まない）としてのみ解決され、この失敗を回避できる。

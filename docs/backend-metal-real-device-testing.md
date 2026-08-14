@@ -25,10 +25,10 @@ cargo test -p backend-metal --release -- --ignored --nocapture
 
 ## なぜ通常 CI では除外されるか（cfg + `#[ignore]` の二重分離）
 
-1. **`#![cfg(target_os = "macos")]`**: 各テストファイル冒頭に付与。`objc2` 系依存自体が macOS 限定（`.claude/rules/deps-policy.md`）のため、CI（self-hosted・Linux）ではそもそもコンパイル対象外になる。
+1. **`#![cfg(target_os = "macos")]`**: 各テストファイル冒頭に付与。`objc2` 系依存自体が macOS 限定（`.claude/rules/deps-policy.md`）のため、CI（GitHub ホステッド・Linux）ではそもそもコンパイル対象外になる。
 2. **`#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]`**: macOS 実機上でも GPU 実体が必要なテストには個別に付与。通常の `cargo test`（`--ignored` 指定なし）からは除外される。
 
-この二重分離により、受け入れ条件「通常 CI では除外される」が Linux self-hosted CI 上でも機械的に成立する（`cargo test --workspace --all-features` のログで `#[ignore]` テストが実行されないことを確認可能。TASK-1.8e 実装時に確認済み）。
+この二重分離により、受け入れ条件「通常 CI では除外される」が Linux CI（GitHub ホステッド）上でも機械的に成立する（`cargo test --workspace --all-features` のログで `#[ignore]` テストが実行されないことを確認可能。TASK-1.8e 実装時に確認済み）。
 
 macOS 側の型検査は Linux CI でも成立させている（後述の「Linux CI での型検査」節）。
 
@@ -59,7 +59,7 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 
 ## Linux CI での型検査（macOS runner 未登録の代替）
 
-macOS self-hosted runner は未登録のため、`backend-metal` の `#[ignore]` テストは Linux CI 上では**実行できない**。代わりに、`aarch64-apple-darwin` ターゲットへの `cargo check` でコンパイル可能性（型検査）のみを Linux CI 上で担保する。
+macOS 実機 runner は未登録のため、`backend-metal` の `#[ignore]` テストは Linux CI 上では**実行できない**。代わりに、`aarch64-apple-darwin` ターゲットへの `cargo check` でコンパイル可能性（型検査）のみを Linux CI 上で担保する。
 
 ```bash
 make check-cross-metal-tests
@@ -69,7 +69,7 @@ cargo check -p backend-metal --tests --target aarch64-apple-darwin
 
 `.github/workflows/ci.yml` の `build` ジョブに同一コマンドのステップとして組み込み済み（`cargo build --workspace --locked --target aarch64-apple-darwin` の後段）。
 
-**`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する理由**: `--workspace --all-targets` は `bench-harness` の `dev-dependencies`（`criterion`）を経由して `alloca`（macOS ターゲットでネイティブ C ビルドを要する）を引き込み、macOS クロスコンパイラ非搭載の self-hosted runner（Linux）では
+**`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する理由**: `--workspace --all-targets` は `bench-harness` の `dev-dependencies`（`criterion`）を経由して `alloca`（macOS ターゲットでネイティブ C ビルドを要する）を引き込み、macOS クロスコンパイラ非搭載の Linux CI runner では
 
 ```
 cc: error: unrecognized command-line option '-arch'
@@ -124,7 +124,7 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
 
 ## 将来課題（スコープ外）
 
-- **macOS（Metal 実機）self-hosted runner の登録と実機 CI ジョブの追加**: runner 未登録のため TASK-1.8e では実施しない。追加する場合は runner ラベルで対象 runner を明示する（`.claude/rules/ci.md`）
+- **macOS（Metal 実機）runner の登録と実機 CI ジョブの追加**: runner 未登録のため TASK-1.8e では実施しない。追加する場合は runner ラベルで対象 runner を明示する（`.claude/rules/ci.md`「実機依存」節）
 - **CUDA 側の同種整備**: `backend-cuda` は既に `make test-ignored-cuda`（TASK-1.7e・#36）で整備済み。本ドキュメントはその Metal 版に相当する
 
 以下は Metal 実機検証・ベンチ計測トラッキングツリー（親 #379）完了時点（イシュー #387・総括反映）で

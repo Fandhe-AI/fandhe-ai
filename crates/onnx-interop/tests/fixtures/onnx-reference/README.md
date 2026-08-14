@@ -3,7 +3,7 @@
 `#80`（TASK-7.2d・REQ-7）の `tests/onnx_poc_v2_6_match.rs`・
 `tests/onnx_slice_dynamic_bounds.rs` が参照する固定 fixture。
 `docs/spec/03-poc/poc-v2-6-interop/code/fixtures/`（PoC-v2-6・正本 submodule）
-からそのままコピーした（コピー元は変更・削除していない）。CI（self-hosted）は
+からそのままコピーした（コピー元は変更・削除していない）。CI は
 `docs/spec`（submodule）を checkout しないため（`tests/fixtures/pytorch-reference/
 README.md` と同じ制約）、テストが依存する fixture は本クレート配下に複製して持つ。
 

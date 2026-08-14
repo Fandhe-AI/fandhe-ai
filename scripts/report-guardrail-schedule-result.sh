@@ -46,7 +46,7 @@ usage() {
 #
 # gh 側は number/title の TSV 化のみを `--jq`（gh CLI 内蔵の Go 実装。外部 jq 非依存）
 # で行い、タイトル完全一致・複数一致 fail-closed の判定は bash 側に残す
-# （self-hosted runner に外部 jq が未導入でも壊れないようにするため。gh は Issue 操作で
+# （runner に外部 jq が未導入でも壊れないようにするため。gh は Issue 操作で
 # 既に必須のため新規ツール依存の追加にはならない。review 指摘・#148 収束指針）。
 find_open_issue() {
   local tsv

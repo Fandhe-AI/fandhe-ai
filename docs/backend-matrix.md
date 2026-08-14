@@ -14,13 +14,13 @@ v1 の土台は `docs/spec/03-poc/poc-4-multi-backend/README.md`「バックエ�
 
 ## 2. 検証環境
 
-REQ-2 受け入れ基準が指定する 2 実機に加え、CI（self-hosted・実機非搭載）を検証実体として扱う。
+REQ-2 受け入れ基準が指定する 2 実機に加え、CI（GitHub ホステッド `ubuntu-latest`・実機非搭載）を検証実体として扱う。
 
 | 環境 | 構成 | 検証実体 |
 |------|------|---------|
 | Apple M4 Max（macOS・Apple Silicon） | CPU・Metal | PoC-v2-4／PoC-v2-5 実測 + `make test-ignored-metal`（[`docs/backend-metal-real-device-testing.md`](./backend-metal-real-device-testing.md)） |
 | NVIDIA DGX Spark GB10（aarch64 Linux・CUDA 13.0・sm_121） | CPU・CUDA | PoC-v2-3／PoC-v2-5 実測 + `make test-ignored-cuda`・`#[ignore]` 実機テスト |
-| self-hosted CI（Linux・CUDA toolkit 非搭載・macOS runner 未登録） | ビルド検証・非実機テスト | `build` ジョブ（Linux ホスト + `aarch64-apple-darwin` クロスターゲット lib-only ビルド）・`build-no-cuda-toolkit` ジョブ（TASK-1.7d #35・TASK-2.3 #56）・`test` ジョブ（`.github/workflows/ci.yml`） |
+| GitHub ホステッド CI（`ubuntu-latest`・Linux・CUDA toolkit 非搭載・macOS 実機 runner 未登録） | ビルド検証・非実機テスト | `build` ジョブ（Linux ホスト + `aarch64-apple-darwin` クロスターゲット lib-only ビルド）・`build-no-cuda-toolkit` ジョブ（TASK-1.7d #35・TASK-2.3 #56）・`test` ジョブ（`.github/workflows/ci.yml`） |
 
 ## 3. バックエンド別ビルド・実行マトリクス
 
@@ -49,10 +49,10 @@ REQ-2 受け入れ基準が指定する 2 実機に加え、CI（self-hosted・�
 
 | 項目 | 内容 |
 |------|------|
-| ビルド可否 | **macOS: OK**。**非 macOS（Linux 等）: 該当コード・依存ごとビルド対象外**（`[target.'cfg(target_os = "macos")'.dependencies]` 分離。`docs/backend-switching-design.md`）。CI（Linux self-hosted）では `aarch64-apple-darwin` クロスターゲットへの lib-only ビルド（`cargo build --workspace --locked --target aarch64-apple-darwin`）で Metal 有効経路のコンパイル可能性のみ検証する。macOS self-hosted runner は未登録のため実機ビルドは CI 対象外（`.github/workflows/ci.yml` `build` ジョブ） |
+| ビルド可否 | **macOS: OK**。**非 macOS（Linux 等）: 該当コード・依存ごとビルド対象外**（`[target.'cfg(target_os = "macos")'.dependencies]` 分離。`docs/backend-switching-design.md`）。CI（Linux・GitHub ホステッド）では `aarch64-apple-darwin` クロスターゲットへの lib-only ビルド（`cargo build --workspace --locked --target aarch64-apple-darwin`）で Metal 有効経路のコンパイル可能性のみ検証する。macOS 実機 runner は未登録のため実機ビルドは CI 対象外（`.github/workflows/ci.yml` `build` ジョブ。実機ジョブは `.claude/rules/ci.md`「実機依存」節の別枠） |
 | 実行可否 | **Apple M4 Max: OK**。PoC-v2-4／PoC-v2-5 実測 |
 | 検証手段 | `make test-ignored-metal`（`--release` 推奨。`cargo test -p backend-metal --release -- --ignored --nocapture`。[`docs/backend-metal-real-device-testing.md`](./backend-metal-real-device-testing.md)）。CI 側の型検査代替は `make check-cross-metal-tests`（`cargo check -p backend-metal --tests --target aarch64-apple-darwin`）。数値一致は `crates/backend-metal/tests/cpu_metal_parity.rs`（`backend_cpu::parity` 経由） |
-| 詰まりポイント | (1) **macOS runner 未登録**: 実機実行は Linux CI では検証不能。代替として `aarch64-apple-darwin` クロスターゲットの型検査（`cargo check`。リンクを行わないため macOS SDK 不要）に限定（[`docs/backend-metal-real-device-testing.md`](./backend-metal-real-device-testing.md)「Linux CI での型検査」節）。(2) **`--workspace --all-targets` 不可**: `bench-harness` の `dev-dependencies`（`criterion`）経由で `alloca`（macOS ネイティブ C ビルド要）を引き込み、macOS クロスコンパイラ非搭載の self-hosted runner では `cc: error: unrecognized command-line option '-arch'` 等で失敗する。`-p backend-metal --tests` に限定することで回避（同文書「`--workspace --all-targets` ではなく」節）。(3) **debug ビルドの著しい低速化**: `cpu_metal_parity.rs::k4096_stress_poc_v2_5`（M=N=512, K=4096）は debug では著しく遅いため `--release` を実行手順の既定にしている（同文書「実行コマンド」節）。(4) **precise math 明示**: `MTLCompileOptions.mathFloatingPointFunctions=Precise` と `metal::precise::exp`／`metal::precise::tanh` の明示使用が数値一致複合判定の前提（REQ-2 (b)。`mathMode=Safe` のみでは `metal::fast` 経路にディスパッチされ判定余裕が薄くなる） |
+| 詰まりポイント | (1) **macOS runner 未登録**: 実機実行は Linux CI では検証不能。代替として `aarch64-apple-darwin` クロスターゲットの型検査（`cargo check`。リンクを行わないため macOS SDK 不要）に限定（[`docs/backend-metal-real-device-testing.md`](./backend-metal-real-device-testing.md)「Linux CI での型検査」節）。(2) **`--workspace --all-targets` 不可**: `bench-harness` の `dev-dependencies`（`criterion`）経由で `alloca`（macOS ネイティブ C ビルド要）を引き込み、macOS クロスコンパイラ非搭載の Linux CI runner では `cc: error: unrecognized command-line option '-arch'` 等で失敗する。`-p backend-metal --tests` に限定することで回避（同文書「`--workspace --all-targets` ではなく」節）。(3) **debug ビルドの著しい低速化**: `cpu_metal_parity.rs::k4096_stress_poc_v2_5`（M=N=512, K=4096）は debug では著しく遅いため `--release` を実行手順の既定にしている（同文書「実行コマンド」節）。(4) **precise math 明示**: `MTLCompileOptions.mathFloatingPointFunctions=Precise` と `metal::precise::exp`／`metal::precise::tanh` の明示使用が数値一致複合判定の前提（REQ-2 (b)。`mathMode=Safe` のみでは `metal::fast` 経路にディスパッチされ判定余裕が薄くなる） |
 | 実測済み（#380） | `make test-ignored-metal`（`#[ignore]` 52 件）・`make check-cross-metal-tests` はいずれも Apple Silicon 実機（M4 Max・macOS 26.6・`stable-aarch64-apple-darwin`）で green を実測確認済み（[`docs/backend-metal-real-device-testing.md`](./backend-metal-real-device-testing.md)「実機実行の実測状況」節） |
 | ベンチ実測完了（#381〜#386。トラッキング親 #379） | f32 GEMM 4 段（naive/tiled/simdgroup/dynamic-tile。#381）: size=4096 で simdgroup 1.7432 TFLOPS・dynamic-tile 3.0283 TFLOPS（[`docs/perf/metal-gemm-dynamic-tile.md`](./perf/metal-gemm-dynamic-tile.md)）。境界形状 TFLOPS・`METAL_SIMDGROUP_MIN_DIM` 妥当性判定（#382）: クロスオーバー実測 384（変更提案を記録。実施は別レビュー・別 PR・ユーザー承認）（[`docs/perf/dispatch-boundary-measurement.md`](./perf/dispatch-boundary-measurement.md)）。f16 GEMM 対 PyTorch MPS f16（#383）: size=2048 で 21.6%・size=4096 で 18.6%（[`docs/perf/metal-f16-vs-mps-f16.md`](./perf/metal-f16-vs-mps-f16.md)）。起動コスト（#384）: cold ≒ warm（[`docs/perf/startup-cost-measurement.md`](./perf/startup-cost-measurement.md)「Metal 実測結果」節）。ピークメモリ（#385）: 対理論比 1.000（[`docs/peak-memory-coefficient-decision.md`](./peak-memory-coefficient-decision.md)）。REQ-8「Metal f16 初期リリース」下限 15% 確定（#386。人間承認済み。[`docs/perf/performance-floor-decision.md`](./perf/performance-floor-decision.md) §8） |
 
@@ -90,7 +90,7 @@ REQ-2 受け入れ基準が指定する 2 実機に加え、CI（self-hosted・�
 
 - **#186（TASK-11.1g）**: TF32／f16 Tensor Core 経路の数値一致閾値が sm_86 実測で著しく超過している。sm_121 では未確認。閾値改定には REQ-2 改定（正本 spec リポジトリ側での対応）が必要（`out-of-scope-tracking.md` に基づき既に #186 として追跡済み。新規起票は不要）
 - **sm_121 の NVRTC 受理可否**: `compute_121` アーキテクチャフラグ・インライン PTX 命令の NVRTC 受理可否はいずれも実機未検証
-- **macOS self-hosted runner 未登録**: Metal 実機 CI ジョブは未整備。追加する場合は runner ラベルで対象 runner を明示する方針（`.claude/rules/ci.md`）
+- **macOS 実機 runner 未登録**: Metal 実機 CI ジョブは未整備。追加する場合は runner ラベルで対象 runner を明示する方針（`.claude/rules/ci.md`「実機依存」節）
 - 上記はいずれも本ドキュメントの新規スコープではなく、既存イシュー・ドキュメントでの追跡状況をそのまま集約したものである
 
 ## 7. 既定 feature 構成の決定（TASK-2.5・#58）
