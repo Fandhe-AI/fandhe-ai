@@ -63,8 +63,10 @@ use backend_cuda::CudaDevice;
 /// `cuda_runtime.h`/`cuda.h` は NVRTC に同梱されないため（`nvrtc.rs`・
 /// `kernels_mma.rs` と同じ制約）、`CUtensorMap` はホスト側
 /// （`cudarc::driver::sys::CUtensorMap`。`opaque: [u64; 16]`・
-/// `#[repr(align(64))]`）とバイトレイアウトが一致する手書き typedef で
-/// 代替する。
+/// `#[repr(align(128))]`。`cuda-13000` feature 下の実測値。cudarc-0.19.8
+/// `src/driver/sys/mod.rs:7314-7320` で確認済み。`align(64)` 版は
+/// `cuda-12xxx` feature 用の別定義であり本リポジトリでは使わない）と
+/// バイトレイアウトが一致する手書き typedef で代替する。
 ///
 /// 手順（1 スレッドが代表して実行し、残りは `__syncthreads()` で合流する
 /// 一般的な TMA パターン）:
@@ -85,7 +87,12 @@ use backend_cuda::CudaDevice;
 /// （クラスタサイズ 1 でも `cuLaunchKernel`〈非 Ex 版〉ではなく
 /// `cuLaunchKernelEx` 経由が必要という前提のもとでの選択。実機未検証）。
 const TMA_PROBE_KERNEL: &str = r#"
-typedef struct __align__(64) {
+// `cudarc::driver::sys::CUtensorMap`（`cuda-13000` feature）は
+// `#[repr(align(128))]`（本ファイル冒頭コメント参照）。ここでのズレは
+// `__grid_constant__ CUtensorMap tensor_map` パラメータ以降のカーネル
+// 引数（`out`・`out_len`）の ABI オフセット計算を狂わせうるため、
+// ホスト側の実際のアライメントと必ず一致させる。
+typedef struct __align__(128) {
     unsigned long long opaque[16];
 } CUtensorMap;
 
@@ -101,6 +108,12 @@ extern "C" __global__ void __launch_bounds__(256) tma_probe_2d(
 {
     __shared__ __align__(128) float smem_tile[TILE_ELEMS];
     __shared__ __align__(8) unsigned long long mbar;
+    // mbarrier ポーリングが `TMA_POLL_LIMIT` 回で完了しなかった場合に
+    // 全スレッドへ「転送未完了」を伝える合流フラグ（tid 0 が書き、
+    // 全スレッドが __syncthreads() 後に読む）。TMA ディスクリプタ不正・
+    // sm_121 での TMA 機能不全時にカーネルが無期限ハングするのを防ぐ
+    // （プローブの目的は失敗の記録であり、無期限占有ではない）。
+    __shared__ unsigned timed_out;
 
     int tid = threadIdx.x;
 
@@ -131,7 +144,16 @@ extern "C" __global__ void __launch_bounds__(256) tma_probe_2d(
 
         unsigned phase_parity = 0;
         unsigned complete = 0;
-        while (!complete) {
+        // 上限回数（タイムアウト）付きポーリング。TMA ディスクリプタが
+        // 不正、あるいは sm_121 で TMA が機能しない場合に mbarrier が
+        // 永遠に complete を返さず thread 0 が無期限ハングするのを防ぐ
+        // （本ファイル冒頭コメント参照）。回数は「実機で正常時は数十〜
+        // 数百 iteration で完了する」想定に対し十分な安全マージンを
+        // 取った値であり、実測に基づくチューニング値ではない
+        // （TMA タイムアウトの確立された基準値は存在しないため）。
+        #define TMA_POLL_LIMIT 1000000u
+        unsigned poll_count = 0;
+        while (!complete && poll_count < TMA_POLL_LIMIT) {
             asm volatile(
                 "{\n"
                 ".reg .pred p;\n"
@@ -140,7 +162,9 @@ extern "C" __global__ void __launch_bounds__(256) tma_probe_2d(
                 "}\n"
                 : "=r"(complete)
                 : "r"(mbar_addr), "r"(phase_parity));
+            poll_count++;
         }
+        timed_out = complete ? 0u : 1u;
         asm volatile("fence.proxy.async.shared::cta;\n");
     }
 
@@ -148,8 +172,27 @@ extern "C" __global__ void __launch_bounds__(256) tma_probe_2d(
 
     // REQ-8: shared→out の書き戻しは out_len を超えるインデックスへ書かない
     // （手動境界チェック省略禁止。`.claude/rules/coding-rust.md`）。
+    //
+    // `timed_out` != 0（mbarrier が TMA_POLL_LIMIT 回のポーリングで
+    // 完了を確認できなかった）場合、shared 側の転送完了は未保証のため
+    // `smem_tile` を読まず NaN センチネル（0x7fc00000）を書く。ホスト側
+    // ([`tma_execution_probe`]) はビット等値比較で失敗するため
+    // 「未完了」を「値が偶然一致しない一般的な不一致」と区別なく検出でき、
+    // かつハングせずテストとして終了する。
     if (tid < TILE_ELEMS && tid < out_len) {
-        out[tid] = smem_tile[tid];
+        if (timed_out != 0) {
+            // `__int_as_float` 等の CUDA math intrinsics は NVRTC 既定の
+            // 組み込みヘッダに含まれない可能性があるため（`nvrtc.rs` の
+            // 制約と同じ）、bit pattern の再解釈は union で行う。
+            union {
+                unsigned u;
+                float f;
+            } nan_bits;
+            nan_bits.u = 0x7fc00000u;
+            out[tid] = nan_bits.f;
+        } else {
+            out[tid] = smem_tile[tid];
+        }
     }
 }
 "#;
