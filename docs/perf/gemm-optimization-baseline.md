@@ -1,0 +1,116 @@
+# REQ-8 GEMM 性能下限表 — 分母・分子の突合基準（#481）
+
+GEMM 最適化ツリー（ルート #479・Phase A 親 #480 の A-1）の成果物。`docs/performance-targets.md`
+§2 の REQ-8 全 5 行（CPU / CUDA f32 / CUDA f16 / Metal f32 / Metal f16）について、後続 Phase
+（B〜G）が共通の前提で参照できるよう「対象カーネル関数名（分子）・実機・PyTorch バージョン
+（分母）・計測形状・出典 file:line」を突合し 1 つの基準ドキュメントへ確定する。
+
+## §0 位置づけ
+
+先例 `docs/performance-targets.md` §1・`docs/perf/performance-floor-decision.md` §1 と同じく、
+本ドキュメントは**判断案**であり、記載内容は本イシュー #481 の PR レビュー・マージ（人間承認）
+をもって成立する。
+
+**本ドキュメントは REQ-8 の下限値・実測比率の数値を一切変更しない**（転記のみ）。下限値の変更は
+Phase F の人間承認タスク（#577）のスコープであり、本ドキュメントでは扱わない。
+
+## §1 REQ-8 全 5 行の突合表
+
+| 行 | 対象カーネル（分子） | 実機 | PyTorch（分母） | 計測形状 | 出典 |
+|---|---|---|---|---|---|
+| CPU | PoC-v2-1 旧経路（SIMD 未適用の初期実装。現行の本番演算経路は `gemm_blis_parallel`〈`crates/backend-cpu/src/gemm_blis/mod.rs`・`crates/backend-cpu/src/ops.rs:67` から呼ばれる BLIS 5-loop・NEON/AVX2/AVX-512 マイクロカーネル dispatch〉であり、5.3% の分子（PoC-v2-1 計測対象）とは別物。現行経路での実値確定は Phase A の A-8〈#488〉のスコープ） | Apple M4 Max | PyTorch 2.13.0 macOS arm64 | 2048/4096（512 は参考値。起動オーバーヘッド支配のため判定対象外） | `docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/README.md`「計測結果」節・`docs/performance-targets.md:25` |
+| CUDA f32 | `wmma_tf32`（Rust 側入口 `CudaGemm::run_wmma_tf32`／`CudaGemm::launch_wmma_tf32`〈`crates/backend-cuda/src/gemm.rs:657,1026`〉。NVRTC カーネル本体は opt 経路 `gemm_wmma_tf32_opt`〈`crates/backend-cuda/src/kernels_wmma_opt.rs:196`〉、基本版 `gemm_wmma_tf32`〈`crates/backend-cuda/src/kernels.rs:303`〉） | DGX Spark GB10 | PyTorch 2.13.0+cu130（同一 GB10 個体で #390 実機再計測） | 4096 が最小（25.64〜25.69%） | `docs/perf/cuda-floor-remeasurement.md`「実測結果（#390 実機実測・DGX Spark GB10・実施日 2026-08-10）」節（該当表は同ファイル 200〜233 行付近） |
+| CUDA f16 | `mma_f16`（`mma.sync` パイプライン。launch-only 計測へ境界統一済み。NVRTC カーネル本体 `gemm_mma_f16`〈`crates/backend-cuda/src/kernels_mma.rs:234`〉） | 同上 | 同上 | 2048 が最小（12.97%） | 同上 |
+| Metal f32 | **2 系列併記**（§2 参照）: (a) PoC-v2-4 旧 simdgroup カーネル・バッファ常駐前提の計測、(b) 現行 `gemm_simdgroup_tiled`〈`crates/backend-metal/src/shaders/gemm.metal:333`〉＋動的タイル選択入口 `MetalGemm::dispatch_auto`〈`crates/backend-metal/src/gemm.rs:245`〉・アップロード/readback 込みの計測 | Apple M4 Max | PyTorch 2.13.0 | 4096（系列 (a) の 23.2% が現行下限の分子。系列 (b) は対 PyTorch 比 未算出） | `docs/spec/03-poc/poc-v2-4-metal-gemm/README.md`「PyTorch MPS 比」表・`docs/perf/metal-gemm-dynamic-tile.md`「実測結果（イシュー #381・2026-08-10 実測）」「PoC-v2-4・REQ-8 との関係」節 |
+| Metal f16 | `gemm_f16`（simdgroup 経路。ベンチ入口 `examples/gemm_f16_bench.rs`〈`crates/backend-metal/src/shaders/gemm.metal:247` の `gemm_simdgroup_f16` カーネルを使用〉） | Apple M4 Max | PyTorch 2.13.0（MPS f16） | 4096 が最小（18.6%。2048 は 21.6%） | `docs/perf/metal-f16-vs-mps-f16.md`「実測結果（イシュー #383・実機実測済み）」節（該当行は同ファイル 157〜158 行付近） |
+
+補足:
+
+- CUDA `wmma_tf32`・`mma_f16` は `docs/perf/cuda-floor-remeasurement.md`「数値一致（parity）状態の限定条件」節に記載の通り、#389 §5.3 の parity 恒常 fail 対象と一致する（#186 由来。REQ-2 改定は spec リポジトリ側対応待ち。詳細は `docs/performance-targets.md` §6）。
+- Transformer 複合ワークロード行（非実機参考値 約 6.1%。QEMU 仮想 CPU）は本表のスコープ外（対象は GEMM 5 行のみ）。#479 の整理（分母に使わない・実機実測は Phase G で確定予定）を参照。
+
+## §2 Metal 2 系列の対応関係と基準系列の決定
+
+### 系列の対応関係
+
+| | 系列 (a) PoC-v2-4（バッファ常駐前提） | 系列 (b) #381 `dispatch_auto`（転送込み） |
+|---|---|---|
+| naive @4096 | 1.271 TFLOPS | 0.9198 TFLOPS |
+| tiled @4096 | 2.123 TFLOPS | 1.2207 TFLOPS |
+| simdgroup @4096 | 3.134 TFLOPS | 1.7432 TFLOPS |
+| dynamic-tile-auto @4096 | （未計測。系列 (b) のみが持つ経路） | 3.0283 TFLOPS |
+| 出典 | `docs/spec/03-poc/poc-v2-4-metal-gemm/README.md` | `docs/perf/metal-gemm-dynamic-tile.md`「実測結果」節・正方形状表 |
+
+同一カーネル（naive/tiled/simdgroup）で系列 (a) が系列 (b) を上回るのは、計測範囲の違い（(a) は
+バッファ常駐前提、(b) は 1 ディスパッチごとに A・B アップロードと C readback を含む）による。
+`docs/perf/metal-gemm-dynamic-tile.md`「PoC-v2-4・REQ-8 との関係」節が明記する通り、**両系列は計測
+境界が異なり絶対値を直接比較できない**。
+
+### 「1024 以降 2.2〜2.4 TFLOPS プラトー」の帰属
+
+この値域は以下 2 箇所の実測に対応する（`docs/perf/metal-gemm-dynamic-tile.md` の該当節）:
+
+- 「候補構成別（size=2048 固定・協調ロード有無比較）」表の `staged` 系列: `bm64_bn64_bk16_staged`
+  2.3572 TFLOPS・`bm32_bn32_bk16_staged` 2.4030 TFLOPS（同ファイル「候補構成別」表）
+- run2/run3（Appendix の再現性確認ラン）における `dynamic-tile-auto` の値域
+
+一方、正方形状の canonical run1 系列（size 1024→2048→4096 で 1.2909→2.5001→3.0283 TFLOPS と
+**単調増加**）はこのプラトーを示さない。よって「1024 以降 2.2〜2.4 TFLOPS プラトー」は候補構成別
+の staged 系列（size=2048 固定でのパラメータ探索）と run2/run3 の再現ばらつきに由来するものであり、
+canonical run1 の正方形状スケーリングとは別系列である。A-7（#487）の定量診断はこの帰属を前提に行う。
+
+### 基準系列の決定（判断案）
+
+以降の Metal 目標値の基準系列は **系列 (b)（現行 `dispatch_auto`）に一本化する**。
+
+理由:
+
+1. 利用者が実際に観測するのは公開経路（`dispatch_auto`）であり、系列 (a) の旧カーネルは現行
+   コードベースに存在せず再計測できない。
+2. REQ-8 は同一ハードウェア・同一計測境界での比較を前提とする（`docs/performance-targets.md`
+   §4「計測プロトコル」）。系列 (a) と (b) の境界差は上表の通り無視できない。
+3. 既確定の下限（初期リリース 20%・最適化後 30%。分子 23.2% は系列 (a) 由来）は本ドキュメントでは
+   **変更しない**。系列 (b) での対 PyTorch 比の算出は、PyTorch MPS 側も同一計測境界（アップロード
+   /readback 込み）で再計測してペアで揃えることを条件に、Phase D 再計測（#547）で行い、下限値への
+   反映は Phase F（#577・人間承認）で判断する。
+
+## §3 CPU 対象実機の決定と E-8 スイープ対象の確定
+
+### 決定（判断案）
+
+REQ-8 CPU 行の基準実機は **Apple M4 Max（PyTorch 2.13.0 macOS arm64）を維持する**。
+
+理由:
+
+1. 確定済み下限（初期リリース 5%・最適化後 20%）の分母は M4 Max 実測であり、実機の変更は分母の
+   付け替え＝実質的な下限再設定に相当するため、本イシューの「値を変更しない」制約の範囲を超え
+   Phase F（#577・人間承認）の判断事項になる。
+2. PoC-v2-1・Metal 系列（§2）が同一個体で計測衛生を確立済み（`docs/perf/metal-gemm-dynamic-tile.md`
+   計測環境表の先例）であり、実機を揃えることで REQ-8 5 行間の計測衛生の一貫性を保てる。
+
+これに伴い、**A-8（#488）の再計測・E-8（#564）の MC/KC/NC 再チューニングスイープは M4 Max 実機で
+実施する**と確定する。
+
+DGX Spark GB10 の CPU（Grace・Cortex-X925/A725）は参考系列と位置づけ、REQ-8 の分母には使わない
+（本表に別行を新設しない）。BLIS 系参照 config（thunderx2/altra/firestorm 等。
+`crates/backend-cpu/src/gemm_blis/mod.rs` の MC/KC/NC 選定コメント参照）は E-8 実装時の探索起点
+としてのみ参考にする。同ファイルの MC/KC/NC 定数コメント（`mod.rs:75〜87` 付近）は「再チューニング
+は #24 のスコープ」と記すのみで、対象実機の明記はない。対象実機（M4 Max）の明記自体は本イシューが
+新たに確定する事項であり、対応するコメント更新は E-8 実装のスコープとする（本イシューでは触らない）。
+
+QEMU 仮想 CPU 環境（`docs/perf/cpu-gemm-rayon-tuning.md`）は改善「比」専用の参考値であり、絶対値
+比較には使えない（既存整理の再掲）。
+
+## §4 共通契約の遵守
+
+GEMM 最適化ツリー（#479）の共通契約に対する本ドキュメントの遵守状況:
+
+- **境界チェック不省略**: 対象外（`.claude/rules/coding-rust.md` のカーネル実装規約はコード変更を
+  伴わない本ドキュメントには適用対象がない）。
+- **tolerance 不緩和**: `crates/bench-harness/src/threshold.rs` の下限定数・数値一致テストの許容誤差
+  は変更していない。
+- **依存追加なし**: `Cargo.toml`・`Cargo.lock` は変更していない。
+- **`docs/spec/`（正本 submodule）不編集**: 変更していない。
+- **REQ-8 下限値不変更**: `docs/performance-targets.md` §2 の下限値・状態列・実測比率は本ドキュメント
+  からリンクを追加した以外の変更をしていない（下限値の変更判断は Phase F・#577 に委ねる）。
+
