@@ -60,3 +60,14 @@ jobs:
     "runs-\
 on": ubuntu-latest-8-cores
     timeout-minutes: 5
+
+  # フローマッピング内で複数行にまたがる二重引用キーによる迂回パターン
+  # （イシュー #472 P0 codex-review 再指摘）。上記 multiline-quoted-key-bypass は
+  # block mapping（行頭が直接 `"`）だったが、フローマッピング（`{ ... }`）内では
+  # `"` の直前に `{` が来るため、行頭（インデント除く）のみを見る判定では
+  # 素通りする。値も self-hosted・許容外 runner 名の字面を含まないため、未知の
+  # キー表記検査（フローマッピングの開始区切り文字を読み飛ばした上での二重引用符
+  # 出現数が奇数の行）で fail するはず。
+  flow-mapping-multiline-quoted-key-bypass:
+    x: { "runs-\
+on": ubuntu-latest-8-cores }
