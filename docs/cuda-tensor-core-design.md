@@ -140,7 +140,7 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 | `cp.async` | 可 | 可 | **可** | 本リポ `crates/backend-cuda/src/kernels_mma.rs` の実装実績（#187。`cp.async.cg.shared.global` 命令を使用）。CUTLASS 側は本イシューでは個別検証していない（Ampere 系譜の一般的対応のため対比表に記載するが根拠は自リポ実績のみ） |
 | `ldmatrix` | 可 | 可 | **可** | (1) 本リポ `crates/backend-cuda/src/kernels_mma.rs` の実装実績（#187。`ldmatrix.sync.aligned.m8n8.x4`/`.x2.trans` 命令を使用）。(2) CUTLASS 側でも `include/cute/arch/config.hpp:130-136` の条件ブロックが `CUTLASS_ARCH_MMA_SM120A_ENABLED`・`SM121A_ENABLED` を起動源に含み `CUTE_ARCH_LDSM_SM100A_ENABLED`（ldmatrix 相当）を定義する |
 | TMA（`cp.async.bulk.tensor`） | 可 | 可 | **静的にはマクロ定義が存在**（実機成否は実機プローブ待ち → A-3・#483 で確定。本節では成否を断定しない） | `include/cute/arch/config.hpp:160` で SM120/SM121 系条件ブロックが `CUTE_ARCH_TMA_SM120_ENABLED` を定義している事実のみを記す。マクロ定義の存在は実機での動作成立を意味しない（コンパイル時定義と実行時動作は別事象） |
-| `setmaxnreg` | 未検証 | 未検証 | **実機プローブ待ち（空欄）** → A-4（#484）で確定 | 本イシューでは検証していない（SM90/SM100 列も含め本イシューのスコープ外） |
+| `setmaxnreg` | 未検証 | 未検証 | **実機プローブ待ち（空欄）** → A-4（#484）で確定。プローブ実装は 12 節・`crates/backend-cuda/tests/setmaxnreg_probe_real_device.rs` に用意済み（実機実行は未了） | 本イシューでは検証していない（SM90/SM100 列も含め本イシューのスコープ外） |
 
 ### 11.2 f32/f16 標準精度向け SM120 専用 mainloop の不在
 
@@ -152,6 +152,13 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 
 - SM90（`wgmma`・TMA 前提の warp specialization epilogue 等）・SM100 系（`tcgen05`・TMEM 系 epilogue）専用の最適化技法は、11.1 節の対比表が示すとおり SM120/sm_121 では利用不可のため、Phase B/C（本リポ CUDA 最適化検討の後続フェーズ）の最適化候補から除外する。
 - TMA（`cp.async.bulk.tensor`）・`setmaxnreg` の採否は、11.1 節で「実機プローブ待ち」とした 2 行の結論が A-3（#483）・A-4（#484）で確定した後にのみ判断する。本節では静的なマクロ定義の存在のみを記録し、採否の断定は行わない。
+
+## 12. setmaxnreg プローブ結果（#484）
+
+- **位置づけ**: 親イシュー #480（Phase A: GEMM 最適化の前提確定・実機プローブ）の A-4。`setmaxnreg.inc/dec.sync.aligned.u32`（warp specialization レジスタ再配分。producer/consumer warp 間でレジスタ予算を非対称配分する PTX 命令）が sm_121（DGX Spark GB10）+ NVRTC（CUDA 13.0 系）で受理・実行可能かを確定させ、後続 B-3（タイル拡大時のレジスタ予算設計）の設計自由度の上限を明らかにする spike。
+- **プローブ実装**: `crates/backend-cuda/tests/setmaxnreg_probe_real_device.rs`（`#[ignore]` 分離。`setmaxnreg.dec` 単独発行版・`dec`→計算→`inc` 往復版の 2 カーネルを NVRTC コンパイル → ロード → 起動 → 同期し、成否を `SETMAXNREG_PROBE_RESULT` 形式で標準出力へ記録する。命令拒否と `libnvrtc` 不在等の toolchain 側要因を区別するため、`setmaxnreg` を含まない対照カーネルを同一 arch へ先にコンパイルしてから判定する）。
+- **実機実行**: **未了**（本イシューの実行環境ではローカル GPU が RTX 3060／compute capability 8.6 であり sm_121 実機ではないため、`docs/real-hardware-verification-env.md` が要求する `docs/real-hardware-verification-env.local.md`（実機ホスト名。`.gitignore` 対象・本 worktree には未配置）経由の DGX Spark GB10 接続を行っていない。9 節「実機検証プローブについて」と同じ理由で、到達できない実機の結果を推定で記載しない）。
+- **B-3 への引き渡し（プローブ実行前の fail-closed 既定）**: 実機プローブが完了し `setmaxnreg` の使用可否が確定するまで、B-3（タイル拡大時のレジスタ予算設計）は**対称レジスタ予算前提**でタイル上限を設計する（`setmaxnreg` の使用を前提にした非対称配分設計を仮定しない）。プローブ実行後、使用可と判明した場合は本節を実測結果・producer/consumer 間の dealloc/alloc 量の設計自由度で更新する。
 
 ## 参考文献
 
