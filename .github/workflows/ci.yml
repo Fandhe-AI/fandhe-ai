@@ -727,7 +727,10 @@ jobs:
         run: bash scripts/run-verification-gates.sh clippy
 
   # --------------------------------------------------
-  # 集約ジョブ（branch protection の required status check はこのジョブのみを指定する）。
+  # 集約ジョブ。branch protection（ruleset main-protection・id 20587668）は
+  # ci-complete を核としつつ、needs 配下の個別ジョブも required contexts に
+  # 重複列挙するのが正式構成（implement-issue-tree の G0 ゲート要件。#629。
+  # 詳細は .claude/rules/ci.md「ワークフロー設計」節を正とする）。
   # bare needs は skipped も success 扱いになるため、明示的に result を検査して
   # fail-closed で判定する（.claude/rules/ci.md）。
   # --------------------------------------------------
@@ -735,13 +738,15 @@ jobs:
     name: ci-complete
     # public 化に伴うホステッドランナー移行（#457 Phase 2）。判定のみのジョブのため
     # checkout・toolchain セットアップは不要（PR #619〈#466〉が明示委譲した残件を
-    # イシュー #467 で引き取り、ci.yml 内の self-hosted ジョブを解消する）。
+    # イシュー #467 で引き取り、ci.yml 内の self-hosted ジョブを解消済み）。
     runs-on: ubuntu-latest
     # 判定のみのジョブのため権限は一切不要（workflow レベルの contents: read も継承しない）。
     permissions: {}
     # 失敗・スキップ時にも必ず実行して fail-closed で判定する。
     if: ${{ always() }}
     # ジョブを追加したら必ずこの needs（および下の完遂判定の検査対象）へ追加する。
+    # あわせて ruleset main-protection（20587668）の required contexts の更新も必要
+    # （人間承認が要る運用上の GitHub 設定変更。詳細は .claude/rules/ci.md 参照）。
     needs: [rust-ci, build, build-no-cuda-toolkit, deps-forbidden, runner-policy, guardrail-regression, verification-gates]
     timeout-minutes: 5
     steps:
