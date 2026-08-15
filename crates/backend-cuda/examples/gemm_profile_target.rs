@@ -268,10 +268,21 @@ fn main() {
             let gemm = match CudaGemm::new(&device) {
                 Ok(g) => g,
                 Err(e) => {
-                    println!(
-                        "backend-cuda gemm_profile_target: tiled/WMMA(TF32) kernel unavailable ({e}); skipping."
+                    // `CudaDevice::new` 成功後（＝実機で CUDA デバイスは確立
+                    // 済み）に `CudaGemm::new` が失敗するのは NVRTC コンパイル
+                    // 失敗・対象 compute capability 非対応等の異常系であり、
+                    // 「CUDA 実行環境自体が無い」ケース（上の `CudaDevice::new`
+                    // 失敗 skip）とは区別する。ここで exit 0 にすると
+                    // `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 の
+                    // 採取ループ（`set -o pipefail` で非 0 終了を検知する契約）
+                    // が対象カーネル未起動を見逃し、次の条件へ進んでしまう
+                    // （PR #637 codex-review 指摘）。よって非 0 終了させる。
+                    eprintln!(
+                        "backend-cuda gemm_profile_target: tiled/WMMA(TF32) kernel unavailable ({e}); \
+                         aborting because the target kernel never launched (this is not an \
+                         environment-adaptive skip)."
                     );
-                    return;
+                    std::process::exit(1);
                 }
             };
             // 実測時に誤ってフォールバック版（基本 WMMA(TF32)）を
@@ -359,10 +370,16 @@ fn main() {
             let gemm = match CudaMmaGemm::new(&device) {
                 Ok(g) => g,
                 Err(e) => {
-                    println!(
-                        "backend-cuda gemm_profile_target: mma.sync f16 kernel unavailable ({e}); skipping."
+                    // 上の `Path::WmmaTf32` 分岐と同じ理由（`CudaDevice::new`
+                    // 成立後の `CudaMmaGemm::new` 失敗は NVRTC コンパイル失敗等
+                    // の異常系。fail-closed 採取ループが検知できるよう非 0
+                    // 終了させる。PR #637 codex-review 指摘）。
+                    eprintln!(
+                        "backend-cuda gemm_profile_target: mma.sync f16 kernel unavailable ({e}); \
+                         aborting because the target kernel never launched (this is not an \
+                         environment-adaptive skip)."
                     );
-                    return;
+                    std::process::exit(1);
                 }
             };
 
