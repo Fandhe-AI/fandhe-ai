@@ -1098,9 +1098,135 @@ fn launch_config(m: u32, n: u32, block_dim: (u32, u32, u32)) -> LaunchConfig {
     }
 }
 
+/// parity 非後退契約（イシュー #491）のベースライン fixture・検査
+/// ユーティリティ（`ParityBaseline`・`BASELINES`・
+/// `assert_no_parity_regression` 等）。
+///
+/// **PR #640 codex-review P1 指摘対応（テスト専用切替 API の公開 feature
+/// 露出）**: 以前は基本版 WMMA(TF32) カーネル（opt 可用性に関わらず
+/// `self.wmma_tf32` を強制実行するエントリポイント）を `internal-testing`
+/// という通常の Cargo feature で `pub` 化し、`tests/parity_nonregression.rs`
+/// （独立クレート扱いの統合テスト）から呼んでいた。Cargo feature は依存
+/// グラフ全体で単一に統合されるため、downstream が自分の `Cargo.toml` で
+/// `backend-cuda = { ..., features = ["internal-testing"] }` と明示すれば
+/// この feature を有効化でき、`[dev-dependencies]` の自己参照だけでは
+/// 外部からの明示的な有効化を防げない（REQ-11「明示切替 API を提供しない」
+/// 方針・内部表現の非漏出に抵触）。
+///
+/// 本モジュール以下の検査は代わりにライブラリ自身の単体テスト
+/// （`#[cfg(test)]`。downstream のビルドには一切コンパイルされず、feature
+/// でも到達不能）として実装し、基本版カーネルには [`CudaGemm::wmma_tf32`]
+/// （private field）・[`CudaGemm::run_wmma_f32_kernel`]（private fn）へ
+/// 同一モジュール内から直接アクセスする。新規の公開 API・feature は
+/// 増やさない。
+///
+/// fixture 自体は `tests/common/parity_baseline.rs` を `#[path]` で直接
+/// 取り込み、統合テスト側（`tests/parity_nonregression.rs::common`）と
+/// 単一のソースを共有する（値を複製すると `docs/perf/cuda-parity-baseline.md`
+/// との二重管理・記録漏れの温床になるため避ける）。
+#[cfg(test)]
+#[path = "../tests/common/parity_baseline.rs"]
+mod parity_baseline_fixture;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// parity 非後退契約（イシュー #491）: 基本版 WMMA(TF32) カーネル
+    /// （[`CudaGemm::wmma_tf32`] フィールド）専用の非後退ゲート。
+    ///
+    /// `run_wmma_tf32`（本番唯一の公開 API）は opt カーネルが利用可能な
+    /// 環境では常に opt を優先するため（`run_wmma_tf32` ドキュメンテーション
+    /// コメント参照）、公開 API 経由では基本版カーネル単独を検査できない。
+    /// 本テストは同一モジュール内から `self.wmma_tf32`／
+    /// `run_wmma_f32_kernel`（いずれも private）へ直接アクセスすることで、
+    /// 公開 API・feature を一切増やさずにこの検査を実現する
+    /// （上記 `parity_baseline_fixture` モジュールコメント・PR #640
+    /// codex-review 指摘対応参照）。
+    ///
+    /// fail-closed 契約: 記録済みベースライン行の provenance が未確定
+    /// （`ParityBaseline::basic_kernel_baseline_unconfirmed == true`）の
+    /// 場合、`assert_no_parity_regression` 側が必ず panic する（黙って
+    /// skip しない。`tests/common/parity_baseline.rs` 参照）。実機再測定で
+    /// 確定値を記録し `false` へ更新するまで、本テストは実機実行のたびに
+    /// fail し続ける契約であり、これは意図した挙動である（実機テストの
+    /// 恒常 fail は本リポで既知の受け入れ済み状態。
+    /// `docs/backend-cuda-real-device-testing.md` §5.3・§7 参照）。
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    fn wmma_tf32_basic_kernel_parity_does_not_regress() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+        let func = gemm.wmma_tf32.as_ref().expect(
+            "basic WMMA(TF32) kernel must be available on this ignored test runner (reason: \
+             see wmma_tf32_error)",
+        );
+
+        let mut failures: Vec<String> = Vec::new();
+
+        for baseline in super::parity_baseline_fixture::BASELINES
+            .iter()
+            .filter(|b| b.path == super::parity_baseline_fixture::ParityPath::WmmaTf32)
+        {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
+                let a = rng.fill_vec((baseline.m as usize) * (baseline.k as usize));
+                let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
+
+                let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
+                backend_cpu::matmul_reference_fma(
+                    &a,
+                    &b,
+                    &mut c_ref,
+                    baseline.m as usize,
+                    baseline.n as usize,
+                    baseline.k as usize,
+                )
+                .expect(
+                    "matmul_reference_fma shape validation must pass for well-formed baseline \
+                     input",
+                );
+
+                validate_gemm_dims(a.len(), b.len(), baseline.m, baseline.n, baseline.k)
+                    .expect("baseline fixture shapes must be valid GEMM dimensions");
+                validate_wmma_tf32_k_bound(baseline.k)
+                    .expect("baseline fixture k must satisfy WMMA(TF32) k bound");
+
+                let c_gpu = gemm
+                    .run_wmma_f32_kernel(func, &a, &b, baseline.m, baseline.n, baseline.k)
+                    .expect(
+                        "basic WMMA(TF32) kernel execution must succeed on this ignored test \
+                         runner",
+                    );
+
+                let report = backend_cpu::compare(&c_gpu, &c_ref)
+                    .expect("shape must match baseline fixture");
+
+                super::parity_baseline_fixture::assert_no_parity_regression(
+                    baseline.context,
+                    &report,
+                    baseline,
+                );
+            }));
+            if let Err(err) = result {
+                let msg = err
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "panic (詳細不明)".to_string());
+                failures.push(format!("{}: {msg}", baseline.context));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "parity 非後退契約 FAIL（{} 件）:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
 
     #[test]
     fn validate_gemm_dims_accepts_matching_lengths() {
