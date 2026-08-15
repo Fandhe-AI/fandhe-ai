@@ -446,6 +446,15 @@ impl CompiledWmmaTf32OptKernel {
     /// `self.func` を起動する。バッファ型は `f32`（TF32 は f32 表現上の
     /// テンソルコア丸めであり、ホスト側バッファは f32 のまま。
     /// `gemm.rs::CudaGemm::launch_wmma_tf32` と同じ契約）。
+    /// no-op 形状（`m==0 || n==0`）は 0 次元 grid のドライバ拒否を避けるため
+    /// カーネル起動前に早期 return する（`kernels_mma::CompiledMmaKernel::launch_f16`
+    /// と同じ根拠・同じ位置づけ。PR #643 codex-review P2 指摘への対応）。
+    /// この経路では `c_dev` を一切書き換えない（`validate_output_len` が
+    /// `c_dev.len() == m*n == 0` を既に保証しているため要素自体が存在せず、
+    /// 「ゼロ初期化して返す」責務を持たない契約。`kernels_mma::CompiledMmaKernel::launch_f16`
+    /// ドキュメンテーションコメントと同じ理由。`k==0`〈`m`/`n` は非ゼロ〉は
+    /// 本 no-op 判定の対象外で、呼び出し元側 API の `k==0` 早期 return が
+    /// 別途担う責務）。
     #[allow(dead_code, clippy::too_many_arguments)]
     pub fn launch_tf32(
         &self,
@@ -460,6 +469,9 @@ impl CompiledWmmaTf32OptKernel {
         self.cfg.validate_launch_shape(m, n, k)?;
         crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
         self.validate_grid_bounds(m)?;
         self.validate_k_tile_bound(k)?;
 
@@ -555,6 +567,9 @@ impl CompiledWmmaF16OptKernel {
     /// `self.func` は `RenderedWmmaF16OptKernel::compile` が
     /// `"gemm_wmma_f16_opt"` 固定名でロードしたものであり、f16 引数との
     /// 対応は型で保証される）。
+    /// no-op 形状（`m==0 || n==0`）の早期 return・`c_dev` 非書き換え契約は
+    /// [`CompiledWmmaTf32OptKernel::launch_tf32`] と同じ（同ドキュメンテーション
+    /// コメント参照）。
     #[allow(dead_code, clippy::too_many_arguments)]
     pub fn launch_f16(
         &self,
@@ -569,6 +584,9 @@ impl CompiledWmmaF16OptKernel {
         self.cfg.validate_launch_shape(m, n, k)?;
         crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
         self.validate_grid_bounds(m)?;
         self.validate_k_tile_bound(k)?;
 

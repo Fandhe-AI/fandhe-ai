@@ -657,14 +657,40 @@ impl CompiledMmaKernel {
     /// 実引数の不一致を fail-closed で拒否、(2)
     /// `gemm.rs::validate_gemm_dims`／`validate_output_len` で `a_dev`/
     /// `b_dev`/`c_dev` の長さが `m`/`n`/`k` と一致することを検証、(3)
+    /// `m==0 || n==0` の no-op 形状（`gemm_mma.rs::CudaMmaGemm::run_f16` と
+    /// 同じ根拠。0 次元 grid はドライバが拒否するためカーネル起動自体を
+    /// 回避する。PR #643 codex-review P2 指摘への対応: 本メソッドは
+    /// `CudaMmaGemm::run_f16` の no-op ガードを経由せず直接呼ばれうる
+    /// テンプレート展開 API の唯一の起動経路であるため、このメソッド自身が
+    /// no-op を吸収する必要がある）の早期 return、(4)
     /// `gemm_mma.rs::validate_mma_alignment` で `cp.async` の 16 バイト転送
-    /// 粒度制約（`n`/`k` が 8 の倍数）を検証、(4) `self.cfg.bm` を単位に
+    /// 粒度制約（`n`/`k` が 8 の倍数）を検証、(5) `self.cfg.bm` を単位に
     /// した grid_dim.y（`m.div_ceil(self.cfg.bm)`）が CUDA の grid y/z 上限
     /// （65,535）を超えないことを検証、してから初めて
     /// [`MmaKernelConfig::launch_config`] が導出した `LaunchConfig` で
     /// `self.func` を起動する。呼び出し元は `CudaFunction`／`LaunchConfig`
     /// のいずれも受け取らないため、検証済み shape・検証済みバッファ長と
     /// 無関係な grid/block・引数で起動する経路が型で塞がれる。
+    ///
+    /// no-op 判定をアライメント・grid 上限検証より前に置く（`gemm_mma.rs::
+    /// CudaMmaGemm::run_f16` ドキュメンテーションコメントと同じ理由）:
+    /// 例えば `(m,n,k)=(0,7,0)` のような有効な no-op 形状は `n=7` が
+    /// 8 の倍数でないため、アライメント検証を先に行うと実際にはカーネルを
+    /// 起動しない形状まで誤って `CudaError::InvalidShape` で拒否して
+    /// しまう。
+    ///
+    /// `m==0 || n==0` の no-op 経路では `c_dev` を一切書き換えない
+    /// （`validate_output_len` により `c_dev.len() == m*n == 0` が既に
+    /// 保証されているため要素自体が存在せず、書き込み対象がない。
+    /// `gemm_mma.rs::CudaMmaGemm::run_f16` の `m==0 || n==0` 早期 return が
+    /// 新規 `Vec::new()` を返すのと異なり、本メソッドは呼び出し元所有の
+    /// 既存バッファに対する操作のため「ゼロ初期化して返す」責務を持たない
+    /// 契約である）。`k==0`（`m`/`n` は非ゼロ）は本 no-op 判定の対象外
+    /// （thread fVS7 は `m`/`n` の no-op のみを指摘しており、`k==0` は
+    /// `num_k_tiles=0` としてカーネル自体は起動するが計算を行わない別経路。
+    /// 呼び出し元がこのケースで `c_dev` の初期値をどう扱うかは
+    /// `CudaMmaGemm::run_f16` 側の `k==0` 早期 return が担う責務であり、
+    /// 本メソッド単体の契約には含めない）。
     #[allow(dead_code, clippy::too_many_arguments)]
     pub fn launch_f16(
         &self,
@@ -679,6 +705,9 @@ impl CompiledMmaKernel {
         self.cfg.validate_launch_shape(m, n, k)?;
         crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
         crate::gemm_mma::validate_mma_alignment(n, k)?;
         self.validate_grid_bounds(m)?;
         self.validate_k_tile_bound(k)?;
