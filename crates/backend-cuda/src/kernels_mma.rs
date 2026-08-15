@@ -651,11 +651,22 @@ pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::er
     const ANCHOR: &str =
         "    int block_row0 = blockIdx.y * BM;\n    int block_col0 = blockIdx.x * BN;\n";
     let occurrences = MMA_F16.matches(ANCHOR).count();
-    assert_eq!(
-        occurrences, 1,
-        "MMA_F16 中のブロック原点アンカー（block_row0/block_col0）の出現数が \
-         1 ではありません（mma_f16_source_with_swizzle の前提が崩れています）"
-    );
+    // `unwrap()`/`expect()`・panic 系マクロを本番経路で使わない方針
+    // （coding-rust.md「エラーは型付きエラーとし、本番経路で unwrap()
+    // / expect() を使わない」）に合わせ、`assert_eq!` ではなく型付き
+    // エラーで返す。`MMA_F16` 定数側の不変条件は
+    // `mma_f16_source_with_swizzle_does_not_mutate_mma_f16_constant` が
+    // 別途 CI 上で回帰検査するため、ここで通常到達しない前提だが、
+    // `new_with_swizzle` から到達しうる公開関数として panic を避ける。
+    if occurrences != 1 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "MMA_F16 中のブロック原点アンカー（block_row0/block_col0）の \
+                 出現数が 1 ではありません（{occurrences} 件検出。 \
+                 mma_f16_source_with_swizzle の前提が崩れています）"
+            ),
+        });
+    }
 
     let remap = format!(
         "    // イシュー #499: L2 再利用のためのタイル→SM 割り当てスウィズル\n\

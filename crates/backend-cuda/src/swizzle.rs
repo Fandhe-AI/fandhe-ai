@@ -210,13 +210,14 @@ mod tests {
     /// 「安全側」参照）。
     #[test]
     fn select_swizzle_group_width_prefers_smaller_candidate_on_tie() {
-        // usage(8) == usage(16) となる block_m/block_n/num_sms の組を
-        // 探すのは煩雑なため、候補配列の順序（8 が先）と `<` 比較
-        // （`<=` ではない）により同値時は先に見た 8 が残ることを
-        // 直接検査する代わりに、num_sms=0 の退化ケース（両候補とも
-        // ceil_div 項が 0 になり usage が block_n*group_width のみで
-        // 単調に 8 が有利）で確認する。
-        assert_eq!(select_swizzle_group_width(0, 64, 128), 8);
+        // usage(8) == usage(16) となる真の同値ケース: block_m=block_n=64,
+        // num_sms=128 のとき
+        //   usage(8)  = 8*64  + ceil(128/8)*64  = 512  + 16*64 = 512+1024=1536
+        //   usage(16) = 16*64 + ceil(128/16)*64 = 1024 + 8*64  = 1024+512=1536
+        // で両者が一致する。候補配列の順序（8 が先）と `<` 比較
+        // （`<=` ではない）により同値時は先に見た 8 が残ることをこの
+        // 組で直接検査する。
+        assert_eq!(select_swizzle_group_width(128, 64, 64), 8);
     }
 
     /// **全単射性の網羅テスト**（実装計画 1 節受け入れ基準 2 項）:
