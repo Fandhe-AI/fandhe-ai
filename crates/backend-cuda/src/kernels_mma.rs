@@ -524,9 +524,13 @@ fn render_mma_f16_unchecked(cfg: &MmaKernelConfig) -> String {
 /// 2 回目以降の起動が `validate_launch_shape` を経由するかは呼び出し元の
 /// 実装規律に委ねられてしまっていた（「独立した public メソッドを都度
 /// 呼ぶ契約」は型レベルで強制されていなかった）。本構造体はこの穴を
-/// ふさぐため、ソースの受け渡し先を [`Self::compile`] のクロージャ引数に
-/// 限定する。クロージャの外へソース文字列を持ち出す経路が存在しない
-/// ため、コンパイル自体が本 descriptor の管理下でのみ起こりうる）。
+/// ふさぐため、ソースの受け渡し先を [`Self::compile`] 内部（NVRTC
+/// コンパイル・固定エントリポイントのロード）に限定する。ソース文字列が
+/// 外部（呼び出し元）へ渡らないため、コンパイル自体が本 descriptor の
+/// 管理下でのみ、かつ必ず `self.source` に対して起こる（PR #643
+/// codex-review 再々々々々指摘〈P0〉への対応。`Self::compile`
+/// ドキュメンテーションコメント参照。旧来クロージャ方式では呼び出し元が
+/// `self.source` を無視した `CudaFunction` を返せてしまっていた）。
 ///
 /// 後続 #504（コンパイルキャッシュキー）もこの descriptor をそのまま
 /// 鍵の構成要素として使える。
@@ -543,27 +547,30 @@ pub struct RenderedMmaKernel {
 }
 
 impl RenderedMmaKernel {
-    /// カーネルソースを `compile` クロージャへ内部的に渡し、コンパイル
-    /// 結果（`CudaFunction`）と展開元 `cfg` を不可分に束ねた
+    /// カーネルソースを NVRTC コンパイル → 固定エントリポイント
+    /// `"gemm_mma_f16"` のロードまで descriptor 内部で完結させ、結果
+    /// （`CudaFunction`）と展開元 `cfg` を不可分に束ねた
     /// [`CompiledMmaKernel`] を返す唯一の公開経路（PR #643 codex-review
-    /// 再々指摘への対応）。
-    ///
-    /// `compile` はソース文字列（`&str`）を受け取り、`nvrtc::compile_ptx`
-    /// →`CudaDevice::context().load_module()`→`load_function("gemm_mma_f16")`
-    /// を行って `CudaFunction` を返す想定（呼び出し元が `CudaDevice`・
-    /// `nvrtc` を持つため、本モジュールはそれらへ依存しない）。ソース文字列
-    /// はこのクロージャの引数としてのみ存在し、戻り値として外部へ漏れる
-    /// 経路がないため、「検査を経ない生ソースの取得」自体が構造的に不可能
-    /// になる。返る [`CompiledMmaKernel`] からも `CudaFunction` を無条件に
-    /// 取り出す経路はなく、実際の起動は [`CompiledMmaKernel::launch_f16`]
-    /// 経由でのみ行える（`RenderedMmaKernel` ドキュメンテーションコメント
-    /// 参照）。
+    /// 再々々々々指摘〈P0〉への対応: 従来はコンパイルをクロージャ
+    /// `impl FnOnce(&str) -> Result<CudaFunction, CudaError>` へ委ねて
+    /// いたが、クロージャは受け取ったソース文字列を無視して無関係な
+    /// `CudaFunction`（別カーネル・別モジュールの関数）を返しても型上
+    /// 検出できず、以降 `launch_f16` が前提とする「検証済み `cfg` と
+    /// `self.func` が対応している」契約がホスト側からは検証不能なまま
+    /// 崩れうる欠陥があった。`compile_ptx`・`load_module`・
+    /// `load_function` をこのメソッド内で直接呼ぶことで、`self.source`
+    /// 以外のソースから得た `CudaFunction` を `CompiledMmaKernel` へ
+    /// 格納する経路自体を型・構造の両面で消す。
     #[allow(dead_code)]
     pub fn compile(
         &self,
-        compile: impl FnOnce(&str) -> Result<cudarc::driver::CudaFunction, CudaError>,
+        device: &crate::device::CudaDevice,
     ) -> Result<CompiledMmaKernel, CudaError> {
-        let func = compile(&self.source)?;
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        let func = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_mma_f16")?;
         Ok(CompiledMmaKernel {
             func,
             cfg: self.cfg,

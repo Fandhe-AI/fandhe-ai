@@ -307,19 +307,26 @@ impl WmmaOptKernelConfig {
     }
 }
 
-/// [`render_wmma_tf32_opt`]／[`render_wmma_f16_opt`] が返す、展開済み
-/// カーネルソースと展開元 [`WmmaOptKernelConfig`] を 1 個にまとめた
-/// descriptor（PR #643 codex-review P1 指摘への対応。
-/// `kernels_mma::RenderedMmaKernel` と同じ設計）。
+/// [`render_wmma_tf32_opt`] が返す、展開済み TF32 opt カーネルソースと
+/// 展開元 [`WmmaOptKernelConfig`] を 1 個にまとめた descriptor（PR #643
+/// codex-review P1 指摘への対応。`kernels_mma::RenderedMmaKernel` と同じ
+/// 設計）。
+///
+/// PR #643 codex-review 再々々々々指摘（P0。`WmmaOptKernelConfig` が
+/// dtype を保持しないため、単一の `RenderedWmmaOptKernel`/
+/// `CompiledWmmaOptKernel` 型に TF32・f16 双方の `compile`/`launch_f16`/
+/// `launch_tf32` を持たせると、TF32 用にコンパイルした `CudaFunction` を
+/// `launch_f16` で（またはその逆で）起動する誤りを型で防げなかった）
+/// への対応として、TF32 経路専用の本型と f16 経路専用の
+/// [`RenderedWmmaF16OptKernel`] へ分離した。dtype ごとに別の Rust 型が
+/// 存在するため、[`Self::compile`] は TF32 用エントリポイント
+/// `"gemm_wmma_tf32_opt"` のみを、対応する [`CompiledWmmaTf32OptKernel`]
+/// は `launch_tf32` のみを公開し、f16 側のメソッドは型として存在しない
+/// （呼び出し元が dtype を取り違えてもコンパイルが通らない）。
 ///
 /// フィールドは非公開。生ソースを `&str`/`String` として外へ返す公開
-/// メソッドは一切持たない（PR #643 codex-review 再々指摘への対応:
-/// 従来の `source_for_launch(m, n, k) -> Result<&str, _>` は取得した
-/// ソースを NVRTC へ渡して得た `CudaFunction` を呼び出し元が検査と無関係な
-/// 場所へ保持でき、2 回目以降の起動が `validate_launch_shape` を経由する
-/// かは呼び出し元の実装規律に委ねられていた。`kernels_mma::RenderedMmaKernel`
-/// と同じ設計変更として、ソースの受け渡し先を [`Self::compile`] の
-/// クロージャ引数に限定する）。
+/// メソッドは一切持たない（`kernels_mma::RenderedMmaKernel` と同じ理由。
+/// ソースの受け渡し先を [`Self::compile`] 内部に限定する）。
 ///
 /// `mod kernels_wmma_opt` が非公開モジュールのため、既定構成のみ消費する
 /// 現状の呼び出し元からは本構造体・以下の全メソッドが呼ばれず dead-code
@@ -327,34 +334,30 @@ impl WmmaOptKernelConfig {
 /// と同じ。
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub struct RenderedWmmaOptKernel {
+pub struct RenderedWmmaTf32OptKernel {
     source: String,
     cfg: WmmaOptKernelConfig,
 }
 
-impl RenderedWmmaOptKernel {
-    /// カーネルソースを `compile` クロージャへ内部的に渡し、コンパイル
+impl RenderedWmmaTf32OptKernel {
+    /// カーネルソースを NVRTC コンパイル → 固定エントリポイント
+    /// `"gemm_wmma_tf32_opt"` のロードまで descriptor 内部で完結させ、
     /// 結果（`CudaFunction`）と展開元 `cfg` を不可分に束ねた
-    /// [`CompiledWmmaOptKernel`] を返す唯一の公開経路（PR #643 codex-review
-    /// 再々指摘への対応。`kernels_mma::RenderedMmaKernel::compile` と同じ
-    /// 設計）。
-    ///
-    /// `compile` はソース文字列を受け取り、`nvrtc::compile_ptx` →
-    /// `CudaDevice::context().load_module()`→`load_function(entry_point)`
-    /// （エントリポイント名は `render_wmma_tf32_opt` なら
-    /// `"gemm_wmma_tf32_opt"`、`render_wmma_f16_opt` なら
-    /// `"gemm_wmma_f16_opt"`。呼び出し元は自身がどちらを呼んだか把握して
-    /// いるため、本モジュールはエントリポイント名を descriptor に持たせず
-    /// 呼び出し元の責務とする）を行い `CudaFunction` を返す想定。ソース
-    /// 文字列はこのクロージャの引数としてのみ存在し外部へ漏れないため、
-    /// 検査を経ない生ソースの取得が構造的に不可能になる。
+    /// [`CompiledWmmaTf32OptKernel`] を返す唯一の公開経路
+    /// （`kernels_mma::RenderedMmaKernel::compile` と同じ設計。PR #643
+    /// codex-review 再々々々々指摘〈P0〉への対応。`RenderedWmmaTf32OptKernel`
+    /// ドキュメンテーションコメント参照）。
     #[allow(dead_code)]
     pub fn compile(
         &self,
-        compile: impl FnOnce(&str) -> Result<cudarc::driver::CudaFunction, CudaError>,
-    ) -> Result<CompiledWmmaOptKernel, CudaError> {
-        let func = compile(&self.source)?;
-        Ok(CompiledWmmaOptKernel {
+        device: &crate::device::CudaDevice,
+    ) -> Result<CompiledWmmaTf32OptKernel, CudaError> {
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        let func = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_wmma_tf32_opt")?;
+        Ok(CompiledWmmaTf32OptKernel {
             func,
             cfg: self.cfg,
         })
@@ -369,59 +372,87 @@ impl RenderedWmmaOptKernel {
     }
 }
 
-/// [`RenderedWmmaOptKernel::compile`] が返す、コンパイル済み
-/// `CudaFunction` と展開元 [`WmmaOptKernelConfig`] を不可分に束ねた
-/// descriptor（PR #643 codex-review 再々指摘への対応。
-/// `kernels_mma::CompiledMmaKernel` と同じ設計）。
+/// [`render_wmma_f16_opt`] が返す、展開済み f16 opt カーネルソースと
+/// 展開元 [`WmmaOptKernelConfig`] を 1 個にまとめた descriptor
+/// （[`RenderedWmmaTf32OptKernel`] と対になる f16 専用型。分離理由は同型の
+/// ドキュメンテーションコメント参照）。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RenderedWmmaF16OptKernel {
+    source: String,
+    cfg: WmmaOptKernelConfig,
+}
+
+impl RenderedWmmaF16OptKernel {
+    /// カーネルソースを NVRTC コンパイル → 固定エントリポイント
+    /// `"gemm_wmma_f16_opt"` のロードまで descriptor 内部で完結させ、
+    /// 結果（`CudaFunction`）と展開元 `cfg` を不可分に束ねた
+    /// [`CompiledWmmaF16OptKernel`] を返す唯一の公開経路
+    /// （[`RenderedWmmaTf32OptKernel::compile`] と対称。エントリポイント名
+    /// のみが異なる）。
+    #[allow(dead_code)]
+    pub fn compile(
+        &self,
+        device: &crate::device::CudaDevice,
+    ) -> Result<CompiledWmmaF16OptKernel, CudaError> {
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        let func = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_wmma_f16_opt")?;
+        Ok(CompiledWmmaF16OptKernel {
+            func,
+            cfg: self.cfg,
+        })
+    }
+
+    /// テスト専用のソース内容検査アクセサ（[`RenderedWmmaTf32OptKernel::source`]
+    /// と同じ理由）。
+    #[cfg(test)]
+    #[allow(dead_code)]
+    fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// [`RenderedWmmaTf32OptKernel::compile`] が返す、TF32 opt カーネル専用の
+/// コンパイル済み `CudaFunction` と展開元 [`WmmaOptKernelConfig`] を
+/// 不可分に束ねた descriptor（PR #643 codex-review 再々々々々指摘〈P0〉
+/// への対応。`kernels_mma::CompiledMmaKernel` と同じ設計）。
 ///
 /// フィールドは非公開。`func` を取り出す・あるいは検証を経ずに起動できる
-/// 公開経路は一切存在しない。唯一の起動経路 [`Self::launch_f16`]／
-/// [`Self::launch_tf32`] は、PR #643 codex-review 再々々指摘（P0。
-/// `with_validated_function` が `&CudaFunction` と `LaunchConfig` を
-/// クロージャへ渡していたため、クロージャが渡された `LaunchConfig` を
-/// 無視して独自の grid/block を構築し、検証済み `m`/`n`/`k` と無関係な
-/// バッファ・引数で起動できてしまう欠陥があった）への対応として、
-/// クロージャ経由の起動 API を廃し、起動そのものをそれぞれのメソッド内で
-/// 完結させる設計に変更した（`kernels_mma::CompiledMmaKernel::launch_f16`
-/// と同型）。呼び出し元は `CudaFunction`／`LaunchConfig` のいずれにも
-/// 触れられないため、検証済み shape 由来の grid/block・引数以外での起動が
-/// 構造的に不可能になる。
-///
-/// `WmmaOptKernelConfig` は dtype を持たない（`launch_config` ドキュメン
-/// テーションコメント参照）ため、この descriptor 自身もどちらの
-/// `render_wmma_tf32_opt`／`render_wmma_f16_opt` から `compile` されたかを
-/// 型として持たない。呼び出し元は自身がどちらを呼んだかを把握したうえで
-/// 対応する `launch_f16`／`launch_tf32` を呼ぶ責務を持つ（`compile`
-/// ドキュメンテーションコメントの「エントリポイント名は呼び出し元の
-/// 責務とする」設計判断と同じ境界。dtype と異なるバッファ型を渡す誤りは
-/// 呼び出し側でコンパイルエラーになるため、境界外アクセスには繋がらない）。
+/// 公開経路は一切存在しない。唯一の起動経路 [`Self::launch_tf32`] は、
+/// 検証済み shape 由来の grid/block・引数以外での起動が構造的に不可能な
+/// 設計（`kernels_mma::CompiledMmaKernel::launch_f16` と同型）。本型は
+/// TF32 専用（[`RenderedWmmaTf32OptKernel::compile`] のみが構築できる）
+/// なので `launch_f16` は型として存在せず、f16 用にコンパイルした
+/// `CudaFunction` を TF32 起動 API で（またはその逆で）呼ぶ経路は
+/// コンパイルエラーになる。
 #[allow(dead_code)]
-pub struct CompiledWmmaOptKernel {
+pub struct CompiledWmmaTf32OptKernel {
     func: cudarc::driver::CudaFunction,
     cfg: WmmaOptKernelConfig,
 }
 
-impl CompiledWmmaOptKernel {
-    /// 検証済み shape でのみ起動できる、f16 WMMA opt カーネルの
-    /// `CudaFunction` へアクセスする唯一の公開経路（PR #643 codex-review
-    /// 再々指摘・再々々指摘・再々々々指摘〈いずれも P0〉への対応。
-    /// `CompiledWmmaOptKernel` ドキュメンテーションコメント参照）。
-    ///
-    /// `self` が [`render_wmma_f16_opt`] から `compile` された descriptor
-    /// であることは呼び出し元の責務（`CompiledWmmaOptKernel` ドキュメン
-    /// テーションコメント参照）。手順は `kernels_mma::CompiledMmaKernel::launch_f16`
-    /// と同じ: (1) [`WmmaOptKernelConfig::validate_launch_shape`]、(2)
+impl CompiledWmmaTf32OptKernel {
+    /// 検証済み shape でのみ起動できる、TF32 WMMA opt カーネルの
+    /// `CudaFunction` へアクセスする唯一の公開経路（`CompiledWmmaTf32OptKernel`
+    /// ドキュメンテーションコメント参照）。手順は
+    /// `kernels_mma::CompiledMmaKernel::launch_f16` と同じ: (1)
+    /// [`WmmaOptKernelConfig::validate_launch_shape`]、(2)
     /// `gemm.rs::validate_gemm_dims`／`validate_output_len`、(3)
     /// [`Self::validate_grid_bounds`]、を経てから初めて
     /// [`WmmaOptKernelConfig::launch_config`] が導出した `LaunchConfig` で
-    /// `self.func` を起動する。
+    /// `self.func` を起動する。バッファ型は `f32`（TF32 は f32 表現上の
+    /// テンソルコア丸めであり、ホスト側バッファは f32 のまま。
+    /// `gemm.rs::CudaGemm::launch_wmma_tf32` と同じ契約）。
     #[allow(dead_code, clippy::too_many_arguments)]
-    pub fn launch_f16(
+    pub fn launch_tf32(
         &self,
         stream: &CudaStream,
-        a_dev: &CudaSlice<f16>,
-        b_dev: &CudaSlice<f16>,
-        c_dev: &mut CudaSlice<f16>,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
         m: u32,
         n: u32,
         k: u32,
@@ -444,49 +475,10 @@ impl CompiledWmmaOptKernel {
         // kernels_wmma.rs、opt 版は本ファイルの guarded load/store）と
         // 合わせて OOB 読み書きが起きない根拠とする。共有メモリは静的
         // `__shared__` 配列のみを使用するため shared_mem_bytes は 0 の
-        // ままでよい。
-        unsafe {
-            stream
-                .launch_builder(&self.func)
-                .arg(a_dev)
-                .arg(b_dev)
-                .arg(c_dev)
-                .arg(&m_i)
-                .arg(&n_i)
-                .arg(&k_i)
-                .launch(launch_config)?;
-        }
-        stream.synchronize()?;
-        Ok(())
-    }
-
-    /// 検証済み shape でのみ起動できる、TF32 WMMA opt カーネルの
-    /// `CudaFunction` へアクセスする唯一の公開経路（[`Self::launch_f16`]
-    /// と同じ設計。`self` が [`render_wmma_tf32_opt`] から `compile` された
-    /// descriptor であることは呼び出し元の責務）。バッファ型が `f32`
-    /// （TF32 は f32 表現上のテンソルコア丸めであり、ホスト側バッファは
-    /// f32 のまま。`gemm.rs::CudaGemm::launch_wmma_tf32` と同じ契約）である
-    /// 点のみ [`Self::launch_f16`] と異なる。
-    #[allow(dead_code, clippy::too_many_arguments)]
-    pub fn launch_tf32(
-        &self,
-        stream: &CudaStream,
-        a_dev: &CudaSlice<f32>,
-        b_dev: &CudaSlice<f32>,
-        c_dev: &mut CudaSlice<f32>,
-        m: u32,
-        n: u32,
-        k: u32,
-    ) -> Result<(), CudaError> {
-        self.cfg.validate_launch_shape(m, n, k)?;
-        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
-        self.validate_grid_bounds(m)?;
-
-        let launch_config = self.cfg.launch_config(m, n);
-        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
-
-        // SAFETY: launch_f16 と同一の根拠（型が f32 になる点のみ異なる）。
+        // ままでよい。`self.func` は本型のコンストラクタである
+        // `RenderedWmmaTf32OptKernel::compile` が `"gemm_wmma_tf32_opt"`
+        // 固定名でロードしたものであり、f32 引数と TF32 カーネルシグネチャ
+        // の対応は型で保証される。
         unsafe {
             stream
                 .launch_builder(&self.func)
@@ -507,6 +499,78 @@ impl CompiledWmmaOptKernel {
     /// （`kernels_mma::CompiledMmaKernel::validate_grid_bounds` と同じ理由。
     /// 超過するとホスト側の他の検証はすべて通過した上で、ドライバの
     /// カーネル起動が失敗する）。
+    fn validate_grid_bounds(&self, m: u32) -> Result<(), CudaError> {
+        const MAX_GRID_DIM_Y: u32 = 65_535;
+        let grid_y = m.div_ceil(self.cfg.block_m);
+        if grid_y > MAX_GRID_DIM_Y {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma opt path grid_dim.y (m.div_ceil(block_m)={grid_y}) exceeds CUDA's \
+                     {MAX_GRID_DIM_Y} limit for grid dimensions y/z (block_m={}); m={m} is \
+                     too large",
+                    self.cfg.block_m
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// [`RenderedWmmaF16OptKernel::compile`] が返す、f16 opt カーネル専用の
+/// コンパイル済み `CudaFunction` と展開元 [`WmmaOptKernelConfig`] を
+/// 不可分に束ねた descriptor（[`CompiledWmmaTf32OptKernel`] と対称。
+/// 分離理由は同型のドキュメンテーションコメント参照）。
+#[allow(dead_code)]
+pub struct CompiledWmmaF16OptKernel {
+    func: cudarc::driver::CudaFunction,
+    cfg: WmmaOptKernelConfig,
+}
+
+impl CompiledWmmaF16OptKernel {
+    /// 検証済み shape でのみ起動できる、f16 WMMA opt カーネルの
+    /// `CudaFunction` へアクセスする唯一の公開経路
+    /// （[`CompiledWmmaTf32OptKernel::launch_tf32`] と同じ設計・検査手順。
+    /// `self.func` は `RenderedWmmaF16OptKernel::compile` が
+    /// `"gemm_wmma_f16_opt"` 固定名でロードしたものであり、f16 引数との
+    /// 対応は型で保証される）。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_f16(
+        &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        self.validate_grid_bounds(m)?;
+
+        let launch_config = self.cfg.launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: CompiledWmmaTf32OptKernel::launch_tf32 と同一の根拠
+        // （型が f16 になる点のみ異なる）。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    /// grid_dim.y の上限検査（[`CompiledWmmaTf32OptKernel::validate_grid_bounds`]
+    /// と同じ理由・同じ実装）。
     fn validate_grid_bounds(&self, m: u32) -> Result<(), CudaError> {
         const MAX_GRID_DIM_Y: u32 = 65_535;
         let grid_y = m.div_ceil(self.cfg.block_m);
@@ -657,11 +721,11 @@ fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 /// [`WmmaOptKernelConfig`] を TF32 opt カーネルソースへ展開する
 /// （イシュー #516）。展開前に [`validate_wmma_tf32_opt_config`] で
 /// SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。返す
-/// [`RenderedWmmaOptKernel`] はソースと展開元 `cfg` を保持し、ホスト側の
-/// 将来の非既定構成起動 API は `.compile(|src| ...)` で `nvrtc::compile_ptx`
-/// 等を実行して [`CompiledWmmaOptKernel`] を得て、以降の起動は
-/// `CompiledWmmaOptKernel::launch_tf32(stream, a_dev, b_dev, c_dev, m, n, k)`
-/// 経由でのみ行うこと（`RenderedWmmaOptKernel`／`CompiledWmmaOptKernel`
+/// [`RenderedWmmaTf32OptKernel`] はソースと展開元 `cfg` を保持し、ホスト側の
+/// 将来の非既定構成起動 API は `.compile(device)` で `nvrtc::compile_ptx`
+/// 等を実行して [`CompiledWmmaTf32OptKernel`] を得て、以降の起動は
+/// `CompiledWmmaTf32OptKernel::launch_tf32(stream, a_dev, b_dev, c_dev, m, n, k)`
+/// 経由でのみ行うこと（`RenderedWmmaTf32OptKernel`／`CompiledWmmaTf32OptKernel`
 /// ドキュメンテーションコメント参照。生ソース・コンパイル済み
 /// `CudaFunction` のいずれも検査を経ない形で外部へ返す公開メソッドは
 /// 存在しない）。
@@ -672,9 +736,11 @@ fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 /// 後続 #504／#519 で追加される想定のため `#[allow(dead_code)]` を付す
 /// （`kernels_mma::render_mma_f16` と同じ判断）。
 #[allow(dead_code)]
-pub fn render_wmma_tf32_opt(cfg: &WmmaOptKernelConfig) -> Result<RenderedWmmaOptKernel, CudaError> {
+pub fn render_wmma_tf32_opt(
+    cfg: &WmmaOptKernelConfig,
+) -> Result<RenderedWmmaTf32OptKernel, CudaError> {
     validate_wmma_tf32_opt_config(cfg)?;
-    Ok(RenderedWmmaOptKernel {
+    Ok(RenderedWmmaTf32OptKernel {
         source: render_wmma_tf32_opt_unchecked(cfg),
         cfg: *cfg,
     })
@@ -1056,14 +1122,16 @@ fn render_wmma_f16_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 
 /// [`WmmaOptKernelConfig`] を f16 opt カーネルソースへ展開する
 /// （イシュー #516）。展開前に [`validate_wmma_f16_opt_config`] で不変
-/// 条件を fail-closed 検査する。返す [`RenderedWmmaOptKernel`] の起動前
+/// 条件を fail-closed 検査する。返す [`RenderedWmmaF16OptKernel`] の起動前
 /// 検査契約は [`render_wmma_tf32_opt`] と同じ。`#[allow(dead_code)]` の
 /// 理由も [`render_wmma_tf32_opt`] と同じ（非公開モジュール・現状は既定
 /// 構成のみ消費・後続 #504／#519 が非既定 config の呼び出し元となる想定）。
 #[allow(dead_code)]
-pub fn render_wmma_f16_opt(cfg: &WmmaOptKernelConfig) -> Result<RenderedWmmaOptKernel, CudaError> {
+pub fn render_wmma_f16_opt(
+    cfg: &WmmaOptKernelConfig,
+) -> Result<RenderedWmmaF16OptKernel, CudaError> {
     validate_wmma_f16_opt_config(cfg)?;
-    Ok(RenderedWmmaOptKernel {
+    Ok(RenderedWmmaF16OptKernel {
         source: render_wmma_f16_opt_unchecked(cfg),
         cfg: *cfg,
     })
