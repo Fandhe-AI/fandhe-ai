@@ -200,6 +200,11 @@ capability 8.6）と異なる世代の Tensor Core でも同様の fail 率（15
 確認した点に価値があり、#186 が示した「REQ-2 改定が必要」という結論を補強する新規データとして
 引き渡す。
 
+**非後退契約への fixture 化（イシュー #491）**: 上記 8 件のうち 6 件（TF32 5 件・f16 K=4096 1 件）の実測値は
+`crates/backend-cuda/tests/common/parity_baseline.rs`（fixture）・`docs/perf/cuda-parity-baseline.md`（正本ドキュメント）
+へ転記され、後続の Phase B/C カーネル改修が「parity green」ではなく「非後退（fail 比率・平均絶対誤差が本節の実測値を
+上回らない）」を機械検査できるようにした。
+
 いずれも `.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で緩和しない」・
 `security.md`「テスト許容誤差の変更は必ず人間の承認を経る」に従い**許容誤差・アサーションを一切変更
 せず**、実測値を本節に記録したうえで #186（Tensor Core 経路の数値一致閾値の実測再評価。

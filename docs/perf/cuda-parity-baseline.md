@@ -1,0 +1,104 @@
+# CUDA parity 非後退契約のベースライン（イシュー #491）
+
+## 1. 位置づけ
+
+`wmma_tf32`・`wmma_tf32_opt`・`mma_f16` 系経路は REQ-2 統一複合判定（相対誤差
+1e-3 未満 または 絶対誤差 1e-5 未満）で恒常 fail の既知状態にある
+（#186 由来。`docs/backend-cuda-real-device-testing.md` §5.3 に DGX Spark
+GB10・sm_121 実機実測を記録済み）。REQ-2 改定（#186）が完了するまでこの状態は
+解消しないため、GEMM 性能改善ツリー（ルート #479 → Phase 2 親 #490）以降の
+Phase B/C カーネル改修は「parity green」を受け入れ条件にできない。
+
+本ドキュメントが定義する**非後退契約**は、カーネル改修の受け入れ判定を
+「fail 比率・平均絶対誤差が記録済みベースラインを上回らないこと」に置き換える。
+機械検査の正は
+`crates/backend-cuda/tests/common/parity_baseline.rs`（fixture・検査
+ユーティリティ）と `crates/backend-cuda/tests/parity_nonregression.rs`
+（テスト本体）であり、本ドキュメントは出典・実測環境・更新規約の記録に徹する
+（二重管理を避ける）。
+
+## 2. 非後退契約の定義（検査 5 項目）
+
+1. **tolerance 定数不変**: `backend_cpu::RELATIVE_TOLERANCE`（1e-3）・
+   `backend_cpu::ABSOLUTE_RESCUE_THRESHOLD`（1e-5）が変更されていないこと
+   （`tolerance_constants_are_pinned` テストで bit 等値 assert）
+2. **fail 比率非増加**: 各ベースライン行について `fail_count` が記録値を
+   超えないこと
+3. **mean_abs_diff 非増加**: 各ベースライン行について `mean_abs_diff` が
+   記録値（表記丸め天井値。4 節）を超えないこと
+4. **FMA 契約維持**: 参照値計算は `backend_cpu::matmul_reference_fma`
+   （TF32 経路）／f16 丸め込み経路（`mma_f16` 経路。3.2 節）を用い、独自の
+   参照実装で判定式を複製しない
+5. **実測値の本ドキュメント追記**: ベースライン行を追加・更新する場合は
+   実機実測とセットで本ドキュメントへ記録する（推定値の記載を禁止）
+
+## 3. ベースライン表
+
+出典: `docs/backend-cuda-real-device-testing.md` §5.3（DGX Spark GB10・
+sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-measurement.md`
+・`docs/perf/cuda-floor-remeasurement.md`。
+
+| 経路 | エントリポイント | 形状（M×N×K） | seed | fail_count/total | mean_abs_diff | 出典テスト |
+|---|---|---|---|---|---|---|
+| `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 32×32×32 | 2000 | 154/1024 (15.0%) | 3.698e-4 | `gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes`（先頭ケース） |
+| `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 256×256×4096 | 8888 | 10647/65536 (16.2%) | 4.476e-3 | `gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5`（先頭呼出し） |
+| `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 512×512×512 | 0x7A0 | 42493/262144 (16.2%) | 1.574e-3 | `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分） |
+| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32`（opt 利用可能環境） | 64×64×64 | 3000 | 699/4096 (17.1%) | 5.676e-4 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`（先頭ケース） |
+| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32`（opt 利用可能環境） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`（先頭呼出し） |
+| `mma_f16` | `CudaMmaGemm::run_f16` | 256×256×4096 | 9999 | 101/65536 (0.15%) | 7.646e-5 | `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（先頭呼出し） |
+
+`wmma_tf32_opt` 行はエントリポイントが `wmma_tf32` と共通（opt カーネルが
+利用可能な環境では `run_wmma_tf32` が内部で自動的に opt 経路へ入るため。
+`crates/backend-cuda/src/gemm.rs` 参照）。実際に opt 固有のタイル境界を
+踏んだ保証を得るため、検査前に `wmma_tf32_opt_available()` を確認する
+契約は既存テスト（`gemm_wmma_tf32_opt.rs`）から踏襲する。
+
+**§5.3 の記録は「各テストで最初に fail した (形状, シード) の値」のみ
+（`assert_parity` が最初の fail で panic する契約のため）**。上表 6 行は
+その実測値の転記であり、未計測形状・シードの行は本表に含めていない。
+
+## 4. 表記丸め対応
+
+§5.3 の記録値は 4 有効桁への丸め表記のため、fixture
+（`baseline_mean_abs_diff_ceiling`）には**記録表記の最終桁を切り上げた
+天井値**を格納する（例: 3.698e-4 → 3.699e-4、4.476e-3 → 4.477e-3）。これは
+表記丸め誤差の吸収であり許容誤差（tolerance 定数）の緩和ではない。判定式・
+`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD` は一切変更しない。
+
+`fail_count` は整数の実測値であり丸め対応の対象外（記録値をそのまま上限
+とする）。
+
+## 5. 参照値計算の経路（fixture・テストが再現する契約）
+
+- **TF32 経路**（`wmma_tf32`/`wmma_tf32_opt`）: 入力を f32 のまま
+  `backend_cpu::matmul_reference_fma` で計算する非量子化参照
+  （`docs/backend-cuda-real-device-testing.md` §5.3「参照実装は意図的に
+  非量子化のままである点の確認」参照。TF32 相当の 10bit 仮数丸めを参照側に
+  適用しない設計判断を踏襲する）
+- **f16 経路**（`mma_f16`）: f16→f32→`matmul_reference_fma`→f16 丸め→f32 の
+  量子化込み経路（`cpu_cuda_mma_parity.rs::assert_mma_f16_parity` と同一
+  手順。GPU 側エピローグ store の丸めを参照側にも反映させる）
+
+## 6. ベースライン更新規約
+
+- **下方更新（改善の反映）**: カーネル改修で fail_count・mean_abs_diff が
+  実測で改善した場合、実機実測値の記録とセットで fixture・本表を更新
+  してよい（後続タスクの通常フロー）
+- **上方更新（緩和）**: fail_count・mean_abs_diff の上限を緩める変更は
+  **ユーザー承認必須**（`.claude/rules/security.md` A08「ガードレール閾値・
+  テスト許容誤差の変更は必ず人間の承認を経る」と同列のガードレール）
+- **未計測形状・シードの行追加**: 実機実測とセットでのみ行う（推定値の
+  捏造をしない。§3 の実測記録方針を継続する）
+- tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）自体の
+  変更は本契約のスコープ外（#186・REQ-2 改定側の判断。変更する場合は
+  `crates/backend-cpu/src/parity.rs` のコメントに従いユーザー承認を得る）
+
+## 7. 関連
+
+- `docs/backend-cuda-real-device-testing.md` §5.3（実測記録本体）
+- `crates/backend-cuda/tests/common/parity_baseline.rs`（fixture・検査
+  ユーティリティ本体）
+- `crates/backend-cuda/tests/parity_nonregression.rs`（非後退契約テスト）
+- イシュー #186（Tensor Core 経路の数値一致閾値の実測再評価。REQ-2 改定
+  候補の引き渡し先）
+- イシュー #490（GEMM 性能改善ツリー Phase 2 親）
