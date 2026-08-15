@@ -127,6 +127,29 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 /// 最適化で除去・並べ替え不能な実メモリアクセスとして強制する
 /// （C++/CUDA の `volatile` は「観測可能な副作用」として扱われるため
 /// コンパイラは削除・キャッシュできない）。
+///
+/// **`volatile` のトレードオフ（実機再検証が必要。イシュー #482 Review
+/// 指摘）**: `volatile` は上記の冗長ストア除去だけでなく、ベクトル化
+/// ロード／ストア（例: `float4` 相当へのまとめ上げ）やレジスタ経由の
+/// 一般的な最適化も全面的に禁止する。ping-pong による RAW 依存
+/// （同一アドレスへの逐次読み書き）だけでも global メモリ経由の実
+/// トラフィックを強制するには十分である可能性が高く、`volatile` は
+/// その上に安全側で追加した保護であるため、本バイナリが報告する
+/// `global`/`l2` の実効帯域はハードウェアの真の実効帯域より**主に
+/// 過小評価する方向へ**歪みうる（過大評価方向〈上記の 64 倍バグ〉より
+/// 安全だが、ゼロではない）。ただし CUDA の `volatile` は L1／
+/// non-coherent キャッシュも経由させない（毎回 global メモリまで
+/// 到達させる）ため、`l2` 行については non-volatile 実装であれば
+/// L1 ヒットにより本来の L2 帯域より**過大**な値を報告した可能性も
+/// 排除できず、歪みの向きは `global` 行ほど一意ではない
+/// （L1 バイパスと冗長ストア除去防止が同時に効くため）。
+/// `docs/perf/sm121-device-attributes.md` の「限界・注意」にもこの
+/// 歪みの向きを明記しており、実測値は保守的な参考値（`global` 行は
+/// 下限値寄り）として扱うこと。sm_121 実機実行時（NVRTC が使える環境）
+/// に `volatile` を外した
+/// 版と比較計測し、ping-pong 単独で冗長ストア除去が防げるか（`nvdisasm`
+/// でロード／ストア命令が反復ごとに残っているか確認する等）を検証し、
+/// 安全に外せるなら本コメントごと更新すること。
 const BW_COPY_F32: &str = r#"
 extern "C" __global__ void bw_copy_f32(float* __restrict__ a, float* __restrict__ b, unsigned long long n, unsigned int repeats) {
     unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
