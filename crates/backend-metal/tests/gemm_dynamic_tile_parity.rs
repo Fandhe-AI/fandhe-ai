@@ -34,23 +34,18 @@ use bench_harness::rng::Xorshift64Star;
 /// `crate::tile::fallback_chain` で `TileConfig::SINGLE_SIMDGROUP_8X8` へ
 /// サイレントにフォールバックしても数値一致自体は通ってしまい、`cfg` が
 /// 実際に採用されたことを保証しない（イシュー #532・PR #651 codex-review
-/// 指摘 P2）。`MetalGemm::resolve_tile_config`（`#[doc(hidden)] pub`。統合
-/// テストから参照するための例外公開。`crate::gemm` 参照）で実際に採用
-/// された構成を事前取得し `cfg` と一致することを assert してからディス
-/// パッチすることで、フォールバックが起きた場合は本関数を呼ぶ全テストが
-/// 失敗する。
+/// 指摘 P2）。この「実際に採用された構成の検証」（`MetalGemm::
+/// resolve_tile_config` を用いる）は、統合テスト（本ファイル。クレート境界
+/// の外）から内部実装（パイプライン構築・フォールバック）が公開 API として
+/// 露出してしまう問題（PR #651 codex-review 再指摘 P1）を避けるため、
+/// `backend_metal` クレート内部の `crate::tile` モジュール
+/// `#[cfg(test)] mod tests`（クレート内テスト。`resolve_tile_config` は
+/// `pub(crate)`）へ集約済み
+/// （`all_tile_candidates_match_cpu_reference_medium_shape` 等）。本関数は
+/// 数値一致（CPU 参照実装との複合判定）の確認に限定する。
 fn run_case(cfg: TileConfig, seed_a: u64, seed_b: u64, m: usize, n: usize, k: usize) {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
-
-    let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
-        panic!("候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
-    });
-    assert_eq!(
-        resolved, cfg,
-        "候補 {cfg:?} が実デバイス上でサイレントに {resolved:?} へフォールバックした \
-         （構成失敗を検知できていない）"
-    );
 
     let a = Xorshift64Star::new(seed_a).fill_vec(m * k);
     let b = Xorshift64Star::new(seed_b).fill_vec(k * n);

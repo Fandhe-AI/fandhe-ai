@@ -252,17 +252,19 @@ impl MetalGemm {
     /// テスト）が本メソッドで `resolve_tile_config(cfg) == cfg` を確認した
     /// うえで初めて実際のディスパッチへ進む契約にする。
     ///
-    /// `#[doc(hidden)] pub`（`pub(crate)` ではない）: 統合テスト
-    /// （`tests/` 配下・クレート境界の外）から参照する必要があるため
-    /// `pub(crate)` では届かない。`crate::tile::CANDIDATES`（候補の並び順・
-    /// 個数という内部表現そのもの。codex-review 指摘・PR #651 P1）とは
-    /// 性質が異なり、本メソッドは「指定した 1 構成が実際に採用されたか」
-    /// を問い合わせるだけで内部の候補集合・順序・個数を一切露出しないため、
-    /// 安定 API 契約への内部表現漏出には当たらない。`doc(hidden)` により
-    /// 通常の公開ドキュメント・利用者向け API 一覧には現れず、テスト専用の
-    /// 検証面であることを示す。
-    #[doc(hidden)]
-    pub fn resolve_tile_config(
+    /// `pub(crate)`（PR #651 codex-review 再指摘・P1）: 当初は統合テスト
+    /// （`tests/` 配下・クレート境界の外）から参照するため `#[doc(hidden)]
+    /// pub` としていたが、`doc(hidden)` はドキュメント表示を抑えるだけで
+    /// 可視性・semver 契約は変更されず、パイプライン構築・フォールバック
+    /// というバックエンド内部実装が外部から呼び出し可能な公開 API に
+    /// なってしまう問題があった。実セット（`crate::tile::CANDIDATES`）を
+    /// 検証するテストはクレート内テスト（本ファイル末尾ではなく
+    /// `crate::tile` の `#[cfg(test)] mod tests`。同モジュールは
+    /// クレート境界の内側のため `pub(crate)` で届く）へ集約し、統合テスト
+    /// （`tests/gemm_dynamic_tile_parity.rs`）側は本メソッドを呼ばず
+    /// `dispatch_variant` の数値一致確認に限定した（フォールバック検知は
+    /// クレート内テストが担う）。
+    pub(crate) fn resolve_tile_config(
         &self,
         ctx: &MetalContext,
         cfg: TileConfig,
