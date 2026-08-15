@@ -36,7 +36,7 @@
 //! `timeout 120 cargo test -p backend-cuda --release --test
 //! setmaxnreg_probe_dec_base_real_device -- --ignored --nocapture`
 //! （`docs/real-hardware-verification-env.md` の手順・
-//! `docs/cuda-tensor-core-design.md` §12「実行契約」節）。
+//! `docs/cuda-tensor-core-design.md` §12.1「実行契約」節）。
 //!
 //! ## A03（インジェクション）対応
 //!

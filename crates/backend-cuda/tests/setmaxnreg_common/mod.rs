@@ -43,7 +43,7 @@
 //! 予測ではなく、実行そのものへの**外部タイムアウト**（プロセス単位）で
 //! 行う契約とする（各テストファイルの実行コマンドは
 //! `timeout <秒> cargo test ... -- --ignored --nocapture` を必須とする。
-//! `docs/cuda-tensor-core-design.md` §12「実行契約」節参照）。これにより
+//! `docs/cuda-tensor-core-design.md` §12.1「実行契約」節参照）。これにより
 //! Bugbot 指摘（dec 単独プローブが `dec_ok=false` でも常に launch していた
 //! 非対称な扱い）も解消する: 本モジュールは dec 単独版・producer/consumer
 //! 版のいずれも「診断ログのみ・ゲートなし・外部タイムアウトで保護」という
@@ -194,13 +194,22 @@ pub fn launch_config(n: u32, block_dim: (u32, u32, u32)) -> LaunchConfig {
     }
 }
 
-/// 実機環境（device 名・compute capability・arch）を
+/// 実機環境（device 名・compute capability・device 基準 arch）を
 /// `SETMAXNREG_PROBE_RESULT` 形式で記録する。各テストファイルの冒頭で
 /// 呼ぶ（分割後もファイルごとに arch 情報を出力し、ログ単体から実行環境が
 /// 分かるようにする）。
+///
+/// フィールド名はあえて `arch` ではなく `device_arch` にしている:
+/// arch-accelerated 版（`*_accel_real_device.rs`）では、本関数は
+/// `device.arch()`（例: `compute_121`）という**基準** arch を報告する一方、
+/// 同ファイルの後続ログ行（`nvrtc_compile`/`execute` 等）は実際に使う
+/// `<arch>a`（例: `compute_121a`）を `arch=` で記録する。同じログ内で
+/// `arch=` が異なる値を指す（基準 arch と実効 arch の混在）と docs 転記時に
+/// 誤転記を招くため、本関数側のフィールド名を分離して曖昧さを排除する
+/// （PR #636 レビュー指摘対応）。
 pub fn report_environment(device: &CudaDevice) {
     println!(
-        "SETMAXNREG_PROBE_RESULT stage=environment name={:?} compute_capability={:?} arch={:?}",
+        "SETMAXNREG_PROBE_RESULT stage=environment name={:?} compute_capability={:?} device_arch={:?}",
         device.name(),
         device.compute_capability(),
         device.arch()
@@ -226,8 +235,15 @@ pub fn try_compile(
     control_ok: bool,
     arch: &str,
 ) -> Option<cudarc::nvrtc::Ptx> {
+    // `control_ok` は `report_control_baseline_regs` が別途コンパイルした
+    // 対照カーネルの成否を呼び出し元から受け取って転記するのみで、この
+    // 行自体は対照カーネルを再コンパイルしていない（本行は `try_compile`
+    // 開始時点の context ログ）。stage 名を `nvrtc_compile_control` にすると
+    // 「ここで対照カーネルをコンパイルした」ように読めてしまうため、
+    // 独立した control 判定に依存しない stage 名にしている
+    // （PR #636 レビュー指摘対応）。
     println!(
-        "SETMAXNREG_PROBE_RESULT stage=nvrtc_compile_control kernel={label} arch={arch} \
+        "SETMAXNREG_PROBE_RESULT stage=nvrtc_compile_start kernel={label} arch={arch} \
          control_accepted={control_ok}"
     );
 
@@ -338,7 +354,7 @@ pub fn report_control_baseline_regs(
 /// コメント参照）。ハング対策は本関数内のゲートではなく、呼び出し元
 /// （各テストファイル）を **外部タイムアウト**（`timeout <秒> cargo
 /// test ...`）付きで実行する運用契約に委ねる（`docs/cuda-tensor-core-
-/// design.md` §12「実行契約」節）。
+/// design.md` §12.1「実行契約」節）。
 ///
 /// `setmaxnreg` が実機で受理されない場合（`CUDA_ERROR_ILLEGAL_INSTRUCTION`
 /// 等）も `panic` させず結果として記録する。実行成功時は出力バッファを
