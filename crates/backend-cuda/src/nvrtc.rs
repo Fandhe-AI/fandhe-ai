@@ -1108,6 +1108,90 @@ mod tests {
                 (12, 9),
                 vec!["--gpu-architecture=compute_90".to_string()],
             ),
+            // Cursor Bugbot 指摘（PR #659）: 本テストは
+            // `changing_any_field_produces_distinct_key`
+            // と同等の全フィールド網羅を謳っていたが、実際には
+            // `block_n`/`block_k`/`stages`/`dtype` を変えるケースが
+            // 欠けていた。とくに `dtype` は `canonical_bytes` 内の
+            // 手書きタグであり、このケースがないと将来タグを誤って
+            // 省略しても F32/F16 がディスクキャッシュエントリを
+            // 共有する不具合を検出できない。ここで全フィールドを
+            // 単独変更するケースを追加する。
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    32,
+                    64,
+                    32,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    32,
+                    32,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    16,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    32,
+                    3,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    32,
+                    2,
+                    DType::F16,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
         ];
 
         for variant in &variants {
