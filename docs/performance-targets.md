@@ -29,6 +29,9 @@ Metal f16 初期リリース下限の確定）で確定した値をそのまま�
 | Metal f16 対 PyTorch MPS f16（同上） | 18.6%（`docs/perf/metal-f16-vs-mps-f16.md`「実測結果」節、size=4096。#383） | **15%** | **未設定** | 初期リリース: 確定（#386・実機実測に基づく。数値一致 #380 全 PASS・限定条件なし）／最適化後: 未設定（今後の最適化タスクで再確定。#386 承認記録） |
 | Transformer 複合ワークロード（attention/softmax/LayerNorm を含む複合演算） | 非実機参考値 約 6.1%（QEMU 仮想 CPU） | **下限を設定しない** | **下限を設定しない** | 未実測（`docs/perf/transformer-workload-measurement.md`・#155。QEMU 参考値は naive 経路混入・非実機の 2 重下振れ要因を含むため根拠に使わない） |
 
+上記各行の対象カーネル関数名・計測境界・Metal 2 系列の対応関係・CPU 基準実機の突合は
+`docs/perf/gemm-optimization-baseline.md`（#481）を参照（本表の数値・下限・状態列は変更していない）。
+
 - **CUDA f16 初期リリースの扱い（脚注）**: 実測比率 1.9%（`03-poc/poc-v2-3-cuda-gemm/README.md`）
   は tensor core 未使用のスカラー実装同士の比較であり、下限値として意味を持たない。
   tensor core（WMMA/mma）実装完了後、下記 §3 の丸め規則を適用して初期リリース下限を確定する。
@@ -121,6 +124,7 @@ v2 では各バックエンドのカーネルを個別に自作するため最�
 
 ## 7. 関連参照
 
+- `docs/perf/gemm-optimization-baseline.md`（#481。REQ-8 GEMM 5 行の対象カーネル・実機・PyTorch 版・出典の突合確定。Metal 2 系列の対応関係・CPU 基準実機の判断を含む）
 - `docs/perf/performance-floor-decision.md`（#158 確定記録 §3・#386 §8〈Metal f16 初期リリース確定〉。本ドキュメントの §2・§6 の入力）
 - `docs/perf/transformer-workload-measurement.md`（#155）
 - `docs/perf/metal-f16-vs-mps-f16.md`（#156・#380・#383）
