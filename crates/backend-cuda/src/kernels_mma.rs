@@ -103,6 +103,10 @@
 //! f16 入出力・f32 内部アキュムレートは `kernels_wmma.rs::WMMA_F16` と
 //! 同一方針（`.claude/rules/coding-rust.md` FMA 契約統一節）。
 
+use std::sync::LazyLock;
+
+use crate::error::CudaError;
+
 /// mma 命令 1 回あたりの行列形状（`m16n8k16`。sm_80+ の f16 標準 shape）。
 pub const MMA_M: u32 = 16;
 pub const MMA_N: u32 = 8;
@@ -199,25 +203,261 @@ const _: () = assert!(
      場合はカーネルソース側の wait_group 分岐ロジックも合わせて見直すこと"
 );
 
-/// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM（f16 入出力・f32 アキュムレート）。
+/// 次元（M／N／K）1 つぶんの焼き込み方式（イシュー #516）。
 ///
-/// ホスト側（`gemm_mma.rs::CudaMmaGemm`）はこの文字列を `nvrtc::compile_ptx`
-/// に渡して `CudaFunction` を得る。カーネルソースはコンパイル時定数の
-/// まま埋め込み、ビルド時に nvcc／CUDA ヘッダを要求しない契約
-/// （`.claude/rules/deps-policy.md`）を維持する（`kernels_wmma.rs` と同じ
-/// 方針）。
-pub const MMA_F16: &str = r#"
-#include <cuda_fp16.h>
+/// `Dynamic` はカーネル引数（`m`/`n`/`k`）をそのまま `#define DIM_* <param>`
+/// として間接参照する既定形（現行カーネルとプリプロセス後等価）。
+/// `Static(value)` はコンパイル時定数として焼き込み、当該次元の境界比較・
+/// 添字計算を NVRTC のコンパイル時定数畳み込みへ委ねる（受け入れ基準 2
+/// 「コンパイル時展開」）。どの次元をいつ静的化するかの選択ポリシーは
+/// 後続 #519（C-7）のスコープであり、本モジュールは機構のみを提供する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DimSpec {
+    /// カーネル引数をそのまま使う（既定）。
+    Dynamic,
+    /// この次元をコンパイル時定数として焼き込む。
+    ///
+    /// `mod kernels_mma` は非公開モジュール（`lib.rs` の `mod kernels_mma;`）
+    /// のため、本モジュール内から `Static` を構築する経路が現状テスト
+    /// コードのみだと rustc の dead-code 解析が誤検知する。本 variant は
+    /// 後続 #519（次元別静的化選択ポリシー）・#521（段数逆算）が実利用
+    /// する機構の一部であるため `#[allow(dead_code)]` を付す（本ファイル
+    /// 冒頭の他の定数に対する同種の判断と同じ方針）。
+    #[allow(dead_code)]
+    Static(u32),
+}
 
-#define MMA_M 16
-#define MMA_N 8
-#define MMA_K 16
-#define BM 32
-#define BN 64
-#define BK 32
-#define WARPS_N 8
-#define STAGES 3
+/// mma f16 カーネルの入出力 dtype 識別子。
+///
+/// 現状 f16 経路のみのため variant は 1 つだが、`MmaKernelConfig` に
+/// フィールドとして持たせておくことで、後続 #504（キャッシュキー構成
+/// 要素としての `Hash + Eq` 導出）が dtype を区別できる形にする（実装計画
+/// 4.1 節「dtype の差し替え」）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MmaDtype {
+    #[default]
+    F16,
+}
 
+/// `render_mma_f16` に渡す構成値（shape／タイル／段数／dtype）。
+///
+/// `Hash + Eq` を導出可能な単純型に留めているのは、後続 #504（descriptor・
+/// コンパイルキャッシュキー）がそのまま鍵の構成要素として使えるように
+/// するため（実装計画 10 節「スコープ外・引き継ぎ」参照）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MmaKernelConfig {
+    /// ブロックタイル M（`MMA_M` の倍数・8 の倍数必須）。
+    pub bm: u32,
+    /// ブロックタイル N（`MMA_N` の倍数・8 の倍数必須）。
+    pub bn: u32,
+    /// ブロックタイル K（`MMA_K` の倍数必須）。
+    pub bk: u32,
+    /// `cp.async` パイプラインの段数。`wait_group` drain 分岐が
+    /// `STAGES == 3` 前提の二値分岐のため、現状 3 以外は
+    /// [`validate_mma_kernel_config`] が拒否する（段数可変化は #492）。
+    pub stages: u32,
+    /// M 次元の焼き込み方式。
+    pub dim_m: DimSpec,
+    /// N 次元の焼き込み方式。
+    pub dim_n: DimSpec,
+    /// K 次元の焼き込み方式。
+    pub dim_k: DimSpec,
+    /// 入出力 dtype 識別子。
+    pub dtype: MmaDtype,
+}
+
+impl Default for MmaKernelConfig {
+    /// 現行の Rust 側タイル定数（唯一の真実源。`MMA_BM` 等）をそのまま
+    /// 初期値とする。全次元 `Dynamic`（既定は静的次元焼き込みなし。
+    /// 実装計画 4.1 節）。
+    fn default() -> Self {
+        Self {
+            bm: MMA_BM,
+            bn: MMA_BN,
+            bk: MMA_BK,
+            stages: MMA_STAGES,
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Dynamic,
+            dtype: MmaDtype::F16,
+        }
+    }
+}
+
+/// [`MmaKernelConfig`] の不変条件を、実際にカーネルソースへ展開する前に
+/// fail-closed で検査する（A03 対策。実装計画 4.2 節）。既存 const
+/// アサーション（本ファイル冒頭）の非既定構成向け一般化にあたる。
+fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+
+    if cfg.bm == 0 || cfg.bn == 0 || cfg.bk == 0 || cfg.stages == 0 {
+        return Err(invalid("bm/bn/bk/stages must all be non-zero".to_string()));
+    }
+    if !cfg.bm.is_multiple_of(MMA_M) {
+        return Err(invalid(format!(
+            "bm ({}) must be a multiple of MMA_M ({MMA_M})",
+            cfg.bm
+        )));
+    }
+    if !cfg.bn.is_multiple_of(MMA_N) {
+        return Err(invalid(format!(
+            "bn ({}) must be a multiple of MMA_N ({MMA_N})",
+            cfg.bn
+        )));
+    }
+    if !cfg.bk.is_multiple_of(MMA_K) {
+        return Err(invalid(format!(
+            "bk ({}) must be a multiple of MMA_K ({MMA_K})",
+            cfg.bk
+        )));
+    }
+    // cp.async 16 バイト転送粒度の前提（本ファイル冒頭コメント「整列制約」）。
+    if !cfg.bm.is_multiple_of(8) || !cfg.bn.is_multiple_of(8) {
+        return Err(invalid(format!(
+            "bm ({}) and bn ({}) must both be multiples of 8 (cp.async 16-byte transfer granularity)",
+            cfg.bm, cfg.bn
+        )));
+    }
+
+    let warps_m = cfg.bm / MMA_M;
+    let warps_n = cfg.bn / MMA_N;
+    let threads = warps_m
+        .checked_mul(warps_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| invalid("block thread count overflow".to_string()))?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "block thread count {threads} exceeds CUDA's per-block limit (1024)"
+        )));
+    }
+
+    // 静的共有メモリ予算（本ファイル冒頭コメント「タイル構成」・
+    // `MMA_SHARED_MEM_BYTES` ドキュメンテーションコメント参照）。
+    let smem_bytes = cfg
+        .bm
+        .checked_mul(cfg.bk)
+        .and_then(|a| cfg.bk.checked_mul(cfg.bn).and_then(|b| a.checked_add(b)))
+        .and_then(|sum| sum.checked_mul(2))
+        .and_then(|v| v.checked_mul(cfg.stages))
+        .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
+    if smem_bytes > 49_152 {
+        return Err(invalid(format!(
+            "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit"
+        )));
+    }
+
+    // wait_group drain 分岐（`if (t == num_k_tiles - 1)`）は STAGES=3 固定
+    // 前提の二値分岐（本ファイル冒頭コメント「命令選定」）。段数可変化は
+    // #492（Phase B）のスコープであり、それまで render 側で拒否する。
+    if cfg.stages != 3 {
+        return Err(invalid(format!(
+            "stages ({}) must be 3; the cp.async wait_group drain branch \
+             (if (t == num_k_tiles - 1)) is hard-coded for STAGES=3. \
+             variable stage counts are tracked by #492",
+            cfg.stages
+        )));
+    }
+
+    for (name, spec) in [
+        ("dim_m", cfg.dim_m),
+        ("dim_n", cfg.dim_n),
+        ("dim_k", cfg.dim_k),
+    ] {
+        if let DimSpec::Static(0) = spec {
+            return Err(invalid(format!(
+                "{name} static value must not be zero (degenerate dimension)"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// `#define {macro_name} <param_name または static 値>` を 1 行生成する。
+fn render_dim_define(macro_name: &str, param_name: &str, spec: DimSpec) -> String {
+    match spec {
+        DimSpec::Dynamic => format!("#define {macro_name} {param_name}"),
+        DimSpec::Static(value) => format!("#define {macro_name} {value}"),
+    }
+}
+
+/// 検証済み [`MmaKernelConfig`] からカーネルソース文字列を組み立てる
+/// 内部関数（`validate_mma_kernel_config` を経ない infallible 経路。
+/// 呼び出し元は必ず検証済みの `cfg` を渡すこと）。
+fn render_mma_f16_unchecked(cfg: &MmaKernelConfig) -> String {
+    let warps_n = cfg.bn / MMA_N;
+    let dim_m_define = render_dim_define("DIM_M", "m", cfg.dim_m);
+    let dim_n_define = render_dim_define("DIM_N", "n", cfg.dim_n);
+    let dim_k_define = render_dim_define("DIM_K", "k", cfg.dim_k);
+    format!(
+        "\n#include <cuda_fp16.h>\n\n\
+         #define MMA_M {MMA_M}\n\
+         #define MMA_N {MMA_N}\n\
+         #define MMA_K {MMA_K}\n\
+         #define BM {bm}\n\
+         #define BN {bn}\n\
+         #define BK {bk}\n\
+         #define WARPS_N {warps_n}\n\
+         #define STAGES {stages}\n\
+         {dim_m_define}\n\
+         {dim_n_define}\n\
+         {dim_k_define}\n\
+         \n{MMA_F16_BODY}",
+        bm = cfg.bm,
+        bn = cfg.bn,
+        bk = cfg.bk,
+        stages = cfg.stages,
+    )
+}
+
+/// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM のテンプレート化されたカーネル
+/// ソースを、`cfg` の shape／タイル／段数で展開する（イシュー #516）。
+///
+/// 展開前に [`validate_mma_kernel_config`] で不変条件を fail-closed 検査
+/// する（SMEM 予算・倍数関係・スレッド数上限・`stages == 3` 等）。
+/// ホスト側（`gemm_mma.rs::CudaMmaGemm`）は返した文字列を
+/// `nvrtc::compile_ptx` に渡して `CudaFunction` を得る。カーネルソースは
+/// 型付き数値・enum のみから組み立てられ、外部入力文字列をソースへ連結
+/// しない契約を維持する（`nvrtc.rs` A03 節参照）。
+///
+/// `mod kernels_mma` が非公開モジュールのため、既定構成のみを使う現状の
+/// `gemm_mma.rs`（[`mma_f16_source`] 経由）からは呼ばれず、rustc の
+/// dead-code 解析が誤検知する。非既定 config を渡す呼び出し元は後続
+/// #504（descriptor・コンパイルキャッシュキー）・#519（次元別静的化
+/// 選択ポリシー）・#521（段数逆算）で追加される想定のため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
+pub fn render_mma_f16(cfg: &MmaKernelConfig) -> Result<String, CudaError> {
+    validate_mma_kernel_config(cfg)?;
+    Ok(render_mma_f16_unchecked(cfg))
+}
+
+/// 既定 [`MmaKernelConfig`]（現行 Rust 定数と同一値）で展開したカーネル
+/// ソースを 1 回だけ生成しキャッシュする（`gemm_mma.rs` からの毎呼び出し
+/// での再フォーマットを避ける）。既定 config はコンパイル時 const
+/// アサーション（本ファイル冒頭）で不変条件を保証済みのため、ここでは
+/// `validate_mma_kernel_config` を経ない `_unchecked` 経路を使い、本番
+/// 経路に `unwrap()`/`expect()` を置かない（`.claude/rules/coding-rust.md`）。
+static MMA_F16_SOURCE: LazyLock<String> =
+    LazyLock::new(|| render_mma_f16_unchecked(&MmaKernelConfig::default()));
+
+/// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM（f16 入出力・f32 アキュムレート）の
+/// 既定構成カーネルソース。`gemm_mma.rs::CudaMmaGemm::new` はこの文字列を
+/// `nvrtc::compile_ptx` に渡して `CudaFunction` を得る。カーネルソースは
+/// コンパイル時定数のまま埋め込み、ビルド時に nvcc／CUDA ヘッダを要求
+/// しない契約（`.claude/rules/deps-policy.md`）を維持する（`kernels_wmma.rs`
+/// と同じ方針）。
+pub fn mma_f16_source() -> &'static str {
+    &MMA_F16_SOURCE
+}
+
+/// [`render_mma_f16_unchecked`]／[`mma_f16_source`] が結合するカーネル本体
+/// テンプレート。`m`/`n`/`k`（カーネル引数）への直接参照は `DIM_M`/`DIM_N`/
+/// `DIM_K` マクロ経由に置き換えてある（実装計画 4.1 節「shape の焼き込み
+/// 機構」）。カーネルシグネチャ自体は `int m, int n, int k` のまま変更
+/// しない（起動側 ABI 不変。`DimSpec::Static` 選択時は当該引数が未使用に
+/// なるだけで安全）。
+const MMA_F16_BODY: &str = r#"
 // REQ-8: グローバル→共有メモリの 16 バイト単位コピー。src_size==16 で
 // 実データをコピーし、src_size==0 で実際のグローバル読み出しを発生させず
 // 共有メモリ側を丸ごとゼロ充填する（本ファイル冒頭コメント「境界検査」参照）。
@@ -263,7 +503,7 @@ extern "C" __global__ void gemm_mma_f16(
     // 単一フラグメントで足りる。本ファイル冒頭コメント「タイル構成」）。
     float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
 
-    int num_k_tiles = (k > 0) ? (k - 1) / BK + 1 : 0;
+    int num_k_tiles = (DIM_K > 0) ? (DIM_K - 1) / BK + 1 : 0;
 
     // REQ-8: A/B タイルを stage へ非同期ロードする。gr/gc は呼び出し側で
     // クランプ済みの添字（境界外ポインタを作らないため）。valid は実際の
@@ -288,10 +528,10 @@ extern "C" __global__ void gemm_mma_f16(
             int col0 = (idx % (BK / 8)) * 8; \
             int gr = block_row0 + row; \
             int gc = (k0) + col0; \
-            int gr_c = gr < m ? gr : (m > 0 ? m - 1 : 0); \
-            int gc_c = gc < k ? gc : (k > 0 ? ((k - 1) / 8) * 8 : 0); \
-            int valid = (gr < m && gc < k) ? 16 : 0; \
-            mma_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * k + gc_c], valid); \
+            int gr_c = gr < DIM_M ? gr : (DIM_M > 0 ? DIM_M - 1 : 0); \
+            int gc_c = gc < DIM_K ? gc : (DIM_K > 0 ? ((DIM_K - 1) / 8) * 8 : 0); \
+            int valid = (gr < DIM_M && gc < DIM_K) ? 16 : 0; \
+            mma_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * DIM_K + gc_c], valid); \
         }
 
     #define LOAD_B_STAGE(stage, k0) \
@@ -300,10 +540,10 @@ extern "C" __global__ void gemm_mma_f16(
             int col0 = (idx % (BN / 8)) * 8; \
             int gr = (k0) + row; \
             int gc = block_col0 + col0; \
-            int gr_c = gr < k ? gr : (k > 0 ? k - 1 : 0); \
-            int gc_c = gc < n ? gc : (n > 0 ? ((n - 1) / 8) * 8 : 0); \
-            int valid = (gr < k && gc < n) ? 16 : 0; \
-            mma_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * n + gc_c], valid); \
+            int gr_c = gr < DIM_K ? gr : (DIM_K > 0 ? DIM_K - 1 : 0); \
+            int gc_c = gc < DIM_N ? gc : (DIM_N > 0 ? ((DIM_N - 1) / 8) * 8 : 0); \
+            int valid = (gr < DIM_K && gc < DIM_N) ? 16 : 0; \
+            mma_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * DIM_N + gc_c], valid); \
         }
 
     // プロローグ: 最初の STAGES-1 タイルをロードし、それぞれ独立した
@@ -343,6 +583,10 @@ extern "C" __global__ void gemm_mma_f16(
         }
         __syncthreads();
 
+        // 受け入れ基準 2（コンパイル時展開）: BK/MMA_K は #define 定数の
+        // ため NVRTC がコンパイル時に反復回数を確定でき、`#pragma unroll`
+        // でループ展開する（wmma_opt 系は既に付与済み。実装計画 4.3 節）。
+        #pragma unroll
         for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {
             int a_row = warp_row * MMA_M;
             int a_col = kstep * MMA_K;
@@ -418,10 +662,10 @@ extern "C" __global__ void gemm_mma_f16(
     int c0 = col0_warp + tid_in_group * 2;
     int c1 = c0 + 1;
 
-    if (r0 < m && c0 < n) c[(size_t)r0 * n + c0] = __float2half(d0);
-    if (r0 < m && c1 < n) c[(size_t)r0 * n + c1] = __float2half(d1);
-    if (r1 < m && c0 < n) c[(size_t)r1 * n + c0] = __float2half(d2);
-    if (r1 < m && c1 < n) c[(size_t)r1 * n + c1] = __float2half(d3);
+    if (r0 < DIM_M && c0 < DIM_N) c[(size_t)r0 * DIM_N + c0] = __float2half(d0);
+    if (r0 < DIM_M && c1 < DIM_N) c[(size_t)r0 * DIM_N + c1] = __float2half(d1);
+    if (r1 < DIM_M && c0 < DIM_N) c[(size_t)r1 * DIM_N + c0] = __float2half(d2);
+    if (r1 < DIM_M && c1 < DIM_N) c[(size_t)r1 * DIM_N + c1] = __float2half(d3);
 }
 "#;
 
@@ -429,12 +673,15 @@ extern "C" __global__ void gemm_mma_f16(
 mod tests {
     use super::*;
 
-    /// Rust 側タイル定数が CUDA ソース内 `#define` と食い違わないことを
-    /// 検査する（`kernels_wmma.rs::wmma_tile_constant_matches_kernel_source_defines`
+    /// Rust 側タイル定数が既定構成の生成ソース内 `#define` と食い違わない
+    /// ことを検査する（`kernels_wmma.rs::wmma_tile_constant_matches_kernel_source_defines`
     /// と同じ方針。値の不一致はコンパイルエラーにならず誤った積和結果を
-    /// 静かに生成しうるため CI 上で機械検出する）。
+    /// 静かに生成しうるため CI 上で機械検出する）。イシュー #516 でテンプレート
+    /// 展開へ移行したため、静的リテラルではなく `mma_f16_source()`（既定
+    /// config の render 結果）を対象にする。
     #[test]
     fn mma_tile_constants_match_kernel_source_defines() {
+        let src = mma_f16_source();
         for (name, value) in [
             ("MMA_M", MMA_M),
             ("MMA_N", MMA_N),
@@ -447,8 +694,23 @@ mod tests {
         ] {
             let expected = format!("#define {name} {value}");
             assert!(
-                MMA_F16.contains(&expected),
-                "MMA_F16 の `#define {name}` が Rust 側定数（{value}）と一致しません"
+                src.contains(&expected),
+                "mma_f16_source() の `#define {name}` が Rust 側定数（{value}）と一致しません"
+            );
+        }
+    }
+
+    /// 既定構成（全次元 `Dynamic`）では `#define DIM_* <カーネル引数>`
+    /// 形式でカーネル引数へ間接するのみで、既存カーネルとプリプロセス後
+    /// 等価であることをロックする（実装計画 4.4 節「境界検査・数値契約の
+    /// 非後退」）。
+    #[test]
+    fn mma_default_config_dim_defines_alias_kernel_parameters() {
+        let src = mma_f16_source();
+        for expected in ["#define DIM_M m", "#define DIM_N n", "#define DIM_K k"] {
+            assert!(
+                src.contains(expected),
+                "mma_f16_source() に既定次元マクロ `{expected}` が見つかりません"
             );
         }
     }
@@ -459,6 +721,7 @@ mod tests {
     /// と同じ方針）。
     #[test]
     fn mma_f16_source_uses_mma_sync_ldmatrix_cp_async_instructions() {
+        let src = mma_f16_source();
         for needle in [
             "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
             "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
@@ -468,8 +731,8 @@ mod tests {
             "cp.async.wait_group",
         ] {
             assert!(
-                MMA_F16.contains(needle),
-                "MMA_F16 に tensor core 命令 `{needle}` が見つかりません"
+                src.contains(needle),
+                "mma_f16_source() に tensor core 命令 `{needle}` が見つかりません"
             );
         }
     }
@@ -477,20 +740,22 @@ mod tests {
     /// REQ-8: A/B タイルの `cp.async` src-size ゼロ充填・エピローグ
     /// guarded store の手動境界チェックが除去されていないことをロックする
     /// （`kernels_wmma.rs` の REQ-8 テスト方針と同様、性能最適化を理由に
-    /// 境界検査が省略される回帰を防ぐ）。
+    /// 境界検査が省略される回帰を防ぐ）。マクロ化（イシュー #516）に伴い
+    /// needle は `DIM_M`/`DIM_N`/`DIM_K` 形式へ更新している。
     #[test]
     fn mma_f16_source_retains_req8_boundary_guards() {
+        let src = mma_f16_source();
         for needle in [
-            "gr < m && gc < k",
-            "gr < k && gc < n",
-            "r0 < m && c0 < n",
-            "r0 < m && c1 < n",
-            "r1 < m && c0 < n",
-            "r1 < m && c1 < n",
+            "gr < DIM_M && gc < DIM_K",
+            "gr < DIM_K && gc < DIM_N",
+            "r0 < DIM_M && c0 < DIM_N",
+            "r0 < DIM_M && c1 < DIM_N",
+            "r1 < DIM_M && c0 < DIM_N",
+            "r1 < DIM_M && c1 < DIM_N",
         ] {
             assert!(
-                MMA_F16.contains(needle),
-                "MMA_F16 に REQ-8 境界チェック `{needle}` が見つかりません"
+                src.contains(needle),
+                "mma_f16_source() に REQ-8 境界チェック `{needle}` が見つかりません"
             );
         }
     }
@@ -522,10 +787,10 @@ mod tests {
     /// `MMA_WAIT_GROUP_IMMEDIATE` ドキュメンテーションコメント参照）。
     #[test]
     fn mma_f16_source_drains_final_async_copy_group_before_compute() {
+        let src = mma_f16_source();
         assert!(
-            MMA_F16.contains("if (t == num_k_tiles - 1)")
-                && MMA_F16.contains("cp.async.wait_group 0;"),
-            "MMA_F16 に最終 K タイルの cp.async drain 分岐（wait_group 0）が見つかりません"
+            src.contains("if (t == num_k_tiles - 1)") && src.contains("cp.async.wait_group 0;"),
+            "mma_f16_source() に最終 K タイルの cp.async drain 分岐（wait_group 0）が見つかりません"
         );
     }
 
@@ -534,13 +799,15 @@ mod tests {
     /// クランプが 16 バイト（8 要素）境界に切り下げられていることを
     /// ロックする（`k-1`/`n-1` への素朴なクランプはアラインを崩し
     /// 未定義動作になりうる。本ファイル `LOAD_A_STAGE`/`LOAD_B_STAGE`
-    /// マクロ直前のコメント参照）。
+    /// マクロ直前のコメント参照）。needle は `DIM_K`/`DIM_N` マクロ化後の
+    /// 形式（イシュー #516）。
     #[test]
     fn mma_f16_source_zero_fill_clamp_stays_16_byte_aligned() {
-        for needle in ["((k - 1) / 8) * 8", "((n - 1) / 8) * 8"] {
+        let src = mma_f16_source();
+        for needle in ["((DIM_K - 1) / 8) * 8", "((DIM_N - 1) / 8) * 8"] {
             assert!(
-                MMA_F16.contains(needle),
-                "MMA_F16 に 16 バイト整列クランプ `{needle}` が見つかりません"
+                src.contains(needle),
+                "mma_f16_source() に 16 バイト整列クランプ `{needle}` が見つかりません"
             );
         }
     }
@@ -552,10 +819,158 @@ mod tests {
     /// すると TL/TR/BL/BR の順になり不正な結果を招く）。
     #[test]
     fn mma_f16_source_uses_mma_fragment_quadrant_order_for_a() {
+        let src = mma_f16_source();
         assert!(
-            MMA_F16.contains("int a_quad_row = (lane / 8) % 2;")
-                && MMA_F16.contains("int a_quad_col = (lane / 8) / 2;"),
-            "MMA_F16 の A フラグメント象限順序（TL/BL/TR/BR）が見つかりません"
+            src.contains("int a_quad_row = (lane / 8) % 2;")
+                && src.contains("int a_quad_col = (lane / 8) / 2;"),
+            "mma_f16_source() の A フラグメント象限順序（TL/BL/TR/BR）が見つかりません"
         );
+    }
+
+    /// 受け入れ基準 2（コンパイル時展開）: kstep ループ直前に `#pragma unroll`
+    /// が付与されていることをロックする（実装計画 4.3 節）。
+    #[test]
+    fn mma_f16_source_has_pragma_unroll_before_kstep_loop() {
+        let src = mma_f16_source();
+        let idx = src
+            .find("for (int kstep = 0; kstep < BK / MMA_K; ++kstep)")
+            .expect("kstep ループが見つかりません");
+        let before = &src[..idx];
+        let pragma_idx = before
+            .rfind("#pragma unroll")
+            .expect("kstep ループ直前に #pragma unroll が見つかりません");
+        // #pragma unroll と for の間に他のステートメントが挟まっていない
+        // ことを確認する（空白・コメント行のみ許容）。
+        let between = &src[pragma_idx + "#pragma unroll".len()..idx];
+        assert!(
+            between.trim().starts_with("//") || between.trim().is_empty(),
+            "#pragma unroll と kstep ループの間に余計な文があります: {between:?}"
+        );
+    }
+
+    /// 非既定 config（`bm=64, bn=64, bk=32`・M 次元を `Static(4096)` で
+    /// 焼き込み）での特化 render: `#define` 実値・派生定数（`WARPS_N` 等）・
+    /// `#define DIM_M 4096` 形式の焼き込みが正しく展開され、REQ-8 ガードが
+    /// 引き続き存在することを検査する（実装計画 7 節「特化 render」）。
+    #[test]
+    fn render_mma_f16_specializes_tile_and_static_dim() {
+        let cfg = MmaKernelConfig {
+            bm: 64,
+            bn: 64,
+            bk: 32,
+            stages: 3,
+            dim_m: DimSpec::Static(4096),
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Dynamic,
+            dtype: MmaDtype::F16,
+        };
+        let src = render_mma_f16(&cfg).expect("有効な構成が拒否されました");
+
+        for expected in [
+            "#define BM 64",
+            "#define BN 64",
+            "#define BK 32",
+            "#define WARPS_N 8", // 64 / MMA_N(8)
+            "#define DIM_M 4096",
+            "#define DIM_N n",
+            "#define DIM_K k",
+        ] {
+            assert!(
+                src.contains(expected),
+                "特化 render に `{expected}` が見つかりません: config={cfg:?}"
+            );
+        }
+        for needle in ["gr < DIM_M && gc < DIM_K", "r0 < DIM_M && c0 < DIM_N"] {
+            assert!(
+                src.contains(needle),
+                "特化 render に REQ-8 境界チェック `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// フェイルクローズド検証（実装計画 7 節・4.2 節）: SMEM 予算超過・
+    /// 倍数違反・スレッド数超過・`stages != 3`・ゼロ次元の各構成が全て
+    /// `Err(CudaError::InvalidKernelConfig)` になることを検査する。
+    #[test]
+    fn render_mma_f16_rejects_invalid_configs() {
+        let base = MmaKernelConfig::default();
+
+        let cases: [(&str, MmaKernelConfig); 5] = [
+            (
+                "bm not multiple of MMA_M",
+                MmaKernelConfig { bm: 17, ..base },
+            ),
+            (
+                "smem budget exceeded",
+                MmaKernelConfig {
+                    bm: 128,
+                    bn: 128,
+                    bk: 32,
+                    ..base
+                },
+            ),
+            (
+                "thread count exceeds 1024",
+                MmaKernelConfig {
+                    bm: 512,
+                    bn: 512,
+                    bk: 16,
+                    stages: 1,
+                    ..base
+                },
+            ),
+            ("stages != 3", MmaKernelConfig { stages: 2, ..base }),
+            (
+                "static dim zero",
+                MmaKernelConfig {
+                    dim_m: DimSpec::Static(0),
+                    ..base
+                },
+            ),
+        ];
+
+        for (label, cfg) in cases {
+            let result = render_mma_f16(&cfg);
+            assert!(
+                matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+                "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}"
+            );
+        }
+    }
+
+    /// 受け入れ基準 2（PTX/SASS ダンプによるコンパイル時展開の実確認）は
+    /// CI・本環境に NVRTC／実機がないため通常 CI では実行しない
+    /// （`kernels_mma.rs` 冒頭コメント「検証状態」・`tests/gemm_mma.rs` の
+    /// 環境適応方式を踏襲）。NVRTC が使える環境では、既定＋特化 render 済み
+    /// ソースが `nvrtc::compile_ptx` を通ることを確認する（実測記録は
+    /// #531/#534/#539 へ引き継ぐ。実装計画 10 節）。
+    #[test]
+    #[ignore = "requires NVRTC (libnvrtc); run manually on a CUDA-enabled host"]
+    fn mma_f16_sources_compile_with_nvrtc_when_available() {
+        use crate::nvrtc::compile_ptx;
+
+        // 実機の compute capability に依存しないよう sm_80（本モジュールの
+        // 最小要求。`gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR`）を使う。
+        let arch = "compute_80";
+
+        match compile_ptx(mma_f16_source(), arch) {
+            Ok(_) => {}
+            Err(CudaError::NvrtcUnavailable { .. }) => return,
+            Err(e) => panic!("既定構成カーネルソースの NVRTC コンパイルに失敗しました: {e}"),
+        }
+
+        let specialized_cfg = MmaKernelConfig {
+            bm: 64,
+            bn: 64,
+            bk: 32,
+            stages: 3,
+            dim_m: DimSpec::Static(4096),
+            dim_n: DimSpec::Static(4096),
+            dim_k: DimSpec::Static(4096),
+            dtype: MmaDtype::F16,
+        };
+        let specialized_src = render_mma_f16(&specialized_cfg).expect("有効な構成が拒否されました");
+        compile_ptx(&specialized_src, arch)
+            .expect("特化構成カーネルソースの NVRTC コンパイルに失敗しました");
     }
 }

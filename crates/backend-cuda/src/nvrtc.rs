@@ -10,9 +10,19 @@
 //! `CUDA_INCLUDE_PATH` 環境変数はコンパイルオプションの include パス
 //! 文字列としてのみ `CompileOptions::include_paths` へ渡し、シェル展開・
 //! コマンド実行には一切使わない（`.claude/rules/security.md`）。
-//! カーネルソース（`src` 引数）はコンパイル時定数（`&'static str`）
-//! であることを呼び出し元（#33/#34）に要求し、外部入力をソース文字列へ
-//! 連結しない方針とする。
+//!
+//! `src` 引数の契約（イシュー #516 で更新）: 従来は「コンパイル時定数
+//! （`&'static str`）であること」を呼び出し元に要求していたが、
+//! `kernels_mma::render_mma_f16`／`kernels_wmma_opt::render_wmma_tf32_opt`・
+//! `render_wmma_f16_opt`（shape／タイル／段数のテンプレート文字列展開）
+//! 導入に伴い、実行時に組み立てた `String`（`&str` として渡す）も許容
+//! する。許容の条件は「静的テンプレート（本クレート内の `const *_BODY`
+//! リテラル）＋ fail-closed 検証済みの型付き数値・enum パラメータのみ
+//! から組み立てられていること」であり、外部入力文字列（ユーザー・
+//! ファイル・環境変数由来の文字列）をソースへ連結する経路は引き続き
+//! 禁止する（A03 対策の実体は不変。`kernels_mma.rs`・
+//! `kernels_wmma_opt.rs` の `render_*` 関数のドキュメンテーションコメント
+//! 参照）。
 
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 

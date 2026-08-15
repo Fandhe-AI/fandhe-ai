@@ -1,6 +1,6 @@
 //! f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM の起動 API（TASK-11.1h・#187）。
 //!
-//! `CudaMmaGemm` は `kernels_mma::MMA_F16`（`m16n8k16` mma・3 ステージ
+//! `CudaMmaGemm` は `kernels_mma::mma_f16_source()`（`m16n8k16` mma・3 ステージ
 //! `cp.async` パイプライン）をコンパイル・保持し、以降はホスト側スライスを
 //! 渡すだけで GPU 実行できる境界を担う（`gemm_wmma.rs::CudaWmmaGemm` と
 //! 同じ責務分割。並行 issue #62/#63 が `gemm.rs`／`gemm_wmma.rs` を編集中の
@@ -107,7 +107,7 @@ impl CudaMmaGemm {
     /// 試みず `CudaError::TensorCoreUnsupported` を返す（`gemm_wmma.rs::new`
     /// と同じ判断。cc 判定をコンパイル前に行うことで、非対応デバイス上での
     /// 無駄な NVRTC 呼び出し・コンパイル失敗の紛れ込みを避ける）。(2)
-    /// `kernels_mma::MMA_F16` を `device.arch()` 向けに `nvrtc::compile_ptx`
+    /// `kernels_mma::mma_f16_source()` を `device.arch()` 向けに `nvrtc::compile_ptx`
     /// でコンパイル。(3) `device.context().load_module()` →
     /// `load_function("gemm_mma_f16")`。`libnvrtc` 不在時は
     /// `CudaError::NvrtcUnavailable` を返す（`compile_ptx` のプローブゲート
@@ -139,7 +139,7 @@ impl CudaMmaGemm {
         }
 
         let arch = device.arch();
-        let ptx = compile_ptx(kernels_mma::MMA_F16, arch)?;
+        let ptx = compile_ptx(kernels_mma::mma_f16_source(), arch)?;
         let mma_f16 = device
             .context()
             .load_module(ptx)?
@@ -153,7 +153,7 @@ impl CudaMmaGemm {
 
     /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM を実行する。C = A @ B
     /// （`m x k` @ `k x n`）。入出力は `half::f16`、GPU 内部アキュムレートは
-    /// f32（`kernels_mma::MMA_F16` 参照。数値契約は `CudaWmmaGemm::run_f16`
+    /// f32（`kernels_mma::mma_f16_source()` 参照。数値契約は `CudaWmmaGemm::run_f16`
     /// と同一）。
     ///
     /// ホスト側形状検証を 3 段で行う: `validate_gemm_dims`（naive/tiled/WMMA

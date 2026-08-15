@@ -142,6 +142,11 @@ pub const WMMA_TF32_OPT_WARP_TILE: u32 = 32;
 /// 「ホスト側ブロック次元とカーネル内 warp グリッドの 1:1 対応」契約）。
 pub const WMMA_TF32_OPT_THREADS: u32 = 128;
 
+use std::sync::LazyLock;
+
+use crate::error::CudaError;
+use crate::kernels_mma::DimSpec;
+
 /// A タイル（`as_tile[2][BLOCK_M][A_PAD]`）の行幅（パディング後）。
 /// `K_TILE`（16）に 4 要素加算し、f32 の `ldm` 制約（4 の倍数）を保ちながら
 /// バンクコンフリクトを避ける（設計メモ 4.2 節・本ファイル冒頭
@@ -175,24 +180,229 @@ pub const WMMA_TF32_OPT_B_PAD: u32 = WMMA_TF32_OPT_BLOCK_N + 4;
 /// の f32）を上回る実測（5 回中央値）。実測確定は #64（実機チューニング）
 /// に引き継ぐ（本カーネルはサンドボックス環境でコンパイル未検証。上記
 /// 「サンドボックス制約と安全側設計」参照）。
-pub const WMMA_TF32_F32_OPT: &str = r#"
-#include <mma.h>
+///
+/// # テンプレート文字列展開（イシュー #516）
+///
+/// 本カーネルは [`render_wmma_tf32_opt`] のテンプレート展開結果であり、
+/// [`WMMA_TF32_OPT_BLOCK_M`] 等 Rust 側タイル定数を初期値とする既定
+/// [`WmmaOptKernelConfig`] で展開したソースを [`wmma_tf32_f32_opt_source`]
+/// が 1 回だけキャッシュして返す。`kernels_mma.rs::MMA_F16` と同じ方針
+/// （`DimSpec` による M/N/K の動的／静的焼き込み選択・fail-closed 構成
+/// 検証）だが、本カーネルは `cp.async` パイプライン段数を持たない
+/// （ダブルバッファ `cur`/`nxt` は 2 固定）ため config に `stages` 相当の
+/// フィールドはない。
+pub fn wmma_tf32_f32_opt_source() -> &'static str {
+    &WMMA_TF32_F32_OPT_SOURCE
+}
 
-using namespace nvcuda;
+static WMMA_TF32_F32_OPT_SOURCE: LazyLock<String> =
+    LazyLock::new(|| render_wmma_tf32_opt_unchecked(&WmmaOptKernelConfig::default_tf32()));
 
-#define WMMA_TF32_OPT_BLOCK_M 64
-#define WMMA_TF32_OPT_BLOCK_N 64
-#define WMMA_TF32_OPT_K_TILE 16
-#define WMMA_TF32_OPT_FRAG 16
-#define WMMA_TF32_OPT_FRAG_K 8
-#define WMMA_TF32_OPT_WARP_TILE 32
-#define WMMA_TF32_OPT_THREADS 128
-#define WMMA_TF32_OPT_A_PAD 20
-#define WMMA_TF32_OPT_B_PAD 68
-#define WMMA_TF32_OPT_FRAG_ROWS 2
-#define WMMA_TF32_OPT_FRAG_COLS 2
-#define WMMA_TF32_OPT_K_SUBSTEPS 2
+/// [`render_wmma_tf32_opt`]／[`render_wmma_f16_opt`] に共通の構成値
+/// （ブロックタイル・K タイル幅・shape 焼き込み方式）。
+///
+/// TF32 opt・f16 opt は fragment 辺（`WMMA_*_OPT_FRAG`）・warp タイル辺
+/// （`WMMA_*_OPT_WARP_TILE`）・パディング増分（TF32: +4／f16: +8）が
+/// 異なるため、これらは各 `render_*` 関数側の固定値として扱い、本構造体
+/// では扱わない（実装計画 4.1 節「dtype の差し替え」: dtype 差異はテンプレート
+/// 選択＝呼び出す `render_*` 関数で表現し、config フィールドとしては
+/// 汎用化しない）。`Hash + Eq` を導出可能な単純型に留めているのは、
+/// `kernels_mma::MmaKernelConfig` と同じ理由（後続 #504 のキャッシュキー
+/// 構成要素として使えるようにするため）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WmmaOptKernelConfig {
+    /// ブロックタイル M（warp タイル辺の倍数必須）。
+    pub block_m: u32,
+    /// ブロックタイル N（warp タイル辺の倍数必須）。
+    pub block_n: u32,
+    /// 共有メモリ K タイル幅。
+    pub k_tile: u32,
+    /// M 次元の焼き込み方式。
+    pub dim_m: DimSpec,
+    /// N 次元の焼き込み方式。
+    pub dim_n: DimSpec,
+    /// K 次元の焼き込み方式。
+    pub dim_k: DimSpec,
+}
 
+impl WmmaOptKernelConfig {
+    /// TF32 opt カーネルの既定構成（現行 Rust 側タイル定数と同一値。
+    /// 全次元 `Dynamic`）。
+    pub fn default_tf32() -> Self {
+        Self {
+            block_m: WMMA_TF32_OPT_BLOCK_M,
+            block_n: WMMA_TF32_OPT_BLOCK_N,
+            k_tile: WMMA_TF32_OPT_K_TILE,
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Dynamic,
+        }
+    }
+
+    /// f16 opt カーネルの既定構成（現行 Rust 側タイル定数と同一値。
+    /// 全次元 `Dynamic`）。
+    pub fn default_f16() -> Self {
+        Self {
+            block_m: WMMA_F16_OPT_BLOCK_M,
+            block_n: WMMA_F16_OPT_BLOCK_N,
+            k_tile: WMMA_F16_OPT_K_TILE,
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Dynamic,
+        }
+    }
+}
+
+/// [`WmmaOptKernelConfig`] を TF32 opt カーネル向けに fail-closed 検証する
+/// （実装計画 4.2 節。`WARP_TILE`=32・`FRAG`=16・`FRAG_K`=8 は本カーネルの
+/// 固定ハードウェア形状であり config では扱わない）。
+fn validate_wmma_tf32_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+    let warp_tile = WMMA_TF32_OPT_WARP_TILE;
+    let frag_k = WMMA_TF32_OPT_FRAG_K;
+
+    if cfg.block_m == 0 || cfg.block_n == 0 || cfg.k_tile == 0 {
+        return Err(invalid(
+            "block_m/block_n/k_tile must all be non-zero".to_string(),
+        ));
+    }
+    if !cfg.block_m.is_multiple_of(warp_tile) || !cfg.block_n.is_multiple_of(warp_tile) {
+        return Err(invalid(format!(
+            "block_m ({}) and block_n ({}) must both be multiples of WARP_TILE ({warp_tile})",
+            cfg.block_m, cfg.block_n
+        )));
+    }
+    if !cfg.k_tile.is_multiple_of(frag_k) {
+        return Err(invalid(format!(
+            "k_tile ({}) must be a multiple of FRAG_K ({frag_k})",
+            cfg.k_tile
+        )));
+    }
+
+    let warp_grid_m = cfg.block_m / warp_tile;
+    let warp_grid_n = cfg.block_n / warp_tile;
+    let threads = warp_grid_m
+        .checked_mul(warp_grid_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| invalid("block thread count overflow".to_string()))?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "block thread count {threads} exceeds CUDA's per-block limit (1024)"
+        )));
+    }
+
+    let a_pad = cfg.k_tile + 4;
+    let b_pad = cfg.block_n + 4;
+    // ダブルバッファ（as_tile/bs_tile）＋エピローグ c_tile の静的共有メモリ
+    // 合計（実装計画 4.2 節「SMEM 予算」）。全て同一カーネル関数内の
+    // `__shared__` 宣言のためタイミングに関わらず合算される。
+    let smem_bytes = 2u32
+        .checked_mul(cfg.block_m)
+        .and_then(|v| v.checked_mul(a_pad))
+        .and_then(|v| v.checked_mul(4))
+        .zip(
+            2u32.checked_mul(cfg.k_tile)
+                .and_then(|v| v.checked_mul(b_pad))
+                .and_then(|v| v.checked_mul(4)),
+        )
+        .and_then(|(a, b)| a.checked_add(b))
+        .zip(
+            cfg.block_m
+                .checked_mul(cfg.block_n)
+                .and_then(|v| v.checked_mul(4)),
+        )
+        .and_then(|(ab, c)| ab.checked_add(c))
+        .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
+    if smem_bytes > 49_152 {
+        return Err(invalid(format!(
+            "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit"
+        )));
+    }
+
+    for (name, spec) in [
+        ("dim_m", cfg.dim_m),
+        ("dim_n", cfg.dim_n),
+        ("dim_k", cfg.dim_k),
+    ] {
+        if let DimSpec::Static(0) = spec {
+            return Err(invalid(format!(
+                "{name} static value must not be zero (degenerate dimension)"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// `#define {macro_name} <param_name または static 値>` を 1 行生成する
+/// （`kernels_mma::render_dim_define` と同方式。用途がモジュールをまたぐ
+/// ためここでも定義する）。
+fn render_dim_define(macro_name: &str, param_name: &str, spec: DimSpec) -> String {
+    match spec {
+        DimSpec::Dynamic => format!("#define {macro_name} {param_name}"),
+        DimSpec::Static(value) => format!("#define {macro_name} {value}"),
+    }
+}
+
+fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
+    let warp_grid_n = cfg.block_n / WMMA_TF32_OPT_WARP_TILE;
+    let threads = (cfg.block_m / WMMA_TF32_OPT_WARP_TILE) * warp_grid_n * 32;
+    let a_pad = cfg.k_tile + 4;
+    let b_pad = cfg.block_n + 4;
+    let k_substeps = cfg.k_tile / WMMA_TF32_OPT_FRAG_K;
+    let dim_m_define = render_dim_define("DIM_M", "m", cfg.dim_m);
+    let dim_n_define = render_dim_define("DIM_N", "n", cfg.dim_n);
+    let dim_k_define = render_dim_define("DIM_K", "k", cfg.dim_k);
+
+    format!(
+        "\n#include <mma.h>\n\n\
+         using namespace nvcuda;\n\n\
+         #define WMMA_TF32_OPT_BLOCK_M {block_m}\n\
+         #define WMMA_TF32_OPT_BLOCK_N {block_n}\n\
+         #define WMMA_TF32_OPT_K_TILE {k_tile}\n\
+         #define WMMA_TF32_OPT_FRAG {frag}\n\
+         #define WMMA_TF32_OPT_FRAG_K {frag_k}\n\
+         #define WMMA_TF32_OPT_WARP_TILE {warp_tile}\n\
+         #define WMMA_TF32_OPT_THREADS {threads}\n\
+         #define WMMA_TF32_OPT_A_PAD {a_pad}\n\
+         #define WMMA_TF32_OPT_B_PAD {b_pad}\n\
+         #define WMMA_TF32_OPT_FRAG_ROWS 2\n\
+         #define WMMA_TF32_OPT_FRAG_COLS 2\n\
+         #define WMMA_TF32_OPT_K_SUBSTEPS {k_substeps}\n\
+         #define WMMA_TF32_OPT_WARP_GRID_N {warp_grid_n}\n\
+         {dim_m_define}\n\
+         {dim_n_define}\n\
+         {dim_k_define}\n\
+         \n{WMMA_TF32_F32_OPT_BODY}",
+        block_m = cfg.block_m,
+        block_n = cfg.block_n,
+        k_tile = cfg.k_tile,
+        frag = WMMA_TF32_OPT_FRAG,
+        frag_k = WMMA_TF32_OPT_FRAG_K,
+        warp_tile = WMMA_TF32_OPT_WARP_TILE,
+    )
+}
+
+/// [`WmmaOptKernelConfig`] を TF32 opt カーネルソースへ展開する
+/// （イシュー #516）。展開前に [`validate_wmma_tf32_opt_config`] で
+/// SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。
+///
+/// `mod kernels_wmma_opt` が非公開モジュールのため、既定構成のみを使う
+/// 現状の `gemm.rs`（[`wmma_tf32_f32_opt_source`] 経由）からは呼ばれず
+/// rustc の dead-code 解析が誤検知する。非既定 config を渡す呼び出し元は
+/// 後続 #504／#519 で追加される想定のため `#[allow(dead_code)]` を付す
+/// （`kernels_mma::render_mma_f16` と同じ判断）。
+#[allow(dead_code)]
+pub fn render_wmma_tf32_opt(cfg: &WmmaOptKernelConfig) -> Result<String, CudaError> {
+    validate_wmma_tf32_opt_config(cfg)?;
+    Ok(render_wmma_tf32_opt_unchecked(cfg))
+}
+
+/// [`render_wmma_tf32_opt_unchecked`]／[`wmma_tf32_f32_opt_source`] が
+/// 結合するカーネル本体テンプレート。`m`/`n`/`k`・warp グリッド分割数の
+/// ハードコード `2` を `DIM_M`/`DIM_N`/`DIM_K`・`WMMA_TF32_OPT_WARP_GRID_N`
+/// マクロへ置き換えてある（`kernels_mma.rs::MMA_F16_BODY` と同方針）。
+const WMMA_TF32_F32_OPT_BODY: &str = r#"
 extern "C" __global__ void gemm_wmma_tf32_opt(
     const float* __restrict__ a,
     const float* __restrict__ b,
@@ -208,8 +418,8 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
     const int tid = threadIdx.x;
     const int num_threads = blockDim.x;
     const int warp_id = tid / 32;
-    const int warp_row = warp_id / 2;
-    const int warp_col = warp_id % 2;
+    const int warp_row = warp_id / WMMA_TF32_OPT_WARP_GRID_N;
+    const int warp_col = warp_id % WMMA_TF32_OPT_WARP_GRID_N;
 
     const int block_row_base = blockIdx.y * WMMA_TF32_OPT_BLOCK_M;
     const int block_col_base = blockIdx.x * WMMA_TF32_OPT_BLOCK_N;
@@ -229,7 +439,7 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
     }
 
     // 桁溢れしない num_k_tiles 計算（kernels.rs::TILED_F32 と同じ方式）。
-    int num_k_tiles = (k > 0) ? (k - 1) / WMMA_TF32_OPT_K_TILE + 1 : 0;
+    int num_k_tiles = (DIM_K > 0) ? (DIM_K - 1) / WMMA_TF32_OPT_K_TILE + 1 : 0;
 
     int cur = 0;
     // 初回タイル（t=0）のプリフェッチ。ループ内では「今回の cur を計算
@@ -242,7 +452,7 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
             int gr = block_row_base + lr;
             int gc = lc;
             // REQ-8: guarded load（範囲外はゼロ充填）。
-            as_tile[cur][lr][lc] = (gr < m && gc < k) ? a[gr * k + gc] : 0.0f;
+            as_tile[cur][lr][lc] = (gr < DIM_M && gc < DIM_K) ? a[gr * DIM_K + gc] : 0.0f;
         }
         for (int idx = tid; idx < WMMA_TF32_OPT_K_TILE * WMMA_TF32_OPT_BLOCK_N; idx += num_threads) {
             int lr = idx / WMMA_TF32_OPT_BLOCK_N;
@@ -250,7 +460,7 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
             int gr = lr;
             int gc = block_col_base + lc;
             // REQ-8: guarded load（範囲外はゼロ充填）。
-            bs_tile[cur][lr][lc] = (gr < k && gc < n) ? b[gr * n + gc] : 0.0f;
+            bs_tile[cur][lr][lc] = (gr < DIM_K && gc < DIM_N) ? b[gr * DIM_N + gc] : 0.0f;
         }
     }
     __syncthreads();
@@ -269,7 +479,7 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
                 int gr = block_row_base + lr;
                 int gc = k_base_next + lc;
                 // REQ-8: guarded load（範囲外はゼロ充填）。
-                as_tile[nxt][lr][lc] = (gr < m && gc < k) ? a[gr * k + gc] : 0.0f;
+                as_tile[nxt][lr][lc] = (gr < DIM_M && gc < DIM_K) ? a[gr * DIM_K + gc] : 0.0f;
             }
             for (int idx = tid; idx < WMMA_TF32_OPT_K_TILE * WMMA_TF32_OPT_BLOCK_N; idx += num_threads) {
                 int lr = idx / WMMA_TF32_OPT_BLOCK_N;
@@ -277,7 +487,7 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
                 int gr = k_base_next + lr;
                 int gc = block_col_base + lc;
                 // REQ-8: guarded load（範囲外はゼロ充填）。
-                bs_tile[nxt][lr][lc] = (gr < k && gc < n) ? b[gr * n + gc] : 0.0f;
+                bs_tile[nxt][lr][lc] = (gr < DIM_K && gc < DIM_N) ? b[gr * DIM_N + gc] : 0.0f;
             }
         }
 
@@ -353,8 +563,8 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
         int lc = idx % WMMA_TF32_OPT_BLOCK_N;
         int gr = block_row_base + lr;
         int gc = block_col_base + lc;
-        if (gr < m && gc < n) {
-            c[gr * n + gc] = c_tile[lr][lc];
+        if (gr < DIM_M && gc < DIM_N) {
+            c[gr * DIM_N + gc] = c_tile[lr][lc];
         }
     }
 }
@@ -428,23 +638,155 @@ pub const WMMA_F16_OPT_B_PAD: u32 = WMMA_F16_OPT_BLOCK_N + 8;
 /// ブロッキング）・バンクコンフリクト回避パディング・ダブルバッファ
 /// リングを適用する。数値契約（f16 入出力・f32 累算）は
 /// `kernels_wmma::WMMA_F16` と同一。
-pub const WMMA_F16_OPT: &str = r#"
-#include <mma.h>
-#include <cuda_fp16.h>
+///
+/// # テンプレート文字列展開（イシュー #516）
+///
+/// [`WMMA_TF32_F32_OPT`] と同じ方針で [`render_wmma_f16_opt`] のテンプレート
+/// 展開結果として得る。f16 opt のカーネル本体は K サブステップループを
+/// 持たない（`WMMA_F16_OPT_K_TILE == WMMA_F16_OPT_FRAG` 固定。TF32 opt の
+/// `K_SUBSTEPS` に相当する概念がない）ため、[`WmmaOptKernelConfig::k_tile`]
+/// は本カーネルでは `WMMA_F16_OPT_FRAG`（16）固定のみを許容する
+/// （[`validate_wmma_f16_opt_config`]）。K タイル可変化は本イシューの
+/// スコープ外（PR 本文の out-of-scope 引き継ぎ参照）。
+pub fn wmma_f16_opt_source() -> &'static str {
+    &WMMA_F16_OPT_SOURCE
+}
 
-using namespace nvcuda;
+static WMMA_F16_OPT_SOURCE: LazyLock<String> =
+    LazyLock::new(|| render_wmma_f16_opt_unchecked(&WmmaOptKernelConfig::default_f16()));
 
-#define WMMA_F16_OPT_BLOCK_M 64
-#define WMMA_F16_OPT_BLOCK_N 64
-#define WMMA_F16_OPT_K_TILE 16
-#define WMMA_F16_OPT_FRAG 16
-#define WMMA_F16_OPT_WARP_TILE 32
-#define WMMA_F16_OPT_THREADS 128
-#define WMMA_F16_OPT_A_PAD 24
-#define WMMA_F16_OPT_B_PAD 72
-#define WMMA_F16_OPT_FRAG_ROWS 2
-#define WMMA_F16_OPT_FRAG_COLS 2
+/// [`WmmaOptKernelConfig`] を f16 opt カーネル向けに fail-closed 検証する。
+/// `WARP_TILE`=32・`FRAG`=16 は固定ハードウェア形状。本カーネルは K
+/// サブステップを持たないため `k_tile` は `FRAG`（16）固定のみを許容する
+/// （本 const 上のドキュメンテーションコメント参照）。
+fn validate_wmma_f16_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+    let warp_tile = WMMA_F16_OPT_WARP_TILE;
+    let frag = WMMA_F16_OPT_FRAG;
 
+    if cfg.block_m == 0 || cfg.block_n == 0 || cfg.k_tile == 0 {
+        return Err(invalid(
+            "block_m/block_n/k_tile must all be non-zero".to_string(),
+        ));
+    }
+    if !cfg.block_m.is_multiple_of(warp_tile) || !cfg.block_n.is_multiple_of(warp_tile) {
+        return Err(invalid(format!(
+            "block_m ({}) and block_n ({}) must both be multiples of WARP_TILE ({warp_tile})",
+            cfg.block_m, cfg.block_n
+        )));
+    }
+    if cfg.k_tile != frag {
+        return Err(invalid(format!(
+            "k_tile ({}) must equal FRAG ({frag}); the f16 opt kernel body has no \
+             K-substep loop (unlike the TF32 opt kernel), so K_TILE != FRAG is unsupported",
+            cfg.k_tile
+        )));
+    }
+
+    let warp_grid_m = cfg.block_m / warp_tile;
+    let warp_grid_n = cfg.block_n / warp_tile;
+    let threads = warp_grid_m
+        .checked_mul(warp_grid_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| invalid("block thread count overflow".to_string()))?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "block thread count {threads} exceeds CUDA's per-block limit (1024)"
+        )));
+    }
+
+    let a_pad = cfg.k_tile + 8;
+    let b_pad = cfg.block_n + 8;
+    // ダブルバッファ（as_tile/bs_tile。half=2byte）＋エピローグ cs_tile
+    // （f32=4byte）の静的共有メモリ合計。
+    let smem_bytes = 2u32
+        .checked_mul(cfg.block_m)
+        .and_then(|v| v.checked_mul(a_pad))
+        .and_then(|v| v.checked_mul(2))
+        .zip(
+            2u32.checked_mul(cfg.k_tile)
+                .and_then(|v| v.checked_mul(b_pad))
+                .and_then(|v| v.checked_mul(2)),
+        )
+        .and_then(|(a, b)| a.checked_add(b))
+        .zip(
+            cfg.block_m
+                .checked_mul(cfg.block_n)
+                .and_then(|v| v.checked_mul(4)),
+        )
+        .and_then(|(ab, c)| ab.checked_add(c))
+        .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
+    if smem_bytes > 49_152 {
+        return Err(invalid(format!(
+            "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit"
+        )));
+    }
+
+    for (name, spec) in [
+        ("dim_m", cfg.dim_m),
+        ("dim_n", cfg.dim_n),
+        ("dim_k", cfg.dim_k),
+    ] {
+        if let DimSpec::Static(0) = spec {
+            return Err(invalid(format!(
+                "{name} static value must not be zero (degenerate dimension)"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn render_wmma_f16_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
+    let warp_grid_n = cfg.block_n / WMMA_F16_OPT_WARP_TILE;
+    let threads = (cfg.block_m / WMMA_F16_OPT_WARP_TILE) * warp_grid_n * 32;
+    let a_pad = cfg.k_tile + 8;
+    let b_pad = cfg.block_n + 8;
+    let dim_m_define = render_dim_define("DIM_M", "m", cfg.dim_m);
+    let dim_n_define = render_dim_define("DIM_N", "n", cfg.dim_n);
+    let dim_k_define = render_dim_define("DIM_K", "k", cfg.dim_k);
+
+    format!(
+        "\n#include <mma.h>\n#include <cuda_fp16.h>\n\n\
+         using namespace nvcuda;\n\n\
+         #define WMMA_F16_OPT_BLOCK_M {block_m}\n\
+         #define WMMA_F16_OPT_BLOCK_N {block_n}\n\
+         #define WMMA_F16_OPT_K_TILE {k_tile}\n\
+         #define WMMA_F16_OPT_FRAG {frag}\n\
+         #define WMMA_F16_OPT_WARP_TILE {warp_tile}\n\
+         #define WMMA_F16_OPT_THREADS {threads}\n\
+         #define WMMA_F16_OPT_A_PAD {a_pad}\n\
+         #define WMMA_F16_OPT_B_PAD {b_pad}\n\
+         #define WMMA_F16_OPT_FRAG_ROWS 2\n\
+         #define WMMA_F16_OPT_FRAG_COLS 2\n\
+         #define WMMA_F16_OPT_WARP_GRID_N {warp_grid_n}\n\
+         {dim_m_define}\n\
+         {dim_n_define}\n\
+         {dim_k_define}\n\
+         \n{WMMA_F16_OPT_BODY}",
+        block_m = cfg.block_m,
+        block_n = cfg.block_n,
+        k_tile = cfg.k_tile,
+        frag = WMMA_F16_OPT_FRAG,
+        warp_tile = WMMA_F16_OPT_WARP_TILE,
+    )
+}
+
+/// [`WmmaOptKernelConfig`] を f16 opt カーネルソースへ展開する
+/// （イシュー #516）。展開前に [`validate_wmma_f16_opt_config`] で不変
+/// 条件を fail-closed 検査する。`#[allow(dead_code)]` の理由は
+/// [`render_wmma_tf32_opt`] と同じ（非公開モジュール・現状は既定構成のみ
+/// 消費・後続 #504／#519 が非既定 config の呼び出し元となる想定）。
+#[allow(dead_code)]
+pub fn render_wmma_f16_opt(cfg: &WmmaOptKernelConfig) -> Result<String, CudaError> {
+    validate_wmma_f16_opt_config(cfg)?;
+    Ok(render_wmma_f16_opt_unchecked(cfg))
+}
+
+/// [`render_wmma_f16_opt_unchecked`]／[`wmma_f16_opt_source`] が結合する
+/// カーネル本体テンプレート（`WMMA_TF32_F32_OPT_BODY` と同方針の
+/// `DIM_M`/`DIM_N`/`DIM_K`・`WMMA_F16_OPT_WARP_GRID_N` マクロ化）。
+const WMMA_F16_OPT_BODY: &str = r#"
 extern "C" __global__ void gemm_wmma_f16_opt(
     const __half* __restrict__ a,
     const __half* __restrict__ b,
@@ -457,8 +799,8 @@ extern "C" __global__ void gemm_wmma_f16_opt(
     const int tid = threadIdx.x;
     const int num_threads = blockDim.x;
     const int warp_id = tid / 32;
-    const int warp_row = warp_id / 2;
-    const int warp_col = warp_id % 2;
+    const int warp_row = warp_id / WMMA_F16_OPT_WARP_GRID_N;
+    const int warp_col = warp_id % WMMA_F16_OPT_WARP_GRID_N;
 
     const int block_row_base = blockIdx.y * WMMA_F16_OPT_BLOCK_M;
     const int block_col_base = blockIdx.x * WMMA_F16_OPT_BLOCK_N;
@@ -476,7 +818,7 @@ extern "C" __global__ void gemm_wmma_f16_opt(
     }
 
     // 桁溢れしない num_k_tiles 計算（kernels.rs::TILED_F32 と同じ方式）。
-    int num_k_tiles = (k > 0) ? (k - 1) / WMMA_F16_OPT_K_TILE + 1 : 0;
+    int num_k_tiles = (DIM_K > 0) ? (DIM_K - 1) / WMMA_F16_OPT_K_TILE + 1 : 0;
 
     int cur = 0;
     if (num_k_tiles > 0) {
@@ -486,7 +828,7 @@ extern "C" __global__ void gemm_wmma_f16_opt(
             int gr = block_row_base + lr;
             int gc = lc;
             // REQ-8: guarded load（範囲外はゼロ充填）。
-            as_tile[cur][lr][lc] = (gr < m && gc < k) ? a[gr * k + gc] : __float2half(0.0f);
+            as_tile[cur][lr][lc] = (gr < DIM_M && gc < DIM_K) ? a[gr * DIM_K + gc] : __float2half(0.0f);
         }
         for (int idx = tid; idx < WMMA_F16_OPT_K_TILE * WMMA_F16_OPT_BLOCK_N; idx += num_threads) {
             int lr = idx / WMMA_F16_OPT_BLOCK_N;
@@ -494,7 +836,7 @@ extern "C" __global__ void gemm_wmma_f16_opt(
             int gr = lr;
             int gc = block_col_base + lc;
             // REQ-8: guarded load（範囲外はゼロ充填）。
-            bs_tile[cur][lr][lc] = (gr < k && gc < n) ? b[gr * n + gc] : __float2half(0.0f);
+            bs_tile[cur][lr][lc] = (gr < DIM_K && gc < DIM_N) ? b[gr * DIM_N + gc] : __float2half(0.0f);
         }
     }
     __syncthreads();
@@ -513,7 +855,7 @@ extern "C" __global__ void gemm_wmma_f16_opt(
                 int gr = block_row_base + lr;
                 int gc = k_base_next + lc;
                 // REQ-8: guarded load（範囲外はゼロ充填）。
-                as_tile[nxt][lr][lc] = (gr < m && gc < k) ? a[gr * k + gc] : __float2half(0.0f);
+                as_tile[nxt][lr][lc] = (gr < DIM_M && gc < DIM_K) ? a[gr * DIM_K + gc] : __float2half(0.0f);
             }
             for (int idx = tid; idx < WMMA_F16_OPT_K_TILE * WMMA_F16_OPT_BLOCK_N; idx += num_threads) {
                 int lr = idx / WMMA_F16_OPT_BLOCK_N;
@@ -521,7 +863,7 @@ extern "C" __global__ void gemm_wmma_f16_opt(
                 int gr = k_base_next + lr;
                 int gc = block_col_base + lc;
                 // REQ-8: guarded load（範囲外はゼロ充填）。
-                bs_tile[nxt][lr][lc] = (gr < k && gc < n) ? b[gr * n + gc] : __float2half(0.0f);
+                bs_tile[nxt][lr][lc] = (gr < DIM_K && gc < DIM_N) ? b[gr * DIM_N + gc] : __float2half(0.0f);
             }
         }
 
@@ -578,8 +920,8 @@ extern "C" __global__ void gemm_wmma_f16_opt(
         int lc = idx % WMMA_F16_OPT_BLOCK_N;
         int gr = block_row_base + lr;
         int gc = block_col_base + lc;
-        if (gr < m && gc < n) {
-            c[gr * n + gc] = __float2half(cs_tile[lr][lc]);
+        if (gr < DIM_M && gc < DIM_N) {
+            c[gr * DIM_N + gc] = __float2half(cs_tile[lr][lc]);
         }
     }
 }
@@ -589,12 +931,14 @@ extern "C" __global__ void gemm_wmma_f16_opt(
 mod tests {
     use super::*;
 
-    /// `WMMA_TF32_OPT_*`（Rust 側の「唯一の真実源」）が `WMMA_TF32_F32_OPT`
-    /// カーネルソース内の `#define` と食い違わないことを検査する
+    /// `WMMA_TF32_OPT_*`（Rust 側の「唯一の真実源」）が既定構成の生成
+    /// ソース内 `#define` と食い違わないことを検査する
     /// （`kernels.rs::wmma_tf32_constants_match_kernel_source_defines` と
-    /// 同じ方式）。
+    /// 同じ方式）。イシュー #516 でテンプレート展開へ移行したため、静的
+    /// リテラルではなく `wmma_tf32_f32_opt_source()` を対象にする。
     #[test]
     fn wmma_tf32_opt_constants_match_kernel_source_defines() {
+        let src = wmma_tf32_f32_opt_source();
         let checks = [
             ("WMMA_TF32_OPT_BLOCK_M", WMMA_TF32_OPT_BLOCK_M),
             ("WMMA_TF32_OPT_BLOCK_N", WMMA_TF32_OPT_BLOCK_N),
@@ -609,16 +953,17 @@ mod tests {
         for (name, value) in checks {
             let expected = format!("#define {name} {value}");
             assert!(
-                WMMA_TF32_F32_OPT.contains(&expected),
-                "WMMA_TF32_F32_OPT の `#define {name}` が Rust 側の定数（{value}）と一致しません"
+                src.contains(&expected),
+                "wmma_tf32_f32_opt_source() の `#define {name}` が Rust 側の定数（{value}）と一致しません"
             );
         }
     }
 
-    /// `WMMA_F16_OPT_*`（Rust 側の「唯一の真実源」）が `WMMA_F16_OPT`
-    /// カーネルソース内の `#define` と食い違わないことを検査する。
+    /// `WMMA_F16_OPT_*`（Rust 側の「唯一の真実源」）が既定構成の生成
+    /// ソース内 `#define` と食い違わないことを検査する。
     #[test]
     fn wmma_f16_opt_constants_match_kernel_source_defines() {
+        let src = wmma_f16_opt_source();
         let checks = [
             ("WMMA_F16_OPT_BLOCK_M", WMMA_F16_OPT_BLOCK_M),
             ("WMMA_F16_OPT_BLOCK_N", WMMA_F16_OPT_BLOCK_N),
@@ -632,9 +977,24 @@ mod tests {
         for (name, value) in checks {
             let expected = format!("#define {name} {value}");
             assert!(
-                WMMA_F16_OPT.contains(&expected),
-                "WMMA_F16_OPT の `#define {name}` が Rust 側の定数（{value}）と一致しません"
+                src.contains(&expected),
+                "wmma_f16_opt_source() の `#define {name}` が Rust 側の定数（{value}）と一致しません"
             );
+        }
+    }
+
+    /// 既定構成（全次元 `Dynamic`）では `#define DIM_* <カーネル引数>`
+    /// 形式でカーネル引数へ間接するのみで、既存カーネルとプリプロセス後
+    /// 等価であることをロックする（`kernels_mma.rs` と同方針）。
+    #[test]
+    fn wmma_opt_default_config_dim_defines_alias_kernel_parameters() {
+        for src in [wmma_tf32_f32_opt_source(), wmma_f16_opt_source()] {
+            for expected in ["#define DIM_M m", "#define DIM_N n", "#define DIM_K k"] {
+                assert!(
+                    src.contains(expected),
+                    "既定次元マクロ `{expected}` が見つかりません: {src}"
+                );
+            }
         }
     }
 
@@ -642,6 +1002,7 @@ mod tests {
     /// `kernels_wmma.rs::wmma_f16_source_uses_wmma_instructions` と同方式。
     #[test]
     fn wmma_tf32_opt_source_uses_wmma_instructions() {
+        let src = wmma_tf32_f32_opt_source();
         for needle in [
             "#include <mma.h>",
             "wmma::fragment",
@@ -652,14 +1013,15 @@ mod tests {
             "wmma::__float_to_tf32",
         ] {
             assert!(
-                WMMA_TF32_F32_OPT.contains(needle),
-                "WMMA_TF32_F32_OPT に tensor core 命令 `{needle}` が見つかりません"
+                src.contains(needle),
+                "wmma_tf32_f32_opt_source() に tensor core 命令 `{needle}` が見つかりません"
             );
         }
     }
 
     #[test]
     fn wmma_f16_opt_source_uses_wmma_instructions() {
+        let src = wmma_f16_opt_source();
         for needle in [
             "#include <mma.h>",
             "wmma::fragment",
@@ -669,31 +1031,41 @@ mod tests {
             "wmma::fill_fragment",
         ] {
             assert!(
-                WMMA_F16_OPT.contains(needle),
-                "WMMA_F16_OPT に tensor core 命令 `{needle}` が見つかりません"
+                src.contains(needle),
+                "wmma_f16_opt_source() に tensor core 命令 `{needle}` が見つかりません"
             );
         }
     }
 
     /// REQ-8: guarded load／guarded store がソースから除去されていない
     /// ことをロックする（`kernels_wmma.rs::wmma_f16_source_retains_req8_boundary_guards`
-    /// と同方式）。
+    /// と同方式）。needle は `DIM_*` マクロ化後の形式（イシュー #516）。
     #[test]
     fn wmma_tf32_opt_source_retains_req8_boundary_guards() {
-        for needle in ["gr < m && gc < k", "gr < k && gc < n", "gr < m && gc < n"] {
+        let src = wmma_tf32_f32_opt_source();
+        for needle in [
+            "gr < DIM_M && gc < DIM_K",
+            "gr < DIM_K && gc < DIM_N",
+            "gr < DIM_M && gc < DIM_N",
+        ] {
             assert!(
-                WMMA_TF32_F32_OPT.contains(needle),
-                "WMMA_TF32_F32_OPT に REQ-8 境界チェック `{needle}` が見つかりません"
+                src.contains(needle),
+                "wmma_tf32_f32_opt_source() に REQ-8 境界チェック `{needle}` が見つかりません"
             );
         }
     }
 
     #[test]
     fn wmma_f16_opt_source_retains_req8_boundary_guards() {
-        for needle in ["gr < m && gc < k", "gr < k && gc < n", "gr < m && gc < n"] {
+        let src = wmma_f16_opt_source();
+        for needle in [
+            "gr < DIM_M && gc < DIM_K",
+            "gr < DIM_K && gc < DIM_N",
+            "gr < DIM_M && gc < DIM_N",
+        ] {
             assert!(
-                WMMA_F16_OPT.contains(needle),
-                "WMMA_F16_OPT に REQ-8 境界チェック `{needle}` が見つかりません"
+                src.contains(needle),
+                "wmma_f16_opt_source() に REQ-8 境界チェック `{needle}` が見つかりません"
             );
         }
     }
@@ -705,7 +1077,7 @@ mod tests {
     /// 単純化（例: ダブルバッファ除去）された場合に検出する。
     #[test]
     fn wmma_opt_sources_retain_double_buffering() {
-        for src in [WMMA_TF32_F32_OPT, WMMA_F16_OPT] {
+        for src in [wmma_tf32_f32_opt_source(), wmma_f16_opt_source()] {
             assert!(
                 src.contains("cur ^ 1"),
                 "ダブルバッファの cur/nxt 切替が見つかりません"
@@ -714,6 +1086,108 @@ mod tests {
                 src.contains("t + 1 < num_k_tiles"),
                 "ダブルバッファのプリフェッチ分岐が見つかりません"
             );
+        }
+    }
+
+    /// 非既定 config（block_m/block_n=128（2×4 warp グリッド）・K 次元を
+    /// `Static(4096)` で焼き込み）での TF32 opt 特化 render を検査する
+    /// （実装計画 7 節「特化 render」）。
+    #[test]
+    fn render_wmma_tf32_opt_specializes_tile_and_static_dim() {
+        let cfg = WmmaOptKernelConfig {
+            block_m: 64,
+            block_n: 96,
+            k_tile: 16,
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Static(4096),
+        };
+        let src = render_wmma_tf32_opt(&cfg).expect("有効な構成が拒否されました");
+
+        for expected in [
+            "#define WMMA_TF32_OPT_BLOCK_M 64",
+            "#define WMMA_TF32_OPT_BLOCK_N 96",
+            "#define WMMA_TF32_OPT_WARP_GRID_N 3", // 96 / WARP_TILE(32)
+            "#define DIM_K 4096",
+            "#define DIM_M m",
+        ] {
+            assert!(
+                src.contains(expected),
+                "特化 render に `{expected}` が見つかりません: config={cfg:?}"
+            );
+        }
+        assert!(src.contains("gr < DIM_M && gc < DIM_K"));
+    }
+
+    /// フェイルクローズド検証（TF32 opt）: SMEM 予算超過・倍数違反・
+    /// ゼロ次元が全て `Err(CudaError::InvalidKernelConfig)` になることを
+    /// 検査する。
+    #[test]
+    fn render_wmma_tf32_opt_rejects_invalid_configs() {
+        let base = WmmaOptKernelConfig::default_tf32();
+        let cases: [(&str, WmmaOptKernelConfig); 3] = [
+            (
+                "block_m not multiple of WARP_TILE",
+                WmmaOptKernelConfig {
+                    block_m: 50,
+                    ..base
+                },
+            ),
+            (
+                "smem budget exceeded",
+                WmmaOptKernelConfig {
+                    block_m: 256,
+                    block_n: 256,
+                    ..base
+                },
+            ),
+            (
+                "static dim zero",
+                WmmaOptKernelConfig {
+                    dim_n: DimSpec::Static(0),
+                    ..base
+                },
+            ),
+        ];
+        for (label, cfg) in cases {
+            let result = render_wmma_tf32_opt(&cfg);
+            assert!(
+                matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+                "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}"
+            );
+        }
+    }
+
+    /// フェイルクローズド検証（f16 opt）: `k_tile != FRAG` が本カーネル
+    /// 固有の制約（K サブステップ非対応）として拒否されることを検査する。
+    #[test]
+    fn render_wmma_f16_opt_rejects_k_tile_mismatch() {
+        let cfg = WmmaOptKernelConfig {
+            k_tile: 32,
+            ..WmmaOptKernelConfig::default_f16()
+        };
+        assert!(matches!(
+            render_wmma_f16_opt(&cfg),
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+    }
+
+    /// 受け入れ基準 2（PTX/SASS ダンプによるコンパイル時展開の実確認）は
+    /// CI・本環境に NVRTC／実機がないため通常 CI では実行しない
+    /// （`kernels_mma.rs::tests::mma_f16_sources_compile_with_nvrtc_when_available`
+    /// と同方針）。実測記録は #531/#534/#539 へ引き継ぐ。
+    #[test]
+    #[ignore = "requires NVRTC (libnvrtc); run manually on a CUDA-enabled host"]
+    fn wmma_opt_sources_compile_with_nvrtc_when_available() {
+        use crate::nvrtc::compile_ptx;
+
+        let arch = "compute_80";
+        for src in [wmma_tf32_f32_opt_source(), wmma_f16_opt_source()] {
+            match compile_ptx(src, arch) {
+                Ok(_) => {}
+                Err(CudaError::NvrtcUnavailable { .. }) => return,
+                Err(e) => panic!("既定構成カーネルソースの NVRTC コンパイルに失敗しました: {e}"),
+            }
         }
     }
 }
