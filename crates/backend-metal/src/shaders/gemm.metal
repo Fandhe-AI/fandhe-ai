@@ -399,29 +399,85 @@ kernel void gemm_simdgroup_tiled(
             // 共有メモリへロードする。実効次元・K タイル端をはみ出す
             // 要素は 0 埋めする（最適化を理由に境界チェックを省略しない。
             // REQ-8）。
+            //
+            // float4 ベクトルロード（イシュー #533。MLX `BlockLoader`
+            // 〈loader.h〉が 128bit 幅相当の単位で読み出す方式を参考に、
+            // 1 要素ずつのスカラーロードから変更）。アラインメント成立
+            // 根拠:
+            //   - `crate::tile::TileConfig::validate`（tile.rs）が BK を
+            //     8 の倍数・BN を WN*8 の倍数（よって 8 の倍数）に dispatch
+            //     前へ検証する契約のため、A タイルの行長 BK・B タイルの
+            //     行長 BN はともに 4 の倍数であり、4 要素グループが行境界
+            //     をまたぐことはない
+            //   - `MetalGemm::dispatch_variant`（gemm.rs）が `SimdgroupTiled`
+            //     向けに m/n/k を `crate::pad::pad8` で 8 の倍数へ実効
+            //     次元パディング済みで渡す契約のため、`p0 = t*BK`・
+            //     `col0 = tgid.x*BN` は常に 8 の倍数（4 要素境界）に揃い、
+            //     device メモリ側の読み出し先頭オフセットも 4 要素（16
+            //     バイト）境界に揃う（MTLBuffer 先頭はページ境界確保）
+            //   - 共有メモリ側オフセット（`tile_b` の `BM*BK`）も 4 の倍数
+            //     のため `threadgroup float4*` 再解釈も 16 バイト境界に揃う
+            // 上記は現行 `CANDIDATES`（tile.rs）の構成から導かれる十分
+            // 条件であり、将来 BK/BN が 4 で割り切れない構成へ変わると
+            // 前提が崩れる。そのため「グループ全 4 要素が in-bounds か」を
+            // 明示判定し、境界グループは範囲外アドレスへ一切触れず要素
+            // 単位のスカラー読み出し + 0 埋めへフォールバックする
+            // （最適化を理由に手動境界チェックを省略しない。REQ-8・
+            // `.claude/rules/coding-rust.md`「カーネル実装の境界検査」）。
+            // 共有メモリへ格納される値は変更前のスカラーループとビット単位
+            // で一致するため、以降の `simdgroup_load`／MMA 発行順・数値
+            // 結果は不変。
             uint local_tid = simd_id * 32 + simd_lane;
             uint threads_total = WM * WN * 32;
 
-            uint a_elems = BM * BK;
-            for (uint idx = local_tid; idx < a_elems; idx += threads_total) {
+            uint a_vecs = (BM * BK) / 4;
+            for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
+                uint idx = vi * 4;
                 uint r = idx / BK;
                 uint kk = idx % BK;
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
-                tile_a[idx] = (kk < bk_eff && global_row < dims.m && global_k < dims.k)
-                    ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k]
-                    : 0.0f;
+                bool group_in_bounds =
+                    (kk + 4 <= bk_eff) && (global_row < dims.m) && (global_k + 4 <= dims.k);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + idx);
+                    *dst = *src;
+                } else {
+                    for (uint e = 0; e < 4; e++) {
+                        uint kk_e = kk + e;
+                        uint global_k_e = global_k + e;
+                        tile_a[idx + e] = (kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)
+                            ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k_e]
+                            : 0.0f;
+                    }
+                }
             }
 
-            uint b_elems = BK * BN;
-            for (uint idx = local_tid; idx < b_elems; idx += threads_total) {
+            uint b_vecs = (BK * BN) / 4;
+            for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
+                uint idx = vi * 4;
                 uint kk = idx / BN;
                 uint c_ = idx % BN;
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
-                tile_b[idx] = (kk < bk_eff && global_k < dims.k && global_col < dims.n)
-                    ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col]
-                    : 0.0f;
+                bool group_in_bounds =
+                    (kk < bk_eff) && (global_k < dims.k) && (global_col + 4 <= dims.n);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + idx);
+                    *dst = *src;
+                } else {
+                    for (uint e = 0; e < 4; e++) {
+                        uint c_e = c_ + e;
+                        uint global_col_e = global_col + e;
+                        tile_b[idx + e] = (kk < bk_eff && global_k < dims.k && global_col_e < dims.n)
+                            ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col_e]
+                            : 0.0f;
+                    }
+                }
             }
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
