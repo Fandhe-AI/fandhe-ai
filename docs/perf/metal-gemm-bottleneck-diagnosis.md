@@ -38,30 +38,41 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 壁時計計測する経路を採用した。
 
 `dispatch_auto` は呼び出しごとに A・B のアップロード・C の readback を含む（`gemm_bench.rs` と同じ計測範囲）
-ため、そのままでは転送時間がカーネル時間に混入し、転送律速が「頭打ち」として誤診断される恐れがある
-（size=4096 で A・B・C 合計約 192MiB のホストコピーを含む）。この混入を避けるため、同一 `(m, n)` で `k` を
-小さくした 2 点（`BASELINE_KS = [8, 32]`。ともに `simdgroup_load` の最小整除単位（8）の倍数かつ
-`tile::select` の `SMALL` 閾値（64）未満）で参照計測し、`wall_secs(size, size, k)` を `k` について線形外挿
-した値（`transfer_baseline_ms`）を使う:
+ため、`wall_ms` はカーネル純時間ではなく「A・B アップロード＋カーネル実行＋C readback」の end-to-end 時間
+である。
+
+#### 転送時間分離を試みて撤回した経緯（PR #649）
+
+当初は同一 `(m, n)` で `k` を小さくした点（`k=8` 単独 → `k=8`・`k=32` の 2 点線形外挿）を「転送時間
+ベースライン」として `wall_ms(size)` から差し引き `kernel_ms_approx`・`tflops_approx`・`eff_bw_gbs_approx`
+を算出していたが、`tile::select` は `k < 64`（`SMALL` 閾値未満）で `SINGLE_SIMDGROUP_8X8`（`bm=bn=8`・
+`staged=false`）を選ぶため、この参照点は `actual_groups = ceil(size/8)^2` という実測対象（staged 64×64
+タイル）とは全く異なる大量の threadgroup をディスパッチする。この参照点の壁時計時間は A・B 転送だけでなく
+直接ロード形式カーネルの演算・ディスパッチオーバーヘッドを主として含み、しかもその演算量も `k` にほぼ
+比例して増えるため、2 点間の傾きを「転送レート」として `k = size` まで外挿すると staged カーネルとは無関係
+な演算時間を転送時間の名目で拡大して差し引くことになる。結果として `kernel_ms_approx` がゼロに近づき
+（ときに負になり `max(0.0)` 後の除算で `inf` が出力される）、`tflops_approx`・`eff_bw_gbs_approx` の基礎が
+成立しなかった（イシュー #487 PR #649 への cursor[bot]・codex-review・Cursor Bugbot の各指摘。review id
+4943646199 ほか）。
+
+GPU timestamp 直接採取または演算を伴わない同量転送のみの対照経路はいずれもクレート内部（`pipeline.rs` 等）
+へのアクセスを要するが、本イシュー（親 #480 本文）は「実装変更を伴わない調査・計測・記録タスクのみ」であり
+`crates/backend-metal/src/`・`shaders/gemm.metal` の変更はスコープ外である。そのため転送・カーネルの分離は
+**試みない**方針へ変更した。`wall_secs` を size ごとの end-to-end 指標としてそのまま報告し、そこから導出
+する性能指標は「`wall_secs ≥ kernel_secs`（転送時間は非負）」という不等式のみから成立する**下限値**に
+限定する:
 
 ```
-slope       = (wall_ms(size, k=32) - wall_ms(size, k=8)) / (32 - 8)
-transfer_baseline_ms ≈ wall_ms(size, k=8) + slope * (size - 8)
-kernel_ms_approx     ≈ wall_ms(size) - transfer_baseline_ms
+tflops_lower_bound            = flops / wall_secs / 1e12
+logical_load_gbs_lower_bound  = (load_bytes_total + store_bytes_total) / wall_secs / 1e9
 ```
 
-という 2 点線形外挿でカーネル純時間を推定する。`dispatch_auto` の A・B アップロードは `m×k`・`k×n` 要素で
-あり **`k` にほぼ比例して増える**（C の readback・固定オーバーヘッドのみ `k` に依らない定数項）ため、
-`k` を最小化した単一点のみを差し引く旧方式（`wall_ms(size, k=8)` を一定値として使う近似）は A・B 転送量を
-過小評価し、`kernel_ms_approx` に A・B アップロード時間の大半が混入して `tflops_approx`・`eff_bw_gbs_approx`
-を系統的に歪めていた（イシュー #487 PR #649 への cursor[bot] 指摘。review id 4943646199。D-2/D-7 の優先順位
-判断に使う指標のため要修正と判断した）。2 点線形外挿はこの `k` 依存分を織り込むことでこの歪みを是正する。
-
-ただし `BASELINE_KS` の 2 点は（`k < 64` のため）`tile::select` が `SINGLE_SIMDGROUP_8X8` を選ぶのに対し
-実測対象（`k = size ≥ 512`）は staged タイルであり、ベースラインと実測対象とでカーネル経路（タイル構成）
-自体が異なる点は本近似の残る限界である。正確な GPU タイムスタンプではない点も含め、**`tflops_approx`・
-`eff_bw_gbs_approx` は必ず「近似値」として扱い**、解析値（occupancy・arithmetic intensity。§3）と併せて
-総合判断する。
+`tflops_lower_bound` は実カーネル TFLOPS の健全な下限（転送時間の分だけ実際はこれより高い）。
+`logical_load_gbs_lower_bound` は **DRAM 実効帯域ではない**（`load_bytes_total` はキャッシュ再利用を考慮
+しない論理ロード量。キャッシュヒットにより実 DRAM トラフィックはこれより少なく、546GB/s 公称帯域との比較
+には使わない。codex-review 指摘。PR #649）。分離を諦めた代わりに、ロード律速・occupancy 不足の判定は
+非 macOS でも算出できる解析値（`arithmetic_intensity`・`actual_groups`/`ideal_groups`・`barriers_per_tg`。
+§3）を主に用いる方針へ §5 の判定基準も改訂した。
 
 計画 §3.1 が想定していた「example 内パイプライン vs `dispatch_variant` の数値照合」は、独自パイプライン構築を
 行わない本設計では対象がないため実施しない（本 example は `MetalGemm::dispatch_auto` という既存の検証済み
@@ -76,8 +87,8 @@ cargo run -p backend-metal --example gemm_diagnosis --release
 ```
 
 出力形式（1 行 1 size。`size=<N> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>) actual_groups=<v>
-ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> transfer_baseline_ms=<v>
-kernel_ms_approx=<v> tflops_approx=<v> eff_bw_gbs_approx=<v>`）を size=512/1024/2048/4096 で出力する。
+ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> tflops_lower_bound=<v>
+logical_load_gbs_lower_bound=<v>`）を size=512/1024/2048/4096 で出力する。
 
 GPU 使用率のサンプリング（ベンチ実行と並行して別ターミナルで実行。sudo 不要）:
 
@@ -147,24 +158,35 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 
 ### 4.2 実測値
 
-| size | wall_ms | transfer_baseline_ms | kernel_ms_approx | tflops_approx | eff_bw_gbs_approx | 対公称帯域比（/546GB/s） | GPU 使用率（ioreg） |
-|------|---------|------------------------|--------------------|-----------------|----------------------|----------------------------|------------------------|
-| 512  | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
-| 1024 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
-| 2048 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
-| 4096 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
+`tflops_lower_bound`・`logical_load_gbs_lower_bound` はいずれも `wall_secs`（A・B アップロード＋カーネル
+実行＋C readback の end-to-end 時間）を分母とする**下限値**であり、公称帯域（546GB/s）との直接比較には
+使わない（「実測部分の設計判断」節参照）。
+
+| size | wall_ms | tflops_lower_bound | logical_load_gbs_lower_bound | GPU 使用率（ioreg） |
+|------|---------|----------------------|--------------------------------|------------------------|
+| 512  | 未計測 | 未計測 | 未計測 | 未計測 |
+| 1024 | 未計測 | 未計測 | 未計測 | 未計測 |
+| 2048 | 未計測 | 未計測 | 未計測 | 未計測 |
+| 4096 | 未計測 | 未計測 | 未計測 | 未計測 |
 
 ## 5. 判定基準・結論（Mac 実機実測後に確定）
 
 ### 5.1 判定基準（事前定義）
 
-- **ロード律速の判定**: `eff_bw_gbs_approx` が公称帯域（546GB/s）に対し高比率で飽和傾向を示し、かつ
-  `tflops_approx` が FP32 理論ピーク（§3.1「要記入」欄が確定してから使用）に対して低比率 →
-  ロード律速 → **D-2 を優先**
+`tflops_approx`・`eff_bw_gbs_approx`（転送時間分離による近似値）は PR #649 で撤回した（「実測部分の設計
+判断」節参照）。`logical_load_gbs_lower_bound` は論理ロード量ベースの下限値でありキャッシュ再利用を考慮
+しないため公称帯域（546GB/s）との比較には使えない。そのため判定は非 macOS でも算出できる解析値
+（§3）を主とし、`wall_ms`・`tflops_lower_bound` は size 間の相対的なスループット傾向（頭打ちの有無）の
+補助証跡として扱う:
+
+- **ロード律速の判定**: `arithmetic_intensity`（§3.2 表。size に依らずほぼ一定 15.06〜15.88 FLOP/byte）を
+  FP32 理論ピーク演算性能 ÷ 546GB/s の machine balance point（§3.1「要記入」欄が確定してから算出）と比較し、
+  `arithmetic_intensity` が machine balance point を下回る → ロード律速 → **D-2 を優先**
 - **occupancy 不足の判定**: `actual_groups < ideal_groups`（§3.2 表）となる size 帯が頭打ち開始点
   （1024 前後）と一致 → **D-7 を優先**
 - 両方成立・どちらも不成立の場合は、バリア同期コスト（`barriers_per_tg` の増加傾向。§3.2 表参照）・
-  タイル選択自体の再検討（`tile::select` が 1024 以降も一律 64×64 を選び続ける点）を解釈指針として追加検討する
+  タイル選択自体の再検討（`tile::select` が 1024 以降も一律 64×64 を選び続ける点）・`tflops_lower_bound` の
+  size 間の伸び方（頭打ちしているか）を解釈指針として追加検討する
 
 ### 5.2 結論・D-2/D-7 優先順位（未確定。Mac 実機実測後に記入）
 

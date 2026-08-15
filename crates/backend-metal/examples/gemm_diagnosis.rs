@@ -19,8 +19,8 @@
 //! 解析値（threadgroup 数・バリア回数・理論トラフィック・arithmetic
 //! intensity）は macOS 以外でも算出できる（`objc2` 系 FFI に触れない
 //! 純粋関数のため。`cargo run -p backend-metal --example gemm_diagnosis`
-//! で Linux でも実行できる）。カーネル実行時間・実効帯域・TFLOPS の実測
-//! （`kernel_ms` 以降の列）は macOS 実機限定（下記「実測部分の設計」）。
+//! で Linux でも実行できる）。壁時計計測・TFLOPS/ロードスループット下限
+//! （`wall_ms` 以降の列）は macOS 実機限定（下記「実測部分の設計」）。
 //!
 //! ```sh
 //! cargo run -p backend-metal --example gemm_diagnosis --release
@@ -38,31 +38,46 @@
 //! `bench-harness::protocol::run` で壁時計計測するフォールバック経路
 //! （計画 §3.1 のフォールバック節）を採用した。`dispatch_auto` は呼び出し
 //! ごとに A・B のアップロード・C の readback を含む（`gemm_bench.rs` と
-//! 同じ計測範囲）ため、そのままでは転送時間がカーネル時間に混入し、
-//! 転送律速が「頭打ち」として誤診断される恐れがある（size=4096 で
-//! A・B・C 合計約 192MiB のホストコピーを含む）。
+//! 同じ計測範囲）ため、`wall_ms` は純粋なカーネル時間ではなく
+//! 「A・B アップロード＋カーネル実行＋C readback」の end-to-end 時間で
+//! ある。
 //!
-//! この混入を避けるため、同一 `(m, n)` で `k` を小さくした 2 点
-//! （`BASELINE_KS = [8, 32]`。いずれも `simdgroup_load` の最小整除単位
-//! （8）の倍数かつ `tile::select` の `SMALL` 閾値（64）未満）で参照計測
-//! し、`wall_secs(size, size, k)` を `k` について線形外挿した値を
-//! `k = size` の転送時間ベースラインとして使う
-//! （`kernel_ms ≈ wall_ms(size) - extrapolate(wall_ms(size, k=8), wall_ms(size, k=32))`）。
-//! `dispatch_auto` の A・B アップロードは `m×k`・`k×n` 要素であり
-//! **`k` にほぼ比例して増える**（C の readback・固定オーバーヘッドのみ
-//! `k` に依らない定数項）ため、`k` を最小化した単一点を「`k` に依らず
-//! ほぼ一定」とみなして差し引く旧方式（`wall_ms(size, k=8)` のみを
-//! 引く）は A・B 転送量を過小評価し、`kernel_ms_approx` に A・B
-//! アップロード時間の大半を混入させて `tflops_approx`・
-//! `eff_bw_gbs_approx` を系統的に歪めていた（イシュー #487 PR #649 への
-//! cursor[bot] 指摘。review id 4943646199）。2 点線形外挿はこの `k` 依存
-//! 分を織り込むことでこの歪みを是正する。ただし `BASELINE_KS` の 2 点は
-//! （`k < 64` のため）`tile::select` が `SINGLE_SIMDGROUP_8X8` を選ぶのに
-//! 対し実測対象（`k = size ≥ 512`）は staged タイルであり、ベースライン
-//! と実測対象とでカーネル経路（タイル構成）自体が異なる点は本近似の
-//! 残る限界である。正確な GPU タイムスタンプではない点も含め、この点を
-//! doc・出力の両方に明記し「近似値」であることを利用者が誤読しないよう
-//! にする）。
+//! ### 転送時間分離を試みて撤回した経緯（イシュー #487 PR #649）
+//!
+//! 当初は同一 `(m, n)` で `k` を小さくした点（`k=8` 単独、次に
+//! `k=8`・`k=32` の 2 点線形外挿）を「転送時間ベースライン」として
+//! `wall_ms(size)` から差し引き `kernel_ms_approx`・`tflops_approx`・
+//! `eff_bw_gbs_approx` を算出していたが、`tile::select` は `k < 64`
+//! （`SMALL` 閾値未満）で `SINGLE_SIMDGROUP_8X8`（`bm=bn=8`・
+//! `staged=false`）を選ぶため、この参照点は `actual_groups =
+//! ceil(size/8)^2` という実測対象（staged 64×64 タイル）とは全く異なる
+//! 大量の threadgroup をディスパッチする。この参照点の壁時計時間は
+//! A・B 転送だけでなく直接ロード形式カーネルの演算・ディスパッチ
+//! オーバーヘッドを主として含み、しかもその演算量も `k` にほぼ比例して
+//! 増えるため、2 点間の傾きを「転送レート」として `k = size` まで
+//! 外挿すると staged カーネルとは無関係な演算時間を転送時間の名目で
+//! 拡大して差し引くことになる。結果として `kernel_ms_approx` が
+//! ゼロに近づき（ときに負になり `max(0.0)` 後の除算で `inf`
+//! が出力される）、`tflops_approx`・`eff_bw_gbs_approx` の基礎が
+//! 成立しなかった（cursor[bot] review id 4943646199・codex-review
+//! 指摘・Cursor Bugbot 指摘。いずれも PR #649 で確認）。
+//!
+//! GPU timestamp 直接採取（`MTLCommandBuffer::GPUStartTime`/`GPUEndTime`）
+//! または演算を伴わない同量転送のみの対照経路は、いずれも
+//! `crate::pipeline::make_pipeline_with_constants` 等クレート内部への
+//! アクセスを要するが、本イシュー（親 #480 本文）は「実装変更を伴わない
+//! 調査・計測・記録タスクのみ」と明記されておりクレート内部
+//! （`crates/backend-metal/src/`・`shaders/gemm.metal`）の変更はスコープ外
+//! である。そのため本 example は転送・カーネルの分離を**試みない**方針へ
+//! 変更した: `wall_ms` を size ごとの end-to-end 指標としてそのまま報告し、
+//! そこから導出する性能指標は「`wall_secs ≥ kernel_secs` （転送時間は
+//! 非負）」という不等式のみから成立する**下限値**
+//! （`tflops_lower_bound`・`logical_load_gbs_lower_bound`。詳細は
+//! [`macos_impl`] のコメント参照）に限定する。分離を諦めた代わりに、
+//! ロード律速・occupancy 不足の判定は非 macOS でも算出できる
+//! [`analytics`]（`arithmetic_intensity`・`actual_groups`/`ideal_groups`・
+//! `barriers_per_tg`）を主に用いる方針へ
+//! `docs/perf/metal-gemm-bottleneck-diagnosis.md` §5 も合わせて改訂した。
 
 /// 実効帯域・occupancy 等の解析値。`objc2` 系 FFI に触れない純粋関数の
 /// ため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
@@ -171,16 +186,6 @@ mod macos_impl {
     /// 同じ入力分布に揃える）。
     const SEED: u64 = 0xC0FFEE;
 
-    /// 転送ベースライン線形外挿（モジュールドキュメント「実測部分の設計」
-    /// 参照）に使う 2 点の `k` 値。ともに `tile::select` の `SMALL`
-    /// 閾値（64。`crates/backend-metal/src/tile.rs`）未満に収め、実測対象
-    /// （`k=size`。`size` は 512 以上）の staged タイルとは異なる
-    /// `SINGLE_SIMDGROUP_8X8` タイルで計測させることで演算量をほぼ 0 に
-    /// 抑える（両点とも同一タイルなので少なくとも「どちらのベースライン
-    /// 点も同じカーネル経路」という前提は保たれる。外挿先の `k=size` とは
-    /// タイルが異なる点は残る近似の限界であり doc に明記する）。
-    const BASELINE_KS: [usize; 2] = [8, 32];
-
     /// `m×n×k` の `dispatch_auto` を計測し中央値秒を返す
     /// （`gemm_bench.rs::measure_auto` と同型。呼び出しごとに A・B の
     /// アップロード・C の readback を含む壁時計計測）。
@@ -205,34 +210,6 @@ mod macos_impl {
         measurement.median_secs
     }
 
-    /// 転送時間ベースラインを `k` について線形外挿する（モジュール
-    /// ドキュメント「実測部分の設計」参照）。`dispatch_auto` の A・B
-    /// アップロードは `m×k`・`k×n` 要素であり `k` にほぼ線形（C の
-    /// readback・ディスパッチ固定コストは `k` に依らない定数項）。
-    /// `BASELINE_KS` の 2 点（両方とも演算量が無視できるほど小さい）で
-    /// `wall_secs(size, size, k)` を測り `wall ≈ intercept + slope * k`
-    /// を最小二乗ではなく単純な 2 点の直線として求め、`k = size` まで
-    /// 外挿した値を「A・B・C 転送＋固定オーバーヘッドの推定値」として
-    /// 返す。定数ベースライン（旧実装の `wall_secs(size, size, MIN_K)`
-    /// 単独差分）は A・B 転送量が `k` に依らずほぼ一定という誤った仮定に
-    /// 基づいており、`kernel_ms_approx` に A・B アップロード時間の大半が
-    /// 混入して `tflops_approx`・`eff_bw_gbs_approx` を系統的に歪めていた
-    /// （イシュー #487 PR #649 への cursor[bot] 指摘。review id
-    /// 4943646199）。線形外挿はこの歪みを是正する。
-    fn extrapolated_transfer_baseline_secs(
-        gemm: &MetalGemm,
-        ctx: &MetalContext,
-        size: usize,
-        config: &MeasurementConfig,
-    ) -> f64 {
-        let [k0, k1] = BASELINE_KS;
-        let w0 = wall_secs(gemm, ctx, size, size, k0, config);
-        let w1 = wall_secs(gemm, ctx, size, size, k1, config);
-        let slope = (w1 - w0) / (k1 as f64 - k0 as f64);
-        let intercept = w0 - slope * k0 as f64;
-        intercept + slope * size as f64
-    }
-
     pub fn main() {
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
@@ -241,27 +218,34 @@ mod macos_impl {
         for size in [512usize, 1024, 2048, 4096] {
             let a: SizeAnalytics = analytics::analyze(size);
 
+            // `wall_secs` は A・B アップロード＋カーネル実行＋C readback を
+            // 含む end-to-end 壁時計時間（モジュールドキュメント「転送時間
+            // 分離を試みて撤回した経緯」参照。転送時間だけを差し引く手段は
+            // クレート内部アクセスを要し本イシューのスコープ外のため、
+            // 分離を試みず `wall_secs` をそのまま報告する）。
             let wall = wall_secs(&gemm, &ctx, size, size, size, &config);
-            // 転送オーバーヘッドの近似ベースライン（`extrapolated_transfer_baseline_secs`
-            // 参照。`BASELINE_KS` 2 点の実測から `k=size` まで線形外挿し、
-            // A・B アップロード量が `k` に比例して増える分を正しく織り込む）。
-            let transfer_baseline = extrapolated_transfer_baseline_secs(&gemm, &ctx, size, &config);
-            // 近似カーネル時間は負にならない範囲でクランプする（計測ノイズで
-            // `wall < transfer_baseline` になり得るため）。
-            let kernel_secs = (wall - transfer_baseline).max(0.0);
 
-            let tflops = a.flops as f64 / kernel_secs / 1e12;
-            // `eff_bw_gbs`: `load_bytes_total + store_bytes_total` を
-            // 近似カーネル時間で割った実効帯域（GB/s）。M4 Max 公称帯域
-            // 546GB/s（`docs/perf/metal-gemm-bottleneck-diagnosis.md`
-            // 出典節）に対する比率は doc 側で算出する。
-            let eff_bw_gbs = (a.load_bytes_total + a.store_bytes_total) as f64 / kernel_secs / 1e9;
+            // `tflops_lower_bound`: 転送時間は非負（`wall_secs ≥
+            // kernel_secs`）という不等式のみから導かれる健全な下限値。
+            // 実際のカーネル TFLOPS はこれ以上（転送時間の分だけ高い）。
+            // 分離を試みないため `_approx`（誤った精度感を与える名称）
+            // ではなく `_lower_bound` と明示する。
+            let tflops_lower_bound = a.flops as f64 / wall / 1e12;
+            // `logical_load_gbs_lower_bound`: `load_bytes_total +
+            // store_bytes_total`（`analytics::analyze` 参照。threadgroup
+            // 間・K タイル間のキャッシュ再利用を考慮しない論理ロード量の
+            // 下限値）を `wall_secs` で割った値。**DRAM 実効帯域ではない**
+            // （キャッシュヒットにより実際の DRAM トラフィックはこれより
+            // 少なく、逆に `wall_secs` が `kernel_secs` 以上であることから
+            // 論理ロードスループットの下限でもある）。M4 Max 公称帯域
+            // 546GB/s との比較には使わない（codex-review 指摘。PR #649）。
+            let logical_load_gbs_lower_bound =
+                (a.load_bytes_total + a.store_bytes_total) as f64 / wall / 1e9;
 
             println!(
                 "size={} tile={}x{}x{}({}x{}, staged={}) actual_groups={} ideal_groups={} \
                  barriers_per_tg={} arithmetic_intensity={:.4} wall_ms={:.4} \
-                 transfer_baseline_ms={:.4} kernel_ms_approx={:.4} tflops_approx={:.4} \
-                 eff_bw_gbs_approx={:.4}",
+                 tflops_lower_bound={:.4} logical_load_gbs_lower_bound={:.4}",
                 a.size,
                 a.tile.bm,
                 a.tile.bn,
@@ -274,10 +258,8 @@ mod macos_impl {
                 a.barriers_per_tg,
                 a.arithmetic_intensity,
                 wall * 1e3,
-                transfer_baseline * 1e3,
-                kernel_secs * 1e3,
-                tflops,
-                eff_bw_gbs,
+                tflops_lower_bound,
+                logical_load_gbs_lower_bound,
             );
         }
     }
@@ -297,9 +279,9 @@ fn main() {
 #[cfg(not(target_os = "macos"))]
 fn main() {
     println!(
-        "backend-metal gemm_diagnosis example: kernel_ms/tflops/eff_bw measurement requires \
-         macOS (Apple Silicon). Analytical values (occupancy / barriers / arithmetic intensity) \
-         below are computed on any platform.\n"
+        "backend-metal gemm_diagnosis example: wall_ms/tflops_lower_bound/logical_load_gbs_lower_bound \
+         measurement requires macOS (Apple Silicon). Analytical values (occupancy / barriers / \
+         arithmetic intensity) below are computed on any platform.\n"
     );
     for size in [512usize, 1024, 2048, 4096] {
         let a = analytics::analyze(size);
