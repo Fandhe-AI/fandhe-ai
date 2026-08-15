@@ -771,9 +771,23 @@ fn setmaxnreg_dec_probe() {
     // を渡すことで `SETMAXNREG_PROBE_RESULT` の行を基準 arch 版と区別する。
     // 基準 arch とは異なる arch での確認のため、`control_src` は
     // `report_control_baseline_regs` のコンパイル結果を再利用できず、
-    // ここで独立にコンパイルする（イシュー #484 レビュー指摘 Low 対応の
-    // 適用範囲外＝真に別入力）。
-    let control_ok_accelerated = compile_ptx(CONTROL_DEC, &arch_accelerated).is_ok();
+    // ここで独立に `report_control_baseline_regs` を呼ぶ（イシュー #484
+    // レビュー指摘 Low 対応の適用範囲外＝真に別入力）。基準 arch 版と同様に
+    // `source=control` の baseline/coherence 診断（`report_control_baseline_regs`
+    // → `report_setmaxnreg_coherence`）を通す: setmaxnreg が最も受理され
+    // やすいのは arch-accelerated 版であり、この 2 段階診断が欠けると
+    // `result=success` のみで「使用可」と誤読されるリスクが基準 arch 版より
+    // 高い（PR #636 レビュー指摘 Medium 対応。以前は `compile_ptx(...).is_ok()`
+    // のみで baseline 実測・coherence 判定を行っていなかった）。
+    let (baseline_regs_accelerated, control_ok_accelerated) =
+        report_control_baseline_regs(&device, "control_dec", CONTROL_DEC, &arch_accelerated);
+    report_setmaxnreg_coherence(
+        "probe_setmaxnreg_dec_arch_accelerated",
+        "control",
+        baseline_regs_accelerated,
+        Some(64),
+        None,
+    );
     if let Some(ptx_accelerated) = try_compile(
         "probe_setmaxnreg_dec_arch_accelerated",
         PROBE_SETMAXNREG_DEC,
@@ -887,9 +901,23 @@ fn setmaxnreg_incdec_probe() {
     // 〈`probe_setmaxnreg_incdec`〉のため [`try_load_and_run`] へ渡す
     // `label` はそのまま再利用し、`arch` 引数に `arch_accelerated` を渡す
     // ことで `SETMAXNREG_PROBE_RESULT` の行を基準 arch 版と区別する。
-    // 基準 arch と異なる arch のため `control_src` を独立にコンパイルする
-    // （イシュー #484 レビュー指摘 Low 対応の適用範囲外＝真に別入力）。
-    let control_ok_accelerated = compile_ptx(CONTROL_INCDEC, &arch_accelerated).is_ok();
+    // 基準 arch と異なる arch のため `control_src` を独立に
+    // `report_control_baseline_regs` へ渡す（イシュー #484 レビュー指摘 Low
+    // 対応の適用範囲外＝真に別入力）。基準 arch 版と同様に `source=control`
+    // の baseline/coherence 診断を通す: setmaxnreg が最も受理されやすいのは
+    // arch-accelerated 版であり、この 2 段階診断が欠けると `result=success`
+    // のみで「使用可」と誤読されるリスクが基準 arch 版より高い（PR #636
+    // レビュー指摘 Medium 対応。以前は `compile_ptx(...).is_ok()` のみで
+    // baseline 実測・coherence 判定を行っていなかった）。
+    let (baseline_regs_accelerated, control_ok_accelerated) =
+        report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, &arch_accelerated);
+    report_setmaxnreg_coherence(
+        "probe_setmaxnreg_incdec_arch_accelerated",
+        "control",
+        baseline_regs_accelerated,
+        Some(24),
+        Some(232),
+    );
     if let Some(ptx_accelerated) = try_compile(
         "probe_setmaxnreg_incdec_arch_accelerated",
         PROBE_SETMAXNREG_INCDEC,
