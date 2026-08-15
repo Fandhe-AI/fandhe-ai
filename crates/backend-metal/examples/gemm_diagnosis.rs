@@ -28,21 +28,24 @@
 //!
 //! ### GPU デバイスプロファイル（occupancy 判定式のパラメータ）
 //!
-//! `ideal_groups` の算出（[`analytics::DeviceProfile`]）は既定で M4 Max
-//! 実機検証環境（`gpu_core_count=40`・`ideal_groups_multiplier=6`）を前提
-//! とする。macOS 実行時は `sysctl -n hw.model` で実機モデルを検出し、
-//! `Mac16,6`（M4 Max）以外では誤った occupancy 判定を避けるため実行を
-//! **拒否する**（fail-closed。codex-review 指摘 P1。PR #649）。他デバイス
-//! で診断したい場合は `--gpu-core-count`・`--ideal-groups-multiplier` を
-//! 両方明示指定する:
+//! `ideal_groups` の算出（[`analytics::DeviceProfile`]）に用いるパラメータ
+//! （`gpu_core_count`・`ideal_groups_multiplier`）は、macOS（実測を伴う
+//! 経路）では `--gpu-core-count`・`--ideal-groups-multiplier` の**両方の
+//! 明示指定を必須**とする。`MTLDevice` に公開の GPU コア数取得 API は
+//! 存在せず、`sysctl -n hw.model` の機種識別子（例: `Mac16,6`）だけでは
+//! 同一機種内の構成差異（binned 版等）まで保証できないため、機種識別子
+//! からの自動判定は行わない（codex-review 指摘 P1・PR #649。誤った
+//! occupancy 判定を機種一致の見た目だけで許してしまう問題への対応。
+//! 未指定は fail-closed でエラー終了する）:
 //!
 //! ```sh
 //! cargo run -p backend-metal --example gemm_diagnosis --release -- \
-//!     --gpu-core-count=20 --ideal-groups-multiplier=6
+//!     --gpu-core-count=40 --ideal-groups-multiplier=6
 //! ```
 //!
-//! 非 macOS（解析値のみ算出。実機検出手段がない）は CLI 引数の明示指定が
-//! なければ M4 Max 既定プロファイルを使い、その旨を stderr へ警告出力する。
+//! 非 macOS（解析値のみ算出。実機を対象としないため誤診断リスクがない）
+//! は CLI 引数の明示指定がなければ M4 Max 既定プロファイルを使い、その旨を
+//! stderr へ警告出力する。
 //!
 //! 計測手順・記録テンプレート・判定基準は
 //! `docs/perf/metal-gemm-bottleneck-diagnosis.md` を参照。
@@ -111,9 +114,12 @@ mod analytics {
     /// `MTLDevice` に公開の GPU コア数取得 API は存在しないため、本
     /// example は解析対象を明示的なプロファイル値として扱う。既定値
     /// （[`Self::M4_MAX`]）を他 Mac 実機の occupancy 判定に無警告で流用
-    /// しないよう、呼び出し側（`main`）で実機モデル検出による
-    /// fail-closed 拒否・CLI 引数上書きを行う（モジュールドキュメント
-    /// 「GPU デバイスプロファイル」節・codex-review 指摘 P1・PR #649）。
+    /// しないよう、呼び出し側（`main`）で macOS 実行時は CLI 引数
+    /// （`--gpu-core-count`・`--ideal-groups-multiplier`）の明示指定を
+    /// 必須化する（機種識別子〈`sysctl -n hw.model`〉だけでは同一機種内の
+    /// 構成差異を保証できないため自動判定は行わない。モジュール
+    /// ドキュメント「GPU デバイスプロファイル」節・codex-review 指摘 P1・
+    /// PR #649）。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct DeviceProfile {
         pub gpu_core_count: u64,
@@ -214,10 +220,12 @@ mod analytics {
 /// で流用しないための CLI 上書き経路（モジュールドキュメント「GPU
 /// デバイスプロファイル」節・codex-review 指摘 P1・PR #649）。
 ///
-/// 誤った occupancy 判定を招く片方だけの指定は `Err` で拒否する
-/// （fail-closed）。両方とも未指定なら `Ok(None)`（呼び出し側が既定
-/// プロファイルの解決方法〈macOS: 実機モデル検出／非 macOS: M4 Max 既定 +
-/// 警告〉を判断する）。
+/// 誤った occupancy 判定を招く片方だけの指定・ゼロ値・
+/// `ideal_groups = gpu_core_count * ideal_groups_multiplier` の乗算
+/// オーバーフローは `Err` で拒否する（fail-closed。ゼロ値検証・
+/// `checked_mul` は codex-review 指摘 P2・PR #649）。両方とも未指定なら
+/// `Ok(None)`（呼び出し側が既定プロファイルの解決方法〈macOS: 明示指定
+/// 必須・非 macOS: M4 Max 既定 + 警告〉を判断する）。
 fn parse_device_profile_override() -> Result<Option<analytics::DeviceProfile>, String> {
     let mut gpu_core_count: Option<u64> = None;
     let mut ideal_groups_multiplier: Option<u64> = None;
@@ -238,6 +246,23 @@ fn parse_device_profile_override() -> Result<Option<analytics::DeviceProfile>, S
 
     match (gpu_core_count, ideal_groups_multiplier) {
         (Some(gpu_core_count), Some(ideal_groups_multiplier)) => {
+            if gpu_core_count == 0 || ideal_groups_multiplier == 0 {
+                return Err(
+                    "--gpu-core-count と --ideal-groups-multiplier はいずれも正数を \
+                     指定する必要がある（ゼロは ideal_groups=0 という成立しない \
+                     occupancy 基準を生むため拒否する）"
+                        .to_string(),
+                );
+            }
+            gpu_core_count
+                .checked_mul(ideal_groups_multiplier)
+                .ok_or_else(|| {
+                    format!(
+                        "--gpu-core-count={gpu_core_count} と \
+                         --ideal-groups-multiplier={ideal_groups_multiplier} の積が \
+                         u64 の範囲を超える（ideal_groups の算出でオーバーフローする）"
+                    )
+                })?;
             Ok(Some(analytics::DeviceProfile {
                 gpu_core_count,
                 ideal_groups_multiplier,
@@ -288,39 +313,27 @@ mod macos_impl {
     }
 
     /// 実行対象デバイスの [`DeviceProfile`] を解決する。CLI 明示指定
-    /// （`super::parse_device_profile_override`）を最優先で使い（他
-    /// デバイスでの意図的な実行を許可するため）、未指定の場合は
-    /// `sysctl -n hw.model` で実機モデルを検出する。検出結果が本 example
-    /// の前提実機（M4 Max・`Mac16,6`）と一致しない、または検出自体に
-    /// 失敗した場合は、誤った occupancy 判定（他デバイスに M4 Max 用の
-    /// `ideal_groups` を無警告で適用してしまう）を避けるため実行を拒否
-    /// する（fail-closed。codex-review 指摘 P1・PR #649）。
+    /// （`super::parse_device_profile_override`）を**必須**とする。
+    ///
+    /// 以前は `sysctl -n hw.model` の機種識別子（`Mac16,6` = M4 Max）が
+    /// 一致すれば既定の [`DeviceProfile::M4_MAX`] を自動採用していたが、
+    /// `MTLDevice` に公開の GPU コア数取得 API は存在せず、機種識別子
+    /// だけでは同一機種内の構成差異（binned 版等）まで保証できないため
+    /// 誤った occupancy 判定を許してしまう問題があった（codex-review
+    /// 指摘 P1・PR #649）。よって自動判定は行わず、未指定は fail-closed
+    /// でエラー終了する。
     fn resolve_device_profile() -> Result<DeviceProfile, String> {
-        if let Some(profile) = super::parse_device_profile_override()? {
-            return Ok(profile);
-        }
-
-        const SUPPORTED_MODEL: &str = "Mac16,6"; // M4 Max（実機検証環境）
-
-        let output = std::process::Command::new("sysctl")
-            .args(["-n", "hw.model"])
-            .output()
-            .map_err(|e| format!("`sysctl -n hw.model` の実行に失敗した: {e}"))?;
-        if !output.status.success() {
-            return Err("`sysctl -n hw.model` がエラー終了した".to_string());
-        }
-        let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        if model == SUPPORTED_MODEL {
-            Ok(DeviceProfile::M4_MAX)
-        } else {
-            Err(format!(
-                "検出デバイス '{model}' は本 example が前提とする実機検証環境（M4 Max・\
-                 {SUPPORTED_MODEL}）と一致しない。occupancy 判定式 \
-                 (idealGroups = gpu_core_count * ideal_groups_multiplier) は機種依存のため、\
-                 既定の M4 Max 用プロファイルをそのまま適用すると誤った診断結果になる。\
-                 `--gpu-core-count=<N> --ideal-groups-multiplier=<M>` を明示指定して再実行すること。"
-            ))
+        match super::parse_device_profile_override()? {
+            Some(profile) => Ok(profile),
+            None => Err(
+                "GPU デバイスプロファイルの自動判定は行わない（機種識別子だけでは \
+                 GPU コア数の一致を保証できないため。codex-review 指摘 P1・PR #649）。\
+                 `--gpu-core-count=<N> --ideal-groups-multiplier=<M>` を明示指定して \
+                 再実行すること（`docs/real-hardware-verification-env.md` §1 記載の \
+                 実機検証環境〈M4 Max〉であれば `--gpu-core-count=40 \
+                 --ideal-groups-multiplier=6`）。"
+                    .to_string(),
+            ),
         }
     }
 

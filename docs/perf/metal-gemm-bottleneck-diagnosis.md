@@ -16,7 +16,8 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 （`docs/real-hardware-verification-env.md` §1・§7「ローカル直接実行」）だが本セッション環境は Linux のため、
 #188 → #380/#381 の先例に従い、Linux 側で完了できる範囲（診断 example の実装・解析値の算出・doc の計測
 手順・記録テンプレート・判定基準の確定）のみを本 PR で行う。**§4「実測結果」・§5「結論」は Mac 実機セッション
-で `cargo run -p backend-metal --example gemm_diagnosis --release` を実行してから記入する。**
+で `cargo run -p backend-metal --example gemm_diagnosis --release -- --gpu-core-count=40 --ideal-groups-multiplier=6`
+を実行してから記入する（CLI 引数は macOS 実行時必須。§1 参照）。**
 
 ## 1. 計測手段
 
@@ -83,19 +84,22 @@ logical_load_gbs_lower_bound  = (load_bytes_total + store_bytes_total) / wall_se
 ```sh
 git fetch origin
 git checkout test/487-metal-gemm-bottleneck-diagnosis   # 本イシューの実装ブランチ
-cargo run -p backend-metal --example gemm_diagnosis --release
+cargo run -p backend-metal --example gemm_diagnosis --release -- \
+    --gpu-core-count=40 --ideal-groups-multiplier=6
 ```
 
 出力形式（1 行 1 size。`size=<N> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>) actual_groups=<v>
 ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> tflops_lower_bound=<v>
 logical_load_gbs_lower_bound=<v>`）を size=512/1024/2048/4096 で出力する。
 
-`ideal_groups` の算出（`idealGroups = gpu_core_count * ideal_groups_multiplier`）は既定で M4 Max
-実機検証環境（`gpu_core_count=40`・`ideal_groups_multiplier=6`）を前提とする。macOS 実行時は
-`sysctl -n hw.model` で実機モデルを検出し、`Mac16,6`（M4 Max）以外では誤った occupancy 判定を
-避けるため実行を **拒否する**（fail-closed。codex-review 指摘 P1・PR #649）。M4 Max 以外の実機で
-診断する場合は `--gpu-core-count`・`--ideal-groups-multiplier` を両方明示指定する（例:
-`cargo run -p backend-metal --example gemm_diagnosis --release -- --gpu-core-count=20 --ideal-groups-multiplier=6`）。
+`ideal_groups` の算出（`idealGroups = gpu_core_count * ideal_groups_multiplier`）に用いる
+`gpu_core_count`・`ideal_groups_multiplier` は、macOS 実行時は `--gpu-core-count`・
+`--ideal-groups-multiplier` の**両方の明示指定を必須**とする。`MTLDevice` に公開の GPU コア数
+取得 API は存在せず、`sysctl -n hw.model` の機種識別子（例: `Mac16,6`）だけでは同一機種内の
+構成差異（binned 版等）まで保証できないため、機種識別子からの自動判定は行わない（codex-review
+指摘 P1・PR #649。未指定は fail-closed でエラー終了する）。実機検証環境（M4 Max）で診断する場合は
+上記コマンド例のとおり `--gpu-core-count=40 --ideal-groups-multiplier=6` を指定する。CLI 値は
+正数（ゼロ拒否）・乗算オーバーフロー不可であることも検証される（codex-review 指摘 P2・PR #649）。
 
 GPU 使用率のサンプリング（ベンチ実行と並行して別ターミナルで実行。sudo 不要）:
 
