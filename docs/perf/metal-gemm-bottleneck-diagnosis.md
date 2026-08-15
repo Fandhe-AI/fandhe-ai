@@ -108,7 +108,7 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 |------|-----|------|
 | GPU コア数（M4 Max） | 40 | `docs/perf/metal-gemm-dynamic-tile.md:53`（`sysctl -n hw.model` = `Mac16,6` 実測記録） |
 | occupancy 判定式 | `idealGroups = coreCount * 6` | MFA（Metal FlashAttention）の FP32 系 occupancy 判定式（イシュー #487 計画「occupancy 不足の判定」節が出発点として指定した式。一次資料の直接引用は未確認のため、判定に用いる際は経験則として扱う） |
-| メモリ帯域公称値 | 546 GB/s | Apple 公表スペック（M4 Max）。実効帯域比の算出時に使用 |
+| メモリ帯域公称値 | 546 GB/s | Apple 公表スペック（M4 Max）。§5.1 の仮説生成用 machine balance point（FP32 理論ピーク ÷ 546GB/s）の算出にのみ使う。`arithmetic_intensity` はキャッシュ再利用を無視した論理ロード量ベースのためこの値との比較は実 DRAM 実効帯域比の確定算出にはならない（§1「実測部分の設計判断」節・§5.1 参照） |
 | FP32 理論ピーク演算性能 | **要記入（Mac 実機セッションで一次資料を確認してから記入する）** | — |
 
 ### 3.2 size 別解析値（`tile::select(size,size,size)` は 4 サイズとも `staged=true` の 64×64 ブロック・
@@ -136,11 +136,13 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 - **arithmetic intensity は size に依らずほぼ一定（15.06〜15.88 FLOP/byte）**。GEMM の理論 AI は本来
   `size` に比例して増大するはずだが、本カーネルの staged タイルはキャッシュ再利用をせず K タイルごとに
   device メモリへ再ロードするため AI が頭打ちになっている（タイル構造由来の定数）。FP32 理論ピークとの比
-  （machine balance）が確定すれば、この一定値がロード律速側に張り付いているかどうかを判定できる（§3.1
-  「要記入」欄が確定してから §5 で判定する）
+  （machine balance）が確定すれば、この一定値との比較から「ロード律速の仮説」を生成できる（§5.1「ロード
+  律速の『仮説』判定」参照。`arithmetic_intensity` は論理ロード量ベースのため、この比較だけでロード律速を
+  **確定**はできない）。§3.1「要記入」欄が確定してから §5 で仮説として評価する
 - 上記 2 点から、暫定的には **occupancy 不足（D-7）よりロード側の定数コスト（D-2 のベクトル化候補）が
-  頭打ちの説明として有力**に見えるが、これは近似的な TFLOPS・実効帯域の実測値（§4）で裏付けを取ってから
-  確定する
+  頭打ちの説明として有力**に見えるが、これは§4 の `wall_ms`・`tflops_lower_bound`（size 間の相対的な
+  スループット傾向。転送時間分離による近似 TFLOPS・実効帯域は PR #649 で撤回済み）を補助証跡として、
+  実測後に裏付けを取ってから確定する
 
 ## 4. 実測結果（Mac 実機セッションで記入）
 
@@ -191,9 +193,11 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
   （codex-review 指摘。PR #649）。仮説が成立する場合は **D-2 を優先候補とする**（確定ではない）
 - **occupancy 不足の判定**: `actual_groups < ideal_groups`（§3.2 表）となる size 帯が頭打ち開始点
   （1024 前後）と一致 → **D-7 を優先**
-- 両方成立・どちらも不成立の場合は、バリア同期コスト（`barriers_per_tg` の増加傾向。§3.2 表参照）・
-  タイル選択自体の再検討（`tile::select` が 1024 以降も一律 64×64 を選び続ける点）・`tflops_lower_bound` の
-  size 間の伸び方（頭打ちしているか）を解釈指針として追加検討する
+- ロード律速の仮説が不成立（実測で machine balance point を上回ると判明）・occupancy 不足の判定も不成立の
+  場合、またはロード律速の仮説が実 DRAM トラフィック実測なしで確定判定に格上げできず結論が定まらない場合は、
+  バリア同期コスト（`barriers_per_tg` の増加傾向。§3.2 表参照）・タイル選択自体の再検討（`tile::select` が
+  1024 以降も一律 64×64 を選び続ける点）・`tflops_lower_bound` の size 間の伸び方（頭打ちしているか）を
+  解釈指針として追加検討する
 
 ### 5.2 結論・D-2/D-7 優先順位（未確定。Mac 実機実測後に記入）
 
