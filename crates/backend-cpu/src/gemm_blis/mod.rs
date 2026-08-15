@@ -63,7 +63,7 @@ use microkernel::Microkernel;
 // テストバイナリのコンパイルには必要。#185 レビュー指摘）。
 #[cfg(any(not(target_arch = "aarch64"), test))]
 use microkernel::ScalarKernel;
-use pack::{pack_a, pack_b};
+use pack::{APackTile, BPackTile, pack_a, pack_b};
 use rayon::prelude::*;
 
 /// C タイルのスタックバッファ最大要素数（`MR * NR` の全 ISA 中の最大値。
@@ -345,14 +345,27 @@ fn gemm_blis_region<K: Microkernel>(
             // B パネル packing: nc_len を NR 単位のブロックに分割し、各
             // ブロックを kc_len*NR 要素の連続領域として 1 本のバッファに
             // 詰める（ic ループ全体で使い回すため pc/jc ブロックごとに
-            // 1 回のみ実行）。
+            // 1 回のみ実行）。pack_b が panel サブスライスへ直接書き込む
+            // ため中間 Vec 確保・copy_from_slice は発生しない（#554:
+            // BLIS/matrixmultiply の呼び出し側確保バッファへ直接書き込む
+            // packing 方式に合わせ二段コピーを廃止）。
             let nr_blocks = nc_len.div_ceil(nr);
             let mut b_panel = vec![0.0f32; nr_blocks * kc_len * nr];
             for jr_block in 0..nr_blocks {
                 let jr = jr_block * nr;
                 let nr_eff = nr.min(nc_len - jr);
-                let bp = pack_b(b, n, pc, kc_len, jc + jr, nr, nr_eff);
-                b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr].copy_from_slice(&bp);
+                pack_b(
+                    &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr],
+                    b,
+                    BPackTile {
+                        n_total: n,
+                        kc_start: pc,
+                        kc_len,
+                        col_start: jc + jr,
+                        nr,
+                        nr_eff,
+                    },
+                );
             }
 
             let mut ic = 0;
@@ -361,14 +374,26 @@ fn gemm_blis_region<K: Microkernel>(
 
                 // A パネル packing: mc_len を MR 単位のブロックに分割
                 // （jr ループ全体で使い回すため ic ブロックごとに 1 回のみ）。
+                // pack_a が panel サブスライスへ直接書き込むため中間 Vec
+                // 確保・copy_from_slice は発生しない（#554。B packing と
+                // 同じ理由）。
                 let mr_blocks = mc_len.div_ceil(mr);
                 let mut a_panel = vec![0.0f32; mr_blocks * kc_len * mr];
                 for ir_block in 0..mr_blocks {
                     let ir = ir_block * mr;
                     let mr_eff = mr.min(mc_len - ir);
-                    let ap = pack_a(a, k_dim, ic + ir, mr, mr_eff, pc, kc_len);
-                    a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr]
-                        .copy_from_slice(&ap);
+                    pack_a(
+                        &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
+                        a,
+                        APackTile {
+                            k_total: k_dim,
+                            row_start: ic + ir,
+                            mr,
+                            mr_eff,
+                            kc_start: pc,
+                            kc_len,
+                        },
+                    );
                 }
 
                 for jr_block in 0..nr_blocks {
