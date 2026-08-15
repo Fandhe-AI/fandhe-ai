@@ -29,13 +29,15 @@ MFA リポジトリ（`philipturner/metal-flash-attention`、参照時点コミ�
    報告がある。「async copy を発行したら、カーネル終了前に必ず別の `threadgroup_barrier` に到達し、かつコピー結果を
    最低 1 スレッドが読む（デリファレンスする）こと」が回避策として明記されており、これを守らないと GPU がフリーズし
    再起動が必要になりうるとされている。使用制約が非自明でデバッグが困難な API である。
-3. **M3/M4 以降で性能悪化**: MFA `Sources/FlashAttention/GEMM/GEMMDescriptor/GEMMDescriptor.swift:212-216` は
+3. **M3/M4 以降では既定で無効化**: MFA `Sources/FlashAttention/GEMM/GEMMDescriptor/GEMMDescriptor.swift:212-216` は
    `mtlDevice.supportsFamily(.apple9)`（Apple9 ファミリー、M3/M4 以降相当）が真の場合に `preferAsyncLoad = false` を
-   既定とし、そうでない場合のみ `true` とする。つまり **MFA 自身が新しい GPU 世代では async copy を避ける**設計に
-   なっている。
-4. **fallback 経路の存在**: 上記のとおり MFA 自身が async copy なしの経路を（Apple9 以降の）既定として持ち、
-   それで性能が成立している。`backend-metal` の現行 staged 協調ロード（`gemm_simdgroup_tiled`）は同系の経路であり、
-   非公式 API に頼らずとも Phase D の他施策（ベクトル化ロード・パディング・タイル選択強化等）による改善余地がある。
+   既定とし、そうでない場合のみ `true` とする。これは確認できる設定値の事実であり、**MFA 自身が新しい GPU 世代では
+   async copy を既定で使わない**という実装選択を示す。この設定切替のみを根拠に「async copy が性能悪化を招く」と
+   因果関係を断定することはできない（ベンチ実測・MFA 側のコメント等の裏付けは参照時点コミットの当該箇所に見当たらず、
+   本ドキュメントも未実施）。
+4. **fallback 経路の存在**: 上記のとおり MFA 自身が async copy なしの経路を（Apple9 以降の）既定として持つ。
+   `backend-metal` の現行 staged 協調ロード（`gemm_simdgroup_tiled`）は同系の経路であり、非公式 API に頼らずとも
+   Phase D の他施策（ベクトル化ロード・パディング・タイル選択強化等）による改善余地がある。
 5. **本リポ方針との整合**: 完全自作コア・保守性を重視する方針（`.claude/rules/coding-rust.md`）の観点から、
    Apple 非公開 ABI（AIR intrinsic）への `__asm` 直接依存は、コンパイラ更新で無警告に壊れうる保守負債であり採らない。
 
