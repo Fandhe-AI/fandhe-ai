@@ -687,8 +687,20 @@ fn validate_wmma_tf32_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaEr
         )));
     }
 
-    let a_pad = cfg.k_tile + 4;
-    let b_pad = cfg.block_n + 4;
+    // codex-review 指摘・PR #643 再レビュー: `k_tile`/`block_n` は直前まで
+    // 「非ゼロ」「WARP_TILE/FRAG_K の倍数」のみを検査しており上限は無いため、
+    // 極端な非既定構成（例: `u32::MAX` 近傍）では通常加算がオーバーフロー
+    // しうる（debug では panic、release では wrap して以降の smem 判定が
+    // 誤る）。fail-closed 検証契約（本ファイル冒頭）に従い `checked_add`
+    // で明示的に拒否する。
+    let a_pad = cfg
+        .k_tile
+        .checked_add(4)
+        .ok_or_else(|| invalid("a_pad (k_tile + 4) overflow".to_string()))?;
+    let b_pad = cfg
+        .block_n
+        .checked_add(4)
+        .ok_or_else(|| invalid("b_pad (block_n + 4) overflow".to_string()))?;
     // ダブルバッファ（as_tile/bs_tile）＋エピローグ c_tile の静的共有メモリ
     // 合計（実装計画 4.2 節「SMEM 予算」）。全て同一カーネル関数内の
     // `__shared__` 宣言のためタイミングに関わらず合算される。
@@ -1134,8 +1146,18 @@ fn validate_wmma_f16_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaErr
         )));
     }
 
-    let a_pad = cfg.k_tile + 8;
-    let b_pad = cfg.block_n + 8;
+    // codex-review 指摘（kernels_wmma_tf32_opt 側の同型指摘・PR #643 再
+    // レビュー）と同じ理由: `k_tile` はここでは `FRAG` 固定だが `block_n`
+    // には上限検査が無いため、fail-closed 契約に従い `checked_add` で
+    // 明示的に拒否する（`validate_wmma_tf32_opt_config` と同方針）。
+    let a_pad = cfg
+        .k_tile
+        .checked_add(8)
+        .ok_or_else(|| invalid("a_pad (k_tile + 8) overflow".to_string()))?;
+    let b_pad = cfg
+        .block_n
+        .checked_add(8)
+        .ok_or_else(|| invalid("b_pad (block_n + 8) overflow".to_string()))?;
     // ダブルバッファ（as_tile/bs_tile。half=2byte）＋エピローグ cs_tile
     // （f32=4byte）の静的共有メモリ合計。
     let smem_bytes = 2u32
@@ -1642,6 +1664,34 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// フェイルクローズド検証（TF32 opt）: `validate_wmma_tf32_opt_config`
+    /// の `a_pad = k_tile + 4`／`b_pad = block_n + 4` を通常加算のまま残すと
+    /// fail-closed 検証器の中に唯一の非 `checked_*` 算術が残ることになる
+    /// （codex-review 指摘・PR #643 再レビュー）。本検証では `k_tile` は
+    /// `FRAG_K`（8）の倍数という制約上 `u32::MAX` 近傍でも `+4` 自体は
+    /// オーバーフローしない（最大到達可能値は `u32::MAX - 7` で
+    /// `+4 = u32::MAX - 3` は有効な `u32`）ため、本ケースの実際の拒否は
+    /// 後続の `smem_bytes` 側 `checked_mul` チェーンが担う。それでも
+    /// `a_pad`/`b_pad` 自体を `checked_add` 化したのは、他の演算がすべて
+    /// `checked_*` で統一されている本関数の contract 上の一貫性のためで
+    /// あり（`FRAG_K`/`WARP_TILE` を将来変更した場合に到達可能性の前提が
+    /// 崩れても fail-closed のまま保たれる）、本テストは「拒否される」
+    /// という外部から観測可能な契約が維持されていることを固定する。
+    #[test]
+    fn render_wmma_tf32_opt_rejects_k_tile_pad_overflow() {
+        let cfg = WmmaOptKernelConfig {
+            k_tile: u32::MAX - 7,
+            ..WmmaOptKernelConfig::default_tf32()
+        };
+        assert!(
+            matches!(
+                render_wmma_tf32_opt(&cfg),
+                Err(CudaError::InvalidKernelConfig { .. })
+            ),
+            "k_tile=u32::MAX-7 は InvalidKernelConfig で拒否されるべきです"
+        );
     }
 
     /// フェイルクローズド検証（f16 opt）: `k_tile != FRAG` が本カーネル
