@@ -257,10 +257,15 @@ impl TileConfig {
 /// `instantiate_gemm_shapes_helper` が実体化する 6 構成のうち本実装未収録
 /// だった 3 つ）を追加した。`select` の選択組み込み・閾値調整は実機実測で
 /// 確定させる後続スコープ（イシュー #532 計画「スコープ外」節）であり本
-/// 追加では行わない。`crates/backend-metal/tests/gemm_dynamic_tile_parity.rs`
-/// の数値一致テストが本セットを直接巡回するため、追加・変更時は両ファイル
-/// の対応関係を崩さないこと。
-pub const CANDIDATES: &[TileConfig] = &[
+/// 追加では行わない。
+///
+/// `pub(crate)`（`pub` にしない）: 候補の並び順・個数は `select` が添字で
+/// 依存する内部表現であり、クレート外へ安定 API として公開すると将来の
+/// 候補調整が公開 API 契約に組み込まれてしまう（codex-review 指摘・PR
+/// #651）。本セットを直接巡回するテストは統合テスト（`tests/` 配下・別
+/// コンパイル単位）ではなく本ファイル末尾の `#[cfg(test)] mod tests`
+/// （クレート内部・`pub(crate)` を参照可能）に置く。
+pub(crate) const CANDIDATES: &[TileConfig] = &[
     // 大形状（正方）: 64x64 ブロックを 2x2=4 simdgroup で分担。
     TileConfig {
         bm: 64,
@@ -737,6 +742,102 @@ mod tests {
             let cfg = select(m, n, k);
             cfg.validate(1024, 32 * 1024)
                 .unwrap_or_else(|e| panic!("select({m},{n},{k})={cfg:?} rejected: {e}"));
+        }
+    }
+
+    // --- CANDIDATES を直接巡回する実機依存テスト（イシュー #532・PR #651 codex-review
+    // 指摘対応） ---
+    //
+    // `CANDIDATES` は `pub(crate)`（クレート外非公開。本ファイル冒頭のコメント参照）の
+    // ため、これを直接巡回するテストは統合テスト（`tests/` 配下・別コンパイル単位で
+    // 公開 API しか見えない）ではなくここに置く。`crate::gemm::MetalGemm`・
+    // `crate::context::MetalContext` は macOS 限定モジュール（`lib.rs` の
+    // `cfg(target_os = "macos")`）のため、本 mod 自体は cfg なし（Linux でも
+    // 単体テストが回る設計）だが以下 2 件のみ個別に `cfg(target_os = "macos")` を
+    // 付ける。
+
+    /// `CANDIDATES`（実セット。イシュー #532 で MLX classic 経路の未収録 3 構成を
+    /// 追加済み）を全て、8 の倍数の中規模形状で検証する（構成別の一致確認）。
+    /// ローカルに候補配列を複製せず実セットを直接巡回することで、本ファイル側の
+    /// 追加・変更が本テストへ自動的に反映されドリフトしない。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_match_cpu_reference_medium_shape() {
+        use backend_cpu::parity::{assert_parity, matmul_reference_fma};
+        use bench_harness::rng::Xorshift64Star;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let (m, n, k) = (256, 256, 256);
+            let seed_a = 10 + i as u64;
+            let seed_b = 20 + i as u64;
+
+            let a = Xorshift64Star::new(seed_a).fill_vec(m * k);
+            let b = Xorshift64Star::new(seed_b).fill_vec(k * n);
+
+            let mut expected = vec![0.0f32; m * n];
+            matmul_reference_fma(&a, &b, &mut expected, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+            let actual = gemm
+                .dispatch_variant(
+                    &ctx,
+                    crate::gemm::GemmVariant::SimdgroupTiled(cfg),
+                    &a,
+                    &b,
+                    m,
+                    n,
+                    k,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("Metal SimdgroupTiled({cfg:?}) GEMM のディスパッチに失敗した: {err}")
+                });
+
+            assert_parity(
+                &format!("metal SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
+                &actual,
+                &expected,
+            );
+        }
+    }
+
+    /// デバイス上限直接検証（イシュー #532 受け入れ基準「SMEM 上限内の実機確認」）:
+    /// `MetalGemm::pipeline_for_tile` は候補が検証・パイプライン構築に失敗すると
+    /// `fallback_chain` で単一 simdgroup へサイレントにフォールバックするため
+    /// （`crate::gemm` 参照）、`dispatch_variant` の PASS だけでは各候補が実際に
+    /// デバイス上限内で動いた証明にならない。ここでは `MetalContext` から実測した
+    /// `maxThreadgroupMemoryLength`（`MTLDevice` の公開プロパティ）に対して
+    /// `CANDIDATES` 全構成（とくに bk=32 構成の 12288 バイト）の `TileConfig::validate`
+    /// が直接 `Ok` を返すことをアサートし、フォールバックの穴を塞ぐ。スレッド数上限
+    /// （`maxTotalThreadsPerThreadgroup`）は `MTLComputePipelineState` 構築後にしか
+    /// 取得できず、かつパイプライン構築 API は `pub(crate)` のため、
+    /// `validate_accepts_all_candidates_under_typical_device_limits`（上記）と同じ
+    /// Apple Silicon 一般上限（1024 スレッド）を前提に据え置き、SMEM のみをデバイス
+    /// 実測値で検証する。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_validate_under_actual_device_shared_memory_limit() {
+        // `MTLDevice::maxThreadgroupMemoryLength` はトレイトメソッドのため、
+        // 実装型（`&ProtocolObject<dyn MTLDevice>`）で呼ぶにはこのトレイトを
+        // スコープに入れる必要がある（`crate::gemm` の同名インポートと同じ理由）。
+        use objc2_metal::MTLDevice;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+
+        for cfg in CANDIDATES {
+            cfg.validate(1024, max_shared_mem_bytes).unwrap_or_else(|e| {
+                panic!(
+                    "candidate {cfg:?} は実デバイス SMEM 上限（{max_shared_mem_bytes} bytes）を \
+                 超過した: {e}"
+                )
+            });
         }
     }
 }

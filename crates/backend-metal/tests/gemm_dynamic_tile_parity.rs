@@ -25,12 +25,6 @@
 use backend_cpu::parity::{assert_parity, matmul_reference_fma};
 use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig};
 use bench_harness::rng::Xorshift64Star;
-// `MTLDevice::maxThreadgroupMemoryLength` はトレイトメソッドのため、実装型
-// `&ProtocolObject<dyn MTLDevice>`（`crate::context::MtlDevice`）で呼ぶには
-// このトレイトをスコープに入れる必要がある
-// （`all_tile_candidates_validate_under_actual_device_shared_memory_limit`
-// が使用。`crates/backend-metal/src/gemm.rs` の同名インポートと同じ理由）。
-use objc2_metal::MTLDevice;
 
 /// `variant`（[`GemmVariant::SimdgroupTiled`]）・`(seed_a, seed_b, m, n, k)`
 /// の 1 ケースを実行し、CPU 参照実装との複合判定 PASS を確認する。
@@ -58,18 +52,12 @@ fn run_case(cfg: TileConfig, seed_a: u64, seed_b: u64, m: usize, n: usize, k: us
     );
 }
 
-/// `crate::tile::CANDIDATES`（実セット。イシュー #532 で MLX classic 経路の
-/// 未収録 3 構成を追加済み）を全て、8 の倍数の中規模形状で検証する（構成別
-/// の一致確認）。ローカルに候補配列を複製せず実セットを直接巡回すること
-/// で、`tile.rs` 側の追加・変更が本テストへ自動的に反映されドリフトしない
-/// （`tile.rs` の `CANDIDATES` ドキュメンテーションコメント参照）。
-#[test]
-#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
-fn all_tile_candidates_match_cpu_reference_medium_shape() {
-    for (i, &cfg) in backend_metal::tile::CANDIDATES.iter().enumerate() {
-        run_case(cfg, 10 + i as u64, 20 + i as u64, 256, 256, 256);
-    }
-}
+// `crate::tile::CANDIDATES` を全て、8 の倍数の中規模形状で検証するテスト
+// （構成別の一致確認）は、`CANDIDATES` がクレート内部表現のため `pub(crate)`
+// であり（codex-review 指摘・PR #651）、本統合テスト（クレート外）からは
+// 参照できなくなったため、`crates/backend-metal/src/tile.rs` の
+// `#[cfg(test)] mod tests`（`all_tile_candidates_match_cpu_reference_medium_shape`）
+// へ移設済み。
 
 /// 直接ロード経路（`staged=false`）を明示指定し、協調ロード経路と別に
 /// 検証する（計画「設計方針」節: 両経路を実装し実測で選択するため、
@@ -254,35 +242,11 @@ fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
     run_case(cfg, 66, 67, 100, 130, 70);
 }
 
-/// デバイス上限直接検証（イシュー #532 受け入れ基準「SMEM 上限内の実機
-/// 確認」）: `MetalGemm::pipeline_for_tile` は候補が検証・パイプライン
-/// 構築に失敗すると `crate::tile::fallback_chain` で単一 simdgroup へ
-/// サイレントにフォールバックするため（`gemm.rs` 参照）、
-/// `dispatch_variant` の PASS だけでは各候補が実際にデバイス上限内で
-/// 動いた証明にならない。ここでは `MetalContext` から実測した
-/// `maxThreadgroupMemoryLength`（`MTLDevice` の公開プロパティ）に対して
-/// `crate::tile::CANDIDATES` 全構成（とくに bk=32 構成の 12288 バイト）の
-/// `TileConfig::validate` が直接 `Ok` を返すことをアサートし、フォール
-/// バックの穴を塞ぐ。スレッド数上限（`maxTotalThreadsPerThreadgroup`）は
-/// `MTLComputePipelineState` 構築後にしか取得できず（`pipeline_for_tile`
-/// のコメント参照）、かつパイプライン構築 API は `pub(crate)` のため本
-/// 統合テスト（クレート外）からは触れられない。よって
-/// `validate_accepts_all_candidates_under_typical_device_limits`（`tile.rs`
-/// 単体テスト）と同じ Apple Silicon 一般上限（1024 スレッド）を前提に
-/// 据え置き、SMEM のみをデバイス実測値で検証する。
-#[test]
-#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
-fn all_tile_candidates_validate_under_actual_device_shared_memory_limit() {
-    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
-    let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
-
-    for cfg in backend_metal::tile::CANDIDATES {
-        cfg.validate(1024, max_shared_mem_bytes)
-            .unwrap_or_else(|e| {
-                panic!(
-                    "candidate {cfg:?} は実デバイス SMEM 上限（{max_shared_mem_bytes} bytes）を \
-                 超過した: {e}"
-                )
-            });
-    }
-}
+// デバイス上限直接検証（イシュー #532 受け入れ基準「SMEM 上限内の実機
+// 確認」）は `crate::tile::CANDIDATES` を直接参照する必要があるが、
+// `CANDIDATES` はクレート内部表現のため `pub(crate)` であり
+// （codex-review 指摘・PR #651）、本統合テスト（クレート外）からは
+// 参照できなくなったため、`crates/backend-metal/src/tile.rs` の
+// `#[cfg(test)] mod tests`
+// （`all_tile_candidates_validate_under_actual_device_shared_memory_limit`）
+// へ移設済み。
