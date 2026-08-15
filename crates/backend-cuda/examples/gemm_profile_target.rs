@@ -119,6 +119,14 @@ struct Args {
     size: u32,
     iters: usize,
     warmup: usize,
+    /// `warmup + iters`（`checked_add` 済み）。`main` 側で未検査の再加算を
+    /// せず、この検証済み値をそのまま消費させるためのフィールド
+    /// （PR #637 codex-review 指摘: `parse_args` が唯一の `Args` 構築点
+    /// であることに未来の変更が依存しないようにする）。
+    total_launches: usize,
+    /// `warmup + ALLOC_ZEROS_LAUNCHES`（`checked_add` 済み）。`--launch-skip`
+    /// 値の算出に使う（同上）。
+    launch_skip: usize,
 }
 
 const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N]";
@@ -174,11 +182,29 @@ fn parse_args() -> Result<Args, String> {
         }
     }
 
+    // `--warmup`／`--iters` は usize へ変換できれば無制限に受理していたため、
+    // `args.warmup + args.iters`（total_launches 算出）や
+    // `args.warmup + ALLOC_ZEROS_LAUNCHES`（`--launch-skip` 値の算出）の
+    // 未検査加算が極端な入力で debug build では panic、release build では
+    // wrap して `--launch-skip` 等の表示・起動有無判定を不正にしうる
+    // （PR #637 codex-review 指摘）。CLI 境界で `checked_add` により
+    // オーバーフローを入力エラーとして拒否し、fail-closed に非 0 終了させる
+    // （`.claude/rules/security.md` A03: 外部入力の検証）。
+    let total_launches = warmup
+        .checked_add(iters)
+        .ok_or_else(|| "--warmup と --iters の合計が usize の範囲を超える".to_string())?;
+    let launch_skip = warmup.checked_add(ALLOC_ZEROS_LAUNCHES).ok_or_else(|| {
+        "--warmup が大きすぎて --launch-skip 値（+alloc_zeros memset 起動分）を算出できない"
+            .to_string()
+    })?;
+
     Ok(Args {
         path: path.ok_or("--path は必須")?,
         size: size.ok_or("--size は必須")?,
         iters,
         warmup,
+        total_launches,
+        launch_skip,
     })
 }
 
@@ -249,10 +275,21 @@ fn main() {
             return;
         }
         Err(other) => {
-            println!(
-                "backend-cuda gemm_profile_target: CudaDevice::new failed ({other}); skipping."
+            // `DriverUnavailable`（CUDA 非搭載環境。上の分岐で skip）以外の
+            // `CudaDevice::new` 失敗（ドライバ不整合・コンテキスト生成失敗等）
+            // は「CUDA 実行環境自体が無い」わけではない異常系であり、対象
+            // カーネルは一度も起動していない。ここで終了コード 0 にすると
+            // `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 の採取
+            // ループ（`set -o pipefail` で非 0 終了を検知する fail-closed
+            // 契約）がこの未起動を見逃し、6 条件すべてを空のまま成功扱いで
+            // 通過してしまう（PR #637 codex-review 指摘）。`CudaGemm::new`
+            // 失敗時と同じ理由で非 0 終了させる。
+            eprintln!(
+                "backend-cuda gemm_profile_target: CudaDevice::new failed ({other}); \
+                 aborting because the target kernel never launched (this is not an \
+                 environment-not-present skip)."
             );
-            return;
+            std::process::exit(1);
         }
     };
     println!(
@@ -287,15 +324,12 @@ fn main() {
     println!(
         "ncu --launch-skip {} --launch-count {} \
          (warmup={} + alloc_zeros memset launches={})",
-        args.warmup + ALLOC_ZEROS_LAUNCHES,
-        args.iters,
-        args.warmup,
-        ALLOC_ZEROS_LAUNCHES
+        args.launch_skip, args.iters, args.warmup, ALLOC_ZEROS_LAUNCHES
     );
 
     let mut rng = Xorshift64Star::new(SEED);
     let (m, n, k) = (args.size, args.size, args.size);
-    let total_launches = args.warmup + args.iters;
+    let total_launches = args.total_launches;
     if total_launches == 0 {
         println!("warmup=0 かつ iters=0 のため計測対象の起動がない。終了する。");
         return;
