@@ -1658,6 +1658,62 @@ mod tests {
         ));
     }
 
+    /// 非既定 config（block_m/block_n=128（4×4 warp グリッド）・K 次元を
+    /// `Static(4096)` で焼き込み）での f16 opt 特化 render を検査する
+    /// （PR レビュー指摘への対応:
+    /// `render_wmma_tf32_opt_specializes_tile_and_static_dim` は TF32 opt
+    /// 側の `WMMA_TF32_OPT_WARP_GRID_N` 置換・静的 dim `#define` を検査
+    /// していたが、f16 opt 側は拒否系〈`render_wmma_f16_opt_rejects_k_tile_mismatch`〉
+    /// のみで、`WMMA_F16_OPT_WARP_GRID_N` の非既定値焼き込みを検査する
+    /// テストが欠けていた。f16 opt は K サブステップを持たないため
+    /// `k_tile` は `WMMA_F16_OPT_FRAG`（16）固定のみが許容される
+    /// （`validate_wmma_f16_opt_config` 参照）。TF32 opt テストと異なり
+    /// block_m/block_n の非対称化はできない〈WARP_TILE=32 の倍数で
+    /// warp_grid_n を既定の 2 から変える必要がある〉ため block_n のみ
+    /// 128 に変えて `WMMA_F16_OPT_WARP_GRID_N` の置換を検査する）。
+    #[test]
+    fn render_wmma_f16_opt_specializes_tile_and_static_dim() {
+        let cfg = WmmaOptKernelConfig {
+            block_m: 64,
+            block_n: 128,
+            k_tile: WMMA_F16_OPT_FRAG,
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Static(4096),
+        };
+        let rendered = render_wmma_f16_opt(&cfg).expect("有効な構成が拒否されました");
+        // dim_m/dim_n=Dynamic・dim_k=Static(4096) のため、実起動形状は
+        // k=4096 固定・m/n は任意（後段の validate_launch_shape 呼び出しと
+        // 揃えて m=64・n=128 を使う）。テスト専用アクセサ `source()`
+        // （`#[cfg(test)]`。本番経路には存在しない）で生成内容のみを検査する。
+        let src = rendered.source();
+
+        for expected in [
+            "#define WMMA_F16_OPT_BLOCK_M 64",
+            "#define WMMA_F16_OPT_BLOCK_N 128",
+            "#define WMMA_F16_OPT_WARP_GRID_N 4", // 128 / WARP_TILE(32)
+            "#define DIM_K 4096",
+            "#define DIM_M m",
+        ] {
+            assert!(
+                src.contains(expected),
+                "特化 render に `{expected}` が見つかりません: config={cfg:?}"
+            );
+        }
+        assert!(src.contains("gr < DIM_M && gc < DIM_K"));
+
+        // dim_k=Static(4096) のため、実際の起動形状 k=16（コンパイル時に
+        // 焼き込んだ値と食い違う）は fail-closed に拒否されなければ
+        // ならない（`render_wmma_tf32_opt_specializes_tile_and_static_dim`
+        // と同じ理由。実機依存の `CudaFunction`／`CudaStream` なしに単体
+        // テストできないため `validate_launch_shape` を直接検査する）。
+        assert!(cfg.validate_launch_shape(64, 128, 4096).is_ok());
+        assert!(matches!(
+            cfg.validate_launch_shape(64, 128, 16),
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+    }
+
     /// [`WmmaOptKernelConfig::validate_launch_shape`] が dim_m/dim_n/dim_k
     /// のいずれか 1 つでも実 shape と食い違えば拒否することを検査する
     /// （PR #643 codex-review P1 指摘への対応。指摘箇所
