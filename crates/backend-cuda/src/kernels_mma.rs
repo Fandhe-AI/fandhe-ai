@@ -32,14 +32,53 @@
 //! （128x32+32x128）x2Bx3 ≈ 49152B = ちょうど 48KiB）、コンパイル検証が
 //! できない本セッションでは危険側に倒れる。よって本実装は
 //! `BM=32`・`BN=64`・`BK=32`・3 ステージ（共有メモリ 18432B ≈ 18KiB）に
-//! 縮小し、さらに 1 warp = C の `MMA_M x MMA_N`（`16x8`）タイル 1 個のみを
-//! 担当する構成（warp 内での M/N 方向の追加タイルループを持たない）とする。
-//! `kernels_wmma.rs` 冒頭コメントの「実機未接続・コンパイル未検証による
-//! リスク最小化」判断をそのまま踏襲する（実装計画 8 節「リスク」・
-//! アドバイザレビューで確認済みの判断）。ブロックタイル拡大・warp あたり
-//! 複数 mma タイル化・レジスタブロッキングは後続（知見は
-//! `docs/cuda-tensor-core-knowledge.md`〈#65・TASK-11.1f〉に集約済み。
-//! 拡張は #63 と同種のスコープとして引き継ぐ）。
+//! 縮小した（`kernels_wmma.rs` 冒頭コメントの「実機未接続・コンパイル
+//! 未検証によるリスク最小化」判断をそのまま踏襲。実装計画 8 節「リスク」・
+//! アドバイザレビューで確認済みの判断）。**この `BM=32`・`BN=64` は当初
+//! 判断の記録であり、現行値は下記 B-3（#494）節が示す `BM=64`・`BN=128`
+//! である**（`MMA_BM`/`MMA_BN` 定数が単一の真実源）。
+//!
+//! 当初は 1 warp = C の `MMA_M x MMA_N`（`16x8`）タイル 1 個のみを担当する
+//! 構成だったが、warp あたりの算術強度（FLOPs / SMEM ロードバイト）が低く
+//! `kernels_wmma_opt.rs`（TF32/f16 opt 経路。冒頭コメント「タイル構成」節）
+//! と技法が非対称だったため、イシュー #493（GEMM 性能改善ツリー #479 →
+//! Phase 2 親 #490 の B-2）で warp あたり `2x2` の mma タイル（出力
+//! `MMA_WARP_M x MMA_WARP_N` = `32x16`）を担当するレジスタブロッキングへ
+//! 拡張した。CUTLASS の `MmaIterations` 2 重ループ・metal-flash-attention の
+//! レジスタタイル配列・MLX の `MMATile` と同型の標準技法であり、ロード済み
+//! A フラグメント 2 個・B フラグメント 2 個を 4 通りの `mma.sync` で総当たり
+//! 再利用することで、同一出力あたりの `ldmatrix` 発行回数を半減させる
+//! （1 K タイル・16x8 出力あたり: 旧 4 発行〈A x4 + B x2 を warp ごとに
+//! 個別発行〉→ 新 2 発行〈A x4 + B x2 を 4 タイル分で共有〉。本ファイル
+//! `MMA_WARP_TILES_M`/`MMA_WARP_TILES_N` 定数直下のドキュメンテーション
+//! コメント参照）。
+//!
+//! **B-2 単体でのスループット改善は受け入れ条件ではない**（#493 本文が
+//! 明示）。warp 数が 16→4 へ減る（スレッド数 512→128）ことで cp.async
+//! 協調ロードの反復回数が増え、B-2 単体では悪化しうる。改善判定はブロック
+//! タイル拡大（B-3・#494）完了時点でペアに対して行う（本ファイル
+//! `docs/perf/cuda-gemm-mma-pipeline.md` 参照）。数値順序への影響はない:
+//! 各出力要素のアキュムレートは同一 warp 内の同一 `mma.sync` 系列
+//! （kstep 順）のままであり、B-1（#492）時点と bit 一致の出力になる
+//! （parity 非後退契約は `tests/parity_nonregression.rs` が機械検査）。
+//!
+//! B-3（#494・GEMM 性能改善ツリー #479 → Phase 2 親 #490）は上記の
+//! スレッド数減少を回復させるため、warp あたりのレジスタブロッキング
+//! （`MMA_WARP_TILES_M`/`MMA_WARP_TILES_N`）自体は変えず、ブロックタイル
+//! （`MMA_BM`/`MMA_BN`）を `32x64` から `64x128` へ拡大した（warp 構成
+//! `MMA_WARPS_M x MMA_WARPS_N` = `2x8` = 16 warp = 512 スレッド。B-1 時点
+//! の 512 スレッドへ回復）。共有メモリ使用量は 18432B（18KiB）から
+//! 36864B（36KiB）へ増えるが per-block 48KiB 上限に対し余裕を残す。
+//! `MMA_BK=32` は不変のため、K タイル・kstep 単位のアキュムレート順序は
+//! BM/BN の値に依存せず B-1/B-2 時点と bit 一致の出力を維持する（parity
+//! 非後退契約は変更不要。候補算出の詳細・SMEM/レジスタ予算・段階的計測
+//! 手順は `docs/perf/cuda-gemm-mma-block-tile.md` を参照。sm_121（DGX
+//! Spark GB10）実機属性は未実測のため候補判断は全 compute capability
+//! 共通の保証値ベースであり、実機での再確認は #502 へ引き継ぐ）。
+//!
+//! ldmatrix 先読みダブルバッファ・cp.async issue interleaving・XOR
+//! swizzle は引き続き後続（知見は `docs/cuda-tensor-core-knowledge.md`
+//! 〈#65・TASK-11.1f〉に集約済み。#495〜#496 のスコープとして引き継ぐ）。
 //!
 //! XOR swizzle（実装計画「段階 3」）は不採用とする。索引演算が最も
 //! 複雑でありながらコンパイル未検証環境では誤りを検出できないため、
@@ -108,23 +147,46 @@ pub const MMA_M: u32 = 16;
 pub const MMA_N: u32 = 8;
 pub const MMA_K: u32 = 16;
 
-/// ブロックタイル（本ファイル冒頭コメント「タイル構成」参照。実装計画
-/// 3.2 節候補値からの意図的な縮小）。
-pub const MMA_BM: u32 = 32;
-pub const MMA_BN: u32 = 64;
+/// ブロックタイル（本ファイル冒頭コメント「タイル構成」参照。#494（B-3・
+/// GEMM 性能改善ツリー #479 → Phase 2 親 #490）で B-2（#493）後の
+/// `32x64` から `64x128` へ拡大した候補 B〈`docs/perf/cuda-gemm-mma-block-tile.md`
+/// §3 候補表〉。`MMA_BK=32` を維持しているため、アキュムレート順序
+/// （K タイル t 順 → kstep 順）は BM/BN の値に依存せず、B-1/B-2 時点と
+/// bit 一致の出力を保つ（`tests/parity_nonregression.rs` の parity 非後退
+/// 契約はこの論拠に基づき変更不要）。
+pub const MMA_BM: u32 = 64;
+pub const MMA_BN: u32 = 128;
 pub const MMA_BK: u32 = 32;
 
 /// `cp.async` multi-stage pipelining のステージ数。共有メモリ使用量
-/// `(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B * MMA_STAGES` = 18432B（18KiB）
+/// `(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B * MMA_STAGES` = 36864B（36KiB）
 /// で per-block 48KiB 上限に対し十分な余裕を持つ（本ファイル冒頭コメント
-/// 参照）。
+/// 参照。#494 のブロックタイル拡大後の値）。
 pub const MMA_STAGES: u32 = 3;
 
-/// 1 ブロックあたりの warp 構成（M 方向 2・N 方向 8 = 16 warp = 512 スレッド）。
-/// 1 warp が C の `MMA_M x MMA_N` タイル 1 個のみを担当する
-/// （本ファイル冒頭コメント「タイル構成」参照）。
-pub const MMA_WARPS_M: u32 = MMA_BM / MMA_M; // 2
-pub const MMA_WARPS_N: u32 = MMA_BN / MMA_N; // 8
+/// warp あたりのレジスタブロッキング係数（#493）。1 warp が C の
+/// `MMA_M x MMA_N` タイルを `MMA_WARP_TILES_M x MMA_WARP_TILES_N`（2x2）
+/// 個担当し、ロード済み A/B フラグメントを 4 通りの `mma.sync` で再利用
+/// する（本ファイル冒頭コメント「タイル構成」参照）。
+pub const MMA_WARP_TILES_M: u32 = 2;
+pub const MMA_WARP_TILES_N: u32 = 2;
+
+/// 1 warp が担当する C タイルの実寸（`MMA_M`/`MMA_N` を warp タイル数で
+/// 拡大したもの）。カーネルソース内 warp 座標計算（`row0_warp`/
+/// `col0_warp`）の単位になる。
+pub const MMA_WARP_M: u32 = MMA_M * MMA_WARP_TILES_M; // 32
+pub const MMA_WARP_N: u32 = MMA_N * MMA_WARP_TILES_N; // 16
+
+/// 1 ブロックあたりの warp 構成（M 方向 2・N 方向 8 = 16 warp = 512
+/// スレッド。#494 でブロックタイルを `32x64`→`64x128` へ拡大したことで
+/// warp タイル実寸（`MMA_WARP_M x MMA_WARP_N` = `32x16`）基準の再導出値が
+/// `MMA_WARPS_M=2`/`MMA_WARPS_N=8` になった。#493 が導入したブロックタイル
+/// 縮小構成（M 方向 1・N 方向 4 = 4 warp = 128 スレッド）からスレッド数を
+/// 4 倍（B-1 時点の 512 スレッド相当）へ回復させ、cp.async 協調ロードの
+/// 並列度低下（#493 冒頭コメント参照）を解消する（本ファイル冒頭コメント
+/// 「タイル構成」参照。実装計画候補表 B の採用）。
+pub const MMA_WARPS_M: u32 = MMA_BM / MMA_WARP_M; // 2
+pub const MMA_WARPS_N: u32 = MMA_BN / MMA_WARP_N; // 8
 
 /// ブロック内スレッド総数（32 スレッド/warp x warp 数）。
 pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
@@ -196,6 +258,16 @@ const _: () = assert!(
     MMA_BLOCK_THREADS <= 1024,
     "MMA_BLOCK_THREADS must not exceed CUDA's per-block thread limit (1024)"
 );
+// #493: warp タイル（`MMA_WARP_M x MMA_WARP_N`）がブロックタイル
+// （`MMA_BM`/`MMA_BN`）を割り切ることを検査する（`MMA_WARPS_M`/
+// `MMA_WARPS_N` の整数除算が余りを切り捨てて誤った warp グリッドを
+// 静かに生成しないための機械検査。本ファイル `MMA_WARPS_M`/
+// `MMA_WARPS_N` 定数直下のドキュメンテーションコメント参照）。
+const _: () = assert!(
+    MMA_BM.is_multiple_of(MMA_WARP_M) && MMA_BN.is_multiple_of(MMA_WARP_N),
+    "MMA_BM/MMA_BN must be exact multiples of MMA_WARP_M/MMA_WARP_N \
+     (warp register-blocking tile must evenly divide the block tile)"
+);
 // #492 で「ループ内固定即値＋ループ外 drain」構造へ整理したことにより、
 // カーネルソース内の wait_group はもはや `MMA_STAGES == 3` に依存しない
 // 段数一般形（`"n"(STAGES - 2)` の固定即値。本ファイル `MMA_STAGES` 定数
@@ -209,6 +281,19 @@ const _: () = assert!(
     "kernels_mma::MMA_F16 の cp.async パイプラインは MMA_STAGES >= 2 を \
      前提とする（カーネルソース側の `STAGES - 2` 計算が u32 で \
      アンダーフローしないため）"
+);
+// #494 受け入れ基準 3 項: CUTLASS `mma_base.h` の
+// `kWarpGemmIterations >= 2`（`static_assert`）相当の機械検査。
+// `MMA_K_STEPS_PER_STAGE`（= `BK / MMA_K`）が 1 だと 1 ステージあたりの
+// mma.sync 発行が 1 回のみになり、ldmatrix ロード直後に mma を 1 回しか
+// 発行しないため命令レイテンシを隠蔽できず、ソフトウェアパイプライン化の
+// 効果が実質失われる。候補表（`docs/perf/cuda-gemm-mma-block-tile.md`
+// §3）の全候補は `MMA_BK=32` を維持するため `MMA_K_STEPS_PER_STAGE=2` で
+// 本条件を満たす。
+const _: () = assert!(
+    MMA_K_STEPS_PER_STAGE >= 2,
+    "kernels_mma::MMA_F16 は CUTLASS mma_base.h の kWarpGemmIterations >= 2 \
+     相当（MMA_BK / MMA_K >= 2）を要求する（#494 受け入れ基準 3 項）"
 );
 
 /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM（f16 入出力・f32 アキュムレート）。
@@ -224,10 +309,12 @@ pub const MMA_F16: &str = r#"
 #define MMA_M 16
 #define MMA_N 8
 #define MMA_K 16
-#define BM 32
-#define BN 64
+#define BM 64
+#define BN 128
 #define BK 32
 #define WARPS_N 8
+#define WARP_TILES_M 2
+#define WARP_TILES_N 2
 #define STAGES 3
 
 // REQ-8: グローバル→共有メモリの 16 バイト単位コピー。src_size==16 で
@@ -263,17 +350,22 @@ extern "C" __global__ void gemm_mma_f16(
     int lane = tid % 32;
     int warp_row = warp_id / WARPS_N;
     int warp_col = warp_id % WARPS_N;
-    int row0_warp = block_row0 + warp_row * MMA_M;
-    int col0_warp = block_col0 + warp_col * MMA_N;
+    // #493: warp が担当する C タイルの原点。warp タイル実寸
+    // （MMA_M*WARP_TILES_M x MMA_N*WARP_TILES_N = 32x16）単位で配置する
+    // （本ファイル冒頭コメント「タイル構成」）。
+    int row0_warp = block_row0 + warp_row * (MMA_M * WARP_TILES_M);
+    int col0_warp = block_col0 + warp_col * (MMA_N * WARP_TILES_N);
 
     // mma.m16n8k16 のレーン→フラグメント要素対応（PTX ISA の標準
     // groupID/threadID_in_group 分解。本ファイル冒頭コメント「命令選定」）。
     int group_id = lane / 4;
     int tid_in_group = lane % 4;
 
-    // C アキュムレータ（f32 x4。1 warp = 1 mma タイルのみ担当のため
-    // 単一フラグメントで足りる。本ファイル冒頭コメント「タイル構成」）。
-    float d0 = 0.0f, d1 = 0.0f, d2 = 0.0f, d3 = 0.0f;
+    // #493: C アキュムレータ（f32 x4 を WARP_TILES_M x WARP_TILES_N 個。
+    // レジスタブロッキングにより 1 warp が 2x2 の mma タイルを担当する
+    // ため、mi/nj でインデックスされる出力タイルごとに独立したアキュム
+    // レータが要る。全ゼロ初期化。本ファイル冒頭コメント「タイル構成」）。
+    float d[WARP_TILES_M][WARP_TILES_N][4] = {};
 
     int num_k_tiles = (k > 0) ? (k - 1) / BK + 1 : 0;
 
@@ -363,59 +455,103 @@ extern "C" __global__ void gemm_mma_f16(
         __syncthreads();
 
         for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {
-            int a_row = warp_row * MMA_M;
             int a_col = kstep * MMA_K;
             int b_row = kstep * MMA_K;
-            int b_col = warp_col * MMA_N;
 
-            // A フラグメント（16x16）: ldmatrix.x4（4 個の 8x8 b16 サブ
-            // タイルを 1 命令でロード。本ファイル冒頭コメント「命令選定」）。
-            // ldmatrix.x4 はレーン群 0-7/8-15/16-23/24-31 の順で出力
-            // レジスタ a0/a1/a2/a3 を埋めるが、mma.m16n8k16 が要求する
-            // A フラグメントの象限順序は TL/BL/TR/BR（PTX ISA
-            // mma.m16n8k16 A フラグメントレイアウト）である。行を
-            // レーン群の下位ビット、列を上位ビットへ割り当てることで
-            // a0=TL, a1=BL, a2=TR, a3=BR の順を作る（PR #255 レビュー
-            // 指摘。逆に取ると a1/a2 に TR/BL が入れ替わって載り、
-            // K/M ハーフが入れ替わった不正な結果になる）。
-            int a_quad_row = (lane / 8) % 2; // 0,1,0,1 -> TL,BL,TR,BR の行
-            int a_quad_col = (lane / 8) / 2; // 0,0,1,1 -> TL,BL,TR,BR の列
-            int a_row_in_tile = lane % 8;
-            __half* a_addr = &as_tile[compute_stage]
-                                      [a_row + a_quad_row * 8 + a_row_in_tile]
-                                      [a_col + a_quad_col * 8];
-            unsigned a_smem = (unsigned)__cvta_generic_to_shared(a_addr);
-            unsigned a0, a1, a2, a3;
-            asm volatile(
-                "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
-                : "r"(a_smem)
-            );
+            // #493: A フラグメントを WARP_TILES_M 個（mi = 0..1、半開区間で
+            // 値は 0 と 1 の 2 個）先に
+            // ロードしてレジスタへ保持する。B フラグメント（nj）と合わせて
+            // 4 通りの mma.sync で再利用するレジスタブロッキング（CUTLASS
+            // の `MmaIterations` 2 重ループ・MLX の `MMATile` と同型。本
+            // ファイル冒頭コメント「タイル構成」）。ldmatrix.x4 1 発行が
+            // 16x16（TL/BL/TR/BR の 4 x 8x8）をまとめてロードする点は
+            // 単一タイル構成と同じで、mi ごとに独立した 16x16 領域を読む。
+            unsigned a_frag[WARP_TILES_M][4];
+#pragma unroll
+            for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+                int a_row = warp_row * (MMA_M * WARP_TILES_M) + mi * MMA_M;
 
-            // B フラグメント（16x8。k x n の row-major 格納から `.trans`
-            // ロードで mma の `.col` 要求配置へ変換。本ファイル冒頭
-            // コメント「命令選定」）。
-            int b_row_in_tile = lane % 8;
-            int b_quad = lane / 8; // 0..1 のみ使用（x2）
-            __half* b_addr = &bs_tile[compute_stage]
-                                      [b_row + (b_quad % 2) * 8 + b_row_in_tile]
-                                      [b_col];
-            unsigned b_smem = (unsigned)__cvta_generic_to_shared(b_addr);
-            unsigned b0, b1;
-            asm volatile(
-                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
-                : "=r"(b0), "=r"(b1)
-                : "r"(b_smem)
-            );
+                // A フラグメント（16x16）: ldmatrix.x4（4 個の 8x8 b16 サブ
+                // タイルを 1 命令でロード。本ファイル冒頭コメント「命令選定」）。
+                // ldmatrix.x4 はレーン群 0-7/8-15/16-23/24-31 の順で出力
+                // レジスタ a0/a1/a2/a3 を埋めるが、mma.m16n8k16 が要求する
+                // A フラグメントの象限順序は TL/BL/TR/BR（PTX ISA
+                // mma.m16n8k16 A フラグメントレイアウト）である。行を
+                // レーン群の下位ビット、列を上位ビットへ割り当てることで
+                // a0=TL, a1=BL, a2=TR, a3=BR の順を作る（PR #255 レビュー
+                // 指摘。逆に取ると a1/a2 に TR/BL が入れ替わって載り、
+                // K/M ハーフが入れ替わった不正な結果になる）。
+                int a_quad_row = (lane / 8) % 2; // 0,1,0,1 -> TL,BL,TR,BR の行
+                int a_quad_col = (lane / 8) / 2; // 0,0,1,1 -> TL,BL,TR,BR の列
+                int a_row_in_tile = lane % 8;
+                __half* a_addr = &as_tile[compute_stage]
+                                          [a_row + a_quad_row * 8 + a_row_in_tile]
+                                          [a_col + a_quad_col * 8];
+                unsigned a_smem = (unsigned)__cvta_generic_to_shared(a_addr);
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                    : "=r"(a_frag[mi][0]), "=r"(a_frag[mi][1]),
+                      "=r"(a_frag[mi][2]), "=r"(a_frag[mi][3])
+                    : "r"(a_smem)
+                );
+            }
 
-            asm volatile(
-                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-                "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-                : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
-                : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
-                  "r"(b0), "r"(b1),
-                  "f"(d0), "f"(d1), "f"(d2), "f"(d3)
-            );
+            // #493: B フラグメントを WARP_TILES_N 個（nj = 0..1、半開区間で
+            // 値は 0 と 1 の 2 個）先に
+            // ロードする（A と同じレジスタブロッキング方針。B 2 個を
+            // x4.trans 1 発行へ融合する余地は残るが、受け入れ基準の
+            // 「A 2 個・B 2 個を 4 通りで再利用」という最小差分に合わせ
+            // ここでは x2.trans を nj ごとに個別発行する。融合は B-3 以降の
+            // 最適化余地としてここに記録する）。
+            unsigned b_frag[WARP_TILES_N][2];
+#pragma unroll
+            for (int nj = 0; nj < WARP_TILES_N; ++nj) {
+                int b_col = warp_col * (MMA_N * WARP_TILES_N) + nj * MMA_N;
+
+                // B フラグメント（16x8。k x n の row-major 格納から `.trans`
+                // ロードで mma の `.col` 要求配置へ変換。本ファイル冒頭
+                // コメント「命令選定」）。
+                int b_row_in_tile = lane % 8;
+                int b_quad = lane / 8; // 0..1 のみ使用（x2）
+                __half* b_addr = &bs_tile[compute_stage]
+                                          [b_row + (b_quad % 2) * 8 + b_row_in_tile]
+                                          [b_col];
+                unsigned b_smem = (unsigned)__cvta_generic_to_shared(b_addr);
+                asm volatile(
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
+                    : "=r"(b_frag[nj][0]), "=r"(b_frag[nj][1])
+                    : "r"(b_smem)
+                );
+            }
+
+            // #493: mi x nj の 4 通りで mma.sync を発行し d[mi][nj] へ
+            // アキュムレートする。同一出力タイルあたりの ldmatrix 発行
+            // 回数は、単一タイル構成（1 warp = 16x8 タイル 1 個）の
+            // 4 発行（A x4 + B x2 を warp ごとに個別発行）から本構成
+            // （2x2 レジスタブロッキング）の 2 発行（A x4 + B x2 を
+            // 4 タイル分で共有）へ半減する（本ファイル冒頭コメント
+            // 「タイル構成」参照。#494 のブロックタイル拡大〈`32x64`→
+            // `64x128`〉は warp あたりの担当範囲・レジスタブロッキング
+            // 係数〈`WARP_TILES_M`/`WARP_TILES_N`〉自体には影響せず、
+            // ブロック全体の warp 数〈`MMA_WARPS_M`/`MMA_WARPS_N`〉のみを
+            // 変える）。
+#pragma unroll
+            for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+#pragma unroll
+                for (int nj = 0; nj < WARP_TILES_N; ++nj) {
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                        : "=f"(d[mi][nj][0]), "=f"(d[mi][nj][1]),
+                          "=f"(d[mi][nj][2]), "=f"(d[mi][nj][3])
+                        : "r"(a_frag[mi][0]), "r"(a_frag[mi][1]),
+                          "r"(a_frag[mi][2]), "r"(a_frag[mi][3]),
+                          "r"(b_frag[nj][0]), "r"(b_frag[nj][1]),
+                          "f"(d[mi][nj][0]), "f"(d[mi][nj][1]),
+                          "f"(d[mi][nj][2]), "f"(d[mi][nj][3])
+                    );
+                }
+            }
         }
 
         // #492: commit をループ末尾で無条件発行する（プロローグと同じ
@@ -446,16 +582,26 @@ extern "C" __global__ void gemm_mma_f16(
 
     // REQ-8: エピローグの guarded store。mma.m16n8k16 の C/D フラグメント
     // レーン対応（groupID/threadID_in_group。本ファイル冒頭コメント
-    // 「命令選定」）: d0/d1 は行 groupID、d2/d3 は行 groupID+8。
-    int r0 = row0_warp + group_id;
-    int r1 = row0_warp + group_id + 8;
-    int c0 = col0_warp + tid_in_group * 2;
-    int c1 = c0 + 1;
+    // 「命令選定」）: d0/d1 は行 groupID、d2/d3 は行 groupID+8。#493 で
+    // mi/nj の 2 重ループへ拡張し、warp が担当する WARP_TILES_M x
+    // WARP_TILES_N 個の出力タイルを順に書き戻す（各タイルの guarded 条件
+    // 式の形は単一タイル構成から変えていない。REQ-8 ソーステスト
+    // needle との互換のため）。
+#pragma unroll
+    for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+#pragma unroll
+        for (int nj = 0; nj < WARP_TILES_N; ++nj) {
+            int r0 = row0_warp + mi * MMA_M + group_id;
+            int r1 = row0_warp + mi * MMA_M + group_id + 8;
+            int c0 = col0_warp + nj * MMA_N + tid_in_group * 2;
+            int c1 = c0 + 1;
 
-    if (r0 < m && c0 < n) c[(size_t)r0 * n + c0] = __float2half(d0);
-    if (r0 < m && c1 < n) c[(size_t)r0 * n + c1] = __float2half(d1);
-    if (r1 < m && c0 < n) c[(size_t)r1 * n + c0] = __float2half(d2);
-    if (r1 < m && c1 < n) c[(size_t)r1 * n + c1] = __float2half(d3);
+            if (r0 < m && c0 < n) c[(size_t)r0 * n + c0] = __float2half(d[mi][nj][0]);
+            if (r0 < m && c1 < n) c[(size_t)r0 * n + c1] = __float2half(d[mi][nj][1]);
+            if (r1 < m && c0 < n) c[(size_t)r1 * n + c0] = __float2half(d[mi][nj][2]);
+            if (r1 < m && c1 < n) c[(size_t)r1 * n + c1] = __float2half(d[mi][nj][3]);
+        }
+    }
 }
 "#;
 
@@ -478,6 +624,8 @@ mod tests {
             ("BK", MMA_BK),
             ("STAGES", MMA_STAGES),
             ("WARPS_N", MMA_WARPS_N),
+            ("WARP_TILES_M", MMA_WARP_TILES_M),
+            ("WARP_TILES_N", MMA_WARP_TILES_N),
         ] {
             let expected = format!("#define {name} {value}");
             assert!(
@@ -532,11 +680,29 @@ mod tests {
     /// `MMA_BLOCK_THREADS` が CUDA の 1 ブロックあたり最大スレッド数
     /// （1024）を超えないことは本ファイル冒頭の `const _: () =
     /// assert!(...)` でコンパイル時に検査済み。本テストは
-    /// `MMA_WARPS_M`/`MMA_WARPS_N` からの導出式が崩れていないことのみ
-    /// 検査する。
+    /// `MMA_WARPS_M`/`MMA_WARPS_N` からの導出式が崩れていないことに加え、
+    /// #494 のブロックタイル拡大（`32x64`→`64x128`）で再導出された値
+    /// （16 warp = 512 スレッド。B-1 時点のスレッド数への回復）をロックする
+    /// （本ファイル `MMA_WARPS_M`/`MMA_WARPS_N` 定数直下のドキュメンテーション
+    /// コメント参照）。
     #[test]
     fn mma_block_threads_matches_warp_layout() {
         assert_eq!(MMA_BLOCK_THREADS, MMA_WARPS_M * MMA_WARPS_N * 32);
+        assert_eq!(MMA_WARPS_M, 2, "#494 再導出値: MMA_BM / MMA_WARP_M");
+        assert_eq!(MMA_WARPS_N, 8, "#494 再導出値: MMA_BN / MMA_WARP_N");
+        assert_eq!(MMA_BLOCK_THREADS, 512);
+    }
+
+    /// #494 受け入れ基準の回帰防止: ブロックタイル拡大後の静的共有メモリ
+    /// 使用量（`(64*32 + 32*128) * 2B * 3 stages` = 36864B）と
+    /// `kWarpGemmIterations` 相当条件（`MMA_K_STEPS_PER_STAGE >= 2`）を
+    /// ロックする。前者は本ファイル冒頭の `const _: () = assert!(...)`
+    /// （48KiB 上限検査）とは独立に、候補表（`docs/perf/cuda-gemm-mma-block-tile.md`
+    /// §3）が採用した候補 B の具体値そのものが崩れていないことを検査する。
+    #[test]
+    fn mma_shared_mem_and_k_steps_match_block_tile_expansion() {
+        assert_eq!(MMA_SHARED_MEM_BYTES, 36_864);
+        assert_eq!(MMA_K_STEPS_PER_STAGE, 2);
     }
 
     /// cp.async 16 バイト整列制約の前提（`BK`/`BN` が 8 の倍数）を検査する
@@ -701,6 +867,61 @@ mod tests {
             MMA_F16.contains("int a_quad_row = (lane / 8) % 2;")
                 && MMA_F16.contains("int a_quad_col = (lane / 8) / 2;"),
             "MMA_F16 の A フラグメント象限順序（TL/BL/TR/BR）が見つかりません"
+        );
+    }
+
+    /// #493 受け入れ基準（回帰防止）: warp あたり 2x2 レジスタブロッキング
+    /// 構造（アキュムレータ配列・A/B フラグメント配列・mi/nj 2 重ループの
+    /// mma.sync 発行）がソース文字列から失われていないことをロックする。
+    #[test]
+    fn mma_f16_source_uses_2x2_register_blocking_structure() {
+        for needle in [
+            "float d[WARP_TILES_M][WARP_TILES_N][4] = {};",
+            "unsigned a_frag[WARP_TILES_M][4];",
+            "unsigned b_frag[WARP_TILES_N][2];",
+            "for (int mi = 0; mi < WARP_TILES_M; ++mi) {",
+            "for (int nj = 0; nj < WARP_TILES_N; ++nj) {",
+        ] {
+            assert!(
+                MMA_F16.contains(needle),
+                "MMA_F16 に #493 の 2x2 レジスタブロッキング構造 `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// #493 受け入れ基準: `mma.sync` 命令の発行箇所（アセンブリ文字列
+    /// リテラル）が mi/nj 2 重ループ内の 1 箇所のみであること（kstep
+    /// ループ内で 4 回実行はされるが、ソース上の発行箇所自体は 1 箇所に
+    /// 集約されている＝レジスタブロッキングがコピペではなくループ化で
+    /// 実装されていることを検査する）。
+    #[test]
+    fn mma_f16_source_issues_mma_sync_from_single_loop_site() {
+        let count = MMA_F16
+            .matches("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32")
+            .count();
+        assert_eq!(
+            count, 1,
+            "MMA_F16 中の mma.sync 発行箇所（アセンブリ文字列リテラル）が \
+             1 箇所ではありません（mi/nj 2 重ループへ集約されているはず）"
+        );
+    }
+
+    /// #493 受け入れ基準: エピローグの guarded store が mi/nj 2 重ループの
+    /// 内側にあり、4 条件の guarded 式自体は単一タイル構成から変わって
+    /// いないことをロックする（`mma_f16_source_retains_req8_boundary_guards`
+    /// の REQ-8 needle と合わせて、2x2 化後も境界チェックが希釈されて
+    /// いないことを検査する）。
+    #[test]
+    fn mma_f16_source_epilogue_store_is_inside_warp_tile_loop() {
+        let loop_pos = MMA_F16
+            .find("for (int mi = 0; mi < WARP_TILES_M; ++mi) {\n#pragma unroll\n        for (int nj = 0; nj < WARP_TILES_N; ++nj) {\n            int r0 = row0_warp")
+            .expect("MMA_F16 にエピローグの mi/nj 2 重ループが見つかりません");
+        let store_pos = MMA_F16
+            .find("c[(size_t)r0 * n + c0] = __float2half(d[mi][nj][0]);")
+            .expect("MMA_F16 にエピローグの guarded store（d[mi][nj]）が見つかりません");
+        assert!(
+            store_pos > loop_pos,
+            "MMA_F16 のエピローグ guarded store が mi/nj ループの外側にあります"
         );
     }
 }
