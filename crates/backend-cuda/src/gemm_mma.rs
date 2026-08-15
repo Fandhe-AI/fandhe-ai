@@ -116,15 +116,31 @@ impl CudaMmaGemm {
     /// の環境適応テストで確認済み。`kernels_mma.rs` 冒頭「検証状態」参照）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         // カーネル定数の内部整合性（静的共有メモリの 48KiB 上限・`MMA_BK`
-        // の `MMA_K` 整除性）は `kernels_mma.rs` の `const _: () =
-        // assert!(...)` でコンパイル時に検査済み（実機コンパイルできない
-        // 本セッションでも `cargo build` の時点で機械検出できる代替
-        // チェック。本ファイル冒頭コメント参照）。ここでは
-        // `cp.async.wait_group` 即値がカーネルソース中のハードコード
-        // `cp.async.wait_group 1;` と食い違わないことのみ追加確認する
-        // （`MMA_STAGES` を変更する場合に無音の競合状態バグを招く箇所の
-        // ため、`MMA_K_STEPS_PER_STAGE` とあわせて実利用しておく）。
-        debug_assert_eq!(kernels_mma::MMA_WAIT_GROUP_IMMEDIATE, 1);
+        // の `MMA_K` 整除性・`MMA_STAGES >= 2`）は `kernels_mma.rs` の
+        // `const _: () = assert!(...)` でコンパイル時に検査済み（実機
+        // コンパイルできない本セッションでも `cargo build` の時点で機械
+        // 検出できる代替チェック。本ファイル冒頭コメント参照）。
+        //
+        // #492 でカーネルソース側の wait_group を「ループ内固定即値
+        // （`"n"(STAGES - 2)`）＋ループ外 drain」構造へ整理したことにより、
+        // ここでの追加確認はカーネルソース中のハードコード数字即値
+        // （旧 `cp.async.wait_group 1;`）との対応検査ではなくなった
+        // （ループ内 wait はもはや `MMA_STAGES` 由来の数字即値を持たず、
+        // `"n"` 制約を通じてカーネル側が自身で `STAGES - 2` を計算する
+        // ため）。下記は `MMA_WAIT_GROUP_IMMEDIATE` 定数自体の定義式
+        // （`kernels_mma.rs` 側）との対応を明示するトートロジーだが、
+        // `MMA_WAIT_GROUP_IMMEDIATE` を実利用する箇所として維持する
+        // （dead-code 化を避ける。値が定数のため `debug_assert!` ではなく
+        // `debug_assert_eq!` を使う。`assert!` 版は clippy
+        // `assertions_on_constants` に抵触する）。段数非依存になった今でも
+        // `MMA_K_STEPS_PER_STAGE` はカーネル内
+        // `for (int kstep = 0; kstep < BK / MMA_K; ++kstep)` に対応する
+        // Rust 側唯一の真実源であり続けるため、引き続き実利用しておく
+        // （`kernels_mma.rs` 冒頭ドキュメントコメント参照）。
+        debug_assert_eq!(
+            kernels_mma::MMA_WAIT_GROUP_IMMEDIATE,
+            kernels_mma::MMA_STAGES - 2
+        );
         debug_assert_eq!(kernels_mma::MMA_K_STEPS_PER_STAGE, 2);
 
         let (major, minor) = device.compute_capability();
@@ -371,5 +387,139 @@ mod tests {
     #[test]
     fn validate_mma_alignment_rejects_misaligned_n_independent_of_noop_shape() {
         assert!(validate_mma_alignment(7, 0).is_err());
+    }
+
+    /// `#define STAGES <kernels_mma::MMA_STAGES>` 行のみを `stages` へ
+    /// 書き換えたソースを NVRTC コンパイル・実行する（#492 §5-5 の
+    /// 実機必須テスト専用ヘルパー。`kernels_mma.rs::tests::
+    /// mma_f16_source_with_stages` と同じ置換方針だが、こちらは
+    /// NVRTC コンパイル・カーネル起動まで踏み込む点が異なる）。
+    ///
+    /// `CudaMmaGemm::new`/`run_f16` を再利用しない理由: それらは常に
+    /// `kernels_mma::MMA_F16`（`STAGES=3` 固定の文字列）をコンパイルする
+    /// ため、段数を差し替えた変種を実行するには本関数のように NVRTC
+    /// コンパイル・モジュールロード・起動を直接組み立てる必要がある。
+    /// 形状検証（`validate_gemm_dims`・[`validate_mma_alignment`]・
+    /// [`validate_mma_grid_bounds`]）・グリッド構築（[`mma_launch_config`]）・
+    /// SAFETY 根拠は `launch_f16` と同一（段数はブロックタイル形状・
+    /// grid/block 次元に影響しないため）。
+    fn run_f16_with_stages(
+        device: &CudaDevice,
+        stages: u32,
+        a: &[f16],
+        b: &[f16],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f16>, CudaError> {
+        let from = format!("#define STAGES {}\n", kernels_mma::MMA_STAGES);
+        let to = format!("#define STAGES {stages}\n");
+        assert_eq!(
+            kernels_mma::MMA_F16.matches(&from).count(),
+            1,
+            "kernels_mma::MMA_F16 中の `{from:?}` の出現数が 1 ではありません \
+             （run_f16_with_stages の前提が崩れています）"
+        );
+        let src = kernels_mma::MMA_F16.replacen(&from, &to, 1);
+
+        let ptx = compile_ptx(&src, device.arch())
+            .expect("stage-swapped MMA_F16 source must compile via NVRTC on real hardware");
+        let func = device
+            .context()
+            .load_module(ptx)
+            .expect("stage-swapped module load must succeed")
+            .load_function("gemm_mma_f16")
+            .expect("gemm_mma_f16 must be present in the stage-swapped module");
+
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_mma_alignment(n, k)?;
+        validate_mma_grid_bounds(m)?;
+
+        let stream = device.stream();
+        let a_dev = stream.clone_htod(a)?;
+        let b_dev = stream.clone_htod(b)?;
+        let mut c_dev = stream.alloc_zeros::<f16>((m as usize) * (n as usize))?;
+
+        let cfg = mma_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `launch_f16` と同一の引数構成（a_dev/b_dev/c_dev + m/n/k）
+        // であり、段数の違いはカーネル内部の共有メモリ・パイプライン深さ
+        // のみに影響し、引数の型・個数・対応関係は変わらない。REQ-8 の
+        // 手動境界チェックも段数非依存（本ファイル冒頭コメント・
+        // `kernels_mma.rs` 参照）。
+        unsafe {
+            stream
+                .launch_builder(&func)
+                .arg(&a_dev)
+                .arg(&b_dev)
+                .arg(&mut c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        stream.synchronize()?;
+        Ok(stream.clone_dtoh(&c_dev)?)
+    }
+
+    /// #492 受け入れ基準（段数可変化）の実機検証: `stages ∈ {2, 3, 4}` の
+    /// 各カーネル変種が、小形状・タイル端形状・大形状の全てで**ビット
+    /// 一致**の出力を返すことを確認する。段数（パイプライン深さ）は
+    /// cp.async の同期タイミングのみを変え、mma/ldmatrix の実行順序・
+    /// アキュムレート順序は変えないため（本ファイル
+    /// `kernels_mma::MMA_WAIT_GROUP_IMMEDIATE` ドキュメンテーションコメント
+    /// 「正しさ」参照）、tolerance を使わない bit 等値で主張できる
+    /// （`.claude/rules/coding-rust.md` の「バックエンド間数値一致テストの
+    /// 許容誤差を単独で緩和しない」契約に抵触しない。段数間比較は
+    /// バックエンド間比較ではなく同一バックエンド内の実装詳細比較の
+    /// ため、tolerance の対象外）。
+    ///
+    /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
+    /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
+    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する
+    /// （`gemm.rs::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
+    /// と同じ実行方法）。
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn mma_f16_stage_count_does_not_change_bit_exact_output() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+
+        // (m, n, k): 小形状（16x8x16。単一 mma タイル）・タイル端形状
+        // （40x72x160。MMA_BM=32/MMA_BN=64/MMA_BK=32 の非整数倍）・
+        // 大形状（256x256x4096。B-0/#491 parity 非後退契約の mma_f16 行と
+        // 同一形状。docs/perf/cuda-parity-baseline.md 参照）を横断する
+        // （#492 実装計画 §5-5）。
+        let shapes: [(u32, u32, u32); 3] = [(16, 8, 16), (40, 72, 160), (256, 256, 4096)];
+        let seed: u64 = 9999;
+
+        for &(m, n, k) in &shapes {
+            let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+            let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+            let b: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+
+            let mut outputs: Vec<(u32, Vec<f16>)> = Vec::new();
+            for stages in [2u32, 3u32, 4u32] {
+                let c =
+                    run_f16_with_stages(&device, stages, &a, &b, m, n, k).unwrap_or_else(|err| {
+                        panic!(
+                            "stages={stages} run_f16_with_stages failed for shape \
+                             (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
+                outputs.push((stages, c));
+            }
+
+            let (base_stages, base_c) = &outputs[0];
+            for (stages, c) in &outputs[1..] {
+                assert_eq!(
+                    c, base_c,
+                    "shape (m={m}, n={n}, k={k}): stages={stages} の出力が \
+                     stages={base_stages} と bit 一致しません（段数変更が \
+                     mma/ldmatrix の実行順序に影響していないか確認すること）"
+                );
+            }
+        }
     }
 }
