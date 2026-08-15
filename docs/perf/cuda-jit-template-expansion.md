@@ -14,7 +14,7 @@
 
 ### 1.1 置換ベースのテンプレート展開（既存静的ソース = テンプレート本体兼デフォルトインスタンス）
 
-`kernels_mma.rs::MMA_F16`・`kernels_wmma_opt.rs::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT` の静的カーネルソース文字列自体をテンプレート本体として維持し、`render_mma_f16`／`render_wmma_tf32_opt`／`render_wmma_f16_opt`（いずれも `pub(crate)` ではなく `pub`。呼び出し元は `gemm_mma.rs`／`gemm_wmma.rs` 相当の同クレート内経路を想定）が [`CudaKernelDescriptor`](../../crates/backend-cuda/src/nvrtc.rs) 相当の検証済み構成型（`MmaKernelConfig`／`WmmaOptKernelConfig`）から `#define` 行を `format!` で組み立て直す。
+`kernels_mma.rs::MMA_F16`・`kernels_wmma_opt.rs::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT` の静的カーネルソース文字列自体をテンプレート本体として維持し、`render_mma_f16`／`render_wmma_tf32_opt`／`render_wmma_f16_opt` が [`CudaKernelDescriptor`](../../crates/backend-cuda/src/nvrtc.rs) 相当の検証済み構成型（`MmaKernelConfig`／`WmmaOptKernelConfig`）から `#define` 行を `format!` で組み立て直す。関数自体は `pub` だが、`mod kernels_mma;`／`mod kernels_wmma_opt;`（`lib.rs`）が非公開モジュールのため、クレート外は疎か `gemm_mma.rs`／`gemm_wmma.rs` を含む本 PR 時点の他モジュールからも呼ばれる本番経路は存在しない（`#[allow(dead_code)]` が付与されている理由。各 render 関数のドキュメンテーションコメント参照）。ディスパッチ・実行経路への結線は C-7（#519）のスコープであり、本タスクは生成 API を提供するのみに留める（§2 最終段落と同じ論拠）。
 
 実装計画（Plan フェーズ）は新規モジュール `kernel_template.rs` に置換エンジンを切り出す設計を想定していたが、実装は各カーネルファイル（`kernels_mma.rs`・`kernels_wmma_opt.rs`）内に render 関数を直接持つ構成へ収束した。**これは意図的な位置の乖離であり、置換対象のテンプレート本体・タイル定数・コンパイル時 `const _: () = assert!(...)` 契約検査と同一ファイル内に render 関数を置くことで、テンプレート文字列と展開ロジックの乖離（`#define` 行の文言変更に render 側が追従し忘れる回帰）を型・視認性の両面で抑える判断による**。置換対象出現数の検証・境界チェック needle 検査は当初計画どおり保持している（§4）。
 
