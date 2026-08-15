@@ -30,30 +30,34 @@
 //! - 丸め規則の適用・段階的下限表の合否判定は #152／#153（TASK-8.2）
 //! - 下限値の確定・REQ-8 表への反映は #158（TASK-8.3d・人間判断）
 //! - CUDA 最適化後下限の再実測は #157、Metal f16 実測は #156
-//! - 本ファイルは `crates/bench-harness/src/` を変更しない（#152／#153 との並行編集
-//!   衝突回避。`.claude/rules/delegation-impl.md`）
+//! - ワークロード形状定数・決定的シードは #589（Phase G-4）で
+//!   [`bench_harness::transformer_workload`] へ単一真実源化済み（挙動不変。本ファイルは
+//!   その定数を参照するのみで、計測ロジック・ベンチ名・`#[ignore]` 分離は変更しない）
 
 use std::hint::black_box;
 
 use backend_cpu::CpuBackendOps;
 use bench_harness::rng::Xorshift64Star;
+use bench_harness::transformer_workload::baseline_spec;
 use bench_harness::{BenchError, BenchReport, MeasurementConfig, run};
 use onnx_interop::ops::{
     LayerNormAttrs, add, erf, layer_normalization, matmul, mul, reshape, softmax, transpose,
 };
 use tensor_core::{BackendOps, Tensor};
 
-/// ワークロード形状（PoC-8 定義。モジュール冒頭コメント参照）。
-const D_MODEL: usize = 512;
-const N_HEADS: usize = 8;
-const D_FF: usize = 2048;
-const BATCH: usize = 8;
-const SEQ_LEN: usize = 128;
+/// ワークロード形状（PoC-8 定義。単一真実源は [`bench_harness::transformer_workload::baseline_spec`]。
+/// 本ファイルはローカル `const` へ束縛して既存コードの参照箇所を変えずに済ませる
+/// （#589 での単一真実源化に伴う挙動不変のリファクタリング）。
+const D_MODEL: usize = baseline_spec().d_model;
+const N_HEADS: usize = baseline_spec().n_heads;
+const D_FF: usize = baseline_spec().d_ff;
+const BATCH: usize = baseline_spec().batch;
+const SEQ_LEN: usize = baseline_spec().seq_len;
 const HEAD_DIM: usize = D_MODEL / N_HEADS;
 
 /// 決定的シード（REQ-8「決定的シードを用いること」）。入力・重み生成の双方に使う。
-/// イシュー番号を値に含め、他計測（例: `determinism.rs` の `2026`）との衝突を避ける。
-const SEED: u64 = 155_083;
+/// 単一真実源は [`bench_harness::transformer_workload::SEED`]（#589）。
+const SEED: u64 = bench_harness::transformer_workload::SEED;
 
 /// `[shape]` の要素数を持つテンソルを決定的 RNG から生成する。
 ///
