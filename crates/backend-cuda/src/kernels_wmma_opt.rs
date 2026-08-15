@@ -461,6 +461,7 @@ impl CompiledWmmaTf32OptKernel {
         crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         crate::gemm::validate_output_len(c_dev.len(), m, n)?;
         self.validate_grid_bounds(m)?;
+        self.validate_k_tile_bound(k)?;
 
         let launch_config = self.cfg.launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
@@ -513,6 +514,27 @@ impl CompiledWmmaTf32OptKernel {
             });
         }
         Ok(())
+    }
+
+    /// K タイル反復のインデックス算術（カーネル内 `t * WMMA_TF32_OPT_K_TILE
+    /// + lc` の `int` 算術。`t` はタイル番号〈最大 `num_k_tiles - 1`〉、
+    /// `lc` はタイル内オフセット〈最大 `k_tile - 1`〉）がオーバーフロー
+    /// しないことを検証する（codex-review 指摘・PR #643 再レビュー。
+    /// `gemm.rs::validate_wmma_tf32_opt_k_bound` と同型だが、こちらは
+    /// `kernels_wmma_opt::WMMA_TF32_OPT_K_TILE` 固定ではなく本
+    /// `cfg.k_tile`〈テンプレート展開元のタイル値。イシュー #516 で
+    /// `k_tile` が可変になったため一般化が必須〉で計算する）。
+    ///
+    /// 実際にカーネルが計算しうる最大インデックスは `ceil(k / k_tile) *
+    /// k_tile - 1`（`k == 0` のときは計算自体が発生しないため 0）であり、
+    /// これが `i32::MAX` を超えると当該算術が i32 の範囲でオーバーフローしうる
+    /// （符号付きオーバーフロー後に境界ガード式 `gk < DIM_K` が誤って
+    /// 成立し REQ-8 の境界チェックを迂回しうるため P0）。
+    /// `validate_wmma_tf32_opt_config` は `k_tile` が 8 の倍数であること
+    /// 等は検査するが、`k` との組合せによる算術オーバーフローは起動時の
+    /// `k` に依存するためここで検査する。
+    fn validate_k_tile_bound(&self, k: u32) -> Result<(), CudaError> {
+        validate_wmma_tf32_opt_k_tile_bound(k, self.cfg.k_tile)
     }
 }
 
@@ -666,6 +688,42 @@ fn validate_wmma_tf32_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaEr
         }
     }
 
+    Ok(())
+}
+
+/// [`CompiledWmmaTf32OptKernel::launch_tf32`] の起動前検査の一部として
+/// 呼ばれる、K タイル反復のインデックス算術（カーネル内 `t * k_tile + lc`
+/// の `int` 算術。`t` はタイル番号〈最大 `num_k_tiles - 1`〉、`lc` は
+/// タイル内オフセット〈最大 `k_tile - 1`〉）が i32 の範囲でオーバーフロー
+/// しない純粋関数（`self` を要求しないため device 実機なしで単体テスト
+/// 可能。codex-review 指摘・PR #643 再レビュー）。
+///
+/// `gemm.rs::validate_wmma_tf32_opt_k_bound` と同型だが、こちらは
+/// `kernels_wmma_opt::WMMA_TF32_OPT_K_TILE` 固定ではなく引数 `k_tile`
+/// 〈テンプレート展開元のタイル値。イシュー #516 で `k_tile` が可変に
+/// なったため一般化が必須〉で計算する。実際にカーネルが計算しうる最大
+/// インデックスは `ceil(k / k_tile) * k_tile - 1`（`k == 0` のときは
+/// 計算自体が発生しないため 0）であり、これが `i32::MAX` を超えると
+/// 当該算術が i32 の範囲でオーバーフローしうる（符号付きオーバーフロー
+/// 後に境界ガード式 `gk < DIM_K` が誤って成立し REQ-8 の境界チェックを
+/// 迂回しうるため P0）。`validate_wmma_tf32_opt_config` は `k_tile` が
+/// 8 の倍数であること等は検査するが、`k` との組合せによる算術オーバー
+/// フローは起動時の `k` に依存するためここで検査する。
+fn validate_wmma_tf32_opt_k_tile_bound(k: u32, k_tile: u32) -> Result<(), CudaError> {
+    let tile = k_tile as u64;
+    let max_computed_index = if k == 0 {
+        0
+    } else {
+        (k as u64).div_ceil(tile) * tile - 1
+    };
+    if max_computed_index > i32::MAX as u64 {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "k tile-index arithmetic for WMMA TF32 opt kernel would overflow i32: k={k}, \
+                 max_computed_index={max_computed_index}, k_tile={k_tile}"
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -1649,5 +1707,43 @@ mod tests {
                 Err(e) => panic!("既定構成カーネルソースの NVRTC コンパイルに失敗しました: {e}"),
             }
         }
+    }
+
+    /// [`validate_wmma_tf32_opt_k_tile_bound`] が通常サイズの `k`/`k_tile`
+    /// を受理することを確認する（回帰防止の基本ケース）。
+    #[test]
+    fn validate_wmma_tf32_opt_k_tile_bound_accepts_ordinary_k() {
+        assert!(validate_wmma_tf32_opt_k_tile_bound(4096, WMMA_TF32_OPT_K_TILE).is_ok());
+        assert!(validate_wmma_tf32_opt_k_tile_bound(0, WMMA_TF32_OPT_K_TILE).is_ok());
+    }
+
+    /// codex-review 指摘（PR #643 再レビュー）の再現ケース: 既定
+    /// （16）と異なる非既定 `k_tile`（例: 24。8 の倍数だが既定値ではない）
+    /// と、最終タイルの `t * k_tile + lc` が `i32::MAX` を超える `k` の
+    /// 組合せを `InvalidShape` として fail-closed に拒否することを検証
+    /// する。
+    #[test]
+    fn validate_wmma_tf32_opt_k_tile_bound_rejects_i32_overflow_for_non_default_k_tile() {
+        let k_tile: u32 = 24; // 8 の倍数だが既定 WMMA_TF32_OPT_K_TILE(16) とは異なる
+        let k = i32::MAX as u32;
+        let tile = k_tile as u64;
+        let expected_max_index = (k as u64).div_ceil(tile) * tile - 1;
+        assert!(
+            expected_max_index > i32::MAX as u64,
+            "テスト前提が崩れています: expected_max_index={expected_max_index} は i32::MAX 以下です"
+        );
+
+        let result = validate_wmma_tf32_opt_k_tile_bound(k, k_tile);
+        assert!(
+            matches!(result, Err(CudaError::InvalidShape { .. })),
+            "i32 オーバーフローが起こりうる k/k_tile の組合せが拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// `k == 0` は算術自体が発生しない no-op 形状のため、`k_tile` の値に
+    /// 関わらず常に受理されることを確認する（境界条件）。
+    #[test]
+    fn validate_wmma_tf32_opt_k_tile_bound_accepts_zero_k_regardless_of_tile() {
+        assert!(validate_wmma_tf32_opt_k_tile_bound(0, u32::MAX).is_ok());
     }
 }

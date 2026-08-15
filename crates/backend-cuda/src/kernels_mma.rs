@@ -475,6 +475,42 @@ fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
     Ok(())
 }
 
+/// [`CompiledMmaKernel::launch_f16`] の起動前検査の一部として呼ばれる、
+/// K タイル反復のインデックス算術（カーネル内 `LOAD_A_STAGE`/
+/// `LOAD_B_STAGE` マクロが計算する `s * bk + col0`。`s` はステージ番号
+/// 〈最大 `num_k_tiles - 1`〉、`col0` はタイル内オフセット〈最大
+/// `bk - 1`〉）が `int`（i32）算術でオーバーフローしないことを検証する
+/// 純粋関数（`self` を要求しないため device 実機なしで単体テスト可能。
+/// codex-review 指摘・PR #643 再レビュー）。
+///
+/// `gemm.rs::validate_wmma_tf32_opt_k_bound` と同型だが、こちらは
+/// `kernels_mma::MMA_BK` 固定ではなく引数 `bk`〈テンプレート展開元の
+/// タイル値。イシュー #516 で `bk` が可変になったため一般化が必須〉で
+/// 計算する。実際にカーネルが計算しうる最大インデックスは `ceil(k / bk) *
+/// bk - 1`（`k == 0` のときは計算自体が発生しないため 0）であり、これが
+/// `i32::MAX` を超えると当該算術が i32 の範囲でオーバーフローしうる
+/// （符号付きオーバーフロー後に境界ガード式 `gk < DIM_K` が誤って成立し
+/// REQ-8 の境界チェックを迂回しうるため P0）。`validate_mma_kernel_config`
+/// は `bk` が 8/`MMA_K` の倍数であること等は検査するが、`k` との組合せに
+/// よる算術オーバーフローは起動時の `k` に依存するためここで検査する。
+fn validate_mma_k_tile_bound(k: u32, bk: u32) -> Result<(), CudaError> {
+    let tile = bk as u64;
+    let max_computed_index = if k == 0 {
+        0
+    } else {
+        (k as u64).div_ceil(tile) * tile - 1
+    };
+    if max_computed_index > i32::MAX as u64 {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "k tile-index arithmetic for mma.sync kernel would overflow i32: k={k}, \
+                 max_computed_index={max_computed_index}, bk={bk}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// `#define {macro_name} <param_name または static 値>` を 1 行生成する。
 fn render_dim_define(macro_name: &str, param_name: &str, spec: DimSpec) -> String {
     match spec {
@@ -645,6 +681,7 @@ impl CompiledMmaKernel {
         crate::gemm::validate_output_len(c_dev.len(), m, n)?;
         crate::gemm_mma::validate_mma_alignment(n, k)?;
         self.validate_grid_bounds(m)?;
+        self.validate_k_tile_bound(k)?;
 
         let launch_config = self.cfg.launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
@@ -694,6 +731,26 @@ impl CompiledMmaKernel {
             });
         }
         Ok(())
+    }
+
+    /// K タイル反復のインデックス算術（カーネル内 `LOAD_A_STAGE`/
+    /// `LOAD_B_STAGE` マクロが計算する `s * BK + col0`。`s` はステージ番号
+    /// 〈最大 `num_k_tiles - 1`〉、`col0` はタイル内オフセット〈最大
+    /// `BK - 1`〉）が `int`（i32）算術でオーバーフローしないことを検証する
+    /// （codex-review 指摘・PR #643 再レビュー。`gemm.rs::
+    /// validate_wmma_tf32_opt_k_bound` と同型だが、こちらは
+    /// `kernels_mma::MMA_BK` 固定ではなく本 `cfg.bk`〈テンプレート展開元の
+    /// タイル値。イシュー #516 で `bk` が可変になったため一般化が必須〉で
+    /// 計算する）。実際にカーネルが計算しうる最大インデックスは
+    /// `ceil(k / bk) * bk - 1`（`k == 0` のときは計算自体が発生しないため
+    /// 0）であり、これが `i32::MAX` を超えると当該算術が i32 の範囲で
+    /// オーバーフローしうる（符号付きオーバーフロー後に境界ガード式
+    /// `gk < DIM_K` が誤って成立し REQ-8 の境界チェックを迂回しうるため
+    /// P0）。`validate_mma_kernel_config` は `bk` が 8/`MMA_K` の倍数
+    /// であること等は検査するが、`k` との組合せによる算術オーバーフローは
+    /// 起動時の `k` に依存するためここで検査する。
+    fn validate_k_tile_bound(&self, k: u32) -> Result<(), CudaError> {
+        validate_mma_k_tile_bound(k, self.cfg.bk)
     }
 }
 
@@ -1434,5 +1491,46 @@ mod tests {
         // 別テストが必要になるため、本テストのスコープ外）。
         compile_ptx(specialized.source(), arch)
             .expect("特化構成カーネルソースの NVRTC コンパイルに失敗しました");
+    }
+
+    /// [`validate_mma_k_tile_bound`] が通常サイズの `k`/`bk` を受理する
+    /// ことを確認する（回帰防止の基本ケース）。
+    #[test]
+    fn validate_mma_k_tile_bound_accepts_ordinary_k() {
+        assert!(validate_mma_k_tile_bound(4096, MMA_BK).is_ok());
+        assert!(validate_mma_k_tile_bound(0, MMA_BK).is_ok());
+    }
+
+    /// codex-review 指摘（PR #643 再レビュー）の再現ケース: 既定より大きい
+    /// `bk`（16 の倍数だが `MMA_BK` とは異なる非既定値）と、最終タイルの
+    /// `s * bk + col0` が `i32::MAX` を超える `k` の組合せを `InvalidShape`
+    /// として fail-closed に拒否することを検証する。
+    #[test]
+    fn validate_mma_k_tile_bound_rejects_i32_overflow_for_non_default_bk() {
+        let bk: u32 = 48; // MMA_K(16) の倍数・8 の倍数だが既定 MMA_BK(32) とは異なる
+        // k = i32::MAX + 1 のとき ceil(k/bk)*bk - 1 は i32::MAX を超える。
+        let k = i32::MAX as u32; // u32 範囲内で確実に超過させるため i32::MAX を使う
+        // ceil(i32::MAX / 48) * 48 - 1 を手計算すると i32::MAX を超えることを
+        // 事前に確認済み（i32::MAX=2_147_483_647 は 48 の倍数でないため
+        // 切り上げ後の最大インデックスが i32::MAX を上回る）。
+        let tile = bk as u64;
+        let expected_max_index = (k as u64).div_ceil(tile) * tile - 1;
+        assert!(
+            expected_max_index > i32::MAX as u64,
+            "テスト前提が崩れています: expected_max_index={expected_max_index} は i32::MAX 以下です"
+        );
+
+        let result = validate_mma_k_tile_bound(k, bk);
+        assert!(
+            matches!(result, Err(CudaError::InvalidShape { .. })),
+            "i32 オーバーフローが起こりうる k/bk の組合せが拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// `k == 0` は算術自体が発生しない no-op 形状のため、`bk` の値に
+    /// 関わらず常に受理されることを確認する（境界条件）。
+    #[test]
+    fn validate_mma_k_tile_bound_accepts_zero_k_regardless_of_bk() {
+        assert!(validate_mma_k_tile_bound(0, u32::MAX).is_ok());
     }
 }
