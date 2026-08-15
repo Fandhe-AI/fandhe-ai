@@ -426,7 +426,8 @@ extern "C" __global__ void gemm_mma_f16(
             int a_col = kstep * MMA_K;
             int b_row = kstep * MMA_K;
 
-            // #493: A フラグメントを WARP_TILES_M 個（mi = 0..2）先に
+            // #493: A フラグメントを WARP_TILES_M 個（mi = 0..1、半開区間で
+            // 値は 0 と 1 の 2 個）先に
             // ロードしてレジスタへ保持する。B フラグメント（nj）と合わせて
             // 4 通りの mma.sync で再利用するレジスタブロッキング（CUTLASS
             // の `MmaIterations` 2 重ループ・MLX の `MMATile` と同型。本
@@ -463,7 +464,8 @@ extern "C" __global__ void gemm_mma_f16(
                 );
             }
 
-            // #493: B フラグメントを WARP_TILES_N 個（nj = 0..2）先に
+            // #493: B フラグメントを WARP_TILES_N 個（nj = 0..1、半開区間で
+            // 値は 0 と 1 の 2 個）先に
             // ロードする（A と同じレジスタブロッキング方針。B 2 個を
             // x4.trans 1 発行へ融合する余地は残るが、受け入れ基準の
             // 「A 2 個・B 2 個を 4 通りで再利用」という最小差分に合わせ
