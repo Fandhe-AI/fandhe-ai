@@ -18,10 +18,12 @@
 
 `RUST_AI_CUDA_CACHE_DIR`・`XDG_CACHE_HOME`・`HOME` はいずれも外部プロセス環境変数由来の信頼できない入力として扱い、以下を満たさない値は三者とも同様に拒否する（`.claude/rules/security.md` A03 節）。
 
-- 空文字列でないこと
+- 空文字列でないこと（`Some("")` のように変数自体は設定されているが値が空、というケースも「未設定」扱いでフォールバックせず明示的に拒否する。PR #659 codex-review P0 指摘: 旧実装は空文字列の `XDG_CACHE_HOME` を素通りさせ `HOME` へフォールバックしていた）
 - 絶対パスであること（相対パスはリポジトリツリー内への意図しない書き込みを招きうるため拒否）
 
-さらに、キャッシュエントリパス（`cache_entry_path`）の組み立て結果は必ず解決済みルート配下（`starts_with(root)`）に収まることを保証する多層防御を持つ（第 1 層: `CudaKernelDescriptor::new` の構築時検証、第 2 層: `CudaKernelCacheKey::cache_entry_dir_name` 内の縦深防御検査、第 3 層: `cache_entry_path_in` のユニットテスト）。
+**上記 2 条件で保証できる範囲は限定的である**（PR #659 codex-review P0 指摘）。絶対パスであることは「解決結果がリポジトリツリー外である」ことを一切保証しない（例: `RUST_AI_CUDA_CACHE_DIR=/path/to/repository/cache` は上記検証を通過する）。リポジトリツリー外であることを実効的に強制するには、信頼済みのワークスペースルートに対して `canonicalize` 済みパスで containment 検証を行う必要があるが、これは実際にディレクトリを作成・オープンする時点（C-3・#509）で行うのが正しい実装点である。C-2（本文書・`resolve_cache_root`）時点では fs I/O を一切行わない純粋なパス組み立てのみであり、シンボリックリンクを考慮した検証は canonicalize 可能なパスの実在を前提とするため、C-2 の責務外として C-3 側に委譲する。
+
+さらに、キャッシュエントリパス（`cache_entry_path`）の組み立て結果は必ず解決済みルート配下（`starts_with(root)`）に収まることを保証する多層防御を持つ（第 1 層: `CudaKernelDescriptor::new` の構築時検証、第 2 層: `CudaKernelCacheKey::cache_entry_dir_name` 内の縦深防御検査、第 3 層: `cache_entry_path_in` のユニットテスト）。この多層防御は「エントリパスがルート配下に収まる」ことのみを保証し、「ルート自体がリポジトリツリー外にある」ことは保証しない（上記参照。C-3 のスコープ）。
 
 ## ディレクトリ命名規則（C-2・#506）
 

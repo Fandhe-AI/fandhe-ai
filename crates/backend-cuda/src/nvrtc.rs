@@ -423,11 +423,24 @@ pub(crate) const fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// 三者とも同様に `CudaError::CacheDirUnavailable` で拒否する（PR #659
 /// レビュー指摘。`override_dir` のみを検証し `xdg_cache_home`／`home` を
 /// 未検証のまま `Path::join` すると `XDG_CACHE_HOME=.` 等でフォールバック
-/// を迂回できたため三者を揃えた）。相対パスを許すとカレントディレクトリ
-/// （呼び出しコンテキストによってはリポジトリツリー内）配下にキャッシュが
-/// 作られ、「キャッシュルートはリポジトリツリー外」要件（runner workspace
-/// に成果物を残さない方針。`.claude/rules/security.md`）と矛盾するため
-/// fail-closed で拒否する。
+/// を迂回できたため三者を揃えた。空文字列は `Some("")` として渡ってきても
+/// 「未設定扱い」でフォールバックせず明示的に拒否する。PR #659 codex-review
+/// P0 指摘: 以前の実装は `!xdg.is_empty()` 相当のガードが `if let` の外に
+/// なく、空文字列の `XDG_CACHE_HOME` が `HOME` へ素通りしていた）。
+///
+/// **本検証が保証する範囲（意図的に限定的）**: ここで拒否するのは
+/// 「空文字列」と「相対パス」のみである。相対パスを許すとカレント
+/// ディレクトリ（呼び出しコンテキストによってはリポジトリツリー内）配下に
+/// 解決されてしまうため、それを避ける目的で絶対パスを要求する。**絶対パス
+/// であることは「リポジトリツリー外である」ことを何ら保証しない**
+/// （例: `RUST_AI_CUDA_CACHE_DIR=/path/to/repository/cache` は本検証を
+/// 通過する。PR #659 codex-review P0 指摘）。リポジトリツリー外であることの
+/// 実効的な強制は、信頼済みルートに対する `canonicalize` 済みパスでの
+/// containment 検証を、実際にディレクトリを作成・オープンする時点
+/// （C-3・#509。本モジュールはこの時点ではまだ fs I/O を一切行わない
+/// 純粋なパス組み立てのみを担う）で行うのが正しい実装点であり、本関数
+/// （C-2・パス組み立てのみ）の責務外として C-3 側へ委譲する
+/// （`docs/cuda-jit-cache-design.md` 検証条件節も参照）。
 fn resolve_cache_root(
     override_dir: Option<&OsStr>,
     xdg_cache_home: Option<&OsStr>,
@@ -448,9 +461,12 @@ fn resolve_cache_root(
         return Ok(path.to_path_buf());
     }
 
-    if let Some(xdg) = xdg_cache_home
-        && !xdg.is_empty()
-    {
+    if let Some(xdg) = xdg_cache_home {
+        if xdg.is_empty() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: "XDG_CACHE_HOME is set but empty".to_string(),
+            });
+        }
         let path = Path::new(xdg);
         if path.is_relative() {
             return Err(CudaError::CacheDirUnavailable {
@@ -460,9 +476,12 @@ fn resolve_cache_root(
         return Ok(path.join("rust-ai-library").join("cuda"));
     }
 
-    if let Some(home_dir) = home
-        && !home_dir.is_empty()
-    {
+    if let Some(home_dir) = home {
+        if home_dir.is_empty() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: "HOME is set but empty".to_string(),
+            });
+        }
         let path = Path::new(home_dir);
         if path.is_relative() {
             return Err(CudaError::CacheDirUnavailable {
@@ -1227,6 +1246,30 @@ mod tests {
     #[test]
     fn resolve_cache_root_rejects_relative_home() {
         let result = resolve_cache_root(None, None, Some(OsStr::new("relative/home")));
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（回帰テスト）: 空文字列の XDG_CACHE_HOME は「未設定」
+    // 扱いで HOME へフォールバックせず拒否する（PR #659 codex-review P0
+    // 指摘。旧実装は `if let Some(xdg) = xdg_cache_home && !xdg.is_empty()`
+    // というガード構造のため、`Some("")`（環境変数は設定済みだが値が空）が
+    // 分岐を素通りして有効な HOME があれば HOME 側の解決結果を返してしまう
+    // fail-closed 契約違反があった。`docs/cuda-jit-cache-design.md:19-22`
+    // の「三者とも空文字列を CacheDirUnavailable として拒否する」方針との
+    // 整合を検証する）。
+    #[test]
+    fn resolve_cache_root_rejects_empty_xdg_cache_home_even_with_valid_home() {
+        let result = resolve_cache_root(None, Some(OsStr::new("")), Some(OsStr::new("/home/user")));
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（回帰テスト）: 空文字列の HOME も同様に拒否する
+    // （override・XDG_CACHE_HOME 双方が未設定かつ HOME のみ空文字列で
+    // 設定されているケース。上記 XDG のケースと対称に fail-closed である
+    // ことを確認する。PR #659 codex-review P0 指摘）。
+    #[test]
+    fn resolve_cache_root_rejects_empty_home() {
+        let result = resolve_cache_root(None, None, Some(OsStr::new("")));
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
     }
 
