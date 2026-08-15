@@ -414,12 +414,16 @@ pub const fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// ため、本関数を純関数として切り出し公開ラッパー（[`resolve_cache_root`]）
 /// が実環境変数を読んで委譲する形にする。
 ///
-/// **安全側の検証**: `override_dir` が空文字列・相対パスの場合は
-/// `CudaError::CacheDirUnavailable` で拒否する。相対パスを許すと
-/// カレントディレクトリ（呼び出しコンテキストによってはリポジトリ
-/// ツリー内）配下にキャッシュが作られ、「キャッシュルートはリポジトリ
-/// ツリー外」要件（runner workspace に成果物を残さない方針。
-/// `.claude/rules/security.md`）と矛盾するため fail-closed で拒否する。
+/// **安全側の検証**: `override_dir`・`xdg_cache_home`・`home` はいずれも
+/// 外部環境変数由来の信頼できない入力であり、空文字列・相対パスの場合は
+/// 三者とも同様に `CudaError::CacheDirUnavailable` で拒否する（PR #659
+/// レビュー指摘。`override_dir` のみを検証し `xdg_cache_home`／`home` を
+/// 未検証のまま `Path::join` すると `XDG_CACHE_HOME=.` 等でフォールバック
+/// を迂回できたため三者を揃えた）。相対パスを許すとカレントディレクトリ
+/// （呼び出しコンテキストによってはリポジトリツリー内）配下にキャッシュが
+/// 作られ、「キャッシュルートはリポジトリツリー外」要件（runner workspace
+/// に成果物を残さない方針。`.claude/rules/security.md`）と矛盾するため
+/// fail-closed で拒否する。
 fn resolve_cache_root(
     override_dir: Option<&OsStr>,
     xdg_cache_home: Option<&OsStr>,
@@ -443,16 +447,25 @@ fn resolve_cache_root(
     if let Some(xdg) = xdg_cache_home
         && !xdg.is_empty()
     {
-        return Ok(Path::new(xdg).join("rust-ai-library").join("cuda"));
+        let path = Path::new(xdg);
+        if path.is_relative() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!("XDG_CACHE_HOME must be an absolute path, got {path:?}"),
+            });
+        }
+        return Ok(path.join("rust-ai-library").join("cuda"));
     }
 
     if let Some(home_dir) = home
         && !home_dir.is_empty()
     {
-        return Ok(Path::new(home_dir)
-            .join(".cache")
-            .join("rust-ai-library")
-            .join("cuda"));
+        let path = Path::new(home_dir);
+        if path.is_relative() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!("HOME must be an absolute path, got {path:?}"),
+            });
+        }
+        return Ok(path.join(".cache").join("rust-ai-library").join("cuda"));
     }
 
     Err(CudaError::CacheDirUnavailable {
@@ -1158,6 +1171,30 @@ mod tests {
             Some(OsStr::new("/home/user/.cache")),
             Some(OsStr::new("/home/user")),
         );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: 相対パスの XDG_CACHE_HOME は拒否する（PR #659 レビュー
+    // 指摘。`XDG_CACHE_HOME=.` のようにカレントディレクトリ（呼び出し
+    // コンテキストによってはリポジトリツリー内）を指す相対パスを未検証で
+    // `Path::join` すると、override 検証を回避してキャッシュがリポジトリ
+    // ツリー内へ落ちてしまうため、override と同じ fail-closed 検証を課す）。
+    #[test]
+    fn resolve_cache_root_rejects_relative_xdg_cache_home() {
+        let result = resolve_cache_root(
+            None,
+            Some(OsStr::new("relative/xdg/cache")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: 相対パスの HOME は拒否する（PR #659 レビュー指摘。
+    // `HOME=.` 等の相対パスフォールバックを未検証で許すと override・
+    // XDG_CACHE_HOME と同じくリポジトリツリー内へキャッシュが落ちうる）。
+    #[test]
+    fn resolve_cache_root_rejects_relative_home() {
+        let result = resolve_cache_root(None, None, Some(OsStr::new("relative/home")));
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
     }
 
