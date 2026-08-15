@@ -432,12 +432,16 @@ kernel void gemm_simdgroup_tiled(
                     simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)BK + (size_t)kk, BK);
                     for (uint ci = 0; ci < acc_cols; ci++) {
                         // 蛇行（serpentine）走査: 奇数行 r では列を逆順（acc_cols-1-ci）に
-                        // 辿り、行切替時（r → r+1）に直前で使った B タイル
-                        // （tile_b 上の列位置）付近を再訪することでレジスタ／
-                        // キャッシュ局所性を高める（MLX `tile_matmad`〈mma.h〉・
-                        // CUTLASS `mma_tensor_op.h` 同型。CUDA 側 #497 B-6 と同一技法。
-                        // #536）。acc[r][c_] ごとの累算オペランド列（K 方向の
-                        // 順序）は c_ の訪問順に依らず不変なので、結果はビット単位で
+                        // 辿る。a_tile は r ループ内で 1 回だけロードされ ci に
+                        // 依らず不変なため、走査順が影響するのは tile_b からの
+                        // `simdgroup_load` アドレス列（行切替時に直前で使った
+                        // 列位置付近を再訪する）のみである（MLX `tile_matmad`
+                        // 〈mma.h〉・CUTLASS `mma_tensor_op.h` 同型の技法。CUDA 側
+                        // #497 B-6 と同一。#536）。この tile_b アクセス局所性向上は
+                        // 期待効果であり、実測結果は `docs/perf/metal-gemm-serpentine-ab.md`
+                        // に記録する（未計測時点では性能上の主張を断定しない）。
+                        // acc[r][c_] ごとの累算オペランド列（K 方向の順序）は
+                        // c_ の訪問順に依らず不変なので、結果はビット単位で
                         // 従来の行優先走査と一致する。
                         uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
                         simdgroup_float8x8 b_tile;
