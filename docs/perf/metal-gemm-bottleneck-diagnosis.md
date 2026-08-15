@@ -101,11 +101,19 @@ cargo run -p backend-metal --example gemm_diagnosis --release -- \
     --gpu-core-count=40 --ideal-groups-multiplier=6
 ```
 
-出力形式（1 行 1 size。`size=<N> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>) actual_groups=<v>
-ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> wall_q1_ms=<v>
-wall_q3_ms=<v> tflops_lower_bound=<v> logical_load_gbs_lower_bound=<v>`）を size=512/1024/2048/4096
-で出力する。`wall_ms`（中央値）に加え `wall_q1_ms`・`wall_q3_ms`（`bench_harness::protocol::run` が
-返す `Measurement::{q1,q3}_secs`）を計測手順（§1「中央値/Q1/Q3」）どおり出力し、破棄しない
+出力形式は size ごとに 2 行（`phase=start`・`phase=result`）:
+
+- 開始マーカー: `size=<N> phase=start epoch_secs=<t>`（`wall_measurement` 呼び出し直前に出力）
+- 結果行: `size=<N> phase=result epoch_secs=<t> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>)
+  actual_groups=<v> ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v>
+  wall_q1_ms=<v> wall_q3_ms=<v> tflops_lower_bound=<v> logical_load_gbs_lower_bound=<v>`
+
+を size=512/1024/2048/4096 の 4 回（計 8 行）出力する。`epoch_secs`（UNIX epoch 秒。
+`gemm_diagnosis.rs::macos_impl::epoch_secs`）は下記 ioreg 継続サンプリングループが記録する
+epoch 秒と同じ単位で、両者を突き合わせることで size ごとの実行区間を特定できる（codex-review
+指摘。PR #649。以前はタイムスタンプ・size 別開始マーカーがなく対応付けができなかった）。
+`wall_ms`（中央値）に加え `wall_q1_ms`・`wall_q3_ms`（`bench_harness::protocol::run` が返す
+`Measurement::{q1,q3}_secs`）を計測手順（§1「中央値/Q1/Q3」）どおり出力し、破棄しない
 （codex-review 指摘。PR #649）。
 
 `ideal_groups` の算出（`idealGroups = gpu_core_count * ideal_groups_multiplier`）に用いる
@@ -124,18 +132,21 @@ GPU 使用率のサンプリング（ベンチ実行と並行して別ターミ�
 
 ```sh
 # macOS 標準 date（BSD date）はサブ秒指定子 %N 非対応（GNU coreutils 拡張のため）。
-# 秒単位のタイムスタンプで十分（0.5 秒間隔サンプリングの前後関係が分かればよい）
+# 秒単位のタイムスタンプで十分（0.5 秒間隔サンプリングの前後関係が分かればよい）。
+# UNIX epoch 秒（%s）で記録し、gemm_diagnosis.rs の stdout が出力する
+# `epoch_secs=<t>`（phase=start/phase=result。共通の時刻源）と直接比較できるようにする
+# （codex-review 指摘。PR #649）。
 while true; do
-    date +%H:%M:%S
+    date +%s
     ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
     sleep 0.5
 done | tee /tmp/gpu_utilization_$(date +%Y%m%d_%H%M%S).log
 ```
 
-`cargo run` 終了後に `Ctrl-C` でサンプリングを停止し、記録したログから size ごとの実行区間（stdout の
-`size=<N> ...` 行のタイムスタンプ、または実行順 size=512→1024→2048→4096 と経過時間の対応）に該当する
-「Device Utilization」値の最大値・中央値を §4.2 の「GPU 使用率（ioreg）」列へ記入する（単一の代表値では
-なくレンジ・代表値の両方を残す）。
+`cargo run` 終了後に `Ctrl-C` でサンプリングを停止し、記録したログの epoch 秒を、stdout の各 size の
+`size=<N> phase=start epoch_secs=<t>`（区間開始）〜同じ size の `phase=result epoch_secs=<t>`（区間終了）
+で挟まれた範囲と突き合わせ、その範囲に該当する「Device Utilization」値の最大値・中央値を §4.2 の
+「GPU 使用率（ioreg）」列へ記入する（単一の代表値ではなくレンジ・代表値の両方を残す）。
 
 計測衛生: AC 電源接続。他 GPU 負荷アプリ（ブラウザ動画・Xcode ビルド・ローカル LLM 等）は終了してから計測する
 （`docs/perf/metal-gemm-dynamic-tile.md`「計測環境」節と同方針）。

@@ -312,6 +312,20 @@ mod macos_impl {
     /// 同じ入力分布に揃える）。
     const SEED: u64 = 0xC0FFEE;
 
+    /// UNIX epoch 秒（サブ秒精度は不要。`docs/perf/metal-gemm-bottleneck-diagnosis.md`
+    /// §2 の GPU 使用率サンプリングループが `date +%s` で記録する epoch 秒と
+    /// 同じ単位に揃え、別ターミナルの ioreg ログと本 example の stdout を
+    /// size 別に対応付けられるようにする（codex-review 指摘。PR #649）。
+    /// システムクロックが UNIX epoch より前を返すことは実運用上あり得ないが、
+    /// 診断用の付随情報のため `duration_since` 失敗時も panic させず `0` に
+    /// フォールバックする。
+    fn epoch_secs() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+
     /// `m×n×k` の `dispatch_auto` を計測し [`Measurement`]（中央値・Q1・Q3
     /// 秒。`bench_harness::protocol::run` の出力）をそのまま返す
     /// （`gemm_bench.rs::measure_auto` と同型。呼び出しごとに A・B の
@@ -380,6 +394,13 @@ mod macos_impl {
         for size in [512usize, 1024, 2048, 4096] {
             let a: SizeAnalytics = analytics::analyze(size, profile);
 
+            // size 別開始マーカー（`epoch_secs`）。別ターミナルで並走させる
+            // ioreg 継続サンプリング（`docs/perf/metal-gemm-bottleneck-diagnosis.md`
+            // §2。同じく `date +%s` の epoch 秒でログを記録する）と付き合わせ、
+            // size ごとの実行区間を特定できるようにする（codex-review 指摘。
+            // PR #649）。
+            println!("size={size} phase=start epoch_secs={}", epoch_secs());
+
             // `measurement.{median,q1,q3}_secs` は A・B アップロード＋
             // カーネル実行＋C readback を含む end-to-end 壁時計時間
             // （モジュールドキュメント「転送時間分離を試みて撤回した経緯」
@@ -412,11 +433,12 @@ mod macos_impl {
                 (a.load_bytes_total + a.store_bytes_total) as f64 / wall / 1e9;
 
             println!(
-                "size={} tile={}x{}x{}({}x{}, staged={}) actual_groups={} ideal_groups={} \
-                 barriers_per_tg={} arithmetic_intensity={:.4} wall_ms={:.4} \
-                 wall_q1_ms={:.4} wall_q3_ms={:.4} tflops_lower_bound={:.4} \
-                 logical_load_gbs_lower_bound={:.4}",
+                "size={} phase=result epoch_secs={} tile={}x{}x{}({}x{}, staged={}) \
+                 actual_groups={} ideal_groups={} barriers_per_tg={} \
+                 arithmetic_intensity={:.4} wall_ms={:.4} wall_q1_ms={:.4} wall_q3_ms={:.4} \
+                 tflops_lower_bound={:.4} logical_load_gbs_lower_bound={:.4}",
                 a.size,
+                epoch_secs(),
                 a.tile.bm,
                 a.tile.bn,
                 a.tile.bk,
