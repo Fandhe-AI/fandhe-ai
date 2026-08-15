@@ -38,7 +38,7 @@ use std::hint::black_box;
 
 use backend_cpu::CpuBackendOps;
 use bench_harness::rng::Xorshift64Star;
-use bench_harness::transformer_workload::baseline_spec;
+use bench_harness::transformer_workload::{baseline_spec, report_name};
 use bench_harness::{BenchError, BenchReport, MeasurementConfig, run};
 use onnx_interop::ops::{
     LayerNormAttrs, add, erf, layer_normalization, matmul, mul, reshape, softmax, transpose,
@@ -369,9 +369,13 @@ fn transformer_block_forward_bench_cpu() {
     // コメント参照）のため、`workload` クロージャの戻り時点で計測対象処理は完了しており
     // 追加の `wait_idle()` 呼び出しは不要（`protocol::run` の前提を満たす）。
 
-    let report =
-        BenchReport::from_measurement("transformer-block-forward-cpu-blis", "cpu", &measurement)
-            .expect("BenchReport 構築に失敗しました");
+    // ベンチ名の単一真実源は [`bench_harness::transformer_workload::report_name`]
+    // （codex-review 指摘・PR #647: 従来 `"transformer-block-forward-cpu-blis"` を
+    // 直書きしており `BENCH_NAME_PREFIX` 変更が実測経路に反映されなかった。
+    // `report_name("cpu")` は CPU 経路が常に `gemm_blis` 系カーネルへディスパッチ
+    // する契約に基づき `"-blis"` サフィックスを含む値を返す）。
+    let report = BenchReport::from_measurement(report_name("cpu"), "cpu", &measurement)
+        .expect("BenchReport 構築に失敗しました");
     let json = report
         .to_json()
         .expect("BenchReport の JSON エンコードに失敗しました");

@@ -112,8 +112,24 @@ pub const BENCH_NAME_PREFIX: &str = "transformer-block-forward";
 ///
 /// GEMM 単体ベンチ（[`crate::threshold::floor_spec`] の判定対象）とは別系列のベンチ名空間である
 /// ことを明示するため、接頭辞を [`BENCH_NAME_PREFIX`] に統一する薄いヘルパー。
+///
+/// `"cpu"` バックエンドのみ `"-blis"` サフィックスを付与する。CPU 経路
+/// （[`crate::transformer_workload`] の実測が使う `CpuBackendOps`）は
+/// `gemm`・`gemm_bias_act` の両方とも常に `gemm_blis` 系カーネル
+/// （`gemm_blis_parallel`・`gemm_blis_bias_act_parallel`）へディスパッチする
+/// 契約（`crates/backend-cpu/src/ops.rs` 冒頭コメント）のため、他バックエンド
+/// 追加時に選択肢が増えうる汎用パラメータではなく、CPU バックエンドの実装
+/// 系列そのものを表す固定サフィックスとして扱う（codex-review 指摘・PR #647:
+/// 従来 `report_name("cpu")` の結果に `"-blis"` が欠落し、実測経路がハード
+/// コードの `"transformer-block-forward-cpu-blis"` を直書きしていた設計不整合
+/// の解消）。CUDA／Metal 側のカーネル実装が確定した際に同様の命名要否を
+/// 個別に判断する（PoC-v2-5 の cfg ベースバックエンド構成では実装が単一の
+/// ため、現時点で `cuda`／`metal` に対応する固定サフィックスは設けない）。
 pub fn report_name(backend: &str) -> String {
-    format!("{BENCH_NAME_PREFIX}-{backend}")
+    match backend {
+        "cpu" => format!("{BENCH_NAME_PREFIX}-cpu-blis"),
+        _ => format!("{BENCH_NAME_PREFIX}-{backend}"),
+    }
 }
 
 #[cfg(test)]
@@ -174,7 +190,7 @@ mod tests {
 
     #[test]
     fn report_name_uses_shared_prefix() {
-        assert_eq!(report_name("cpu"), "transformer-block-forward-cpu");
+        assert_eq!(report_name("cpu"), "transformer-block-forward-cpu-blis");
         assert_eq!(report_name("cuda"), "transformer-block-forward-cuda");
     }
 }
