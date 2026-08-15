@@ -196,19 +196,41 @@ fn bytes_per_element_for(dtype: DType) -> NonZeroU32 {
 /// 1. warp 分解不能: `block_m % MMA_WARP_M != 0` または
 ///    `block_n % MMA_WARP_N != 0` または `block_k % MMA_K != 0`
 ///    （候補空間の構成段階で構造的に排除されるが、将来の候補空間変更に
-///    対する多層防御として実行時にも検査する）
+///    対する多層防御として実行時にも検査する）。加えて
+///    `block_k / MMA_K < MIN_MMA_K_STEPS_PER_STAGE`（2）も棄却する
+///    （`kernels_mma.rs` の `MMA_K_STEPS_PER_STAGE`〈`= MMA_BK / MMA_K`〉
+///    が 2 以上であることをコンパイル時に要求する `assert!`〈#494
+///    受け入れ基準 3 項〉と同じ K ループ構造契約。
+///    `block_k == MMA_K`〈16〉だと 1 段あたりの kstep 反復が 1 回になり
+///    カーネル側のコンパイル時契約に違反するため、候補段階で先に
+///    fail-closed に遮断する。#524 レビュー指摘: 旧実装は整数倍数性のみ
+///    検査し「2 以上」を検査していなかった）
 /// 2. per-block スレッド数超過:
 ///    `(block_m / MMA_WARP_M) * (block_n / MMA_WARP_N) * 32 > 1024`
 ///    （CUDA の per-block スレッド上限。`kernels_mma.rs` の compile-time
 ///    assert と同じ制約の実行時版）
 /// 3. レジスタ不足: `block_m > 128 && block_n > 128` の同時成立
-///    （DeepGEMM の事前枝刈りをそのまま踏襲）
+///    （DeepGEMM の事前枝刈りをそのまま踏襲。現在の
+///    `BLOCK_M_BASE_CANDIDATES`（最大 128）では block_m が 128 を超える
+///    候補自体が生成されないため、この規則は現行候補空間では構造的に
+///    発火しない〈dead〉。#524 レビュー指摘。`BLOCK_M_BASE_CANDIDATES` が
+///    将来 128 超へ拡張された際の多層防御として意図的に残す。対応する
+///    テスト `candidates_never_exceed_128_on_both_dimensions_even_with_huge_budget`
+///    は現行候補空間では規則 1・2 由来の恒真検査になるが、規則 3 単独の
+///    リグレッション〈規則 3 自体の削除・条件緩和〉も検出できるため
+///    保持する）
 /// 4. cp.async アライメント不足:
 ///    `(block_k * bytes_per_element) % 16 != 0` または
 ///    `(block_n * bytes_per_element) % 16 != 0`（DeepGEMM の
 ///    「swizzle 64B 未満」枝刈りの本カーネル族への適応。既存テスト
 ///    `mma_tile_dims_satisfy_cp_async_alignment_granularity`
-///    〈`kernels_mma.rs`〉と同じ 16B 粒度契約）
+///    〈`kernels_mma.rs`〉と同じ 16B 粒度契約）。block_n は規則 1 により
+///    常に [`MMA_WARP_N`]（16）の倍数、block_k は規則 1（続き）により
+///    常に [`MMA_K`]（16）の倍数と確定しているため、`bytes_per_element`
+///    が 1 以上である限り両積は常に 16 の倍数になり、現行候補空間では
+///    この規則も構造的に発火しない〈dead〉。#524 レビュー指摘。将来
+///    warp タイル寸法（[`MMA_WARP_N`]／[`MMA_K`]）が 16 未満に変更される
+///    ケースの多層防御として意図的に残す
 /// 5. 段数・SMEM 不成立: [`derive_pipeline_stages`] が `Err`（SMEM
 ///    予算超過と DeepGEMM 由来の最小段数要求〈3 段・小タイル 4 段〉
 ///    未達をここで一括棄却する。C-8 実装の再利用であり閾値を二重管理
@@ -309,6 +331,17 @@ fn build_tile_candidate(
         return None;
     }
 
+    // 規則 1（続き）: `MMA_K_STEPS_PER_STAGE`（= block_k / MMA_K）が
+    // `MIN_MMA_K_STEPS_PER_STAGE`（2）未満の構成を棄却する
+    // （`kernels_mma.rs` のコンパイル時契約 `assert!(MMA_K_STEPS_PER_STAGE
+    // >= 2, ...)` と同じ制約。#524 レビュー指摘: block_k == MMA_K〈16〉が
+    // block_k % MMA_K == 0 を満たしてしまうため上の多重性検査だけでは
+    // 通過してしまっていた）。`block_k` は上の検査で `MMA_K` の倍数と
+    // 確定済みのため整数除算は割り切れる。
+    if block_k / MMA_K < MIN_MMA_K_STEPS_PER_STAGE {
+        return None;
+    }
+
     // 規則 2: per-block スレッド数が CUDA の上限（1024）を超えない。
     let warps_m = block_m / MMA_WARP_M;
     let warps_n = block_n / MMA_WARP_N;
@@ -376,8 +409,25 @@ const SMALL_M_THRESHOLD: u32 = 64;
 const BLOCK_N_MAX_CANDIDATE: u32 = 256;
 
 /// block_k 候補（[`MMA_K`] の倍数。独立したリテラルを持たず [`MMA_K`]
-/// からの倍数として導出し単一真実源を保つ）。
+/// からの倍数として導出し単一真実源を保つ）。`MMA_K`（16）自体は
+/// [`MIN_MMA_K_STEPS_PER_STAGE`] 制約（`block_k / MMA_K >= 2`）により
+/// `build_tile_candidate` の規則 1 で常に棄却される（#524 レビュー指摘）。
+/// 候補生成側から先に除外せず列挙後の枝刈りに委ねているのは、枝刈り
+/// 規則の一覧（本モジュール `enumerate_tile_candidates` の doc）を唯一の
+/// 判定根拠にするため（候補空間の構成条件と枝刈り条件が分裂すると
+/// どちらか一方だけが更新される静かな乖離を招く。#521 と同種の教訓）。
 const BLOCK_K_CANDIDATES: [u32; 3] = [MMA_K, MMA_K * 2, MMA_K * 4];
+
+/// カーネル側の K ループ構造契約（`kernels_mma.rs` の
+/// `assert!(MMA_K_STEPS_PER_STAGE >= 2, ...)`〈#494 受け入れ基準 3 項〉）
+/// を候補列挙側でも検査するための下限値。カーネル側の
+/// `MMA_K_STEPS_PER_STAGE` は固定 `MMA_BK`（32）から導出される定数だが、
+/// ここでは候補ごとに異なる `block_k` に対して同じ「1 段あたりの kstep
+/// 反復回数は 2 以上」という契約を検査する必要があるため、値（2）のみを
+/// 独立した名前付き定数として持つ（`kernels_mma::MMA_K_STEPS_PER_STAGE`
+/// 自体を再利用すると `MMA_BK=32` 固定の値〈2〉を意味的に異なる文脈
+/// 〈任意の block_k〉へ流用することになり誤解を招くため）。
+const MIN_MMA_K_STEPS_PER_STAGE: u32 = 2;
 
 /// GEMM ブロックタイル候補 1 件（Phase C-9a・イシュー #524）。
 ///
@@ -553,6 +603,12 @@ mod tile_candidate_tests {
             "block_n={bn} must be a multiple of MMA_WARP_N"
         );
         assert_eq!(bk % MMA_K, 0, "block_k={bk} must be a multiple of MMA_K");
+        assert!(
+            bk / MMA_K >= MIN_MMA_K_STEPS_PER_STAGE,
+            "block_k={bk} must yield at least MIN_MMA_K_STEPS_PER_STAGE \
+             ({MIN_MMA_K_STEPS_PER_STAGE}) kstep iterations per stage \
+             (kernels_mma.rs MMA_K_STEPS_PER_STAGE >= 2 contract, #494)"
+        );
 
         // 規則 2: per-block スレッド数上限。
         let threads = (bm / MMA_WARP_M) * (bn / MMA_WARP_N) * 32;
@@ -700,6 +756,24 @@ mod tile_candidate_tests {
         assert!(
             !large_candidates.iter().any(|c| c.block_m().get() == 32),
             "m=65 (> SMALL_M_THRESHOLD) must not include a block_m=32 candidate"
+        );
+    }
+
+    /// block_k=[`MMA_K`]（16）はカーネル側の K ループ構造契約
+    /// （`kernels_mma.rs` の `MMA_K_STEPS_PER_STAGE >= 2` コンパイル時
+    /// assert・#494 受け入れ基準 3 項）に違反するため、`block_m % MMA_K
+    /// == 0` を満たしていても候補に残らないこと（#524 レビュー指摘の
+    /// 再現テスト: 修正前は `enumerate_tile_candidates(GemmShape::new(
+    /// 4096, 4096, 4096), DType::F16, STATIC_SMEM_BUDGET_CAP_BYTES)` で
+    /// block_k=16 の候補が 24 件残存していた）。
+    #[test]
+    fn block_k_equal_to_mma_k_is_always_pruned() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+        assert!(
+            !candidates.iter().any(|c| c.block_k().get() == MMA_K),
+            "block_k == MMA_K ({MMA_K}) violates MMA_K_STEPS_PER_STAGE >= 2 \
+             and must never appear in enumerated candidates"
         );
     }
 
