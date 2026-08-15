@@ -58,8 +58,18 @@ use cudarc::driver::{LaunchConfig, PushKernelArg};
 /// のみで足りるため 128 固定）とする。手動境界チェック（`if (idx < n)`）は
 /// REQ-8（`.claude/rules/coding-rust.md`）に従い、プローブ用途であっても
 /// 省略しない。
+///
+/// `__launch_bounds__(128)` を付与するのは [`PROBE_SETMAXNREG_INCDEC`] と
+/// 同じ理由（イシュー #484 レビュー指摘 Low 対応）: [`report_control_baseline_regs`]
+/// で [`CONTROL_DEC`] のベースライン register/thread 数を実測し、
+/// `setmaxnreg.dec ... 64` が要求するレジスタ予算（64 以下への削減）が
+/// 実際のベースラインと整合するかを [`setmaxnreg_dec_probe`] が
+/// `stage=coherence_check` として記録する（`PROBE_SETMAXNREG_INCDEC` の
+/// P2 対応が dec 単体側には未適用だった非対称を解消）。launch bounds を
+/// 対照カーネルと揃えないと、ベースライン実測値が本プローブの実際の
+/// コンパイル構成と異なる値になり誤読を招くため必須。
 const PROBE_SETMAXNREG_DEC: &str = r#"
-extern "C" __global__ void probe_setmaxnreg_dec(
+extern "C" __global__ void __launch_bounds__(128) probe_setmaxnreg_dec(
     const float* __restrict__ in,
     float* __restrict__ out,
     int n)
@@ -114,6 +124,25 @@ extern "C" __global__ void probe_setmaxnreg_dec(
 /// がこのベースラインでは不成立だった」（値の再選定が必要）をベースライン
 /// 実測値との比較で区別できる。`docs/cuda-tensor-core-design.md` への転記時は
 /// `control_baseline_regs` の実測値も併記すること。
+///
+/// **`result=success` の判別力限界と `coherent` ログ（イシュー #484 レビュー
+/// 指摘 Medium 対応）**: 本カーネルの演算自体（`in[idx] * 2.0f`）は 3 引数・
+/// idx 計算程度でベースラインレジスタ数が数十/thread 程度に収まりうるため、
+/// `result=success`（`try_load_and_run` の launch/synchronize/期待値検証が
+/// すべて通過）は「setmaxnreg による再配分が実際に成立した」ことと
+/// 「レジスタ予算的に無風（`dec`/`inc` の対象値がベースラインに対して
+/// 意味のある制約にならない）で通っただけ」を区別できない。この判別力限界
+/// 自体は演算を複雑化してレジスタ圧を上げても質的には解消しない
+/// （どの程度で「意味のある制約」になるかは ptxas の割付次第で決め打ち
+/// できないため）。そのため本ファイルは代わりに、[`report_control_baseline_regs`]
+/// が返すベースライン実測値と `.dec 24`/`.inc 232` の整合性を
+/// `setmaxnreg_incdec_probe` が `stage=coherence_check` 行として明示的に
+/// ログする（PTX ISA 上 `setmaxnreg.dec` はベースライン以下、`.inc` は
+/// ベースライン以上の対象値を要求するため、`coherent=false` はベースライン
+/// との不整合＝本プローブの具体値が無風または UB 域のいずれかを示す
+/// 客観的シグナルになる）。`docs/cuda-tensor-core-design.md` への転記時は
+/// `result` に加えこの `coherent` 行も必ず併記し、`coherent=false` の場合は
+/// `result=success` であっても「使用可」と断定しないこと。
 const PROBE_SETMAXNREG_INCDEC: &str = r#"
 extern "C" __global__ void __launch_bounds__(256) probe_setmaxnreg_incdec(
     const float* __restrict__ in,
@@ -149,8 +178,14 @@ extern "C" __global__ void __launch_bounds__(256) probe_setmaxnreg_incdec(
 /// 「コンパイル基盤は健全だが setmaxnreg のみ拒否された」（`control=accepted`
 /// かつ `probe` が拒否）とそれ以外（toolchain 自体の問題で判定不能）を
 /// 読み手が区別できるようにする。
+///
+/// `__launch_bounds__(128)` を [`PROBE_SETMAXNREG_DEC`] と揃えて付与する
+/// （イシュー #484 レビュー指摘 Low 対応。[`CONTROL_INCDEC`] が
+/// `PROBE_SETMAXNREG_INCDEC` と揃えているのと同じ理由。揃えないと
+/// [`report_control_baseline_regs`] の実測値がプローブ本体のベースラインと
+/// 異なる値になり誤読を招く）。
 const CONTROL_DEC: &str = r#"
-extern "C" __global__ void control_dec(
+extern "C" __global__ void __launch_bounds__(128) control_dec(
     const float* __restrict__ in,
     float* __restrict__ out,
     int n)
@@ -286,7 +321,19 @@ fn try_compile(
 /// として記録する（本ファイル冒頭「使えないという結論も spike の正当な
 /// 成果」と同じ方針。対照カーネルの失敗は toolchain 側の問題である可能性が
 /// 高く、[`try_compile`] 側の `control_accepted` ログと合わせて診断する）。
-fn report_control_baseline_regs(device: &CudaDevice, label: &str, control_src: &str, arch: &str) {
+///
+/// 戻り値の `Option<i32>` は測定成功時の `num_regs_per_thread`（失敗時は
+/// `None`）。呼び出し元（[`setmaxnreg_dec_probe`]／[`setmaxnreg_incdec_probe`]）
+/// はこれを [`report_setmaxnreg_coherence`] へ渡し、`.dec`/`.inc` の対象値
+/// との整合性を `stage=coherence_check` として明示的にログする
+/// （イシュー #484 レビュー指摘 Medium 対応。[`PROBE_SETMAXNREG_INCDEC`]
+/// ドキュメンテーションコメント参照）。
+fn report_control_baseline_regs(
+    device: &CudaDevice,
+    label: &str,
+    control_src: &str,
+    arch: &str,
+) -> Option<i32> {
     let ptx = match compile_ptx(control_src, arch) {
         Ok(ptx) => ptx,
         Err(err) => {
@@ -294,7 +341,7 @@ fn report_control_baseline_regs(device: &CudaDevice, label: &str, control_src: &
                 "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
                  result=failed detail={err}"
             );
-            return;
+            return None;
         }
     };
     let module = match device.context().load_module(ptx) {
@@ -304,7 +351,7 @@ fn report_control_baseline_regs(device: &CudaDevice, label: &str, control_src: &
                 "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
                  result=failed detail={err:?}"
             );
-            return;
+            return None;
         }
     };
     let func = match module.load_function(label) {
@@ -314,7 +361,7 @@ fn report_control_baseline_regs(device: &CudaDevice, label: &str, control_src: &
                 "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
                  result=failed detail={err:?}"
             );
-            return;
+            return None;
         }
     };
     match func.num_regs() {
@@ -323,14 +370,58 @@ fn report_control_baseline_regs(device: &CudaDevice, label: &str, control_src: &
                 "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
                  result=measured num_regs_per_thread={num_regs}"
             );
+            Some(num_regs)
         }
         Err(err) => {
             println!(
                 "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
                  result=failed detail={err:?}"
             );
+            None
         }
     }
+}
+
+/// [`report_control_baseline_regs`] が実測したベースライン register/thread
+/// 数（`baseline_regs`）と、本プローブが発行する `setmaxnreg.dec`/`.inc` の
+/// 対象値（`dec_target`／`inc_target`。片方のみのプローブは `None` を渡す）
+/// の整合性を判定し `SETMAXNREG_PROBE_RESULT stage=coherence_check` として
+/// 記録する（イシュー #484 レビュー指摘 Medium 対応）。
+///
+/// PTX ISA 上、`setmaxnreg.dec` の対象値は現在のレジスタ数**以下**、
+/// `setmaxnreg.inc` の対象値は現在のレジスタ数**以上**であることが要求される
+/// （さもなくば未定義動作になりうる）。本ファイルの `.dec`/`.inc` はいずれも
+/// 同一カーネル関数内で発行され、`num_regs_per_thread` はカーネル関数単位で
+/// 決まる値のためベースラインは producer/consumer 双方で共通である。よって
+/// `dec_target <= baseline_regs`（dec 側）・`inc_target >= baseline_regs`
+/// （inc 側）が両方成立する場合のみ `coherent=true` とする。
+///
+/// `coherent=false` は「`result=success` であってもレジスタ予算的に無風
+/// （または PTX ISA 上不整合）だった」ことを示す客観的シグナルであり、
+/// `docs/cuda-tensor-core-design.md` への転記時に `result=success` のみを
+/// 見て「使用可」と誤読するのを防ぐ（[`PROBE_SETMAXNREG_INCDEC`]
+/// ドキュメンテーションコメント参照）。ベースライン実測自体が失敗している
+/// 場合（`baseline_regs=None`）は判定不能として `coherent=unknown` を記録し
+/// `false` 側へ丸めない（fail-closed で「不整合」と断定しない）。
+fn report_setmaxnreg_coherence(
+    label: &str,
+    baseline_regs: Option<i32>,
+    dec_target: Option<i32>,
+    inc_target: Option<i32>,
+) {
+    let coherent = match baseline_regs {
+        Some(baseline) => {
+            let dec_ok = dec_target.is_none_or(|dec| dec <= baseline);
+            let inc_ok = inc_target.is_none_or(|inc| inc >= baseline);
+            (dec_ok && inc_ok).to_string()
+        }
+        None => "unknown".to_string(),
+    };
+    println!(
+        "SETMAXNREG_PROBE_RESULT stage=coherence_check kernel={label} \
+         baseline_regs={baseline_regs:?} dec_target={dec_target:?} inc_target={inc_target:?} \
+         coherent={coherent}"
+    );
 }
 
 /// コンパイル成功済みカーネルをロード・起動・同期し、成否を記録する。
@@ -478,6 +569,13 @@ fn try_load_and_run(
 /// 版が存在し受理されるかの参考として `<arch>a`（`compute_121a`）でも
 /// コンパイルを追試する。両方の結果を `SETMAXNREG_PROBE_RESULT` として
 /// 記録する（本ファイル冒頭コメント「実機実測」節）。
+///
+/// `try_compile`/`try_load_and_run` の前に [`report_control_baseline_regs`]
+/// で対照カーネル（[`CONTROL_DEC`]）のベースライン register/thread 数を
+/// 実測し、`setmaxnreg.dec ... 64`（[`PROBE_SETMAXNREG_DEC`]）の対象値との
+/// 整合性を [`report_setmaxnreg_coherence`] で判定・記録する（イシュー #484
+/// レビュー指摘 Low・Medium 対応。`setmaxnreg_incdec_probe` にのみ適用
+/// されていた P2 是正を dec 単体側にも揃える）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10、compute capability 12.1 相当）必須。\
             実測記録は docs/cuda-tensor-core-design.md「setmaxnreg プローブ結果（#484）」節"]
@@ -492,6 +590,14 @@ fn setmaxnreg_dec_probe() {
 
     let arch = device.arch();
     let arch_accelerated = format!("{arch}a");
+
+    // `setmaxnreg.dec` の対象値（64）を検証する前に、対照カーネル
+    // （`setmaxnreg` を含まない同一 `__launch_bounds__(128)` 構成）の実際の
+    // ベースライン register/thread 数を実測する（イシュー #484 レビュー
+    // 指摘 Low 対応。`setmaxnreg_incdec_probe` の `report_control_baseline_regs`
+    // 呼び出しと対称の構成にする）。
+    let baseline_regs = report_control_baseline_regs(&device, "control_dec", CONTROL_DEC, arch);
+    report_setmaxnreg_coherence("probe_setmaxnreg_dec", baseline_regs, Some(64), None);
 
     // 素の compute_XY（本命シナリオ: arch-accelerated feature のため
     // 拒否される可能性が高い）。
@@ -556,8 +662,17 @@ fn setmaxnreg_incdec_probe() {
     // （`setmaxnreg` を含まない同一 `__launch_bounds__(256)` 構成）の実際の
     // ベースライン register/thread 数を実測する（イシュー #484 レビュー
     // 指摘 P2 対応。[`PROBE_SETMAXNREG_INCDEC`] ドキュメンテーションコメント
-    // 参照）。
-    report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, arch);
+    // 参照）。実測値は `report_setmaxnreg_coherence` へ渡し、24/232 との
+    // 整合性を `stage=coherence_check` として明示的に記録する（同レビュー
+    // Medium 対応。`result=success` のみでは判別できない偽陽性を防ぐ）。
+    let baseline_regs =
+        report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, arch);
+    report_setmaxnreg_coherence(
+        "probe_setmaxnreg_incdec",
+        baseline_regs,
+        Some(24),
+        Some(232),
+    );
 
     // 素の compute_XY（本命シナリオ: arch-accelerated feature のため
     // 拒否される可能性が高い）。
