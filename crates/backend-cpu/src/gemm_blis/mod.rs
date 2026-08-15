@@ -63,7 +63,7 @@ use microkernel::Microkernel;
 // テストバイナリのコンパイルには必要。#185 レビュー指摘）。
 #[cfg(any(not(target_arch = "aarch64"), test))]
 use microkernel::ScalarKernel;
-use pack::{pack_a, pack_b};
+use pack::{APackTile, BPackTile, pack_a, pack_b};
 use rayon::prelude::*;
 
 /// C タイルのスタックバッファ最大要素数（`MR * NR` の全 ISA 中の最大値。
@@ -85,6 +85,71 @@ const MC: usize = 128;
 const KC: usize = 256;
 /// 列方向ブロックサイズ（B のパネル幅）。
 const NC: usize = 512;
+
+/// panel packing バッファ（A/B 各 1 本）を gemm 呼び出し単位で 1 回だけ
+/// 確保し、5-loop 内の全 jc×pc×ic ブロックで使い回すための保持構造体
+/// （#556。matrixmultiply 等参照実装の「gemm 呼び出しあたり 1 回確保＋
+/// オフセット分割」方針に倣う）。
+///
+/// [`dispatch_region`] がカーネル型（`K::MR`／`K::NR`）確定直後に 1 回
+/// 構築し、[`gemm_blis_region`] へ可変参照で渡す。直列経路（`gemm_blis`）
+/// は gemm 呼び出しあたり 1 組、並列経路（`gemm_blis_parallel`／
+/// `gemm_blis_bias_act_parallel`）は rayon の行パネルタスクごとに
+/// `dispatch_region` が呼ばれるため**タスクごとに 1 組を所有**する
+/// （`Vec` の所有権がタスクローカルに閉じるため、事前一括確保＋
+/// `par_chunks_mut` とのオフセット分割を要さずコンパイル時にデータ競合
+/// が排除される。B packing のスレッド間重複計算〈同じ B 列ブロックを
+/// 複数タスクが個別に pack し直す〉は本変更のスコープ外＝既存挙動のまま。
+/// 将来の並列分割再構成候補として PR 本文に記載する）。
+struct PanelBuffers {
+    /// B パネル用バッファ（全 jc×pc ブロック中で最大の nc_len×kc_len 組が
+    /// 必要とする要素数で確保。ループ内は `nr_blocks*kc_len*nr` 要素の
+    /// 先頭サブスライスのみ使う）。
+    b_panel: Vec<f32>,
+    /// A パネル用バッファ（全 jc×pc×ic ブロック中で最大の mc_len×kc_len
+    /// 組が必要とする要素数で確保。ループ内は `mr_blocks*kc_len*mr` 要素の
+    /// 先頭サブスライスのみ使う）。
+    a_panel: Vec<f32>,
+}
+
+impl PanelBuffers {
+    /// `n`（C の列数）・`k_dim`（縮約次元）・`mc_total`（この呼び出しが
+    /// 担当する行数。並列時はパネル 1 つぶん）から、[`gemm_blis_region`]
+    /// の全反復を通じて必要になる最大バッファ長を 1 回で計算し確保する。
+    ///
+    /// 各反復の必要量は `min(NC, n).div_ceil(nr)*min(KC,k_dim)*nr`
+    /// （B）／`min(MC, mc_total).div_ceil(mr)*min(KC,k_dim)*mr`（A）が
+    /// 常に上界になる（先頭ブロックが nc_len/mc_len/kc_len 最大で、末尾
+    /// ブロックはこれらが縮むのみ。§4.1 計画）。MC/KC/NC はコンパイル時
+    /// 定数（B ≦ 512KiB・A ≦ 約 132KiB 相当）で上界が押さえられるため
+    /// 乗算オーバーフローの懸念はない。`n == 0`／`k_dim == 0`／
+    /// `mc_total == 0` では長さ 0 のバッファになり、5-loop 自体が回らない
+    /// ためサブスライス取得も発生せず問題ない。
+    fn new<K: Microkernel>(n: usize, k_dim: usize, mc_total: usize) -> Self {
+        let (b_len, a_len) = panel_capacity(n, k_dim, mc_total, K::MR, K::NR);
+        PanelBuffers {
+            b_panel: vec![0.0f32; b_len],
+            a_panel: vec![0.0f32; a_len],
+        }
+    }
+}
+
+/// [`PanelBuffers::new`] の容量計算本体（B 長・A 長の順で返す）。`mr`／`nr`
+/// を型パラメータでなく引数に取ることで、単体テストが
+/// [`Microkernel`] 実装を経由せず MR/NR の任意の組（全 ISA カーネル定数
+/// 相当）に対して総当たり検証できるようにしている（#556 テスト計画
+/// §5-3）。
+fn panel_capacity(n: usize, k_dim: usize, mc_total: usize, mr: usize, nr: usize) -> (usize, usize) {
+    let kc_len_max = KC.min(k_dim);
+    let nc_len_max = NC.min(n);
+    let mc_len_max = MC.min(mc_total);
+    let nr_blocks_max = nc_len_max.div_ceil(nr);
+    let mr_blocks_max = mc_len_max.div_ceil(mr);
+    (
+        nr_blocks_max * kc_len_max * nr,
+        mr_blocks_max * kc_len_max * mr,
+    )
+}
 
 /// 単一スレッドの BLIS 5-loop GEMM（jc→pc→ic→jr→ir）。
 ///
@@ -274,14 +339,18 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
     // （実行 CPU が AVX-512F を持っていてもコンパイラの stable 化状況に
     // 応じて AVX2 へフォールバックする。数値一致は ISA 間 bit 完全一致
     // 契約のため結果には影響しない）。
+    let mc_total = rows.end - rows.start;
     #[cfg(avx512_stable)]
     if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
-        return gemm_blis_region(kernel, a, b, c, n, k, rows);
+        let mut bufs = PanelBuffers::new::<microkernel::Avx512Kernel>(n, k, mc_total);
+        return gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs);
     }
     if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
-        gemm_blis_region(kernel, a, b, c, n, k, rows);
+        let mut bufs = PanelBuffers::new::<microkernel::Avx2Kernel>(n, k, mc_total);
+        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs);
     } else {
-        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows);
+        let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total);
+        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs);
     }
 }
 
@@ -291,7 +360,9 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
 #[cfg(target_arch = "aarch64")]
 fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows: Range<usize>) {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
-    gemm_blis_region(microkernel::NeonKernel, a, b, c, n, k, rows);
+    let mc_total = rows.end - rows.start;
+    let mut bufs = PanelBuffers::new::<microkernel::NeonKernel>(n, k, mc_total);
+    gemm_blis_region(microkernel::NeonKernel, a, b, c, n, k, rows, &mut bufs);
 }
 
 /// aarch64／x86_64 以外の arch 版 [`dispatch_region`]。実行時検出対象の
@@ -299,7 +370,9 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows: Range<usize>) {
     debug_assert_eq!(Isa::detect(), Isa::Scalar);
-    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows);
+    let mc_total = rows.end - rows.start;
+    let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total);
+    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs);
 }
 
 /// `gemm_blis`／`gemm_blis_parallel` 共通の 5-loop 本体。`c` はパネル
@@ -322,6 +395,24 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
 /// 使う（ジェネリック const 式は stable Rust で使えないための対処。各
 /// カーネルモジュールの `const _: () = assert!(MR * NR <= MAX_TILE);` が
 /// この前提をコンパイル時に検査する）。
+///
+/// `bufs`（[`PanelBuffers`]）は呼び出し元（[`dispatch_region`]）が
+/// カーネル型確定直後に 1 回確保した A/B panel バッファで、jc×pc×ic の
+/// 全反復を通じて使い回す（#556。以前は各反復で `vec![...]` を都度確保
+/// していた。M=N=K=4096・MC=128/KC=256/NC=512 換算で B は 128 回・A は
+/// 4,096 回のヒープ確保がこの 1 回確保へ削減される。実測は
+/// `docs/perf/cpu-gemm-packing-buffer-reuse.md`）。各反復は `bufs` の
+/// 先頭から必要長ぶんのサブスライスを再借用するのみで、`pack_a`／
+/// `pack_b` が呼び出しのたびに有効レーンを全上書き（端タイルは
+/// `dst.fill(0.0)` してから書く。`pack.rs` 参照）するため前反復の残留値
+/// には依存せず、bit 完全一致契約（REQ-2）・FMA 契約・累積順序は一切
+/// 変更しない。
+///
+/// `#[allow(clippy::too_many_arguments)]`: `bufs` 追加により 8 引数に
+/// なる。本ファイル内の既存慣例（[`gemm_blis_bias_act_parallel`] の
+/// 同 attribute 使用箇所と同方針）に従い、構造体化はせず素朴な引数列の
+/// まま許容する。
+#[allow(clippy::too_many_arguments)]
 fn gemm_blis_region<K: Microkernel>(
     kernel: K,
     a: &[f32],
@@ -330,6 +421,7 @@ fn gemm_blis_region<K: Microkernel>(
     n: usize,
     k_dim: usize,
     rows: Range<usize>,
+    bufs: &mut PanelBuffers,
 ) {
     let mr = K::MR;
     let nr = K::NR;
@@ -345,14 +437,30 @@ fn gemm_blis_region<K: Microkernel>(
             // B パネル packing: nc_len を NR 単位のブロックに分割し、各
             // ブロックを kc_len*NR 要素の連続領域として 1 本のバッファに
             // 詰める（ic ループ全体で使い回すため pc/jc ブロックごとに
-            // 1 回のみ実行）。
+            // 1 回のみ実行）。pack_b が panel サブスライスへ直接書き込む
+            // ため中間 Vec 確保・copy_from_slice は発生しない（#554:
+            // BLIS/matrixmultiply の呼び出し側確保バッファへ直接書き込む
+            // packing 方式に合わせ二段コピーを廃止）。バッファ自体は
+            // `bufs.b_panel`（呼び出し元 `dispatch_region` が 1 回確保
+            // 済み）の先頭サブスライスを再借用する（#556。ループ内での
+            // `vec![...]` 確保をゼロにする）。
             let nr_blocks = nc_len.div_ceil(nr);
-            let mut b_panel = vec![0.0f32; nr_blocks * kc_len * nr];
+            let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
             for jr_block in 0..nr_blocks {
                 let jr = jr_block * nr;
                 let nr_eff = nr.min(nc_len - jr);
-                let bp = pack_b(b, n, pc, kc_len, jc + jr, nr, nr_eff);
-                b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr].copy_from_slice(&bp);
+                pack_b(
+                    &mut b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr],
+                    b,
+                    BPackTile {
+                        n_total: n,
+                        kc_start: pc,
+                        kc_len,
+                        col_start: jc + jr,
+                        nr,
+                        nr_eff,
+                    },
+                );
             }
 
             let mut ic = 0;
@@ -361,14 +469,28 @@ fn gemm_blis_region<K: Microkernel>(
 
                 // A パネル packing: mc_len を MR 単位のブロックに分割
                 // （jr ループ全体で使い回すため ic ブロックごとに 1 回のみ）。
+                // pack_a が panel サブスライスへ直接書き込むため中間 Vec
+                // 確保・copy_from_slice は発生しない（#554。B packing と
+                // 同じ理由）。バッファ自体は `bufs.a_panel`（呼び出し元
+                // `dispatch_region` が 1 回確保済み）の先頭サブスライスを
+                // 再借用する（#556）。
                 let mr_blocks = mc_len.div_ceil(mr);
-                let mut a_panel = vec![0.0f32; mr_blocks * kc_len * mr];
+                let a_panel = &mut bufs.a_panel[..mr_blocks * kc_len * mr];
                 for ir_block in 0..mr_blocks {
                     let ir = ir_block * mr;
                     let mr_eff = mr.min(mc_len - ir);
-                    let ap = pack_a(a, k_dim, ic + ir, mr, mr_eff, pc, kc_len);
-                    a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr]
-                        .copy_from_slice(&ap);
+                    pack_a(
+                        &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
+                        a,
+                        APackTile {
+                            k_total: k_dim,
+                            row_start: ic + ir,
+                            mr,
+                            mr_eff,
+                            kc_start: pc,
+                            kc_len,
+                        },
+                    );
                 }
 
                 for jr_block in 0..nr_blocks {
@@ -433,7 +555,8 @@ pub(crate) fn gemm_blis_with_kernel<K: Microkernel>(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    gemm_blis_region(kernel, a, b, c, n, k, 0..m);
+    let mut bufs = PanelBuffers::new::<K>(n, k, m);
+    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs);
     Ok(())
 }
 
@@ -551,5 +674,60 @@ mod tests {
             c_detected, c_scalar,
             "実行時検出された ISA 経路と ScalarKernel 強制経路は bit 完全一致するはず"
         );
+    }
+
+    /// [`panel_capacity`]（[`PanelBuffers::new`] の容量計算本体）が、
+    /// `gemm_blis_region` の全 jc×pc×ic ブロック反復における実際の必要量
+    /// （`nr_blocks*kc_len*nr`／`mr_blocks*kc_len*mr`）の上界になっている
+    /// ことを、複数形状 × 全 ISA カーネル定数相当の (mr, nr) 総当たりで
+    /// 検証する（#556。§4.1 の「先頭ブロックが最大」という設計根拠の
+    /// 直接検証。ブロック境界を跨ぐ形状〈MC/KC/NC 未満・ちょうど・超過〉
+    /// を含める）。
+    #[test]
+    fn panel_capacity_upper_bounds_all_block_iterations() {
+        // scalar 4x4・neon 8x8・avx2 6x16・avx512 8x32（`microkernel/*.rs`）。
+        const KERNEL_DIMS: [(usize, usize); 4] = [(4, 4), (8, 8), (6, 16), (8, 32)];
+        // MC/KC/NC 境界（128/256/512）を跨ぐ・下回る・ちょうどの形状。
+        const SHAPES: [(usize, usize, usize); 6] = [
+            (1, 1, 1),
+            (7, 7, 7),
+            (128, 256, 128),
+            (129, 257, 129),
+            (600, 700, 300),
+            (512, 256, 128),
+        ];
+
+        for &(mr, nr) in &KERNEL_DIMS {
+            for &(n, k_dim, mc_total) in &SHAPES {
+                let (b_cap, a_cap) = panel_capacity(n, k_dim, mc_total, mr, nr);
+
+                for jc in (0..n).step_by(NC) {
+                    let nc_len = NC.min(n - jc);
+                    for pc in (0..k_dim).step_by(KC) {
+                        let kc_len = KC.min(k_dim - pc);
+                        let nr_blocks = nc_len.div_ceil(nr);
+                        let b_needed = nr_blocks * kc_len * nr;
+                        assert!(
+                            b_needed <= b_cap,
+                            "B 容量不足: mr={mr},nr={nr},n={n},k={k_dim},mc_total={mc_total},\
+                             jc={jc},pc={pc}: needed={b_needed} > cap={b_cap}"
+                        );
+
+                        let mut ic = 0;
+                        while ic < mc_total {
+                            let mc_len = MC.min(mc_total - ic);
+                            let mr_blocks = mc_len.div_ceil(mr);
+                            let a_needed = mr_blocks * kc_len * mr;
+                            assert!(
+                                a_needed <= a_cap,
+                                "A 容量不足: mr={mr},nr={nr},n={n},k={k_dim},mc_total={mc_total},\
+                                 jc={jc},pc={pc},ic={ic}: needed={a_needed} > cap={a_cap}"
+                            );
+                            ic += MC;
+                        }
+                    }
+                }
+            }
+        }
     }
 }

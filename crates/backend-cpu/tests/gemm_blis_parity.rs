@@ -142,6 +142,41 @@ fn gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools() {
     }
 }
 
+/// panel packing バッファを gemm 呼び出し単位で 1 回確保・再利用する
+/// 変更（#556）の回帰テスト。各 rayon 行パネルタスクが `PanelBuffers`
+/// を所有する設計（`src/gemm_blis/mod.rs` の [`PanelBuffers`] ドキュメント
+/// コメント参照）のため、タスク間でバッファが誤って共有・再利用されると
+/// 別パネルの packing 結果が混入し数値が壊れる。固定 4 スレッドプール・
+/// 複数行パネル／端タイルを跨ぐ形状で複数回実行し、毎回
+/// `gemm_blis`（直列）と bit 完全一致することを確認する
+/// （`gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools` と
+/// 同一パターンだが、こちらは同一プールでの反復実行に焦点を当てる）。
+#[test]
+fn gemm_blis_parallel_panel_buffers_are_task_local_across_repeated_runs() {
+    let (m, n, k) = (257, 193, 131);
+    let a = random_matrix(40, m * k);
+    let b = random_matrix(41, k * n);
+
+    let mut c_serial = vec![0.0; m * n];
+    gemm_blis(&a, &b, &mut c_serial, m, n, k).unwrap();
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(4)
+        .build()
+        .unwrap_or_else(|e| panic!("4 スレッドの rayon プール構築に失敗: {e}"));
+
+    for run in 0..8 {
+        let mut c_parallel = vec![0.0; m * n];
+        pool.install(|| gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+
+        assert_eq!(
+            c_serial, c_parallel,
+            "gemm_blis_parallel（run={run}）が gemm_blis（直列）と bit 一致しない \
+             （panel バッファのタスク間分離が壊れている可能性）"
+        );
+    }
+}
+
 // --- 3. FMA 契約の固定（K が大きいストレス形状） ---
 
 /// K=4096 は PoC-v2-5 の GPU 数値一致ストレスケースと同一規模
