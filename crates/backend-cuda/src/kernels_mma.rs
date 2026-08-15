@@ -1699,11 +1699,21 @@ mod tests {
                 },
             ),
             (
+                // PR #643 Bugbot 指摘への対応: bk=16 だと bk/MMA_K=1 で
+                // 上位の `MMA_K_STEPS_PER_STAGE >= 2` 検査（本ファイル
+                // §511-527）に先に拒否されてしまい、このケースが検証
+                // したいスレッド数上限（1024）の fail-closed 分岐を
+                // 実際には通過できていなかった（「bk / MMA_K below
+                // MMA_K_STEPS_PER_STAGE」ケースと拒否理由が重複していた）。
+                // bk=32（MMA_BK・bk/MMA_K=2 で同検査を通過）に変更し、
+                // bm=512・bn=512 由来の threads=16*32*32=16384 が
+                // k_steps 検査より後段のスレッド数上限検査（本ファイル
+                // §544）で拒否されることを専用に検査する。
                 "thread count exceeds 1024",
                 MmaKernelConfig {
                     bm: 512,
                     bn: 512,
-                    bk: 16,
+                    bk: 32,
                     stages: 1,
                     ..base
                 },
@@ -1760,6 +1770,16 @@ mod tests {
                         assert!(
                             detail.contains("shared memory"),
                             "{label} は SMEM 予算超過として拒否されるべきです（実際の detail: {detail}）"
+                        );
+                    }
+                    // PR #643 Bugbot 指摘への対応: "smem budget exceeded"
+                    // 同様に、このケースが実際にスレッド数上限分岐
+                    // （k_steps_per_stage 分岐ではなく）で拒否されたことを
+                    // detail 文字列で確認する。
+                    if label == "thread count exceeds 1024" {
+                        assert!(
+                            detail.contains("thread count") && detail.contains("1024"),
+                            "{label} はスレッド数上限超過として拒否されるべきです（実際の detail: {detail}）"
                         );
                     }
                 }
