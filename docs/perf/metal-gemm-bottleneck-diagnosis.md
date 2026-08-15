@@ -40,15 +40,28 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 `dispatch_auto` は呼び出しごとに A・B のアップロード・C の readback を含む（`gemm_bench.rs` と同じ計測範囲）
 ため、そのままでは転送時間がカーネル時間に混入し、転送律速が「頭打ち」として誤診断される恐れがある
 （size=4096 で A・B・C 合計約 192MiB のホストコピーを含む）。この混入を避けるため、同一 `(m, n)` で `k` を
-最小構成（8。`simdgroup_load` の最小整除単位）にした参照計測（`transfer_baseline_ms`）を追加し、
+小さくした 2 点（`BASELINE_KS = [8, 32]`。ともに `simdgroup_load` の最小整除単位（8）の倍数かつ
+`tile::select` の `SMALL` 閾値（64）未満）で参照計測し、`wall_secs(size, size, k)` を `k` について線形外挿
+した値（`transfer_baseline_ms`）を使う:
 
 ```
-kernel_ms_approx ≈ wall_ms(size) - wall_ms(size, k=8)
+slope       = (wall_ms(size, k=32) - wall_ms(size, k=8)) / (32 - 8)
+transfer_baseline_ms ≈ wall_ms(size, k=8) + slope * (size - 8)
+kernel_ms_approx     ≈ wall_ms(size) - transfer_baseline_ms
 ```
 
-という差分近似でカーネル純時間を推定する。**転送量は `k` に依らずほぼ一定という仮定に基づく近似であり、
-正確な GPU タイムスタンプではない**。`tflops_approx`・`eff_bw_gbs_approx` は必ず「近似値」として扱い、
-解析値（occupancy・arithmetic intensity。§3）と併せて総合判断する。
+という 2 点線形外挿でカーネル純時間を推定する。`dispatch_auto` の A・B アップロードは `m×k`・`k×n` 要素で
+あり **`k` にほぼ比例して増える**（C の readback・固定オーバーヘッドのみ `k` に依らない定数項）ため、
+`k` を最小化した単一点のみを差し引く旧方式（`wall_ms(size, k=8)` を一定値として使う近似）は A・B 転送量を
+過小評価し、`kernel_ms_approx` に A・B アップロード時間の大半が混入して `tflops_approx`・`eff_bw_gbs_approx`
+を系統的に歪めていた（イシュー #487 PR #649 への cursor[bot] 指摘。review id 4943646199。D-2/D-7 の優先順位
+判断に使う指標のため要修正と判断した）。2 点線形外挿はこの `k` 依存分を織り込むことでこの歪みを是正する。
+
+ただし `BASELINE_KS` の 2 点は（`k < 64` のため）`tile::select` が `SINGLE_SIMDGROUP_8X8` を選ぶのに対し
+実測対象（`k = size ≥ 512`）は staged タイルであり、ベースラインと実測対象とでカーネル経路（タイル構成）
+自体が異なる点は本近似の残る限界である。正確な GPU タイムスタンプではない点も含め、**`tflops_approx`・
+`eff_bw_gbs_approx` は必ず「近似値」として扱い**、解析値（occupancy・arithmetic intensity。§3）と併せて
+総合判断する。
 
 計画 §3.1 が想定していた「example 内パイプライン vs `dispatch_variant` の数値照合」は、独自パイプライン構築を
 行わない本設計では対象がないため実施しない（本 example は `MetalGemm::dispatch_auto` という既存の検証済み

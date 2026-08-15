@@ -42,13 +42,27 @@
 //! 転送律速が「頭打ち」として誤診断される恐れがある（size=4096 で
 //! A・B・C 合計約 192MiB のホストコピーを含む）。
 //!
-//! この混入を避けるため、同一 `(m, n)` で `k` を最小構成（8。
-//! `simdgroup_load` の最小整除単位）にした参照計測を追加し、
-//! `kernel_ms ≈ wall_ms(size) - wall_ms(size, k=8)` という差分近似で
-//! カーネル純時間を推定する（転送量は `k` に依らずほぼ一定という仮定に
-//! 基づく近似であり、正確な GPU タイムスタンプではない。この点を
-//! doc・出力の両方に明記し「近似値」であることを利用者が誤読しない
-//! ようにする）。
+//! この混入を避けるため、同一 `(m, n)` で `k` を小さくした 2 点
+//! （`BASELINE_KS = [8, 32]`。いずれも `simdgroup_load` の最小整除単位
+//! （8）の倍数かつ `tile::select` の `SMALL` 閾値（64）未満）で参照計測
+//! し、`wall_secs(size, size, k)` を `k` について線形外挿した値を
+//! `k = size` の転送時間ベースラインとして使う
+//! （`kernel_ms ≈ wall_ms(size) - extrapolate(wall_ms(size, k=8), wall_ms(size, k=32))`）。
+//! `dispatch_auto` の A・B アップロードは `m×k`・`k×n` 要素であり
+//! **`k` にほぼ比例して増える**（C の readback・固定オーバーヘッドのみ
+//! `k` に依らない定数項）ため、`k` を最小化した単一点を「`k` に依らず
+//! ほぼ一定」とみなして差し引く旧方式（`wall_ms(size, k=8)` のみを
+//! 引く）は A・B 転送量を過小評価し、`kernel_ms_approx` に A・B
+//! アップロード時間の大半を混入させて `tflops_approx`・
+//! `eff_bw_gbs_approx` を系統的に歪めていた（イシュー #487 PR #649 への
+//! cursor[bot] 指摘。review id 4943646199）。2 点線形外挿はこの `k` 依存
+//! 分を織り込むことでこの歪みを是正する。ただし `BASELINE_KS` の 2 点は
+//! （`k < 64` のため）`tile::select` が `SINGLE_SIMDGROUP_8X8` を選ぶのに
+//! 対し実測対象（`k = size ≥ 512`）は staged タイルであり、ベースライン
+//! と実測対象とでカーネル経路（タイル構成）自体が異なる点は本近似の
+//! 残る限界である。正確な GPU タイムスタンプではない点も含め、この点を
+//! doc・出力の両方に明記し「近似値」であることを利用者が誤読しないよう
+//! にする）。
 
 /// 実効帯域・occupancy 等の解析値。`objc2` 系 FFI に触れない純粋関数の
 /// ため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
@@ -157,10 +171,15 @@ mod macos_impl {
     /// 同じ入力分布に揃える）。
     const SEED: u64 = 0xC0FFEE;
 
-    /// `simdgroup_load` の最小整除単位（8）。転送時間の参照計測
-    /// （`k` 最小化ベースライン）に使う `k` 値（モジュールドキュメント
-    /// 「実測部分の設計」参照）。
-    const MIN_K: usize = 8;
+    /// 転送ベースライン線形外挿（モジュールドキュメント「実測部分の設計」
+    /// 参照）に使う 2 点の `k` 値。ともに `tile::select` の `SMALL`
+    /// 閾値（64。`crates/backend-metal/src/tile.rs`）未満に収め、実測対象
+    /// （`k=size`。`size` は 512 以上）の staged タイルとは異なる
+    /// `SINGLE_SIMDGROUP_8X8` タイルで計測させることで演算量をほぼ 0 に
+    /// 抑える（両点とも同一タイルなので少なくとも「どちらのベースライン
+    /// 点も同じカーネル経路」という前提は保たれる。外挿先の `k=size` とは
+    /// タイルが異なる点は残る近似の限界であり doc に明記する）。
+    const BASELINE_KS: [usize; 2] = [8, 32];
 
     /// `m×n×k` の `dispatch_auto` を計測し中央値秒を返す
     /// （`gemm_bench.rs::measure_auto` と同型。呼び出しごとに A・B の
@@ -186,6 +205,34 @@ mod macos_impl {
         measurement.median_secs
     }
 
+    /// 転送時間ベースラインを `k` について線形外挿する（モジュール
+    /// ドキュメント「実測部分の設計」参照）。`dispatch_auto` の A・B
+    /// アップロードは `m×k`・`k×n` 要素であり `k` にほぼ線形（C の
+    /// readback・ディスパッチ固定コストは `k` に依らない定数項）。
+    /// `BASELINE_KS` の 2 点（両方とも演算量が無視できるほど小さい）で
+    /// `wall_secs(size, size, k)` を測り `wall ≈ intercept + slope * k`
+    /// を最小二乗ではなく単純な 2 点の直線として求め、`k = size` まで
+    /// 外挿した値を「A・B・C 転送＋固定オーバーヘッドの推定値」として
+    /// 返す。定数ベースライン（旧実装の `wall_secs(size, size, MIN_K)`
+    /// 単独差分）は A・B 転送量が `k` に依らずほぼ一定という誤った仮定に
+    /// 基づいており、`kernel_ms_approx` に A・B アップロード時間の大半が
+    /// 混入して `tflops_approx`・`eff_bw_gbs_approx` を系統的に歪めていた
+    /// （イシュー #487 PR #649 への cursor[bot] 指摘。review id
+    /// 4943646199）。線形外挿はこの歪みを是正する。
+    fn extrapolated_transfer_baseline_secs(
+        gemm: &MetalGemm,
+        ctx: &MetalContext,
+        size: usize,
+        config: &MeasurementConfig,
+    ) -> f64 {
+        let [k0, k1] = BASELINE_KS;
+        let w0 = wall_secs(gemm, ctx, size, size, k0, config);
+        let w1 = wall_secs(gemm, ctx, size, size, k1, config);
+        let slope = (w1 - w0) / (k1 as f64 - k0 as f64);
+        let intercept = w0 - slope * k0 as f64;
+        intercept + slope * size as f64
+    }
+
     pub fn main() {
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
@@ -195,10 +242,10 @@ mod macos_impl {
             let a: SizeAnalytics = analytics::analyze(size);
 
             let wall = wall_secs(&gemm, &ctx, size, size, size, &config);
-            // 転送オーバーヘッドの近似ベースライン（モジュールドキュメント
-            // 「実測部分の設計」参照。`k` を最小化することでカーネル計算量を
-            // 最小化しつつ、A・B・C の転送量はほぼそのままに保つ）。
-            let transfer_baseline = wall_secs(&gemm, &ctx, size, size, MIN_K, &config);
+            // 転送オーバーヘッドの近似ベースライン（`extrapolated_transfer_baseline_secs`
+            // 参照。`BASELINE_KS` 2 点の実測から `k=size` まで線形外挿し、
+            // A・B アップロード量が `k` に比例して増える分を正しく織り込む）。
+            let transfer_baseline = extrapolated_transfer_baseline_secs(&gemm, &ctx, size, &config);
             // 近似カーネル時間は負にならない範囲でクランプする（計測ノイズで
             // `wall < transfer_baseline` になり得るため）。
             let kernel_secs = (wall - transfer_baseline).max(0.0);
