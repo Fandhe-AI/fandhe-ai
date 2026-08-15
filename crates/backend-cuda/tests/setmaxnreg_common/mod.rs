@@ -492,11 +492,24 @@ pub fn try_load_and_run(
             // 転記運用（grep・人間による転記）で `result=success` のみを見て
             // 「使用可」と誤読されるのを防ぐため、`result=corrupted` という
             // 別ラベルで記録したうえで `panic`（テスト失敗）させる。
+            //
+            // `panic!` のメッセージは既定でテストハーネスの標準エラー
+            // （stderr）に出力され、`success`／ソフト失敗（`--nocapture`
+            // 付き `println!`）と異なり stdout には現れない。運用上
+            // `SETMAXNREG_PROBE_RESULT` 行を stdout のみから grep で
+            // 突合する場合、最も危険な `corrupted` 結果だけが取りこぼされる
+            // （PR #636 レビュー指摘対応）。そのため `panic!` する前に
+            // 同じペイロードを `println!` で stdout へも明示的に記録する。
+            let expected_y = expected(x);
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} arch={arch} \
+                 result=corrupted output_matches_expected=false sample_input={x} \
+                 sample_output={y} sample_expected={expected_y}"
+            );
             panic!(
                 "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} arch={arch} \
                  result=corrupted output_matches_expected=false sample_input={x} \
-                 sample_output={y} sample_expected={}",
-                expected(x)
+                 sample_output={y} sample_expected={expected_y}"
             );
         }
     }

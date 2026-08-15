@@ -36,8 +36,18 @@ fn setmaxnreg_incdec_accel_probe() {
     let control_ok =
         report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, &arch_accelerated);
 
+    // `try_compile` の `label` は `try_load_and_run` と共有する診断ログ用
+    // ラベルであり（`try_load_and_run` 側は同時に `module.load_function`
+    // へ渡す実 CUDA シンボル名でもある）、base 版（`setmaxnreg_probe_
+    // incdec_base_real_device.rs`）と同一の `"probe_setmaxnreg_incdec"` に
+    // 揃える。arch-accelerated 版であることの区別は `arch` 引数
+    // （`<arch>a`）側で既に付与されているため、`label` に
+    // `_arch_accelerated` を別途付与すると `SETMAXNREG_PROBE_RESULT` の
+    // compile 段階と load/execute 段階とで `kernel=` の値が食い違い、
+    // 同一実行の結果を grep で突合する運用が壊れる（PR #636 レビュー
+    // 指摘対応）。
     if let Some(ptx) = try_compile(
-        "probe_setmaxnreg_incdec_arch_accelerated",
+        "probe_setmaxnreg_incdec",
         PROBE_SETMAXNREG_INCDEC,
         control_ok,
         &arch_accelerated,
