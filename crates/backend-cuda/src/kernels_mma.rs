@@ -499,20 +499,36 @@ extern "C" __global__ void gemm_mma_f16(
             // 64 発行 → 新構成 4 warp x (A x4 x2mi + B x2 x2nj) x 2 kstep
             // = 32 発行と半減する（同一出力タイルあたり 4 発行 → 2
             // 発行。ロード済みフラグメントを 4 通り再利用するため）。
+            //
+            // #497: 内側 nj ループを蛇行（serpentine）走査順にする。
+            // 外側 mi が奇数のとき nj を逆順（WARP_TILES_N-1 .. 0）に
+            // 辿ることで、mi が進んだ直後に直前と同じ b_frag[nj] を
+            // 再利用する形になり、レジスタ局所性・命令スケジューリングの
+            // 改善を狙う（CUTLASS `mma_tensor_op.h` の serpentine 走査、
+            // MLX `mma.h` `tile_matmad` の `n_serp = (m % 2) ? (N - 1 - n)
+            // : n` と同型。Metal 側の先例は #536・PR #652）。
+            // 数値不変性: 各アキュムレータ d[mi][x] は 1 kstep あたり
+            // 必ず 1 回だけ mma を受け、K 方向の加算順序（kstep ループの
+            // 反復順）は変えていない。nj_s は「その kstep 内でどの mi/nj
+            // 組を先に発行するか」という命令発行順のみを並べ替えるもので
+            // あり、mi x nj の集合（4 通り）自体は不変のため、走査順の
+            // 並べ替えはビット単位で同一の結果を生む（§1.2 非後退契約の
+            // 前提。tolerance 定数・parity_baseline.rs は変更しない）。
 #pragma unroll
             for (int mi = 0; mi < WARP_TILES_M; ++mi) {
 #pragma unroll
                 for (int nj = 0; nj < WARP_TILES_N; ++nj) {
+                    int nj_s = (mi % 2) ? (WARP_TILES_N - 1 - nj) : nj;
                     asm volatile(
                         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-                        : "=f"(d[mi][nj][0]), "=f"(d[mi][nj][1]),
-                          "=f"(d[mi][nj][2]), "=f"(d[mi][nj][3])
+                        : "=f"(d[mi][nj_s][0]), "=f"(d[mi][nj_s][1]),
+                          "=f"(d[mi][nj_s][2]), "=f"(d[mi][nj_s][3])
                         : "r"(a_frag[mi][0]), "r"(a_frag[mi][1]),
                           "r"(a_frag[mi][2]), "r"(a_frag[mi][3]),
-                          "r"(b_frag[nj][0]), "r"(b_frag[nj][1]),
-                          "f"(d[mi][nj][0]), "f"(d[mi][nj][1]),
-                          "f"(d[mi][nj][2]), "f"(d[mi][nj][3])
+                          "r"(b_frag[nj_s][0]), "r"(b_frag[nj_s][1]),
+                          "f"(d[mi][nj_s][0]), "f"(d[mi][nj_s][1]),
+                          "f"(d[mi][nj_s][2]), "f"(d[mi][nj_s][3])
                     );
                 }
             }
@@ -836,6 +852,52 @@ mod tests {
             assert!(
                 MMA_F16.contains(needle),
                 "MMA_F16 に #493 の 2x2 レジスタブロッキング構造 `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// #497 受け入れ基準: mma 発行の内側 nj ループが蛇行（serpentine）
+    /// 走査順であることをソース証跡でロックする（Metal 側
+    /// `shader_source_evidence.rs::gemm_simdgroup_tiled_source_uses_serpentine_scan_order`
+    /// 〈PR #652〉と同方針）。蛇行式 `int nj_s = (mi % 2) ? (WARP_TILES_N -
+    /// 1 - nj) : nj;` の実在に加え、mma.sync 発行部のオペランドが
+    /// `nj_s`（`nj` の生値ではなく）を参照していることを検査し、走査順の
+    /// 並べ替えが実際に mma 発行へ反映されていることを保証する。位置検査
+    /// （蛇行式が mma.sync asm リテラルより手前・エピローグより前の乗算
+    /// ループ内にあること）も合わせて検査する。
+    #[test]
+    fn mma_f16_source_uses_serpentine_scan_order() {
+        let serpentine_needle = "int nj_s = (mi % 2) ? (WARP_TILES_N - 1 - nj) : nj;";
+        let serpentine_pos = MMA_F16
+            .find(serpentine_needle)
+            .expect("MMA_F16 に #497 の蛇行走査式 `nj_s` が見つかりません");
+
+        let mma_sync_pos = MMA_F16
+            .find("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32")
+            .expect("MMA_F16 に mma.sync 発行箇所が見つかりません");
+        assert!(
+            serpentine_pos < mma_sync_pos,
+            "蛇行走査式は mma.sync 発行（asm volatile）より手前の乗算ループ内にある必要があります"
+        );
+
+        let epilogue_loop_pos = MMA_F16
+            .find("for (int mi = 0; mi < WARP_TILES_M; ++mi) {\n#pragma unroll\n        for (int nj = 0; nj < WARP_TILES_N; ++nj) {\n            int r0 = row0_warp")
+            .expect("MMA_F16 にエピローグの mi/nj 2 重ループが見つかりません");
+        assert!(
+            serpentine_pos < epilogue_loop_pos,
+            "蛇行走査式はエピローグの guarded store ループより前（mma 発行ループ内）にある必要があります"
+        );
+
+        for needle in [
+            "\"=f\"(d[mi][nj_s][0]), \"=f\"(d[mi][nj_s][1]),",
+            "\"=f\"(d[mi][nj_s][2]), \"=f\"(d[mi][nj_s][3])",
+            "\"r\"(b_frag[nj_s][0]), \"r\"(b_frag[nj_s][1]),",
+            "\"f\"(d[mi][nj_s][0]), \"f\"(d[mi][nj_s][1]),",
+            "\"f\"(d[mi][nj_s][2]), \"f\"(d[mi][nj_s][3])",
+        ] {
+            assert!(
+                MMA_F16.contains(needle),
+                "MMA_F16 の mma.sync 発行オペランドが `nj_s` を参照していません（`{needle}` が見つかりません）"
             );
         }
     }
