@@ -136,7 +136,7 @@ ssh "$CUDA_NODE" 'tail -5 $HOME/work/cuda-test.log'
 
 ### 4.5 setmaxnreg プローブ（#484）の外部タイムアウト運用契約
 
-`crates/backend-cuda/tests/setmaxnreg_probe_{dec,incdec}_{base,accel}_real_device.rs`（4 ファイル）は、命令拒否とハングを区別するための静的な `num_regs` 実行ゲートを持たない設計（`docs/cuda-tensor-core-design.md` §12.1「実行契約」節）。ロードに成功したカーネルは常に起動・同期するため、ハング対策は各テストファイルを個別に**外部タイムアウト付きで実行する運用契約**へ一本化している。4 ファイルとも `--test <ファイル名>` を単体指定し、`timeout` でラップして実行すること（`cargo test -p backend-cuda --release -- --ignored --nocapture` で一括実行しない）：
+`crates/backend-cuda/tests/setmaxnreg_probe_{dec,incdec}_{base,accel}_real_device.rs`（4 ファイル）は、命令拒否とハングを区別するための静的な `num_regs` 実行ゲートを持たない設計（`docs/cuda-tensor-core-design.md` §13.1「実行契約」節）。ロードに成功したカーネルは常に起動・同期するため、ハング対策は各テストファイルを個別に**外部タイムアウト付きで実行する運用契約**へ一本化している。4 ファイルとも `--test <ファイル名>` を単体指定し、`timeout` でラップして実行すること（`cargo test -p backend-cuda --release -- --ignored --nocapture` で一括実行しない）：
 
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \

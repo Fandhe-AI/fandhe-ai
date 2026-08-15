@@ -43,7 +43,7 @@
 //! 予測ではなく、実行そのものへの**外部タイムアウト**（プロセス単位）で
 //! 行う契約とする（各テストファイルの実行コマンドは
 //! `timeout <秒> cargo test ... -- --ignored --nocapture` を必須とする。
-//! `docs/cuda-tensor-core-design.md` §12.1「実行契約」節参照）。これにより
+//! `docs/cuda-tensor-core-design.md` §13.1「実行契約」節参照）。これにより
 //! Bugbot 指摘（dec 単独プローブが `dec_ok=false` でも常に launch していた
 //! 非対称な扱い）も解消する: 本モジュールは dec 単独版・producer/consumer
 //! 版のいずれも「診断ログのみ・ゲートなし・外部タイムアウトで保護」という
@@ -354,7 +354,7 @@ pub fn report_control_baseline_regs(
 /// コメント参照）。ハング対策は本関数内のゲートではなく、呼び出し元
 /// （各テストファイル）を **外部タイムアウト**（`timeout <秒> cargo
 /// test ...`）付きで実行する運用契約に委ねる（`docs/cuda-tensor-core-
-/// design.md` §12.1「実行契約」節）。
+/// design.md` §13.1「実行契約」節）。
 ///
 /// `setmaxnreg` が実機で受理されない場合（`CUDA_ERROR_ILLEGAL_INSTRUCTION`
 /// 等）も `panic` させず結果として記録する。実行成功時は出力バッファを
