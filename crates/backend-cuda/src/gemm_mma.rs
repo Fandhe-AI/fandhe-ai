@@ -127,20 +127,16 @@ impl CudaMmaGemm {
         // （旧 `cp.async.wait_group 1;`）との対応検査ではなくなった
         // （ループ内 wait はもはや `MMA_STAGES` 由来の数字即値を持たず、
         // `"n"` 制約を通じてカーネル側が自身で `STAGES - 2` を計算する
-        // ため）。下記は `MMA_WAIT_GROUP_IMMEDIATE` 定数自体の定義式
-        // （`kernels_mma.rs` 側）との対応を明示するトートロジーだが、
-        // `MMA_WAIT_GROUP_IMMEDIATE` を実利用する箇所として維持する
-        // （dead-code 化を避ける。値が定数のため `debug_assert!` ではなく
-        // `debug_assert_eq!` を使う。`assert!` 版は clippy
-        // `assertions_on_constants` に抵触する）。段数非依存になった今でも
-        // `MMA_K_STEPS_PER_STAGE` はカーネル内
+        // ため）。かつてここには Rust 側 `MMA_WAIT_GROUP_IMMEDIATE` 定数を
+        // その定義式自身（`MMA_STAGES - 2`）と比較するだけの
+        // `debug_assert_eq!` があったが、常に真となるトートロジーで
+        // 検査価値がなかったため定数ごと撤去した（#492 レビュー指摘）。
+        // 非負性（`STAGES - 2` の u32 アンダーフロー回避）は上記
+        // コンパイル時 assert（`MMA_STAGES >= 2`）が既に担保している。
+        // 段数非依存になった今でも `MMA_K_STEPS_PER_STAGE` はカーネル内
         // `for (int kstep = 0; kstep < BK / MMA_K; ++kstep)` に対応する
         // Rust 側唯一の真実源であり続けるため、引き続き実利用しておく
         // （`kernels_mma.rs` 冒頭ドキュメントコメント参照）。
-        debug_assert_eq!(
-            kernels_mma::MMA_WAIT_GROUP_IMMEDIATE,
-            kernels_mma::MMA_STAGES - 2
-        );
         debug_assert_eq!(kernels_mma::MMA_K_STEPS_PER_STAGE, 2);
 
         let (major, minor) = device.compute_capability();
@@ -467,9 +463,9 @@ mod tests {
     /// 各カーネル変種が、小形状・タイル端形状・大形状の全てで**ビット
     /// 一致**の出力を返すことを確認する。段数（パイプライン深さ）は
     /// cp.async の同期タイミングのみを変え、mma/ldmatrix の実行順序・
-    /// アキュムレート順序は変えないため（本ファイル
-    /// `kernels_mma::MMA_WAIT_GROUP_IMMEDIATE` ドキュメンテーションコメント
-    /// 「正しさ」参照）、tolerance を使わない bit 等値で主張できる
+    /// アキュムレート順序は変えないため（`kernels_mma.rs` の `MMA_STAGES`
+    /// 定数直下のドキュメンテーションコメント「正しさ」参照）、
+    /// tolerance を使わない bit 等値で主張できる
     /// （`.claude/rules/coding-rust.md` の「バックエンド間数値一致テストの
     /// 許容誤差を単独で緩和しない」契約に抵触しない。段数間比較は
     /// バックエンド間比較ではなく同一バックエンド内の実装詳細比較の

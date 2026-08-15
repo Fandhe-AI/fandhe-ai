@@ -129,31 +129,31 @@ pub const MMA_WARPS_N: u32 = MMA_BN / MMA_N; // 8
 /// ブロック内スレッド総数（32 スレッド/warp x warp 数）。
 pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
 
-/// `cp.async.wait_group` のループ内固定即値。`MMA_STAGES - 2` に一致する
-/// 必要がある（プロローグで `MMA_STAGES - 1` グループを commit した後、
-/// 最古のグループの完了を待つには「直近 `MMA_STAGES - 2` グループの
-/// 未完了を許容する」`wait_group` 即値が必要。標準的なソフトウェア
-/// パイプラインの式。CUTLASS `mma_multistage.h` と同型）。
-///
-/// #492 で「ループ内固定即値＋ループ外 drain」構造へ整理し、旧来の
-/// 「最終タイルのみ `wait_group 0`・それ以外は `wait_group 1`」という
-/// `MMA_STAGES == 3` 専用の 2 値分岐（PR #255 由来）を撤去した。カーネル
-/// ソース側は毎イテレーション必ず 1 commit を発行する不変条件（範囲外
-/// タイルでは空グループを commit する）により、ループ内の wait は
-/// `"n"(STAGES - 2)` という段数非依存の単一即値で常に正しくなる
-/// （イテレーション t の時点の commit 総数は `(STAGES-1) + t` であり、
-/// `wait_group (STAGES-2)` は完了数 `>= t+1` を保証するため、タイル t
-/// 自身のグループの完了が全 t で保証される）。最終タイルの空グループは
-/// 即完了するため、ループ外の `wait_group 0;`（drain）は残存グループの
-/// 掃き出しのみを担う。
-///
-/// #492 でカーネルソース側の wait 即値がコンパイル時 `"n"` 制約
-/// （`asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2))`）で
-/// 直接 `STAGES - 2` を計算するようになったため、カーネルソース中の
-/// ハードコード数字即値との対応検査という旧来の用途はなくなったが、
-/// `gemm_mma.rs::CudaMmaGemm::new` は引き続きこの定数を `STAGES` に対する
-/// 健全性 sanity check（即値がステージ数を超えない）で実利用する。
-pub const MMA_WAIT_GROUP_IMMEDIATE: u32 = MMA_STAGES - 2;
+// `cp.async.wait_group` のループ内固定即値は `MMA_STAGES - 2` に一致する
+// 必要がある（プロローグで `MMA_STAGES - 1` グループを commit した後、
+// 最古のグループの完了を待つには「直近 `MMA_STAGES - 2` グループの
+// 未完了を許容する」`wait_group` 即値が必要。標準的なソフトウェア
+// パイプラインの式。CUTLASS `mma_multistage.h` と同型）。
+//
+// #492 で「ループ内固定即値＋ループ外 drain」構造へ整理し、旧来の
+// 「最終タイルのみ `wait_group 0`・それ以外は `wait_group 1`」という
+// `MMA_STAGES == 3` 専用の 2 値分岐（PR #255 由来）を撤去した。カーネル
+// ソース側は毎イテレーション必ず 1 commit を発行する不変条件（範囲外
+// タイルでは空グループを commit する）により、ループ内の wait は
+// `"n"(STAGES - 2)` という段数非依存の単一即値で常に正しくなる
+// （イテレーション t の時点の commit 総数は `(STAGES-1) + t` であり、
+// `wait_group (STAGES-2)` は完了数 `>= t+1` を保証するため、タイル t
+// 自身のグループの完了が全 t で保証される）。最終タイルの空グループは
+// 即完了するため、ループ外の `wait_group 0;`（drain）は残存グループの
+// 掃き出しのみを担う。
+//
+// `STAGES - 2` はカーネルソース側のコンパイル時 `"n"` 制約
+// （`asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2))`）で
+// 直接計算されるため、Rust 側で対応する定数を別途持つ必要はない
+// （非負性は下記 `MMA_STAGES >= 2` のコンパイル時 assert が担保する）。
+// かつて `MMA_WAIT_GROUP_IMMEDIATE` という Rust 側定数を持っていたが、
+// その定義式自身と比較するだけの debug_assert しか利用箇所がなく実質的な
+// 検査価値がなかったため撤去した（#492 レビュー指摘）。
 
 /// 1 ステージあたりの `mma.sync` 呼び出し回数（`BK / MMA_K`。カーネル内
 /// `for (int kstep = 0; kstep < BK / MMA_K; ++kstep)` に対応する Rust 側の
@@ -198,17 +198,16 @@ const _: () = assert!(
 );
 // #492 で「ループ内固定即値＋ループ外 drain」構造へ整理したことにより、
 // カーネルソース内の wait_group はもはや `MMA_STAGES == 3` に依存しない
-// 段数一般形（`"n"(STAGES - 2)` の固定即値。本ファイル
-// `MMA_WAIT_GROUP_IMMEDIATE` ドキュメンテーションコメント参照）になった。
-// 残る制約は `MMA_WAIT_GROUP_IMMEDIATE = MMA_STAGES - 2` が非負であること
-// （`u32` の減算アンダーフローを避ける）のみであり、`MMA_STAGES == 3` 固定
-// ガードは撤去し `MMA_STAGES >= 2` の下限検査に一般化する。上限は既存の
-// 共有メモリ 48KiB assert・`MMA_BLOCK_THREADS` assert が引き続き機械検査
-// する。
+// 段数一般形（`"n"(STAGES - 2)` の固定即値。本ファイル `MMA_STAGES` 定数
+// 直下のドキュメンテーションコメント参照）になった。残る制約は
+// `STAGES - 2` が非負であること（`u32` の減算アンダーフローを避ける）
+// のみであり、`MMA_STAGES == 3` 固定ガードは撤去し `MMA_STAGES >= 2` の
+// 下限検査に一般化する。上限は既存の共有メモリ 48KiB assert・
+// `MMA_BLOCK_THREADS` assert が引き続き機械検査する。
 const _: () = assert!(
     MMA_STAGES >= 2,
     "kernels_mma::MMA_F16 の cp.async パイプラインは MMA_STAGES >= 2 を \
-     前提とする（MMA_WAIT_GROUP_IMMEDIATE = MMA_STAGES - 2 が u32 で \
+     前提とする（カーネルソース側の `STAGES - 2` 計算が u32 で \
      アンダーフローしないため）"
 );
 
@@ -343,10 +342,10 @@ extern "C" __global__ void gemm_mma_f16(
         int next_tile = t + STAGES - 1;
         int load_stage = next_tile % STAGES;
 
-        // #492: 段数一般形の固定即値（Rust 側
-        // `kernels_mma::MMA_WAIT_GROUP_IMMEDIATE` = `MMA_STAGES - 2` と
-        // 対応。`gemm_mma.rs::CudaMmaGemm::new` の `debug_assert!` が
-        // 参照する）。`"n"` 制約はコンパイル時整数即値を要求する PTX
+        // #492: 段数一般形の固定即値（`STAGES - 2`。非負性は Rust 側
+        // `const _: () = assert!(MMA_STAGES >= 2, ...)` がコンパイル時に
+        // 担保する。本ファイル `MMA_STAGES` 定数直下のドキュメンテーション
+        // コメント参照）。`"n"` 制約はコンパイル時整数即値を要求する PTX
         // インラインアセンブリの制約（CUTLASS が同様に `cp_async_wait<N>()`
         // をテンプレート非型パラメータで即値化するのと同じ理由）。
         //
@@ -556,7 +555,7 @@ mod tests {
     /// **存在しない**こと、ループ内 wait が段数一般形の即値制約
     /// （`"n"(STAGES - 2)`）であること、ループ外（`#undef` の直前）に
     /// 無条件の `cp.async.wait_group 0;` drain が存在することを検査する
-    /// （本ファイル冒頭コメント「命令選定」・`MMA_WAIT_GROUP_IMMEDIATE`
+    /// （本ファイル冒頭コメント「命令選定」・`MMA_STAGES` 定数直下の
     /// ドキュメンテーションコメント参照）。
     #[test]
     fn mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain() {
@@ -624,11 +623,13 @@ mod tests {
     /// #492 受け入れ基準（段数可変化）の CI 側担保: `#define STAGES 3` を
     /// `stages` へ書き換えたソースについて、段数依存の即値リテラル・分岐
     /// が残らないこと、および Rust 側で導出される整合条件（共有メモリ
-    /// 48KiB 上限・`MMA_WAIT_GROUP_IMMEDIATE` の非負性）が成立することを
-    /// `stages ∈ {2, 4}` について検査する。実機 NVRTC コンパイル自体は
-    /// `#[ignore]` 分離（`gemm_mma.rs` 側。本ファイル冒頭コメント「検証
-    /// 状態」参照）だが、ソース文字列レベルの整合はここで通常 CI 下でも
-    /// 検査できる。
+    /// 48KiB 上限）が成立することを `stages ∈ {2, 4}` について検査する。
+    /// `stages >= 2`（`STAGES - 2` の非負性）は下記ループの値が固定
+    /// リテラル配列由来のため実行時検査の対象にならず、本ファイル冒頭の
+    /// `const _: () = assert!(MMA_STAGES >= 2, ...)` が担う。実機 NVRTC
+    /// コンパイル自体は `#[ignore]` 分離（`gemm_mma.rs` 側。本ファイル
+    /// 冒頭コメント「検証状態」参照）だが、ソース文字列レベルの整合は
+    /// ここで通常 CI 下でも検査できる。
     #[test]
     fn mma_f16_source_stages_are_swappable_without_kernel_source_edits() {
         for stages in [2u32, 4u32] {
@@ -652,10 +653,6 @@ mod tests {
             assert!(
                 shared_mem_bytes <= 49_152,
                 "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB を超えています"
-            );
-            assert!(
-                stages >= 2,
-                "stages={stages}: MMA_WAIT_GROUP_IMMEDIATE = stages - 2 が非負である前提を満たしません"
             );
         }
     }
