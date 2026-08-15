@@ -636,6 +636,16 @@ extern "C" __global__ void gemm_mma_f16(
 /// 3 節「(c)」。安全側の実装単純化として `swizzle.rs::
 /// select_swizzle_group_width` の候補 `{8, 16}` 以外の値も受理するが
 /// `1` 未満・`1` そのものは拒否する）。
+///
+/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
+/// feature 既定 off）からの唯一の呼び出し元 `gemm_mma.rs::
+/// CudaMmaGemm::new_with_swizzle` が同 feature でゲートされたため
+/// （PR #667 codex-review P1 是正）、`cargo build`（feature 指定なし）では
+/// 呼び出し元が存在せず dead-code lint が誤検出する。本関数自体は
+/// `#[cfg(test)]` 下のソース生成検査テスト（本ファイル末尾）からは feature
+/// 非依存に呼ばれ続ける（`swizzle.rs::GROUP_WIDTH_CANDIDATES` と同じ
+/// 判断パターン）。
+#[allow(dead_code)]
 pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
     if group_width < 2 {
         return Err(crate::error::CudaError::InvalidShape {

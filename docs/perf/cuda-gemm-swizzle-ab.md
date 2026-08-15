@@ -8,9 +8,13 @@ N を先に全走査してから次の M グループへ移る順序へ並べ替
 
 ## 1. 設計根拠（確信度差の明示）
 
-- **DeepGEMM**: 本方式は DeepGEMM の `get_swizzled_block_idx`（グルーピング幅の動的選択式
-  `usage = g * BLOCK_N + ceil_div(num_sms, g) * BLOCK_M` の最小化を含む）と同型であり、DeepGEMM では
-  production 経路として有効化されている（確信度: 高）。
+- **DeepGEMM**: 本方式は DeepGEMM の `get_swizzled_block_idx` と同型のグルーピング幅動的選択の考え方を
+  踏襲するが、本実装は **M 方向グルーピング**（グループ内で N を先に全走査する。本ファイル冒頭「A/B
+  計測手順」節参照）のため、選択式は `usage = g * BLOCK_M + ceil_div(num_sms, g) * BLOCK_N`
+  （`crates/backend-cuda/src/swizzle.rs::swizzle_group_usage` が単一の真実源）である。DeepGEMM 自体の
+  N-grouping 式（`g * BLOCK_N + ceil_div(num_sms, g) * BLOCK_M`）とは軸が入れ替わる点に注意
+  （Bugbot 指摘・PR #667 レビュー是正）。DeepGEMM ではこの動的選択の考え方自体が production 経路として
+  有効化されている（確信度: 高）。
 - **MLX**: MLX にも shift/mask 式の同種機構（swizzle）が存在するが、classic GEMM 経路では無効化された
   ままであり、有効時の効果は同リポジトリ内で実証されていない（確信度: 低・未実証）。
 - 本イシューはこの確信度差を踏まえ、DeepGEMM 同型の方式のみを実装対象とする（MLX 側の shift/mask 方式は

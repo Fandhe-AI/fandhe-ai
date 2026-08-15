@@ -180,8 +180,8 @@ impl CudaMmaGemm {
     /// `device` 上で、L2 再利用のためのタイル→SM 割り当てスウィズル
     /// （イシュー #499・`kernels_mma::mma_f16_source_with_swizzle`）を
     /// 適用した変種カーネルを NVRTC コンパイルし保持するハンドルを構築
-    /// する（**opt-in 経路**。本ファイル冒頭・`lib.rs` 冒頭コメント
-    /// 「#499」節参照）。
+    /// する（**opt-in・未計測の実験実装**。本ファイル冒頭・`lib.rs` 冒頭
+    /// コメント「#499」節参照）。
     ///
     /// [`new`](Self::new) と同じ cc ゲート・NVRTC コンパイル手順を共有し
     /// （[`check_min_compute_capability`]）、コンパイルするソース文字列
@@ -203,6 +203,20 @@ impl CudaMmaGemm {
     /// 作らない。`.claude/rules/security.md` A03 インジェクション対策）。
     /// `group_width < 2` は `kernels_mma::mma_f16_source_with_swizzle` が
     /// `CudaError::InvalidShape` で拒否する。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`Cargo.toml` の `[features]` 参照。PR #667 codex-review P1 是正:
+    /// `CudaMmaGemm` 自体は `run_f16` 等の安定 API を持つ常時公開の型だが、
+    /// 本コンストラクタが返す「未計測の実験カーネル変種」だけは
+    /// `lib.rs::diagnostics` モジュールと同じ feature ゲート方針で通常
+    /// ビルドの公開 API 面から除外する。ゲートしない場合、doc comment
+    /// 上で「opt-in／本番経路から到達不能」と謳っていても、通常ビルドの
+    /// crate 外部利用者が feature 指定なしに直接呼べてしまい実態と矛盾
+    /// する）。`examples/gemm_mma_swizzle_bench.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）専用の入口であり、実機
+    /// A/B 計測後に採用確定した段階で feature ゲートを外し安定 API へ
+    /// 昇格する（`docs/perf/cuda-gemm-swizzle-ab.md` 参照）。
+    #[cfg(feature = "internal-diagnostics")]
     pub fn new_with_swizzle(device: &CudaDevice, group_width: u32) -> Result<Self, CudaError> {
         check_min_compute_capability(device)?;
 
@@ -608,6 +622,14 @@ mod tests {
     /// `cargo test -p backend-cuda --lib -- --ignored` から実行する
     /// （`mma_f16_stage_count_does_not_change_bit_exact_output` と同じ
     /// 実行方法）。
+    ///
+    /// `internal-diagnostics` feature（既定 off）でのみコンパイルされる
+    /// （[`CudaMmaGemm::new_with_swizzle`] 自体が同 feature でゲートされて
+    /// いるため。`cargo test -p backend-cuda --lib --features
+    /// internal-diagnostics -- --ignored` で実行する。`Makefile` の `test`
+    /// ターゲットは `--all-features` のため通常の `make test`（コンパイル
+    /// のみ・`--ignored` なしでは実行されない）でも本 feature は有効）。
+    #[cfg(feature = "internal-diagnostics")]
     #[test]
     #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
     fn mma_f16_swizzle_variant_matches_base_bit_exact_output() {
@@ -624,12 +646,16 @@ mod tests {
         );
 
         // (m, n, k): 小形状（16x8x16。単一 mma タイル。grid は 1x1 のため
-        // swizzle remap は恒等的に自明）・タイル端形状（40x72x160。
-        // MMA_BM=64/MMA_BN=128/MMA_BK=32 の非整数倍で grid > 1x1 になり
-        // remap が非自明に効く）・2048 級形状（実装計画 5 節「実機
+        // swizzle remap は恒等的に自明）・タイル端形状（80x136x160。
+        // MMA_BM=64/MMA_BN=128/MMA_BK=32 に対し
+        // grid=(n.div_ceil(MMA_BN), m.div_ceil(MMA_BM))=(2, 2) となり
+        // （`mma_launch_config`。両軸とも非整数倍の端数タイルを含む）
+        // remap が非自明に効く。旧値 40x72x160 は grid=(1,1) となり remap
+        // が恒等写像に縮退していたため是正した〈Bugbot 指摘・PR #667
+        // レビュー是正〉）・2048 級形状（実装計画 5 節「実機
         // （引き継ぎ）」の A/B 計測形状と揃える。4096 は本テストの目的
         // （bit 一致の確認）には過大なため 2048 に留める）。
-        let shapes: [(u32, u32, u32); 3] = [(16, 8, 16), (40, 72, 160), (256, 256, 2048)];
+        let shapes: [(u32, u32, u32); 3] = [(16, 8, 16), (80, 136, 160), (256, 256, 2048)];
         let seed: u64 = 424_242;
 
         // group_width=8/16 は候補表（swizzle.rs::select_swizzle_group_width

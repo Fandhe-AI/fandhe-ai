@@ -112,14 +112,18 @@
 //! イシュー #499（GEMM 性能改善ツリー #479 の後続）で L2 再利用のための
 //! タイル→SM 割り当てスウィズル（[`swizzle`]・`kernels_mma::
 //! mma_f16_source_with_swizzle`・`gemm_mma::CudaMmaGemm::new_with_swizzle`）
-//! を **opt-in 経路として**追加した。本セッション実行環境（RTX 3060・
-//! NVRTC 非搭載）では実機 A/B 計測ができないため（`docs/perf/
-//! cuda-gemm-swizzle-ab.md` 参照。#497 と同型の判断）、本番カーネル
-//! （`kernels_mma::MMA_F16` 定数）・本番ディスパッチ経路（`ops.rs`／
-//! `gemm_auto.rs`）は変更していない。`swizzle` モジュールはホスト側
-//! グルーピング幅選択・remap の純関数のみを持ち、`new_with_swizzle` を
-//! 明示的に呼ばない限り到達しない。実機 A/B 計測・採否確定は実機ツリー
-//! #408 側セッションへ引き継ぐ。
+//! を **opt-in・`internal-diagnostics` feature（既定 off）ゲート経路**
+//! として追加した。本セッション実行環境（RTX 3060・NVRTC 非搭載）では
+//! 実機 A/B 計測ができないため（`docs/perf/cuda-gemm-swizzle-ab.md`
+//! 参照。#497 と同型の判断）、本番カーネル（`kernels_mma::MMA_F16`
+//! 定数）・本番ディスパッチ経路（`ops.rs`／`gemm_auto.rs`）は変更して
+//! いない。`swizzle` モジュールはホスト側グルーピング幅選択・remap の
+//! 純関数のみを持ち、`new_with_swizzle` を明示的に呼ばない限り到達
+//! しない。`new_with_swizzle` 自体も通常ビルド（feature 指定なし）では
+//! コンパイルされないため crate 外部から到達不能（PR #667 codex-review
+//! P1 是正: `#[cfg(feature = "internal-diagnostics")]`。`gemm_mma.rs::
+//! CudaMmaGemm::new_with_swizzle` ドキュメンテーションコメント参照）。
+//! 実機 A/B 計測・採否確定は実機ツリー #408 側セッションへ引き継ぐ。
 //!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・

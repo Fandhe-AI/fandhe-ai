@@ -42,8 +42,21 @@
 const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 
 /// グルーピング幅 `g` を仮定した場合の L2 footprint 近似コスト
-/// （`usage = g * block_n + ceil_div(num_sms, g) * block_m`。DeepGEMM
-/// 同型の選択式。実装計画 1 節受け入れ基準 1 項）。
+/// （`usage = g * block_m + ceil_div(num_sms, g) * block_n`。実装計画 1
+/// 節受け入れ基準 1 項）。
+///
+/// 本モジュールの remap（[`swizzled_block_idx`]）は **M 方向**を
+/// `group_width` 個ずつグルーピングし、各グループ内で N を先に全走査する
+/// 方式（本ファイル冒頭コメント参照）。1 グループに属する連続
+/// `group_width` 個の SM ブロックは同じ N（B タイル。`block_n` 幅）を
+/// 共有し M（A タイル。`block_m` 幅）だけが異なるため、footprint は
+/// 「1 グループ内で異なる `group_width` 個の A タイル」= `g * block_m` と
+/// 「同時に活性な `ceil_div(num_sms, g)` グループそれぞれが専有する 1 個の
+/// B タイル」= `ceil_div(num_sms, g) * block_n` の和になる。DeepGEMM の
+/// `get_swizzled_block_idx` 選択式はグルーピング軸が逆（N 方向グルーピング
+/// のため `g * block_n + ceil_div(num_sms, g) * block_m`）であり、本方式
+/// （M 方向グルーピング）へそのまま流用すると軸が入れ替わってしまう点に
+/// 注意（Bugbot 指摘・PR #667 レビュー是正）。
 ///
 /// 全項を `u64` で計算し、`u32` 同士の乗算オーバーフロー（`block_n`・
 /// `num_sms` は実測値だが、桁溢れを事前に排除しておくことで呼び出し側の
@@ -59,7 +72,7 @@ fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u3
         u64::from(block_n),
         u64::from(group_width),
     );
-    group_width * block_n + num_sms.div_ceil(group_width.max(1)) * block_m
+    group_width * block_m + num_sms.div_ceil(group_width.max(1)) * block_n
 }
 
 /// `num_sms`（SM 数）・ブロックタイル寸法（`block_m`/`block_n`）から
@@ -185,22 +198,28 @@ mod tests {
     /// 使い、`num_sms` を数種類振って期待候補が固定されることを検査する。
     #[test]
     fn select_swizzle_group_width_matches_hand_computed_usage() {
-        // num_sms=1: usage(8) = 8*128 + ceil(1/8)*64 = 1024 + 64 = 1088
-        //            usage(16) = 16*128 + ceil(1/16)*64 = 2048 + 64 = 2112
+        // usage(g) = g*block_m + ceil(num_sms/g)*block_n（本ファイル
+        // `swizzle_group_usage` ドキュメンテーションコメント参照。M 方向
+        // グルーピングのため block_m/block_n の役割は DeepGEMM の
+        // N-grouping 式と入れ替わる。Bugbot 指摘・PR #667 レビュー是正）。
+        // block_m=64, block_n=128 のとき:
+        //
+        // num_sms=1: usage(8) = 8*64 + ceil(1/8)*128 = 512 + 128 = 640
+        //            usage(16) = 16*64 + ceil(1/16)*128 = 1024 + 128 = 1152
         // -> 8 が最小。
         assert_eq!(select_swizzle_group_width(1, 64, 128), 8);
 
         // num_sms=132（DGX Spark GB10 級の SM 数を想定した仮値）:
-        // usage(8) = 8*128 + ceil(132/8)*64 = 1024 + 17*64 = 1024+1088=2112
-        // usage(16) = 16*128 + ceil(132/16)*64 = 2048 + 9*64 = 2048+576=2624
-        // -> 8 が最小。
-        assert_eq!(select_swizzle_group_width(132, 64, 128), 8);
+        // usage(8) = 8*64 + ceil(132/8)*128 = 512 + 17*128 = 512+2176=2688
+        // usage(16) = 16*64 + ceil(132/16)*128 = 1024 + 9*128 = 1024+1152=2176
+        // -> 16 が最小。
+        assert_eq!(select_swizzle_group_width(132, 64, 128), 16);
 
-        // num_sms を極端に大きくして group_width=16 側が有利になる境界も
-        // 確認する（ceil_div の非線形性により大きい g が有利になりうる
-        // 領域があることの確認。num_sms=100000):
-        // usage(8) = 1024 + ceil(100000/8)*64 = 1024 + 12500*64 = 801024
-        // usage(16) = 2048 + ceil(100000/16)*64 = 2048 + 6250*64 = 402048
+        // num_sms を極端に大きくしても group_width=16 側が有利であり続ける
+        // ことを確認する（block_n の係数が ceil_div 側に付くため num_sms
+        // が増えるほど大きい g が漸近的に有利になる。num_sms=100000):
+        // usage(8) = 512 + ceil(100000/8)*128 = 512 + 12500*128 = 1600512
+        // usage(16) = 1024 + ceil(100000/16)*128 = 1024 + 6250*128 = 801024
         // -> 16 が最小。
         assert_eq!(select_swizzle_group_width(100_000, 64, 128), 16);
     }
