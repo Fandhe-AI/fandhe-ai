@@ -16,8 +16,8 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 （`docs/real-hardware-verification-env.md` §1・§7「ローカル直接実行」）だが本セッション環境は Linux のため、
 #188 → #380/#381 の先例に従い、Linux 側で完了できる範囲（診断 example の実装・解析値の算出・doc の計測
 手順・記録テンプレート・判定基準の確定）のみを本 PR で行う。**§4「実測結果」・§5「結論」は Mac 実機セッション
-で `cargo run -p backend-metal --example gemm_diagnosis --release -- --gpu-core-count=40 --ideal-groups-multiplier=6`
-を実行してから記入する（CLI 引数は macOS 実行時必須。§1 参照）。**
+で `cargo run -p backend-metal --example gemm_diagnosis --release -- --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200`
+を実行してから記入する（CLI 引数は macOS 実行時必須。§1 参照。`--iters=200` は §2「サンプル数下限」節参照）。**
 
 ## 1. 計測手段
 
@@ -98,22 +98,22 @@ git fetch origin
 git checkout --detach origin/main
 git rev-parse HEAD   # この SHA を §4.1「計測コミット SHA」へ記入する
 cargo run -p backend-metal --example gemm_diagnosis --release -- \
-    --gpu-core-count=40 --ideal-groups-multiplier=6
+    --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200
 ```
 
 出力形式は size ごとに 2 行（`phase=start`・`phase=result`）:
 
-- 開始マーカー: `size=<N> phase=start epoch_secs=<t>`（`wall_measurement` 呼び出し直前に出力）
-- 結果行: `size=<N> phase=result epoch_secs=<t> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>)
+- 開始マーカー: `size=<N> phase=start epoch_ms=<t>`（`wall_measurement` 呼び出し直前に出力）
+- 結果行: `size=<N> phase=result epoch_ms=<t> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>)
   actual_groups=<v> ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v>
   wall_q1_ms=<v> wall_q3_ms=<v> tflops_lower_bound=<v> logical_load_gbs_lower_bound=<v>`
 
-を size=512/1024/2048/4096 の 4 回（計 8 行）出力する。`epoch_secs`（UNIX epoch 秒。
-`gemm_diagnosis.rs::macos_impl::epoch_secs`）は下記 ioreg 継続サンプリングループが記録する
-epoch 秒と同じ単位で、両者を突き合わせることで size ごとの実行区間を特定できる（codex-review
-指摘。PR #649。以前はタイムスタンプ・size 別開始マーカーがなく対応付けができなかった）。
-`wall_ms`（中央値）に加え `wall_q1_ms`・`wall_q3_ms`（`bench_harness::protocol::run` が返す
-`Measurement::{q1,q3}_secs`）を計測手順（§1「中央値/Q1/Q3」）どおり出力し、破棄しない
+を size=512/1024/2048/4096 の 4 回（計 8 行）出力する。`epoch_ms`（UNIX epoch ミリ秒。
+`gemm_diagnosis.rs::macos_impl::epoch_millis`）は下記 ioreg 継続サンプリングループが記録する
+ミリ秒タイムスタンプと同じ単位で、両者を突き合わせることで size ごとの実行区間を特定できる
+（codex-review 指摘。PR #649。以前はタイムスタンプ・size 別開始マーカーがなく対応付けができ
+なかった）。`wall_ms`（中央値）に加え `wall_q1_ms`・`wall_q3_ms`（`bench_harness::protocol::run`
+が返す `Measurement::{q1,q3}_secs`）を計測手順（§1「中央値/Q1/Q3」）どおり出力し、破棄しない
 （codex-review 指摘。PR #649）。
 
 `ideal_groups` の算出（`idealGroups = gpu_core_count * ideal_groups_multiplier`）に用いる
@@ -125,28 +125,47 @@ epoch 秒と同じ単位で、両者を突き合わせることで size ごと�
 上記コマンド例のとおり `--gpu-core-count=40 --ideal-groups-multiplier=6` を指定する。CLI 値は
 正数（ゼロ拒否）・乗算オーバーフロー不可であることも検証される（codex-review 指摘 P2・PR #649）。
 
+### サンプル数下限（`--iters`・epoch_ms・ioreg サンプリング間隔の関係。cursor[bot] 指摘 Medium・PR #649）
+
+`gemm_diagnosis.rs::macos_impl::epoch_millis` の docs コメントが示すとおり、`--iters` 未指定
+（既定 20/20）だと size=512/1024/2048 は 1 size あたりの総実行区間（`phase=start` 〜
+`phase=result`）が 1 秒未満で終わることがある。この場合 epoch_ms 化（秒精度から解像度を上げた
+こと）だけでは根本解決にならない —— 下記 ioreg 継続サンプリングは 0.5 秒間隔でしか標本を取らない
+ため、1 秒未満の区間には ioreg サンプルが 0〜1 個しか収まらず、§4.2 に記入する「最大値・中央値」
+が意味を持つ標本数（目安として **5 サンプル以上**）に届かない。**上記コマンド例のとおり
+`--iters=200` を指定して warmup・計測回数を引き上げ、size ごとの区間を意図的に伸ばしてから
+計測する**（`--iters` は 20 以上必須。20 未満は `MeasurementConfig::new` が TASK-8.1 下限違反として
+fail-closed で拒否する）。§4.2 記入時、該当 size の区間に収まった ioreg サンプル数が 5 未満だった
+場合はその旨を明記し、最大値・中央値を確定値ではなく参考値として扱う。
+
 GPU 使用率のサンプリング（ベンチ実行と並行して別ターミナルで実行。sudo 不要）。`ioreg` は単発スナップショットの
-ため、`cargo run`（4 size 分の warmup 20 回・計測 20 回を含む全実行区間。概算で数十秒〜数分）と並走させて
-0.5 秒間隔で継続サンプリングし、テキストへ記録する（1 回だけの取得では計測区間内の変動・ピークを捉えられない
-ため。codex-review 指摘。PR #649）:
+ため、`cargo run`（`--iters=200` 適用時は 4 size 分の warmup 200 回・計測 200 回を含む全実行区間。
+概算で数分）と並走させて 0.5 秒間隔で継続サンプリングし、テキストへ記録する（1 回だけの取得では
+計測区間内の変動・ピークを捉えられないため。codex-review 指摘。PR #649）:
 
 ```sh
 # macOS 標準 date（BSD date）はサブ秒指定子 %N 非対応（GNU coreutils 拡張のため）。
-# 秒単位のタイムスタンプで十分（0.5 秒間隔サンプリングの前後関係が分かればよい）。
-# UNIX epoch 秒（%s）で記録し、gemm_diagnosis.rs の stdout が出力する
-# `epoch_secs=<t>`（phase=start/phase=result。共通の時刻源）と直接比較できるようにする
-# （codex-review 指摘。PR #649）。
+# ミリ秒精度が必要な場合は zsh 組み込みの $EPOCHREALTIME（macOS 既定シェル。
+# `zmodload zsh/datetime` で有効化）を使う。fallback として perl
+# （macOS に同梱。`Time::HiRes` 標準ライブラリ）も利用できる。
+# gemm_diagnosis.rs の stdout が出力する `epoch_ms=<t>`（phase=start/
+# phase=result。共通の時刻源）と直接比較できるようにミリ秒精度で記録する
+# （cursor[bot] 指摘 Medium・PR #649: 秒精度では 1 秒未満の実行区間が
+# 隣接 size と衝突し size 単位で紐付けられなかった）。
+zmodload zsh/datetime
 while true; do
-    date +%s
+    printf '%d\n' $(( EPOCHREALTIME * 1000 ))
     ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
     sleep 0.5
 done | tee /tmp/gpu_utilization_$(date +%Y%m%d_%H%M%S).log
 ```
 
-`cargo run` 終了後に `Ctrl-C` でサンプリングを停止し、記録したログの epoch 秒を、stdout の各 size の
-`size=<N> phase=start epoch_secs=<t>`（区間開始）〜同じ size の `phase=result epoch_secs=<t>`（区間終了）
-で挟まれた範囲と突き合わせ、その範囲に該当する「Device Utilization」値の最大値・中央値を §4.2 の
-「GPU 使用率（ioreg）」列へ記入する（単一の代表値ではなくレンジ・代表値の両方を残す）。
+`cargo run` 終了後に `Ctrl-C` でサンプリングを停止し、記録したログのミリ秒タイムスタンプを、stdout の
+各 size の `size=<N> phase=start epoch_ms=<t>`（区間開始）〜同じ size の
+`phase=result epoch_ms=<t>`（区間終了）で挟まれた範囲と突き合わせ、その範囲に該当する
+「Device Utilization」値の最大値・中央値を §4.2 の「GPU 使用率（ioreg）」列へ記入する（単一の代表値
+ではなくレンジ・代表値の両方を残す。該当サンプル数が上記「サンプル数下限」節の目安を下回る場合は
+参考値である旨を明記する）。
 
 計測衛生: AC 電源接続。他 GPU 負荷アプリ（ブラウザ動画・Xcode ビルド・ローカル LLM 等）は終了してから計測する
 （`docs/perf/metal-gemm-dynamic-tile.md`「計測環境」節と同方針）。

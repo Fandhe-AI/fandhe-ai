@@ -48,6 +48,25 @@
 //! は CLI 引数の明示指定がなければ M4 Max 既定プロファイルを使い、その旨を
 //! stderr へ警告出力する。
 //!
+//! ### 計測回数（ioreg サンプリング窓を広げる `--iters`）
+//!
+//! size=512/1024/2048 は既定（`MeasurementConfig::default()` =
+//! warmup 20 回・計測 20 回）だと 1 size あたりの総実行区間が 1 秒未満で
+//! 終わることがあり、`docs/perf/metal-gemm-bottleneck-diagnosis.md` §2 の
+//! ioreg 継続サンプリング（0.5 秒間隔）では 1 size の区間に収まるサンプルが
+//! 0〜1 個しか取れず median/max の算出が意味を持たない（cursor[bot] 指摘
+//! Medium・PR #649）。`--iters=<N>`（`N` は 20 以上。TASK-8.1 下限を
+//! `MeasurementConfig::new` が fail-closed で検証する）で warmup・計測回数を
+//! 両方 `N` へ引き上げ、区間を意図的に伸ばして使う:
+//!
+//! ```sh
+//! cargo run -p backend-metal --example gemm_diagnosis --release -- \
+//!     --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200
+//! ```
+//!
+//! 未指定時は既定（20/20）のまま（4096 size は 137 GFLOP/回のため、既定を
+//! 引き上げると全呼び出し側の実行時間が伸びてしまう。opt-in に限定する）。
+//!
 //! 計測手順・記録テンプレート・判定基準は
 //! `docs/perf/metal-gemm-bottleneck-diagnosis.md` を参照。
 //!
@@ -312,17 +331,29 @@ mod macos_impl {
     /// 同じ入力分布に揃える）。
     const SEED: u64 = 0xC0FFEE;
 
-    /// UNIX epoch 秒（サブ秒精度は不要。`docs/perf/metal-gemm-bottleneck-diagnosis.md`
-    /// §2 の GPU 使用率サンプリングループが `date +%s` で記録する epoch 秒と
+    /// UNIX epoch ミリ秒。`docs/perf/metal-gemm-bottleneck-diagnosis.md`
+    /// §2 の GPU 使用率サンプリングループが記録するミリ秒精度タイムスタンプと
     /// 同じ単位に揃え、別ターミナルの ioreg ログと本 example の stdout を
-    /// size 別に対応付けられるようにする（codex-review 指摘。PR #649）。
+    /// size 別に対応付けられるようにする。
+    ///
+    /// 以前は秒精度（`epoch_secs`）だったが、M4 Max 実測（`dispatch_auto`・
+    /// `MeasurementConfig::default()` = warmup 20 回・計測 20 回）では
+    /// size=512/1024/2048 の 1 size 分の総実行区間が 1 秒未満で終わることが
+    /// あり、`phase=start`・`phase=result` は言うに及ばず**隣接する別 size
+    /// の区間同士**まで同一エポック秒に丸められて衝突し、ioreg サンドイッチ
+    /// 方式（開始〜終了マーカーで挟んだ範囲を size に紐付ける手法）が size
+    /// 単位で使用率を紐付けられなくなる問題があった（cursor[bot] 指摘
+    /// Medium・PR #649）。ミリ秒精度化はこの衝突を実務上の解像度まで縮小する
+    /// （完全排除ではない — `--iters` で意図的に区間を伸ばした運用と組み合わせる
+    /// 前提。`main` 内のコメント・`docs/perf/metal-gemm-bottleneck-diagnosis.md`
+    /// §2「サンプル数下限」節参照）。
     /// システムクロックが UNIX epoch より前を返すことは実運用上あり得ないが、
     /// 診断用の付随情報のため `duration_since` 失敗時も panic させず `0` に
     /// フォールバックする。
-    fn epoch_secs() -> u64 {
+    fn epoch_millis() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
+            .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
     }
 
@@ -378,6 +409,45 @@ mod macos_impl {
         }
     }
 
+    /// `--iters=<N>` で warmup・計測回数（`MeasurementConfig::{warmup,iters}`）
+    /// を両方 `N` へ引き上げる。未指定なら [`MeasurementConfig::default`]
+    /// （20/20。TASK-8.1 下限）を使う。
+    ///
+    /// `epoch_millis` 化（本関数の docs 参照）だけでは、ioreg 側の外部
+    /// サンプリング間隔（`docs/perf/metal-gemm-bottleneck-diagnosis.md` §2 =
+    /// 0.5 秒間隔）そのものは変わらないため、1 size あたりの実行区間が
+    /// サンプリング間隔の数倍程度なければ「その size の区間に収まる ioreg
+    /// サンプル」が 0〜1 個しか得られず median/max の算出が意味を持たない
+    /// （cursor[bot] 指摘 Medium・PR #649）。`--iters` は
+    /// `MeasurementConfig::new` を経由し TASK-8.1 の 20 回下限を下回る指定を
+    /// fail-closed で拒否する（`warmup`・`iters` は `pub` フィールドのため
+    /// 構造体リテラル経由だとこの下限検証をバイパスしうる。下限検証を
+    /// 迂回しない）。既定を引き上げない（4096 size は 137 GFLOP/回であり、
+    /// 既定 20/20 を超えて全呼び出し側の実行時間を伸ばさないよう opt-in に
+    /// 限定する）。
+    fn parse_iters_override() -> Result<Option<usize>, String> {
+        for arg in std::env::args().skip(1) {
+            if let Some(v) = arg.strip_prefix("--iters=") {
+                let n: usize = v
+                    .parse()
+                    .map_err(|_| format!("--iters の値が不正: '{v}'"))?;
+                return Ok(Some(n));
+            }
+        }
+        Ok(None)
+    }
+
+    /// [`MeasurementConfig`] を解決する。`--iters` 未指定なら既定
+    /// （20/20）、指定時は warmup・iters とも `N` へ引き上げる
+    /// （`parse_iters_override` docs 参照。TASK-8.1 の 20 回下限は
+    /// `MeasurementConfig::new` が fail-closed で検証する）。
+    fn resolve_measurement_config() -> Result<MeasurementConfig, String> {
+        match parse_iters_override()? {
+            Some(n) => MeasurementConfig::new(n, n).map_err(|e| e.to_string()),
+            None => Ok(MeasurementConfig::default()),
+        }
+    }
+
     pub fn main() {
         let profile = match resolve_device_profile() {
             Ok(profile) => profile,
@@ -386,20 +456,29 @@ mod macos_impl {
                 std::process::exit(1);
             }
         };
+        let config = match resolve_measurement_config() {
+            Ok(config) => config,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::exit(1);
+            }
+        };
 
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
-        let config = MeasurementConfig::default();
 
         for size in [512usize, 1024, 2048, 4096] {
             let a: SizeAnalytics = analytics::analyze(size, profile);
 
-            // size 別開始マーカー（`epoch_secs`）。別ターミナルで並走させる
+            // size 別開始マーカー（`epoch_millis`）。別ターミナルで並走させる
             // ioreg 継続サンプリング（`docs/perf/metal-gemm-bottleneck-diagnosis.md`
-            // §2。同じく `date +%s` の epoch 秒でログを記録する）と付き合わせ、
-            // size ごとの実行区間を特定できるようにする（codex-review 指摘。
-            // PR #649）。
-            println!("size={size} phase=start epoch_secs={}", epoch_secs());
+            // §2。同じくミリ秒精度でログを記録する）と付き合わせ、size ごとの
+            // 実行区間を特定できるようにする（codex-review 指摘。PR #649）。
+            // 秒精度（`epoch_secs`）からミリ秒精度（`epoch_millis`）へ変更した
+            // 理由は `epoch_millis` の docs コメント参照（cursor[bot] 指摘
+            // Medium・PR #649: 1 size 分の総実行区間が 1 秒未満だと秒精度では
+            // 隣接 size の区間まで同一秒に丸められ紐付けられない）。
+            println!("size={size} phase=start epoch_ms={}", epoch_millis());
 
             // `measurement.{median,q1,q3}_secs` は A・B アップロード＋
             // カーネル実行＋C readback を含む end-to-end 壁時計時間
@@ -433,12 +512,12 @@ mod macos_impl {
                 (a.load_bytes_total + a.store_bytes_total) as f64 / wall / 1e9;
 
             println!(
-                "size={} phase=result epoch_secs={} tile={}x{}x{}({}x{}, staged={}) \
+                "size={} phase=result epoch_ms={} tile={}x{}x{}({}x{}, staged={}) \
                  actual_groups={} ideal_groups={} barriers_per_tg={} \
                  arithmetic_intensity={:.4} wall_ms={:.4} wall_q1_ms={:.4} wall_q3_ms={:.4} \
                  tflops_lower_bound={:.4} logical_load_gbs_lower_bound={:.4}",
                 a.size,
-                epoch_secs(),
+                epoch_millis(),
                 a.tile.bm,
                 a.tile.bn,
                 a.tile.bk,
