@@ -216,8 +216,9 @@ fn parity_baselines_do_not_regress() {
 /// 参照）ため、opt が使える実機では `WmmaTf32` 行も実質 opt カーネルを
 /// 検査してしまい、基本版カーネル単独の後退を検出できない盲点があった。
 /// 現在は経路ごとにエントリポイントを分ける: `WmmaTf32` 行は
-/// [`CudaGemm::run_wmma_tf32_basic_for_test`]（`#[doc(hidden)]` のテスト
-/// 専用口。基本版カーネルを opt の可用性に関わらず直接指定する）を、
+/// [`CudaGemm::run_wmma_tf32_basic_for_test`]（`internal-testing` feature
+/// でのみコンパイルされるテスト専用口。基本版カーネルを opt の可用性に
+/// 関わらず直接指定する。`crates/backend-cuda/Cargo.toml` 参照）を、
 /// `WmmaTf32Opt` 行は引き続き `run_wmma_tf32` を使う。どちらも「実際に
 /// 意図した版のカーネルを踏んだ」ことを事前の可用性 assert で保証してから
 /// 実行する（`wmma_tf32_available`/`wmma_tf32_opt_available` の対称な

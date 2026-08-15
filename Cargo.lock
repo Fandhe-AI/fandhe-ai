@@ -78,6 +78,7 @@ name = "backend-cuda"
 version = "0.3.0"
 dependencies = [
  "backend-cpu",
+ "backend-cuda",
  "bench-harness",
  "cudarc",
  "half",

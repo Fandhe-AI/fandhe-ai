@@ -12,6 +12,27 @@
 //! する。判定式・閾値定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）
 //! 自体は一切変更しない（`backend_cpu::parity` を単に呼ぶだけで複製しない）。
 //!
+//! ## 承認記録（PR #640 codex-review 指摘対応）
+//!
+//! `baseline_fail_count`/`baseline_mean_abs_diff_ceiling` は
+//! `RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`（tolerance 定数）とは
+//! **別の概念**であり、両者を混同しない: tolerance 定数は「1 要素あたりの
+//! 合否判定式」そのもの、baseline のこの 2 値は「その判定式を通した後の
+//! 集計結果（fail 件数・平均絶対誤差）が既知の恒常 fail 状態から悪化して
+//! いないか」を見る非後退の上限である（`assert_no_parity_regression` は
+//! `report.total`・`fail_count`・`mean_abs_diff` の 3 点比較のみを行い、
+//! tolerance 定数自体には一切触れない。`tolerance_constants_are_pinned` が
+//! 定数の無断変更を別途 bit 等値で検知する）。
+//!
+//! この非後退基準（「恒常 fail 経路は green を要求せず、記録済み
+//! ベースラインを上回らないことを機械検査する」設計）自体は、本モジュールが
+//! 実装するイシュー #491 の受け入れ基準に明記された**ユーザー承認済みの
+//! 仕様**であり、本 PR が新設した緩和ではない（イシュー #491 本文
+//! 「§1.2 parity 非後退契約」2 番目の受け入れ基準を単一の正として参照する。
+//! `docs/perf/cuda-parity-baseline.md` §6「ベースライン更新規約」に
+//! 「上方更新（緩和）はユーザー承認必須」と明記し、本表の初期値（下方
+//! 更新にすら当たらない初回記録）とは区別している）。
+//!
 //! `crates/backend-cuda/tests/*.rs` は独立クレート扱いのため、各テスト
 //! ファイルから `mod common;` で本モジュールを共有する
 //! （`crates/autodiff/tests/common/mod.rs` と同型のパターン）。
@@ -80,6 +101,15 @@ pub static BASELINES: &[ParityBaseline] = &[
     // wmma_tf32: 形状網羅の最小ケース（32x32x32、seed=2000）。
     // `tests/gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes` の
     // 先頭ケース（`assert_wmma_tf32_parity(&gemm, ctx, 2000 + 0, 32, 32, 32)`）。
+    //
+    // 既知の限界（PR #640 Cursor Bugbot 指摘・未解決）: 出典テストは
+    // `run_wmma_tf32`（opt 可用なら opt 優先）を opt 可用性確認なしに
+    // 呼ぶため、この記録値が実際には opt カーネル計測である可能性がある
+    // （DGX Spark GB10 実機では opt が概ね利用可能。
+    // `docs/perf/cuda-parity-baseline.md` §3「既知の限界」参照）。基本版
+    // カーネル専用エントリ（`run_wmma_tf32_basic_for_test`）による非後退
+    // 検査との比較でこの provenance 不確実性を認識したうえで扱うこと。
+    // 実機再測定でのみ解消可能（推定値での上書きはしない）。
     ParityBaseline {
         path: ParityPath::WmmaTf32,
         context: "wmma_tf32 32x32x32 seed=2000",
@@ -93,6 +123,9 @@ pub static BASELINES: &[ParityBaseline] = &[
     },
     // wmma_tf32: K=4096 ストレスケース先頭（256x256x4096、seed=8888）。
     // `tests/gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5` の先頭呼出し。
+    //
+    // 既知の限界: 上の 32x32x32 行と同じ provenance 不確実性が該当する
+    // （出典テストが opt 可用性を確認せず `run_wmma_tf32` を呼ぶため）。
     ParityBaseline {
         path: ParityPath::WmmaTf32,
         context: "wmma_tf32 256x256x4096 seed=8888 (PoC-v2-5 stress)",

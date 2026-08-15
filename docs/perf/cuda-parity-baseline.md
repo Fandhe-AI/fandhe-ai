@@ -17,6 +17,16 @@ Phase B/C カーネル改修は「parity green」を受け入れ条件にでき�
 （テスト本体）であり、本ドキュメントは出典・実測環境・更新規約の記録に徹する
 （二重管理を避ける）。
 
+**承認記録（PR #640 codex-review 指摘対応）**: この非後退契約（恒常 fail
+経路を「parity green」ではなく「記録済みベースラインを上回らないこと」で
+受け入れ判定する設計）は、`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`
+（1 要素あたりの合否判定式）を緩和するものではない。契約自体はイシュー #491
+本文「§1.2 parity 非後退契約」の受け入れ基準（`gh issue view 491` で参照
+可能）としてユーザー承認済みの仕様であり、本 PR はその機械検査を実装した
+だけで新たな緩和を導入していない。以後この上限を**上方更新（緩和）**する
+場合のみ §6 のとおり別途ユーザー承認が必要（初回記録・下方更新〈改善の
+反映〉と区別する）。
+
 ## 2. 非後退契約の定義（検査 5 項目）
 
 1. **tolerance 定数不変**: `backend_cpu::RELATIVE_TOLERANCE`（1e-3）・
@@ -52,6 +62,21 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 `crates/backend-cuda/src/gemm.rs` 参照）。実際に opt 固有のタイル境界を
 踏んだ保証を得るため、検査前に `wmma_tf32_opt_available()` を確認する
 契約は既存テスト（`gemm_wmma_tf32_opt.rs`）から踏襲する。
+
+**既知の限界（`wmma_tf32` 行 2 件・PR #640 Cursor Bugbot 指摘。未解決・
+実機再測定が必要）**: 上表 1〜2 行目（32×32×32 seed=2000・
+256×256×4096 seed=8888）は出典テスト `gemm_wmma_tf32.rs` が
+`CudaGemm::run_wmma_tf32` を opt 可用性の確認なしに呼び出しており、DGX
+Spark GB10 実機実測環境では opt カーネルが利用可能であった可能性が高い
+（`docs/perf/cuda-floor-remeasurement.md`「opt カーネル可用性の検証」節
+参照。同実機で `wmma_tf32_opt_available()` が概ね true であることの
+傍証）。そのため記録値が実際には opt カーネルの結果であり、基本版カーネル
+専用エントリ（`CudaGemm::run_wmma_tf32_basic_for_test`。§7 関連）の
+非後退検査と比較した際に K-tiling 差（基本版 8 / opt 16）由来の
+false-fail・false-pass を生む可能性がある。実機未到達のため本 PR では
+再測定できず、`wmma_tf32` 行の基本版カーネル確定測定は実機到達時の
+フォローアップ課題として引き継ぐ（推定値で上書きしない。§6「未計測形状・
+シードの行追加」と同じ原則を、既存行の provenance 再確認にも適用する）。
 
 **§5.3 の記録は「各テストで最初に fail した (形状, シード) の値」のみ
 （`assert_parity` が最初の fail で panic する契約のため）**。上表 6 行は

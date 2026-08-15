@@ -724,9 +724,18 @@ impl CudaGemm {
     ///
     /// 本メソッドは REQ-11「明示切替 API を提供しない」方針を本番経路に
     /// 限って維持したうえでの、この非後退契約テストのためだけに存在する
-    /// `#[doc(hidden)]` の狭い例外である（本番向け公開 API 面は
-    /// `run_wmma_tf32` のみであり続ける）。テスト以外の呼び出し元を
-    /// 増やさないこと。
+    /// 狭い例外である（本番向け公開 API 面は `run_wmma_tf32` のみであり
+    /// 続ける）。
+    ///
+    /// **PR #640 codex-review 指摘対応（`pub` のみでは外部クレートから
+    /// 通常のライブラリ API として呼び出せてしまう懸念）**: `#[doc(hidden)]`
+    /// はドキュメント非表示にするだけで可視性そのものは変えないため、
+    /// `internal-testing` feature（`Cargo.toml` 参照。既定 OFF・
+    /// `[dev-dependencies]` の自己参照経由でのみ `cargo test` 時に有効化
+    /// される）で `pub` 自体をコンパイル時に無効化する。この feature を
+    /// 明示的に有効化しない限り本メソッドはビルド後のクレートに存在しない
+    /// （downstream が `cargo add backend-cuda` するだけでは到達不能）。
+    #[cfg(feature = "internal-testing")]
     #[doc(hidden)]
     pub fn run_wmma_tf32_basic_for_test(
         &self,
