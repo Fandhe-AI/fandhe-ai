@@ -251,6 +251,59 @@ impl WmmaOptKernelConfig {
             dim_k: DimSpec::Dynamic,
         }
     }
+
+    /// [`RenderedWmmaOptKernel::validate_launch_shape`] の実体（起動前
+    /// 検査）。`dim_m`/`dim_n`/`dim_k` それぞれについて
+    /// [`DimSpec::matches_launch_dim`] を実引数 `m`/`n`/`k` に対して検査し、
+    /// `Static` 次元の食い違いを fail-closed で拒否する（PR #643
+    /// codex-review P1 指摘への対応。`kernels_mma::MmaKernelConfig::validate_launch_shape`
+    /// と同じ設計）。`Dynamic` のみの既定 config（`default_tf32`／
+    /// `default_f16`）では常に `Ok`。
+    #[allow(dead_code)] // 理由は kernels_mma::DimSpec::matches_launch_dim と同じ
+    pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
+        self.dim_m.matches_launch_dim(m)?;
+        self.dim_n.matches_launch_dim(n)?;
+        self.dim_k.matches_launch_dim(k)?;
+        Ok(())
+    }
+}
+
+/// [`render_wmma_tf32_opt`]／[`render_wmma_f16_opt`] が返す、展開済み
+/// カーネルソースと展開元 [`WmmaOptKernelConfig`] を 1 個にまとめた
+/// descriptor（PR #643 codex-review P1 指摘への対応。
+/// `kernels_mma::RenderedMmaKernel` と同じ設計）。
+///
+/// フィールドは非公開とし、ソース取得は
+/// [`RenderedWmmaOptKernel::source`]、起動前検査は
+/// [`RenderedWmmaOptKernel::validate_launch_shape`] のみを公開する。これに
+/// より「`Static` 次元を含む config から得たソースは、必ずその config を
+/// 経由した起動時形状検査を通らない限りカーネル起動へ渡せない」という
+/// 構造的な契約になる（`RenderedMmaKernel` ドキュメンテーションコメント
+/// 参照）。`mod kernels_wmma_opt` が非公開モジュールのため、既定構成のみ
+/// 消費する現状の呼び出し元からは本構造体・以下の全メソッドが呼ばれず
+/// dead-code 解析が誤検知する。`#[allow(dead_code)]` の理由は
+/// [`render_wmma_tf32_opt`] と同じ。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RenderedWmmaOptKernel {
+    source: String,
+    cfg: WmmaOptKernelConfig,
+}
+
+impl RenderedWmmaOptKernel {
+    /// NVRTC（`nvrtc::compile_ptx`）へ渡すカーネルソース文字列。
+    #[allow(dead_code)]
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// このソースをコンパイルして得たカーネル関数を実際に起動する直前に、
+    /// 呼び出し元が必ず呼ぶ契約。
+    /// [`WmmaOptKernelConfig::validate_launch_shape`] へ委譲する。
+    #[allow(dead_code)]
+    pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)
+    }
 }
 
 /// [`WmmaOptKernelConfig`] を TF32 opt カーネル向けに fail-closed 検証する
@@ -385,7 +438,11 @@ fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 
 /// [`WmmaOptKernelConfig`] を TF32 opt カーネルソースへ展開する
 /// （イシュー #516）。展開前に [`validate_wmma_tf32_opt_config`] で
-/// SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。
+/// SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。返す
+/// [`RenderedWmmaOptKernel`] はソースと展開元 `cfg` を保持し、ホスト側の
+/// 将来の非既定構成起動 API は `.source()` を `nvrtc::compile_ptx` に渡した
+/// のち、カーネル起動直前に `.validate_launch_shape(m, n, k)` を必ず経由
+/// させること（`RenderedWmmaOptKernel` ドキュメンテーションコメント参照）。
 ///
 /// `mod kernels_wmma_opt` が非公開モジュールのため、既定構成のみを使う
 /// 現状の `gemm.rs`（[`wmma_tf32_f32_opt_source`] 経由）からは呼ばれず
@@ -393,9 +450,12 @@ fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 /// 後続 #504／#519 で追加される想定のため `#[allow(dead_code)]` を付す
 /// （`kernels_mma::render_mma_f16` と同じ判断）。
 #[allow(dead_code)]
-pub fn render_wmma_tf32_opt(cfg: &WmmaOptKernelConfig) -> Result<String, CudaError> {
+pub fn render_wmma_tf32_opt(cfg: &WmmaOptKernelConfig) -> Result<RenderedWmmaOptKernel, CudaError> {
     validate_wmma_tf32_opt_config(cfg)?;
-    Ok(render_wmma_tf32_opt_unchecked(cfg))
+    Ok(RenderedWmmaOptKernel {
+        source: render_wmma_tf32_opt_unchecked(cfg),
+        cfg: *cfg,
+    })
 }
 
 /// [`render_wmma_tf32_opt_unchecked`]／[`wmma_tf32_f32_opt_source`] が
@@ -774,13 +834,17 @@ fn render_wmma_f16_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 
 /// [`WmmaOptKernelConfig`] を f16 opt カーネルソースへ展開する
 /// （イシュー #516）。展開前に [`validate_wmma_f16_opt_config`] で不変
-/// 条件を fail-closed 検査する。`#[allow(dead_code)]` の理由は
-/// [`render_wmma_tf32_opt`] と同じ（非公開モジュール・現状は既定構成のみ
-/// 消費・後続 #504／#519 が非既定 config の呼び出し元となる想定）。
+/// 条件を fail-closed 検査する。返す [`RenderedWmmaOptKernel`] の起動前
+/// 検査契約は [`render_wmma_tf32_opt`] と同じ。`#[allow(dead_code)]` の
+/// 理由も [`render_wmma_tf32_opt`] と同じ（非公開モジュール・現状は既定
+/// 構成のみ消費・後続 #504／#519 が非既定 config の呼び出し元となる想定）。
 #[allow(dead_code)]
-pub fn render_wmma_f16_opt(cfg: &WmmaOptKernelConfig) -> Result<String, CudaError> {
+pub fn render_wmma_f16_opt(cfg: &WmmaOptKernelConfig) -> Result<RenderedWmmaOptKernel, CudaError> {
     validate_wmma_f16_opt_config(cfg)?;
-    Ok(render_wmma_f16_opt_unchecked(cfg))
+    Ok(RenderedWmmaOptKernel {
+        source: render_wmma_f16_opt_unchecked(cfg),
+        cfg: *cfg,
+    })
 }
 
 /// [`render_wmma_f16_opt_unchecked`]／[`wmma_f16_opt_source`] が結合する
@@ -1102,7 +1166,8 @@ mod tests {
             dim_n: DimSpec::Dynamic,
             dim_k: DimSpec::Static(4096),
         };
-        let src = render_wmma_tf32_opt(&cfg).expect("有効な構成が拒否されました");
+        let rendered = render_wmma_tf32_opt(&cfg).expect("有効な構成が拒否されました");
+        let src = rendered.source();
 
         for expected in [
             "#define WMMA_TF32_OPT_BLOCK_M 64",
@@ -1117,6 +1182,16 @@ mod tests {
             );
         }
         assert!(src.contains("gr < DIM_M && gc < DIM_K"));
+
+        // dim_k=Static(4096) のため、実際の起動形状 k=16（コンパイル時に
+        // 焼き込んだ値と食い違う）は
+        // RenderedWmmaOptKernel::validate_launch_shape で fail-closed に
+        // 拒否されなければならない（PR #643 codex-review P1 指摘への対応）。
+        assert!(rendered.validate_launch_shape(64, 96, 4096).is_ok());
+        assert!(matches!(
+            rendered.validate_launch_shape(64, 96, 16),
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
     }
 
     /// フェイルクローズド検証（TF32 opt）: SMEM 予算超過・倍数違反・
@@ -1170,6 +1245,34 @@ mod tests {
             render_wmma_f16_opt(&cfg),
             Err(CudaError::InvalidKernelConfig { .. })
         ));
+    }
+
+    /// [`WmmaOptKernelConfig::validate_launch_shape`] が dim_m/dim_n/dim_k
+    /// のいずれか 1 つでも実 shape と食い違えば拒否することを検査する
+    /// （PR #643 codex-review P1 指摘への対応。指摘箇所
+    /// `kernels_wmma_opt.rs:322`（TF32 opt 検証器）・`:725`（f16 opt 検証器）
+    /// 双方を `default_tf32`／`default_f16` それぞれで検査する。
+    /// `kernels_mma::tests::mma_kernel_config_validate_launch_shape_rejects_k_mismatch`
+    /// と同じ設計）。
+    #[test]
+    fn wmma_opt_config_validate_launch_shape_rejects_k_mismatch() {
+        for base in [
+            WmmaOptKernelConfig::default_tf32(),
+            WmmaOptKernelConfig::default_f16(),
+        ] {
+            let cfg = WmmaOptKernelConfig {
+                dim_k: DimSpec::Static(4096),
+                ..base
+            };
+
+            assert!(cfg.validate_launch_shape(128, 128, 4096).is_ok());
+
+            let result = cfg.validate_launch_shape(128, 128, 16);
+            assert!(
+                matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+                "dim_k=Static(4096) の関数を実際は K=16 で起動しようとする場合は拒否されるべきです: base={base:?}, result={result:?}"
+            );
+        }
     }
 
     /// 受け入れ基準 2（PTX/SASS ダンプによるコンパイル時展開の実確認）は
