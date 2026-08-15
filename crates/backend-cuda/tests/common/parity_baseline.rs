@@ -104,12 +104,16 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_fail_count: 10647,
         baseline_mean_abs_diff_ceiling: 4.477e-3,
     },
-    // wmma_tf32（基本カーネル。opt ではない）: 512x512x512。
-    // `tests/tensor_core_real_device.rs::tensor_core_parity_record` TF32 部分
-    // （`gemm.run_wmma_tf32(...)`、seed=0x7A0）。
+    // wmma_tf32_opt: 512x512x512。エントリポイントは `run_wmma_tf32` と共通
+    // だが、記録元 `tensor_core_real_device.rs::tensor_core_parity_record`
+    // TF32 部分は事前に `wmma_tf32_opt_available()` を assert してから計測
+    // しているため（`gemm.run_wmma_tf32(...)`、seed=0x7A0）、opt 経路の
+    // ベースラインとして扱う（`WmmaTf32` のままだと `check_wmma_tf32_baseline`
+    // が opt 可用性を検査せず、opt 計測値を basic カーネルの計測結果と
+    // 比較してしまう。Cursor Bugbot 指摘対応）。
     ParityBaseline {
-        path: ParityPath::WmmaTf32,
-        context: "wmma_tf32 512x512x512 seed=0x7A0 (tensor_core_parity_record)",
+        path: ParityPath::WmmaTf32Opt,
+        context: "wmma_tf32_opt 512x512x512 seed=0x7A0 (tensor_core_parity_record)",
         m: 512,
         n: 512,
         k: 512,

@@ -42,8 +42,8 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 |---|---|---|---|---|---|---|
 | `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 32×32×32 | 2000 | 154/1024 (15.0%) | 3.698e-4 | `gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes`（先頭ケース） |
 | `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 256×256×4096 | 8888 | 10647/65536 (16.2%) | 4.476e-3 | `gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5`（先頭呼出し） |
-| `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 512×512×512 | 0x7A0 | 42493/262144 (16.2%) | 1.574e-3 | `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分） |
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32`（opt 利用可能環境） | 64×64×64 | 3000 | 699/4096 (17.1%) | 5.676e-4 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`（先頭ケース） |
+| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32`（opt 利用可能環境） | 512×512×512 | 0x7A0 | 42493/262144 (16.2%) | 1.574e-3 | `tensor_core_real_device.rs::tensor_core_parity_record`（TF32 部分。計測前に `wmma_tf32_opt_available()` を assert） |
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32`（opt 利用可能環境） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`（先頭呼出し） |
 | `mma_f16` | `CudaMmaGemm::run_f16` | 256×256×4096 | 9999 | 101/65536 (0.15%) | 7.646e-5 | `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（先頭呼出し） |
 
