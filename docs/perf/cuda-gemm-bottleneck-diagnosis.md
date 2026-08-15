@@ -74,6 +74,16 @@ env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
 計測区間のみをプロファイルする（既定 `--warmup 2 --iters 5` なら `--launch-skip 2 --launch-count 5`）。
 
 ```sh
+# `set -o pipefail`: `gemm_profile_target` が opt カーネル不在等で非 0 終了
+# しても `| tee` の終了コードは tee 自身の 0 で上書きされてしまう
+# （bash の pipefail 既定 off の挙動）。`gemm_profile_target` は opt カーネル
+# 不在時に基本カーネルへ黙ってフォールバックせず非 0 終了するよう変更済み
+# のため（PR #637 codex-review 指摘。`gemm_profile_target.rs` 該当コメント
+# 参照）、本ループ側も pipefail を有効化して非 0 終了を確実に検知し、
+# 誤ったカーネルの ncu 結果を「正常計測」として次サイズへ進めないように
+# する。
+set -o pipefail
+
 BIN=$HOME/work/target-rust-ai-library/release/examples/gemm_profile_target
 METRICS="sm__warps_active.avg.pct_of_peak_sustained_active,\
 lts__t_sector_hit_rate.pct,\
@@ -85,9 +95,13 @@ sm__inst_issued.avg.pct_of_peak_sustained_active"
 
 for path in wmma_tf32 mma_f16; do
   for size in 1024 2048 4096; do
-    ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
+    if ! ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
         "$BIN" --path "$path" --size "$size" \
-        2>&1 | tee "ncu-${path}-${size}.log"
+        2>&1 | tee "ncu-${path}-${size}.log"; then
+      echo "abort: path=${path} size=${size} で gemm_profile_target または ncu が非 0 終了した" \
+           "（opt カーネル不在等の異常系。ログ ncu-${path}-${size}.log を確認する）。" >&2
+      exit 1
+    fi
   done
 done
 ```

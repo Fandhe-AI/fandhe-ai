@@ -286,27 +286,38 @@ fn main() {
             // コメント参照）上、opt カーネル不在時に基本カーネルへ黙って
             // フォールバックして計測を続けると、診断対象と異なるカーネルの
             // ncu 結果を正常計測として生成してしまう（PR #637 codex-review
-            // 指摘）。加えて、もし opt・基本の両方が未ロードであれば
-            // フォールバック先の `launch_wmma_tf32` 自体が
-            // `CudaError::WmmaUnavailable` を返し、起動ループ側の `.expect()`
-            // が panic していた（`CudaDevice::new`／`CudaMmaGemm::new` が
-            // 徹底している fail-soft skip 方針に反する。PR #637 Cursor
-            // Bugbot 指摘）。よって opt カーネル不在時はフォールバック
-            // させず、起動ループへ入る前に非 0 終了せず早期 return して
-            // skip する（`cuda_floor_bench.rs` の環境非対応スキップと同じ
-            // 判断: panic ではなく理由を表示して終了する）。
+            // 指摘）。
+            //
+            // ここでの終了コードは上の `CudaDevice::new`／`CudaGemm::new`
+            // 失敗時の skip（exit 0）とは意図的に区別する:
+            // `CudaDevice::new` 失敗（CUDA driver 自体が不在）は「そもそも
+            // CUDA 実行環境ではない」ことを意味し fail-soft skip が正しい。
+            // 対してここに到達するのは CUDA デバイス・`CudaGemm::new` 自体
+            // は成立した上で opt カーネルの NVRTC ロードのみが失敗した場合
+            // （`wmma_tf32_opt_unavailable_reason()` が理由を保持している
+            // ことからも NVRTC コンパイル失敗等の異常系であることが分かる）
+            // であり、オペレーターは opt カーネルをプロファイルする意図で
+            // このバイナリを実機（GPU が動く環境）で起動している。この場合
+            // に exit 0 で「正常終了」に見せると、ncu 実行スクリプト側が
+            // 失敗を検知できず基本カーネルの結果を opt カーネルの正常計測
+            // として記録表へ転記してしまう（PR #637 codex-review 指摘の
+            // 「実行手順もこの終了状態を検査しないため誤ったボトルネック分析
+            // に進みうる」の直接原因）。よって非 0 終了させ、§3.3 の採取
+            // ループ（`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）側の
+            // `set -o pipefail` と組み合わせて誤計測をループ内で検知
+            // させる。
             if gemm.wmma_tf32_opt_available() {
                 println!("wmma_tf32 opt kernel: AVAILABLE (used for this run's launches).");
             } else {
-                println!(
+                eprintln!(
                     "backend-cuda gemm_profile_target: wmma_tf32 opt kernel unavailable ({}); \
-                     skipping instead of falling back to the basic (non-optimized) WMMA(TF32) \
+                     aborting instead of falling back to the basic (non-optimized) WMMA(TF32) \
                      kernel, because ncu results for the fallback kernel would not represent the \
                      opt-kernel data-reuse characteristics under diagnosis.",
                     gemm.wmma_tf32_opt_unavailable_reason()
                         .unwrap_or("unknown reason")
                 );
-                return;
+                std::process::exit(1);
             }
 
             let a = rng.fill_vec((m as usize) * (k as usize));
