@@ -125,32 +125,54 @@ extern "C" __global__ void __launch_bounds__(128) probe_setmaxnreg_dec(
 /// 実測値との比較で区別できる。`docs/cuda-tensor-core-design.md` への転記時は
 /// `control_baseline_regs` の実測値も併記すること。
 ///
-/// **`result=success` の判別力限界と `coherent` ログ（イシュー #484 レビュー
-/// 指摘 Medium 対応）**: 本カーネルの演算自体（`in[idx] * 2.0f`）は 3 引数・
-/// idx 計算程度でベースラインレジスタ数が数十/thread 程度に収まりうるため、
-/// `result=success`（`try_load_and_run` の launch/synchronize/期待値検証が
-/// すべて通過）は「setmaxnreg による再配分が実際に成立した」ことと
-/// 「レジスタ予算的に無風（`dec`/`inc` の対象値がベースラインに対して
-/// 意味のある制約にならない）で通っただけ」を区別できない。この判別力限界
-/// 自体は演算を複雑化してレジスタ圧を上げても質的には解消しない
-/// （どの程度で「意味のある制約」になるかは ptxas の割付次第で決め打ち
-/// できないため）。そのため本ファイルは代わりに、`.dec 24`/`.inc 232` との
-/// 整合性を `setmaxnreg_incdec_probe` が `stage=coherence_check` 行として
-/// **2 段階**で明示的にログする（PTX ISA 上 `setmaxnreg.dec` はベースライン
-/// 以下、`.inc` はベースライン以上の対象値を要求するため、`coherent=false`
-/// はベースラインとの不整合＝本プローブの具体値が無風または UB 域のいずれかを
-/// 示す客観的シグナルになる）: (1) [`report_control_baseline_regs`] が
-/// `setmaxnreg` を含まない対照カーネルから実測した値（`source=control`。
-/// `__launch_bounds__` は揃えているが `setmaxnreg` 命令の有無自体が ptxas の
-/// 静的レジスタ割り当てへ与える影響までは揃う保証がないため、あくまで
-/// toolchain 健全性の参考値）、(2) [`try_load_and_run`] が `setmaxnreg` を
-/// 実際に発行するプローブカーネル自身から実測した値（`source=probe_self`。
-/// PTX ISA の dec/inc 制約が本来要求する対象そのものであり**権威値**。
-/// 以前の実装は (1) のみを比較しておりプローブ自身の静的割り当てを
-/// 未計測だった＝本レビュー指摘の是正対象）。`docs/cuda-tensor-core-design.md`
-/// への転記時は `result` に加え `source=probe_self` の `coherent` 行を優先して
-/// 併記し、`coherent=false` の場合は `result=success` であっても「使用可」と
-/// 断定しないこと。
+/// **`result=success` の判別力限界と `coherent` ログの位置づけ（イシュー
+/// #484 レビュー指摘 Medium・PR #636 再指摘 P2 対応）**: 本カーネルの演算
+/// 自体（`in[idx] * 2.0f`）は 3 引数・idx 計算程度でベースラインレジスタ数が
+/// 数十/thread 程度に収まりうるため、`result=success`（`try_load_and_run` の
+/// launch/synchronize/期待値検証がすべて通過）は「setmaxnreg による再配分が
+/// 実際に成立した」ことと「レジスタ予算的に無風（`dec`/`inc` の対象値が
+/// ベースラインに対して意味のある制約にならない）で通っただけ」を区別
+/// できない。この判別力限界自体は演算を複雑化してレジスタ圧を上げても
+/// 質的には解消しない（どの程度で「意味のある制約」になるかは ptxas の
+/// 割付次第で決め打ちできないため）。そのため本ファイルは代わりに、
+/// `.dec 24`/`.inc 232` との整合性を `setmaxnreg_incdec_probe` が
+/// `stage=coherence_check` 行として **2 段階**でログする: (1)
+/// [`report_control_baseline_regs`] が `setmaxnreg` を含まない対照カーネル
+/// から実測した値（`source=control`）、(2) [`try_load_and_run`] が
+/// `setmaxnreg` を実際に発行するプローブカーネル自身から実測した値
+/// （`source=probe_self`）。
+///
+/// **`num_regs`（`CU_FUNC_ATTRIBUTE_NUM_REGS`）は両 `source` とも静的な
+/// register/thread 割り当て値であり、`setmaxnreg` 命令が実行される時点の
+/// 動的なレジスタ再配分後の実割当量ではない**（`cuModuleLoadData` 時点の
+/// ドライバ JIT〈ptxas 相当〉がコンパイル時に確定させる値であり、
+/// `setmaxnreg.dec/inc` はカーネル**実行中**に warp 単位でこの予算を
+/// 動的に変更する命令のため、両者は原理的に異なる観測対象である）。
+/// したがって `source=probe_self` を含め `coherent` は producer/consumer
+/// 間の再配分が**実際に成立したこと**の証明にはならず、いずれの
+/// `source` も **診断参考値**にとどまる（以前の実装は `source=probe_self` を
+/// 「PTX ISA の dec/inc 制約が本来要求する対象そのものであり権威値」と
+/// 位置付けていたが、静的値であるという性質は `source=control` と変わらない
+/// ため、この位置付けは誤りであり本対応で撤回する）。`coherent=false` は
+/// 「`.dec`/`.inc` の対象値が実測ベースラインと矛盾する（無風または UB 域）」
+/// ことを示す客観的な**警告シグナル**として引き続き有用だが、
+/// `coherent=true` は「矛盾は見つからなかった」以上の意味を持たず、それ
+/// 単独でも `result=success` との組み合わせでも「setmaxnreg による再配分が
+/// 実際に成立した」ことの根拠にはできない。
+///
+/// **本スパイクが確定できる範囲・できない範囲**: 本ファイルが実測で確定
+/// できるのは (a) NVRTC が命令を**受理**するか（`stage=nvrtc_compile`・
+/// `module_load`・`load_function`）と (b) 受理された場合に実行が**完走**し
+/// 出力がビット完全一致するか（`stage=execute`。不一致は `result=corrupted`
+/// として `panic`）の 2 点のみである。producer/consumer 間でレジスタ予算が
+/// 実際に非対称再配分された動的証拠（例: 実行時の SM レジスタ占有率を
+/// warp 単位で追跡する `nsight-compute` 等のプロファイラによる観測）は
+/// 本ファイルのスコープ外であり、必要な場合は別途 Issue で追跡する
+/// （`.claude/rules/out-of-scope-tracking.md`）。`docs/cuda-tensor-core-design.md`
+/// への転記時は、使用可否の一次判断根拠を (a)・(b) の実測結果に置き、
+/// `coherent` は「矛盾の有無を示す補助的な警告シグナル」として併記する
+/// （`coherent=false` かつ `result=success` の場合に「使用可」と断定しない
+/// 運用は維持する）。
 const PROBE_SETMAXNREG_INCDEC: &str = r#"
 extern "C" __global__ void __launch_bounds__(256) probe_setmaxnreg_incdec(
     const float* __restrict__ in,
@@ -419,16 +441,24 @@ fn fmt_opt_regs(value: Option<i32>) -> String {
 ///
 /// `source` は `measured_regs` の由来を示す診断ラベルで、`"probe_self"`
 /// （`setmaxnreg` を実際に発行するプローブカーネル自身を
-/// [`try_load_and_run`] がロードして実測した値。PTX ISA の dec/inc 制約は
-/// 本来この値に対して要求されるため**権威値**）と `"control"`
+/// [`try_load_and_run`] がロードして実測した値）と `"control"`
 /// （[`report_control_baseline_regs`] が `setmaxnreg` を含まない対照カーネル
 /// から実測した値。`__launch_bounds__` は揃えているが `setmaxnreg` 命令の
-/// 有無自体が ptxas の静的レジスタ割り当てへ与える影響までは揃わないため、
-/// toolchain 健全性の**参考値**にとどまる）のいずれかを渡す。呼び出し元は
-/// 両方の `source` で本関数を呼び、`docs/cuda-tensor-core-design.md` への
-/// 転記時は `source=probe_self` 側の行を優先して参照すること
-/// （イシュー #484 レビュー指摘 Medium 対応の是正。以前は `control` 実測値
-/// のみを比較しておりプローブ自身の静的割り当てを未計測だった）。
+/// 有無自体が ptxas の静的レジスタ割り当てへ与える影響までは揃わない）の
+/// いずれかを渡す。**両者とも `cuModuleLoadData` 時点のドライバ JIT が
+/// 確定させた静的な register/thread 数であり、`setmaxnreg` 命令が実行時に
+/// 動的へ変更するレジスタ予算そのものではない**（イシュー #484 レビュー
+/// 指摘 Medium・PR #636 再指摘 P2 対応。[`PROBE_SETMAXNREG_INCDEC`]
+/// ドキュメンテーションコメント参照）。したがって `source=probe_self` を
+/// 「権威値」とする位置付けは撤回し、両 `source` とも**診断参考値**として
+/// 扱う: `coherent=false` は `.dec`/`.inc` の対象値と実測ベースラインの
+/// 矛盾を示す警告シグナルとして有用だが、`coherent=true` は「矛盾が
+/// 見つからなかった」以上の意味を持たず、producer/consumer 間の再配分が
+/// 実際に成立したことの証明にはならない。呼び出し元は両方の `source` で
+/// 本関数を呼び、`docs/cuda-tensor-core-design.md` への転記時は
+/// `source=probe_self` 行を参考値として併記しつつ、使用可否の一次判断根拠は
+/// `nvrtc_compile`/`module_load`/`load_function`（受理）と `execute`
+/// （実行完走＋出力一致）の実測結果に置くこと。
 ///
 /// PTX ISA 上、`setmaxnreg.dec` の対象値は現在のレジスタ数**以下**、
 /// `setmaxnreg.inc` の対象値は現在のレジスタ数**以上**であることが要求される
@@ -478,10 +508,17 @@ fn report_setmaxnreg_coherence(
 /// `label` は診断ログ用のラベルであると同時に、`module.load_function(label)`
 /// へそのまま渡す **CUDA 側 `extern "C"` 関数シンボル名**でもある
 /// （呼び出し元は `ptx` を生成した `src`（`PROBE_SETMAXNREG_DEC`/
-/// `PROBE_SETMAXNREG_INCDEC`）内の `__global__` 関数名と必ず一致させる
-/// こと。対照カーネル〈`CONTROL_DEC`/`CONTROL_INCDEC`〉や
-/// arch-accelerated 版のコンパイル確認専用ラベル
-/// 〈`..._arch_accelerated`〉は本関数へは渡さない＝実行しない）。
+/// `PROBE_SETMAXNREG_INCDEC`）内の `__global__` 関数名と必ず一致させること。
+/// arch-accelerated 版〈`<arch>a`〉の PTX を実行する場合も、シンボル名は
+/// 基準 arch 版と同一〈`probe_setmaxnreg_dec`/`probe_setmaxnreg_incdec`〉の
+/// ため `label` はそのまま渡す。対照カーネル〈`CONTROL_DEC`/
+/// `CONTROL_INCDEC`〉は本関数へは渡さない＝実行しない）。
+///
+/// `arch` は診断ログ専用（`load_function` には渡さない）で、基準 arch版と
+/// arch-accelerated 版の呼び出しを `SETMAXNREG_PROBE_RESULT` の行から区別
+/// するために付与する（PR #636 レビュー指摘 P2 対応。同一 `label` で 2 回
+/// 呼ばれるため `arch` フィールドがないと `stage=execute kernel=...` 等の
+/// 行がどちらの呼び出しに由来するか転記者が判別できない）。
 ///
 /// `block_dim` は呼び出し元が `src` の warpgroup 構成に合わせて指定する
 /// （[`WARPGROUP_BLOCK_DIM`]＝1 warpgroup／[`PRODUCER_CONSUMER_BLOCK_DIM`]
@@ -489,17 +526,26 @@ fn report_setmaxnreg_coherence(
 /// [`PRODUCER_CONSUMER_BLOCK_DIM`] でも 1 ブロックに収まり producer・
 /// consumer 双方の warpgroup が確実に起動される値として選んでいる。
 ///
+/// arch-accelerated 版も基準 arch 版と同じ「受理されても `panic` させない」
+/// 方針を維持する（`module_load`/`load_function`/`launch`/`synchronize` の
+/// 失敗は fail-loud にしない）。ただし `result=corrupted`（実行完走したが
+/// 出力が期待値と不一致）は基準 arch 版と同様に `panic` させる: 出力破壊は
+/// arch-accelerated 版であっても「命令の受理可否」の範疇を超えた危険な
+/// シグナルであり、softening しない（本関数末尾のコメント参照）。
+///
 /// 戻り値の `Option<i32>` は、`setmaxnreg` を実際に発行する本プローブ
 /// カーネル自身（`func`）を [`cudarc::driver::CudaFunction::num_regs`] で
-/// 実測した `num_regs_per_thread`（イシュー #484 レビュー指摘 Medium 対応。
-/// [`report_setmaxnreg_coherence`] ドキュメンテーションコメント参照）。
-/// `module_load`/`load_function` 失敗時は実測不能のため `None` を返す。
-/// 実測は `module.load_function` 直後（起動前）に行う: レジスタ割り当ては
-/// `cuModuleLoadData` 時点のドライバ JIT で確定済みのため、実行結果の成否に
-/// 左右されず記録できる（[`report_control_baseline_regs`] と同じ理屈）。
+/// 実測した `num_regs_per_thread`（診断参考値であり動的な実割当量では
+/// ない。[`report_setmaxnreg_coherence`] ドキュメンテーションコメント
+/// 参照）。`module_load`/`load_function` 失敗時は実測不能のため `None` を
+/// 返す。実測は `module.load_function` 直後（起動前）に行う: レジスタ
+/// 割り当ては `cuModuleLoadData` 時点のドライバ JIT で確定済みのため、
+/// 実行結果の成否に左右されず記録できる（[`report_control_baseline_regs`]
+/// と同じ理屈）。
 fn try_load_and_run(
     device: &CudaDevice,
     label: &str,
+    arch: &str,
     ptx: cudarc::nvrtc::Ptx,
     block_dim: (u32, u32, u32),
     expected: impl Fn(f32) -> f32,
@@ -512,8 +558,8 @@ fn try_load_and_run(
         Ok(module) => module,
         Err(err) => {
             println!(
-                "SETMAXNREG_PROBE_RESULT stage=module_load kernel={label} result=failed \
-                 detail={err:?}"
+                "SETMAXNREG_PROBE_RESULT stage=module_load kernel={label} arch={arch} \
+                 result=failed detail={err:?}"
             );
             return None;
         }
@@ -522,29 +568,29 @@ fn try_load_and_run(
         Ok(func) => func,
         Err(err) => {
             println!(
-                "SETMAXNREG_PROBE_RESULT stage=load_function kernel={label} result=failed \
-                 detail={err:?}"
+                "SETMAXNREG_PROBE_RESULT stage=load_function kernel={label} arch={arch} \
+                 result=failed detail={err:?}"
             );
             return None;
         }
     };
 
     // `setmaxnreg` が要求する dec/inc の PTX ISA 制約は、対照カーネルではなく
-    // このプローブカーネル自身の静的レジスタ割り当てに対して定義される
-    // （イシュー #484 レビュー指摘 Medium 対応）。起動前に実測して記録し、
-    // `probe_self_regs` を呼び出し元へ返す。
+    // このプローブカーネル自身の静的レジスタ割り当てに対して定義される。
+    // 起動前に実測して記録し、`probe_self_regs` を呼び出し元へ返す
+    // （診断参考値。[`report_setmaxnreg_coherence`] 参照）。
     let probe_self_regs = match func.num_regs() {
         Ok(num_regs) => {
             println!(
-                "SETMAXNREG_PROBE_RESULT stage=probe_self_regs kernel={label} result=measured \
-                 num_regs_per_thread={num_regs}"
+                "SETMAXNREG_PROBE_RESULT stage=probe_self_regs kernel={label} arch={arch} \
+                 result=measured num_regs_per_thread={num_regs}"
             );
             Some(num_regs)
         }
         Err(err) => {
             println!(
-                "SETMAXNREG_PROBE_RESULT stage=probe_self_regs kernel={label} result=failed \
-                 detail={err:?}"
+                "SETMAXNREG_PROBE_RESULT stage=probe_self_regs kernel={label} arch={arch} \
+                 result=failed detail={err:?}"
             );
             None
         }
@@ -580,15 +626,16 @@ fn try_load_and_run(
     };
     if let Err(err) = launch_result {
         println!(
-            "SETMAXNREG_PROBE_RESULT stage=launch kernel={label} result=failed detail={err:?}"
+            "SETMAXNREG_PROBE_RESULT stage=launch kernel={label} arch={arch} result=failed \
+             detail={err:?}"
         );
         return probe_self_regs;
     }
 
     if let Err(err) = device.stream().synchronize() {
         println!(
-            "SETMAXNREG_PROBE_RESULT stage=synchronize kernel={label} result=failed \
-             detail={err:?}"
+            "SETMAXNREG_PROBE_RESULT stage=synchronize kernel={label} arch={arch} \
+             result=failed detail={err:?}"
         );
         return probe_self_regs;
     }
@@ -612,8 +659,8 @@ fn try_load_and_run(
     match mismatch {
         None => {
             println!(
-                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} result=success \
-                 output_matches_expected=true"
+                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} arch={arch} \
+                 result=success output_matches_expected=true"
             );
             probe_self_regs
         }
@@ -628,11 +675,12 @@ fn try_load_and_run(
             // 冒頭コメントの「命令の受理可否は panic させない」方針は
             // コンパイル・ロード・起動・同期の失敗（=setmaxnreg 自体が拒否
             // された）に限った例外であり、実行が完走したのに数値が壊れて
-            // いるケースまでは対象外とする。
+            // いるケースまでは対象外とする（arch-accelerated 版〈`arch`
+            // フィールドで判別〉も同じ扱いとし softening しない）。
             panic!(
-                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} result=corrupted \
-                 output_matches_expected=false sample_input={x} sample_output={y} \
-                 sample_expected={}",
+                "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} arch={arch} \
+                 result=corrupted output_matches_expected=false sample_input={x} \
+                 sample_output={y} sample_expected={}",
                 expected(x)
             );
         }
@@ -642,9 +690,11 @@ fn try_load_and_run(
 /// `setmaxnreg.dec` のみを発行するカーネルの実機プローブ。
 ///
 /// `device.arch()`（実機では `compute_121` 相当）に加え、arch-accelerated
-/// 版が存在し受理されるかの参考として `<arch>a`（`compute_121a`）でも
-/// コンパイルを追試する。両方の結果を `SETMAXNREG_PROBE_RESULT` として
-/// 記録する（本ファイル冒頭コメント「実機実測」節）。
+/// 版 `<arch>a`（`compute_121a`）でもコンパイル・ロード・起動・同期・
+/// 出力検証まで追試する（PR #636 レビュー指摘 P2 対応。コンパイル受理
+/// 可否のみでは sm_121 実機での「受理・実行可能か」を確定できないため）。
+/// 両方の結果を `SETMAXNREG_PROBE_RESULT` として記録する（本ファイル冒頭
+/// コメント「実機実測」節）。
 ///
 /// `try_compile`/`try_load_and_run` の前に [`report_control_baseline_regs`]
 /// で対照カーネル（[`CONTROL_DEC`]）のベースライン register/thread 数を
@@ -673,10 +723,9 @@ fn setmaxnreg_dec_probe() {
     // 指摘 Low 対応。`setmaxnreg_incdec_probe` の `report_control_baseline_regs`
     // 呼び出しと対称の構成にする）。`control_ok` は基準 arch 向け
     // `try_compile` へそのまま渡し、同一 `control_src`・同一 arch の
-    // 再コンパイルを避ける（同レビュー Low 対応）。この時点の
-    // `coherence_check` は `source=control`（参考値）として記録するのみで、
-    // 権威値は `try_load_and_run` が返すプローブ自身の実測値
-    // （`source=probe_self`）である（同レビュー Medium 対応）。
+    // 再コンパイルを避ける（同レビュー Low 対応）。両 `source` とも
+    // 診断参考値であり「権威値」ではない（[`report_setmaxnreg_coherence`]
+    // ドキュメンテーションコメント参照。PR #636 レビュー指摘 P2 対応）。
     let (baseline_regs, control_ok) =
         report_control_baseline_regs(&device, "control_dec", CONTROL_DEC, arch);
     report_setmaxnreg_coherence(
@@ -698,6 +747,7 @@ fn setmaxnreg_dec_probe() {
         let probe_self_regs = try_load_and_run(
             &device,
             "probe_setmaxnreg_dec",
+            arch,
             ptx,
             WARPGROUP_BLOCK_DIM,
             |x| x + 1.0,
@@ -711,19 +761,41 @@ fn setmaxnreg_dec_probe() {
         );
     }
 
-    // 参考追試: arch-accelerated 版（`compute_XYa`）が NVRTC に受理される
-    // かどうかも記録する（実行までは行わず受理可否のみ。受理された場合の
-    // 実行検証は B-3 着手時に改めて設計する）。基準 arch とは異なる arch
-    // での確認のため、`control_src` は `report_control_baseline_regs` の
-    // コンパイル結果を再利用できず、ここで独立にコンパイルする
-    // （イシュー #484 レビュー指摘 Low 対応の適用範囲外＝真に別入力）。
+    // arch-accelerated 版（`compute_XYa`）: コンパイル受理可否だけでなく、
+    // 受理された場合はロード・起動・同期・出力検証まで実行する（PR #636
+    // レビュー指摘 P2 対応。以前はコンパイル確認のみで `try_compile` の
+    // 戻り値を捨てており、sm_121 実機での「受理・実行可能か」を確定
+    // できていなかった）。カーネル内 `__global__` 関数シンボル名は基準
+    // arch 版と同一〈`probe_setmaxnreg_dec`〉のため [`try_load_and_run`]
+    // へ渡す `label` はそのまま再利用し、`arch` 引数に `arch_accelerated`
+    // を渡すことで `SETMAXNREG_PROBE_RESULT` の行を基準 arch 版と区別する。
+    // 基準 arch とは異なる arch での確認のため、`control_src` は
+    // `report_control_baseline_regs` のコンパイル結果を再利用できず、
+    // ここで独立にコンパイルする（イシュー #484 レビュー指摘 Low 対応の
+    // 適用範囲外＝真に別入力）。
     let control_ok_accelerated = compile_ptx(CONTROL_DEC, &arch_accelerated).is_ok();
-    let _ = try_compile(
+    if let Some(ptx_accelerated) = try_compile(
         "probe_setmaxnreg_dec_arch_accelerated",
         PROBE_SETMAXNREG_DEC,
         control_ok_accelerated,
         &arch_accelerated,
-    );
+    ) {
+        let probe_self_regs_accelerated = try_load_and_run(
+            &device,
+            "probe_setmaxnreg_dec",
+            &arch_accelerated,
+            ptx_accelerated,
+            WARPGROUP_BLOCK_DIM,
+            |x| x + 1.0,
+        );
+        report_setmaxnreg_coherence(
+            "probe_setmaxnreg_dec_arch_accelerated",
+            "probe_self",
+            probe_self_regs_accelerated,
+            Some(64),
+            None,
+        );
+    }
 }
 
 /// producer warpgroup が `setmaxnreg.dec`、consumer warpgroup が
@@ -731,11 +803,11 @@ fn setmaxnreg_dec_probe() {
 /// 参照）の実機プローブ。
 ///
 /// `setmaxnreg_dec_probe` と同様、`device.arch()` に加え arch-accelerated
-/// 版（`<arch>a`）でのコンパイル受理可否も追試する。B-3
-/// （タイル拡大時のレジスタ予算設計）が引き継ぐのは producer/consumer
-/// 非対称パターン（本テスト）側であり、`setmaxnreg.dec` 単体（片道）版より
-/// 情報価値が高いため、dec 版の拒否予測が的中した場合に備えてこちらでも
-/// 追試を欠かさない。
+/// 版（`<arch>a`）でもコンパイル・ロード・起動・同期・出力検証まで追試
+/// する（PR #636 レビュー指摘 P2 対応）。B-3（タイル拡大時のレジスタ予算
+/// 設計）が引き継ぐのは producer/consumer 非対称パターン（本テスト）側で
+/// あり、`setmaxnreg.dec` 単体（片道）版より情報価値が高いため、dec 版の
+/// 拒否予測が的中した場合に備えてこちらでも追試を欠かさない。
 ///
 /// `try_compile`/`try_load_and_run` の前に [`report_control_baseline_regs`]
 /// で対照カーネルの実際のベースライン register/thread 数を実測・記録する
@@ -788,13 +860,15 @@ fn setmaxnreg_incdec_probe() {
         let probe_self_regs = try_load_and_run(
             &device,
             "probe_setmaxnreg_incdec",
+            arch,
             ptx,
             PRODUCER_CONSUMER_BLOCK_DIM,
             |x| x * 2.0,
         );
-        // 権威値（`setmaxnreg` を実際に発行するプローブ自身の静的レジスタ
-        // 割り当て）による最終判定。`source=control` の行は toolchain 健全性
-        // の参考記録として残す（イシュー #484 レビュー指摘 Medium 対応）。
+        // `setmaxnreg` を実際に発行するプローブ自身の静的レジスタ割り当て
+        // による判定（診断参考値。`source=control` の行は toolchain 健全性
+        // の参考記録として残す。イシュー #484 レビュー指摘 Medium・
+        // PR #636 レビュー指摘 P2 対応）。
         report_setmaxnreg_coherence(
             "probe_setmaxnreg_incdec",
             "probe_self",
@@ -804,16 +878,38 @@ fn setmaxnreg_incdec_probe() {
         );
     }
 
-    // 参考追試: arch-accelerated 版（`compute_XYa`）が NVRTC に受理される
-    // かどうかも記録する（`setmaxnreg_dec_probe` と同型。実行までは行わず
-    // 受理可否のみ。受理された場合の実行検証は B-3 着手時に改めて設計する）。
+    // arch-accelerated 版（`compute_XYa`）: コンパイル受理可否だけでなく、
+    // 受理された場合はロード・起動・同期・出力検証まで実行する
+    // （`setmaxnreg_dec_probe` と同型。PR #636 レビュー指摘 P2 対応。以前は
+    // コンパイル確認のみで `try_compile` の戻り値を捨てており、sm_121 実機
+    // での「受理・実行可能か」を確定できていなかった）。カーネル内
+    // `__global__` 関数シンボル名は基準 arch 版と同一
+    // 〈`probe_setmaxnreg_incdec`〉のため [`try_load_and_run`] へ渡す
+    // `label` はそのまま再利用し、`arch` 引数に `arch_accelerated` を渡す
+    // ことで `SETMAXNREG_PROBE_RESULT` の行を基準 arch 版と区別する。
     // 基準 arch と異なる arch のため `control_src` を独立にコンパイルする
     // （イシュー #484 レビュー指摘 Low 対応の適用範囲外＝真に別入力）。
     let control_ok_accelerated = compile_ptx(CONTROL_INCDEC, &arch_accelerated).is_ok();
-    let _ = try_compile(
+    if let Some(ptx_accelerated) = try_compile(
         "probe_setmaxnreg_incdec_arch_accelerated",
         PROBE_SETMAXNREG_INCDEC,
         control_ok_accelerated,
         &arch_accelerated,
-    );
+    ) {
+        let probe_self_regs_accelerated = try_load_and_run(
+            &device,
+            "probe_setmaxnreg_incdec",
+            &arch_accelerated,
+            ptx_accelerated,
+            PRODUCER_CONSUMER_BLOCK_DIM,
+            |x| x * 2.0,
+        );
+        report_setmaxnreg_coherence(
+            "probe_setmaxnreg_incdec_arch_accelerated",
+            "probe_self",
+            probe_self_regs_accelerated,
+            Some(24),
+            Some(232),
+        );
+    }
 }
