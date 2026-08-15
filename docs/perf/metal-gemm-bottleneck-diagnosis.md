@@ -74,9 +74,10 @@ logical_load_gbs_lower_bound  = (load_bytes_total + store_bytes_total) / wall_se
 `tflops_lower_bound` は実カーネル TFLOPS の健全な下限（転送時間の分だけ実際はこれより高い）。
 `logical_load_gbs_lower_bound` は **DRAM 実効帯域ではない**（`load_bytes_total` はキャッシュ再利用を考慮
 しない論理ロード量。キャッシュヒットにより実 DRAM トラフィックはこれより少なく、546GB/s 公称帯域との比較
-には使わない。codex-review 指摘。PR #649）。分離を諦めた代わりに、ロード律速・occupancy 不足の判定は
-非 macOS でも算出できる解析値（`arithmetic_intensity`・`actual_groups`/`ideal_groups`・`barriers_per_tg`。
-§3）を主に用いる方針へ §5 の判定基準も改訂した。
+には使わない。codex-review 指摘。PR #649）。分離を諦めた代わりに、ロード律速の仮説判定・並列度
+〈concurrency/saturation〉ヒューリスティックによる一次観察は非 macOS でも算出できる解析値
+（`arithmetic_intensity`・`actual_groups`/`ideal_groups`・`barriers_per_tg`。`ideal_groups` が真の
+occupancy を表さない点は §1「解析値」節参照。§3）を主に用いる方針へ §5 の判定基準も改訂した。
 
 計画 §3.1 が想定していた「example 内パイプライン vs `dispatch_variant` の数値照合」は、独自パイプライン構築を
 行わない本設計では対象がないため実施しない（本 example は `MetalGemm::dispatch_auto` という既存の検証済み
@@ -222,7 +223,7 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
   ideal_groups` が成立しても真の occupancy 不足が存在しないことの証明にはならない（codex-review 指摘。
   PR #649）。この仮説を確定判定へ格上げするには Xcode GPU counters 等によるレジスタ・threadgroup
   memory 使用率の実測が必要
-- ロード律速の仮説が不成立（実測で machine balance point を上回ると判明）・occupancy 不足の判定も不成立の
+- ロード律速の仮説が不成立（実測で machine balance point を上回ると判明）・並列度〈concurrency/saturation〉不足の仮説判定も不成立の
   場合、またはロード律速の仮説が実 DRAM トラフィック実測なしで確定判定に格上げできず結論が定まらない場合は、
   バリア同期コスト（`barriers_per_tg` の増加傾向。§3.2 表参照）・タイル選択自体の再検討（`tile::select` が
   1024 以降も一律 64×64 を選び続ける点）・`tflops_lower_bound` の size 間の伸び方（頭打ちしているか）を

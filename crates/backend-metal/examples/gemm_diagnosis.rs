@@ -103,7 +103,9 @@
 //! [`analytics::DeviceProfile`] のドキュメント参照）を主に用いる方針へ
 //! `docs/perf/metal-gemm-bottleneck-diagnosis.md` §5 も合わせて改訂した。
 
-/// 実効帯域・occupancy 等の解析値。`objc2` 系 FFI に触れない純粋関数の
+/// 実効帯域・並列度〈concurrency/saturation〉ヒューリスティック等の解析値
+/// （`ideal_groups` は真の occupancy を表さない。[`DeviceProfile`] のドキュメント
+/// 参照）。`objc2` 系 FFI に触れない純粋関数の
 /// ため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
 /// コンパイル・実行できる（`crate::tile`・`crate::pad` と同じ設計判断）。
 mod analytics {
@@ -390,7 +392,7 @@ mod macos_impl {
             let measurement = wall_measurement(&gemm, &ctx, size, size, size, &config);
             let wall = measurement.median_secs;
 
-            // `tflops_lower_bound`: 転送時間は非負（`wall_secs ≥
+            // `tflops_lower_bound`: 転送時間は非負（`wall`（壁時計秒） ≥
             // kernel_secs`）という不等式のみから導かれる健全な下限値。
             // 実際のカーネル TFLOPS はこれ以上（転送時間の分だけ高い）。
             // 分離を試みないため `_approx`（誤った精度感を与える名称）
@@ -401,9 +403,9 @@ mod macos_impl {
             // `logical_load_gbs_lower_bound`: `load_bytes_total +
             // store_bytes_total`（`analytics::analyze` 参照。threadgroup
             // 間・K タイル間のキャッシュ再利用を考慮しない論理ロード量の
-            // 下限値）を `wall_secs` で割った値。**DRAM 実効帯域ではない**
+            // 下限値）を `wall`（壁時計秒）で割った値。**DRAM 実効帯域ではない**
             // （キャッシュヒットにより実際の DRAM トラフィックはこれより
-            // 少なく、逆に `wall_secs` が `kernel_secs` 以上であることから
+            // 少なく、逆に `wall` が `kernel_secs` 以上であることから
             // 論理ロードスループットの下限でもある）。M4 Max 公称帯域
             // 546GB/s との比較には使わない（codex-review 指摘。PR #649）。
             let logical_load_gbs_lower_bound =
