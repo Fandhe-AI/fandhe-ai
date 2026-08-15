@@ -79,6 +79,76 @@ fn baseline_fixture_is_self_consistent() {
     }
 }
 
+/// `pending_basic_remeasurement` フィールドの誤用防止（codex-review P1
+/// 指摘対応・イシュー #491）: このフラグは「基本版カーネル記録値の
+/// provenance が opt/basic 混同で確定していない」ケース専用であり、
+/// `WmmaTf32Opt`・`MmaF16` の記録元は opt 可用性確認済み／基本-opt 分岐が
+/// 存在しないためこの不確実性が原理的に生じない（`common/parity_baseline.rs`
+/// 各行コメント参照）。このテストは `WmmaTf32Opt`/`MmaF16` の行に
+/// `pending_basic_remeasurement: true` が誤って付与されていないことを
+/// 固定し、非後退ゲートが意図せず広くスキップされる回帰を防ぐ。
+#[test]
+fn pending_basic_remeasurement_is_scoped_to_wmma_tf32_only() {
+    for b in BASELINES {
+        if b.path != ParityPath::WmmaTf32 {
+            assert!(
+                !b.pending_basic_remeasurement,
+                "{}: pending_basic_remeasurement は WmmaTf32（基本版）行専用です。\
+                 経路 {:?} で true になっており、非後退ゲートが意図せず\
+                 スキップされます",
+                b.context, b.path
+            );
+        }
+    }
+}
+
+/// 「非後退ゲートとして機能している行数」を経路ごとに可視化する
+/// （codex-review P1 指摘対応の副作用への対策・イシュー #491）。
+///
+/// `baseline_fixture_is_self_consistent` の「経路ごとに 1 行以上存在する」
+/// 検査は `pending_basic_remeasurement: true` の行も 1 行として数えるため、
+/// `WmmaTf32`（基本版）の 2 行がどちらも pending になった現状ではこの検査
+/// だけでは「実際には基本版カーネルの非後退を検査する行が 0 件」という
+/// 状態を見逃す（gate が機能していないのに green に見える、まさに元の
+/// codex-review 指摘と同じ形の落とし穴）。このテストは
+/// `WmmaTf32`（基本版）の enforced 行数が**現状 0 件である**ことを明示的に
+/// 固定し、実機再測定で `pending_basic_remeasurement: false` の行が
+/// 追加されたら本テストの期待値を更新する必要があることをコード上に残す
+/// （`docs/perf/cuda-parity-baseline.md` §「既知の限界」参照）。
+#[test]
+fn wmma_tf32_basic_enforced_row_count_is_tracked() {
+    let enforced_wmma_tf32_basic_rows = BASELINES
+        .iter()
+        .filter(|b| b.path == ParityPath::WmmaTf32 && !b.pending_basic_remeasurement)
+        .count();
+    assert_eq!(
+        enforced_wmma_tf32_basic_rows, 0,
+        "WmmaTf32（基本版）の enforced 行数の想定が変わりました（現状想定=0: \
+         provenance 不確実性〈codex-review P1 指摘〉により全行 \
+         pending_basic_remeasurement=true。実機再測定で確定行を追加した場合は\
+         この期待値を更新し、`baseline_fixture_is_self_consistent` の\
+         「経路ごとに 1 行以上」だけに頼らず基本版カーネルが非後退ゲートで\
+         実際に保護されていることを再確認してください）"
+    );
+
+    // WmmaTf32Opt・MmaF16 は provenance 不確実性が原理的に生じない経路
+    // （common/parity_baseline.rs 各行コメント参照）ため、全行が enforced
+    // であることを固定する。
+    for path in [ParityPath::WmmaTf32Opt, ParityPath::MmaF16] {
+        let total = BASELINES.iter().filter(|b| b.path == path).count();
+        let enforced = BASELINES
+            .iter()
+            .filter(|b| b.path == path && !b.pending_basic_remeasurement)
+            .count();
+        assert_eq!(
+            enforced, total,
+            "経路 {path}: pending_basic_remeasurement=true の行が含まれています \
+             （この経路は provenance 不確実性が生じないため全行 enforced である\
+             べきです）"
+        );
+    }
+}
+
 /// 検査関数自体の falsification テスト（`.claude/rules/coding-rust.md`
 /// 「本番経路で unwrap/expect を使わない」とは別軸の品質観点: 検査
 /// ユーティリティが「常に pass する」壊れ方をしていないことを固定する。
@@ -99,6 +169,7 @@ fn assert_no_parity_regression_panics_on_fail_count_regression() {
         total: 16,
         baseline_fail_count: 2,
         baseline_mean_abs_diff_ceiling: 1e-4,
+        pending_basic_remeasurement: false,
     };
     // fail_count がベースライン(2)を上回る合成レポート。
     let a = vec![0.0f32; baseline.total];
@@ -129,6 +200,7 @@ fn assert_no_parity_regression_panics_on_mean_abs_diff_regression() {
         // fail_count は緩く設定し、mean_abs_diff 側のみで fail させる。
         baseline_fail_count: 4,
         baseline_mean_abs_diff_ceiling: 1e-6,
+        pending_basic_remeasurement: false,
     };
     let a = vec![0.0f32; baseline.total];
     // 絶対誤差救済閾値(1e-5)未満のため複合判定は pass するが、
@@ -153,6 +225,7 @@ fn assert_no_parity_regression_panics_on_total_mismatch() {
         total: 16,
         baseline_fail_count: 100,
         baseline_mean_abs_diff_ceiling: 1.0,
+        pending_basic_remeasurement: false,
     };
     // total が baseline(16) と異なる合成レポート。
     let a = vec![0.0f32; 9];
@@ -223,6 +296,19 @@ fn parity_baselines_do_not_regress() {
 /// 意図した版のカーネルを踏んだ」ことを事前の可用性 assert で保証してから
 /// 実行する（`wmma_tf32_available`/`wmma_tf32_opt_available` の対称な
 /// 事前検査。既存テスト `gemm_wmma_tf32_opt.rs` と同じ考え方）。
+///
+/// **PR #640 codex-review P1 指摘対応（イシュー #491・本 PR）**:
+/// `baseline.pending_basic_remeasurement` が `true` の行（現状 `WmmaTf32`
+/// 2 行。`common/parity_baseline.rs` の当該行コメント参照）は、記録値の
+/// provenance が確定していない（opt カーネル実測の疑いがある）ため
+/// `run_wmma_tf32_basic_for_test`（基本版専用エントリ）の結果と比較しても
+/// 非後退ゲートとして成立しない（カーネルが異なれば fail_count・
+/// mean_abs_diff の分布も異なり、false-fail・false-pass の両方を生む）。
+/// そのためこれらの行は基本版カーネルを実行はするが
+/// `assert_no_parity_regression` による合否判定には使わず、クラッシュしない
+/// ことのみを確認する（実機再測定で provenance が確定し
+/// `pending_basic_remeasurement: false` へ更新されるまでの暫定措置。
+/// `docs/perf/cuda-parity-baseline.md` §「既知の限界」）。
 fn check_wmma_tf32_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
     match baseline.path {
         ParityPath::WmmaTf32 => assert!(
@@ -268,6 +354,21 @@ fn check_wmma_tf32_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
     };
 
     let report = backend_cpu::compare(&c_gpu, &c_ref).expect("shape must match baseline fixture");
+
+    if baseline.pending_basic_remeasurement {
+        // provenance 不確実（上記ドキュメンテーションコメント参照）のため
+        // 非後退の合否判定には使わない。カーネルが正常終了し比較自体が
+        // 成立すること（shape 不一致等の contract 違反がないこと）のみを
+        // 確認済みとしてここで打ち切る。
+        eprintln!(
+            "{}: pending_basic_remeasurement=true のため非後退判定をスキップします \
+             (実測 fail_count={}/{}, mean_abs_diff={:.6e}。実機再測定で provenance \
+             確定後に判定を有効化してください)",
+            baseline.context, report.fail_count, report.total, report.mean_abs_diff
+        );
+        return;
+    }
+
     assert_no_parity_regression(baseline.context, &report, baseline);
 }
 

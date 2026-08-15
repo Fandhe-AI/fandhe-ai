@@ -63,8 +63,8 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 踏んだ保証を得るため、検査前に `wmma_tf32_opt_available()` を確認する
 契約は既存テスト（`gemm_wmma_tf32_opt.rs`）から踏襲する。
 
-**既知の限界（`wmma_tf32` 行 2 件・PR #640 Cursor Bugbot 指摘。未解決・
-実機再測定が必要）**: 上表 1〜2 行目（32×32×32 seed=2000・
+**既知の限界（`wmma_tf32` 行 2 件・PR #640 Cursor Bugbot 指摘・codex-review
+P1 指摘。未解決・実機再測定が必要）**: 上表 1〜2 行目（32×32×32 seed=2000・
 256×256×4096 seed=8888）は出典テスト `gemm_wmma_tf32.rs` が
 `CudaGemm::run_wmma_tf32` を opt 可用性の確認なしに呼び出しており、DGX
 Spark GB10 実機実測環境では opt カーネルが利用可能であった可能性が高い
@@ -77,6 +77,17 @@ false-fail・false-pass を生む可能性がある。実機未到達のため�
 再測定できず、`wmma_tf32` 行の基本版カーネル確定測定は実機到達時の
 フォローアップ課題として引き継ぐ（推定値で上書きしない。§6「未計測形状・
 シードの行追加」と同じ原則を、既存行の provenance 再確認にも適用する）。
+
+**機械的な運用対応（codex-review P1 指摘対応）**: この provenance 不確実性を
+「わかったうえで放置」せず、`ParityBaseline::pending_basic_remeasurement`
+フィールド（`common/parity_baseline.rs`）でこの 2 行を明示的に `true` へ
+マークした。`parity_nonregression.rs::check_wmma_tf32_baseline` はこのフラグ
+が立つ行について、基本版カーネル（`run_wmma_tf32_basic_for_test`）自体は
+実行してクラッシュしないことを確認するが、`assert_no_parity_regression` に
+よる合否判定（非後退ゲート）には使わない。すなわち「正しいベースラインを
+得るまで基本版の合否判定に使用しない」（対応案の後者）を採用し、実機再測定
+で provenance が確定した時点で `pending_basic_remeasurement: false` へ更新し
+判定を有効化する。
 
 **§5.3 の記録は「各テストで最初に fail した (形状, シード) の値」のみ
 （`assert_parity` が最初の fail で panic する契約のため）**。上表 6 行は
