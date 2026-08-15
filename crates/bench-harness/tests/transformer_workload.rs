@@ -54,6 +54,10 @@ const D_FF: usize = baseline_spec().d_ff;
 const BATCH: usize = baseline_spec().batch;
 const SEQ_LEN: usize = baseline_spec().seq_len;
 const HEAD_DIM: usize = D_MODEL / N_HEADS;
+/// LayerNormalization の epsilon。単一真実源は [`baseline_spec`] の
+/// `layer_norm_eps` フィールド（Bugbot 指摘・PR #647: 従来 `1e-5` をハードコードしており、
+/// SSOT を変更しても実ワークロードが追従しないドリフトを許していた）。
+const LAYER_NORM_EPS: f32 = baseline_spec().layer_norm_eps;
 
 /// 決定的シード（REQ-8「決定的シードを用いること」）。入力・重み生成の双方に使う。
 /// 単一真実源は [`bench_harness::transformer_workload::SEED`]（#589）。
@@ -246,7 +250,7 @@ fn transformer_block_forward(
 ) -> Tensor<f32> {
     let ln_attrs = LayerNormAttrs {
         axis: -1,
-        epsilon: 1e-5,
+        epsilon: LAYER_NORM_EPS,
     };
 
     let attn_out = multi_head_attention(ops, x, w);
