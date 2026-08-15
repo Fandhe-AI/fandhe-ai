@@ -179,9 +179,16 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 （§3）を主とし、`wall_ms`・`tflops_lower_bound` は size 間の相対的なスループット傾向（頭打ちの有無）の
 補助証跡として扱う:
 
-- **ロード律速の判定**: `arithmetic_intensity`（§3.2 表。size に依らずほぼ一定 15.06〜15.88 FLOP/byte）を
-  FP32 理論ピーク演算性能 ÷ 546GB/s の machine balance point（§3.1「要記入」欄が確定してから算出）と比較し、
-  `arithmetic_intensity` が machine balance point を下回る → ロード律速 → **D-2 を優先**
+- **ロード律速の「仮説」判定（確定判定ではない）**: `arithmetic_intensity`（§3.2 表。size に依らずほぼ一定
+  15.06〜15.88 FLOP/byte）は threadgroup 間・K タイル間のキャッシュ再利用を無視した論理ロード量を分母とする
+  値であり、実 DRAM トラフィックではない（「実測部分の設計判断」節参照）。そのため `FP32 理論ピーク演算性能
+  ÷ 546GB/s` という **DRAM 側の** machine balance point（§3.1「要記入」欄が確定してから算出）と直接比較
+  しても、両者はメモリ階層が異なり（`arithmetic_intensity` はキャッシュヒット分を含めない論理値、
+  machine balance point は DRAM 実効帯域が前提）本来比較できない。`arithmetic_intensity` が machine
+  balance point を下回ることは「実 DRAM 帯域で律速している」ことの確定的な証拠にはならず、あくまで
+  「キャッシュ再利用込みでも DRAM 律速の可能性を排除できない」という**仮説生成**に留める。この仮説を
+  確定判定へ格上げするには、Metal System Trace 等による実 DRAM トラフィック・実効帯域の実測が必要
+  （codex-review 指摘。PR #649）。仮説が成立する場合は **D-2 を優先候補とする**（確定ではない）
 - **occupancy 不足の判定**: `actual_groups < ideal_groups`（§3.2 表）となる size 帯が頭打ち開始点
   （1024 前後）と一致 → **D-7 を優先**
 - 両方成立・どちらも不成立の場合は、バリア同期コスト（`barriers_per_tg` の増加傾向。§3.2 表参照）・
