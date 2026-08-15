@@ -489,21 +489,20 @@ fn render_mma_f16_unchecked(cfg: &MmaKernelConfig) -> String {
 /// [`MmaKernelConfig`] を 1 個にまとめた descriptor（PR #643 codex-review
 /// P1 指摘への対応）。
 ///
-/// フィールドは非公開とし、ソース取得は [`RenderedMmaKernel::source_for_launch`]
-/// の 1 経路のみを公開する（起動前検査を経ない裸の `source()` は公開しない。
-/// PR #643 codex-review 再指摘への対応: `source() -> &str` を独立に公開する
-/// 設計では、呼び出し元がそれをコンパイルして descriptor を破棄し、
-/// `validate_launch_shape` を一度も呼ばずに `CudaFunction` を起動できて
-/// しまい、「検査を通らない限りソースを取得できない」という構造的保証が
-/// 成立しない。`source_for_launch(m, n, k)` は内部で
-/// [`MmaKernelConfig::validate_launch_shape`] を実行してから初めて
-/// `&str` を返すため、検査の呼び忘れは型レベルで起こり得ない）。
-/// `render_mma_f16` が `String` を直接返す設計では、`validate_launch_shape`
-/// の呼び出しは呼び出し元の doc comment 遵守（advisory）に依存してしまい、
-/// `dim_k=Static(4096)` の関数を実際は K=16 の入力で起動するような
-/// 呼び忘れを型で防げない（`DimSpec::matches_launch_dim` ドキュメンテー
-/// ションコメント参照）。後続 #504（コンパイルキャッシュキー）もこの
-/// descriptor をそのまま鍵の構成要素として使える。
+/// フィールドは非公開。生ソースを `&str`/`String` として外へ返す公開
+/// メソッドは一切持たない（PR #643 codex-review 再々指摘への対応:
+/// 従来の `source_for_launch(m, n, k) -> Result<&str, _>` は「検査を通ら
+/// ないとソースを取得できない」構造だったが、取得した `&str` を NVRTC へ
+/// 渡して得た `CudaFunction` は呼び出し元がその後どこにでも保持でき、
+/// 2 回目以降の起動が `validate_launch_shape` を経由するかは呼び出し元の
+/// 実装規律に委ねられてしまっていた（「独立した public メソッドを都度
+/// 呼ぶ契約」は型レベルで強制されていなかった）。本構造体はこの穴を
+/// ふさぐため、ソースの受け渡し先を [`Self::compile`] のクロージャ引数に
+/// 限定する。クロージャの外へソース文字列を持ち出す経路が存在しない
+/// ため、コンパイル自体が本 descriptor の管理下でのみ起こりうる）。
+///
+/// 後続 #504（コンパイルキャッシュキー）もこの descriptor をそのまま
+/// 鍵の構成要素として使える。
 ///
 /// `mod kernels_mma` が非公開モジュールのため、既定構成のみを使う現状の
 /// `gemm_mma.rs` からは本構造体・以下の全メソッドが呼ばれず dead-code
@@ -517,33 +516,84 @@ pub struct RenderedMmaKernel {
 }
 
 impl RenderedMmaKernel {
-    /// 起動を意図する形状 `m`/`n`/`k` を検証してから NVRTC
-    /// （`nvrtc::compile_ptx`）へ渡すカーネルソース文字列を返す唯一の公開
-    /// 経路（PR #643 codex-review P1 再指摘への対応）。
+    /// カーネルソースを `compile` クロージャへ内部的に渡し、コンパイル
+    /// 結果（`CudaFunction`）と展開元 `cfg` を不可分に束ねた
+    /// [`CompiledMmaKernel`] を返す唯一の公開経路（PR #643 codex-review
+    /// 再々指摘への対応）。
     ///
-    /// 内部で [`MmaKernelConfig::validate_launch_shape`] を呼び、`Static`
-    /// 次元と実引数の不一致を fail-closed で拒否してから初めて `&str` を
-    /// 返す。裸の `source() -> &str` を独立に公開すると、呼び出し元がこの
-    /// 検査を一度も経由せずソースをコンパイル・起動できてしまい
-    /// （`RenderedMmaKernel` ドキュメンテーションコメント参照）、REQ-8
-    /// 境界検査が実バッファ境界ではなく静的値を基準に通過しうる。この
-    /// メソッドはコンパイルへ渡す直前に呼び出す想定のため、`m`/`n`/`k` は
-    /// 実際に起動するカーネル呼び出しの引数と同じ値を渡すこと。
+    /// `compile` はソース文字列（`&str`）を受け取り、`nvrtc::compile_ptx`
+    /// →`CudaDevice::context().load_module()`→`load_function("gemm_mma_f16")`
+    /// を行って `CudaFunction` を返す想定（呼び出し元が `CudaDevice`・
+    /// `nvrtc` を持つため、本モジュールはそれらへ依存しない）。ソース文字列
+    /// はこのクロージャの引数としてのみ存在し、戻り値として外部へ漏れる
+    /// 経路がないため、「検査を経ない生ソースの取得」自体が構造的に不可能
+    /// になる。返る [`CompiledMmaKernel`] からも `CudaFunction` を無条件に
+    /// 取り出す経路はなく、実際の起動は
+    /// [`CompiledMmaKernel::with_validated_function`] 経由でのみ行える
+    /// （`RenderedMmaKernel` ドキュメンテーションコメント参照）。
     #[allow(dead_code)]
-    pub fn source_for_launch(&self, m: u32, n: u32, k: u32) -> Result<&str, CudaError> {
-        self.cfg.validate_launch_shape(m, n, k)?;
-        Ok(&self.source)
+    pub fn compile(
+        &self,
+        compile: impl FnOnce(&str) -> Result<cudarc::driver::CudaFunction, CudaError>,
+    ) -> Result<CompiledMmaKernel, CudaError> {
+        let func = compile(&self.source)?;
+        Ok(CompiledMmaKernel {
+            func,
+            cfg: self.cfg,
+        })
     }
 
-    /// コンパイル済みの `CudaFunction` を実際に起動する直前、呼び出しの
-    /// 都度呼ぶ契約（[`Self::source_for_launch`] は最初の 1 回のみ・
-    /// コンパイル前の検査であり、`Dynamic` 次元は起動ごとに異なる
-    /// `m`/`n`/`k` を許容しうるため、実際の起動直前の再検査はこのメソッド
-    /// が担う）。[`MmaKernelConfig::validate_launch_shape`] へ委譲し、
-    /// `Static` 次元と実引数の不一致を fail-closed で拒否する。
+    /// テスト専用のソース内容検査アクセサ（`#[cfg(test)]` のためリリース
+    /// ビルドには存在しない）。生成された `#define`／REQ-8 境界チェックの
+    /// 文字列内容を検査するテストのみが使い、[`Self::compile`] が公開する
+    /// 「検査を経ないと `CudaFunction` に到達できない」という契約には
+    /// 影響しない（本番経路の公開 API には現れない）。
+    #[cfg(test)]
+    fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// [`RenderedMmaKernel::compile`] が返す、コンパイル済み `CudaFunction`
+/// と展開元 [`MmaKernelConfig`] を不可分に束ねた descriptor（PR #643
+/// codex-review 再々指摘への対応）。
+///
+/// フィールドは非公開。`func` を取り出す唯一の経路は
+/// [`Self::with_validated_function`] であり、これは呼び出しの都度
+/// `cfg.validate_launch_shape(m, n, k)` を実行して `Static` 次元と実引数
+/// の不一致を fail-closed で拒否してから初めて、渡された `launch`
+/// クロージャへ `&CudaFunction` を渡す。`func` フィールドを公開する・
+/// あるいは `&CudaFunction` を返す独立メソッドを公開する設計では、
+/// 呼び出し元がそれを検査の外へ保持してしまい「起動の都度検査する」
+/// 契約を型で強制できない（`kernels_mma.rs:533` 相当の元指摘）。
+/// `launch` へ渡す `&CudaFunction` の借用は `with_validated_function` の
+/// 呼び出し内に閉じるため、Rust の借用検査により呼び出し元がこの参照を
+/// 検査の外側（後続の別呼び出し）へ持ち出すことはできない。
+#[allow(dead_code)]
+pub struct CompiledMmaKernel {
+    func: cudarc::driver::CudaFunction,
+    cfg: MmaKernelConfig,
+}
+
+impl CompiledMmaKernel {
+    /// 起動を意図する形状 `m`/`n`/`k` を検証してから `launch` クロージャへ
+    /// `&CudaFunction` を渡す、`CudaFunction` へアクセスする唯一の公開
+    /// 経路（PR #643 codex-review 再々指摘への対応）。
+    ///
+    /// `Dynamic` 次元は起動ごとに異なる `m`/`n`/`k` を許容しうるため、
+    /// 実際の起動直前に毎回このメソッドを経由する想定。`launch` 内では
+    /// `stream.launch_builder(func)...launch(cfg)` 等、渡された `m`/`n`/`k`
+    /// と同じ値で構築した引数・grid 設定のみを使うこと。
     #[allow(dead_code)]
-    pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
-        self.cfg.validate_launch_shape(m, n, k)
+    pub fn with_validated_function<R>(
+        &self,
+        m: u32,
+        n: u32,
+        k: u32,
+        launch: impl FnOnce(&cudarc::driver::CudaFunction) -> Result<R, CudaError>,
+    ) -> Result<R, CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        launch(&self.func)
     }
 }
 
@@ -554,12 +604,15 @@ impl RenderedMmaKernel {
 /// する（SMEM 予算・倍数関係・スレッド数上限・`stages == 3` 等）。返す
 /// [`RenderedMmaKernel`] はソースと展開元 `cfg` を保持し、ホスト側
 /// （`gemm_mma.rs::CudaMmaGemm` 相当の将来の非既定構成起動 API）は
-/// `.source_for_launch(m, n, k)` で起動時形状検査を経たソース文字列を
-/// 取得してから `nvrtc::compile_ptx` に渡して `CudaFunction` を得ること
-/// （`RenderedMmaKernel` ドキュメンテーションコメント参照。検査を経ない
-/// 裸の `source()` は公開しないため呼び忘れが型で防がれる）。カーネル
-/// ソースは型付き数値・enum のみから組み立てられ、外部入力文字列を
-/// ソースへ連結しない契約を維持する（`nvrtc.rs` A03 節参照）。
+/// `.compile(|src| ...)` で `nvrtc::compile_ptx` 等を実行して
+/// [`CompiledMmaKernel`] を得て、以降の起動は
+/// `CompiledMmaKernel::with_validated_function(m, n, k, |func| ...)`
+/// 経由でのみ行うこと（`RenderedMmaKernel`／`CompiledMmaKernel`
+/// ドキュメンテーションコメント参照。生ソース・コンパイル済み
+/// `CudaFunction` のいずれも検査を経ない形で外部へ返す公開メソッドは
+/// 存在しない）。カーネルソースは型付き数値・enum のみから組み立てられ、
+/// 外部入力文字列をソースへ連結しない契約を維持する（`nvrtc.rs` A03
+/// 節参照）。
 ///
 /// `mod kernels_mma` が非公開モジュールのため、既定構成のみを使う現状の
 /// `gemm_mma.rs`（[`mma_f16_source`] 経由）からは呼ばれず、rustc の
@@ -1011,10 +1064,10 @@ mod tests {
         let rendered = render_mma_f16(&cfg).expect("有効な構成が拒否されました");
         // dim_m=Static(4096)・dim_n/dim_k=Dynamic のため、実起動形状は
         // m=4096 固定・n/k は任意（ここでは後段の validate_launch_shape
-        // 呼び出しと揃えて n=64・k=32 を使う）。
-        let src = rendered
-            .source_for_launch(4096, 64, 32)
-            .expect("有効な起動形状が拒否されました");
+        // 呼び出しと揃えて n=64・k=32 を使う）。テスト専用アクセサ
+        // `source()`（`#[cfg(test)]`。本番経路には存在しない）で生成
+        // 内容のみを検査する。
+        let src = rendered.source();
 
         for expected in [
             "#define BM 64",
@@ -1038,13 +1091,18 @@ mod tests {
         }
 
         // dim_m=Static(4096) のため、実際の起動形状 m=16（コンパイル時に
-        // 焼き込んだ値と食い違う）は RenderedMmaKernel::validate_launch_shape
-        // で fail-closed に拒否されなければならない（PR #643 codex-review
-        // P1 指摘への対応。descriptor 経由でしか launch shape 検査を回避
-        // できない構造的契約）。
-        assert!(rendered.validate_launch_shape(4096, 64, 32).is_ok());
+        // 焼き込んだ値と食い違う）は fail-closed に拒否されなければ
+        // ならない。`CompiledMmaKernel::with_validated_function` は実機
+        // 依存の `CudaFunction` なしに単体テストできないため（cudarc
+        // `CudaFunction` はテスト用コンストラクタを持たない）、同じ検査を
+        // 内部で実行する `MmaKernelConfig::validate_launch_shape` を直接
+        // 検査する（PR #643 codex-review 再々指摘への対応。ロジックの
+        // 単一の真実源は `cfg.validate_launch_shape` であり、
+        // `CompiledMmaKernel::with_validated_function` はこれへ委譲する
+        // だけの薄いラッパーのため、ここでの検査で契約全体をカバーする）。
+        assert!(cfg.validate_launch_shape(4096, 64, 32).is_ok());
         assert!(matches!(
-            rendered.validate_launch_shape(16, 64, 32),
+            cfg.validate_launch_shape(16, 64, 32),
             Err(CudaError::InvalidKernelConfig { .. })
         ));
     }
@@ -1224,10 +1282,12 @@ mod tests {
             dtype: MmaDtype::F16,
         };
         let specialized = render_mma_f16(&specialized_cfg).expect("有効な構成が拒否されました");
-        let specialized_src = specialized
-            .source_for_launch(4096, 4096, 4096)
-            .expect("有効な起動形状が拒否されました");
-        compile_ptx(specialized_src, arch)
+        // 本テストは NVRTC の構文検証のみが目的で `CudaFunction`（実機の
+        // `CudaModule` が必要）を作らないため、テスト専用アクセサ
+        // `source()`（`#[cfg(test)]`）でソース文字列へ直接アクセスする
+        // （`Self::compile` 経由の契約は `with_validated_function` を
+        // 使う実機依存の別テストが必要になるため、本テストのスコープ外）。
+        compile_ptx(specialized.source(), arch)
             .expect("特化構成カーネルソースの NVRTC コンパイルに失敗しました");
     }
 }
