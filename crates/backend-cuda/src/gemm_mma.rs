@@ -619,16 +619,17 @@ mod tests {
     ///
     /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
     /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
-    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する
-    /// （`mma_f16_stage_count_does_not_change_bit_exact_output` と同じ
-    /// 実行方法）。
+    /// `cargo test -p backend-cuda --lib --features internal-diagnostics --
+    /// --ignored` から実行する（`--features internal-diagnostics` を欠くと
+    /// 下記の理由で本テスト自体がコンパイルされず green と誤認する。PR #667
+    /// codex-review P1 是正。`docs/perf/cuda-gemm-swizzle-ab.md` の実機検証
+    /// 手順コマンドも同時に是正済み）。
     ///
     /// `internal-diagnostics` feature（既定 off）でのみコンパイルされる
     /// （[`CudaMmaGemm::new_with_swizzle`] 自体が同 feature でゲートされて
-    /// いるため。`cargo test -p backend-cuda --lib --features
-    /// internal-diagnostics -- --ignored` で実行する。`Makefile` の `test`
-    /// ターゲットは `--all-features` のため通常の `make test`（コンパイル
-    /// のみ・`--ignored` なしでは実行されない）でも本 feature は有効）。
+    /// いるため）。`Makefile` の `test` ターゲットは `--all-features` の
+    /// ため通常の `make test`（コンパイルのみ・`--ignored` なしでは実行
+    /// されない）でも本 feature は有効。
     #[cfg(feature = "internal-diagnostics")]
     #[test]
     #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]

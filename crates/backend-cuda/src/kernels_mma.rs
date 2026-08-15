@@ -691,7 +691,14 @@ pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::er
          \x20   // `SWIZZLE_GROUP * num_n_blocks` は `int`（32 bit 符号付き）\n\
          \x20   // のままでは容易にオーバーフローしうる（REQ-8 「境界検査の\n\
          \x20   // 省略禁止」）。最終座標は `gridDim` 内であることを明示的に\n\
-         \x20   // 検査してから `int` へ縮小する。\n\
+         \x20   // 検査してから `int` へ縮小する（`m_block < num_m_blocks <=\n\
+         \x20   // 65,535`・`n_block < num_n_blocks <= 2^31-1` を上記の\n\
+         \x20   // 境界検査が保証するため、`m_block * BM`/`n_block * BN` は\n\
+         \x20   // 元の `m`/`n`（呼び出し元 `gemm_mma.rs::mma_launch_config`\n\
+         \x20   // が `int` として渡す形状）を超えず、64→32 bit への縮小は\n\
+         \x20   // 安全。オーバーフロー元は 64 bit 側で解消済みであり、この\n\
+         \x20   // 縮小自体は新たな符号なし/符号付きオーバーフロー経路を\n\
+         \x20   // 導入しない）。\n\
          \x20   #define SWIZZLE_GROUP {group_width}\n\
          \x20   long long num_m_blocks = gridDim.y;\n\
          \x20   long long num_n_blocks = gridDim.x;\n\
