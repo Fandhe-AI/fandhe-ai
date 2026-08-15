@@ -82,7 +82,29 @@ mod iokit_ffi {
     /// 実装が同様に扱う既知の安定値）。
     pub(super) const K_IO_MAIN_PORT_DEFAULT: MachPortT = 0;
 
-    #[link(name = "IOKit", kind = "framework")]
+    // SAFETY: 各宣言のシグネチャは Apple の `IOKitLib.h`／`IOKitKeys.h`
+    // ヘッダの ABI と一致させてある（C の関数ポインタ ABI は Rust の
+    // `extern "C"` と同一表現のためリンク時に齟齬なく解決される前提）。
+    // 引数・戻り値の所有権契約:
+    // - `IOServiceMatching(name)`: `name` は呼び出し中のみ生存すればよい
+    //   NUL 終端 C 文字列（借用）。戻り値の `CFDictionaryRef` は呼び出し側
+    //   が所有権を得る（CF Create ルール。ヘッダ注釈 `CF_RETURNS_RETAINED`
+    //   相当）が、本モジュールでは次段の `IOServiceGetMatchingService` へ
+    //   譲渡するため個別に解放しない。
+    // - `IOServiceGetMatchingService(main_port, matching)`: `matching` の
+    //   所有権を引き取り内部で解放する（Apple ヘッダの明示契約。呼び出し後
+    //   に呼び出し側が再度使用・解放してはならない）。戻り値
+    //   `io_service_t` はハンドル値（`mach_port_t` の別名）であり借用の
+    //   ようなポインタ安全性の懸念はないが、不在時は `0`（`IO_OBJECT_NULL`）
+    //   を返しうる。
+    // - `IORegistryEntryCreateCFProperty(entry, key, allocator, options)`:
+    //   `entry` は有効なハンドル、`key` は非 NULL の `CFStringRef`
+    //   （借用）、`allocator` は `NULL` 許容（既定アロケータを意味する）。
+    //   戻り値は呼び出し側が所有権を得る（Create ルール。プロパティ不在時
+    //   は `NULL`）。
+    // - `IOObjectRelease(object)`: `object` は有効なハンドルであることが
+    //   前提（無効ハンドルへの呼び出しは未定義動作になりうるため、呼び出し
+    //   側が「取得済みかつ未解放」の不変条件を管理する）。
     unsafe extern "C" {
         pub(super) fn IOServiceMatching(name: *const c_char) -> CfDictionaryRef;
         /// `matching` の所有権を引き取り解放する（呼び出し後に
@@ -100,6 +122,23 @@ mod iokit_ffi {
         pub(super) fn IOObjectRelease(object: IoObjectT) -> KernReturnT;
     }
 
+    // SAFETY: 各宣言のシグネチャは Apple の `CFString.h`／`CFNumber.h`／
+    // `CFBase.h` ヘッダの ABI と一致させてある。引数・戻り値の所有権契約:
+    // - `CFStringCreateWithCString(alloc, c_str, encoding)`: `alloc` は
+    //   `NULL` 許容（既定アロケータ）。`c_str` は呼び出し中のみ生存すれば
+    //   よい NUL 終端 C 文字列（借用）。戻り値は呼び出し側が所有権を得る
+    //   （Create ルール。失敗時は `NULL`）。
+    // - `CFGetTypeID(cf)`／`CFNumberGetValue(number, ..)`: `cf`／`number`
+    //   は非 NULL の有効な `CFTypeRef` であることが前提（呼び出し側が
+    //   NULL チェック後にのみ呼ぶ）。`CFNumberGetValue` の
+    //   `value_ptr` は `the_type` に応じた書き込み先バイト数
+    //   （本モジュールでは `kCFNumberSInt64Type` に対応する `i64` 分）を
+    //   確保した有効なメモリを指すことが呼び出し側の責務。
+    // - `CFNumberGetTypeID()`: 引数を取らない純関数。
+    // - `CFRelease(cf)`: `cf` は Create ルールで取得した未解放の有効な
+    //   `CFTypeRef` であることが前提（二重解放・無効ポインタへの呼び出し
+    //   は未定義動作になりうるため、呼び出し側が「取得済みかつ未解放」の
+    //   不変条件を管理する）。
     #[link(name = "CoreFoundation", kind = "framework")]
     unsafe extern "C" {
         pub(super) fn CFStringCreateWithCString(

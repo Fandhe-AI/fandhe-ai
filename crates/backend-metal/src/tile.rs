@@ -412,10 +412,22 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 /// （`groups_m * groups_n`）と同一式。現行 GEMM にバッチ次元は存在しない
 /// ため常に 1 件分の行列積を前提とする（MFA の `batchDimension` 相当は
 /// 将来拡張。イシュー #541 計画「スコープ外」節）。
-pub fn actual_groups(m: usize, n: usize, cfg: TileConfig) -> u64 {
+///
+/// **fail-safe 契約**: `TileConfig` の `bm`／`bn` フィールドは公開のため
+/// 呼び出し元が `0` を含む任意値を構築できる（`div_ceil(0)` は panic する）。
+/// 本番経路で panic しない契約（`.claude/rules/coding-rust.md`）に従い、
+/// `cfg.bm == 0` または `cfg.bn == 0`、あるいは `groups_m * groups_n` の
+/// オーバーフロー（`usize` から `u64` へ拡張した値同士の積が `u64::MAX` を
+/// 超える極端な `m`／`n`）はいずれも `None` を返す（codex-review 指摘。
+/// PR #662）。通常経路（[`TileConfig::validate`] を通過した構成）では
+/// `bm`／`bn` は常に非ゼロのため実質的には常に `Some` を返す。
+pub fn actual_groups(m: usize, n: usize, cfg: TileConfig) -> Option<u64> {
+    if cfg.bm == 0 || cfg.bn == 0 {
+        return None;
+    }
     let groups_m = (m as u64).div_ceil(cfg.bm as u64);
     let groups_n = (n as u64).div_ceil(cfg.bn as u64);
-    groups_m * groups_n
+    groups_m.checked_mul(groups_n)
 }
 
 /// [`OccupancyParams::smem_groups_per_core`] が返す「1 コアあたり同時常駐
@@ -885,17 +897,38 @@ mod tests {
         // `docs/perf/metal-gemm-bottleneck-diagnosis.md` §3.2 の事前計算表
         // （64x64 タイル・正方形状）と一致することを固定する。
         let cfg = CANDIDATES[0]; // bm=bn=64
-        assert_eq!(actual_groups(512, 512, cfg), 64);
-        assert_eq!(actual_groups(1024, 1024, cfg), 256);
-        assert_eq!(actual_groups(2048, 2048, cfg), 1024);
-        assert_eq!(actual_groups(4096, 4096, cfg), 4096);
+        assert_eq!(actual_groups(512, 512, cfg), Some(64));
+        assert_eq!(actual_groups(1024, 1024, cfg), Some(256));
+        assert_eq!(actual_groups(2048, 2048, cfg), Some(1024));
+        assert_eq!(actual_groups(4096, 4096, cfg), Some(4096));
     }
 
     #[test]
     fn actual_groups_rounds_up_for_non_multiple_shapes() {
         // m=100 は bm=64 の倍数でないため ceil(100/64)=2 へ切り上がる。
         let cfg = CANDIDATES[0]; // bm=bn=64
-        assert_eq!(actual_groups(100, 64, cfg), 2);
+        assert_eq!(actual_groups(100, 64, cfg), Some(2));
+    }
+
+    #[test]
+    fn actual_groups_is_none_when_bm_is_zero() {
+        let mut cfg = CANDIDATES[0];
+        cfg.bm = 0;
+        assert_eq!(actual_groups(512, 512, cfg), None);
+    }
+
+    #[test]
+    fn actual_groups_is_none_when_bn_is_zero() {
+        let mut cfg = CANDIDATES[0];
+        cfg.bn = 0;
+        assert_eq!(actual_groups(512, 512, cfg), None);
+    }
+
+    #[test]
+    fn actual_groups_is_none_on_overflow() {
+        // groups_m * groups_n が u64::MAX を超える極端な形状。
+        let cfg = CANDIDATES[0]; // bm=bn=64
+        assert_eq!(actual_groups(usize::MAX, usize::MAX, cfg), None);
     }
 
     // --- occupancy 目標算出: OccupancyParams::smem_groups_per_core ---
