@@ -589,7 +589,7 @@ mod tests {
     /// 入力 `x`）。「reduction 軸が一致しない連鎖は分断される」反例は
     /// [`mismatched_reduction_axis_splits_the_segment`] を参照。
     #[test]
-    fn sum_and_max_boundary_split_the_segment() {
+    fn sum_with_matching_segment_axis_is_fused_not_a_boundary() {
         let mut g = FusionGraph::new();
         let x = g.push(FusionOp::Input, f32_meta(&[4, 4])).unwrap();
         let relu = g.push(FusionOp::Relu(x), f32_meta(&[4, 4])).unwrap();
