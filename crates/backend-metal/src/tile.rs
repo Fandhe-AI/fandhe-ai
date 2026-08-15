@@ -189,11 +189,66 @@ impl TileConfig {
     /// 書き込みを未然に防ぐ）。
     pub const MAX_ACC: u32 = 8;
 
+    /// `pad`（イシュー #538 で新設。本ファイル冒頭 [`TileConfig`]
+    /// ドキュメント参照）導入前の 6 フィールド構成（`bm`／`bn`／`bk`／
+    /// `wm`／`wn`／`staged`）から `pad: 0`（無効化。direct-load 経路と
+    /// 同じ挙動）で構築する互換コンストラクタ。
+    ///
+    /// `TileConfig` は全フィールド `pub` の構造体リテラルで直接構築
+    /// できる設計のため、`pad` フィールド新設は既存の
+    /// `TileConfig { bm, bn, bk, wm, wn, staged }` という構造体リテラルを
+    /// コンパイル不能にする破壊的変更になる（codex-review 指摘・#538 PR
+    /// レビュー）。既存呼び出し側の移行を最小差分にするため、フィールド
+    /// リテラルの代わりに本メソッドへ切り替えれば `pad: 0` を明示せずに
+    /// 済む形を用意する（`..Self { pad: 0, ..old }` 相当）。新規に `pad`
+    /// を使いたい呼び出しは [`TileConfig::with_pad`] を続けて呼ぶ
+    /// （`TileConfig::without_padding(..).with_pad(4)`）。
+    pub const fn without_padding(
+        bm: u32,
+        bn: u32,
+        bk: u32,
+        wm: u32,
+        wn: u32,
+        staged: bool,
+    ) -> Self {
+        TileConfig {
+            bm,
+            bn,
+            bk,
+            wm,
+            wn,
+            staged,
+            pad: 0,
+        }
+    }
+
+    /// 既存の [`TileConfig`] から `pad` のみを差し替えた新しい値を返す
+    /// builder（イシュー #538）。[`without_padding`](Self::without_padding)
+    /// と組み合わせることで、フィールド追加前の呼び出し形（6 引数）を
+    /// 保ったまま `pad` を明示的に指定できる。
+    pub const fn with_pad(mut self, pad: u32) -> Self {
+        self.pad = pad;
+        self
+    }
+
     /// threadgroup 1 個あたりのスレッド数（`wm*wn*32`。1 simdgroup = 32
     /// スレッド）。`crate::gemm` のディスパッチが
     /// `threadsPerThreadgroup = (wm*wn*32, 1, 1)` を構成する際に使う。
     pub fn thread_count(&self) -> u32 {
-        self.wm * self.wn * 32
+        // イシュー #538 codex-review 指摘: `TileConfig` は全フィールド
+        // `pub` かつ `u32` へ範囲制約がないため、`wm`/`wn` に大きな値を
+        // 与えると `wm*wn*32` が `u32` で乗算オーバーフローし wrap する。
+        // `validate` の `TooManyThreads` 検査（`threads > max_threads_per_tg`）
+        // を wrap 後の小さい値が素通りしてしまう fail-closed 迂回を防ぐため、
+        // `u64` へ拡張した checked 演算で計算し、表現不能な場合は
+        // `u32::MAX`（`max_threads_per_tg` を必ず上回る）へ飽和させる
+        // （`validate` 側の比較で確実に弾かれる。`checked_shared_mem_bytes`
+        // と同じ設計）。
+        (self.wm as u64)
+            .checked_mul(self.wn as u64)
+            .and_then(|v| v.checked_mul(32))
+            .unwrap_or(u64::MAX)
+            .min(u32::MAX as u64) as u32
     }
 
     /// A タイル（`bm`×`(bk+pad)`）＋ B タイル（`bk`×`(bn+pad)`）を保持する
@@ -217,7 +272,37 @@ impl TileConfig {
         if !self.staged {
             return 0;
         }
-        (self.bm * (self.bk + self.pad) + self.bk * (self.bn + self.pad)) * 4
+        // イシュー #538 codex-review 指摘（P0）: 以前は `bm * (bk + pad) +
+        // bk * (bn + pad)) * 4` を `u32` のまま計算していたため、`pad`
+        // （公開 `pub` フィールドで任意の `u32` を受け取れる）に大きな値を
+        // 渡すと加算・乗算がオーバーフローし wrap する。release ビルドでは
+        // panic せず小さな値へ wrap するため、`validate` の
+        // `ExceedsSharedMemory` 検査（`bytes > max_shared_mem_bytes`）を
+        // 迂回でき、Rust 側の確保長（`crate::gemm` の
+        // `setThreadgroupMemoryLength`）と `shaders/gemm.metal` の
+        // `lda = BK + TGP_PAD`／`ldb = BN + TGP_PAD` が実際にアクセスする
+        // 範囲との契約が崩れ、threadgroup memory の範囲外アクセスに
+        // つながる。
+        //
+        // `u64` へ拡張し `checked_add`／`checked_mul` で計算する（`bm`/`bn`/
+        // `bk`/`pad` は最大でも `u32::MAX` のため、各要素を `u64` へ広げた
+        // 中間結果同士の乗算・加算は依然として `u64` を超えうるので
+        // `checked_*` が必須。単純な `u64` キャストだけでは不十分）。
+        // 表現不能な場合は `u32::MAX`（`validate` が要求する
+        // `max_shared_mem_bytes` を必ず上回る値）へ飽和させ、
+        // `ExceedsSharedMemory` で確実に fail-closed に拒否させる。
+        let bm = self.bm as u64;
+        let bn = self.bn as u64;
+        let bk = self.bk as u64;
+        let pad = self.pad as u64;
+        let compute = || -> Option<u64> {
+            let a_row = bk.checked_add(pad)?;
+            let b_row = bn.checked_add(pad)?;
+            let a_tile = bm.checked_mul(a_row)?;
+            let b_tile = bk.checked_mul(b_row)?;
+            a_tile.checked_add(b_tile)?.checked_mul(4)
+        };
+        compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
     }
 
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
@@ -231,13 +316,23 @@ impl TileConfig {
         max_threads_per_tg: u32,
         max_shared_mem_bytes: u32,
     ) -> Result<(), TileConfigError> {
-        if self.wm == 0 || !self.bm.is_multiple_of(self.wm * 8) {
+        // イシュー #538 codex-review 指摘: `wm`/`wn` も `pub` フィールドで
+        // 任意の `u32` を受け取れるため、`wm * 8`／`wn * 8` を素の `u32`
+        // 乗算のまま行うと極端に大きい値でオーバーフローし wrap しうる
+        // （wrap 後の小さい除数へ `bm`/`bn` がたまたま整除してしまうと、
+        // 後続の `acc_rows`/`acc_cols`・`thread_count` 計算が想定外の
+        // 構成を「妥当」と誤判定する）。`checked_mul` で拒否し、
+        // オーバーフロー時は本来の不整合と同じ `BmNotDivisibleByWm8`／
+        // `BnNotDivisibleByWn8` として fail-closed に扱う。
+        let wm8 = self.wm.checked_mul(8);
+        if self.wm == 0 || wm8.is_none_or(|wm8| !self.bm.is_multiple_of(wm8)) {
             return Err(TileConfigError::BmNotDivisibleByWm8 {
                 bm: self.bm,
                 wm: self.wm,
             });
         }
-        if self.wn == 0 || !self.bn.is_multiple_of(self.wn * 8) {
+        let wn8 = self.wn.checked_mul(8);
+        if self.wn == 0 || wn8.is_none_or(|wn8| !self.bn.is_multiple_of(wn8)) {
             return Err(TileConfigError::BnNotDivisibleByWn8 {
                 bn: self.bn,
                 wn: self.wn,
@@ -511,6 +606,84 @@ mod tests {
             pad: 4,
         };
         assert_eq!(cfg.shared_mem_bytes(), 9472);
+    }
+
+    #[test]
+    fn shared_mem_bytes_saturates_instead_of_wrapping_on_overflow() {
+        // codex-review 指摘（P0・#538 PR レビュー）: `pad` は任意の `u32`
+        // を受け取れる公開フィールドのため、以前の `u32` のみの演算では
+        // `bm*(bk+pad) + bk*(bn+pad)) * 4` がオーバーフローして小さな値へ
+        // wrap し、`validate` の `ExceedsSharedMemory` 検査を迂回できて
+        // いた。`u32::MAX` 近辺の `pad` を与えても飽和して `u32::MAX` を
+        // 返し、`validate` 側の `bytes > max_shared_mem_bytes` 比較で必ず
+        // 拒否されることを確認する（wrap による小さい値への回帰を防ぐ
+        // regression test）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+            pad: u32::MAX - 3, // 4 の倍数（0xFFFF_FFFC）へ切り下げ（validate の PadNotMultipleOfFour を避ける）
+        };
+        assert_eq!(cfg.shared_mem_bytes(), u32::MAX);
+        assert_eq!(
+            cfg.validate(1024, 32 * 1024),
+            Err(TileConfigError::ExceedsSharedMemory {
+                bytes: u32::MAX,
+                max_shared_mem_bytes: 32 * 1024,
+            })
+        );
+    }
+
+    #[test]
+    fn thread_count_saturates_instead_of_wrapping_on_overflow() {
+        // codex-review 指摘（P0・#538 PR レビュー）: `wm`/`wn` に極端に
+        // 大きい値を与えると `wm*wn*32` が `u32` でオーバーフローし wrap
+        // しうる。飽和させることで `validate` の `TooManyThreads` 検査が
+        // 確実に働くことを確認する。
+        let cfg = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: 8,
+            wm: 1 << 30,
+            wn: 1 << 30,
+            staged: false,
+            pad: 0,
+        };
+        assert_eq!(cfg.thread_count(), u32::MAX);
+    }
+
+    #[test]
+    fn without_padding_and_with_pad_reproduce_struct_literal_construction() {
+        // イシュー #538 codex-review 指摘（P1）: `pad` フィールド新設で
+        // 既存の 6 フィールド構造体リテラルがコンパイル不能になる破壊的
+        // 変更に対する互換コンストラクタ／builder が、フィールド直接
+        // 指定と同じ値を構築できることを確認する。
+        let via_literal = TileConfig {
+            bm: 32,
+            bn: 32,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+            pad: 4,
+        };
+        let via_builder = TileConfig::without_padding(32, 32, 16, 2, 2, true).with_pad(4);
+        assert_eq!(via_literal, via_builder);
+
+        let via_literal_no_pad = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: 8,
+            wm: 1,
+            wn: 1,
+            staged: false,
+            pad: 0,
+        };
+        let via_builder_no_pad = TileConfig::without_padding(8, 8, 8, 1, 1, false);
+        assert_eq!(via_literal_no_pad, via_builder_no_pad);
     }
 
     // --- TileConfig::validate（pure・GPU 非依存） ---
