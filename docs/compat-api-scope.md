@@ -37,6 +37,19 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
 - サポート境界の変更（内部クレートの直接利用をサポート対象に含める等）は
   正本 spec リポジトリ側での REQ-9／REQ-12 受け入れ基準の改定を要する
   （5 節「範囲拡張の手続き」と同じ手続き）
+- **内部クレートの `pub` enum への `#[non_exhaustive]` 付与は本節の適用例**
+  （codex-review PR #648 P1 是正）: `tensor_core::fusion::FusedOpKind`
+  （`crates/tensor-core/src/fusion/plan.rs`）は `facade` から再エクスポート
+  されず（`crates/facade/src/lib.rs` の `pub use tensor_core::{..}` に
+  `FusedOpKind` は含まれない）、`tensor-core` 自体も `publish = false`
+  （ワークスペース `Cargo.toml`）のため、本節が定める意味での「サポート
+  される公開面の利用者」は存在しない。既に安定した公開 enum への
+  `#[non_exhaustive]` 遡及付与は一般に破壊的変更たりうる（外部の
+  非ワイルドカード exhaustive match を壊すため）が、本 enum の唯一の
+  参照元はワークスペース内クレート（`backend-cpu`・`autodiff`）に限られ、
+  いずれも `_` 分岐を持つ形で参照を更新済み（`backend-cpu::
+  fused_elementwise::eval_one` 等）であるため、この一般論はここには
+  適用されない
 
 ## 1. 対象範囲（in scope）
 
