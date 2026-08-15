@@ -144,6 +144,8 @@ pub const WMMA_TF32_OPT_THREADS: u32 = 128;
 
 use std::sync::LazyLock;
 
+use cudarc::driver::LaunchConfig;
+
 use crate::error::CudaError;
 use crate::kernels_mma::DimSpec;
 
@@ -266,6 +268,43 @@ impl WmmaOptKernelConfig {
         self.dim_k.matches_launch_dim(k)?;
         Ok(())
     }
+
+    /// `m`/`n` から実際の起動グリッドを構築する（`gemm_wmma.rs::wmma_opt_launch_config`
+    /// と同じ「ブロックタイル `block_m x block_n` を `div_ceil` で敷き詰める」
+    /// 設計を、既定タイル定数ではなく本 `cfg` のタイル値〈`self.block_m`/
+    /// `self.block_n`〉に一般化したもの。PR #643 codex-review P0 再指摘への
+    /// 対応: [`CompiledWmmaOptKernel::with_validated_function`] は本メソッド
+    /// が返す `LaunchConfig` をそのままクロージャへ渡すことで、クロージャが
+    /// 検証済み `m`/`n`/`k` とは無関係な grid/block 設定を独自に構築して
+    /// 起動する経路をなくす（`kernels_mma::MmaKernelConfig::launch_config`
+    /// と同じ設計）。
+    ///
+    /// warp タイル辺（32）は TF32 opt（`WMMA_TF32_OPT_WARP_TILE`）・f16 opt
+    /// （`WMMA_F16_OPT_WARP_TILE`）のいずれも同一のハードウェア形状固定値
+    /// （両定数の値は 32 で一致。`validate_wmma_tf32_opt_config`／
+    /// `validate_wmma_f16_opt_config` が `block_m`/`block_n` をこの倍数と
+    /// して検査済み）であり、`WmmaOptKernelConfig` は dtype を持たない
+    /// （dtype 差異は呼び出す `render_*` 関数の選択で表現する設計。本構造体
+    /// ドキュメンテーションコメント参照）ため、本メソッドはどちらの dtype
+    /// でも共通のグリッド／ブロック計算として使える。
+    ///
+    /// 静的共有メモリ（`__shared__` 配列としてカーネルソースへ焼き込み
+    /// 済み）のみを使う設計のため `shared_mem_bytes` は常に 0
+    /// （`gemm_wmma.rs::wmma_opt_launch_config` と同じ契約）。
+    #[allow(dead_code)] // 理由は validate_launch_shape と同じ（非公開モジュール）
+    pub fn launch_config(&self, m: u32, n: u32) -> LaunchConfig {
+        // TF32 opt・f16 opt 共通のハードウェア warp タイル辺（両定数とも
+        // 32 で一致。値の根拠は本メソッドのドキュメンテーションコメント
+        // 参照）。
+        const WARP_TILE: u32 = 32;
+        let warp_grid_m = self.block_m / WARP_TILE;
+        let warp_grid_n = self.block_n / WARP_TILE;
+        LaunchConfig {
+            grid_dim: (n.div_ceil(self.block_n), m.div_ceil(self.block_m), 1),
+            block_dim: (warp_grid_m * warp_grid_n * 32, 1, 1),
+            shared_mem_bytes: 0,
+        }
+    }
 }
 
 /// [`render_wmma_tf32_opt`]／[`render_wmma_f16_opt`] が返す、展開済み
@@ -347,19 +386,24 @@ pub struct CompiledWmmaOptKernel {
 
 impl CompiledWmmaOptKernel {
     /// 起動を意図する形状 `m`/`n`/`k` を検証してから `launch` クロージャへ
-    /// `&CudaFunction` を渡す、`CudaFunction` へアクセスする唯一の公開
-    /// 経路（`kernels_mma::CompiledMmaKernel::with_validated_function` と
-    /// 同じ設計）。
+    /// `&CudaFunction` と、その `m`/`n` から `self.cfg` が導出した
+    /// `LaunchConfig`（grid/block 設定）を渡す、`CudaFunction` へ
+    /// アクセスする唯一の公開経路（PR #643 codex-review 再々々指摘〈P0〉
+    /// への対応。`kernels_mma::CompiledMmaKernel::with_validated_function`
+    /// と同じ設計。検証済み shape と無関係な grid/block を独自に構築して
+    /// 起動する経路をなくす理由は同メソッドのドキュメンテーションコメント
+    /// 参照）。
     #[allow(dead_code)]
     pub fn with_validated_function<R>(
         &self,
         m: u32,
         n: u32,
         k: u32,
-        launch: impl FnOnce(&cudarc::driver::CudaFunction) -> Result<R, CudaError>,
+        launch: impl FnOnce(&cudarc::driver::CudaFunction, LaunchConfig) -> Result<R, CudaError>,
     ) -> Result<R, CudaError> {
         self.cfg.validate_launch_shape(m, n, k)?;
-        launch(&self.func)
+        let launch_config = self.cfg.launch_config(m, n);
+        launch(&self.func, launch_config)
     }
 }
 
@@ -1277,10 +1321,20 @@ mod tests {
                 },
             ),
             (
+                // PR #643 codex-review P2 指摘への対応: 旧ケース
+                // （block_m=256・block_n=256）は warp_grid_m(8)*warp_grid_n(8)
+                // *32=2048 threads となり、smem 予算検査より前のスレッド数
+                // 上限（1024）で拒否されてしまい SMEM の fail-closed 分岐を
+                // 検査できていなかった。block_m=32（最小・warp_tile 1 個分）
+                // × block_n=1024（warp_tile の 32 倍）なら
+                // threads=(32/32)*(1024/32)*32=1024（ちょうど上限内で拒否
+                // されない）で、k_tile は既定値（16）のまま
+                // smem_bytes=8*32*(16+4)+8*16*(1024+4)+4*32*1024=267776
+                // > 49152 のみが拒否理由になる。
                 "smem budget exceeded",
                 WmmaOptKernelConfig {
-                    block_m: 256,
-                    block_n: 256,
+                    block_m: 32,
+                    block_n: 1024,
                     ..base
                 },
             ),
@@ -1294,10 +1348,23 @@ mod tests {
         ];
         for (label, cfg) in cases {
             let result = render_wmma_tf32_opt(&cfg);
-            assert!(
-                matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
-                "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}"
-            );
+            match &result {
+                Err(CudaError::InvalidKernelConfig { detail }) => {
+                    // PR #643 codex-review P2 指摘への対応: 拒否されたこと
+                    // だけでなく、"smem budget exceeded" ケースが実際に
+                    // SMEM 予算超過分岐（スレッド数上限分岐ではなく）で
+                    // 拒否されたことを detail 文字列で確認する。
+                    if label == "smem budget exceeded" {
+                        assert!(
+                            detail.contains("shared memory"),
+                            "{label} は SMEM 予算超過として拒否されるべきです（実際の detail: {detail}）"
+                        );
+                    }
+                }
+                other => panic!(
+                    "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}, result={other:?}"
+                ),
+            }
         }
     }
 
@@ -1340,6 +1407,43 @@ mod tests {
                 matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
                 "dim_k=Static(4096) の関数を実際は K=16 で起動しようとする場合は拒否されるべきです: base={base:?}, result={result:?}"
             );
+        }
+    }
+
+    /// [`WmmaOptKernelConfig::launch_config`] が `block_m`/`block_n` を
+    /// 単位に `div_ceil` でグリッドを構築し、`shared_mem_bytes` が常に 0
+    /// （静的共有メモリのみの契約）であることを、TF32 opt・f16 opt
+    /// 両既定構成で検査する（PR #643 codex-review P0 再指摘への対応:
+    /// `with_validated_function` が本メソッドの戻り値をそのまま起動へ
+    /// 渡す設計の土台。両 dtype で warp タイル辺が共通〈32〉であることの
+    /// 前提を併せて確認する）。
+    #[test]
+    fn wmma_opt_config_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
+        for base in [
+            WmmaOptKernelConfig::default_tf32(),
+            WmmaOptKernelConfig::default_f16(),
+        ] {
+            // m=65（block_m=64 の 1 タイル分 +1 端数）・n=64（block_n=64 の
+            // ちょうど 1 タイル分。TF32 opt・f16 opt とも既定 block_m/n は
+            // 64x64）。
+            let launch_config = base.launch_config(65, 64);
+            assert_eq!(
+                launch_config.grid_dim,
+                (
+                    64u32.div_ceil(base.block_n),
+                    65u32.div_ceil(base.block_m),
+                    1
+                ),
+                "base={base:?}"
+            );
+            let warp_grid_m = base.block_m / 32;
+            let warp_grid_n = base.block_n / 32;
+            assert_eq!(
+                launch_config.block_dim,
+                (warp_grid_m * warp_grid_n * 32, 1, 1),
+                "base={base:?}"
+            );
+            assert_eq!(launch_config.shared_mem_bytes, 0, "base={base:?}");
         }
     }
 

@@ -105,6 +105,8 @@
 
 use std::sync::LazyLock;
 
+use cudarc::driver::LaunchConfig;
+
 use crate::error::CudaError;
 
 /// mma 命令 1 回あたりの行列形状（`m16n8k16`。sm_80+ の f16 標準 shape）。
@@ -317,6 +319,31 @@ impl MmaKernelConfig {
         self.dim_n.matches_launch_dim(n)?;
         self.dim_k.matches_launch_dim(k)?;
         Ok(())
+    }
+
+    /// `m`/`n` から実際の起動グリッドを構築する（`gemm_mma.rs::mma_launch_config`
+    /// と同じ「1 warp = C の `MMA_M x MMA_N` タイル 1 個」設計を、既定タイル
+    /// 定数〈`MMA_BM`/`MMA_BN`〉ではなく本 `cfg` のタイル値〈`self.bm`/`self.bn`〉
+    /// に一般化したもの。PR #643 codex-review P0 再指摘への対応:
+    /// [`CompiledMmaKernel::with_validated_function`] は本メソッドが返す
+    /// `LaunchConfig` をそのままクロージャへ渡すことで、クロージャが
+    /// 検証済み `m`/`n`/`k` とは無関係な grid/block 設定を独自に構築して
+    /// 起動する経路をなくす（呼び出し元が別の shape 向けに計算した
+    /// `LaunchConfig` を持ち込む余地を型で塞ぐ）。
+    ///
+    /// 静的共有メモリ（`__shared__` 配列としてカーネルソースへ焼き込み
+    /// 済み）のみを使う設計のため `shared_mem_bytes` は常に 0
+    /// （`gemm_mma.rs::mma_launch_config`／`gemm_wmma.rs::wmma_launch_config`
+    /// と同じ契約）。
+    #[allow(dead_code)] // 理由は validate_launch_shape と同じ（非公開モジュール）
+    pub fn launch_config(&self, m: u32, n: u32) -> LaunchConfig {
+        let warps_m = self.bm / MMA_M;
+        let warps_n = self.bn / MMA_N;
+        LaunchConfig {
+            grid_dim: (n.div_ceil(self.bn), m.div_ceil(self.bm), 1),
+            block_dim: (warps_m * warps_n * 32, 1, 1),
+            shared_mem_bytes: 0,
+        }
     }
 }
 
@@ -577,23 +604,38 @@ pub struct CompiledMmaKernel {
 
 impl CompiledMmaKernel {
     /// 起動を意図する形状 `m`/`n`/`k` を検証してから `launch` クロージャへ
-    /// `&CudaFunction` を渡す、`CudaFunction` へアクセスする唯一の公開
-    /// 経路（PR #643 codex-review 再々指摘への対応）。
+    /// `&CudaFunction` と、その `m`/`n` から `self.cfg` が導出した
+    /// `LaunchConfig`（grid/block 設定）を渡す、`CudaFunction` へ
+    /// アクセスする唯一の公開経路（PR #643 codex-review 再々指摘・
+    /// 再々々指摘〈P0〉への対応）。
     ///
     /// `Dynamic` 次元は起動ごとに異なる `m`/`n`/`k` を許容しうるため、
-    /// 実際の起動直前に毎回このメソッドを経由する想定。`launch` 内では
-    /// `stream.launch_builder(func)...launch(cfg)` 等、渡された `m`/`n`/`k`
-    /// と同じ値で構築した引数・grid 設定のみを使うこと。
+    /// 実際の起動直前に毎回このメソッドを経由する想定。以前は `launch`
+    /// クロージャへ `&CudaFunction` のみを渡していたため、呼び出し元が
+    /// 検証済みの `m`/`n`/`k` とは別の値で grid/引数を構築して起動できて
+    /// しまい、焼き込まれた `DIM_*`（`Static` 次元）を前提とする手動境界
+    /// チェックが実バッファ境界を超えて通過しうる欠陥があった（REQ-8・
+    /// `.claude/rules/coding-rust.md`「カーネル実装の境界検査」違反）。
+    /// 本メソッドが `LaunchConfig` を [`MmaKernelConfig::launch_config`]
+    /// から導出して渡すことで、`launch` クロージャは検証済み shape 由来の
+    /// grid/block 設定をそのまま使う経路が最短になり、無関係な shape で
+    /// 独自に構築した `LaunchConfig` を持ち込む必要がなくなる（呼び出し元
+    /// のホストバッファが `m`/`n`/`k` と一致した要素数を持つことまでは
+    /// 本モジュールの知り得ない範囲のため型で強制できないが、それは
+    /// `gemm_mma.rs::CudaMmaGemm::launch_f16` 等の呼び出し元の既存契約と
+    /// 同じ境界であり、grid/block の食い違いという本指摘の核心は本変更で
+    /// 塞がれる）。
     #[allow(dead_code)]
     pub fn with_validated_function<R>(
         &self,
         m: u32,
         n: u32,
         k: u32,
-        launch: impl FnOnce(&cudarc::driver::CudaFunction) -> Result<R, CudaError>,
+        launch: impl FnOnce(&cudarc::driver::CudaFunction, LaunchConfig) -> Result<R, CudaError>,
     ) -> Result<R, CudaError> {
         self.cfg.validate_launch_shape(m, n, k)?;
-        launch(&self.func)
+        let launch_config = self.cfg.launch_config(m, n);
+        launch(&self.func, launch_config)
     }
 }
 
@@ -606,7 +648,7 @@ impl CompiledMmaKernel {
 /// （`gemm_mma.rs::CudaMmaGemm` 相当の将来の非既定構成起動 API）は
 /// `.compile(|src| ...)` で `nvrtc::compile_ptx` 等を実行して
 /// [`CompiledMmaKernel`] を得て、以降の起動は
-/// `CompiledMmaKernel::with_validated_function(m, n, k, |func| ...)`
+/// `CompiledMmaKernel::with_validated_function(m, n, k, |func, launch_config| ...)`
 /// 経由でのみ行うこと（`RenderedMmaKernel`／`CompiledMmaKernel`
 /// ドキュメンテーションコメント参照。生ソース・コンパイル済み
 /// `CudaFunction` のいずれも検査を経ない形で外部へ返す公開メソッドは
@@ -1120,10 +1162,19 @@ mod tests {
                 MmaKernelConfig { bm: 17, ..base },
             ),
             (
+                // PR #643 codex-review P2 指摘への対応: 旧ケース
+                // （bm=128・bn=128・bk=32）は warps_m(8)*warps_n(16)*32=4096
+                // threads となり、smem 予算検査より前のスレッド数上限
+                // （1024）で拒否されてしまい SMEM の fail-closed 分岐を
+                // 検査できていなかった。bm=16・bn=256（bm/MMA_M=1・
+                // bn/MMA_N=32・threads=1*32*32=1024。ちょうど上限内で
+                // 拒否されない）× bk=32 なら
+                // smem_bytes=(16*32+32*256)*2*3=52224 > 49152 のみが
+                // 拒否理由になる（thread count は境界の 1024 で通過）。
                 "smem budget exceeded",
                 MmaKernelConfig {
-                    bm: 128,
-                    bn: 128,
+                    bm: 16,
+                    bn: 256,
                     bk: 32,
                     ..base
                 },
@@ -1169,10 +1220,23 @@ mod tests {
 
         for (label, cfg) in cases {
             let result = render_mma_f16(&cfg);
-            assert!(
-                matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
-                "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}"
-            );
+            match &result {
+                Err(CudaError::InvalidKernelConfig { detail }) => {
+                    // PR #643 codex-review P2 指摘への対応: 拒否されたこと
+                    // だけでなく、"smem budget exceeded" ケースが実際に
+                    // SMEM 予算超過分岐（スレッド数上限分岐ではなく）で
+                    // 拒否されたことを detail 文字列で確認する。
+                    if label == "smem budget exceeded" {
+                        assert!(
+                            detail.contains("shared memory"),
+                            "{label} は SMEM 予算超過として拒否されるべきです（実際の detail: {detail}）"
+                        );
+                    }
+                }
+                other => panic!(
+                    "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}, result={other:?}"
+                ),
+            }
         }
     }
 
@@ -1248,6 +1312,30 @@ mod tests {
             matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
             "dim_k=Static(4096) の関数を実際は K=16 で起動しようとする場合は拒否されるべきです: {result:?}"
         );
+    }
+
+    /// [`MmaKernelConfig::launch_config`] が `bm`/`bn` を単位に
+    /// `div_ceil` でグリッドを構築し、`shared_mem_bytes` が常に 0
+    /// （静的共有メモリのみの契約）であることを検査する（PR #643
+    /// codex-review P0 再指摘への対応: `with_validated_function` が本
+    /// メソッドの戻り値をそのまま起動へ渡す設計の土台）。
+    #[test]
+    fn mma_kernel_config_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
+        let cfg = MmaKernelConfig {
+            bm: 32,
+            bn: 64,
+            ..MmaKernelConfig::default()
+        };
+
+        // m=65（bm=32 の 2 タイル分 +1 端数）・n=64（bn=64 のちょうど 1
+        // タイル分）。
+        let launch_config = cfg.launch_config(65, 64);
+        assert_eq!(launch_config.grid_dim, (1, 3, 1));
+        assert_eq!(
+            launch_config.block_dim,
+            ((cfg.bm / MMA_M) * (cfg.bn / MMA_N) * 32, 1, 1)
+        );
+        assert_eq!(launch_config.shared_mem_bytes, 0);
     }
 
     /// 受け入れ基準 2（PTX/SASS ダンプによるコンパイル時展開の実確認）は
