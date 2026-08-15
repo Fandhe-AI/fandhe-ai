@@ -92,6 +92,22 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 /// 境界検査」は計測用カーネルにも適用する。イシュー #482 実装計画
 /// §2 共通契約）。
 ///
+/// **grid-stride のインデックス演算を 64 bit にする（イシュー #482 Review
+/// 指摘）**: `idx`/`stride`/内側ループ変数 `i` を `unsigned long long` にし、
+/// `n` 引数も `unsigned long long` にした。当初 `int`（32 bit 符号付き）
+/// だった実装は、ホスト側で `n` を `i32::MAX` 以下に検証していても
+/// `i += stride` 自体（`i` が `n` に近づいた最終反復で計算される次の値）が
+/// `i32::MAX` を超えうると符号付き整数オーバーフロー（C/CUDA では UB）を
+/// 起こす可能性が残り、`measure_bandwidth_secs` 側の検証コメントが
+/// 「関数境界で不変条件を強制する」と主張する内容と実際の保証範囲が
+/// 一致していなかった。`unsigned long long`（64 bit）にすることで、
+/// ホスト側が確保できる現実的な `n`（`usize` 由来。64 bit ターゲットでは
+/// `usize` も 64 bit）に対してインデックス演算がオーバーフローする余地を
+/// なくし、コメントの主張と実装を一致させる（`unsigned int` への変更では
+/// 32 bit の壁が `u32::MAX` へ広がるだけで同種の問題が残るうえ、
+/// オーバーフロー時に `i` が小さい値へラップして `i < n` を再び満たし
+/// カーネルが実質無限ループ化するリスクがあるため採用しなかった）。
+///
 /// **`a`/`b` を `volatile` 経由でアクセスする（イシュー #482 Cursor Bugbot
 /// 指摘・PR #635 追加コミット）**: ping-pong により反復間の RAW 依存
 /// （`b[i]` は前反復の `a[i]` に依存、逆も同様）を作っても、その依存は
@@ -112,13 +128,13 @@ use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
 /// （C++/CUDA の `volatile` は「観測可能な副作用」として扱われるため
 /// コンパイラは削除・キャッシュできない）。
 const BW_COPY_F32: &str = r#"
-extern "C" __global__ void bw_copy_f32(float* __restrict__ a, float* __restrict__ b, int n, int repeats) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
+extern "C" __global__ void bw_copy_f32(float* __restrict__ a, float* __restrict__ b, unsigned long long n, unsigned int repeats) {
+    unsigned long long idx = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    unsigned long long stride = (unsigned long long)blockDim.x * gridDim.x;
     volatile float* va = a;
     volatile float* vb = b;
-    for (int r = 0; r < repeats; ++r) {
-        for (int i = idx; i < n; i += stride) {
+    for (unsigned int r = 0; r < repeats; ++r) {
+        for (unsigned long long i = idx; i < n; i += stride) {
             if ((r & 1) == 0) {
                 vb[i] = va[i] + 1.0f;
             } else {
@@ -209,37 +225,55 @@ fn measure_bandwidth_secs(
     // 「`a`/`b` 間の ping-pong で `repeats` 反復を最適化から保護する」参照）。
     let mut a = stream.alloc_zeros::<f32>(n)?;
     let mut b = stream.alloc_zeros::<f32>(n)?;
-    // イシュー #482 codex-review 指摘（PR #635, P0）: `n as i32` は
-    // `n > i32::MAX` の場合サイレントに切り詰められ、直後の SAFETY コメント
-    // 「同じ値をバッファ確保に使ったためオーバーフローしない」が実際には
-    // 保証しない不変条件になる（切り詰め後の負値がカーネルへ渡ると境界検査
-    // `i < n` が想定どおり働かない）。`unsafe` ブロックの安全性根拠を本関数
-    // 自身で強制するため `i32::try_from` で検証し、失敗時は
-    // `CudaError::InvalidShape`（`gemm.rs::validate_gemm_dims` と同じ host 側
-    // 形状検証の型付きエラー方針。GPU 起動前に外部由来の形状値へ境界チェック
-    // を課す A03 対策。`.claude/rules/security.md`）を返す。呼び出し元
-    // （`global_n`/`l2_n`）は現状 i32 範囲内の固定値だが、将来の呼び出し値
-    // 変更でも不変条件が壊れないよう関数境界で強制する。
-    let n_i = i32::try_from(n).map_err(|_| CudaError::InvalidShape {
+    // イシュー #482 codex-review 指摘（PR #635, P0）を受けて `n as i32` の
+    // サイレント切り詰めを `i32::try_from` 検証で塞いだ後、さらに Review
+    // 指摘（本コミット）でカーネル側インデックス演算を 64 bit
+    // （`unsigned long long`。`BW_COPY_F32` ドキュメンテーションコメント
+    // 「grid-stride のインデックス演算を 64 bit にする」参照）へ変更した
+    // ため、host 側の検証も `u64::try_from` へ揃える。`usize`（64 bit
+    // ターゲットでは `u64` と同幅）から `u64` への変換は本リポジトリが
+    // 対象とする 64 bit プラットフォームでは失敗しえないが、`try_from` を
+    // 残すことで特定の語長を暗黙に仮定しない（32 bit ターゲットが将来
+    // 対象になっても静かに壊れない）。`unsafe` ブロックの安全性根拠を
+    // 本関数自身で強制する方針は維持し、失敗時は `CudaError::InvalidShape`
+    // （`gemm.rs::validate_gemm_dims` と同じ host 側形状検証の型付き
+    // エラー方針。GPU 起動前に外部由来の形状値へ境界チェックを課す
+    // A03 対策。`.claude/rules/security.md`）を返す。実際に成立する
+    // 不変条件: カーネル側のインデックス演算（`idx`/`stride`/`i`）が
+    // 64 bit のため、host が確保可能な任意の `n`（`usize` 由来）に対して
+    // `i += stride` が符号付きオーバーフロー（C/CUDA では UB）を起こす
+    // 余地はない（`BW_COPY_F32` ドキュメンテーションコメント参照）。
+    let n_u64 = u64::try_from(n).map_err(|_| CudaError::InvalidShape {
         detail: format!(
-            "measure_bandwidth_secs: n={n} exceeds i32::MAX; \
-             cannot pass as bw_copy_f32 kernel argument without truncation"
+            "measure_bandwidth_secs: n={n} exceeds u64::MAX; \
+             cannot pass as bw_copy_f32 kernel argument"
         ),
     })?;
-    // `BW_LAUNCH_REPEATS` は定数だが、同じカーネル引数境界を通るため
-    // 同一の検証経路（`try_from`）で揃える（上記コメントの「関数自身で
-    // 不変条件を保証する」方針を `n_i` と非対称にしないため）。
-    let repeats_i = i32::try_from(BW_LAUNCH_REPEATS).map_err(|_| CudaError::InvalidShape {
-        detail: format!(
-            "measure_bandwidth_secs: BW_LAUNCH_REPEATS={BW_LAUNCH_REPEATS} exceeds i32::MAX"
-        ),
-    })?;
+    // `BW_LAUNCH_REPEATS` は既に `u32` 定数であり、カーネル側 `repeats`
+    // 引数（`unsigned int`。`BW_COPY_F32` ドキュメンテーションコメント
+    // 「grid-stride のインデックス演算を 64 bit にする」参照。`repeats`
+    // 自体は小さい定数のため 32 bit のまま）と型・幅が一致するため
+    // 変換不要でそのまま渡す。
+    let repeats_u32 = BW_LAUNCH_REPEATS;
     let cfg = LaunchConfig {
         grid_dim: (bw_grid_dim(n, sm_count), 1, 1),
         block_dim: (BW_BLOCK_THREADS, 1, 1),
         shared_mem_bytes: 0,
     };
 
+    // `bench_run` のクロージャは `FnMut()`（戻り値なし）で、本関数は
+    // `Result<f64, CudaError>` を返す設計のため、クロージャ内部で起きた
+    // `launch`/`synchronize` の失敗をクロージャの戻り値として直接伝播
+    // できない（イシュー #482 Review 指摘: 従来はここで `.expect()` して
+    // いたため、実行時エラーが `Result` を素通りしてパニックになり、
+    // 関数シグネチャが約束する fail-soft な `Result` 伝播と非対称だった）。
+    // クロージャ外の `first_launch_err` へ最初のエラーを退避し、
+    // `bench_run` から戻った直後に `?` で本関数の `Result` へ合流させる
+    // ことで、`.expect()` を使わずに `Result<f64, CudaError>` の契約を
+    // 一貫させる（`.claude/rules/coding-rust.md`「本番経路で `unwrap()` /
+    // `expect()` を使わない」。本バイナリは spike の計測経路だが同方針を
+    // 適用する）。
+    let mut first_launch_err: Option<CudaError> = None;
     let measurement = bench_run(&MeasurementConfig::default(), || {
         // カーネル起動は 1 回のみ行い、コピーの `BW_LAUNCH_REPEATS` 回反復は
         // カーネル内部の外側ループ（`repeats` 引数）に委ねる。呼び出し側で
