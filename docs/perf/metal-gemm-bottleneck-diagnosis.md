@@ -87,7 +87,16 @@ occupancy を表さない点は §1「解析値」節参照。§3）を主に用
 
 ```sh
 git fetch origin
-git checkout test/487-metal-gemm-bottleneck-diagnosis   # 本イシューの実装ブランチ
+# 一時的な PR ブランチ test/487-metal-gemm-bottleneck-diagnosis はマージ後に
+# 削除されうるため恒久参照にしない（codex-review 指摘。PR #649）。以下は
+# 「現時点の main 最新」を checkout する簡便手順であり、これ自体は main の
+# 更新に伴い指す commit が変わる（恒久参照ではない）。再現性を担保する恒久
+# 参照は「実際に checkout された commit SHA を §4.1『計測コミット SHA』へ
+# 記入する」ことで得る（下記 `git rev-parse HEAD` の出力）。マージ前に本 PR
+# で先行検証する場合は origin/main の代わりに
+# origin/test/487-metal-gemm-bottleneck-diagnosis を指定する
+git checkout --detach origin/main
+git rev-parse HEAD   # この SHA を §4.1「計測コミット SHA」へ記入する
 cargo run -p backend-metal --example gemm_diagnosis --release -- \
     --gpu-core-count=40 --ideal-groups-multiplier=6
 ```
@@ -108,11 +117,25 @@ wall_q3_ms=<v> tflops_lower_bound=<v> logical_load_gbs_lower_bound=<v>`）を si
 上記コマンド例のとおり `--gpu-core-count=40 --ideal-groups-multiplier=6` を指定する。CLI 値は
 正数（ゼロ拒否）・乗算オーバーフロー不可であることも検証される（codex-review 指摘 P2・PR #649）。
 
-GPU 使用率のサンプリング（ベンチ実行と並行して別ターミナルで実行。sudo 不要）:
+GPU 使用率のサンプリング（ベンチ実行と並行して別ターミナルで実行。sudo 不要）。`ioreg` は単発スナップショットの
+ため、`cargo run`（4 size 分の warmup 20 回・計測 20 回を含む全実行区間。概算で数十秒〜数分）と並走させて
+0.5 秒間隔で継続サンプリングし、テキストへ記録する（1 回だけの取得では計測区間内の変動・ピークを捉えられない
+ため。codex-review 指摘。PR #649）:
 
 ```sh
-ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
+# macOS 標準 date（BSD date）はサブ秒指定子 %N 非対応（GNU coreutils 拡張のため）。
+# 秒単位のタイムスタンプで十分（0.5 秒間隔サンプリングの前後関係が分かればよい）
+while true; do
+    date +%H:%M:%S
+    ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
+    sleep 0.5
+done | tee /tmp/gpu_utilization_$(date +%Y%m%d_%H%M%S).log
 ```
+
+`cargo run` 終了後に `Ctrl-C` でサンプリングを停止し、記録したログから size ごとの実行区間（stdout の
+`size=<N> ...` 行のタイムスタンプ、または実行順 size=512→1024→2048→4096 と経過時間の対応）に該当する
+「Device Utilization」値の最大値・中央値を §4.2 の「GPU 使用率（ioreg）」列へ記入する（単一の代表値では
+なくレンジ・代表値の両方を残す）。
 
 計測衛生: AC 電源接続。他 GPU 負荷アプリ（ブラウザ動画・Xcode ビルド・ローカル LLM 等）は終了してから計測する
 （`docs/perf/metal-gemm-dynamic-tile.md`「計測環境」節と同方針）。
