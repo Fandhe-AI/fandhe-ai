@@ -1,6 +1,6 @@
 # CUDA Tensor Core（WMMA/mma）カーネル設計メモ
 
-- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）
+- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）／#485（GEMM 性能改善ツリー Phase A・親 #480 の A-5。11 節を追記）
 - 位置づけ: 本文書は**設計メモのみ**であり、実行可能なカーネル実装は含まない。受け入れ条件は「命令選定・タイル構成・根拠」の 3 要素が記録されていることの 1 点（#60 本文）。
 - 対象外（後続サブタスクのスコープ。重複実装を避けるため明記する）:
   - #61（11.1b）: f16 WMMA GEMM の実装
@@ -20,7 +20,7 @@
 
 - **compute capability**: DGX Spark GB10 は compute capability 12.1（`sm_121`）。RTX 50 系コンシューマ GPU と同じ Blackwell の「コンシューマ系譜」（SM12x）に属する（PoC-v2-3 実機ログ、CUDA SDK 13.0.3・ドライバ 580.159.03）。
 - **命令セット系譜**: SM12x（sm_120/121）の Tensor Core プログラミングモデルは、データセンター系 Blackwell（SM100/`sm_100`）の `tcgen05` 命令・専用メモリ（TMEM）を要求せず、Hopper（SM90）の `wgmma` も要求しない。SM12x は Ampere（SM80）以来の `mma.sync`／WMMA 系プログラミングモデルを維持する（出典: [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)、[Day 3: DGX Spark Unpacked — Kubesimplify](https://blog.kubesimplify.com/day-3-the-dgx-spark-unpacked-gb10-unified-memory-sm-121-and-the-one-reason-this-hardware-exists)）。
-  - この事実は本設計の中心的な前提を確定させる: sm_121 向けカーネルは `wmma::fragment`（C++ API）または `mma.sync.aligned`（PTX）のいずれかで実装可能であり、`tcgen05`/`wgmma` 系の新命令は選択肢に入らない。
+  - この事実は本設計の中心的な前提を確定させる: sm_121 向けカーネルは `wmma::fragment`（C++ API）または `mma.sync.aligned`（PTX）のいずれかで実装可能であり、`tcgen05`/`wgmma` 系の新命令は選択肢に入らない。二次情報（技術ブログ）に基づく本節の記述は、11 節で CUTLASS 一次ソースの実測読解により裏付け・構造化している。
 - **対応 fragment shape・精度**（Ampere 系譜の WMMA API 前提）:
   - f16 入力: `m16n16k16`・`m32n8k16`・`m8n32k16`、累算は f16 または f32
   - TF32 入力: `m16n16k8`（compute capability 8.0 以降で対応、sm_121 は満たす）
@@ -124,11 +124,41 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - カーネル起動 API（`cudarc` の `unsafe fn` ラッパー）が唯一の `unsafe` 境界となる設計を、tensor core 版カーネルでも維持する。CUDA C ソース文字列（`kernels.rs` 相当）自体は Rust の `unsafe` を必要としない（NVRTC への文字列渡し・PTX ロードは `cudarc` 側の型で表現される）。実装（#61 以降）では、既存 `crates/backend-cuda/src/gemm.rs` のカーネル起動ラッパーと同様に、理由コメント付きで `unsafe` を最小化しレビュー必須とする（`.claude/rules/security.md`「unsafe」節）。
 - **仕様変更が必要と判断した事項**: 現時点では発見していない。REQ-11 の受け入れ基準（明示切替 API を提供しない方針・証跡方式）と本設計は整合しており、`docs/spec/` 側の変更提案は不要と判断した。
 
+## 11. SM120/sm_121 の機能制約（SM90/SM100 対比・CUTLASS ソース根拠）
+
+- **目的・分担**: #485（GEMM 性能改善ツリー Phase A・親 #480 の A-5）でのイシューとして、以後の CUDA 最適化検討（Phase B/C）が SM90（Hopper）・SM100 系（データセンター Blackwell）専用技法を SM120/sm_121（DGX Spark GB10）向けの最適化候補に誤って含めないよう、CUTLASS 一次ソースの静的読解のみで確定できる制約をここに記録する。TMA・`setmaxnreg` の実機成否は本節では判断せず、A-3（#483）・A-4（#484）の受け入れ基準側で確定する（11.1 節の空欄行）。2 節の記述（技術ブログ由来の二次情報）はこの一次ソース読解で裏付けられている。
+- **検証に用いた CUTLASS**: リポジトリ [NVIDIA/cutlass](https://github.com/NVIDIA/cutlass)、tag `v4.7.0`（commit `dcf215af68a2d08d305076c152a06f201728cd53`。2026-08-14 時点の最新リリースタグ）。scratchpad 内に `git clone --depth 1` 後 `git fetch --depth 1 origin tag v4.7.0` で当該タグへ checkout して検証した（読み取り専用。コード・コメントは転記せず、事実の指摘のみ `path:line` で記載する）。
+
+### 11.1 機能対比表
+
+| 機能 | SM90 (Hopper) | SM100 系 (DC Blackwell) | SM120/sm_121 (GB10) | CUTLASS ソース根拠（tag v4.7.0） |
+|---|---|---|---|---|
+| `wgmma` | 可 | —（`tcgen05` に置換） | **不可** | `include/cute/arch/mma_sm120.hpp`（全 3278 行）に `wgmma`・`tcgen05` の大小無視の文字列一致が 0 件（`grep -c -i` 実測）。同ファイル内の MMA 命令はすべて `mma.sync` 系（`grep -c "mma.sync"` で 78 件） |
+| `tcgen05` / TMEM | 不可 | 可 | **不可** | `include/cute/arch/config.hpp`（起動源マクロは `CUTE_ARCH_TCGEN05_TMEM_ENABLED`。イシュー本文の `config.h` はファイル名の言い間違いで実体は `config.hpp`、内容面の主張は正しい）は同マクロを 4 箇所（115・140・180・188 行目）で定義するが、いずれの条件ブロックも起動源が `CUTLASS_ARCH_MMA_SM100A/100F/101A/101F/103A/103F_ENABLED` と `SM110A/110F_ENABLED` の組合せのみで、SM120/SM121 系マクロを起動源に含む条件ブロックは 1 件も存在しない（ファイル全 223 行を走査済み）。SM120/SM121 系条件ブロック（156〜161 行目）は `CUTE_ARCH_MMA_SM120_ENABLED`・`CUTE_ARCH_TMA_SM120_ENABLED` のみを定義する |
+| cluster（実用） | 可 | 可 | **実用上不可**（1×1×1 のみ） | (1) `include/cutlass/gemm/collective/builders/` 配下の SM120 向け GEMM collective builder 6 ファイルのうち 5 ファイル（`blockwise_mma_builder.inl` を除く）が `static_assert(cute::size(ClusterShape_MNK{}) == Int<1>{}, ...)`（意訳: 「本アーキテクチャではプログラマブルなマルチキャストクラスタ不可」の主張）を課す。該当行: `sm120_mma_builder.inl:84`・`sm120_array_mma_builder.inl:87`・`sm120_sparse_mma_builder.inl:163`・`sm120_blockscaled_mma_builder.inl:104`・`sm120_blockscaled_sparse_mma_builder.inl:179`。(2) `examples/79_blackwell_geforce_gemm/` 配下の SM120 向け example 4 本（79a〜79d）は全て `using ClusterShape = Shape<_1,_1,_1>;` を使用（各ファイルの該当行を実測確認済み） |
+| `mma.sync`（Ampere 形状） | 可 | 可 | **可** | `mma_sm120.hpp` の実体は `mma.sync.aligned` 系命令のみ（同上 78 件）＋本リポ `crates/backend-cuda/src/kernels_mma.rs`（#187。ファイル冒頭コメントに `mma.sync`/`ldmatrix`/`cp.async` GEMM カーネルソースと明記）の実装実績 |
+| `cp.async` | 可 | 可 | **可** | 本リポ `crates/backend-cuda/src/kernels_mma.rs` の実装実績（#187。`cp.async.cg.shared.global` 命令を使用）。CUTLASS 側は本イシューでは個別検証していない（Ampere 系譜の一般的対応のため対比表に記載するが根拠は自リポ実績のみ） |
+| `ldmatrix` | 可 | 可 | **可** | (1) 本リポ `crates/backend-cuda/src/kernels_mma.rs` の実装実績（#187。`ldmatrix.sync.aligned.m8n8.x4`/`.x2.trans` 命令を使用）。(2) CUTLASS 側でも `include/cute/arch/config.hpp:130-136` の条件ブロックが `CUTLASS_ARCH_MMA_SM120A_ENABLED`・`SM121A_ENABLED` を起動源に含み `CUTE_ARCH_LDSM_SM100A_ENABLED`（ldmatrix 相当）を定義する |
+| TMA（`cp.async.bulk.tensor`） | 可 | 可 | **静的にはマクロ定義が存在**（実機成否は実機プローブ待ち → A-3・#483 で確定。本節では成否を断定しない） | `include/cute/arch/config.hpp:160` で SM120/SM121 系条件ブロックが `CUTE_ARCH_TMA_SM120_ENABLED` を定義している事実のみを記す。マクロ定義の存在は実機での動作成立を意味しない（コンパイル時定義と実行時動作は別事象） |
+| `setmaxnreg` | 未検証 | 未検証 | **実機プローブ待ち（空欄）** → A-4（#484）で確定 | 本イシューでは検証していない（SM90/SM100 列も含め本イシューのスコープ外） |
+
+### 11.2 f32/f16 標準精度向け SM120 専用 mainloop の不在
+
+- `include/cutlass/gemm/collective/builders/` 配下の SM120 向け GEMM `CollectiveBuilder` 特殊化は 6 ファイル存在する（`sm120_mma_builder.inl`・`sm120_array_mma_builder.inl`・`sm120_sparse_mma_builder.inl`・`sm120_blockwise_mma_builder.inl`・`sm120_blockscaled_mma_builder.inl`・`sm120_blockscaled_sparse_mma_builder.inl`。各ファイルとも `struct CollectiveBuilder<...>` の特殊化定義は 1 つのみ）。このうち 4 ファイル（`mma`・`array_mma`・`sparse_mma`・`blockwise_mma`）が、入力型が f8f6f4 系（narrow-precision）要素であることを要求する `static_assert`（`is_sm10x_f8f6f4_element` 判定に基づく。該当行: `sm120_mma_builder.inl:80-81`・`sm120_array_mma_builder.inl:83-84`・`sm120_sparse_mma_builder.inl:159-160`・`sm120_blockwise_mma_builder.inl:132-133`）を課し、さらに 4 ファイル（`mma`・`array_mma`・`sparse_mma`・`blockwise_mma`）は追加で「blockscaled でない collective builder は F8F6F4 MMA のみサポートする」という趣旨の `static_assert`（該当行: `sm120_mma_builder.inl:114-115`・`sm120_array_mma_builder.inl:116-117`・`sm120_sparse_mma_builder.inl:192-194`・`sm120_blockwise_mma_builder.inl:177-178`）も課す。残り 2 ファイル（`blockscaled_mma`・`blockscaled_sparse_mma`）はファイル名・内部の `check_input_datatypes` 呼び出しが示すとおり MXFP/NVFP4 系のブロックスケール narrow-precision フォーマット専用であり、標準精度（f32/f16）は入力型として成立しない構成である。
+- すなわち SM120 向け GEMM collective builder は 6 ファイルのいずれも f8f6f4／blockscaled／sparse のいずれかの narrow-precision 系に限定されており、f32/f16 のような標準精度では要件を満たせず選択されない。CUTLASS 自身も f32/f16 では SM120 専用の mainloop を持たないことが、この 6 ファイル全数の走査から確認できる（SM80 系 mainloop への依存経路そのものは本イシューでは SM80 側ソースを個別検証していないため、「SM120 専用 mainloop が narrow-precision 限定である」という否定的事実の確認に留める）。
+- **帰結**: 本リポが CUDA バックエンドの tensor core 化（#61〜#63、`crates/backend-cuda`）で Ampere 世代 `mma.sync`（`m16n8k16` 等の WMMA/mma 形状、本ドキュメント 2〜4 節）を使い続ける設計判断は、CUTLASS 自身の構成（SM120 専用 collective builder が narrow-precision 限定であり、f32/f16 向けの SM120 専用 mainloop を持たない）とも整合する。
+
+### 11.3 Phase B/C への含意
+
+- SM90（`wgmma`・TMA 前提の warp specialization epilogue 等）・SM100 系（`tcgen05`・TMEM 系 epilogue）専用の最適化技法は、11.1 節の対比表が示すとおり SM120/sm_121 では利用不可のため、Phase B/C（本リポ CUDA 最適化検討の後続フェーズ）の最適化候補から除外する。
+- TMA（`cp.async.bulk.tensor`）・`setmaxnreg` の採否は、11.1 節で「実機プローブ待ち」とした 2 行の結論が A-3（#483）・A-4（#484）で確定した後にのみ判断する。本節では静的なマクロ定義の存在のみを記録し、採否の断定は行わない。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）
 - [Day 3: DGX Spark Unpacked. GB10, Unified Memory, sm_121, and NVFP4 — Kubesimplify](https://blog.kubesimplify.com/day-3-the-dgx-spark-unpacked-gb10-unified-memory-sm-121-and-the-one-reason-this-hardware-exists)
 - [NVIDIA Blackwell Architecture 公式ページ](https://www.nvidia.com/en-us/data-center/technologies/blackwell-architecture/)（5th-Gen Tensor Core の対応精度）
 - [NVRTC 13.3 公式ドキュメント](https://docs.nvidia.com/cuda/nvrtc/index.html)（ヘッダ解決の仕組み、`nvrtcCreateProgram` への渡し方）
+- [NVIDIA/cutlass](https://github.com/NVIDIA/cutlass)（tag `v4.7.0`、commit `dcf215af68a2d08d305076c152a06f201728cd53`。11 節の一次ソース根拠。BSD-3-Clause ライセンス、コード・コメントの転記は行わず事実の指摘のみを記載）
 - `docs/spec/03-poc/poc-v2-3-cuda-gemm/README.md`（CUDA tiled GEMM 実測・tensor core 化の段階見積もり）
 - `docs/spec/04-requirements.md`（REQ-2・REQ-8・REQ-11）
