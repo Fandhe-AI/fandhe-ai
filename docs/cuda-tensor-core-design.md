@@ -1,6 +1,6 @@
 # CUDA Tensor Core（WMMA/mma）カーネル設計メモ
 
-- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）／#485（GEMM 性能改善ツリー Phase A・親 #480 の A-5。11 節を追記）／#483（GEMM 性能改善ツリー Phase A・親 #480 の A-3。TMA sm_121 プローブ spike。12 節を追記）
+- 対応イシュー: #60（TASK-11.1a、親 #59 TASK-11.1 の再分解サブタスク先頭）／#485（GEMM 性能改善ツリー Phase A・親 #480 の A-5。11 節を追記）／#483（GEMM 性能改善ツリー Phase A・親 #480 の A-3。TMA sm_121 プローブ spike。12 節を追記）／#484（GEMM 性能改善ツリー Phase A・親 #480 の A-4。setmaxnreg プローブ spike。13 節を追記）
 - 位置づけ: 本文書は**設計メモのみ**であり、実行可能なカーネル実装は含まない。受け入れ条件は「命令選定・タイル構成・根拠」の 3 要素が記録されていることの 1 点（#60 本文）。
 - 対象外（後続サブタスクのスコープ。重複実装を避けるため明記する）:
   - #61（11.1b）: f16 WMMA GEMM の実装
@@ -142,7 +142,7 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 | `cp.async` | 可 | 可 | **可** | 本リポ `crates/backend-cuda/src/kernels_mma.rs` の実装実績（#187。`cp.async.cg.shared.global` 命令を使用）。CUTLASS 側は本イシューでは個別検証していない（Ampere 系譜の一般的対応のため対比表に記載するが根拠は自リポ実績のみ） |
 | `ldmatrix` | 可 | 可 | **可** | (1) 本リポ `crates/backend-cuda/src/kernels_mma.rs` の実装実績（#187。`ldmatrix.sync.aligned.m8n8.x4`/`.x2.trans` 命令を使用）。(2) CUTLASS 側でも `include/cute/arch/config.hpp:130-136` の条件ブロックが `CUTLASS_ARCH_MMA_SM120A_ENABLED`・`SM121A_ENABLED` を起動源に含み `CUTE_ARCH_LDSM_SM100A_ENABLED`（ldmatrix 相当）を定義する |
 | TMA（`cp.async.bulk.tensor`） | 可 | 可 | **静的にはマクロ定義が存在**（実機成否は実機プローブ待ち → A-3・#483 で確定。本節では成否を断定しない） | `include/cute/arch/config.hpp:160` で SM120/SM121 系条件ブロックが `CUTE_ARCH_TMA_SM120_ENABLED` を定義している事実のみを記す。マクロ定義の存在は実機での動作成立を意味しない（コンパイル時定義と実行時動作は別事象） |
-| `setmaxnreg` | 未検証 | 未検証 | **実機プローブ待ち（空欄）** → A-4（#484）で確定 | 本イシューでは検証していない（SM90/SM100 列も含め本イシューのスコープ外） |
+| `setmaxnreg` | 未検証 | 未検証 | **実機プローブ待ち（空欄）** → A-4（#484）で確定。プローブ実装は 13 節・`crates/backend-cuda/tests/setmaxnreg_probe_{dec,incdec}_{base,accel}_real_device.rs`（4 ファイル）に用意済み（実機実行は未了） | 本イシューでは検証していない（SM90/SM100 列も含め本イシューのスコープ外） |
 
 ### 11.2 f32/f16 標準精度向け SM120 専用 mainloop の不在
 
@@ -185,6 +185,22 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
   - cluster・cta のいずれか一方でもコンパイル・実行が成功: 起票要（起票自体は `out-of-scope-tracking.md` に従いユーザー承認のうえ別途実施）。本ファイル冒頭コメント「CUTLASS 側の根拠」のとおり sm_120/121 では `CUTE_ARCH_TMA_SM120_ENABLED` パスが `shared::cta` opcode を発行する設計のため、**cta 単独の成功でも cluster の失敗は非ブロッキングとして扱う**（cta 成功のみで起票要と判定してよい）。
   - cluster・cta のいずれも全 arch でコンパイルまたは実行が失敗、かつ上記一次トリアージで全失敗理由が (a) opcode／arch 非対応と判定できた場合のみ: 起票不要。(b) プローブ自体のバグに起因する失敗が一件でも含まれる場合は「起票不要」と確定せず、プローブ修正・再実行後に再判定する。
 - 実機実行手順は `docs/real-hardware-verification-env.md`（接続情報・実ホスト名は同ドキュメントの `*.local.md` 参照方式に従い本節には記載しない）。
+
+## 13. setmaxnreg プローブ結果（#484）
+
+- **位置づけ**: 親イシュー #480（Phase A: GEMM 最適化の前提確定・実機プローブ）の A-4。`setmaxnreg.inc/dec.sync.aligned.u32`（warp specialization レジスタ再配分。producer/consumer warp 間でレジスタ予算を非対称配分する PTX 命令）が sm_121（DGX Spark GB10）+ NVRTC（CUDA 13.0 系）で受理・実行可能かを確定させ、後続 B-3（タイル拡大時のレジスタ予算設計）の設計自由度の上限を明らかにする spike。
+- **プローブ実装（PR #636 再指摘 P2 × 3・Bugbot Medium 対応で 4 ファイルへ再設計）**: `crates/backend-cuda/tests/setmaxnreg_probe_{dec,incdec}_{base,accel}_real_device.rs`（`#[ignore]` 分離。共有ヘルパーは `tests/setmaxnreg_common/mod.rs`）。`setmaxnreg.dec` 単独発行版・producer warpgroup が `setmaxnreg.dec`／consumer warpgroup が `setmaxnreg.inc` を発行する非対称版（1 ブロック 2 warpgroup・256 スレッド）の 2 カーネルを、基準 arch（`compute_121` 相当）・arch-accelerated 版（`compute_121a`）それぞれ独立のテストバイナリ（＝独立プロセス）で NVRTC コンパイル → ロード → 起動 → 同期し、成否を `SETMAXNREG_PROBE_RESULT` 形式で標準出力へ記録する。命令拒否と `libnvrtc` 不在等の toolchain 側要因を区別するため、`setmaxnreg` を含まない対照カーネルを同一 arch へ先にコンパイルしてから判定する。
+  - **ファイル分割によるプロセス分離（再指摘 P2「同一 CUDA コンテキストでの連続実行」対応）**: 以前は 1 テスト関数内で基準 arch → arch-accelerated 版を同一 `CudaDevice`／CUDA コンテキストで連続実行しており、先行プローブのデバイス例外がコンテキストを汚染し後続の判定に伝播しうる構造だった。`tests/` 直下のトップレベル `.rs` ファイルはそれぞれ独立の cargo test バイナリ（＝独立プロセス）としてコンパイル・実行される cargo の既定動作を利用し、追加の自前プロセス分離機構（自己再実行ハーネス等）を実装せずに 4 ファイル（dec/incdec × base/accel）へ分割することで真のコンテキスト独立を得た。
+  - **`num_regs` を実行ゲートから撤去し診断専用へ（再指摘 P2 × 2「静的 `num_regs` を実行可否ゲートに使わない」対応）**: 以前は `CU_FUNC_ATTRIBUTE_NUM_REGS`（`cudarc::driver::CudaFunction::num_regs`）から算出した CTA レジスタプール保存則等の静的判定で `launch`/`synchronize` 自体を skip していた。しかし `num_regs` は `cuModuleLoadData` 時点のドライバ JIT が確定させる静的な register/thread 割り当て値であり、単純なプローブカーネルでは `setmaxnreg` の対象値（24〜232）を大きく下回りやすく、有効な命令構成であっても実行経路が恒常的に skip され本スパイクの主目的（producer/consumer 非対称版の実際のロード・起動・同期・出力検証）を達成できていなかった。再設計後は `num_regs` を `source=diagnostic` の参考ログとしてのみ記録し（`stage=control_baseline_regs`／`stage=probe_self_regs`）、実行可否には一切使わない。ロードに成功したカーネルは常に起動・同期する。
+  - **使用可否判断の一次根拠は変わらず** `nvrtc_compile`/`module_load`/`load_function`（受理）と `execute`（実行完走＋出力ビット完全一致。基準 arch 版・arch-accelerated 版とも `arch=` フィールドで区別して記録）の実測結果である。`result=corrupted`（実行完走したが出力が期待値と不一致）は引き続き `panic` させる（出力破壊は命令の受理可否の範疇を超えた危険なシグナルのため softening しない）。producer/consumer 間で実際にレジスタ予算が動的に再配分された証拠（例: `nsight-compute` 等によるレジスタ占有率の実行時プロファイル）は本プローブのスコープ外。詳細は `tests/setmaxnreg_common/mod.rs` 冒頭コメント参照。転記時は `result`・`arch` に加え `probe_self_regs`・`control_baseline_regs`（いずれも `source=diagnostic` の参考値）の実測値も併記すること。
+  - **register/thread 数を構成でピン留めしていない点（既知の限界・PR #636 継続コミット時点の判断）**: dec/inc の対象値（dec 単独版 64、非対称版 24／232）が実機のベースライン静的レジスタ割り当てに対して ISA 上妥当（`.dec` 対象値 ≤ 現在値・`.inc` 対象値 ≥ 現在値）かどうかは、`--maxrregcount` 等はレジスタ数の**上限（cap）**を指定するのみで**下限（floor）**を保証しないため、構成のみでは確定できない。本プローブはこれを診断ログ（`source=diagnostic`）として記録するに留め、真の ISA 妥当性は実機実行の結果（受理・実行完走・出力一致）そのものに語らせる設計とした（構成による事前保証を諦める代わりに、静的推測に基づく恒常的な実行 skip という以前の失敗を繰り返さない）。この限界自体は実機実行後も残り得るため、実機結果の転記時は「命令自体が拒否された」（真の不可）と「値の組み合わせがこのベースラインでは不成立だった」（値の再選定が必要）を `probe_self_regs` の実測値と突き合わせて人間が判断すること。
+
+### 13.1 実行契約
+
+**ハング対策は静的ゲートではなく外部タイムアウトへ（Bugbot Medium「dec-only プローブが `dec_ok=false` でも常に launch する」対応）**: 旧実装は producer/consumer 非対称版のみ静的ゲートを持ち、dec 単独版は「常にゲートなしで実行」という非対称な扱いだった（旧コメント「単体（片道）プローブのため CTA レジスタプール保存則の対象外」）。再設計は両者を「診断ログのみ・ゲートなし」で統一し、ハング対策は各テストファイルを**外部タイムアウト付きで実行する運用契約**に一本化した: `timeout 120 cargo test -p backend-cuda --release --test <ファイル名> -- --ignored --nocapture`（4 ファイルそれぞれに適用。実行手順は `docs/real-hardware-verification-env.md` §4.5 に反映済み）。静的値からの予測に頼らず、実機自身に真の成否（命令拒否／ハング／実行完走）を語らせる設計とする。
+
+- **実機実行**: **未了**（本イシューの実行環境ではローカル GPU が RTX 3060／compute capability 8.6 であり sm_121 実機ではないため、`docs/real-hardware-verification-env.md` が要求する `docs/real-hardware-verification-env.local.md`（実機ホスト名。`.gitignore` 対象・本 worktree には未配置）経由の DGX Spark GB10 接続を行っていない。9 節「実機検証プローブについて」と同じ理由で、到達できない実機の結果を推定で記載しない）。負対照実行（cc 8.6・本 worktree・2026-08-15）: `libnvrtc` 自体が本環境に未導入のため 4 ファイルとも `nvrtc_compile` 段階で `result=inconclusive`（`CudaError::NvrtcUnavailable`）として記録され、`panic` せず pass した。これは「非対応 arch での命令拒否」の実測ではなく「toolchain 不在」の実測に留まるが、4 ファイル分割後のプロセス分離・非ハング・構造化ログ出力という再設計後の実行経路自体が機能することは確認できた（一過性の負対照記録であり、恒久的な環境詳細としては記載しない）。
+- **B-3 への引き渡し（プローブ実行前の fail-closed 既定）**: 実機プローブが完了し `setmaxnreg` の使用可否が確定するまで、B-3（タイル拡大時のレジスタ予算設計）は**対称レジスタ予算前提**でタイル上限を設計する（`setmaxnreg` の使用を前提にした非対称配分設計を仮定しない）。**使用可と確定した場合**、B-3 は producer/consumer 間の dealloc/alloc 量の設計自由度を本節の実測結果（`probe_self_regs`・`execute` の `result`）で更新した内容から引き継ぐ。確定自体は実機実行後の作業であり、本節はその条件付き方針のみを記す。
 
 ## 参考文献
 
