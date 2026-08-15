@@ -26,6 +26,24 @@
 //! cargo run -p backend-metal --example gemm_diagnosis --release
 //! ```
 //!
+//! ### GPU デバイスプロファイル（occupancy 判定式のパラメータ）
+//!
+//! `ideal_groups` の算出（[`analytics::DeviceProfile`]）は既定で M4 Max
+//! 実機検証環境（`gpu_core_count=40`・`ideal_groups_multiplier=6`）を前提
+//! とする。macOS 実行時は `sysctl -n hw.model` で実機モデルを検出し、
+//! `Mac16,6`（M4 Max）以外では誤った occupancy 判定を避けるため実行を
+//! **拒否する**（fail-closed。codex-review 指摘 P1。PR #649）。他デバイス
+//! で診断したい場合は `--gpu-core-count`・`--ideal-groups-multiplier` を
+//! 両方明示指定する:
+//!
+//! ```sh
+//! cargo run -p backend-metal --example gemm_diagnosis --release -- \
+//!     --gpu-core-count=20 --ideal-groups-multiplier=6
+//! ```
+//!
+//! 非 macOS（解析値のみ算出。実機検出手段がない）は CLI 引数の明示指定が
+//! なければ M4 Max 既定プロファイルを使い、その旨を stderr へ警告出力する。
+//!
 //! 計測手順・記録テンプレート・判定基準は
 //! `docs/perf/metal-gemm-bottleneck-diagnosis.md` を参照。
 //!
@@ -85,18 +103,33 @@
 mod analytics {
     use backend_metal::TileConfig;
 
-    /// M4 Max（実機検証環境。`docs/real-hardware-verification-env.md` §1）
-    /// の GPU コア数。`docs/perf/metal-gemm-dynamic-tile.md:53` の実測記録
-    /// （`sysctl -n hw.model` = `Mac16,6`・GPU コア 40）を出典とする。
-    /// `MTLDevice` に公開の GPU コア数取得 API は存在しないため、本 example
-    /// は解析対象を実機検証環境の固定値として扱う（他 Mac 実機での
-    /// occupancy 判定に流用しないよう doc に明記する）。
-    pub const M4_MAX_GPU_CORE_COUNT: u64 = 40;
+    /// GPU デバイスプロファイル（occupancy 判定式
+    /// `idealGroups = gpu_core_count * ideal_groups_multiplier`
+    /// （MFA〈Metal FlashAttention〉の FP32 系判定式。イシュー #487 計画
+    /// 「occupancy 不足の判定」節が出発点として指定）のパラメータ）。
+    ///
+    /// `MTLDevice` に公開の GPU コア数取得 API は存在しないため、本
+    /// example は解析対象を明示的なプロファイル値として扱う。既定値
+    /// （[`Self::M4_MAX`]）を他 Mac 実機の occupancy 判定に無警告で流用
+    /// しないよう、呼び出し側（`main`）で実機モデル検出による
+    /// fail-closed 拒否・CLI 引数上書きを行う（モジュールドキュメント
+    /// 「GPU デバイスプロファイル」節・codex-review 指摘 P1・PR #649）。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct DeviceProfile {
+        pub gpu_core_count: u64,
+        pub ideal_groups_multiplier: u64,
+    }
 
-    /// MFA（Metal FlashAttention）の occupancy 判定式
-    /// `idealGroups = coreCount * multiplier`（FP32 系は経験則で 6 倍。
-    /// イシュー #487 計画「occupancy 不足の判定」節が出発点として指定）。
-    pub const MFA_IDEAL_GROUPS_MULTIPLIER: u64 = 6;
+    impl DeviceProfile {
+        /// M4 Max（実機検証環境。`docs/real-hardware-verification-env.md`
+        /// §1）の既定プロファイル。`docs/perf/metal-gemm-dynamic-tile.md:53`
+        /// の実測記録（`sysctl -n hw.model` = `Mac16,6`・GPU コア 40）と
+        /// MFA 経験則の 6 倍を出典とする。
+        pub const M4_MAX: DeviceProfile = DeviceProfile {
+            gpu_core_count: 40,
+            ideal_groups_multiplier: 6,
+        };
+    }
 
     /// `size×size×size` 正方 GEMM 1 件分の解析値
     /// （`gemm.metal` の staged 経路・`tile::select` の選択結果を前提に
@@ -139,13 +172,13 @@ mod analytics {
     /// [`SizeAnalytics`] を算出する。`tile::select` を正方形状
     /// （`m=n=k=size`）で呼び出し、その選択結果に基づいて
     /// occupancy・バリア回数・理論トラフィックを求める。
-    pub fn analyze(size: usize) -> SizeAnalytics {
+    pub fn analyze(size: usize, profile: DeviceProfile) -> SizeAnalytics {
         let tile = backend_metal::tile::select(size, size, size);
 
         let groups_m = ceil_div(size, tile.bm);
         let groups_n = ceil_div(size, tile.bn);
         let actual_groups = groups_m * groups_n;
-        let ideal_groups = M4_MAX_GPU_CORE_COUNT * MFA_IDEAL_GROUPS_MULTIPLIER;
+        let ideal_groups = profile.gpu_core_count * profile.ideal_groups_multiplier;
 
         let k_tile_count = ceil_div(size, tile.bk);
         let barriers_per_tg = if tile.staged { 2 * k_tile_count } else { 0 };
@@ -175,9 +208,53 @@ mod analytics {
     }
 }
 
+/// `--gpu-core-count=<N>` `--ideal-groups-multiplier=<M>` を解析し、明示
+/// 指定された [`analytics::DeviceProfile`] を返す（macOS・非 macOS 双方の
+/// `main` から呼ばれる）。既定の M4 Max プロファイルを他デバイスへ無警告
+/// で流用しないための CLI 上書き経路（モジュールドキュメント「GPU
+/// デバイスプロファイル」節・codex-review 指摘 P1・PR #649）。
+///
+/// 誤った occupancy 判定を招く片方だけの指定は `Err` で拒否する
+/// （fail-closed）。両方とも未指定なら `Ok(None)`（呼び出し側が既定
+/// プロファイルの解決方法〈macOS: 実機モデル検出／非 macOS: M4 Max 既定 +
+/// 警告〉を判断する）。
+fn parse_device_profile_override() -> Result<Option<analytics::DeviceProfile>, String> {
+    let mut gpu_core_count: Option<u64> = None;
+    let mut ideal_groups_multiplier: Option<u64> = None;
+
+    for arg in std::env::args().skip(1) {
+        if let Some(v) = arg.strip_prefix("--gpu-core-count=") {
+            gpu_core_count = Some(
+                v.parse()
+                    .map_err(|_| format!("--gpu-core-count の値が不正: '{v}'"))?,
+            );
+        } else if let Some(v) = arg.strip_prefix("--ideal-groups-multiplier=") {
+            ideal_groups_multiplier = Some(
+                v.parse()
+                    .map_err(|_| format!("--ideal-groups-multiplier の値が不正: '{v}'"))?,
+            );
+        }
+    }
+
+    match (gpu_core_count, ideal_groups_multiplier) {
+        (Some(gpu_core_count), Some(ideal_groups_multiplier)) => {
+            Ok(Some(analytics::DeviceProfile {
+                gpu_core_count,
+                ideal_groups_multiplier,
+            }))
+        }
+        (None, None) => Ok(None),
+        _ => Err(
+            "--gpu-core-count と --ideal-groups-multiplier は両方同時に指定する必要がある \
+             （片方のみの指定は不正な occupancy 判定を招くため拒否する）"
+                .to_string(),
+        ),
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use super::analytics::{self, SizeAnalytics};
+    use super::analytics::{self, DeviceProfile, SizeAnalytics};
     use backend_metal::{MetalContext, MetalGemm};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
@@ -210,13 +287,58 @@ mod macos_impl {
         measurement.median_secs
     }
 
+    /// 実行対象デバイスの [`DeviceProfile`] を解決する。CLI 明示指定
+    /// （`super::parse_device_profile_override`）を最優先で使い（他
+    /// デバイスでの意図的な実行を許可するため）、未指定の場合は
+    /// `sysctl -n hw.model` で実機モデルを検出する。検出結果が本 example
+    /// の前提実機（M4 Max・`Mac16,6`）と一致しない、または検出自体に
+    /// 失敗した場合は、誤った occupancy 判定（他デバイスに M4 Max 用の
+    /// `ideal_groups` を無警告で適用してしまう）を避けるため実行を拒否
+    /// する（fail-closed。codex-review 指摘 P1・PR #649）。
+    fn resolve_device_profile() -> Result<DeviceProfile, String> {
+        if let Some(profile) = super::parse_device_profile_override()? {
+            return Ok(profile);
+        }
+
+        const SUPPORTED_MODEL: &str = "Mac16,6"; // M4 Max（実機検証環境）
+
+        let output = std::process::Command::new("sysctl")
+            .args(["-n", "hw.model"])
+            .output()
+            .map_err(|e| format!("`sysctl -n hw.model` の実行に失敗した: {e}"))?;
+        if !output.status.success() {
+            return Err("`sysctl -n hw.model` がエラー終了した".to_string());
+        }
+        let model = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        if model == SUPPORTED_MODEL {
+            Ok(DeviceProfile::M4_MAX)
+        } else {
+            Err(format!(
+                "検出デバイス '{model}' は本 example が前提とする実機検証環境（M4 Max・\
+                 {SUPPORTED_MODEL}）と一致しない。occupancy 判定式 \
+                 (idealGroups = gpu_core_count * ideal_groups_multiplier) は機種依存のため、\
+                 既定の M4 Max 用プロファイルをそのまま適用すると誤った診断結果になる。\
+                 `--gpu-core-count=<N> --ideal-groups-multiplier=<M>` を明示指定して再実行すること。"
+            ))
+        }
+    }
+
     pub fn main() {
+        let profile = match resolve_device_profile() {
+            Ok(profile) => profile,
+            Err(msg) => {
+                eprintln!("{msg}");
+                std::process::exit(1);
+            }
+        };
+
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
         let config = MeasurementConfig::default();
 
         for size in [512usize, 1024, 2048, 4096] {
-            let a: SizeAnalytics = analytics::analyze(size);
+            let a: SizeAnalytics = analytics::analyze(size, profile);
 
             // `wall_secs` は A・B アップロード＋カーネル実行＋C readback を
             // 含む end-to-end 壁時計時間（モジュールドキュメント「転送時間
@@ -278,13 +400,33 @@ fn main() {
 /// の事前計算表を再生成する手段としても使える）。
 #[cfg(not(target_os = "macos"))]
 fn main() {
+    // 非 macOS には `sysctl -n hw.model` 相当の実機検出手段がなく、この
+    // 経路はそもそも実測（GPU 実行）を行わない解析専用パスのため、CLI
+    // 明示指定がなければ M4 Max 既定プロファイルを使い、その旨を stderr
+    // へ警告する（macOS 側の fail-closed 拒否とは異なり、実機ではない
+    // ため誤った実機診断を招くリスクがない。codex-review 指摘 P1・PR #649）。
+    let profile = match parse_device_profile_override() {
+        Ok(Some(profile)) => profile,
+        Ok(None) => {
+            eprintln!(
+                "--gpu-core-count/--ideal-groups-multiplier 未指定のため既定の M4 Max プロファイル \
+                 (gpu_core_count=40, ideal_groups_multiplier=6) を使う。"
+            );
+            analytics::DeviceProfile::M4_MAX
+        }
+        Err(msg) => {
+            eprintln!("{msg}");
+            std::process::exit(1);
+        }
+    };
+
     println!(
         "backend-metal gemm_diagnosis example: wall_ms/tflops_lower_bound/logical_load_gbs_lower_bound \
          measurement requires macOS (Apple Silicon). Analytical values (occupancy / barriers / \
          arithmetic intensity) below are computed on any platform.\n"
     );
     for size in [512usize, 1024, 2048, 4096] {
-        let a = analytics::analyze(size);
+        let a = analytics::analyze(size, profile);
         println!(
             "size={} tile={}x{}x{}({}x{}, staged={}) actual_groups={} ideal_groups={} \
              barriers_per_tg={} load_bytes_total={} store_bytes_total={} flops={} \

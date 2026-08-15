@@ -90,6 +90,13 @@ cargo run -p backend-metal --example gemm_diagnosis --release
 ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> tflops_lower_bound=<v>
 logical_load_gbs_lower_bound=<v>`）を size=512/1024/2048/4096 で出力する。
 
+`ideal_groups` の算出（`idealGroups = gpu_core_count * ideal_groups_multiplier`）は既定で M4 Max
+実機検証環境（`gpu_core_count=40`・`ideal_groups_multiplier=6`）を前提とする。macOS 実行時は
+`sysctl -n hw.model` で実機モデルを検出し、`Mac16,6`（M4 Max）以外では誤った occupancy 判定を
+避けるため実行を **拒否する**（fail-closed。codex-review 指摘 P1・PR #649）。M4 Max 以外の実機で
+診断する場合は `--gpu-core-count`・`--ideal-groups-multiplier` を両方明示指定する（例:
+`cargo run -p backend-metal --example gemm_diagnosis --release -- --gpu-core-count=20 --ideal-groups-multiplier=6`）。
+
 GPU 使用率のサンプリング（ベンチ実行と並行して別ターミナルで実行。sudo 不要）:
 
 ```sh
