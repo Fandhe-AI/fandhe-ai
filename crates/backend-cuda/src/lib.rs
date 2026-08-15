@@ -108,6 +108,17 @@
 //! 切替は別スコープ）。elementwise・reduction は GPU カーネル未実装のため
 //! `tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。
+//!
+//! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
+//! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
+//! [`CudaKernelCacheKey`]・[`nvrtc_version`] を追加した。カーネル特化
+//! パラメータ（shape・ブロックタイル・パイプライン段数・dtype）とコンパイル
+//! キャッシュのキー（上記 + compute capability・NVRTC バージョン・
+//! コンパイルフラグ）を表す `Hash + Eq` な型であり、後続タスク（C-2 自作
+//! ハッシュ・ディレクトリ命名 #506、C-4 プロセス内 LRU #511、C-6 テンプレート
+//! 展開 #516）が共通に使う「キーの単位」を確定する。本タスクではキャッシュ
+//! 本体・ディレクトリ命名・テンプレート展開は実装しない（`nvrtc.rs`
+//! ドキュメンテーションコメント参照）。
 
 pub mod device;
 mod error;
@@ -130,5 +141,49 @@ pub use gemm_auto::CudaGemmAuto;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
-pub use nvrtc::compile_ptx;
+pub use nvrtc::{CudaKernelCacheKey, CudaKernelDescriptor, compile_ptx, nvrtc_version};
 pub use ops::CudaBackendOps;
+
+/// `kernels_mma`／`kernels_wmma_opt`（非公開 `mod`。カーネル本体は crate
+/// 外から直接呼ばせない）が持つブロックタイル定数を、診断専用の安定関数
+/// として公開する境界。イシュー #486 の `examples/gemm_profile_target.rs`
+/// occupancy 概算がこのタイル値を必要とするが、値を手元転記すると出典側の
+/// 変更を機械的に検知できない（値が乖離しても診断ツールが静かに誤った
+/// 参考値を出し続ける）ため、`kernels_mma::MMA_BM`／`_BN`・
+/// `kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M`／`_N` を crate 内部でのみ
+/// `use` し、値そのものを返す関数だけを公開する。
+///
+/// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+/// （`Cargo.toml` の `[features]` 参照。PR #637 codex-review P1 指摘の是正:
+/// 生の内部定数はおろか、この安定関数群自体も非公開カーネルのタイル形状を
+/// crate 外へ伝える契約になってしまうため、`pub mod` として常時公開せず
+/// feature ゲートで既定ビルドの公開 API 面から完全に除外する。コメントで
+/// 「SemVer 互換性保証対象外」と宣言するだけでは Rust の通常の公開 API で
+/// ある以上、戻り値の意味・関数自体が利用者との契約になってしまうため
+/// 不十分と判断した）。`examples/gemm_profile_target.rs`
+/// （occupancy 概算専用）は `Cargo.toml` の `required-features` で本
+/// feature を要求するため、`cargo build --example gemm_profile_target
+/// --features internal-diagnostics` でのみビルドできる。通常の利用者は
+/// [`CudaGemm`]／[`CudaMmaGemm`]／[`ops::CudaBackendOps`] 等の安定 API を
+/// 経由してバックエンドを利用し、本 feature を有効化する必要はない。
+#[cfg(feature = "internal-diagnostics")]
+pub mod diagnostics {
+    use crate::{kernels_mma, kernels_wmma_opt};
+
+    /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
+    /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
+    /// occupancy 概算専用。
+    pub fn wmma_tf32_opt_block_tile() -> (u32, u32) {
+        (
+            kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M,
+            kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_N,
+        )
+    }
+
+    /// `mma_f16`（`mma.sync` f16 パイプライン）カーネルのブロックタイル
+    /// 形状 `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
+    /// occupancy 概算専用。
+    pub fn mma_f16_block_tile() -> (u32, u32) {
+        (kernels_mma::MMA_BM, kernels_mma::MMA_BN)
+    }
+}

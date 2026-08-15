@@ -236,6 +236,43 @@ impl MetalGemm {
         }))
     }
 
+    /// [`Self::pipeline_for_tile`] が実際に採用した [`TileConfig`]（フォール
+    /// バック後の構成）を検証する（イシュー #532・PR #651 codex-review 指摘
+    /// 対応。P2/P3）。
+    ///
+    /// `dispatch_variant`（`SimdgroupTiled`）は `pipeline_for_tile` が
+    /// `crate::tile::fallback_chain` で構成失敗時に
+    /// `TileConfig::SINGLE_SIMDGROUP_8X8` へサイレントにフォールバックして
+    /// も戻り値の `Vec<f32>` だけを見ると成功にしか見えず、指定した構成が
+    /// 実際にコンパイル・パイプライン構築（実デバイスの
+    /// `maxThreadgroupMemoryLength`・パイプライン構築後実測の
+    /// `maxTotalThreadsPerThreadgroup` を含む）まで通ったかを外側から検証
+    /// できない問題があった。`crate::tile` モジュール末尾の実機依存テスト、
+    /// および `tests/gemm_dynamic_tile_parity.rs`（別コンパイル単位の統合
+    /// テスト）が本メソッドで `resolve_tile_config(cfg) == cfg` を確認した
+    /// うえで初めて実際のディスパッチへ進む契約にする。
+    ///
+    /// `pub(crate)`（PR #651 codex-review 再指摘・P1）: 当初は統合テスト
+    /// （`tests/` 配下・クレート境界の外）から参照するため `#[doc(hidden)]
+    /// pub` としていたが、`doc(hidden)` はドキュメント表示を抑えるだけで
+    /// 可視性・semver 契約は変更されず、パイプライン構築・フォールバック
+    /// というバックエンド内部実装が外部から呼び出し可能な公開 API に
+    /// なってしまう問題があった。実セット（`crate::tile::CANDIDATES`）を
+    /// 検証するテストはクレート内テスト（本ファイル末尾ではなく
+    /// `crate::tile` の `#[cfg(test)] mod tests`。同モジュールは
+    /// クレート境界の内側のため `pub(crate)` で届く）へ集約し、統合テスト
+    /// （`tests/gemm_dynamic_tile_parity.rs`）側は本メソッドを呼ばず
+    /// `dispatch_variant` の数値一致確認に限定した（フォールバック検知は
+    /// クレート内テストが担う）。
+    pub(crate) fn resolve_tile_config(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        self.pipeline_for_tile(ctx, cfg)
+            .map(|(_, resolved)| resolved)
+    }
+
     /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
     /// [`tile::select`] で [`TileConfig`] を選び、[`GemmVariant::SimdgroupTiled`]
     /// で [`Self::dispatch_variant`] へ委譲する。バックエンド抽象層からの

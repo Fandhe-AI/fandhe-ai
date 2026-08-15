@@ -148,7 +148,7 @@ use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::error::CudaError;
-use crate::kernels_mma::DimSpec;
+use crate::kernels_mma::{DimSpec, render_dim_define};
 
 /// A タイル（`as_tile[2][BLOCK_M][A_PAD]`）の行幅（パディング後）。
 /// `K_TILE`（16）に 4 要素加算し、f32 の `ldm` 制約（4 の倍数）を保ちながら
@@ -189,7 +189,7 @@ pub const WMMA_TF32_OPT_B_PAD: u32 = WMMA_TF32_OPT_BLOCK_N + 4;
 /// 本カーネルは [`render_wmma_tf32_opt`] のテンプレート展開結果であり、
 /// [`WMMA_TF32_OPT_BLOCK_M`] 等 Rust 側タイル定数を初期値とする既定
 /// [`WmmaOptKernelConfig`] で展開したソースを [`wmma_tf32_f32_opt_source`]
-/// が 1 回だけキャッシュして返す。`kernels_mma.rs::MMA_F16` と同じ方針
+/// が 1 回だけキャッシュして返す。`kernels_mma.rs::mma_f16_source()` と同じ方針
 /// （`DimSpec` による M/N/K の動的／静的焼き込み選択・fail-closed 構成
 /// 検証）だが、本カーネルは `cp.async` パイプライン段数を持たない
 /// （ダブルバッファ `cur`/`nxt` は 2 固定）ため config に `stages` 相当の
@@ -295,8 +295,17 @@ impl WmmaOptKernelConfig {
     pub fn launch_config(&self, m: u32, n: u32) -> LaunchConfig {
         // TF32 opt・f16 opt 共通のハードウェア warp タイル辺（両定数とも
         // 32 で一致。値の根拠は本メソッドのドキュメンテーションコメント
-        // 参照）。
+        // 参照）。下記コンパイル時アサーションで
+        // `WMMA_TF32_OPT_WARP_TILE`/`WMMA_F16_OPT_WARP_TILE` との一致を
+        // 保証する（レビュー指摘: 将来どちらか一方の定数値のみが変更
+        // された場合に `validate_wmma_*_opt_config` 側は正しい定数で
+        // 倍数関係を検査する一方、本メソッドはハードコードされた 32 の
+        // ままとなり両者が無言で食い違う経路を塞ぐ）。
         const WARP_TILE: u32 = 32;
+        const _: () = assert!(
+            WARP_TILE == WMMA_TF32_OPT_WARP_TILE && WARP_TILE == WMMA_F16_OPT_WARP_TILE,
+            "WARP_TILE は WMMA_TF32_OPT_WARP_TILE/WMMA_F16_OPT_WARP_TILE と一致している必要があります"
+        );
         let warp_grid_m = self.block_m / WARP_TILE;
         let warp_grid_n = self.block_n / WARP_TILE;
         LaunchConfig {
@@ -759,16 +768,6 @@ fn validate_wmma_opt_k_tile_bound(k: u32, k_tile: u32) -> Result<(), CudaError> 
         });
     }
     Ok(())
-}
-
-/// `#define {macro_name} <param_name または static 値>` を 1 行生成する
-/// （`kernels_mma::render_dim_define` と同方式。用途がモジュールをまたぐ
-/// ためここでも定義する）。
-fn render_dim_define(macro_name: &str, param_name: &str, spec: DimSpec) -> String {
-    match spec {
-        DimSpec::Dynamic => format!("#define {macro_name} {param_name}"),
-        DimSpec::Static(value) => format!("#define {macro_name} {value}"),
-    }
 }
 
 fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {

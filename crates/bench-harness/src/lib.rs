@@ -94,6 +94,16 @@
 //! #180（TASK-14.3）のスコープであり、本イシューは実測記録の入力データ生成のみを行う。
 //! CLI は `src/bin/peak_memory_bench.rs`（`make peak-memory-bench` から起動。`Makefile` 参照）。
 
+//! ## Phase G-4: Transformer 複合ワークロードのベンチ定義単一真実源化（本イシュー #589 の実装範囲）
+//!
+//! [`transformer_workload`] モジュールが、#155（TASK-8.3a）以来テストファイル内ローカル定数
+//! だったワークロード形状（`d_model`・`n_heads`・`d_ff`・`batch`・`seq_len`）と決定的シードを
+//! `TransformerWorkloadSpec`／`baseline_spec()` として単一真実源化する。親 #582（Phase G）の
+//! 評価軸「Transformer 複合ワークロード」は REQ-8 の GEMM 単体 5 行（[`threshold::floor_spec`]
+//! の判定対象）とは別系列であり、本モジュールの値は `floor_spec`／`judge` の判定対象に
+//! 含めない（[`threshold`] モジュールへの変更なし）。定義の確定経緯・計測プロトコル・
+//! 比較対象 PyTorch 構成・評価方式は `docs/perf/transformer-workload-baseline.md`（#589）を参照。
+
 pub mod alloc_tracker;
 pub mod peak_memory;
 mod protocol;
@@ -104,6 +114,7 @@ pub mod startup;
 mod stats;
 pub mod sync;
 mod threshold;
+pub mod transformer_workload;
 
 pub use peak_memory::{
     DEFAULT_GEMM_SIZE, DEFAULT_PEAK_MEMORY_TRIALS, MAX_GEMM_SIZE, MAX_PEAK_MEMORY_TRIALS,

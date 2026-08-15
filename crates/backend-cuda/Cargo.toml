@@ -6,6 +6,18 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[example]]
+# `cargo test --workspace`（Makefile の `test` ターゲット・CI の rust-ci
+# test ジョブが使うコマンド）は既定では example ターゲットの `test = false`
+# のため、`#[cfg(test)] mod tests` を持つ example はテストハーネスがビルド
+# されるだけで実行されない（`cargo test -p backend-cuda --example
+# device_attributes_dump` の明示指定時のみ実行される）。本 example が追加
+# した `bw_grid_dim`・`bandwidth_gbps`・`bytes_per_cycle` の単体テストを
+# CI で確実に実行するため `test = true` を明示する（イシュー #482 Review
+# 指摘）。
+name = "device_attributes_dump"
+test = true
+
 [dependencies]
 # workspace 内部クレート（path 依存）。deps-policy.md の許容依存 8 区分の対象外であり
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
@@ -21,6 +33,21 @@ tensor-core = { path = "../tensor-core" }
 # 確認済み（実行時のみ toolkit を要求する契約は変更しない）。
 cudarc.workspace = true
 half.workspace = true
+
+[features]
+# `backend_cuda::diagnostics`（内部カーネルのタイル定数を返す診断専用関数群）を
+# 通常の公開 API 面から外すための feature ゲート（PR #637 codex-review P1 指摘の
+# 是正）。この feature を有効化しない既定ビルドでは `diagnostics` モジュール自体が
+# コンパイルされないため、crate 外部から到達不能（`pub mod` として存在しない）。
+# `examples/gemm_profile_target.rs`（occupancy 概算専用。イシュー #486）のみが
+# `required-features` 経由で本 feature を要求する。deps-policy.md「バックエンド
+# 切替は feature フラグなしの cfg ベース」はバックエンド選択（CUDA/Metal/CPU）に
+# 関する規約であり、本 feature は内部診断専用ツールの可視性制御であって対象外。
+internal-diagnostics = []
+
+[[example]]
+name = "gemm_profile_target"
+required-features = ["internal-diagnostics"]
 
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト

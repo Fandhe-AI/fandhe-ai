@@ -286,3 +286,74 @@ fn rejects_non_contiguous_leaf() {
     let err = run_fused_elementwise(&plan, &[&transposed]).unwrap_err();
     assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
 }
+
+// --- #586: reduction（Sum/Max）・Rsqrt を含む FusionPlan の pre-scan 拒否 ---
+//
+// `tensor_core::fusion` の境界再定義（イシュー #586）により `FusionPlan`
+// は Sum／Max／Rsqrt を含みうるが、対応する CPU カーネル実装は本イシュー
+// のスコープ外（後続 G-3 以降）。`run_fused_elementwise` が pre-scan で
+// fail-closed に拒否し、`eval_one` の到達不能 arm へ落ちて panic したり
+// 静かに誤った値を返したりしないことを固定する（`.claude/rules/
+// coding-rust.md`・`security.md` A04）。
+
+#[test]
+fn rejects_plan_containing_sum() {
+    let x = seeded_tensor(50, &[4]);
+    let plan = FusionPlan::from_ops(
+        vec![
+            FusedOpKind::Input { leaf_index: 0 },
+            FusedOpKind::Relu { input: 0 },
+            FusedOpKind::Sum {
+                input: 1,
+                axis: Some(0),
+            },
+        ],
+        vec![4],
+        DType::F32,
+        1,
+    )
+    .unwrap();
+
+    let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
+    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+}
+
+#[test]
+fn rejects_plan_containing_max() {
+    let x = seeded_tensor(51, &[4]);
+    let plan = FusionPlan::from_ops(
+        vec![
+            FusedOpKind::Input { leaf_index: 0 },
+            FusedOpKind::Relu { input: 0 },
+            FusedOpKind::Max {
+                input: 1,
+                axis: None,
+            },
+        ],
+        vec![4],
+        DType::F32,
+        1,
+    )
+    .unwrap();
+
+    let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
+    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+}
+
+#[test]
+fn rejects_plan_containing_rsqrt() {
+    let x = seeded_tensor(52, &[4]);
+    let plan = FusionPlan::from_ops(
+        vec![
+            FusedOpKind::Input { leaf_index: 0 },
+            FusedOpKind::Rsqrt { input: 0 },
+        ],
+        vec![4],
+        DType::F32,
+        1,
+    )
+    .unwrap();
+
+    let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
+    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+}

@@ -97,6 +97,19 @@ pub enum CudaError {
     /// （後続 #519 の次元別静的化選択・#521 の段数逆算等が生成する構成）
     /// を検証する経路でのみ返る。
     InvalidKernelConfig { detail: String },
+
+    /// カーネル特化パラメータ記述子（[`crate::CudaKernelDescriptor`]）の
+    /// 構築時、ブロックタイル寸法（BM/BN/BK）・パイプライン段数が
+    /// ゼロ値で渡された。
+    ///
+    /// イシュー #504（Phase C-1）: metal-flash-attention の
+    /// `Optional + fatalError` 方式（未確定パラメータのまま descriptor を
+    /// 使うと実行時に fatal error）を、Rust では「非ゼロを要求する
+    /// コンストラクタ + 型付きエラー」で置き換える。`NonZeroU32::new` が
+    /// `None` を返した場合にのみこの variant を返し、`unwrap`/`expect` に
+    /// よる panic 経路は持たない（`.claude/rules/coding-rust.md`
+    /// 「本番経路で `unwrap()`/`expect()` を使わない」）。
+    InvalidKernelDescriptor { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -129,6 +142,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidKernelConfig { detail } => {
                 write!(f, "invalid kernel template config: {detail}")
+            }
+            CudaError::InvalidKernelDescriptor { detail } => {
+                write!(f, "invalid CUDA kernel descriptor: {detail}")
             }
         }
     }
