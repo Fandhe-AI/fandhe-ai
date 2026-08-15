@@ -526,4 +526,73 @@ mod tests {
             }
         }
     }
+
+    /// C-8（#521）受け入れ基準「B-1（#492）可変化カーネルとの接続実証」の
+    /// 実機検証: 実デバイスの SMEM 予算から
+    /// `gemm_auto::derive_stages_for_device` で段数を導出し、
+    /// `run_f16_with_stages`（B-1 の段数可変化ヘルパー）でその導出値を
+    /// 使ってカーネルを生成・実行し、既定の `MMA_STAGES=3` 構成の出力と
+    /// bit 一致することを確認する。
+    ///
+    /// `mma_f16_stage_count_does_not_change_bit_exact_output` が段数
+    /// `{2,3,4}` を固定リテラルで横断するのに対し、本テストは
+    /// **導出ロジックが返した値**を実際にカーネル起動へ結線できることを
+    /// 検証する点が異なる（実装計画 §4 の受け入れ基準対応表）。
+    ///
+    /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
+    /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
+    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する。
+    ///
+    /// **実機実行時の注意**: 現行タイル構成（#494。`MMA_BM=64`/`MMA_BN=128`/
+    /// `MMA_BK=32`・f16）では導出段数は 4（`docs/perf/sm121-device-attributes.md`
+    /// の検算参照）で、これは静的 SMEM 予算 49,152 バイトをちょうど使い切る
+    /// （余裕ゼロ）値である。もし実機のドライバが宣言済み静的確保に加えて
+    /// per-block の予約領域（同ドキュメントの `RESERVED_SHARED_MEMORY_PER_BLOCK`
+    /// 実測欄参照）を上乗せする場合、`run_f16_with_stages(derived_stages, ...)`
+    /// がコンパイル・起動エラーになりうる。その場合の原因は
+    /// `derive_stages_for_device`／`derive_pipeline_stages` の結線ではなく
+    /// 予算値そのもの（クランプ上限 49,152 が実機の実効上限より大きい）で
+    /// ある可能性を先に疑うこと。
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn mma_f16_derived_stage_count_matches_default_stage_count_bit_exact() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+
+        let block_m = std::num::NonZeroU32::new(kernels_mma::MMA_BM)
+            .expect("kernels_mma::MMA_BM must be non-zero");
+        let block_n = std::num::NonZeroU32::new(kernels_mma::MMA_BN)
+            .expect("kernels_mma::MMA_BN must be non-zero");
+        let block_k = std::num::NonZeroU32::new(kernels_mma::MMA_BK)
+            .expect("kernels_mma::MMA_BK must be non-zero");
+        let derived_stages = crate::gemm_auto::derive_stages_for_device(
+            &device,
+            block_m,
+            block_n,
+            block_k,
+            tensor_core::dispatch::DType::F16,
+        )
+        .expect("derive_stages_for_device must succeed for the current tile configuration");
+
+        let (m, n, k) = (256u32, 256u32, 4096u32);
+        let seed: u64 = 9999;
+        let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+        let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+        let b: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+
+        let derived_c = run_f16_with_stages(&device, derived_stages.get(), &a, &b, m, n, k)
+            .expect("derived stage count must compile and execute");
+        let default_c = run_f16_with_stages(&device, kernels_mma::MMA_STAGES, &a, &b, m, n, k)
+            .expect("MMA_STAGES-default kernel must compile and execute");
+
+        assert_eq!(
+            derived_c,
+            default_c,
+            "derived stage count {} の出力が既定 MMA_STAGES={} と \
+             bit 一致しません（段数導出値とカーネル起動の結線に問題がないか \
+             確認すること）",
+            derived_stages,
+            kernels_mma::MMA_STAGES
+        );
+    }
 }

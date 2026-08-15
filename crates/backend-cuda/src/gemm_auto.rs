@@ -18,12 +18,131 @@
 //! で `Err` を返した場合は WMMA を候補から外し、以降 `run_f16` は常に
 //! tiled 経路を使う（fail-safe。`panic!`／`unwrap()` を使わない）。
 
+use std::num::NonZeroU32;
+
+use cudarc::driver::sys::CUdevice_attribute;
+use half::f16;
+use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
+
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
 use crate::gemm_wmma::CudaWmmaGemm;
-use half::f16;
-use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
+use crate::kernels_mma::{MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES};
+use crate::nvrtc::derive_pipeline_stages;
+
+/// 静的 `__shared__`（動的 SMEM opt-in 非使用）構成のカーネルが従う
+/// per-block SMEM 上限。[`MMA_STATIC_SMEM_LIMIT_BYTES`] から
+/// 直接導出し、49,152（48KiB）という値をここで独立にハードコードしない
+/// （以前は `gemm_auto.rs` と `kernels_mma.rs` の双方が同じリテラルを
+/// 個別に持っており、どちらか一方だけが変更されても検出されない静かな
+/// 乖離リスクがあった。#521 レビュー指摘）。[`derive_stages_for_device`]
+/// はデバイス実測値がこれを上回っても静的上限でクランプする（本モジュール
+/// 冒頭コメント 3.1 節の安全側判断: NVRTC コンパイル自体がこの上限超過で
+/// 失敗するため、予算側で先に fail-closed に遮断する）。
+pub const STATIC_SMEM_BUDGET_CAP_BYTES: u64 = MMA_STATIC_SMEM_LIMIT_BYTES as u64;
+
+// 実使用量が予算上限に収まっていることのコンパイル時契約検査（上記の
+// 「唯一の真実源」導出そのものは値の重複を構造的に排除しているが、これは
+// 別の検査: 現在のタイル構成〈MMA_SHARED_MEM_BYTES〉が STATIC_SMEM_BUDGET_
+// CAP_BYTES を超えていないかを機械検出する使用量ガードである。実機
+// コンパイルできない環境でも `cargo build` の時点で検出できる代替チェック
+// （`kernels_mma.rs` 側の同種 assert と対になる二重チェック）。
+const _: () = assert!(
+    MMA_SHARED_MEM_BYTES as u64 <= STATIC_SMEM_BUDGET_CAP_BYTES,
+    "gemm_auto::STATIC_SMEM_BUDGET_CAP_BYTES に対して \
+     kernels_mma::MMA_SHARED_MEM_BYTES の実使用量が超過している"
+);
+
+/// f16 の要素バイト幅（`kernels_mma.rs` の f16 * 2B と同じ根拠）。
+/// [`derive_stages_for_device`] の `bytes_per_element` 導出で使う
+/// コンパイル時定数。`NonZeroU32::new` は `Option` を返すため `match` で
+/// 分解するが、リテラルが非ゼロであることはコンパイル時に確定しており
+/// 実行時に `None` 分岐へ到達することはない（#521 レビュー指摘: 旧実装は
+/// これを実行時エラーとして扱っており、到達不能なエラーパスを持っていた）。
+const BYTES_PER_ELEMENT_F16: NonZeroU32 = match NonZeroU32::new(2) {
+    Some(v) => v,
+    None => panic!("BYTES_PER_ELEMENT_F16: 2 must be non-zero"),
+};
+
+/// F32 の要素バイト幅（将来の mma/tf32 経路を見越した 4 バイト）。
+/// [`BYTES_PER_ELEMENT_F16`] と同じ理由でコンパイル時定数とする。
+const BYTES_PER_ELEMENT_F32: NonZeroU32 = match NonZeroU32::new(4) {
+    Some(v) => v,
+    None => panic!("BYTES_PER_ELEMENT_F32: 4 must be non-zero"),
+};
+
+/// `device` の `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK` を実行時
+/// に取得し、[`STATIC_SMEM_BUDGET_CAP_BYTES`] でクランプしたうえで
+/// [`derive_pipeline_stages`]（`nvrtc.rs`・C-8）へ渡してパイプライン段数を
+/// 導出する結線ヘルパー（イシュー #521 実装計画 §4）。
+///
+/// SMEM 容量をハードコード定数として持たない理由: `docs/perf/
+/// sm121-device-attributes.md` の sm_121 実機実測は「未実測・要実機実行」
+/// のまま安全側クローズされており（A-2・#482）、存在しない実測値を推定で
+/// 定数化することは同ドキュメントの方針に反する。CUTLASS
+/// `StageCountAutoCarveout` と同じ「実デバイスの残量から自動算出・固定値
+/// ハードコードなし」の思想を採る。
+///
+/// 属性取得の失敗（例: デバイス問い合わせ自体の driver API エラー）は
+/// `CudaError::Driver` として呼び出し元へそのまま伝播する（fail-closed。
+/// `From<DriverError>` は `error.rs` に既存）。
+///
+/// 本関数は導出ロジックと B-1（#492）可変化カーネルとの接続を実証する
+/// ためのものであり、既定の本番 GEMM 経路（[`CudaGemmAuto::run_f16`]・
+/// `gemm_mma.rs::CudaMmaGemm::run_f16` の `MMA_STAGES=3` 固定）へ導出値を
+/// 適用する判断は本イシューのスコープ外（C-10・#527 最良構成選定に委ねる。
+/// カーネルソース自体は一切変更していないため、この関数は既定経路の
+/// 実行結果・parity ベースラインに影響しない）。
+pub fn derive_stages_for_device(
+    device: &CudaDevice,
+    block_m: NonZeroU32,
+    block_n: NonZeroU32,
+    block_k: NonZeroU32,
+    dtype: DType,
+) -> Result<NonZeroU32, CudaError> {
+    let raw_attr = device
+        .context()
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;
+    // `attribute()` は driver API 契約上 `i32` を返す（cudarc 0.19.8
+    // `CudaContext::attribute`）。`MAX_SHARED_MEMORY_PER_BLOCK` は物理的に
+    // 負値になり得ないが、ドライバが不正値を返すケースを暗黙の 0 丸め
+    // （`unwrap_or(0)`）で握り潰すと、後続の `derive_pipeline_stages` が
+    // 返す `min_required` 未達エラーが「予算 0」という誤解を招く診断に
+    // なる。`TryFrom` 失敗を明示的な `InvalidKernelDescriptor` として
+    // 伝播し、fail-closed のまま原因を追跡可能にする。
+    let raw_attr_u64 = u64::try_from(raw_attr).map_err(|_| CudaError::InvalidKernelDescriptor {
+        detail: format!(
+            "derive_stages_for_device: CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK \
+             returned a negative value ({raw_attr}), which cannot be a valid SMEM budget"
+        ),
+    })?;
+    let smem_budget_bytes = raw_attr_u64.min(STATIC_SMEM_BUDGET_CAP_BYTES);
+
+    // `bytes_per_element` はカーネル入出力 dtype のバイト幅（`kernels_mma.rs`
+    // の f16 * 2B と同じ根拠）。F32 は将来の mma/tf32 経路を見越して
+    // 4 バイトとする。`DType` は非網羅的でない列挙（`tensor_core::dispatch`）
+    // であるため match は両変種を明示し、新変種追加時はコンパイルエラーで
+    // 見落としを検出する（`_ =>` フォールバックは持たない）。
+    //
+    // 両アームともコンパイル時定数（`BYTES_PER_ELEMENT_F16`／`_F32`）を返す
+    // ため、`NonZeroU32::new` の失敗分岐はコンパイル時に確定して排除される
+    // （旧実装は実行時 `ok_or_else` で検査しており、両アームとも非ゼロの
+    // リテラルであるため到達不能な `Err` 分岐を持つだけだった。#521 レビュー
+    // 指摘）。
+    let bytes_per_element = match dtype {
+        DType::F16 => BYTES_PER_ELEMENT_F16,
+        DType::F32 => BYTES_PER_ELEMENT_F32,
+    };
+
+    derive_pipeline_stages(
+        block_m,
+        block_n,
+        block_k,
+        bytes_per_element,
+        smem_budget_bytes,
+    )
+}
 
 /// naive／tiled／WMMA の全 GEMM カーネルを保持し、`select_gemm_kernel`
 /// の判定結果に従って呼び分ける自動経路選択の入口。
