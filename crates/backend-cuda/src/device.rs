@@ -72,6 +72,10 @@ impl CudaDevice {
     /// 公式ライブラリのみであり、動的リンカの標準信頼モデルの範囲内
     /// である（`.claude/rules/security.md` の unsafe 方針）。
     pub fn is_available() -> bool {
+        // SAFETY: 上記ドキュメンテーションコメント（# Safety 節）参照。
+        // `cudarc::driver::sys::is_culib_present()` は事前条件を要求せず、
+        // 動的リンカの標準探索パス上の CUDA 公式ライブラリに対する
+        // `dlopen` 試行のみを行う non-panicking なプローブである。
         unsafe { cudarc::driver::sys::is_culib_present() }
     }
 
