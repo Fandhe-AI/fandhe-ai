@@ -80,11 +80,17 @@
 //! swizzle は引き続き後続（知見は `docs/cuda-tensor-core-knowledge.md`
 //! 〈#65・TASK-11.1f〉に集約済み。#495〜#496 のスコープとして引き継ぐ）。
 //!
-//! XOR swizzle（実装計画「段階 3」）は不採用とする。索引演算が最も
-//! 複雑でありながらコンパイル未検証環境では誤りを検出できないため、
-//! バンクコンフリクト低減は将来の性能最適化（実測可能な環境）へ明示的に
-//! 先送りする（out-of-scope-tracking.md に従い記録。本ファイル末尾
-//! 参照）。
+//! 共有メモリのバンクコンフリクト対策（#498。`docs/perf/cuda-gemm-mma-bank-conflict.md`）:
+//! 非 2 冪パディング（`MMA_A_PAD`/`MMA_B_PAD` 定数参照）を適用済み。
+//! `kernels_wmma_opt.rs`（`WMMA_TF32_OPT_A_PAD`/`WMMA_TF32_OPT_B_PAD`）と
+//! 同型の技法だが、f16（2B/要素）＋ `cp.async` 16B 転送粒度のため
+//! パディング幅は 8 要素（16B）単位（f32 opt 経路の +4 要素とは粒度が
+//! 異なる）。XOR swizzle（実装計画「段階 3」）は本 PR ではコードとして
+//! 実装せず、実機 nsight-compute でバンクコンフリクトの残存が実測された
+//! 場合のみ検討する（採否判断基準は上記 docs/perf ファイル参照。
+//! 先送り理由だった「コンパイル未検証環境では誤り検出不能」は #486 の
+//! プロファイル手段整備で解消済みという位置づけ。
+//! out-of-scope-tracking.md に従い記録）。
 //!
 //! # 命令選定・sm_80+ ゲート
 //!
@@ -217,18 +223,55 @@ pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
 // その定義式自身と比較するだけの debug_assert しか利用箇所がなく実質的な
 // 検査価値がなかったため撤去した（#492 レビュー指摘）。
 
+/// A タイル（`as_tile[STAGES][BM][MMA_A_PAD]`）の行幅（パディング後。
+/// #498「共有メモリのバンクコンフリクト対策」）。パディングなしの
+/// `MMA_BK=32`（f16 2B/要素で行ストライド 64B = 16 バンク）は 2 冪の
+/// ため、`ldmatrix.x4`（A フラグメント。本ファイル冒頭コメント「命令
+/// 選定」）が読む 8 行の開始バンクが全て同一位相へ収束し 4-way バンク
+/// コンフリクトが理論上発生しうる。`+8` 要素（16B）を加えると行ストライド
+/// 80B = 20 バンクとなり、8 行の開始バンクは `0,20,8,28,16,4,24,12` と
+/// 全て相異なる（`gcd(20,32)=4` だが 8 行分の巡回で 32 バンクを完全被覆。
+/// 本ファイル冒頭コメント「バンクコンフリクト対策」節・
+/// `docs/perf/cuda-gemm-mma-bank-conflict.md` §2 参照）。パディング幅を
+/// 8 要素単位に限定する理由は `cp.async` の 16B（f16 8 要素）転送粒度・
+/// 整列要件（本ファイル冒頭コメント「整列制約」）を崩さないため（f32 opt
+/// 経路の `kernels_wmma_opt.rs::WMMA_TF32_OPT_A_PAD` は `+4` 要素=8B だが、
+/// f32 は元々 4B/要素で `cp.async` 粒度単位が異なるため同じ +4 要素は
+/// f16 では 8B にしかならず 16B 整列が崩れる）。
+///
+/// [`MMA_SHARED_MEM_BYTES`] と同じ理由（コンパイル時 const アサーション
+/// のみからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
+pub const MMA_A_PAD: u32 = MMA_BK + 8;
+
+/// B タイル（`bs_tile[STAGES][BK][MMA_B_PAD]`）の行幅（パディング後。
+/// #498）。パディングなしの `MMA_BN=128`（行ストライド 256B）は
+/// バンク位相が全行で 0 固定のため、`ldmatrix.x2.trans`（B フラグメント）
+/// が読む 8 行で 8-way バンクコンフリクトが理論上発生しうる（[`MMA_A_PAD`]
+/// より深刻）。`+8` 要素を加えると行ストライド 272B = バンク位相 +4/行の
+/// 等差数列となり、8 行の開始バンクが `0,4,8,...,28` と分散する
+/// （`docs/perf/cuda-gemm-mma-bank-conflict.md` §2 参照）。
+///
+/// [`MMA_SHARED_MEM_BYTES`] と同じ理由でコンパイル時 const アサーション
+/// のみからの参照のため `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
+pub const MMA_B_PAD: u32 = MMA_BN + 8;
+
 /// 1 ステージあたりの `mma.sync` 呼び出し回数（`BK / MMA_K`。カーネル内
 /// `for (int kstep = 0; kstep < BK / MMA_K; ++kstep)` に対応する Rust 側の
 /// 唯一の真実源）。`gemm_mma.rs` が起動前の `debug_assert` で参照する。
 pub const MMA_K_STEPS_PER_STAGE: u32 = MMA_BK / MMA_K;
 
-/// 静的共有メモリ使用量（バイト）。`(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B
-/// (f16) * MMA_STAGES`。全 compute capability 共通の per-block 静的共有
-/// メモリ上限（49152 バイト = 48KiB）に対する実使用量を下記
-/// `const _: () = assert!(...)` でコンパイル時に検査する（本ファイル冒頭
-/// コメント「タイル構成」参照。タイル定数変更時に即座にビルドエラーで
-/// 検出できるよう、実行時 `debug_assert` ではなくコンパイル時定数
-/// アサーションとする）。
+/// 静的共有メモリ使用量（バイト）。`(MMA_BM*MMA_A_PAD + MMA_BK*MMA_B_PAD) *
+/// 2B (f16) * MMA_STAGES`（#498 のバンクコンフリクト対策パディング込み。
+/// パディング前は `(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B * MMA_STAGES` =
+/// 36,864B だったが、パディング後は 41,472B）。全 compute capability
+/// 共通の per-block 静的共有メモリ上限（49152 バイト = 48KiB）に対する
+/// 実使用量を下記 `const _: () = assert!(...)` でコンパイル時に検査する
+/// （本ファイル冒頭コメント「タイル構成」参照。タイル定数変更時に即座に
+/// ビルドエラーで検出できるよう、実行時 `debug_assert` ではなくコンパイル
+/// 時定数アサーションとする）。
 ///
 /// 上記の通りコンパイル時 const アサーションのみからの参照であり、実行時
 /// `debug_assert` は意図的に用いない（このコメント自身の設計判断）。その
@@ -236,7 +279,7 @@ pub const MMA_K_STEPS_PER_STAGE: u32 = MMA_BK / MMA_K;
 /// 判定する（1.92 以降では解消済み。`cargo +1.88.0 clippy` と
 /// `cargo +1.92.0 clippy` の実測差分で確認済み。#149 PR CI 指摘対応）。
 #[allow(dead_code)]
-pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * MMA_STAGES;
+pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_A_PAD + MMA_BK * MMA_B_PAD) * 2 * MMA_STAGES;
 
 // コンパイル時契約検査（タイル定数の内部整合性。実機コンパイルできない
 // 環境でも `cargo build` の時点で機械検出できる代替チェック。本ファイル
@@ -253,6 +296,28 @@ const _: () = assert!(
 const _: () = assert!(
     MMA_BN.is_multiple_of(8) && MMA_BM.is_multiple_of(8),
     "MMA_BM/MMA_BN must be multiples of 8 (cp.async 16-byte transfer granularity)"
+);
+// #498: パディング幅の 16B（f16 8 要素）整列前提を機械検査する。
+// `cp.async.cg.shared.global` は転送先アドレスが 16B 境界に整列している
+// 必要があり（本ファイル冒頭コメント「整列制約」）、`ldmatrix` の行
+// アドレス計算（`as_tile[stage][row][col]`/`bs_tile[stage][row][col]`）も
+// 行幅の変化がこの整列を崩さないことに依存する（[`MMA_A_PAD`]/
+// [`MMA_B_PAD`] 定数直下のドキュメンテーションコメント参照）。
+const _: () = assert!(
+    MMA_A_PAD.is_multiple_of(8) && MMA_B_PAD.is_multiple_of(8),
+    "MMA_A_PAD/MMA_B_PAD must be multiples of 8 (cp.async 16-byte transfer \
+     granularity / ldmatrix row alignment)"
+);
+// #498: パディング後の行ストライド（バイト数）が 128B（= 32 バンク x 4B/
+// バンクの 1 巡回長）の倍数でないことを機械検査する。128B の倍数だと
+// 全行が同一バンク位相に収束し、パディングを追加した意味（バンク位相の
+// 分散によるコンフリクト低減）が失われる（[`MMA_A_PAD`]/[`MMA_B_PAD`]
+// 定数直下のドキュメンテーションコメント・
+// `docs/perf/cuda-gemm-mma-bank-conflict.md` §2 参照）。
+const _: () = assert!(
+    !(MMA_A_PAD * 2).is_multiple_of(128) && !(MMA_B_PAD * 2).is_multiple_of(128),
+    "MMA_A_PAD/MMA_B_PAD row stride in bytes must not be a multiple of 128B \
+     (32 banks x 4B) or bank-phase padding degenerates to no-op"
 );
 const _: () = assert!(
     MMA_BLOCK_THREADS <= 1024,
@@ -316,6 +381,14 @@ pub const MMA_F16: &str = r#"
 #define WARP_TILES_M 2
 #define WARP_TILES_N 2
 #define STAGES 3
+// #498: 共有メモリのバンクコンフリクト対策パディング（本ファイル冒頭
+// コメント「バンクコンフリクト対策」・Rust 側 MMA_A_PAD/MMA_B_PAD 定数
+// 直下のドキュメンテーションコメント参照）。索引式（LOAD_A/B_STAGE・
+// ldmatrix アドレス計算）は配列次元経由でこのパディングを自動的に
+// 反映するため、パディング領域そのものへの明示的な書き込み・読み出しは
+// 発生しない。
+#define A_PAD 40
+#define B_PAD 136
 
 // REQ-8: グローバル→共有メモリの 16 バイト単位コピー。src_size==16 で
 // 実データをコピーし、src_size==0 で実際のグローバル読み出しを発生させず
@@ -337,10 +410,12 @@ extern "C" __global__ void gemm_mma_f16(
     int m, int n, int k)
 {
     // __align__(16): cp.async の 16 バイト転送先整列要件（本ファイル冒頭
-    // コメント「整列制約」）。BK/BN が 8 の倍数のため各行の先頭は常に
-    // 16 バイト整列する。
-    __shared__ __align__(16) __half as_tile[STAGES][BM][BK];
-    __shared__ __align__(16) __half bs_tile[STAGES][BK][BN];
+    // コメント「整列制約」）。A_PAD/B_PAD が 8 の倍数のため各行の先頭は
+    // 常に 16 バイト整列する（#498。パディングされた行幅
+    // `BK`->`A_PAD`・`BN`->`B_PAD` を使うことでバンクコンフリクトを
+    // 低減する。本ファイル冒頭コメント「バンクコンフリクト対策」参照）。
+    __shared__ __align__(16) __half as_tile[STAGES][BM][A_PAD];
+    __shared__ __align__(16) __half bs_tile[STAGES][BK][B_PAD];
 
     int block_row0 = blockIdx.y * BM;
     int block_col0 = blockIdx.x * BN;
@@ -622,6 +697,8 @@ mod tests {
             ("BM", MMA_BM),
             ("BN", MMA_BN),
             ("BK", MMA_BK),
+            ("A_PAD", MMA_A_PAD),
+            ("B_PAD", MMA_B_PAD),
             ("STAGES", MMA_STAGES),
             ("WARPS_N", MMA_WARPS_N),
             ("WARP_TILES_M", MMA_WARP_TILES_M),
@@ -693,16 +770,49 @@ mod tests {
         assert_eq!(MMA_BLOCK_THREADS, 512);
     }
 
-    /// #494 受け入れ基準の回帰防止: ブロックタイル拡大後の静的共有メモリ
-    /// 使用量（`(64*32 + 32*128) * 2B * 3 stages` = 36864B）と
-    /// `kWarpGemmIterations` 相当条件（`MMA_K_STEPS_PER_STAGE >= 2`）を
-    /// ロックする。前者は本ファイル冒頭の `const _: () = assert!(...)`
-    /// （48KiB 上限検査）とは独立に、候補表（`docs/perf/cuda-gemm-mma-block-tile.md`
-    /// §3）が採用した候補 B の具体値そのものが崩れていないことを検査する。
+    /// #494 受け入れ基準の回帰防止（#498 でパディング込みの値へ更新）:
+    /// ブロックタイル拡大後・バンクコンフリクト対策パディング適用後の
+    /// 静的共有メモリ使用量（`(64*40 + 32*136) * 2B * 3 stages` =
+    /// 41,472B。パディング前は 36,864B だった）と `kWarpGemmIterations`
+    /// 相当条件（`MMA_K_STEPS_PER_STAGE >= 2`）をロックする。前者は本
+    /// ファイル冒頭の `const _: () = assert!(...)`（48KiB 上限検査）とは
+    /// 独立に、候補表（`docs/perf/cuda-gemm-mma-block-tile.md` §3）が
+    /// 採用した候補 B へ #498 のパディングを適用した具体値そのものが
+    /// 崩れていないことを検査する。
     #[test]
     fn mma_shared_mem_and_k_steps_match_block_tile_expansion() {
-        assert_eq!(MMA_SHARED_MEM_BYTES, 36_864);
+        assert_eq!(MMA_SHARED_MEM_BYTES, 41_472);
         assert_eq!(MMA_K_STEPS_PER_STAGE, 2);
+    }
+
+    /// #498 の回帰防止: パディング後の行ストライド（バイト）が共有メモリ
+    /// 32 バンク（各 4B）を 8 行（`ldmatrix.x4`/`.x2` が読む行数）で完全に
+    /// 分散させる非 2 冪バンク位相であることをロックする（[`MMA_A_PAD`]/
+    /// [`MMA_B_PAD`] 定数直下のドキュメンテーションコメント・
+    /// `docs/perf/cuda-gemm-mma-bank-conflict.md` §2 参照）。バンク番号は
+    /// `(行バイトオフセット / 4) % 32`（CUDA 共有メモリの標準 32 バンク・
+    /// 4B/バンク・128B 周期モデル）。
+    #[test]
+    fn mma_tile_padding_distributes_bank_phase_across_rows() {
+        assert_eq!(MMA_A_PAD, 40, "MMA_A_PAD は #498 で BK+8 = 40 に固定");
+        assert_eq!(MMA_B_PAD, 136, "MMA_B_PAD は #498 で BN+8 = 136 に固定");
+
+        let a_stride_bytes = MMA_A_PAD * 2;
+        let b_stride_bytes = MMA_B_PAD * 2;
+
+        let bank_of = |stride_bytes: u32, row: u32| -> u32 { (row * stride_bytes / 4) % 32 };
+
+        for (name, stride_bytes) in [("A", a_stride_bytes), ("B", b_stride_bytes)] {
+            let mut banks: Vec<u32> = (0..8).map(|row| bank_of(stride_bytes, row)).collect();
+            banks.sort_unstable();
+            banks.dedup();
+            assert_eq!(
+                banks.len(),
+                8,
+                "{name} タイル: パディング後も 8 行の開始バンクが分散していません \
+                 （非 2 冪パディングによるバンク位相分散が崩れている可能性）"
+            );
+        }
     }
 
     /// cp.async 16 バイト整列制約の前提（`BK`/`BN` が 8 の倍数）を検査する
@@ -796,12 +906,24 @@ mod tests {
     /// コンパイル自体は `#[ignore]` 分離（`gemm_mma.rs` 側。本ファイル
     /// 冒頭コメント「検証状態」参照）だが、ソース文字列レベルの整合は
     /// ここで通常 CI 下でも検査できる。
+    ///
+    /// #498 追補: パディング（[`MMA_A_PAD`]/[`MMA_B_PAD`]）適用後は共有
+    /// メモリ使用量が増える（36,864B→41,472B。本ファイル
+    /// [`MMA_SHARED_MEM_BYTES`] 定数直下参照）ため、`stages=4` はもはや
+    /// 48KiB 上限に収まらない（`(64*40+32*136)*2*4` = 55,296B）。
+    /// `docs/perf/cuda-gemm-mma-block-tile.md` §3 の「STAGES=4 は
+    /// パディング前で余裕ゼロ」という記述はパディング後は「不成立」へ
+    /// 更新済み（同ファイル参照）。本テストは段数依存リテラルが残らない
+    /// ことは両段数について維持しつつ、SMEM 検査は「stages=2 は上限内・
+    /// stages=4 はパディング後は上限超過（BM/BN 縮小なしでは不成立）」を
+    /// 明示的に assert する形へ改訂した。
     #[test]
     fn mma_f16_source_stages_are_swappable_without_kernel_source_edits() {
         for stages in [2u32, 4u32] {
             let src = mma_f16_source_with_stages(stages);
 
-            // 段数依存の旧来リテラル・分岐が残っていないこと。
+            // 段数依存の旧来リテラル・分岐が残っていないこと（この不変条件
+            // 自体は段数にもパディングにも依存しないため両段数で維持）。
             assert!(
                 !src.contains("if (t == num_k_tiles - 1)"),
                 "stages={stages}: wait_group 二値分岐が残っています"
@@ -814,12 +936,23 @@ mod tests {
             }
 
             // Rust 側導出値の整合（本ファイル冒頭 `const _: () = assert!(...)`
-            // と同じ式を stages 可変で検査する）。
-            let shared_mem_bytes = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * stages;
-            assert!(
-                shared_mem_bytes <= 49_152,
-                "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB を超えています"
-            );
+            // と同じ式を stages 可変で検査する。#498 でパディング込みの
+            // 式へ更新）。
+            let shared_mem_bytes = (MMA_BM * MMA_A_PAD + MMA_BK * MMA_B_PAD) * 2 * stages;
+            if stages == 2 {
+                assert!(
+                    shared_mem_bytes <= 49_152,
+                    "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB を \
+                     超えています（stages=2 はパディング後も上限内であるはず）"
+                );
+            } else {
+                assert!(
+                    shared_mem_bytes > 49_152,
+                    "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB \
+                     以下です（#498 のパディング後は stages=4 は BM/BN 縮小なしでは \
+                     不成立になるはずだが、上限超過が検出されなかった）"
+                );
+            }
         }
     }
 
