@@ -320,7 +320,12 @@ impl CudaKernelCacheKey {
     /// [`Self::canonical_bytes`] を FNV-1a 64bit（[`fnv1a_64`]）でハッシュ
     /// した値。[`Self::cache_entry_dir_name`] のハッシュ部として使う
     /// ディスク永続キー本体（イシュー #506）。
-    pub fn stable_hash(&self) -> u64 {
+    ///
+    /// `pub(crate)` に留める（crate ルートからは再公開しない）: FNV-1a・
+    /// `canonical_bytes` のフィールド順序といった内部ハッシュ表現の選択を
+    /// 外部利用者との SemVer 契約にしない。[`cache_root`]／
+    /// [`cache_entry_path`] と同じ理由（PR #659 レビュー指摘）。
+    pub(crate) fn stable_hash(&self) -> u64 {
         fnv1a_64(&self.canonical_bytes())
     }
 
@@ -337,7 +342,13 @@ impl CudaKernelCacheKey {
     /// 保証が崩れる可能性はゼロではない）への縦深防御として、生成した
     /// ディレクトリ名自体にもパスセパレータ・`..` が含まれないことを
     /// ここで再検査する（fail-closed。A03 対策）。
-    pub fn cache_entry_dir_name(&self) -> Result<String, CudaError> {
+    ///
+    /// `pub(crate)` に留める（crate ルートからは再公開しない）:
+    /// `kernel.<name>.<hash>` というディレクトリ命名規則自体が内部
+    /// キャッシュ形式であり、外部利用者との SemVer 契約にしない。
+    /// [`stable_hash`](Self::stable_hash)・[`cache_root`]・
+    /// [`cache_entry_path`] と同じ理由（PR #659 レビュー指摘）。
+    pub(crate) fn cache_entry_dir_name(&self) -> Result<String, CudaError> {
         let name = format!(
             "kernel.{}.{:016x}",
             self.descriptor.kernel_name,
