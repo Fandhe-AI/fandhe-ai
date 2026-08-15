@@ -1094,4 +1094,32 @@ mod tests {
             "MMA_F16 のエピローグ guarded store が mi/nj ループの外側にあります"
         );
     }
+
+    /// #501 形状横断回帰テストの前提固定: `crates/backend-cuda/tests/
+    /// cpu_cuda_mma_parity.rs::mma_f16_matches_reference_across_shapes` の
+    /// 形状表（タイル倍数・タイル±端数の分類コメント）は
+    /// `MMA_BM=64`/`MMA_BN=128`/`MMA_BK=32`（#494 時点の値）を前提に
+    /// 選定されている。本テストはこの前提値を機械的にロックし、将来の
+    /// ブロックタイル変更（`docs/perf/cuda-gemm-mma-block-tile.md` の
+    /// 再候補選定等）で `MMA_BM`/`MMA_BN`/`MMA_BK` が変わった際に、
+    /// 形状表の分類コメントが陳腐化する（例: 65 が「BM+1」でなくなる）
+    /// ことをこのテストの failure で気付けるようにする。
+    /// `mma_tile_constants_match_kernel_source_defines`（本ファイル）が
+    /// CUDA ソース側 `#define` との一致を検査するのに対し、本テストは
+    /// Rust 側定数の具体値そのものを固定する点で異なる。
+    #[test]
+    fn mma_tile_constants_pinned_for_shape_table_cross_reference() {
+        assert_eq!(
+            MMA_BM, 64,
+            "MMA_BM が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
+        );
+        assert_eq!(
+            MMA_BN, 128,
+            "MMA_BN が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
+        );
+        assert_eq!(
+            MMA_BK, 32,
+            "MMA_BK が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
+        );
+    }
 }
