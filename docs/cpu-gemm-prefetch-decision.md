@@ -36,9 +36,9 @@ unsafe fn probe(ptr: *const f32) {
 ```console
 $ rustc --edition 2021 --crate-type lib --target aarch64-unknown-linux-gnu --emit=metadata -o /tmp/probe_linux.rmeta prefetch_probe.rs
 error[E0658]: use of unstable library feature `stdarch_aarch64_prefetch`
- --> prefetch_probe.rs:9:33
+ --> prefetch_probe.rs:6:33
   |
-9 |     _prefetch(ptr as *const i8, _PREFETCH_READ, _PREFETCH_LOCALITY3);
+6 |     _prefetch(ptr as *const i8, _PREFETCH_READ, _PREFETCH_LOCALITY3);
   |                                 ^^^^^^^^^^^^^^
   |
   = note: see issue #117217 <https://github.com/rust-lang/rust/issues/117217> for more information
