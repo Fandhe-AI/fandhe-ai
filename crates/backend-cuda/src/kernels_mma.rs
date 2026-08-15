@@ -508,6 +508,23 @@ fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
             cfg.bk
         )));
     }
+    // 冒頭 const アサーション `MMA_K_STEPS_PER_STAGE >= 2`（本ファイル
+    // §297-303）の非既定構成向け一般化。1 ステージあたりの `mma.sync`
+    // 呼び出し回数（`bk / MMA_K`）が 1 だと cp.async ソフトウェア
+    // パイプライン（現ステージのロード完了を待つ間に次ステージを issue
+    // する設計）が成立せず、`bk=16`（`MMA_K` の倍数ではあるが 1 ステップ
+    // 分しかない）のような構成が render/compile を素通りしてしまう
+    // （PR #643 codex-review Medium 指摘への対応。`bk % MMA_K == 0` だけ
+    // では不変条件を再現できていなかった）。
+    let k_steps_per_stage = cfg.bk / MMA_K;
+    if k_steps_per_stage < 2 {
+        return Err(invalid(format!(
+            "bk / MMA_K ({k_steps_per_stage}) must be >= 2 (MMA_K_STEPS_PER_STAGE \
+             invariant; the cp.async software pipeline needs at least 2 mma.sync \
+             steps per stage, bk={} MMA_K={MMA_K})",
+            cfg.bk
+        )));
+    }
     // cp.async 16 バイト転送粒度の前提（本ファイル冒頭コメント「整列制約」）。
     if !cfg.bm.is_multiple_of(8) || !cfg.bn.is_multiple_of(8) {
         return Err(invalid(format!(
@@ -1644,7 +1661,7 @@ mod tests {
     fn render_mma_f16_rejects_invalid_configs() {
         let base = MmaKernelConfig::default();
 
-        let cases: [(&str, MmaKernelConfig); 8] = [
+        let cases: [(&str, MmaKernelConfig); 9] = [
             (
                 "bm not multiple of MMA_WARP_M",
                 MmaKernelConfig { bm: 17, ..base },
@@ -1692,6 +1709,17 @@ mod tests {
                 },
             ),
             ("stages != 3", MmaKernelConfig { stages: 2, ..base }),
+            // PR #643 codex-review Medium 指摘への対応: bk=16 は
+            // MMA_K(16) の倍数だが bk/MMA_K=1 で
+            // MMA_K_STEPS_PER_STAGE(>=2) 不変条件（本ファイル冒頭 const
+            // アサーション §297-303）を満たさない。cp.async ソフトウェア
+            // パイプラインが 1 ステップでは成立しないため fail-closed で
+            // 拒否されなければならない（`bk % MMA_K == 0` 検査だけでは
+            // 見逃されていた構成）。
+            (
+                "bk / MMA_K below MMA_K_STEPS_PER_STAGE (bk=MMA_K)",
+                MmaKernelConfig { bk: MMA_K, ..base },
+            ),
             (
                 "static dim zero",
                 MmaKernelConfig {
