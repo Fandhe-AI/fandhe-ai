@@ -13,8 +13,11 @@ leadingBlockDimensions 実値指定・TileKernels の `TILE_X + TILE_K` 確保�
 記録テンプレートのみを整備した状態（#533・#536 と同方式）。`crates/backend-metal/tests/shader_source_evidence.rs` の
 `gemm_metal_source_declares_tgp_pad_function_constant`・`gemm_simdgroup_tiled_source_uses_tgp_padding_stride`・
 `gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding`、および `crates/backend-metal/src/tile.rs` の
-`TileConfig` 単体テスト（`shared_mem_bytes_includes_pad_in_both_tile_strides`・`validate_rejects_pad_not_multiple_of_four`・
-`validate_rejects_nonzero_pad_without_staging` 等）により、パディング機構の実在・SMEM 使用量計算への反映・
+`TileConfig` 単体テスト（`shared_mem_bytes_includes_derived_pad_in_both_tile_strides_when_staged`・
+`pad_is_derived_purely_from_staged`・`shared_mem_bytes_saturates_instead_of_wrapping_on_overflow` 等。`pad` は
+イシュー #538 codex-review 指摘 P1 再指摘対応〈PR #673〉で `TileConfig` の `pub` フィールドから `staged` 由来の
+導出メソッド `TileConfig::pad()` へ設計変更したため、テスト名もこれに合わせて変更済み）により、パディング機構の
+実在・SMEM 使用量計算への反映・
 REQ-8 境界チェック維持は Linux CI（ubuntu-latest）上で機械検査済みだが、数値一致の実測（ビット単位一致の理論前提の
 検証）・性能効果の実測・採否判断（下記「判断基準」）は Mac 実機セッションでの後続対応が必要。
 
@@ -69,8 +72,9 @@ green であること（tolerance は変更しない。coding-rust.md）。
 
 - base に対し head の中央値 TFLOPS が改善していれば「採用」とし、本ドキュメントへ実測結果を追記する
 - 改善が確認できなければ**採用しない**と判断し、パディングの変更（`gemm.metal` の `TGP_PAD`・`lda`/`ldb` 関連
-  箇所、`tile.rs` の `pad` フィールド・`shared_mem_bytes()`・`validate` 規則、`pipeline.rs` の index 6 定数、
-  `shader_source_evidence.rs` の関連テスト）を revert PR で撤去し、その判断と実測値を本ドキュメントへ記録する
+  箇所、`tile.rs` の `TileConfig::pad()`（PR #673 で `staged` からの導出メソッドへ変更済み）・
+  `shared_mem_bytes()`・`validate` 規則、`pipeline.rs` の index 6 定数、`shader_source_evidence.rs` の関連テスト）
+  を revert PR で撤去し、その判断と実測値を本ドキュメントへ記録する
 
 ## 実測結果
 
