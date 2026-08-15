@@ -24,8 +24,11 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 `crates/backend-metal/examples/gemm_diagnosis.rs`（本イシューで新規作成）。
 
 - **解析値**（`analytics` モジュール。`objc2` 系 FFI に触れない純粋関数のため非 macOS でも実行できる）:
-  `tile::select(size, size, size)` の選択結果から threadgroup 数（occupancy 相当）・バリア回数・理論
-  ロード/ストアトラフィック・arithmetic intensity を算出する
+  `tile::select(size, size, size)` の選択結果から threadgroup 数（並列度〈concurrency/saturation〉
+  ヒューリスティックの一次指標。レジスタ・threadgroup memory 等の資源制約を表さないため真の occupancy
+  ではない — 詳細は `gemm_diagnosis.rs` の `analytics::DeviceProfile` ドキュメント「本ヒューリスティック
+  の限界」節・codex-review 指摘・PR #649 参照）・バリア回数・理論ロード/ストアトラフィック・arithmetic
+  intensity を算出する
 - **実測値**（macOS 限定。`macos_impl` モジュール）: `MetalGemm::dispatch_auto` を
   `bench-harness::protocol::run`（`MeasurementConfig::default()` = warmup 20 回・計測 20 回・中央値/Q1/Q3。
   TASK-8.1）で壁時計計測する
@@ -89,8 +92,11 @@ cargo run -p backend-metal --example gemm_diagnosis --release -- \
 ```
 
 出力形式（1 行 1 size。`size=<N> tile=<bm>x<bn>x<bk>(<wm>x<wn>, staged=<bool>) actual_groups=<v>
-ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> tflops_lower_bound=<v>
-logical_load_gbs_lower_bound=<v>`）を size=512/1024/2048/4096 で出力する。
+ideal_groups=<v> barriers_per_tg=<v> arithmetic_intensity=<v> wall_ms=<v> wall_q1_ms=<v>
+wall_q3_ms=<v> tflops_lower_bound=<v> logical_load_gbs_lower_bound=<v>`）を size=512/1024/2048/4096
+で出力する。`wall_ms`（中央値）に加え `wall_q1_ms`・`wall_q3_ms`（`bench_harness::protocol::run` が
+返す `Measurement::{q1,q3}_secs`）を計測手順（§1「中央値/Q1/Q3」）どおり出力し、破棄しない
+（codex-review 指摘。PR #649）。
 
 `ideal_groups` の算出（`idealGroups = gpu_core_count * ideal_groups_multiplier`）に用いる
 `gpu_core_count`・`ideal_groups_multiplier` は、macOS 実行時は `--gpu-core-count`・
@@ -140,17 +146,23 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 
 ### 3.3 解析値からの暫定観察（Mac 実機実測前の中間所見。§5 で確定結論とする）
 
-- **occupancy は size=1024 で ideal（240）を超え始める**（actual/ideal = 1.067）。size=512 は 0.267 と
-  明確に不足しているが、512 は診断対象の「1024 以降の頭打ち」の範囲外であり、1024 以降は occupancy が
-  ideal を大きく上回る一方（2048: 4.267 倍・4096: 17.067 倍）でも頭打ちが観測されている。**この事実だけ見ると
-  「occupancy 不足」は 1024 以降の頭打ちの説明にならない**（1024 以降はむしろ occupancy 過剰の領域）
+- **`actual_groups` は size=1024 で `ideal_groups`（240）を超え始める**（actual/ideal = 1.067）。size=512
+  は 0.267 と明確に下回るが、512 は診断対象の「1024 以降の頭打ち」の範囲外であり、1024 以降は
+  `actual_groups` が `ideal_groups` を大きく上回る一方（2048: 4.267 倍・4096: 17.067 倍）でも頭打ちが
+  観測されている。`ideal_groups` はレジスタ・threadgroup memory 等の資源制約を表さない
+  concurrency/saturation の proxy（MFA 経験式。真の occupancy ではない — §1「解析値」節・codex-review
+  指摘・PR #649 参照）であるため、この比だけから「occupancy が過剰／不足である」とは確定できない点に
+  注意した上で、**「発行 threadgroup 数が経験的な飽和目標を下回っている」という意味での並列度不足は
+  1024 以降の頭打ちの説明にならない**（1024 以降はむしろ発行 threadgroup 数が飽和目標を大きく上回る
+  領域であり、真の occupancy 不足〈資源制約由来〉が原因であれば別途レジスタ・threadgroup memory 使用率
+  の実測で裏付ける必要がある）
 - **arithmetic intensity は size に依らずほぼ一定（15.06〜15.88 FLOP/byte）**。GEMM の理論 AI は本来
   `size` に比例して増大するはずだが、本カーネルの staged タイルはキャッシュ再利用をせず K タイルごとに
   device メモリへ再ロードするため AI が頭打ちになっている（タイル構造由来の定数）。FP32 理論ピークとの比
   （machine balance）が確定すれば、この一定値との比較から「ロード律速の仮説」を生成できる（§5.1「ロード
   律速の『仮説』判定」参照。`arithmetic_intensity` は論理ロード量ベースのため、この比較だけでロード律速を
   **確定**はできない）。§3.1「要記入」欄が確定してから §5 で仮説として評価する
-- 上記 2 点から、暫定的には **occupancy 不足（D-7）よりロード側の定数コスト（D-2 のベクトル化候補）が
+- 上記 2 点から、暫定的には **並列度不足の仮説（D-7）よりロード側の定数コスト（D-2 のベクトル化候補）が
   頭打ちの説明として有力**に見えるが、これは§4 の `wall_ms`・`tflops_lower_bound`（size 間の相対的な
   スループット傾向。転送時間分離による近似 TFLOPS・実効帯域は PR #649 で撤回済み）を補助証跡として、
   実測後に裏付けを取ってから確定する
@@ -175,12 +187,12 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 実行＋C readback の end-to-end 時間）を分母とする**下限値**であり、公称帯域（546GB/s）との直接比較には
 使わない（「実測部分の設計判断」節参照）。
 
-| size | wall_ms | tflops_lower_bound | logical_load_gbs_lower_bound | GPU 使用率（ioreg） |
-|------|---------|----------------------|--------------------------------|------------------------|
-| 512  | 未計測 | 未計測 | 未計測 | 未計測 |
-| 1024 | 未計測 | 未計測 | 未計測 | 未計測 |
-| 2048 | 未計測 | 未計測 | 未計測 | 未計測 |
-| 4096 | 未計測 | 未計測 | 未計測 | 未計測 |
+| size | wall_ms（中央値） | wall_q1_ms | wall_q3_ms | tflops_lower_bound | logical_load_gbs_lower_bound | GPU 使用率（ioreg） |
+|------|---------------------|------------|------------|----------------------|--------------------------------|------------------------|
+| 512  | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
+| 1024 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
+| 2048 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
+| 4096 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 | 未計測 |
 
 ## 5. 判定基準・結論（Mac 実機実測後に確定）
 
@@ -202,8 +214,14 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
   「キャッシュ再利用込みでも DRAM 律速の可能性を排除できない」という**仮説生成**に留める。この仮説を
   確定判定へ格上げするには、Metal System Trace 等による実 DRAM トラフィック・実効帯域の実測が必要
   （codex-review 指摘。PR #649）。仮説が成立する場合は **D-2 を優先候補とする**（確定ではない）
-- **occupancy 不足の判定**: `actual_groups < ideal_groups`（§3.2 表）となる size 帯が頭打ち開始点
-  （1024 前後）と一致 → **D-7 を優先**
+- **並列度〈concurrency/saturation〉不足の仮説判定（真の occupancy 判定ではない）**:
+  `actual_groups < ideal_groups`（§3.2 表）となる size 帯が頭打ち開始点（1024 前後）と一致する場合、
+  D-7（occupancy 目標算出のタイル選択への組み込み）を優先候補とする。ただし `ideal_groups` は
+  レジスタ・threadgroup memory・`threads-per-threadgroup` 上限といった真の occupancy を決める資源制約
+  を表さない concurrency/saturation の proxy（MFA 経験式）に過ぎないため、`actual_groups >=
+  ideal_groups` が成立しても真の occupancy 不足が存在しないことの証明にはならない（codex-review 指摘。
+  PR #649）。この仮説を確定判定へ格上げするには Xcode GPU counters 等によるレジスタ・threadgroup
+  memory 使用率の実測が必要
 - ロード律速の仮説が不成立（実測で machine balance point を上回ると判明）・occupancy 不足の判定も不成立の
   場合、またはロード律速の仮説が実 DRAM トラフィック実測なしで確定判定に格上げできず結論が定まらない場合は、
   バリア同期コスト（`barriers_per_tg` の増加傾向。§3.2 表参照）・タイル選択自体の再検討（`tile::select` が
@@ -212,7 +230,7 @@ ioreg -r -d 1 -w0 -c IOAccelerator | grep "Device Utilization"
 
 ### 5.2 結論・D-2/D-7 優先順位（未確定。Mac 実機実測後に記入）
 
-未計測のため未確定。§3.3「解析値からの暫定観察」の時点では occupancy 側の説明力が弱く D-2 優先を示唆するが、
+未計測のため未確定。§3.3「解析値からの暫定観察」の時点では並列度不足の仮説側の説明力が弱く D-2 優先を示唆するが、
 これは実測（§4）による裏付けが必要な暫定所見であり、確定結論として扱わない。
 
 ## 6. 参照

@@ -9,7 +9,8 @@
 //!
 //! 本イシューは「実装変更を伴わない調査・計測・記録タスクのみ」
 //! （親 #480 本文）のため `crates/backend-metal/src/`・`shaders/gemm.metal`
-//! は一切変更しない。占有率・バリア回数・理論トラフィックの算出式は
+//! は一切変更しない。並列度〈concurrency/saturation〉ヒューリスティック・
+//! バリア回数・理論トラフィックの算出式は
 //! [`analytics`] モジュールへローカル実装した（`crate::tile::select` の
 //! 選択結果を読むだけの純粋関数。`tile.rs` への恒久実装は D-7a・#541 の
 //! 受け入れ基準であり、ここで先取りすると重複実装になるため避けた）。
@@ -26,7 +27,7 @@
 //! cargo run -p backend-metal --example gemm_diagnosis --release
 //! ```
 //!
-//! ### GPU デバイスプロファイル（occupancy 判定式のパラメータ）
+//! ### GPU デバイスプロファイル（並列度ヒューリスティックのパラメータ）
 //!
 //! `ideal_groups` の算出（[`analytics::DeviceProfile`]）に用いるパラメータ
 //! （`gpu_core_count`・`ideal_groups_multiplier`）は、macOS（実測を伴う
@@ -95,9 +96,11 @@
 //! 非負）」という不等式のみから成立する**下限値**
 //! （`tflops_lower_bound`・`logical_load_gbs_lower_bound`。詳細は
 //! [`macos_impl`] のコメント参照）に限定する。分離を諦めた代わりに、
-//! ロード律速・occupancy 不足の判定は非 macOS でも算出できる
+//! ロード律速の仮説判定・並列度〈concurrency/saturation〉ヒューリス
+//! ティックによる一次観察は非 macOS でも算出できる
 //! [`analytics`]（`arithmetic_intensity`・`actual_groups`/`ideal_groups`・
-//! `barriers_per_tg`）を主に用いる方針へ
+//! `barriers_per_tg`。`ideal_groups` が真の occupancy を表さない点は
+//! [`analytics::DeviceProfile`] のドキュメント参照）を主に用いる方針へ
 //! `docs/perf/metal-gemm-bottleneck-diagnosis.md` §5 も合わせて改訂した。
 
 /// 実効帯域・occupancy 等の解析値。`objc2` 系 FFI に触れない純粋関数の
@@ -106,15 +109,28 @@
 mod analytics {
     use backend_metal::TileConfig;
 
-    /// GPU デバイスプロファイル（occupancy 判定式
-    /// `idealGroups = gpu_core_count * ideal_groups_multiplier`
-    /// （MFA〈Metal FlashAttention〉の FP32 系判定式。イシュー #487 計画
-    /// 「occupancy 不足の判定」節が出発点として指定）のパラメータ）。
+    /// GPU デバイスプロファイル（並列度〈concurrency/saturation〉飽和度
+    /// ヒューリスティックの算出式 `idealGroups = gpu_core_count *
+    /// ideal_groups_multiplier`（MFA〈Metal FlashAttention〉の FP32 系
+    /// 経験式。イシュー #487 計画「occupancy 不足の判定」節が出発点として
+    /// 指定）のパラメータ）。
+    ///
+    /// **本ヒューリスティックの限界（codex-review 指摘。PR #649）**:
+    /// `idealGroups` は「コアあたり `ideal_groups_multiplier` 個の
+    /// threadgroup を発行すればコアを飽和させられる」という
+    /// concurrency/saturation の proxy に過ぎず、レジスタ使用量・
+    /// threadgroup memory 使用量・`threads-per-threadgroup` 上限といった
+    /// 真の occupancy を決める資源制約を一切表さない。したがって
+    /// `actual_groups`（[`SizeAnalytics::actual_groups`]）とこの値の比較
+    /// だけから「occupancy が十分／過剰である」と確定的に結論づけることは
+    /// できず、あくまで「発行 threadgroup 数が経験的な飽和目標に対して
+    /// 多いか少ないか」という一次指標として扱う（`docs/perf/
+    /// metal-gemm-bottleneck-diagnosis.md` §5.1 も同じ限定を明記）。
     ///
     /// `MTLDevice` に公開の GPU コア数取得 API は存在しないため、本
     /// example は解析対象を明示的なプロファイル値として扱う。既定値
-    /// （[`Self::M4_MAX`]）を他 Mac 実機の occupancy 判定に無警告で流用
-    /// しないよう、呼び出し側（`main`）で macOS 実行時は CLI 引数
+    /// （[`Self::M4_MAX`]）を他 Mac 実機の判定に無警告で流用しないよう、
+    /// 呼び出し側（`main`）で macOS 実行時は CLI 引数
     /// （`--gpu-core-count`・`--ideal-groups-multiplier`）の明示指定を
     /// 必須化する（機種識別子〈`sysctl -n hw.model`〉だけでは同一機種内の
     /// 構成差異を保証できないため自動判定は行わない。モジュール
@@ -139,7 +155,8 @@ mod analytics {
 
     /// `size×size×size` 正方 GEMM 1 件分の解析値
     /// （`gemm.metal` の staged 経路・`tile::select` の選択結果を前提に
-    /// 算出。occupancy・バリア回数・理論トラフィックはすべて `k` を
+    /// 算出。並列度〈concurrency/saturation〉ヒューリスティック・
+    /// バリア回数・理論トラフィックはすべて `k` を
     /// パディング前の実サイズとして計算するため、8 の倍数でない `size`
     /// を渡した場合はカーネル側パディング後の実効値と厳密には一致しない
     /// 点に注意。本診断が対象とする 4 サイズ〈512/1024/2048/4096〉は
@@ -150,7 +167,10 @@ mod analytics {
         pub tile: TileConfig,
         /// 実際に発行される threadgroup 数（`ceil(size/bm) * ceil(size/bn)`）。
         pub actual_groups: u64,
-        /// MFA 判定式によるコア飽和目標 threadgroup 数。
+        /// MFA 経験式によるコア飽和目標 threadgroup 数。
+        /// [`DeviceProfile`] のドキュメント「本ヒューリスティックの限界」
+        /// 節参照 — レジスタ・threadgroup memory 等の資源制約を表さない
+        /// concurrency/saturation の proxy であり、真の occupancy ではない。
         pub ideal_groups: u64,
         /// 1 threadgroup が K 方向ループで通過する `threadgroup_barrier`
         /// 回数（staged 経路: `gemm.metal:427,441` の 2 回 × K タイル数。
@@ -177,7 +197,9 @@ mod analytics {
 
     /// [`SizeAnalytics`] を算出する。`tile::select` を正方形状
     /// （`m=n=k=size`）で呼び出し、その選択結果に基づいて
-    /// occupancy・バリア回数・理論トラフィックを求める。
+    /// 並列度〈concurrency/saturation〉ヒューリスティック・バリア回数・
+    /// 理論トラフィックを求める（真の occupancy ではない点は
+    /// [`DeviceProfile`] のドキュメント参照）。
     pub fn analyze(size: usize, profile: DeviceProfile) -> SizeAnalytics {
         let tile = backend_metal::tile::select(size, size, size);
 
@@ -282,34 +304,37 @@ mod macos_impl {
     use super::analytics::{self, DeviceProfile, SizeAnalytics};
     use backend_metal::{MetalContext, MetalGemm};
     use bench_harness::rng::Xorshift64Star;
-    use bench_harness::{MeasurementConfig, run as bench_run};
+    use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
 
     /// 決定的シード（`gemm_bench.rs::SEED` と同一値。過去 PoC・既存ベンチと
     /// 同じ入力分布に揃える）。
     const SEED: u64 = 0xC0FFEE;
 
-    /// `m×n×k` の `dispatch_auto` を計測し中央値秒を返す
+    /// `m×n×k` の `dispatch_auto` を計測し [`Measurement`]（中央値・Q1・Q3
+    /// 秒。`bench_harness::protocol::run` の出力）をそのまま返す
     /// （`gemm_bench.rs::measure_auto` と同型。呼び出しごとに A・B の
-    /// アップロード・C の readback を含む壁時計計測）。
-    fn wall_secs(
+    /// アップロード・C の readback を含む壁時計計測）。中央値のみを
+    /// 返さず `Measurement` 全体を返すのは、計測手順（`docs/perf/
+    /// metal-gemm-bottleneck-diagnosis.md` §1「中央値/Q1/Q3」）と出力・
+    /// §4 記録表を整合させるため（q1/q3 を破棄すると分布のばらつきが
+    /// 記録から失われる。codex-review 指摘。PR #649）。
+    fn wall_measurement(
         gemm: &MetalGemm,
         ctx: &MetalContext,
         m: usize,
         n: usize,
         k: usize,
         config: &MeasurementConfig,
-    ) -> f64 {
+    ) -> Measurement {
         let mut rng = Xorshift64Star::new(SEED);
         let a = rng.fill_vec(m * k);
         let b = rng.fill_vec(k * n);
 
-        let measurement = bench_run(config, || {
+        bench_run(config, || {
             gemm.dispatch_auto(ctx, &a, &b, m, n, k)
                 .expect("Metal GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
         })
-        .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
-
-        measurement.median_secs
+        .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない")
     }
 
     /// 実行対象デバイスの [`DeviceProfile`] を解決する。CLI 明示指定
@@ -353,18 +378,25 @@ mod macos_impl {
         for size in [512usize, 1024, 2048, 4096] {
             let a: SizeAnalytics = analytics::analyze(size, profile);
 
-            // `wall_secs` は A・B アップロード＋カーネル実行＋C readback を
-            // 含む end-to-end 壁時計時間（モジュールドキュメント「転送時間
-            // 分離を試みて撤回した経緯」参照。転送時間だけを差し引く手段は
-            // クレート内部アクセスを要し本イシューのスコープ外のため、
-            // 分離を試みず `wall_secs` をそのまま報告する）。
-            let wall = wall_secs(&gemm, &ctx, size, size, size, &config);
+            // `measurement.{median,q1,q3}_secs` は A・B アップロード＋
+            // カーネル実行＋C readback を含む end-to-end 壁時計時間
+            // （モジュールドキュメント「転送時間分離を試みて撤回した経緯」
+            // 参照。転送時間だけを差し引く手段はクレート内部アクセスを要し
+            // 本イシューのスコープ外のため、分離を試みず `wall_measurement`
+            // が返す `Measurement`（中央値・Q1・Q3）をそのまま報告する。
+            // 中央値のみを使い q1/q3 を破棄すると計測手順〈§1「中央値/
+            // Q1/Q3」〉と出力・§4 記録表が不整合になる。codex-review 指摘。
+            // PR #649）。
+            let measurement = wall_measurement(&gemm, &ctx, size, size, size, &config);
+            let wall = measurement.median_secs;
 
             // `tflops_lower_bound`: 転送時間は非負（`wall_secs ≥
             // kernel_secs`）という不等式のみから導かれる健全な下限値。
             // 実際のカーネル TFLOPS はこれ以上（転送時間の分だけ高い）。
             // 分離を試みないため `_approx`（誤った精度感を与える名称）
-            // ではなく `_lower_bound` と明示する。
+            // ではなく `_lower_bound` と明示する。中央値秒を基準に算出し、
+            // Q1/Q3 秒はばらつきの記録用にそのまま別途出力する（下記
+            // `println!`）。
             let tflops_lower_bound = a.flops as f64 / wall / 1e12;
             // `logical_load_gbs_lower_bound`: `load_bytes_total +
             // store_bytes_total`（`analytics::analyze` 参照。threadgroup
@@ -380,7 +412,8 @@ mod macos_impl {
             println!(
                 "size={} tile={}x{}x{}({}x{}, staged={}) actual_groups={} ideal_groups={} \
                  barriers_per_tg={} arithmetic_intensity={:.4} wall_ms={:.4} \
-                 tflops_lower_bound={:.4} logical_load_gbs_lower_bound={:.4}",
+                 wall_q1_ms={:.4} wall_q3_ms={:.4} tflops_lower_bound={:.4} \
+                 logical_load_gbs_lower_bound={:.4}",
                 a.size,
                 a.tile.bm,
                 a.tile.bn,
@@ -393,6 +426,8 @@ mod macos_impl {
                 a.barriers_per_tg,
                 a.arithmetic_intensity,
                 wall * 1e3,
+                measurement.q1_secs * 1e3,
+                measurement.q3_secs * 1e3,
                 tflops_lower_bound,
                 logical_load_gbs_lower_bound,
             );
@@ -435,8 +470,9 @@ fn main() {
 
     println!(
         "backend-metal gemm_diagnosis example: wall_ms/tflops_lower_bound/logical_load_gbs_lower_bound \
-         measurement requires macOS (Apple Silicon). Analytical values (occupancy / barriers / \
-         arithmetic intensity) below are computed on any platform.\n"
+         measurement requires macOS (Apple Silicon). Analytical values (actual_groups/ideal_groups \
+         parallelism-saturation heuristic — not true occupancy; see analytics::DeviceProfile docs — \
+         barriers / arithmetic intensity) below are computed on any platform.\n"
     );
     for size in [512usize, 1024, 2048, 4096] {
         let a = analytics::analyze(size, profile);
