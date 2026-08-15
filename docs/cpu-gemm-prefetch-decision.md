@@ -6,7 +6,7 @@
 
 **stable rustc 上で `core::arch::aarch64` の安定版プリフェッチ intrinsic は存在しない。** `_prefetch`（および `_PREFETCH_READ`／`_PREFETCH_LOCALITY3` 等の locality/rw 定数）は `core::arch::aarch64` に定義自体は存在するが `unstable`（feature gate: `stdarch_aarch64_prefetch`、tracking issue [rust-lang/rust#117217](https://github.com/rust-lang/rust/issues/117217)）であり、stable channel では `E0658` でコンパイル不能である（実測は後述）。
 
-stable 前提で `PRFM` 相当命令を発行する経路は **inline asm（`asm!("prfm pldl1keep, [{0}]", ...)`）以外に存在しない**。inline asm は aarch64 では Rust 1.59 以降 stable だが、`unsafe` inline asm の新規導入となり `.claude/rules/coding-rust.md`「コード品質」節の「`unsafe` は FFI 境界等の必要最小限に留め、理由をコメントで明記しレビュー必須」という方針との整合上、**E-7（#562）の実装可否・採否は本 spike の範囲外とし、ユーザー承認事項として保留する**。
+stable 前提で `PRFM` 相当命令を発行する経路は、関数内 inline asm（`asm!("prfm pldl1keep, [{0}]", ...)`）とモジュールスコープの `core::arch::global_asm!` の 2 経路が技術的に到達可能である（後述の評価表参照）。ただし `global_asm!` はマイクロカーネルのホットループ内で計算済みポインタへ直接発行する用途には適合しない（評価表・下記参照）ため、**本リポのユースケース（ループ内の動的アドレスへのプリフェッチ）における実質的な到達手段は inline asm（`asm!`）である**。inline asm は aarch64 では Rust 1.59 以降 stable だが、`unsafe` inline asm の新規導入となり `.claude/rules/coding-rust.md`「コード品質」節の「`unsafe` は FFI 境界等の必要最小限に留め、理由をコメントで明記しレビュー必須」という方針との整合上、**E-7（#562）の実装可否・採否は本 spike の範囲外とし、ユーザー承認事項として保留する**。
 
 本 spike はこの分岐（「存在しない場合」）に該当した時点で完了である（イシュー #489 受け入れ基準 2 項）。E-7 本体への Issue コメント・ラベル変更等の操作は行わない（`.claude/rules/out-of-scope-tracking.md`: ユーザー承認なしの Issue 操作をしない）。
 
@@ -62,7 +62,8 @@ error: aborting due to 6 previous errors
 | `std::hint` 系（`std::hint::black_box` 等） | 該当なし | プリフェッチ相当の安定 API が存在しない |
 | nightly channel への変更 | 不採用 | `rust-toolchain.toml` は CI 共通基盤（rust-base-ci reusable workflow）が参照する単一真実源で stable 固定（`.claude/rules/ci.md`「ベースライン品質ゲート」節）。self-repair 検証ゲートの clippy component 依存（PR #344 実測）を含め stable 前提を崩す変更は影響範囲が大きく本 spike の範囲外 |
 | 外部クレート（プリフェッチ機能を提供するもの） | 不採用 | 許容依存 8 区分（`.claude/rules/deps-policy.md`）外。新規依存追加はユーザー承認必須であり本 spike では判断しない |
-| inline asm（`asm!("prfm pldl1keep, [{0}]", ...)`） | 技術的に唯一の到達手段。**採否はユーザー承認事項として保留** | aarch64 では inline asm は Rust 1.59 以降 stable だが、`unsafe` の新規導入となり `.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要最小限に留め、理由をコメントで明記しレビュー必須」との整合確認が要る |
+| inline asm（`asm!("prfm pldl1keep, [{0}]", ...)`） | 到達可能。本ユースケース（ホットループ内の動的アドレスへのプリフェッチ）における実質的な採用候補。**採否はユーザー承認事項として保留** | aarch64 では inline asm は Rust 1.59 以降 stable だが、`unsafe` の新規導入となり `.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要最小限に留め、理由をコメントで明記しレビュー必須」との整合確認が要る |
+| モジュールスコープ asm（`core::arch::global_asm!("prfm pldl1keep, [x0]" ...)`） | 到達可能だが本ユースケースには不適合 | `global_asm!` は `asm!` と同じ Rust 1.59 で stable 化された aarch64 対応マクロだが、意味論が異なる: 関数本体の中には書けず、モジュールスコープに独立したアセンブリ項目（フリースタンディングなシンボル・関数）を直接定義するものであり、`in`/`out` オペランドで Rust のローカル変数（レジスタ割付されたポインタ値等）を asm へ渡す機能を持たない。マイクロカーネルのループ内で計算済みの動的アドレスへ `PRFM` を発行するには、`global_asm!` でプリフェッチ専用の `extern "C"` 関数を別途定義し、ループ側からその関数を FFI 境界越しに呼び出す構成が必要になる。これは (1) 呼び出し規約（AAPCS64）に従った関数呼び出しオーバーヘッドをホットパス命令ごとに発生させ、(2) インライン化をコンパイラの裁量から外し、(3) `unsafe extern "C"` の FFI 境界と手動シンボル管理を新規に持ち込む点で、関数内 `asm!` を直接インラインで発行する経路より不利であり、性能目的のプリフェッチ挿入という本ユースケースには適合しない。`unsafe` 統制の観点でも `asm!` 1 箇所への局所化（引き継ぎ事項 (a) 参照）に比べ `unsafe extern "C"` 宣言・呼び出し元双方に `unsafe` 境界が増える分、`.claude/rules/coding-rust.md` の unsafe 最小化方針との整合が悪化する。保守性の観点では、モジュールスコープの生アセンブリ関数はマイクロカーネル本体（Rust コード）と物理的に分離されるため、MR/NR 変更等マイクロカーネル形状の変更時に追随漏れが起きやすい |
 
 ## E-7（#562）への引き継ぎ事項
 
@@ -100,3 +101,4 @@ error: aborting due to 6 previous errors
 - `.claude/rules/deps-policy.md`（許容依存 8 区分・新規依存はユーザー承認必須）
 - `.claude/rules/out-of-scope-tracking.md`（ユーザー承認なしの Issue 操作をしない）
 - rust-lang/rust#117217（`stdarch_aarch64_prefetch` tracking issue）
+- [The Rust Reference: Inline assembly](https://doc.rust-lang.org/reference/inline-assembly.html)（`asm!`／`global_asm!` の stable 化・aarch64 対応・意味論の違いの根拠）
