@@ -129,18 +129,31 @@ pub const MMA_WARPS_N: u32 = MMA_BN / MMA_N; // 8
 /// ブロック内スレッド総数（32 スレッド/warp x warp 数）。
 pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
 
-/// `cp.async.wait_group` の非最終タイル向け即値。`MMA_STAGES - 2` に
-/// 一致する必要がある（プロローグで `MMA_STAGES - 1` グループを commit
-/// した後、最古のグループの完了を待つには「直近 `MMA_STAGES - 2`
-/// グループの未完了を許容する」`wait_group` 即値が必要。標準的な
-/// ソフトウェアパイプラインの式）。最終 K タイルでは新規 commit が発生
-/// しないため、この即値では最後のグループの完了を保証できず
-/// `wait_group 0` による drain が別途必要（カーネルソース `if (t ==
-/// num_k_tiles - 1)` 分岐。PR #255 レビュー指摘）。`MMA_STAGES` を
-/// 変更する場合、カーネルソース中の `cp.async.wait_group 1;`／`0;` の
-/// 即値と分岐条件もあわせて見直すこと。`gemm_mma.rs` が起動前の
-/// `debug_assert` で参照し、`MMA_STAGES` の実利用を兼ねる。
-pub const MMA_WAIT_GROUP_IMMEDIATE: u32 = MMA_STAGES - 2;
+// `cp.async.wait_group` のループ内固定即値は `MMA_STAGES - 2` に一致する
+// 必要がある（プロローグで `MMA_STAGES - 1` グループを commit した後、
+// 最古のグループの完了を待つには「直近 `MMA_STAGES - 2` グループの
+// 未完了を許容する」`wait_group` 即値が必要。標準的なソフトウェア
+// パイプラインの式。CUTLASS `mma_multistage.h` と同型）。
+//
+// #492 で「ループ内固定即値＋ループ外 drain」構造へ整理し、旧来の
+// 「最終タイルのみ `wait_group 0`・それ以外は `wait_group 1`」という
+// `MMA_STAGES == 3` 専用の 2 値分岐（PR #255 由来）を撤去した。カーネル
+// ソース側は毎イテレーション必ず 1 commit を発行する不変条件（範囲外
+// タイルでは空グループを commit する）により、ループ内の wait は
+// `"n"(STAGES - 2)` という段数非依存の単一即値で常に正しくなる
+// （イテレーション t の時点の commit 総数は `(STAGES-1) + t` であり、
+// `wait_group (STAGES-2)` は完了数 `>= t+1` を保証するため、タイル t
+// 自身のグループの完了が全 t で保証される）。最終タイルの空グループは
+// 即完了するため、ループ外の `wait_group 0;`（drain）は残存グループの
+// 掃き出しのみを担う。
+//
+// `STAGES - 2` はカーネルソース側のコンパイル時 `"n"` 制約
+// （`asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2))`）で
+// 直接計算されるため、Rust 側で対応する定数を別途持つ必要はない
+// （非負性は下記 `MMA_STAGES >= 2` のコンパイル時 assert が担保する）。
+// かつて `MMA_WAIT_GROUP_IMMEDIATE` という Rust 側定数を持っていたが、
+// その定義式自身と比較するだけの debug_assert しか利用箇所がなく実質的な
+// 検査価値がなかったため撤去した（#492 レビュー指摘）。
 
 /// 1 ステージあたりの `mma.sync` 呼び出し回数（`BK / MMA_K`。カーネル内
 /// `for (int kstep = 0; kstep < BK / MMA_K; ++kstep)` に対応する Rust 側の
@@ -183,20 +196,19 @@ const _: () = assert!(
     MMA_BLOCK_THREADS <= 1024,
     "MMA_BLOCK_THREADS must not exceed CUDA's per-block thread limit (1024)"
 );
-// カーネルソース内 `if (t == num_k_tiles - 1) { wait_group 0 } else { wait_group 1 }`
-// の二値分岐（本ファイル冒頭「命令選定」・`MMA_WAIT_GROUP_IMMEDIATE`
-// ドキュメンテーションコメント参照）は `MMA_STAGES = 3` の下でのみ正しい
-// （一般には `wait_group` の必要値は `min(MMA_STAGES-2, num_k_tiles-t-1)`
-// であり、`MMA_STAGES > 3` では末尾の中間値をこの二値分岐では表現でき
-// ない）。`debug_assert_eq!`（`gemm_mma.rs::CudaMmaGemm::new`）はデバッグ
-// ビルドでのみ検査するのに対し、こちらはリリースビルドでも即座に
-// ビルドエラーとして検出する（PR #255 レビュー指摘。実機コンパイル
-// できないセッションでの安全側の追加ガード）。
+// #492 で「ループ内固定即値＋ループ外 drain」構造へ整理したことにより、
+// カーネルソース内の wait_group はもはや `MMA_STAGES == 3` に依存しない
+// 段数一般形（`"n"(STAGES - 2)` の固定即値。本ファイル `MMA_STAGES` 定数
+// 直下のドキュメンテーションコメント参照）になった。残る制約は
+// `STAGES - 2` が非負であること（`u32` の減算アンダーフローを避ける）
+// のみであり、`MMA_STAGES == 3` 固定ガードは撤去し `MMA_STAGES >= 2` の
+// 下限検査に一般化する。上限は既存の共有メモリ 48KiB assert・
+// `MMA_BLOCK_THREADS` assert が引き続き機械検査する。
 const _: () = assert!(
-    MMA_STAGES == 3,
-    "kernels_mma::MMA_F16 の cp.async drain 分岐は MMA_STAGES=3 前提の \
-     二値分岐（if (t == num_k_tiles - 1)）のため、MMA_STAGES を変更する \
-     場合はカーネルソース側の wait_group 分岐ロジックも合わせて見直すこと"
+    MMA_STAGES >= 2,
+    "kernels_mma::MMA_F16 の cp.async パイプラインは MMA_STAGES >= 2 を \
+     前提とする（カーネルソース側の `STAGES - 2` 計算が u32 で \
+     アンダーフローしないため）"
 );
 
 /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM（f16 入出力・f32 アキュムレート）。
@@ -309,9 +321,19 @@ extern "C" __global__ void gemm_mma_f16(
     // プロローグ: 最初の STAGES-1 タイルをロードし、それぞれ独立した
     // cp.async グループとして commit する（標準的なソフトウェア
     // パイプライン初期化。本ファイル冒頭コメント「命令選定」参照）。
-    for (int s = 0; s < STAGES - 1 && s < num_k_tiles; ++s) {
-        LOAD_A_STAGE(s, s * BK);
-        LOAD_B_STAGE(s, s * BK);
+    //
+    // #492: commit を無条件化する（CUTLASS `mma_multistage.h` と同じ
+    // 「1 イテレーション = 必ず 1 commit」不変条件。範囲外ステージ
+    // （s >= num_k_tiles、K が浅い形状で発生しうる）はロードを飛ばし
+    // 空グループを commit する。PTX ISA 上、未 commit の cp.async が無い
+    // 状態の `cp.async.commit_group` は空グループを作り即完了するため、
+    // 後述のループ内固定即値 wait が全 num_k_tiles で成立するための
+    // 前提となる）。
+    for (int s = 0; s < STAGES - 1; ++s) {
+        if (s < num_k_tiles) {
+            LOAD_A_STAGE(s, s * BK);
+            LOAD_B_STAGE(s, s * BK);
+        }
         asm volatile("cp.async.commit_group;\n");
     }
 
@@ -320,27 +342,24 @@ extern "C" __global__ void gemm_mma_f16(
         int next_tile = t + STAGES - 1;
         int load_stage = next_tile % STAGES;
 
-        // MMA_STAGES=3 前提の即値（Rust 側 `kernels_mma::MMA_WAIT_GROUP_IMMEDIATE`
-        // 参照。`gemm_mma.rs::CudaMmaGemm::new` の `debug_assert_eq!` が
-        // この即値との対応を検査する）。最古の commit 済みグループ
-        // （compute_stage に対応）の完了を保証する。
+        // #492: 段数一般形の固定即値（`STAGES - 2`。非負性は Rust 側
+        // `const _: () = assert!(MMA_STAGES >= 2, ...)` がコンパイル時に
+        // 担保する。本ファイル `MMA_STAGES` 定数直下のドキュメンテーション
+        // コメント参照）。`"n"` 制約はコンパイル時整数即値を要求する PTX
+        // インラインアセンブリの制約（CUTLASS が同様に `cp_async_wait<N>()`
+        // をテンプレート非型パラメータで即値化するのと同じ理由）。
         //
-        // 最終 K タイル（t == num_k_tiles - 1）では下の
-        // `if (next_tile < num_k_tiles)` が false のまま新規 commit が
-        // 発生しないため、`wait_group 1` のままだと最後の cp.async
-        // グループの完了を待たずに ldmatrix/mma.sync が共有メモリを読み
-        // うる（PR #255 レビュー指摘。k<=BK の小 K・16x8x16 smoke test で
-        // 即座に発生しうるレースコンディション）。最終タイルのみ
-        // `wait_group 0`（全 outstanding グループの完了待ち）で drain する。
-        // `MMA_WAIT_GROUP_IMMEDIATE`（`MMA_STAGES - 2` = 1）は
-        // `MMA_STAGES = 3` 固定の下でのみ「最終タイル以外は 1」が正しい値
-        // になる関係にあり、`MMA_STAGES` を変える場合はこの二値分岐自体を
-        // 見直す必要がある。
-        if (t == num_k_tiles - 1) {
-            asm volatile("cp.async.wait_group 0;\n");
-        } else {
-            asm volatile("cp.async.wait_group 1;\n");
-        }
+        // 正しさ: 上記プロローグの無条件 commit により、イテレーション t
+        // の時点での commit 総数は常に `(STAGES-1) + t`。`wait_group
+        // (STAGES-2)` は「未完了グループ数 <= STAGES-2」を保証するため、
+        // 完了数 >= `(STAGES-1) + t - (STAGES-2)` = `t + 1`、すなわちタイル
+        // t のグループ（(t+1) 番目）の完了が全 t で保証される。最終タイル
+        // 直前までのみ wait すればよく、最終タイル自身の drain（旧来の
+        // `wait_group 0` 分岐。PR #255 レビュー指摘の起点）はループ外へ
+        // 切り出した（本関数末尾参照）。よってループ内は段数分岐を持たず、
+        // `MMA_STAGES` を 2 や 4 に変えてもカーネルソース側の書き換えが
+        // 不要になる。
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2));
         __syncthreads();
 
         for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {
@@ -399,13 +418,28 @@ extern "C" __global__ void gemm_mma_f16(
             );
         }
 
+        // #492: commit をループ末尾で無条件発行する（プロローグと同じ
+        // 「1 イテレーション = 必ず 1 commit」不変条件。`next_tile` が
+        // 範囲外のタイル、つまりループ末尾に近い反復では、ロードのみを
+        // `if` で抑止し空グループを commit する）。
         if (next_tile < num_k_tiles) {
             LOAD_A_STAGE(load_stage, next_tile * BK);
             LOAD_B_STAGE(load_stage, next_tile * BK);
-            asm volatile("cp.async.commit_group;\n");
         }
+        asm volatile("cp.async.commit_group;\n");
         __syncthreads();
     }
+
+    // #492: ループ外 drain。ループ内固定即値 wait（`wait_group
+    // (STAGES-2)`）はタイル t 自身のグループの完了までしか保証しない
+    // （本ファイル上記コメント「正しさ」参照）ため、ループを抜けた直後に
+    // 残存する outstanding グループ（プロローグ以降に commit された空
+    // グループを含む）を `wait_group 0` で掃き出してから mma の結果を
+    // 読み出す（旧来の「最終タイルのみ wait_group 0」分岐が担っていた
+    // 安全性を、段数非依存な形でループ外へ移設したもの。PR #255 レビュー
+    // 指摘の趣旨を引き継ぐ）。
+    asm volatile("cp.async.wait_group 0;\n");
+    __syncthreads();
 
     #undef LOAD_A_STAGE
     #undef LOAD_B_STAGE
@@ -515,18 +549,129 @@ mod tests {
         assert_eq!(MMA_BN % 8, 0);
     }
 
-    /// PR #255 レビュー指摘の回帰防止: 最終 K タイルで `cp.async.wait_group 0`
-    /// による drain 分岐（`if (t == num_k_tiles - 1)`）が存在することを
-    /// ロックする。`wait_group 1` のみだと最終タイルの cp.async 完了を
-    /// 待たずに ldmatrix/mma.sync が共有メモリを読みうる（本ファイル
-    /// `MMA_WAIT_GROUP_IMMEDIATE` ドキュメンテーションコメント参照）。
+    /// #492 の回帰防止（旧テスト
+    /// `mma_f16_source_drains_final_async_copy_group_before_compute` の
+    /// 改名・主張反転）: ループ内の `if (t == num_k_tiles - 1)` 二値分岐が
+    /// **存在しない**こと、ループ内 wait が段数一般形の即値制約
+    /// （`"n"(STAGES - 2)`）であること、ループ外（`#undef` の直前）に
+    /// 無条件の `cp.async.wait_group 0;` drain が存在することを検査する
+    /// （本ファイル冒頭コメント「命令選定」・`MMA_STAGES` 定数直下の
+    /// ドキュメンテーションコメント参照）。
     #[test]
-    fn mma_f16_source_drains_final_async_copy_group_before_compute() {
+    fn mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain() {
         assert!(
-            MMA_F16.contains("if (t == num_k_tiles - 1)")
-                && MMA_F16.contains("cp.async.wait_group 0;"),
-            "MMA_F16 に最終 K タイルの cp.async drain 分岐（wait_group 0）が見つかりません"
+            !MMA_F16.contains("if (t == num_k_tiles - 1)"),
+            "MMA_F16 に MMA_STAGES=3 専用の wait_group 二値分岐が残っています \
+             （#492 でループ内固定即値＋ループ外 drain へ整理したはず）"
         );
+        assert!(
+            MMA_F16.contains(r#"asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2));"#),
+            "MMA_F16 のループ内 wait が段数一般形の即値制約（\"n\"(STAGES - 2)）ではありません"
+        );
+        // 数字即値 `wait_group 0;` の出現位置が `#undef LOAD_A_STAGE`
+        // （ループ本体終了直後の目印）より手前にある、すなわちループの
+        // 外側（ループ末尾 `}` の後）に置かれていることを位置関係で検査
+        // する。カーネルソースの PTX asm 文字列内部は `\n`（バックスラッシュ
+        // + n の 2 文字）が実際の改行ではなくリテラルとして現れるため、
+        // 改行を含む固定文字列一致ではなく `find` によるインデックス比較
+        // を用いる。
+        let undef_pos = MMA_F16
+            .find("#undef LOAD_A_STAGE")
+            .expect("MMA_F16 に #undef LOAD_A_STAGE が見つかりません");
+        let drain_pos = MMA_F16
+            .rfind("cp.async.wait_group 0;")
+            .expect("MMA_F16 に cp.async.wait_group 0; が見つかりません");
+        assert!(
+            drain_pos < undef_pos,
+            "MMA_F16 のループ外 drain（wait_group 0）が #undef LOAD_A_STAGE より \
+             後ろにあります（ループ内へ紛れ込んでいないか確認すること）"
+        );
+        // ループ本体の閉じ `}`（`for (int t = ...)` ループ末尾。直前の
+        // `__syncthreads();` を目印にする）より drain が後ろにあること。
+        let loop_syncthreads_pos = MMA_F16
+            .rfind("asm volatile(\"cp.async.commit_group;")
+            .expect("MMA_F16 にループ末尾の cp.async.commit_group が見つかりません");
+        assert!(
+            drain_pos > loop_syncthreads_pos,
+            "MMA_F16 のループ外 drain（wait_group 0）がループ末尾の commit_group より \
+             前にあります（ループ外へ切り出されていない可能性）"
+        );
+    }
+
+    /// #492 の回帰防止: `cp.async.wait_group <数字リテラル>` 形の出現が
+    /// ループ外 drain の `0` の 1 箇所のみであることを検査する。段数
+    /// （`MMA_STAGES`）由来のリテラル（旧来の `wait_group 1` 等）が
+    /// ループ内へ再導入されると、`MMA_STAGES` を変えた際に無音で誤った
+    /// 同期になるため、出現数を機械的に固定する。
+    #[test]
+    fn mma_f16_source_has_single_numeric_wait_group_literal() {
+        let count = MMA_F16.matches("cp.async.wait_group 0;").count();
+        assert_eq!(
+            count, 1,
+            "MMA_F16 中の `cp.async.wait_group 0;`（数字即値）出現数が 1 ではありません \
+             （ループ外 drain の 1 箇所のみが正。段数由来の数字リテラルがループ内へ \
+             再導入されていないか確認すること）"
+        );
+        // ループ内 wait は数字即値ではなく `%0` プレースホルダ＋`"n"` 制約
+        // 経由の段数一般形でなければならない。
+        assert!(
+            !MMA_F16.contains("cp.async.wait_group 1;"),
+            "MMA_F16 に MMA_STAGES=3 専用の数字即値 `wait_group 1;` が残っています"
+        );
+    }
+
+    /// #492 受け入れ基準（段数可変化）の CI 側担保: `#define STAGES 3` を
+    /// `stages` へ書き換えたソースについて、段数依存の即値リテラル・分岐
+    /// が残らないこと、および Rust 側で導出される整合条件（共有メモリ
+    /// 48KiB 上限）が成立することを `stages ∈ {2, 4}` について検査する。
+    /// `stages >= 2`（`STAGES - 2` の非負性）は下記ループの値が固定
+    /// リテラル配列由来のため実行時検査の対象にならず、本ファイル冒頭の
+    /// `const _: () = assert!(MMA_STAGES >= 2, ...)` が担う。実機 NVRTC
+    /// コンパイル自体は `#[ignore]` 分離（`gemm_mma.rs` 側。本ファイル
+    /// 冒頭コメント「検証状態」参照）だが、ソース文字列レベルの整合は
+    /// ここで通常 CI 下でも検査できる。
+    #[test]
+    fn mma_f16_source_stages_are_swappable_without_kernel_source_edits() {
+        for stages in [2u32, 4u32] {
+            let src = mma_f16_source_with_stages(stages);
+
+            // 段数依存の旧来リテラル・分岐が残っていないこと。
+            assert!(
+                !src.contains("if (t == num_k_tiles - 1)"),
+                "stages={stages}: wait_group 二値分岐が残っています"
+            );
+            for wrong in ["cp.async.wait_group 1;", "cp.async.wait_group 2;"] {
+                assert!(
+                    !src.contains(wrong),
+                    "stages={stages}: 段数由来の数字即値 `{wrong}` が残っています"
+                );
+            }
+
+            // Rust 側導出値の整合（本ファイル冒頭 `const _: () = assert!(...)`
+            // と同じ式を stages 可変で検査する）。
+            let shared_mem_bytes = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * stages;
+            assert!(
+                shared_mem_bytes <= 49_152,
+                "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB を超えています"
+            );
+        }
+    }
+
+    /// `mma_f16_source_stages_are_swappable_without_kernel_source_edits` が
+    /// 使うヘルパー: `#define STAGES <MMA_STAGES>` 行のみを `stages` へ
+    /// 置換したソース文字列を返す。置換が正確に 1 回起きたことを assert
+    /// することで、ヘルパー自体の壊れ（`#define STAGES` 行の文言変化で
+    /// マッチしなくなる等）を検出する。
+    fn mma_f16_source_with_stages(stages: u32) -> String {
+        let from = format!("#define STAGES {MMA_STAGES}\n");
+        let to = format!("#define STAGES {stages}\n");
+        let count = MMA_F16.matches(&from).count();
+        assert_eq!(
+            count, 1,
+            "MMA_F16 中の `{from:?}` の出現数が 1 ではありません（ヘルパーの \
+             前提が崩れています）"
+        );
+        MMA_F16.replacen(&from, &to, 1)
     }
 
     /// PR #255 レビュー指摘の回帰防止: A/B タイルロードの範囲外チャンク

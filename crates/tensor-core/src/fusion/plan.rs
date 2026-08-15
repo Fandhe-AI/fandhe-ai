@@ -60,12 +60,36 @@ use std::fmt;
 pub type FusedNodeIndex = usize;
 
 /// [`FusionPlan::ops`] が列挙する 1 ノード分の演算内容。内部
-/// `pub(crate)` の [`FusionOp`]（`graph.rs`・§2.1）と 1:1 対応するが、
-/// 融合境界ノード（`Gemm`／`Sum`／`Max`）は設計書 §3.2 (a)(b) のとおり
+/// `pub(crate)` の [`FusionOp`]（`graph.rs`・§2.1）と 1:1 対応する。
+/// `Gemm` のみが常に融合境界ノードのため設計書 §3.2 (b) のとおり
 /// `FusionPlan` 内に現れない（実体化境界のため、融合対象区間そのものに
-/// は含まれない）ので列挙しない。フィールドは [`FusedNodeIndex`]
-/// （plain `usize`）のみで構成し、`pub(crate)` 型を一切参照しない
-/// （設計書 §3.4「privacy 制約」）。
+/// は含まれない）。`Sum`／`Max`（reduction）はイシュー #586 の境界
+/// 再定義により、セグメント軸が一致する限り `FusionPlan` 内に現れうる
+/// （`graph.rs`・`detect.rs` の doc 参照。CPU カーネル実装自体は本イシュー
+/// のスコープ外＝ G-3 以降であり、`backend-cpu::fused_elementwise` は
+/// これらを含む plan を pre-scan で `BackendError::Unsupported` として
+/// fail-closed に拒否する）。フィールドは [`FusedNodeIndex`]（plain
+/// `usize`）のみで構成し、`pub(crate)` 型を一切参照しない（設計書 §3.4
+/// 「privacy 制約」）。
+///
+/// # 後方互換性（codex-review PR #648 P1 是正）
+///
+/// `tensor-core` は `publish = false`（workspace `Cargo.toml`）かつ
+/// `docs/compat-api-scope.md` §0 が定める**内部クレート**であり、`facade`
+/// のみが「サポートされる公開 API 面」である（`facade::compat` に
+/// `FusedOpKind` は再エクスポートされない）。よって本 enum が Rust の
+/// 可視性として `pub`（`backend-cpu`／`autodiff` からのクレート間参照に
+/// 必要なため）であることと、外部利用者向けにサポートされる公開面で
+/// あることは区別する（`docs/compat-api-scope.md` §0 で `autodiff::
+/// Tape::new_with_ops` 等に対し既に確立済みの区別と同じ整理）。
+/// それでも本 workspace 内の `backend-cpu`／`autodiff` の各クレートは
+/// `FusedOpKind` を跨クレートで exhaustive match するため、`#[non_exhaustive]`
+/// を付けて「variant 追加は非破壊」という前方互換性を型で保証する
+/// （バリアント単位の `#[non_exhaustive]` ではなく enum 全体へ付与:
+/// バリアント単位だと `FusedOpKind::Add { .. }` 等のクレート外構築
+/// 〈`autodiff/src/tape.rs`〉自体が壊れるため）。呼び出し側の match は
+/// 必ず `_` 分岐を持つ（`backend-cpu::fused_elementwise::eval_one` 等）。
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FusedOpKind {
     /// 葉ノード（このプランへの外部入力）。`leaf_index` は `run_fused`
@@ -91,6 +115,24 @@ pub enum FusedOpKind {
     },
     Tanh {
         input: FusedNodeIndex,
+    },
+    /// `1/sqrt(x)`。RMSNorm 融合（#586）の構成要素。`graph.rs::
+    /// FusionOp::Rsqrt` と 1:1 対応。
+    Rsqrt {
+        input: FusedNodeIndex,
+    },
+    /// reduction（縮約）。`axis: None` は全軸縮約、`axis: Some(a)` は
+    /// 指定軸のみの縮約（`graph.rs::FusionOp::Sum` の `dim` フィールドを
+    /// この公開 DTO の命名規約〈`axis`〉へ写像する。#586 イシュー指定の
+    /// フィールド名）。
+    Sum {
+        input: FusedNodeIndex,
+        axis: Option<usize>,
+    },
+    /// [`FusedOpKind::Sum`] と同じ写像規約に従う reduction。
+    Max {
+        input: FusedNodeIndex,
+        axis: Option<usize>,
     },
 }
 
@@ -126,8 +168,11 @@ pub enum FusionPlanError {
     /// 各 `leaf_index` が `0..leaf_count` に一度ずつ出現することを
     /// 型付きエラーで拒否する）。
     DuplicateLeafIndex { leaf_index: usize },
-    /// `ops` が空、または `Input` エントリのみで構成される（elementwise
-    /// ノードが 1 個も無い＝融合する意味がない）。
+    /// `ops` が空、または `Input` エントリのみで構成される（`Input` 以外
+    /// のノードが 1 個も無い＝融合する意味がない。variant 名は公開面の
+    /// ため維持するが、#586 で reduction／`Rsqrt` も対象へ加わったため
+    /// 「非 `Input` ノードが 1 個も無い」の意味へ拡張する。命名は互換性
+    /// のため据え置く）。
     NoElementwiseNode,
     /// `ops` の末尾エントリが `Input` である（本モジュール冒頭「出力
     /// ノードの契約」参照。末尾が出力ノードでなければ
@@ -144,6 +189,19 @@ pub enum FusionPlanError {
     /// 後段〈`backend-cpu::run_fused_elementwise`〉の shape 一致検証に
     /// 検証責務が漏れ出す）。
     OutputShapeOverflow,
+    /// `ops` 内の `Sum`／`Max` エントリの `axis` が、セグメント内で最初に
+    /// 現れた reduction が確定した軸と一致しない（#586・`detect.rs` の
+    /// セグメント軸一致判定〈グラフ構築経路〉と同じ不変条件を、`ops`
+    /// を直接受け取る `from_ops` 経路でも防御的に検証する。`from_ops`
+    /// は `autodiff` から任意の `Vec<FusedOpKind>` を受け取る公開経路
+    /// であり、`detect_fusion` の判定を経由しないため、この検証を欠くと
+    /// 軸不一致の reduction が混在した不正な `FusionPlan` が構築できて
+    /// しまう）。`#[non_exhaustive]` のため後方互換に新規追加できる。
+    MismatchedReductionAxis {
+        at: usize,
+        expected: Option<usize>,
+        actual: Option<usize>,
+    },
 }
 
 impl fmt::Display for FusionPlanError {
@@ -179,6 +237,14 @@ impl fmt::Display for FusionPlanError {
             FusionPlanError::OutputShapeOverflow => {
                 write!(f, "fusion plan output_shape element count overflows usize")
             }
+            FusionPlanError::MismatchedReductionAxis {
+                at,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "fusion plan node {at} reduction axis {actual:?} does not match segment axis {expected:?}"
+            ),
         }
     }
 }
@@ -232,6 +298,15 @@ impl From<FusionPlanError> for BackendError {
             FusionPlanError::OutputShapeOverflow => {
                 BackendError::ShapeMismatch(ShapeError::ElementCountOverflow)
             }
+            // #586: 軸不一致は「型不変条件違反」というより「この
+            // FusionPlan は融合として成立しない」という意味論のため、
+            // 実測値の丸め対象である ShapeMismatch 系ではなく
+            // `NoElementwiseNode`／`LastOpIsInput` と同じ `Unsupported`
+            // へ寄せる（`err.to_string()` で `at`/`expected`/`actual` を
+            // 保持したメッセージのまま伝播する）。
+            FusionPlanError::MismatchedReductionAxis { .. } => {
+                BackendError::Unsupported(err.to_string())
+            }
         }
     }
 }
@@ -279,10 +354,11 @@ impl FusionPlan {
     /// # エラー
     ///
     /// `graph.node` が返す [`FusionGraphError::NodeIdOutOfRange`]、
-    /// `segment.nodes` が elementwise 5 演算以外のノードを含む場合の
-    /// [`FusionGraphError::UnexpectedOpKind`]、または Add／Mul／Relu／
-    /// Exp／Tanh のオペランドが再番号付け表に存在しない場合の
-    /// [`FusionGraphError::DanglingOperandReference`] を返す（いずれも
+    /// `segment.nodes` が `Input`／`Gemm`（#586 以降も常に境界）を含む
+    /// 場合の [`FusionGraphError::UnexpectedOpKind`]、または Add／Mul／
+    /// Relu／Exp／Tanh／Rsqrt／Sum／Max のオペランドが再番号付け表に
+    /// 存在しない場合の [`FusionGraphError::DanglingOperandReference`]
+    /// を返す（いずれも
     /// `segment` が `graph` と整合しない場合の防御。通常は #162 の検出
     /// 結果をそのまま渡す限り到達しない。レビュー指摘 #400: 従来は
     /// `index_of[&id]` の直接添字アクセスで panic していた）。
@@ -311,13 +387,13 @@ impl FusionPlan {
         for node_id in &segment.nodes {
             let node = graph.node(*node_id)?;
             // `segment.nodes` は #162 の連鎖検出（`is_elementwise()` を
-            // 満たすノードのみを `included` へ挿入する。`detect.rs`
-            // 参照）が確定した集合であるため、ここに現れる `op` は常に
-            // elementwise 5 演算のいずれかである。`Input`／`Gemm`／
-            // `Sum`／`Max` が紛れ込む経路は存在しないが、`graph`
-            // （#399 の教訓どおり `pub(crate)` であっても未検証入力を
-            // panic で処理しない）と `segment` の整合をここでも
-            // 型付きエラーで扱う（呼び出し元のバグにより不整合な
+            // 満たすノード、および #586 でセグメント軸が一致する
+            // reduction〈`Sum`／`Max`〉のみを `included` へ挿入する。
+            // `detect.rs` 参照）が確定した集合であるため、ここに現れる
+            // `op` は常に「常に境界」の `Input`／`Gemm` 以外である。
+            // それでも `graph`（#399 の教訓どおり `pub(crate)` であっても
+            // 未検証入力を panic で処理しない）と `segment` の整合を
+            // ここでも型付きエラーで扱う（呼び出し元のバグにより不整合な
             // `segment` が渡された場合の防御的検証）。
             let kind = match &node.op {
                 FusionOp::Add(a, b) => FusedOpKind::Add {
@@ -337,15 +413,30 @@ impl FusionPlan {
                 FusionOp::Tanh(a) => FusedOpKind::Tanh {
                     input: lookup_index(&index_of, a.0)?,
                 },
-                FusionOp::Input
-                | FusionOp::Gemm(..)
-                | FusionOp::Sum { .. }
-                | FusionOp::Max { .. } => {
+                FusionOp::Rsqrt(a) => FusedOpKind::Rsqrt {
+                    input: lookup_index(&index_of, a.0)?,
+                },
+                // #586: reduction（Sum／Max）はセグメント軸が一致する限り
+                // `detect_fusion` がセグメントへ組み込むため（`detect.rs`
+                // 参照）、ここに現れうる。`dim`→`axis` の命名写像のみ行う
+                // （検証は `detect_fusion` が構築済みで、ここでは再検証
+                // しない。`segment` と `graph` が不整合な場合の入力参照
+                // 解決は他の枝と同じ `lookup_index` に委ねる）。
+                FusionOp::Sum { input: a, dim } => FusedOpKind::Sum {
+                    input: lookup_index(&index_of, a.0)?,
+                    axis: *dim,
+                },
+                FusionOp::Max { input: a, dim } => FusedOpKind::Max {
+                    input: lookup_index(&index_of, a.0)?,
+                    axis: *dim,
+                },
+                FusionOp::Input | FusionOp::Gemm(..) => {
                     // 到達しない防御的分岐（上記コメント参照）。専用の
                     // `FusionGraphError::UnexpectedOpKind` を返す
                     // （`NodeIdOutOfRange` は「ID が範囲外」という別の
                     // 不変条件の違反を表すため意味論的に転用しない。
-                    // レビュー指摘 #163）。
+                    // レビュー指摘 #163）。`Gemm`／`Input` のみが常に
+                    // 境界であり `segment.nodes` に現れえない（#586）。
                     return Err(FusionGraphError::UnexpectedOpKind { id: node_id.0 });
                 }
             };
@@ -390,6 +481,11 @@ impl FusionPlan {
     /// - `ops` が空でなく、`Input` 以外のノードを最低 1 個含むこと
     /// - `ops` の末尾エントリが `Input` でないこと（モジュール冒頭
     ///   「出力ノードの契約」）
+    /// - `Sum`／`Max` エントリの `axis` が、`ops` 内で最初に現れた
+    ///   reduction の `axis` と一致すること（#586。`detect_fusion` の
+    ///   セグメント軸一致判定〈`detect.rs`〉と同じ不変条件を `ops` を
+    ///   直接受け取るこの経路でも検証する。不一致は
+    ///   [`FusionPlanError::MismatchedReductionAxis`]）
     #[doc(hidden)]
     pub fn from_ops(
         ops: Vec<FusedOpKind>,
@@ -402,12 +498,18 @@ impl FusionPlan {
         }
 
         let mut input_count = 0usize;
+        // 変数名は据え置くが #586 以降「`Input` 以外のノードを 1 個以上
+        // 含むか」（elementwise ∪ reduction ∪ Rsqrt）を表す（上記
+        // `NoElementwiseNode` doc 参照）。
         let mut has_elementwise = false;
         // `leaf_index` ごとの出現済みフラグ（レビュー指摘 #400:
         // `leaf_count` 個数一致・範囲チェックだけでは重複した
         // `leaf_index` を見逃す。`0..leaf_count` へ一度ずつ出現する
         // ことをここで確定する）。
         let mut leaf_seen = vec![false; leaf_count];
+        // セグメント軸（#586。`detect.rs::detect_fusion` の
+        // `segment_axis` と同じ役割を `ops` の直接検証側でも担う）。
+        let mut reduction_axis: Option<Option<usize>> = None;
         for (at, op) in ops.iter().enumerate() {
             match *op {
                 FusedOpKind::Input { leaf_index } => {
@@ -429,9 +531,22 @@ impl FusionPlan {
                 }
                 FusedOpKind::Relu { input }
                 | FusedOpKind::Exp { input }
-                | FusedOpKind::Tanh { input } => {
+                | FusedOpKind::Tanh { input }
+                | FusedOpKind::Rsqrt { input } => {
                     has_elementwise = true;
                     check_preceding(input, at)?;
+                }
+                FusedOpKind::Sum { input, axis } | FusedOpKind::Max { input, axis } => {
+                    has_elementwise = true;
+                    check_preceding(input, at)?;
+                    let expected = *reduction_axis.get_or_insert(axis);
+                    if expected != axis {
+                        return Err(FusionPlanError::MismatchedReductionAxis {
+                            at,
+                            expected,
+                            actual: axis,
+                        });
+                    }
                 }
             }
         }
@@ -553,7 +668,10 @@ fn compute_use_counts(ops: &[FusedOpKind]) -> Vec<usize> {
             }
             FusedOpKind::Relu { input }
             | FusedOpKind::Exp { input }
-            | FusedOpKind::Tanh { input } => {
+            | FusedOpKind::Tanh { input }
+            | FusedOpKind::Rsqrt { input }
+            | FusedOpKind::Sum { input, .. }
+            | FusedOpKind::Max { input, .. } => {
                 counts[input] += 1;
             }
             FusedOpKind::Input { .. } => {}
@@ -585,13 +703,15 @@ mod tests {
         let c = g.push(FusionOp::Relu(b), f32_meta(&[4])).unwrap();
         let d = g.push(FusionOp::Exp(c), f32_meta(&[4])).unwrap();
         // 境界ノード（Sum）が a を外部から参照する（segment 外）。
+        // `dim: None`（全軸縮約）の出力 shape 契約は rank 0（`[]`。#586
+        // で構築時検証を追加。`graph.rs::FusionGraph::push` 参照）。
         let _sum = g
             .push(
                 FusionOp::Sum {
                     input: a,
                     dim: None,
                 },
-                f32_meta(&[1]),
+                f32_meta(&[]),
             )
             .unwrap();
 
@@ -851,5 +971,129 @@ mod tests {
         assert_eq!(plan.use_count(0), 1);
         // 範囲外は 0 を返す。
         assert_eq!(plan.use_count(999), 0);
+    }
+
+    /// #586: `detect_fusion` がセグメント軸一致で reduction を組み込んだ
+    /// 場合、`from_segment` が `dim`→`axis` の命名写像を保ったまま
+    /// `FusedOpKind::Sum`／`Rsqrt` へ変換することを固定する（RMSNorm 様
+    /// 連鎖: `Mul(x,x) → Sum{None} → Rsqrt → Mul`）。
+    #[test]
+    fn from_segment_converts_reduction_and_rsqrt_with_axis_mapping() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let sq = g.push(FusionOp::Mul(x, x), f32_meta(&[4])).unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: sq,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        let rsqrt = g.push(FusionOp::Rsqrt(sum), f32_meta(&[])).unwrap();
+        let out = g.push(FusionOp::Mul(rsqrt, rsqrt), f32_meta(&[])).unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let segment = match decision {
+            FusionDecision::Fuse(seg) => seg,
+            other => panic!("expected Fuse, got {other:?}"),
+        };
+
+        let plan = FusionPlan::from_segment(&g, &segment).unwrap();
+        let ops: Vec<FusedOpKind> = plan.ops().collect();
+        // leaf 0=x, 1=sq(Mul(0,0)), 2=sum(Sum{axis:None}(1)), 3=rsqrt(2), 4=out(Mul(3,3))
+        assert_eq!(ops.len(), 5);
+        assert!(matches!(ops[0], FusedOpKind::Input { leaf_index: 0 }));
+        assert!(matches!(ops[1], FusedOpKind::Mul { lhs: 0, rhs: 0 }));
+        assert!(matches!(
+            ops[2],
+            FusedOpKind::Sum {
+                input: 1,
+                axis: None
+            }
+        ));
+        assert!(matches!(ops[3], FusedOpKind::Rsqrt { input: 2 }));
+        assert!(matches!(ops[4], FusedOpKind::Mul { lhs: 3, rhs: 3 }));
+        // sum（プラン内 index 2）は Rsqrt から 1 回参照される。
+        assert_eq!(plan.use_count(2), 1);
+    }
+
+    /// #586: `from_ops` は `ops` 内で最初に現れた reduction の `axis` を
+    /// セグメント軸として確定し、以降一致する `Sum`／`Max` を受理する。
+    #[test]
+    fn from_ops_accepts_matching_reduction_axis() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Relu { input: 0 },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: Some(0),
+                },
+                FusedOpKind::Exp { input: 2 },
+                FusedOpKind::Max {
+                    input: 3,
+                    axis: Some(0),
+                },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        assert_eq!(plan.leaf_count(), 1);
+        assert_eq!(plan.use_count(1), 1);
+    }
+
+    /// 受け入れ基準（#586）の `from_ops` 側固定: `axis` が一致しない
+    /// `Sum`／`Max` を混在させると [`FusionPlanError::
+    /// MismatchedReductionAxis`] で拒否される。
+    #[test]
+    fn from_ops_rejects_mismatched_reduction_axis() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Relu { input: 0 },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: Some(0),
+                },
+                FusedOpKind::Exp { input: 2 },
+                FusedOpKind::Max {
+                    input: 3,
+                    axis: Some(1),
+                },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FusionPlanError::MismatchedReductionAxis {
+                at: 4,
+                expected: Some(0),
+                actual: Some(1),
+            }
+        );
+    }
+
+    /// #586: `Rsqrt` 単独でも `from_ops` の「非 `Input` ノードを最低 1 個
+    /// 含む」判定（`NoElementwiseNode` の拡張された意味論）を満たす。
+    #[test]
+    fn from_ops_accepts_rsqrt_only_chain() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Rsqrt { input: 0 },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        assert_eq!(plan.use_count(0), 1);
     }
 }

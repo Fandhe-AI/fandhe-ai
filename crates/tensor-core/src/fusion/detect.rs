@@ -94,8 +94,10 @@ pub(crate) enum FusionDecision {
     Fallback(FallbackReason),
 }
 
-/// `root` を出力とする融合可能な elementwise 連鎖を検出する（設計書
-/// §3.2 の実体化条件・§6.1 #162 のスコープに対応する本体）。
+/// `root` を出力とする融合可能な elementwise／reduction 連鎖を検出する
+/// （設計書 §3.2 の実体化条件・§6.1 #162 のスコープに対応する本体。
+/// イシュー #586 で reduction（`Sum`／`Max`）をセグメントへ組み込める
+/// よう境界判定を再定義した）。
 ///
 /// # アルゴリズム
 ///
@@ -106,10 +108,13 @@ pub(crate) enum FusionDecision {
 /// される（キュー・スタックによる探索順の非決定性を排除できる。本関数
 /// が純関数・決定的であるための構造上の根拠）。
 ///
-/// 1. 到達可能集合 `reachable` を `{root}` で初期化する。
+/// 1. 到達可能集合 `reachable` を `{root}` で初期化する。セグメント軸
+///    `segment_axis`（`Option<Option<usize>>`。外側 `None` は「まだ
+///    reduction を含んでいない」、内側は reduction の `dim`）を `None`
+///    で初期化する。
 /// 2. `id` を `root.0` から `0` まで降順に走査し、`reachable` に含まれる
 ///    ノードのみを処理する:
-///    - elementwise（`Add`／`Mul`／`Relu`／`Exp`／`Tanh`）なら:
+///    - elementwise（`Add`／`Mul`／`Relu`／`Exp`／`Tanh`／`Rsqrt`）なら:
 ///      - `dtype != F32` または `contiguous == false` を検出した時点で
 ///        走査全体を打ち切り [`FusionDecision::Fallback`] を返す
 ///        （設計書 §3.2 (e)・セグメント全体を非融合にする方針）。
@@ -126,21 +131,43 @@ pub(crate) enum FusionDecision {
 ///        [`MAX_FUSED_CHAIN_LEN`] 以下に収まる。
 ///      - 上限未到達ならセグメントへ追加し、このノードの入力を
 ///        `reachable` へ追加して走査を継続する。
-///    - 融合境界（`Gemm`／`Sum`／`Max`）または `Input` なら、それ自体を
-///      入力方向へは展開せず、そのノード ID を後段で葉として扱う
-///      （設計書 §3.2 (a)(b)）。ただしこの時点でも `dtype != F32` または
+///    - reduction（`Sum`／`Max`）なら（#586 の境界再定義）:
+///      - `dtype != F32` または `contiguous == false` は elementwise と
+///        同様に走査全体を打ち切る。
+///      - `segment_axis` が未確定（`None`）なら、このノードの `dim` を
+///        セグメント軸として確定する（`Option<usize>::get_or_insert`。
+///        「セグメント内で最初に含まれる reduction の `dim` がセグメント
+///        軸を確定する」の実体。降順走査のため root に近い側＝走査で
+///        最初に到達する reduction が優先される）。
+///      - `dim` が `segment_axis` と一致すれば elementwise と同じ扱い
+///        （上限判定→セグメントへ追加→入力を `reachable` へ展開）で
+///        セグメントへ組み込む。
+///      - `dim` が `segment_axis` と**一致しなければ**、このノードは
+///        セグメントへ組み込まず・入力も展開しない（＝境界ノードとして
+///        葉になる。受け入れ基準「reduction 軸が一致しない連鎖は分断
+///        される」の実体）。
+///    - 融合境界（`Gemm`）または `Input` なら、それ自体を入力方向へは
+///      展開せず、そのノード ID を後段で葉として扱う（設計書 §3.2
+///      (a)(b)）。ただしこの時点でも `dtype != F32` または
 ///      `contiguous == false` を検出した時点で走査全体を打ち切り
 ///      [`FusionDecision::Fallback`] を返す（`graph.rs` の
 ///      `FusionGraph::push` の binary shape 検証コメントが明言する契約: broadcast
 ///      view は `push` 時点では拒否せず `contiguous: false` として本
 ///      関数の非融合フォールバック判定に委ねられる。境界ノードだから
-///      といって検証を素通りさせない）。
+///      といって検証を素通りさせない）。軸不一致で境界化した reduction
+///      ノードもこの分岐と同じ検証（`dtype`／`contiguous`）を受ける。
 /// 3. 走査完了後、セグメントに含まれるノードが 1 個でも `dtype`／
 ///    `contiguous` 違反で打ち切られていなければ、セグメントの各ノードが
 ///    参照する入力のうちセグメントに含まれないものを葉として集約する
 ///    （重複除去・昇順ソート）。
 /// 4. セグメントのノード数が [`MIN_FUSED_CHAIN_LEN`] 未満なら
 ///    [`FallbackReason::ChainTooShort`] で非融合とする。
+///
+/// **root は従来どおり elementwise のみ許可**（reduction root は
+/// [`FallbackReason::RootNotElementwise`] のまま。RMSNorm／softmax の
+/// 実用セグメントは elementwise で終端するため必要十分であり、既存挙動
+/// の回帰面を最小化する安全側の判断。将来必要になれば別イシューで
+/// 拡張する。#586 実装計画 §3.3）。
 ///
 /// fan-out（同一ノードが複数ノードから参照される）・fan-in（複数の
 /// elementwise 連鎖が 1 ノードへ合流する `(a+b)*(c+d)` 形）はいずれも
@@ -172,51 +199,91 @@ pub(crate) fn detect_fusion(
     let mut reachable: BTreeSet<usize> = BTreeSet::new();
     reachable.insert(root.0);
 
-    // セグメントに含まれる elementwise ノード（発見順。降順走査のため
-    // root に近い側から入る。最終的に昇順へソートし直す）。
+    // セグメントに含まれる elementwise／reduction ノード（発見順。降順
+    // 走査のため root に近い側から入る。最終的に昇順へソートし直す）。
     let mut included: BTreeSet<usize> = BTreeSet::new();
+
+    // セグメント軸（#586）。`None` は「まだ reduction を含んでいない」、
+    // `Some(dim)` は確定済みのセグメント軸（`dim` は reduction 自体の
+    // `Option<usize>`）。最初に組み込まれた reduction がこれを確定する
+    // （関数doc「アルゴリズム」節参照）。
+    let mut segment_axis: Option<Option<usize>> = None;
 
     for id in (0..=root.0).rev() {
         if !reachable.contains(&id) {
             continue;
         }
         let node = graph.node(FusionNodeId(id))?;
-        if !node.op.is_elementwise() {
-            // 融合境界（Gemm/Sum/Max）または Input。ここでは展開せず、
-            // 葉抽出（後段）に委ねる。ただし葉として使われる以上、
-            // `graph.rs` が明言する「broadcast view は contiguous: false
-            // として非融合判定側〈本関数〉に委ねる」契約の受け手として
-            // ここで検証する（#162 レビュー指摘: 境界ノードの
-            // contiguous/dtype が未検証だった）。
+
+        if node.op.is_elementwise() {
             if node.meta.dtype != DType::F32 {
                 return Ok(FusionDecision::Fallback(FallbackReason::UnsupportedDtype));
             }
             if !node.meta.contiguous {
                 return Ok(FusionDecision::Fallback(FallbackReason::NonContiguous));
             }
+
+            // 上限判定は `included` へ挿入する**前**に行う。fan-in を含む
+            // DAG では同一ノードが複数経路から先に `reachable` へ入りうる
+            // ため、挿入後に上限を検査すると別経路由来のノードが上限到達後
+            // も処理されてしまい `included.len()` が `MAX_FUSED_CHAIN_LEN`
+            // を超過する（#162 レビュー指摘の反例: バランス木 fan-in）。
+            // 挿入前判定なら `included.len()` は到達経路・走査順によらず
+            // 常に上限以下に収まり、上限到達後のノードはそのまま外部入力
+            // （葉）として後段の葉抽出に委ねられる（設計書 §3.2 (d)）。
+            if included.len() >= MAX_FUSED_CHAIN_LEN {
+                continue;
+            }
+            included.insert(id);
+            for input in node.op.inputs() {
+                reachable.insert(input.0);
+            }
             continue;
         }
+
+        if let Some(dim) = node.op.reduction_dim() {
+            // reduction（Sum／Max）。#586: セグメント軸が一致する限り
+            // elementwise と同様にセグメントへ組み込める。
+            if node.meta.dtype != DType::F32 {
+                return Ok(FusionDecision::Fallback(FallbackReason::UnsupportedDtype));
+            }
+            if !node.meta.contiguous {
+                return Ok(FusionDecision::Fallback(FallbackReason::NonContiguous));
+            }
+
+            // `get_or_insert` は未確定なら `dim` で確定して `&mut` を返し、
+            // 確定済みならその既存値への `&mut` を返す。いずれの場合も
+            // 比較先は「確定済みのセグメント軸」になるため、初回は必ず
+            // 一致（このノードが軸を確定する）、2 回目以降は既存軸との
+            // 一致判定になる。
+            let axis_matches = *segment_axis.get_or_insert(dim) == dim;
+            if !axis_matches {
+                // 軸不一致: セグメントへ組み込まず・入力も展開しない
+                // （境界ノードとして葉になる。受け入れ基準「reduction
+                // 軸が一致しない連鎖は分断される」の実体）。
+                continue;
+            }
+
+            if included.len() >= MAX_FUSED_CHAIN_LEN {
+                continue;
+            }
+            included.insert(id);
+            for input in node.op.inputs() {
+                reachable.insert(input.0);
+            }
+            continue;
+        }
+
+        // 融合境界（Gemm）または Input。ここでは展開せず、葉抽出（後段）
+        // に委ねる。ただし葉として使われる以上、`graph.rs` が明言する
+        // 「broadcast view は contiguous: false として非融合判定側
+        // 〈本関数〉に委ねる」契約の受け手としてここで検証する（#162
+        // レビュー指摘: 境界ノードの contiguous/dtype が未検証だった）。
         if node.meta.dtype != DType::F32 {
             return Ok(FusionDecision::Fallback(FallbackReason::UnsupportedDtype));
         }
         if !node.meta.contiguous {
             return Ok(FusionDecision::Fallback(FallbackReason::NonContiguous));
-        }
-
-        // 上限判定は `included` へ挿入する**前**に行う。fan-in を含む
-        // DAG では同一ノードが複数経路から先に `reachable` へ入りうる
-        // ため、挿入後に上限を検査すると別経路由来のノードが上限到達後
-        // も処理されてしまい `included.len()` が `MAX_FUSED_CHAIN_LEN`
-        // を超過する（#162 レビュー指摘の反例: バランス木 fan-in）。
-        // 挿入前判定なら `included.len()` は到達経路・走査順によらず
-        // 常に上限以下に収まり、上限到達後のノードはそのまま外部入力
-        // （葉）として後段の葉抽出に委ねられる（設計書 §3.2 (d)）。
-        if included.len() >= MAX_FUSED_CHAIN_LEN {
-            continue;
-        }
-        included.insert(id);
-        for input in node.op.inputs() {
-            reachable.insert(input.0);
         }
     }
 
@@ -511,13 +578,18 @@ mod tests {
         assert_eq!(seg.leaves, vec![gemm]);
     }
 
-    /// Sum／Max 境界も同様にセグメントを分断する（設計書 §3.2 (a)）。
-    /// elementwise 連鎖の初期スコープ（4〜6 段。
-    /// `docs/fusion-graph-design.md:15`・`docs/spec/05-tasks.md:370`
-    /// TASK-12.1）に収まる構成にするため sum 側のセグメントに
-    /// `relu2`／`tanh2` を追加している。
+    /// #586 で境界を再定義する前は Sum／Max がセグメントを常に分断して
+    /// いたが、再定義後は「セグメント軸が一致する reduction」はセグメント
+    /// へ組み込まれる（`detect_fusion` doc 「アルゴリズム」節）。本テストは
+    /// 旧仕様（`Sum` が常に境界）の固定テストを新仕様（単一 `Sum` はセグ
+    /// メント軸を確定しつつそのまま組み込まれる）へ書き換えたもの——
+    /// `relu`→`sum{dim=Some(0)}`→`exp`→`tanh`→`relu2`→`tanh2` の 6 段連鎖
+    /// が丸ごと 1 セグメントとして検出され、`MAX_FUSED_CHAIN_LEN`
+    /// ちょうどで打ち切られることを固定する（打ち切り境界は `relu` の
+    /// 入力 `x`）。「reduction 軸が一致しない連鎖は分断される」反例は
+    /// [`mismatched_reduction_axis_splits_the_segment`] を参照。
     #[test]
-    fn sum_and_max_boundary_split_the_segment() {
+    fn sum_with_matching_segment_axis_is_fused_not_a_boundary() {
         let mut g = FusionGraph::new();
         let x = g.push(FusionOp::Input, f32_meta(&[4, 4])).unwrap();
         let relu = g.push(FusionOp::Relu(x), f32_meta(&[4, 4])).unwrap();
@@ -539,16 +611,141 @@ mod tests {
         let FusionDecision::Fuse(seg) = decision else {
             panic!("expected Fuse, got {decision:?}");
         };
-        assert_eq!(seg.nodes, vec![exp, tanh, relu2, tanh2]);
-        assert_eq!(seg.leaves, vec![sum]);
+        assert_eq!(seg.nodes, vec![relu, sum, exp, tanh, relu2, tanh2]);
+        assert_eq!(seg.nodes.len(), MAX_FUSED_CHAIN_LEN);
+        assert_eq!(seg.leaves, vec![x]);
+    }
 
-        // relu 自身を root にすれば、その手前で完結する別セグメントとして
-        // 独立に検出できる（sum 側からは辿れない独立した連結成分）。
-        let relu_decision = detect_fusion(&g, relu).unwrap();
-        let FusionDecision::Fallback(reason) = relu_decision else {
-            panic!("expected Fallback (single node < MIN_FUSED_CHAIN_LEN)");
+    /// 受け入れ基準（#586）: RMSNorm 様連鎖（`Mul(x,x) → Sum{dim} →
+    /// Rsqrt → Mul`）が単一セグメントとして検出される。
+    #[test]
+    fn rmsnorm_like_chain_with_full_reduction_is_a_single_segment() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let sq = g.push(FusionOp::Mul(x, x), f32_meta(&[4])).unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: sq,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        let rsqrt = g.push(FusionOp::Rsqrt(sum), f32_meta(&[])).unwrap();
+        let out = g.push(FusionOp::Mul(rsqrt, rsqrt), f32_meta(&[])).unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
         };
-        assert_eq!(reason, FallbackReason::ChainTooShort);
+        assert_eq!(seg.nodes, vec![sq, sum, rsqrt, out]);
+        assert_eq!(seg.leaves, vec![x]);
+    }
+
+    /// 受け入れ基準（#586）: 同一軸の reduction を 2 個含む連鎖も融合可能
+    /// （`Sum{dim=Some(0)}` を 2 回、間に elementwise を挟んで構成）。
+    #[test]
+    fn two_same_axis_reductions_are_fused_into_one_segment() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[2, 3, 4])).unwrap();
+        let n1 = g.push(FusionOp::Relu(x), f32_meta(&[2, 3, 4])).unwrap();
+        let r1 = g
+            .push(
+                FusionOp::Sum {
+                    input: n1,
+                    dim: Some(0),
+                },
+                f32_meta(&[3, 4]),
+            )
+            .unwrap();
+        let n2 = g.push(FusionOp::Exp(r1), f32_meta(&[3, 4])).unwrap();
+        let r2 = g
+            .push(
+                FusionOp::Sum {
+                    input: n2,
+                    dim: Some(0),
+                },
+                f32_meta(&[4]),
+            )
+            .unwrap();
+        let n3 = g.push(FusionOp::Tanh(r2), f32_meta(&[4])).unwrap();
+        let root = g.push(FusionOp::Relu(n3), f32_meta(&[4])).unwrap();
+
+        let decision = detect_fusion(&g, root).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        assert_eq!(seg.nodes, vec![n1, r1, n2, r2, n3, root]);
+        assert_eq!(seg.nodes.len(), MAX_FUSED_CHAIN_LEN);
+        assert_eq!(seg.leaves, vec![x]);
+    }
+
+    /// 受け入れ基準（#586・実装計画 §5「reduction 軸が一致しない連鎖は
+    /// 分断される」）の直接固定: セグメント軸を最初に確定する
+    /// `r2`（`dim=Some(0)`）と異なる軸を持つ `r1`（`dim=Some(2)`）は
+    /// セグメントへ組み込まれず境界（葉）になる。`r1` の手前
+    /// （`n1`／`x`）はそもそも `reachable` に入らないため走査対象にも
+    /// ならない。
+    #[test]
+    fn mismatched_reduction_axis_splits_the_segment() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[2, 3, 4])).unwrap();
+        let n1 = g.push(FusionOp::Relu(x), f32_meta(&[2, 3, 4])).unwrap();
+        let r1 = g
+            .push(
+                FusionOp::Sum {
+                    input: n1,
+                    dim: Some(2),
+                },
+                f32_meta(&[2, 3]),
+            )
+            .unwrap();
+        let n2 = g.push(FusionOp::Exp(r1), f32_meta(&[2, 3])).unwrap();
+        let r2 = g
+            .push(
+                FusionOp::Sum {
+                    input: n2,
+                    dim: Some(0),
+                },
+                f32_meta(&[3]),
+            )
+            .unwrap();
+        let n3 = g.push(FusionOp::Tanh(r2), f32_meta(&[3])).unwrap();
+        let root = g.push(FusionOp::Relu(n3), f32_meta(&[3])).unwrap();
+
+        let decision = detect_fusion(&g, root).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        // r1（軸不一致）は組み込まれず、その手前（n1・x）も未到達のまま
+        // セグメント外＝r1 自身が葉になる。
+        assert_eq!(seg.nodes, vec![n2, r2, n3, root]);
+        assert_eq!(seg.leaves, vec![r1]);
+    }
+
+    /// reduction root は #586 以降も従来どおり `RootNotElementwise`
+    /// フォールバック（実装計画 §3.3「root は従来どおり elementwise の
+    /// み許可」）。`gemm_root_is_rejected_as_not_elementwise` と同型。
+    #[test]
+    fn reduction_root_is_rejected_as_not_elementwise() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: x,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+
+        let decision = detect_fusion(&g, sum).unwrap();
+        assert_eq!(
+            decision,
+            FusionDecision::Fallback(FallbackReason::RootNotElementwise)
+        );
     }
 
     /// `contiguous == false` が連鎖に混在するとセグメント全体が非融合
