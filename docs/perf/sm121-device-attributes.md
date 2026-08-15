@@ -126,8 +126,16 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 （URL・版・該当節）をここに記入すること。DeepGEMM Hopper 実装（下記コストモデル定数表）が用いる
 `128 bytes/cycle/SM` 相当の仮定と対比できる形（bytes/cycle/SM）で記録する。
 
-- スペック値: 未記入
+- スペック値: 未記入（調査済み・未確定。下記「調査状況」参照）
 - 出典: 未記入
+- **調査状況（2026-08-15 実施）**: NVIDIA 公式の Blackwell/GB10 アーキテクチャホワイトペーパーおよび
+  サードパーティ解析記事（chipsandcheese "Analyzing Nvidia GB10's GPU"・"Blackwell: Nvidia's Massive GPU"
+  等）を確認したが、L1/shared memory の**容量**（128 KiB/SM〈GPU 側〉、SoC 全体では最大 192 KiB/SM 相当）
+  ・ヒットレイテンシ（約 30〜40 サイクル）の記載はあるものの、DeepGEMM の `128 bytes/cycle/SM` 相当と
+  対比可能な **L1 実効帯域（bytes/cycle/SM）を明記した一次情報源は見つからなかった**。この数値は
+  一般に公開されていない可能性が高く、実装計画の安全側フォールバック（推定値を書かない）に従い、
+  推測での穴埋めは行わない。sm_121 実機アクセス時にマイクロベンチ（1 SM 占有の L1 限定測定。上記
+  「限界・注意」参照）で実測するか、NVIDIA から追加のアーキテクチャ資料が公開された場合に転記すること。
 
 ## コストモデル定数表（C-8/C-9 参照用）
 
