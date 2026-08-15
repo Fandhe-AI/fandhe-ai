@@ -108,6 +108,17 @@
 //! 切替は別スコープ）。elementwise・reduction は GPU カーネル未実装のため
 //! `tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。
+//!
+//! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
+//! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
+//! [`CudaKernelCacheKey`]・[`nvrtc_version`] を追加した。カーネル特化
+//! パラメータ（shape・ブロックタイル・パイプライン段数・dtype）とコンパイル
+//! キャッシュのキー（上記 + compute capability・NVRTC バージョン・
+//! コンパイルフラグ）を表す `Hash + Eq` な型であり、後続タスク（C-2 自作
+//! ハッシュ・ディレクトリ命名 #506、C-4 プロセス内 LRU #511、C-6 テンプレート
+//! 展開 #516）が共通に使う「キーの単位」を確定する。本タスクではキャッシュ
+//! 本体・ディレクトリ命名・テンプレート展開は実装しない（`nvrtc.rs`
+//! ドキュメンテーションコメント参照）。
 
 pub mod device;
 mod error;
@@ -130,5 +141,5 @@ pub use gemm_auto::CudaGemmAuto;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
-pub use nvrtc::compile_ptx;
+pub use nvrtc::{CudaKernelCacheKey, CudaKernelDescriptor, compile_ptx, nvrtc_version};
 pub use ops::CudaBackendOps;
