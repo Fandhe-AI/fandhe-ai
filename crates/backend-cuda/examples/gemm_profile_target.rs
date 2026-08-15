@@ -31,26 +31,32 @@
 //!
 //! ```sh
 //! cargo build -p backend-cuda --example gemm_profile_target --release
-//! ncu --launch-skip <warmup 起動数 + 1> --launch-count <iters> \
+//! ncu --launch-skip <warmup 起動数> --launch-count <iters> \
 //!     --metrics <確定メトリクス名, カンマ区切り> \
 //!     ./target/release/examples/gemm_profile_target \
 //!     --path wmma_tf32 --size 4096
 //! ```
 //!
-//! `--launch-skip` は `<warmup 起動数>` ではなく **`<warmup 起動数 + 1>`**
-//! を指定する（Cursor Bugbot 指摘・PR #637）。`gemm.alloc_output_f32`／
-//! `alloc_output_f16`（`gemm.rs`／`gemm_wmma.rs`／`gemm_mma.rs` 各
-//! `alloc_output_*`）は cudarc の `alloc_zeros` を呼び、内部でデバイス側
-//! ゼロクリアの memset カーネルを 1 回起動する。この起動は各 `Path` 分岐
-//! で warmup ループの直前・計測対象カーネル起動より前に発生するため
-//! （下記 `alloc_output_f32`／`alloc_output_f16` 呼び出し箇所参照）、
-//! ncu から見た起動順序は「memset（1 回）→ warmup（`--warmup` 回）→
-//! 計測対象（`--iters` 回）」になる。`--launch-skip <warmup>` のままだと
-//! memset がターゲットカーネルとして誤ってプロファイルされてしまう
-//! （とくに `--warmup 0` の場合に顕著）。この起動回数はこのバイナリの
-//! 実行時に `path=... size=... warmup=... iters=...` の直後に
-//! `ncu --launch-skip <値>` として明示出力するので、手計算せずその値を
-//! 使う。
+//! `--launch-skip` は `<warmup 起動数>` をそのまま指定する（`+ 1` の調整は
+//! **不要**。旧版は `gemm.alloc_output_f32`／`alloc_output_f16`
+//! （`gemm.rs`／`gemm_wmma.rs`／`gemm_mma.rs` 各 `alloc_output_*`）が呼ぶ
+//! cudarc の `alloc_zeros`（デバイス側ゼロクリア）を ncu の
+//! `--launch-skip` が数える「プロファイル対象カーネル起動」に含まれる
+//! ものと誤って前提していたが、`alloc_zeros` は内部で `cuMemsetD*Async`
+//! 系のドライバ API（`cudarc::driver::safe::core::memset_zeros`。
+//! `cuLaunchKernel` を経由しない別経路）を呼ぶ memset 操作であり、
+//! ncu がプロファイルする「カーネル起動」の通し番号には含まれない
+//! （PR #637 codex-review 指摘。誤った `+ 1` のまま `--launch-skip` を
+//! 大きくすると、warmup 回数分だけ計測対象カーネル起動を余分にスキップ
+//! してしまい、`--launch-count 5` に対し実際に計測されるのは 4 回になる
+//! ため 6 条件すべての診断結果が不完全・誤りになる）。ただし ncu の
+//! カーネル起動カウント仕様は cudarc バージョン・実機の compute
+//! capability に依存しうるため、この前提を鵜呑みにせず実機の ncu 出力で
+//! 対象カーネル名と採取回数が一致することを事前確認する
+//! （`docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3.1）。この起動
+//! 回数はこのバイナリの実行時に `path=... size=... warmup=... iters=...`
+//! の直後に `ncu --launch-skip <値>` として明示出力するので、手計算せず
+//! その値を使う。
 //!
 //! `--path`（`wmma_tf32`｜`mma_f16`。必須）・`--size`（`1024`｜`2048`｜
 //! `4096`。必須）は固定 allowlist との完全一致のみ受理する（`.claude/rules/
@@ -67,10 +73,7 @@
 
 use std::time::Instant;
 
-use backend_cuda::{
-    CudaDevice, CudaError, CudaGemm, CudaMmaGemm, MMA_BM, MMA_BN, WMMA_TF32_OPT_BLOCK_M,
-    WMMA_TF32_OPT_BLOCK_N,
-};
+use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, diagnostics};
 use bench_harness::rng::Xorshift64Star;
 use cudarc::driver::sys::CUdevice_attribute;
 use half::f16;
@@ -81,14 +84,17 @@ const SEED: u64 = 0xC0FFEE;
 
 /// `Path::WmmaTf32`／`Path::MmaF16` の各分岐が warmup ループの直前に呼ぶ
 /// `gemm.alloc_output_f32`／`alloc_output_f16`（`gemm.rs`／`gemm_wmma.rs`／
-/// `gemm_mma.rs`）は cudarc の `alloc_zeros` を経由し、内部でデバイス側
-/// ゼロクリアの memset カーネルを 1 回起動する。ncu はプロセス内の全カーネル
-/// 起動を通し番号で数えるため、この 1 回を `--launch-skip` に含めないと
-/// memset がターゲットカーネルとして誤ってプロファイルされる
-/// （`--warmup 0` の場合にとくに顕著。Cursor Bugbot 指摘・PR #637）。
-/// モジュール冒頭ドキュメンテーションコメント「実行手順」・
-/// `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 参照。
-const ALLOC_ZEROS_LAUNCHES: usize = 1;
+/// `gemm_mma.rs`）は cudarc の `alloc_zeros` を経由するが、内部で呼ぶのは
+/// `cuMemsetD*Async` 系のドライバ API（`memset_zeros`）であり、
+/// `cuLaunchKernel` を経由しない別経路のため ncu の `--launch-skip` が
+/// 数える「プロファイル対象カーネル起動」には含まれない。よって
+/// `--launch-skip` の算出に加算は不要（値は常に 0）。定数として残すのは
+/// 過去（PR #637 時点）に「memset も 1 回のカーネル起動として数える」と
+/// 誤って前提し `--launch-skip` を `warmup + 1` にしていた経緯を記録し、
+/// 将来同じ誤りを繰り返さないためのコメント錨点として。モジュール冒頭
+/// ドキュメンテーションコメント「実行手順」・
+/// `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3／§3.3.1 参照。
+const ALLOC_ZEROS_LAUNCHES: usize = 0;
 
 /// 対象経路（CLI `--path` の allowlist）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,8 +133,10 @@ struct Args {
     /// （PR #637 codex-review 指摘: `parse_args` が唯一の `Args` 構築点
     /// であることに未来の変更が依存しないようにする）。
     total_launches: usize,
-    /// `warmup + ALLOC_ZEROS_LAUNCHES`（`checked_add` 済み）。`--launch-skip`
-    /// 値の算出に使う（同上）。
+    /// `warmup + ALLOC_ZEROS_LAUNCHES`（`checked_add` 済み。
+    /// `ALLOC_ZEROS_LAUNCHES` は常に 0 のため実質 `warmup` と同値だが、
+    /// `--launch-skip` 算出の唯一の構築点を `parse_args` に保つ意図で
+    /// フィールドとして残す）。`--launch-skip` 値の算出に使う（同上）。
     launch_skip: usize,
 }
 
@@ -223,18 +231,20 @@ fn tflops(size: u32, secs: f64) -> f64 {
 /// 実測値との突合用に、ブロック単位のタイル分割数と SM 数から求まる
 /// blocks/SM 比を起動時に print する（実装計画 §3 Step 3）。
 fn print_occupancy_estimate(path: Path, size: u32, sm_count: Option<u32>) {
-    // タイル定数はハードコード転記ではなく `backend_cuda` crate root が
-    // re-export する `kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M`/`_N`・
-    // `kernels_mma::MMA_BM`/`MMA_BN` を直接 `use` する（`lib.rs` 参照）。
-    // カーネル側モジュール自体（`mod kernels_wmma_opt`／`mod kernels_mma`）
-    // は非公開のままで値の re-export のみを追加したため、カーネル側の
-    // 値を変更しないという本イシューのスコープ（実装計画 §6）を保ちつつ、
-    // 出典側の値変更がコンパイル時に機械的にここへ反映される（レビュー
-    // 指摘: 手元転記だと出典との乖離を検知できず、occupancy estimate が
-    // 静かに誤った参考値を出し続けるおそれがあった）。
+    // タイル定数はハードコード転記ではなく `backend_cuda::diagnostics` の
+    // 診断専用安定関数（`wmma_tf32_opt_block_tile`／`mma_f16_block_tile`。
+    // `lib.rs` 参照）経由で取得する。カーネル側モジュール自体
+    // （`mod kernels_wmma_opt`／`mod kernels_mma`）・生の内部定数は非公開の
+    // ままとし（PR #637 codex-review 指摘: 生の定数を crate root へ直接
+    // `pub use` すると内部実装詳細がそのまま公開 API 互換性の対象に
+    // なってしまう）、`diagnostics` モジュールが唯一の公開境界となる。
+    // カーネル側の値を変更しないという本イシューのスコープ
+    // （実装計画 §6）を保ちつつ、出典側の値変更がコンパイル時に機械的に
+    // ここへ反映される（手元転記だと出典との乖離を検知できず、occupancy
+    // estimate が静かに誤った参考値を出し続けるおそれがあった）。
     let (block_m, block_n): (u32, u32) = match path {
-        Path::WmmaTf32 => (WMMA_TF32_OPT_BLOCK_M, WMMA_TF32_OPT_BLOCK_N),
-        Path::MmaF16 => (MMA_BM, MMA_BN),
+        Path::WmmaTf32 => diagnostics::wmma_tf32_opt_block_tile(),
+        Path::MmaF16 => diagnostics::mma_f16_block_tile(),
     };
     let actual_blocks = size.div_ceil(block_m) as u64 * size.div_ceil(block_n) as u64;
     match sm_count {
@@ -320,9 +330,10 @@ fn main() {
         args.iters
     );
     // `alloc_output_f32`／`alloc_output_f16`（各 `Path` 分岐で warmup
-    // ループ直前に 1 回呼ばれる）の `alloc_zeros` memset 起動を
-    // `--launch-skip` に含める（`ALLOC_ZEROS_LAUNCHES` 定義コメント参照）。
-    // 手計算による転記ミスを防ぐため、実行時にそのまま使える値を出力する。
+    // ループ直前に 1 回呼ばれる）の `alloc_zeros` memset は `cuLaunchKernel`
+    // を経由しないため `--launch-skip` に含めない（`ALLOC_ZEROS_LAUNCHES`
+    // 定義コメント参照）。手計算による転記ミスを防ぐため、実行時にそのまま
+    // 使える値を出力する。
     println!(
         "ncu --launch-skip {} --launch-count {} \
          (warmup={} + alloc_zeros memset launches={})",
@@ -418,11 +429,11 @@ fn main() {
                 .upload_f32(&a, &b)
                 .expect("wmma_tf32 upload must succeed on CUDA-equipped runner");
             // `alloc_output_f32`（`gemm.rs`）は cudarc `alloc_zeros` 経由で
-            // memset カーネルを 1 回起動する（`ALLOC_ZEROS_LAUNCHES` 定義
-            // コメント参照）。これが以下 warmup ループより前に発生する
-            // ncu 起動番号 0 番になるため、`--launch-skip` は
-            // `args.warmup` ではなく `args.warmup + ALLOC_ZEROS_LAUNCHES`
-            // を使う（実行時出力・モジュール冒頭「実行手順」参照）。
+            // memset を行うが、`cuLaunchKernel` を経由しない別経路の
+            // ドライバ API のため ncu の起動通し番号には含まれず
+            // `--launch-skip` は `args.warmup` のみでよい
+            // （`ALLOC_ZEROS_LAUNCHES` 定義コメント・実行時出力・
+            // モジュール冒頭「実行手順」参照）。
             let mut c_dev = gemm
                 .alloc_output_f32(m, n)
                 .expect("wmma_tf32 output allocation must succeed on CUDA-equipped runner");
@@ -476,9 +487,10 @@ fn main() {
             let (a_dev, b_dev) = gemm
                 .upload_f16(&a, &b)
                 .expect("mma_f16 upload must succeed on CUDA-equipped runner");
-            // `alloc_output_f16`（`gemm_mma.rs`）も `alloc_zeros` 経由で
-            // memset カーネルを 1 回起動する（`ALLOC_ZEROS_LAUNCHES` 定義
-            // コメント・上の `Path::WmmaTf32` 分岐と同じ理由）。
+            // `alloc_output_f16`（`gemm_mma.rs`）も `alloc_zeros` 経由の
+            // memset だが `cuLaunchKernel` を経由しないため ncu の起動
+            // 通し番号に含まれない（`ALLOC_ZEROS_LAUNCHES` 定義コメント・
+            // 上の `Path::WmmaTf32` 分岐と同じ理由）。
             let mut c_dev = gemm
                 .alloc_output_f16(m, n)
                 .expect("mma_f16 output allocation must succeed on CUDA-equipped runner");

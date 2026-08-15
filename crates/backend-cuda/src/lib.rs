@@ -129,19 +129,43 @@ pub use gemm::CudaGemm;
 pub use gemm_auto::CudaGemmAuto;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
-// `kernels_mma`／`kernels_wmma_opt` 自体は `mod`（非公開。カーネル本体は
-// crate 外から直接呼ばせない）だが、ブロックタイル定数のみをここで
-// 個別に re-export する。イシュー #486 レビュー指摘: `examples/
-// gemm_profile_target.rs` の occupancy 概算がこのタイル値を手元転記して
-// おり、モジュール非公開のため出典側の変更を機械的に検知できなかった
-// （値が乖離しても診断ツールが静かに誤った参考値を出し続ける）。この
-// re-export により `gemm_profile_target.rs` はハードコードではなくこの
-// 値を直接 `use` できるようになり、出典側（`kernels_mma.rs`／
-// `kernels_wmma_opt.rs`）の変更が再ビルドだけで機械的に反映される
-// （カーネル実装・モジュール可視性自体は変更しない。実装計画 §6 の
-// スコープを維持）。
-pub use kernels_mma::{MMA_BM, MMA_BN};
-pub use kernels_wmma_opt::{WMMA_TF32_OPT_BLOCK_M, WMMA_TF32_OPT_BLOCK_N};
 pub use memory::CudaMemory;
 pub use nvrtc::compile_ptx;
 pub use ops::CudaBackendOps;
+
+/// `kernels_mma`／`kernels_wmma_opt`（非公開 `mod`。カーネル本体は crate
+/// 外から直接呼ばせない）が持つブロックタイル定数を、診断専用の安定関数
+/// として公開する境界。イシュー #486 の `examples/gemm_profile_target.rs`
+/// occupancy 概算がこのタイル値を必要とするが、値を手元転記すると出典側の
+/// 変更を機械的に検知できない（値が乖離しても診断ツールが静かに誤った
+/// 参考値を出し続ける）ため、`kernels_mma::MMA_BM`／`_BN`・
+/// `kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M`／`_N` を crate 内部でのみ
+/// `use` し、値そのものを返す関数だけを公開する（PR #637 codex-review
+/// 指摘: 生の内部定数を `pub use` で crate root へ直接漏出させると、
+/// 最適化目的のタイル形状変更がそのまま `backend_cuda` の公開 API 互換性
+/// 問題になってしまう）。
+///
+/// **この関数群は SemVer の互換性保証対象外**（診断・プロファイリング
+/// 専用。内部カーネルのタイル最適化変更に伴い戻り値が予告なく変わりうる）。
+/// 通常の利用者は [`CudaGemm`]／[`CudaMmaGemm`]／[`ops::CudaBackendOps`]
+/// 等の安定 API を経由してバックエンドを利用し、本関数は使わない。
+pub mod diagnostics {
+    use crate::{kernels_mma, kernels_wmma_opt};
+
+    /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
+    /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
+    /// occupancy 概算専用。
+    pub fn wmma_tf32_opt_block_tile() -> (u32, u32) {
+        (
+            kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M,
+            kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_N,
+        )
+    }
+
+    /// `mma_f16`（`mma.sync` f16 パイプライン）カーネルのブロックタイル
+    /// 形状 `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
+    /// occupancy 概算専用。
+    pub fn mma_f16_block_tile() -> (u32, u32) {
+        (kernels_mma::MMA_BM, kernels_mma::MMA_BN)
+    }
+}
