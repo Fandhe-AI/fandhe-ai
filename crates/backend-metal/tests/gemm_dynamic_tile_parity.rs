@@ -28,9 +28,29 @@ use bench_harness::rng::Xorshift64Star;
 
 /// `variant`（[`GemmVariant::SimdgroupTiled`]）・`(seed_a, seed_b, m, n, k)`
 /// の 1 ケースを実行し、CPU 参照実装との複合判定 PASS を確認する。
+///
+/// `dispatch_variant` だけを呼ぶと `MetalGemm::pipeline_for_tile` が構成の
+/// 検証・コンパイル・パイプライン上限確認のいずれかに失敗した場合
+/// `crate::tile::fallback_chain` で `TileConfig::SINGLE_SIMDGROUP_8X8` へ
+/// サイレントにフォールバックしても数値一致自体は通ってしまい、`cfg` が
+/// 実際に採用されたことを保証しない（イシュー #532・PR #651 codex-review
+/// 指摘 P2）。`MetalGemm::resolve_tile_config`（`#[doc(hidden)] pub`。統合
+/// テストから参照するための例外公開。`crate::gemm` 参照）で実際に採用
+/// された構成を事前取得し `cfg` と一致することを assert してからディス
+/// パッチすることで、フォールバックが起きた場合は本関数を呼ぶ全テストが
+/// 失敗する。
 fn run_case(cfg: TileConfig, seed_a: u64, seed_b: u64, m: usize, n: usize, k: usize) {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+    let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+        panic!("候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+    });
+    assert_eq!(
+        resolved, cfg,
+        "候補 {cfg:?} が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+         （構成失敗を検知できていない）"
+    );
 
     let a = Xorshift64Star::new(seed_a).fill_vec(m * k);
     let b = Xorshift64Star::new(seed_b).fill_vec(k * n);

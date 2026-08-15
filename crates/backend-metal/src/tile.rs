@@ -765,7 +765,7 @@ mod tests {
     /// 失敗時に `fallback_chain` で `TileConfig::SINGLE_SIMDGROUP_8X8` へ
     /// サイレントにフォールバックしても数値一致自体は通ってしまい、対象候補が
     /// 実際にコンパイル・実行されたことを保証しない（イシュー #532・PR #651
-    /// codex-review 指摘 P2）。`MetalGemm::resolve_tile_config`（`pub(crate)`。
+    /// codex-review 指摘 P2）。`MetalGemm::resolve_tile_config`（`#[doc(hidden)] pub`。
     /// `crate::gemm` 参照）で実際に採用された構成を事前取得し `cfg` と一致する
     /// ことを assert してからディスパッチすることで、フォールバックが起きた
     /// 場合は本テスト自体を失敗させる。
@@ -836,7 +836,7 @@ mod tests {
     /// 構築されないため、実測ではなく仮定に基づく検証に留まり、フォールバックの穴を
     /// 塞げていなかった（イシュー #532・PR #651 codex-review 指摘 P2/P3）。
     ///
-    /// `MetalGemm::resolve_tile_config`（`pub(crate)`。`crate::gemm` 参照）は実際に
+    /// `MetalGemm::resolve_tile_config`（`#[doc(hidden)] pub`。`crate::gemm` 参照）は実際に
     /// `MTLComputePipelineState` を構築し、SMEM（構築前の事前検証）・スレッド数
     /// （構築後の実測 `maxTotalThreadsPerThreadgroup`）の両方をデバイス実測値で検証
     /// したうえで採用構成を返す。返り値が `cfg` と一致することを assert することで、
