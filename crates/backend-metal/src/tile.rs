@@ -275,8 +275,12 @@ impl TileConfig {
     /// 整合が必要）は [`crate::gemm`] のディスパッチ側で `.max(16)` して
     /// 決定する（本メソッドが返す 0 バイトをそのまま渡さない。bugbot
     /// 指摘・#253 レビュー）。`staged=true` の場合は `bm`/`bk`/`bn` が
-    /// [`TileConfig::validate`] により常に 8 の倍数へ・`pad` が 4 の倍数へ
-    /// 制約されるため、この戻り値は常に 256 以上かつ 16 の倍数になる。
+    /// [`TileConfig::validate`] により常に 8 の倍数へ制約され、`pad`
+    /// （[`TileConfig::pad`]）は `staged` からの導出値として常に 4 の倍数
+    /// （0 または `TGP_PAD_ELEMS=4`）になる（イシュー #538 codex-review 指摘
+    /// P1 再指摘対応・PR #673 で実行時検証ではなく型の設計自体が保証する
+    /// 方式へ変更した。本ファイル冒頭 [`TileConfig`] ドキュメント参照）ため、
+    /// この戻り値は常に 256 以上かつ 16 の倍数になる。
     pub fn shared_mem_bytes(&self) -> u32 {
         if !self.staged {
             return 0;
