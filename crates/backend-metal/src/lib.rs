@@ -92,6 +92,15 @@
 //! Metal バッファ型 [`half_buffer::MetalHalfBuffer`] を新設し、既存
 //! [`buffer::MetalBuffer`]（f32 専用）のシグネチャには一切手を入れていない。
 //!
+//! イシュー #541（D-7a）で occupancy 目標算出の基盤を追加した:
+//! [`device::probe_gpu_core_count`]（IOKit `AGXAccelerator` 実測。
+//! `device` モジュールと同じく `cfg(target_os = "macos")` 限定）・
+//! [`device::MetalOccupancyInfo`]・[`tile::OccupancyParams`]
+//! （`tile::actual_groups`／`tile::is_underoccupied` と合わせ `objc2` 系
+//! FFI に触れない純粋関数群）。`tile::select` への組み込み・タイル
+//! 2 段階切替の閾値運用は後続イシュー #542 のスコープであり本イシューは
+//! 算出機構のみを追加する。
+//!
 //! `dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` は関数名に
 //! `_unverified` を付け `#[doc(hidden)]` としている（PR #346 codex-review
 //! P1-2 指摘）。REQ-2 複合判定を満たすことはイシュー #380 で Metal 実機
@@ -141,6 +150,8 @@ pub use buffer::MetalBuffer;
 pub use context::MetalContext;
 #[cfg(target_os = "macos")]
 pub use device::MetalDeviceProvider;
+#[cfg(target_os = "macos")]
+pub use device::{MetalOccupancyInfo, probe_gpu_core_count};
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
