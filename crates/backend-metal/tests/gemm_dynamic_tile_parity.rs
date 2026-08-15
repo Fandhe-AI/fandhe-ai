@@ -96,6 +96,7 @@ fn direct_load_path_matches_cpu_reference() {
         wm: 2,
         wn: 2,
         staged: false,
+        pad: 0,
     };
     run_case(cfg, 30, 31, 256, 256, 256);
 }
@@ -117,6 +118,7 @@ fn direct_load_path_matches_cpu_reference_non_multiple_of_tile() {
         wm: 2,
         wn: 2,
         staged: false,
+        pad: 0,
     };
     // pad8(100)=104（32 の倍数でない）・pad8(70)=72 で
     // BM/BN=32 を割り切らない実効次元を作る。
@@ -137,6 +139,7 @@ fn tiled_matches_cpu_reference_non_multiple_of_tile() {
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     };
     run_case(cfg, 1, 2, 100, 130, 70);
     run_case(cfg, 3, 4, 65, 129, 33);
@@ -192,6 +195,7 @@ fn tiled_matches_cpu_reference_k_stress() {
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     };
     run_case(cfg, 7, 8, 64, 64, 4096);
 }
@@ -211,6 +215,7 @@ fn bk32_candidate_matches_cpu_reference_non_multiple_of_tile() {
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     };
     run_case(cfg, 60, 61, 100, 70, 70);
 }
@@ -228,6 +233,7 @@ fn bk32_candidate_matches_cpu_reference_k_stress() {
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     };
     run_case(cfg, 62, 63, 64, 64, 4096);
 }
@@ -245,6 +251,7 @@ fn wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile() {
         wm: 4,
         wn: 1,
         staged: true,
+        pad: 4,
     };
     run_case(cfg, 64, 65, 100, 70, 70);
 }
@@ -262,6 +269,7 @@ fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
         wm: 1,
         wn: 2,
         staged: true,
+        pad: 4,
     };
     run_case(cfg, 66, 67, 100, 130, 70);
 }

@@ -96,7 +96,8 @@ pub(crate) fn make_pipeline(
 
 /// `gemm_simdgroup_tiled`（`shaders/gemm.metal`。TASK-1.8f・#188）を
 /// `cfg`（[`TileConfig`]）の MSL function constant（`BM`/`BN`/`BK`/`WM`/
-/// `WN`/`USE_TGP_STAGING`。index 0〜5）を畳み込んだ状態でコンパイル・
+/// `WN`/`USE_TGP_STAGING`/`TGP_PAD`。index 0〜6。`TGP_PAD` はイシュー #538
+/// で追加した threadgroup memory パディング幅）を畳み込んだ状態でコンパイル・
 /// パイプライン化する。[`crate::gemm::MetalGemm`] の構成キー → パイプライン
 /// 遅延キャッシュから、構成ごとに 1 回だけ呼ばれる想定
 /// （`newFunctionWithName_constantValues_error` は MSL コンパイラを呼ぶ
@@ -121,7 +122,9 @@ pub(crate) fn make_pipeline_with_constants(
     // objc2-metal 0.3.2 ドキュメント参照）。各ローカル変数は本呼び出し中
     // 生存しており、型・バイト数は `shaders/gemm.metal` の
     // `[[function_constant(n)]]` 宣言（`constant uint`/`constant bool`）と
-    // 一致させている。
+    // 一致させている。index 6（`pad`）はイシュー #538 で追加した threadgroup
+    // memory パディング幅（`TGP_PAD`。u32）で、既存 index 0〜5 と同じ即時
+    // 複製契約に従う。
     unsafe {
         let bm = cfg.bm;
         constants.setConstantValue_type_atIndex(
@@ -158,6 +161,12 @@ pub(crate) fn make_pipeline_with_constants(
             std::ptr::NonNull::from(&staged).cast(),
             MTLDataType::Bool,
             5,
+        );
+        let pad = cfg.pad;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&pad).cast(),
+            MTLDataType::UInt,
+            6,
         );
     }
 

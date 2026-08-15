@@ -40,6 +40,17 @@
 ///   同期コストを避けるが、行優先ロード時のキャッシュ局所性は劣る。
 ///   「必ず速いとは限らない」ため両経路を実装し実機実測で選択する。
 ///   計画「設計方針」節参照）
+/// - `pad`: staged 経路の共有メモリタイル（A: BM×BK、B: BK×BN）の行末
+///   パディング要素数（`f32` 単位。両タイル共通。イシュー #538）。
+///   `simdgroup_load` の列方向アクセスが行ストライドと threadgroup メモリの
+///   バンク境界（16/32 バンク）と整合してしまうことによるバンクコンフリクト
+///   を、行ストライドを `BK+pad`（A）/`BN+pad`（B）へずらして回避する
+///   （MLX steel `gemm.h` の `tgp_padding_a`/`tgp_padding_b`〈`16/sizeof(T)`
+///   要素〉・metal-flash-attention の leadingBlockDimensions 実値指定・
+///   TileKernels の `TILE_X + TILE_K` 確保と同族の技法。CUDA 側 B-7 と同族。
+///   #538 計画「設計方針」節）。`staged=false`（direct-load 経路）では
+///   共有メモリを使わないため `pad` は常に 0 でなければならない
+///   （[`validate`](Self::validate) の `PadWithoutStaging` が強制する）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TileConfig {
     pub bm: u32,
@@ -48,6 +59,7 @@ pub struct TileConfig {
     pub wm: u32,
     pub wn: u32,
     pub staged: bool,
+    pub pad: u32,
 }
 
 /// [`TileConfig::validate`] が返す検証エラー。
@@ -84,6 +96,17 @@ pub enum TileConfigError {
     AccRowsExceedsMax { acc_rows: u32, max_acc: u32 },
     /// 上記の列方向版（`(bn/wn)/8` が `MAX_ACC` を超える）。
     AccColsExceedsMax { acc_cols: u32, max_acc: u32 },
+    /// `pad` が 4 の倍数でない（イシュー #538）。`gemm.metal` の staged
+    /// 協調ロードは float4（16 バイト）単位で共有メモリへ書き込むため、
+    /// 書き込み先添字 `r*(BK+pad)+kk`（`kk` は 4 の倍数）が常に 4 要素
+    /// 境界に揃うことを `pad` 自体が 4 の倍数であることで機械保証する
+    /// （BK・BN は [`validate`](Self::validate) が既に 8 の倍数へ制約済み。
+    /// #538 計画「設計方針」節）。
+    PadNotMultipleOfFour { pad: u32 },
+    /// `staged=false` にもかかわらず `pad != 0`（イシュー #538）。
+    /// direct-load 経路は共有メモリを使わずパディングも無意味なため、
+    /// 未使用パラメータの紛れ込みを fail-closed で拒否する。
+    PadWithoutStaging { pad: u32 },
 }
 
 impl std::fmt::Display for TileConfigError {
@@ -128,6 +151,15 @@ impl std::fmt::Display for TileConfigError {
                     "(bn/wn)/8={acc_cols} exceeds gemm_simdgroup_tiled acc[][] col limit {max_acc}"
                 )
             }
+            TileConfigError::PadNotMultipleOfFour { pad } => {
+                write!(f, "pad={pad} is not a multiple of 4")
+            }
+            TileConfigError::PadWithoutStaging { pad } => {
+                write!(
+                    f,
+                    "pad={pad} is nonzero but staged=false (padding is unused without staging)"
+                )
+            }
         }
     }
 }
@@ -146,6 +178,7 @@ impl TileConfig {
         wm: 1,
         wn: 1,
         staged: false,
+        pad: 0,
     };
 
     /// `shaders/gemm.metal` の `gemm_simdgroup_tiled` が確保するローカル
@@ -163,22 +196,28 @@ impl TileConfig {
         self.wm * self.wn * 32
     }
 
-    /// A タイル（`bm`×`bk`）＋ B タイル（`bk`×`bn`）を保持する threadgroup
-    /// 共有メモリのバイト数（`f32` 4 バイト換算）。`staged=false` の場合は
-    /// 直接 `simdgroup_load` するため共有メモリを使わず 0 を返す
+    /// A タイル（`bm`×`(bk+pad)`）＋ B タイル（`bk`×`(bn+pad)`）を保持する
+    /// threadgroup 共有メモリのバイト数（`f32` 4 バイト換算）。`staged=false`
+    /// の場合は直接 `simdgroup_load` するため共有メモリを使わず 0 を返す
     /// （`shaders/gemm.metal` の `USE_TGP_STAGING` 分岐と対応）。
+    ///
+    /// `pad`（イシュー #538。本ファイル冒頭 [`TileConfig`] ドキュメント参照）
+    /// は A・B 両タイルの行末へ同じ要素数だけ加算する。`gemm.metal` 側の
+    /// `lda = BK + TGP_PAD`・`ldb = BN + TGP_PAD` 行ストライドと 1:1 対応
+    /// させることで、確保する共有メモリ量とカーネルが実際にアクセスする
+    /// 範囲を常に一致させる（validate と合わせた fail-closed 契約）。
     ///
     /// `setThreadgroupMemoryLength` へ渡す実際のバイト長（16 バイト境界
     /// 整合が必要）は [`crate::gemm`] のディスパッチ側で `.max(16)` して
     /// 決定する（本メソッドが返す 0 バイトをそのまま渡さない。bugbot
     /// 指摘・#253 レビュー）。`staged=true` の場合は `bm`/`bk`/`bn` が
-    /// [`TileConfig::validate`] により常に 8 の倍数へ制約されるため、この
-    /// 戻り値は常に 256 以上かつ 16 の倍数になる。
+    /// [`TileConfig::validate`] により常に 8 の倍数へ・`pad` が 4 の倍数へ
+    /// 制約されるため、この戻り値は常に 256 以上かつ 16 の倍数になる。
     pub fn shared_mem_bytes(&self) -> u32 {
         if !self.staged {
             return 0;
         }
-        (self.bm * self.bk + self.bk * self.bn) * 4
+        (self.bm * (self.bk + self.pad) + self.bk * (self.bn + self.pad)) * 4
     }
 
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
@@ -206,6 +245,19 @@ impl TileConfig {
         }
         if self.bk == 0 || !self.bk.is_multiple_of(8) {
             return Err(TileConfigError::BkNotMultipleOfEight { bk: self.bk });
+        }
+
+        // イシュー #538: `pad` は float4（4 要素）単位の書き込み先添字整合
+        // （`shared_mem_bytes` ドキュメント参照）を保証するため 4 の倍数を
+        // 要求する。0 は許容（無効化）。
+        if !self.pad.is_multiple_of(4) {
+            return Err(TileConfigError::PadNotMultipleOfFour { pad: self.pad });
+        }
+        // `staged=false`（direct-load 経路）は共有メモリ自体を使わないため
+        // `pad` は無意味であり、混入をここで fail-closed に拒否する
+        // （イシュー #538）。
+        if !self.staged && self.pad != 0 {
+            return Err(TileConfigError::PadWithoutStaging { pad: self.pad });
         }
 
         // `shaders/gemm.metal` の `acc[MAX_ACC][MAX_ACC]` ローカル配列は
@@ -274,6 +326,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     },
     // 縦長（m がかなり大きく n が中程度）。
     TileConfig {
@@ -283,6 +336,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     },
     // 横長（n がかなり大きく m が中程度）。
     TileConfig {
@@ -292,6 +346,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     },
     // 中形状（正方）。
     TileConfig {
@@ -301,6 +356,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     },
     // MLX steel classic 経路の未収録構成（イシュー #532）:
     // 大形状（正方）を少 simdgroup（wm=1,wn=2 の 64 スレッド）で分担する
@@ -312,13 +368,15 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 1,
         wn: 2,
         staged: true,
+        pad: 4,
     },
     // MLX steel classic 経路の未収録構成（イシュー #532）: `bk=32` は本実装
     // 初採用。K 方向のループ刻みを既存候補の 2 倍にすることで、K=4096 等
     // 長い内積で `threadgroup_barrier` の往復回数を半減させる狙い（理論
-    // 根拠。実機ベンチによる効果確認は後続スコープ）。SMEM は
-    // `(64*32+32*32)*4=12288` バイトで、既存候補の最大 8192 バイトを
-    // 上回るが 32KiB 上限内（`TileConfig::validate` で機械検証）。
+    // 根拠。実機ベンチによる効果確認は後続スコープ）。SMEM は pad=4 込みで
+    // `(64*36+32*36)*4=13824` バイト（イシュー #538。旧 pad=0 時点の
+    // 12288 バイトから増加）で、32KiB 上限内（`TileConfig::validate` で
+    // 機械検証）。
     TileConfig {
         bm: 64,
         bn: 32,
@@ -326,6 +384,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 2,
         wn: 2,
         staged: true,
+        pad: 4,
     },
     // MLX steel classic 経路の未収録構成（イシュー #532）: `wm=4` の縦
     // 分担・`bk=8`（最小許容値）の小刻み K 分割構成。
@@ -336,6 +395,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
         wm: 4,
         wn: 1,
         staged: true,
+        pad: 4,
     },
     // 微小形状: 既存 gemm_simdgroup と等価な単一 simdgroup 8x8。
     TileConfig::SINGLE_SIMDGROUP_8X8,
@@ -402,6 +462,7 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 0,
         };
         assert_eq!(cfg.thread_count(), 128);
         assert_eq!(TileConfig::SINGLE_SIMDGROUP_8X8.thread_count(), 32);
@@ -416,13 +477,14 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: false,
+            pad: 0,
         };
         assert_eq!(cfg.shared_mem_bytes(), 0);
     }
 
     #[test]
     fn shared_mem_bytes_sums_a_and_b_tiles_when_staged() {
-        // A: 64x16, B: 16x64 -> (1024+1024)*4 = 8192 バイト。
+        // A: 64x16, B: 16x64 -> (1024+1024)*4 = 8192 バイト（pad=0）。
         let cfg = TileConfig {
             bm: 64,
             bn: 64,
@@ -430,8 +492,25 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 0,
         };
         assert_eq!(cfg.shared_mem_bytes(), 8192);
+    }
+
+    #[test]
+    fn shared_mem_bytes_includes_pad_in_both_tile_strides() {
+        // イシュー #538: pad=4 を両タイルの行末へ加算する。
+        // A: 64x(16+4)=64x20, B: 16x(64+4)=16x68 -> (1280+1088)*4 = 9472 バイト。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+            pad: 4,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), 9472);
     }
 
     // --- TileConfig::validate（pure・GPU 非依存） ---
@@ -455,6 +534,7 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 0,
         };
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
@@ -472,6 +552,7 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 0,
         };
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
@@ -489,6 +570,7 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 0,
         };
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
@@ -506,6 +588,7 @@ mod tests {
             wm: 4,
             wn: 4,
             staged: true,
+            pad: 0,
         };
         assert_eq!(cfg.thread_count(), 512);
         let err = cfg.validate(256, 32 * 1024).unwrap_err();
@@ -527,6 +610,7 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 0,
         };
         assert_eq!(cfg.shared_mem_bytes(), 8192);
         let err = cfg.validate(1024, 4096).unwrap_err();
@@ -551,6 +635,7 @@ mod tests {
             wm: 1,
             wn: 1,
             staged: true,
+            pad: 0,
         };
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
@@ -572,6 +657,7 @@ mod tests {
             wm: 1,
             wn: 1,
             staged: true,
+            pad: 0,
         };
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
@@ -581,6 +667,59 @@ mod tests {
                 max_acc: 8
             }
         ));
+    }
+
+    // --- イシュー #538: pad の検証規則 ---
+
+    #[test]
+    fn validate_rejects_pad_not_multiple_of_four() {
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+            pad: 3,
+        };
+        let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+        assert!(matches!(
+            err,
+            TileConfigError::PadNotMultipleOfFour { pad: 3 }
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_pad_zero_as_multiple_of_four() {
+        // pad=0 は「パディング無効」を意味する 4 の倍数として許容される。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+            pad: 0,
+        };
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("pad=0 は許容されるはずが拒否された: {e}"));
+    }
+
+    #[test]
+    fn validate_rejects_nonzero_pad_without_staging() {
+        // direct-load 経路（staged=false）は共有メモリ自体を使わないため
+        // pad が無意味であり、混入を fail-closed に拒否する（イシュー #538）。
+        let cfg = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: 8,
+            wm: 1,
+            wn: 1,
+            staged: false,
+            pad: 4,
+        };
+        let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+        assert!(matches!(err, TileConfigError::PadWithoutStaging { pad: 4 }));
     }
 
     // --- fallback_chain（pure） ---
@@ -636,10 +775,12 @@ mod tests {
     // --- イシュー #532: MLX classic 経路の未収録 3 構成 ---
 
     #[test]
-    fn bk32_candidate_shared_mem_is_12288_bytes_within_32kib_limit() {
-        // (64,32,32,2,2): A=64x32, B=32x32 -> (2048+1024)*4 = 12288 バイト。
-        // 既存最大 8192 バイトを上回るが 32KiB（32768 バイト）以内である
-        // ことを固定する（イシュー #532 計画「現状分析」節の事前検証値）。
+    fn bk32_candidate_shared_mem_is_13824_bytes_within_32kib_limit() {
+        // (64,32,32,2,2,pad=4): A=64x36, B=32x36 -> (2304+1152)*4 = 13824 バイト
+        // （イシュー #538 で pad=4 導入。旧 pad=0 時点は 12288 バイトだった）。
+        // 既存最大を上回るが 32KiB（32768 バイト）以内であることを固定する
+        // （イシュー #532 計画「現状分析」節の事前検証値・#538 計画
+        // 「事前検証値」節で更新）。
         let cfg = TileConfig {
             bm: 64,
             bn: 32,
@@ -647,8 +788,9 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: true,
+            pad: 4,
         };
-        assert_eq!(cfg.shared_mem_bytes(), 12288);
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
         assert!(cfg.shared_mem_bytes() <= 32 * 1024);
         cfg.validate(1024, 32 * 1024)
             .unwrap_or_else(|e| panic!("bk=32 candidate rejected: {e}"));
@@ -666,6 +808,7 @@ mod tests {
             wm: 4,
             wn: 1,
             staged: true,
+            pad: 4,
         };
         assert_eq!(cfg.thread_count(), 128);
         cfg.validate(1024, 32 * 1024)
@@ -684,6 +827,7 @@ mod tests {
             wm: 1,
             wn: 2,
             staged: true,
+            pad: 4,
         };
         let acc_rows = (cfg.bm / cfg.wm) / 8;
         assert_eq!(acc_rows, TileConfig::MAX_ACC);
@@ -694,6 +838,8 @@ mod tests {
     #[test]
     fn candidates_include_the_three_mlx_classic_configs_added_in_issue_532() {
         // CANDIDATES への収録漏れ・削除を検知する回帰ガード。
+        // pad: 4 は #538 で CANDIDATES 全 staged=true 構成へ導入した既定値
+        // （本ファイル冒頭 CANDIDATES コメント参照）。
         let expected = [
             TileConfig {
                 bm: 64,
@@ -702,6 +848,7 @@ mod tests {
                 wm: 1,
                 wn: 2,
                 staged: true,
+                pad: 4,
             },
             TileConfig {
                 bm: 64,
@@ -710,6 +857,7 @@ mod tests {
                 wm: 2,
                 wn: 2,
                 staged: true,
+                pad: 4,
             },
             TileConfig {
                 bm: 64,
@@ -718,6 +866,7 @@ mod tests {
                 wm: 4,
                 wn: 1,
                 staged: true,
+                pad: 4,
             },
         ];
         for cfg in expected {
@@ -906,6 +1055,7 @@ mod tests {
             wm: 2,
             wn: 2,
             staged: false,
+            pad: 0,
         };
 
         let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {

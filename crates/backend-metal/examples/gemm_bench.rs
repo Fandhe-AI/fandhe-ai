@@ -183,6 +183,7 @@ mod macos_impl {
                     wm: 2,
                     wn: 2,
                     staged: true,
+                    pad: 4,
                 },
             ),
             (
@@ -194,6 +195,7 @@ mod macos_impl {
                     wm: 2,
                     wn: 2,
                     staged: true,
+                    pad: 4,
                 },
             ),
             (
@@ -205,6 +207,7 @@ mod macos_impl {
                     wm: 2,
                     wn: 2,
                     staged: false,
+                    pad: 0,
                 },
             ),
         ] {
