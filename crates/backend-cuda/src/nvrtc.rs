@@ -381,7 +381,11 @@ fn push_len_prefixed_str(buf: &mut Vec<u8>, s: &str) {
 /// 既知テストベクタ（`""` → `0xcbf29ce484222325`・`"a"` →
 /// `0xaf63dc4c8601ec8c`・`"foobar"` → `0x85944171f73967e8`）でユニット
 /// テスト済み（下記 `tests` モジュール）。
-pub const fn fnv1a_64(bytes: &[u8]) -> u64 {
+///
+/// `pub(crate)` に留める（crate ルートからは再公開しない）: FNV-1a という
+/// 内部ハッシュ表現の選択を外部利用者との SemVer 契約にしない
+/// （PR #659 レビュー指摘）。
+pub(crate) const fn fnv1a_64(bytes: &[u8]) -> u64 {
     const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -475,10 +479,28 @@ fn resolve_cache_root(
     })
 }
 
-/// [`resolve_cache_root`] の公開ラッパー。実プロセス環境変数
+/// [`resolve_cache_root`] の crate 内ラッパー。実プロセス環境変数
 /// （`RUST_AI_CUDA_CACHE_DIR`・`XDG_CACHE_HOME`・`HOME`）を読んで委譲する
 /// （イシュー #506・Phase C-2。C-3（#509）・C-4（#511）から呼ばれる想定）。
-pub fn cache_root() -> Result<PathBuf, CudaError> {
+///
+/// `pub(crate)` に留める（crate ルートからは再公開しない）: 環境変数名・
+/// キャッシュ配置規則は C-3/C-4/C-6（同一 crate 内の後続実装）が使う内部
+/// 実装詳細であり、外部公開すると SemVer 契約になってしまう
+/// （PR #659 レビュー指摘）。外部向けキャッシュ設定 API が要件になった
+/// 場合は `docs/public-api-design.md` に契約・安定性を明記した専用 API
+/// として別途設計する。
+///
+/// 呼び出し元は C-3（#509）・C-4（#511）で追加予定のため、本タスク
+/// （C-2・#506）時点では crate 内に呼び出し元がまだなく `dead_code` 警告
+/// が出る。テスト側は実環境変数への依存を避けるため注入可能な
+/// [`resolve_cache_root`] を直接呼ぶ（本関数の doc 参照）ので、本関数
+/// 自体は非テストコードから未参照のままになる。
+#[allow(
+    dead_code,
+    reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
+              意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
+)]
+pub(crate) fn cache_root() -> Result<PathBuf, CudaError> {
     resolve_cache_root(
         std::env::var_os("RUST_AI_CUDA_CACHE_DIR").as_deref(),
         std::env::var_os("XDG_CACHE_HOME").as_deref(),
@@ -511,7 +533,17 @@ fn cache_entry_path_in(root: &Path, key: &CudaKernelCacheKey) -> Result<PathBuf,
 /// [`cache_entry_path_in`] のユニットテストで検証し、トラバーサル防御
 /// （A03）の第 3 層とする（第 1 層: `CudaKernelDescriptor::new` の構築時
 /// 検証、第 2 層: `cache_entry_dir_name` 内の縦深防御検査）。
-pub fn cache_entry_path(key: &CudaKernelCacheKey) -> Result<PathBuf, CudaError> {
+///
+/// [`cache_root`] と同じ理由で `pub(crate)` に留める（crate ルートからは
+/// 再公開しない。PR #659 レビュー指摘）。呼び出し元も [`cache_root`] と
+/// 同じく C-3（#509）・C-4（#511）で追加予定のため、本タスク時点では
+/// 先行スキャフォールディングとして `dead_code` を許容する。
+#[allow(
+    dead_code,
+    reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
+              意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
+)]
+pub(crate) fn cache_entry_path(key: &CudaKernelCacheKey) -> Result<PathBuf, CudaError> {
     cache_entry_path_in(&cache_root()?, key)
 }
 
