@@ -51,7 +51,23 @@
 ///   #538 計画「設計方針」節）。`staged=false`（direct-load 経路）では
 ///   共有メモリを使わないため `pad` は常に 0 でなければならない
 ///   （[`validate`](Self::validate) の `PadWithoutStaging` が強制する）。
+///
+/// `#[non_exhaustive]`（イシュー #538 codex-review 指摘 P1 対応・PR #673）:
+/// 本クレート（`backend-metal`）は `facade`（composition root）を経由しない
+/// 限り外部公開 API 面ではないが（CLAUDE.md「想定クレート」節）、`tile` モジュール
+/// 自体は `pub mod tile`（`lib.rs`）でクレートルートから公開されており、全
+/// フィールド `pub` の構造体リテラルは将来のフィールド追加のたびに
+/// クレート境界を越えた利用者の構築コードを破壊的に壊す設計になっていた
+/// （`pad` フィールド新設が実例）。`#[non_exhaustive]` を付与することで
+/// クレート外からの構造体リテラル構築・分解パターン（`..` なしの
+/// フィールド列挙）を禁止し、[`TileConfig::without_padding`]・
+/// [`TileConfig::with_pad`] 等のコンストラクタ経由の構築のみを外部契約とする
+/// （Rust API Guidelines C-STRUCT-PRIVATE 相当）。以後のフィールド追加は
+/// クレート外にとって非破壊的になる。クレート内部（本ファイルの
+/// `CANDIDATES`・`#[cfg(test)] mod tests` 等）は同一クレートのため従来どおり
+/// フィールド列挙リテラルを使い続けられ、影響を受けない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct TileConfig {
     pub bm: u32,
     pub bn: u32,
@@ -67,7 +83,16 @@ pub struct TileConfig {
 /// [`crate::gemm::MetalGemm`] のパイプライン遅延キャッシュ構築時に、
 /// 不成立構成を候補から除外し次善構成へフォールバックする判断材料になる
 /// （fail-closed。計画「パイプライン管理」節）。
+///
+/// `#[non_exhaustive]`（イシュー #538 codex-review 指摘 P1 対応・PR #673）:
+/// `PadNotMultipleOfFour`・`PadWithoutStaging` variant 新設（#538）が
+/// クレート外の exhaustive `match`（ワイルドカードアーム `_` なし）を破壊
+/// する問題への対応。[`TileConfig`] 側の `#[non_exhaustive]` と同じ理由で、
+/// 以後の variant 追加をクレート外にとって非破壊的にする。クレート内部
+/// （本ファイルの `#[cfg(test)] mod tests`）の exhaustive `match`（`matches!`
+/// マクロ含む）は同一クレートのため従来どおり動作する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TileConfigError {
     /// `bm` が `wm*8` の倍数でない（各 simdgroup の行分担が 8 の倍数に
     /// ならず `simdgroup_float8x8` タイルへ整除できない）。
@@ -194,13 +219,12 @@ impl TileConfig {
     /// `wm`／`wn`／`staged`）から `pad: 0`（無効化。direct-load 経路と
     /// 同じ挙動）で構築する互換コンストラクタ。
     ///
-    /// `TileConfig` は全フィールド `pub` の構造体リテラルで直接構築
-    /// できる設計のため、`pad` フィールド新設は既存の
-    /// `TileConfig { bm, bn, bk, wm, wn, staged }` という構造体リテラルを
-    /// コンパイル不能にする破壊的変更になる（codex-review 指摘・#538 PR
-    /// レビュー）。既存呼び出し側の移行を最小差分にするため、フィールド
-    /// リテラルの代わりに本メソッドへ切り替えれば `pad: 0` を明示せずに
-    /// 済む形を用意する（`..Self { pad: 0, ..old }` 相当）。新規に `pad`
+    /// `TileConfig` は `#[non_exhaustive]`（イシュー #538 codex-review 指摘
+    /// P1 対応・PR #673）のため、クレート外からは構造体リテラルで直接構築
+    /// できない。本メソッドはクレート外向けの正式な構築 API であり、`pad`
+    /// フィールド新設前の 6 引数構成（`bm`／`bn`／`bk`／`wm`／`wn`／
+    /// `staged`）のまま `pad: 0`（無効化。direct-load 経路と同じ挙動）で
+    /// 構築できる（`..Self { pad: 0, ..old }` 相当）。新規に `pad`
     /// を使いたい呼び出しは [`TileConfig::with_pad`] を続けて呼ぶ
     /// （`TileConfig::without_padding(..).with_pad(4)`）。
     pub const fn without_padding(
