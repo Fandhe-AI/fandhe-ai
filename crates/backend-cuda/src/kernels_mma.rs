@@ -1496,11 +1496,23 @@ mod tests {
         // 最小要求。`gemm_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR`）を使う。
         let arch = "compute_80";
 
-        match compile_ptx(mma_f16_source(), arch) {
-            Ok(_) => {}
+        let default_ptx = match compile_ptx(mma_f16_source(), arch) {
+            Ok(ptx) => ptx,
             Err(CudaError::NvrtcUnavailable { .. }) => return,
             Err(e) => panic!("既定構成カーネルソースの NVRTC コンパイルに失敗しました: {e}"),
-        }
+        };
+        // 受け入れ基準 2 の本体: `#pragma unroll` を付与した `kstep` ループ
+        // （`MMA_K_STEPS_PER_STAGE` 回展開・kernels_mma.rs 冒頭 §設計）が
+        // NVRTC のコンパイル時展開でループ制御なしに `mma.sync` 命令列へ
+        // 落ちていることを PTX テキストで確認する（compile 成功のみでは
+        // ループが残っていても検出できないため出現数を数える）。
+        let default_mma_count = default_ptx.to_src().matches("mma.sync.aligned").count();
+        assert!(
+            default_mma_count >= MMA_K_STEPS_PER_STAGE as usize,
+            "既定構成 PTX の mma.sync.aligned 出現数（{default_mma_count}）が \
+             MMA_K_STEPS_PER_STAGE（{MMA_K_STEPS_PER_STAGE}）未満です \
+             （#pragma unroll によるコンパイル時展開の証跡が見つかりません）"
+        );
 
         let specialized_cfg = MmaKernelConfig {
             bm: 64,
@@ -1518,8 +1530,16 @@ mod tests {
         // `source()`（`#[cfg(test)]`）でソース文字列へ直接アクセスする
         // （`Self::compile` 経由の契約は `launch_f16` を使う実機依存の
         // 別テストが必要になるため、本テストのスコープ外）。
-        compile_ptx(specialized.source(), arch)
+        let specialized_ptx = compile_ptx(specialized.source(), arch)
             .expect("特化構成カーネルソースの NVRTC コンパイルに失敗しました");
+        let specialized_expected_steps = specialized_cfg.bk / MMA_K;
+        let specialized_mma_count = specialized_ptx.to_src().matches("mma.sync.aligned").count();
+        assert!(
+            specialized_mma_count >= specialized_expected_steps as usize,
+            "特化構成 PTX の mma.sync.aligned 出現数（{specialized_mma_count}）が \
+             bk/MMA_K（{specialized_expected_steps}）未満です \
+             （shape/タイル特化構成でもコンパイル時展開が維持されることの証跡が見つかりません）"
+        );
     }
 
     /// [`validate_mma_k_tile_bound`] が通常サイズの `k`/`bk` を受理する

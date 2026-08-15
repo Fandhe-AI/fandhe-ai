@@ -1734,12 +1734,29 @@ mod tests {
         use crate::nvrtc::compile_ptx;
 
         let arch = "compute_80";
-        for src in [wmma_tf32_f32_opt_source(), wmma_f16_opt_source()] {
-            match compile_ptx(src, arch) {
-                Ok(_) => {}
+        // TF32 opt は `k_tile / FRAG_K` 回（既定 16/8=2 回）の
+        // `wmma::mma_sync` 呼び出しをコンパイル時に展開する
+        // （`render_wmma_tf32_opt` の `WMMA_TF32_OPT_K_SUBSTEPS` 定義を
+        // 参照）。この下限を PTX テキストの `wmma.mma.sync` 出現数で
+        // 確認する（受け入れ基準 2）。f16 opt は 1 K タイル内が単一
+        // フラグメント（`WMMA_F16_OPT_K_TILE == WMMA_F16_OPT_FRAG`）の
+        // ため出現の有無のみを確認する。
+        let tf32_min_mma_count = (WMMA_TF32_OPT_K_TILE / WMMA_TF32_OPT_FRAG_K) as usize;
+        for (src, min_mma_count) in [
+            (wmma_tf32_f32_opt_source(), tf32_min_mma_count),
+            (wmma_f16_opt_source(), 1),
+        ] {
+            let ptx = match compile_ptx(src, arch) {
+                Ok(ptx) => ptx,
                 Err(CudaError::NvrtcUnavailable { .. }) => return,
                 Err(e) => panic!("既定構成カーネルソースの NVRTC コンパイルに失敗しました: {e}"),
-            }
+            };
+            let mma_count = ptx.to_src().matches("wmma.mma.sync").count();
+            assert!(
+                mma_count >= min_mma_count,
+                "PTX の wmma.mma.sync 出現数（{mma_count}）が下限（{min_mma_count}）未満です \
+                 （コンパイル時展開の証跡が見つかりません）"
+            );
         }
     }
 
