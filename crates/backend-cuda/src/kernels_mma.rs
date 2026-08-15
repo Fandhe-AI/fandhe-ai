@@ -105,7 +105,8 @@
 
 use std::sync::LazyLock;
 
-use cudarc::driver::LaunchConfig;
+use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use half::f16;
 
 use crate::error::CudaError;
 
@@ -324,12 +325,11 @@ impl MmaKernelConfig {
     /// `m`/`n` から実際の起動グリッドを構築する（`gemm_mma.rs::mma_launch_config`
     /// と同じ「1 warp = C の `MMA_M x MMA_N` タイル 1 個」設計を、既定タイル
     /// 定数〈`MMA_BM`/`MMA_BN`〉ではなく本 `cfg` のタイル値〈`self.bm`/`self.bn`〉
-    /// に一般化したもの。PR #643 codex-review P0 再指摘への対応:
-    /// [`CompiledMmaKernel::with_validated_function`] は本メソッドが返す
-    /// `LaunchConfig` をそのままクロージャへ渡すことで、クロージャが
-    /// 検証済み `m`/`n`/`k` とは無関係な grid/block 設定を独自に構築して
-    /// 起動する経路をなくす（呼び出し元が別の shape 向けに計算した
-    /// `LaunchConfig` を持ち込む余地を型で塞ぐ）。
+    /// に一般化したもの。[`CompiledMmaKernel::launch_f16`] が本メソッドの
+    /// 戻り値を内部でのみ使い、呼び出し元へは一切公開しないことで、
+    /// 検証済み `m`/`n`/`k` とは無関係な grid/block 設定を持ち込んで起動
+    /// する経路を型で塞ぐ（`CompiledMmaKernel` ドキュメンテーションコメント
+    /// 参照）。
     ///
     /// 静的共有メモリ（`__shared__` 配列としてカーネルソースへ焼き込み
     /// 済み）のみを使う設計のため `shared_mem_bytes` は常に 0
@@ -555,9 +555,9 @@ impl RenderedMmaKernel {
     /// はこのクロージャの引数としてのみ存在し、戻り値として外部へ漏れる
     /// 経路がないため、「検査を経ない生ソースの取得」自体が構造的に不可能
     /// になる。返る [`CompiledMmaKernel`] からも `CudaFunction` を無条件に
-    /// 取り出す経路はなく、実際の起動は
-    /// [`CompiledMmaKernel::with_validated_function`] 経由でのみ行える
-    /// （`RenderedMmaKernel` ドキュメンテーションコメント参照）。
+    /// 取り出す経路はなく、実際の起動は [`CompiledMmaKernel::launch_f16`]
+    /// 経由でのみ行える（`RenderedMmaKernel` ドキュメンテーションコメント
+    /// 参照）。
     #[allow(dead_code)]
     pub fn compile(
         &self,
@@ -585,17 +585,17 @@ impl RenderedMmaKernel {
 /// と展開元 [`MmaKernelConfig`] を不可分に束ねた descriptor（PR #643
 /// codex-review 再々指摘への対応）。
 ///
-/// フィールドは非公開。`func` を取り出す唯一の経路は
-/// [`Self::with_validated_function`] であり、これは呼び出しの都度
-/// `cfg.validate_launch_shape(m, n, k)` を実行して `Static` 次元と実引数
-/// の不一致を fail-closed で拒否してから初めて、渡された `launch`
-/// クロージャへ `&CudaFunction` を渡す。`func` フィールドを公開する・
-/// あるいは `&CudaFunction` を返す独立メソッドを公開する設計では、
-/// 呼び出し元がそれを検査の外へ保持してしまい「起動の都度検査する」
-/// 契約を型で強制できない（`kernels_mma.rs:533` 相当の元指摘）。
-/// `launch` へ渡す `&CudaFunction` の借用は `with_validated_function` の
-/// 呼び出し内に閉じるため、Rust の借用検査により呼び出し元がこの参照を
-/// 検査の外側（後続の別呼び出し）へ持ち出すことはできない。
+/// フィールドは非公開。`func` を取り出す・あるいは検証を経ずに起動できる
+/// 公開経路は一切存在しない。唯一の起動経路 [`Self::launch_f16`] は、
+/// PR #643 codex-review 再々々指摘（P0。`with_validated_function` が
+/// `&CudaFunction` と `LaunchConfig` をクロージャへ渡していたため、
+/// クロージャが渡された `LaunchConfig` を無視して独自の grid/block を
+/// 構築し、検証済み `m`/`n`/`k` と無関係なバッファ・引数で起動できて
+/// しまう欠陥があった）への対応として、クロージャ経由の起動 API を廃し、
+/// 起動そのものをこのメソッド内で完結させる設計に変更した
+/// （`gemm_mma.rs::CudaMmaGemm::launch_f16` と同型。呼び出し元は
+/// `CudaFunction`／`LaunchConfig` のいずれにも触れられないため、検証済み
+/// shape 由来の grid/block・引数以外での起動が構造的に不可能になる）。
 #[allow(dead_code)]
 pub struct CompiledMmaKernel {
     func: cudarc::driver::CudaFunction,
@@ -603,39 +603,90 @@ pub struct CompiledMmaKernel {
 }
 
 impl CompiledMmaKernel {
-    /// 起動を意図する形状 `m`/`n`/`k` を検証してから `launch` クロージャへ
-    /// `&CudaFunction` と、その `m`/`n` から `self.cfg` が導出した
-    /// `LaunchConfig`（grid/block 設定）を渡す、`CudaFunction` へ
-    /// アクセスする唯一の公開経路（PR #643 codex-review 再々指摘・
-    /// 再々々指摘〈P0〉への対応）。
+    /// 検証済み shape でのみ起動できる、`CudaFunction` へアクセスする
+    /// 唯一の公開経路（PR #643 codex-review 再々指摘・再々々指摘・
+    /// 再々々々指摘〈いずれも P0〉への対応。`CompiledMmaKernel`
+    /// ドキュメンテーションコメント参照）。
     ///
     /// `Dynamic` 次元は起動ごとに異なる `m`/`n`/`k` を許容しうるため、
-    /// 実際の起動直前に毎回このメソッドを経由する想定。以前は `launch`
-    /// クロージャへ `&CudaFunction` のみを渡していたため、呼び出し元が
-    /// 検証済みの `m`/`n`/`k` とは別の値で grid/引数を構築して起動できて
-    /// しまい、焼き込まれた `DIM_*`（`Static` 次元）を前提とする手動境界
-    /// チェックが実バッファ境界を超えて通過しうる欠陥があった（REQ-8・
-    /// `.claude/rules/coding-rust.md`「カーネル実装の境界検査」違反）。
-    /// 本メソッドが `LaunchConfig` を [`MmaKernelConfig::launch_config`]
-    /// から導出して渡すことで、`launch` クロージャは検証済み shape 由来の
-    /// grid/block 設定をそのまま使う経路が最短になり、無関係な shape で
-    /// 独自に構築した `LaunchConfig` を持ち込む必要がなくなる（呼び出し元
-    /// のホストバッファが `m`/`n`/`k` と一致した要素数を持つことまでは
-    /// 本モジュールの知り得ない範囲のため型で強制できないが、それは
-    /// `gemm_mma.rs::CudaMmaGemm::launch_f16` 等の呼び出し元の既存契約と
-    /// 同じ境界であり、grid/block の食い違いという本指摘の核心は本変更で
-    /// 塞がれる）。
-    #[allow(dead_code)]
-    pub fn with_validated_function<R>(
+    /// 実際の起動直前に毎回このメソッドを経由する想定。手順は
+    /// (1) [`MmaKernelConfig::validate_launch_shape`] で `Static` 次元と
+    /// 実引数の不一致を fail-closed で拒否、(2)
+    /// `gemm.rs::validate_gemm_dims`／`validate_output_len` で `a_dev`/
+    /// `b_dev`/`c_dev` の長さが `m`/`n`/`k` と一致することを検証、(3)
+    /// `gemm_mma.rs::validate_mma_alignment` で `cp.async` の 16 バイト転送
+    /// 粒度制約（`n`/`k` が 8 の倍数）を検証、(4) `self.cfg.bm` を単位に
+    /// した grid_dim.y（`m.div_ceil(self.cfg.bm)`）が CUDA の grid y/z 上限
+    /// （65,535）を超えないことを検証、してから初めて
+    /// [`MmaKernelConfig::launch_config`] が導出した `LaunchConfig` で
+    /// `self.func` を起動する。呼び出し元は `CudaFunction`／`LaunchConfig`
+    /// のいずれも受け取らないため、検証済み shape・検証済みバッファ長と
+    /// 無関係な grid/block・引数で起動する経路が型で塞がれる。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_f16(
         &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
-        launch: impl FnOnce(&cudarc::driver::CudaFunction, LaunchConfig) -> Result<R, CudaError>,
-    ) -> Result<R, CudaError> {
+    ) -> Result<(), CudaError> {
         self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        crate::gemm_mma::validate_mma_alignment(n, k)?;
+        self.validate_grid_bounds(m)?;
+
         let launch_config = self.cfg.launch_config(m, n);
-        launch(&self.func, launch_config)
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: カーネル引数は a_dev/b_dev/c_dev（それぞれ上記
+        // validate_gemm_dims/validate_output_len で m*k/k*n/m*n 要素の
+        // 確保済みデバイスバッファであることを検証済み）と m_i/n_i/k_i の
+        // 5 個・型・個数が、検証済みの m/n/k と 1:1 対応する。grid/block は
+        // 同じく検証済みの m/n から launch_config が導出したもののみを
+        // 使い、呼び出し元が独自に構築した LaunchConfig を持ち込む経路は
+        // 存在しない。カーネル内の手動境界チェック（cp.async src-size
+        // ゼロ充填・エピローグ guarded store。REQ-8）と合わせて OOB
+        // 読み書きが起きない根拠とする。共有メモリは静的 `__shared__`
+        // 配列のみを使用するため shared_mem_bytes は 0 のままでよい。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    /// grid_dim.y（`m.div_ceil(self.cfg.bm)`）が CUDA の grid y/z 上限
+    /// （65,535。全 compute capability 共通）を超えないことを検証する
+    /// （`gemm_mma.rs::validate_mma_grid_bounds` と同じ理由だが、既定タイル
+    /// 定数〈`MMA_BM`〉固定ではなく本 `cfg.bm`〈テンプレート展開元のタイル
+    /// 値〉で計算する点が異なる。超過するとホスト側の他の検証はすべて
+    /// 通過した上で、ドライバのカーネル起動が失敗する）。
+    fn validate_grid_bounds(&self, m: u32) -> Result<(), CudaError> {
+        const MAX_GRID_DIM_Y: u32 = 65_535;
+        let grid_y = m.div_ceil(self.cfg.bm);
+        if grid_y > MAX_GRID_DIM_Y {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "mma.sync path grid_dim.y (m.div_ceil(bm)={grid_y}) exceeds CUDA's \
+                     {MAX_GRID_DIM_Y} limit for grid dimensions y/z (bm={}); m={m} is too \
+                     large",
+                    self.cfg.bm
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -648,7 +699,7 @@ impl CompiledMmaKernel {
 /// （`gemm_mma.rs::CudaMmaGemm` 相当の将来の非既定構成起動 API）は
 /// `.compile(|src| ...)` で `nvrtc::compile_ptx` 等を実行して
 /// [`CompiledMmaKernel`] を得て、以降の起動は
-/// `CompiledMmaKernel::with_validated_function(m, n, k, |func, launch_config| ...)`
+/// `CompiledMmaKernel::launch_f16(stream, a_dev, b_dev, c_dev, m, n, k)`
 /// 経由でのみ行うこと（`RenderedMmaKernel`／`CompiledMmaKernel`
 /// ドキュメンテーションコメント参照。生ソース・コンパイル済み
 /// `CudaFunction` のいずれも検査を経ない形で外部へ返す公開メソッドは
@@ -1134,14 +1185,13 @@ mod tests {
 
         // dim_m=Static(4096) のため、実際の起動形状 m=16（コンパイル時に
         // 焼き込んだ値と食い違う）は fail-closed に拒否されなければ
-        // ならない。`CompiledMmaKernel::with_validated_function` は実機
-        // 依存の `CudaFunction` なしに単体テストできないため（cudarc
-        // `CudaFunction` はテスト用コンストラクタを持たない）、同じ検査を
-        // 内部で実行する `MmaKernelConfig::validate_launch_shape` を直接
-        // 検査する（PR #643 codex-review 再々指摘への対応。ロジックの
-        // 単一の真実源は `cfg.validate_launch_shape` であり、
-        // `CompiledMmaKernel::with_validated_function` はこれへ委譲する
-        // だけの薄いラッパーのため、ここでの検査で契約全体をカバーする）。
+        // ならない。`CompiledMmaKernel::launch_f16` は実機依存の
+        // `CudaFunction`／`CudaStream` なしに単体テストできないため
+        // （cudarc はテスト用コンストラクタを持たない）、同じ検査を内部で
+        // 実行する `MmaKernelConfig::validate_launch_shape` を直接検査する
+        // （PR #643 codex-review 再々指摘への対応。ロジックの単一の真実源は
+        // `cfg.validate_launch_shape` であり、`CompiledMmaKernel::launch_f16`
+        // はこれへ委譲するだけのため、ここでの検査で契約全体をカバーする）。
         assert!(cfg.validate_launch_shape(4096, 64, 32).is_ok());
         assert!(matches!(
             cfg.validate_launch_shape(16, 64, 32),
@@ -1317,8 +1367,8 @@ mod tests {
     /// [`MmaKernelConfig::launch_config`] が `bm`/`bn` を単位に
     /// `div_ceil` でグリッドを構築し、`shared_mem_bytes` が常に 0
     /// （静的共有メモリのみの契約）であることを検査する（PR #643
-    /// codex-review P0 再指摘への対応: `with_validated_function` が本
-    /// メソッドの戻り値をそのまま起動へ渡す設計の土台）。
+    /// codex-review P0 再指摘への対応: `CompiledMmaKernel::launch_f16` が
+    /// 本メソッドの戻り値を内部起動にのみ使う設計の土台）。
     #[test]
     fn mma_kernel_config_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
         let cfg = MmaKernelConfig {
@@ -1373,8 +1423,8 @@ mod tests {
         // 本テストは NVRTC の構文検証のみが目的で `CudaFunction`（実機の
         // `CudaModule` が必要）を作らないため、テスト専用アクセサ
         // `source()`（`#[cfg(test)]`）でソース文字列へ直接アクセスする
-        // （`Self::compile` 経由の契約は `with_validated_function` を
-        // 使う実機依存の別テストが必要になるため、本テストのスコープ外）。
+        // （`Self::compile` 経由の契約は `launch_f16` を使う実機依存の
+        // 別テストが必要になるため、本テストのスコープ外）。
         compile_ptx(specialized.source(), arch)
             .expect("特化構成カーネルソースの NVRTC コンパイルに失敗しました");
     }

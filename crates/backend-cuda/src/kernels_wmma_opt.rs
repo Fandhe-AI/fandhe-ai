@@ -144,7 +144,8 @@ pub const WMMA_TF32_OPT_THREADS: u32 = 128;
 
 use std::sync::LazyLock;
 
-use cudarc::driver::LaunchConfig;
+use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+use half::f16;
 
 use crate::error::CudaError;
 use crate::kernels_mma::DimSpec;
@@ -272,12 +273,11 @@ impl WmmaOptKernelConfig {
     /// `m`/`n` から実際の起動グリッドを構築する（`gemm_wmma.rs::wmma_opt_launch_config`
     /// と同じ「ブロックタイル `block_m x block_n` を `div_ceil` で敷き詰める」
     /// 設計を、既定タイル定数ではなく本 `cfg` のタイル値〈`self.block_m`/
-    /// `self.block_n`〉に一般化したもの。PR #643 codex-review P0 再指摘への
-    /// 対応: [`CompiledWmmaOptKernel::with_validated_function`] は本メソッド
-    /// が返す `LaunchConfig` をそのままクロージャへ渡すことで、クロージャが
-    /// 検証済み `m`/`n`/`k` とは無関係な grid/block 設定を独自に構築して
-    /// 起動する経路をなくす（`kernels_mma::MmaKernelConfig::launch_config`
-    /// と同じ設計）。
+    /// `self.block_n`〉に一般化したもの。[`CompiledWmmaOptKernel::launch_f16`]／
+    /// [`CompiledWmmaOptKernel::launch_tf32`] が本メソッドの戻り値を内部
+    /// でのみ使い、呼び出し元へは一切公開しないことで、検証済み `m`/`n`/`k`
+    /// とは無関係な grid/block 設定を持ち込んで起動する経路を型で塞ぐ
+    /// （`kernels_mma::MmaKernelConfig::launch_config` と同じ設計）。
     ///
     /// warp タイル辺（32）は TF32 opt（`WMMA_TF32_OPT_WARP_TILE`）・f16 opt
     /// （`WMMA_F16_OPT_WARP_TILE`）のいずれも同一のハードウェア形状固定値
@@ -374,10 +374,27 @@ impl RenderedWmmaOptKernel {
 /// descriptor（PR #643 codex-review 再々指摘への対応。
 /// `kernels_mma::CompiledMmaKernel` と同じ設計）。
 ///
-/// フィールドは非公開。`func` を取り出す唯一の経路は
-/// [`Self::with_validated_function`] であり、呼び出しの都度
-/// `cfg.validate_launch_shape(m, n, k)` を実行してから初めて `launch`
-/// クロージャへ `&CudaFunction` を渡す。
+/// フィールドは非公開。`func` を取り出す・あるいは検証を経ずに起動できる
+/// 公開経路は一切存在しない。唯一の起動経路 [`Self::launch_f16`]／
+/// [`Self::launch_tf32`] は、PR #643 codex-review 再々々指摘（P0。
+/// `with_validated_function` が `&CudaFunction` と `LaunchConfig` を
+/// クロージャへ渡していたため、クロージャが渡された `LaunchConfig` を
+/// 無視して独自の grid/block を構築し、検証済み `m`/`n`/`k` と無関係な
+/// バッファ・引数で起動できてしまう欠陥があった）への対応として、
+/// クロージャ経由の起動 API を廃し、起動そのものをそれぞれのメソッド内で
+/// 完結させる設計に変更した（`kernels_mma::CompiledMmaKernel::launch_f16`
+/// と同型）。呼び出し元は `CudaFunction`／`LaunchConfig` のいずれにも
+/// 触れられないため、検証済み shape 由来の grid/block・引数以外での起動が
+/// 構造的に不可能になる。
+///
+/// `WmmaOptKernelConfig` は dtype を持たない（`launch_config` ドキュメン
+/// テーションコメント参照）ため、この descriptor 自身もどちらの
+/// `render_wmma_tf32_opt`／`render_wmma_f16_opt` から `compile` されたかを
+/// 型として持たない。呼び出し元は自身がどちらを呼んだかを把握したうえで
+/// 対応する `launch_f16`／`launch_tf32` を呼ぶ責務を持つ（`compile`
+/// ドキュメンテーションコメントの「エントリポイント名は呼び出し元の
+/// 責務とする」設計判断と同じ境界。dtype と異なるバッファ型を渡す誤りは
+/// 呼び出し側でコンパイルエラーになるため、境界外アクセスには繋がらない）。
 #[allow(dead_code)]
 pub struct CompiledWmmaOptKernel {
     func: cudarc::driver::CudaFunction,
@@ -385,25 +402,125 @@ pub struct CompiledWmmaOptKernel {
 }
 
 impl CompiledWmmaOptKernel {
-    /// 起動を意図する形状 `m`/`n`/`k` を検証してから `launch` クロージャへ
-    /// `&CudaFunction` と、その `m`/`n` から `self.cfg` が導出した
-    /// `LaunchConfig`（grid/block 設定）を渡す、`CudaFunction` へ
-    /// アクセスする唯一の公開経路（PR #643 codex-review 再々々指摘〈P0〉
-    /// への対応。`kernels_mma::CompiledMmaKernel::with_validated_function`
-    /// と同じ設計。検証済み shape と無関係な grid/block を独自に構築して
-    /// 起動する経路をなくす理由は同メソッドのドキュメンテーションコメント
-    /// 参照）。
-    #[allow(dead_code)]
-    pub fn with_validated_function<R>(
+    /// 検証済み shape でのみ起動できる、f16 WMMA opt カーネルの
+    /// `CudaFunction` へアクセスする唯一の公開経路（PR #643 codex-review
+    /// 再々指摘・再々々指摘・再々々々指摘〈いずれも P0〉への対応。
+    /// `CompiledWmmaOptKernel` ドキュメンテーションコメント参照）。
+    ///
+    /// `self` が [`render_wmma_f16_opt`] から `compile` された descriptor
+    /// であることは呼び出し元の責務（`CompiledWmmaOptKernel` ドキュメン
+    /// テーションコメント参照）。手順は `kernels_mma::CompiledMmaKernel::launch_f16`
+    /// と同じ: (1) [`WmmaOptKernelConfig::validate_launch_shape`]、(2)
+    /// `gemm.rs::validate_gemm_dims`／`validate_output_len`、(3)
+    /// [`Self::validate_grid_bounds`]、を経てから初めて
+    /// [`WmmaOptKernelConfig::launch_config`] が導出した `LaunchConfig` で
+    /// `self.func` を起動する。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_f16(
         &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
         m: u32,
         n: u32,
         k: u32,
-        launch: impl FnOnce(&cudarc::driver::CudaFunction, LaunchConfig) -> Result<R, CudaError>,
-    ) -> Result<R, CudaError> {
+    ) -> Result<(), CudaError> {
         self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        self.validate_grid_bounds(m)?;
+
         let launch_config = self.cfg.launch_config(m, n);
-        launch(&self.func, launch_config)
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: カーネル引数は a_dev/b_dev/c_dev（上記
+        // validate_gemm_dims/validate_output_len で m*k/k*n/m*n 要素の
+        // 確保済みデバイスバッファであることを検証済み）と m_i/n_i/k_i の
+        // 5 個・型・個数が、検証済みの m/n/k と 1:1 対応する。grid/block は
+        // 同じく検証済みの m/n から launch_config が導出したもののみを
+        // 使い、呼び出し元が独自に構築した LaunchConfig を持ち込む経路は
+        // 存在しない。カーネル内の手動境界チェック（REQ-8。基本版は
+        // kernels_wmma.rs、opt 版は本ファイルの guarded load/store）と
+        // 合わせて OOB 読み書きが起きない根拠とする。共有メモリは静的
+        // `__shared__` 配列のみを使用するため shared_mem_bytes は 0 の
+        // ままでよい。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    /// 検証済み shape でのみ起動できる、TF32 WMMA opt カーネルの
+    /// `CudaFunction` へアクセスする唯一の公開経路（[`Self::launch_f16`]
+    /// と同じ設計。`self` が [`render_wmma_tf32_opt`] から `compile` された
+    /// descriptor であることは呼び出し元の責務）。バッファ型が `f32`
+    /// （TF32 は f32 表現上のテンソルコア丸めであり、ホスト側バッファは
+    /// f32 のまま。`gemm.rs::CudaGemm::launch_wmma_tf32` と同じ契約）である
+    /// 点のみ [`Self::launch_f16`] と異なる。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_tf32(
+        &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        self.validate_grid_bounds(m)?;
+
+        let launch_config = self.cfg.launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: launch_f16 と同一の根拠（型が f32 になる点のみ異なる）。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    /// grid_dim.y（`m.div_ceil(self.cfg.block_m)`）が CUDA の grid y/z
+    /// 上限（65,535。全 compute capability 共通）を超えないことを検証する
+    /// （`kernels_mma::CompiledMmaKernel::validate_grid_bounds` と同じ理由。
+    /// 超過するとホスト側の他の検証はすべて通過した上で、ドライバの
+    /// カーネル起動が失敗する）。
+    fn validate_grid_bounds(&self, m: u32) -> Result<(), CudaError> {
+        const MAX_GRID_DIM_Y: u32 = 65_535;
+        let grid_y = m.div_ceil(self.cfg.block_m);
+        if grid_y > MAX_GRID_DIM_Y {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma opt path grid_dim.y (m.div_ceil(block_m)={grid_y}) exceeds CUDA's \
+                     {MAX_GRID_DIM_Y} limit for grid dimensions y/z (block_m={}); m={m} is \
+                     too large",
+                    self.cfg.block_m
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -543,7 +660,7 @@ fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 /// [`RenderedWmmaOptKernel`] はソースと展開元 `cfg` を保持し、ホスト側の
 /// 将来の非既定構成起動 API は `.compile(|src| ...)` で `nvrtc::compile_ptx`
 /// 等を実行して [`CompiledWmmaOptKernel`] を得て、以降の起動は
-/// `CompiledWmmaOptKernel::with_validated_function(m, n, k, |func| ...)`
+/// `CompiledWmmaOptKernel::launch_tf32(stream, a_dev, b_dev, c_dev, m, n, k)`
 /// 経由でのみ行うこと（`RenderedWmmaOptKernel`／`CompiledWmmaOptKernel`
 /// ドキュメンテーションコメント参照。生ソース・コンパイル済み
 /// `CudaFunction` のいずれも検査を経ない形で外部へ返す公開メソッドは
@@ -1294,9 +1411,9 @@ mod tests {
 
         // dim_k=Static(4096) のため、実際の起動形状 k=16（コンパイル時に
         // 焼き込んだ値と食い違う）は fail-closed に拒否されなければ
-        // ならない。`CompiledWmmaOptKernel::with_validated_function` は
-        // 実機依存の `CudaFunction` なしに単体テストできないため
-        // （`kernels_mma::render_mma_f16_specializes_tile_and_static_dim`
+        // ならない。`CompiledWmmaOptKernel::launch_f16`／`launch_tf32` は
+        // 実機依存の `CudaFunction`／`CudaStream` なしに単体テストできない
+        // ため（`kernels_mma::render_mma_f16_specializes_tile_and_static_dim`
         // と同じ理由）、同じ検査を内部で実行する
         // `WmmaOptKernelConfig::validate_launch_shape` を直接検査する。
         assert!(cfg.validate_launch_shape(64, 96, 4096).is_ok());
@@ -1414,9 +1531,9 @@ mod tests {
     /// 単位に `div_ceil` でグリッドを構築し、`shared_mem_bytes` が常に 0
     /// （静的共有メモリのみの契約）であることを、TF32 opt・f16 opt
     /// 両既定構成で検査する（PR #643 codex-review P0 再指摘への対応:
-    /// `with_validated_function` が本メソッドの戻り値をそのまま起動へ
-    /// 渡す設計の土台。両 dtype で warp タイル辺が共通〈32〉であることの
-    /// 前提を併せて確認する）。
+    /// `CompiledWmmaOptKernel::launch_f16`／`launch_tf32` が本メソッドの
+    /// 戻り値を内部起動にのみ使う設計の土台。両 dtype で warp タイル辺が
+    /// 共通〈32〉であることの前提を併せて確認する）。
     #[test]
     fn wmma_opt_config_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
         for base in [
