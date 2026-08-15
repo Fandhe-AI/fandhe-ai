@@ -181,8 +181,23 @@ const BW_LAUNCH_REPEATS: u32 = 64;
 /// `n` 要素を `BW_BLOCK_THREADS` で割った必要ブロック数と、SM 数ベースの
 /// 占有率目安（`sm_count * 32`）の小さい方を採る
 /// （バッファが小さい L2 計測時にブロック数だけが過大になるのを防ぐ）。
+///
+/// **`n: usize` を直接 `u32` へキャストしない（イシュー #482 Review 指摘）**:
+/// 呼び出し元の `global_n`/`l2_n`（現状はそれぞれ 64 MiB 要素・
+/// `L2_CACHE_SIZE/16` 要素相当）はいずれも `u32::MAX` を大きく下回るため
+/// 現在の値では顕在化しないが、`n as u32` は `n >= 2^32` で暗黙に切り詰め、
+/// `needed` が 0 になりうる（`bw_copy_f32` の起動が空グリッドになる、
+/// または見かけ上の計測になる）。`measure_bandwidth_secs` がカーネル
+/// 側インデックス演算を 64 bit 化した際に払った同種の慎重さ
+/// （`u64::try_from` によるオーバーフロー検証。`measure_bandwidth_secs`
+/// ドキュメンテーションコメント参照）とこの関数の契約を非対称にしない
+/// ため、除算は `u64` で行い、`u32` へは `min(u32::MAX)` で飽和させて
+/// から変換する（後続の `sm_count` ベースの上限 `min` により、
+/// 実際に採用される値は通常はるかに小さい占有率目安側になるため、
+/// この飽和が最終結果へ影響することはない）。
 fn bw_grid_dim(n: usize, sm_count: u32) -> u32 {
-    let needed = (n as u32).div_ceil(BW_BLOCK_THREADS);
+    let needed_u64 = (n as u64).div_ceil(u64::from(BW_BLOCK_THREADS));
+    let needed = u32::try_from(needed_u64).unwrap_or(u32::MAX);
     needed.min(sm_count.saturating_mul(32).max(1))
 }
 
@@ -579,6 +594,25 @@ mod tests {
         // n=100, block=256 なら 1 ブロックで足りる。
         let g = bw_grid_dim(100, 16);
         assert_eq!(g, 1);
+    }
+
+    // イシュー #482 Review 指摘（Low）の回帰確認: 旧実装は `n as u32` で
+    // 直接切り詰めていたため、`n = 2^32` では `(2^32) as u32 == 0` となり
+    // `needed = 0.div_ceil(256) == 0` に縮退し、SM 数による下限
+    // `sm_count.saturating_mul(32).max(1)` との `min` を経ても最終的に
+    // `bw_grid_dim` が 0 を返しえた（空グリッド起動）。`1usize << 32` は
+    // 32 bit ターゲットでは無効な shift のため、本テストはこのリポジトリが
+    // 対象とする 64 bit プラットフォーム限定で実行する
+    // （`.claude/rules/coding-rust.md` は 64 bit ターゲットを前提とする
+    // 既存の `measure_bandwidth_secs` の `u64::try_from` 検証と同様の理由）。
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn bw_grid_dim_does_not_truncate_n_beyond_u32_max() {
+        let g = bw_grid_dim(1usize << 32, 16);
+        // 修正後は u64 で除算してから u32 へ飽和させるため、SM 数ベースの
+        // 占有率目安（16 * 32 = 512）が採用される。
+        assert_eq!(g, 512);
+        assert!(g >= 1, "grid_dim が 0 だと bw_copy_f32 の起動が空になる");
     }
 
     #[test]
