@@ -95,10 +95,17 @@ endif
 # CI（Linux ホステッド。実機非搭載）では実行不可・実機でのみ使用する #[ignore] 分離テスト
 # （coding-rust.md・ci.md の実機分離規約）。Metal は Apple Silicon 実機、
 # CUDA は DGX Spark GB10 等の NVIDIA GPU 実機で実行する。
+#
+# PR #640 codex-review P1 指摘対応（イシュー #491）: `test-ignored-cuda` と同じ
+# 理由で `wmma_tf32_basic_kernel_parity_does_not_regress`（`--skip` 対象。
+# `test-ignored-cuda` ターゲットのコメント・`crates/backend-cuda/src/gemm.rs`
+# 当該テストのドキュメンテーションコメント参照）を除外する。本ターゲットは
+# `--workspace` で `test-ignored-cuda` を包含するため、除外を怠ると workspace
+# 全体の実機受け入れスイートが基本版カーネルの正しさに関係なく常に赤くなる。
 .PHONY: test-ignored
-test-ignored: ## 実機（Metal / CUDA）専用: #[ignore] 分離テストを実行する
+test-ignored: ## 実機（Metal / CUDA）専用: #[ignore] 分離テストを実行する（基本版カーネル確定待ちの恒常 fail テストは除外）
 ifdef HAS_CARGO
-	cargo test --workspace -- --ignored --nocapture
+	cargo test --workspace -- --ignored --skip wmma_tf32_basic_kernel_parity_does_not_regress --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored をスキップ"
 endif
@@ -111,12 +118,43 @@ endif
 # と同じ理由。`tests/tensor_core_real_device.rs` の M=N=K=4096 TFLOPS 実測・
 # `tests/gemm_wmma_tf32_opt.rs` の K=4096 ストレスケースは CPU 参照実装
 # 〈`matmul_reference_fma`〉の計算量が大きく debug ビルドでは著しく遅いため）。
+#
+# PR #640 codex-review P1 指摘対応（イシュー #491）:
+# `crates/backend-cuda/src/gemm.rs::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
+# は記録済みベースライン 2 行が `basic_kernel_baseline_unconfirmed: true`
+# のため、基本版 WMMA(TF32) カーネルが完全に正しくても実行するたびに
+# 必ず panic する契約（fail-closed。同テストのドキュメンテーションコメント
+# 参照）。このテストを本ターゲットに含めたままだと「CUDA 実機で
+# `test-ignored-cuda` を実行すればカーネルの実質的な正しさが分かる」という
+# 非後退ゲートとしての実用性を、確定ベースライン記録待ちの間ずっと失う
+# （基本版カーネルに実際の後退があってもなくても同じ failure が出る）。
+# よって実機再測定で確定するまでの間、本ターゲット（通常の実機受け入れ
+# スイート）からは `--skip` で明示的に除外し、下記
+# `test-cuda-basic-kernel-baseline-remeasurement` という独立ターゲットへ
+# 分離する（`ParityBaseline::basic_kernel_baseline_unconfirmed` の
+# ドキュメンテーションコメント・`docs/perf/cuda-parity-baseline.md`
+# §「既知の限界」参照）。
 .PHONY: test-ignored-cuda
-test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する（release）
+test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する（release。基本版カーネル確定待ちの恒常 fail テストは除外）
 ifdef HAS_CARGO
-	cargo test -p backend-cuda --release -- --ignored --nocapture
+	cargo test -p backend-cuda --release -- --ignored --skip wmma_tf32_basic_kernel_parity_does_not_regress --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
+endif
+
+# PR #640 codex-review P1 指摘対応（イシュー #491）: 上記 `test-ignored-cuda`
+# から除外した `wmma_tf32_basic_kernel_parity_does_not_regress` 専用の実行
+# 導線。基本版 WMMA(TF32) カーネル単独の parity を実機再測定し、
+# `crates/backend-cuda/tests/common/parity_baseline.rs` の
+# `basic_kernel_baseline_unconfirmed: true` な行を確定値へ更新する作業
+# （実機再測定）でのみ使う。恒常 fail が意図された挙動であるため
+# `test-ignored-cuda`（通常の実機受け入れスイート）には含めない。
+.PHONY: test-cuda-basic-kernel-baseline-remeasurement
+test-cuda-basic-kernel-baseline-remeasurement: ## CUDA 実機専用: 基本版 WMMA(TF32) カーネルの parity 確定ベースライン再測定用（恒常 fail が既知の挙動）
+ifdef HAS_CARGO
+	cargo test -p backend-cuda --release -- --ignored --exact gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress --nocapture
+else
+	@echo "skip: Cargo.toml 未追加のため test-cuda-basic-kernel-baseline-remeasurement をスキップ"
 endif
 
 # TASK-1.8e（イシュー #42）: `backend-cuda` の `test-ignored-cuda`（#36）と対になる

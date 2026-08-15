@@ -49,7 +49,8 @@ make setup   # サブモジュール取得 → rustup → lefthook（git hooks�
 | `make lint` | `cargo clippy -D warnings` |
 | `make test` | `cargo test`（実機依存の `#[ignore]` テストは除く） |
 | `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
-| `make test-ignored-cuda` | CUDA 実機専用: `backend-cuda` の `#[ignore]` 分離テストのみ実行（TASK-1.7e・#36） |
+| `make test-ignored-cuda` | CUDA 実機専用: `backend-cuda` の `#[ignore]` 分離テストのみ実行（TASK-1.7e・#36。基本版 WMMA(TF32) カーネルの確定ベースライン待ち恒常 fail テストは `--skip` 除外。イシュー #491・PR #640 codex-review 指摘対応） |
+| `make test-cuda-basic-kernel-baseline-remeasurement` | CUDA 実機専用: 上記から除外した基本版 WMMA(TF32) カーネルの parity 確定ベースライン再測定専用（恒常 fail が既知の挙動。イシュー #491） |
 | `make test-ignored-metal` | Metal 実機専用: `backend-metal` の `#[ignore]` 分離テストのみ実行・release（TASK-1.8e・#42） |
 | `make deny` | `cargo deny check licenses sources`（依存ライセンス監査。`cargo-deny` 未導入なら自動導入） |
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
@@ -76,8 +77,13 @@ make docker-ci      # コンテナ内で make ci を実行（環境非依存の�
 ```bash
 make test-ignored-cuda   # backend-cuda に限定した #[ignore] テスト実行（release）
 # 相当コマンド:
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p backend-cuda --release -- --ignored --skip wmma_tf32_basic_kernel_parity_does_not_regress --nocapture
 ```
+
+基本版 WMMA(TF32) カーネル単独の parity 確定ベースライン再測定（イシュー #491）は、上記から独立した
+`make test-cuda-basic-kernel-baseline-remeasurement` を使います（当該テストは記録済みベースラインの
+provenance が未確定な間、実機実行のたびに必ず fail する契約のため通常の `test-ignored-cuda` には含めて
+いません。`docs/perf/cuda-parity-baseline.md` §3 参照）。
 
 `backend-cuda` 以外を含む全 `#[ignore]` テスト（Metal 実機分も含む）をまとめて実行したい場合は `make test-ignored`（`cargo test --workspace -- --ignored --nocapture`）を使ってください。
 

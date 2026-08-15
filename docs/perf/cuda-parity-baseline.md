@@ -98,6 +98,16 @@ provenance を確定させ `basic_kernel_baseline_unconfirmed: false` へ更新�
 `docs/backend-cuda-real-device-testing.md` §5.3・§7 参照。「実機テスト全件
 pass」は本イシューのスコープでは未達のまま確定している既存の前例と同種）。
 
+**追記（PR #640 codex-review P1 再指摘対応。`make test-ignored-cuda` からの
+分離）**: 上記の恒常 fail 契約をそのまま通常の実機受け入れスイート
+（`make test-ignored-cuda`）に含めると、基本版カーネルの実際の正しさに
+関係なくスイート全体が常に赤くなり、他の `#[ignore]` テストの合否が
+埋もれて非後退ゲートとして機能しなくなる。そのため `Makefile` 側で本テストを
+`test-ignored-cuda` から `--skip` で明示除外し、確定ベースライン再測定専用の
+独立ターゲット `make test-cuda-basic-kernel-baseline-remeasurement` を新設して
+そちらからのみ実行する構成にした（`Makefile` の両ターゲットのコメント・
+`docs/backend-cuda-real-device-testing.md` §6 参照）。
+
 **§5.3 の記録は「各テストで最初に fail した (形状, シード) の値」のみ
 （`assert_parity` が最初の fail で panic する契約のため）**。上表 6 行は
 その実測値の転記であり、未計測形状・シードの行は本表に含めていない。

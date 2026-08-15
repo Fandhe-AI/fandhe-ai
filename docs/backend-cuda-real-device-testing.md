@@ -227,10 +227,23 @@ toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p backend-cud
 非後退検査（`ParityPath::WmmaTf32`）は、`tests/*.rs`（独立クレート扱いの統合テスト）から公開 API を
 増やさずに到達できないため、`crates/backend-cuda/src/gemm.rs` のライブラリ自身の単体テスト
 （`#[cfg(test)] mod tests` 内 `wmma_tf32_basic_kernel_parity_does_not_regress`。`#[ignore]` で実機必須）
-として実装している。`cargo test` はターゲット未指定時に lib ユニットテスト・統合テスト双方を対象にする
-ため、既存の実行導線（`make test-ignored-cuda`。`cargo test -p backend-cuda --release -- --ignored --nocapture`）
-はこのテストも変更なく含む。個別に実行する場合は `cargo test -p backend-cuda --lib -- --ignored` を使う。
-`docs/perf/cuda-parity-baseline.md` §7「関連」参照。
+として実装している。
+
+**追記（PR #640 codex-review P1 再指摘対応）**: 当該テストは記録済みベースライン行
+（`ParityPath::WmmaTf32` の 2 行）が `basic_kernel_baseline_unconfirmed: true` のため、基本版カーネルの
+実際の正しさに関係なく実行するたびに必ず fail する契約（意図した恒常 fail。§5.3・本節冒頭参照）。
+`cargo test` はターゲット未指定時に lib ユニットテスト・統合テスト双方を対象にするため、そのままでは
+既存の実行導線（`make test-ignored-cuda`）が常にこの恒常 fail を含んでしまい、他の `#[ignore]` テストの
+合否が埋もれて非後退ゲートとして機能しなくなる。そのため `Makefile` 側で `test-ignored-cuda`
+（`cargo test -p backend-cuda --release -- --ignored --skip
+wmma_tf32_basic_kernel_parity_does_not_regress --nocapture`）から本テストを明示除外し、確定ベースライン
+再測定専用の独立ターゲット `make test-cuda-basic-kernel-baseline-remeasurement`
+（`cargo test -p backend-cuda --release -- --ignored --exact
+gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress --nocapture`）からのみ実行する構成にした
+（`Makefile` の両ターゲットのコメント・`crates/backend-cuda/src/gemm.rs` の当該テストのドキュメンテーション
+コメント参照）。実機再測定で `basic_kernel_baseline_unconfirmed` を `false` へ更新したあとは、
+`test-ignored-cuda` への合流（`--skip` 除外の削除）を検討する。`docs/perf/cuda-parity-baseline.md`
+§7「関連」参照。
 
 ## 7. 未解決事項・エスカレーション先
 

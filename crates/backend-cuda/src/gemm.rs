@@ -1148,12 +1148,31 @@ mod tests {
     /// （`ParityBaseline::basic_kernel_baseline_unconfirmed == true`）の
     /// 場合、`assert_no_parity_regression` 側が必ず panic する（黙って
     /// skip しない。`tests/common/parity_baseline.rs` 参照）。実機再測定で
-    /// 確定値を記録し `false` へ更新するまで、本テストは実機実行のたびに
+    /// 確定値を記録し `false` へ更新するまで、本テストは実行のたびに
     /// fail し続ける契約であり、これは意図した挙動である（実機テストの
     /// 恒常 fail は本リポで既知の受け入れ済み状態。
     /// `docs/backend-cuda-real-device-testing.md` §5.3・§7 参照）。
+    ///
+    /// **PR #640 codex-review P1 再指摘対応（`make test-ignored-cuda` からの
+    /// 分離）**: 上記の恒常 fail 契約は「基本版カーネルが完全に正しくても
+    /// 必ず fail する」ため、通常の実機受け入れスイート（`make
+    /// test-ignored-cuda` = `cargo test -p backend-cuda --release --
+    /// --ignored`）にそのまま含めると、そのスイート全体が
+    /// 基本版カーネルの実際の正しさに関係なく常に赤くなり、非後退ゲート
+    /// として機能しなくなる（他の `#[ignore]` テストの合否が本テストの
+    /// 恒常 fail に埋もれる）。よって `Makefile` 側で本テストを
+    /// `test-ignored-cuda` から `--skip` で明示的に除外し、確定
+    /// ベースライン記録専用の独立ターゲット
+    /// `make test-cuda-basic-kernel-baseline-remeasurement` からのみ実行する
+    /// 構成にしている（`Makefile` の当該ターゲットコメント参照）。実機再測定
+    /// で `basic_kernel_baseline_unconfirmed` を `false` へ更新したあとは、
+    /// 本テストは他の行と同様に非後退判定として機能するため、
+    /// `test-ignored-cuda` への合流（`--skip` 除外の削除）を検討する。
     #[test]
-    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須。make test-ignored-cuda \
+                からは Makefile 側で明示除外済み。実機再測定は \
+                `make test-cuda-basic-kernel-baseline-remeasurement` を使う \
+                （理由は本テストのドキュメンテーションコメント参照）"]
     fn wmma_tf32_basic_kernel_parity_does_not_regress() {
         let device =
             CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
