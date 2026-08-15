@@ -67,7 +67,10 @@
 
 use std::time::Instant;
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm};
+use backend_cuda::{
+    CudaDevice, CudaError, CudaGemm, CudaMmaGemm, MMA_BM, MMA_BN, WMMA_TF32_OPT_BLOCK_M,
+    WMMA_TF32_OPT_BLOCK_N,
+};
 use bench_harness::rng::Xorshift64Star;
 use cudarc::driver::sys::CUdevice_attribute;
 use half::f16;
@@ -220,19 +223,18 @@ fn tflops(size: u32, secs: f64) -> f64 {
 /// 実測値との突合用に、ブロック単位のタイル分割数と SM 数から求まる
 /// blocks/SM 比を起動時に print する（実装計画 §3 Step 3）。
 fn print_occupancy_estimate(path: Path, size: u32, sm_count: Option<u32>) {
-    // タイル定数は非公開モジュール（`kernels_wmma_opt.rs`／
-    // `kernels_mma.rs` は `mod`、`pub mod` ではないため crate 外から
-    // 参照不能）の値をこの診断バイナリ専用にコピーしたもの。カーネル側の
-    // 値を変更しないという本イシューのスコープ（実装計画 §6）上、
-    // カーネル側モジュールの可視性は変更せずここに手元転記する。値の
-    // 出典・整合はコメントの参照先行番号で追跡する（値が乖離した場合は
-    // 出典側の変更漏れとして検知できるよう、変更時は必ず両者を同時に
-    // 更新すること）。
+    // タイル定数はハードコード転記ではなく `backend_cuda` crate root が
+    // re-export する `kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M`/`_N`・
+    // `kernels_mma::MMA_BM`/`MMA_BN` を直接 `use` する（`lib.rs` 参照）。
+    // カーネル側モジュール自体（`mod kernels_wmma_opt`／`mod kernels_mma`）
+    // は非公開のままで値の re-export のみを追加したため、カーネル側の
+    // 値を変更しないという本イシューのスコープ（実装計画 §6）を保ちつつ、
+    // 出典側の値変更がコンパイル時に機械的にここへ反映される（レビュー
+    // 指摘: 手元転記だと出典との乖離を検知できず、occupancy estimate が
+    // 静かに誤った参考値を出し続けるおそれがあった）。
     let (block_m, block_n): (u32, u32) = match path {
-        // `kernels_wmma_opt.rs::WMMA_TF32_OPT_BLOCK_M`/`_N`（64×64）。
-        Path::WmmaTf32 => (64, 64),
-        // `kernels_mma.rs::MMA_BM`/`MMA_BN`（32×64）。
-        Path::MmaF16 => (32, 64),
+        Path::WmmaTf32 => (WMMA_TF32_OPT_BLOCK_M, WMMA_TF32_OPT_BLOCK_N),
+        Path::MmaF16 => (MMA_BM, MMA_BN),
     };
     let actual_blocks = size.div_ceil(block_m) as u64 * size.div_ceil(block_n) as u64;
     match sm_count {
@@ -329,11 +331,18 @@ fn main() {
 
     let mut rng = Xorshift64Star::new(SEED);
     let (m, n, k) = (args.size, args.size, args.size);
-    let total_launches = args.total_launches;
-    if total_launches == 0 {
-        println!("warmup=0 かつ iters=0 のため計測対象の起動がない。終了する。");
-        return;
-    }
+    // `args.total_launches`（`warmup + iters`）が 0 になる分岐は存在しない
+    // （レビュー指摘: 以前あった `if total_launches == 0 { ... return; }` は
+    // 到達不能なデッドコードだった）。`parse_args` が `--iters == 0` を
+    // 明示的に `Err` で拒否するため（本ファイル `parse_args` 参照）、
+    // `total_launches = warmup + iters` は `warmup` の値に関わらず常に 1
+    // 以上になる。この不変条件が将来の `parse_args` 変更で崩れないことを
+    // ここで検査だけしておく（本番経路の値を分岐させない `debug_assert!`。
+    // release ビルドでは最適化除去される）。
+    debug_assert!(
+        args.total_launches >= 1,
+        "parse_args が --iters==0 を拒否する契約が崩れている"
+    );
 
     match args.path {
         Path::WmmaTf32 => {

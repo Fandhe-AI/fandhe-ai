@@ -129,6 +129,19 @@ pub use gemm::CudaGemm;
 pub use gemm_auto::CudaGemmAuto;
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
+// `kernels_mma`／`kernels_wmma_opt` 自体は `mod`（非公開。カーネル本体は
+// crate 外から直接呼ばせない）だが、ブロックタイル定数のみをここで
+// 個別に re-export する。イシュー #486 レビュー指摘: `examples/
+// gemm_profile_target.rs` の occupancy 概算がこのタイル値を手元転記して
+// おり、モジュール非公開のため出典側の変更を機械的に検知できなかった
+// （値が乖離しても診断ツールが静かに誤った参考値を出し続ける）。この
+// re-export により `gemm_profile_target.rs` はハードコードではなくこの
+// 値を直接 `use` できるようになり、出典側（`kernels_mma.rs`／
+// `kernels_wmma_opt.rs`）の変更が再ビルドだけで機械的に反映される
+// （カーネル実装・モジュール可視性自体は変更しない。実装計画 §6 の
+// スコープを維持）。
+pub use kernels_mma::{MMA_BM, MMA_BN};
+pub use kernels_wmma_opt::{WMMA_TF32_OPT_BLOCK_M, WMMA_TF32_OPT_BLOCK_N};
 pub use memory::CudaMemory;
 pub use nvrtc::compile_ptx;
 pub use ops::CudaBackendOps;

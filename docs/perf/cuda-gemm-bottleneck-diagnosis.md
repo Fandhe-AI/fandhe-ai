@@ -118,6 +118,30 @@ done
 `.ncu-rep` ファイル自体・生ログはコミットしない（秘密情報・内部ホスト名は含まないが、実測記録は本
 ドキュメントの「4. 記録表」への転記を正とする。`.claude/rules/security.md` A01/A09）。
 
+#### 3.3.1 `ALLOC_ZEROS_LAUNCHES = 1` 前提の実機検証（6 通り採取ループの前に 1 回だけ実施）
+
+`--launch-skip` の算出（§3.3 冒頭）は「`alloc_zeros` の memset カーネル起動が正確に 1 回だけ ncu の
+起動通し番号に現れる」という `gemm_profile_target.rs` の `ALLOC_ZEROS_LAUNCHES` 前提に依存する。この
+前提は cudarc のバージョン・実機の compute capability（sm_121/Blackwell 世代）に固有の実装詳細であり、
+ずれると `--launch-skip` が過不足し、意図しないカーネル（memset 自体・対象外の起動）を計測してしまう
+（PR #637 で Bugbot が指摘したのと同種の失敗の再発）。6 通りの本採取ループ（§3.3）を回す前に、いずれか
+1 通り（例: `wmma_tf32`／`1024`）で `--launch-skip` を指定せず `--launch-count` のみ絞って全カーネル名を
+一覧し、想定どおりの並び（memset 系カーネルが 1 回・その後に対象カーネルが `warmup + iters` 回連続）に
+なっていることを目視確認する。
+
+```sh
+# --launch-skip なしで先頭数回分の起動を全部並べ、カーネル名の並びを目視確認する。
+# `--launch-count` は `1 + warmup + iters`（既定なら 1 + 2 + 5 = 8）以上を指定する。
+ncu --launch-count 8 --print-kernel-base full \
+    "$BIN" --path wmma_tf32 --size 1024 2>&1 | tee ncu-verify-launch-skip.log
+```
+
+想定どおり（memset カーネル 1 回 → 対象カーネル `warmup + iters` 回）であれば §3.3 の 6 通りループへ
+進む。並びが想定と異なる場合（memset が 0 回・2 回以上、または対象カーネル名が warmup 区間から既に
+異なる等）は、`ALLOC_ZEROS_LAUNCHES` の値・`gemm_profile_target.rs` の `--launch-skip` 算出式を実機の
+実際のカーネル起動順に合わせて見直してから 6 通りループを実行する（閾値・受け入れ基準の変更ではなく
+診断ツール自体の前提修正のため人間承認は不要だが、修正した場合はコミット・PR 本文にその旨を明記する）。
+
 ## 4. 記録表
 
 環境: commit SHA=`<.rev-stamp の値>`／GPU driver=`<実測>`／CUDA=`<実測>`／ncu=`<ncu --version 実測>`
