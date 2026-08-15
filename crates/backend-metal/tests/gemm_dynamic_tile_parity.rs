@@ -43,6 +43,15 @@ use bench_harness::rng::Xorshift64Star;
 /// `pub(crate)`）へ集約済み
 /// （`all_tile_candidates_match_cpu_reference_medium_shape` 等）。本関数は
 /// 数値一致（CPU 参照実装との複合判定）の確認に限定する。
+///
+/// `crate::tile::CANDIDATES` を巡回する上記クレート内テストは全構成が
+/// `staged=true` のため、本ファイルが使う `staged=false`（直接ロード経路）
+/// の構成はその巡回対象に含まれない。この構成のフォールバック検知は
+/// `crate::tile` の `direct_load_path_config_resolves_without_fallback`
+/// （クレート内テスト）が別途担う（codex-review 再指摘対応。イシュー
+/// #532・PR #651。`BUGBOT_BUG_ID: c65127ea-56c2-4c52-95c2-604b5739cf40`）。
+/// 下記 `direct_load_path_*` 系のテストが使う `TileConfig` を変更する場合は
+/// 同テストの `cfg` も同期させること。
 fn run_case(cfg: TileConfig, seed_a: u64, seed_b: u64, m: usize, n: usize, k: usize) {
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");

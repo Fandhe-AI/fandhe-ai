@@ -867,4 +867,54 @@ mod tests {
             );
         }
     }
+
+    /// 直接ロード経路（`staged=false`）構成のフォールバック検知
+    /// （codex-review 再指摘対応。イシュー #532・PR #651）。
+    ///
+    /// `CANDIDATES` は `select` の自動選択対象のみで全て `staged=true`
+    /// （MLX classic 経路〈#532〉の追加 3 構成も含め本ファイル中に
+    /// `staged: false` の要素はない）ため、`all_tile_candidates_match_*`
+    /// 系（`CANDIDATES` を巡回するテスト）は `staged=false` 構成を一切
+    /// 検証しない。`tests/gemm_dynamic_tile_parity.rs` の
+    /// `direct_load_path_matches_cpu_reference` 系は `run_case` から
+    /// `resolve_tile_config` 呼び出しが外れているため（同ファイルの
+    /// `run_case` コメント参照）、直接ロード経路固有の
+    /// `TileConfig { staged: false, .. }` がサイレントに
+    /// `TileConfig::SINGLE_SIMDGROUP_8X8` へフォールバックしても
+    /// 統合テストの数値一致確認だけでは検知できない穴が残っていた
+    /// （codex-review 指摘 `BUGBOT_BUG_ID: c65127ea-56c2-4c52-95c2-604b5739cf40`）。
+    /// 本テストはその穴を埋めるクレート内検証で、`resolve_tile_config`
+    /// （`pub(crate)`）で実際に採用された構成が指定 `cfg` と一致することを
+    /// 確認する。ここで使う `cfg` の値は
+    /// `tests/gemm_dynamic_tile_parity.rs` の
+    /// `direct_load_path_matches_cpu_reference` /
+    /// `direct_load_path_matches_cpu_reference_non_multiple_of_tile` が
+    /// 使う `TileConfig`（`bm=32,bn=32,bk=16,wm=2,wn=2,staged=false`）と
+    /// 同期させること（形状のみが異なり構成自体は共通のため 1 回の検証で足りる）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn direct_load_path_config_resolves_without_fallback() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let cfg = TileConfig {
+            bm: 32,
+            bn: 32,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: false,
+        };
+
+        let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+            panic!("direct-load 構成 {cfg:?} のパイプライン構築・検証に失敗した: {err}")
+        });
+        assert_eq!(
+            resolved, cfg,
+            "direct-load 構成 {cfg:?} が実デバイス上でサイレントに {resolved:?} へ \
+             フォールバックした（構成失敗を検知できていない）"
+        );
+    }
 }
