@@ -70,8 +70,14 @@ env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
 
 ### 3.3 ncu 採取（6 通り: 2 path × 3 size）
 
-`--launch-skip <warmup 起動数> --launch-count <iters>` で `gemm_profile_target` 内の warmup を除いた
-計測区間のみをプロファイルする（既定 `--warmup 2 --iters 5` なら `--launch-skip 2 --launch-count 5`）。
+`--launch-skip <warmup 起動数 + 1> --launch-count <iters>` で `gemm_profile_target` 内の warmup を除いた
+計測区間のみをプロファイルする。`+ 1` は `gemm.alloc_output_f32`／`alloc_output_f16`（各 `Path` 分岐で
+warmup ループ直前に 1 回呼ばれる）が cudarc `alloc_zeros` 経由でデバイス側ゼロクリアの memset カーネルを
+1 回起動するためで、これを `--launch-skip` に含めないと memset がターゲットカーネルとして誤ってプロファイル
+される（`--warmup 0` の場合にとくに顕著。Cursor Bugbot 指摘・PR #637。`gemm_profile_target.rs` の
+`ALLOC_ZEROS_LAUNCHES` 定義コメント参照）。既定 `--warmup 2 --iters 5` なら `--launch-skip 3
+--launch-count 5`。この値は手計算せず、`gemm_profile_target` 実行時に `path=... warmup=... iters=...` の
+直後へ出力される `ncu --launch-skip <値> --launch-count <値>` 行をそのまま使う。
 
 ```sh
 # `set -o pipefail`: `gemm_profile_target` が opt カーネル不在等で非 0 終了
@@ -95,7 +101,10 @@ sm__inst_issued.avg.pct_of_peak_sustained_active"
 
 for path in wmma_tf32 mma_f16; do
   for size in 1024 2048 4096; do
-    if ! ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
+    # --launch-skip 3 = --warmup 2（既定）+ alloc_zeros memset 起動 1 回
+    # （§3.3 冒頭の説明・`gemm_profile_target.rs` の `ALLOC_ZEROS_LAUNCHES`
+    # 定義コメント参照）。
+    if ! ncu --launch-skip 3 --launch-count 5 --metrics "$METRICS" \
         "$BIN" --path "$path" --size "$size" \
         2>&1 | tee "ncu-${path}-${size}.log"; then
       echo "abort: path=${path} size=${size} で gemm_profile_target または ncu が非 0 終了した" \

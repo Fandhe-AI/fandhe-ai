@@ -31,11 +31,26 @@
 //!
 //! ```sh
 //! cargo build -p backend-cuda --example gemm_profile_target --release
-//! ncu --launch-skip <warmup 起動数> --launch-count <iters> \
+//! ncu --launch-skip <warmup 起動数 + 1> --launch-count <iters> \
 //!     --metrics <確定メトリクス名, カンマ区切り> \
 //!     ./target/release/examples/gemm_profile_target \
 //!     --path wmma_tf32 --size 4096
 //! ```
+//!
+//! `--launch-skip` は `<warmup 起動数>` ではなく **`<warmup 起動数 + 1>`**
+//! を指定する（Cursor Bugbot 指摘・PR #637）。`gemm.alloc_output_f32`／
+//! `alloc_output_f16`（`gemm.rs`／`gemm_wmma.rs`／`gemm_mma.rs` 各
+//! `alloc_output_*`）は cudarc の `alloc_zeros` を呼び、内部でデバイス側
+//! ゼロクリアの memset カーネルを 1 回起動する。この起動は各 `Path` 分岐
+//! で warmup ループの直前・計測対象カーネル起動より前に発生するため
+//! （下記 `alloc_output_f32`／`alloc_output_f16` 呼び出し箇所参照）、
+//! ncu から見た起動順序は「memset（1 回）→ warmup（`--warmup` 回）→
+//! 計測対象（`--iters` 回）」になる。`--launch-skip <warmup>` のままだと
+//! memset がターゲットカーネルとして誤ってプロファイルされてしまう
+//! （とくに `--warmup 0` の場合に顕著）。この起動回数はこのバイナリの
+//! 実行時に `path=... size=... warmup=... iters=...` の直後に
+//! `ncu --launch-skip <値>` として明示出力するので、手計算せずその値を
+//! 使う。
 //!
 //! `--path`（`wmma_tf32`｜`mma_f16`。必須）・`--size`（`1024`｜`2048`｜
 //! `4096`。必須）は固定 allowlist との完全一致のみ受理する（`.claude/rules/
@@ -60,6 +75,17 @@ use half::f16;
 /// 決定的シード（`cuda_floor_bench.rs`・`gemm_mma_bench.rs` と同一値。
 /// 過去実測・他バックエンドベンチと同じ入力分布に揃える）。
 const SEED: u64 = 0xC0FFEE;
+
+/// `Path::WmmaTf32`／`Path::MmaF16` の各分岐が warmup ループの直前に呼ぶ
+/// `gemm.alloc_output_f32`／`alloc_output_f16`（`gemm.rs`／`gemm_wmma.rs`／
+/// `gemm_mma.rs`）は cudarc の `alloc_zeros` を経由し、内部でデバイス側
+/// ゼロクリアの memset カーネルを 1 回起動する。ncu はプロセス内の全カーネル
+/// 起動を通し番号で数えるため、この 1 回を `--launch-skip` に含めないと
+/// memset がターゲットカーネルとして誤ってプロファイルされる
+/// （`--warmup 0` の場合にとくに顕著。Cursor Bugbot 指摘・PR #637）。
+/// モジュール冒頭ドキュメンテーションコメント「実行手順」・
+/// `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 参照。
+const ALLOC_ZEROS_LAUNCHES: usize = 1;
 
 /// 対象経路（CLI `--path` の allowlist）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -254,6 +280,18 @@ fn main() {
         args.warmup,
         args.iters
     );
+    // `alloc_output_f32`／`alloc_output_f16`（各 `Path` 分岐で warmup
+    // ループ直前に 1 回呼ばれる）の `alloc_zeros` memset 起動を
+    // `--launch-skip` に含める（`ALLOC_ZEROS_LAUNCHES` 定義コメント参照）。
+    // 手計算による転記ミスを防ぐため、実行時にそのまま使える値を出力する。
+    println!(
+        "ncu --launch-skip {} --launch-count {} \
+         (warmup={} + alloc_zeros memset launches={})",
+        args.warmup + ALLOC_ZEROS_LAUNCHES,
+        args.iters,
+        args.warmup,
+        ALLOC_ZEROS_LAUNCHES
+    );
 
     let mut rng = Xorshift64Star::new(SEED);
     let (m, n, k) = (args.size, args.size, args.size);
@@ -336,16 +374,23 @@ fn main() {
             let (a_dev, b_dev) = gemm
                 .upload_f32(&a, &b)
                 .expect("wmma_tf32 upload must succeed on CUDA-equipped runner");
+            // `alloc_output_f32`（`gemm.rs`）は cudarc `alloc_zeros` 経由で
+            // memset カーネルを 1 回起動する（`ALLOC_ZEROS_LAUNCHES` 定義
+            // コメント参照）。これが以下 warmup ループより前に発生する
+            // ncu 起動番号 0 番になるため、`--launch-skip` は
+            // `args.warmup` ではなく `args.warmup + ALLOC_ZEROS_LAUNCHES`
+            // を使う（実行時出力・モジュール冒頭「実行手順」参照）。
             let mut c_dev = gemm
                 .alloc_output_f32(m, n)
                 .expect("wmma_tf32 output allocation must succeed on CUDA-equipped runner");
 
-            // ncu は `--launch-skip <warmup 起動数> --launch-count <iters>`
-            // でこのループ内のカーネル起動番号を直接指定してプロファイル
-            // する（モジュール冒頭ドキュメンテーションコメント「実行手順」
-            // 参照）。`launch_wmma_tf32` は呼び出しごとに内部で
-            // `stream.synchronize()` するため（`gemm.rs::launch_wmma_tf32`
-            // 末尾参照）、ここでの追加同期は不要。
+            // ncu は `--launch-skip <warmup 起動数 + alloc_zeros memset 起動数>
+            // --launch-count <iters>` でこのループ内のカーネル起動番号を
+            // 直接指定してプロファイルする（モジュール冒頭ドキュメンテー
+            // ションコメント「実行手順」参照）。`launch_wmma_tf32` は
+            // 呼び出しごとに内部で `stream.synchronize()` するため
+            // （`gemm.rs::launch_wmma_tf32` 末尾参照）、ここでの追加同期は
+            // 不要。
             for _ in 0..args.warmup {
                 gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
                     .expect("wmma_tf32 warmup launch must succeed on CUDA-equipped runner");
@@ -388,6 +433,9 @@ fn main() {
             let (a_dev, b_dev) = gemm
                 .upload_f16(&a, &b)
                 .expect("mma_f16 upload must succeed on CUDA-equipped runner");
+            // `alloc_output_f16`（`gemm_mma.rs`）も `alloc_zeros` 経由で
+            // memset カーネルを 1 回起動する（`ALLOC_ZEROS_LAUNCHES` 定義
+            // コメント・上の `Path::WmmaTf32` 分岐と同じ理由）。
             let mut c_dev = gemm
                 .alloc_output_f16(m, n)
                 .expect("mma_f16 output allocation must succeed on CUDA-equipped runner");
