@@ -25,6 +25,12 @@
 use backend_cpu::parity::{assert_parity, matmul_reference_fma};
 use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig};
 use bench_harness::rng::Xorshift64Star;
+// `MTLDevice::maxThreadgroupMemoryLength` はトレイトメソッドのため、実装型
+// `&ProtocolObject<dyn MTLDevice>`（`crate::context::MtlDevice`）で呼ぶには
+// このトレイトをスコープに入れる必要がある
+// （`all_tile_candidates_validate_under_actual_device_shared_memory_limit`
+// が使用。`crates/backend-metal/src/gemm.rs` の同名インポートと同じ理由）。
+use objc2_metal::MTLDevice;
 
 /// `variant`（[`GemmVariant::SimdgroupTiled`]）・`(seed_a, seed_b, m, n, k)`
 /// の 1 ケースを実行し、CPU 参照実装との複合判定 PASS を確認する。
@@ -52,47 +58,15 @@ fn run_case(cfg: TileConfig, seed_a: u64, seed_b: u64, m: usize, n: usize, k: us
     );
 }
 
-/// `crate::tile` の候補セット（大形状・縦長・横長・中形状・単一
-/// simdgroup）を全て、8 の倍数の中規模形状で検証する（構成別の一致確認）。
+/// `crate::tile::CANDIDATES`（実セット。イシュー #532 で MLX classic 経路の
+/// 未収録 3 構成を追加済み）を全て、8 の倍数の中規模形状で検証する（構成別
+/// の一致確認）。ローカルに候補配列を複製せず実セットを直接巡回すること
+/// で、`tile.rs` 側の追加・変更が本テストへ自動的に反映されドリフトしない
+/// （`tile.rs` の `CANDIDATES` ドキュメンテーションコメント参照）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn all_tile_candidates_match_cpu_reference_medium_shape() {
-    let candidates = [
-        TileConfig {
-            bm: 64,
-            bn: 64,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        },
-        TileConfig {
-            bm: 64,
-            bn: 32,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        },
-        TileConfig {
-            bm: 32,
-            bn: 64,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        },
-        TileConfig {
-            bm: 32,
-            bn: 32,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        },
-        TileConfig::SINGLE_SIMDGROUP_8X8,
-    ];
-    for (i, cfg) in candidates.into_iter().enumerate() {
+    for (i, &cfg) in backend_metal::tile::CANDIDATES.iter().enumerate() {
         run_case(cfg, 10 + i as u64, 20 + i as u64, 256, 256, 256);
     }
 }
@@ -208,4 +182,107 @@ fn tiled_matches_cpu_reference_k_stress() {
         staged: true,
     };
     run_case(cfg, 7, 8, 64, 64, 4096);
+}
+
+// --- イシュー #532: MLX classic 経路の未収録 3 構成 ---
+
+/// `bk=32`（本実装初採用。イシュー #532）の境界形状ケース: `k` が 32 の
+/// 倍数にならない実効次元（pad8(70)=72）で `bk_eff` 末尾 0 埋め経路
+/// （`shaders/gemm.metal` の境界チェック。REQ-8）に到達することを確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bk32_candidate_matches_cpu_reference_non_multiple_of_tile() {
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 60, 61, 100, 70, 70);
+}
+
+/// `bk=32`（イシュー #532 の性能動機）の K ストレスケース: K=4096 の長い
+/// 内積で `threadgroup_barrier` 往復半減の狙いが数値正しさを損なわないこと
+/// を確認する（`tiled_matches_cpu_reference_k_stress` の bk=16 版に対応）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn bk32_candidate_matches_cpu_reference_k_stress() {
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 62, 63, 64, 64, 4096);
+}
+
+/// `(64,32,8,4,1)`（wm=4 縦分担・bk=8 小刻み。イシュー #532）の境界形状:
+/// m/n/k いずれも bm/bn/bk の倍数でない形状で REQ-8 手動境界チェックの
+/// 実効を確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile() {
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 8,
+        wm: 4,
+        wn: 1,
+        staged: true,
+    };
+    run_case(cfg, 64, 65, 100, 70, 70);
+}
+
+/// `(64,64,16,1,2)`（少 simdgroup・acc_rows が `MAX_ACC` ちょうどの境界。
+/// イシュー #532）の境界形状: m/n/k いずれも bm/bn/bk の倍数でない形状で
+/// REQ-8 手動境界チェックの実効を確認する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 1,
+        wn: 2,
+        staged: true,
+    };
+    run_case(cfg, 66, 67, 100, 130, 70);
+}
+
+/// デバイス上限直接検証（イシュー #532 受け入れ基準「SMEM 上限内の実機
+/// 確認」）: `MetalGemm::pipeline_for_tile` は候補が検証・パイプライン
+/// 構築に失敗すると `crate::tile::fallback_chain` で単一 simdgroup へ
+/// サイレントにフォールバックするため（`gemm.rs` 参照）、
+/// `dispatch_variant` の PASS だけでは各候補が実際にデバイス上限内で
+/// 動いた証明にならない。ここでは `MetalContext` から実測した
+/// `maxThreadgroupMemoryLength`（`MTLDevice` の公開プロパティ）に対して
+/// `crate::tile::CANDIDATES` 全構成（とくに bk=32 構成の 12288 バイト）の
+/// `TileConfig::validate` が直接 `Ok` を返すことをアサートし、フォール
+/// バックの穴を塞ぐ。スレッド数上限（`maxTotalThreadsPerThreadgroup`）は
+/// `MTLComputePipelineState` 構築後にしか取得できず（`pipeline_for_tile`
+/// のコメント参照）、かつパイプライン構築 API は `pub(crate)` のため本
+/// 統合テスト（クレート外）からは触れられない。よって
+/// `validate_accepts_all_candidates_under_typical_device_limits`（`tile.rs`
+/// 単体テスト）と同じ Apple Silicon 一般上限（1024 スレッド）を前提に
+/// 据え置き、SMEM のみをデバイス実測値で検証する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn all_tile_candidates_validate_under_actual_device_shared_memory_limit() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+
+    for cfg in backend_metal::tile::CANDIDATES {
+        cfg.validate(1024, max_shared_mem_bytes)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "candidate {cfg:?} は実デバイス SMEM 上限（{max_shared_mem_bytes} bytes）を \
+                 超過した: {e}"
+                )
+            });
+    }
 }

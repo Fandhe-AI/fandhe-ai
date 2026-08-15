@@ -250,7 +250,17 @@ impl TileConfig {
 /// [`select`] が候補として巡回する構成（大 → 小の優先順）。MLX steel の
 /// 実装傾向（大形状ほど大きい BM/BN・複数 simdgroup 分担）を参考にした
 /// 暫定初期値（本ファイル冒頭コメント参照。実機実測で確定させる）。
-const CANDIDATES: &[TileConfig] = &[
+///
+/// `select` は先頭 4 要素（index 0〜3）に添字で直接依存する（`select` 本体
+/// 参照）ため、既存 4 構成の並び順・個数は変更しない。イシュー #532 で
+/// index 4〜6 に MLX steel classic 経路（`steel_gemm_fused.metal` の
+/// `instantiate_gemm_shapes_helper` が実体化する 6 構成のうち本実装未収録
+/// だった 3 つ）を追加した。`select` の選択組み込み・閾値調整は実機実測で
+/// 確定させる後続スコープ（イシュー #532 計画「スコープ外」節）であり本
+/// 追加では行わない。`crates/backend-metal/tests/gemm_dynamic_tile_parity.rs`
+/// の数値一致テストが本セットを直接巡回するため、追加・変更時は両ファイル
+/// の対応関係を崩さないこと。
+pub const CANDIDATES: &[TileConfig] = &[
     // 大形状（正方）: 64x64 ブロックを 2x2=4 simdgroup で分担。
     TileConfig {
         bm: 64,
@@ -285,6 +295,41 @@ const CANDIDATES: &[TileConfig] = &[
         bk: 16,
         wm: 2,
         wn: 2,
+        staged: true,
+    },
+    // MLX steel classic 経路の未収録構成（イシュー #532）:
+    // 大形状（正方）を少 simdgroup（wm=1,wn=2 の 64 スレッド）で分担する
+    // 構成。acc_rows=(64/1)/8=8 が `TileConfig::MAX_ACC` ちょうどの境界。
+    TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 1,
+        wn: 2,
+        staged: true,
+    },
+    // MLX steel classic 経路の未収録構成（イシュー #532）: `bk=32` は本実装
+    // 初採用。K 方向のループ刻みを既存候補の 2 倍にすることで、K=4096 等
+    // 長い内積で `threadgroup_barrier` の往復回数を半減させる狙い（理論
+    // 根拠。実機ベンチによる効果確認は後続スコープ）。SMEM は
+    // `(64*32+32*32)*4=12288` バイトで、既存候補の最大 8192 バイトを
+    // 上回るが 32KiB 上限内（`TileConfig::validate` で機械検証）。
+    TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+    // MLX steel classic 経路の未収録構成（イシュー #532）: `wm=4` の縦
+    // 分担・`bk=8`（最小許容値）の小刻み K 分割構成。
+    TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 8,
+        wm: 4,
+        wn: 1,
         staged: true,
     },
     // 微小形状: 既存 gemm_simdgroup と等価な単一 simdgroup 8x8。
@@ -581,6 +626,101 @@ mod tests {
         let cfg = select(128, 1024, 256);
         assert_eq!(cfg, CANDIDATES[2]);
         assert_eq!((cfg.bm, cfg.bn), (32, 64));
+    }
+
+    // --- イシュー #532: MLX classic 経路の未収録 3 構成 ---
+
+    #[test]
+    fn bk32_candidate_shared_mem_is_12288_bytes_within_32kib_limit() {
+        // (64,32,32,2,2): A=64x32, B=32x32 -> (2048+1024)*4 = 12288 バイト。
+        // 既存最大 8192 バイトを上回るが 32KiB（32768 バイト）以内である
+        // ことを固定する（イシュー #532 計画「現状分析」節の事前検証値）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), 12288);
+        assert!(cfg.shared_mem_bytes() <= 32 * 1024);
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("bk=32 candidate rejected: {e}"));
+    }
+
+    #[test]
+    fn wm4_bk8_candidate_has_128_threads_and_validates() {
+        // (64,32,8,4,1): threads=4*1*32=128、acc_rows=(64/4)/8=2・
+        // acc_cols=(32/1)/8=4 で MAX_ACC 拡張は不要（イシュー #532 計画
+        // 「現状分析」節）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 8,
+            wm: 4,
+            wn: 1,
+            staged: true,
+        };
+        assert_eq!(cfg.thread_count(), 128);
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("wm=4/bk=8 candidate rejected: {e}"));
+    }
+
+    #[test]
+    fn wm1_wn2_candidate_acc_rows_hits_max_acc_boundary_and_validates() {
+        // (64,64,16,1,2): acc_rows=(64/1)/8=8 が MAX_ACC=8 ちょうどの境界。
+        // 超過ではなく境界一致で validate を通ることを固定する（イシュー
+        // #532 計画「現状分析」節）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 1,
+            wn: 2,
+            staged: true,
+        };
+        let acc_rows = (cfg.bm / cfg.wm) / 8;
+        assert_eq!(acc_rows, TileConfig::MAX_ACC);
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("wm=1/wn=2 candidate rejected: {e}"));
+    }
+
+    #[test]
+    fn candidates_include_the_three_mlx_classic_configs_added_in_issue_532() {
+        // CANDIDATES への収録漏れ・削除を検知する回帰ガード。
+        let expected = [
+            TileConfig {
+                bm: 64,
+                bn: 64,
+                bk: 16,
+                wm: 1,
+                wn: 2,
+                staged: true,
+            },
+            TileConfig {
+                bm: 64,
+                bn: 32,
+                bk: 32,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            },
+            TileConfig {
+                bm: 64,
+                bn: 32,
+                bk: 8,
+                wm: 4,
+                wn: 1,
+                staged: true,
+            },
+        ];
+        for cfg in expected {
+            assert!(
+                CANDIDATES.contains(&cfg),
+                "CANDIDATES に {cfg:?} が含まれていない"
+            );
+        }
     }
 
     #[test]
