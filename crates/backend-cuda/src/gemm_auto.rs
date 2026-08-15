@@ -28,16 +28,49 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
 use crate::gemm_wmma::CudaWmmaGemm;
+use crate::kernels_mma::{MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES};
 use crate::nvrtc::derive_pipeline_stages;
 
 /// 静的 `__shared__`（動的 SMEM opt-in 非使用）構成のカーネルが従う
-/// per-block SMEM 上限（全 compute capability 共通の 49,152 バイト =
-/// 48KiB）。`kernels_mma.rs::MMA_SHARED_MEM_BYTES` のコンパイル時 assert
-/// と同じ上限値であり、[`derive_stages_for_device`] はデバイス実測値が
-/// これを上回っても静的上限でクランプする（本モジュール冒頭コメント
-/// 3.1 節の安全側判断: NVRTC コンパイル自体がこの上限超過で失敗するため、
-/// 予算側で先に fail-closed に遮断する）。
-pub const STATIC_SMEM_BUDGET_CAP_BYTES: u64 = 49_152;
+/// per-block SMEM 上限。[`MMA_STATIC_SMEM_LIMIT_BYTES`] から
+/// 直接導出し、49,152（48KiB）という値をここで独立にハードコードしない
+/// （以前は `gemm_auto.rs` と `kernels_mma.rs` の双方が同じリテラルを
+/// 個別に持っており、どちらか一方だけが変更されても検出されない静かな
+/// 乖離リスクがあった。#521 レビュー指摘）。[`derive_stages_for_device`]
+/// はデバイス実測値がこれを上回っても静的上限でクランプする（本モジュール
+/// 冒頭コメント 3.1 節の安全側判断: NVRTC コンパイル自体がこの上限超過で
+/// 失敗するため、予算側で先に fail-closed に遮断する）。
+pub const STATIC_SMEM_BUDGET_CAP_BYTES: u64 = MMA_STATIC_SMEM_LIMIT_BYTES as u64;
+
+// 実使用量が予算上限に収まっていることのコンパイル時契約検査（上記の
+// 「唯一の真実源」導出そのものは値の重複を構造的に排除しているが、これは
+// 別の検査: 現在のタイル構成〈MMA_SHARED_MEM_BYTES〉が STATIC_SMEM_BUDGET_
+// CAP_BYTES を超えていないかを機械検出する使用量ガードである。実機
+// コンパイルできない環境でも `cargo build` の時点で検出できる代替チェック
+// （`kernels_mma.rs` 側の同種 assert と対になる二重チェック）。
+const _: () = assert!(
+    MMA_SHARED_MEM_BYTES as u64 <= STATIC_SMEM_BUDGET_CAP_BYTES,
+    "gemm_auto::STATIC_SMEM_BUDGET_CAP_BYTES に対して \
+     kernels_mma::MMA_SHARED_MEM_BYTES の実使用量が超過している"
+);
+
+/// f16 の要素バイト幅（`kernels_mma.rs` の f16 * 2B と同じ根拠）。
+/// [`derive_stages_for_device`] の `bytes_per_element` 導出で使う
+/// コンパイル時定数。`NonZeroU32::new` は `Option` を返すため `match` で
+/// 分解するが、リテラルが非ゼロであることはコンパイル時に確定しており
+/// 実行時に `None` 分岐へ到達することはない（#521 レビュー指摘: 旧実装は
+/// これを実行時エラーとして扱っており、到達不能なエラーパスを持っていた）。
+const BYTES_PER_ELEMENT_F16: NonZeroU32 = match NonZeroU32::new(2) {
+    Some(v) => v,
+    None => panic!("BYTES_PER_ELEMENT_F16: 2 must be non-zero"),
+};
+
+/// F32 の要素バイト幅（将来の mma/tf32 経路を見越した 4 バイト）。
+/// [`BYTES_PER_ELEMENT_F16`] と同じ理由でコンパイル時定数とする。
+const BYTES_PER_ELEMENT_F32: NonZeroU32 = match NonZeroU32::new(4) {
+    Some(v) => v,
+    None => panic!("BYTES_PER_ELEMENT_F32: 4 must be non-zero"),
+};
 
 /// `device` の `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK` を実行時
 /// に取得し、[`STATIC_SMEM_BUDGET_CAP_BYTES`] でクランプしたうえで
@@ -91,14 +124,16 @@ pub fn derive_stages_for_device(
     // 4 バイトとする。`DType` は非網羅的でない列挙（`tensor_core::dispatch`）
     // であるため match は両変種を明示し、新変種追加時はコンパイルエラーで
     // 見落としを検出する（`_ =>` フォールバックは持たない）。
+    //
+    // 両アームともコンパイル時定数（`BYTES_PER_ELEMENT_F16`／`_F32`）を返す
+    // ため、`NonZeroU32::new` の失敗分岐はコンパイル時に確定して排除される
+    // （旧実装は実行時 `ok_or_else` で検査しており、両アームとも非ゼロの
+    // リテラルであるため到達不能な `Err` 分岐を持つだけだった。#521 レビュー
+    // 指摘）。
     let bytes_per_element = match dtype {
-        DType::F16 => 2u32,
-        DType::F32 => 4u32,
+        DType::F16 => BYTES_PER_ELEMENT_F16,
+        DType::F32 => BYTES_PER_ELEMENT_F32,
     };
-    let bytes_per_element =
-        NonZeroU32::new(bytes_per_element).ok_or_else(|| CudaError::InvalidKernelDescriptor {
-            detail: "derive_stages_for_device: bytes_per_element must be non-zero".to_string(),
-        })?;
 
     derive_pipeline_stages(
         block_m,
