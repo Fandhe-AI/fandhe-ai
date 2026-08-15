@@ -93,15 +93,27 @@ extern "C" __global__ void probe_setmaxnreg_dec(
 /// dec/inc の値（24 / 232。8 の倍数・[24, 256] の許容範囲内）は、
 /// `__launch_bounds__(256)`（カーネル宣言に付与）によりコンパイラの
 /// ベースライン割り当てをブロック内 256 スレッド構成に対してヒントした
-/// うえで CUTLASS の一般的な producer/consumer 値域を踏襲したものであり、
-/// **正確なベースライン register/thread 数を本プローブが確定できているわけ
-/// ではない**（`--maxrregcount` 等の明示指定は行っていない）。したがって
-/// `.dec`/`.inc` が要求するレジスタ予算総量が実際に成立するかは本プローブ
-/// の実測（`try_load_and_run` の launch/synchronize 失敗捕捉。本ファイル
-/// 冒頭「使えないという結論も spike の正当な成果」）に委ねる。失敗時は
-/// 「命令自体が拒否された」（真の不可）と「本プローブの値の組み合わせが
-/// このベースラインでは不成立だった」（値の再選定が必要）を区別できない
-/// 点を `docs/cuda-tensor-core-design.md` への転記時に明記すること。
+/// うえで CUTLASS の一般的な producer/consumer 値域を踏襲したものである。
+///
+/// **ベースライン register/thread 数の確定（イシュー #484 レビュー指摘
+/// P2 対応）**: `--maxrregcount` 等の明示指定は行っていないが、代わりに
+/// [`report_control_baseline_regs`] が `CONTROL_INCDEC`（`setmaxnreg` を
+/// 含まない対照カーネル。同一 `__launch_bounds__(256)`）を実際にロードし
+/// `cuFuncGetAttribute(CU_FUNC_ATTRIBUTE_NUM_REGS)`（`CudaFunction::
+/// num_regs`）でコンパイラが実際に割り当てたベースライン register/thread
+/// 数を実測・記録する（NVRTC は PTX 生成のみでレジスタ割付を行わず、割付は
+/// `cuModuleLoadData` 時のドライバ JIT〈ptxas 相当〉が行うため、この属性
+/// クエリが「実際に成立したベースライン」を確定できる唯一の実測経路）。
+/// これにより 24/232 という値がベースラインから見て妥当な増減幅かどうかを
+/// `SETMAXNREG_PROBE_RESULT stage=control_baseline_regs` の実測値と突き合わせ
+/// て判断できる。したがって `.dec`/`.inc` が要求するレジスタ予算総量が実際に
+/// 成立するかは、このベースライン実測値と本プローブの実行結果
+/// （`try_load_and_run` の launch/synchronize 失敗捕捉。本ファイル冒頭
+/// 「使えないという結論も spike の正当な成果」）を組み合わせて判断する。
+/// 失敗時は「命令自体が拒否された」（真の不可）と「本プローブの値の組み合わせ
+/// がこのベースラインでは不成立だった」（値の再選定が必要）をベースライン
+/// 実測値との比較で区別できる。`docs/cuda-tensor-core-design.md` への転記時は
+/// `control_baseline_regs` の実測値も併記すること。
 const PROBE_SETMAXNREG_INCDEC: &str = r#"
 extern "C" __global__ void __launch_bounds__(256) probe_setmaxnreg_incdec(
     const float* __restrict__ in,
@@ -155,8 +167,14 @@ extern "C" __global__ void control_dec(
 /// （dec・inc）を除いた点以外は [`PROBE_SETMAXNREG_INCDEC`] と同一の
 /// 計算・書き込みを行う（同一ブロック次元 [`PRODUCER_CONSUMER_BLOCK_DIM`]
 /// で起動することを前提とする）。
+///
+/// `__launch_bounds__(256)` を [`PROBE_SETMAXNREG_INCDEC`] と揃えて付与する
+/// （イシュー #484 レビュー指摘 P2）。コンパイラのベースラインレジスタ
+/// 割り当ては launch bounds ヒントに依存するため、これを揃えずに
+/// [`report_control_baseline_regs`] で計測すると `PROBE_SETMAXNREG_INCDEC`
+/// が実際に前提とするベースラインと異なる値を「確定値」として誤読しうる。
 const CONTROL_INCDEC: &str = r#"
-extern "C" __global__ void control_incdec(
+extern "C" __global__ void __launch_bounds__(256) control_incdec(
     const float* __restrict__ in,
     float* __restrict__ out,
     int n)
@@ -247,6 +265,70 @@ fn try_compile(
                  result={result} control_accepted={control_ok} detail={err}"
             );
             None
+        }
+    }
+}
+
+/// `control_src`（`setmaxnreg` を含まない対照カーネル）を `arch` でコンパイル・
+/// ロードし、`CU_FUNC_ATTRIBUTE_NUM_REGS`（[`cudarc::driver::CudaFunction::
+/// num_regs`]）でコンパイラが実際に割り当てたベースライン register/thread 数を
+/// 実測して `SETMAXNREG_PROBE_RESULT` 行として記録する（イシュー #484
+/// レビュー指摘 P2 対応。[`PROBE_SETMAXNREG_INCDEC`] ドキュメンテーション
+/// コメント参照）。
+///
+/// カーネルを起動しない点が [`try_load_and_run`] と異なる: レジスタ割り当ては
+/// `cuModuleLoadData` 時点のドライバ JIT（ptxas 相当）で確定するため、
+/// `load_function` までで実測に十分であり、実行（launch/synchronize）は
+/// 不要（かつ対照カーネルは `setmaxnreg` を含まないため実行結果自体に
+/// 検証価値がない）。
+///
+/// コンパイル・ロードいずれかが失敗した場合も `panic` させず `result=failed`
+/// として記録する（本ファイル冒頭「使えないという結論も spike の正当な
+/// 成果」と同じ方針。対照カーネルの失敗は toolchain 側の問題である可能性が
+/// 高く、[`try_compile`] 側の `control_accepted` ログと合わせて診断する）。
+fn report_control_baseline_regs(device: &CudaDevice, label: &str, control_src: &str, arch: &str) {
+    let ptx = match compile_ptx(control_src, arch) {
+        Ok(ptx) => ptx,
+        Err(err) => {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
+                 result=failed detail={err}"
+            );
+            return;
+        }
+    };
+    let module = match device.context().load_module(ptx) {
+        Ok(module) => module,
+        Err(err) => {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
+                 result=failed detail={err:?}"
+            );
+            return;
+        }
+    };
+    let func = match module.load_function(label) {
+        Ok(func) => func,
+        Err(err) => {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
+                 result=failed detail={err:?}"
+            );
+            return;
+        }
+    };
+    match func.num_regs() {
+        Ok(num_regs) => {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
+                 result=measured num_regs_per_thread={num_regs}"
+            );
+        }
+        Err(err) => {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=control_baseline_regs kernel={label} arch={arch} \
+                 result=failed detail={err:?}"
+            );
         }
     }
 }
@@ -449,6 +531,12 @@ fn setmaxnreg_dec_probe() {
 /// 非対称パターン（本テスト）側であり、`setmaxnreg.dec` 単体（片道）版より
 /// 情報価値が高いため、dec 版の拒否予測が的中した場合に備えてこちらでも
 /// 追試を欠かさない。
+///
+/// `try_compile`/`try_load_and_run` の前に [`report_control_baseline_regs`]
+/// で対照カーネルの実際のベースライン register/thread 数を実測・記録する
+/// （イシュー #484 レビュー指摘 P2 対応。`PROBE_SETMAXNREG_INCDEC` が指定する
+/// dec/inc の絶対値〈24/232〉がこのベースラインに対して妥当かどうかを
+/// 転記時に突き合わせられるようにするため）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10、compute capability 12.1 相当）必須。\
             実測記録は docs/cuda-tensor-core-design.md「setmaxnreg プローブ結果（#484）」節"]
@@ -463,6 +551,13 @@ fn setmaxnreg_incdec_probe() {
 
     let arch = device.arch();
     let arch_accelerated = format!("{arch}a");
+
+    // `setmaxnreg.dec`/`.inc` の絶対値（24/232）を検証する前に、対照カーネル
+    // （`setmaxnreg` を含まない同一 `__launch_bounds__(256)` 構成）の実際の
+    // ベースライン register/thread 数を実測する（イシュー #484 レビュー
+    // 指摘 P2 対応。[`PROBE_SETMAXNREG_INCDEC`] ドキュメンテーションコメント
+    // 参照）。
+    report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, arch);
 
     // 素の compute_XY（本命シナリオ: arch-accelerated feature のため
     // 拒否される可能性が高い）。
