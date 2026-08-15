@@ -503,11 +503,11 @@ fn main() {
     }
 
     // L2: L2_CACHE_SIZE 未満に src+dst の合計が収まるようバッファを
-    // `l2_bytes / 4`（f32 要素数。src・dst 双方を L2 に収めるため 1/2 では
-    // なくさらに余裕を持たせる）に抑える。属性取得に失敗した場合は
-    // global より 1 桁小さい固定値へフォールバックする（fail-soft。
-    // 属性ダンプ自体の失敗は上のセクションで既に可視化済みのため、ここでは
-    // 帯域計測を継続する）。
+    // `l2_bytes / 4 / size_of::<f32>()`（= L2_CACHE_SIZE/16 要素。src・dst
+    // 双方を L2 に収めるため 1/2 ではなくさらに余裕を持たせる）に抑える。
+    // 属性取得に失敗した場合は global より 1 桁小さい固定値へフォールバック
+    // する（fail-soft。属性ダンプ自体の失敗は上のセクションで既に可視化済み
+    // のため、ここでは帯域計測を継続する）。
     let (l2_n, l2_size_is_fallback): (usize, bool) = match l2_cache_bytes {
         Some(bytes) if bytes > 0 => (
             ((bytes as usize) / 4 / std::mem::size_of::<f32>()).max(1024),

@@ -104,7 +104,7 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 | 区分 | バッファサイズ | 実効帯域（中央値） | bytes/cycle（device-wide） | 備考 |
 |---|---|---|---|---|
 | global（L2 超） | n=67108864（256 MiB/バッファ） | 未実測 GB/s | 未実測 | L2 非依存の参照帯域。`bytes_per_cycle_device_wide`（`device_attributes_dump.rs` 出力ラベル）をそのまま転記 |
-| L2（L2 未満） | 未実測（`L2_CACHE_SIZE/4` 要素） | 未実測 GB/s | 未実測 | src+dst 合計が L2 に収まる設定。同上 |
+| L2（L2 未満） | 未実測（`L2_CACHE_SIZE/16` 要素。`device_attributes_dump.rs` の算出式 `l2_bytes / 4 / size_of::<f32>()` 実測） | 未実測 GB/s | 未実測 | src+dst 合計が L2 に収まる設定。同上 |
 | L1（SM あたり） | — | スペック値＋出典を記録（下記参照） | — （per-SM。上 2 行とは基準が異なる） | 本バイナリでは未実装（下記「限界」参照） |
 
 **単位に関する注意（Review 指摘対応・#482）**: 上表の `bytes/cycle` 列は global/L2 行が **device-wide**
