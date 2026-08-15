@@ -200,6 +200,11 @@ capability 8.6）と異なる世代の Tensor Core でも同様の fail 率（15
 確認した点に価値があり、#186 が示した「REQ-2 改定が必要」という結論を補強する新規データとして
 引き渡す。
 
+**非後退契約への fixture 化（イシュー #491）**: 上記 8 件のうち 6 件（TF32 5 件・f16 K=4096 1 件）の実測値は
+`crates/backend-cuda/tests/common/parity_baseline.rs`（fixture）・`docs/perf/cuda-parity-baseline.md`（正本ドキュメント）
+へ転記され、後続の Phase B/C カーネル改修が「parity green」ではなく「非後退（fail 比率・平均絶対誤差が本節の実測値を
+上回らない）」を機械検査できるようにした。
+
 いずれも `.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を単独で緩和しない」・
 `security.md`「テスト許容誤差の変更は必ず人間の承認を経る」に従い**許容誤差・アサーションを一切変更
 せず**、実測値を本節に記録したうえで #186（Tensor Core 経路の数値一致閾値の実測再評価。
@@ -217,6 +222,15 @@ toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p backend-cud
 （`*_parity_smoke_env_adaptive` 等）のみが実行される。これらは `CudaDevice::new` が
 `CudaError::DriverUnavailable`／`CudaError::NvrtcUnavailable` を返す分岐で早期 return し green になる
 契約（各テストファイル冒頭のドキュメンテーションコメント参照）。本イシューの実行はこの契約を変更しない。
+
+**追記（イシュー #491・PR #640 codex-review P1 指摘対応）**: 基本版 WMMA(TF32) カーネル単独の parity
+非後退検査（`ParityPath::WmmaTf32`）は、`tests/*.rs`（独立クレート扱いの統合テスト）から公開 API を
+増やさずに到達できないため、`crates/backend-cuda/src/gemm.rs` のライブラリ自身の単体テスト
+（`#[cfg(test)] mod tests` 内 `wmma_tf32_basic_kernel_parity_does_not_regress`。`#[ignore]` で実機必須）
+として実装している。`cargo test` はターゲット未指定時に lib ユニットテスト・統合テスト双方を対象にする
+ため、既存の実行導線（`make test-ignored-cuda`。`cargo test -p backend-cuda --release -- --ignored --nocapture`）
+はこのテストも変更なく含む。個別に実行する場合は `cargo test -p backend-cuda --lib -- --ignored` を使う。
+`docs/perf/cuda-parity-baseline.md` §7「関連」参照。
 
 ## 7. 未解決事項・エスカレーション先
 
