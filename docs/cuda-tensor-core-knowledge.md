@@ -25,7 +25,8 @@
 
 ### 2.3 静的共有メモリ per-block 48KiB 上限とタイル構成縮小の判断
 
-- 全 compute capability 共通の静的共有メモリ上限（per-block 48KiB。動的共有メモリ opt-in `cudaFuncSetAttribute` を追加で呼ばない限り超過するとコンパイル・起動が失敗する）に対し、`mma.sync`/`ldmatrix`/`cp.async` パイプライン（#187）の実装計画候補値（ブロックタイル 128×128・BK=32・3 ステージ）は `(128×32+32×128)×2B×3 ≈ 49152B ≈ 48KiB` とほぼ上限に達し、コンパイル検証ができない環境では危険側に倒れる。よって `BM=32`・`BN=64`・`BK=32`・3 ステージ（共有メモリ 18432B ≈ 18KiB）に縮小した（[`kernels_mma.rs`](../crates/backend-cuda/src/kernels_mma.rs) 冒頭コメント「タイル構成」）。
+- 全 compute capability 共通の静的共有メモリ上限（per-block 48KiB。動的共有メモリ opt-in `cudaFuncSetAttribute` を追加で呼ばない限り超過するとコンパイル・起動が失敗する）に対し、`mma.sync`/`ldmatrix`/`cp.async` パイプライン（#187）の実装計画候補値（ブロックタイル 128×128・BK=32・3 ステージ）は `(128×32+32×128)×2B×3 ≈ 49152B ≈ 48KiB` とほぼ上限に達し、コンパイル検証ができない環境では危険側に倒れる。よって当初 `BM=32`・`BN=64`・`BK=32`・3 ステージ（共有メモリ 18432B ≈ 18KiB）に縮小した（[`kernels_mma.rs`](../crates/backend-cuda/src/kernels_mma.rs) 冒頭コメント「タイル構成」）。
+- **B-3（#494）でのブロックタイル拡大**: B-2（レジスタブロッキング。#493）でブロックスレッド数が 512→128 へ減り `cp.async` 協調ロードの並列度が低下したため、`BK=32` を維持したまま `BM=64`・`BN=128`（warp 構成 `2x8`=16 warp=512 スレッド。共有メモリ 36864B ≈ 36KiB。per-block 48KiB 上限に対し余裕を残す）へ拡大した。`BK` 不変のためアキュムレート順序は BM/BN に依存せず B-1/B-2 時点と bit 一致の出力を維持する（parity 非後退契約は変更不要）。候補算出・SMEM/レジスタ予算・段階的計測手順は [`docs/perf/cuda-gemm-mma-block-tile.md`](./perf/cuda-gemm-mma-block-tile.md) を参照。sm_121 実機属性は未実測のため候補判断は全 compute capability 共通の保証値ベースであり、実機再確認は #502 へ引き継ぐ。
 
 ### 2.4 インライン PTX の NVRTC 受理は未検証
 
@@ -36,7 +37,8 @@
 | 判断事項 | 内容 | 出典 |
 |---------|------|------|
 | WMMA タイル構成の縮小 | ブロックタイル = warp タイル = fragment タイル = `m16n16k16`（1 ブロック = 1 warp = 32 スレッド、fragment 1 個のみ）に縮小。設計メモ候補値（128×128・64×64・2×2 warp）からの意図的な逸脱 | [`kernels_wmma.rs`](../crates/backend-cuda/src/kernels_wmma.rs) 冒頭コメント「タイル構成」 |
-| mma パイプラインのタイル構成縮小 | `BM=32`・`BN=64`・`BK=32`・3 ステージ、1 warp = C の `16x8` タイル 1 個のみ（warp 内 M/N 方向の追加タイルループなし） | [`kernels_mma.rs`](../crates/backend-cuda/src/kernels_mma.rs) 冒頭コメント「タイル構成」。2.3 節参照 |
+| mma パイプラインのタイル構成縮小（当初・B-1〜B-2） | `BM=32`・`BN=64`・`BK=32`・3 ステージ、1 warp = C の `16x8` タイル 1 個のみ（warp 内 M/N 方向の追加タイルループなし） | [`kernels_mma.rs`](../crates/backend-cuda/src/kernels_mma.rs) 冒頭コメント「タイル構成」。2.3 節参照 |
+| mma パイプラインのブロックタイル拡大（B-3・#494） | `BM=64`・`BN=128`・`BK=32`・3 ステージへ拡大（warp あたり 2x2 レジスタブロッキングは #493 のまま不変）。ブロックスレッド数を 128→512（B-1 相当）へ回復 | 同上・2.3 節参照 |
 | 縮小の共通理由 | 実機未接続・コンパイル未検証環境での「索引演算の複雑度を最小化する安全側判断」。`kernels_mma.rs` は `kernels_wmma.rs` の判断をそのまま踏襲 | 両ファイル冒頭コメント |
 | XOR swizzle 不採用 | バンクコンフリクト低減目的の XOR swizzle（実装計画「段階 3」）は、索引演算が最も複雑でありながらコンパイル未検証環境では誤りを検出できないため不採用。将来、性能実測が可能な環境で導入を検討する | [`docs/perf/cuda-gemm-mma-pipeline.md`](./perf/cuda-gemm-mma-pipeline.md)「スコープ外」 |
 | `ldm`（leading dimension）制約 | half 入力の `load_matrix_sync` は ldm が 8 要素の倍数、f32 の `store_matrix_sync` は ldm が 4 要素の倍数を要求。WMMA 実装は共有メモリタイル行幅を fragment 次元と同じ 16 要素に固定することで、追加パディングなしに両制約を同時に満たす（設計メモが挙げる 24 要素幅パディング候補は #63 スコープの将来最適化として保留） | [`kernels_wmma.rs`](../crates/backend-cuda/src/kernels_wmma.rs) 冒頭コメント「ldm 制約」 |

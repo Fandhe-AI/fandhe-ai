@@ -24,8 +24,8 @@
 //! 本経路は `n`/`k` が 8 の倍数であることを要求する（`kernels_mma.rs`
 //! 冒頭コメント「整列制約」）ため、`cpu_cuda_wmma_parity.rs` の非倍数
 //! エッジ形状（17×19×23 等）はそのまま流用できない。8 の倍数の
-//! エッジ形状（40×24×72 等。ブロックタイル `MMA_BM=32`/`MMA_BN=64` の
-//! 非倍数）で境界チェックの回帰対象とする。
+//! エッジ形状（40×24×72 等。ブロックタイル `MMA_BM=64`/`MMA_BN=128`
+//! 〈#494 時点〉の非倍数）で境界チェックの回帰対象とする。
 
 use backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
 use half::f16;
@@ -106,8 +106,8 @@ fn mma_f16_parity_smoke_env_adaptive() {
 /// 受け入れ条件の本体。
 ///
 /// タイル倍数形状（32/64/128）・8 の倍数の非タイル倍数エッジ形状
-/// （REQ-8 手動境界検査の回帰対象。`MMA_BM=32`/`MMA_BN=64` の非倍数）を
-/// 含む。すべて `n`/`k` が 8 の倍数（本経路の整列制約）。
+/// （REQ-8 手動境界検査の回帰対象。`MMA_BM=64`/`MMA_BN=128`〈#494 時点〉
+/// の非倍数）を含む。すべて `n`/`k` が 8 の倍数（本経路の整列制約）。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn mma_f16_matches_reference_across_shapes() {

@@ -168,11 +168,15 @@ fn mma_f16_rejects_m_exceeding_grid_dim_y_limit() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
 
-    // MMA_BM=32: 65_535 * 32 + 32 = 2_097_152 で div_ceil(m, 32) = 65_536
-    // > 65_535。a/b は形状検証にのみ使われ実際には確保しない大きさなので
-    // 空スライスにせず最小限の妥当な長さで構築する必要はない
-    // （validate_gemm_dims が先に走るため長さは合わせる）。
-    let m: u32 = 65_535 * 32 + 32;
+    // #494 時点の MMA_BM=64: 65_535 * 64 + 64 = 4_194_304 で
+    // div_ceil(m, 64) = 65_536 > 65_535。`kernels_mma::MMA_BM` は
+    // `backend_cuda` crate 内部限定（`pub(crate)`）で本統合テストからは
+    // 到達できないため、リテラル値はタイル定数変更時に手動で追従させる
+    // 必要がある（`kernels_mma.rs::MMA_BM` が単一の真実源）。a/b は形状
+    // 検証にのみ使われ実際には確保しない大きさなので空スライスにせず
+    // 最小限の妥当な長さで構築する必要はない（validate_gemm_dims が先に
+    // 走るため長さは合わせる）。
+    let m: u32 = 65_535 * 64 + 64;
     let n: u32 = 8;
     let k: u32 = 8;
     let a = vec![half::f16::ONE; (m as usize) * (k as usize)];

@@ -279,8 +279,9 @@ impl CudaMmaGemm {
         // の余剰はカーネル内境界チェックで弾かれる。共有メモリは静的
         // `__shared__` 配列のみを使用するため `shared_mem_bytes` は 0 の
         // ままでよい（`kernels_mma.rs` 冒頭コメント「タイル構成」の
-        // 18432B は per-block 静的上限 48KiB 内であり動的共有メモリの
-        // 追加確保・`cudaFuncSetAttribute` opt-in は不要）。
+        // 36864B〈#494 のブロックタイル拡大後の値〉は per-block 静的上限
+        // 48KiB 内であり動的共有メモリの追加確保・`cudaFuncSetAttribute`
+        // opt-in は不要）。
         unsafe {
             self.stream
                 .launch_builder(&self.mma_f16)
@@ -327,9 +328,10 @@ mod tests {
 
     #[test]
     fn mma_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
-        // MMA_BM=32, MMA_BN=64: 33x65 を覆うには grid (2, 2) が必要
-        // （div_ceil(65,64)=2, div_ceil(33,32)=2）。
-        let cfg = mma_launch_config(33, 65);
+        // #494 でブロックタイルを MMA_BM=64/MMA_BN=128 へ拡大。
+        // 65x129 を覆うには grid (2, 2) が必要
+        // （div_ceil(129,128)=2, div_ceil(65,64)=2）。
+        let cfg = mma_launch_config(65, 129);
         assert_eq!(cfg.grid_dim, (2, 2, 1));
         assert_eq!(cfg.block_dim, MMA_BLOCK_DIM);
         assert_eq!(cfg.shared_mem_bytes, 0);
@@ -337,7 +339,9 @@ mod tests {
 
     #[test]
     fn mma_launch_config_exact_multiple_shape_has_no_extra_tile() {
-        let cfg = mma_launch_config(64, 128);
+        // MMA_BM=64/MMA_BN=128 のちょうど 2 倍（128, 256）で余剰タイルが
+        // 出ないことを検査する。
+        let cfg = mma_launch_config(128, 256);
         assert_eq!(cfg.grid_dim, (2, 2, 1));
     }
 
@@ -361,13 +365,15 @@ mod tests {
 
     #[test]
     fn validate_mma_grid_bounds_accepts_shapes_within_limit() {
-        // MMA_BM=32: div_ceil(65_535 * 32, 32) = 65_535（上限ちょうど）。
+        // MMA_BM（#494 時点で 64）単位: div_ceil(65_535 * MMA_BM, MMA_BM)
+        // = 65_535（上限ちょうど）。定数参照のためタイル値変更時も自動追従。
         assert!(validate_mma_grid_bounds(65_535 * kernels_mma::MMA_BM).is_ok());
     }
 
     #[test]
     fn validate_mma_grid_bounds_rejects_m_exceeding_grid_y_limit() {
-        // MMA_BM=32: div_ceil(65_535*32 + 1, 32) = 65_536 > 65_535。
+        // MMA_BM（#494 時点で 64）単位: div_ceil(65_535*MMA_BM + 1, MMA_BM)
+        // = 65_536 > 65_535。
         let err = validate_mma_grid_bounds(65_535 * kernels_mma::MMA_BM + 1)
             .expect_err("grid_dim.y must exceed CUDA's 65,535 limit");
         assert!(matches!(err, CudaError::InvalidShape { .. }));
@@ -483,7 +489,8 @@ mod tests {
             CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
         // (m, n, k): 小形状（16x8x16。単一 mma タイル）・タイル端形状
-        // （40x72x160。MMA_BM=32/MMA_BN=64/MMA_BK=32 の非整数倍）・
+        // （40x72x160。#494 時点の MMA_BM=64/MMA_BN=128/MMA_BK=32 の
+        // 非整数倍）・
         // 大形状（256x256x4096。B-0/#491 parity 非後退契約の mma_f16 行と
         // 同一形状。docs/perf/cuda-parity-baseline.md 参照）を横断する
         // （#492 実装計画 §5-5）。
