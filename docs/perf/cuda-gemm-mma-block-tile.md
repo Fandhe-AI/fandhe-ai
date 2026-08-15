@@ -48,7 +48,7 @@ B-2（#493）は warp あたり 2x2 レジスタブロッキング（warp タイ
 
 **#498 追記（バンクコンフリクト対策パディング適用後）**: 上記「余裕ゼロ」はパディング**前**の値であり、#498 で `MMA_A_PAD`/`MMA_B_PAD`（バンクコンフリクト対策の非 2 冪パディング）を適用した結果、共有メモリ使用量は `41,472B`（stages=3）へ増加した。`stages=4` の使用量は `(64*40+32*136)*2*4 = 55,296B` となり **48KiB 上限を超過（不成立）** になった（パディング前の「余裕ゼロ」から「そもそも成立しない」へ変化）。テスト自体もこの変化に合わせ `docs/perf/cuda-gemm-mma-bank-conflict.md` §1「STAGES=4 スワップテストへの影響」の記載どおり改訂済み（詳細は同ファイル参照）。
 
-候補 B の占有率概算（参考: compute capability 8.6 の公称仕様値。実機実測ではない。sm_121 は `docs/perf/sm121-device-attributes.md` 記入後に再確認）: SMEM/SM 約 100KiB（仕様上限）→ 2 ブロック/SM（73,728B ≤ 100KiB）、1,024 スレッド ≤ 1,536、レジスタは 64 本/thread 以下なら 2 ブロック常駐可。全候補が `MMA_K_STEPS_PER_STAGE >= 2`（CUTLASS `mma_base.h` の `kWarpGemmIterations >= 2` 相当。`kernels_mma.rs` の `const _: () = assert!(MMA_K_STEPS_PER_STAGE >= 2, ...)` で機械検査）を満たす。
+候補 B の占有率概算（参考: compute capability 8.6 の公称仕様値。実機実測ではない。sm_121 は `docs/perf/sm121-device-attributes.md` 記入後に再確認）: SMEM/SM 約 100KiB（仕様上限）→ 2 ブロック/SM（パディング前 73,728B ≤ 100KiB。#498 のパディング適用後は 82,944B ≤ 100KiB で同じく 2 ブロック/SM を維持。詳細は上記「#498 追記」および `docs/perf/cuda-gemm-mma-bank-conflict.md` §「占有率への影響」参照）、1,024 スレッド ≤ 1,536、レジスタは 64 本/thread 以下なら 2 ブロック常駐可。全候補が `MMA_K_STEPS_PER_STAGE >= 2`（CUTLASS `mma_base.h` の `kWarpGemmIterations >= 2` 相当。`kernels_mma.rs` の `const _: () = assert!(MMA_K_STEPS_PER_STAGE >= 2, ...)` で機械検査）を満たす。
 
 **本実装は候補 B（`BM=64`・`BN=128`・`BK=32`）を既定値として `kernels_mma.rs` に反映済み**（§2 の bit 一致論拠により安全側）。候補 A/C/D は実機での段階的計測用に本ファイルへ記録するのみで、コードには反映していない。
 
