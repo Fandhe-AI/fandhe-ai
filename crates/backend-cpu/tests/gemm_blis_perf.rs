@@ -126,9 +126,15 @@ fn gemm_blis_baseline_pytorch_square_512_to_4096() {
 
         let config = MeasurementConfig::default(); // warmup 20・iters 20（TASK-8.1 下限）
 
+        // `gemm_blis_parallel` は出力バッファ全体を上書きする契約
+        // （`crates/backend-cpu/src/gemm_blis/mod.rs`）のため、ゼロ初期化は
+        // 計測前に一度だけ行えばよい。計測クロージャ内でループのたびに
+        // ゼロクリアすると O(N²) のメモリ書き込み時間が `median_secs`・
+        // そこから算出する TFLOPS（Phase E の対 PyTorch 比率の分子）へ
+        // 混入し、比較対象のカーネル性能を過小評価してしまう
+        // （codex-review 指摘・PR #650）。
         let mut c = vec![0.0f32; m * n];
         let measurement = run(&config, || {
-            c.iter_mut().for_each(|v| *v = 0.0);
             gemm_blis_parallel(&a, &b, &mut c, m, n, k).unwrap();
         })
         .expect("gemm_blis_parallel の計測に失敗");
