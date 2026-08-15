@@ -439,42 +439,34 @@ pub(crate) const fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// P0 指摘: 以前の実装は `!xdg.is_empty()` 相当のガードが `if let` の外に
 /// なく、空文字列の `XDG_CACHE_HOME` が `HOME` へ素通りしていた）。
 ///
-/// **リポジトリツリー containment 検証を持たない理由（PR #659 codex-review
-/// P1 指摘への対応。旧実装の設計変更）**: 旧実装はコンパイル時の
-/// `CARGO_MANIFEST_DIR` から導出した「ビルド時ワークスペースルート」
-/// （旧 `compile_time_workspace_root()`）と実行時の解決結果を比較する
-/// containment 検証を持っていたが、この検証は **ビルド環境と実行環境が
-/// 異なる場合（別 checkout・コンテナ・配布先での実行）に無条件で素通り
-/// する**という構造的欠陥があった（`env!("CARGO_MANIFEST_DIR")` はビルド
-/// 時のディレクトリ配置を焼き込むため、実行時に別のパスへ配置された
-/// リポジトリと比較しても一致せず、検査が成立しない。ビルド時パスの
-/// ハードコードを避ける方針 `AGENTS.md` にも反する）。「ビルド時定数との
-/// 一致で拒否する」ブロックリスト方式は実行時に一般には機能しないため、
-/// 本関数はこの検証を削除し、代わりに以下の許可リスト方式（本関数が
-/// 保証する範囲）に置き換える:
+/// **`workspace_root` containment 検証（PR #659 codex-review P0 再指摘への
+/// 対応。2 回目の設計変更）**: 1 回目の修正（P1 指摘対応）ではコンパイル時
+/// `CARGO_MANIFEST_DIR` から導出した「ビルド時ワークスペースルート」との
+/// 比較を削除し、containment 検証自体を持たない許可リスト方式に置き換えた。
+/// しかしこれは `override_dir`（`RUST_AI_CUDA_CACHE_DIR`）がリポジトリ
+/// ツリー内を指す絶対パス（例 `/workspace/repository/cache`）をそのまま
+/// 受理してしまう回帰であり、codex-review に P0 として再指摘された。
+/// 「ビルド時定数のハードコードは実行環境が変わると素通りする」という
+/// 1 回目の指摘の要点は正しいが、対策は「containment 検証を削除する」
+/// ことではなく「**信頼できる境界を呼び出し元から注入で受け取る**」こと
+/// だった。本関数はこの反省を踏まえ `workspace_root: &Path`（`Option` では
+/// なく必須引数）を受け取り、`override_dir`・`xdg_cache_home`・`home` の
+/// 3 分岐すべてで解決結果を [`path_lexically_within`] により
+/// `workspace_root` 配下でないことを検証する（3 分岐のうち `override_dir`
+/// だけを検証対象外にする例外は設けない。それが今回の P0 指摘の核心の
+/// ため）。`workspace_root` を `Option` にして呼び出し元が `None` を渡せる
+/// 余地を残すと「検証を迂回できる」構造が復活するため、必須引数として
+/// 契約に組み込む（呼び出し元は [`cache_root`] も参照）。
 ///
-/// - `xdg_cache_home`／`home` の 2 分岐は、外部入力（`XDG_CACHE_HOME`・
-///   `HOME`）へ本ライブラリ専有のサブパス（`rust-ai-library/cuda` または
-///   `.cache/rust-ai-library/cuda`）を必ず付加する。OS 標準のユーザー
-///   キャッシュ規約（XDG Base Directory・`$HOME/.cache`）はいずれもソース
-///   リポジトリのツリーとは独立した場所を指す設計上の慣習であり、通常の
-///   運用でリポジトリツリー内に一致することはない。
-/// - `override_dir`（`RUST_AI_CUDA_CACHE_DIR`）は、DeepGEMM の
-///   `DG_JIT_CACHE_DIR` と同様に「呼び出し元が明示的に指定した信頼済み
-///   キャッシュ配置先」として扱う（絶対パス・非空のみ検証し、それ以上の
-///   自動判定は行わない）。呼び出し元（CI・運用者）がリポジトリツリー内を
-///   誤って指定した場合の防止はこの層の責務外とする。
-///
-/// **C-3（#509）への委譲**: 実際にディレクトリを作成・オープンする時点で、
-/// `canonicalize` 済みパスによる containment 再検証を行うのが正しい実装点
-/// である（symlink 解決込みの実在ベース検証はビルド時の純関数では原理的に
-/// 実行できない。パスの実在を要求するため）。C-3 はこの時点で「信頼できる
-/// runtime workspace 境界」をどう受け取るか（設定値として明示的に渡す等）
-/// を含めて設計する（`docs/cuda-jit-cache-design.md` 検証条件節も参照）。
-/// [`path_lexically_within`]／[`lexically_normalize`] は `..` 折り畳み込みの
-/// 字句正規化プリミティブとして C-3 の実装に転用できるよう残してある
-/// （本関数からは呼ばない。C-3 実装までは意図的に未使用）。
+/// **C-3（#509）への委譲は残る範囲のみ**: 実際にディレクトリを作成・
+/// オープンする時点での `canonicalize` 済みパスによる symlink 解決込みの
+/// 再検証（本関数は fs I/O なしの字句正規化のみで、パスの実在を要求する
+/// symlink 解決は原理的に実行できない）は引き続き C-3 のスコープとする
+/// （`docs/cuda-jit-cache-design.md` 検証条件節も参照）。`workspace_root`
+/// 自体をどう決定するか（呼び出し元がどの値を渡すか）は [`cache_root`] の
+/// doc を参照。
 fn resolve_cache_root(
+    workspace_root: &Path,
     override_dir: Option<&OsStr>,
     xdg_cache_home: Option<&OsStr>,
     home: Option<&OsStr>,
@@ -489,6 +481,14 @@ fn resolve_cache_root(
         if path.is_relative() {
             return Err(CudaError::CacheDirUnavailable {
                 detail: format!("RUST_AI_CUDA_CACHE_DIR must be an absolute path, got {path:?}"),
+            });
+        }
+        if path_lexically_within(path, workspace_root) {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "RUST_AI_CUDA_CACHE_DIR must not resolve within the workspace root \
+                     {workspace_root:?}, got {path:?}"
+                ),
             });
         }
         return Ok(path.to_path_buf());
@@ -506,7 +506,16 @@ fn resolve_cache_root(
                 detail: format!("XDG_CACHE_HOME must be an absolute path, got {path:?}"),
             });
         }
-        return Ok(path.join("rust-ai-library").join("cuda"));
+        let candidate = path.join("rust-ai-library").join("cuda");
+        if path_lexically_within(&candidate, workspace_root) {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "XDG_CACHE_HOME-derived cache root must not resolve within the workspace \
+                     root {workspace_root:?}, got {candidate:?}"
+                ),
+            });
+        }
+        return Ok(candidate);
     }
 
     if let Some(home_dir) = home {
@@ -521,7 +530,16 @@ fn resolve_cache_root(
                 detail: format!("HOME must be an absolute path, got {path:?}"),
             });
         }
-        return Ok(path.join(".cache").join("rust-ai-library").join("cuda"));
+        let candidate = path.join(".cache").join("rust-ai-library").join("cuda");
+        if path_lexically_within(&candidate, workspace_root) {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "HOME-derived cache root must not resolve within the workspace root \
+                     {workspace_root:?}, got {candidate:?}"
+                ),
+            });
+        }
+        return Ok(candidate);
     }
 
     Err(CudaError::CacheDirUnavailable {
@@ -543,27 +561,18 @@ fn resolve_cache_root(
 /// 操作は `..` 解決後のパス（`root` 配下）を指してしまう。symlink 解決
 /// までは行わない（fs I/O なしの字句正規化のみ）。
 ///
-/// **現時点では未使用（意図的な先行スキャフォールディング。PR #659
-/// codex-review P1 指摘への対応）**: [`resolve_cache_root`] は旧実装で
-/// 本関数を使いビルド時ワークスペースルートとの containment を検証して
-/// いたが、ビルド環境と実行環境が異なる場合に検証が無条件で素通りする
-/// 構造的欠陥があったため削除した（[`resolve_cache_root`] doc 参照）。
-/// `..` 折り畳み込みの字句正規化プリミティブ自体は、C-3（#509）が実際に
+/// [`resolve_cache_root`] が `workspace_root` containment 検証（3 分岐
+/// 共通）に使う（PR #659 codex-review P0 再指摘への対応で、1 回目の修正
+/// 時に外していた呼び出しを復元した。詳細は [`resolve_cache_root`] doc
+/// 参照）。`..` 折り畳み込みの字句正規化プリミティブは、C-3（#509）が実際に
 /// ディレクトリを作成・オープンする時点で行う `canonicalize` 済みパスでの
-/// containment 再検証に転用できるため残してある。
-#[allow(
-    dead_code,
-    reason = "C-3(#509) の canonicalize 済み containment 再検証で使う想定の \
-              先行スキャフォールディング（PR #659 codex-review P1 指摘対応で \
-              resolve_cache_root の呼び出しを削除したため現時点では未参照）"
-)]
+/// symlink 解決込み再検証にも転用できる。
 fn path_lexically_within(candidate: &Path, root: &Path) -> bool {
     lexically_normalize(candidate).starts_with(lexically_normalize(root))
 }
 
 /// パスのコンポーネントを fs I/O なしで字句上（lexically）正規化する
-/// （[`path_lexically_within`] 用。同関数と同じ理由で現時点では未使用の
-/// 先行スキャフォールディング）。`..`（[`Component::ParentDir`]）が
+/// （[`path_lexically_within`] 用）。`..`（[`Component::ParentDir`]）が
 /// 現れるたびに直前の通常コンポーネント（[`Component::Normal`]）を
 /// 取り除く（realpath 相当だがシンボリックリンク解決は行わない）。
 ///
@@ -571,11 +580,6 @@ fn path_lexically_within(candidate: &Path, root: &Path) -> bool {
 /// は OS のパス解決（ルートの親はルート自身）と同様に無視する。相対
 /// パスの先頭に現れる `..`（遡り先の通常コンポーネントが存在しない
 /// 場合）のみ、そのまま保持する。
-#[allow(
-    dead_code,
-    reason = "path_lexically_within と同じく C-3(#509) 向けの先行 \
-              スキャフォールディング（PR #659 codex-review P1 指摘対応）"
-)]
 fn lexically_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -620,20 +624,30 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// [`resolve_cache_root`] を直接呼ぶ（本関数の doc 参照）ので、本関数
 /// 自体は非テストコードから未参照のままになる。
 ///
-/// **旧実装からの変更（PR #659 codex-review P1 指摘対応）**: コンパイル時
+/// **`workspace_root` を必須引数として受け取る（PR #659 codex-review P0
+/// 再指摘への対応）**: 1 回目の修正（P1 指摘対応）ではコンパイル時
 /// `CARGO_MANIFEST_DIR` から導出する「ビルド時ワークスペースルート」を
-/// 引数に渡す処理を削除した。ビルド環境と実行環境が異なる配布シナリオ
-/// （別 checkout・コンテナ等）では当該ワークスペースルートが実行時の
-/// リポジトリ配置と一致せず containment 検証が無条件で素通りする構造的
-/// 欠陥があったため（`AGENTS.md` の実機固有パスのハードコード回避方針にも
-/// 反する）。詳細は [`resolve_cache_root`] doc 参照。
+/// 引数に渡す処理を削除し、containment 検証自体をなくしてしまっていた
+/// （ビルド環境と実行環境が異なる配布シナリオでは当該ワークスペースルート
+/// が実行時のリポジトリ配置と一致せず検証が無条件で素通りするという
+/// 1 回目の指摘自体は正しかったが、対策として検証を丸ごと削除したのが
+/// 誤りだった）。本関数は `workspace_root: &Path` を必須引数として受け取り
+/// [`resolve_cache_root`] へそのまま渡す。呼び出し元（C-3・C-4）は、
+/// ビルド時定数のハードコードではなく実行時に確定する信頼できる境界
+/// （例: 実行時に明示設定される runtime workspace 設定値。プロセスの
+/// カレントディレクトリ `std::env::current_dir()` は「プロセス起動時の
+/// 作業ディレクトリ」であり「リポジトリツリーの境界」ではないため
+/// **使わない**: `XDG_CACHE_HOME`／`HOME` 未設定でカレントディレクトリが
+/// たまたまホームディレクトリ配下だった場合、`~/.cache/...` という正当な
+/// フォールバック結果が誤って拒否される）を C-3 設計時に決定して渡す。
 #[allow(
     dead_code,
     reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
               意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
 )]
-pub(crate) fn cache_root() -> Result<PathBuf, CudaError> {
+pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
     resolve_cache_root(
+        workspace_root,
         std::env::var_os("RUST_AI_CUDA_CACHE_DIR").as_deref(),
         std::env::var_os("XDG_CACHE_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
@@ -643,7 +657,11 @@ pub(crate) fn cache_root() -> Result<PathBuf, CudaError> {
 /// `root` と [`CudaKernelCacheKey::cache_entry_dir_name`] を合成し、
 /// キャッシュエントリの完全パスを返す内部純関数（イシュー #506・
 /// Phase C-2）。fs I/O は行わない純粋なパス組み立てのみ（`create_dir_all`
-/// 等は C-3（#509）のスコープ）。
+/// 等は C-3（#509）のスコープ）。`root` は呼び出し元
+/// （[`cache_entry_path`] 経由の [`cache_root`]）で既に `workspace_root`
+/// containment 検証を経ている前提であり、本関数自体は単純な結合のみを
+/// 行う（結果が常に `root` 配下に収まることは `Path::join` の性質として
+/// 自明であり、下記ユニットテストで回帰確認する）。
 ///
 /// [`resolve_cache_root`]／[`cache_root`] と同じ「注入で決定化」パターン
 /// （`self-repair::isolation::resolve_toolchain_home_reinjections`と同型。
@@ -664,7 +682,13 @@ fn cache_entry_path_in(root: &Path, key: &CudaKernelCacheKey) -> Result<PathBuf,
 /// 結果が必ず `root` 配下（`starts_with(root)`）に収まることを
 /// [`cache_entry_path_in`] のユニットテストで検証し、トラバーサル防御
 /// （A03）の第 3 層とする（第 1 層: `CudaKernelDescriptor::new` の構築時
-/// 検証、第 2 層: `cache_entry_dir_name` 内の縦深防御検査）。
+/// 検証、第 2 層: `cache_entry_dir_name` 内の縦深防御検査）。`root` 自体が
+/// リポジトリツリー外であることの検証（第 0 層）は [`cache_root`] 経由の
+/// [`resolve_cache_root`] が `workspace_root` containment 検証で担う
+/// （PR #659 codex-review P0 再指摘: `cache_entry_path_in` 自体にも
+/// containment がないと指摘されたが、それは `cache_root` が渡す `root` に
+/// 対して検証すべき事項であり、本関数の責務は `root` 配下への結合のみに
+/// 留める設計とした）。
 ///
 /// [`cache_root`] と同じ理由で `pub(crate)` に留める（crate ルートからは
 /// 再公開しない。PR #659 レビュー指摘）。呼び出し元も [`cache_root`] と
@@ -675,8 +699,11 @@ fn cache_entry_path_in(root: &Path, key: &CudaKernelCacheKey) -> Result<PathBuf,
     reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
               意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
 )]
-pub(crate) fn cache_entry_path(key: &CudaKernelCacheKey) -> Result<PathBuf, CudaError> {
-    cache_entry_path_in(&cache_root()?, key)
+pub(crate) fn cache_entry_path(
+    workspace_root: &Path,
+    key: &CudaKernelCacheKey,
+) -> Result<PathBuf, CudaError> {
+    cache_entry_path_in(&cache_root(workspace_root)?, key)
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
@@ -1352,11 +1379,22 @@ mod tests {
         assert!(!name.contains('/') && !name.contains('\\') && !name.contains(".."));
     }
 
+    // `resolve_cache_root` テスト共通の `workspace_root`（イシュー #506・
+    // PR #659 codex-review P0 再指摘対応）: 既存の全テストケース
+    // （`/opt/rust-ai-cache`・`/home/user/...`）とは無関係なパスにして
+    // おき、containment 検証が既存のフォールバック挙動を壊さないことを
+    // 既存テスト自体で回帰確認する（下記の専用テストは逆に workspace_root
+    // 配下を指すケースを検証する）。
+    fn unrelated_workspace_root() -> PathBuf {
+        PathBuf::from("/workspace/repository")
+    }
+
     // キャッシュルート解決: env 上書き（override）が XDG_CACHE_HOME・
     // HOME より優先されること。
     #[test]
     fn resolve_cache_root_prefers_override() {
         let root = resolve_cache_root(
+            &unrelated_workspace_root(),
             Some(OsStr::new("/opt/rust-ai-cache")),
             Some(OsStr::new("/home/user/.cache")),
             Some(OsStr::new("/home/user")),
@@ -1370,6 +1408,7 @@ mod tests {
     #[test]
     fn resolve_cache_root_falls_back_to_xdg_cache_home() {
         let root = resolve_cache_root(
+            &unrelated_workspace_root(),
             None,
             Some(OsStr::new("/home/user/.cache")),
             Some(OsStr::new("/home/user")),
@@ -1385,8 +1424,13 @@ mod tests {
     // フォールバックし `.cache/rust-ai-library/cuda` を付加すること。
     #[test]
     fn resolve_cache_root_falls_back_to_home() {
-        let root =
-            resolve_cache_root(None, None, Some(OsStr::new("/home/user"))).expect("must succeed");
+        let root = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            None,
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("must succeed");
         assert_eq!(
             root,
             PathBuf::from("/home/user/.cache/rust-ai-library/cuda")
@@ -1396,7 +1440,7 @@ mod tests {
     // キャッシュルート解決: 全欠落時は `CacheDirUnavailable`（panic なし）。
     #[test]
     fn resolve_cache_root_errs_when_all_missing() {
-        let result = resolve_cache_root(None, None, None);
+        let result = resolve_cache_root(&unrelated_workspace_root(), None, None, None);
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
     }
 
@@ -1404,6 +1448,7 @@ mod tests {
     #[test]
     fn resolve_cache_root_rejects_empty_override() {
         let result = resolve_cache_root(
+            &unrelated_workspace_root(),
             Some(OsStr::new("")),
             Some(OsStr::new("/home/user/.cache")),
             Some(OsStr::new("/home/user")),
@@ -1416,6 +1461,7 @@ mod tests {
     #[test]
     fn resolve_cache_root_rejects_relative_override() {
         let result = resolve_cache_root(
+            &unrelated_workspace_root(),
             Some(OsStr::new("relative/cache/dir")),
             Some(OsStr::new("/home/user/.cache")),
             Some(OsStr::new("/home/user")),
@@ -1431,6 +1477,7 @@ mod tests {
     #[test]
     fn resolve_cache_root_rejects_relative_xdg_cache_home() {
         let result = resolve_cache_root(
+            &unrelated_workspace_root(),
             None,
             Some(OsStr::new("relative/xdg/cache")),
             Some(OsStr::new("/home/user")),
@@ -1443,7 +1490,12 @@ mod tests {
     // XDG_CACHE_HOME と同じくリポジトリツリー内へキャッシュが落ちうる）。
     #[test]
     fn resolve_cache_root_rejects_relative_home() {
-        let result = resolve_cache_root(None, None, Some(OsStr::new("relative/home")));
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            None,
+            Some(OsStr::new("relative/home")),
+        );
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
     }
 
@@ -1457,7 +1509,12 @@ mod tests {
     // 整合を検証する）。
     #[test]
     fn resolve_cache_root_rejects_empty_xdg_cache_home_even_with_valid_home() {
-        let result = resolve_cache_root(None, Some(OsStr::new("")), Some(OsStr::new("/home/user")));
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("/home/user")),
+        );
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
     }
 
@@ -1467,14 +1524,100 @@ mod tests {
     // ことを確認する。PR #659 codex-review P0 指摘）。
     #[test]
     fn resolve_cache_root_rejects_empty_home() {
-        let result = resolve_cache_root(None, None, Some(OsStr::new("")));
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            None,
+            Some(OsStr::new("")),
+        );
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
     }
 
-    // `path_lexically_within` の単体テスト（PR #659 codex-review P1 指摘
-    // 対応で `resolve_cache_root` からの呼び出しは削除したが、C-3（#509）の
-    // canonicalize 済み containment 再検証への転用に備え、純関数としての
-    // 挙動は引き続き検証する）。
+    // 安全側の検証（PR #659 codex-review P0 再指摘そのものの再現テスト）:
+    // `RUST_AI_CUDA_CACHE_DIR` が `workspace_root` 配下を指す絶対パスの
+    // 場合は拒否する。codex-review が指摘した具体例
+    // `/workspace/repository/cache` をそのまま使う。
+    #[test]
+    fn resolve_cache_root_rejects_override_within_workspace_root() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("/workspace/repository/cache")),
+            None,
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（PR #659 codex-review P0 再指摘。`..` を含む絶対パスに
+    // よる字句上の回避を防ぐ）: `/tmp/../workspace/repository/cache` は
+    // `Path::starts_with` の素朴なコンポーネント比較なら
+    // `workspace_root`（`/workspace/repository`）と先頭コンポーネントが
+    // 一致せず素通りしてしまうが、`..` 折り畳み後は `workspace_root` 配下
+    // になるため [`path_lexically_within`] の正規化込み比較で拒否される
+    // ことを確認する（codex-review 指摘の具体例そのもの）。
+    #[test]
+    fn resolve_cache_root_rejects_override_within_workspace_root_via_parent_dir_traversal() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("/tmp/../workspace/repository/cache")),
+            None,
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: `XDG_CACHE_HOME` から導出したキャッシュルートが
+    // `workspace_root` 配下になる場合も override と同様に拒否する
+    // （PR #659 codex-review P0 再指摘: 3 分岐すべてを検証対象にする）。
+    #[test]
+    fn resolve_cache_root_rejects_xdg_cache_home_within_workspace_root() {
+        let result = resolve_cache_root(
+            Path::new("/workspace/repository"),
+            None,
+            Some(OsStr::new("/workspace/repository/.cache")),
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: `HOME` から導出したキャッシュルートが `workspace_root`
+    // 配下になる場合も同様に拒否する（3 分岐目。上記 2 テストと対称）。
+    #[test]
+    fn resolve_cache_root_rejects_home_within_workspace_root() {
+        let result = resolve_cache_root(
+            Path::new("/workspace/repository"),
+            None,
+            None,
+            Some(OsStr::new("/workspace/repository")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 回帰ガード（advisor 指摘）: `workspace_root` containment 検証の追加が
+    // 「カレントディレクトリを境界に使う」という誤った実装に陥っていない
+    // ことを確認する。`workspace_root` が解決結果と無関係な場所を指す限り、
+    // XDG_CACHE_HOME／HOME フォールバックは引き続き成功しなければならない
+    // （`resolve_cache_root_falls_back_to_home` 等の既存テストと合わせ、
+    // workspace_root がたまたまホームディレクトリ等と重ならない限り誤検知
+    // しないことの明示的な回帰確認）。
+    #[test]
+    fn resolve_cache_root_succeeds_when_workspace_root_is_elsewhere() {
+        let root = resolve_cache_root(
+            Path::new("/some/other/workspace"),
+            None,
+            None,
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("must succeed: workspace_root is unrelated to the resolved cache root");
+        assert_eq!(
+            root,
+            PathBuf::from("/home/user/.cache/rust-ai-library/cuda")
+        );
+    }
+
+    // `path_lexically_within` の単体テスト（[`resolve_cache_root`] の
+    // `workspace_root` containment 検証で使う。PR #659 codex-review P0
+    // 再指摘対応で呼び出しを復元した）。
     #[test]
     fn path_lexically_within_detects_containment_after_normalizing_parent_dir() {
         // `..` 折り畳み後は `/path/to/repository/cache` となり

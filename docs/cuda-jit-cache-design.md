@@ -21,14 +21,13 @@
 - 空文字列でないこと（`Some("")` のように変数自体は設定されているが値が空、というケースも「未設定」扱いでフォールバックせず明示的に拒否する。PR #659 codex-review P0 指摘: 旧実装は空文字列の `XDG_CACHE_HOME` を素通りさせ `HOME` へフォールバックしていた）
 - 絶対パスであること（相対パスはリポジトリツリー内への意図しない書き込みを招きうるため拒否）
 
-**リポジトリツリー containment 検証を持たない理由（PR #659 codex-review P1 指摘への対応。設計変更）**: 旧実装はコンパイル時 `CARGO_MANIFEST_DIR` から導出する「ビルド時ワークスペースルート」（旧 `nvrtc::compile_time_workspace_root`）配下への字句上の containment を拒否する検証を持っていたが、ビルド環境と実行環境が異なる場合（別 checkout・コンテナ・配布先での実行）にはこの検証が無条件で素通りする構造的欠陥があった（`env!("CARGO_MANIFEST_DIR")` はビルド時のディレクトリ配置を焼き込む値であり、実行時に別パスへ配置されたリポジトリと比較しても一致しないため。`AGENTS.md` の実機固有パスのハードコード回避方針にも反する）。「ビルド時定数との一致で拒否する」ブロックリスト方式は実行時に一般には機能しないため削除し、代わりに以下の許可リスト方式に置き換えた:
+**`workspace_root` containment 検証（PR #659 codex-review P0 再指摘への対応。2 回目の設計変更）**: 1 回目の修正（P1 指摘対応）ではコンパイル時 `CARGO_MANIFEST_DIR` から導出する「ビルド時ワークスペースルート」（旧 `nvrtc::compile_time_workspace_root`）との比較を削除し、containment 検証自体を持たない許可リスト方式に置き換えていた。しかしこれは `RUST_AI_CUDA_CACHE_DIR` がリポジトリツリー内を指す絶対パス（例 `/workspace/repository/cache`）をそのまま受理してしまう回帰であり、codex-review に P0 として再指摘された。「ビルド時定数のハードコードは実行環境が変わると素通りする」という 1 回目の指摘の要点自体は正しいが、対策は検証を削除することではなく**信頼できる境界を呼び出し元から注入で受け取る**ことだった。
 
-- `XDG_CACHE_HOME`・`HOME` の 2 分岐は、外部入力へ本ライブラリ専有のサブパス（`rust-ai-library/cuda` または `.cache/rust-ai-library/cuda`）を必ず付加する。XDG Base Directory・`$HOME/.cache` はいずれも OS 標準のユーザーキャッシュ規約であり、ソースリポジトリのツリーとは独立した場所を指す設計上の慣習である
-- `RUST_AI_CUDA_CACHE_DIR` は DeepGEMM の `DG_JIT_CACHE_DIR` と同様に「呼び出し元が明示的に指定した信頼済みキャッシュ配置先」として扱う。絶対パス・非空のみ検証し、それ以上の自動判定は行わない（呼び出し元がリポジトリツリー内を誤って指定した場合の防止はこの層の責務外）
+現行実装（`nvrtc::resolve_cache_root`）は `workspace_root: &Path` を**必須引数**（`Option` ではない）として受け取り、`RUST_AI_CUDA_CACHE_DIR`・`XDG_CACHE_HOME`・`HOME` の 3 分岐すべてで、解決結果が `workspace_root` 配下（`nvrtc::path_lexically_within` による `..` 折り畳み込みの字句正規化済み比較）でないことを検証し、配下であれば `CudaError::CacheDirUnavailable` で拒否する。`RUST_AI_CUDA_CACHE_DIR` だけを検証対象外にする例外は設けない（それが P0 再指摘の核心のため）。`workspace_root` を `Option` にして呼び出し元が `None` を渡せる余地を残すと検証を迂回できる構造が復活するため、必須引数として契約に組み込んでいる。
 
-実際にディレクトリを作成・オープンする時点（C-3・#509）で `canonicalize` 済みパスによる containment 再検証を行うのが正しい実装点である（symlink 解決込みの実在ベース検証はパスの実在を要求するため、fs I/O を行わない C-2 の純関数では原理的に実行できない）。C-3 はこの時点で「信頼できる runtime workspace 境界」をどう受け取るかを含めて設計する。`nvrtc::path_lexically_within`／`nvrtc::lexically_normalize`（`..` 折り畳み込みの字句正規化プリミティブ）は C-3 の実装に転用できるよう crate 内に残してある（`resolve_cache_root` からは呼ばない）。
+`workspace_root` を「どの値にするか」はビルド時定数のハードコードを避けつつ、かつプロセスのカレントディレクトリ（`std::env::current_dir()`）のような「プロセス起動時の作業ディレクトリ」を安易に使わない（`XDG_CACHE_HOME`／`HOME` 未設定でカレントディレクトリがたまたまホームディレクトリ配下だった場合、`~/.cache/...` という正当なフォールバック結果が誤って拒否される）。C-3（#509）が実際にディレクトリを作成・オープンする際に、実行時に確定する信頼できる境界（例: 明示設定される runtime workspace 設定値）をどう決定するかを含めて設計する。加えて、`canonicalize` 済みパスによる symlink 解決込みの再検証（symlink 解決込みの実在ベース検証はパスの実在を要求するため、fs I/O を行わない C-2 の純関数では原理的に実行できない）も C-3 のスコープとして残る。
 
-さらに、キャッシュエントリパス（`cache_entry_path`）の組み立て結果は必ず解決済みルート配下（`starts_with(root)`）に収まることを保証する多層防御を持つ（第 1 層: `CudaKernelDescriptor::new` の構築時検証、第 2 層: `CudaKernelCacheKey::cache_entry_dir_name` 内の縦深防御検査、第 3 層: `cache_entry_path_in` のユニットテスト）。この多層防御は「エントリパスがルート配下に収まる」ことのみを保証し、「ルート自体がリポジトリツリー外にある」ことは保証しない（上記参照。C-3 のスコープ）。
+さらに、キャッシュエントリパス（`cache_entry_path`）の組み立て結果は必ず解決済みルート配下（`starts_with(root)`）に収まることを保証する多層防御を持つ（第 1 層: `CudaKernelDescriptor::new` の構築時検証、第 2 層: `CudaKernelCacheKey::cache_entry_dir_name` 内の縦深防御検査、第 3 層: `cache_entry_path_in` のユニットテスト）。「ルート自体がリポジトリツリー外にある」ことは上記の `workspace_root` containment 検証（`resolve_cache_root` 側）が担う（第 0 層）。
 
 ## ディレクトリ命名規則（C-2・#506）
 
@@ -38,5 +37,5 @@
 
 - `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`）
 - `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`
-- C-3（#509）: 一時ディレクトリコンパイル → アトミック rename（本文書の環境変数が実際に I/O へ結び付くタスク）。**残課題**: 本 PR（#659）時点で #509 の受け入れ基準には、`canonicalize` 済みパスによる containment 検証（symlink 対応を含む）が明記されていない。C-2 のリポジトリツリー containment 検証（ビルド時定数依存の旧実装。PR #659 codex-review P1 指摘対応で削除済み）は実行時には機能しなかったため、C-3 では「信頼できる runtime workspace 境界をどう受け取るか」を含めて検証条件を新規設計する必要がある。実装時に本文書・`nvrtc.rs` のドキュメンテーションコメントを踏まえて追加すること
+- C-3（#509）: 一時ディレクトリコンパイル → アトミック rename（本文書の環境変数が実際に I/O へ結び付くタスク）。**残課題**: 本 PR（#659）時点で #509 の受け入れ基準には、`canonicalize` 済みパスによる containment 再検証（symlink 対応を含む）が明記されていない。C-2 は字句正規化ベースの `workspace_root` containment 検証（`resolve_cache_root`・`nvrtc::path_lexically_within`。PR #659 codex-review P0 再指摘対応で実装）まで担い、C-3 では「`workspace_root` に何を渡すか（実行時に確定する信頼できる境界の決定方法）」と「symlink 解決込みの再検証」を含めて検証条件を新規設計する必要がある。実装時に本文書・`nvrtc.rs` のドキュメンテーションコメントを踏まえて追加すること
 - C-4（#511）: プロセス内 LRU カーネルキャッシュ
