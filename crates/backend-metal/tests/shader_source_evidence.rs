@@ -148,3 +148,36 @@ fn gemm_simdgroup_f16_source_retains_req8_boundary_guard() {
         "gemm_simdgroup_f16 に REQ-8 手動境界チェックが見つかりません"
     );
 }
+
+/// `gemm_simdgroup_tiled` カーネル本体（`kernel void gemm_simdgroup_tiled(`
+/// 開始位置から EOF まで）を切り出す。本ファイル内で最後に定義される
+/// カーネルのため EOF までのスライスで安全（次カーネル境界を考慮する
+/// 必要がない）。
+fn gemm_simdgroup_tiled_kernel_body() -> &'static str {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_tiled(")
+        .expect("gemm_simdgroup_tiled カーネル本体が見つかりません");
+    &GEMM_METAL_SOURCE[kernel_start..]
+}
+
+/// イシュー #536 の証跡: `gemm_simdgroup_tiled` の MMA 発行ループ（staged
+/// 経路・直接ロード経路の両方）が蛇行（serpentine）走査順
+/// （`acc_cols - 1 - ci`。奇数行 r で列を逆順に辿る）へ移植されている
+/// ことを Linux CI（ubuntu-latest）上でロックする。Mac 実機依存の A/B 計測
+/// （`docs/perf/metal-gemm-serpentine-ab.md`）は別途実施し、改善が無ければ
+/// このテストごと変更を撤去（revert）する運用とする。
+///
+/// 走査順の並べ替えのみで `acc[r][c_]` ごとの累算オペランド列（K 方向の
+/// 順序）は不変のため、既存の数値一致テスト（tolerance 変更なし）はこの
+/// 変更と独立に green であるべきという前提のもとに追加した検査（本テスト
+/// 自体は Metal 実機を必要としない文字列検査）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let needle = "uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;";
+    let occurrences = kernel_body.matches(needle).count();
+    assert_eq!(
+        occurrences, 2,
+        "gemm_simdgroup_tiled の staged 経路・直接ロード経路の両方に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}）"
+    );
+}
