@@ -424,6 +424,27 @@ fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
         }
     }
 
+    // PR #643 codex-review P0 指摘への対応: `DIM_K`/`DIM_N` は
+    // `LOAD_A_STAGE`/`LOAD_B_STAGE`（本ファイル `MMA_F16_BODY`）で A/B の
+    // 行ストライドとして直接使われ、`mma_cp_async16` の 16 バイト転送先
+    // アドレス計算（`&a[gr_c * DIM_K + gc_c]`／`&b[gr_c * DIM_N + gc_c]`）に
+    // 畳み込まれる。`Static` で焼き込む場合、値が 8 要素（f16 で 16 バイト）
+    // の倍数でないと非既定行の開始アドレスが 16 バイト境界からずれ、
+    // `cp.async.cg.shared.global` が未定義動作になる（REQ-8 境界検査の
+    // 前提が崩れる）。`dim_m` はストライドに使われず境界クランプにのみ
+    // 使われるため対象外（`LOAD_A_STAGE` の `gr_c` は行方向で整列を問わない
+    // 旨のコメント参照）。ゼロ拒否（上記ループ）とは独立の検査。
+    for (name, spec) in [("dim_n", cfg.dim_n), ("dim_k", cfg.dim_k)] {
+        if let DimSpec::Static(value) = spec
+            && !value.is_multiple_of(8)
+        {
+            return Err(invalid(format!(
+                "{name} static value ({value}) must be a multiple of 8 to preserve \
+                 cp.async's 16-byte transfer alignment for A/B row strides"
+            )));
+        }
+    }
+
     Ok(())
 }
 
@@ -468,14 +489,18 @@ fn render_mma_f16_unchecked(cfg: &MmaKernelConfig) -> String {
 /// [`MmaKernelConfig`] を 1 個にまとめた descriptor（PR #643 codex-review
 /// P1 指摘への対応）。
 ///
-/// フィールドは非公開とし、ソース取得は [`RenderedMmaKernel::source`]、
-/// 起動前検査は [`RenderedMmaKernel::validate_launch_shape`] のみを公開
-/// する。これにより「`Static` 次元を含む config から得たソースは、必ず
-/// その config を経由した起動時形状検査を通らない限りカーネル起動へ
-/// 渡せない」という構造的な契約になる。`render_mma_f16` が `String` を
-/// 直接返す設計では、`MmaKernelConfig::validate_launch_shape` の呼び出しは
-/// 呼び出し元の doc comment 遵守（advisory）に依存してしまい、`dim_k=
-/// Static(4096)` の関数を実際は K=16 の入力で起動するような
+/// フィールドは非公開とし、ソース取得は [`RenderedMmaKernel::source_for_launch`]
+/// の 1 経路のみを公開する（起動前検査を経ない裸の `source()` は公開しない。
+/// PR #643 codex-review 再指摘への対応: `source() -> &str` を独立に公開する
+/// 設計では、呼び出し元がそれをコンパイルして descriptor を破棄し、
+/// `validate_launch_shape` を一度も呼ばずに `CudaFunction` を起動できて
+/// しまい、「検査を通らない限りソースを取得できない」という構造的保証が
+/// 成立しない。`source_for_launch(m, n, k)` は内部で
+/// [`MmaKernelConfig::validate_launch_shape`] を実行してから初めて
+/// `&str` を返すため、検査の呼び忘れは型レベルで起こり得ない）。
+/// `render_mma_f16` が `String` を直接返す設計では、`validate_launch_shape`
+/// の呼び出しは呼び出し元の doc comment 遵守（advisory）に依存してしまい、
+/// `dim_k=Static(4096)` の関数を実際は K=16 の入力で起動するような
 /// 呼び忘れを型で防げない（`DimSpec::matches_launch_dim` ドキュメンテー
 /// ションコメント参照）。後続 #504（コンパイルキャッシュキー）もこの
 /// descriptor をそのまま鍵の構成要素として使える。
@@ -492,16 +517,30 @@ pub struct RenderedMmaKernel {
 }
 
 impl RenderedMmaKernel {
-    /// NVRTC（`nvrtc::compile_ptx`）へ渡すカーネルソース文字列。
+    /// 起動を意図する形状 `m`/`n`/`k` を検証してから NVRTC
+    /// （`nvrtc::compile_ptx`）へ渡すカーネルソース文字列を返す唯一の公開
+    /// 経路（PR #643 codex-review P1 再指摘への対応）。
+    ///
+    /// 内部で [`MmaKernelConfig::validate_launch_shape`] を呼び、`Static`
+    /// 次元と実引数の不一致を fail-closed で拒否してから初めて `&str` を
+    /// 返す。裸の `source() -> &str` を独立に公開すると、呼び出し元がこの
+    /// 検査を一度も経由せずソースをコンパイル・起動できてしまい
+    /// （`RenderedMmaKernel` ドキュメンテーションコメント参照）、REQ-8
+    /// 境界検査が実バッファ境界ではなく静的値を基準に通過しうる。この
+    /// メソッドはコンパイルへ渡す直前に呼び出す想定のため、`m`/`n`/`k` は
+    /// 実際に起動するカーネル呼び出しの引数と同じ値を渡すこと。
     #[allow(dead_code)]
-    pub fn source(&self) -> &str {
-        &self.source
+    pub fn source_for_launch(&self, m: u32, n: u32, k: u32) -> Result<&str, CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        Ok(&self.source)
     }
 
-    /// このソースをコンパイルして得たカーネル関数を実際に起動する直前に、
-    /// 呼び出し元が必ず呼ぶ契約。[`MmaKernelConfig::validate_launch_shape`]
-    /// へ委譲し、`Static` 次元と実引数 `m`/`n`/`k` の不一致を fail-closed
-    /// で拒否する。
+    /// コンパイル済みの `CudaFunction` を実際に起動する直前、呼び出しの
+    /// 都度呼ぶ契約（[`Self::source_for_launch`] は最初の 1 回のみ・
+    /// コンパイル前の検査であり、`Dynamic` 次元は起動ごとに異なる
+    /// `m`/`n`/`k` を許容しうるため、実際の起動直前の再検査はこのメソッド
+    /// が担う）。[`MmaKernelConfig::validate_launch_shape`] へ委譲し、
+    /// `Static` 次元と実引数の不一致を fail-closed で拒否する。
     #[allow(dead_code)]
     pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
         self.cfg.validate_launch_shape(m, n, k)
@@ -515,9 +554,10 @@ impl RenderedMmaKernel {
 /// する（SMEM 予算・倍数関係・スレッド数上限・`stages == 3` 等）。返す
 /// [`RenderedMmaKernel`] はソースと展開元 `cfg` を保持し、ホスト側
 /// （`gemm_mma.rs::CudaMmaGemm` 相当の将来の非既定構成起動 API）は
-/// `.source()` を `nvrtc::compile_ptx` に渡して `CudaFunction` を得たのち、
-/// カーネル起動直前に `.validate_launch_shape(m, n, k)` を必ず経由させる
-/// こと（`RenderedMmaKernel` ドキュメンテーションコメント参照）。カーネル
+/// `.source_for_launch(m, n, k)` で起動時形状検査を経たソース文字列を
+/// 取得してから `nvrtc::compile_ptx` に渡して `CudaFunction` を得ること
+/// （`RenderedMmaKernel` ドキュメンテーションコメント参照。検査を経ない
+/// 裸の `source()` は公開しないため呼び忘れが型で防がれる）。カーネル
 /// ソースは型付き数値・enum のみから組み立てられ、外部入力文字列を
 /// ソースへ連結しない契約を維持する（`nvrtc.rs` A03 節参照）。
 ///
@@ -969,7 +1009,12 @@ mod tests {
             dtype: MmaDtype::F16,
         };
         let rendered = render_mma_f16(&cfg).expect("有効な構成が拒否されました");
-        let src = rendered.source();
+        // dim_m=Static(4096)・dim_n/dim_k=Dynamic のため、実起動形状は
+        // m=4096 固定・n/k は任意（ここでは後段の validate_launch_shape
+        // 呼び出しと揃えて n=64・k=32 を使う）。
+        let src = rendered
+            .source_for_launch(4096, 64, 32)
+            .expect("有効な起動形状が拒否されました");
 
         for expected in [
             "#define BM 64",
@@ -1011,7 +1056,7 @@ mod tests {
     fn render_mma_f16_rejects_invalid_configs() {
         let base = MmaKernelConfig::default();
 
-        let cases: [(&str, MmaKernelConfig); 5] = [
+        let cases: [(&str, MmaKernelConfig); 7] = [
             (
                 "bm not multiple of MMA_M",
                 MmaKernelConfig { bm: 17, ..base },
@@ -1043,6 +1088,25 @@ mod tests {
                     ..base
                 },
             ),
+            // PR #643 codex-review P0 指摘への対応（再指摘）: dim_k=Static(7)
+            // は 8 の倍数でないため cp.async 16 バイト転送のアドレス整列
+            // 契約を破る。fail-closed に拒否されなければならない。
+            (
+                "static dim_k not a multiple of 8",
+                MmaKernelConfig {
+                    dim_k: DimSpec::Static(7),
+                    ..base
+                },
+            ),
+            // 同上・dim_n=Static(9) のケース（B の行ストライドへ直接畳み
+            // 込まれる）。
+            (
+                "static dim_n not a multiple of 8",
+                MmaKernelConfig {
+                    dim_n: DimSpec::Static(9),
+                    ..base
+                },
+            ),
         ];
 
         for (label, cfg) in cases {
@@ -1052,6 +1116,35 @@ mod tests {
                 "{label} は InvalidKernelConfig で拒否されるべきです: config={cfg:?}"
             );
         }
+    }
+
+    /// PR #643 codex-review P0 指摘への対応（再指摘）の受理側検査:
+    /// `dim_k`/`dim_n` が 8 の倍数の `Static` 値であれば許容され、`dim_m`
+    /// は 8 の倍数制約の対象外（cp.async のアドレス計算に使われるのは
+    /// `DIM_K`/`DIM_N` のみで `DIM_M` は境界クランプにのみ使われるため）
+    /// であることを検査する（`validate_mma_kernel_config` ドキュメンテー
+    /// ションコメント参照）。
+    #[test]
+    fn render_mma_f16_accepts_static_dims_aligned_to_eight_and_exempts_dim_m() {
+        let base = MmaKernelConfig::default();
+
+        assert!(
+            render_mma_f16(&MmaKernelConfig {
+                dim_k: DimSpec::Static(4096),
+                dim_n: DimSpec::Static(4096),
+                ..base
+            })
+            .is_ok()
+        );
+
+        // dim_m は 8 の倍数でない値（5）でも拒否されない。
+        assert!(
+            render_mma_f16(&MmaKernelConfig {
+                dim_m: DimSpec::Static(5),
+                ..base
+            })
+            .is_ok()
+        );
     }
 
     /// [`DimSpec::matches_launch_dim`] が `Dynamic` を常に許容し、`Static`
@@ -1131,7 +1224,10 @@ mod tests {
             dtype: MmaDtype::F16,
         };
         let specialized = render_mma_f16(&specialized_cfg).expect("有効な構成が拒否されました");
-        compile_ptx(specialized.source(), arch)
+        let specialized_src = specialized
+            .source_for_launch(4096, 4096, 4096)
+            .expect("有効な起動形状が拒否されました");
+        compile_ptx(specialized_src, arch)
             .expect("特化構成カーネルソースの NVRTC コンパイルに失敗しました");
     }
 }

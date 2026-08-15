@@ -274,8 +274,9 @@ impl WmmaOptKernelConfig {
 /// `kernels_mma::RenderedMmaKernel` と同じ設計）。
 ///
 /// フィールドは非公開とし、ソース取得は
-/// [`RenderedWmmaOptKernel::source`]、起動前検査は
-/// [`RenderedWmmaOptKernel::validate_launch_shape`] のみを公開する。これに
+/// [`RenderedWmmaOptKernel::source_for_launch`] の 1 経路のみを公開する
+/// （起動前検査を経ない裸の `source()` は公開しない。PR #643 codex-review
+/// 再指摘への対応。`kernels_mma::RenderedMmaKernel` と同じ設計変更）。これに
 /// より「`Static` 次元を含む config から得たソースは、必ずその config を
 /// 経由した起動時形状検査を通らない限りカーネル起動へ渡せない」という
 /// 構造的な契約になる（`RenderedMmaKernel` ドキュメンテーションコメント
@@ -291,15 +292,24 @@ pub struct RenderedWmmaOptKernel {
 }
 
 impl RenderedWmmaOptKernel {
-    /// NVRTC（`nvrtc::compile_ptx`）へ渡すカーネルソース文字列。
+    /// 起動を意図する形状 `m`/`n`/`k` を検証してから NVRTC
+    /// （`nvrtc::compile_ptx`）へ渡すカーネルソース文字列を返す唯一の公開
+    /// 経路（PR #643 codex-review P1 再指摘への対応。
+    /// `kernels_mma::RenderedMmaKernel::source_for_launch` と同じ設計）。
+    /// 裸の `source() -> &str` を独立に公開すると、呼び出し元が起動時形状
+    /// 検査を一度も経由せずソースをコンパイル・起動できてしまう
+    /// （`RenderedWmmaOptKernel` ドキュメンテーションコメント参照）。
     #[allow(dead_code)]
-    pub fn source(&self) -> &str {
-        &self.source
+    pub fn source_for_launch(&self, m: u32, n: u32, k: u32) -> Result<&str, CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        Ok(&self.source)
     }
 
-    /// このソースをコンパイルして得たカーネル関数を実際に起動する直前に、
-    /// 呼び出し元が必ず呼ぶ契約。
-    /// [`WmmaOptKernelConfig::validate_launch_shape`] へ委譲する。
+    /// コンパイル済みの `CudaFunction` を実際に起動する直前、呼び出しの
+    /// 都度呼ぶ契約（[`Self::source_for_launch`] は最初の 1 回のみ・
+    /// コンパイル前の検査であり、`Dynamic` 次元は起動ごとに異なる
+    /// `m`/`n`/`k` を許容しうるため、実際の起動直前の再検査はこのメソッド
+    /// が担う）。[`WmmaOptKernelConfig::validate_launch_shape`] へ委譲する。
     #[allow(dead_code)]
     pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
         self.cfg.validate_launch_shape(m, n, k)
@@ -440,9 +450,10 @@ fn render_wmma_tf32_opt_unchecked(cfg: &WmmaOptKernelConfig) -> String {
 /// （イシュー #516）。展開前に [`validate_wmma_tf32_opt_config`] で
 /// SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。返す
 /// [`RenderedWmmaOptKernel`] はソースと展開元 `cfg` を保持し、ホスト側の
-/// 将来の非既定構成起動 API は `.source()` を `nvrtc::compile_ptx` に渡した
-/// のち、カーネル起動直前に `.validate_launch_shape(m, n, k)` を必ず経由
-/// させること（`RenderedWmmaOptKernel` ドキュメンテーションコメント参照）。
+/// 将来の非既定構成起動 API は `.source_for_launch(m, n, k)` で起動時形状
+/// 検査を経たソース文字列を取得してから `nvrtc::compile_ptx` に渡すこと
+/// （`RenderedWmmaOptKernel` ドキュメンテーションコメント参照。検査を経ない
+/// 裸の `source()` は公開しないため呼び忘れが型で防がれる）。
 ///
 /// `mod kernels_wmma_opt` が非公開モジュールのため、既定構成のみを使う
 /// 現状の `gemm.rs`（[`wmma_tf32_f32_opt_source`] 経由）からは呼ばれず
@@ -1167,7 +1178,12 @@ mod tests {
             dim_k: DimSpec::Static(4096),
         };
         let rendered = render_wmma_tf32_opt(&cfg).expect("有効な構成が拒否されました");
-        let src = rendered.source();
+        // dim_m/dim_n=Dynamic・dim_k=Static(4096) のため、実起動形状は
+        // k=4096 固定・m/n は任意（後段の validate_launch_shape 呼び出しと
+        // 揃えて m=64・n=96 を使う）。
+        let src = rendered
+            .source_for_launch(64, 96, 4096)
+            .expect("有効な起動形状が拒否されました");
 
         for expected in [
             "#define WMMA_TF32_OPT_BLOCK_M 64",
