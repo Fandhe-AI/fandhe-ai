@@ -281,24 +281,30 @@ fn measure_bandwidth_secs(
         // ため（定数 `BW_LAUNCH_REPEATS` のドキュメンテーションコメント
         // 参照）、起動 1 回・同期 1 回に統一する。
         //
-        // SAFETY: `a`/`b` は直前に `n` 要素で確保済みで `n_i == n`
-        // （usize→i32 変換は `n` が呼び出し元でバッファ確保に使った値と
-        // 同一のためオーバーフローしない）。カーネル側の内側ループは
+        // SAFETY: `a`/`b` は直前に `n` 要素で確保済みで `n_u64 == n`
+        // （usize→u64 変換は同一値の再表現であり切り詰めなし。上記
+        // `n_u64` 算出コメント参照）。カーネル側の内側ループは 64 bit の
         // `i < n` を毎回検査するため（`BW_COPY_F32` 定義参照）、起動側の
-        // グリッド構成に関わらず OOB アクセスは発生しない。`repeats` 回の
-        // カーネル内反復は `a`/`b` を読み出し役・書き込み役として交互に
-        // 入れ替えるだけで、各反復内では常に一方から読み一方へ書く
-        // （同一反復内での読み書き対象は別バッファのため read-after-write
-        // ハザードはない。`BW_COPY_F32` ドキュメンテーションコメント参照）。
-        unsafe {
+        // グリッド構成に関わらず OOB アクセスは発生せず、`i += stride` の
+        // インデックス演算も 64 bit のためオーバーフローしない（同ドキュ
+        // メンテーションコメント「grid-stride のインデックス演算を
+        // 64 bit にする」参照）。`repeats` 回のカーネル内反復は `a`/`b` を
+        // 読み出し役・書き込み役として交互に入れ替えるだけで、各反復内
+        // では常に一方から読み一方へ書く（同一反復内での読み書き対象は
+        // 別バッファのため read-after-write ハザードはない。
+        // `BW_COPY_F32` ドキュメンテーションコメント参照）。
+        let launch_result = unsafe {
             stream
                 .launch_builder(func)
                 .arg(&mut a)
                 .arg(&mut b)
-                .arg(&n_i)
-                .arg(&repeats_i)
+                .arg(&n_u64)
+                .arg(&repeats_u32)
                 .launch(cfg)
-                .expect("bw_copy_f32 launch must succeed on CUDA-equipped runner");
+        };
+        if let Err(e) = launch_result {
+            first_launch_err.get_or_insert(CudaError::from(e));
+            return;
         }
         // カーネル起動は非同期のため、`synchronize()` を計測区間（このクロージャ）
         // 内に含めないと `Instant` の計測が起動オーバーヘッドのみを捉え、実行完了を
@@ -306,11 +312,18 @@ fn measure_bandwidth_secs(
         // （`gemm.rs::launch_tiled_f32` 等の GEMM 起動 API が内部で同期する契約と
         // 同じ理由。PyTorch 参照計測境界を踏襲する `cuda_floor_bench.rs` の
         // 「計測境界の統一」と同様、GPU 実行完了までを計測区間に含める）。
-        stream
-            .synchronize()
-            .expect("stream synchronize must succeed on CUDA-equipped runner");
+        if let Err(e) = stream.synchronize() {
+            first_launch_err.get_or_insert(CudaError::from(e));
+        }
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
+    // `MeasurementConfig::default` の下限（warmup/計測とも 20 回）を
+    // 満たせないケース（`bench_run` 自体の設定エラー）とは別に、CUDA
+    // 実行時エラーはここで検査し、あれば本関数の `Result` として返す
+    // （上記クロージャのコメント参照）。
+    if let Some(e) = first_launch_err {
+        return Err(e);
+    }
     // カーネル内で `BW_LAUNCH_REPEATS` 回分の反復を実行した 1 起動分の
     // 秒数を計測しているため、反復 1 回あたり（= `bandwidth_gbps` が
     // 前提とする 2N 要素分のトラフィック 1 回分）の秒数へ正規化して返す。
@@ -327,6 +340,16 @@ fn bandwidth_gbps(n: usize, secs: f64) -> f64 {
 /// clock_rate（kHz。`CU_DEVICE_ATTRIBUTE_CLOCK_RATE`）を用いて GB/s を
 /// bytes/cycle へ換算する（DeepGEMM の `*_bandwidth_per_cycle` 定数群と
 /// 同じ単位に揃えるため。イシュー #482 実装計画 §4 Step 2）。
+///
+/// **単位はデバイス全体（device-wide）であり per-SM ではない（イシュー
+/// #482 Review 指摘）**: 引数 `gbps` は `bandwidth_gbps` が返すデバイス
+/// 全体の実効帯域（global/L2 計測の合計トラフィック）をそのままクロックで
+/// 割った値のため、本関数の戻り値も「デバイス全体の 1 サイクルあたり
+/// バイト数」である。`docs/perf/sm121-device-attributes.md` のコストモデル
+/// 定数表で L1 行が明示する `bytes/cycle/SM`（per-SM 単位）とは基準が
+/// 異なるため、両者を同一列で比較・転記する際は per-SM 換算
+/// （`device_wide_value / sm_count`）が必要（本関数はその換算を行わない。
+/// 呼び出し側の `println!` ラベルに `device-wide` と明記して混同を防ぐ）。
 fn bytes_per_cycle(gbps: f64, clock_khz: i32) -> f64 {
     let hz = (clock_khz as f64) * 1e3;
     if hz <= 0.0 {
@@ -472,7 +495,7 @@ fn main() {
             let gbps = bandwidth_gbps(global_n, secs);
             println!(
                 "global: n={global_n} secs_per_launch={secs:.6} bandwidth={gbps:.2} GB/s \
-                 bytes_per_cycle={:.4}",
+                 bytes_per_cycle_device_wide={:.4}",
                 bytes_per_cycle(gbps, clock_khz)
             );
         }
@@ -514,7 +537,8 @@ fn main() {
             };
             println!(
                 "{label}: n={l2_n} (src+dst={} bytes, L2_CACHE_SIZE={:?} bytes) \
-                 secs_per_launch={secs:.6} bandwidth={gbps:.2} GB/s bytes_per_cycle={:.4}",
+                 secs_per_launch={secs:.6} bandwidth={gbps:.2} GB/s \
+                 bytes_per_cycle_device_wide={:.4}",
                 2 * l2_n * std::mem::size_of::<f32>(),
                 l2_cache_bytes,
                 bytes_per_cycle(gbps, clock_khz)

@@ -101,11 +101,18 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 表・出力の `secs_per_launch` は計測した中央値秒を `BW_LAUNCH_REPEATS` で割った「内部反復 1 回あたり」
 の値。
 
-| 区分 | バッファサイズ | 実効帯域（中央値） | bytes/cycle | 備考 |
+| 区分 | バッファサイズ | 実効帯域（中央値） | bytes/cycle（device-wide） | 備考 |
 |---|---|---|---|---|
-| global（L2 超） | n=67108864（256 MiB/バッファ） | 未実測 GB/s | 未実測 | L2 非依存の参照帯域 |
-| L2（L2 未満） | 未実測（`L2_CACHE_SIZE/4` 要素） | 未実測 GB/s | 未実測 | src+dst 合計が L2 に収まる設定 |
-| L1（SM あたり） | — | スペック値＋出典を記録（下記参照） | — | 本バイナリでは未実装（下記「限界」参照） |
+| global（L2 超） | n=67108864（256 MiB/バッファ） | 未実測 GB/s | 未実測 | L2 非依存の参照帯域。`bytes_per_cycle_device_wide`（`device_attributes_dump.rs` 出力ラベル）をそのまま転記 |
+| L2（L2 未満） | 未実測（`L2_CACHE_SIZE/4` 要素） | 未実測 GB/s | 未実測 | src+dst 合計が L2 に収まる設定。同上 |
+| L1（SM あたり） | — | スペック値＋出典を記録（下記参照） | — （per-SM。上 2 行とは基準が異なる） | 本バイナリでは未実装（下記「限界」参照） |
+
+**単位に関する注意（Review 指摘対応・#482）**: 上表の `bytes/cycle` 列は global/L2 行が **device-wide**
+（デバイス全体の実効帯域をデバイスクロックで割った値。`device_attributes_dump.rs::bytes_per_cycle`
+のドキュメンテーションコメント参照）、L1 行のみ **per-SM**（DeepGEMM の `128 bytes/cycle/SM` 相当と
+対比するための単位）であり、同一列でも基準が異なる。global/L2 の実測値を per-SM 換算する場合は
+`device_wide_value / SM 数`（上表 `MULTIPROCESSOR_COUNT` の実測値）で割ること。単位を揃えずに下記
+コストモデル定数表へ転記しない。
 
 **転記前チェック（Review 指摘対応・#482）**: `l2` の実効帯域が `global` の実効帯域を**下回った場合は
 本表へ転記しない**こと。起動・同期オーバーヘッドがまだ支配的である兆候（`BW_LAUNCH_REPEATS` を増やして
@@ -130,8 +137,8 @@ DeepGEMM Hopper（SM90）定数と sm_121 実測値の対比表。**後続タス
 | 定数 | DeepGEMM Hopper（SM90）値 | 出典 | sm_121 実測値 |
 |---|---|---|---|
 | SMEM 容量（`smem_capacity`） | 232448 bytes | DeepGEMM `csrc/jit_kernels/heuristics/sm90.hpp` 14 行付近 | 未実測（上表 `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR` 参照） |
-| L2 帯域（`l2_bandwidth_per_cycle` 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（上表「L2」行参照） |
-| L1 帯域（per-SM per-cycle 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（スペック値＋出典欄参照） |
+| L2 帯域（`l2_bandwidth_per_cycle` 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（上表「L2」行は **device-wide** の bytes/cycle。DeepGEMM 側定数の単位基準〈device-wide か per-SM か〉は本ドキュメントでは未確認のため、転記時に両者の基準を揃えること。上記「単位に関する注意」参照） |
+| L1 帯域（per-SM per-cycle 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（スペック値＋出典欄参照。per-SM） |
 | SM 数 | Hopper 固有（機種依存） | — | 未実測 |
 
 ## 限界・注意
