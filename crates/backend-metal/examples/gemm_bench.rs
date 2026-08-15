@@ -176,39 +176,15 @@ mod macos_impl {
         for (label, cfg) in [
             (
                 "bm64_bn64_bk16_staged",
-                TileConfig {
-                    bm: 64,
-                    bn: 64,
-                    bk: 16,
-                    wm: 2,
-                    wn: 2,
-                    staged: true,
-                    pad: 4,
-                },
+                TileConfig::without_padding(64, 64, 16, 2, 2, true).with_pad(4),
             ),
             (
                 "bm32_bn32_bk16_staged",
-                TileConfig {
-                    bm: 32,
-                    bn: 32,
-                    bk: 16,
-                    wm: 2,
-                    wn: 2,
-                    staged: true,
-                    pad: 4,
-                },
+                TileConfig::without_padding(32, 32, 16, 2, 2, true).with_pad(4),
             ),
             (
                 "bm32_bn32_bk16_direct",
-                TileConfig {
-                    bm: 32,
-                    bn: 32,
-                    bk: 16,
-                    wm: 2,
-                    wn: 2,
-                    staged: false,
-                    pad: 0,
-                },
+                TileConfig::without_padding(32, 32, 16, 2, 2, false),
             ),
         ] {
             let tflops = measure(&gemm, &ctx, GemmVariant::SimdgroupTiled(cfg), size, &config);
