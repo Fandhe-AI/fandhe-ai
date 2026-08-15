@@ -340,9 +340,31 @@ kernel void gemm_simdgroup_tiled(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
+    // threadgroup ID スウィズル（`swizzle_log` 相当。イシュー #540・
+    // 実験的機構。採否は `docs/perf/metal-gemm-tgid-swizzle-ab.md` の A/B
+    // 計測で判断する）: dispatch grid 上で `tile`（`1 << SWIZZLE_LOG` = 4）
+    // threadgroup を縦方向へ束ねて走査順を変え、近接時刻に実行される
+    // threadgroup 群が B（列方向）の同一領域を再利用しやすくする（MLX
+    // steel `swizzle_log`・DeepGEMM の L2 スウィズルと同種。MLX 自身は
+    // classic 経路で `swizzle_log = 0`〈無効〉のまま据え置いており未実証の
+    // 技法である点に留意）。`crate::tile::swizzled_grid` が張った grid
+    // （`grid_w = tiles_n << SWIZZLE_LOG`・`grid_h = div_ceil(tiles_m,
+    // tile)`）を tgid が走査する契約で、変換後の `(tid_y, tid_x)` が元の
+    // `(tiles_m, tiles_n)` を過不足なく覆うことを `crate::tile` の
+    // `swizzled_grid_covers_every_tile_exactly_once` テストが Linux 上で
+    // 静的に検証する。
+    constexpr uint SWIZZLE_LOG = 2;
+    constexpr uint SWIZZLE_TILE = 1u << SWIZZLE_LOG;
+    uint tid_y = (tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1));
+    uint tid_x = tgid.x >> SWIZZLE_LOG;
+
     // 1 threadgroup が担当する C ブロックの原点（行優先: y=行, x=列）。
-    uint row0 = tgid.y * BM;
-    uint col0 = tgid.x * BN;
+    // `tid_y`/`tid_x` はスウィズル後のタイル座標であり、`tiles_m` が
+    // `SWIZZLE_TILE` の倍数でない場合に `tid_y >= tiles_m` となる余剰
+    // threadgroup が生じうるが、直後の早期 return（REQ-8 境界チェック）が
+    // これを無害化する（省略しない）。
+    uint row0 = tid_y * BM;
+    uint col0 = tid_x * BN;
 
     // ブロック全体が実効次元を完全に超える場合は早期 return する
     // （REQ-8。dispatch 側 grid は div_ceil(BM)/div_ceil(BN) で切り上げる

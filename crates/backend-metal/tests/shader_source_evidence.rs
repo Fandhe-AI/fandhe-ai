@@ -181,3 +181,39 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
         "gemm_simdgroup_tiled の staged 経路・直接ロード経路の両方に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}）"
     );
 }
+
+/// イシュー #540 の証跡: `gemm_simdgroup_tiled` 冒頭に threadgroup ID
+/// スウィズル（`swizzle_log` 相当）の tgid 変換が実装され、シェーダ側の
+/// `SWIZZLE_LOG` リテラルが Rust 側 `crate::tile::SWIZZLE_LOG`（本テストは
+/// 別クレートのため値のみ複製し等値をロックする）と一致していることを
+/// Linux CI（ubuntu-latest）上でロックする。Mac 実機依存の A/B 計測
+/// （`docs/perf/metal-gemm-tgid-swizzle-ab.md`）は別途実施し、改善が無ければ
+/// このテストごと変更を撤去（revert）する運用とする（`metal-gemm-
+/// serpentine-ab.md` と同じ運用。#536 前例踏襲）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_tgid_swizzle() {
+    // `crate::tile::SWIZZLE_LOG` は `pub(crate)` のためこのテストバイナリ
+    // （別コンパイル単位）からは参照できない。値の複製自体が二重管理に
+    // なるためコメントで対応関係を明示し、値はここで固定リテラルとして
+    // 検査する（`gemm_simdgroup_tiled_source_uses_serpentine_scan_order`
+    // と同じ「文字列証跡でロックする」方式）。
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    assert!(
+        kernel_body.contains("constexpr uint SWIZZLE_LOG = 2;"),
+        "gemm_simdgroup_tiled に SWIZZLE_LOG 定数（値 2。crate::tile::SWIZZLE_LOG と一致契約）が見つかりません"
+    );
+    assert!(
+        kernel_body
+            .contains("uint tid_y = (tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1));"),
+        "gemm_simdgroup_tiled に tid_y スウィズル変換式が見つかりません"
+    );
+    assert!(
+        kernel_body.contains("uint tid_x = tgid.x >> SWIZZLE_LOG;"),
+        "gemm_simdgroup_tiled に tid_x スウィズル変換式が見つかりません"
+    );
+    assert!(
+        kernel_body.contains("uint row0 = tid_y * BM;")
+            && kernel_body.contains("uint col0 = tid_x * BN;"),
+        "gemm_simdgroup_tiled の row0/col0 計算がスウィズル後の tid_y/tid_x を使っていません"
+    );
+}

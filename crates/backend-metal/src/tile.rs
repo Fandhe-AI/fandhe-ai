@@ -387,6 +387,51 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
     }
 }
 
+/// threadgroup ID スウィズル（`swizzle_log` 相当。イシュー #540）の群幅を
+/// 2 のべき乗指数で表す。`4 = 1 << SWIZZLE_LOG` threadgroup を 1 群として
+/// dispatch grid 上で縦方向へ束ね、近接時刻に実行される threadgroup 群が
+/// B（列方向）の同一領域を再利用しやすくする（L2 相当キャッシュのヒット
+/// 率向上を狙う。MLX steel `swizzle_log` と同型・DeepGEMM の L2 スウィズル
+/// と同種の技法。計画「設計方針」節）。
+///
+/// **実験的パラメータとして固定値のみ扱う**: `TileConfig` のフィールドや
+/// MSL function constant にはしない。採否は `docs/perf/
+/// metal-gemm-tgid-swizzle-ab.md` の A/B 計測で判断し、不採用なら本定数を
+/// 含む変更一式を revert する（既定 off の未使用パラメータとして残さない
+/// 方針。out-of-scope-tracking.md の趣旨に反しないための意図的な二択設計）。
+pub const SWIZZLE_LOG: u32 = 2;
+
+/// `encode_dispatch_tiled`（`crate::gemm`）が呼ぶ、スウィズル後の dispatch
+/// grid（`(grid_width, grid_height)` = `(threadgroups.width,
+/// threadgroups.height)`）を計算する純粋関数。
+///
+/// `tiles_n`/`tiles_m` は素朴な `div_ceil(dims.n, cfg.bn)`/
+/// `div_ceil(dims.m, cfg.bm)`（スウィズル前の threadgroup 数）。
+/// `shaders/gemm.metal` の `gemm_simdgroup_tiled` 側 tgid 変換
+/// （`tid_y = (tgid.y << SWIZZLE_LOG) + (tgid.x & (tile - 1))`・
+/// `tid_x = tgid.x >> SWIZZLE_LOG`）と 1:1 対応する契約: この関数が返す
+/// grid 全体を tgid が走査したとき、変換後の `(tid_y, tid_x)` が
+/// `0..tiles_m × 0..tiles_n` の全域を過不足なく 1 回ずつ覆う必要がある
+/// （`tiles_m` が `tile` の倍数でない場合に生じる余剰 threadgroup は
+/// カーネル側の早期 return（`row0 >= dims.m || col0 >= dims.n`。REQ-8）
+/// が無害化する。本ファイルの `swizzle_reference_remap` テストヘルパで
+/// この対応を Linux 上でも静的に検証する）。
+///
+/// `tiles_n`/`tiles_m` は `crate::gemm::validate_effective_dims` 通過後の
+/// 実効次元（`u32::MAX` 以下）由来のため、`tiles_n << SWIZZLE_LOG`
+/// （最大シフト量 2）は 64bit `usize` 上でオーバーフローしない
+/// （`u32::MAX << 2` は `usize` が 32bit 環境でも `u64` 相当の範囲に収まる
+/// が、念のため `checked_shl`/`checked_mul` で防御し、万一の桁あふれは
+/// パニックではなく `usize::MAX` へ飽和させる。実運用では到達しない
+/// 経路であることをコメントで根拠づけるに留め、無限ループ等の未定義動作
+/// を避ける趣旨）。
+pub fn swizzled_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
+    let tile = 1usize << SWIZZLE_LOG;
+    let grid_w = tiles_n.checked_shl(SWIZZLE_LOG).unwrap_or(usize::MAX);
+    let grid_h = tiles_m.div_ceil(tile);
+    (grid_w, grid_h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -743,6 +788,76 @@ mod tests {
             cfg.validate(1024, 32 * 1024)
                 .unwrap_or_else(|e| panic!("select({m},{n},{k})={cfg:?} rejected: {e}"));
         }
+    }
+
+    // --- swizzled_grid（イシュー #540。pure） ---
+
+    /// `shaders/gemm.metal` の tgid 変換式（`gemm_simdgroup_tiled_source_
+    /// uses_tgid_swizzle`〈`shader_source_evidence.rs`〉が実在をロックする
+    /// 式と 1:1 対応するホスト側リファレンス実装）。`swizzled_grid` が
+    /// 張った grid 全体を tgid が走査したとき、この関数が返す
+    /// `(tid_y, tid_x)` が `0..tiles_m × 0..tiles_n` を過不足なく 1 回ずつ
+    /// 覆うことを下記テストで検証する（カーネル計算の欠落・二重書き込みを
+    /// Linux 上で静的に防止する。計画「実装ステップ」5 節）。
+    fn swizzle_reference_remap(tgid_y: usize, tgid_x: usize) -> (usize, usize) {
+        let tile = 1usize << SWIZZLE_LOG;
+        let tid_y = (tgid_y << SWIZZLE_LOG) + (tgid_x & (tile - 1));
+        let tid_x = tgid_x >> SWIZZLE_LOG;
+        (tid_y, tid_x)
+    }
+
+    #[test]
+    fn swizzled_grid_covers_every_tile_exactly_once() {
+        // `tile`（4）の倍数・非倍数・1 を含む組み合わせ（計画「実装ステップ」
+        // 5 節）。カーネル側の早期 return（REQ-8）が吸収する余剰
+        // threadgroup（`tid_y >= tiles_m`）はここでは無害化前提として除外
+        // して数える。
+        for &(tiles_m, tiles_n) in &[
+            (1usize, 1usize),
+            (4, 4),
+            (8, 8),
+            (5, 3),
+            (7, 9),
+            (16, 1),
+            (1, 16),
+            (13, 5),
+        ] {
+            let (grid_w, grid_h) = swizzled_grid(tiles_n, tiles_m);
+            let mut covered = std::collections::HashSet::new();
+            for gy in 0..grid_h {
+                for gx in 0..grid_w {
+                    let (tid_y, tid_x) = swizzle_reference_remap(gy, gx);
+                    // カーネル側早期 return と同じ境界（row0/col0 換算前の
+                    // タイル座標）を吸収する: 実域外は書き込み対象にしない。
+                    if tid_y >= tiles_m || tid_x >= tiles_n {
+                        continue;
+                    }
+                    assert!(
+                        covered.insert((tid_y, tid_x)),
+                        "(tiles_m={tiles_m}, tiles_n={tiles_n}) で (tid_y={tid_y}, tid_x={tid_x}) \
+                         が複数回書き込まれた（grid=({grid_w}, {grid_h})）"
+                    );
+                }
+            }
+            assert_eq!(
+                covered.len(),
+                tiles_m * tiles_n,
+                "(tiles_m={tiles_m}, tiles_n={tiles_n}) で全タイルが被覆されなかった \
+                 （被覆数: {}, 期待: {}, grid=({grid_w}, {grid_h})）",
+                covered.len(),
+                tiles_m * tiles_n
+            );
+        }
+    }
+
+    #[test]
+    fn swizzled_grid_matches_div_ceil_scaling() {
+        // grid_w = tiles_n << SWIZZLE_LOG（4 倍）・grid_h =
+        // div_ceil(tiles_m, 1 << SWIZZLE_LOG)（計画「設計方針」節の式）。
+        assert_eq!(swizzled_grid(1, 1), (4, 1));
+        assert_eq!(swizzled_grid(2, 4), (8, 1));
+        assert_eq!(swizzled_grid(2, 5), (8, 2));
+        assert_eq!(swizzled_grid(3, 9), (12, 3));
     }
 
     // --- CANDIDATES を直接巡回する実機依存テスト（イシュー #532・PR #651 codex-review
