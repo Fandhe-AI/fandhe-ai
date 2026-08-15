@@ -1352,10 +1352,8 @@ mod tests {
         assert!(!name.contains('/') && !name.contains('\\') && !name.contains(".."));
     }
 
-    // テスト用の固定ワークスペースルート。既存テストの候補パス
-    // （`/opt/...`・`/home/user/...`）と絶対に重ならない値を使い、
-    // containment 検証の追加が既存の合格/フォールバック系テストへ
-    // キャッシュルート解決: env 上書き優先。
+    // キャッシュルート解決: env 上書き（override）が XDG_CACHE_HOME・
+    // HOME より優先されること。
     #[test]
     fn resolve_cache_root_prefers_override() {
         let root = resolve_cache_root(
