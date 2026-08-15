@@ -445,15 +445,28 @@ fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
     if cfg.bm == 0 || cfg.bn == 0 || cfg.bk == 0 || cfg.stages == 0 {
         return Err(invalid("bm/bn/bk/stages must all be non-zero".to_string()));
     }
-    if !cfg.bm.is_multiple_of(MMA_M) {
+    // #493 の warp あたり 2x2 レジスタブロッキング後、1 warp が担当する C
+    // タイル実寸は `MMA_WARP_M x MMA_WARP_N`（`MMA_M`/`MMA_N` ではない）。
+    // `launch_config`／`render_mma_f16_unchecked` の `WARPS_N` マクロは
+    // いずれも `bm`/`bn` を `MMA_WARP_M`/`MMA_WARP_N` で除算するため、
+    // ここでの倍数検査も同じ除数で行わなければ `bm`/`bn` が `MMA_M`/
+    // `MMA_N` の倍数だが `MMA_WARP_M`/`MMA_WARP_N` の倍数ではない構成
+    // （例: bm=16・bn=8）が render/compile まで通過し、`warps_m`/
+    // `warps_n` が 0 になって `block_dim.x=0` の無効な起動設定・生成
+    // ソース内 `WARPS_N=0` を生じる（PR #643 codex-review P1 指摘への
+    // 対応。REQ-8 の非既定構成 fail-closed 検査契約）。`MMA_WARP_M`/
+    // `MMA_WARP_N` は `MMA_M`/`MMA_N` の倍数（本ファイル `MMA_WARP_M`/
+    // `MMA_WARP_N` 定数直下参照）のため、この検査は旧 `MMA_M`/`MMA_N`
+    // 基準の検査を包含する。
+    if !cfg.bm.is_multiple_of(MMA_WARP_M) {
         return Err(invalid(format!(
-            "bm ({}) must be a multiple of MMA_M ({MMA_M})",
+            "bm ({}) must be a multiple of MMA_WARP_M ({MMA_WARP_M})",
             cfg.bm
         )));
     }
-    if !cfg.bn.is_multiple_of(MMA_N) {
+    if !cfg.bn.is_multiple_of(MMA_WARP_N) {
         return Err(invalid(format!(
-            "bn ({}) must be a multiple of MMA_N ({MMA_N})",
+            "bn ({}) must be a multiple of MMA_WARP_N ({MMA_WARP_N})",
             cfg.bn
         )));
     }
@@ -471,8 +484,10 @@ fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
         )));
     }
 
-    let warps_m = cfg.bm / MMA_M;
-    let warps_n = cfg.bn / MMA_N;
+    // `launch_config`／生成ソース `WARPS_N` と同じ除数（`MMA_WARP_M`/
+    // `MMA_WARP_N`）で warp 数を導出する（上記倍数検査のコメント参照）。
+    let warps_m = cfg.bm / MMA_WARP_M;
+    let warps_n = cfg.bn / MMA_WARP_N;
     let threads = warps_m
         .checked_mul(warps_n)
         .and_then(|w| w.checked_mul(32))
@@ -1580,25 +1595,39 @@ mod tests {
     fn render_mma_f16_rejects_invalid_configs() {
         let base = MmaKernelConfig::default();
 
-        let cases: [(&str, MmaKernelConfig); 7] = [
+        let cases: [(&str, MmaKernelConfig); 8] = [
             (
-                "bm not multiple of MMA_M",
+                "bm not multiple of MMA_WARP_M",
                 MmaKernelConfig { bm: 17, ..base },
+            ),
+            (
+                // PR #643 codex-review P1 再指摘への対応: bm/bn は
+                // `MMA_WARP_M`/`MMA_WARP_N`（`MMA_M`/`MMA_N` ではない）の
+                // 倍数を要求するようになったため、`MMA_M`/`MMA_N` の倍数
+                // だが `MMA_WARP_M`/`MMA_WARP_N` の倍数ではない構成
+                // （旧: bm=16 は MMA_M(16) の倍数だが MMA_WARP_M(32) の
+                // 倍数ではない）を独立ケースとして検査する。
+                // `warps_m`/`warps_n` が 0 になる境界値（bm=16 は
+                // MMA_WARP_M(32) 未満のため warps_m=0）で block_dim.x=0
+                // の無効な起動設定を防ぐ検査が効くことを確認する。
+                "bn not multiple of MMA_WARP_N",
+                MmaKernelConfig { bn: 8, ..base },
             ),
             (
                 // PR #643 codex-review P2 指摘への対応: 旧ケース
                 // （bm=128・bn=128・bk=32）は warps_m(8)*warps_n(16)*32=4096
                 // threads となり、smem 予算検査より前のスレッド数上限
                 // （1024）で拒否されてしまい SMEM の fail-closed 分岐を
-                // 検査できていなかった。bm=16・bn=256（bm/MMA_M=1・
-                // bn/MMA_N=32・threads=1*32*32=1024。ちょうど上限内で
-                // 拒否されない）× bk=32 なら
-                // smem_bytes=(16*32+32*256)*2*3=52224 > 49152 のみが
-                // 拒否理由になる（thread count は境界の 1024 で通過）。
+                // 検査できていなかった。bm/bn は `MMA_WARP_M`/`MMA_WARP_N`
+                // の倍数（PR #643 P1 再指摘）が前提のため
+                // bm=32（warps_m=1）・bn=496（bn/MMA_WARP_N(16)=31。
+                // threads=1*31*32=992。上限 1024 内で拒否されない）×
+                // bk=32 なら smem_bytes=(32*32+32*496)*2*3=101376 > 49152
+                // のみが拒否理由になる（thread count は上限内で通過）。
                 "smem budget exceeded",
                 MmaKernelConfig {
-                    bm: 16,
-                    bn: 256,
+                    bm: 32,
+                    bn: 496,
                     bk: 32,
                     ..base
                 },
