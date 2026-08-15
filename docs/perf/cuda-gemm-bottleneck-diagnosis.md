@@ -65,8 +65,15 @@ ssh "$CUDA_NODE" 'ncu --query-metrics | grep -E "sm__warps_active|lts__t_sector_
 ```sh
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
     CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-    cargo build -p backend-cuda --example gemm_profile_target --release
+    cargo build -p backend-cuda --example gemm_profile_target --release \
+    --features internal-diagnostics
 ```
+
+`--features internal-diagnostics` は必須（PR #637 codex-review 指摘の是正）。
+`backend_cuda::diagnostics`（内部カーネルのタイル定数を返す診断専用関数群）は
+既定ビルドの通常の公開 API 面から除外されており、この feature を有効化した
+ビルドでのみ `diagnostics` モジュールが存在する（`crates/backend-cuda/src/lib.rs`
+`diagnostics` モジュール冒頭コメント参照）。
 
 ### 3.3 ncu 採取（6 通り: 2 path × 3 size）
 

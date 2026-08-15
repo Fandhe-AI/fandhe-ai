@@ -24,13 +24,20 @@
 //! ない。TFLOPS 出力はあくまで ncu 実測値との突合用の参考値）。
 //! `backend-cpu`／`bench-harness` は既に `backend-cuda` の
 //! `dev-dependencies`（`examples/cuda_floor_bench.rs` 等が使用）であり、
-//! 本ファイルの追加に伴う `Cargo.toml` の変更は不要
-//! （`deps-policy.md` ユーザー承認事項に該当しない）。
+//! 本ファイルの追加に伴う外部依存の追加は不要（`deps-policy.md` ユーザー
+//! 承認事項に該当しない）。ただし本ファイルが使う
+//! `backend_cuda::diagnostics`（内部カーネルのタイル定数を返す診断専用
+//! 関数群）は `internal-diagnostics` feature（既定 off）でのみコンパイル
+//! されるため、`Cargo.toml` の `[[example]] required-features` で本
+//! feature を要求する構成にしてある（PR #637 codex-review 指摘の是正:
+//! 診断専用の内部値を既定ビルドの通常の公開 API 面から除外するため。
+//! `lib.rs` の `diagnostics` モジュール冒頭コメント参照）。
 //!
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo build -p backend-cuda --example gemm_profile_target --release
+//! cargo build -p backend-cuda --example gemm_profile_target --release \
+//!     --features internal-diagnostics
 //! ncu --launch-skip <warmup 起動数> --launch-count <iters> \
 //!     --metrics <確定メトリクス名, カンマ区切り> \
 //!     ./target/release/examples/gemm_profile_target \

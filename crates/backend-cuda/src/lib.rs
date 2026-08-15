@@ -140,15 +140,22 @@ pub use ops::CudaBackendOps;
 /// 変更を機械的に検知できない（値が乖離しても診断ツールが静かに誤った
 /// 参考値を出し続ける）ため、`kernels_mma::MMA_BM`／`_BN`・
 /// `kernels_wmma_opt::WMMA_TF32_OPT_BLOCK_M`／`_N` を crate 内部でのみ
-/// `use` し、値そのものを返す関数だけを公開する（PR #637 codex-review
-/// 指摘: 生の内部定数を `pub use` で crate root へ直接漏出させると、
-/// 最適化目的のタイル形状変更がそのまま `backend_cuda` の公開 API 互換性
-/// 問題になってしまう）。
+/// `use` し、値そのものを返す関数だけを公開する。
 ///
-/// **この関数群は SemVer の互換性保証対象外**（診断・プロファイリング
-/// 専用。内部カーネルのタイル最適化変更に伴い戻り値が予告なく変わりうる）。
-/// 通常の利用者は [`CudaGemm`]／[`CudaMmaGemm`]／[`ops::CudaBackendOps`]
-/// 等の安定 API を経由してバックエンドを利用し、本関数は使わない。
+/// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+/// （`Cargo.toml` の `[features]` 参照。PR #637 codex-review P1 指摘の是正:
+/// 生の内部定数はおろか、この安定関数群自体も非公開カーネルのタイル形状を
+/// crate 外へ伝える契約になってしまうため、`pub mod` として常時公開せず
+/// feature ゲートで既定ビルドの公開 API 面から完全に除外する。コメントで
+/// 「SemVer 互換性保証対象外」と宣言するだけでは Rust の通常の公開 API で
+/// ある以上、戻り値の意味・関数自体が利用者との契約になってしまうため
+/// 不十分と判断した）。`examples/gemm_profile_target.rs`
+/// （occupancy 概算専用）は `Cargo.toml` の `required-features` で本
+/// feature を要求するため、`cargo build --example gemm_profile_target
+/// --features internal-diagnostics` でのみビルドできる。通常の利用者は
+/// [`CudaGemm`]／[`CudaMmaGemm`]／[`ops::CudaBackendOps`] 等の安定 API を
+/// 経由してバックエンドを利用し、本 feature を有効化する必要はない。
+#[cfg(feature = "internal-diagnostics")]
 pub mod diagnostics {
     use crate::{kernels_mma, kernels_wmma_opt};
 
