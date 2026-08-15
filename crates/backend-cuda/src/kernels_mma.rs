@@ -222,19 +222,28 @@ pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
 /// 唯一の真実源）。`gemm_mma.rs` が起動前の `debug_assert` で参照する。
 pub const MMA_K_STEPS_PER_STAGE: u32 = MMA_BK / MMA_K;
 
+/// 全 compute capability 共通の per-block 静的共有メモリ上限（49,152 バイト
+/// = 48KiB。動的共有メモリ opt-in `cudaFuncSetAttribute` を追加で呼ばない
+/// 限りの静的 `__shared__` 上限）。[`MMA_SHARED_MEM_BYTES`] の下記
+/// `const _: () = assert!(...)` と `gemm_auto.rs::STATIC_SMEM_BUDGET_CAP_BYTES`
+/// が同じ 49,152 の値を独立にハードコードして重複管理していた（#521
+/// レビュー指摘）ため、本定数を唯一の真実源として両所から参照する。
+pub const MMA_STATIC_SMEM_LIMIT_BYTES: u32 = 49_152;
+
 /// 静的共有メモリ使用量（バイト）。`(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B
-/// (f16) * MMA_STAGES`。全 compute capability 共通の per-block 静的共有
-/// メモリ上限（49152 バイト = 48KiB）に対する実使用量を下記
-/// `const _: () = assert!(...)` でコンパイル時に検査する（本ファイル冒頭
-/// コメント「タイル構成」参照。タイル定数変更時に即座にビルドエラーで
+/// (f16) * MMA_STAGES`。[`MMA_STATIC_SMEM_LIMIT_BYTES`] に対する実使用量を
+/// 下記 `const _: () = assert!(...)` でコンパイル時に検査する（本ファイル
+/// 冒頭コメント「タイル構成」参照。タイル定数変更時に即座にビルドエラーで
 /// 検出できるよう、実行時 `debug_assert` ではなくコンパイル時定数
 /// アサーションとする）。
 ///
-/// 上記の通りコンパイル時 const アサーションのみからの参照であり、実行時
-/// `debug_assert` は意図的に用いない（このコメント自身の設計判断）。その
-/// ため rustc 1.88 系の dead-code 解析はこの `pub const` を誤って未使用と
-/// 判定する（1.92 以降では解消済み。`cargo +1.88.0 clippy` と
-/// `cargo +1.92.0 clippy` の実測差分で確認済み。#149 PR CI 指摘対応）。
+/// `gemm_auto.rs::derive_stages_for_device` からも参照されるようになったが
+/// （デバイス実測 SMEM 予算のクランプ上限として。`gemm_auto.rs` 冒頭の
+/// コンパイル時契約検査コメント参照）、rustc 1.88 系の dead-code 解析が
+/// 誤って未使用と判定する既知の quirk（1.92 以降では解消済み。`#149` PR CI
+/// 指摘対応）への対策として `#[allow(dead_code)]` は保守的に残す（この
+/// crate 内参照追加により quirk 自体が解消したかは 1.88 系での再実測なし
+/// には確認できないため、断定しない）。
 #[allow(dead_code)]
 pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * MMA_STAGES;
 
@@ -242,7 +251,7 @@ pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * 
 // 環境でも `cargo build` の時点で機械検出できる代替チェック。本ファイル
 // 冒頭コメント「タイル構成」参照）。
 const _: () = assert!(
-    MMA_SHARED_MEM_BYTES <= 49_152,
+    MMA_SHARED_MEM_BYTES <= MMA_STATIC_SMEM_LIMIT_BYTES,
     "kernels_mma::MMA_F16 static shared memory exceeds the 48KiB per-block \
      limit shared by every compute capability"
 );
@@ -817,7 +826,7 @@ mod tests {
             // と同じ式を stages 可変で検査する）。
             let shared_mem_bytes = (MMA_BM * MMA_BK + MMA_BK * MMA_BN) * 2 * stages;
             assert!(
-                shared_mem_bytes <= 49_152,
+                shared_mem_bytes <= MMA_STATIC_SMEM_LIMIT_BYTES,
                 "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB を超えています"
             );
         }
