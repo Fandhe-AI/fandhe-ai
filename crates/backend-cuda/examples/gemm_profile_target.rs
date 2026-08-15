@@ -138,9 +138,20 @@ struct Args {
     /// `--launch-skip` 算出の唯一の構築点を `parse_args` に保つ意図で
     /// フィールドとして残す）。`--launch-skip` 値の算出に使う（同上）。
     launch_skip: usize,
+    /// `CudaDevice::new` が `CudaError::DriverUnavailable`（CUDA 非搭載
+    /// 環境）を返した場合に終了コード 0 でスキップすることを明示的に
+    /// 許可するフラグ。既定は `false`（非 0 終了）。`docs/perf/`
+    /// `cuda-gemm-bottleneck-diagnosis.md` §3.3 の `set -o pipefail`
+    /// 採取ループは非 0 終了で失敗検知する fail-closed 契約のため、
+    /// 既定でドライバ不在を成功終了扱いにすると 6 条件すべてが
+    /// カーネル未起動・空ログのまま正常終了として見逃されうる
+    /// （PR #637 codex-review 指摘）。CI はこの example をビルドするのみ
+    /// で実行しないため、CUDA 非搭載環境で意図的にスキップしたい場合
+    /// （手元検証時等）だけこのフラグを明示指定させる。
+    allow_missing_driver: bool,
 }
 
-const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N]";
+const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N] [--allow-missing-driver]";
 
 /// `std::env::args` のみで CLI 引数をパースする（依存追加なし。実装計画
 /// §3 Step 1「CLI 引数を `std::env::args` のみでパースする」）。
@@ -152,6 +163,7 @@ fn parse_args() -> Result<Args, String> {
     let mut size: Option<u32> = None;
     let mut iters: usize = 5;
     let mut warmup: usize = 2;
+    let mut allow_missing_driver = false;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -189,6 +201,9 @@ fn parse_args() -> Result<Args, String> {
                     format!("--warmup は 0 以上の整数のみ受理する（指定値: '{v}'）")
                 })?;
             }
+            "--allow-missing-driver" => {
+                allow_missing_driver = true;
+            }
             other => return Err(format!("未知の引数: '{other}'")),
         }
     }
@@ -216,6 +231,7 @@ fn parse_args() -> Result<Args, String> {
         warmup,
         total_launches,
         launch_skip,
+        allow_missing_driver,
     })
 }
 
@@ -280,16 +296,37 @@ fn main() {
 
     let device = match CudaDevice::new(0) {
         Ok(dev) => dev,
-        Err(CudaError::DriverUnavailable { detail }) => {
+        Err(CudaError::DriverUnavailable { detail }) if args.allow_missing_driver => {
             println!(
-                "backend-cuda gemm_profile_target: CUDA driver unavailable ({detail}); skipping."
+                "backend-cuda gemm_profile_target: CUDA driver unavailable ({detail}); \
+                 skipping because --allow-missing-driver was specified."
             );
             return;
         }
+        Err(CudaError::DriverUnavailable { detail }) => {
+            // 既定では非 0 終了させる（fail-closed）。ここで終了コード 0 に
+            // すると `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 の
+            // 採取ループ（`set -o pipefail` で非 0 終了を検知する契約）が
+            // ドライバ不在による未起動を見逃し、6 条件すべてがカーネル
+            // 未起動・空ログのまま正常終了扱いで通過してしまう
+            // （PR #637 codex-review 指摘）。CI はこの example をビルド
+            // するだけで実行しないため、実行時に成功終了させる必要はない。
+            // CUDA 非搭載環境で意図的にスキップしたい場合は `--allow-
+            // missing-driver` を明示指定させる（採取用の既定動作とは
+            // 分離した opt-in）。
+            eprintln!(
+                "backend-cuda gemm_profile_target: CUDA driver unavailable ({detail}); \
+                 aborting because the target kernel never launched. Pass \
+                 --allow-missing-driver to skip intentionally in CUDA-less environments."
+            );
+            std::process::exit(1);
+        }
         Err(other) => {
-            // `DriverUnavailable`（CUDA 非搭載環境。上の分岐で skip）以外の
-            // `CudaDevice::new` 失敗（ドライバ不整合・コンテキスト生成失敗等）
-            // は「CUDA 実行環境自体が無い」わけではない異常系であり、対象
+            // `DriverUnavailable`（CUDA 非搭載環境。上の 2 分岐参照。既定
+            // では非 0 終了、`--allow-missing-driver` 指定時のみ skip）
+            // 以外の `CudaDevice::new` 失敗（ドライバ不整合・コンテキスト
+            // 生成失敗等）は「CUDA 実行環境自体が無い」わけではない
+            // 異常系であり、`--allow-missing-driver` の対象外。対象
             // カーネルは一度も起動していない。ここで終了コード 0 にすると
             // `docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 の採取
             // ループ（`set -o pipefail` で非 0 終了を検知する fail-closed
