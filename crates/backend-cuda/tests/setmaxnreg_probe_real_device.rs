@@ -466,37 +466,71 @@ fn fmt_opt_regs(value: Option<i32>) -> String {
 /// 同一カーネル関数内で発行され、`num_regs_per_thread` はカーネル関数単位で
 /// 決まる値のためベースラインは producer/consumer 双方で共通である。よって
 /// `dec_target <= measured_regs`（dec 側）・`inc_target >= measured_regs`
-/// （inc 側）が両方成立する場合のみ `coherent=true` とする。
+/// （inc 側）が両方成立することは `coherent=true` の**必要条件**だが、
+/// producer/consumer が対になる場合（両方 `Some`）は十分条件ではない
+/// （下記 CTA レジスタプール保存則を参照）。
+///
+/// **CTA レジスタプール保存則（Bugbot 指摘・PR #636 再指摘 High 対応）**:
+/// `dec_target`・`inc_target` が両方 `Some`（[`PROBE_SETMAXNREG_INCDEC`] の
+/// producer/consumer 対）の場合、上記の片側条件だけでは producer が実際に
+/// 解放するレジスタ量が consumer の要求量を満たすかを検査できない。
+/// [`PRODUCER_CONSUMER_BLOCK_DIM`] は producer/consumer を同数（128 スレッド
+/// ＝ 4 warp）ずつ均等割りする構成のため、CTA 全体のレジスタ予算保存則は
+/// `producer が解放する量（baseline - dec_target）` `>=`
+/// `consumer が要求する増分（inc_target - baseline）`、すなわち
+/// `2 * baseline >= dec_target + inc_target` に単純化できる。この不等式が
+/// 成立しない場合、consumer 側の `setmaxnreg.inc` は producer が実際には
+/// 解放しないレジスタを待ち続け、[`try_load_and_run`] の `synchronize`
+/// 呼び出しが実機上で無期限にハングしうる（CI では `#[ignore]` のため
+/// 顕在化せず、実機実行時のみ発現する）。この保存則は `dec_target`・
+/// `inc_target` の一方が `None`（`setmaxnreg_dec_probe` のような単体プローブ。
+/// 同一 CTA 内で対になる consumer が存在しない）の場合は対象外とし
+/// `pool_conservation_ok=true` とする。
 ///
 /// `coherent=false` は「`result=success` であってもレジスタ予算的に無風
-/// （または PTX ISA 上不整合）だった」ことを示す客観的シグナルであり、
-/// `docs/cuda-tensor-core-design.md` への転記時に `result=success` のみを
-/// 見て「使用可」と誤読するのを防ぐ（[`PROBE_SETMAXNREG_INCDEC`]
-/// ドキュメンテーションコメント参照）。実測自体が失敗している場合
-/// （`measured_regs=None`）は判定不能として `coherent=unknown` を記録し
-/// `false` 側へ丸めない（fail-closed で「不整合」と断定しない）。
+/// （または PTX ISA 上不整合、または CTA レジスタプール保存則違反）だった」
+/// ことを示す客観的シグナルであり、`docs/cuda-tensor-core-design.md` への
+/// 転記時に `result=success` のみを見て「使用可」と誤読するのを防ぐ
+/// （[`PROBE_SETMAXNREG_INCDEC`] ドキュメンテーションコメント参照）。実測
+/// 自体が失敗している場合（`measured_regs=None`）は判定不能として
+/// `coherent=unknown` をログへ記録する（診断ラベルとしては fail-closed で
+/// 「不整合」と断定しない）。一方、戻り値（呼び出し元が [`try_load_and_run`]
+/// の実行可否ゲートに使う `bool`）は測定不能・保存則違反のいずれも
+/// `false` として fail-closed に倒す（診断ログの表示と実行ゲートの安全側
+/// 判断は目的が異なるため意図的に非対称にしている）。
 fn report_setmaxnreg_coherence(
     label: &str,
     source: &str,
     measured_regs: Option<i32>,
     dec_target: Option<i32>,
     inc_target: Option<i32>,
-) {
-    let coherent = match measured_regs {
+) -> bool {
+    let (coherent, pool_conservation_ok) = match measured_regs {
         Some(baseline) => {
             let dec_ok = dec_target.is_none_or(|dec| dec <= baseline);
             let inc_ok = inc_target.is_none_or(|inc| inc >= baseline);
-            (dec_ok && inc_ok).to_string()
+            let pool_ok = match (dec_target, inc_target) {
+                (Some(dec), Some(inc)) => 2 * baseline >= dec + inc,
+                _ => true,
+            };
+            (dec_ok && inc_ok && pool_ok, pool_ok)
         }
-        None => "unknown".to_string(),
+        None => (false, false),
+    };
+    let coherent_display = if measured_regs.is_some() {
+        coherent.to_string()
+    } else {
+        "unknown".to_string()
     };
     println!(
         "SETMAXNREG_PROBE_RESULT stage=coherence_check kernel={label} source={source} \
-         measured_regs={} dec_target={} inc_target={} coherent={coherent}",
+         measured_regs={} dec_target={} inc_target={} coherent={coherent_display} \
+         pool_conservation_ok={pool_conservation_ok}",
         fmt_opt_regs(measured_regs),
         fmt_opt_regs(dec_target),
         fmt_opt_regs(inc_target),
     );
+    coherent
 }
 
 /// コンパイル成功済みカーネルをロード・起動・同期し、成否を記録する。
@@ -855,7 +889,7 @@ fn setmaxnreg_incdec_probe() {
     // （同レビュー Low 対応）。
     let (baseline_regs, control_ok) =
         report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, arch);
-    report_setmaxnreg_coherence(
+    let control_pool_conserved = report_setmaxnreg_coherence(
         "probe_setmaxnreg_incdec",
         "control",
         baseline_regs,
@@ -871,25 +905,46 @@ fn setmaxnreg_incdec_probe() {
         control_ok,
         arch,
     ) {
-        let probe_self_regs = try_load_and_run(
-            &device,
-            "probe_setmaxnreg_incdec",
-            arch,
-            ptx,
-            PRODUCER_CONSUMER_BLOCK_DIM,
-            |x| x * 2.0,
-        );
-        // `setmaxnreg` を実際に発行するプローブ自身の静的レジスタ割り当て
-        // による判定（診断参考値。`source=control` の行は toolchain 健全性
-        // の参考記録として残す。イシュー #484 レビュー指摘 Medium・
-        // PR #636 レビュー指摘 P2 対応）。
-        report_setmaxnreg_coherence(
-            "probe_setmaxnreg_incdec",
-            "probe_self",
-            probe_self_regs,
-            Some(24),
-            Some(232),
-        );
+        // `control_pool_conserved`（[`report_setmaxnreg_coherence`] の戻り値。
+        // CTA レジスタプール保存則 `2 * baseline >= dec_target + inc_target`
+        // を含む）が `false` のまま [`try_load_and_run`] を呼ぶと、consumer
+        // warpgroup の `setmaxnreg.inc` が producer が実際には解放しない
+        // レジスタを待ち続け `synchronize` が実機上で無期限にハングしうる
+        // （Bugbot 指摘・PR #636 再指摘 High 対応）。本プローブカーネルは
+        // 演算が単純で `control` baseline が保存則を満たすほど大きくならない
+        // ことが多いため、事前にコンパイル済みの `control` 側 baseline で
+        // 判定し、満たさない場合は実行（launch/synchronize）自体を skip して
+        // ハングを回避する。skip した場合は `stage=execute_skipped` として
+        // 判定不能ではなく「保存則違反により意図的に未実行」であることを
+        // 明示的にログへ残す。
+        if control_pool_conserved {
+            let probe_self_regs = try_load_and_run(
+                &device,
+                "probe_setmaxnreg_incdec",
+                arch,
+                ptx,
+                PRODUCER_CONSUMER_BLOCK_DIM,
+                |x| x * 2.0,
+            );
+            // `setmaxnreg` を実際に発行するプローブ自身の静的レジスタ割り当て
+            // による判定（診断参考値。`source=control` の行は toolchain 健全性
+            // の参考記録として残す。イシュー #484 レビュー指摘 Medium・
+            // PR #636 レビュー指摘 P2 対応）。
+            report_setmaxnreg_coherence(
+                "probe_setmaxnreg_incdec",
+                "probe_self",
+                probe_self_regs,
+                Some(24),
+                Some(232),
+            );
+        } else {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=execute_skipped kernel=probe_setmaxnreg_incdec \
+                 arch={arch} reason=cta_pool_conservation_violated baseline_regs={} \
+                 dec_target=24 inc_target=232",
+                fmt_opt_regs(baseline_regs),
+            );
+        }
     }
 
     // arch-accelerated 版（`compute_XYa`）: コンパイル受理可否だけでなく、
@@ -911,7 +966,7 @@ fn setmaxnreg_incdec_probe() {
     // baseline 実測・coherence 判定を行っていなかった）。
     let (baseline_regs_accelerated, control_ok_accelerated) =
         report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, &arch_accelerated);
-    report_setmaxnreg_coherence(
+    let control_pool_conserved_accelerated = report_setmaxnreg_coherence(
         "probe_setmaxnreg_incdec_arch_accelerated",
         "control",
         baseline_regs_accelerated,
@@ -924,20 +979,33 @@ fn setmaxnreg_incdec_probe() {
         control_ok_accelerated,
         &arch_accelerated,
     ) {
-        let probe_self_regs_accelerated = try_load_and_run(
-            &device,
-            "probe_setmaxnreg_incdec",
-            &arch_accelerated,
-            ptx_accelerated,
-            PRODUCER_CONSUMER_BLOCK_DIM,
-            |x| x * 2.0,
-        );
-        report_setmaxnreg_coherence(
-            "probe_setmaxnreg_incdec_arch_accelerated",
-            "probe_self",
-            probe_self_regs_accelerated,
-            Some(24),
-            Some(232),
-        );
+        // 基準 arch 版と同じゲート（`control_pool_conserved_accelerated`）で
+        // `try_load_and_run` の実行可否を判定する（Bugbot 指摘・PR #636
+        // 再指摘 High 対応。上の基準 arch 版ブロックのコメント参照）。
+        if control_pool_conserved_accelerated {
+            let probe_self_regs_accelerated = try_load_and_run(
+                &device,
+                "probe_setmaxnreg_incdec",
+                &arch_accelerated,
+                ptx_accelerated,
+                PRODUCER_CONSUMER_BLOCK_DIM,
+                |x| x * 2.0,
+            );
+            report_setmaxnreg_coherence(
+                "probe_setmaxnreg_incdec_arch_accelerated",
+                "probe_self",
+                probe_self_regs_accelerated,
+                Some(24),
+                Some(232),
+            );
+        } else {
+            println!(
+                "SETMAXNREG_PROBE_RESULT stage=execute_skipped \
+                 kernel=probe_setmaxnreg_incdec_arch_accelerated arch={arch_accelerated} \
+                 reason=cta_pool_conservation_violated baseline_regs={} \
+                 dec_target=24 inc_target=232",
+                fmt_opt_regs(baseline_regs_accelerated),
+            );
+        }
     }
 }
