@@ -94,6 +94,17 @@ impl BackendOps for RecordingFusedOps {
                             .into(),
                     ));
                 }
+                // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+                // PR #648 P1 是正）のため、別クレートである本テストからの match
+                // は将来の未知 variant に備え `_` 分岐が必須。
+                _ => {
+                    return Err(BackendError::Unsupported(
+                        "run_fused test fixture: unknown FusedOpKind variant \
+                         (tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
+                         variant)"
+                            .into(),
+                    ));
+                }
             };
             values.push(v);
         }

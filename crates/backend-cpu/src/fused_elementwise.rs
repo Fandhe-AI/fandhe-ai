@@ -104,16 +104,31 @@ pub fn run_fused_elementwise(
     // を遅延評価対象にせず `push_eager` で実体化するため
     // （`crates/autodiff/src/tape.rs`）、実運用の `FusedOpKind` 列に
     // これらが混入する経路は存在しない＝本チェックは回帰を起こさない。
+    //
+    // **denylist ではなく allowlist**（codex-review PR #648 P1 是正・
+    // `tensor_core::FusedOpKind` の `#[non_exhaustive]` 化に伴う変更）:
+    // `Sum`／`Max`／`Rsqrt` を名指しで拒否する denylist だと、将来
+    // `tensor-core` 側で `FusedOpKind` に新 variant が追加された際に
+    // この pre-scan をすり抜け、`eval_one` の `_ => 0.0` 分岐へ到達して
+    // 「静かに誤った 0.0 を返す」経路が復活してしまう（`#[non_exhaustive]`
+    // で型検査は通っても実行時の fail-closed 性は別途保証が要る）。
+    // 本カーネルが実装済みの elementwise 演算のみを許可する allowlist へ
+    // 反転することで、未知の将来 variant も含め安全側（拒否）へ倒す。
     if plan.ops().any(|op| {
-        matches!(
+        !matches!(
             op,
-            FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } | FusedOpKind::Rsqrt { .. }
+            FusedOpKind::Input { .. }
+                | FusedOpKind::Add { .. }
+                | FusedOpKind::Mul { .. }
+                | FusedOpKind::Relu { .. }
+                | FusedOpKind::Exp { .. }
+                | FusedOpKind::Tanh { .. }
         )
     }) {
         return Err(BackendError::Unsupported(
-            "run_fused_elementwise: reduction (Sum/Max) and Rsqrt fused kernels are not yet \
-             implemented (tensor_core::fusion boundary redefinition #586 extends the IR; the \
-             CPU kernel is tracked as a follow-up issue)"
+            "run_fused_elementwise: reduction (Sum/Max), Rsqrt, and any other non-elementwise \
+             fused op are not yet implemented (tensor_core::fusion boundary redefinition #586 \
+             extends the IR; the CPU kernel is tracked as a follow-up issue)"
                 .to_string(),
         ));
     }
@@ -230,6 +245,13 @@ fn eval_one(
             // （pre-scan の防御を二重化する構成。モジュール冒頭「境界
             // 検査」節と同じ多層防御の考え方）。
             FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } | FusedOpKind::Rsqrt { .. } => 0.0,
+            // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+            // PR #648 P1 是正）のため、本クレート（別クレート）からの
+            // match は将来の未知 variant に備え `_` 分岐が必須。pre-scan
+            // 側の allowlist 反転（本ファイル上部）により、この分岐へ
+            // 到達する plan はそもそも `run_fused_elementwise` の時点で
+            // 既に fail-closed に拒否されている（二重防御）。
+            _ => 0.0,
         };
     }
     regs[output_index]

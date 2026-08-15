@@ -96,6 +96,17 @@ impl BackendOps for CountingFusedOps {
                             .into(),
                     ));
                 }
+                // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+                // PR #648 P1 是正）のため、別クレートである本テストからの match
+                // は将来の未知 variant に備え `_` 分岐が必須。
+                _ => {
+                    return Err(BackendError::Unsupported(
+                        "CountingFusedOps::run_fused: unknown FusedOpKind variant \
+                         (tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
+                         variant)"
+                            .into(),
+                    ));
+                }
             };
             values.push(v);
         }
@@ -321,6 +332,17 @@ impl BackendOps for ShapeMismatchOnBroadcastFusedOps {
                     return Err(BackendError::Unsupported(
                         "CountingFusedOps::run_fused: reduction/Rsqrt not implemented \
                          (tensor_core::fusion IR extension #586; CPU kernel out of scope)"
+                            .into(),
+                    ));
+                }
+                // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+                // PR #648 P1 是正）のため、別クレートである本テストからの match
+                // は将来の未知 variant に備え `_` 分岐が必須。
+                _ => {
+                    return Err(BackendError::Unsupported(
+                        "CountingFusedOps::run_fused: unknown FusedOpKind variant \
+                         (tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
+                         variant)"
                             .into(),
                     ));
                 }

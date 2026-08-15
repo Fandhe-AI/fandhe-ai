@@ -71,6 +71,25 @@ pub type FusedNodeIndex = usize;
 /// fail-closed に拒否する）。フィールドは [`FusedNodeIndex`]（plain
 /// `usize`）のみで構成し、`pub(crate)` 型を一切参照しない（設計書 §3.4
 /// 「privacy 制約」）。
+///
+/// # 後方互換性（codex-review PR #648 P1 是正）
+///
+/// `tensor-core` は `publish = false`（workspace `Cargo.toml`）かつ
+/// `docs/compat-api-scope.md` §0 が定める**内部クレート**であり、`facade`
+/// のみが「サポートされる公開 API 面」である（`facade::compat` に
+/// `FusedOpKind` は再エクスポートされない）。よって本 enum が Rust の
+/// 可視性として `pub`（`backend-cpu`／`autodiff` からのクレート間参照に
+/// 必要なため）であることと、外部利用者向けにサポートされる公開面で
+/// あることは区別する（`docs/compat-api-scope.md` §0 で `autodiff::
+/// Tape::new_with_ops` 等に対し既に確立済みの区別と同じ整理）。
+/// それでも本 workspace 内の `backend-cpu`／`autodiff` の各クレートは
+/// `FusedOpKind` を跨クレートで exhaustive match するため、`#[non_exhaustive]`
+/// を付けて「variant 追加は非破壊」という前方互換性を型で保証する
+/// （バリアント単位の `#[non_exhaustive]` ではなく enum 全体へ付与:
+/// バリアント単位だと `FusedOpKind::Add { .. }` 等のクレート外構築
+/// 〈`autodiff/src/tape.rs`〉自体が壊れるため）。呼び出し側の match は
+/// 必ず `_` 分岐を持つ（`backend-cpu::fused_elementwise::eval_one` 等）。
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FusedOpKind {
     /// 葉ノード（このプランへの外部入力）。`leaf_index` は `run_fused`
