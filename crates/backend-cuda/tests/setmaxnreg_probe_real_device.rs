@@ -498,14 +498,38 @@ fn fmt_opt_regs(value: Option<i32>) -> String {
 /// の実行可否ゲートに使う `bool`）は測定不能・保存則違反のいずれも
 /// `false` として fail-closed に倒す（診断ログの表示と実行ゲートの安全側
 /// 判断は目的が異なるため意図的に非対称にしている）。
+///
+/// 戻り値は [`CoherenceOutcome`]（判定の内訳を保持する構造体。PR #636
+/// 再指摘 Low 対応: 以前は `bool`（`coherent` のみ）を返しており、呼び出し元
+/// の `execute_skipped` ログが常に `reason=cta_pool_conservation_violated`
+/// 決め打ちになっていた。`measured`・`dec_ok`・`inc_ok`・
+/// `pool_conservation_ok` を個別に公開することで、[`skip_reason`] が
+/// 「実測不能」「ISA 制約〈dec/inc〉違反」「CTA レジスタプール保存則違反」
+/// を区別できるようにする）。
+struct CoherenceOutcome {
+    /// 総合診断値（`measured_regs=None` の場合は `false`。ログ上は
+    /// `unknown` として表示する。本フィールド自体は fail-closed）。
+    coherent: bool,
+    /// `measured_regs` が `Some` だったか（`false` なら実測失敗）。
+    measured: bool,
+    /// `dec_target <= measured_regs`（`dec_target` が `None` なら常に `true`）。
+    dec_ok: bool,
+    /// `inc_target >= measured_regs`（`inc_target` が `None` なら常に `true`）。
+    inc_ok: bool,
+    /// CTA レジスタプール保存則 `2 * measured_regs >= dec_target + inc_target`
+    /// （`dec_target`・`inc_target` の一方が `None` なら常に `true`。
+    /// `measured_regs=None` の場合は `false` として fail-closed）。
+    pool_conservation_ok: bool,
+}
+
 fn report_setmaxnreg_coherence(
     label: &str,
     source: &str,
     measured_regs: Option<i32>,
     dec_target: Option<i32>,
     inc_target: Option<i32>,
-) -> bool {
-    let (coherent, pool_conservation_ok) = match measured_regs {
+) -> CoherenceOutcome {
+    let outcome = match measured_regs {
         Some(baseline) => {
             let dec_ok = dec_target.is_none_or(|dec| dec <= baseline);
             let inc_ok = inc_target.is_none_or(|inc| inc >= baseline);
@@ -513,24 +537,57 @@ fn report_setmaxnreg_coherence(
                 (Some(dec), Some(inc)) => 2 * baseline >= dec + inc,
                 _ => true,
             };
-            (dec_ok && inc_ok && pool_ok, pool_ok)
+            CoherenceOutcome {
+                coherent: dec_ok && inc_ok && pool_ok,
+                measured: true,
+                dec_ok,
+                inc_ok,
+                pool_conservation_ok: pool_ok,
+            }
         }
-        None => (false, false),
+        None => CoherenceOutcome {
+            coherent: false,
+            measured: false,
+            dec_ok: false,
+            inc_ok: false,
+            pool_conservation_ok: false,
+        },
     };
-    let coherent_display = if measured_regs.is_some() {
-        coherent.to_string()
+    let coherent_display = if outcome.measured {
+        outcome.coherent.to_string()
     } else {
         "unknown".to_string()
     };
     println!(
         "SETMAXNREG_PROBE_RESULT stage=coherence_check kernel={label} source={source} \
          measured_regs={} dec_target={} inc_target={} coherent={coherent_display} \
-         pool_conservation_ok={pool_conservation_ok}",
+         pool_conservation_ok={}",
         fmt_opt_regs(measured_regs),
         fmt_opt_regs(dec_target),
         fmt_opt_regs(inc_target),
+        outcome.pool_conservation_ok,
     );
-    coherent
+    outcome
+}
+
+/// [`try_load`] 後・[`execute_loaded`] 前の CTA レジスタプール保存則ゲートで
+/// `stage=execute_skipped` になった場合の理由ラベルを [`CoherenceOutcome`]
+/// の内訳から導出する（PR #636 再指摘 Low 対応）。`!outcome.coherent` の
+/// 場合のみ呼び出すこと＝ゲートに使う条件（`coherent`）と理由ラベルの対象を
+/// 一致させる。優先順位は「実測不能」→「ISA 制約〈dec〉違反」→
+/// 「ISA 制約〈inc〉違反」→「CTA レジスタプール保存則違反」の順（`dec_ok`／
+/// `inc_ok` が false のまま `pool_conservation_ok` の判定へ進んでも
+/// オペレーターには無意味なため、最初に false になった条件を報告する）。
+fn skip_reason(outcome: &CoherenceOutcome) -> &'static str {
+    if !outcome.measured {
+        "probe_self_regs_measurement_failed"
+    } else if !outcome.dec_ok {
+        "isa_dec_target_exceeds_baseline"
+    } else if !outcome.inc_ok {
+        "isa_inc_target_below_baseline"
+    } else {
+        "cta_pool_conservation_violated"
+    }
 }
 
 /// コンパイル成功済みカーネルをロード・起動・同期し、成否を記録する。
@@ -576,18 +633,23 @@ fn report_setmaxnreg_coherence(
 /// 割り当ては `cuModuleLoadData` 時点のドライバ JIT で確定済みのため、
 /// 実行結果の成否に左右されず記録できる（[`report_control_baseline_regs`]
 /// と同じ理屈）。
-fn try_load_and_run(
+///
+/// **`try_load`/`execute_loaded` への分割（Bugbot 指摘・PR #636 再指摘
+/// Medium 対応）**: 以前は本関数（当時の `try_load_and_run`）がロード
+/// （`module_load`・`load_function`・`probe_self_regs` 実測）から起動・同期
+/// まで一体だったため、呼び出し元が CTA レジスタプール保存則ゲートで
+/// `execute_skipped` に倒すと、ハングし得ない `module_load`／`load_function`
+/// ／`probe_self_regs`（spike の主要な証拠）までまとめて失われていた
+/// （低レジスタカーネル〈24/232〉ではこの skip が常態化しうる）。ハングし
+/// うるのは `launch`／`synchronize` のみであるため、ロード段階を
+/// [`try_load`]（常に実行）へ切り出し、起動・同期のみを [`execute_loaded`]
+/// （CTA レジスタプール保存則ゲート成立時のみ呼ぶ）へ残す。
+fn try_load(
     device: &CudaDevice,
     label: &str,
     arch: &str,
     ptx: cudarc::nvrtc::Ptx,
-    block_dim: (u32, u32, u32),
-    expected: impl Fn(f32) -> f32,
-) -> Option<i32> {
-    let n: u32 = 256;
-    let mut rng = bench_harness::rng::Xorshift64Star::new(0xC0FFEE);
-    let input: Vec<f32> = rng.fill_vec(n as usize);
-
+) -> Option<(cudarc::driver::CudaFunction, Option<i32>)> {
     let module = match device.context().load_module(ptx) {
         Ok(module) => module,
         Err(err) => {
@@ -612,7 +674,11 @@ fn try_load_and_run(
     // `setmaxnreg` が要求する dec/inc の PTX ISA 制約は、対照カーネルではなく
     // このプローブカーネル自身の静的レジスタ割り当てに対して定義される。
     // 起動前に実測して記録し、`probe_self_regs` を呼び出し元へ返す
-    // （診断参考値。[`report_setmaxnreg_coherence`] 参照）。
+    // （呼び出し元は CTA レジスタプール保存則ゲートの基準値として**この値**
+    // を使うこと。対照カーネルの baseline は producer/consumer が実際に
+    // 使うレジスタプールのサイズを決定しないため、ゲート判定には使わない
+    // ＝[`report_control_baseline_regs`] の値と混同しない。Bugbot 指摘・
+    // PR #636 再指摘 Medium 対応）。
     let probe_self_regs = match func.num_regs() {
         Ok(num_regs) => {
             println!(
@@ -629,6 +695,48 @@ fn try_load_and_run(
             None
         }
     };
+
+    Some((func, probe_self_regs))
+}
+
+/// [`try_load`] が返した `func` を起動・同期し、成否を記録する。ハングし
+/// うるのは本関数の `launch`／`synchronize` のみであり、呼び出し元は CTA
+/// レジスタプール保存則ゲート（[`report_setmaxnreg_coherence`] が返す
+/// [`CoherenceOutcome::coherent`]）が成立する場合のみ本関数を呼ぶこと
+/// （Bugbot 指摘・PR #636 再指摘 Medium 対応。[`try_load`] ドキュメンテー
+/// ションコメント参照）。
+///
+/// `setmaxnreg` が実機で受理されない場合（`CUDA_ERROR_ILLEGAL_INSTRUCTION`
+/// 等）も `panic` させず結果として記録する。実行成功時は出力バッファを
+/// 回収し「命令が実行を破壊していないか」の期待値検証も行う。
+///
+/// `arch` は診断ログ専用（`load_function` には渡さない）で、基準 arch版と
+/// arch-accelerated 版の呼び出しを `SETMAXNREG_PROBE_RESULT` の行から区別
+/// するために付与する。
+///
+/// `block_dim` は呼び出し元が `src` の warpgroup 構成に合わせて指定する
+/// （[`WARPGROUP_BLOCK_DIM`]＝1 warpgroup／[`PRODUCER_CONSUMER_BLOCK_DIM`]
+/// ＝producer・consumer 2 warpgroup）。`n`（256 要素固定）は
+/// [`PRODUCER_CONSUMER_BLOCK_DIM`] でも 1 ブロックに収まり producer・
+/// consumer 双方の warpgroup が確実に起動される値として選んでいる。
+///
+/// arch-accelerated 版も基準 arch 版と同じ「受理されても `panic` させない」
+/// 方針を維持する（`launch`/`synchronize` の失敗は fail-loud にしない）。
+/// ただし `result=corrupted`（実行完走したが出力が期待値と不一致）は
+/// 基準 arch 版と同様に `panic` させる: 出力破壊は arch-accelerated 版で
+/// あっても「命令の受理可否」の範疇を超えた危険なシグナルであり、
+/// softening しない（本関数末尾のコメント参照）。
+fn execute_loaded(
+    device: &CudaDevice,
+    func: cudarc::driver::CudaFunction,
+    label: &str,
+    arch: &str,
+    block_dim: (u32, u32, u32),
+    expected: impl Fn(f32) -> f32,
+) {
+    let n: u32 = 256;
+    let mut rng = bench_harness::rng::Xorshift64Star::new(0xC0FFEE);
+    let input: Vec<f32> = rng.fill_vec(n as usize);
 
     let in_dev = device
         .stream()
@@ -663,7 +771,7 @@ fn try_load_and_run(
             "SETMAXNREG_PROBE_RESULT stage=launch kernel={label} arch={arch} result=failed \
              detail={err:?}"
         );
-        return probe_self_regs;
+        return;
     }
 
     if let Err(err) = device.stream().synchronize() {
@@ -671,7 +779,7 @@ fn try_load_and_run(
             "SETMAXNREG_PROBE_RESULT stage=synchronize kernel={label} arch={arch} \
              result=failed detail={err:?}"
         );
-        return probe_self_regs;
+        return;
     }
 
     let output = device
@@ -696,7 +804,6 @@ fn try_load_and_run(
                 "SETMAXNREG_PROBE_RESULT stage=execute kernel={label} arch={arch} \
                  result=success output_matches_expected=true"
             );
-            probe_self_regs
         }
         Some((&x, &y)) => {
             // `result=success` は「命令が受理され実行が完走した」ことしか
@@ -777,12 +884,17 @@ fn setmaxnreg_dec_probe() {
         PROBE_SETMAXNREG_DEC,
         control_ok,
         arch,
-    ) {
-        let probe_self_regs = try_load_and_run(
+    ) && let Some((func, probe_self_regs)) = try_load(&device, "probe_setmaxnreg_dec", arch, ptx)
+    {
+        // 単体（片道）プローブのため CTA レジスタプール保存則の対象外
+        // （`inc_target=None`。[`report_setmaxnreg_coherence`] ドキュメン
+        // テーションコメント参照）で、常に起動・同期まで進める（従来
+        // どおりゲートなし）。
+        execute_loaded(
             &device,
+            func,
             "probe_setmaxnreg_dec",
             arch,
-            ptx,
             WARPGROUP_BLOCK_DIM,
             |x| x + 1.0,
         );
@@ -827,12 +939,17 @@ fn setmaxnreg_dec_probe() {
         PROBE_SETMAXNREG_DEC,
         control_ok_accelerated,
         &arch_accelerated,
+    ) && let Some((func, probe_self_regs_accelerated)) = try_load(
+        &device,
+        "probe_setmaxnreg_dec",
+        &arch_accelerated,
+        ptx_accelerated,
     ) {
-        let probe_self_regs_accelerated = try_load_and_run(
+        execute_loaded(
             &device,
+            func,
             "probe_setmaxnreg_dec",
             &arch_accelerated,
-            ptx_accelerated,
             WARPGROUP_BLOCK_DIM,
             |x| x + 1.0,
         );
@@ -889,7 +1006,12 @@ fn setmaxnreg_incdec_probe() {
     // （同レビュー Low 対応）。
     let (baseline_regs, control_ok) =
         report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, arch);
-    let control_pool_conserved = report_setmaxnreg_coherence(
+    // `source=control` は toolchain 健全性の参考記録のみで、CTA レジスタ
+    // プール保存則ゲートには使わない（対照カーネルの baseline は
+    // producer/consumer が実際に使うレジスタプールのサイズを決定しない。
+    // Bugbot 指摘・PR #636 再指摘 Medium 対応。[`try_load`] ドキュメンテー
+    // ションコメント参照）。
+    report_setmaxnreg_coherence(
         "probe_setmaxnreg_incdec",
         "control",
         baseline_regs,
@@ -905,45 +1027,53 @@ fn setmaxnreg_incdec_probe() {
         control_ok,
         arch,
     ) {
-        // `control_pool_conserved`（[`report_setmaxnreg_coherence`] の戻り値。
-        // CTA レジスタプール保存則 `2 * baseline >= dec_target + inc_target`
-        // を含む）が `false` のまま [`try_load_and_run`] を呼ぶと、consumer
-        // warpgroup の `setmaxnreg.inc` が producer が実際には解放しない
-        // レジスタを待ち続け `synchronize` が実機上で無期限にハングしうる
-        // （Bugbot 指摘・PR #636 再指摘 High 対応）。本プローブカーネルは
-        // 演算が単純で `control` baseline が保存則を満たすほど大きくならない
-        // ことが多いため、事前にコンパイル済みの `control` 側 baseline で
-        // 判定し、満たさない場合は実行（launch/synchronize）自体を skip して
-        // ハングを回避する。skip した場合は `stage=execute_skipped` として
-        // 判定不能ではなく「保存則違反により意図的に未実行」であることを
-        // 明示的にログへ残す。
-        if control_pool_conserved {
-            let probe_self_regs = try_load_and_run(
-                &device,
-                "probe_setmaxnreg_incdec",
-                arch,
-                ptx,
-                PRODUCER_CONSUMER_BLOCK_DIM,
-                |x| x * 2.0,
-            );
-            // `setmaxnreg` を実際に発行するプローブ自身の静的レジスタ割り当て
-            // による判定（診断参考値。`source=control` の行は toolchain 健全性
-            // の参考記録として残す。イシュー #484 レビュー指摘 Medium・
-            // PR #636 レビュー指摘 P2 対応）。
-            report_setmaxnreg_coherence(
+        // `module_load`・`load_function`・`probe_self_regs` はハングし得ない
+        // ため、CTA レジスタプール保存則ゲートより先に常に実行する
+        // （Bugbot 指摘・PR #636 再指摘 Medium 対応。以前はこれらの段階まで
+        // ゲートでまとめて skip しており、低レジスタカーネル〈24/232〉では
+        // spike の主要な証拠がほとんど記録できなくなっていた）。
+        if let Some((func, probe_self_regs)) =
+            try_load(&device, "probe_setmaxnreg_incdec", arch, ptx)
+        {
+            // CTA レジスタプール保存則は、CTA プールをサイズ決定する**この
+            // プローブカーネル自身**の実測値（`probe_self_regs`）を基準に
+            // 判定する（対照カーネルの baseline ではない。Bugbot 指摘・
+            // PR #636 再指摘 Medium 対応）。`outcome.coherent` が `false` の
+            // まま [`execute_loaded`] を呼ぶと、consumer warpgroup の
+            // `setmaxnreg.inc` が producer が実際には解放しないレジスタを
+            // 待ち続け `synchronize` が実機上で無期限にハングしうる
+            // （Bugbot 指摘・PR #636 再指摘 High 対応）。満たさない場合は
+            // 実行（launch/synchronize）自体を skip してハングを回避する。
+            // skip した場合は `stage=execute_skipped` として判定不能ではなく
+            // 「不整合により意図的に未実行」であることを明示的にログへ残し、
+            // 理由ラベルは [`skip_reason`] で実測不能／ISA 制約違反／CTA
+            // レジスタプール保存則違反を区別する（PR #636 再指摘 Low 対応。
+            // 以前は常に `reason=cta_pool_conservation_violated` 決め打ち
+            // だった）。
+            let outcome = report_setmaxnreg_coherence(
                 "probe_setmaxnreg_incdec",
                 "probe_self",
                 probe_self_regs,
                 Some(24),
                 Some(232),
             );
-        } else {
-            println!(
-                "SETMAXNREG_PROBE_RESULT stage=execute_skipped kernel=probe_setmaxnreg_incdec \
-                 arch={arch} reason=cta_pool_conservation_violated baseline_regs={} \
-                 dec_target=24 inc_target=232",
-                fmt_opt_regs(baseline_regs),
-            );
+            if outcome.coherent {
+                execute_loaded(
+                    &device,
+                    func,
+                    "probe_setmaxnreg_incdec",
+                    arch,
+                    PRODUCER_CONSUMER_BLOCK_DIM,
+                    |x| x * 2.0,
+                );
+            } else {
+                println!(
+                    "SETMAXNREG_PROBE_RESULT stage=execute_skipped kernel=probe_setmaxnreg_incdec \
+                     arch={arch} reason={} probe_self_regs={} dec_target=24 inc_target=232",
+                    skip_reason(&outcome),
+                    fmt_opt_regs(probe_self_regs),
+                );
+            }
         }
     }
 
@@ -953,9 +1083,9 @@ fn setmaxnreg_incdec_probe() {
     // コンパイル確認のみで `try_compile` の戻り値を捨てており、sm_121 実機
     // での「受理・実行可能か」を確定できていなかった）。カーネル内
     // `__global__` 関数シンボル名は基準 arch 版と同一
-    // 〈`probe_setmaxnreg_incdec`〉のため [`try_load_and_run`] へ渡す
-    // `label` はそのまま再利用し、`arch` 引数に `arch_accelerated` を渡す
-    // ことで `SETMAXNREG_PROBE_RESULT` の行を基準 arch 版と区別する。
+    // 〈`probe_setmaxnreg_incdec`〉のため [`try_load`] へ渡す `label` は
+    // そのまま再利用し、`arch` 引数に `arch_accelerated` を渡すことで
+    // `SETMAXNREG_PROBE_RESULT` の行を基準 arch 版と区別する。
     // 基準 arch と異なる arch のため `control_src` を独立に
     // `report_control_baseline_regs` へ渡す（イシュー #484 レビュー指摘 Low
     // 対応の適用範囲外＝真に別入力）。基準 arch 版と同様に `source=control`
@@ -966,7 +1096,10 @@ fn setmaxnreg_incdec_probe() {
     // baseline 実測・coherence 判定を行っていなかった）。
     let (baseline_regs_accelerated, control_ok_accelerated) =
         report_control_baseline_regs(&device, "control_incdec", CONTROL_INCDEC, &arch_accelerated);
-    let control_pool_conserved_accelerated = report_setmaxnreg_coherence(
+    // `source=control` は toolchain 健全性の参考記録のみで、CTA レジスタ
+    // プール保存則ゲートには使わない（基準 arch 版ブロックのコメント参照。
+    // Bugbot 指摘・PR #636 再指摘 Medium 対応）。
+    report_setmaxnreg_coherence(
         "probe_setmaxnreg_incdec_arch_accelerated",
         "control",
         baseline_regs_accelerated,
@@ -979,33 +1112,41 @@ fn setmaxnreg_incdec_probe() {
         control_ok_accelerated,
         &arch_accelerated,
     ) {
-        // 基準 arch 版と同じゲート（`control_pool_conserved_accelerated`）で
-        // `try_load_and_run` の実行可否を判定する（Bugbot 指摘・PR #636
-        // 再指摘 High 対応。上の基準 arch 版ブロックのコメント参照）。
-        if control_pool_conserved_accelerated {
-            let probe_self_regs_accelerated = try_load_and_run(
-                &device,
-                "probe_setmaxnreg_incdec",
-                &arch_accelerated,
-                ptx_accelerated,
-                PRODUCER_CONSUMER_BLOCK_DIM,
-                |x| x * 2.0,
-            );
-            report_setmaxnreg_coherence(
+        // 基準 arch 版と同じ「ロード段階は常に実行し、CTA レジスタプール
+        // 保存則ゲートは launch/synchronize のみに適用する」方針（Bugbot
+        // 指摘・PR #636 再指摘 Medium/High/Low 対応。上の基準 arch 版
+        // ブロックのコメント参照）。
+        if let Some((func, probe_self_regs_accelerated)) = try_load(
+            &device,
+            "probe_setmaxnreg_incdec",
+            &arch_accelerated,
+            ptx_accelerated,
+        ) {
+            let outcome = report_setmaxnreg_coherence(
                 "probe_setmaxnreg_incdec_arch_accelerated",
                 "probe_self",
                 probe_self_regs_accelerated,
                 Some(24),
                 Some(232),
             );
-        } else {
-            println!(
-                "SETMAXNREG_PROBE_RESULT stage=execute_skipped \
-                 kernel=probe_setmaxnreg_incdec_arch_accelerated arch={arch_accelerated} \
-                 reason=cta_pool_conservation_violated baseline_regs={} \
-                 dec_target=24 inc_target=232",
-                fmt_opt_regs(baseline_regs_accelerated),
-            );
+            if outcome.coherent {
+                execute_loaded(
+                    &device,
+                    func,
+                    "probe_setmaxnreg_incdec",
+                    &arch_accelerated,
+                    PRODUCER_CONSUMER_BLOCK_DIM,
+                    |x| x * 2.0,
+                );
+            } else {
+                println!(
+                    "SETMAXNREG_PROBE_RESULT stage=execute_skipped \
+                     kernel=probe_setmaxnreg_incdec_arch_accelerated arch={arch_accelerated} \
+                     reason={} probe_self_regs={} dec_target=24 inc_target=232",
+                    skip_reason(&outcome),
+                    fmt_opt_regs(probe_self_regs_accelerated),
+                );
+            }
         }
     }
 }
