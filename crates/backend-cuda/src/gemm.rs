@@ -654,6 +654,28 @@ impl CudaGemm {
         self.wmma_tf32_opt_error.as_deref()
     }
 
+    /// 基本版 WMMA(TF32) カーネル（[`Self::wmma_tf32`]）が `CudaGemm::new`
+    /// 時点でコンパイル・ロードに成功しているかを返す
+    /// （[`Self::wmma_tf32_opt_available`] の基本版対）。
+    ///
+    /// PR #640 codex-review 指摘対応: `run_wmma_tf32` は opt カーネルが
+    /// 利用可能な環境では常に opt を優先するため（上記
+    /// ドキュメンテーションコメント参照）、`tests/parity_nonregression.rs`
+    /// の `ParityPath::WmmaTf32`（基本版）行が実際に基本版カーネルを検査
+    /// したことを、[`Self::run_wmma_tf32_basic_for_test`] 呼び出し前に
+    /// この読み取り口で事前確認する（`wmma_tf32_opt_available` を
+    /// `tests/gemm_wmma_tf32_opt.rs` が使う構図と対称）。
+    pub fn wmma_tf32_available(&self) -> bool {
+        self.wmma_tf32.is_some()
+    }
+
+    /// [`Self::wmma_tf32_available`] が `false` の場合の失敗理由
+    /// （[`Self::wmma_tf32_error`] の公開読み取り口。
+    /// [`Self::wmma_tf32_opt_unavailable_reason`] の基本版対）。
+    pub fn wmma_tf32_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_tf32_error.as_deref()
+    }
+
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],
@@ -683,6 +705,44 @@ impl CudaGemm {
                     (Some(basic), None) => basic.clone(),
                     (None, _) => "WMMA(TF32) kernel unavailable for an unknown reason".to_string(),
                 },
+            })?;
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_wmma_tf32_k_bound(k)?;
+        self.run_wmma_f32_kernel(func, a, b, m, n, k)
+    }
+
+    /// テスト専用: 基本版 WMMA(TF32) カーネル（[`Self::wmma_tf32`]）を
+    /// opt カーネルの可用性に関わらず必ず実行するエントリポイント。
+    ///
+    /// PR #640 codex-review 指摘対応: `run_wmma_tf32`（本番経路唯一の
+    /// 公開 API）は opt カーネルが利用可能なら常にそちらを優先するため
+    /// （`run_wmma_tf32` ドキュメンテーションコメント参照）、opt カーネルが
+    /// 利用可能な実機では `run_wmma_tf32` 経由で基本版カーネル自体を検査
+    /// することができない。`tests/parity_nonregression.rs` の
+    /// `ParityPath::WmmaTf32`（基本版）行はこの理由で本メソッドを使う
+    /// （`ParityPath::WmmaTf32Opt` 行は引き続き `run_wmma_tf32` を使う）。
+    ///
+    /// 本メソッドは REQ-11「明示切替 API を提供しない」方針を本番経路に
+    /// 限って維持したうえでの、この非後退契約テストのためだけに存在する
+    /// `#[doc(hidden)]` の狭い例外である（本番向け公開 API 面は
+    /// `run_wmma_tf32` のみであり続ける）。テスト以外の呼び出し元を
+    /// 増やさないこと。
+    #[doc(hidden)]
+    pub fn run_wmma_tf32_basic_for_test(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        let func = self
+            .wmma_tf32
+            .as_ref()
+            .ok_or_else(|| CudaError::WmmaUnavailable {
+                detail: self.wmma_tf32_error.clone().unwrap_or_else(|| {
+                    "basic WMMA(TF32) kernel unavailable for an unknown reason".to_string()
+                }),
             })?;
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_wmma_tf32_k_bound(k)?;

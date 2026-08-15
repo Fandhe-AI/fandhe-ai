@@ -208,19 +208,35 @@ fn parity_baselines_do_not_regress() {
 ///
 /// 参照値は `backend_cpu::matmul_reference_fma`（非量子化。
 /// `docs/backend-cuda-real-device-testing.md` §5.3 が確認済みの意図的設計を
-/// 踏襲する）。`wmma_tf32_opt` 行はエントリポイントが `run_wmma_tf32` と
-/// 共通（opt カーネルが利用可能な環境では内部で自動的に opt 経路へ入る
-/// ため。`gemm.rs::run_wmma_tf32` 参照）だが、opt カーネル利用可能である
-/// ことを事前に確認してからでないと「実際に opt 固有のタイル境界を踏んだ」
-/// 保証がないため、既存テスト（`gemm_wmma_tf32_opt.rs`）と同じ事前検査を行う。
+/// 踏襲する）。
+///
+/// **PR #640 codex-review 指摘対応**: 以前は `WmmaTf32`（基本版）・
+/// `WmmaTf32Opt` の両行を `run_wmma_tf32` に送っていたが、この API は opt
+/// カーネルが利用可能なら常に opt を優先する（`gemm.rs::run_wmma_tf32`
+/// 参照）ため、opt が使える実機では `WmmaTf32` 行も実質 opt カーネルを
+/// 検査してしまい、基本版カーネル単独の後退を検出できない盲点があった。
+/// 現在は経路ごとにエントリポイントを分ける: `WmmaTf32` 行は
+/// [`CudaGemm::run_wmma_tf32_basic_for_test`]（`#[doc(hidden)]` のテスト
+/// 専用口。基本版カーネルを opt の可用性に関わらず直接指定する）を、
+/// `WmmaTf32Opt` 行は引き続き `run_wmma_tf32` を使う。どちらも「実際に
+/// 意図した版のカーネルを踏んだ」ことを事前の可用性 assert で保証してから
+/// 実行する（`wmma_tf32_available`/`wmma_tf32_opt_available` の対称な
+/// 事前検査。既存テスト `gemm_wmma_tf32_opt.rs` と同じ考え方）。
 fn check_wmma_tf32_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
-    if baseline.path == ParityPath::WmmaTf32Opt {
-        assert!(
+    match baseline.path {
+        ParityPath::WmmaTf32 => assert!(
+            gemm.wmma_tf32_available(),
+            "{}: basic WMMA(TF32) kernel must be available on this ignored test runner (reason: {:?})",
+            baseline.context,
+            gemm.wmma_tf32_unavailable_reason()
+        ),
+        ParityPath::WmmaTf32Opt => assert!(
             gemm.wmma_tf32_opt_available(),
             "{}: opt kernel must be available on this ignored test runner (reason: {:?})",
             baseline.context,
             gemm.wmma_tf32_opt_unavailable_reason()
-        );
+        ),
+        ParityPath::MmaF16 => unreachable!("check_wmma_tf32_baseline は TF32 系経路専用"),
     }
 
     let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
@@ -238,9 +254,17 @@ fn check_wmma_tf32_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
     )
     .expect("matmul_reference_fma shape validation must pass for well-formed baseline input");
 
-    let c_gpu = gemm
-        .run_wmma_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
-        .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner");
+    let c_gpu = match baseline.path {
+        ParityPath::WmmaTf32 => gemm
+            .run_wmma_tf32_basic_for_test(&a, &b, baseline.m, baseline.n, baseline.k)
+            .expect(
+                "CudaGemm::run_wmma_tf32_basic_for_test must succeed on a compute capability >= 8.0 test runner",
+            ),
+        ParityPath::WmmaTf32Opt => gemm
+            .run_wmma_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
+            .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner"),
+        ParityPath::MmaF16 => unreachable!("check_wmma_tf32_baseline は TF32 系経路専用"),
+    };
 
     let report = backend_cpu::compare(&c_gpu, &c_ref).expect("shape must match baseline fixture");
     assert_no_parity_regression(baseline.context, &report, baseline);
