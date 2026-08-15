@@ -16,7 +16,7 @@
 
 use std::ffi::OsStr;
 use std::num::NonZeroU32;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
@@ -450,8 +450,8 @@ pub(crate) const fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// 同一検証を課す。個別指摘対象だった XDG_CACHE_HOME・HOME 分岐も含む）。
 ///
 /// **本検証が保証しない範囲（意図的に限定的。C-3・#509 へ委譲）**:
-/// この containment 判定は [`Path::starts_with`] による**字句上の比較の
-/// み**であり、シンボリックリンク解決を伴わない。したがって
+/// この containment 判定は [`path_lexically_within`] による**字句上の
+/// 比較のみ**であり、シンボリックリンク解決を伴わない。したがって
 /// シンボリックリンクでリポジトリツリー内の別名パスへ迂回するケース
 /// （例: ツリー外にあるように見えるパスが実はツリー内ディレクトリへの
 /// symlink である場合）は本層では検出できない。これを実効的に強制する
@@ -462,6 +462,16 @@ pub(crate) const fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// 実在が保証されない C-2 時点の純関数では原理的に実行できない）で
 /// 行うのが正しい実装点であり、シンボリックリンク対応は C-3 側の責務と
 /// する（`docs/cuda-jit-cache-design.md` 検証条件節も参照）。
+///
+/// **`..` コンポーネントの字句正規化（PR #659 codex-review P0 指摘への
+/// 追加対応）**: [`path_lexically_within`] は比較前に `..`
+/// （[`Component::ParentDir`]）を fs I/O なしで畳み込む（[`lexically_normalize`]
+/// 参照）。畳み込みを行わず単純に [`Path::starts_with`] のみで比較すると、
+/// `workspace_root` が `/repo` のとき `RUST_AI_CUDA_CACHE_DIR=/outside/../repo/cache`
+/// のような絶対パスは「先頭コンポーネントが `/repo` と一致しない」ため
+/// containment 判定を素通りしてしまうが、実際のファイル操作は
+/// `/repo/cache`（ツリー内）を指してしまう。3 分岐（override・
+/// XDG_CACHE_HOME・HOME）すべてがこの正規化済み比較を経由する。
 fn resolve_cache_root(
     override_dir: Option<&OsStr>,
     xdg_cache_home: Option<&OsStr>,
@@ -547,8 +557,56 @@ fn resolve_cache_root(
 /// 判定する（[`resolve_cache_root`] 用。fs I/O なしの純比較。
 /// [`Path::starts_with`] はコンポーネント単位の比較のため、
 /// `/repo-extra` を `/repo` の配下と誤判定しない）。
+///
+/// 比較前に両パスを [`lexically_normalize`] で正規化する（PR #659
+/// codex-review P0 指摘）: 正規化なしでは `..` コンポーネントを含む
+/// 絶対パス（例 `/outside/../repo/cache`）が `Path::starts_with` の
+/// コンポーネント単位比較を素通りしてしまう（先頭コンポーネントが
+/// `root` と一致しないため）が、実際のファイル操作は `..` 解決後の
+/// パス（`root` 配下）を指してしまう。symlink 解決までは行わない
+/// （fs I/O なしの字句正規化のみ）。symlink 経由の迂回は C-3・#509 の
+/// `canonicalize` 済みパスでの再検証に委譲する（本関数 doc・
+/// [`resolve_cache_root`] doc 参照）。
 fn path_lexically_within(candidate: &Path, root: &Path) -> bool {
-    candidate.starts_with(root)
+    lexically_normalize(candidate).starts_with(lexically_normalize(root))
+}
+
+/// パスのコンポーネントを fs I/O なしで字句上（lexically）正規化する
+/// （[`path_lexically_within`] 用）。`..`（[`Component::ParentDir`]）が
+/// 現れるたびに直前の通常コンポーネント（[`Component::Normal`]）を
+/// 取り除く（realpath 相当だがシンボリックリンク解決は行わない）。
+///
+/// ルート／プレフィックス（`/`・Windows ドライブ文字等）を越える `..`
+/// は OS のパス解決（ルートの親はルート自身）と同様に無視する。相対
+/// パスの先頭に現れる `..`（遡り先の通常コンポーネントが存在しない
+/// 場合）のみ、そのまま保持する（本クレートの呼び出し元は絶対パス
+/// のみを渡す前提〈[`resolve_cache_root`] の `is_relative()` 検証〉
+/// のためこの分岐へは通常到達しない）。
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {
+                    // ルート／プレフィックス直下からはこれ以上遡れない
+                    // （OS のパス解決と同様、ルートの親はルート自身）
+                    // ため `..` を読み捨てる。
+                }
+                _ => {
+                    // 正規化結果が空、または直前も `..`: 遡り先の通常
+                    // コンポーネントがまだないため、相対パスの先頭
+                    // `..` として保持する。
+                    normalized.push(component);
+                }
+            },
+            Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    normalized
 }
 
 /// 本クレート（`backend-cuda`）が属するワークスペースのルートディレクトリ
@@ -1550,6 +1608,92 @@ mod tests {
             &workspace_root,
         );
         assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // containment 検証（PR #659 codex-review P0 再指摘への対応）: `..`
+    // コンポーネントを含む絶対パスで containment 判定を迂回できないこと。
+    // `path_lexically_within` が `Path::starts_with` のみ（正規化なし）
+    // だった旧実装では、`workspace_root` が `/path/to/repository` の
+    // とき `/path/to/outside/../repository/cache` は先頭コンポーネント
+    // が一致しないため誤って許可されてしまうが、実際のファイル操作は
+    // `..` 解決後の `/path/to/repository/cache`（ツリー内）を指す。
+    #[test]
+    fn resolve_cache_root_rejects_override_with_parent_dir_traversal_into_workspace_root() {
+        let workspace_root = PathBuf::from("/path/to/repository");
+        let result = resolve_cache_root(
+            Some(OsStr::new("/path/to/outside/../repository/cache")),
+            None,
+            None,
+            &workspace_root,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // containment 検証: XDG_CACHE_HOME 分岐でも `..` トラバーサルを拒否する
+    // （P0 指摘は override・XDG_CACHE_HOME・HOME の 3 分岐すべてを対象と
+    // していたため、分岐ごとに回帰テストを揃える）。
+    #[test]
+    fn resolve_cache_root_rejects_xdg_cache_home_with_parent_dir_traversal_into_workspace_root() {
+        let workspace_root = PathBuf::from("/path/to/repository");
+        let result = resolve_cache_root(
+            None,
+            Some(OsStr::new("/path/to/outside/../repository")),
+            None,
+            &workspace_root,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // containment 検証: HOME 分岐でも `..` トラバーサルを拒否する。
+    #[test]
+    fn resolve_cache_root_rejects_home_with_parent_dir_traversal_into_workspace_root() {
+        let workspace_root = PathBuf::from("/path/to/repository");
+        let result = resolve_cache_root(
+            None,
+            None,
+            Some(OsStr::new("/path/to/outside/../repository")),
+            &workspace_root,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // `lexically_normalize` の単体テスト: `..` の畳み込み・ルートを
+    // 越える `..` の読み捨て・`.` の除去を直接検証する（fs I/O なしの
+    // 純関数であるため実ファイルシステムに依存せずテストできる）。
+    #[test]
+    fn lexically_normalize_collapses_parent_dir_components() {
+        assert_eq!(
+            lexically_normalize(Path::new("/path/to/outside/../repository/cache")),
+            PathBuf::from("/path/to/repository/cache")
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_ignores_parent_dir_past_root() {
+        // ルート直下からの `..` は OS のパス解決と同様にルート自身へ
+        // とどまる（それ以上遡らない）。
+        assert_eq!(
+            lexically_normalize(Path::new("/../repository")),
+            PathBuf::from("/repository")
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_removes_cur_dir_components() {
+        assert_eq!(
+            lexically_normalize(Path::new("/path/./to/./repository")),
+            PathBuf::from("/path/to/repository")
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_preserves_leading_parent_dir_in_relative_path() {
+        // 絶対パス前提の呼び出し元（`resolve_cache_root`）では通常
+        // 到達しない経路だが、純関数としての境界挙動を明示する。
+        assert_eq!(
+            lexically_normalize(Path::new("../repository")),
+            PathBuf::from("../repository")
+        );
     }
 
     // トラバーサル防御（A03）: `cache_entry_path`（実体は
