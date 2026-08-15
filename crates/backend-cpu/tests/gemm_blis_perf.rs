@@ -126,12 +126,17 @@ fn gemm_blis_baseline_pytorch_square_512_to_4096() {
 
         let config = MeasurementConfig::default(); // warmup 20・iters 20（TASK-8.1 下限）
 
-        // `gemm_blis_parallel` は出力バッファ全体を上書きする契約
-        // （`crates/backend-cpu/src/gemm_blis/mod.rs`）のため、ゼロ初期化は
-        // 計測前に一度だけ行えばよい。計測クロージャ内でループのたびに
-        // ゼロクリアすると O(N²) のメモリ書き込み時間が `median_secs`・
-        // そこから算出する TFLOPS（Phase E の対 PyTorch 比率の分子）へ
-        // 混入し、比較対象のカーネル性能を過小評価してしまう
+        // `gemm_blis_parallel`（`dispatch_region` → `gemm_blis_region`）は
+        // C タイルの現在値をロードしてから `kernel.run` で加算する
+        // 「C += A@B」契約であり、出力バッファ全体を上書きする契約では
+        // ない（`crates/backend-cpu/src/gemm_blis/mod.rs` の C タイル
+        // load/store 部を参照）。そのため計測クロージャ内では `c` を
+        // ゼロクリアしない（warmup・計測の反復を経るたびに前回の
+        // 結果へ積算されていくだけで、計測対象はあくまで
+        // `gemm_blis_parallel` 呼び出し自体の所要時間であり `c` の
+        // 最終値は計測目的では使わない）。ゼロクリアの O(N²) メモリ
+        // 書き込み時間が `median_secs`・そこから算出する TFLOPS
+        // （Phase E の対 PyTorch 比率の分子）へ混入するのを避ける
         // （codex-review 指摘・PR #650）。
         let mut c = vec![0.0f32; m * n];
         let measurement = run(&config, || {
@@ -139,25 +144,35 @@ fn gemm_blis_baseline_pytorch_square_512_to_4096() {
         })
         .expect("gemm_blis_parallel の計測に失敗");
 
-        // 計測に使った具体的な入力で数値正当性を保険として確認する
-        // （bit 完全一致契約の網羅検証は `tests/gemm_blis_parity.rs` が
-        // 別途担うため、ここでは計測対象取り違えの検出に限定する）。
-        let mut c_ref = vec![0.0f32; m * n];
-        gemm_parallel(&a, &b, &mut c_ref, m, n, k).unwrap();
-        assert_eq!(
-            c, c_ref,
-            "計測対象 gemm_blis_parallel が参照実装と bit 一致しない（M=N=K={size}）"
-        );
-
         let flops = 2.0 * (size as f64).powi(3);
         let median_tflops = flops / measurement.median_secs / 1e12;
         let q1_tflops = flops / measurement.q3_secs / 1e12; // 所要時間が短いほど TFLOPS は高いため q3_secs が q1_tflops に対応する
         let q3_tflops = flops / measurement.q1_secs / 1e12;
 
+        // 計測済み TFLOPS は正当性確認より先に出力する。以降の
+        // `assert_eq!` が失敗して panic しても、Phase E の分母となる
+        // この形状の計測値が出力されないまま失われることはない
+        // （cursor[bot]・github-actions 指摘・PR #650）。
         println!(
             "kernel=gemm_blis_parallel size={size} median_tflops={median_tflops:.6} \
              q1_tflops={q1_tflops:.6} q3_tflops={q3_tflops:.6} median_secs={:.6}",
             measurement.median_secs,
+        );
+
+        // 数値正当性は計測区間の外側で独立して確認する（計測ループ中の
+        // `c` は複数回の `gemm_blis_parallel` 呼び出しで積算された値の
+        // ため、そのままでは参照実装と比較できない）。`c` を明示的に
+        // ゼロクリアしてから単回のみ再実行し、その結果を
+        // `gemm_parallel` と突き合わせる（bit 完全一致契約の網羅検証は
+        // `tests/gemm_blis_parity.rs` が別途担うため、ここでは計測対象
+        // 取り違えの検出に限定する）。
+        c.iter_mut().for_each(|v| *v = 0.0);
+        gemm_blis_parallel(&a, &b, &mut c, m, n, k).unwrap();
+        let mut c_ref = vec![0.0f32; m * n];
+        gemm_parallel(&a, &b, &mut c_ref, m, n, k).unwrap();
+        assert_eq!(
+            c, c_ref,
+            "計測対象 gemm_blis_parallel が参照実装と bit 一致しない（M=N=K={size}）"
         );
     }
 }
