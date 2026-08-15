@@ -91,18 +91,27 @@ pub struct ParityBaseline {
     /// 保証が取れていない場合に `true`（PR #640 codex-review 指摘対応・
     /// イシュー #491）。
     ///
-    /// `true` の行は `assert_no_parity_regression` による基本版カーネル
-    /// 単独の合否判定には使わない（`parity_nonregression.rs::check_wmma_tf32_baseline`
-    /// を参照。記録元テストが opt カーネル可用性を確認せず `run_wmma_tf32`
-    /// を呼んだため、記録値が opt カーネルの実測結果である可能性が高い —
-    /// にもかかわらず基本版専用エントリ〈`run_wmma_tf32_basic_for_test`〉と
-    /// 比較すると、カーネルが異なり fail_count・mean_abs_diff の分布も
-    /// 異なるため、後退していない変更を拒否する false-fail と、基本版の
-    /// 後退を見逃す false-pass の両方が生じ、非後退ゲートとして成立しない）。
-    /// 実機再測定でこの provenance 不確実性を解消したら `false` へ更新し、
-    /// 基本版カーネル専用の実測値へ差し替える（推定値での上書きはしない。
-    /// `docs/perf/cuda-parity-baseline.md` §「既知の限界」）。
-    pub pending_basic_remeasurement: bool,
+    /// **fail-closed 契約（PR #640 codex-review P1 再指摘対応。旧
+    /// `pending_basic_remeasurement` からの改名）**: `true` の行は
+    /// `assert_no_parity_regression` が判定を試みず**必ず panic する**
+    /// （黙って skip しない。旧実装は provenance 不確実な行をスキップし
+    /// 「実機テストは正常終了と shape 一致だけで通過する」状態を許してい
+    /// たが、これは非後退ゲートが機能していないのに green に見える回帰
+    /// だった）。記録元テストが opt カーネル可用性を確認せず `run_wmma_tf32`
+    /// を呼んだため、記録値が opt カーネルの実測結果である可能性が高く、
+    /// 基本版カーネル専用の実測経路
+    /// （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
+    /// `src/gemm.rs` 内のライブラリ単体テスト）と比較すると、カーネルが
+    /// 異なり fail_count・mean_abs_diff の分布も異なるため、後退していない
+    /// 変更を拒否する false-fail と、基本版の後退を見逃す false-pass の
+    /// 両方が生じ非後退ゲートとして成立しない。実機再測定でこの provenance
+    /// 不確実性を解消したら `false` へ更新し、基本版カーネル専用の実測値へ
+    /// 差し替える（推定値での上書きはしない。
+    /// `docs/perf/cuda-parity-baseline.md` §「既知の限界」）。それまでの間、
+    /// 該当行を含む実機必須テストは実行のたびに fail し続ける契約であり、
+    /// これは意図した挙動である（本リポで既知の受け入れ済み状態。
+    /// `docs/backend-cuda-real-device-testing.md` §5.3・§7 参照）。
+    pub basic_kernel_baseline_unconfirmed: bool,
 }
 
 /// 記録済みベースライン一覧（`docs/perf/cuda-parity-baseline.md` の表・6 行）。
@@ -123,9 +132,11 @@ pub static BASELINES: &[ParityBaseline] = &[
     // 呼ぶため、この記録値が実際には opt カーネル計測である可能性がある
     // （DGX Spark GB10 実機では opt が概ね利用可能。
     // `docs/perf/cuda-parity-baseline.md` §3「既知の限界」参照）。基本版
-    // カーネル専用エントリ（`run_wmma_tf32_basic_for_test`）による非後退
-    // 検査との比較でこの provenance 不確実性を認識したうえで扱うこと。
-    // 実機再測定でのみ解消可能（推定値での上書きはしない）。
+    // カーネル専用の単体テスト
+    // （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
+    // `src/gemm.rs`）による非後退検査との比較でこの provenance 不確実性を
+    // 認識したうえで扱うこと。実機再測定でのみ解消可能（推定値での上書きは
+    // しない）。
     ParityBaseline {
         path: ParityPath::WmmaTf32,
         context: "wmma_tf32 32x32x32 seed=2000",
@@ -139,7 +150,7 @@ pub static BASELINES: &[ParityBaseline] = &[
         // PR #640 codex-review P1 指摘対応: 記録元は opt 可用性を確認せず
         // `run_wmma_tf32` を呼ぶため opt 実測の可能性が高く、基本版専用
         // エントリとの比較に使えない（上記ドキュメンテーションコメント参照）。
-        pending_basic_remeasurement: true,
+        basic_kernel_baseline_unconfirmed: true,
     },
     // wmma_tf32: K=4096 ストレスケース先頭（256x256x4096、seed=8888）。
     // `tests/gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5` の先頭呼出し。
@@ -158,7 +169,7 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 4.477e-3,
         // PR #640 codex-review P1 指摘対応: 32x32x32 行と同じ provenance
         // 不確実性が該当する（上記ドキュメンテーションコメント参照）。
-        pending_basic_remeasurement: true,
+        basic_kernel_baseline_unconfirmed: true,
     },
     // wmma_tf32_opt: 512x512x512。エントリポイントは `run_wmma_tf32` と共通
     // だが、記録元 `tensor_core_real_device.rs::tensor_core_parity_record`
@@ -179,7 +190,7 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 1.575e-3,
         // opt 可用性を計測前に assert 済み（記録元コメント参照）。
         // provenance 不確実性なし。
-        pending_basic_remeasurement: false,
+        basic_kernel_baseline_unconfirmed: false,
     },
     // wmma_tf32_opt: 形状網羅の先頭ケース（64x64x64、seed=3000）。
     // `tests/gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`
@@ -196,7 +207,7 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 5.677e-4,
         // 記録元テストは opt 経路専用（`gemm_wmma_tf32_opt.rs`）のため
         // provenance 不確実性なし。
-        pending_basic_remeasurement: false,
+        basic_kernel_baseline_unconfirmed: false,
     },
     // wmma_tf32_opt: K=4096 ストレスケース先頭（512x512x4096、seed=0xC0FFEE）。
     // `tests/gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress` の先頭呼出し。
@@ -212,7 +223,7 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_mean_abs_diff_ceiling: 4.464e-3,
         // 記録元テストは opt 経路専用（`gemm_wmma_tf32_opt.rs`）のため
         // provenance 不確実性なし。
-        pending_basic_remeasurement: false,
+        basic_kernel_baseline_unconfirmed: false,
     },
     // mma_f16: K=4096 ストレスケース（256x256x4096、seed=9999）。
     // `tests/cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` の先頭呼出し
@@ -228,7 +239,7 @@ pub static BASELINES: &[ParityBaseline] = &[
         baseline_fail_count: 101,
         baseline_mean_abs_diff_ceiling: 7.647e-5,
         // `run_f16` は基本/opt の分岐を持たないため provenance 不確実性なし。
-        pending_basic_remeasurement: false,
+        basic_kernel_baseline_unconfirmed: false,
     },
 ];
 
@@ -249,12 +260,31 @@ pub static BASELINES: &[ParityBaseline] = &[
 ///
 /// いずれかの検査に失敗した場合、`backend_cpu::assert_parity` と同水準の
 /// 診断情報（fail_count・mean_abs_diff 等の分布統計）を付けて panic する。
+/// `baseline.basic_kernel_baseline_unconfirmed == true` の場合は上記 3 点の
+/// 比較を行わず、実機再測定が必要である旨のメッセージで即座に panic する
+/// （fail-closed。`ParityBaseline::basic_kernel_baseline_unconfirmed` の
+/// ドキュメンテーションコメント参照。PR #640 codex-review P1 再指摘対応:
+/// 呼び出し側で判定をスキップさせず、この関数自身が迂回不能な唯一の
+/// 判定経路として fail-closed を保証する）。
 #[track_caller]
 pub fn assert_no_parity_regression(
     context: &str,
     report: &backend_cpu::CompareReport,
     baseline: &ParityBaseline,
 ) {
+    assert!(
+        !baseline.basic_kernel_baseline_unconfirmed,
+        "{context}: parity 非後退契約 FAIL — この行は基本版カーネル専用の \
+         確定ベースラインが未整備です（basic_kernel_baseline_unconfirmed \
+         == true）。provenance 不確実性により非後退判定に使えないため、\
+         黙って skip せず fail-closed で失敗させています。CUDA 実機で \
+         基本版カーネル単独を再測定し、確定値を記録したうえで \
+         basic_kernel_baseline_unconfirmed: false へ更新してください \
+         （推定値の記入は禁止。docs/perf/cuda-parity-baseline.md \
+         §「既知の限界」・§「ベースライン更新規約」参照。実測 fail_count=\
+         {}/{}, mean_abs_diff={:.6e} は参考値であり合否判定には使っていません）",
+        report.fail_count, report.total, report.mean_abs_diff,
+    );
     assert_eq!(
         report.total, baseline.total,
         "{context}: 比較対象の要素数が baseline({}) と一致しません（形状・\

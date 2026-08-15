@@ -22,25 +22,7 @@ tensor-core = { path = "../tensor-core" }
 cudarc.workspace = true
 half.workspace = true
 
-[features]
-# `run_wmma_tf32_basic_for_test`（parity 非後退契約の基本版カーネル専用
-# テスト口。PR #640 codex-review 指摘対応）の可視性スイッチ。既定 OFF。
-# 新規外部依存の追加ではなく、また feature フラグでバックエンドを切替える
-# ものでもないため `.claude/rules/coding-rust.md`「バックエンド切替は
-# feature フラグなしの cfg ベース」の対象外（cfg ベース切替方針はバックエンド
-# 選択〈CPU/CUDA/Metal〉に関する規約であり、単一バックエンド内のテスト専用
-# エントリの可視性制御は別軸）。有効化は下記 `[dev-dependencies]` の自己
-# 参照経由のみとし、`cargo test`/`cargo build --tests` 実行時にのみ有効化
-# される（通常の `cargo build`・downstream の `cargo add backend-cuda` では
-# 到達しない。Cargo のターゲット別 feature unification〈resolver = "3"〉に
-# よる）。
-internal-testing = []
-
 [dev-dependencies]
-# `internal-testing` feature を統合テスト（`tests/*.rs`）向けにのみ有効化
-# するための自己参照（Cargo の標準パターン。dev-dependencies のみの
-# cyclic self-dependency は許容される）。新規外部依存の追加ではない。
-backend-cuda = { path = ".", features = ["internal-testing"] }
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート
 # 同士の path 依存であり、許容依存 8 区分（外部クレート）の新規追加には

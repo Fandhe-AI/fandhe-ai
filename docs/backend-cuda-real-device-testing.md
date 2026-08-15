@@ -223,6 +223,15 @@ toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p backend-cud
 `CudaError::DriverUnavailable`／`CudaError::NvrtcUnavailable` を返す分岐で早期 return し green になる
 契約（各テストファイル冒頭のドキュメンテーションコメント参照）。本イシューの実行はこの契約を変更しない。
 
+**追記（イシュー #491・PR #640 codex-review P1 指摘対応）**: 基本版 WMMA(TF32) カーネル単独の parity
+非後退検査（`ParityPath::WmmaTf32`）は、`tests/*.rs`（独立クレート扱いの統合テスト）から公開 API を
+増やさずに到達できないため、`crates/backend-cuda/src/gemm.rs` のライブラリ自身の単体テスト
+（`#[cfg(test)] mod tests` 内 `wmma_tf32_basic_kernel_parity_does_not_regress`。`#[ignore]` で実機必須）
+として実装している。`cargo test` はターゲット未指定時に lib ユニットテスト・統合テスト双方を対象にする
+ため、既存の実行導線（`make test-ignored-cuda`。`cargo test -p backend-cuda --release -- --ignored --nocapture`）
+はこのテストも変更なく含む。個別に実行する場合は `cargo test -p backend-cuda --lib -- --ignored` を使う。
+`docs/perf/cuda-parity-baseline.md` §7「関連」参照。
+
 ## 7. 未解決事項・エスカレーション先
 
 - **#186**（Tensor Core 経路の数値一致閾値の実測再評価）: 5.3 節の 8 件（f16 K=4096 tail 3 件・TF32 5 件）

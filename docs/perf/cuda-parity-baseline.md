@@ -71,23 +71,32 @@ Spark GB10 実機実測環境では opt カーネルが利用可能であった�
 （`docs/perf/cuda-floor-remeasurement.md`「opt カーネル可用性の検証」節
 参照。同実機で `wmma_tf32_opt_available()` が概ね true であることの
 傍証）。そのため記録値が実際には opt カーネルの結果であり、基本版カーネル
-専用エントリ（`CudaGemm::run_wmma_tf32_basic_for_test`。§7 関連）の
-非後退検査と比較した際に K-tiling 差（基本版 8 / opt 16）由来の
-false-fail・false-pass を生む可能性がある。実機未到達のため本 PR では
-再測定できず、`wmma_tf32` 行の基本版カーネル確定測定は実機到達時の
-フォローアップ課題として引き継ぐ（推定値で上書きしない。§6「未計測形状・
-シードの行追加」と同じ原則を、既存行の provenance 再確認にも適用する）。
+専用の単体テスト
+（`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
+`crates/backend-cuda/src/gemm.rs`。§7 関連）の非後退検査と比較した際に
+K-tiling 差（基本版 8 / opt 16）由来の false-fail・false-pass を生む可能性が
+ある。実機未到達のため本 PR では再測定できず、`wmma_tf32` 行の基本版
+カーネル確定測定は実機到達時のフォローアップ課題として引き継ぐ（推定値で
+上書きしない。§6「未計測形状・シードの行追加」と同じ原則を、既存行の
+provenance 再確認にも適用する）。
 
-**機械的な運用対応（codex-review P1 指摘対応）**: この provenance 不確実性を
-「わかったうえで放置」せず、`ParityBaseline::pending_basic_remeasurement`
-フィールド（`common/parity_baseline.rs`）でこの 2 行を明示的に `true` へ
-マークした。`parity_nonregression.rs::check_wmma_tf32_baseline` はこのフラグ
-が立つ行について、基本版カーネル（`run_wmma_tf32_basic_for_test`）自体は
-実行してクラッシュしないことを確認するが、`assert_no_parity_regression` に
-よる合否判定（非後退ゲート）には使わない。すなわち「正しいベースラインを
-得るまで基本版の合否判定に使用しない」（対応案の後者）を採用し、実機再測定
-で provenance が確定した時点で `pending_basic_remeasurement: false` へ更新し
-判定を有効化する。
+**機械的な運用対応（codex-review P1 再指摘対応。fail-closed 契約への変更）**:
+この provenance 不確実性を「わかったうえで放置」せず、
+`ParityBaseline::basic_kernel_baseline_unconfirmed` フィールド
+（`common/parity_baseline.rs`）でこの 2 行を明示的に `true` へマークした。
+初回実装（`pending_basic_remeasurement`）は該当行の判定を黙って skip し
+「実機テストは正常終了と shape 一致だけで通過する」状態を許していたが、
+これは非後退ゲートが機能していないのに green に見える回帰だったため、
+`assert_no_parity_regression`（`common/parity_baseline.rs`）自身がこの
+フラグを検査する構造に変更した: フラグが `true` の行を渡すと、実測値の
+良否に関わらず**必ず panic する**（fail-closed。判定を呼び出し側で
+迂回できない）。したがって基本版カーネル専用の単体テスト
+（`wmma_tf32_basic_kernel_parity_does_not_regress`）は、実機再測定で
+provenance を確定させ `basic_kernel_baseline_unconfirmed: false` へ更新する
+までの間、実機で実行するたびに fail し続ける契約であり、これは意図した
+挙動である（本リポで既知の受け入れ済み状態。
+`docs/backend-cuda-real-device-testing.md` §5.3・§7 参照。「実機テスト全件
+pass」は本イシューのスコープでは未達のまま確定している既存の前例と同種）。
 
 **§5.3 の記録は「各テストで最初に fail した (形状, シード) の値」のみ
 （`assert_parity` が最初の fail で panic する契約のため）**。上表 6 行は
@@ -134,7 +143,13 @@ false-fail・false-pass を生む可能性がある。実機未到達のため�
 - `docs/backend-cuda-real-device-testing.md` §5.3（実測記録本体）
 - `crates/backend-cuda/tests/common/parity_baseline.rs`（fixture・検査
   ユーティリティ本体）
-- `crates/backend-cuda/tests/parity_nonregression.rs`（非後退契約テスト）
+- `crates/backend-cuda/tests/parity_nonregression.rs`（非後退契約テスト。
+  `wmma_tf32_opt`・`mma_f16` 経路）
+- `crates/backend-cuda/src/gemm.rs`（`mod tests` 内
+  `wmma_tf32_basic_kernel_parity_does_not_regress`。基本版 WMMA(TF32)
+  カーネル〈`wmma_tf32` 経路〉専用のライブラリ単体テスト。公開 API・
+  feature を増やさず private field へ直接アクセスするための配置。
+  PR #640 codex-review P1 指摘対応）
 - イシュー #186（Tensor Core 経路の数値一致閾値の実測再評価。REQ-2 改定
   候補の引き渡し先）
 - イシュー #490（GEMM 性能改善ツリー Phase 2 親）
