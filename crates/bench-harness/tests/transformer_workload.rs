@@ -53,11 +53,27 @@ const N_HEADS: usize = baseline_spec().n_heads;
 const D_FF: usize = baseline_spec().d_ff;
 const BATCH: usize = baseline_spec().batch;
 const SEQ_LEN: usize = baseline_spec().seq_len;
-const HEAD_DIM: usize = D_MODEL / N_HEADS;
+/// ヘッド次元。単一真実源は [`baseline_spec`] の [`TransformerWorkloadSpec::head_dim`]
+/// （codex-review 指摘・PR #647 P1 修正後の型付き失敗 API）。`baseline_spec()` の値は
+/// 不変条件（`n_heads > 0` かつ `d_model % n_heads == 0`）を満たす確定値のため
+/// `const` 文脈で `panic!` する分岐は到達しない（違反時はコンパイルエラーとして表面化する）。
+const HEAD_DIM: usize = match baseline_spec().head_dim() {
+    Some(v) => v,
+    None => panic!("baseline_spec() は head_dim の不変条件を満たす確定値のはず"),
+};
 /// LayerNormalization の epsilon。単一真実源は [`baseline_spec`] の
 /// `layer_norm_eps` フィールド（Bugbot 指摘・PR #647: 従来 `1e-5` をハードコードしており、
 /// SSOT を変更しても実ワークロードが追従しないドリフトを許していた）。
 const LAYER_NORM_EPS: f32 = baseline_spec().layer_norm_eps;
+/// Transformer ブロックの層数。単一真実源は [`baseline_spec`] の `num_layers` フィールド
+/// （codex-review 指摘・PR #647 P2: 従来この値を参照せず常に 1 層固定で実行しており、
+/// SSOT を変更しても実測が追従しないドリフトを許していた）。`generate_layers`／
+/// `full_forward` がこの値だけ層を積み重ねる。
+const NUM_LAYERS: usize = baseline_spec().num_layers;
+/// Multi-Head Self-Attention サブレイヤーを含むかどうか。単一真実源は [`baseline_spec`] の
+/// `has_attention` フィールド（同上 P2 指摘）。`transformer_block_forward` がこのフラグで
+/// attention サブレイヤーの有無を分岐する。
+const HAS_ATTENTION: bool = baseline_spec().has_attention;
 
 /// 決定的シード（REQ-8「決定的シードを用いること」）。入力・重み生成の双方に使う。
 /// 単一真実源は [`bench_harness::transformer_workload::SEED`]（#589）。
@@ -124,6 +140,29 @@ impl TransformerWeights {
             ln2_bias: gen_tensor(rng, &[D_MODEL]),
         }
     }
+}
+
+/// [`NUM_LAYERS`] 層分の重みを決定的シードから連続生成する（`baseline_spec().num_layers` を
+/// 実際のループ回数へ反映する側。#589・P2 修正: 従来 [`TransformerWeights::generate`] を
+/// 1 回だけ呼ぶ形で暗黙に 1 層固定になっており `num_layers` フィールドが未参照だった）。
+fn generate_layers(rng: &mut Xorshift64Star) -> Vec<TransformerWeights> {
+    (0..NUM_LAYERS)
+        .map(|_| TransformerWeights::generate(rng))
+        .collect()
+}
+
+/// [`transformer_block_forward`] を [`NUM_LAYERS`] 層分連鎖適用する（前層の出力を
+/// 次層の入力とする標準的な Transformer スタック構成）。
+fn full_forward(
+    ops: &dyn BackendOps,
+    x: &Tensor<f32>,
+    layers: &[TransformerWeights],
+) -> Tensor<f32> {
+    let mut y = x.clone();
+    for w in layers {
+        y = transformer_block_forward(ops, &y, w);
+    }
+    y
 }
 
 /// `x2d @ w + b` を計算する（`ops.gemm` が最適化済み自作カーネル、`add` が bias の
@@ -243,6 +282,11 @@ fn feed_forward(ops: &dyn BackendOps, x: &Tensor<f32>, w: &TransformerWeights) -
 /// `x -> MHA -> Add(residual) -> LayerNorm -> FFN -> Add(residual) -> LayerNorm` の順で、
 /// `transformer.onnx` フィクスチャの `norm_first=false` 構成と整合させる
 /// （`docs/spec/03-poc/poc-8-*` 系実測に対応する REQ-8 の代表ワークロード定義）。
+///
+/// [`HAS_ATTENTION`]（単一真実源は [`baseline_spec`] の `has_attention`）が `false` の場合は
+/// MHA サブレイヤー・その残差接続／LayerNorm1 を丸ごとスキップし FFN サブレイヤーのみを
+/// 適用する（#589・P2 修正: 従来はこのフィールドを一切参照せず常に attention ありの
+/// 経路を実行しており、SSOT を変更しても実測が追従しないドリフトを許していた）。
 fn transformer_block_forward(
     ops: &dyn BackendOps,
     x: &Tensor<f32>,
@@ -253,13 +297,17 @@ fn transformer_block_forward(
         epsilon: LAYER_NORM_EPS,
     };
 
-    let attn_out = multi_head_attention(ops, x, w);
-    let residual1 = add(x, &attn_out).expect("MHA 残差接続の add に失敗するはずがない");
-    let ln1 = layer_normalization(&residual1, &w.ln1_scale, Some(&w.ln1_bias), &ln_attrs)
-        .expect("LayerNorm1 の計算に失敗するはずがない");
+    let post_attn = if HAS_ATTENTION {
+        let attn_out = multi_head_attention(ops, x, w);
+        let residual1 = add(x, &attn_out).expect("MHA 残差接続の add に失敗するはずがない");
+        layer_normalization(&residual1, &w.ln1_scale, Some(&w.ln1_bias), &ln_attrs)
+            .expect("LayerNorm1 の計算に失敗するはずがない")
+    } else {
+        x.clone()
+    };
 
-    let ffn_out = feed_forward(ops, &ln1, w);
-    let residual2 = add(&ln1, &ffn_out).expect("FFN 残差接続の add に失敗するはずがない");
+    let ffn_out = feed_forward(ops, &post_attn, w);
+    let residual2 = add(&post_attn, &ffn_out).expect("FFN 残差接続の add に失敗するはずがない");
     layer_normalization(&residual2, &w.ln2_scale, Some(&w.ln2_bias), &ln_attrs)
         .expect("LayerNorm2 の計算に失敗するはずがない")
 }
@@ -275,10 +323,10 @@ fn transformer_block_forward(
 fn transformer_block_forward_produces_expected_shape() {
     let ops = CpuBackendOps::new();
     let mut rng = Xorshift64Star::new(SEED);
-    let weights = TransformerWeights::generate(&mut rng);
+    let layers = generate_layers(&mut rng);
     let x = gen_tensor(&mut rng, &[BATCH, SEQ_LEN, D_MODEL]);
 
-    let y = transformer_block_forward(&ops, &x, &weights);
+    let y = full_forward(&ops, &x, &layers);
     assert_eq!(y.shape(), &[BATCH, SEQ_LEN, D_MODEL]);
 }
 
@@ -305,12 +353,12 @@ fn measurement_config_rejects_below_protocol_minimum() {
 fn transformer_block_forward_bench_cpu() {
     let ops = CpuBackendOps::new();
     let mut rng = Xorshift64Star::new(SEED);
-    let weights = TransformerWeights::generate(&mut rng);
+    let layers = generate_layers(&mut rng);
     let x = gen_tensor(&mut rng, &[BATCH, SEQ_LEN, D_MODEL]);
 
     let config = MeasurementConfig::new(20, 20).expect("20/20 は下限ちょうどのため成功するはず");
     let measurement = run(&config, || {
-        let y = transformer_block_forward(&ops, black_box(&x), black_box(&weights));
+        let y = full_forward(&ops, black_box(&x), black_box(&layers));
         black_box(y);
     })
     .expect("Transformer ブロック forward の計測に失敗しました");

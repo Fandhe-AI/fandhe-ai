@@ -65,8 +65,17 @@ impl TransformerWorkloadSpec {
     ///
     /// `multi_head_attention`（実測実装側）の `to_heads` クロージャが
     /// `[batch, seq, n_heads, head_dim]` への reshape に使う値と同一の導出式。
-    pub const fn head_dim(&self) -> usize {
-        self.d_model / self.n_heads
+    ///
+    /// 全フィールドが公開されているため利用者が `n_heads == 0` や
+    /// `d_model % n_heads != 0` の値を構築できる（コンストラクタ非経由）。
+    /// 本番経路で `panic` させない方針（`.claude/rules/coding-rust.md`）に従い、
+    /// 両不変条件（ゼロ除算・割り切れ）を満たさない場合は `None` を返す
+    /// 型付き失敗にする（codex-review 指摘・PR #647 P1）。
+    pub const fn head_dim(&self) -> Option<usize> {
+        if self.n_heads == 0 || !self.d_model.is_multiple_of(self.n_heads) {
+            return None;
+        }
+        Some(self.d_model / self.n_heads)
     }
 }
 
@@ -134,8 +143,33 @@ mod tests {
     #[test]
     fn baseline_spec_head_dim_divides_evenly() {
         let spec = baseline_spec();
-        assert_eq!(spec.head_dim() * spec.n_heads, spec.d_model);
-        assert_eq!(spec.head_dim(), 64);
+        let head_dim = spec
+            .head_dim()
+            .expect("baseline_spec() は不変条件を満たす確定値のはず");
+        assert_eq!(head_dim * spec.n_heads, spec.d_model);
+        assert_eq!(head_dim, 64);
+    }
+
+    /// `n_heads == 0`（ゼロ除算になりうる値）を構築しても `head_dim()` は `panic` せず
+    /// `None` を返すことを検査する（codex-review 指摘・PR #647 P1 の回帰防止）。
+    #[test]
+    fn head_dim_returns_none_for_zero_n_heads() {
+        let spec = TransformerWorkloadSpec {
+            n_heads: 0,
+            ..baseline_spec()
+        };
+        assert_eq!(spec.head_dim(), None);
+    }
+
+    /// `d_model % n_heads != 0`（割り切れない値）でも `head_dim()` が `None` を返すことを
+    /// 検査する（`d_model` フィールドのドキュメンテーションコメントが掲げる不変条件の検査）。
+    #[test]
+    fn head_dim_returns_none_when_not_evenly_divisible() {
+        let spec = TransformerWorkloadSpec {
+            n_heads: 3,
+            ..baseline_spec()
+        };
+        assert_eq!(spec.head_dim(), None);
     }
 
     #[test]
