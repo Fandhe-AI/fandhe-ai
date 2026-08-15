@@ -14,7 +14,12 @@
 //! - `detect`（TASK-12.1b・#162 本体）: elementwise 連鎖検出（融合判定）
 //!   アルゴリズム（[`detect::detect_fusion`]・[`detect::FusionDecision`]・
 //!   [`detect::FusionSegment`]）。副作用なしの純関数として実装する
-//!   （`dispatch::select_gemm_kernel` と同方針。設計書 §3.4）。
+//!   （`dispatch::select_gemm_kernel` と同方針。設計書 §3.4）。イシュー
+//!   #586 で融合境界を再定義: reduction（`Sum`／`Max`）は「常に境界」
+//!   ではなく、セグメント軸（`dim`）が一致する限り融合セグメントへ
+//!   組み込める（`graph::FusionOp::Rsqrt` を含む elementwise 6 演算に
+//!   加えて reduction もセグメント対象になる）。`Gemm`・`Input` のみが
+//!   常に境界のまま（`graph.rs`・`detect.rs` の doc 参照）。
 //! - `plan`（TASK-12.1c 本体・#163）: 融合カーネル生成向け公開 DTO
 //!   （[`plan::FusionPlan`]・[`plan::FusedOpKind`]・
 //!   [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`]）。

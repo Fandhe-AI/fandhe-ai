@@ -420,6 +420,22 @@ pub(crate) enum FusionOp {
   本融合グラフも同じ f32 固定スコープに揃える。f16 対応は §6 の未決事項
   とする。
 
+> **#586 追記（境界の再定義）**: 上記は TASK-12.1（#162）当初のスコープ
+> 記述であり、`reduction ＝ 常に融合境界` という前提のまま残されていた。
+> イシュー #586 でこの前提を再定義した——`sum`／`max`（reduction）は
+> **常に境界ではなく、セグメント軸（`dim: Option<usize>`）が一致する
+> 限り融合セグメントへ組み込める**。同一セグメント内で最初に組み込まれた
+> reduction がセグメント軸を確定し、以降 `dim` が一致する reduction は
+> elementwise と同様にセグメントへ追加され、`dim` が一致しない
+> reduction は（従来どおり）境界として葉になる。**`gemm` のみが常に
+> 融合境界**として残る。elementwise 演算も `1/sqrt(x)`（`Rsqrt`）を
+> 追加し 6 演算になった（RMSNorm 融合の構成要素。実カーネル実装は
+> 本イシューのスコープ外で後続 G-3 以降）。root は従来どおり
+> elementwise のみ許可（reduction root は非融合。RMSNorm／softmax の
+> 実用セグメントは elementwise で終端するため必要十分という安全側の
+> 判断）。詳細アルゴリズムは `crates/tensor-core/src/fusion/detect.rs`
+> の `detect_fusion` doc コメントを正とし、本文書では二重管理しない。
+
 ### 2.2 グラフ構造
 
 ノード ID＋隣接（入力エッジ）リストによる DAG とする。`autodiff` クレート
@@ -676,6 +692,16 @@ API でグラフを遅延構築する「明示的遅延バッファ」方式**�
 | (c) | `Var::value`／`Var::to_tensor`／`Gradients::get`（非 fallible 境界）、または `matmul`／`sum`／`max`（入力側の未実体化値を必要とした時点）・`Tape::backward`（`grad.rs::vjp` の入力として forward 記録済みの未実体化ノードを読み出す時点）（fallible 境界）。**融合されるのは forward が記録した elementwise 遅延グラフのみであり、VJP 自体の勾配式は融合対象外**（§3.3）。いずれも `autodiff` 側の materialize ヘルパー（§3.5.1〜3.5.3）に帰着する。`ops`（§1。`Tape::new(ops)` で構築したどの `Tape` でも常に埋まっている必須所有値）を使い `FusionPlan::from_ops` を経由して `BackendOps::run_fused` を試み、`BackendError::Unsupported` は同じ `ops` の per-op メソッドへフォールバックする（§3.5.2・§3.5.3。codex-review 第 13 波 P1-b 指摘への回答により、`autodiff` 内の実行主体〈第 11〜12 波の「コア融合実行器」〉は撤回し、フォールバック先を `ops` 自身の既存 per-op メソッドへ一本化する。層 2 に限りそれも失敗した場合の最終手段として `eval.rs` を使う。§2.5「`autodiff` 側の役割」） | `Tensor`（`tensor.rs:53`）自体は `Arc<Storage<T>>` を必須で保持する既存表現のまま変更せず、`Storage<T>`（非公開）も `Pending` バリアントを持たない（§3.5.1 で確定）。したがって `Tensor::get`／`as_slice`／`contiguous`（`tensor-core` の汎用アクセサ）にも「未実体化」を表す分岐は存在しない。遅延状態は `autodiff::TapeNode`（`tape.rs`）だけが持つ（§3.5.1）。fallible 境界での実体化失敗は型付きエラーとして `?` で伝播し（層 1。`Unsupported` 以外の失敗時のみ）、非 fallible 境界での実体化失敗は per-op メソッド（必要なら最終手段の `eval.rs`）による再計算で必ず正しい値を返す（層 2。§3.5.4） |
 | (d) | 連鎖長上限（4〜6 段）到達 | TASK-12.1 の内容規定（4〜6 段程度）。PoC-9 の代表ワークロード規模（`ew4`／`ew6`）とも整合する上限であり、無制限連鎖によるカーネル生成コスト・レジスタ圧の増大を避ける。上限に到達させた演算が `matmul`／`sum`／`max`（fallible）か `add`／`mul`／`relu`／`exp`／`tanh`（非 fallible）かにより (c) の層 1／層 2 いずれかへ合流する（§3.5.3・§3.5.4）。**`add`／`mul` 自身も上限到達時は自分自身のノードを実体化してから返る**ため、この場合の `Var::add`／`mul` は「shape 妥当性 + バックエンド実行結果」の両方を表すことになる（§3.5.4） |
 | (e) | 非融合対象パターン検出（transpose 混在等、`NodeMeta.contiguous == false`）| §1・§2.3 の非融合フォールバック方針 |
+
+> **#586 とのスコープ区別**: 上表 (a) は `autodiff::tape` の遅延グラフ
+> （層 1／層 2 の実体化境界。本節）における reduction の扱いであり、
+> `autodiff::tape::build_lazy_plan` は #586 時点でも reduction を遅延
+> 評価対象にせず引き続き即時実体化する（`autodiff` 側の統合は本イシュー
+> のスコープ外・後続イシュー）。一方 #586 が再定義したのは
+> `tensor_core::fusion::detect`（`graph.rs`／`detect.rs`）の**融合セグメント
+> IR** における境界であり、両者は別レイヤーの概念（§2.1 追記・
+> `detect.rs::detect_fusion` doc 参照）。`autodiff` 側が実際に reduction
+> を遅延グラフへ含めるようになった時点で本表 (a) の記述も更新が必要になる。
 
 ### 3.3 autodiff との関係
 

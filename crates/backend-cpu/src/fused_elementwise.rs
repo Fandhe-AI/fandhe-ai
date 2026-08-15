@@ -93,6 +93,31 @@ pub fn run_fused_elementwise(
         )));
     }
 
+    // #586: `tensor_core::fusion` の境界再定義により `FusionPlan` は
+    // reduction（`Sum`／`Max`）・`Rsqrt` を含みうるようになったが、対応
+    // する CPU カーネル実装は本イシューのスコープ外（後続 G-3 以降）
+    // である。ここで pre-scan し fail-closed に拒否することで、
+    // `eval_one` の対応する arm（本ファイル下部）へ実際に到達させず、
+    // 「静かに誤った 0.0 を返す」経路を作らない（`.claude/rules/
+    // coding-rust.md`・`security.md` A04「未実装カーネル経路は
+    // fail-closed」）。`autodiff::tape::build_lazy_plan` は現状 reduction
+    // を遅延評価対象にせず `push_eager` で実体化するため
+    // （`crates/autodiff/src/tape.rs`）、実運用の `FusedOpKind` 列に
+    // これらが混入する経路は存在しない＝本チェックは回帰を起こさない。
+    if plan.ops().any(|op| {
+        matches!(
+            op,
+            FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } | FusedOpKind::Rsqrt { .. }
+        )
+    }) {
+        return Err(BackendError::Unsupported(
+            "run_fused_elementwise: reduction (Sum/Max) and Rsqrt fused kernels are not yet \
+             implemented (tensor_core::fusion boundary redefinition #586 extends the IR; the \
+             CPU kernel is tracked as a follow-up issue)"
+                .to_string(),
+        ));
+    }
+
     let output_shape = plan.output_shape();
     let mut leaf_slices: Vec<&[f32]> = Vec::with_capacity(leaves.len());
     for (i, leaf) in leaves.iter().enumerate() {
@@ -197,6 +222,14 @@ fn eval_one(
             FusedOpKind::Exp { input } => regs[input].exp(),
             // `f32::tanh`（libm 経由。`elementwise.rs::tanh_slice` と同一定義）。
             FusedOpKind::Tanh { input } => regs[input].tanh(),
+            // 到達不能な防御的 arm（#586）: `run_fused_elementwise` の
+            // pre-scan が Sum／Max／Rsqrt を含む plan を事前に拒否する
+            // ため、本 arm は実運用では到達しない。それでも本番経路
+            // panic 禁止方針（`.claude/rules/coding-rust.md`）により
+            // `unreachable!()` ではなく安全な既定値 `0.0` を返す
+            // （pre-scan の防御を二重化する構成。モジュール冒頭「境界
+            // 検査」節と同じ多層防御の考え方）。
+            FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } | FusedOpKind::Rsqrt { .. } => 0.0,
         };
     }
     regs[output_index]

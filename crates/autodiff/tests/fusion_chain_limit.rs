@@ -79,6 +79,21 @@ impl BackendOps for RecordingFusedOps {
                 FusedOpKind::Relu { input } => self.inner.relu(&values[input])?,
                 FusedOpKind::Exp { input } => self.inner.exp(&values[input])?,
                 FusedOpKind::Tanh { input } => self.inner.tanh(&values[input])?,
+                // #586 で `FusedOpKind` へ追加された reduction（Sum／Max）
+                // ・Rsqrt は、`autodiff::tape::build_lazy_plan` が現状これらを
+                // 遅延評価対象にせず `push_eager` で実体化するため
+                // （`crates/autodiff/src/tape.rs`）、本テストフィクスチャの
+                // `run_fused` へ実際に渡される `ops` には現れない。到達不能
+                // だが `-D warnings` の網羅性要求を満たすため、実装済み
+                // カーネル未対応として型付きエラーを返す（本番経路 panic
+                // 禁止方針。`.claude/rules/coding-rust.md`）。
+                FusedOpKind::Rsqrt { .. } | FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } => {
+                    return Err(BackendError::Unsupported(
+                        "run_fused test fixture: reduction/Rsqrt not implemented \
+                         (tensor_core::fusion IR extension #586; CPU kernel out of scope)"
+                            .into(),
+                    ));
+                }
             };
             values.push(v);
         }
