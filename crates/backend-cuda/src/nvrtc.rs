@@ -237,6 +237,13 @@ impl CudaKernelCacheKey {
 /// 有効なポインタを渡す（NVRTC API 契約上、両ポインタは非 null かつ
 /// 呼び出し中のみ書き込まれる）。
 pub fn nvrtc_version() -> Result<(i32, i32), CudaError> {
+    // SAFETY: `cudarc::nvrtc::sys::is_culib_present()` は `libnvrtc` の
+    // 存在確認のみを行う `dlopen` ベースのプローブで、引数を取らず
+    // ポインタ・共有可変状態も扱わない（cudarc 0.19.8 に safe wrapper が
+    // ないため FFI 境界の `unsafe` を必要最小限で使う。`.claude/rules/
+    // security.md`）。本呼び出し自体が「`libnvrtc` が存在するか」を
+    // 判定する目的であり、後続の `nvrtcVersion` 呼び出し（252 行目付近）
+    // の前提確認としてここで先に行う。
     if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
         return Err(CudaError::NvrtcUnavailable {
             detail: "libnvrtc dynamic library not found (dlopen failed); \
@@ -277,6 +284,13 @@ pub fn nvrtc_version() -> Result<(i32, i32), CudaError> {
 /// ストレスケースで実測確認済み。`.claude/rules/coding-rust.md`）は
 /// この既定 FMA 契約が前提であり、呼び出し元が独自に上書きしないこと。
 pub fn compile_ptx(src: &str, arch: &str) -> Result<Ptx, CudaError> {
+    // SAFETY: `cudarc::nvrtc::sys::is_culib_present()` は `libnvrtc` の
+    // 存在確認のみを行う `dlopen` ベースのプローブで、引数を取らず
+    // ポインタ・共有可変状態も扱わない（cudarc 0.19.8 に safe wrapper が
+    // ないため FFI 境界の `unsafe` を必要最小限で使う。`.claude/rules/
+    // security.md`）。`nvrtc_version()` と同じく、`libnvrtc` 不在時に
+    // dynamic-loading 側の panic 経路を踏まないための事前プローブとして
+    // 呼び出し本体（NVRTC コンパイル）の前に行う。
     if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
         return Err(CudaError::NvrtcUnavailable {
             detail: "libnvrtc dynamic library not found (dlopen failed); \
