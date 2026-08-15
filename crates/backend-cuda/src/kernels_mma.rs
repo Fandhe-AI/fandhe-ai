@@ -682,27 +682,41 @@ pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::er
         "    // イシュー #499: L2 再利用のためのタイル→SM 割り当てスウィズル\n\
          \x20   // remap（swizzle.rs::swizzled_block_idx と同一式。本ファイル\n\
          \x20   // mma_f16_source_with_swizzle ドキュメンテーションコメント参照）。\n\
+         \x20   // PR #667 codex-review P0 是正: 線形 index・ブロック数・積は\n\
+         \x20   // `long long`（64 bit）で計算する。`gridDim.y` は\n\
+         \x20   // `gemm_mma.rs::MAX_GRID_DIM_Y`（65,535）で上限検証済みだが\n\
+         \x20   // `gridDim.x` は上限検証していないため（同ファイル冒頭コメント\n\
+         \x20   // 「x 成分の上限は 2^31-1 と大きく実用的に問題にならないため\n\
+         \x20   // x は検証しない」）、`blockIdx.y * gridDim.x` や\n\
+         \x20   // `SWIZZLE_GROUP * num_n_blocks` は `int`（32 bit 符号付き）\n\
+         \x20   // のままでは容易にオーバーフローしうる（REQ-8 「境界検査の\n\
+         \x20   // 省略禁止」）。最終座標は `gridDim` 内であることを明示的に\n\
+         \x20   // 検査してから `int` へ縮小する。\n\
          \x20   #define SWIZZLE_GROUP {group_width}\n\
-         \x20   int num_m_blocks = gridDim.y;\n\
-         \x20   int num_n_blocks = gridDim.x;\n\
-         \x20   int linear_idx = blockIdx.y * gridDim.x + blockIdx.x;\n\
-         \x20   int full_groups = num_m_blocks / SWIZZLE_GROUP;\n\
-         \x20   int remainder = num_m_blocks % SWIZZLE_GROUP;\n\
-         \x20   int full_group_blocks = SWIZZLE_GROUP * num_n_blocks;\n\
-         \x20   int full_groups_total_blocks = full_groups * full_group_blocks;\n\
-         \x20   int m_block, n_block;\n\
+         \x20   long long num_m_blocks = gridDim.y;\n\
+         \x20   long long num_n_blocks = gridDim.x;\n\
+         \x20   long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;\n\
+         \x20   long long full_groups = num_m_blocks / SWIZZLE_GROUP;\n\
+         \x20   long long remainder = num_m_blocks % SWIZZLE_GROUP;\n\
+         \x20   long long full_group_blocks = (long long)SWIZZLE_GROUP * num_n_blocks;\n\
+         \x20   long long full_groups_total_blocks = full_groups * full_group_blocks;\n\
+         \x20   long long m_block, n_block;\n\
          \x20   if (linear_idx < full_groups_total_blocks) {{\n\
-         \x20       int group_idx = linear_idx / full_group_blocks;\n\
-         \x20       int idx_in_group = linear_idx % full_group_blocks;\n\
+         \x20       long long group_idx = linear_idx / full_group_blocks;\n\
+         \x20       long long idx_in_group = linear_idx % full_group_blocks;\n\
          \x20       m_block = group_idx * SWIZZLE_GROUP + (idx_in_group % SWIZZLE_GROUP);\n\
          \x20       n_block = idx_in_group / SWIZZLE_GROUP;\n\
          \x20   }} else {{\n\
-         \x20       int idx_in_group = linear_idx - full_groups_total_blocks;\n\
+         \x20       long long idx_in_group = linear_idx - full_groups_total_blocks;\n\
          \x20       m_block = full_groups * SWIZZLE_GROUP + (idx_in_group % remainder);\n\
          \x20       n_block = idx_in_group / remainder;\n\
          \x20   }}\n\
-         \x20   int block_row0 = m_block * BM;\n\
-         \x20   int block_col0 = n_block * BN;\n"
+         \x20   if (m_block < 0 || m_block >= num_m_blocks || n_block < 0 ||\n\
+         \x20       n_block >= num_n_blocks) {{\n\
+         \x20       return;\n\
+         \x20   }}\n\
+         \x20   int block_row0 = (int)(m_block * BM);\n\
+         \x20   int block_col0 = (int)(n_block * BN);\n"
     );
 
     Ok(MMA_F16.replacen(ANCHOR, &remap, 1))
@@ -1058,11 +1072,11 @@ mod tests {
                  見つかりません"
             );
             for needle in [
-                "int linear_idx = blockIdx.y * gridDim.x + blockIdx.x;",
-                "int full_groups = num_m_blocks / SWIZZLE_GROUP;",
-                "int remainder = num_m_blocks % SWIZZLE_GROUP;",
-                "int block_row0 = m_block * BM;",
-                "int block_col0 = n_block * BN;",
+                "long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;",
+                "long long full_groups = num_m_blocks / SWIZZLE_GROUP;",
+                "long long remainder = num_m_blocks % SWIZZLE_GROUP;",
+                "int block_row0 = (int)(m_block * BM);",
+                "int block_col0 = (int)(n_block * BN);",
             ] {
                 assert!(
                     src.contains(needle),

@@ -50,8 +50,17 @@ git fetch origin
 git checkout perf/499-tile-sm-swizzle   # 本イシューの実装ブランチ（opt-in 経路のみ・本番カーネル無変更）
 
 # 数値一致確認（TFLOPS 比較より前に必須。swizzle はブロック割り当ての置換のみで
-# 各出力要素のアキュムレート順序を変えないため、bit 一致で主張できる前提を検証する）
+# 各出力要素のアキュムレート順序を変えないため、bit 一致で主張できる前提を検証する）。
+# cpu_cuda_mma_parity・parity_nonregression（feature 非依存）はこの通常経路で
+# 実行される。
 cargo test -p backend-cuda --release -- --ignored --nocapture
+
+# mma_f16_swizzle_variant_matches_base_bit_exact_output は internal-diagnostics
+# feature（既定 off。CudaMmaGemm::new_with_swizzle 自体が同 feature でゲート
+# されているため）配下の #[cfg] のみでコンパイルされる（gemm_mma.rs 同テスト
+# doc コメント参照）。上記コマンドには --features がないため対象テストが
+# コンパイル・実行されず green と誤認する（PR #667 codex-review P1 是正）。
+cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --ignored --nocapture mma_f16_swizzle_variant_matches_base_bit_exact_output
 
 # A/B 計測（動的選択幅の表示 + base/head の TFLOPS 比較。internal-diagnostics feature 必須）
 cargo run -p backend-cuda --example gemm_mma_swizzle_bench --release --features internal-diagnostics
