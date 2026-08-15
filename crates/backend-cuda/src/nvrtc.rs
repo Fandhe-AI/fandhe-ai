@@ -180,6 +180,13 @@ pub struct CudaKernelCacheKey {
     nvrtc_version: (i32, i32),
     /// `--gpu-architecture` 等のコンパイルフラグ。アーキ違いが自動的に
     /// 別キャッシュエントリになる性質はこのフィールドが担う。
+    ///
+    /// 順序契約: `Vec<String>` は要素順序を `Hash`/`Eq` に含めるため、
+    /// 呼び出し元は意味的に同一なフラグ集合を常に決定的な順序で
+    /// 構築すること（`HashSet` 等の非決定順コレクションから直接
+    /// 構築しない）。契約違反時の影響は誤ヒット（安全性違反）方向では
+    /// なく無駄なキャッシュミス方向のみだが、C-2（#506）でのキー消費側
+    /// 実装時にも本契約を維持する。
     compile_flags: Vec<String>,
 }
 
@@ -274,8 +281,14 @@ pub fn nvrtc_version() -> Result<(i32, i32), CudaError> {
 
     let mut major: i32 = 0;
     let mut minor: i32 = 0;
-    // SAFETY: 上記コメント参照。`is_culib_present()` 確認済み・ポインタは
-    // 有効なスタック変数を指す。
+    // SAFETY: `is_culib_present()`（上記ブロック）で `libnvrtc` の存在を
+    // 確認済みのうえで呼ぶ。`major`/`minor` はこの直前で初期化した
+    // スタックローカル変数への `&mut` であり、非 null かつ呼び出し中の
+    // 書き込みに対して有効な唯一の可変参照を渡す（NVRTC API 契約上、
+    // 両ポインタは `nvrtcVersion` 呼び出し中のみ書き込まれる）。
+    // 1 番目のブロック（`is_culib_present()`）とは前提条件（引数なし・
+    // 副作用なしの存在確認 vs 出力ポインタへの書き込みを伴うバージョン
+    // 取得）が異なるため、ここで独立して根拠を明示する。
     let result = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
     if result != cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS {
         return Err(CudaError::NvrtcUnavailable {
