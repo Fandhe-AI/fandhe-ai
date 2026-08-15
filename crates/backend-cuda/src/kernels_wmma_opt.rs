@@ -1604,6 +1604,36 @@ mod tests {
         ));
     }
 
+    /// 決定性の機械検査（#516 実装計画 4 節・§8「スコープ外」の C-5/C-2
+    /// キャッシュ系タスクが本 render の出力をハッシュ材料として使う前提の
+    /// 検査。`kernels_mma::render_mma_f16_is_deterministic_for_same_config`
+    /// と同じ方針）。同一 `WmmaOptKernelConfig` から `render_wmma_tf32_opt`
+    /// を 2 回呼んで byte 単位一致することをロックする。
+    #[test]
+    fn render_wmma_tf32_opt_is_deterministic_for_same_config() {
+        let cfg = WmmaOptKernelConfig {
+            block_m: 64,
+            block_n: 96,
+            k_tile: 16,
+            dim_m: DimSpec::Static(4096),
+            dim_n: DimSpec::Static(4096),
+            dim_k: DimSpec::Static(4096),
+        };
+        let first = render_wmma_tf32_opt(&cfg)
+            .expect("有効な構成が拒否されました")
+            .source()
+            .to_owned();
+        let second = render_wmma_tf32_opt(&cfg)
+            .expect("有効な構成が拒否されました")
+            .source()
+            .to_owned();
+        assert_eq!(
+            first, second,
+            "同一 WmmaOptKernelConfig からの render_wmma_tf32_opt が byte 一致しません \
+             （キャッシュキー材料としての決定性契約が崩れています）"
+        );
+    }
+
     /// フェイルクローズド検証（TF32 opt）: SMEM 予算超過・倍数違反・
     /// ゼロ次元が全て `Err(CudaError::InvalidKernelConfig)` になることを
     /// 検査する。
@@ -1762,6 +1792,33 @@ mod tests {
             cfg.validate_launch_shape(64, 128, 16),
             Err(CudaError::InvalidKernelConfig { .. })
         ));
+    }
+
+    /// 決定性の機械検査（`render_wmma_tf32_opt_is_deterministic_for_same_config`
+    /// と同じ方針。f16 opt 側）。
+    #[test]
+    fn render_wmma_f16_opt_is_deterministic_for_same_config() {
+        let cfg = WmmaOptKernelConfig {
+            block_m: 64,
+            block_n: 128,
+            k_tile: WMMA_F16_OPT_FRAG,
+            dim_m: DimSpec::Static(4096),
+            dim_n: DimSpec::Static(4096),
+            dim_k: DimSpec::Static(4096),
+        };
+        let first = render_wmma_f16_opt(&cfg)
+            .expect("有効な構成が拒否されました")
+            .source()
+            .to_owned();
+        let second = render_wmma_f16_opt(&cfg)
+            .expect("有効な構成が拒否されました")
+            .source()
+            .to_owned();
+        assert_eq!(
+            first, second,
+            "同一 WmmaOptKernelConfig からの render_wmma_f16_opt が byte 一致しません \
+             （キャッシュキー材料としての決定性契約が崩れています）"
+        );
     }
 
     /// [`WmmaOptKernelConfig::validate_launch_shape`] が dim_m/dim_n/dim_k

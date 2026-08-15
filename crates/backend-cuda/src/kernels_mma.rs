@@ -1654,6 +1654,40 @@ mod tests {
         ));
     }
 
+    /// 決定性の機械検査（#516 実装計画 4 節・§8「スコープ外」の C-5/C-2
+    /// キャッシュ系タスクが本 render の出力をハッシュ材料として使う前提の
+    /// 検査）。`render_mma_f16_unchecked` は `format!` のみで構成される
+    /// 純関数（`HashMap` 走査・乱数・時刻等の非決定要素を持たない）だが、
+    /// 同一 `MmaKernelConfig` から 2 回 render して byte 単位一致することを
+    /// 明示的にロックし、将来の実装変更（例: 走査順が意味を持つデータ構造
+    /// への置き換え）が非決定性を持ち込む回帰を検出できるようにする。
+    #[test]
+    fn render_mma_f16_is_deterministic_for_same_config() {
+        let cfg = MmaKernelConfig {
+            bm: 64,
+            bn: 128,
+            bk: 32,
+            stages: 3,
+            dim_m: DimSpec::Static(4096),
+            dim_n: DimSpec::Static(4096),
+            dim_k: DimSpec::Static(4096),
+            dtype: MmaDtype::F16,
+        };
+        let first = render_mma_f16(&cfg)
+            .expect("有効な構成が拒否されました")
+            .source()
+            .to_owned();
+        let second = render_mma_f16(&cfg)
+            .expect("有効な構成が拒否されました")
+            .source()
+            .to_owned();
+        assert_eq!(
+            first, second,
+            "同一 MmaKernelConfig からの render_mma_f16 が byte 一致しません \
+             （キャッシュキー材料としての決定性契約が崩れています）"
+        );
+    }
+
     /// フェイルクローズド検証（実装計画 7 節・4.2 節）: SMEM 予算超過・
     /// 倍数違反・スレッド数超過・`stages != 3`・ゼロ次元の各構成が全て
     /// `Err(CudaError::InvalidKernelConfig)` になることを検査する。
