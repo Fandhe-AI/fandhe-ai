@@ -21,7 +21,7 @@ cargo test -p backend-metal --release -- --ignored --nocapture
 
 `--release` を既定にしている理由: `tests/cpu_metal_parity.rs` の `k4096_stress_poc_v2_5`（M=N=512, K=4096 の CPU 参照実装によるストレスケース）は debug ビルドでは著しく遅い。各テストファイル冒頭の doc コメントも同じコマンドを推奨している。
 
-`backend-cuda` 側の `make test-ignored-cuda`（TASK-1.7e・#36）と対になる per-backend ターゲットであり、`make test-ignored`（`cargo test --workspace -- --ignored --skip wmma_tf32_basic_kernel_parity_does_not_regress --nocapture`。除外理由は `Makefile` の当該ターゲットコメント・イシュー #491 参照）のように他バックエンド（CUDA 実機必須のテストを含む）を巻き込まない。
+`backend-cuda` 側の `make test-ignored-cuda`（TASK-1.7e・#36）と対になる per-backend ターゲットであり、`make test-ignored`（`cargo test --workspace -- --ignored --nocapture`）のように他バックエンド（CUDA 実機必須のテストを含む）を巻き込まない。
 
 ## なぜ通常 CI では除外されるか（cfg + `#[ignore]` の二重分離）
 
