@@ -75,6 +75,14 @@ impl CudaKernelDescriptor {
     /// `block_m`／`block_n`／`block_k`／`stages` がゼロの場合は
     /// `CudaError::InvalidKernelDescriptor` を返す（panic 経路なし。
     /// `unwrap`/`expect` は使わない。`.claude/rules/coding-rust.md`）。
+    ///
+    /// `kernel_name` はパス走査文字（`/`・`\`・`..`）と空文字列を拒否する
+    /// （codex-review 指摘・PR #641・P2）。`kernel_name` は `&'static str`
+    /// でも `"../escape"` 等のリテラルは書けてしまい、C-2（#506）の
+    /// キャッシュディレクトリ命名（`kernel.<name>.<hash>`）で
+    /// そのままパスセグメントへ使われる想定のため、型（`&'static str`）
+    /// だけでは意図しないパス脱出を防げない。値の妥当性は構築時に
+    /// ここで検証し、C-2 側は「検証済み文字列である」ことを前提にできる。
     pub fn new(
         kernel_name: &'static str,
         shape: tensor_core::dispatch::GemmShape,
@@ -84,6 +92,18 @@ impl CudaKernelDescriptor {
         stages: u32,
         dtype: tensor_core::dispatch::DType,
     ) -> Result<Self, CudaError> {
+        if kernel_name.is_empty()
+            || kernel_name.contains('/')
+            || kernel_name.contains('\\')
+            || kernel_name.contains("..")
+        {
+            return Err(CudaError::InvalidKernelDescriptor {
+                detail: format!(
+                    "kernel_name must be a non-empty path-safe segment \
+                     (no '/', '\\\\', or \"..\"), got {kernel_name:?}"
+                ),
+            });
+        }
         let non_zero = |value: u32, field: &str| {
             NonZeroU32::new(value).ok_or_else(|| CudaError::InvalidKernelDescriptor {
                 detail: format!("{field} must be non-zero (got 0)"),
@@ -447,6 +467,30 @@ mod tests {
             result,
             Err(CudaError::InvalidKernelDescriptor { .. })
         ));
+    }
+
+    // codex-review 指摘（PR #641・P2）: `kernel_name: &'static str` は
+    // 型だけでは `"../escape"` 等のパス走査文字列を排除できない。C-2
+    // （#506）のディレクトリ命名（`kernel.<name>.<hash>`）で使われる前に
+    // ここで拒否し、後続タスクが「検証済み文字列」を前提にできるように
+    // する。
+    #[test]
+    fn new_rejects_path_traversal_kernel_name() {
+        for bad_name in ["../escape", "a/b", "a\\b", "..", ""] {
+            let result = CudaKernelDescriptor::new(
+                bad_name,
+                GemmShape::new(4096, 4096, 4096),
+                64,
+                64,
+                32,
+                2,
+                DType::F32,
+            );
+            assert!(
+                matches!(result, Err(CudaError::InvalidKernelDescriptor { .. })),
+                "kernel_name {bad_name:?} must be rejected"
+            );
+        }
     }
 
     // 受け入れ基準: 同一パラメータから構築した 2 キーは `==` かつ
