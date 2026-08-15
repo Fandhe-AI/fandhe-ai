@@ -181,3 +181,45 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
         "gemm_simdgroup_tiled の staged 経路・直接ロード経路の両方に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}）"
     );
 }
+
+/// イシュー #533 の証跡: `gemm_simdgroup_tiled` の staged ロード（協調
+/// ロード）経路が A/B タイルとも `float4` ベクトルロード（1 要素ずつの
+/// スカラーロードではなく `reinterpret_cast<device const float4*>` 経由の
+/// 128bit 幅読み出し）へ移植されていることを Linux CI（ubuntu-latest）上で
+/// ロックする。Mac 実機依存の parity・A/B 計測（
+/// `docs/perf/metal-gemm-float4-staged-load.md`）は別途実施する。将来の
+/// 書き戻し（スカラー化への retrograde）をこのテストで検出する。
+///
+/// ベクトルロードは A タイル・B タイルの 2 箇所で発行されるため、needle の
+/// 出現数を 2 に固定する（境界外グループのスカラーフォールバック側には
+/// この needle は現れないため、退行〈float4 化の巻き戻し〉があれば
+/// occurrences が 0 になり検出できる）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_float4_staged_load() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let needle = "reinterpret_cast<device const float4*>(";
+    let occurrences = kernel_body.matches(needle).count();
+    assert_eq!(
+        occurrences, 2,
+        "gemm_simdgroup_tiled の staged 経路の A/B タイルロードに float4 ベクトルロード `{needle}` が見つかりません（見つかった数: {occurrences}）"
+    );
+}
+
+/// 上記 float4 ベクトルロードが REQ-8 の手動境界チェックを省略していない
+/// ことのロック（境界グループの要素単位スカラーフォールバックが staged
+/// 経路に残っていることを検査。`.claude/rules/coding-rust.md`「カーネル
+/// 実装の境界検査」: 性能上の下限・最適化の達成を理由に境界チェックを
+/// 省略しない）。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    assert!(
+        kernel_body.contains("bool group_in_bounds ="),
+        "float4 ベクトルロードのグループ単位 in-bounds 判定が見つかりません（境界チェック省略の疑い）"
+    );
+    assert_eq!(
+        kernel_body.matches("bool group_in_bounds =").count(),
+        2,
+        "A タイル・B タイルの両方に group_in_bounds 判定が必要です"
+    );
+}

@@ -34,7 +34,9 @@
 //! `BM=32`・`BN=64`・`BK=32`・3 ステージ（共有メモリ 18432B ≈ 18KiB）に
 //! 縮小した（`kernels_wmma.rs` 冒頭コメントの「実機未接続・コンパイル
 //! 未検証によるリスク最小化」判断をそのまま踏襲。実装計画 8 節「リスク」・
-//! アドバイザレビューで確認済みの判断）。
+//! アドバイザレビューで確認済みの判断）。**この `BM=32`・`BN=64` は当初
+//! 判断の記録であり、現行値は下記 B-3（#494）節が示す `BM=64`・`BN=128`
+//! である**（`MMA_BM`/`MMA_BN` 定数が単一の真実源）。
 //!
 //! 当初は 1 warp = C の `MMA_M x MMA_N`（`16x8`）タイル 1 個のみを担当する
 //! 構成だったが、warp あたりの算術強度（FLOPs / SMEM ロードバイト）が低く
@@ -60,9 +62,23 @@
 //! （kstep 順）のままであり、B-1（#492）時点と bit 一致の出力になる
 //! （parity 非後退契約は `tests/parity_nonregression.rs` が機械検査）。
 //!
-//! ブロックタイル拡大・ldmatrix 先読みダブルバッファ・cp.async issue
-//! interleaving は後続（知見は `docs/cuda-tensor-core-knowledge.md`
-//! 〈#65・TASK-11.1f〉に集約済み。#494〜#496 のスコープとして引き継ぐ）。
+//! B-3（#494・GEMM 性能改善ツリー #479 → Phase 2 親 #490）は上記の
+//! スレッド数減少を回復させるため、warp あたりのレジスタブロッキング
+//! （`MMA_WARP_TILES_M`/`MMA_WARP_TILES_N`）自体は変えず、ブロックタイル
+//! （`MMA_BM`/`MMA_BN`）を `32x64` から `64x128` へ拡大した（warp 構成
+//! `MMA_WARPS_M x MMA_WARPS_N` = `2x8` = 16 warp = 512 スレッド。B-1 時点
+//! の 512 スレッドへ回復）。共有メモリ使用量は 18432B（18KiB）から
+//! 36864B（36KiB）へ増えるが per-block 48KiB 上限に対し余裕を残す。
+//! `MMA_BK=32` は不変のため、K タイル・kstep 単位のアキュムレート順序は
+//! BM/BN の値に依存せず B-1/B-2 時点と bit 一致の出力を維持する（parity
+//! 非後退契約は変更不要。候補算出の詳細・SMEM/レジスタ予算・段階的計測
+//! 手順は `docs/perf/cuda-gemm-mma-block-tile.md` を参照。sm_121（DGX
+//! Spark GB10）実機属性は未実測のため候補判断は全 compute capability
+//! 共通の保証値ベースであり、実機での再確認は #502 へ引き継ぐ）。
+//!
+//! ldmatrix 先読みダブルバッファ・cp.async issue interleaving・XOR
+//! swizzle は引き続き後続（知見は `docs/cuda-tensor-core-knowledge.md`
+//! 〈#65・TASK-11.1f〉に集約済み。#495〜#496 のスコープとして引き継ぐ）。
 //!
 //! XOR swizzle（実装計画「段階 3」）は不採用とする。索引演算が最も
 //! 複雑でありながらコンパイル未検証環境では誤りを検出できないため、
@@ -131,16 +147,21 @@ pub const MMA_M: u32 = 16;
 pub const MMA_N: u32 = 8;
 pub const MMA_K: u32 = 16;
 
-/// ブロックタイル（本ファイル冒頭コメント「タイル構成」参照。実装計画
-/// 3.2 節候補値からの意図的な縮小）。
-pub const MMA_BM: u32 = 32;
-pub const MMA_BN: u32 = 64;
+/// ブロックタイル（本ファイル冒頭コメント「タイル構成」参照。#494（B-3・
+/// GEMM 性能改善ツリー #479 → Phase 2 親 #490）で B-2（#493）後の
+/// `32x64` から `64x128` へ拡大した候補 B〈`docs/perf/cuda-gemm-mma-block-tile.md`
+/// §3 候補表〉。`MMA_BK=32` を維持しているため、アキュムレート順序
+/// （K タイル t 順 → kstep 順）は BM/BN の値に依存せず、B-1/B-2 時点と
+/// bit 一致の出力を保つ（`tests/parity_nonregression.rs` の parity 非後退
+/// 契約はこの論拠に基づき変更不要）。
+pub const MMA_BM: u32 = 64;
+pub const MMA_BN: u32 = 128;
 pub const MMA_BK: u32 = 32;
 
 /// `cp.async` multi-stage pipelining のステージ数。共有メモリ使用量
-/// `(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B * MMA_STAGES` = 18432B（18KiB）
+/// `(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B * MMA_STAGES` = 36864B（36KiB）
 /// で per-block 48KiB 上限に対し十分な余裕を持つ（本ファイル冒頭コメント
-/// 参照）。
+/// 参照。#494 のブロックタイル拡大後の値）。
 pub const MMA_STAGES: u32 = 3;
 
 /// warp あたりのレジスタブロッキング係数（#493）。1 warp が C の
@@ -156,18 +177,16 @@ pub const MMA_WARP_TILES_N: u32 = 2;
 pub const MMA_WARP_M: u32 = MMA_M * MMA_WARP_TILES_M; // 32
 pub const MMA_WARP_N: u32 = MMA_N * MMA_WARP_TILES_N; // 16
 
-/// 1 ブロックあたりの warp 構成（M 方向 1・N 方向 4 = 4 warp = 128
-/// スレッド。#493 でレジスタブロッキング導入に伴い warp タイル実寸
-/// （`MMA_WARP_M x MMA_WARP_N` = `32x16`）基準へ再導出した。旧構成
-/// （M 方向 2・N 方向 8 = 16 warp = 512 スレッド。1 warp = 16x8 タイル
-/// 1 個のみ）からスレッド数が 1/4 に減るため、cp.async 協調ロードの
-/// 反復回数が増える（A タイル: 512 スレッド中 128 スレッドのみ稼働
-/// していた分岐が解消され全 128 スレッドが 1 反復／B タイル: 0.5 反復
-/// 相当 → 2 反復）。B-2 単体でのスループット改善を主張しない理由の一つ
-/// （本ファイル冒頭コメント「タイル構成」参照。ブロックタイル拡大に
-/// よるスレッド数回復は #494 のスコープ）。
-pub const MMA_WARPS_M: u32 = MMA_BM / MMA_WARP_M; // 1
-pub const MMA_WARPS_N: u32 = MMA_BN / MMA_WARP_N; // 4
+/// 1 ブロックあたりの warp 構成（M 方向 2・N 方向 8 = 16 warp = 512
+/// スレッド。#494 でブロックタイルを `32x64`→`64x128` へ拡大したことで
+/// warp タイル実寸（`MMA_WARP_M x MMA_WARP_N` = `32x16`）基準の再導出値が
+/// `MMA_WARPS_M=2`/`MMA_WARPS_N=8` になった。#493 が導入したブロックタイル
+/// 縮小構成（M 方向 1・N 方向 4 = 4 warp = 128 スレッド）からスレッド数を
+/// 4 倍（B-1 時点の 512 スレッド相当）へ回復させ、cp.async 協調ロードの
+/// 並列度低下（#493 冒頭コメント参照）を解消する（本ファイル冒頭コメント
+/// 「タイル構成」参照。実装計画候補表 B の採用）。
+pub const MMA_WARPS_M: u32 = MMA_BM / MMA_WARP_M; // 2
+pub const MMA_WARPS_N: u32 = MMA_BN / MMA_WARP_N; // 8
 
 /// ブロック内スレッド総数（32 スレッド/warp x warp 数）。
 pub const MMA_BLOCK_THREADS: u32 = MMA_WARPS_M * MMA_WARPS_N * 32;
@@ -263,6 +282,19 @@ const _: () = assert!(
      前提とする（カーネルソース側の `STAGES - 2` 計算が u32 で \
      アンダーフローしないため）"
 );
+// #494 受け入れ基準 3 項: CUTLASS `mma_base.h` の
+// `kWarpGemmIterations >= 2`（`static_assert`）相当の機械検査。
+// `MMA_K_STEPS_PER_STAGE`（= `BK / MMA_K`）が 1 だと 1 ステージあたりの
+// mma.sync 発行が 1 回のみになり、ldmatrix ロード直後に mma を 1 回しか
+// 発行しないため命令レイテンシを隠蔽できず、ソフトウェアパイプライン化の
+// 効果が実質失われる。候補表（`docs/perf/cuda-gemm-mma-block-tile.md`
+// §3）の全候補は `MMA_BK=32` を維持するため `MMA_K_STEPS_PER_STAGE=2` で
+// 本条件を満たす。
+const _: () = assert!(
+    MMA_K_STEPS_PER_STAGE >= 2,
+    "kernels_mma::MMA_F16 は CUTLASS mma_base.h の kWarpGemmIterations >= 2 \
+     相当（MMA_BK / MMA_K >= 2）を要求する（#494 受け入れ基準 3 項）"
+);
 
 /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM（f16 入出力・f32 アキュムレート）。
 ///
@@ -277,10 +309,10 @@ pub const MMA_F16: &str = r#"
 #define MMA_M 16
 #define MMA_N 8
 #define MMA_K 16
-#define BM 32
-#define BN 64
+#define BM 64
+#define BN 128
 #define BK 32
-#define WARPS_N 4
+#define WARPS_N 8
 #define WARP_TILES_M 2
 #define WARP_TILES_N 2
 #define STAGES 3
@@ -493,12 +525,16 @@ extern "C" __global__ void gemm_mma_f16(
             }
 
             // #493: mi x nj の 4 通りで mma.sync を発行し d[mi][nj] へ
-            // アキュムレートする。1 K タイル（kstep 2 回）あたりの
-            // ldmatrix 発行回数は、ブロック全体（C の 32x64 = 16x8
-            // タイル 16 個）で旧構成 16 warp x (A x4 + B x2) x 2 kstep =
-            // 64 発行 → 新構成 4 warp x (A x4 x2mi + B x2 x2nj) x 2 kstep
-            // = 32 発行と半減する（同一出力タイルあたり 4 発行 → 2
-            // 発行。ロード済みフラグメントを 4 通り再利用するため）。
+            // アキュムレートする。同一出力タイルあたりの ldmatrix 発行
+            // 回数は、単一タイル構成（1 warp = 16x8 タイル 1 個）の
+            // 4 発行（A x4 + B x2 を warp ごとに個別発行）から本構成
+            // （2x2 レジスタブロッキング）の 2 発行（A x4 + B x2 を
+            // 4 タイル分で共有）へ半減する（本ファイル冒頭コメント
+            // 「タイル構成」参照。#494 のブロックタイル拡大〈`32x64`→
+            // `64x128`〉は warp あたりの担当範囲・レジスタブロッキング
+            // 係数〈`WARP_TILES_M`/`WARP_TILES_N`〉自体には影響せず、
+            // ブロック全体の warp 数〈`MMA_WARPS_M`/`MMA_WARPS_N`〉のみを
+            // 変える）。
 #pragma unroll
             for (int mi = 0; mi < WARP_TILES_M; ++mi) {
 #pragma unroll
@@ -645,15 +681,28 @@ mod tests {
     /// （1024）を超えないことは本ファイル冒頭の `const _: () =
     /// assert!(...)` でコンパイル時に検査済み。本テストは
     /// `MMA_WARPS_M`/`MMA_WARPS_N` からの導出式が崩れていないことに加え、
-    /// #493 のレジスタブロッキング導入で再導出された値（4 warp = 128
-    /// スレッド）をロックする（本ファイル `MMA_WARPS_M`/`MMA_WARPS_N`
-    /// 定数直下のドキュメンテーションコメント参照）。
+    /// #494 のブロックタイル拡大（`32x64`→`64x128`）で再導出された値
+    /// （16 warp = 512 スレッド。B-1 時点のスレッド数への回復）をロックする
+    /// （本ファイル `MMA_WARPS_M`/`MMA_WARPS_N` 定数直下のドキュメンテーション
+    /// コメント参照）。
     #[test]
     fn mma_block_threads_matches_warp_layout() {
         assert_eq!(MMA_BLOCK_THREADS, MMA_WARPS_M * MMA_WARPS_N * 32);
-        assert_eq!(MMA_WARPS_M, 1, "#493 再導出値: MMA_BM / MMA_WARP_M");
-        assert_eq!(MMA_WARPS_N, 4, "#493 再導出値: MMA_BN / MMA_WARP_N");
-        assert_eq!(MMA_BLOCK_THREADS, 128);
+        assert_eq!(MMA_WARPS_M, 2, "#494 再導出値: MMA_BM / MMA_WARP_M");
+        assert_eq!(MMA_WARPS_N, 8, "#494 再導出値: MMA_BN / MMA_WARP_N");
+        assert_eq!(MMA_BLOCK_THREADS, 512);
+    }
+
+    /// #494 受け入れ基準の回帰防止: ブロックタイル拡大後の静的共有メモリ
+    /// 使用量（`(64*32 + 32*128) * 2B * 3 stages` = 36864B）と
+    /// `kWarpGemmIterations` 相当条件（`MMA_K_STEPS_PER_STAGE >= 2`）を
+    /// ロックする。前者は本ファイル冒頭の `const _: () = assert!(...)`
+    /// （48KiB 上限検査）とは独立に、候補表（`docs/perf/cuda-gemm-mma-block-tile.md`
+    /// §3）が採用した候補 B の具体値そのものが崩れていないことを検査する。
+    #[test]
+    fn mma_shared_mem_and_k_steps_match_block_tile_expansion() {
+        assert_eq!(MMA_SHARED_MEM_BYTES, 36_864);
+        assert_eq!(MMA_K_STEPS_PER_STAGE, 2);
     }
 
     /// cp.async 16 バイト整列制約の前提（`BK`/`BN` が 8 の倍数）を検査する
