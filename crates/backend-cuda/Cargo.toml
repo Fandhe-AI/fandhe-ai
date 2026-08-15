@@ -34,6 +34,21 @@ tensor-core = { path = "../tensor-core" }
 cudarc.workspace = true
 half.workspace = true
 
+[features]
+# `backend_cuda::diagnostics`（内部カーネルのタイル定数を返す診断専用関数群）を
+# 通常の公開 API 面から外すための feature ゲート（PR #637 codex-review P1 指摘の
+# 是正）。この feature を有効化しない既定ビルドでは `diagnostics` モジュール自体が
+# コンパイルされないため、crate 外部から到達不能（`pub mod` として存在しない）。
+# `examples/gemm_profile_target.rs`（occupancy 概算専用。イシュー #486）のみが
+# `required-features` 経由で本 feature を要求する。deps-policy.md「バックエンド
+# 切替は feature フラグなしの cfg ベース」はバックエンド選択（CUDA/Metal/CPU）に
+# 関する規約であり、本 feature は内部診断専用ツールの可視性制御であって対象外。
+internal-diagnostics = []
+
+[[example]]
+name = "gemm_profile_target"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート
