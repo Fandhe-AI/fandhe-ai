@@ -56,17 +56,17 @@ pub struct TileConfig {
 /// 不成立構成を候補から除外し次善構成へフォールバックする判断材料になる
 /// （fail-closed。計画「パイプライン管理」節）。
 ///
-/// `#[non_exhaustive]`（イシュー #535・codex-review 指摘対応。PR #672）:
-/// 本 enum は `pub enum` かつクレート公開面（`crate::tile`
-/// は `pub mod`）のため、`validate` の検査項目を追加するたびに
-/// variant を増やすとダウンストリームの網羅的 `match` を破壊しうる
-/// （実際 #535 で `BkNotDivisibleByVecWidth`/`BnNotDivisibleByVecWidth`
-/// の 2 variant を追加した際に露見）。`#[non_exhaustive]` を付けることで
-/// 「新規 variant の追加はクレート外から見て非破壊」という契約を型で
-/// 明示し、呼び出し側に `_ =>` の catch-all を強制する。`Display` 実装
-/// （下記）はクレート内部のためこの制約を受けず全 variant を明示できる。
+/// 本 enum は `pub enum` かつクレート公開面（`crate::tile` は `pub mod`）
+/// のため、variant の追加・削除はダウンストリームの網羅的 `match` を
+/// 破壊しうる（`#[non_exhaustive]` を後付けする変更自体も同様に破壊的。
+/// イシュー #535・codex-review 指摘・PR #672）。このため本 enum の
+/// variant 集合は既存のまま変更しない: `staged=true` 構成のベクトル化
+/// ロード（float4）整除制約は、新規 variant を増やす代わりに既存の
+/// `BkNotMultipleOfEight`/`BnNotDivisibleByWn8` 検査（8 整除）が
+/// `VEC_WIDTH`（4）整除を数学的に包含することを [`validate`](TileConfig::validate)
+/// の実装コメントとテスト（本ファイル末尾 `validate_ok_implies_vec_width_divisibility`）
+/// で担保する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum TileConfigError {
     /// `bm` が `wm*8` の倍数でない（各 simdgroup の行分担が 8 の倍数に
     /// ならず `simdgroup_float8x8` タイルへ整除できない）。
@@ -95,15 +95,6 @@ pub enum TileConfigError {
     AccRowsExceedsMax { acc_rows: u32, max_acc: u32 },
     /// 上記の列方向版（`(bn/wn)/8` が `MAX_ACC` を超える）。
     AccColsExceedsMax { acc_cols: u32, max_acc: u32 },
-    /// `staged=true` の構成で `bk` が `VEC_WIDTH`（4）の倍数でない
-    /// （イシュー #535）。`shaders/gemm.metal` の `USE_TGP_STAGING`
-    /// 協調ロード（イシュー #533）は A タイル（`bm`×`bk`）を float4
-    /// （128bit）単位で読み出すため、A タイルの行長 `bk` が 4 要素
-    /// グループで行境界をまたがないことを要求する。MLX `loader.h` の
-    /// `BCOLS % n_reads == 0` 前提と同種の契約（計画「設計方針」節）。
-    BkNotDivisibleByVecWidth { bk: u32, vec_width: u32 },
-    /// 上記の B タイル行長版（`bn` が `VEC_WIDTH` の倍数でない）。
-    BnNotDivisibleByVecWidth { bn: u32, vec_width: u32 },
 }
 
 impl std::fmt::Display for TileConfigError {
@@ -148,18 +139,6 @@ impl std::fmt::Display for TileConfigError {
                     "(bn/wn)/8={acc_cols} exceeds gemm_simdgroup_tiled acc[][] col limit {max_acc}"
                 )
             }
-            TileConfigError::BkNotDivisibleByVecWidth { bk, vec_width } => {
-                write!(
-                    f,
-                    "bk={bk} is not a multiple of VEC_WIDTH={vec_width} (required for staged float4 cooperative load)"
-                )
-            }
-            TileConfigError::BnNotDivisibleByVecWidth { bn, vec_width } => {
-                write!(
-                    f,
-                    "bn={bn} is not a multiple of VEC_WIDTH={vec_width} (required for staged float4 cooperative load)"
-                )
-            }
         }
     }
 }
@@ -190,12 +169,15 @@ impl TileConfig {
 
     /// `shaders/gemm.metal` の `USE_TGP_STAGING` 協調ロード（イシュー
     /// #533）が使う `float4`（128bit）ベクトルロード幅（要素数）。
-    /// [`validate`](Self::validate) が `staged=true` の構成で `bk`・`bn`
-    /// がこの倍数であることを明示検査し、A/B タイルの行境界を 4 要素
-    /// グループがまたがないという gemm.metal 側のアラインメント前提
-    /// （同ファイル `USE_TGP_STAGING` 分岐のコメント参照）を Rust 側で
-    /// 独立に担保する（MLX `loader.h` の `BCOLS % n_reads == 0` 相当。
-    /// イシュー #535 計画「設計方針」節）。
+    /// A/B タイルの行境界を 4 要素グループがまたがないという gemm.metal
+    /// 側のアラインメント前提（同ファイル `USE_TGP_STAGING` 分岐のコメント
+    /// 参照。MLX `loader.h` の `BCOLS % n_reads == 0` 相当）を、
+    /// [`validate`](Self::validate) の既存 8 整除検査（`bk % 8 == 0`・
+    /// `bn % (wn*8) == 0` ⟹ `wn >= 1` のため `bn % 8 == 0`）が数学的に
+    /// 包含することをテスト（本ファイル末尾
+    /// `validate_ok_implies_vec_width_divisibility`）で固定する（イシュー
+    /// #535 計画「設計方針」節）。専用の検査 variant は追加しない
+    /// （`TileConfigError` の公開面を変更しないための判断。上記 doc 参照）。
     pub const VEC_WIDTH: u32 = 4;
 
     /// threadgroup 1 個あたりのスレッド数（`wm*wn*32`。1 simdgroup = 32
@@ -234,37 +216,23 @@ impl TileConfig {
         max_threads_per_tg: u32,
         max_shared_mem_bytes: u32,
     ) -> Result<(), TileConfigError> {
-        // ベクトル化ロードの整除制約（イシュー #535）: `staged=true`
-        // のみ gemm.metal の `USE_TGP_STAGING` float4 協調ロード経路
-        // （イシュー #533）を通るため、この検査も staged 限定で行う
-        // （`staged=false` の直接ロード経路は下記の 8 整除検査のみが
-        // 適用される契約のまま変えない）。
+        // ベクトル化ロードの整除制約（イシュー #535）: `staged=true` の
+        // 構成は gemm.metal の `USE_TGP_STAGING` float4 協調ロード経路
+        // （イシュー #533）を通るため、A/B タイルの行長 `bk`/`bn` が
+        // `VEC_WIDTH`（4）の倍数であることを要求する（MLX `loader.h` の
+        // `BCOLS % n_reads == 0` 相当）。
         //
-        // 既存の `bk % 8 == 0`・`bn % (wn*8) == 0` 検査は数学的に
-        // `VEC_WIDTH`（4）整除を包含するため、本検査は**それらより前**
-        // に置く。後段に置くと `BkNotDivisibleByVecWidth` /
-        // `BnNotDivisibleByVecWidth` が常に 8 整除検査に先に弾かれて
-        // 到達不能になり、テストで固定できなくなるため（イシュー #535
-        // 計画「設計方針」節）。前段配置により fail-closed 性は単調に
-        // 強まる（例: `bk=6` は本検査で、`bk=12` は従来どおり 8 整除
-        // 検査で弾かれる）。
-        //
-        // `(bm*bk) % 4`（`tile_b` 共有メモリオフセットの float4 境界）・
-        // `(bm*bk)/4`／`(bk*bn)/4` ループの全要素被覆は `bk`/`bn` の 4
-        // 整除から導出されるため個別検査は追加しない（到達不能な検査を
-        // 作らない）。
-        if self.staged && !self.bk.is_multiple_of(TileConfig::VEC_WIDTH) {
-            return Err(TileConfigError::BkNotDivisibleByVecWidth {
-                bk: self.bk,
-                vec_width: TileConfig::VEC_WIDTH,
-            });
-        }
-        if self.staged && !self.bn.is_multiple_of(TileConfig::VEC_WIDTH) {
-            return Err(TileConfigError::BnNotDivisibleByVecWidth {
-                bn: self.bn,
-                vec_width: TileConfig::VEC_WIDTH,
-            });
-        }
+        // 専用の検査 variant（`TileConfigError` への新規追加）は設けない。
+        // 下記の既存 8 整除検査（`bk % 8 == 0`・`wn >= 1` かつ
+        // `bn % (wn*8) == 0` ⟹ `bn % 8 == 0`）が `VEC_WIDTH`（4）整除を
+        // 数学的に包含するため、`staged=true` かつこれらの検査を通る
+        // 構成は必ず `bk`/`bn` が 4 の倍数になる（`8 | x ⟹ 4 | x`）。
+        // この不変条件は本ファイル末尾のテスト
+        // `validate_ok_implies_vec_width_divisibility` で固定する。
+        // enum への variant 追加・`#[non_exhaustive]` 化はいずれも
+        // ダウンストリームの網羅的 `match` を破壊しうるため（codex-review
+        // 指摘・PR #672）、`TileConfigError` の公開面は変更しない
+        // （型定義側の doc コメント参照）。
 
         if self.wm == 0 || !self.bm.is_multiple_of(self.wm * 8) {
             return Err(TileConfigError::BmNotDivisibleByWm8 {
@@ -661,9 +629,9 @@ mod tests {
 
     #[test]
     fn validate_rejects_staged_bk_not_divisible_by_vec_width() {
-        // staged=true・bk=6（4 の倍数でない）は VEC_WIDTH 検査で弾かれる。
-        // gemm.metal の float4 協調ロード（#533）が A タイル行境界を
-        // またがない前提を Rust 側で明示検査する契約の固定。
+        // staged=true・bk=6（4 の倍数でない）は既存の 8 整除検査
+        // （BkNotMultipleOfEight）で弾かれる。専用 variant は設けない
+        // 判断（型定義 doc・validate 実装コメント参照）の固定。
         let cfg = TileConfig {
             bm: 64,
             bn: 64,
@@ -675,16 +643,14 @@ mod tests {
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
             err,
-            TileConfigError::BkNotDivisibleByVecWidth {
-                bk: 6,
-                vec_width: 4
-            }
+            TileConfigError::BkNotMultipleOfEight { bk: 6 }
         ));
     }
 
     #[test]
     fn validate_rejects_staged_bn_not_divisible_by_vec_width() {
-        // staged=true・bn=6（4 の倍数でない）は VEC_WIDTH 検査で弾かれる。
+        // staged=true・bn=6（4 の倍数でない）は既存の 8 整除検査
+        // （BnNotDivisibleByWn8。wn=1 のため bn%8==0 相当）で弾かれる。
         // bm/bk/wm/wn は他の検査に触れない妥当値にしておく。
         let cfg = TileConfig {
             bm: 64,
@@ -697,18 +663,16 @@ mod tests {
         let err = cfg.validate(1024, 32 * 1024).unwrap_err();
         assert!(matches!(
             err,
-            TileConfigError::BnNotDivisibleByVecWidth {
-                bn: 6,
-                vec_width: 4
-            }
+            TileConfigError::BnNotDivisibleByWn8 { bn: 6, wn: 1 }
         ));
     }
 
     #[test]
     fn non_staged_config_bypasses_vec_width_check() {
-        // staged=false（直接ロード経路）は VEC_WIDTH 検査の対象外で、
-        // 従来どおり 8 整除検査（BkNotMultipleOfEight）で弾かれることを
-        // 固定する（VEC_WIDTH 検査が staged 限定であることの回帰ガード）。
+        // staged=false（直接ロード経路）も staged=true と同じ 8 整除検査
+        // （BkNotMultipleOfEight）のみで弾かれる。VEC_WIDTH 専用検査を
+        // 追加しない設計のため staged の有無で拒否理由は変わらないことの
+        // 回帰ガード。
         let cfg = TileConfig {
             bm: 64,
             bn: 64,
@@ -722,6 +686,45 @@ mod tests {
             err,
             TileConfigError::BkNotMultipleOfEight { bk: 6 }
         ));
+    }
+
+    #[test]
+    fn validate_ok_implies_vec_width_divisibility() {
+        // 不変条件テスト（イシュー #535・codex-review 指摘対応 PR #672）:
+        // `TileConfigError` に専用の VEC_WIDTH 整除検査 variant を追加する
+        // 代わりに、既存の 8 整除検査（`bk % 8 == 0`・
+        // `bn % (wn*8) == 0` かつ `wn >= 1` ⟹ `bn % 8 == 0`）が
+        // `VEC_WIDTH`（4）整除を数学的に包含することをここで固定する。
+        // `validate` が Ok を返す `staged=true` 構成は必ず `bk`/`bn` が
+        // 4 の倍数であることを bm/bn/bk/wm/wn の小さな全域で検査する。
+        for bm in [8u32, 16, 32, 64] {
+            for bn in [8u32, 16, 32, 64] {
+                for bk in [4u32, 6, 8, 12, 16, 24, 32] {
+                    for wm in [1u32, 2, 4] {
+                        for wn in [1u32, 2, 4] {
+                            let cfg = TileConfig {
+                                bm,
+                                bn,
+                                bk,
+                                wm,
+                                wn,
+                                staged: true,
+                            };
+                            if cfg.validate(1024, 32 * 1024).is_ok() {
+                                assert!(
+                                    bk.is_multiple_of(TileConfig::VEC_WIDTH),
+                                    "validate({cfg:?}) が Ok を返したが bk が VEC_WIDTH の倍数でない"
+                                );
+                                assert!(
+                                    bn.is_multiple_of(TileConfig::VEC_WIDTH),
+                                    "validate({cfg:?}) が Ok を返したが bn が VEC_WIDTH の倍数でない"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
