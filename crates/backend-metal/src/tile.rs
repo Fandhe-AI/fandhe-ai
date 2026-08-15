@@ -760,6 +760,15 @@ mod tests {
     /// 追加済み）を全て、8 の倍数の中規模形状で検証する（構成別の一致確認）。
     /// ローカルに候補配列を複製せず実セットを直接巡回することで、本ファイル側の
     /// 追加・変更が本テストへ自動的に反映されドリフトしない。
+    ///
+    /// `dispatch_variant` だけを呼ぶと `MetalGemm::pipeline_for_tile` が構成
+    /// 失敗時に `fallback_chain` で `TileConfig::SINGLE_SIMDGROUP_8X8` へ
+    /// サイレントにフォールバックしても数値一致自体は通ってしまい、対象候補が
+    /// 実際にコンパイル・実行されたことを保証しない（イシュー #532・PR #651
+    /// codex-review 指摘 P2）。`MetalGemm::resolve_tile_config`（`pub(crate)`。
+    /// `crate::gemm` 参照）で実際に採用された構成を事前取得し `cfg` と一致する
+    /// ことを assert してからディスパッチすることで、フォールバックが起きた
+    /// 場合は本テスト自体を失敗させる。
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
@@ -772,6 +781,15 @@ mod tests {
         let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
         for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?} が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
             let (m, n, k) = (256, 256, 256);
             let seed_a = 10 + i as u64;
             let seed_b = 20 + i as u64;
@@ -809,35 +827,40 @@ mod tests {
     /// `MetalGemm::pipeline_for_tile` は候補が検証・パイプライン構築に失敗すると
     /// `fallback_chain` で単一 simdgroup へサイレントにフォールバックするため
     /// （`crate::gemm` 参照）、`dispatch_variant` の PASS だけでは各候補が実際に
-    /// デバイス上限内で動いた証明にならない。ここでは `MetalContext` から実測した
-    /// `maxThreadgroupMemoryLength`（`MTLDevice` の公開プロパティ）に対して
-    /// `CANDIDATES` 全構成（とくに bk=32 構成の 12288 バイト）の `TileConfig::validate`
-    /// が直接 `Ok` を返すことをアサートし、フォールバックの穴を塞ぐ。スレッド数上限
-    /// （`maxTotalThreadsPerThreadgroup`）は `MTLComputePipelineState` 構築後にしか
-    /// 取得できず、かつパイプライン構築 API は `pub(crate)` のため、
-    /// `validate_accepts_all_candidates_under_typical_device_limits`（上記）と同じ
-    /// Apple Silicon 一般上限（1024 スレッド）を前提に据え置き、SMEM のみをデバイス
-    /// 実測値で検証する。
+    /// デバイス上限内で動いた証明にならない。
+    ///
+    /// 従前は `TileConfig::validate` を SMEM のみ実デバイス値（`maxThreadgroupMemoryLength`）
+    /// で直接呼び、スレッド数上限（`maxTotalThreadsPerThreadgroup`）は
+    /// `MTLComputePipelineState` 構築前には取得できないという理由で Apple Silicon の
+    /// 一般値 1024 を仮定していた。これでは候補が一度もコンパイル・パイプライン
+    /// 構築されないため、実測ではなく仮定に基づく検証に留まり、フォールバックの穴を
+    /// 塞げていなかった（イシュー #532・PR #651 codex-review 指摘 P2/P3）。
+    ///
+    /// `MetalGemm::resolve_tile_config`（`pub(crate)`。`crate::gemm` 参照）は実際に
+    /// `MTLComputePipelineState` を構築し、SMEM（構築前の事前検証）・スレッド数
+    /// （構築後の実測 `maxTotalThreadsPerThreadgroup`）の両方をデバイス実測値で検証
+    /// したうえで採用構成を返す。返り値が `cfg` と一致することを assert することで、
+    /// 「1024 固定仮定」に依らず両上限を実測で確認しつつフォールバックを検知する。
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
     fn all_tile_candidates_validate_under_actual_device_shared_memory_limit() {
-        // `MTLDevice::maxThreadgroupMemoryLength` はトレイトメソッドのため、
-        // 実装型（`&ProtocolObject<dyn MTLDevice>`）で呼ぶにはこのトレイトを
-        // スコープに入れる必要がある（`crate::gemm` の同名インポートと同じ理由）。
-        use objc2_metal::MTLDevice;
-
         let ctx = crate::context::MetalContext::new()
             .expect("Metal デバイス・コマンドキューの初期化に失敗した");
-        let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
-        for cfg in CANDIDATES {
-            cfg.validate(1024, max_shared_mem_bytes).unwrap_or_else(|e| {
+        for &cfg in CANDIDATES {
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
                 panic!(
-                    "candidate {cfg:?} は実デバイス SMEM 上限（{max_shared_mem_bytes} bytes）を \
-                 超過した: {e}"
+                    "candidate {cfg:?} は実デバイス上限（SMEM・スレッド数）でのパイプライン \
+                     構築・検証に失敗した: {err}"
                 )
             });
+            assert_eq!(
+                resolved, cfg,
+                "candidate {cfg:?} が実デバイス上限で {resolved:?} へサイレントに \
+                 フォールバックした（SMEM・スレッド数いずれかの実測上限超過）"
+            );
         }
     }
 }

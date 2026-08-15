@@ -236,6 +236,32 @@ impl MetalGemm {
         }))
     }
 
+    /// [`Self::pipeline_for_tile`] が実際に採用した [`TileConfig`]（フォール
+    /// バック後の構成）のみをクレート内テストへ公開する内部専用面（イシュー
+    /// #532・PR #651 codex-review 指摘対応。P2/P3）。
+    ///
+    /// `dispatch_variant`（`SimdgroupTiled`）は `pipeline_for_tile` が
+    /// `crate::tile::fallback_chain` で構成失敗時に
+    /// `TileConfig::SINGLE_SIMDGROUP_8X8` へサイレントにフォールバックして
+    /// も戻り値の `Vec<f32>` だけを見ると成功にしか見えず、`CANDIDATES` の
+    /// 各構成が実際にコンパイル・パイプライン構築（実デバイスの
+    /// `maxThreadgroupMemoryLength`・パイプライン構築後実測の
+    /// `maxTotalThreadsPerThreadgroup` を含む）まで通ったかを外側から検証
+    /// できない問題があった。`crate::tile` モジュール末尾の実機依存テスト
+    /// （`#[cfg(target_os = "macos")]` + `#[ignore]`）が本メソッドで
+    /// `resolve_tile_config(cfg) == cfg` を確認したうえで初めて実際の
+    /// ディスパッチへ進む契約にする。`pub(crate)` に留め公開 API 契約には
+    /// 含めない（`crate::tile::CANDIDATES` と同じ判断根拠。同モジュール
+    /// 冒頭コメント参照）。
+    pub(crate) fn resolve_tile_config(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        self.pipeline_for_tile(ctx, cfg)
+            .map(|(_, resolved)| resolved)
+    }
+
     /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
     /// [`tile::select`] で [`TileConfig`] を選び、[`GemmVariant::SimdgroupTiled`]
     /// で [`Self::dispatch_variant`] へ委譲する。バックエンド抽象層からの
