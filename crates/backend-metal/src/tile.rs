@@ -55,7 +55,18 @@ pub struct TileConfig {
 /// [`crate::gemm::MetalGemm`] のパイプライン遅延キャッシュ構築時に、
 /// 不成立構成を候補から除外し次善構成へフォールバックする判断材料になる
 /// （fail-closed。計画「パイプライン管理」節）。
+///
+/// `#[non_exhaustive]`（イシュー #535・codex-review 指摘対応。PR #672）:
+/// 本 enum は `pub enum` かつクレート公開面（`crate::tile`
+/// は `pub mod`）のため、`validate` の検査項目を追加するたびに
+/// variant を増やすとダウンストリームの網羅的 `match` を破壊しうる
+/// （実際 #535 で `BkNotDivisibleByVecWidth`/`BnNotDivisibleByVecWidth`
+/// の 2 variant を追加した際に露見）。`#[non_exhaustive]` を付けることで
+/// 「新規 variant の追加はクレート外から見て非破壊」という契約を型で
+/// 明示し、呼び出し側に `_ =>` の catch-all を強制する。`Display` 実装
+/// （下記）はクレート内部のためこの制約を受けず全 variant を明示できる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TileConfigError {
     /// `bm` が `wm*8` の倍数でない（各 simdgroup の行分担が 8 の倍数に
     /// ならず `simdgroup_float8x8` タイルへ整除できない）。
