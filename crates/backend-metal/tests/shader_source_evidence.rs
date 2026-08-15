@@ -192,15 +192,15 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
 /// serpentine-ab.md` と同じ運用。#536 前例踏襲）。
 #[test]
 fn gemm_simdgroup_tiled_source_uses_tgid_swizzle() {
-    // `crate::tile::SWIZZLE_LOG` は `pub(crate)` のためこのテストバイナリ
-    // （別コンパイル単位）からは参照できない。値の複製自体が二重管理に
-    // なるためコメントで対応関係を明示し、値はここで固定リテラルとして
-    // 検査する（`gemm_simdgroup_tiled_source_uses_serpentine_scan_order`
-    // と同じ「文字列証跡でロックする」方式）。
+    // `backend_metal::tile::SWIZZLE_LOG` は `pub`（`crate::tile` も
+    // `lib.rs` で `pub mod tile;`）のためこのテストバイナリ（別コンパイル
+    // 単位）からも参照できる。固定リテラルの複製による二重管理を避け、
+    // 実際の定数値をそのままシェーダ側文字列証跡の期待値へ埋め込む。
     let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let swizzle_log = backend_metal::tile::SWIZZLE_LOG;
     assert!(
-        kernel_body.contains("constexpr uint SWIZZLE_LOG = 2;"),
-        "gemm_simdgroup_tiled に SWIZZLE_LOG 定数（値 2。crate::tile::SWIZZLE_LOG と一致契約）が見つかりません"
+        kernel_body.contains(&format!("constexpr uint SWIZZLE_LOG = {swizzle_log};")),
+        "gemm_simdgroup_tiled に SWIZZLE_LOG 定数（値 {swizzle_log}。crate::tile::SWIZZLE_LOG と一致契約）が見つかりません"
     );
     assert!(
         kernel_body

@@ -418,16 +418,18 @@ pub const SWIZZLE_LOG: u32 = 2;
 /// この対応を Linux 上でも静的に検証する）。
 ///
 /// `tiles_n`/`tiles_m` は `crate::gemm::validate_effective_dims` 通過後の
-/// 実効次元（`u32::MAX` 以下）由来のため、`tiles_n << SWIZZLE_LOG`
-/// （最大シフト量 2）は 64bit `usize` 上でオーバーフローしない
-/// （`u32::MAX << 2` は `usize` が 32bit 環境でも `u64` 相当の範囲に収まる
-/// が、念のため `checked_shl`/`checked_mul` で防御し、万一の桁あふれは
-/// パニックではなく `usize::MAX` へ飽和させる。実運用では到達しない
-/// 経路であることをコメントで根拠づけるに留め、無限ループ等の未定義動作
-/// を避ける趣旨）。
+/// 実効次元（`u32::MAX` 以下）由来のため、`tiles_n * (1 << SWIZZLE_LOG)`
+/// （最大倍率 4）は 64bit `usize` 上でオーバーフローしない
+/// （`u32::MAX * 4` は `usize` が 32bit 環境でも `u64` 相当の範囲に収まる
+/// が、念のため `saturating_mul` で防御し、万一の桁あふれはパニックではなく
+/// `usize::MAX` へ飽和させる。`checked_shl` はシフト量がビット幅以上の
+/// ときのみ `None` を返す仕様で値側の桁あふれ自体は検知できない（`<<` と
+/// 挙動が同一）ため、桁あふれを実際に検知できる乗算ベースの飽和演算を使う。
+/// 実運用では到達しない経路であることをコメントで根拠づけるに留め、
+/// 無限ループ等の未定義動作を避ける趣旨）。
 pub fn swizzled_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
     let tile = 1usize << SWIZZLE_LOG;
-    let grid_w = tiles_n.checked_shl(SWIZZLE_LOG).unwrap_or(usize::MAX);
+    let grid_w = tiles_n.saturating_mul(tile);
     let grid_h = tiles_m.div_ceil(tile);
     (grid_w, grid_h)
 }
