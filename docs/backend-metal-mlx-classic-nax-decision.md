@@ -12,8 +12,11 @@ D-1（#532・クローズ済み）で classic 経路の未収録 3 構成を追�
 ## 判断サマリ
 
 **MLX の NAX 経路（`MetalPerformancePrimitives` の `mpp::tensor_ops::matmul2d` を使う経路）は
-`backend-metal` に不採用とする。** classic 経路構成の本実装 `CANDIDATES` への取り込みは #532 で
-完了済みであり、本ドキュメントはその対比表と NAX 不採用の根拠を記録するのみで新規のコード変更は伴わない。
+`backend-metal` に不採用とする。** classic 経路 6 構成のうち #532 で本実装 `CANDIDATES` に
+完全一致で取り込み済みなのは 5 構成（index 0・3・4・5・6）であり、残り 1 構成
+`(32,64,16,1,2)` は本実装に完全一致では存在しない（最近傍として index 2
+`(32,64,16,2,2)` があるが `wm`/`wn` が異なるため完全一致ではない。詳細は §1）。
+本ドキュメントはその対比表と NAX 不採用の根拠を記録するのみで新規のコード変更は伴わない。
 
 ## §1 classic 経路 6 構成と `CANDIDATES` の対比表
 
@@ -28,15 +31,17 @@ D-1（#532・クローズ済み）で classic 経路の未収録 3 構成を追�
 | `(64,64,16,2,2)` | `steel_gemm_fused.metal:22` | index 0 | `tile.rs:270-277` | 完全一致 |
 | `(64,64,16,1,2)` | `steel_gemm_fused.metal:23` | index 4 | `tile.rs:308-315` | 完全一致（#532 追加） |
 | `(64,32,32,2,2)` | `steel_gemm_fused.metal:24` | index 5 | `tile.rs:322-329` | 完全一致（#532 追加） |
-| `(32,64,16,1,2)` | `steel_gemm_fused.metal:25` | — | — | **本実装に完全一致で存在しない**（下記注記） |
+| `(32,64,16,1,2)` | `steel_gemm_fused.metal:25` | 最近傍: index 2 | `tile.rs:288-295` | **本実装に完全一致で存在しない**（`wm`/`wn` 相違。下記注記） |
 | `(32,32,16,2,2)` | `steel_gemm_fused.metal:26` | index 3 | `tile.rs:297-304` | 完全一致 |
 | `(64,32,8,4,1)` | `steel_gemm_fused.metal:27` | index 6 | `tile.rs:332-339` | 完全一致（#532 追加） |
 
-本実装 `CANDIDATES`（`tile.rs:268-342`。全 8 構成）のうち上記対応がない残り 2 構成:
+本実装 `CANDIDATES`（`tile.rs:268-342`。全 8 構成）のうち classic 6 構成に完全一致の対応が
+付かない残り 3 構成:
 
 | 本実装 `(bm,bn,bk,wm,wn)` | index | 出典行 | 備考 |
 |---|---|---|---|
 | `(64,32,16,2,2)` | index 1 | `tile.rs:279-286` | classic 6 構成に同一形状なし。本実装独自の縦長候補 |
+| `(32,64,16,2,2)` | index 2 | `tile.rs:288-295` | classic の `(32,64,16,1,2)`（`wm=1,wn=2`）と `bm`/`bn`/`bk` は一致するが `wm`/`wn` が異なるため完全一致ではない（詳細下記） |
 | `SINGLE_SIMDGROUP_8X8`（`8,8,8,1,1`） | index 7 | `tile.rs:142-149` | classic 6 構成に同一形状なし。微小形状フォールバック（`select` の下限構成） |
 
 **重要な記録事項（差異）**: MLX classic の横長構成は `(32,64,16,1,2)`（`wm=1,wn=2`。64 スレッド）だが、
