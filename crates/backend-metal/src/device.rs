@@ -105,6 +105,7 @@ mod iokit_ffi {
     // - `IOObjectRelease(object)`: `object` は有効なハンドルであることが
     //   前提（無効ハンドルへの呼び出しは未定義動作になりうるため、呼び出し
     //   側が「取得済みかつ未解放」の不変条件を管理する）。
+    #[link(name = "IOKit", kind = "framework")]
     unsafe extern "C" {
         pub(super) fn IOServiceMatching(name: *const c_char) -> CfDictionaryRef;
         /// `matching` の所有権を引き取り解放する（呼び出し後に
