@@ -20,13 +20,17 @@
 use crate::dispatch::DType;
 use crate::error::ShapeError;
 
-/// 融合グラフのノード種別（設計書 §2.1）。
+/// 融合グラフのノード種別（設計書 §2.1・イシュー #586 で境界を再定義）。
 ///
 /// `BackendOps`（`crate::backend_ops::BackendOps`）の各メソッドと 1:1
 /// 対応させる: elementwise binary（`add`／`mul`）・unary（`relu`／
-/// `exp`／`tanh`）が融合対象、`gemm`／`sum`／`max` は融合境界ノード
-/// （融合セグメントに組み込まず、そこで走査を打ち切る印として扱う。
-/// `detect.rs` 参照）。
+/// `exp`／`tanh`／`rsqrt`）に加え、reduction（`sum`／`max`）も
+/// **セグメント軸（`dim`）が一致する限り融合セグメント内に組み込める**
+/// （#586。RMSNorm／softmax のような `reduce → elementwise` 連鎖を単一
+/// セグメントで扱う土台。`detect.rs` の走査がセグメント軸の確定・一致
+/// 判定を担う）。`gemm` のみが常に融合境界ノード（融合セグメントに
+/// 組み込まず、そこで走査を打ち切る印として扱う。`detect.rs` 参照）で
+/// あり続ける。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FusionOp {
     /// リーフノード（グラフへの外部入力テンソル）。
@@ -34,16 +38,25 @@ pub(crate) enum FusionOp {
     // elementwise binary（backend_ops.rs の `add`/`mul` に対応）
     Add(FusionNodeId, FusionNodeId),
     Mul(FusionNodeId, FusionNodeId),
-    // elementwise unary（`relu`/`exp`/`tanh` に対応）
+    // elementwise unary（`relu`/`exp`/`tanh`/`rsqrt` に対応）
     Relu(FusionNodeId),
     Exp(FusionNodeId),
     Tanh(FusionNodeId),
-    // 融合境界ノード（融合しない。到達時に実体化する。設計書 §3 参照）
+    /// `1/sqrt(x)`。RMSNorm 融合（#586）の構成要素として追加。elementwise
+    /// unary と同じ恒等 shape 契約（`push` の出力 shape 検証・
+    /// `is_elementwise()`）を持つ。
+    Rsqrt(FusionNodeId),
+    // 常に融合境界ノード（融合しない。到達時に実体化する。設計書 §3 参照）
     Gemm(FusionNodeId, FusionNodeId),
+    /// reduction（縮約）。`dim: None` は全軸縮約、`dim: Some(axis)` は
+    /// 指定軸のみの縮約（`backend-cpu::reduction` の契約と同型）。
+    /// #586 以降、セグメント軸が一致する限り融合セグメントへ組み込める
+    /// （`detect.rs` 参照。組み込まれない場合は従来どおり境界ノード）。
     Sum {
         input: FusionNodeId,
         dim: Option<usize>,
     },
+    /// [`FusionOp::Sum`] と同じ軸一致融合ルールに従う reduction。
     Max {
         input: FusionNodeId,
         dim: Option<usize>,
@@ -60,14 +73,18 @@ impl FusionOp {
         match self {
             FusionOp::Input => Vec::new(),
             FusionOp::Add(a, b) | FusionOp::Mul(a, b) | FusionOp::Gemm(a, b) => vec![*a, *b],
-            FusionOp::Relu(a) | FusionOp::Exp(a) | FusionOp::Tanh(a) => vec![*a],
+            FusionOp::Relu(a) | FusionOp::Exp(a) | FusionOp::Tanh(a) | FusionOp::Rsqrt(a) => {
+                vec![*a]
+            }
             FusionOp::Sum { input, .. } | FusionOp::Max { input, .. } => vec![*input],
         }
     }
 
-    /// elementwise 5 演算（融合対象）かどうか（設計書 §2.1「融合の直接
-    /// 対象」）。`detect.rs` の連鎖検出が融合境界（`Gemm`／`Sum`／`Max`）
-    /// と外部入力（`Input`）を区別するために使う。
+    /// elementwise 6 演算（融合対象・恒等 shape 契約を持つ）かどうか
+    /// （設計書 §2.1「融合の直接対象」・#586 で `Rsqrt` を追加）。
+    /// `detect.rs` の連鎖検出が「常に境界」の `Gemm`・reduction
+    /// （[`is_reduction`](Self::is_reduction)）・外部入力（`Input`）と
+    /// 区別するために使う。
     pub(crate) fn is_elementwise(&self) -> bool {
         matches!(
             self,
@@ -76,7 +93,33 @@ impl FusionOp {
                 | FusionOp::Relu(..)
                 | FusionOp::Exp(..)
                 | FusionOp::Tanh(..)
+                | FusionOp::Rsqrt(..)
         )
+    }
+
+    /// reduction（`Sum`／`Max`）かどうか（#586）。`detect.rs` がセグメント
+    /// 軸一致判定の対象ノードを識別するために使う。
+    pub(crate) fn is_reduction(&self) -> bool {
+        matches!(self, FusionOp::Sum { .. } | FusionOp::Max { .. })
+    }
+
+    /// 融合セグメントへ組み込みうる演算（elementwise ∪ reduction）かどうか
+    /// （#586。`Gemm`／`Input` のみが常に組み込み対象外）。現状
+    /// `detect.rs` は reduction の組み込み可否をセグメント軸一致で個別に
+    /// 判定するため本メソッドを直接は使わないが、`is_elementwise`／
+    /// `is_reduction` の対概念として設計書の境界再定義を型で表現する
+    /// （将来の呼び出し元向けの安定 API）。
+    pub(crate) fn is_fusable(&self) -> bool {
+        self.is_elementwise() || self.is_reduction()
+    }
+
+    /// reduction の縮約軸を返す（`Sum`／`Max` 以外は `None`）。`detect.rs`
+    /// のセグメント軸一致判定・`plan.rs` の `dim`→`axis` 写像が使う。
+    pub(crate) fn reduction_dim(&self) -> Option<Option<usize>> {
+        match self {
+            FusionOp::Sum { dim, .. } | FusionOp::Max { dim, .. } => Some(*dim),
+            _ => None,
+        }
     }
 }
 
@@ -315,7 +358,7 @@ impl FusionGraph {
                     .into());
                 }
             }
-            FusionOp::Relu(a) | FusionOp::Exp(a) | FusionOp::Tanh(a) => {
+            FusionOp::Relu(a) | FusionOp::Exp(a) | FusionOp::Tanh(a) | FusionOp::Rsqrt(a) => {
                 let input_shape = &self.nodes[a.0].meta.shape;
                 if input_shape != &meta.shape {
                     return Err(ShapeError::ShapeMismatch {
@@ -325,10 +368,29 @@ impl FusionGraph {
                     .into());
                 }
             }
-            // `Input`・`Gemm`・`Sum`・`Max` は出力 shape が入力の恒等関数
-            // ではない（`Input` は外部から与えられ、`Gemm`／`Sum`／`Max`
-            // は融合境界としてここでは検証しない。設計書 §2.1）。
-            FusionOp::Input | FusionOp::Gemm(..) | FusionOp::Sum { .. } | FusionOp::Max { .. } => {}
+            // reduction（`Sum`／`Max`）は #586 でセグメント内包対象になった
+            // ため、出力 shape も構築時に fail-closed で検証する
+            // （`backend-cpu::reduction` の shape 契約の正: `dim=None` は
+            // rank 0〈`[]`〉、`dim=Some(axis)` は縮約軸を除去した shape。
+            // 検証ロジック自体は `ops_shape::reduce_out_shape` を再利用し
+            // 二重定義しない）。軸範囲外は `ShapeError::AxisOutOfRange`
+            // （`reduce_out_shape` から `?` で伝播）、縮約後 shape の不一致は
+            // `ShapeError::ShapeMismatch` として拒否する。
+            FusionOp::Sum { input, dim } | FusionOp::Max { input, dim } => {
+                let input_shape = &self.nodes[input.0].meta.shape;
+                let expected_shape = crate::ops_shape::reduce_out_shape(input_shape, *dim)?;
+                if expected_shape != meta.shape {
+                    return Err(ShapeError::ShapeMismatch {
+                        lhs: meta.shape.clone(),
+                        rhs: expected_shape,
+                    }
+                    .into());
+                }
+            }
+            // `Input`・`Gemm` は出力 shape が入力の恒等関数ではない
+            // （`Input` は外部から与えられ、`Gemm` は常に融合境界として
+            // ここでは検証しない。設計書 §2.1）。
+            FusionOp::Input | FusionOp::Gemm(..) => {}
         }
 
         let new_id = FusionNodeId(self.nodes.len());
@@ -457,5 +519,121 @@ mod tests {
         let b = g.push(FusionOp::Input, f32_meta(&[3, 5])).unwrap();
         let gemm = g.push(FusionOp::Gemm(a, b), f32_meta(&[2, 5])).unwrap();
         assert_eq!(g.node(gemm).unwrap().op, FusionOp::Gemm(a, b));
+    }
+
+    /// #586: `Rsqrt` は他の elementwise unary と同じ恒等 shape 契約を持つ。
+    #[test]
+    fn push_rsqrt_accepts_identity_shape() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let r = g.push(FusionOp::Rsqrt(x), f32_meta(&[4])).unwrap();
+        assert_eq!(g.node(r).unwrap().op, FusionOp::Rsqrt(x));
+        assert!(g.node(r).unwrap().op.is_elementwise());
+    }
+
+    /// #586: `Rsqrt` も unary elementwise と同様、偽った出力 shape を
+    /// 拒否する（push 前レビュー指摘 push_rejects_unary_output_shape_mismatch
+    /// と同型の反例）。
+    #[test]
+    fn push_rejects_rsqrt_output_shape_mismatch() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let err = g.push(FusionOp::Rsqrt(x), f32_meta(&[999])).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![999],
+                rhs: vec![4],
+            })
+        );
+        assert_eq!(g.len(), 1);
+    }
+
+    /// #586: `Sum { dim: None }`（全軸縮約）は `backend-cpu::reduction::sum`
+    /// の shape 契約どおり rank 0（`[]`）のみを受理する。
+    #[test]
+    fn push_accepts_sum_full_reduction_scalar_shape() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: x,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        assert_eq!(
+            g.node(sum).unwrap().op,
+            FusionOp::Sum {
+                input: x,
+                dim: None
+            }
+        );
+    }
+
+    /// #586: `Sum { dim: Some(axis) }` は縮約軸を除去した shape のみを
+    /// 受理する（`ops_shape::reduce_out_shape` と同一の契約）。
+    #[test]
+    fn push_rejects_sum_output_shape_mismatch() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[2, 4])).unwrap();
+        // 正しい出力 shape は axis=0 を除去した [4] のはずが [1] を渡す。
+        let err = g
+            .push(
+                FusionOp::Sum {
+                    input: x,
+                    dim: Some(0),
+                },
+                f32_meta(&[1]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![1],
+                rhs: vec![4],
+            })
+        );
+        assert_eq!(g.len(), 1);
+    }
+
+    /// #586: 軸範囲外の `Sum`／`Max` は `ShapeError::AxisOutOfRange`
+    /// （`ops_shape::reduce_out_shape` から `?` で伝播）で拒否される。
+    #[test]
+    fn push_rejects_max_axis_out_of_range() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[2, 4])).unwrap();
+        let err = g
+            .push(
+                FusionOp::Max {
+                    input: x,
+                    dim: Some(5),
+                },
+                f32_meta(&[2]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::AxisOutOfRange { axis: 5, rank: 2 })
+        );
+    }
+
+    /// #586: `is_reduction`／`is_fusable` の境界再定義そのものを固定する。
+    #[test]
+    fn is_reduction_and_is_fusable_classify_ops_correctly() {
+        let add = FusionOp::Add(FusionNodeId(0), FusionNodeId(0));
+        let sum = FusionOp::Sum {
+            input: FusionNodeId(0),
+            dim: None,
+        };
+        let gemm = FusionOp::Gemm(FusionNodeId(0), FusionNodeId(0));
+        let input = FusionOp::Input;
+
+        assert!(!add.is_reduction() && add.is_fusable());
+        assert!(sum.is_reduction() && sum.is_fusable());
+        assert!(!gemm.is_reduction() && !gemm.is_fusable());
+        assert!(!input.is_reduction() && !input.is_fusable());
     }
 }
