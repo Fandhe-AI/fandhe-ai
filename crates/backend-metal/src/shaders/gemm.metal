@@ -430,7 +430,16 @@ kernel void gemm_simdgroup_tiled(
                 for (uint r = 0; r < acc_rows; r++) {
                     simdgroup_float8x8 a_tile;
                     simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)BK + (size_t)kk, BK);
-                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                    for (uint ci = 0; ci < acc_cols; ci++) {
+                        // 蛇行（serpentine）走査: 奇数行 r では列を逆順（acc_cols-1-ci）に
+                        // 辿り、行切替時（r → r+1）に直前で使った B タイル
+                        // （tile_b 上の列位置）付近を再訪することでレジスタ／
+                        // キャッシュ局所性を高める（MLX `tile_matmad`〈mma.h〉・
+                        // CUTLASS `mma_tensor_op.h` 同型。CUDA 側 #497 B-6 と同一技法。
+                        // #536）。acc[r][c_] ごとの累算オペランド列（K 方向の
+                        // 順序）は c_ の訪問順に依らず不変なので、結果はビット単位で
+                        // 従来の行優先走査と一致する。
+                        uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
                         simdgroup_float8x8 b_tile;
                         simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)BN + (size_t)(wn_idx * sub_bn + c_ * 8), BN);
                         simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
@@ -464,7 +473,11 @@ kernel void gemm_simdgroup_tiled(
                     if (a_row < dims.m) {
                         simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
                     }
-                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                    for (uint ci = 0; ci < acc_cols; ci++) {
+                        // 蛇行（serpentine）走査: staged 経路と同じ理由・出典（#536）。
+                        // c_ の訪問順を変えるだけで acc[r][c_] の累算オペランド列は
+                        // 不変のため数値はビット単位で従来と一致する。
+                        uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
                         uint b_col = sub_col0 + c_ * 8;
                         // 上記と同じ理屈（`dims.n` も pad8 済みで 8 の倍数、
                         // `b_col` も常に 8 の倍数）。
