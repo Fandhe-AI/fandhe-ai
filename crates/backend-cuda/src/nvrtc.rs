@@ -411,6 +411,44 @@ mod tests {
         ));
     }
 
+    // codex-review 指摘（PR #641・P2）: `new_rejects_zero_block_m` /
+    // `new_rejects_zero_stages` のみでは `block_n`・`block_k` の
+    // ゼロ値拒否が未検証だった。`non_zero` ヘルパはフィールドごとに
+    // 独立して呼ばれるため、各フィールドを個別に検証する。
+    #[test]
+    fn new_rejects_zero_block_n() {
+        let result = CudaKernelDescriptor::new(
+            "wmma_tf32_f32",
+            GemmShape::new(4096, 4096, 4096),
+            64,
+            0,
+            32,
+            2,
+            DType::F32,
+        );
+        assert!(matches!(
+            result,
+            Err(CudaError::InvalidKernelDescriptor { .. })
+        ));
+    }
+
+    #[test]
+    fn new_rejects_zero_block_k() {
+        let result = CudaKernelDescriptor::new(
+            "wmma_tf32_f32",
+            GemmShape::new(4096, 4096, 4096),
+            64,
+            64,
+            0,
+            2,
+            DType::F32,
+        );
+        assert!(matches!(
+            result,
+            Err(CudaError::InvalidKernelDescriptor { .. })
+        ));
+    }
+
     // 受け入れ基準: 同一パラメータから構築した 2 キーは `==` かつ
     // 同一ハッシュになること（`HashMap` キーとして使うための前提）。
     #[test]
@@ -463,9 +501,86 @@ mod tests {
         );
         assert_ne!(base, different_block_m);
 
+        // codex-review 指摘（PR #641・P2）: `block_n`・`block_k`・
+        // `stages`・`kernel_name` は `different_block_m` までのケースでは
+        // 未検証だった。各フィールドを単独で変更し、`Hash`/`Eq` の
+        // derive がフィールド漏れなく全メンバを含んでいることを検証する。
+        let different_block_n = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new(
+                "wmma_tf32_f32",
+                GemmShape::new(4096, 4096, 4096),
+                64,
+                32,
+                32,
+                2,
+                DType::F32,
+            )
+            .unwrap(),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+        );
+        assert_ne!(base, different_block_n);
+
+        let different_block_k = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new(
+                "wmma_tf32_f32",
+                GemmShape::new(4096, 4096, 4096),
+                64,
+                64,
+                16,
+                2,
+                DType::F32,
+            )
+            .unwrap(),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+        );
+        assert_ne!(base, different_block_k);
+
+        let different_stages = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new(
+                "wmma_tf32_f32",
+                GemmShape::new(4096, 4096, 4096),
+                64,
+                64,
+                32,
+                3,
+                DType::F32,
+            )
+            .unwrap(),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+        );
+        assert_ne!(base, different_stages);
+
+        let different_kernel_name = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new(
+                "wmma_tf32_f32_v2",
+                GemmShape::new(4096, 4096, 4096),
+                64,
+                64,
+                32,
+                2,
+                DType::F32,
+            )
+            .unwrap(),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+        );
+        assert_ne!(base, different_kernel_name);
+
+        // `kernel_name` は固定したまま `dtype` のみ変更する。
+        // `kernel_name` を同時に変えると、万一 `dtype` が `Hash`/`Eq`
+        // から欠落しても `kernel_name` 側の差分だけで
+        // `assert_ne!` が通ってしまい検出できない
+        // （codex-review 指摘・PR #641・P2）。
         let different_dtype = CudaKernelCacheKey::new(
             CudaKernelDescriptor::new(
-                "wmma_f16",
+                "wmma_tf32_f32",
                 GemmShape::new(4096, 4096, 4096),
                 64,
                 64,
