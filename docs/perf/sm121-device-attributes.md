@@ -98,8 +98,9 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 `stream.synchronize()` する構成であり（起動・同期オーバーヘッドの償却。反復ごとに 2 バッファを
 読み出し役・書き込み役として入れ替える ping-pong 構成にすることで、コンパイラによる冗長ストア除去で
 反復が縮約されるのを防ぐ。`BW_COPY_F32` ドキュメンテーションコメント参照。下記「限界・注意」参照）、
-表・出力の `secs_per_launch` は計測した中央値秒を `BW_LAUNCH_REPEATS` で割った「内部反復 1 回あたり」
-の値。
+表・出力の `secs_per_iter` は計測した中央値秒を `BW_LAUNCH_REPEATS` で割った「内部反復 1 回あたり」
+の値（イシュー #482 Review 指摘: ラベルが誤って「1 回の起動あたり」を意味する `secs_per_launch` に
+なっていたため `secs_per_iter` へ改称し、本文の説明と整合させた）。
 
 | 区分 | バッファサイズ | 実効帯域（中央値） | bytes/cycle（device-wide） | 備考 |
 |---|---|---|---|---|

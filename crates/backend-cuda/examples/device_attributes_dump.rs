@@ -532,7 +532,7 @@ fn main() {
         Ok(secs) => {
             let gbps = bandwidth_gbps(global_n, secs);
             println!(
-                "global: n={global_n} secs_per_launch={secs:.6} bandwidth={gbps:.2} GB/s \
+                "global: n={global_n} secs_per_iter={secs:.6} bandwidth={gbps:.2} GB/s \
                  bytes_per_cycle_device_wide={:.4}",
                 bytes_per_cycle(gbps, clock_khz)
             );
@@ -575,7 +575,7 @@ fn main() {
             };
             println!(
                 "{label}: n={l2_n} (src+dst={} bytes, L2_CACHE_SIZE={:?} bytes) \
-                 secs_per_launch={secs:.6} bandwidth={gbps:.2} GB/s \
+                 secs_per_iter={secs:.6} bandwidth={gbps:.2} GB/s \
                  bytes_per_cycle_device_wide={:.4}",
                 2 * l2_n * std::mem::size_of::<f32>(),
                 l2_cache_bytes,
