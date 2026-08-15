@@ -162,7 +162,7 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::Bool,
             5,
         );
-        let pad = cfg.pad;
+        let pad = cfg.pad();
         constants.setConstantValue_type_atIndex(
             std::ptr::NonNull::from(&pad).cast(),
             MTLDataType::UInt,

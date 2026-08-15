@@ -89,7 +89,14 @@ fn run_case(cfg: TileConfig, seed_a: u64, seed_b: u64, m: usize, n: usize, k: us
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn direct_load_path_matches_cpu_reference() {
-    let cfg = TileConfig::without_padding(32, 32, 16, 2, 2, false);
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: false,
+    };
     run_case(cfg, 30, 31, 256, 256, 256);
 }
 
@@ -103,7 +110,14 @@ fn direct_load_path_matches_cpu_reference() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn direct_load_path_matches_cpu_reference_non_multiple_of_tile() {
-    let cfg = TileConfig::without_padding(32, 32, 16, 2, 2, false);
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: false,
+    };
     // pad8(100)=104（32 の倍数でない）・pad8(70)=72 で
     // BM/BN=32 を割り切らない実効次元を作る。
     run_case(cfg, 32, 33, 100, 70, 70);
@@ -116,7 +130,14 @@ fn direct_load_path_matches_cpu_reference_non_multiple_of_tile() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn tiled_matches_cpu_reference_non_multiple_of_tile() {
-    let cfg = TileConfig::without_padding(64, 64, 16, 2, 2, true).with_pad(4);
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
     run_case(cfg, 1, 2, 100, 130, 70);
     run_case(cfg, 3, 4, 65, 129, 33);
 }
@@ -164,7 +185,14 @@ fn dispatch_auto_matches_cpu_reference_across_shape_bands() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn tiled_matches_cpu_reference_k_stress() {
-    let cfg = TileConfig::without_padding(32, 32, 16, 2, 2, true).with_pad(4);
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
     run_case(cfg, 7, 8, 64, 64, 4096);
 }
 
@@ -176,7 +204,14 @@ fn tiled_matches_cpu_reference_k_stress() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn bk32_candidate_matches_cpu_reference_non_multiple_of_tile() {
-    let cfg = TileConfig::without_padding(64, 32, 32, 2, 2, true).with_pad(4);
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
     run_case(cfg, 60, 61, 100, 70, 70);
 }
 
@@ -186,7 +221,14 @@ fn bk32_candidate_matches_cpu_reference_non_multiple_of_tile() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn bk32_candidate_matches_cpu_reference_k_stress() {
-    let cfg = TileConfig::without_padding(64, 32, 32, 2, 2, true).with_pad(4);
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
     run_case(cfg, 62, 63, 64, 64, 4096);
 }
 
@@ -196,7 +238,14 @@ fn bk32_candidate_matches_cpu_reference_k_stress() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile() {
-    let cfg = TileConfig::without_padding(64, 32, 8, 4, 1, true).with_pad(4);
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 8,
+        wm: 4,
+        wn: 1,
+        staged: true,
+    };
     run_case(cfg, 64, 65, 100, 70, 70);
 }
 
@@ -206,7 +255,14 @@ fn wm4_bk8_candidate_matches_cpu_reference_non_multiple_of_tile() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
-    let cfg = TileConfig::without_padding(64, 64, 16, 1, 2, true).with_pad(4);
+    let cfg = TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 1,
+        wn: 2,
+        staged: true,
+    };
     run_case(cfg, 66, 67, 100, 130, 70);
 }
 
