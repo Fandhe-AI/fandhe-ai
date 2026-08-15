@@ -209,8 +209,31 @@ fn measure_bandwidth_secs(
     // 「`a`/`b` 間の ping-pong で `repeats` 反復を最適化から保護する」参照）。
     let mut a = stream.alloc_zeros::<f32>(n)?;
     let mut b = stream.alloc_zeros::<f32>(n)?;
-    let n_i = n as i32;
-    let repeats_i = BW_LAUNCH_REPEATS as i32;
+    // イシュー #482 codex-review 指摘（PR #635, P0）: `n as i32` は
+    // `n > i32::MAX` の場合サイレントに切り詰められ、直後の SAFETY コメント
+    // 「同じ値をバッファ確保に使ったためオーバーフローしない」が実際には
+    // 保証しない不変条件になる（切り詰め後の負値がカーネルへ渡ると境界検査
+    // `i < n` が想定どおり働かない）。`unsafe` ブロックの安全性根拠を本関数
+    // 自身で強制するため `i32::try_from` で検証し、失敗時は
+    // `CudaError::InvalidShape`（`gemm.rs::validate_gemm_dims` と同じ host 側
+    // 形状検証の型付きエラー方針。GPU 起動前に外部由来の形状値へ境界チェック
+    // を課す A03 対策。`.claude/rules/security.md`）を返す。呼び出し元
+    // （`global_n`/`l2_n`）は現状 i32 範囲内の固定値だが、将来の呼び出し値
+    // 変更でも不変条件が壊れないよう関数境界で強制する。
+    let n_i = i32::try_from(n).map_err(|_| CudaError::InvalidShape {
+        detail: format!(
+            "measure_bandwidth_secs: n={n} exceeds i32::MAX; \
+             cannot pass as bw_copy_f32 kernel argument without truncation"
+        ),
+    })?;
+    // `BW_LAUNCH_REPEATS` は定数だが、同じカーネル引数境界を通るため
+    // 同一の検証経路（`try_from`）で揃える（上記コメントの「関数自身で
+    // 不変条件を保証する」方針を `n_i` と非対称にしないため）。
+    let repeats_i = i32::try_from(BW_LAUNCH_REPEATS).map_err(|_| CudaError::InvalidShape {
+        detail: format!(
+            "measure_bandwidth_secs: BW_LAUNCH_REPEATS={BW_LAUNCH_REPEATS} exceeds i32::MAX"
+        ),
+    })?;
     let cfg = LaunchConfig {
         grid_dim: (bw_grid_dim(n, sm_count), 1, 1),
         block_dim: (BW_BLOCK_THREADS, 1, 1),
