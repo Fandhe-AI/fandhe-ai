@@ -27,6 +27,7 @@ use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gem
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
+use crate::gemm_mma::validate_mma_alignment;
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
     MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
@@ -235,6 +236,18 @@ fn bytes_per_element_for(dtype: DType) -> NonZeroU32 {
 ///    予算超過と DeepGEMM 由来の最小段数要求〈3 段・小タイル 4 段〉
 ///    未達をここで一括棄却する。C-8 実装の再利用であり閾値を二重管理
 ///    しない）
+/// 6. GEMM 形状自体の cp.async 整列制約: `shape.k % 8 != 0` または
+///    `shape.n % 8 != 0`（`gemm_mma::validate_mma_alignment` と同一契約。
+///    候補のブロックタイル寸法〈block_k/block_n〉が規則 1・4 で
+///    8 の倍数〈`MMA_K`/`MMA_WARP_N` はいずれも 16 の倍数〉に確定して
+///    いても、実際のグローバルメモリ行ストライドである `shape.k`・
+///    `shape.n` 自体が整列要件を満たさなければ `kernels_mma.rs` の
+///    `cp.async` は実行できない。この規則は個々の候補ではなく形状
+///    全体に対する前提のため、列挙開始前に一括で空 `Vec` を返す形で
+///    適用する（#524 レビュー指摘: 旧実装は候補側の整列のみ検査し
+///    `shape.k`/`shape.n` を検査していなかったため、例えば
+///    `GemmShape::new(4096, 9, 17)` に対して実行不能な候補を返して
+///    いた）
 ///
 /// 純関数（副作用なし・決定的）であり、候補ゼロ件は空 `Vec` を返す
 /// （`panic!`／`Err` にはしない。ゼロ件時のフォールバック方針は C-9b・
@@ -258,6 +271,16 @@ pub fn enumerate_tile_candidates(
     dtype: DType,
     smem_budget_bytes: u64,
 ) -> Vec<TileCandidate> {
+    // 規則 6: GEMM 形状自体の cp.async 整列制約（本関数ドキュメンテーション
+    // コメント §枝刈り規則 6 参照）。`kernels_mma.rs` の起動 API
+    // （`gemm_mma.rs::CudaMmaGemm::run_f16`）が要求する契約と同一のもの
+    // をここでも検証し、実行不能な候補を一切生成しない（候補側の整列
+    // 〈規則 4〉だけでは block_k/block_n しか検査できず、shape.k/shape.n
+    // 自体の不整列を見逃す）。
+    if validate_mma_alignment(shape.n, shape.k).is_err() {
+        return Vec::new();
+    }
+
     let bytes_per_element = bytes_per_element_for(dtype);
     let bpe_u64 = u64::from(bytes_per_element.get());
 
@@ -774,6 +797,44 @@ mod tile_candidate_tests {
             !candidates.iter().any(|c| c.block_k().get() == MMA_K),
             "block_k == MMA_K ({MMA_K}) violates MMA_K_STEPS_PER_STAGE >= 2 \
              and must never appear in enumerated candidates"
+        );
+    }
+
+    /// 規則 6 の再現テスト（#524 レビュー指摘、PR #671 対応）: GEMM 形状
+    /// 自体が `gemm_mma::validate_mma_alignment` の cp.async 整列制約
+    /// （`k % 8 == 0 && n % 8 == 0`）を満たさない場合、候補のブロック
+    /// タイル寸法（block_k/block_n）は常に 8 の倍数であっても、実際の
+    /// グローバルメモリ行ストライドである `shape.k`/`shape.n` が不整列
+    /// なため `kernels_mma.rs` の `cp.async` は実行不能である。
+    /// `enumerate_tile_candidates` は shape 全体を棄却して空 `Vec` を
+    /// 返さねばならない（修正前は shape.k/shape.n を検査せず実行不能な
+    /// 候補を返していた）。
+    #[test]
+    fn misaligned_shape_yields_no_candidates() {
+        // n=9 (% 8 != 0), k=17 (% 8 != 0)。
+        let shape = GemmShape::new(4096, 9, 17);
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+        assert!(
+            candidates.is_empty(),
+            "misaligned shape (n=9, k=17) must yield zero candidates, got {candidates:?}"
+        );
+    }
+
+    /// 規則 6 の境界確認: `n`・`k` の一方のみが不整列な場合も棄却される
+    /// こと（`validate_mma_alignment` は `n`/`k` の両方を独立に検査する
+    /// ため、片方だけの不整列でも棄却が必要）。
+    #[test]
+    fn misaligned_shape_on_either_axis_alone_yields_no_candidates() {
+        let n_misaligned = GemmShape::new(4096, 9, 4096);
+        assert!(
+            enumerate_tile_candidates(n_misaligned, DType::F16, FULL_BUDGET_BYTES).is_empty(),
+            "n=9 alone (k aligned) must still yield zero candidates"
+        );
+
+        let k_misaligned = GemmShape::new(4096, 4096, 17);
+        assert!(
+            enumerate_tile_candidates(k_misaligned, DType::F16, FULL_BUDGET_BYTES).is_empty(),
+            "k=17 alone (n aligned) must still yield zero candidates"
         );
     }
 
