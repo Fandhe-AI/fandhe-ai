@@ -250,7 +250,22 @@ impl TileConfig {
 /// [`select`] が候補として巡回する構成（大 → 小の優先順）。MLX steel の
 /// 実装傾向（大形状ほど大きい BM/BN・複数 simdgroup 分担）を参考にした
 /// 暫定初期値（本ファイル冒頭コメント参照。実機実測で確定させる）。
-const CANDIDATES: &[TileConfig] = &[
+///
+/// `select` は先頭 4 要素（index 0〜3）に添字で直接依存する（`select` 本体
+/// 参照）ため、既存 4 構成の並び順・個数は変更しない。イシュー #532 で
+/// index 4〜6 に MLX steel classic 経路（`steel_gemm_fused.metal` の
+/// `instantiate_gemm_shapes_helper` が実体化する 6 構成のうち本実装未収録
+/// だった 3 つ）を追加した。`select` の選択組み込み・閾値調整は実機実測で
+/// 確定させる後続スコープ（イシュー #532 計画「スコープ外」節）であり本
+/// 追加では行わない。
+///
+/// `pub(crate)`（`pub` にしない）: 候補の並び順・個数は `select` が添字で
+/// 依存する内部表現であり、クレート外へ安定 API として公開すると将来の
+/// 候補調整が公開 API 契約に組み込まれてしまう（codex-review 指摘・PR
+/// #651）。本セットを直接巡回するテストは統合テスト（`tests/` 配下・別
+/// コンパイル単位）ではなく本ファイル末尾の `#[cfg(test)] mod tests`
+/// （クレート内部・`pub(crate)` を参照可能）に置く。
+pub(crate) const CANDIDATES: &[TileConfig] = &[
     // 大形状（正方）: 64x64 ブロックを 2x2=4 simdgroup で分担。
     TileConfig {
         bm: 64,
@@ -285,6 +300,41 @@ const CANDIDATES: &[TileConfig] = &[
         bk: 16,
         wm: 2,
         wn: 2,
+        staged: true,
+    },
+    // MLX steel classic 経路の未収録構成（イシュー #532）:
+    // 大形状（正方）を少 simdgroup（wm=1,wn=2 の 64 スレッド）で分担する
+    // 構成。acc_rows=(64/1)/8=8 が `TileConfig::MAX_ACC` ちょうどの境界。
+    TileConfig {
+        bm: 64,
+        bn: 64,
+        bk: 16,
+        wm: 1,
+        wn: 2,
+        staged: true,
+    },
+    // MLX steel classic 経路の未収録構成（イシュー #532）: `bk=32` は本実装
+    // 初採用。K 方向のループ刻みを既存候補の 2 倍にすることで、K=4096 等
+    // 長い内積で `threadgroup_barrier` の往復回数を半減させる狙い（理論
+    // 根拠。実機ベンチによる効果確認は後続スコープ）。SMEM は
+    // `(64*32+32*32)*4=12288` バイトで、既存候補の最大 8192 バイトを
+    // 上回るが 32KiB 上限内（`TileConfig::validate` で機械検証）。
+    TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 32,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    },
+    // MLX steel classic 経路の未収録構成（イシュー #532）: `wm=4` の縦
+    // 分担・`bk=8`（最小許容値）の小刻み K 分割構成。
+    TileConfig {
+        bm: 64,
+        bn: 32,
+        bk: 8,
+        wm: 4,
+        wn: 1,
         staged: true,
     },
     // 微小形状: 既存 gemm_simdgroup と等価な単一 simdgroup 8x8。
@@ -583,6 +633,101 @@ mod tests {
         assert_eq!((cfg.bm, cfg.bn), (32, 64));
     }
 
+    // --- イシュー #532: MLX classic 経路の未収録 3 構成 ---
+
+    #[test]
+    fn bk32_candidate_shared_mem_is_12288_bytes_within_32kib_limit() {
+        // (64,32,32,2,2): A=64x32, B=32x32 -> (2048+1024)*4 = 12288 バイト。
+        // 既存最大 8192 バイトを上回るが 32KiB（32768 バイト）以内である
+        // ことを固定する（イシュー #532 計画「現状分析」節の事前検証値）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), 12288);
+        assert!(cfg.shared_mem_bytes() <= 32 * 1024);
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("bk=32 candidate rejected: {e}"));
+    }
+
+    #[test]
+    fn wm4_bk8_candidate_has_128_threads_and_validates() {
+        // (64,32,8,4,1): threads=4*1*32=128、acc_rows=(64/4)/8=2・
+        // acc_cols=(32/1)/8=4 で MAX_ACC 拡張は不要（イシュー #532 計画
+        // 「現状分析」節）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 8,
+            wm: 4,
+            wn: 1,
+            staged: true,
+        };
+        assert_eq!(cfg.thread_count(), 128);
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("wm=4/bk=8 candidate rejected: {e}"));
+    }
+
+    #[test]
+    fn wm1_wn2_candidate_acc_rows_hits_max_acc_boundary_and_validates() {
+        // (64,64,16,1,2): acc_rows=(64/1)/8=8 が MAX_ACC=8 ちょうどの境界。
+        // 超過ではなく境界一致で validate を通ることを固定する（イシュー
+        // #532 計画「現状分析」節）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 1,
+            wn: 2,
+            staged: true,
+        };
+        let acc_rows = (cfg.bm / cfg.wm) / 8;
+        assert_eq!(acc_rows, TileConfig::MAX_ACC);
+        cfg.validate(1024, 32 * 1024)
+            .unwrap_or_else(|e| panic!("wm=1/wn=2 candidate rejected: {e}"));
+    }
+
+    #[test]
+    fn candidates_include_the_three_mlx_classic_configs_added_in_issue_532() {
+        // CANDIDATES への収録漏れ・削除を検知する回帰ガード。
+        let expected = [
+            TileConfig {
+                bm: 64,
+                bn: 64,
+                bk: 16,
+                wm: 1,
+                wn: 2,
+                staged: true,
+            },
+            TileConfig {
+                bm: 64,
+                bn: 32,
+                bk: 32,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            },
+            TileConfig {
+                bm: 64,
+                bn: 32,
+                bk: 8,
+                wm: 4,
+                wn: 1,
+                staged: true,
+            },
+        ];
+        for cfg in expected {
+            assert!(
+                CANDIDATES.contains(&cfg),
+                "CANDIDATES に {cfg:?} が含まれていない"
+            );
+        }
+    }
+
     #[test]
     fn select_result_always_validates_under_typical_device_limits() {
         for &(m, n, k) in &[
@@ -598,5 +743,178 @@ mod tests {
             cfg.validate(1024, 32 * 1024)
                 .unwrap_or_else(|e| panic!("select({m},{n},{k})={cfg:?} rejected: {e}"));
         }
+    }
+
+    // --- CANDIDATES を直接巡回する実機依存テスト（イシュー #532・PR #651 codex-review
+    // 指摘対応） ---
+    //
+    // `CANDIDATES` は `pub(crate)`（クレート外非公開。本ファイル冒頭のコメント参照）の
+    // ため、これを直接巡回するテストは統合テスト（`tests/` 配下・別コンパイル単位で
+    // 公開 API しか見えない）ではなくここに置く。`crate::gemm::MetalGemm`・
+    // `crate::context::MetalContext` は macOS 限定モジュール（`lib.rs` の
+    // `cfg(target_os = "macos")`）のため、本 mod 自体は cfg なし（Linux でも
+    // 単体テストが回る設計）だが以下 2 件のみ個別に `cfg(target_os = "macos")` を
+    // 付ける。
+
+    /// `CANDIDATES`（実セット。イシュー #532 で MLX classic 経路の未収録 3 構成を
+    /// 追加済み）を全て、8 の倍数の中規模形状で検証する（構成別の一致確認）。
+    /// ローカルに候補配列を複製せず実セットを直接巡回することで、本ファイル側の
+    /// 追加・変更が本テストへ自動的に反映されドリフトしない。
+    ///
+    /// `dispatch_variant` だけを呼ぶと `MetalGemm::pipeline_for_tile` が構成
+    /// 失敗時に `fallback_chain` で `TileConfig::SINGLE_SIMDGROUP_8X8` へ
+    /// サイレントにフォールバックしても数値一致自体は通ってしまい、対象候補が
+    /// 実際にコンパイル・実行されたことを保証しない（イシュー #532・PR #651
+    /// codex-review 指摘 P2）。`MetalGemm::resolve_tile_config`（`pub(crate)`。
+    /// PR #651 codex-review 再指摘 P1 で `#[doc(hidden)] pub` から変更。本
+    /// `mod tests` はクレート境界の内側のため届く。`crate::gemm` 参照）で
+    /// 実際に採用された構成を事前取得し `cfg` と一致することを assert して
+    /// からディスパッチすることで、フォールバックが起きた場合は本テスト
+    /// 自体を失敗させる。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_match_cpu_reference_medium_shape() {
+        use backend_cpu::parity::{assert_parity, matmul_reference_fma};
+        use bench_harness::rng::Xorshift64Star;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?} が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let (m, n, k) = (256, 256, 256);
+            let seed_a = 10 + i as u64;
+            let seed_b = 20 + i as u64;
+
+            let a = Xorshift64Star::new(seed_a).fill_vec(m * k);
+            let b = Xorshift64Star::new(seed_b).fill_vec(k * n);
+
+            let mut expected = vec![0.0f32; m * n];
+            matmul_reference_fma(&a, &b, &mut expected, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+
+            let actual = gemm
+                .dispatch_variant(
+                    &ctx,
+                    crate::gemm::GemmVariant::SimdgroupTiled(cfg),
+                    &a,
+                    &b,
+                    m,
+                    n,
+                    k,
+                )
+                .unwrap_or_else(|err| {
+                    panic!("Metal SimdgroupTiled({cfg:?}) GEMM のディスパッチに失敗した: {err}")
+                });
+
+            assert_parity(
+                &format!("metal SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
+                &actual,
+                &expected,
+            );
+        }
+    }
+
+    /// デバイス上限直接検証（イシュー #532 受け入れ基準「SMEM 上限内の実機確認」）:
+    /// `MetalGemm::pipeline_for_tile` は候補が検証・パイプライン構築に失敗すると
+    /// `fallback_chain` で単一 simdgroup へサイレントにフォールバックするため
+    /// （`crate::gemm` 参照）、`dispatch_variant` の PASS だけでは各候補が実際に
+    /// デバイス上限内で動いた証明にならない。
+    ///
+    /// 従前は `TileConfig::validate` を SMEM のみ実デバイス値（`maxThreadgroupMemoryLength`）
+    /// で直接呼び、スレッド数上限（`maxTotalThreadsPerThreadgroup`）は
+    /// `MTLComputePipelineState` 構築前には取得できないという理由で Apple Silicon の
+    /// 一般値 1024 を仮定していた。これでは候補が一度もコンパイル・パイプライン
+    /// 構築されないため、実測ではなく仮定に基づく検証に留まり、フォールバックの穴を
+    /// 塞げていなかった（イシュー #532・PR #651 codex-review 指摘 P2/P3）。
+    ///
+    /// `MetalGemm::resolve_tile_config`（`pub(crate)`。PR #651 codex-review 再指摘 P1 で
+    /// `#[doc(hidden)] pub` から変更。本 `mod tests` はクレート境界の内側のため届く。
+    /// `crate::gemm` 参照）は実際に
+    /// `MTLComputePipelineState` を構築し、SMEM（構築前の事前検証）・スレッド数
+    /// （構築後の実測 `maxTotalThreadsPerThreadgroup`）の両方をデバイス実測値で検証
+    /// したうえで採用構成を返す。返り値が `cfg` と一致することを assert することで、
+    /// 「1024 固定仮定」に依らず両上限を実測で確認しつつフォールバックを検知する。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_validate_under_actual_device_shared_memory_limit() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        for &cfg in CANDIDATES {
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!(
+                    "candidate {cfg:?} は実デバイス上限（SMEM・スレッド数）でのパイプライン \
+                     構築・検証に失敗した: {err}"
+                )
+            });
+            assert_eq!(
+                resolved, cfg,
+                "candidate {cfg:?} が実デバイス上限で {resolved:?} へサイレントに \
+                 フォールバックした（SMEM・スレッド数いずれかの実測上限超過）"
+            );
+        }
+    }
+
+    /// 直接ロード経路（`staged=false`）構成のフォールバック検知
+    /// （codex-review 再指摘対応。イシュー #532・PR #651）。
+    ///
+    /// `CANDIDATES` は `select` の自動選択対象のみで全て `staged=true`
+    /// （MLX classic 経路〈#532〉の追加 3 構成も含め本ファイル中に
+    /// `staged: false` の要素はない）ため、`all_tile_candidates_match_*`
+    /// 系（`CANDIDATES` を巡回するテスト）は `staged=false` 構成を一切
+    /// 検証しない。`tests/gemm_dynamic_tile_parity.rs` の
+    /// `direct_load_path_matches_cpu_reference` 系は `run_case` から
+    /// `resolve_tile_config` 呼び出しが外れているため（同ファイルの
+    /// `run_case` コメント参照）、直接ロード経路固有の
+    /// `TileConfig { staged: false, .. }` がサイレントに
+    /// `TileConfig::SINGLE_SIMDGROUP_8X8` へフォールバックしても
+    /// 統合テストの数値一致確認だけでは検知できない穴が残っていた
+    /// （codex-review 指摘 `BUGBOT_BUG_ID: c65127ea-56c2-4c52-95c2-604b5739cf40`）。
+    /// 本テストはその穴を埋めるクレート内検証で、`resolve_tile_config`
+    /// （`pub(crate)`）で実際に採用された構成が指定 `cfg` と一致することを
+    /// 確認する。ここで使う `cfg` の値は
+    /// `tests/gemm_dynamic_tile_parity.rs` の
+    /// `direct_load_path_matches_cpu_reference` /
+    /// `direct_load_path_matches_cpu_reference_non_multiple_of_tile` が
+    /// 使う `TileConfig`（`bm=32,bn=32,bk=16,wm=2,wn=2,staged=false`）と
+    /// 同期させること（形状のみが異なり構成自体は共通のため 1 回の検証で足りる）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn direct_load_path_config_resolves_without_fallback() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let cfg = TileConfig {
+            bm: 32,
+            bn: 32,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: false,
+        };
+
+        let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+            panic!("direct-load 構成 {cfg:?} のパイプライン構築・検証に失敗した: {err}")
+        });
+        assert_eq!(
+            resolved, cfg,
+            "direct-load 構成 {cfg:?} が実デバイス上でサイレントに {resolved:?} へ \
+             フォールバックした（構成失敗を検知できていない）"
+        );
     }
 }
