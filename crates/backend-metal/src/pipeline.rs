@@ -96,7 +96,8 @@ pub(crate) fn make_pipeline(
 
 /// `gemm_simdgroup_tiled`（`shaders/gemm.metal`。TASK-1.8f・#188）を
 /// `cfg`（[`TileConfig`]）の MSL function constant（`BM`/`BN`/`BK`/`WM`/
-/// `WN`/`USE_TGP_STAGING`。index 0〜5）を畳み込んだ状態でコンパイル・
+/// `WN`/`USE_TGP_STAGING`。index 0〜5）と `crate::tile::SWIZZLE_ENABLED`
+/// （`SWIZZLE_ENABLED`。index 6。イシュー #540）を畳み込んだ状態でコンパイル・
 /// パイプライン化する。[`crate::gemm::MetalGemm`] の構成キー → パイプライン
 /// 遅延キャッシュから、構成ごとに 1 回だけ呼ばれる想定
 /// （`newFunctionWithName_constantValues_error` は MSL コンパイラを呼ぶ
@@ -158,6 +159,18 @@ pub(crate) fn make_pipeline_with_constants(
             std::ptr::NonNull::from(&staged).cast(),
             MTLDataType::Bool,
             5,
+        );
+        // threadgroup ID スウィズル（イシュー #540）のゲート。既定
+        // `false`（`crate::tile::SWIZZLE_ENABLED`）で、実機未検証の間は
+        // `shaders/gemm.metal` 側を恒等変換のまま動作させる（PR #661
+        // codex-review 指摘: 未検証のまま本番経路へ無条件適用しない）。
+        // `crate::gemm::encode_dispatch_tiled` の grid 計算も同じ定数で
+        // 分岐させ、シェーダ側の tgid 変換と grid 形状を同期させる契約。
+        let swizzle_enabled = crate::tile::SWIZZLE_ENABLED;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&swizzle_enabled).cast(),
+            MTLDataType::Bool,
+            6,
         );
     }
 

@@ -394,12 +394,50 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 /// 率向上を狙う。MLX steel `swizzle_log` と同型・DeepGEMM の L2 スウィズル
 /// と同種の技法。計画「設計方針」節）。
 ///
-/// **実験的パラメータとして固定値のみ扱う**: `TileConfig` のフィールドや
-/// MSL function constant にはしない。採否は `docs/perf/
-/// metal-gemm-tgid-swizzle-ab.md` の A/B 計測で判断し、不採用なら本定数を
-/// 含む変更一式を revert する（既定 off の未使用パラメータとして残さない
-/// 方針。out-of-scope-tracking.md の趣旨に反しないための意図的な二択設計）。
-pub const SWIZZLE_LOG: u32 = 2;
+/// **実験的パラメータとして固定値のみ扱う**: `TileConfig` のフィールドには
+/// しない。採否は `docs/perf/metal-gemm-tgid-swizzle-ab.md` の A/B 計測で
+/// 判断し、不採用なら本定数を含む変更一式を revert する（既定 off の
+/// 未使用パラメータとして残さない方針。out-of-scope-tracking.md の趣旨に
+/// 反しないための意図的な二択設計）。
+///
+/// `pub(crate)` に留める（PR #661 codex-review 指摘）: `tile` モジュールは
+/// `lib.rs` で `pub mod tile;` のため公開されており、`pub` のままだと
+/// 実測結果次第で撤去されうる実験的な内部実装詳細が外部利用者の依存対象
+/// （公開 API）になってしまう。シェーダ証跡検査（`SWIZZLE_LOG` の値と
+/// `shaders/gemm.metal` 側リテラルの一致確認）はこのファイル末尾の
+/// crate 内 unit test（`gemm_simdgroup_tiled_source_uses_tgid_swizzle`）が
+/// 担う（旧 `tests/shader_source_evidence.rs` から移設。別クレート
+/// コンパイル単位からは `pub(crate)` 定数を参照できないため）。
+///
+/// `#[cfg(any(test, target_os = "macos"))]`: 唯一の非テスト呼び出し元
+/// `crate::pipeline::make_pipeline_with_constants`／`crate::gemm::
+/// encode_dispatch_tiled` は `cfg(target_os = "macos")` 限定（`lib.rs`）の
+/// ため、`target_os != "macos"` かつ非テストビルドではこの定数への到達
+/// パスが存在せず `dead_code` lint（`clippy -D warnings`）が誤検知する
+/// （`pub(crate)` 化前は `pub` だったため外部公開 API 扱いで lint 対象外
+/// だった）。本ファイルは Linux 上でも純粋関数の単体テストを回す設計
+/// （本ファイル冒頭コメント）のため `test` cfg でも到達可能にする。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const SWIZZLE_LOG: u32 = 2;
+
+/// スウィズルを本番 dispatch 経路（`crate::gemm::encode_dispatch_tiled`）と
+/// シェーダ側 tgid 変換（`shaders/gemm.metal` の `SWIZZLE_ENABLED` function
+/// constant）で実際に有効化するかどうかのゲート（PR #661 codex-review
+/// 指摘）。
+///
+/// **既定は `false`（無効）**: 本イシュー（#540）は実機（Apple Silicon）
+/// での性能効果・数値一致が `docs/perf/metal-gemm-tgid-swizzle-ab.md` の
+/// 「判断基準」を満たすまで未検証のため、本番経路は従来の走査順
+/// （`tid_y = tgid.y`・`tid_x = tgid.x`。恒等変換）のままにする。A/B 計測を
+/// 実機セッションで行う際はこの値を一時的に `true` へ変更してベンチマークを
+/// 実行し、採用判断後に応じて（採用: 既定を `true` へ確定 / 不採用:
+/// スウィズル機構一式を revert）このコメントごと更新する。コミットした
+/// 状態で `true` のまま残さない。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const SWIZZLE_ENABLED: bool = false;
 
 /// `encode_dispatch_tiled`（`crate::gemm`）が呼ぶ、スウィズル後の dispatch
 /// grid（`(grid_width, grid_height)` = `(threadgroups.width,
@@ -427,11 +465,34 @@ pub const SWIZZLE_LOG: u32 = 2;
 /// 挙動が同一）ため、桁あふれを実際に検知できる乗算ベースの飽和演算を使う。
 /// 実運用では到達しない経路であることをコメントで根拠づけるに留め、
 /// 無限ループ等の未定義動作を避ける趣旨）。
-pub fn swizzled_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn swizzled_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
     let tile = 1usize << SWIZZLE_LOG;
     let grid_w = tiles_n.saturating_mul(tile);
     let grid_h = tiles_m.div_ceil(tile);
     (grid_w, grid_h)
+}
+
+/// `crate::gemm::encode_dispatch_tiled` が使う dispatch grid を
+/// `SWIZZLE_ENABLED` に応じて決定する（PR #661 codex-review 指摘対応:
+/// 未検証のスウィズルを本番経路へ無条件適用しない）。`SWIZZLE_ENABLED`
+/// （既定 `false`）が `false` の間は素朴な `(tiles_n, tiles_m)` grid
+/// （スウィズル前の threadgroup 数）を返し、`shaders/gemm.metal` 側の
+/// 恒等変換（`SWIZZLE_ENABLED=false` 分岐）と同期する契約。`true` の場合は
+/// [`swizzled_grid`] へ委譲する。
+///
+/// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
+/// doc comment を参照（同一の dead_code 誤検知回避）。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn tiled_dispatch_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
+    if SWIZZLE_ENABLED {
+        swizzled_grid(tiles_n, tiles_m)
+    } else {
+        (tiles_n, tiles_m)
+    }
 }
 
 #[cfg(test)]
@@ -860,6 +921,111 @@ mod tests {
         assert_eq!(swizzled_grid(2, 4), (8, 1));
         assert_eq!(swizzled_grid(2, 5), (8, 2));
         assert_eq!(swizzled_grid(3, 9), (12, 3));
+    }
+
+    #[test]
+    fn tiled_dispatch_grid_matches_swizzle_enabled_gate() {
+        // PR #661 codex-review 指摘対応: `SWIZZLE_ENABLED` は本番既定
+        // `false` に固定されている（実機未検証のため。tile.rs 冒頭の
+        // `SWIZZLE_ENABLED` doc comment参照）。ここでは
+        // `tiled_dispatch_grid` が現在の `SWIZZLE_ENABLED` 値に応じて
+        // 正しい枝へ分岐することのみを検査する（定数値そのものの妥当性は
+        // 上記 doc comment の運用ルールが担保する）。
+        let (tiles_n, tiles_m) = (3usize, 9usize);
+        let expected = if SWIZZLE_ENABLED {
+            swizzled_grid(tiles_n, tiles_m)
+        } else {
+            (tiles_n, tiles_m)
+        };
+        assert_eq!(tiled_dispatch_grid(tiles_n, tiles_m), expected);
+        // 既定 `SWIZZLE_ENABLED=false` の間は恒等（素朴な div_ceil 由来の
+        // grid）であることを明示的にロックする。定数値の比較は
+        // `const { assert!(..) }` に包む（clippy::assertions_on_constants。
+        // `SWIZZLE_ENABLED` はコンパイル時定数のため通常の `assert!` は
+        // 「定数に対するアサーション」として lint される）。
+        const {
+            assert!(
+                !SWIZZLE_ENABLED,
+                "SWIZZLE_ENABLED が true のままコミットされていないか確認する（実機 A/B 計測の一時的な変更を戻し忘れていないか。PR #661 codex-review 指摘）"
+            )
+        };
+        assert_eq!(tiled_dispatch_grid(tiles_n, tiles_m), (tiles_n, tiles_m));
+    }
+
+    // --- shaders/gemm.metal のスウィズル証跡検査（イシュー #540・PR #661
+    // codex-review 指摘対応） ---
+    //
+    // `SWIZZLE_LOG`/`SWIZZLE_ENABLED` は `pub(crate)`（クレート外非公開）の
+    // ため、これらを参照するシェーダ証跡検査は統合テスト（`tests/` 配下・
+    // 別コンパイル単位で公開 API しか見えない）ではなくここに置く
+    // （旧 `tests/shader_source_evidence.rs::
+    // gemm_simdgroup_tiled_source_uses_tgid_swizzle` から移設。直上の
+    // `CANDIDATES` 巡回テストと同じ理由）。
+
+    /// `crates/backend-metal/src/shaders/gemm.metal` のソース全文。
+    const GEMM_METAL_SOURCE: &str = include_str!("shaders/gemm.metal");
+
+    /// `gemm_simdgroup_tiled` カーネル本体（`kernel void
+    /// gemm_simdgroup_tiled(` 開始位置から EOF まで）を切り出す。本ファイル
+    /// 内で最後に定義されるカーネルのため EOF までのスライスで安全
+    /// （`tests/shader_source_evidence.rs::gemm_simdgroup_tiled_kernel_body`
+    /// と同一ロジック）。
+    fn gemm_simdgroup_tiled_kernel_body() -> &'static str {
+        let kernel_start = GEMM_METAL_SOURCE
+            .find("kernel void gemm_simdgroup_tiled(")
+            .expect("gemm_simdgroup_tiled カーネル本体が見つかりません");
+        &GEMM_METAL_SOURCE[kernel_start..]
+    }
+
+    /// イシュー #540 の証跡: `gemm_simdgroup_tiled` 冒頭に threadgroup ID
+    /// スウィズル（`swizzle_log` 相当）の tgid 変換が実装され、シェーダ側の
+    /// `SWIZZLE_LOG` リテラルが `crate::tile::SWIZZLE_LOG` と一致している
+    /// こと、かつ本番既定では `SWIZZLE_ENABLED` function constant により
+    /// 恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）へフォールバックする
+    /// 分岐がシェーダ側に実在することを Linux CI（ubuntu-latest）上で
+    /// ロックする。Mac 実機依存の A/B 計測（`docs/perf/
+    /// metal-gemm-tgid-swizzle-ab.md`）は別途実施し、改善が無ければこの
+    /// テストごと変更を撤去（revert）する運用とする（`metal-gemm-
+    /// serpentine-ab.md` と同じ運用。#536 前例踏襲）。
+    ///
+    /// PR #661 codex-review 指摘対応: 実機未検証のまま `SWIZZLE_ENABLED`
+    /// を無条件 `true` で本番経路へ適用しないよう、シェーダ側が
+    /// `SWIZZLE_ENABLED` 分岐を持つこと自体をここでロックする
+    /// （`crate::gemm::encode_dispatch_tiled` 側の同期は本ファイルの
+    /// `tiled_dispatch_grid_matches_swizzle_enabled_gate` が Rust 側の
+    /// grid 計算の分岐を、[`swizzled_grid_covers_every_tile_exactly_once`]
+    /// が `swizzled_grid` 自体の走査網羅性を、それぞれ別途確認する）。
+    #[test]
+    fn gemm_simdgroup_tiled_source_uses_tgid_swizzle() {
+        let kernel_body = gemm_simdgroup_tiled_kernel_body();
+        assert!(
+            kernel_body.contains(&format!("constexpr uint SWIZZLE_LOG = {SWIZZLE_LOG};")),
+            "gemm_simdgroup_tiled に SWIZZLE_LOG 定数（値 {SWIZZLE_LOG}。crate::tile::SWIZZLE_LOG と一致契約）が見つかりません"
+        );
+        // SWIZZLE_ENABLED の function constant 宣言はファイル冒頭
+        // （カーネル本体の外・他の function constant と並べた位置）にある
+        // ため、`kernel_body` ではなく `GEMM_METAL_SOURCE` 全文を検索する。
+        assert!(
+            GEMM_METAL_SOURCE.contains("constant bool SWIZZLE_ENABLED"),
+            "gemm.metal に SWIZZLE_ENABLED function constant 宣言が見つかりません \
+             （実機未検証のまま本番 dispatch へ無条件適用しないためのゲート。PR #661 codex-review 指摘）"
+        );
+        assert!(
+            kernel_body.contains(
+                "uint tid_y = SWIZZLE_ENABLED ? ((tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1))) : tgid.y;"
+            ),
+            "gemm_simdgroup_tiled に SWIZZLE_ENABLED ゲート付き tid_y スウィズル変換式が見つかりません"
+        );
+        assert!(
+            kernel_body
+                .contains("uint tid_x = SWIZZLE_ENABLED ? (tgid.x >> SWIZZLE_LOG) : tgid.x;"),
+            "gemm_simdgroup_tiled に SWIZZLE_ENABLED ゲート付き tid_x スウィズル変換式が見つかりません"
+        );
+        assert!(
+            kernel_body.contains("uint row0 = tid_y * BM;")
+                && kernel_body.contains("uint col0 = tid_x * BN;"),
+            "gemm_simdgroup_tiled の row0/col0 計算がスウィズル後の tid_y/tid_x を使っていません"
+        );
     }
 
     // --- CANDIDATES を直接巡回する実機依存テスト（イシュー #532・PR #651 codex-review

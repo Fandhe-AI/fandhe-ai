@@ -910,12 +910,19 @@ fn encode_dispatch_f16(
 /// フォールバック解決した後の実際の構成（`resolved_cfg`）。
 ///
 /// grid は素朴には `div_ceil(dims.n, cfg.bn) × div_ceil(dims.m, cfg.bm)`
-/// （threadgroup 単位のブロック分割数）だが、threadgroup ID スウィズル
-/// （`swizzle_log` 相当。イシュー #540・実験的機構）を適用するため
-/// `tile::swizzled_grid` へ委譲する（`shaders/gemm.metal` の
+/// （threadgroup 単位のブロック分割数）だが、`tile::SWIZZLE_ENABLED`
+/// （既定 `false`。イシュー #540・実験的機構）が `true` の場合のみ
+/// threadgroup ID スウィズル（`swizzle_log` 相当）を適用するため
+/// `tile::tiled_dispatch_grid` へ委譲する（`shaders/gemm.metal` の
 /// `gemm_simdgroup_tiled` 冒頭の tgid 変換と 1:1 対応する契約。採否は
 /// `docs/perf/metal-gemm-tgid-swizzle-ab.md` の A/B 計測で判断する）。
-/// threadgroup スレッド数は `cfg.thread_count()`（`wm*wn*32`）。
+/// `SWIZZLE_ENABLED=false`（本番既定。PR #661 codex-review 指摘: 未検証の
+/// スウィズルを本番経路へ無条件適用しない）では素朴な
+/// `(tiles_n, tiles_m)` grid をそのまま使う。シェーダ側は同じ
+/// `SWIZZLE_ENABLED` function constant（`crate::pipeline::
+/// make_pipeline_with_constants`）で同期し、恒等変換（`tid_y = tgid.y`・
+/// `tid_x = tgid.x`）になる。threadgroup スレッド数は `cfg.thread_count()`
+/// （`wm*wn*32`）。
 fn encode_dispatch_tiled(
     encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
@@ -978,7 +985,7 @@ fn encode_dispatch_tiled(
     };
     let tiles_n = (dims.n as usize).div_ceil(cfg.bn as usize);
     let tiles_m = (dims.m as usize).div_ceil(cfg.bm as usize);
-    let (grid_w, grid_h) = crate::tile::swizzled_grid(tiles_n, tiles_m);
+    let (grid_w, grid_h) = crate::tile::tiled_dispatch_grid(tiles_n, tiles_m);
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,

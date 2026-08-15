@@ -182,38 +182,11 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
     );
 }
 
-/// イシュー #540 の証跡: `gemm_simdgroup_tiled` 冒頭に threadgroup ID
-/// スウィズル（`swizzle_log` 相当）の tgid 変換が実装され、シェーダ側の
-/// `SWIZZLE_LOG` リテラルが Rust 側 `crate::tile::SWIZZLE_LOG`（本テストは
-/// 別クレートのため値のみ複製し等値をロックする）と一致していることを
-/// Linux CI（ubuntu-latest）上でロックする。Mac 実機依存の A/B 計測
-/// （`docs/perf/metal-gemm-tgid-swizzle-ab.md`）は別途実施し、改善が無ければ
-/// このテストごと変更を撤去（revert）する運用とする（`metal-gemm-
-/// serpentine-ab.md` と同じ運用。#536 前例踏襲）。
-#[test]
-fn gemm_simdgroup_tiled_source_uses_tgid_swizzle() {
-    // `backend_metal::tile::SWIZZLE_LOG` は `pub`（`crate::tile` も
-    // `lib.rs` で `pub mod tile;`）のためこのテストバイナリ（別コンパイル
-    // 単位）からも参照できる。固定リテラルの複製による二重管理を避け、
-    // 実際の定数値をそのままシェーダ側文字列証跡の期待値へ埋め込む。
-    let kernel_body = gemm_simdgroup_tiled_kernel_body();
-    let swizzle_log = backend_metal::tile::SWIZZLE_LOG;
-    assert!(
-        kernel_body.contains(&format!("constexpr uint SWIZZLE_LOG = {swizzle_log};")),
-        "gemm_simdgroup_tiled に SWIZZLE_LOG 定数（値 {swizzle_log}。crate::tile::SWIZZLE_LOG と一致契約）が見つかりません"
-    );
-    assert!(
-        kernel_body
-            .contains("uint tid_y = (tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1));"),
-        "gemm_simdgroup_tiled に tid_y スウィズル変換式が見つかりません"
-    );
-    assert!(
-        kernel_body.contains("uint tid_x = tgid.x >> SWIZZLE_LOG;"),
-        "gemm_simdgroup_tiled に tid_x スウィズル変換式が見つかりません"
-    );
-    assert!(
-        kernel_body.contains("uint row0 = tid_y * BM;")
-            && kernel_body.contains("uint col0 = tid_x * BN;"),
-        "gemm_simdgroup_tiled の row0/col0 計算がスウィズル後の tid_y/tid_x を使っていません"
-    );
-}
+// イシュー #540「gemm_simdgroup_tiled の SWIZZLE_LOG/SWIZZLE_ENABLED 証跡
+// 検査」は `crates/backend-metal/src/tile.rs` の crate 内 unit test
+// （`gemm_simdgroup_tiled_source_uses_tgid_swizzle`）へ移設した（PR #661
+// codex-review 指摘対応）。`crate::tile::SWIZZLE_LOG`/`SWIZZLE_ENABLED` を
+// `pub(crate)` へ狭めたため（実験的な内部実装詳細を公開 API に露出しない
+// 方針）、別コンパイル単位である本ファイル（`tests/` 配下の統合テスト）
+// からは参照できなくなったことによる（直上の `CANDIDATES` 巡回テストが
+// `tile.rs` 側に置かれている理由と同じ）。
