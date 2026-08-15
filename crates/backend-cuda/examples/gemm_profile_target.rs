@@ -65,11 +65,17 @@
 //! 採取手順・実測記録・主因分析は `docs/perf/cuda-gemm-bottleneck-diagnosis.md`
 //! を参照。
 //!
-//! CUDA 非搭載・NVRTC 非搭載・cc 非対応環境では、`CudaDevice::new`／各
-//! `*Gemm::new` の失敗を検出した時点で理由を表示して終了する（`panic!`
-//! しない。`cuda_floor_bench.rs`・`gemm_mma_bench.rs` と同じ環境適応分岐。
+//! `CudaDevice::new`／`CudaGemm::new`／`CudaMmaGemm::new`／opt カーネル
+//! 不在（`wmma_tf32_opt_available() == false`）のいずれの失敗も、既定では
+//! 理由を表示したうえで `panic!` を使わず `std::process::exit(1)`（非 0
+//! 終了）する。`docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 の採取
+//! ループが `set -o pipefail` で非 0 終了を検知する fail-closed 契約のため
+//! （PR #637 codex-review 指摘）。CUDA 非搭載環境として意図的にスキップ
+//! したい場合（手元検証時等）のみ `--allow-missing-driver` を明示指定する
+//! と `CudaDevice::new` の `CudaError::DriverUnavailable` に限り終了コード
+//! 0 でスキップする（`Args::allow_missing_driver` 参照。既定は `false`）。
 //! CI の `cargo build --workspace --all-targets` はビルドのみなので
-//! この実行時分岐は CI に影響しない）。
+//! この実行時分岐は CI に影響しない。
 
 use std::time::Instant;
 
@@ -429,11 +435,14 @@ fn main() {
             // 指摘）。
             //
             // ここでの終了コードは上の `CudaDevice::new`／`CudaGemm::new`
-            // 失敗時の skip（exit 0）とは意図的に区別する:
-            // `CudaDevice::new` 失敗（CUDA driver 自体が不在）は「そもそも
-            // CUDA 実行環境ではない」ことを意味し fail-soft skip が正しい。
-            // 対してここに到達するのは CUDA デバイス・`CudaGemm::new` 自体
-            // は成立した上で opt カーネルの NVRTC ロードのみが失敗した場合
+            // 失敗時の扱いと揃える: `CudaDevice::new` の
+            // `CudaError::DriverUnavailable` は既定でも非 0 終了とし
+            // （`--allow-missing-driver` を明示指定した場合のみ opt-in で
+            // exit 0 スキップ）、それ以外（`DriverUnavailable` 以外の
+            // `CudaDevice::new` エラー・`CudaGemm::new`／`CudaMmaGemm::new`
+            // 失敗）は常に非 0 終了する。ここに到達するのは CUDA デバイス・
+            // `CudaGemm::new` 自体は成立した上で opt カーネルの NVRTC
+            // ロードのみが失敗した場合
             // （`wmma_tf32_opt_unavailable_reason()` が理由を保持している
             // ことからも NVRTC コンパイル失敗等の異常系であることが分かる）
             // であり、オペレーターは opt カーネルをプロファイルする意図で
