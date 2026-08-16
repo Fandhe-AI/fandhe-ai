@@ -66,6 +66,21 @@ pub enum ParityPath {
     /// （基本版カーネル専用ゲート `wmma_tf32_basic_kernel_parity_does_not_regress`
     /// と同型のパターン。`tests/parity_nonregression.rs` はこの経路を
     /// 検査しない——公開 API では opt を強制できないため）。
+    ///
+    /// **PR #678 codex-review P1 再指摘対応**: 上記の非後退ゲートは
+    /// `BASELINES` に実測値を持つ 3 形状（64×64×64・512×512×512・
+    /// 512×512×4096）しか検査しない。opt カーネル固有のタイル境界
+    /// （ブロックタイル倍数・非倍数境界・非正方・極小）を網羅する検査は、
+    /// 同じ private field 経由アクセスで CPU 参照実装と直接照合する
+    /// `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+    /// `wmma_tf32_opt_kernel_k4096_stress`（いずれも `src/gemm.rs`。
+    /// `assert_no_parity_regression` ではなく `backend_cpu::assert_parity`
+    /// を使う——未計測形状を `BASELINES` へ追加すると
+    /// `baseline_provenance_unconfirmed: true` の fail-closed 契約により
+    /// 無条件 panic になるため、この 2 テストは本 fixture を経由しない）
+    /// が担う。旧 `tests/gemm_wmma_tf32_opt.rs::
+    /// wmma_tf32_opt_matches_reference_across_shapes`／
+    /// `wmma_tf32_opt_k4096_stress` からの移設。
     WmmaTf32Opt,
     /// opt-staged カーネル（cp.async 多段パイプライン・fragment 先読み。
     /// イシュー #500）単独の非後退ゲート。

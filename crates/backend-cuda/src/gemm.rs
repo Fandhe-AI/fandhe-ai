@@ -1573,6 +1573,132 @@ mod tests {
         );
     }
 
+    /// [`wmma_tf32_opt_kernel_parity_does_not_regress`] と同一の private
+    /// field 経由アクセス（`self.wmma_tf32_opt`／`run_wmma_tf32_opt_kernel`）
+    /// で `run_wmma_tf32_opt_kernel` を CPU 参照実装と直接照合するヘルパー。
+    /// 3 段選択（`run_wmma_tf32`）を経由しないため、cp.async 整列形状でも
+    /// opt-staged カーネルへ横取りされず opt カーネル固有のタイル境界
+    /// （ブロックタイル 64、共有メモリ K タイル 16）を確実に踏む。
+    ///
+    /// `assert_no_parity_regression`（記録済みベースラインとの比較）ではなく
+    /// [`backend_cpu::assert_parity`]（複合判定そのものでの合否）を使う点が
+    /// [`wmma_tf32_opt_kernel_parity_does_not_regress`] との違いである:
+    /// 本ヘルパーが検査するのは `tests/gemm_wmma_tf32_opt.rs` から移設した
+    /// 任意形状の網羅（`docs/perf/cuda-parity-baseline.md` に記録された
+    /// 実機実測値を持たない形状を含む）であり、`ParityBaseline::BASELINES`
+    /// への未計測行追加（`baseline_provenance_unconfirmed: true` の
+    /// プレースホルダ）は fail-closed 契約により無条件 panic になってしまう
+    /// （`tests/common/parity_baseline.rs::assert_no_parity_regression`
+    /// ドキュメンテーションコメント参照）。実測値を持つ 3 形状（64×64×64・
+    /// 512×512×512・512×512×4096）の非後退検査は
+    /// [`wmma_tf32_opt_kernel_parity_does_not_regress`] に委ね、本ヘルパーは
+    /// 二重管理しない。
+    fn assert_wmma_tf32_opt_kernel_parity(
+        gemm: &CudaGemm,
+        func: &CudaFunction,
+        context: &str,
+        seed: u64,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) {
+        let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
+        backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
+            .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+
+        validate_gemm_dims(a.len(), b.len(), m, n, k)
+            .expect("test shape must be a valid GEMM dimension");
+        validate_wmma_tf32_opt_k_bound(k).expect("test k must satisfy WMMA(TF32) opt k bound");
+
+        let c_gpu = gemm
+            .run_wmma_tf32_opt_kernel(func, &a, &b, m, n, k)
+            .expect("opt WMMA(TF32) kernel execution must succeed on this ignored test runner");
+
+        backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    }
+
+    /// opt カーネル**単独**の形状網羅テスト（PR #678 codex-review P1
+    /// 再指摘対応）。
+    ///
+    /// イシュー #500 のルーティング変更で `tests/gemm_wmma_tf32_opt.rs::
+    /// wmma_tf32_opt_matches_reference_across_shapes`（公開 API
+    /// `run_wmma_tf32` 経由）が整列形状（`n%4==0 && k%4==0`）では
+    /// opt-staged カーネルへ横取りされるようになり、opt カーネル固有の
+    /// タイル境界カバレッジを失っていた。本テストは
+    /// [`assert_wmma_tf32_opt_kernel_parity`] で 3 段選択を経由せず opt
+    /// カーネルを強制実行することで、旧 `wmma_tf32_opt_matches_reference_across_shapes`
+    /// が検査していた全形状（ブロックタイル倍数・非倍数境界・非正方・
+    /// 極小）のカバレッジを復元する（シード起点 `3000 + idx` は移設元と
+    /// 同一。64×64×64・seed=3000 の 1 行目は `ParityBaseline` 記録値
+    /// 〈`wmma_tf32_opt 64x64x64 seed=3000`〉と同一入力になる）。
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    fn wmma_tf32_opt_kernel_matches_reference_across_shapes() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+        let func = gemm.wmma_tf32_opt.as_ref().expect(
+            "opt WMMA(TF32) kernel must be available on this ignored test runner (reason: see \
+             wmma_tf32_opt_error)",
+        );
+
+        let cases: &[(u32, u32, u32)] = &[
+            (64, 64, 64),
+            (128, 128, 128),
+            (512, 512, 512),
+            (63, 65, 33),
+            (65, 63, 17),
+            (64, 96, 256),
+            (1, 1, 1),
+        ];
+        for (idx, &(m, n, k)) in cases.iter().enumerate() {
+            let context = format!("opt kernel shape m={m} n={n} k={k}");
+            assert_wmma_tf32_opt_kernel_parity(&gemm, func, &context, 3000 + idx as u64, m, n, k);
+        }
+    }
+
+    /// opt カーネル**単独**の K 大ストレスケース（PR #678 codex-review P1
+    /// 再指摘対応）。旧 `tests/gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`
+    /// からの移設（シード・形状とも同一。上記
+    /// [`wmma_tf32_opt_kernel_matches_reference_across_shapes`]
+    /// ドキュメンテーションコメント参照）。
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    fn wmma_tf32_opt_kernel_k4096_stress() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+        let func = gemm.wmma_tf32_opt.as_ref().expect(
+            "opt WMMA(TF32) kernel must be available on this ignored test runner (reason: see \
+             wmma_tf32_opt_error)",
+        );
+
+        assert_wmma_tf32_opt_kernel_parity(
+            &gemm,
+            func,
+            "opt kernel K4096 stress 512x512x4096",
+            0xC0FFEE,
+            512,
+            512,
+            4096,
+        );
+        assert_wmma_tf32_opt_kernel_parity(
+            &gemm,
+            func,
+            "opt kernel K4096 stress 4096x4096x4096",
+            0xBEEF,
+            4096,
+            4096,
+            4096,
+        );
+    }
+
     /// #500 の目的（cp.async 多段化・fragment 先読みによる TF32 経路の性能
     /// 改善）の実測本体: staged カーネルが opt カーネルを上回ることを、
     /// 同一実行内で 5 回計測した中央値で確認する（`.claude/rules/

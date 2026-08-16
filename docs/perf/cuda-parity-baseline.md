@@ -52,9 +52,9 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 |---|---|---|---|---|---|---|
 | `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 32×32×32 | 2000 | 154/1024 (15.0%) | 3.698e-4 | `gemm_wmma_tf32.rs::wmma_tf32_matches_reference_across_shapes`（先頭ケース） |
 | `wmma_tf32` | `CudaGemm::run_wmma_tf32` | 256×256×4096 | 8888 | 10647/65536 (16.2%) | 4.476e-3 | `gemm_wmma_tf32.rs::wmma_tf32_k4096_stress_poc_v2_5`（先頭呼出し） |
-| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 64×64×64 | 3000 | 699/4096 (17.1%) | 5.676e-4 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`（記録元。先頭ケース） |
+| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 64×64×64 | 3000 | 699/4096 (17.1%) | 5.676e-4 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`（記録元・改名前。現行は `wmma_tf32_routed_path_matches_reference_across_shapes`。先頭ケース） |
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 512×512×512 | 0x7A0 | 42493/262144 (16.2%) | 1.574e-3 | `tensor_core_real_device.rs::tensor_core_parity_record`（記録元。TF32 部分。計測前に `wmma_tf32_opt_available()` を assert） |
-| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`（記録元。先頭呼出し） |
+| `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`（記録元・改名前。現行は `wmma_tf32_routed_path_k4096_stress`。先頭呼出し） |
 | `wmma_tf32_staged` | `CudaGemm::run_wmma_tf32`（staged 利用可能・整列形状） | 512×512×4096 | 0xC0FFEE | 未計測 | 未計測 | `tests/gemm_wmma_tf32_staged.rs::wmma_tf32_staged_k4096_stress`（記録元候補。実機再測定待ち） |
 | `mma_f16` | `CudaMmaGemm::run_f16` | 256×256×4096 | 9999 | 101/65536 (0.15%) | 7.646e-5 | `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（先頭呼出し） |
 
@@ -72,6 +72,23 @@ cp.async 16 バイト整列条件を満たす形状で staged 経路を最優先
 `run_wmma_tf32` が整列形状で実際に選ぶ経路であるため、逆に公開 API 経由で
 正しく検査できる（`tests/parity_nonregression.rs::
 check_wmma_tf32_staged_baseline`）。
+
+**opt カーネル単独の形状網羅（PR #678 codex-review P1 再指摘対応）**: 上記
+非後退ゲートはこの表に記録済みの 3 形状（64×64×64・512×512×512・
+512×512×4096）しか検査しない。旧 `gemm_wmma_tf32_opt.rs::
+wmma_tf32_opt_matches_reference_across_shapes`／`wmma_tf32_opt_k4096_stress`
+が検査していた opt カーネル固有のタイル境界網羅（128×128×128・63×65×33・
+65×63×17・64×96×256・1×1×1 を含む）は、同じ private field 経由アクセスで
+CPU 参照実装と直接照合する
+`backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+`wmma_tf32_opt_kernel_k4096_stress`（いずれも `src/gemm.rs`。
+`backend_cpu::assert_parity` による判定であり、この表の非後退ベースライン
+機構〈`assert_no_parity_regression`〉は使わない——未計測形状を本表へ追加
+すると `baseline_provenance_unconfirmed: true` の fail-closed 契約により
+無条件 panic になるため）へ移設した。移設元の `gemm_wmma_tf32_opt.rs` 側は
+`wmma_tf32_routed_path_matches_reference_across_shapes`・
+`wmma_tf32_routed_path_k4096_stress` へ改名し、「実効ルーティング経路の
+parity」検査として引き続き公開 API 経由で機能する。
 
 **既知の限界（`wmma_tf32` 行 2 件・PR #640 Cursor Bugbot 指摘・codex-review
 P1 指摘。未解決・実機再測定が必要）**: 上表 1〜2 行目（32×32×32 seed=2000・
@@ -173,8 +190,14 @@ pass」は本イシューのスコープでは未達のまま確定している�
   - `wmma_tf32_basic_kernel_parity_does_not_regress`（基本版 WMMA(TF32)
     カーネル〈`wmma_tf32` 経路〉専用。PR #640 codex-review P1 指摘対応）
   - `wmma_tf32_opt_kernel_parity_does_not_regress`（opt カーネル
-    〈`wmma_tf32_opt` 経路〉専用。PR #678 codex-review P1 指摘対応・
-    イシュー #500）
+    〈`wmma_tf32_opt` 経路〉専用。記録済みベースライン 3 形状の非後退検査。
+    PR #678 codex-review P1 指摘対応・イシュー #500）
+  - `wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+    `wmma_tf32_opt_kernel_k4096_stress`（opt カーネル単独のタイル境界
+    形状網羅。`assert_parity` による直接照合〈非後退ベースラインは使わない〉。
+    旧 `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`／
+    `wmma_tf32_opt_k4096_stress` からの移設。PR #678 codex-review P1
+    再指摘対応）
   - `wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`（staged 対
     opt の TFLOPS 直接比較。PR #678 codex-review P2 指摘対応）
 - イシュー #186（Tensor Core 経路の数値一致閾値の実測再評価。REQ-2 改定

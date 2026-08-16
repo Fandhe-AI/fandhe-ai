@@ -6,26 +6,34 @@
 //! 絶対誤差 1e-5 未満」の唯一の実体）に一本化し、ここでローカル複製しない
 //! （`.claude/rules/coding-rust.md`）。
 //!
-//! **公開 API との関係**: `CudaGemm::run_wmma_tf32` は opt カーネルが
-//! `CudaGemm::new` 時点でコンパイル・ロードに成功していれば自動的に
-//! opt 経路を選ぶ（`gemm.rs` フォールバック方針。専用の切替 API は
-//! 存在しない。REQ-11）。本ファイルは `run_wmma_tf32` を通じて opt
-//! カーネル固有のタイル境界（ブロックタイル 64、K タイル 16）を踏む
-//! 形状を検証する。
+//! **公開 API との関係**: `CudaGemm::run_wmma_tf32` は opt カーネル・
+//! opt-staged カーネルが `CudaGemm::new` 時点でコンパイル・ロードに成功
+//! していれば自動的にそちらを選ぶ 3 段選択（`gemm.rs::run_wmma_tf32`
+//! ドキュメンテーションコメント参照。専用の切替 API は存在しない。REQ-11）。
+//! 本ファイルは `run_wmma_tf32` が実機で実際に選んだ経路（staged が
+//! 利用可能なら staged、そうでなければ opt、それも不可なら basic）が
+//! CPU 参照実装と一致することを検証する「ルーティング後の実効経路」の
+//! parity 検査であり、opt カーネル単独の形状網羅は担わない
+//! （下記「イシュー #500 でのルーティング変更に関する注記」参照）。
 //!
 //! **イシュー #500 でのルーティング変更に関する注記（PR #678 codex-review
-//! P1 指摘対応で判明した関連事項）**: #500 で TF32 opt-staged カーネルが
-//! 追加され、`run_wmma_tf32` は staged カーネルが利用可能かつ cp.async 16
-//! バイト整列条件（`n%4==0 && k%4==0`）を満たす形状では staged 経路を
-//! 最優先で選ぶ。本ファイルの形状（64×64×64・128×128×128・512×512×512・
-//! 512×512×4096 等）はいずれも 4 の倍数であるため、staged カーネル実装済み
-//! 環境の実機では実際には staged 経路を通り、opt カーネル固有のタイル境界を
-//! 踏まなくなる。数値一致（parity）検査自体は「その時点で選ばれた経路が
-//! CPU 参照実装と一致するか」を見るものであり実行経路に依らず有効だが、
-//! opt カーネル**単独**の回帰検出が目的なら本ファイルでは保証できない
-//! （opt 単独の非後退検査は `backend_cuda::gemm::tests::
-//! wmma_tf32_opt_kernel_parity_does_not_regress`〈`src/gemm.rs`〉が
-//! private field 経由で行う。`docs/perf/cuda-parity-baseline.md` §3 参照）。
+//! P1 指摘対応・PR #678 再指摘対応で移設完了）**: #500 で TF32 opt-staged
+//! カーネルが追加され、`run_wmma_tf32` は staged カーネルが利用可能かつ
+//! cp.async 16 バイト整列条件（`n%4==0 && k%4==0`）を満たす形状では staged
+//! 経路を最優先で選ぶ。本ファイルの形状（64×64×64・128×128×128・
+//! 512×512×512・512×512×4096 等）はいずれも 4 の倍数であるため、staged
+//! カーネル実装済み環境の実機では実際には staged 経路を通り、opt カーネル
+//! 固有のタイル境界を踏まなくなる。数値一致（parity）検査自体は「その時点
+//! で選ばれた経路が CPU 参照実装と一致するか」を見るものであり実行経路に
+//! 依らず有効だが（下記
+//! `wmma_tf32_routed_path_matches_reference_across_shapes`／
+//! `wmma_tf32_routed_path_k4096_stress` が担う）、opt カーネル**単独**の
+//! 形状網羅・回帰検出はこのファイルでは保証できないため
+//! `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+//! `wmma_tf32_opt_kernel_k4096_stress`・
+//! `wmma_tf32_opt_kernel_parity_does_not_regress`（いずれも `src/gemm.rs`。
+//! private field 経由で 3 段選択を経由せず opt カーネルを強制実行する）へ
+//! 移設した（`docs/perf/cuda-parity-baseline.md` §3 参照）。
 //!
 //! **実機依存の分離**: `tests/gemm_wmma_tf32.rs` と同じ分岐パターン
 //! （環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載環境では早期
@@ -34,8 +42,8 @@
 use backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装と `run_wmma_tf32`
-/// （opt カーネルが利用可能ならそちら）の出力を [`backend_cpu::assert_parity`]
-/// で照合する。
+/// （3 段選択で実機が実際に選んだ経路——staged・opt・basic のいずれか）の
+/// 出力を [`backend_cpu::assert_parity`] で照合する。
 fn assert_wmma_tf32_opt_parity(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n: u32, k: u32) {
     let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
     let a = rng.fill_vec((m as usize) * (k as usize));
@@ -93,25 +101,39 @@ fn wmma_tf32_opt_parity_smoke_env_adaptive() {
 }
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
-/// テスト。受け入れ条件の本体。
+/// テスト。`run_wmma_tf32`（公開 API・3 段選択）が実機で実際に選んだ経路
+/// （staged 利用可能なら staged、そうでなければ opt、それも不可なら
+/// basic）が CPU 参照実装と一致することを検証する。
 ///
-/// opt カーネル固有のタイル境界（ブロックタイル 64、共有メモリ K タイル
-/// 16、fragment 16/8）を踏む形状を含む: ブロックタイル倍数
-/// （64×64×64・128×128×128・512×512×512）・非倍数境界
-/// （63×65×33・65×63×17）・非正方（64×96×256）・極小（1×1×1）。
+/// **PR #678 codex-review P1 再指摘対応で改名**: 旧名
+/// `wmma_tf32_opt_matches_reference_across_shapes` は、本テストの形状が
+/// 4 の倍数（cp.async 整列条件を満たす）であるため実機では staged 経路を
+/// 通ることを踏まえると誤解を招く名称だった（「opt を検査している」という
+/// 誤った期待を持たせる）。opt カーネル**単独**の形状網羅は
+/// `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`
+/// （`src/gemm.rs`）へ移設済み（本ファイル冒頭のモジュールコメント参照）。
+/// 本テストは「実効経路の parity」を検査する別軸の検査として維持する。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
-fn wmma_tf32_opt_matches_reference_across_shapes() {
+fn wmma_tf32_routed_path_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    // PR #256 レビュー指摘対応: `run_wmma_tf32` は opt カーネル未対応環境で
-    // 基本版へ自動フォールバックするため、この検証がここで opt カーネル
-    // 固有のタイル境界を実際に踏んだことを保証するには、フォールバック
-    // していないことを事前に確認する必要がある（本テストは compute
-    // capability 8.0 以降の実機必須なので opt カーネルは利用可能であるべき）。
+    // PR #256 レビュー指摘対応の踏襲（PR #678 codex-review P1 再指摘対応で
+    // 条件を修正）: `run_wmma_tf32` は staged・opt の両方が使用不能な環境で
+    // 基本版へ自動フォールバックするため、この検証が WMMA 経路（staged・
+    // opt のいずれか）を実際に踏んだことを保証するには、basic への
+    // フォールバックが起きていないことを事前に確認する必要がある
+    // （本テストは compute capability 8.0 以降の実機必須なので staged・opt
+    // のいずれかは利用可能であるべき）。staged が整列形状で opt を横取り
+    // する 3 段選択の性質上、「opt が利用可能」を要求すると staged 選択時に
+    // 誤って fail するため、「staged または opt のいずれかが利用可能」へ
+    // 緩和する。
     assert!(
-        gemm.wmma_tf32_opt_available(),
-        "opt kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.wmma_tf32_staged_available() || gemm.wmma_tf32_opt_available(),
+        "staged or opt WMMA(TF32) kernel must be available on this ignored test runner so \
+         that the routed path actually exercises a WMMA path rather than silently falling \
+         back to the basic kernel (staged reason: {:?}, opt reason: {:?})",
+        gemm.wmma_tf32_staged_unavailable_reason(),
         gemm.wmma_tf32_opt_unavailable_reason()
     );
 
@@ -125,30 +147,41 @@ fn wmma_tf32_opt_matches_reference_across_shapes() {
         (1, 1, 1),
     ];
     for (idx, &(m, n, k)) in cases.iter().enumerate() {
-        let context = format!("shape m={m} n={n} k={k}");
+        let context = format!("routed path shape m={m} n={n} k={k}");
         assert_wmma_tf32_opt_parity(&gemm, &context, 3000 + idx as u64, m, n, k);
     }
 }
 
 /// K 大のストレスケース（受け入れ条件の性能比較対象と同一形状。
-/// PoC-v2-3 の M=N=K=4096 と揃える）。
+/// PoC-v2-3 の M=N=K=4096 と揃える）。上記
+/// [`wmma_tf32_routed_path_matches_reference_across_shapes`] と同じ理由で
+/// 改名（旧名 `wmma_tf32_opt_k4096_stress`）。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
-fn wmma_tf32_opt_k4096_stress() {
+fn wmma_tf32_routed_path_k4096_stress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
-    // PR #256 レビュー指摘対応（上記 wmma_tf32_opt_matches_reference_across_shapes
-    // と同じ根拠）。
+    // PR #256 レビュー指摘対応の踏襲（上記
+    // wmma_tf32_routed_path_matches_reference_across_shapes と同じ根拠）。
     assert!(
-        gemm.wmma_tf32_opt_available(),
-        "opt kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.wmma_tf32_staged_available() || gemm.wmma_tf32_opt_available(),
+        "staged or opt WMMA(TF32) kernel must be available on this ignored test runner (staged \
+         reason: {:?}, opt reason: {:?})",
+        gemm.wmma_tf32_staged_unavailable_reason(),
         gemm.wmma_tf32_opt_unavailable_reason()
     );
 
-    assert_wmma_tf32_opt_parity(&gemm, "K4096 stress 512x512x4096", 0xC0FFEE, 512, 512, 4096);
     assert_wmma_tf32_opt_parity(
         &gemm,
-        "K4096 stress 4096x4096x4096",
+        "routed path K4096 stress 512x512x4096",
+        0xC0FFEE,
+        512,
+        512,
+        4096,
+    );
+    assert_wmma_tf32_opt_parity(
+        &gemm,
+        "routed path K4096 stress 4096x4096x4096",
         0xBEEF,
         4096,
         4096,
