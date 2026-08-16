@@ -24,7 +24,9 @@
 //! `kernels_wmma_opt.rs` の `render_*` 関数のドキュメンテーションコメント
 //! 参照）。
 
+use std::ffi::OsStr;
 use std::num::NonZeroU32;
+use std::path::{Component, Path, PathBuf};
 
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
@@ -102,15 +104,27 @@ impl CudaKernelDescriptor {
         stages: u32,
         dtype: tensor_core::dispatch::DType,
     ) -> Result<Self, CudaError> {
+        // イシュー #506（Phase C-2）レビュー指摘: 先頭・末尾がドット
+        // （例 `".foo"`・`"foo."`）の `kernel_name` は、当初この検証を
+        // 通過したうえで `cache_entry_dir_name()`（イシュー #506）が
+        // 生成する `"kernel..foo.<hash>"`/`"kernel.foo..<hash>"` に
+        // `".."` を出現させ、同関数の縦深防御検査で構築後になって初めて
+        // 拒否される（fail-closed だが、構築時点では有効に見える
+        // descriptor が消費時点まで使えないことが分かる、という早期検知の
+        // 弱さがあった）。ここで前倒しして拒否し、「構築に成功した
+        // `kernel_name` は消費側で必ず使える」という契約を保つ。
         if kernel_name.is_empty()
             || kernel_name.contains('/')
             || kernel_name.contains('\\')
             || kernel_name.contains("..")
+            || kernel_name.starts_with('.')
+            || kernel_name.ends_with('.')
         {
             return Err(CudaError::InvalidKernelDescriptor {
                 detail: format!(
                     "kernel_name must be a non-empty path-safe segment \
-                     (no '/', '\\\\', or \"..\"), got {kernel_name:?}"
+                     (no '/', '\\\\', \"..\", and no leading/trailing '.'), \
+                     got {kernel_name:?}"
                 ),
             });
         }
@@ -254,6 +268,486 @@ impl CudaKernelCacheKey {
     pub fn compile_flags(&self) -> &[String] {
         &self.compile_flags
     }
+
+    /// 処理系非依存の正準バイト列表現（イシュー #506・Phase C-2）。
+    ///
+    /// `derive(Hash)` の `Hash` 実装は Rust 処理系バージョン間で安定性が
+    /// 保証されない（`std::hash::Hash` のドキュメント契約）ため、ディスク
+    /// 永続キー（[`Self::cache_entry_dir_name`]）には使えない。本メソッドは
+    /// DeepGEMM が `{name}$${signature}$${flags}$${code}` の明示的な文字列
+    /// 連結をハッシュする方式（`compiler.hpp`）に倣い、全フィールドを
+    /// 曖昧さのない形式（可変長フィールドは長さプレフィクス付き、数値は
+    /// フィールド順固定の固定長 LE バイト列）で連結する。区切り文字方式
+    /// ではなく長さプレフィクス方式を採るのは、コンパイルフラグ文字列
+    /// 自体に区切り文字が混入すると異なる論理キーが同一バイト列に
+    /// 縮退しうるため。
+    ///
+    /// 先頭 1 バイトはエンコーディングバージョン。C-5（#514）でソース
+    /// 断片ハッシュをキーへ拡張する等、将来このバイト列表現を変更する際は
+    /// このバージョン番号を上げ、互換性の切り替え点として使う。
+    /// **このバイト列表現の変更は既存キャッシュエントリを全て無効化する**
+    /// （ハッシュ値が変わるため）契約であることに注意。
+    fn canonical_bytes(&self) -> Vec<u8> {
+        const ENCODING_VERSION: u8 = 1;
+
+        let mut buf = Vec::new();
+        buf.push(ENCODING_VERSION);
+
+        push_len_prefixed_str(&mut buf, self.descriptor.kernel_name);
+
+        buf.extend_from_slice(&self.descriptor.shape.m.to_le_bytes());
+        buf.extend_from_slice(&self.descriptor.shape.n.to_le_bytes());
+        buf.extend_from_slice(&self.descriptor.shape.k.to_le_bytes());
+
+        buf.extend_from_slice(&self.descriptor.block_m.get().to_le_bytes());
+        buf.extend_from_slice(&self.descriptor.block_n.get().to_le_bytes());
+        buf.extend_from_slice(&self.descriptor.block_k.get().to_le_bytes());
+        buf.extend_from_slice(&self.descriptor.stages.get().to_le_bytes());
+
+        // `DType` は non-exhaustive ではない自クレート型ではなく
+        // `tensor_core::dispatch::DType` だが、キー用途では判別子のみが
+        // 意味を持つため 1 バイトの手書き判別子へ写像する（derive(Hash)
+        // に依存しない方針をここでも一貫させる）。
+        let dtype_tag: u8 = match self.descriptor.dtype {
+            tensor_core::dispatch::DType::F32 => 0,
+            tensor_core::dispatch::DType::F16 => 1,
+        };
+        buf.push(dtype_tag);
+
+        buf.extend_from_slice(&self.compute_capability.0.to_le_bytes());
+        buf.extend_from_slice(&self.compute_capability.1.to_le_bytes());
+        buf.extend_from_slice(&self.nvrtc_version.0.to_le_bytes());
+        buf.extend_from_slice(&self.nvrtc_version.1.to_le_bytes());
+
+        buf.extend_from_slice(&(self.compile_flags.len() as u32).to_le_bytes());
+        for flag in &self.compile_flags {
+            push_len_prefixed_str(&mut buf, flag);
+        }
+
+        buf
+    }
+
+    /// [`Self::canonical_bytes`] を FNV-1a 64bit（[`fnv1a_64`]）でハッシュ
+    /// した値。[`Self::cache_entry_dir_name`] のハッシュ部として使う
+    /// ディスク永続キー本体（イシュー #506）。
+    ///
+    /// `pub(crate)` に留める（crate ルートからは再公開しない）: FNV-1a・
+    /// `canonical_bytes` のフィールド順序といった内部ハッシュ表現の選択を
+    /// 外部利用者との SemVer 契約にしない。[`cache_root`]／
+    /// [`cache_entry_path`] と同じ理由（PR #659 レビュー指摘）。
+    pub(crate) fn stable_hash(&self) -> u64 {
+        fnv1a_64(&self.canonical_bytes())
+    }
+
+    /// キャッシュエントリのディレクトリ名を返す（`kernel.<name>.<hash>`。
+    /// DeepGEMM の `~/.deep_gemm/cache/kernel.<name>.<hex16>` 命名に倣う。
+    /// イシュー #506・Phase C-2）。
+    ///
+    /// ディスクへの書き込み・アトミック rename は C-3（#509）のスコープで
+    /// あり、本メソッドは純粋なパス計算（fs I/O なし）に留める。
+    ///
+    /// `kernel_name` は [`CudaKernelDescriptor::new`] が構築時に検証済み
+    /// （パス走査文字・空文字列を拒否）だが、構築後の不変条件破壊
+    /// （型不変条件はあくまで実行時検査であり、将来のリファクタでこの
+    /// 保証が崩れる可能性はゼロではない）への縦深防御として、生成した
+    /// ディレクトリ名自体にもパスセパレータ・`..` が含まれないことを
+    /// ここで再検査する（fail-closed。A03 対策）。
+    ///
+    /// `pub(crate)` に留める（crate ルートからは再公開しない）:
+    /// `kernel.<name>.<hash>` というディレクトリ命名規則自体が内部
+    /// キャッシュ形式であり、外部利用者との SemVer 契約にしない。
+    /// [`stable_hash`](Self::stable_hash)・[`cache_root`]・
+    /// [`cache_entry_path`] と同じ理由（PR #659 レビュー指摘）。
+    pub(crate) fn cache_entry_dir_name(&self) -> Result<String, CudaError> {
+        let name = format!(
+            "kernel.{}.{:016x}",
+            self.descriptor.kernel_name,
+            self.stable_hash()
+        );
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(CudaError::InvalidKernelDescriptor {
+                detail: format!(
+                    "generated cache entry dir name unexpectedly contains \
+                     path-traversal characters: {name:?}"
+                ),
+            });
+        }
+        Ok(name)
+    }
+}
+
+/// `s` の UTF-8 バイト長（`u32` LE）＋バイト列そのものを `buf` へ追記する
+/// ([`CudaKernelCacheKey::canonical_bytes`] のみが使う長さプレフィクス
+/// エンコーディングヘルパ)。区切り文字ではなく長さプレフィクスを使う
+/// 理由は当該メソッドのドキュメンテーションコメントを参照。
+fn push_len_prefixed_str(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+/// FNV-1a 64bit ハッシュ（自作・非暗号）。
+///
+/// イシュー #506（Phase C-2）: ディスク上のコンパイルキャッシュ
+/// エントリ名（[`CudaKernelCacheKey::cache_entry_dir_name`]）を短く
+/// 決定的に導出する目的専用であり、改竄検知・完全性保証（OWASP A08）
+/// には使わない（非暗号ハッシュのため衝突耐性の暗号学的保証はない。
+/// 破損検出・整合性検証は C-3/C-10（#509・#529）のスコープで別途扱う）。
+/// 依存クレート追加なしで実装する（deps-policy.md の許容 8 区分に
+/// ハッシュ関数区分はなく、std のみで完結させる判断）。
+///
+/// アルゴリズムは標準の FNV-1a（32bit ではなく 64bit 版）。オフセット
+/// ベーシスと素数は FNV の公開仕様値。
+///
+/// 既知テストベクタ（`""` → `0xcbf29ce484222325`・`"a"` →
+/// `0xaf63dc4c8601ec8c`・`"foobar"` → `0x85944171f73967e8`）でユニット
+/// テスト済み（下記 `tests` モジュール）。
+///
+/// `pub(crate)` に留める（crate ルートからは再公開しない）: FNV-1a という
+/// 内部ハッシュ表現の選択を外部利用者との SemVer 契約にしない
+/// （PR #659 レビュー指摘）。
+pub(crate) const fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    let mut i = 0;
+    while i < bytes.len() {
+        hash ^= bytes[i] as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+        i += 1;
+    }
+    hash
+}
+
+/// コンパイルキャッシュのルートディレクトリを解決する内部純関数
+/// （イシュー #506・Phase C-2）。
+///
+/// 優先順位: (1) `override_dir`（`RUST_AI_CUDA_CACHE_DIR` 相当。
+/// DeepGEMM の `DG_JIT_CACHE_DIR` に相当する本リポ命名として新規決定）
+/// → (2) `xdg_cache_home`（`XDG_CACHE_HOME`）→ (3) `home`（`$HOME`）。
+/// (2)(3) には `rust-ai-library/cuda` を付加する。全て `None`（環境変数
+/// 全欠落）なら [`CudaError::CacheDirUnavailable`] を返す（panic 経路
+/// なし）。
+///
+/// 実環境変数を直接 `std::env::var_os` するのではなく引数として受け取る
+/// のは `self-repair::isolation::resolve_toolchain_home_reinjections`
+/// （`crates/self-repair/src/isolation.rs:242`）と同じ「注入で決定化」
+/// パターン。edition 2024 では `std::env::set_var` が `unsafe` になり
+/// （プロセス環境変数はテストバイナリ全体で共有されるグローバル状態）、
+/// フォールバック分岐を書き換えなしで決定的に再現するテストが書けない
+/// ため、本関数を純関数として切り出し公開ラッパー（[`resolve_cache_root`]）
+/// が実環境変数を読んで委譲する形にする。
+///
+/// **安全側の検証**: `override_dir`・`xdg_cache_home`・`home` はいずれも
+/// 外部環境変数由来の信頼できない入力であり、空文字列・相対パスの場合は
+/// 三者とも同様に `CudaError::CacheDirUnavailable` で拒否する（PR #659
+/// レビュー指摘。`override_dir` のみを検証し `xdg_cache_home`／`home` を
+/// 未検証のまま `Path::join` すると `XDG_CACHE_HOME=.` 等でフォールバック
+/// を迂回できたため三者を揃えた。空文字列は `Some("")` として渡ってきても
+/// 「未設定扱い」でフォールバックせず明示的に拒否する。PR #659 codex-review
+/// P0 指摘: 以前の実装は `!xdg.is_empty()` 相当のガードが `if let` の外に
+/// なく、空文字列の `XDG_CACHE_HOME` が `HOME` へ素通りしていた）。
+///
+/// **`workspace_root` containment 検証（PR #659 codex-review P0 再指摘への
+/// 対応。2 回目の設計変更）**: 1 回目の修正（P1 指摘対応）ではコンパイル時
+/// `CARGO_MANIFEST_DIR` から導出した「ビルド時ワークスペースルート」との
+/// 比較を削除し、containment 検証自体を持たない許可リスト方式に置き換えた。
+/// しかしこれは `override_dir`（`RUST_AI_CUDA_CACHE_DIR`）がリポジトリ
+/// ツリー内を指す絶対パス（例 `/workspace/repository/cache`）をそのまま
+/// 受理してしまう回帰であり、codex-review に P0 として再指摘された。
+/// 「ビルド時定数のハードコードは実行環境が変わると素通りする」という
+/// 1 回目の指摘の要点は正しいが、対策は「containment 検証を削除する」
+/// ことではなく「**信頼できる境界を呼び出し元から注入で受け取る**」こと
+/// だった。本関数はこの反省を踏まえ `workspace_root: &Path`（`Option` では
+/// なく必須引数）を受け取り、`override_dir`・`xdg_cache_home`・`home` の
+/// 3 分岐すべてで解決結果を [`path_lexically_within`] により
+/// `workspace_root` 配下でないことを検証する（3 分岐のうち `override_dir`
+/// だけを検証対象外にする例外は設けない。それが今回の P0 指摘の核心の
+/// ため）。`workspace_root` を `Option` にして呼び出し元が `None` を渡せる
+/// 余地を残すと「検証を迂回できる」構造が復活するため、必須引数として
+/// 契約に組み込む（呼び出し元は [`cache_root`] も参照）。
+///
+/// **C-3（#509）への委譲は残る範囲のみ**: 実際にディレクトリを作成・
+/// オープンする時点での `canonicalize` 済みパスによる symlink 解決込みの
+/// 再検証（本関数は fs I/O なしの字句正規化のみで、パスの実在を要求する
+/// symlink 解決は原理的に実行できない）は引き続き C-3 のスコープとする
+/// （`docs/cuda-jit-cache-design.md` 検証条件節も参照）。`workspace_root`
+/// 自体をどう決定するか（呼び出し元がどの値を渡すか）は [`cache_root`] の
+/// doc を参照。
+///
+/// **`workspace_root` は絶対パス必須（PR #659 codex-review Bugbot 指摘
+/// 対応）**: [`path_lexically_within`] はコンポーネント単位の
+/// `starts_with` 比較のため、`workspace_root` が相対パスだと絶対パスの
+/// 候補（`override_dir`・`XDG_CACHE_HOME`／`HOME` 由来の候補はいずれも
+/// 絶対パス必須で既に検証済み）との比較が常に不一致になり、containment
+/// 判定が fail-open 側へ倒れる（本来ブロックすべきリポジトリ内キャッシュ
+/// ルートを再び受理してしまう）。3 分岐へ分岐する前に本関数の入口で
+/// `workspace_root` の絶対パス性を検証し、相対パスなら 3 分岐いずれも
+/// 実行せず fail-closed で拒否する（迂回できる分岐を残さない）。
+fn resolve_cache_root(
+    workspace_root: &Path,
+    override_dir: Option<&OsStr>,
+    xdg_cache_home: Option<&OsStr>,
+    home: Option<&OsStr>,
+) -> Result<PathBuf, CudaError> {
+    if workspace_root.is_relative() {
+        return Err(CudaError::CacheDirUnavailable {
+            detail: format!(
+                "workspace_root must be an absolute path for containment checks \
+                 to be meaningful, got {workspace_root:?}"
+            ),
+        });
+    }
+
+    if let Some(dir) = override_dir {
+        let path = Path::new(dir);
+        if dir.is_empty() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: "RUST_AI_CUDA_CACHE_DIR is set but empty".to_string(),
+            });
+        }
+        if path.is_relative() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!("RUST_AI_CUDA_CACHE_DIR must be an absolute path, got {path:?}"),
+            });
+        }
+        if path_lexically_within(path, workspace_root) {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "RUST_AI_CUDA_CACHE_DIR must not resolve within the workspace root \
+                     {workspace_root:?}, got {path:?}"
+                ),
+            });
+        }
+        return Ok(path.to_path_buf());
+    }
+
+    if let Some(xdg) = xdg_cache_home {
+        if xdg.is_empty() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: "XDG_CACHE_HOME is set but empty".to_string(),
+            });
+        }
+        let path = Path::new(xdg);
+        if path.is_relative() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!("XDG_CACHE_HOME must be an absolute path, got {path:?}"),
+            });
+        }
+        let candidate = path.join("rust-ai-library").join("cuda");
+        if path_lexically_within(&candidate, workspace_root) {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "XDG_CACHE_HOME-derived cache root must not resolve within the workspace \
+                     root {workspace_root:?}, got {candidate:?}"
+                ),
+            });
+        }
+        return Ok(candidate);
+    }
+
+    if let Some(home_dir) = home {
+        if home_dir.is_empty() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: "HOME is set but empty".to_string(),
+            });
+        }
+        let path = Path::new(home_dir);
+        if path.is_relative() {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!("HOME must be an absolute path, got {path:?}"),
+            });
+        }
+        let candidate = path.join(".cache").join("rust-ai-library").join("cuda");
+        if path_lexically_within(&candidate, workspace_root) {
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "HOME-derived cache root must not resolve within the workspace root \
+                     {workspace_root:?}, got {candidate:?}"
+                ),
+            });
+        }
+        return Ok(candidate);
+    }
+
+    Err(CudaError::CacheDirUnavailable {
+        detail: "none of RUST_AI_CUDA_CACHE_DIR, XDG_CACHE_HOME, HOME is set; \
+                 cannot determine a cache root"
+            .to_string(),
+    })
+}
+
+/// `candidate` が `root` 配下（`root` 自身を含む）に字句上収まるかを
+/// 判定する（[`resolve_cache_root`] 用。fs I/O なしの純比較。
+/// [`Path::starts_with`] はコンポーネント単位の比較のため、
+/// `/repo-extra` を `/repo` の配下と誤判定しない）。
+///
+/// 比較前に両パスを [`lexically_normalize`] で正規化する: 正規化なしでは
+/// `..` コンポーネントを含む絶対パス（例 `/outside/../repo/cache`）が
+/// `Path::starts_with` のコンポーネント単位比較を素通りしてしまう
+/// （先頭コンポーネントが `root` と一致しないため）が、実際のファイル
+/// 操作は `..` 解決後のパス（`root` 配下）を指してしまう。symlink 解決
+/// までは行わない（fs I/O なしの字句正規化のみ）。
+///
+/// [`resolve_cache_root`] が `workspace_root` containment 検証（3 分岐
+/// 共通）に使う（PR #659 codex-review P0 再指摘への対応で、1 回目の修正
+/// 時に外していた呼び出しを復元した。詳細は [`resolve_cache_root`] doc
+/// 参照）。`..` 折り畳み込みの字句正規化プリミティブは、C-3（#509）が実際に
+/// ディレクトリを作成・オープンする時点で行う `canonicalize` 済みパスでの
+/// symlink 解決込み再検証にも転用できる。
+///
+/// **前提: `root` は絶対パスであること（PR #659 codex-review Bugbot
+/// 指摘対応）**: `starts_with` はコンポーネント単位の比較のため、
+/// `root` が相対パスだと絶対パスの `candidate` とは先頭コンポーネント
+/// （`RootDir`／`Prefix` の有無）が食い違い、実際には包含関係にあって
+/// も必ず `false`（fail-open）を返す。本関数自身は `root` の絶対パス
+/// 性を検証しない（呼び出し元の責務）。[`resolve_cache_root`] は入口で
+/// `workspace_root.is_relative()` を検査してから本関数へ委譲すること
+/// でこの前提を満たす。
+fn path_lexically_within(candidate: &Path, root: &Path) -> bool {
+    lexically_normalize(candidate).starts_with(lexically_normalize(root))
+}
+
+/// パスのコンポーネントを fs I/O なしで字句上（lexically）正規化する
+/// （[`path_lexically_within`] 用）。`..`（[`Component::ParentDir`]）が
+/// 現れるたびに直前の通常コンポーネント（[`Component::Normal`]）を
+/// 取り除く（realpath 相当だがシンボリックリンク解決は行わない）。
+///
+/// ルート／プレフィックス（`/`・Windows ドライブ文字等）を越える `..`
+/// は OS のパス解決（ルートの親はルート自身）と同様に無視する。相対
+/// パスの先頭に現れる `..`（遡り先の通常コンポーネントが存在しない
+/// 場合）のみ、そのまま保持する。
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {
+                    // ルート／プレフィックス直下からはこれ以上遡れない
+                    // （OS のパス解決と同様、ルートの親はルート自身）
+                    // ため `..` を読み捨てる。
+                }
+                _ => {
+                    // 正規化結果が空、または直前も `..`: 遡り先の通常
+                    // コンポーネントがまだないため、相対パスの先頭
+                    // `..` として保持する。
+                    normalized.push(component);
+                }
+            },
+            Component::CurDir => {}
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+/// [`resolve_cache_root`] の crate 内ラッパー。実プロセス環境変数
+/// （`RUST_AI_CUDA_CACHE_DIR`・`XDG_CACHE_HOME`・`HOME`）を読んで委譲する
+/// （イシュー #506・Phase C-2。C-3（#509）・C-4（#511）から呼ばれる想定）。
+///
+/// `pub(crate)` に留める（crate ルートからは再公開しない）: 環境変数名・
+/// キャッシュ配置規則は C-3/C-4/C-6（同一 crate 内の後続実装）が使う内部
+/// 実装詳細であり、外部公開すると SemVer 契約になってしまう
+/// （PR #659 レビュー指摘）。外部向けキャッシュ設定 API が要件になった
+/// 場合は `docs/public-api-design.md` に契約・安定性を明記した専用 API
+/// として別途設計する。
+///
+/// 呼び出し元は C-3（#509）・C-4（#511）で追加予定のため、本タスク
+/// （C-2・#506）時点では crate 内に呼び出し元がまだなく `dead_code` 警告
+/// が出る。テスト側は実環境変数への依存を避けるため注入可能な
+/// [`resolve_cache_root`] を直接呼ぶ（本関数の doc 参照）ので、本関数
+/// 自体は非テストコードから未参照のままになる。
+///
+/// **`workspace_root` を必須引数として受け取る（PR #659 codex-review P0
+/// 再指摘への対応）**: 1 回目の修正（P1 指摘対応）ではコンパイル時
+/// `CARGO_MANIFEST_DIR` から導出する「ビルド時ワークスペースルート」を
+/// 引数に渡す処理を削除し、containment 検証自体をなくしてしまっていた
+/// （ビルド環境と実行環境が異なる配布シナリオでは当該ワークスペースルート
+/// が実行時のリポジトリ配置と一致せず検証が無条件で素通りするという
+/// 1 回目の指摘自体は正しかったが、対策として検証を丸ごと削除したのが
+/// 誤りだった）。本関数は `workspace_root: &Path` を必須引数として受け取り
+/// [`resolve_cache_root`] へそのまま渡す。呼び出し元（C-3・C-4）は、
+/// ビルド時定数のハードコードではなく実行時に確定する信頼できる境界
+/// （例: 実行時に明示設定される runtime workspace 設定値。プロセスの
+/// カレントディレクトリ `std::env::current_dir()` は「プロセス起動時の
+/// 作業ディレクトリ」であり「リポジトリツリーの境界」ではないため
+/// **使わない**: `XDG_CACHE_HOME`／`HOME` 未設定でカレントディレクトリが
+/// たまたまホームディレクトリ配下だった場合、`~/.cache/...` という正当な
+/// フォールバック結果が誤って拒否される）を C-3 設計時に決定して渡す。
+///
+/// **`workspace_root` は絶対パスであること（PR #659 codex-review Bugbot
+/// 指摘対応）**: [`resolve_cache_root`] は相対パスを fail-closed で拒否
+/// する（[`path_lexically_within`] の `starts_with` 比較は相対パスの
+/// `root` に対して常に `false` を返し containment 判定が意味を失うため）。
+/// C-3・C-4 が渡す境界値は必ず絶対パスへ解決してから渡すこと。
+#[allow(
+    dead_code,
+    reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
+              意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
+)]
+pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
+    resolve_cache_root(
+        workspace_root,
+        std::env::var_os("RUST_AI_CUDA_CACHE_DIR").as_deref(),
+        std::env::var_os("XDG_CACHE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// `root` と [`CudaKernelCacheKey::cache_entry_dir_name`] を合成し、
+/// キャッシュエントリの完全パスを返す内部純関数（イシュー #506・
+/// Phase C-2）。fs I/O は行わない純粋なパス組み立てのみ（`create_dir_all`
+/// 等は C-3（#509）のスコープ）。`root` は呼び出し元
+/// （[`cache_entry_path`] 経由の [`cache_root`]）で既に `workspace_root`
+/// containment 検証を経ている前提であり、本関数自体は単純な結合のみを
+/// 行う（結果が常に `root` 配下に収まることは `Path::join` の性質として
+/// 自明であり、下記ユニットテストで回帰確認する）。
+///
+/// [`resolve_cache_root`]／[`cache_root`] と同じ「注入で決定化」パターン
+/// （`self-repair::isolation::resolve_toolchain_home_reinjections`と同型。
+/// `crates/self-repair/src/isolation.rs:242`）で `root` を引数化する。
+/// 実 `cache_root()`（環境変数依存）を経由すると「結果が必ず `root` 配下
+/// （`starts_with(root)`）」というトラバーサル防御（A03）の受け入れ基準を
+/// テスト実行環境の実 `HOME` に依存させずには検証できないため、公開
+/// ラッパー（[`cache_entry_path`]）と分離する。
+fn cache_entry_path_in(root: &Path, key: &CudaKernelCacheKey) -> Result<PathBuf, CudaError> {
+    let entry_name = key.cache_entry_dir_name()?;
+    Ok(root.join(entry_name))
+}
+
+/// [`cache_root`] と [`CudaKernelCacheKey::cache_entry_dir_name`] を
+/// 合成し、キャッシュエントリの完全パスを返す（イシュー #506・
+/// Phase C-2。C-3（#509）・C-4（#511）から呼ばれる想定）。
+///
+/// 結果が必ず `root` 配下（`starts_with(root)`）に収まることを
+/// [`cache_entry_path_in`] のユニットテストで検証し、トラバーサル防御
+/// （A03）の第 3 層とする（第 1 層: `CudaKernelDescriptor::new` の構築時
+/// 検証、第 2 層: `cache_entry_dir_name` 内の縦深防御検査）。`root` 自体が
+/// リポジトリツリー外であることの検証（第 0 層）は [`cache_root`] 経由の
+/// [`resolve_cache_root`] が `workspace_root` containment 検証で担う
+/// （PR #659 codex-review P0 再指摘: `cache_entry_path_in` 自体にも
+/// containment がないと指摘されたが、それは `cache_root` が渡す `root` に
+/// 対して検証すべき事項であり、本関数の責務は `root` 配下への結合のみに
+/// 留める設計とした）。
+///
+/// [`cache_root`] と同じ理由で `pub(crate)` に留める（crate ルートからは
+/// 再公開しない。PR #659 レビュー指摘）。呼び出し元も [`cache_root`] と
+/// 同じく C-3（#509）・C-4（#511）で追加予定のため、本タスク時点では
+/// 先行スキャフォールディングとして `dead_code` を許容する。
+#[allow(
+    dead_code,
+    reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
+              意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
+)]
+pub(crate) fn cache_entry_path(
+    workspace_root: &Path,
+    key: &CudaKernelCacheKey,
+) -> Result<PathBuf, CudaError> {
+    cache_entry_path_in(&cache_root(workspace_root)?, key)
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
@@ -635,7 +1129,12 @@ mod tests {
     // する。
     #[test]
     fn new_rejects_path_traversal_kernel_name() {
-        for bad_name in ["../escape", "a/b", "a\\b", "..", ""] {
+        // イシュー #506（Phase C-2）レビュー指摘: 先頭・末尾ドット
+        // （`.foo`・`foo.`）は素朴なチェックでは通過してしまうが、
+        // `cache_entry_dir_name()` が生成する `"kernel..foo.<hash>"` 等に
+        // `".."` を出現させるため、構築時点で前倒しして拒否する
+        // （`CudaKernelDescriptor::new` 内コメント参照）。
+        for bad_name in ["../escape", "a/b", "a\\b", "..", "", ".foo", "foo.", "."] {
             let result = CudaKernelDescriptor::new(
                 bad_name,
                 GemmShape::new(4096, 4096, 4096),
@@ -840,6 +1339,587 @@ mod tests {
             vec!["--gpu-architecture=compute_90".to_string()],
         );
         assert_eq!(cache.get(&miss_key), None);
+    }
+
+    // イシュー #506（Phase C-2）: FNV-1a 64bit の既知テストベクタ
+    // （公開仕様値。実装が標準アルゴリズムと一致することを保証する）。
+    #[test]
+    fn fnv1a_64_matches_known_test_vectors() {
+        assert_eq!(fnv1a_64(b""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x85944171f73967e8);
+    }
+
+    // 受け入れ基準: ハッシュ関数の決定性（同一入力 → 複数回・別呼び出しで
+    // 同一値）。
+    #[test]
+    fn stable_hash_is_deterministic() {
+        let key = sample_key();
+        assert_eq!(key.stable_hash(), key.stable_hash());
+        assert_eq!(sample_key().stable_hash(), key.stable_hash());
+    }
+
+    // 受け入れ基準: 代表ケースの非衝突。`changing_any_field_produces_
+    // distinct_key`（既存・derive Hash/Eq 用）と同型のフィールド網羅を
+    // `stable_hash()` に対しても行う（DeepGEMM のアーキ違い＝別エントリの
+    // 性質を自作ハッシュ側でも担保する）。
+    #[test]
+    fn stable_hash_changing_any_field_produces_distinct_hash() {
+        let base = sample_key();
+        let base_hash = base.stable_hash();
+
+        let variants = [
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(2048, 4096, 4096),
+                    64,
+                    64,
+                    32,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32_v2",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    32,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                sample_descriptor(),
+                (9, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                sample_descriptor(),
+                (8, 0),
+                (13, 0),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                sample_descriptor(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_90".to_string()],
+            ),
+            // Cursor Bugbot 指摘（PR #659）: 本テストは
+            // `changing_any_field_produces_distinct_key`
+            // と同等の全フィールド網羅を謳っていたが、実際には
+            // `block_n`/`block_k`/`stages`/`dtype` を変えるケースが
+            // 欠けていた。とくに `dtype` は `canonical_bytes` 内の
+            // 手書きタグであり、このケースがないと将来タグを誤って
+            // 省略しても F32/F16 がディスクキャッシュエントリを
+            // 共有する不具合を検出できない。ここで全フィールドを
+            // 単独変更するケースを追加する。
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    32,
+                    64,
+                    32,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    32,
+                    32,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    16,
+                    2,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    32,
+                    3,
+                    DType::F32,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+            CudaKernelCacheKey::new(
+                CudaKernelDescriptor::new(
+                    "wmma_tf32_f32",
+                    GemmShape::new(4096, 4096, 4096),
+                    64,
+                    64,
+                    32,
+                    2,
+                    DType::F16,
+                )
+                .unwrap(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+            ),
+        ];
+
+        for variant in &variants {
+            assert_ne!(
+                base_hash,
+                variant.stable_hash(),
+                "variant unexpectedly produced the same stable_hash as base"
+            );
+        }
+    }
+
+    // 正準エンコーディング非曖昧性: フラグ境界の移動（["ab","c"] vs
+    // ["a","bc"]）が長さプレフィクス方式のため異なるバイト列・異なる
+    // ハッシュになること（区切り文字方式だと `"ab" + "c"` == `"a" + "bc"`
+    // に縮退しうる、というリスクをここで否定する）。
+    #[test]
+    fn canonical_encoding_disambiguates_flag_boundaries() {
+        let key_ab_c = CudaKernelCacheKey::new(
+            sample_descriptor(),
+            (8, 0),
+            (12, 9),
+            vec!["ab".to_string(), "c".to_string()],
+        );
+        let key_a_bc = CudaKernelCacheKey::new(
+            sample_descriptor(),
+            (8, 0),
+            (12, 9),
+            vec!["a".to_string(), "bc".to_string()],
+        );
+        assert_ne!(key_ab_c.canonical_bytes(), key_a_bc.canonical_bytes());
+        assert_ne!(key_ab_c.stable_hash(), key_a_bc.stable_hash());
+    }
+
+    // 命名規則: `cache_entry_dir_name()` が `kernel.<name>.` + 16 桁小文字
+    // hex の形式であり、パスセパレータを含まないこと（DeepGEMM
+    // `compiler.hpp:102` の hex16 に対応。イシュー #506）。
+    #[test]
+    fn cache_entry_dir_name_has_expected_format() {
+        let key = sample_key();
+        let name = key.cache_entry_dir_name().expect("must succeed");
+
+        let expected_prefix = format!("kernel.{}.", key.descriptor().kernel_name());
+        assert!(
+            name.starts_with(&expected_prefix),
+            "{name:?} must start with {expected_prefix:?}"
+        );
+
+        let hash_part = &name[expected_prefix.len()..];
+        assert_eq!(hash_part.len(), 16, "hash part must be 16 hex digits");
+        assert!(
+            hash_part
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "hash part must be lowercase hex: {hash_part:?}"
+        );
+        assert!(!name.contains('/') && !name.contains('\\') && !name.contains(".."));
+    }
+
+    // `resolve_cache_root` テスト共通の `workspace_root`（イシュー #506・
+    // PR #659 codex-review P0 再指摘対応）: 既存の全テストケース
+    // （`/opt/rust-ai-cache`・`/home/user/...`）とは無関係なパスにして
+    // おき、containment 検証が既存のフォールバック挙動を壊さないことを
+    // 既存テスト自体で回帰確認する（下記の専用テストは逆に workspace_root
+    // 配下を指すケースを検証する）。
+    fn unrelated_workspace_root() -> PathBuf {
+        PathBuf::from("/workspace/repository")
+    }
+
+    // キャッシュルート解決: env 上書き（override）が XDG_CACHE_HOME・
+    // HOME より優先されること。
+    #[test]
+    fn resolve_cache_root_prefers_override() {
+        let root = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("/opt/rust-ai-cache")),
+            Some(OsStr::new("/home/user/.cache")),
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("must succeed");
+        assert_eq!(root, PathBuf::from("/opt/rust-ai-cache"));
+    }
+
+    // キャッシュルート解決: override 欠落時は XDG_CACHE_HOME にフォール
+    // バックし、`rust-ai-library/cuda` サブパスを付加すること。
+    #[test]
+    fn resolve_cache_root_falls_back_to_xdg_cache_home() {
+        let root = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            Some(OsStr::new("/home/user/.cache")),
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("must succeed");
+        assert_eq!(
+            root,
+            PathBuf::from("/home/user/.cache/rust-ai-library/cuda")
+        );
+    }
+
+    // キャッシュルート解決: override・XDG_CACHE_HOME 欠落時は HOME に
+    // フォールバックし `.cache/rust-ai-library/cuda` を付加すること。
+    #[test]
+    fn resolve_cache_root_falls_back_to_home() {
+        let root = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            None,
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("must succeed");
+        assert_eq!(
+            root,
+            PathBuf::from("/home/user/.cache/rust-ai-library/cuda")
+        );
+    }
+
+    // キャッシュルート解決: 全欠落時は `CacheDirUnavailable`（panic なし）。
+    #[test]
+    fn resolve_cache_root_errs_when_all_missing() {
+        let result = resolve_cache_root(&unrelated_workspace_root(), None, None, None);
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: 空文字列の override は拒否する。
+    #[test]
+    fn resolve_cache_root_rejects_empty_override() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("")),
+            Some(OsStr::new("/home/user/.cache")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: 相対パスの override は拒否する（リポジトリツリー内へ
+    // キャッシュが落ちるのを防ぐ。イシュー #506 §4.4）。
+    #[test]
+    fn resolve_cache_root_rejects_relative_override() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("relative/cache/dir")),
+            Some(OsStr::new("/home/user/.cache")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: 相対パスの XDG_CACHE_HOME は拒否する（PR #659 レビュー
+    // 指摘。`XDG_CACHE_HOME=.` のようにカレントディレクトリ（呼び出し
+    // コンテキストによってはリポジトリツリー内）を指す相対パスを未検証で
+    // `Path::join` すると、override 検証を回避してキャッシュがリポジトリ
+    // ツリー内へ落ちてしまうため、override と同じ fail-closed 検証を課す）。
+    #[test]
+    fn resolve_cache_root_rejects_relative_xdg_cache_home() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            Some(OsStr::new("relative/xdg/cache")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: 相対パスの HOME は拒否する（PR #659 レビュー指摘。
+    // `HOME=.` 等の相対パスフォールバックを未検証で許すと override・
+    // XDG_CACHE_HOME と同じくリポジトリツリー内へキャッシュが落ちうる）。
+    #[test]
+    fn resolve_cache_root_rejects_relative_home() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            None,
+            Some(OsStr::new("relative/home")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（回帰テスト）: 空文字列の XDG_CACHE_HOME は「未設定」
+    // 扱いで HOME へフォールバックせず拒否する（PR #659 codex-review P0
+    // 指摘。旧実装は `if let Some(xdg) = xdg_cache_home && !xdg.is_empty()`
+    // というガード構造のため、`Some("")`（環境変数は設定済みだが値が空）が
+    // 分岐を素通りして有効な HOME があれば HOME 側の解決結果を返してしまう
+    // fail-closed 契約違反があった。`docs/cuda-jit-cache-design.md:19-22`
+    // の「三者とも空文字列を CacheDirUnavailable として拒否する」方針との
+    // 整合を検証する）。
+    #[test]
+    fn resolve_cache_root_rejects_empty_xdg_cache_home_even_with_valid_home() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            Some(OsStr::new("")),
+            Some(OsStr::new("/home/user")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（回帰テスト）: 空文字列の HOME も同様に拒否する
+    // （override・XDG_CACHE_HOME 双方が未設定かつ HOME のみ空文字列で
+    // 設定されているケース。上記 XDG のケースと対称に fail-closed である
+    // ことを確認する。PR #659 codex-review P0 指摘）。
+    #[test]
+    fn resolve_cache_root_rejects_empty_home() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            None,
+            None,
+            Some(OsStr::new("")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（PR #659 codex-review P0 再指摘そのものの再現テスト）:
+    // `RUST_AI_CUDA_CACHE_DIR` が `workspace_root` 配下を指す絶対パスの
+    // 場合は拒否する。codex-review が指摘した具体例
+    // `/workspace/repository/cache` をそのまま使う。
+    #[test]
+    fn resolve_cache_root_rejects_override_within_workspace_root() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("/workspace/repository/cache")),
+            None,
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証（PR #659 codex-review P0 再指摘。`..` を含む絶対パスに
+    // よる字句上の回避を防ぐ）: `/tmp/../workspace/repository/cache` は
+    // `Path::starts_with` の素朴なコンポーネント比較なら
+    // `workspace_root`（`/workspace/repository`）と先頭コンポーネントが
+    // 一致せず素通りしてしまうが、`..` 折り畳み後は `workspace_root` 配下
+    // になるため [`path_lexically_within`] の正規化込み比較で拒否される
+    // ことを確認する（codex-review 指摘の具体例そのもの）。
+    #[test]
+    fn resolve_cache_root_rejects_override_within_workspace_root_via_parent_dir_traversal() {
+        let result = resolve_cache_root(
+            &unrelated_workspace_root(),
+            Some(OsStr::new("/tmp/../workspace/repository/cache")),
+            None,
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: `XDG_CACHE_HOME` から導出したキャッシュルートが
+    // `workspace_root` 配下になる場合も override と同様に拒否する
+    // （PR #659 codex-review P0 再指摘: 3 分岐すべてを検証対象にする）。
+    #[test]
+    fn resolve_cache_root_rejects_xdg_cache_home_within_workspace_root() {
+        let result = resolve_cache_root(
+            Path::new("/workspace/repository"),
+            None,
+            Some(OsStr::new("/workspace/repository/.cache")),
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 安全側の検証: `HOME` から導出したキャッシュルートが `workspace_root`
+    // 配下になる場合も同様に拒否する（3 分岐目。上記 2 テストと対称）。
+    #[test]
+    fn resolve_cache_root_rejects_home_within_workspace_root() {
+        let result = resolve_cache_root(
+            Path::new("/workspace/repository"),
+            None,
+            None,
+            Some(OsStr::new("/workspace/repository")),
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 回帰ガード（advisor 指摘）: `workspace_root` containment 検証の追加が
+    // 「カレントディレクトリを境界に使う」という誤った実装に陥っていない
+    // ことを確認する。`workspace_root` が解決結果と無関係な場所を指す限り、
+    // XDG_CACHE_HOME／HOME フォールバックは引き続き成功しなければならない
+    // （`resolve_cache_root_falls_back_to_home` 等の既存テストと合わせ、
+    // workspace_root がたまたまホームディレクトリ等と重ならない限り誤検知
+    // しないことの明示的な回帰確認）。
+    #[test]
+    fn resolve_cache_root_succeeds_when_workspace_root_is_elsewhere() {
+        let root = resolve_cache_root(
+            Path::new("/some/other/workspace"),
+            None,
+            None,
+            Some(OsStr::new("/home/user")),
+        )
+        .expect("must succeed: workspace_root is unrelated to the resolved cache root");
+        assert_eq!(
+            root,
+            PathBuf::from("/home/user/.cache/rust-ai-library/cuda")
+        );
+    }
+
+    // PR #659 codex-review Bugbot 指摘の再現テスト: `workspace_root` が
+    // 相対パスだと `path_lexically_within` の `starts_with` 比較が絶対
+    // パスの候補と食い違い containment 判定が fail-open になる（本来
+    // ブロックすべきリポジトリ内キャッシュルートを受理してしまう）。
+    // `resolve_cache_root` は 3 分岐へ入る前に `workspace_root` の絶対
+    // パス性を検証して fail-closed で拒否しなければならない。
+    #[test]
+    fn resolve_cache_root_rejects_relative_workspace_root_even_when_override_is_within_it() {
+        let result = resolve_cache_root(
+            Path::new("workspace/repository"),
+            Some(OsStr::new("/workspace/repository/cache")),
+            None,
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 空文字列の `workspace_root`（`Path::new("")` は相対パス扱い）も
+    // 同じ fail-closed 経路で拒否されることを確認する。
+    #[test]
+    fn resolve_cache_root_rejects_empty_workspace_root() {
+        let result = resolve_cache_root(
+            Path::new(""),
+            None,
+            Some(OsStr::new("/home/user/.cache")),
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // 相対 `workspace_root` の拒否が特定の分岐（override）だけでなく
+    // 入口の共通ガードで行われていることを、XDG_CACHE_HOME 分岐でも
+    // 確認する（分岐ごとに個別実装していないことの回帰確認）。
+    #[test]
+    fn resolve_cache_root_rejects_relative_workspace_root_via_xdg_branch() {
+        let result = resolve_cache_root(
+            Path::new("relative/workspace"),
+            None,
+            Some(OsStr::new("/home/user/.cache")),
+            None,
+        );
+        assert!(matches!(result, Err(CudaError::CacheDirUnavailable { .. })));
+    }
+
+    // `path_lexically_within` の単体テスト（[`resolve_cache_root`] の
+    // `workspace_root` containment 検証で使う。PR #659 codex-review P0
+    // 再指摘対応で呼び出しを復元した）。
+    #[test]
+    fn path_lexically_within_detects_containment_after_normalizing_parent_dir() {
+        // `..` 折り畳み後は `/path/to/repository/cache` となり
+        // `/path/to/repository` 配下に収まる。
+        assert!(path_lexically_within(
+            Path::new("/path/to/outside/../repository/cache"),
+            Path::new("/path/to/repository"),
+        ));
+    }
+
+    #[test]
+    fn path_lexically_within_rejects_sibling_directory() {
+        // 兄弟ディレクトリ（`/path/to/repository-extra`）は
+        // `Path::starts_with` がコンポーネント単位の比較であり文字列前方
+        // 一致でないため、containment と誤判定されない。
+        assert!(!path_lexically_within(
+            Path::new("/path/to/repository-extra/cache"),
+            Path::new("/path/to/repository"),
+        ));
+    }
+
+    // `lexically_normalize` の単体テスト: `..` の畳み込み・ルートを
+    // 越える `..` の読み捨て・`.` の除去を直接検証する（fs I/O なしの
+    // 純関数であるため実ファイルシステムに依存せずテストできる）。
+    #[test]
+    fn lexically_normalize_collapses_parent_dir_components() {
+        assert_eq!(
+            lexically_normalize(Path::new("/path/to/outside/../repository/cache")),
+            PathBuf::from("/path/to/repository/cache")
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_ignores_parent_dir_past_root() {
+        // ルート直下からの `..` は OS のパス解決と同様にルート自身へ
+        // とどまる（それ以上遡らない）。
+        assert_eq!(
+            lexically_normalize(Path::new("/../repository")),
+            PathBuf::from("/repository")
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_removes_cur_dir_components() {
+        assert_eq!(
+            lexically_normalize(Path::new("/path/./to/./repository")),
+            PathBuf::from("/path/to/repository")
+        );
+    }
+
+    #[test]
+    fn lexically_normalize_preserves_leading_parent_dir_in_relative_path() {
+        // 絶対パス前提の呼び出し元（`resolve_cache_root`）では通常
+        // 到達しない経路だが、純関数としての境界挙動を明示する。
+        assert_eq!(
+            lexically_normalize(Path::new("../repository")),
+            PathBuf::from("../repository")
+        );
+    }
+
+    // トラバーサル防御（A03）: `cache_entry_path`（実体は
+    // `cache_entry_path_in`）の組み立て結果が常に `root` 配下
+    // （`starts_with(root)`）であること。既存の
+    // `new_rejects_path_traversal_kernel_name` と合わせ二層で担保する
+    // （イシュー #506 §6）。`cache_entry_path` 自体ではなく
+    // `cache_entry_path_in` を直接呼ぶのは、テスト実行環境の実 `HOME` に
+    // 依存させずに `root` を注入で決定化するため（`resolve_cache_root` と
+    // 同じパターン）。
+    #[test]
+    fn cache_entry_path_stays_within_cache_root() {
+        let root = PathBuf::from("/opt/rust-ai-cache");
+        let key = sample_key();
+
+        let entry_path = cache_entry_path_in(&root, &key).expect("must succeed");
+
+        assert!(entry_path.starts_with(&root));
+        let entry_name = key.cache_entry_dir_name().expect("must succeed");
+        assert_eq!(entry_path, root.join(entry_name));
     }
 
     // 実機（DGX Spark GB10 等）依存: `libnvrtc` の実バージョンを問い合わせる。
