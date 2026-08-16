@@ -1149,6 +1149,16 @@ mod tests {
         // `VEC_WIDTH`（4）整除を数学的に包含することをここで固定する。
         // `validate` が Ok を返す `staged=true` 構成は必ず `bk`/`bn` が
         // 4 の倍数であることを bm/bn/bk/wm/wn の小さな全域で検査する。
+        //
+        // 注意（イシュー #535 review 再指摘）: この入力集合で `validate`
+        // を通る `bk` は元々すべて 8 の倍数（＝ 4 の倍数でもある）ため、
+        // 本テスト単体は「8 整除検査が 4 整除を包含する」という設計判断を
+        // 独立に保証しない（将来 `bk % 8` の検査が誤って `bk % 4` へ
+        // 弱められても、このテストは通り続けてしまう）。その退行を実際に
+        // 検知するのは直後の
+        // `validate_rejects_bk_that_is_vec_width_multiple_but_not_eight`
+        // であり、本テストは「現状の実装で Ok になる構成が包含関係と
+        // 矛盾しないこと」を固定する回帰ガードに留まる。
         for bm in [8u32, 16, 32, 64] {
             for bn in [8u32, 16, 32, 64] {
                 for bk in [4u32, 6, 8, 12, 16, 24, 32] {
@@ -1176,6 +1186,40 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn validate_rejects_bk_that_is_vec_width_multiple_but_not_eight() {
+        // `validate_ok_implies_vec_width_divisibility` がトートロジーに
+        // 陥る間隙を埋める直接的な回帰ガード（イシュー #535 review 再指摘）。
+        // `bk` が `VEC_WIDTH`（4）の倍数だが 8 の倍数ではない値（4・12・20・
+        // 28）を固定で用意し、`staged=true` かつ他フィールドは通常受理
+        // される値（bm=64,bn=64,wm=2,wn=2）に揃えたうえで、`validate` が
+        // 必ず `BkNotMultipleOfEight` で拒否することを検査する。将来
+        // 「既存 8 整除検査が VEC_WIDTH 整除を包含するので専用 variant は
+        // 不要」という設計判断（本ファイル [`TileConfig::validate`]
+        // ドキュメント参照）を壊して `bk % 8` を `bk % VEC_WIDTH` へ
+        // 弱める変更が入ると、このテストが直ちに失敗する。
+        for bk in [4u32, 12, 20, 28] {
+            let cfg = TileConfig {
+                bm: 64,
+                bn: 64,
+                bk,
+                wm: 2,
+                wn: 2,
+                staged: true,
+            };
+            assert!(
+                bk.is_multiple_of(TileConfig::VEC_WIDTH),
+                "テスト前提が崩れている: bk={bk} が VEC_WIDTH の倍数でない"
+            );
+            let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+            assert!(
+                matches!(err, TileConfigError::BkNotMultipleOfEight { bk: rejected_bk } if rejected_bk == bk),
+                "bk={bk}（VEC_WIDTH 倍数だが 8 の倍数でない）が validate({cfg:?}) で \
+                 BkNotMultipleOfEight 以外の結果になった: {err:?}"
+            );
         }
     }
 
