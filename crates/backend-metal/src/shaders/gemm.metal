@@ -464,11 +464,20 @@ kernel void gemm_simdgroup_tiled(
             // 〈loader.h〉が 128bit 幅相当の単位で読み出す方式を参考に、
             // 1 要素ずつのスカラーロードから変更）。アラインメント成立
             // 根拠:
-            //   - `crate::tile::TileConfig::validate`（tile.rs）が BK を
-            //     8 の倍数・BN を WN*8 の倍数（よって 8 の倍数）に dispatch
-            //     前へ検証する契約のため、A タイルの行長 BK・B タイルの
-            //     行長 BN はともに 4 の倍数であり、4 要素グループが行境界
-            //     をまたぐことはない
+            //   - `crate::tile::TileConfig::validate`（tile.rs）が
+            //     `staged=true` の構成に対し要求する `bk % 8 == 0`・
+            //     `bn % (wn*8) == 0`（`wn >= 1` のため `bn % 8 == 0` を
+            //     含意）という既存の 8 整除検査が、`TileConfig::VEC_WIDTH`
+            //     （4）整除を数学的に包含する（`8 | x ⟹ 4 | x`）。専用の
+            //     VEC_WIDTH 整除検査 variant は追加していない（`pub enum
+            //     TileConfigError` への variant 追加が下流の網羅的
+            //     `match` を破壊する P1 指摘・PR #672 codex-review を受け
+            //     既存 variant で拒否できる現行契約を維持する方針へ変更）。
+            //     この間接包含はテスト（tile.rs
+            //     `validate_ok_implies_vec_width_divisibility`）で固定
+            //     済み（イシュー #535）。この前提により A タイルの行長
+            //     BK・B タイルの行長 BN はともに 4 の倍数であり、4 要素
+            //     グループが行境界をまたぐことはない
             //   - `MetalGemm::dispatch_variant`（gemm.rs）が `SimdgroupTiled`
             //     向けに m/n/k を `crate::pad::pad8` で 8 の倍数へ実効
             //     次元パディング済みで渡す契約のため、`p0 = t*BK`・
@@ -477,15 +486,19 @@ kernel void gemm_simdgroup_tiled(
             //     バイト）境界に揃う（MTLBuffer 先頭はページ境界確保）
             //   - 共有メモリ側オフセット（`tile_b` の `BM*lda`）も 4 の倍数
             //     のため `threadgroup float4*` 再解釈も 16 バイト境界に揃う
-            //     （`lda = BK+TGP_PAD` は BK・TGP_PAD がともに 4 の倍数
-            //     〈`TileConfig::validate` が dispatch 前に検証〉のため
-            //     常に 4 の倍数。書き込み先添字 `r*lda+kk`／`kk*ldb+c_` も
-            //     同じ理由で常に 4 要素境界に揃う。イシュー #538）
-            // 上記は現行 `CANDIDATES`（tile.rs）の構成から導かれる十分
-            // 条件であり、将来 BK/BN が 4 で割り切れない構成へ変わると
-            // 前提が崩れる。そのため「グループ全 4 要素が in-bounds か」を
-            // 明示判定し、境界グループは範囲外アドレスへ一切触れず要素
-            // 単位のスカラー読み出し + 0 埋めへフォールバックする
+            //     （`lda = BK+TGP_PAD` は BK が上記 8 整除検査からの間接
+            //     包含で常に 4 の倍数、TGP_PAD（`TileConfig::pad`）も
+            //     `TGP_PAD_ELEMS=4` で常に 4 の倍数〈`TileConfig::validate`
+            //     が dispatch 前に検証〉のため常に 4 の倍数。書き込み先
+            //     添字 `r*lda+kk`／`kk*ldb+c_` も同じ理由で常に 4 要素境界
+            //     に揃う。イシュー #538）
+            // `TileConfig::validate` の既存 8 整除検査が上記を dispatch
+            // 前に fail-closed で拒否するため、将来 `CANDIDATES` に
+            // BK/BN が 8 で割り切れない構成を追加しようとしても検証段階
+            // で弾かれ本カーネルへ到達しない（防衛層。イシュー #535）。
+            // それでも「グループ全 4 要素が in-bounds か」を本シェーダ側
+            // でも明示判定し、境界グループは範囲外アドレスへ一切触れず
+            // 要素単位のスカラー読み出し + 0 埋めへフォールバックする
             // （最適化を理由に手動境界チェックを省略しない。REQ-8・
             // `.claude/rules/coding-rust.md`「カーネル実装の境界検査」）。
             // 共有メモリへ格納される値は変更前のスカラーループとビット単位
