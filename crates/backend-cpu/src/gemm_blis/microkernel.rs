@@ -138,20 +138,23 @@ pub trait Microkernel: Copy + Sync {
     /// であり、内部の `unsafe`（intrinsics 呼び出し）はトークンの生成
     /// 経路（検出済みの場合のみ構築可能）によって健全性が保証される。
     ///
-    /// ## 公開 API 非破壊（#691 レビュー指摘への対応）
+    /// ## 公開 API 非破壊（#691 レビュー指摘への再対応）
     ///
-    /// #557 で `ldc` 対応版（[`Self::run_with_ldc`]）を追加した際、本
-    /// メソッド自体のシグネチャを変更すると `backend_cpu::gemm_blis`
-    /// モジュールが `pub` であるため既存呼び出し元（クレート外部から
-    /// `Microkernel` を実装・呼び出すコード）を壊す（AGENTS.md「公開 API
-    /// の破壊的変更は P1」）。そのため本メソッドは従来シグネチャを維持し、
-    /// `ldc = Self::NR`（密パッキング契約）で [`Self::run_with_ldc`] を
-    /// 呼ぶデフォルト実装のみを持つ薄い後方互換ラッパーとする。各実装
-    /// （[`ScalarKernel`] 等）は `run_with_ldc` のみをオーバーライドすれば
-    /// よく、本メソッドを再実装する必要はない。
-    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
-    }
+    /// 当初 #691 対応として本メソッドへデフォルト実装（[`Self::run_with_ldc`]
+    /// への委譲）を与え `run_with_ldc` を必須メソッドとしたが、これは
+    /// 「従来 `run` のみを実装するクレート外部の `Microkernel` 実装」が
+    /// 新設の必須メソッド `run_with_ldc` 未実装により `E0046` でコンパイル
+    /// 不能になる別の破壊的変更を生んでいた（codex-review・Cursor Bugbot
+    /// 双方の再指摘）。そのため本メソッドを**従来どおり必須メソッド
+    /// （デフォルト実装なし）として維持**し、`ldc` 拡張は
+    /// [`Self::run_with_ldc`] 側にのみデフォルト実装を持たせる非対称な形へ
+    /// 修正した。既存の外部実装（`run` のみをオーバーライド）は無変更で
+    /// コンパイル可能になる（`run_with_ldc` のデフォルト実装が `run` へ
+    /// フォールバックする。[`Self::run_with_ldc`] のドキュメント参照）。
+    /// 組み込み実装（[`ScalarKernel`] 等）は `run` の実装を
+    /// `run_with_ldc(..., Self::NR, ...)` への委譲として与えつつ、
+    /// `run_with_ldc` 自体は ISA ごとの直接 C 経路（#557）を実装する。
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize);
 
     /// `ldc` 契約版（#557: 完全タイルの C 直接ロード/ストア）。`c` は要素
     /// `c[i * ldc + j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする
@@ -164,9 +167,42 @@ pub trait Microkernel: Copy + Sync {
     ///   する。コピーイン/コピーアウトが不要になる（#557 の主目的）
     /// - 端タイル: 従来どおり `MAX_TILE` スタックバッファの先頭
     ///   `MR*NR` 要素を渡し `ldc = NR` とする（現行の密パッキング契約は
-    ///   `ldc = NR` の特殊ケースとして包含される。[`Self::run`] のデフォルト
-    ///   実装が行う呼び出しと同一）
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize);
+    ///   `ldc = NR` の特殊ケースとして包含される）
+    ///
+    /// ## デフォルト実装（#691 再指摘への対応。公開 API 非破壊）
+    ///
+    /// 本メソッドを必須にすると [`Self::run`] のみを実装する既存の外部
+    /// `Microkernel` 実装を破壊するため、デフォルト実装を設けて
+    /// オーバーライド不要にする:
+    ///
+    /// - `ldc == Self::NR`（密パッキング契約）: 追加コピーなしで
+    ///   [`Self::run`] へそのまま委譲する
+    /// - `ldc != Self::NR`（#557 の直接 C 経路が使われるケース）:
+    ///   [`Self::run`] は `ldc = NR` の密パッキングしか扱えないため、
+    ///   ヒープ確保した `MR*NR` 要素のスクラッチタイルへ `c` の現在値を
+    ///   `ldc` ストライドでギャザーし、[`Self::run`] を密パッキング契約で
+    ///   呼んだ後、結果を `ldc` ストライドで `c` へスキャッタし直す
+    ///   （正しさ優先のフォールバック。#557 が狙うコピー往復削減の効果は
+    ///   本フォールバック経路には及ばないが、組み込みカーネル
+    ///   （[`ScalarKernel`]／[`NeonKernel`]／[`Avx2Kernel`]／
+    ///   [`Avx512Kernel`]）は全て本メソッドを直接オーバーライドしており
+    ///   本番の駆動経路（[`super::gemm_blis_region`]）はこのフォールバック
+    ///   を通らない）
+    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+        if ldc == Self::NR {
+            self.run(ap, bp, c, kc_len);
+            return;
+        }
+        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len());
+        let mut tile = vec![0.0f32; Self::MR * Self::NR];
+        for i in 0..Self::MR {
+            tile[i * Self::NR..(i + 1) * Self::NR].copy_from_slice(&c[i * ldc..i * ldc + Self::NR]);
+        }
+        self.run(ap, bp, &mut tile, kc_len);
+        for i in 0..Self::MR {
+            c[i * ldc..i * ldc + Self::NR].copy_from_slice(&tile[i * Self::NR..(i + 1) * Self::NR]);
+        }
+    }
 }
 
 /// 全 arch 共通のスカラーフォールバックトークン。検出不要のため
@@ -177,6 +213,10 @@ pub struct ScalarKernel;
 impl Microkernel for ScalarKernel {
     const MR: usize = scalar::MR;
     const NR: usize = scalar::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+    }
 
     fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
         scalar::kernel_with_ldc(ap, bp, c, ldc, kc_len);
@@ -193,6 +233,10 @@ pub struct NeonKernel;
 impl Microkernel for NeonKernel {
     const MR: usize = neon::MR;
     const NR: usize = neon::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+    }
 
     fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
         neon::kernel_with_ldc(ap, bp, c, ldc, kc_len);
@@ -227,6 +271,10 @@ impl Avx2Kernel {
 impl Microkernel for Avx2Kernel {
     const MR: usize = avx2::MR;
     const NR: usize = avx2::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+    }
 
     fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
         // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
@@ -264,6 +312,10 @@ impl Avx512Kernel {
 impl Microkernel for Avx512Kernel {
     const MR: usize = avx512::MR;
     const NR: usize = avx512::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+    }
 
     fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
         // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
@@ -349,6 +401,78 @@ impl Isa {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `run` のみをオーバーライドする「クレート外部実装」を模したトークン
+    /// （#691 再指摘への回帰テスト）。`Microkernel::run_with_ldc` は
+    /// デフォルト実装のみに頼り、MR=2・NR=2 の単純な mul_add 累積を
+    /// 密パッキング（`ldc == NR`）契約でのみ行う。
+    #[derive(Clone, Copy)]
+    struct LegacyRunOnlyKernel;
+
+    impl Microkernel for LegacyRunOnlyKernel {
+        const MR: usize = 2;
+        const NR: usize = 2;
+
+        fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+            for i in 0..Self::MR {
+                for j in 0..Self::NR {
+                    let mut acc = c_tile[i * Self::NR + j];
+                    for p in 0..kc_len {
+                        acc = ap[p * Self::MR + i].mul_add(bp[p * Self::NR + j], acc);
+                    }
+                    c_tile[i * Self::NR + j] = acc;
+                }
+            }
+        }
+    }
+
+    /// `run` のみを実装するレガシー実装は、密パッキング契約（`ldc == NR`）
+    /// では追加コピーなしで `run_with_ldc` のデフォルト実装から呼び出せる
+    /// （#691 再指摘: 公開 API 非破壊の核心シナリオ）。
+    #[test]
+    fn run_with_ldc_default_impl_delegates_to_run_when_ldc_equals_nr() {
+        let k = LegacyRunOnlyKernel;
+        let ap = [1.0f32, 2.0, 3.0, 4.0]; // kc_len=2, MR=2 (p-major)
+        let bp = [5.0f32, 6.0, 7.0, 8.0]; // kc_len=2, NR=2 (p-major)
+        let mut via_run = [0.0f32; 4];
+        k.run(&ap, &bp, &mut via_run, 2);
+
+        let mut via_default_ldc = [0.0f32; 4];
+        k.run_with_ldc(&ap, &bp, &mut via_default_ldc, 2, 2);
+
+        assert_eq!(
+            via_run, via_default_ldc,
+            "ldc == NR では run へ委譲するはず"
+        );
+    }
+
+    /// `run` のみを実装するレガシー実装でも、`ldc != NR`（#557 の直接 C
+    /// 経路が使うストライド）で呼ばれた場合はギャザー/スキャッタの
+    /// フォールバックにより正しい結果を返す（正しさ優先。性能は
+    /// 組み込みカーネルほど出ないがコンパイル不能にはならない）。
+    #[test]
+    fn run_with_ldc_default_impl_gather_scatter_fallback_matches_dense_result() {
+        let k = LegacyRunOnlyKernel;
+        let ap = [1.0f32, 2.0, 3.0, 4.0];
+        let bp = [5.0f32, 6.0, 7.0, 8.0];
+
+        // 密パッキング（ldc = NR = 2）で得られる期待値。
+        let mut dense = [0.0f32; 4];
+        k.run_with_ldc(&ap, &bp, &mut dense, 2, 2);
+
+        // ldc = 3 の広い C バッファ（行間に 1 要素のギャップ）へ同じ演算を行う。
+        // 初期値は 0 埋めなので dense と同じ結果になるはず。
+        let mut strided = [0.0f32; 6];
+        k.run_with_ldc(&ap, &bp, &mut strided, 3, 2);
+
+        assert_eq!(strided[0], dense[0]);
+        assert_eq!(strided[1], dense[1]);
+        assert_eq!(strided[3], dense[2]);
+        assert_eq!(strided[4], dense[3]);
+        // ギャップ列（各行末尾）には触れない契約であるはず。
+        assert_eq!(strided[2], 0.0);
+        assert_eq!(strided[5], 0.0);
+    }
 
     #[test]
     fn select_isa_prefers_avx512_over_avx2() {
