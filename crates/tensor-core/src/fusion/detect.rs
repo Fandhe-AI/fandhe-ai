@@ -33,7 +33,31 @@ use crate::dispatch::DType;
 /// 公開する（`autodiff` → `tensor-core` の依存方向のみで完結し、逆依存
 /// を作らない）。値の重複定義を避けるため、遅延評価経路側で同名の
 /// 定数を再定義しないこと。
+///
+/// **#588 での意味論の精密化**: 本定数は **elementwise ノード数のみ**
+/// に適用する（`FusionOp::is_elementwise()` を満たすノード。reduction・
+/// broadcast は含まない）。softmax パターン（`Max → Broadcast → Sub →
+/// Exp → Sum → Broadcast → Div` の 7 ノード）は elementwise が 3 個
+/// （`Sub`／`Exp`／`Div`）のみのため、この上限の下で全 7 ノードが単一
+/// セグメントに収まる。reduction／broadcast は行スカラー 1 個分の
+/// レジスタしか消費せず、elementwise 中間列とはレジスタ圧のコスト構造が
+/// 異なるため elementwise 数のみを数える対象とする判断（#588 実装計画
+/// §3.3）。総ノード数の暴走防止は [`MAX_FUSED_SEGMENT_NODES`] が別途担う。
 pub const MAX_FUSED_CHAIN_LEN: usize = 6;
+
+/// 融合セグメントの総ノード数上限（#588）。
+///
+/// [`MAX_FUSED_CHAIN_LEN`] が elementwise ノード数のみに適用される
+/// 意味論へ精密化されたことに伴い、reduction／broadcast を含めた総数の
+/// 暴走を防ぐために新設する決定的打ち切り上限（挿入前判定。既存の
+/// `MAX_FUSED_CHAIN_LEN` 挿入前判定パターンをそのまま踏襲する）。
+/// `2 × MAX_FUSED_CHAIN_LEN` を初期値とする（RMSNorm・softmax のような
+/// 「reduction/broadcast が elementwise と概ね同数以下で交互に現れる」
+/// 典型パターンを 1 セグメントに収めつつ、無制限な連鎖成長を防ぐための
+/// 実装判断の定数。ガードレール閾値・テスト許容誤差ではないためユーザー
+/// 承認は要さないが、[`MAX_FUSED_CHAIN_LEN`] と同様 TASK-12.2 系の実測
+/// （#602 等）で見直し可能な形で定数化しておく。#588 実装計画 §3.3）。
+pub const MAX_FUSED_SEGMENT_NODES: usize = 2 * MAX_FUSED_CHAIN_LEN;
 
 /// 融合セグメント成立に要する最小 elementwise ノード数。
 ///
@@ -110,42 +134,52 @@ pub(crate) enum FusionDecision {
 ///
 /// 1. 到達可能集合 `reachable` を `{root}` で初期化する。セグメント軸
 ///    `segment_axis`（`Option<Option<usize>>`。外側 `None` は「まだ
-///    reduction を含んでいない」、内側は reduction の `dim`）を `None`
-///    で初期化する。
+///    reduction／broadcast を含んでいない」、内側は reduction／broadcast
+///    の `dim`）を `None` で初期化する。elementwise 数の別カウンタ
+///    `elementwise_count` を 0 で初期化する（#588。「#588 での意味論の
+///    精密化」参照）。
 /// 2. `id` を `root.0` から `0` まで降順に走査し、`reachable` に含まれる
 ///    ノードのみを処理する:
-///    - elementwise（`Add`／`Mul`／`Relu`／`Exp`／`Tanh`／`Rsqrt`）なら:
+///    - elementwise（`Add`／`Mul`／`Sub`／`Div`／`Relu`／`Exp`／`Tanh`／
+///      `Rsqrt`）なら:
 ///      - `dtype != F32` または `contiguous == false` を検出した時点で
 ///        走査全体を打ち切り [`FusionDecision::Fallback`] を返す
 ///        （設計書 §3.2 (e)・セグメント全体を非融合にする方針）。
-///      - 現在のセグメントサイズが [`MAX_FUSED_CHAIN_LEN`] **に達して
-///        いれば**、このノードはセグメントへ追加せず・入力も
+///      - `elementwise_count` が [`MAX_FUSED_CHAIN_LEN`] に達しているか
+///        `included.len()`（総数）が [`MAX_FUSED_SEGMENT_NODES`] に
+///        **達していれば**、このノードはセグメントへ追加せず・入力も
 ///        `reachable` へ展開しない（＝それ自身が打ち切り境界となり、
 ///        後段の葉抽出で外部入力として扱われる。設計書 §3.2 (d)）。
 ///        この判定は「`included` へ挿入する前」に行う。fan-in で同一
 ///        ノードが複数経路から `reachable` に入りうるため、挿入後に
 ///        上限を検査すると別経路から先に `reachable` 入りしていた
-///        ノードが上限到達後も処理され `included.len()` が上限を
-///        超過しうる（#162 レビュー指摘）。挿入前判定であれば
-///        `included.len()` は走査順・到達経路によらず常に
-///        [`MAX_FUSED_CHAIN_LEN`] 以下に収まる。
-///      - 上限未到達ならセグメントへ追加し、このノードの入力を
-///        `reachable` へ追加して走査を継続する。
-///    - reduction（`Sum`／`Max`）なら（#586 の境界再定義）:
+///        ノードが上限到達後も処理され各カウンタが上限を超過しうる
+///        （#162 レビュー指摘）。挿入前判定であれば各カウンタは走査順・
+///        到達経路によらず常に上限以下に収まる。
+///      - 上限未到達ならセグメントへ追加し（`elementwise_count` も
+///        加算）、このノードの入力を `reachable` へ追加して走査を継続
+///        する。
+///    - reduction（`Sum`／`Max`）または broadcast（`Broadcast`。#588）
+///      なら（#586 の境界再定義・#588 で broadcast へ拡張）:
 ///      - `dtype != F32` または `contiguous == false` は elementwise と
 ///        同様に走査全体を打ち切る。
 ///      - `segment_axis` が未確定（`None`）なら、このノードの `dim` を
 ///        セグメント軸として確定する（`Option<usize>::get_or_insert`。
-///        「セグメント内で最初に含まれる reduction の `dim` がセグメント
-///        軸を確定する」の実体。降順走査のため root に近い側＝走査で
-///        最初に到達する reduction が優先される）。
-///      - `dim` が `segment_axis` と一致すれば elementwise と同じ扱い
-///        （上限判定→セグメントへ追加→入力を `reachable` へ展開）で
-///        セグメントへ組み込む。
+///        「セグメント内で最初に含まれる reduction／broadcast の `dim`
+///        がセグメント軸を確定する」の実体。降順走査のため root に近い
+///        側＝走査で最初に到達するノードが優先される——softmax パターン
+///        では `Broadcast` が `Sum`／`Max` より root 側に現れるため、
+///        `Broadcast` が先にセグメント軸を確定し、後続（深部）の
+///        `Sum`／`Max` がそれと一致する必要がある）。
+///      - `dim` が `segment_axis` と一致すれば、`included.len()`（総数）
+///        が [`MAX_FUSED_SEGMENT_NODES`] 未満である限りセグメントへ
+///        組み込む（`elementwise_count` は加算しない。#588 の意味論
+///        精密化により reduction／broadcast は elementwise 数上限の
+///        対象外）。
 ///      - `dim` が `segment_axis` と**一致しなければ**、このノードは
 ///        セグメントへ組み込まず・入力も展開しない（＝境界ノードとして
 ///        葉になる。受け入れ基準「reduction 軸が一致しない連鎖は分断
-///        される」の実体）。
+///        される」の実体。broadcast も同じ扱い）。
 ///    - 融合境界（`Gemm`）または `Input` なら、それ自体を入力方向へは
 ///      展開せず、そのノード ID を後段で葉として扱う（設計書 §3.2
 ///      (a)(b)）。ただしこの時点でも `dtype != F32` または
@@ -154,14 +188,16 @@ pub(crate) enum FusionDecision {
 ///      `FusionGraph::push` の binary shape 検証コメントが明言する契約: broadcast
 ///      view は `push` 時点では拒否せず `contiguous: false` として本
 ///      関数の非融合フォールバック判定に委ねられる。境界ノードだから
-///      といって検証を素通りさせない）。軸不一致で境界化した reduction
-///      ノードもこの分岐と同じ検証（`dtype`／`contiguous`）を受ける。
+///      といって検証を素通りさせない）。軸不一致で境界化した
+///      reduction／broadcast ノードもこの分岐と同じ検証（`dtype`／
+///      `contiguous`）を受ける。
 /// 3. 走査完了後、セグメントに含まれるノードが 1 個でも `dtype`／
 ///    `contiguous` 違反で打ち切られていなければ、セグメントの各ノードが
 ///    参照する入力のうちセグメントに含まれないものを葉として集約する
 ///    （重複除去・昇順ソート）。
 /// 4. セグメントのノード数が [`MIN_FUSED_CHAIN_LEN`] 未満なら
-///    [`FallbackReason::ChainTooShort`] で非融合とする。
+///    [`FallbackReason::ChainTooShort`] で非融合とする（この判定は
+///    従来どおり `included.len()`〈総数〉で行う。#588 実装計画 §3.3）。
 ///
 /// **root は従来どおり elementwise のみ許可**（reduction root は
 /// [`FallbackReason::RootNotElementwise`] のまま。RMSNorm／softmax の
@@ -199,14 +235,22 @@ pub(crate) fn detect_fusion(
     let mut reachable: BTreeSet<usize> = BTreeSet::new();
     reachable.insert(root.0);
 
-    // セグメントに含まれる elementwise／reduction ノード（発見順。降順
-    // 走査のため root に近い側から入る。最終的に昇順へソートし直す）。
+    // セグメントに含まれる elementwise／reduction／broadcast ノード
+    // （発見順。降順走査のため root に近い側から入る。最終的に昇順へ
+    // ソートし直す）。
     let mut included: BTreeSet<usize> = BTreeSet::new();
 
-    // セグメント軸（#586）。`None` は「まだ reduction を含んでいない」、
-    // `Some(dim)` は確定済みのセグメント軸（`dim` は reduction 自体の
-    // `Option<usize>`）。最初に組み込まれた reduction がこれを確定する
-    // （関数doc「アルゴリズム」節参照）。
+    // セグメントに含まれる elementwise ノード数（#588: `included.len()`
+    // 〈総数〉とは別に数える。`MAX_FUSED_CHAIN_LEN` は elementwise 数のみ
+    // に適用する意味論へ精密化されたため。関数doc「#588 での意味論の
+    // 精密化」参照）。
+    let mut elementwise_count: usize = 0;
+
+    // セグメント軸（#586・#588 で broadcast にも適用範囲を拡張）。`None`
+    // は「まだ reduction／broadcast を含んでいない」、`Some(dim)` は
+    // 確定済みのセグメント軸（`dim` は reduction／broadcast 自体の
+    // `Option<usize>`）。最初に組み込まれた reduction／broadcast がこれを
+    // 確定する（関数doc「アルゴリズム」節参照）。
     let mut segment_axis: Option<Option<usize>> = None;
 
     for id in (0..=root.0).rev() {
@@ -226,24 +270,36 @@ pub(crate) fn detect_fusion(
             // 上限判定は `included` へ挿入する**前**に行う。fan-in を含む
             // DAG では同一ノードが複数経路から先に `reachable` へ入りうる
             // ため、挿入後に上限を検査すると別経路由来のノードが上限到達後
-            // も処理されてしまい `included.len()` が `MAX_FUSED_CHAIN_LEN`
-            // を超過する（#162 レビュー指摘の反例: バランス木 fan-in）。
-            // 挿入前判定なら `included.len()` は到達経路・走査順によらず
-            // 常に上限以下に収まり、上限到達後のノードはそのまま外部入力
-            // （葉）として後段の葉抽出に委ねられる（設計書 §3.2 (d)）。
-            if included.len() >= MAX_FUSED_CHAIN_LEN {
+            // も処理されてしまい `included.len()` が上限を超過する（#162
+            // レビュー指摘の反例: バランス木 fan-in）。挿入前判定なら
+            // 各カウンタは到達経路・走査順によらず常に上限以下に収まり、
+            // 上限到達後のノードはそのまま外部入力（葉）として後段の葉
+            // 抽出に委ねられる（設計書 §3.2 (d)）。elementwise は
+            // [`MAX_FUSED_CHAIN_LEN`]（elementwise 数のみに適用。#588）と
+            // [`MAX_FUSED_SEGMENT_NODES`]（総数。#588）の両方を満たす
+            // 必要がある。
+            if elementwise_count >= MAX_FUSED_CHAIN_LEN || included.len() >= MAX_FUSED_SEGMENT_NODES
+            {
                 continue;
             }
             included.insert(id);
+            elementwise_count += 1;
             for input in node.op.inputs() {
                 reachable.insert(input.0);
             }
             continue;
         }
 
-        if let Some(dim) = node.op.reduction_dim() {
-            // reduction（Sum／Max）。#586: セグメント軸が一致する限り
-            // elementwise と同様にセグメントへ組み込める。
+        // reduction（Sum／Max）と broadcast（#588）は同じセグメント軸
+        // 一致判定を共有する（reduction が軸を確定する、broadcast が
+        // その軸で組み込まれる、あるいはその逆——降順走査のため softmax
+        // パターンでは root 側の `Broadcast` が先に軸を確定し、後続
+        // （深部）の `Sum`／`Max` がそれと一致する必要がある。#588
+        // 実装計画 §3.4）。総数上限のみを適用し（elementwise 数上限は
+        // 適用しない。#588 の意味論精密化）、`MAX_FUSED_CHAIN_LEN` は
+        // 検査しない。
+        let dim = node.op.reduction_dim().or_else(|| node.op.broadcast_dim());
+        if let Some(dim) = dim {
             if node.meta.dtype != DType::F32 {
                 return Ok(FusionDecision::Fallback(FallbackReason::UnsupportedDtype));
             }
@@ -260,11 +316,12 @@ pub(crate) fn detect_fusion(
             if !axis_matches {
                 // 軸不一致: セグメントへ組み込まず・入力も展開しない
                 // （境界ノードとして葉になる。受け入れ基準「reduction
-                // 軸が一致しない連鎖は分断される」の実体）。
+                // 軸が一致しない連鎖は分断される」の実体。broadcast も
+                // 同じ扱い）。
                 continue;
             }
 
-            if included.len() >= MAX_FUSED_CHAIN_LEN {
+            if included.len() >= MAX_FUSED_SEGMENT_NODES {
                 continue;
             }
             included.insert(id);
@@ -831,5 +888,190 @@ mod tests {
             result,
             Err(FusionGraphError::NodeIdOutOfRange { id: 5, len: 1 })
         );
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 1」）: RMSNorm 行方向
+    /// パターン（`Mul(x,x) → Sum{None} → Rsqrt → Broadcast{None} →
+    /// Mul(bc, x)`）が単一セグメントとして検出される。#586 テスト
+    /// [`rmsnorm_like_chain_with_full_reduction_is_a_single_segment`]
+    /// との違いは、正規化係数を `Broadcast` で明示的に元の行 shape へ
+    /// 拡張してから `x` と乗じる点（RMSNorm の実際の計算構造そのもの）。
+    #[test]
+    fn rmsnorm_pattern_with_explicit_broadcast_is_a_single_segment() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[8])).unwrap();
+        let sq = g.push(FusionOp::Mul(x, x), f32_meta(&[8])).unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: sq,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        let rsqrt = g.push(FusionOp::Rsqrt(sum), f32_meta(&[])).unwrap();
+        let bc = g
+            .push(
+                FusionOp::Broadcast {
+                    input: rsqrt,
+                    dim: None,
+                },
+                f32_meta(&[8]),
+            )
+            .unwrap();
+        let out = g.push(FusionOp::Mul(bc, x), f32_meta(&[8])).unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        assert_eq!(seg.nodes, vec![sq, sum, rsqrt, bc, out]);
+        assert_eq!(seg.leaves, vec![x]);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 1・3」）: softmax
+    /// パターン（`Max → Broadcast → Sub → Exp → Sum → Broadcast → Div` の
+    /// 7 ノード）が単一セグメントとして検出される。elementwise は
+    /// `Sub`／`Exp`／`Div` の 3 個のみで [`MAX_FUSED_CHAIN_LEN`]（6）以下
+    /// のため、#588 の意味論精密化（elementwise 数のみに上限を適用）に
+    /// より全 7 ノードが 1 セグメントに収まることを直接検証する。
+    #[test]
+    fn softmax_pattern_with_seven_nodes_is_a_single_segment() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[2, 8])).unwrap();
+        let mx = g
+            .push(
+                FusionOp::Max {
+                    input: x,
+                    dim: Some(1),
+                },
+                f32_meta(&[2]),
+            )
+            .unwrap();
+        let bc1 = g
+            .push(
+                FusionOp::Broadcast {
+                    input: mx,
+                    dim: Some(1),
+                },
+                f32_meta(&[2, 8]),
+            )
+            .unwrap();
+        let sub = g.push(FusionOp::Sub(x, bc1), f32_meta(&[2, 8])).unwrap();
+        let exp = g.push(FusionOp::Exp(sub), f32_meta(&[2, 8])).unwrap();
+        let sm = g
+            .push(
+                FusionOp::Sum {
+                    input: exp,
+                    dim: Some(1),
+                },
+                f32_meta(&[2]),
+            )
+            .unwrap();
+        let bc2 = g
+            .push(
+                FusionOp::Broadcast {
+                    input: sm,
+                    dim: Some(1),
+                },
+                f32_meta(&[2, 8]),
+            )
+            .unwrap();
+        let div = g.push(FusionOp::Div(exp, bc2), f32_meta(&[2, 8])).unwrap();
+
+        let decision = detect_fusion(&g, div).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        assert_eq!(seg.nodes, vec![mx, bc1, sub, exp, sm, bc2, div]);
+        assert_eq!(seg.nodes.len(), 7);
+        assert_eq!(seg.leaves, vec![x]);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6）: `Broadcast` の軸がセグメント軸
+    /// （root 側の `Sum{dim:Some(0)}` が確定）と一致しない場合、
+    /// `mismatched_reduction_axis_splits_the_segment`（`Sum`／`Sum` 間の
+    /// 軸不一致）と同様に境界（葉）化される。
+    #[test]
+    fn mismatched_broadcast_axis_splits_the_segment() {
+        let mut g = FusionGraph::new();
+        let per_row = g.push(FusionOp::Input, f32_meta(&[2])).unwrap();
+        // 軸不一致になる Broadcast（root 側で確定するセグメント軸
+        // Some(0) とは異なる Some(1) を使う）。
+        let bc_wrong = g
+            .push(
+                FusionOp::Broadcast {
+                    input: per_row,
+                    dim: Some(1),
+                },
+                f32_meta(&[2, 3]),
+            )
+            .unwrap();
+        let n2 = g.push(FusionOp::Exp(bc_wrong), f32_meta(&[2, 3])).unwrap();
+        let seg_axis_setter = g
+            .push(
+                FusionOp::Sum {
+                    input: n2,
+                    dim: Some(0),
+                },
+                f32_meta(&[3]),
+            )
+            .unwrap();
+        let n3 = g
+            .push(FusionOp::Tanh(seg_axis_setter), f32_meta(&[3]))
+            .unwrap();
+        let root = g.push(FusionOp::Relu(n3), f32_meta(&[3])).unwrap();
+
+        let decision = detect_fusion(&g, root).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        // bc_wrong（軸不一致）は組み込まれず、その手前（per_row）も
+        // 未到達のままセグメント外＝bc_wrong 自身が葉になる。
+        assert_eq!(seg.nodes, vec![n2, seg_axis_setter, n3, root]);
+        assert_eq!(seg.leaves, vec![bc_wrong]);
+    }
+
+    /// #588 実装計画 §3.3: `MAX_FUSED_SEGMENT_NODES`（総数上限。12）は
+    /// [`MAX_FUSED_CHAIN_LEN`]（elementwise 数上限。6）とは独立に決定的
+    /// 打ち切りを行う。本テストは elementwise が root の 1 個のみで、
+    /// 残り全てが `Broadcast{dim:None}`（scalar 上の恒等写像として連鎖
+    /// させる）という「reduction／broadcast が elementwise 数上限を
+    /// 大きく下回るまま総数上限に達する」構成にすることで、打ち切りが
+    /// 総数上限単独の効果であることを示す。
+    #[test]
+    fn total_node_cap_truncates_independently_of_elementwise_cap() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[])).unwrap();
+        let mut prev = x;
+        let mut broadcasts = Vec::new();
+        for _ in 0..12 {
+            let b = g
+                .push(
+                    FusionOp::Broadcast {
+                        input: prev,
+                        dim: None,
+                    },
+                    f32_meta(&[]),
+                )
+                .unwrap();
+            broadcasts.push(b);
+            prev = b;
+        }
+        let root = g.push(FusionOp::Relu(prev), f32_meta(&[])).unwrap();
+
+        let decision = detect_fusion(&g, root).unwrap();
+        let FusionDecision::Fuse(seg) = decision else {
+            panic!("expected Fuse, got {decision:?}");
+        };
+        assert_eq!(seg.nodes.len(), MAX_FUSED_SEGMENT_NODES);
+        // root（elementwise 1 個）+ broadcasts[1..12]（11 個）で 12 個
+        // ちょうど。broadcasts[0] が打ち切り境界となり葉になる
+        // （`seven_stage_chain_is_cut_off_deterministically_at_cap` と
+        // 同型の「root から数えて上限個」パターン）。
+        assert_eq!(&seg.nodes[..11], &broadcasts[1..]);
+        assert_eq!(seg.nodes[11], root);
+        assert_eq!(seg.leaves, vec![broadcasts[0]]);
     }
 }
