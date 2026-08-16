@@ -1698,9 +1698,25 @@ mod cost_model_tests {
             .find(|c| c.block_m().get() == 128 && c.block_n().get() == 128)
             .expect("128x128 candidate must exist for this shape/budget");
 
+        // l1_bytes_per_cycle_per_sm はコメントどおり device-wide 換算時に
+        // `num_sms` 倍される（`estimate_candidate_cost` L1 帯域計算参照）ため、
+        // num_sms を変えると l1_cycles 自体も変化してしまい L1 律速では
+        // base_cycles が num_sms 非依存にならない（#527 レビュー指摘: PR #675
+        // codex-review P2・Cursor Bugbot 双方が、旧パラメータ
+        // （l1=128・l2=4096）は 128x128 タイルで L1 律速となり base_cycles が
+        // num_sms に連動するため wave 効率補正項を削除しても検出できないと
+        // 指摘）。L2 帯域（`l2_bytes_per_cycle_device`）は device-wide 値を
+        // そのまま使い num_sms に依存しないため、L2 律速（l2_cycles >=
+        // l1_cycles）になるよう l2 帯域を十分小さく選ぶことで、num_sms を
+        // 63/64 間で変えても base_cycles（= l2_cycles）は真に不変になる。
+        // 128x128 タイル（warps_m=4, warps_n=8）では l1_traffic =
+        // 6 * l2_traffic が成り立つため、L2 律速の条件は
+        // `l1_bytes_per_cycle_per_sm * num_sms >= 6 * l2_bytes_per_cycle_device`。
+        // num_sms=63（最小値）でも成立するよう l2 帯域を 1024 に設定する
+        // （128 * 63 = 8064 >= 6 * 1024 = 6144）。
         let bandwidth = MeasuredBandwidth {
             l1_bytes_per_cycle_per_sm: NonZeroU64::new(128).expect("non-zero"),
-            l2_bytes_per_cycle_device: NonZeroU64::new(4096).expect("non-zero"),
+            l2_bytes_per_cycle_device: NonZeroU64::new(1024).expect("non-zero"),
         };
 
         // num_blocks = 64。num_sms = 64 なら wave 効率 100%（1 wave）。
@@ -1720,8 +1736,10 @@ mod cost_model_tests {
         let imperfect_cost = estimate_candidate_cost(shape, candidate, &imperfect_params, bpe)
             .expect("cost estimation must not overflow");
 
-        // 同一候補・同一帯域を num_sms のみ変えて評価しているため、
-        // トラフィック（base_cycles）は同一で wave 効率補正項のみが
+        // 上記の帯域選定により L2 律速（base_cycles = l2_cycles）が
+        // num_sms=63/64 の両方で成立し、l2_cycles は l2_traffic /
+        // l2_bytes_per_cycle_device のみで決まり num_sms に依存しないため、
+        // トラフィック（base_cycles）は真に同一で wave 効率補正項のみが
         // 異なる。`compare_candidate_costs` で実際の CandidateCost を
         // 比較し、端数 wave を生む構成（num_sms=63）の方が真に高コストで
         // あることを検証する（#527 レビュー指摘: 補正式を丸ごと削除しても
