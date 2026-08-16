@@ -181,21 +181,25 @@ fn same_code_dispatches_gemm_to_metal_backend_or_returns_typed_error() {
 /// `Unsupported` を返さない）。
 #[test]
 fn cuda_elementwise_and_reduction_return_unsupported_not_panic() {
+    // イシュー #599: elementwise（add/mul/relu/exp/tanh）は CUDA カーネル
+    // 実装済みのため `Unsupported` を返さなくなった。CUDA 非搭載環境
+    // （本 CI 環境）では `device_handle()` が driver 初期化時点で
+    // `BackendError::CudaUnavailable` を返す（`backend-cuda/src/ops.rs`
+    // 参照）ため、ここでは「panic しない」ことと「`Unsupported` ではなく
+    // `CudaUnavailable` へ変換される」ことを検証する（環境適応。実機での
+    // 実カーネル一致検証は `backend-cuda/tests/backend_ops_real_device.rs`
+    // の `#[ignore]` テストが引き継ぐ）。reduction（sum/max）は本イシュー
+    // 時点でも未実装のため引き続き `Unsupported` を検証する。
     let cuda = CudaBackendOps::new(0);
     let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
     let b = a.clone();
 
-    assert!(matches!(
-        cuda.add(&a, &b),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(
-        cuda.mul(&a, &b),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(cuda.relu(&a), Err(BackendError::Unsupported(_))));
-    assert!(matches!(cuda.exp(&a), Err(BackendError::Unsupported(_))));
-    assert!(matches!(cuda.tanh(&a), Err(BackendError::Unsupported(_))));
+    assert_cuda_elementwise_env_adaptive(cuda.add(&a, &b), "add");
+    assert_cuda_elementwise_env_adaptive(cuda.mul(&a, &b), "mul");
+    assert_cuda_elementwise_env_adaptive(cuda.relu(&a), "relu");
+    assert_cuda_elementwise_env_adaptive(cuda.exp(&a), "exp");
+    assert_cuda_elementwise_env_adaptive(cuda.tanh(&a), "tanh");
+
     assert!(matches!(
         cuda.sum(&a, None),
         Err(BackendError::Unsupported(_))
@@ -204,6 +208,19 @@ fn cuda_elementwise_and_reduction_return_unsupported_not_panic() {
         cuda.max(&a, None),
         Err(BackendError::Unsupported(_))
     ));
+}
+
+/// `cuda_elementwise_and_reduction_return_unsupported_not_panic` の
+/// elementwise 演算共通の環境適応アサーション（実機なら `Ok`、非搭載環境
+/// なら `CudaUnavailable`。いずれでも panic しないことが目的）。
+fn assert_cuda_elementwise_env_adaptive(result: Result<Tensor<f32>, BackendError>, op_name: &str) {
+    match result {
+        Ok(_) => {}
+        Err(BackendError::CudaUnavailable(msg)) => {
+            assert!(!msg.is_empty(), "error detail message must not be empty");
+        }
+        Err(other) => panic!("unexpected error variant for CudaBackendOps::{op_name}: {other}"),
+    }
 }
 
 #[test]
