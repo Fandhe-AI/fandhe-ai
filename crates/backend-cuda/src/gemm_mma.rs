@@ -1,6 +1,6 @@
 //! f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM の起動 API（TASK-11.1h・#187）。
 //!
-//! `CudaMmaGemm` は `kernels_mma::MMA_F16`（`m16n8k16` mma・3 ステージ
+//! `CudaMmaGemm` は `kernels_mma::mma_f16_source()`（`m16n8k16` mma・3 ステージ
 //! `cp.async` パイプライン）をコンパイル・保持し、以降はホスト側スライスを
 //! 渡すだけで GPU 実行できる境界を担う（`gemm_wmma.rs::CudaWmmaGemm` と
 //! 同じ責務分割。並行 issue #62/#63 が `gemm.rs`／`gemm_wmma.rs` を編集中の
@@ -107,7 +107,7 @@ impl CudaMmaGemm {
     /// 試みず `CudaError::TensorCoreUnsupported` を返す（`gemm_wmma.rs::new`
     /// と同じ判断。cc 判定をコンパイル前に行うことで、非対応デバイス上での
     /// 無駄な NVRTC 呼び出し・コンパイル失敗の紛れ込みを避ける）。(2)
-    /// `kernels_mma::MMA_F16` を `device.arch()` 向けに `nvrtc::compile_ptx`
+    /// `kernels_mma::mma_f16_source()` を `device.arch()` 向けに `nvrtc::compile_ptx`
     /// でコンパイル。(3) `device.context().load_module()` →
     /// `load_function("gemm_mma_f16")`。`libnvrtc` 不在時は
     /// `CudaError::NvrtcUnavailable` を返す（`compile_ptx` のプローブゲート
@@ -151,7 +151,7 @@ impl CudaMmaGemm {
         }
 
         let arch = device.arch();
-        let ptx = compile_ptx(kernels_mma::MMA_F16, arch)?;
+        let ptx = compile_ptx(kernels_mma::mma_f16_source(), arch)?;
         let mma_f16 = device
             .context()
             .load_module(ptx)?
@@ -165,7 +165,7 @@ impl CudaMmaGemm {
 
     /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM を実行する。C = A @ B
     /// （`m x k` @ `k x n`）。入出力は `half::f16`、GPU 内部アキュムレートは
-    /// f32（`kernels_mma::MMA_F16` 参照。数値契約は `CudaWmmaGemm::run_f16`
+    /// f32（`kernels_mma::mma_f16_source()` 参照。数値契約は `CudaWmmaGemm::run_f16`
     /// と同一）。
     ///
     /// ホスト側形状検証を 3 段で行う: `validate_gemm_dims`（naive/tiled/WMMA
@@ -279,9 +279,10 @@ impl CudaMmaGemm {
         // の余剰はカーネル内境界チェックで弾かれる。共有メモリは静的
         // `__shared__` 配列のみを使用するため `shared_mem_bytes` は 0 の
         // ままでよい（`kernels_mma.rs` 冒頭コメント「タイル構成」の
-        // 36864B〈#494 のブロックタイル拡大後の値〉は per-block 静的上限
-        // 48KiB 内であり動的共有メモリの追加確保・`cudaFuncSetAttribute`
-        // opt-in は不要）。
+        // 41,472B〈#494 のブロックタイル拡大後・#498 のバンクコンフリクト
+        // 対策パディング適用後の値〉は per-block 静的上限 48KiB 内であり
+        // 動的共有メモリの追加確保・`cudaFuncSetAttribute` opt-in は
+        // 不要）。
         unsafe {
             self.stream
                 .launch_builder(&self.mma_f16)
@@ -398,8 +399,8 @@ mod tests {
     /// NVRTC コンパイル・カーネル起動まで踏み込む点が異なる）。
     ///
     /// `CudaMmaGemm::new`/`run_f16` を再利用しない理由: それらは常に
-    /// `kernels_mma::MMA_F16`（`STAGES=3` 固定の文字列）をコンパイルする
-    /// ため、段数を差し替えた変種を実行するには本関数のように NVRTC
+    /// `kernels_mma::mma_f16_source()`（`STAGES=3` 固定の文字列）をコンパイル
+    /// する ため、段数を差し替えた変種を実行するには本関数のように NVRTC
     /// コンパイル・モジュールロード・起動を直接組み立てる必要がある。
     /// 形状検証（`validate_gemm_dims`・[`validate_mma_alignment`]・
     /// [`validate_mma_grid_bounds`]）・グリッド構築（[`mma_launch_config`]）・
@@ -414,15 +415,16 @@ mod tests {
         n: u32,
         k: u32,
     ) -> Result<Vec<f16>, CudaError> {
+        let base_src = kernels_mma::mma_f16_source();
         let from = format!("#define STAGES {}\n", kernels_mma::MMA_STAGES);
         let to = format!("#define STAGES {stages}\n");
         assert_eq!(
-            kernels_mma::MMA_F16.matches(&from).count(),
+            base_src.matches(&from).count(),
             1,
-            "kernels_mma::MMA_F16 中の `{from:?}` の出現数が 1 ではありません \
+            "kernels_mma::mma_f16_source() 中の `{from:?}` の出現数が 1 ではありません \
              （run_f16_with_stages の前提が崩れています）"
         );
-        let src = kernels_mma::MMA_F16.replacen(&from, &to, 1);
+        let src = base_src.replacen(&from, &to, 1);
 
         let ptx = compile_ptx(&src, device.arch())
             .expect("stage-swapped MMA_F16 source must compile via NVRTC on real hardware");

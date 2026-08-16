@@ -113,7 +113,7 @@ pub struct CudaGemm {
     /// `run_wmma_tf32` から再送出できるよう文字列化して保持する。
     wmma_tf32_error: Option<String>,
     /// TASK-11.1d（#63）で追加。共有メモリ・タイル最適化版 WMMA(TF32)
-    /// カーネル（`kernels_wmma_opt::WMMA_TF32_F32_OPT`）のコンパイル済み
+    /// カーネル（`kernels_wmma_opt::wmma_tf32_f32_opt_source()`）のコンパイル済み
     /// ハンドル。`wmma_tf32`（基本版）と同じ理由（`#include <mma.h>` の
     /// include パス解決・compute capability 8.0 以降を要求し、失敗しうる
     /// 環境が広い）で `Option` にし、コンパイル失敗を `new` の早期 return
@@ -287,7 +287,7 @@ pub(crate) fn validate_wmma_tf32_k_bound(k: u32) -> Result<(), CudaError> {
 
 /// WMMA TF32 opt カーネル固有の `k` 追加上限検証（TASK-11.1d・#63）。
 ///
-/// `kernels_wmma_opt::WMMA_TF32_F32_OPT` は各 K タイル反復で
+/// `kernels_wmma_opt::wmma_tf32_f32_opt_source()` は各 K タイル反復で
 /// `t * WMMA_TF32_OPT_K_TILE + local_col`（`local_col` は最大
 /// `WMMA_TF32_OPT_K_TILE - 1`）を C の `int` 算術で計算する。実際にカーネルが
 /// 計算しうる最大インデックスは `ceil(k / WMMA_TF32_OPT_K_TILE) *
@@ -369,12 +369,12 @@ fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
-/// WMMA(TF32) opt カーネル（`kernels_wmma_opt::WMMA_TF32_F32_OPT`）を単独で
+/// WMMA(TF32) opt カーネル（`kernels_wmma_opt::wmma_tf32_f32_opt_source()`）を単独で
 /// コンパイル・ロードする。[`compile_wmma_tf32`] と同じ理由（レビュー指摘
 /// #62 の踏襲）で `CudaGemm::new` の早期 return には合流させず、呼び出し元で
 /// `wmma_tf32_opt_error` として退避する。
 fn compile_wmma_tf32_opt(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let ptx = compile_ptx(kernels_wmma_opt::WMMA_TF32_F32_OPT, arch)?;
+    let ptx = compile_ptx(kernels_wmma_opt::wmma_tf32_f32_opt_source(), arch)?;
     let func = device
         .context()
         .load_module(ptx)?
@@ -482,7 +482,7 @@ impl CudaGemm {
             Err(e) => (None, Some(e.to_string())),
         };
 
-        // TASK-11.1d（#63）: `kernels_wmma_opt::WMMA_TF32_F32_OPT` はブロック
+        // TASK-11.1d（#63）: `kernels_wmma_opt::wmma_tf32_f32_opt_source()` はブロック
         // タイル（M/N=64）を warp タイル（WARP_TILE=32）の 2x2 グリッドに
         // 割ることを前提にしており、`WMMA_TF32_OPT_THREADS`（128 = 4 warp）
         // ともこの分割数と対応する。上記 `WMMA_TF32_BLOCK_M/N` const アサー
