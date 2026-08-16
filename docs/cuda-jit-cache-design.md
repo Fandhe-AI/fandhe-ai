@@ -35,19 +35,24 @@
 
 ## エントリ内ファイル構成と書き込みプロトコル（C-3・#509）
 
-最終エントリ（`<cache_root>/kernel.<name>.<hash16>/`）直下には `kernel.cu`（NVRTC へ渡したソース全文）と `kernel.ptx`（コンパイル結果の PTX アセンブリ全文）の 2 ファイルを置く。**不変条件**: 有効なエントリは両ファイルが存在する（`nvrtc::validate_cache_entry`）。片方欠落は破損とみなし、読み出し側（`load_cache_entry`）はミス（`Ok(None)`）として扱う（削除は行わない。置き換えは書き込み側に一元化）。
+最終エントリ（`<cache_root>/kernel.<name>.<hash16>/`）直下には `kernel.cu`（NVRTC へ渡したソース全文）と `kernel.ptx`（コンパイル結果の PTX アセンブリ全文）の 2 ファイルを置く。**不変条件**: 有効なエントリは両ファイルが存在する。片方欠落は破損とみなし、読み出し側（`load_cache_entry`）はミス（`Ok(None)`）として扱う（削除は行わない。置き換えは書き込み側に一元化）。
 
-読み出し側はさらに 2 つの追加検査を行う（実装計画 §3.1・§7 のハッシュ衝突安全弁）。いずれも通常運用で偽陽性にならない（`store_cache_entry_in` は非空バイト列を書き込んだ後に fsync してから rename するため）ため、`Ok(None)`（ミス）扱いにしてよい:
+この不変条件の判定は本番経路とテスト経路で実装が分かれる（イシュー #509 PR #677 codex-review P0 指摘対応。両者は同じ判定基準〈エントリディレクトリ・両ファイルとも symlink を追跡しない実在確認〉を守るが、TOCTOU 耐性の作り方が異なる）:
+
+- **本番経路**: `store_cache_entry_in`／`load_cache_entry_in`（いずれも Unix 版）は `nvrtc::validate_cache_entry_at`（`root_fd` からの fd 相対判定）を使う。検証と実際の作成・削除・読み取りを同一の pin 済みディレクトリ fd に結合することで、パスを再解決する隙（TOCTOU）を構造的に閉じる
+- **テスト経路**: `nvrtc::validate_cache_entry`（パスベース版）は `#[cfg(test)]` 限定で、外部から symlink 差し替え等を観測するアサーション専用に残す。本番経路からは呼ばれない
+
+読み出し側はさらに 2 つの追加検査を行う（実装計画 §3.1・§7 のハッシュ衝突安全弁）。いずれも通常運用で偽陽性にならない（`store_cache_entry_at` は非空バイト列を書き込んだ後に一時ディレクトリを fsync してから rename するため）ため、`Ok(None)`（ミス）扱いにしてよい:
 
 1. **非空検査**: `kernel.cu`／`kernel.ptx` のいずれかが 0 バイトならミス（クラッシュ残骸 0 バイトファイルを有効なエントリと誤認しない）
 2. **ソース照合**: `load_cache_entry`／`load_cache_entry_in` は呼び出し元がこれからコンパイルしようとしているソース全文（`expected_src`）を引数に取り、保存済み `kernel.cu` とバイト単位で照合する。不一致ならミス。エントリ名のハッシュ（FNV-1a 64bit・非暗号）が偶然衝突した場合に、別ソースの PTX を誤ってヒット扱いして GPU 上で実行してしまう経路を閉じる（C-4・#511 配線後、NVRTC 結線でこのフィールドが実際に GPU 上で実行される PTX になるため重要）
 
-`store_cache_entry`（実体は `store_cache_entry_in`）は DeepGEMM の compiler（一時ディレクトリでビルド後 rename、先着プロセスがいた場合は rename 失敗を正常系として吸収）に倣い、次の手順で書き込む。
+`store_cache_entry`（実体は `store_cache_entry_in` → `store_cache_entry_at`）は DeepGEMM の compiler（一時ディレクトリでビルド後 rename、先着プロセスがいた場合は rename 失敗を正常系として吸収）に倣うが、TOCTOU 対策のため全操作を「キャッシュルートを指す 1 個の pin 済みディレクトリ fd（`root_fd`）」からの fd 相対操作に統一している（イシュー #509 PR #677 codex-review P0 指摘対応。`root.join(..)` のようなパス再解決を経由すると、pin 後に `root` 自体が別ディレクトリへの symlink へ差し替えられた場合に symlink 先を誤って操作しうる）。
 
-1. `ensure_cache_root` でキャッシュルートを実体化する（`create_dir_all` の後、`canonicalize` 済みの実在パスで `path_lexically_within` による symlink 解決込みの containment 再検証を行う。C-2 が委譲していた「symlink 解決込みの再検証」の実装）
-2. ルート直下に一時ディレクトリ `.tmp.<final_entry_name>.<pid>.<seq>` を排他作成する
-3. `kernel.cu`／`kernel.ptx` を書き込み、各ファイルと一時ディレクトリ自体を fsync する（rename 前にディスクへ反映されていることを保証。DeepGEMM `fsync_dir` 相当のボトムアップ fsync）
-4. `std::fs::rename` で最終パスへアトミックに配置する。失敗時は最終パスの既存エントリを検査し、有効なら「他プロセス先着」として正常系吸収（`Ok`）、破損なら削除して一度だけ再試行、それでも失敗すれば `CudaError::CacheIo` で fail-closed に失敗する（無限リトライしない）
+1. `ensure_cache_root` でキャッシュルートを実体化する。**祖先ディレクトリを検証してから作成する**順序を守る（作成してから検証する旧設計は、拒否確定前に workspace 内へ書き込みが発生しうる契約違反だった。イシュー #509 codex-review P0 再指摘対応）: `longest_existing_ancestor` で fs 上に実在する最長の祖先を求め、その祖先を `canonicalize`（symlink 解決込み）して `path_lexically_within` による containment 事前検証を行ってから、`create_dir_all_verified`（pin 済みディレクトリ fd 起点で 1 コンポーネントずつ作成・検証を結合する。Linux 版は `mkdirat`／`openat` の FFI 直接呼び出し、非 Linux〈macOS〉版は `openat_nofollow` 系の同等実装）で残りのコンポーネントを実体化する。最後に実体化後の `canonical_root` を再度 containment 検証する（事前検証と作成の間の TOCTOU に対する縦深防御）
+2. `root_fd`（`ensure_cache_root` が返したルートを `open_dir_nofollow` で pin したディレクトリ fd）を起点に、一時ディレクトリ `.tmp.<final_entry_name>.<pid>.<seq>` を fd 相対（`create_subdir_pinned`）で排他作成する
+3. `kernel.cu`／`kernel.ptx` を pin 済みの一時ディレクトリ fd から直接書き込み・fsync し（`write_child_file_pinned`。書き込みに使ったハンドルから直接 `sync_all` するためパス再オープンの TOCTOU 窓がない）、一時ディレクトリ自体も fsync する（rename 前にディスクへ反映されていることを保証。DeepGEMM `fsync_dir` 相当のボトムアップ fsync）
+4. 最終パスへアトミックに配置する（`rename_pinned`。Linux 版は `/proc/self/fd/<fd>/<name>` 経由の `std::fs::rename`、macOS 版は `renameat(2)` の FFI 直接呼び出し〈`renameat_raw`〉——いずれも fd 相対で pin 済みディレクトリを起点にパスの 1 コンポーネントのみを解決し、`root` のパス再解決を挟まない）。失敗時は最終パスの既存エントリを `validate_cache_entry_at`／`entry_exists_at`（ディレクトリ・通常ファイル・symlink のいずれの占有も検出する。イシュー #509 PR #677 Bugbot 指摘対応）で検査し、有効なら「他プロセス先着」として正常系吸収（`Ok`）、破損なら退避名へ `rename_pinned` で一意に固定してから削除し一度だけ再試行、それでも失敗すれば `CudaError::CacheIo` で fail-closed に失敗する（無限リトライしない）。後始末（一時ディレクトリ・退避ディレクトリの削除）も `remove_cache_entry_pinned`（fd 相対）で行い、`fs::remove_dir_all` のようなパス再解決は使わない
 
 ## ソース断片の取り込み（C-5・#514）
 
@@ -59,7 +64,7 @@
 
 ## 関連
 
-- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`store_cache_entry`／`store_cache_entry_in`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry`／`CudaKernelCacheKey`）
+- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`store_cache_entry`／`store_cache_entry_in`／`store_cache_entry_at`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry_at`（本番経路）／`validate_cache_entry`（`#[cfg(test)]` 限定）／`rename_pinned`／`create_dir_all_verified`／`CudaKernelCacheKey`）
 - `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`／`CudaError::CacheIo`
 - C-4（#511）: プロセス内 LRU カーネルキャッシュ・GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ導線）
 - C-10（#529）: ヒット/ミス・並行競合・破損検出の網羅的回帰テスト拡充（C-3 時点のユニットテストは受け入れ基準を直接検証する最小限に留める）
