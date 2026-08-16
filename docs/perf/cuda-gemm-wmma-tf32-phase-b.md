@@ -129,6 +129,11 @@ cargo run -p backend-cuda --example cuda_floor_bench --release -- --shapes 4096x
 では実機（`spark-dbd9`）へ到達できなかったため未計測のまま達成を主張しない。実機再計測はイシュー #502
 （Phase B 完了時点の f32/f16 再計測）へ引き継ぐ。
 
+**#502 実装セッション（2026-08-16）追記**: 引き継ぎ先の #502 セッションでも
+`docs/real-hardware-verification-env.local.md` が worktree に存在せず `spark-dbd9` の名前解決ができない
+ため実機へ到達できず、本表は依然として未計測のまま確定させた（詳細・再実行手順は
+`docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測（#502）」節）。
+
 ## 8. スコープ外（追跡）
 
 - 蛇行・L2 スウィズル・タイル拡大の TF32 経路適用: 2 節で選別除外。実機 A/B（蛇行は #497 の再提案手順、

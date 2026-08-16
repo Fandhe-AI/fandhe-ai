@@ -52,10 +52,13 @@
 //! （または同一形状・同一プロトコルの再計測手段）を**本バイナリと同一
 //! 実機で**実行し、得られた値を以下の環境変数で注入できる:
 //!
-//! - `CUDA_FLOOR_BENCH_PYTORCH_F32_{512,2048,4096}` / `_F16_{512,2048,4096}`:
-//!   再計測した TFLOPS 値（正の有限浮動小数点数）。再計測は
-//!   `gemm_bench_torch_cuda.py` と同一の計測境界（下記「計測境界の統一」
-//!   節）で行うこと
+//! - `CUDA_FLOOR_BENCH_PYTORCH_F32_{512,1024,2048,4096}` /
+//!   `_F16_{512,1024,2048,4096}`: 再計測した TFLOPS 値（正の有限浮動小数点数）。
+//!   再計測は `gemm_bench_torch_cuda.py` と同一の計測境界（下記「計測境界の
+//!   統一」節）で行うこと。1024 は #502（Phase B 完了時点の再計測）で
+//!   追加した参考形状で、PoC-v2-3 固定値が存在しないため env 注入が無い
+//!   限り対 PyTorch 比は `n/a` になる（`pytorch_f32_fixed`/
+//!   `pytorch_f16_fixed` ドキュメンテーションコメント参照）
 //! - `CUDA_FLOOR_BENCH_PYTORCH_SOURCE`: 再計測値の出所を明示する文字列
 //!   （例: `"poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py 実行,
 //!   2026-08-08, 同一 GB10 個体"`）。値の注入だけでは根拠不足のため、出所
@@ -117,9 +120,17 @@ use half::f16;
 const SEED: u64 = 0xC0FFEE;
 
 /// 判定対象形状（REQ-8「判定対象形状は演算律速域〈M=N=K=2048・4096〉」）。
-/// 512 は参考値としてのみ計測し、候補下限値の算出には使わない。
+/// 512・1024 は参考値としてのみ計測し、候補下限値の算出には使わない。
 const JUDGED_SIZES: [usize; 2] = [2048, 4096];
-const REFERENCE_ONLY_SIZE: usize = 512;
+/// 参考値のみを計測する形状。1024 は #502（Phase B 完了時点の再計測）で
+/// 追加した中間形状で、`pytorch_f32_fixed`/`pytorch_f16_fixed` の PoC-v2-3
+/// 固定値には対応する実測が無い（PoC-v2-3 は 512/2048/4096 のみ計測）ため、
+/// `CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_1024` の同一実機再計測注入がある
+/// 場合のみ対 PyTorch 比を表示し、無ければ `pytorch_f32_fixed`/
+/// `pytorch_f16_fixed` が返す NaN が `f32_ratio_percent`/`f16_ratio_percent`
+/// の `is_finite()` フィルタで自然に `None`（表示は `n/a`）へ落ちる
+/// （`fmt_ratio` 呼び出し箇所参照。新たな分岐は不要）。
+const REFERENCE_ONLY_SIZES: [usize; 2] = [512, 1024];
 
 /// PoC-v2-3 実測の PyTorch CUDA 実効値（TFLOPS、5〜20 回中央値。
 /// DGX Spark GB10・PyTorch 2.13.0+cu130）。
@@ -127,6 +138,12 @@ const REFERENCE_ONLY_SIZE: usize = 512;
 /// 2 表から転記した過去実測固定値。GPU 名一致だけでは同一実機比較を
 /// 保証できないため（PR #349 codex-review 指摘 P1）、この固定値を根拠に
 /// 正式な candidate floor は出さない。あくまで参考比率の分母として使う。
+/// 1024（#502 で `REFERENCE_ONLY_SIZES` に追加した参考形状）は PoC-v2-3
+/// で計測されておらず固定値が存在しないため NaN を返す。呼び出し側の
+/// `pytorch_f32_ref`/`pytorch_f16_ref` は env override（`source` 非空時）
+/// があればそれを優先するため、1024 の対 PyTorch 比は env 注入時のみ表示
+/// され、未注入時は `f32_ratio_percent`/`f16_ratio_percent` の
+/// `is_finite()` フィルタで自然に `n/a` になる（新たな分岐は不要）。
 fn pytorch_f32_fixed(size: usize) -> f64 {
     match size {
         512 => 7.8803,
@@ -614,7 +631,7 @@ fn main() {
     let mut f32_opt_ok = true;
     let mut f16_opt_ok = true;
 
-    for size in std::iter::once(REFERENCE_ONLY_SIZE).chain(JUDGED_SIZES) {
+    for size in REFERENCE_ONLY_SIZES.into_iter().chain(JUDGED_SIZES) {
         let config = MeasurementConfig::default();
 
         let tiled = tiled_gemm
@@ -734,7 +751,7 @@ fn main() {
 
     println!(
         "---\n\
-         judged shapes (REQ-8): M=N=K in {JUDGED_SIZES:?} (size={REFERENCE_ONLY_SIZE} is \
+         judged shapes (REQ-8): M=N=K in {JUDGED_SIZES:?} (sizes {REFERENCE_ONLY_SIZES:?} are \
          reference-only, excluded from candidate floor)"
     );
     print_candidate_floor(
