@@ -110,6 +110,64 @@ WMMA 経路との相互比較）と `tests/gemm_mma.rs` の `#[ignore]` ケー�
 分離計測したい場合は、`kernels_mma.rs::MMA_F16` の `cp.async`/`ldmatrix` 呼び出しを同期ロードへ一時的に置き換えた
 比較ビルドで計測し、本節に追記する。
 
+## Phase B 完了時点の再計測（#502）
+
+イシュー #502「Phase B 完了時点の f32/f16 スループットと対 PyTorch 比を再計測・記録」の記録節。
+GEMM 性能改善ツリー Phase B（親 #490）の B-0〜B-10（#491〜#501）は全て CLOSED 済みだが、B-1〜B-9 の
+カーネル改修は NVRTC 非搭載環境で実装されたため、実機（DGX Spark GB10・sm_121）での構文検証・性能実測が
+本イシュー時点でも一度も行われていない。
+
+### 実機到達性の確認結果（2026-08-16・本実装セッション）
+
+- `docs/real-hardware-verification-env.local.md`（実ホスト名・接続情報を記す Git 管理外ファイル）は本
+  worktree に**存在しない**（`docs/real-hardware-verification-env.local.md.example` のみ存在）。
+- 実機ホスト名（`spark-dbd9`。#500・#656 で使用実績のある個体名）は本ホストから名前解決できず、SSH
+  到達性を確認する前提（`CUDA_NODE` の取得）が満たせない。
+- したがって実装計画の実機到達性ゲート（手順 3）は**不達**と判定し、実機実測は行わず安全側（推定値を
+  記載しない）に倒した。§7「実測結果」以下の表は未計測のまま確定させる（#656・#500 §7 の先例と同じ
+  判断）。
+
+### 実装した変更（実機セッションが即実行できるようにする準備。実測は含まない）
+
+`crates/backend-cuda/examples/cuda_floor_bench.rs` の判定対象外形状に 1024 を追加した
+（`REFERENCE_ONLY_SIZES: [usize; 2] = [512, 1024]`。従来は `REFERENCE_ONLY_SIZE = 512` の単一形状）。
+`JUDGED_SIZES`（2048・4096）・候補下限の丸め規則・経路選択ロジックは無変更。PoC-v2-3 固定値
+（`pytorch_f32_fixed`/`pytorch_f16_fixed`）に 1024 の実測が存在しないため、同一実機再計測値
+（`CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_1024`）の env 注入がある場合のみ 1024 の対 PyTorch 比を表示し、
+未注入時は既存の `is_finite()` フィルタで自然に `n/a` 表示になる（新規の特殊分岐は追加していない。
+`pytorch_f32_fixed`/`pytorch_f16_fixed` ドキュメンテーションコメント参照）。
+
+検証済み（本ホスト・GPU 不要のロジック検査のみ。実機到達性が無いため以下に限定）:
+
+- `cargo fmt --all` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`: green
+- `cargo build -p backend-cuda --all-targets`: green（`cudarc` 動的ロードのため CUDA toolkit 非搭載環境でも成立）
+- `cargo test -p backend-cuda`（`cuda_floor_bench` の `#[cfg(test)]` 単体検査 14 件を含む）: green
+- `git diff origin/main -- crates/backend-cuda/tests/common crates/backend-cuda/src crates/bench-harness`:
+  無差分（tolerance 定数・parity fixture・`FloorSpec`・カーネルソースは本イシューで一切変更していない）
+
+### 目標達成状況・未達要因
+
+**未計測のため判定不能。** 目標（対 PyTorch 比 f32 35〜40% / f16 25〜30%。#490 本文の期待効果、ベース
+ラインは f32 25.64% / f16 12.97%〈`docs/perf/performance-floor-decision.md` §9〉）に対する達成状況・
+未達要因の分析は、実機到達後の再実行セッションへ引き継ぐ。REQ-8 下限（f32 25% / f16 10%。
+`bench-harness` の確定値）は本イシューでは変更しない（#577〈Phase F・人間承認タスク〉へ申し送り）。
+
+### 実機セッションでの再実行手順（引き継ぎ）
+
+1. `docs/real-hardware-verification-env.local.md`（`.example` を基に用意）から `CUDA_NODE` を取得し
+   `ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" 'hostname && nvidia-smi --query-gpu=name,utilization.gpu --format=csv,noheader'`
+   で到達性・GPU 排他性を確認する
+2. `docs/real-hardware-verification-env.md` §3 の rsync 手順でコードを転送し、`.rev-stamp` でリビジョン
+   一致を確認する
+3. `cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1` ほか
+   `--ignored` テスト群で数値一致・parity 非後退を性能値採用より先に確認する（後退時は性能値を採用せず
+   打ち切る）
+4. `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py <size> 20 20` を
+   size ∈ {512, 1024, 2048, 4096} × {f32, f16} で同一実機実行し、PyTorch 参照値を再計測する
+5. `CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_{512,1024,2048,4096}` と `CUDA_FLOOR_BENCH_PYTORCH_SOURCE` を
+   設定し `cargo run -p backend-cuda --example cuda_floor_bench --release --locked` を 3 回反復実行、
+   run 間中央値を代表値として本節・`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` §7 へ機械転記する
+
 ## スコープ外（out-of-scope-tracking.md に従い記録）
 
 - **XOR swizzle によるバンクコンフリクト低減**（実装計画「段階 3」）: 索引演算が最も複雑でありながら、本実装
