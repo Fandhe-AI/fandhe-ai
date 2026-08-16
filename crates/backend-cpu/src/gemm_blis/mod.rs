@@ -743,31 +743,53 @@ mod tests {
     /// 既定 8×12 カーネル・12×8 A/B 対抗変種いずれも [`ScalarKernel`]
     /// 強制経路と bit 完全一致することを確認する（受け入れ条件 3: parity
     /// テストが green であること）。MC/KC/NC 境界を跨ぐ形状を選ぶ。
+    ///
+    /// k の一覧はイシュー #561（NEON k=4 アンロール）の主ループ／端数
+    /// 分離（k_main = k - k%4）の剰余網羅用に拡張した: 元の k=700 は
+    /// KC=256 ブロック分割で各領域の kc_len が 256/256/188（いずれも
+    /// 4 の倍数）となり k%4 の剰余が常に 0 で端数ループを一切通らない
+    /// （#561 で新設した端数ループの検証漏れになる）。k=701〜703 を
+    /// 追加し、各々 KC 分割後の最終領域 kc_len が 189/190/191（k%4 が
+    /// 1/2/3）になることで剰余 1/2/3 を通す。MC/NC 境界跨ぎは元の
+    /// k=700・(m,n)=(200,600) ケースで既に検証済みのため、追加した
+    /// k=701〜703 は端数分岐の検証のみが目的（重複検証を避け aarch64
+    /// 実機セッションでの実行コストを抑えるため）小さい (m,n) を使う。
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_8x12_and_12x8_match_scalar_forced_bit_exact() {
         use microkernel::{Neon12x8Kernel, NeonKernel};
 
-        let (m, n, k) = (200, 600, 700);
-        let a = xorshift32_vec(0x5555_5555, m * k);
-        let b = xorshift32_vec(0x6666_6666, k * n);
+        for (i, &(m, n, k)) in [
+            (200usize, 600usize, 700usize),
+            (16, 20, 701),
+            (16, 20, 702),
+            (16, 20, 703),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let seed_a = 0x5555_5555u32 + i as u32;
+            let seed_b = 0x6666_6666u32 + i as u32;
+            let a = xorshift32_vec(seed_a, m * k);
+            let b = xorshift32_vec(seed_b, k * n);
 
-        let mut c_scalar = vec![0.0f32; m * n];
-        gemm_blis_with_kernel(ScalarKernel, &a, &b, &mut c_scalar, m, n, k).unwrap();
+            let mut c_scalar = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(ScalarKernel, &a, &b, &mut c_scalar, m, n, k).unwrap();
 
-        let mut c_neon_8x12 = vec![0.0f32; m * n];
-        gemm_blis_with_kernel(NeonKernel, &a, &b, &mut c_neon_8x12, m, n, k).unwrap();
-        assert_eq!(
-            c_scalar, c_neon_8x12,
-            "NeonKernel（既定 8×12）は ScalarKernel 強制経路と bit 完全一致するはず"
-        );
+            let mut c_neon_8x12 = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(NeonKernel, &a, &b, &mut c_neon_8x12, m, n, k).unwrap();
+            assert_eq!(
+                c_scalar, c_neon_8x12,
+                "NeonKernel（既定 8×12・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
 
-        let mut c_neon_12x8 = vec![0.0f32; m * n];
-        gemm_blis_with_kernel(Neon12x8Kernel, &a, &b, &mut c_neon_12x8, m, n, k).unwrap();
-        assert_eq!(
-            c_scalar, c_neon_12x8,
-            "Neon12x8Kernel（A/B 対抗変種）は ScalarKernel 強制経路と bit 完全一致するはず"
-        );
+            let mut c_neon_12x8 = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(Neon12x8Kernel, &a, &b, &mut c_neon_12x8, m, n, k).unwrap();
+            assert_eq!(
+                c_scalar, c_neon_12x8,
+                "Neon12x8Kernel（A/B 対抗変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+        }
     }
 
     /// [`NeonKernel`]（既定 8×12）と [`Neon12x8Kernel`]（firestorm 型 A/B

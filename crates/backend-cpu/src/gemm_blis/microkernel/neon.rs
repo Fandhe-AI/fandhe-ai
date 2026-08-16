@@ -41,6 +41,43 @@
 //! 維持され、bit 完全一致は `gemm_blis_parity` テストで検証する
 //! （aarch64 実行環境では NEON 経路が既定選択されるため実機実行時に
 //! この経路の bit 一致が検査される）。
+//!
+//! ## k=4 アンロール＋ソフトウェアパイプライン（イシュー #561）
+//!
+//! [`kernel`]・[`kernel_12x8`] いずれも k ループを BLIS armv8a 参照実装の
+//! `k_iter = k/4`（主ループ）・`k_left = k%4`（端数ループ）分離技法へ
+//! 書き換えた。主ループは 4 ステップ（p, p+1, p+2, p+3）を 1 チャンクと
+//! して展開し、各ステップの A/B オペランドロード（`vld1q_f32`）を
+//! 直前ステップの FMA 列の合間へ先出し発行する（2 段ソフトウェア
+//! パイプライン）ことでロードレイテンシの隠蔽を狙う。
+//!
+//! **bit 完全一致契約は変更しない**: アキュムレータ（`acc[i][j]`）は
+//! 分割せず、FMA の演算順序（p 昇順・行 i 昇順・`[0]`→`[1]`→`[2]`）は
+//! 主ループ・端数ループを通じて元実装（#559）と完全に同一のまま
+//! 保つ。変更するのはロードの発行位置（ソースコード上の並び）のみで
+//! あり、`vld1q_f32` 自体は丸め・演算順序に影響しないため、この
+//! 並べ替えは冒頭の bit 完全一致契約に抵触しない。
+//!
+//! **先読み境界**: 主ループはチャンク内（p〜p+3、p はチャンク先頭で
+//! 4 の倍数）でのみ先読みし、チャンク境界を越えて次チャンク・端数
+//! 領域を読み出さない。`k_main = kc_len - (kc_len % 4)` としたとき
+//! チャンク内の最大オフセットは `p + 3 <= k_main - 1 < kc_len` が
+//! 常に成り立つため、チャンク内で先読みする p〜p+3 のいずれのロードも
+//! 入口 `assert_eq!` が保証する `kc_len` 範囲を超えない（REQ-8: 境界
+//! チェックを省略しない）。端数ループ（`k_main..kc_len`）は #559 と
+//! 同一の 1 ステップ構造をそのまま維持する。
+//!
+//! レジスタ収支: 既定カーネルは acc 24 本 + 現行ステップのオペランド
+//! 5 本で 29 本（v0〜v31 の 32 本以内）だが、先読み対象ステップの
+//! オペランド（最大 5 本）が一時的に重複して生存するため、チャンク内
+//! 短時間ではあるが 32 本を超えスピルしうる（BLIS 参照実装でも
+//! 同種のトレードオフが存在する）。実効性能・スピル有無は aarch64
+//! 実機でのみ計測可能であり、本イシューでは実装・クロス型検査・
+//! x86_64 側リグレッションまでを実施し、実測は
+//! `docs/perf/cpu-gemm-neon-k4-unroll.md` の環境ゲート判定に従い
+//! fail-closed で後続セッションへ引き継ぐ（悪化が実機で確認された
+//! 場合はロード配置のみ簡素化する余地を残す。アンロール自体〈k_main/
+//! k_left 分離〉は維持する）。
 
 use std::arch::aarch64::{float32x4_t, vfmaq_laneq_f32, vld1q_f32, vst1q_f32};
 
@@ -88,6 +125,12 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
     //   ap.len() を超えない。
     // - c_tile: i*NR, i*NR+4, i*NR+8..+12 の最大は i=MR-1 でも
     //   (MR-1)*NR+12 = c_tile.len() を超えない。
+    // k=4 アンロール（#561）: 主ループは p を 4 刻みのチャンクで処理し
+    // チャンク内（p..p+3）のみ先読みするため、チャンク先頭 p は 4 の
+    // 倍数で p+3 <= k_main-1 < kc_len が常に成り立つ（冒頭モジュール
+    // コメント参照）。よって主ループの先読みロードも上記 p 範囲の
+    // オフセット上界証明の内側に収まる。端数ループは p in
+    // k_main..kc_len で上記と同一の 1 ステップ構造。
     // NEON は aarch64 のベースライン機能であり実行時検出は不要（本モジュール
     // が `cfg(target_arch = "aarch64")` 限定コンパイルであることが前提）。
     unsafe {
@@ -114,13 +157,83 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
             }};
         }
 
-        for p in 0..kc_len {
+        // ステップ p の A/B オペランドをまとめてロードする（k=4 アンロール
+        // の各段で共通利用。#561）。A の 8 行ぶんは #552 と同じく 2 回の
+        // vld1q_f32 で一括ロードする（行 0..4 は a0、行 4..8 は a1）。
+        macro_rules! load_step {
+            ($p:expr) => {
+                (
+                    vld1q_f32(bp[$p * NR..].as_ptr()),
+                    vld1q_f32(bp[$p * NR + 4..].as_ptr()),
+                    vld1q_f32(bp[$p * NR + 8..].as_ptr()),
+                    vld1q_f32(ap[$p * MR..].as_ptr()),
+                    vld1q_f32(ap[$p * MR + 4..].as_ptr()),
+                )
+            };
+        }
+
+        // 主ループ（k_main = kc_len - kc_len%4）: 4 ステップ（p, p+1, p+2,
+        // p+3）を 1 チャンクとして展開する。各ステップの FMA 呼び出し順
+        // （p 昇順・行 0..8 昇順・[0]→[1]→[2]）は端数ループ・旧実装と
+        // 完全に同一（bit 完全一致契約）。次ステップのロードは直前
+        // ステップの FMA 列の合間へ先出しし、ロードレイテンシを隠蔽する
+        // （2 段ソフトウェアパイプライン。冒頭モジュールコメント参照）。
+        let k_main = kc_len - (kc_len % 4);
+        let mut p = 0;
+        while p < k_main {
+            let (b0_0, b1_0, b2_0, a0_0, a1_0) = load_step!(p);
+            fma_row!(acc[0], a0_0, 0, b0_0, b1_0, b2_0);
+            fma_row!(acc[1], a0_0, 1, b0_0, b1_0, b2_0);
+            fma_row!(acc[2], a0_0, 2, b0_0, b1_0, b2_0);
+            fma_row!(acc[3], a0_0, 3, b0_0, b1_0, b2_0);
+
+            let (b0_1, b1_1, b2_1, a0_1, a1_1) = load_step!(p + 1);
+            fma_row!(acc[4], a1_0, 0, b0_0, b1_0, b2_0);
+            fma_row!(acc[5], a1_0, 1, b0_0, b1_0, b2_0);
+            fma_row!(acc[6], a1_0, 2, b0_0, b1_0, b2_0);
+            fma_row!(acc[7], a1_0, 3, b0_0, b1_0, b2_0);
+
+            let (b0_2, b1_2, b2_2, a0_2, a1_2) = load_step!(p + 2);
+            fma_row!(acc[0], a0_1, 0, b0_1, b1_1, b2_1);
+            fma_row!(acc[1], a0_1, 1, b0_1, b1_1, b2_1);
+            fma_row!(acc[2], a0_1, 2, b0_1, b1_1, b2_1);
+            fma_row!(acc[3], a0_1, 3, b0_1, b1_1, b2_1);
+
+            let (b0_3, b1_3, b2_3, a0_3, a1_3) = load_step!(p + 3);
+            fma_row!(acc[4], a1_1, 0, b0_1, b1_1, b2_1);
+            fma_row!(acc[5], a1_1, 1, b0_1, b1_1, b2_1);
+            fma_row!(acc[6], a1_1, 2, b0_1, b1_1, b2_1);
+            fma_row!(acc[7], a1_1, 3, b0_1, b1_1, b2_1);
+
+            fma_row!(acc[0], a0_2, 0, b0_2, b1_2, b2_2);
+            fma_row!(acc[1], a0_2, 1, b0_2, b1_2, b2_2);
+            fma_row!(acc[2], a0_2, 2, b0_2, b1_2, b2_2);
+            fma_row!(acc[3], a0_2, 3, b0_2, b1_2, b2_2);
+            fma_row!(acc[4], a1_2, 0, b0_2, b1_2, b2_2);
+            fma_row!(acc[5], a1_2, 1, b0_2, b1_2, b2_2);
+            fma_row!(acc[6], a1_2, 2, b0_2, b1_2, b2_2);
+            fma_row!(acc[7], a1_2, 3, b0_2, b1_2, b2_2);
+
+            fma_row!(acc[0], a0_3, 0, b0_3, b1_3, b2_3);
+            fma_row!(acc[1], a0_3, 1, b0_3, b1_3, b2_3);
+            fma_row!(acc[2], a0_3, 2, b0_3, b1_3, b2_3);
+            fma_row!(acc[3], a0_3, 3, b0_3, b1_3, b2_3);
+            fma_row!(acc[4], a1_3, 0, b0_3, b1_3, b2_3);
+            fma_row!(acc[5], a1_3, 1, b0_3, b1_3, b2_3);
+            fma_row!(acc[6], a1_3, 2, b0_3, b1_3, b2_3);
+            fma_row!(acc[7], a1_3, 3, b0_3, b1_3, b2_3);
+
+            p += 4;
+        }
+
+        // 端数ループ（k_left = kc_len - k_main < 4）: #559 と同一の
+        // 1 ステップ構造をそのまま維持する（REQ-8: 手動境界検査の省略
+        // 禁止。p < kc_len の範囲内であることは主ループ終了条件から
+        // 自明）。
+        while p < kc_len {
             let b0 = vld1q_f32(bp[p * NR..].as_ptr());
             let b1 = vld1q_f32(bp[p * NR + 4..].as_ptr());
             let b2 = vld1q_f32(bp[p * NR + 8..].as_ptr());
-            // A の 8 行ぶんを 2 回の vld1q_f32 で一括ロード（行 0..4 は
-            // a0、行 4..8 は a1）。旧実装のスカラーロード 8 回＋
-            // vdupq_n_f32（DUP）8 回を排除する（イシュー #552）。
             let a0 = vld1q_f32(ap[p * MR..].as_ptr());
             let a1 = vld1q_f32(ap[p * MR + 4..].as_ptr());
 
@@ -132,6 +245,8 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
             fma_row!(acc[5], a1, 1, b0, b1, b2);
             fma_row!(acc[6], a1, 2, b0, b1, b2);
             fma_row!(acc[7], a1, 3, b0, b1, b2);
+
+            p += 1;
         }
 
         for (i, acc_i) in acc.iter().enumerate() {
@@ -181,6 +296,10 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
     //   (kc_len-1)*MR_12X8+12 = ap.len() を超えない。
     // - c_tile: i*NR_12X8, i*NR_12X8+4 の最大は i=MR_12X8-1 でも
     //   (MR_12X8-1)*NR_12X8+8 = c_tile.len() を超えない。
+    // k=4 アンロール（#561）: [`kernel`] と同一の理由で、主ループは
+    // チャンク内（p..p+3、p は 4 の倍数）でのみ先読みし
+    // p+3 <= k_main-1 < kc_len が常に成り立つため上記オフセット上界
+    // 証明の内側に収まる（冒頭モジュールコメント参照）。
     // NEON は aarch64 のベースライン機能であり実行時検出は不要（本モジュール
     // が `cfg(target_arch = "aarch64")` 限定コンパイルであることが前提）。
     unsafe {
@@ -202,11 +321,94 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
             }};
         }
 
-        for p in 0..kc_len {
+        // ステップ p の A/B オペランドをまとめてロードする（[`kernel`]
+        // の `load_step!` と同型。A の 12 行ぶんは 3 回の vld1q_f32 で
+        // 一括ロード（行 0..4 は a0、行 4..8 は a1、行 8..12 は a2）。
+        macro_rules! load_step {
+            ($p:expr) => {
+                (
+                    vld1q_f32(bp[$p * NR_12X8..].as_ptr()),
+                    vld1q_f32(bp[$p * NR_12X8 + 4..].as_ptr()),
+                    vld1q_f32(ap[$p * MR_12X8..].as_ptr()),
+                    vld1q_f32(ap[$p * MR_12X8 + 4..].as_ptr()),
+                    vld1q_f32(ap[$p * MR_12X8 + 8..].as_ptr()),
+                )
+            };
+        }
+
+        // 主ループ: [`kernel`] と同型の 4 ステップチャンク展開・先読み
+        // インターリーブ（冒頭モジュールコメント参照）。FMA 呼び出し順
+        // （p 昇順・行 0..12 昇順・[0]→[1]）は端数ループ・旧実装と完全
+        // に同一。
+        let k_main = kc_len - (kc_len % 4);
+        let mut p = 0;
+        while p < k_main {
+            let (b0_0, b1_0, a0_0, a1_0, a2_0) = load_step!(p);
+            fma_row!(acc[0], a0_0, 0, b0_0, b1_0);
+            fma_row!(acc[1], a0_0, 1, b0_0, b1_0);
+            fma_row!(acc[2], a0_0, 2, b0_0, b1_0);
+            fma_row!(acc[3], a0_0, 3, b0_0, b1_0);
+
+            let (b0_1, b1_1, a0_1, a1_1, a2_1) = load_step!(p + 1);
+            fma_row!(acc[4], a1_0, 0, b0_0, b1_0);
+            fma_row!(acc[5], a1_0, 1, b0_0, b1_0);
+            fma_row!(acc[6], a1_0, 2, b0_0, b1_0);
+            fma_row!(acc[7], a1_0, 3, b0_0, b1_0);
+
+            let (b0_2, b1_2, a0_2, a1_2, a2_2) = load_step!(p + 2);
+            fma_row!(acc[8], a2_0, 0, b0_0, b1_0);
+            fma_row!(acc[9], a2_0, 1, b0_0, b1_0);
+            fma_row!(acc[10], a2_0, 2, b0_0, b1_0);
+            fma_row!(acc[11], a2_0, 3, b0_0, b1_0);
+
+            fma_row!(acc[0], a0_1, 0, b0_1, b1_1);
+            fma_row!(acc[1], a0_1, 1, b0_1, b1_1);
+            fma_row!(acc[2], a0_1, 2, b0_1, b1_1);
+            fma_row!(acc[3], a0_1, 3, b0_1, b1_1);
+
+            let (b0_3, b1_3, a0_3, a1_3, a2_3) = load_step!(p + 3);
+            fma_row!(acc[4], a1_1, 0, b0_1, b1_1);
+            fma_row!(acc[5], a1_1, 1, b0_1, b1_1);
+            fma_row!(acc[6], a1_1, 2, b0_1, b1_1);
+            fma_row!(acc[7], a1_1, 3, b0_1, b1_1);
+            fma_row!(acc[8], a2_1, 0, b0_1, b1_1);
+            fma_row!(acc[9], a2_1, 1, b0_1, b1_1);
+            fma_row!(acc[10], a2_1, 2, b0_1, b1_1);
+            fma_row!(acc[11], a2_1, 3, b0_1, b1_1);
+
+            fma_row!(acc[0], a0_2, 0, b0_2, b1_2);
+            fma_row!(acc[1], a0_2, 1, b0_2, b1_2);
+            fma_row!(acc[2], a0_2, 2, b0_2, b1_2);
+            fma_row!(acc[3], a0_2, 3, b0_2, b1_2);
+            fma_row!(acc[4], a1_2, 0, b0_2, b1_2);
+            fma_row!(acc[5], a1_2, 1, b0_2, b1_2);
+            fma_row!(acc[6], a1_2, 2, b0_2, b1_2);
+            fma_row!(acc[7], a1_2, 3, b0_2, b1_2);
+            fma_row!(acc[8], a2_2, 0, b0_2, b1_2);
+            fma_row!(acc[9], a2_2, 1, b0_2, b1_2);
+            fma_row!(acc[10], a2_2, 2, b0_2, b1_2);
+            fma_row!(acc[11], a2_2, 3, b0_2, b1_2);
+
+            fma_row!(acc[0], a0_3, 0, b0_3, b1_3);
+            fma_row!(acc[1], a0_3, 1, b0_3, b1_3);
+            fma_row!(acc[2], a0_3, 2, b0_3, b1_3);
+            fma_row!(acc[3], a0_3, 3, b0_3, b1_3);
+            fma_row!(acc[4], a1_3, 0, b0_3, b1_3);
+            fma_row!(acc[5], a1_3, 1, b0_3, b1_3);
+            fma_row!(acc[6], a1_3, 2, b0_3, b1_3);
+            fma_row!(acc[7], a1_3, 3, b0_3, b1_3);
+            fma_row!(acc[8], a2_3, 0, b0_3, b1_3);
+            fma_row!(acc[9], a2_3, 1, b0_3, b1_3);
+            fma_row!(acc[10], a2_3, 2, b0_3, b1_3);
+            fma_row!(acc[11], a2_3, 3, b0_3, b1_3);
+
+            p += 4;
+        }
+
+        // 端数ループ: [`kernel`] と同型・#559 と同一の 1 ステップ構造。
+        while p < kc_len {
             let b0 = vld1q_f32(bp[p * NR_12X8..].as_ptr());
             let b1 = vld1q_f32(bp[p * NR_12X8 + 4..].as_ptr());
-            // A の 12 行ぶんを 3 回の vld1q_f32 で一括ロード（行 0..4 は
-            // a0、行 4..8 は a1、行 8..12 は a2）。
             let a0 = vld1q_f32(ap[p * MR_12X8..].as_ptr());
             let a1 = vld1q_f32(ap[p * MR_12X8 + 4..].as_ptr());
             let a2 = vld1q_f32(ap[p * MR_12X8 + 8..].as_ptr());
@@ -223,6 +425,8 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
             fma_row!(acc[9], a2, 1, b0, b1);
             fma_row!(acc[10], a2, 2, b0, b1);
             fma_row!(acc[11], a2, 3, b0, b1);
+
+            p += 1;
         }
 
         for (i, acc_i) in acc.iter().enumerate() {
