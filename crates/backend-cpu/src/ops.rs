@@ -72,10 +72,12 @@ impl BackendOps for CpuBackendOps {
     /// [`tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、CPU カーネル内で epilogue を融合
     /// する [`gemm_blis_bias_act_parallel`] へ差し替える（TASK-12.1f・
-    /// #203）。CUDA／Metal はこのオーバーライドを持たずデフォルト実装
-    /// （非融合合成）を使う（両バックエンドの elementwise 未実装により
-    /// `bias`／`act` 指定時は `Unsupported` を透過的に返す。モジュール
-    /// ドキュメント冒頭・`tensor_core::backend_ops` のコメント参照）。
+    /// #203）。CUDA は同型のオーバーライド（`backend-cuda::ops::
+    /// CudaBackendOps::gemm_bias_act`）をイシュー #599 で追加済み。Metal
+    /// はこのオーバーライドを持たずデフォルト実装（非融合合成）を使う
+    /// （elementwise 未実装により `bias`／`act` 指定時は `Unsupported` を
+    /// 透過的に返す。モジュールドキュメント冒頭・`tensor_core::
+    /// backend_ops` のコメント参照）。
     ///
     /// 融合カーネル（[`gemm_blis_bias_act_parallel`]）は bias の行方向
     /// 複製（shape が厳密に `[n]`）のみ対応する。`bias.shape() == [1]` の
