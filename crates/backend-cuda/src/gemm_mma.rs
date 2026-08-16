@@ -279,9 +279,10 @@ impl CudaMmaGemm {
         // の余剰はカーネル内境界チェックで弾かれる。共有メモリは静的
         // `__shared__` 配列のみを使用するため `shared_mem_bytes` は 0 の
         // ままでよい（`kernels_mma.rs` 冒頭コメント「タイル構成」の
-        // 36864B〈#494 のブロックタイル拡大後の値〉は per-block 静的上限
-        // 48KiB 内であり動的共有メモリの追加確保・`cudaFuncSetAttribute`
-        // opt-in は不要）。
+        // 41,472B〈#494 のブロックタイル拡大後・#498 のバンクコンフリクト
+        // 対策パディング適用後の値〉は per-block 静的上限 48KiB 内であり
+        // 動的共有メモリの追加確保・`cudaFuncSetAttribute` opt-in は
+        // 不要）。
         unsafe {
             self.stream
                 .launch_builder(&self.mma_f16)
