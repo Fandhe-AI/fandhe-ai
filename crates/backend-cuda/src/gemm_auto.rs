@@ -429,7 +429,7 @@ pub fn specialized_mma_descriptor(
     compiled: CompiledDims,
 ) -> Result<CudaKernelDescriptor, CudaError> {
     let (cfg, _rendered) = specialized_mma_config(shape, compiled)?;
-    CudaKernelDescriptor::new(
+    CudaKernelDescriptor::new_with_compiled_dims(
         "mma_f16",
         shape,
         cfg.bm,
