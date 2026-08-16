@@ -1366,6 +1366,13 @@ const O_EXCL: i32 = 0x0800;
 #[cfg(target_os = "macos")]
 const O_WRONLY: i32 = 0x0001;
 
+/// macOS（Darwin）の `unlinkat(2)` `AT_REMOVEDIR`（`<fcntl.h>` では
+/// `0x0080`）。[`unlinkat_raw`] 用（イシュー #509 PR #677 codex-review P0
+/// 指摘対応）。指定時は対象を空ディレクトリとして `rmdir(2)` 相当で削除
+/// し、非指定時は通常ファイル・symlink 自体を `unlink(2)` 相当で削除する。
+#[cfg(target_os = "macos")]
+const AT_REMOVEDIR: i32 = 0x0080;
+
 /// macOS（Darwin）の `fcntl(2)` `F_GETPATH`（`<fcntl.h>` では `50`）。
 /// [`real_path_of_fd`] 用（イシュー #509 PR #677 codex-review P0 再指摘
 /// 対応: [`create_dir_all_verified`] macOS 版のコンテインメント再検証で、
@@ -1535,6 +1542,17 @@ unsafe extern "C" {
         oldpath: *const std::os::raw::c_char,
         newdirfd: std::os::raw::c_int,
         newpath: *const std::os::raw::c_char,
+    ) -> std::os::raw::c_int;
+
+    // `unlinkat`（イシュー #509 PR #677 codex-review P0 指摘対応:
+    // [`remove_child_pinned`] macOS 版が使う。`AT_REMOVEDIR` フラグ指定時は
+    // 空ディレクトリの削除〈`rmdir(2)` 相当〉、非指定時は通常ファイル・
+    // symlink 自体の削除〈`unlink(2)` 相当〉になる。POSIX で固定 3 引数の
+    // 非 variadic 関数）。
+    fn unlinkat(
+        dirfd: std::os::raw::c_int,
+        pathname: *const std::os::raw::c_char,
+        flags: std::os::raw::c_int,
     ) -> std::os::raw::c_int;
 }
 
@@ -1741,6 +1759,43 @@ fn renameat_raw(
             c_to.as_ptr(),
         )
     };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// pin 済みディレクトリ fd を起点に `unlinkat(2)` を呼ぶ（イシュー #509
+/// PR #677 codex-review P0 指摘対応。[`remove_child_pinned`] macOS 版が
+/// 使う）。
+///
+/// `dir` は呼び出し元が pin 済みの dirfd（本モジュールでは常にキャッシュ
+/// ルート fd、またはそこから 1 階層だけ辿ったエントリディレクトリ fd）。
+/// `unlinkat` は POSIX 標準のシステムコールで `dirfd` を起点に `name` の
+/// 1 コンポーネントのみを解決するため、Linux 版（[`proc_fd_path`] 経由の
+/// `fs::remove_file`／`fs::remove_dir`）と同様にキャッシュルートのパス
+/// 文字列を再度ルートから辿り直すことがない。`remove_dir` が真なら
+/// `AT_REMOVEDIR` を付与し空ディレクトリの削除として扱う。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn unlinkat_raw(dir: &fs::File, name: &str, remove_dir: bool) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsRawFd;
+
+    let c_name = CString::new(name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry name must not contain a NUL byte",
+        )
+    })?;
+
+    let flags = if remove_dir { AT_REMOVEDIR } else { 0 };
+
+    // SAFETY: `dir` は呼び出し元が pin 済みの有効なディレクトリ fd で
+    // 本呼び出しの間生存する。`c_name` は直前に構築した NUL 終端の有効な
+    // C 文字列で呼び出し中生存する。`unlinkat` は POSIX 標準のシステム
+    // コールで、戻り値は成功時 `0`、失敗時 `-1`（`errno` は
+    // `std::io::Error::last_os_error()` で読む）。
+    let ret = unsafe { unlinkat(dir.as_raw_fd(), c_name.as_ptr(), flags) };
     if ret != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -2109,6 +2164,75 @@ fn rename_pinned(
     #[cfg(not(target_os = "linux"))]
     {
         renameat_raw(from_dir_fd, from_name, to_dir_fd, to_name)
+    }
+}
+
+/// `dir_fd` を起点に `name` の 1 コンポーネントを削除する（[`remove_cache_entry_pinned`]
+/// が使う削除プリミティブ。イシュー #509 PR #677 codex-review P0 指摘
+/// 対応: 後始末〈一時ディレクトリ・退避ディレクトリの削除〉を `root_fd`
+/// 起点の fd 相対操作へ統一するための最小単位）。
+///
+/// Linux 版は [`proc_fd_path`] 経由の [`fs::remove_file`]／[`fs::remove_dir`]
+/// （`/proc/self/fd/<fd>/<name>` は fd が指す実体を起点に `name` の 1
+/// コンポーネントだけを解決するため、[`rename_pinned`]・
+/// [`create_subdir_pinned`] 等の既存 fd 相対プリミティブと同じ手法。
+/// [`proc_fd_path`] のドキュメンテーションコメント参照）。macOS 版は
+/// [`unlinkat_raw`]（`unlinkat(2)` FFI 直接呼び出し）を使う。`is_dir` が
+/// 真の場合は空ディレクトリの削除（`rmdir(2)` 相当）、偽の場合は通常
+/// ファイル・symlink 自体の削除（`unlink(2)` 相当）として扱う。
+#[cfg(unix)]
+fn remove_child_pinned(dir_fd: &fs::File, name: &str, is_dir: bool) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = proc_fd_path(dir_fd).join(name);
+        if is_dir {
+            fs::remove_dir(&path)
+        } else {
+            fs::remove_file(&path)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        unlinkat_raw(dir_fd, name, is_dir)
+    }
+}
+
+/// `root_fd` 起点で `name`（[`store_cache_entry_at`] の `tmp_name`／
+/// `stale_name`）が指す実体を best-effort に削除する（イシュー #509 PR
+/// #677 codex-review P0 指摘対応:
+/// [`fs::remove_dir_all`]（`root.join(name)` によるパス再解決）・
+/// 旧 `remove_cache_entry_best_effort` の置き換え。`root_fd` を pin した
+/// 後に `root` 自体が別ディレクトリへの symlink に差し替えられても、
+/// `root_fd` から辿った実体だけを削除対象にするため、攻撃者が用意した
+/// symlink 先のディレクトリ・ファイルを誤って削除しない）。
+///
+/// [`store_cache_entry_at`] が扱う削除対象は常にディレクトリ（中身は高々
+/// [`CACHE_ENTRY_SOURCE_FILE`]／[`CACHE_ENTRY_PTX_FILE`] の 2 ファイルのみ。
+/// [`write_entry_files_pinned`] の書き込み契約、または元は正常なキャッシュ
+/// エントリだった退避コピー）か、非ディレクトリ（イシュー #509 PR #677
+/// Bugbot 指摘〈Non-dir blocks cache replacement〉対応で置換対象になった
+/// 通常ファイル・symlink）のいずれかである。ディレクトリの場合は既知の 2
+/// ファイル名のみを対象に子を削除してから親ディレクトリ自体を削除する
+/// （未知のファイルが残っていれば `remove_dir` が `ENOTEMPTY` 相当で失敗
+/// し当該ディレクトリは残置されるが、削除失敗はいずれも呼び出し元が
+/// best-effort として無視する契約であり、無条件の再帰削除〈子孫を limit
+/// なく辿る〉より安全側に倒す）。
+#[cfg(unix)]
+fn remove_cache_entry_pinned(root_fd: &fs::File, name: &str) {
+    match open_dir_child_nofollow(root_fd, name) {
+        Ok(dir_fd) => {
+            let _ = remove_child_pinned(&dir_fd, CACHE_ENTRY_SOURCE_FILE, false);
+            let _ = remove_child_pinned(&dir_fd, CACHE_ENTRY_PTX_FILE, false);
+            drop(dir_fd);
+            let _ = remove_child_pinned(root_fd, name, true);
+        }
+        Err(_) => {
+            // ディレクトリでなければ通常ファイル・symlink として直接
+            // 削除する（[`entry_exists_at`] の非ディレクトリ占有判定と
+            // 対称の扱い）。存在しない場合（そもそも作られなかった等）も
+            // ここへ来るが、削除失敗は best-effort として無視される。
+            let _ = remove_child_pinned(root_fd, name, false);
+        }
     }
 }
 
@@ -2803,56 +2927,26 @@ fn store_cache_entry_in(
         detail: format!("failed to pin cache root {}: {e}", root.display()),
     })?;
 
-    store_cache_entry_at(
-        &root_fd,
-        root,
-        &final_dir,
-        &entry_name,
-        kernel_cu,
-        kernel_ptx,
-    )
-}
-
-/// 退避したキャッシュエントリ（`stale_dir`）をベストエフォートで削除
-/// する（[`store_cache_entry_at`] 用）。削除は containment 突破の経路
-/// ではないためパスベースのままでよい（[`create_dir_all_verified`]
-/// macOS 版の同種コメント参照）が、[`entry_exists_at`] の型非依存化
-/// （イシュー #509 PR #677 Bugbot 指摘〈Non-dir blocks cache
-/// replacement〉対応）に伴い、退避先には旧・破損エントリが元々どの
-/// 種別（ディレクトリ・通常ファイル・symlink）で占有していたかに
-/// かかわらず rename されてくる。`fs::remove_dir_all` はディレクトリ
-/// 以外（通常ファイル・symlink）には使えないため、`symlink_metadata`
-/// （symlink を追跡しない）で実体の種別を判定してから、ディレクトリは
-/// `remove_dir_all`、それ以外は `remove_file` を呼び分ける。判定・
-/// 削除いずれも失敗はベストエフォート（呼び出し元は次回 store 時の
-/// 再試行に委ねる）として無視する。
-#[cfg(unix)]
-fn remove_cache_entry_best_effort(path: &Path) {
-    match fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_dir() => {
-            let _ = fs::remove_dir_all(path);
-        }
-        Ok(_) => {
-            let _ = fs::remove_file(path);
-        }
-        Err(_) => {
-            // 既に存在しない（別 writer が先に片付けた等）。何もしない。
-        }
-    }
+    store_cache_entry_at(&root_fd, &final_dir, &entry_name, kernel_cu, kernel_ptx)
 }
 
 /// [`store_cache_entry_in`]（Unix 版）が pin 済みの `root_fd` を渡して
 /// 呼ぶ、fd 相対操作のみで完結する実処理本体（イシュー #509 PR #677
 /// codex-review P0 指摘対応）。
 ///
-/// `root`／`final_dir` は best-effort な後始末（[`fs::remove_dir_all`]
-/// によるベストエフォート削除。削除は containment 突破の経路ではない
-/// ため path ベースのままでよい。[`create_dir_all_verified`] macOS 版の
-/// 同種コメント参照）専用の表示・削除パスとしてのみ使い、実際の
-/// 作成・書き込み・rename・検証は `root_fd`／`entry_name`／
-/// `tmp_name`／`stale_name` の fd 相対操作（[`create_subdir_pinned`]・
-/// [`rename_pinned`]・[`validate_cache_entry_at`]・[`entry_exists_at`]）
-/// のみで行う。テスト容易性のため `root_fd` を注入で決定化する構造は
+/// `final_dir` は成功時の戻り値組み立て専用（表示・呼び出し元への通知用）
+/// のパスとしてのみ使う。作成・書き込み・rename・検証・**後始末（一時
+/// ディレクトリ・退避ディレクトリの削除）を含む全操作**は `root_fd`／
+/// `entry_name`／`tmp_name`／`stale_name` の fd 相対操作（[`create_subdir_pinned`]・
+/// [`rename_pinned`]・[`validate_cache_entry_at`]・[`entry_exists_at`]・
+/// [`remove_cache_entry_pinned`]）のみで行う（イシュー #509 PR #677
+/// codex-review P0 再指摘対応: 旧実装は後始末のみ `root.join(..)` という
+/// 文字列パスを経由して [`fs::remove_dir_all`] するため、`root_fd` を pin
+/// した後で `root` 自体が別ディレクトリへの symlink に差し替えられると
+/// pin 済みの実体ではなく symlink 先を再解決してしまい、攻撃者が用意した
+/// 同名ディレクトリ・ファイルを削除しうる TOCTOU が残っていた。作成・
+/// rename・検証系は既に `root_fd` 起点だったため、削除系のみを同じ手法へ
+/// 揃える）。テスト容易性のため `root_fd` を注入で決定化する構造は
 /// [`ensure_cache_root_in`] と同型。
 ///
 /// # 並行競合の吸収（受け入れ基準 1）
@@ -2886,17 +2980,15 @@ fn remove_cache_entry_best_effort(path: &Path) {
 #[cfg(unix)]
 fn store_cache_entry_at(
     root_fd: &fs::File,
-    root: &Path,
     final_dir: &Path,
     entry_name: &str,
     kernel_cu: &str,
     kernel_ptx: &str,
 ) -> Result<PathBuf, CudaError> {
     let tmp_name = temp_entry_dir_name(entry_name);
-    let tmp_dir = root.join(&tmp_name); // best-effort クリーンアップ専用
 
     if let Err(e) = write_entry_files_pinned(root_fd, &tmp_name, kernel_cu, kernel_ptx) {
-        let _ = fs::remove_dir_all(&tmp_dir);
+        remove_cache_entry_pinned(root_fd, &tmp_name);
         return Err(e);
     }
 
@@ -2911,7 +3003,7 @@ fn store_cache_entry_at(
     // rename 失敗経路: 他プロセス先着（正常系）／破損エントリ置換／
     // その他 fs エラーのいずれかを、最終エントリの状態から判別する。
     if validate_cache_entry_at(root_fd, entry_name) {
-        let _ = fs::remove_dir_all(&tmp_dir);
+        remove_cache_entry_pinned(root_fd, &tmp_name);
         return Ok(final_dir.to_path_buf());
     }
 
@@ -2925,7 +3017,7 @@ fn store_cache_entry_at(
         // する: 再検証なしに削除すると、その別 writer の先着エントリを
         // 「破損」扱いで消してしまい first-writer-wins 契約を破りうる。
         if validate_cache_entry_at(root_fd, entry_name) {
-            let _ = fs::remove_dir_all(&tmp_dir);
+            remove_cache_entry_pinned(root_fd, &tmp_name);
             return Ok(final_dir.to_path_buf());
         }
 
@@ -2951,21 +3043,19 @@ fn store_cache_entry_at(
                     // コピーを破棄する（いずれにせよ最終エントリには
                     // 有効なエントリが残る）。
                     if rename_pinned(root_fd, &stale_name, root_fd, entry_name).is_ok() {
-                        let _ = fs::remove_dir_all(&tmp_dir);
+                        remove_cache_entry_pinned(root_fd, &tmp_name);
                         return Ok(final_dir.to_path_buf());
                     }
-                    let stale_dir = root.join(&stale_name);
-                    remove_cache_entry_best_effort(&stale_dir);
+                    remove_cache_entry_pinned(root_fd, &stale_name);
                     if validate_cache_entry_at(root_fd, entry_name) {
-                        let _ = fs::remove_dir_all(&tmp_dir);
+                        remove_cache_entry_pinned(root_fd, &tmp_name);
                         return Ok(final_dir.to_path_buf());
                     }
                 } else {
                     // 退避コピーは検証済みで真に破損している。安全に削除
                     // できる（最終エントリからは既に rename 済みのため、
                     // これを削除しても他 writer の実体を破壊しない）。
-                    let stale_dir = root.join(&stale_name);
-                    remove_cache_entry_best_effort(&stale_dir);
+                    remove_cache_entry_pinned(root_fd, &stale_name);
                 }
             }
             Err(_) => {
@@ -2987,7 +3077,7 @@ fn store_cache_entry_at(
         }
     }
 
-    let _ = fs::remove_dir_all(&tmp_dir);
+    remove_cache_entry_pinned(root_fd, &tmp_name);
     if validate_cache_entry_at(root_fd, entry_name) {
         // 再試行の間に別プロセスが有効なエントリを置いた（正常系）。
         Ok(final_dir.to_path_buf())
@@ -5216,15 +5306,8 @@ mod tests {
         let final_dir = cache_entry_path_in(&real_root, &key).expect("must compute final dir");
         let entry_name = key.cache_entry_dir_name().expect("must compute entry name");
 
-        store_cache_entry_at(
-            &root_fd,
-            &real_root,
-            &final_dir,
-            &entry_name,
-            "pinned.cu",
-            "pinned.ptx",
-        )
-        .expect("store must still succeed via the pinned fd, unaffected by the symlink swap");
+        store_cache_entry_at(&root_fd, &final_dir, &entry_name, "pinned.cu", "pinned.ptx")
+            .expect("store must still succeed via the pinned fd, unaffected by the symlink swap");
 
         // 実体は pin 済み fd（差し替え前の実ディレクトリ、現在は
         // `moved_aside` の位置）側に作られていること。
@@ -5248,6 +5331,103 @@ mod tests {
                 .next()
                 .is_none(),
             "entry must not leak into the symlink target planted after pinning"
+        );
+
+        drop(root_fd);
+        let _ = fs::remove_dir_all(&moved_aside);
+        let _ = fs::remove_file(&real_root);
+        let _ = fs::remove_dir_all(&attacker_target);
+    }
+
+    // 回帰テスト（イシュー #509 PR #677 codex-review P0 指摘対応）:
+    // `store_cache_entry_at` の後始末（一時ディレクトリ・退避ディレクトリ
+    // の削除）が `root_fd` 起点の fd 相対操作であり、`root_fd` を pin した
+    // 後に `root` 自体が symlink へ差し替えられても、削除対象を pin 済み
+    // の実体（`moved_aside`）だけに限定し symlink 先（`attacker_target`）
+    // には一切触れないことを検証する。
+    //
+    // 上のテスト（`store_at_writes_through_pinned_root_fd_even_after_root_path_is_swapped_to_symlink`）
+    // は成功系（rename が一発で成功する経路）のみを通るため、後始末の
+    // 削除コード（[`remove_cache_entry_pinned`]）を一切経由しない。本
+    // テストは事前に破損エントリを置いて「破損エントリ置換」分岐（受け
+    // 入れ基準 2）を強制的に踏ませ、削除コードそのものを symlink 差し
+    // 替え下で実行させる。
+    #[cfg(unix)]
+    #[test]
+    fn store_at_cleanup_stays_within_pinned_root_fd_even_after_root_path_is_swapped_to_symlink() {
+        let real_root = fresh_temp_dir("pin-cleanup-real-root");
+        let moved_aside = fresh_temp_dir("pin-cleanup-moved-aside-placeholder");
+        fs::remove_dir(&moved_aside).expect("must clear rename destination placeholder");
+        let attacker_target = fresh_temp_dir("pin-cleanup-attacker-target");
+        // 攻撃者が用意した無関係なディレクトリに「監視用」の目印ファイルを
+        // 置いておく。後始末が symlink 先を誤って再帰削除すれば、この目印
+        // ごと消え去るはずである。
+        fs::write(attacker_target.join("sentinel"), b"do-not-delete")
+            .expect("must plant a sentinel file in the attacker-controlled directory");
+        let key = sample_key();
+        let entry_name = key.cache_entry_dir_name().expect("must compute entry name");
+
+        // 破損エントリ（`kernel.ptx` 欠如）を pin 前に実ディレクトリへ
+        // 用意し、「破損エントリ置換」分岐（受け入れ基準 2）を強制する。
+        let entry_dir = real_root.join(&entry_name);
+        fs::create_dir(&entry_dir).expect("must create corrupt entry directory");
+        fs::write(entry_dir.join(CACHE_ENTRY_SOURCE_FILE), b"stale-cu")
+            .expect("must write stale kernel.cu");
+        assert!(
+            !validate_cache_entry(&entry_dir),
+            "entry must be corrupt (missing kernel.ptx) before replacement"
+        );
+
+        let root_fd = open_dir_nofollow(&real_root).expect("must pin real cache root");
+
+        // pin 後に実ディレクトリを別名へどかし、元のパスへ無関係な
+        // ディレクトリへの symlink を差し替える。
+        fs::rename(&real_root, &moved_aside).expect("must move the real root directory aside");
+        std::os::unix::fs::symlink(&attacker_target, &real_root)
+            .expect("must plant a symlink at the original root path");
+
+        let final_dir = cache_entry_path_in(&real_root, &key).expect("must compute final dir");
+
+        store_cache_entry_at(&root_fd, &final_dir, &entry_name, "fresh-cu", "fresh-ptx")
+            .expect("store must replace the corrupt entry via the pinned fd");
+
+        // 置換後のエントリは pin 済み fd（`moved_aside`）側で有効である
+        // こと。
+        assert!(
+            validate_cache_entry_at(&root_fd, &entry_name),
+            "replaced entry must land in the directory that was pinned before the symlink swap"
+        );
+
+        // 後始末（一時ディレクトリ・退避ディレクトリの削除）が pin 済み
+        // 実体側で完了し、`.tmp.` プレフィックスの残骸が残っていないこと。
+        let leftover_tmp_dirs = fs::read_dir(&moved_aside)
+            .expect("moved_aside must be readable")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp."))
+            .count();
+        assert_eq!(
+            leftover_tmp_dirs, 0,
+            "temp/stale cleanup must happen via the pinned root fd, not leave debris behind"
+        );
+
+        // symlink 先（攻撃者が用意した無関係なディレクトリ）は後始末に
+        // よって一切変更されていないこと（削除の containment 突破が
+        // ないことの直接検証。旧実装は `root.join(name)` を再解決した
+        // ため、削除処理が symlink 先を辿り攻撃者のディレクトリ・
+        // ファイルを消しうる P0 指摘があった）。
+        assert!(
+            attacker_target.join("sentinel").is_file(),
+            "cleanup must never delete anything inside the symlink target planted after pinning"
+        );
+        let attacker_target_entries: Vec<_> = fs::read_dir(&attacker_target)
+            .expect("attacker_target must still be readable")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(
+            attacker_target_entries.len(),
+            1,
+            "cleanup must not create or delete anything inside the symlink target"
         );
 
         drop(root_fd);
