@@ -8,7 +8,7 @@
 
 ## 変更内容
 
-- [`Microkernel::run`](../../crates/backend-cpu/src/gemm_blis/microkernel.rs) のシグネチャに行ストライド `ldc` を追加し、`c[i*ldc+j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする契約へ一般化した（scalar／neon／avx2／avx512 の全マイクロカーネルが追従）
+- [`Microkernel`](../../crates/backend-cpu/src/gemm_blis/microkernel.rs) trait に行ストライド `ldc` を受け取る新規メソッド [`run_with_ldc`](../../crates/backend-cpu/src/gemm_blis/microkernel.rs) を追加し、`c[i*ldc+j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする契約へ一般化した（scalar／neon／avx2／avx512 の全マイクロカーネルが `run_with_ldc` を直接実装）。既存の公開メソッド [`Microkernel::run`](../../crates/backend-cpu/src/gemm_blis/microkernel.rs) はシグネチャ変更なしで維持しており（公開 API 非破壊。#691 レビュー指摘への対応）、組み込みカーネルは `run` を `run_with_ldc(..., NR, ...)` への委譲として実装する。`run_with_ldc` はデフォルト実装（`ldc == NR` なら `run` へ委譲、それ以外はギャザー/スキャッタでフォールバック）を持つため、`run` のみを実装するクレート外部実装も無変更でコンパイル可能
 - 完全タイル: `gemm_blis_region` が C の実バッファから `&mut c[row0..row0+(mr-1)*n+nr]`・`ldc=n` を渡す（コピーなし）
 - 端タイル: 従来どおり `MAX_TILE` スタックバッファへコピーイン → `ldc=nr` でカーネル実行 → 有効部のみコピーバック
 - 各カーネル入口に `assert!(ldc >= NR)`・`assert!(c.len() >= (MR-1)*ldc+NR)`（`checked_mul`/`checked_add` 経由）を追加し、REQ-8 の境界検査を維持・強化した
