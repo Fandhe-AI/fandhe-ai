@@ -189,12 +189,62 @@ impl CudaKernelDescriptor {
 /// エントリが誤って再利用されない性質を担保する（OWASP A08 整合性。
 /// `.claude/rules/security.md`）。
 ///
-/// ソースコード断片のハッシュ（DeepGEMM の `code` 相当）は本キーには
-/// 含めない（C-5・#514 のスコープ。ソース断片によるキー拡張・キャッシュ
-/// 無効化はそちらで扱う）。ディレクトリ命名（`kernel.<name>.<hash>`）と
-/// ハッシュ関数自体は C-2（#506）のスコープであり、本型は「ハッシュ化
-/// される前のキーの単位」を定義するのみ。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// ソースコード断片は `source` フィールドとして本キーに含める
+/// （C-5・#514）。
+///
+/// # C-5（#514）の必要性判断: 「再帰ハッシュ」ではなく最終ソース全体を
+/// 取り込む方式を採る理由
+///
+/// イシュー #514 が要求する DeepGEMM 型の対応物（生成コードが `#include`
+/// する外部ヘッダファイルを正規表現抽出して再帰的にハッシュへ取り込み、
+/// フルプリプロセスなしにヘッダ変更を検知する機構）は、本リポジトリの
+/// カーネルソースには構造的に不要である。DeepGEMM がヘッダの再帰 include
+/// パースを必要とするのは、生成コードがリポジトリ内ヘッダファイルを
+/// `#include` で参照するため。一方、本クレートのカーネルソースは
+/// `kernels_mma::render_mma_f16`／`render_mma_f16_unchecked` のような
+/// `render_*` 関数が Rust の `const` 文字列断片（`MMA_F16_BODY` 等）と
+/// 型付きパラメータ（shape・タイル寸法・段数）のみからプロセス内で
+/// 最終 `String` を組み立てて確定させる契約（本ファイル冒頭 A03 節・
+/// `kernels_mma.rs` ドキュメンテーションコメント参照）であり、リポジトリ
+/// 内ヘッダファイルへの `#include` 参照が存在しない（NVRTC へ渡す
+/// `#include <cuda_fp16.h>` 等は toolkit 標準ヘッダのみで、その ABI 変更は
+/// 本フィールドではなく `nvrtc_version` フィールドが追従する）。
+///
+/// したがって、最終レンダー済みソース文字列そのものをキーへ含めれば、
+/// 断片（`*_BODY` 定数・展開ヘッダ・将来の断片合成のいずれ）を編集しても
+/// 推移的に本フィールドの値が変わり、DeepGEMM の再帰ハッシュと同じ
+/// 「ソースの何がどう変わっても確実にキャッシュミスする」性質を、
+/// ファイルパース・fs I/O を一切伴わない単純な方式で得られる。これは
+/// DeepGEMM 自身がキーに `code`（最終展開済みソース全体）を含める設計
+/// （`compiler.hpp` の `{name}$${signature}$${flags}$${code}`）とも
+/// 対応関係にある。
+///
+/// ディレクトリ命名（`kernel.<name>.<hash>`）とハッシュ関数自体は C-2
+/// （#506）のスコープであり、本型は「ハッシュ化される前のキーの単位」を
+/// 定義するのみ。
+///
+/// # 破壊的変更の意図的な受容（C-5・#514・codex-review P1 是正）
+///
+/// [`Self::new`]／[`Self::from_device`] は本フィールド（`source`）追加に
+/// 伴い必須引数が増える破壊的シグネチャ変更を受けている。旧シグネチャを
+/// 互換維持したまま `source` なしのコンストラクタを併存させる代替案は
+/// 採らない: `source` を含まないキーは `canonical_bytes()`／派生
+/// `Hash`/`Eq` がソース変更を検知できず、C-5 が解消対象とする「ソースを
+/// 編集してもキャッシュがヒットし続ける」問題（stale cache reuse。OWASP
+/// A08 整合性）をまさに再導入してしまうため、互換コンストラクタの追加は
+/// 安全側ではなく危険側の選択となる。
+///
+/// 移行契約: 本型は crate root（`lib.rs`）から `pub use` で再公開されて
+/// おり形式上は公開 API だが、`backend-cuda` はこのリポジトリの「唯一の
+/// サポートされる公開 API 面」ではない内部クレートであり（`facade` が
+/// 公開面。CLAUDE.md「想定クレート 10 個」節）、かつ workspace は
+/// `publish = false`（crates.io 非公開）のため crate 外・リポジトリ外の
+/// SemVer 契約下の利用者は存在しない（`grep -rn CudaKernelCacheKey .` で
+/// 呼び出し元は本ファイル自身のみと確認済み）。既存呼び出し元
+/// （本ファイル内の実装・テスト）は本 PR で全て新シグネチャへ移行済み。
+/// 将来 crate 外から利用する場合は最終レンダー済みソース文字列
+/// （`kernels_mma::render_mma_f16` 等の戻り値）を渡すこと。
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CudaKernelCacheKey {
     descriptor: CudaKernelDescriptor,
     /// `CudaDevice::compute_capability()` と同型（`device.rs`）。
@@ -212,10 +262,21 @@ pub struct CudaKernelCacheKey {
     /// なく無駄なキャッシュミス方向のみだが、C-2（#506）でのキー消費側
     /// 実装時にも本契約を維持する。
     compile_flags: Vec<String>,
+    /// 最終レンダー済みカーネルソース全体（C-5・#514）。上記ドキュメン
+    /// テーションコメントの必要性判断を参照。`derive(Hash)`/`derive(Eq)`
+    /// へ自然に含まれるため、プロセス内キー比較（将来の C-4 LRU・#511）は
+    /// ハッシュ縮退なしの厳密一致になる。
+    ///
+    /// 外部への公開 getter は設けない（`pub(crate)` に留める）:
+    /// `RenderedMmaKernel` がソース文字列を外部へ返さない設計（PR #643
+    /// P0 対応）を採っており、キー経由でソース全文が漏出する新たな公開
+    /// 経路を作らないため。
+    source: String,
 }
 
 impl CudaKernelCacheKey {
-    /// `descriptor`（検証済み）と環境パラメータからキーを構築する。
+    /// `descriptor`（検証済み）と環境パラメータ、および最終レンダー済み
+    /// カーネルソース（`source`。C-5・#514）からキーを構築する。
     /// `descriptor` は [`CudaKernelDescriptor::new`] を経由済みのため
     /// infallible（`Result` を返さない）。
     pub fn new(
@@ -223,12 +284,14 @@ impl CudaKernelCacheKey {
         compute_capability: (i32, i32),
         nvrtc_version: (i32, i32),
         compile_flags: Vec<String>,
+        source: String,
     ) -> Self {
         Self {
             descriptor,
             compute_capability,
             nvrtc_version,
             compile_flags,
+            source,
         }
     }
 
@@ -240,12 +303,14 @@ impl CudaKernelCacheKey {
         descriptor: CudaKernelDescriptor,
         device: &crate::device::CudaDevice,
         compile_flags: Vec<String>,
+        source: String,
     ) -> Result<Self, CudaError> {
         Ok(Self::new(
             descriptor,
             device.compute_capability(),
             nvrtc_version()?,
             compile_flags,
+            source,
         ))
     }
 
@@ -282,13 +347,19 @@ impl CudaKernelCacheKey {
     /// 自体に区切り文字が混入すると異なる論理キーが同一バイト列に
     /// 縮退しうるため。
     ///
-    /// 先頭 1 バイトはエンコーディングバージョン。C-5（#514）でソース
-    /// 断片ハッシュをキーへ拡張する等、将来このバイト列表現を変更する際は
-    /// このバージョン番号を上げ、互換性の切り替え点として使う。
+    /// 先頭 1 バイトはエンコーディングバージョン。将来このバイト列表現を
+    /// 変更する際はこのバージョン番号を上げ、互換性の切り替え点として使う。
     /// **このバイト列表現の変更は既存キャッシュエントリを全て無効化する**
     /// （ハッシュ値が変わるため）契約であることに注意。
+    ///
+    /// v2（C-5・#514）: 末尾に [`Self::source`] を長さプレフィクス付きで
+    /// 追記した。v1 → v2 の切り替えにより、v1 時点で存在しうるディスク
+    /// キャッシュエントリ（C-3・#509 実装後に実体化）は本フィールド追加
+    /// と無関係に全て無効化される（意図どおり。C-2 実装時点のコメントで
+    /// 「C-5 でソース取り込み時に ENCODING_VERSION を上げる」ことが
+    /// 予告済み）。
     fn canonical_bytes(&self) -> Vec<u8> {
-        const ENCODING_VERSION: u8 = 1;
+        const ENCODING_VERSION: u8 = 2;
 
         let mut buf = Vec::new();
         buf.push(ENCODING_VERSION);
@@ -323,6 +394,12 @@ impl CudaKernelCacheKey {
         for flag in &self.compile_flags {
             push_len_prefixed_str(&mut buf, flag);
         }
+
+        // v2（C-5・#514）: 最終レンダー済みカーネルソース全体。フラグ列の
+        // 末尾（可変長プレフィクス方式）の直後に置くため、長さプレフィクス
+        // 方式のまま追記すれば既存フィールドとの境界曖昧化は起きない
+        // （`push_len_prefixed_str` のドキュメンテーションコメント参照）。
+        push_len_prefixed_str(&mut buf, &self.source);
 
         buf
     }
@@ -373,6 +450,38 @@ impl CudaKernelCacheKey {
             });
         }
         Ok(name)
+    }
+}
+
+/// 手動 `Debug` 実装（C-5・#514・codex-review P1 是正）。`derive(Debug)`
+/// のままだと [`CudaKernelCacheKey::source`]（数十 KB になりうる展開済み
+/// カーネルソース全文）がそのままログ・パニックメッセージへ出力されて
+/// しまう（情報露出。`.claude/rules/security.md` セキュリティ考慮）。
+///
+/// 当初案（先頭 40 文字の平文要約 `source_summary`）は codex-review で
+/// P1 指摘を受けた: ソース先頭 40 文字はカーネル名・シグネチャ等の識別
+/// 情報を含みうる平文断片であり、「公開 getter を設けずソース全文漏出を
+/// 防止する」（`source` フィールドのドキュメンテーションコメント参照）
+/// という設計方針に反する部分的漏出だった。本実装は `source` の内容を
+/// 一切表示せず、長さと非可逆な変更検知用フィンガープリント
+/// （[`fnv1a_64`]。[`Self::stable_hash`] と同一アルゴリズム）のみを出力
+/// する。`fnv1a_64` は非暗号ハッシュのため、このフィンガープリントは
+/// 「同一ソースかどうかの変更検知」用途に限られ、改竄検知・完全性保証
+/// （OWASP A08）の根拠にはしない（[`fnv1a_64`] のドキュメンテーション
+/// コメント参照）。他フィールドは derive 相当の表示を保つ。
+impl std::fmt::Debug for CudaKernelCacheKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaKernelCacheKey")
+            .field("descriptor", &self.descriptor)
+            .field("compute_capability", &self.compute_capability)
+            .field("nvrtc_version", &self.nvrtc_version)
+            .field("compile_flags", &self.compile_flags)
+            .field("source_len", &self.source.len())
+            .field(
+                "source_fnv1a64",
+                &format_args!("{:016x}", fnv1a_64(self.source.as_bytes())),
+            )
+            .finish()
     }
 }
 
@@ -1033,12 +1142,23 @@ mod tests {
         .expect("valid descriptor parameters must not fail")
     }
 
+    // C-5（#514）: 実テンプレート（`kernels_mma::mma_f16_source`。既定
+    // 構成で展開済みの実カーネルソース）を使う。合成のダミー文字列ではなく
+    // 実際にコンパイル対象となるソースでテストすることで、
+    // `source_changes_produce_distinct_key_and_hash` が「テンプレート
+    // 文字列を編集した際に必ずキャッシュミスする」という受け入れ基準を
+    // 実物に即して検証する。
+    fn sample_source() -> String {
+        crate::kernels_mma::mma_f16_source().to_string()
+    }
+
     fn sample_key() -> CudaKernelCacheKey {
         CudaKernelCacheKey::new(
             sample_descriptor(),
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         )
     }
 
@@ -1183,6 +1303,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_shape);
 
@@ -1200,6 +1321,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_block_m);
 
@@ -1221,6 +1343,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_block_n);
 
@@ -1238,6 +1361,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_block_k);
 
@@ -1255,6 +1379,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_stages);
 
@@ -1272,6 +1397,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_kernel_name);
 
@@ -1294,6 +1420,7 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_dtype);
 
@@ -1304,6 +1431,7 @@ mod tests {
             (9, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_cc);
 
@@ -1312,6 +1440,7 @@ mod tests {
             (8, 0),
             (13, 0),
             vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_nvrtc_version);
 
@@ -1320,8 +1449,33 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_90".to_string()],
+            sample_source(),
         );
         assert_ne!(base, different_flags);
+
+        // 受け入れ基準の中核（C-5・#514）: テンプレート展開元の descriptor・
+        // 環境パラメータが全て同一でも、ソース文字列自体（例: 1 文字の
+        // コメント追記に相当する変更）が異なれば別キーになること。
+        // カーネルテンプレート（`kernels_mma.rs` の `MMA_F16_BODY` 等）を
+        // 編集してもタイル定数・カーネル名が不変なら以前は同一キーに
+        // 縮退していた欠陥（本タスクの動機）をここで直接検証する。
+        let different_source = CudaKernelCacheKey::new(
+            sample_descriptor(),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+            format!("{}\n// edited\n", sample_source()),
+        );
+        assert_ne!(base, different_source);
+        // 実装計画 §4-5 の中核受け入れ基準そのもの: ソース断片編集が
+        // ディスクキャッシュのディレクトリ名（`kernel.<name>.<hash>`）を
+        // 変え、C-3（#509）実装後に陳腐化エントリへ誤ヒットしないこと。
+        assert_ne!(
+            base.cache_entry_dir_name().expect("must succeed"),
+            different_source
+                .cache_entry_dir_name()
+                .expect("must succeed"),
+        );
     }
 
     // 受け入れ基準: `HashMap` でのヒット/ミス動作のスモークテスト。
@@ -1337,8 +1491,41 @@ mod tests {
             (9, 0),
             (12, 9),
             vec!["--gpu-architecture=compute_90".to_string()],
+            sample_source(),
         );
         assert_eq!(cache.get(&miss_key), None);
+    }
+
+    // codex-review P1 是正（C-5・#514）: `Debug` 出力にカーネルソース内容
+    // （先頭 40 文字の平文要約を含む旧実装）が漏出しないことを保証する
+    // 回帰テスト。`sample_source()` は `mma_f16_source()`（数十行の実
+    // カーネルソース）を返すため、その内容の一部（先頭のプリプロセッサ
+    // 指令等の識別可能な断片）が `{:?}` 出力に一切含まれないことを検査
+    // する。長さ・非可逆フィンガープリントのみが出力される契約
+    // （`impl Debug for CudaKernelCacheKey` ドキュメンテーションコメント
+    // 参照）。
+    #[test]
+    fn debug_output_does_not_leak_source_content() {
+        let key = sample_key();
+        let debug_output = format!("{key:?}");
+        let source = sample_source();
+
+        // ソース全文はもちろん、旧実装が漏出させていた先頭 40 文字断片も
+        // 含め、ソースからの任意の非自明な部分文字列が出力に現れない
+        // ことを確認する。
+        let leading_fragment: String = source.chars().take(40).collect();
+        assert!(
+            !debug_output.contains(&leading_fragment),
+            "Debug 出力にソース先頭断片が含まれている（情報露出）: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(&source),
+            "Debug 出力にソース全文が含まれている（情報露出）: {debug_output}"
+        );
+
+        // 代わりに長さと非可逆フィンガープリントは出力される契約。
+        assert!(debug_output.contains(&source.len().to_string()));
+        assert!(debug_output.contains("source_fnv1a64"));
     }
 
     // イシュー #506（Phase C-2）: FNV-1a 64bit の既知テストベクタ
@@ -1383,6 +1570,7 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 CudaKernelDescriptor::new(
@@ -1398,24 +1586,28 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 sample_descriptor(),
                 (9, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 sample_descriptor(),
                 (8, 0),
                 (13, 0),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 sample_descriptor(),
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_90".to_string()],
+                sample_source(),
             ),
             // Cursor Bugbot 指摘（PR #659）: 本テストは
             // `changing_any_field_produces_distinct_key`
@@ -1440,6 +1632,7 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 CudaKernelDescriptor::new(
@@ -1455,6 +1648,7 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 CudaKernelDescriptor::new(
@@ -1470,6 +1664,7 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 CudaKernelDescriptor::new(
@@ -1485,6 +1680,7 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
             ),
             CudaKernelCacheKey::new(
                 CudaKernelDescriptor::new(
@@ -1500,6 +1696,18 @@ mod tests {
                 (8, 0),
                 (12, 9),
                 vec!["--gpu-architecture=compute_80".to_string()],
+                sample_source(),
+            ),
+            // C-5（#514）: `stable_hash` 側でも `source` フィールド単独の
+            // 変更が別ハッシュを生むことを検証する
+            // （`changing_any_field_produces_distinct_key` の
+            // `different_source` ケースと同型）。
+            CudaKernelCacheKey::new(
+                sample_descriptor(),
+                (8, 0),
+                (12, 9),
+                vec!["--gpu-architecture=compute_80".to_string()],
+                format!("{}\n// edited\n", sample_source()),
             ),
         ];
 
@@ -1523,15 +1731,55 @@ mod tests {
             (8, 0),
             (12, 9),
             vec!["ab".to_string(), "c".to_string()],
+            sample_source(),
         );
         let key_a_bc = CudaKernelCacheKey::new(
             sample_descriptor(),
             (8, 0),
             (12, 9),
             vec!["a".to_string(), "bc".to_string()],
+            sample_source(),
         );
         assert_ne!(key_ab_c.canonical_bytes(), key_a_bc.canonical_bytes());
         assert_ne!(key_ab_c.stable_hash(), key_a_bc.stable_hash());
+    }
+
+    // 正準エンコーディング非曖昧性（C-5・#514）: `compile_flags` 末尾と
+    // `source` 先頭の境界も、`canonical_encoding_disambiguates_flag_
+    // boundaries` と同じ長さプレフィクス方式の性質により曖昧化しない
+    // ことを検証する。区切り文字方式であれば
+    // `flags=["x"], source="yz"` と `flags=["x","y"], source="z"`
+    // が同一バイト列へ縮退しうる、というリスクをここで否定する。
+    #[test]
+    fn canonical_encoding_disambiguates_flags_source_boundary() {
+        // `compile_flags` の要素数（u32 カウント）は両者とも 1 で揃える。
+        // 要素数まで変えると `canonical_bytes` はその時点で既に異なる
+        // バイト列になり、区切り文字方式であれば
+        // `"x" + "yz"` == `"xy" + "z"` に縮退しうる、という本テストが
+        // 否定したい境界曖昧化を実際には検証しないまま通過してしまう
+        // （advisor 指摘）。
+        let flags_x_source_yz = CudaKernelCacheKey::new(
+            sample_descriptor(),
+            (8, 0),
+            (12, 9),
+            vec!["x".to_string()],
+            "yz".to_string(),
+        );
+        let flags_xy_source_z = CudaKernelCacheKey::new(
+            sample_descriptor(),
+            (8, 0),
+            (12, 9),
+            vec!["xy".to_string()],
+            "z".to_string(),
+        );
+        assert_ne!(
+            flags_x_source_yz.canonical_bytes(),
+            flags_xy_source_z.canonical_bytes()
+        );
+        assert_ne!(
+            flags_x_source_yz.stable_hash(),
+            flags_xy_source_z.stable_hash()
+        );
     }
 
     // 命名規則: `cache_entry_dir_name()` が `kernel.<name>.` + 16 桁小文字
