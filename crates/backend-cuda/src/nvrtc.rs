@@ -6027,3 +6027,16 @@ mod tests {
         ));
     }
 }
+
+// JIT キャッシュのヒット/ミス・並行コンパイル競合・破損検出の網羅的
+// 回帰テスト（イシュー #529・Phase C-10）。キャッシュ API が
+// module-private（`pub(crate)` にすら満たない）ため、integration test
+// （`crates/backend-cuda/tests/`）ではなく `nvrtc` モジュール自身の子として
+// 配置する（`use super::*;` で private アイテムへ到達するため）。上の
+// `mod tests`（C-3・#509）の兄弟モジュールであり、`tests` 側の private
+// ヘルパー（`sample_key` 等）とは独立に自前のヘルパーを持つ（可視性
+// ルールと配置理由の詳細は `jit_cache_regression_tests.rs` 冒頭の
+// ドキュメンテーションコメントを正とする）。
+#[cfg(test)]
+#[path = "jit_cache_regression_tests.rs"]
+mod jit_cache_regression_tests;
