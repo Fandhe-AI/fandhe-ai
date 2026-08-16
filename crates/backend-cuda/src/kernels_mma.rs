@@ -273,6 +273,10 @@ pub const MMA_K_STEPS_PER_STAGE: u32 = MMA_BK / MMA_K;
 /// `const _: () = assert!(...)` と `gemm_auto.rs::STATIC_SMEM_BUDGET_CAP_BYTES`
 /// が同じ 49,152 の値を独立にハードコードして重複管理していた（#521
 /// レビュー指摘）ため、本定数を唯一の真実源として両所から参照する。
+/// `kernels_wmma_opt.rs` の config 検証器（MMA/WMMA opt 双方の静的
+/// 共有メモリ上限検査）も本定数を参照する（イシュー #516 レビュー
+/// 指摘対応。48KiB はハードウェア側の固定上限であり MMA 固有の値
+/// ではないため、モジュールをまたいだ共有が妥当）。
 pub const MMA_STATIC_SMEM_LIMIT_BYTES: u32 = 49_152;
 
 /// 静的共有メモリ使用量（バイト）。`(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B
@@ -2335,6 +2339,10 @@ mod tests {
     /// イシュー #516 でテンプレート展開へ移行したため、`MMA_F16` 定数では
     /// なく `mma_f16_source()`（既定 config の render 結果）を対象にする
     /// （`mma_f16_source_uses_2x2_register_blocking_structure` と同じ方針）。
+    /// `contains` ではなく `matches().count() == 1` で検査するのは、main
+    /// 追従マージが `#define` を二重に持ち込んでいないか（テンプレート側の
+    /// パラメータ化定義と main 側の旧リテラル定義が両方残る等）を機械検出
+    /// するため（PR #643 マージ・イシュー #516 のレビュー指摘対応）。
     #[test]
     fn mma_f16_source_interleaves_cp_async_issue_into_kstep_loop() {
         let src = mma_f16_source();
@@ -2349,11 +2357,28 @@ mod tests {
             "LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);",
             "LOAD_B_STAGE_GROUP(load_stage, next_tile * BK, kstep);",
         ] {
-            assert!(
-                src.contains(needle),
-                "mma_f16_source() に #496 の cp.async issue interleaving 構造 `{needle}` が見つかりません"
+            assert_eq!(
+                src.matches(needle).count(),
+                1,
+                "mma_f16_source() に #496 の cp.async issue interleaving 構造 `{needle}` が \
+                 ちょうど 1 回出現しません（main 追従マージによる定義の重複・欠落の疑い）"
             );
         }
+
+        // `BK` は `K_GROUPS` 等の派生 `#define` より前に定義されている
+        // こと（プリプロセッサのマクロ展開順序契約。マージで定義順序が
+        // 入れ替わると NVRTC コンパイル不能になる回帰を機械検出する）。
+        let bk_define_pos = src
+            .find("#define BK")
+            .expect("mma_f16_source() に #define BK が見つかりません");
+        let k_groups_define_pos = src
+            .find("#define K_GROUPS")
+            .expect("mma_f16_source() に #define K_GROUPS が見つかりません");
+        assert!(
+            bk_define_pos < k_groups_define_pos,
+            "mma_f16_source() の #define BK が #define K_GROUPS より後ろにあります \
+             （K_GROUPS は BK に依存するため BK が先に定義されている必要がある）"
+        );
 
         // グループ発行（分散発行サイト）は kstep ループの内側にあること
         // （kstep ループ開始より後ろ）。
