@@ -14,8 +14,11 @@
 //! の `#[cfg(test)]`）が担当する。本ファイルは「選ばれた経路が実際に
 //! 実行され、既存カーネルと同じ数値契約を満たすか」の統合検証に限定する。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemmAuto};
+use backend_cuda::{
+    CudaDevice, CudaError, CudaGemmAuto, TileSelectionBasis, select_tile_config_for_device,
+};
 use half::f16;
+use tensor_core::dispatch::{DType, GemmShape};
 
 // `backend_cpu::matmul_reference_fma`／`assert_parity` はクレートルート
 // で再エクスポートされている（`crates/backend-cpu/src/lib.rs`）。
@@ -120,4 +123,34 @@ fn run_f16_matches_cpu_reference() {
         &gpu_f32,
         &reference_rounded,
     );
+}
+
+/// 実機依存: `select_tile_config_for_device`（Phase C-9b・イシュー #527）
+/// がドライバ属性照会（SMEM 予算・SM 数）を実際に成功させ、`Ok` の
+/// タイル選定を返すことを検証する。
+///
+/// `SM121_MEASURED_BANDWIDTH` が未実測（`None`）である現時点では選定
+/// 根拠は必ず [`TileSelectionBasis::FixedTable`] になり、選定構成は
+/// 実測裏付けのある現行本番構成（64/128/32・stages 3）と一致する
+/// （`docs/perf/cuda-gemm-cost-model-selection.md` の実機比較手順が
+/// 完了し帯域が `Some` 化された後は、この事前条件〈`FixedTable` 固定〉
+/// も合わせて更新する）。
+#[test]
+#[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
+            test-ignored-cuda 経由で実行する"]
+fn select_tile_config_for_device_succeeds_on_real_hardware() {
+    let device = CudaDevice::new(0).expect("CUDA device available in ignored test environment");
+    let shape = GemmShape::new(4096, 4096, 4096);
+
+    let selection = select_tile_config_for_device(&device, shape, DType::F16)
+        .expect("select_tile_config_for_device succeeds on real hardware");
+
+    // SM121_MEASURED_BANDWIDTH が None の間は常に固定選定テーブルへ
+    // フォールバックする（本モジュール doc・gemm_auto.rs
+    // `select_tile_config` 参照）。
+    assert_eq!(selection.basis(), TileSelectionBasis::FixedTable);
+    assert_eq!(selection.candidate().block_m().get(), 64);
+    assert_eq!(selection.candidate().block_n().get(), 128);
+    assert_eq!(selection.candidate().block_k().get(), 32);
+    assert_eq!(selection.candidate().stages().get(), 3);
 }
