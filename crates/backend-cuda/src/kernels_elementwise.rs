@@ -19,7 +19,9 @@
 //! を用いる。GPU 側の丸めが CPU の `f32::exp`／`f32::tanh`（libm）と厳密
 //! 一致する保証はないため、backend 間の数値突合は統一複合判定「相対誤差
 //! 1e-3 未満 または 絶対誤差 1e-5 未満」（`.claude/rules/coding-rust.md`）で
-//! 検証する（`tests/backend_ops_real_device.rs` の `#[ignore]` テスト）。
+//! 検証する（`tests/gemm_bias_act_parity.rs` の
+//! `elementwise_matches_cpu_across_ops`（`#[ignore]`）で add／mul／relu／
+//! exp／tanh の 5 演算を検証する）。
 //!
 //! # ブロードキャスト
 //!
