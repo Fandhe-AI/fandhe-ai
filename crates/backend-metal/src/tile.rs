@@ -1459,10 +1459,15 @@ mod tests {
         // SWIZZLE_ENABLED の function constant 宣言はファイル冒頭
         // （カーネル本体の外・他の function constant と並べた位置）にある
         // ため、`kernel_body` ではなく `GEMM_METAL_SOURCE` 全文を検索する。
+        // index まで含めて検査する（#538 の `TGP_PAD`〈index 6〉との
+        // index 重複を機械的に検出するため。origin/main との merge
+        // コンフリクト解決〈両者とも index 6 を主張していた〉で実際に
+        // 衝突していたことがあり、名前だけの検査では黙って再発しうる）。
         assert!(
-            GEMM_METAL_SOURCE.contains("constant bool SWIZZLE_ENABLED"),
-            "gemm.metal に SWIZZLE_ENABLED function constant 宣言が見つかりません \
-             （実機未検証のまま本番 dispatch へ無条件適用しないためのゲート。PR #661 codex-review 指摘）"
+            GEMM_METAL_SOURCE.contains("constant bool SWIZZLE_ENABLED [[function_constant(7)]];"),
+            "gemm.metal に SWIZZLE_ENABLED function constant（index 7。TGP_PAD〈#538・index 6〉の \
+             直後）の宣言が見つかりません（実機未検証のまま本番 dispatch へ無条件適用しないための \
+             ゲート。PR #661 codex-review 指摘）"
         );
         assert!(
             kernel_body.contains(
