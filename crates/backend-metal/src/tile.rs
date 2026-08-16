@@ -668,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn non_staged_config_bypasses_vec_width_check() {
+    fn non_staged_config_uses_same_divisibility_check_as_staged() {
         // staged=false（直接ロード経路）も staged=true と同じ 8 整除検査
         // （BkNotMultipleOfEight）のみで弾かれる。VEC_WIDTH 専用検査を
         // 追加しない設計のため staged の有無で拒否理由は変わらないことの
@@ -744,11 +744,12 @@ mod tests {
     }
 
     #[test]
-    fn direct_load_path_config_bypasses_vec_width_check_and_validates() {
+    fn direct_load_path_config_still_validates() {
         // `tests/gemm_dynamic_tile_parity.rs` の直接ロード経路構成
-        // （bm=32,bn=32,bk=16,wm=2,wn=2,staged=false）が VEC_WIDTH 検査
-        // 追加後も引き続き validate() を通ることの確認（計画「実装
-        // ステップ」節）。
+        // （bm=32,bn=32,bk=16,wm=2,wn=2,staged=false）が本イシューの
+        // VEC_WIDTH 整除契約の明文化（既存 8 整除検査の間接包含・
+        // コメント・不変条件テスト追加）後も引き続き validate() を
+        // 通ることの確認（計画「実装ステップ」節）。
         let cfg = TileConfig {
             bm: 32,
             bn: 32,

@@ -405,15 +405,19 @@ kernel void gemm_simdgroup_tiled(
             // 1 要素ずつのスカラーロードから変更）。アラインメント成立
             // 根拠:
             //   - `crate::tile::TileConfig::validate`（tile.rs）が
-            //     `staged=true` の構成に対し `BK`・`BN` が
-            //     `TileConfig::VEC_WIDTH`（4）の倍数であることを dispatch
-            //     前へ**明示検査**する契約（イシュー #535。MLX
-            //     `loader.h` の `BCOLS % n_reads == 0` 相当）。この検査は
-            //     既存の `BK % 8 == 0`・`BN % (WN*8) == 0` 検査より前段に
-            //     置かれており、8 整除に間接包含されるだけの暗黙前提では
-            //     なく独立した契約として拒否できる。この前提により A
-            //     タイルの行長 BK・B タイルの行長 BN はともに 4 の倍数で
-            //     あり、4 要素グループが行境界をまたぐことはない
+            //     `staged=true` の構成に対し要求する `bk % 8 == 0`・
+            //     `bn % (wn*8) == 0`（`wn >= 1` のため `bn % 8 == 0` を
+            //     含意）という既存の 8 整除検査が、`TileConfig::VEC_WIDTH`
+            //     （4）整除を数学的に包含する（`8 | x ⟹ 4 | x`）。専用の
+            //     VEC_WIDTH 整除検査 variant は追加していない（`pub enum
+            //     TileConfigError` への variant 追加が下流の網羅的
+            //     `match` を破壊する P1 指摘・PR #672 codex-review を受け
+            //     既存 variant で拒否できる現行契約を維持する方針へ変更）。
+            //     この間接包含はテスト（tile.rs
+            //     `validate_ok_implies_vec_width_divisibility`）で固定
+            //     済み（イシュー #535）。この前提により A タイルの行長
+            //     BK・B タイルの行長 BN はともに 4 の倍数であり、4 要素
+            //     グループが行境界をまたぐことはない
             //   - `MetalGemm::dispatch_variant`（gemm.rs）が `SimdgroupTiled`
             //     向けに m/n/k を `crate::pad::pad8` で 8 の倍数へ実効
             //     次元パディング済みで渡す契約のため、`p0 = t*BK`・
@@ -421,17 +425,17 @@ kernel void gemm_simdgroup_tiled(
             //     device メモリ側の読み出し先頭オフセットも 4 要素（16
             //     バイト）境界に揃う（MTLBuffer 先頭はページ境界確保）
             //   - 共有メモリ側オフセット（`tile_b` の `BM*BK`）は BK が
-            //     4 の倍数であるため（上記 `TileConfig::validate` の
-            //     明示検査から導出）常に 4 の倍数となり、
-            //     `threadgroup float4*` 再解釈も 16 バイト境界に揃う
-            // `TileConfig::validate` が上記を dispatch 前に fail-closed で
-            // 拒否するため、将来 `CANDIDATES` に BK/BN が 4 で割り切れない
-            // 構成を追加しようとしても検証段階で弾かれ本カーネルへ到達
-            // しない（防衛層。イシュー #535）。それでも「グループ全 4
-            // 要素が in-bounds か」を本シェーダ側でも明示判定し、境界
-            // グループは範囲外アドレスへ一切触れず要素単位のスカラー
-            // 読み出し + 0 埋めへフォールバックする（最適化を理由に手動
-            // 境界チェックを省略しない。REQ-8・
+            //     4 の倍数であるため（上記 8 整除検査からの間接包含）
+            //     常に 4 の倍数となり、`threadgroup float4*` 再解釈も
+            //     16 バイト境界に揃う
+            // `TileConfig::validate` の既存 8 整除検査が上記を dispatch
+            // 前に fail-closed で拒否するため、将来 `CANDIDATES` に
+            // BK/BN が 8 で割り切れない構成を追加しようとしても検証段階
+            // で弾かれ本カーネルへ到達しない（防衛層。イシュー #535）。
+            // それでも「グループ全 4 要素が in-bounds か」を本シェーダ側
+            // でも明示判定し、境界グループは範囲外アドレスへ一切触れず
+            // 要素単位のスカラー読み出し + 0 埋めへフォールバックする
+            // （最適化を理由に手動境界チェックを省略しない。REQ-8・
             // `.claude/rules/coding-rust.md`「カーネル実装の境界検査」）。
             // 共有メモリへ格納される値は変更前のスカラーループとビット単位
             // で一致するため、以降の `simdgroup_load`／MMA 発行順・数値
