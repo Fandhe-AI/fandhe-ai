@@ -152,6 +152,51 @@ fn gemm_bias_act_matches_cpu_across_shapes() {
         cpu_result.as_slice().expect("contiguous"),
         "k=0 degenerate gemm_bias_act must match CPU exactly (integer bias+relu, no float GEMM)"
     );
+
+    // m=0・n=0 縮退（`gemm.rs::run_tiled_bias_act_f32` の
+    // `m == 0 || n == 0` 分岐。GPU 起動を行わず空の結果を直接返す
+    // no-op 形状。codex-review 指摘・PR #688: k=0 のみでは
+    // `m == 0 || n == 0` 分岐が未検証だったため追加）。
+    let a_m0 = Tensor::<f32>::zeros(&[0, 3]).expect("valid tensor");
+    let b_m0 =
+        Tensor::new(Xorshift64Star::new(616).fill_vec(3 * 4), &[3, 4]).expect("valid tensor");
+    let bias_m0 = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[4]).expect("valid tensor");
+    let cpu_result_m0 = cpu
+        .gemm_bias_act(&a_m0, &b_m0, Some(&bias_m0), Activation::Relu)
+        .expect("cpu gemm_bias_act m=0 must succeed");
+    let cuda_result_m0 = cuda
+        .gemm_bias_act(&a_m0, &b_m0, Some(&bias_m0), Activation::Relu)
+        .expect("cuda gemm_bias_act m=0 must succeed");
+    assert_eq!(
+        cuda_result_m0.shape(),
+        cpu_result_m0.shape(),
+        "m=0 degenerate gemm_bias_act must produce the same empty shape as CPU"
+    );
+    assert_eq!(
+        cuda_result_m0.as_slice().expect("contiguous"),
+        cpu_result_m0.as_slice().expect("contiguous"),
+        "m=0 degenerate gemm_bias_act must match CPU exactly (no-op shape, no GPU launch)"
+    );
+
+    let a_n0 =
+        Tensor::new(Xorshift64Star::new(617).fill_vec(4 * 3), &[4, 3]).expect("valid tensor");
+    let b_n0 = Tensor::<f32>::zeros(&[3, 0]).expect("valid tensor");
+    let cpu_result_n0 = cpu
+        .gemm_bias_act(&a_n0, &b_n0, None, Activation::None)
+        .expect("cpu gemm_bias_act n=0 must succeed");
+    let cuda_result_n0 = cuda
+        .gemm_bias_act(&a_n0, &b_n0, None, Activation::None)
+        .expect("cuda gemm_bias_act n=0 must succeed");
+    assert_eq!(
+        cuda_result_n0.shape(),
+        cpu_result_n0.shape(),
+        "n=0 degenerate gemm_bias_act must produce the same empty shape as CPU"
+    );
+    assert_eq!(
+        cuda_result_n0.as_slice().expect("contiguous"),
+        cpu_result_n0.as_slice().expect("contiguous"),
+        "n=0 degenerate gemm_bias_act must match CPU exactly (no-op shape, no GPU launch)"
+    );
 }
 
 /// elementwise 5 演算（`add`／`mul`／`relu`／`exp`／`tanh`）の CPU-CUDA

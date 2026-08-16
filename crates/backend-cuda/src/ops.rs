@@ -358,10 +358,14 @@ mod tests {
     /// CUDA 非搭載環境では `BackendError::CudaUnavailable` を確認して
     /// 早期 return する（`tests/backend_ops_real_device.rs` と同じ
     /// 分岐パターン）。
+    ///
+    /// カウンタはスレッドローカル（`gemm.rs::BIAS_ACT_FUSED_LAUNCH_COUNT`
+    /// のドキュメンテーションコメント参照。codex-review 指摘・PR #688）
+    /// のため、`cargo test` の既定並列実行下で他スレッドの別テストが
+    /// 同じ融合カーネルを起動しても `before`/`after` の差分には混入しない
+    /// （直列化・プロセス全体 Mutex は不要）。
     #[test]
     fn gemm_bias_act_fused_path_increments_launch_counter_env_adaptive() {
-        use std::sync::atomic::Ordering;
-
         use tensor_core::Tensor;
 
         let cuda = CudaBackendOps::new(0);
@@ -369,10 +373,10 @@ mod tests {
         let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
         let bias = Tensor::new(vec![1.0, 1.0], &[2]).expect("valid tensor");
 
-        let before = crate::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT.load(Ordering::Relaxed);
+        let before = crate::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.get());
         match cuda.gemm_bias_act(&a, &b, Some(&bias), Activation::Relu) {
             Ok(_) => {
-                let after = crate::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT.load(Ordering::Relaxed);
+                let after = crate::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.get());
                 assert!(
                     after > before,
                     "融合カーネルの起動カウンタが増加していない（デフォルト非融合合成へ \

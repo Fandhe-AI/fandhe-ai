@@ -32,8 +32,8 @@
 //!    [`CudaGemm::run_f32_kernel`]／[`CudaGemm::run_f16_kernel`] に集約する
 //!    （#34 で naive 専用だった手続きを共通化）。
 
+use std::cell::Cell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
@@ -87,20 +87,33 @@ const WMMA_TF32_OPT_BLOCK_DIM: (u32, u32, u32) = (kernels_wmma_opt::WMMA_TF32_OP
 const WMMA_TF32_STAGED_BLOCK_DIM: (u32, u32, u32) =
     (kernels_wmma_opt::WMMA_TF32_STAGED_THREADS, 1, 1);
 
-/// [`CudaGemm::run_tiled_bias_act_f32`] が実際に GPU カーネルを起動した
-/// 回数（イシュー #599）。
-///
-/// `ops.rs::CudaBackendOps::gemm_bias_act` の経路選択（融合 vs
-/// `tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
-/// 非融合 3 段合成）が実際に融合カーネルへ到達しているかを、実機なしの
-/// 単体テスト（`ops.rs` 内 `#[cfg(test)]`）が検証するための可観測点。
-/// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない
-/// （`Relaxed` オーダリングで十分。厳密な happens-before 関係は不要で、
-/// 単に「呼ばれたか」を数える）。`m == 0 || n == 0`（no-op）・`k == 0`
-/// （ホスト側で直接 epilogue のみ計算し GPU 起動を回避する分岐。
-/// [`CudaGemm::run_tiled_bias_act_f32`] 参照）の場合はカーネルを起動しない
-/// ためカウントしない。
-pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: AtomicU64 = AtomicU64::new(0);
+thread_local! {
+    /// [`CudaGemm::run_tiled_bias_act_f32`] が実際に GPU カーネルを起動した
+    /// 回数（イシュー #599）。
+    ///
+    /// `ops.rs::CudaBackendOps::gemm_bias_act` の経路選択（融合 vs
+    /// `tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
+    /// 非融合 3 段合成）が実際に融合カーネルへ到達しているかを、実機なしの
+    /// 単体テスト（`ops.rs` 内 `#[cfg(test)]`）が検証するための可観測点。
+    /// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない。
+    /// `m == 0 || n == 0`（no-op）・`k == 0`（ホスト側で直接 epilogue のみ
+    /// 計算し GPU 起動を回避する分岐。[`CudaGemm::run_tiled_bias_act_f32`]
+    /// 参照）の場合はカーネルを起動しないためカウントしない。
+    ///
+    /// **スレッドローカルにする理由（codex-review 指摘・PR #688）**: `static
+    /// AtomicU64`（プロセス全体共有）だと `cargo test` 既定の並列実行下で
+    /// 「`before` 読み取り〜`gemm_bias_act` 呼び出し〜`after` 読み取り」の間に
+    /// 別スレッドで実行中の別テストが同じ融合カーネルを起動すると、当該呼び
+    /// 出しが実際には融合経路を通らなくても `after > before` が偶然成立し
+    /// うる（偽陽性）。Rust の既定テストハーネストは各テスト関数の実行を
+    /// 単一スレッド内で完結させ、同一スレッド上で複数テストが同時に走る
+    /// ことはない（スレッドプールがテストをスレッド間で使い回すのは逐次的）
+    /// ため、カウンタをスレッドローカルにすれば「呼び出し元スレッドが実際に
+    /// 起動した回数」だけを観測でき、他スレッドで並走する別テストの起動が
+    /// 混入しない（直列化やプロセス全体 Mutex を要さない、呼び出し単位の
+    /// 観測フック）。
+    pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+}
 
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
@@ -855,7 +868,7 @@ impl CudaGemm {
             return Ok(out);
         }
 
-        BIAS_ACT_FUSED_LAUNCH_COUNT.fetch_add(1, Ordering::Relaxed);
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
