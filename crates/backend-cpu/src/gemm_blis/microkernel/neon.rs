@@ -48,7 +48,7 @@ const _: () = assert!(MR * NR <= 256);
 const _: () = assert!(MR == 8 && NR == 8);
 
 /// [`super::scalar::kernel`] と同一の累積契約（p 昇順・mul_add 連鎖）を
-/// NEON `vfmaq_f32` で実装する。C タイルをレーンごとに独立したレジスタへ
+/// NEON `vfmaq_laneq_f32`（レーン選択 FMA）で実装する。C タイルをレーンごとに独立したレジスタへ
 /// ロードし、レーン間縮約を一切行わないため、`p` ごとの `a[p][i]・b[p][j]`
 /// への乗算順序はスカラー版と bit 完全一致する。
 ///
