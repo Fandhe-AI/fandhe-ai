@@ -200,13 +200,19 @@ pub enum FusionPlanError {
     LastOpIsInput,
     /// `output_shape` の要素数積が `usize` でオーバーフローする
     /// （`tensor-core::tensor::checked_numel` と同じ検査を `from_ops`
-    /// でも行う。`from_segment` 経路は `output_shape` を既存の検証済み
-    /// `Tensor` の shape からのみ導出するため対象外だが、`from_ops` は
+    /// が構築の全経路で行う。`from_segment` 経路は `output_shape` を
+    /// 既存の検証済み `Tensor` の shape からのみ導出するため、この
+    /// 構築時点の全経路検査としては対象外に留めているが、`from_ops` は
     /// `autodiff` から任意の `Vec<usize>` を直接受け取る公開経路であり、
     /// `FusionPlan` 単体の型不変条件として shape 妥当性を保証する必要が
     /// ある。レビュー指摘 #163: 検証を欠くと不正 shape でも構築に成功し、
     /// 後段〈`backend-cpu::run_fused_elementwise`〉の shape 一致検証に
-    /// 検証責務が漏れ出す）。
+    /// 検証責務が漏れ出す）。ただし [`RowFusionMeta::row_len`]
+    /// （`axis: None` の全縮約ケース）は `compute_row_fusion` が経路
+    /// 共通で `checked_numel` 相当の検査を行うため、`from_segment`
+    /// であってもこの派生値の積算オーバーフローは本 variant で
+    /// fail-closed に拒否される（PR #687 Bugbot #2「Unchecked row_len
+    /// product」対応）。
     OutputShapeOverflow,
     /// `ops` 内の `Sum`／`Max` エントリの `axis` が、セグメント内で最初に
     /// 現れた reduction が確定した軸と一致しない（#586・`detect.rs` の
@@ -240,14 +246,21 @@ pub enum FusionPlanError {
     /// `a >= output_shape.len()`）。`compute_row_fusion`（本モジュール
     /// 下部の共通ヘルパー）が返す fail-closed 検証エラー。
     RowAxisOutOfRange { axis: usize, rank: usize },
-    /// `ops` が `Broadcast` を 1 個以上含むにもかかわらず、末尾（出力）
-    /// ノードが reduction（`Sum`／`Max`）である——すなわち出力 shape が
-    /// 行 shape へ復元されないまま終端する（#588 実装計画 §3.5）。
-    /// RMSNorm／softmax のように「broadcast で行 shape へ戻してから
-    /// 終端する」パターンのみを本イシューでは表現可能とする安全側の
-    /// 制約であり、broadcast 後に再縮約して終端するプランは表現不能
+    /// `ops` が `Broadcast` を 1 個以上含むにもかかわらず、最後の
+    /// `Broadcast` より後方（発生順で後）に reduction（`Sum`／`Max`）が
+    /// 存在する——すなわち broadcast で行 shape へ復元した後に再度
+    /// 縮約が起こり、出力 shape が行 shape のまま維持されない
+    /// （#588 実装計画 §3.5）。「末尾ノードが reduction か」だけを見る
+    /// のではなく、最後の `Broadcast` より後方の任意の位置（末尾に
+    /// 限らない。例: `Sum → Broadcast → Sum → Relu` のように再縮約の
+    /// 後に elementwise で終端するプラン）を対象に検査する（PR #687
+    /// Bugbot #1「Incomplete reduced-output guard」対応）。RMSNorm／
+    /// softmax のように「broadcast で行 shape へ戻してから、再縮約を
+    /// 挟まずに終端する」パターンのみを本イシューでは表現可能とする
+    /// 安全側の制約であり、broadcast 後に再縮約するプランは表現不能
     /// として fail-closed に拒否する（緩和は将来イシュー。#588 実装計画
-    /// §9「スコープ外・申し送り」）。`at` は末尾ノードのインデックス。
+    /// §9「スコープ外・申し送り」）。`at` は検出された reduction ノード
+    /// のインデックス（末尾ノードとは限らない）。
     ReducedOutputWithBroadcast { at: usize },
 }
 
@@ -444,10 +457,14 @@ impl RowFusionMeta {
 ///
 /// - [`FusionPlanError::RowAxisOutOfRange`]: セグメント軸 `Some(a)` が
 ///   `output_shape` の rank 範囲外。
-/// - [`FusionPlanError::ReducedOutputWithBroadcast`]: `ops` の末尾
-///   （出力ノード）が reduction（`Sum`／`Max`）——broadcast で行 shape へ
-///   復元し終端する RMSNorm／softmax 型のみを表現可能とする安全側の制約
+/// - [`FusionPlanError::ReducedOutputWithBroadcast`]: 最後の `Broadcast`
+///   より発生順で後方に reduction（`Sum`／`Max`）が存在する（末尾ノード
+///   に限らない）——broadcast で行 shape へ復元し、再縮約を挟まずに
+///   終端する RMSNorm／softmax 型のみを表現可能とする安全側の制約
 ///   （§3.5・§9「スコープ外・申し送り」）。
+/// - [`FusionPlanError::OutputShapeOverflow`]: `axis: None`（全縮約）の
+///   場合の `row_len`（`output_shape` の要素数積）が `usize` で
+///   オーバーフローする。
 fn compute_row_fusion(
     ops: &[FusedOpKind],
     output_shape: &[usize],
@@ -471,14 +488,31 @@ fn compute_row_fusion(
         return Ok(None);
     }
 
-    // `ops` は空ではない契約（`from_segment`／`from_ops` いずれも
-    // `Input` 以外を最低 1 個含むことを別途検証済み）。
-    let last_at = ops.len() - 1;
-    if matches!(
-        ops[last_at],
-        FusedOpKind::Sum { .. } | FusedOpKind::Max { .. }
-    ) {
-        return Err(FusionPlanError::ReducedOutputWithBroadcast { at: last_at });
+    // `has_broadcast` が真のため、最後に現れた `Broadcast` の位置が
+    // 必ず存在する。「末尾ノードが reduction か」だけを見る素朴な判定
+    // （旧実装）では、`Broadcast` で行 shape へ復元した後に再度
+    // `Sum`／`Max` で縮約し、その縮約済みテンソルに対して elementwise
+    // で終端するプラン（例: `Sum → Broadcast → Sum → Relu`）を素通り
+    // させてしまう。この場合 `ops` 末尾は elementwise だが、実際の
+    // `output_shape`（後段の再縮約の出力）は行 shape に復元されない
+    // ままであり、`row_fusion` が「出力は行 shape に復元済み」という
+    // 契約を偽って報告することになる（レビュー指摘: PR #687 Bugbot
+    // #1「Incomplete reduced-output guard」）。よって「最後の
+    // `Broadcast` より後方に `Sum`／`Max` が 1 個でも存在するか」を
+    // fail-closed に検査する（末尾ノードのみを見る旧判定を包含する
+    // 一般化: 末尾が reduction ならそれ自体が「最後の Broadcast より
+    // 後方の reduction」に該当するため同じ結果になる）。
+    let last_broadcast_at = ops
+        .iter()
+        .rposition(|op| matches!(op, FusedOpKind::Broadcast { .. }))
+        .expect("has_broadcast is true, so at least one Broadcast entry exists");
+    if let Some(offset) = ops[last_broadcast_at + 1..]
+        .iter()
+        .position(|op| matches!(op, FusedOpKind::Sum { .. } | FusedOpKind::Max { .. }))
+    {
+        return Err(FusionPlanError::ReducedOutputWithBroadcast {
+            at: last_broadcast_at + 1 + offset,
+        });
     }
 
     // `axis` は `has_broadcast` が真である以上、上の `find_map` で必ず
@@ -494,11 +528,23 @@ fn compute_row_fusion(
                 .ok_or(FusionPlanError::RowAxisOutOfRange { axis: a, rank })?
         }
         // 全縮約（`axis: None`）: 行長は出力テンソルの要素数積
-        // （`RowFusionMeta::row_len` doc 参照）。`output_shape` は
-        // 呼び出し元（`from_segment`: 実テンソルの shape・`from_ops`:
-        // `OutputShapeOverflow` 検査済み）でオーバーフローしないことが
-        // 既に確定しているため、素朴な乗算で求める。
-        None => output_shape.iter().product(),
+        // （`RowFusionMeta::row_len` doc 参照）。`from_ops` は本関数
+        // 呼び出し前に `checked_numel` でオーバーフローを弾いているが、
+        // `from_segment` は `output_shape` を `FusionGraph` ノードの
+        // `meta.shape`（呼び出し側が任意に構築できる `pub(crate)` 値。
+        // `graph.rs::push` は shape 同士の整合〈reduce/broadcast の逆
+        // 関係〉のみを検証し要素数積のオーバーフローまでは検証しない）
+        // からそのまま受け取るため、素朴な乗算では debug で panic・
+        // release で wrap した誤った `row_len` を許しうる（レビュー
+        // 指摘: PR #687 Bugbot #2「Unchecked row_len product」）。
+        // `from_segment`／`from_ops` のどちらの経路かに関わらず
+        // `checked_numel` と同じ検査を経路共通のここで行い、
+        // オーバーフロー時は同種の型不変条件違反である
+        // `OutputShapeOverflow` へ寄せる（`from_ops` にとっては
+        // 到達しない冗長検査だが、`from_segment` にとっては唯一の
+        // 検査点になる）。
+        None => crate::tensor::checked_numel(output_shape)
+            .map_err(|_| FusionPlanError::OutputShapeOverflow)?,
     };
 
     Ok(Some(RowFusionMeta {
@@ -715,8 +761,11 @@ impl FusionPlan {
     ///   （#588。不一致は [`FusionPlanError::MismatchedBroadcastAxis`]）
     /// - [`compute_row_fusion`] の検証（#588・§3.5）: `Broadcast` を含む
     ///   場合、セグメント軸が `output_shape` の rank 範囲内であること
-    ///   （[`FusionPlanError::RowAxisOutOfRange`]）、末尾（出力）ノードが
-    ///   reduction でないこと（[`FusionPlanError::ReducedOutputWithBroadcast`]）
+    ///   （[`FusionPlanError::RowAxisOutOfRange`]）、最後の `Broadcast`
+    ///   より後方に reduction が存在しないこと
+    ///   （[`FusionPlanError::ReducedOutputWithBroadcast`]）、`axis: None`
+    ///   の `row_len` 積算がオーバーフローしないこと
+    ///   （[`FusionPlanError::OutputShapeOverflow`]）
     #[doc(hidden)]
     pub fn from_ops(
         ops: Vec<FusedOpKind>,
@@ -1698,6 +1747,93 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, FusionPlanError::ReducedOutputWithBroadcast { at: 2 });
+    }
+
+    /// レビュー指摘（PR #687 Bugbot #1「Incomplete reduced-output
+    /// guard」）の反例そのもの: `Broadcast` で行 shape へ復元した後に
+    /// 再度 `Sum` で縮約し、その縮約済みテンソルに対して elementwise
+    /// （`Relu`）で終端するプラン（`ops` 末尾は `Sum` ではなく
+    /// `Relu`）。「末尾ノードのみが reduction か」を見る旧実装では
+    /// この形を素通りさせてしまうが、「最後の `Broadcast` より後方に
+    /// reduction が存在するか」を見る現実装では
+    /// [`FusionPlanError::ReducedOutputWithBroadcast`] で fail-closed に
+    /// 拒否される（`at` は再縮約ノード自身のインデックスであり、
+    /// 末尾ノードのインデックスではない）。
+    #[test]
+    fn from_ops_rejects_reduction_after_broadcast_even_when_last_op_is_elementwise() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Broadcast {
+                    input: 0,
+                    axis: None,
+                },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: None,
+                },
+                FusedOpKind::Relu { input: 2 },
+            ],
+            vec![],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, FusionPlanError::ReducedOutputWithBroadcast { at: 2 });
+    }
+
+    /// レビュー指摘（PR #687 Bugbot #2「Unchecked row_len product」）の
+    /// 反例: `from_segment` 経路で `axis: None`（全縮約）の `row_len`
+    /// （`output_shape` の要素数積）がオーバーフローする場合、
+    /// `compute_row_fusion` が `checked_numel` 相当の検査で
+    /// [`FusionPlanError::OutputShapeOverflow`] を返す（旧実装は
+    /// `from_ops` のみ構築時に `checked_numel` を呼んでおり、
+    /// `from_segment` は `FusionGraph` ノードの `meta.shape`
+    /// （`graph.rs::push` は shape 同士の整合のみ検証し要素数積の
+    /// オーバーフローは検証しない）をそのまま経由するため素朴な乗算が
+    /// debug で panic・release で wrap しうる隙間があった）。
+    #[test]
+    fn from_segment_rejects_row_len_overflow_on_none_axis() {
+        let mut g = FusionGraph::new();
+        // `usize::MAX * 2` は `usize` の乗算でオーバーフローする shape。
+        let overflow_shape = [usize::MAX, 2];
+        let x = g.push(FusionOp::Input, f32_meta(&overflow_shape)).unwrap();
+        let sq = g
+            .push(FusionOp::Mul(x, x), f32_meta(&overflow_shape))
+            .unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: sq,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        let rsqrt = g.push(FusionOp::Rsqrt(sum), f32_meta(&[])).unwrap();
+        let bc = g
+            .push(
+                FusionOp::Broadcast {
+                    input: rsqrt,
+                    dim: None,
+                },
+                f32_meta(&overflow_shape),
+            )
+            .unwrap();
+        let out = g
+            .push(FusionOp::Mul(bc, x), f32_meta(&overflow_shape))
+            .unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let segment = match decision {
+            FusionDecision::Fuse(seg) => seg,
+            other => panic!("expected Fuse, got {other:?}"),
+        };
+        let err = FusionPlan::from_segment(&g, &segment).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Plan(Box::new(FusionPlanError::OutputShapeOverflow))
+        );
     }
 
     /// #588: `use_count` 集計に `Sub`／`Div`／`Broadcast` が正しく寄与する
