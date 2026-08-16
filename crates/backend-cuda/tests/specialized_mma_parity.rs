@@ -126,6 +126,73 @@ fn specialized_mma_f16_matches_default_smoke_env_adaptive() {
     );
 }
 
+/// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）:
+/// `SpecializedMmaKernelHandle::compile` を `CudaMmaGemm::new` を経由せず
+/// **直接**呼び出す負系回帰（PR #685 codex-review P2 指摘への対応）。
+///
+/// 上の `specialized_mma_f16_matches_default_smoke_env_adaptive` は
+/// `CudaMmaGemm::new`（`gemm_mma.rs`）を先に経由するため、
+/// `SpecializedMmaKernelHandle::compile` 自身が cc ゲート
+/// （`check_min_compute_capability`）を NVRTC コンパイルより前に呼ぶ
+/// ことを検出できない（`CudaMmaGemm::new` 側のゲートが先に働き
+/// `TensorCoreUnsupported` を返すため、`compile` 側のゲートが仮に
+/// 欠落・後退しても本テストの `CudaMmaGemm::new` 呼び出し部分では
+/// 気付けない）。本テストは `compile` を直接呼ぶことでこの検出不能性
+/// を解消する。
+///
+/// CUDA 非搭載・NVRTC 非搭載・cc<8.0 のいずれの環境でも早期 return し
+/// green とする（本ファイル冒頭の環境適応スモークと同じ分岐パターン）。
+/// cc<8.0 環境（`CudaMmaGemm::new` と同じ `MIN_COMPUTE_CAPABILITY_MAJOR`
+/// ゲートを共有する `gemm_mma.rs::check_min_compute_capability`）では
+/// `CudaError::TensorCoreUnsupported` が返ることを検証し（本テストの
+/// 主目的）、CUDA+NVRTC+cc>=8.0 環境では `compile` 自体が成功すること
+/// （過剰拒否していないことの健全性確認）を確認する。
+#[test]
+fn specialized_mma_kernel_handle_compile_direct_smoke_env_adaptive() {
+    let device = match CudaDevice::new(0) {
+        Ok(dev) => dev,
+        Err(CudaError::DriverUnavailable { detail }) => {
+            assert!(!detail.is_empty(), "detail message must not be empty");
+            return;
+        }
+        Err(CudaError::Driver(_)) => return,
+        Err(other) => panic!("unexpected CudaError variant from CudaDevice::new: {other}"),
+    };
+
+    // `CudaMmaGemm::new` を経由せず `SpecializedMmaKernelHandle::compile`
+    // を直接呼ぶ（本テストの主張の核）。`compiled` プリセットは
+    // `DYNAMIC_ALL`（既定カーネルと同一次元構成）を使う。
+    match SpecializedMmaKernelHandle::compile(
+        &device,
+        GemmShape::new(16, 8, 16),
+        CompiledDims::DYNAMIC_ALL,
+    ) {
+        Ok(_handle) => {
+            // CUDA+NVRTC+cc>=8.0 環境: `compile` が過剰拒否していないことの
+            // 健全性確認（成功のみを主張し、以降の launch_f16 検証は
+            // `specialized_mma_f16_matches_default_smoke_env_adaptive` 等が
+            // 別途カバーする）。
+        }
+        Err(CudaError::NvrtcUnavailable { detail }) => {
+            assert!(!detail.is_empty());
+        }
+        Err(CudaError::TensorCoreUnsupported { detail }) => {
+            // cc < 8.0 の実機（`mma.sync`/`ldmatrix`/`cp.async` 非対応）。
+            // `SpecializedMmaKernelHandle::compile` 自身が
+            // `check_min_compute_capability` を NVRTC コンパイル前に
+            // 呼んで拒否した、という本テストが検証したい負系そのもの。
+            assert!(!detail.is_empty());
+            assert!(
+                detail.contains("compute capability"),
+                "TensorCoreUnsupported detail must mention compute capability: {detail}"
+            );
+        }
+        Err(other) => {
+            panic!("unexpected CudaError variant from SpecializedMmaKernelHandle::compile: {other}")
+        }
+    }
+}
+
 /// 実機（compute capability 8.0 以上・NVRTC 搭載）必須の形状網羅テスト。
 /// 受け入れ条件の本体（#531）。
 ///
