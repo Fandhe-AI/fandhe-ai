@@ -141,7 +141,7 @@ GEMM 性能改善ツリー Phase B（親 #490）の B-0〜B-10（#491〜#501）�
 
 - `cargo fmt --all` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`: green
 - `cargo build -p backend-cuda --all-targets`: green（`cudarc` 動的ロードのため CUDA toolkit 非搭載環境でも成立）
-- `cargo test -p backend-cuda`（`cuda_floor_bench` の `#[cfg(test)]` 単体検査 13 件を含む）: green
+- `cargo test -p backend-cuda`（`cuda_floor_bench` の `#[cfg(test)]` 単体検査 14 件を含む）: green
 - `git diff origin/main -- crates/backend-cuda/tests/common crates/backend-cuda/src crates/bench-harness`:
   無差分（tolerance 定数・parity fixture・`FloorSpec`・カーネルソースは本イシューで一切変更していない）
 
