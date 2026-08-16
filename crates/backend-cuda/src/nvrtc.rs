@@ -6040,3 +6040,14 @@ mod tests {
 #[cfg(test)]
 #[path = "jit_cache_regression_tests.rs"]
 mod jit_cache_regression_tests;
+
+// JIT キャッシュ導入前後（初回コンパイル／2 回目ロード）のレイテンシ・
+// スループット実機ベンチ（イシュー #534・Phase C-12）。上の
+// `jit_cache_regression_tests`（#529・C-10）と同じ理由（キャッシュ API が
+// module-private）で `nvrtc` 直下の兄弟モジュールとして配置する。全テスト
+// `#[ignore]`（実機必須）のため通常 CI では実行されず、コンパイル検査の
+// みが行われる（詳細は `jit_cache_bench_tests.rs` 冒頭ドキュメンテーション
+// コメントを正とする）。
+#[cfg(test)]
+#[path = "jit_cache_bench_tests.rs"]
+mod jit_cache_bench_tests;
