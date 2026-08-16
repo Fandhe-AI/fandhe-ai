@@ -654,10 +654,24 @@ mod tests {
         // （`mma_launch_config`。両軸とも非整数倍の端数タイルを含む）
         // remap が非自明に効く。旧値 40x72x160 は grid=(1,1) となり remap
         // が恒等写像に縮退していたため是正した〈Bugbot 指摘・PR #667
-        // レビュー是正〉）・2048 級形状（実装計画 5 節「実機
-        // （引き継ぎ）」の A/B 計測形状と揃える。4096 は本テストの目的
-        // （bit 一致の確認）には過大なため 2048 に留める）。
-        let shapes: [(u32, u32, u32); 3] = [(16, 8, 16), (80, 136, 160), (256, 256, 2048)];
+        // レビュー是正〉）・full_groups 分岐形状（1088x256x2048。
+        // `swizzled_block_idx`〈`swizzle.rs`〉は `num_m_blocks` を
+        // `group_width` 単位でグルーピングし、`full_groups`（`group_width`
+        // 個ぴったり埋まるグループ）と末尾の縮小 `remainder` グループの
+        // 2 分岐を持つ。旧値 256x256x2048 は
+        // num_m_blocks=m.div_ceil(MMA_BM)=4 のため候補幅 group_width∈
+        // {8, 16}（`swizzle::GROUP_WIDTH_CANDIDATES`）のいずれでも
+        // full_groups=num_m_blocks/group_width=0 となり、生成 CUDA 側の
+        // full_groups リマップ分岐（ベクトル化ロードの境界検査を伴う。
+        // REQ-8）が一度も経由されず remainder 分岐のみ検査していた
+        // 〈Bugbot 指摘・PR #667 レビュー是正〉。1088=17*MMA_BM により
+        // num_m_blocks=17 となり、group_width=8 では full_groups=2・
+        // remainder=1、group_width=16 では full_groups=1・remainder=1 と
+        // なり両候補幅で full_groups・remainder の両分岐を経由する
+        // （k=2048 は実装計画 5 節「実機（引き継ぎ）」の A/B 計測 k 値と
+        // 揃える値をそのまま踏襲。4096 は本テストの目的〈bit 一致の
+        // 確認〉には過大なため採らない）。
+        let shapes: [(u32, u32, u32); 3] = [(16, 8, 16), (80, 136, 160), (1088, 256, 2048)];
         let seed: u64 = 424_242;
 
         // group_width=8/16 は候補表（swizzle.rs::select_swizzle_group_width
