@@ -93,23 +93,23 @@ pub(crate) fn validate_transpose_dims(src_len: usize, m: u32, n: u32) -> Result<
     let mn =
         (m as usize)
             .checked_mul(n as usize)
-            .ok_or_else(|| CudaError::InvalidElementwiseShape {
+            .ok_or_else(|| CudaError::InvalidTransposeShape {
                 detail: format!("m*n overflows usize: m={m}, n={n}"),
             })?;
     if src_len != mn {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!("src length mismatch: expected {mn} (m*n), actual {src_len}"),
         });
     }
     // カーネル引数（`int m, int n`）は C の 32bit 符号付き整数のため、
     // `gemm.rs::validate_gemm_dims` と同じ理由で i32::MAX 上限を検証する。
     if m > i32::MAX as u32 || n > i32::MAX as u32 {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!("m/n must fit in i32 (kernel argument type): m={m}, n={n}"),
         });
     }
     if mn > i32::MAX as usize {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!(
                 "m*n must fit in i32 (kernel index arithmetic is 32bit int): m={m}, n={n}, \
                  m*n={mn}"
@@ -134,11 +134,11 @@ pub(crate) fn validate_transpose_output_len(
 ) -> Result<(), CudaError> {
     let expected = (out_m as usize)
         .checked_mul(out_n as usize)
-        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+        .ok_or_else(|| CudaError::InvalidTransposeShape {
             detail: format!("out_m*out_n overflows usize: out_m={out_m}, out_n={out_n}"),
         })?;
     if dst_len != expected {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!(
                 "dst length mismatch: expected {expected} (out_m*out_n), actual {dst_len}"
             ),
@@ -367,12 +367,23 @@ impl CudaTranspose {
     ) -> Result<(), CudaError> {
         validate_tiled_transposed_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
         validate_transpose_output_len(c_t_dev.len(), n, m)?;
-        if m == 0 || n == 0 || k == 0 {
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        if k == 0 {
             // k==0 は `run_tiled_transposed_f32` の早期 return と同じ理由
-            // （C は全 0 のまま）だが、本関数は呼び出し元がゼロ初期化済み
-            // の `c_t_dev`（`alloc_output_f32` はゼロ初期化を保証する）を
-            // 渡す契約のため、カーネル起動を省略するだけで良い（書き戻し
-            // 不要）。
+            // （K 方向の累積対象が存在しない = C は全 0 という GEMM の数学的
+            // 定義。`gemm.rs::run_tiled_bias_act_f32` の「k == 0」節と同じ
+            // 契約）。ただし本関数は safe な公開 API であり、任意の
+            // `CudaSlice<f32>`（確保・再利用した非ゼロバッファを含む）を
+            // `c_t_dev` として受け取れる。カーネル起動を省略するだけでは
+            // `c_t_dev` の既存内容が残ってしまい「正常終了時は必ず
+            // `(A @ B)^T` の値になる」という数値契約を破る（codex-review
+            // 指摘 P1・PR #690）。カーネル起動を省略する代わりに
+            // `c_t_dev` を明示的にゼロクリアすることで、呼び出し元が
+            // ゼロ初期化済みバッファ（`alloc_output_f32`）を渡したかに
+            // 依らず数学的に正しい結果を保証する。
+            self.stream.memset_zeros(c_t_dev)?;
             return Ok(());
         }
 
@@ -598,36 +609,36 @@ fn validate_tiled_transposed_gemm_dims(
     let (m_usize, n_usize, k_usize) = (m as usize, n as usize, k as usize);
     let mk = m_usize
         .checked_mul(k_usize)
-        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+        .ok_or_else(|| CudaError::InvalidTransposeShape {
             detail: format!("m*k overflows usize: m={m}, k={k}"),
         })?;
     let kn = k_usize
         .checked_mul(n_usize)
-        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+        .ok_or_else(|| CudaError::InvalidTransposeShape {
             detail: format!("k*n overflows usize: k={k}, n={n}"),
         })?;
     let mn = m_usize
         .checked_mul(n_usize)
-        .ok_or_else(|| CudaError::InvalidElementwiseShape {
+        .ok_or_else(|| CudaError::InvalidTransposeShape {
             detail: format!("m*n overflows usize: m={m}, n={n}"),
         })?;
     if a_len != mk {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!("a length mismatch: expected {mk} (m*k), actual {a_len}"),
         });
     }
     if b_len != kn {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!("b length mismatch: expected {kn} (k*n), actual {b_len}"),
         });
     }
     if m > i32::MAX as u32 || n > i32::MAX as u32 || k > i32::MAX as u32 {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!("m/n/k must fit in i32 (kernel argument type): m={m}, n={n}, k={k}"),
         });
     }
     if mk > i32::MAX as usize || kn > i32::MAX as usize || mn > i32::MAX as usize {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!(
                 "m*k, k*n, m*n must fit in i32 (kernel index arithmetic is 32bit int): \
                  m={m}, n={n}, k={k}, m*k={mk}, k*n={kn}, m*n={mn}"
@@ -639,7 +650,7 @@ fn validate_tiled_transposed_gemm_dims(
     // TRANSPOSE_TILE` は `kernels::TILE` と同値の 32）。
     let limit = i32::MAX as u32 - (kernels_transpose::TRANSPOSE_TILE - 1);
     if k > limit {
-        return Err(CudaError::InvalidElementwiseShape {
+        return Err(CudaError::InvalidTransposeShape {
             detail: format!(
                 "k must not exceed i32::MAX - (TRANSPOSE_TILE - 1) for tiled kernel \
                  tile-index arithmetic: k={k}, limit={limit}"
@@ -716,7 +727,7 @@ mod tests {
     #[test]
     fn validate_transpose_dims_rejects_length_mismatch() {
         let err = validate_transpose_dims(5, 2, 3).expect_err("2*3=6 != 5 must be rejected");
-        assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
+        assert!(matches!(err, CudaError::InvalidTransposeShape { .. }));
     }
 
     #[test]
@@ -732,7 +743,7 @@ mod tests {
     fn validate_tiled_transposed_gemm_dims_rejects_length_mismatch() {
         let err = validate_tiled_transposed_gemm_dims(5, 6, 2, 3, 2)
             .expect_err("a length 5 != m*k=4 must be rejected");
-        assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
+        assert!(matches!(err, CudaError::InvalidTransposeShape { .. }));
     }
 
     #[test]

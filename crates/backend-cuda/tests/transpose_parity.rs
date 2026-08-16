@@ -198,6 +198,52 @@ fn tiled_transposed_f32_matches_host_transposed_tiled_and_cpu_reference() {
     }
 }
 
+/// `launch_tiled_transposed_f32`（safe な公開 API）の `k == 0` 分岐が、
+/// 呼び出し元から渡された非ゼロ初期化バッファを明示的にゼロクリアする
+/// ことを検証する（codex-review 指摘 P1・PR #690 レビュー回帰）。
+///
+/// `run_tiled_transposed_f32`（上記テスト）は自前でゼロ初期化済みの
+/// バッファ（`alloc_output_f32`）を割り当てるため k==0 の欠陥を踏まない。
+/// `launch_tiled_transposed_f32` は呼び出し元が確保・再利用したバッファを
+/// そのまま受け取る契約のため、ここでは非ゼロ値で埋めたバッファを渡し、
+/// カーネル起動を省略する k==0 経路でも `(A @ B)^T = 0` の数学的契約
+/// （全 0）が保たれることを実機で確認する。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn launch_tiled_transposed_f32_zero_clears_stale_buffer_when_k_is_zero() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let transpose = CudaTranspose::new(&device).expect("transpose kernel compilation must succeed");
+
+    let (m, k, n) = (4u32, 0u32, 5u32);
+    let a: Vec<f32> = Vec::new();
+    let b: Vec<f32> = Vec::new();
+    let a_dev = transpose
+        .upload_f32(&a)
+        .expect("upload_f32 must succeed for empty (k=0) slice");
+    let b_dev = transpose
+        .upload_f32(&b)
+        .expect("upload_f32 must succeed for empty (k=0) slice");
+
+    // c_t_dev（n x m）を非ゼロ値（stale なバッファ再利用を模す）で埋める。
+    let stale = vec![1.0f32; (n as usize) * (m as usize)];
+    let mut c_t_dev = transpose
+        .upload_f32(&stale)
+        .expect("upload_f32 must succeed for stale fill buffer");
+
+    transpose
+        .launch_tiled_transposed_f32(&a_dev, &b_dev, &mut c_t_dev, m, n, k)
+        .expect("launch_tiled_transposed_f32 must succeed for k=0");
+
+    let c_t = transpose
+        .download_f32(&c_t_dev)
+        .expect("download_f32 must succeed");
+    assert_eq!(
+        c_t,
+        vec![0.0f32; (n as usize) * (m as usize)],
+        "k==0 must zero-clear a caller-supplied non-zero c_t_dev buffer, not leave stale values"
+    );
+}
+
 // 既存 `tests/parity_nonregression.rs` の非後退確認（§1.2 (2)）は
 // 本ファイルではなく `tests/parity_nonregression.rs` 自身が担う
 // （本イシューは既存カーネル・tolerance 定数を変更しないため、当該

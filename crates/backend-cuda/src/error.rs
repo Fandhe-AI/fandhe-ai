@@ -71,6 +71,21 @@ pub enum CudaError {
     /// 分離し、`Display` メッセージも専用文言にする。
     InvalidElementwiseShape { detail: String },
 
+    /// 転置カーネル起動 API（`transpose.rs::CudaTranspose`）のホスト側形状
+    /// 検証が拒否した入力。
+    ///
+    /// `validate_transpose_dims`／`validate_transpose_output_len`（素朴・
+    /// smem 転置の `src.len()==m*n`／`dst.len()==out_m*out_n` 検証）と
+    /// `validate_tiled_transposed_gemm_dims`（GEMM epilogue 融合転置の
+    /// `a.len()==m*k`／`b.len()==k*n` 検証）が対象。転置は GEMM 本体
+    /// （`InvalidShape`）でも elementwise／bias（`InvalidElementwiseShape`）
+    /// でもないため、`Display` メッセージの誤表示（Cursor Bugbot 指摘・
+    /// PR #690）を避けて独立 variant に分離する。GEMM epilogue 融合転置
+    /// （`m`/`n`/`k` を持つ）が `InvalidShape` と紛らわしい構造を持つ点は
+    /// 承知のうえで、あくまで転置 API（`transpose.rs`）の検証であることを
+    /// 優先し本 variant に統一する。
+    InvalidTransposeShape { detail: String },
+
     /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
     /// の要件を満たさないデバイス上で要求された。
     ///
@@ -167,6 +182,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidElementwiseShape { detail } => {
                 write!(f, "invalid elementwise/bias shape: {detail}")
+            }
+            CudaError::InvalidTransposeShape { detail } => {
+                write!(f, "invalid transpose shape: {detail}")
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
