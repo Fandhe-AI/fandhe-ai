@@ -109,6 +109,22 @@
 //! `tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。
 //!
+//! イシュー #499（GEMM 性能改善ツリー #479 の後続）で L2 再利用のための
+//! タイル→SM 割り当てスウィズル（[`swizzle`]・`kernels_mma::
+//! mma_f16_source_with_swizzle`・`gemm_mma::CudaMmaGemm::new_with_swizzle`）
+//! を **opt-in・`internal-diagnostics` feature（既定 off）ゲート経路**
+//! として追加した。本セッション実行環境（RTX 3060・NVRTC 非搭載）では
+//! 実機 A/B 計測ができないため（`docs/perf/cuda-gemm-swizzle-ab.md`
+//! 参照。#497 と同型の判断）、本番カーネル（`kernels_mma::MMA_F16`
+//! 定数）・本番ディスパッチ経路（`ops.rs`／`gemm_auto.rs`）は変更して
+//! いない。`swizzle` モジュールはホスト側グルーピング幅選択・remap の
+//! 純関数のみを持ち、`new_with_swizzle` を明示的に呼ばない限り到達
+//! しない。`new_with_swizzle` 自体も通常ビルド（feature 指定なし）では
+//! コンパイルされないため crate 外部から到達不能（PR #667 codex-review
+//! P1 是正: `#[cfg(feature = "internal-diagnostics")]`。`gemm_mma.rs::
+//! CudaMmaGemm::new_with_swizzle` ドキュメンテーションコメント参照）。
+//! 実機 A/B 計測・採否確定は実機ツリー #408 側セッションへ引き継ぐ。
+//!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
 //! [`CudaKernelCacheKey`]・[`nvrtc_version`] を追加した。カーネル特化
@@ -133,6 +149,7 @@ mod kernels_wmma_opt;
 pub mod memory;
 mod nvrtc;
 mod ops;
+mod swizzle;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
@@ -175,7 +192,7 @@ pub use ops::CudaBackendOps;
 /// 経由してバックエンドを利用し、本 feature を有効化する必要はない。
 #[cfg(feature = "internal-diagnostics")]
 pub mod diagnostics {
-    use crate::{kernels_mma, kernels_wmma_opt};
+    use crate::{kernels_mma, kernels_wmma_opt, swizzle};
 
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
@@ -192,5 +209,17 @@ pub mod diagnostics {
     /// occupancy 概算専用。
     pub fn mma_f16_block_tile() -> (u32, u32) {
         (kernels_mma::MMA_BM, kernels_mma::MMA_BN)
+    }
+
+    /// イシュー #499: L2 再利用のためのタイル→SM 割り当てスウィズルの
+    /// グルーピング幅動的選択（`swizzle::select_swizzle_group_width`）を
+    /// `mma_f16` のブロックタイル（`MMA_BM`/`MMA_BN`）に対して適用した
+    /// 結果を返す。`swizzle` は非公開 `mod`（`lib.rs` の `mod swizzle;`）
+    /// のため、crate 外部（`examples/gemm_mma_swizzle_bench.rs`）から
+    /// 到達するにはこの diagnostics 経由の薄いラッパーが必要
+    /// （`mma_f16_block_tile`・`wmma_tf32_opt_block_tile` と同じ理由・
+    /// 同じ feature ゲート方針）。
+    pub fn mma_swizzle_group_width(num_sms: u32) -> u32 {
+        swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }
 }

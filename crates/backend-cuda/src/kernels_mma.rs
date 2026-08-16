@@ -1574,6 +1574,137 @@ extern "C" __global__ void gemm_mma_f16(
 }
 "#;
 
+/// [`mma_f16_source`] のアンカー 2 行（`block_row0`/`block_col0` のブロック
+/// 原点計算）を、`swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
+/// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
+/// 生成する（イシュー #499 受け入れ基準 1〜2 項の opt-in 経路）。
+///
+/// **`mma_f16_source()`（既定 config の render 結果。イシュー #516 で
+/// `MMA_F16` 定数からテンプレート展開へ移行済み）自体は変更しない**
+/// （`replacen` で新規 `String` を都度構築するのみ）。呼び出し元は
+/// `gemm_mma.rs::CudaMmaGemm::
+/// new_with_swizzle` のみであり、本番ディスパッチ経路（`ops.rs`／
+/// `gemm_auto.rs`）からは到達しない（本ファイルクレートルート
+/// `lib.rs` 冒頭コメント「#499」節参照）。
+///
+/// # remap の整数式（`swizzle.rs::swizzled_block_idx` と単一の設計を共有）
+///
+/// `linear_idx = blockIdx.y * gridDim.x + blockIdx.x`（CUDA が
+/// `blockIdx.x` を先に増分する既定の 2 次元グリッド線形化。`gridDim.x` =
+/// `num_n_blocks`・`gridDim.y` = `num_m_blocks`）を、`group_width` 個の M
+/// ブロックごとにグルーピングした順序へ remap する。式自体は
+/// `swizzle.rs::swizzled_block_idx` のホスト側参照実装と同一だが、両者は
+/// 独立した文字列（Rust 式 vs CUDA C++ 文字列）であり単一の共有ソースを
+/// 持たないため、不一致は `mma_f16_source_with_swizzle_matches_group_width_define`
+/// （本ファイル）と `gemm_mma.rs` の実機 bit 一致テストの二段で検出する
+/// （`swizzle.rs` 冒頭コメント参照）。
+///
+/// # エラー契約
+///
+/// `group_width < 2` は `CudaError::InvalidShape` で拒否する
+/// （`group_width == 1` は各グループが M ブロック 1 個のみを持つ退化
+/// ケースで、恒等写像に等しく L2 再利用効果を持たないため。実装計画
+/// 3 節「(c)」。安全側の実装単純化として `swizzle.rs::
+/// select_swizzle_group_width` の候補 `{8, 16}` 以外の値も受理するが
+/// `1` 未満・`1` そのものは拒否する）。
+///
+/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
+/// feature 既定 off）からの唯一の呼び出し元 `gemm_mma.rs::
+/// CudaMmaGemm::new_with_swizzle` が同 feature でゲートされたため
+/// （PR #667 codex-review P1 是正）、`cargo build`（feature 指定なし）では
+/// 呼び出し元が存在せず dead-code lint が誤検出する。本関数自体は
+/// `#[cfg(test)]` 下のソース生成検査テスト（本ファイル末尾）からは feature
+/// 非依存に呼ばれ続ける（`swizzle.rs::GROUP_WIDTH_CANDIDATES` と同じ
+/// 判断パターン）。
+#[allow(dead_code)]
+pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
+    if group_width < 2 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "mma_f16_source_with_swizzle requires group_width >= 2 (got {group_width}); \
+                 group_width == 1 degenerates to the identity block mapping \
+                 (swizzle.rs::swizzled_block_idx_group_width_one_is_identity_mapping) \
+                 and offers no L2 reuse benefit"
+            ),
+        });
+    }
+
+    const ANCHOR: &str =
+        "    int block_row0 = blockIdx.y * BM;\n    int block_col0 = blockIdx.x * BN;\n";
+    // イシュー #516 でカーネルソースが `MMA_F16` 定数からテンプレート展開
+    // （`render_mma_f16_unchecked`／`MMA_F16_SOURCE`）へ移行したため、
+    // 定数を直接参照せず `mma_f16_source()`（既定 config の render 結果。
+    // 他の回帰テストと同じ参照経路）を対象にする。
+    let source = mma_f16_source();
+    let occurrences = source.matches(ANCHOR).count();
+    // `unwrap()`/`expect()`・panic 系マクロを本番経路で使わない方針
+    // （coding-rust.md「エラーは型付きエラーとし、本番経路で unwrap()
+    // / expect() を使わない」）に合わせ、`assert_eq!` ではなく型付き
+    // エラーで返す。`mma_f16_source()` 側の不変条件は
+    // `mma_f16_source_with_swizzle_does_not_mutate_mma_f16_source` が
+    // 別途 CI 上で回帰検査するため、ここで通常到達しない前提だが、
+    // `new_with_swizzle` から到達しうる公開関数として panic を避ける。
+    if occurrences != 1 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "MMA_F16 中のブロック原点アンカー（block_row0/block_col0）の \
+                 出現数が 1 ではありません（{occurrences} 件検出。 \
+                 mma_f16_source_with_swizzle の前提が崩れています）"
+            ),
+        });
+    }
+
+    let remap = format!(
+        "    // イシュー #499: L2 再利用のためのタイル→SM 割り当てスウィズル\n\
+         \x20   // remap（swizzle.rs::swizzled_block_idx と同一式。本ファイル\n\
+         \x20   // mma_f16_source_with_swizzle ドキュメンテーションコメント参照）。\n\
+         \x20   // PR #667 codex-review P0 是正: 線形 index・ブロック数・積は\n\
+         \x20   // `long long`（64 bit）で計算する。`gridDim.y` は\n\
+         \x20   // `gemm_mma.rs::MAX_GRID_DIM_Y`（65,535）で上限検証済みだが\n\
+         \x20   // `gridDim.x` は上限検証していないため（同ファイル冒頭コメント\n\
+         \x20   // 「x 成分の上限は 2^31-1 と大きく実用的に問題にならないため\n\
+         \x20   // x は検証しない」）、`blockIdx.y * gridDim.x` や\n\
+         \x20   // `SWIZZLE_GROUP * num_n_blocks` は `int`（32 bit 符号付き）\n\
+         \x20   // のままでは容易にオーバーフローしうる（REQ-8 「境界検査の\n\
+         \x20   // 省略禁止」）。最終座標は `gridDim` 内であることを明示的に\n\
+         \x20   // 検査してから `int` へ縮小する（`m_block < num_m_blocks <=\n\
+         \x20   // 65,535`・`n_block < num_n_blocks <= 2^31-1` を上記の\n\
+         \x20   // 境界検査が保証するため、`m_block * BM`/`n_block * BN` は\n\
+         \x20   // 元の `m`/`n`（呼び出し元 `gemm_mma.rs::mma_launch_config`\n\
+         \x20   // が `int` として渡す形状）を超えず、64→32 bit への縮小は\n\
+         \x20   // 安全。オーバーフロー元は 64 bit 側で解消済みであり、この\n\
+         \x20   // 縮小自体は新たな符号なし/符号付きオーバーフロー経路を\n\
+         \x20   // 導入しない）。\n\
+         \x20   #define SWIZZLE_GROUP {group_width}\n\
+         \x20   long long num_m_blocks = gridDim.y;\n\
+         \x20   long long num_n_blocks = gridDim.x;\n\
+         \x20   long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;\n\
+         \x20   long long full_groups = num_m_blocks / SWIZZLE_GROUP;\n\
+         \x20   long long remainder = num_m_blocks % SWIZZLE_GROUP;\n\
+         \x20   long long full_group_blocks = (long long)SWIZZLE_GROUP * num_n_blocks;\n\
+         \x20   long long full_groups_total_blocks = full_groups * full_group_blocks;\n\
+         \x20   long long m_block, n_block;\n\
+         \x20   if (linear_idx < full_groups_total_blocks) {{\n\
+         \x20       long long group_idx = linear_idx / full_group_blocks;\n\
+         \x20       long long idx_in_group = linear_idx % full_group_blocks;\n\
+         \x20       m_block = group_idx * SWIZZLE_GROUP + (idx_in_group % SWIZZLE_GROUP);\n\
+         \x20       n_block = idx_in_group / SWIZZLE_GROUP;\n\
+         \x20   }} else {{\n\
+         \x20       long long idx_in_group = linear_idx - full_groups_total_blocks;\n\
+         \x20       m_block = full_groups * SWIZZLE_GROUP + (idx_in_group % remainder);\n\
+         \x20       n_block = idx_in_group / remainder;\n\
+         \x20   }}\n\
+         \x20   if (m_block < 0 || m_block >= num_m_blocks || n_block < 0 ||\n\
+         \x20       n_block >= num_n_blocks) {{\n\
+         \x20       return;\n\
+         \x20   }}\n\
+         \x20   int block_row0 = (int)(m_block * BM);\n\
+         \x20   int block_col0 = (int)(n_block * BN);\n"
+    );
+
+    Ok(source.replacen(ANCHOR, &remap, 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2639,6 +2770,79 @@ mod tests {
         assert_eq!(
             MMA_BK, 32,
             "MMA_BK が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
+        );
+    }
+
+    /// #499 受け入れ基準: `group_width < 2` を拒否する（本ファイル
+    /// `mma_f16_source_with_swizzle` ドキュメンテーションコメント
+    /// 「エラー契約」参照）。
+    #[test]
+    fn mma_f16_source_with_swizzle_rejects_group_width_below_two() {
+        let err = mma_f16_source_with_swizzle(1).expect_err("group_width=1 must be rejected");
+        assert!(matches!(err, crate::error::CudaError::InvalidShape { .. }));
+        let err = mma_f16_source_with_swizzle(0).expect_err("group_width=0 must be rejected");
+        assert!(matches!(err, crate::error::CudaError::InvalidShape { .. }));
+    }
+
+    /// #499 受け入れ基準: `group_width >= 2` では生成ソースに
+    /// `#define SWIZZLE_GROUP <group_width>` と remap 断片が含まれ、かつ
+    /// 元のアンカー（`blockIdx.y * BM`/`blockIdx.x * BN` 直書き）は
+    /// 除去されていることを検査する（アンカー出現数 1 の pin を兼ねる。
+    /// `mma_f16_source_with_swizzle` 内部の `assert_eq!` が既に検査する
+    /// 前提だが、ここでは戻り値側から独立に確認する）。
+    #[test]
+    fn mma_f16_source_with_swizzle_contains_group_define_and_remap_fragment() {
+        for group_width in [2u32, 8, 16] {
+            let src = mma_f16_source_with_swizzle(group_width)
+                .unwrap_or_else(|err| panic!("group_width={group_width}: {err}"));
+
+            let expected_define = format!("#define SWIZZLE_GROUP {group_width}");
+            assert!(
+                src.contains(&expected_define),
+                "group_width={group_width}: 生成ソースに `{expected_define}` が \
+                 見つかりません"
+            );
+            for needle in [
+                "long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;",
+                "long long full_groups = num_m_blocks / SWIZZLE_GROUP;",
+                "long long remainder = num_m_blocks % SWIZZLE_GROUP;",
+                "int block_row0 = (int)(m_block * BM);",
+                "int block_col0 = (int)(n_block * BN);",
+            ] {
+                assert!(
+                    src.contains(needle),
+                    "group_width={group_width}: 生成ソースに remap 断片 `{needle}` \
+                     が見つかりません"
+                );
+            }
+            assert!(
+                !src.contains("int block_row0 = blockIdx.y * BM;"),
+                "group_width={group_width}: 元のアンカー（blockIdx.y 直書き）が \
+                 remap 後も残っています"
+            );
+        }
+    }
+
+    /// `mma_f16_source_with_swizzle` はアンカー置換のみを行い、
+    /// `mma_f16_source()`（既定 config の render 結果）自体は不変で
+    /// あることをロックする（本ファイル `mma_f16_source_with_swizzle`
+    /// ドキュメンテーションコメント「**`mma_f16_source()` 自体は変更
+    /// しない**」・実装計画 2 節の安全側判断の回帰防止）。イシュー #516
+    /// でカーネルソースが `MMA_F16` 定数からテンプレート展開へ移行した
+    /// ため、対象を `mma_f16_source()` に合わせてある（他の回帰テストと
+    /// 同じ参照経路）。
+    #[test]
+    fn mma_f16_source_with_swizzle_does_not_mutate_mma_f16_source() {
+        let before = mma_f16_source();
+        let _ = mma_f16_source_with_swizzle(8).expect("group_width=8 must be accepted");
+        assert_eq!(
+            mma_f16_source(),
+            before,
+            "mma_f16_source_with_swizzle 呼び出し後に mma_f16_source() が変化しています"
+        );
+        assert!(
+            mma_f16_source().contains("int block_row0 = blockIdx.y * BM;"),
+            "mma_f16_source() の元のアンカー行が失われています（本番カーネルは無変更のはず）"
         );
     }
 }
