@@ -149,6 +149,24 @@ impl Microkernel for NeonKernel {
     }
 }
 
+/// aarch64 NEON 12×8（firestorm 型）A/B 対抗トークン。[`neon::kernel_12x8`]
+/// と同じく NEON は baseline ISA のため実行時検出不要。`super::dispatch_region`
+/// の駆動経路には接続せず、`gemm_blis::mod` の `#[cfg(test)]` A/B 計測
+/// テスト（`super::gemm_blis_with_kernel` 経由）専用のトークン（#559）。
+#[cfg(target_arch = "aarch64")]
+#[derive(Clone, Copy)]
+pub struct Neon12x8Kernel;
+
+#[cfg(target_arch = "aarch64")]
+impl Microkernel for Neon12x8Kernel {
+    const MR: usize = neon::MR_12X8;
+    const NR: usize = neon::NR_12X8;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        neon::kernel_12x8(ap, bp, c_tile, kc_len);
+    }
+}
+
 /// x86_64 AVX2+FMA トークン。[`Avx2Kernel::try_new`] 経由でのみ構築でき、
 /// これが実行 CPU の AVX2+FMA 対応を保証する（[`Microkernel::run`] 内部の
 /// `unsafe { avx2::kernel_unchecked(...) }` の SAFETY 根拠）。
