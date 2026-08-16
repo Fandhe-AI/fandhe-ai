@@ -1342,7 +1342,7 @@ fn launch_config(m: u32, n: u32, block_dim: (u32, u32, u32)) -> LaunchConfig {
     }
 }
 
-/// parity 非後退契約（イシュー #491）のベースライン fixture・検査
+/// parity 非後退契約（イシュー #491・#500）のベースライン fixture・検査
 /// ユーティリティ（`ParityBaseline`・`BASELINES`・
 /// `assert_no_parity_regression` 等）。
 ///
@@ -1362,7 +1362,14 @@ fn launch_config(m: u32, n: u32, block_dim: (u32, u32, u32)) -> LaunchConfig {
 /// でも到達不能）として実装し、基本版カーネルには [`CudaGemm::wmma_tf32`]
 /// （private field）・[`CudaGemm::run_wmma_f32_kernel`]（private fn）へ
 /// 同一モジュール内から直接アクセスする。新規の公開 API・feature は
-/// 増やさない。
+/// 増やさない。イシュー #500 で TF32 opt-staged カーネルが追加され、公開
+/// `run_wmma_tf32` が整列形状で staged 経路を最優先するようになったため
+/// （3 段選択。`run_wmma_tf32` ドキュメンテーションコメント参照）、opt
+/// カーネル単独の非後退検査（`wmma_tf32_opt_kernel_parity_does_not_regress`）
+/// も同じ理由で同一モジュール内から `self.wmma_tf32_opt`（private field）・
+/// `run_wmma_tf32_opt_kernel`（private fn）へ直接アクセスする（PR #678
+/// codex-review P1 指摘対応: 公開 API 経由の旧検査が staged 経路へ黙って
+/// すり替わっていた欠陥の是正）。
 ///
 /// fixture 自体は `tests/common/parity_baseline.rs` を `#[path]` で直接
 /// 取り込み、統合テスト側（`tests/parity_nonregression.rs::common`）と
@@ -1389,7 +1396,7 @@ mod tests {
     /// codex-review 指摘対応参照）。
     ///
     /// fail-closed 契約: 記録済みベースライン行の provenance が未確定
-    /// （`ParityBaseline::basic_kernel_baseline_unconfirmed == true`）の
+    /// （`ParityBaseline::baseline_provenance_unconfirmed == true`）の
     /// 場合、`assert_no_parity_regression` 側が必ず panic する（黙って
     /// skip しない。`tests/common/parity_baseline.rs` 参照）。実機再測定で
     /// 確定値を記録し `false` へ更新するまで、本テストは実機実行のたびに
@@ -1469,6 +1476,175 @@ mod tests {
             "parity 非後退契約 FAIL（{} 件）:\n{}",
             failures.len(),
             failures.join("\n")
+        );
+    }
+
+    /// parity 非後退契約（イシュー #491・#500）: opt カーネル
+    /// （[`CudaGemm::wmma_tf32_opt`] フィールド）専用の非後退ゲート。
+    ///
+    /// **PR #678 codex-review P1 指摘対応**: `run_wmma_tf32`（公開唯一の
+    /// API）はイシュー #500 で追加された TF32 opt-staged カーネルが利用
+    /// 可能かつ cp.async 16 バイト整列条件を満たす形状では staged 経路を
+    /// 最優先で選ぶため（`run_wmma_tf32` ドキュメンテーションコメント
+    /// 参照）、公開 API 経由では opt カーネル単独を検査できない
+    /// （`tests/parity_nonregression.rs` の旧実装はこの分岐を知らずに
+    /// `wmma_tf32_opt_available()` の確認だけで opt 専用と誤認しており、
+    /// staged 経路の回帰を opt の非後退として黙って見逃す・opt 自体の
+    /// 回帰を検出できない、という「opt 非後退テストが staged 経路へ
+    /// すり替わる」欠陥があった）。本テストは
+    /// [`wmma_tf32_basic_kernel_parity_does_not_regress`] と同型のパターンで
+    /// 同一モジュール内から `self.wmma_tf32_opt`／`run_wmma_tf32_opt_kernel`
+    /// （いずれも private）へ直接アクセスし、3 段選択を経由せず opt
+    /// カーネルを強制実行することで、公開 API・feature を一切増やさずに
+    /// この検査を実現する。
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    fn wmma_tf32_opt_kernel_parity_does_not_regress() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+        let func = gemm.wmma_tf32_opt.as_ref().expect(
+            "opt WMMA(TF32) kernel must be available on this ignored test runner (reason: see \
+             wmma_tf32_opt_error)",
+        );
+
+        let mut failures: Vec<String> = Vec::new();
+
+        for baseline in super::parity_baseline_fixture::BASELINES
+            .iter()
+            .filter(|b| b.path == super::parity_baseline_fixture::ParityPath::WmmaTf32Opt)
+        {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
+                let a = rng.fill_vec((baseline.m as usize) * (baseline.k as usize));
+                let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
+
+                let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
+                backend_cpu::matmul_reference_fma(
+                    &a,
+                    &b,
+                    &mut c_ref,
+                    baseline.m as usize,
+                    baseline.n as usize,
+                    baseline.k as usize,
+                )
+                .expect(
+                    "matmul_reference_fma shape validation must pass for well-formed baseline \
+                     input",
+                );
+
+                validate_gemm_dims(a.len(), b.len(), baseline.m, baseline.n, baseline.k)
+                    .expect("baseline fixture shapes must be valid GEMM dimensions");
+                validate_wmma_tf32_opt_k_bound(baseline.k)
+                    .expect("baseline fixture k must satisfy WMMA(TF32) opt k bound");
+
+                let c_gpu = gemm
+                    .run_wmma_tf32_opt_kernel(func, &a, &b, baseline.m, baseline.n, baseline.k)
+                    .expect(
+                        "opt WMMA(TF32) kernel execution must succeed on this ignored test \
+                         runner",
+                    );
+
+                let report = backend_cpu::compare(&c_gpu, &c_ref)
+                    .expect("shape must match baseline fixture");
+
+                super::parity_baseline_fixture::assert_no_parity_regression(
+                    baseline.context,
+                    &report,
+                    baseline,
+                );
+            }));
+            if let Err(err) = result {
+                let msg = err
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
+                    .unwrap_or_else(|| "panic (詳細不明)".to_string());
+                failures.push(format!("{}: {msg}", baseline.context));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "parity 非後退契約 FAIL（{} 件）:\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+
+    /// #500 の目的（cp.async 多段化・fragment 先読みによる TF32 経路の性能
+    /// 改善）の実測本体: staged カーネルが opt カーネルを上回ることを、
+    /// 同一実行内で 5 回計測した中央値で確認する（`.claude/rules/
+    /// coding-rust.md`「ベンチは 5 回計測の中央値」）。
+    ///
+    /// **PR #678 codex-review P2 指摘対応**: `tests/gemm_wmma_tf32_staged.rs`
+    /// の旧実装は独立クレート扱いのため公開 API 経由でしか計測できず、
+    /// `run_wmma_tf32`（公開 API）は staged 選択後は opt 単体を分離計測
+    /// できないため、doc comment・関数名が主張する「opt を上回る」ことを
+    /// 実際には検証していなかった（比較対象が `run_tiled_f32` にすり替わる。
+    /// codex-review 指摘）。本テストは `wmma_tf32_opt_kernel_parity_does_not_regress`
+    /// と同じ手段（同一モジュール内から `self.wmma_tf32_staged`／
+    /// `self.wmma_tf32_opt`（いずれも private）へ直接アクセス）で、staged・
+    /// opt 双方を 3 段選択を経由せず強制実行し、同一実行内で TFLOPS を
+    /// 直接比較する。`tests/gemm_wmma_tf32_staged.rs::
+    /// wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096`（公開 API 経由の
+    /// tiled 比較。受け入れ基準「4096 の対 PyTorch 比が 25.64% を上回る」の
+    /// 実測本体）とは別軸の検査である。
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須。実測記録は \
+                docs/perf/cuda-gemm-wmma-tf32-phase-b.md"]
+    fn wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096() {
+        use std::time::Instant;
+
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
+
+        let staged_func = gemm.wmma_tf32_staged.as_ref().expect(
+            "staged WMMA(TF32) kernel must be available on this ignored test runner so that the \
+             TFLOPS comparison actually exercises the staged kernel (reason: see \
+             wmma_tf32_staged_error)",
+        );
+        let opt_func = gemm.wmma_tf32_opt.as_ref().expect(
+            "opt WMMA(TF32) kernel must be available on this ignored test runner so that the \
+             comparison baseline is the actual optimized kernel (reason: see wmma_tf32_opt_error)",
+        );
+
+        let (m, n, k) = (4096u32, 4096u32, 4096u32);
+        let mut rng = bench_harness::rng::Xorshift64Star::new(0xACE1);
+        let a = rng.fill_vec((m as usize) * (k as usize));
+        let b = rng.fill_vec((k as usize) * (n as usize));
+
+        let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
+
+        let median_tflops = |run: &dyn Fn() -> Vec<f32>| -> f64 {
+            // warmup（NVRTC JIT・クロック遷移の影響を計測から除外する）。
+            let _ = run();
+            let mut samples = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let start = Instant::now();
+                let _ = run();
+                samples.push(start.elapsed().as_secs_f64());
+            }
+            samples.sort_by(|x, y| x.partial_cmp(y).expect("elapsed seconds must not be NaN"));
+            let median = samples[samples.len() / 2];
+            (flops / median) / 1e12
+        };
+
+        let opt_tflops = median_tflops(&|| {
+            gemm.run_wmma_tf32_opt_kernel(opt_func, &a, &b, m, n, k)
+                .expect("opt WMMA(TF32) kernel must succeed on CUDA-equipped test runner")
+        });
+        let staged_tflops = median_tflops(&|| {
+            gemm.run_wmma_tf32_staged_kernel(staged_func, &a, &b, m, n, k)
+                .expect("staged WMMA(TF32) kernel must succeed on CUDA-equipped test runner")
+        });
+
+        assert!(
+            staged_tflops > opt_tflops,
+            "staged 経路（{staged_tflops:.3} TFLOPS）が opt 経路（{opt_tflops:.3} TFLOPS）を \
+             上回りませんでした（M=N=K=4096）"
         );
     }
 

@@ -61,11 +61,16 @@ BN=128（B-3 適用時の試算）: `as_tile` 30,720B（`block_m=128, a_pad=20`�
 
 ## 5. 非後退契約
 
-- `tests/common/parity_baseline.rs::ParityPath::WmmaTf32Opt` の記録行（64×64×64・512×512×512・
-  512×512×4096。いずれも 4 の倍数）は、staged カーネル実装済み環境の実機では `run_wmma_tf32` が
-  staged 経路を自動選択するため、行ラベルと実行経路が一致しなくなる（`parity_baseline.rs` 当該行の
-  ドキュメンテーションコメント参照）。tolerance 定数・baseline 数値は変更していない。実機再計測時
-  （6 節）に staged 経路での fail_count・mean_abs_diff が既存 baseline を上回らないことを確認する。
+- **ルーティング変更（PR #678 codex-review P1 指摘対応）**: `tests/common/parity_baseline.rs::
+  ParityPath::WmmaTf32Opt` の記録行（64×64×64・512×512×512・512×512×4096。いずれも 4 の倍数）は、
+  staged カーネル実装済み環境の実機では `run_wmma_tf32`（公開 API）が staged 経路を自動選択するため、
+  公開 API 経由の非後退検査は opt カーネル自体の回帰を検出できなくなる欠陥があった。修正として、この
+  経路の非後退検査は `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress`
+  （`src/gemm.rs`。private field 経由で 3 段選択を経由せず opt カーネルを強制実行）へ移設した。新設の
+  `ParityPath::WmmaTf32Staged`（`tests/parity_nonregression.rs::check_wmma_tf32_staged_baseline`）が
+  公開 API 経由で staged 経路を検査する（staged はこの経由で正しく強制実行できる）。staged 行は実機
+  未到達のため記録値未確定（`baseline_provenance_unconfirmed: true`）で fail-closed に倒れる。実機
+  再計測時（6 節）に両経路の fail_count・mean_abs_diff を記録し確定させる。
 - `RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`（ガードレール閾値）は無変更（
   `tolerance_constants_are_pinned` が bit 等値で機械検査する）。
 
@@ -86,6 +91,8 @@ cargo test -p backend-cuda --lib kernels_wmma_opt
 cargo test -p backend-cuda --test gemm_wmma_tf32_staged -- --ignored --test-threads=1
 cargo test -p backend-cuda --test gemm_wmma_tf32_opt -- --ignored --test-threads=1
 cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
+# opt カーネル単独の非後退・staged 対 opt の TFLOPS 比較（private field 経由。gemm.rs 内）。
+cargo test -p backend-cuda --lib -- --ignored --test-threads=1 wmma_tf32_opt_kernel_parity_does_not_regress wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096
 
 # cuda_floor_bench（対 PyTorch 比。既存 f32 行の再測定）。
 cargo run -p backend-cuda --example cuda_floor_bench --release -- --shapes 4096x4096x4096
@@ -95,7 +102,8 @@ cargo run -p backend-cuda --example cuda_floor_bench --release -- --shapes 4096x
 
 | 項目 | base（opt。既存） | head（staged。#500） | 備考 |
 |---|---|---|---|
-| M=N=K=4096 TFLOPS（5 回計測中央値） | 未計測 | 未計測 | `wmma_tf32_staged_exceeds_opt_tflops_at_4096` |
+| M=N=K=4096 TFLOPS（5 回計測中央値。staged 対 opt） | 未計測 | 未計測 | `backend_cuda::gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`（`src/gemm.rs`） |
+| M=N=K=4096 TFLOPS（5 回計測中央値。staged 対 tiled f32） | 未計測 | 未計測 | `tests/gemm_wmma_tf32_staged.rs::wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096` |
 | 対 PyTorch 比（REQ-8 f32 行） | 25.64%（`cuda-floor-remeasurement.md` 実測値） | 未計測 | 目標 35% |
 | parity fail_count/total（wmma_tf32_opt 行） | 既存 baseline（`parity_baseline.rs`） | 未計測 | 非後退確認 |
 | parity mean_abs_diff | 既存 baseline | 未計測 | 非後退確認 |

@@ -199,23 +199,35 @@ fn wmma_tf32_staged_zero_dim_shape_returns_empty_without_launch() {
     assert!(c.is_empty());
 }
 
-/// #500 の目的（cp.async 多段化・fragment 先読みによる TF32 経路の性能
-/// 改善）の実測本体: staged 経路（`run_wmma_tf32`。staged カーネルが
-/// 利用可能かつ整列条件を満たす環境では自動的にこちらが選ばれる）が
-/// 既存 opt 実装（tiled 超過が確認済み。#63）を上回ることを、同一実行内で
-/// 5 回計測した中央値で確認する（`.claude/rules/coding-rust.md`「ベンチは
-/// 5 回計測の中央値」）。
+/// 受け入れ基準「4096 の対 PyTorch 比が 25.64% を上回る」の実測本体
+/// （公開 API 経由。staged 経路（`run_wmma_tf32`。staged カーネルが利用
+/// 可能かつ整列条件を満たす環境では自動的にこちらが選ばれる）が tiled f32
+/// を上回ることを、同一実行内で 5 回計測した中央値で確認する
+/// （`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」）。
+///
+/// **PR #678 codex-review P2 指摘対応（イシュー #500。旧名
+/// `wmma_tf32_staged_exceeds_opt_tflops_at_4096`）**: 本ファイルは独立
+/// クレート扱いのため公開 API しか呼べず、`run_wmma_tf32` は staged 選択後
+/// は opt 単体を分離計測できない。旧実装はこの制約を認識したうえで比較対象
+/// を `run_tiled_f32` へ差し替えていたにもかかわらず、関数名・doc comment
+/// が「opt を上回る」ことを主張しており、受け入れ条件と実装が乖離していた
+/// （テスト名・目的が実施内容と一致しない）。「staged が既存 opt 実装を
+/// 上回る」という本来の受け入れ条件は、private field へ直接アクセスできる
+/// ライブラリ単体テスト
+/// （`backend_cuda::gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`。
+/// `src/gemm.rs`）へ切り出した。本テストは名称・目的を実施内容（tiled f32
+/// 比較）に揃え、公開 API から到達可能な形で「tiled f32 を上回る」ことを
+/// 検証する（イシュー #500 の受け入れ基準本体はこちら）。
 ///
 /// **未計測（本 PR の対象外）**: 本テストは実機（DGX Spark GB10 等）
 /// 必須のため、この PR を作成したセッションでは実行できていない。
-/// 対 PyTorch 比・staged 対 opt の実測倍率は `docs/perf/
-/// cuda-gemm-wmma-tf32-phase-b.md` の実測結果欄（プレースホルダ）へ
-/// 実機セッションで記入し、必要に応じてイシュー #502（Phase B 完了時点の
-/// f32/f16 再計測）へ引き継ぐ。
+/// 対 PyTorch 比の実測倍率は `docs/perf/cuda-gemm-wmma-tf32-phase-b.md` の
+/// 実測結果欄（プレースホルダ）へ実機セッションで記入し、必要に応じて
+/// イシュー #502（Phase B 完了時点の f32/f16 再計測）へ引き継ぐ。
 #[test]
 #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実測記録は \
             docs/perf/cuda-gemm-wmma-tf32-phase-b.md"]
-fn wmma_tf32_staged_exceeds_opt_tflops_at_4096() {
+fn wmma_tf32_staged_exceeds_tiled_f32_tflops_at_4096() {
     use std::time::Instant;
 
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
@@ -226,12 +238,6 @@ fn wmma_tf32_staged_exceeds_opt_tflops_at_4096() {
          comparison actually exercises the staged kernel rather than silently falling back \
          (reason: {:?})",
         gemm.wmma_tf32_staged_unavailable_reason()
-    );
-    assert!(
-        gemm.wmma_tf32_opt_available(),
-        "opt kernel must be available on this ignored test runner so that the comparison \
-         baseline is the actual optimized kernel, not the basic WMMA kernel (reason: {:?})",
-        gemm.wmma_tf32_opt_unavailable_reason()
     );
 
     let (m, n, k) = (4096u32, 4096u32, 4096u32);
@@ -257,15 +263,10 @@ fn wmma_tf32_staged_exceeds_opt_tflops_at_4096() {
 
     // staged 経路は m/n/k=4096（4 の倍数）で自動選択される
     // （`wmma_tf32_staged_alignment_ok`）ため `run_wmma_tf32` をそのまま
-    // 使う。opt 側は `run_wmma_tf32` 経由では staged にフォールバックされて
-    // しまうため、`gemm_wmma.rs`／内部 API を持たない本クレートの公開面
-    // からは opt 単体の分離計測ができない。したがって「opt を上回る」旨の
-    // 主張は、`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` に記録する
-    // 実機セッションで `wmma_tf32_opt` 側のみをコンパイルする一時的な
-    // 計測（または #502 再計測時の既存 `wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`
-    // の実測値との比較）に委ねる。本テストでは「tiled f32 を上回る」ことを
-    // 受け入れ条件の本体として計測する（既存 `wmma_tf32_opt_exceeds_tiled_f32_tflops_at_4096`
-    // と同型の比較軸）。
+    // 使う。「opt を上回る」旨の検証は
+    // `wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`
+    // （`src/gemm.rs`）が private field 経由で直接行う（本テストの対象外。
+    // 上記ドキュメンテーションコメント参照）。
     let tiled_tflops = median_tflops(&|| {
         gemm.run_tiled_f32(&a, &b, m, n, k)
             .expect("tiled f32 must succeed on CUDA-equipped test runner")

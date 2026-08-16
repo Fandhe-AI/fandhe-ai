@@ -23,8 +23,7 @@
 //! ## `ParityPath::WmmaTf32`（基本版）行の検査場所（PR #640 codex-review
 //! P1 指摘対応・イシュー #491）
 //!
-//! 本ファイルの実機必須テストは `ParityPath::WmmaTf32Opt`・`MmaF16` のみを
-//! 対象とする。`ParityPath::WmmaTf32`（基本版カーネル単独）の非後退検査は
+//! `ParityPath::WmmaTf32`（基本版カーネル単独）の非後退検査は
 //! `backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
 //! （`crates/backend-cuda/src/gemm.rs` 内のライブラリ単体テスト。`cargo test
 //! -p backend-cuda --lib -- --ignored` で実行）へ移設済みである。
@@ -43,6 +42,29 @@
 //! カーネル（private field）へ公開 API を増やさずに到達する唯一の方法は
 //! ライブラリ自身の単体テストであるため、上記の通り移設した
 //! （`gemm.rs` 内の該当テストのドキュメンテーションコメント参照）。
+//!
+//! ## `ParityPath::WmmaTf32Opt` 行の検査場所（PR #678 codex-review P1
+//! 指摘対応・イシュー #500）
+//!
+//! 本ファイルの実機必須テストは `ParityPath::WmmaTf32Opt` を**対象としない**
+//! （`ParityPath::WmmaTf32` と同じ理由で `gemm.rs` へ移設済み）。イシュー
+//! #500 で TF32 opt-staged カーネル（cp.async 多段パイプライン）が追加され、
+//! `run_wmma_tf32`（公開 API）は staged カーネルが利用可能かつ cp.async 16
+//! バイト整列条件（`n%4==0 && k%4==0`）を満たす形状では staged 経路を
+//! 最優先で選ぶようになった（`gemm.rs::run_wmma_tf32` 3 段選択）。既存
+//! `WmmaTf32Opt` ベースライン行（512×512×512・64×64×64・512×512×4096）は
+//! いずれも 4 の倍数形状のため、以前ここで `wmma_tf32_opt_available()` を
+//! assert してから公開 `run_wmma_tf32` を呼んでいた検査は、#500 以降は
+//! 実際には staged カーネルの実測になってしまい、opt カーネル自体の回帰を
+//! 検出できなくなっていた（opt 非後退テストが黙って staged 経路へ
+//! すり替わる。codex-review P1 指摘）。修正として、opt カーネル単独の検査は
+//! `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress`
+//! （`src/gemm.rs`。private field `wmma_tf32_opt`・private fn
+//! `run_wmma_tf32_opt_kernel` へ同一モジュール内から直接アクセスし、
+//! 3 段選択を経由せず opt カーネルを強制実行する）へ移設した。本ファイルは
+//! 代わりに新設の `ParityPath::WmmaTf32Staged`（[`check_wmma_tf32_staged_baseline`]）
+//! を検査する。staged は #500 以降の `run_wmma_tf32` が整列形状で実際に
+//! 選ぶ経路であるため、公開 API 経由でも正しく強制実行できる。
 
 mod common;
 
@@ -63,7 +85,7 @@ fn tolerance_constants_are_pinned() {
 }
 
 /// fixture 自体の妥当性検査: 各行の `baseline_fail_count <= total`・
-/// `total == m*n`・3 経路すべてに 1 行以上存在することを確認する。
+/// `total == m*n`・4 経路すべてに 1 行以上存在することを確認する。
 /// fixture 値の入力ミス（転記ミス等）を CI で機械的に検出する。
 #[test]
 fn baseline_fixture_is_self_consistent() {
@@ -94,6 +116,7 @@ fn baseline_fixture_is_self_consistent() {
     for path in [
         ParityPath::WmmaTf32,
         ParityPath::WmmaTf32Opt,
+        ParityPath::WmmaTf32Staged,
         ParityPath::MmaF16,
     ] {
         assert!(
@@ -103,23 +126,25 @@ fn baseline_fixture_is_self_consistent() {
     }
 }
 
-/// `basic_kernel_baseline_unconfirmed` フィールドの誤用防止（codex-review P1
-/// 指摘対応・イシュー #491）: このフラグは「基本版カーネル記録値の
-/// provenance が opt/basic 混同で確定していない」ケース専用であり、
+/// `baseline_provenance_unconfirmed` フィールドの誤用防止（codex-review P1
+/// 指摘対応・イシュー #491。PR #678 codex-review P1 指摘対応で
+/// `WmmaTf32Staged` を許容経路へ追加・フィールド名変更に追従）: このフラグは
+/// 「記録値の provenance が確定していない」ケース専用であり、
 /// `WmmaTf32Opt`・`MmaF16` の記録元は opt 可用性確認済み／基本-opt 分岐が
 /// 存在しないためこの不確実性が原理的に生じない（`common/parity_baseline.rs`
 /// 各行コメント参照）。このテストは `WmmaTf32Opt`/`MmaF16` の行に
-/// `basic_kernel_baseline_unconfirmed: true` が誤って付与されていないことを
-/// 固定し、非後退ゲートが意図せず広くスキップされる回帰を防ぐ。
+/// `baseline_provenance_unconfirmed: true` が誤って付与されていないことを
+/// 固定し、非後退ゲートが意図せず広くスキップされる回帰を防ぐ（`WmmaTf32`・
+/// `WmmaTf32Staged` は実機未到達で記録値が存在しないため許容する）。
 #[test]
-fn basic_kernel_baseline_unconfirmed_is_scoped_to_wmma_tf32_only() {
+fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
     for b in BASELINES {
-        if b.path != ParityPath::WmmaTf32 {
+        if b.path != ParityPath::WmmaTf32 && b.path != ParityPath::WmmaTf32Staged {
             assert!(
-                !b.basic_kernel_baseline_unconfirmed,
-                "{}: basic_kernel_baseline_unconfirmed は WmmaTf32（基本版）行専用です。\
-                 経路 {:?} で true になっており、非後退ゲートが意図せず\
-                 スキップされます",
+                !b.baseline_provenance_unconfirmed,
+                "{}: baseline_provenance_unconfirmed は WmmaTf32（基本版）・\
+                 WmmaTf32Staged 行専用です。経路 {:?} で true になっており、\
+                 非後退ゲートが意図せずスキップされます",
                 b.context, b.path
             );
         }
@@ -131,11 +156,12 @@ fn basic_kernel_baseline_unconfirmed_is_scoped_to_wmma_tf32_only() {
 ///
 /// `WmmaTf32Opt`・`MmaF16` は provenance 不確実性が原理的に生じない経路
 /// （`common/parity_baseline.rs` 各行コメント参照）のため、全行が
-/// enforced（`basic_kernel_baseline_unconfirmed == false`）であることを
-/// 固定する。`WmmaTf32`（基本版）は対象外（現状 2 行とも
-/// `basic_kernel_baseline_unconfirmed: true` であり、これは
+/// enforced（`baseline_provenance_unconfirmed == false`）であることを
+/// 固定する。`WmmaTf32`（基本版）・`WmmaTf32Staged` は対象外（前者は現状
+/// 2 行とも、後者は実機未到達のため 1 行とも
+/// `baseline_provenance_unconfirmed: true` であり、これは
 /// `assert_no_parity_regression` の fail-closed 契約
-/// （`wmma_tf32_basic_kernel_parity_does_not_regress_panics_on_unconfirmed_baseline`
+/// （`assert_no_parity_regression_panics_on_unconfirmed_baseline`
 /// が下で機械検査する）によって「実機必須テストが黙って green になる」
 /// ことを防いでいる。0 件を green として固定するテストは置かない
 /// —— それ自体が codex-review P1 指摘が問題視した「機能していないゲート
@@ -146,11 +172,11 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
         let total = BASELINES.iter().filter(|b| b.path == path).count();
         let enforced = BASELINES
             .iter()
-            .filter(|b| b.path == path && !b.basic_kernel_baseline_unconfirmed)
+            .filter(|b| b.path == path && !b.baseline_provenance_unconfirmed)
             .count();
         assert_eq!(
             enforced, total,
-            "経路 {path}: basic_kernel_baseline_unconfirmed=true の行が含まれています \
+            "経路 {path}: baseline_provenance_unconfirmed=true の行が含まれています \
              （この経路は provenance 不確実性が生じないため全行 enforced である\
              べきです）"
         );
@@ -158,7 +184,7 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
 }
 
 /// fail-closed 契約の falsification テスト（codex-review P1 再指摘対応・
-/// イシュー #491）: `basic_kernel_baseline_unconfirmed: true` の行を
+/// イシュー #491）: `baseline_provenance_unconfirmed: true` の行を
 /// `assert_no_parity_regression` に渡すと、実測値の良否に関わらず
 /// **必ず panic する**ことを固定する（黙って skip して pass する壊れ方の
 /// 防止。`assert_no_parity_regression_panics_on_*` 3 兄弟と同方針）。
@@ -167,8 +193,8 @@ fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
 /// あえて設定し、それでも provenance 未確定の一点だけで fail-closed に
 /// panic することを検証する。
 #[test]
-#[should_panic(expected = "basic_kernel_baseline_unconfirmed")]
-fn assert_no_parity_regression_panics_on_unconfirmed_basic_kernel_baseline() {
+#[should_panic(expected = "baseline_provenance_unconfirmed")]
+fn assert_no_parity_regression_panics_on_unconfirmed_baseline() {
     let baseline = ParityBaseline {
         path: ParityPath::WmmaTf32,
         context: "synthetic unconfirmed",
@@ -182,7 +208,7 @@ fn assert_no_parity_regression_panics_on_unconfirmed_basic_kernel_baseline() {
         // を確認する。
         baseline_fail_count: 4,
         baseline_mean_abs_diff_ceiling: 1.0,
-        basic_kernel_baseline_unconfirmed: true,
+        baseline_provenance_unconfirmed: true,
     };
     let a = vec![0.0f32; baseline.total];
     let b = vec![0.0f32; baseline.total];
@@ -210,7 +236,7 @@ fn assert_no_parity_regression_panics_on_fail_count_regression() {
         total: 16,
         baseline_fail_count: 2,
         baseline_mean_abs_diff_ceiling: 1e-4,
-        basic_kernel_baseline_unconfirmed: false,
+        baseline_provenance_unconfirmed: false,
     };
     // fail_count がベースライン(2)を上回る合成レポート。
     let a = vec![0.0f32; baseline.total];
@@ -241,7 +267,7 @@ fn assert_no_parity_regression_panics_on_mean_abs_diff_regression() {
         // fail_count は緩く設定し、mean_abs_diff 側のみで fail させる。
         baseline_fail_count: 4,
         baseline_mean_abs_diff_ceiling: 1e-6,
-        basic_kernel_baseline_unconfirmed: false,
+        baseline_provenance_unconfirmed: false,
     };
     let a = vec![0.0f32; baseline.total];
     // 絶対誤差救済閾値(1e-5)未満のため複合判定は pass するが、
@@ -266,7 +292,7 @@ fn assert_no_parity_regression_panics_on_total_mismatch() {
         total: 16,
         baseline_fail_count: 100,
         baseline_mean_abs_diff_ceiling: 1.0,
-        basic_kernel_baseline_unconfirmed: false,
+        baseline_provenance_unconfirmed: false,
     };
     // total が baseline(16) と異なる合成レポート。
     let a = vec![0.0f32; 9];
@@ -291,26 +317,29 @@ fn parity_baselines_do_not_regress() {
     let mut failures: Vec<String> = Vec::new();
 
     for baseline in BASELINES {
-        // `ParityPath::WmmaTf32`（基本版カーネル単独）行はここでは検査
-        // しない。基本版カーネルは private field（`self.wmma_tf32`）でしか
-        // opt 可用性に関わらず強制実行できず、独立クレート扱いの本ファイル
-        // から公開 API を増やさずに到達する手段がないため、ライブラリ自身の
-        // 単体テスト（`backend_cuda::gemm::tests::
-        // wmma_tf32_basic_kernel_parity_does_not_regress`。`src/gemm.rs`）
-        // へ検査自体を移設済み（本ファイル冒頭ドキュメンテーションコメント
-        // 参照。PR #640 codex-review P1 指摘対応）。
-        if baseline.path == ParityPath::WmmaTf32 {
+        // `ParityPath::WmmaTf32`（基本版カーネル単独）・`ParityPath::WmmaTf32Opt`
+        // 行はここでは検査しない。どちらも private field（`self.wmma_tf32`／
+        // `self.wmma_tf32_opt`）へ直接アクセスしないと 3 段選択を経由せず
+        // 強制実行できず、独立クレート扱いの本ファイルから公開 API を
+        // 増やさずに到達する手段がないため、ライブラリ自身の単体テスト
+        // （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`・
+        // `wmma_tf32_opt_kernel_parity_does_not_regress`。`src/gemm.rs`）へ
+        // 検査自体を移設済み（本ファイル冒頭ドキュメンテーションコメント
+        // 参照。PR #640・#678 codex-review P1 指摘対応）。
+        if baseline.path == ParityPath::WmmaTf32 || baseline.path == ParityPath::WmmaTf32Opt {
             continue;
         }
         let result =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match baseline.path {
-                ParityPath::WmmaTf32Opt => {
-                    check_wmma_tf32_opt_baseline(&gemm, baseline);
+                ParityPath::WmmaTf32Staged => {
+                    check_wmma_tf32_staged_baseline(&gemm, baseline);
                 }
                 ParityPath::MmaF16 => {
                     check_mma_f16_baseline(&mma_gemm, baseline);
                 }
-                ParityPath::WmmaTf32 => unreachable!("continue で除外済み"),
+                ParityPath::WmmaTf32 | ParityPath::WmmaTf32Opt => {
+                    unreachable!("continue で除外済み")
+                }
             }));
         if let Err(err) = result {
             let msg = err
@@ -330,21 +359,28 @@ fn parity_baselines_do_not_regress() {
     );
 }
 
-/// `wmma_tf32_opt` 経路 1 行の非後退検査（`ParityPath::WmmaTf32Opt` 専用。
-/// `ParityPath::WmmaTf32`〈基本版〉は本ファイル冒頭ドキュメンテーション
-/// コメントのとおり `src/gemm.rs` の単体テストへ移設済みのため対象外）。
+/// `wmma_tf32_staged` 経路 1 行の非後退検査（`ParityPath::WmmaTf32Staged`
+/// 専用。PR #678 codex-review P1 指摘対応・イシュー #500）。
+///
+/// `ParityPath::WmmaTf32Opt` はここでは検査しない（`gemm.rs` の内部テストへ
+/// 移設済み。本ファイル冒頭ドキュメンテーションコメント参照）。この行は
+/// 逆に公開 API（`run_wmma_tf32`）経由で正しく staged カーネルを強制実行
+/// できる: fixture のこの経路の形状は cp.async 16 バイト整列条件
+/// （`n%4==0 && k%4==0`）を満たすよう選定済みであり、staged カーネルが
+/// 利用可能な環境では `run_wmma_tf32` の 3 段選択が必ず staged 経路を
+/// 選ぶ（`gemm.rs::run_wmma_tf32` ドキュメンテーションコメント参照）。
 ///
 /// 参照値は `backend_cpu::matmul_reference_fma`（非量子化。
 /// `docs/backend-cuda-real-device-testing.md` §5.3 が確認済みの意図的設計を
-/// 踏襲する）。事前に `wmma_tf32_opt_available()` を assert し、opt カーネルが
-/// 実際に利用可能な環境で計測していることを保証してから実行する
-/// （既存テスト `gemm_wmma_tf32_opt.rs` と同じ考え方）。
-fn check_wmma_tf32_opt_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
+/// 踏襲する）。事前に `wmma_tf32_staged_available()` を assert し、staged
+/// カーネルが実際に利用可能な環境で計測していることを保証してから実行する
+/// （既存テスト `gemm_wmma_tf32_staged.rs` と同じ考え方）。
+fn check_wmma_tf32_staged_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
     assert!(
-        gemm.wmma_tf32_opt_available(),
-        "{}: opt kernel must be available on this ignored test runner (reason: {:?})",
+        gemm.wmma_tf32_staged_available(),
+        "{}: staged kernel must be available on this ignored test runner (reason: {:?})",
         baseline.context,
-        gemm.wmma_tf32_opt_unavailable_reason()
+        gemm.wmma_tf32_staged_unavailable_reason()
     );
 
     let mut rng = bench_harness::rng::Xorshift64Star::new(baseline.seed);
