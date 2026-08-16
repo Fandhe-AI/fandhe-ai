@@ -15,7 +15,9 @@ codex-review 指摘対応で `tests/shader_source_evidence.rs` から移設）�
 上で機械検査済みだが、性能効果の実測・採否判断（下記「判断基準」）は Mac 実機セッションでの後続対応が必要。
 
 **本番 dispatch は `crate::tile::SWIZZLE_ENABLED`（既定 `false`）でスウィズルを無効化済み**（PR #661 codex-review 指摘対応:
-実機未検証のまま本番経路へ無条件適用しない）。`gemm_simdgroup_tiled` の MSL function constant `SWIZZLE_ENABLED`（index 6）が
+実機未検証のまま本番経路へ無条件適用しない）。`gemm_simdgroup_tiled` の MSL function constant `SWIZZLE_ENABLED`（index 7。
+`TGP_PAD`〈#538・index 6〉との index 重複は `tile.rs` 側の機械検査（`gemm_simdgroup_tiled_source_uses_tgid_swizzle`）で
+ロック済み）が
 `false` の間はシェーダ側も恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）で動作し、本ブランチをそのままマージしても挙動・
 性能は base（スウィズル導入前）と同一になる。下記計測手順の「head」計測時は、`crates/backend-metal/src/tile.rs` の
 `SWIZZLE_ENABLED` を一時的に `true` へ書き換えてから `cargo run` する（**この変更はコミットしない**。計測後に `git checkout --
