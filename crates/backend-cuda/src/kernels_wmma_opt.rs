@@ -61,8 +61,20 @@
 //! 計算読み出しの間にレースは生じない。ループ末尾の 1 回の `__syncthreads()`
 //! が「今回の `cur` 読み出し（計算）」と「今回の `nxt` 書き込み
 //! （プリフェッチ）」の両方の完了を保証したうえで `cur`/`nxt` を入れ替える
-//! （標準的な 2 段パイプラインの契約。`cp.async` 等の非同期コピー命令は
-//! 使わず `__syncthreads()` ベースに限定する。#187 のスコープ外事項）。
+//! （標準的な 2 段パイプラインの契約。`WMMA_TF32_F32_OPT_BODY`／
+//! `WMMA_F16_OPT_BODY` は `cp.async` 等の非同期コピー命令は使わず
+//! `__syncthreads()` ベースに限定する。#187 のスコープ外事項）。
+//!
+//! **イシュー #500 での追記**: 上記の「`cp.async` 不使用」は
+//! `WMMA_TF32_F32_OPT_BODY`／`WMMA_F16_OPT_BODY` 2 経路に閉じた制約であり、
+//! 本モジュール全体の制約ではない。TF32 opt-staged 経路
+//! （`WMMA_TF32_F32_STAGED_BODY`。本ファイル該当節参照）は
+//! `kernels_mma.rs::MMA_F16_BODY`（Phase B・#492〜#499）で確立した
+//! `cp.async` 多段パイプライン・fragment 先読みダブルバッファを WMMA C++
+//! API（`nvcuda::wmma`）の TF32 経路へ横展開したものであり、`cp.async` を
+//! 使用する。既存 2 経路（`__syncthreads()` ベース）は変更せず併存させる
+//! （`gemm.rs::run_wmma_tf32` の cp.async 16 バイト整列非対応形状の
+//! フォールバック先として温存する）。
 //!
 //! # 境界検査（REQ-8。省略禁止）
 //!
@@ -149,6 +161,7 @@ use half::f16;
 
 use crate::error::CudaError;
 use crate::kernels_mma::{DimSpec, MMA_STATIC_SMEM_LIMIT_BYTES, render_dim_define};
+use crate::nvrtc::MAX_PIPELINE_STAGES;
 
 /// A タイル（`as_tile[2][BLOCK_M][A_PAD]`）の行幅（パディング後）。
 /// `K_TILE`（16）に 4 要素加算し、f32 の `ldm` 制約（4 の倍数）を保ちながら
@@ -1012,6 +1025,833 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
     for (int idx = tid; idx < WMMA_TF32_OPT_BLOCK_M * WMMA_TF32_OPT_BLOCK_N; idx += num_threads) {
         int lr = idx / WMMA_TF32_OPT_BLOCK_N;
         int lc = idx % WMMA_TF32_OPT_BLOCK_N;
+        int gr = block_row_base + lr;
+        int gc = block_col_base + lc;
+        if (gr < DIM_M && gc < DIM_N) {
+            c[gr * DIM_N + gc] = c_tile[lr][lc];
+        }
+    }
+}
+"#;
+
+// ============================================================================
+// TF32 opt-staged（イシュー #500・GEMM 性能改善ツリー #479 → Phase B の
+// TF32 WMMA 経路への横展開）
+//
+// Phase B（#492〜#499・kernels_mma.rs）で f16 `mma.sync` 経路に確立した
+// cp.async 多段パイプライン（B-1/B-5）・fragment 先読みダブルバッファ
+// （B-4）を、上記 `WMMA_TF32_F32_OPT_BODY`（`__syncthreads()` ベースの
+// 2 面ダブルバッファ・cp.async 不使用）と独立に、WMMA C++ API
+// （`nvcuda::wmma`）の TF32 経路へ横展開したもの。
+//
+// `WMMA_TF32_F32_OPT_BODY` は削除・改変しない（整列非対応形状
+// 〈`gemm.rs::run_wmma_tf32` の 3 段選択で cp.async 16 バイト整列条件
+// 〈n%4==0 && k%4==0〉を満たさない形状〉のフォールバック先として温存する。
+// `docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 2 節「技法の選別」参照）。
+// ============================================================================
+
+/// TF32 opt-staged GEMM（イシュー #500）のブロックタイル一辺。既存 TF32
+/// opt（[`WMMA_TF32_OPT_BLOCK_M`]/[`WMMA_TF32_OPT_BLOCK_N`]）と同一値
+/// （64）を採用する。cp.async 多段化・fragment 先読みはブロックタイル
+/// 自体を変えない技法のため（`docs/perf/cuda-gemm-wmma-tf32-phase-b.md`
+/// 「B-3: タイル拡大」除外理由参照。SMEM 予算がステージ数増加分を
+/// 吸収できるのは 64×64 のままだからであり、拡大は別途エピローグ SMEM
+/// 再利用の設計が要る）。
+pub const WMMA_TF32_STAGED_BLOCK_M: u32 = 64;
+pub const WMMA_TF32_STAGED_BLOCK_N: u32 = 64;
+
+/// TF32 opt-staged GEMM の共有メモリ K タイル幅。既存 TF32 opt
+/// （[`WMMA_TF32_OPT_K_TILE`]）と同一値（16）。
+pub const WMMA_TF32_STAGED_K_TILE: u32 = 16;
+
+/// TF32 opt-staged GEMM の fragment M・N 一辺（`m16n16k8` の 16）。
+///
+/// [`WMMA_TF32_OPT_FRAG`] と同じ理由（コンパイル時 const アサーションの
+/// みからの参照）で rustc 1.88 系 dead-code 誤検知の対象になるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
+pub const WMMA_TF32_STAGED_FRAG: u32 = 16;
+
+/// TF32 opt-staged GEMM の fragment K 一辺（`m16n16k8` の 8）。
+#[allow(dead_code)]
+pub const WMMA_TF32_STAGED_FRAG_K: u32 = 8;
+
+/// TF32 opt-staged GEMM の warp タイル一辺（32。fragment 辺 16 の 2 倍 =
+/// レジスタブロッキング 2×2。既存 TF32 opt と同一構成）。
+#[allow(dead_code)]
+pub const WMMA_TF32_STAGED_WARP_TILE: u32 = 32;
+
+/// TF32 opt-staged GEMM 1 ブロックあたりのスレッド数（4 warp = 128
+/// スレッド。既存 TF32 opt と同一）。
+pub const WMMA_TF32_STAGED_THREADS: u32 = 128;
+
+/// `cp.async` multi-stage pipelining のステージ数（イシュー #500）。
+/// `kernels_mma.rs::MMA_STAGES` と同じ 3 段構成を採用する（B-1/B-5 の
+/// 横展開）。共有メモリ予算はステージ数増加に伴い増えるが、ブロック
+/// タイルを 64×64 に据え置くことで
+/// `crates/backend-cuda/src/kernels_mma.rs::MMA_STATIC_SMEM_LIMIT_BYTES`
+/// （48KiB）以内に収まる（`validate_wmma_tf32_staged_config` が実測検査
+/// する。`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 「SMEM 予算」節参照）。
+pub const WMMA_TF32_STAGED_STAGES: u32 = 3;
+
+// `kernels_mma.rs::MMA_STAGES` 定数直下コメント「正しさ」と同一の論証:
+// ループ内 `cp.async.wait_group (STAGES-2)` の即値が非負であるための
+// コンパイル時保証。
+const _: () = assert!(
+    WMMA_TF32_STAGED_STAGES >= 2,
+    "kernels_wmma_opt::WMMA_TF32_F32_STAGED の cp.async パイプラインは \
+     STAGES >= 2 を要求する（wait_group (STAGES-2) の即値が非負であることの \
+     コンパイル時保証。kernels_mma.rs::MMA_STAGES 定数直下コメント「正しさ」\
+     と同じ論証）"
+);
+
+/// A タイル（`as_tile[STAGES][BLOCK_M][A_PAD]`）の行幅（パディング後）。
+/// `K_TILE`（16）に 4 要素加算する（既存 TF32 opt の [`WMMA_TF32_OPT_A_PAD`]
+/// と同じ根拠）。cp.async の 16 バイト転送粒度は f32 4 要素のため、
+/// パディング幅も 4 要素の倍数である必要がある（下記 const アサーション）。
+#[allow(dead_code)]
+pub const WMMA_TF32_STAGED_A_PAD: u32 = WMMA_TF32_STAGED_K_TILE + 4;
+
+/// B タイル（`bs_tile[STAGES][K_TILE][B_PAD]`）の行幅（パディング後）。
+/// `BLOCK_N`（64）に 4 要素加算する。A パディングと同じ根拠。
+#[allow(dead_code)]
+pub const WMMA_TF32_STAGED_B_PAD: u32 = WMMA_TF32_STAGED_BLOCK_N + 4;
+
+const _: () = assert!(
+    WMMA_TF32_STAGED_A_PAD.is_multiple_of(4),
+    "cp.async 16 バイト転送は f32 4 要素粒度のため A_PAD は 4 要素の倍数が必要"
+);
+const _: () = assert!(
+    WMMA_TF32_STAGED_B_PAD.is_multiple_of(4),
+    "cp.async 16 バイト転送は f32 4 要素粒度のため B_PAD は 4 要素の倍数が必要"
+);
+
+/// [`WmmaTf32StagedKernelConfig`] で展開したソースを
+/// [`wmma_tf32_f32_staged_source`] が 1 回だけキャッシュして返す
+/// （[`wmma_tf32_f32_opt_source`] と同じ方針）。
+pub fn wmma_tf32_f32_staged_source() -> &'static str {
+    &WMMA_TF32_F32_STAGED_SOURCE
+}
+
+static WMMA_TF32_F32_STAGED_SOURCE: LazyLock<String> = LazyLock::new(|| {
+    render_wmma_tf32_staged_unchecked(&WmmaTf32StagedKernelConfig::default_tf32_staged())
+});
+
+/// [`render_wmma_tf32_staged`] に渡す構成値（イシュー #500）。
+///
+/// 既存 [`WmmaOptKernelConfig`]（TF32 opt・f16 opt 共通）へ `stages`
+/// フィールドを追加する代替案は採らず、staged 専用の独立した struct と
+/// した（実装計画 3.1 節。共有 struct へフィールドを追加すると、本ファイル
+/// 内の f16 opt・TF32 opt 双方の既存 `WmmaOptKernelConfig { .. }` リテラル
+/// 構築〈`default_tf32`/`default_f16`・各テストの部分構築〉が軒並み
+/// 影響を受けるため、影響範囲を本カーネルに閉じる）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct WmmaTf32StagedKernelConfig {
+    /// ブロックタイル M（warp タイル辺の倍数必須）。
+    pub block_m: u32,
+    /// ブロックタイル N（warp タイル辺の倍数必須）。
+    pub block_n: u32,
+    /// 共有メモリ K タイル幅。
+    pub k_tile: u32,
+    /// `cp.async` multi-stage pipelining のステージ数（`>= 2` 必須。
+    /// [`WMMA_TF32_STAGED_STAGES`] 直下コメント参照）。
+    pub stages: u32,
+    /// M 次元の焼き込み方式。
+    pub dim_m: DimSpec,
+    /// N 次元の焼き込み方式。
+    pub dim_n: DimSpec,
+    /// K 次元の焼き込み方式。
+    pub dim_k: DimSpec,
+}
+
+impl WmmaTf32StagedKernelConfig {
+    /// TF32 opt-staged カーネルの既定構成（Rust 側タイル定数と同一値。
+    /// 全次元 `Dynamic`）。
+    pub fn default_tf32_staged() -> Self {
+        Self {
+            block_m: WMMA_TF32_STAGED_BLOCK_M,
+            block_n: WMMA_TF32_STAGED_BLOCK_N,
+            k_tile: WMMA_TF32_STAGED_K_TILE,
+            stages: WMMA_TF32_STAGED_STAGES,
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Dynamic,
+            dim_k: DimSpec::Dynamic,
+        }
+    }
+
+    /// [`WmmaOptKernelConfig::validate_launch_shape`] と同じ設計。
+    #[allow(dead_code)] // 理由は WmmaOptKernelConfig::validate_launch_shape と同じ
+    pub fn validate_launch_shape(&self, m: u32, n: u32, k: u32) -> Result<(), CudaError> {
+        self.dim_m.matches_launch_dim(m)?;
+        self.dim_n.matches_launch_dim(n)?;
+        self.dim_k.matches_launch_dim(k)?;
+        Ok(())
+    }
+
+    /// [`WmmaOptKernelConfig::launch_config`] と同じ設計（`stages` は
+    /// grid/block 次元に影響しない。共有メモリは静的宣言のため
+    /// `shared_mem_bytes` は常に 0）。
+    #[allow(dead_code)] // 理由は WmmaOptKernelConfig::launch_config と同じ
+    pub fn launch_config(&self, m: u32, n: u32) -> LaunchConfig {
+        const WARP_TILE: u32 = 32;
+        const _: () = assert!(
+            WARP_TILE == WMMA_TF32_STAGED_WARP_TILE,
+            "WARP_TILE は WMMA_TF32_STAGED_WARP_TILE と一致している必要があります"
+        );
+        let warp_grid_m = self.block_m / WARP_TILE;
+        let warp_grid_n = self.block_n / WARP_TILE;
+        LaunchConfig {
+            grid_dim: (n.div_ceil(self.block_n), m.div_ceil(self.block_m), 1),
+            block_dim: (warp_grid_m * warp_grid_n * 32, 1, 1),
+            shared_mem_bytes: 0,
+        }
+    }
+}
+
+/// [`render_wmma_tf32_staged`] が返す、展開済み TF32 opt-staged カーネル
+/// ソースと展開元 [`WmmaTf32StagedKernelConfig`] を 1 個にまとめた
+/// descriptor（[`RenderedWmmaTf32OptKernel`] と同じ設計）。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RenderedWmmaTf32StagedKernel {
+    source: String,
+    cfg: WmmaTf32StagedKernelConfig,
+}
+
+impl RenderedWmmaTf32StagedKernel {
+    /// [`RenderedWmmaTf32OptKernel::compile`] と同じ設計。固定エント
+    /// リポイント `"gemm_wmma_tf32_staged"`。
+    #[allow(dead_code)]
+    pub fn compile(
+        &self,
+        device: &crate::device::CudaDevice,
+    ) -> Result<CompiledWmmaTf32StagedKernel, CudaError> {
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        let func = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_wmma_tf32_staged")?;
+        Ok(CompiledWmmaTf32StagedKernel {
+            func,
+            cfg: self.cfg,
+        })
+    }
+
+    #[cfg(test)]
+    fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// [`RenderedWmmaTf32StagedKernel::compile`] が返す、コンパイル済み
+/// `CudaFunction` と展開元 [`WmmaTf32StagedKernelConfig`] を不可分に
+/// 束ねた descriptor（[`CompiledWmmaTf32OptKernel`] と同じ設計）。
+#[allow(dead_code)]
+pub struct CompiledWmmaTf32StagedKernel {
+    func: cudarc::driver::CudaFunction,
+    cfg: WmmaTf32StagedKernelConfig,
+}
+
+impl CompiledWmmaTf32StagedKernel {
+    /// [`CompiledWmmaTf32OptKernel::launch_tf32`] と同じ検証手順・同じ
+    /// no-op early return 契約に加え、cp.async 16 バイト整列制約
+    /// （[`crate::gemm::wmma_tf32_staged_alignment_ok`]）を fail-closed で
+    /// 検証する。
+    ///
+    /// `gemm.rs::run_wmma_tf32`（3 段フォールバックの経路選択）は同じ
+    /// 判定関数を呼んで整列 NG の形状を staged 経路へそもそも渡さない
+    /// ため通常はここで拒否されることはないが、本メソッドは
+    /// `pub`（crate 内から直接到達可能）であり、将来の呼び出し元が
+    /// 経路選択のフォールバックを経由せずに直接呼ぶ可能性がある。
+    /// `gemm_mma.rs::CudaMmaGemm::launch`（`validate_mma_alignment` を
+    /// 唯一のゲートとして起動前に必ず経由させる設計）と同じ
+    /// 「起動 API 自体が fail-closed である」契約に揃えるため、経路選択
+    /// 側の判定に依存せずここでも検証する（Bugbot 指摘 PR #678 review
+    /// id 4945411529）。満たさない場合、cp.async の 16 バイト転送粒度が
+    /// 要求するグローバル側整列を欠いたままカーネルを起動し、フォールト
+    /// または silent corruption を招きうる。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_tf32_staged(
+        &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        if !crate::gemm::wmma_tf32_staged_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma tf32 staged path requires n % 4 == 0 && k % 4 == 0 (cp.async \
+                     16-byte transfer granularity; gemm.rs::wmma_tf32_staged_alignment_ok \
+                     doc comment), but got n={n}, k={k}"
+                ),
+            });
+        }
+        self.validate_grid_bounds(m)?;
+        self.validate_k_tile_bound(k)?;
+
+        let launch_config = self.cfg.launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: CompiledWmmaTf32OptKernel::launch_tf32 と同一の根拠。
+        // カーネル引数は上記で検証済みの m/n/k から導出しており、opt-staged
+        // カーネル内の手動境界チェック（guarded load・エピローグ store の
+        // ガード付きコピー。REQ-8）と合わせて OOB 読み書きが起きない根拠
+        // とする。`self.func` は本型のコンストラクタである
+        // `RenderedWmmaTf32StagedKernel::compile` が
+        // `"gemm_wmma_tf32_staged"` 固定名でロードしたものであり、f32
+        // 引数と TF32 カーネルシグネチャの対応は型で保証される。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
+
+    /// [`CompiledWmmaTf32OptKernel`] の同名メソッドと同じ理由。
+    fn validate_grid_bounds(&self, m: u32) -> Result<(), CudaError> {
+        const MAX_GRID_DIM_Y: u32 = 65_535;
+        let grid_y = m.div_ceil(self.cfg.block_m);
+        if grid_y > MAX_GRID_DIM_Y {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma staged path grid_dim.y (m.div_ceil(block_m)={grid_y}) exceeds CUDA's \
+                     {MAX_GRID_DIM_Y} limit for grid dimensions y/z (block_m={}); m={m} is \
+                     too large",
+                    self.cfg.block_m
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// [`CompiledWmmaTf32OptKernel::validate_k_tile_bound`] と同じ理由。
+    /// [`validate_wmma_opt_k_tile_bound`] は `k_tile` を引数に取る汎用実装
+    /// のため、TF32 opt・opt-staged の双方から共有できる。
+    fn validate_k_tile_bound(&self, k: u32) -> Result<(), CudaError> {
+        validate_wmma_opt_k_tile_bound(k, self.cfg.k_tile)
+    }
+}
+
+/// [`WmmaTf32StagedKernelConfig`] を TF32 opt-staged カーネル向けに
+/// fail-closed 検証する（[`validate_wmma_tf32_opt_config`] と同じ方針。
+/// 追加で `stages`・cp.async 4 要素整列制約を検査する）。
+fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+    let warp_tile = WMMA_TF32_STAGED_WARP_TILE;
+    let frag_k = WMMA_TF32_STAGED_FRAG_K;
+
+    if cfg.block_m == 0 || cfg.block_n == 0 || cfg.k_tile == 0 {
+        return Err(invalid(
+            "block_m/block_n/k_tile must all be non-zero".to_string(),
+        ));
+    }
+    // `cp.async.wait_group (STAGES-2)` の即値が非負であるための前提
+    // （[`WMMA_TF32_STAGED_STAGES`] 直下コメント参照）。
+    if cfg.stages < 2 {
+        return Err(invalid(format!(
+            "stages ({}) must be >= 2 (cp.async wait_group (STAGES-2) immediate must be \
+             non-negative; kernels_mma.rs::MMA_STAGES 定数直下コメント「正しさ」と同じ論証)",
+            cfg.stages
+        )));
+    }
+    // `stages` の上限は SMEM 予算だけでは決まらない（codex-review 指摘:
+    // block_m/block_n/k_tile を小さくした構成では SMEM 予算内のまま stages
+    // を際限なく大きく取れてしまう）ため、別枠の上限検査が必要である。
+    //
+    // PR #678 Bugbot 指摘（Medium）: 当初の実装は「`cp.async.wait_group N`
+    // の N は PTX 上 0〜7 の即値レンジに制限される」という誤った ISA 上限
+    // を根拠に `stages <= 9` を要求していたが、この主張は誤りだった
+    // （LLVM NVPTX は `wait_group 8`／`16` 相当の即値も発行・検査しており、
+    // ISA 側に 0〜7 という固定上限は存在しない）。本リポ自身も同じ
+    // `wait_group (STAGES-2)` 段数一般形を使う `derive_pipeline_stages`
+    // （`nvrtc.rs`）で [`MAX_PIPELINE_STAGES`]（16）を段数の有効上限として
+    // 扱っており、7 という値はこの既存の合意と矛盾していた。誤った制約で
+    // SMEM に収まる正当な構成を fail-close 側で弾いてしまっていたため、
+    // 上限を [`MAX_PIPELINE_STAGES`] に統一する（レジスタ圧・命令数増加に
+    // 見合わない段数を弾くという本来の目的は維持しつつ、ISA 上の誤った
+    // 根拠を取り除く）。
+    if cfg.stages > MAX_PIPELINE_STAGES {
+        return Err(invalid(format!(
+            "stages ({}) exceeds MAX_PIPELINE_STAGES ({MAX_PIPELINE_STAGES}); this upper bound \
+             matches derive_pipeline_stages (nvrtc.rs) so that this staged kernel's stage-count \
+             ceiling stays consistent with the rest of the crate",
+            cfg.stages
+        )));
+    }
+    if !cfg.block_m.is_multiple_of(warp_tile) || !cfg.block_n.is_multiple_of(warp_tile) {
+        return Err(invalid(format!(
+            "block_m ({}) and block_n ({}) must both be multiples of WARP_TILE ({warp_tile})",
+            cfg.block_m, cfg.block_n
+        )));
+    }
+    if !cfg.k_tile.is_multiple_of(frag_k) {
+        return Err(invalid(format!(
+            "k_tile ({}) must be a multiple of FRAG_K ({frag_k})",
+            cfg.k_tile
+        )));
+    }
+    // cp.async の 16 バイト転送粒度は f32 4 要素であるため、協調ロード
+    // マクロ（`LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP`）のチャンク分割式
+    // `(BLOCK_M * K_TILE) / 4`／`(K_TILE * BLOCK_N) / 4` が割り切れる必要が
+    // ある（[`WMMA_TF32_STAGED_A_PAD`]/[`WMMA_TF32_STAGED_B_PAD`] の const
+    // アサーションと同じ根拠を可変 config でも検査する）。
+    if !cfg.block_m.is_multiple_of(4)
+        || !cfg.block_n.is_multiple_of(4)
+        || !cfg.k_tile.is_multiple_of(4)
+    {
+        return Err(invalid(format!(
+            "block_m ({}), block_n ({}), k_tile ({}) must all be multiples of 4 (cp.async \
+             16-byte transfer granularity for f32 elements)",
+            cfg.block_m, cfg.block_n, cfg.k_tile
+        )));
+    }
+
+    let warp_grid_m = cfg.block_m / warp_tile;
+    let warp_grid_n = cfg.block_n / warp_tile;
+    let threads = warp_grid_m
+        .checked_mul(warp_grid_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| invalid("block thread count overflow".to_string()))?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "block thread count {threads} exceeds CUDA's per-block limit (1024)"
+        )));
+    }
+
+    let a_pad = cfg
+        .k_tile
+        .checked_add(4)
+        .ok_or_else(|| invalid("a_pad (k_tile + 4) overflow".to_string()))?;
+    let b_pad = cfg
+        .block_n
+        .checked_add(4)
+        .ok_or_else(|| invalid("b_pad (block_n + 4) overflow".to_string()))?;
+
+    // ステージ数分の as_tile/bs_tile 多段バッファ + エピローグ c_tile の
+    // 静的共有メモリ合計（`docs/perf/cuda-gemm-wmma-tf32-phase-b.md`
+    // 「SMEM 予算」節の試算式と同一）。
+    let stage_bytes_a = cfg
+        .stages
+        .checked_mul(cfg.block_m)
+        .and_then(|v| v.checked_mul(a_pad))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| invalid("A stage shared memory byte count overflow".to_string()))?;
+    let stage_bytes_b = cfg
+        .stages
+        .checked_mul(cfg.k_tile)
+        .and_then(|v| v.checked_mul(b_pad))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| invalid("B stage shared memory byte count overflow".to_string()))?;
+    let c_tile_bytes = cfg
+        .block_m
+        .checked_mul(cfg.block_n)
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| invalid("c_tile shared memory byte count overflow".to_string()))?;
+    let smem_bytes = stage_bytes_a
+        .checked_add(stage_bytes_b)
+        .and_then(|v| v.checked_add(c_tile_bytes))
+        .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
+    if smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES {
+        return Err(invalid(format!(
+            "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit \
+             (stages={}, block_m={}, block_n={}, k_tile={})",
+            cfg.stages, cfg.block_m, cfg.block_n, cfg.k_tile
+        )));
+    }
+
+    for (name, spec) in [
+        ("dim_m", cfg.dim_m),
+        ("dim_n", cfg.dim_n),
+        ("dim_k", cfg.dim_k),
+    ] {
+        if let DimSpec::Static(0) = spec {
+            return Err(invalid(format!(
+                "{name} static value must not be zero (degenerate dimension)"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn render_wmma_tf32_staged_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String {
+    let warp_grid_n = cfg.block_n / WMMA_TF32_STAGED_WARP_TILE;
+    let threads = (cfg.block_m / WMMA_TF32_STAGED_WARP_TILE) * warp_grid_n * 32;
+    let a_pad = cfg.k_tile + 4;
+    let b_pad = cfg.block_n + 4;
+    let k_substeps = cfg.k_tile / WMMA_TF32_STAGED_FRAG_K;
+    let dim_m_define = render_dim_define("DIM_M", "m", cfg.dim_m);
+    let dim_n_define = render_dim_define("DIM_N", "n", cfg.dim_n);
+    let dim_k_define = render_dim_define("DIM_K", "k", cfg.dim_k);
+
+    format!(
+        "\n#include <mma.h>\n\n\
+         using namespace nvcuda;\n\n\
+         #define WMMA_TF32_STAGED_BLOCK_M {block_m}\n\
+         #define WMMA_TF32_STAGED_BLOCK_N {block_n}\n\
+         #define WMMA_TF32_STAGED_K_TILE {k_tile}\n\
+         #define WMMA_TF32_STAGED_FRAG {frag}\n\
+         #define WMMA_TF32_STAGED_FRAG_K {frag_k}\n\
+         #define WMMA_TF32_STAGED_WARP_TILE {warp_tile}\n\
+         #define WMMA_TF32_STAGED_THREADS {threads}\n\
+         #define WMMA_TF32_STAGED_A_PAD {a_pad}\n\
+         #define WMMA_TF32_STAGED_B_PAD {b_pad}\n\
+         #define WMMA_TF32_STAGED_FRAG_ROWS 2\n\
+         #define WMMA_TF32_STAGED_FRAG_COLS 2\n\
+         #define WMMA_TF32_STAGED_K_SUBSTEPS {k_substeps}\n\
+         #define WMMA_TF32_STAGED_WARP_GRID_N {warp_grid_n}\n\
+         #define WMMA_TF32_STAGED_STAGES {stages}\n\
+         {dim_m_define}\n\
+         {dim_n_define}\n\
+         {dim_k_define}\n\
+         \n{WMMA_TF32_F32_STAGED_BODY}",
+        block_m = cfg.block_m,
+        block_n = cfg.block_n,
+        k_tile = cfg.k_tile,
+        frag = WMMA_TF32_STAGED_FRAG,
+        frag_k = WMMA_TF32_STAGED_FRAG_K,
+        warp_tile = WMMA_TF32_STAGED_WARP_TILE,
+        stages = cfg.stages,
+    )
+}
+
+/// [`WmmaTf32StagedKernelConfig`] を TF32 opt-staged カーネルソースへ展開
+/// する（イシュー #500。[`render_wmma_tf32_opt`] と同じ設計）。展開前に
+/// [`validate_wmma_tf32_staged_config`] で SMEM 予算・倍数関係・スレッド数
+/// 上限を fail-closed 検査する。
+#[allow(dead_code)]
+pub fn render_wmma_tf32_staged(
+    cfg: &WmmaTf32StagedKernelConfig,
+) -> Result<RenderedWmmaTf32StagedKernel, CudaError> {
+    validate_wmma_tf32_staged_config(cfg)?;
+    Ok(RenderedWmmaTf32StagedKernel {
+        source: render_wmma_tf32_staged_unchecked(cfg),
+        cfg: *cfg,
+    })
+}
+
+/// [`render_wmma_tf32_staged_unchecked`]／[`wmma_tf32_f32_staged_source`]
+/// が結合するカーネル本体テンプレート。
+///
+/// `kernels_mma.rs::MMA_F16_BODY`（cp.async 3 ステージ・issue
+/// interleaving・ldmatrix 先読みダブルバッファ）の構造を、WMMA C++ API
+/// （`nvcuda::wmma`）の TF32 経路へそのまま移植したもの。差分は
+/// (1) グローバル→共有メモリのロード粒度が f16 8 要素/16B ではなく f32
+/// 4 要素/16B である点、(2) `ldmatrix` の代わりに `wmma::load_matrix_sync`
+/// を使い、ロード直後に `wmma::__float_to_tf32` による明示変換を適用する
+/// 点（既存 `WMMA_TF32_F32_OPT_BODY` と同一の数値契約。2 面バッファの
+/// どちらの呼び出しからもこの変換を経由するため、先読みバッファに変換
+/// 漏れが生じない）のみで、cp.async 段数管理・commit/wait 配置・issue
+/// interleaving の骨格は f16 版と同一の t/stage 添字算術を使う（正しさの
+/// 論証も同一。本ファイル [`WMMA_TF32_STAGED_STAGES`] 定数直下コメント
+/// 参照）。
+///
+/// **`_Pragma` 不使用の方針**: `kernels_mma.rs::MMA_F16_BODY` 冒頭
+/// ドキュメンテーションコメント「マクロを『1 フラグメント単位』に留め」
+/// と同じ理由（本ファイルは NVRTC 構文検証不能環境で書いており、
+/// `_Pragma` 演算子は本ファイル・`kernels_mma.rs` のいずれにも前例がなく
+/// NVRTC 上での挙動を実機なしで確認できない）で、fragment ロード＋TF32
+/// 変換マクロ（`LDWM_A_FRAG`/`LDWM_B_FRAG`）内では `#pragma unroll` を
+/// 使わない（`num_elements` 反復のみの小ループを展開しないだけで、正しさ
+/// には影響しない）。`#pragma unroll` は既存 `WMMA_TF32_F32_OPT_BODY` と
+/// 同じく、プリプロセッサ済みの実際の文出現位置（マクロ呼び出し側の
+/// `fi`/`fj`/`ks` ループ）にのみ置く。
+const WMMA_TF32_F32_STAGED_BODY: &str = r#"
+// イシュー #500: グローバル→共有メモリの 16 バイト単位（f32 4 要素）
+// 非同期コピー。src_size==16 で実データをコピーし、src_size==0 で共有
+// メモリ側をゼロ充填する（REQ-8 境界検査。kernels_mma.rs::mma_cp_async16
+// と同じ契約・同じ PTX 命令。関数名は同一 NVRTC コンパイル単位内での
+// 衝突を避けるため本カーネル専用の接頭辞を付す）。
+__device__ __forceinline__ void wmma_tf32_staged_cp_async16(void* smem_ptr, const void* gmem_ptr, int src_size)
+{
+    unsigned smem_addr = (unsigned)__cvta_generic_to_shared(smem_ptr);
+    asm volatile(
+        "cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+        :
+        : "r"(smem_addr), "l"(gmem_ptr), "r"(src_size)
+    );
+}
+
+extern "C" __global__ void gemm_wmma_tf32_staged(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k)
+{
+    // __align__(16): cp.async の 16 バイト転送先整列要件（本ファイル冒頭
+    // ドキュメントコメント「アライメント」・kernels_mma.rs 冒頭コメント
+    // 「整列制約」と同じ根拠）。A_PAD/B_PAD が 4 要素（16 バイト）の倍数
+    // のため各行の先頭は常に整列する。
+    __shared__ __align__(16) float as_tile[WMMA_TF32_STAGED_STAGES][WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD];
+    __shared__ __align__(16) float bs_tile[WMMA_TF32_STAGED_STAGES][WMMA_TF32_STAGED_K_TILE][WMMA_TF32_STAGED_B_PAD];
+
+    const int tid = threadIdx.x;
+    const int num_threads = blockDim.x;
+    const int warp_id = tid / 32;
+    const int warp_row = warp_id / WMMA_TF32_STAGED_WARP_GRID_N;
+    const int warp_col = warp_id % WMMA_TF32_STAGED_WARP_GRID_N;
+
+    const int block_row_base = blockIdx.y * WMMA_TF32_STAGED_BLOCK_M;
+    const int block_col_base = blockIdx.x * WMMA_TF32_STAGED_BLOCK_N;
+    const int warp_row_base = warp_row * WMMA_TF32_STAGED_WARP_TILE;
+    const int warp_col_base = warp_col * WMMA_TF32_STAGED_WARP_TILE;
+
+    // レジスタブロッキング（B-2、適用済み）: warp あたり 2x2 = 4 個の
+    // accumulator fragment。既存 TF32 opt と同一構成。
+    wmma::fragment<wmma::accumulator, WMMA_TF32_STAGED_FRAG, WMMA_TF32_STAGED_FRAG,
+                   WMMA_TF32_STAGED_FRAG_K, float> c_frag[WMMA_TF32_STAGED_FRAG_ROWS][WMMA_TF32_STAGED_FRAG_COLS];
+#pragma unroll
+    for (int fi = 0; fi < WMMA_TF32_STAGED_FRAG_ROWS; ++fi) {
+#pragma unroll
+        for (int fj = 0; fj < WMMA_TF32_STAGED_FRAG_COLS; ++fj) {
+            wmma::fill_fragment(c_frag[fi][fj], 0.0f);
+        }
+    }
+
+    // 桁溢れしない num_k_tiles 計算（既存 TF32 opt と同一式）。
+    int num_k_tiles = (DIM_K > 0) ? (DIM_K - 1) / WMMA_TF32_STAGED_K_TILE + 1 : 0;
+
+    // イシュー #500: cp.async 発行を K サブステップへ分散するための添字
+    // 空間分割（kernels_mma.rs::MMA_F16_BODY「#496」節と同じ設計。
+    // K_GROUPS は下記 ks ループの反復回数（WMMA_TF32_STAGED_K_SUBSTEPS）と
+    // 必ず一致する）。
+    #define K_GROUPS (WMMA_TF32_STAGED_K_TILE / WMMA_TF32_STAGED_FRAG_K)
+    #define A_CHUNKS ((WMMA_TF32_STAGED_BLOCK_M * WMMA_TF32_STAGED_K_TILE) / 4)
+    #define B_CHUNKS ((WMMA_TF32_STAGED_K_TILE * WMMA_TF32_STAGED_BLOCK_N) / 4)
+    #define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+    #define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+
+    // REQ-8: A/B タイルを stage へ非同期ロードするマクロ。gr_c/gc_c は
+    // 境界外チャンクでも 16 バイト整列を保ったままクランプする
+    // （kernels_mma.rs::MMA_F16_BODY「#496」節直上コメント「REQ-8 追補」と
+    // 同じ理由・同じ式。列方向は 4 要素境界〈f32 4 要素 = 16 バイト〉に
+    // 切り下げる点のみ f16 版〈8 要素境界〉と異なる。行ストライド
+    // （A は k・B は n）が 4 の倍数であることは `gemm.rs` 側の起動前
+    // 整列検証〈cp.async 16 バイト整列条件〉が保証する）。
+    #define LOAD_A_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * A_GROUP_CHUNKS + tid; \
+             idx < A_CHUNKS && idx < ((g) + 1) * A_GROUP_CHUNKS; \
+             idx += num_threads) { \
+            int row = idx / (WMMA_TF32_STAGED_K_TILE / 4); \
+            int col0 = (idx % (WMMA_TF32_STAGED_K_TILE / 4)) * 4; \
+            int gr = block_row_base + row; \
+            int gc = (k0) + col0; \
+            int gr_c = gr < DIM_M ? gr : (DIM_M > 0 ? DIM_M - 1 : 0); \
+            int gc_c = gc < DIM_K ? gc : (DIM_K > 0 ? ((DIM_K - 1) / 4) * 4 : 0); \
+            int valid = (gr < DIM_M && gc < DIM_K) ? 16 : 0; \
+            wmma_tf32_staged_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * DIM_K + gc_c], valid); \
+        }
+
+    #define LOAD_B_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * B_GROUP_CHUNKS + tid; \
+             idx < B_CHUNKS && idx < ((g) + 1) * B_GROUP_CHUNKS; \
+             idx += num_threads) { \
+            int row = idx / (WMMA_TF32_STAGED_BLOCK_N / 4); \
+            int col0 = (idx % (WMMA_TF32_STAGED_BLOCK_N / 4)) * 4; \
+            int gr = (k0) + row; \
+            int gc = block_col_base + col0; \
+            int gr_c = gr < DIM_K ? gr : (DIM_K > 0 ? DIM_K - 1 : 0); \
+            int gc_c = gc < DIM_N ? gc : (DIM_N > 0 ? ((DIM_N - 1) / 4) * 4 : 0); \
+            int valid = (gr < DIM_K && gc < DIM_N) ? 16 : 0; \
+            wmma_tf32_staged_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * DIM_N + gc_c], valid); \
+        }
+
+    // プロローグ（下記）は K タイル 1 段分をまとめてロードする必要が
+    // あるため、上記 2 マクロを全グループについて呼ぶ薄いラッパーとして
+    // 再定義する（kernels_mma.rs::MMA_F16_BODY「#496」節と同じ設計）。
+    #define LOAD_A_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_A_STAGE_GROUP(stage, k0, g_); \
+        }
+
+    #define LOAD_B_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_B_STAGE_GROUP(stage, k0, g_); \
+        }
+
+    // プロローグ: 最初の STAGES-1 タイルをロードし、それぞれ独立した
+    // cp.async グループとして commit する（kernels_mma.rs::MMA_F16_BODY
+    // プロローグと同一の「1 イテレーション = 必ず 1 commit」不変条件。
+    // #492 の論証をそのまま踏襲する）。
+    for (int s = 0; s < WMMA_TF32_STAGED_STAGES - 1; ++s) {
+        if (s < num_k_tiles) {
+            LOAD_A_STAGE(s, s * WMMA_TF32_STAGED_K_TILE);
+            LOAD_B_STAGE(s, s * WMMA_TF32_STAGED_K_TILE);
+        }
+        asm volatile("cp.async.commit_group;\n");
+    }
+
+    for (int t = 0; t < num_k_tiles; ++t) {
+        int compute_stage = t % WMMA_TF32_STAGED_STAGES;
+        int next_tile = t + WMMA_TF32_STAGED_STAGES - 1;
+        int load_stage = next_tile % WMMA_TF32_STAGED_STAGES;
+
+        // kernels_mma.rs::MMA_F16_BODY「#492」節と同一の段数一般形固定
+        // 即値（`STAGES - 2`）・同一の正しさ論証（本ファイル
+        // WMMA_TF32_STAGED_STAGES 定数直下コメント参照）。
+        // 正しさ: プロローグの無条件 commit により、イテレーション t の
+        // 時点での commit 総数は常に `(STAGES-1) + t`。`wait_group
+        // (STAGES-2)` は未完了グループ数 <= STAGES-2 を保証するため、
+        // 完了数 >= t+1、すなわちタイル t のグループの完了が全 t で
+        // 保証される。
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(WMMA_TF32_STAGED_STAGES - 2));
+        __syncthreads();
+
+        // fragment 2 面バッファ（cur/nxt）。kernels_mma.rs::MMA_F16_BODY
+        // 「#495」節と同じ「タイル内限定・クロスタイル先読みは不採用」
+        // 設計（理由も同一: ループ内 wait_group はタイル t 自身のグループ
+        // 完了しか保証しないため、タイル境界を跨ぐ先読みは wait/sync
+        // 配置の大規模再構成を要し、NVRTC 構文検証不能な本環境ではリスク
+        // が高い）。
+        wmma::fragment<wmma::matrix_a, WMMA_TF32_STAGED_FRAG, WMMA_TF32_STAGED_FRAG,
+                       WMMA_TF32_STAGED_FRAG_K, wmma::precision::tf32, wmma::row_major>
+            a_frag[2][WMMA_TF32_STAGED_FRAG_ROWS];
+        wmma::fragment<wmma::matrix_b, WMMA_TF32_STAGED_FRAG, WMMA_TF32_STAGED_FRAG,
+                       WMMA_TF32_STAGED_FRAG_K, wmma::precision::tf32, wmma::row_major>
+            b_frag[2][WMMA_TF32_STAGED_FRAG_COLS];
+
+        // フラグメント 1 個を buf 面へロードし、TF32 明示変換を直後に
+        // 適用するマクロ（既存 `WMMA_TF32_F32_OPT_BODY` と同一の数値
+        // 契約。2 面バッファのどちらの呼び出しからもこのマクロを経由する
+        // ため、先読みバッファに変換漏れが生じない）。`_Pragma` 不使用の
+        // 方針は本ファイルこのテンプレート冒頭ドキュメンテーション
+        // コメント参照（呼び出し側で `#pragma unroll` を付す）。
+        #define LDWM_A_FRAG(buf, stage, kstep, fi) \
+            do { \
+                wmma::load_matrix_sync( \
+                    a_frag[buf][fi], \
+                    &as_tile[stage][warp_row_base + (fi) * WMMA_TF32_STAGED_FRAG][(kstep) * WMMA_TF32_STAGED_FRAG_K], \
+                    WMMA_TF32_STAGED_A_PAD); \
+                for (int e = 0; e < a_frag[buf][fi].num_elements; ++e) { \
+                    a_frag[buf][fi].x[e] = wmma::__float_to_tf32(a_frag[buf][fi].x[e]); \
+                } \
+            } while (0)
+
+        #define LDWM_B_FRAG(buf, stage, kstep, fj) \
+            do { \
+                wmma::load_matrix_sync( \
+                    b_frag[buf][fj], \
+                    &bs_tile[stage][(kstep) * WMMA_TF32_STAGED_FRAG_K][warp_col_base + (fj) * WMMA_TF32_STAGED_FRAG], \
+                    WMMA_TF32_STAGED_B_PAD); \
+                for (int e = 0; e < b_frag[buf][fj].num_elements; ++e) { \
+                    b_frag[buf][fj].x[e] = wmma::__float_to_tf32(b_frag[buf][fj].x[e]); \
+                } \
+            } while (0)
+
+        // warp プロローグ: kstep=0 のフラグメントをバッファ 0 へロードして
+        // から ks ループへ入る（kernels_mma.rs #495 warp プロローグと同型）。
+#pragma unroll
+        for (int fi = 0; fi < WMMA_TF32_STAGED_FRAG_ROWS; ++fi) {
+            LDWM_A_FRAG(0, compute_stage, 0, fi);
+        }
+#pragma unroll
+        for (int fj = 0; fj < WMMA_TF32_STAGED_FRAG_COLS; ++fj) {
+            LDWM_B_FRAG(0, compute_stage, 0, fj);
+        }
+
+        // K_SUBSTEPS は `#define` 由来のコンパイル時定数式のためトリップ
+        // 回数は既知であり、`#pragma unroll` により cur/nxt がコンパイル
+        // 時定数へ畳み込まれる（kernels_mma.rs #495 kstep ループと同じ
+        // 必須の pragma。cosmetic ではない）。
+#pragma unroll
+        for (int ks = 0; ks < WMMA_TF32_STAGED_K_SUBSTEPS; ++ks) {
+            int cur = ks % 2;
+            int nxt = (ks + 1) % 2;
+
+            // 次段（ks+1）のフラグメントを、現在段（ks）の mma_sync 発行前
+            // に先読みしてバッファ nxt へロードする（kernels_mma.rs #495
+            // と同じソフトウェアパイプライン化）。
+            if (ks + 1 < WMMA_TF32_STAGED_K_SUBSTEPS) {
+#pragma unroll
+                for (int fi = 0; fi < WMMA_TF32_STAGED_FRAG_ROWS; ++fi) {
+                    LDWM_A_FRAG(nxt, compute_stage, ks + 1, fi);
+                }
+#pragma unroll
+                for (int fj = 0; fj < WMMA_TF32_STAGED_FRAG_COLS; ++fj) {
+                    LDWM_B_FRAG(nxt, compute_stage, ks + 1, fj);
+                }
+            }
+
+            // イシュー #500: cp.async issue interleaving
+            // （kernels_mma.rs「#496」節と同旨）。K_GROUPS ==
+            // K_SUBSTEPS のため全グループが ks ループで過不足なく発行
+            // される。同期の正しさ論証も #496 節と同一（発行先
+            // load_stage は本イテレーションの ldmatrix 相当
+            // 〈load_matrix_sync〉から一切読まれない。load_stage !=
+            // compute_stage は STAGES>=2 で常に成立）。
+            if (next_tile < num_k_tiles) {
+                LOAD_A_STAGE_GROUP(load_stage, next_tile * WMMA_TF32_STAGED_K_TILE, ks);
+                LOAD_B_STAGE_GROUP(load_stage, next_tile * WMMA_TF32_STAGED_K_TILE, ks);
+            }
+
+#pragma unroll
+            for (int fi = 0; fi < WMMA_TF32_STAGED_FRAG_ROWS; ++fi) {
+#pragma unroll
+                for (int fj = 0; fj < WMMA_TF32_STAGED_FRAG_COLS; ++fj) {
+                    wmma::mma_sync(c_frag[fi][fj], a_frag[cur][fi], b_frag[cur][fj], c_frag[fi][fj]);
+                }
+            }
+        }
+
+        #undef LDWM_A_FRAG
+        #undef LDWM_B_FRAG
+
+        // #492/#496 と同じ「1 イテレーション = 必ず 1 commit」不変条件。
+        asm volatile("cp.async.commit_group;\n");
+        __syncthreads();
+    }
+
+    // #492 節と同じループ外 drain。ループ内固定即値 wait は最終タイル
+    // 直前までしか保証しないため、抜けた直後に残存グループを
+    // `wait_group 0` で掃き出してから読み出す。
+    asm volatile("cp.async.wait_group 0;\n");
+    __syncthreads();
+
+    #undef LOAD_A_STAGE
+    #undef LOAD_B_STAGE
+    #undef LOAD_A_STAGE_GROUP
+    #undef LOAD_B_STAGE_GROUP
+    #undef A_GROUP_CHUNKS
+    #undef B_GROUP_CHUNKS
+    #undef A_CHUNKS
+    #undef B_CHUNKS
+    #undef K_GROUPS
+
+    // REQ-8: エピローグ store のガード条件。既存 TF32 opt
+    // （WMMA_TF32_F32_OPT_BODY）エピローグと同一の guarded store 方式。
+    __shared__ __align__(32) float c_tile[WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_BLOCK_N];
+#pragma unroll
+    for (int fi = 0; fi < WMMA_TF32_STAGED_FRAG_ROWS; ++fi) {
+#pragma unroll
+        for (int fj = 0; fj < WMMA_TF32_STAGED_FRAG_COLS; ++fj) {
+            wmma::store_matrix_sync(
+                &c_tile[warp_row_base + fi * WMMA_TF32_STAGED_FRAG][warp_col_base + fj * WMMA_TF32_STAGED_FRAG],
+                c_frag[fi][fj], WMMA_TF32_STAGED_BLOCK_N, wmma::mem_row_major);
+        }
+    }
+    __syncthreads();
+
+    for (int idx = tid; idx < WMMA_TF32_STAGED_BLOCK_M * WMMA_TF32_STAGED_BLOCK_N; idx += num_threads) {
+        int lr = idx / WMMA_TF32_STAGED_BLOCK_N;
+        int lc = idx % WMMA_TF32_STAGED_BLOCK_N;
         int gr = block_row_base + lr;
         int gc = block_col_base + lc;
         if (gr < DIM_M && gc < DIM_N) {
@@ -1904,6 +2744,12 @@ mod tests {
         // フラグメント（`WMMA_F16_OPT_K_TILE == WMMA_F16_OPT_FRAG`）の
         // ため出現の有無のみを確認する。
         let tf32_min_mma_count = (WMMA_TF32_OPT_K_TILE / WMMA_TF32_OPT_FRAG_K) as usize;
+        // イシュー #500: TF32 opt-staged は K_SUBSTEPS（既定 16/8=2）回の
+        // `wmma::mma_sync` に加え、cp.async 命令（`cp.async.cg.shared.global`）
+        // が PTX へ実際に出現することも確認する（NVRTC が cp.async を
+        // 未対応アーキテクチャ向けに黙って別命令へ差し替えていないことの
+        // 実機的傍証。`kernels_mma.rs` の同種テストと同方針）。
+        let staged_min_mma_count = (WMMA_TF32_STAGED_K_TILE / WMMA_TF32_STAGED_FRAG_K) as usize;
         for (src, min_mma_count) in [
             (wmma_tf32_f32_opt_source(), tf32_min_mma_count),
             (wmma_f16_opt_source(), 1),
@@ -1920,6 +2766,25 @@ mod tests {
                  （コンパイル時展開の証跡が見つかりません）"
             );
         }
+
+        let staged_ptx = match compile_ptx(wmma_tf32_f32_staged_source(), arch) {
+            Ok(ptx) => ptx,
+            Err(CudaError::NvrtcUnavailable { .. }) => return,
+            Err(e) => {
+                panic!("TF32 opt-staged カーネルソースの NVRTC コンパイルに失敗しました: {e}")
+            }
+        };
+        let staged_src = staged_ptx.to_src();
+        let staged_mma_count = staged_src.matches("wmma.mma.sync").count();
+        assert!(
+            staged_mma_count >= staged_min_mma_count,
+            "TF32 opt-staged PTX の wmma.mma.sync 出現数（{staged_mma_count}）が下限 \
+             （{staged_min_mma_count}）未満です"
+        );
+        assert!(
+            staged_src.contains("cp.async"),
+            "TF32 opt-staged PTX に cp.async 系命令が見つかりません"
+        );
     }
 
     /// [`validate_wmma_opt_k_tile_bound`] が通常サイズの `k`/`k_tile`
@@ -1961,5 +2826,336 @@ mod tests {
     #[test]
     fn validate_wmma_opt_k_tile_bound_accepts_zero_k_regardless_of_tile() {
         assert!(validate_wmma_opt_k_tile_bound(0, u32::MAX).is_ok());
+    }
+
+    // ========================================================================
+    // TF32 opt-staged（イシュー #500）
+    // ========================================================================
+
+    /// `WMMA_TF32_STAGED_*`（Rust 側の「唯一の真実源」）が既定構成の生成
+    /// ソース内 `#define` と食い違わないことを検査する
+    /// （`wmma_tf32_opt_constants_match_kernel_source_defines` と同方式）。
+    #[test]
+    fn wmma_tf32_staged_constants_match_kernel_source_defines() {
+        let src = wmma_tf32_f32_staged_source();
+        let checks = [
+            ("WMMA_TF32_STAGED_BLOCK_M", WMMA_TF32_STAGED_BLOCK_M),
+            ("WMMA_TF32_STAGED_BLOCK_N", WMMA_TF32_STAGED_BLOCK_N),
+            ("WMMA_TF32_STAGED_K_TILE", WMMA_TF32_STAGED_K_TILE),
+            ("WMMA_TF32_STAGED_FRAG", WMMA_TF32_STAGED_FRAG),
+            ("WMMA_TF32_STAGED_FRAG_K", WMMA_TF32_STAGED_FRAG_K),
+            ("WMMA_TF32_STAGED_WARP_TILE", WMMA_TF32_STAGED_WARP_TILE),
+            ("WMMA_TF32_STAGED_THREADS", WMMA_TF32_STAGED_THREADS),
+            ("WMMA_TF32_STAGED_A_PAD", WMMA_TF32_STAGED_A_PAD),
+            ("WMMA_TF32_STAGED_B_PAD", WMMA_TF32_STAGED_B_PAD),
+            ("WMMA_TF32_STAGED_STAGES", WMMA_TF32_STAGED_STAGES),
+        ];
+        for (name, value) in checks {
+            let expected = format!("#define {name} {value}");
+            assert!(
+                src.contains(&expected),
+                "wmma_tf32_f32_staged_source() の `#define {name}` が Rust 側の定数（{value}）と \
+                 一致しません"
+            );
+        }
+    }
+
+    /// 既定構成（全次元 `Dynamic`）では `#define DIM_* <カーネル引数>`
+    /// 形式でカーネル引数へ間接するのみであることをロックする
+    /// （`wmma_opt_default_config_dim_defines_alias_kernel_parameters` と
+    /// 同方針）。
+    #[test]
+    fn wmma_tf32_staged_default_config_dim_defines_alias_kernel_parameters() {
+        let src = wmma_tf32_f32_staged_source();
+        for expected in ["#define DIM_M m", "#define DIM_N n", "#define DIM_K k"] {
+            assert!(
+                src.contains(expected),
+                "既定次元マクロ `{expected}` が見つかりません: {src}"
+            );
+        }
+    }
+
+    /// tensor core 命令・TF32 明示変換の証跡（`wmma_tf32_opt_source_uses_wmma_instructions`
+    /// と同方式）。
+    #[test]
+    fn wmma_tf32_staged_source_uses_wmma_instructions() {
+        let src = wmma_tf32_f32_staged_source();
+        for needle in [
+            "#include <mma.h>",
+            "wmma::fragment",
+            "wmma::load_matrix_sync",
+            "wmma::mma_sync",
+            "wmma::store_matrix_sync",
+            "wmma::fill_fragment",
+            "wmma::__float_to_tf32",
+        ] {
+            assert!(
+                src.contains(needle),
+                "wmma_tf32_f32_staged_source() に tensor core 命令 `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// イシュー #500 の主要技法（cp.async 多段パイプライン・issue
+    /// interleaving）の証跡。`kernels_mma.rs::
+    /// mma_f16_source_uses_mma_sync_ldmatrix_cp_async_instructions` と同方式。
+    #[test]
+    fn wmma_tf32_staged_source_uses_cp_async_instructions() {
+        let src = wmma_tf32_f32_staged_source();
+        for needle in [
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+        ] {
+            assert!(
+                src.contains(needle),
+                "wmma_tf32_f32_staged_source() に cp.async 命令 `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// 段数一般形の固定即値 wait（`wait_group (STAGES-2)` 相当）と、
+    /// ループ外 drain（無条件 `wait_group 0;`）の双方が存在することを
+    /// 検査する（`kernels_mma.rs::
+    /// mma_f16_source_has_unconditional_drain_wait_group_zero` と同方針。
+    /// #492 の「段数非依存の drain をループ外へ移設する」設計が staged
+    /// カーネルでも保たれていることをロックする）。
+    #[test]
+    fn wmma_tf32_staged_source_has_fixed_immediate_wait_and_unconditional_drain() {
+        let src = wmma_tf32_f32_staged_source();
+        assert!(
+            src.contains(
+                r#"asm volatile("cp.async.wait_group %0;\n" ::"n"(WMMA_TF32_STAGED_STAGES - 2));"#
+            ),
+            "wmma_tf32_f32_staged_source() に段数一般形の固定即値 wait_group が見つかりません"
+        );
+        let drain_pos = src
+            .rfind("cp.async.wait_group 0;")
+            .expect("wmma_tf32_f32_staged_source() に cp.async.wait_group 0; が見つかりません");
+        let last_commit_pos = src.rfind("asm volatile(\"cp.async.commit_group;").expect(
+            "wmma_tf32_f32_staged_source() にループ末尾の cp.async.commit_group が \
+                 見つかりません",
+        );
+        assert!(
+            drain_pos > last_commit_pos,
+            "ループ外 drain（wait_group 0）がループ内最終 commit より前にあります \
+             （drain_pos={drain_pos}, last_commit_pos={last_commit_pos}）"
+        );
+    }
+
+    /// advisor 指摘（PR レビュー相当）: `load_matrix_sync` の呼び出し回数
+    /// と TF32 明示変換ループ（`wmma::__float_to_tf32` を呼ぶ `for` ループ）
+    /// の出現回数が一致することを検査する。fragment ロード直後の変換適用は
+    /// 数値契約の根幹（既存 `WMMA_TF32_F32_OPT_BODY` と同一契約）であり、
+    /// 2 面バッファのどちらか一方だけ変換が漏れる回帰を検出する（単純な
+    /// 部分文字列存在検査では検出できないクラスの回帰のため、出現回数の
+    /// 突合という強い形の検査にする）。
+    #[test]
+    fn wmma_tf32_staged_source_applies_tf32_conversion_to_every_fragment_load() {
+        let src = wmma_tf32_f32_staged_source();
+        let load_count = src.matches("wmma::load_matrix_sync(").count();
+        let convert_count = src.matches("wmma::__float_to_tf32(").count();
+        // マクロ定義側に 1 箇所ずつ（LDWM_A_FRAG・LDWM_B_FRAG）記述されている
+        // のみで、呼び出し側は展開時に増えるが本テストはテンプレート文字列
+        // （展開前のマクロ定義込みソース）を対象にしているため、定義箇所の
+        // 個数（load: 2、convert: 2）が一致することを検査する。
+        assert_eq!(
+            load_count, convert_count,
+            "wmma::load_matrix_sync の出現回数（{load_count}）と \
+             wmma::__float_to_tf32 変換ループの出現回数（{convert_count}）が一致しません \
+             （先読みバッファの一方で TF32 変換が欠落している可能性）"
+        );
+        assert_eq!(
+            load_count, 2,
+            "LDWM_A_FRAG/LDWM_B_FRAG マクロ定義それぞれ 1 箇所ずつ、計 2 箇所の \
+             load_matrix_sync 呼び出しが期待されます（実際: {load_count}）"
+        );
+    }
+
+    /// REQ-8: guarded load／guarded store の境界チェックがソースから
+    /// 除去されていないことをロックする。
+    #[test]
+    fn wmma_tf32_staged_source_retains_req8_boundary_guards() {
+        let src = wmma_tf32_f32_staged_source();
+        for needle in [
+            "gr < DIM_M && gc < DIM_K",
+            "gr < DIM_K && gc < DIM_N",
+            "gr < DIM_M && gc < DIM_N",
+        ] {
+            assert!(
+                src.contains(needle),
+                "wmma_tf32_f32_staged_source() に REQ-8 境界チェック `{needle}` が見つかりません"
+            );
+        }
+    }
+
+    /// `RenderedWmmaTf32StagedKernel::compile` が呼ぶ固定エントリポイント
+    /// 名がソース内の関数定義名と一致することをロックする（`gemm.rs::
+    /// compile_wmma_tf32_staged` の `load_function("gemm_wmma_tf32_staged")`
+    /// と対応）。
+    #[test]
+    fn wmma_tf32_staged_source_defines_expected_entry_point() {
+        let src = wmma_tf32_f32_staged_source();
+        assert!(
+            src.contains("extern \"C\" __global__ void gemm_wmma_tf32_staged("),
+            "wmma_tf32_f32_staged_source() に固定エントリポイント \
+             `gemm_wmma_tf32_staged` の定義が見つかりません"
+        );
+    }
+
+    /// 同一 `WmmaTf32StagedKernelConfig` からの [`render_wmma_tf32_staged`]
+    /// が byte 一致することをロックする（`RenderedWmmaTf32OptKernel` と
+    /// 同方式の再現性検査。`RenderedWmmaTf32StagedKernel::source` テスト
+    /// 専用アクセサをここで使用する）。
+    #[test]
+    fn render_wmma_tf32_staged_is_deterministic_for_same_config() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let a = render_wmma_tf32_staged(&cfg).expect("既定構成は検証を通過するはずです");
+        let b = render_wmma_tf32_staged(&cfg).expect("既定構成は検証を通過するはずです");
+        assert_eq!(
+            a.source(),
+            b.source(),
+            "同一 WmmaTf32StagedKernelConfig からの render_wmma_tf32_staged が byte 一致しません \
+             （非決定的な展開はキャッシュ・再現性の前提を壊す）"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_config`] のフェイルクローズド検証:
+    /// `stages < 2` を拒否することを確認する（`WMMA_TF32_STAGED_STAGES`
+    /// 定数直下コメント「正しさ」参照。`wait_group (STAGES-2)` の即値が
+    /// 非負であるための前提）。
+    #[test]
+    fn validate_wmma_tf32_staged_config_rejects_stages_below_two() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            stages: 1,
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "stages=1 が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_config`] のフェイルクローズド検証:
+    /// `stages > MAX_PIPELINE_STAGES`（16）を拒否することを確認する
+    /// （SMEM 予算チェックのみでは block_m/block_n/k_tile を小さくした
+    /// 構成で stages を大きく取れてしまい、この段数上限の検査を素通り
+    /// しうる。ここでは意図的に warp タイル辺の最小構成
+    /// 〈block_m=block_n=WARP_TILE, k_tile=FRAG_K〉を使い、SMEM 予算内の
+    /// まま stages=17 が拒否されることを示す。PR #678 Bugbot 指摘対応:
+    /// 旧テストは誤った ISA 上限〈wait_group 即値 0〜7〉を根拠に
+    /// stages=10 を拒否していたが、正しい上限は
+    /// [`MAX_PIPELINE_STAGES`]（16）である）。
+    #[test]
+    fn validate_wmma_tf32_staged_config_rejects_stages_exceeding_max_pipeline_stages() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            block_m: WMMA_TF32_STAGED_WARP_TILE,
+            block_n: WMMA_TF32_STAGED_WARP_TILE,
+            k_tile: WMMA_TF32_STAGED_FRAG_K,
+            stages: MAX_PIPELINE_STAGES + 1, // 17 > MAX_PIPELINE_STAGES(16)
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "SMEM 予算内だが stages=17（MAX_PIPELINE_STAGES 超過）が拒否されませんでした: \
+             {result:?}"
+        );
+    }
+
+    /// 上記の境界値検査: `stages=MAX_PIPELINE_STAGES`（16。ちょうど上限）は
+    /// 同じ最小構成で受理されることを確認する（過剰拒否を防ぐ境界値
+    /// テスト）。
+    #[test]
+    fn validate_wmma_tf32_staged_config_accepts_stages_at_max_pipeline_stages() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            block_m: WMMA_TF32_STAGED_WARP_TILE,
+            block_n: WMMA_TF32_STAGED_WARP_TILE,
+            k_tile: WMMA_TF32_STAGED_FRAG_K,
+            stages: MAX_PIPELINE_STAGES, // 16 == 上限ちょうど
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            result.is_ok(),
+            "SMEM 予算内かつ MAX_PIPELINE_STAGES ちょうどの stages=16 が拒否されました: \
+             {result:?}"
+        );
+    }
+
+    /// `WmmaTf32StagedKernelConfig` の SMEM 予算超過を拒否することを検証
+    /// する（`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 「SMEM 予算」節の
+    /// 試算どおり、既定ブロックタイル 64×64・stages=3 は 44,800B で収まる
+    /// 一方、stages を増やすと 48KiB 上限を超過することを確認する）。
+    #[test]
+    fn validate_wmma_tf32_staged_config_accepts_default_and_rejects_smem_overflow() {
+        let default_cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        assert!(
+            validate_wmma_tf32_staged_config(&default_cfg).is_ok(),
+            "既定構成（stages=3, block_m=block_n=64, k_tile=16）は SMEM 予算内のはずです"
+        );
+
+        // stages を大きく増やすと、2*(block_m*a_pad + k_tile*b_pad)*4B が
+        // ステージ数倍に増え、48KiB 上限を超える（試算:
+        // stages=8 の場合 8*(64*20+16*68)*4 + 64*64*4 = 8*3552*4 + 16384
+        // = 113664 + 16384 = 130048B > 49152B）。
+        let overflow_cfg = WmmaTf32StagedKernelConfig {
+            stages: 8,
+            ..default_cfg
+        };
+        let result = validate_wmma_tf32_staged_config(&overflow_cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "stages=8 の SMEM 超過構成が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// `WmmaTf32StagedKernelConfig` の cp.async 4 要素整列制約（f32 16
+    /// バイト転送粒度）を拒否することを検証する。
+    #[test]
+    fn validate_wmma_tf32_staged_config_rejects_non_multiple_of_four_k_tile() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            k_tile: 10, // FRAG_K(8) の倍数でも 4 の倍数でもない
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "k_tile=10（4 の倍数でない）が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// [`WmmaTf32StagedKernelConfig::validate_launch_shape`] が dim_m/dim_n/dim_k
+    /// の `Static` 不一致を fail-closed で拒否することを検査する
+    /// （`wmma_opt_config_validate_launch_shape_rejects_static_mismatch` と
+    /// 同方針）。
+    #[test]
+    fn wmma_tf32_staged_config_validate_launch_shape_rejects_static_mismatch() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            dim_m: DimSpec::Static(4096),
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        assert!(cfg.validate_launch_shape(4096, 64, 64).is_ok());
+        let result = cfg.validate_launch_shape(16, 64, 64);
+        assert!(
+            result.is_err(),
+            "Static(4096) 指定 dim_m に対し m=16 が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// [`WmmaTf32StagedKernelConfig::launch_config`] が `block_m`/`block_n`
+    /// を単位に `div_ceil` でグリッドを構築し、`block_dim` は warp タイル
+    /// 由来のスレッド数であることを検査する。
+    #[test]
+    fn wmma_tf32_staged_config_launch_config_uses_block_tile_grid() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let launch = cfg.launch_config(130, 65);
+        assert_eq!(
+            launch.grid_dim,
+            (65u32.div_ceil(64), 130u32.div_ceil(64), 1)
+        );
+        assert_eq!(launch.block_dim, (128, 1, 1));
+        assert_eq!(launch.shared_mem_bytes, 0);
     }
 }
