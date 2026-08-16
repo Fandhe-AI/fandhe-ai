@@ -1004,6 +1004,19 @@ impl TileSelection {
 /// 分岐であり、`measured` を「呼び出し元が明示的に注入しない限り
 /// コストモデルは動かない」パラメータにしている。
 ///
+/// `measured` が `None`、またはコストモデルが候補ゼロ件／評価不能で
+/// 固定選定テーブルへフォールバックする場合、[`cost_model::
+/// FIXED_TILE_SELECTION`] を無条件に成功として返さず、[`validate_fixed_tile_selection`]
+/// で呼び出し元が渡した `shape`／`dtype`／`smem_budget_bytes` に対して
+/// 実際に適用可能かを検証する（codex-review #675 P1 指摘: 検証なしで
+/// 固定テーブルを返すと `smem_budget_bytes` 予算超過・`shape` の
+/// mma.sync 整列制約違反・f16 専用メタデータの `DType::F32` への誤流用
+/// を「成功した `TileSelection`」として呼び出し元へ伝えてしまい、
+/// 公開 API `select_tile_config` の契約〈返す構成は入力制約を満たす〉
+/// を破っていた）。満たさない場合は `Err(CudaError::InvalidKernelConfig)`
+/// で選定不能を明示し、無効な構成を返さない（fail-closed。
+/// `.claude/rules/security.md` A08 と同種の安全側判断）。
+///
 /// 本関数は選定結果を既定の本番 GEMM 経路（[`CudaGemmAuto::run_f16`]）
 /// へ結線・適用しない（スコープ境界。カーネルが `#define` 固定のため、
 /// 適用は実機実測・補正判定完了後の後続タスクに委ねる。
@@ -1014,12 +1027,9 @@ pub fn select_tile_config(
     smem_budget_bytes: u64,
     num_sms: NonZeroU32,
     measured: Option<MeasuredBandwidth>,
-) -> TileSelection {
+) -> Result<TileSelection, CudaError> {
     let Some(bandwidth) = measured else {
-        return TileSelection {
-            candidate: cost_model::FIXED_TILE_SELECTION,
-            basis: TileSelectionBasis::FixedTable,
-        };
+        return fixed_table_selection_if_valid(shape, dtype, smem_budget_bytes);
     };
 
     let bytes_per_element = bytes_per_element_for(dtype);
@@ -1027,19 +1037,82 @@ pub fn select_tile_config(
     let params = CostModelParams { num_sms, bandwidth };
 
     match cost_model::select_best_tile_candidate(shape, &candidates, &params, bytes_per_element) {
-        Ok(Some(candidate)) => TileSelection {
+        Ok(Some(candidate)) => Ok(TileSelection {
             candidate,
             basis: TileSelectionBasis::CostModel,
-        },
+        }),
         // 候補ゼロ件・コストモデルのオーバーフロー評価不能のいずれも、
         // fail-closed に固定選定テーブルへ倒す（`.claude/rules/security.md`
         // A08「取り込み判断の迂回経路を作らない」と同種の安全側判断:
         // 静的モデルが評価不能な状況で未検証のまま候補を採用しない）。
-        Ok(None) | Err(_) => TileSelection {
-            candidate: cost_model::FIXED_TILE_SELECTION,
-            basis: TileSelectionBasis::FixedTable,
-        },
+        // ただしこのフォールバック先自体も無検証では返さない
+        // （`fixed_table_selection_if_valid` 参照）。
+        Ok(None) | Err(_) => fixed_table_selection_if_valid(shape, dtype, smem_budget_bytes),
     }
+}
+
+/// [`cost_model::FIXED_TILE_SELECTION`] を返す前に、呼び出し元が渡した
+/// `shape`／`dtype`／`smem_budget_bytes` に対して実際に適用可能かを
+/// [`validate_fixed_tile_selection`] で検証する（[`select_tile_config`]
+/// の 2 つのフォールバック経路〈`measured = None`／候補評価不能〉が
+/// 共有する単一の検証入口。判定ロジックが分裂して片方だけ緩和される
+/// 静かな乖離を防ぐ。#521 と同種の教訓）。
+fn fixed_table_selection_if_valid(
+    shape: GemmShape,
+    dtype: DType,
+    smem_budget_bytes: u64,
+) -> Result<TileSelection, CudaError> {
+    validate_fixed_tile_selection(shape, dtype, smem_budget_bytes)?;
+    Ok(TileSelection {
+        candidate: cost_model::FIXED_TILE_SELECTION,
+        basis: TileSelectionBasis::FixedTable,
+    })
+}
+
+/// [`cost_model::FIXED_TILE_SELECTION`] が `shape`／`dtype`／
+/// `smem_budget_bytes` の下で実際に適用可能かを検証する
+/// （codex-review #675 P1 指摘対応）。
+///
+/// 検証する 3 条件（いずれか 1 つでも満たさなければ `Err`）:
+/// 1. `dtype == DType::F16`: [`cost_model::FIXED_TILE_SELECTION`] の
+///    `smem_per_stage`／`smem_total` は f16（2 bytes/element）前提で
+///    コンパイル時算出されている（同定数のドキュメンテーションコメント
+///    参照）。`DType::F32` に対して返すとメタデータが実際のバイト量と
+///    一致しない。
+/// 2. `validate_mma_alignment(shape.n, shape.k)`: `kernels_mma.rs` の
+///    cp.async が要求する `n`/`k` 8 の倍数整列（[`enumerate_tile_candidates`]
+///    規則 6 と同一契約）。固定テーブルも同じ `kernels_mma.rs` 起動 API
+///    を経由するため、この整列を満たさない形状には適用できない。
+/// 3. `smem_total <= smem_budget_bytes`: 固定テーブルの SMEM 使用量が
+///    デバイスの実際の予算を超過していないか。
+fn validate_fixed_tile_selection(
+    shape: GemmShape,
+    dtype: DType,
+    smem_budget_bytes: u64,
+) -> Result<(), CudaError> {
+    if dtype != DType::F16 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "select_tile_config: FIXED_TILE_SELECTION の smem_per_stage/smem_total は \
+                 f16 (2 bytes/element) 前提で算出済みのため、dtype={dtype:?} には \
+                 適用できない（現行本番の kernels_mma.rs は f16 専用。#494）"
+            ),
+        });
+    }
+
+    validate_mma_alignment(shape.n, shape.k)?;
+
+    let smem_total = cost_model::FIXED_TILE_SELECTION.smem_total();
+    if smem_total > smem_budget_bytes {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "select_tile_config: FIXED_TILE_SELECTION の smem_total={smem_total} が \
+                 smem_budget_bytes={smem_budget_bytes} を超過するため適用できない"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// [`select_tile_config`] の実デバイス結線ヘルパー
@@ -1073,13 +1146,13 @@ pub fn select_tile_config_for_device(
                  returned 0, which cannot be a valid SM count"
                 .to_string(),
         })?;
-    Ok(select_tile_config(
+    select_tile_config(
         shape,
         dtype,
         smem_budget_bytes,
         num_sms,
         SM121_MEASURED_BANDWIDTH,
-    ))
+    )
 }
 
 /// naive／tiled／WMMA の全 GEMM カーネルを保持し、`select_gemm_kernel`
@@ -1727,21 +1800,27 @@ mod cost_model_tests {
             FULL_BUDGET_BYTES,
             num_sms,
             SM121_MEASURED_BANDWIDTH,
-        );
+        )
+        .expect("aligned shape/F16/full budget satisfies FIXED_TILE_SELECTION constraints");
 
         assert_eq!(selection.basis(), TileSelectionBasis::FixedTable);
         let fixed = FIXED_TILE_SELECTION;
         assert_eq!(selection.candidate(), fixed);
     }
 
-    /// フォールバック検証: 候補ゼロ件（不整列形状）でもフォールバックが
-    /// 機能すること。`measured` を意図的に `Some` にしても、コストモデル
-    /// が評価対象を持たない場合は固定テーブルへ倒れる。
+    /// フォールバック検証（かつ codex-review #675 P1 指摘の回帰防止）:
+    /// 候補ゼロ件（不整列形状）の場合、`measured` を `Some` にしても
+    /// コストモデルが評価対象を持たないため固定テーブルへ倒れようと
+    /// するが、固定テーブル自体も同じ不整列形状の下では
+    /// `validate_mma_alignment` を満たさないため、無検証の
+    /// `TileSelection` を返さず `Err(CudaError::InvalidKernelConfig)`
+    /// で選定不能を明示する。
     #[test]
-    fn select_tile_config_falls_back_to_fixed_table_when_no_candidates_exist() {
+    fn select_tile_config_rejects_when_shape_violates_alignment_even_for_fixed_table() {
         // shape.k % 8 != 0 のため enumerate_tile_candidates が規則 6 で
         // 空 Vec を返す形状（tile_candidate_tests の同種フィクスチャと
-        // 同じ根拠）。
+        // 同じ根拠）。同じ不整列性が FIXED_TILE_SELECTION 側の
+        // validate_mma_alignment 検証も失敗させる。
         let unaligned_shape = GemmShape::new(4096, 9, 17);
         let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
         let measured = Some(MeasuredBandwidth {
@@ -1749,16 +1828,18 @@ mod cost_model_tests {
             l2_bytes_per_cycle_device: NonZeroU64::new(4096).expect("non-zero"),
         });
 
-        let selection = select_tile_config(
+        let err = select_tile_config(
             unaligned_shape,
             DType::F16,
             FULL_BUDGET_BYTES,
             num_sms,
             measured,
+        )
+        .expect_err(
+            "unaligned shape must be rejected instead of silently returning \
+             FIXED_TILE_SELECTION (codex-review #675 P1)",
         );
-
-        assert_eq!(selection.basis(), TileSelectionBasis::FixedTable);
-        assert_eq!(selection.candidate(), FIXED_TILE_SELECTION);
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 
     /// `SM121_MEASURED_BANDWIDTH` が `None` である間は選定入口が
@@ -1777,11 +1858,37 @@ mod cost_model_tests {
         let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
 
         // smem_budget_bytes = 0 は enumerate_tile_candidates を通せば
-        // 全候補棄却（tile_candidate_tests 参照）になるが、None 経路は
-        // これを一切参照しないため固定テーブルがそのまま返る。
-        let selection = select_tile_config(shape, DType::F16, 0, num_sms, None);
+        // 全候補棄却（tile_candidate_tests 参照）になる。None 経路は
+        // enumerate_tile_candidates／コストモデルを一切呼ばず、直接
+        // fixed_table_selection_if_valid で FIXED_TILE_SELECTION の
+        // smem_total を smem_budget_bytes=0 に対して検証するため、
+        // どちらの経路を通っても最終的に「予算超過で選定不能」という
+        // 同じ結論に到達する（codex-review #675 P1 指摘の回帰防止:
+        // 検証共有化前は None 経路がこの budget=0 を無視して
+        // FIXED_TILE_SELECTION を無検証で返してしまっていた）。
+        let err = select_tile_config(shape, DType::F16, 0, num_sms, None).expect_err(
+            "smem_budget_bytes=0 must reject FIXED_TILE_SELECTION instead of returning it \
+             unchecked (codex-review #675 P1)",
+        );
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
 
-        assert_eq!(selection.basis(), TileSelectionBasis::FixedTable);
-        assert_eq!(selection.candidate(), FIXED_TILE_SELECTION);
+    /// codex-review #675 P1 指摘の回帰防止: `select_tile_config` に
+    /// `DType::F32` を渡した場合、`measured = None`（固定テーブル経路）
+    /// では `FIXED_TILE_SELECTION` の `smem_per_stage`/`smem_total` が
+    /// f16 前提で算出されたメタデータであるため、dtype 不一致として
+    /// `Err(CudaError::InvalidKernelConfig)` を返し、無検証の
+    /// `TileSelection` を成功として返さないこと。
+    #[test]
+    fn select_tile_config_rejects_f32_dtype_for_fixed_table() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+
+        let err = select_tile_config(shape, DType::F32, FULL_BUDGET_BYTES, num_sms, None)
+            .expect_err(
+                "DType::F32 must be rejected because FIXED_TILE_SELECTION's smem metadata is \
+                 f16-only (codex-review #675 P1)",
+            );
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
     }
 }
