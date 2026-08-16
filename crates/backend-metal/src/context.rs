@@ -19,7 +19,9 @@ use objc2_metal::{
 };
 use tensor_core::dispatch::DeviceCaps;
 
+use crate::device::MetalOccupancyInfo;
 use crate::error::MetalError;
+use crate::tile::OccupancyParams;
 
 pub(crate) type MtlDevice = ProtocolObject<dyn MTLDevice>;
 pub(crate) type MtlQueue = ProtocolObject<dyn MTLCommandQueue>;
@@ -44,6 +46,7 @@ pub struct MetalContext {
     device: Retained<MtlDevice>,
     queue: Retained<MtlQueue>,
     caps: DeviceCaps,
+    occupancy_params: Option<OccupancyParams>,
 }
 
 impl MetalContext {
@@ -55,6 +58,15 @@ impl MetalContext {
     /// `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)`（`simdgroup_matrix`
     /// 対応可否の判定材料。`docs/dispatch-rules-design.md` §2 表）もここで
     /// 1 回だけ評価し [`DeviceCaps`] へキャッシュする（[`Self::caps`]）。
+    ///
+    /// [`crate::tile::select_with_occupancy`]（イシュー #542）が使う
+    /// occupancy 実機値（[`MetalOccupancyInfo::probe`]。GPU コア数は IOKit
+    /// FFI・threadgroup memory 上限は `MTLDevice`）もここで 1 回だけ取得し
+    /// [`OccupancyParams`] へ写像してキャッシュする（[`Self::occupancy_params`]）。
+    /// ディスパッチ経路のホットパスに FFI を持ち込まないための設計（`caps`
+    /// と同じ判断）。GPU コア数が取得不能（`None`）な場合は
+    /// `occupancy_params` 自体を `None` にし、`select_with_occupancy` の
+    /// fail-safe フォールバック（`params: None`）へ委ねる。
     pub fn new() -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceUnavailable)?;
         let queue = device
@@ -69,10 +81,21 @@ impl MetalContext {
         // 扱いに倒す fail-safe とする（§2.2）。
         let apple7_supported = device.supportsFamily(MTLGPUFamily::Apple7);
         let caps = DeviceCaps::metal(apple7_supported);
+
+        let occupancy_info = MetalOccupancyInfo::probe(&device);
+        let occupancy_params =
+            occupancy_info
+                .gpu_core_count
+                .map(|gpu_core_count| OccupancyParams {
+                    gpu_core_count,
+                    max_threadgroup_memory_bytes: occupancy_info.max_threadgroup_memory_bytes,
+                });
+
         Ok(Self {
             device,
             queue,
             caps,
+            occupancy_params,
         })
     }
 
@@ -80,6 +103,15 @@ impl MetalContext {
     /// （TASK-1.8b・#39 以降）から参照される Metal デバイスハンドル。
     pub fn device(&self) -> &MtlDevice {
         &self.device
+    }
+
+    /// `new` 時にキャッシュした occupancy 判定用実機値
+    /// ([`crate::gemm::MetalGemm::dispatch_auto`] が
+    /// [`crate::tile::select_with_occupancy`] へそのまま渡す。イシュー
+    /// #542）。GPU コア数が取得不能だった場合は `None`（`select_with_occupancy`
+    /// 側の fail-safe フォールバックで形状のみの選択へ倒れる）。
+    pub fn occupancy_params(&self) -> Option<OccupancyParams> {
+        self.occupancy_params
     }
 
     /// コマンドバッファ生成に使うコマンドキュー

@@ -97,9 +97,17 @@
 //! `device` モジュールと同じく `cfg(target_os = "macos")` 限定）・
 //! [`device::MetalOccupancyInfo`]・[`tile::OccupancyParams`]
 //! （`tile::actual_groups`／`tile::is_underoccupied` と合わせ `objc2` 系
-//! FFI に触れない純粋関数群）。`tile::select` への組み込み・タイル
-//! 2 段階切替の閾値運用は後続イシュー #542 のスコープであり本イシューは
-//! 算出機構のみを追加する。
+//! FFI に触れない純粋関数群）。
+//!
+//! イシュー #542（D-7b）で [`tile::select_with_occupancy`] へ組み込み、
+//! `gemm::MetalGemm::dispatch_auto` から実機値で駆動できるようにした。
+//! [`context::MetalContext::new`] が `MetalOccupancyInfo::probe` を 1 回
+//! だけ実行して `Option<tile::OccupancyParams>` へ写像・キャッシュし
+//! （[`context::MetalContext::occupancy_params`]）、`dispatch_auto` が
+//! `tile::select`（形状のみ）ではなく `tile::select_with_occupancy`（形状＋
+//! occupancy 縮退の 2 段階判定）を呼ぶ。GPU コア数取得不能時は
+//! `occupancy_params` が `None` になり `select_with_occupancy` が形状のみの
+//! 判定へ fail-safe フォールバックする（従来 `tile::select` と同一挙動）。
 //!
 //! `dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` は関数名に
 //! `_unverified` を付け `#[doc(hidden)]` としている（PR #346 codex-review

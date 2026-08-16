@@ -35,7 +35,7 @@
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig};
+    use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig, tile};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
 
@@ -210,6 +210,49 @@ mod macos_impl {
         ] {
             let tflops = measure(&gemm, &ctx, GemmVariant::SimdgroupTiled(cfg), size, &config);
             println!("size={size} candidate={label} tflops={tflops:.4}");
+        }
+
+        // occupancy 判定組み込み比較（イシュー #542。受け入れ条件 2:
+        // 「size ∈ {512, 1024, 2048, 4096} で現行 select() 比の劣化がない
+        // ことを実測確認する」）。
+        //
+        // 「旧」: `tile::select`（形状のみの判定。occupancy 縮退なし）が
+        // 選ぶ構成を `SimdgroupTiled` へ明示指定してディスパッチする
+        // （`dispatch_auto` 変更前の挙動を再現する対照群）。
+        // 「新」: `dispatch_auto`（`ctx.occupancy_params()` 経由で
+        // `tile::select_with_occupancy` を呼ぶ。GPU コア数取得不能時は
+        // `tile::select` と同一構成へ fail-safe フォールバックする）。
+        //
+        // 選択された `TileConfig`（`bm`/`bn`）も出力し、`docs/perf/
+        // metal-gemm-occupancy-select.md` の記録テンプレへ転記できるように
+        // する。
+        println!(
+            "--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy 経由 dispatch_auto）---"
+        );
+        for size in [512usize, 1024, 2048, 4096] {
+            let config = MeasurementConfig::default();
+
+            let old_cfg = tile::select(size, size, size);
+            let old_tflops = measure(
+                &gemm,
+                &ctx,
+                GemmVariant::SimdgroupTiled(old_cfg),
+                size,
+                &config,
+            );
+
+            let new_cfg = tile::select_with_occupancy(size, size, size, ctx.occupancy_params());
+            let new_tflops = measure_auto(&gemm, &ctx, size, size, size, &config);
+
+            println!(
+                "size={size} old_tile=({}x{}) old_tflops={old_tflops:.4} new_tile=({}x{}) new_tflops={new_tflops:.4} new_over_old={:.4} occupancy_params={:?}",
+                old_cfg.bm,
+                old_cfg.bn,
+                new_cfg.bm,
+                new_cfg.bn,
+                new_tflops / old_tflops,
+                ctx.occupancy_params(),
+            );
         }
     }
 }

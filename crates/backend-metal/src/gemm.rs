@@ -64,8 +64,8 @@ pub enum GemmVariant {
     /// 動的タイル選択（TASK-1.8f・#188）。`gemm_simdgroup_tiled` を
     /// 保持する [`TileConfig`] の MSL function constant（BM/BN/BK/WM/WN・
     /// `USE_TGP_STAGING`）で特殊化してディスパッチする。行列サイズから
-    /// 構成を自動選択する入口は [`MetalGemm::dispatch_auto`]（[`tile::select`]
-    /// を使う）。`m`・`n`・`k` は `Simdgroup` と同じく 8 の倍数へパディング
+    /// 構成を自動選択する入口は [`MetalGemm::dispatch_auto`]（[`tile::select_with_occupancy`]
+    /// を使う。イシュー #542）。`m`・`n`・`k` は `Simdgroup` と同じく 8 の倍数へパディング
     /// して実行する（[`MetalGemm::dispatch_variant`] 参照）。
     SimdgroupTiled(TileConfig),
 }
@@ -273,9 +273,12 @@ impl MetalGemm {
             .map(|(_, resolved)| resolved)
     }
 
-    /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
-    /// [`tile::select`] で [`TileConfig`] を選び、[`GemmVariant::SimdgroupTiled`]
-    /// で [`Self::dispatch_variant`] へ委譲する。バックエンド抽象層からの
+    /// 動的タイル選択（TASK-1.8f・#188。イシュー #542 で occupancy 判定を
+    /// 組み込み済み）の自動入口。`(m, n, k)` と `ctx.occupancy_params()`
+    /// （[`MetalContext::new`] が実機値からキャッシュした値。GPU コア数
+    /// 取得不能時は `None`）から [`tile::select_with_occupancy`] で
+    /// [`TileConfig`] を選び、[`GemmVariant::SimdgroupTiled`] で
+    /// [`Self::dispatch_variant`] へ委譲する。バックエンド抽象層からの
     /// accelerated/tiled 経路選択（#67/#68）とはレイヤが異なる（本関数は
     /// 「Metal GEMM を実行すると決まった後」のタイル構成選択のみを担う。
     /// イシュー #188 計画「スコープ外」節）。
@@ -288,7 +291,7 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        let cfg = tile::select(m, n, k);
+        let cfg = tile::select_with_occupancy(m, n, k, ctx.occupancy_params());
         self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
     }
 
@@ -300,9 +303,9 @@ impl MetalGemm {
     /// （[`tensor_core::dispatch::KernelKind`]）を [`GemmVariant`] へ写像
     /// する（`docs/dispatch-rules-design.md` §5.3 決定表の Metal 側行）:
     ///
-    /// - `MatrixUnit` → [`Self::dispatch_auto`]（[`tile::select`] による
-    ///   動的タイル選択。「Metal GEMM を実行すると決まった後のタイル構成
-    ///   選択」という別レイヤの責務は [`Self::dispatch_auto`] のドキュ
+    /// - `MatrixUnit` → [`Self::dispatch_auto`]（[`tile::select_with_occupancy`]
+    ///   による動的タイル選択。「Metal GEMM を実行すると決まった後のタイル
+    ///   構成選択」という別レイヤの責務は [`Self::dispatch_auto`] のドキュ
     ///   メンテーションコメントどおり変更しない。実装計画 §3.3）
     /// - `Tiled` → [`GemmVariant::Tiled`]
     /// - `Naive` → [`GemmVariant::Naive`]（現決定表では Metal 行から到達
