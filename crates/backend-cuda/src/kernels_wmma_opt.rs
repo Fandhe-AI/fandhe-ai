@@ -161,6 +161,7 @@ use half::f16;
 
 use crate::error::CudaError;
 use crate::kernels_mma::{DimSpec, MMA_STATIC_SMEM_LIMIT_BYTES, render_dim_define};
+use crate::nvrtc::MAX_PIPELINE_STAGES;
 
 /// A タイル（`as_tile[2][BLOCK_M][A_PAD]`）の行幅（パディング後）。
 /// `K_TILE`（16）に 4 要素加算し、f32 の `ldm` 制約（4 の倍数）を保ちながら
@@ -1371,23 +1372,28 @@ fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<
             cfg.stages
         )));
     }
-    // `cp.async.wait_group N` の N は PTX 上 0〜7 の即値レンジに制限される
-    // （codex-review 指摘: SMEM 予算チェックのみでは block_m/block_n/k_tile
-    // を小さくした構成で stages を大きく取れてしまい、SMEM 予算内のまま
-    // wait_group の即値レンジを超過しうる。上記 `stages < 2` チェックの
-    // 直後で `stages - 2` の下限側非負性は既に保証済みのため、ここでは
-    // 上限側のみを検査すれば安全に減算できる）。この検査を欠くと
-    // `render_wmma_tf32_staged` 自体は成功し、NVRTC コンパイルの時点まで
-    // 無効な PTX であることが判明しない（fail-closed の趣旨に反する）。
-    const CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE: u32 = 7;
-    if cfg.stages - 2 > CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE {
+    // `stages` の上限は SMEM 予算だけでは決まらない（codex-review 指摘:
+    // block_m/block_n/k_tile を小さくした構成では SMEM 予算内のまま stages
+    // を際限なく大きく取れてしまう）ため、別枠の上限検査が必要である。
+    //
+    // PR #678 Bugbot 指摘（Medium）: 当初の実装は「`cp.async.wait_group N`
+    // の N は PTX 上 0〜7 の即値レンジに制限される」という誤った ISA 上限
+    // を根拠に `stages <= 9` を要求していたが、この主張は誤りだった
+    // （LLVM NVPTX は `wait_group 8`／`16` 相当の即値も発行・検査しており、
+    // ISA 側に 0〜7 という固定上限は存在しない）。本リポ自身も同じ
+    // `wait_group (STAGES-2)` 段数一般形を使う `derive_pipeline_stages`
+    // （`nvrtc.rs`）で [`MAX_PIPELINE_STAGES`]（16）を段数の有効上限として
+    // 扱っており、7 という値はこの既存の合意と矛盾していた。誤った制約で
+    // SMEM に収まる正当な構成を fail-close 側で弾いてしまっていたため、
+    // 上限を [`MAX_PIPELINE_STAGES`] に統一する（レジスタ圧・命令数増加に
+    // 見合わない段数を弾くという本来の目的は維持しつつ、ISA 上の誤った
+    // 根拠を取り除く）。
+    if cfg.stages > MAX_PIPELINE_STAGES {
         return Err(invalid(format!(
-            "stages ({}) is too large: cp.async.wait_group (STAGES-2) immediate ({}) exceeds \
-             PTX's {CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE} upper bound for pending group count \
-             (stages must be <= {})",
-            cfg.stages,
-            cfg.stages - 2,
-            CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE + 2
+            "stages ({}) exceeds MAX_PIPELINE_STAGES ({MAX_PIPELINE_STAGES}); this upper bound \
+             matches derive_pipeline_stages (nvrtc.rs) so that this staged kernel's stage-count \
+             ceiling stays consistent with the rest of the crate",
+            cfg.stages
         )));
     }
     if !cfg.block_m.is_multiple_of(warp_tile) || !cfg.block_n.is_multiple_of(warp_tile) {
@@ -3032,46 +3038,49 @@ mod tests {
     }
 
     /// [`validate_wmma_tf32_staged_config`] のフェイルクローズド検証:
-    /// `cp.async.wait_group (STAGES-2)` の即値は PTX 上 0〜7 の範囲に
-    /// 制限されるため `stages > 9` を拒否することを確認する
-    /// （codex-review 指摘: SMEM 予算チェックのみでは block_m/block_n/
-    /// k_tile を小さくした構成で stages を大きく取れてしまい、この
-    /// wait_group 即値レンジの検査を素通りしうる。ここでは意図的に
-    /// warp タイル辺の最小構成〈block_m=block_n=WARP_TILE, k_tile=FRAG_K〉
-    /// を使い、SMEM 予算内のまま stages=10 が拒否されることを示す）。
+    /// `stages > MAX_PIPELINE_STAGES`（16）を拒否することを確認する
+    /// （SMEM 予算チェックのみでは block_m/block_n/k_tile を小さくした
+    /// 構成で stages を大きく取れてしまい、この段数上限の検査を素通り
+    /// しうる。ここでは意図的に warp タイル辺の最小構成
+    /// 〈block_m=block_n=WARP_TILE, k_tile=FRAG_K〉を使い、SMEM 予算内の
+    /// まま stages=17 が拒否されることを示す。PR #678 Bugbot 指摘対応:
+    /// 旧テストは誤った ISA 上限〈wait_group 即値 0〜7〉を根拠に
+    /// stages=10 を拒否していたが、正しい上限は
+    /// [`MAX_PIPELINE_STAGES`]（16）である）。
     #[test]
-    fn validate_wmma_tf32_staged_config_rejects_stages_exceeding_wait_group_bound() {
+    fn validate_wmma_tf32_staged_config_rejects_stages_exceeding_max_pipeline_stages() {
         let cfg = WmmaTf32StagedKernelConfig {
             block_m: WMMA_TF32_STAGED_WARP_TILE,
             block_n: WMMA_TF32_STAGED_WARP_TILE,
             k_tile: WMMA_TF32_STAGED_FRAG_K,
-            stages: 10, // stages-2=8 > wait_group 即値上限 7
+            stages: MAX_PIPELINE_STAGES + 1, // 17 > MAX_PIPELINE_STAGES(16)
             ..WmmaTf32StagedKernelConfig::default_tf32_staged()
         };
         let result = validate_wmma_tf32_staged_config(&cfg);
         assert!(
             matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
-            "SMEM 予算内だが stages=10（wait_group 即値上限超過）が拒否されませんでした: \
+            "SMEM 予算内だが stages=17（MAX_PIPELINE_STAGES 超過）が拒否されませんでした: \
              {result:?}"
         );
     }
 
-    /// 上記の境界値検査: `stages=9`（`stages-2=7` は wait_group 即値上限
-    /// ちょうど）は同じ最小構成で受理されることを確認する（過剰拒否を
-    /// 防ぐ境界値テスト）。
+    /// 上記の境界値検査: `stages=MAX_PIPELINE_STAGES`（16。ちょうど上限）は
+    /// 同じ最小構成で受理されることを確認する（過剰拒否を防ぐ境界値
+    /// テスト）。
     #[test]
-    fn validate_wmma_tf32_staged_config_accepts_stages_at_wait_group_bound() {
+    fn validate_wmma_tf32_staged_config_accepts_stages_at_max_pipeline_stages() {
         let cfg = WmmaTf32StagedKernelConfig {
             block_m: WMMA_TF32_STAGED_WARP_TILE,
             block_n: WMMA_TF32_STAGED_WARP_TILE,
             k_tile: WMMA_TF32_STAGED_FRAG_K,
-            stages: 9, // stages-2=7 == wait_group 即値上限
+            stages: MAX_PIPELINE_STAGES, // 16 == 上限ちょうど
             ..WmmaTf32StagedKernelConfig::default_tf32_staged()
         };
         let result = validate_wmma_tf32_staged_config(&cfg);
         assert!(
             result.is_ok(),
-            "SMEM 予算内かつ wait_group 即値上限ちょうどの stages=9 が拒否されました: {result:?}"
+            "SMEM 予算内かつ MAX_PIPELINE_STAGES ちょうどの stages=16 が拒否されました: \
+             {result:?}"
         );
     }
 
