@@ -892,6 +892,20 @@ const O_NONBLOCK: i32 = 0x0004;
 /// 経由の std 標準機能であり追加依存を要しない（[`O_NOFOLLOW`] 定数の
 /// コメント参照）。
 #[cfg(unix)]
+// macOS 版 `load_cache_entry_in`（`#[cfg(all(unix, not(target_os =
+// "linux")))]`）は `openat_nofollow` を使うため、macOS の通常ビルド
+// （`#[cfg(test)]` を含まない lib コンパイル単位）では本関数を直接
+// 呼ばない。`O_NOFOLLOW` 定数値そのものの直接回帰テスト
+// （`open_nofollow_rejects_a_symlinked_path`。全 unix 共通で実行）専用の
+// 到達経路として維持するため、Linux 以外では dead_code を抑止する
+// （イシュー #509・`aarch64-apple-darwin` クロスチェックで判明）。
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(
+        dead_code,
+        reason = "macOS では openat_nofollow に一本化されテスト専用の到達経路になるため"
+    )
+)]
 fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
@@ -953,19 +967,22 @@ fn proc_fd_path(dir: &fs::File) -> PathBuf {
     PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
 }
 
-/// POSIX `openat(2)` の FFI 宣言（macOS 版 [`load_cache_entry_in`] 用。
-/// イシュー #509 codex-review P0 再指摘〈TOCTOU〉対応）。
-///
-/// `libc`／`rustix` クレートは許容依存 8 区分（`.claude/rules/
-/// deps-policy.md`）外のためユーザー承認なしに追加できない（[`O_NOFOLLOW`]
-/// 定数のコメントと同じ制約）。一方 macOS の `/dev/fd/<fd>` は配下への
-/// パス継続解決をサポートしないため（[`proc_fd_path`] のドキュメン
-/// テーションコメント参照）、Linux 版と同じ「fd 経由でパス再解決を
-/// 避ける」手法を適用できない。そこで std のみでは到達できない `openat`
-/// システムコールを、新規クレートを追加せず `extern "C"` 宣言（libSystem
-/// が提供する libc シンボルへリンクする FFI 境界）で直接呼ぶ。`unsafe`
-/// は FFI 境界の必要最小限に留める方針（`.claude/rules/security.md`）に
-/// 沿い、本関数は [`openat_nofollow`] の内部でのみ使う。
+// POSIX `openat(2)` の FFI 宣言（macOS 版 `load_cache_entry_in` 用。
+// イシュー #509 codex-review P0 再指摘〈TOCTOU〉対応）。
+//
+// `libc`／`rustix` クレートは許容依存 8 区分（`.claude/rules/
+// deps-policy.md`）外のためユーザー承認なしに追加できない（`O_NOFOLLOW`
+// 定数のコメントと同じ制約）。一方 macOS の `/dev/fd/<fd>` は配下への
+// パス継続解決をサポートしないため（`proc_fd_path` のドキュメン
+// テーションコメント参照）、Linux 版と同じ「fd 経由でパス再解決を
+// 避ける」手法を適用できない。そこで std のみでは到達できない `openat`
+// システムコールを、新規クレートを追加せず `extern "C"` 宣言（libSystem
+// が提供する libc シンボルへリンクする FFI 境界）で直接呼ぶ。`unsafe`
+// は FFI 境界の必要最小限に留める方針（`.claude/rules/security.md`）に
+// 沿い、本関数は `openat_nofollow` の内部でのみ使う（rustdoc は extern
+// ブロックへの `///` ドキュメンテーションコメントを認識しないため
+// `//` の通常コメントとする。`aarch64-apple-darwin` クロスチェックで
+// unused-doc-comments として検出）。
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe extern "C" {
     fn openat(
@@ -1052,6 +1069,13 @@ const MAX_CACHE_ENTRY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 ///    うえで、実際の読み込みも `Read::take` で上限 + 1 バイトに制限する
 ///    （事前検査後にファイルが伸長される競合〈他プロセスが追記する等〉
 ///    への縦深防御）。
+/// 3. **非空検査**: 読み込んだバイト列が空なら `Ok(None)`（ミス）とする
+///    （実装計画 §3.1 の不変条件「両ファイルが存在し、いずれも空でない」。
+///    クラッシュ直後の 0 バイト残骸〈`create` 直後・書き込み前に
+///    プロセスが落ちた場合等〉を有効なエントリとして誤読しないための
+///    fail-closed 判定。fd 経由で読み込み済みのバイト列そのものを検査
+///    する〈別途 `metadata()` を取り直さない〉ため、この検査自体が新規の
+///    TOCTOU 窓を開かない）。
 ///
 /// いずれの拒否条件も「壊れたエントリはキャッシュミス扱いにする」という
 /// 本モジュールの既存方針（[`load_cache_entry_in`] のドキュメンテーション
@@ -1075,6 +1099,9 @@ fn read_verified_cache_entry_file(mut file: fs::File) -> std::io::Result<Option<
         .take(MAX_CACHE_ENTRY_FILE_BYTES + 1)
         .read_to_end(&mut buf)?;
     if buf.len() as u64 > MAX_CACHE_ENTRY_FILE_BYTES {
+        return Ok(None);
+    }
+    if buf.is_empty() {
         return Ok(None);
     }
 
@@ -1796,6 +1823,7 @@ pub(crate) fn store_cache_entry(
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
+    expected_src: &str,
 ) -> Result<Option<CachedKernel>, CudaError> {
     let entry_dir = cache_entry_path_in(root, key)?;
 
@@ -1827,6 +1855,14 @@ fn load_cache_entry_in(
             })?,
             None => return Ok(None),
         };
+    // ハッシュ衝突安全弁（実装計画 §3.1・§7。FNV-1a 64bit は非暗号ハッシュ
+    // のため、異なるソースが同一エントリ名〈`kernel.<name>.<hash16>`〉に
+    // 衝突した場合でも誤った PTX を返さないよう、保存済みソース全文を
+    // 要求元ソースとバイト単位で照合する。不一致はミス扱い〈`Ok(None)`〉
+    // とし、C-4〈#511〉配線後は素直に再コンパイルへフォールバックする）。
+    if kernel_cu != expected_src {
+        return Ok(None);
+    }
     let kernel_ptx =
         match read_verified_cache_entry_file(ptx_file).map_err(|e| CudaError::CacheIo {
             detail: format!("failed to read cached kernel ptx: {e}"),
@@ -1858,6 +1894,7 @@ fn load_cache_entry_in(
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
+    expected_src: &str,
 ) -> Result<Option<CachedKernel>, CudaError> {
     let entry_dir = cache_entry_path_in(root, key)?;
 
@@ -1888,6 +1925,10 @@ fn load_cache_entry_in(
             })?,
             None => return Ok(None),
         };
+    // ハッシュ衝突安全弁（Linux 版と同じ理由。実装計画 §3.1・§7）。
+    if kernel_cu != expected_src {
+        return Ok(None);
+    }
     let kernel_ptx =
         match read_verified_cache_entry_file(ptx_file).map_err(|e| CudaError::CacheIo {
             detail: format!("failed to read cached kernel ptx: {e}"),
@@ -1915,6 +1956,7 @@ fn load_cache_entry_in(
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
+    expected_src: &str,
 ) -> Result<Option<CachedKernel>, CudaError> {
     const MAX_CACHE_ENTRY_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -1927,7 +1969,11 @@ fn load_cache_entry_in(
     let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
     for path in [&cu_path, &ptx_path] {
         match fs::metadata(path) {
-            Ok(meta) if meta.is_file() && meta.len() <= MAX_CACHE_ENTRY_FILE_BYTES => {}
+            // 非空検査（実装計画 §3.1）: unix 版 `read_verified_cache_entry_file`
+            // と同じ不変条件をパスベース経路でも適用する。
+            Ok(meta)
+                if meta.is_file() && meta.len() > 0 && meta.len() <= MAX_CACHE_ENTRY_FILE_BYTES => {
+            }
             _ => return Ok(None),
         }
     }
@@ -1935,6 +1981,10 @@ fn load_cache_entry_in(
     let kernel_cu = fs::read_to_string(&cu_path).map_err(|e| CudaError::CacheIo {
         detail: format!("failed to read cached kernel source: {e}"),
     })?;
+    // ハッシュ衝突安全弁（Unix 版と同じ理由。実装計画 §3.1・§7）。
+    if kernel_cu != expected_src {
+        return Ok(None);
+    }
     let kernel_ptx = fs::read_to_string(&ptx_path).map_err(|e| CudaError::CacheIo {
         detail: format!("failed to read cached kernel ptx: {e}"),
     })?;
@@ -1949,6 +1999,14 @@ fn load_cache_entry_in(
 /// `workspace_root` から [`ensure_cache_root`] でルートを実体化した上で
 /// 委譲する（store 側と対称。ルート実体化は冪等なため読み出し専用の
 /// 呼び出しでも安全）。
+///
+/// `expected_src` は呼び出し元がこれからコンパイルしようとしている
+/// カーネルソース全文。`key` の 64bit ハッシュ（非暗号・FNV-1a）が
+/// 衝突した場合に誤った PTX を返さないための安全弁として、保存済み
+/// `kernel.cu` とバイト単位で照合する（実装計画 §3.1・§7）。この検査を
+/// `load_cache_entry_in` 側に閉じ込めるのは、呼び出し元が省略できる
+/// `Option` 引数にしないという C-2 以来の「注入で決定化・迂回不能」
+/// 方針を fs I/O 層まで一貫させるため。
 #[allow(
     dead_code,
     reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
@@ -1957,9 +2015,10 @@ fn load_cache_entry_in(
 pub(crate) fn load_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
+    expected_src: &str,
 ) -> Result<Option<CachedKernel>, CudaError> {
     let root = ensure_cache_root(workspace_root)?;
-    load_cache_entry_in(&root, key)
+    load_cache_entry_in(&root, key, expected_src)
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
@@ -3172,7 +3231,7 @@ mod tests {
             .expect("store must succeed");
         assert!(validate_cache_entry(&stored));
 
-        let loaded = load_cache_entry_in(&root, &key)
+        let loaded = load_cache_entry_in(&root, &key, "// kernel.cu source")
             .expect("load must succeed")
             .expect("entry must be a hit after store");
         assert_eq!(loaded.kernel_cu, "// kernel.cu source");
@@ -3221,7 +3280,8 @@ mod tests {
             "entry with a symlinked kernel.ptx must be rejected, not treated as a valid entry"
         );
 
-        let loaded = load_cache_entry_in(&root, &key).expect("load must not error, only miss");
+        let loaded = load_cache_entry_in(&root, &key, "kernel source")
+            .expect("load must not error, only miss");
         assert!(
             loaded.is_none(),
             "load must treat a symlink-replaced entry as a cache miss, never follow the symlink"
@@ -3254,7 +3314,7 @@ mod tests {
             !validate_cache_entry(&entry_path),
             "entry directory replaced with a symlink must be rejected"
         );
-        let loaded = load_cache_entry_in(&root, &key).expect("load must not error, only miss");
+        let loaded = load_cache_entry_in(&root, &key, "").expect("load must not error, only miss");
         assert!(loaded.is_none());
 
         let _ = fs::remove_dir_all(&root);
@@ -3289,7 +3349,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let root_for_thread = root.clone();
         std::thread::spawn(move || {
-            let result = load_cache_entry_in(&root_for_thread, &sample_key());
+            let result = load_cache_entry_in(&root_for_thread, &sample_key(), "kernel source");
             // reader が存在しないためテスト終了後も FIFO の open を試みる
             // 別プロセス/スレッドが残らないよう、成否に関わらず結果だけ
             // 送る（本スレッド自体は fn 終了で自然に終わる）。
@@ -3326,7 +3386,8 @@ mod tests {
         let oversized = vec![b'A'; (MAX_CACHE_ENTRY_FILE_BYTES + 1) as usize];
         fs::write(&ptx_path, &oversized).expect("must write oversized ptx file");
 
-        let loaded = load_cache_entry_in(&root, &key).expect("load must not error, only miss");
+        let loaded = load_cache_entry_in(&root, &key, "kernel source")
+            .expect("load must not error, only miss");
         assert!(
             loaded.is_none(),
             "load must treat an oversized entry file as a cache miss, never read it unbounded"
@@ -3412,7 +3473,7 @@ mod tests {
         let root = fresh_temp_dir("miss");
         let key = sample_key();
 
-        let loaded = load_cache_entry_in(&root, &key).expect("load must succeed");
+        let loaded = load_cache_entry_in(&root, &key, "irrelevant").expect("load must succeed");
         assert!(loaded.is_none());
 
         let _ = fs::remove_dir_all(&root);
@@ -3432,7 +3493,7 @@ mod tests {
             .expect("second store must be absorbed as success, not fail");
 
         assert_eq!(first, second);
-        let loaded = load_cache_entry_in(&root, &key)
+        let loaded = load_cache_entry_in(&root, &key, "first.cu")
             .expect("load must succeed")
             .expect("entry must exist");
         // 先着（1 回目）の内容が保たれ、2 回目の書き込みで上書きされない
@@ -3503,7 +3564,7 @@ mod tests {
             store_cache_entry_in(&root, &key, "cu-body", "ptx-body").expect("store must succeed");
         fs::remove_file(entry_dir.join(CACHE_ENTRY_PTX_FILE)).expect("must remove ptx file");
 
-        let loaded = load_cache_entry_in(&root, &key).expect("load must succeed");
+        let loaded = load_cache_entry_in(&root, &key, "cu-body").expect("load must succeed");
         assert!(loaded.is_none(), "entry missing kernel.ptx must be a miss");
 
         let _ = fs::remove_dir_all(&root);
@@ -3527,11 +3588,65 @@ mod tests {
             .expect("store must replace the corrupt entry");
         assert_eq!(replaced, entry_dir);
 
-        let loaded = load_cache_entry_in(&root, &key)
+        let loaded = load_cache_entry_in(&root, &key, "fresh-cu")
             .expect("load must succeed")
             .expect("replaced entry must be a hit");
         assert_eq!(loaded.kernel_cu, "fresh-cu");
         assert_eq!(loaded.kernel_ptx, "fresh-ptx");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 受け入れ基準（実装計画 §3.1・§8）: 非空検査。`kernel.cu` をクラッシュ
+    // 残骸想定の 0 バイトファイルへ差し替えると、`is_file()` は真だが
+    // `read_verified_cache_entry_file`（Unix 版）／サイズ検査（非 Unix
+    // 版）の非空チェックでミス扱いになること。
+    #[test]
+    fn load_treats_empty_source_file_as_miss() {
+        let root = fresh_temp_dir("empty-cu");
+        let key = sample_key();
+
+        let entry_dir =
+            store_cache_entry_in(&root, &key, "cu-body", "ptx-body").expect("store must succeed");
+        fs::write(entry_dir.join(CACHE_ENTRY_SOURCE_FILE), b"")
+            .expect("must truncate kernel.cu to zero bytes");
+
+        let loaded =
+            load_cache_entry_in(&root, &key, "cu-body").expect("load must not error, only miss");
+        assert!(
+            loaded.is_none(),
+            "entry with an empty kernel.cu must be a miss, not a crash-remnant hit"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 受け入れ基準（実装計画 §3.1・§7）: ハッシュ衝突安全弁。保存済み
+    // `kernel.cu` の内容が呼び出し元の要求ソース（`expected_src`）と
+    // バイト不一致であれば、64bit FNV-1a ハッシュの衝突によって別ソースの
+    // エントリを誤ってヒット扱いしない（誤った PTX を GPU へ渡さない
+    // fail-closed）。
+    #[test]
+    fn load_treats_source_mismatch_as_miss() {
+        let root = fresh_temp_dir("source-mismatch");
+        let key = sample_key();
+
+        store_cache_entry_in(&root, &key, "stored-source.cu", "stored-source.ptx")
+            .expect("store must succeed");
+
+        let loaded = load_cache_entry_in(&root, &key, "different-source.cu")
+            .expect("load must not error, only miss");
+        assert!(
+            loaded.is_none(),
+            "a stored source that differs from the caller's expected source must be a miss \
+             (hash-collision safety valve), even though the entry itself is otherwise valid"
+        );
+
+        // 対照実験: 一致する場合は通常どおりヒットすること。
+        let hit = load_cache_entry_in(&root, &key, "stored-source.cu")
+            .expect("load must succeed")
+            .expect("matching source must still be a hit");
+        assert_eq!(hit.kernel_cu, "stored-source.cu");
 
         let _ = fs::remove_dir_all(&root);
     }
