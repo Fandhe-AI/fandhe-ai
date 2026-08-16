@@ -37,10 +37,17 @@ const _: () = assert!(MR * NR <= 256);
 /// `tests/gemm_blis_parity.rs` の `is_x86_feature_detected!` ガード付き
 /// 直接呼び出しがその責務を果たす）。
 ///
+/// # `ldc` 契約（#557）
+///
+/// `c` は要素 `c[i*ldc+j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする。
+/// 完全タイル呼び出しでは `ldc = n`（C の実列数）で C バッファへ直接、
+/// 端タイル呼び出しでは `ldc = NR` で密パッキングされたスタックバッファへ
+/// アクセスする（[`super::Microkernel::run`] 契約と同一）。
+///
 /// # Panics
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／
-/// `c_tile.len() != MR * NR` のいずれかであればパニックする（REQ-8
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／`ldc < NR`／
+/// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする（REQ-8
 /// 境界検査規約: 最適化対象の関数であっても関数入口の明示検査は省略
 /// しない。呼び出し頻度はマイクロカーネル呼び出し 1 回につき 1 回のみ
 /// で、内側の SIMD ループには一切挟まない）。
@@ -51,24 +58,32 @@ const _: () = assert!(MR * NR <= 256);
 /// 保証しなければならない（コンパイル時 cfg または `is_x86_feature_detected!`
 /// による実行時検出のいずれか）。
 #[target_feature(enable = "avx2,fma")]
-pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+    assert!(ldc >= NR, "ldc must be at least NR");
+    assert!(
+        c.len()
+            >= (MR - 1)
+                .checked_mul(ldc)
+                .and_then(|v| v.checked_add(NR))
+                .expect("ldc*MR overflow"),
+        "C tile buffer too small for MR*ldc access pattern"
+    );
 
     // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
-    // 要素、c_tile は MR*NR(=96) 要素ちょうどであることが保証されている。
-    // 以下のロード／ストアはいずれもこの範囲内のオフセットに限定される
-    // （p*NR+8..p*NR+16 の最大値は kc_len-1 でも bp.len() を超えない。
-    // c_tile も i*NR+8..i*NR+16 が最大 i=MR-1 でも c_tile.len() を超え
-    // ない）。AVX2+FMA 命令の発行自体は、この関数の `#[target_feature]`
-    // 契約により呼び出し元が実行 CPU の対応を保証している前提で健全
-    // （関数ドキュメントの `# Safety` 節参照）。
+    // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
+    // ことが保証されている。以下のロード／ストアはいずれもこの範囲内の
+    // オフセットに限定される（p*NR+8..p*NR+16 の最大値は kc_len-1 でも
+    // bp.len() を超えない。c も i*ldc+8..i*ldc+16 が最大 i=MR-1 でも
+    // c.len() を超えない）。AVX2+FMA 命令の発行自体は、この関数の
+    // `#[target_feature]` 契約により呼び出し元が実行 CPU の対応を
+    // 保証している前提で健全（関数ドキュメントの `# Safety` 節参照）。
     unsafe {
         let mut acc: [[__m256; 2]; MR] = std::array::from_fn(|i| {
             [
-                _mm256_loadu_ps(c_tile[i * NR..].as_ptr()),
-                _mm256_loadu_ps(c_tile[i * NR + 8..].as_ptr()),
+                _mm256_loadu_ps(c[i * ldc..].as_ptr()),
+                _mm256_loadu_ps(c[i * ldc + 8..].as_ptr()),
             ]
         });
 
@@ -84,8 +99,8 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_le
         }
 
         for (i, acc_i) in acc.iter().enumerate() {
-            _mm256_storeu_ps(c_tile[i * NR..].as_mut_ptr(), acc_i[0]);
-            _mm256_storeu_ps(c_tile[i * NR + 8..].as_mut_ptr(), acc_i[1]);
+            _mm256_storeu_ps(c[i * ldc..].as_mut_ptr(), acc_i[0]);
+            _mm256_storeu_ps(c[i * ldc + 8..].as_mut_ptr(), acc_i[1]);
         }
     }
 }
@@ -98,12 +113,12 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_le
 /// この条件下でのみ本関数を選ぶため、`unsafe` 呼び出しの健全性は
 /// コンパイル時に確定する。
 #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
-pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     // SAFETY: この関数がコンパイルされている時点で `cfg(target_feature =
     // "avx2", target_feature = "fma")` が成立しており、ビルド対象 CPU は
     // AVX2+FMA をサポートすると明示されている（`kernel_unchecked` の
     // `# Safety` 契約を満たす）。
-    unsafe { kernel_unchecked(ap, bp, c_tile, kc_len) }
+    unsafe { kernel_unchecked(ap, bp, c, ldc, kc_len) }
 }
 
 #[cfg(test)]
@@ -146,7 +161,7 @@ mod tests {
         // SAFETY: 直前の is_x86_feature_detected! ガードにより実行 CPU が
         // AVX2・FMA をサポートすることを確認済み。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_tile, kc_len);
+            kernel_unchecked(&ap, &bp, &mut c_tile, NR, kc_len);
         }
 
         // 行 0 の先頭は c_tile[0]、行 1 の先頭は c_tile[NR]。
@@ -215,12 +230,62 @@ mod tests {
         let mut c_avx2 = c_init;
         // SAFETY: 直前の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_avx2, kc_len);
+            kernel_unchecked(&ap, &bp, &mut c_avx2, NR, kc_len);
         }
 
         assert_eq!(
             c_ref, c_avx2,
             "AVX2 カーネルは mul_add 参照実装と bit 完全一致するはず"
         );
+    }
+
+    /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
+    /// と bit 完全一致し、ギャップ列を破壊しないことを検証する（scalar.rs
+    /// の同種テストと同一パターン）。
+    #[test]
+    fn kernel_unchecked_with_larger_ldc_matches_tight_packing_and_preserves_gap() {
+        if !is_x86_feature_detected!("avx2") || !is_x86_feature_detected!("fma") {
+            eprintln!("AVX2/FMA 非対応環境のためスキップ");
+            return;
+        }
+
+        let kc_len = 5;
+        let ap = xorshift32_vec(0xC0FF_EE01, MR * kc_len);
+        let bp = xorshift32_vec(0xC0FF_EE02, kc_len * NR);
+        let c_init = xorshift32_vec(0xC0FF_EE03, MR * NR);
+
+        let mut c_tight = c_init.clone();
+        // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
+        unsafe {
+            kernel_unchecked(&ap, &bp, &mut c_tight, NR, kc_len);
+        }
+
+        let ldc = NR + 5;
+        let sentinel = -777.0f32;
+        let mut c_gapped = vec![sentinel; (MR - 1) * ldc + ldc];
+        for i in 0..MR {
+            c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
+        }
+        // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
+        unsafe {
+            kernel_unchecked(&ap, &bp, &mut c_gapped, ldc, kc_len);
+        }
+
+        for i in 0..MR {
+            for j in 0..NR {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    c_tight[i * NR + j],
+                    "ldc={ldc} 経路と ldc=NR 経路は bit 完全一致するはず（i={i}, j={j}）"
+                );
+            }
+            for j in NR..ldc {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    sentinel,
+                    "ギャップ列（i={i}, j={j}）は直接ストアで破壊されてはならない"
+                );
+            }
+        }
     }
 }

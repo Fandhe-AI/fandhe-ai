@@ -112,11 +112,25 @@ pub trait Microkernel: Copy + Sync {
     /// マイクロカーネルタイルの列数。
     const NR: usize;
 
-    /// `ap`（packed A）・`bp`（packed B）から `c_tile`（MR×NR、row-major・
-    /// ld=NR）へ `kc_len` ぶんの寄与を加算する。安全な呼び出し専用の入口
-    /// であり、内部の `unsafe`（intrinsics 呼び出し）はトークンの生成
-    /// 経路（検出済みの場合のみ構築可能）によって健全性が保証される。
-    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize);
+    /// `ap`（packed A）・`bp`（packed B）から `c`（MR×NR タイル、row-major・
+    /// 行ストライド `ldc`）へ `kc_len` ぶんの寄与を加算する。安全な呼び出し
+    /// 専用の入口であり、内部の `unsafe`（intrinsics 呼び出し）はトークンの
+    /// 生成経路（検出済みの場合のみ構築可能）によって健全性が保証される。
+    ///
+    /// ## `ldc` 契約（#557: 完全タイルの C 直接ロード/ストア）
+    ///
+    /// `c` は要素 `c[i * ldc + j]`（`i in 0..MR`・`j in 0..NR`）のみを
+    /// 読み書きする対象とし、それ以外のインデックスへは触れない。この
+    /// 契約により、呼び出し元（[`super::gemm_blis_region`]）は 2 通りの
+    /// 呼び出し方ができる:
+    ///
+    /// - 完全タイル（`mr_eff == MR && nr_eff == NR`）: C の実バッファから
+    ///   タイル原点起点のサブスライスを直接渡し `ldc = n`（C の列数）と
+    ///   する。コピーイン/コピーアウトが不要になる（#557 の主目的）
+    /// - 端タイル: 従来どおり `MAX_TILE` スタックバッファの先頭
+    ///   `MR*NR` 要素を渡し `ldc = NR` とする（現行の密パッキング契約は
+    ///   `ldc = NR` の特殊ケースとして包含される）
+    fn run(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize);
 }
 
 /// 全 arch 共通のスカラーフォールバックトークン。検出不要のため
@@ -128,8 +142,8 @@ impl Microkernel for ScalarKernel {
     const MR: usize = scalar::MR;
     const NR: usize = scalar::NR;
 
-    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        scalar::kernel(ap, bp, c_tile, kc_len);
+    fn run(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+        scalar::kernel(ap, bp, c, ldc, kc_len);
     }
 }
 
@@ -144,8 +158,8 @@ impl Microkernel for NeonKernel {
     const MR: usize = neon::MR;
     const NR: usize = neon::NR;
 
-    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        neon::kernel(ap, bp, c_tile, kc_len);
+    fn run(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+        neon::kernel(ap, bp, c, ldc, kc_len);
     }
 }
 
@@ -178,11 +192,11 @@ impl Microkernel for Avx2Kernel {
     const MR: usize = avx2::MR;
     const NR: usize = avx2::NR;
 
-    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    fn run(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
         // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
         // is_x86_feature_detected!("avx2") && ("fma") を確認済み
         // （avx2::kernel_unchecked の `# Safety` 契約を満たす）。
-        unsafe { avx2::kernel_unchecked(ap, bp, c_tile, kc_len) }
+        unsafe { avx2::kernel_unchecked(ap, bp, c, ldc, kc_len) }
     }
 }
 
@@ -215,11 +229,11 @@ impl Microkernel for Avx512Kernel {
     const MR: usize = avx512::MR;
     const NR: usize = avx512::NR;
 
-    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    fn run(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
         // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
         // is_x86_feature_detected!("avx512f") を確認済み
         // （avx512::kernel_unchecked の `# Safety` 契約を満たす）。
-        unsafe { avx512::kernel_unchecked(ap, bp, c_tile, kc_len) }
+        unsafe { avx512::kernel_unchecked(ap, bp, c, ldc, kc_len) }
     }
 }
 

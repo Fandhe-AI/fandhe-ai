@@ -19,30 +19,44 @@ pub const NR: usize = 4;
 const _: () = assert!(MR * NR <= 256);
 
 /// `ap`（packed A、MR 行×kc_len、p-major）・`bp`（packed B、kc_len×NR、
-/// p-major）から MR×NR の C タイル `c_tile`（row-major、ld=NR）へ
+/// p-major）から MR×NR の C タイル `c`（row-major、行ストライド `ldc`）へ
 /// `kc_len` ぶんの寄与を加算する。
 ///
 /// 呼び出し元（[`super::super::mod`] の 5-loop ドライバ）は本関数呼び出し
-/// 前に `c_tile` へ実際の C の現在値をロードし、呼び出し後に書き戻す
-/// （複数の `pc` ブロックにまたがる累積を成立させるため）。
+/// 前に `c` へ実際の C の現在値をロードし、呼び出し後に書き戻す
+/// （複数の `pc` ブロックにまたがる累積を成立させるため）。#557 により
+/// 完全タイルは C の実バッファへ `ldc = n` で直接読み書きし、端タイルは
+/// 従来どおり `MAX_TILE` スタックバッファへ `ldc = NR` でコピー往復する
+/// （[`super::Microkernel::run`] の `ldc` 契約参照）。
 ///
 /// # 累積順序（bit 完全一致契約）
 ///
-/// 各 `(i, j)` に対し `c_tile[i][j] = a[p][i].mul_add(b[p][j], c_tile[i][j])`
+/// 各 `(i, j)` に対し `c[i*ldc+j] = a[p][i].mul_add(b[p][j], c[i*ldc+j])`
 /// を `p` 昇順に適用する。この順序は [`crate::gemm::gemm_naive`] が
 /// 内側ループで行う蓄積順序と同一であり、他の `(i, j)` との縮約
 /// （split-k 等）を一切行わないため、`gemm_naive` と bit 完全一致が
-/// 成立する（`tests/gemm_blis_parity.rs` の `assert_eq!` 契約）。
+/// 成立する（`tests/gemm_blis_parity.rs` の `assert_eq!` 契約）。`ldc` の
+/// 導入で変わるのはロード/ストアのアドレッシングのみで演算値・順序は
+/// 不変のため、この契約は `ldc` に依らず成立する。
 ///
 /// # Panics
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／
-/// `c_tile.len() != MR * NR` のいずれかであればパニックする
-/// （呼び出し元のバグを早期検出する契約前提の検証。REQ-8 境界検査規約）。
-pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／`ldc < NR`／
+/// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする
+/// （呼び出し元のバグを早期検出する契約前提の検証。REQ-8 境界検査規約。
+/// `(MR-1)*ldc+NR` は本関数がアクセスする最大オフセット `+1`）。
+pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+    assert!(ldc >= NR, "ldc must be at least NR");
+    assert!(
+        c.len()
+            >= (MR - 1)
+                .checked_mul(ldc)
+                .and_then(|v| v.checked_add(NR))
+                .expect("ldc*MR overflow"),
+        "C tile buffer too small for MR*ldc access pattern"
+    );
 
     for p in 0..kc_len {
         let a_p = &ap[p * MR..p * MR + MR];
@@ -50,7 +64,7 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
         for i in 0..MR {
             let a_val = a_p[i];
             for j in 0..NR {
-                c_tile[i * NR + j] = a_val.mul_add(b_p[j], c_tile[i * NR + j]);
+                c[i * ldc + j] = a_val.mul_add(b_p[j], c[i * ldc + j]);
             }
         }
     }
@@ -83,7 +97,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, 2);
+        kernel(&ap, &bp, &mut c_tile, NR, 2);
 
         assert_eq!(c_tile[0], 19.0); // 1*5+2*7（行 0 の先頭は c_tile[0]）
         assert_eq!(c_tile[1], 22.0); // 1*6+2*8
@@ -97,6 +111,79 @@ mod tests {
         let ap = vec![0.0f32; MR * 2 - 1];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, 2);
+        kernel(&ap, &bp, &mut c_tile, NR, 2);
+    }
+
+    /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
+    /// と bit 完全一致し、ギャップ列（`j in NR..ldc` に相当する隣接領域）
+    /// を破壊しないことを検証する（回帰検査。§5 テスト計画 1・2）。
+    #[test]
+    fn kernel_with_larger_ldc_matches_tight_packing_and_preserves_gap() {
+        let kc_len = 3;
+        let ap = vec![
+            1.0, 2.0, 3.0, 4.0, // p=0
+            5.0, 6.0, 7.0, 8.0, // p=1
+            9.0, 10.0, 11.0, 12.0, // p=2
+        ];
+        let bp = vec![
+            0.1, 0.2, 0.3, 0.4, // p=0
+            0.5, 0.6, 0.7, 0.8, // p=1
+            0.9, 1.0, 1.1, 1.2, // p=2
+        ];
+
+        let mut c_tight = vec![0.0f32; MR * NR];
+        kernel(&ap, &bp, &mut c_tight, NR, kc_len);
+
+        // ldc = NR + 3 のギャップ付きバッファ。ギャップ列は番兵値
+        // （追跡しやすい負の値）で埋め、カーネル実行後も不変であることを
+        // 確認する（直接ストアが隣接領域を破壊しない回帰検査）。
+        let ldc = NR + 3;
+        let sentinel = -999.0f32;
+        let mut c_gapped = vec![sentinel; (MR - 1) * ldc + ldc];
+        // タイル本体（j in 0..NR）は c_tight と同じ初期値（0.0）で揃え、
+        // ギャップ列（j in NR..ldc）のみ番兵値のまま残す。
+        for i in 0..MR {
+            for j in 0..NR {
+                c_gapped[i * ldc + j] = 0.0;
+            }
+        }
+        kernel(&ap, &bp, &mut c_gapped, ldc, kc_len);
+
+        for i in 0..MR {
+            for j in 0..NR {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    c_tight[i * NR + j],
+                    "ldc={ldc} 経路と ldc=NR 経路は bit 完全一致するはず（i={i}, j={j}）"
+                );
+            }
+            for j in NR..ldc {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    sentinel,
+                    "ギャップ列（i={i}, j={j}）は直接ストアで破壊されてはならない"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "ldc must be at least NR")]
+    fn kernel_rejects_ldc_smaller_than_nr() {
+        let ap = vec![0.0f32; MR * 2];
+        let bp = vec![0.0f32; 2 * NR];
+        let mut c_tile = vec![0.0f32; MR * NR];
+        kernel(&ap, &bp, &mut c_tile, NR - 1, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "C tile buffer too small")]
+    fn kernel_rejects_c_buffer_too_small_for_ldc() {
+        let ap = vec![0.0f32; MR * 2];
+        let bp = vec![0.0f32; 2 * NR];
+        // ldc = NR + 1 なら必要長は (MR-1)*(NR+1)+NR だが、ここでは
+        // 密パッキング（MR*NR）ぶんしか用意しない。
+        let mut c_tile = vec![0.0f32; MR * NR];
+        kernel(&ap, &bp, &mut c_tile, NR + 1, 2);
     }
 }

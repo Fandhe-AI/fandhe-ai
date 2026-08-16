@@ -52,30 +52,46 @@ const _: () = assert!(MR == 8 && NR == 8);
 /// ロードし、レーン間縮約を一切行わないため、`p` ごとの `a[p][i]・b[p][j]`
 /// への乗算順序はスカラー版と bit 完全一致する。
 ///
+/// # `ldc` 契約（#557）
+///
+/// `c` は要素 `c[i*ldc+j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする。
+/// 完全タイル呼び出しでは `ldc = n`（C の実列数）で C バッファへ直接、
+/// 端タイル呼び出しでは `ldc = NR` で密パッキングされたスタックバッファへ
+/// アクセスする（[`super::Microkernel::run`] 契約と同一）。
+///
 /// # Panics
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／
-/// `c_tile.len() != MR * NR` のいずれかであればパニックする（REQ-8
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／`ldc < NR`／
+/// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする（REQ-8
 /// 境界検査規約: 呼び出し元契約を関数入口で明示検査し、以降の
 /// `unsafe` ロード／ストアはこの検査済み長さの範囲内でのみ行う）。
-pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+    assert!(ldc >= NR, "ldc must be at least NR");
+    assert!(
+        c.len()
+            >= (MR - 1)
+                .checked_mul(ldc)
+                .and_then(|v| v.checked_add(NR))
+                .expect("ldc*MR overflow"),
+        "C tile buffer too small for MR*ldc access pattern"
+    );
 
     // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
-    // 要素、c_tile は MR*NR(=64) 要素ちょうどであることが保証されている。
-    // 以下のロード／ストアはいずれもこの範囲内のオフセット（p*MR+i の
-    // 最大値は (kc_len-1)*MR+MR-1 = ap.len()-1、p*MR+4..p*MR+8 の最大も
-    // 同様に ap.len() を超えない。c_tile も i*NR+4..i*NR+8 が最大
-    // i=MR-1 でも c_tile.len() を超えない）に限定される。NEON は
-    // aarch64 のベースライン機能であり実行時検出は不要（本モジュールが
-    // `cfg(target_arch = "aarch64")` 限定コンパイルであることが前提）。
+    // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
+    // ことが保証されている。以下のロード／ストアはいずれもこの範囲内の
+    // オフセット（p*MR+i の最大値は (kc_len-1)*MR+MR-1 = ap.len()-1、
+    // p*MR+4..p*MR+8 の最大も同様に ap.len() を超えない。c も
+    // i*ldc+4..i*ldc+8 が最大 i=MR-1 でも c.len() を超えない）に限定
+    // される。NEON は aarch64 のベースライン機能であり実行時検出は不要
+    // （本モジュールが `cfg(target_arch = "aarch64")` 限定コンパイルで
+    // あることが前提）。
     unsafe {
         let mut acc: [[float32x4_t; 2]; MR] = std::array::from_fn(|i| {
             [
-                vld1q_f32(c_tile[i * NR..].as_ptr()),
-                vld1q_f32(c_tile[i * NR + 4..].as_ptr()),
+                vld1q_f32(c[i * ldc..].as_ptr()),
+                vld1q_f32(c[i * ldc + 4..].as_ptr()),
             ]
         });
 
@@ -113,8 +129,101 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
         }
 
         for (i, acc_i) in acc.iter().enumerate() {
-            vst1q_f32(c_tile[i * NR..].as_mut_ptr(), acc_i[0]);
-            vst1q_f32(c_tile[i * NR + 4..].as_mut_ptr(), acc_i[1]);
+            vst1q_f32(c[i * ldc..].as_mut_ptr(), acc_i[0]);
+            vst1q_f32(c[i * ldc + 4..].as_mut_ptr(), acc_i[1]);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift32 による疑似乱数ベクトル生成（テスト専用・本体非依存。
+    /// [`super::avx2`] の同名関数のドキュメントコメント参照）。
+    fn xorshift32_vec(seed: u32, len: usize) -> Vec<f32> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as f64 / u32::MAX as f64) as f32
+            })
+            .collect()
+    }
+
+    /// 手計算 2x2（MR/NR=8 タイルの左上 2x2 のみ使用・残りはゼロ）で
+    /// FMA 累積が正しいことを確認する（scalar.rs の同種テストと同じ
+    /// ケース。aarch64 実機／エミュレーションでのみ実行される）。
+    #[test]
+    fn kernel_matches_hand_computed_subset() {
+        let kc_len = 2;
+        let mut ap = vec![0.0f32; MR * kc_len];
+        let mut bp = vec![0.0f32; kc_len * NR];
+        ap[0] = 1.0;
+        ap[1] = 3.0;
+        ap[MR] = 2.0;
+        ap[MR + 1] = 4.0;
+        bp[0] = 5.0;
+        bp[1] = 6.0;
+        bp[NR] = 7.0;
+        bp[NR + 1] = 8.0;
+
+        let mut c_tile = vec![0.0f32; MR * NR];
+        kernel(&ap, &bp, &mut c_tile, NR, kc_len);
+
+        assert_eq!(c_tile[0], 19.0);
+        assert_eq!(c_tile[1], 22.0);
+        assert_eq!(c_tile[NR], 43.0);
+        assert_eq!(c_tile[NR + 1], 50.0);
+    }
+
+    /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
+    /// と bit 完全一致し、ギャップ列を破壊しないことを検証する（scalar.rs／
+    /// avx2.rs の同種テストと同一パターン）。
+    #[test]
+    fn kernel_with_larger_ldc_matches_tight_packing_and_preserves_gap() {
+        let kc_len = 5;
+        let ap = xorshift32_vec(0xE0FF_EE01, MR * kc_len);
+        let bp = xorshift32_vec(0xE0FF_EE02, kc_len * NR);
+        let c_init = xorshift32_vec(0xE0FF_EE03, MR * NR);
+
+        let mut c_tight = c_init.clone();
+        kernel(&ap, &bp, &mut c_tight, NR, kc_len);
+
+        let ldc = NR + 5;
+        let sentinel = -777.0f32;
+        let mut c_gapped = vec![sentinel; (MR - 1) * ldc + ldc];
+        for i in 0..MR {
+            c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
+        }
+        kernel(&ap, &bp, &mut c_gapped, ldc, kc_len);
+
+        for i in 0..MR {
+            for j in 0..NR {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    c_tight[i * NR + j],
+                    "ldc={ldc} 経路と ldc=NR 経路は bit 完全一致するはず（i={i}, j={j}）"
+                );
+            }
+            for j in NR..ldc {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    sentinel,
+                    "ギャップ列（i={i}, j={j}）は直接ストアで破壊されてはならない"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "ldc must be at least NR")]
+    fn kernel_rejects_ldc_smaller_than_nr() {
+        let ap = vec![0.0f32; MR * 2];
+        let bp = vec![0.0f32; 2 * NR];
+        let mut c_tile = vec![0.0f32; MR * NR];
+        kernel(&ap, &bp, &mut c_tile, NR - 1, 2);
     }
 }

@@ -66,11 +66,19 @@ use microkernel::ScalarKernel;
 use pack::{APackTile, BPackTile, pack_a, pack_b};
 use rayon::prelude::*;
 
-/// C タイルのスタックバッファ最大要素数（`MR * NR` の全 ISA 中の最大値。
-/// AVX-512 の 8×32=256 が最大。ジェネリック const 式は stable Rust では
-/// 使えないため固定長で確保し、各カーネルモジュールの
+/// 端タイル専用の C スタックバッファ最大要素数（`MR * NR` の全 ISA 中の
+/// 最大値。AVX-512 の 8×32=256 が最大。ジェネリック const 式は stable
+/// Rust では使えないため固定長で確保し、各カーネルモジュールの
 /// `const _: () = assert!(MR * NR <= 256);` でこの上限を守ることを
 /// コンパイル時に検査する）。
+///
+/// #557 により、完全タイル（`mr_eff == MR && nr_eff == NR`）は C の実
+/// バッファへ [`Microkernel::run`] の `ldc` 契約経由で直接ロード/ストア
+/// するため、本バッファは境界検査（REQ-8）が必要な**端タイル専用**に
+/// 用途が絞られた（参照実装 matrixmultiply の「完全タイルは直接、端
+/// タイルのみマスク付きバッファ」という設計に倣う。以前は全タイルが
+/// 本バッファ経由でタイルあたり 2×MR×NR 要素のコピー往復を余分に
+/// 払っていた）。
 const MAX_TILE: usize = 256;
 
 /// キャッシュブロッキングの行方向ブロックサイズ（A のパネル高さ）。
@@ -503,32 +511,52 @@ fn gemm_blis_region<K: Microkernel>(
                         let mr_eff = mr.min(mc_len - ir);
                         let ap_slice =
                             &a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr];
-
-                        // C タイルの現在値をロード（複数 pc ブロックに
-                        // またがる累積を成立させるため、ゼロ初期化せず
-                        // 実際の現在値を読み込む）。padding レーン
-                        // （mr_eff..mr, nr_eff..nr）はゼロのままでよい
-                        // （書き戻し時に有効部のみコピーするため不使用）。
-                        // `MAX_TILE` 固定長スタックバッファを確保し
-                        // `mr*nr` ぶんだけ使う（ir_block×jr_block のたびに
-                        // ヒープ確保しない。Review 指摘: M=N=K=2048 では
-                        // ir/jr ループの反復数が数十万に達し `Vec` 確保が
-                        // 無視できないオーバーヘッドになるため）。
-                        let mut c_tile_buf = [0.0f32; MAX_TILE];
-                        let c_tile = &mut c_tile_buf[..mr * nr];
                         let col_base = jc + jr;
-                        for i in 0..mr_eff {
-                            let src = &c[(ic + ir + i) * n + col_base
-                                ..(ic + ir + i) * n + col_base + nr_eff];
-                            c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
-                        }
 
-                        kernel.run(ap_slice, bp_slice, c_tile, kc_len);
+                        if mr_eff == mr && nr_eff == nr {
+                            // 完全タイル（#557）: C の実バッファへ
+                            // `Microkernel::run` の `ldc` 契約経由で直接
+                            // ロード/ストアし、コピーイン/コピーアウトの
+                            // 往復を省く。`row0` はこのタイル原点（行
+                            // ic+ir・列 col_base）の C 上のオフセットで、
+                            // サブスライス長 `(mr-1)*n + nr` は行 mr-1・
+                            // 列 nr-1 までを覆う（`ldc = n`）。完全タイル
+                            // ゆえ `col_base + nr <= n` が成立し
+                            // `ldc(=n) >= nr` も自動的に満たされる
+                            // （[`microkernel::Microkernel::run`] の `ldc`
+                            // 契約参照）。スライス取得自体が範囲外なら
+                            // panic する安全操作であり、カーネル入口の
+                            // `ldc`／長さ assert と合わせ REQ-8 の境界
+                            // 検査を二重に満たす。
+                            let row0 = (ic + ir) * n + col_base;
+                            let c_direct = &mut c[row0..row0 + (mr - 1) * n + nr];
+                            kernel.run(ap_slice, bp_slice, c_direct, n, kc_len);
+                        } else {
+                            // 端タイル: 従来どおり `MAX_TILE` スタック
+                            // バッファへコピーインし、有効部
+                            // （mr_eff×nr_eff）のみコピーバックする
+                            // （padding レーン mr_eff..mr, nr_eff..nr は
+                            // ゼロのままでよい。書き戻し時に不使用）。
+                            // ir_block×jr_block のたびのヒープ確保を避ける
+                            // ため固定長スタック配列を使う（Review 指摘:
+                            // M=N=K=2048 では ir/jr ループの反復数が数十万
+                            // に達し `Vec` 確保が無視できないオーバー
+                            // ヘッドになるため）。
+                            let mut c_tile_buf = [0.0f32; MAX_TILE];
+                            let c_tile = &mut c_tile_buf[..mr * nr];
+                            for i in 0..mr_eff {
+                                let src = &c[(ic + ir + i) * n + col_base
+                                    ..(ic + ir + i) * n + col_base + nr_eff];
+                                c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
+                            }
 
-                        for i in 0..mr_eff {
-                            let dst = &mut c[(ic + ir + i) * n + col_base
-                                ..(ic + ir + i) * n + col_base + nr_eff];
-                            dst.copy_from_slice(&c_tile[i * nr..i * nr + nr_eff]);
+                            kernel.run(ap_slice, bp_slice, c_tile, nr, kc_len);
+
+                            for i in 0..mr_eff {
+                                let dst = &mut c[(ic + ir + i) * n + col_base
+                                    ..(ic + ir + i) * n + col_base + nr_eff];
+                                dst.copy_from_slice(&c_tile[i * nr..i * nr + nr_eff]);
+                            }
                         }
                     }
                 }
@@ -673,6 +701,36 @@ mod tests {
         assert_eq!(
             c_detected, c_scalar,
             "実行時検出された ISA 経路と ScalarKernel 強制経路は bit 完全一致するはず"
+        );
+    }
+
+    /// #557: 全タイルが完全タイル（直接経路のみを通る）形状で
+    /// `gemm_naive` と bit 完全一致することを確認する（[`ScalarKernel`]
+    /// 強制。MR=NR=4 の scalar タイル形状に対し m・n がともに倍数の形状
+    /// を選ぶことで、端タイル分岐（コピー経路）を一切通さずに直接経路
+    /// のみを検証する）。
+    #[test]
+    fn gemm_blis_scalar_kernel_all_full_tiles_matches_naive_bit_exact() {
+        // ScalarKernel は MR=4・NR=4（scalar.rs 参照）。m・n をともに 4 の
+        // 倍数にし、かつ MC/KC/NC 境界（128/256/512）を跨ぐ形状を選び、
+        // 全 ic/jc/jr/ir 反復で mr_eff == MR && nr_eff == NR が成立する
+        // ようにする。
+        let (m, n, k) = (256, 512, 300);
+        assert_eq!(m % ScalarKernel::MR, 0);
+        assert_eq!(n % ScalarKernel::NR, 0);
+
+        let a = xorshift32_vec(0x5555_5555, m * k);
+        let b = xorshift32_vec(0x6666_6666, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_direct = vec![0.0f32; m * n];
+        gemm_blis_with_kernel(ScalarKernel, &a, &b, &mut c_direct, m, n, k).unwrap();
+
+        assert_eq!(
+            c_naive, c_direct,
+            "全タイル完全（C 直接経路のみ）でも gemm_naive と bit 完全一致するはず"
         );
     }
 
