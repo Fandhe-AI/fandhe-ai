@@ -27,7 +27,9 @@ use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gem
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
-use crate::gemm_mma::{validate_mma_alignment, validate_mma_grid_bounds};
+use crate::gemm_mma::{
+    check_min_compute_capability, validate_mma_alignment, validate_mma_grid_bounds,
+};
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
     CompiledMmaKernel, DimSpec, MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES,
@@ -512,6 +514,13 @@ impl SpecializedMmaKernelHandle {
         shape: GemmShape,
         compiled: CompiledDims,
     ) -> Result<Self, CudaError> {
+        // `gemm_mma.rs::CudaMmaGemm::new` と同じ `mma.sync`/`ldmatrix`/
+        // `cp.async` 命令セットを NVRTC コンパイルするため同じ cc ゲートを
+        // NVRTC コンパイル前に適用する（PR #685 Bugbot 指摘〈Low〉・
+        // codex-review 指摘への対応。`check_min_compute_capability` doc
+        // comment 参照）。
+        check_min_compute_capability(device)?;
+
         let (cfg, rendered) = specialized_mma_config(shape, compiled)?;
         let compiled_kernel = rendered.compile(device)?;
         Ok(Self {
@@ -550,6 +559,23 @@ impl SpecializedMmaKernelHandle {
     ) -> Result<Vec<f16>, CudaError> {
         self.cfg.validate_launch_shape(m, n, k)?;
         crate::gemm::validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+
+        // `cp.async` 整列制約（`validate_mma_alignment`）・grid_dim.y 上限
+        // （`validate_mma_grid_bounds`）も H2D 転送・出力アロケーションより
+        // 前で fail-closed する（PR #685 Bugbot 指摘〈Medium〉への対応。
+        // 本メソッドドキュメンテーションコメント参照: 従来はこれらの検証を
+        // `CompiledMmaKernel::launch_f16` 内部〈転送後〉に委ねきっており、
+        // 不正な `Dynamic` 起動でも先に `clone_htod`／`alloc_zeros` が発生
+        // しえた）。no-op 形状（`m==0 || n==0`）はアライメント制約の対象外
+        // （`gemm_mma.rs::CudaMmaGemm::run_f16`・`CompiledMmaKernel::launch_f16`
+        // ドキュメンテーションコメントと同じ根拠: 例えば `(m,n,k)=(0,7,0)`
+        // は有効な no-op 形状だが `n=7` が 8 の倍数でないため、no-op 判定
+        // より前にアライメント検証を行うと誤って拒否してしまう）ため、
+        // no-op 判定を先に行ってから適用する。
+        if m != 0 && n != 0 {
+            validate_mma_alignment(n, k)?;
+            validate_mma_grid_bounds(m)?;
+        }
 
         let stream = &self.stream;
         let a_dev = stream.clone_htod(a)?;
