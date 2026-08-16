@@ -156,12 +156,14 @@ mod gemm_wmma;
 mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;
+mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
 pub mod memory;
 mod nvrtc;
 mod ops;
 mod swizzle;
+mod transpose;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use elementwise::CudaElementwise;
@@ -192,6 +194,7 @@ pub use nvrtc::{
     derive_pipeline_stages, nvrtc_version,
 };
 pub use ops::CudaBackendOps;
+pub use transpose::CudaTranspose;
 
 /// `kernels_mma`／`kernels_wmma_opt`（非公開 `mod`。カーネル本体は crate
 /// 外から直接呼ばせない）が持つブロックタイル定数を、診断専用の安定関数
