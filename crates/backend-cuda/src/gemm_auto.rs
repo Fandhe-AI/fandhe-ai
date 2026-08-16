@@ -27,14 +27,22 @@ use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gem
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
-use crate::gemm_mma::{
-    check_min_compute_capability, validate_mma_alignment, validate_mma_grid_bounds,
-};
+use crate::gemm_mma::{validate_mma_alignment, validate_mma_grid_bounds};
+// `SpecializedMmaKernelHandle::compile`（本ファイル下部）でのみ使う。
+// 同メソッドが `internal-diagnostics` feature（既定 off）でのみコンパイル
+// されるため、この import も同 feature でゲートしないと既定ビルドで
+// unused import 警告（`-D warnings` で fail）になる。
+#[cfg(feature = "internal-diagnostics")]
+use crate::gemm_mma::check_min_compute_capability;
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
-    CompiledMmaKernel, DimSpec, MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES,
-    MMA_WARP_M, MMA_WARP_N, MmaKernelConfig, RenderedMmaKernel, render_mma_f16,
+    DimSpec, MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
+    MmaKernelConfig, RenderedMmaKernel, render_mma_f16,
 };
+// `SpecializedMmaKernelHandle` の非公開フィールド型としてのみ使う
+// （上記 `check_min_compute_capability` と同じ理由で feature ゲート）。
+#[cfg(feature = "internal-diagnostics")]
+use crate::kernels_mma::CompiledMmaKernel;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor, derive_pipeline_stages};
 
 /// 静的 `__shared__`（動的 SMEM opt-in 非使用）構成のカーネルが従う
@@ -463,8 +471,23 @@ pub fn specialized_mma_descriptor(
 ///
 /// 本番ディスパッチ経路（[`CudaGemmAuto::run_f16`]）からは呼ばれず
 /// （本モジュール §スコープ境界参照。LRU キャッシュによる再利用結線は
-/// C-4・#511 のスコープ）dead-code 解析が誤検知するため
-/// `#[allow(dead_code)]` を付す（[`dim_specs_for`] と同じ理由）。
+/// C-4・#511 のスコープ）テスト・ベンチ専用の検証用ハンドルである。
+///
+/// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+/// （PR #685 codex-review P1 指摘の是正: 本ハンドルは crate root から
+/// 無条件 re-export されていたため、「テスト・ベンチ専用」というコメント
+/// 上の意図に反して通常ビルドの安定した公開 API 面に漏出していた。
+/// `diagnostics` モジュール〈本ファイル冒頭 `lib.rs` の同 feature ゲート
+/// 参照〉・`gemm_mma.rs::CudaMmaGemm::new_with_swizzle` と同じ方針で
+/// `#[cfg(feature = "internal-diagnostics")]` により定義自体を既定ビルド
+/// のコンパイル対象から外し、`lib.rs` の re-export も同 feature で
+/// ゲートする。外部 integration test（`tests/specialized_mma_parity.rs`）
+/// は `Cargo.toml` の `[[test]]` セクションで `required-features =
+/// ["internal-diagnostics"]` を指定し、`cargo test --all-features`
+/// （CI の test ジョブ・`make test` が使うコマンド）でのみビルド・実行
+/// される。feature 無効時は crate 外部からはもちろん crate 内部からも
+/// 到達不能になるため `#[allow(dead_code)]` は不要（[`dim_specs_for`]
+/// のように dead-code 解析が誤検知する状況ではなくなった）。
 ///
 /// `stream` は [`Self::compile`] 実行時（NVRTC コンパイル・
 /// `load_module`／`load_function`）に使った `device` の
@@ -481,7 +504,7 @@ pub fn specialized_mma_descriptor(
 /// 前提としていた〉。コンパイル元の `stream` をハンドル内に固定し
 /// 起動時の外部入力から外すことで、この不変条件を型・構造の両面で
 /// 強制する）。
-#[allow(dead_code)]
+#[cfg(feature = "internal-diagnostics")]
 pub struct SpecializedMmaKernelHandle {
     compiled: CompiledMmaKernel,
     stream: std::sync::Arc<cudarc::driver::CudaStream>,
@@ -492,7 +515,7 @@ pub struct SpecializedMmaKernelHandle {
     cfg: MmaKernelConfig,
 }
 
-#[allow(dead_code)]
+#[cfg(feature = "internal-diagnostics")]
 impl SpecializedMmaKernelHandle {
     /// `shape`・`compiled` から特化 config を構築し（[`specialized_mma_config`]）
     /// NVRTC コンパイルまで完了させる（[`RenderedMmaKernel::compile`]）。
@@ -635,9 +658,12 @@ impl SpecializedMmaKernelHandle {
 /// [`crate::gemm_mma::validate_mma_grid_bounds`]）も `CudaMmaGemm::run_f16`
 /// と同一手順・同一関数を再利用し、判定ロジックを複製しない。
 ///
-/// 理由は [`dim_specs_for`] と同じ（既定経路から未結線のため dead-code
-/// 解析が誤検知する）。テスト・ベンチからのみ呼ばれる。
-#[allow(dead_code)]
+/// テスト・ベンチからのみ呼ばれる。[`SpecializedMmaKernelHandle`] と
+/// 同じ理由（PR #685 codex-review P1 指摘の是正）で
+/// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+/// （同 struct ドキュメンテーションコメント参照。feature 無効時は crate
+/// 内部からも到達不能になるため `#[allow(dead_code)]` は不要）。
+#[cfg(feature = "internal-diagnostics")]
 pub fn run_specialized_mma_f16(
     device: &CudaDevice,
     compiled: CompiledDims,

@@ -2,7 +2,12 @@
 //! 回帰テスト（イシュー #531）。
 //!
 //! `gemm_auto::run_specialized_mma_f16`／`SpecializedMmaKernelHandle`
-//! （crate root 再エクスポート）を通じて `CompiledDims::{DYNAMIC_ALL,
+//! （crate root 再エクスポート。テスト・ベンチ専用のため `internal-diagnostics`
+//! feature〈既定 off〉でゲートされている。本テストは `Cargo.toml` の
+//! `[[test]]` セクションで `required-features = ["internal-diagnostics"]`
+//! を指定し、`cargo test --all-features`〈CI の test ジョブ・`make test`
+//! が使うコマンド〉でのみビルド・実行される。PR #685 codex-review P1
+//! 指摘の是正）を通じて `CompiledDims::{DYNAMIC_ALL,
 //! STATIC_NK, STATIC_MNK}` の 3 プリセットを実際に NVRTC コンパイル・
 //! 起動し、以下を検証する:
 //!

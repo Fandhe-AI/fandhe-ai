@@ -160,11 +160,22 @@ pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
 pub use gemm_auto::{
-    CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH,
-    SpecializedMmaKernelHandle, TileCandidate, TileSelection, TileSelectionBasis,
-    derive_stages_for_device, enumerate_tile_candidates, enumerate_tile_candidates_for_device,
-    run_specialized_mma_f16, select_tile_config, select_tile_config_for_device,
+    CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
+    TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
+    enumerate_tile_candidates_for_device, select_tile_config, select_tile_config_for_device,
 };
+// `SpecializedMmaKernelHandle`／`run_specialized_mma_f16` はテスト・ベンチ専用の
+// 検証用ハンドル（`gemm_auto.rs` 冒頭ドキュメンテーションコメント参照。本番
+// ディスパッチ経路〈`CudaGemmAuto::run_f16`〉からは呼ばれない）。PR #685
+// codex-review P1 指摘の是正: 従来は上記ブロックへ無条件 re-export しており、
+// コメント上「テスト・ベンチ専用」の意図に反して通常ビルドの安定した公開
+// API 面へ漏出していた。`diagnostics` モジュール（本ファイル下部）と同じ
+// `internal-diagnostics` feature（既定 off）でゲートし、`tests/
+// specialized_mma_parity.rs` は `Cargo.toml` の `[[test]]` セクションで
+// `required-features = ["internal-diagnostics"]` を指定して到達する
+// （`cargo test --all-features` でのみビルド・実行される）。
+#[cfg(feature = "internal-diagnostics")]
+pub use gemm_auto::{SpecializedMmaKernelHandle, run_specialized_mma_f16};
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
