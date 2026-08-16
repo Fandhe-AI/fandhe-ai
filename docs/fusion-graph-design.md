@@ -435,6 +435,61 @@ pub(crate) enum FusionOp {
 > 実用セグメントは elementwise で終端するため必要十分という安全側の
 > 判断）。詳細アルゴリズムは `crates/tensor-core/src/fusion/detect.rs`
 > の `detect_fusion` doc コメントを正とし、本文書では二重管理しない。
+>
+> **#588 追記（Broadcast・Sub・Div の追加／連鎖長上限の意味論の精密化）**:
+> #586 は reduction をセグメントへ組み込めるようにしたが、「縮約 →
+> スカラー化 → 元テンソルへの broadcast 適用」という 2 パス構造
+> （RMSNorm／softmax の実際の計算構造）は表現できなかった——reduction の
+> 出力（縮約済み shape）と元の行 shape のテンソルを組み合わせる
+> elementwise binary は `FusionGraph::push` の shape 恒等検証で拒否され、
+> broadcast を表すノード種別も存在しなかった。イシュー #588 でこれを解消
+> した:
+>
+> - `FusionOp::Broadcast { input, dim }` を追加。縮約済みテンソルを
+>   `dim` に沿って元の行 shape へ論理拡張する（reduction の逆演算に相当。
+>   `push` の構築時検証は既存の `ops_shape::reduce_out_shape` を逆方向に
+>   適用する形で再利用し、専用の逆算ロジックを二重に書かない）。
+>   reduction と同じセグメント軸一致判定でセグメントへ組み込める
+>   （`detect.rs`。降順走査のため softmax パターンでは `Broadcast` が
+>   `Sum`／`Max` より先にセグメント軸を確定しうる）。
+> - softmax に必須の減算・除算を表現するため `FusionOp::Sub`／`Div`
+>   （elementwise binary）を追加。`Add`／`Mul` と同じ shape 恒等契約に
+>   相乗りする。
+> - **`MAX_FUSED_CHAIN_LEN`（6）は elementwise ノード数のみに適用する**
+>   意味論へ精密化した（reduction／broadcast は含まない。行スカラー
+>   1 個分のレジスタしか消費せず elementwise 中間列とはコスト構造が
+>   異なるため）。softmax パターン（`Max → Broadcast → Sub → Exp →
+>   Sum → Broadcast → Div` の 7 ノード）は elementwise が `Sub`／
+>   `Exp`／`Div` の 3 個のみのため、この上限の下で全 7 ノードが 1
+>   セグメントに収まる。総ノード数の暴走防止として
+>   `MAX_FUSED_SEGMENT_NODES`（12 ＝ `2 × MAX_FUSED_CHAIN_LEN`）を新設
+>   （挿入前判定・決定的打ち切りの既存パターンを踏襲）。
+> - `FusionPlan` に行方向 reduction＋broadcast 融合の行メタデータ
+>   `RowFusionMeta`（`axis`／`row_len`／`single_pass_hint`）を追加し、
+>   `row_fusion()` アクセサで公開する。`Broadcast` を 1 個以上含む
+>   プランのみ `Some`（#586 までの reduction-only プランは `None` の
+>   まま後方互換）。`single_pass_hint` は行長が `MAX_SINGLE_PASS_ROW_LEN`
+>   （8192。参照実装〈イシュー本文の非信頼データ・TileKernels
+>   `swiglu_forward_and_per_token_cast_kernel.py:30-42`〉の実測境界値を
+>   タイル形状決定則として転用）以下かのヒントであり、バックエンドは
+>   自前の smem／レジスタ予算で再判定してよい。
+> - `from_ops`（`autodiff` 専用構築経路）の fail-closed 検証を拡張:
+>   `Broadcast` の軸不一致（`FusionPlanError::MismatchedBroadcastAxis`）・
+>   行メタデータ導出の軸範囲外（`RowAxisOutOfRange`）・`Broadcast` を
+>   含むのに末尾ノードが reduction（`ReducedOutputWithBroadcast`。
+>   broadcast で行 shape へ復元してから終端するパターンのみを表現可能と
+>   する安全側の制約。緩和は将来イシュー）を追加した。
+> - スコープ外: CPU／CUDA／Metal の融合 RMSNorm・softmax カーネル実装
+>   （後続 G-6 以降。#607／#592／#594／#604）・`autodiff::build_lazy_plan`
+>   の reduction／broadcast 遅延化（新 variant を実運用プランへ流す結線）。
+>   `backend-cpu::fused_elementwise` の pre-scan は allowlist 方式のため
+>   `Broadcast`／`Sub`／`Div` は自動的に `BackendError::Unsupported` で
+>   fail-closed に拒否される（backend 側変更ゼロで担保）。
+>
+> 詳細アルゴリズムは `crates/tensor-core/src/fusion/detect.rs`
+> の `detect_fusion` doc コメント・`crates/tensor-core/src/fusion/plan.rs`
+> の `RowFusionMeta`／`compute_row_fusion` doc コメントを正とし、本文書
+> では二重管理しない。
 
 ### 2.2 グラフ構造
 

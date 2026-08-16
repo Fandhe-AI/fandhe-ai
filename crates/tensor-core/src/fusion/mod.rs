@@ -17,12 +17,22 @@
 //!   （`dispatch::select_gemm_kernel` と同方針。設計書 §3.4）。イシュー
 //!   #586 で融合境界を再定義: reduction（`Sum`／`Max`）は「常に境界」
 //!   ではなく、セグメント軸（`dim`）が一致する限り融合セグメントへ
-//!   組み込める（`graph::FusionOp::Rsqrt` を含む elementwise 6 演算に
+//!   組み込める（`graph::FusionOp::Rsqrt` を含む elementwise 8 演算に
 //!   加えて reduction もセグメント対象になる）。`Gemm`・`Input` のみが
-//!   常に境界のまま（`graph.rs`・`detect.rs` の doc 参照）。
+//!   常に境界のまま（`graph.rs`・`detect.rs` の doc 参照）。イシュー
+//!   #588 でさらに拡張: 縮約済みテンソルを元の行 shape へ論理拡張する
+//!   `graph::FusionOp::Broadcast` を追加し、reduction と同じセグメント
+//!   軸一致判定でセグメントへ組み込めるようにした（「行方向 reduction →
+//!   派生スカラー → 同一行へ broadcast 適用」という RMSNorm／softmax 型
+//!   の 2 パス構造を単一セグメントとして表現できる）。softmax に必須の
+//!   `graph::FusionOp::Sub`／`Div` も追加し、`MAX_FUSED_CHAIN_LEN`
+//!   （elementwise 連鎖長上限）は elementwise ノード数のみに適用する
+//!   意味論へ精密化した（総数の暴走防止は新設の
+//!   [`MAX_FUSED_SEGMENT_NODES`] が担う）。
 //! - `plan`（TASK-12.1c 本体・#163）: 融合カーネル生成向け公開 DTO
 //!   （[`plan::FusionPlan`]・[`plan::FusedOpKind`]・
-//!   [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`]）。
+//!   [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`]・#588 で追加した
+//!   [`plan::RowFusionMeta`]／[`plan::MAX_SINGLE_PASS_ROW_LEN`]）。
 //!   `FusionOp`／`FusionNode`／`FusionGraph`（`graph` モジュール）は
 //!   `pub(crate)` のまま変更しない設計判断（設計書 §2.5）のため、
 //!   `backend-cpu`／`backend-cuda`／`backend-metal` が融合グラフの内容を
@@ -80,9 +90,14 @@ pub(crate) use detect::{
 };
 // `autodiff::tape` の push 時上限適用（#404）が参照する単一真実源
 // として `pub` 昇格（`detect.rs` の doc comment 参照）。クレートルート
-// （`lib.rs`）で再 re-export する。
-pub use detect::MAX_FUSED_CHAIN_LEN;
+// （`lib.rs`）で再 re-export する。`MAX_FUSED_SEGMENT_NODES`（#588）は
+// 現状クレート内利用者を持たないが、`MAX_FUSED_CHAIN_LEN` と対の
+// 実装判断の定数として同じ可視性（`pub`）で揃える。
+pub use detect::{MAX_FUSED_CHAIN_LEN, MAX_FUSED_SEGMENT_NODES};
 pub(crate) use graph::{
     FusionGraph, FusionGraphError, FusionNode, FusionNodeId, FusionOp, NodeMeta,
 };
-pub use plan::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError};
+pub use plan::{
+    FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_SINGLE_PASS_ROW_LEN,
+    RowFusionMeta,
+};

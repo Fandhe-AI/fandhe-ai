@@ -113,7 +113,13 @@ pub use element::Element;
 pub use error::ShapeError;
 // `MAX_FUSED_CHAIN_LEN`（#404）: `autodiff::tape` の push 時上限適用が
 // 参照する単一真実源（`fusion/detect.rs` の doc comment 参照）。
-pub use fusion::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_FUSED_CHAIN_LEN};
+// `RowFusionMeta`／`MAX_SINGLE_PASS_ROW_LEN`（#588）: 行方向
+// reduction＋broadcast 融合プランの行メタデータ・1 パス判定境界値
+// （`fusion/plan.rs` の doc comment 参照）。
+pub use fusion::{
+    FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_FUSED_CHAIN_LEN,
+    MAX_FUSED_SEGMENT_NODES, MAX_SINGLE_PASS_ROW_LEN, RowFusionMeta,
+};
 pub use memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,

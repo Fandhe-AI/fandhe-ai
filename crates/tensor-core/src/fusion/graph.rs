@@ -20,15 +20,20 @@
 use crate::dispatch::DType;
 use crate::error::ShapeError;
 
-/// 融合グラフのノード種別（設計書 §2.1・イシュー #586 で境界を再定義）。
+/// 融合グラフのノード種別（設計書 §2.1・イシュー #586 で境界を再定義・
+/// #588 で `Sub`／`Div`／`Broadcast` を追加）。
 ///
 /// `BackendOps`（`crate::backend_ops::BackendOps`）の各メソッドと 1:1
-/// 対応させる: elementwise binary（`add`／`mul`）・unary（`relu`／
-/// `exp`／`tanh`／`rsqrt`）に加え、reduction（`sum`／`max`）も
+/// 対応させる: elementwise binary（`add`／`mul`／`sub`／`div`）・unary
+/// （`relu`／`exp`／`tanh`／`rsqrt`）に加え、reduction（`sum`／`max`）も
 /// **セグメント軸（`dim`）が一致する限り融合セグメント内に組み込める**
 /// （#586。RMSNorm／softmax のような `reduce → elementwise` 連鎖を単一
 /// セグメントで扱う土台。`detect.rs` の走査がセグメント軸の確定・一致
-/// 判定を担う）。`gemm` のみが常に融合境界ノード（融合セグメントに
+/// 判定を担う）。`Broadcast` は縮約済みテンソルを元の行 shape へ論理拡張
+/// するノードで、reduction の出力を再びセグメント内の elementwise へ
+/// 合流させる（#588。「行方向 reduction → 派生スカラー → 同一行へ
+/// broadcast 適用」という RMSNorm／softmax 型の 2 パス構造を表現する
+/// ために必須）。`gemm` のみが常に融合境界ノード（融合セグメントに
 /// 組み込まず、そこで走査を打ち切る印として扱う。`detect.rs` 参照）で
 /// あり続ける。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +43,13 @@ pub(crate) enum FusionOp {
     // elementwise binary（backend_ops.rs の `add`/`mul` に対応）
     Add(FusionNodeId, FusionNodeId),
     Mul(FusionNodeId, FusionNodeId),
+    /// 減算（`lhs - rhs`）。softmax の `x - max(x)` を表現するために
+    /// #588 で追加。`Add`／`Mul` と同じオペランド・出力 shape 恒等契約
+    /// （`push` の検証枝を共有する）。
+    Sub(FusionNodeId, FusionNodeId),
+    /// 除算（`lhs / rhs`）。softmax の `exp(..) / sum(..)` を表現するために
+    /// #588 で追加。`Add`／`Mul` と同じ検証契約に相乗りする。
+    Div(FusionNodeId, FusionNodeId),
     // elementwise unary（`relu`/`exp`/`tanh`/`rsqrt` に対応）
     Relu(FusionNodeId),
     Exp(FusionNodeId),
@@ -61,6 +73,17 @@ pub(crate) enum FusionOp {
         input: FusionNodeId,
         dim: Option<usize>,
     },
+    /// 縮約済みテンソル `input` をセグメント軸に沿って元の行 shape へ
+    /// 論理拡張する（#588。値の複製をレジスタ内で行う契約であり、
+    /// strided view ではない）。`dim: None` は `input` が rank 0（`[]`）
+    /// で任意 shape への全 broadcast、`dim: Some(axis)` は `input` の
+    /// shape に軸 `axis` を再挿入した shape が出力になる契約
+    /// （`FusionOp::Sum`／`Max` の逆演算に相当。`push` の構築時検証は
+    /// `crate::ops_shape::reduce_out_shape` を再利用し二重定義しない）。
+    Broadcast {
+        input: FusionNodeId,
+        dim: Option<usize>,
+    },
 }
 
 impl FusionOp {
@@ -72,24 +95,35 @@ impl FusionOp {
     pub(crate) fn inputs(&self) -> Vec<FusionNodeId> {
         match self {
             FusionOp::Input => Vec::new(),
-            FusionOp::Add(a, b) | FusionOp::Mul(a, b) | FusionOp::Gemm(a, b) => vec![*a, *b],
+            FusionOp::Add(a, b)
+            | FusionOp::Mul(a, b)
+            | FusionOp::Sub(a, b)
+            | FusionOp::Div(a, b)
+            | FusionOp::Gemm(a, b) => vec![*a, *b],
             FusionOp::Relu(a) | FusionOp::Exp(a) | FusionOp::Tanh(a) | FusionOp::Rsqrt(a) => {
                 vec![*a]
             }
-            FusionOp::Sum { input, .. } | FusionOp::Max { input, .. } => vec![*input],
+            FusionOp::Sum { input, .. }
+            | FusionOp::Max { input, .. }
+            | FusionOp::Broadcast { input, .. } => vec![*input],
         }
     }
 
-    /// elementwise 6 演算（融合対象・恒等 shape 契約を持つ）かどうか
-    /// （設計書 §2.1「融合の直接対象」・#586 で `Rsqrt` を追加）。
-    /// `detect.rs` の連鎖検出が「常に境界」の `Gemm`・reduction
-    /// （[`is_reduction`](Self::is_reduction)）・外部入力（`Input`）と
-    /// 区別するために使う。
+    /// elementwise 8 演算（融合対象・恒等 shape 契約を持つ）かどうか
+    /// （設計書 §2.1「融合の直接対象」・#586 で `Rsqrt` を追加・#588 で
+    /// `Sub`／`Div` を追加）。`detect.rs` の連鎖検出が「常に境界」の
+    /// `Gemm`・reduction（[`is_reduction`](Self::is_reduction)）・
+    /// broadcast（[`is_broadcast`](Self::is_broadcast)）・外部入力
+    /// （`Input`）と区別するために使う。**`Broadcast` は恒等 shape 契約を
+    /// 持たない**（出力 shape が入力より rank が高い）ため、ここには
+    /// 含めない（#588 実装計画 §3.1）。
     pub(crate) fn is_elementwise(&self) -> bool {
         matches!(
             self,
             FusionOp::Add(..)
                 | FusionOp::Mul(..)
+                | FusionOp::Sub(..)
+                | FusionOp::Div(..)
                 | FusionOp::Relu(..)
                 | FusionOp::Exp(..)
                 | FusionOp::Tanh(..)
@@ -103,14 +137,22 @@ impl FusionOp {
         matches!(self, FusionOp::Sum { .. } | FusionOp::Max { .. })
     }
 
-    /// 融合セグメントへ組み込みうる演算（elementwise ∪ reduction）かどうか
-    /// （#586。`Gemm`／`Input` のみが常に組み込み対象外）。現状
-    /// `detect.rs` は reduction の組み込み可否をセグメント軸一致で個別に
-    /// 判定するため本メソッドを直接は使わないが、`is_elementwise`／
-    /// `is_reduction` の対概念として設計書の境界再定義を型で表現する
-    /// （将来の呼び出し元向けの安定 API）。
+    /// `Broadcast`（縮約済みテンソルの行方向拡張）かどうか（#588）。
+    /// `detect.rs` が reduction と同じセグメント軸一致判定の対象として
+    /// 扱うために使う（`is_reduction` と対）。
+    pub(crate) fn is_broadcast(&self) -> bool {
+        matches!(self, FusionOp::Broadcast { .. })
+    }
+
+    /// 融合セグメントへ組み込みうる演算（elementwise ∪ reduction ∪
+    /// broadcast）かどうか（#586・#588 で拡張。`Gemm`／`Input` のみが
+    /// 常に組み込み対象外）。現状 `detect.rs` は reduction／broadcast の
+    /// 組み込み可否をセグメント軸一致で個別に判定するため本メソッドを
+    /// 直接は使わないが、`is_elementwise`／`is_reduction`／`is_broadcast`
+    /// の対概念として設計書の境界再定義を型で表現する（将来の呼び出し元
+    /// 向けの安定 API）。
     pub(crate) fn is_fusable(&self) -> bool {
-        self.is_elementwise() || self.is_reduction()
+        self.is_elementwise() || self.is_reduction() || self.is_broadcast()
     }
 
     /// reduction の縮約軸を返す（`Sum`／`Max` 以外は `None`）。`detect.rs`
@@ -118,6 +160,17 @@ impl FusionOp {
     pub(crate) fn reduction_dim(&self) -> Option<Option<usize>> {
         match self {
             FusionOp::Sum { dim, .. } | FusionOp::Max { dim, .. } => Some(*dim),
+            _ => None,
+        }
+    }
+
+    /// `Broadcast` の拡張軸を返す（`Broadcast` 以外は `None`）。
+    /// [`reduction_dim`](Self::reduction_dim) と対の役割を持つ（#588。
+    /// `detect.rs` のセグメント軸一致判定・`plan.rs` の `dim`→`axis`
+    /// 写像が使う）。
+    pub(crate) fn broadcast_dim(&self) -> Option<Option<usize>> {
+        match self {
+            FusionOp::Broadcast { dim, .. } => Some(*dim),
             _ => None,
         }
     }
@@ -206,6 +259,13 @@ pub(crate) enum FusionGraphError {
     /// 不整合な `segment` に対して panic するため、`HashMap::get` と
     /// 本 variant による fail-closed な処理へ置き換える）。
     DanglingOperandReference { id: usize },
+    /// [`FusionPlan::from_segment`]（`plan.rs`）内の `compute_row_fusion`
+    /// （#588・§3.5）が返す検証エラーを包む。`detect_fusion`・`push` の
+    /// 検証を通過した通常経路（`detect.rs` が確定したセグメント軸・
+    /// `push` が確定した shape 契約）では到達しない防御的検証だが、
+    /// `from_segment` の戻り値型を `FusionGraphError` に統一するために
+    /// ここへ合流させる（#588 実装計画 §3.6）。
+    Plan(Box<super::plan::FusionPlanError>),
 }
 
 impl std::fmt::Display for FusionGraphError {
@@ -230,6 +290,9 @@ impl std::fmt::Display for FusionGraphError {
                     "fusion segment operand references node {id} which is absent from the segment's leaves/nodes"
                 )
             }
+            FusionGraphError::Plan(err) => {
+                write!(f, "fusion segment row-fusion metadata error: {err}")
+            }
         }
     }
 }
@@ -239,6 +302,12 @@ impl std::error::Error for FusionGraphError {}
 impl From<ShapeError> for FusionGraphError {
     fn from(err: ShapeError) -> Self {
         FusionGraphError::Shape(err)
+    }
+}
+
+impl From<super::plan::FusionPlanError> for FusionGraphError {
+    fn from(err: super::plan::FusionPlanError) -> Self {
+        FusionGraphError::Plan(Box::new(err))
     }
 }
 
@@ -324,7 +393,11 @@ impl FusionGraph {
         // 側で扱う」により、shape が完全一致しないブロードキャストは
         // ここでは拒否せず、呼び出し側が事前に broadcast 済み shape ＋
         // `contiguous: false` で表現する契約とする）。
-        if let FusionOp::Add(a, b) | FusionOp::Mul(a, b) = &op {
+        if let FusionOp::Add(a, b)
+        | FusionOp::Mul(a, b)
+        | FusionOp::Sub(a, b)
+        | FusionOp::Div(a, b) = &op
+        {
             let lhs_shape = &self.nodes[a.0].meta.shape;
             let rhs_shape = &self.nodes[b.0].meta.shape;
             if lhs_shape != rhs_shape {
@@ -346,7 +419,10 @@ impl FusionGraph {
         // （push 前レビュー指摘。モジュール冒頭コメント「構築時に検証を
         // 先行させる」の対象に含める）。
         match &op {
-            FusionOp::Add(a, _) | FusionOp::Mul(a, _) => {
+            FusionOp::Add(a, _)
+            | FusionOp::Mul(a, _)
+            | FusionOp::Sub(a, _)
+            | FusionOp::Div(a, _) => {
                 // binary は rhs との一致を上の検査で確認済みのため、lhs
                 // との一致のみ確認すれば三者の恒等性が揃う。
                 let operand_shape = &self.nodes[a.0].meta.shape;
@@ -383,6 +459,27 @@ impl FusionGraph {
                     return Err(ShapeError::ShapeMismatch {
                         lhs: meta.shape.clone(),
                         rhs: expected_shape,
+                    }
+                    .into());
+                }
+            }
+            // `Broadcast`（#588）は reduction の逆演算: 出力 shape
+            // （`meta.shape`。このノード自身の出力）を `dim` で縮約すると
+            // 入力 shape に戻ることを要求する（`reduce_out_shape` を
+            // 逆方向に適用する形で再利用し、専用の逆算ロジックを二重に
+            // 書かない。`dim: None` の場合 `reduce_out_shape` は常に
+            // `Vec::new()` を返すため、この検査は「入力が rank 0（`[]`）
+            // であること」に自然に帰着する——#588 実装計画 §3.1 が定める
+            // 「`dim: None` は入力が rank 0 で任意 shape への全 broadcast」
+            // の契約そのもの）。軸範囲外は `ShapeError::AxisOutOfRange`
+            // （`reduce_out_shape` から `?` で伝播）。
+            FusionOp::Broadcast { input, dim } => {
+                let input_shape = &self.nodes[input.0].meta.shape;
+                let reduced_output = crate::ops_shape::reduce_out_shape(&meta.shape, *dim)?;
+                if &reduced_output != input_shape {
+                    return Err(ShapeError::ShapeMismatch {
+                        lhs: input_shape.clone(),
+                        rhs: reduced_output,
                     }
                     .into());
                 }
@@ -635,5 +732,177 @@ mod tests {
         assert!(sum.is_reduction() && sum.is_fusable());
         assert!(!gemm.is_reduction() && !gemm.is_fusable());
         assert!(!input.is_reduction() && !input.is_fusable());
+    }
+
+    /// #588: `Sub`／`Div` は `Add`／`Mul` と同じオペランド shape 一致・
+    /// 出力 shape 恒等契約を持つ elementwise binary である。
+    #[test]
+    fn push_accepts_sub_and_div_with_identity_shape() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let y = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let sub = g.push(FusionOp::Sub(x, y), f32_meta(&[4])).unwrap();
+        let div = g.push(FusionOp::Div(x, y), f32_meta(&[4])).unwrap();
+        assert!(g.node(sub).unwrap().op.is_elementwise());
+        assert!(g.node(div).unwrap().op.is_elementwise());
+    }
+
+    /// #588: `Sub`／`Div` もオペランド shape 不一致を `Add`／`Mul` と同型に
+    /// 拒否する（反例は `push_rejects_binary_shape_mismatch` と同構成）。
+    #[test]
+    fn push_rejects_sub_operand_shape_mismatch() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let y = g.push(FusionOp::Input, f32_meta(&[2, 4])).unwrap();
+        let err = g.push(FusionOp::Sub(x, y), f32_meta(&[4])).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![4],
+                rhs: vec![2, 4],
+            })
+        );
+    }
+
+    /// #588: `Div` の出力 shape 恒等違反（`push_rejects_binary_output_shape_mismatch`
+    /// と同型の反例）。
+    #[test]
+    fn push_rejects_div_output_shape_mismatch() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let y = g.push(FusionOp::Input, f32_meta(&[4])).unwrap();
+        let err = g.push(FusionOp::Div(x, y), f32_meta(&[999])).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![999],
+                rhs: vec![4],
+            })
+        );
+    }
+
+    /// #588 §3.1: `Broadcast { dim: Some(axis) }` は `input` の shape に
+    /// 軸を再挿入した shape のみを受理する（`[2] --dim Some(1)--> [2, 8]`）。
+    #[test]
+    fn push_accepts_broadcast_with_axis_reinsertion_shape() {
+        let mut g = FusionGraph::new();
+        let scalar_per_row = g.push(FusionOp::Input, f32_meta(&[2])).unwrap();
+        let bc = g
+            .push(
+                FusionOp::Broadcast {
+                    input: scalar_per_row,
+                    dim: Some(1),
+                },
+                f32_meta(&[2, 8]),
+            )
+            .unwrap();
+        assert_eq!(
+            g.node(bc).unwrap().op,
+            FusionOp::Broadcast {
+                input: scalar_per_row,
+                dim: Some(1)
+            }
+        );
+        assert!(!g.node(bc).unwrap().op.is_elementwise());
+        assert!(g.node(bc).unwrap().op.is_broadcast());
+        assert!(g.node(bc).unwrap().op.is_fusable());
+    }
+
+    /// #588 §3.1: `Broadcast { dim: None }` は入力が rank 0（`[]`）である
+    /// 場合のみ任意 shape への全 broadcast を受理する。
+    #[test]
+    fn push_accepts_broadcast_full_from_scalar_input() {
+        let mut g = FusionGraph::new();
+        let scalar = g.push(FusionOp::Input, f32_meta(&[])).unwrap();
+        let bc = g
+            .push(
+                FusionOp::Broadcast {
+                    input: scalar,
+                    dim: None,
+                },
+                f32_meta(&[4, 8]),
+            )
+            .unwrap();
+        assert_eq!(
+            g.node(bc).unwrap().op,
+            FusionOp::Broadcast {
+                input: scalar,
+                dim: None
+            }
+        );
+    }
+
+    /// #588 §3.1: `dim: None` なのに入力が rank 0 でない場合は
+    /// `reduce_out_shape(meta.shape, None)`（常に `[]`）との不一致として
+    /// 拒否される。
+    #[test]
+    fn push_rejects_broadcast_full_from_non_scalar_input() {
+        let mut g = FusionGraph::new();
+        let non_scalar = g.push(FusionOp::Input, f32_meta(&[2])).unwrap();
+        let err = g
+            .push(
+                FusionOp::Broadcast {
+                    input: non_scalar,
+                    dim: None,
+                },
+                f32_meta(&[2, 8]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![2],
+                rhs: Vec::new(),
+            })
+        );
+    }
+
+    /// #588 §3.1: `Broadcast` の逆縮約 shape が入力 shape と一致しない
+    /// 場合は `ShapeMismatch` で拒否される（`push_rejects_sum_output_shape_mismatch`
+    /// と対称の反例）。
+    #[test]
+    fn push_rejects_broadcast_output_shape_mismatch() {
+        let mut g = FusionGraph::new();
+        let per_row = g.push(FusionOp::Input, f32_meta(&[2])).unwrap();
+        // 正しい出力 shape は axis=1 に per_row の shape [2] を再挿入した
+        // [2, 8] のはずが [3, 8] を渡す（reduce_out_shape([3, 8], Some(1))
+        // == [3] が per_row の shape [2] と不一致）。
+        let err = g
+            .push(
+                FusionOp::Broadcast {
+                    input: per_row,
+                    dim: Some(1),
+                },
+                f32_meta(&[3, 8]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::ShapeMismatch {
+                lhs: vec![2],
+                rhs: vec![3],
+            })
+        );
+    }
+
+    /// #588 §3.1: 軸範囲外の `Broadcast` は `ShapeError::AxisOutOfRange`
+    /// （`reduce_out_shape` から `?` で伝播）で拒否される。
+    #[test]
+    fn push_rejects_broadcast_axis_out_of_range() {
+        let mut g = FusionGraph::new();
+        let scalar = g.push(FusionOp::Input, f32_meta(&[])).unwrap();
+        let err = g
+            .push(
+                FusionOp::Broadcast {
+                    input: scalar,
+                    dim: Some(5),
+                },
+                f32_meta(&[4]),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Shape(ShapeError::AxisOutOfRange { axis: 5, rank: 1 })
+        );
     }
 }
