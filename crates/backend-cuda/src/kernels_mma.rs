@@ -2137,6 +2137,55 @@ mod tests {
         ));
     }
 
+    /// イシュー #531 受け入れ基準 3 項（境界検査の非省略・REQ-8）:
+    /// `render_mma_f16_specializes_tile_and_static_dim` は `dim_m=Static`
+    /// のみを検査しており、`gemm_auto::CompiledDims::STATIC_NK`（N/K
+    /// 静的化・M 動的）・`STATIC_MNK`（全次元静的化）相当の config でも
+    /// REQ-8 手動境界チェック（`kernels_mma.rs` 冒頭コメント「境界検査」）
+    /// が render 後のソースに残存していることを検査する（イシュー #531
+    /// 実装計画 §3.4）。テンプレート展開（`#define` によるコンパイル時
+    /// 定数の焼き込み。イシュー #516）は演算命令列・境界チェック文自体を
+    /// 変更しない設計のため、いずれの `DimSpec` 組合せでも同一の needle
+    /// が残ることを機械的にロックする。
+    #[test]
+    fn render_mma_f16_retains_req8_boundary_guards_for_static_nk_and_mnk() {
+        // `STATIC_NK` 相当: M=Dynamic・N/K=Static（`nvrtc::CompiledDims::STATIC_NK`
+        // と同じ選択。本モジュールは `nvrtc` に依存しないため値は直接
+        // 構築する）。
+        let static_nk = MmaKernelConfig {
+            dim_m: DimSpec::Dynamic,
+            dim_n: DimSpec::Static(128),
+            dim_k: DimSpec::Static(64),
+            ..MmaKernelConfig::default()
+        };
+        // `STATIC_MNK` 相当: 全次元 Static。
+        let static_mnk = MmaKernelConfig {
+            dim_m: DimSpec::Static(4096),
+            dim_n: DimSpec::Static(128),
+            dim_k: DimSpec::Static(64),
+            ..MmaKernelConfig::default()
+        };
+
+        for cfg in [static_nk, static_mnk] {
+            let rendered = render_mma_f16(&cfg).expect("有効な構成が拒否されました");
+            let src = rendered.source();
+            for needle in [
+                "gr < DIM_M && gc < DIM_K",
+                "gr < DIM_K && gc < DIM_N",
+                "r0 < DIM_M && c0 < DIM_N",
+                "r0 < DIM_M && c1 < DIM_N",
+                "r1 < DIM_M && c0 < DIM_N",
+                "r1 < DIM_M && c1 < DIM_N",
+            ] {
+                assert!(
+                    src.contains(needle),
+                    "特化 render（config={cfg:?}）に REQ-8 境界チェック \
+                     `{needle}` が見つかりません"
+                );
+            }
+        }
+    }
+
     /// 決定性の機械検査（#516 実装計画 4 節・§8「スコープ外」の C-5/C-2
     /// キャッシュ系タスクが本 render の出力をハッシュ材料として使う前提の
     /// 検査）。`render_mma_f16_unchecked` は `format!` のみで構成される
