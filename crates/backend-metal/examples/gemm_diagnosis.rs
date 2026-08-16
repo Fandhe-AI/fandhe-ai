@@ -166,11 +166,15 @@ mod analytics {
     impl DeviceProfile {
         /// M4 Max（実機検証環境。`docs/real-hardware-verification-env.md`
         /// §1）の既定プロファイル。`docs/perf/metal-gemm-dynamic-tile.md:53`
-        /// の実測記録（`sysctl -n hw.model` = `Mac16,6`・GPU コア 40）と
-        /// MFA 経験則の 6 倍を出典とする。
+        /// の実測記録（`sysctl -n hw.model` = `Mac16,6`・GPU コア 40）を
+        /// 出典とする。`ideal_groups_multiplier` は
+        /// `backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32`
+        /// （MFA 経験則の f32 系係数）をそのまま参照し、診断経路と
+        /// ライブラリ経路で係数値が食い違わないようにする（単一真実源。
+        /// codex-review 指摘・PR #662）。
         pub const M4_MAX: DeviceProfile = DeviceProfile {
             gpu_core_count: 40,
-            ideal_groups_multiplier: 6,
+            ideal_groups_multiplier: backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32 as u64,
         };
     }
 

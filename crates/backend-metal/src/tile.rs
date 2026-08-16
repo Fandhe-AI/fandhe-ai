@@ -545,6 +545,163 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
     }
 }
 
+// --- occupancy 目標算出（イシュー #541・D-7a）---
+//
+// MFA（metal-flash-attention）型の方法論「`actualGroups`（起動 threadgroup
+// 数）と `idealGroups`（コア数×係数）を比較し、閾値でタイルを 2 段階切替
+// する」の**基盤（算出機構）のみ**をここに置く。`select()` への組み込み・
+// 閾値切替そのものは後続イシュー #542 のスコープであり、本ファイルはまだ
+// `select()` からこれらの関数を呼ばない（#487 診断バイナリ
+// `examples/gemm_diagnosis.rs::analytics` のローカル実装と等価な算出式を
+// クレート内 API として一本化し、算式のドリフト〈重複実装間の食い違い〉
+// を防ぐ狙い）。
+//
+// 本モジュール全体と同じ設計判断で、以下も `objc2` 系 FFI に一切触れない
+// 純粋関数・純粋構造体のため `cfg(target_os = "macos")` を付けない
+// （Linux・CI でも単体テストが回る）。GPU コア数の実機取得（IOKit FFI）は
+// `crate::device::probe_gpu_core_count`（macOS 限定）が担い、その結果を
+// [`OccupancyParams`] へ写像してから本モジュールの関数へ渡す構成にする
+// （FFI 層と算出ロジック層を分離し、算出ロジックを非 macOS でもテスト
+// 可能に保つため）。
+
+/// `(m, n)` から実際に起動される threadgroup 数（`ceil(m/bm) * ceil(n/bn)`）。
+///
+/// `examples/gemm_diagnosis.rs::analytics::analyze` の `actual_groups` 算出
+/// （`groups_m * groups_n`）と同一式。現行 GEMM にバッチ次元は存在しない
+/// ため常に 1 件分の行列積を前提とする（MFA の `batchDimension` 相当は
+/// 将来拡張。イシュー #541 計画「スコープ外」節）。
+///
+/// **fail-safe 契約**: `TileConfig` の `bm`／`bn` フィールドは公開のため
+/// 呼び出し元が `0` を含む任意値を構築できる（`div_ceil(0)` は panic する）。
+/// 本番経路で panic しない契約（`.claude/rules/coding-rust.md`）に従い、
+/// `cfg.bm == 0` または `cfg.bn == 0`、あるいは `groups_m * groups_n` の
+/// オーバーフロー（`usize` から `u64` へ拡張した値同士の積が `u64::MAX` を
+/// 超える極端な `m`／`n`）はいずれも `None` を返す（codex-review 指摘。
+/// PR #662）。通常経路（[`TileConfig::validate`] を通過した構成）では
+/// `bm`／`bn` は常に非ゼロのため実質的には常に `Some` を返す。
+pub fn actual_groups(m: usize, n: usize, cfg: TileConfig) -> Option<u64> {
+    if cfg.bm == 0 || cfg.bn == 0 {
+        return None;
+    }
+    let groups_m = (m as u64).div_ceil(cfg.bm as u64);
+    let groups_n = (n as u64).div_ceil(cfg.bn as u64);
+    groups_m.checked_mul(groups_n)
+}
+
+/// [`OccupancyParams::smem_groups_per_core`] が返す「1 コアあたり同時常駐
+/// 可能な threadgroup 数」の上限キャップ。TileKernels（参照実装）由来の
+/// 経験的上限であり、Apple Silicon の実際のレジスタ・実行ユニット制約に
+/// よる同時実行数はこれより小さくなりうる（本キャップは threadgroup
+/// memory 予算のみから導出される上限を頭打ちにするためのものであり、
+/// レジスタ圧迫等の別要因は考慮しない）。M4 Max 向け確定値ではなく実機
+/// 実測（#542）で見直しうる初期値（イシュー #541 計画「設計方針」節）。
+pub const SMEM_GROUPS_PER_CORE_CAP: u32 = 16;
+
+/// [`OccupancyParams::ideal_groups`] の既定係数（f32 アキュムレータ系）。
+/// MFA の FP32 系経験式（`docs/perf/metal-gemm-bottleneck-diagnosis.md`
+/// §3 の M4 Max 実測前提値・`examples/gemm_diagnosis.rs::analytics::
+/// DeviceProfile::M4_MAX` と同じ出典）が採用する「コアあたり 6 threadgroup」
+/// を初期値として踏襲する。**M4 Max 向けの確定値ではない**（本ファイル
+/// 冒頭コメント・イシュー #541 計画「注意」節: MFA の具体数値は Apple7/8/9
+/// の実測値であり実機実測で確定させる前提）。
+pub const IDEAL_GROUPS_MULTIPLIER_F32: u32 = 6;
+
+/// [`OccupancyParams::ideal_groups`] の全 16bit 系（A・B・アキュムレータ
+/// すべて半精度）向け係数。MFA の経験式でレジスタ圧迫が緩む分だけ f32 系
+/// より高い値（9）が使われる。[`IDEAL_GROUPS_MULTIPLIER_F32`] と同じく
+/// 初期値であり実機実測で確定させる（`backend-metal` は現状 f32 GEMM
+/// が主経路のため、本定数は将来 f16 系カーネルを追加した際の参照用に
+/// 先行定義する）。
+pub const IDEAL_GROUPS_MULTIPLIER_ALL_16BIT: u32 = 9;
+
+/// occupancy 目標算出（[`OccupancyParams::ideal_groups`]）の入力パラメータ。
+/// `crate::device::MetalOccupancyInfo`（macOS 実機からの実測値）から写像
+/// して構築する。GPU コア数が取得不能（`None`）な場合の呼び出し側
+/// フォールバック方針は #542 のスコープであり、本構造体自体は
+/// `gpu_core_count: u32` を必須値として持つ（呼び出し側が `Option` の
+/// 解決を担う）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OccupancyParams {
+    /// GPU コア数（`crate::device::probe_gpu_core_count` の実測値、または
+    /// CLI／設定ファイル由来の明示指定値）。
+    pub gpu_core_count: u32,
+    /// デバイスの threadgroup memory 上限バイト数
+    /// （`MTLDevice::maxThreadgroupMemoryLength`）。
+    pub max_threadgroup_memory_bytes: u32,
+}
+
+impl OccupancyParams {
+    /// `cfg` の threadgroup memory 使用量から、1 コアに同時常駐できる
+    /// threadgroup 数の上限を求める（TileKernels 型: `min(max_smem /
+    /// smem_bytes, CAP)`）。
+    ///
+    /// - `cfg.staged == false`（`shared_mem_bytes() == 0`。device メモリから
+    ///   直接 `simdgroup_load` する経路）は threadgroup memory を消費しない
+    ///   ため、SMEM 制約による上限は存在せず [`SMEM_GROUPS_PER_CORE_CAP`]
+    ///   をそのまま返す。
+    /// - `cfg.shared_mem_bytes() == 0` かつ `staged == true` は
+    ///   [`TileConfig::validate`] の整除制約上ありえない構成だが、ゼロ除算
+    ///   を避けるため同じく `staged` 分岐で判定する（`shared_mem_bytes` の
+    ///   値そのものでは分岐しない）。
+    /// - `shared_mem_bytes() > max_threadgroup_memory_bytes`（デバイス上限
+    ///   超過。[`TileConfig::validate`] が本来この構成自体を拒否する）は
+    ///   0 を返す（同時常駐不可）。
+    pub fn smem_groups_per_core(&self, cfg: TileConfig) -> u32 {
+        if !cfg.staged {
+            return SMEM_GROUPS_PER_CORE_CAP;
+        }
+        let bytes = cfg.shared_mem_bytes();
+        if bytes == 0 || bytes > self.max_threadgroup_memory_bytes {
+            return 0;
+        }
+        (self.max_threadgroup_memory_bytes / bytes).min(SMEM_GROUPS_PER_CORE_CAP)
+    }
+
+    /// コア飽和目標 threadgroup 数（`idealGroups`）を算出する。
+    ///
+    /// `gpu_core_count * min(multiplier, smem_groups_per_core(cfg))`
+    /// （MFA 経験式にコア数×係数だけでなく threadgroup memory 予算による
+    /// 同時常駐数上限を組み合わせた一般化。イシュー #541 計画「設計方針」
+    /// §3.2）。`multiplier` には [`IDEAL_GROUPS_MULTIPLIER_F32`] 等の既定
+    /// 係数、または `examples/gemm_diagnosis.rs` の `--ideal-groups-multiplier`
+    /// 相当の明示指定値を渡す。
+    ///
+    /// `gpu_core_count == 0`・`multiplier == 0`・積のオーバーフローは
+    /// `None`（fail-closed。`examples/gemm_diagnosis.rs::
+    /// parse_device_profile_override` の CLI 検証と同方針。「occupancy
+    /// 判定を無効化するフォールバック」として呼び出し側が扱う契約は
+    /// #542 のスコープ）。
+    ///
+    /// `smem_groups_per_core(cfg) == 0`（`cfg` の threadgroup memory
+    /// 使用量がデバイス上限を超える等、同時常駐不能な構成）の場合も
+    /// `effective_multiplier` が 0 になり同様に `None` を返す（codex-review
+    /// 指摘・PR #662）。ここを素通りして `Some(0)` を返すと、
+    /// [`is_underoccupied`] へ渡した際に通常 `actual > 0` のため
+    /// `actual <= 0` が false 判定となり、実行不能なタイルを
+    /// 「under-occupied ではない」と誤判定してしまう（fail-closed 契約に
+    /// 反する）。
+    pub fn ideal_groups(&self, multiplier: u32, cfg: TileConfig) -> Option<u64> {
+        if self.gpu_core_count == 0 || multiplier == 0 {
+            return None;
+        }
+        let effective_multiplier = multiplier.min(self.smem_groups_per_core(cfg));
+        if effective_multiplier == 0 {
+            return None;
+        }
+        (self.gpu_core_count as u64).checked_mul(effective_multiplier as u64)
+    }
+}
+
+/// `actual`（[`actual_groups`]）が `ideal`（[`OccupancyParams::ideal_groups`]）
+/// 以下かどうかを判定する（MFA の小ブロック縮退条件相当: under-occupied
+/// なら小さいタイルへ切り替える判断材料になる）。境界一致（`actual ==
+/// ideal`）は under-occupied 側（`true`）に倒す（fail-safe: 「ちょうど
+/// 目標」を「十分」と誤認せず縮退候補に含める）。閾値運用そのもの
+/// （`select()` への組み込み）は #542 のスコープ。
+pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
+    actual <= ideal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,6 +1197,232 @@ mod tests {
             cfg.validate(1024, 32 * 1024)
                 .unwrap_or_else(|e| panic!("select({m},{n},{k})={cfg:?} rejected: {e}"));
         }
+    }
+
+    // --- occupancy 目標算出（イシュー #541・D-7a）: actual_groups ---
+
+    #[test]
+    fn actual_groups_matches_m4_max_reference_table_for_64x64_tile() {
+        // `docs/perf/metal-gemm-bottleneck-diagnosis.md` §3.2 の事前計算表
+        // （64x64 タイル・正方形状）と一致することを固定する。
+        let cfg = CANDIDATES[0]; // bm=bn=64
+        assert_eq!(actual_groups(512, 512, cfg), Some(64));
+        assert_eq!(actual_groups(1024, 1024, cfg), Some(256));
+        assert_eq!(actual_groups(2048, 2048, cfg), Some(1024));
+        assert_eq!(actual_groups(4096, 4096, cfg), Some(4096));
+    }
+
+    #[test]
+    fn actual_groups_rounds_up_for_non_multiple_shapes() {
+        // m=100 は bm=64 の倍数でないため ceil(100/64)=2 へ切り上がる。
+        let cfg = CANDIDATES[0]; // bm=bn=64
+        assert_eq!(actual_groups(100, 64, cfg), Some(2));
+    }
+
+    #[test]
+    fn actual_groups_is_none_when_bm_is_zero() {
+        let mut cfg = CANDIDATES[0];
+        cfg.bm = 0;
+        assert_eq!(actual_groups(512, 512, cfg), None);
+    }
+
+    #[test]
+    fn actual_groups_is_none_when_bn_is_zero() {
+        let mut cfg = CANDIDATES[0];
+        cfg.bn = 0;
+        assert_eq!(actual_groups(512, 512, cfg), None);
+    }
+
+    #[test]
+    fn actual_groups_is_none_on_overflow() {
+        // groups_m * groups_n が u64::MAX を超える極端な形状。
+        let cfg = CANDIDATES[0]; // bm=bn=64
+        assert_eq!(actual_groups(usize::MAX, usize::MAX, cfg), None);
+    }
+
+    // --- occupancy 目標算出: OccupancyParams::smem_groups_per_core ---
+
+    #[test]
+    fn smem_groups_per_core_divides_max_smem_by_tile_smem_bytes() {
+        // CANDIDATES[0]（64x64x16, staged）: shared_mem_bytes = 9472
+        // （イシュー #538・PR #673 で導入された行末パディング
+        // `TileConfig::pad`＝`TGP_PAD_ELEMS=4` を含む値。pad 導入前は
+        // 8192 だった）。
+        let cfg = CANDIDATES[0];
+        assert_eq!(cfg.shared_mem_bytes(), 9472);
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(params.smem_groups_per_core(cfg), 3); // 32768/9472=3（切り捨て）
+    }
+
+    #[test]
+    fn smem_groups_per_core_bk32_candidate_yields_two() {
+        // イシュー #532 の bk=32 候補: shared_mem_bytes = 13824
+        // （#538・PR #673 のパディング込み。pad 導入前は 12288 だった）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(params.smem_groups_per_core(cfg), 2); // 32768/13824=2（切り捨て）
+    }
+
+    #[test]
+    fn smem_groups_per_core_is_zero_when_tile_exceeds_device_limit() {
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        // #538・PR #673 のパディング込みで 13824（pad 導入前は 12288）。
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 8192, // 13824 > 8192
+        };
+        assert_eq!(params.smem_groups_per_core(cfg), 0);
+    }
+
+    #[test]
+    fn smem_groups_per_core_returns_cap_when_not_staged() {
+        // staged=false（direct load）は threadgroup memory を使わないため
+        // SMEM 制約による上限を持たず CAP をそのまま返す。
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            params.smem_groups_per_core(TileConfig::SINGLE_SIMDGROUP_8X8),
+            SMEM_GROUPS_PER_CORE_CAP
+        );
+    }
+
+    // --- occupancy 目標算出: OccupancyParams::ideal_groups ---
+
+    #[test]
+    fn ideal_groups_is_capped_by_smem_budget() {
+        // CANDIDATES[0] は shared_mem_bytes=9472（#538・PR #673 のパディング
+        // 込み）のため smem_groups_per_core=3 < multiplier=6 となり、
+        // 実効係数は 3 に頭打ちされる（40*3=120。pad 導入前は
+        // smem_groups_per_core=4・160 だった）。
+        let cfg = CANDIDATES[0];
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, cfg),
+            Some(120)
+        );
+    }
+
+    #[test]
+    fn ideal_groups_matches_mfa_formula_when_smem_unconstrained() {
+        // CANDIDATES[3]（32x32x16 中形状）: shared_mem_bytes=4864
+        // （#538・PR #673 のパディング込み。pad 導入前は 4096 だった）のため
+        // smem_groups_per_core=6 >= multiplier=6 で SMEM 制約が効かず、
+        // 素の MFA 経験式（40*6=240。`docs/perf/
+        // metal-gemm-bottleneck-diagnosis.md` §3 実測前提値）と一致する。
+        let cfg = CANDIDATES[3];
+        assert_eq!(cfg.shared_mem_bytes(), 4864);
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, cfg),
+            Some(240)
+        );
+    }
+
+    #[test]
+    fn ideal_groups_uses_cap_for_direct_load_config() {
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        // multiplier=20 > CAP=16 のため実効係数は 16 に頭打ちされる。
+        assert_eq!(
+            params.ideal_groups(20, TileConfig::SINGLE_SIMDGROUP_8X8),
+            Some(640)
+        );
+    }
+
+    #[test]
+    fn ideal_groups_is_none_when_gpu_core_count_is_zero() {
+        let params = OccupancyParams {
+            gpu_core_count: 0,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, CANDIDATES[0]),
+            None
+        );
+    }
+
+    #[test]
+    fn ideal_groups_is_none_when_multiplier_is_zero() {
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(params.ideal_groups(0, CANDIDATES[0]), None);
+    }
+
+    #[test]
+    fn ideal_groups_is_none_when_smem_groups_per_core_is_zero() {
+        // codex-review 指摘（PR #662）: cfg の threadgroup memory 使用量が
+        // デバイス上限を超え smem_groups_per_core(cfg)==0 の場合、
+        // effective_multiplier も 0 になる。これを検証せず素通りすると
+        // `Some(0)` が返り、`is_underoccupied` へ渡した際に
+        // `actual <= 0` が通常 false となって実行不能な構成を
+        // 「under-occupied ではない」と誤判定してしまう（fail-closed
+        // 契約違反）。`None` を返すことを固定する。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 8192, // 13824 > 8192 のため常駐不可
+        };
+        assert_eq!(params.smem_groups_per_core(cfg), 0);
+        assert_eq!(params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, cfg), None);
+    }
+
+    // --- occupancy 目標算出: is_underoccupied ---
+
+    #[test]
+    fn is_underoccupied_treats_exact_boundary_as_underoccupied() {
+        assert!(is_underoccupied(160, 160));
+    }
+
+    #[test]
+    fn is_underoccupied_is_false_when_actual_exceeds_ideal() {
+        assert!(!is_underoccupied(161, 160));
+    }
+
+    #[test]
+    fn is_underoccupied_is_true_when_actual_is_below_ideal() {
+        assert!(is_underoccupied(64, 160));
     }
 
     // --- CANDIDATES を直接巡回する実機依存テスト（イシュー #532・PR #651 codex-review

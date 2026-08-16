@@ -49,10 +49,17 @@
 3. `kernel.cu`／`kernel.ptx` を書き込み、各ファイルと一時ディレクトリ自体を fsync する（rename 前にディスクへ反映されていることを保証。DeepGEMM `fsync_dir` 相当のボトムアップ fsync）
 4. `std::fs::rename` で最終パスへアトミックに配置する。失敗時は最終パスの既存エントリを検査し、有効なら「他プロセス先着」として正常系吸収（`Ok`）、破損なら削除して一度だけ再試行、それでも失敗すれば `CudaError::CacheIo` で fail-closed に失敗する（無限リトライしない）
 
+## ソース断片の取り込み（C-5・#514）
+
+`CudaKernelCacheKey` は descriptor・環境パラメータに加え、最終レンダー済みカーネルソース全体（`source: String`）をキーへ含める。
+
+- **必要性判断**: DeepGEMM 型の「`#include` を正規表現抽出して再帰的にハッシュへ取り込む」機構は不要と判断した。本クレートのカーネルソースは `kernels_mma::render_mma_f16` 等がプロセス内で最終 `String` を確定させ、リポジトリ内ヘッダファイルへの `#include` 参照を持たないため（toolkit 標準ヘッダの変更は既存の `nvrtc_version` フィールドが追従する）。最終ソース文字列そのものをキーへ含めれば、断片（`kernels_mma.rs` の `*_BODY` 定数等）をどう編集しても推移的にキーが変わり、DeepGEMM の再帰ハッシュと同じ「ソース変更で確実にキャッシュミスする」性質を、ファイルパース・fs I/O ゼロで得られる。判断根拠の詳細は `crates/backend-cuda/src/nvrtc.rs` の `CudaKernelCacheKey` ドキュメンテーションコメントを正とする。
+- **エンコーディング**: `canonical_bytes` の `ENCODING_VERSION` を `1` → `2` へ上げ、`compile_flags` の後段に `source` を長さプレフィクス付きで追記した。C-2（#506）時点のディスクキャッシュエントリ（C-3・#509 実装後に実体化）は本変更により全て無効化される契約（意図どおり）。
+- **情報露出対策**: `source`（数十 KB になりうる）は `derive(Debug)` をやめ手動 `Debug` 実装とし、ログ・パニックメッセージには長さと非暗号な変更検知用フィンガープリント（FNV-1a 64bit。`stable_hash` と同一アルゴリズム）のみを出す（PR #676 codex-review P1 是正。当初案の先頭 40 文字平文要約はカーネル名・シグネチャ等の識別情報を含みうる部分的漏出だったため撤回した）。外部公開 getter は追加していない（`RenderedMmaKernel` がソース文字列を外部へ返さない設計〈PR #643〉と同じ理由）。
+
 ## 関連
 
-- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`store_cache_entry`／`store_cache_entry_in`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry`）
+- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`store_cache_entry`／`store_cache_entry_in`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry`／`CudaKernelCacheKey`）
 - `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`／`CudaError::CacheIo`
 - C-4（#511）: プロセス内 LRU カーネルキャッシュ・GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ導線）
-- C-5（#514）: ソース断片の再帰ハッシュによるキャッシュ無効化
 - C-10（#529）: ヒット/ミス・並行競合・破損検出の網羅的回帰テスト拡充（C-3 時点のユニットテストは受け入れ基準を直接検証する最小限に留める）
