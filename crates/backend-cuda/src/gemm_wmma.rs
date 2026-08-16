@@ -62,7 +62,7 @@ pub struct CudaWmmaGemm {
     stream: Arc<CudaStream>,
     wmma_f16: CudaFunction,
     /// TASK-11.1d（#63）で追加。共有メモリ・タイル最適化版 f16 WMMA
-    /// カーネル（`kernels_wmma_opt::WMMA_F16_OPT`）のコンパイル済みハンドル。
+    /// カーネル（`kernels_wmma_opt::wmma_f16_opt_source()`）のコンパイル済みハンドル。
     /// `gemm.rs::CudaGemm::wmma_tf32_opt` と同じ理由（コンパイル失敗しうる
     /// 環境が `wmma_f16`〈基本版〉より広い）で `Option` にし、失敗を
     /// `new` の早期 return に合流させない。`run_f16` はこちらが `Some` なら
@@ -113,7 +113,7 @@ impl CudaWmmaGemm {
             .load_module(ptx)?
             .load_function("gemm_wmma_f16")?;
 
-        // TASK-11.1d（#63）: `kernels_wmma_opt::WMMA_F16_OPT` の不変条件
+        // TASK-11.1d（#63）: `kernels_wmma_opt::wmma_f16_opt_source()` の不変条件
         // （ブロックタイルが warp タイルの倍数・スレッド数が warp 数×32 に
         // 一致・warp タイルが fragment 辺の 2 倍・パディング行幅が half の
         // `ldm` 制約〈8 の倍数〉を満たす）をコンパイル時 const アサーション
@@ -390,14 +390,14 @@ fn wmma_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
-/// f16 WMMA opt カーネル（`kernels_wmma_opt::WMMA_F16_OPT`）を単独で
+/// f16 WMMA opt カーネル（`kernels_wmma_opt::wmma_f16_opt_source()`）を単独で
 /// コンパイル・ロードする。`CudaWmmaGemm::new` から呼ばれ、戻り値の `Err`
 /// は基本版（`wmma_f16`）の可用性から切り離すため `?` で早期 return せず
 /// 呼び出し元で `.ok()` により握りつぶす（`Self::wmma_f16_opt` フィールドの
 /// ドキュメンテーションコメント参照。`gemm.rs::compile_wmma_tf32_opt` と
 /// 同じ設計判断）。
 fn compile_wmma_f16_opt(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let ptx = compile_ptx(kernels_wmma_opt::WMMA_F16_OPT, arch)?;
+    let ptx = compile_ptx(kernels_wmma_opt::wmma_f16_opt_source(), arch)?;
     let func = device
         .context()
         .load_module(ptx)?
