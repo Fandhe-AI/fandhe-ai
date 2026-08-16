@@ -25,8 +25,10 @@
 //! 参照）。
 
 use std::ffi::OsStr;
+use std::fs;
 use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
@@ -748,6 +750,391 @@ pub(crate) fn cache_entry_path(
     key: &CudaKernelCacheKey,
 ) -> Result<PathBuf, CudaError> {
     cache_entry_path_in(&cache_root(workspace_root)?, key)
+}
+
+// ============================================================================
+// キャッシュ I/O（イシュー #509・Phase C-3）
+//
+// 上記まで（C-2・#506）はキャッシュキーの正規化・ハッシュ化・ルート／
+// エントリパスの「解決」のみを担う純関数群だった。以下は解決済みパスに
+// 対する実際の fs I/O（一時ディレクトリコンパイル → fsync → アトミック
+// rename）を追加する。参照実装は DeepGEMM の compiler（一時ディレクトリで
+// ビルド後 `std::filesystem::rename`、先着プロセスがいた場合は rename
+// 失敗を正常系として吸収。rename 前にボトムアップ再帰 fsync）。
+//
+// crate 内呼び出し元（GEMM 経路への結線・プロセス内 LRU）は C-4（#511）の
+// スコープであり、本タスク時点では未結線（先行スキャフォールディング。
+// C-2 の `cache_root`／`cache_entry_path` と同じ判断）。
+// ============================================================================
+
+/// キャッシュエントリ内のソースファイル名（NVRTC へ渡した `.cu` ソース
+/// 全文）。[`validate_cache_entry`]・[`store_cache_entry_in`]・
+/// [`load_cache_entry_in`] が共用する。
+const CACHE_ENTRY_SOURCE_FILE: &str = "kernel.cu";
+
+/// キャッシュエントリ内の成果物ファイル名（NVRTC コンパイル結果の PTX
+/// アセンブリ全文）。定数化の理由は [`CACHE_ENTRY_SOURCE_FILE`] と同じ。
+const CACHE_ENTRY_PTX_FILE: &str = "kernel.ptx";
+
+/// コンパイルキャッシュから読み出したカーネルの実体（イシュー #509・
+/// Phase C-3）。
+///
+/// エントリディレクトリ直下の [`CACHE_ENTRY_SOURCE_FILE`]／
+/// [`CACHE_ENTRY_PTX_FILE`] の内容をそのまま保持する薄いデータ型。
+/// NVRTC 呼び出し（`compile_ptx`）との結線・プロセス内 LRU での保持は
+/// C-4（#511）のスコープであり、本 struct はディスクとメモリの間で
+/// バイト列（UTF-8 テキスト）を運ぶだけの役割に留める。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CachedKernel {
+    /// NVRTC へ渡したソース全文（[`CACHE_ENTRY_SOURCE_FILE`] の内容）。
+    pub(crate) kernel_cu: String,
+    /// NVRTC コンパイル結果の PTX アセンブリ全文
+    /// （[`CACHE_ENTRY_PTX_FILE`] の内容）。
+    pub(crate) kernel_ptx: String,
+}
+
+/// キャッシュエントリディレクトリが不変条件（[`CACHE_ENTRY_SOURCE_FILE`]・
+/// [`CACHE_ENTRY_PTX_FILE`] の両方が存在する）を満たすかを判定する
+/// （イシュー #509・Phase C-3。実装計画 §3.1・§3.3）。
+///
+/// [`store_cache_entry_in`]（rename 失敗時の「他プロセス先着」判定・
+/// 破損置換判定）と [`load_cache_entry_in`]（読み出し前のミス判定）で
+/// 共用する。存在確認のみを行う軽量チェックであり、内容の妥当性（PTX と
+/// して有効か等）までは検証しない（DeepGEMM の kernel_runtime 検証と
+/// 同水準）。ディレクトリ rename はアトミックなため通常運用で破損
+/// エントリは生まれず、これはクラッシュ残骸・外部破壊への縦深防御
+/// （A08 整合性）である。
+fn validate_cache_entry(entry_dir: &Path) -> bool {
+    entry_dir.join(CACHE_ENTRY_SOURCE_FILE).is_file()
+        && entry_dir.join(CACHE_ENTRY_PTX_FILE).is_file()
+}
+
+/// ファイルを fsync する（[`write_entry_files`] が書き込み直後に呼ぶ）。
+///
+/// rename 前に内容がディスクへ確実に反映されていることを保証する
+/// （A08 整合性: rename のアトミック性だけでは「rename 前にクラッシュし
+/// 部分書き込みのまま OS バッファに留まる」ケースを防げないため。
+/// DeepGEMM compiler の書き込みプロトコルに倣う）。
+fn fsync_file(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+/// ディレクトリを fsync する（[`write_entry_files`]・[`store_cache_entry_in`]
+/// が一時ディレクトリ／ルートディレクトリに対して呼ぶ）。
+///
+/// POSIX 準拠 OS ではディレクトリエントリの追加（ファイル作成・rename）も
+/// fsync が必要な変更として扱われるため、`kernel.cu`／`kernel.ptx` の
+/// 書き込み後に一時ディレクトリ自体も fsync する（DeepGEMM `fsync_dir`
+/// 相当のボトムアップ fsync）。非 Unix（本クレートのビルド対象は
+/// `backend-switching-design.md` の cfg ベース分岐上 Linux/macOS/CUDA
+/// toolkit 非搭載環境のみを想定し Windows は対象外）では
+/// `File::open` でディレクトリを開くこと自体が失敗しうるため no-op と
+/// する（fsync できないことを理由に I/O 全体を失敗させない。rename の
+/// アトミック性自体は非 Unix でも成立する）。
+#[cfg(unix)]
+fn fsync_dir(path: &Path) -> std::io::Result<()> {
+    fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn fsync_dir(_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// 一時ディレクトリ名のシーケンス番号（プロセス内一意性の担保。
+/// [`temp_entry_dir_name`] が使う）。
+static TEMP_ENTRY_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// [`store_cache_entry_in`] が使う一時ディレクトリ名を生成する。
+///
+/// 命名は `.tmp.<final_entry_name>.<pid>.<seq>`。先頭 `.` により
+/// `kernel.*` エントリ名前空間（[`CudaKernelCacheKey::cache_entry_dir_name`]）
+/// と衝突しない。`pid`（`std::process::id()`。プロセス間一意性）と
+/// `seq`（[`TEMP_ENTRY_DIR_SEQ`]。プロセス内一意性）の組み合わせで、
+/// 同一ルートへの並行書き込み（複数プロセス・同一プロセス内の複数
+/// スレッド）が一時ディレクトリ名で衝突しないことを保証する（DeepGEMM
+/// compiler の一時ディレクトリ方式に倣う。実装計画 §3.2）。
+/// `final_entry_name` はキー検証済み（[`CudaKernelCacheKey::cache_entry_dir_name`]
+/// の A03 トラバーサル防御を経由済み）の文字列のみを渡すこと。
+fn temp_entry_dir_name(final_entry_name: &str) -> String {
+    let seq = TEMP_ENTRY_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!(".tmp.{final_entry_name}.{}.{seq}", std::process::id())
+}
+
+/// [`store_cache_entry_in`] の手順 1〜3（一時ディレクトリ作成・
+/// `kernel.cu`／`kernel.ptx` 書き込み・各ファイルの fsync・一時
+/// ディレクトリ自体の fsync）を担う。
+///
+/// `tmp_dir` は [`fs::create_dir`]（排他的作成。既存パスなら `Err`）で
+/// 確保するため、[`temp_entry_dir_name`] の一意性が壊れていれば本関数が
+/// `Err` を返す（サイレントな上書きを避ける）。
+fn write_entry_files(tmp_dir: &Path, kernel_cu: &str, kernel_ptx: &str) -> Result<(), CudaError> {
+    fs::create_dir(tmp_dir).map_err(|e| CudaError::CacheIo {
+        detail: format!(
+            "failed to create temp cache directory {}: {e}",
+            tmp_dir.display()
+        ),
+    })?;
+
+    let cu_path = tmp_dir.join(CACHE_ENTRY_SOURCE_FILE);
+    fs::write(&cu_path, kernel_cu).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to write {}: {e}", cu_path.display()),
+    })?;
+    fsync_file(&cu_path).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to fsync {}: {e}", cu_path.display()),
+    })?;
+
+    let ptx_path = tmp_dir.join(CACHE_ENTRY_PTX_FILE);
+    fs::write(&ptx_path, kernel_ptx).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to write {}: {e}", ptx_path.display()),
+    })?;
+    fsync_file(&ptx_path).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to fsync {}: {e}", ptx_path.display()),
+    })?;
+
+    fsync_dir(tmp_dir).map_err(|e| CudaError::CacheIo {
+        detail: format!(
+            "failed to fsync temp cache directory {}: {e}",
+            tmp_dir.display()
+        ),
+    })
+}
+
+/// [`cache_root`] が解決した候補パスを実際に fs 上へ実体化し、symlink
+/// 解決込みの containment 再検証を行う（イシュー #509・Phase C-3。
+/// C-2 が `docs/cuda-jit-cache-design.md` 「残課題」節で明示的に委譲した
+/// 「symlink 解決込みの再検証」を実装する）。
+///
+/// `candidate_root` は [`cache_root`]（環境変数解決＋字句正規化のみの
+/// containment 検証）の戻り値を渡す想定。本関数はそれを
+/// [`fs::create_dir_all`] で実体化した後、[`Path::canonicalize`]
+/// （symlink 解決込み）した実在パスで [`path_lexically_within`] による
+/// containment を**再検証**する。C-2 時点の字句正規化のみの検証は、
+/// `candidate_root` の祖先ディレクトリが symlink 経由で `workspace_root`
+/// 配下を指すケース（例: `~/.cache` が `<workspace_root>/evil` への
+/// symlink）を見逃す（字句上は `workspace_root` 配下に見えないため）。
+/// ディレクトリを実際に作成した後でなければ symlink 解決ができない
+/// （存在しないパスは `canonicalize` が `Err` を返す）ため、この再検証は
+/// fs I/O を行わない C-2 の純関数群では実行できず C-3（本関数）のスコープ
+/// とされていた。
+///
+/// テスト容易性のため `candidate_root`（実体化対象）と `workspace_root`
+/// （containment 検証の基準）を分離した「注入で決定化」パターン
+/// （[`cache_entry_path_in`] と同型）を採る。公開ラッパー
+/// [`ensure_cache_root`] は `candidate_root` を [`cache_root`]（実環境変数
+/// 依存）から求めるため、実 `HOME`／`XDG_CACHE_HOME` に依存させず・
+/// 実プロセス環境変数を書き換えず（並行テスト実行時の競合を避ける）に
+/// containment 再検証（特に symlink 経由の拒否）をテストするには本関数を
+/// 直接呼ぶ。
+fn ensure_cache_root_in(
+    candidate_root: &Path,
+    workspace_root: &Path,
+) -> Result<PathBuf, CudaError> {
+    fs::create_dir_all(candidate_root).map_err(|e| CudaError::CacheIo {
+        detail: format!(
+            "failed to create cache root directory {}: {e}",
+            candidate_root.display()
+        ),
+    })?;
+
+    let canonical_root = candidate_root
+        .canonicalize()
+        .map_err(|e| CudaError::CacheIo {
+            detail: format!(
+                "failed to canonicalize cache root directory {}: {e}",
+                candidate_root.display()
+            ),
+        })?;
+
+    // `workspace_root` 自体が存在しない（呼び出し元がまだ何も書き込んで
+    // いないビルドディレクトリ等）場合は canonicalize できないため、
+    // その場合のみ字句正規化した値へフォールバックする（C-2 の
+    // `resolve_cache_root` と同じ判断: containment 検証の基準側が
+    // 存在しない場合、字句比較で近似する）。
+    let canonical_workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| lexically_normalize(workspace_root));
+
+    if path_lexically_within(&canonical_root, &canonical_workspace_root) {
+        return Err(CudaError::CacheDirUnavailable {
+            detail: format!(
+                "cache root {} resolves (after symlink resolution) within workspace root {}",
+                canonical_root.display(),
+                canonical_workspace_root.display()
+            ),
+        });
+    }
+
+    Ok(canonical_root)
+}
+
+/// [`cache_root`] の解決結果を実際に fs 上へ実体化する公開ラッパー
+/// （イシュー #509・Phase C-3。[`store_cache_entry`]／[`load_cache_entry`]
+/// から呼ばれる）。実処理は [`ensure_cache_root_in`] に委譲する（同関数
+/// ドキュメンテーションコメント参照）。
+#[allow(
+    dead_code,
+    reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
+              先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
+)]
+pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
+    ensure_cache_root_in(&cache_root(workspace_root)?, workspace_root)
+}
+
+/// 一時ディレクトリコンパイル → アトミック rename でキャッシュエントリを
+/// 書き込む（イシュー #509・Phase C-3。実装計画 §3.2）。
+///
+/// `root` は既に [`ensure_cache_root_in`]／[`ensure_cache_root`] で実体化・
+/// containment 検証済みのキャッシュルートを渡す想定（本関数自体は
+/// containment 再検証を行わない。責務分離は [`cache_entry_path_in`] と
+/// 同じ設計判断）。
+///
+/// # 並行競合の吸収（受け入れ基準 1）
+///
+/// [`fs::rename`] が失敗した場合、最終パスに [`validate_cache_entry`] を
+/// 満たす既存エントリがあれば「他プロセス（他スレッド）が同一キーへ
+/// 先着した」**正常系**とみなし、自分の一時ディレクトリを削除して最終
+/// パスを返す（`Ok`）。rename のアトミック性により、途中状態の破損
+/// エントリが他プロセスから観測されることはない（A08 整合性）。
+///
+/// # 破損エントリの置換（受け入れ基準 2）
+///
+/// 最終パスに既存エントリがあるが [`validate_cache_entry`] を満たさない
+/// （破損。クラッシュ残骸・外部破壊）場合、そのエントリを
+/// [`fs::remove_dir_all`] で削除して rename を**一度だけ**再試行する。
+/// 再試行後も失敗する場合（別プロセスが同時に置き直した等）は再度
+/// 有効性を確認し、有効なら正常系として吸収する。それでも無効なら
+/// 無限リトライせず [`CudaError::CacheIo`] で fail-closed に失敗させる
+/// （DoS 耐性。`.claude/rules/security.md` A08）。
+///
+/// いずれのエラー経路でも一時ディレクトリの削除を試みる（best-effort。
+/// 削除失敗はそれ自体をエラーにせず元エラーを優先する）。
+fn store_cache_entry_in(
+    root: &Path,
+    key: &CudaKernelCacheKey,
+    kernel_cu: &str,
+    kernel_ptx: &str,
+) -> Result<PathBuf, CudaError> {
+    let final_dir = cache_entry_path_in(root, key)?;
+    let entry_name = key.cache_entry_dir_name()?;
+    let tmp_dir = root.join(temp_entry_dir_name(&entry_name));
+
+    if let Err(e) = write_entry_files(&tmp_dir, kernel_cu, kernel_ptx) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+
+    if fs::rename(&tmp_dir, &final_dir).is_ok() {
+        // ルートディレクトリ自体の fsync は best-effort（rename の
+        // アトミック性・可視性自体は fsync に依存しない。エントリ追加が
+        // ディスクへ確実に反映されることを高めるための追加防御に留める）。
+        let _ = fsync_dir(root);
+        return Ok(final_dir);
+    }
+
+    // rename 失敗経路: 他プロセス先着（正常系）／破損エントリ置換／
+    // その他 fs エラーのいずれかを、最終パスの状態から判別する。
+    if validate_cache_entry(&final_dir) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Ok(final_dir);
+    }
+
+    if final_dir.exists() {
+        // 破損エントリ。置換して一度だけ再試行する（無限リトライしない）。
+        let _ = fs::remove_dir_all(&final_dir);
+        if fs::rename(&tmp_dir, &final_dir).is_ok() {
+            let _ = fsync_dir(root);
+            return Ok(final_dir);
+        }
+    }
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+    if validate_cache_entry(&final_dir) {
+        // 再試行の間に別プロセスが有効なエントリを置いた（正常系）。
+        Ok(final_dir)
+    } else {
+        Err(CudaError::CacheIo {
+            detail: format!(
+                "failed to atomically rename cache entry into place: {}",
+                final_dir.display()
+            ),
+        })
+    }
+}
+
+/// [`store_cache_entry_in`] の公開ラッパー（イシュー #509・Phase C-3）。
+/// `workspace_root` から [`ensure_cache_root`] でルートを実体化した上で
+/// 委譲する。NVRTC コンパイル（`compile_ptx`）との結線（コンパイル成功後
+/// に本関数を呼ぶ導線）は C-4（#511）のスコープ（実装計画 §3.5: store は
+/// バイト列を受け渡す純 I/O プリミティブに留める）。
+#[allow(
+    dead_code,
+    reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
+              先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
+)]
+pub(crate) fn store_cache_entry(
+    workspace_root: &Path,
+    key: &CudaKernelCacheKey,
+    kernel_cu: &str,
+    kernel_ptx: &str,
+) -> Result<PathBuf, CudaError> {
+    let root = ensure_cache_root(workspace_root)?;
+    store_cache_entry_in(&root, key, kernel_cu, kernel_ptx)
+}
+
+/// キャッシュエントリを読み出す（イシュー #509・Phase C-3。実装計画
+/// §3.3）。`root` は [`store_cache_entry_in`] と同じく呼び出し元で
+/// 実体化・containment 検証済みのキャッシュルートを渡す想定。
+///
+/// - エントリディレクトリ不在 → `Ok(None)`（ミス）
+/// - 両ファイル存在・読み取り成功 → `Ok(Some(..))`
+/// - 片方欠落（破損） → `Ok(None)`（ミス扱い）
+///
+/// 破損エントリを検出しても**削除は行わない**: 読み手が消すと並行する
+/// 書き手・他の読み手との競合面が増えるため、置き換えは
+/// [`store_cache_entry_in`] 側（rename 失敗判定）に一元化する（実装計画
+/// §3.3 の設計判断）。
+fn load_cache_entry_in(
+    root: &Path,
+    key: &CudaKernelCacheKey,
+) -> Result<Option<CachedKernel>, CudaError> {
+    let entry_dir = cache_entry_path_in(root, key)?;
+    if !validate_cache_entry(&entry_dir) {
+        return Ok(None);
+    }
+
+    let kernel_cu = fs::read_to_string(entry_dir.join(CACHE_ENTRY_SOURCE_FILE)).map_err(|e| {
+        CudaError::CacheIo {
+            detail: format!("failed to read cached kernel source: {e}"),
+        }
+    })?;
+    let kernel_ptx = fs::read_to_string(entry_dir.join(CACHE_ENTRY_PTX_FILE)).map_err(|e| {
+        CudaError::CacheIo {
+            detail: format!("failed to read cached kernel ptx: {e}"),
+        }
+    })?;
+
+    Ok(Some(CachedKernel {
+        kernel_cu,
+        kernel_ptx,
+    }))
+}
+
+/// [`load_cache_entry_in`] の公開ラッパー（イシュー #509・Phase C-3）。
+/// `workspace_root` から [`ensure_cache_root`] でルートを実体化した上で
+/// 委譲する（store 側と対称。ルート実体化は冪等なため読み出し専用の
+/// 呼び出しでも安全）。
+#[allow(
+    dead_code,
+    reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
+              先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
+)]
+pub(crate) fn load_cache_entry(
+    workspace_root: &Path,
+    key: &CudaKernelCacheKey,
+) -> Result<Option<CachedKernel>, CudaError> {
+    let root = ensure_cache_root(workspace_root)?;
+    load_cache_entry_in(&root, key)
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
@@ -1920,6 +2307,254 @@ mod tests {
         assert!(entry_path.starts_with(&root));
         let entry_name = key.cache_entry_dir_name().expect("must succeed");
         assert_eq!(entry_path, root.join(entry_name));
+    }
+
+    // ------------------------------------------------------------------
+    // キャッシュ I/O（イシュー #509・Phase C-3）のユニットテスト。
+    //
+    // 実プロセス環境変数（`RUST_AI_CUDA_CACHE_DIR` 等）を書き換えると
+    // 並行テスト実行時に競合するため、`*_in` 系（`store_cache_entry_in`・
+    // `load_cache_entry_in`・`ensure_cache_root_in`）を直接呼び、`root`
+    // を `std::env::temp_dir()` 配下の一意なディレクトリで注入する
+    // （`cache_entry_path_in` と同じ「注入で決定化」パターン）。網羅的な
+    // ヒット/ミス・並行競合・破損検出の回帰テスト拡充は C-10（#529）の
+    // スコープであり、ここでは受け入れ基準を直接検証する最小限に留める
+    // （実装計画 §1 スコープ境界節）。
+    // ------------------------------------------------------------------
+
+    /// テスト用に一意な一時ディレクトリを払い出す（プロセス内
+    /// `AtomicU64` カウンタ＋PID で並行テスト実行時の衝突を避ける）。
+    /// 呼び出し元がテスト末尾で `remove_dir_all` して片付ける。
+    fn fresh_temp_dir(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "rust-ai-library-cache-test.{label}.{}.{seq}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("failed to create test temp dir");
+        dir
+    }
+
+    // 受け入れ基準（実装計画 §5）: store → load ラウンドトリップ。両
+    // ファイルが存在し内容が一致すること。
+    #[test]
+    fn store_then_load_roundtrips_entry_contents() {
+        let root = fresh_temp_dir("roundtrip");
+        let key = sample_key();
+
+        let stored = store_cache_entry_in(&root, &key, "// kernel.cu source", "// kernel.ptx body")
+            .expect("store must succeed");
+        assert!(validate_cache_entry(&stored));
+
+        let loaded = load_cache_entry_in(&root, &key)
+            .expect("load must succeed")
+            .expect("entry must be a hit after store");
+        assert_eq!(loaded.kernel_cu, "// kernel.cu source");
+        assert_eq!(loaded.kernel_ptx, "// kernel.ptx body");
+
+        // エラー経路・正常経路とも一時ディレクトリが残存しないこと。
+        let leftover_tmp_dirs = fs::read_dir(&root)
+            .expect("root must be readable")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp."))
+            .count();
+        assert_eq!(leftover_tmp_dirs, 0, "temp directories must not remain");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 未書き込みキーの load はミス（`Ok(None)`）を返すこと。
+    #[test]
+    fn load_returns_none_when_entry_absent() {
+        let root = fresh_temp_dir("miss");
+        let key = sample_key();
+
+        let loaded = load_cache_entry_in(&root, &key).expect("load must succeed");
+        assert!(loaded.is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 受け入れ基準 1: 並行競合（先着吸収）。同一キーで 2 回 store しても
+    // 両方 `Ok`、エントリは 1 つ・内容は 1 回目のもののまま破壊されない
+    // （2 回目の rename は失敗し「他プロセス先着」として吸収される）。
+    #[test]
+    fn store_twice_absorbs_second_writer_as_success() {
+        let root = fresh_temp_dir("double-store");
+        let key = sample_key();
+
+        let first = store_cache_entry_in(&root, &key, "first.cu", "first.ptx")
+            .expect("first store must succeed");
+        let second = store_cache_entry_in(&root, &key, "second.cu", "second.ptx")
+            .expect("second store must be absorbed as success, not fail");
+
+        assert_eq!(first, second);
+        let loaded = load_cache_entry_in(&root, &key)
+            .expect("load must succeed")
+            .expect("entry must exist");
+        // 先着（1 回目）の内容が保たれ、2 回目の書き込みで上書きされない
+        // こと（rename 失敗時に自分の一時ディレクトリを捨てる契約）。
+        assert_eq!(loaded.kernel_cu, "first.cu");
+        assert_eq!(loaded.kernel_ptx, "first.ptx");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 受け入れ基準 1: 並行競合（複数スレッド）。同一注入ルート・同一キー
+    // へ複数スレッドが同時 store しても全スレッド `Ok` を返し、最終
+    // エントリが不変条件（`validate_cache_entry`）を満たすこと。
+    #[test]
+    fn concurrent_store_from_multiple_threads_all_succeed() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let root = Arc::new(fresh_temp_dir("concurrent"));
+        let key = Arc::new(sample_key());
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let root = Arc::clone(&root);
+                let key = Arc::clone(&key);
+                thread::spawn(move || {
+                    store_cache_entry_in(
+                        &root,
+                        &key,
+                        &format!("thread-{i}.cu"),
+                        &format!("thread-{i}.ptx"),
+                    )
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("thread must not panic")
+                .expect("every concurrent store must succeed (Ok)");
+        }
+
+        let entry_path = cache_entry_path_in(&root, &key).expect("must succeed");
+        assert!(validate_cache_entry(&entry_path));
+
+        let leftover_tmp_dirs = fs::read_dir(root.as_path())
+            .expect("root must be readable")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".tmp."))
+            .count();
+        assert_eq!(
+            leftover_tmp_dirs, 0,
+            "no thread's temp directory may remain after the race"
+        );
+
+        let _ = fs::remove_dir_all(root.as_path());
+    }
+
+    // 受け入れ基準 2: 破損検出。`kernel.ptx` を削除した破損エントリで
+    // load がミス（`Ok(None)`）を返すこと。
+    #[test]
+    fn load_treats_missing_ptx_file_as_miss() {
+        let root = fresh_temp_dir("corrupt-load");
+        let key = sample_key();
+
+        let entry_dir =
+            store_cache_entry_in(&root, &key, "cu-body", "ptx-body").expect("store must succeed");
+        fs::remove_file(entry_dir.join(CACHE_ENTRY_PTX_FILE)).expect("must remove ptx file");
+
+        let loaded = load_cache_entry_in(&root, &key).expect("load must succeed");
+        assert!(loaded.is_none(), "entry missing kernel.ptx must be a miss");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 受け入れ基準 2: 破損エントリ存在下で store が置換に成功すること。
+    #[test]
+    fn store_replaces_corrupt_existing_entry() {
+        let root = fresh_temp_dir("corrupt-replace");
+        let key = sample_key();
+
+        let entry_dir = store_cache_entry_in(&root, &key, "stale-cu", "stale-ptx")
+            .expect("initial store must succeed");
+        fs::remove_file(entry_dir.join(CACHE_ENTRY_PTX_FILE)).expect("must remove ptx file");
+        assert!(
+            !validate_cache_entry(&entry_dir),
+            "entry must be corrupt (missing kernel.ptx) before replacement"
+        );
+
+        let replaced = store_cache_entry_in(&root, &key, "fresh-cu", "fresh-ptx")
+            .expect("store must replace the corrupt entry");
+        assert_eq!(replaced, entry_dir);
+
+        let loaded = load_cache_entry_in(&root, &key)
+            .expect("load must succeed")
+            .expect("replaced entry must be a hit");
+        assert_eq!(loaded.kernel_cu, "fresh-cu");
+        assert_eq!(loaded.kernel_ptx, "fresh-ptx");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // `ensure_cache_root_in`: 通常ケース（symlink なし）で `candidate_root`
+    // が実体化され、containment 検証（`workspace_root` 配下でない）を
+    // 通過した canonical パスが返ること。
+    #[test]
+    fn ensure_cache_root_in_creates_and_returns_canonical_root() {
+        let workspace_root = fresh_temp_dir("ensure-root-workspace");
+        let candidate = fresh_temp_dir("ensure-root-candidate").join("nested/cache/dir");
+
+        let resolved = ensure_cache_root_in(&candidate, &workspace_root)
+            .expect("candidate outside workspace_root must be accepted");
+
+        assert!(resolved.is_dir());
+        assert_eq!(
+            resolved,
+            candidate
+                .canonicalize()
+                .expect("candidate must exist and be canonicalizable after ensure_cache_root_in")
+        );
+
+        let _ = fs::remove_dir_all(&workspace_root);
+        // `candidate` は `candidate.parent()`（`fresh_temp_dir` が返した
+        // ディレクトリ）を消せば `nested/...` ごと片付く。
+        let _ = fs::remove_dir_all(
+            candidate
+                .ancestors()
+                .nth(2)
+                .expect("candidate must have a fresh_temp_dir ancestor"),
+        );
+    }
+
+    // symlink 再検証（cfg(unix)）: `candidate_root` が symlink 経由で
+    // `workspace_root` 配下を指す場合、字句上は `workspace_root` 外に
+    // 見えても `ensure_cache_root_in` が `canonicalize` 済みパスで
+    // containment を再検証し拒否すること（実装計画 §3.4・受け入れ
+    // 基準相当）。
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cache_root_in_rejects_symlink_into_workspace_root() {
+        let workspace_root = fresh_temp_dir("symlink-workspace");
+        let real_target = workspace_root.join("evil-cache-inside-workspace");
+        fs::create_dir_all(&real_target).expect("must create symlink target inside workspace");
+
+        // symlink 自体は `workspace_root` の外に置く（字句比較だけでは
+        // containment 違反に見えないことを保証するため）。
+        let outside_dir = fresh_temp_dir("symlink-outside");
+        let candidate = outside_dir.join("cache-symlink");
+        std::os::unix::fs::symlink(&real_target, &candidate)
+            .expect("must create symlink pointing into workspace_root");
+
+        // 字句上は `workspace_root` の配下ではないことを前提として確認
+        // する（symlink 解決なしでは検出できないケースであることの検算）。
+        assert!(!path_lexically_within(&candidate, &workspace_root));
+
+        let result = ensure_cache_root_in(&candidate, &workspace_root);
+        assert!(
+            matches!(result, Err(CudaError::CacheDirUnavailable { .. })),
+            "symlink resolving into workspace_root must be rejected after canonicalization"
+        );
+
+        let _ = fs::remove_dir_all(&workspace_root);
+        let _ = fs::remove_dir_all(&outside_dir);
     }
 
     // 実機（DGX Spark GB10 等）依存: `libnvrtc` の実バージョンを問い合わせる。

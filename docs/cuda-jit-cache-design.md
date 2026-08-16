@@ -1,8 +1,8 @@
 # CUDA JIT コンパイルキャッシュ ディレクトリ解決規則
 
-- 対応イシュー: 親 #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・静的タイル選定）／C-1 #504（キー型定義）／C-2 #506（自作非暗号ハッシュ・ディレクトリ命名規則。本文書はその一部として PR #659 で追加）
-- 位置づけ: 本文書は `crates/backend-cuda/src/nvrtc.rs` のキャッシュルート解決・エントリパス組み立てロジックの**利用者向け参照**である。実装本体のドキュメンテーションコメント（同ファイル）を正とし、本文書はそれを要約・横断参照可能な形にまとめたものにすぎない（二重管理を避けるため詳細ロジックはコードコメント側で保守する）。
-- **現状（PR #659 時点）**: 本文書が説明する解決ロジック（`resolve_cache_root`／`cache_root`／`cache_entry_path`）はいずれも `pub(crate)`（crate 内限定）であり、`backend-cuda` クレートの外から呼び出す手段はまだない。ディスクへの実際の読み書き（`create_dir_all`・アトミック rename 等）は C-3（#509）で実装される予定で、C-2（#506・本 PR）時点ではパス解決ロジックのみが存在し、実際のキャッシュ I/O はまだ発生しない。したがって以下の環境変数は **C-3 実装後に初めて実効化される**（内部実装の先行スキャフォールディングとして本 PR で導入。crate 内公開範囲の判断は `crates/backend-cuda/src/lib.rs` 直下 `pub use` から意図的に除外している。理由は同ファイル該当関数のドキュメンテーションコメント参照）。
+- 対応イシュー: 親 #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・静的タイル選定）／C-1 #504（キー型定義）／C-2 #506（自作非暗号ハッシュ・ディレクトリ命名規則。PR #659）／C-3 #509（一時ディレクトリコンパイル → アトミック rename によるキャッシュ書き込み。本節を本タスクで更新）
+- 位置づけ: 本文書は `crates/backend-cuda/src/nvrtc.rs` のキャッシュルート解決・エントリパス組み立て・実 I/O ロジックの**利用者向け参照**である。実装本体のドキュメンテーションコメント（同ファイル）を正とし、本文書はそれを要約・横断参照可能な形にまとめたものにすぎない（二重管理を避けるため詳細ロジックはコードコメント側で保守する）。
+- **現状（C-3・#509 実装後）**: `resolve_cache_root`／`cache_root`／`cache_entry_path`／`ensure_cache_root`／`store_cache_entry`／`load_cache_entry` はいずれも `pub(crate)`（crate 内限定）であり、`backend-cuda` クレートの外から呼び出す手段はまだない。C-3 でディスクへの実際の読み書き（`ensure_cache_root` の `create_dir_all`・symlink 解決込み containment 再検証、`store_cache_entry`／`load_cache_entry` の一時ディレクトリ書き込み・fsync・アトミック rename）を実装したことで、以下の環境変数は**実効化されている**（crate 内公開範囲の判断は `crates/backend-cuda/src/lib.rs` 直下 `pub use` から意図的に除外している。理由は同ファイル該当関数のドキュメンテーションコメント参照）。ただし GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ導線・プロセス内 LRU）は C-4（#511）のスコープであり、本タスク時点では未結線（先行スキャフォールディング）。
 
 ## 環境変数と優先順位
 
@@ -33,9 +33,21 @@
 
 キャッシュエントリはキャッシュルート直下に `kernel.<name>.<hash>` の形式で配置する。`<hash>` は [`CudaKernelCacheKey::canonical_bytes`] を自作の非暗号ハッシュ（FNV-1a 64bit。std のみで実装。依存クレート追加なし）でハッシュ化した値の 16 桁 16 進表記。非暗号ハッシュを選んだ理由・改竄検知に使わない旨は `crates/backend-cuda/src/nvrtc.rs` の `fnv1a_64` ドキュメンテーションコメントを参照。
 
+## エントリ内ファイル構成と書き込みプロトコル（C-3・#509）
+
+最終エントリ（`<cache_root>/kernel.<name>.<hash16>/`）直下には `kernel.cu`（NVRTC へ渡したソース全文）と `kernel.ptx`（コンパイル結果の PTX アセンブリ全文）の 2 ファイルを置く。**不変条件**: 有効なエントリは両ファイルが存在する（`nvrtc::validate_cache_entry`）。片方欠落は破損とみなし、読み出し側（`load_cache_entry`）はミス（`Ok(None)`）として扱う（削除は行わない。置き換えは書き込み側に一元化）。
+
+`store_cache_entry`（実体は `store_cache_entry_in`）は DeepGEMM の compiler（一時ディレクトリでビルド後 rename、先着プロセスがいた場合は rename 失敗を正常系として吸収）に倣い、次の手順で書き込む。
+
+1. `ensure_cache_root` でキャッシュルートを実体化する（`create_dir_all` の後、`canonicalize` 済みの実在パスで `path_lexically_within` による symlink 解決込みの containment 再検証を行う。C-2 が委譲していた「symlink 解決込みの再検証」の実装）
+2. ルート直下に一時ディレクトリ `.tmp.<final_entry_name>.<pid>.<seq>` を排他作成する
+3. `kernel.cu`／`kernel.ptx` を書き込み、各ファイルと一時ディレクトリ自体を fsync する（rename 前にディスクへ反映されていることを保証。DeepGEMM `fsync_dir` 相当のボトムアップ fsync）
+4. `std::fs::rename` で最終パスへアトミックに配置する。失敗時は最終パスの既存エントリを検査し、有効なら「他プロセス先着」として正常系吸収（`Ok`）、破損なら削除して一度だけ再試行、それでも失敗すれば `CudaError::CacheIo` で fail-closed に失敗する（無限リトライしない）
+
 ## 関連
 
-- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`）
-- `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`
-- C-3（#509）: 一時ディレクトリコンパイル → アトミック rename（本文書の環境変数が実際に I/O へ結び付くタスク）。**残課題**: 本 PR（#659）時点で #509 の受け入れ基準には、`canonicalize` 済みパスによる containment 再検証（symlink 対応を含む）が明記されていない。C-2 は字句正規化ベースの `workspace_root` containment 検証（`resolve_cache_root`・`nvrtc::path_lexically_within`。PR #659 codex-review P0 再指摘対応で実装）まで担い、C-3 では「`workspace_root` に何を渡すか（実行時に確定する信頼できる境界の決定方法）」と「symlink 解決込みの再検証」を含めて検証条件を新規設計する必要がある。実装時に本文書・`nvrtc.rs` のドキュメンテーションコメントを踏まえて追加すること
-- C-4（#511）: プロセス内 LRU カーネルキャッシュ
+- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`store_cache_entry`／`store_cache_entry_in`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry`）
+- `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`／`CudaError::CacheIo`
+- C-4（#511）: プロセス内 LRU カーネルキャッシュ・GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ導線）
+- C-5（#514）: ソース断片の再帰ハッシュによるキャッシュ無効化
+- C-10（#529）: ヒット/ミス・並行競合・破損検出の網羅的回帰テスト拡充（C-3 時点のユニットテストは受け入れ基準を直接検証する最小限に留める）
