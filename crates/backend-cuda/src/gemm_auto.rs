@@ -30,9 +30,10 @@ use crate::gemm::CudaGemm;
 use crate::gemm_mma::validate_mma_alignment;
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
-    MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
+    DimSpec, MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
+    MmaKernelConfig, RenderedMmaKernel, render_mma_f16,
 };
-use crate::nvrtc::derive_pipeline_stages;
+use crate::nvrtc::{CompiledDims, CudaKernelDescriptor, derive_pipeline_stages};
 
 /// 静的 `__shared__`（動的 SMEM opt-in 非使用）構成のカーネルが従う
 /// per-block SMEM 上限。[`MMA_STATIC_SMEM_LIMIT_BYTES`] から
@@ -332,6 +333,112 @@ pub fn enumerate_tile_candidates_for_device(
 ) -> Result<Vec<TileCandidate>, CudaError> {
     let smem_budget_bytes = read_clamped_smem_budget_bytes(device)?;
     Ok(enumerate_tile_candidates(shape, dtype, smem_budget_bytes))
+}
+
+/// `shape` と `compiled`（[`CompiledDims`]。イシュー #519・C-7）から、
+/// `MmaKernelConfig` の `dim_m`/`dim_n`/`dim_k` に渡す
+/// [`DimSpec`] の三つ組を導出する（DeepGEMM `runtime_utils.hpp`
+/// `get_compiled_dim` 相当の純関数）。
+///
+/// `compiled` が当該次元を定数化対象として選択している場合は
+/// `DimSpec::Static(実 shape 値)` を、非選択（動的）の場合は
+/// `DimSpec::Dynamic`（カーネル引数 `m`/`n`/`k` をそのまま使う。受け入れ
+/// 基準 2「非定数化次元は実行時引数として渡ること」）を返す。
+///
+/// 既定の本番 GEMM 経路（[`CudaGemmAuto::run_f16`]）からは呼ばれず
+/// （本モジュール §スコープ境界参照）、`mod kernels_mma` 同様 rustc の
+/// dead-code 解析が誤検知するため `#[allow(dead_code)]` を付す
+/// （`kernels_mma::DimSpec::Static` に対する同種の判断と同じ方針）。
+#[allow(dead_code)]
+pub fn dim_specs_for(shape: GemmShape, compiled: CompiledDims) -> (DimSpec, DimSpec, DimSpec) {
+    let pick = |is_compiled: bool, value: u32| {
+        if is_compiled {
+            DimSpec::Static(value)
+        } else {
+            DimSpec::Dynamic
+        }
+    };
+    (
+        pick(compiled.m(), shape.m),
+        pick(compiled.n(), shape.n),
+        pick(compiled.k(), shape.k),
+    )
+}
+
+/// `shape`／`compiled` から特化 [`MmaKernelConfig`] を構築し、実際に
+/// [`render_mma_f16`] へ通してカーネルソースへ展開する（イシュー #519・
+/// C-7。実装計画 §3.3）。
+///
+/// ブロックタイル値・段数は現行本番構成（[`MmaKernelConfig::default`]。
+/// `MMA_BM`/`MMA_BN`/`MMA_BK`/`MMA_STAGES`）をそのまま使い、
+/// `dim_m`/`dim_n`/`dim_k` のみ [`dim_specs_for`] の結果で上書きする。
+/// `render_mma_f16` 内部の `validate_mma_kernel_config`（[`kernels_mma`]
+/// 唯一の判定根拠。本関数側で検証ロジックを二重管理しない）が
+/// `Static` 値のゼロ・8 の倍数制約等を fail-closed で検査するため、
+/// 実行不能な特化構成をそのまま返すことはない。
+///
+/// 戻り値は `(cfg, rendered)`。`cfg` は [`specialized_mma_descriptor`]
+/// が同じタイル値・段数からキャッシュキー用 descriptor を組み立てる際に
+/// 再利用する（config とキーの値の単一真実源を保つ）。`RenderedMmaKernel`
+/// は `Clone` 導出済みのため、呼び出し元がソースを保持したまま `cfg` も
+/// 別途参照できる。
+///
+/// # スコープ境界
+///
+/// 既定の本番 GEMM 経路（[`CudaGemmAuto::run_f16`]・
+/// `gemm_mma.rs::CudaMmaGemm`）への結線・実行は行わない（LRU キャッシュ
+/// C-4・#511・最良構成選定 C-9b・#527・数値一致回帰 #531 のスコープ）。
+/// カーネルソース・既定経路は一切変更しないため、本関数の追加は既定
+/// 経路の実行結果・parity ベースラインに影響しない。
+///
+/// 理由は [`dim_specs_for`] と同じ（既定経路から未結線のため
+/// dead-code 解析が誤検知する）。
+#[allow(dead_code)]
+pub fn specialized_mma_config(
+    shape: GemmShape,
+    compiled: CompiledDims,
+) -> Result<(MmaKernelConfig, RenderedMmaKernel), CudaError> {
+    let (dim_m, dim_n, dim_k) = dim_specs_for(shape, compiled);
+    let cfg = MmaKernelConfig {
+        dim_m,
+        dim_n,
+        dim_k,
+        ..MmaKernelConfig::default()
+    };
+    let rendered = render_mma_f16(&cfg)?;
+    Ok((cfg, rendered))
+}
+
+/// [`specialized_mma_config`] と同じタイル値・段数から
+/// [`CudaKernelDescriptor`]（コンパイルキャッシュキーの構成要素。C-1・
+/// #504）を構築する（イシュー #519・C-7。実装計画 §3.3）。
+///
+/// `specialized_mma_config` を内部で呼ぶことで、config とキーの値
+/// （ブロックタイル・段数・`compiled_dims`）が同一 shape・同一
+/// `CompiledDims` から常に一致した値になることを構造で保証する（config
+/// とキーが別々に計算されて静かに乖離するリスクを構造的に排除する）。
+///
+/// `kernel_name` は固定文字列 `"mma_f16"`（`kernels_mma::render_mma_f16`
+/// が展開するカーネル本体と対応）。
+///
+/// 理由は [`dim_specs_for`] と同じ（既定経路から未結線のため
+/// dead-code 解析が誤検知する）。
+#[allow(dead_code)]
+pub fn specialized_mma_descriptor(
+    shape: GemmShape,
+    compiled: CompiledDims,
+) -> Result<CudaKernelDescriptor, CudaError> {
+    let (cfg, _rendered) = specialized_mma_config(shape, compiled)?;
+    CudaKernelDescriptor::new(
+        "mma_f16",
+        shape,
+        cfg.bm,
+        cfg.bn,
+        cfg.bk,
+        cfg.stages,
+        DType::F16,
+        compiled,
+    )
 }
 
 /// [`enumerate_tile_candidates`] の 1 候補分の枝刈り判定＋構築（規則
@@ -874,5 +981,256 @@ mod tile_candidate_tests {
         for candidate in &f32_candidates {
             assert_candidate_satisfies_structural_rules(candidate, bpe_f32);
         }
+    }
+}
+
+// イシュー #519（C-7）: [`dim_specs_for`]／[`specialized_mma_config`]／
+// [`specialized_mma_descriptor`] のユニットテスト群。全て GPU 不要（純関数
+// ／NVRTC 実コンパイルを伴わない `render_mma_f16` の文字列組み立てのみ）。
+#[cfg(test)]
+mod compiled_dims_selection_tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    /// 代表 shape（全次元が異なる値。sentinel 正規化の衝突を避けるため）。
+    fn sample_shape() -> GemmShape {
+        GemmShape::new(64, 128, 256)
+    }
+
+    /// [`CudaKernelCacheKey`] を構築する際の環境パラメータ（テスト内では
+    /// descriptor 側の差分のみを見たいため固定値を使う。`nvrtc.rs` の
+    /// `sample_key` と同型の判断）。
+    fn cache_key_for(
+        descriptor: crate::nvrtc::CudaKernelDescriptor,
+    ) -> crate::nvrtc::CudaKernelCacheKey {
+        crate::nvrtc::CudaKernelCacheKey::new(
+            descriptor,
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+        )
+    }
+
+    // 受け入れ基準 1: 次元ごとに定数化／動的を選択できること。
+    #[test]
+    fn dim_specs_for_selects_static_only_for_compiled_dims() {
+        let shape = sample_shape();
+
+        assert_eq!(
+            dim_specs_for(shape, CompiledDims::DYNAMIC_ALL),
+            (DimSpec::Dynamic, DimSpec::Dynamic, DimSpec::Dynamic)
+        );
+        assert_eq!(
+            dim_specs_for(shape, CompiledDims::STATIC_NK),
+            (
+                DimSpec::Dynamic,
+                DimSpec::Static(shape.n),
+                DimSpec::Static(shape.k)
+            )
+        );
+        assert_eq!(
+            dim_specs_for(shape, CompiledDims::STATIC_MNK),
+            (
+                DimSpec::Static(shape.m),
+                DimSpec::Static(shape.n),
+                DimSpec::Static(shape.k)
+            )
+        );
+        // 任意組合せ（M/K のみ定数化・N は動的）。
+        assert_eq!(
+            dim_specs_for(shape, CompiledDims::new(true, false, true)),
+            (
+                DimSpec::Static(shape.m),
+                DimSpec::Dynamic,
+                DimSpec::Static(shape.k)
+            )
+        );
+    }
+
+    // 受け入れ基準 2: 非定数化次元は実行時引数のまま扱われること。
+    // `MmaKernelConfig::validate_launch_shape`（`DimSpec::matches_launch_dim`
+    // 経由）は `Dynamic` を常に許容し、`Static` は展開元の値と一致しない
+    // 実起動 shape を拒否する（`kernels_mma.rs` の既存契約）。この挙動を
+    // 組合せ単位で確認することで「動的次元は任意の実行時引数を受け付ける」
+    // ことを間接検証する。
+    #[test]
+    fn non_compiled_dims_accept_arbitrary_runtime_values() {
+        let shape = sample_shape();
+        let (cfg, _rendered) = specialized_mma_config(shape, CompiledDims::STATIC_NK)
+            .expect("STATIC_NK config for an 8-aligned n/k shape must render successfully");
+
+        // M は動的（任意値で Ok）、N/K は展開元の値と一致する必要がある。
+        assert!(cfg.validate_launch_shape(999_999, shape.n, shape.k).is_ok());
+        assert!(cfg.validate_launch_shape(shape.m, shape.n, shape.k).is_ok());
+        assert!(
+            cfg.validate_launch_shape(shape.m, shape.n + 8, shape.k)
+                .is_err()
+        );
+        assert!(
+            cfg.validate_launch_shape(shape.m, shape.n, shape.k + 16)
+                .is_err()
+        );
+    }
+
+    // 受け入れ基準 3（中核）: 定数化した次元のみがキャッシュエントリ数へ
+    // 反映され、動的次元の値変動ではエントリが増殖しないこと。
+    #[test]
+    fn static_nk_collapses_varying_m_into_a_single_cache_entry() {
+        // n/k は 8 の倍数で固定し M のみ多数変動させる（`STATIC_NK` では
+        // M は sentinel 0 に正規化されるため、M の実値差はキャッシュキーへ
+        // 反映されない）。
+        let keys: HashSet<_> = (1..=8)
+            .map(|i| GemmShape::new(i * 8, 128, 256))
+            .map(|shape| {
+                specialized_mma_descriptor(shape, CompiledDims::STATIC_NK)
+                    .expect("n=128/k=256 are 8-aligned so specialization must succeed")
+            })
+            .map(cache_key_for)
+            .collect();
+        assert_eq!(
+            keys.len(),
+            1,
+            "STATIC_NK must collapse all M variations into a single cache entry"
+        );
+    }
+
+    #[test]
+    fn static_nk_produces_distinct_entries_for_varying_n() {
+        // block_n/block_k はタイル定数（既定 config）で固定なので、shape
+        // 側の n を変えても render 検証（8 の倍数）には影響しない。K は
+        // 固定・N のみ変動させ、各 N ごとに別エントリになることを確認する。
+        let ns = [128u32, 136, 144, 152];
+        let keys: HashSet<_> = ns
+            .iter()
+            .map(|&n| GemmShape::new(64, n, 256))
+            .map(|shape| {
+                specialized_mma_descriptor(shape, CompiledDims::STATIC_NK)
+                    .expect("8-aligned n must specialize successfully")
+            })
+            .map(cache_key_for)
+            .collect();
+        assert_eq!(
+            keys.len(),
+            ns.len(),
+            "STATIC_NK must produce one distinct cache entry per distinct N"
+        );
+    }
+
+    #[test]
+    fn static_mnk_produces_distinct_entries_for_varying_m() {
+        let ms = [8u32, 16, 24, 32];
+        let keys: HashSet<_> = ms
+            .iter()
+            .map(|&m| GemmShape::new(m, 128, 256))
+            .map(|shape| {
+                specialized_mma_descriptor(shape, CompiledDims::STATIC_MNK)
+                    .expect("valid shape must specialize successfully")
+            })
+            .map(cache_key_for)
+            .collect();
+        assert_eq!(
+            keys.len(),
+            ms.len(),
+            "STATIC_MNK must produce one distinct cache entry per distinct M"
+        );
+    }
+
+    #[test]
+    fn dynamic_all_collapses_every_shape_into_a_single_cache_entry() {
+        let keys: HashSet<_> = [
+            GemmShape::new(64, 128, 256),
+            GemmShape::new(4096, 4096, 4096),
+            GemmShape::new(8, 8, 16),
+        ]
+        .into_iter()
+        .map(|shape| {
+            specialized_mma_descriptor(shape, CompiledDims::DYNAMIC_ALL)
+                .expect("DYNAMIC_ALL never depends on shape alignment for its own dims")
+        })
+        .map(cache_key_for)
+        .collect();
+        assert_eq!(
+            keys.len(),
+            1,
+            "DYNAMIC_ALL must collapse every shape into a single cache entry"
+        );
+    }
+
+    // 同一 shape に対して全 8 通りの `CompiledDims` 組合せを適用しても、
+    // 組合せ間で誤って衝突・誤ヒットしないこと（A08: 異なる定数化組合せ
+    // 間の誤ヒットは誤った特化カーネルの再利用につながる）。
+    #[test]
+    fn all_eight_compiled_dims_combinations_yield_distinct_entries_for_same_shape() {
+        let shape = sample_shape();
+        let mut keys = HashSet::new();
+        for m in [false, true] {
+            for n in [false, true] {
+                for k in [false, true] {
+                    let descriptor = specialized_mma_descriptor(shape, CompiledDims::new(m, n, k))
+                        .expect("sample_shape is 8-aligned on n/k for every combination");
+                    keys.insert(cache_key_for(descriptor));
+                }
+            }
+        }
+        assert_eq!(
+            keys.len(),
+            8,
+            "all 8 CompiledDims combinations must yield distinct cache entries for one shape"
+        );
+    }
+
+    // fail-closed: 定数化対象次元の実値が 0 だと `Err` になり panic しない
+    // こと。`specialized_mma_descriptor` は内部で `specialized_mma_config`
+    // （`render_mma_f16` 経由）を先に呼ぶため、`dim_specs_for` が
+    // `DimSpec::Static(0)` を生成するこの入力は `kernels_mma::
+    // validate_mma_kernel_config` の「静的次元ゼロ拒否」検査
+    // （`CudaError::InvalidKernelConfig`）が先に発火する。`CudaKernelDescriptor
+    // ::new` 自身の同種検査（`nvrtc.rs`。`new_rejects_zero_value_for_a_
+    // compiled_dim` で直接検証済み）は、descriptor を render を経ずに
+    // 直接構築する呼び出し元に対する独立の多層防御であり、本関数のような
+    // 合成経路では render 側の検査が先に fail-closed に遮断する
+    // （判定ロジックを二重管理しない設計。本関数ドキュメンテーション
+    // コメント参照）。
+    #[test]
+    fn specialized_mma_descriptor_rejects_zero_value_for_a_compiled_dim() {
+        let result =
+            specialized_mma_descriptor(GemmShape::new(0, 128, 256), CompiledDims::STATIC_MNK);
+        assert!(matches!(result, Err(CudaError::InvalidKernelConfig { .. })));
+    }
+
+    // fail-closed: N/K を定数化した shape の N/K が 8 の倍数でないと
+    // `render_mma_f16`（`kernels_mma::validate_mma_kernel_config`）の
+    // 検査で `Err` になり、それが `specialized_mma_config` からそのまま
+    // 伝播すること（判定ロジックを二重管理せず render 側へ委譲する契約
+    // の検証）。
+    #[test]
+    fn specialized_mma_config_rejects_non_eight_aligned_static_n_or_k() {
+        let n_misaligned =
+            specialized_mma_config(GemmShape::new(64, 127, 256), CompiledDims::STATIC_NK);
+        assert!(matches!(
+            n_misaligned,
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+
+        let k_misaligned =
+            specialized_mma_config(GemmShape::new(64, 128, 255), CompiledDims::STATIC_NK);
+        assert!(matches!(
+            k_misaligned,
+            Err(CudaError::InvalidKernelConfig { .. })
+        ));
+    }
+
+    // 決定性: 同一入力の 2 回呼び出しが同一 `cfg` を返すこと
+    // （`enumerate_tile_candidates` の決定性テストと同型の方針。
+    // `RenderedMmaKernel` は `PartialEq` を導出していない〈内部ソース
+    // 文字列を外部比較材料にしない設計。`kernels_mma.rs` 参照〉ため、
+    // 展開元 `cfg`〈`PartialEq` 導出済み〉の一致で決定性を検証する）。
+    #[test]
+    fn specialized_mma_config_is_deterministic() {
+        let shape = sample_shape();
+        let (cfg_a, _) = specialized_mma_config(shape, CompiledDims::STATIC_NK).unwrap();
+        let (cfg_b, _) = specialized_mma_config(shape, CompiledDims::STATIC_NK).unwrap();
+        assert_eq!(cfg_a, cfg_b);
     }
 }

@@ -14,7 +14,7 @@
 
 ### 1.1 置換ベースのテンプレート展開（既存静的ソース = テンプレート本体兼デフォルトインスタンス）
 
-`kernels_mma.rs::MMA_F16`・`kernels_wmma_opt.rs::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT` の静的カーネルソース文字列自体をテンプレート本体として維持し、`render_mma_f16`／`render_wmma_tf32_opt`／`render_wmma_f16_opt` が [`CudaKernelDescriptor`](../../crates/backend-cuda/src/nvrtc.rs) 相当の検証済み構成型（`MmaKernelConfig`／`WmmaOptKernelConfig`）から `#define` 行を `format!` で組み立て直す。関数自体は `pub` だが、`mod kernels_mma;`／`mod kernels_wmma_opt;`（`lib.rs`）が非公開モジュールのため、クレート外は疎か `gemm_mma.rs`／`gemm_wmma.rs` を含む本 PR 時点の他モジュールからも呼ばれる本番経路は存在しない（`#[allow(dead_code)]` が付与されている理由。各 render 関数のドキュメンテーションコメント参照）。ディスパッチ・実行経路への結線は C-7（#519）のスコープであり、本タスクは生成 API を提供するのみに留める（§2 最終段落と同じ論拠）。
+`kernels_mma.rs::MMA_F16`・`kernels_wmma_opt.rs::WMMA_TF32_F32_OPT`／`WMMA_F16_OPT` の静的カーネルソース文字列自体をテンプレート本体として維持し、`render_mma_f16`／`render_wmma_tf32_opt`／`render_wmma_f16_opt` が [`CudaKernelDescriptor`](../../crates/backend-cuda/src/nvrtc.rs) 相当の検証済み構成型（`MmaKernelConfig`／`WmmaOptKernelConfig`）から `#define` 行を `format!` で組み立て直す。関数自体は `pub` だが、`mod kernels_mma;`／`mod kernels_wmma_opt;`（`lib.rs`）が非公開モジュールのため、クレート外は疎か `gemm_mma.rs`／`gemm_wmma.rs` を含む本 PR 時点の他モジュールからも呼ばれる本番経路は存在しない（`#[allow(dead_code)]` が付与されている理由。各 render 関数のドキュメンテーションコメント参照）。C-7（#519）は「どの次元を定数化するか」の選択ポリシー（`gemm_auto.rs::dim_specs_for`／`specialized_mma_config`／`specialized_mma_descriptor`）を追加したが、既定の本番 GEMM 経路（`CudaGemmAuto::run_f16`・`gemm_mma.rs::CudaMmaGemm`）への実結線・実行は行っていない（LRU キャッシュ C-4・#511・最良構成選定 C-9b・#527・数値一致回帰 #531 のスコープとして切り分けた。本ファイル §2 最終段落・`gemm_auto.rs::specialized_mma_config` ドキュメンテーションコメント参照）。
 
 実装計画（Plan フェーズ）は新規モジュール `kernel_template.rs` に置換エンジンを切り出す設計を想定していたが、実装は各カーネルファイル（`kernels_mma.rs`・`kernels_wmma_opt.rs`）内に render 関数を直接持つ構成へ収束した。**これは意図的な位置の乖離であり、置換対象のテンプレート本体・タイル定数・コンパイル時 `const _: () = assert!(...)` 契約検査と同一ファイル内に render 関数を置くことで、テンプレート文字列と展開ロジックの乖離（`#define` 行の文言変更に render 側が追従し忘れる回帰）を型・視認性の両面で抑える判断による**。置換対象出現数の検証・境界チェック needle 検査は当初計画どおり保持している（§4）。
 
@@ -28,7 +28,7 @@
 
 この方式は計画の「未定義時はプリプロセッサ除去で意味不変」という目標を、実行時分岐（`#if`）を経由せず**マクロ置換の字面一致**で達成する（`DimSpec::Dynamic` は常に `#define DIM_M m` を生成するため、デフォルト構成の展開結果は「`m`/`n`/`k` の生トークンを `DIM_M`/`DIM_N`/`DIM_K` に機械的に置き換えただけ」のソースになり、プリプロセッサ後のトークン列はデフォルト（旧）カーネルと同一になる）。
 
-3 次元のうち一部のみ静的化する組み合わせ（`render_mma_f16_specializes_tile_and_static_dim` テストが検査する `dim_m=Static/dim_n=Dynamic/dim_k=Dynamic` 等）は既に生成 API 側でサポート済み。「どの次元を焼き込むか」の選択ポリシー自体は C-7（#519）のスコープであり、本タスクは全 3 次元の個別焼き込みが可能な生成 API を提供するのみに留める。
+3 次元のうち一部のみ静的化する組み合わせ（`render_mma_f16_specializes_tile_and_static_dim` テストが検査する `dim_m=Static/dim_n=Dynamic/dim_k=Dynamic` 等）は既に生成 API 側でサポート済み。「どの次元を焼き込むか」の選択ポリシーは C-7（#519）で `CompiledDims`（`nvrtc.rs`。DeepGEMM `get_compiled_dim` の型付き版）・`gemm_auto.rs::dim_specs_for` として実装済み（`DYNAMIC_ALL`／`STATIC_NK`〈既定〉／`STATIC_MNK` の 3 プリセット + 任意組合せ）。本タスク（C-6）自体は全 3 次元の個別焼き込みが可能な生成 API を提供するのみに留める。
 
 ### 1.3 生成 API の構造
 
@@ -44,7 +44,7 @@
 
 - `tests/parity_nonregression.rs` のベースライン fixture・tolerance 定数（§1.2 契約）は無変更（本 PR の `git diff` でも該当ファイルに差分がないことを確認済み）
 - FMA 契約（CPU 参照実装の `f32::mul_add`・GPU 側既定 FMA 契約。`.claude/rules/coding-rust.md`）に本タスクは非接触（テンプレート展開はソース文字列の組み立てのみで、演算命令列・アキュムレート順序を変更しない）
-- 特化構成（非デフォルト値）はディスパッチ・実行経路へまだ結線されていない（結線は C-7 #519 のスコープ）ため、本 PR 単体では実行時の数値挙動に一切影響しない
+- 特化構成（非デフォルト値）はディスパッチ・実行経路へまだ結線されていない（C-7・#519 で選択ポリシー〈`CompiledDims`〉自体は実装済みだが、実結線は C-4・#511／C-9b・#527／#531 のスコープとして切り分け済み。上記 §1.2 参照）ため、本 PR 単体では実行時の数値挙動に一切影響しない
 
 ## 3. PTX/SASS でのコンパイル時展開確認手順（実機必須・DGX Spark 実行時の手順書）
 

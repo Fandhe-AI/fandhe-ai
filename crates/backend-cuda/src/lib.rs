@@ -145,7 +145,7 @@ pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
 pub use nvrtc::{
-    CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
+    CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,
 };
 pub use ops::CudaBackendOps;

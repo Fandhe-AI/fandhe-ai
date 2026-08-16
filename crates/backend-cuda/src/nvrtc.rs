@@ -30,6 +30,109 @@ use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 
 use crate::error::CudaError;
 
+/// 次元（M／N／K）ごとの compile-time 定数化選択（イシュー #519・C-7）。
+///
+/// DeepGEMM `runtime_utils.hpp` の `get_compiled_dim`（`compiled_dims`
+/// 文字列、例 `"nk"`）の型付き版。DeepGEMM 設計の意図（M はバッチ×系列長
+/// で可変なのでカーネル数を抑えるため動的化し、N/K は重み形状で
+/// 固定的なので定数化して最適化を最大化する）をそのまま踏襲するが、
+/// **文字列パースは行わない**（A03: 外部入力文字列がカーネルソースへ
+/// 混入する経路を型で遮断する。`kernel_name: &'static str` の判断
+/// 〈本ファイル冒頭〉と同型）。
+///
+/// `kernels_mma::DimSpec`（M/N/K 各次元を `Dynamic`／`Static(u32)` の
+/// どちらでカーネルソースへ焼き込むかを表す機構）に対して、「どの次元を
+/// 焼き込むか」という選択ポリシー側の型であり、[`CudaKernelDescriptor`]
+/// のキャッシュキー構成要素としても使う（[`Self::cache_shape`] 参照）。
+///
+/// フィールドは private + getter とし、`new`（任意組合せ）と 3 つの
+/// プリセット定数（[`Self::DYNAMIC_ALL`]／[`Self::STATIC_NK`]／
+/// [`Self::STATIC_MNK`]）以外の経路で構築できないようにする（既存
+/// descriptor 型と同じ不変条件維持方針）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompiledDims {
+    m: bool,
+    n: bool,
+    k: bool,
+}
+
+impl CompiledDims {
+    /// 全次元を実行時引数のまま扱う（`kernels_mma::DimSpec::Dynamic` 相当）。
+    /// shape が変わってもカーネルは 1 種類のみで済むため、キャッシュ
+    /// エントリ数を最小化したい既定探索・フォールバック用途に使う。
+    pub const DYNAMIC_ALL: Self = Self {
+        m: false,
+        n: false,
+        k: false,
+    };
+
+    /// N/K のみ定数化し M は動的のまま扱う（DeepGEMM `get_compiled_dim`
+    /// の既定意図: M はバッチ×系列長で可変・N/K は重み形状で固定的）。
+    /// `Default` 実装もこのプリセットに揃える。
+    pub const STATIC_NK: Self = Self {
+        m: false,
+        n: true,
+        k: true,
+    };
+
+    /// 全次元を定数化する（最適化を最大化するが、shape の組合せごとに
+    /// 別カーネル・別キャッシュエントリが必要になる）。
+    pub const STATIC_MNK: Self = Self {
+        m: true,
+        n: true,
+        k: true,
+    };
+
+    /// 任意の次元別組合せで構築する（プリセット以外の組合せが必要な
+    /// 呼び出し元向け）。
+    pub const fn new(m: bool, n: bool, k: bool) -> Self {
+        Self { m, n, k }
+    }
+
+    /// M 次元を定数化するか。
+    pub fn m(&self) -> bool {
+        self.m
+    }
+
+    /// N 次元を定数化するか。
+    pub fn n(&self) -> bool {
+        self.n
+    }
+
+    /// K 次元を定数化するか。
+    pub fn k(&self) -> bool {
+        self.k
+    }
+
+    /// `shape` を「キャッシュキー用 shape」へ正規化する。定数化しない
+    /// （`Dynamic` のまま扱う）次元は sentinel `0` に落とす（DeepGEMM
+    /// `get_compiled_dim` が非選択次元に対し `0` を返す設計の踏襲）。
+    ///
+    /// 非選択次元の実際の値が異なっても同一カーネル（同一キャッシュ
+    /// エントリ）を再利用できることが本メソッドの目的であり、
+    /// [`CudaKernelDescriptor::new`] は本メソッドの戻り値を `shape` として
+    /// 保持することでこれを構造的に強制する（呼び出し元の規律に頼らない。
+    /// PR #643 レビューの教訓と同方針）。
+    pub fn cache_shape(
+        &self,
+        shape: tensor_core::dispatch::GemmShape,
+    ) -> tensor_core::dispatch::GemmShape {
+        tensor_core::dispatch::GemmShape::new(
+            if self.m { shape.m } else { 0 },
+            if self.n { shape.n } else { 0 },
+            if self.k { shape.k } else { 0 },
+        )
+    }
+}
+
+impl Default for CompiledDims {
+    /// DeepGEMM `get_compiled_dim` の既定意図（N/K 定数化・M 動的）に
+    /// 揃える（[`Self::STATIC_NK`] 参照）。
+    fn default() -> Self {
+        Self::STATIC_NK
+    }
+}
+
 /// カーネル特化パラメータ記述子（Phase C-1・イシュー #504）。
 ///
 /// 親イシュー #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・
@@ -64,6 +167,11 @@ pub struct CudaKernelDescriptor {
     kernel_name: &'static str,
     /// GEMM 形状（M/N/K）。`tensor_core::dispatch` の既存 `Hash + Eq` 型を
     /// 再利用し、ディスパッチ規則（#67/#68）が扱う形状表現と揃える。
+    ///
+    /// `compiled_dims` で定数化しない（動的扱いの）次元は sentinel `0`
+    /// に正規化済み（[`CompiledDims::cache_shape`] 契約。イシュー #519）。
+    /// `new` がこの正規化を内部で強制するため、動的次元の実値違いは
+    /// キャッシュキーへ影響しない。
     shape: tensor_core::dispatch::GemmShape,
     /// ブロックタイル M 次元。
     block_m: NonZeroU32,
@@ -77,6 +185,11 @@ pub struct CudaKernelDescriptor {
     stages: NonZeroU32,
     /// 入出力 dtype。`tensor_core::dispatch::DType` を再利用する。
     dtype: tensor_core::dispatch::DType,
+    /// 次元ごとの compile-time 定数化選択（イシュー #519）。`shape` の
+    /// 正規化（sentinel 0）はこのフィールドの選択に従う。`Hash + Eq`
+    /// derive が本フィールドを自動的に含むため、同一 shape でも定数化
+    /// 組合せが違えば別キャッシュエントリになる。
+    compiled_dims: CompiledDims,
 }
 
 impl CudaKernelDescriptor {
@@ -93,6 +206,21 @@ impl CudaKernelDescriptor {
     /// そのままパスセグメントへ使われる想定のため、型（`&'static str`）
     /// だけでは意図しないパス脱出を防げない。値の妥当性は構築時に
     /// ここで検証し、C-2 側は「検証済み文字列である」ことを前提にできる。
+    ///
+    /// `compiled_dims` で定数化対象とした次元の `shape` 実値が `0` の
+    /// 場合は `CudaError::InvalidKernelDescriptor` を返す（イシュー #519。
+    /// [`CompiledDims::cache_shape`] が動的次元の sentinel として `0` を
+    /// 使うため、定数化対象の実値が `0` だと「値 0 で定数化」なのか
+    /// 「動的次元の sentinel」なのかが構築時点で曖昧になる。この検査は
+    /// 曖昧性を型・構造の両面で排除する）。
+    ///
+    /// 引数 8 個は `clippy::too_many_arguments`（既定閾値 7）に抵触するが、
+    /// 全フィールドを構築時必須引数として要求し「未確定パラメータのまま
+    /// 構築できない」不変条件を保つ設計（本型ドキュメンテーションコメント
+    /// 参照）自体が目的のため、ビルダーパターン等への分割は行わず
+    /// `#[allow]` する（`gemm.rs`／`gemm_wmma.rs`／`kernels_mma.rs` の
+    /// 同種カーネル起動関数と同じ判断）。
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         kernel_name: &'static str,
         shape: tensor_core::dispatch::GemmShape,
@@ -101,6 +229,7 @@ impl CudaKernelDescriptor {
         block_k: u32,
         stages: u32,
         dtype: tensor_core::dispatch::DType,
+        compiled_dims: CompiledDims,
     ) -> Result<Self, CudaError> {
         if kernel_name.is_empty()
             || kernel_name.contains('/')
@@ -114,6 +243,21 @@ impl CudaKernelDescriptor {
                 ),
             });
         }
+        for (name, is_compiled, value) in [
+            ("shape.m", compiled_dims.m(), shape.m),
+            ("shape.n", compiled_dims.n(), shape.n),
+            ("shape.k", compiled_dims.k(), shape.k),
+        ] {
+            if is_compiled && value == 0 {
+                return Err(CudaError::InvalidKernelDescriptor {
+                    detail: format!(
+                        "{name} is selected for compile-time constant folding \
+                         (compiled_dims) but is 0, which is indistinguishable from \
+                         the dynamic-dimension cache sentinel"
+                    ),
+                });
+            }
+        }
         let non_zero = |value: u32, field: &str| {
             NonZeroU32::new(value).ok_or_else(|| CudaError::InvalidKernelDescriptor {
                 detail: format!("{field} must be non-zero (got 0)"),
@@ -121,12 +265,13 @@ impl CudaKernelDescriptor {
         };
         Ok(Self {
             kernel_name,
-            shape,
+            shape: compiled_dims.cache_shape(shape),
             block_m: non_zero(block_m, "block_m")?,
             block_n: non_zero(block_n, "block_n")?,
             block_k: non_zero(block_k, "block_k")?,
             stages: non_zero(stages, "stages")?,
             dtype,
+            compiled_dims,
         })
     }
 
@@ -135,9 +280,15 @@ impl CudaKernelDescriptor {
         self.kernel_name
     }
 
-    /// GEMM 形状。
+    /// GEMM 形状。動的次元（`compiled_dims` で非選択）は sentinel `0` に
+    /// 正規化済み（[`CompiledDims::cache_shape`] 契約）。
     pub fn shape(&self) -> tensor_core::dispatch::GemmShape {
         self.shape
+    }
+
+    /// 次元ごとの compile-time 定数化選択。
+    pub fn compiled_dims(&self) -> CompiledDims {
+        self.compiled_dims
     }
 
     /// ブロックタイル M 次元。
@@ -535,6 +686,7 @@ mod tests {
             32,
             2,
             DType::F32,
+            CompiledDims::STATIC_MNK,
         )
         .expect("valid descriptor parameters must not fail")
     }
@@ -566,6 +718,7 @@ mod tests {
             32,
             2,
             DType::F32,
+            CompiledDims::STATIC_MNK,
         );
         assert!(matches!(
             result,
@@ -583,6 +736,7 @@ mod tests {
             32,
             0,
             DType::F32,
+            CompiledDims::STATIC_MNK,
         );
         assert!(matches!(
             result,
@@ -604,6 +758,7 @@ mod tests {
             32,
             2,
             DType::F32,
+            CompiledDims::STATIC_MNK,
         );
         assert!(matches!(
             result,
@@ -621,6 +776,7 @@ mod tests {
             0,
             2,
             DType::F32,
+            CompiledDims::STATIC_MNK,
         );
         assert!(matches!(
             result,
@@ -644,6 +800,7 @@ mod tests {
                 32,
                 2,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             );
             assert!(
                 matches!(result, Err(CudaError::InvalidKernelDescriptor { .. })),
@@ -679,6 +836,7 @@ mod tests {
                 32,
                 2,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -696,6 +854,7 @@ mod tests {
                 32,
                 2,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -717,6 +876,7 @@ mod tests {
                 32,
                 2,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -734,6 +894,7 @@ mod tests {
                 16,
                 2,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -751,6 +912,7 @@ mod tests {
                 32,
                 3,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -768,6 +930,7 @@ mod tests {
                 32,
                 2,
                 DType::F32,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -790,6 +953,7 @@ mod tests {
                 32,
                 2,
                 DType::F16,
+                CompiledDims::STATIC_MNK,
             )
             .unwrap(),
             (8, 0),
@@ -823,6 +987,141 @@ mod tests {
             vec!["--gpu-architecture=compute_90".to_string()],
         );
         assert_ne!(base, different_flags);
+
+        // イシュー #519 受け入れ基準 3: `compiled_dims` のみを変えても
+        // 別エントリになること（他フィールド一式は `sample_descriptor`
+        // と同一のまま `compiled_dims` だけ `STATIC_NK` へ切り替える）。
+        let different_compiled_dims = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new(
+                "wmma_tf32_f32",
+                GemmShape::new(4096, 4096, 4096),
+                64,
+                64,
+                32,
+                2,
+                DType::F32,
+                CompiledDims::STATIC_NK,
+            )
+            .unwrap(),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+        );
+        assert_ne!(base, different_compiled_dims);
+    }
+
+    // イシュー #519（C-7）: `CompiledDims` プリセットが意図した次元集合を
+    // 表すこと（`DYNAMIC_ALL` は全次元動的・`STATIC_NK` は N/K のみ定数化
+    // ・M 動的・`STATIC_MNK` は全次元定数化）。`Default` は DeepGEMM
+    // `get_compiled_dim` の既定意図（N/K 定数化）に揃えて `STATIC_NK` と
+    // 一致すること。
+    #[test]
+    fn compiled_dims_presets_have_expected_flags() {
+        assert_eq!(
+            CompiledDims::DYNAMIC_ALL,
+            CompiledDims::new(false, false, false)
+        );
+        assert_eq!(
+            CompiledDims::STATIC_NK,
+            CompiledDims::new(false, true, true)
+        );
+        assert_eq!(
+            CompiledDims::STATIC_MNK,
+            CompiledDims::new(true, true, true)
+        );
+        assert_eq!(CompiledDims::default(), CompiledDims::STATIC_NK);
+
+        assert!(!CompiledDims::DYNAMIC_ALL.m());
+        assert!(!CompiledDims::DYNAMIC_ALL.n());
+        assert!(!CompiledDims::DYNAMIC_ALL.k());
+        assert!(!CompiledDims::STATIC_NK.m());
+        assert!(CompiledDims::STATIC_NK.n());
+        assert!(CompiledDims::STATIC_NK.k());
+        assert!(CompiledDims::STATIC_MNK.m());
+        assert!(CompiledDims::STATIC_MNK.n());
+        assert!(CompiledDims::STATIC_MNK.k());
+    }
+
+    // 受け入れ基準 3（キャッシュキーの正規化）の基礎となる純関数の検証:
+    // 非選択次元は sentinel `0` に、選択次元は実値のまま保たれること。
+    #[test]
+    fn cache_shape_normalizes_only_non_selected_dims_to_zero() {
+        let shape = GemmShape::new(64, 4096, 2048);
+
+        assert_eq!(
+            CompiledDims::DYNAMIC_ALL.cache_shape(shape),
+            GemmShape::new(0, 0, 0)
+        );
+        assert_eq!(
+            CompiledDims::STATIC_NK.cache_shape(shape),
+            GemmShape::new(0, 4096, 2048)
+        );
+        assert_eq!(CompiledDims::STATIC_MNK.cache_shape(shape), shape);
+    }
+
+    // イシュー #519 受け入れ基準 3（エントリ数抑制）の基礎: `new` が
+    // `compiled_dims` に従って `shape` を正規化して保持するため、動的
+    // 次元の実値違いは `descriptor.shape()` に現れないこと。
+    #[test]
+    fn new_normalizes_shape_via_compiled_dims() {
+        let descriptor = CudaKernelDescriptor::new(
+            "mma_f16",
+            GemmShape::new(64, 4096, 2048),
+            64,
+            128,
+            32,
+            3,
+            DType::F16,
+            CompiledDims::STATIC_NK,
+        )
+        .expect("valid descriptor parameters must not fail");
+        assert_eq!(descriptor.shape(), GemmShape::new(0, 4096, 2048));
+        assert_eq!(descriptor.compiled_dims(), CompiledDims::STATIC_NK);
+    }
+
+    // イシュー #519 fail-closed 契約: 定数化対象次元の実値が 0 だと
+    // sentinel（動的次元の正規化値）と曖昧になるため構築時点で拒否する。
+    #[test]
+    fn new_rejects_zero_value_for_a_compiled_dim() {
+        for (shape, compiled_dims) in [
+            (GemmShape::new(0, 4096, 4096), CompiledDims::STATIC_MNK),
+            (GemmShape::new(4096, 0, 4096), CompiledDims::STATIC_NK),
+            (GemmShape::new(4096, 4096, 0), CompiledDims::STATIC_NK),
+        ] {
+            let result = CudaKernelDescriptor::new(
+                "mma_f16",
+                shape,
+                64,
+                128,
+                32,
+                3,
+                DType::F16,
+                compiled_dims,
+            );
+            assert!(
+                matches!(result, Err(CudaError::InvalidKernelDescriptor { .. })),
+                "shape={shape:?} compiled_dims={compiled_dims:?} must be rejected"
+            );
+        }
+    }
+
+    // 動的次元（`compiled_dims` 非選択）の実値が 0 でも sentinel と同じ
+    // 表現になるだけであり拒否されないこと（fail-closed 検査は「定数化
+    // 対象かつ 0」の組合せのみを拒否する）。
+    #[test]
+    fn new_allows_zero_value_for_a_dynamic_dim() {
+        let descriptor = CudaKernelDescriptor::new(
+            "mma_f16",
+            GemmShape::new(0, 4096, 4096),
+            64,
+            128,
+            32,
+            3,
+            DType::F16,
+            CompiledDims::STATIC_NK,
+        )
+        .expect("dynamic dim with value 0 must not be rejected");
+        assert_eq!(descriptor.shape(), GemmShape::new(0, 4096, 4096));
     }
 
     // 受け入れ基準: `HashMap` でのヒット/ミス動作のスモークテスト。
