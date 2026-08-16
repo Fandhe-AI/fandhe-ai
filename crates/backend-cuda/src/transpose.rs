@@ -383,7 +383,14 @@ impl CudaTranspose {
             // `c_t_dev` を明示的にゼロクリアすることで、呼び出し元が
             // ゼロ初期化済みバッファ（`alloc_output_f32`）を渡したかに
             // 依らず数学的に正しい結果を保証する。
+            // `memset_zeros` は同一ストリーム上への非同期投入に留まるため、
+            // 通常のカーネル起動経路と同様に `synchronize()` で完了を待って
+            // から返す。待たずに返すと、呼び出し元が別ストリームで直ちに
+            // `c_t_dev` を参照した場合に stale 値を観測しうるほか、非同期
+            // 実行エラーもこの API から返せなくなる（codex-review 指摘 P1・
+            // PR #690）。
             self.stream.memset_zeros(c_t_dev)?;
+            self.stream.synchronize()?;
             return Ok(());
         }
 
