@@ -32,6 +32,7 @@
 //!    [`CudaGemm::run_f32_kernel`]／[`CudaGemm::run_f16_kernel`] に集約する
 //!    （#34 で naive 専用だった手続きを共通化）。
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
@@ -86,6 +87,34 @@ const WMMA_TF32_OPT_BLOCK_DIM: (u32, u32, u32) = (kernels_wmma_opt::WMMA_TF32_OP
 const WMMA_TF32_STAGED_BLOCK_DIM: (u32, u32, u32) =
     (kernels_wmma_opt::WMMA_TF32_STAGED_THREADS, 1, 1);
 
+thread_local! {
+    /// [`CudaGemm::run_tiled_bias_act_f32`] が実際に GPU カーネルを起動した
+    /// 回数（イシュー #599）。
+    ///
+    /// `ops.rs::CudaBackendOps::gemm_bias_act` の経路選択（融合 vs
+    /// `tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
+    /// 非融合 3 段合成）が実際に融合カーネルへ到達しているかを、実機なしの
+    /// 単体テスト（`ops.rs` 内 `#[cfg(test)]`）が検証するための可観測点。
+    /// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない。
+    /// `m == 0 || n == 0`（no-op）・`k == 0`（ホスト側で直接 epilogue のみ
+    /// 計算し GPU 起動を回避する分岐。[`CudaGemm::run_tiled_bias_act_f32`]
+    /// 参照）の場合はカーネルを起動しないためカウントしない。
+    ///
+    /// **スレッドローカルにする理由（codex-review 指摘・PR #688）**: `static
+    /// AtomicU64`（プロセス全体共有）だと `cargo test` 既定の並列実行下で
+    /// 「`before` 読み取り〜`gemm_bias_act` 呼び出し〜`after` 読み取り」の間に
+    /// 別スレッドで実行中の別テストが同じ融合カーネルを起動すると、当該呼び
+    /// 出しが実際には融合経路を通らなくても `after > before` が偶然成立し
+    /// うる（偽陽性）。Rust の既定テストハーネストは各テスト関数の実行を
+    /// 単一スレッド内で完結させ、同一スレッド上で複数テストが同時に走る
+    /// ことはない（スレッドプールがテストをスレッド間で使い回すのは逐次的）
+    /// ため、カウンタをスレッドローカルにすれば「呼び出し元スレッドが実際に
+    /// 起動した回数」だけを観測でき、他スレッドで並走する別テストの起動が
+    /// 混入しない（直列化やプロセス全体 Mutex を要さない、呼び出し単位の
+    /// 観測フック）。
+    pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
 /// `stream` は [`CudaDevice`] から `Arc` クローンで受け取る（`device.rs` の
@@ -99,6 +128,12 @@ pub struct CudaGemm {
     naive_f16: CudaFunction,
     tiled_f32: CudaFunction,
     tiled_f16: CudaFunction,
+    /// イシュー #599 で追加。GEMM epilogue（bias 加算・activation）を融合
+    /// した tiled GEMM（`kernels::TILED_BIAS_ACT_F32`）のコンパイル済み
+    /// ハンドル。`tiled_f32` と異なり `#include` を使わない・compute
+    /// capability を問わない点は同じ（naive/tiled 4 カーネルと同様、失敗
+    /// しうる環境が広い WMMA(TF32) 系より狭いため `Option` 化しない）。
+    tiled_bias_act_f32: CudaFunction,
     /// TASK-11.1c（#62）で追加。WMMA（Tensor Core）を用いた TF32 GEMM
     /// （`kernels::WMMA_TF32_F32`）のコンパイル済みハンドル。#61（f16 WMMA
     /// GEMM）が本 PR 時点で未マージのため、WMMA 共通基盤（NVRTC コンパイル・
@@ -549,6 +584,16 @@ impl CudaGemm {
             .load_module(tiled_f16_ptx)?
             .load_function("gemm_tiled_f16")?;
 
+        // イシュー #599: epilogue 融合カーネルは naive/tiled と同様
+        // `#include` を使わず全 compute capability で成立するため、
+        // WMMA(TF32) 系のような Option 化・失敗の退避は行わず、`new` の
+        // 早期 return（`?`）に合流させる（上記 4 カーネルと同じ扱い）。
+        let tiled_bias_act_f32_ptx = compile_ptx(kernels::TILED_BIAS_ACT_F32, arch)?;
+        let tiled_bias_act_f32 = device
+            .context()
+            .load_module(tiled_bias_act_f32_ptx)?
+            .load_function("gemm_tiled_bias_act_f32")?;
+
         // `kernels::WMMA_TF32_F32` はブロックタイル（M/N=32）を warp タイル
         // （WMMA_TF32_FRAG=16）の 2x2 グリッドに割ることを前提にしており、
         // `WMMA_TF32_THREADS`（128 = 4 warp）ともこの分割数と対応する。この
@@ -668,6 +713,7 @@ impl CudaGemm {
             naive_f16,
             tiled_f32,
             tiled_f16,
+            tiled_bias_act_f32,
             wmma_tf32,
             wmma_tf32_error,
             wmma_tf32_opt,
@@ -741,6 +787,130 @@ impl CudaGemm {
         validate_gemm_dims(a.len(), b.len(), m, n, k)?;
         validate_tiled_k_bound(k)?;
         self.run_f16_kernel(&self.tiled_f16, a, b, m, n, k, TILED_BLOCK_DIM)
+    }
+
+    /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM を実行
+    /// する。`act(A @ B + bias)`（イシュー #599・TASK-12.1f）。
+    ///
+    /// `bias` は `Some` の場合 `n` 要素の 1 次元スライス（`B` の列数への
+    /// 行方向複製）でなければならない（それ以外の shape・ブロードキャスト
+    /// はサポートしない。`ops.rs::CudaBackendOps::gemm_bias_act` が
+    /// `bias.shape() == [n]` の場合にのみ本関数へ委譲する契約。呼び出し元
+    /// ドキュメント参照）。`act_relu` が `true` なら epilogue で
+    /// `max(v, 0)` を追加適用する。
+    ///
+    /// ホスト側形状検証は [`Self::run_tiled_f32`] と同一
+    /// （[`validate_gemm_dims`]・[`validate_tiled_k_bound`]）に加え、
+    /// カーネル本体へ触れる前に `bias` の長さが `n` と一致することを検証
+    /// する（CPU 参照実装 `gemm_blis_bias_act_parallel` の
+    /// `GemmError::BiasLenMismatch` と同じ「カーネル本体アクセス前に検証」
+    /// の順序契約。REQ-8・OWASP A03）。
+    ///
+    /// **`m == 0 || n == 0`**: [`Self::run_f32_kernel`] と同じ理由（no-op
+    /// 形状）で空の結果を返す。**`k == 0`**: `run_f32_kernel`／
+    /// `run_tiled_f32` は「K 方向の累積対象が存在しない = C は全 0」という
+    /// GEMM の数学的定義どおり無条件で全 0 を返すが、CPU 参照実装
+    /// （`gemm_blis_bias_act_parallel`）は `k == 0` でも epilogue（bias 加算・
+    /// activation）を適用する契約であるため、本関数はその契約に合わせ
+    /// `acc == 0` に対する epilogue をホスト側で直接計算する（GPU 起動を
+    /// 回避しつつ CPU と同一の意味論を保つ。0 バイトデバイス確保を一部
+    /// CUDA driver が拒否しうる問題〈`run_f32_kernel` の該当コメント参照〉
+    /// も同時に回避する）。
+    ///
+    /// [`gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`](BIAS_ACT_FUSED_LAUNCH_COUNT)
+    /// は実際に GPU カーネルが起動した場合（`m/n > 0` かつ `k > 0`）にのみ
+    /// 増加する（上記フィールドのドキュメンテーションコメント参照）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_tiled_bias_act_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        bias: Option<&[f32]>,
+        act_relu: bool,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        if let Some(bias) = bias
+            && bias.len() != n as usize
+        {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "bias length mismatch: expected {n} (n), actual {}",
+                    bias.len()
+                ),
+            });
+        }
+
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+
+        if k == 0 {
+            // 上記ドキュメンテーションコメント「k == 0」参照: CPU 参照
+            // 実装と同じく epilogue はホスト側で直接適用し、GPU 起動は
+            // 行わない（BIAS_ACT_FUSED_LAUNCH_COUNT は増加させない）。
+            let mut out = vec![0.0f32; (m as usize) * (n as usize)];
+            if let Some(bias) = bias {
+                for row in out.chunks_mut(n as usize) {
+                    for (x, bv) in row.iter_mut().zip(bias.iter()) {
+                        *x += *bv;
+                    }
+                }
+            }
+            if act_relu {
+                for x in out.iter_mut() {
+                    *x = x.max(0.0);
+                }
+            }
+            return Ok(out);
+        }
+
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+
+        let a_dev = self.stream.clone_htod(a)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        // `bias` が `None` の場合はダミーの 1 要素バッファを渡す（null
+        // ポインタをカーネル引数へ渡す経路を作らない。`has_bias == 0` の
+        // ガードによりカーネル側は実際にはこのバッファを参照しない。
+        // `kernels::TILED_BIAS_ACT_F32` ドキュメンテーションコメント参照）。
+        let (bias_dev, has_bias): (CudaSlice<f32>, i32) = match bias {
+            Some(bias) => (self.stream.clone_htod(bias)?, 1),
+            None => (self.stream.alloc_zeros::<f32>(1)?, 0),
+        };
+        let mut c_dev = self
+            .stream
+            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+
+        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+        let act_i: i32 = if act_relu { 1 } else { 0 };
+
+        // SAFETY: run_f32_kernel と同一の根拠（該当コメント参照）。
+        // 追加引数（bias_dev・has_bias・act_i）は上記で検証済みの `n`／
+        // `bias` の有無と 1:1 対応し、カーネル内 epilogue は書き込み
+        // ガード（`row < m && col < n`）の内側でのみ `bias[col]` を
+        // 参照するため OOB は発生しない（REQ-8）。
+        unsafe {
+            self.stream
+                .launch_builder(&self.tiled_bias_act_f32)
+                .arg(&a_dev)
+                .arg(&b_dev)
+                .arg(&bias_dev)
+                .arg(&mut c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .arg(&has_bias)
+                .arg(&act_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+
+        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        Ok(c_host)
     }
 
     /// WMMA（Tensor Core）を用いた TF32 GEMM を実行する。C = A @ B（`m x k` @

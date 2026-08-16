@@ -105,9 +105,14 @@
 //! `tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
 //! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
 //! tiled 固定とし、`CudaGemmAuto` を介した Tensor Core 経路の自動選択への
-//! 切替は別スコープ）。elementwise・reduction は GPU カーネル未実装のため
-//! `tensor_core::device::BackendError::Unsupported` を返す
-//! （out-of-scope-tracking.md 対象）。
+//! 切替は別スコープ）。イシュー #599 で elementwise 5 演算（`add`／`mul`／
+//! `relu`／`exp`／`tanh`。[`elementwise::CudaElementwise`]）を実装し、
+//! `gemm_bias_act` を GEMM epilogue 融合カーネル
+//! （[`CudaGemm::run_tiled_bias_act_f32`]）で実融合化した（`bias`
+//! ブロードキャスト形状の非厳密一致ケースは非融合合成へフォールバックする。
+//! `ops::gemm_bias_act_route` 参照）。reduction（`sum`／`max`）は GPU
+//! カーネル未実装のまま `tensor_core::device::BackendError::Unsupported`
+//! を返す（out-of-scope-tracking.md 対象）。
 //!
 //! イシュー #499（GEMM 性能改善ツリー #479 の後続）で L2 再利用のための
 //! タイル→SM 割り当てスウィズル（[`swizzle`]・`kernels_mma::
@@ -142,12 +147,14 @@
 //! 参照）。
 
 pub mod device;
+mod elementwise;
 mod error;
 mod gemm;
 mod gemm_auto;
 mod gemm_mma;
 mod gemm_wmma;
 mod kernels;
+mod kernels_elementwise;
 mod kernels_mma;
 mod kernels_wmma;
 mod kernels_wmma_opt;
@@ -157,6 +164,7 @@ mod ops;
 mod swizzle;
 
 pub use device::{CudaDevice, CudaDeviceProvider};
+pub use elementwise::CudaElementwise;
 pub use error::CudaError;
 pub use gemm::CudaGemm;
 pub use gemm_auto::{
@@ -168,7 +176,7 @@ pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
 pub use nvrtc::{
-    CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
+    CompiledDims, CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
     derive_pipeline_stages, nvrtc_version,
 };
 pub use ops::CudaBackendOps;
