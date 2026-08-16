@@ -1253,7 +1253,22 @@ pub struct CompiledWmmaTf32StagedKernel {
 
 impl CompiledWmmaTf32StagedKernel {
     /// [`CompiledWmmaTf32OptKernel::launch_tf32`] と同じ検証手順・同じ
-    /// no-op early return 契約。
+    /// no-op early return 契約に加え、cp.async 16 バイト整列制約
+    /// （[`crate::gemm::wmma_tf32_staged_alignment_ok`]）を fail-closed で
+    /// 検証する。
+    ///
+    /// `gemm.rs::run_wmma_tf32`（3 段フォールバックの経路選択）は同じ
+    /// 判定関数を呼んで整列 NG の形状を staged 経路へそもそも渡さない
+    /// ため通常はここで拒否されることはないが、本メソッドは
+    /// `pub`（crate 内から直接到達可能）であり、将来の呼び出し元が
+    /// 経路選択のフォールバックを経由せずに直接呼ぶ可能性がある。
+    /// `gemm_mma.rs::CudaMmaGemm::launch`（`validate_mma_alignment` を
+    /// 唯一のゲートとして起動前に必ず経由させる設計）と同じ
+    /// 「起動 API 自体が fail-closed である」契約に揃えるため、経路選択
+    /// 側の判定に依存せずここでも検証する（Bugbot 指摘 PR #678 review
+    /// id 4945411529）。満たさない場合、cp.async の 16 バイト転送粒度が
+    /// 要求するグローバル側整列を欠いたままカーネルを起動し、フォールト
+    /// または silent corruption を招きうる。
     #[allow(dead_code, clippy::too_many_arguments)]
     pub fn launch_tf32_staged(
         &self,
@@ -1270,6 +1285,15 @@ impl CompiledWmmaTf32StagedKernel {
         crate::gemm::validate_output_len(c_dev.len(), m, n)?;
         if m == 0 || n == 0 {
             return Ok(());
+        }
+        if !crate::gemm::wmma_tf32_staged_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma tf32 staged path requires n % 4 == 0 && k % 4 == 0 (cp.async \
+                     16-byte transfer granularity; gemm.rs::wmma_tf32_staged_alignment_ok \
+                     doc comment), but got n={n}, k={k}"
+                ),
+            });
         }
         self.validate_grid_bounds(m)?;
         self.validate_k_tile_bound(k)?;
