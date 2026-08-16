@@ -97,9 +97,20 @@
 //! `device` モジュールと同じく `cfg(target_os = "macos")` 限定）・
 //! [`device::MetalOccupancyInfo`]・[`tile::OccupancyParams`]
 //! （`tile::actual_groups`／`tile::is_underoccupied` と合わせ `objc2` 系
-//! FFI に触れない純粋関数群）。`tile::select` への組み込み・タイル
-//! 2 段階切替の閾値運用は後続イシュー #542 のスコープであり本イシューは
-//! 算出機構のみを追加する。
+//! FFI に触れない純粋関数群）。
+//!
+//! イシュー #542（D-7b）で [`tile::select_with_occupancy`] を実装した。
+//! [`context::MetalContext::new`] が `MetalOccupancyInfo::probe` を 1 回
+//! だけ実行して `Option<tile::OccupancyParams>` へ写像・キャッシュする
+//! （[`context::MetalContext::occupancy_params`]）。**ただし
+//! `gemm::MetalGemm::dispatch_auto`（本番ディスパッチ経路）は現時点では
+//! `tile::select`（形状のみ）を呼ぶ**: `ideal_groups` の係数（MFA 経験式
+//! 由来の暫定値）は M4 Max 実機での `select()` 比・性能非劣化確認
+//! （`docs/perf/metal-gemm-occupancy-select.md` §5）が未完了のため、
+//! `select_with_occupancy` への切替は当該実測完了後に別 PR で行う
+//! （codex-review P1・PR #684）。GPU コア数取得不能時のフォールバック
+//! 挙動（`occupancy_params` が `None` になり `select_with_occupancy` が
+//! 形状のみの判定へ fail-safe する）自体は実装・テスト済み。
 //!
 //! `dispatch_f16_unverified`／`dispatch_f16_prepared_unverified` は関数名に
 //! `_unverified` を付け `#[doc(hidden)]` としている（PR #346 codex-review
