@@ -190,3 +190,105 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
 // 方針）、別コンパイル単位である本ファイル（`tests/` 配下の統合テスト）
 // からは参照できなくなったことによる（直上の `CANDIDATES` 巡回テストが
 // `tile.rs` 側に置かれている理由と同じ）。
+
+/// イシュー #533 の証跡: `gemm_simdgroup_tiled` の staged ロード（協調
+/// ロード）経路が A/B タイルとも `float4` ベクトルロード（1 要素ずつの
+/// スカラーロードではなく `reinterpret_cast<device const float4*>` 経由の
+/// 128bit 幅読み出し）へ移植されていることを Linux CI（ubuntu-latest）上で
+/// ロックする。Mac 実機依存の parity・A/B 計測（
+/// `docs/perf/metal-gemm-float4-staged-load.md`）は別途実施する。将来の
+/// 書き戻し（スカラー化への retrograde）をこのテストで検出する。
+///
+/// ベクトルロードは A タイル・B タイルの 2 箇所で発行されるため、needle の
+/// 出現数を 2 に固定する（境界外グループのスカラーフォールバック側には
+/// この needle は現れないため、退行〈float4 化の巻き戻し〉があれば
+/// occurrences が 0 になり検出できる）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_float4_staged_load() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    let needle = "reinterpret_cast<device const float4*>(";
+    let occurrences = kernel_body.matches(needle).count();
+    assert_eq!(
+        occurrences, 2,
+        "gemm_simdgroup_tiled の staged 経路の A/B タイルロードに float4 ベクトルロード `{needle}` が見つかりません（見つかった数: {occurrences}）"
+    );
+}
+
+/// 上記 float4 ベクトルロードが REQ-8 の手動境界チェックを省略していない
+/// ことのロック（境界グループの要素単位スカラーフォールバックが staged
+/// 経路に残っていることを検査。`.claude/rules/coding-rust.md`「カーネル
+/// 実装の境界検査」: 性能上の下限・最適化の達成を理由に境界チェックを
+/// 省略しない）。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    assert!(
+        kernel_body.contains("bool group_in_bounds ="),
+        "float4 ベクトルロードのグループ単位 in-bounds 判定が見つかりません（境界チェック省略の疑い）"
+    );
+    assert_eq!(
+        kernel_body.matches("bool group_in_bounds =").count(),
+        2,
+        "A タイル・B タイルの両方に group_in_bounds 判定が必要です"
+    );
+}
+
+/// イシュー #538 の証跡: threadgroup memory のパディング幅 `TGP_PAD` が
+/// MSL function constant（index 6）として宣言されていることを Linux CI
+/// （ubuntu-latest）上でロックする。`crate::pipeline::make_pipeline_with_constants`
+/// が渡す `TileConfig::pad` と 1:1 対応する契約（Rust 側は
+/// `crates/backend-metal/src/tile.rs`・`crates/backend-metal/src/pipeline.rs`
+/// の単体テストで別途検証する）。
+#[test]
+fn gemm_metal_source_declares_tgp_pad_function_constant() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("constant uint TGP_PAD [[function_constant(6)]];"),
+        "gemm.metal に TGP_PAD function constant（index 6）の宣言が見つかりません"
+    );
+}
+
+/// イシュー #538 の証跡: `gemm_simdgroup_tiled` の staged 経路が
+/// `simdgroup_load` の行ストライドに素の `BK`/`BN` ではなく `TGP_PAD` を
+/// 含む `lda`/`ldb` を使用していることをロックする（バンクコンフリクト
+/// 回避の要である「パディング込みストライドでのロード」自体が失われて
+/// いないことの検査。`lda`/`ldb` の定義式自体〈`BK + TGP_PAD`〉も併せて
+/// 固定する）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_tgp_padding_stride() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "uint lda = BK + TGP_PAD;",
+        "uint ldb = BN + TGP_PAD;",
+        "simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
+        "simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled に TGP_PAD 込みストライド `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #538 の証跡: 上記パディング導入後も staged 経路の REQ-8
+/// 手動境界チェック（float4 グループ単位 in-bounds 判定・境界外要素の
+/// スカラーフォールバック 0 埋め）が維持されていることをロックする
+/// （`gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback`
+/// と同種の検査を、パディング導入後の書き込み先添字〈`dst_idx`〉に対して
+/// 再確認する）。
+#[test]
+fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    assert!(
+        kernel_body.contains("uint dst_idx = r * lda + kk;"),
+        "A タイルのパディング込み書き込み先添字 dst_idx が見つかりません"
+    );
+    assert!(
+        kernel_body.contains("uint dst_idx = kk * ldb + c_;"),
+        "B タイルのパディング込み書き込み先添字 dst_idx が見つかりません"
+    );
+    assert_eq!(
+        kernel_body.matches("bool group_in_bounds =").count(),
+        2,
+        "パディング導入後も A タイル・B タイル双方の group_in_bounds 判定が必要です"
+    );
+}

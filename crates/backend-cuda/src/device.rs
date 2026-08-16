@@ -179,6 +179,22 @@ impl CudaDevice {
             .ok()
             .and_then(|count| u32::try_from(count).ok())
     }
+
+    /// SM（マルチプロセッサ）数の公開アクセサ（イシュー #499）。
+    ///
+    /// [`compute_units`](Self::compute_units) と同一の取得ロジック・
+    /// fail-soft 方針（取得失敗時 `None`）をそのまま公開する薄いラッパー。
+    /// `swizzle::select_swizzle_group_width`（`swizzle.rs`）・
+    /// `gemm_mma.rs::CudaMmaGemm::new_with_swizzle`・
+    /// `examples/gemm_mma_swizzle_bench.rs` が、グルーピング幅の動的選択に
+    /// 使う SM 数をここから取得する。`DeviceInfo::compute_units`
+    /// （[`CudaDeviceProvider::probe`]）は既に同じ値を crate 外へ公開して
+    /// いるため（`tensor_core::device::DeviceInfo` 経由）、本アクセサは
+    /// 新規の公開面を作るものではなく、`CudaDevice` から直接取得する経路を
+    /// 追加するのみ。
+    pub fn multiprocessor_count(&self) -> Option<u32> {
+        self.compute_units()
+    }
 }
 
 /// CUDA バックエンドの `DeviceProvider` 実装（TASK-1.9a・#44）。

@@ -957,18 +957,23 @@ fn encode_dispatch_tiled(
     // `dispatchThreadgroups` 時に GPU 側が確保する threadgroup 共有メモリの
     // バイト長を指定するだけで、即座のメモリアクセスは発生しない。
     // `shaders/gemm.metal` の `gemm_simdgroup_tiled` は `threadgroup(0)` に
-    // `TileConfig::shared_mem_bytes()`（A タイル BM×BK ＋ B タイル BK×BN）
-    // 分のバイト数を要求する契約。`staged=false`（直接ロード経路。
+    // `TileConfig::shared_mem_bytes()`（A タイル BM×(BK+pad) ＋ B タイル
+    // BK×(BN+pad)。`pad` はイシュー #538 の threadgroup memory パディング
+    // 幅）分のバイト数を要求する契約。`staged=false`（直接ロード経路。
     // small-shape 構成・最終フォールバック `SINGLE_SIMDGROUP_8X8` を含む）
     // では共有メモリを使わず 0 バイトを返すが、`setThreadgroupMemoryLength`
     // へ 0 を渡すと未定義動作になりうるため非 0 の下限値が必要になる
     // （カーネル側は `USE_TGP_STAGING=false` の分岐でこの領域へアクセス
     // しない）。Metal は `setThreadgroupMemoryLength` の長さに 16 バイト
     // 境界整合を要求するため、下限値は 4 ではなく 16 バイト境界の最小値
-    // （16）にする。`staged=true` 側は `bm`/`bk`/`bn` が常に 8 の倍数
-    // （[`TileConfig::validate`] が強制）のため、`(bm*bk + bk*bn)*4` は
-    // 常に 256 以上かつ 16 の倍数になり非 staged 側の下限を上書きしない
-    // （bugbot 指摘。#253 レビュー）。
+    // （16）にする。`staged=true` 側は `bm`/`bk`/`bn` が常に 8 の倍数・
+    // `pad`（[`TileConfig::pad`]）が常に 4 の倍数（`staged` からの導出値
+    // 自体が保証する構成不変条件。イシュー #538 codex-review 指摘 P1 再指摘
+    // 対応・PR #673 で `TileConfig::validate` による実行時検証ではなく型の
+    // 設計自体で保証する方式へ変更した。`crate::tile` の `TileConfig`
+    // ドキュメント「破壊的変更を伴わない導入設計」節参照）のため、
+    // `(bm*(bk+pad) + bk*(bn+pad))*4` は常に 256 以上かつ 16 の倍数になり
+    // 非 staged 側の下限を上書きしない（bugbot 指摘。#253 レビュー）。
     let shared_mem_bytes = cfg.shared_mem_bytes().max(16) as usize;
     debug_assert!(
         shared_mem_bytes.is_multiple_of(16),

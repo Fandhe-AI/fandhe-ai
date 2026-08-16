@@ -1,6 +1,6 @@
 //! f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM の起動 API（TASK-11.1h・#187）。
 //!
-//! `CudaMmaGemm` は `kernels_mma::MMA_F16`（`m16n8k16` mma・3 ステージ
+//! `CudaMmaGemm` は `kernels_mma::mma_f16_source()`（`m16n8k16` mma・3 ステージ
 //! `cp.async` パイプライン）をコンパイル・保持し、以降はホスト側スライスを
 //! 渡すだけで GPU 実行できる境界を担う（`gemm_wmma.rs::CudaWmmaGemm` と
 //! 同じ責務分割。並行 issue #62/#63 が `gemm.rs`／`gemm_wmma.rs` を編集中の
@@ -98,6 +98,29 @@ pub struct CudaMmaGemm {
     mma_f16: CudaFunction,
 }
 
+/// [`MIN_COMPUTE_CAPABILITY_MAJOR`]（8.0）のゲート検査を行う（
+/// [`CudaMmaGemm::new`]・[`CudaMmaGemm::new_with_swizzle`] 共通の前段）。
+///
+/// イシュー #499 で `new_with_swizzle` を追加した際に、両コンストラクタが
+/// コンパイルするカーネルソースが異なる（`MMA_F16` 定数 vs
+/// `kernels_mma::mma_f16_source_with_swizzle` が生成する変種）一方で cc
+/// ゲート自体は同一（ブロックタイル定数・命令選定はどちらも
+/// `MMA_M`/`MMA_N`/`MMA_K`/`cp.async`/`ldmatrix` を使う同じ命令セットの
+/// ため）であることから、重複を避けて切り出した。
+fn check_min_compute_capability(device: &CudaDevice) -> Result<(), CudaError> {
+    let (major, minor) = device.compute_capability();
+    if major < MIN_COMPUTE_CAPABILITY_MAJOR {
+        return Err(CudaError::TensorCoreUnsupported {
+            detail: format!(
+                "mma.sync/ldmatrix/cp.async path requires compute capability \
+                 >= {MIN_COMPUTE_CAPABILITY_MAJOR}.0 (cp.async/ldmatrix are \
+                 LDGSTS-only, sm_80+), but device reports {major}.{minor}"
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl CudaMmaGemm {
     /// `device` 上で `mma.sync`/`ldmatrix`/`cp.async` GEMM カーネルを
     /// NVRTC コンパイルし保持するハンドルを構築する。
@@ -107,7 +130,7 @@ impl CudaMmaGemm {
     /// 試みず `CudaError::TensorCoreUnsupported` を返す（`gemm_wmma.rs::new`
     /// と同じ判断。cc 判定をコンパイル前に行うことで、非対応デバイス上での
     /// 無駄な NVRTC 呼び出し・コンパイル失敗の紛れ込みを避ける）。(2)
-    /// `kernels_mma::MMA_F16` を `device.arch()` 向けに `nvrtc::compile_ptx`
+    /// `kernels_mma::mma_f16_source()` を `device.arch()` 向けに `nvrtc::compile_ptx`
     /// でコンパイル。(3) `device.context().load_module()` →
     /// `load_function("gemm_mma_f16")`。`libnvrtc` 不在時は
     /// `CudaError::NvrtcUnavailable` を返す（`compile_ptx` のプローブゲート
@@ -139,19 +162,67 @@ impl CudaMmaGemm {
         // （`kernels_mma.rs` 冒頭ドキュメントコメント参照）。
         debug_assert_eq!(kernels_mma::MMA_K_STEPS_PER_STAGE, 2);
 
-        let (major, minor) = device.compute_capability();
-        if major < MIN_COMPUTE_CAPABILITY_MAJOR {
-            return Err(CudaError::TensorCoreUnsupported {
-                detail: format!(
-                    "mma.sync/ldmatrix/cp.async path requires compute capability \
-                     >= {MIN_COMPUTE_CAPABILITY_MAJOR}.0 (cp.async/ldmatrix are \
-                     LDGSTS-only, sm_80+), but device reports {major}.{minor}"
-                ),
-            });
-        }
+        check_min_compute_capability(device)?;
 
         let arch = device.arch();
-        let ptx = compile_ptx(kernels_mma::MMA_F16, arch)?;
+        let ptx = compile_ptx(kernels_mma::mma_f16_source(), arch)?;
+        let mma_f16 = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_mma_f16")?;
+
+        Ok(Self {
+            stream: device.stream().clone(),
+            mma_f16,
+        })
+    }
+
+    /// `device` 上で、L2 再利用のためのタイル→SM 割り当てスウィズル
+    /// （イシュー #499・`kernels_mma::mma_f16_source_with_swizzle`）を
+    /// 適用した変種カーネルを NVRTC コンパイルし保持するハンドルを構築
+    /// する（**opt-in・未計測の実験実装**。本ファイル冒頭・`lib.rs` 冒頭
+    /// コメント「#499」節参照）。
+    ///
+    /// [`new`](Self::new) と同じ cc ゲート・NVRTC コンパイル手順を共有し
+    /// （[`check_min_compute_capability`]）、コンパイルするソース文字列
+    /// のみが `kernels_mma::MMA_F16`（変更なし）から
+    /// `kernels_mma::mma_f16_source_with_swizzle(group_width)`（M 方向
+    /// ブロック割り当てを remap した変種）へ変わる。返す
+    /// [`CudaMmaGemm`] は [`new`](Self::new) が返すものと同一の型・API
+    /// （`run_f16`／`upload_f16`／`launch_f16`／`download_f16`）を持ち、
+    /// grid/block 構成・形状検証・SAFETY 根拠はブロックタイル定数
+    /// （`MMA_BM`/`MMA_BN`/`MMA_BK`）を変更しないため共有できる（swizzle
+    /// はブロックがどの `(m_block, n_block)` を担当するかの割り当てのみを
+    /// 変え、各出力要素のアキュムレート順序・ブロックあたりの計算内容は
+    /// 変えない）。
+    ///
+    /// 任意ソースを受ける公開 API（`new_with_source` 型）は意図的に作らず、
+    /// `group_width: u32` のみを受けてカプセル化する（`kernels_mma.rs`
+    /// 側で固定文字列アンカーの `replacen` と数値 `format!` 埋め込みのみを
+    /// 行う契約を維持し、外部入力を直接カーネルソースへ流し込む経路を
+    /// 作らない。`.claude/rules/security.md` A03 インジェクション対策）。
+    /// `group_width < 2` は `kernels_mma::mma_f16_source_with_swizzle` が
+    /// `CudaError::InvalidShape` で拒否する。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`Cargo.toml` の `[features]` 参照。PR #667 codex-review P1 是正:
+    /// `CudaMmaGemm` 自体は `run_f16` 等の安定 API を持つ常時公開の型だが、
+    /// 本コンストラクタが返す「未計測の実験カーネル変種」だけは
+    /// `lib.rs::diagnostics` モジュールと同じ feature ゲート方針で通常
+    /// ビルドの公開 API 面から除外する。ゲートしない場合、doc comment
+    /// 上で「opt-in／本番経路から到達不能」と謳っていても、通常ビルドの
+    /// crate 外部利用者が feature 指定なしに直接呼べてしまい実態と矛盾
+    /// する）。`examples/gemm_mma_swizzle_bench.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）専用の入口であり、実機
+    /// A/B 計測後に採用確定した段階で feature ゲートを外し安定 API へ
+    /// 昇格する（`docs/perf/cuda-gemm-swizzle-ab.md` 参照）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_with_swizzle(device: &CudaDevice, group_width: u32) -> Result<Self, CudaError> {
+        check_min_compute_capability(device)?;
+
+        let arch = device.arch();
+        let src = kernels_mma::mma_f16_source_with_swizzle(group_width)?;
+        let ptx = compile_ptx(&src, arch)?;
         let mma_f16 = device
             .context()
             .load_module(ptx)?
@@ -165,7 +236,7 @@ impl CudaMmaGemm {
 
     /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM を実行する。C = A @ B
     /// （`m x k` @ `k x n`）。入出力は `half::f16`、GPU 内部アキュムレートは
-    /// f32（`kernels_mma::MMA_F16` 参照。数値契約は `CudaWmmaGemm::run_f16`
+    /// f32（`kernels_mma::mma_f16_source()` 参照。数値契約は `CudaWmmaGemm::run_f16`
     /// と同一）。
     ///
     /// ホスト側形状検証を 3 段で行う: `validate_gemm_dims`（naive/tiled/WMMA
@@ -279,8 +350,10 @@ impl CudaMmaGemm {
         // の余剰はカーネル内境界チェックで弾かれる。共有メモリは静的
         // `__shared__` 配列のみを使用するため `shared_mem_bytes` は 0 の
         // ままでよい（`kernels_mma.rs` 冒頭コメント「タイル構成」の
-        // 18432B は per-block 静的上限 48KiB 内であり動的共有メモリの
-        // 追加確保・`cudaFuncSetAttribute` opt-in は不要）。
+        // 41,472B〈#494 のブロックタイル拡大後・#498 のバンクコンフリクト
+        // 対策パディング適用後の値〉は per-block 静的上限 48KiB 内であり
+        // 動的共有メモリの追加確保・`cudaFuncSetAttribute` opt-in は
+        // 不要）。
         unsafe {
             self.stream
                 .launch_builder(&self.mma_f16)
@@ -327,9 +400,10 @@ mod tests {
 
     #[test]
     fn mma_launch_config_grid_dim_covers_m_and_n_via_div_ceil() {
-        // MMA_BM=32, MMA_BN=64: 33x65 を覆うには grid (2, 2) が必要
-        // （div_ceil(65,64)=2, div_ceil(33,32)=2）。
-        let cfg = mma_launch_config(33, 65);
+        // #494 でブロックタイルを MMA_BM=64/MMA_BN=128 へ拡大。
+        // 65x129 を覆うには grid (2, 2) が必要
+        // （div_ceil(129,128)=2, div_ceil(65,64)=2）。
+        let cfg = mma_launch_config(65, 129);
         assert_eq!(cfg.grid_dim, (2, 2, 1));
         assert_eq!(cfg.block_dim, MMA_BLOCK_DIM);
         assert_eq!(cfg.shared_mem_bytes, 0);
@@ -337,7 +411,9 @@ mod tests {
 
     #[test]
     fn mma_launch_config_exact_multiple_shape_has_no_extra_tile() {
-        let cfg = mma_launch_config(64, 128);
+        // MMA_BM=64/MMA_BN=128 のちょうど 2 倍（128, 256）で余剰タイルが
+        // 出ないことを検査する。
+        let cfg = mma_launch_config(128, 256);
         assert_eq!(cfg.grid_dim, (2, 2, 1));
     }
 
@@ -361,13 +437,15 @@ mod tests {
 
     #[test]
     fn validate_mma_grid_bounds_accepts_shapes_within_limit() {
-        // MMA_BM=32: div_ceil(65_535 * 32, 32) = 65_535（上限ちょうど）。
+        // MMA_BM（#494 時点で 64）単位: div_ceil(65_535 * MMA_BM, MMA_BM)
+        // = 65_535（上限ちょうど）。定数参照のためタイル値変更時も自動追従。
         assert!(validate_mma_grid_bounds(65_535 * kernels_mma::MMA_BM).is_ok());
     }
 
     #[test]
     fn validate_mma_grid_bounds_rejects_m_exceeding_grid_y_limit() {
-        // MMA_BM=32: div_ceil(65_535*32 + 1, 32) = 65_536 > 65_535。
+        // MMA_BM（#494 時点で 64）単位: div_ceil(65_535*MMA_BM + 1, MMA_BM)
+        // = 65_536 > 65_535。
         let err = validate_mma_grid_bounds(65_535 * kernels_mma::MMA_BM + 1)
             .expect_err("grid_dim.y must exceed CUDA's 65,535 limit");
         assert!(matches!(err, CudaError::InvalidShape { .. }));
@@ -392,8 +470,8 @@ mod tests {
     /// NVRTC コンパイル・カーネル起動まで踏み込む点が異なる）。
     ///
     /// `CudaMmaGemm::new`/`run_f16` を再利用しない理由: それらは常に
-    /// `kernels_mma::MMA_F16`（`STAGES=3` 固定の文字列）をコンパイルする
-    /// ため、段数を差し替えた変種を実行するには本関数のように NVRTC
+    /// `kernels_mma::mma_f16_source()`（`STAGES=3` 固定の文字列）をコンパイル
+    /// する ため、段数を差し替えた変種を実行するには本関数のように NVRTC
     /// コンパイル・モジュールロード・起動を直接組み立てる必要がある。
     /// 形状検証（`validate_gemm_dims`・[`validate_mma_alignment`]・
     /// [`validate_mma_grid_bounds`]）・グリッド構築（[`mma_launch_config`]）・
@@ -408,15 +486,16 @@ mod tests {
         n: u32,
         k: u32,
     ) -> Result<Vec<f16>, CudaError> {
+        let base_src = kernels_mma::mma_f16_source();
         let from = format!("#define STAGES {}\n", kernels_mma::MMA_STAGES);
         let to = format!("#define STAGES {stages}\n");
         assert_eq!(
-            kernels_mma::MMA_F16.matches(&from).count(),
+            base_src.matches(&from).count(),
             1,
-            "kernels_mma::MMA_F16 中の `{from:?}` の出現数が 1 ではありません \
+            "kernels_mma::mma_f16_source() 中の `{from:?}` の出現数が 1 ではありません \
              （run_f16_with_stages の前提が崩れています）"
         );
-        let src = kernels_mma::MMA_F16.replacen(&from, &to, 1);
+        let src = base_src.replacen(&from, &to, 1);
 
         let ptx = compile_ptx(&src, device.arch())
             .expect("stage-swapped MMA_F16 source must compile via NVRTC on real hardware");
@@ -483,7 +562,8 @@ mod tests {
             CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
         // (m, n, k): 小形状（16x8x16。単一 mma タイル）・タイル端形状
-        // （40x72x160。MMA_BM=32/MMA_BN=64/MMA_BK=32 の非整数倍）・
+        // （40x72x160。#494 時点の MMA_BM=64/MMA_BN=128/MMA_BK=32 の
+        // 非整数倍）・
         // 大形状（256x256x4096。B-0/#491 parity 非後退契約の mma_f16 行と
         // 同一形状。docs/perf/cuda-parity-baseline.md 参照）を横断する
         // （#492 実装計画 §5-5）。
@@ -517,5 +597,184 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// #499 受け入れ基準（実機検証）: [`CudaMmaGemm::new_with_swizzle`]
+    /// が生成する各 `group_width` の変種が、[`CudaMmaGemm::new`]（base）と
+    /// **ビット一致**の出力を返すことを確認する。
+    ///
+    /// swizzle はブロックがどの `(m_block, n_block)` を担当するかの割り当て
+    /// のみを変え、各ブロック内部の計算（mma/ldmatrix の発行順序・
+    /// アキュムレート順序）は変えないため（`kernels_mma.rs::
+    /// mma_f16_source_with_swizzle` ドキュメンテーションコメント参照）、
+    /// `mma_f16_stage_count_does_not_change_bit_exact_output` と同じ論法で
+    /// tolerance を使わない bit 等値で主張できる（`.claude/rules/
+    /// coding-rust.md` の「バックエンド間数値一致テストの許容誤差を単独で
+    /// 緩和しない」契約に抵触しない。swizzle 変種間比較はバックエンド間
+    /// 比較ではなく同一バックエンド内の実装詳細比較のため tolerance の
+    /// 対象外）。
+    ///
+    /// `group_width` は [`crate::swizzle::select_swizzle_group_width`] の
+    /// 動的選択結果（`device.multiprocessor_count()` 実測値ベース）に
+    /// 加え、参考として固定候補 `8`/`16` も検査する（実装計画 4 節
+    /// 「gemm_mma.rs（起動側）」）。
+    ///
+    /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
+    /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
+    /// `cargo test -p backend-cuda --lib --features internal-diagnostics --
+    /// --ignored` から実行する（`--features internal-diagnostics` を欠くと
+    /// 下記の理由で本テスト自体がコンパイルされず green と誤認する。PR #667
+    /// codex-review P1 是正。`docs/perf/cuda-gemm-swizzle-ab.md` の実機検証
+    /// 手順コマンドも同時に是正済み）。
+    ///
+    /// `internal-diagnostics` feature（既定 off）でのみコンパイルされる
+    /// （[`CudaMmaGemm::new_with_swizzle`] 自体が同 feature でゲートされて
+    /// いるため）。`Makefile` の `test` ターゲットは `--all-features` の
+    /// ため通常の `make test`（コンパイルのみ・`--ignored` なしでは実行
+    /// されない）でも本 feature は有効。
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn mma_f16_swizzle_variant_matches_base_bit_exact_output() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let base = CudaMmaGemm::new(&device)
+            .expect("base CudaMmaGemm::new must succeed on ignored test runner");
+
+        let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
+        let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels_mma::MMA_BM,
+            kernels_mma::MMA_BN,
+        );
+
+        // (m, n, k): 小形状（16x8x16。単一 mma タイル。grid は 1x1 のため
+        // swizzle remap は恒等的に自明）・タイル端形状（80x136x160。
+        // MMA_BM=64/MMA_BN=128/MMA_BK=32 に対し
+        // grid=(n.div_ceil(MMA_BN), m.div_ceil(MMA_BM))=(2, 2) となり
+        // （`mma_launch_config`。両軸とも非整数倍の端数タイルを含む）
+        // remap が非自明に効く。旧値 40x72x160 は grid=(1,1) となり remap
+        // が恒等写像に縮退していたため是正した〈Bugbot 指摘・PR #667
+        // レビュー是正〉）・full_groups 分岐形状（1088x256x2048。
+        // `swizzled_block_idx`〈`swizzle.rs`〉は `num_m_blocks` を
+        // `group_width` 単位でグルーピングし、`full_groups`（`group_width`
+        // 個ぴったり埋まるグループ）と末尾の縮小 `remainder` グループの
+        // 2 分岐を持つ。旧値 256x256x2048 は
+        // num_m_blocks=m.div_ceil(MMA_BM)=4 のため候補幅 group_width∈
+        // {8, 16}（`swizzle::GROUP_WIDTH_CANDIDATES`）のいずれでも
+        // full_groups=num_m_blocks/group_width=0 となり、生成 CUDA 側の
+        // full_groups リマップ分岐（ベクトル化ロードの境界検査を伴う。
+        // REQ-8）が一度も経由されず remainder 分岐のみ検査していた
+        // 〈Bugbot 指摘・PR #667 レビュー是正〉。1088=17*MMA_BM により
+        // num_m_blocks=17 となり、group_width=8 では full_groups=2・
+        // remainder=1、group_width=16 では full_groups=1・remainder=1 と
+        // なり両候補幅で full_groups・remainder の両分岐を経由する
+        // （k=2048 は実装計画 5 節「実機（引き継ぎ）」の A/B 計測 k 値と
+        // 揃える値をそのまま踏襲。4096 は本テストの目的〈bit 一致の
+        // 確認〉には過大なため採らない）。
+        let shapes: [(u32, u32, u32); 3] = [(16, 8, 16), (80, 136, 160), (1088, 256, 2048)];
+        let seed: u64 = 424_242;
+
+        // group_width=8/16 は候補表（swizzle.rs::select_swizzle_group_width
+        // の候補）そのもの。dynamic_group_width が候補と一致する場合は
+        // 重複計測になるが、テストの単純さを優先し de-dup はしない。
+        for group_width in [dynamic_group_width, 8, 16] {
+            let variant =
+                CudaMmaGemm::new_with_swizzle(&device, group_width).unwrap_or_else(|err| {
+                    panic!("group_width={group_width}: new_with_swizzle failed: {err}")
+                });
+
+            for &(m, n, k) in &shapes {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+                let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+                let b: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+
+                let base_c = base.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
+                    panic!("base run_f16 failed for shape (m={m}, n={n}, k={k}): {err}")
+                });
+                let variant_c = variant.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
+                    panic!(
+                        "group_width={group_width} run_f16 failed for shape \
+                         (m={m}, n={n}, k={k}): {err}"
+                    )
+                });
+
+                assert_eq!(
+                    variant_c, base_c,
+                    "shape (m={m}, n={n}, k={k}) group_width={group_width}: swizzle \
+                     変種の出力が base と bit 一致しません（remap がブロック内部の \
+                     計算・アキュムレート順序に影響していないか確認すること）"
+                );
+            }
+        }
+    }
+
+    /// C-8（#521）受け入れ基準「B-1（#492）可変化カーネルとの接続実証」の
+    /// 実機検証: 実デバイスの SMEM 予算から
+    /// `gemm_auto::derive_stages_for_device` で段数を導出し、
+    /// `run_f16_with_stages`（B-1 の段数可変化ヘルパー）でその導出値を
+    /// 使ってカーネルを生成・実行し、既定の `MMA_STAGES=3` 構成の出力と
+    /// bit 一致することを確認する。
+    ///
+    /// `mma_f16_stage_count_does_not_change_bit_exact_output` が段数
+    /// `{2,3,4}` を固定リテラルで横断するのに対し、本テストは
+    /// **導出ロジックが返した値**を実際にカーネル起動へ結線できることを
+    /// 検証する点が異なる（実装計画 §4 の受け入れ基準対応表）。
+    ///
+    /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
+    /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
+    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する。
+    ///
+    /// **実機実行時の注意**: 現行タイル構成（#494。`MMA_BM=64`/`MMA_BN=128`/
+    /// `MMA_BK=32`・f16）では導出段数は 4（`docs/perf/sm121-device-attributes.md`
+    /// の検算参照）で、これは静的 SMEM 予算 49,152 バイトをちょうど使い切る
+    /// （余裕ゼロ）値である。もし実機のドライバが宣言済み静的確保に加えて
+    /// per-block の予約領域（同ドキュメントの `RESERVED_SHARED_MEMORY_PER_BLOCK`
+    /// 実測欄参照）を上乗せする場合、`run_f16_with_stages(derived_stages, ...)`
+    /// がコンパイル・起動エラーになりうる。その場合の原因は
+    /// `derive_stages_for_device`／`derive_pipeline_stages` の結線ではなく
+    /// 予算値そのもの（クランプ上限 49,152 が実機の実効上限より大きい）で
+    /// ある可能性を先に疑うこと。
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn mma_f16_derived_stage_count_matches_default_stage_count_bit_exact() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+
+        let block_m = std::num::NonZeroU32::new(kernels_mma::MMA_BM)
+            .expect("kernels_mma::MMA_BM must be non-zero");
+        let block_n = std::num::NonZeroU32::new(kernels_mma::MMA_BN)
+            .expect("kernels_mma::MMA_BN must be non-zero");
+        let block_k = std::num::NonZeroU32::new(kernels_mma::MMA_BK)
+            .expect("kernels_mma::MMA_BK must be non-zero");
+        let derived_stages = crate::gemm_auto::derive_stages_for_device(
+            &device,
+            block_m,
+            block_n,
+            block_k,
+            tensor_core::dispatch::DType::F16,
+        )
+        .expect("derive_stages_for_device must succeed for the current tile configuration");
+
+        let (m, n, k) = (256u32, 256u32, 4096u32);
+        let seed: u64 = 9999;
+        let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+        let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+        let b: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+
+        let derived_c = run_f16_with_stages(&device, derived_stages.get(), &a, &b, m, n, k)
+            .expect("derived stage count must compile and execute");
+        let default_c = run_f16_with_stages(&device, kernels_mma::MMA_STAGES, &a, &b, m, n, k)
+            .expect("MMA_STAGES-default kernel must compile and execute");
+
+        assert_eq!(
+            derived_c,
+            default_c,
+            "derived stage count {} の出力が既定 MMA_STAGES={} と \
+             bit 一致しません（段数導出値とカーネル起動の結線に問題がないか \
+             確認すること）",
+            derived_stages,
+            kernels_mma::MMA_STAGES
+        );
     }
 }
