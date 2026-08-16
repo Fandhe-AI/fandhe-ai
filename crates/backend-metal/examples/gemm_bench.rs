@@ -258,9 +258,16 @@ mod macos_impl {
         // 新→旧の順序を反転させながら交互計測する。旧・新それぞれの
         // ラウンド計測値（各ラウンドは `bench_run` 内部で warmup・計測とも
         // `MeasurementConfig` の下限を満たした上での中央値）をさらに束ね、
-        // その中央値（`.claude/rules/coding-rust.md`「ベンチは 5 回計測の
-        // 中央値」）を最終値として `new_over_old` を求める。
-        const ROUNDS: usize = 5;
+        // その中央値を最終値として `new_over_old` を求める。
+        //
+        // ROUNDS は偶数固定とする（codex-review・Cursor Bugbot 指摘・PR
+        // #684 追加レビュー）: 奇数だと「偶数ラウンドは旧→新・奇数ラウンド
+        // は新→旧」の反転規則の下で旧先頭ラウンドが 1 回多くなり
+        // （ROUNDS=5 なら旧先頭 3 回・新先頭 2 回）、old-first バイアスを
+        // 完全には相殺できず `new_over_old` を系統的に過小評価しうる。
+        // 偶数化により旧先頭・新先頭が同数（ROUNDS=6 で 3 対 3）になり、
+        // 順序バイアスをラウンド間で厳密に相殺する。
+        const ROUNDS: usize = 6;
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
 
