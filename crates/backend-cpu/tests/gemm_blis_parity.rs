@@ -51,7 +51,13 @@ fn gemm_blis_identity_is_noop() {
 
 const SHAPE_GRID_M: [usize; 7] = [1, 5, 11, 12, 13, 51, 200];
 const SHAPE_GRID_N: [usize; 8] = [1, 5, 11, 12, 13, 19, 512, 600];
-const SHAPE_GRID_K: [usize; 5] = [1, 3, 255, 257, 700];
+// k=2/4/6 はイシュー #561（NEON k=4 アンロール）の主ループ／端数分離
+// （k_main = k - k%4）の剰余網羅用に追加した: k=2 は k_main=0（全量が
+// 端数ループ）、k=4 は k_main=4（主ループ 1 チャンクのみ・端数 0）、
+// k=6 は k_main=4・端数 2 を通す。既存の 1/3/255/257/700 は k%4 が
+// それぞれ 1/3/3/1/0 のため、これらを追加すると k%4 の 0/1/2/3 全剰余を
+// 網羅する。
+const SHAPE_GRID_K: [usize; 8] = [1, 2, 3, 4, 6, 255, 257, 700];
 
 #[test]
 fn gemm_blis_matches_naive_bit_exact_shape_grid() {
