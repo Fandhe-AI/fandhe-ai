@@ -646,17 +646,33 @@ impl CudaKernelCacheKey {
     /// と無関係に全て無効化される（意図どおり。C-2 実装時点のコメントで
     /// 「C-5 でソース取り込み時に ENCODING_VERSION を上げる」ことが
     /// 予告済み）。
+    ///
+    /// v3（イシュー #519・cursor[bot] 指摘・PR #674）: shape 部分を
+    /// 生の [`CudaKernelDescriptor::shape`] から
+    /// [`CudaKernelDescriptor::cache_key_shape`]（動的次元を sentinel
+    /// `0` に正規化済み）へ差し替え、[`CudaKernelDescriptor::compiled_dims`]
+    /// を末尾（`source` の直後）に追記した。`PartialEq`／`Hash`
+    /// （本ファイル `impl PartialEq for CudaKernelDescriptor` 参照）は
+    /// 既に `cache_key_shape`／`compiled_dims` をキーにするよう手動実装
+    /// 済みだったが、本メソッド（ディスク永続キー用の正準バイト列）は
+    /// 追従しておらず、プロセス内キー（メモリ上の `HashMap` 等）とディスク
+    /// キーが乖離していた: 動的次元がディスク側では正規化されず、`source`
+    /// が一致するだけで異なる specialization policy（例: `STATIC_NK` と
+    /// `STATIC_MNK`）が同一の `stable_hash` を共有しうる（キャッシュ汚染・
+    /// 誤ヒットのリスク。OWASP A08 整合性）。v2 → v3 の切り替えにより
+    /// v2 時点のディスクキャッシュエントリは全て無効化される（意図どおり）。
     fn canonical_bytes(&self) -> Vec<u8> {
-        const ENCODING_VERSION: u8 = 2;
+        const ENCODING_VERSION: u8 = 3;
 
         let mut buf = Vec::new();
         buf.push(ENCODING_VERSION);
 
         push_len_prefixed_str(&mut buf, self.descriptor.kernel_name);
 
-        buf.extend_from_slice(&self.descriptor.shape.m.to_le_bytes());
-        buf.extend_from_slice(&self.descriptor.shape.n.to_le_bytes());
-        buf.extend_from_slice(&self.descriptor.shape.k.to_le_bytes());
+        let cache_key_shape = self.descriptor.cache_key_shape();
+        buf.extend_from_slice(&cache_key_shape.m.to_le_bytes());
+        buf.extend_from_slice(&cache_key_shape.n.to_le_bytes());
+        buf.extend_from_slice(&cache_key_shape.k.to_le_bytes());
 
         buf.extend_from_slice(&self.descriptor.block_m.get().to_le_bytes());
         buf.extend_from_slice(&self.descriptor.block_n.get().to_le_bytes());
@@ -688,6 +704,24 @@ impl CudaKernelCacheKey {
         // 方式のまま追記すれば既存フィールドとの境界曖昧化は起きない
         // （`push_len_prefixed_str` のドキュメンテーションコメント参照）。
         push_len_prefixed_str(&mut buf, &self.source);
+
+        // v3（イシュー #519・cursor[bot] 指摘・PR #674）: 次元ごとの
+        // compile-time 定数化選択。`cache_key_shape` は非選択次元を
+        // sentinel `0` に正規化するため、`compiled_dims` 自体を含めない
+        // と異なる選択ポリシー（例: 全次元 `0` の `DYNAMIC_ALL` shape と
+        // `STATIC_NK` で N=K=0 の shape）が同一バイト列に縮退しうる。
+        // `Option<CompiledDims>` は固定長 1 バイトの判別子 + 3 bool で
+        // 十分表現できるため（`None`／`Some` を含め最大 4 バイト）、長さ
+        // プレフィクスは使わず固定長のまま追記する。
+        match self.descriptor.compiled_dims {
+            None => buf.push(0),
+            Some(dims) => {
+                buf.push(1);
+                buf.push(dims.m() as u8);
+                buf.push(dims.n() as u8);
+                buf.push(dims.k() as u8);
+            }
+        }
 
         buf
     }
@@ -2247,6 +2281,80 @@ mod tests {
         assert_ne!(
             flags_x_source_yz.stable_hash(),
             flags_xy_source_z.stable_hash()
+        );
+    }
+
+    // 回帰テスト（イシュー #519・cursor[bot] 指摘・PR #674・High
+    // Severity）: `canonical_bytes`／`stable_hash`（ディスク永続キー側）が
+    // `compiled_dims` の選択差を検知できることを検証する。修正前は
+    // `canonical_bytes` が正規化前の生 `shape` をハッシュし
+    // `compiled_dims` を含めていなかったため、同一の生 `shape` を持ち
+    // `compiled_dims` のみが異なる（= `cache_key_shape` も異なる）2 つの
+    // descriptor が `source` 一致のみで同一 `stable_hash` を共有しえた
+    // （メモリ上キー〈`PartialEq`/`Hash` は `cache_key_shape`・
+    // `compiled_dims` 済みで正しかった〉とディスクキーの乖離。キャッシュ
+    // 汚染・誤ヒットのリスク）。
+    #[test]
+    fn stable_hash_distinguishes_compiled_dims_with_same_raw_shape() {
+        let same_raw_shape = GemmShape::new(4096, 4096, 4096);
+
+        let static_nk = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new_with_compiled_dims(
+                "wmma_tf32_f32",
+                same_raw_shape,
+                64,
+                64,
+                32,
+                2,
+                DType::F32,
+                CompiledDims::STATIC_NK,
+            )
+            .expect("valid descriptor parameters must not fail"),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
+        );
+        let static_mnk = CudaKernelCacheKey::new(
+            CudaKernelDescriptor::new_with_compiled_dims(
+                "wmma_tf32_f32",
+                same_raw_shape,
+                64,
+                64,
+                32,
+                2,
+                DType::F32,
+                CompiledDims::STATIC_MNK,
+            )
+            .expect("valid descriptor parameters must not fail"),
+            (8, 0),
+            (12, 9),
+            vec!["--gpu-architecture=compute_80".to_string()],
+            sample_source(),
+        );
+
+        // 前提: 生 `shape` は同一だが `cache_key_shape` は異なる
+        // （`STATIC_NK` は M を sentinel `0` に正規化、`STATIC_MNK` は
+        // しない）。本テストが実際に狙った境界を検証していることを
+        // 明示する。
+        assert_eq!(
+            static_nk.descriptor().shape(),
+            static_mnk.descriptor().shape()
+        );
+        assert_ne!(
+            static_nk.descriptor().cache_key_shape(),
+            static_mnk.descriptor().cache_key_shape()
+        );
+
+        assert_ne!(
+            static_nk.canonical_bytes(),
+            static_mnk.canonical_bytes(),
+            "compiled_dims 違いが canonical_bytes に反映されていない（ディスクキャッシュ汚染のリスク）"
+        );
+        assert_ne!(
+            static_nk.stable_hash(),
+            static_mnk.stable_hash(),
+            "compiled_dims 違いが stable_hash に反映されていない（ディスクキャッシュ汚染のリスク）"
         );
     }
 
