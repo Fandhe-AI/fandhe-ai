@@ -2171,6 +2171,66 @@ mod tests {
         );
     }
 
+    /// イシュー #519（C-7）受け入れ基準 2 の直接検証: `CompiledDims::
+    /// STATIC_NK`（N/K 定数化・M 動的。`gemm_auto.rs::dim_specs_for` の
+    /// 既定ポリシー相当）で `dim_m=Dynamic` の config は、`nvrtc.rs`
+    /// 側でキャッシュキーが縮退する（`CompiledDims::cache_shape` が M を
+    /// sentinel 0 へ正規化する）だけでなく、**実際に render される
+    /// カーネルソース自体に M の実行時値を表す定数が一切焼き込まれない**
+    /// ことを直接検査する（`#define DIM_M m` の `m` はカーネル引数名で
+    /// あり数値ではない）。対照として `dim_m=Static(m)` は焼き込み値
+    /// ごとに異なるソースを render することも確認し、「定数化した次元
+    /// だけがキャッシュキー・ソース両面で分岐する」契約を固定する。
+    /// `gemm_auto.rs` 側のキャッシュエントリ数テスト
+    /// （`static_nk_collapses_varying_m_into_a_single_cache_entry` 等）は
+    /// `CudaKernelDescriptor`（正規化済み shape・非公開ソース）のみを
+    /// 比較材料にしており、「同一キーだが異なるソースが縮退する」という
+    /// キャッシュ汚染（A08）の否定的証拠にはならない。`RenderedMmaKernel::
+    /// source()` は `#[cfg(test)]` のため本テストは `kernels_mma.rs`
+    /// 内に置く必要がある（`gemm_auto.rs` からは参照できない）。
+    #[test]
+    fn dynamic_m_dim_render_never_bakes_in_a_concrete_m_value() {
+        let cfg_for = |dim_m: DimSpec| MmaKernelConfig {
+            bm: 64,
+            bn: 128,
+            bk: 32,
+            stages: 3,
+            dim_m,
+            dim_n: DimSpec::Static(128),
+            dim_k: DimSpec::Static(256),
+            dtype: MmaDtype::F16,
+        };
+
+        let dynamic_src = render_mma_f16(&cfg_for(DimSpec::Dynamic))
+            .expect("Dynamic dim_m の既定タイル構成は有効なはず")
+            .source()
+            .to_owned();
+        assert!(
+            dynamic_src.contains("#define DIM_M m"),
+            "dim_m=Dynamic は DIM_M をカーネル引数 `m` の間接参照へ \
+             展開しなければならない（数値の焼き込みなし）"
+        );
+
+        // 定数化した M ごとに異なるソースが render されること（縮退させて
+        // はならない）。
+        let static_8 = render_mma_f16(&cfg_for(DimSpec::Static(8)))
+            .expect("Static(8) は有効な構成のはず")
+            .source()
+            .to_owned();
+        let static_64 = render_mma_f16(&cfg_for(DimSpec::Static(64)))
+            .expect("Static(64) は有効な構成のはず")
+            .source()
+            .to_owned();
+        assert_ne!(
+            static_8, static_64,
+            "dim_m=Static(m) は焼き込み値ごとに異なるソースを render しなければならない"
+        );
+        assert_ne!(
+            dynamic_src, static_8,
+            "dim_m=Dynamic と dim_m=Static(8) は異なるソースを render しなければならない"
+        );
+    }
+
     /// フェイルクローズド検証（実装計画 7 節・4.2 節）: SMEM 予算超過・
     /// 倍数違反・スレッド数超過・`stages != 3`・ゼロ次元の各構成が全て
     /// `Err(CudaError::InvalidKernelConfig)` になることを検査する。
