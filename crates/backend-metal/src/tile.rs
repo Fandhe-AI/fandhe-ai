@@ -671,11 +671,23 @@ impl OccupancyParams {
     /// parse_device_profile_override` の CLI 検証と同方針。「occupancy
     /// 判定を無効化するフォールバック」として呼び出し側が扱う契約は
     /// #542 のスコープ）。
+    ///
+    /// `smem_groups_per_core(cfg) == 0`（`cfg` の threadgroup memory
+    /// 使用量がデバイス上限を超える等、同時常駐不能な構成）の場合も
+    /// `effective_multiplier` が 0 になり同様に `None` を返す（codex-review
+    /// 指摘・PR #662）。ここを素通りして `Some(0)` を返すと、
+    /// [`is_underoccupied`] へ渡した際に通常 `actual > 0` のため
+    /// `actual <= 0` が false 判定となり、実行不能なタイルを
+    /// 「under-occupied ではない」と誤判定してしまう（fail-closed 契約に
+    /// 反する）。
     pub fn ideal_groups(&self, multiplier: u32, cfg: TileConfig) -> Option<u64> {
         if self.gpu_core_count == 0 || multiplier == 0 {
             return None;
         }
         let effective_multiplier = multiplier.min(self.smem_groups_per_core(cfg));
+        if effective_multiplier == 0 {
+            return None;
+        }
         (self.gpu_core_count as u64).checked_mul(effective_multiplier as u64)
     }
 }
@@ -1232,19 +1244,23 @@ mod tests {
 
     #[test]
     fn smem_groups_per_core_divides_max_smem_by_tile_smem_bytes() {
-        // CANDIDATES[0]（64x64x16, staged）: shared_mem_bytes = 8192。
+        // CANDIDATES[0]（64x64x16, staged）: shared_mem_bytes = 9472
+        // （イシュー #538・PR #673 で導入された行末パディング
+        // `TileConfig::pad`＝`TGP_PAD_ELEMS=4` を含む値。pad 導入前は
+        // 8192 だった）。
         let cfg = CANDIDATES[0];
-        assert_eq!(cfg.shared_mem_bytes(), 8192);
+        assert_eq!(cfg.shared_mem_bytes(), 9472);
         let params = OccupancyParams {
             gpu_core_count: 40,
             max_threadgroup_memory_bytes: 32 * 1024,
         };
-        assert_eq!(params.smem_groups_per_core(cfg), 4); // 32768/8192=4
+        assert_eq!(params.smem_groups_per_core(cfg), 3); // 32768/9472=3（切り捨て）
     }
 
     #[test]
     fn smem_groups_per_core_bk32_candidate_yields_two() {
-        // イシュー #532 の bk=32 候補: shared_mem_bytes = 12288。
+        // イシュー #532 の bk=32 候補: shared_mem_bytes = 13824
+        // （#538・PR #673 のパディング込み。pad 導入前は 12288 だった）。
         let cfg = TileConfig {
             bm: 64,
             bn: 32,
@@ -1253,12 +1269,12 @@ mod tests {
             wn: 2,
             staged: true,
         };
-        assert_eq!(cfg.shared_mem_bytes(), 12288);
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
         let params = OccupancyParams {
             gpu_core_count: 40,
             max_threadgroup_memory_bytes: 32 * 1024,
         };
-        assert_eq!(params.smem_groups_per_core(cfg), 2); // 32768/12288=2（切り捨て）
+        assert_eq!(params.smem_groups_per_core(cfg), 2); // 32768/13824=2（切り捨て）
     }
 
     #[test]
@@ -1271,10 +1287,11 @@ mod tests {
             wn: 2,
             staged: true,
         };
-        assert_eq!(cfg.shared_mem_bytes(), 12288);
+        // #538・PR #673 のパディング込みで 13824（pad 導入前は 12288）。
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
         let params = OccupancyParams {
             gpu_core_count: 40,
-            max_threadgroup_memory_bytes: 8192, // 12288 > 8192
+            max_threadgroup_memory_bytes: 8192, // 13824 > 8192
         };
         assert_eq!(params.smem_groups_per_core(cfg), 0);
     }
@@ -1297,8 +1314,10 @@ mod tests {
 
     #[test]
     fn ideal_groups_is_capped_by_smem_budget() {
-        // CANDIDATES[0] は smem_groups_per_core=4 < multiplier=6 のため、
-        // 実効係数は 4 に頭打ちされる（40*4=160）。
+        // CANDIDATES[0] は shared_mem_bytes=9472（#538・PR #673 のパディング
+        // 込み）のため smem_groups_per_core=3 < multiplier=6 となり、
+        // 実効係数は 3 に頭打ちされる（40*3=120。pad 導入前は
+        // smem_groups_per_core=4・160 だった）。
         let cfg = CANDIDATES[0];
         let params = OccupancyParams {
             gpu_core_count: 40,
@@ -1306,18 +1325,19 @@ mod tests {
         };
         assert_eq!(
             params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, cfg),
-            Some(160)
+            Some(120)
         );
     }
 
     #[test]
     fn ideal_groups_matches_mfa_formula_when_smem_unconstrained() {
-        // CANDIDATES[3]（32x32x16 中形状）: shared_mem_bytes=4096 のため
-        // smem_groups_per_core=8 >= multiplier=6 で SMEM 制約が効かず、
+        // CANDIDATES[3]（32x32x16 中形状）: shared_mem_bytes=4864
+        // （#538・PR #673 のパディング込み。pad 導入前は 4096 だった）のため
+        // smem_groups_per_core=6 >= multiplier=6 で SMEM 制約が効かず、
         // 素の MFA 経験式（40*6=240。`docs/perf/
         // metal-gemm-bottleneck-diagnosis.md` §3 実測前提値）と一致する。
         let cfg = CANDIDATES[3];
-        assert_eq!(cfg.shared_mem_bytes(), 4096);
+        assert_eq!(cfg.shared_mem_bytes(), 4864);
         let params = OccupancyParams {
             gpu_core_count: 40,
             max_threadgroup_memory_bytes: 32 * 1024,
@@ -1360,6 +1380,32 @@ mod tests {
             max_threadgroup_memory_bytes: 32 * 1024,
         };
         assert_eq!(params.ideal_groups(0, CANDIDATES[0]), None);
+    }
+
+    #[test]
+    fn ideal_groups_is_none_when_smem_groups_per_core_is_zero() {
+        // codex-review 指摘（PR #662）: cfg の threadgroup memory 使用量が
+        // デバイス上限を超え smem_groups_per_core(cfg)==0 の場合、
+        // effective_multiplier も 0 になる。これを検証せず素通りすると
+        // `Some(0)` が返り、`is_underoccupied` へ渡した際に
+        // `actual <= 0` が通常 false となって実行不能な構成を
+        // 「under-occupied ではない」と誤判定してしまう（fail-closed
+        // 契約違反）。`None` を返すことを固定する。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 32,
+            bk: 32,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 8192, // 13824 > 8192 のため常駐不可
+        };
+        assert_eq!(params.smem_groups_per_core(cfg), 0);
+        assert_eq!(params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, cfg), None);
     }
 
     // --- occupancy 目標算出: is_underoccupied ---
