@@ -107,7 +107,15 @@ pub struct CudaMmaGemm {
 /// ゲート自体は同一（ブロックタイル定数・命令選定はどちらも
 /// `MMA_M`/`MMA_N`/`MMA_K`/`cp.async`/`ldmatrix` を使う同じ命令セットの
 /// ため）であることから、重複を避けて切り出した。
-fn check_min_compute_capability(device: &CudaDevice) -> Result<(), CudaError> {
+///
+/// `pub(crate)`: `gemm_auto.rs::SpecializedMmaKernelHandle::compile` も
+/// 同じ `mma.sync`/`ldmatrix`/`cp.async` 命令セットを NVRTC コンパイルする
+/// ため同一ゲートを再利用する（PR #685 Bugbot 指摘〈Low〉・codex-review
+/// 指摘への対応: `SpecializedMmaKernelHandle::compile` が `CudaMmaGemm::new`
+/// と同じカーネルを構築するにもかかわらず cc ゲートを欠いており、旧世代
+/// GPU 上で `CudaError::TensorCoreUnsupported` の代わりに不透明な NVRTC
+/// コンパイル／起動失敗になっていた）。
+pub(crate) fn check_min_compute_capability(device: &CudaDevice) -> Result<(), CudaError> {
     let (major, minor) = device.compute_capability();
     if major < MIN_COMPUTE_CAPABILITY_MAJOR {
         return Err(CudaError::TensorCoreUnsupported {

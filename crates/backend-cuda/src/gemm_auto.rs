@@ -28,11 +28,21 @@ use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
 use crate::gemm_mma::{validate_mma_alignment, validate_mma_grid_bounds};
+// `SpecializedMmaKernelHandle::compile`（本ファイル下部）でのみ使う。
+// 同メソッドが `internal-diagnostics` feature（既定 off）でのみコンパイル
+// されるため、この import も同 feature でゲートしないと既定ビルドで
+// unused import 警告（`-D warnings` で fail）になる。
+#[cfg(feature = "internal-diagnostics")]
+use crate::gemm_mma::check_min_compute_capability;
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
     DimSpec, MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
     MmaKernelConfig, RenderedMmaKernel, render_mma_f16,
 };
+// `SpecializedMmaKernelHandle` の非公開フィールド型としてのみ使う
+// （上記 `check_min_compute_capability` と同じ理由で feature ゲート）。
+#[cfg(feature = "internal-diagnostics")]
+use crate::kernels_mma::CompiledMmaKernel;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor, derive_pipeline_stages};
 
 /// 静的 `__shared__`（動的 SMEM opt-in 非使用）構成のカーネルが従う
@@ -439,6 +449,247 @@ pub fn specialized_mma_descriptor(
         DType::F16,
         compiled,
     )
+}
+
+/// `compiled`（[`CompiledDims`]。C-7・#519）が選択した特化構成で
+/// コンパイル済み `mma_f16` カーネルを保持し、複数回の起動へ再利用可能
+/// にする公開ハンドル（イシュー #531 実装計画 §3.1・§3.2 点 3）。
+///
+/// [`RenderedMmaKernel`]／[`CompiledMmaKernel`] 型自体は非公開のまま
+/// 維持する（PR #643 codex-review 対応で確立した型レベル封じ込め設計。
+/// カーネルソース・`CudaFunction` を crate 外へ渡さない）。本ハンドルは
+/// [`CompiledMmaKernel`] を非公開フィールドとして内部に保持するだけの
+/// 薄いラッパーであり、[`Self::launch_f16`] 以外に内部状態へ到達する
+/// 経路を持たない。
+///
+/// `gemm_mma.rs::CudaMmaGemm` と同じ「1 回コンパイル・複数回起動」の
+/// 形を、テスト・ベンチが特化構成に対しても使えるよう公開する。
+/// `STATIC_NK`（M=Dynamic）カーネルを同一 N/K・異なる M で再利用する
+/// 回帰検査、`STATIC_MNK` の不一致形状起動が
+/// `CudaError::InvalidKernelConfig` で fail-closed に拒否されることの
+/// 検査に使う（`tests/specialized_mma_parity.rs` 参照）。
+///
+/// 本番ディスパッチ経路（[`CudaGemmAuto::run_f16`]）からは呼ばれず
+/// （本モジュール §スコープ境界参照。LRU キャッシュによる再利用結線は
+/// C-4・#511 のスコープ）テスト・ベンチ専用の検証用ハンドルである。
+///
+/// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+/// （PR #685 codex-review P1 指摘の是正: 本ハンドルは crate root から
+/// 無条件 re-export されていたため、「テスト・ベンチ専用」というコメント
+/// 上の意図に反して通常ビルドの安定した公開 API 面に漏出していた。
+/// `diagnostics` モジュール〈本ファイル冒頭 `lib.rs` の同 feature ゲート
+/// 参照〉・`gemm_mma.rs::CudaMmaGemm::new_with_swizzle` と同じ方針で
+/// `#[cfg(feature = "internal-diagnostics")]` により定義自体を既定ビルド
+/// のコンパイル対象から外し、`lib.rs` の re-export も同 feature で
+/// ゲートする。外部 integration test（`tests/specialized_mma_parity.rs`）
+/// は `Cargo.toml` の `[[test]]` セクションで `required-features =
+/// ["internal-diagnostics"]` を指定し、`cargo test --all-features`
+/// （CI の test ジョブ・`make test` が使うコマンド）でのみビルド・実行
+/// される。feature 無効時は crate 外部からはもちろん crate 内部からも
+/// 到達不能になるため `#[allow(dead_code)]` は不要（[`dim_specs_for`]
+/// のように dead-code 解析が誤検知する状況ではなくなった）。
+///
+/// `stream` は [`Self::compile`] 実行時（NVRTC コンパイル・
+/// `load_module`／`load_function`）に使った `device` の
+/// `Arc<CudaStream>`（延いては `Arc<CudaContext>`）をハンドル内に
+/// 保持し、[`Self::launch_f16`] は常にこの `stream` のみで起動する
+/// （PR #685 codex-review 指摘〈P0〉への対応: 従来は `launch_f16` が
+/// 呼び出しごとに任意の `&CudaDevice` を受け取っており、safe な公開
+/// API から `compiled.func`〈コンパイル元 context 由来〉と別 context
+/// の `stream`／デバイスバッファを渡して起動できてしまっていた。
+/// `CudaFunction` はロード元 `CudaContext` に紐付き、別 context の
+/// stream・バッファで起動する不変条件違反は cudarc の型では検出
+/// されない〈`kernels_mma.rs::CompiledMmaKernel::launch_f16` の
+/// `// SAFETY:` 根拠もバッファ長の一致のみを扱い、context 同一性は
+/// 前提としていた〉。コンパイル元の `stream` をハンドル内に固定し
+/// 起動時の外部入力から外すことで、この不変条件を型・構造の両面で
+/// 強制する）。
+#[cfg(feature = "internal-diagnostics")]
+pub struct SpecializedMmaKernelHandle {
+    compiled: CompiledMmaKernel,
+    stream: std::sync::Arc<cudarc::driver::CudaStream>,
+    /// [`Self::compile`] が構築した特化 config（[`specialized_mma_config`]）。
+    /// [`Self::launch_f16`] が H2D 転送・出力確保より前に
+    /// `validate_launch_shape` で形状検証するための保持（codex-review
+    /// P2 指摘への対応。本 struct ドキュメンテーションコメント参照）。
+    cfg: MmaKernelConfig,
+}
+
+#[cfg(feature = "internal-diagnostics")]
+impl SpecializedMmaKernelHandle {
+    /// `shape`・`compiled` から特化 config を構築し（[`specialized_mma_config`]）
+    /// NVRTC コンパイルまで完了させる（[`RenderedMmaKernel::compile`]）。
+    /// コンパイルに使った `device` の `stream`（`Arc<CudaStream>`）を
+    /// ハンドル内に保持し、以降の [`Self::launch_f16`] 呼び出しは常に
+    /// この `stream`（延いては同一 `CudaContext`）でのみ起動する
+    /// （本 struct ドキュメンテーションコメント参照）。
+    ///
+    /// `compiled` が `Dynamic` としている次元は `shape` の対応する値が
+    /// 何であっても焼き込みに影響しない（[`dim_specs_for`] 参照）ため、
+    /// `STATIC_NK`（M=Dynamic）を渡す場合の `shape.m` は任意の非ゼロ値で
+    /// よい（後続 [`Self::launch_f16`] が実際の起動ごとの M を渡す）。
+    /// `Static` 化された次元に `0` を渡すと [`specialized_mma_config`]
+    /// 内部の `render_mma_f16`（`kernels_mma::validate_mma_kernel_config`）
+    /// が fail-closed で拒否する（[`run_specialized_mma_f16`] ドキュメン
+    /// テーションコメント「no-op 形状」参照）。
+    pub fn compile(
+        device: &CudaDevice,
+        shape: GemmShape,
+        compiled: CompiledDims,
+    ) -> Result<Self, CudaError> {
+        // `gemm_mma.rs::CudaMmaGemm::new` と同じ `mma.sync`/`ldmatrix`/
+        // `cp.async` 命令セットを NVRTC コンパイルするため同じ cc ゲートを
+        // NVRTC コンパイル前に適用する（PR #685 Bugbot 指摘〈Low〉・
+        // codex-review 指摘への対応。`check_min_compute_capability` doc
+        // comment 参照）。
+        check_min_compute_capability(device)?;
+
+        let (cfg, rendered) = specialized_mma_config(shape, compiled)?;
+        let compiled_kernel = rendered.compile(device)?;
+        Ok(Self {
+            compiled: compiled_kernel,
+            stream: std::sync::Arc::clone(device.stream()),
+            cfg,
+        })
+    }
+
+    /// コンパイル済みカーネルを `a`/`b`/`m`/`n`/`k` で起動する（先行検証
+    /// → H2D 転送 → [`CompiledMmaKernel::launch_f16`] → D2H 回収）。
+    ///
+    /// 転送・出力確保より前に `self.cfg.validate_launch_shape`・
+    /// `crate::gemm::validate_gemm_dims`（host 側スライス長）で早期
+    /// fail-closed する（codex-review P2 指摘への対応: 従来はこの
+    /// 検査を行わずに `clone_htod`／`alloc_zeros` を先に実行しており、
+    /// 無効な起動引数でも GPU 転送・確保〈OOM 等〉が先に発生しえた）。
+    /// これは `run_specialized_mma_f16` が呼び出し前に `validate_gemm_dims`
+    /// を行うのと同型の多層防御であり、device 側バッファ長・アライメント・
+    /// grid/k タイル境界の最終検証は引き続き [`CompiledMmaKernel::launch_f16`]
+    /// （唯一の真実源）が担う。本メソッドはその検証を複製・代替しない。
+    /// `Dynamic` 次元は起動ごとに異なる値を許容しうるため、同一ハンドルへ
+    /// 複数回呼べる設計とする。
+    ///
+    /// `m==0 || n==0`・`k==0` の no-op 形状は `run_specialized_mma_f16`・
+    /// `gemm_mma.rs::CudaMmaGemm::run_f16` と同一契約で本メソッド自身が
+    /// 早期 return する（PR #685 Bugbot 再指摘〈Medium〉への対応。本メソッド
+    /// 実装のコメント参照）。`CompiledMmaKernel::launch_f16` は `k==0` を
+    /// 自身の no-op 契約に含めない設計のため、`k==0` の意味付けは呼び出し元
+    /// である本メソッドが担う。
+    ///
+    /// `device` を引数に取らず [`Self::compile`] 時に保持した
+    /// `self.stream` のみを使う（本 struct ドキュメンテーションコメント
+    /// 参照。呼び出し元がコンパイル元と異なる `CudaDevice`／`stream` を
+    /// 持ち込める経路を型で塞ぐ）。
+    pub fn launch_f16(
+        &self,
+        a: &[f16],
+        b: &[f16],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f16>, CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+
+        // no-op 形状（`m==0 || n==0`）・`k==0`（A/B が空の縮約次元となる
+        // ため C は全 0）は `gemm_mma.rs::CudaMmaGemm::run_f16`・
+        // `run_specialized_mma_f16`（本ファイル）と同一契約で、H2D 転送・
+        // カーネル起動そのものを回避して早期 return する（PR #685 Bugbot
+        // 再指摘〈Medium〉への対応: 従来は `k==0` の早期 return を欠いており、
+        // `m`/`n` が非ゼロなら常に `validate_mma_alignment` を実行していた
+        // ため、`(m,n,k)=(8,7,0)` のような有効な no-op〈`k==0` により
+        // C が全 0 となるべき形状〉が `n=7` の非整列を理由に誤って拒否
+        // されていた。`CompiledMmaKernel::launch_f16` は `k==0` を自身の
+        // no-op 契約に含めない設計〈同 struct doc comment 参照。カーネル
+        // 自体は `num_k_tiles=0` として起動しうる別経路〉のため、
+        // `k==0` の意味付け〈全 0 の C を返す no-op として扱うか〉は
+        // 呼び出し元がここで担う）。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
+        }
+
+        // `cp.async` 整列制約（`validate_mma_alignment`）・grid_dim.y 上限
+        // （`validate_mma_grid_bounds`）も H2D 転送・出力アロケーションより
+        // 前で fail-closed する（PR #685 Bugbot 指摘〈Medium〉への対応。
+        // 本メソッドドキュメンテーションコメント参照: 従来はこの検査を
+        // `CompiledMmaKernel::launch_f16` 内部〈転送後〉に委ねきっており、
+        // 不正な `Dynamic` 起動でも先に `clone_htod`／`alloc_zeros` が発生
+        // しえた）。上記の no-op／`k==0` 早期 return より後に置くことで、
+        // 有効な no-op 形状（例: `n` が 8 の倍数でない `(m,n,k)=(8,7,0)`）
+        // を誤って拒否しない。
+        validate_mma_alignment(n, k)?;
+        validate_mma_grid_bounds(m)?;
+
+        let stream = &self.stream;
+        let a_dev = stream.clone_htod(a)?;
+        let b_dev = stream.clone_htod(b)?;
+        let mut c_dev = stream.alloc_zeros::<f16>((m as usize) * (n as usize))?;
+        self.compiled
+            .launch_f16(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)?;
+        Ok(stream.clone_dtoh(&c_dev)?)
+    }
+}
+
+/// `compiled`（[`CompiledDims`]。C-7・#519）が選択した特化構成で
+/// [`SpecializedMmaKernelHandle::compile`] → [`SpecializedMmaKernelHandle::launch_f16`]
+/// を一括実行する結線ヘルパー（イシュー #531 実装計画 §3.1）。
+///
+/// `gemm_mma.rs::CudaMmaGemm` は `mma_f16` カーネルを 1 回だけコンパイルし
+/// 使い回す設計だが、本関数は**呼び出しごとに NVRTC コンパイルする**
+/// （LRU キャッシュによる再利用結線は C-4・#511 のスコープ。本関数は
+/// あくまでテスト・ベンチが特化カーネルの実行結果へ単発で到達するための
+/// 経路であり、本番ディスパッチ経路（[`CudaGemmAuto::run_f16`]）では
+/// ない。複数回起動しての再利用検証には
+/// [`SpecializedMmaKernelHandle`] を直接使う）。
+///
+/// no-op 形状（`m==0 || n==0`）・`k==0` の早期 return は
+/// `gemm_mma.rs::CudaMmaGemm::run_f16` と同一契約とする。`compiled` が
+/// 対象次元を `Static` 化している場合、`Static(0)` は
+/// [`specialized_mma_config`] 内部の `render_mma_f16`（`kernels_mma::
+/// validate_mma_kernel_config`）が fail-closed で拒否するため、
+/// コンパイルへ進む前にここで no-op 判定を済ませる必要がある
+/// （`CudaMmaGemm::run_f16` は既定 config が全次元 `Dynamic` のため
+/// この制約を持たないが、本関数は `compiled` 次第で `Static(0)` に
+/// 到達しうる点が異なる）。
+///
+/// 形状検証（`validate_gemm_dims`・[`crate::gemm_mma::validate_mma_alignment`]・
+/// [`crate::gemm_mma::validate_mma_grid_bounds`]）も `CudaMmaGemm::run_f16`
+/// と同一手順・同一関数を再利用し、判定ロジックを複製しない。
+///
+/// テスト・ベンチからのみ呼ばれる。[`SpecializedMmaKernelHandle`] と
+/// 同じ理由（PR #685 codex-review P1 指摘の是正）で
+/// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+/// （同 struct ドキュメンテーションコメント参照。feature 無効時は crate
+/// 内部からも到達不能になるため `#[allow(dead_code)]` は不要）。
+#[cfg(feature = "internal-diagnostics")]
+pub fn run_specialized_mma_f16(
+    device: &CudaDevice,
+    compiled: CompiledDims,
+    a: &[f16],
+    b: &[f16],
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<Vec<f16>, CudaError> {
+    crate::gemm::validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+
+    // no-op 形状の早期 return（本関数ドキュメンテーションコメント参照。
+    // `CudaMmaGemm::run_f16` と同一契約）。
+    if m == 0 || n == 0 {
+        return Ok(Vec::new());
+    }
+    if k == 0 {
+        return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
+    }
+
+    crate::gemm_mma::validate_mma_alignment(n, k)?;
+    crate::gemm_mma::validate_mma_grid_bounds(m)?;
+
+    let shape = GemmShape::new(m, n, k);
+    let handle = SpecializedMmaKernelHandle::compile(device, shape, compiled)?;
+    handle.launch_f16(a, b, m, n, k)
 }
 
 /// [`enumerate_tile_candidates`] の 1 候補分の枝刈り判定＋構築（規則

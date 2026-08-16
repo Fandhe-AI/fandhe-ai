@@ -95,10 +95,18 @@ endif
 # CI（Linux ホステッド。実機非搭載）では実行不可・実機でのみ使用する #[ignore] 分離テスト
 # （coding-rust.md・ci.md の実機分離規約）。Metal は Apple Silicon 実機、
 # CUDA は DGX Spark GB10 等の NVIDIA GPU 実機で実行する。
+# `--all-features` 必須（PR #685 codex-review/Bugbot 指摘の是正）: backend-cuda の
+# `specialized_mma_parity`（イシュー #531）は `[[test]] required-features =
+# ["internal-diagnostics"]`（`crates/backend-cuda/Cargo.toml` 参照）でゲートされて
+# おり、feature 未指定では cargo がテストバイナリ自体をビルド対象から外すため
+# `--ignored` を渡しても実行されず暗黙に「パス」扱いになる（false-green。
+# PR #667 の swizzle 系テストと同型の落とし穴）。`--all-features` を明示することで
+# `cargo test --all-features`（CI の test ジョブ・`make test` と同じ feature 集合）と
+# 揃え、実機検証で実際にビルド・実行されることを保証する。
 .PHONY: test-ignored
 test-ignored: ## 実機（Metal / CUDA）専用: #[ignore] 分離テストを実行する
 ifdef HAS_CARGO
-	cargo test --workspace -- --ignored --nocapture
+	cargo test --workspace --all-features -- --ignored --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored をスキップ"
 endif
@@ -111,10 +119,15 @@ endif
 # と同じ理由。`tests/tensor_core_real_device.rs` の M=N=K=4096 TFLOPS 実測・
 # `tests/gemm_wmma_tf32_opt.rs` の K=4096 ストレスケースは CPU 参照実装
 # 〈`matmul_reference_fma`〉の計算量が大きく debug ビルドでは著しく遅いため）。
+# `--all-features` 必須（PR #685 codex-review/Bugbot 指摘の是正。`test-ignored`
+# 冒頭コメント参照）: `specialized_mma_parity`（イシュー #531）は
+# `internal-diagnostics` feature の `required-features` ゲート対象のため、
+# feature 未指定だとテストバイナリがビルドされず実機検証で実際には走らない
+# （false-green）。
 .PHONY: test-ignored-cuda
 test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する（release）
 ifdef HAS_CARGO
-	cargo test -p backend-cuda --release -- --ignored --nocapture
+	cargo test -p backend-cuda --release --all-features -- --ignored --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
 endif

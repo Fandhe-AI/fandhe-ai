@@ -96,4 +96,27 @@ cuobjdump -sass <compiled.cubin> | less
 - 生成ソースのディスパッチ・実行経路への結線後の実測（C-7 #519 のスコープ）
 - 段数逆算（`derive_pipeline_stages`・C-8 #521）との統合実測
 
-`cargo test -p backend-cuda --release -- --ignored --nocapture` は本実装セッションの環境（NVRTC 非搭載）では実行不能なため未実行のまま。実機実測は #531／#534 へ引き継ぐ。
+`cargo test -p backend-cuda --release --all-features -- --ignored --nocapture` は本実装セッションの環境（NVRTC 非搭載）では実行不能なため未実行のまま。実機実測は #531／#534 へ引き継ぐ（PR #685 codex-review/Bugbot 指摘の是正: `internal-diagnostics` feature 配下の対象テストが `--all-features` なしではビルド対象から外れ実行されない〈§6.2 参照〉ため、コマンド例に明記する）。
+
+## 6. 実機 parity 検証（#531）
+
+イシュー #531「shape 特化カーネルの数値一致回帰テストを複数形状で追加」の実装で、C-6（#516）・C-7（#519）の特化構成（`gemm_auto::CompiledDims::{DYNAMIC_ALL, STATIC_NK, STATIC_MNK}`）を実際に NVRTC コンパイル・起動して数値一致を検証する経路（`gemm_auto::run_specialized_mma_f16`／`SpecializedMmaKernelHandle`。crate root 再エクスポート）と回帰テスト（`crates/backend-cuda/tests/specialized_mma_parity.rs`）を追加した。
+
+### 6.1 追加した検証内容
+
+- **既定カーネルとの bit 一致**: M=N=K=4096 を含む 10 形状（非正方・非タイル倍数を含む） × 3 プリセット（計 30 ケース）で `CudaMmaGemm::run_f16`（既定・全 `Dynamic`）と bit 一致することを検証する（`specialized_mma_f16_matches_default_and_reference_across_shapes`）
+- **CPU 参照実装との複合判定**: 上記のうち 4096³・(512,64,4096) を除く 8 形状で `backend_cpu::assert_parity`（REQ-2 統一複合判定。tolerance 定数は無変更）を適用する
+- **fail-closed 負系**: `STATIC_MNK` でコンパイルしたカーネルへ不一致形状（M のみ 1 差分）を渡す起動が `CudaError::InvalidKernelConfig` で拒否されることを、実際の公開経路（NVRTC コンパイル・実起動）を通じて end-to-end で確認する（`specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape`）
+- **`STATIC_NK` 動的次元再利用**: 同一コンパイル済みカーネルを N/K 固定・M 可変（65→1）で複数回起動し、いずれも CPU 参照実装と一致することを確認する（`specialized_mma_f16_static_nk_reuses_across_dynamic_m`）
+- **REQ-8 境界検査の非省略（ソースレベル）**: `STATIC_NK`／`STATIC_MNK` 相当の config で render したソースに REQ-8 境界チェック needle が残存することを検査する `kernels_mma.rs::tests::render_mma_f16_retains_req8_boundary_guards_for_static_nk_and_mnk`（実機非依存）を追加した
+
+### 6.2 実測状態: 未実測・実機実行待ち
+
+§0「状態」と同じ理由（本実装セッションの環境に NVRTC が存在しない）により、上記 `#[ignore]` 4 テスト（形状網羅・fail-closed 負系・`STATIC_NK` 再利用・k=0 no-op〈非整列 N〉）は **本セッションでは実行できていない**（`specialized_mma_f16_matches_default_and_reference_across_shapes`・`specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape`・`specialized_mma_f16_static_nk_reuses_across_dynamic_m`・`specialized_mma_f16_handles_k_zero_noop_with_misaligned_n`）。実行できたのは以下のみ:
+
+- `specialized_mma_f16_matches_default_smoke_env_adaptive`（`#[ignore]` なし。環境適応スモーク）: CUDA/NVRTC 非搭載環境で `CudaDevice::new`／`CudaMmaGemm::new` の早期 return 分岐を通り green（実測日時: 本 PR 作成時点・NVRTC 非搭載環境）
+- `specialized_mma_kernel_handle_compile_direct_smoke_env_adaptive`（`#[ignore]` なし。環境適応スモーク）: 同様に CUDA/NVRTC 非搭載環境で `SpecializedMmaKernelHandle::compile` の早期 return 分岐を通り green
+- `cargo fmt --all -- --check`／`cargo clippy --workspace --all-targets --all-features -- -D warnings`／`cargo test --workspace`（実機依存 `#[ignore]` を除く全テスト）が green
+- `git diff` で `tests/common/parity_baseline.rs`・tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）に差分がないことを確認済み。`Cargo.toml` は `crates/backend-cuda/Cargo.toml` に `specialized_mma_parity` 用の `[[test]]`（`required-features = ["internal-diagnostics"]`）ブロックを追加したのみで依存クレートの追加・更新はなく、`Cargo.lock` は無差分
+
+DGX Spark GB10（spark-dbd9・sm_121）実機での `cargo test -p backend-cuda --test specialized_mma_parity --features internal-diagnostics -- --ignored --nocapture`（`specialized_mma_parity` は `[[test]] required-features = ["internal-diagnostics"]` でゲートされているため `--features internal-diagnostics`〈または `--all-features`〉指定が必須。指定なしでは cargo がテストバイナリをビルド対象から外し `--ignored` を渡しても実行されない false-green になる。PR #685 codex-review/Bugbot 指摘の是正）実行、および既存 `cpu_cuda_mma_parity.rs`／`parity_nonregression.rs` の `--ignored` 併走による非後退確認は、本実装セッションでは未了のまま残タスクとする（実装計画 §5 手順 6・§5 安全側フォールバック方針。`docs/real-hardware-verification-env.md` の手順に従う）。実測結果は本節を追記更新する形で記録する。

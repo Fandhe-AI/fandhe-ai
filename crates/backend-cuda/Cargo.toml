@@ -49,6 +49,20 @@ internal-diagnostics = []
 name = "gemm_profile_target"
 required-features = ["internal-diagnostics"]
 
+[[test]]
+# `SpecializedMmaKernelHandle`／`run_specialized_mma_f16`（テスト・ベンチ
+# 専用の検証用ハンドル。`src/lib.rs`・`src/gemm_auto.rs` の同 feature
+# ゲート済み re-export 参照）を使う外部 integration test。PR #685
+# codex-review P1 指摘の是正: 上記シンボルを既定ビルドの公開 API 面から
+# 除外したため、これらを使う本テストも `internal-diagnostics` feature
+# なしではビルドできない。`required-features` により `cargo test
+# --workspace`（feature 未指定）では対象外としてスキップされ、
+# `cargo test --all-features`（CI の test ジョブ・`make test` が使う
+# コマンド。`scripts/run-verification-gates.sh` 冒頭コメント参照）で
+# のみビルド・実行される。
+name = "specialized_mma_parity"
+required-features = ["internal-diagnostics"]
+
 [[example]]
 # イシュー #499: 動的グルーピング幅選択（`backend_cuda::diagnostics::
 # mma_swizzle_group_width`）を使うため `gemm_profile_target` と同じ
