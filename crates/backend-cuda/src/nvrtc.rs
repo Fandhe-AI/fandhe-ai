@@ -1246,6 +1246,14 @@ pub(crate) struct CachedKernel {
 /// 実行する経路に繋がりうる）。本関数は [`load_cache_entry_in`] が実際に
 /// 読み出す直前に呼ばれるため、ここで symlink を拒否すれば
 /// `fs::read_to_string` が symlink 先の内容を読むことはない。
+///
+/// Unix 版の書き込み経路（[`store_cache_entry_at`]）はパスの再解決を
+/// 避けるため fd 相対版 [`validate_cache_entry_at`] を使うが、本関数
+/// 自体は非 Unix フォールバック（[`store_cache_entry_in`]・
+/// [`load_cache_entry_in`] の非 Unix 版）とテスト（symlink 差し替え等の
+/// 外部観測用アサーション）の双方から引き続き使うため cfg で残す
+/// （イシュー #509 PR #677 codex-review P0 再指摘対応）。
+#[cfg(any(not(unix), test))]
 fn validate_cache_entry(entry_dir: &Path) -> bool {
     is_plain_dir(entry_dir)
         && is_plain_file(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE))
@@ -1269,6 +1277,7 @@ fn validate_cache_entry(entry_dir: &Path) -> bool {
 /// 自分の新規書き込みを破棄してしまい、そのキーは以降ずっと「ミスと
 /// 判定されて再コンパイルされる」空回りに陥る（正常書き込みが永久に
 /// キャッシュへ反映されない）。
+#[cfg(any(not(unix), test))]
 fn is_plain_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_file() && meta.len() > 0)
@@ -1279,6 +1288,7 @@ fn is_plain_file(path: &Path) -> bool {
 /// 追跡しない [`fs::symlink_metadata`] で判定する（[`is_plain_file`] と
 /// 同じ理由。エントリディレクトリ自体が symlink に置換されているケース
 /// を拒否する）。
+#[cfg(any(not(unix), test))]
 fn is_plain_dir(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_dir())
@@ -1334,6 +1344,35 @@ const O_NONBLOCK: i32 = 0x0004;
 /// エントリの中身を子プロセスへ意図せず漏出させうる）。
 #[cfg(target_os = "macos")]
 const O_CLOEXEC: i32 = 0x0100_0000;
+
+/// macOS（Darwin）の `O_CREAT`（`<fcntl.h>` では `0x0200`）。
+/// [`create_file_pinned`]・[`create_dir_all_verified`] macOS 版用（イシュー
+/// #509 PR #677 codex-review P0 再指摘対応: [`write_entry_files`]
+/// パスベース版が呼んでいた [`fs::write`]（既存ファイルを暗黙に truncate
+/// する）相当の書き込みを、fd 起点かつ排他生成に置き換えるための
+/// フラグ）。
+#[cfg(target_os = "macos")]
+const O_CREAT: i32 = 0x0200;
+
+/// macOS（Darwin）の `O_EXCL`（`<fcntl.h>` では `0x0800`）。`O_CREAT` と
+/// 併用し、対象が symlink を含め既に存在すれば `open` 自体を `EEXIST` で
+/// 拒否する（新規作成のみを許可し、既存ファイル・symlink 先への
+/// 上書きを構造的に防ぐ）。[`create_file_pinned`] 用。
+#[cfg(target_os = "macos")]
+const O_EXCL: i32 = 0x0800;
+
+/// macOS（Darwin）の `O_WRONLY`（`<fcntl.h>` では `0x0001`）。
+/// [`create_file_pinned`] 用。
+#[cfg(target_os = "macos")]
+const O_WRONLY: i32 = 0x0001;
+
+/// macOS（Darwin）の `fcntl(2)` `F_GETPATH`（`<fcntl.h>` では `50`）。
+/// [`real_path_of_fd`] 用（イシュー #509 PR #677 codex-review P0 再指摘
+/// 対応: [`create_dir_all_verified`] macOS 版のコンテインメント再検証で、
+/// Linux 版の `/proc/self/fd/<fd>`（[`proc_fd_path`]）に相当する
+/// 「fd が指す実体の現在の絶対パス」を取得する唯一の標準手段として使う）。
+#[cfg(target_os = "macos")]
+const F_GETPATH: std::os::raw::c_int = 50;
 
 /// `path` を `O_NOFOLLOW | O_NONBLOCK` 付きで開く（[`load_cache_entry_in`]
 /// 用。イシュー #509 codex-review P0 指摘対応）。
@@ -1457,6 +1496,12 @@ fn proc_fd_path(dir: &fs::File) -> PathBuf {
 // `mode` 相当の引数を渡さない（`O_CREAT` を指定しないため mode は
 // 意味を持たない）ことで、実体の variadic 関数へ ABI 上安全に対応
 // させる。
+// 同ブロックへ `mkdirat`／`renameat`（イシュー #509 PR #677 codex-review
+// P0 再指摘対応: [`create_subdir_pinned`]・[`rename_pinned`] macOS 版・
+// [`create_dir_all_verified`] macOS 版が使う）を追加する。両者とも POSIX
+// では固定引数の非 variadic 関数（`mkdirat` の `mode_t mode` は常に
+// 必須引数、`renameat` に可変引数はない）であり、`openat` のような ABI
+// 上の注意点は生じない。
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe extern "C" {
     fn openat(
@@ -1465,25 +1510,45 @@ unsafe extern "C" {
         flags: std::os::raw::c_int,
         ...
     ) -> std::os::raw::c_int;
+
+    fn mkdirat(
+        dirfd: std::os::raw::c_int,
+        pathname: *const std::os::raw::c_char,
+        mode: ModeT,
+    ) -> std::os::raw::c_int;
+
+    fn renameat(
+        olddirfd: std::os::raw::c_int,
+        oldpath: *const std::os::raw::c_char,
+        newdirfd: std::os::raw::c_int,
+        newpath: *const std::os::raw::c_char,
+    ) -> std::os::raw::c_int;
 }
 
-/// pin 済みディレクトリ fd（`open_dir_nofollow` で `O_NOFOLLOW |
-/// O_DIRECTORY` 付きで開いたもの）を起点に、`name`（1 コンポーネントの
-/// ファイル名。エントリ内は [`CACHE_ENTRY_SOURCE_FILE`]／
-/// [`CACHE_ENTRY_PTX_FILE`] の固定文字列のみを渡す）を `openat(2)` で
-/// 開く（macOS 版 [`load_cache_entry_in`] 用。イシュー #509 codex-review
-/// P0 再指摘対応）。
-///
-/// 呼び出し元は `dir` を一度だけ pin し、以降は本関数を介して `dir` を
-/// dirfd（起点）とした 1 コンポーネントの解決のみを行う。`entry_dir` を
-/// 表すパス文字列をルートから再度辿り直す経路が存在しないため、事前
-/// 検証（`open_dir_nofollow` 成功）後に `entry_dir` 自体を別 symlink へ
-/// 差し替える TOCTOU（旧実装は open 前後の `dev`/`ino` 比較という事後
-/// 検出に留まっていた）が構造的に発生しない。`O_NOFOLLOW`（最終
-/// コンポーネントの symlink を拒否）・`O_NONBLOCK`（FIFO 等特殊ファイルの
-/// open ハング防止。[`O_NONBLOCK`] 定数参照）を付与する。
+/// macOS（Darwin）の `mode_t`（`<sys/_types/_mode_t.h>` では
+/// `__uint16_t`）。[`mkdirat`]／[`openat`]（`O_CREAT` 使用時）の第 3 引数
+/// 型として使う（イシュー #509 PR #677 codex-review P0 再指摘対応）。
 #[cfg(all(unix, not(target_os = "linux")))]
-fn openat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
+type ModeT = u16;
+
+/// pin 済みディレクトリ fd を起点に `openat(2)` を呼ぶ共通実装（イシュー
+/// #509 PR #677 codex-review P0 再指摘対応。[`openat_nofollow`]（ファイル
+/// 読み取り用）・[`opendirat_nofollow`]（ディレクトリ descent 用）・
+/// [`create_file_pinned`] macOS 版（新規作成用）が共用する）。
+///
+/// `mode` は `flags` に `O_CREAT` を含む場合のみ `Some` を渡す（`openat`
+/// は宣言上 variadic〈[`openat`] 宣言のコメント参照〉であり、実際に
+/// `mode` を渡すかどうかで呼び出し側の可変引数の数を変える。`O_CREAT`
+/// 非指定時に `mode` を渡すと POSIX 契約〈`mode` は `O_CREAT`／
+/// `O_TMPFILE` 指定時のみ意味を持つ可変引数〉から外れるため、
+/// `None`／`Some` で呼び出し形自体を分ける）。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn openat_raw(
+    dir: &fs::File,
+    name: &str,
+    flags: std::os::raw::c_int,
+    mode: Option<ModeT>,
+) -> std::io::Result<fs::File> {
     use std::ffi::CString;
     use std::os::unix::io::{AsRawFd, FromRawFd};
 
@@ -1494,27 +1559,28 @@ fn openat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
         )
     })?;
 
-    // SAFETY: `dir` は `open_dir_nofollow` が返した、呼び出し元が所有し
-    // 本呼び出しの間生存させている有効なディレクトリ fd。`c_name` は
-    // 直前に構築した NUL 終端の有効な C 文字列で、`openat` 呼び出し中
-    // 生存する（`CString` はこのスコープを抜けるまでドロップされない）。
-    // `openat` は POSIX 標準のシステムコールで、`dirfd`（`dir` の fd 値）
-    // を起点に `pathname`（`name`）の 1 コンポーネントのみを解決する
-    // （`man 2 openat`）。戻り値は新規 fd（成功時 `>= 0`）または `-1`
-    // （失敗時。`errno` は `std::io::Error::last_os_error()` で読む）で
-    // あり、いずれも呼び出し直後にこの Rust コードへ制御を戻す前提を
-    // 満たす。`openat` は宣言上 variadic（[`openat`] 宣言のコメント
-    // 参照）だが本呼び出しは可変引数を 1 つも渡さない（`O_CREAT` を
-    // 指定しないため `mode` 相当の引数は不要かつ渡してはならない）。
-    // `O_CLOEXEC` を付与し、std 経由の open（[`open_nofollow`]・
-    // [`open_dir_nofollow`]）が既定で得る close-on-exec と同じ保証を
-    // 揃える（[`O_CLOEXEC`] 定数のコメント参照）。
+    // SAFETY: `dir` は呼び出し元が pin 済みの有効なディレクトリ fd で
+    // 本呼び出しの間生存する。`c_name` は直前に構築した NUL 終端の有効な
+    // C 文字列で `openat` 呼び出し中生存する（`CString` はこのスコープを
+    // 抜けるまでドロップされない）。`openat` は POSIX 標準のシステム
+    // コールで、`dirfd`（`dir` の fd 値）を起点に `pathname`（`name`）の
+    // 1 コンポーネントのみを解決する（`man 2 openat`）。戻り値は新規 fd
+    // （成功時 `>= 0`）または `-1`（失敗時。`errno` は
+    // `std::io::Error::last_os_error()` で読む）であり、いずれも呼び出し
+    // 直後にこの Rust コードへ制御を戻す前提を満たす。`mode` を渡す
+    // 呼び出し（`Some`）は `c_uint` へ昇格済みの値を可変引数として渡す
+    // （`O_CREAT` 指定時の ABI 上正しい形。[`openat`] 宣言のコメント
+    // 参照）。`mode` なしの呼び出し（`None`）は可変引数を 1 つも渡さない。
     let fd = unsafe {
-        openat(
-            dir.as_raw_fd(),
-            c_name.as_ptr(),
-            O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
-        )
+        match mode {
+            Some(m) => openat(
+                dir.as_raw_fd(),
+                c_name.as_ptr(),
+                flags,
+                m as std::os::raw::c_uint,
+            ),
+            None => openat(dir.as_raw_fd(), c_name.as_ptr(), flags),
+        }
     };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
@@ -1526,6 +1592,190 @@ fn openat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
     // `fs::File` へ移す（以降のクローズ責務は返した `File` の Drop に
     // 委ねる）。
     Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+/// pin 済みディレクトリ fd（`open_dir_nofollow` で `O_NOFOLLOW |
+/// O_DIRECTORY` 付きで開いたもの）を起点に、`name`（1 コンポーネントの
+/// ファイル名。エントリ内は [`CACHE_ENTRY_SOURCE_FILE`]／
+/// [`CACHE_ENTRY_PTX_FILE`] の固定文字列のみを渡す）を読み取り用に開く
+/// （macOS 版 [`load_cache_entry_in`] 用。イシュー #509 codex-review P0
+/// 再指摘対応）。
+///
+/// 呼び出し元は `dir` を一度だけ pin し、以降は本関数を介して `dir` を
+/// dirfd（起点）とした 1 コンポーネントの解決のみを行う。`entry_dir` を
+/// 表すパス文字列をルートから再度辿り直す経路が存在しないため、事前
+/// 検証（`open_dir_nofollow` 成功）後に `entry_dir` 自体を別 symlink へ
+/// 差し替える TOCTOU（旧実装は open 前後の `dev`/`ino` 比較という事後
+/// 検出に留まっていた）が構造的に発生しない。`O_NOFOLLOW`（最終
+/// コンポーネントの symlink を拒否）・`O_NONBLOCK`（FIFO 等特殊ファイルの
+/// open ハング防止。[`O_NONBLOCK`] 定数参照）・`O_CLOEXEC`（std 経由の
+/// open が既定で得る close-on-exec と同じ保証を揃える。[`O_CLOEXEC`]
+/// 定数のコメント参照）を付与する。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn openat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    openat_raw(dir, name, O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, None)
+}
+
+/// pin 済みディレクトリ fd を起点に、`name` の 1 コンポーネントを
+/// `O_NOFOLLOW | O_DIRECTORY` で開く（[`open_dir_nofollow`] の macOS
+/// dirfd 起点版。イシュー #509 PR #677 codex-review P0 再指摘対応:
+/// [`create_subdir_pinned`]・[`create_dir_all_verified`] macOS 版が、
+/// ディレクトリ descent の各階層で「元のパス文字列をルートから再度
+/// 辿り直さない」ために使う）。最終コンポーネントが symlink または
+/// 非ディレクトリであれば `openat(2)` 自体が `ELOOP`／`ENOTDIR` で拒否
+/// する。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn opendirat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    openat_raw(dir, name, O_NOFOLLOW | O_DIRECTORY | O_CLOEXEC, None)
+}
+
+/// pin 済みディレクトリ fd を起点に、`name` を新規ファイルとして排他
+/// 生成する（`O_CREAT | O_EXCL`。[`create_subdir_pinned`]・
+/// [`write_child_file_pinned`] 用。イシュー #509 PR #677 codex-review P0
+/// 再指摘対応）。
+///
+/// `O_EXCL` により、対象が symlink を含め既に存在すれば `open` 自体が
+/// `EEXIST` で失敗する（symlink 先への意図しない書き込みを構造的に防ぐ。
+/// Linux 版 [`create_file_pinned`] の `OpenOptions::create_new` と同じ
+/// 保証）。作成モードは `0o600`（所有者のみ読み書き。キャッシュエントリは
+/// プロセス実行ユーザー以外が読む必要はない）。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn create_file_pinned_at(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    openat_raw(
+        dir,
+        name,
+        O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+        Some(0o600),
+    )
+}
+
+/// pin 済みディレクトリ fd を起点に `name` のサブディレクトリを作成する
+/// （`mkdirat(2)` の FFI 直接呼び出し。イシュー #509 PR #677 codex-review
+/// P0 再指摘対応。[`create_subdir_pinned`] macOS 版・[`create_dir_all_verified`]
+/// macOS 版が使う）。
+///
+/// `mkdirat` は POSIX の固定引数関数（可変引数なし）であり [`openat`]
+/// と異なり ABI 上の variadic 注意点はない。モードは `0o700`（所有者の
+/// み読み書き実行。既存の `fs::create_dir`〈umask 適用前は既定で
+/// パーミッションを渡さない〉と同水準の意図）。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn mkdirat_raw(dir: &fs::File, name: &str) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsRawFd;
+
+    let c_name = CString::new(name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry directory name must not contain a NUL byte",
+        )
+    })?;
+
+    // SAFETY: `dir` は呼び出し元が pin 済みの有効なディレクトリ fd で
+    // 本呼び出しの間生存する。`c_name` は直前に構築した NUL 終端の有効な
+    // C 文字列で呼び出し中生存する。`mkdirat` は POSIX 標準のシステム
+    // コールで `dirfd` を起点に `pathname` の 1 コンポーネントのみを
+    // 解決する（`man 2 mkdirat`）。戻り値は成功時 `0`、失敗時 `-1`
+    // （`errno` は `std::io::Error::last_os_error()` で読む）。
+    let ret = unsafe { mkdirat(dir.as_raw_fd(), c_name.as_ptr(), 0o700) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// pin 済みディレクトリ fd を起点に `renameat(2)` を呼ぶ（イシュー #509
+/// PR #677 codex-review P0 再指摘対応。[`rename_pinned`] macOS 版が使う）。
+///
+/// `from_dir`／`to_dir` はいずれも呼び出し元が pin 済みの dirfd
+/// （本モジュールでは常にキャッシュルート fd）。`renameat` は POSIX
+/// 標準のシステムコールで、両方のパスをそれぞれの dirfd を起点に
+/// 1 コンポーネントだけ解決するため、Linux 版
+/// （[`proc_fd_path`] 経由の `fs::rename`）と同様にキャッシュルートの
+/// パス文字列を再度ルートから辿り直すことがない。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn renameat_raw(
+    from_dir: &fs::File,
+    from_name: &str,
+    to_dir: &fs::File,
+    to_name: &str,
+) -> std::io::Result<()> {
+    use std::ffi::CString;
+    use std::os::unix::io::AsRawFd;
+
+    let c_from = CString::new(from_name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry directory name must not contain a NUL byte",
+        )
+    })?;
+    let c_to = CString::new(to_name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry directory name must not contain a NUL byte",
+        )
+    })?;
+
+    // SAFETY: `from_dir`／`to_dir` は呼び出し元が pin 済みの有効な
+    // ディレクトリ fd で本呼び出しの間生存する。`c_from`／`c_to` は
+    // 直前に構築した NUL 終端の有効な C 文字列で呼び出し中生存する。
+    // `renameat` は POSIX 標準のシステムコールで、戻り値は成功時 `0`、
+    // 失敗時 `-1`（`errno` は `std::io::Error::last_os_error()` で読む）。
+    let ret = unsafe {
+        renameat(
+            from_dir.as_raw_fd(),
+            c_from.as_ptr(),
+            to_dir.as_raw_fd(),
+            c_to.as_ptr(),
+        )
+    };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+// macOS `fcntl(2)` `F_GETPATH` の FFI 宣言（[`real_path_of_fd`] 用。
+// イシュー #509 PR #677 codex-review P0 再指摘対応）。`fcntl` は POSIX
+// では variadic（`int fcntl(int, int, ...)`）だが、`F_GETPATH` の第 3
+// 引数はポインタ型でありデフォルト引数昇格の対象外（整数・浮動小数点の
+// 昇格ルールはポインタには適用されない）のため、`openat` の `mode`
+// 引数のような ABI 上の追加注意点は生じない。
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn fcntl(fd: std::os::raw::c_int, cmd: std::os::raw::c_int, ...) -> std::os::raw::c_int;
+}
+
+/// `dir` fd が指す実体の現在の絶対パスを `F_GETPATH` で取得する（macOS
+/// 限定。イシュー #509 PR #677 codex-review P0 再指摘対応:
+/// [`create_dir_all_verified`] macOS 版のコンテインメント再検証用。
+/// Linux 版が使う `/proc/self/fd/<fd>`〈[`proc_fd_path`]〉の symlink
+/// 解決込み絶対パス取得に相当する、macOS で fd から実パスを得る唯一の
+/// 標準的手段）。
+///
+/// バッファは `PATH_MAX`（macOS では `1024`。`<sys/syslimits.h>`）を
+/// 確保する。`F_GETPATH` は成功時に NUL 終端済みの絶対パスをバッファへ
+/// 書き込む。
+#[cfg(target_os = "macos")]
+fn real_path_of_fd(dir: &fs::File) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::io::AsRawFd;
+
+    const PATH_MAX: usize = 1024;
+    let mut buf = vec![0u8; PATH_MAX];
+
+    // SAFETY: `dir` は呼び出し元が所有する有効なオープン fd。`buf` は
+    // `PATH_MAX` バイト確保済みの書き込み可能バッファで、`fcntl` は
+    // `F_GETPATH` 使用時に高々 `PATH_MAX` バイトしか書き込まない
+    // （`man 2 fcntl` の `F_GETPATH` 節）。戻り値は成功時 `0`、失敗時
+    // `-1`（`errno` は `std::io::Error::last_os_error()` で読む）。
+    let ret = unsafe { fcntl(dir.as_raw_fd(), F_GETPATH, buf.as_mut_ptr()) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let nul = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf.truncate(nul);
+    Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
 }
 
 /// キャッシュエントリ 1 ファイルあたりの読み込み上限（バイト数。イシュー
@@ -1594,33 +1844,33 @@ fn read_verified_cache_entry_file(mut file: fs::File) -> std::io::Result<Option<
     Ok(Some(buf))
 }
 
-/// ファイルを fsync する（[`write_entry_files`] が書き込み直後に呼ぶ）。
+/// ファイルを fsync する（[`write_entry_files`]〈非 Unix フォールバック〉
+/// が書き込み直後に呼ぶ）。
 ///
 /// rename 前に内容がディスクへ確実に反映されていることを保証する
 /// （A08 整合性: rename のアトミック性だけでは「rename 前にクラッシュし
 /// 部分書き込みのまま OS バッファに留まる」ケースを防げないため。
-/// DeepGEMM compiler の書き込みプロトコルに倣う）。
+/// DeepGEMM compiler の書き込みプロトコルに倣う）。Unix 版の
+/// 書き込み経路（[`write_child_file_pinned`]）はパスの再オープンを
+/// 避けるため、書き込みに使った fd から直接 `sync_all` する（イシュー
+/// #509 PR #677 codex-review P0 再指摘対応。本関数のようなパス経由の
+/// 再オープンは symlink 差し替え TOCTOU の窓になるため使わない）。
+#[cfg(not(unix))]
 fn fsync_file(path: &Path) -> std::io::Result<()> {
     fs::File::open(path)?.sync_all()
 }
 
-/// ディレクトリを fsync する（[`write_entry_files`]・[`store_cache_entry_in`]
-/// が一時ディレクトリ／ルートディレクトリに対して呼ぶ）。
+/// ディレクトリを fsync する（[`write_entry_files`]〈非 Unix
+/// フォールバック〉が一時ディレクトリに対して呼ぶ）。
 ///
-/// POSIX 準拠 OS ではディレクトリエントリの追加（ファイル作成・rename）も
-/// fsync が必要な変更として扱われるため、`kernel.cu`／`kernel.ptx` の
-/// 書き込み後に一時ディレクトリ自体も fsync する（DeepGEMM `fsync_dir`
-/// 相当のボトムアップ fsync）。非 Unix（本クレートのビルド対象は
-/// `backend-switching-design.md` の cfg ベース分岐上 Linux/macOS/CUDA
-/// toolkit 非搭載環境のみを想定し Windows は対象外）では
-/// `File::open` でディレクトリを開くこと自体が失敗しうるため no-op と
-/// する（fsync できないことを理由に I/O 全体を失敗させない。rename の
-/// アトミック性自体は非 Unix でも成立する）。
-#[cfg(unix)]
-fn fsync_dir(path: &Path) -> std::io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
-
+/// 非 Unix（本クレートのビルド対象は `backend-switching-design.md` の
+/// cfg ベース分岐上 Linux/macOS/CUDA toolkit 非搭載環境のみを想定し
+/// Windows は対象外）では `File::open` でディレクトリを開くこと自体が
+/// 失敗しうるため no-op とする（fsync できないことを理由に I/O 全体を
+/// 失敗させない。rename のアトミック性自体は非 Unix でも成立する）。
+/// Unix 版は [`create_subdir_pinned`]／[`store_cache_entry_at`] が
+/// pin 済み fd から直接 `sync_all` するため本関数を経由しない（同じ
+/// TOCTOU 回避理由。[`fsync_file`] のコメント参照）。
 #[cfg(not(unix))]
 fn fsync_dir(_path: &Path) -> std::io::Result<()> {
     Ok(())
@@ -1646,13 +1896,239 @@ fn temp_entry_dir_name(final_entry_name: &str) -> String {
     format!(".tmp.{final_entry_name}.{}.{seq}", std::process::id())
 }
 
-/// [`store_cache_entry_in`] の手順 1〜3（一時ディレクトリ作成・
+/// キャッシュルート fd（[`open_dir_nofollow`] で pin 済み）を起点に
+/// `name` の 1 コンポーネントのサブディレクトリを作成し、そのディレクトリ
+/// fd を返す（[`write_entry_files_pinned`]・[`create_dir_all_verified`]
+/// macOS 版が共用。イシュー #509 PR #677 codex-review P0 再指摘対応）。
+///
+/// Linux 版は [`proc_fd_path`]（`/proc/self/fd/<fd>/<name>`）経由で
+/// [`fs::create_dir`] → [`open_dir_nofollow`] する（`load_cache_entry_in`
+/// Linux 版・[`create_dir_all_verified`] Linux 版と同じ手法）。macOS 版は
+/// [`mkdirat_raw`] → [`opendirat_nofollow`]（`openat(2)` FFI 直接呼び出し）
+/// する。いずれも `parent` を起点とした fd 相対操作のみで完結し、`parent`
+/// が指す実体を表すパス文字列をルートから再度辿り直すことがないため、
+/// `parent` の pin 後にその祖先が symlink へ差し替えられても書き込み先が
+/// 追従しない（`mkdirat`／`openat` と同等の効果。[`proc_fd_path`]・
+/// [`openat_raw`] のドキュメンテーションコメント参照）。
+#[cfg(unix)]
+fn create_subdir_pinned(parent: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    {
+        let child_path = proc_fd_path(parent).join(name);
+        fs::create_dir(&child_path)?;
+        open_dir_nofollow(&child_path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        mkdirat_raw(parent, name)?;
+        opendirat_nofollow(parent, name)
+    }
+}
+
+/// 親ディレクトリ fd（[`create_subdir_pinned`] が返した一時ディレクトリ
+/// fd）を起点に `name` を新規ファイルとして排他生成する（[`create_subdir_pinned`]
+/// と対になる書き込み用プリミティブ。イシュー #509 PR #677 codex-review
+/// P0 再指摘対応）。
+///
+/// Linux 版は [`proc_fd_path`] 経由で `OpenOptions::create_new`
+/// （`O_CREAT | O_EXCL` 相当。既存の symlink・ファイルがあれば `EEXIST`
+/// で拒否）＋ `O_NOFOLLOW`（最終コンポーネント自体が symlink の場合の
+/// 追加拒否。`create_new` と合わせた縦深防御）で開く。macOS 版は
+/// [`create_file_pinned_at`]（`openat(2)` FFI 直接呼び出し。同じ
+/// `O_CREAT | O_EXCL | O_NOFOLLOW`）を使う。いずれも `parent.write(true)`
+/// 相当の書き込み専用ハンドルを返す。
+#[cfg(unix)]
+fn create_file_pinned(parent: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let path = proc_fd_path(parent).join(name);
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+            .open(&path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        create_file_pinned_at(parent, name)
+    }
+}
+
+/// `dir_fd` を起点に `name` の 1 コンポーネントを読み取り専用で開く
+/// （[`validate_cache_entry_at`]・[`entry_exists_at`] 用。イシュー #509
+/// PR #677 codex-review P0 再指摘対応）。
+///
+/// Linux 版は [`open_nofollow`]（[`proc_fd_path`] 経由）、macOS 版は
+/// 既存の [`openat_nofollow`]（`load_cache_entry_in` macOS 版と同一実装）
+/// をそのまま再利用する。
+#[cfg(unix)]
+fn open_file_child_nofollow(dir_fd: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    {
+        open_nofollow(&proc_fd_path(dir_fd).join(name))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        openat_nofollow(dir_fd, name)
+    }
+}
+
+/// `dir_fd` を起点に `name` の 1 コンポーネントのサブディレクトリを
+/// `O_NOFOLLOW | O_DIRECTORY` で開く（[`validate_cache_entry_at`]・
+/// [`entry_exists_at`]・[`store_cache_entry_at`] 用。イシュー #509 PR
+/// #677 codex-review P0 再指摘対応）。
+#[cfg(unix)]
+fn open_dir_child_nofollow(dir_fd: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    #[cfg(target_os = "linux")]
+    {
+        open_dir_nofollow(&proc_fd_path(dir_fd).join(name))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        opendirat_nofollow(dir_fd, name)
+    }
+}
+
+/// `root_fd` 起点で `entry_name` のキャッシュエントリが存在するかを、
+/// パスを再解決せず fd 相対の open のみで判定する（[`store_cache_entry_at`]
+/// 用。イシュー #509 PR #677 codex-review P0 再指摘対応。パスベース版
+/// [`validate_cache_entry`] の存在確認に相当するが、`root_fd` を pin
+/// した後にキャッシュルート自体が symlink へ差し替えられても、`root_fd`
+/// が指す元の実体だけを見るため誤判定しない）。
+#[cfg(unix)]
+fn entry_exists_at(root_fd: &fs::File, entry_name: &str) -> bool {
+    open_dir_child_nofollow(root_fd, entry_name).is_ok()
+}
+
+/// `root_fd` 起点で `entry_name` のキャッシュエントリが不変条件
+/// （[`CACHE_ENTRY_SOURCE_FILE`]／[`CACHE_ENTRY_PTX_FILE`] の両方が
+/// 存在し、いずれも symlink でない非空の通常ファイルであること）を
+/// 満たすかを、パスを再解決せず fd 相対の open のみで判定する
+/// （[`store_cache_entry_at`] 用。イシュー #509 PR #677 codex-review P0
+/// 再指摘対応。パスベース版 [`validate_cache_entry`] の fd 版）。
+#[cfg(unix)]
+fn validate_cache_entry_at(root_fd: &fs::File, entry_name: &str) -> bool {
+    let dir_fd = match open_dir_child_nofollow(root_fd, entry_name) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    is_plain_file_at(&dir_fd, CACHE_ENTRY_SOURCE_FILE)
+        && is_plain_file_at(&dir_fd, CACHE_ENTRY_PTX_FILE)
+}
+
+/// `dir_fd` 起点で `name` が symlink ではない非空の通常ファイルかを、
+/// fd 経由の `fstat`（`open_file_child_nofollow` が成功した時点で
+/// symlink・特殊ファイルは既に拒否済み。[`open_nofollow`]・
+/// [`openat_nofollow`] のドキュメンテーションコメント参照）で判定する
+/// （[`validate_cache_entry_at`] 用）。
+#[cfg(unix)]
+fn is_plain_file_at(dir_fd: &fs::File, name: &str) -> bool {
+    match open_file_child_nofollow(dir_fd, name) {
+        Ok(f) => f
+            .metadata()
+            .map(|m| m.file_type().is_file() && m.len() > 0)
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// `from_dir_fd`／`to_dir_fd` を起点に `from_name` から `to_name` へ
+/// アトミックに rename する（[`store_cache_entry_at`] 用。イシュー #509
+/// PR #677 codex-review P0 再指摘対応。両 fd が同一キャッシュルートを
+/// 指す場合、Linux/macOS いずれも通常の同一ファイルシステム内 rename と
+/// 同じくアトミック）。
+///
+/// Linux 版は [`proc_fd_path`] 経由で両端を magic path 化した
+/// [`fs::rename`]（`rename(2)` はどちらの引数もパス解決するが、
+/// `/proc/self/fd/<fd>/<name>` は fd が指す実体を直接指すため、キャッシュ
+/// ルートのパス文字列を再度ルートから辿り直すことがない）。macOS 版は
+/// [`renameat_raw`]（`renameat(2)` FFI 直接呼び出し）を使う。
+#[cfg(unix)]
+fn rename_pinned(
+    from_dir_fd: &fs::File,
+    from_name: &str,
+    to_dir_fd: &fs::File,
+    to_name: &str,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        fs::rename(
+            proc_fd_path(from_dir_fd).join(from_name),
+            proc_fd_path(to_dir_fd).join(to_name),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        renameat_raw(from_dir_fd, from_name, to_dir_fd, to_name)
+    }
+}
+
+/// [`store_cache_entry_at`] の手順 1〜3（一時ディレクトリ作成・
 /// `kernel.cu`／`kernel.ptx` 書き込み・各ファイルの fsync・一時
-/// ディレクトリ自体の fsync）を担う。
+/// ディレクトリ自体の fsync）を、キャッシュルート fd（`root_fd`）起点の
+/// fd 相対操作のみで担う（[`write_entry_files`]〈非 Unix フォールバック〉
+/// の Unix 強化版。イシュー #509 PR #677 codex-review P0 指摘対応:
+/// パスベース版は `root_fd` を pin した後でも `tmp_dir`（`root.join(..)`）
+/// という文字列パスを経由して `fs::create_dir`／`fs::write` するため、
+/// pin 後にキャッシュルート自体が symlink へ差し替えられると
+/// containment 検証済みの実体の外へ書き込みうる TOCTOU が残っていた。
+/// 本関数は一時ディレクトリの作成〈[`create_subdir_pinned`]〉・
+/// 2 ファイルの生成〈[`create_file_pinned`]〉・fsync（書き込みに使った
+/// fd から直接 `sync_all`。パス経由の再オープンをしない）まで、すべて
+/// `root_fd` から辿った fd のみで行う）。
+///
+/// `tmp_name` は [`temp_entry_dir_name`] が返す一意な名前
+/// （[`create_subdir_pinned`] は排他的作成のため、一意性が壊れていれば
+/// 本関数が `Err` を返す。サイレントな上書きを避ける）。
+#[cfg(unix)]
+fn write_entry_files_pinned(
+    root_fd: &fs::File,
+    tmp_name: &str,
+    kernel_cu: &str,
+    kernel_ptx: &str,
+) -> Result<(), CudaError> {
+    let tmp_dir_fd = create_subdir_pinned(root_fd, tmp_name).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to create temp cache directory {tmp_name}: {e}"),
+    })?;
+
+    write_child_file_pinned(&tmp_dir_fd, CACHE_ENTRY_SOURCE_FILE, kernel_cu)?;
+    write_child_file_pinned(&tmp_dir_fd, CACHE_ENTRY_PTX_FILE, kernel_ptx)?;
+
+    tmp_dir_fd.sync_all().map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to fsync temp cache directory {tmp_name}: {e}"),
+    })
+}
+
+/// [`write_entry_files_pinned`] の内側で `name` の 1 ファイルを作成・
+/// 書き込み・fsync する（イシュー #509 PR #677 codex-review P0 再指摘
+/// 対応）。書き込みに使った [`fs::File`] ハンドルから直接 `sync_all` する
+/// ため、[`fsync_file`]〈非 Unix フォールバック〉のようなパス経由の
+/// 再オープン（symlink 差し替え TOCTOU の窓）が生じない。
+#[cfg(unix)]
+fn write_child_file_pinned(dir_fd: &fs::File, name: &str, content: &str) -> Result<(), CudaError> {
+    use std::io::Write;
+
+    let mut file = create_file_pinned(dir_fd, name).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to create {name}: {e}"),
+    })?;
+    file.write_all(content.as_bytes())
+        .map_err(|e| CudaError::CacheIo {
+            detail: format!("failed to write {name}: {e}"),
+        })?;
+    file.sync_all().map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to fsync {name}: {e}"),
+    })
+}
+
+/// [`store_cache_entry_in`]〈非 Unix フォールバック〉の手順 1〜3（一時
+/// ディレクトリ作成・`kernel.cu`／`kernel.ptx` 書き込み・各ファイルの
+/// fsync・一時ディレクトリ自体の fsync）を担う。
 ///
 /// `tmp_dir` は [`fs::create_dir`]（排他的作成。既存パスなら `Err`）で
 /// 確保するため、[`temp_entry_dir_name`] の一意性が壊れていれば本関数が
 /// `Err` を返す（サイレントな上書きを避ける）。
+#[cfg(not(unix))]
 fn write_entry_files(tmp_dir: &Path, kernel_cu: &str, kernel_ptx: &str) -> Result<(), CudaError> {
     fs::create_dir(tmp_dir).map_err(|e| CudaError::CacheIo {
         detail: format!(
@@ -1967,35 +2443,167 @@ fn create_dir_all_verified(
     Ok(())
 }
 
-/// [`create_dir_all_verified`]（Linux 版）の macOS／その他 Unix 向け
-/// フォールバック実装（イシュー #509 codex-review P0 再指摘対応）。
+/// [`create_dir_all_verified`]（Linux 版）の macOS 向け fd 起点実装
+/// （イシュー #509 PR #677 codex-review P0 再指摘対応）。
 ///
 /// macOS の `/dev/fd/<fd>`（`fdesc` ファイルシステム）は `<fd>` 自体を
 /// ノードとして提供するのみで配下（`/dev/fd/<fd>/name`）へのパス継続
 /// 解決をサポートしないため、Linux 版が使う `/proc/self/fd/<fd>` 相当の
-/// fd 起点手法を適用できない（[`proc_fd_path`] のドキュメンテーション
-/// コメント参照）。本実装は 1 コンポーネントずつ [`fs::create_dir`]
-/// （`create_dir_all` と異なり対象パスが既に存在すれば `AlreadyExists`
-/// で失敗し、symlink を辿って中身を作ることはない）で作成し、作成直後
-/// （または並行する他プロセスによる先着で `AlreadyExists` だった場合も
-/// 同様に）`fs::symlink_metadata` で通常ディレクトリであること・
-/// `canonical_workspace_root` 配下でないことを都度検証する**検出型**の
-/// 縦深防御に留まる。途中で拒否した場合、攻撃者が差し替えられるのは
-/// 高々直前の 1 コンポーネント（直前に自分が作成したディレクトリ、
-/// または `AlreadyExists` でフォールスルーした既存パス）に限られ、拒否
-/// 直後に [`fs::remove_dir`] で削除してから返す（ベストエフォート。
-/// 削除失敗はそれ自体をエラーにせず元エラーを優先する。
-/// [`store_cache_entry_in`] の一時ディレクトリ削除と同じ方針）。
+/// magic path 手法は適用できない（[`proc_fd_path`] のドキュメンテーション
+/// コメント参照）。旧実装（1 コンポーネントずつ [`fs::create_dir`]／
+/// [`fs::symlink_metadata`]／[`Path::canonicalize`] で扱う検出型の縦深
+/// 防御）は、直前のコンポーネント検証と次のコンポーネント作成の間に
+/// 祖先が symlink へ差し替えられる TOCTOU が残っていた（Linux 版の旧
+/// 実装が抱えていたのと同じ問題。イシュー #509 PR #677 codex-review P0
+/// 再指摘）。
 ///
-/// `canonical_existing_ancestor`（Linux 版が fd pin の起点に使う
-/// symlink 解決済みパス。イシュー #509 codex-review P1 再指摘対応）は
-/// 本実装では未使用: 本関数は `existing_ancestor` を `O_NOFOLLOW` で
-/// open することがなく（1 コンポーネントずつ文字列連結した `current` を
-/// [`fs::create_dir`]／[`fs::symlink_metadata`] で扱うのみ）、
-/// `existing_ancestor` 自身が symlink であっても誤って拒否しないため、
-/// Linux 版と同じ問題が生じない。呼び出し元（[`ensure_cache_root_in`]）
-/// を cfg 分岐させずに共有するため引数だけ受け取る。
-#[cfg(not(target_os = "linux"))]
+/// 本実装は [`mkdirat_raw`]／[`opendirat_nofollow`]（`mkdirat(2)`／
+/// `openat(2)` FFI 直接呼び出し）で「現在位置」のディレクトリ fd
+/// （`current_dir`）を起点とした dirfd 相対操作のみを行い、次の
+/// コンポーネントへは常に直前に pin した fd 経由でのみ進む。`mkdirat`
+/// は対象が既に symlink であれば `EEXIST` で失敗し symlink を辿って
+/// 中身を作ることはなく、続く `opendirat_nofollow` も symlink／非
+/// ディレクトリを `ELOOP`／`ENOTDIR` で拒否するため、Linux 版
+/// （[`proc_fd_path`] 経由）と同様に**拒否時点で次の階層への書き込みは
+/// 一切発生していない**。
+///
+/// containment 再検証は各階層で [`real_path_of_fd`]（`fcntl(2)`
+/// `F_GETPATH`）を使う。Linux 版が使う [`proc_fd_path`] の
+/// `fs::read_link`（symlink 解決込みの絶対パス取得）に相当する、fd から
+/// 実パスを得る唯一の標準的手段である（[`real_path_of_fd`] の
+/// ドキュメンテーションコメント参照）。パスベースの `canonicalize` を
+/// 使わない理由: `current_dir` を pin した後に別プロセスが途中の祖先を
+/// symlink へ差し替えても、`display_path`（表示専用の文字列パス）を
+/// `canonicalize` すると差し替え後の偽の実体を検証してしまい、実際に
+/// 書き込んだ fd 起点の実体（`workspace_root` 外に留まっている）とは
+/// 別のものを見てしまう。`F_GETPATH` は fd が指す実体そのものの現在の
+/// 絶対パスを返すため、この乖離が生じない。
+///
+/// `existing_ancestor`（Linux 版の P1 再指摘と同じ理由で、正当な
+/// symlink〈`~/.cache`・`XDG_CACHE_HOME` 自体が workspace 外の実
+/// ディレクトリを指す一般的な構成〉でありうる）は `O_NOFOLLOW` なしの
+/// 通常 `fs::File::open` で最初の 1 段だけ開く（`opendirat_nofollow`
+/// 〈`O_NOFOLLOW` 付き〉を最終コンポーネントへ直接使うと正当な構成を
+/// `ELOOP` で誤って拒否してしまうため）。`canonical_existing_ancestor`
+/// は Linux 版が fd pin の起点として使う symlink 解決済みパスだが、
+/// 本実装は `existing_ancestor` を `O_NOFOLLOW` で開かないため未使用
+/// （呼び出し元 [`ensure_cache_root_in`] を cfg 分岐させずに共有する
+/// ため引数だけ受け取る）。
+///
+/// 拒否時に [`fs::remove_dir`] で削除するのはベストエフォートの
+/// パスベースクリーンアップに留める（削除失敗はそれ自体をエラーに
+/// せず元エラーを優先する。[`store_cache_entry_at`] の一時ディレクトリ
+/// 削除と同じ方針: 削除は containment 突破の経路ではなく、失敗しても
+/// 高々空ディレクトリが残るだけであるため path ベースのままでよい）。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn create_dir_all_verified(
+    existing_ancestor: &Path,
+    _canonical_existing_ancestor: &Path,
+    candidate_root: &Path,
+    canonical_workspace_root: &Path,
+) -> Result<(), CudaError> {
+    let relative = candidate_root
+        .strip_prefix(existing_ancestor)
+        .map_err(|_| CudaError::CacheIo {
+            detail: format!(
+                "cache root candidate {} is not nested under its existing ancestor {}",
+                candidate_root.display(),
+                existing_ancestor.display()
+            ),
+        })?;
+
+    let mut current_dir = fs::File::open(existing_ancestor).map_err(|e| CudaError::CacheIo {
+        detail: format!(
+            "failed to open existing cache directory ancestor {}: {e}",
+            existing_ancestor.display()
+        ),
+    })?;
+    // 表示・削除用の人間可読パス（セキュリティ判断には使わない。
+    // 実際のオープン・作成は常に `current_dir` 起点の dirfd 相対操作で
+    // 行う）。
+    let mut display_path = existing_ancestor.to_path_buf();
+
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            // `existing_ancestor` は fs 上に実在するパスの祖先探索結果
+            // であり、`candidate_root` は環境変数由来の絶対パスを結合
+            // したもの（[`resolve_cache_root`]）のため、ここに `..`／`.`／
+            // プレフィックス等の非正規コンポーネントが現れることは想定
+            // しない。防御的に fail-closed で拒否する。
+            return Err(CudaError::CacheIo {
+                detail: format!(
+                    "cache root candidate {} contains a non-normal path component",
+                    candidate_root.display()
+                ),
+            });
+        };
+        display_path.push(name);
+        let name_str = name.to_str().ok_or_else(|| CudaError::CacheIo {
+            detail: format!(
+                "cache directory component {} is not valid UTF-8",
+                display_path.display()
+            ),
+        })?;
+
+        if let Err(e) = mkdirat_raw(&current_dir, name_str)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(CudaError::CacheIo {
+                detail: format!(
+                    "failed to create cache directory component {}: {e}",
+                    display_path.display()
+                ),
+            });
+        }
+        // `AlreadyExists`（並行する他プロセスが同じ祖先を先に作成した等）
+        // は下記の再検証へフォールスルーし、既存の中身が正規ディレクト
+        // リ・workspace 外であることを確認する。
+
+        let child_dir = match opendirat_nofollow(&current_dir, name_str) {
+            Ok(f) => f,
+            Err(_) => {
+                let _ = fs::remove_dir(&display_path);
+                return Err(CudaError::CacheDirUnavailable {
+                    detail: format!(
+                        "cache directory component {} is not a plain directory (symlink or \
+                         other non-directory found where a directory was expected)",
+                        display_path.display()
+                    ),
+                });
+            }
+        };
+
+        let canonical_current = real_path_of_fd(&child_dir).map_err(|e| CudaError::CacheIo {
+            detail: format!(
+                "failed to resolve real path of cache directory component {} via F_GETPATH: {e}",
+                display_path.display()
+            ),
+        })?;
+        if path_lexically_within(&canonical_current, canonical_workspace_root) {
+            let _ = fs::remove_dir(&display_path);
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "cache directory component {} resolves (after symlink resolution) within \
+                     workspace root {}; refusing to continue creating directories under it",
+                    canonical_current.display(),
+                    canonical_workspace_root.display()
+                ),
+            });
+        }
+
+        current_dir = child_dir;
+    }
+
+    Ok(())
+}
+
+/// [`create_dir_all_verified`]（Linux／macOS 版）の非 Unix フォールバック
+/// 実装（本クレートのビルド対象は Linux/macOS のみのため通常到達しない。
+/// [`fsync_dir`]〈非 Unix フォールバック〉の非 Unix 分岐と同じ判断）。
+/// `O_NOFOLLOW` 相当の std API を持たないため、Unix 版と異なり fd 起点の
+/// TOCTOU 対策強化は適用されない（旧 Unix 実装と同水準の検出型の縦深
+/// 防御を維持する）。
+#[cfg(not(unix))]
 fn create_dir_all_verified(
     existing_ancestor: &Path,
     _canonical_existing_ancestor: &Path,
@@ -2015,11 +2623,6 @@ fn create_dir_all_verified(
     let mut current = existing_ancestor.to_path_buf();
     for component in relative.components() {
         let Component::Normal(name) = component else {
-            // `existing_ancestor` は fs 上に実在するパスの祖先探索結果
-            // であり、`candidate_root` は環境変数由来の絶対パスを結合
-            // したもの（[`resolve_cache_root`]）のため、ここに `..`／`.`／
-            // プレフィックス等の非正規コンポーネントが現れることは想定
-            // しない。防御的に fail-closed で拒否する。
             return Err(CudaError::CacheIo {
                 detail: format!(
                     "cache root candidate {} contains a non-normal path component",
@@ -2039,9 +2642,6 @@ fn create_dir_all_verified(
                 ),
             });
         }
-        // `AlreadyExists`（並行する他プロセスが同じ祖先を先に作成した等）
-        // は下記の再検証へフォールスルーし、既存の中身が正規ディレクト
-        // リ・workspace 外であることを確認する。
 
         let meta = fs::symlink_metadata(&current).map_err(|e| CudaError::CacheIo {
             detail: format!(
@@ -2130,6 +2730,201 @@ pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<PathBuf, CudaEr
 ///
 /// いずれのエラー経路でも一時ディレクトリの削除を試みる（best-effort。
 /// 削除失敗はそれ自体をエラーにせず元エラーを優先する）。
+///
+/// Unix 版は `root` を一度だけ [`open_dir_nofollow`] で fd pin し、以降の
+/// 全操作（一時ディレクトリ作成・書き込み・rename・破損判定・退避）を
+/// [`store_cache_entry_at`] へ委譲して fd 相対操作のみで行う（イシュー
+/// #509 PR #677 codex-review P0 指摘対応: `root` を pin した後で
+/// キャッシュルート自体が symlink へ差し替えられても、以降の全操作が
+/// pin 済みの元の実体だけを見るため追従しない）。非 Unix
+/// フォールバックは旧来のパスベース実装をそのまま維持する
+/// （`O_NOFOLLOW` 相当の std API がないため強化できない。本クレートの
+/// ビルド対象は Linux/macOS のみで通常到達しない。[`load_cache_entry_in`]
+/// 〈非 Unix フォールバック〉と同じ判断）。
+#[cfg(unix)]
+fn store_cache_entry_in(
+    root: &Path,
+    key: &CudaKernelCacheKey,
+    kernel_cu: &str,
+    kernel_ptx: &str,
+) -> Result<PathBuf, CudaError> {
+    let final_dir = cache_entry_path_in(root, key)?;
+    let entry_name = key.cache_entry_dir_name()?;
+
+    let root_fd = open_dir_nofollow(root).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to pin cache root {}: {e}", root.display()),
+    })?;
+
+    store_cache_entry_at(
+        &root_fd,
+        root,
+        &final_dir,
+        &entry_name,
+        kernel_cu,
+        kernel_ptx,
+    )
+}
+
+/// [`store_cache_entry_in`]（Unix 版）が pin 済みの `root_fd` を渡して
+/// 呼ぶ、fd 相対操作のみで完結する実処理本体（イシュー #509 PR #677
+/// codex-review P0 指摘対応）。
+///
+/// `root`／`final_dir` は best-effort な後始末（[`fs::remove_dir_all`]
+/// によるベストエフォート削除。削除は containment 突破の経路ではない
+/// ため path ベースのままでよい。[`create_dir_all_verified`] macOS 版の
+/// 同種コメント参照）専用の表示・削除パスとしてのみ使い、実際の
+/// 作成・書き込み・rename・検証は `root_fd`／`entry_name`／
+/// `tmp_name`／`stale_name` の fd 相対操作（[`create_subdir_pinned`]・
+/// [`rename_pinned`]・[`validate_cache_entry_at`]・[`entry_exists_at`]）
+/// のみで行う。テスト容易性のため `root_fd` を注入で決定化する構造は
+/// [`ensure_cache_root_in`] と同型。
+///
+/// # 並行競合の吸収（受け入れ基準 1）
+///
+/// [`rename_pinned`] が失敗した場合、最終エントリに
+/// [`validate_cache_entry_at`] を満たす既存エントリがあれば「他プロセス
+/// （他スレッド）が同一キーへ先着した」**正常系**とみなし、自分の一時
+/// ディレクトリを削除して最終パスを返す（`Ok`）。rename のアトミック性
+/// により、途中状態の破損エントリが他プロセスから観測されることはない
+/// （A08 整合性）。
+///
+/// # 破損エントリの置換（受け入れ基準 2）
+///
+/// 最終エントリが存在するが [`validate_cache_entry_at`] を満たさない
+/// （破損。クラッシュ残骸・外部破壊）場合、削除対象を「検証したその
+/// 実体」に固定するため、まず一意な退避名へ [`rename_pinned`]（atomic）
+/// してから退避コピー側を再検証する（パスベース版と同じ判断。イシュー
+/// #509 codex-review P2 再指摘対応の踏襲）。退避コピーが破損なら削除し、
+/// rename を**一度だけ**再試行する。退避コピーが実は正常だった場合は
+/// 元の位置へ戻す（戻せなければ既に別 writer が先着したとみなし退避
+/// コピーを破棄する）。再試行後も失敗する場合（別プロセスが同時に置き
+/// 直した等）は再度有効性を確認し、有効なら正常系として吸収する。
+/// それでも無効なら無限リトライせず [`CudaError::CacheIo`] で
+/// fail-closed に失敗させる（DoS 耐性。`.claude/rules/security.md` A08）。
+#[cfg(unix)]
+fn store_cache_entry_at(
+    root_fd: &fs::File,
+    root: &Path,
+    final_dir: &Path,
+    entry_name: &str,
+    kernel_cu: &str,
+    kernel_ptx: &str,
+) -> Result<PathBuf, CudaError> {
+    let tmp_name = temp_entry_dir_name(entry_name);
+    let tmp_dir = root.join(&tmp_name); // best-effort クリーンアップ専用
+
+    if let Err(e) = write_entry_files_pinned(root_fd, &tmp_name, kernel_cu, kernel_ptx) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(e);
+    }
+
+    if rename_pinned(root_fd, &tmp_name, root_fd, entry_name).is_ok() {
+        // ルートディレクトリ自体の fsync は best-effort（rename の
+        // アトミック性・可視性自体は fsync に依存しない。エントリ追加が
+        // ディスクへ確実に反映されることを高めるための追加防御に留める）。
+        let _ = root_fd.sync_all();
+        return Ok(final_dir.to_path_buf());
+    }
+
+    // rename 失敗経路: 他プロセス先着（正常系）／破損エントリ置換／
+    // その他 fs エラーのいずれかを、最終エントリの状態から判別する。
+    if validate_cache_entry_at(root_fd, entry_name) {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Ok(final_dir.to_path_buf());
+    }
+
+    if entry_exists_at(root_fd, entry_name) {
+        // 破損エントリの可能性がある経路。ただし直前の
+        // `validate_cache_entry_at` 判定から本チェックまでの間に、別
+        // writer（他プロセス・他スレッド）が正常なエントリを先着配置
+        // した可能性がある（パスベース版と同じ判断。イシュー #509
+        // codex-review P2 指摘 `PRRT_kwDOTuUCJc6ZkpxM` 対応の踏襲）。
+        // 削除直前に再検証し、既に有効なら削除せず正常系として吸収
+        // する: 再検証なしに削除すると、その別 writer の先着エントリを
+        // 「破損」扱いで消してしまい first-writer-wins 契約を破りうる。
+        if validate_cache_entry_at(root_fd, entry_name) {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Ok(final_dir.to_path_buf());
+        }
+
+        // 破損エントリを削除する前に、直前の `validate_cache_entry_at`
+        // 判定と削除の間に別 writer（他プロセス・他スレッド）が破損
+        // エントリを正常なエントリへ atomic rename で置き換え得る
+        // （パスベース版と同じ判断の踏襲）。fd 相対の再検証だけでは
+        // 「検証したその実体」と「削除するその実体」が同一である保証が
+        // ない（検証と削除の間に再度差し替えられ得る）ため、削除対象を
+        // まず一意な退避名へ atomic rename して固定してから検証・削除
+        // する（[`rename_pinned`] は POSIX ではアトミックなので、この
+        // 1 手で「rename 時点で最終エントリにあった実体」を確実に
+        // 捕まえられる）。
+        let stale_name = temp_entry_dir_name(entry_name);
+        match rename_pinned(root_fd, entry_name, root_fd, &stale_name) {
+            Ok(()) => {
+                if validate_cache_entry_at(root_fd, &stale_name) {
+                    // 捕まえた実体は実は正常だった（別 writer が直前の
+                    // 判定後・本 rename 前に先着していた）。
+                    // first-writer-wins 契約を守るため、可能なら元の
+                    // 位置へ戻す。戻せない場合（さらに別 writer が
+                    // 既に最終エントリを埋めた場合）は自分の退避
+                    // コピーを破棄する（いずれにせよ最終エントリには
+                    // 有効なエントリが残る）。
+                    if rename_pinned(root_fd, &stale_name, root_fd, entry_name).is_ok() {
+                        let _ = fs::remove_dir_all(&tmp_dir);
+                        return Ok(final_dir.to_path_buf());
+                    }
+                    let stale_dir = root.join(&stale_name);
+                    let _ = fs::remove_dir_all(&stale_dir);
+                    if validate_cache_entry_at(root_fd, entry_name) {
+                        let _ = fs::remove_dir_all(&tmp_dir);
+                        return Ok(final_dir.to_path_buf());
+                    }
+                } else {
+                    // 退避コピーは検証済みで真に破損している。安全に削除
+                    // できる（最終エントリからは既に rename 済みのため、
+                    // これを削除しても他 writer の実体を破壊しない）。
+                    let stale_dir = root.join(&stale_name);
+                    let _ = fs::remove_dir_all(&stale_dir);
+                }
+            }
+            Err(_) => {
+                // 最終エントリが既に別 writer によって削除・置換された
+                // 等。下の再試行（最終エントリの現状に応じて分岐）へ
+                // フォールスルーする。
+            }
+        }
+
+        // 破損エントリを置換して一度だけ再試行する（無限リトライしない）。
+        // 上の分岐で既に有効なエントリを復元・確認できていれば最終
+        // エントリは存在するため、ここでは何もせず下の最終判定へ
+        // フォールスルーする。
+        if !entry_exists_at(root_fd, entry_name)
+            && rename_pinned(root_fd, &tmp_name, root_fd, entry_name).is_ok()
+        {
+            let _ = root_fd.sync_all();
+            return Ok(final_dir.to_path_buf());
+        }
+    }
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+    if validate_cache_entry_at(root_fd, entry_name) {
+        // 再試行の間に別プロセスが有効なエントリを置いた（正常系）。
+        Ok(final_dir.to_path_buf())
+    } else {
+        Err(CudaError::CacheIo {
+            detail: format!(
+                "failed to atomically rename cache entry into place: {}",
+                final_dir.display()
+            ),
+        })
+    }
+}
+
+/// [`store_cache_entry_in`] の非 Unix フォールバック実装（本クレートの
+/// ビルド対象は Linux/macOS のみのため通常到達しない。[`load_cache_entry_in`]
+/// 〈非 Unix フォールバック〉と同じ判断）。`O_NOFOLLOW` 相当の std API を
+/// 持たないため、Unix 版と異なり fd 起点の TOCTOU 対策強化は適用されない
+/// （旧実装と同水準のパスベース実装を維持する）。
+#[cfg(not(unix))]
 fn store_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
@@ -2146,55 +2941,25 @@ fn store_cache_entry_in(
     }
 
     if fs::rename(&tmp_dir, &final_dir).is_ok() {
-        // ルートディレクトリ自体の fsync は best-effort（rename の
-        // アトミック性・可視性自体は fsync に依存しない。エントリ追加が
-        // ディスクへ確実に反映されることを高めるための追加防御に留める）。
         let _ = fsync_dir(root);
         return Ok(final_dir);
     }
 
-    // rename 失敗経路: 他プロセス先着（正常系）／破損エントリ置換／
-    // その他 fs エラーのいずれかを、最終パスの状態から判別する。
     if validate_cache_entry(&final_dir) {
         let _ = fs::remove_dir_all(&tmp_dir);
         return Ok(final_dir);
     }
 
     if final_dir.exists() {
-        // 破損エントリの可能性がある経路。ただし直前の `validate_cache_entry`
-        // 判定（本関数冒頭側）から本チェックまでの間に、別 writer（他
-        // プロセス・他スレッド）が正常なエントリを先着配置した可能性が
-        // ある（イシュー #509 codex-review P2 指摘
-        // `PRRT_kwDOTuUCJc6ZkpxM` 対応）。削除直前に再検証し、既に有効
-        // なら削除せず正常系として吸収する: 再検証なしに削除すると、
-        // その別 writer の先着エントリを「破損」扱いで消してしまい
-        // first-writer-wins 契約を破りうる。
         if validate_cache_entry(&final_dir) {
             let _ = fs::remove_dir_all(&tmp_dir);
             return Ok(final_dir);
         }
 
-        // 破損エントリを削除する前に、直前の `validate_cache_entry(&final_dir)`
-        // 判定と削除の間に別 writer（他プロセス・他スレッド）が破損
-        // エントリを正常なエントリへ atomic rename で置き換え得る
-        // （イシュー #509 codex-review P2 再指摘対応）。パス文字列に
-        // 対する再検証だけでは「検証したその実体」と「削除するその実体」
-        // が同一である保証がない（検証と削除の間に再度差し替えられ得る）
-        // ため、削除対象をまず一意な退避名へ atomic rename して固定して
-        // から検証・削除する（`fs::rename` は POSIX ではアトミックなので、
-        // この 1 手で「rename 時点で `final_dir` にあった実体」を確実に
-        // 捕まえられる）。
         let stale_dir = root.join(temp_entry_dir_name(&entry_name));
         match fs::rename(&final_dir, &stale_dir) {
             Ok(()) => {
                 if validate_cache_entry(&stale_dir) {
-                    // 捕まえた実体は実は正常だった（別 writer が直前の
-                    // 判定後・本 rename 前に先着していた）。
-                    // first-writer-wins 契約を守るため、可能なら元の
-                    // 位置へ戻す。戻せない場合（さらに別 writer が
-                    // 既に `final_dir` を埋めた場合）は自分の退避
-                    // コピーを破棄する（いずれにせよ `final_dir` には
-                    // 有効なエントリが残る）。
                     if fs::rename(&stale_dir, &final_dir).is_ok() {
                         let _ = fs::remove_dir_all(&tmp_dir);
                         return Ok(final_dir);
@@ -2205,23 +2970,12 @@ fn store_cache_entry_in(
                         return Ok(final_dir);
                     }
                 } else {
-                    // 退避コピーは検証済みで真に破損している。安全に削除
-                    // できる（`final_dir` からは既に rename 済みのため、
-                    // これを削除しても他 writer の実体を破壊しない）。
                     let _ = fs::remove_dir_all(&stale_dir);
                 }
             }
-            Err(_) => {
-                // `final_dir` が既に別 writer によって削除・置換された等。
-                // 下の再試行（`final_dir` の現状に応じて分岐）へ
-                // フォールスルーする。
-            }
+            Err(_) => {}
         }
 
-        // 破損エントリを置換して一度だけ再試行する（無限リトライしない）。
-        // 上の分岐で既に有効なエントリを復元・確認できていれば
-        // `final_dir` は存在するため、ここでは何もせず下の最終判定へ
-        // フォールスルーする。
         if !final_dir.exists() && fs::rename(&tmp_dir, &final_dir).is_ok() {
             let _ = fsync_dir(root);
             return Ok(final_dir);
@@ -2230,7 +2984,6 @@ fn store_cache_entry_in(
 
     let _ = fs::remove_dir_all(&tmp_dir);
     if validate_cache_entry(&final_dir) {
-        // 再試行の間に別プロセスが有効なエントリを置いた（正常系）。
         Ok(final_dir)
     } else {
         Err(CudaError::CacheIo {
@@ -4381,6 +5134,96 @@ mod tests {
         assert_eq!(loaded.kernel_ptx, "first.ptx");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // イシュー #509 PR #677 codex-review P0 再指摘の直接回帰テスト:
+    // 「`ensure_cache_root` が返した canonical path が fd として固定
+    // されず、後続の書き込みがパスを再解決している。検証後にキャッシュ
+    // ルートを rename して同名の symlink に差し替えられると、一時
+    // ディレクトリと `kernel.cu`／`kernel.ptx` が containment 検証外へ
+    // 作成される」を、`store_cache_entry_in` が内部で行う手順
+    // （`open_dir_nofollow(root)` による pin → `store_cache_entry_at` へ
+    // 委譲）を直接呼ぶことでタイミング競合なしに決定的に再現する。
+    //
+    // `root_fd` を pin した**後**に元のパス（`real_root`）にあった実体を
+    // 別名（`moved_aside`）へ rename でどかし、元のパスへは無関係な
+    // `attacker_target` を指す symlink を差し替えで置く（攻撃者が root
+    // pin と書き込みの間で祖先を入れ替えるシナリオを模す。`rmdir` では
+    // なく `rename` でどかすのは、ディレクトリを完全にリンクされた状態
+    // のまま維持するため。`rmdir` 後の unlink 済みディレクトリへの子
+    // 作成可否はファイルシステム依存の未規定動作であり、本テストの
+    // 意図する検証〈pin 済み fd が指す実体が正しい場所であること〉とは
+    // 無関係な不確実性を持ち込むため避ける）。pin 済み fd はこの
+    // 差し替えの影響を受けない（POSIX の `openat`／`mkdirat`／`rename` は
+    // dirfd が指す実体を直接操作し、パス文字列を再解決しない）ため、
+    // `store_cache_entry_at` が fd 相対操作のみで書き込みを行っていれば、
+    // エントリは常に元の実体（`moved_aside`。pin 時点で `real_root` に
+    // あったディレクトリそのもの）側に作られ、`attacker_target` 側には
+    // 一切作られないはずである。
+    #[cfg(unix)]
+    #[test]
+    fn store_at_writes_through_pinned_root_fd_even_after_root_path_is_swapped_to_symlink() {
+        let real_root = fresh_temp_dir("pin-real-root");
+        let moved_aside = fresh_temp_dir("pin-moved-aside-placeholder");
+        // `fresh_temp_dir` は作成まで行うため、rename の宛先として使う
+        // 前に一旦空にしておく（`fs::rename` はディレクトリ同士でも
+        // 宛先が空ディレクトリなら置換できるが、ここでは単純に削除して
+        // から rename する）。
+        fs::remove_dir(&moved_aside).expect("must clear rename destination placeholder");
+        let attacker_target = fresh_temp_dir("pin-attacker-target");
+        let key = sample_key();
+
+        // `store_cache_entry_in` 冒頭と同じ手順: 実ディレクトリを一度だけ
+        // pin する。
+        let root_fd = open_dir_nofollow(&real_root).expect("must pin real cache root");
+
+        // pin 後に実ディレクトリを別名へどかし、元のパスへ無関係な
+        // ディレクトリへの symlink を差し替える。
+        fs::rename(&real_root, &moved_aside).expect("must move the real root directory aside");
+        std::os::unix::fs::symlink(&attacker_target, &real_root)
+            .expect("must plant a symlink at the original root path");
+
+        let final_dir = cache_entry_path_in(&real_root, &key).expect("must compute final dir");
+        let entry_name = key.cache_entry_dir_name().expect("must compute entry name");
+
+        store_cache_entry_at(
+            &root_fd,
+            &real_root,
+            &final_dir,
+            &entry_name,
+            "pinned.cu",
+            "pinned.ptx",
+        )
+        .expect("store must still succeed via the pinned fd, unaffected by the symlink swap");
+
+        // 実体は pin 済み fd（差し替え前の実ディレクトリ、現在は
+        // `moved_aside` の位置）側に作られていること。
+        assert!(
+            validate_cache_entry_at(&root_fd, &entry_name),
+            "entry must land in the directory that was pinned before the symlink swap"
+        );
+        assert!(
+            moved_aside
+                .join(&entry_name)
+                .join(CACHE_ENTRY_SOURCE_FILE)
+                .is_file(),
+            "entry must be observable by path at the directory's post-rename location"
+        );
+
+        // symlink 先（攻撃者が用意した無関係なディレクトリ）には一切
+        // 作られていないこと（containment 突破の直接検証）。
+        assert!(
+            fs::read_dir(&attacker_target)
+                .expect("attacker_target must still be readable")
+                .next()
+                .is_none(),
+            "entry must not leak into the symlink target planted after pinning"
+        );
+
+        drop(root_fd);
+        let _ = fs::remove_dir_all(&moved_aside);
+        let _ = fs::remove_file(&real_root);
+        let _ = fs::remove_dir_all(&attacker_target);
     }
 
     // 受け入れ基準 1: 並行競合（複数スレッド）。同一注入ルート・同一キー
