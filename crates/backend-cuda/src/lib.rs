@@ -137,7 +137,10 @@ mod ops;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
-pub use gemm_auto::{CudaGemmAuto, derive_stages_for_device};
+pub use gemm_auto::{
+    CudaGemmAuto, TileCandidate, derive_stages_for_device, enumerate_tile_candidates,
+    enumerate_tile_candidates_for_device,
+};
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
