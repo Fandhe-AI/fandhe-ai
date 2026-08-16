@@ -1253,6 +1253,7 @@ fn ensure_cache_root_in(
 
     create_dir_all_verified(
         &existing_ancestor,
+        &canonical_existing_ancestor,
         candidate_root,
         &canonical_workspace_root,
     )?;
@@ -1331,9 +1332,21 @@ fn longest_existing_ancestor(path: &Path) -> Option<PathBuf> {
 /// `libc`／`rustix` の `openat`／`mkdirat` は許容依存 8 区分
 /// （`.claude/rules/deps-policy.md`）外のためユーザー承認なしに追加
 /// できない。
+///
+/// `existing_ancestor`（fd pin の起点として使う `canonical_existing_ancestor`
+/// とは別に、`candidate_root` からの相対コンポーネントを求める字句上の
+/// 基準として渡す）自身が正当な symlink（例: `~/.cache` や
+/// `XDG_CACHE_HOME` 自体が workspace 外の実ディレクトリを指す一般的な
+/// 構成）である場合、fd pin を `existing_ancestor` に対して直接
+/// `open_dir_nofollow`（`O_NOFOLLOW`）で行うと、最終コンポーネントが
+/// symlink であること自体を理由に `ELOOP` で拒否してしまい、正当な
+/// 構成を利用不能にする（イシュー #509 codex-review P1 再指摘対応。
+/// Linux のみ・macOS 版は元々 `existing_ancestor` を文字列連結の起点
+/// として使うだけで `O_NOFOLLOW` open を行わないため影響しない）。
 #[cfg(target_os = "linux")]
 fn create_dir_all_verified(
     existing_ancestor: &Path,
+    canonical_existing_ancestor: &Path,
     candidate_root: &Path,
     canonical_workspace_root: &Path,
 ) -> Result<(), CudaError> {
@@ -1347,17 +1360,21 @@ fn create_dir_all_verified(
             ),
         })?;
 
-    // `existing_ancestor` は呼び出し元（[`ensure_cache_root_in`]）が
-    // symlink 解決込みで containment 検証済みの実在ディレクトリ。ここで
-    // 一度だけ fd を pin し、以降は当該 fd 起点の magic path のみを経由
-    // する（`open_dir_nofollow` の `O_NOFOLLOW` により、pin 時点で
-    // symlink へ差し替えられていれば拒否する）。
-    let mut current_dir = open_dir_nofollow(existing_ancestor).map_err(|e| CudaError::CacheIo {
-        detail: format!(
-            "failed to open existing cache directory ancestor {}: {e}",
-            existing_ancestor.display()
-        ),
-    })?;
+    // fd pin の起点には `existing_ancestor`（字句上のパス。symlink で
+    // あり得る）ではなく `canonical_existing_ancestor`（呼び出し元
+    // [`ensure_cache_root_in`] が `Path::canonicalize` で symlink 解決
+    // 済み・containment 検証済みの実在ディレクトリ）を使う。canonicalize
+    // 済みパスは構成コンポーネントに symlink を含まないため
+    // `open_dir_nofollow` の `O_NOFOLLOW` が正当な symlink 祖先を誤って
+    // 拒否することがない（上記ドキュメンテーションコメント参照）。
+    let mut current_dir =
+        open_dir_nofollow(canonical_existing_ancestor).map_err(|e| CudaError::CacheIo {
+            detail: format!(
+                "failed to open existing cache directory ancestor {} (canonical: {}): {e}",
+                existing_ancestor.display(),
+                canonical_existing_ancestor.display()
+            ),
+        })?;
     // 表示・削除用の人間可読パス（セキュリティ判断には使わない。
     // 実際のオープン・作成は常に `current_dir` 起点の magic path で行う）。
     let mut display_path = existing_ancestor.to_path_buf();
@@ -1456,9 +1473,19 @@ fn create_dir_all_verified(
 /// 直後に [`fs::remove_dir`] で削除してから返す（ベストエフォート。
 /// 削除失敗はそれ自体をエラーにせず元エラーを優先する。
 /// [`store_cache_entry_in`] の一時ディレクトリ削除と同じ方針）。
+///
+/// `canonical_existing_ancestor`（Linux 版が fd pin の起点に使う
+/// symlink 解決済みパス。イシュー #509 codex-review P1 再指摘対応）は
+/// 本実装では未使用: 本関数は `existing_ancestor` を `O_NOFOLLOW` で
+/// open することがなく（1 コンポーネントずつ文字列連結した `current` を
+/// [`fs::create_dir`]／[`fs::symlink_metadata`] で扱うのみ）、
+/// `existing_ancestor` 自身が symlink であっても誤って拒否しないため、
+/// Linux 版と同じ問題が生じない。呼び出し元（[`ensure_cache_root_in`]）
+/// を cfg 分岐させずに共有するため引数だけ受け取る。
 #[cfg(not(target_os = "linux"))]
 fn create_dir_all_verified(
     existing_ancestor: &Path,
+    _canonical_existing_ancestor: &Path,
     candidate_root: &Path,
     canonical_workspace_root: &Path,
 ) -> Result<(), CudaError> {
@@ -1574,12 +1601,19 @@ pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<PathBuf, CudaEr
 /// # 破損エントリの置換（受け入れ基準 2）
 ///
 /// 最終パスに既存エントリがあるが [`validate_cache_entry`] を満たさない
-/// （破損。クラッシュ残骸・外部破壊）場合、そのエントリを
-/// [`fs::remove_dir_all`] で削除して rename を**一度だけ**再試行する。
-/// 再試行後も失敗する場合（別プロセスが同時に置き直した等）は再度
-/// 有効性を確認し、有効なら正常系として吸収する。それでも無効なら
-/// 無限リトライせず [`CudaError::CacheIo`] で fail-closed に失敗させる
-/// （DoS 耐性。`.claude/rules/security.md` A08）。
+/// （破損。クラッシュ残骸・外部破壊）場合、削除対象を「検証したその
+/// 実体」に固定するため、まず一意な退避名へ [`fs::rename`]（atomic）
+/// してから退避コピー側を再検証する（イシュー #509 codex-review P2
+/// 再指摘対応。直前の判定と削除の間に別 writer が正常なエントリへ
+/// 置き換えていた場合、パス文字列への `fs::remove_dir_all` だけでは
+/// その正常なエントリを誤って消しうるため、rename で捕まえた実体を
+/// 単位に判定・処理する）。退避コピーが破損なら削除し、rename を
+/// **一度だけ**再試行する。退避コピーが実は正常だった場合は元の位置へ
+/// 戻す（戻せなければ既に別 writer が先着したとみなし退避コピーを
+/// 破棄する）。再試行後も失敗する場合（別プロセスが同時に置き直した
+/// 等）は再度有効性を確認し、有効なら正常系として吸収する。それでも
+/// 無効なら無限リトライせず [`CudaError::CacheIo`] で fail-closed に
+/// 失敗させる（DoS 耐性。`.claude/rules/security.md` A08）。
 ///
 /// いずれのエラー経路でも一時ディレクトリの削除を試みる（best-effort。
 /// 削除失敗はそれ自体をエラーにせず元エラーを優先する）。
@@ -1627,9 +1661,55 @@ fn store_cache_entry_in(
             return Ok(final_dir);
         }
 
-        // 破損エントリ。置換して一度だけ再試行する（無限リトライしない）。
-        let _ = fs::remove_dir_all(&final_dir);
-        if fs::rename(&tmp_dir, &final_dir).is_ok() {
+        // 破損エントリを削除する前に、直前の `validate_cache_entry(&final_dir)`
+        // 判定と削除の間に別 writer（他プロセス・他スレッド）が破損
+        // エントリを正常なエントリへ atomic rename で置き換え得る
+        // （イシュー #509 codex-review P2 再指摘対応）。パス文字列に
+        // 対する再検証だけでは「検証したその実体」と「削除するその実体」
+        // が同一である保証がない（検証と削除の間に再度差し替えられ得る）
+        // ため、削除対象をまず一意な退避名へ atomic rename して固定して
+        // から検証・削除する（`fs::rename` は POSIX ではアトミックなので、
+        // この 1 手で「rename 時点で `final_dir` にあった実体」を確実に
+        // 捕まえられる）。
+        let stale_dir = root.join(temp_entry_dir_name(&entry_name));
+        match fs::rename(&final_dir, &stale_dir) {
+            Ok(()) => {
+                if validate_cache_entry(&stale_dir) {
+                    // 捕まえた実体は実は正常だった（別 writer が直前の
+                    // 判定後・本 rename 前に先着していた）。
+                    // first-writer-wins 契約を守るため、可能なら元の
+                    // 位置へ戻す。戻せない場合（さらに別 writer が
+                    // 既に `final_dir` を埋めた場合）は自分の退避
+                    // コピーを破棄する（いずれにせよ `final_dir` には
+                    // 有効なエントリが残る）。
+                    if fs::rename(&stale_dir, &final_dir).is_ok() {
+                        let _ = fs::remove_dir_all(&tmp_dir);
+                        return Ok(final_dir);
+                    }
+                    let _ = fs::remove_dir_all(&stale_dir);
+                    if validate_cache_entry(&final_dir) {
+                        let _ = fs::remove_dir_all(&tmp_dir);
+                        return Ok(final_dir);
+                    }
+                } else {
+                    // 退避コピーは検証済みで真に破損している。安全に削除
+                    // できる（`final_dir` からは既に rename 済みのため、
+                    // これを削除しても他 writer の実体を破壊しない）。
+                    let _ = fs::remove_dir_all(&stale_dir);
+                }
+            }
+            Err(_) => {
+                // `final_dir` が既に別 writer によって削除・置換された等。
+                // 下の再試行（`final_dir` の現状に応じて分岐）へ
+                // フォールスルーする。
+            }
+        }
+
+        // 破損エントリを置換して一度だけ再試行する（無限リトライしない）。
+        // 上の分岐で既に有効なエントリを復元・確認できていれば
+        // `final_dir` は存在するため、ここでは何もせず下の最終判定へ
+        // フォールスルーする。
+        if !final_dir.exists() && fs::rename(&tmp_dir, &final_dir).is_ok() {
             let _ = fsync_dir(root);
             return Ok(final_dir);
         }
@@ -3562,6 +3642,52 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&workspace_root);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    // symlink 再検証（cfg(unix)）・正当な外部 symlink 祖先の許容: 祖先
+    // （`~/.cache`／`XDG_CACHE_HOME` 相当）自体が symlink であっても、
+    // その解決先が `workspace_root` 外の正当なディレクトリであれば
+    // 拒否せずディレクトリを実体化できること（イシュー #509 codex-review
+    // P1 再指摘対応の回帰テスト。修正前は Linux 版が
+    // `open_dir_nofollow`（`O_NOFOLLOW`）を symlink である祖先そのものへ
+    // 適用していたため `CacheIo` で失敗していた）。
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cache_root_in_accepts_legitimate_ancestor_symlink_outside_workspace() {
+        let workspace_root = fresh_temp_dir("legit-ancestor-symlink-workspace");
+
+        // symlink とその解決先はいずれも `workspace_root` 外に置く
+        // （`~/.cache` が別ディスク上の実ディレクトリを指す一般的な
+        // 構成を模す）。
+        let real_target = fresh_temp_dir("legit-ancestor-symlink-real-target");
+        let outside_dir = fresh_temp_dir("legit-ancestor-symlink-outside");
+        let ancestor_symlink = outside_dir.join("cache-symlink");
+        std::os::unix::fs::symlink(&real_target, &ancestor_symlink)
+            .expect("must create ancestor symlink pointing outside workspace_root");
+
+        // `candidate_root` はこの symlink のさらに下（まだ存在しない）。
+        let candidate = ancestor_symlink.join("nested/cache/dir");
+        assert!(
+            !candidate.exists(),
+            "candidate must not exist yet to reproduce the pre-existing-ancestor scenario"
+        );
+
+        let resolved = ensure_cache_root_in(&candidate, &workspace_root).expect(
+            "a legitimate ancestor symlink resolving outside workspace_root must be accepted",
+        );
+
+        assert!(resolved.is_dir());
+        assert_eq!(
+            resolved,
+            real_target
+                .join("nested/cache/dir")
+                .canonicalize()
+                .expect("resolved cache root must exist under the symlink's real target")
+        );
+
+        let _ = fs::remove_dir_all(&workspace_root);
+        let _ = fs::remove_dir_all(&real_target);
         let _ = fs::remove_dir_all(&outside_dir);
     }
 
