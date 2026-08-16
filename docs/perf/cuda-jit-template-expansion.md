@@ -96,7 +96,7 @@ cuobjdump -sass <compiled.cubin> | less
 - 生成ソースのディスパッチ・実行経路への結線後の実測（C-7 #519 のスコープ）
 - 段数逆算（`derive_pipeline_stages`・C-8 #521）との統合実測
 
-`cargo test -p backend-cuda --release -- --ignored --nocapture` は本実装セッションの環境（NVRTC 非搭載）では実行不能なため未実行のまま。実機実測は #531／#534 へ引き継ぐ。
+`cargo test -p backend-cuda --release --all-features -- --ignored --nocapture` は本実装セッションの環境（NVRTC 非搭載）では実行不能なため未実行のまま。実機実測は #531／#534 へ引き継ぐ（PR #685 codex-review/Bugbot 指摘の是正: `internal-diagnostics` feature 配下の対象テストが `--all-features` なしではビルド対象から外れ実行されない〈§6.2 参照〉ため、コマンド例に明記する）。
 
 ## 6. 実機 parity 検証（#531）
 
@@ -118,4 +118,4 @@ cuobjdump -sass <compiled.cubin> | less
 - `cargo fmt --all -- --check`／`cargo clippy --workspace --all-targets --all-features -- -D warnings`／`cargo test --workspace`（実機依存 `#[ignore]` を除く全テスト）が green
 - `git diff` で `tests/common/parity_baseline.rs`・tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）・`Cargo.toml`/`Cargo.lock` に差分がないことを確認済み
 
-DGX Spark GB10（spark-dbd9・sm_121）実機での `cargo test -p backend-cuda --test specialized_mma_parity -- --ignored --nocapture` 実行、および既存 `cpu_cuda_mma_parity.rs`／`parity_nonregression.rs` の `--ignored` 併走による非後退確認は、本実装セッションでは未了のまま残タスクとする（実装計画 §5 手順 6・§5 安全側フォールバック方針。`docs/real-hardware-verification-env.md` の手順に従う）。実測結果は本節を追記更新する形で記録する。
+DGX Spark GB10（spark-dbd9・sm_121）実機での `cargo test -p backend-cuda --test specialized_mma_parity --features internal-diagnostics -- --ignored --nocapture`（`specialized_mma_parity` は `[[test]] required-features = ["internal-diagnostics"]` でゲートされているため `--features internal-diagnostics`〈または `--all-features`〉指定が必須。指定なしでは cargo がテストバイナリをビルド対象から外し `--ignored` を渡しても実行されない false-green になる。PR #685 codex-review/Bugbot 指摘の是正）実行、および既存 `cpu_cuda_mma_parity.rs`／`parity_nonregression.rs` の `--ignored` 併走による非後退確認は、本実装セッションでは未了のまま残タスクとする（実装計画 §5 手順 6・§5 安全側フォールバック方針。`docs/real-hardware-verification-env.md` の手順に従う）。実測結果は本節を追記更新する形で記録する。
