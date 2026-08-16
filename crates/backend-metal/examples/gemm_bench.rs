@@ -102,6 +102,21 @@ mod macos_impl {
         flops / measurement.median_secs / 1e12
     }
 
+    /// 昇順ソート済みでない `f64` 列から中央値を求める（要素数が偶数の
+    /// 場合は中央 2 要素の平均）。`.claude/rules/coding-rust.md` の
+    /// 「ベンチは 5 回計測の中央値を採用」に合わせ、occupancy 判定組み込み
+    /// 比較のラウンド交互方式（後述）で得た各ラウンドの計測値を集約する
+    /// のに使う。
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(|a, b| a.partial_cmp(b).expect("TFLOPS は NaN にならない"));
+        let n = values.len();
+        if n % 2 == 1 {
+            values[n / 2]
+        } else {
+            (values[n / 2 - 1] + values[n / 2]) / 2.0
+        }
+    }
+
     /// `dispatch_auto`（`crate::tile::select` による行列サイズ別自動選択。
     /// TASK-1.8f・#188）を計測する。
     fn measure_auto(
@@ -234,26 +249,65 @@ mod macos_impl {
         // metal-gemm-occupancy-select.md` の記録テンプレへ転記できるように
         // する。
         println!("--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy）---");
+        // ラウンド交互方式（codex-review 指摘・PR #684）: 旧→新の固定順で
+        // 全 warmup・計測を終えてから他方を計測すると、GPU の DVFS・温度
+        // 上昇によるクロックスロットリングが計測順序に系統的に乗り、
+        // `new_over_old` 比が測定順序に左右されてしまう（受け入れ条件
+        // 「select() 比の性能非劣化」の判定を汚染しうる）。これを避ける
+        // ため、ROUNDS 回の独立ラウンドに分割し、ラウンドごとに旧→新／
+        // 新→旧の順序を反転させながら交互計測する。旧・新それぞれの
+        // ラウンド計測値（各ラウンドは `bench_run` 内部で warmup・計測とも
+        // `MeasurementConfig` の下限を満たした上での中央値）をさらに束ね、
+        // その中央値（`.claude/rules/coding-rust.md`「ベンチは 5 回計測の
+        // 中央値」）を最終値として `new_over_old` を求める。
+        const ROUNDS: usize = 5;
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
 
             let old_cfg = tile::select(size, size, size);
-            let old_tflops = measure(
-                &gemm,
-                &ctx,
-                GemmVariant::SimdgroupTiled(old_cfg),
-                size,
-                &config,
-            );
-
             let new_cfg = tile::select_with_occupancy(size, size, size, ctx.occupancy_params());
-            let new_tflops = measure(
-                &gemm,
-                &ctx,
-                GemmVariant::SimdgroupTiled(new_cfg),
-                size,
-                &config,
-            );
+
+            let mut old_samples = Vec::with_capacity(ROUNDS);
+            let mut new_samples = Vec::with_capacity(ROUNDS);
+
+            for round in 0..ROUNDS {
+                // 偶数ラウンド（0-origin）は旧→新、奇数ラウンドは新→旧に
+                // 反転し、順序バイアスをラウンド間で打ち消す。
+                if round % 2 == 0 {
+                    old_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(old_cfg),
+                        size,
+                        &config,
+                    ));
+                    new_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(new_cfg),
+                        size,
+                        &config,
+                    ));
+                } else {
+                    new_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(new_cfg),
+                        size,
+                        &config,
+                    ));
+                    old_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(old_cfg),
+                        size,
+                        &config,
+                    ));
+                }
+            }
+
+            let old_tflops = median(old_samples);
+            let new_tflops = median(new_samples);
 
             println!(
                 "size={size} old_tile=({}x{}) old_tflops={old_tflops:.4} new_tile=({}x{}) new_tflops={new_tflops:.4} new_over_old={:.4} occupancy_params={:?}",
