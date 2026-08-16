@@ -122,14 +122,19 @@ pub trait BackendOps {
     /// デフォルトを **カーネル内融合実装でオーバーライド**し、中間
     /// `Tensor` 2 個の割当・GEMM 結果の再読み出しパスを削減する
     /// （CUTLASS 系実測で epilogue 融合が平均 1.38〜1.45 倍。動機は
-    /// イシュー #203）。CUDA／Metal はこのデフォルト（非融合合成）へ
-    /// フォールバックする。両バックエンドは本イシュー時点で GEMM
+    /// イシュー #203）。CUDA はイシュー #599 で
+    /// `backend-cuda::ops::CudaBackendOps::gemm_bias_act` が本デフォルトを
+    /// **カーネル内融合実装でオーバーライド**した（CPU と同じ「bias が
+    /// `None` または `[n]` 厳密一致なら融合、それ以外は非融合合成へ
+    /// フォールバック」という分岐条件。`backend-cuda::ops::
+    /// gemm_bias_act_route` 参照）。Metal は本デフォルト（非融合合成）へ
+    /// フォールバックしたままとする。Metal は本イシュー時点でも GEMM
     /// カーネルのみ実装済みで elementwise 側が
     /// [`BackendError::Unsupported`] を返すため（モジュール冒頭コメント
     /// 参照）、`bias.is_some() || act != Activation::None` の場合は
-    /// GPU 側で `Unsupported` を透過的に返す（GPU カーネル内 epilogue
-    /// 融合は #203 のスコープ外。out-of-scope-tracking.md に従いユーザー
-    /// 承認を得て別 Issue で追跡する）。
+    /// `Unsupported` を透過的に返す（Metal 側 GPU カーネル内 epilogue
+    /// 融合は #203／#599 のスコープ外。out-of-scope-tracking.md に従い
+    /// ユーザー承認を得て別 Issue で追跡する）。
     ///
     /// `bias` の shape が `[n]` の場合（CPU バックエンドでは融合カーネルの
     /// 対応範囲）はそのまま計算する。`[n]` でない場合は `add` の NumPy

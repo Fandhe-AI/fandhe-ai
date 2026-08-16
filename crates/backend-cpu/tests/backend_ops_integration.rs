@@ -263,17 +263,25 @@ fn unregistered_device_returns_device_unavailable_not_panic() {
 }
 
 #[test]
-fn cuda_add_returns_typed_unsupported_not_panic() {
-    // CUDA は driver 非搭載環境でも `add` は「未実装カーネル」の
-    // `Unsupported` を driver 呼び出し前に返す（`backend-cuda/src/ops.rs`）。
+fn cuda_add_returns_typed_error_not_panic() {
+    // イシュー #599: `add` は CUDA カーネル実装済みのため、driver 非搭載
+    // 環境（本 CI 環境）では `device_handle()` の driver 初期化時点で
+    // `BackendError::CudaUnavailable` を返すようになった
+    // （`backend-cuda/src/ops.rs`）。実機なら `Ok` を返す（`backend-cuda/
+    // tests/backend_ops_real_device.rs` の `#[ignore]` テストが実カーネル
+    // 一致まで検証する）。ここでは環境適応で「panic しない」ことと型付き
+    // エラーであることのみ検証する。
     let cuda = CudaBackendOps::new(0);
     let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
     let b = a.clone();
 
-    assert!(matches!(
-        cuda.add(&a, &b),
-        Err(BackendError::Unsupported(_))
-    ));
+    match cuda.add(&a, &b) {
+        Ok(_) => {}
+        Err(BackendError::CudaUnavailable(msg)) => {
+            assert!(!msg.is_empty(), "error detail message must not be empty");
+        }
+        Err(other) => panic!("unexpected error variant for CudaBackendOps::add: {other}"),
+    }
 }
 
 // ---------------------------------------------------------------------

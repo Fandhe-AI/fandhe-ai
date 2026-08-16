@@ -101,13 +101,25 @@
   2.56 倍**の改善（5 回中央値。全形状で融合が非融合を上回る）。数値一致
   は bit 完全一致（epilogue が要素ごとに独立な演算で演算順序に依存しない
   ため。同文書「数値一致」節）。
-- **GPU（CUDA NVRTC・Metal MSL）**: 本文書執筆時点で GEMM カーネルのみ
-  実装済みで elementwise（`add`／`relu`）が未実装のため、`bias`／`act`
-  指定時は透過的にデフォルト実装（非融合合成）へフォールバックする
-  （`Unsupported` 経由。`docs/perf/cpu-gemm-epilogue-fusion.md`「スコープ
-  外」節）。GPU カーネル内 epilogue 融合の実装自体は実機検証前提のため
-  未着手（`out-of-scope-tracking.md` に従いユーザー承認取得後に別イシュー
-  で追跡する）。
+- **GPU（CUDA NVRTC・Metal MSL）**: イシュー #599 で CUDA 側に elementwise
+  5 演算（`add`／`mul`／`relu`／`exp`／`tanh`）と `gemm_bias_act` の
+  epilogue 融合カーネル（`kernels::TILED_BIAS_ACT_F32`・
+  `CudaGemm::run_tiled_bias_act_f32`）を実装した。`bias` が `None`、
+  または `B: [k, n]` の列数 `n` に厳密一致する `[n]` 形状の場合に融合
+  カーネルへ進み（`ops::gemm_bias_act_route`）、`gemm`→`add`→`relu` の
+  非融合合成と同一の tiled アキュムレーション順序を経由するため bit
+  完全一致する（CPU `gemm_blis_bias_act_parallel` と同じ「epilogue を
+  カーネル内で完結させる」設計思想）。`[1]`・`[1, n]` 等ブロードキャスト
+  可能だが `[n]` ちょうどでない shape はデフォルト実装（非融合合成）へ
+  フォールバックする（CUDA は本イシューで `add`／`relu` を実装済みの
+  ため CPU と異なり `Unsupported` を経由しない）。実機での実測（融合 vs
+  非融合の 5 回計測中央値）は `docs/perf/cuda-gemm-epilogue-fusion.md`
+  を参照（未実施の場合はその旨が明記される）。Metal は本文書執筆時点で
+  GEMM カーネルのみ実装済みで elementwise 未実装のままであり、`bias`／
+  `act` 指定時は引き続き `Unsupported` 経由でデフォルト実装（非融合
+  合成）へフォールバックする。Metal 側 epilogue 融合の実装自体は実機
+  検証前提のため未着手（`out-of-scope-tracking.md` に従いユーザー承認
+  取得後に別イシューで追跡する）。
 
 ## 3. 限界
 
@@ -193,12 +205,16 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
   VJP 計算式専用の融合グラフ構築・`FusedOpKind` への演算表現拡張
   （`sub` 等）を要する（`docs/fusion-graph-design.md` §6.2「backward
   （VJP）融合」）。
-- **GPU バックエンドへの融合展開**: 現状 CUDA／Metal は GEMM カーネル
-  のみ実装済みで elementwise 未実装のため、§2.2 の epilogue 融合を含め
-  GPU 側の融合はデフォルト実装（非融合合成）へのフォールバックに留まる
-  （§2.2）。実機（DGX Spark GB10・Metal 実機）での検証を要するため、
+- **GPU バックエンドへの融合展開**: CUDA は §2.2 のとおりイシュー #599 で
+  elementwise 5 演算・`gemm_bias_act` epilogue 融合を実装済み。Metal は
+  引き続き GEMM カーネルのみ実装済みで elementwise 未実装のため、GPU
+  側の融合はデフォルト実装（非融合合成）へのフォールバックに留まる
+  （§2.2）。Metal 側の融合展開は実機（Metal 実機）での検証を要するため、
   ユーザー承認を得たうえで別イシューとして追跡する
-  （`.claude/rules/out-of-scope-tracking.md`）。
+  （`.claude/rules/out-of-scope-tracking.md`）。CUDA 側の `run_fused`
+  （融合 IR 実行。§2.1）自体は本イシューのスコープ外のまま
+  （`tensor_core::backend_ops::BackendOps::run_fused` デフォルト実装
+  ＝`Unsupported` を継続使用）。
 - **f16 対応**: `BackendOps`・`NodeMeta.dtype` とも現状 f32 固定であり、
   f16 融合カーネルの型設計は未着手（`docs/fusion-graph-design.md`
   §6.2「f16 対応」）。
