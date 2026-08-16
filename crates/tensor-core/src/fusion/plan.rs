@@ -107,6 +107,18 @@ pub enum FusedOpKind {
         lhs: FusedNodeIndex,
         rhs: FusedNodeIndex,
     },
+    /// 減算（`lhs - rhs`）。softmax の `x - max(x)` を表現するために
+    /// #588 で追加。`graph.rs::FusionOp::Sub` と 1:1 対応。
+    Sub {
+        lhs: FusedNodeIndex,
+        rhs: FusedNodeIndex,
+    },
+    /// 除算（`lhs / rhs`）。softmax の `exp(..) / sum(..)` を表現するため
+    /// #588 で追加。`graph.rs::FusionOp::Div` と 1:1 対応。
+    Div {
+        lhs: FusedNodeIndex,
+        rhs: FusedNodeIndex,
+    },
     Relu {
         input: FusedNodeIndex,
     },
@@ -131,6 +143,13 @@ pub enum FusedOpKind {
     },
     /// [`FusedOpKind::Sum`] と同じ写像規約に従う reduction。
     Max {
+        input: FusedNodeIndex,
+        axis: Option<usize>,
+    },
+    /// 縮約済みテンソル `input` をセグメント軸に沿って元の行 shape へ
+    /// 論理拡張する（#588）。`graph.rs::FusionOp::Broadcast` と 1:1
+    /// 対応し、`dim`→`axis` の写像規約は `Sum`／`Max` と同一。
+    Broadcast {
         input: FusedNodeIndex,
         axis: Option<usize>,
     },
@@ -181,13 +200,19 @@ pub enum FusionPlanError {
     LastOpIsInput,
     /// `output_shape` の要素数積が `usize` でオーバーフローする
     /// （`tensor-core::tensor::checked_numel` と同じ検査を `from_ops`
-    /// でも行う。`from_segment` 経路は `output_shape` を既存の検証済み
-    /// `Tensor` の shape からのみ導出するため対象外だが、`from_ops` は
+    /// が構築の全経路で行う。`from_segment` 経路は `output_shape` を
+    /// 既存の検証済み `Tensor` の shape からのみ導出するため、この
+    /// 構築時点の全経路検査としては対象外に留めているが、`from_ops` は
     /// `autodiff` から任意の `Vec<usize>` を直接受け取る公開経路であり、
     /// `FusionPlan` 単体の型不変条件として shape 妥当性を保証する必要が
     /// ある。レビュー指摘 #163: 検証を欠くと不正 shape でも構築に成功し、
     /// 後段〈`backend-cpu::run_fused_elementwise`〉の shape 一致検証に
-    /// 検証責務が漏れ出す）。
+    /// 検証責務が漏れ出す）。ただし [`RowFusionMeta::row_len`]
+    /// （`axis: None` の全縮約ケース）は `compute_row_fusion` が経路
+    /// 共通で `checked_numel` 相当の検査を行うため、`from_segment`
+    /// であってもこの派生値の積算オーバーフローは本 variant で
+    /// fail-closed に拒否される（PR #687 Bugbot #2「Unchecked row_len
+    /// product」対応）。
     OutputShapeOverflow,
     /// `ops` 内の `Sum`／`Max` エントリの `axis` が、セグメント内で最初に
     /// 現れた reduction が確定した軸と一致しない（#586・`detect.rs` の
@@ -202,6 +227,41 @@ pub enum FusionPlanError {
         expected: Option<usize>,
         actual: Option<usize>,
     },
+    /// `ops` 内の `Broadcast` エントリの `axis` が、セグメント内で最初に
+    /// 現れた reduction／broadcast が確定した軸と一致しない（#588。
+    /// [`MismatchedReductionAxis`](Self::MismatchedReductionAxis) と対称の
+    /// 検証だが、`detect.rs::detect_fusion` が reduction／broadcast を
+    /// 同じセグメント軸判定の対象として扱う一方（`graph.rs::FusionOp::
+    /// reduction_dim`／`broadcast_dim` の対）、`Sum`／`Max` の軸不一致と
+    /// `Broadcast` の軸不一致を呼び出し元が区別して診断できるよう別
+    /// variant にする。`#[non_exhaustive]` のため後方互換に新規追加
+    /// できる）。
+    MismatchedBroadcastAxis {
+        at: usize,
+        expected: Option<usize>,
+        actual: Option<usize>,
+    },
+    /// [`FusionPlan::row_fusion`]（#588・§3.5）が導出する行融合メタデータ
+    /// の軸が `output_shape` の rank 範囲外（`axis: Some(a)` で
+    /// `a >= output_shape.len()`）。`compute_row_fusion`（本モジュール
+    /// 下部の共通ヘルパー）が返す fail-closed 検証エラー。
+    RowAxisOutOfRange { axis: usize, rank: usize },
+    /// `ops` が `Broadcast` を 1 個以上含むにもかかわらず、最後の
+    /// `Broadcast` より後方（発生順で後）に reduction（`Sum`／`Max`）が
+    /// 存在する——すなわち broadcast で行 shape へ復元した後に再度
+    /// 縮約が起こり、出力 shape が行 shape のまま維持されない
+    /// （#588 実装計画 §3.5）。「末尾ノードが reduction か」だけを見る
+    /// のではなく、最後の `Broadcast` より後方の任意の位置（末尾に
+    /// 限らない。例: `Sum → Broadcast → Sum → Relu` のように再縮約の
+    /// 後に elementwise で終端するプラン）を対象に検査する（PR #687
+    /// Bugbot #1「Incomplete reduced-output guard」対応）。RMSNorm／
+    /// softmax のように「broadcast で行 shape へ戻してから、再縮約を
+    /// 挟まずに終端する」パターンのみを本イシューでは表現可能とする
+    /// 安全側の制約であり、broadcast 後に再縮約するプランは表現不能
+    /// として fail-closed に拒否する（緩和は将来イシュー。#588 実装計画
+    /// §9「スコープ外・申し送り」）。`at` は検出された reduction ノード
+    /// のインデックス（末尾ノードとは限らない）。
+    ReducedOutputWithBroadcast { at: usize },
 }
 
 impl fmt::Display for FusionPlanError {
@@ -244,6 +304,24 @@ impl fmt::Display for FusionPlanError {
             } => write!(
                 f,
                 "fusion plan node {at} reduction axis {actual:?} does not match segment axis {expected:?}"
+            ),
+            FusionPlanError::MismatchedBroadcastAxis {
+                at,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "fusion plan node {at} broadcast axis {actual:?} does not match segment axis {expected:?}"
+            ),
+            FusionPlanError::RowAxisOutOfRange { axis, rank } => write!(
+                f,
+                "fusion plan row-fusion axis {axis} out of range (output rank={rank})"
+            ),
+            FusionPlanError::ReducedOutputWithBroadcast { at } => write!(
+                f,
+                "fusion plan node {at} (after the last Broadcast) is a reduction while the plan \
+                 contains Broadcast; broadcast-containing plans must terminate with a row-shaped \
+                 output"
             ),
         }
     }
@@ -304,11 +382,179 @@ impl From<FusionPlanError> for BackendError {
             // `NoElementwiseNode`／`LastOpIsInput` と同じ `Unsupported`
             // へ寄せる（`err.to_string()` で `at`/`expected`/`actual` を
             // 保持したメッセージのまま伝播する）。
-            FusionPlanError::MismatchedReductionAxis { .. } => {
+            // #588: `MismatchedBroadcastAxis`／`ReducedOutputWithBroadcast`
+            // は `MismatchedReductionAxis` と同じ「融合として成立しない」
+            // 意味論のため `Unsupported` へ寄せる。`RowAxisOutOfRange` は
+            // 行融合メタデータ導出時点の shape 不整合であり
+            // `OutputShapeOverflow` と同種の型不変条件違反のため
+            // `ShapeMismatch` 系へ寄せる。
+            FusionPlanError::MismatchedReductionAxis { .. }
+            | FusionPlanError::MismatchedBroadcastAxis { .. }
+            | FusionPlanError::ReducedOutputWithBroadcast { .. } => {
                 BackendError::Unsupported(err.to_string())
+            }
+            FusionPlanError::RowAxisOutOfRange { axis, rank } => {
+                BackendError::ShapeMismatch(ShapeError::AxisOutOfRange { axis, rank })
             }
         }
     }
+}
+
+/// 行方向 reduction＋broadcast 融合プランの行メタデータ（#588・受け入れ
+/// 基準 2）。「行方向 reduction → 派生スカラー（rstd／max／sum）→ 同一行へ
+/// broadcast 適用」という 2 パス構造を持つプラン（[`FusionPlan::row_fusion`]
+/// が `Some` を返すプラン）について、行方向の形状事実（軸・行長）のみを
+/// 提供する。フィールドは private とし、下記アクセサ経由でのみ読み取れる
+/// （`FusionPlan` 本体と同じ「`tensor-core` 外からは構築・分解できない」
+/// 設計方針）。
+///
+/// # 1 パス／2 パス判定は各バックエンドの責務（codex-review PR #687 P2 是正）
+///
+/// 当初は `row_len <= 8192`（TileKernels の実測値を転用した定数
+/// `MAX_SINGLE_PASS_ROW_LEN`）を「1 パス実装で行全体をレジスタ常駐できる
+/// か」のヒントとしてここに持たせていたが、この閾値は CUDA の
+/// レジスタ／smem 予算に基づく実測値であり、`tensor-core` は backend
+/// 非依存層（`docs/fusion-graph-design.md` §3.4）である以上、CPU／Metal
+/// バックエンドにまで同じ閾値を無条件で提示するのは責務境界を越える
+/// （CPU にはレジスタ常駐の概念自体が薄く、Metal の smem／レジスタ予算は
+/// CUDA と異なる）。よって `RowFusionMeta` は `axis`／`row_len` の形状
+/// 事実のみを公開し、1 パス／2 パス（あるいは smem タイル分割）の判定は
+/// `row_len` を読んだ各バックエンド（`backend-cuda` 等）が自前の予算で
+/// 行う設計へ変更した。本 PR 時点でこの判定を行う利用側実装（`run_fused`
+/// のカーネル選択。実装は #164 以降）はまだ存在しないため、旧
+/// `single_pass_hint` フィールド・`MAX_SINGLE_PASS_ROW_LEN` 定数は
+/// 削除のみで足りる（利用側があれば移設が必要だったが、`git grep` で
+/// 確認した限り本 workspace 内に利用側は無かった）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowFusionMeta {
+    axis: Option<usize>,
+    row_len: usize,
+}
+
+impl RowFusionMeta {
+    /// セグメント軸（`FusedOpKind::Sum`／`Max`／`Broadcast` の `axis` と
+    /// 同じ値。`None` は全軸縮約を表す）。
+    pub fn axis(&self) -> Option<usize> {
+        self.axis
+    }
+
+    /// 行長（`axis: Some(a)` なら `output_shape[a]`、`axis: None`
+    /// （全縮約）なら `output_shape` の要素数積）。1 パス／2 パスの
+    /// カーネル選択判定は本値を読んだ各バックエンドの責務とする
+    /// （本 struct 上部 doc 「1 パス／2 パス判定は各バックエンドの責務」
+    /// 参照）。
+    pub fn row_len(&self) -> usize {
+        self.row_len
+    }
+}
+
+/// [`RowFusionMeta`] の導出（`from_segment`／`from_ops` の共通ヘルパー。
+/// #588 実装計画 §3.5「二重実装しない」）。`ops` が `Broadcast` を 1 個も
+/// 含まなければ `Ok(None)`（#586 までの reduction-only プランは後方互換で
+/// `None` のまま。§3.5）。含む場合は fail-closed 検証（§3.6）を行った上で
+/// `Ok(Some(_))` を返す。
+///
+/// # エラー
+///
+/// - [`FusionPlanError::RowAxisOutOfRange`]: セグメント軸 `Some(a)` が
+///   `output_shape` の rank 範囲外。
+/// - [`FusionPlanError::ReducedOutputWithBroadcast`]: 最後の `Broadcast`
+///   より発生順で後方に reduction（`Sum`／`Max`）が存在する（末尾ノード
+///   に限らない）——broadcast で行 shape へ復元し、再縮約を挟まずに
+///   終端する RMSNorm／softmax 型のみを表現可能とする安全側の制約
+///   （§3.5・§9「スコープ外・申し送り」）。
+/// - [`FusionPlanError::OutputShapeOverflow`]: `axis: None`（全縮約）の
+///   場合の `row_len`（`output_shape` の要素数積）が `usize` で
+///   オーバーフローする。
+fn compute_row_fusion(
+    ops: &[FusedOpKind],
+    output_shape: &[usize],
+) -> Result<Option<RowFusionMeta>, FusionPlanError> {
+    // セグメント軸: `ops` 内で最初に現れた Sum／Max／Broadcast の
+    // `axis`（`from_segment`〈`detect.rs` のセグメント軸一致判定〉・
+    // `from_ops`〈本モジュール `check_preceding` 呼び出し元〉のいずれの
+    // 経路でも、この時点までに全 reduction／broadcast エントリが同一軸を
+    // 持つことが既に検証済みのため、最初の 1 個を読めば十分。
+    let axis = ops.iter().find_map(|op| match *op {
+        FusedOpKind::Sum { axis, .. }
+        | FusedOpKind::Max { axis, .. }
+        | FusedOpKind::Broadcast { axis, .. } => Some(axis),
+        _ => None,
+    });
+
+    // 最後に現れた `Broadcast` の位置。`ops` が `Broadcast` を 1 個も
+    // 含まない場合は `None` となり、その場で `Ok(None)`（#586 までの
+    // reduction-only プランの後方互換）を返す。従来は「`Broadcast` を
+    // 含むか」の判定（`has_broadcast`）と「最後の位置」の探索を別々の
+    // 走査で行い、後者を `.expect()` で「必ず `Some`」と決め打ちしていた
+    // （レビュー指摘: PR #687 codex-review P1「本番経路で panic しうる」
+    // ・coding-rust.md「本番経路で unwrap()/expect() を使わない」）。
+    // `rposition` の戻り値をそのまま分岐に使うことで、論理的な不変条件
+    // （`Broadcast` を含む ⇒ 最後の位置が存在する）をコンパイラの型で
+    // 表現し、到達しないはずの分岐でも panic ではなく `Ok(None)`
+    // （非融合として扱う fail-closed な既定挙動）へ倒す。
+    let Some(last_broadcast_at) = ops
+        .iter()
+        .rposition(|op| matches!(op, FusedOpKind::Broadcast { .. }))
+    else {
+        return Ok(None);
+    };
+
+    // 「末尾ノードが reduction か」だけを見る素朴な判定（旧実装）では、
+    // `Broadcast` で行 shape へ復元した後に再度 `Sum`／`Max` で縮約し、
+    // その縮約済みテンソルに対して elementwise で終端するプラン（例:
+    // `Sum → Broadcast → Sum → Relu`）を素通りさせてしまう。この場合
+    // `ops` 末尾は elementwise だが、実際の `output_shape`（後段の
+    // 再縮約の出力）は行 shape に復元されないままであり、`row_fusion`
+    // が「出力は行 shape に復元済み」という契約を偽って報告することに
+    // なる（レビュー指摘: PR #687 Bugbot #1「Incomplete reduced-output
+    // guard」）。よって「最後の `Broadcast` より後方に `Sum`／`Max` が
+    // 1 個でも存在するか」を fail-closed に検査する（末尾ノードのみを
+    // 見る旧判定を包含する一般化: 末尾が reduction ならそれ自体が
+    // 「最後の Broadcast より後方の reduction」に該当するため同じ結果
+    // になる）。
+    if let Some(offset) = ops[last_broadcast_at + 1..]
+        .iter()
+        .position(|op| matches!(op, FusedOpKind::Sum { .. } | FusedOpKind::Max { .. }))
+    {
+        return Err(FusionPlanError::ReducedOutputWithBroadcast {
+            at: last_broadcast_at + 1 + offset,
+        });
+    }
+
+    // `axis` は `ops` が `Broadcast` を含む（上記 `last_broadcast_at`
+    // 導出済み）以上、上の `find_map` で必ず `Some` になる（`Broadcast`
+    // エントリ自身がこの `find_map` に一致するため）。
+    let axis = axis.unwrap_or(None);
+
+    let row_len = match axis {
+        Some(a) => {
+            let rank = output_shape.len();
+            *output_shape
+                .get(a)
+                .ok_or(FusionPlanError::RowAxisOutOfRange { axis: a, rank })?
+        }
+        // 全縮約（`axis: None`）: 行長は出力テンソルの要素数積
+        // （`RowFusionMeta::row_len` doc 参照）。`from_ops` は本関数
+        // 呼び出し前に `checked_numel` でオーバーフローを弾いているが、
+        // `from_segment` は `output_shape` を `FusionGraph` ノードの
+        // `meta.shape`（呼び出し側が任意に構築できる `pub(crate)` 値。
+        // `graph.rs::push` は shape 同士の整合〈reduce/broadcast の逆
+        // 関係〉のみを検証し要素数積のオーバーフローまでは検証しない）
+        // からそのまま受け取るため、素朴な乗算では debug で panic・
+        // release で wrap した誤った `row_len` を許しうる（レビュー
+        // 指摘: PR #687 Bugbot #2「Unchecked row_len product」）。
+        // `from_segment`／`from_ops` のどちらの経路かに関わらず
+        // `checked_numel` と同じ検査を経路共通のここで行い、
+        // オーバーフロー時は同種の型不変条件違反である
+        // `OutputShapeOverflow` へ寄せる（`from_ops` にとっては
+        // 到達しない冗長検査だが、`from_segment` にとっては唯一の
+        // 検査点になる）。
+        None => crate::tensor::checked_numel(output_shape)
+            .map_err(|_| FusionPlanError::OutputShapeOverflow)?,
+    };
+
+    Ok(Some(RowFusionMeta { axis, row_len }))
 }
 
 /// `run_fused`（`BackendOps` の非破壊拡張。実装は #164）へ渡す公開の
@@ -335,6 +581,10 @@ pub struct FusionPlan {
     /// 回数。境界ノード（Gemm／Sum／Max。プラン外）からの参照は含まない
     /// （設計書 §3.4 `use_count` アクセサの契約）。
     use_counts: Vec<usize>,
+    /// 行方向 reduction＋broadcast 融合の行メタデータ（#588・§3.5）。
+    /// `ops` が `Broadcast` を 1 個以上含むプランのみ `Some`（#586 までの
+    /// reduction-only プランは `None` のまま後方互換を保つ）。
+    row_fusion: Option<RowFusionMeta>,
 }
 
 impl FusionPlan {
@@ -404,6 +654,16 @@ impl FusionPlan {
                     lhs: lookup_index(&index_of, a.0)?,
                     rhs: lookup_index(&index_of, b.0)?,
                 },
+                // #588: `Sub`／`Div` は `Add`／`Mul` と同じオペランド解決に
+                // 相乗りする。
+                FusionOp::Sub(a, b) => FusedOpKind::Sub {
+                    lhs: lookup_index(&index_of, a.0)?,
+                    rhs: lookup_index(&index_of, b.0)?,
+                },
+                FusionOp::Div(a, b) => FusedOpKind::Div {
+                    lhs: lookup_index(&index_of, a.0)?,
+                    rhs: lookup_index(&index_of, b.0)?,
+                },
                 FusionOp::Relu(a) => FusedOpKind::Relu {
                     input: lookup_index(&index_of, a.0)?,
                 },
@@ -430,6 +690,14 @@ impl FusionPlan {
                     input: lookup_index(&index_of, a.0)?,
                     axis: *dim,
                 },
+                // #588: `Broadcast` も reduction と同じくセグメント軸が
+                // 一致する限り `detect_fusion` がセグメントへ組み込む
+                // ため、ここに現れうる。`dim`→`axis` の写像規約は
+                // `Sum`／`Max` と同一。
+                FusionOp::Broadcast { input: a, dim } => FusedOpKind::Broadcast {
+                    input: lookup_index(&index_of, a.0)?,
+                    axis: *dim,
+                },
                 FusionOp::Input | FusionOp::Gemm(..) => {
                     // 到達しない防御的分岐（上記コメント参照）。専用の
                     // `FusionGraphError::UnexpectedOpKind` を返す
@@ -448,6 +716,11 @@ impl FusionPlan {
         let dtype = root_node.meta.dtype;
 
         let use_counts = compute_use_counts(&ops);
+        // #588 §3.5: `compute_row_fusion` のエラーは detect_fusion／push
+        // の検証を通過した通常経路では到達しない防御的検証だが、戻り値型
+        // を `FusionGraphError` に統一するため `FusionGraphError::Plan`
+        // （`graph.rs` の `From<FusionPlanError>` 実装）へ `?` で合流させる。
+        let row_fusion = compute_row_fusion(&ops, &output_shape)?;
 
         Ok(FusionPlan {
             ops,
@@ -455,6 +728,7 @@ impl FusionPlan {
             dtype,
             leaf_count,
             use_counts,
+            row_fusion,
         })
     }
 
@@ -482,10 +756,19 @@ impl FusionPlan {
     /// - `ops` の末尾エントリが `Input` でないこと（モジュール冒頭
     ///   「出力ノードの契約」）
     /// - `Sum`／`Max` エントリの `axis` が、`ops` 内で最初に現れた
-    ///   reduction の `axis` と一致すること（#586。`detect_fusion` の
-    ///   セグメント軸一致判定〈`detect.rs`〉と同じ不変条件を `ops` を
-    ///   直接受け取るこの経路でも検証する。不一致は
+    ///   reduction／broadcast の `axis` と一致すること（#586。
+    ///   `detect_fusion` のセグメント軸一致判定〈`detect.rs`〉と同じ
+    ///   不変条件を `ops` を直接受け取るこの経路でも検証する。不一致は
     ///   [`FusionPlanError::MismatchedReductionAxis`]）
+    /// - `Broadcast` エントリの `axis` が同じセグメント軸と一致すること
+    ///   （#588。不一致は [`FusionPlanError::MismatchedBroadcastAxis`]）
+    /// - [`compute_row_fusion`] の検証（#588・§3.5）: `Broadcast` を含む
+    ///   場合、セグメント軸が `output_shape` の rank 範囲内であること
+    ///   （[`FusionPlanError::RowAxisOutOfRange`]）、最後の `Broadcast`
+    ///   より後方に reduction が存在しないこと
+    ///   （[`FusionPlanError::ReducedOutputWithBroadcast`]）、`axis: None`
+    ///   の `row_len` 積算がオーバーフローしないこと
+    ///   （[`FusionPlanError::OutputShapeOverflow`]）
     #[doc(hidden)]
     pub fn from_ops(
         ops: Vec<FusedOpKind>,
@@ -507,9 +790,10 @@ impl FusionPlan {
         // `leaf_index` を見逃す。`0..leaf_count` へ一度ずつ出現する
         // ことをここで確定する）。
         let mut leaf_seen = vec![false; leaf_count];
-        // セグメント軸（#586。`detect.rs::detect_fusion` の
-        // `segment_axis` と同じ役割を `ops` の直接検証側でも担う）。
-        let mut reduction_axis: Option<Option<usize>> = None;
+        // セグメント軸（#586・#588 で broadcast にも適用範囲を拡張。
+        // `detect.rs::detect_fusion` の `segment_axis` と同じ役割を
+        // `ops` の直接検証側でも担う）。
+        let mut segment_axis: Option<Option<usize>> = None;
         for (at, op) in ops.iter().enumerate() {
             match *op {
                 FusedOpKind::Input { leaf_index } => {
@@ -524,7 +808,10 @@ impl FusionPlan {
                         return Err(FusionPlanError::DuplicateLeafIndex { leaf_index });
                     }
                 }
-                FusedOpKind::Add { lhs, rhs } | FusedOpKind::Mul { lhs, rhs } => {
+                FusedOpKind::Add { lhs, rhs }
+                | FusedOpKind::Mul { lhs, rhs }
+                | FusedOpKind::Sub { lhs, rhs }
+                | FusedOpKind::Div { lhs, rhs } => {
                     has_elementwise = true;
                     check_preceding(lhs, at)?;
                     check_preceding(rhs, at)?;
@@ -539,9 +826,25 @@ impl FusionPlan {
                 FusedOpKind::Sum { input, axis } | FusedOpKind::Max { input, axis } => {
                     has_elementwise = true;
                     check_preceding(input, at)?;
-                    let expected = *reduction_axis.get_or_insert(axis);
+                    let expected = *segment_axis.get_or_insert(axis);
                     if expected != axis {
                         return Err(FusionPlanError::MismatchedReductionAxis {
+                            at,
+                            expected,
+                            actual: axis,
+                        });
+                    }
+                }
+                // #588: `Broadcast` も reduction と同じセグメント軸一致
+                // 判定に参加する（「Input 以外を最低 1 個含む」判定への
+                // 寄与も reduction と同様）。軸不一致は reduction とは
+                // 別 variant（`MismatchedBroadcastAxis`）で診断性を保つ。
+                FusedOpKind::Broadcast { input, axis } => {
+                    has_elementwise = true;
+                    check_preceding(input, at)?;
+                    let expected = *segment_axis.get_or_insert(axis);
+                    if expected != axis {
+                        return Err(FusionPlanError::MismatchedBroadcastAxis {
                             at,
                             expected,
                             actual: axis,
@@ -573,6 +876,7 @@ impl FusionPlan {
             .map_err(|_| FusionPlanError::OutputShapeOverflow)?;
 
         let use_counts = compute_use_counts(&ops);
+        let row_fusion = compute_row_fusion(&ops, &output_shape)?;
 
         Ok(FusionPlan {
             ops,
@@ -580,6 +884,7 @@ impl FusionPlan {
             dtype,
             leaf_count,
             use_counts,
+            row_fusion,
         })
     }
 
@@ -622,6 +927,17 @@ impl FusionPlan {
     pub fn use_count(&self, node: FusedNodeIndex) -> usize {
         self.use_counts.get(node).copied().unwrap_or(0)
     }
+
+    /// 行方向 reduction＋broadcast 融合の行メタデータ（#588・受け入れ
+    /// 基準 2）。`ops` が `Broadcast` を 1 個以上含むプランのみ `Some`
+    /// を返す（#586 までの reduction-only プランは `None`。後方互換）。
+    /// バックエンド（`run_fused` 実装）はこれ（`axis`／`row_len`）を読んで
+    /// 1 パス／2 パスのカーネル実装を自前の予算で選択できる
+    /// （`RowFusionMeta` 型 doc「1 パス／2 パス判定は各バックエンドの
+    /// 責務」参照）。
+    pub fn row_fusion(&self) -> Option<&RowFusionMeta> {
+        self.row_fusion.as_ref()
+    }
 }
 
 /// `index_of`（元の `FusionNodeId(usize)` -> プラン内 [`FusedNodeIndex`]
@@ -662,7 +978,10 @@ fn compute_use_counts(ops: &[FusedOpKind]) -> Vec<usize> {
     let mut counts = vec![0usize; ops.len()];
     for op in ops {
         match *op {
-            FusedOpKind::Add { lhs, rhs } | FusedOpKind::Mul { lhs, rhs } => {
+            FusedOpKind::Add { lhs, rhs }
+            | FusedOpKind::Mul { lhs, rhs }
+            | FusedOpKind::Sub { lhs, rhs }
+            | FusedOpKind::Div { lhs, rhs } => {
                 counts[lhs] += 1;
                 counts[rhs] += 1;
             }
@@ -671,7 +990,8 @@ fn compute_use_counts(ops: &[FusedOpKind]) -> Vec<usize> {
             | FusedOpKind::Tanh { input }
             | FusedOpKind::Rsqrt { input }
             | FusedOpKind::Sum { input, .. }
-            | FusedOpKind::Max { input, .. } => {
+            | FusedOpKind::Max { input, .. }
+            | FusedOpKind::Broadcast { input, .. } => {
                 counts[input] += 1;
             }
             FusedOpKind::Input { .. } => {}
@@ -1095,5 +1415,441 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.use_count(0), 1);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_segment`
+    /// で RMSNorm プランを構築すると `row_fusion()` が
+    /// `Some`（axis: None・row_len: 8）になる
+    /// （`detect.rs::rmsnorm_pattern_with_explicit_broadcast_is_a_single_segment`
+    /// と同型のグラフ）。
+    #[test]
+    fn from_segment_builds_rmsnorm_plan_with_row_fusion_metadata() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[8])).unwrap();
+        let sq = g.push(FusionOp::Mul(x, x), f32_meta(&[8])).unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: sq,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        let rsqrt = g.push(FusionOp::Rsqrt(sum), f32_meta(&[])).unwrap();
+        let bc = g
+            .push(
+                FusionOp::Broadcast {
+                    input: rsqrt,
+                    dim: None,
+                },
+                f32_meta(&[8]),
+            )
+            .unwrap();
+        let out = g.push(FusionOp::Mul(bc, x), f32_meta(&[8])).unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let segment = match decision {
+            FusionDecision::Fuse(seg) => seg,
+            other => panic!("expected Fuse, got {other:?}"),
+        };
+        let plan = FusionPlan::from_segment(&g, &segment).unwrap();
+        let ops: Vec<FusedOpKind> = plan.ops().collect();
+        // leaf 0=x, 1=sq(Mul(0,0)), 2=sum(Sum{None}(1)), 3=rsqrt(2),
+        // 4=bc(Broadcast{None}(3)), 5=out(Mul(4,0))
+        assert_eq!(ops.len(), 6);
+        assert!(matches!(
+            ops[4],
+            FusedOpKind::Broadcast {
+                input: 3,
+                axis: None
+            }
+        ));
+        let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
+        assert_eq!(row_fusion.axis(), None);
+        assert_eq!(row_fusion.row_len(), 8);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_segment`
+    /// で softmax プラン（7 ops + 葉 1）を構築すると `row_fusion()` が
+    /// `Some`（axis: Some(1)・row_len: 8）になる
+    /// （`detect.rs::softmax_pattern_with_seven_nodes_is_a_single_segment`
+    /// と同型のグラフ）。
+    #[test]
+    fn from_segment_builds_softmax_plan_with_row_fusion_metadata() {
+        let mut g = FusionGraph::new();
+        let x = g.push(FusionOp::Input, f32_meta(&[2, 8])).unwrap();
+        let mx = g
+            .push(
+                FusionOp::Max {
+                    input: x,
+                    dim: Some(1),
+                },
+                f32_meta(&[2]),
+            )
+            .unwrap();
+        let bc1 = g
+            .push(
+                FusionOp::Broadcast {
+                    input: mx,
+                    dim: Some(1),
+                },
+                f32_meta(&[2, 8]),
+            )
+            .unwrap();
+        let sub = g.push(FusionOp::Sub(x, bc1), f32_meta(&[2, 8])).unwrap();
+        let exp = g.push(FusionOp::Exp(sub), f32_meta(&[2, 8])).unwrap();
+        let sm = g
+            .push(
+                FusionOp::Sum {
+                    input: exp,
+                    dim: Some(1),
+                },
+                f32_meta(&[2]),
+            )
+            .unwrap();
+        let bc2 = g
+            .push(
+                FusionOp::Broadcast {
+                    input: sm,
+                    dim: Some(1),
+                },
+                f32_meta(&[2, 8]),
+            )
+            .unwrap();
+        let div = g.push(FusionOp::Div(exp, bc2), f32_meta(&[2, 8])).unwrap();
+
+        let decision = detect_fusion(&g, div).unwrap();
+        let segment = match decision {
+            FusionDecision::Fuse(seg) => seg,
+            other => panic!("expected Fuse, got {other:?}"),
+        };
+        let plan = FusionPlan::from_segment(&g, &segment).unwrap();
+        assert_eq!(plan.leaf_count(), 1);
+        let ops: Vec<FusedOpKind> = plan.ops().collect();
+        assert_eq!(ops.len(), 8); // 1 leaf + mx + bc1 + sub + exp + sm + bc2 + div
+        assert!(matches!(ops[7], FusedOpKind::Div { .. }));
+        let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
+        assert_eq!(row_fusion.axis(), Some(1));
+        assert_eq!(row_fusion.row_len(), 8);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_ops`
+    /// でも RMSNorm パターンを構築でき、`row_fusion()` が
+    /// `from_segment` と同じ結果になる（autodiff 経路の対称性）。
+    #[test]
+    fn from_ops_builds_rmsnorm_plan_with_row_fusion_metadata() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Mul { lhs: 0, rhs: 0 },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: None,
+                },
+                FusedOpKind::Rsqrt { input: 2 },
+                FusedOpKind::Broadcast {
+                    input: 3,
+                    axis: None,
+                },
+                FusedOpKind::Mul { lhs: 4, rhs: 0 },
+            ],
+            vec![8],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
+        assert_eq!(row_fusion.axis(), None);
+        assert_eq!(row_fusion.row_len(), 8);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_ops`
+    /// でも softmax パターンを構築できる（autodiff 経路の対称性）。
+    #[test]
+    fn from_ops_builds_softmax_plan_with_row_fusion_metadata() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Max {
+                    input: 0,
+                    axis: Some(1),
+                },
+                FusedOpKind::Broadcast {
+                    input: 1,
+                    axis: Some(1),
+                },
+                FusedOpKind::Sub { lhs: 0, rhs: 2 },
+                FusedOpKind::Exp { input: 3 },
+                FusedOpKind::Sum {
+                    input: 4,
+                    axis: Some(1),
+                },
+                FusedOpKind::Broadcast {
+                    input: 5,
+                    axis: Some(1),
+                },
+                FusedOpKind::Div { lhs: 4, rhs: 6 },
+            ],
+            vec![2, 8],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
+        assert_eq!(row_fusion.axis(), Some(1));
+        assert_eq!(row_fusion.row_len(), 8);
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 2」）: `row_len` は
+    /// `axis: None`（全縮約）の場合 `output_shape` の要素数積そのものを
+    /// そのまま返す（1 パス／2 パス判定用の閾値は `RowFusionMeta` から
+    /// 削除済みのため、本テストは `row_len` の値そのものの検証に留める。
+    /// 閾値判定は各バックエンドの責務。本 struct 上部 doc「1 パス／2 パス
+    /// 判定は各バックエンドの責務」参照）。
+    #[test]
+    fn row_fusion_row_len_matches_output_shape_product_for_full_reduction() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Broadcast {
+                    input: 0,
+                    axis: None,
+                },
+            ],
+            vec![8193],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
+        assert_eq!(row_fusion.row_len(), 8193);
+    }
+
+    /// 受け入れ基準（#586 との後方互換。#588 実装計画 §3.5）: `Broadcast`
+    /// を含まない reduction-only プランは `row_fusion() == None` のまま。
+    #[test]
+    fn row_fusion_is_none_for_reduction_only_plan() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Relu { input: 0 },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: Some(0),
+                },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        assert!(plan.row_fusion().is_none());
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 4」）: `Broadcast`
+    /// の軸がセグメント軸と一致しない場合、`from_ops` は
+    /// [`FusionPlanError::MismatchedBroadcastAxis`] で fail-closed に
+    /// 拒否する（`from_ops_rejects_mismatched_reduction_axis` と対称）。
+    #[test]
+    fn from_ops_rejects_mismatched_broadcast_axis() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Sum {
+                    input: 0,
+                    axis: Some(0),
+                },
+                FusedOpKind::Broadcast {
+                    input: 1,
+                    axis: Some(1),
+                },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            FusionPlanError::MismatchedBroadcastAxis {
+                at: 2,
+                expected: Some(0),
+                actual: Some(1),
+            }
+        );
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 4」）: `Broadcast`
+    /// のセグメント軸が `output_shape` の rank 範囲外の場合、
+    /// [`FusionPlanError::RowAxisOutOfRange`] で拒否される。
+    #[test]
+    fn from_ops_rejects_row_axis_out_of_range() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Broadcast {
+                    input: 0,
+                    axis: Some(5),
+                },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, FusionPlanError::RowAxisOutOfRange { axis: 5, rank: 1 });
+    }
+
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 4」）: `Broadcast`
+    /// を含むにもかかわらず末尾（出力）ノードが reduction（`Sum`／`Max`）
+    /// の場合、[`FusionPlanError::ReducedOutputWithBroadcast`] で
+    /// fail-closed に拒否される（broadcast 後に再縮約して終端するプラン
+    /// は #588 のスコープ外。実装計画 §9）。
+    #[test]
+    fn from_ops_rejects_reduced_output_with_broadcast() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Broadcast {
+                    input: 0,
+                    axis: None,
+                },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: None,
+                },
+            ],
+            vec![4],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, FusionPlanError::ReducedOutputWithBroadcast { at: 2 });
+    }
+
+    /// レビュー指摘（PR #687 Bugbot #1「Incomplete reduced-output
+    /// guard」）の反例そのもの: `Broadcast` で行 shape へ復元した後に
+    /// 再度 `Sum` で縮約し、その縮約済みテンソルに対して elementwise
+    /// （`Relu`）で終端するプラン（`ops` 末尾は `Sum` ではなく
+    /// `Relu`）。「末尾ノードのみが reduction か」を見る旧実装では
+    /// この形を素通りさせてしまうが、「最後の `Broadcast` より後方に
+    /// reduction が存在するか」を見る現実装では
+    /// [`FusionPlanError::ReducedOutputWithBroadcast`] で fail-closed に
+    /// 拒否される（`at` は再縮約ノード自身のインデックスであり、
+    /// 末尾ノードのインデックスではない）。
+    #[test]
+    fn from_ops_rejects_reduction_after_broadcast_even_when_last_op_is_elementwise() {
+        let err = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Broadcast {
+                    input: 0,
+                    axis: None,
+                },
+                FusedOpKind::Sum {
+                    input: 1,
+                    axis: None,
+                },
+                FusedOpKind::Relu { input: 2 },
+            ],
+            vec![],
+            DType::F32,
+            1,
+        )
+        .unwrap_err();
+        assert_eq!(err, FusionPlanError::ReducedOutputWithBroadcast { at: 2 });
+    }
+
+    /// レビュー指摘（PR #687 Bugbot #2「Unchecked row_len product」）の
+    /// 反例: `from_segment` 経路で `axis: None`（全縮約）の `row_len`
+    /// （`output_shape` の要素数積）がオーバーフローする場合、
+    /// `compute_row_fusion` が `checked_numel` 相当の検査で
+    /// [`FusionPlanError::OutputShapeOverflow`] を返す（旧実装は
+    /// `from_ops` のみ構築時に `checked_numel` を呼んでおり、
+    /// `from_segment` は `FusionGraph` ノードの `meta.shape`
+    /// （`graph.rs::push` は shape 同士の整合のみ検証し要素数積の
+    /// オーバーフローは検証しない）をそのまま経由するため素朴な乗算が
+    /// debug で panic・release で wrap しうる隙間があった）。
+    #[test]
+    fn from_segment_rejects_row_len_overflow_on_none_axis() {
+        let mut g = FusionGraph::new();
+        // `usize::MAX * 2` は `usize` の乗算でオーバーフローする shape。
+        let overflow_shape = [usize::MAX, 2];
+        let x = g.push(FusionOp::Input, f32_meta(&overflow_shape)).unwrap();
+        let sq = g
+            .push(FusionOp::Mul(x, x), f32_meta(&overflow_shape))
+            .unwrap();
+        let sum = g
+            .push(
+                FusionOp::Sum {
+                    input: sq,
+                    dim: None,
+                },
+                f32_meta(&[]),
+            )
+            .unwrap();
+        let rsqrt = g.push(FusionOp::Rsqrt(sum), f32_meta(&[])).unwrap();
+        let bc = g
+            .push(
+                FusionOp::Broadcast {
+                    input: rsqrt,
+                    dim: None,
+                },
+                f32_meta(&overflow_shape),
+            )
+            .unwrap();
+        let out = g
+            .push(FusionOp::Mul(bc, x), f32_meta(&overflow_shape))
+            .unwrap();
+
+        let decision = detect_fusion(&g, out).unwrap();
+        let segment = match decision {
+            FusionDecision::Fuse(seg) => seg,
+            other => panic!("expected Fuse, got {other:?}"),
+        };
+        let err = FusionPlan::from_segment(&g, &segment).unwrap_err();
+        assert_eq!(
+            err,
+            FusionGraphError::Plan(Box::new(FusionPlanError::OutputShapeOverflow))
+        );
+    }
+
+    /// #588: `use_count` 集計に `Sub`／`Div`／`Broadcast` が正しく寄与する
+    /// （softmax パターンで `exp`〈プラン内 index 4〉が `Sum` と `Div`
+    /// の両方から参照されることを固定する）。
+    #[test]
+    fn from_ops_use_count_includes_sub_div_broadcast() {
+        let plan = FusionPlan::from_ops(
+            vec![
+                FusedOpKind::Input { leaf_index: 0 },
+                FusedOpKind::Max {
+                    input: 0,
+                    axis: Some(1),
+                },
+                FusedOpKind::Broadcast {
+                    input: 1,
+                    axis: Some(1),
+                },
+                FusedOpKind::Sub { lhs: 0, rhs: 2 },
+                FusedOpKind::Exp { input: 3 },
+                FusedOpKind::Sum {
+                    input: 4,
+                    axis: Some(1),
+                },
+                FusedOpKind::Broadcast {
+                    input: 5,
+                    axis: Some(1),
+                },
+                FusedOpKind::Div { lhs: 4, rhs: 6 },
+            ],
+            vec![2, 8],
+            DType::F32,
+            1,
+        )
+        .unwrap();
+        // exp（index 4）は Sum（index 5）と Div（index 7）の 2 か所から
+        // 参照される。
+        assert_eq!(plan.use_count(4), 2);
     }
 }
