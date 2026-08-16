@@ -821,12 +821,26 @@ fn validate_cache_entry(entry_dir: &Path) -> bool {
         && is_plain_file(&entry_dir.join(CACHE_ENTRY_PTX_FILE))
 }
 
-/// `path` が symlink ではない通常ファイルであるかを、symlink を追跡
-/// しない [`fs::symlink_metadata`] で判定する（[`validate_cache_entry`]
-/// 用。イシュー #509 codex-review P0 指摘対応）。
+/// `path` が symlink ではない・空でない通常ファイルであるかを、symlink
+/// を追跡しない [`fs::symlink_metadata`] で判定する（[`validate_cache_entry`]
+/// 用。イシュー #509 codex-review P0 指摘対応・PR #677 Bugbot 指摘
+/// 〈Empty entries block replacement〉対応）。
+///
+/// 非空検査（`meta.len() > 0`）を含めるのは、[`read_verified_cache_entry_file`]
+/// の非空検査（実装計画 §3.1 の不変条件「両ファイルが存在し、いずれも
+/// 空でない」）と判定基準を一致させるため。この検査を省くと、クラッシュ
+/// 直後の 0 バイト残骸（`create` 直後・書き込み前にプロセスが落ちた場合
+/// 等）を本関数（`validate_cache_entry` 経由で [`store_cache_entry_in`]
+/// の破損判定に使われる）は「有効」と誤判定する一方、読み込み側
+/// （[`read_verified_cache_entry_file`]）は同じ残骸を「ミス」として
+/// `Ok(None)` にする。この不一致があると、rename 衝突時に
+/// `store_cache_entry_in` が 0 バイト残骸を正常な先着エントリとみなして
+/// 自分の新規書き込みを破棄してしまい、そのキーは以降ずっと「ミスと
+/// 判定されて再コンパイルされる」空回りに陥る（正常書き込みが永久に
+/// キャッシュへ反映されない）。
 fn is_plain_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_file())
+        .map(|meta| meta.file_type().is_file() && meta.len() > 0)
         .unwrap_or(false)
 }
 
@@ -873,6 +887,22 @@ const O_NONBLOCK: i32 = 0o4000;
 /// Linux 版と同じ理由・同じ用途。
 #[cfg(target_os = "macos")]
 const O_NONBLOCK: i32 = 0x0004;
+
+/// macOS（Darwin）の `O_CLOEXEC`（`<fcntl.h>` では `0x01000000`）。
+/// [`openat_nofollow`] 専用（イシュー #509 PR #677 codex-review P2
+/// 指摘対応）。
+///
+/// [`open_nofollow`]／[`open_dir_nofollow`] は `std::fs::OpenOptions`
+/// 経由で開くため、std が全 Unix open 系呼び出しへ既定で付与する
+/// close-on-exec（`sys::pal::unix::fs` 実装。fork/exec 先へ fd を漏らさない
+/// ための std 既定動作）を自動的に受け取る。一方 `openat_nofollow` は
+/// std を経由しない `extern "C"` の `openat(2)` 直接呼び出しのため
+/// std の既定付与が及ばず、明示的に `O_CLOEXEC` を渡さない限り生成
+/// fd に close-on-exec が設定されない（`self-repair` 等がサブ
+/// プロセスを fork/exec する経路と将来結合した場合、この fd がキャッシュ
+/// エントリの中身を子プロセスへ意図せず漏出させうる）。
+#[cfg(target_os = "macos")]
+const O_CLOEXEC: i32 = 0x0100_0000;
 
 /// `path` を `O_NOFOLLOW | O_NONBLOCK` 付きで開く（[`load_cache_entry_in`]
 /// 用。イシュー #509 codex-review P0 指摘対応）。
@@ -983,12 +1013,26 @@ fn proc_fd_path(dir: &fs::File) -> PathBuf {
 // ブロックへの `///` ドキュメンテーションコメントを認識しないため
 // `//` の通常コメントとする。`aarch64-apple-darwin` クロスチェックで
 // unused-doc-comments として検出）。
+//
+// POSIX の実 C シグネチャは `int openat(int, const char *, int, ...)`
+// という variadic 関数（`mode_t mode` は `O_CREAT`／`O_TMPFILE` 指定時
+// のみ渡される可変引数）である。`...` を落とし固定 3 引数として宣言
+// すると、可変引数を 1 つも渡さない呼び出しであっても Rust コンパイラ
+// が非 variadic 呼び出し規約でコード生成しうる（イシュー #509 PR #677
+// codex-review P0 再指摘: `aarch64-apple-darwin` の Apple 独自 ABI は
+// variadic 呼び出しに対し固定引数と異なるスタック渡し規約を要求する
+// ため、宣言と実体の不一致は未定義動作になりうる）。以下は `...` を
+// 明示し、呼び出し側（[`openat_nofollow`]）も可変引数を 1 つも渡さず
+// `mode` 相当の引数を渡さない（`O_CREAT` を指定しないため mode は
+// 意味を持たない）ことで、実体の variadic 関数へ ABI 上安全に対応
+// させる。
 #[cfg(all(unix, not(target_os = "linux")))]
 unsafe extern "C" {
     fn openat(
         dirfd: std::os::raw::c_int,
         pathname: *const std::os::raw::c_char,
         flags: std::os::raw::c_int,
+        ...
     ) -> std::os::raw::c_int;
 }
 
@@ -1028,8 +1072,19 @@ fn openat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
     // （`man 2 openat`）。戻り値は新規 fd（成功時 `>= 0`）または `-1`
     // （失敗時。`errno` は `std::io::Error::last_os_error()` で読む）で
     // あり、いずれも呼び出し直後にこの Rust コードへ制御を戻す前提を
-    // 満たす。
-    let fd = unsafe { openat(dir.as_raw_fd(), c_name.as_ptr(), O_NOFOLLOW | O_NONBLOCK) };
+    // 満たす。`openat` は宣言上 variadic（[`openat`] 宣言のコメント
+    // 参照）だが本呼び出しは可変引数を 1 つも渡さない（`O_CREAT` を
+    // 指定しないため `mode` 相当の引数は不要かつ渡してはならない）。
+    // `O_CLOEXEC` を付与し、std 経由の open（[`open_nofollow`]・
+    // [`open_dir_nofollow`]）が既定で得る close-on-exec と同じ保証を
+    // 揃える（[`O_CLOEXEC`] 定数のコメント参照）。
+    let fd = unsafe {
+        openat(
+            dir.as_raw_fd(),
+            c_name.as_ptr(),
+            O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC,
+        )
+    };
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -3617,6 +3672,45 @@ mod tests {
             loaded.is_none(),
             "entry with an empty kernel.cu must be a miss, not a crash-remnant hit"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 受け入れ基準（実装計画 §3.1・§8）: PR #677 Bugbot 指摘〈Empty
+    // entries block replacement〉の回帰テスト。`validate_cache_entry`
+    // （`is_plain_file` 経由）が 0 バイト残骸を「有効」と誤判定すると、
+    // `store_cache_entry_in` の rename 衝突時の破損判定
+    // （`!validate_cache_entry(&final_dir)`）を通過してしまい、新規
+    // 書き込みが破棄されて空回りキャッシュミスが恒久化する（`is_plain_file`
+    // の非空検査追加前は本テストが失敗していたはず）。0 バイト残骸を
+    // `store_cache_entry_in` が「破損」として検出・置換することを検証する。
+    #[test]
+    fn store_replaces_zero_byte_remnant_entry() {
+        let root = fresh_temp_dir("zero-byte-remnant");
+        let key = sample_key();
+
+        let entry_dir = store_cache_entry_in(&root, &key, "stale-cu", "stale-ptx")
+            .expect("initial store must succeed");
+        // クラッシュ直後の 0 バイト残骸を模す（`create` 直後・書き込み前に
+        // プロセスが落ちた場合等）。ファイル自体は存在し `is_file()` は
+        // 真だが、内容は空。
+        fs::write(entry_dir.join(CACHE_ENTRY_SOURCE_FILE), b"")
+            .expect("must truncate kernel.cu to zero bytes");
+        assert!(
+            !validate_cache_entry(&entry_dir),
+            "zero-byte kernel.cu must make the entry invalid (corrupt), not merely a load-time miss"
+        );
+
+        let replaced = store_cache_entry_in(&root, &key, "fresh-cu", "fresh-ptx").expect(
+            "store must replace the zero-byte remnant instead of absorbing it as first-writer-wins",
+        );
+        assert_eq!(replaced, entry_dir);
+
+        let loaded = load_cache_entry_in(&root, &key, "fresh-cu")
+            .expect("load must succeed")
+            .expect("replaced entry must be a hit");
+        assert_eq!(loaded.kernel_cu, "fresh-cu");
+        assert_eq!(loaded.kernel_ptx, "fresh-ptx");
 
         let _ = fs::remove_dir_all(&root);
     }
