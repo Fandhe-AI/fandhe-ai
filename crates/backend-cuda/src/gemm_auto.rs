@@ -27,7 +27,7 @@ use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gem
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
-use crate::gemm_mma::validate_mma_alignment;
+use crate::gemm_mma::{validate_mma_alignment, validate_mma_grid_bounds};
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
     MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
@@ -504,6 +504,698 @@ impl TileCandidate {
     }
 }
 
+/// L1/L2 帯域コストモデルによる静的タイル構成選定（Phase C-9b・イシュー
+/// #527）。[`enumerate_tile_candidates`]（C-9a・#524）が列挙した
+/// [`TileCandidate`] 群から、実行時ベンチマークを一切行わずに最良 1 件を
+/// 決定的に選ぶ。
+///
+/// 参照実装は DeepGEMM（`sm90.hpp` の `get_layout_info`／`compare`）だが、
+/// 同ドキュメントの帯域定数（`l2_bandwidth_per_cycle = min(64*num_sms,
+/// 8e6/1300)`・`l1 = 128*num_sms`）は H100 実測由来のマジックナンバーで
+/// あり、本モジュールでは**流用しない**。sm_121 実測値
+/// （`docs/perf/sm121-device-attributes.md`・A-2・#482）は本イシュー時点で
+/// 「未実測・要実機実行」のまま安全側クローズされているため、帯域定数は
+/// [`SM121_MEASURED_BANDWIDTH`] という `Option` 型の注入パラメータで表現
+/// し、`None` の間はコストモデル自体を稼働させない（下記 [`select_tile_config`]
+/// のフォールバック方針参照）。H100 定数の暗黙流用経路を構造的に排除する。
+///
+/// ## モデル構造（DeepGEMM 同型の段階分解）
+///
+/// 1. `num_blocks = ceil_div(M, block_m) * ceil_div(N, block_n)`
+/// 2. `num_waves = ceil_div(num_blocks, num_sms)`
+/// 3. L2（グローバル→SMEM）総トラフィックから `l2_cycles` を、L1
+///    （SMEM→レジスタ、mma.sync オペランド供給）総トラフィックから
+///    `l1_cycles` を導出する（下記 §トラフィックモデル）
+/// 4. `base_cycles = max(l1_cycles, l2_cycles)`（律速側支配）
+/// 5. wave 効率 `num_blocks / (num_waves * num_sms)` で `base_cycles` を
+///    補正する（端数 wave を生む構成ほど不利になる）:
+///    `cost = base_cycles * num_waves * num_sms / num_blocks`
+/// 6. `cost` 昇順で比較する（DeepGEMM `compare` 相当）
+///
+/// ## トラフィックモデル（本カーネル族〈cp.async + mma.sync・cluster
+/// なし・num_groups=1〉への適応。DeepGEMM の Hopper cluster／swizzle
+/// 前提の削減ヒューリスティクスはそのまま持ち込めないため、独自に導出
+/// する物理モデルを採る）
+///
+/// - `K_padded = ceil_div(shape.k, block_k) * block_k`（末尾 k-step の
+///   境界検査分もブロック単位で丸めた保守的な見積り）
+/// - **L2（グローバルメモリ→L2/SMEM）**: 各ブロックはグローバルメモリ
+///   から A タイル（`block_m * K_padded` 要素）・B タイル
+///   （`block_n * K_padded` 要素）を 1 回ずつロードする（ブロック間の
+///   L2 ヒット再利用は保守的にモデル化しない）:
+///   `l2_traffic = num_blocks * (block_m + block_n) * K_padded * bytes_per_element`
+/// - **L1（SMEM→レジスタ、mma.sync オペランド供給）**: warp タイル分割
+///   （`warps_m = block_m / MMA_WARP_M`・`warps_n = block_n / MMA_WARP_N`）
+///   により、A タイルの各バイトは `warps_n` 個の N 方向 warp グループに、
+///   B タイルの各バイトは `warps_m` 個の M 方向 warp グループにそれぞれ
+///   再読み込みされる（同一 SMEM 内容を複数 warp が個別に `ldmatrix`
+///   等で読む構造上の再読込係数）:
+///   `l1_traffic = num_blocks * (block_m * warps_n + block_n * warps_m) * K_padded * bytes_per_element`
+///
+/// `l1_traffic >= l2_traffic`（`warps_m, warps_n >= 1`）が構造的に成立し、
+/// SMEM 再読込トラフィックがグローバルメモリトラフィックを常に上回る
+/// （タイリングによる演算強度向上の物理的根拠と整合する）。
+///
+/// **L1 トラフィックはタイル構成にほぼ不変である（意図された挙動）**:
+/// `warps_n = block_n / MMA_WARP_N`・`warps_m = block_m / MMA_WARP_M` を
+/// 代入すると `block_m*warps_n + block_n*warps_m = block_m*block_n *
+/// (1/MMA_WARP_N + 1/MMA_WARP_M)` となり、タイル面積（`block_m*block_n`）
+/// に比例する。したがって `l1_traffic ∝ num_blocks * block_m * block_n`
+/// であり、`block_m`・`block_n` が `shape.m`・`shape.n` をそれぞれ割り切る
+/// 場合は `num_blocks * block_m * block_n ≈ shape.m * shape.n`（タイル
+/// 構成に依らない定数）に近似される。これは warp タイル（レジスタ
+/// ブロッキング係数）がブロックタイル寸法と独立に固定されていることの
+/// 帰結であり、物理的にも妥当（1 flop あたりに必要な warp フラグメント
+/// 読み出し量はブロック分割の仕方によらずほぼ一定。ブロックタイル拡大の
+/// 恩恵はもっぱら L2 側〈グローバルメモリ再読込の削減〉に現れる）。
+/// 候補間の L1 側の差は主に「割り切れない形状での `ceil_div` 余剰」から
+/// 生じ、タイル面積そのものの差では大きく動かない。実機補正（下記
+/// `docs/perf/cuda-gemm-cost-model-selection.md` §1 ステップ 4）で
+/// モデル選定と実測が食い違う場合、L1 側の帯域定数を調整しても整列
+/// 形状ではランキングをほぼ動かせない点に注意し、補正は L2 側の係数・
+/// wave 効率項を優先して見直すこと。
+///
+/// ## 数値表現
+///
+/// 浮動小数を使わず、すべての中間値を分子・分母を保持した
+/// [`CycleFraction`]（`u128` の `checked_*` 演算）として扱い、比較は
+/// 交差乗算で行う（決定性・オーバーフロー安全性の確保。
+/// `.claude/rules/coding-rust.md`「本番経路で `unwrap()`/`expect()` を
+/// 使わない」）。オーバーフロー・ゼロ除算はすべて `CudaError::
+/// InvalidKernelDescriptor` として型付きエラーで返す（`panic!` なし）。
+mod cost_model {
+    use std::num::{NonZeroU32, NonZeroU64, NonZeroU128};
+
+    use tensor_core::dispatch::GemmShape;
+
+    use crate::error::CudaError;
+    use crate::kernels_mma::{MMA_BK, MMA_BM, MMA_BN, MMA_STAGES, MMA_WARP_M, MMA_WARP_N};
+
+    use super::TileCandidate;
+
+    /// sm_121 の L1（per-SM）／L2（device-wide）帯域実測値（バイト/サイクル）。
+    ///
+    /// 単位は `docs/perf/sm121-device-attributes.md` の「単位に関する
+    /// 注意」（L2 は device-wide 総帯域・L1 は per-SM 帯域）と厳密に
+    /// 揃える。[`estimate_candidate_cost`] は `l1_bytes_per_cycle_per_sm`
+    /// を呼び出し側から渡された `num_sms` 倍して device-wide 換算する。
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct MeasuredBandwidth {
+        /// L1（SMEM）の SM 単位あたり帯域（バイト/サイクル）。
+        pub l1_bytes_per_cycle_per_sm: NonZeroU64,
+        /// L2 のデバイス全体帯域（バイト/サイクル）。
+        pub l2_bytes_per_cycle_device: NonZeroU64,
+    }
+
+    /// sm_121 実測帯域定数（A-2・イシュー #482 が「未実測・要実機実行」の
+    /// まま安全側クローズしているため `None`）。
+    ///
+    /// `None` の間は [`select_tile_config`] がコストモデルを一切評価せず
+    /// 固定選定テーブル（`FIXED_TILE_SELECTION`）へ fail-closed に
+    /// フォールバックする。`docs/perf/sm121-device-attributes.md` に実測値
+    /// が記入され、`docs/perf/cuda-gemm-cost-model-selection.md` の実機
+    /// 比較手順（3 形状中 2 形状以上一致）が完了した時点で、同ドキュメント
+    /// を正として本定数を `Some(...)` へ更新する。H100（DeepGEMM
+    /// `sm90.hpp`）の帯域定数をここに書き写さないこと（本モジュール冒頭
+    /// ドキュメンテーションコメント参照）。
+    pub const SM121_MEASURED_BANDWIDTH: Option<MeasuredBandwidth> = None;
+
+    /// [`SM121_MEASURED_BANDWIDTH`] が対象とする compute capability
+    /// （major, minor）= sm_121（DGX Spark GB10）。
+    ///
+    /// [`super::select_tile_config_for_device`] はこの定数と
+    /// `device.compute_capability()` を突き合わせてからでなければ
+    /// [`SM121_MEASURED_BANDWIDTH`] を [`super::select_tile_config`] へ
+    /// 渡さない（codex-review #675 P1 指摘対応: アーキテクチャ検証なしに
+    /// sm_121 実測定数を任意デバイスへ適用すると、`SM121_MEASURED_BANDWIDTH`
+    /// が `Some` へ更新された将来、sm_80/sm_90 等の他アーキテクチャでも
+    /// 未検証の `CostModel` 選定結果を成功として返してしまう）。
+    pub const SM121_COMPUTE_CAPABILITY: (i32, i32) = (12, 1);
+
+    /// [`estimate_candidate_cost`] へ渡すデバイス実行時パラメータ。
+    ///
+    /// `num_sms` はハードコードせず、呼び出し元（[`select_tile_config_for_device`]）
+    /// が `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT` から実行時に構築する。
+    #[derive(Debug, Clone, Copy)]
+    pub struct CostModelParams {
+        pub num_sms: NonZeroU32,
+        pub bandwidth: MeasuredBandwidth,
+    }
+
+    /// 分子・分母を保持した非負有理数（サイクル数の中間表現）。
+    ///
+    /// 浮動小数を経由せず `u128` の `checked_*` 演算のみで構築・比較する
+    /// （本モジュールドキュメンテーションコメント §数値表現）。すべての
+    /// 演算はオーバーフロー時に `None` を返し、呼び出し元が
+    /// `CudaError::InvalidKernelDescriptor` へ変換する。
+    #[derive(Debug, Clone, Copy)]
+    struct CycleFraction {
+        numerator: u128,
+        denominator: NonZeroU128,
+    }
+
+    impl CycleFraction {
+        fn new(numerator: u128, denominator: NonZeroU128) -> Self {
+            Self {
+                numerator,
+                denominator,
+            }
+        }
+
+        /// `numerator` を追加の整数倍率で拡大する（分母は変えない）。
+        fn checked_scale_numerator(self, factor: u128) -> Option<Self> {
+            let numerator = self.numerator.checked_mul(factor)?;
+            Some(Self::new(numerator, self.denominator))
+        }
+
+        /// 分母へ追加の整数除数を乗じる（実質的に値を縮小する）。
+        fn checked_scale_denominator(self, divisor: NonZeroU128) -> Option<Self> {
+            let denominator = self
+                .denominator
+                .get()
+                .checked_mul(divisor.get())
+                .and_then(NonZeroU128::new)?;
+            Some(Self::new(self.numerator, denominator))
+        }
+
+        /// `self >= other` を交差乗算で判定する（浮動小数を使わない比較。
+        /// オーバーフロー時は `None`）。
+        fn checked_ge(self, other: Self) -> Option<bool> {
+            let lhs = self.numerator.checked_mul(other.denominator.get())?;
+            let rhs = other.numerator.checked_mul(self.denominator.get())?;
+            Some(lhs >= rhs)
+        }
+
+        /// 律速側支配（`max`）。交差乗算比較のオーバーフロー時は `None`。
+        fn checked_max(self, other: Self) -> Option<Self> {
+            if self.checked_ge(other)? {
+                Some(self)
+            } else {
+                Some(other)
+            }
+        }
+    }
+
+    /// 候補 1 件のコスト評価結果。`cycles` は最終補正後のサイクル数
+    /// （分数のまま保持し、[`compare_candidate_costs`] が交差乗算で
+    /// 比較する。個々の候補ごとに異なる `num_blocks` を分母に持つため、
+    /// 浮動小数への変換は行わない）。
+    #[derive(Debug, Clone, Copy)]
+    pub struct CandidateCost {
+        cycles: CycleFraction,
+    }
+
+    /// `a` と `b` の推定サイクル数を比較する（`a < b` なら
+    /// `std::cmp::Ordering::Less`）。交差乗算のオーバーフロー時は
+    /// `CudaError::InvalidKernelDescriptor` を返す。
+    ///
+    /// `pub(crate)`: `select_best_tile_candidate`（本モジュール内）に加え、
+    /// `cost_model_tests`（`gemm_auto.rs` 側の兄弟モジュール）が
+    /// wave 効率補正・L1/L2 律速切り替えの検証で実際の比較結果を検査する
+    /// ために公開する（`CandidateCost` のフィールドは private のままとし、
+    /// 比較演算のみをテストへ公開する。#527 レビュー指摘: 合成コストを
+    /// 破棄して自前で再計算したアサーションはモデル自体を検証しない）。
+    pub(crate) fn compare_candidate_costs(
+        a: &CandidateCost,
+        b: &CandidateCost,
+    ) -> Result<std::cmp::Ordering, CudaError> {
+        let a_ge_b =
+            a.cycles
+                .checked_ge(b.cycles)
+                .ok_or_else(|| CudaError::InvalidKernelDescriptor {
+                    detail: "compare_candidate_costs: サイクル数比較の交差乗算が u128 の範囲を \
+                         超過した"
+                        .to_string(),
+                })?;
+        let b_ge_a =
+            b.cycles
+                .checked_ge(a.cycles)
+                .ok_or_else(|| CudaError::InvalidKernelDescriptor {
+                    detail: "compare_candidate_costs: サイクル数比較の交差乗算が u128 の範囲を \
+                         超過した"
+                        .to_string(),
+                })?;
+        Ok(match (a_ge_b, b_ge_a) {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            // 両方 false は起こり得ない（全順序）が、網羅性のため
+            // Equal 扱いにフォールバックする（`unreachable!` は使わない。
+            // `.claude/rules/coding-rust.md`）。
+            (false, false) => std::cmp::Ordering::Equal,
+        })
+    }
+
+    /// `shape` に対する `candidate` 1 件のコストを見積もる（本モジュール
+    /// ドキュメンテーションコメント §モデル構造・§トラフィックモデル参照）。
+    ///
+    /// `MMA_WARP_M`／`MMA_WARP_N`（`kernels_mma.rs`）から warp 分割数を
+    /// 導出する（[`TileCandidate`] 自体は warp 分割数を保持しないため、
+    /// [`enumerate_tile_candidates`]〈#524〉の規則 1 が保証する整数除算
+    /// 可能性に依拠する）。
+    pub fn estimate_candidate_cost(
+        shape: GemmShape,
+        candidate: &TileCandidate,
+        params: &CostModelParams,
+        bytes_per_element: NonZeroU32,
+    ) -> Result<CandidateCost, CudaError> {
+        let overflow_err = || CudaError::InvalidKernelDescriptor {
+            detail: format!(
+                "estimate_candidate_cost: shape={shape:?} candidate=(block_m={}, block_n={}, \
+                 block_k={}) の見積り計算が整数範囲を超過した",
+                candidate.block_m(),
+                candidate.block_n(),
+                candidate.block_k()
+            ),
+        };
+
+        let block_m = u128::from(candidate.block_m().get());
+        let block_n = u128::from(candidate.block_n().get());
+        let block_k = u128::from(candidate.block_k().get());
+        let bpe = u128::from(bytes_per_element.get());
+        let num_sms = u128::from(params.num_sms.get());
+
+        // num_blocks = ceil_div(M, block_m) * ceil_div(N, block_n)。
+        let blocks_m = u128::from(shape.m)
+            .checked_add(block_m.checked_sub(1).ok_or_else(overflow_err)?)
+            .ok_or_else(overflow_err)?
+            .checked_div(block_m)
+            .ok_or_else(overflow_err)?;
+        let blocks_n = u128::from(shape.n)
+            .checked_add(block_n.checked_sub(1).ok_or_else(overflow_err)?)
+            .ok_or_else(overflow_err)?
+            .checked_div(block_n)
+            .ok_or_else(overflow_err)?;
+        let num_blocks = blocks_m.checked_mul(blocks_n).ok_or_else(overflow_err)?;
+        if num_blocks == 0 {
+            return Err(CudaError::InvalidKernelDescriptor {
+                detail: format!(
+                    "estimate_candidate_cost: shape={shape:?} に対する num_blocks が 0 に \
+                     なった（M/N のいずれかが 0）"
+                ),
+            });
+        }
+        let num_blocks_nz = NonZeroU128::new(num_blocks).ok_or_else(overflow_err)?;
+
+        // num_waves = ceil_div(num_blocks, num_sms)。
+        let num_waves = num_blocks
+            .checked_add(num_sms.checked_sub(1).ok_or_else(overflow_err)?)
+            .ok_or_else(overflow_err)?
+            .checked_div(num_sms)
+            .ok_or_else(overflow_err)?;
+
+        // K_padded = ceil_div(shape.k, block_k) * block_k。
+        let k_steps = u128::from(shape.k)
+            .checked_add(block_k.checked_sub(1).ok_or_else(overflow_err)?)
+            .ok_or_else(overflow_err)?
+            .checked_div(block_k)
+            .ok_or_else(overflow_err)?;
+        let k_padded = k_steps.checked_mul(block_k).ok_or_else(overflow_err)?;
+
+        // L2 総トラフィック（バイト）。
+        let l2_tile_bytes = block_m
+            .checked_add(block_n)
+            .ok_or_else(overflow_err)?
+            .checked_mul(k_padded)
+            .ok_or_else(overflow_err)?
+            .checked_mul(bpe)
+            .ok_or_else(overflow_err)?;
+        let l2_traffic = num_blocks
+            .checked_mul(l2_tile_bytes)
+            .ok_or_else(overflow_err)?;
+
+        // L1（SMEM 再読込）総トラフィック（バイト）。warp 分割数は
+        // `enumerate_tile_candidates` 規則 1 により整数除算が保証される。
+        let warps_m = u128::from(candidate.block_m().get() / MMA_WARP_M);
+        let warps_n = u128::from(candidate.block_n().get() / MMA_WARP_N);
+        let l1_tile_bytes_a = block_m
+            .checked_mul(warps_n)
+            .ok_or_else(overflow_err)?
+            .checked_mul(k_padded)
+            .ok_or_else(overflow_err)?
+            .checked_mul(bpe)
+            .ok_or_else(overflow_err)?;
+        let l1_tile_bytes_b = block_n
+            .checked_mul(warps_m)
+            .ok_or_else(overflow_err)?
+            .checked_mul(k_padded)
+            .ok_or_else(overflow_err)?
+            .checked_mul(bpe)
+            .ok_or_else(overflow_err)?;
+        let l1_tile_bytes = l1_tile_bytes_a
+            .checked_add(l1_tile_bytes_b)
+            .ok_or_else(overflow_err)?;
+        let l1_traffic = num_blocks
+            .checked_mul(l1_tile_bytes)
+            .ok_or_else(overflow_err)?;
+
+        // 帯域（バイト/サイクル）。L1 は per-SM 実測値を num_sms 倍して
+        // device-wide 換算する（本モジュール `MeasuredBandwidth` doc 参照）。
+        let l2_bandwidth =
+            NonZeroU128::new(u128::from(params.bandwidth.l2_bytes_per_cycle_device.get()))
+                .ok_or_else(overflow_err)?;
+        let l1_bandwidth_per_sm = u128::from(params.bandwidth.l1_bytes_per_cycle_per_sm.get());
+        let l1_bandwidth = l1_bandwidth_per_sm
+            .checked_mul(num_sms)
+            .and_then(NonZeroU128::new)
+            .ok_or_else(overflow_err)?;
+
+        let l2_cycles = CycleFraction::new(l2_traffic, l2_bandwidth);
+        let l1_cycles = CycleFraction::new(l1_traffic, l1_bandwidth);
+        let base_cycles = l1_cycles.checked_max(l2_cycles).ok_or_else(overflow_err)?;
+
+        // wave 効率補正: cost = base_cycles * num_waves * num_sms / num_blocks。
+        let wave_factor = num_waves.checked_mul(num_sms).ok_or_else(overflow_err)?;
+        let cycles = base_cycles
+            .checked_scale_numerator(wave_factor)
+            .ok_or_else(overflow_err)?
+            .checked_scale_denominator(num_blocks_nz)
+            .ok_or_else(overflow_err)?;
+
+        Ok(CandidateCost { cycles })
+    }
+
+    /// `candidates` の中からコスト最小の 1 件を決定的に選ぶ（DeepGEMM
+    /// `compare` 相当。サイクル数昇順、同値時は列挙順〈block_m→n→k
+    /// 昇順ソート済み〉の先頭を採るタイブレーク）。
+    ///
+    /// 候補ゼロ件は `Ok(None)`（`panic!` にはしない）。交差乗算の
+    /// オーバーフローは握り潰さず `Err` として明示的に返す（コストモデル
+    /// 自体が評価不能だったという事実を消さない）。呼び出し元の
+    /// [`super::select_tile_config`] は `Ok(None)`・`Err` のいずれも
+    /// 「コストモデルで評価不能」として同一に扱い、固定選定テーブルへ
+    /// fail-closed にフォールバックする（未検証のまま候補を採用しない
+    /// 安全側判断。`Err` を呼び出し元へ伝播させて上位で panic させたり
+    /// 未定義の構成を返したりしない、という意味で「握り潰さない」）。
+    pub fn select_best_tile_candidate(
+        shape: GemmShape,
+        candidates: &[TileCandidate],
+        params: &CostModelParams,
+        bytes_per_element: NonZeroU32,
+    ) -> Result<Option<TileCandidate>, CudaError> {
+        let mut best: Option<(TileCandidate, CandidateCost)> = None;
+        for candidate in candidates {
+            let cost = estimate_candidate_cost(shape, candidate, params, bytes_per_element)?;
+            best = match best {
+                None => Some((*candidate, cost)),
+                Some((best_candidate, best_cost)) => {
+                    // 厳密な `Less`（`cost < best_cost`）のときのみ更新する
+                    // ことで、同値時は先に見つかった候補（列挙順の先頭）
+                    // を保つ決定的タイブレークにする。
+                    if compare_candidate_costs(&cost, &best_cost)? == std::cmp::Ordering::Less {
+                        Some((*candidate, cost))
+                    } else {
+                        Some((best_candidate, best_cost))
+                    }
+                }
+            };
+        }
+        Ok(best.map(|(candidate, _)| candidate))
+    }
+
+    /// [`FIXED_TILE_SELECTION`] の各 `NonZeroU32` フィールドをコンパイル
+    /// 時に構築する（`match` + `panic!` は const context で評価される
+    /// ため、実行時にこの分岐へ到達することはない。[`super::
+    /// BYTES_PER_ELEMENT_F16`] と同型のコンパイル時確定パターン）。
+    const fn nonzero_or_panic(value: u32) -> NonZeroU32 {
+        match NonZeroU32::new(value) {
+            Some(v) => v,
+            None => panic!("gemm_auto::cost_model::nonzero_or_panic: value must be non-zero"),
+        }
+    }
+
+    /// 実測裏付けのある現行本番構成（#494 実測記録が根拠。
+    /// `kernels_mma.rs` の `MMA_BM/BN/BK`・`MMA_STAGES` を単一真実源とし、
+    /// リテラルをここで独立に持たない）。[`SM121_MEASURED_BANDWIDTH`] が
+    /// `None` の間、[`super::select_tile_config`] はこのテーブル値を返す。
+    ///
+    /// `TileCandidate` の全フィールドをコンパイル時定数として構築する
+    /// （`.claude/rules/coding-rust.md`「本番経路で `unwrap()`/`expect()`
+    /// を使わない」の徹底: 旧実装は実行時 `NonZeroU32::new(...).expect(...)`
+    /// を使っており、値がコンパイル時に確定しているにも関わらず実行時
+    /// panic 経路を持っていた。#527 レビュー指摘）。
+    ///
+    /// `smem_per_stage`／`smem_total` は f16（バイト幅 2）のカーネル族
+    /// （現行本番の `kernels_mma.rs` は f16 専用。#494）を前提に算出する。
+    /// `select_tile_config` が `DType::F32` に対して本定数を返す場合、
+    /// `block_m`/`block_n`/`block_k`/`stages`（カーネルのブロック分割・
+    /// パイプライン構造）は dtype に依存しないため引き続き有効だが、
+    /// `smem_per_stage`/`smem_total`（バイト量）は f16 前提の値である
+    /// 点に注意（F32 専用の固定テーブルは現時点で存在しない。mma.sync
+    /// 経路自体が f16 専用のため）。
+    pub const FIXED_TILE_SELECTION: TileCandidate = {
+        let block_m = nonzero_or_panic(MMA_BM);
+        let block_n = nonzero_or_panic(MMA_BN);
+        let block_k = nonzero_or_panic(MMA_BK);
+        let stages = nonzero_or_panic(MMA_STAGES);
+        let bpe_u64 = 2u64; // f16 固定（現行本番構成は f16 専用。#494）。
+        let a_tile_elems = MMA_BM as u64 * MMA_BK as u64;
+        let b_tile_elems = MMA_BK as u64 * MMA_BN as u64;
+        let smem_per_stage = (a_tile_elems + b_tile_elems) * bpe_u64;
+        let smem_total = smem_per_stage * MMA_STAGES as u64;
+        TileCandidate {
+            block_m,
+            block_n,
+            block_k,
+            stages,
+            smem_per_stage,
+            smem_total,
+        }
+    };
+}
+
+pub use cost_model::{
+    CostModelParams, MeasuredBandwidth, SM121_COMPUTE_CAPABILITY, SM121_MEASURED_BANDWIDTH,
+};
+
+/// [`select_tile_config`] の選定根拠（実機検証・ログでの判別用。
+/// イシュー #527 実装計画 §3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileSelectionBasis {
+    /// [`cost_model::SM121_MEASURED_BANDWIDTH`] が `Some` で、L1/L2 帯域
+    /// コストモデルが候補を評価して選んだことを表す。
+    CostModel,
+    /// 帯域未実測（`None`）または候補選定不能（候補ゼロ件・オーバー
+    /// フロー等）により、固定選定テーブルへフォールバックしたことを表す。
+    FixedTable,
+}
+
+/// [`select_tile_config`] の返り値。選定されたタイル構成と、その選定
+/// 根拠（コストモデル／固定テーブル）の両方を保持する。
+#[derive(Debug, Clone, Copy)]
+pub struct TileSelection {
+    candidate: TileCandidate,
+    basis: TileSelectionBasis,
+}
+
+impl TileSelection {
+    /// 選定されたタイル構成。
+    pub fn candidate(&self) -> TileCandidate {
+        self.candidate
+    }
+
+    /// 選定根拠（[`TileSelectionBasis::CostModel`] か
+    /// [`TileSelectionBasis::FixedTable`] か）。
+    pub fn basis(&self) -> TileSelectionBasis {
+        self.basis
+    }
+}
+
+/// GEMM タイル構成の静的最良選定（Phase C-9b・イシュー #527）。
+///
+/// `measured` が `Some`（sm_121 実測帯域が確定済み）の場合のみ
+/// [`enumerate_tile_candidates`]（#524）で候補を列挙し
+/// [`cost_model::select_best_tile_candidate`] で最良 1 件を選ぶ。
+/// 候補が 0 件、またはコストモデル自体が交差乗算オーバーフローで
+/// 評価不能だった場合は、`measured` の有無に関わらず
+/// [`cost_model::FIXED_TILE_SELECTION`]（実測裏付けのある現行本番構成
+/// 64/128/32・stages 3）へ fail-closed にフォールバックする（本モジュール
+/// `cost_model` ドキュメンテーションコメント参照）。
+///
+/// `measured` が `None`（未実測。既定は [`SM121_MEASURED_BANDWIDTH`]）の
+/// 間は、コストモデルを一切評価せず常に固定選定テーブルを返す。これは
+/// H100（DeepGEMM）帯域定数の暗黙流用を構造的に排除するための意図的な
+/// 分岐であり、`measured` を「呼び出し元が明示的に注入しない限り
+/// コストモデルは動かない」パラメータにしている。
+///
+/// `measured` が `None`、またはコストモデルが候補ゼロ件／評価不能で
+/// 固定選定テーブルへフォールバックする場合、[`cost_model::
+/// FIXED_TILE_SELECTION`] を無条件に成功として返さず、[`validate_fixed_tile_selection`]
+/// で呼び出し元が渡した `shape`／`dtype`／`smem_budget_bytes` に対して
+/// 実際に適用可能かを検証する（codex-review #675 P1 指摘: 検証なしで
+/// 固定テーブルを返すと `smem_budget_bytes` 予算超過・`shape` の
+/// mma.sync 整列制約違反・f16 専用メタデータの `DType::F32` への誤流用
+/// を「成功した `TileSelection`」として呼び出し元へ伝えてしまい、
+/// 公開 API `select_tile_config` の契約〈返す構成は入力制約を満たす〉
+/// を破っていた）。満たさない場合は `Err(CudaError::InvalidKernelConfig)`
+/// で選定不能を明示し、無効な構成を返さない（fail-closed。
+/// `.claude/rules/security.md` A08 と同種の安全側判断）。
+///
+/// 本関数は選定結果を既定の本番 GEMM 経路（[`CudaGemmAuto::run_f16`]）
+/// へ結線・適用しない（スコープ境界。カーネルが `#define` 固定のため、
+/// 適用は実機実測・補正判定完了後の後続タスクに委ねる。
+/// `docs/perf/cuda-gemm-cost-model-selection.md` 参照）。
+pub fn select_tile_config(
+    shape: GemmShape,
+    dtype: DType,
+    smem_budget_bytes: u64,
+    num_sms: NonZeroU32,
+    measured: Option<MeasuredBandwidth>,
+) -> Result<TileSelection, CudaError> {
+    let Some(bandwidth) = measured else {
+        return fixed_table_selection_if_valid(shape, dtype, smem_budget_bytes);
+    };
+
+    let bytes_per_element = bytes_per_element_for(dtype);
+    let candidates = enumerate_tile_candidates(shape, dtype, smem_budget_bytes);
+    let params = CostModelParams { num_sms, bandwidth };
+
+    match cost_model::select_best_tile_candidate(shape, &candidates, &params, bytes_per_element) {
+        Ok(Some(candidate)) => Ok(TileSelection {
+            candidate,
+            basis: TileSelectionBasis::CostModel,
+        }),
+        // 候補ゼロ件・コストモデルのオーバーフロー評価不能のいずれも、
+        // fail-closed に固定選定テーブルへ倒す（`.claude/rules/security.md`
+        // A08「取り込み判断の迂回経路を作らない」と同種の安全側判断:
+        // 静的モデルが評価不能な状況で未検証のまま候補を採用しない）。
+        // ただしこのフォールバック先自体も無検証では返さない
+        // （`fixed_table_selection_if_valid` 参照）。
+        Ok(None) | Err(_) => fixed_table_selection_if_valid(shape, dtype, smem_budget_bytes),
+    }
+}
+
+/// [`cost_model::FIXED_TILE_SELECTION`] を返す前に、呼び出し元が渡した
+/// `shape`／`dtype`／`smem_budget_bytes` に対して実際に適用可能かを
+/// [`validate_fixed_tile_selection`] で検証する（[`select_tile_config`]
+/// の 2 つのフォールバック経路〈`measured = None`／候補評価不能〉が
+/// 共有する単一の検証入口。判定ロジックが分裂して片方だけ緩和される
+/// 静かな乖離を防ぐ。#521 と同種の教訓）。
+fn fixed_table_selection_if_valid(
+    shape: GemmShape,
+    dtype: DType,
+    smem_budget_bytes: u64,
+) -> Result<TileSelection, CudaError> {
+    validate_fixed_tile_selection(shape, dtype, smem_budget_bytes)?;
+    Ok(TileSelection {
+        candidate: cost_model::FIXED_TILE_SELECTION,
+        basis: TileSelectionBasis::FixedTable,
+    })
+}
+
+/// [`cost_model::FIXED_TILE_SELECTION`] が `shape`／`dtype`／
+/// `smem_budget_bytes` の下で実際に適用可能かを検証する
+/// （codex-review #675 P1 指摘対応）。
+///
+/// 検証する 4 条件（いずれか 1 つでも満たさなければ `Err`）:
+/// 1. `dtype == DType::F16`: [`cost_model::FIXED_TILE_SELECTION`] の
+///    `smem_per_stage`／`smem_total` は f16（2 bytes/element）前提で
+///    コンパイル時算出されている（同定数のドキュメンテーションコメント
+///    参照）。`DType::F32` に対して返すとメタデータが実際のバイト量と
+///    一致しない。
+/// 2. `validate_mma_alignment(shape.n, shape.k)`: `kernels_mma.rs` の
+///    cp.async が要求する `n`/`k` 8 の倍数整列（[`enumerate_tile_candidates`]
+///    規則 6 と同一契約）。固定テーブルも同じ `kernels_mma.rs` 起動 API
+///    を経由するため、この整列を満たさない形状には適用できない。
+/// 3. `validate_mma_grid_bounds(shape.m)`: `mma_launch_config` が構築する
+///    グリッドの y 成分（`m.div_ceil(MMA_BM)`）が CUDA の grid dim y/z
+///    上限（65,535）を超えないか（`gemm_mma.rs::validate_mma_grid_bounds`
+///    と同一契約）。固定テーブルも同じ起動 API を経由するため、`m` が
+///    `64 * 65535` を超える形状には適用できない（Cursor Bugbot 指摘。
+///    PR #675 review。この検証を欠くと `dtype`／`n`／`k`／SMEM 予算の
+///    条件をすべて満たしていても、実際のカーネル起動時に grid dim
+///    上限超過で失敗する構成を `Ok` として返してしまい、本関数が
+///    閉じるはずの「成功したのに使えない構成」という穴が `m` の
+///    次元だけ再発する）。
+/// 4. `smem_total <= smem_budget_bytes`: 固定テーブルの SMEM 使用量が
+///    デバイスの実際の予算を超過していないか。
+fn validate_fixed_tile_selection(
+    shape: GemmShape,
+    dtype: DType,
+    smem_budget_bytes: u64,
+) -> Result<(), CudaError> {
+    if dtype != DType::F16 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "select_tile_config: FIXED_TILE_SELECTION の smem_per_stage/smem_total は \
+                 f16 (2 bytes/element) 前提で算出済みのため、dtype={dtype:?} には \
+                 適用できない（現行本番の kernels_mma.rs は f16 専用。#494）"
+            ),
+        });
+    }
+
+    validate_mma_alignment(shape.n, shape.k)?;
+    validate_mma_grid_bounds(shape.m)?;
+
+    let smem_total = cost_model::FIXED_TILE_SELECTION.smem_total();
+    if smem_total > smem_budget_bytes {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "select_tile_config: FIXED_TILE_SELECTION の smem_total={smem_total} が \
+                 smem_budget_bytes={smem_budget_bytes} を超過するため適用できない"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+/// [`select_tile_config`] の実デバイス結線ヘルパー
+/// （[`enumerate_tile_candidates_for_device`]・[`derive_stages_for_device`]
+/// と同型。イシュー #527 実装計画 §3）。
+///
+/// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`（SMEM 予算）・
+/// `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT`（SM 数）を実行時取得し、
+/// [`SM121_MEASURED_BANDWIDTH`] とともに [`select_tile_config`] へ渡す。
+/// 属性取得の失敗は `CudaError::Driver`／`CudaError::InvalidKernelDescriptor`
+/// として呼び出し元へそのまま伝播する（fail-closed。既存ヘルパーと同型）。
+///
+/// `device.compute_capability()` を [`SM121_COMPUTE_CAPABILITY`]（sm_121）と
+/// 突き合わせ、一致する場合のみ [`SM121_MEASURED_BANDWIDTH`] を
+/// [`select_tile_config`] へ渡す。不一致（sm_80/sm_90 等の他アーキテクチャ）
+/// の場合は `measured = None` を渡し、[`select_tile_config`] を常に
+/// 検証済み固定選定テーブル経路（[`fixed_table_selection_if_valid`]）へ
+/// fail-closed に倒す（codex-review #675 P1 指摘対応: sm_121 実測定数
+/// ——将来 `SM121_MEASURED_BANDWIDTH` が `Some` へ更新された時点——を
+/// アーキテクチャ検証なしに他デバイスへ適用すると、未検証の `CostModel`
+/// 選定結果を成功として返してしまう。現状 `SM121_MEASURED_BANDWIDTH` は
+/// `None` のため本検証追加による挙動変化はない）。
+pub fn select_tile_config_for_device(
+    device: &CudaDevice,
+    shape: GemmShape,
+    dtype: DType,
+) -> Result<TileSelection, CudaError> {
+    let smem_budget_bytes = read_clamped_smem_budget_bytes(device)?;
+    let raw_num_sms = device
+        .context()
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
+    let num_sms_u32 =
+        u32::try_from(raw_num_sms).map_err(|_| CudaError::InvalidKernelDescriptor {
+            detail: format!(
+                "select_tile_config_for_device: CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT \
+                 returned a negative value ({raw_num_sms}), which cannot be a valid SM count"
+            ),
+        })?;
+    let num_sms =
+        NonZeroU32::new(num_sms_u32).ok_or_else(|| CudaError::InvalidKernelDescriptor {
+            detail: "select_tile_config_for_device: CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT \
+                 returned 0, which cannot be a valid SM count"
+                .to_string(),
+        })?;
+    // sm_121 実測定数の他アーキテクチャへの誤流用防止（codex-review #675
+    // P1 指摘）。`SM121_MEASURED_BANDWIDTH` は sm_121（DGX Spark GB10）で
+    // しか意味を持たない定数のため、compute capability が一致しない
+    // デバイスには決して渡さず `None` にフォールバックする（`select_tile_config`
+    // の `measured = None` 経路は検証済み固定選定テーブルへ fail-closed
+    // に倒れる。上記関数ドキュメンテーションコメント参照）。
+    let measured = if device.compute_capability() == SM121_COMPUTE_CAPABILITY {
+        SM121_MEASURED_BANDWIDTH
+    } else {
+        None
+    };
+    select_tile_config(shape, dtype, smem_budget_bytes, num_sms, measured)
+}
+
 /// naive／tiled／WMMA の全 GEMM カーネルを保持し、`select_gemm_kernel`
 /// の判定結果に従って呼び分ける自動経路選択の入口。
 ///
@@ -874,5 +1566,419 @@ mod tile_candidate_tests {
         for candidate in &f32_candidates {
             assert_candidate_satisfies_structural_rules(candidate, bpe_f32);
         }
+    }
+}
+
+/// L1/L2 帯域コストモデル（Phase C-9b・イシュー #527）の GPU 不要
+/// ユニットテスト。合成帯域パラメータ（実測不要）でモデル挙動を検証する
+/// （実装計画 §4 ステップ 4）。
+#[cfg(test)]
+mod cost_model_tests {
+    use std::num::{NonZeroU32, NonZeroU64};
+
+    use super::cost_model::{
+        CostModelParams, FIXED_TILE_SELECTION, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH,
+        compare_candidate_costs, estimate_candidate_cost, select_best_tile_candidate,
+    };
+    use super::*;
+    use crate::kernels_mma::MMA_BM;
+
+    /// 実測不要な代表的 SMEM 予算（`tile_candidate_tests::FULL_BUDGET_BYTES`
+    /// と同じ根拠。全候補が SMEM 制約で棄却されないよう十分大きい値）。
+    const FULL_BUDGET_BYTES: u64 = u64::MAX;
+
+    /// L1/L2 双方に十分な帯域を与える合成パラメータ（律速側の切り替わり
+    /// を意図的に起こさないケースで使う既定値）。SM 数は sm_121 に近い
+    /// 桁数の合成値だが実測値ではない（テスト専用の合成入力）。
+    fn balanced_params() -> CostModelParams {
+        CostModelParams {
+            num_sms: NonZeroU32::new(64).expect("64 is non-zero"),
+            bandwidth: MeasuredBandwidth {
+                l1_bytes_per_cycle_per_sm: NonZeroU64::new(128).expect("128 is non-zero"),
+                l2_bytes_per_cycle_device: NonZeroU64::new(4096).expect("4096 is non-zero"),
+            },
+        }
+    }
+
+    /// (a) 単調性: 同一形状・同一 SMEM 予算下では、より大きなタイル
+    /// （num_blocks が小さい構成）ほどトラフィックが減り、コストモデルが
+    /// より小さいサイクル数（より優先）を割り当てる。
+    #[test]
+    fn larger_tile_traffic_yields_lower_or_equal_cost_than_smaller_tile() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let params = balanced_params();
+        let bpe = bytes_per_element_for(DType::F16);
+
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+        assert!(
+            candidates.len() >= 2,
+            "must have multiple candidates to compare"
+        );
+
+        // block_m*block_n が最大の候補（最も少ない num_blocks）と最小の
+        // 候補（最も多い num_blocks）を比較する。
+        let largest = candidates
+            .iter()
+            .max_by_key(|c| c.block_m().get() as u64 * c.block_n().get() as u64)
+            .expect("candidates is non-empty");
+        let smallest = candidates
+            .iter()
+            .min_by_key(|c| c.block_m().get() as u64 * c.block_n().get() as u64)
+            .expect("candidates is non-empty");
+
+        let largest_cost = estimate_candidate_cost(shape, largest, &params, bpe)
+            .expect("cost estimation must not overflow for this shape/candidate");
+        let smallest_cost = estimate_candidate_cost(shape, smallest, &params, bpe)
+            .expect("cost estimation must not overflow for this shape/candidate");
+
+        // largest の推定サイクル数が smallest 以下であることを実際の
+        // CandidateCost 比較で検証する（`compare_candidate_costs` は
+        // `pub(crate)` としてテストへ公開。#527 レビュー指摘: 合成コスト
+        // を破棄して select_best_tile_candidate の結果だけを見るのでは、
+        // ペナルティ補正を消してもテストが検出できない）。
+        assert_eq!(
+            compare_candidate_costs(&largest_cost, &smallest_cost)
+                .expect("comparison must not overflow"),
+            std::cmp::Ordering::Less,
+            "the tile with fewer num_blocks (less total traffic) must have a strictly lower cost"
+        );
+
+        // 選定関数自体も一貫して largest を選ぶことを確認する。
+        let best = select_best_tile_candidate(shape, &[*largest, *smallest], &params, bpe)
+            .expect("comparison must not overflow");
+        assert_eq!(
+            best,
+            Some(*largest),
+            "the tile with fewer num_blocks (less total traffic) must be preferred"
+        );
+    }
+
+    /// (b) L1/L2 律速側の切り替わり: 片側の帯域を極端に絞ると、その側の
+    /// `max()` が支配し、L2 トラフィック（`block_m + block_n` に比例）と
+    /// L1 トラフィック（`block_m*warps_n + block_n*warps_m` に比例。
+    /// `warps_n = block_n/16`・`warps_m = block_m/32` を代入すると
+    /// `block_m*block_n` の積に比例）とで有利な候補の順位が入れ替わる
+    /// ことを、実際に順位が入れ替わる 1 組の候補ペアで直接検証する
+    /// （#527 レビュー指摘: `select_best_tile_candidate` の結果を
+    /// `contains` するだけの smoke test では律速切り替え自体を検証
+    /// できない）。
+    #[test]
+    fn cost_model_switches_dominance_between_l1_and_l2_bandwidth() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let bpe = bytes_per_element_for(DType::F16);
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+
+        // 候補 A: (block_m=128, block_n=16) → タイル面積=2048（小・L1
+        // トラフィックはタイル面積に比例）・L2 和=144（大・L2 トラフィック
+        // は block_m+block_n に比例）。
+        // 候補 B: (block_m=64,  block_n=48) → タイル面積=3072（大）・
+        // L2 和=112（小）。shape.n=4096 は block_n=48 で割り切れない
+        // （ceil_div により余剰ブロックが生じ、B の面積優位はさらに
+        // 相殺される）。
+        // 面積の大小関係（A<B）と L2 和の大小関係（A>B）が逆転しているため、
+        // 律速側の切り替えで最良候補が入れ替わるはずの組。
+        let candidate_a = *candidates
+            .iter()
+            .find(|c| c.block_m().get() == 128 && c.block_n().get() == 16)
+            .expect("(128, 16) candidate must exist for this shape/budget");
+        let candidate_b = *candidates
+            .iter()
+            .find(|c| c.block_m().get() == 64 && c.block_n().get() == 48)
+            .expect("(64, 48) candidate must exist for this shape/budget");
+
+        // L2 帯域を極端に絞る（L2 律速。L2 和が小さい B が有利になるはず）。
+        let l2_starved = CostModelParams {
+            num_sms: NonZeroU32::new(64).expect("64 is non-zero"),
+            bandwidth: MeasuredBandwidth {
+                l1_bytes_per_cycle_per_sm: NonZeroU64::new(1_000_000).expect("non-zero"),
+                l2_bytes_per_cycle_device: NonZeroU64::new(1).expect("non-zero"),
+            },
+        };
+        // L1 帯域を極端に絞る（L1 律速。L1 積が小さい A が有利になるはず）。
+        let l1_starved = CostModelParams {
+            num_sms: NonZeroU32::new(64).expect("64 is non-zero"),
+            bandwidth: MeasuredBandwidth {
+                l1_bytes_per_cycle_per_sm: NonZeroU64::new(1).expect("non-zero"),
+                l2_bytes_per_cycle_device: NonZeroU64::new(1_000_000).expect("non-zero"),
+            },
+        };
+
+        let cost_a_l2 = estimate_candidate_cost(shape, &candidate_a, &l2_starved, bpe)
+            .expect("cost estimation must not overflow");
+        let cost_b_l2 = estimate_candidate_cost(shape, &candidate_b, &l2_starved, bpe)
+            .expect("cost estimation must not overflow");
+        assert_eq!(
+            compare_candidate_costs(&cost_b_l2, &cost_a_l2).expect("comparison must not overflow"),
+            std::cmp::Ordering::Less,
+            "under L2-starved bandwidth, candidate B (smaller L2 traffic) must cost less than A"
+        );
+
+        let cost_a_l1 = estimate_candidate_cost(shape, &candidate_a, &l1_starved, bpe)
+            .expect("cost estimation must not overflow");
+        let cost_b_l1 = estimate_candidate_cost(shape, &candidate_b, &l1_starved, bpe)
+            .expect("cost estimation must not overflow");
+        assert_eq!(
+            compare_candidate_costs(&cost_a_l1, &cost_b_l1).expect("comparison must not overflow"),
+            std::cmp::Ordering::Less,
+            "under L1-starved bandwidth, candidate A (smaller L1 traffic) must cost less than B"
+        );
+    }
+
+    /// (c) wave 効率ペナルティ: 端数 wave を生む構成（`num_blocks` が
+    /// `num_sms` の倍数から外れる）は、同等のトラフィックを持つ整数 wave
+    /// 構成より不利になる。`num_sms` を意図的に `num_blocks` と非整除
+    /// にすることで検証する。
+    #[test]
+    fn wave_efficiency_penalizes_non_integer_wave_counts() {
+        // block_m=128, block_n=128 の単一候補で num_blocks を固定し、
+        // num_sms を変えて wave 効率だけが変化するケースを作る。
+        let shape = GemmShape::new(1024, 1024, 4096); // 8x8 = 64 blocks (128x128 tile)
+        let bpe = bytes_per_element_for(DType::F16);
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+        let candidate = candidates
+            .iter()
+            .find(|c| c.block_m().get() == 128 && c.block_n().get() == 128)
+            .expect("128x128 candidate must exist for this shape/budget");
+
+        // l1_bytes_per_cycle_per_sm はコメントどおり device-wide 換算時に
+        // `num_sms` 倍される（`estimate_candidate_cost` L1 帯域計算参照）ため、
+        // num_sms を変えると l1_cycles 自体も変化してしまい L1 律速では
+        // base_cycles が num_sms 非依存にならない（#527 レビュー指摘: PR #675
+        // codex-review P2・Cursor Bugbot 双方が、旧パラメータ
+        // （l1=128・l2=4096）は 128x128 タイルで L1 律速となり base_cycles が
+        // num_sms に連動するため wave 効率補正項を削除しても検出できないと
+        // 指摘）。L2 帯域（`l2_bytes_per_cycle_device`）は device-wide 値を
+        // そのまま使い num_sms に依存しないため、L2 律速（l2_cycles >=
+        // l1_cycles）になるよう l2 帯域を十分小さく選ぶことで、num_sms を
+        // 63/64 間で変えても base_cycles（= l2_cycles）は真に不変になる。
+        // 128x128 タイル（warps_m=4, warps_n=8）では l1_traffic =
+        // 6 * l2_traffic が成り立つため、L2 律速の条件は
+        // `l1_bytes_per_cycle_per_sm * num_sms >= 6 * l2_bytes_per_cycle_device`。
+        // num_sms=63（最小値）でも成立するよう l2 帯域を 1024 に設定する
+        // （128 * 63 = 8064 >= 6 * 1024 = 6144）。
+        let bandwidth = MeasuredBandwidth {
+            l1_bytes_per_cycle_per_sm: NonZeroU64::new(128).expect("non-zero"),
+            l2_bytes_per_cycle_device: NonZeroU64::new(1024).expect("non-zero"),
+        };
+
+        // num_blocks = 64。num_sms = 64 なら wave 効率 100%（1 wave）。
+        let perfect_params = CostModelParams {
+            num_sms: NonZeroU32::new(64).expect("non-zero"),
+            bandwidth,
+        };
+        // num_sms = 63 なら num_waves = ceil(64/63) = 2、wave 効率
+        // 64/(2*63) ≈ 50.8%（端数 wave によるペナルティが発生する）。
+        let imperfect_params = CostModelParams {
+            num_sms: NonZeroU32::new(63).expect("non-zero"),
+            bandwidth,
+        };
+
+        let perfect_cost = estimate_candidate_cost(shape, candidate, &perfect_params, bpe)
+            .expect("cost estimation must not overflow");
+        let imperfect_cost = estimate_candidate_cost(shape, candidate, &imperfect_params, bpe)
+            .expect("cost estimation must not overflow");
+
+        // 上記の帯域選定により L2 律速（base_cycles = l2_cycles）が
+        // num_sms=63/64 の両方で成立し、l2_cycles は l2_traffic /
+        // l2_bytes_per_cycle_device のみで決まり num_sms に依存しないため、
+        // トラフィック（base_cycles）は真に同一で wave 効率補正項のみが
+        // 異なる。`compare_candidate_costs` で実際の CandidateCost を
+        // 比較し、端数 wave を生む構成（num_sms=63）の方が真に高コストで
+        // あることを検証する（#527 レビュー指摘: 補正式を丸ごと削除しても
+        // 検出できない自己完結アサーションは wave 効率補正自体を検証
+        // しない）。
+        assert_eq!(
+            compare_candidate_costs(&imperfect_cost, &perfect_cost)
+                .expect("comparison must not overflow"),
+            std::cmp::Ordering::Greater,
+            "num_sms=63 (imperfect wave packing, num_waves=2) must cost strictly more than \
+             num_sms=64 (perfect wave packing, num_waves=1) for the same traffic"
+        );
+    }
+
+    /// (d) 決定性: 同一入力を 2 回評価しても同一の選定結果になる。
+    #[test]
+    fn select_best_tile_candidate_is_deterministic() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let bpe = bytes_per_element_for(DType::F16);
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+        let params = balanced_params();
+
+        let first = select_best_tile_candidate(shape, &candidates, &params, bpe)
+            .expect("comparison must not overflow");
+        let second = select_best_tile_candidate(shape, &candidates, &params, bpe)
+            .expect("comparison must not overflow");
+        assert_eq!(
+            first, second,
+            "identical inputs must yield identical selection"
+        );
+    }
+
+    /// (e) オーバーフロー安全性: 巨大形状・巨大帯域を与えても `panic!`
+    /// せず `Err`（もしくは正常な `Ok`）のいずれかで応答する。
+    #[test]
+    fn estimate_candidate_cost_does_not_panic_on_huge_inputs() {
+        let shape = GemmShape::new(u32::MAX, u32::MAX, u32::MAX);
+        let bpe = bytes_per_element_for(DType::F16);
+        let candidates = enumerate_tile_candidates(shape, DType::F16, FULL_BUDGET_BYTES);
+
+        let extreme_params = CostModelParams {
+            num_sms: NonZeroU32::new(1).expect("non-zero"),
+            bandwidth: MeasuredBandwidth {
+                l1_bytes_per_cycle_per_sm: NonZeroU64::new(1).expect("non-zero"),
+                l2_bytes_per_cycle_device: NonZeroU64::new(1).expect("non-zero"),
+            },
+        };
+
+        for candidate in &candidates {
+            // panic せず Result で応答することのみを検証する（Err/Ok
+            // いずれも許容。巨大形状は u128 演算でも桁あふれしうる）。
+            let _ = estimate_candidate_cost(shape, candidate, &extreme_params, bpe);
+        }
+
+        // select_best_tile_candidate 自体も panic しないことを検証する。
+        let _ = select_best_tile_candidate(shape, &candidates, &extreme_params, bpe);
+    }
+
+    /// フォールバック検証: `measured = None`（既定の
+    /// `SM121_MEASURED_BANDWIDTH`）→ 固定選定テーブル（64/128/32・
+    /// stages 3）が返り、選定根拠が `FixedTable` であること。
+    #[test]
+    fn select_tile_config_falls_back_to_fixed_table_when_bandwidth_unmeasured() {
+        assert_eq!(
+            SM121_MEASURED_BANDWIDTH, None,
+            "sm_121 実測帯域が未実測の間は select_tile_config が常に固定選定 \
+             テーブルへフォールバックする契約のテスト前提（A-2・#482 未実測）"
+        );
+
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+
+        let selection = select_tile_config(
+            shape,
+            DType::F16,
+            FULL_BUDGET_BYTES,
+            num_sms,
+            SM121_MEASURED_BANDWIDTH,
+        )
+        .expect("aligned shape/F16/full budget satisfies FIXED_TILE_SELECTION constraints");
+
+        assert_eq!(selection.basis(), TileSelectionBasis::FixedTable);
+        let fixed = FIXED_TILE_SELECTION;
+        assert_eq!(selection.candidate(), fixed);
+    }
+
+    /// フォールバック検証（かつ codex-review #675 P1 指摘の回帰防止）:
+    /// 候補ゼロ件（不整列形状）の場合、`measured` を `Some` にしても
+    /// コストモデルが評価対象を持たないため固定テーブルへ倒れようと
+    /// するが、固定テーブル自体も同じ不整列形状の下では
+    /// `validate_mma_alignment` を満たさないため、無検証の
+    /// `TileSelection` を返さず `Err(CudaError::InvalidKernelConfig)`
+    /// で選定不能を明示する。
+    #[test]
+    fn select_tile_config_rejects_when_shape_violates_alignment_even_for_fixed_table() {
+        // shape.k % 8 != 0 のため enumerate_tile_candidates が規則 6 で
+        // 空 Vec を返す形状（tile_candidate_tests の同種フィクスチャと
+        // 同じ根拠）。同じ不整列性が FIXED_TILE_SELECTION 側の
+        // validate_mma_alignment 検証も失敗させる。
+        let unaligned_shape = GemmShape::new(4096, 9, 17);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+        let measured = Some(MeasuredBandwidth {
+            l1_bytes_per_cycle_per_sm: NonZeroU64::new(128).expect("non-zero"),
+            l2_bytes_per_cycle_device: NonZeroU64::new(4096).expect("non-zero"),
+        });
+
+        let err = select_tile_config(
+            unaligned_shape,
+            DType::F16,
+            FULL_BUDGET_BYTES,
+            num_sms,
+            measured,
+        )
+        .expect_err(
+            "unaligned shape must be rejected instead of silently returning \
+             FIXED_TILE_SELECTION (codex-review #675 P1)",
+        );
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
+    }
+
+    /// `SM121_MEASURED_BANDWIDTH` が `None` である間は選定入口が
+    /// コストモデルを一切評価しないこと（H100 定数流用の不在を機械検査）。
+    /// `select_tile_config` に `measured: None` を渡した場合、内部で
+    /// `enumerate_tile_candidates`／コストモデルへ到達せず即座に固定
+    /// テーブルを返す実装であることを、`smem_budget_bytes` に意図的に
+    /// 不正な値（0。全候補が SMEM 予算超過で棄却される値）を渡しても
+    /// 固定テーブルの選定結果に一切影響しないことで間接検証する
+    /// （コストモデル経路を通っていれば `smem_budget_bytes=0` は
+    /// `enumerate_tile_candidates` の結果に影響するはずだが、`None`
+    /// 経路はそもそも `enumerate_tile_candidates` を呼ばない）。
+    #[test]
+    fn none_bandwidth_bypasses_cost_model_evaluation_entirely() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+
+        // smem_budget_bytes = 0 は enumerate_tile_candidates を通せば
+        // 全候補棄却（tile_candidate_tests 参照）になる。None 経路は
+        // enumerate_tile_candidates／コストモデルを一切呼ばず、直接
+        // fixed_table_selection_if_valid で FIXED_TILE_SELECTION の
+        // smem_total を smem_budget_bytes=0 に対して検証するため、
+        // どちらの経路を通っても最終的に「予算超過で選定不能」という
+        // 同じ結論に到達する（codex-review #675 P1 指摘の回帰防止:
+        // 検証共有化前は None 経路がこの budget=0 を無視して
+        // FIXED_TILE_SELECTION を無検証で返してしまっていた）。
+        let err = select_tile_config(shape, DType::F16, 0, num_sms, None).expect_err(
+            "smem_budget_bytes=0 must reject FIXED_TILE_SELECTION instead of returning it \
+             unchecked (codex-review #675 P1)",
+        );
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// codex-review #675 P1 指摘の回帰防止: `select_tile_config` に
+    /// `DType::F32` を渡した場合、`measured = None`（固定テーブル経路）
+    /// では `FIXED_TILE_SELECTION` の `smem_per_stage`/`smem_total` が
+    /// f16 前提で算出されたメタデータであるため、dtype 不一致として
+    /// `Err(CudaError::InvalidKernelConfig)` を返し、無検証の
+    /// `TileSelection` を成功として返さないこと。
+    #[test]
+    fn select_tile_config_rejects_f32_dtype_for_fixed_table() {
+        let shape = GemmShape::new(4096, 4096, 4096);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+
+        let err = select_tile_config(shape, DType::F32, FULL_BUDGET_BYTES, num_sms, None)
+            .expect_err(
+                "DType::F32 must be rejected because FIXED_TILE_SELECTION's smem metadata is \
+                 f16-only (codex-review #675 P1)",
+            );
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// Cursor Bugbot 指摘の回帰防止（PR #675 review）:
+    /// `validate_fixed_tile_selection` は dtype／`n`・`k` 整列／SMEM 予算は
+    /// 検査するが `validate_mma_grid_bounds` を呼んでいなかったため、
+    /// `m > 64 * 65535`（`MMA_BM` 単位で grid_dim.y が CUDA の 65,535 上限を
+    /// 超える形状）に対しても `dtype`／`n`／`k`／SMEM の条件さえ満たせば
+    /// `FIXED_TILE_SELECTION` を「成功した `TileSelection`」として返して
+    /// しまっていた（実際のカーネル起動は grid dim 上限超過で失敗する）。
+    /// `n`/`k` は 8 の倍数の整列要件を保ちつつ `m` だけを上限超過させ、
+    /// `Err(CudaError::InvalidShape)` になることを確認する。
+    #[test]
+    fn select_tile_config_rejects_m_exceeding_grid_y_limit_for_fixed_table() {
+        // gemm_mma.rs::validate_mma_grid_bounds_rejects_m_exceeding_grid_y_limit
+        // と同じ根拠・同じ境界値（65_535 * MMA_BM + 1）。
+        let oversized_shape = GemmShape::new(65_535 * MMA_BM + 1, 4096, 4096);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+
+        let err = select_tile_config(
+            oversized_shape,
+            DType::F16,
+            FULL_BUDGET_BYTES,
+            num_sms,
+            SM121_MEASURED_BANDWIDTH,
+        )
+        .expect_err(
+            "m exceeding 64 * 65535 must be rejected instead of silently returning \
+             FIXED_TILE_SELECTION with an unlaunchable grid_dim.y (Cursor Bugbot, PR #675)",
+        );
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 }

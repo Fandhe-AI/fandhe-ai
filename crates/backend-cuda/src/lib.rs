@@ -138,8 +138,9 @@ pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
 pub use gemm_auto::{
-    CudaGemmAuto, TileCandidate, derive_stages_for_device, enumerate_tile_candidates,
-    enumerate_tile_candidates_for_device,
+    CostModelParams, CudaGemmAuto, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH, TileCandidate,
+    TileSelection, TileSelectionBasis, derive_stages_for_device, enumerate_tile_candidates,
+    enumerate_tile_candidates_for_device, select_tile_config, select_tile_config_for_device,
 };
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
