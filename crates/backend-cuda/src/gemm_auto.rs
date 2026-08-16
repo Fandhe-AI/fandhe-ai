@@ -620,6 +620,18 @@ mod cost_model {
     /// ドキュメンテーションコメント参照）。
     pub const SM121_MEASURED_BANDWIDTH: Option<MeasuredBandwidth> = None;
 
+    /// [`SM121_MEASURED_BANDWIDTH`] が対象とする compute capability
+    /// （major, minor）= sm_121（DGX Spark GB10）。
+    ///
+    /// [`super::select_tile_config_for_device`] はこの定数と
+    /// `device.compute_capability()` を突き合わせてからでなければ
+    /// [`SM121_MEASURED_BANDWIDTH`] を [`super::select_tile_config`] へ
+    /// 渡さない（codex-review #675 P1 指摘対応: アーキテクチャ検証なしに
+    /// sm_121 実測定数を任意デバイスへ適用すると、`SM121_MEASURED_BANDWIDTH`
+    /// が `Some` へ更新された将来、sm_80/sm_90 等の他アーキテクチャでも
+    /// 未検証の `CostModel` 選定結果を成功として返してしまう）。
+    pub const SM121_COMPUTE_CAPABILITY: (i32, i32) = (12, 1);
+
     /// [`estimate_candidate_cost`] へ渡すデバイス実行時パラメータ。
     ///
     /// `num_sms` はハードコードせず、呼び出し元（[`select_tile_config_for_device`]）
@@ -952,7 +964,9 @@ mod cost_model {
     };
 }
 
-pub use cost_model::{CostModelParams, MeasuredBandwidth, SM121_MEASURED_BANDWIDTH};
+pub use cost_model::{
+    CostModelParams, MeasuredBandwidth, SM121_COMPUTE_CAPABILITY, SM121_MEASURED_BANDWIDTH,
+};
 
 /// [`select_tile_config`] の選定根拠（実機検証・ログでの判別用。
 /// イシュー #527 実装計画 §3）。
@@ -1124,6 +1138,17 @@ fn validate_fixed_tile_selection(
 /// [`SM121_MEASURED_BANDWIDTH`] とともに [`select_tile_config`] へ渡す。
 /// 属性取得の失敗は `CudaError::Driver`／`CudaError::InvalidKernelDescriptor`
 /// として呼び出し元へそのまま伝播する（fail-closed。既存ヘルパーと同型）。
+///
+/// `device.compute_capability()` を [`SM121_COMPUTE_CAPABILITY`]（sm_121）と
+/// 突き合わせ、一致する場合のみ [`SM121_MEASURED_BANDWIDTH`] を
+/// [`select_tile_config`] へ渡す。不一致（sm_80/sm_90 等の他アーキテクチャ）
+/// の場合は `measured = None` を渡し、[`select_tile_config`] を常に
+/// 検証済み固定選定テーブル経路（[`fixed_table_selection_if_valid`]）へ
+/// fail-closed に倒す（codex-review #675 P1 指摘対応: sm_121 実測定数
+/// ——将来 `SM121_MEASURED_BANDWIDTH` が `Some` へ更新された時点——を
+/// アーキテクチャ検証なしに他デバイスへ適用すると、未検証の `CostModel`
+/// 選定結果を成功として返してしまう。現状 `SM121_MEASURED_BANDWIDTH` は
+/// `None` のため本検証追加による挙動変化はない）。
 pub fn select_tile_config_for_device(
     device: &CudaDevice,
     shape: GemmShape,
@@ -1146,13 +1171,18 @@ pub fn select_tile_config_for_device(
                  returned 0, which cannot be a valid SM count"
                 .to_string(),
         })?;
-    select_tile_config(
-        shape,
-        dtype,
-        smem_budget_bytes,
-        num_sms,
-        SM121_MEASURED_BANDWIDTH,
-    )
+    // sm_121 実測定数の他アーキテクチャへの誤流用防止（codex-review #675
+    // P1 指摘）。`SM121_MEASURED_BANDWIDTH` は sm_121（DGX Spark GB10）で
+    // しか意味を持たない定数のため、compute capability が一致しない
+    // デバイスには決して渡さず `None` にフォールバックする（`select_tile_config`
+    // の `measured = None` 経路は検証済み固定選定テーブルへ fail-closed
+    // に倒れる。上記関数ドキュメンテーションコメント参照）。
+    let measured = if device.compute_capability() == SM121_COMPUTE_CAPABILITY {
+        SM121_MEASURED_BANDWIDTH
+    } else {
+        None
+    };
+    select_tile_config(shape, dtype, smem_budget_bytes, num_sms, measured)
 }
 
 /// naive／tiled／WMMA の全 GEMM カーネルを保持し、`select_gemm_kernel`
