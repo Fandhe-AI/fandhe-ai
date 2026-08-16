@@ -78,6 +78,14 @@ const WMMA_TF32_BLOCK_DIM: (u32, u32, u32) = (kernels::WMMA_TF32_THREADS, 1, 1);
 /// 参照）。
 const WMMA_TF32_OPT_BLOCK_DIM: (u32, u32, u32) = (kernels_wmma_opt::WMMA_TF32_OPT_THREADS, 1, 1);
 
+/// WMMA TF32 opt-staged（cp.async 多段パイプライン・fragment 先読み。
+/// イシュー #500）カーネル起動 1 回あたりのブロック次元。
+/// [`WMMA_TF32_OPT_BLOCK_DIM`] と同じ理由（`kernels_wmma_opt.rs` 冒頭
+/// ドキュメンテーションコメント参照）で専用定数として分離する
+/// （`kernels_wmma_opt::WMMA_TF32_STAGED_THREADS` と偶然同じ値 128）。
+const WMMA_TF32_STAGED_BLOCK_DIM: (u32, u32, u32) =
+    (kernels_wmma_opt::WMMA_TF32_STAGED_THREADS, 1, 1);
+
 /// naive／tiled GEMM カーネル（f32/f16 各 2 種）のコンパイル済みハンドルを保持する。
 ///
 /// `stream` は [`CudaDevice`] から `Arc` クローンで受け取る（`device.rs` の
@@ -129,6 +137,21 @@ pub struct CudaGemm {
     /// `wmma_tf32_error` の detail が `CudaError::WmmaUnavailable` として
     /// 表面化する）。
     wmma_tf32_opt_error: Option<String>,
+    /// イシュー #500 で追加。`kernels_wmma_opt::wmma_tf32_f32_staged_source()`
+    /// （cp.async 多段パイプライン・fragment 先読みを WMMA TF32 経路へ
+    /// 横展開したカーネル）のコンパイル済みハンドル。`wmma_tf32_opt` と
+    /// 同じ理由（`#include <mma.h>` の解決・compute capability 8.0 以降
+    /// 要求）で `Option` にし、コンパイル失敗を `new` の早期 return に
+    /// 合流させない。`run_wmma_tf32` はこちらが `Some` かつ cp.async 16
+    /// バイト整列条件（`n % 4 == 0 && k % 4 == 0`）を満たす場合に最優先で
+    /// 使い、いずれかが成立しなければ `wmma_tf32_opt`（既存 opt 版）→
+    /// `wmma_tf32`（基本版）の順にフォールバックする（3 段選択。
+    /// `kernels_wmma_opt.rs` 冒頭ドキュメントコメント「TF32 opt-staged」
+    /// 節参照）。
+    wmma_tf32_staged: Option<CudaFunction>,
+    /// `wmma_tf32_staged` が `None` の場合の失敗理由。`wmma_tf32_opt_error`
+    /// と同じ理由で文字列化して保持する。
+    wmma_tf32_staged_error: Option<String>,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -333,6 +356,50 @@ pub(crate) fn validate_wmma_tf32_opt_k_bound(k: u32) -> Result<(), CudaError> {
     Ok(())
 }
 
+/// WMMA TF32 opt-staged カーネル固有の `k` 追加上限検証（イシュー #500）。
+/// [`validate_wmma_tf32_opt_k_bound`] と同型・同じ厳密算術（`ceil(k /
+/// WMMA_TF32_STAGED_K_TILE) * WMMA_TF32_STAGED_K_TILE - 1` を `u64` で
+/// 計算し `i32::MAX` と比較する）だが、`WMMA_TF32_STAGED_K_TILE` 基準で
+/// 独立して検証する（両定数は現状同値〈16〉だが、staged 側の K タイル
+/// 拡張時に opt 側の検証と無言で食い違わないよう独立関数として保つ）。
+pub(crate) fn validate_wmma_tf32_staged_k_bound(k: u32) -> Result<(), CudaError> {
+    let tile = kernels_wmma_opt::WMMA_TF32_STAGED_K_TILE as u64;
+    let max_computed_index = if k == 0 {
+        0
+    } else {
+        (k as u64).div_ceil(tile) * tile - 1
+    };
+    if max_computed_index > i32::MAX as u64 {
+        return Err(CudaError::InvalidShape {
+            detail: format!(
+                "k tile-index arithmetic for WMMA TF32 staged kernel would overflow i32: k={k}, \
+                 max_computed_index={max_computed_index}, WMMA_TF32_STAGED_K_TILE={}",
+                kernels_wmma_opt::WMMA_TF32_STAGED_K_TILE
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// WMMA TF32 opt-staged カーネルの cp.async 16 バイト転送粒度が要求する
+/// グローバル側整列制約を検証する（`gemm_mma.rs::validate_mma_alignment`
+/// の f32 版。f16 は 8 要素/16B、f32 は 4 要素/16B である点のみ異なる）。
+///
+/// A の行ストライドは `k`、B の行ストライドは `n` であり、共有メモリ側の
+/// タイル幅（`WMMA_TF32_STAGED_K_TILE`/`WMMA_TF32_STAGED_BLOCK_N`）が共に
+/// 4 の倍数であることと合わせて `k % 4 == 0 && n % 4 == 0` を満たさない
+/// 限り、行境界をまたぐ列オフセットが 16 バイト境界からずれうる
+/// （`kernels_wmma_opt.rs::WMMA_TF32_F32_STAGED_BODY` 内
+/// `LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP` コメント「REQ-8」参照）。
+/// 満たさない形状は `run_wmma_tf32` が staged 経路を選ばず opt 版へ
+/// フォールバックするため、`InvalidShape` ではなく `bool` を返す
+/// （`validate_mma_alignment` は独立経路〈`CudaMmaGemm`〉の唯一のゲート
+/// のため fail-closed に拒否するが、本関数は 3 段フォールバックの経路
+/// 選択条件であり拒否ではなくフォールバックが正しい契約のため）。
+pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
+    n.is_multiple_of(4) && k.is_multiple_of(4)
+}
+
 /// `kernels::WMMA_TF32_BLOCK_M`／`WMMA_TF32_BLOCK_N`（ブロックタイル一辺）を
 /// 単位に `m`/`n` を `div_ceil` で包含するグリッド次元を構築する。
 ///
@@ -395,6 +462,36 @@ fn wmma_tf32_opt_launch_config(m: u32, n: u32) -> LaunchConfig {
     LaunchConfig {
         grid_dim,
         block_dim: WMMA_TF32_OPT_BLOCK_DIM,
+        shared_mem_bytes: 0,
+    }
+}
+
+/// WMMA(TF32) opt-staged カーネル（イシュー #500・
+/// `kernels_wmma_opt::wmma_tf32_f32_staged_source()`）を単独でコンパイル・
+/// ロードする。[`compile_wmma_tf32_opt`] と同じ理由で `CudaGemm::new` の
+/// 早期 return には合流させず、呼び出し元で `wmma_tf32_staged_error` として
+/// 退避する。
+fn compile_wmma_tf32_staged(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
+    let ptx = compile_ptx(kernels_wmma_opt::wmma_tf32_f32_staged_source(), arch)?;
+    let func = device
+        .context()
+        .load_module(ptx)?
+        .load_function("gemm_wmma_tf32_staged")?;
+    Ok(func)
+}
+
+/// [`wmma_tf32_opt_launch_config`] の staged 版。ブロックタイル
+/// `kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M/N`（64×64。既存 opt 版と
+/// 同一）を単位に `div_ceil` でグリッドを構築する。
+fn wmma_tf32_staged_launch_config(m: u32, n: u32) -> LaunchConfig {
+    let grid_dim = (
+        n.div_ceil(kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N),
+        m.div_ceil(kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M),
+        1,
+    );
+    LaunchConfig {
+        grid_dim,
+        block_dim: WMMA_TF32_STAGED_BLOCK_DIM,
         shared_mem_bytes: 0,
     }
 }
@@ -526,6 +623,45 @@ impl CudaGemm {
             Err(e) => (None, Some(e.to_string())),
         };
 
+        // イシュー #500: `kernels_wmma_opt::wmma_tf32_f32_staged_source()`
+        // は既存 TF32 opt と同一のブロックタイル（64）・warp タイル（32）
+        // 分割・レジスタブロッキング（2×2）前提を持つ。上記
+        // `WMMA_TF32_OPT_BLOCK_M/N` 系 const アサーションと同じ理由
+        // （レビュー指摘 #62 の踏襲）でコンパイル時に検査する。
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M
+                .is_multiple_of(kernels_wmma_opt::WMMA_TF32_STAGED_WARP_TILE)
+        );
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N
+                .is_multiple_of(kernels_wmma_opt::WMMA_TF32_STAGED_WARP_TILE)
+        );
+        const _: () = assert!(
+            (kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M
+                / kernels_wmma_opt::WMMA_TF32_STAGED_WARP_TILE)
+                * (kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N
+                    / kernels_wmma_opt::WMMA_TF32_STAGED_WARP_TILE)
+                * 32
+                == kernels_wmma_opt::WMMA_TF32_STAGED_THREADS
+        );
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_TF32_STAGED_WARP_TILE
+                == kernels_wmma_opt::WMMA_TF32_STAGED_FRAG * 2
+        );
+        const _: () = assert!(
+            kernels_wmma_opt::WMMA_TF32_STAGED_K_TILE
+                == kernels_wmma_opt::WMMA_TF32_STAGED_FRAG_K * 2
+        );
+        const _: () = assert!(kernels_wmma_opt::WMMA_TF32_STAGED_A_PAD.is_multiple_of(4));
+        const _: () = assert!(kernels_wmma_opt::WMMA_TF32_STAGED_B_PAD.is_multiple_of(4));
+        const _: () = assert!(kernels_wmma_opt::WMMA_TF32_STAGED_STAGES >= 2);
+
+        let (wmma_tf32_staged, wmma_tf32_staged_error) =
+            match compile_wmma_tf32_staged(device, arch) {
+                Ok(func) => (Some(func), None),
+                Err(e) => (None, Some(e.to_string())),
+            };
+
         Ok(Self {
             stream: device.stream().clone(),
             naive_f32,
@@ -536,6 +672,8 @@ impl CudaGemm {
             wmma_tf32_error,
             wmma_tf32_opt,
             wmma_tf32_opt_error,
+            wmma_tf32_staged,
+            wmma_tf32_staged_error,
         })
     }
 
@@ -654,6 +792,23 @@ impl CudaGemm {
         self.wmma_tf32_opt_error.as_deref()
     }
 
+    /// TF32 opt-staged カーネル（イシュー #500）が `CudaGemm::new` 時点で
+    /// コンパイル・ロードに成功しているかを返す（[`Self::wmma_tf32_opt_available`]
+    /// と同じ理由。`run_wmma_tf32` は staged カーネルが利用可能かつ
+    /// cp.async 16 バイト整列条件を満たす形状でのみ staged 経路を選ぶため、
+    /// 戻り値の成否だけでは staged 経路が実際に実行されたかを判定
+    /// できない。`tests/gemm_wmma_tf32_staged.rs` はこの関数で可用性を
+    /// 確認したうえで計測・検証する）。
+    pub fn wmma_tf32_staged_available(&self) -> bool {
+        self.wmma_tf32_staged.is_some()
+    }
+
+    /// [`Self::wmma_tf32_staged_available`] が `false` の場合の失敗理由
+    /// （[`Self::wmma_tf32_opt_unavailable_reason`] と同じ理由）。
+    pub fn wmma_tf32_staged_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_tf32_staged_error.as_deref()
+    }
+
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],
@@ -662,6 +817,22 @@ impl CudaGemm {
         n: u32,
         k: u32,
     ) -> Result<Vec<f32>, CudaError> {
+        // イシュー #500: 3 段選択。staged（cp.async 多段パイプライン・
+        // fragment 先読み。cp.async 16 バイト整列条件 `n%4==0 && k%4==0`
+        // を満たす形状限定）→ opt（既存 `__syncthreads()` ベース。整列
+        // 非対応形状のフォールバック先）→ basic の順。整列非対応形状
+        // （63×65×33 等）は従来どおり opt カーネルが処理するため、
+        // 既存 `#[ignore]` テストの parity 特性は非後退（本ファイル
+        // `wmma_tf32_staged_alignment_ok` ドキュメンテーションコメント
+        // 参照）。
+        if let Some(func) = self.wmma_tf32_staged.as_ref()
+            && wmma_tf32_staged_alignment_ok(n, k)
+        {
+            validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+            validate_wmma_tf32_staged_k_bound(k)?;
+            return self.run_wmma_tf32_staged_kernel(func, a, b, m, n, k);
+        }
+
         if let Some(func) = self.wmma_tf32_opt.as_ref() {
             validate_gemm_dims(a.len(), b.len(), m, n, k)?;
             validate_wmma_tf32_opt_k_bound(k)?;
@@ -784,6 +955,60 @@ impl CudaGemm {
         // （guarded load・エピローグ store のガード付きコピー。
         // kernels_wmma_opt.rs 参照、REQ-8）と合わせて OOB 読み書きが
         // 起きない根拠とする。
+        unsafe {
+            self.stream
+                .launch_builder(func)
+                .arg(&a_dev)
+                .arg(&b_dev)
+                .arg(&mut c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+
+        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        Ok(c_host)
+    }
+
+    /// WMMA TF32 opt-staged カーネル専用の起動手続き（イシュー #500）。
+    /// [`Self::run_wmma_tf32_opt_kernel`] と転送・同期・回収の構造は
+    /// 同一だが、グリッド計算に [`wmma_tf32_staged_launch_config`]
+    /// （ブロックタイルは既存 opt 版と同じ 64×64）を使う点が異なる。
+    fn run_wmma_tf32_staged_kernel(
+        &self,
+        func: &CudaFunction,
+        a: &[f32],
+        b: &[f32],
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<Vec<f32>, CudaError> {
+        // run_wmma_tf32_opt_kernel と同一の根拠（Cursor Bugbot 指摘 PR #240／#244）。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![0.0f32; (m as usize) * (n as usize)]);
+        }
+
+        let a_dev = self.stream.clone_htod(a)?;
+        let b_dev = self.stream.clone_htod(b)?;
+        let mut c_dev = self
+            .stream
+            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+
+        let cfg = wmma_tf32_staged_launch_config(m, n);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: run_wmma_tf32_opt_kernel と同一の根拠。カーネル引数
+        // （a_dev/b_dev/c_dev・m_i/n_i/k_i）はホスト側検証
+        // （validate_gemm_dims・validate_wmma_tf32_staged_k_bound）済みの
+        // m/n/k から導出しており、staged カーネル内の手動境界チェック
+        // （cp.async src-size ゼロ充填・エピローグ store のガード付き
+        // コピー。kernels_wmma_opt.rs::WMMA_TF32_F32_STAGED_BODY 参照、
+        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。
         unsafe {
             self.stream
                 .launch_builder(func)
@@ -1012,17 +1237,17 @@ impl CudaGemm {
 
     /// デバイス常駐済みの A/B/C バッファに対して WMMA(TF32) カーネルを
     /// 起動し、完了を待つ（[`Self::launch_tiled_f32`] と同じ「GPU 実行
-    /// のみ」契約）。opt カーネルが利用可能ならそちらを使用し、そうで
-    /// なければ基本版へフォールバックする（`run_wmma_tf32` と同一の選択
-    /// ロジック `self.wmma_tf32_opt.is_some()` を用いる。呼び出し元は
-    /// 事前に `run_wmma_tf32` を 1 回 probe 実行して可用性を確認している
-    /// 前提だが（`cuda_floor_bench.rs::measure_wmma_tf32` 参照）、本関数
-    /// 自体は safe な公開 API のため、選択される経路（opt／基本）ごとに
-    /// 必要な `k` 境界検証（[`validate_wmma_tf32_opt_k_bound`]／
-    /// [`validate_wmma_tf32_k_bound`]）とデバイスバッファ長検証を
-    /// 呼び出し元の事前検証に依存せず自前で行う（PR #349 codex-review
-    /// 指摘 P0。[`Self::launch_tiled_f32`] のドキュメンテーションコメント
-    /// 参照）。
+    /// のみ」契約）。`run_wmma_tf32` と同一の 3 段選択ロジック（staged →
+    /// opt → 基本）を用いる（イシュー #500 で staged 選択を追加）。
+    /// 呼び出し元は事前に `run_wmma_tf32` を 1 回 probe 実行して可用性を
+    /// 確認している前提だが（`cuda_floor_bench.rs::measure_wmma_tf32`
+    /// 参照）、本関数自体は safe な公開 API のため、選択される経路
+    /// （staged／opt／基本）ごとに必要な `k` 境界検証
+    /// （[`validate_wmma_tf32_staged_k_bound`]／
+    /// [`validate_wmma_tf32_opt_k_bound`]／[`validate_wmma_tf32_k_bound`]）
+    /// とデバイスバッファ長検証を呼び出し元の事前検証に依存せず自前で行う
+    /// （PR #349 codex-review 指摘 P0。[`Self::launch_tiled_f32`] の
+    /// ドキュメンテーションコメント参照）。
     pub fn launch_wmma_tf32(
         &self,
         a_dev: &CudaSlice<f32>,
@@ -1036,11 +1261,30 @@ impl CudaGemm {
         validate_output_len(c_dev.len(), m, n)?;
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
 
-        // SAFETY: run_wmma_f32_kernel／run_wmma_tf32_opt_kernel と同一の
-        // 根拠。カーネル引数は上記・各分岐内で検証済みの m/n/k と 1:1
-        // 対応し、カーネル内の手動境界チェック（REQ-8）と合わせて OOB
-        // 読み書きが起きない根拠とする。
-        if let Some(func) = self.wmma_tf32_opt.as_ref() {
+        // SAFETY: run_wmma_f32_kernel／run_wmma_tf32_opt_kernel／
+        // run_wmma_tf32_staged_kernel と同一の根拠。カーネル引数は
+        // 上記・各分岐内で検証済みの m/n/k と 1:1 対応し、カーネル内の
+        // 手動境界チェック（REQ-8）と合わせて OOB 読み書きが起きない
+        // 根拠とする。
+        if let Some(func) = self
+            .wmma_tf32_staged
+            .as_ref()
+            .filter(|_| wmma_tf32_staged_alignment_ok(n, k))
+        {
+            validate_wmma_tf32_staged_k_bound(k)?;
+            let cfg = wmma_tf32_staged_launch_config(m, n);
+            unsafe {
+                self.stream
+                    .launch_builder(func)
+                    .arg(a_dev)
+                    .arg(b_dev)
+                    .arg(c_dev)
+                    .arg(&m_i)
+                    .arg(&n_i)
+                    .arg(&k_i)
+                    .launch(cfg)?;
+            }
+        } else if let Some(func) = self.wmma_tf32_opt.as_ref() {
             validate_wmma_tf32_opt_k_bound(k)?;
             let cfg = wmma_tf32_opt_launch_config(m, n);
             unsafe {
@@ -1415,6 +1659,64 @@ mod tests {
     #[test]
     fn wmma_tf32_opt_launch_config_exact_multiple_shape_has_no_extra_tile() {
         let cfg = wmma_tf32_opt_launch_config(128, 192);
+        assert_eq!(cfg.grid_dim, (3, 2, 1));
+    }
+
+    // ========================================================================
+    // TF32 opt-staged（イシュー #500）
+    // ========================================================================
+
+    #[test]
+    fn validate_wmma_tf32_staged_k_bound_accepts_ordinary_k() {
+        assert!(validate_wmma_tf32_staged_k_bound(4096).is_ok());
+        assert!(validate_wmma_tf32_staged_k_bound(0).is_ok());
+    }
+
+    /// [`validate_wmma_tf32_opt_k_bound_accepts_full_range_up_to_i32_max`]
+    /// と同じ根拠。`WMMA_TF32_STAGED_K_TILE`（16）は
+    /// `WMMA_TF32_OPT_K_TILE` と同値のため同一の受理範囲を持つ。
+    #[test]
+    fn validate_wmma_tf32_staged_k_bound_accepts_full_range_up_to_i32_max() {
+        for k in 2_147_483_633u32..=2_147_483_640u32 {
+            assert!(
+                validate_wmma_tf32_staged_k_bound(k).is_ok(),
+                "k={k} must be accepted (largest computed index is exactly i32::MAX, not an overflow)"
+            );
+        }
+        assert!(validate_wmma_tf32_staged_k_bound(i32::MAX as u32).is_ok());
+    }
+
+    /// [`wmma_tf32_staged_alignment_ok`] が cp.async 16 バイト転送粒度
+    /// （f32 4 要素）の整列条件を正しく判定することを検証する
+    /// （`gemm_mma.rs::validate_mma_alignment_accepts_multiples_of_eight`
+    /// と同方針だが、こちらは 3 段フォールバックの経路選択条件のため
+    /// `Result` ではなく `bool` を返す）。
+    #[test]
+    fn wmma_tf32_staged_alignment_ok_accepts_multiples_of_four_and_rejects_others() {
+        assert!(wmma_tf32_staged_alignment_ok(64, 32));
+        assert!(wmma_tf32_staged_alignment_ok(4, 4));
+        assert!(wmma_tf32_staged_alignment_ok(0, 0));
+        assert!(!wmma_tf32_staged_alignment_ok(65, 32)); // n が 4 の倍数でない
+        assert!(!wmma_tf32_staged_alignment_ok(64, 33)); // k が 4 の倍数でない
+        assert!(!wmma_tf32_staged_alignment_ok(65, 33)); // 両方とも 4 の倍数でない
+    }
+
+    #[test]
+    fn wmma_tf32_staged_launch_config_grid_dim_covers_m_and_n_via_block_tile_div_ceil() {
+        // wmma_tf32_opt_launch_config_grid_dim_covers_m_and_n_via_block_tile_div_ceil
+        // と同一形状（ブロックタイルは既存 opt 版と同じ 64×64）。
+        let cfg = wmma_tf32_staged_launch_config(65, 63);
+        assert_eq!(cfg.grid_dim, (1, 2, 1));
+        assert_eq!(cfg.block_dim, WMMA_TF32_STAGED_BLOCK_DIM);
+        assert_eq!(
+            cfg.block_dim,
+            (kernels_wmma_opt::WMMA_TF32_STAGED_THREADS, 1, 1)
+        );
+    }
+
+    #[test]
+    fn wmma_tf32_staged_launch_config_exact_multiple_shape_has_no_extra_tile() {
+        let cfg = wmma_tf32_staged_launch_config(128, 192);
         assert_eq!(cfg.grid_dim, (3, 2, 1));
     }
 }

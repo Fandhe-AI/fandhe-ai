@@ -50,6 +50,19 @@ pub enum ParityPath {
     WmmaTf32,
     /// `CudaGemm::run_wmma_tf32`（opt カーネル利用可能環境。
     /// `wmma_tf32_opt_available()` で分岐する経路）。
+    ///
+    /// **イシュー #500 での注記**: `run_wmma_tf32` は #500 で TF32
+    /// opt-staged カーネル（cp.async 多段パイプライン）が追加され、staged
+    /// カーネルが利用可能かつ cp.async 16 バイト整列条件（`n%4==0 &&
+    /// k%4==0`）を満たす形状では staged 経路が最優先で選ばれる
+    /// （`gemm.rs::run_wmma_tf32` 3 段選択）。本表の `WmmaTf32Opt` 行
+    /// （64×64×64・512×512×512・512×512×4096 いずれも 4 の倍数形状）は
+    /// staged カーネル実装済み環境の実機では実際には staged 経路を通る
+    /// ことになるため、行ラベルと実行経路が一致しない。数値契約
+    /// （TF32 明示変換・f32 累算・mma 発行順序）は staged・opt で同一の
+    /// はずだが、この行の非後退判定が実際には staged カーネルの実測に
+    /// なる点は実機再計測（イシュー #502）で確認する。既存 tolerance 定数・
+    /// baseline 数値は変更しない。
     WmmaTf32Opt,
     /// `CudaMmaGemm::run_f16`（`mma.sync`/`ldmatrix`/`cp.async` 経路）。
     MmaF16,
