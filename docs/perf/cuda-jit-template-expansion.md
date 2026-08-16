@@ -112,10 +112,11 @@ cuobjdump -sass <compiled.cubin> | less
 
 ### 6.2 実測状態: 未実測・実機実行待ち
 
-§0「状態」と同じ理由（本実装セッションの環境に NVRTC が存在しない）により、上記 `#[ignore]` 3 テスト（形状網羅・fail-closed 負系・`STATIC_NK` 再利用）は **本セッションでは実行できていない**。実行できたのは以下のみ:
+§0「状態」と同じ理由（本実装セッションの環境に NVRTC が存在しない）により、上記 `#[ignore]` 4 テスト（形状網羅・fail-closed 負系・`STATIC_NK` 再利用・k=0 no-op〈非整列 N〉）は **本セッションでは実行できていない**（`specialized_mma_f16_matches_default_and_reference_across_shapes`・`specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape`・`specialized_mma_f16_static_nk_reuses_across_dynamic_m`・`specialized_mma_f16_handles_k_zero_noop_with_misaligned_n`）。実行できたのは以下のみ:
 
 - `specialized_mma_f16_matches_default_smoke_env_adaptive`（`#[ignore]` なし。環境適応スモーク）: CUDA/NVRTC 非搭載環境で `CudaDevice::new`／`CudaMmaGemm::new` の早期 return 分岐を通り green（実測日時: 本 PR 作成時点・NVRTC 非搭載環境）
+- `specialized_mma_kernel_handle_compile_direct_smoke_env_adaptive`（`#[ignore]` なし。環境適応スモーク）: 同様に CUDA/NVRTC 非搭載環境で `SpecializedMmaKernelHandle::compile` の早期 return 分岐を通り green
 - `cargo fmt --all -- --check`／`cargo clippy --workspace --all-targets --all-features -- -D warnings`／`cargo test --workspace`（実機依存 `#[ignore]` を除く全テスト）が green
-- `git diff` で `tests/common/parity_baseline.rs`・tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）・`Cargo.toml`/`Cargo.lock` に差分がないことを確認済み
+- `git diff` で `tests/common/parity_baseline.rs`・tolerance 定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）に差分がないことを確認済み。`Cargo.toml` は `crates/backend-cuda/Cargo.toml` に `specialized_mma_parity` 用の `[[test]]`（`required-features = ["internal-diagnostics"]`）ブロックを追加したのみで依存クレートの追加・更新はなく、`Cargo.lock` は無差分
 
 DGX Spark GB10（spark-dbd9・sm_121）実機での `cargo test -p backend-cuda --test specialized_mma_parity --features internal-diagnostics -- --ignored --nocapture`（`specialized_mma_parity` は `[[test]] required-features = ["internal-diagnostics"]` でゲートされているため `--features internal-diagnostics`〈または `--all-features`〉指定が必須。指定なしでは cargo がテストバイナリをビルド対象から外し `--ignored` を渡しても実行されない false-green になる。PR #685 codex-review/Bugbot 指摘の是正）実行、および既存 `cpu_cuda_mma_parity.rs`／`parity_nonregression.rs` の `--ignored` 併走による非後退確認は、本実装セッションでは未了のまま残タスクとする（実装計画 §5 手順 6・§5 安全側フォールバック方針。`docs/real-hardware-verification-env.md` の手順に従う）。実測結果は本節を追記更新する形で記録する。
