@@ -1314,6 +1314,34 @@ const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(target_os = "macos")]
 const O_NOFOLLOW: i32 = 0x0100;
 
+/// Linux の `ENOTDIR`（`<asm-generic/errno-base.h>` では `20`）。
+/// [`is_confirmed_non_directory_open_error`] 用（イシュー #509 PR #677
+/// Cursor Bugbot 再指摘対応: `open_dir_nofollow`／`opendirat_nofollow`
+/// の失敗原因を「確実に非ディレクトリ」と「それ以外（fd 枯渇・権限
+/// 不足等）」に区別するため、errno の生値を見る必要がある。
+/// `std::io::ErrorKind::NotADirectory`（`io_error_more`）は本ワーク
+/// スペースの stable toolchain では未安定化のため使えない）。
+#[cfg(target_os = "linux")]
+const ENOTDIR: i32 = 20;
+
+/// Linux の `ELOOP`（`<asm-generic/errno.h>` では `40`）。上記
+/// `ENOTDIR` と同じ理由・同じ用途（symlink を `O_NOFOLLOW` で拒否
+/// した場合の errno）。
+#[cfg(target_os = "linux")]
+const ELOOP: i32 = 40;
+
+/// macOS（Darwin）の `ENOTDIR`（`<sys/errno.h>` では `20`）。上記 Linux
+/// 版 `ENOTDIR` と同じ理由・同じ用途。
+#[cfg(target_os = "macos")]
+const ENOTDIR: i32 = 20;
+
+/// macOS（Darwin）の `ELOOP`（`<sys/errno.h>` では `62`）。上記 Linux
+/// 版 `ELOOP` と同じ理由・同じ用途。値は Linux と異なる（プラット
+/// フォームごとに errno 番号が異なるため `target_os` で分岐する。
+/// 上記 `O_NOFOLLOW` 等と同じ判断）。
+#[cfg(target_os = "macos")]
+const ELOOP: i32 = 62;
+
 /// Linux の `O_NONBLOCK`（`<fcntl.h>`。8 進数 `04000`）。[`open_nofollow`]
 /// ／[`openat_nofollow`] 用（イシュー #509 codex-review P0 指摘対応:
 /// キャッシュエントリの `kernel.cu`／`kernel.ptx` として FIFO 等の特殊
@@ -2462,6 +2490,30 @@ fn longest_existing_ancestor(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// [`open_dir_nofollow`]／[`opendirat_nofollow`] の失敗が「対象が確実に
+/// plain directory ではない」（symlink または非ディレクトリ）ことに
+/// 起因するかを判定する（イシュー #509 PR #677 Cursor Bugbot 再指摘
+/// 対応: `create_dir_all_verified` の Linux 版・macOS 版いずれも、旧実装
+/// は open 失敗の原因種別を区別せず一律に「非ディレクトリ」とみなして
+/// `remove_dir` していた。しかし `EMFILE`〈fd 枯渇〉・`EACCES`〈権限
+/// 不足〉のような一時的・権限系エラーでも `open`／`openat` は失敗し
+/// うる一方、`rmdir` は新規 fd を必要としないため成功してしまい、
+/// 正当な peer プロセスが作成した空ディレクトリを誤って削除しうる）。
+///
+/// `O_NOFOLLOW` は symlink を `ELOOP` で、`O_DIRECTORY` は非ディレクトリ
+/// を `ENOTDIR` で拒否する（`open(2)`）。この 2 種類の errno のみを
+/// 「確実に非ディレクトリ」と判断し、それ以外（fd 枯渇・権限不足・
+/// シグナル割り込み等）は削除せず [`CudaError::CacheIo`] として呼び
+/// 出し元へそのまま伝播する（削除は「確実に非ディレクトリと判明した
+/// 場合」のみに限定する fail-safe 方針）。`std::io::ErrorKind::
+/// FilesystemLoop`／`NotADirectory`（`io_error_more`）は本ワークスペース
+/// の stable toolchain では未安定化のため使えず、[`ELOOP`]／[`ENOTDIR`]
+/// （`target_os` ごとの errno 生値）と `raw_os_error()` を直接比較する。
+#[cfg(unix)]
+fn is_confirmed_non_directory_open_error(e: &std::io::Error) -> bool {
+    matches!(e.raw_os_error(), Some(ENOTDIR) | Some(ELOOP))
+}
+
 /// `existing_ancestor`（[`longest_existing_ancestor`] で求めた、事前検証
 /// 済みの実在祖先）から `candidate_root` まで、パスコンポーネントを
 /// 1 階層ずつ fd 起点（`/proc/self/fd/<fd>`）で作成し、作成直後の fd
@@ -2574,12 +2626,24 @@ fn create_dir_all_verified(
 
         let child_dir = match open_dir_nofollow(&child_magic_path) {
             Ok(f) => f,
-            Err(_) => {
+            Err(e) if is_confirmed_non_directory_open_error(&e) => {
                 let _ = fs::remove_dir(&display_path);
                 return Err(CudaError::CacheDirUnavailable {
                     detail: format!(
                         "cache directory component {} is not a plain directory (symlink or \
                          other non-directory found where a directory was expected)",
+                        display_path.display()
+                    ),
+                });
+            }
+            Err(e) => {
+                // `EMFILE`／`EACCES` 等、対象が非ディレクトリだと確定
+                // していないエラー。`remove_dir` を実行せずそのまま
+                // 伝播する（[`is_confirmed_non_directory_open_error`]
+                // のドキュメンテーションコメント参照）。
+                return Err(CudaError::CacheIo {
+                    detail: format!(
+                        "failed to open cache directory component {} after creation: {e}",
                         display_path.display()
                     ),
                 });
@@ -2733,12 +2797,24 @@ fn create_dir_all_verified(
 
         let child_dir = match opendirat_nofollow(&current_dir, name_str) {
             Ok(f) => f,
-            Err(_) => {
+            Err(e) if is_confirmed_non_directory_open_error(&e) => {
                 let _ = fs::remove_dir(&display_path);
                 return Err(CudaError::CacheDirUnavailable {
                     detail: format!(
                         "cache directory component {} is not a plain directory (symlink or \
                          other non-directory found where a directory was expected)",
+                        display_path.display()
+                    ),
+                });
+            }
+            Err(e) => {
+                // `EMFILE`／`EACCES` 等、対象が非ディレクトリだと確定
+                // していないエラー。`remove_dir` を実行せずそのまま
+                // 伝播する（[`is_confirmed_non_directory_open_error`]
+                // のドキュメンテーションコメント参照）。
+                return Err(CudaError::CacheIo {
+                    detail: format!(
+                        "failed to open cache directory component {} after creation: {e}",
                         display_path.display()
                     ),
                 });
@@ -5217,6 +5293,74 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // [`is_confirmed_non_directory_open_error`] が「確実に非ディレクトリ」
+    // （`ELOOP`／`ENOTDIR`）と「一時的・権限系エラー」（`EACCES`／`EMFILE`
+    // 等）を区別することの回帰確認（イシュー #509 PR #677 Cursor Bugbot
+    // 再指摘対応: 旧実装は open 失敗の原因種別を区別せず一律に
+    // `remove_dir` していたため、fd 枯渇・権限不足時に peer プロセスが
+    // 作成した正当な空ディレクトリを誤って削除しうる問題があった）。
+    #[cfg(unix)]
+    #[test]
+    fn is_confirmed_non_directory_open_error_distinguishes_eloop_enotdir_from_transient_errors() {
+        let root = fresh_temp_dir("confirmed-non-dir-classification");
+
+        let real_dir = root.join("real-dir");
+        fs::create_dir(&real_dir).expect("must create real directory");
+        let symlink_to_dir = root.join("via-symlink-dir");
+        std::os::unix::fs::symlink(&real_dir, &symlink_to_dir)
+            .expect("must create symlink to real directory");
+        let eloop_err =
+            open_dir_nofollow(&symlink_to_dir).expect_err("O_NOFOLLOW must reject the symlink");
+        assert!(
+            is_confirmed_non_directory_open_error(&eloop_err),
+            "an O_NOFOLLOW rejection of a symlink (ELOOP) must be classified as confirmed \
+             non-directory: {eloop_err}"
+        );
+
+        let real_file = root.join("real-file");
+        fs::write(&real_file, "not a directory").expect("must write real file");
+        let enotdir_err =
+            open_dir_nofollow(&real_file).expect_err("O_DIRECTORY must reject the plain file");
+        assert!(
+            is_confirmed_non_directory_open_error(&enotdir_err),
+            "an O_DIRECTORY rejection of a plain file (ENOTDIR) must be classified as confirmed \
+             non-directory: {enotdir_err}"
+        );
+
+        // `EACCES`（権限不足）・`EMFILE`（fd 枯渇）は対象が非ディレクトリ
+        // だと確定させない。実際のシステムコールを再現困難な状況（fd
+        // 枯渇等）まで踏み込まず、`raw_os_error` のみを見る本関数の契約を
+        // 直接検証する（[`is_confirmed_non_directory_open_error`] は
+        // `std::io::Error` の中身のみを見て判定するため、合成した
+        // `Error::from_raw_os_error` で十分）。
+        let eacces_err = std::io::Error::from_raw_os_error(libc_like_errno::EACCES);
+        assert!(
+            !is_confirmed_non_directory_open_error(&eacces_err),
+            "EACCES must not be classified as confirmed non-directory (would wrongly delete a \
+             directory that could not be opened due to a permission error)"
+        );
+
+        let emfile_err = std::io::Error::from_raw_os_error(libc_like_errno::EMFILE);
+        assert!(
+            !is_confirmed_non_directory_open_error(&emfile_err),
+            "EMFILE must not be classified as confirmed non-directory (would wrongly delete a \
+             peer-created directory during fd exhaustion)"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // `EACCES`／`EMFILE` の errno 生値（Linux・macOS で共通の値。POSIX
+    // 標準の基本エラー番号のため、両プラットフォームで一致する）。
+    // `libc`／`rustix` クレートを追加せずテスト専用の合成エラーを組み
+    // 立てるための最小限の定数（許容依存 8 区分外のため追加不可。
+    // [`O_NOFOLLOW`] 定数のコメントと同じ制約）。
+    #[cfg(unix)]
+    mod libc_like_errno {
+        pub(super) const EACCES: i32 = 13;
+        pub(super) const EMFILE: i32 = 24;
     }
 
     // 未書き込みキーの load はミス（`Ok(None)`）を返すこと。
