@@ -218,17 +218,22 @@ mod macos_impl {
         //
         // 「旧」: `tile::select`（形状のみの判定。occupancy 縮退なし）が
         // 選ぶ構成を `SimdgroupTiled` へ明示指定してディスパッチする
-        // （`dispatch_auto` 変更前の挙動を再現する対照群）。
-        // 「新」: `dispatch_auto`（`ctx.occupancy_params()` 経由で
-        // `tile::select_with_occupancy` を呼ぶ。GPU コア数取得不能時は
-        // `tile::select` と同一構成へ fail-safe フォールバックする）。
+        // （`dispatch_auto` の現行本番挙動と同一。`select_with_occupancy`
+        // は M4 Max 実機での性能非劣化確認が未完了のため `dispatch_auto`
+        // へは未適用〈codex-review P1・PR #684。`crate::gemm` モジュール
+        // ドキュメンテーションコメント参照〉）。
+        // 「新」: `tile::select_with_occupancy`（`ctx.occupancy_params()`
+        // 経由の occupancy 縮退込み判定）が選ぶ構成を同じく `SimdgroupTiled`
+        // へ明示指定してディスパッチする（`dispatch_auto` 経由ではなく
+        // 直接 `select_with_occupancy` の結果を計測する。GPU コア数取得
+        // 不能時は `tile::select` と同一構成へ fail-safe フォールバックする）。
+        // 本比較で非劣化を確認できたら `dispatch_auto` を
+        // `select_with_occupancy` 呼び出しへ切り替える（別 PR）。
         //
         // 選択された `TileConfig`（`bm`/`bn`）も出力し、`docs/perf/
         // metal-gemm-occupancy-select.md` の記録テンプレへ転記できるように
         // する。
-        println!(
-            "--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy 経由 dispatch_auto）---"
-        );
+        println!("--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy）---");
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
 
@@ -242,7 +247,13 @@ mod macos_impl {
             );
 
             let new_cfg = tile::select_with_occupancy(size, size, size, ctx.occupancy_params());
-            let new_tflops = measure_auto(&gemm, &ctx, size, size, size, &config);
+            let new_tflops = measure(
+                &gemm,
+                &ctx,
+                GemmVariant::SimdgroupTiled(new_cfg),
+                size,
+                &config,
+            );
 
             println!(
                 "size={size} old_tile=({}x{}) old_tflops={old_tflops:.4} new_tile=({}x{}) new_tflops={new_tflops:.4} new_over_old={:.4} occupancy_params={:?}",

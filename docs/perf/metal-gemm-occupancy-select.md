@@ -6,7 +6,12 @@
 （`tile::actual_groups`・`tile::OccupancyParams`・`tile::is_underoccupied`）を、`tile::select()` の
 タイル選択へ実際に組み込む。
 
-## 状態: 判定式の実装・単体テスト（Linux worktree）は完了。**実機計測（受け入れ基準 2）は未実施（Mac 実機実行待ち）**
+## 状態: 判定式の実装・単体テスト（Linux worktree）は完了。**実機計測（受け入れ基準 2）は未実施（Mac 実機実行待ち）。本番ディスパッチ（`dispatch_auto`）は未適用**
+
+`crate::gemm::MetalGemm::dispatch_auto` は現時点で `tile::select`（形状のみ）を呼び続けており、
+`tile::select_with_occupancy` は未組み込みである（codex-review P1・PR #684。§4「実機計測手順」記載の
+非劣化確認が完了してから別 PR で `dispatch_auto` を切り替える）。`select_with_occupancy` 自体は実装・
+単体テスト済みで `examples/gemm_bench.rs` の比較セクションから直接呼び出し可能。
 
 本実装環境は Linux のため、`crate::context::MetalContext::new` が実行時に取得する GPU コア数・
 threadgroup memory 上限の実測値、および `examples/gemm_bench.rs` の旧/新比較セクションの実測は
@@ -84,10 +89,13 @@ cargo run -p backend-metal --example gemm_bench --release
 ```
 
 `examples/gemm_bench.rs` の `--- occupancy 判定組み込み比較 ---` セクション（size ∈ {512, 1024, 2048,
-4096}）が、旧（`tile::select` を明示 `SimdgroupTiled` で使う対照群）と新（`dispatch_auto`。
-`ctx.occupancy_params()` 経由で `select_with_occupancy` を使う）を並べて TFLOPS・選択された
-`TileConfig`（`bm`/`bn`）・`occupancy_params` の実測値を出力する（5 回以上計測の中央値。
-`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値を採用」）。
+4096}）が、旧（`tile::select` を明示 `SimdgroupTiled` で使う対照群。`dispatch_auto` の現行本番挙動と
+同一）と新（`tile::select_with_occupancy`〈`ctx.occupancy_params()` 経由〉が選ぶ構成を同じく明示
+`SimdgroupTiled` でディスパッチ）を並べて TFLOPS・選択された `TileConfig`（`bm`/`bn`）・
+`occupancy_params` の実測値を出力する（5 回以上計測の中央値。`.claude/rules/coding-rust.md`
+「ベンチは 5 回計測の中央値を採用」）。**`dispatch_auto` 自体は本ドキュメント記載の非劣化確認が
+完了するまで `select_with_occupancy` を呼ばない**（`crate::gemm` モジュールドキュメンテーション
+コメント参照。codex-review P1・PR #684）。
 
 `cargo test -p backend-metal -- --ignored --nocapture` で `MetalOccupancyInfo::probe` 系テストの実測値
 （GPU コア数・SMEM 上限）も確認できる（`docs/perf/metal-gemm-occupancy-target.md` §3.2 と同じ手順）。

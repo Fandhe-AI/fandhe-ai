@@ -528,7 +528,12 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 }
 
 /// `(m, n, k)` から [`TileConfig`] を選択する（occupancy 判定込み。イシュー
-/// #542）。[`crate::gemm::MetalGemm::dispatch_auto`] の入口。
+/// #542）。**現時点では [`crate::gemm::MetalGemm::dispatch_auto`] の入口
+/// ではない**（本番ディスパッチは引き続き [`select`] を使う。M4 Max
+/// 実機での性能非劣化確認が未完了のため。`crate::gemm` モジュール
+/// ドキュメンテーションコメント・`docs/perf/metal-gemm-occupancy-select.md`
+/// §5 参照）。`examples/gemm_bench.rs` の旧/新比較セクションから明示的に
+/// 呼ばれる。
 ///
 /// 2 段階判定（MFA 型方法論。本ファイル「occupancy 目標算出」節参照）:
 ///
