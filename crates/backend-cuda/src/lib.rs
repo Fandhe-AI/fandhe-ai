@@ -154,11 +154,17 @@ mod swizzle;
 pub use device::{CudaDevice, CudaDeviceProvider};
 pub use error::CudaError;
 pub use gemm::CudaGemm;
-pub use gemm_auto::CudaGemmAuto;
+pub use gemm_auto::{
+    CudaGemmAuto, TileCandidate, derive_stages_for_device, enumerate_tile_candidates,
+    enumerate_tile_candidates_for_device,
+};
 pub use gemm_mma::CudaMmaGemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
-pub use nvrtc::{CudaKernelCacheKey, CudaKernelDescriptor, compile_ptx, nvrtc_version};
+pub use nvrtc::{
+    CudaKernelCacheKey, CudaKernelDescriptor, MAX_PIPELINE_STAGES, compile_ptx,
+    derive_pipeline_stages, nvrtc_version,
+};
 pub use ops::CudaBackendOps;
 
 /// `kernels_mma`／`kernels_wmma_opt`（非公開 `mod`。カーネル本体は crate

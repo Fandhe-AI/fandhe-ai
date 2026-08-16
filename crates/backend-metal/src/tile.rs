@@ -40,6 +40,44 @@
 ///   同期コストを避けるが、行優先ロード時のキャッシュ局所性は劣る。
 ///   「必ず速いとは限らない」ため両経路を実装し実機実測で選択する。
 ///   計画「設計方針」節参照）
+///
+/// `pad`（イシュー #538・[`TileConfig::pad`] 参照）は staged 経路の共有
+/// メモリタイル（A: BM×BK、B: BK×BN）の行末パディング要素数（`f32` 単位。
+/// 両タイル共通）。`simdgroup_load` の列方向アクセスが行ストライドと
+/// threadgroup メモリのバンク境界（16/32 バンク）と整合してしまうことに
+/// よるバンクコンフリクトを、行ストライドを `BK+pad`（A）/`BN+pad`（B）へ
+/// ずらして回避する（MLX steel `gemm.h` の
+/// `tgp_padding_a`/`tgp_padding_b`〈`16/sizeof(T)` 要素〉・
+/// metal-flash-attention の leadingBlockDimensions 実値指定・TileKernels の
+/// `TILE_X + TILE_K` 確保と同族の技法。CUDA 側 B-7 と同族。#538 計画
+/// 「設計方針」節）。`staged=false`（direct-load 経路）では共有メモリを
+/// 使わないため `pad` は常に 0 になる（[`TileConfig::pad`] が `staged` から
+/// 導出する。次段落参照）。
+///
+/// **破壊的変更を伴わない導入設計（イシュー #538 codex-review 指摘 P1
+/// 再指摘対応・PR #673）**: 当初 `pad` を 7 番目の `pub` フィールドとして
+/// 追加し `#[non_exhaustive]` を付与する案を試みたが、Rust の言語仕様上
+/// 「既存の全フィールド `pub` な構造体へ新フィールドを追加する」こと自体が
+/// 構造体リテラル構築を破壊し、`#[non_exhaustive]` はこれを緩和できない
+/// （リテラル構築を将来的に禁止するだけで、既存の 6 フィールドリテラルを
+/// 救済しない）ため、`without_padding`/`with_pad` コンストラクタを用意して
+/// もなお「クレート外の既存リテラル構築コードが無改変でコンパイルできる」
+/// という意味での破壊的変更にはならない、という再指摘を受けた
+/// （codex-review 指摘 2026-08-15。対応案「既存型を変更せずフィールドを
+/// 増やさない」を採用）。
+///
+/// 本設計では `pad` を構造体フィールドとして持たず、[`TileConfig::pad`]
+/// メソッドで `staged` から一意に導出する（`CANDIDATES`（本ファイル）・
+/// テスト・`examples/` の全 `staged: true` 構成が `pad=4` を、唯一の
+/// `staged: false` 構成が `pad=0` を使っており、`pad` は `staged` の純関数
+/// として矛盾なく表現できることを確認済み）。これにより:
+/// - `TileConfig` は従来どおり 6 フィールド（`bm`/`bn`/`bk`/`wm`/`wn`/
+///   `staged`）の全 `pub` 構造体のままであり、`#[non_exhaustive]` を
+///   付与する必要がなく、既存の構造体リテラル構築コードは無改変で動作する
+/// - `TileConfigError::PadNotMultipleOfFour`／`PadWithoutStaging`（`pad` が
+///   構築時入力ではなく導出値になったことで到達不能になった検証）は削除
+/// - `without_padding`／`with_pad`（本 PR で新設したコンストラクタ。`main`
+///   に対する破壊的変更にはならない）も併せて削除する
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TileConfig {
     pub bm: u32,
@@ -55,6 +93,14 @@ pub struct TileConfig {
 /// [`crate::gemm::MetalGemm`] のパイプライン遅延キャッシュ構築時に、
 /// 不成立構成を候補から除外し次善構成へフォールバックする判断材料になる
 /// （fail-closed。計画「パイプライン管理」節）。
+///
+/// `#[non_exhaustive]` は付与しない（イシュー #538 codex-review 指摘 P1
+/// 再指摘対応・PR #673）: 当初 `PadNotMultipleOfFour`・`PadWithoutStaging`
+/// variant を追加し `#[non_exhaustive]` で外部の exhaustive `match` 破壊を
+/// 緩和する案を試みたが、[`TileConfig`] 側の設計変更（`pad` を `staged` から
+/// 導出する方式へ変更。本ファイル冒頭 [`TileConfig`] ドキュメント参照）に
+/// より両 variant 自体が到達不能になったため削除した。variant 追加を伴わない
+/// ため `#[non_exhaustive]` の付与理由も解消している。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TileConfigError {
     /// `bm` が `wm*8` の倍数でない（各 simdgroup の行分担が 8 の倍数に
@@ -90,10 +136,28 @@ impl std::fmt::Display for TileConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TileConfigError::BmNotDivisibleByWm8 { bm, wm } => {
-                write!(f, "bm={bm} is not a multiple of wm*8={}", wm * 8)
+                // イシュー #538 codex-review 指摘（P1・再指摘）: `validate`
+                // は `wm.checked_mul(8)` の失敗も本 variant として返すため、
+                // `wm=u32::MAX` 等の入力では `wm*8` の再計算がここで素の
+                // `u32` 乗算のままオーバーフローし、overflow-checks 有効な
+                // 本番ビルド（release でも `overflow-checks = true` の場合）
+                // で `Display::fmt` 自体が panic していた
+                // （`.claude/rules/coding-rust.md` 「本番経路で unwrap /
+                // expect を使わない」と同じ精神の禁止事項＝本番経路の
+                // panic を避ける）。`checked_mul` で再計算し、表現不能な
+                // 場合は積を出さずそのまま `wm` を表示する。
+                match wm.checked_mul(8) {
+                    Some(wm8) => write!(f, "bm={bm} is not a multiple of wm*8={wm8}"),
+                    None => write!(f, "bm={bm} is not a multiple of wm*8 (wm={wm} overflows)"),
+                }
             }
             TileConfigError::BnNotDivisibleByWn8 { bn, wn } => {
-                write!(f, "bn={bn} is not a multiple of wn*8={}", wn * 8)
+                // 上記 `BmNotDivisibleByWm8` と同じ理由（イシュー #538
+                // codex-review 指摘 P1・再指摘）。
+                match wn.checked_mul(8) {
+                    Some(wn8) => write!(f, "bn={bn} is not a multiple of wn*8={wn8}"),
+                    None => write!(f, "bn={bn} is not a multiple of wn*8 (wn={wn} overflows)"),
+                }
             }
             TileConfigError::BkNotMultipleOfEight { bk } => {
                 write!(f, "bk={bk} is not a multiple of 8")
@@ -156,29 +220,105 @@ impl TileConfig {
     /// 書き込みを未然に防ぐ）。
     pub const MAX_ACC: u32 = 8;
 
+    /// staged 経路（[`TileConfig::pad`]）が使う共有メモリタイルの行末
+    /// パディング要素数（`f32` 単位。イシュー #538）。`CANDIDATES`
+    /// （本ファイル）の全 `staged: true` 構成が採用する値と一致させる
+    /// 固定値であり、[`pad`](Self::pad) 経由でのみ参照する。
+    const TGP_PAD_ELEMS: u32 = 4;
+
+    /// staged 経路の共有メモリタイル（A: BM×BK、B: BK×BN）の行末パディング
+    /// 要素数を `staged` から導出する（イシュー #538 codex-review 指摘 P1
+    /// 再指摘対応・PR #673。本ファイル冒頭 [`TileConfig`] ドキュメント
+    /// 「破壊的変更を伴わない導入設計」節参照）。
+    ///
+    /// `pad` を構造体フィールドとして持たずここで導出することで、
+    /// `TileConfig` は従来どおり 6 フィールドの全 `pub` 構造体のまま
+    /// 保たれ、既存の構造体リテラル構築コードを一切破壊しない。
+    /// `direct-load`（`staged=false`）経路は共有メモリを使わずパディングも
+    /// 無意味なため常に `0` を返す。
+    pub const fn pad(&self) -> u32 {
+        if self.staged { Self::TGP_PAD_ELEMS } else { 0 }
+    }
+
     /// threadgroup 1 個あたりのスレッド数（`wm*wn*32`。1 simdgroup = 32
     /// スレッド）。`crate::gemm` のディスパッチが
     /// `threadsPerThreadgroup = (wm*wn*32, 1, 1)` を構成する際に使う。
     pub fn thread_count(&self) -> u32 {
-        self.wm * self.wn * 32
+        // イシュー #538 codex-review 指摘: `TileConfig` は全フィールド
+        // `pub` かつ `u32` へ範囲制約がないため、`wm`/`wn` に大きな値を
+        // 与えると `wm*wn*32` が `u32` で乗算オーバーフローし wrap する。
+        // `validate` の `TooManyThreads` 検査（`threads > max_threads_per_tg`）
+        // を wrap 後の小さい値が素通りしてしまう fail-closed 迂回を防ぐため、
+        // `u64` へ拡張した checked 演算で計算し、表現不能な場合は
+        // `u32::MAX`（`max_threads_per_tg` を必ず上回る）へ飽和させる
+        // （`validate` 側の比較で確実に弾かれる。`checked_shared_mem_bytes`
+        // と同じ設計）。
+        (self.wm as u64)
+            .checked_mul(self.wn as u64)
+            .and_then(|v| v.checked_mul(32))
+            .unwrap_or(u64::MAX)
+            .min(u32::MAX as u64) as u32
     }
 
-    /// A タイル（`bm`×`bk`）＋ B タイル（`bk`×`bn`）を保持する threadgroup
-    /// 共有メモリのバイト数（`f32` 4 バイト換算）。`staged=false` の場合は
-    /// 直接 `simdgroup_load` するため共有メモリを使わず 0 を返す
+    /// A タイル（`bm`×`(bk+pad)`）＋ B タイル（`bk`×`(bn+pad)`）を保持する
+    /// threadgroup 共有メモリのバイト数（`f32` 4 バイト換算）。`staged=false`
+    /// の場合は直接 `simdgroup_load` するため共有メモリを使わず 0 を返す
     /// （`shaders/gemm.metal` の `USE_TGP_STAGING` 分岐と対応）。
+    ///
+    /// `pad`（イシュー #538。本ファイル冒頭 [`TileConfig`] ドキュメント参照）
+    /// は A・B 両タイルの行末へ同じ要素数だけ加算する。`gemm.metal` 側の
+    /// `lda = BK + TGP_PAD`・`ldb = BN + TGP_PAD` 行ストライドと 1:1 対応
+    /// させることで、確保する共有メモリ量とカーネルが実際にアクセスする
+    /// 範囲を常に一致させる（validate と合わせた fail-closed 契約）。
     ///
     /// `setThreadgroupMemoryLength` へ渡す実際のバイト長（16 バイト境界
     /// 整合が必要）は [`crate::gemm`] のディスパッチ側で `.max(16)` して
     /// 決定する（本メソッドが返す 0 バイトをそのまま渡さない。bugbot
     /// 指摘・#253 レビュー）。`staged=true` の場合は `bm`/`bk`/`bn` が
-    /// [`TileConfig::validate`] により常に 8 の倍数へ制約されるため、この
-    /// 戻り値は常に 256 以上かつ 16 の倍数になる。
+    /// [`TileConfig::validate`] により常に 8 の倍数へ制約され、`pad`
+    /// （[`TileConfig::pad`]）は `staged` からの導出値として常に 4 の倍数
+    /// （0 または `TGP_PAD_ELEMS=4`）になる（イシュー #538 codex-review 指摘
+    /// P1 再指摘対応・PR #673 で実行時検証ではなく型の設計自体が保証する
+    /// 方式へ変更した。本ファイル冒頭 [`TileConfig`] ドキュメント参照）ため、
+    /// この戻り値は常に 256 以上かつ 16 の倍数になる。
     pub fn shared_mem_bytes(&self) -> u32 {
         if !self.staged {
             return 0;
         }
-        (self.bm * self.bk + self.bk * self.bn) * 4
+        // イシュー #538 codex-review 指摘（P0）: 以前は `bm * (bk + pad) +
+        // bk * (bn + pad)) * 4` を `u32` のまま計算していたため、`bm`/`bn`/
+        // `bk`（いずれも `pub` フィールドで任意の `u32` を受け取れる）に
+        // 大きな値を渡すと加算・乗算がオーバーフローし wrap する。release
+        // ビルドでは panic せず小さな値へ wrap するため、`validate` の
+        // `ExceedsSharedMemory` 検査（`bytes > max_shared_mem_bytes`）を
+        // 迂回でき、Rust 側の確保長（`crate::gemm` の
+        // `setThreadgroupMemoryLength`）と `shaders/gemm.metal` の
+        // `lda = BK + TGP_PAD`／`ldb = BN + TGP_PAD` が実際にアクセスする
+        // 範囲との契約が崩れ、threadgroup memory の範囲外アクセスに
+        // つながる。`pad`（[`pad`](Self::pad)）自体は `staged` から導出する
+        // 固定値（0 または `TGP_PAD_ELEMS`）のためオーバーフロー源には
+        // ならないが、`bm`/`bn`/`bk` 側は依然として任意値のため以下の
+        // checked 演算は必須のまま維持する。
+        //
+        // `u64` へ拡張し `checked_add`／`checked_mul` で計算する（`bm`/`bn`/
+        // `bk`/`pad` は最大でも `u32::MAX` のため、各要素を `u64` へ広げた
+        // 中間結果同士の乗算・加算は依然として `u64` を超えうるので
+        // `checked_*` が必須。単純な `u64` キャストだけでは不十分）。
+        // 表現不能な場合は `u32::MAX`（`validate` が要求する
+        // `max_shared_mem_bytes` を必ず上回る値）へ飽和させ、
+        // `ExceedsSharedMemory` で確実に fail-closed に拒否させる。
+        let bm = self.bm as u64;
+        let bn = self.bn as u64;
+        let bk = self.bk as u64;
+        let pad = self.pad() as u64;
+        let compute = || -> Option<u64> {
+            let a_row = bk.checked_add(pad)?;
+            let b_row = bn.checked_add(pad)?;
+            let a_tile = bm.checked_mul(a_row)?;
+            let b_tile = bk.checked_mul(b_row)?;
+            a_tile.checked_add(b_tile)?.checked_mul(4)
+        };
+        compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
     }
 
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
@@ -192,13 +332,23 @@ impl TileConfig {
         max_threads_per_tg: u32,
         max_shared_mem_bytes: u32,
     ) -> Result<(), TileConfigError> {
-        if self.wm == 0 || !self.bm.is_multiple_of(self.wm * 8) {
+        // イシュー #538 codex-review 指摘: `wm`/`wn` も `pub` フィールドで
+        // 任意の `u32` を受け取れるため、`wm * 8`／`wn * 8` を素の `u32`
+        // 乗算のまま行うと極端に大きい値でオーバーフローし wrap しうる
+        // （wrap 後の小さい除数へ `bm`/`bn` がたまたま整除してしまうと、
+        // 後続の `acc_rows`/`acc_cols`・`thread_count` 計算が想定外の
+        // 構成を「妥当」と誤判定する）。`checked_mul` で拒否し、
+        // オーバーフロー時は本来の不整合と同じ `BmNotDivisibleByWm8`／
+        // `BnNotDivisibleByWn8` として fail-closed に扱う。
+        let wm8 = self.wm.checked_mul(8);
+        if self.wm == 0 || wm8.is_none_or(|wm8| !self.bm.is_multiple_of(wm8)) {
             return Err(TileConfigError::BmNotDivisibleByWm8 {
                 bm: self.bm,
                 wm: self.wm,
             });
         }
-        if self.wn == 0 || !self.bn.is_multiple_of(self.wn * 8) {
+        let wn8 = self.wn.checked_mul(8);
+        if self.wn == 0 || wn8.is_none_or(|wn8| !self.bn.is_multiple_of(wn8)) {
             return Err(TileConfigError::BnNotDivisibleByWn8 {
                 bn: self.bn,
                 wn: self.wn,
@@ -207,6 +357,13 @@ impl TileConfig {
         if self.bk == 0 || !self.bk.is_multiple_of(8) {
             return Err(TileConfigError::BkNotMultipleOfEight { bk: self.bk });
         }
+
+        // イシュー #538: `pad`（[`pad`](Self::pad)）は `staged` の純関数
+        // として導出するため、`4` の倍数であること・`staged=false` では
+        // `0` になることは型の設計自体で保証済み（`TGP_PAD_ELEMS = 4` が
+        // 常に 4 の倍数）であり、ここでの実行時検証は不要（本ファイル
+        // 冒頭 [`TileConfig`] ドキュメント「破壊的変更を伴わない導入設計」
+        // 節参照）。
 
         // `shaders/gemm.metal` の `acc[MAX_ACC][MAX_ACC]` ローカル配列は
         // `acc_rows = (bm/wm)/8`・`acc_cols = (bn/wn)/8` を検査せず添字に
@@ -316,9 +473,10 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
     // MLX steel classic 経路の未収録構成（イシュー #532）: `bk=32` は本実装
     // 初採用。K 方向のループ刻みを既存候補の 2 倍にすることで、K=4096 等
     // 長い内積で `threadgroup_barrier` の往復回数を半減させる狙い（理論
-    // 根拠。実機ベンチによる効果確認は後続スコープ）。SMEM は
-    // `(64*32+32*32)*4=12288` バイトで、既存候補の最大 8192 バイトを
-    // 上回るが 32KiB 上限内（`TileConfig::validate` で機械検証）。
+    // 根拠。実機ベンチによる効果確認は後続スコープ）。SMEM は pad=4 込みで
+    // `(64*36+32*36)*4=13824` バイト（イシュー #538。旧 pad=0 時点の
+    // 12288 バイトから増加）で、32KiB 上限内（`TileConfig::validate` で
+    // 機械検証）。
     TileConfig {
         bm: 64,
         bn: 32,
@@ -421,8 +579,12 @@ mod tests {
     }
 
     #[test]
-    fn shared_mem_bytes_sums_a_and_b_tiles_when_staged() {
-        // A: 64x16, B: 16x64 -> (1024+1024)*4 = 8192 バイト。
+    fn shared_mem_bytes_includes_derived_pad_in_both_tile_strides_when_staged() {
+        // イシュー #538 codex-review 指摘 P1 再指摘対応（PR #673）で `pad` を
+        // `staged` からの導出値（[`TileConfig::pad`]）へ変更した。`staged:
+        // true` は常に `pad()=TGP_PAD_ELEMS=4` を両タイルの行末へ加算する:
+        // A: 64x(16+4)=64x20, B: 16x(64+4)=16x68 -> (1280+1088)*4 = 9472 バイト
+        // （旧 pad=0 時点は 8192 バイトだった）。
         let cfg = TileConfig {
             bm: 64,
             bn: 64,
@@ -431,7 +593,84 @@ mod tests {
             wn: 2,
             staged: true,
         };
-        assert_eq!(cfg.shared_mem_bytes(), 8192);
+        assert_eq!(cfg.pad(), 4);
+        assert_eq!(cfg.shared_mem_bytes(), 9472);
+    }
+
+    #[test]
+    fn shared_mem_bytes_saturates_instead_of_wrapping_on_overflow() {
+        // codex-review 指摘（P0・#538 PR レビュー）: `bm`/`bn`/`bk` は任意の
+        // `u32` を受け取れる公開フィールドのため、以前の `u32` のみの演算
+        // では `bm*(bk+pad) + bk*(bn+pad)) * 4` がオーバーフローして小さな
+        // 値へ wrap し、`validate` の `ExceedsSharedMemory` 検査を迂回でき
+        // ていた。`pad` は #538 codex-review 指摘 P1 再指摘対応（PR #673）で
+        // `staged` からの導出値（[`TileConfig::pad`]。0 または
+        // `TGP_PAD_ELEMS=4` の固定値）へ変わりオーバーフロー源ではなくなった
+        // ため、本 regression test は `bk` に `u32::MAX` 近辺の値を与える
+        // ケースへ retarget する。`u32::MAX` を返し、`validate` 側の
+        // `bytes > max_shared_mem_bytes` 比較で必ず拒否されることを確認する
+        // （wrap による小さい値への回帰を防ぐ regression test）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: u32::MAX - 7, // 8 の倍数（u32::MAX 以下で最大）へ切り下げ（validate の BkNotMultipleOfEight を避ける）
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes(), u32::MAX);
+        assert_eq!(
+            cfg.validate(1024, 32 * 1024),
+            Err(TileConfigError::ExceedsSharedMemory {
+                bytes: u32::MAX,
+                max_shared_mem_bytes: 32 * 1024,
+            })
+        );
+    }
+
+    #[test]
+    fn thread_count_saturates_instead_of_wrapping_on_overflow() {
+        // codex-review 指摘（P0・#538 PR レビュー）: `wm`/`wn` に極端に
+        // 大きい値を与えると `wm*wn*32` が `u32` でオーバーフローし wrap
+        // しうる。飽和させることで `validate` の `TooManyThreads` 検査が
+        // 確実に働くことを確認する。
+        let cfg = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: 8,
+            wm: 1 << 30,
+            wn: 1 << 30,
+            staged: false,
+        };
+        assert_eq!(cfg.thread_count(), u32::MAX);
+    }
+
+    #[test]
+    fn pad_is_derived_purely_from_staged() {
+        // イシュー #538 codex-review 指摘 P1 再指摘対応（PR #673）: `pad` は
+        // 構造体フィールドではなく `staged` から導出する（本ファイル冒頭
+        // [`TileConfig`] ドキュメント「破壊的変更を伴わない導入設計」節
+        // 参照）。この設計により従来どおり 6 フィールドの構造体リテラル
+        // 構築が無改変で動作し続けることを確認する。
+        let staged_cfg = TileConfig {
+            bm: 32,
+            bn: 32,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(staged_cfg.pad(), 4);
+
+        let direct_cfg = TileConfig {
+            bm: 8,
+            bn: 8,
+            bk: 8,
+            wm: 1,
+            wn: 1,
+            staged: false,
+        };
+        assert_eq!(direct_cfg.pad(), 0);
     }
 
     // --- TileConfig::validate（pure・GPU 非依存） ---
@@ -478,6 +717,56 @@ mod tests {
             err,
             TileConfigError::BnNotDivisibleByWn8 { bn: 60, wn: 2 }
         ));
+    }
+
+    #[test]
+    fn bm_not_divisible_display_does_not_panic_on_overflowing_wm() {
+        // イシュー #538 codex-review 指摘（P1・再指摘）: `validate` は
+        // `wm.checked_mul(8)` の失敗（`wm=u32::MAX` 等）も
+        // `BmNotDivisibleByWm8` として返すが、その `Display` 実装が `wm*8`
+        // を未検査で再計算していたため、overflow-checks 有効な本番ビルド
+        // では `to_string()`（エラー表示）自体が panic していた
+        // （`.claude/rules/coding-rust.md` 「本番経路で unwrap/expect を
+        // 使わない」と同じ精神＝本番経路の panic を避ける）。本ワークスペース
+        // は `[profile.dev]` で `overflow-checks` を明示 `false` にしていない
+        // ため既定の `true` が有効で、本テストは実際に overflow-checks 有効
+        // なビルドで実行される（regression 検知が機能する前提）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: u32::MAX,
+            wn: 1,
+            staged: false,
+        };
+        let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+        assert!(matches!(
+            err,
+            TileConfigError::BmNotDivisibleByWm8 { bm: 64, wm } if wm == u32::MAX
+        ));
+        // `Display::fmt` 呼び出し自体が panic しないことを確認する
+        // （wrap ではなく checked 演算で回避していることの regression test）。
+        let _ = err.to_string();
+    }
+
+    #[test]
+    fn bn_not_divisible_display_does_not_panic_on_overflowing_wn() {
+        // 上記 `bm_not_divisible_display_does_not_panic_on_overflowing_wm`
+        // と同じ理由（イシュー #538 codex-review 指摘 P1・再指摘）の `bn`/`wn` 版。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 1,
+            wn: u32::MAX,
+            staged: false,
+        };
+        let err = cfg.validate(1024, 32 * 1024).unwrap_err();
+        assert!(matches!(
+            err,
+            TileConfigError::BnNotDivisibleByWn8 { bn: 64, wn } if wn == u32::MAX
+        ));
+        let _ = err.to_string();
     }
 
     #[test]
@@ -528,12 +817,15 @@ mod tests {
             wn: 2,
             staged: true,
         };
-        assert_eq!(cfg.shared_mem_bytes(), 8192);
+        // pad() は staged=true から常に 4 を導出する（イシュー #538
+        // codex-review 指摘 P1 再指摘対応・PR #673）ため 9472 バイト
+        // （旧 pad=0 時点は 8192 バイトだった）。
+        assert_eq!(cfg.shared_mem_bytes(), 9472);
         let err = cfg.validate(1024, 4096).unwrap_err();
         assert!(matches!(
             err,
             TileConfigError::ExceedsSharedMemory {
-                bytes: 8192,
+                bytes: 9472,
                 max_shared_mem_bytes: 4096
             }
         ));
@@ -636,10 +928,12 @@ mod tests {
     // --- イシュー #532: MLX classic 経路の未収録 3 構成 ---
 
     #[test]
-    fn bk32_candidate_shared_mem_is_12288_bytes_within_32kib_limit() {
-        // (64,32,32,2,2): A=64x32, B=32x32 -> (2048+1024)*4 = 12288 バイト。
-        // 既存最大 8192 バイトを上回るが 32KiB（32768 バイト）以内である
-        // ことを固定する（イシュー #532 計画「現状分析」節の事前検証値）。
+    fn bk32_candidate_shared_mem_is_13824_bytes_within_32kib_limit() {
+        // (64,32,32,2,2,pad=4): A=64x36, B=32x36 -> (2304+1152)*4 = 13824 バイト
+        // （イシュー #538 で pad=4 導入。旧 pad=0 時点は 12288 バイトだった）。
+        // 既存最大を上回るが 32KiB（32768 バイト）以内であることを固定する
+        // （イシュー #532 計画「現状分析」節の事前検証値・#538 計画
+        // 「事前検証値」節で更新）。
         let cfg = TileConfig {
             bm: 64,
             bn: 32,
@@ -648,7 +942,7 @@ mod tests {
             wn: 2,
             staged: true,
         };
-        assert_eq!(cfg.shared_mem_bytes(), 12288);
+        assert_eq!(cfg.shared_mem_bytes(), 13824);
         assert!(cfg.shared_mem_bytes() <= 32 * 1024);
         cfg.validate(1024, 32 * 1024)
             .unwrap_or_else(|e| panic!("bk=32 candidate rejected: {e}"));
@@ -694,6 +988,9 @@ mod tests {
     #[test]
     fn candidates_include_the_three_mlx_classic_configs_added_in_issue_532() {
         // CANDIDATES への収録漏れ・削除を検知する回帰ガード。
+        // `pad()` は #538 で `staged` から導出する設計にしたため（本ファイル
+        // 冒頭 [`TileConfig`] ドキュメント参照）、全 `staged: true` 構成が
+        // 自動的に `pad()=4` になる（比較用構造体リテラルへ pad は不要）。
         let expected = [
             TileConfig {
                 bm: 64,
