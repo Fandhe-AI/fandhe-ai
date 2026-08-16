@@ -1909,6 +1909,26 @@ fn real_path_of_fd(dir: &fs::File) -> std::io::Result<PathBuf> {
     Ok(PathBuf::from(std::ffi::OsString::from_vec(buf)))
 }
 
+/// pin 済みディレクトリ fd が指す実体の現在の絶対パスを、OS ごとの唯一の
+/// 標準的手段（Linux: [`proc_fd_path`] の symlink 解決、macOS:
+/// [`real_path_of_fd`] の `F_GETPATH`）で取得する共通口（イシュー #509
+/// PR #677 codex-review P0 再指摘対応: [`ensure_cache_root_in`] が最終
+/// containment 再検証を「pin 済み fd から得た実パス」で行うために使う。
+/// `candidate_root.canonicalize()` のようなパスベースの再解決は、pin 後に
+/// 祖先が差し替えられても検知できない〈差し替え後の偽の実体を検証して
+/// しまう〉ため使わない）。
+#[cfg(target_os = "linux")]
+fn real_path_of_dir_fd(dir: &fs::File) -> std::io::Result<PathBuf> {
+    fs::read_link(proc_fd_path(dir))
+}
+
+/// [`real_path_of_dir_fd`]（Linux 版）の macOS 向け実装。[`real_path_of_fd`]
+/// （`F_GETPATH`）へそのまま委譲する。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn real_path_of_dir_fd(dir: &fs::File) -> std::io::Result<PathBuf> {
+    real_path_of_fd(dir)
+}
+
 /// キャッシュエントリ 1 ファイルあたりの読み込み上限（バイト数。イシュー
 /// #509 codex-review P0 指摘対応）。
 ///
@@ -2346,10 +2366,23 @@ fn write_child_file_pinned(dir_fd: &fs::File, name: &str, content: &str) -> Resu
 /// 実プロセス環境変数を書き換えず（並行テスト実行時の競合を避ける）に
 /// containment 再検証（特に symlink 経由の拒否）をテストするには本関数を
 /// 直接呼ぶ。
+///
+/// 戻り値は canonical パスに加え、検証直後に [`open_dir_nofollow`] で
+/// pin したディレクトリ fd を含む（イシュー #509 PR #677 codex-review P0
+/// 再指摘対応）。呼び出し元（[`store_cache_entry`]／[`load_cache_entry`]）
+/// はこの fd をそのまま完了まで引き回し、`root` をパスとして再オープン
+/// しない。旧実装は `PathBuf` のみを返しており、[`store_cache_entry_in`]
+/// ／[`load_cache_entry_in`] が改めて `root`（パス文字列）を
+/// `open_dir_nofollow` で再オープンしていたため、本関数の検証と再オープン
+/// の間（呼び出し元の NVRTC コンパイル等を挟みうる、任意に長い窓）に
+/// 祖先ディレクトリを rename／symlink で差し替えられると、検証していない
+/// 別ルートへ書き込む、または細工された PTX を読み込みうる TOCTOU が
+/// あった（`O_NOFOLLOW` は最終コンポーネントの symlink のみを防ぎ、
+/// 祖先の差し替えは防がない）。
 fn ensure_cache_root_in(
     candidate_root: &Path,
     workspace_root: &Path,
-) -> Result<PathBuf, CudaError> {
+) -> Result<(PathBuf, fs::File), CudaError> {
     // `workspace_root` 自体が存在しない（呼び出し元がまだ何も書き込んで
     // いないビルドディレクトリ等）場合は canonicalize できないため、
     // その場合のみ字句正規化した値へフォールバックする（C-2 の
@@ -2415,21 +2448,44 @@ fn ensure_cache_root_in(
             ),
         })?;
 
+    // ルートを一度だけ pin する。以降の containment 再検証・呼び出し元
+    // （[`store_cache_entry`]／[`load_cache_entry`]）の全操作は、この fd
+    // だけを起点にし `canonical_root`（パス文字列）を再度開き直さない
+    // （本関数のドキュメンテーションコメント参照）。
+    let root_fd = open_dir_nofollow(&canonical_root).map_err(|e| CudaError::CacheIo {
+        detail: format!(
+            "failed to pin verified cache root {}: {e}",
+            canonical_root.display()
+        ),
+    })?;
+
     // 事後の再検証（TOCTOU に対する縦深防御）: 上記の事前検証と
-    // `fs::create_dir_all` の間で祖先が symlink に差し替えられる競合が
-    // 万一あっても、最終的に返す `canonical_root` 自体を再検証すること
-    // で fail-closed に倒す（事前検証だけに頼らない多層防御）。
-    if path_lexically_within(&canonical_root, &canonical_workspace_root) {
+    // `create_dir_all_verified` の間で祖先が symlink に差し替えられる
+    // 競合が万一あっても fail-closed に倒す。再検証の対象パスは
+    // `canonical_root`（`candidate_root.canonicalize()` の結果。上記の
+    // pin 直前に計算したもの）を再度パス解決するのではなく、pin 済みの
+    // `root_fd` から [`real_path_of_dir_fd`] で得た「今開いている実体」の
+    // 絶対パスを使う。pin と本チェックの間に別プロセスが `canonical_root`
+    // を差し替えても、fd は差し替え前の実体を指したままのため、この
+    // チェックは常に「実際に返す fd」の実体を検証する（事前検証だけに
+    // 頼らない多層防御）。
+    let real_root = real_path_of_dir_fd(&root_fd).map_err(|e| CudaError::CacheIo {
+        detail: format!(
+            "failed to resolve real path of pinned cache root {}: {e}",
+            canonical_root.display()
+        ),
+    })?;
+    if path_lexically_within(&real_root, &canonical_workspace_root) {
         return Err(CudaError::CacheDirUnavailable {
             detail: format!(
                 "cache root {} resolves (after symlink resolution) within workspace root {}",
-                canonical_root.display(),
+                real_root.display(),
                 canonical_workspace_root.display()
             ),
         });
     }
 
-    Ok(canonical_root)
+    Ok((canonical_root, root_fd))
 }
 
 /// `path` 自身または祖先のうち、fs 上に実在する最も長い（`path` に最も
@@ -2586,7 +2642,13 @@ fn create_dir_all_verified(
         let child_dir = match open_dir_nofollow(&child_magic_path) {
             Ok(f) => f,
             Err(e) if is_confirmed_non_directory_open_error(&e) => {
-                let _ = fs::remove_dir(&display_path);
+                // 削除対象は常に `child_magic_path`（= `proc_fd_path(&current_dir)
+                // .join(name)`。上の作成呼び出しと同一の、pin 済み `current_dir`
+                // 起点の magic path）を使う。`display_path`（人間可読の字句上の
+                // パス）はルートから再解決するため、祖先が検証後に差し替え
+                // られていると実際に作成・検証した inode と無関係な実体を指し
+                // うる（イシュー #509 PR #677 codex-review P0 再指摘対応）。
+                let _ = fs::remove_dir(&child_magic_path);
                 return Err(CudaError::CacheDirUnavailable {
                     detail: format!(
                         "cache directory component {} is not a plain directory (symlink or \
@@ -2621,7 +2683,9 @@ fn create_dir_all_verified(
                 ),
             })?;
         if path_lexically_within(&canonical_current, canonical_workspace_root) {
-            let _ = fs::remove_dir(&display_path);
+            // 上記と同じ理由で `child_magic_path`（pin 済み `current_dir`
+            // 起点）を使う（イシュー #509 PR #677 codex-review P0 再指摘対応）。
+            let _ = fs::remove_dir(&child_magic_path);
             return Err(CudaError::CacheDirUnavailable {
                 detail: format!(
                     "cache directory component {} resolves (after symlink resolution) within \
@@ -2674,26 +2738,45 @@ fn create_dir_all_verified(
 /// 別のものを見てしまう。`F_GETPATH` は fd が指す実体そのものの現在の
 /// 絶対パスを返すため、この乖離が生じない。
 ///
-/// `existing_ancestor`（Linux 版の P1 再指摘と同じ理由で、正当な
-/// symlink〈`~/.cache`・`XDG_CACHE_HOME` 自体が workspace 外の実
-/// ディレクトリを指す一般的な構成〉でありうる）は `O_NOFOLLOW` なしの
-/// 通常 `fs::File::open` で最初の 1 段だけ開く（`opendirat_nofollow`
-/// 〈`O_NOFOLLOW` 付き〉を最終コンポーネントへ直接使うと正当な構成を
-/// `ELOOP` で誤って拒否してしまうため）。`canonical_existing_ancestor`
-/// は Linux 版が fd pin の起点として使う symlink 解決済みパスだが、
-/// 本実装は `existing_ancestor` を `O_NOFOLLOW` で開かないため未使用
-/// （呼び出し元 [`ensure_cache_root_in`] を cfg 分岐させずに共有する
-/// ため引数だけ受け取る）。
+/// `existing_ancestor` は字句上の基準（`candidate_root` からの相対
+/// コンポーネントを求める・表示用パスの起点）としてのみ使う。fd pin の
+/// 起点には Linux 版と同じく `canonical_existing_ancestor`（呼び出し元
+/// [`ensure_cache_root_in`] が `Path::canonicalize` で symlink 解決済み・
+/// containment 検証済みの実在ディレクトリ）を [`open_dir_nofollow`]
+/// （`O_NOFOLLOW | O_DIRECTORY`）で直接開く（イシュー #509 PR #677
+/// codex-review P0 再指摘対応）。
 ///
-/// 拒否時に [`fs::remove_dir`] で削除するのはベストエフォートの
-/// パスベースクリーンアップに留める（削除失敗はそれ自体をエラーに
-/// せず元エラーを優先する。[`store_cache_entry_at`] の一時ディレクトリ
-/// 削除と同じ方針: 削除は containment 突破の経路ではなく、失敗しても
-/// 高々空ディレクトリが残るだけであるため path ベースのままでよい）。
+/// 旧実装は未検証の `existing_ancestor`（字句上のパス。symlink であり
+/// うる）を `O_NOFOLLOW` なしの通常 `fs::File::open` で開いていたため、
+/// containment 検証（[`ensure_cache_root_in`] の事前検証）と本関数の
+/// この最初のオープンとの間に `existing_ancestor` が workspace 内への
+/// symlink へ差し替えられると、以降の全操作（次の `mkdirat_raw` を含む）
+/// が未検証の実体を起点にしてしまい、`F_GETPATH` による containment
+/// 再検証（下記ループ内）で拒否が確定する前に workspace 内へ書き込みが
+/// 発生しうる（「拒否対象への書き込み自体を起こさない」という
+/// `.claude/rules/security.md` のパストラバーサル防止契約に反する）。
+/// `canonical_existing_ancestor` は symlink 解決済みで構成コンポーネント
+/// に symlink を含まないため、`open_dir_nofollow` の `O_NOFOLLOW` が
+/// 正当な symlink 祖先（`~/.cache` 等）を誤って `ELOOP` 拒否することは
+/// ない（Linux 版 [`create_dir_all_verified`] のドキュメンテーション
+/// コメントと同じ理由）。
+///
+/// 拒否時の削除は [`unlinkat_raw`]（`current_dir` 起点の fd 相対
+/// `unlinkat(2)`。作成に使った `mkdirat_raw(&current_dir, name_str)` と
+/// 同じ起点）で行うベストエフォートに留める（削除失敗はそれ自体を
+/// エラーにせず元エラーを優先する）。[`fs::remove_dir`] へ字句上の
+/// `display_path`（ルートから再解決するパス）を渡す旧実装は、作成・
+/// 検証は pin 済み fd 起点なのに削除だけパスベースで再解決するため、
+/// 祖先が検証後に差し替えられると実際に作成・検証した inode と無関係な
+/// 攻撃者指定先を削除しうる TOCTOU があった（イシュー #509 PR #677
+/// codex-review P0 再指摘対応。「失敗しても空ディレクトリが残るだけ」
+/// という判断は削除対象の同一性が保証されて初めて成立するため、削除
+/// 自体は containment 突破の経路ではなくとも対象の同一性は fd 相対で
+/// 保証する）。
 #[cfg(all(unix, not(target_os = "linux")))]
 fn create_dir_all_verified(
     existing_ancestor: &Path,
-    _canonical_existing_ancestor: &Path,
+    canonical_existing_ancestor: &Path,
     candidate_root: &Path,
     canonical_workspace_root: &Path,
 ) -> Result<(), CudaError> {
@@ -2707,12 +2790,14 @@ fn create_dir_all_verified(
             ),
         })?;
 
-    let mut current_dir = fs::File::open(existing_ancestor).map_err(|e| CudaError::CacheIo {
-        detail: format!(
-            "failed to open existing cache directory ancestor {}: {e}",
-            existing_ancestor.display()
-        ),
-    })?;
+    let mut current_dir =
+        open_dir_nofollow(canonical_existing_ancestor).map_err(|e| CudaError::CacheIo {
+            detail: format!(
+                "failed to open existing cache directory ancestor {} (canonical: {}): {e}",
+                existing_ancestor.display(),
+                canonical_existing_ancestor.display()
+            ),
+        })?;
     // 表示・削除用の人間可読パス（セキュリティ判断には使わない。
     // 実際のオープン・作成は常に `current_dir` 起点の dirfd 相対操作で
     // 行う）。
@@ -2757,7 +2842,14 @@ fn create_dir_all_verified(
         let child_dir = match opendirat_nofollow(&current_dir, name_str) {
             Ok(f) => f,
             Err(e) if is_confirmed_non_directory_open_error(&e) => {
-                let _ = fs::remove_dir(&display_path);
+                // fd 相対の [`unlinkat_raw`]（`current_dir` 起点。上の作成
+                // 呼び出し〈`mkdirat_raw(&current_dir, name_str)`〉と同じ
+                // 起点）で削除する。`display_path`（人間可読の字句上の
+                // パス）を `fs::remove_dir` へ渡すルートからの再解決は、
+                // 祖先が検証後に差し替えられていると実際に作成・検証した
+                // inode と無関係な実体を指しうる（イシュー #509 PR #677
+                // codex-review P0 再指摘対応）。
+                let _ = unlinkat_raw(&current_dir, name_str, true);
                 return Err(CudaError::CacheDirUnavailable {
                     detail: format!(
                         "cache directory component {} is not a plain directory (symlink or \
@@ -2787,7 +2879,10 @@ fn create_dir_all_verified(
             ),
         })?;
         if path_lexically_within(&canonical_current, canonical_workspace_root) {
-            let _ = fs::remove_dir(&display_path);
+            // 上記と同じ理由で `unlinkat_raw(&current_dir, name_str, true)`
+            // （`current_dir` 起点）を使う（イシュー #509 PR #677
+            // codex-review P0 再指摘対応）。
+            let _ = unlinkat_raw(&current_dir, name_str, true);
             return Err(CudaError::CacheDirUnavailable {
                 detail: format!(
                     "cache directory component {} resolves (after symlink resolution) within \
@@ -2807,13 +2902,15 @@ fn create_dir_all_verified(
 /// [`cache_root`] の解決結果を実際に fs 上へ実体化する公開ラッパー
 /// （イシュー #509・Phase C-3。[`store_cache_entry`]／[`load_cache_entry`]
 /// から呼ばれる）。実処理は [`ensure_cache_root_in`] に委譲する（同関数
-/// ドキュメンテーションコメント参照）。
+/// ドキュメンテーションコメント参照）。戻り値の fd は呼び出し元が
+/// store／load 完了まで引き回す想定であり、`root` パスとして再オープン
+/// してはならない（イシュー #509 PR #677 codex-review P0 再指摘対応）。
 #[allow(
     dead_code,
     reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
               先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
 )]
-pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
+pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<(PathBuf, fs::File), CudaError> {
     ensure_cache_root_in(&cache_root(workspace_root)?, workspace_root)
 }
 
@@ -2863,7 +2960,25 @@ pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<PathBuf, CudaEr
 /// 持たない非 unix 向けの検出型フォールバックは維持しない（fd pin による
 /// TOCTOU 対策が unix 系 API に依存するため。crate ルート／`nvrtc`
 /// モジュール冒頭の `compile_error!` 参照）。
+///
+/// 本番経路の公開ラッパー [`store_cache_entry`] は本関数へ委譲しない
+/// （[`ensure_cache_root`] が検証直後に pin した fd をそのまま
+/// [`store_cache_entry_at`] へ渡すため。同関数のドキュメンテーション
+/// コメント参照）。本関数は `root: &Path` を受け取る「注入で決定化」
+/// パターンのテスト専用到達経路として維持する（実 `HOME`／
+/// `XDG_CACHE_HOME` に依存させず・並行テスト実行時に競合する実環境変数を
+/// 書き換えずに `root_fd` pin を含む一連の I/O を直接検証するため。
+/// `open_nofollow` の cfg 分岐と同種の判断）。
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "本番経路は ensure_cache_root が pin した fd を store_cache_entry_at \
+                  へ直接渡すため未使用（上記ドキュメンテーションコメント参照）。テスト専用の \
+                  到達経路として維持する"
+    )
+)]
 fn store_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
@@ -3046,6 +3161,16 @@ fn store_cache_entry_at(
 /// 委譲する。NVRTC コンパイル（`compile_ptx`）との結線（コンパイル成功後
 /// に本関数を呼ぶ導線）は C-4（#511）のスコープ（実装計画 §3.5: store は
 /// バイト列を受け渡す純 I/O プリミティブに留める）。
+///
+/// [`store_cache_entry_in`]（`root: &Path` を受け取りテスト用に自前で
+/// fd pin する版）へは委譲しない。[`ensure_cache_root`] が検証直後に
+/// pin 済みの fd をそのまま [`store_cache_entry_at`] へ渡すことで、
+/// 「検証」と「（本関数完了までの任意に長くなりうる窓を挟んでの）
+/// パスとしての再オープン」を分離しない（イシュー #509 PR #677
+/// codex-review P0 再指摘対応: 旧実装は `ensure_cache_root` の戻り値
+/// `PathBuf` を [`store_cache_entry_in`] が改めて `open_dir_nofollow` で
+/// 開き直しており、その間に祖先を差し替えられると検証していない別
+/// ルートへ書き込みうる TOCTOU があった）。
 #[allow(
     dead_code,
     reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
@@ -3057,8 +3182,10 @@ pub(crate) fn store_cache_entry(
     kernel_cu: &str,
     kernel_ptx: &str,
 ) -> Result<PathBuf, CudaError> {
-    let root = ensure_cache_root(workspace_root)?;
-    store_cache_entry_in(&root, key, kernel_cu, kernel_ptx)
+    let (root, root_fd) = ensure_cache_root(workspace_root)?;
+    let final_dir = cache_entry_path_in(&root, key)?;
+    let entry_name = key.cache_entry_dir_name()?;
+    store_cache_entry_at(&root_fd, &final_dir, &entry_name, kernel_cu, kernel_ptx)
 }
 
 /// キャッシュエントリを読み出す（イシュー #509・Phase C-3。実装計画
@@ -3112,24 +3239,52 @@ pub(crate) fn store_cache_entry(
 // 他の破損検出と同様、呼び出し元は再コンパイルへフォールバックすれば
 // よい。
 #[cfg(unix)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "本番経路は ensure_cache_root が pin した fd を load_cache_entry_at \
+                  へ直接渡すため未使用（load_cache_entry のドキュメンテーションコメント \
+                  参照）。テスト専用の到達経路として維持する"
+    )
+)]
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
     expected_src: &str,
 ) -> Result<Option<CachedKernel>, CudaError> {
-    let entry_name = key.cache_entry_dir_name()?;
-
     // キャッシュルート自体を `O_NOFOLLOW | O_DIRECTORY` で一度だけ開き
     // fd を pin する（[`store_cache_entry_in`] Unix 版と同じ手順）。
+    // テスト容易性のため `root: &Path` を受け取り自前で pin する薄い
+    // ラッパーに留め、fd 相対操作の本体は [`load_cache_entry_at`] へ
+    // 委譲する（[`store_cache_entry_in`]／[`store_cache_entry_at`] と
+    // 同型の分離。イシュー #509 PR #677 codex-review P0 再指摘対応:
+    // 公開ラッパー [`load_cache_entry`] は本関数を経由せず
+    // [`ensure_cache_root`] が pin した fd をそのまま [`load_cache_entry_at`]
+    // へ渡すことで、検証とパスとしての再オープンを分離しない）。
     let root_fd = match open_dir_nofollow(root) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
 
+    load_cache_entry_at(&root_fd, key, expected_src)
+}
+
+/// [`load_cache_entry_in`]（Unix 版）が pin 済みの `root_fd` を渡して呼ぶ、
+/// fd 相対操作のみで完結する実処理本体（[`store_cache_entry_at`] と対称。
+/// イシュー #509 PR #677 codex-review P0 再指摘対応）。
+#[cfg(unix)]
+fn load_cache_entry_at(
+    root_fd: &fs::File,
+    key: &CudaKernelCacheKey,
+    expected_src: &str,
+) -> Result<Option<CachedKernel>, CudaError> {
+    let entry_name = key.cache_entry_dir_name()?;
+
     // `root_fd` 起点で `entry_name`（1 コンポーネント）のみを解決する。
     // symlink・非ディレクトリであれば拒否されるため「symlink でないこと
     // を確認してから中身を読む」という 2 手順の間の TOCTOU が生じない。
-    let dir = match open_dir_child_nofollow(&root_fd, &entry_name) {
+    let dir = match open_dir_child_nofollow(root_fd, &entry_name) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
@@ -3178,16 +3333,22 @@ fn load_cache_entry_in(
     }))
 }
 
-/// [`load_cache_entry_in`] の公開ラッパー（イシュー #509・Phase C-3）。
+/// [`load_cache_entry_at`] の公開ラッパー（イシュー #509・Phase C-3）。
 /// `workspace_root` から [`ensure_cache_root`] でルートを実体化した上で
 /// 委譲する（store 側と対称。ルート実体化は冪等なため読み出し専用の
 /// 呼び出しでも安全）。
+///
+/// [`load_cache_entry_in`]（`root: &Path` を受け取りテスト用に自前で
+/// fd pin する版）へは委譲しない。[`ensure_cache_root`] が検証直後に
+/// pin 済みの fd をそのまま [`load_cache_entry_at`] へ渡すことで、検証と
+/// パスとしての再オープンを分離しない（[`store_cache_entry`] と同じ
+/// 判断。イシュー #509 PR #677 codex-review P0 再指摘対応）。
 ///
 /// `expected_src` は呼び出し元がこれからコンパイルしようとしている
 /// カーネルソース全文。`key` の 64bit ハッシュ（非暗号・FNV-1a）が
 /// 衝突した場合に誤った PTX を返さないための安全弁として、保存済み
 /// `kernel.cu` とバイト単位で照合する（実装計画 §3.1・§7）。この検査を
-/// `load_cache_entry_in` 側に閉じ込めるのは、呼び出し元が省略できる
+/// `load_cache_entry_at` 側に閉じ込めるのは、呼び出し元が省略できる
 /// `Option` 引数にしないという C-2 以来の「注入で決定化・迂回不能」
 /// 方針を fs I/O 層まで一貫させるため。
 #[allow(
@@ -3200,8 +3361,8 @@ pub(crate) fn load_cache_entry(
     key: &CudaKernelCacheKey,
     expected_src: &str,
 ) -> Result<Option<CachedKernel>, CudaError> {
-    let root = ensure_cache_root(workspace_root)?;
-    load_cache_entry_in(&root, key, expected_src)
+    let (_root, root_fd) = ensure_cache_root(workspace_root)?;
+    load_cache_entry_at(&root_fd, key, expected_src)
 }
 
 /// リンクされている NVRTC のバージョンを `(major, minor)` で返す。
@@ -5628,7 +5789,7 @@ mod tests {
         let workspace_root = fresh_temp_dir("ensure-root-workspace");
         let candidate = fresh_temp_dir("ensure-root-candidate").join("nested/cache/dir");
 
-        let resolved = ensure_cache_root_in(&candidate, &workspace_root)
+        let (resolved, _resolved_fd) = ensure_cache_root_in(&candidate, &workspace_root)
             .expect("candidate outside workspace_root must be accepted");
 
         assert!(resolved.is_dir());
@@ -5757,7 +5918,7 @@ mod tests {
             "candidate must not exist yet to reproduce the pre-existing-ancestor scenario"
         );
 
-        let resolved = ensure_cache_root_in(&candidate, &workspace_root).expect(
+        let (resolved, _resolved_fd) = ensure_cache_root_in(&candidate, &workspace_root).expect(
             "a legitimate ancestor symlink resolving outside workspace_root must be accepted",
         );
 
