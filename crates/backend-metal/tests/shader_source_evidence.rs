@@ -182,6 +182,15 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
     );
 }
 
+// イシュー #540「gemm_simdgroup_tiled の SWIZZLE_LOG/SWIZZLE_ENABLED 証跡
+// 検査」は `crates/backend-metal/src/tile.rs` の crate 内 unit test
+// （`gemm_simdgroup_tiled_source_uses_tgid_swizzle`）へ移設した（PR #661
+// codex-review 指摘対応）。`crate::tile::SWIZZLE_LOG`/`SWIZZLE_ENABLED` を
+// `pub(crate)` へ狭めたため（実験的な内部実装詳細を公開 API に露出しない
+// 方針）、別コンパイル単位である本ファイル（`tests/` 配下の統合テスト）
+// からは参照できなくなったことによる（直上の `CANDIDATES` 巡回テストが
+// `tile.rs` 側に置かれている理由と同じ）。
+
 /// イシュー #533 の証跡: `gemm_simdgroup_tiled` の staged ロード（協調
 /// ロード）経路が A/B タイルとも `float4` ベクトルロード（1 要素ずつの
 /// スカラーロードではなく `reinterpret_cast<device const float4*>` 経由の

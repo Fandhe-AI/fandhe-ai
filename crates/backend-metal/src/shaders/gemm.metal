@@ -331,6 +331,17 @@ constant bool USE_TGP_STAGING [[function_constant(5)]];
 // staged 経路のみ）。
 constant uint TGP_PAD [[function_constant(6)]];
 
+// threadgroup ID スウィズル（イシュー #540・実験的機構）を本番 dispatch で
+// 実際に有効化するかどうかのゲート。`crate::tile::SWIZZLE_ENABLED`
+// （既定 `false`）が `crate::pipeline::make_pipeline_with_constants` 経由で
+// 畳み込む。実機での性能効果・数値一致が `docs/perf/
+// metal-gemm-tgid-swizzle-ab.md` の判断基準を満たすまで `false` のまま
+// 据え置き、恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）で動作する
+// （PR #661 codex-review 指摘: 未検証のスウィズルを本番経路へ無条件適用
+// しない）。index は #538 で index 6 を占有した TGP_PAD の直後、index 7
+// （main への rebase 時点での未使用最小 index）を割り当てる。
+constant bool SWIZZLE_ENABLED [[function_constant(7)]];
+
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
 // atIndex`（`crate::gemm::encode_dispatch_tiled`）で渡す。A タイル
@@ -349,9 +360,36 @@ kernel void gemm_simdgroup_tiled(
     uint simd_lane [[thread_index_in_simdgroup]],
     uint simd_id [[simdgroup_index_in_threadgroup]]
 ) {
+    // threadgroup ID スウィズル（`swizzle_log` 相当。イシュー #540・
+    // 実験的機構。採否は `docs/perf/metal-gemm-tgid-swizzle-ab.md` の A/B
+    // 計測で判断する）: dispatch grid 上で `tile`（`1 << SWIZZLE_LOG` = 4）
+    // threadgroup を縦方向へ束ねて走査順を変え、近接時刻に実行される
+    // threadgroup 群が B（列方向）の同一領域を再利用しやすくする（MLX
+    // steel `swizzle_log`・DeepGEMM の L2 スウィズルと同種。MLX 自身は
+    // classic 経路で `swizzle_log = 0`〈無効〉のまま据え置いており未実証の
+    // 技法である点に留意）。`SWIZZLE_ENABLED`（既定 `false`。上記宣言参照）
+    // が `true` の場合のみ `crate::tile::swizzled_grid` が張った grid
+    // （`grid_w = tiles_n << SWIZZLE_LOG`・`grid_h = div_ceil(tiles_m,
+    // tile)`）を tgid が走査する契約で、変換後の `(tid_y, tid_x)` が元の
+    // `(tiles_m, tiles_n)` を過不足なく覆うことを `crate::tile` の
+    // `swizzled_grid_covers_every_tile_exactly_once` テストが Linux 上で
+    // 静的に検証する。`SWIZZLE_ENABLED=false`（本番既定。PR #661
+    // codex-review 指摘）では恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）
+    // となり、`crate::gemm::encode_dispatch_tiled` 側もこのとき
+    // `swizzled_grid` を使わず素朴な `(tiles_n, tiles_m)` grid を張る
+    // （両者は同じ `SWIZZLE_ENABLED` 値で同期させる契約）。
+    constexpr uint SWIZZLE_LOG = 2;
+    constexpr uint SWIZZLE_TILE = 1u << SWIZZLE_LOG;
+    uint tid_y = SWIZZLE_ENABLED ? ((tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1))) : tgid.y;
+    uint tid_x = SWIZZLE_ENABLED ? (tgid.x >> SWIZZLE_LOG) : tgid.x;
+
     // 1 threadgroup が担当する C ブロックの原点（行優先: y=行, x=列）。
-    uint row0 = tgid.y * BM;
-    uint col0 = tgid.x * BN;
+    // `tid_y`/`tid_x` はスウィズル後のタイル座標であり、`tiles_m` が
+    // `SWIZZLE_TILE` の倍数でない場合に `tid_y >= tiles_m` となる余剰
+    // threadgroup が生じうるが、直後の早期 return（REQ-8 境界チェック）が
+    // これを無害化する（省略しない）。
+    uint row0 = tid_y * BM;
+    uint col0 = tid_x * BN;
 
     // ブロック全体が実効次元を完全に超える場合は早期 return する
     // （REQ-8。dispatch 側 grid は div_ceil(BM)/div_ceil(BN) で切り上げる
