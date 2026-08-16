@@ -718,6 +718,65 @@ export function classifyMergeExecDispatch(execReason, currentBlockedReason) {
   }
 }
 
+// merge 監視ループ（runMergeLoop）の「強制スレッド再走査のための監視枠確保」判定。純粋関数として
+// 切り出す理由は、監視ループ本体が Workflow ハーネス依存（agent / log の注入）でテストから隔離
+// されているのに対し、この境界条件だけは決定的に回帰検証する必要があるため
+// （tests/merge-loop-rescan.test.mjs）。
+//
+// 呼び出し文脈: merge-exec が reason 'unresolved-threads'（未解決スレッドの「件数」だけを検出）を
+// 返し、かつスレッド内容の一覧が手元にない（unresolvedComments が空）ときに 1 回だけ呼ばれる。
+// このとき runMergeLoop は fix を起動せず forceThreadRescan を立てて次ラウンドの monitor に
+// 手順 5 の強制再走査を指示する（continue）。ところが監視予算（monitorsLeft）はループ先頭で
+// 既に減算済みのため、その回が最後の枠だった場合は while 条件が false になり救済ラウンドが
+// 一度も走らないまま 'unresolved-comments' の blocked 終端へ落ちる（Fandhe-AI/ideas#248 の P1）。
+//
+// 契約:
+//   - 監視枠が尽きている（monitorsLeft < 1）かつ延長未使用のときのみ 1 枠を確保する
+//   - 延長は実行全体で 1 回限り（rescueUsed ラッチ）。merge-exec が空一覧を返し続けても
+//     予算が延び続けず、2 回目以降は従来どおり残り予算のみで進み尽きれば終端する
+//     （ラッチを消費するのは実際に延長した回だけ。残枠がある回はラッチを温存する）
+// 戻り値の monitorsLeft / rescueUsed は呼び出し元の同名変数へそのまま代入して使う。
+export function planForcedThreadRescan(monitorsLeft, rescueUsed) {
+  if (!rescueUsed && monitorsLeft < 1) {
+    return { monitorsLeft: 1, rescueUsed: true, granted: true }
+  }
+  return { monitorsLeft, rescueUsed, granted: false }
+}
+
+// planForcedThreadRescan が延長した「救済ラウンド」の結果をどう終端させるかの判定。
+// 同じくハーネス非依存の純粋関数として切り出す（tests/merge-loop-rescan.test.mjs）。
+//
+// 呼び出し文脈: 予算枯渇時に 1 枠だけ延長して走らせた再走査ラウンドの monitor 結果を
+// 受け取り、そのラウンド直後に 1 度だけ呼ばれる。
+//
+// 解決する問題: 延長した枠は残り予算ゼロなので、その回の結果がそのまま終端 state になる。
+// 救済ラウンドが 'timeout'（＝スレッド内容を観測できないまま監視上限に到達）で返ると
+// terminalStatus が blocked（halt 非カウント・次ラン monitoring 再開）から failed
+// （halt カウント・再開対象外）へ化ける。延長を入れる前の同じケースは blocked で終端して
+// いたため、これは救済機構が持ち込んだ回帰である（Fandhe-AI/rust-ai-library#681）。
+//
+// lastState を 'unresolved-comments' へ書き換える方法を採らない理由: その値は fix ループを
+// 起動する状態でもあるため、書き換えると制御が fix 分岐へ流れ、timeout の finding で fix が
+// 走って monitorsLeft が積み増され、狙った blocked 終端に到達しない。無効な fix 結果は既定の
+// failed 終端になり、直そうとした halt カウント回帰がそのまま再現する
+// （Fandhe-AI/agent-cli-skills#246 への Bugbot High 指摘）。よって state は 'timeout' の
+// まま触らず、「即座にループを抜けて終端 status だけを品質ブロックへ分類する」指示を返す。
+//
+// 契約:
+//   - 救済ラウンド直後かつ結果が 'timeout' のときだけ terminate / qualityBlock を立てる。
+//     救済は「未解決スレッドの内容を取り直すための追加試行」であり、観測に失敗しても
+//     「未解決スレッドが残っている」という元の品質ブロックの事実は変わらない
+//   - 'ready' / 'needs-fix' / 'blocked' 等の有意な結果では何もしない（観測が成立した以上、
+//     その判定と通常の分岐処理を尊重する）
+//   - pending は常に false へ落とす（救済は 1 回限りで、次ラウンド以降へ持ち越さない）
+// 戻り値の rescuePending は呼び出し元の同名変数へそのまま代入して使う。
+export function reconcileRescueRoundState(lastState, rescuePending) {
+  if (rescuePending && lastState === 'timeout') {
+    return { terminate: true, qualityBlock: true, rescuePending: false }
+  }
+  return { terminate: false, qualityBlock: false, rescuePending: false }
+}
+
 // マージ独立確認エージェント（mergeVerifyPrompt）の返却スキーマ（Issue #160）。merge-exec の
 // merged 自己申告を別コンテキストで裏付ける読み取り専用エージェントが gh pr view の取得値のみ
 // を返す。自由文フィールドを意図的に持たせず、未検証文字列がホストのログ・note 合成へ流れる
@@ -3372,6 +3431,18 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
   // 次ラウンドの monitor へ手順 5 の強制再走査を指示し、monitor が unresolved-comments / ready を
   // 返したら解除する。件数・reason のみを根拠に立てる（merge-exec の自由テキストは信頼しない）。
   let forceThreadRescan = false
+  // 強制再走査のための監視枠延長を使い切ったか（while の外で宣言すること。ループ内で宣言すると
+  // 毎ラウンド初期化されラッチが機能せず、merge-exec が空一覧を返し続ける間ループが無限化する）。
+  // 判定は planForcedThreadRescan（純粋関数・回帰テスト対象）に委ねる。
+  let forceThreadRescanBudgetUsed = false
+  // 直前に救済延長した枠を消費中かを示す。延長した回は残り予算ゼロのため、その結果が
+  // そのまま終端 state になる。timeout（観測不能）で終わった場合の扱いは
+  // reconcileRescueRoundState（純粋関数・回帰テスト対象）に委ねる。
+  let rescueRoundPending = false
+  // 救済ラウンドが観測に失敗して終端したことを示す。lastState は 'timeout' のまま残す
+  // （実際に観測できなかったのは事実であり、終端理由の記録としては正しい）が、終端 status
+  // の分類だけは元の未解決スレッド由来の品質ブロックとして blocked にする。
+  let rescueTimeoutQualityBlock = false
   // 一過性 reason（head-moved / checks-not-green / merge-failed）で merge-exec がマージを見送った
   // 直近の理由（sanitize 済み）。timeout 終端時の note に残し「CI green・理由不明」を防ぐ。
   let lastExecDeferralNote = ''
@@ -3419,6 +3490,20 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     if (lastState === 'merged') {
       log(`#${item.number}: 監視エージェントが非推奨の state: merged を返した。ready として扱いマージ実行エージェントで再検証する`)
       lastState = 'ready'
+    }
+    // 救済延長した枠で走ったラウンドが観測に失敗（timeout）した場合は、fix 分岐へ入れず
+    // ここで終端させ、終端 status だけを品質ブロックへ分類する。延長枠は残り予算ゼロで
+    // 即終端するため、ここで分類しないと blocked が failed へ化けて halt にカウントされる
+    // （rust-ai-library#681）。lastState を書き換えないのは、'unresolved-comments' が fix
+    // 起動状態でもあり、書き換えると fix が走って狙った終端に届かないため（#246 の指摘）。
+    if (rescueRoundPending) {
+      const reconciled = reconcileRescueRoundState(lastState, rescueRoundPending)
+      rescueRoundPending = reconciled.rescuePending
+      if (reconciled.terminate) {
+        rescueTimeoutQualityBlock = reconciled.qualityBlock
+        log(`#${item.number}: 救済ラウンドがスレッド内容を観測できないまま timeout したため、未解決スレッド由来の品質ブロックとして終端させる（次回実行で monitoring 再開の対象）`)
+        break
+      }
     }
     // 強制再走査フラグは monitor が手順 5 の走査を実行したラウンド（unresolved-comments / ready）
     // で解除する。needs-fix / timeout / blocked では持ち越す（走査未実施の可能性が残るため）。
@@ -3612,7 +3697,16 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
             // フラグは reason enum と一覧の空という決定的事実のみを根拠に立て（自由テキストは
             // 根拠にしない）、次ラウンドの monitor へ手順 5 の強制再走査を指示する。
             forceThreadRescan = true
-            log(`#${item.number}: マージ実行エージェントが未解決スレッドを検出したが内容が未取得のため、fix を起動せず次ラウンドの監視でスレッド再走査を強制する`)
+            // 監視枠はループ先頭で減算済みのため、最後の枠でここへ来ると continue しても while
+            // 条件が false になり救済ラウンドが走らない。1 回限りの延長で枠を確保する
+            // （Fandhe-AI/ideas#248 の P1。2 回目以降は延長せず残り予算で終端させる）。
+            const rescan = planForcedThreadRescan(monitorsLeft, forceThreadRescanBudgetUsed)
+            monitorsLeft = rescan.monitorsLeft
+            forceThreadRescanBudgetUsed = rescan.rescueUsed
+            // 延長した回だけ pending を立てる。残枠があった回は後続ラウンドが続くため、
+            // その回の timeout を品質ブロックへ写像すると実際の失敗を隠すことになる。
+            if (rescan.granted) rescueRoundPending = true
+            log(`#${item.number}: マージ実行エージェントが未解決スレッドを検出したが内容が未取得のため、fix を起動せず次ラウンドの監視でスレッド再走査を強制する${rescan.granted ? '（監視枠が尽きていたため再走査用に 1 回だけ延長した）' : ''}`)
             continue
           }
           log(`#${item.number}: マージ実行エージェントが未解決スレッドを検出したため fix ループへ回す`)
@@ -3871,10 +3965,13 @@ async function runMergeLoop(item, impl, initialFixCount, initialWorktreePath, in
     // 分類すると halt 防御を回避する）。mergedButIssueOpen は回復可能なため 'blocked'。blocked は
     // blockedReason 'quality' のときだけ 'blocked' 終端（'unrecoverable' を blocked + pr で終端
     // すると毎ラン再開で halt 防御を迂回するため 'failed' へ落とす）。'unresolved-comments' は
-    // 定義上つねに品質ブロック。
+    // 定義上つねに品質ブロック。rescueTimeoutQualityBlock は救済ラウンドが観測に失敗した
+    // ケースで、lastState は 'timeout' のままだが実体は未解決スレッド由来の品質ブロック
+    // （救済機構を入れる前は 'unresolved-comments' として blocked 終端していた）。
     const blockedIsRecoverable = lastState === 'blocked' && lastBlockedReason === 'quality'
     const terminalStatus =
-      !routingErrorDetected && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments')
+      !routingErrorDetected
+      && (mergedButIssueOpen || blockedIsRecoverable || lastState === 'unresolved-comments' || rescueTimeoutQualityBlock)
         ? 'blocked'
         : 'failed'
     if (lastState === 'blocked') {
