@@ -222,6 +222,28 @@ impl CudaKernelDescriptor {
 /// ディレクトリ命名（`kernel.<name>.<hash>`）とハッシュ関数自体は C-2
 /// （#506）のスコープであり、本型は「ハッシュ化される前のキーの単位」を
 /// 定義するのみ。
+///
+/// # 破壊的変更の意図的な受容（C-5・#514・codex-review P1 是正）
+///
+/// [`Self::new`]／[`Self::from_device`] は本フィールド（`source`）追加に
+/// 伴い必須引数が増える破壊的シグネチャ変更を受けている。旧シグネチャを
+/// 互換維持したまま `source` なしのコンストラクタを併存させる代替案は
+/// 採らない: `source` を含まないキーは `canonical_bytes()`／派生
+/// `Hash`/`Eq` がソース変更を検知できず、C-5 が解消対象とする「ソースを
+/// 編集してもキャッシュがヒットし続ける」問題（stale cache reuse。OWASP
+/// A08 整合性）をまさに再導入してしまうため、互換コンストラクタの追加は
+/// 安全側ではなく危険側の選択となる。
+///
+/// 移行契約: 本型は crate root（`lib.rs`）から `pub use` で再公開されて
+/// おり形式上は公開 API だが、`backend-cuda` はこのリポジトリの「唯一の
+/// サポートされる公開 API 面」ではない内部クレートであり（`facade` が
+/// 公開面。CLAUDE.md「想定クレート 10 個」節）、かつ workspace は
+/// `publish = false`（crates.io 非公開）のため crate 外・リポジトリ外の
+/// SemVer 契約下の利用者は存在しない（`grep -rn CudaKernelCacheKey .` で
+/// 呼び出し元は本ファイル自身のみと確認済み）。既存呼び出し元
+/// （本ファイル内の実装・テスト）は本 PR で全て新シグネチャへ移行済み。
+/// 将来 crate 外から利用する場合は最終レンダー済みソース文字列
+/// （`kernels_mma::render_mma_f16` 等の戻り値）を渡すこと。
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CudaKernelCacheKey {
     descriptor: CudaKernelDescriptor,
@@ -431,25 +453,34 @@ impl CudaKernelCacheKey {
     }
 }
 
-/// 手動 `Debug` 実装（C-5・#514）。`derive(Debug)` のままだと
-/// [`CudaKernelCacheKey::source`]（数十 KB になりうる展開済みカーネル
-/// ソース全文）がそのままログ・パニックメッセージへ出力されてしまう
-/// （情報露出。`.claude/rules/security.md` セキュリティ考慮）。`source`
-/// のみ長さと先頭 40 文字程度の要約表示に差し替え、他フィールドは
-/// derive 相当の表示を保つ。
+/// 手動 `Debug` 実装（C-5・#514・codex-review P1 是正）。`derive(Debug)`
+/// のままだと [`CudaKernelCacheKey::source`]（数十 KB になりうる展開済み
+/// カーネルソース全文）がそのままログ・パニックメッセージへ出力されて
+/// しまう（情報露出。`.claude/rules/security.md` セキュリティ考慮）。
+///
+/// 当初案（先頭 40 文字の平文要約 `source_summary`）は codex-review で
+/// P1 指摘を受けた: ソース先頭 40 文字はカーネル名・シグネチャ等の識別
+/// 情報を含みうる平文断片であり、「公開 getter を設けずソース全文漏出を
+/// 防止する」（`source` フィールドのドキュメンテーションコメント参照）
+/// という設計方針に反する部分的漏出だった。本実装は `source` の内容を
+/// 一切表示せず、長さと非可逆な変更検知用フィンガープリント
+/// （[`fnv1a_64`]。[`Self::stable_hash`] と同一アルゴリズム）のみを出力
+/// する。`fnv1a_64` は非暗号ハッシュのため、このフィンガープリントは
+/// 「同一ソースかどうかの変更検知」用途に限られ、改竄検知・完全性保証
+/// （OWASP A08）の根拠にはしない（[`fnv1a_64`] のドキュメンテーション
+/// コメント参照）。他フィールドは derive 相当の表示を保つ。
 impl std::fmt::Debug for CudaKernelCacheKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const SUMMARY_LEN: usize = 40;
-        // `source` は UTF-8 文字列のため、バイト境界ではなく char 境界で
-        // 切り詰める（マルチバイト文字の途中で切ると panic するため）。
-        let summary: String = self.source.chars().take(SUMMARY_LEN).collect();
         f.debug_struct("CudaKernelCacheKey")
             .field("descriptor", &self.descriptor)
             .field("compute_capability", &self.compute_capability)
             .field("nvrtc_version", &self.nvrtc_version)
             .field("compile_flags", &self.compile_flags)
             .field("source_len", &self.source.len())
-            .field("source_summary", &summary)
+            .field(
+                "source_fnv1a64",
+                &format_args!("{:016x}", fnv1a_64(self.source.as_bytes())),
+            )
             .finish()
     }
 }
@@ -1463,6 +1494,38 @@ mod tests {
             sample_source(),
         );
         assert_eq!(cache.get(&miss_key), None);
+    }
+
+    // codex-review P1 是正（C-5・#514）: `Debug` 出力にカーネルソース内容
+    // （先頭 40 文字の平文要約を含む旧実装）が漏出しないことを保証する
+    // 回帰テスト。`sample_source()` は `mma_f16_source()`（数十行の実
+    // カーネルソース）を返すため、その内容の一部（先頭のプリプロセッサ
+    // 指令等の識別可能な断片）が `{:?}` 出力に一切含まれないことを検査
+    // する。長さ・非可逆フィンガープリントのみが出力される契約
+    // （`impl Debug for CudaKernelCacheKey` ドキュメンテーションコメント
+    // 参照）。
+    #[test]
+    fn debug_output_does_not_leak_source_content() {
+        let key = sample_key();
+        let debug_output = format!("{key:?}");
+        let source = sample_source();
+
+        // ソース全文はもちろん、旧実装が漏出させていた先頭 40 文字断片も
+        // 含め、ソースからの任意の非自明な部分文字列が出力に現れない
+        // ことを確認する。
+        let leading_fragment: String = source.chars().take(40).collect();
+        assert!(
+            !debug_output.contains(&leading_fragment),
+            "Debug 出力にソース先頭断片が含まれている（情報露出）: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains(&source),
+            "Debug 出力にソース全文が含まれている（情報露出）: {debug_output}"
+        );
+
+        // 代わりに長さと非可逆フィンガープリントは出力される契約。
+        assert!(debug_output.contains(&source.len().to_string()));
+        assert!(debug_output.contains("source_fnv1a64"));
     }
 
     // イシュー #506（Phase C-2）: FNV-1a 64bit の既知テストベクタ
