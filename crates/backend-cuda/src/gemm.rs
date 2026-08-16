@@ -836,7 +836,7 @@ impl CudaGemm {
         if let Some(bias) = bias
             && bias.len() != n as usize
         {
-            return Err(CudaError::InvalidShape {
+            return Err(CudaError::InvalidElementwiseShape {
                 detail: format!(
                     "bias length mismatch: expected {n} (n), actual {}",
                     bias.len()

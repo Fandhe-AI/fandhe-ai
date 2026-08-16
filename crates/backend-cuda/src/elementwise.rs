@@ -41,7 +41,7 @@ pub(crate) fn validate_elementwise_binary_dims(
     b_len: usize,
 ) -> Result<(), CudaError> {
     if a_len != b_len {
-        return Err(CudaError::InvalidShape {
+        return Err(CudaError::InvalidElementwiseShape {
             detail: format!("elementwise length mismatch: a_len={a_len}, b_len={b_len}"),
         });
     }
@@ -51,7 +51,7 @@ pub(crate) fn validate_elementwise_binary_dims(
 /// 単項演算向け: 長さが `i32::MAX` に収まることのみを検証する。
 pub(crate) fn validate_elementwise_len(len: usize) -> Result<(), CudaError> {
     if len > i32::MAX as usize {
-        return Err(CudaError::InvalidShape {
+        return Err(CudaError::InvalidElementwiseShape {
             detail: format!(
                 "elementwise numel must fit in i32 (kernel argument type): numel={len}"
             ),
@@ -248,13 +248,13 @@ mod tests {
     #[test]
     fn validate_elementwise_binary_dims_rejects_length_mismatch() {
         let err = validate_elementwise_binary_dims(4, 5).unwrap_err();
-        assert!(matches!(err, CudaError::InvalidShape { .. }));
+        assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
     }
 
     #[test]
     fn validate_elementwise_len_rejects_exceeding_i32_max() {
         let err = validate_elementwise_len(i32::MAX as usize + 1).unwrap_err();
-        assert!(matches!(err, CudaError::InvalidShape { .. }));
+        assert!(matches!(err, CudaError::InvalidElementwiseShape { .. }));
     }
 
     #[test]
