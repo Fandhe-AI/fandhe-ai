@@ -809,6 +809,25 @@ impl CudaGemm {
         self.wmma_tf32_staged_error.as_deref()
     }
 
+    /// 指定した `(n, k)` の形状で `run_wmma_tf32` が実際に WMMA 経路
+    /// （staged または opt のいずれか）を選び、basic へフォールバック
+    /// しないことを判定する（PR #678 codex-review Medium 指摘対応
+    /// 「Weak routed-path availability gate」）。
+    ///
+    /// [`Self::wmma_tf32_staged_available`] と [`Self::wmma_tf32_opt_available`]
+    /// を `||` で束ねただけのゲートは形状非依存であり、staged が利用可能
+    /// でも整列非対応形状（`wmma_tf32_staged_alignment_ok` が `false` を
+    /// 返す形状。例: 63×65×33・1×1×1）では staged 経路を選ばない。opt が
+    /// 未対応な環境ではその形状だけ静かに basic へフォールバックし、
+    /// 「WMMA 経路の parity を検証している」というテストの意図を裏切って
+    /// も検査は素通りしてしまう。本関数は `run_wmma_tf32` の 3 段選択
+    /// ロジック（`wmma_tf32_staged_alignment_ok` を含む）を形状ごとに
+    /// 再現し、その形状で実際に WMMA 経路が選ばれるかを判定する。
+    pub fn wmma_tf32_routed_path_available(&self, n: u32, k: u32) -> bool {
+        (self.wmma_tf32_staged_available() && wmma_tf32_staged_alignment_ok(n, k))
+            || self.wmma_tf32_opt_available()
+    }
+
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],

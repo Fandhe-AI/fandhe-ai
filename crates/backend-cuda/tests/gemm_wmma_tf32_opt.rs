@@ -119,24 +119,20 @@ fn wmma_tf32_routed_path_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
     // PR #256 レビュー指摘対応の踏襲（PR #678 codex-review P1 再指摘対応で
-    // 条件を修正）: `run_wmma_tf32` は staged・opt の両方が使用不能な環境で
-    // 基本版へ自動フォールバックするため、この検証が WMMA 経路（staged・
-    // opt のいずれか）を実際に踏んだことを保証するには、basic への
-    // フォールバックが起きていないことを事前に確認する必要がある
-    // （本テストは compute capability 8.0 以降の実機必須なので staged・opt
-    // のいずれかは利用可能であるべき）。staged が整列形状で opt を横取り
-    // する 3 段選択の性質上、「opt が利用可能」を要求すると staged 選択時に
-    // 誤って fail するため、「staged または opt のいずれかが利用可能」へ
-    // 緩和する。
-    assert!(
-        gemm.wmma_tf32_staged_available() || gemm.wmma_tf32_opt_available(),
-        "staged or opt WMMA(TF32) kernel must be available on this ignored test runner so \
-         that the routed path actually exercises a WMMA path rather than silently falling \
-         back to the basic kernel (staged reason: {:?}, opt reason: {:?})",
-        gemm.wmma_tf32_staged_unavailable_reason(),
-        gemm.wmma_tf32_opt_unavailable_reason()
-    );
-
+    // 条件を修正・PR #678 codex-review Medium 再指摘対応でゲートを形状
+    // ごとの判定へ強化）: `run_wmma_tf32` は staged・opt の両方が使用不能な
+    // 環境で基本版へ自動フォールバックするため、この検証が WMMA 経路
+    // （staged・opt のいずれか）を実際に踏んだことを保証するには、basic
+    // へのフォールバックが起きていないことを事前に確認する必要がある。
+    // `wmma_tf32_staged_available() || wmma_tf32_opt_available()` という
+    // gemm 単位（形状非依存）のゲートは、staged が利用可能でも整列非対応
+    // 形状（63×65×33・1×1×1 等）では staged 経路を選ばず、opt が未対応な
+    // 環境ではその形状だけ静かに basic へフォールバックしても検出できない
+    // （Weak routed-path availability gate 指摘）。
+    // `wmma_tf32_routed_path_available(n, k)`（`run_wmma_tf32` の 3 段
+    // 選択ロジックを形状ごとに再現。`gemm.rs` ドキュメンテーションコメント
+    // 参照）で各ケースごとに WMMA 経路が実際に選ばれることを確認してから
+    // parity を検証する。
     let cases: &[(u32, u32, u32)] = &[
         (64, 64, 64),
         (128, 128, 128),
@@ -147,6 +143,15 @@ fn wmma_tf32_routed_path_matches_reference_across_shapes() {
         (1, 1, 1),
     ];
     for (idx, &(m, n, k)) in cases.iter().enumerate() {
+        assert!(
+            gemm.wmma_tf32_routed_path_available(n, k),
+            "staged or opt WMMA(TF32) kernel must be available for shape m={m} n={n} k={k} on \
+             this ignored test runner so that the routed path actually exercises a WMMA path \
+             rather than silently falling back to the basic kernel (staged reason: {:?}, opt \
+             reason: {:?})",
+            gemm.wmma_tf32_staged_unavailable_reason(),
+            gemm.wmma_tf32_opt_unavailable_reason()
+        );
         let context = format!("routed path shape m={m} n={n} k={k}");
         assert_wmma_tf32_opt_parity(&gemm, &context, 3000 + idx as u64, m, n, k);
     }
@@ -162,31 +167,32 @@ fn wmma_tf32_routed_path_k4096_stress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
     // PR #256 レビュー指摘対応の踏襲（上記
-    // wmma_tf32_routed_path_matches_reference_across_shapes と同じ根拠）。
-    assert!(
-        gemm.wmma_tf32_staged_available() || gemm.wmma_tf32_opt_available(),
-        "staged or opt WMMA(TF32) kernel must be available on this ignored test runner (staged \
-         reason: {:?}, opt reason: {:?})",
-        gemm.wmma_tf32_staged_unavailable_reason(),
-        gemm.wmma_tf32_opt_unavailable_reason()
-    );
-
-    assert_wmma_tf32_opt_parity(
-        &gemm,
-        "routed path K4096 stress 512x512x4096",
-        0xC0FFEE,
-        512,
-        512,
-        4096,
-    );
-    assert_wmma_tf32_opt_parity(
-        &gemm,
-        "routed path K4096 stress 4096x4096x4096",
-        0xBEEF,
-        4096,
-        4096,
-        4096,
-    );
+    // wmma_tf32_routed_path_matches_reference_across_shapes と同じ根拠。
+    // PR #678 codex-review Medium 再指摘対応で形状ごとのゲートへ強化）。
+    // 本テストの 2 形状はいずれも 4 の倍数（cp.async 整列条件を満たす）
+    // だが、gemm 単位のゲートは形状変更時に静かに緩む余地を残すため、
+    // `wmma_tf32_routed_path_available(n, k)` で形状ごとに検証する
+    // （上記関数と同じ理由）。
+    for &(m, n, k, seed, label) in &[
+        (512u32, 512u32, 4096u32, 0xC0FFEEu64, "512x512x4096"),
+        (4096, 4096, 4096, 0xBEEF, "4096x4096x4096"),
+    ] {
+        assert!(
+            gemm.wmma_tf32_routed_path_available(n, k),
+            "staged or opt WMMA(TF32) kernel must be available for shape m={m} n={n} k={k} on \
+             this ignored test runner (staged reason: {:?}, opt reason: {:?})",
+            gemm.wmma_tf32_staged_unavailable_reason(),
+            gemm.wmma_tf32_opt_unavailable_reason()
+        );
+        assert_wmma_tf32_opt_parity(
+            &gemm,
+            &format!("routed path K4096 stress {label}"),
+            seed,
+            m,
+            n,
+            k,
+        );
+    }
 }
 
 /// `k == 0`（`num_k_tiles == 0` 経路）で C が全 0 になることを確認する
