@@ -110,6 +110,24 @@ pub enum CudaError {
     /// よる panic 経路は持たない（`.claude/rules/coding-rust.md`
     /// 「本番経路で `unwrap()`/`expect()` を使わない」）。
     InvalidKernelDescriptor { detail: String },
+
+    /// コンパイルキャッシュのルートディレクトリ（`nvrtc.rs::cache_root`）が
+    /// 解決できない。
+    ///
+    /// イシュー #506（Phase C-2）: `RUST_AI_CUDA_CACHE_DIR` / `XDG_CACHE_HOME`
+    /// / `HOME` のいずれからもキャッシュルートを導けない場合（全環境変数
+    /// 欠落）、`RUST_AI_CUDA_CACHE_DIR` に空文字列・相対パスが指定された
+    /// 場合、または解決結果（3 分岐いずれも）がコンパイル時ワークスペース
+    /// ルート配下に字句上収まる場合（PR #659 codex-review P0 指摘。
+    /// `resolve_cache_root`／`path_lexically_within` 参照）に返る。相対
+    /// パスを許すとカレントディレクトリ（リポジトリツリー内でありうる）
+    /// 配下にキャッシュが作られ、「キャッシュルートはリポジトリツリー外」
+    /// 要件（security.md・runner workspace に成果物を残さない方針）に
+    /// 反するため fail-closed で拒否する（panic 経路は持たない）。
+    /// containment 検証はシンボリックリンク非対応の字句比較に留まり、
+    /// シンボリックリンク対応の `canonicalize` 再検証は C-3（#509）が
+    /// 実ディレクトリ作成・オープン時点で担う。
+    CacheDirUnavailable { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -145,6 +163,12 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidKernelDescriptor { detail } => {
                 write!(f, "invalid CUDA kernel descriptor: {detail}")
+            }
+            CudaError::CacheDirUnavailable { detail } => {
+                write!(
+                    f,
+                    "CUDA kernel compile cache directory unavailable: {detail}"
+                )
             }
         }
     }
