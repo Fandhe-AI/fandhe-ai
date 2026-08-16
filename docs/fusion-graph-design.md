@@ -465,14 +465,20 @@ pub(crate) enum FusionOp {
 >   `MAX_FUSED_SEGMENT_NODES`（12 ＝ `2 × MAX_FUSED_CHAIN_LEN`）を新設
 >   （挿入前判定・決定的打ち切りの既存パターンを踏襲）。
 > - `FusionPlan` に行方向 reduction＋broadcast 融合の行メタデータ
->   `RowFusionMeta`（`axis`／`row_len`／`single_pass_hint`）を追加し、
->   `row_fusion()` アクセサで公開する。`Broadcast` を 1 個以上含む
->   プランのみ `Some`（#586 までの reduction-only プランは `None` の
->   まま後方互換）。`single_pass_hint` は行長が `MAX_SINGLE_PASS_ROW_LEN`
->   （8192。参照実装〈イシュー本文の非信頼データ・TileKernels
+>   `RowFusionMeta`（`axis`／`row_len`）を追加し、`row_fusion()`
+>   アクセサで公開する。`Broadcast` を 1 個以上含むプランのみ `Some`
+>   （#586 までの reduction-only プランは `None` のまま後方互換）。
+>   **（codex-review PR #687 P2 是正で更新）**: 当初は `single_pass_hint`
+>   （行長が `MAX_SINGLE_PASS_ROW_LEN`＝8192〈参照実装〈イシュー本文の
+>   非信頼データ・TileKernels
 >   `swiglu_forward_and_per_token_cast_kernel.py:30-42`〉の実測境界値を
->   タイル形状決定則として転用）以下かのヒントであり、バックエンドは
->   自前の smem／レジスタ予算で再判定してよい。
+>   タイル形状決定則として転用〉以下かのヒント）を `RowFusionMeta` に
+>   持たせていたが、この閾値は CUDA のレジスタ／smem 予算に基づく実測値
+>   であり、backend 非依存層である `tensor-core` が CPU／Metal にまで
+>   同じ閾値を無条件で提示するのは責務境界を越えるという指摘を受け、
+>   `single_pass_hint` フィールドと `MAX_SINGLE_PASS_ROW_LEN` 定数は
+>   削除した。1 パス／2 パスのカーネル選択判定は `row_len` を読んだ
+>   各バックエンドの責務とする（本 PR 時点で利用側実装は存在しない）。
 > - `from_ops`（`autodiff` 専用構築経路）の fail-closed 検証を拡張:
 >   `Broadcast` の軸不一致（`FusionPlanError::MismatchedBroadcastAxis`）・
 >   行メタデータ導出の軸範囲外（`RowAxisOutOfRange`）・`Broadcast` を

@@ -319,8 +319,9 @@ impl fmt::Display for FusionPlanError {
             ),
             FusionPlanError::ReducedOutputWithBroadcast { at } => write!(
                 f,
-                "fusion plan node {at} (last op) is a reduction while the plan contains Broadcast; \
-                 broadcast-containing plans must terminate with a row-shaped output"
+                "fusion plan node {at} (after the last Broadcast) is a reduction while the plan \
+                 contains Broadcast; broadcast-containing plans must terminate with a row-shaped \
+                 output"
             ),
         }
     }
@@ -399,31 +400,35 @@ impl From<FusionPlanError> for BackendError {
     }
 }
 
-/// 「1 セグメントが 1 行を保持できるか」の境界値（#588）。TileKernels
-/// `swiglu_forward_and_per_token_cast_kernel.py:30-42` の実測（非信頼
-/// データ・イシュー本文の参照実装の要約。`TILE_X == 1 and hidden <= 8192`
-/// のとき 1 CTA が 1 トークンの全 hidden をレジスタ常駐できる）を、融合
-/// softmax／RMSNorm のタイル形状決定則としてそのまま転用した値。**あくまで
-/// ヒント**であり、バックエンド（CUDA／Metal／CPU）は `row_len` から自前の
-/// smem／レジスタ予算で再判定してよい（#588 実装計画 §3.5）。ガードレール
-/// 閾値・テスト許容誤差ではない実装定数のためユーザー承認は要さないが、
-/// [`crate::fusion::detect::MAX_FUSED_CHAIN_LEN`] と同様 G-8 計測（#602 等）
-/// で見直し可能な形で定数化しておく。
-pub const MAX_SINGLE_PASS_ROW_LEN: usize = 8192;
-
 /// 行方向 reduction＋broadcast 融合プランの行メタデータ（#588・受け入れ
 /// 基準 2）。「行方向 reduction → 派生スカラー（rstd／max／sum）→ 同一行へ
 /// broadcast 適用」という 2 パス構造を持つプラン（[`FusionPlan::row_fusion`]
-/// が `Some` を返すプラン）について、1 パス実装（1 実行単位が行全体を
-/// レジスタ常駐できる）と 2 パス実装（行を分割して複数回走査する）の
-/// どちらをバックエンドが選ぶべきかの判断材料を提供する。フィールドは
-/// private とし、下記アクセサ経由でのみ読み取れる（`FusionPlan` 本体と
-/// 同じ「`tensor-core` 外からは構築・分解できない」設計方針）。
+/// が `Some` を返すプラン）について、行方向の形状事実（軸・行長）のみを
+/// 提供する。フィールドは private とし、下記アクセサ経由でのみ読み取れる
+/// （`FusionPlan` 本体と同じ「`tensor-core` 外からは構築・分解できない」
+/// 設計方針）。
+///
+/// # 1 パス／2 パス判定は各バックエンドの責務（codex-review PR #687 P2 是正）
+///
+/// 当初は `row_len <= 8192`（TileKernels の実測値を転用した定数
+/// `MAX_SINGLE_PASS_ROW_LEN`）を「1 パス実装で行全体をレジスタ常駐できる
+/// か」のヒントとしてここに持たせていたが、この閾値は CUDA の
+/// レジスタ／smem 予算に基づく実測値であり、`tensor-core` は backend
+/// 非依存層（`docs/fusion-graph-design.md` §3.4）である以上、CPU／Metal
+/// バックエンドにまで同じ閾値を無条件で提示するのは責務境界を越える
+/// （CPU にはレジスタ常駐の概念自体が薄く、Metal の smem／レジスタ予算は
+/// CUDA と異なる）。よって `RowFusionMeta` は `axis`／`row_len` の形状
+/// 事実のみを公開し、1 パス／2 パス（あるいは smem タイル分割）の判定は
+/// `row_len` を読んだ各バックエンド（`backend-cuda` 等）が自前の予算で
+/// 行う設計へ変更した。本 PR 時点でこの判定を行う利用側実装（`run_fused`
+/// のカーネル選択。実装は #164 以降）はまだ存在しないため、旧
+/// `single_pass_hint` フィールド・`MAX_SINGLE_PASS_ROW_LEN` 定数は
+/// 削除のみで足りる（利用側があれば移設が必要だったが、`git grep` で
+/// 確認した限り本 workspace 内に利用側は無かった）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowFusionMeta {
     axis: Option<usize>,
     row_len: usize,
-    single_pass_hint: bool,
 }
 
 impl RowFusionMeta {
@@ -434,16 +439,12 @@ impl RowFusionMeta {
     }
 
     /// 行長（`axis: Some(a)` なら `output_shape[a]`、`axis: None`
-    /// （全縮約）なら `output_shape` の要素数積）。
+    /// （全縮約）なら `output_shape` の要素数積）。1 パス／2 パスの
+    /// カーネル選択判定は本値を読んだ各バックエンドの責務とする
+    /// （本 struct 上部 doc 「1 パス／2 パス判定は各バックエンドの責務」
+    /// 参照）。
     pub fn row_len(&self) -> usize {
         self.row_len
-    }
-
-    /// `row_len <= MAX_SINGLE_PASS_ROW_LEN` のヒント値（§本モジュール
-    /// `MAX_SINGLE_PASS_ROW_LEN` の doc 参照。あくまでヒントであり
-    /// バックエンドが自前の予算で再判定してよい）。
-    pub fn single_pass_hint(&self) -> bool {
-        self.single_pass_hint
     }
 }
 
@@ -553,11 +554,7 @@ fn compute_row_fusion(
             .map_err(|_| FusionPlanError::OutputShapeOverflow)?,
     };
 
-    Ok(Some(RowFusionMeta {
-        axis,
-        row_len,
-        single_pass_hint: row_len <= MAX_SINGLE_PASS_ROW_LEN,
-    }))
+    Ok(Some(RowFusionMeta { axis, row_len }))
 }
 
 /// `run_fused`（`BackendOps` の非破壊拡張。実装は #164）へ渡す公開の
@@ -934,9 +931,10 @@ impl FusionPlan {
     /// 行方向 reduction＋broadcast 融合の行メタデータ（#588・受け入れ
     /// 基準 2）。`ops` が `Broadcast` を 1 個以上含むプランのみ `Some`
     /// を返す（#586 までの reduction-only プランは `None`。後方互換）。
-    /// バックエンド（`run_fused` 実装）はこれを読んで 1 パス／2 パスの
-    /// カーネル実装を選択できる（`RowFusionMeta::single_pass_hint`
-    /// doc 参照）。
+    /// バックエンド（`run_fused` 実装）はこれ（`axis`／`row_len`）を読んで
+    /// 1 パス／2 パスのカーネル実装を自前の予算で選択できる
+    /// （`RowFusionMeta` 型 doc「1 パス／2 パス判定は各バックエンドの
+    /// 責務」参照）。
     pub fn row_fusion(&self) -> Option<&RowFusionMeta> {
         self.row_fusion.as_ref()
     }
@@ -1421,7 +1419,7 @@ mod tests {
 
     /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_segment`
     /// で RMSNorm プランを構築すると `row_fusion()` が
-    /// `Some`（axis: None・row_len: 8・single_pass_hint: true）になる
+    /// `Some`（axis: None・row_len: 8）になる
     /// （`detect.rs::rmsnorm_pattern_with_explicit_broadcast_is_a_single_segment`
     /// と同型のグラフ）。
     #[test]
@@ -1470,12 +1468,11 @@ mod tests {
         let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
         assert_eq!(row_fusion.axis(), None);
         assert_eq!(row_fusion.row_len(), 8);
-        assert!(row_fusion.single_pass_hint());
     }
 
     /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_segment`
     /// で softmax プラン（7 ops + 葉 1）を構築すると `row_fusion()` が
-    /// `Some`（axis: Some(1)・row_len: 8・single_pass_hint: true）になる
+    /// `Some`（axis: Some(1)・row_len: 8）になる
     /// （`detect.rs::softmax_pattern_with_seven_nodes_is_a_single_segment`
     /// と同型のグラフ）。
     #[test]
@@ -1535,7 +1532,6 @@ mod tests {
         let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
         assert_eq!(row_fusion.axis(), Some(1));
         assert_eq!(row_fusion.row_len(), 8);
-        assert!(row_fusion.single_pass_hint());
     }
 
     /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_ops`
@@ -1566,7 +1562,6 @@ mod tests {
         let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
         assert_eq!(row_fusion.axis(), None);
         assert_eq!(row_fusion.row_len(), 8);
-        assert!(row_fusion.single_pass_hint());
     }
 
     /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 3」）: `from_ops`
@@ -1604,14 +1599,16 @@ mod tests {
         let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
         assert_eq!(row_fusion.axis(), Some(1));
         assert_eq!(row_fusion.row_len(), 8);
-        assert!(row_fusion.single_pass_hint());
     }
 
-    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 2」）: `row_len ==
-    /// MAX_SINGLE_PASS_ROW_LEN`（8192）ちょうどは `single_pass_hint` が
-    /// `true`（境界を含む側）。
+    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 2」）: `row_len` は
+    /// `axis: None`（全縮約）の場合 `output_shape` の要素数積そのものを
+    /// そのまま返す（1 パス／2 パス判定用の閾値は `RowFusionMeta` から
+    /// 削除済みのため、本テストは `row_len` の値そのものの検証に留める。
+    /// 閾値判定は各バックエンドの責務。本 struct 上部 doc「1 パス／2 パス
+    /// 判定は各バックエンドの責務」参照）。
     #[test]
-    fn row_fusion_single_pass_hint_true_at_exact_boundary() {
+    fn row_fusion_row_len_matches_output_shape_product_for_full_reduction() {
         let plan = FusionPlan::from_ops(
             vec![
                 FusedOpKind::Input { leaf_index: 0 },
@@ -1620,37 +1617,13 @@ mod tests {
                     axis: None,
                 },
             ],
-            vec![MAX_SINGLE_PASS_ROW_LEN],
+            vec![8193],
             DType::F32,
             1,
         )
         .unwrap();
         let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
-        assert_eq!(row_fusion.row_len(), MAX_SINGLE_PASS_ROW_LEN);
-        assert!(row_fusion.single_pass_hint());
-    }
-
-    /// 受け入れ基準（#588・実装計画 §6「受け入れ基準 2」）: `row_len ==
-    /// MAX_SINGLE_PASS_ROW_LEN + 1`（8193）は `single_pass_hint` が
-    /// `false`（境界の外側）。
-    #[test]
-    fn row_fusion_single_pass_hint_false_just_above_boundary() {
-        let plan = FusionPlan::from_ops(
-            vec![
-                FusedOpKind::Input { leaf_index: 0 },
-                FusedOpKind::Broadcast {
-                    input: 0,
-                    axis: None,
-                },
-            ],
-            vec![MAX_SINGLE_PASS_ROW_LEN + 1],
-            DType::F32,
-            1,
-        )
-        .unwrap();
-        let row_fusion = plan.row_fusion().expect("row_fusion must be Some");
-        assert_eq!(row_fusion.row_len(), MAX_SINGLE_PASS_ROW_LEN + 1);
-        assert!(!row_fusion.single_pass_hint());
+        assert_eq!(row_fusion.row_len(), 8193);
     }
 
     /// 受け入れ基準（#586 との後方互換。#588 実装計画 §3.5）: `Broadcast`

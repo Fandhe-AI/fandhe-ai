@@ -32,7 +32,9 @@
 //! - `plan`（TASK-12.1c 本体・#163）: 融合カーネル生成向け公開 DTO
 //!   （[`plan::FusionPlan`]・[`plan::FusedOpKind`]・
 //!   [`plan::FusedNodeIndex`]・[`plan::FusionPlanError`]・#588 で追加した
-//!   [`plan::RowFusionMeta`]／[`plan::MAX_SINGLE_PASS_ROW_LEN`]）。
+//!   [`plan::RowFusionMeta`]。1 パス／2 パス判定の閾値定数は codex-review
+//!   PR #687 P2 是正で backend 非依存層から削除し、閾値判定は各
+//!   バックエンドの責務とした〈`plan::RowFusionMeta` doc 参照〉）。
 //!   `FusionOp`／`FusionNode`／`FusionGraph`（`graph` モジュール）は
 //!   `pub(crate)` のまま変更しない設計判断（設計書 §2.5）のため、
 //!   `backend-cpu`／`backend-cuda`／`backend-metal` が融合グラフの内容を
@@ -97,7 +99,4 @@ pub use detect::{MAX_FUSED_CHAIN_LEN, MAX_FUSED_SEGMENT_NODES};
 pub(crate) use graph::{
     FusionGraph, FusionGraphError, FusionNode, FusionNodeId, FusionOp, NodeMeta,
 };
-pub use plan::{
-    FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, MAX_SINGLE_PASS_ROW_LEN,
-    RowFusionMeta,
-};
+pub use plan::{FusedNodeIndex, FusedOpKind, FusionPlan, FusionPlanError, RowFusionMeta};
