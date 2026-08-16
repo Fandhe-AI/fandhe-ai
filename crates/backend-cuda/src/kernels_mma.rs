@@ -76,9 +76,47 @@
 //! Spark GB10）実機属性は未実測のため候補判断は全 compute capability
 //! 共通の保証値ベースであり、実機での再確認は #502 へ引き継ぐ）。
 //!
-//! ldmatrix 先読みダブルバッファ・cp.async issue interleaving・XOR
-//! swizzle は引き続き後続（知見は `docs/cuda-tensor-core-knowledge.md`
-//! 〈#65・TASK-11.1f〉に集約済み。#495〜#496 のスコープとして引き継ぐ）。
+//! cp.async issue interleaving は #496（GEMM 性能改善ツリー #479 →
+//! Phase 2 親 #490 の B-5）で実装済み。CUTLASS `mma_multistage.h` の
+//! `kAccessesPerGroupA/B`（`AsyncCopyIterationsPerStage` を
+//! `kWarpGemmIterations` 個へ分割発行する方式）と同型の技法を、本
+//! カーネルのチャンク添字空間分割として翻案する: 1 K タイル分の
+//! `cp.async` 発行を `K_GROUPS`（= `BK / MMA_K`。kstep ループの反復回数と
+//! 一致）個の連続チャンクレンジへ分割し、各 kstep の ldmatrix 先読み後・
+//! mma.sync 発行前にレンジ 1 個分を発行する（`LOAD_A_STAGE_GROUP`/
+//! `LOAD_B_STAGE_GROUP` マクロ直前のコメント参照）。従来はループ末尾で
+//! 次段タイルの `cp.async` を一括発行していたため発行コストが K タイル
+//! 境界の 1 点に集中していたが、本変更により warp 内 mma ループへ発行が
+//! 分散され Tensor Core 演算とオーバーラップする。`cp.async.commit_group`
+//! の位置（ループ末尾・無条件）・「1 イテレーション = 必ず 1 commit」
+//! 不変条件（#492）は変更しない（分割後も `wait_group (STAGES-2)` の
+//! 正しさ論証がそのまま成立する。本ファイル `MMA_STAGES` 定数直下の
+//! ドキュメンテーションコメント参照）。発行タイミングの変更はコピー
+//! されるデータ・`mma.sync` の発行順序・オペランド値を変えないため、
+//! 出力は #495 時点と bit 一致（parity 非後退契約は
+//! `tests/parity_nonregression.rs` が機械検査。tolerance・fixture は
+//! 変更なし）。未実測（実機 NVRTC 非搭載環境のため。本ファイル冒頭
+//! コメント「検証状態」参照）: 実測記録は
+//! `docs/perf/cuda-gemm-mma-cp-async-interleaving.md` を参照。
+//!
+//! XOR swizzle は引き続き不採用（下記「XOR swizzle」節参照）。
+//!
+//! ldmatrix 先読みダブルバッファは #495（GEMM 性能改善ツリー #479 →
+//! Phase 2 親 #490 の B-4）で実装済み。warp レベルの kstep ループ内で
+//! A/B フラグメントを 2 面バッファ化し（`a_frag[2][...]`/`b_frag[2][...]`）、
+//! kstep+1 段のフラグメントを kstep 段の `mma.sync` 発行前に先読みする
+//! ことで、SMEM→レジスタのロードレイテンシと Tensor Core 演算をオーバー
+//! ラップさせる（CUTLASS `mma_multistage.h` の `PipeState`/`mac_loop_iter`
+//! と同型。カーネルソース `LDSM_A_FRAG`/`LDSM_B_FRAG` マクロ直前の
+//! コメント参照）。CUTLASS の `mac_loop_iter` はタイル境界を跨いで次
+//! タイルの kstep=0 まで先読みするが、本実装は**タイル内先読みに限定**
+//! する（クロスタイル先読みは不採用。理由は下記マクロ直前のコメント）。
+//! 数値順序（アキュムレート順序）は ldmatrix 発行タイミングの変更では
+//! 変わらないため、B-3（#494）時点と bit 一致の出力を維持する（parity
+//! 非後退契約は `tests/parity_nonregression.rs` が機械検査。tolerance・
+//! fixture は変更なし）。未実測（実機 NVRTC 非搭載環境のため。本ファイル
+//! 冒頭コメント「検証状態」参照）: 実測記録・レジスタ予算リスクは
+//! `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md` を参照。
 //!
 //! 共有メモリのバンクコンフリクト対策（#498。`docs/perf/cuda-gemm-mma-bank-conflict.md`）:
 //! 非 2 冪パディング（`MMA_A_PAD`/`MMA_B_PAD` 定数参照）を適用済み。
@@ -263,21 +301,30 @@ pub const MMA_B_PAD: u32 = MMA_BN + 8;
 /// 唯一の真実源）。`gemm_mma.rs` が起動前の `debug_assert` で参照する。
 pub const MMA_K_STEPS_PER_STAGE: u32 = MMA_BK / MMA_K;
 
+/// 全 compute capability 共通の per-block 静的共有メモリ上限（49,152 バイト
+/// = 48KiB。動的共有メモリ opt-in `cudaFuncSetAttribute` を追加で呼ばない
+/// 限りの静的 `__shared__` 上限）。[`MMA_SHARED_MEM_BYTES`] の下記
+/// `const _: () = assert!(...)` と `gemm_auto.rs::STATIC_SMEM_BUDGET_CAP_BYTES`
+/// が同じ 49,152 の値を独立にハードコードして重複管理していた（#521
+/// レビュー指摘）ため、本定数を唯一の真実源として両所から参照する。
+pub const MMA_STATIC_SMEM_LIMIT_BYTES: u32 = 49_152;
+
 /// 静的共有メモリ使用量（バイト）。`(MMA_BM*MMA_A_PAD + MMA_BK*MMA_B_PAD) *
 /// 2B (f16) * MMA_STAGES`（#498 のバンクコンフリクト対策パディング込み。
 /// パディング前は `(MMA_BM*MMA_BK + MMA_BK*MMA_BN) * 2B * MMA_STAGES` =
-/// 36,864B だったが、パディング後は 41,472B）。全 compute capability
-/// 共通の per-block 静的共有メモリ上限（49152 バイト = 48KiB）に対する
-/// 実使用量を下記 `const _: () = assert!(...)` でコンパイル時に検査する
-/// （本ファイル冒頭コメント「タイル構成」参照。タイル定数変更時に即座に
-/// ビルドエラーで検出できるよう、実行時 `debug_assert` ではなくコンパイル
-/// 時定数アサーションとする）。
+/// 36,864B だったが、パディング後は 41,472B）。[`MMA_STATIC_SMEM_LIMIT_BYTES`]
+/// に対する実使用量を下記 `const _: () = assert!(...)` でコンパイル時に
+/// 検査する（本ファイル冒頭コメント「タイル構成」参照。タイル定数変更時に
+/// 即座にビルドエラーで検出できるよう、実行時 `debug_assert` ではなく
+/// コンパイル時定数アサーションとする）。
 ///
-/// 上記の通りコンパイル時 const アサーションのみからの参照であり、実行時
-/// `debug_assert` は意図的に用いない（このコメント自身の設計判断）。その
-/// ため rustc 1.88 系の dead-code 解析はこの `pub const` を誤って未使用と
-/// 判定する（1.92 以降では解消済み。`cargo +1.88.0 clippy` と
-/// `cargo +1.92.0 clippy` の実測差分で確認済み。#149 PR CI 指摘対応）。
+/// `gemm_auto.rs::derive_stages_for_device` からも参照されるようになったが
+/// （デバイス実測 SMEM 予算のクランプ上限として。`gemm_auto.rs` 冒頭の
+/// コンパイル時契約検査コメント参照）、rustc 1.88 系の dead-code 解析が
+/// 誤って未使用と判定する既知の quirk（1.92 以降では解消済み。`#149` PR CI
+/// 指摘対応）への対策として `#[allow(dead_code)]` は保守的に残す（この
+/// crate 内参照追加により quirk 自体が解消したかは 1.88 系での再実測なし
+/// には確認できないため、断定しない）。
 #[allow(dead_code)]
 pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_A_PAD + MMA_BK * MMA_B_PAD) * 2 * MMA_STAGES;
 
@@ -285,7 +332,7 @@ pub const MMA_SHARED_MEM_BYTES: u32 = (MMA_BM * MMA_A_PAD + MMA_BK * MMA_B_PAD) 
 // 環境でも `cargo build` の時点で機械検出できる代替チェック。本ファイル
 // 冒頭コメント「タイル構成」参照）。
 const _: () = assert!(
-    MMA_SHARED_MEM_BYTES <= 49_152,
+    MMA_SHARED_MEM_BYTES <= MMA_STATIC_SMEM_LIMIT_BYTES,
     "kernels_mma::MMA_F16 static shared memory exceeds the 48KiB per-block \
      limit shared by every compute capability"
 );
@@ -461,8 +508,36 @@ extern "C" __global__ void gemm_mma_f16(
     // `validate_mma_alignment` が起動前に必ず通ることに依存しており、
     // `run_f16` 側でこの検証呼び出しを外す・順序を変える場合は本コメント
     // ごと見直すこと。
-    #define LOAD_A_STAGE(stage, k0) \
-        for (int idx = tid; idx < (BM * BK) / 8; idx += blockDim.x) { \
+    // #496: 1 K タイル分の cp.async 発行を warp 内 kstep ループへ分散する
+    // ための添字空間分割。`K_GROUPS`（= `BK / MMA_K`）は下記 kstep ループの
+    // 反復回数（`for (int kstep = 0; kstep < BK / MMA_K; ...)`）と必ず
+    // 一致する（両者とも同一の `#define` 式由来のため取り零しなく整合する。
+    // `MMA_K_STEPS_PER_STAGE >= 2` の Rust 側コンパイル時 assert が
+    // `K_GROUPS >= 2` を実質的に保証する。本ファイル `MMA_K_STEPS_PER_STAGE`
+    // 定数直下のドキュメンテーションコメント参照）。`A_GROUP_CHUNKS`/
+    // `B_GROUP_CHUNKS` は ceil 分割（`(総数 + K_GROUPS - 1) / K_GROUPS`）
+    // のため、`A_CHUNKS`/`B_CHUNKS` が `K_GROUPS` で割り切れない構成
+    // （将来の `BM`/`BN`/`BK` 変更）でも全チャンクが必ずいずれかの
+    // グループに含まれる（最終グループの範囲が `LOAD_*_STAGE_GROUP` 内の
+    // `idx < A_CHUNKS`/`idx < B_CHUNKS` 判定でクランプされるため取り零し・
+    // 二重発行のいずれも生じない）。
+    #define K_GROUPS (BK / MMA_K)
+    #define A_CHUNKS ((BM * BK) / 8)
+    #define B_CHUNKS ((BK * BN) / 8)
+    #define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+    #define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+
+    // #496: グループ `g`（0 <= g < K_GROUPS）が担当するチャンクレンジ
+    // `[g * A_GROUP_CHUNKS, min((g+1) * A_GROUP_CHUNKS, A_CHUNKS))` のみを
+    // 発行する（CUTLASS `copy_tiles_and_advance` の per-group 発行と同旨）。
+    // 境界クランプ（`gr_c`/`gc_c`・16 バイト整列切り下げ）・`valid`（範囲外
+    // チャンクの src-size 0 ゼロ充填）の REQ-8 境界検査ロジックは
+    // `LOAD_A_STAGE`/`LOAD_B_STAGE`（旧・一括発行版）と一切変更していない
+    // （本ファイル冒頭コメント「境界検査」・下記マクロ本体参照）。
+    #define LOAD_A_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * A_GROUP_CHUNKS + tid; \
+             idx < A_CHUNKS && idx < ((g) + 1) * A_GROUP_CHUNKS; \
+             idx += blockDim.x) { \
             int row = idx / (BK / 8); \
             int col0 = (idx % (BK / 8)) * 8; \
             int gr = block_row0 + row; \
@@ -473,8 +548,10 @@ extern "C" __global__ void gemm_mma_f16(
             mma_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * k + gc_c], valid); \
         }
 
-    #define LOAD_B_STAGE(stage, k0) \
-        for (int idx = tid; idx < (BK * BN) / 8; idx += blockDim.x) { \
+    #define LOAD_B_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * B_GROUP_CHUNKS + tid; \
+             idx < B_CHUNKS && idx < ((g) + 1) * B_GROUP_CHUNKS; \
+             idx += blockDim.x) { \
             int row = idx / (BN / 8); \
             int col0 = (idx % (BN / 8)) * 8; \
             int gr = (k0) + row; \
@@ -483,6 +560,21 @@ extern "C" __global__ void gemm_mma_f16(
             int gc_c = gc < n ? gc : (n > 0 ? ((n - 1) / 8) * 8 : 0); \
             int valid = (gr < k && gc < n) ? 16 : 0; \
             mma_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * n + gc_c], valid); \
+        }
+
+    // #496: プロローグ（下記）は K タイル 1 段分をまとめてロードする必要が
+    // あるため、`LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP` を全グループに
+    // ついて呼ぶ薄いラッパーとして再定義する（発行本体は上記 2 マクロの
+    // 単一サイトに集約されたまま。`K_GROUPS` は 2 相当の小さいコンパイル
+    // 時定数のためコンパイラが自動的に展開する）。
+    #define LOAD_A_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_A_STAGE_GROUP(stage, k0, g_); \
+        }
+
+    #define LOAD_B_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_B_STAGE_GROUP(stage, k0, g_); \
         }
 
     // プロローグ: 最初の STAGES-1 タイルをロードし、それぞれ独立した
@@ -529,74 +621,168 @@ extern "C" __global__ void gemm_mma_f16(
         asm volatile("cp.async.wait_group %0;\n" ::"n"(STAGES - 2));
         __syncthreads();
 
-        for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {
-            int a_col = kstep * MMA_K;
-            int b_row = kstep * MMA_K;
+        // #495: A/B フラグメントを 2 面バッファ化する（`a_frag[2][...]`/
+        // `b_frag[2][...]`）。kstep ループの外側（K タイル t ごと）で
+        // 宣言し、下記 warp プロローグ＋ kstep ループ内の先読みが両バッファを
+        // 交互に埋める。CUTLASS `mma_multistage.h` の `PipeState`
+        // （`warp_loaded_frag_A_[2]` 等）と同型（本ファイル冒頭コメント
+        // 「ldmatrix 先読みダブルバッファ」参照）。
+        unsigned a_frag[2][WARP_TILES_M][4];
+        unsigned b_frag[2][WARP_TILES_N][2];
 
-            // #493: A フラグメントを WARP_TILES_M 個（mi = 0..1、半開区間で
-            // 値は 0 と 1 の 2 個）先に
-            // ロードしてレジスタへ保持する。B フラグメント（nj）と合わせて
-            // 4 通りの mma.sync で再利用するレジスタブロッキング（CUTLASS
-            // の `MmaIterations` 2 重ループ・MLX の `MMATile` と同型。本
-            // ファイル冒頭コメント「タイル構成」）。ldmatrix.x4 1 発行が
-            // 16x16（TL/BL/TR/BR の 4 x 8x8）をまとめてロードする点は
-            // 単一タイル構成と同じで、mi ごとに独立した 16x16 領域を読む。
-            unsigned a_frag[WARP_TILES_M][4];
+        // #495: A/B フラグメント 1 個（`mi`/`nj` で指定）を `buf` 面へ
+        // ロードするマクロ（`stage` は cp.async ステージ・`kstep` は K
+        // タイル内の mma ステップ）。#493 時点のループ本体の 1 反復分を
+        // マクロ化したもので、`ldmatrix` の発行箇所自体は A/B 各 1 箇所の
+        // まま（`buf`/`mi`/`nj` 違いで呼び分けるだけ。既存テスト
+        // `mma_f16_source_issues_mma_sync_from_single_loop_site` と同じ
+        // 「ループ化・非コピペ」方針を先読みロードにも適用する）。
+        // ldmatrix.x4 1 発行が 16x16（TL/BL/TR/BR の 4 x 8x8）をまとめて
+        // ロードする点・象限順序（TL/BL/TR/BR。PR #255 レビュー指摘）は
+        // #493 時点と不変。
+        //
+        // マクロを「1 フラグメント単位」に留め、`WARP_TILES_M`/
+        // `WARP_TILES_N` 回のループと `#pragma unroll` を呼び出し側に置く
+        // 設計にしている理由（マクロ内で `for` + `_Pragma("unroll")` を
+        // 完結させない理由）: 本ファイルは NVRTC 構文検証不能環境で書いて
+        // いる（本ファイル冒頭コメント「検証状態」参照）。マクロ内 `for`
+        // ループ＋バックスラッシュ継続＋インライン asm の組み合わせ自体は
+        // 既存 `LOAD_A_STAGE`/`LOAD_B_STAGE` に前例があるが、`_Pragma`
+        // 演算子は本ファイルに前例がなく、NVRTC 上での挙動を実機なしで
+        // 確認できない。一方、呼び出し側の `#pragma unroll` はプリプロ
+        // セッサ済みの実際の文出現位置に置かれるため、既存の
+        // mi/nj 二重ループ（mma.sync 発行側）と同じ形（前例あり・確実）。
+        // このマクロは `unroll` を要求する: `buf`（`cur`/`nxt`）・
+        // `mi`/`nj` はインラインアセンブリの出力オペランド
+        // （`a_frag[buf][mi][...]` 等）の添字であり、レジスタ割り当ては
+        // コンパイル時に確定した添字を要求する（実行時添字だとレジスタを
+        // 選べず local memory へ溢れ、ロード先読み最適化が逆に SMEM
+        // 律速を招く）。呼び出し側で `#pragma unroll` を伴わずにこの
+        // マクロを呼ばないこと。
+        #define LDSM_A_FRAG(buf, stage, kstep, mi) \
+            do { \
+                int a_col_ = (kstep) * MMA_K; \
+                int a_row = warp_row * (MMA_M * WARP_TILES_M) + (mi) * MMA_M; \
+                int a_quad_row = (lane / 8) % 2; \
+                int a_quad_col = (lane / 8) / 2; \
+                int a_row_in_tile = lane % 8; \
+                __half* a_addr = &as_tile[stage] \
+                                          [a_row + a_quad_row * 8 + a_row_in_tile] \
+                                          [a_col_ + a_quad_col * 8]; \
+                unsigned a_smem = (unsigned)__cvta_generic_to_shared(a_addr); \
+                asm volatile( \
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" \
+                    : "=r"(a_frag[buf][mi][0]), "=r"(a_frag[buf][mi][1]), \
+                      "=r"(a_frag[buf][mi][2]), "=r"(a_frag[buf][mi][3]) \
+                    : "r"(a_smem) \
+                ); \
+            } while (0)
+
+        // #493: B フラグメント（16x8。k x n の row-major 格納から `.trans`
+        // ロードで mma の `.col` 要求配置へ変換。本ファイル冒頭コメント
+        // 「命令選定」）。`b_quad`（`lane / 8`）は 0..1 のみ使用（x2）。
+        // B 2 個（`nj = 0..1`）を x4.trans 1 発行へ融合する余地は残るが、
+        // #493 受け入れ基準の「A 2 個・B 2 個を 4 通りで再利用」という
+        // 最小差分に合わせ、ここでは x2.trans を nj ごとに個別発行する
+        // （融合は #495 以降・#496（cp.async issue interleaving）以降の
+        // 最適化余地として引き継ぐ）。
+        #define LDSM_B_FRAG(buf, stage, kstep, nj) \
+            do { \
+                int b_row_ = (kstep) * MMA_K; \
+                int b_col = warp_col * (MMA_N * WARP_TILES_N) + (nj) * MMA_N; \
+                int b_row_in_tile = lane % 8; \
+                int b_quad = lane / 8; \
+                __half* b_addr = &bs_tile[stage] \
+                                          [b_row_ + (b_quad % 2) * 8 + b_row_in_tile] \
+                                          [b_col]; \
+                unsigned b_smem = (unsigned)__cvta_generic_to_shared(b_addr); \
+                asm volatile( \
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n" \
+                    : "=r"(b_frag[buf][nj][0]), "=r"(b_frag[buf][nj][1]) \
+                    : "r"(b_smem) \
+                ); \
+            } while (0)
+
+        // #495 warp プロローグ: kstep=0 のフラグメントをバッファ 0 へ
+        // ロードしてから kstep ループへ入る（CUTLASS `mac_loop_iter` の
+        // ウォームアップ相当）。
 #pragma unroll
-            for (int mi = 0; mi < WARP_TILES_M; ++mi) {
-                int a_row = warp_row * (MMA_M * WARP_TILES_M) + mi * MMA_M;
+        for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+            LDSM_A_FRAG(0, compute_stage, 0, mi);
+        }
+#pragma unroll
+        for (int nj = 0; nj < WARP_TILES_N; ++nj) {
+            LDSM_B_FRAG(0, compute_stage, 0, nj);
+        }
 
-                // A フラグメント（16x16）: ldmatrix.x4（4 個の 8x8 b16 サブ
-                // タイルを 1 命令でロード。本ファイル冒頭コメント「命令選定」）。
-                // ldmatrix.x4 はレーン群 0-7/8-15/16-23/24-31 の順で出力
-                // レジスタ a0/a1/a2/a3 を埋めるが、mma.m16n8k16 が要求する
-                // A フラグメントの象限順序は TL/BL/TR/BR（PTX ISA
-                // mma.m16n8k16 A フラグメントレイアウト）である。行を
-                // レーン群の下位ビット、列を上位ビットへ割り当てることで
-                // a0=TL, a1=BL, a2=TR, a3=BR の順を作る（PR #255 レビュー
-                // 指摘。逆に取ると a1/a2 に TR/BL が入れ替わって載り、
-                // K/M ハーフが入れ替わった不正な結果になる）。
-                int a_quad_row = (lane / 8) % 2; // 0,1,0,1 -> TL,BL,TR,BR の行
-                int a_quad_col = (lane / 8) / 2; // 0,0,1,1 -> TL,BL,TR,BR の列
-                int a_row_in_tile = lane % 8;
-                __half* a_addr = &as_tile[compute_stage]
-                                          [a_row + a_quad_row * 8 + a_row_in_tile]
-                                          [a_col + a_quad_col * 8];
-                unsigned a_smem = (unsigned)__cvta_generic_to_shared(a_addr);
-                asm volatile(
-                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
-                    : "=r"(a_frag[mi][0]), "=r"(a_frag[mi][1]),
-                      "=r"(a_frag[mi][2]), "=r"(a_frag[mi][3])
-                    : "r"(a_smem)
-                );
+        // #495: kstep ループ自体を `#pragma unroll` する。`BK / MMA_K` は
+        // コンパイル時定数式（`#define` 由来）のためトリップ回数は既知
+        // であり、これにより `cur`/`nxt`（`kstep % 2`/`(kstep+1) % 2`）が
+        // コンパイル時定数へ畳み込まれる。上記 `LDSM_A_FRAG`/`LDSM_B_FRAG`
+        // マクロ直前のコメントの通り、これはフラグメント配列のインライン
+        // asm 出力オペランド添字（`a_frag[cur][mi][...]` 等）がコンパイル
+        // 時定数であることを要求するための必須の pragma であり、
+        // 省略すると local memory 溢れによる性能後退を招く（cosmetic な
+        // pragma ではない）。
+#pragma unroll
+        for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {
+            int cur = kstep % 2;
+            int nxt = (kstep + 1) % 2;
+
+            // #495: 次段（kstep+1）のフラグメントを、現在段（kstep）の
+            // mma.sync 発行前に先読みしてバッファ `nxt` へロードする。
+            // これにより `ldmatrix` の SMEM→レジスタロードレイテンシが
+            // 直後の mma.sync 系列とオーバーラップする（ソフトウェア
+            // パイプライン化。本ファイル冒頭コメント「ldmatrix 先読み
+            // ダブルバッファ」参照）。
+            //
+            // タイル境界を跨ぐ先読み（CUTLASS の `(warp_mma_k+1) % K`
+            // wrap-around で次タイルの kstep=0 まで読む方式）は**採用
+            // しない**（意図的な縮小。#495 実装計画 §3.3）。理由:
+            // 本カーネルのループ内 `cp.async.wait_group (STAGES-2)` は
+            // イテレーション t の時点でタイル t のグループ完了までしか
+            // 保証しない（本ファイル `MMA_STAGES` 定数直下コメント
+            // 「正しさ」参照）。タイル t+1 の SMEM 完了保証前に読み出す
+            // クロスタイル先読みは wait/sync 配置の大規模再構成を要し、
+            // NVRTC 構文検証不能な本環境ではリスクが高いため、タイル内
+            // 先読みに限定した（残余の最適化余地として
+            // `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md` に記録）。
+            if (kstep + 1 < BK / MMA_K) {
+#pragma unroll
+                for (int mi = 0; mi < WARP_TILES_M; ++mi) {
+                    LDSM_A_FRAG(nxt, compute_stage, kstep + 1, mi);
+                }
+#pragma unroll
+                for (int nj = 0; nj < WARP_TILES_N; ++nj) {
+                    LDSM_B_FRAG(nxt, compute_stage, kstep + 1, nj);
+                }
             }
 
-            // #493: B フラグメントを WARP_TILES_N 個（nj = 0..1、半開区間で
-            // 値は 0 と 1 の 2 個）先に
-            // ロードする（A と同じレジスタブロッキング方針。B 2 個を
-            // x4.trans 1 発行へ融合する余地は残るが、受け入れ基準の
-            // 「A 2 個・B 2 個を 4 通りで再利用」という最小差分に合わせ
-            // ここでは x2.trans を nj ごとに個別発行する。融合は B-3 以降の
-            // 最適化余地としてここに記録する）。
-            unsigned b_frag[WARP_TILES_N][2];
-#pragma unroll
-            for (int nj = 0; nj < WARP_TILES_N; ++nj) {
-                int b_col = warp_col * (MMA_N * WARP_TILES_N) + nj * MMA_N;
-
-                // B フラグメント（16x8。k x n の row-major 格納から `.trans`
-                // ロードで mma の `.col` 要求配置へ変換。本ファイル冒頭
-                // コメント「命令選定」）。
-                int b_row_in_tile = lane % 8;
-                int b_quad = lane / 8; // 0..1 のみ使用（x2）
-                __half* b_addr = &bs_tile[compute_stage]
-                                          [b_row + (b_quad % 2) * 8 + b_row_in_tile]
-                                          [b_col];
-                unsigned b_smem = (unsigned)__cvta_generic_to_shared(b_addr);
-                asm volatile(
-                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\n"
-                    : "=r"(b_frag[nj][0]), "=r"(b_frag[nj][1])
-                    : "r"(b_smem)
-                );
+            // #496: cp.async issue interleaving。1 K タイル分の次段ロード
+            // 発行を一括せず、kstep ごとにグループ 1 個分（`g = kstep`。
+            // `K_GROUPS == BK / MMA_K` が kstep ループの反復回数と一致する
+            // ため全グループが過不足なく発行される）だけ発行し、直後の
+            // mma.sync 系列とオーバーラップさせる（CUTLASS
+            // `mma_multistage.h` が `warp_mma` 呼び出しと
+            // `copy_tiles_and_advance` を交互に置く配置と同旨。本ファイル
+            // 冒頭コメント「cp.async issue interleaving」参照）。
+            //
+            // 同期の正しさ: 発行先 `load_stage` の SMEM ステージは、
+            // 前イテレーション（K タイル t-1）末尾の `__syncthreads()`
+            // 通過後は本イテレーションの ldmatrix（`compute_stage` を読む。
+            // `load_stage != compute_stage` は STAGES>=2 で常に成立）から
+            // 一切読まれない。したがって発行位置を旧来のループ末尾一括
+            // 発行から kstep ループ内へ前倒ししても、書き込みと読み出しの
+            // ハザードは生じない（追加の `__syncthreads()` は不要）。
+            // `next_tile < num_k_tiles` ガードは分割前と同じ意味（K が
+            // 浅い形状での範囲外ステージロード抑止。#492 不変条件）を
+            // 各グループ発行に対して個別に適用する。`cp.async.commit_group`
+            // 自体はループ末尾・無条件のまま動かさない（本関数末尾の
+            // コメント参照。「1 イテレーション = 必ず 1 commit」不変条件・
+            // `wait_group (STAGES-2)` の正しさ論証を無傷で維持するため）。
+            if (next_tile < num_k_tiles) {
+                LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);
+                LOAD_B_STAGE_GROUP(load_stage, next_tile * BK, kstep);
             }
 
             // #493: mi x nj の 4 通りで mma.sync を発行し d[mi][nj] へ
@@ -609,7 +795,11 @@ extern "C" __global__ void gemm_mma_f16(
             // `64x128`〉は warp あたりの担当範囲・レジスタブロッキング
             // 係数〈`WARP_TILES_M`/`WARP_TILES_N`〉自体には影響せず、
             // ブロック全体の warp 数〈`MMA_WARPS_M`/`MMA_WARPS_N`〉のみを
-            // 変える）。
+            // 変える）。#495 でフラグメントソースを `a_frag[cur]`/
+            // `b_frag[cur]` へ切り替えた以外、発行箇所・オペランド順は
+            // #493/#494 時点と不変（先読みタイミングの変更は mma.sync の
+            // 発行順序・オペランド値を変えないため、出力は bit 一致。
+            // 本ファイル冒頭コメント「ldmatrix 先読みダブルバッファ」参照）。
 #pragma unroll
             for (int mi = 0; mi < WARP_TILES_M; ++mi) {
 #pragma unroll
@@ -619,9 +809,9 @@ extern "C" __global__ void gemm_mma_f16(
                         "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
                         : "=f"(d[mi][nj][0]), "=f"(d[mi][nj][1]),
                           "=f"(d[mi][nj][2]), "=f"(d[mi][nj][3])
-                        : "r"(a_frag[mi][0]), "r"(a_frag[mi][1]),
-                          "r"(a_frag[mi][2]), "r"(a_frag[mi][3]),
-                          "r"(b_frag[nj][0]), "r"(b_frag[nj][1]),
+                        : "r"(a_frag[cur][mi][0]), "r"(a_frag[cur][mi][1]),
+                          "r"(a_frag[cur][mi][2]), "r"(a_frag[cur][mi][3]),
+                          "r"(b_frag[cur][nj][0]), "r"(b_frag[cur][nj][1]),
                           "f"(d[mi][nj][0]), "f"(d[mi][nj][1]),
                           "f"(d[mi][nj][2]), "f"(d[mi][nj][3])
                     );
@@ -629,14 +819,18 @@ extern "C" __global__ void gemm_mma_f16(
             }
         }
 
-        // #492: commit をループ末尾で無条件発行する（プロローグと同じ
-        // 「1 イテレーション = 必ず 1 commit」不変条件。`next_tile` が
-        // 範囲外のタイル、つまりループ末尾に近い反復では、ロードのみを
-        // `if` で抑止し空グループを commit する）。
-        if (next_tile < num_k_tiles) {
-            LOAD_A_STAGE(load_stage, next_tile * BK);
-            LOAD_B_STAGE(load_stage, next_tile * BK);
-        }
+        #undef LDSM_A_FRAG
+        #undef LDSM_B_FRAG
+
+        // #492/#496: commit をループ末尾で無条件発行する（プロローグと
+        // 同じ「1 イテレーション = 必ず 1 commit」不変条件）。#496 で
+        // 次段タイルのロード発行自体は kstep ループ内へ分散したため
+        // （上記「cp.async issue interleaving」コメント参照）、ここには
+        // commit のみが残る。分割後も全グループの発行が同一イテレーション
+        // 内で完了してから commit されることに変わりはないため、
+        // `wait_group (STAGES-2)` の正しさ論証（本ファイル `MMA_STAGES`
+        // 定数直下のドキュメンテーションコメント「正しさ」参照）は無傷で
+        // 成立する。
         asm volatile("cp.async.commit_group;\n");
         __syncthreads();
     }
@@ -654,6 +848,13 @@ extern "C" __global__ void gemm_mma_f16(
 
     #undef LOAD_A_STAGE
     #undef LOAD_B_STAGE
+    #undef LOAD_A_STAGE_GROUP
+    #undef LOAD_B_STAGE_GROUP
+    #undef A_GROUP_CHUNKS
+    #undef B_GROUP_CHUNKS
+    #undef A_CHUNKS
+    #undef B_CHUNKS
+    #undef K_GROUPS
 
     // REQ-8: エピローグの guarded store。mma.m16n8k16 の C/D フラグメント
     // レーン対応（groupID/threadID_in_group。本ファイル冒頭コメント
@@ -941,13 +1142,13 @@ mod tests {
             let shared_mem_bytes = (MMA_BM * MMA_A_PAD + MMA_BK * MMA_B_PAD) * 2 * stages;
             if stages == 2 {
                 assert!(
-                    shared_mem_bytes <= 49_152,
+                    shared_mem_bytes <= MMA_STATIC_SMEM_LIMIT_BYTES,
                     "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB を \
                      超えています（stages=2 はパディング後も上限内であるはず）"
                 );
             } else {
                 assert!(
-                    shared_mem_bytes > 49_152,
+                    shared_mem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES,
                     "stages={stages}: 共有メモリ使用量 {shared_mem_bytes}B が 48KiB \
                      以下です（#498 のパディング後は stages=4 は BM/BN 縮小なしでは \
                      不成立になるはずだが、上限超過が検出されなかった）"
@@ -1006,12 +1207,16 @@ mod tests {
     /// #493 受け入れ基準（回帰防止）: warp あたり 2x2 レジスタブロッキング
     /// 構造（アキュムレータ配列・A/B フラグメント配列・mi/nj 2 重ループの
     /// mma.sync 発行）がソース文字列から失われていないことをロックする。
+    /// フラグメント配列の宣言 needle は #495（ldmatrix 先読みダブルバッファ）
+    /// で 2 面バッファ化した宣言形（`a_frag[2][...]`/`b_frag[2][...]`）へ
+    /// 更新済み（本ファイル冒頭コメント「ldmatrix 先読みダブルバッファ」
+    /// 参照）。
     #[test]
     fn mma_f16_source_uses_2x2_register_blocking_structure() {
         for needle in [
             "float d[WARP_TILES_M][WARP_TILES_N][4] = {};",
-            "unsigned a_frag[WARP_TILES_M][4];",
-            "unsigned b_frag[WARP_TILES_N][2];",
+            "unsigned a_frag[2][WARP_TILES_M][4];",
+            "unsigned b_frag[2][WARP_TILES_N][2];",
             "for (int mi = 0; mi < WARP_TILES_M; ++mi) {",
             "for (int nj = 0; nj < WARP_TILES_N; ++nj) {",
         ] {
@@ -1020,6 +1225,140 @@ mod tests {
                 "MMA_F16 に #493 の 2x2 レジスタブロッキング構造 `{needle}` が見つかりません"
             );
         }
+    }
+
+    /// #495 受け入れ基準（回帰防止）: A/B フラグメントの 2 面バッファ化
+    /// 宣言・warp プロローグ（kstep=0 の先読みロードが kstep ループの
+    /// 手前にある位置関係）・kstep+1 段の先読みガード（`kstep + 1 < BK /
+    /// MMA_K`。範囲外 kstep の SMEM 読み出しを発行しないための境界検査）・
+    /// kstep ループ自体の `#pragma unroll`（`cur`/`nxt` をコンパイル時
+    /// 定数へ畳み込むために必須。`LDSM_A_FRAG`/`LDSM_B_FRAG` マクロ直前の
+    /// コメント参照）がソース文字列から失われていないことをロックする
+    /// （本ファイル冒頭コメント「ldmatrix 先読みダブルバッファ」参照）。
+    #[test]
+    fn mma_f16_source_uses_ldmatrix_double_buffer_structure() {
+        for needle in [
+            "unsigned a_frag[2][WARP_TILES_M][4];",
+            "unsigned b_frag[2][WARP_TILES_N][2];",
+            "#define LDSM_A_FRAG(buf, stage, kstep, mi)",
+            "#define LDSM_B_FRAG(buf, stage, kstep, nj)",
+            "LDSM_A_FRAG(0, compute_stage, 0, mi);",
+            "LDSM_B_FRAG(0, compute_stage, 0, nj);",
+            "if (kstep + 1 < BK / MMA_K) {",
+            "LDSM_A_FRAG(nxt, compute_stage, kstep + 1, mi);",
+            "LDSM_B_FRAG(nxt, compute_stage, kstep + 1, nj);",
+        ] {
+            assert!(
+                MMA_F16.contains(needle),
+                "MMA_F16 に #495 のダブルバッファ構造 `{needle}` が見つかりません"
+            );
+        }
+
+        // warp プロローグ（kstep=0 のロード）は kstep ループの手前に
+        // 位置しなければならない（`mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain`
+        // と同じ `find` インデックス比較方式）。
+        let prologue_pos = MMA_F16
+            .find("LDSM_A_FRAG(0, compute_stage, 0, mi);")
+            .expect("MMA_F16 に warp プロローグの LDSM_A_FRAG(0, ...) が見つかりません");
+        let kstep_loop_pos = MMA_F16
+            .find("for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {")
+            .expect("MMA_F16 に kstep ループが見つかりません");
+        assert!(
+            prologue_pos < kstep_loop_pos,
+            "MMA_F16 の warp プロローグ（kstep=0 先読み）が kstep ループより \
+             後ろにあります（プロローグは kstep ループの手前で発行される必要がある）"
+        );
+
+        // 先読みガードは kstep ループの内側（プロローグより後ろ）にある
+        // こと。
+        let guard_pos = MMA_F16
+            .find("if (kstep + 1 < BK / MMA_K) {")
+            .expect("MMA_F16 に先読みガードが見つかりません");
+        assert!(
+            guard_pos > kstep_loop_pos,
+            "MMA_F16 の先読みガード（kstep + 1 < BK / MMA_K）が kstep ループより \
+             前にあります（kstep ループ内で発行される必要がある）"
+        );
+
+        // kstep ループ直前に `#pragma unroll` があること（`cur`/`nxt` の
+        // コンパイル時定数畳み込みに必須。省略は local memory 溢れに
+        // よる性能後退へ直結するため、cosmetic な pragma 除去として
+        // 見逃さないよう隣接した 1 文字列として検査する）。
+        assert!(
+            MMA_F16.contains(
+                "#pragma unroll\n        for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {"
+            ),
+            "MMA_F16 の kstep ループ直前に #pragma unroll が見つかりません \
+             （cur/nxt のコンパイル時定数畳み込みに必須）"
+        );
+    }
+
+    /// #496 受け入れ基準（回帰防止）: cp.async issue interleaving のグループ
+    /// 版マクロ（`LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP`）・添字空間分割
+    /// の `#define`（`K_GROUPS`/`A_CHUNKS`/`B_CHUNKS`/`A_GROUP_CHUNKS`/
+    /// `B_GROUP_CHUNKS`）がソース文字列から失われていないこと、グループ
+    /// 発行が kstep ループの内側（ldmatrix 先読みガードより後ろ・mma.sync
+    /// 発行より前）にあること、`cp.async.commit_group` がループ末尾・
+    /// 無条件のまま動いていないこと（#492 不変条件の維持）をロックする
+    /// （本ファイル冒頭コメント「cp.async issue interleaving」参照）。
+    #[test]
+    fn mma_f16_source_interleaves_cp_async_issue_into_kstep_loop() {
+        for needle in [
+            "#define K_GROUPS (BK / MMA_K)",
+            "#define A_CHUNKS ((BM * BK) / 8)",
+            "#define B_CHUNKS ((BK * BN) / 8)",
+            "#define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)",
+            "#define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)",
+            "#define LOAD_A_STAGE_GROUP(stage, k0, g)",
+            "#define LOAD_B_STAGE_GROUP(stage, k0, g)",
+            "LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);",
+            "LOAD_B_STAGE_GROUP(load_stage, next_tile * BK, kstep);",
+        ] {
+            assert!(
+                MMA_F16.contains(needle),
+                "MMA_F16 に #496 の cp.async issue interleaving 構造 `{needle}` が見つかりません"
+            );
+        }
+
+        // グループ発行（分散発行サイト）は kstep ループの内側にあること
+        // （kstep ループ開始より後ろ）。
+        let kstep_loop_pos = MMA_F16
+            .find("for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {")
+            .expect("MMA_F16 に kstep ループが見つかりません");
+        let group_issue_pos = MMA_F16
+            .find("LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);")
+            .expect("MMA_F16 に分散発行サイト（LOAD_A_STAGE_GROUP 呼び出し）が見つかりません");
+        assert!(
+            group_issue_pos > kstep_loop_pos,
+            "MMA_F16 の cp.async 分散発行サイトが kstep ループより前にあります \
+             （kstep ループ内で発行される必要がある）"
+        );
+
+        // グループ発行は ldmatrix 先読みガード（kstep+1 段の先読み）より
+        // 後ろ・mma.sync 発行（アセンブリ文字列リテラル）より前にあること
+        // （ldmatrix 先読みの直後・Tensor Core 演算の直前という配置。
+        // 本ファイル冒頭コメント「cp.async issue interleaving」参照）。
+        let prefetch_guard_pos = MMA_F16
+            .find("if (kstep + 1 < BK / MMA_K) {")
+            .expect("MMA_F16 に先読みガードが見つかりません");
+        let mma_sync_pos = MMA_F16
+            .find("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32")
+            .expect("MMA_F16 に mma.sync 発行が見つかりません");
+        assert!(
+            group_issue_pos > prefetch_guard_pos && group_issue_pos < mma_sync_pos,
+            "MMA_F16 の cp.async 分散発行サイトが「ldmatrix 先読みガードの後・\
+             mma.sync 発行の前」という配置になっていません"
+        );
+
+        // ループ末尾の commit_group は無条件のまま（#492 不変条件）:
+        // 直前に旧来の一括ロード呼び出し
+        // `LOAD_A_STAGE(load_stage, next_tile * BK);` が存在しないこと
+        // （分割前はここにあったが #496 で kstep ループ内へ移設済み）。
+        assert!(
+            !MMA_F16.contains("LOAD_A_STAGE(load_stage, next_tile * BK);"),
+            "MMA_F16 にループ末尾の旧・一括ロード呼び出しが残っています \
+             （#496 で kstep ループ内の分散発行へ置き換わっているはず）"
+        );
     }
 
     /// #493 受け入れ基準: `mma.sync` 命令の発行箇所（アセンブリ文字列
@@ -1055,6 +1394,34 @@ mod tests {
         assert!(
             store_pos > loop_pos,
             "MMA_F16 のエピローグ guarded store が mi/nj ループの外側にあります"
+        );
+    }
+
+    /// #501 形状横断回帰テストの前提固定: `crates/backend-cuda/tests/
+    /// cpu_cuda_mma_parity.rs::mma_f16_matches_reference_across_shapes` の
+    /// 形状表（タイル倍数・タイル±端数の分類コメント）は
+    /// `MMA_BM=64`/`MMA_BN=128`/`MMA_BK=32`（#494 時点の値）を前提に
+    /// 選定されている。本テストはこの前提値を機械的にロックし、将来の
+    /// ブロックタイル変更（`docs/perf/cuda-gemm-mma-block-tile.md` の
+    /// 再候補選定等）で `MMA_BM`/`MMA_BN`/`MMA_BK` が変わった際に、
+    /// 形状表の分類コメントが陳腐化する（例: 65 が「BM+1」でなくなる）
+    /// ことをこのテストの failure で気付けるようにする。
+    /// `mma_tile_constants_match_kernel_source_defines`（本ファイル）が
+    /// CUDA ソース側 `#define` との一致を検査するのに対し、本テストは
+    /// Rust 側定数の具体値そのものを固定する点で異なる。
+    #[test]
+    fn mma_tile_constants_pinned_for_shape_table_cross_reference() {
+        assert_eq!(
+            MMA_BM, 64,
+            "MMA_BM が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
+        );
+        assert_eq!(
+            MMA_BN, 128,
+            "MMA_BN が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
+        );
+        assert_eq!(
+            MMA_BK, 32,
+            "MMA_BK が変更された場合は cpu_cuda_mma_parity.rs の形状表分類コメントを見直すこと"
         );
     }
 }

@@ -154,6 +154,16 @@ DeepGEMM Hopper（SM90）定数と sm_121 実測値の対比表。**後続タス
 | L1 帯域（per-SM per-cycle 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（スペック値＋出典欄参照。per-SM） |
 | SM 数 | Hopper 固有（機種依存） | — | 未実測 |
 
+**C-8（#521）注記**: 本表の SMEM 容量は「未実測」のままであり、実測値が無い状態で DeepGEMM の
+Hopper 固有値（232448）を sm_121 向けに流用・推定で定数化することはしない。C-8 の
+`derive_pipeline_stages`（`crates/backend-cuda/src/nvrtc.rs`）は SMEM 容量をコード定数として
+持たず、`gemm_auto::derive_stages_for_device` が `device.context().attribute(
+CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)` で**実行時に**取得した値を（静的
+`__shared__` 構成の per-block 上限 49,152 バイトでクランプしたうえで）渡す方式を採る。sm_121
+実機で本表の値が実測記入された際は、実機上で `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`
+の取得値と本表の記入値が一致することを確認すること（不一致は属性クエリ側かドキュメント記載側の
+いずれかに誤りがあることを示す）。
+
 ## 限界・注意
 
 - **L1 帯域は本バイナリでは実測しない**: 1 SM を単独占有して L1 のみを計測する信頼できるマイクロベンチは
