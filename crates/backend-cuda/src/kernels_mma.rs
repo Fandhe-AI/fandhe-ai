@@ -76,9 +76,30 @@
 //! Spark GB10）実機属性は未実測のため候補判断は全 compute capability
 //! 共通の保証値ベースであり、実機での再確認は #502 へ引き継ぐ）。
 //!
-//! cp.async issue interleaving・XOR swizzle は引き続き後続（知見は
-//! `docs/cuda-tensor-core-knowledge.md`〈#65・TASK-11.1f〉に集約済み。
-//! #496 以降のスコープとして引き継ぐ）。
+//! cp.async issue interleaving は #496（GEMM 性能改善ツリー #479 →
+//! Phase 2 親 #490 の B-5）で実装済み。CUTLASS `mma_multistage.h` の
+//! `kAccessesPerGroupA/B`（`AsyncCopyIterationsPerStage` を
+//! `kWarpGemmIterations` 個へ分割発行する方式）と同型の技法を、本
+//! カーネルのチャンク添字空間分割として翻案する: 1 K タイル分の
+//! `cp.async` 発行を `K_GROUPS`（= `BK / MMA_K`。kstep ループの反復回数と
+//! 一致）個の連続チャンクレンジへ分割し、各 kstep の ldmatrix 先読み後・
+//! mma.sync 発行前にレンジ 1 個分を発行する（`LOAD_A_STAGE_GROUP`/
+//! `LOAD_B_STAGE_GROUP` マクロ直前のコメント参照）。従来はループ末尾で
+//! 次段タイルの `cp.async` を一括発行していたため発行コストが K タイル
+//! 境界の 1 点に集中していたが、本変更により warp 内 mma ループへ発行が
+//! 分散され Tensor Core 演算とオーバーラップする。`cp.async.commit_group`
+//! の位置（ループ末尾・無条件）・「1 イテレーション = 必ず 1 commit」
+//! 不変条件（#492）は変更しない（分割後も `wait_group (STAGES-2)` の
+//! 正しさ論証がそのまま成立する。本ファイル `MMA_STAGES` 定数直下の
+//! ドキュメンテーションコメント参照）。発行タイミングの変更はコピー
+//! されるデータ・`mma.sync` の発行順序・オペランド値を変えないため、
+//! 出力は #495 時点と bit 一致（parity 非後退契約は
+//! `tests/parity_nonregression.rs` が機械検査。tolerance・fixture は
+//! 変更なし）。未実測（実機 NVRTC 非搭載環境のため。本ファイル冒頭
+//! コメント「検証状態」参照）: 実測記録は
+//! `docs/perf/cuda-gemm-mma-cp-async-interleaving.md` を参照。
+//!
+//! XOR swizzle は引き続き不採用（下記「XOR swizzle」節参照）。
 //!
 //! ldmatrix 先読みダブルバッファは #495（GEMM 性能改善ツリー #479 →
 //! Phase 2 親 #490 の B-4）で実装済み。warp レベルの kstep ループ内で
@@ -582,7 +603,7 @@ fn validate_mma_kernel_config(cfg: &MmaKernelConfig) -> Result<(), CudaError> {
         .and_then(|sum| sum.checked_mul(2))
         .and_then(|v| v.checked_mul(cfg.stages))
         .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
-    if smem_bytes > 49_152 {
+    if smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES {
         return Err(invalid(format!(
             "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit"
         )));
@@ -1083,8 +1104,36 @@ extern "C" __global__ void gemm_mma_f16(
     // `validate_mma_alignment` が起動前に必ず通ることに依存しており、
     // `run_f16` 側でこの検証呼び出しを外す・順序を変える場合は本コメント
     // ごと見直すこと。
-    #define LOAD_A_STAGE(stage, k0) \
-        for (int idx = tid; idx < (BM * BK) / 8; idx += blockDim.x) { \
+    // #496: 1 K タイル分の cp.async 発行を warp 内 kstep ループへ分散する
+    // ための添字空間分割。`K_GROUPS`（= `BK / MMA_K`）は下記 kstep ループの
+    // 反復回数（`for (int kstep = 0; kstep < BK / MMA_K; ...)`）と必ず
+    // 一致する（両者とも同一の `#define` 式由来のため取り零しなく整合する。
+    // `MMA_K_STEPS_PER_STAGE >= 2` の Rust 側コンパイル時 assert が
+    // `K_GROUPS >= 2` を実質的に保証する。本ファイル `MMA_K_STEPS_PER_STAGE`
+    // 定数直下のドキュメンテーションコメント参照）。`A_GROUP_CHUNKS`/
+    // `B_GROUP_CHUNKS` は ceil 分割（`(総数 + K_GROUPS - 1) / K_GROUPS`）
+    // のため、`A_CHUNKS`/`B_CHUNKS` が `K_GROUPS` で割り切れない構成
+    // （将来の `BM`/`BN`/`BK` 変更）でも全チャンクが必ずいずれかの
+    // グループに含まれる（最終グループの範囲が `LOAD_*_STAGE_GROUP` 内の
+    // `idx < A_CHUNKS`/`idx < B_CHUNKS` 判定でクランプされるため取り零し・
+    // 二重発行のいずれも生じない）。
+    #define K_GROUPS (BK / MMA_K)
+    #define A_CHUNKS ((BM * BK) / 8)
+    #define B_CHUNKS ((BK * BN) / 8)
+    #define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+    #define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+
+    // #496: グループ `g`（0 <= g < K_GROUPS）が担当するチャンクレンジ
+    // `[g * A_GROUP_CHUNKS, min((g+1) * A_GROUP_CHUNKS, A_CHUNKS))` のみを
+    // 発行する（CUTLASS `copy_tiles_and_advance` の per-group 発行と同旨）。
+    // 境界クランプ（`gr_c`/`gc_c`・16 バイト整列切り下げ）・`valid`（範囲外
+    // チャンクの src-size 0 ゼロ充填）の REQ-8 境界検査ロジックは
+    // `LOAD_A_STAGE`/`LOAD_B_STAGE`（旧・一括発行版）と一切変更していない
+    // （本ファイル冒頭コメント「境界検査」・下記マクロ本体参照）。
+    #define LOAD_A_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * A_GROUP_CHUNKS + tid; \
+             idx < A_CHUNKS && idx < ((g) + 1) * A_GROUP_CHUNKS; \
+             idx += blockDim.x) { \
             int row = idx / (BK / 8); \
             int col0 = (idx % (BK / 8)) * 8; \
             int gr = block_row0 + row; \
@@ -1095,8 +1144,10 @@ extern "C" __global__ void gemm_mma_f16(
             mma_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * DIM_K + gc_c], valid); \
         }
 
-    #define LOAD_B_STAGE(stage, k0) \
-        for (int idx = tid; idx < (BK * BN) / 8; idx += blockDim.x) { \
+    #define LOAD_B_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * B_GROUP_CHUNKS + tid; \
+             idx < B_CHUNKS && idx < ((g) + 1) * B_GROUP_CHUNKS; \
+             idx += blockDim.x) { \
             int row = idx / (BN / 8); \
             int col0 = (idx % (BN / 8)) * 8; \
             int gr = (k0) + row; \
@@ -1105,6 +1156,21 @@ extern "C" __global__ void gemm_mma_f16(
             int gc_c = gc < DIM_N ? gc : (DIM_N > 0 ? ((DIM_N - 1) / 8) * 8 : 0); \
             int valid = (gr < DIM_K && gc < DIM_N) ? 16 : 0; \
             mma_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * DIM_N + gc_c], valid); \
+        }
+
+    // #496: プロローグ（下記）は K タイル 1 段分をまとめてロードする必要が
+    // あるため、`LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP` を全グループに
+    // ついて呼ぶ薄いラッパーとして再定義する（発行本体は上記 2 マクロの
+    // 単一サイトに集約されたまま。`K_GROUPS` は 2 相当の小さいコンパイル
+    // 時定数のためコンパイラが自動的に展開する）。
+    #define LOAD_A_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_A_STAGE_GROUP(stage, k0, g_); \
+        }
+
+    #define LOAD_B_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_B_STAGE_GROUP(stage, k0, g_); \
         }
 
     // プロローグ: 最初の STAGES-1 タイルをロードし、それぞれ独立した
@@ -1288,6 +1354,33 @@ extern "C" __global__ void gemm_mma_f16(
                 }
             }
 
+            // #496: cp.async issue interleaving。1 K タイル分の次段ロード
+            // 発行を一括せず、kstep ごとにグループ 1 個分（`g = kstep`。
+            // `K_GROUPS == BK / MMA_K` が kstep ループの反復回数と一致する
+            // ため全グループが過不足なく発行される）だけ発行し、直後の
+            // mma.sync 系列とオーバーラップさせる（CUTLASS
+            // `mma_multistage.h` が `warp_mma` 呼び出しと
+            // `copy_tiles_and_advance` を交互に置く配置と同旨。本ファイル
+            // 冒頭コメント「cp.async issue interleaving」参照）。
+            //
+            // 同期の正しさ: 発行先 `load_stage` の SMEM ステージは、
+            // 前イテレーション（K タイル t-1）末尾の `__syncthreads()`
+            // 通過後は本イテレーションの ldmatrix（`compute_stage` を読む。
+            // `load_stage != compute_stage` は STAGES>=2 で常に成立）から
+            // 一切読まれない。したがって発行位置を旧来のループ末尾一括
+            // 発行から kstep ループ内へ前倒ししても、書き込みと読み出しの
+            // ハザードは生じない（追加の `__syncthreads()` は不要）。
+            // `next_tile < num_k_tiles` ガードは分割前と同じ意味（K が
+            // 浅い形状での範囲外ステージロード抑止。#492 不変条件）を
+            // 各グループ発行に対して個別に適用する。`cp.async.commit_group`
+            // 自体はループ末尾・無条件のまま動かさない（本関数末尾の
+            // コメント参照。「1 イテレーション = 必ず 1 commit」不変条件・
+            // `wait_group (STAGES-2)` の正しさ論証を無傷で維持するため）。
+            if (next_tile < num_k_tiles) {
+                LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);
+                LOAD_B_STAGE_GROUP(load_stage, next_tile * BK, kstep);
+            }
+
             // #493: mi x nj の 4 通りで mma.sync を発行し d[mi][nj] へ
             // アキュムレートする。同一出力タイルあたりの ldmatrix 発行
             // 回数は、単一タイル構成（1 warp = 16x8 タイル 1 個）の
@@ -1325,14 +1418,15 @@ extern "C" __global__ void gemm_mma_f16(
         #undef LDSM_A_FRAG
         #undef LDSM_B_FRAG
 
-        // #492: commit をループ末尾で無条件発行する（プロローグと同じ
-        // 「1 イテレーション = 必ず 1 commit」不変条件。`next_tile` が
-        // 範囲外のタイル、つまりループ末尾に近い反復では、ロードのみを
-        // `if` で抑止し空グループを commit する）。
-        if (next_tile < num_k_tiles) {
-            LOAD_A_STAGE(load_stage, next_tile * BK);
-            LOAD_B_STAGE(load_stage, next_tile * BK);
-        }
+        // #492/#496: commit をループ末尾で無条件発行する（プロローグと
+        // 同じ「1 イテレーション = 必ず 1 commit」不変条件）。#496 で
+        // 次段タイルのロード発行自体は kstep ループ内へ分散したため
+        // （上記「cp.async issue interleaving」コメント参照）、ここには
+        // commit のみが残る。分割後も全グループの発行が同一イテレーション
+        // 内で完了してから commit されることに変わりはないため、
+        // `wait_group (STAGES-2)` の正しさ論証（本ファイル `MMA_STAGES`
+        // 定数直下のドキュメンテーションコメント「正しさ」参照）は無傷で
+        // 成立する。
         asm volatile("cp.async.commit_group;\n");
         __syncthreads();
     }
@@ -1350,6 +1444,13 @@ extern "C" __global__ void gemm_mma_f16(
 
     #undef LOAD_A_STAGE
     #undef LOAD_B_STAGE
+    #undef LOAD_A_STAGE_GROUP
+    #undef LOAD_B_STAGE_GROUP
+    #undef A_GROUP_CHUNKS
+    #undef B_GROUP_CHUNKS
+    #undef A_CHUNKS
+    #undef B_CHUNKS
+    #undef K_GROUPS
 
     // REQ-8: エピローグの guarded store。mma.m16n8k16 の C/D フラグメント
     // レーン対応（groupID/threadID_in_group。本ファイル冒頭コメント
@@ -2219,6 +2320,81 @@ mod tests {
             ),
             "mma_f16_source() の kstep ループ直前に #pragma unroll が見つかりません \
              （cur/nxt のコンパイル時定数畳み込みに必須）"
+        );
+    }
+
+    /// #496 受け入れ基準（回帰防止）: cp.async issue interleaving のグループ
+    /// 版マクロ（`LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP`）・添字空間分割
+    /// の `#define`（`K_GROUPS`/`A_CHUNKS`/`B_CHUNKS`/`A_GROUP_CHUNKS`/
+    /// `B_GROUP_CHUNKS`）がソース文字列から失われていないこと、グループ
+    /// 発行が kstep ループの内側（ldmatrix 先読みガードより後ろ・mma.sync
+    /// 発行より前）にあること、`cp.async.commit_group` がループ末尾・
+    /// 無条件のまま動いていないこと（#492 不変条件の維持）をロックする
+    /// （本ファイル冒頭コメント「cp.async issue interleaving」参照）。
+    ///
+    /// イシュー #516 でテンプレート展開へ移行したため、`MMA_F16` 定数では
+    /// なく `mma_f16_source()`（既定 config の render 結果）を対象にする
+    /// （`mma_f16_source_uses_2x2_register_blocking_structure` と同じ方針）。
+    #[test]
+    fn mma_f16_source_interleaves_cp_async_issue_into_kstep_loop() {
+        let src = mma_f16_source();
+        for needle in [
+            "#define K_GROUPS (BK / MMA_K)",
+            "#define A_CHUNKS ((BM * BK) / 8)",
+            "#define B_CHUNKS ((BK * BN) / 8)",
+            "#define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)",
+            "#define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)",
+            "#define LOAD_A_STAGE_GROUP(stage, k0, g)",
+            "#define LOAD_B_STAGE_GROUP(stage, k0, g)",
+            "LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);",
+            "LOAD_B_STAGE_GROUP(load_stage, next_tile * BK, kstep);",
+        ] {
+            assert!(
+                src.contains(needle),
+                "mma_f16_source() に #496 の cp.async issue interleaving 構造 `{needle}` が見つかりません"
+            );
+        }
+
+        // グループ発行（分散発行サイト）は kstep ループの内側にあること
+        // （kstep ループ開始より後ろ）。
+        let kstep_loop_pos = src
+            .find("for (int kstep = 0; kstep < BK / MMA_K; ++kstep) {")
+            .expect("mma_f16_source() に kstep ループが見つかりません");
+        let group_issue_pos = src
+            .find("LOAD_A_STAGE_GROUP(load_stage, next_tile * BK, kstep);")
+            .expect(
+                "mma_f16_source() に分散発行サイト（LOAD_A_STAGE_GROUP 呼び出し）が見つかりません",
+            );
+        assert!(
+            group_issue_pos > kstep_loop_pos,
+            "mma_f16_source() の cp.async 分散発行サイトが kstep ループより前にあります \
+             （kstep ループ内で発行される必要がある）"
+        );
+
+        // グループ発行は ldmatrix 先読みガード（kstep+1 段の先読み）より
+        // 後ろ・mma.sync 発行（アセンブリ文字列リテラル）より前にあること
+        // （ldmatrix 先読みの直後・Tensor Core 演算の直前という配置。
+        // 本ファイル冒頭コメント「cp.async issue interleaving」参照）。
+        let prefetch_guard_pos = src
+            .find("if (kstep + 1 < BK / MMA_K) {")
+            .expect("mma_f16_source() に先読みガードが見つかりません");
+        let mma_sync_pos = src
+            .find("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32")
+            .expect("mma_f16_source() に mma.sync 発行が見つかりません");
+        assert!(
+            group_issue_pos > prefetch_guard_pos && group_issue_pos < mma_sync_pos,
+            "mma_f16_source() の cp.async 分散発行サイトが「ldmatrix 先読みガードの後・\
+             mma.sync 発行の前」という配置になっていません"
+        );
+
+        // ループ末尾の commit_group は無条件のまま（#492 不変条件）:
+        // 直前に旧来の一括ロード呼び出し
+        // `LOAD_A_STAGE(load_stage, next_tile * BK);` が存在しないこと
+        // （分割前はここにあったが #496 で kstep ループ内へ移設済み）。
+        assert!(
+            !src.contains("LOAD_A_STAGE(load_stage, next_tile * BK);"),
+            "mma_f16_source() にループ末尾の旧・一括ロード呼び出しが残っています \
+             （#496 で kstep ループ内の分散発行へ置き換わっているはず）"
         );
     }
 

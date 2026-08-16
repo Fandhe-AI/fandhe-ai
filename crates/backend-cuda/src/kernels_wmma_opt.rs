@@ -148,7 +148,7 @@ use cudarc::driver::{CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
 use half::f16;
 
 use crate::error::CudaError;
-use crate::kernels_mma::{DimSpec, render_dim_define};
+use crate::kernels_mma::{DimSpec, MMA_STATIC_SMEM_LIMIT_BYTES, render_dim_define};
 
 /// A タイル（`as_tile[2][BLOCK_M][A_PAD]`）の行幅（パディング後）。
 /// `K_TILE`（16）に 4 要素加算し、f32 の `ldm` 制約（4 の倍数）を保ちながら
@@ -721,7 +721,7 @@ fn validate_wmma_tf32_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaEr
         )
         .and_then(|(ab, c)| ab.checked_add(c))
         .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
-    if smem_bytes > 49_152 {
+    if smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES {
         return Err(invalid(format!(
             "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit"
         )));
@@ -1177,7 +1177,7 @@ fn validate_wmma_f16_opt_config(cfg: &WmmaOptKernelConfig) -> Result<(), CudaErr
         )
         .and_then(|(ab, c)| ab.checked_add(c))
         .ok_or_else(|| invalid("shared memory byte count overflow".to_string()))?;
-    if smem_bytes > 49_152 {
+    if smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES {
         return Err(invalid(format!(
             "static shared memory usage {smem_bytes} bytes exceeds the 48KiB per-block limit"
         )));
