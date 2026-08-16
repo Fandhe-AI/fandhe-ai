@@ -784,7 +784,7 @@ mod tests {
         use microkernel::{Neon12x8Kernel, NeonKernel};
         use std::time::Instant;
 
-        fn median_secs<K: Microkernel>(
+        fn run_once<K: Microkernel>(
             kernel: K,
             a: &[f32],
             b: &[f32],
@@ -792,13 +792,13 @@ mod tests {
             n: usize,
             k_dim: usize,
         ) -> f64 {
-            let mut samples = Vec::with_capacity(5);
-            for _ in 0..5 {
-                let mut c = vec![0.0f32; m * n];
-                let start = Instant::now();
-                gemm_blis_with_kernel(kernel, a, b, &mut c, m, n, k_dim).unwrap();
-                samples.push(start.elapsed().as_secs_f64());
-            }
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_with_kernel(kernel, a, b, &mut c, m, n, k_dim).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
             samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
             samples[samples.len() / 2]
         }
@@ -808,8 +808,31 @@ mod tests {
             let a = xorshift32_vec(0x7777_7777, m * k);
             let b = xorshift32_vec(0x8888_8888, k * n);
 
-            let median_8x12 = median_secs(NeonKernel, &a, &b, m, n, k);
-            let median_12x8 = median_secs(Neon12x8Kernel, &a, &b, m, n, k);
+            // キャッシュ・TLB を双方カーネルで温めてから計測に入る
+            // （ウォームアップなしだと先に計測する側が cold cache を
+            // 引き、後段が温まった状態を引き継ぐため系統的に偏る）。
+            run_once(NeonKernel, &a, &b, m, n, k);
+            run_once(Neon12x8Kernel, &a, &b, m, n, k);
+
+            // 各反復で計測順序を交互化し、cursor[bot] 指摘（PR #693・
+            // レビュースレッド PRRT_kwDOTuUCJc6ZnFza）が挙げた
+            // 「NeonKernel を常に先に計測するため後段の
+            // Neon12x8Kernel がキャッシュ/TLB の温まった状態を
+            // 引き継ぎ 12x8 有利に系統的偏りうる」問題を解消する。
+            let mut samples_8x12 = Vec::with_capacity(5);
+            let mut samples_12x8 = Vec::with_capacity(5);
+            for i in 0..5 {
+                if i % 2 == 0 {
+                    samples_8x12.push(run_once(NeonKernel, &a, &b, m, n, k));
+                    samples_12x8.push(run_once(Neon12x8Kernel, &a, &b, m, n, k));
+                } else {
+                    samples_12x8.push(run_once(Neon12x8Kernel, &a, &b, m, n, k));
+                    samples_8x12.push(run_once(NeonKernel, &a, &b, m, n, k));
+                }
+            }
+
+            let median_8x12 = median(samples_8x12);
+            let median_12x8 = median(samples_12x8);
 
             println!(
                 "dim={dim}: NeonKernel(8x12) median={median_8x12:.6}s, \
