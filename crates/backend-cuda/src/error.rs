@@ -84,6 +84,20 @@ pub enum CudaError {
     /// 参照）。
     WmmaUnavailable { detail: String },
 
+    /// カーネルソースのテンプレート展開（`kernels_mma::render_mma_f16`・
+    /// `kernels_wmma_opt::render_wmma_tf32_opt`／`render_wmma_f16_opt`。
+    /// イシュー #516）に渡された shape／タイル／段数の構成値が、境界検査・
+    /// 共有メモリ予算・整列制約等の不変条件を満たさないケースを表す。
+    ///
+    /// レンダラは文字列組み立てより前にこれらの不変条件を検査し、違反時は
+    /// 実際に NVRTC へ渡すことなく本 variant で早期拒否する（A03 対策。
+    /// 不正な構成値がそのままカーネルソースへ焼き込まれるのを防ぐ。
+    /// `.claude/rules/security.md`）。既定 config はコンパイル時 const
+    /// アサーションで別途保証されるため、本 variant は非既定 config
+    /// （後続 #519 の次元別静的化選択・#521 の段数逆算等が生成する構成）
+    /// を検証する経路でのみ返る。
+    InvalidKernelConfig { detail: String },
+
     /// カーネル特化パラメータ記述子（[`crate::CudaKernelDescriptor`]）の
     /// 構築時、ブロックタイル寸法（BM/BN/BK）・パイプライン段数が
     /// ゼロ値で渡された。
@@ -125,6 +139,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::WmmaUnavailable { detail } => {
                 write!(f, "WMMA(TF32) GEMM kernel unavailable: {detail}")
+            }
+            CudaError::InvalidKernelConfig { detail } => {
+                write!(f, "invalid kernel template config: {detail}")
             }
             CudaError::InvalidKernelDescriptor { detail } => {
                 write!(f, "invalid CUDA kernel descriptor: {detail}")
