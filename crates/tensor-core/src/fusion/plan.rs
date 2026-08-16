@@ -481,31 +481,37 @@ fn compute_row_fusion(
         _ => None,
     });
 
-    let has_broadcast = ops
-        .iter()
-        .any(|op| matches!(op, FusedOpKind::Broadcast { .. }));
-    if !has_broadcast {
-        return Ok(None);
-    }
-
-    // `has_broadcast` が真のため、最後に現れた `Broadcast` の位置が
-    // 必ず存在する。「末尾ノードが reduction か」だけを見る素朴な判定
-    // （旧実装）では、`Broadcast` で行 shape へ復元した後に再度
-    // `Sum`／`Max` で縮約し、その縮約済みテンソルに対して elementwise
-    // で終端するプラン（例: `Sum → Broadcast → Sum → Relu`）を素通り
-    // させてしまう。この場合 `ops` 末尾は elementwise だが、実際の
-    // `output_shape`（後段の再縮約の出力）は行 shape に復元されない
-    // ままであり、`row_fusion` が「出力は行 shape に復元済み」という
-    // 契約を偽って報告することになる（レビュー指摘: PR #687 Bugbot
-    // #1「Incomplete reduced-output guard」）。よって「最後の
-    // `Broadcast` より後方に `Sum`／`Max` が 1 個でも存在するか」を
-    // fail-closed に検査する（末尾ノードのみを見る旧判定を包含する
-    // 一般化: 末尾が reduction ならそれ自体が「最後の Broadcast より
-    // 後方の reduction」に該当するため同じ結果になる）。
-    let last_broadcast_at = ops
+    // 最後に現れた `Broadcast` の位置。`ops` が `Broadcast` を 1 個も
+    // 含まない場合は `None` となり、その場で `Ok(None)`（#586 までの
+    // reduction-only プランの後方互換）を返す。従来は「`Broadcast` を
+    // 含むか」の判定（`has_broadcast`）と「最後の位置」の探索を別々の
+    // 走査で行い、後者を `.expect()` で「必ず `Some`」と決め打ちしていた
+    // （レビュー指摘: PR #687 codex-review P1「本番経路で panic しうる」
+    // ・coding-rust.md「本番経路で unwrap()/expect() を使わない」）。
+    // `rposition` の戻り値をそのまま分岐に使うことで、論理的な不変条件
+    // （`Broadcast` を含む ⇒ 最後の位置が存在する）をコンパイラの型で
+    // 表現し、到達しないはずの分岐でも panic ではなく `Ok(None)`
+    // （非融合として扱う fail-closed な既定挙動）へ倒す。
+    let Some(last_broadcast_at) = ops
         .iter()
         .rposition(|op| matches!(op, FusedOpKind::Broadcast { .. }))
-        .expect("has_broadcast is true, so at least one Broadcast entry exists");
+    else {
+        return Ok(None);
+    };
+
+    // 「末尾ノードが reduction か」だけを見る素朴な判定（旧実装）では、
+    // `Broadcast` で行 shape へ復元した後に再度 `Sum`／`Max` で縮約し、
+    // その縮約済みテンソルに対して elementwise で終端するプラン（例:
+    // `Sum → Broadcast → Sum → Relu`）を素通りさせてしまう。この場合
+    // `ops` 末尾は elementwise だが、実際の `output_shape`（後段の
+    // 再縮約の出力）は行 shape に復元されないままであり、`row_fusion`
+    // が「出力は行 shape に復元済み」という契約を偽って報告することに
+    // なる（レビュー指摘: PR #687 Bugbot #1「Incomplete reduced-output
+    // guard」）。よって「最後の `Broadcast` より後方に `Sum`／`Max` が
+    // 1 個でも存在するか」を fail-closed に検査する（末尾ノードのみを
+    // 見る旧判定を包含する一般化: 末尾が reduction ならそれ自体が
+    // 「最後の Broadcast より後方の reduction」に該当するため同じ結果
+    // になる）。
     if let Some(offset) = ops[last_broadcast_at + 1..]
         .iter()
         .position(|op| matches!(op, FusedOpKind::Sum { .. } | FusedOpKind::Max { .. }))
@@ -515,9 +521,9 @@ fn compute_row_fusion(
         });
     }
 
-    // `axis` は `has_broadcast` が真である以上、上の `find_map` で必ず
-    // `Some` になる（`Broadcast` エントリ自身がこの `find_map` に
-    // 一致するため）。
+    // `axis` は `ops` が `Broadcast` を含む（上記 `last_broadcast_at`
+    // 導出済み）以上、上の `find_map` で必ず `Some` になる（`Broadcast`
+    // エントリ自身がこの `find_map` に一致するため）。
     let axis = axis.unwrap_or(None);
 
     let row_len = match axis {
