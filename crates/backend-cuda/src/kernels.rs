@@ -201,6 +201,95 @@ extern "C" __global__ void gemm_tiled_f16(
 }
 "#;
 
+/// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM（f32）。
+/// イシュー #599（TASK-12.1f `gemm_bias_act` の実融合化）。
+///
+/// [`TILED_F32`] のアキュムレーション部分（共有メモリタイリング・
+/// `#pragma unroll` による積和ループ）はそのまま維持し、C への書き込み
+/// 直前の epilogue で `has_bias` が真なら `acc + bias[col]`、`act == 1`
+/// なら続けて `max(v, 0)` を適用してから 1 回だけ HBM へ書く（`gemm` →
+/// `add` → `relu` の非融合合成のように中間結果を HBM へ書いて読み直す
+/// ことをしない。CPU 側 `gemm_blis_bias_act_parallel`
+/// （`crates/backend-cpu/src/gemm_blis/mod.rs`）と同じ「epilogue をカーネル
+/// 内で完結させる」設計思想を CUDA へ適用したもの。
+/// `docs/kernel-fusion.md` §2.2）。
+///
+/// **数値契約**: アキュムレーション自体は [`TILED_F32`] と完全に同一の
+/// 演算順序（同じ shared memory タイリング・同じ `#pragma unroll` ループ）
+/// のため、`gemm`→`add`→`relu` の非融合合成（同じ [`TILED_F32`] を経由し
+/// た後に別カーネルで bias 加算・relu を適用する経路）と bit 完全一致に
+/// なる（epilogue の加算・比較は要素独立で演算順序に依存しないため。
+/// `.claude/rules/coding-rust.md` の FMA 契約統一節・
+/// `docs/kernel-fusion.md` §2.2「bit 完全一致」と同じ論拠）。
+///
+/// **`bias` が `None`（`has_bias == 0`）の場合**: ホスト側
+/// （`gemm.rs::CudaGemm::run_tiled_bias_act_f32`）は null ポインタではなく
+/// ダミーの 1 要素デバイスバッファを `bias` へ渡す契約とする（`has_bias`
+/// ガードにより当該バッファは実際には参照されないが、CUDA カーネル引数に
+/// null を渡す経路を作らないため）。
+///
+/// # REQ-8（カーネル境界検査規約）
+///
+/// タイルロード時の三項ガード・C への書き込み時の `if (row < m && col <
+/// n)` ガードは [`TILED_F32`] と同一（該当コメント参照）。epilogue の
+/// `bias[col]` 参照は書き込みガード（`row < m && col < n`、したがって
+/// `col < n`）の内側でのみ行うため、`bias`（`n` 要素想定）への範囲外
+/// 読み出しは発生しない。
+pub const TILED_BIAS_ACT_F32: &str = r#"
+#define TILE 32
+
+extern "C" __global__ void gemm_tiled_bias_act_f32(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    const float* __restrict__ bias,
+    float* __restrict__ c,
+    int m, int n, int k,
+    int has_bias, int act)
+{
+    __shared__ float as_tile[TILE][TILE];
+    __shared__ float bs_tile[TILE][TILE];
+
+    int row = blockIdx.y * TILE + threadIdx.y;
+    int col = blockIdx.x * TILE + threadIdx.x;
+    float acc = 0.0f;
+
+    // 桁溢れしない num_tiles 計算（TILED_F32 と同一。上記ドキュメンテー
+    // ションコメント参照）。
+    int num_tiles = (k > 0) ? (k - 1) / TILE + 1 : 0;
+    for (int t = 0; t < num_tiles; ++t) {
+        int a_col = t * TILE + threadIdx.x;
+        int b_row = t * TILE + threadIdx.y;
+
+        // REQ-8: TILED_F32 と同じ手動境界チェック（三項ガード）。
+        as_tile[threadIdx.y][threadIdx.x] =
+            (row < m && a_col < k) ? a[row * k + a_col] : 0.0f;
+        bs_tile[threadIdx.y][threadIdx.x] =
+            (b_row < k && col < n) ? b[b_row * n + col] : 0.0f;
+        __syncthreads();
+
+#pragma unroll
+        for (int p = 0; p < TILE; ++p) {
+            acc += as_tile[threadIdx.y][p] * bs_tile[p][threadIdx.x];
+        }
+        __syncthreads();
+    }
+
+    // REQ-8: C への書き込み時の手動境界チェック（TILED_F32 と同一）。
+    // epilogue（bias 加算・activation）はこのガードの内側でのみ適用し、
+    // 中間結果を別カーネルへ渡さず 1 回の書き込みで完結させる。
+    if (row < m && col < n) {
+        float v = acc;
+        if (has_bias) {
+            v += bias[col];
+        }
+        if (act == 1) {
+            v = v > 0.0f ? v : 0.0f;
+        }
+        c[row * n + col] = v;
+    }
+}
+"#;
+
 /// WMMA TF32 GEMM のブロックタイル一辺（M・N とも 32。2x2 warp グリッド）。
 ///
 /// `gemm.rs` の `run_wmma_tf32` はグリッド計算（`div_ceil(m/n, WMMA_TF32_BLOCK_*)`）
@@ -426,6 +515,10 @@ mod tests {
         assert!(
             TILED_F16.contains(&expected),
             "TILED_F16 の `#define TILE` が Rust 側の TILE 定数（{TILE}）と一致しません"
+        );
+        assert!(
+            TILED_BIAS_ACT_F32.contains(&expected),
+            "TILED_BIAS_ACT_F32 の `#define TILE` が Rust 側の TILE 定数（{TILE}）と一致しません"
         );
     }
 

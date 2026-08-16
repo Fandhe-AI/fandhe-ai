@@ -58,6 +58,19 @@ pub enum CudaError {
     /// カーネル引数へ渡さない。`.claude/rules/security.md`）を兼ねる。
     InvalidShape { detail: String },
 
+    /// elementwise 演算（`elementwise.rs::CudaElementwise`）のホスト側形状
+    /// 検証、および GEMM epilogue の bias 長検証（`gemm.rs::run_tiled_bias_act_f32`）
+    /// が拒否した入力。
+    ///
+    /// `InvalidShape` の `Display` 実装は "invalid GEMM shape" 接頭辞を
+    /// 固定で付けるため、elementwise（`add`／`mul`／`relu`／`exp`／`tanh`）や
+    /// bias 長不一致の失敗を `InvalidShape` で表すと `to_string()` 経由の
+    /// エラーマッピングが GEMM 形状エラーと誤表示してしまう
+    /// （codex-review 指摘・イシュー #599 PR #688 レビュー）。GEMM 本体の
+    /// 形状検証（`m*k`／`k*n` 一致・オーバーフロー等）とは別 variant に
+    /// 分離し、`Display` メッセージも専用文言にする。
+    InvalidElementwiseShape { detail: String },
+
     /// f16 WMMA GEMM（`gemm_wmma.rs::CudaWmmaGemm`）が、Tensor Core（WMMA）
     /// の要件を満たさないデバイス上で要求された。
     ///
@@ -151,6 +164,9 @@ impl fmt::Display for CudaError {
             CudaError::Compile(e) => write!(f, "nvrtc compile error: {e:?}"),
             CudaError::InvalidShape { detail } => {
                 write!(f, "invalid GEMM shape: {detail}")
+            }
+            CudaError::InvalidElementwiseShape { detail } => {
+                write!(f, "invalid elementwise/bias shape: {detail}")
             }
             CudaError::TensorCoreUnsupported { detail } => {
                 write!(f, "tensor core (WMMA) unsupported on this device: {detail}")
