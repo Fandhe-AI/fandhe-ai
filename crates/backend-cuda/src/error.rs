@@ -156,6 +156,22 @@ pub enum CudaError {
     /// シンボリックリンク対応の `canonicalize` 再検証は C-3（#509）が
     /// 実ディレクトリ作成・オープン時点で担う。
     CacheDirUnavailable { detail: String },
+
+    /// コンパイルキャッシュへの実際の fs I/O（一時ディレクトリ作成・
+    /// 書き込み・fsync・アトミック rename）が失敗した。
+    ///
+    /// イシュー #509（Phase C-3）: `nvrtc.rs::store_cache_entry_in`／
+    /// `load_cache_entry_in`／`ensure_cache_root` が返す。`CacheDirUnavailable`
+    /// が「ルート**パス**を解決できない」（fs I/O 前の純粋なパス計算の
+    /// 失敗）を表すのに対し、本 variant は「解決済みパスに対する実際の
+    /// fs 操作」が失敗したケースに限定する（責務分離）。並行プロセスに
+    /// よる rename 競合（他プロセス先着）は本 variant を返さず正常系
+    /// （`Ok`）として吸収する契約（`store_cache_entry_in` ドキュメンテー
+    /// ションコメント参照）であり、本 variant は「1 回限りの破損置換
+    /// 再試行も失敗した」等の fail-closed 経路にのみ現れる。panic 経路は
+    /// 持たない（`.claude/rules/coding-rust.md` 「本番経路で
+    /// `unwrap()`/`expect()` を使わない」）。
+    CacheIo { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -203,6 +219,9 @@ impl fmt::Display for CudaError {
                     f,
                     "CUDA kernel compile cache directory unavailable: {detail}"
                 )
+            }
+            CudaError::CacheIo { detail } => {
+                write!(f, "CUDA kernel compile cache I/O failed: {detail}")
             }
         }
     }
