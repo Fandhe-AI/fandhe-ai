@@ -840,6 +840,45 @@ fn is_plain_dir(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Linux の `O_NOFOLLOW`（`<fcntl.h>`。`asm-generic/bits/fcntl-linux.h`
+/// では 8 進数 `0400000`）。[`open_nofollow`] 用（イシュー #509
+/// codex-review P0 指摘対応）。
+///
+/// `libc`／`rustix` クレートは許容依存 8 区分（`.claude/rules/
+/// deps-policy.md`）外でユーザー承認なしに追加できないため、
+/// `std::os::unix::fs::OpenOptionsExt::custom_flags`（std 標準機能）へ
+/// 渡すフラグ値を自前で定義する。値はターゲット OS ごとに異なるため
+/// `target_os` で分岐する（[`fsync_dir`] の非 Unix フォールバックと同じ
+/// 判断: 本クレートのビルド対象は Linux/macOS のみ。
+/// `backend-switching-design.md`）。
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400000;
+
+/// macOS（Darwin）の `O_NOFOLLOW`（`<fcntl.h>` では `0x0100`）。上記
+/// Linux 版と同じ理由・同じ用途。
+#[cfg(target_os = "macos")]
+const O_NOFOLLOW: i32 = 0x0100;
+
+/// `path` を `O_NOFOLLOW` 付きで開く（[`load_cache_entry_in`] 用。
+/// イシュー #509 codex-review P0 指摘対応）。
+///
+/// 最終コンポーネントが symlink であれば `open(2)` 自体をカーネルが
+/// 拒否するため、「symlink でないことを確認してから読む」という 2 手順
+/// （`validate_cache_entry` → `read_to_string`）の間に symlink へ差し替え
+/// られる TOCTOU を、検証と読み取りを 1 回のシステムコールへ結合する
+/// ことで構造的に排除できる（返した [`fs::File`] ハンドルからそのまま
+/// 読み取ること。パスへ再度アクセスしない）。`custom_flags` は
+/// [`std::os::unix::fs::OpenOptionsExt`] 経由の std 標準機能であり
+/// 追加依存を要しない（[`O_NOFOLLOW`] 定数のコメント参照）。
+#[cfg(unix)]
+fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+}
+
 /// ファイルを fsync する（[`write_entry_files`] が書き込み直後に呼ぶ）。
 ///
 /// rename 前に内容がディスクへ確実に反映されていることを保証する
@@ -1010,12 +1049,11 @@ fn ensure_cache_root_in(
         });
     }
 
-    fs::create_dir_all(candidate_root).map_err(|e| CudaError::CacheIo {
-        detail: format!(
-            "failed to create cache root directory {}: {e}",
-            candidate_root.display()
-        ),
-    })?;
+    create_dir_all_verified(
+        &existing_ancestor,
+        candidate_root,
+        &canonical_workspace_root,
+    )?;
 
     let canonical_root = candidate_root
         .canonicalize()
@@ -1058,6 +1096,127 @@ fn longest_existing_ancestor(path: &Path) -> Option<PathBuf> {
         }
         current = current.parent()?;
     }
+}
+
+/// `existing_ancestor`（[`longest_existing_ancestor`] で求めた、事前検証
+/// 済みの実在祖先）から `candidate_root` まで、パスコンポーネントを
+/// 1 階層ずつ [`fs::create_dir`] で作成し、**作成直後ごとに**
+/// symlink でないこと・`canonical_workspace_root` 配下でないことを
+/// 再検証する（[`ensure_cache_root_in`] 用。イシュー #509 codex-review
+/// P0 再指摘対応）。
+///
+/// 旧実装は [`fs::create_dir_all`] で候補パス全体を一括作成してから
+/// 事後検証していた。`create_dir_all` は既存の祖先ディレクトリを
+/// （symlink であっても）辿って残りのコンポーネントを作成するため、
+/// 事前検証（[`longest_existing_ancestor`] 起点の symlink 解決）から
+/// `create_dir_all` 実行までの間に祖先が workspace 内を指す symlink へ
+/// 差し替えられると、最終的な事後検証で拒否する**前に** workspace 内へ
+/// ディレクトリツリー全体を作成してしまう TOCTOU があった（検査済み
+/// ディレクトリの fd を保持し続けず、パスを毎回ゼロから再解決する
+/// `create_dir_all` の性質そのものが原因）。
+///
+/// 本関数はコンポーネントごとに [`fs::create_dir`]（`create_dir_all` と
+/// 異なり対象パスが既に存在すれば `AlreadyExists` で失敗し、symlink を
+/// 辿って中身を作ることはない）で作成し、作成直後（または並行する
+/// 他プロセスによる先着で `AlreadyExists` だった場合も同様に）
+/// `fs::symlink_metadata` で通常ディレクトリであること・
+/// `canonical_workspace_root` 配下でないことを都度検証する。途中で拒否
+/// した場合、攻撃者が差し替えられるのは高々直前の 1 コンポーネント
+/// （直前に自分が作成したディレクトリ、または `AlreadyExists` で
+/// フォールスルーした既存パス）に限られ、拒否直後に [`fs::remove_dir`]
+/// で削除してから返す（ベストエフォート。削除失敗はそれ自体をエラーに
+/// せず元エラーを優先する。[`store_cache_entry_in`] の一時ディレクトリ
+/// 削除と同じ方針）。
+///
+/// `libc`／`rustix` の `openat`／`mkdirat`（fd 起点でパス再解決を避ける
+/// 方式）は許容依存 8 区分（`.claude/rules/deps-policy.md`）外のため
+/// ユーザー承認なしに追加できない。本関数は std のみで完結させるため、
+/// 「fd 保持で再解決を避ける」代わりに「1 コンポーネントずつ検証しながら
+/// 進み、被害範囲を直前の 1 階層に限定した上で即座に検出・削除する」
+/// 検出型の縦深防御を採る。
+fn create_dir_all_verified(
+    existing_ancestor: &Path,
+    candidate_root: &Path,
+    canonical_workspace_root: &Path,
+) -> Result<(), CudaError> {
+    let relative = candidate_root
+        .strip_prefix(existing_ancestor)
+        .map_err(|_| CudaError::CacheIo {
+            detail: format!(
+                "cache root candidate {} is not nested under its existing ancestor {}",
+                candidate_root.display(),
+                existing_ancestor.display()
+            ),
+        })?;
+
+    let mut current = existing_ancestor.to_path_buf();
+    for component in relative.components() {
+        let Component::Normal(name) = component else {
+            // `existing_ancestor` は fs 上に実在するパスの祖先探索結果
+            // であり、`candidate_root` は環境変数由来の絶対パスを結合
+            // したもの（[`resolve_cache_root`]）のため、ここに `..`／`.`／
+            // プレフィックス等の非正規コンポーネントが現れることは想定
+            // しない。防御的に fail-closed で拒否する。
+            return Err(CudaError::CacheIo {
+                detail: format!(
+                    "cache root candidate {} contains a non-normal path component",
+                    candidate_root.display()
+                ),
+            });
+        };
+        current.push(name);
+
+        if let Err(e) = fs::create_dir(&current)
+            && e.kind() != std::io::ErrorKind::AlreadyExists
+        {
+            return Err(CudaError::CacheIo {
+                detail: format!(
+                    "failed to create cache directory component {}: {e}",
+                    current.display()
+                ),
+            });
+        }
+        // `AlreadyExists`（並行する他プロセスが同じ祖先を先に作成した等）
+        // は下記の再検証へフォールスルーし、既存の中身が正規ディレクト
+        // リ・workspace 外であることを確認する。
+
+        let meta = fs::symlink_metadata(&current).map_err(|e| CudaError::CacheIo {
+            detail: format!(
+                "failed to stat cache directory component {}: {e}",
+                current.display()
+            ),
+        })?;
+        if !meta.file_type().is_dir() {
+            let _ = fs::remove_dir(&current);
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "cache directory component {} is not a plain directory (symlink or other \
+                     non-directory found where a directory was expected)",
+                    current.display()
+                ),
+            });
+        }
+
+        let canonical_current = current.canonicalize().map_err(|e| CudaError::CacheIo {
+            detail: format!(
+                "failed to canonicalize cache directory component {}: {e}",
+                current.display()
+            ),
+        })?;
+        if path_lexically_within(&canonical_current, canonical_workspace_root) {
+            let _ = fs::remove_dir(&current);
+            return Err(CudaError::CacheDirUnavailable {
+                detail: format!(
+                    "cache directory component {} resolves (after symlink resolution) within \
+                     workspace root {}; refusing to continue creating directories under it",
+                    canonical_current.display(),
+                    canonical_workspace_root.display()
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// [`cache_root`] の解決結果を実際に fs 上へ実体化する公開ラッパー
@@ -1132,6 +1291,19 @@ fn store_cache_entry_in(
     }
 
     if final_dir.exists() {
+        // 破損エントリの可能性がある経路。ただし直前の `validate_cache_entry`
+        // 判定（本関数冒頭側）から本チェックまでの間に、別 writer（他
+        // プロセス・他スレッド）が正常なエントリを先着配置した可能性が
+        // ある（イシュー #509 codex-review P2 指摘
+        // `PRRT_kwDOTuUCJc6ZkpxM` 対応）。削除直前に再検証し、既に有効
+        // なら削除せず正常系として吸収する: 再検証なしに削除すると、
+        // その別 writer の先着エントリを「破損」扱いで消してしまい
+        // first-writer-wins 契約を破りうる。
+        if validate_cache_entry(&final_dir) {
+            let _ = fs::remove_dir_all(&tmp_dir);
+            return Ok(final_dir);
+        }
+
         // 破損エントリ。置換して一度だけ再試行する（無限リトライしない）。
         let _ = fs::remove_dir_all(&final_dir);
         if fs::rename(&tmp_dir, &final_dir).is_ok() {
@@ -1186,6 +1358,92 @@ pub(crate) fn store_cache_entry(
 /// 書き手・他の読み手との競合面が増えるため、置き換えは
 /// [`store_cache_entry_in`] 側（rename 失敗判定）に一元化する（実装計画
 /// §3.3 の設計判断）。
+// `validate_cache_entry`（symlink 非追跡の存在確認）してから
+// `fs::read_to_string`（パス経由の再オープン）するまでの間に、エントリ
+// ディレクトリまたは中のファイルを symlink へ差し替えられると、
+// キャッシュルート外の任意ファイルを読み込みうる TOCTOU があった
+// （イシュー #509 codex-review P0 指摘対応: 現状はデコード先が
+// `CachedKernel`（構造体フィールドへコピーされるだけ）のため実害は
+// 限定的だが、NVRTC 結線後は当該フィールドが PTX として GPU 上で実行
+// されうる導線になるため、検証と読み取りを原子的に結合しておく）。
+// Unix（本クレートのビルド対象は Linux/macOS のみ）では
+// [`open_nofollow`]（`O_NOFOLLOW`）でファイル自体の symlink 化を
+// open(2) 時点でカーネルに拒否させ、返した [`fs::File`] ハンドルから
+// そのまま読み取ることでパスへの再アクセスを避ける。加えて
+// `O_NOFOLLOW` は最終コンポーネント（ファイル自体）の symlink 化しか
+// 防がないため、エントリディレクトリ自体の差し替え（中間コンポーネント）
+// は open 前後の `dev`/`ino` 一致検査で検出する。
+//
+// `libc`／`rustix` の `openat`（fd 起点でパス再解決を避ける方式）は
+// 許容依存 8 区分（`.claude/rules/deps-policy.md`）外のためユーザー
+// 承認なしに追加できず、std のみで完結させている。
+#[cfg(unix)]
+fn load_cache_entry_in(
+    root: &Path,
+    key: &CudaKernelCacheKey,
+) -> Result<Option<CachedKernel>, CudaError> {
+    use std::io::Read;
+    use std::os::unix::fs::MetadataExt;
+
+    let entry_dir = cache_entry_path_in(root, key)?;
+
+    // 事前検証: エントリディレクトリ自体が symlink でない通常ディレクト
+    // リであること。以降の open がこの同一ディレクトリに対してであった
+    // ことを事後検証するため `dev`/`ino` を記録する。
+    let pre_meta = match fs::symlink_metadata(&entry_dir) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(None),
+    };
+    if !pre_meta.file_type().is_dir() {
+        return Ok(None);
+    }
+    let (pre_dev, pre_ino) = (pre_meta.dev(), pre_meta.ino());
+
+    let mut cu_file = match open_nofollow(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE)) {
+        Ok(f) => f,
+        Err(_) => return Ok(None),
+    };
+    let mut ptx_file = match open_nofollow(&entry_dir.join(CACHE_ENTRY_PTX_FILE)) {
+        Ok(f) => f,
+        Err(_) => return Ok(None),
+    };
+
+    // 事後の再検証: 2 回の open の前後でエントリディレクトリ自体が
+    // 別物（symlink・別ディレクトリ）へ差し替えられていないことを
+    // `dev`/`ino` 一致で確認する。
+    let post_meta = match fs::symlink_metadata(&entry_dir) {
+        Ok(meta) => meta,
+        Err(_) => return Ok(None),
+    };
+    if !post_meta.file_type().is_dir() || post_meta.dev() != pre_dev || post_meta.ino() != pre_ino {
+        return Ok(None);
+    }
+
+    let mut kernel_cu = String::new();
+    cu_file
+        .read_to_string(&mut kernel_cu)
+        .map_err(|e| CudaError::CacheIo {
+            detail: format!("failed to read cached kernel source: {e}"),
+        })?;
+    let mut kernel_ptx = String::new();
+    ptx_file
+        .read_to_string(&mut kernel_ptx)
+        .map_err(|e| CudaError::CacheIo {
+            detail: format!("failed to read cached kernel ptx: {e}"),
+        })?;
+
+    Ok(Some(CachedKernel {
+        kernel_cu,
+        kernel_ptx,
+    }))
+}
+
+/// 非 Unix 向けフォールバック（本クレートのビルド対象は Linux/macOS の
+/// みのため通常到達しない。[`fsync_dir`] の非 Unix 分岐と同じ判断）。
+/// `O_NOFOLLOW` 相当の std API を持たないため、上記 Unix 版と異なり
+/// [`validate_cache_entry`]（パスベース検証）に読み取り前確認を留める
+/// （既存動作を維持。TOCTOU 対策強化は Unix 版のみ）。
+#[cfg(not(unix))]
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
@@ -2526,6 +2784,38 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    // [`open_nofollow`]（[`O_NOFOLLOW`]）が実行プラットフォーム上で実際に
+    // symlink を拒否することの直接回帰確認（イシュー #509 codex-review
+    // P0 指摘対応）。`O_NOFOLLOW` の数値定数は `target_os` ごとに手書き
+    // 定義しているため（`libc`／`rustix` は許容依存 8 区分外。
+    // [`O_NOFOLLOW`] のコメント参照）、値の取り違えを本テストで検知する。
+    // errno の具体値までは断定せず `is_err()` のみを検査する（Linux は
+    // `ELOOP`、実装によっては別の errno になりうるため。プラットフォーム
+    // 間の errno 差異に依存しない検証にする）。
+    #[cfg(unix)]
+    #[test]
+    fn open_nofollow_rejects_a_symlinked_path() {
+        let root = fresh_temp_dir("open-nofollow");
+        let real_file = root.join("real.txt");
+        fs::write(&real_file, "real content").expect("must write real file");
+        let symlink_path = root.join("via-symlink.txt");
+        std::os::unix::fs::symlink(&real_file, &symlink_path)
+            .expect("must create symlink to real file");
+
+        assert!(
+            open_nofollow(&symlink_path).is_err(),
+            "open_nofollow must refuse to open a path whose final component is a symlink"
+        );
+        // 対照実験: symlink でない通常ファイルは開けること（定数の値自体が
+        // 誤って全 open を拒否する側に倒れていないことの検算）。
+        assert!(
+            open_nofollow(&real_file).is_ok(),
+            "open_nofollow must still open a plain, non-symlink file"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     // 未書き込みキーの load はミス（`Ok(None)`）を返すこと。
