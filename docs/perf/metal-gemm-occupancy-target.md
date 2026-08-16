@@ -118,8 +118,15 @@ occupancy 判定を `gemm_diagnosis.rs` にも反映するタイミングで行�
 
 ## 5. スコープ外（#542 ほかへ委ねる事項）
 
-- `select()` への occupancy 判定の組み込み・タイル 2 段階切替・閾値の実測確定
-- GPU コア数が取得不能（`None`）な場合の `select()` 側フォールバック方針の確定
-- 実機での実測値記入（§3.3）・係数（6/9・`SMEM_GROUPS_PER_CORE_CAP`）の M4 Max 向け確定
+- ~~`select()` への occupancy 判定の組み込み・タイル 2 段階切替・閾値の実測確定~~ →
+  イシュー #542（`crate::tile::select_with_occupancy`）で実装完了。詳細は
+  `docs/perf/metal-gemm-occupancy-select.md` を参照
+- ~~GPU コア数が取得不能（`None`）な場合の `select()` 側フォールバック方針の確定~~ →
+  #542 で確定（`params: None`／`actual_groups`／`ideal_groups` のいずれかが `None` なら形状のみの
+  判定へ fail-safe フォールバック。`docs/perf/metal-gemm-occupancy-select.md` §2）
+- 実機での実測値記入（§3.3）・係数（6/9・`SMEM_GROUPS_PER_CORE_CAP`）の M4 Max 向け確定 →
+  引き続き Mac 実機セッション（実機ツリー #408 系）へ委ねる（#542 でも未完了。
+  `docs/perf/metal-gemm-occupancy-select.md` §5 記録テンプレート）
 - バッチ次元（MFA の `batchDimension`）の導入
-- `examples/gemm_diagnosis.rs` の算式をクレート内 API へ実際に置換すること（§4）
+- `examples/gemm_diagnosis.rs` の算式をクレート内 API へ実際に置換すること（§4）（#542 でも見送り。
+  `docs/perf/metal-gemm-occupancy-select.md` §6）
