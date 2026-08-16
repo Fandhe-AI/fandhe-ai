@@ -49,6 +49,14 @@ internal-diagnostics = []
 name = "gemm_profile_target"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #499: 動的グルーピング幅選択（`backend_cuda::diagnostics::
+# mma_swizzle_group_width`）を使うため `gemm_profile_target` と同じ
+# feature ゲートを要求する（`examples/gemm_mma_swizzle_bench.rs` 冒頭
+# コメント参照）。
+name = "gemm_mma_swizzle_bench"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

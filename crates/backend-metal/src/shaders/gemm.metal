@@ -321,6 +321,15 @@ constant uint BK [[function_constant(2)]];
 constant uint WM [[function_constant(3)]];
 constant uint WN [[function_constant(4)]];
 constant bool USE_TGP_STAGING [[function_constant(5)]];
+// threadgroup memory のパディング幅（イシュー #538。行末に加算する f32
+// 要素数）。`crate::tile::TileConfig::validate` が 4 の倍数（0 を含む）へ
+// 事前検証済みの契約で、staged 経路の A/B タイル行ストライドを
+// `BK+TGP_PAD`/`BN+TGP_PAD` へずらしてバンクコンフリクトを回避する
+// （MLX steel `gemm.h` の `tgp_padding_a`/`tgp_padding_b` と同族の技法。
+// direct-load 経路〈USE_TGP_STAGING=false〉では未使用。`TileConfig::validate`
+// が `staged=false` のとき `pad=0` を強制するため、値が実際に効くのは
+// staged 経路のみ）。
+constant uint TGP_PAD [[function_constant(6)]];
 
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
@@ -379,10 +388,23 @@ kernel void gemm_simdgroup_tiled(
         }
     }
 
-    // threadgroup 共有メモリ上の A タイル（BM×BK）・B タイル（BK×BN）
+    // threadgroup 共有メモリ上の A タイル（BM×lda）・B タイル（BK×ldb）
     // オフセット（`USE_TGP_STAGING=true` の場合のみ使用）。
+    //
+    // 行ストライドのパディング（イシュー #538。TGP_PAD function constant。
+    // 本ファイル冒頭 TGP_PAD 宣言のコメント参照）: `lda`/`ldb` を素の
+    // `BK`/`BN` ではなく `+TGP_PAD` した値にすることで、`simdgroup_load` の
+    // 列方向アクセス（`kk`/`wn_idx*sub_bn+c_*8` を跨ぐストライド走査）が
+    // threadgroup メモリのバンク境界と整合してしまうことによるバンク
+    // コンフリクトを回避する（MLX steel `gemm.h` の
+    // `tgp_padding_a`/`tgp_padding_b`・metal-flash-attention の
+    // leadingBlockDimensions 実値指定・TileKernels の `TILE_X + TILE_K`
+    // 確保と同族の技法。CUDA 側 B-7 と同族。`TileConfig::shared_mem_bytes`
+    // が本カーネルと同じ `bm*lda + bk*ldb` 総量を計算する契約）。
+    uint lda = BK + TGP_PAD;
+    uint ldb = BN + TGP_PAD;
     threadgroup float* tile_a = shared_mem;
-    threadgroup float* tile_b = shared_mem + (size_t)BM * (size_t)BK;
+    threadgroup float* tile_b = shared_mem + (size_t)BM * (size_t)lda;
 
     uint k_full_tiles = dims.k / BK;
     uint k_tail = dims.k - k_full_tiles * BK; // BK の倍数でない末尾（0 埋め扱い）
@@ -424,10 +446,14 @@ kernel void gemm_simdgroup_tiled(
             //     `col0 = tgid.x*BN` は常に 8 の倍数（4 要素境界）に揃い、
             //     device メモリ側の読み出し先頭オフセットも 4 要素（16
             //     バイト）境界に揃う（MTLBuffer 先頭はページ境界確保）
-            //   - 共有メモリ側オフセット（`tile_b` の `BM*BK`）は BK が
-            //     4 の倍数であるため（上記 8 整除検査からの間接包含）
-            //     常に 4 の倍数となり、`threadgroup float4*` 再解釈も
-            //     16 バイト境界に揃う
+            //   - 共有メモリ側オフセット（`tile_b` の `BM*lda`）も 4 の倍数
+            //     のため `threadgroup float4*` 再解釈も 16 バイト境界に揃う
+            //     （`lda = BK+TGP_PAD` は BK が上記 8 整除検査からの間接
+            //     包含で常に 4 の倍数、TGP_PAD（`TileConfig::pad`）も
+            //     `TGP_PAD_ELEMS=4` で常に 4 の倍数〈`TileConfig::validate`
+            //     が dispatch 前に検証〉のため常に 4 の倍数。書き込み先
+            //     添字 `r*lda+kk`／`kk*ldb+c_` も同じ理由で常に 4 要素境界
+            //     に揃う。イシュー #538）
             // `TileConfig::validate` の既存 8 整除検査が上記を dispatch
             // 前に fail-closed で拒否するため、将来 `CANDIDATES` に
             // BK/BN が 8 で割り切れない構成を追加しようとしても検証段階
@@ -439,7 +465,12 @@ kernel void gemm_simdgroup_tiled(
             // `.claude/rules/coding-rust.md`「カーネル実装の境界検査」）。
             // 共有メモリへ格納される値は変更前のスカラーループとビット単位
             // で一致するため、以降の `simdgroup_load`／MMA 発行順・数値
-            // 結果は不変。
+            // 結果は不変（論理添字 r/kk/c_ の導出・境界判定は非パディング
+            // 平坦添字のまま維持し、書き込み先のみパディング込みストライド
+            // へ変更しているため。イシュー #538 計画「設計方針」節）。
+            // パディング列（`lda-BK`／`ldb-BN` 分の隙間）自体は
+            // `simdgroup_load` が一切読まない（各行の読み出しは
+            // `kk..kk+8 ⊆ 0..BK` に収まる）ため 0 埋め不要。
             uint local_tid = simd_id * 32 + simd_lane;
             uint threads_total = WM * WN * 32;
 
@@ -448,6 +479,7 @@ kernel void gemm_simdgroup_tiled(
                 uint idx = vi * 4;
                 uint r = idx / BK;
                 uint kk = idx % BK;
+                uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
                 bool group_in_bounds =
@@ -455,13 +487,13 @@ kernel void gemm_simdgroup_tiled(
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
-                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + idx);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_a + dst_idx);
                     *dst = *src;
                 } else {
                     for (uint e = 0; e < 4; e++) {
                         uint kk_e = kk + e;
                         uint global_k_e = global_k + e;
-                        tile_a[idx + e] = (kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)
+                        tile_a[dst_idx + e] = (kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)
                             ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k_e]
                             : 0.0f;
                     }
@@ -473,6 +505,7 @@ kernel void gemm_simdgroup_tiled(
                 uint idx = vi * 4;
                 uint kk = idx / BN;
                 uint c_ = idx % BN;
+                uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
                 bool group_in_bounds =
@@ -480,13 +513,13 @@ kernel void gemm_simdgroup_tiled(
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
-                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + idx);
+                    threadgroup float4* dst = reinterpret_cast<threadgroup float4*>(tile_b + dst_idx);
                     *dst = *src;
                 } else {
                     for (uint e = 0; e < 4; e++) {
                         uint c_e = c_ + e;
                         uint global_col_e = global_col + e;
-                        tile_b[idx + e] = (kk < bk_eff && global_k < dims.k && global_col_e < dims.n)
+                        tile_b[dst_idx + e] = (kk < bk_eff && global_k < dims.k && global_col_e < dims.n)
                             ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col_e]
                             : 0.0f;
                     }
@@ -498,7 +531,10 @@ kernel void gemm_simdgroup_tiled(
             for (uint kk = 0; kk < BK; kk += 8) {
                 for (uint r = 0; r < acc_rows; r++) {
                     simdgroup_float8x8 a_tile;
-                    simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)BK + (size_t)kk, BK);
+                    // ストライドを BK ではなく lda（パディング込み）にする
+                    // ことで、パディングにより実際にずれた行の先頭アドレス
+                    // を正しく指す（イシュー #538）。
+                    simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
                     for (uint ci = 0; ci < acc_cols; ci++) {
                         // 蛇行（serpentine）走査: 奇数行 r では列を逆順（acc_cols-1-ci）に
                         // 辿る。a_tile は r ループ内で 1 回だけロードされ ci に
@@ -514,7 +550,9 @@ kernel void gemm_simdgroup_tiled(
                         // 従来の行優先走査と一致する。
                         uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
                         simdgroup_float8x8 b_tile;
-                        simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)BN + (size_t)(wn_idx * sub_bn + c_ * 8), BN);
+                        // ストライドを BN ではなく ldb（パディング込み）にする
+                        // （上記 A タイル側と同じ理由。イシュー #538）。
+                        simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
                         simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
                     }
                 }
