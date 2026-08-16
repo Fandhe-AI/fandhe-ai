@@ -804,9 +804,40 @@ pub(crate) struct CachedKernel {
 /// 同水準）。ディレクトリ rename はアトミックなため通常運用で破損
 /// エントリは生まれず、これはクラッシュ残骸・外部破壊への縦深防御
 /// （A08 整合性）である。
+///
+/// [`Path::is_file`] ではなく [`is_plain_dir`]／[`is_plain_file`]（symlink
+/// を追跡しない [`fs::symlink_metadata`] ベース）を使う（イシュー #509
+/// codex-review P0 指摘対応）: `entry_dir` 自体または
+/// [`CACHE_ENTRY_SOURCE_FILE`]／[`CACHE_ENTRY_PTX_FILE`] を symlink に
+/// 置換されると、`is_file()`（symlink を追跡する）はキャッシュルート外の
+/// 任意ファイルでも「有効なキャッシュエントリ」と誤判定してしまう
+/// （A03 symlink 脱出。後続で PTX として任意ファイルを読み込み GPU 上で
+/// 実行する経路に繋がりうる）。本関数は [`load_cache_entry_in`] が実際に
+/// 読み出す直前に呼ばれるため、ここで symlink を拒否すれば
+/// `fs::read_to_string` が symlink 先の内容を読むことはない。
 fn validate_cache_entry(entry_dir: &Path) -> bool {
-    entry_dir.join(CACHE_ENTRY_SOURCE_FILE).is_file()
-        && entry_dir.join(CACHE_ENTRY_PTX_FILE).is_file()
+    is_plain_dir(entry_dir)
+        && is_plain_file(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE))
+        && is_plain_file(&entry_dir.join(CACHE_ENTRY_PTX_FILE))
+}
+
+/// `path` が symlink ではない通常ファイルであるかを、symlink を追跡
+/// しない [`fs::symlink_metadata`] で判定する（[`validate_cache_entry`]
+/// 用。イシュー #509 codex-review P0 指摘対応）。
+fn is_plain_file(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_file())
+        .unwrap_or(false)
+}
+
+/// `path` が symlink ではない通常ディレクトリであるかを、symlink を
+/// 追跡しない [`fs::symlink_metadata`] で判定する（[`is_plain_file`] と
+/// 同じ理由。エントリディレクトリ自体が symlink に置換されているケース
+/// を拒否する）。
+fn is_plain_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_dir())
+        .unwrap_or(false)
 }
 
 /// ファイルを fsync する（[`write_entry_files`] が書き込み直後に呼ぶ）。
@@ -930,6 +961,55 @@ fn ensure_cache_root_in(
     candidate_root: &Path,
     workspace_root: &Path,
 ) -> Result<PathBuf, CudaError> {
+    // `workspace_root` 自体が存在しない（呼び出し元がまだ何も書き込んで
+    // いないビルドディレクトリ等）場合は canonicalize できないため、
+    // その場合のみ字句正規化した値へフォールバックする（C-2 の
+    // `resolve_cache_root` と同じ判断: containment 検証の基準側が
+    // 存在しない場合、字句比較で近似する）。
+    let canonical_workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| lexically_normalize(workspace_root));
+
+    // 実体化（`fs::create_dir_all`）より前の containment 事前検証
+    // （イシュー #509 codex-review P0 指摘対応）: `candidate_root` 自身は
+    // まだ存在しない場合が多く canonicalize できないため、fs 上に実在
+    // する最長の祖先（[`longest_existing_ancestor`]）を symlink 解決込み
+    // で先に検証する。ここで拒否すれば `fs::create_dir_all` は一切呼ばれ
+    // ない。旧実装は「作成してから canonicalize して検証」という順序
+    // だったため、workspace 外の祖先 symlink が workspace 内を指す
+    // ケース（例: `~/.cache` が `<workspace_root>/evil` への symlink）で
+    // 「実際に workspace 内へディレクトリを作成した後」に初めて拒否して
+    // おり、containment 契約を副作用の時点で破っていた。
+    let existing_ancestor =
+        longest_existing_ancestor(candidate_root).ok_or_else(|| CudaError::CacheIo {
+            detail: format!(
+                "failed to resolve any existing ancestor of cache root candidate {}",
+                candidate_root.display()
+            ),
+        })?;
+    let canonical_existing_ancestor =
+        existing_ancestor
+            .canonicalize()
+            .map_err(|e| CudaError::CacheIo {
+                detail: format!(
+                    "failed to canonicalize existing ancestor {} of cache root candidate {}: {e}",
+                    existing_ancestor.display(),
+                    candidate_root.display()
+                ),
+            })?;
+    if path_lexically_within(&canonical_existing_ancestor, &canonical_workspace_root) {
+        return Err(CudaError::CacheDirUnavailable {
+            detail: format!(
+                "cache root candidate {} has an existing ancestor {} that resolves (after \
+                 symlink resolution) within workspace root {}; refusing to create any \
+                 directory under it",
+                candidate_root.display(),
+                canonical_existing_ancestor.display(),
+                canonical_workspace_root.display()
+            ),
+        });
+    }
+
     fs::create_dir_all(candidate_root).map_err(|e| CudaError::CacheIo {
         detail: format!(
             "failed to create cache root directory {}: {e}",
@@ -946,15 +1026,10 @@ fn ensure_cache_root_in(
             ),
         })?;
 
-    // `workspace_root` 自体が存在しない（呼び出し元がまだ何も書き込んで
-    // いないビルドディレクトリ等）場合は canonicalize できないため、
-    // その場合のみ字句正規化した値へフォールバックする（C-2 の
-    // `resolve_cache_root` と同じ判断: containment 検証の基準側が
-    // 存在しない場合、字句比較で近似する）。
-    let canonical_workspace_root = workspace_root
-        .canonicalize()
-        .unwrap_or_else(|_| lexically_normalize(workspace_root));
-
+    // 事後の再検証（TOCTOU に対する縦深防御）: 上記の事前検証と
+    // `fs::create_dir_all` の間で祖先が symlink に差し替えられる競合が
+    // 万一あっても、最終的に返す `canonical_root` 自体を再検証すること
+    // で fail-closed に倒す（事前検証だけに頼らない多層防御）。
     if path_lexically_within(&canonical_root, &canonical_workspace_root) {
         return Err(CudaError::CacheDirUnavailable {
             detail: format!(
@@ -966,6 +1041,23 @@ fn ensure_cache_root_in(
     }
 
     Ok(canonical_root)
+}
+
+/// `path` 自身または祖先のうち、fs 上に実在する最も長い（`path` に最も
+/// 近い）パスを返す（[`ensure_cache_root_in`] の実体化前 containment
+/// 事前検証用。イシュー #509 codex-review P0 指摘対応）。`path` が絶対
+/// パスであれば必ずルート（`/`）は実在するため、絶対パスに対しては
+/// `None` を返さない。相対パスかつどの祖先も存在しない極端なケースの
+/// みフォールバックとして `None` を返す（呼び出し元は `CacheIo` で
+/// fail-closed に扱う）。
+fn longest_existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.exists() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
 }
 
 /// [`cache_root`] の解決結果を実際に fs 上へ実体化する公開ラッパー
@@ -2364,6 +2456,78 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // symlink 脱出防御（イシュー #509 codex-review P0 指摘対応。
+    // `cfg(unix)`）: エントリディレクトリ自体は正規に store されたものだが、
+    // その中の `kernel.ptx` をルート外の任意ファイルへの symlink に
+    // 差し替えた場合、`validate_cache_entry`（ひいては `load_cache_entry_in`）
+    // が symlink を追跡せず「無効なエントリ」として拒否すること
+    // （symlink 先の任意ファイル内容がキャッシュヒットとして読み出されない
+    // ことの回帰確認）。
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_entry_whose_ptx_file_is_replaced_with_a_symlink() {
+        let root = fresh_temp_dir("symlink-entry-ptx");
+        let key = sample_key();
+
+        let entry_dir = store_cache_entry_in(&root, &key, "kernel source", "legit ptx")
+            .expect("store must succeed");
+
+        // ルート外に「秘密ファイル」を用意し、キャッシュルート外の
+        // 任意ファイルを指す想定を再現する。
+        let outside_dir = fresh_temp_dir("symlink-entry-secret");
+        let secret_path = outside_dir.join("secret.ptx");
+        fs::write(&secret_path, "leaked-outside-root-ptx").expect("must write secret file");
+
+        let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
+        fs::remove_file(&ptx_path).expect("must remove legit ptx file before replacing");
+        std::os::unix::fs::symlink(&secret_path, &ptx_path)
+            .expect("must replace kernel.ptx with a symlink pointing outside the cache root");
+
+        assert!(
+            !validate_cache_entry(&entry_dir),
+            "entry with a symlinked kernel.ptx must be rejected, not treated as a valid entry"
+        );
+
+        let loaded = load_cache_entry_in(&root, &key).expect("load must not error, only miss");
+        assert!(
+            loaded.is_none(),
+            "load must treat a symlink-replaced entry as a cache miss, never follow the symlink"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    // symlink 脱出防御（`cfg(unix)`）: エントリディレクトリ自体
+    // （`kernel.<hash>`）が symlink に置換されているケースも拒否すること。
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_entry_directory_replaced_with_a_symlink() {
+        let root = fresh_temp_dir("symlink-entry-dir");
+        let key = sample_key();
+
+        let outside_dir = fresh_temp_dir("symlink-entry-dir-target");
+        fs::write(outside_dir.join(CACHE_ENTRY_SOURCE_FILE), "outside cu")
+            .expect("must write outside kernel.cu");
+        fs::write(outside_dir.join(CACHE_ENTRY_PTX_FILE), "outside ptx")
+            .expect("must write outside kernel.ptx");
+
+        let entry_name = key.cache_entry_dir_name().expect("must succeed");
+        let entry_path = root.join(entry_name);
+        std::os::unix::fs::symlink(&outside_dir, &entry_path)
+            .expect("must create entry dir as a symlink pointing outside the cache root");
+
+        assert!(
+            !validate_cache_entry(&entry_path),
+            "entry directory replaced with a symlink must be rejected"
+        );
+        let loaded = load_cache_entry_in(&root, &key).expect("load must not error, only miss");
+        assert!(loaded.is_none());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
     // 未書き込みキーの load はミス（`Ok(None)`）を返すこと。
     #[test]
     fn load_returns_none_when_entry_absent() {
@@ -2551,6 +2715,52 @@ mod tests {
         assert!(
             matches!(result, Err(CudaError::CacheDirUnavailable { .. })),
             "symlink resolving into workspace_root must be rejected after canonicalization"
+        );
+
+        let _ = fs::remove_dir_all(&workspace_root);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    // symlink 再検証（cfg(unix)）・実体化前チェック: `candidate_root`
+    // 自身ではなく**祖先**が symlink 経由で `workspace_root` 配下を指し、
+    // かつ `candidate_root` の末端（`nested/cache`）がまだ存在しない場合
+    // （イシュー #509 codex-review P0 指摘の具体的な再現ケース）でも、
+    // `fs::create_dir_all` を一切呼ばずに拒否すること（symlink 先＝
+    // workspace 内へ実際にディレクトリが作成されてしまう副作用がないこと
+    // を確認する）。
+    #[cfg(unix)]
+    #[test]
+    fn ensure_cache_root_in_rejects_ancestor_symlink_without_creating_anything_inside_workspace() {
+        let workspace_root = fresh_temp_dir("ancestor-symlink-workspace");
+        let real_target = workspace_root.join("evil-cache-inside-workspace");
+        fs::create_dir_all(&real_target).expect("must create symlink target inside workspace");
+
+        // symlink 自体は `workspace_root` の外に置く。
+        let outside_dir = fresh_temp_dir("ancestor-symlink-outside");
+        let ancestor_symlink = outside_dir.join("cache-symlink");
+        std::os::unix::fs::symlink(&real_target, &ancestor_symlink)
+            .expect("must create ancestor symlink pointing into workspace_root");
+
+        // `candidate_root` はこの symlink のさらに下（まだ存在しない）。
+        let candidate = ancestor_symlink.join("nested/cache/dir");
+        assert!(
+            !candidate.exists(),
+            "candidate must not exist yet to reproduce the pre-existing-ancestor scenario"
+        );
+
+        let result = ensure_cache_root_in(&candidate, &workspace_root);
+        assert!(
+            matches!(result, Err(CudaError::CacheDirUnavailable { .. })),
+            "ancestor symlink resolving into workspace_root must be rejected before any \
+             directory is created under it"
+        );
+
+        // 副作用がないこと: symlink 先（workspace 内）に `nested` 等が
+        // 実際に作られていないことを確認する。
+        assert!(
+            !real_target.join("nested").exists(),
+            "no directory must have been created inside workspace_root as a side effect of \
+             the rejected containment check"
         );
 
         let _ = fs::remove_dir_all(&workspace_root);
