@@ -539,11 +539,18 @@ impl SpecializedMmaKernelHandle {
     /// 検査を行わずに `clone_htod`／`alloc_zeros` を先に実行しており、
     /// 無効な起動引数でも GPU 転送・確保〈OOM 等〉が先に発生しえた）。
     /// これは `run_specialized_mma_f16` が呼び出し前に `validate_gemm_dims`
-    /// を行うのと同型の多層防御であり、device 側バッファ長・no-op・
-    /// アライメント・grid/k タイル境界の最終検証は引き続き
-    /// [`CompiledMmaKernel::launch_f16`]（唯一の真実源）が担う。本メソッド
-    /// はその検証を複製・代替しない。`Dynamic` 次元は起動ごとに異なる
-    /// 値を許容しうるため、同一ハンドルへ複数回呼べる設計とする。
+    /// を行うのと同型の多層防御であり、device 側バッファ長・アライメント・
+    /// grid/k タイル境界の最終検証は引き続き [`CompiledMmaKernel::launch_f16`]
+    /// （唯一の真実源）が担う。本メソッドはその検証を複製・代替しない。
+    /// `Dynamic` 次元は起動ごとに異なる値を許容しうるため、同一ハンドルへ
+    /// 複数回呼べる設計とする。
+    ///
+    /// `m==0 || n==0`・`k==0` の no-op 形状は `run_specialized_mma_f16`・
+    /// `gemm_mma.rs::CudaMmaGemm::run_f16` と同一契約で本メソッド自身が
+    /// 早期 return する（PR #685 Bugbot 再指摘〈Medium〉への対応。本メソッド
+    /// 実装のコメント参照）。`CompiledMmaKernel::launch_f16` は `k==0` を
+    /// 自身の no-op 契約に含めない設計のため、`k==0` の意味付けは呼び出し元
+    /// である本メソッドが担う。
     ///
     /// `device` を引数に取らず [`Self::compile`] 時に保持した
     /// `self.stream` のみを使う（本 struct ドキュメンテーションコメント
@@ -560,22 +567,37 @@ impl SpecializedMmaKernelHandle {
         self.cfg.validate_launch_shape(m, n, k)?;
         crate::gemm::validate_gemm_dims(a.len(), b.len(), m, n, k)?;
 
+        // no-op 形状（`m==0 || n==0`）・`k==0`（A/B が空の縮約次元となる
+        // ため C は全 0）は `gemm_mma.rs::CudaMmaGemm::run_f16`・
+        // `run_specialized_mma_f16`（本ファイル）と同一契約で、H2D 転送・
+        // カーネル起動そのものを回避して早期 return する（PR #685 Bugbot
+        // 再指摘〈Medium〉への対応: 従来は `k==0` の早期 return を欠いており、
+        // `m`/`n` が非ゼロなら常に `validate_mma_alignment` を実行していた
+        // ため、`(m,n,k)=(8,7,0)` のような有効な no-op〈`k==0` により
+        // C が全 0 となるべき形状〉が `n=7` の非整列を理由に誤って拒否
+        // されていた。`CompiledMmaKernel::launch_f16` は `k==0` を自身の
+        // no-op 契約に含めない設計〈同 struct doc comment 参照。カーネル
+        // 自体は `num_k_tiles=0` として起動しうる別経路〉のため、
+        // `k==0` の意味付け〈全 0 の C を返す no-op として扱うか〉は
+        // 呼び出し元がここで担う）。
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k == 0 {
+            return Ok(vec![f16::ZERO; (m as usize) * (n as usize)]);
+        }
+
         // `cp.async` 整列制約（`validate_mma_alignment`）・grid_dim.y 上限
         // （`validate_mma_grid_bounds`）も H2D 転送・出力アロケーションより
         // 前で fail-closed する（PR #685 Bugbot 指摘〈Medium〉への対応。
-        // 本メソッドドキュメンテーションコメント参照: 従来はこれらの検証を
+        // 本メソッドドキュメンテーションコメント参照: 従来はこの検査を
         // `CompiledMmaKernel::launch_f16` 内部〈転送後〉に委ねきっており、
         // 不正な `Dynamic` 起動でも先に `clone_htod`／`alloc_zeros` が発生
-        // しえた）。no-op 形状（`m==0 || n==0`）はアライメント制約の対象外
-        // （`gemm_mma.rs::CudaMmaGemm::run_f16`・`CompiledMmaKernel::launch_f16`
-        // ドキュメンテーションコメントと同じ根拠: 例えば `(m,n,k)=(0,7,0)`
-        // は有効な no-op 形状だが `n=7` が 8 の倍数でないため、no-op 判定
-        // より前にアライメント検証を行うと誤って拒否してしまう）ため、
-        // no-op 判定を先に行ってから適用する。
-        if m != 0 && n != 0 {
-            validate_mma_alignment(n, k)?;
-            validate_mma_grid_bounds(m)?;
-        }
+        // しえた）。上記の no-op／`k==0` 早期 return より後に置くことで、
+        // 有効な no-op 形状（例: `n` が 8 の倍数でない `(m,n,k)=(8,7,0)`）
+        // を誤って拒否しない。
+        validate_mma_alignment(n, k)?;
+        validate_mma_grid_bounds(m)?;
 
         let stream = &self.stream;
         let a_dev = stream.clone_htod(a)?;

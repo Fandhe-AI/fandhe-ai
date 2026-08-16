@@ -280,3 +280,43 @@ fn specialized_mma_f16_static_nk_reuses_across_dynamic_m() {
         );
     }
 }
+
+/// `k==0` no-op 形状（実機必須）: `SpecializedMmaKernelHandle::launch_f16`
+/// が `gemm_mma.rs::CudaMmaGemm::run_f16`・`run_specialized_mma_f16` と
+/// 同一契約で `k==0` を早期 return し、C を全 0 として返すことを確認する
+/// （PR #685 Bugbot 再指摘〈Medium〉への回帰テスト）。
+///
+/// `n=7`（8 の倍数ではない）を選び、修正前は no-op 判定を欠いたまま
+/// `validate_mma_alignment(n=7, k=0)` に到達して誤って `InvalidShape` を
+/// 返していたことを再現する（`gemm_mma.rs::tests::
+/// validate_mma_alignment_rejects_misaligned_n_independent_of_noop_shape`
+/// が単体で検査する非整列拒否と、`run_f16`／本テストが検査する「no-op
+/// 早期 return がその非整列拒否より前に効く」契約は別物である点に注意）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
+fn specialized_mma_f16_handles_k_zero_noop_with_misaligned_n() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+
+    let (m, n, k) = (8u32, 7u32, 0u32);
+    let handle = SpecializedMmaKernelHandle::compile(
+        &device,
+        GemmShape::new(m, n, k),
+        CompiledDims::DYNAMIC_ALL,
+    )
+    .expect("DYNAMIC_ALL specialization must compile on ignored test runner");
+
+    // k=0 のため A・B は空スライスでよい（`gemm::validate_gemm_dims` は
+    // m*k=0・k*n=0 の長さ一致を要求するのみ）。
+    let a: Vec<f16> = Vec::new();
+    let b: Vec<f16> = Vec::new();
+
+    let c = handle.launch_f16(&a, &b, m, n, k).expect(
+        "k==0 no-op shape (m=8, n=7, k=0) must succeed despite n not being a multiple of 8",
+    );
+
+    assert_eq!(
+        c,
+        vec![f16::ZERO; (m as usize) * (n as usize)],
+        "k==0 no-op shape must return an all-zero C"
+    );
+}
