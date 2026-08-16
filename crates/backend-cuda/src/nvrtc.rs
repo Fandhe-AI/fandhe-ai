@@ -859,23 +859,44 @@ const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(target_os = "macos")]
 const O_NOFOLLOW: i32 = 0x0100;
 
-/// `path` を `O_NOFOLLOW` 付きで開く（[`load_cache_entry_in`] 用。
-/// イシュー #509 codex-review P0 指摘対応）。
+/// Linux の `O_NONBLOCK`（`<fcntl.h>`。8 進数 `04000`）。[`open_nofollow`]
+/// ／[`openat_nofollow`] 用（イシュー #509 codex-review P0 指摘対応:
+/// キャッシュエントリの `kernel.cu`／`kernel.ptx` として FIFO 等の特殊
+/// ファイルを配置されると、`O_NONBLOCK` なしの `open` は writer 待ちで
+/// ハングしうる〈外部由来キャッシュエントリの種類検証欠落による DoS〉）。
+/// 正規ファイルに対しては `O_NONBLOCK` は open／read の挙動を変えない
+/// （POSIX `open(2)`）ため、通常のキャッシュ読み出しには影響しない。
+#[cfg(target_os = "linux")]
+const O_NONBLOCK: i32 = 0o4000;
+
+/// macOS（Darwin）の `O_NONBLOCK`（`<fcntl.h>` では `0x0004`）。上記
+/// Linux 版と同じ理由・同じ用途。
+#[cfg(target_os = "macos")]
+const O_NONBLOCK: i32 = 0x0004;
+
+/// `path` を `O_NOFOLLOW | O_NONBLOCK` 付きで開く（[`load_cache_entry_in`]
+/// 用。イシュー #509 codex-review P0 指摘対応）。
 ///
 /// 最終コンポーネントが symlink であれば `open(2)` 自体をカーネルが
 /// 拒否するため、「symlink でないことを確認してから読む」という 2 手順
 /// （`validate_cache_entry` → `read_to_string`）の間に symlink へ差し替え
 /// られる TOCTOU を、検証と読み取りを 1 回のシステムコールへ結合する
 /// ことで構造的に排除できる（返した [`fs::File`] ハンドルからそのまま
-/// 読み取ること。パスへ再度アクセスしない）。`custom_flags` は
-/// [`std::os::unix::fs::OpenOptionsExt`] 経由の std 標準機能であり
-/// 追加依存を要しない（[`O_NOFOLLOW`] 定数のコメント参照）。
+/// 読み取ること。パスへ再度アクセスしない）。`O_NONBLOCK` は FIFO 等の
+/// 特殊ファイルに対する open のハングを防ぐ（[`O_NONBLOCK`] 定数の
+/// コメント参照）。返した fd は必ず [`read_verified_cache_entry_file`]
+/// へ渡し、そこで fd 経由の `fstat`（symlink を追跡しない）により
+/// 「実際に通常ファイルか」を再検証してから読むこと（`O_NOFOLLOW` は
+/// symlink のみを拒否し FIFO・デバイス等の他の特殊ファイル種別は拒否
+/// しないため）。`custom_flags` は [`std::os::unix::fs::OpenOptionsExt`]
+/// 経由の std 標準機能であり追加依存を要しない（[`O_NOFOLLOW`] 定数の
+/// コメント参照）。
 #[cfg(unix)]
 fn open_nofollow(path: &Path) -> std::io::Result<fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     fs::OpenOptions::new()
         .read(true)
-        .custom_flags(O_NOFOLLOW)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
         .open(path)
 }
 
@@ -930,6 +951,134 @@ fn open_dir_nofollow(path: &Path) -> std::io::Result<fs::File> {
 fn proc_fd_path(dir: &fs::File) -> PathBuf {
     use std::os::unix::io::AsRawFd;
     PathBuf::from(format!("/proc/self/fd/{}", dir.as_raw_fd()))
+}
+
+/// POSIX `openat(2)` の FFI 宣言（macOS 版 [`load_cache_entry_in`] 用。
+/// イシュー #509 codex-review P0 再指摘〈TOCTOU〉対応）。
+///
+/// `libc`／`rustix` クレートは許容依存 8 区分（`.claude/rules/
+/// deps-policy.md`）外のためユーザー承認なしに追加できない（[`O_NOFOLLOW`]
+/// 定数のコメントと同じ制約）。一方 macOS の `/dev/fd/<fd>` は配下への
+/// パス継続解決をサポートしないため（[`proc_fd_path`] のドキュメン
+/// テーションコメント参照）、Linux 版と同じ「fd 経由でパス再解決を
+/// 避ける」手法を適用できない。そこで std のみでは到達できない `openat`
+/// システムコールを、新規クレートを追加せず `extern "C"` 宣言（libSystem
+/// が提供する libc シンボルへリンクする FFI 境界）で直接呼ぶ。`unsafe`
+/// は FFI 境界の必要最小限に留める方針（`.claude/rules/security.md`）に
+/// 沿い、本関数は [`openat_nofollow`] の内部でのみ使う。
+#[cfg(all(unix, not(target_os = "linux")))]
+unsafe extern "C" {
+    fn openat(
+        dirfd: std::os::raw::c_int,
+        pathname: *const std::os::raw::c_char,
+        flags: std::os::raw::c_int,
+    ) -> std::os::raw::c_int;
+}
+
+/// pin 済みディレクトリ fd（`open_dir_nofollow` で `O_NOFOLLOW |
+/// O_DIRECTORY` 付きで開いたもの）を起点に、`name`（1 コンポーネントの
+/// ファイル名。エントリ内は [`CACHE_ENTRY_SOURCE_FILE`]／
+/// [`CACHE_ENTRY_PTX_FILE`] の固定文字列のみを渡す）を `openat(2)` で
+/// 開く（macOS 版 [`load_cache_entry_in`] 用。イシュー #509 codex-review
+/// P0 再指摘対応）。
+///
+/// 呼び出し元は `dir` を一度だけ pin し、以降は本関数を介して `dir` を
+/// dirfd（起点）とした 1 コンポーネントの解決のみを行う。`entry_dir` を
+/// 表すパス文字列をルートから再度辿り直す経路が存在しないため、事前
+/// 検証（`open_dir_nofollow` 成功）後に `entry_dir` 自体を別 symlink へ
+/// 差し替える TOCTOU（旧実装は open 前後の `dev`/`ino` 比較という事後
+/// 検出に留まっていた）が構造的に発生しない。`O_NOFOLLOW`（最終
+/// コンポーネントの symlink を拒否）・`O_NONBLOCK`（FIFO 等特殊ファイルの
+/// open ハング防止。[`O_NONBLOCK`] 定数参照）を付与する。
+#[cfg(all(unix, not(target_os = "linux")))]
+fn openat_nofollow(dir: &fs::File, name: &str) -> std::io::Result<fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::io::{AsRawFd, FromRawFd};
+
+    let c_name = CString::new(name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cache entry file name must not contain a NUL byte",
+        )
+    })?;
+
+    // SAFETY: `dir` は `open_dir_nofollow` が返した、呼び出し元が所有し
+    // 本呼び出しの間生存させている有効なディレクトリ fd。`c_name` は
+    // 直前に構築した NUL 終端の有効な C 文字列で、`openat` 呼び出し中
+    // 生存する（`CString` はこのスコープを抜けるまでドロップされない）。
+    // `openat` は POSIX 標準のシステムコールで、`dirfd`（`dir` の fd 値）
+    // を起点に `pathname`（`name`）の 1 コンポーネントのみを解決する
+    // （`man 2 openat`）。戻り値は新規 fd（成功時 `>= 0`）または `-1`
+    // （失敗時。`errno` は `std::io::Error::last_os_error()` で読む）で
+    // あり、いずれも呼び出し直後にこの Rust コードへ制御を戻す前提を
+    // 満たす。
+    let fd = unsafe { openat(dir.as_raw_fd(), c_name.as_ptr(), O_NOFOLLOW | O_NONBLOCK) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    // SAFETY: `fd` は直前の `openat` 呼び出しが正常終了時（`fd >= 0` を
+    // 確認済み）に返した新規オープン fd で、他のどのハンドルにも所有
+    // されていない。`fs::File::from_raw_fd` はその所有権を一度だけ
+    // `fs::File` へ移す（以降のクローズ責務は返した `File` の Drop に
+    // 委ねる）。
+    Ok(unsafe { fs::File::from_raw_fd(fd) })
+}
+
+/// キャッシュエントリ 1 ファイルあたりの読み込み上限（バイト数。イシュー
+/// #509 codex-review P0 指摘対応）。
+///
+/// 書き込み可能なキャッシュディレクトリへ巨大ファイルを配置されるだけで
+/// `read_to_string`／`read_to_end` が EOF まで無制限に読み込み OOM に
+/// なりうる問題への対策。NVRTC が実際に生成する PTX・その変換元ソースは
+/// 通常数百 KiB 程度に収まるため、想定される最大カーネルサイズに十分な
+/// 余裕を持たせた値として 64 MiB を採用する。
+#[cfg(unix)]
+const MAX_CACHE_ENTRY_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// [`open_nofollow`]／[`openat_nofollow`] で開いた fd から、通常ファイル
+/// であることと読み込みサイズ上限（[`MAX_CACHE_ENTRY_FILE_BYTES`]）を
+/// 検証したうえでバイト列を読み込む（[`load_cache_entry_in`]（Linux／
+/// macOS 版）共用。イシュー #509 codex-review P0 指摘 2 件対応）。
+///
+/// 1. **特殊ファイル拒否**: `file.metadata()`（fd 経由の `fstat`。パスを
+///    再解決しないため symlink 差し替え TOCTOU の対象にならない）で
+///    `file_type().is_file()` を検証する。`O_NOFOLLOW` は symlink のみを
+///    拒否し FIFO・ソケット・デバイス等の他の特殊ファイル種別は拒否
+///    しないため、`kernel.cu`／`kernel.ptx` として FIFO を配置され
+///    `open` 自体は `O_NONBLOCK` により即座に成功してしまうケースを
+///    ここで検出し拒否する。
+/// 2. **サイズ上限**: 読み込み前に `metadata().len()` で事前検査した
+///    うえで、実際の読み込みも `Read::take` で上限 + 1 バイトに制限する
+///    （事前検査後にファイルが伸長される競合〈他プロセスが追記する等〉
+///    への縦深防御）。
+///
+/// いずれの拒否条件も「壊れたエントリはキャッシュミス扱いにする」という
+/// 本モジュールの既存方針（[`load_cache_entry_in`] のドキュメンテーション
+/// コメント参照）に合わせて `Ok(None)` を返す（エラーにはしない）。
+/// 一方 I/O 自体の失敗（読み込み中のエラー等）は `Err` として呼び出し元
+/// へ伝える（既存の `read_to_string` 呼び出しと同じ扱い）。
+#[cfg(unix)]
+fn read_verified_cache_entry_file(mut file: fs::File) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read;
+
+    let meta = file.metadata()?;
+    if !meta.file_type().is_file() {
+        return Ok(None);
+    }
+    if meta.len() > MAX_CACHE_ENTRY_FILE_BYTES {
+        return Ok(None);
+    }
+
+    let mut buf = Vec::new();
+    (&mut file)
+        .take(MAX_CACHE_ENTRY_FILE_BYTES + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_CACHE_ENTRY_FILE_BYTES {
+        return Ok(None);
+    }
+
+    Ok(Some(buf))
 }
 
 /// ファイルを fsync する（[`write_entry_files`] が書き込み直後に呼ぶ）。
@@ -1546,23 +1695,28 @@ pub(crate) fn store_cache_entry(
 // [`proc_fd_path`]（`/proc/self/fd/<fd>`）経由でのみ 2 ファイルを開く。
 // fd は pin 済みの実体を直接指すため、事前 open 後にパスを再解決する
 // 余地がなく「中間ディレクトリの差し替え」という TOCTOU の窓自体が
-// 存在しない（`cfg(all(unix, not(target_os = "linux")))` 分岐に残る
-// macOS 版は、`O_NOFOLLOW` でファイル自体の symlink 化を拒否しつつ、
-// 中間コンポーネント差し替えは open 前後の `dev`/`ino` 一致検査という
-// 事後検出に留まる旧方式のまま。理由は [`proc_fd_path`] のドキュメン
-// テーションコメント参照: macOS の `/dev/fd/<fd>` は配下へのパス継続
-// 解決をサポートしないため fd 起点手法を適用できない）。
+// 存在しない。`cfg(all(unix, not(target_os = "linux")))` 分岐（macOS 版）
+// も、旧方式（open 前後の `dev`/`ino` 一致検査という事後検出）から
+// [`openat_nofollow`]（`openat(2)` の FFI 直接呼び出し）による fd 起点
+// 解決へ置き換え済み（イシュー #509 codex-review P0 再指摘対応）。
+// パス再解決自体が発生しないため Linux 版と同様に TOCTOU の窓が構造的に
+// 存在しない（[`openat_nofollow`] のドキュメンテーションコメント参照）。
 //
-// `libc`／`rustix` の `openat`（fd 起点でパス再解決を避ける方式）は
-// 許容依存 8 区分（`.claude/rules/deps-policy.md`）外のためユーザー
-// 承認なしに追加できず、std のみで完結させている。
+// いずれの版も [`read_verified_cache_entry_file`] で fd 経由の `fstat`
+// による通常ファイル種別検証（FIFO 等の特殊ファイル拒否。イシュー #509
+// codex-review P0 指摘対応）と読み込みサイズ上限
+// （[`MAX_CACHE_ENTRY_FILE_BYTES`]。同 P0 指摘対応）を共通で適用する。
+//
+// `libc`／`rustix` は許容依存 8 区分（`.claude/rules/deps-policy.md`）外
+// のためユーザー承認なしに追加できない。Linux 版は `/proc/self/fd/<fd>`
+// （std のみ）、macOS 版は `openat` の `extern "C"` FFI 宣言（新規クレート
+// 追加なし。[`openat_nofollow`] 参照）でそれぞれ fd 起点解決を実現して
+// いる。
 #[cfg(target_os = "linux")]
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
 ) -> Result<Option<CachedKernel>, CudaError> {
-    use std::io::Read;
-
     let entry_dir = cache_entry_path_in(root, key)?;
 
     // エントリディレクトリ自体を `O_NOFOLLOW | O_DIRECTORY` で一度だけ
@@ -1575,27 +1729,33 @@ fn load_cache_entry_in(
     };
 
     let magic = proc_fd_path(&dir);
-    let mut cu_file = match open_nofollow(&magic.join(CACHE_ENTRY_SOURCE_FILE)) {
+    let cu_file = match open_nofollow(&magic.join(CACHE_ENTRY_SOURCE_FILE)) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
-    let mut ptx_file = match open_nofollow(&magic.join(CACHE_ENTRY_PTX_FILE)) {
+    let ptx_file = match open_nofollow(&magic.join(CACHE_ENTRY_PTX_FILE)) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
 
-    let mut kernel_cu = String::new();
-    cu_file
-        .read_to_string(&mut kernel_cu)
-        .map_err(|e| CudaError::CacheIo {
+    let kernel_cu =
+        match read_verified_cache_entry_file(cu_file).map_err(|e| CudaError::CacheIo {
             detail: format!("failed to read cached kernel source: {e}"),
-        })?;
-    let mut kernel_ptx = String::new();
-    ptx_file
-        .read_to_string(&mut kernel_ptx)
-        .map_err(|e| CudaError::CacheIo {
+        })? {
+            Some(bytes) => String::from_utf8(bytes).map_err(|e| CudaError::CacheIo {
+                detail: format!("cached kernel source is not valid UTF-8: {e}"),
+            })?,
+            None => return Ok(None),
+        };
+    let kernel_ptx =
+        match read_verified_cache_entry_file(ptx_file).map_err(|e| CudaError::CacheIo {
             detail: format!("failed to read cached kernel ptx: {e}"),
-        })?;
+        })? {
+            Some(bytes) => String::from_utf8(bytes).map_err(|e| CudaError::CacheIo {
+                detail: format!("cached kernel ptx is not valid UTF-8: {e}"),
+            })?,
+            None => return Ok(None),
+        };
 
     Ok(Some(CachedKernel {
         kernel_cu,
@@ -1607,65 +1767,56 @@ fn load_cache_entry_in(
 /// 実装（イシュー #509 codex-review P0 再指摘対応）。
 ///
 /// macOS の `/dev/fd/<fd>` は配下へのパス継続解決をサポートしないため
-/// Linux 版の fd 起点手法を適用できない（[`proc_fd_path`] のドキュメン
-/// テーションコメント参照）。[`open_nofollow`]（`O_NOFOLLOW`）でファイル
-/// 自体の symlink 化を open(2) 時点でカーネルに拒否させつつ、中間
-/// コンポーネント（エントリディレクトリ自体）の差し替えは open 前後の
-/// `dev`/`ino` 一致検査という**事後検出**に留まる。
+/// Linux 版の `/proc/self/fd/<fd>` 手法は適用できない（[`proc_fd_path`]
+/// のドキュメンテーションコメント参照）。代わりに [`openat_nofollow`]
+/// （`openat(2)` の FFI 直接呼び出し）でエントリディレクトリの pin 済み
+/// fd を起点に 2 ファイルを開くため、Linux 版と同様にパス再解決自体が
+/// 発生せず、事前検証後に `entry_dir` を別 symlink へ差し替える TOCTOU
+/// （旧実装は open 前後の `dev`/`ino` 一致検査という事後検出に留まって
+/// いた）が構造的に発生しない。
 #[cfg(all(unix, not(target_os = "linux")))]
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
 ) -> Result<Option<CachedKernel>, CudaError> {
-    use std::io::Read;
-    use std::os::unix::fs::MetadataExt;
-
     let entry_dir = cache_entry_path_in(root, key)?;
 
-    // 事前検証: エントリディレクトリ自体が symlink でない通常ディレクト
-    // リであること。以降の open がこの同一ディレクトリに対してであった
-    // ことを事後検証するため `dev`/`ino` を記録する。
-    let pre_meta = match fs::symlink_metadata(&entry_dir) {
-        Ok(meta) => meta,
-        Err(_) => return Ok(None),
-    };
-    if !pre_meta.file_type().is_dir() {
-        return Ok(None);
-    }
-    let (pre_dev, pre_ino) = (pre_meta.dev(), pre_meta.ino());
-
-    let mut cu_file = match open_nofollow(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE)) {
-        Ok(f) => f,
-        Err(_) => return Ok(None),
-    };
-    let mut ptx_file = match open_nofollow(&entry_dir.join(CACHE_ENTRY_PTX_FILE)) {
+    // エントリディレクトリ自体を `O_NOFOLLOW | O_DIRECTORY` で一度だけ
+    // 開き fd を pin する（Linux 版と同じ理由）。以降は本 fd を dirfd と
+    // した `openat_nofollow` でのみ 2 ファイルを開くため、`entry_dir` の
+    // パス文字列へ再度アクセスすることはない。
+    let dir = match open_dir_nofollow(&entry_dir) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
 
-    // 事後の再検証: 2 回の open の前後でエントリディレクトリ自体が
-    // 別物（symlink・別ディレクトリ）へ差し替えられていないことを
-    // `dev`/`ino` 一致で確認する。
-    let post_meta = match fs::symlink_metadata(&entry_dir) {
-        Ok(meta) => meta,
+    let cu_file = match openat_nofollow(&dir, CACHE_ENTRY_SOURCE_FILE) {
+        Ok(f) => f,
         Err(_) => return Ok(None),
     };
-    if !post_meta.file_type().is_dir() || post_meta.dev() != pre_dev || post_meta.ino() != pre_ino {
-        return Ok(None);
-    }
+    let ptx_file = match openat_nofollow(&dir, CACHE_ENTRY_PTX_FILE) {
+        Ok(f) => f,
+        Err(_) => return Ok(None),
+    };
 
-    let mut kernel_cu = String::new();
-    cu_file
-        .read_to_string(&mut kernel_cu)
-        .map_err(|e| CudaError::CacheIo {
+    let kernel_cu =
+        match read_verified_cache_entry_file(cu_file).map_err(|e| CudaError::CacheIo {
             detail: format!("failed to read cached kernel source: {e}"),
-        })?;
-    let mut kernel_ptx = String::new();
-    ptx_file
-        .read_to_string(&mut kernel_ptx)
-        .map_err(|e| CudaError::CacheIo {
+        })? {
+            Some(bytes) => String::from_utf8(bytes).map_err(|e| CudaError::CacheIo {
+                detail: format!("cached kernel source is not valid UTF-8: {e}"),
+            })?,
+            None => return Ok(None),
+        };
+    let kernel_ptx =
+        match read_verified_cache_entry_file(ptx_file).map_err(|e| CudaError::CacheIo {
             detail: format!("failed to read cached kernel ptx: {e}"),
-        })?;
+        })? {
+            Some(bytes) => String::from_utf8(bytes).map_err(|e| CudaError::CacheIo {
+                detail: format!("cached kernel ptx is not valid UTF-8: {e}"),
+            })?,
+            None => return Ok(None),
+        };
 
     Ok(Some(CachedKernel {
         kernel_cu,
@@ -1676,27 +1827,36 @@ fn load_cache_entry_in(
 /// 非 Unix 向けフォールバック（本クレートのビルド対象は Linux/macOS の
 /// みのため通常到達しない。[`fsync_dir`] の非 Unix 分岐と同じ判断）。
 /// `O_NOFOLLOW` 相当の std API を持たないため、上記 Unix 版と異なり
-/// [`validate_cache_entry`]（パスベース検証）に読み取り前確認を留める
-/// （既存動作を維持。TOCTOU 対策強化は Unix 版のみ）。
+/// TOCTOU 対策強化は適用されない（既存動作を維持）。読み込みサイズ上限
+/// （イシュー #509 codex-review P0 指摘対応）のみ、パスベースの
+/// `fs::metadata`（事前検査。TOCTOU の窓は残るが Unix 版と同じ定数値
+/// 由来の上限）で最小限追加する。
 #[cfg(not(unix))]
 fn load_cache_entry_in(
     root: &Path,
     key: &CudaKernelCacheKey,
 ) -> Result<Option<CachedKernel>, CudaError> {
+    const MAX_CACHE_ENTRY_FILE_BYTES: u64 = 64 * 1024 * 1024;
+
     let entry_dir = cache_entry_path_in(root, key)?;
     if !validate_cache_entry(&entry_dir) {
         return Ok(None);
     }
 
-    let kernel_cu = fs::read_to_string(entry_dir.join(CACHE_ENTRY_SOURCE_FILE)).map_err(|e| {
-        CudaError::CacheIo {
-            detail: format!("failed to read cached kernel source: {e}"),
+    let cu_path = entry_dir.join(CACHE_ENTRY_SOURCE_FILE);
+    let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
+    for path in [&cu_path, &ptx_path] {
+        match fs::metadata(path) {
+            Ok(meta) if meta.is_file() && meta.len() <= MAX_CACHE_ENTRY_FILE_BYTES => {}
+            _ => return Ok(None),
         }
+    }
+
+    let kernel_cu = fs::read_to_string(&cu_path).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to read cached kernel source: {e}"),
     })?;
-    let kernel_ptx = fs::read_to_string(entry_dir.join(CACHE_ENTRY_PTX_FILE)).map_err(|e| {
-        CudaError::CacheIo {
-            detail: format!("failed to read cached kernel ptx: {e}"),
-        }
+    let kernel_ptx = fs::read_to_string(&ptx_path).map_err(|e| CudaError::CacheIo {
+        detail: format!("failed to read cached kernel ptx: {e}"),
     })?;
 
     Ok(Some(CachedKernel {
@@ -3019,6 +3179,80 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    // 特殊ファイル拒否（イシュー #509 codex-review P0 指摘対応。
+    // `cfg(unix)`）: `kernel.ptx` を FIFO（named pipe）に差し替えると、
+    // `O_NONBLOCK` なしの旧実装では writer 不在のまま `open` がハングし
+    // うる（DoS）。本テストは `load_cache_entry_in` の呼び出しを別
+    // スレッドで実行し、有界時間内に `Ok(None)`（ミス扱い。ハングせず
+    // 拒否）で返ることを検証する。ハングした場合はスレッド join が
+    // タイムアウトしテストを fail させる（無限ハングでテストプロセス
+    // 自体が停止するのを防ぐ）。
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_fifo_cache_entry_file_without_hanging() {
+        let root = fresh_temp_dir("fifo-entry-ptx");
+        let key = sample_key();
+
+        let entry_dir = store_cache_entry_in(&root, &key, "kernel source", "legit ptx")
+            .expect("store must succeed");
+
+        let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
+        fs::remove_file(&ptx_path).expect("must remove legit ptx file before replacing");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&ptx_path)
+            .status()
+            .expect("mkfifo command must be spawnable in the test environment");
+        assert!(status.success(), "mkfifo must succeed");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let root_for_thread = root.clone();
+        std::thread::spawn(move || {
+            let result = load_cache_entry_in(&root_for_thread, &sample_key());
+            // reader が存在しないためテスト終了後も FIFO の open を試みる
+            // 別プロセス/スレッドが残らないよう、成否に関わらず結果だけ
+            // 送る（本スレッド自体は fn 終了で自然に終わる）。
+            let _ = tx.send(result);
+        });
+
+        let result = rx.recv_timeout(std::time::Duration::from_secs(10)).expect(
+            "load_cache_entry_in must return within a bounded time \
+                 (a FIFO cache entry must never hang the open call)",
+        );
+        let loaded = result.expect("load must not error, only miss");
+        assert!(
+            loaded.is_none(),
+            "load must treat a FIFO-replaced entry as a cache miss, never read from it"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // 読み込みサイズ上限（イシュー #509 codex-review P0 指摘対応。
+    // `cfg(unix)`）: `kernel.ptx` を [`MAX_CACHE_ENTRY_FILE_BYTES`] 超の
+    // 巨大ファイルへ差し替えても、`load_cache_entry_in` が無制限に読み
+    // 込まず `Ok(None)`（ミス扱い）で拒否すること。
+    #[cfg(unix)]
+    #[test]
+    fn load_rejects_oversized_cache_entry_file() {
+        let root = fresh_temp_dir("oversized-entry-ptx");
+        let key = sample_key();
+
+        let entry_dir = store_cache_entry_in(&root, &key, "kernel source", "legit ptx")
+            .expect("store must succeed");
+
+        let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
+        let oversized = vec![b'A'; (MAX_CACHE_ENTRY_FILE_BYTES + 1) as usize];
+        fs::write(&ptx_path, &oversized).expect("must write oversized ptx file");
+
+        let loaded = load_cache_entry_in(&root, &key).expect("load must not error, only miss");
+        assert!(
+            loaded.is_none(),
+            "load must treat an oversized entry file as a cache miss, never read it unbounded"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     // [`open_nofollow`]（[`O_NOFOLLOW`]）が実行プラットフォーム上で実際に
