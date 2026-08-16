@@ -41,6 +41,16 @@ REQ-8 の CUDA f32 行（対 PyTorch 比 25.64%・`wmma_tf32` opt 経路。`docs
 validate_wmma_tf32_staged_config_accepts_default_and_rejects_smem_overflow` が既定構成の受理と
 `stages=8`（130,048B。上限超過）の拒否を単体テストで固定する）。
 
+**`stages` の上限は SMEM 予算だけでは決まらない**（codex-review 指摘）。ループ内 `cp.async.wait_group
+(STAGES-2)` の即値は PTX 上 0〜7 の範囲に制限されるため、`stages <= 9` が別枠の必須条件になる。
+block_m/block_n/k_tile を warp タイル辺（32）・FRAG_K（8）まで小さくした構成では、SMEM 予算内のまま
+`stages` を 10 以上へ増やせてしまい、SMEM 検査のみでは `render_wmma_tf32_staged` が成功したうえで
+NVRTC コンパイルの段階まで無効な PTX であることが判明しない。`validate_wmma_tf32_staged_config` は
+`stages - 2 > 7` を独立に fail-closed 拒否し、`kernels_wmma_opt::tests::
+validate_wmma_tf32_staged_config_rejects_stages_exceeding_wait_group_bound`／
+`..._accepts_stages_at_wait_group_bound` が最小タイル構成（block_m=block_n=32, k_tile=8）で
+`stages=10` の拒否・`stages=9` の受理（境界値）を単体テストで固定する。
+
 BN=128（B-3 適用時の試算）: `as_tile` 30,720B（`block_m=128, a_pad=20`）+ `bs_tile` 13,056B（k_tile/b_pad
 は N のみ拡大なら b_pad=132 で `3*16*132*4`=25,344B）+ `c_tile` 65,536B（128×128×4B）で合計 121,600B 超
 （実際には BM/BN 双方拡大でさらに増える）。48KiB を大きく超過するため B-3 は除外（2 節）。

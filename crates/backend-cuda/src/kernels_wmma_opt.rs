@@ -1371,6 +1371,25 @@ fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<
             cfg.stages
         )));
     }
+    // `cp.async.wait_group N` の N は PTX 上 0〜7 の即値レンジに制限される
+    // （codex-review 指摘: SMEM 予算チェックのみでは block_m/block_n/k_tile
+    // を小さくした構成で stages を大きく取れてしまい、SMEM 予算内のまま
+    // wait_group の即値レンジを超過しうる。上記 `stages < 2` チェックの
+    // 直後で `stages - 2` の下限側非負性は既に保証済みのため、ここでは
+    // 上限側のみを検査すれば安全に減算できる）。この検査を欠くと
+    // `render_wmma_tf32_staged` 自体は成功し、NVRTC コンパイルの時点まで
+    // 無効な PTX であることが判明しない（fail-closed の趣旨に反する）。
+    const CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE: u32 = 7;
+    if cfg.stages - 2 > CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE {
+        return Err(invalid(format!(
+            "stages ({}) is too large: cp.async.wait_group (STAGES-2) immediate ({}) exceeds \
+             PTX's {CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE} upper bound for pending group count \
+             (stages must be <= {})",
+            cfg.stages,
+            cfg.stages - 2,
+            CP_ASYNC_WAIT_GROUP_MAX_IMMEDIATE + 2
+        )));
+    }
     if !cfg.block_m.is_multiple_of(warp_tile) || !cfg.block_n.is_multiple_of(warp_tile) {
         return Err(invalid(format!(
             "block_m ({}) and block_n ({}) must both be multiples of WARP_TILE ({warp_tile})",
@@ -3009,6 +3028,50 @@ mod tests {
         assert!(
             matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
             "stages=1 が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_config`] のフェイルクローズド検証:
+    /// `cp.async.wait_group (STAGES-2)` の即値は PTX 上 0〜7 の範囲に
+    /// 制限されるため `stages > 9` を拒否することを確認する
+    /// （codex-review 指摘: SMEM 予算チェックのみでは block_m/block_n/
+    /// k_tile を小さくした構成で stages を大きく取れてしまい、この
+    /// wait_group 即値レンジの検査を素通りしうる。ここでは意図的に
+    /// warp タイル辺の最小構成〈block_m=block_n=WARP_TILE, k_tile=FRAG_K〉
+    /// を使い、SMEM 予算内のまま stages=10 が拒否されることを示す）。
+    #[test]
+    fn validate_wmma_tf32_staged_config_rejects_stages_exceeding_wait_group_bound() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            block_m: WMMA_TF32_STAGED_WARP_TILE,
+            block_n: WMMA_TF32_STAGED_WARP_TILE,
+            k_tile: WMMA_TF32_STAGED_FRAG_K,
+            stages: 10, // stages-2=8 > wait_group 即値上限 7
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "SMEM 予算内だが stages=10（wait_group 即値上限超過）が拒否されませんでした: \
+             {result:?}"
+        );
+    }
+
+    /// 上記の境界値検査: `stages=9`（`stages-2=7` は wait_group 即値上限
+    /// ちょうど）は同じ最小構成で受理されることを確認する（過剰拒否を
+    /// 防ぐ境界値テスト）。
+    #[test]
+    fn validate_wmma_tf32_staged_config_accepts_stages_at_wait_group_bound() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            block_m: WMMA_TF32_STAGED_WARP_TILE,
+            block_n: WMMA_TF32_STAGED_WARP_TILE,
+            k_tile: WMMA_TF32_STAGED_FRAG_K,
+            stages: 9, // stages-2=7 == wait_group 即値上限
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            result.is_ok(),
+            "SMEM 予算内かつ wait_group 即値上限ちょうどの stages=9 が拒否されました: {result:?}"
         );
     }
 
