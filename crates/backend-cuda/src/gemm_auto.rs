@@ -463,15 +463,41 @@ pub fn specialized_mma_descriptor(
 /// （本モジュール §スコープ境界参照。LRU キャッシュによる再利用結線は
 /// C-4・#511 のスコープ）dead-code 解析が誤検知するため
 /// `#[allow(dead_code)]` を付す（[`dim_specs_for`] と同じ理由）。
+///
+/// `stream` は [`Self::compile`] 実行時（NVRTC コンパイル・
+/// `load_module`／`load_function`）に使った `device` の
+/// `Arc<CudaStream>`（延いては `Arc<CudaContext>`）をハンドル内に
+/// 保持し、[`Self::launch_f16`] は常にこの `stream` のみで起動する
+/// （PR #685 codex-review 指摘〈P0〉への対応: 従来は `launch_f16` が
+/// 呼び出しごとに任意の `&CudaDevice` を受け取っており、safe な公開
+/// API から `compiled.func`〈コンパイル元 context 由来〉と別 context
+/// の `stream`／デバイスバッファを渡して起動できてしまっていた。
+/// `CudaFunction` はロード元 `CudaContext` に紐付き、別 context の
+/// stream・バッファで起動する不変条件違反は cudarc の型では検出
+/// されない〈`kernels_mma.rs::CompiledMmaKernel::launch_f16` の
+/// `// SAFETY:` 根拠もバッファ長の一致のみを扱い、context 同一性は
+/// 前提としていた〉。コンパイル元の `stream` をハンドル内に固定し
+/// 起動時の外部入力から外すことで、この不変条件を型・構造の両面で
+/// 強制する）。
 #[allow(dead_code)]
 pub struct SpecializedMmaKernelHandle {
     compiled: CompiledMmaKernel,
+    stream: std::sync::Arc<cudarc::driver::CudaStream>,
+    /// [`Self::compile`] が構築した特化 config（[`specialized_mma_config`]）。
+    /// [`Self::launch_f16`] が H2D 転送・出力確保より前に
+    /// `validate_launch_shape` で形状検証するための保持（codex-review
+    /// P2 指摘への対応。本 struct ドキュメンテーションコメント参照）。
+    cfg: MmaKernelConfig,
 }
 
 #[allow(dead_code)]
 impl SpecializedMmaKernelHandle {
     /// `shape`・`compiled` から特化 config を構築し（[`specialized_mma_config`]）
     /// NVRTC コンパイルまで完了させる（[`RenderedMmaKernel::compile`]）。
+    /// コンパイルに使った `device` の `stream`（`Arc<CudaStream>`）を
+    /// ハンドル内に保持し、以降の [`Self::launch_f16`] 呼び出しは常に
+    /// この `stream`（延いては同一 `CudaContext`）でのみ起動する
+    /// （本 struct ドキュメンテーションコメント参照）。
     ///
     /// `compiled` が `Dynamic` としている次元は `shape` の対応する値が
     /// 何であっても焼き込みに影響しない（[`dim_specs_for`] 参照）ため、
@@ -486,29 +512,46 @@ impl SpecializedMmaKernelHandle {
         shape: GemmShape,
         compiled: CompiledDims,
     ) -> Result<Self, CudaError> {
-        let (_cfg, rendered) = specialized_mma_config(shape, compiled)?;
+        let (cfg, rendered) = specialized_mma_config(shape, compiled)?;
         let compiled_kernel = rendered.compile(device)?;
         Ok(Self {
             compiled: compiled_kernel,
+            stream: std::sync::Arc::clone(device.stream()),
+            cfg,
         })
     }
 
-    /// コンパイル済みカーネルを `a`/`b`/`m`/`n`/`k` で起動する（H2D 転送
-    /// → [`CompiledMmaKernel::launch_f16`] → D2H 回収）。形状検証・
-    /// no-op（`m==0 || n==0`）判定・`Static` 次元と実引数の不一致検査は
-    /// すべて [`CompiledMmaKernel::launch_f16`] 内部（唯一の真実源）に
-    /// 委譲し、本メソッドで複製しない。`Dynamic` 次元は起動ごとに異なる
+    /// コンパイル済みカーネルを `a`/`b`/`m`/`n`/`k` で起動する（先行検証
+    /// → H2D 転送 → [`CompiledMmaKernel::launch_f16`] → D2H 回収）。
+    ///
+    /// 転送・出力確保より前に `self.cfg.validate_launch_shape`・
+    /// `crate::gemm::validate_gemm_dims`（host 側スライス長）で早期
+    /// fail-closed する（codex-review P2 指摘への対応: 従来はこの
+    /// 検査を行わずに `clone_htod`／`alloc_zeros` を先に実行しており、
+    /// 無効な起動引数でも GPU 転送・確保〈OOM 等〉が先に発生しえた）。
+    /// これは `run_specialized_mma_f16` が呼び出し前に `validate_gemm_dims`
+    /// を行うのと同型の多層防御であり、device 側バッファ長・no-op・
+    /// アライメント・grid/k タイル境界の最終検証は引き続き
+    /// [`CompiledMmaKernel::launch_f16`]（唯一の真実源）が担う。本メソッド
+    /// はその検証を複製・代替しない。`Dynamic` 次元は起動ごとに異なる
     /// 値を許容しうるため、同一ハンドルへ複数回呼べる設計とする。
+    ///
+    /// `device` を引数に取らず [`Self::compile`] 時に保持した
+    /// `self.stream` のみを使う（本 struct ドキュメンテーションコメント
+    /// 参照。呼び出し元がコンパイル元と異なる `CudaDevice`／`stream` を
+    /// 持ち込める経路を型で塞ぐ）。
     pub fn launch_f16(
         &self,
-        device: &CudaDevice,
         a: &[f16],
         b: &[f16],
         m: u32,
         n: u32,
         k: u32,
     ) -> Result<Vec<f16>, CudaError> {
-        let stream = device.stream();
+        self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a.len(), b.len(), m, n, k)?;
+
+        let stream = &self.stream;
         let a_dev = stream.clone_htod(a)?;
         let b_dev = stream.clone_htod(b)?;
         let mut c_dev = stream.alloc_zeros::<f16>((m as usize) * (n as usize))?;
@@ -572,7 +615,7 @@ pub fn run_specialized_mma_f16(
 
     let shape = GemmShape::new(m, n, k);
     let handle = SpecializedMmaKernelHandle::compile(device, shape, compiled)?;
-    handle.launch_f16(device, a, b, m, n, k)
+    handle.launch_f16(a, b, m, n, k)
 }
 
 /// [`enumerate_tile_candidates`] の 1 候補分の枝刈り判定＋構築（規則

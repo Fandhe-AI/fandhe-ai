@@ -222,16 +222,13 @@ fn specialized_mma_f16_static_mnk_rejects_mismatched_launch_shape() {
     // （fail-closed 判定が過剰拒否していないことの健全性確認）。
     let (a_match, b_match) = gen_ab(4242, compiled_m, compiled_n, compiled_k);
     handle
-        .launch_f16(
-            &device, &a_match, &b_match, compiled_m, compiled_n, compiled_k,
-        )
+        .launch_f16(&a_match, &b_match, compiled_m, compiled_n, compiled_k)
         .expect("launch with matching (m, n, k) must succeed");
 
     // M のみ不一致（64 != 65）の起動は InvalidKernelConfig で拒否される。
     let mismatched_m = compiled_m - 1;
     let (a_mismatch, b_mismatch) = gen_ab(4243, mismatched_m, compiled_n, compiled_k);
     let result = handle.launch_f16(
-        &device,
         &a_mismatch,
         &b_mismatch,
         mismatched_m,
@@ -270,11 +267,9 @@ fn specialized_mma_f16_static_nk_reuses_across_dynamic_m() {
         let seed = 4300 + idx as u64;
         let (a, b) = gen_ab(seed, m, n, k);
 
-        let specialized_c = handle
-            .launch_f16(&device, &a, &b, m, n, k)
-            .unwrap_or_else(|err| {
-                panic!("m={m}: SpecializedMmaKernelHandle::launch_f16 failed: {err}")
-            });
+        let specialized_c = handle.launch_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
+            panic!("m={m}: SpecializedMmaKernelHandle::launch_f16 failed: {err}")
+        });
 
         let c_ref_rounded = cpu_reference_f32(&a, &b, m, n, k);
         let c_specialized_f32: Vec<f32> = specialized_c.iter().map(|x| x.to_f32()).collect();
