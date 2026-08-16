@@ -1392,26 +1392,42 @@ mod tests {
             (tiles_n, tiles_m)
         };
         assert_eq!(tiled_dispatch_grid(tiles_n, tiles_m), expected);
-        // 既定 `SWIZZLE_ENABLED=false` の間は恒等（素朴な div_ceil 由来の
-        // grid）であることを明示的にロックする。
-        //
-        // cursor[bot] 指摘対応（PR #661 review_r3791409328）: 以前はこの
-        // ロックを `const { assert!(!SWIZZLE_ENABLED, ..) }`（コンパイル時
-        // アサーション）で実装していたが、`docs/perf/metal-gemm-tgid-
-        // swizzle-ab.md` の A/B 計測手順が指示する「実機セッションで
-        // `SWIZZLE_ENABLED` を一時的に `true` へ書き換えてから `cargo test
-        // --release -- --ignored` で数値一致 parity テストを実行する」操作を
-        // 行うと、この crate 全体（本テストを含む）がコンパイル不能になり
-        // 手順どおりに検証できなくなっていた（コンパイル時アサーションは
-        // 選択的にテストを skip しても回避できない）。ロックの対象は
-        // 「既定値 `SWIZZLE_ENABLED=false` のときの分岐挙動」であり、
-        // `SWIZZLE_ENABLED=true` 時（A/B 計測の一時的なローカル変更）は
-        // このロック自体を検査対象外とすれば足りる（`true` のまま誤って
-        // コミットされた場合の防御は、本テスト冒頭の `expected` 分岐が
-        // 依然として現在値に追従して検査するため失われない）。
-        if !SWIZZLE_ENABLED {
-            assert_eq!(tiled_dispatch_grid(tiles_n, tiles_m), (tiles_n, tiles_m));
-        }
+    }
+
+    /// `SWIZZLE_ENABLED` の**コミット状態既定値**が `false` に固定されて
+    /// いることを恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）でロックする
+    /// 独立テスト（PR #661 codex-review・Cursor Bugbot 指摘対応:
+    /// review_r3791409328 と同一箇所を指す独立指摘 2 件。「SWIZZLE_ENABLED
+    /// の誤有効化をテストが検出できない」）。
+    ///
+    /// [`tiled_dispatch_grid_matches_swizzle_enabled_gate`] の `expected` は
+    /// 現在の `SWIZZLE_ENABLED` 値へ追従して分岐を選ぶため、`true` のまま
+    /// 誤ってコミットされてもあの assert 自体は通ってしまう（分岐選択の
+    /// 正しさしか検査していない）。本テストはそれとは別に、**恒等変換を
+    /// 無条件に固定値で assert する**ことで「今のビルドで
+    /// `SWIZZLE_ENABLED` が実際どちらの値でコンパイルされたか」を検出する。
+    ///
+    /// あえてコンパイル時 `const { assert!(...) }` にはしない
+    /// （review_r3791409328 の教訓）: `docs/perf/metal-gemm-tgid-swizzle-
+    /// ab.md` の A/B 計測手順は実機セッションで `SWIZZLE_ENABLED` を一時的に
+    /// `true` へ書き換えたうえで `cargo test --release -- --ignored`
+    /// （ignored テストのみ選択実行）を叩く運用のため、コンパイル時
+    /// アサーションだとその一時変更のたびに crate 全体がビルド不能になり
+    /// 計測できなくなる。本テストは通常の `#[test]`（非 `#[ignore]`）の
+    /// ため `--ignored` フィルタでは実行対象外となり A/B 計測時の妨げには
+    /// ならない一方、通常 CI（`cargo test`。SWIZZLE_ENABLED=true のまま
+    /// 誤コミットされた状態を含む）では必ず実行され、`true` のままの
+    /// コミットを実行時 panic で確実に検出する。
+    #[test]
+    fn tiled_dispatch_grid_is_identity_by_default() {
+        let (tiles_n, tiles_m) = (3usize, 9usize);
+        assert_eq!(
+            tiled_dispatch_grid(tiles_n, tiles_m),
+            (tiles_n, tiles_m),
+            "SWIZZLE_ENABLED が true のままコミットされている疑いがあります。\
+             実機未検証のスウィズルは本番既定 false に固定する契約です \
+             （tile.rs 冒頭の SWIZZLE_ENABLED doc comment・PR #661 参照）。"
+        );
     }
 
     // --- shaders/gemm.metal のスウィズル証跡検査（イシュー #540・PR #661
