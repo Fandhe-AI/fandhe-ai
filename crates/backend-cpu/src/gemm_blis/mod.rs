@@ -73,7 +73,7 @@ use rayon::prelude::*;
 /// コンパイル時に検査する）。
 ///
 /// #557 により、完全タイル（`mr_eff == MR && nr_eff == NR`）は C の実
-/// バッファへ [`Microkernel::run`] の `ldc` 契約経由で直接ロード/ストア
+/// バッファへ [`Microkernel::run_with_ldc`] の `ldc` 契約経由で直接ロード/ストア
 /// するため、本バッファは境界検査（REQ-8）が必要な**端タイル専用**に
 /// 用途が絞られた（参照実装 matrixmultiply の「完全タイルは直接、端
 /// タイルのみマスク付きバッファ」という設計に倣う。以前は全タイルが
@@ -396,7 +396,7 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
 /// README「設計判断」節と同じ狙い）。
 ///
 /// `K::MR`／`K::NR`（[`Microkernel`] トレイトの定数）でタイル形状を決め、
-/// `kernel.run(...)` で累積計算を呼ぶ（#185 でジェネリック化。ISA ごとに
+/// `kernel.run_with_ldc(...)` で累積計算を呼ぶ（#185 でジェネリック化。ISA ごとに
 /// 呼び出し元でモノモーフィックに特殊化されるため、この関数自体に
 /// `unsafe` は現れない）。C タイルは [`MAX_TILE`]（全 ISA 中の MR*NR 最大値）
 /// 固定長スタックバッファを確保し、`K::MR * K::NR` ぶんだけスライスして
@@ -515,7 +515,7 @@ fn gemm_blis_region<K: Microkernel>(
 
                         if mr_eff == mr && nr_eff == nr {
                             // 完全タイル（#557）: C の実バッファへ
-                            // `Microkernel::run` の `ldc` 契約経由で直接
+                            // `Microkernel::run_with_ldc` の `ldc` 契約経由で直接
                             // ロード/ストアし、コピーイン/コピーアウトの
                             // 往復を省く。`row0` はこのタイル原点（行
                             // ic+ir・列 col_base）の C 上のオフセットで、
@@ -523,14 +523,14 @@ fn gemm_blis_region<K: Microkernel>(
                             // 列 nr-1 までを覆う（`ldc = n`）。完全タイル
                             // ゆえ `col_base + nr <= n` が成立し
                             // `ldc(=n) >= nr` も自動的に満たされる
-                            // （[`microkernel::Microkernel::run`] の `ldc`
+                            // （[`microkernel::Microkernel::run_with_ldc`] の `ldc`
                             // 契約参照）。スライス取得自体が範囲外なら
                             // panic する安全操作であり、カーネル入口の
                             // `ldc`／長さ assert と合わせ REQ-8 の境界
                             // 検査を二重に満たす。
                             let row0 = (ic + ir) * n + col_base;
                             let c_direct = &mut c[row0..row0 + (mr - 1) * n + nr];
-                            kernel.run(ap_slice, bp_slice, c_direct, n, kc_len);
+                            kernel.run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len);
                         } else {
                             // 端タイル: 従来どおり `MAX_TILE` スタック
                             // バッファへコピーインし、有効部
@@ -550,7 +550,7 @@ fn gemm_blis_region<K: Microkernel>(
                                 c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
                             }
 
-                            kernel.run(ap_slice, bp_slice, c_tile, nr, kc_len);
+                            kernel.run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len);
 
                             for i in 0..mr_eff {
                                 let dst = &mut c[(ic + ir + i) * n + col_base

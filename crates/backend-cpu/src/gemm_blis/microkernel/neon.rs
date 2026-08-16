@@ -65,18 +65,15 @@ const _: () = assert!(MR == 8 && NR == 8);
 /// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする（REQ-8
 /// 境界検査規約: 呼び出し元契約を関数入口で明示検査し、以降の
 /// `unsafe` ロード／ストアはこの検査済み長さの範囲内でのみ行う）。
-pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+///
+/// # 公開 API 非破壊（#691 レビュー指摘への対応）
+///
+/// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
+/// 同じ理由で従来シグネチャを [`kernel`] として残す。
+pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert!(ldc >= NR, "ldc must be at least NR");
-    assert!(
-        c.len()
-            >= (MR - 1)
-                .checked_mul(ldc)
-                .and_then(|v| v.checked_add(NR))
-                .expect("ldc*MR overflow"),
-        "C tile buffer too small for MR*ldc access pattern"
-    );
+    super::check_c_tile_bounds(MR, NR, ldc, c.len());
 
     // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
     // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
@@ -135,6 +132,13 @@ pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) 
     }
 }
 
+/// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
+/// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
+/// [`kernel_with_ldc`] を使うこと。
+pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    kernel_with_ldc(ap, bp, c_tile, NR, kc_len);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,7 +175,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, NR, kc_len);
+        kernel(&ap, &bp, &mut c_tile, kc_len);
 
         assert_eq!(c_tile[0], 19.0);
         assert_eq!(c_tile[1], 22.0);
@@ -190,7 +194,7 @@ mod tests {
         let c_init = xorshift32_vec(0xE0FF_EE03, MR * NR);
 
         let mut c_tight = c_init.clone();
-        kernel(&ap, &bp, &mut c_tight, NR, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len);
 
         let ldc = NR + 5;
         let sentinel = -777.0f32;
@@ -198,7 +202,7 @@ mod tests {
         for i in 0..MR {
             c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
         }
-        kernel(&ap, &bp, &mut c_gapped, ldc, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len);
 
         for i in 0..MR {
             for j in 0..NR {
@@ -224,6 +228,6 @@ mod tests {
         let ap = vec![0.0f32; MR * 2];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, NR - 1, 2);
+        kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2);
     }
 }

@@ -45,18 +45,18 @@ const _: () = assert!(MR * NR <= 256);
 /// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする
 /// （呼び出し元のバグを早期検出する契約前提の検証。REQ-8 境界検査規約。
 /// `(MR-1)*ldc+NR` は本関数がアクセスする最大オフセット `+1`）。
-pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+///
+/// # 公開 API 非破壊（#691 レビュー指摘への対応）
+///
+/// #557 導入時に既存の `kernel(ap, bp, c_tile, kc_len)`（`ldc = NR` 固定）
+/// を本関数へ改名・拡張したが、`backend_cpu::gemm_blis::microkernel` は
+/// `pub mod` であり既存呼び出し元を壊すため（AGENTS.md「公開 API の
+/// 破壊的変更は P1」）、従来シグネチャは [`kernel`] として残し、本関数へ
+/// `ldc = NR` で委譲する薄い後方互換ラッパーとする。
+pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert!(ldc >= NR, "ldc must be at least NR");
-    assert!(
-        c.len()
-            >= (MR - 1)
-                .checked_mul(ldc)
-                .and_then(|v| v.checked_add(NR))
-                .expect("ldc*MR overflow"),
-        "C tile buffer too small for MR*ldc access pattern"
-    );
+    super::check_c_tile_bounds(MR, NR, ldc, c.len());
 
     for p in 0..kc_len {
         let a_p = &ap[p * MR..p * MR + MR];
@@ -68,6 +68,13 @@ pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) 
             }
         }
     }
+}
+
+/// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
+/// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
+/// [`kernel_with_ldc`] を使うこと。
+pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    kernel_with_ldc(ap, bp, c_tile, NR, kc_len);
 }
 
 #[cfg(test)]
@@ -97,7 +104,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, NR, 2);
+        kernel(&ap, &bp, &mut c_tile, 2);
 
         assert_eq!(c_tile[0], 19.0); // 1*5+2*7（行 0 の先頭は c_tile[0]）
         assert_eq!(c_tile[1], 22.0); // 1*6+2*8
@@ -111,7 +118,7 @@ mod tests {
         let ap = vec![0.0f32; MR * 2 - 1];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, NR, 2);
+        kernel(&ap, &bp, &mut c_tile, 2);
     }
 
     /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
@@ -132,7 +139,7 @@ mod tests {
         ];
 
         let mut c_tight = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tight, NR, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len);
 
         // ldc = NR + 3 のギャップ付きバッファ。ギャップ列は番兵値
         // （追跡しやすい負の値）で埋め、カーネル実行後も不変であることを
@@ -147,7 +154,7 @@ mod tests {
                 c_gapped[i * ldc + j] = 0.0;
             }
         }
-        kernel(&ap, &bp, &mut c_gapped, ldc, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len);
 
         for i in 0..MR {
             for j in 0..NR {
@@ -173,7 +180,7 @@ mod tests {
         let ap = vec![0.0f32; MR * 2];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, NR - 1, 2);
+        kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2);
     }
 
     #[test]
@@ -184,6 +191,6 @@ mod tests {
         // ldc = NR + 1 なら必要長は (MR-1)*(NR+1)+NR だが、ここでは
         // 密パッキング（MR*NR）ぶんしか用意しない。
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, NR + 1, 2);
+        kernel_with_ldc(&ap, &bp, &mut c_tile, NR + 1, 2);
     }
 }

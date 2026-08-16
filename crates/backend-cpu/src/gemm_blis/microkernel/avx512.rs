@@ -57,19 +57,22 @@ const _: () = assert!(MR * NR <= 256);
 /// 呼び出し元は実行 CPU が AVX-512F 命令セットをサポートすることを
 /// 保証しなければならない（[`super::Avx512Kernel::try_new`] による
 /// 実行時検出、またはテストの `is_x86_feature_detected!` ガードのいずれか）。
+///
+/// # 公開 API 非破壊（#691 レビュー指摘への対応）
+///
+/// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
+/// 同じ理由で従来シグネチャを [`kernel_unchecked`] として残す。
 #[target_feature(enable = "avx512f")]
-pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+pub unsafe fn kernel_unchecked_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert!(ldc >= NR, "ldc must be at least NR");
-    assert!(
-        c.len()
-            >= (MR - 1)
-                .checked_mul(ldc)
-                .and_then(|v| v.checked_add(NR))
-                .expect("ldc*MR overflow"),
-        "C tile buffer too small for MR*ldc access pattern"
-    );
+    super::check_c_tile_bounds(MR, NR, ldc, c.len());
 
     // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
     // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
@@ -103,6 +106,21 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize
             _mm512_storeu_ps(c[i * ldc + 16..].as_mut_ptr(), acc_i[1]);
         }
     }
+}
+
+/// [`kernel_unchecked_with_ldc`] の従来シグネチャ後方互換ラッパー（unsafe。
+/// `ldc = NR` 固定・密パッキング契約）。[`kernel_unchecked_with_ldc`] の
+/// `# Safety` 契約をそのまま引き継ぐ。
+///
+/// # Safety
+///
+/// [`kernel_unchecked_with_ldc`] と同一（呼び出し元は実行 CPU が
+/// AVX-512F をサポートすることを保証しなければならない）。
+#[target_feature(enable = "avx512f")]
+pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    // SAFETY: 呼び出し元契約を本関数の `# Safety` 節としてそのまま
+    // 引き継いでいる。
+    unsafe { kernel_unchecked_with_ldc(ap, bp, c, NR, kc_len) }
 }
 
 #[cfg(test)]
@@ -140,7 +158,7 @@ mod tests {
         // SAFETY: 直前の is_x86_feature_detected! ガードにより実行 CPU が
         // AVX-512F をサポートすることを確認済み。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_tile, NR, kc_len);
+            kernel_unchecked(&ap, &bp, &mut c_tile, kc_len);
         }
 
         assert_eq!(c_tile[0], 19.0);
@@ -194,7 +212,7 @@ mod tests {
         let mut c_avx512 = c_init;
         // SAFETY: 直前の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_avx512, NR, kc_len);
+            kernel_unchecked(&ap, &bp, &mut c_avx512, kc_len);
         }
 
         assert_eq!(
@@ -221,7 +239,7 @@ mod tests {
         let mut c_tight = c_init.clone();
         // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_tight, NR, kc_len);
+            kernel_unchecked_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len);
         }
 
         let ldc = NR + 5;
@@ -232,7 +250,7 @@ mod tests {
         }
         // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_gapped, ldc, kc_len);
+            kernel_unchecked_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len);
         }
 
         for i in 0..MR {

@@ -57,19 +57,22 @@ const _: () = assert!(MR * NR <= 256);
 /// 呼び出し元は実行 CPU が AVX2・FMA 命令セットをサポートすることを
 /// 保証しなければならない（コンパイル時 cfg または `is_x86_feature_detected!`
 /// による実行時検出のいずれか）。
+///
+/// # 公開 API 非破壊（#691 レビュー指摘への対応）
+///
+/// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
+/// 同じ理由で従来シグネチャを [`kernel_unchecked`] として残す。
 #[target_feature(enable = "avx2,fma")]
-pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+pub unsafe fn kernel_unchecked_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert!(ldc >= NR, "ldc must be at least NR");
-    assert!(
-        c.len()
-            >= (MR - 1)
-                .checked_mul(ldc)
-                .and_then(|v| v.checked_add(NR))
-                .expect("ldc*MR overflow"),
-        "C tile buffer too small for MR*ldc access pattern"
-    );
+    super::check_c_tile_bounds(MR, NR, ldc, c.len());
 
     // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
     // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
@@ -105,20 +108,43 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize
     }
 }
 
-/// [`kernel_unchecked`] の安全なラッパー。`cfg(target_feature = "avx2",
-/// target_feature = "fma")` が成立する場合のみコンパイルされ、これは
-/// ビルド時 `RUSTFLAGS="-C target-feature=+avx2,+fma"` 等でコンパイル
-/// ターゲット CPU が AVX2+FMA を持つと明示された場合にのみ真になる。
-/// `gemm_blis` の既定経路（[`super::super::microkernel`] の cfg 選択）が
-/// この条件下でのみ本関数を選ぶため、`unsafe` 呼び出しの健全性は
-/// コンパイル時に確定する。
+/// [`kernel_unchecked_with_ldc`] の従来シグネチャ後方互換ラッパー（unsafe。
+/// `ldc = NR` 固定・密パッキング契約）。[`kernel_unchecked_with_ldc`] の
+/// `# Safety` 契約をそのまま引き継ぐ。
+///
+/// # Safety
+///
+/// [`kernel_unchecked_with_ldc`] と同一（呼び出し元は実行 CPU が
+/// AVX2・FMA をサポートすることを保証しなければならない）。
+#[target_feature(enable = "avx2,fma")]
+pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    // SAFETY: 呼び出し元契約を本関数の `# Safety` 節としてそのまま
+    // 引き継いでいる。
+    unsafe { kernel_unchecked_with_ldc(ap, bp, c, NR, kc_len) }
+}
+
+/// [`kernel_unchecked_with_ldc`] の安全なラッパー（`ldc` 指定可能）。
+/// `cfg(target_feature = "avx2", target_feature = "fma")` が成立する
+/// 場合のみコンパイルされ、これはビルド時
+/// `RUSTFLAGS="-C target-feature=+avx2,+fma"` 等でコンパイルターゲット
+/// CPU が AVX2+FMA を持つと明示された場合にのみ真になる。
 #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
-pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     // SAFETY: この関数がコンパイルされている時点で `cfg(target_feature =
     // "avx2", target_feature = "fma")` が成立しており、ビルド対象 CPU は
-    // AVX2+FMA をサポートすると明示されている（`kernel_unchecked` の
-    // `# Safety` 契約を満たす）。
-    unsafe { kernel_unchecked(ap, bp, c, ldc, kc_len) }
+    // AVX2+FMA をサポートすると明示されている（`kernel_unchecked_with_ldc`
+    // の `# Safety` 契約を満たす）。
+    unsafe { kernel_unchecked_with_ldc(ap, bp, c, ldc, kc_len) }
+}
+
+/// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
+/// 密パッキング契約）。`gemm_blis` の既定経路（[`super::super::microkernel`]
+/// の cfg 選択）はこの薄いラッパーではなく実行時ディスパッチ経由の
+/// [`Microkernel::run_with_ldc`](super::Microkernel::run_with_ldc) を使う
+/// （モジュールドキュメント「公開 API 非破壊」節参照）。
+#[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    kernel_with_ldc(ap, bp, c, NR, kc_len);
 }
 
 #[cfg(test)]
@@ -161,7 +187,7 @@ mod tests {
         // SAFETY: 直前の is_x86_feature_detected! ガードにより実行 CPU が
         // AVX2・FMA をサポートすることを確認済み。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_tile, NR, kc_len);
+            kernel_unchecked(&ap, &bp, &mut c_tile, kc_len);
         }
 
         // 行 0 の先頭は c_tile[0]、行 1 の先頭は c_tile[NR]。
@@ -230,7 +256,7 @@ mod tests {
         let mut c_avx2 = c_init;
         // SAFETY: 直前の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_avx2, NR, kc_len);
+            kernel_unchecked(&ap, &bp, &mut c_avx2, kc_len);
         }
 
         assert_eq!(
@@ -257,7 +283,7 @@ mod tests {
         let mut c_tight = c_init.clone();
         // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_tight, NR, kc_len);
+            kernel_unchecked_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len);
         }
 
         let ldc = NR + 5;
@@ -268,7 +294,7 @@ mod tests {
         }
         // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_gapped, ldc, kc_len);
+            kernel_unchecked_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len);
         }
 
         for i in 0..MR {
