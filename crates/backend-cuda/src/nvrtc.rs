@@ -23,6 +23,33 @@
 //! 禁止する（A03 対策の実体は不変。`kernels_mma.rs`・
 //! `kernels_wmma_opt.rs` の `render_*` 関数のドキュメンテーションコメント
 //! 参照）。
+//!
+//! # サポート対象 OS（非 unix のビルドを拒否する。イシュー #509 PR #677
+//! codex-review P0 再指摘対応）
+//!
+//! 本モジュールの NVRTC キャッシュ I/O（[`ensure_cache_root`]・
+//! [`store_cache_entry`]・[`load_cache_entry`] とその内部実装）は
+//! symlink 脱出・TOCTOU 対策として `O_NOFOLLOW`・fd 相対解決
+//! （`/proc/self/fd/<fd>` 経由・`openat`/`mkdirat`/`renameat`/`unlinkat`
+//! 相当の自前 FFI）を用いており、いずれも unix 系 API（`<fcntl.h>`・
+//! `std::os::unix::fs::OpenOptionsExt`）にのみ依存する。以前は
+//! `#[cfg(not(unix))]` に「検証してから読み書きする」という構造的に
+//! TOCTOU を閉じられないパスベースのフォールバック実装を維持していたが、
+//! `.claude/rules/deps-policy.md`（`libc`／`rustix` はユーザー承認なしに
+//! 追加できない）の制約下ではこのフォールバックを同水準まで強化できず、
+//! 本クレートのサポート対象（Linux／macOS。`backend-switching-design.md`）
+//! では到達しないコードでもあったため、`.claude/rules/security.md` の
+//! fail-closed 方針に従いフォールバックごと削除した。非 unix
+//! ターゲットでのビルドはコンパイルエラーで明示的に拒否する。
+
+#[cfg(not(unix))]
+compile_error!(
+    "backend-cuda の NVRTC キャッシュ（crates/backend-cuda/src/nvrtc.rs）は \
+     unix（Linux/macOS）のみサポートする。fd pin による TOCTOU 対策が \
+     O_NOFOLLOW・/proc/self/fd・openat 等の unix 系 API に依存するため、 \
+     非 unix 向けの同水準フォールバックは提供しない \
+     （イシュー #509 PR #677 codex-review P0 再指摘対応）。"
+);
 
 use std::ffi::OsStr;
 use std::fs;
@@ -1238,22 +1265,24 @@ pub(crate) struct CachedKernel {
 ///
 /// [`Path::is_file`] ではなく [`is_plain_dir`]／[`is_plain_file`]（symlink
 /// を追跡しない [`fs::symlink_metadata`] ベース）を使う（イシュー #509
-/// codex-review P0 指摘対応）: `entry_dir` 自体または
-/// [`CACHE_ENTRY_SOURCE_FILE`]／[`CACHE_ENTRY_PTX_FILE`] を symlink に
-/// 置換されると、`is_file()`（symlink を追跡する）はキャッシュルート外の
-/// 任意ファイルでも「有効なキャッシュエントリ」と誤判定してしまう
-/// （A03 symlink 脱出。後続で PTX として任意ファイルを読み込み GPU 上で
-/// 実行する経路に繋がりうる）。本関数は [`load_cache_entry_in`] が実際に
-/// 読み出す直前に呼ばれるため、ここで symlink を拒否すれば
-/// `fs::read_to_string` が symlink 先の内容を読むことはない。
+/// codex-review P0 指摘対応の名残。`entry_dir` 自体または
+/// [`CACHE_ENTRY_SOURCE_FILE`]／[`CACHE_ENTRY_PTX_FILE`] が symlink に
+/// 置換されている場合、`is_file()`（symlink を追跡する）だと「有効な
+/// キャッシュエントリ」と誤判定しうるため、その種のテストアサーション
+/// でも symlink を追跡しない判定にしておく）。
 ///
-/// Unix 版の書き込み経路（[`store_cache_entry_at`]）はパスの再解決を
-/// 避けるため fd 相対版 [`validate_cache_entry_at`] を使うが、本関数
-/// 自体は非 Unix フォールバック（[`store_cache_entry_in`]・
-/// [`load_cache_entry_in`] の非 Unix 版）とテスト（symlink 差し替え等の
-/// 外部観測用アサーション）の双方から引き続き使うため cfg で残す
-/// （イシュー #509 PR #677 codex-review P0 再指摘対応）。
-#[cfg(any(not(unix), test))]
+/// 本関数自体は fs I/O の本番経路（[`load_cache_entry_in`]・
+/// [`store_cache_entry_in`]）からは呼ばれない: それらの Unix 版は
+/// パスの再解決を避けるため fd 相対版 [`validate_cache_entry_at`] を
+/// 使い、検証と読み書きを同一 fd に結合することで TOCTOU を構造的に
+/// 閉じている（本関数のようなパス経由の再検証は、検証と読み取りの間に
+/// 別の TOCTOU 窓を開くため本番経路では使わない）。本関数はテスト
+/// （symlink 差し替え等の外部観測用アサーション）専用として
+/// `#[cfg(test)]` で残す（イシュー #509 PR #677 codex-review P0 再指摘
+/// 対応。旧非 Unix フォールバックは検証と読み取りが別ステップで
+/// TOCTOU を構造的に閉じられなかったため削除済み。crate ルート／
+/// `nvrtc` モジュール冒頭の `compile_error!` 参照）。
+#[cfg(test)]
 fn validate_cache_entry(entry_dir: &Path) -> bool {
     is_plain_dir(entry_dir)
         && is_plain_file(&entry_dir.join(CACHE_ENTRY_SOURCE_FILE))
@@ -1277,7 +1306,7 @@ fn validate_cache_entry(entry_dir: &Path) -> bool {
 /// 自分の新規書き込みを破棄してしまい、そのキーは以降ずっと「ミスと
 /// 判定されて再コンパイルされる」空回りに陥る（正常書き込みが永久に
 /// キャッシュへ反映されない）。
-#[cfg(any(not(unix), test))]
+#[cfg(test)]
 fn is_plain_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_file() && meta.len() > 0)
@@ -1288,7 +1317,7 @@ fn is_plain_file(path: &Path) -> bool {
 /// 追跡しない [`fs::symlink_metadata`] で判定する（[`is_plain_file`] と
 /// 同じ理由。エントリディレクトリ自体が symlink に置換されているケース
 /// を拒否する）。
-#[cfg(any(not(unix), test))]
+#[cfg(test)]
 fn is_plain_dir(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_dir())
@@ -1303,9 +1332,9 @@ fn is_plain_dir(path: &Path) -> bool {
 /// deps-policy.md`）外でユーザー承認なしに追加できないため、
 /// `std::os::unix::fs::OpenOptionsExt::custom_flags`（std 標準機能）へ
 /// 渡すフラグ値を自前で定義する。値はターゲット OS ごとに異なるため
-/// `target_os` で分岐する（[`fsync_dir`] の非 Unix フォールバックと同じ
-/// 判断: 本クレートのビルド対象は Linux/macOS のみ。
-/// `backend-switching-design.md`）。
+/// `target_os` で分岐する（本クレートのビルド対象は Linux/macOS のみ。
+/// `backend-switching-design.md`。非 unix は crate ルート／`nvrtc`
+/// モジュール冒頭の `compile_error!` でビルド自体を拒否する）。
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: i32 = 0o400000;
 
@@ -1375,10 +1404,9 @@ const O_CLOEXEC: i32 = 0x0100_0000;
 
 /// macOS（Darwin）の `O_CREAT`（`<fcntl.h>` では `0x0200`）。
 /// [`create_file_pinned`]・[`create_dir_all_verified`] macOS 版用（イシュー
-/// #509 PR #677 codex-review P0 再指摘対応: [`write_entry_files`]
-/// パスベース版が呼んでいた [`fs::write`]（既存ファイルを暗黙に truncate
-/// する）相当の書き込みを、fd 起点かつ排他生成に置き換えるための
-/// フラグ）。
+/// #509 PR #677 codex-review P0 再指摘対応: 旧パスベース実装が呼んでいた
+/// [`fs::write`]（既存ファイルを暗黙に truncate する）相当の書き込みを、
+/// fd 起点かつ排他生成に置き換えるためのフラグ）。
 #[cfg(target_os = "macos")]
 const O_CREAT: i32 = 0x0200;
 
@@ -1947,38 +1975,6 @@ fn read_verified_cache_entry_file(mut file: fs::File) -> std::io::Result<Option<
     Ok(Some(buf))
 }
 
-/// ファイルを fsync する（[`write_entry_files`]〈非 Unix フォールバック〉
-/// が書き込み直後に呼ぶ）。
-///
-/// rename 前に内容がディスクへ確実に反映されていることを保証する
-/// （A08 整合性: rename のアトミック性だけでは「rename 前にクラッシュし
-/// 部分書き込みのまま OS バッファに留まる」ケースを防げないため。
-/// DeepGEMM compiler の書き込みプロトコルに倣う）。Unix 版の
-/// 書き込み経路（[`write_child_file_pinned`]）はパスの再オープンを
-/// 避けるため、書き込みに使った fd から直接 `sync_all` する（イシュー
-/// #509 PR #677 codex-review P0 再指摘対応。本関数のようなパス経由の
-/// 再オープンは symlink 差し替え TOCTOU の窓になるため使わない）。
-#[cfg(not(unix))]
-fn fsync_file(path: &Path) -> std::io::Result<()> {
-    fs::File::open(path)?.sync_all()
-}
-
-/// ディレクトリを fsync する（[`write_entry_files`]〈非 Unix
-/// フォールバック〉が一時ディレクトリに対して呼ぶ）。
-///
-/// 非 Unix（本クレートのビルド対象は `backend-switching-design.md` の
-/// cfg ベース分岐上 Linux/macOS/CUDA toolkit 非搭載環境のみを想定し
-/// Windows は対象外）では `File::open` でディレクトリを開くこと自体が
-/// 失敗しうるため no-op とする（fsync できないことを理由に I/O 全体を
-/// 失敗させない。rename のアトミック性自体は非 Unix でも成立する）。
-/// Unix 版は [`create_subdir_pinned`]／[`store_cache_entry_at`] が
-/// pin 済み fd から直接 `sync_all` するため本関数を経由しない（同じ
-/// TOCTOU 回避理由。[`fsync_file`] のコメント参照）。
-#[cfg(not(unix))]
-fn fsync_dir(_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
-
 /// 一時ディレクトリ名のシーケンス番号（プロセス内一意性の担保。
 /// [`temp_entry_dir_name`] が使う）。
 static TEMP_ENTRY_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -2267,12 +2263,12 @@ fn remove_cache_entry_pinned(root_fd: &fs::File, name: &str) {
 /// [`store_cache_entry_at`] の手順 1〜3（一時ディレクトリ作成・
 /// `kernel.cu`／`kernel.ptx` 書き込み・各ファイルの fsync・一時
 /// ディレクトリ自体の fsync）を、キャッシュルート fd（`root_fd`）起点の
-/// fd 相対操作のみで担う（[`write_entry_files`]〈非 Unix フォールバック〉
-/// の Unix 強化版。イシュー #509 PR #677 codex-review P0 指摘対応:
-/// パスベース版は `root_fd` を pin した後でも `tmp_dir`（`root.join(..)`）
-/// という文字列パスを経由して `fs::create_dir`／`fs::write` するため、
-/// pin 後にキャッシュルート自体が symlink へ差し替えられると
-/// containment 検証済みの実体の外へ書き込みうる TOCTOU が残っていた。
+/// fd 相対操作のみで担う（旧パスベース実装からの fd 相対化。イシュー
+/// #509 PR #677 codex-review P0 指摘対応: パスベース版は `root_fd` を
+/// pin した後でも `tmp_dir`（`root.join(..)`）という文字列パスを経由
+/// して `fs::create_dir`／`fs::write` するため、pin 後にキャッシュ
+/// ルート自体が symlink へ差し替えられると containment 検証済みの
+/// 実体の外へ書き込みうる TOCTOU が残っていた。
 /// 本関数は一時ディレクトリの作成〈[`create_subdir_pinned`]〉・
 /// 2 ファイルの生成〈[`create_file_pinned`]〉・fsync（書き込みに使った
 /// fd から直接 `sync_all`。パス経由の再オープンをしない）まで、すべて
@@ -2303,8 +2299,7 @@ fn write_entry_files_pinned(
 /// [`write_entry_files_pinned`] の内側で `name` の 1 ファイルを作成・
 /// 書き込み・fsync する（イシュー #509 PR #677 codex-review P0 再指摘
 /// 対応）。書き込みに使った [`fs::File`] ハンドルから直接 `sync_all` する
-/// ため、[`fsync_file`]〈非 Unix フォールバック〉のようなパス経由の
-/// 再オープン（symlink 差し替え TOCTOU の窓）が生じない。
+/// ため、パス経由の再オープン（symlink 差し替え TOCTOU の窓）が生じない。
 #[cfg(unix)]
 fn write_child_file_pinned(dir_fd: &fs::File, name: &str, content: &str) -> Result<(), CudaError> {
     use std::io::Write;
@@ -2321,63 +2316,27 @@ fn write_child_file_pinned(dir_fd: &fs::File, name: &str, content: &str) -> Resu
     })
 }
 
-/// [`store_cache_entry_in`]〈非 Unix フォールバック〉の手順 1〜3（一時
-/// ディレクトリ作成・`kernel.cu`／`kernel.ptx` 書き込み・各ファイルの
-/// fsync・一時ディレクトリ自体の fsync）を担う。
-///
-/// `tmp_dir` は [`fs::create_dir`]（排他的作成。既存パスなら `Err`）で
-/// 確保するため、[`temp_entry_dir_name`] の一意性が壊れていれば本関数が
-/// `Err` を返す（サイレントな上書きを避ける）。
-#[cfg(not(unix))]
-fn write_entry_files(tmp_dir: &Path, kernel_cu: &str, kernel_ptx: &str) -> Result<(), CudaError> {
-    fs::create_dir(tmp_dir).map_err(|e| CudaError::CacheIo {
-        detail: format!(
-            "failed to create temp cache directory {}: {e}",
-            tmp_dir.display()
-        ),
-    })?;
-
-    let cu_path = tmp_dir.join(CACHE_ENTRY_SOURCE_FILE);
-    fs::write(&cu_path, kernel_cu).map_err(|e| CudaError::CacheIo {
-        detail: format!("failed to write {}: {e}", cu_path.display()),
-    })?;
-    fsync_file(&cu_path).map_err(|e| CudaError::CacheIo {
-        detail: format!("failed to fsync {}: {e}", cu_path.display()),
-    })?;
-
-    let ptx_path = tmp_dir.join(CACHE_ENTRY_PTX_FILE);
-    fs::write(&ptx_path, kernel_ptx).map_err(|e| CudaError::CacheIo {
-        detail: format!("failed to write {}: {e}", ptx_path.display()),
-    })?;
-    fsync_file(&ptx_path).map_err(|e| CudaError::CacheIo {
-        detail: format!("failed to fsync {}: {e}", ptx_path.display()),
-    })?;
-
-    fsync_dir(tmp_dir).map_err(|e| CudaError::CacheIo {
-        detail: format!(
-            "failed to fsync temp cache directory {}: {e}",
-            tmp_dir.display()
-        ),
-    })
-}
-
 /// [`cache_root`] が解決した候補パスを実際に fs 上へ実体化し、symlink
 /// 解決込みの containment 再検証を行う（イシュー #509・Phase C-3。
 /// C-2 が `docs/cuda-jit-cache-design.md` 「残課題」節で明示的に委譲した
 /// 「symlink 解決込みの再検証」を実装する）。
 ///
 /// `candidate_root` は [`cache_root`]（環境変数解決＋字句正規化のみの
-/// containment 検証）の戻り値を渡す想定。本関数はそれを
-/// [`fs::create_dir_all`] で実体化した後、[`Path::canonicalize`]
-/// （symlink 解決込み）した実在パスで [`path_lexically_within`] による
-/// containment を**再検証**する。C-2 時点の字句正規化のみの検証は、
-/// `candidate_root` の祖先ディレクトリが symlink 経由で `workspace_root`
-/// 配下を指すケース（例: `~/.cache` が `<workspace_root>/evil` への
-/// symlink）を見逃す（字句上は `workspace_root` 配下に見えないため）。
-/// ディレクトリを実際に作成した後でなければ symlink 解決ができない
-/// （存在しないパスは `canonicalize` が `Err` を返す）ため、この再検証は
-/// fs I/O を行わない C-2 の純関数群では実行できず C-3（本関数）のスコープ
-/// とされていた。
+/// containment 検証）の戻り値を渡す想定。C-2 時点の字句正規化のみの
+/// 検証は、`candidate_root` の祖先ディレクトリが symlink 経由で
+/// `workspace_root` 配下を指すケース（例: `~/.cache` が
+/// `<workspace_root>/evil` への symlink）を見逃す（字句上は
+/// `workspace_root` 配下に見えないため）。本関数はまず fs 上に実在する
+/// 最長祖先（[`longest_existing_ancestor`]）を [`Path::canonicalize`]
+/// （symlink 解決込み）して containment を検証してから、未作成の
+/// 残りコンポーネントを [`create_dir_all_verified`]（fd pin 起点で
+/// 1 コンポーネントずつ作成・検証を結合する。イシュー #509 codex-review
+/// P0 再指摘対応: 「作成してから検証」の順序では拒否確定前に workspace
+/// 内へ書き込みが発生しうるため、検証と作成を同じディレクトリハンドル
+/// へ結び付ける）で実体化する。ディレクトリを実際に作成した後でなければ
+/// 最終的な symlink 解決ができない（存在しないパスは `canonicalize` が
+/// `Err` を返す）ため、この再検証は fs I/O を行わない C-2 の純関数群では
+/// 実行できず C-3（本関数）のスコープとされていた。
 ///
 /// テスト容易性のため `candidate_root`（実体化対象）と `workspace_root`
 /// （containment 検証の基準）を分離した「注入で決定化」パターン
@@ -2845,91 +2804,6 @@ fn create_dir_all_verified(
     Ok(())
 }
 
-/// [`create_dir_all_verified`]（Linux／macOS 版）の非 Unix フォールバック
-/// 実装（本クレートのビルド対象は Linux/macOS のみのため通常到達しない。
-/// [`fsync_dir`]〈非 Unix フォールバック〉の非 Unix 分岐と同じ判断）。
-/// `O_NOFOLLOW` 相当の std API を持たないため、Unix 版と異なり fd 起点の
-/// TOCTOU 対策強化は適用されない（旧 Unix 実装と同水準の検出型の縦深
-/// 防御を維持する）。
-#[cfg(not(unix))]
-fn create_dir_all_verified(
-    existing_ancestor: &Path,
-    _canonical_existing_ancestor: &Path,
-    candidate_root: &Path,
-    canonical_workspace_root: &Path,
-) -> Result<(), CudaError> {
-    let relative = candidate_root
-        .strip_prefix(existing_ancestor)
-        .map_err(|_| CudaError::CacheIo {
-            detail: format!(
-                "cache root candidate {} is not nested under its existing ancestor {}",
-                candidate_root.display(),
-                existing_ancestor.display()
-            ),
-        })?;
-
-    let mut current = existing_ancestor.to_path_buf();
-    for component in relative.components() {
-        let Component::Normal(name) = component else {
-            return Err(CudaError::CacheIo {
-                detail: format!(
-                    "cache root candidate {} contains a non-normal path component",
-                    candidate_root.display()
-                ),
-            });
-        };
-        current.push(name);
-
-        if let Err(e) = fs::create_dir(&current)
-            && e.kind() != std::io::ErrorKind::AlreadyExists
-        {
-            return Err(CudaError::CacheIo {
-                detail: format!(
-                    "failed to create cache directory component {}: {e}",
-                    current.display()
-                ),
-            });
-        }
-
-        let meta = fs::symlink_metadata(&current).map_err(|e| CudaError::CacheIo {
-            detail: format!(
-                "failed to stat cache directory component {}: {e}",
-                current.display()
-            ),
-        })?;
-        if !meta.file_type().is_dir() {
-            let _ = fs::remove_dir(&current);
-            return Err(CudaError::CacheDirUnavailable {
-                detail: format!(
-                    "cache directory component {} is not a plain directory (symlink or other \
-                     non-directory found where a directory was expected)",
-                    current.display()
-                ),
-            });
-        }
-
-        let canonical_current = current.canonicalize().map_err(|e| CudaError::CacheIo {
-            detail: format!(
-                "failed to canonicalize cache directory component {}: {e}",
-                current.display()
-            ),
-        })?;
-        if path_lexically_within(&canonical_current, canonical_workspace_root) {
-            let _ = fs::remove_dir(&current);
-            return Err(CudaError::CacheDirUnavailable {
-                detail: format!(
-                    "cache directory component {} resolves (after symlink resolution) within \
-                     workspace root {}; refusing to continue creating directories under it",
-                    canonical_current.display(),
-                    canonical_workspace_root.display()
-                ),
-            });
-        }
-    }
-
-    Ok(())
-}
-
 /// [`cache_root`] の解決結果を実際に fs 上へ実体化する公開ラッパー
 /// （イシュー #509・Phase C-3。[`store_cache_entry`]／[`load_cache_entry`]
 /// から呼ばれる）。実処理は [`ensure_cache_root_in`] に委譲する（同関数
@@ -2984,11 +2858,11 @@ pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<PathBuf, CudaEr
 /// [`store_cache_entry_at`] へ委譲して fd 相対操作のみで行う（イシュー
 /// #509 PR #677 codex-review P0 指摘対応: `root` を pin した後で
 /// キャッシュルート自体が symlink へ差し替えられても、以降の全操作が
-/// pin 済みの元の実体だけを見るため追従しない）。非 Unix
-/// フォールバックは旧来のパスベース実装をそのまま維持する
-/// （`O_NOFOLLOW` 相当の std API がないため強化できない。本クレートの
-/// ビルド対象は Linux/macOS のみで通常到達しない。[`load_cache_entry_in`]
-/// 〈非 Unix フォールバック〉と同じ判断）。
+/// pin 済みの元の実体だけを見るため追従しない）。本クレートのビルド
+/// 対象は Linux/macOS（unix）のみであり、`O_NOFOLLOW` 相当の std API を
+/// 持たない非 unix 向けの検出型フォールバックは維持しない（fd pin による
+/// TOCTOU 対策が unix 系 API に依存するため。crate ルート／`nvrtc`
+/// モジュール冒頭の `compile_error!` 参照）。
 #[cfg(unix)]
 fn store_cache_entry_in(
     root: &Path,
@@ -3167,82 +3041,6 @@ fn store_cache_entry_at(
     }
 }
 
-/// [`store_cache_entry_in`] の非 Unix フォールバック実装（本クレートの
-/// ビルド対象は Linux/macOS のみのため通常到達しない。[`load_cache_entry_in`]
-/// 〈非 Unix フォールバック〉と同じ判断）。`O_NOFOLLOW` 相当の std API を
-/// 持たないため、Unix 版と異なり fd 起点の TOCTOU 対策強化は適用されない
-/// （旧実装と同水準のパスベース実装を維持する）。
-#[cfg(not(unix))]
-fn store_cache_entry_in(
-    root: &Path,
-    key: &CudaKernelCacheKey,
-    kernel_cu: &str,
-    kernel_ptx: &str,
-) -> Result<PathBuf, CudaError> {
-    let final_dir = cache_entry_path_in(root, key)?;
-    let entry_name = key.cache_entry_dir_name()?;
-    let tmp_dir = root.join(temp_entry_dir_name(&entry_name));
-
-    if let Err(e) = write_entry_files(&tmp_dir, kernel_cu, kernel_ptx) {
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Err(e);
-    }
-
-    if fs::rename(&tmp_dir, &final_dir).is_ok() {
-        let _ = fsync_dir(root);
-        return Ok(final_dir);
-    }
-
-    if validate_cache_entry(&final_dir) {
-        let _ = fs::remove_dir_all(&tmp_dir);
-        return Ok(final_dir);
-    }
-
-    if final_dir.exists() {
-        if validate_cache_entry(&final_dir) {
-            let _ = fs::remove_dir_all(&tmp_dir);
-            return Ok(final_dir);
-        }
-
-        let stale_dir = root.join(temp_entry_dir_name(&entry_name));
-        match fs::rename(&final_dir, &stale_dir) {
-            Ok(()) => {
-                if validate_cache_entry(&stale_dir) {
-                    if fs::rename(&stale_dir, &final_dir).is_ok() {
-                        let _ = fs::remove_dir_all(&tmp_dir);
-                        return Ok(final_dir);
-                    }
-                    let _ = fs::remove_dir_all(&stale_dir);
-                    if validate_cache_entry(&final_dir) {
-                        let _ = fs::remove_dir_all(&tmp_dir);
-                        return Ok(final_dir);
-                    }
-                } else {
-                    let _ = fs::remove_dir_all(&stale_dir);
-                }
-            }
-            Err(_) => {}
-        }
-
-        if !final_dir.exists() && fs::rename(&tmp_dir, &final_dir).is_ok() {
-            let _ = fsync_dir(root);
-            return Ok(final_dir);
-        }
-    }
-
-    let _ = fs::remove_dir_all(&tmp_dir);
-    if validate_cache_entry(&final_dir) {
-        Ok(final_dir)
-    } else {
-        Err(CudaError::CacheIo {
-            detail: format!(
-                "failed to atomically rename cache entry into place: {}",
-                final_dir.display()
-            ),
-        })
-    }
-}
-
 /// [`store_cache_entry_in`] の公開ラッパー（イシュー #509・Phase C-3）。
 /// `workspace_root` から [`ensure_cache_root`] でルートを実体化した上で
 /// 委譲する。NVRTC コンパイル（`compile_ptx`）との結線（コンパイル成功後
@@ -3373,56 +3171,6 @@ fn load_cache_entry_in(
             },
             None => return Ok(None),
         };
-
-    Ok(Some(CachedKernel {
-        kernel_cu,
-        kernel_ptx,
-    }))
-}
-
-/// 非 Unix 向けフォールバック（本クレートのビルド対象は Linux/macOS の
-/// みのため通常到達しない。[`fsync_dir`] の非 Unix 分岐と同じ判断）。
-/// `O_NOFOLLOW` 相当の std API を持たないため、上記 Unix 版と異なり
-/// TOCTOU 対策強化は適用されない（既存動作を維持）。読み込みサイズ上限
-/// （イシュー #509 codex-review P0 指摘対応）のみ、パスベースの
-/// `fs::metadata`（事前検査。TOCTOU の窓は残るが Unix 版と同じ定数値
-/// 由来の上限）で最小限追加する。
-#[cfg(not(unix))]
-fn load_cache_entry_in(
-    root: &Path,
-    key: &CudaKernelCacheKey,
-    expected_src: &str,
-) -> Result<Option<CachedKernel>, CudaError> {
-    const MAX_CACHE_ENTRY_FILE_BYTES: u64 = 64 * 1024 * 1024;
-
-    let entry_dir = cache_entry_path_in(root, key)?;
-    if !validate_cache_entry(&entry_dir) {
-        return Ok(None);
-    }
-
-    let cu_path = entry_dir.join(CACHE_ENTRY_SOURCE_FILE);
-    let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
-    for path in [&cu_path, &ptx_path] {
-        match fs::metadata(path) {
-            // 非空検査（実装計画 §3.1）: unix 版 `read_verified_cache_entry_file`
-            // と同じ不変条件をパスベース経路でも適用する。
-            Ok(meta)
-                if meta.is_file() && meta.len() > 0 && meta.len() <= MAX_CACHE_ENTRY_FILE_BYTES => {
-            }
-            _ => return Ok(None),
-        }
-    }
-
-    let kernel_cu = fs::read_to_string(&cu_path).map_err(|e| CudaError::CacheIo {
-        detail: format!("failed to read cached kernel source: {e}"),
-    })?;
-    // ハッシュ衝突安全弁（Unix 版と同じ理由。実装計画 §3.1・§7）。
-    if kernel_cu != expected_src {
-        return Ok(None);
-    }
-    let kernel_ptx = fs::read_to_string(&ptx_path).map_err(|e| CudaError::CacheIo {
-        detail: format!("failed to read cached kernel ptx: {e}"),
-    })?;
 
     Ok(Some(CachedKernel {
         kernel_cu,
@@ -5675,8 +5423,7 @@ mod tests {
 
     // 受け入れ基準（実装計画 §3.1・§8）: 非空検査。`kernel.cu` をクラッシュ
     // 残骸想定の 0 バイトファイルへ差し替えると、`is_file()` は真だが
-    // `read_verified_cache_entry_file`（Unix 版）／サイズ検査（非 Unix
-    // 版）の非空チェックでミス扱いになること。
+    // `read_verified_cache_entry_file` の非空チェックでミス扱いになること。
     #[test]
     fn load_treats_empty_source_file_as_miss() {
         let root = fresh_temp_dir("empty-cu");
