@@ -346,9 +346,13 @@ pub struct MetalOccupancyInfo {
     /// [`probe_gpu_core_count`] の結果（取得不能なら `None`）。
     pub gpu_core_count: Option<u32>,
     /// `MTLDevice::maxThreadgroupMemoryLength()`（safe API。objc2-metal
-    /// 提供）。`crate::tile::OccupancyParams::max_threadgroup_memory_bytes`
-    /// へそのまま渡す入力値。
-    pub max_threadgroup_memory_bytes: u64,
+    /// 提供。戻り値は `NSUInteger`）。`crate::tile::OccupancyParams::
+    /// max_threadgroup_memory_bytes`（`u32`）へそのまま渡す入力値のため、
+    /// `crate::gemm`（`TileConfig::validate` 向け実測値取得。
+    /// `gemm.rs` の `maxThreadgroupMemoryLength() as u32` 変換）と同じく
+    /// ここで `u32` へ縮小しておく（実機の threadgroup memory 上限は
+    /// 数十 KiB 〜 数 MiB 程度で `u32::MAX` を超えない。#541）。
+    pub max_threadgroup_memory_bytes: u32,
 }
 
 impl MetalOccupancyInfo {
@@ -358,7 +362,7 @@ impl MetalOccupancyInfo {
     pub fn probe(device: &objc2::runtime::ProtocolObject<dyn MTLDevice>) -> Self {
         Self {
             gpu_core_count: probe_gpu_core_count(),
-            max_threadgroup_memory_bytes: device.maxThreadgroupMemoryLength() as u64,
+            max_threadgroup_memory_bytes: device.maxThreadgroupMemoryLength() as u32,
         }
     }
 }
