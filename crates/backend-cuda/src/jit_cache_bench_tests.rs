@@ -21,8 +21,32 @@
 //! - **2 回目ロード時間**（キャッシュヒット: `load_cache_entry_in`）
 //!   ＝「導入後」の再起動時コスト
 //! - **スループット**: キャッシュ経由でロードした PTX とフレッシュ
-//!   コンパイルした PTX から起動した GEMM が同一出力（bit 一致）・
+//!   コンパイルした PTX から起動した GEMM が同一出力（bit 一致)・
 //!   同等性能であることを記録し、キャッシュ導入による性能非後退を示す
+//!
+//! # 「コンパイル+store 対 warm load」の hard assert を撤去した理由（Review #534）
+//!
+//! [`jit_cache_bench_cold_compile_vs_warm_load_latency`] はかつて
+//! `warm_q.median < cold_total_median` を `assert!` していたが、これは
+//! §2.1（[`jit_cache_bench_module_load_and_throughput_parity`] 冒頭）の
+//! TFLOPS 非 gating 判断と同じ「GPU クロック挙動・他プロセス競合等の
+//! 環境揺らぎをタイミング値の hard assert に持ち込むと flaky 化する」
+//! リスクに、TFLOPS と同様にさらされている。NVRTC の `source→PTX`
+//! コンパイルはプロセス内キャッシュを持たない設計
+//! （`docs/perf/startup-cost-measurement.md`）であり通常はコンパイル
+//! 時間がディスク読み込みより桁違いに大きいため実運用上は成立しやすい
+//! が、実機ランナー上でのディスク I/O 遅延・NVRTC 初期化揺らぎ等で
+//! 逆転しうる余地は理論上残る。よってこの比較も TFLOPS と対称に
+//! **記録のみに留め、gating の対象にしない**
+//! （`speedup_x` として `println!` に残し `docs/perf/
+//! cuda-jit-cache-benchmark.md` へ転記する一次情報とする）。
+//!
+//! 一方 [`measure_cold_warm_trial`] 内の
+//! `assert_eq!(loaded.kernel_ptx, ptx_src, ...)`（ストアしたエントリを
+//! 直後にロードした結果がコンパイル直後の PTX と byte 一致すること）は
+//! **決定的で環境揺らぎの影響を受けないキャッシュ正当性の検証**であり
+//! 撤去しない。この gating は維持されるため、キャッシュ I/O 自体の
+//! 破損・不整合は引き続き本テストの失敗として検出される。
 //!
 //! # C-4（#511）未結線であることの位置づけ（重要）
 //!
@@ -81,11 +105,38 @@ use crate::kernels_mma::{MmaKernelConfig, mma_f16_source};
 /// [`median_q1_q3`] を直接使う独自ループとする）。
 const TRIALS: usize = 5;
 
+/// [`fresh_temp_dir`] が払い出した一時ディレクトリを `Drop` で確実に
+/// 片付ける RAII ガード（Review #534 指摘: 各関数末尾でのみ
+/// `fs::remove_dir_all` していたため、その間の `expect()`（十数箇所）で
+/// panic すると `/tmp` 配下にディレクトリが残り、実機ランナーで繰り返し
+/// 実行される性質上リークが蓄積しうる問題への対処）。`path()` で内側の
+/// `PathBuf` を借用し、既存の `fresh_temp_dir` 呼び出し箇所を最小差分で
+/// 置き換えられるようにする。
+struct TempDirGuard(PathBuf);
+
+impl TempDirGuard {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        // ベンチ用一時ディレクトリの片付けであり、CI／実機ランナー上の
+        // 通常経路では既に空か削除済みのことが多い。削除失敗（他プロセス
+        // との競合等）はベンチ自体の成否に関わらないため無視する
+        // （`fs::remove_dir_all` の戻り値を握りつぶす既存方針を踏襲）。
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// `jit_cache_regression_tests::fresh_temp_dir` と同型: テスト・ベンチ用に
 /// 一意な一時ディレクトリを払い出す（プロセス内 `AtomicU64` カウンタ＋PID
 /// で並行実行時の衝突を避ける）。モジュール境界をまたいだ結合を避けるため
 /// 独立して定義する（`jit_cache_regression_tests.rs` 冒頭コメント参照）。
-fn fresh_temp_dir(label: &str) -> PathBuf {
+/// 戻り値は [`TempDirGuard`] であり、呼び出し元スコープを抜けるときに
+/// panic 経路も含めて自動的に片付けられる。
+fn fresh_temp_dir(label: &str) -> TempDirGuard {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -93,7 +144,7 @@ fn fresh_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     fs::create_dir_all(&dir).expect("failed to create bench temp dir");
-    dir
+    TempDirGuard(dir)
 }
 
 /// 決定的シードで GEMM 入力（A・B、f16）を生成する（`specialized_mma_parity.rs::gen_ab`
@@ -152,7 +203,11 @@ fn measure_cold_warm_trial(
     key: &CudaKernelCacheKey,
     source: &str,
 ) -> ColdWarmSample {
-    let root = fresh_temp_dir("cold-warm");
+    // `_root_guard` は関数を抜ける際（panic 経路含む）に一時ディレクトリを
+    // 自動で片付ける（`TempDirGuard` の `Drop` 実装参照。Review #534
+    // 指摘対応）。以降の `root` 参照はすべて `.path()` 経由。
+    let _root_guard = fresh_temp_dir("cold-warm");
+    let root = _root_guard.path();
 
     let t_compile = Instant::now();
     let ptx = compile_ptx(source, device.arch()).expect(
@@ -162,12 +217,12 @@ fn measure_cold_warm_trial(
     let ptx_src = ptx.to_src();
 
     let t_store = Instant::now();
-    store_cache_entry_in(&root, key, source, &ptx_src)
+    store_cache_entry_in(root, key, source, &ptx_src)
         .expect("store_cache_entry_in must succeed against a fresh, writable temp root");
     let store_secs = t_store.elapsed().as_secs_f64();
 
     let t_load = Instant::now();
-    let loaded = load_cache_entry_in(&root, key, source)
+    let loaded = load_cache_entry_in(root, key, source)
         .expect("load_cache_entry_in must not error against the entry just stored")
         .expect("a cache hit is expected immediately after store_cache_entry_in in a single-writer trial");
     let warm_load_secs = t_load.elapsed().as_secs_f64();
@@ -176,8 +231,6 @@ fn measure_cold_warm_trial(
         loaded.kernel_ptx, ptx_src,
         "cache-loaded PTX must byte-match the freshly compiled PTX (single-writer trial, no race)"
     );
-
-    let _ = fs::remove_dir_all(&root);
 
     ColdWarmSample {
         compile_secs,
@@ -252,13 +305,20 @@ fn jit_cache_bench_cold_compile_vs_warm_load_latency() {
 
         // `--nocapture` 実行時のみ観測される構造化出力（実装計画 §4.1）。
         // 実測値は `docs/perf/cuda-jit-cache-benchmark.md` へ転記する。
+        // `warm_faster`／`speedup_x` は記録のみ（本ファイル冒頭ドキュメン
+        // テーションコメント「hard assert を撤去した理由」参照）。GPU
+        // クロック挙動・他プロセス競合等の環境揺らぎを hard assert に
+        // 持ち込まないための safety-side な判断であり TFLOPS の非 gating
+        // 方針（[`jit_cache_bench_module_load_and_throughput_parity`]）と
+        // 対称にしている。
         println!(
             "[jit_cache_bench:cold_vs_warm] descriptor={label} \
              compile_median_s={:.6} (q1={:.6}, q3={:.6}) \
              store_median_s={:.6} (q1={:.6}, q3={:.6}) \
              cold_total_median_s={cold_total_median:.6} \
              warm_load_median_s={:.6} (q1={:.6}, q3={:.6}) \
-             speedup_x={:.2}",
+             speedup_x={:.2} warm_faster={} \
+             — record only, non-gating (see module doc comment)",
             compile_q.median,
             compile_q.q1,
             compile_q.q3,
@@ -269,14 +329,7 @@ fn jit_cache_bench_cold_compile_vs_warm_load_latency() {
             warm_q.q1,
             warm_q.q3,
             cold_total_median / warm_q.median.max(f64::EPSILON),
-        );
-
-        assert!(
             warm_q.median < cold_total_median,
-            "descriptor={label}: warm load median ({:.6}s) must be faster than \
-             cold compile+store median ({cold_total_median:.6}s) — a cache that is not faster \
-             than recompiling provides no benefit",
-            warm_q.median
         );
     }
 }
@@ -306,10 +359,14 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
         "NVRTC compile of the production mma_f16 kernel source must succeed on the bench runner",
     );
 
-    let root = fresh_temp_dir("throughput");
-    store_cache_entry_in(&root, &key, source, &ptx_fresh.to_src())
+    // `_root_guard` は関数を抜ける際（panic 経路含む）に一時ディレクトリを
+    // 自動で片付ける（`TempDirGuard` の `Drop` 実装参照。Review #534
+    // 指摘対応）。以降の `root` 参照はすべて `.path()` 経由。
+    let _root_guard = fresh_temp_dir("throughput");
+    let root = _root_guard.path();
+    store_cache_entry_in(root, &key, source, &ptx_fresh.to_src())
         .expect("store_cache_entry_in must succeed against a fresh, writable temp root");
-    let cached = load_cache_entry_in(&root, &key, source)
+    let cached = load_cache_entry_in(root, &key, source)
         .expect("load_cache_entry_in must not error against the entry just stored")
         .expect("a cache hit is expected immediately after store_cache_entry_in in a single-writer trial");
     assert_eq!(
@@ -319,10 +376,19 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
     );
     let ptx_cached = Ptx::from_src(cached.kernel_ptx);
 
-    // モジュールロード時間（5 回計測中央値）。`load_module` はロードごとに
-    // 独立した `CUmodule` を作るため、同じ `Ptx` を複数回ロードしても
-    // 直前のロード結果を再利用しない（純粋なロードコストの計測）。
-    let module_load_secs = |ptx: &Ptx| -> f64 {
+    // モジュールロード+シンボル解決時間（5 回計測中央値）。`load_module`
+    // （`cuModuleLoadData`。PTX→SASS JIT はここで実行される）に加えて
+    // `load_function("gemm_mma_f16")`（`cuModuleGetFunction`。シンボル
+    // 解決）まで計測区間に含める。`load_module` はロードごとに独立した
+    // `CUmodule` を作るため、同じ `Ptx` を複数回ロードしても直前のロード
+    // 結果を再利用しない。区間を `load_module` のみに絞らないのは、
+    // cudarc（`cudarc-0.19.8` `driver/safe/core.rs`）の実装上
+    // `load_function` の `cuModuleGetFunction` コストが `load_module` と
+    // 独立した別ステップであり、「起動可能な `CudaFunction` を得るまで」
+    // の実測を優先するため（狭めると `load_function` の寄与が計測から
+    // 漏れ、`docs/perf/cuda-jit-cache-benchmark.md` へ転記する一次データ
+    // が実際の起動コストを過小評価してしまう）。
+    let module_load_and_resolve_secs = |ptx: &Ptx| -> f64 {
         let t = Instant::now();
         let _func = device
             .context()
@@ -336,17 +402,20 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
     let mut fresh_load_samples = Vec::with_capacity(TRIALS);
     let mut cached_load_samples = Vec::with_capacity(TRIALS);
     for _ in 0..TRIALS {
-        fresh_load_samples.push(module_load_secs(&ptx_fresh));
-        cached_load_samples.push(module_load_secs(&ptx_cached));
+        fresh_load_samples.push(module_load_and_resolve_secs(&ptx_fresh));
+        cached_load_samples.push(module_load_and_resolve_secs(&ptx_cached));
     }
     let fresh_load_q = median_q1_q3(&fresh_load_samples)
         .expect("5 non-NaN fresh-PTX module-load samples must yield quartiles");
     let cached_load_q = median_q1_q3(&cached_load_samples)
         .expect("5 non-NaN cached-PTX module-load samples must yield quartiles");
 
+    // ラベルは `load_module`（PTX→SASS JIT）+ `load_function`
+    // （シンボル解決）の合算区間であることを明示する（上の
+    // `module_load_and_resolve_secs` コメント参照）。
     println!(
-        "[jit_cache_bench:module_load] fresh_ptx_load_median_s={:.6} (q1={:.6}, q3={:.6}) \
-         cached_ptx_load_median_s={:.6} (q1={:.6}, q3={:.6})",
+        "[jit_cache_bench:module_load] fresh_ptx_load_and_resolve_median_s={:.6} (q1={:.6}, q3={:.6}) \
+         cached_ptx_load_and_resolve_median_s={:.6} (q1={:.6}, q3={:.6})",
         fresh_load_q.median,
         fresh_load_q.q1,
         fresh_load_q.q3,
@@ -477,5 +546,5 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
         meas_fresh.median_secs, meas_cached.median_secs,
     );
 
-    let _ = fs::remove_dir_all(&root);
+    // `root`（`_root_guard`）は関数終了時に `Drop` で自動的に片付けられる。
 }
