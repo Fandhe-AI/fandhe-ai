@@ -1481,13 +1481,15 @@ extern "C" __global__ void gemm_mma_f16(
 }
 "#;
 
-/// [`MMA_F16`] のアンカー 2 行（`block_row0`/`block_col0` のブロック原点
-/// 計算）を、`swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
+/// [`mma_f16_source`] のアンカー 2 行（`block_row0`/`block_col0` のブロック
+/// 原点計算）を、`swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
 /// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
 /// 生成する（イシュー #499 受け入れ基準 1〜2 項の opt-in 経路）。
 ///
-/// **`MMA_F16` 定数自体は変更しない**（`replacen` で新規 `String` を
-/// 都度構築するのみ）。呼び出し元は `gemm_mma.rs::CudaMmaGemm::
+/// **`mma_f16_source()`（既定 config の render 結果。イシュー #516 で
+/// `MMA_F16` 定数からテンプレート展開へ移行済み）自体は変更しない**
+/// （`replacen` で新規 `String` を都度構築するのみ）。呼び出し元は
+/// `gemm_mma.rs::CudaMmaGemm::
 /// new_with_swizzle` のみであり、本番ディスパッチ経路（`ops.rs`／
 /// `gemm_auto.rs`）からは到達しない（本ファイルクレートルート
 /// `lib.rs` 冒頭コメント「#499」節参照）。
@@ -1536,12 +1538,17 @@ pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::er
 
     const ANCHOR: &str =
         "    int block_row0 = blockIdx.y * BM;\n    int block_col0 = blockIdx.x * BN;\n";
-    let occurrences = MMA_F16.matches(ANCHOR).count();
+    // イシュー #516 でカーネルソースが `MMA_F16` 定数からテンプレート展開
+    // （`render_mma_f16_unchecked`／`MMA_F16_SOURCE`）へ移行したため、
+    // 定数を直接参照せず `mma_f16_source()`（既定 config の render 結果。
+    // 他の回帰テストと同じ参照経路）を対象にする。
+    let source = mma_f16_source();
+    let occurrences = source.matches(ANCHOR).count();
     // `unwrap()`/`expect()`・panic 系マクロを本番経路で使わない方針
     // （coding-rust.md「エラーは型付きエラーとし、本番経路で unwrap()
     // / expect() を使わない」）に合わせ、`assert_eq!` ではなく型付き
-    // エラーで返す。`MMA_F16` 定数側の不変条件は
-    // `mma_f16_source_with_swizzle_does_not_mutate_mma_f16_constant` が
+    // エラーで返す。`mma_f16_source()` 側の不変条件は
+    // `mma_f16_source_with_swizzle_does_not_mutate_mma_f16_source` が
     // 別途 CI 上で回帰検査するため、ここで通常到達しない前提だが、
     // `new_with_swizzle` から到達しうる公開関数として panic を避ける。
     if occurrences != 1 {
@@ -1602,7 +1609,7 @@ pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::er
          \x20   int block_col0 = (int)(n_block * BN);\n"
     );
 
-    Ok(MMA_F16.replacen(ANCHOR, &remap, 1))
+    Ok(source.replacen(ANCHOR, &remap, 1))
 }
 
 #[cfg(test)]
@@ -2665,22 +2672,26 @@ mod tests {
         }
     }
 
-    /// `mma_f16_source_with_swizzle` はアンカー置換のみを行い、`MMA_F16`
-    /// 定数自体は不変であることをロックする（本ファイル
-    /// `mma_f16_source_with_swizzle` ドキュメンテーションコメント
-    /// 「**`MMA_F16` 定数自体は変更しない**」・実装計画 2 節の安全側判断の
-    /// 回帰防止）。
+    /// `mma_f16_source_with_swizzle` はアンカー置換のみを行い、
+    /// `mma_f16_source()`（既定 config の render 結果）自体は不変で
+    /// あることをロックする（本ファイル `mma_f16_source_with_swizzle`
+    /// ドキュメンテーションコメント「**`mma_f16_source()` 自体は変更
+    /// しない**」・実装計画 2 節の安全側判断の回帰防止）。イシュー #516
+    /// でカーネルソースが `MMA_F16` 定数からテンプレート展開へ移行した
+    /// ため、対象を `mma_f16_source()` に合わせてある（他の回帰テストと
+    /// 同じ参照経路）。
     #[test]
-    fn mma_f16_source_with_swizzle_does_not_mutate_mma_f16_constant() {
-        let before = MMA_F16;
+    fn mma_f16_source_with_swizzle_does_not_mutate_mma_f16_source() {
+        let before = mma_f16_source();
         let _ = mma_f16_source_with_swizzle(8).expect("group_width=8 must be accepted");
         assert_eq!(
-            MMA_F16, before,
-            "mma_f16_source_with_swizzle 呼び出し後に MMA_F16 定数が変化しています"
+            mma_f16_source(),
+            before,
+            "mma_f16_source_with_swizzle 呼び出し後に mma_f16_source() が変化しています"
         );
         assert!(
-            MMA_F16.contains("int block_row0 = blockIdx.y * BM;"),
-            "MMA_F16 定数の元のアンカー行が失われています（本番カーネルは無変更のはず）"
+            mma_f16_source().contains("int block_row0 = blockIdx.y * BM;"),
+            "mma_f16_source() の元のアンカー行が失われています（本番カーネルは無変更のはず）"
         );
     }
 }

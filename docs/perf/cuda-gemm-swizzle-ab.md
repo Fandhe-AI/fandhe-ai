@@ -47,7 +47,13 @@ base（`CudaMmaGemm::new`。本番カーネル）と head（`CudaMmaGemm::new_wi
 
 ```sh
 git fetch origin
-git checkout perf/499-tile-sm-swizzle   # 本イシューの実装ブランチ（opt-in 経路のみ・本番カーネル無変更）
+gh pr checkout 667   # 本イシューの実装 PR（perf/499-tile-sm-swizzle。opt-in 経路のみ・本番カーネル無変更）
+# PR 番号（#667）で明示する: ブランチ名固定だとマージ後にブランチが削除・更新停止して
+# "git checkout <ブランチ名>" が実行不能になる（PR #667 codex-review P2 是正）。`gh pr
+# checkout` は PR がマージ・クローズ後もリモートの pull/667/head 参照から取得できるため
+# ブランチ削除後も実行可能（`git fetch origin refs/pull/667/head && git checkout
+# FETCH_HEAD` でも同等）。PR マージ後は squash commit として main に取り込まれるため、
+# 単に `git checkout main` でも同じコードを指す。
 
 # 数値一致確認（TFLOPS 比較より前に必須。swizzle はブロック割り当ての置換のみで
 # 各出力要素のアキュムレート順序を変えないため、bit 一致で主張できる前提を検証する）。
