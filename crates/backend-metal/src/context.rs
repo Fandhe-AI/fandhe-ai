@@ -105,11 +105,16 @@ impl MetalContext {
         &self.device
     }
 
-    /// `new` 時にキャッシュした occupancy 判定用実機値
-    /// ([`crate::gemm::MetalGemm::dispatch_auto`] が
-    /// [`crate::tile::select_with_occupancy`] へそのまま渡す。イシュー
-    /// #542）。GPU コア数が取得不能だった場合は `None`（`select_with_occupancy`
-    /// 側の fail-safe フォールバックで形状のみの選択へ倒れる）。
+    /// `new` 時にキャッシュした occupancy 判定用実機値（イシュー #542）。
+    /// [`crate::tile::select_with_occupancy`] が受け取る形へ写像済みだが、
+    /// 本番ディスパッチ入口 [`crate::gemm::MetalGemm::dispatch_auto`] は
+    /// 実機実測（M4 Max `select()` 比の非劣化確認）が完了するまで
+    /// `tile::select` を使い続ける契約であり、本値を渡さない
+    /// （[`crate::gemm::MetalGemm::dispatch_auto`] ドキュメンテーション
+    /// コメント参照。codex-review P2・PR #684）。現状は
+    /// `examples/gemm_bench.rs` の比較経路からのみ利用される。GPU コア数が
+    /// 取得不能だった場合は `None`（`select_with_occupancy` 側の
+    /// fail-safe フォールバックで形状のみの選択へ倒れる）。
     pub fn occupancy_params(&self) -> Option<OccupancyParams> {
         self.occupancy_params
     }
