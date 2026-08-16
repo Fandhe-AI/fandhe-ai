@@ -27,7 +27,7 @@ use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gem
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
-use crate::gemm_mma::validate_mma_alignment;
+use crate::gemm_mma::{validate_mma_alignment, validate_mma_grid_bounds};
 use crate::gemm_wmma::CudaWmmaGemm;
 use crate::kernels_mma::{
     MMA_K, MMA_SHARED_MEM_BYTES, MMA_STATIC_SMEM_LIMIT_BYTES, MMA_WARP_M, MMA_WARP_N,
@@ -1087,7 +1087,7 @@ fn fixed_table_selection_if_valid(
 /// `smem_budget_bytes` の下で実際に適用可能かを検証する
 /// （codex-review #675 P1 指摘対応）。
 ///
-/// 検証する 3 条件（いずれか 1 つでも満たさなければ `Err`）:
+/// 検証する 4 条件（いずれか 1 つでも満たさなければ `Err`）:
 /// 1. `dtype == DType::F16`: [`cost_model::FIXED_TILE_SELECTION`] の
 ///    `smem_per_stage`／`smem_total` は f16（2 bytes/element）前提で
 ///    コンパイル時算出されている（同定数のドキュメンテーションコメント
@@ -1097,7 +1097,17 @@ fn fixed_table_selection_if_valid(
 ///    cp.async が要求する `n`/`k` 8 の倍数整列（[`enumerate_tile_candidates`]
 ///    規則 6 と同一契約）。固定テーブルも同じ `kernels_mma.rs` 起動 API
 ///    を経由するため、この整列を満たさない形状には適用できない。
-/// 3. `smem_total <= smem_budget_bytes`: 固定テーブルの SMEM 使用量が
+/// 3. `validate_mma_grid_bounds(shape.m)`: `mma_launch_config` が構築する
+///    グリッドの y 成分（`m.div_ceil(MMA_BM)`）が CUDA の grid dim y/z
+///    上限（65,535）を超えないか（`gemm_mma.rs::validate_mma_grid_bounds`
+///    と同一契約）。固定テーブルも同じ起動 API を経由するため、`m` が
+///    `64 * 65535` を超える形状には適用できない（Cursor Bugbot 指摘。
+///    PR #675 review。この検証を欠くと `dtype`／`n`／`k`／SMEM 予算の
+///    条件をすべて満たしていても、実際のカーネル起動時に grid dim
+///    上限超過で失敗する構成を `Ok` として返してしまい、本関数が
+///    閉じるはずの「成功したのに使えない構成」という穴が `m` の
+///    次元だけ再発する）。
+/// 4. `smem_total <= smem_budget_bytes`: 固定テーブルの SMEM 使用量が
 ///    デバイスの実際の予算を超過していないか。
 fn validate_fixed_tile_selection(
     shape: GemmShape,
@@ -1115,6 +1125,7 @@ fn validate_fixed_tile_selection(
     }
 
     validate_mma_alignment(shape.n, shape.k)?;
+    validate_mma_grid_bounds(shape.m)?;
 
     let smem_total = cost_model::FIXED_TILE_SELECTION.smem_total();
     if smem_total > smem_budget_bytes {
@@ -1570,6 +1581,7 @@ mod cost_model_tests {
         compare_candidate_costs, estimate_candidate_cost, select_best_tile_candidate,
     };
     use super::*;
+    use crate::kernels_mma::MMA_BM;
 
     /// 実測不要な代表的 SMEM 予算（`tile_candidate_tests::FULL_BUDGET_BYTES`
     /// と同じ根拠。全候補が SMEM 制約で棄却されないよう十分大きい値）。
@@ -1938,5 +1950,35 @@ mod cost_model_tests {
                  f16-only (codex-review #675 P1)",
             );
         assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// Cursor Bugbot 指摘の回帰防止（PR #675 review）:
+    /// `validate_fixed_tile_selection` は dtype／`n`・`k` 整列／SMEM 予算は
+    /// 検査するが `validate_mma_grid_bounds` を呼んでいなかったため、
+    /// `m > 64 * 65535`（`MMA_BM` 単位で grid_dim.y が CUDA の 65,535 上限を
+    /// 超える形状）に対しても `dtype`／`n`／`k`／SMEM の条件さえ満たせば
+    /// `FIXED_TILE_SELECTION` を「成功した `TileSelection`」として返して
+    /// しまっていた（実際のカーネル起動は grid dim 上限超過で失敗する）。
+    /// `n`/`k` は 8 の倍数の整列要件を保ちつつ `m` だけを上限超過させ、
+    /// `Err(CudaError::InvalidShape)` になることを確認する。
+    #[test]
+    fn select_tile_config_rejects_m_exceeding_grid_y_limit_for_fixed_table() {
+        // gemm_mma.rs::validate_mma_grid_bounds_rejects_m_exceeding_grid_y_limit
+        // と同じ根拠・同じ境界値（65_535 * MMA_BM + 1）。
+        let oversized_shape = GemmShape::new(65_535 * MMA_BM + 1, 4096, 4096);
+        let num_sms = NonZeroU32::new(64).expect("64 is non-zero");
+
+        let err = select_tile_config(
+            oversized_shape,
+            DType::F16,
+            FULL_BUDGET_BYTES,
+            num_sms,
+            SM121_MEASURED_BANDWIDTH,
+        )
+        .expect_err(
+            "m exceeding 64 * 65535 must be rejected instead of silently returning \
+             FIXED_TILE_SELECTION with an unlaunchable grid_dim.y (Cursor Bugbot, PR #675)",
+        );
+        assert!(matches!(err, CudaError::InvalidShape { .. }));
     }
 }
