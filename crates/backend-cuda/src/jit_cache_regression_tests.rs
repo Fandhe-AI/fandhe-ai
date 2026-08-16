@@ -540,15 +540,117 @@ fn concurrent_store_different_keys_do_not_interfere() {
 const MP_CHILD_ROOT_ENV: &str = "RAI_C10_MP_CHILD_ROOT";
 const MP_CHILD_INDEX_ENV: &str = "RAI_C10_MP_CHILD_INDEX";
 
+/// [`multiprocess_concurrent_store_absorbs_rename_race`] の barrier
+/// 実装で親・子が共有するファイルベース同期プロトコル（プロセス境界を
+/// 跨ぐため `std::sync::Barrier` は使えず、キャッシュ root と同じ
+/// ファイルシステム上に readiness マーカー／go シグナルを置く）。
+///
+/// - `mp_sync/ready.<index>`: 子プロセスが store 直前に自分の index で
+///   作成する空ファイル。親はこれが N 個揃うまで待つ。
+/// - `mp_sync/go`: 親が全 ready を確認した後に作成する空ファイル。
+///   子プロセスはこれの出現をポーリングしてから store を呼ぶ。
+///
+/// この 2 段階同期がないと、先行して spawn されたプロセスが後続プロセス
+/// の起動前に書き込みを完了し得るため、受け入れ基準が要求する rename
+/// 競合（複数プロセスが cold cache を確認した状態から同時に store へ
+/// 進む状況）を通らずにテストが成功してしまう（イシュー #529 コメント
+/// `PRRT_kwDOTuUCJc6ZnY5S`・codex-review 指摘）。
+mod mp_sync {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    /// barrier 待ちの上限（CI 環境でのハング防止。通常はミリ秒単位で
+    /// 全員が揃うため、この値に到達するのは既に異常系のみ）。
+    const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+    const POLL_INTERVAL: Duration = Duration::from_micros(100);
+
+    pub(super) fn dir(root: &Path) -> PathBuf {
+        root.join("mp_sync")
+    }
+
+    pub(super) fn ready_marker(root: &Path, index: usize) -> PathBuf {
+        dir(root).join(format!("ready.{index}"))
+    }
+
+    pub(super) fn go_marker(root: &Path) -> PathBuf {
+        dir(root).join("go")
+    }
+
+    /// 子プロセス側: 自分の ready マーカーを作成し、`go` マーカーが
+    /// 現れるまでポーリングで待つ。
+    pub(super) fn child_wait_for_go(root: &Path, index: usize) {
+        std::fs::create_dir_all(dir(root)).expect("mp_sync dir must be creatable by child");
+        std::fs::write(ready_marker(root, index), b"")
+            .expect("child ready marker must be writable");
+
+        let go = go_marker(root);
+        let start = Instant::now();
+        while !go.exists() {
+            assert!(
+                start.elapsed() < WAIT_TIMEOUT,
+                "child {index} timed out waiting for the parent's go signal"
+            );
+            std::thread::sleep(POLL_INTERVAL);
+        }
+    }
+
+    /// 親プロセス側: N 個の ready マーカーが揃うまで待ってから `go`
+    /// マーカーを作成し、全子プロセスの同時 store 開始を解禁する。
+    pub(super) fn parent_release_when_all_ready(root: &Path, total: usize) {
+        let dir_path = dir(root);
+        std::fs::create_dir_all(&dir_path).expect("mp_sync dir must be creatable by parent");
+
+        let start = Instant::now();
+        loop {
+            let ready_count = (0..total)
+                .filter(|&i| ready_marker(root, i).exists())
+                .count();
+            if ready_count == total {
+                break;
+            }
+            assert!(
+                start.elapsed() < WAIT_TIMEOUT,
+                "parent timed out waiting for all {total} children to signal ready \
+                 (observed {ready_count})"
+            );
+            std::thread::sleep(POLL_INTERVAL);
+        }
+
+        std::fs::write(go_marker(root), b"").expect("go marker must be writable by parent");
+    }
+}
+
 #[test]
 fn mp_store_child() {
     let Ok(root) = std::env::var(MP_CHILD_ROOT_ENV) else {
         return;
     };
     let index = std::env::var(MP_CHILD_INDEX_ENV).unwrap_or_default();
+    let index_num: usize = index.parse().expect("child index must be a valid usize");
     let root = PathBuf::from(root);
     let key = sample_key();
     let src = sample_source();
+
+    // 受け入れ基準 1 が要求する「rename 競合の経路を実際に通ること」を
+    // 保証するため、ready マーカーを立てる前に cache が cold（未ヒット）
+    // であることを確認する。barrier（`go` は全 N ready 揃うまで書かれ
+    // ない）によりこの時点で cache が warm になっていることはないはず
+    // だが、barrier が破綻した場合はここで検知して fail-closed に落ちる
+    // （黙って「全プロセスが起動済み」を仮定した緩いテストへ後退しない
+    // ため。イシュー #529 コメント `PRRT_kwDOTuUCJc6ZnY5S`・codex-review
+    // 指摘対応）。
+    let cold = load_cache_entry_in(&root, &key, &src).expect("child cold-cache load must succeed");
+    assert!(
+        cold.is_none(),
+        "child {index} observed a warm cache entry before signaling ready; \
+         the parent/child barrier failed to keep all processes on the cold-cache path"
+    );
+
+    // 全子プロセスが cold cache を確認した状態から同時に store へ進める
+    // よう、親からの go シグナルを待ってから store する（barrier。上記
+    // `mp_sync` モジュールのドキュメント参照）。
+    mp_sync::child_wait_for_go(&root, index_num);
+
     store_cache_entry_in(&root, &key, &src, &format!("// mp ptx from child {index}"))
         .expect("child store_cache_entry_in must succeed");
 }
@@ -561,6 +663,15 @@ fn mp_store_child() {
 /// `--exact mp_store_child` で N 回再帰起動する。シェルは経由せず
 /// `std::process::Command` に固定引数のみを渡す（A03 インジェクション
 /// 対策。`.claude/rules/security.md`）。
+///
+/// spawn する順序だけでは「全 N プロセスが cold cache を確認してから
+/// 同時に store へ進む」状況を保証できない（先に起動した子が後続の
+/// 起動前に書き込みを完了してしまうと、後続は既存の有効エントリを
+/// 見るだけになり rename 競合の経路を一度も通らずテストが偽陽性で
+/// 成功しうる。イシュー #529 コメント `PRRT_kwDOTuUCJc6ZnY5S`・
+/// codex-review 指摘）。そのため `mp_sync` の barrier（子は ready
+/// マーカーを立てて `go` を待ち、親は全 ready を確認してから `go` を
+/// 書く）で全子プロセスの store 開始を同時刻へ揃える。
 #[test]
 fn multiprocess_concurrent_store_absorbs_rename_race() {
     const N: usize = 5;
@@ -579,6 +690,11 @@ fn multiprocess_concurrent_store_absorbs_rename_race() {
             .expect("must spawn child test process");
         children.push(child);
     }
+
+    // 全 N 子プロセスが ready マーカーを立てる（= cold cache 確認直前まで
+    // 進んだ）ことを確認してから go シグナルを送り、store 開始を同時刻へ
+    // 揃える（barrier。上記コメント参照）。
+    mp_sync::parent_release_when_all_ready(&root, N);
 
     for (i, mut child) in children.into_iter().enumerate() {
         let status = child.wait().expect("must wait for child process");
