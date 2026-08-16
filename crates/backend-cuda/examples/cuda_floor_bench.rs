@@ -863,9 +863,34 @@ fn print_candidate_floor(
 
 #[cfg(test)]
 mod tests {
-    use super::{best_of, confirmed_candidate_floor, f16_candidate_floor_value, tflops_sample};
+    use super::{
+        JUDGED_SIZES, REFERENCE_ONLY_SIZES, best_of, confirmed_candidate_floor,
+        f16_candidate_floor_value, tflops_sample,
+    };
     use bench_harness::Measurement;
     use bench_harness::floor_lower_bound;
+
+    // #502 codex-review 指摘（Low, test-coverage）対応: `REFERENCE_ONLY_SIZES`
+    // （参考計測のみで候補下限に寄与しない形状。1024 を追加した本 issue の
+    // 変更点）が `JUDGED_SIZES`（候補下限算出ループの `if
+    // JUDGED_SIZES.contains(&size)` ゲート対象。2048/4096）と重複しないこと
+    // を回帰検査する。両定数は main() 内のハードコード配列走査（`for size
+    // in REFERENCE_ONLY_SIZES.into_iter().chain(JUDGED_SIZES)` からの
+    // ゲート分岐）でのみ参照され、この走査ロジック自体を直接駆動する単体
+    // テストは実行環境に GPU を要するため用意できない。将来誰かが 1024 を
+    // 誤って `JUDGED_SIZES` 側にも追加した場合、この定数レベルの不変条件
+    // 検査が最初に検知する。
+    #[test]
+    fn reference_only_sizes_are_disjoint_from_judged_sizes() {
+        for size in REFERENCE_ONLY_SIZES {
+            assert!(
+                !JUDGED_SIZES.contains(&size),
+                "REFERENCE_ONLY_SIZES と JUDGED_SIZES が重複している（size={size}）: \
+                 参考計測専用の形状は候補下限算出ゲート（JUDGED_SIZES.contains）から \
+                 除外され続ける必要がある"
+            );
+        }
+    }
 
     // PR #349 codex-review 指摘 P1「Q1/Q3 を破棄しており実測記録の契約を
     // 満たせない」の回帰確認: `tflops_sample`（4 経路すべての `measure_*` が
