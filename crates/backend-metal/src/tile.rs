@@ -564,12 +564,55 @@ pub fn fallback_chain(primary: TileConfig) -> Vec<TileConfig> {
 }
 
 /// `(m, n, k)` から [`TileConfig`] を選択する（暫定閾値。本ファイル冒頭
-/// コメント参照）。[`crate::gemm::MetalGemm::dispatch_auto`] の入口。
-///
-/// 閾値はパディング前の元次元（`m`/`n`/`k`）に対して判定する
-/// （`crate::pad::pad8` によるパディングは選択後・パイプライン確保直前に
-/// `crate::gemm` 側で行う。本関数はパディングの有無を問わない純粋関数）。
+/// コメント参照）。[`select_with_occupancy(m, n, k, None)`][select_with_occupancy]
+/// への委譲であり、occupancy 判定は行わない（形状のみによる選択。既存
+/// 呼び出し元・既存テストとの完全互換を保つための後方互換入口。イシュー
+/// #542 で `select_with_occupancy` を追加した際に本関数を委譲化した）。
 pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
+    select_with_occupancy(m, n, k, None)
+}
+
+/// `(m, n, k)` から [`TileConfig`] を選択する（occupancy 判定込み。イシュー
+/// #542）。**現時点では [`crate::gemm::MetalGemm::dispatch_auto`] の入口
+/// ではない**（本番ディスパッチは引き続き [`select`] を使う。M4 Max
+/// 実機での性能非劣化確認が未完了のため。`crate::gemm` モジュール
+/// ドキュメンテーションコメント・`docs/perf/metal-gemm-occupancy-select.md`
+/// §5 参照）。`examples/gemm_bench.rs` の旧/新比較セクションから明示的に
+/// 呼ばれる。
+///
+/// 2 段階判定（MFA 型方法論。本ファイル「occupancy 目標算出」節参照）:
+///
+/// 1. **形状判定**: [`select`] と同一ロジックで形状優先の構成を決める
+///    （閾値はパディング前の元次元 `m`/`n`/`k` に対して判定する。
+///    `crate::pad::pad8` によるパディングは選択後・パイプライン確保直前に
+///    `crate::gemm` 側で行う。本関数はパディングの有無を問わない純粋関数）。
+/// 2. **occupancy 縮退**: 段 1 の結果が大タイル系（[`CANDIDATES`]`[0..=2]`。
+///    64×64・64×32・32×64）かつ `params` が `Some` のとき、
+///    [`actual_groups`] と [`OccupancyParams::ideal_groups`]（係数
+///    [`IDEAL_GROUPS_MULTIPLIER_F32`]）を比較し、[`is_underoccupied`] なら
+///    [`CANDIDATES`]`[3]`（32×32 中形状）へ縮退する。[`TileConfig::
+///    SINGLE_SIMDGROUP_8X8`]（微小形状フォールバック）へはこの経路で縮退
+///    させない（段 1 の `SMALL` 判定のみが担う責務であり、occupancy 縮退の
+///    対象は「大タイル→中タイル」の 1 段のみ）。
+///
+/// **fail-safe フォールバック**: 以下のいずれかに該当する場合は occupancy
+/// 判定を無効化し、段 1 の結果をそのまま返す（現行 [`select`] と完全一致。
+/// 安全側。#541 doc §5 の残課題に対する確定方針）:
+/// - `params` が `None`（呼び出し元が実機値を取得できなかった、または
+///   意図的に occupancy 判定を無効化したい場合）
+/// - [`actual_groups`] が `None`（`cfg.bm`／`cfg.bn` が 0。[`CANDIDATES`]
+///   内の構成では実質発生しないが fail-safe として扱う）
+/// - [`OccupancyParams::ideal_groups`] が `None`（コア数 0・係数 0・SMEM
+///   予算超過によりデバイス上でタイルが同時常駐不可能・オーバーフロー）
+///
+/// いずれの分岐も panic しない（`.claude/rules/coding-rust.md`「本番経路で
+/// unwrap/expect を使わない」）。
+pub fn select_with_occupancy(
+    m: usize,
+    n: usize,
+    k: usize,
+    params: Option<OccupancyParams>,
+) -> TileConfig {
     const SMALL: usize = 64;
     const LARGE: usize = 512;
     const ASPECT_RATIO: usize = 2;
@@ -582,11 +625,40 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
     let tall = m >= n.saturating_mul(ASPECT_RATIO);
     let wide = n >= m.saturating_mul(ASPECT_RATIO);
 
-    match (large, tall, wide) {
+    let shape_cfg = match (large, tall, wide) {
         (_, true, _) => CANDIDATES[1], // 64x32（縦長）
         (_, _, true) => CANDIDATES[2], // 32x64（横長）
         (true, _, _) => CANDIDATES[0], // 64x64（大形状・正方）
         _ => CANDIDATES[3],            // 32x32（中形状・正方）
+    };
+
+    // occupancy 縮退の対象は段 1 が大タイル系（CANDIDATES[0..=2]）を選んだ
+    // 場合のみ。CANDIDATES[3]（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8
+    // は段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
+    // 来ない）。
+    let is_large_tile_candidate =
+        shape_cfg == CANDIDATES[0] || shape_cfg == CANDIDATES[1] || shape_cfg == CANDIDATES[2];
+
+    if !is_large_tile_candidate {
+        return shape_cfg;
+    }
+
+    let Some(params) = params else {
+        return shape_cfg;
+    };
+
+    let Some(actual) = actual_groups(m, n, shape_cfg) else {
+        return shape_cfg;
+    };
+
+    let Some(ideal) = params.ideal_groups(IDEAL_GROUPS_MULTIPLIER_F32, shape_cfg) else {
+        return shape_cfg;
+    };
+
+    if is_underoccupied(actual, ideal) {
+        CANDIDATES[3] // 32x32（中形状）へ縮退
+    } else {
+        shape_cfg
     }
 }
 
@@ -702,9 +774,8 @@ pub(crate) fn tiled_dispatch_grid(tiles_n: usize, tiles_m: usize) -> (usize, usi
 //
 // MFA（metal-flash-attention）型の方法論「`actualGroups`（起動 threadgroup
 // 数）と `idealGroups`（コア数×係数）を比較し、閾値でタイルを 2 段階切替
-// する」の**基盤（算出機構）のみ**をここに置く。`select()` への組み込み・
-// 閾値切替そのものは後続イシュー #542 のスコープであり、本ファイルはまだ
-// `select()` からこれらの関数を呼ばない（#487 診断バイナリ
+// する」の算出機構。[`select_with_occupancy`]（イシュー #542）が本節の
+// 関数群を用いて閾値判定・タイル縮退を行う（#487 診断バイナリ
 // `examples/gemm_diagnosis.rs::analytics` のローカル実装と等価な算出式を
 // クレート内 API として一本化し、算式のドリフト〈重複実装間の食い違い〉
 // を防ぐ狙い）。
@@ -770,9 +841,11 @@ pub const IDEAL_GROUPS_MULTIPLIER_ALL_16BIT: u32 = 9;
 /// occupancy 目標算出（[`OccupancyParams::ideal_groups`]）の入力パラメータ。
 /// `crate::device::MetalOccupancyInfo`（macOS 実機からの実測値）から写像
 /// して構築する。GPU コア数が取得不能（`None`）な場合の呼び出し側
-/// フォールバック方針は #542 のスコープであり、本構造体自体は
+/// フォールバック方針は [`select_with_occupancy`] が `params: None` の
+/// fail-safe 分岐として確定済み（イシュー #542）。本構造体自体は
 /// `gpu_core_count: u32` を必須値として持つ（呼び出し側が `Option` の
-/// 解決を担う）。
+/// 解決を担う。`crate::context::MetalContext::new` が `MetalOccupancyInfo`
+/// から `Option<OccupancyParams>` への写像を担う）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OccupancyParams {
     /// GPU コア数（`crate::device::probe_gpu_core_count` の実測値、または
@@ -823,7 +896,7 @@ impl OccupancyParams {
     /// `None`（fail-closed。`examples/gemm_diagnosis.rs::
     /// parse_device_profile_override` の CLI 検証と同方針。「occupancy
     /// 判定を無効化するフォールバック」として呼び出し側が扱う契約は
-    /// #542 のスコープ）。
+    /// [`select_with_occupancy`] が確定済み（イシュー #542）。
     ///
     /// `smem_groups_per_core(cfg) == 0`（`cfg` の threadgroup memory
     /// 使用量がデバイス上限を超える等、同時常駐不能な構成）の場合も
@@ -849,8 +922,8 @@ impl OccupancyParams {
 /// 以下かどうかを判定する（MFA の小ブロック縮退条件相当: under-occupied
 /// なら小さいタイルへ切り替える判断材料になる）。境界一致（`actual ==
 /// ideal`）は under-occupied 側（`true`）に倒す（fail-safe: 「ちょうど
-/// 目標」を「十分」と誤認せず縮退候補に含める）。閾値運用そのもの
-/// （`select()` への組み込み）は #542 のスコープ。
+/// 目標」を「十分」と誤認せず縮退候補に含める）。閾値運用（[`select`] への
+/// 組み込み）は [`select_with_occupancy`] が担う（イシュー #542）。
 pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
     actual <= ideal
 }
@@ -1414,6 +1487,163 @@ mod tests {
         let cfg = select(128, 1024, 256);
         assert_eq!(cfg, CANDIDATES[2]);
         assert_eq!((cfg.bm, cfg.bn), (32, 64));
+    }
+
+    // --- select_with_occupancy（occupancy 縮退組み込み。イシュー #542）---
+
+    #[test]
+    fn select_with_occupancy_none_matches_select_for_representative_shapes() {
+        // params=None は occupancy 判定を無効化し select() と完全一致する
+        // （挙動不変の回帰ガード。#542 計画「fail-safe フォールバック方針」）。
+        for &(m, n, k) in &[
+            (32, 32, 32),
+            (1000, 1000, 32),
+            (1024, 1024, 1024),
+            (128, 128, 128),
+            (1024, 128, 256),
+            (128, 1024, 256),
+        ] {
+            assert_eq!(
+                select_with_occupancy(m, n, k, None),
+                select(m, n, k),
+                "m={m} n={n} k={k}"
+            );
+        }
+    }
+
+    /// M4 Max 想定値（#542 計画「現状分析」節の事前検証値: コア数 40・
+    /// SMEM 32768 バイト）。`OccupancyParams` は実機実測値ではなく机上計算
+    /// 用の暫定値であり、確定は Mac 実機セッション（実機ツリー #408 系）で
+    /// 行う（`docs/perf/metal-gemm-occupancy-select.md` 参照）。
+    fn m4_max_expected_params() -> OccupancyParams {
+        OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        }
+    }
+
+    #[test]
+    fn select_with_occupancy_shrinks_512_square_under_m4_max_expected_params() {
+        // CANDIDATES[0]（64x64x16）: shared_mem_bytes=9472 → smem_groups_per_core=3
+        // → ideal_groups=40*3=120。512 正方の actual_groups=8*8=64 <= 120 で
+        // under-occupied のため CANDIDATES[3]（32x32）へ縮退する
+        // （#542 計画「現状分析」節の事前検証表）。
+        let cfg = select_with_occupancy(512, 512, 512, Some(m4_max_expected_params()));
+        assert_eq!(cfg, CANDIDATES[3]);
+    }
+
+    #[test]
+    fn select_with_occupancy_keeps_large_squares_from_1024_under_m4_max_expected_params() {
+        // 1024/2048/4096 正方はいずれも actual_groups > ideal_groups=120 の
+        // ため CANDIDATES[0]（64x64）を維持する（#542 計画「現状分析」節）。
+        for &size in &[1024usize, 2048, 4096] {
+            let cfg = select_with_occupancy(size, size, size, Some(m4_max_expected_params()));
+            assert_eq!(cfg, CANDIDATES[0], "size={size}");
+        }
+    }
+
+    #[test]
+    fn select_with_occupancy_shrinks_tall_shape_when_underoccupied() {
+        // 縦長（512x128）: 段 1 は CANDIDATES[1]（64x32）を選ぶ。
+        // actual_groups = ceil(512/64)*ceil(128/32) = 8*4 = 32。
+        // CANDIDATES[1] の smem_groups_per_core=4（7424 バイト）→
+        // ideal_groups=40*4=160。32 <= 160 で under-occupied のため
+        // CANDIDATES[3] へ縮退する。
+        let cfg = select_with_occupancy(512, 128, 256, Some(m4_max_expected_params()));
+        assert_eq!(cfg, CANDIDATES[3]);
+    }
+
+    #[test]
+    fn select_with_occupancy_shrinks_wide_shape_when_underoccupied() {
+        // 横長（128x512）: 段 1 は CANDIDATES[2]（32x64）を選ぶ。縦長と対称の
+        // 形状のため同じく under-occupied となり CANDIDATES[3] へ縮退する。
+        let cfg = select_with_occupancy(128, 512, 256, Some(m4_max_expected_params()));
+        assert_eq!(cfg, CANDIDATES[3]);
+    }
+
+    #[test]
+    fn select_with_occupancy_shrinks_on_boundary_actual_equals_ideal() {
+        // 境界一致（actual == ideal）は縮退側に倒れる fail-safe 契約
+        // （`is_underoccupied` の既存契約。本テストは select_with_occupancy
+        // 統合後もその契約が保たれることを固定する）。
+        // gpu_core_count=24・十分大きい max_threadgroup_memory_bytes（SMEM
+        // 制約が効かず effective_multiplier が IDEAL_GROUPS_MULTIPLIER_F32=6
+        // のまま）なら ideal_groups(CANDIDATES[0]) = 24*6 = 144。
+        // m=n=768（大形状・正方）: actual_groups = ceil(768/64)^2 = 12*12 = 144。
+        let params = OccupancyParams {
+            gpu_core_count: 24,
+            max_threadgroup_memory_bytes: 1024 * 1024,
+        };
+        let cfg = select_with_occupancy(768, 768, 768, Some(params));
+        assert_eq!(cfg, CANDIDATES[3]);
+    }
+
+    #[test]
+    fn select_with_occupancy_does_not_further_shrink_mid_or_tiny_candidates() {
+        // 段 1 が CANDIDATES[3]（中形状）・SINGLE_SIMDGROUP_8X8（微小形状）を
+        // 返す形状は、occupancy 縮退の対象（大タイル系のみ）に含まれない
+        // ため occupancy パラメータの値に関わらず段 1 の結果を維持する。
+        let extreme_params = OccupancyParams {
+            gpu_core_count: 1,
+            max_threadgroup_memory_bytes: 1,
+        };
+        assert_eq!(
+            select_with_occupancy(128, 128, 128, Some(extreme_params)),
+            CANDIDATES[3]
+        );
+        assert_eq!(
+            select_with_occupancy(32, 32, 32, Some(extreme_params)),
+            TileConfig::SINGLE_SIMDGROUP_8X8
+        );
+    }
+
+    #[test]
+    fn select_with_occupancy_falls_back_when_gpu_core_count_is_zero() {
+        // ideal_groups() が None（gpu_core_count==0）の場合、occupancy
+        // 判定を無効化し段 1 の結果（select() と同一）へフォールバックする。
+        let params = OccupancyParams {
+            gpu_core_count: 0,
+            max_threadgroup_memory_bytes: 32 * 1024,
+        };
+        assert_eq!(
+            select_with_occupancy(1024, 1024, 1024, Some(params)),
+            select(1024, 1024, 1024)
+        );
+    }
+
+    #[test]
+    fn select_with_occupancy_falls_back_when_smem_budget_is_exceeded() {
+        // ideal_groups() が None（smem_groups_per_core(cfg)==0。デバイスの
+        // threadgroup memory 上限が CANDIDATES[0] の使用量 9472 バイトに
+        // 満たない）の場合も段 1 の結果へフォールバックする。
+        let params = OccupancyParams {
+            gpu_core_count: 40,
+            max_threadgroup_memory_bytes: 1024, // CANDIDATES[0] の 9472 バイト未満
+        };
+        assert_eq!(
+            select_with_occupancy(1024, 1024, 1024, Some(params)),
+            select(1024, 1024, 1024)
+        );
+    }
+
+    #[test]
+    fn select_with_occupancy_result_always_validates_under_typical_device_limits() {
+        // select_result_always_validates_under_typical_device_limits（下記）の
+        // occupancy 込み版。縮退後の構成も含め常に validate を通ることを
+        // 固定する（REQ-8 境界検査・パイプライン確保時の panic 防止）。
+        for &(m, n, k) in &[
+            (7usize, 13usize, 5usize),
+            (512, 512, 512),
+            (512, 128, 256),
+            (128, 512, 256),
+            (1024, 1024, 1024),
+            (2048, 2048, 2048),
+            (4096, 512, 512),
+        ] {
+            let cfg = select_with_occupancy(m, n, k, Some(m4_max_expected_params()));
+            cfg.validate(1024, 32 * 1024)
+                .unwrap_or_else(|e| panic!("select_with_occupancy({m}, {n}, {k}) rejected: {e}"));
+        }
     }
 
     // --- イシュー #532: MLX classic 経路の未収録 3 構成 ---

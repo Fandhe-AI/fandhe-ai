@@ -35,7 +35,7 @@
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig};
+    use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig, tile};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
 
@@ -100,6 +100,21 @@ mod macos_impl {
 
         let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
         flops / measurement.median_secs / 1e12
+    }
+
+    /// 昇順ソート済みでない `f64` 列から中央値を求める（要素数が偶数の
+    /// 場合は中央 2 要素の平均）。`.claude/rules/coding-rust.md` の
+    /// 「ベンチは 5 回計測の中央値を採用」に合わせ、occupancy 判定組み込み
+    /// 比較のラウンド交互方式（後述）で得た各ラウンドの計測値を集約する
+    /// のに使う。
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(|a, b| a.partial_cmp(b).expect("TFLOPS は NaN にならない"));
+        let n = values.len();
+        if n % 2 == 1 {
+            values[n / 2]
+        } else {
+            (values[n / 2 - 1] + values[n / 2]) / 2.0
+        }
     }
 
     /// `dispatch_auto`（`crate::tile::select` による行列サイズ別自動選択。
@@ -210,6 +225,106 @@ mod macos_impl {
         ] {
             let tflops = measure(&gemm, &ctx, GemmVariant::SimdgroupTiled(cfg), size, &config);
             println!("size={size} candidate={label} tflops={tflops:.4}");
+        }
+
+        // occupancy 判定組み込み比較（イシュー #542。受け入れ条件 2:
+        // 「size ∈ {512, 1024, 2048, 4096} で現行 select() 比の劣化がない
+        // ことを実測確認する」）。
+        //
+        // 「旧」: `tile::select`（形状のみの判定。occupancy 縮退なし）が
+        // 選ぶ構成を `SimdgroupTiled` へ明示指定してディスパッチする
+        // （`dispatch_auto` の現行本番挙動と同一。`select_with_occupancy`
+        // は M4 Max 実機での性能非劣化確認が未完了のため `dispatch_auto`
+        // へは未適用〈codex-review P1・PR #684。`crate::gemm` モジュール
+        // ドキュメンテーションコメント参照〉）。
+        // 「新」: `tile::select_with_occupancy`（`ctx.occupancy_params()`
+        // 経由の occupancy 縮退込み判定）が選ぶ構成を同じく `SimdgroupTiled`
+        // へ明示指定してディスパッチする（`dispatch_auto` 経由ではなく
+        // 直接 `select_with_occupancy` の結果を計測する。GPU コア数取得
+        // 不能時は `tile::select` と同一構成へ fail-safe フォールバックする）。
+        // 本比較で非劣化を確認できたら `dispatch_auto` を
+        // `select_with_occupancy` 呼び出しへ切り替える（別 PR）。
+        //
+        // 選択された `TileConfig`（`bm`/`bn`）も出力し、`docs/perf/
+        // metal-gemm-occupancy-select.md` の記録テンプレへ転記できるように
+        // する。
+        println!("--- occupancy 判定組み込み比較（旧: select / 新: select_with_occupancy）---");
+        // ラウンド交互方式（codex-review 指摘・PR #684）: 旧→新の固定順で
+        // 全 warmup・計測を終えてから他方を計測すると、GPU の DVFS・温度
+        // 上昇によるクロックスロットリングが計測順序に系統的に乗り、
+        // `new_over_old` 比が測定順序に左右されてしまう（受け入れ条件
+        // 「select() 比の性能非劣化」の判定を汚染しうる）。これを避ける
+        // ため、ROUNDS 回の独立ラウンドに分割し、ラウンドごとに旧→新／
+        // 新→旧の順序を反転させながら交互計測する。旧・新それぞれの
+        // ラウンド計測値（各ラウンドは `bench_run` 内部で warmup・計測とも
+        // `MeasurementConfig` の下限を満たした上での中央値）をさらに束ね、
+        // その中央値を最終値として `new_over_old` を求める。
+        //
+        // ROUNDS は偶数固定とする（codex-review・Cursor Bugbot 指摘・PR
+        // #684 追加レビュー）: 奇数だと「偶数ラウンドは旧→新・奇数ラウンド
+        // は新→旧」の反転規則の下で旧先頭ラウンドが 1 回多くなり
+        // （ROUNDS=5 なら旧先頭 3 回・新先頭 2 回）、old-first バイアスを
+        // 完全には相殺できず `new_over_old` を系統的に過小評価しうる。
+        // 偶数化により旧先頭・新先頭が同数（ROUNDS=6 で 3 対 3）になり、
+        // 順序バイアスをラウンド間で厳密に相殺する。
+        const ROUNDS: usize = 6;
+        for size in [512usize, 1024, 2048, 4096] {
+            let config = MeasurementConfig::default();
+
+            let old_cfg = tile::select(size, size, size);
+            let new_cfg = tile::select_with_occupancy(size, size, size, ctx.occupancy_params());
+
+            let mut old_samples = Vec::with_capacity(ROUNDS);
+            let mut new_samples = Vec::with_capacity(ROUNDS);
+
+            for round in 0..ROUNDS {
+                // 偶数ラウンド（0-origin）は旧→新、奇数ラウンドは新→旧に
+                // 反転し、順序バイアスをラウンド間で打ち消す。
+                if round % 2 == 0 {
+                    old_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(old_cfg),
+                        size,
+                        &config,
+                    ));
+                    new_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(new_cfg),
+                        size,
+                        &config,
+                    ));
+                } else {
+                    new_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(new_cfg),
+                        size,
+                        &config,
+                    ));
+                    old_samples.push(measure(
+                        &gemm,
+                        &ctx,
+                        GemmVariant::SimdgroupTiled(old_cfg),
+                        size,
+                        &config,
+                    ));
+                }
+            }
+
+            let old_tflops = median(old_samples);
+            let new_tflops = median(new_samples);
+
+            println!(
+                "size={size} old_tile=({}x{}) old_tflops={old_tflops:.4} new_tile=({}x{}) new_tflops={new_tflops:.4} new_over_old={:.4} occupancy_params={:?}",
+                old_cfg.bm,
+                old_cfg.bn,
+                new_cfg.bm,
+                new_cfg.bn,
+                new_tflops / old_tflops,
+                ctx.occupancy_params(),
+            );
         }
     }
 }

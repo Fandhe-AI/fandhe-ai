@@ -40,17 +40,24 @@ fn gemm_blis_identity_is_noop() {
 
 // --- 2. gemm_blis / gemm_blis_parallel が naive と bit 完全一致 ---
 //
-// MR/NR は ISA ごとに異なる（scalar 4x4・neon 8x8・avx2 6x16・
-// avx512 8x32。`src/gemm_blis/microkernel.rs`）。実行時 ISA ディスパッチ
-// （#185・`microkernel::Isa::detect`）によりどの ISA が選ばれても
-// bit 完全一致するため、本テストは特定 ISA を固定せず実行環境で検出
-// された ISA 経路をそのまま検証する。MC=128・KC=256・NC=512 は
+// MR/NR は ISA ごとに異なる（scalar 4x4・neon 8x12（既定。#559 で 8x8 から
+// 拡張）・avx2 6x16・avx512 8x32。`src/gemm_blis/microkernel.rs`）。実行時
+// ISA ディスパッチ（#185・`microkernel::Isa::detect`）によりどの ISA が
+// 選ばれても bit 完全一致するため、本テストは特定 ISA を固定せず実行環境で
+// 検出された ISA 経路をそのまま検証する。MC=128・KC=256・NC=512 は
 // `src/gemm_blis/mod.rs` の定数と同じ値。グリッドは各境界（MR/NR の
-// 最小値・MC/KC/NC）を跨ぐよう m・n・k を選ぶ。
+// 最小値・MC/KC/NC）を跨ぐよう m・n・k を選ぶ。n には NEON NR=12（既定。
+// #559）の境界（11/12/13）近傍も含める。
 
-const SHAPE_GRID_M: [usize; 6] = [1, 5, 15, 19, 51, 200];
-const SHAPE_GRID_N: [usize; 6] = [1, 5, 17, 19, 512, 600];
-const SHAPE_GRID_K: [usize; 5] = [1, 3, 255, 257, 700];
+const SHAPE_GRID_M: [usize; 7] = [1, 5, 11, 12, 13, 51, 200];
+const SHAPE_GRID_N: [usize; 8] = [1, 5, 11, 12, 13, 19, 512, 600];
+// k=2/4/6 はイシュー #561（NEON k=4 アンロール）の主ループ／端数分離
+// （k_main = k - k%4）の剰余網羅用に追加した: k=2 は k_main=0（全量が
+// 端数ループ）、k=4 は k_main=4（主ループ 1 チャンクのみ・端数 0）、
+// k=6 は k_main=4・端数 2 を通す。既存の 1/3/255/257/700 は k%4 が
+// それぞれ 1/3/3/1/0 のため、これらを追加すると k%4 の 0/1/2/3 全剰余を
+// 網羅する。
+const SHAPE_GRID_K: [usize; 8] = [1, 2, 3, 4, 6, 255, 257, 700];
 
 #[test]
 fn gemm_blis_matches_naive_bit_exact_shape_grid() {

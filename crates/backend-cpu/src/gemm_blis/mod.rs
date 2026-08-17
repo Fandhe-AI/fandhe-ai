@@ -743,8 +743,9 @@ mod tests {
     /// を含める）。
     #[test]
     fn panel_capacity_upper_bounds_all_block_iterations() {
-        // scalar 4x4・neon 8x8・avx2 6x16・avx512 8x32（`microkernel/*.rs`）。
-        const KERNEL_DIMS: [(usize, usize); 4] = [(4, 4), (8, 8), (6, 16), (8, 32)];
+        // scalar 4x4・neon 8x12（既定）・neon 12x8（A/B 対抗変種。#559）・
+        // avx2 6x16・avx512 8x32（`microkernel/*.rs`）。
+        const KERNEL_DIMS: [(usize, usize); 5] = [(4, 4), (8, 12), (12, 8), (6, 16), (8, 32)];
         // MC/KC/NC 境界（128/256/512）を跨ぐ・下回る・ちょうどの形状。
         const SHAPES: [(usize, usize, usize); 6] = [
             (1, 1, 1),
@@ -786,6 +787,137 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // --- NEON MR=8×NR=12 拡張の aarch64 限定検証（イシュー #559）---
+    //
+    // x86_64 開発環境では実行不能なため `cfg(target_arch = "aarch64")` で
+    // ゲートする（`cargo check --target aarch64-unknown-linux-gnu` の
+    // クロス型検査対象にはなるが、x86_64 通常 CI では実行されない。
+    // 実機での bit 一致・A/B 実測は `docs/perf/cpu-gemm-neon-mr8-nr12.md`
+    // 参照）。
+
+    /// 既定 8×12 カーネル・12×8 A/B 対抗変種いずれも [`ScalarKernel`]
+    /// 強制経路と bit 完全一致することを確認する（受け入れ条件 3: parity
+    /// テストが green であること）。MC/KC/NC 境界を跨ぐ形状を選ぶ。
+    ///
+    /// k の一覧はイシュー #561（NEON k=4 アンロール）の主ループ／端数
+    /// 分離（k_main = k - k%4）の剰余網羅用に拡張した: 元の k=700 は
+    /// KC=256 ブロック分割で各領域の kc_len が 256/256/188（いずれも
+    /// 4 の倍数）となり k%4 の剰余が常に 0 で端数ループを一切通らない
+    /// （#561 で新設した端数ループの検証漏れになる）。k=701〜703 を
+    /// 追加し、各々 KC 分割後の最終領域 kc_len が 189/190/191（k%4 が
+    /// 1/2/3）になることで剰余 1/2/3 を通す。MC/NC 境界跨ぎは元の
+    /// k=700・(m,n)=(200,600) ケースで既に検証済みのため、追加した
+    /// k=701〜703 は端数分岐の検証のみが目的（重複検証を避け aarch64
+    /// 実機セッションでの実行コストを抑えるため）小さい (m,n) を使う。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn neon_8x12_and_12x8_match_scalar_forced_bit_exact() {
+        use microkernel::{Neon12x8Kernel, NeonKernel};
+
+        for (i, &(m, n, k)) in [
+            (200usize, 600usize, 700usize),
+            (16, 20, 701),
+            (16, 20, 702),
+            (16, 20, 703),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let seed_a = 0x5555_5555u32 + i as u32;
+            let seed_b = 0x6666_6666u32 + i as u32;
+            let a = xorshift32_vec(seed_a, m * k);
+            let b = xorshift32_vec(seed_b, k * n);
+
+            let mut c_scalar = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(ScalarKernel, &a, &b, &mut c_scalar, m, n, k).unwrap();
+
+            let mut c_neon_8x12 = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(NeonKernel, &a, &b, &mut c_neon_8x12, m, n, k).unwrap();
+            assert_eq!(
+                c_scalar, c_neon_8x12,
+                "NeonKernel（既定 8×12・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+
+            let mut c_neon_12x8 = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(Neon12x8Kernel, &a, &b, &mut c_neon_12x8, m, n, k).unwrap();
+            assert_eq!(
+                c_scalar, c_neon_12x8,
+                "Neon12x8Kernel（A/B 対抗変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+        }
+    }
+
+    /// [`NeonKernel`]（既定 8×12）と [`Neon12x8Kernel`]（firestorm 型 A/B
+    /// 対抗変種）のスループットを同一形状で計測し中央値を報告する
+    /// （`.claude/rules/coding-rust.md` の 5 回計測中央値規約）。
+    /// 採用可否の判定は本テストの出力を見た人間／後続セッションが行う
+    /// ため、本テスト自体は勝敗を assert しない（イシュー #559 §2.3）。
+    /// `#[ignore]` 分離（実機実行専用。`.claude/rules/coding-rust.md`
+    /// 実機分離方針）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "aarch64 実機での A/B 性能計測専用（--release 実行推奨）"]
+    fn neon_8x12_vs_12x8_ab_median_throughput() {
+        use microkernel::{Neon12x8Kernel, NeonKernel};
+        use std::time::Instant;
+
+        fn run_once<K: Microkernel>(
+            kernel: K,
+            a: &[f32],
+            b: &[f32],
+            m: usize,
+            n: usize,
+            k_dim: usize,
+        ) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_with_kernel(kernel, a, b, &mut c, m, n, k_dim).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            samples[samples.len() / 2]
+        }
+
+        for dim in [512usize, 1024, 2048] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0x7777_7777, m * k);
+            let b = xorshift32_vec(0x8888_8888, k * n);
+
+            // キャッシュ・TLB を双方カーネルで温めてから計測に入る
+            // （ウォームアップなしだと先に計測する側が cold cache を
+            // 引き、後段が温まった状態を引き継ぐため系統的に偏る）。
+            run_once(NeonKernel, &a, &b, m, n, k);
+            run_once(Neon12x8Kernel, &a, &b, m, n, k);
+
+            // 各反復で計測順序を交互化し、cursor[bot] 指摘（PR #693・
+            // レビュースレッド PRRT_kwDOTuUCJc6ZnFza）が挙げた
+            // 「NeonKernel を常に先に計測するため後段の
+            // Neon12x8Kernel がキャッシュ/TLB の温まった状態を
+            // 引き継ぎ 12x8 有利に系統的偏りうる」問題を解消する。
+            let mut samples_8x12 = Vec::with_capacity(5);
+            let mut samples_12x8 = Vec::with_capacity(5);
+            for i in 0..5 {
+                if i % 2 == 0 {
+                    samples_8x12.push(run_once(NeonKernel, &a, &b, m, n, k));
+                    samples_12x8.push(run_once(Neon12x8Kernel, &a, &b, m, n, k));
+                } else {
+                    samples_12x8.push(run_once(Neon12x8Kernel, &a, &b, m, n, k));
+                    samples_8x12.push(run_once(NeonKernel, &a, &b, m, n, k));
+                }
+            }
+
+            let median_8x12 = median(samples_8x12);
+            let median_12x8 = median(samples_12x8);
+
+            println!(
+                "dim={dim}: NeonKernel(8x12) median={median_8x12:.6}s, \
+                 Neon12x8Kernel(12x8) median={median_12x8:.6}s"
+            );
         }
     }
 }

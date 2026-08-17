@@ -172,6 +172,143 @@ K ストレスケース）が PASS することを先に確認してから性能
   ドキュメントのみを対象としコード変更を含めないため、本イシューでも実施しない）
 - 実機 CI 整備（TASK-1.8e・#42）と関連付けて追跡する（`.claude/rules/out-of-scope-tracking.md`）
 
+## Phase D 完了時点再計測（#547）
+
+イシュー #547「bench(backend-metal): Phase D 完了時点の f32/f16 スループットと対 PyTorch MPS 比を
+再計測・記録」の実測記録。GEMM 最適化ツリー（ルート #479）の Phase D（親 #530）子イシュー
+D-1〜D-9・D-11（#547 自身は D-10）が全て完遂した時点でのスナップショット計測であり、
+A-1（#481・`docs/perf/gemm-optimization-baseline.md`）で確定した基準系列に対する改善率を算出する。
+
+### 状態: 未計測。実機セッションで消化
+
+本節は Linux worktree で作成され、Metal 実機（Apple Silicon）が同一セッションで使用できないため
+計測手順・記録テンプレートのみを整備する（Phase D 先例 `docs/perf/metal-gemm-float4-staged-load.md`
+等と同方式）。実機到達可能なセッションが下記手順で計測し、本節の表を実測値で埋める。
+
+### Phase D 有効変更の一覧（本計測が含む経路の明記）
+
+計測時点で `MetalGemm::dispatch_auto`／`dispatch_f16_prepared_unverified` の本番経路に**適用済み**の
+変更と、実装済みだが本番経路には**未適用**の変更を区別して記録する（計測結果の解釈に必須）。
+
+| 子イシュー | 内容 | 本番経路への適用状態 |
+|---|---|---|
+| D-1（#532） | `tile::CANDIDATES` へ MLX classic 未収録 3 構成を追加（計 8 構成） | **適用済み**（`crates/backend-metal/src/tile.rs::CANDIDATES`） |
+| D-2（#533） | staged ロードの `float4` ベクトル化 | **適用済み**（`shaders/gemm.metal` の staged ロード経路。function constant 分岐なし・無条件） |
+| D-3（#535） | `TileConfig::validate` へ整除制約検証を追加 | **適用済み**（実機非依存の検証ロジック） |
+| D-4（#536） | 蛇行（serpentine）走査順の移植 | **適用済み**（`shaders/gemm.metal` epilogue。無条件） |
+| D-5（#538） | threadgroup memory のパディング（`TGP_PAD`） | **適用済み**（`staged=true` の全候補で `TGP_PAD_ELEMS=4` が有効。`tile.rs::TileConfig::pad`） |
+| D-6（#540） | threadgroup ID スウィズルの実験 | **未適用**（`tile::SWIZZLE_ENABLED = false` が本番既定。PR #661 codex-review 指摘: 未検証のスウィズルを本番経路へ無条件適用しない） |
+| D-7a（#541） | occupancy 目標算出の仕組み | 算出機構のみ（`dispatch_auto` からは未参照） |
+| D-7b（#542） | occupancy 判定のタイル選択への組み込み | **未適用**（`docs/perf/metal-gemm-occupancy-select.md`「状態」節: `MetalGemm::dispatch_auto` は `tile::select`〈形状のみ〉を呼び続けており `select_with_occupancy` は未接続。非劣化確認後に別 PR で切替予定） |
+| D-8（#544） | Morton 順マッピングの適用余地調査 | **不採用**（`docs/backend-metal-morton-mapping-decision.md`: 標準 `simdgroup_matrix` API 下では適用不可と判断） |
+| D-9（#546） | 非公式 `simdgroup_async_copy` 系 AIR intrinsic | **不採用**（`docs/backend-metal-async-copy-decision.md`） |
+| D-11（#549） | MLX classic 対比・NAX 経路非適用の記録 | ドキュメントのみ（コード変更なし） |
+
+まとめ: 本計測は D-1〜D-5（CANDIDATES 拡充・float4 ベクトル化・整除検証・serpentine 走査・
+TGP パディング）を含む経路の実測であり、D-6（swizzle）・D-7b（occupancy 選択）は未適用のまま。
+`tile::select` の選択ロジック自体（`SMALL`/`LARGE`/`ASPECT_RATIO` 閾値）は #381（D-10 の前身相当）
+時点から変更していない。
+
+### 計測手順（Apple Silicon 実機）
+
+数値一致確認（性能値採用の前提）:
+
+```sh
+cargo test -p backend-metal --release -- --ignored --nocapture
+```
+
+全ケース PASS を確認してからベンチを実行する。
+
+```sh
+cargo run -p backend-metal --example gemm_bench --release
+cargo run -p backend-metal --example gemm_f16_bench --release
+```
+
+上記 2 コマンドを**各 5 回独立実行**し、size ごとに 5 個の TFLOPS 値の中央値を採用する
+（`docs/perf/metal-f16-vs-mps-f16.md` §「実測結果」と同一方式。`MeasurementConfig::default()`
+自体が warmup 20・計測 20・中央値を内包するため、5 プロセス独立実行との組み合わせで
+「5 回計測の中央値」下限〈`.claude/rules/coding-rust.md`〉を二重に満たす）。
+
+PyTorch 側は一時 venv（リポジトリ管理外。`.venv-mps-bench` 先例）で以下を実行する:
+
+```sh
+python3 -m venv .venv-mps-bench
+source .venv-mps-bench/bin/activate
+pip install torch
+python3 scripts/bench/gemm_bench_torch_mps_f32.py
+python3 scripts/bench/gemm_bench_torch_mps_f16.py
+```
+
+Rust 側と同様に各 5 回独立実行し、size ごとの中央値を採用する。
+
+計測衛生（#381・#383 先例と同方式）: AC 電源接続、外部ディスプレイのコンポジタ負荷を許容するが
+他 GPU 負荷アプリ（ブラウザ動画・Xcode ビルド・ローカル LLM 等）は終了する。Rust 側・PyTorch 側の
+同時実行を避け、各ラン前後に `pgrep -fl "gemm_bench|gemm_f16_bench|gemm_bench_torch_mps"` で他
+プロセスとの競合がないことを確認する（競合検出時は破棄・取り直す）。
+
+### 計測環境（実測時に記入）
+
+| 項目 | 値 |
+|------|-----|
+| チップ | （未計測） |
+| OS | （未計測） |
+| rustc | （未計測） |
+| torch | （未計測） |
+| 計測コミット SHA | （未計測） |
+| 計測プロトコル | `bench-harness::protocol::run`（warmup 20・計測 20・中央値）を 5 回独立実行し size ごとに中央値採用（Rust・PyTorch 双方） |
+| 決定的シード | `0xC0FFEE` |
+| 同期境界 | Rust: コマンドバッファ完了待ち／PyTorch: `torch.mps.synchronize()` |
+
+### f32 実測結果（対 系列 (b) #381 run1 改善率）
+
+分母は `docs/perf/gemm-optimization-baseline.md` §2 の系列 (b)（#381 canonical run1。同一計測境界
+「1 ディスパッチごとに A・B アップロード＋C readback を含む」）。系列 (a)（PoC-v2-4・バッファ常駐）
+とは計測境界が異なるため比較しない（同ドキュメント §2「基準系列の決定」）。
+
+| size | naive TFLOPS | tiled TFLOPS | simdgroup TFLOPS | dynamic-tile-auto TFLOPS | 対 #381 run1 改善率（dynamic-tile-auto） |
+|------|------|------|------|------|------|
+| 512  | （未計測） | （未計測） | （未計測） | （未計測） | 分母 0.5216 |
+| 1024 | （未計測） | （未計測） | （未計測） | （未計測） | 分母 1.2909 |
+| 2048 | （未計測） | （未計測） | （未計測） | （未計測） | 分母 2.5001 |
+| 4096 | （未計測） | （未計測） | （未計測） | （未計測） | 分母 3.0283 |
+
+改善率 = 本計測 dynamic-tile-auto TFLOPS ÷ 上記分母（#381 run1）。
+
+### f32 対 PyTorch MPS 比（参考値・計測境界差の注記付き）
+
+**REQ-8 の分母・分子には使わない**。`dispatch_auto` は転送込み境界のため、`docs/performance-targets.md`
+§4 の同期方式契約（ホスト転送を伴わない完了待ち）を単独では満たさない。§4 準拠の f32 prepared
+入口整備・確定計測は Phase F の #572 のスコープ（`docs/perf/gemm-optimization-baseline.md` §2 参照）。
+
+| size | Metal f32 TFLOPS（dynamic-tile-auto。5 回中央値） | PyTorch MPS f32 TFLOPS（5 回中央値） | Metal/PyTorch 比（参考値） |
+|------|------|------|------|
+| 512  | （未計測） | （未計測） | （未計測） |
+| 1024 | （未計測） | （未計測） | （未計測） |
+| 2048 | （未計測） | （未計測） | （未計測） |
+| 4096 | （未計測） | （未計測） | （未計測） |
+
+### f16 実測結果（対 #383 改善率・対 MPS f16 比）
+
+分母は `docs/perf/metal-f16-vs-mps-f16.md`「実測結果（イシュー #383）」節（同一計測境界・
+`dispatch_f16_prepared_unverified`。§4 準拠の prepared 境界のため対 MPS 比も直接比較可）。
+
+| size | Metal f16 TFLOPS（5 回中央値） | 対 #383 改善率 | PyTorch MPS f16 TFLOPS（5 回中央値） | Metal/PyTorch f16 比 |
+|------|------|------|------|------|
+| 512  | （未計測） | 分母 1.1554 | （未計測） | （未計測） |
+| 1024 | （未計測） | 分母 2.1777 | （未計測） | （未計測） |
+| 2048 | （未計測） | 分母 2.4426 | （未計測） | （未計測） |
+| 4096 | （未計測） | 分母 2.2411 | （未計測） | （未計測） |
+
+改善率 = 本計測 Metal f16 TFLOPS ÷ 上記分母（#383）。Metal/PyTorch f16 比 = 本計測 Metal f16
+TFLOPS ÷ 本計測 PyTorch MPS f16 TFLOPS（REQ-8 の比較定義。size ごとの比の中央値ではない）。
+
+### REQ-8 下限値との関係（変更しない）
+
+**本節は REQ-8 下限値（Metal f32 23.2%・f16 18.6% 等の既定行。`docs/performance-targets.md` §2）を
+一切変更しない**。改善率・対 MPS 比の算出結果を下限値へ反映する判断は Phase F の人間承認タスク
+（#577）へ申し送る（`docs/perf/gemm-optimization-baseline.md` §0「本ドキュメントは REQ-8 の下限値・
+実測比率の数値を一切変更しない」と同方針）。
+
 ## Appendix: 生ログ（3 ラン分）
 
 ### run1（canonical）
