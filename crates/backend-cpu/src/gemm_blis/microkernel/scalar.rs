@@ -84,13 +84,24 @@ pub fn kernel_with_ldc(
 /// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
 /// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
 /// [`kernel_with_ldc`] を使うこと。
-pub fn kernel(
-    ap: &[f32],
-    bp: &[f32],
-    c_tile: &mut [f32],
-    kc_len: usize,
-) -> Result<(), super::TileBoundsError> {
-    kernel_with_ldc(ap, bp, c_tile, NR, kc_len)
+///
+/// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
+///
+/// #557 対応の過程で本関数の戻り値を一時的に
+/// `Result<(), super::TileBoundsError>` へ変更していたが、これは
+/// `backend_cpu::gemm_blis::microkernel::scalar` が `pub mod` であるため
+/// 「従来 `()` を返す本関数を関数ポインタ・末尾式で使う既存の外部
+/// 呼び出し元」をコンパイル不能にする破壊的変更だった（codex-review・
+/// GraphQL reviewThreads 双方の指摘。AGENTS.md 公開 API 非破壊規約）。
+/// 本関数は従来どおり `()` を返す必須シグネチャへ戻し、契約違反は
+/// [`kernel_with_ldc`] と同じく panic で表面化させる（本関数はもともと
+/// `assert_eq!` で panic する契約だったため、観測可能な挙動は #557 以前
+/// と同一）。`ldc` を選べる新設 API は [`kernel_with_ldc`]（`Result` を
+/// 返す）側にのみ存在する非対称な形とする。
+pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    if let Err(e) = kernel_with_ldc(ap, bp, c_tile, NR, kc_len) {
+        panic!("{e}");
+    }
 }
 
 #[cfg(test)]
@@ -120,7 +131,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, 2).unwrap();
+        kernel(&ap, &bp, &mut c_tile, 2);
 
         assert_eq!(c_tile[0], 19.0); // 1*5+2*7（行 0 の先頭は c_tile[0]）
         assert_eq!(c_tile[1], 22.0); // 1*6+2*8
@@ -134,7 +145,7 @@ mod tests {
         let ap = vec![0.0f32; MR * 2 - 1];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        let _ = kernel(&ap, &bp, &mut c_tile, 2);
+        kernel(&ap, &bp, &mut c_tile, 2);
     }
 
     /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`

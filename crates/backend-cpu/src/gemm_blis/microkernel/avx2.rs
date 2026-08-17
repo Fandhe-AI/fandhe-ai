@@ -119,16 +119,19 @@ pub unsafe fn kernel_unchecked_with_ldc(
 ///
 /// [`kernel_unchecked_with_ldc`] と同一（呼び出し元は実行 CPU が
 /// AVX2・FMA をサポートすることを保証しなければならない）。
+///
+/// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
+///
+/// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
+/// 従来どおり `()` を返す必須シグネチャへ戻し、契約違反は panic で
+/// 表面化させる。
 #[target_feature(enable = "avx2,fma")]
-pub unsafe fn kernel_unchecked(
-    ap: &[f32],
-    bp: &[f32],
-    c: &mut [f32],
-    kc_len: usize,
-) -> Result<(), super::TileBoundsError> {
+pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
     // SAFETY: 呼び出し元契約を本関数の `# Safety` 節としてそのまま
     // 引き継いでいる。
-    unsafe { kernel_unchecked_with_ldc(ap, bp, c, NR, kc_len) }
+    if let Err(e) = unsafe { kernel_unchecked_with_ldc(ap, bp, c, NR, kc_len) } {
+        panic!("{e}");
+    }
 }
 
 /// [`kernel_unchecked_with_ldc`] の安全なラッパー（`ldc` 指定可能）。
@@ -156,14 +159,17 @@ pub fn kernel_with_ldc(
 /// の cfg 選択）はこの薄いラッパーではなく実行時ディスパッチ経由の
 /// [`Microkernel::run_with_ldc`](super::Microkernel::run_with_ldc) を使う
 /// （モジュールドキュメント「公開 API 非破壊」節参照）。
+///
+/// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
+///
+/// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
+/// 従来どおり `()` を返す必須シグネチャへ戻し、契約違反は panic で
+/// 表面化させる。
 #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
-pub fn kernel(
-    ap: &[f32],
-    bp: &[f32],
-    c: &mut [f32],
-    kc_len: usize,
-) -> Result<(), super::TileBoundsError> {
-    kernel_with_ldc(ap, bp, c, NR, kc_len)
+pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    if let Err(e) = kernel_with_ldc(ap, bp, c, NR, kc_len) {
+        panic!("{e}");
+    }
 }
 
 #[cfg(test)]
@@ -206,7 +212,7 @@ mod tests {
         // SAFETY: 直前の is_x86_feature_detected! ガードにより実行 CPU が
         // AVX2・FMA をサポートすることを確認済み。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_tile, kc_len).unwrap();
+            kernel_unchecked(&ap, &bp, &mut c_tile, kc_len);
         }
 
         // 行 0 の先頭は c_tile[0]、行 1 の先頭は c_tile[NR]。
@@ -275,7 +281,7 @@ mod tests {
         let mut c_avx2 = c_init;
         // SAFETY: 直前の is_x86_feature_detected! ガードにより健全。
         unsafe {
-            kernel_unchecked(&ap, &bp, &mut c_avx2, kc_len).unwrap();
+            kernel_unchecked(&ap, &bp, &mut c_avx2, kc_len);
         }
 
         assert_eq!(

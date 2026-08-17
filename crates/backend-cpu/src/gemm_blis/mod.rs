@@ -212,8 +212,7 @@ pub fn gemm_blis(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    dispatch_region(a, b, c, n, k, 0..m, default_blocks());
-    Ok(())
+    dispatch_region(a, b, c, n, k, 0..m, default_blocks())
 }
 
 /// `gemm_blis` を `rayon` で行パネル並列化した版。
@@ -243,12 +242,11 @@ pub fn gemm_blis_parallel(
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
-        .for_each(|(panel_idx, c_chunk)| {
+        .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks());
-        });
-    Ok(())
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks())
+        })
 }
 
 /// `gemm_blis_parallel` に GEMM epilogue（bias 加算・activation）を融合した版
@@ -325,7 +323,7 @@ pub fn gemm_blis_bias_act_parallel(
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks());
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks())?;
             apply_epilogue(c_chunk, n, bias, act)
         })
 }
@@ -385,7 +383,7 @@ fn dispatch_region(
     k: usize,
     rows: Range<usize>,
     blocks: BlockSizes,
-) {
+) -> Result<(), GemmError> {
     // AVX-512 経路は `avx512_stable` cfg（`backend-cpu` クレートルートの
     // `build.rs` が AVX-512F intrinsics のコンパイル可否を実測して発行。
     // [`microkernel::avx512`] モジュールドキュメント参照）が立っている
@@ -402,10 +400,10 @@ fn dispatch_region(
     }
     if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
         let mut bufs = PanelBuffers::new::<microkernel::Avx2Kernel>(n, k, mc_total, blocks);
-        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks);
+        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks)
     } else {
         let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total, blocks);
-        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks);
+        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks)
     }
 }
 
@@ -421,7 +419,7 @@ fn dispatch_region(
     k: usize,
     rows: Range<usize>,
     blocks: BlockSizes,
-) {
+) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     let mc_total = rows.end - rows.start;
     let mut bufs = PanelBuffers::new::<microkernel::NeonKernel>(n, k, mc_total, blocks);
@@ -435,7 +433,7 @@ fn dispatch_region(
         rows,
         &mut bufs,
         blocks,
-    );
+    )
 }
 
 /// aarch64／x86_64 以外の arch 版 [`dispatch_region`]。実行時検出対象の
@@ -449,11 +447,11 @@ fn dispatch_region(
     k: usize,
     rows: Range<usize>,
     blocks: BlockSizes,
-) {
+) -> Result<(), GemmError> {
     debug_assert_eq!(Isa::detect(), Isa::Scalar);
     let mc_total = rows.end - rows.start;
     let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total, blocks);
-    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks);
+    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks)
 }
 
 /// `gemm_blis`／`gemm_blis_parallel` 共通の 5-loop 本体。`c` はパネル
@@ -499,6 +497,18 @@ fn dispatch_region(
 /// 依らず不変のため、任意の `blocks` で [`crate::gemm::gemm_naive`] との
 /// bit 完全一致契約（REQ-2）が成立する（`gemm_blis_with_kernel_and_blocks`
 /// のパリティテストで直接検証）。
+/// ## エラー伝播（#691 レビュー P1 再指摘への対応）
+///
+/// 内部の `kernel.run_with_ldc(...)` 呼び出しは構築上（組み込みカーネルの
+/// `MR`／`NR` はコンパイル時定数で 1 以上、完全タイル・端タイルいずれも
+/// 必要長ちょうどのスライス／バッファを渡す）常に境界検査を満たすため
+/// `TileBoundsError` を返さないはずだが、以前は `unwrap_or_else` +
+/// `unreachable!` で `Result` を panic へ変換していた（AGENTS.md「本番
+/// 経路の panic 禁止」・`.claude/rules/coding-rust.md`「本番経路で
+/// unwrap()/expect() を使わない」への抵触）。本関数は `Result<(), GemmError>`
+/// を返し、`?`（[`GemmError::MicrokernelTileBounds`] への `From` 変換）で
+/// 呼び出し元まで型付きエラーとして伝播させる（[`GemmError`] の `#[non_exhaustive]`
+/// により呼び出し元の網羅的 match は破壊しない）。
 #[allow(clippy::too_many_arguments)]
 fn gemm_blis_region<K: Microkernel>(
     kernel: K,
@@ -510,7 +520,7 @@ fn gemm_blis_region<K: Microkernel>(
     rows: Range<usize>,
     bufs: &mut PanelBuffers,
     blocks: BlockSizes,
-) {
+) -> Result<(), GemmError> {
     let mr = K::MR;
     let nr = K::NR;
     let row_start = rows.start;
@@ -610,26 +620,24 @@ fn gemm_blis_region<K: Microkernel>(
                             // 二重に満たす。`run_with_ldc` は外部の
                             // `Microkernel` 実装からも到達しうる公開入口
                             // のため `Result` を返す契約（#691 レビュー
-                            // P1 対応）だが、本呼び出しは private な
+                            // P1 対応）で、本呼び出しは private な
                             // `gemm_blis_region` 内部から組み込みカーネル
                             // （`ScalarKernel`／`NeonKernel`／`Avx2Kernel`／
                             // `Avx512Kernel`。いずれも `MR`／`NR` はモジュール
                             // 定数でコンパイル時に 1 以上）へ、完全タイル
                             // ゆえ自動的に満たされる `ldc(=n) >= nr` と、
                             // 上記スライス長 `(mr-1)*n+nr`（= 必要長そのもの）
-                            // で呼ぶため、境界検査は構築上常に成功する
-                            // （`unreachable!` は本当に到達不能であることの
-                            // 表明であり、外部入力起因の panic ではない）。
+                            // で呼ぶため、境界検査は構築上常に成功するはず
+                            // だが、`unreachable!` による panic 変換
+                            // （#691 レビュー P1 再指摘）を避け、`?` で
+                            // `GemmError::MicrokernelTileBounds` として
+                            // 呼び出し元まで型付きエラーで伝播させる
+                            // （実際に `Err` になることは想定していない
+                            // fail-safe だが、本番経路の panic 禁止規約
+                            // を優先する）。
                             let row0 = (ic + ir) * n + col_base;
                             let c_direct = &mut c[row0..row0 + (mr - 1) * n + nr];
-                            kernel
-                                .run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len)
-                                .unwrap_or_else(|e| {
-                                    unreachable!(
-                                        "gemm_blis_region 内部契約違反: 完全タイル呼び出しは \
-                                         構築上常に境界検査を満たすはず（{e}）"
-                                    )
-                                });
+                            kernel.run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len)?;
                         } else {
                             // 端タイル: 従来どおり `MAX_TILE` スタック
                             // バッファへコピーインし、有効部
@@ -652,16 +660,11 @@ fn gemm_blis_region<K: Microkernel>(
                             // `ldc = nr` は組み込みカーネルの `NR` 定数
                             // そのものであり `c_tile` は `mr*nr` ちょうど
                             // の長さで確保しているため、境界検査は構築上
-                            // 常に成功する（上記完全タイル分岐の
-                            // `unreachable!` と同じ根拠）。
-                            kernel
-                                .run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len)
-                                .unwrap_or_else(|e| {
-                                    unreachable!(
-                                        "gemm_blis_region 内部契約違反: 端タイル呼び出しは \
-                                         構築上常に境界検査を満たすはず（{e}）"
-                                    )
-                                });
+                            // 常に成功するはず（上記完全タイル分岐と同じ
+                            // 根拠）。同様に `?` で型付きエラーとして
+                            // 伝播させ、`unreachable!` による panic 変換
+                            // を避ける（#691 レビュー P1 再指摘）。
+                            kernel.run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len)?;
 
                             for i in 0..mr_eff {
                                 let dst = &mut c[(ic + ir + i) * n + col_base
@@ -676,6 +679,7 @@ fn gemm_blis_region<K: Microkernel>(
             }
         }
     }
+    Ok(())
 }
 
 /// テスト専用: 実行環境の実際の ISA 検出結果に依らず、指定したカーネル
@@ -695,8 +699,7 @@ pub(crate) fn gemm_blis_with_kernel<K: Microkernel>(
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
     let mut bufs = PanelBuffers::new::<K>(n, k, m, default_blocks());
-    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, default_blocks());
-    Ok(())
+    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, default_blocks())
 }
 
 /// [`gemm_blis_with_kernel_and_blocks`]／[`gemm_blis_parallel_with_blocks`]
@@ -748,8 +751,7 @@ pub(crate) fn gemm_blis_with_kernel_and_blocks<K: Microkernel>(
     validate_dims(a, b, c, m, n, k)?;
     validate_block_sizes(blocks)?;
     let mut bufs = PanelBuffers::new::<K>(n, k, m, blocks);
-    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, blocks);
-    Ok(())
+    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, blocks)
 }
 
 /// テスト・スイープ専用: [`gemm_blis_parallel`] の任意 `BlockSizes` 版
@@ -780,12 +782,11 @@ pub(crate) fn gemm_blis_parallel_with_blocks(
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
-        .for_each(|(panel_idx, c_chunk)| {
+        .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks);
-        });
-    Ok(())
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+        })
 }
 
 #[cfg(test)]

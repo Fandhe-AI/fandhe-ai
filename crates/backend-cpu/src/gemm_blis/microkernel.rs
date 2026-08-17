@@ -302,11 +302,20 @@ pub trait Microkernel: Copy + Sync {
         ldc: usize,
         kc_len: usize,
     ) -> Result<(), TileBoundsError> {
+        // #691 レビュー P1 再指摘（密パッキング経路が境界検査を迂回する）
+        // への対応: `ldc == Self::NR` の高速経路も含め、[`Self::run`] へ
+        // 委譲する前に必ず [`check_c_tile_bounds`] を通す。以前は
+        // `ldc == Self::NR` の場合に検査より先に `run` へ委譲していたため、
+        // 短い `c`（[`Self::MR`]／[`Self::NR`] の契約を満たさない `c.len()`）
+        // や `Self::MR == 0` を渡す外部 `Microkernel` 実装が
+        // `Result::Err(TileBoundsError)` を得られず、`run` 内部のスライス
+        // 添字アクセスで検証不能な panic を起こしうる状態だった（REQ-8
+        // 境界検査契約・AGENTS.md「本番経路の panic 禁止」）。
+        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         if ldc == Self::NR {
             self.run(ap, bp, c, kc_len);
             return Ok(());
         }
-        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         let mut tile = vec![0.0f32; Self::MR * Self::NR];
         for i in 0..Self::MR {
             tile[i * Self::NR..(i + 1) * Self::NR].copy_from_slice(&c[i * ldc..i * ldc + Self::NR]);
@@ -437,11 +446,14 @@ impl Microkernel for Neon12x8Kernel {
         ldc: usize,
         kc_len: usize,
     ) -> Result<(), TileBoundsError> {
+        // #691 レビュー P1 再指摘（[`Microkernel::run_with_ldc`] デフォルト
+        // 実装の同種修正参照）: `ldc == Self::NR` の高速経路も含め、`run`
+        // へ委譲する前に必ず境界検査を通す。
+        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         if ldc == Self::NR {
             self.run(ap, bp, c, kc_len);
             return Ok(());
         }
-        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         // ヒープ確保（`Vec`）を避けるため MR_12X8*NR_12X8（=96）固定長の
         // スタック配列を使う（`super::MAX_TILE`〈256〉以内。デフォルト
         // 実装との唯一の差分はここのみで、ギャザー/スキャッタのロジック

@@ -464,13 +464,16 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
 /// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
 /// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
 /// [`kernel_with_ldc`] を使うこと。
-pub fn kernel(
-    ap: &[f32],
-    bp: &[f32],
-    c_tile: &mut [f32],
-    kc_len: usize,
-) -> Result<(), super::TileBoundsError> {
-    kernel_with_ldc(ap, bp, c_tile, NR, kc_len)
+///
+/// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
+///
+/// [`super::scalar::kernel`] のドキュメント参照。本モジュールも同じ
+/// 理由で従来どおり `()` を返す必須シグネチャへ戻し、契約違反は panic
+/// で表面化させる。
+pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    if let Err(e) = kernel_with_ldc(ap, bp, c_tile, NR, kc_len) {
+        panic!("{e}");
+    }
 }
 
 #[cfg(test)]
@@ -509,7 +512,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, kc_len).unwrap();
+        kernel(&ap, &bp, &mut c_tile, kc_len);
 
         assert_eq!(c_tile[0], 19.0);
         assert_eq!(c_tile[1], 22.0);
