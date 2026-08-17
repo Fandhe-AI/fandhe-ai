@@ -26,7 +26,7 @@ use tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm_auto::read_clamped_smem_budget_bytes;
-use crate::kernels_rmsnorm::{self, RMSNORM_BLOCK_DIM};
+use crate::kernels_rmsnorm::{self, RMSNORM_BLOCK_DIM, RMSNORM_BWD_BLOCK_DIM};
 use crate::nvrtc::compile_ptx;
 
 /// [`rmsnorm_route`] が返す経路選択。行長（`RowFusionMeta::row_len`／
@@ -39,6 +39,22 @@ pub(crate) enum RmsNormRoute {
     OnePassSmem,
     /// [`kernels_rmsnorm::RMSNORM_F32_TWOPASS`]（global 再読・SMEM 非使用）。
     TwoPass,
+}
+
+/// `rows`／`hidden` の対を 1 引数へまとめる（`clippy::too_many_arguments`
+/// 対策。[`CudaRmsNorm::run_rmsnorm_bwd_f32`]（`pub`）の引数に使うため
+/// `pub` とする。内部専用の [`CudaRmsNorm::run_rmsnorm_f32_inner`] も同じ
+/// 2 値を使い回すため共有する）。
+#[derive(Debug, Clone, Copy)]
+pub struct RmsNormShape {
+    /// 正規化対象の行数（バッチ次元。`x`／`dy`／`dx` の長さは
+    /// `rows * hidden` に一致する契約）。
+    pub rows: usize,
+    /// 1 行あたりの要素数（正規化軸の長さ。`w`／`dw` の長さおよび
+    /// [`CudaRmsNorm::run_rmsnorm_f32_train`]・
+    /// [`CudaRmsNorm::run_rmsnorm_bwd_f32`] が内部導出する
+    /// `inv_n = 1.0 / hidden`（`hidden == 0` は 1.0）の分母に一致する契約）。
+    pub hidden: usize,
 }
 
 /// `row_len`（行長）が `per_block_smem_budget_bytes`（[`crate::gemm_auto::
@@ -99,6 +115,92 @@ pub(crate) fn derive_persistent_grid_two_pass(sm_count: u32, rows: u32) -> u32 {
     }
     let grid = (sm_count as u64).saturating_mul(16);
     grid.clamp(1, rows as u64) as u32
+}
+
+/// `rmsnorm_bwd_dw_f32`（`kernels_rmsnorm.rs`）専用のブロックあたり
+/// スレッド数。dx カーネル（[`RMSNORM_BWD_BLOCK_DIM`]・行方向 persistent
+/// grid）とは軸が異なる列方向 grid-stride のため、共有 SM 予算計算に
+/// 依存しない単純な 256 スレッドを用いる（reduction を伴わないため
+/// warp 数の制約はない）。
+pub(crate) const RMSNORM_BWD_DW_BLOCK_DIM: u32 = 256;
+
+/// dw カーネル（列＝`hidden` 方向 grid-stride）の persistent grid を
+/// 導出する純関数。dx／順伝播の `derive_persistent_grid_*`（行方向）とは
+/// 軸が異なるため独立した関数として持つ（`kernels_rmsnorm.rs::
+/// RMSNORM_BWD_DW_F32` ドキュメンテーションコメント参照）。
+/// `grid = clamp(sm_count * 16, 1, ceil(hidden / RMSNORM_BWD_DW_BLOCK_DIM))`。
+/// `hidden == 0` は呼び出し元が早期 return するため本関数へは渡らない
+/// 契約だが、`derive_persistent_grid_two_pass` と同じフェイルセーフ
+/// （1 を返す）を持つ。
+pub(crate) fn derive_persistent_grid_dw(sm_count: u32, hidden: u32) -> u32 {
+    if hidden == 0 {
+        return 1;
+    }
+    let blocks_needed = hidden.div_ceil(RMSNORM_BWD_DW_BLOCK_DIM);
+    let grid = (sm_count as u64).saturating_mul(16);
+    grid.clamp(1, blocks_needed as u64) as u32
+}
+
+/// ホスト側検証（逆伝播起動前・fail-closed。イシュー #596）:
+/// `rows * hidden == x_len == dy_len`（checked 乗算）・`rstd_len == rows`・
+/// `w_len == Some(hidden)`（指定時のみ）・`rows`／`hidden`／`numel` が
+/// `i32::MAX`（カーネル引数 `int rows`／`int hidden` 契約）に収まること
+/// を検証する（[`validate_rmsnorm_launch`] と同型・`CudaError::
+/// InvalidRmsNormShape` を再利用。`.claude/rules/security.md` A03 対策）。
+/// `eps` は逆伝播カーネルの引数に含まれない（保存済み `rstd` から
+/// 再計算するため）ため検証対象外。
+pub(crate) fn validate_rmsnorm_backward_launch(
+    rows: usize,
+    hidden: usize,
+    x_len: usize,
+    dy_len: usize,
+    rstd_len: usize,
+    w_len: Option<usize>,
+) -> Result<(), CudaError> {
+    let numel = rows
+        .checked_mul(hidden)
+        .ok_or_else(|| CudaError::InvalidRmsNormShape {
+            detail: format!(
+                "rmsnorm backward rows*hidden overflowed usize: rows={rows}, hidden={hidden}"
+            ),
+        })?;
+    if numel != x_len {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!(
+                "rmsnorm backward x length mismatch: rows*hidden={numel}, x.len()={x_len}"
+            ),
+        });
+    }
+    if numel != dy_len {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!(
+                "rmsnorm backward dy length mismatch: rows*hidden={numel}, dy.len()={dy_len}"
+            ),
+        });
+    }
+    if rstd_len != rows {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!(
+                "rmsnorm backward rstd length mismatch: rows={rows}, rstd.len()={rstd_len}"
+            ),
+        });
+    }
+    if let Some(wl) = w_len
+        && wl != hidden
+    {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!("rmsnorm backward w length mismatch: hidden={hidden}, w.len()={wl}"),
+        });
+    }
+    if rows > i32::MAX as usize || hidden > i32::MAX as usize || numel > i32::MAX as usize {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!(
+                "rmsnorm backward dims must fit in i32 (kernel argument type): rows={rows}, \
+                 hidden={hidden}, numel={numel}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// ホスト側検証（起動前・fail-closed）: `rows * hidden == x_len`（checked
@@ -217,6 +319,10 @@ pub struct CudaRmsNorm {
     stream: Arc<CudaStream>,
     onepass_f32: CudaFunction,
     twopass_f32: CudaFunction,
+    /// 逆伝播 dx カーネル（イシュー #596。recompute-in-backward）。
+    bwd_dx_f32: CudaFunction,
+    /// 逆伝播 dw カーネル（`w.is_some()` の場合のみ起動元が呼ぶ）。
+    bwd_dw_f32: CudaFunction,
     /// per-block SMEM 予算（[`crate::gemm_auto::STATIC_SMEM_BUDGET_CAP_BYTES`]
     /// でクランプ済み。[`rmsnorm_route`] の分岐に使う）。
     smem_per_block_budget_bytes: u64,
@@ -250,6 +356,17 @@ impl CudaRmsNorm {
             .context()
             .load_module(twopass_ptx)?
             .load_function("rmsnorm_f32_twopass")?;
+
+        let bwd_dx_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_BWD_DX_F32, arch)?;
+        let bwd_dw_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_BWD_DW_F32, arch)?;
+        let bwd_dx_f32 = device
+            .context()
+            .load_module(bwd_dx_ptx)?
+            .load_function("rmsnorm_bwd_dx_f32")?;
+        let bwd_dw_f32 = device
+            .context()
+            .load_module(bwd_dw_ptx)?
+            .load_function("rmsnorm_bwd_dw_f32")?;
 
         let smem_per_block_budget_bytes = read_clamped_smem_budget_bytes(device)?;
 
@@ -286,6 +403,8 @@ impl CudaRmsNorm {
             stream: device.stream().clone(),
             onepass_f32,
             twopass_f32,
+            bwd_dx_f32,
+            bwd_dw_f32,
             smem_per_block_budget_bytes,
             smem_per_sm_budget_bytes,
             sm_count,
@@ -342,10 +461,79 @@ impl CudaRmsNorm {
         rows: usize,
         hidden: usize,
     ) -> Result<Vec<f32>, CudaError> {
+        let shape = RmsNormShape { rows, hidden };
+        let (out, _rstd) = self.run_rmsnorm_f32_inner(x, w, eps, inv_n, shape, false)?;
+        Ok(out)
+    }
+
+    /// 学習用エントリ（イシュー #596）: 順伝播 `out` に加え、逆伝播が
+    /// 再計算に必要とする行あたりスカラー `rstd`（`len == rows`）を
+    /// 併せて返す。`ops.rs::run_fused` 経由の推論専用プランは
+    /// [`Self::run_rmsnorm_f32_raw`]（`save_rstd = 0`・スカラーすら
+    /// 書かない）を使い続けるため、本メソッドは学習ループ（autodiff の
+    /// `Var::rmsnorm` 相当。#596 スコープでは backend-cuda 単体 API として
+    /// 提供する）の呼び出し元にのみ関わる。
+    pub fn run_rmsnorm_f32_train(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        eps: f32,
+        rows: usize,
+        hidden: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>), CudaError> {
+        let inv_n = if hidden == 0 {
+            1.0f32
+        } else {
+            1.0f32 / hidden as f32
+        };
+        let shape = RmsNormShape { rows, hidden };
+        let (out, rstd) = self.run_rmsnorm_f32_inner(x, w, eps, inv_n, shape, true)?;
+        // `save_rstd = true` 経路は `rows == 0 || hidden == 0` の早期
+        // return でも `Some(Vec::new())` を返す契約（`run_rmsnorm_f32_inner`
+        // 参照）ため `unwrap_or_default` で空 Vec に正規化する。
+        Ok((out, rstd.unwrap_or_default()))
+    }
+
+    /// [`Self::run_rmsnorm_f32_raw`]／[`Self::run_rmsnorm_f32_train`] の
+    /// 共通実装。`save_rstd` により学習経路（`rstd_out` へ行あたり 1
+    /// スカラーを書く）と推論経路（一切書かない）を切り替える
+    /// （`kernels_rmsnorm.rs` の `save_rstd` 契約と 1:1 対応）。
+    fn run_rmsnorm_f32_inner(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        eps: f32,
+        inv_n: f32,
+        shape: RmsNormShape,
+        save_rstd: bool,
+    ) -> Result<(Vec<f32>, Option<Vec<f32>>), CudaError> {
+        let RmsNormShape { rows, hidden } = shape;
         validate_rmsnorm_launch(rows, hidden, x.len(), w.map(|s| s.len()), eps)?;
 
         if rows == 0 || hidden == 0 {
-            return Ok(Vec::new());
+            // `save_rstd == true`（学習経路）の契約は「`rstd.len() ==
+            // rows`」（[`Self::run_rmsnorm_f32_train`] ドキュメンテーション
+            // コメント）であり、`hidden == 0` でもこれを維持しなければ
+            // ならない。`hidden == 0` の行は要素を持たないため
+            // `sum(x^2) == 0` が数学的に確定し、`inv_n` の値に関わらず
+            // `rstd = rsqrt(0 * inv_n + eps) = rsqrt(eps)`（全行同一値）が
+            // 一意に定まる（`eps` は `validate_rmsnorm_launch` で有限・
+            // 非負を検証済みのため `eps.sqrt()` は NaN 化しない。`eps ==
+            // 0.0` は `rsqrt(0) == inf` になるが有限性検証の対象外＝許容
+            // 済みの退化値）。`rows == 0` の場合は `vec![_; 0]` が自然に
+            // 空になるため分岐不要。Cursor Bugbot 指摘（PR #711 レビュー
+            // r3794159146）: この早期 return が常に空 Vec を返すと、
+            // `run_rmsnorm_f32_train` 経由で `hidden == 0 && rows > 0` を
+            // 逆伝播へ渡した際 `validate_rmsnorm_backward_launch` の
+            // `rstd.len() == rows` 検証が `hidden == 0` の空判定より先に
+            // 失敗してしまう。
+            let rstd = if save_rstd {
+                let degenerate_rstd = 1.0f32 / eps.sqrt();
+                Some(vec![degenerate_rstd; rows])
+            } else {
+                None
+            };
+            return Ok((Vec::new(), rstd));
         }
 
         let route = rmsnorm_route(hidden, self.smem_per_block_budget_bytes);
@@ -362,6 +550,16 @@ impl CudaRmsNorm {
             None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
         };
         let mut out_dev = self.stream.alloc_zeros::<f32>(x.len())?;
+        // `save_rstd == false`（推論経路）でもカーネル引数としてポインタは
+        // 必要だが `save_rstd == 0` により決してデリファレンスされない
+        // （`w_dev` ダミーと同じイディオム）。学習経路は `rows` 要素を
+        // 確保する。
+        let mut rstd_dev = if save_rstd {
+            self.stream.alloc_zeros::<f32>(rows)?
+        } else {
+            self.stream.alloc_zeros::<f32>(1)?
+        };
+        let save_rstd_i = save_rstd as i32;
 
         let rows_i = rows as i32;
         let hidden_i = hidden as i32;
@@ -409,39 +607,254 @@ impl CudaRmsNorm {
             }
         };
 
-        // SAFETY: カーネル引数（x_dev/w_dev/out_dev・rows_i/hidden_i・
-        // eps/inv_n/has_weight）は `validate_rmsnorm_launch` で検証済みの
-        // 形状と 1:1 対応するデバイスバッファ長・値であり、カーネル内の
-        // 手動境界チェック（`if (base+3 < hidden)`／グリッドストライド
-        // `row < rows`・REQ-8）と合わせて OOB 読み書きが起きない根拠と
-        // する。1 パス経路の `shared_mem_bytes` は `hidden * 4`（実際に
-        // 確保する SMEM バイト数）であり、`rmsnorm_route` が判定した
+        // SAFETY: カーネル引数（x_dev/w_dev/out_dev/rstd_dev・rows_i/
+        // hidden_i・eps/inv_n/has_weight/save_rstd_i）は
+        // `validate_rmsnorm_launch` で検証済みの形状と 1:1 対応する
+        // デバイスバッファ長・値であり、カーネル内の手動境界チェック
+        // （`if (base+3 < hidden)`／グリッドストライド `row < rows`・
+        // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。1 パス
+        // 経路の `shared_mem_bytes` は `hidden * 4`（実際に確保する SMEM
+        // バイト数）であり、`rmsnorm_route` が判定した
         // `smem_per_block_budget_bytes` 以下であることを既に確認済み
         // （経路判定は予算上限との比較、起動は実バイト数という異なる
         // 量を扱うが、`hidden * 4 <= 予算上限` の不変条件により smem
-        // 予算超過による起動失敗は起きない）。
+        // 予算超過による起動失敗は起きない）。`rstd_dev` は
+        // `save_rstd == true` なら `rows` 要素（カーネル内 `rstd_out[row]`
+        // が `row < rows` の範囲でのみ書く）、`false` ならダミー 1 要素
+        // （`save_rstd == 0` によりカーネルが一切デリファレンスしない。
+        // `w_dev` ダミーと同じ根拠）。
         unsafe {
             self.stream
                 .launch_builder(func)
                 .arg(&x_dev)
                 .arg(&w_dev)
                 .arg(&mut out_dev)
+                .arg(&mut rstd_dev)
                 .arg(&rows_i)
                 .arg(&hidden_i)
                 .arg(&eps)
                 .arg(&inv_n)
                 .arg(&has_weight)
+                .arg(&save_rstd_i)
                 .launch(cfg)?;
         }
         self.stream.synchronize()?;
 
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        let out = self.stream.clone_dtoh(&out_dev)?;
+        let rstd = if save_rstd {
+            Some(self.stream.clone_dtoh(&rstd_dev)?)
+        } else {
+            None
+        };
+        Ok((out, rstd))
+    }
+
+    /// 逆伝播（イシュー #596。recompute-in-backward）: 保存 `rstd`
+    /// （[`Self::run_rmsnorm_f32_train`] が返す行あたりスカラー）と生の
+    /// `x`／`dy` から `dx`（常に）・`dw`（`w.is_some()` の場合のみ）を
+    /// 再計算する。中間の正規化済みテンソルは一切受け取らない
+    /// （`kernels_rmsnorm.rs::RMSNORM_BWD_DX_F32`／`RMSNORM_BWD_DW_F32`
+    /// ドキュメンテーションコメント参照）。
+    ///
+    /// `inv_n` は公開引数に含めない。現状の唯一の学習用順伝播
+    /// （[`Self::run_rmsnorm_f32_train`]）が `rstd` を常に `inv_n =
+    /// 1/hidden`（`hidden == 0` は `1.0` の退化値。ゼロ除算回避）で導出する
+    /// ため、本関数も `shape.hidden` から同一式で内部導出する（呼び出し元
+    /// が任意の `inv_n` を渡せると、`rstd` の導出時前提と再計算式が食い違い
+    /// `validate_rmsnorm_backward_launch` をすり抜けたまま数学的に誤った
+    /// `dx` を「正常結果」として返しうる。codex-review P1 指摘・PR #711
+    /// レビュー r3794149870）。将来 `ops.rs::run_fused`〈`inv_n = 1.0`〉
+    /// 経路の逆伝播を追加する場合は、`inv_n` を復活させるのではなく
+    /// 順伝播側の係数選択（`raw` か `train` か）を型で分ける設計とし、
+    /// 本関数の暗黙導出を安易に上書きしないこと。
+    pub fn run_rmsnorm_bwd_f32(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        dy: &[f32],
+        rstd: &[f32],
+        shape: RmsNormShape,
+    ) -> Result<(Vec<f32>, Option<Vec<f32>>), CudaError> {
+        let RmsNormShape { rows, hidden } = shape;
+        validate_rmsnorm_backward_launch(
+            rows,
+            hidden,
+            x.len(),
+            dy.len(),
+            rstd.len(),
+            w.map(|s| s.len()),
+        )?;
+
+        // `run_rmsnorm_f32_train` と同一式（呼び出し元が指定する余地を
+        // なくすことで数値契約を強制する。上記ドキュメンテーションコメント
+        // 参照）。
+        let inv_n = if hidden == 0 {
+            1.0f32
+        } else {
+            1.0f32 / hidden as f32
+        };
+
+        if rows == 0 || hidden == 0 {
+            // `dx` は `x` と同じ形状（`numel = rows*hidden`）のため常に
+            // 空。`dw` は `w` と同じ形状（`len == hidden`）を維持する契約
+            // （`validate_rmsnorm_backward_launch` の `w_len == hidden`
+            // 検証・CPU 参照実装と揃える）。`rows == 0` かつ `hidden > 0`
+            // では「0 行分の勾配和」= 全要素 0 の `hidden` 長ベクトルが
+            // 正しい形状（`w` の長さは検証済みで `hidden` と一致）。
+            // Cursor Bugbot 指摘（PR #711 レビュー r3794159146）: 従来は
+            // 常に空 Vec を返し `w.len() == hidden` の検証・CPU 参照実装と
+            // 形状が食い違っていた。
+            let dw = w.map(|w_slice| vec![0.0f32; w_slice.len()]);
+            return Ok((Vec::new(), dw));
+        }
+
+        let x_dev = self.stream.clone_htod(x)?;
+        let dy_dev = self.stream.clone_htod(dy)?;
+        let rstd_dev = self.stream.clone_htod(rstd)?;
+        // `w` ダミーは順伝播と同じイディオム（`has_weight == 0` で
+        // カーネルが一切デリファレンスしない）。
+        let (w_dev, has_weight) = match w {
+            Some(w_slice) => (self.stream.clone_htod(w_slice)?, 1i32),
+            None => (self.stream.alloc_zeros::<f32>(1)?, 0i32),
+        };
+        let mut dx_dev = self.stream.alloc_zeros::<f32>(x.len())?;
+
+        let rows_i = rows as i32;
+        let hidden_i = hidden as i32;
+        let grid = derive_persistent_grid_two_pass(self.sm_count, rows_i as u32);
+
+        // SAFETY: `validate_rmsnorm_backward_launch` で `x`/`dy`/`rstd`/
+        // `w`（指定時）の長さと `rows`/`hidden`（i32 上限）を検証済み。
+        // カーネル内の手動境界チェック（グリッドストライド `row < rows`・
+        // `base + 3 < hidden`・REQ-8）と合わせて OOB 読み書きが起きない
+        // 根拠とする。`RMSNORM_BWD_BLOCK_DIM`（256）は `RMSNORM_BLOCK_DIM`
+        // （32・順伝播）と独立のブロック幅であり、grid 導出
+        // （`derive_persistent_grid_two_pass`。行数ベースでブロック幅に
+        // 依存しない）はそのまま再利用できる（`kernels_rmsnorm.rs::
+        // RMSNORM_BWD_BLOCK_DIM` ドキュメンテーションコメント参照）。
+        unsafe {
+            self.stream
+                .launch_builder(&self.bwd_dx_f32)
+                .arg(&x_dev)
+                .arg(&w_dev)
+                .arg(&dy_dev)
+                .arg(&rstd_dev)
+                .arg(&mut dx_dev)
+                .arg(&rows_i)
+                .arg(&hidden_i)
+                .arg(&inv_n)
+                .arg(&has_weight)
+                .launch(LaunchConfig {
+                    grid_dim: (grid, 1, 1),
+                    block_dim: (RMSNORM_BWD_BLOCK_DIM, 1, 1),
+                    shared_mem_bytes: 0,
+                })?;
+        }
+
+        let dw = if let Some(w_slice) = w {
+            let mut dw_dev = self.stream.alloc_zeros::<f32>(w_slice.len())?;
+            let dw_grid = derive_persistent_grid_dw(self.sm_count, hidden_i as u32);
+            // SAFETY: dw カーネルは列方向 grid-stride（`i < hidden`）で
+            // 起動する。`x`/`dy` の長さは `rows*hidden` と検証済み
+            // （`validate_rmsnorm_backward_launch`）であり、行方向は
+            // カーネル内ループ条件 `row < rows` で境界保証される
+            // （REQ-8）。
+            unsafe {
+                self.stream
+                    .launch_builder(&self.bwd_dw_f32)
+                    .arg(&x_dev)
+                    .arg(&dy_dev)
+                    .arg(&rstd_dev)
+                    .arg(&mut dw_dev)
+                    .arg(&rows_i)
+                    .arg(&hidden_i)
+                    .launch(LaunchConfig {
+                        grid_dim: (dw_grid, 1, 1),
+                        block_dim: (RMSNORM_BWD_DW_BLOCK_DIM, 1, 1),
+                        shared_mem_bytes: 0,
+                    })?;
+            }
+            self.stream.synchronize()?;
+            Some(self.stream.clone_dtoh(&dw_dev)?)
+        } else {
+            self.stream.synchronize()?;
+            None
+        };
+
+        let dx = self.stream.clone_dtoh(&dx_dev)?;
+        Ok((dx, dw))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- derive_persistent_grid_dw ---
+
+    #[test]
+    fn derive_persistent_grid_dw_uses_16_per_sm_clamped_by_blocks_needed() {
+        // hidden=100000, block=256 -> blocks_needed = ceil(100000/256) = 391。
+        // sm_count=4 -> grid候補 = 64 < 391 なので 64。
+        assert_eq!(derive_persistent_grid_dw(4, 100_000), 64);
+    }
+
+    #[test]
+    fn derive_persistent_grid_dw_clamps_at_blocks_needed_for_small_hidden() {
+        // hidden=8, block=256 -> blocks_needed = 1。
+        assert_eq!(derive_persistent_grid_dw(100, 8), 1);
+    }
+
+    #[test]
+    fn derive_persistent_grid_dw_hidden_zero_is_failsafe_one() {
+        assert_eq!(derive_persistent_grid_dw(4, 0), 1);
+    }
+
+    // --- validate_rmsnorm_backward_launch ---
+
+    #[test]
+    fn validate_rmsnorm_backward_launch_accepts_matching_dims() {
+        assert!(validate_rmsnorm_backward_launch(3, 8, 24, 24, 3, Some(8)).is_ok());
+        assert!(validate_rmsnorm_backward_launch(3, 8, 24, 24, 3, None).is_ok());
+    }
+
+    #[test]
+    fn validate_rmsnorm_backward_launch_rejects_x_len_mismatch() {
+        let err = validate_rmsnorm_backward_launch(3, 8, 23, 24, 3, None).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_backward_launch_rejects_dy_len_mismatch() {
+        let err = validate_rmsnorm_backward_launch(3, 8, 24, 23, 3, None).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_backward_launch_rejects_rstd_len_mismatch() {
+        let err = validate_rmsnorm_backward_launch(3, 8, 24, 24, 2, None).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_backward_launch_rejects_w_len_mismatch() {
+        let err = validate_rmsnorm_backward_launch(3, 8, 24, 24, 3, Some(7)).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_backward_launch_rejects_dims_exceeding_i32_max() {
+        let err = validate_rmsnorm_backward_launch(
+            i32::MAX as usize + 1,
+            1,
+            i32::MAX as usize + 1,
+            i32::MAX as usize + 1,
+            i32::MAX as usize + 1,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
 
     // --- rmsnorm_route ---
 

@@ -245,7 +245,7 @@ pub use nvrtc::{
     derive_pipeline_stages, nvrtc_version,
 };
 pub use ops::CudaBackendOps;
-pub use rmsnorm::CudaRmsNorm;
+pub use rmsnorm::{CudaRmsNorm, RmsNormShape};
 pub use softmax::CudaSoftmax;
 pub use transpose::CudaTranspose;
 
