@@ -396,10 +396,13 @@ pub fn dim_specs_for(shape: GemmShape, compiled: CompiledDims) -> (DimSpec, DimS
 /// # スコープ境界
 ///
 /// 既定の本番 GEMM 経路（[`CudaGemmAuto::run_f16`]・
-/// `gemm_mma.rs::CudaMmaGemm`）への結線・実行は行わない（LRU キャッシュ
-/// C-4・#511・最良構成選定 C-9b・#527・数値一致回帰 #531 のスコープ）。
-/// カーネルソース・既定経路は一切変更しないため、本関数の追加は既定
-/// 経路の実行結果・parity ベースラインに影響しない。
+/// `gemm_mma.rs::CudaMmaGemm`）への結線・実行は行わない（最良構成選定
+/// C-9b・#527・数値一致回帰 #531 のスコープ。プロセス内 LRU カーネル
+/// モジュールキャッシュ〈C-4・#511〉は本関数が内部で呼ぶ
+/// `RenderedMmaKernel::compile` 側へ実装済みだが、既定経路への結線自体は
+/// 行わない点は変わらない）。カーネルソース・既定経路は一切変更しない
+/// ため、本関数の追加は既定経路の実行結果・parity ベースラインに影響
+/// しない。
 ///
 /// 理由は [`dim_specs_for`] と同じ（既定経路から未結線のため
 /// dead-code 解析が誤検知する）。
@@ -470,8 +473,14 @@ pub fn specialized_mma_descriptor(
 /// 検査に使う（`tests/specialized_mma_parity.rs` 参照）。
 ///
 /// 本番ディスパッチ経路（[`CudaGemmAuto::run_f16`]）からは呼ばれず
-/// （本モジュール §スコープ境界参照。LRU キャッシュによる再利用結線は
-/// C-4・#511 のスコープ）テスト・ベンチ専用の検証用ハンドルである。
+/// （本モジュール §スコープ境界参照）テスト・ベンチ専用の検証用ハンドル
+/// である。`Self::compile` が内部で呼ぶ `RenderedMmaKernel::compile` は
+/// プロセス内 LRU カーネルモジュールキャッシュ（C-4・#511）を経由する
+/// ため、同一形状・同一 `CompiledDims` での 2 回目以降の `Self::compile`
+/// 呼び出しは NVRTC 再コンパイルを回避しうる（`tests/
+/// specialized_mma_parity.rs::
+/// specialized_mma_kernel_handle_compile_reuses_process_local_module_cache`
+/// 参照）。
 ///
 /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
 /// （PR #685 codex-review P1 指摘の是正: 本ハンドルは crate root から
@@ -637,12 +646,15 @@ impl SpecializedMmaKernelHandle {
 /// を一括実行する結線ヘルパー（イシュー #531 実装計画 §3.1）。
 ///
 /// `gemm_mma.rs::CudaMmaGemm` は `mma_f16` カーネルを 1 回だけコンパイルし
-/// 使い回す設計だが、本関数は**呼び出しごとに NVRTC コンパイルする**
-/// （LRU キャッシュによる再利用結線は C-4・#511 のスコープ。本関数は
-/// あくまでテスト・ベンチが特化カーネルの実行結果へ単発で到達するための
-/// 経路であり、本番ディスパッチ経路（[`CudaGemmAuto::run_f16`]）では
-/// ない。複数回起動しての再利用検証には
-/// [`SpecializedMmaKernelHandle`] を直接使う）。
+/// 使い回す設計だが、本関数は**呼び出しごとに [`SpecializedMmaKernelHandle::compile`]
+/// を新規に呼ぶ**（`SpecializedMmaKernelHandle` インスタンス自体は使い
+/// 回さない。本関数はあくまでテスト・ベンチが特化カーネルの実行結果へ
+/// 単発で到達するための経路であり、本番ディスパッチ経路
+/// （[`CudaGemmAuto::run_f16`]）ではない）。ただし `compile` 内部の
+/// `RenderedMmaKernel::compile` はプロセス内 LRU カーネルモジュール
+/// キャッシュ（C-4・#511）を経由するため、同一形状・同一 `compiled` での
+/// 呼び出しは NVRTC 再コンパイルを回避しうる。複数回起動しての明示的な
+/// 再利用検証には [`SpecializedMmaKernelHandle`] を直接使う）。
 ///
 /// no-op 形状（`m==0 || n==0`）・`k==0` の早期 return は
 /// `gemm_mma.rs::CudaMmaGemm::run_f16` と同一契約とする。`compiled` が

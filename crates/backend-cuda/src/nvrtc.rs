@@ -1116,11 +1116,10 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// 場合は `docs/public-api-design.md` に契約・安定性を明記した専用 API
 /// として別途設計する。
 ///
-/// 呼び出し元は C-3（#509）・C-4（#511）で追加予定のため、本タスク
-/// （C-2・#506）時点では crate 内に呼び出し元がまだなく `dead_code` 警告
-/// が出る。テスト側は実環境変数への依存を避けるため注入可能な
-/// [`resolve_cache_root`] を直接呼ぶ（本関数の doc 参照）ので、本関数
-/// 自体は非テストコードから未参照のままになる。
+/// 呼び出し元は C-4（#511・[`runtime_workspace_root`] 経由）。テスト側は
+/// 実環境変数への依存を避けるため注入可能な [`resolve_cache_root`] を
+/// 直接呼ぶ（本関数の doc 参照）ので、本関数自体は非テストコードからは
+/// [`runtime_workspace_root`] 経由でのみ参照される。
 ///
 /// **`workspace_root` を必須引数として受け取る（PR #659 codex-review P0
 /// 再指摘への対応）**: 1 回目の修正（P1 指摘対応）ではコンパイル時
@@ -1144,11 +1143,6 @@ fn lexically_normalize(path: &Path) -> PathBuf {
 /// する（[`path_lexically_within`] の `starts_with` 比較は相対パスの
 /// `root` に対して常に `false` を返し containment 判定が意味を失うため）。
 /// C-3・C-4 が渡す境界値は必ず絶対パスへ解決してから渡すこと。
-#[allow(
-    dead_code,
-    reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
-              意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
-)]
 pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
     resolve_cache_root(
         workspace_root,
@@ -1156,6 +1150,45 @@ pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
         std::env::var_os("XDG_CACHE_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
     )
+}
+
+/// [`cache_root`]／[`cache_entry_path`] へ渡す `workspace_root` を実行時に
+/// 確定する C-4（#511）の結線用ヘルパー。
+///
+/// 本関数直上のドキュメンテーションコメントは「プロセスのカレント
+/// ディレクトリは『リポジトリツリーの境界』ではないため使わない」と
+/// 注意している（`XDG_CACHE_HOME`／`HOME` 未設定時、カレントディレクトリが
+/// たまたまホーム配下だと正当な `~/.cache/...` フォールバックが誤って
+/// 拒否されるため）。本関数はこの懸念を承知のうえで
+/// `std::env::current_dir()`（取得成功時は `canonicalize` を試みる）を
+/// 採用する。理由は、C-4 の呼び出し元（[`crate::kernels_mma::
+/// RenderedMmaKernel::compile`]）が本関数の失敗（および後続の
+/// [`store_cache_entry`]／[`load_cache_entry`] の失敗）を**コンパイル失敗
+/// にせず「ディスクキャッシュなしの縮退運転」へ落とす** fail-safe 方針を
+/// 採るため（`RenderedMmaKernel::compile` ドキュメンテーションコメント
+/// 参照）。上記の誤拒否が起きても帰結は「ディスクキャッシュが効かない」
+/// だけであり、NVRTC 直コンパイル＋プロセス内 LRU（`module_cache.rs`）
+/// のみで機能・数値経路は正しく続行する。ビルド時定数（`CARGO_MANIFEST_DIR`
+/// 等）のハードコードは実行環境が変わると素通りする既知の問題
+/// （`cache_root` ドキュメンテーションコメント「PR #659 codex-review P0
+/// 再指摘」参照）を再導入しないため避け、実行時に確定する境界としてこれを
+/// 採用した（実装計画 §3.5）。
+///
+/// `current_dir()` 自体が失敗した場合（プロセスの作業ディレクトリが削除
+/// された等）は `CudaError::CacheDirUnavailable` を返し、呼び出し元は
+/// 同じ fail-safe 方針でディスクキャッシュなし運転へ縮退する。
+pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
+    let cwd = std::env::current_dir().map_err(|e| CudaError::CacheDirUnavailable {
+        detail: format!("failed to resolve current_dir() for cache workspace_root: {e}"),
+    })?;
+    // `canonicalize` はシンボリックリンクを解決した絶対パスを返す。失敗時
+    // （稀。パーミッション等）は `cwd` 自体が `current_dir()` の契約上
+    // 既に絶対パスであるためそのままフォールバックする（containment 検証
+    // 〈`resolve_cache_root` の `workspace_root.is_relative()` 検査〉は
+    // 絶対パスであれば通過するため機能上問題ない。字句正規化のみを行う
+    // `path_lexically_within` はシンボリックリンク非対応である点は
+    // `resolve_cache_root` ドキュメンテーションコメントの既存の限界と同じ）。
+    Ok(cwd.canonicalize().unwrap_or(cwd))
 }
 
 /// `root` と [`CudaKernelCacheKey::cache_entry_dir_name`] を合成し、
@@ -1195,13 +1228,19 @@ fn cache_entry_path_in(root: &Path, key: &CudaKernelCacheKey) -> Result<PathBuf,
 /// 留める設計とした）。
 ///
 /// [`cache_root`] と同じ理由で `pub(crate)` に留める（crate ルートからは
-/// 再公開しない。PR #659 レビュー指摘）。呼び出し元も [`cache_root`] と
-/// 同じく C-3（#509）・C-4（#511）で追加予定のため、本タスク時点では
-/// 先行スキャフォールディングとして `dead_code` を許容する。
+/// 再公開しない。PR #659 レビュー指摘）。C-3（#509）・C-4（#511）の実処理
+/// （[`ensure_cache_root`] 経由の [`store_cache_entry`]／[`load_cache_entry`]）
+/// は `root` の実体化・containment 検証を fd pin と原子的に行う必要から
+/// 本関数を経由せず [`cache_entry_path_in`] を直接呼ぶため（両関数の
+/// ドキュメンテーションコメント「TOCTOU 対策」参照）、本関数自体は
+/// crate 内呼び出し元を持たないまま残る。将来 fd pin を経由しない読み
+/// 取り専用の便宜 API（例: 実体化なしでのパス確認）が必要になった場合の
+/// ための意図的な保持であり、`dead_code` を許容する。
 #[allow(
     dead_code,
-    reason = "C-3(#509)/C-4(#511) の crate 内呼び出し元が実装されるまでの \
-              意図的な先行スキャフォールディング（PR #659 レビュー指摘）"
+    reason = "fd pin 経由の store/load 経路（TOCTOU 対策）を経由しない \
+              便宜 API として意図的に残置。crate 内呼び出し元は現状ない \
+              （本関数ドキュメンテーションコメント参照）"
 )]
 pub(crate) fn cache_entry_path(
     workspace_root: &Path,
@@ -1220,9 +1259,10 @@ pub(crate) fn cache_entry_path(
 // ビルド後 `std::filesystem::rename`、先着プロセスがいた場合は rename
 // 失敗を正常系として吸収。rename 前にボトムアップ再帰 fsync）。
 //
-// crate 内呼び出し元（GEMM 経路への結線・プロセス内 LRU）は C-4（#511）の
-// スコープであり、本タスク時点では未結線（先行スキャフォールディング。
-// C-2 の `cache_root`／`cache_entry_path` と同じ判断）。
+// GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ
+// 導線・コンパイル前に `load_cache_entry` を引く導線）・プロセス内 LRU
+// （`module_cache.rs`）は C-4（#511）で実装済み（`kernels_mma.rs::
+// RenderedMmaKernel::compile` 参照）。
 // ============================================================================
 
 /// キャッシュエントリ内のソースファイル名（NVRTC へ渡した `.cu` ソース
@@ -2905,11 +2945,6 @@ fn create_dir_all_verified(
 /// ドキュメンテーションコメント参照）。戻り値の fd は呼び出し元が
 /// store／load 完了まで引き回す想定であり、`root` パスとして再オープン
 /// してはならない（イシュー #509 PR #677 codex-review P0 再指摘対応）。
-#[allow(
-    dead_code,
-    reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
-              先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
-)]
 pub(crate) fn ensure_cache_root(workspace_root: &Path) -> Result<(PathBuf, fs::File), CudaError> {
     ensure_cache_root_in(&cache_root(workspace_root)?, workspace_root)
 }
@@ -3159,8 +3194,11 @@ fn store_cache_entry_at(
 /// [`store_cache_entry_in`] の公開ラッパー（イシュー #509・Phase C-3）。
 /// `workspace_root` から [`ensure_cache_root`] でルートを実体化した上で
 /// 委譲する。NVRTC コンパイル（`compile_ptx`）との結線（コンパイル成功後
-/// に本関数を呼ぶ導線）は C-4（#511）のスコープ（実装計画 §3.5: store は
-/// バイト列を受け渡す純 I/O プリミティブに留める）。
+/// に本関数を呼ぶ導線）は C-4（#511）で実装済み
+/// （[`crate::kernels_mma::RenderedMmaKernel::compile`] 参照。実装計画
+/// §3.5: 本関数はバイト列を受け渡す純 I/O プリミティブに留め、ディスク
+/// キャッシュ関連の失敗はコンパイル失敗にせず縮退運転へ落とす判断は
+/// 呼び出し元が担う）。
 ///
 /// [`store_cache_entry_in`]（`root: &Path` を受け取りテスト用に自前で
 /// fd pin する版）へは委譲しない。[`ensure_cache_root`] が検証直後に
@@ -3171,11 +3209,6 @@ fn store_cache_entry_at(
 /// `PathBuf` を [`store_cache_entry_in`] が改めて `open_dir_nofollow` で
 /// 開き直しており、その間に祖先を差し替えられると検証していない別
 /// ルートへ書き込みうる TOCTOU があった）。
-#[allow(
-    dead_code,
-    reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
-              先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
-)]
 pub(crate) fn store_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
@@ -3351,11 +3384,6 @@ fn load_cache_entry_at(
 /// `load_cache_entry_at` 側に閉じ込めるのは、呼び出し元が省略できる
 /// `Option` 引数にしないという C-2 以来の「注入で決定化・迂回不能」
 /// 方針を fs I/O 層まで一貫させるため。
-#[allow(
-    dead_code,
-    reason = "C-4(#511) の crate 内呼び出し元が実装されるまでの意図的な \
-              先行スキャフォールディング（PR #659 の cache_root と同じ判断）"
-)]
 pub(crate) fn load_cache_entry(
     workspace_root: &Path,
     key: &CudaKernelCacheKey,
