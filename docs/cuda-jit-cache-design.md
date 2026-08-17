@@ -98,7 +98,7 @@ C-1〜C-3・C-5 が用意したキー型・ディレクトリ命名・ディス�
 
 - **`CudaKernelDescriptor`**（`nvrtc.rs`）:
   - `kernel_name`（`&'static str` 限定。実行時文字列を受け付けない設計で A03 対策済み）
-  - `cache_key_shape`（`compiled_dims` で定数化対象とした次元を sentinel `0` に正規化した shape。実行に使う実 shape である `shape()` とはフィールド・意味とも分離しており、`Hash`／`Eq` 実装はキャッシュキーとしての同一性判定に `cache_key_shape` のみを用いる〈`shape` は含めない〉）
+  - `cache_key_shape`（`compiled_dims` で非選択（動的扱い）とした次元を sentinel `0` に正規化した shape。定数化対象として選択した次元は実値のまま保つ。実行に使う実 shape である `shape()` とはフィールド・意味とも分離しており、`Hash`／`Eq` 実装はキャッシュキーとしての同一性判定に `cache_key_shape` のみを用いる〈`shape` は含めない〉）
   - `block_m`／`block_n`／`block_k`／`stages`（静的タイル構成。C-6〜C-9b の選定結果を表す）
   - `dtype`
   - `compiled_dims`（`Option<CompiledDims>`。C-7・#519 で導入した次元別定数化選択。`None` は次元特化なし〈従来コンストラクタ経由〉を表す）
