@@ -138,6 +138,11 @@ DGX Spark GB10 の CPU（Grace・Cortex-X925/A725）は参考系列と位置づ�
 QEMU 仮想 CPU 環境（`docs/perf/cpu-gemm-rayon-tuning.md`）は改善「比」専用の参考値であり、絶対値
 比較には使えない（既存整理の再掲）。
 
+**E-8（#564）の実施状況**: `crates/backend-cpu/src/gemm_blis/mod.rs` の MC/KC/NC 定数コメントへ
+対象実機（M4 Max）とスイープ記録ドキュメントへの参照を追記し、パラメータ化・パリティテスト・
+実機スイープハーネスまで整備した（`docs/perf/cpu-gemm-blocking-sweep.md`）。M4 Max 実機での実測・
+選定は環境ゲート未達のため未実施（fail-closed。現行値 128/256/512 を維持）。
+
 ## §4 共通契約の遵守
 
 GEMM 最適化ツリー（#479）の共通契約に対する本ドキュメントの遵守状況:
