@@ -37,38 +37,73 @@ const _: () = assert!(MR * NR <= 256);
 /// の場合のみトークンを生成することでこの責務を果たす。テストでは
 /// `is_x86_feature_detected!` ガード付き直接呼び出しで同じ責務を果たす）。
 ///
-/// # Panics
+/// # `ldc` 契約（#557）
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／
-/// `c_tile.len() != MR * NR` のいずれかであればパニックする（REQ-8
-/// 境界検査規約: 最適化対象の関数であっても関数入口の明示検査は省略
-/// しない。呼び出し頻度はマイクロカーネル呼び出し 1 回につき 1 回のみ
-/// で、内側の SIMD ループには一切挟まない）。
+/// `c` は要素 `c[i*ldc+j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする。
+/// 完全タイル呼び出しでは `ldc = n`（C の実列数）で C バッファへ直接、
+/// 端タイル呼び出しでは `ldc = NR` で密パッキングされたスタックバッファへ
+/// アクセスする（[`super::Microkernel::run`] 契約と同一）。
+///
+/// # エラー（#691 レビュー P0 再指摘への対応）
+///
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`（その積の
+/// オーバーフローを含む。#691 レビュー P0 再指摘
+/// `PRRT_kwDOTuUCJc6ZrXKs`）・`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`
+/// のいずれも [`super::TileBoundsError`] として `Result::Err` を返す
+/// （panic しない。本関数は外部の `Microkernel` 実装からも到達しうる
+/// 公開入口のため。呼び出し頻度はマイクロカーネル呼び出し 1 回につき
+/// 1 回のみで、内側の SIMD ループには一切挟まない）。
 ///
 /// # Safety
 ///
 /// 呼び出し元は実行 CPU が AVX-512F 命令セットをサポートすることを
 /// 保証しなければならない（[`super::Avx512Kernel::try_new`] による
 /// 実行時検出、またはテストの `is_x86_feature_detected!` ガードのいずれか）。
+///
+/// # 公開 API 非破壊（#691 レビュー指摘への対応）
+///
+/// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
+/// 同じ理由で従来シグネチャを [`kernel_unchecked`] として残す。
 #[target_feature(enable = "avx512f")]
-pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+pub unsafe fn kernel_unchecked_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
+    super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    // SAFETY: [`compute`] のドキュメント参照（直前の検査により前提を
+    // 満たす）。
+    unsafe { compute(ap, bp, c, ldc, kc_len) };
+    Ok(())
+}
 
-    // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
-    // 要素、c_tile は MR*NR(=256) 要素ちょうどであることが保証されている。
-    // 以下のロード／ストアはいずれもこの範囲内のオフセットに限定される
+/// [`kernel_unchecked_with_ldc`]／[`kernel_unchecked`] 共通の演算本体
+/// （境界検査は呼び出し元の責務。#691 レビュー P1 再指摘
+/// `PRRT_kwDOTuUCJc6ZrQZG` 対応: `Result` を `panic!` へ変換する経路を
+/// なくすため、検査ロジックと演算を分離する）。
+///
+/// # Safety
+///
+/// 呼び出し元は次を保証しなければならない: 実行 CPU が AVX-512F を
+/// サポートする（[`kernel_unchecked_with_ldc`] と同一の `# Safety` 契約）・
+/// `ap.len() == MR * kc_len`・`bp.len() == kc_len * NR`・
+/// `c.len() >= (MR - 1) * ldc + NR`（`ldc >= NR`）。
+#[target_feature(enable = "avx512f")]
+unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    // SAFETY: 呼び出し元契約（本関数の `# Safety` 節）により、以下の
+    // ロード／ストアはいずれもこの範囲内のオフセットに限定される
     // （p*NR+16..p*NR+32 の最大値は kc_len-1 でも bp.len() を超えない。
-    // c_tile も i*NR+16..i*NR+32 が最大 i=MR-1 でも c_tile.len() を超え
-    // ない）。AVX-512F 命令の発行自体は、この関数の `#[target_feature]`
-    // 契約により呼び出し元が実行 CPU の対応を保証している前提で健全
-    // （関数ドキュメントの `# Safety` 節参照）。
+    // c も i*ldc+16..i*ldc+32 が最大 i=MR-1 でも c.len() を超えない）。
+    // AVX-512F 命令の発行自体は、この関数の `#[target_feature]` 契約に
+    // より呼び出し元が実行 CPU の対応を保証している前提で健全。
     unsafe {
         let mut acc: [[__m512; 2]; MR] = std::array::from_fn(|i| {
             [
-                _mm512_loadu_ps(c_tile[i * NR..].as_ptr()),
-                _mm512_loadu_ps(c_tile[i * NR + 16..].as_ptr()),
+                _mm512_loadu_ps(c[i * ldc..].as_ptr()),
+                _mm512_loadu_ps(c[i * ldc + 16..].as_ptr()),
             ]
         });
 
@@ -84,10 +119,51 @@ pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_le
         }
 
         for (i, acc_i) in acc.iter().enumerate() {
-            _mm512_storeu_ps(c_tile[i * NR..].as_mut_ptr(), acc_i[0]);
-            _mm512_storeu_ps(c_tile[i * NR + 16..].as_mut_ptr(), acc_i[1]);
+            _mm512_storeu_ps(c[i * ldc..].as_mut_ptr(), acc_i[0]);
+            _mm512_storeu_ps(c[i * ldc + 16..].as_mut_ptr(), acc_i[1]);
         }
     }
+}
+
+/// [`kernel_unchecked_with_ldc`] の従来シグネチャ後方互換ラッパー（unsafe。
+/// `ldc = NR` 固定・密パッキング契約）。[`kernel_unchecked_with_ldc`] の
+/// `# Safety` 契約をそのまま引き継ぐ。
+///
+/// # Safety
+///
+/// [`kernel_unchecked_with_ldc`] と同一（呼び出し元は実行 CPU が
+/// AVX-512F をサポートすることを保証しなければならない）。
+///
+/// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
+///
+/// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
+/// 従来どおり `()` を返す必須シグネチャへ戻す。`check_c_tile_bounds` の
+/// `Result` を `panic!` へ変換する経路は持たない（#691 レビュー P1
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: [`compute`] へ直接委譲する）。
+/// `ap`／`bp` の長さ検査は [`super::panel_len_matches`] で `checked_mul`
+/// によりオーバーフローも確実に不一致として扱う（#691 レビュー P0
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。`c.len() == MR * NR` の検査は `ldc`
+/// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に
+/// 明示的に復元した（#691 レビュー再指摘 cursor
+/// `PRRT_kwDOTuUCJc6ZrXO1`。avx2.rs 側と同型の指摘: `compute` は生ポインタ
+/// の AVX-512F ロード/ストア（`_mm512_loadu_ps` 等）であり範囲チェックを
+/// 経ないため、検査なしでは未定義動作に到達しうる）。
+#[target_feature(enable = "avx512f")]
+pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c.len(), MR * NR, "C tile length mismatch");
+    // SAFETY: 呼び出し元契約を本関数の `# Safety` 節としてそのまま
+    // 引き継いでいる（[`compute`] の `# Safety` 節参照）。
+    unsafe { compute(ap, bp, c, NR, kc_len) };
 }
 
 #[cfg(test)]
@@ -186,5 +262,55 @@ mod tests {
             c_ref, c_avx512,
             "AVX-512F カーネルは mul_add 参照実装と bit 完全一致するはず"
         );
+    }
+
+    /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
+    /// と bit 完全一致し、ギャップ列を破壊しないことを検証する（avx2.rs
+    /// の同種テストと同一パターン）。
+    #[test]
+    fn kernel_unchecked_with_larger_ldc_matches_tight_packing_and_preserves_gap() {
+        if !is_x86_feature_detected!("avx512f") {
+            eprintln!("AVX-512F 非対応環境のためスキップ");
+            return;
+        }
+
+        let kc_len = 5;
+        let ap = xorshift32_vec(0xD0FF_EE01, MR * kc_len);
+        let bp = xorshift32_vec(0xD0FF_EE02, kc_len * NR);
+        let c_init = xorshift32_vec(0xD0FF_EE03, MR * NR);
+
+        let mut c_tight = c_init.clone();
+        // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
+        unsafe {
+            kernel_unchecked_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len).unwrap();
+        }
+
+        let ldc = NR + 5;
+        let sentinel = -777.0f32;
+        let mut c_gapped = vec![sentinel; (MR - 1) * ldc + ldc];
+        for i in 0..MR {
+            c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
+        }
+        // SAFETY: 冒頭の is_x86_feature_detected! ガードにより健全。
+        unsafe {
+            kernel_unchecked_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len).unwrap();
+        }
+
+        for i in 0..MR {
+            for j in 0..NR {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    c_tight[i * NR + j],
+                    "ldc={ldc} 経路と ldc=NR 経路は bit 完全一致するはず（i={i}, j={j}）"
+                );
+            }
+            for j in NR..ldc {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    sentinel,
+                    "ギャップ列（i={i}, j={j}）は直接ストアで破壊されてはならない"
+                );
+            }
+        }
     }
 }

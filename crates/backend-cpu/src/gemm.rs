@@ -120,6 +120,17 @@ pub enum GemmError {
     /// 無視して不正な結果を返さないための型付きエラー。coding-rust.md
     /// 「本番経路で unwrap/expect を使わない」）。
     UnsupportedActivation,
+    /// `gemm_blis` の 5-loop ドライバ（`gemm_blis::gemm_blis_region`）が
+    /// マイクロカーネル入口（[`crate::gemm_blis::microkernel::Microkernel::run_with_ldc`]）
+    /// から返された `TileBoundsError` を受け取った（#691 レビュー P1
+    /// 再指摘への対応）。ドライバ内部の呼び出しは構築上
+    /// （組み込みカーネルの `MR`／`NR` はコンパイル時定数で 1 以上、
+    /// タイル分割ロジックが必要長ちょうどのスライス／バッファを渡す）
+    /// 常に境界検査を満たすため通常到達しないが、`unreachable!`／
+    /// `unwrap` による panic 変換（AGENTS.md「本番経路の panic 禁止」）
+    /// を避け、型付きエラーとして呼び出し元まで伝播させる
+    /// fail-safe（`GemmError::UnsupportedActivation` と同種の設計判断）。
+    MicrokernelTileBounds(crate::gemm_blis::microkernel::TileBoundsError),
 }
 
 impl fmt::Display for GemmError {
@@ -143,6 +154,9 @@ impl fmt::Display for GemmError {
             GemmError::UnsupportedActivation => {
                 write!(f, "unsupported (non-exhaustive) Activation variant")
             }
+            GemmError::MicrokernelTileBounds(e) => {
+                write!(f, "microkernel tile bounds violation: {e}")
+            }
             GemmError::BiasLenMismatch { expected, actual } => {
                 write!(
                     f,
@@ -154,6 +168,15 @@ impl fmt::Display for GemmError {
 }
 
 impl std::error::Error for GemmError {}
+
+/// [`crate::gemm_blis::microkernel::Microkernel::run_with_ldc`] の
+/// `Result::Err` を `?` で `GemmError` へ伝播させるための変換
+/// （[`GemmError::MicrokernelTileBounds`] 参照）。
+impl From<crate::gemm_blis::microkernel::TileBoundsError> for GemmError {
+    fn from(e: crate::gemm_blis::microkernel::TileBoundsError) -> Self {
+        GemmError::MicrokernelTileBounds(e)
+    }
+}
 
 /// 公開入口共通の shape 検証。`m*k`／`k*n`／`m*n` を `checked_mul` で
 /// 算出し、オーバーフローとスライス長不整合を本体アクセス前に拒否する

@@ -105,26 +105,56 @@ const _: () = assert!(MR == 8 && NR == 12);
 /// ロードし、レーン間縮約を一切行わないため、`p` ごとの `a[p][i]・b[p][j]`
 /// への乗算順序はスカラー版と bit 完全一致する。
 ///
-/// # Panics
+/// # `ldc` 契約（#557）
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／
-/// `c_tile.len() != MR * NR` のいずれかであればパニックする（REQ-8
-/// 境界検査規約: 呼び出し元契約を関数入口で明示検査し、以降の
-/// `unsafe` ロード／ストアはこの検査済み長さの範囲内でのみ行う）。
-pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+/// `c` は要素 `c[i*ldc+j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする。
+/// 完全タイル呼び出しでは `ldc = n`（C の実列数）で C バッファへ直接、
+/// 端タイル呼び出しでは `ldc = NR` で密パッキングされたスタックバッファへ
+/// アクセスする（[`super::Microkernel::run`] 契約と同一）。
+///
+/// # エラー（#691 レビュー P0 再指摘への対応）
+///
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`（その積の
+/// オーバーフローを含む。#691 レビュー P0 再指摘
+/// `PRRT_kwDOTuUCJc6ZrXKs`）・`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`
+/// のいずれも [`super::TileBoundsError`] として `Result::Err` を返す
+/// （panic しない。本関数は外部の `Microkernel` 実装からも到達しうる
+/// 公開入口のため）。以降の `unsafe` ロード／ストアはこの検査済み長さの
+/// 範囲内でのみ行う。
+///
+/// # 公開 API 非破壊（#691 レビュー指摘への対応）
+///
+/// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
+/// 同じ理由で従来シグネチャを [`kernel`] として残す。
+pub fn kernel_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
+    super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    compute(ap, bp, c, ldc, kc_len);
+    Ok(())
+}
 
-    // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
-    // 要素、c_tile は MR*NR(=96) 要素ちょうどであることが保証されている。
-    // 以下のロード／ストアはいずれもこの範囲内のオフセットに限定される:
+/// [`kernel_with_ldc`]／[`kernel`] 共通の演算本体（境界検査は呼び出し元の
+/// 責務。#691 レビュー P1 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: `Result` を
+/// `panic!` へ変換する経路をなくすため、検査ロジックと演算を分離する）。
+fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
+    // ことが保証されている（#557: `ldc` 一般化。完全タイル呼び出しでは
+    // `ldc = n` で C バッファへ直接、端タイル呼び出しでは `ldc = NR` で
+    // スタックバッファへアクセスする）。以下のロード／ストアはいずれも
+    // この範囲内のオフセットに限定される:
     // - bp: p*NR, p*NR+4, p*NR+8..+12 の最大は p=kc_len-1 でも
     //   (kc_len-1)*NR+12 = bp.len() を超えない。
     // - ap: p*MR, p*MR+4..+8 の最大は p=kc_len-1 でも (kc_len-1)*MR+8 =
     //   ap.len() を超えない。
-    // - c_tile: i*NR, i*NR+4, i*NR+8..+12 の最大は i=MR-1 でも
-    //   (MR-1)*NR+12 = c_tile.len() を超えない。
+    // - c: i*ldc, i*ldc+4, i*ldc+8..+12 の最大は i=MR-1 でも
+    //   (MR-1)*ldc+12 <= (MR-1)*ldc+NR = c.len() 上界（`ldc >= NR` を
+    //   入口 assert で保証済み）を超えない。
     // k=4 アンロール（#561）: 主ループは p を 4 刻みのチャンクで処理し
     // チャンク内（p..p+3）のみ先読みするため、チャンク先頭 p は 4 の
     // 倍数で p+3 <= k_main-1 < kc_len が常に成り立つ（冒頭モジュール
@@ -136,9 +166,9 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
     unsafe {
         let mut acc: [[float32x4_t; 3]; MR] = std::array::from_fn(|i| {
             [
-                vld1q_f32(c_tile[i * NR..].as_ptr()),
-                vld1q_f32(c_tile[i * NR + 4..].as_ptr()),
-                vld1q_f32(c_tile[i * NR + 8..].as_ptr()),
+                vld1q_f32(c[i * ldc..].as_ptr()),
+                vld1q_f32(c[i * ldc + 4..].as_ptr()),
+                vld1q_f32(c[i * ldc + 8..].as_ptr()),
             ]
         });
 
@@ -250,9 +280,9 @@ pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
         }
 
         for (i, acc_i) in acc.iter().enumerate() {
-            vst1q_f32(c_tile[i * NR..].as_mut_ptr(), acc_i[0]);
-            vst1q_f32(c_tile[i * NR + 4..].as_mut_ptr(), acc_i[1]);
-            vst1q_f32(c_tile[i * NR + 8..].as_mut_ptr(), acc_i[2]);
+            vst1q_f32(c[i * ldc..].as_mut_ptr(), acc_i[0]);
+            vst1q_f32(c[i * ldc + 4..].as_mut_ptr(), acc_i[1]);
+            vst1q_f32(c[i * ldc + 8..].as_mut_ptr(), acc_i[2]);
         }
     }
 }
@@ -282,8 +312,19 @@ const _: () = assert!(MR_12X8 == 12 && NR_12X8 == 8);
 /// `c_tile.len() != MR_12X8 * NR_12X8` のいずれかであればパニックする
 /// （REQ-8 境界検査規約。[`kernel`] と同じ契約）。
 pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR_12X8 * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR_12X8, "packed B panel length mismatch");
+    // `ap`／`bp` の長さ検査は `checked_mul` 判定の [`super::panel_len_matches`]
+    // 経由に統一する（#691 レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs` と
+    // 同型の未検査乗算オーバーフローを防ぐ）。
+    assert!(
+        super::panel_len_matches(ap.len(), MR_12X8, kc_len),
+        "packed A panel length mismatch (or MR_12X8*kc_len overflow): ap.len()={}, MR_12X8={MR_12X8}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR_12X8),
+        "packed B panel length mismatch (or kc_len*NR_12X8 overflow): bp.len()={}, kc_len={kc_len}, NR_12X8={NR_12X8}",
+        bp.len()
+    );
     assert_eq!(c_tile.len(), MR_12X8 * NR_12X8, "C tile length mismatch");
 
     // SAFETY: 直前の assert により ap は MR_12X8*kc_len 要素、bp は
@@ -433,5 +474,138 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
             vst1q_f32(c_tile[i * NR_12X8..].as_mut_ptr(), acc_i[0]);
             vst1q_f32(c_tile[i * NR_12X8 + 4..].as_mut_ptr(), acc_i[1]);
         }
+    }
+}
+
+/// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
+/// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
+/// [`kernel_with_ldc`] を使うこと。
+///
+/// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
+///
+/// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
+/// 従来どおり `()` を返す必須シグネチャへ戻し、`check_c_tile_bounds` の
+/// `Result` を `panic!` へ変換する経路は持たない（`compute` へ直接
+/// 委譲する。契約違反時の挙動は #557 以前と同一）。`ap`／`bp` の長さ検査は
+/// [`super::panel_len_matches`] で `checked_mul` によりオーバーフローも
+/// 確実に不一致として扱う（#691 レビュー P0 再指摘
+/// `PRRT_kwDOTuUCJc6ZrXKs`）。`c_tile.len() == MR * NR` の検査は `ldc`
+/// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に
+/// 明示的に復元した（#691 レビュー再指摘 cursor
+/// `PRRT_kwDOTuUCJc6ZrXO1`: `compute` は生ポインタの NEON ロード/ストア
+/// であり範囲チェックを経ないため、検査なしでは未定義動作に到達しうる）。
+pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
+    compute(ap, bp, c_tile, NR, kc_len);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// xorshift32 による疑似乱数ベクトル生成（テスト専用・本体非依存。
+    /// [`super::avx2`] の同名関数のドキュメントコメント参照）。
+    fn xorshift32_vec(seed: u32, len: usize) -> Vec<f32> {
+        let mut state = seed | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state as f64 / u32::MAX as f64) as f32
+            })
+            .collect()
+    }
+
+    /// 手計算 2x2（MR/NR=8 タイルの左上 2x2 のみ使用・残りはゼロ）で
+    /// FMA 累積が正しいことを確認する（scalar.rs の同種テストと同じ
+    /// ケース。aarch64 実機／エミュレーションでのみ実行される）。
+    #[test]
+    fn kernel_matches_hand_computed_subset() {
+        let kc_len = 2;
+        let mut ap = vec![0.0f32; MR * kc_len];
+        let mut bp = vec![0.0f32; kc_len * NR];
+        ap[0] = 1.0;
+        ap[1] = 3.0;
+        ap[MR] = 2.0;
+        ap[MR + 1] = 4.0;
+        bp[0] = 5.0;
+        bp[1] = 6.0;
+        bp[NR] = 7.0;
+        bp[NR + 1] = 8.0;
+
+        let mut c_tile = vec![0.0f32; MR * NR];
+        kernel(&ap, &bp, &mut c_tile, kc_len);
+
+        assert_eq!(c_tile[0], 19.0);
+        assert_eq!(c_tile[1], 22.0);
+        assert_eq!(c_tile[NR], 43.0);
+        assert_eq!(c_tile[NR + 1], 50.0);
+    }
+
+    /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
+    /// と bit 完全一致し、ギャップ列を破壊しないことを検証する（scalar.rs／
+    /// avx2.rs の同種テストと同一パターン）。
+    #[test]
+    fn kernel_with_larger_ldc_matches_tight_packing_and_preserves_gap() {
+        let kc_len = 5;
+        let ap = xorshift32_vec(0xE0FF_EE01, MR * kc_len);
+        let bp = xorshift32_vec(0xE0FF_EE02, kc_len * NR);
+        let c_init = xorshift32_vec(0xE0FF_EE03, MR * NR);
+
+        let mut c_tight = c_init.clone();
+        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len).unwrap();
+
+        let ldc = NR + 5;
+        let sentinel = -777.0f32;
+        let mut c_gapped = vec![sentinel; (MR - 1) * ldc + ldc];
+        for i in 0..MR {
+            c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
+        }
+        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len).unwrap();
+
+        for i in 0..MR {
+            for j in 0..NR {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    c_tight[i * NR + j],
+                    "ldc={ldc} 経路と ldc=NR 経路は bit 完全一致するはず（i={i}, j={j}）"
+                );
+            }
+            for j in NR..ldc {
+                assert_eq!(
+                    c_gapped[i * ldc + j],
+                    sentinel,
+                    "ギャップ列（i={i}, j={j}）は直接ストアで破壊されてはならない"
+                );
+            }
+        }
+    }
+
+    /// `ldc < NR` は panic ではなく `Result::Err` として返る（#691
+    /// レビュー P1 再指摘への対応。従来は `should_panic` テストだった）。
+    #[test]
+    fn kernel_rejects_ldc_smaller_than_nr() {
+        let ap = vec![0.0f32; MR * 2];
+        let bp = vec![0.0f32; 2 * NR];
+        let mut c_tile = vec![0.0f32; MR * NR];
+        let err = kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            super::super::TileBoundsError::LdcTooSmall {
+                ldc: NR - 1,
+                nr: NR
+            }
+        );
     }
 }
