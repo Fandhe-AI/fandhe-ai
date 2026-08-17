@@ -279,6 +279,8 @@ Rust 側と同様に各 5 回独立実行し、size ごとの中央値を採用�
 **REQ-8 の分母・分子には使わない**。`dispatch_auto` は転送込み境界のため、`docs/performance-targets.md`
 §4 の同期方式契約（ホスト転送を伴わない完了待ち）を単独では満たさない。§4 準拠の f32 prepared
 入口整備・確定計測は Phase F の #572 のスコープ（`docs/perf/gemm-optimization-baseline.md` §2 参照）。
+#572 で追加した `MetalGemm::dispatch_tiled_prepared`（§4 準拠 prepared 入口）による確定計測は
+`docs/perf/metal-floor-remeasurement.md` へ記録する（本節の参考値とは別系列）。
 
 | size | Metal f32 TFLOPS（dynamic-tile-auto。5 回中央値） | PyTorch MPS f32 TFLOPS（5 回中央値） | Metal/PyTorch 比（参考値） |
 |------|------|------|------|

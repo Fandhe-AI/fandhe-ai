@@ -362,6 +362,67 @@ impl MetalGemm {
         }
     }
 
+    /// `SimdgroupTiled`（f32）の §4 準拠 prepared 入口（イシュー #572・
+    /// Phase F-2）。[`Self::dispatch_f16_prepared_unverified`] と同型の
+    /// 計測境界（エンコード＋コマンドバッファ完了待ちのみ）を f32 側にも
+    /// 提供する目的で追加した（`docs/perf/gemm-optimization-baseline.md`
+    /// §2 が「f16 と同型の §4 準拠 prepared ディスパッチ入口を f32 側にも
+    /// 用意したうえでの f32 再計測は Phase F の #572 のスコープ」と明記した
+    /// 対応）。`crates/backend-metal/examples/gemm_f32_prepared_bench.rs` が
+    /// `scripts/bench/gemm_bench_torch_mps_f32.py`（`torch.mm` +
+    /// `torch.mps.synchronize()` のみ計測）と同一の同期境界で計測するために
+    /// 本関数を使う。
+    ///
+    /// [`Self::dispatch_variant`]（`SimdgroupTiled`）はパディング・バッファ
+    /// 確保／アップロード・ディスパッチ・readback／アンパディングを一括で
+    /// 行うのに対し、本関数は呼び出し元が事前に [`pad8`] で実効次元へ
+    /// パディング・確保・アップロード済みの [`MetalBuffer`] に対して
+    /// [`MetalContext::dispatch_sync`] のクロージャ結線のみを行う。呼び出し
+    /// 元が `pad8` を経由せず任意の `m_eff`/`n_eff`/`k_eff`・バッファ長を
+    /// 渡せるため、[`validate_prepared_inputs_f32`] で 8 の倍数・バッファ長
+    /// 一致をエンコード前に検証する（f16 側 `validate_prepared_inputs`・
+    /// PR #346 codex-review P1-1 指摘と同水準の検証）。
+    ///
+    /// `cfg` は呼び出し元が選んだ候補構成（`tile::select(m, n, k)` 等）だが、
+    /// [`Self::pipeline_for_tile`] がデバイス上限超過等でサイレントに
+    /// `TileConfig::SINGLE_SIMDGROUP_8X8` へフォールバックしうるため
+    /// （フォールバック透明性は [`Self::pipeline_for_tile`] ドキュメント
+    /// コメント参照）、戻り値として実際に採用された構成（resolved）を返す。
+    /// 呼び出し元（ベンチ入口）は戻り値のラベルで実測対象構成を確定できる。
+    ///
+    /// `SimdgroupTiled` は `pad8` パディング契約が必須（[`Self::dispatch_variant`]
+    /// 参照）。実効次元は呼び出し元が [`pad8`] で 8 の倍数へ揃えたうえで
+    /// [`pad_matrix`] 済みのデータを [`MetalBuffer`] へアップロードしておく
+    /// こと（パディング・バッファ確保／アップロードは計測ループ外で行う
+    /// 想定。呼び出し元コメント参照）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: [`Self::dispatch_f16_prepared_unverified`]
+    /// と同じ判断根拠（個別引数で呼び出し側の意図が明確になるため構造体へ
+    /// まとめ込まない。理由コメント必須のルール `.claude/rules/coding-rust.md`
+    /// に対応）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_tiled_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        c_buf: &MetalBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+        validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
+
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_tiled(encoder, &pipeline, a_buf, b_buf, c_buf, dims, resolved_cfg);
+        })?;
+
+        Ok(resolved_cfg)
+    }
+
     /// naive GEMM（`C = A @ B`。ゼロ初期化した C へのディスパッチ 1 回のみ、
     /// 蓄積なし）を実行し、結果をホストへ読み出す。[`GemmVariant::Naive`]
     /// で [`Self::dispatch_variant`] へ委譲する薄いラッパー（#39 時点の
@@ -793,6 +854,59 @@ fn validate_prepared_inputs(
     Ok(())
 }
 
+/// [`MetalGemm::dispatch_tiled_prepared`]（イシュー #572）の入力検証。
+///
+/// [`validate_prepared_inputs`]（f16 版。PR #346 codex-review P1-1 指摘）と
+/// 判定ロジックは同一だが、引数型が [`MetalBuffer`]（f32）のため独立実装
+/// する（本ファイル既存の `validate_dims`/`validate_dims_f16` と同じ
+/// 「クレートをまたいだ検証ロジック共有はスコープ外」という既存方針を
+/// 型違いの同クレート内複製にも適用する判断）。
+///
+/// [`validate_effective_dims`] 通過後にのみ呼ばれる前提のため、
+/// `m_eff*k_eff` 等の積は `usize` の範囲でオーバーフローしないことが
+/// 保証されている（`checked_mul` を再度呼ぶ必要はない）。
+fn validate_prepared_inputs_f32(
+    a_buf: &MetalBuffer,
+    b_buf: &MetalBuffer,
+    c_buf: &MetalBuffer,
+    m_eff: usize,
+    n_eff: usize,
+    k_eff: usize,
+) -> Result<(), MetalError> {
+    if !m_eff.is_multiple_of(8) || !n_eff.is_multiple_of(8) || !k_eff.is_multiple_of(8) {
+        return Err(MetalError::NotEightAligned {
+            m_eff,
+            n_eff,
+            k_eff,
+        });
+    }
+
+    let mk = m_eff * k_eff;
+    let kn = k_eff * n_eff;
+    let mn = m_eff * n_eff;
+
+    if a_buf.len() != mk {
+        return Err(MetalError::ALenMismatch {
+            expected: mk,
+            actual: a_buf.len(),
+        });
+    }
+    if b_buf.len() != kn {
+        return Err(MetalError::BLenMismatch {
+            expected: kn,
+            actual: b_buf.len(),
+        });
+    }
+    if c_buf.len() != mn {
+        return Err(MetalError::CLenMismatch {
+            expected: mn,
+            actual: c_buf.len(),
+        });
+    }
+
+    Ok(())
+}
+
 /// パイプライン設定・バッファ結線（index 0〜2）・`Dims`（index 3）の
 /// `setBytes`・`dispatchThreadgroups_threadsPerThreadgroup` を行う。
 /// [`MetalGemm::dispatch_variant`] が [`MetalContext::dispatch_sync`]
@@ -1128,6 +1242,13 @@ mod tests {
     // 書けない（`MetalHalfBuffer` の確保に Metal デバイスが必要）。8 の倍数・
     // バッファ長不一致の両方の拒否は `tests/cpu_metal_f16_parity.rs::
     // f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs`
+    // （`#[ignore]`・Metal 実機依存）で検証する。
+    //
+    // `validate_prepared_inputs_f32`（イシュー #572・`dispatch_tiled_prepared`
+    // の入力検証）も同じ理由（`&MetalBuffer` の確保に Metal デバイスが
+    // 必要）で Linux 上の pure 単体テストが書けない。8 の倍数・バッファ長
+    // 不一致の拒否は `tests/gemm_dynamic_tile_parity.rs::
+    // dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs`
     // （`#[ignore]`・Metal 実機依存）で検証する。
 
     // --- validate_dims_f16（pure・実機不要。TASK-8.3b・#156） ---
