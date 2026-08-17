@@ -605,7 +605,11 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
     // `median_q1_q3`。coding-rust.md「ベンチは 5 回計測の中央値」）を
     // 採用する。tolerance・受け入れ基準・gating 方針（TFLOPS は
     // non-gating。本関数冒頭コメント参照）は変更しない。
-    const ROUNDS: usize = 5;
+    // ROUNDS は偶数（6）とする: 奇数だと fresh 先行ラウンドと cached 先行
+    // ラウンドの回数が非対称になり（例: 5 なら fresh 先行 3 回・cached
+    // 先行 2 回）、順序バイアスを完全には相殺できない。#684 でも同じ
+    // 指摘（codex-review）を受けて偶数化した前例に合わせる。
+    const ROUNDS: usize = 6;
     let mut fresh_tflops_samples = Vec::with_capacity(ROUNDS);
     let mut cached_tflops_samples = Vec::with_capacity(ROUNDS);
     let mut fresh_secs_samples = Vec::with_capacity(ROUNDS);
@@ -643,13 +647,13 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
     }
 
     let fresh_tflops_q = median_q1_q3(&fresh_tflops_samples)
-        .expect("5 non-NaN fresh-PTX TFLOPS round samples must yield quartiles");
+        .expect("ROUNDS non-NaN fresh-PTX TFLOPS round samples must yield quartiles");
     let cached_tflops_q = median_q1_q3(&cached_tflops_samples)
-        .expect("5 non-NaN cached-PTX TFLOPS round samples must yield quartiles");
+        .expect("ROUNDS non-NaN cached-PTX TFLOPS round samples must yield quartiles");
     let fresh_secs_q = median_q1_q3(&fresh_secs_samples)
-        .expect("5 non-NaN fresh-PTX median_secs round samples must yield quartiles");
+        .expect("ROUNDS non-NaN fresh-PTX median_secs round samples must yield quartiles");
     let cached_secs_q = median_q1_q3(&cached_secs_samples)
-        .expect("5 non-NaN cached-PTX median_secs round samples must yield quartiles");
+        .expect("ROUNDS non-NaN cached-PTX median_secs round samples must yield quartiles");
 
     println!(
         "[jit_cache_bench:throughput] shape=(4096,4096,4096) \
