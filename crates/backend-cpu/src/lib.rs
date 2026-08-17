@@ -94,6 +94,14 @@
 //! fused_elementwise_parity.rs` で融合 vs 非融合の数値一致を検証する。
 //! 受け入れ条件）。
 
+//! イシュー #607 で [`rmsnorm`]・[`softmax`] モジュール（融合 RMSNorm／
+//! softmax 順伝播の NEON + `rayon` 参照実装。`backend-cuda::rmsnorm`
+//! （#592）・`backend-cuda::softmax`（#594）・`backend-metal`（#604）と
+//! 同じ意味論・プラン一致契約）を追加し、`ops::CpuBackendOps::run_fused`
+//! を「RMSNorm 一致 → softmax 一致 → 既存 elementwise 融合」の 3 分岐へ
+//! 拡張した。exp 実装方式は標準 `f32::exp` を採用（[`softmax`] モジュール
+//! 冒頭コメント参照。tolerance 緩和は行わない）。
+
 mod device;
 mod elementwise;
 pub mod fused_elementwise;
@@ -103,6 +111,8 @@ pub mod memory;
 mod ops;
 pub mod parity;
 pub mod reduction;
+pub mod rmsnorm;
+pub mod softmax;
 
 pub use device::CpuDeviceProvider;
 pub use elementwise::{
@@ -119,3 +129,5 @@ pub use parity::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, ParityError, RELATIVE_TOLERANCE, assert_parity,
     compare, matmul_reference_fma,
 };
+pub use rmsnorm::{RmsNormError, run_rmsnorm_f32};
+pub use softmax::{SoftmaxError, run_softmax_f32};
