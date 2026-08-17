@@ -136,6 +136,14 @@ python3 docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/pytorch/gemm_bench_torch_
 起動オーバーヘッド支配のため参考値扱いとし分母に使わない（`docs/perf/gemm-optimization-baseline.md`
 §1 表と同方針）。
 
+**関連ドキュメント（#567）**: Phase E（E-1〜E-8）完了時点の対 PyTorch 比再計測は
+`docs/perf/cpu-gemm-phase-e-remeasurement.md` に記録する（本ドキュメントと同じく Linux x86_64
+セッションでは環境ゲート未達のため未実施）。同ドキュメントはベースライン基準コミットを本ドキュメント
+の計測ハーネス導入コミット（PR #650・`1cb2938`）と同一に定めているため、**実機セッションでは
+本ドキュメントの表と `cpu-gemm-phase-e-remeasurement.md` の「対 A-8 ベースライン改善率」表を同一の
+ベースライン計測（Rust 5 run × 4 形状・PyTorch 5 run × 4 形状）1 セットで同時に埋められる**（二重
+計測を避けるため、実機セッションでは両ドキュメントをまとめて更新することを推奨する）。
+
 ## PoC-v2-1（5.3%）との対比（未実施）
 
 実測完了後、本ドキュメントの現行経路の値と PoC-v2-1 旧経路の 5.3%（`docs/performance-targets.md:25`）
