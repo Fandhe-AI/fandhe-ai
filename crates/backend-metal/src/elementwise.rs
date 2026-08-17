@@ -234,7 +234,7 @@ fn encode_binary_dispatch(
 ) {
     encoder.setComputePipelineState(pipeline);
 
-    // SAFETY（FFI 境界 1/2）: `setBuffer_offset_atIndex` は生存中の
+    // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きしない
     // （`crate::gemm::encode_dispatch` の同種コメント参照）。`a_buf`／
     // `b_buf`／`out_buf` は呼び出し元 `ctx.dispatch_sync` が完了するまで
@@ -245,7 +245,7 @@ fn encode_binary_dispatch(
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 2);
     }
 
-    // SAFETY（FFI 境界 2/2）: `setBytes_length_atIndex` は指定ポインタから
+    // SAFETY: FFI 境界 2/2。`setBytes_length_atIndex` は指定ポインタから
     // 指定バイト数を即座に複製する。`numel` はローカル変数でありポインタは
     // 本呼び出し中生存し、長さは `size_of::<u32>()` と一致する
     // （`shaders/elementwise.metal` の `constant uint& numel` 宣言と型を

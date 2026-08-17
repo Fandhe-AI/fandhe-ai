@@ -1110,7 +1110,7 @@ fn encode_dispatch(
 ) {
     encoder.setComputePipelineState(pipeline);
 
-    // SAFETY（FFI 境界 1/2）: `setBuffer_offset_atIndex` は生存中の
+    // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きはしない
     // （実際のアクセスは `dispatchThreadgroups` 後、GPU 側の非同期実行で
     // 発生する）。`a_buf`/`b_buf`/`c_buf` は本関数の呼び出し元
@@ -1123,7 +1123,7 @@ fn encode_dispatch(
         encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
     }
 
-    // SAFETY（FFI 境界 2/2）: `setBytes_length_atIndex` は指定ポインタから
+    // SAFETY: FFI 境界 2/2。`setBytes_length_atIndex` は指定ポインタから
     // `size_of::<Dims>()` バイトを即座に複製する（PoC-v2-4 `metal_gemm.rs`
     // と同じ呼び出し形）。`dims` はローカル変数でありポインタは本呼び出し
     // 中生存し、長さは `size_of::<Dims>()` と正確に一致する。
@@ -1192,7 +1192,7 @@ fn encode_dispatch_bias_act(
 ) {
     encoder.setComputePipelineState(pipeline);
 
-    // SAFETY（FFI 境界 1/2）: `encode_dispatch` の同種コメントと同一の
+    // SAFETY: FFI 境界 1/2。`encode_dispatch` の同種コメントと同一の
     // 契約（`a_buf`/`b_buf`/`bias_buf`/`c_buf` は `dispatch_sync` の同期
     // 完了まで呼び出し元スタックフレームで生存する）。
     unsafe {
@@ -1202,7 +1202,7 @@ fn encode_dispatch_bias_act(
         encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 3);
     }
 
-    // SAFETY（FFI 境界 2/2）: `encode_dispatch` の同種コメントと同一の
+    // SAFETY: FFI 境界 2/2。`encode_dispatch` の同種コメントと同一の
     // 契約（各ローカル変数は本呼び出し中生存し、型・バイト数は
     // `shaders/gemm.metal::gemm_tiled_bias_act` の
     // `constant Dims&`/`constant int&` 宣言と一致させている）。
