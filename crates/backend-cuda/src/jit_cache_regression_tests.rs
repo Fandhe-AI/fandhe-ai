@@ -909,7 +909,16 @@ fn stale_tmp_dirs_do_not_break_store_or_load() {
 /// `.git` ディレクトリを持つ祖先が境界として検出されること。
 #[test]
 fn find_workspace_root_from_detects_git_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
     let root = fresh_temp_dir("workspace-root-git");
+    // 環境の umask（例 `002`）に依存せず group 書き込みビットを持たない
+    // ことを保証する（イシュー #511 PR #703 codex-review P0 再指摘対応で
+    // `has_workspace_root_marker` が group 書き込みビットも拒否条件に
+    // 含めるようになったため、`fs::create_dir_all` の既定モードが umask
+    // `002` 環境で `0o775` になり誤ってミス扱いされるのを防ぐ）。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("must pin workspace root dir permissions to non-group-writable");
     fs::create_dir_all(root.join(".git")).expect("must create .git marker dir");
     let nested = root.join("crates").join("backend-cuda").join("src");
     fs::create_dir_all(&nested).expect("must create nested descendant dir");
@@ -927,7 +936,14 @@ fn find_workspace_root_from_detects_git_ancestor() {
 /// `[workspace]` を持つ `Cargo.toml` の祖先が境界として検出されること。
 #[test]
 fn find_workspace_root_from_detects_workspace_cargo_toml_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
     let root = fresh_temp_dir("workspace-root-cargo-toml");
+    // 環境の umask（例 `002`）に依存せず group 書き込みビットを持たない
+    // ことを保証する（上記 `find_workspace_root_from_detects_git_ancestor`
+    // と同じ理由。イシュー #511 PR #703 codex-review P0 再指摘対応）。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("must pin workspace root dir permissions to non-group-writable");
     fs::write(
         root.join("Cargo.toml"),
         "[workspace]\nmembers = [\"crates/*\"]\n",
@@ -988,6 +1004,41 @@ fn has_workspace_root_marker_rejects_world_writable_git_ancestor() {
     assert!(
         !has_workspace_root_marker(&root),
         "a world-writable ancestor must not be trusted as a workspace root marker \
+         even if it contains a .git directory"
+    );
+
+    // 権限を戻してからでないと `remove_dir_all` の後始末で権限起因の
+    // 失敗が起きうる環境があるため、テスト終了前に元へ戻す。
+    let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o755));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// group 書き込み可能なディレクトリに置かれた `.git` は境界マーカーと
+/// して信頼されないこと（イシュー #511 PR #703 codex-review P0 再指摘
+/// 〈group-writable ancestor を workspace root として信頼している〉への
+/// 回帰確認）。旧実装は other 書き込みビット〈`0o002`〉のみを拒否条件と
+/// し、group 書き込みビット〈`0o020`〉を意図的に許容していたため、
+/// 同一グループの別 uid のユーザーが `.git`／`[workspace]` Cargo.toml を
+/// 仕込んで `workspace_root` を偽装できた。所有 uid が異なるケースは
+/// テスト環境で別 uid のプロセスを起動できないため権限ビットのみで
+/// 検証する（上記 `has_workspace_root_marker_rejects_world_writable_git_ancestor`
+/// と同じ理由）。
+#[test]
+fn has_workspace_root_marker_rejects_group_writable_git_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("workspace-root-group-writable-git");
+    fs::create_dir_all(root.join(".git")).expect("must create .git marker dir");
+    // 攻撃シナリオの模擬: group 共有ワークツリー（umask `002` 環境の
+    // `git init` 等で生じる `0o775`）を想定し、`root` 自体を group
+    // 書き込み可能（`0o770`。other 書き込みビットは立てない）へ緩める。
+    // 中身（`.git`）は変更しない。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o770))
+        .expect("must relax workspace root dir permissions to group-writable");
+
+    assert!(
+        !has_workspace_root_marker(&root),
+        "a group-writable ancestor must not be trusted as a workspace root marker \
          even if it contains a .git directory"
     );
 

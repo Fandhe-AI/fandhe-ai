@@ -974,10 +974,15 @@ impl RenderedMmaKernel {
     ///    `Arc<CudaModule>` があれば `cuModuleGetFunction`（軽量）のみで
     ///    済ませ、NVRTC 再コンパイル・`load_module` 再ロードを回避する。
     /// 2. **ディスクキャッシュ**（[`crate::nvrtc::load_cache_entry`]。
-    ///    C-3・#509）: ソース全文のバイト単位照合込みでヒットすれば
-    ///    `Ptx::from_src` で `load_module`（NVRTC 自体をスキップ）。
-    /// 3. **NVRTC 直コンパイル**（フルミス）: `compile_ptx` 実行後、
-    ///    成功すれば [`crate::nvrtc::store_cache_entry`] でディスクへ保存
+    ///    C-3・#509）: ソース全文のバイト単位照合込みでヒット判定のみ
+    ///    行う。**ヒットしてもディスク上の `kernel.ptx` は実行入力として
+    ///    使わない**（イシュー #511 PR #703 codex-review P0 再指摘対応。
+    ///    詳細理由は下記実装のコメント参照）。ヒット／ミスいずれの場合も
+    ///    3 段目の NVRTC 直コンパイルへ進み、このプロセス内で生成した
+    ///    PTX のみを `load_module` する。
+    /// 3. **NVRTC 直コンパイル**（2 段目のヒット／ミスを問わず必ず実行):
+    ///    `compile_ptx` 実行後、ディスクに当該キーのエントリがまだ
+    ///    なければ [`crate::nvrtc::store_cache_entry`] でディスクへ保存
     ///    する（C-2〜C-3 が用意した導線への結線。設計文書
     ///    `docs/cuda-jit-cache-design.md` C-4 節）。
     ///

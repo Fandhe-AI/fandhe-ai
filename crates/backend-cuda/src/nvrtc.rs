@@ -1182,25 +1182,33 @@ fn has_workspace_root_marker(dir: &Path) -> bool {
     };
     {
         use std::os::unix::fs::MetadataExt;
-        // **group 書き込みビット（`0o020`）は検査しない
-        // （[`is_cache_entry_permission_untrusted`] との意図的な差分）**:
-        // キャッシュエントリ自体は本クレートが `create_subdir_pinned`／
-        // `create_file_pinned` で明示 `mode(0o700)`／`mode(0o600)` を
-        // 指定して作成するため umask に左右されず group 書き込みを
-        // 常に排除できる（同関数のドキュメンテーションコメント参照）。
-        // 一方 `.git`／`Cargo.toml` はユーザーの既存リポジトリであり
-        // 本クレートが作成・権限制御するものではない。group 共有ワーク
-        // ツリー（umask `002`）は珍しくなく、その場合 `git init` 等で
-        // 作成された正当なディレクトリも group 書き込み可能（`0o775`
-        // 等）になる。ここで group ビットまで拒否条件に含めると、umask
-        // `002` を使う一般的な開発環境で正当な `workspace_root` 解決が
-        // 軒並み失敗し「ディスクキャッシュが常に効かない」規模の回帰に
-        // なる。よって「他ユーザーが任意に書き込める」ことを直接示す
-        // other 書き込みビット（`0o002`）と所有 uid 不一致のみを検査
-        // する: この 2 条件は「見知らぬ第三者が当該ディレクトリへ書き
-        // 込めた可能性」を捉える一方、同一ユーザーが管理するグループ
-        // 共有ワークツリーは正当に通す。
-        if meta.mode() & 0o002 != 0 || meta.uid() != current_euid() {
+        // **group 書き込みビット（`0o020`）も検査する（イシュー #511
+        // PR #703 codex-review P0 再指摘対応。旧実装は other 書き込み
+        // ビット〈`0o002`〉のみを検査し group 書き込みビットを意図的に
+        // 除外していたが、これは不健全だった）: `dir` の所有 uid が
+        // このプロセスと一致していても、`dir` が group 書き込み可能
+        // （`mode & 0o020 != 0`）であれば、同一グループに属する別 uid の
+        // ユーザーがそのディレクトリへ書き込める。つまり「同一 uid が
+        // 所有」という条件だけでは group 経由の第三者書き込みを排除
+        // できず、攻撃者が `.git`／`[workspace]` 付き `Cargo.toml` を
+        // 仕込んで `workspace_root` を偽造し、`resolve_cache_root` の
+        // containment 検証が想定する境界を回避しうる（旧コメントは
+        // 「エントリ自体は `create_subdir_pinned`／`create_file_pinned`
+        // が `mode(0o700)`／`mode(0o600)` を明示するため group 書き込みを
+        // 排除できる」という [`is_cache_entry_permission_untrusted`] 側の
+        // 理由を誤って `.git`／`Cargo.toml`〈本クレートが作成・権限制御
+        // しないユーザーの既存ファイル〉にも適用してしまっていた）。
+        // よって [`is_cache_entry_permission_untrusted`] と同じ
+        // `mode & 0o022 != 0`（group／other いずれかの書き込み）で統一
+        // する。**既知の許容トレードオフ**: umask `002` の group 共有
+        // ワークツリーでは `.git`／`Cargo.toml` が group 書き込み可能に
+        // なりがちなため、その環境では `workspace_root` 解決が失敗し
+        // ディスクキャッシュが常に効かない縮退運転になる（`compile` の
+        // 「縮退方針」どおり NVRTC 直コンパイルへフォールバックするのみで
+        // 誤動作ではない）。この縮退は「他グループメンバーによる
+        // workspace boundary 偽装を許す」という P0 より安全側であるため
+        // 受け入れる。
+        if meta.mode() & 0o022 != 0 || meta.uid() != current_euid() {
             return false;
         }
     }
