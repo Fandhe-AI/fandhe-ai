@@ -403,6 +403,17 @@ pub trait Microkernel: Copy + Sync {
     /// `Result::Err(TileBoundsError)` として返す。[`Self::run`] は
     /// `ldc == Self::NR`（密パッキング契約）でのみ呼ばれ境界検査を経ない
     /// ため無変更（既存の必須メソッドのシグネチャは非破壊のまま）。
+    ///
+    /// ## `ap`／`bp` 長検査の追加（#691 レビュー再指摘 cursor
+    /// `PRRT_kwDOTuUCJc6Zr8oU` への対応）
+    ///
+    /// 上記の型付きエラー化は `c`／`ldc` の検査のみを対象としており、
+    /// `ap`／`bp` の長さ検査は含んでいなかった。本メソッドは `Result` を
+    /// 返す公開入口である以上、各 ISA の `kernel_with_ldc`／
+    /// `kernel_unchecked_with_ldc` と同様に [`check_panel_lengths`]（`ap`／
+    /// `bp` 長不一致・オーバーフローを `TileBoundsError::
+    /// PanelLengthMismatch` として拒否）も `check_c_tile_bounds` と併せて
+    /// 実行する。
     fn run_with_ldc(
         &self,
         ap: &[f32],
@@ -411,6 +422,7 @@ pub trait Microkernel: Copy + Sync {
         ldc: usize,
         kc_len: usize,
     ) -> Result<(), TileBoundsError> {
+        check_panel_lengths(Self::MR, Self::NR, kc_len, ap.len(), bp.len())?;
         // #691 レビュー P1 再指摘（密パッキング経路が境界検査を迂回する）
         // への対応: `ldc == Self::NR` の高速経路も含め、[`Self::run`] へ
         // 委譲する前に必ず [`check_c_tile_bounds`] を通す。以前は
@@ -554,7 +566,11 @@ impl Microkernel for Neon12x8Kernel {
     ) -> Result<(), TileBoundsError> {
         // #691 レビュー P1 再指摘（[`Microkernel::run_with_ldc`] デフォルト
         // 実装の同種修正参照）: `ldc == Self::NR` の高速経路も含め、`run`
-        // へ委譲する前に必ず境界検査を通す。
+        // へ委譲する前に必ず境界検査を通す。`ap`／`bp` 長検査
+        // （[`check_panel_lengths`]）は #691 レビュー再指摘 cursor
+        // `PRRT_kwDOTuUCJc6Zr8oU` への対応で追加した（デフォルト実装の
+        // 同種修正参照）。
+        check_panel_lengths(Self::MR, Self::NR, kc_len, ap.len(), bp.len())?;
         check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         if ldc == Self::NR {
             self.run(ap, bp, c, kc_len);
