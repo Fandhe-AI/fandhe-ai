@@ -110,10 +110,12 @@ mod macos_impl {
         })
         .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
 
+        // TFLOPS の Q1/Q3 は時間の Q3/Q1 から算出する（上のドキュメンテーション
+        // コメント参照。Bugbot #231 の gemm_bench.rs / gemm_blis_perf.rs と同一対応）。
         TflopsQuartiles {
             median: tflops(m, n, k, measurement.median_secs),
-            q1: tflops(m, n, k, measurement.q1_secs),
-            q3: tflops(m, n, k, measurement.q3_secs),
+            q1: tflops(m, n, k, measurement.q3_secs),
+            q3: tflops(m, n, k, measurement.q1_secs),
         }
     }
 

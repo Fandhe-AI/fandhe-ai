@@ -125,10 +125,15 @@ mod macos_impl {
         })
         .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
 
+        // TFLOPS は実行時間の逆数のため、秒の昇順（q1_secs <= median_secs <=
+        // q3_secs）は TFLOPS の降順に反転する。TFLOPS の Q1（下位＝低速側）は
+        // 時間の Q3（q3_secs）から、TFLOPS の Q3（上位＝高速側）は時間の Q1
+        // （q1_secs）から算出し、ラベルを TFLOPS 側で昇順に保つ（Bugbot #231
+        // の gemm_bench.rs / gemm_blis_perf.rs と同一対応）。
         let quartiles = TflopsQuartiles {
             median: tflops(m, n, k, measurement.median_secs),
-            q1: tflops(m, n, k, measurement.q1_secs),
-            q3: tflops(m, n, k, measurement.q3_secs),
+            q1: tflops(m, n, k, measurement.q3_secs),
+            q3: tflops(m, n, k, measurement.q1_secs),
         };
         (quartiles, resolved_cfg)
     }
