@@ -45,6 +45,24 @@
 //! 安全側に具体化したものである（値としては何ら緩和していない: 手動境界
 //! チェック `if (base + 3 < hidden)` はベクトル化適用時も維持する）。
 //!
+//! # ループ添字のオーバーフロー安全性（REQ-8 境界検査規約）
+//!
+//! `validate_rmsnorm_launch`（`rmsnorm.rs`）は `hidden`／`rows` を
+//! `i32::MAX` 以下であれば受理する。カーネル引数の型は `int`（kernel
+//! ABI 契約。行頭オフセット計算のみ `long long` へ昇格済み）だが、grid
+//! -stride ループの添字（`base`／`i`／`row`）を `int` のまま
+//! `+= 32*4`／`+= 32`／`+= gridDim.x` で進めると、`hidden`（または
+//! `rows`）が `i32::MAX` 近傍の場合に添字が符号あり `int` の範囲を
+//! signed overflow（C++ の未定義動作）でラップし負値化しうる。ラップ後
+//! `i < hidden` 等のループ条件が負値相手に再度真となり、`x_row[i]`／
+//! `out_row[i]` へ負インデックスで範囲外アクセスする（手動境界チェック
+//! `if (base + 3 < hidden)` を実質迂回する。codex-review 指摘・PR #706
+//! レビュー r3793473231 相当）。よって `base`／`i`／`row` は
+//! `long long`（`vec_hidden`／`hidden`／`rows` との比較は暗黙昇格）で
+//! 宣言し、`i32::MAX` 近傍でもオーバーフローしない終了条件を保証する
+//! （`hidden`／`rows` 自体の型は kernel ABI 契約のため `int` のまま
+//! 据え置く）。
+//!
 //! # 数値契約（FMA・丸め）
 //!
 //! 二乗和の蓄積・正規化の積和は `fmaf` を明示使用し、CPU 参照実装
@@ -96,16 +114,19 @@ extern "C" __global__ void rmsnorm_f32_onepass(
     // REQ-8」参照）。
     int vec_hidden = (hidden % 4 == 0) ? hidden : 0;
 
-    for (int row = blockIdx.x; row < rows; row += gridDim.x) {
-        const float* x_row = x + (long long)row * hidden;
-        float* out_row = out + (long long)row * hidden;
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {
+        const float* x_row = x + row * (long long)hidden;
+        float* out_row = out + row * (long long)hidden;
 
         float acc = 0.0f;
 
         // ベクトル化ロード（float4）+ SMEM 格納 + 二乗和蓄積。
         // `base + 3 < hidden` は vec_hidden の定義上常に成立するが、
-        // 最適化を理由に手動境界チェックを省略しない（REQ-8）。
-        for (int base = lane * 4; base < vec_hidden; base += 32 * 4) {
+        // 最適化を理由に手動境界チェックを省略しない（REQ-8）。`base` は
+        // `long long`（本ファイル冒頭コメント「ループ添字のオーバーフロー
+        // 安全性」参照。`hidden` が `i32::MAX` 近傍でも `int` 添字の
+        // signed overflow による境界チェック迂回を防ぐ）。
+        for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
                 smem[base + 0] = v.x;
@@ -119,8 +140,9 @@ extern "C" __global__ void rmsnorm_f32_onepass(
             }
         }
         // スカラー経路: hidden % 4 != 0 なら全要素、それ以外は端要素なし
-        // （vec_hidden == hidden のため本ループは実行されない）。
-        for (int i = vec_hidden + lane; i < hidden; i += 32) {
+        // （vec_hidden == hidden のため本ループは実行されない）。`i` は
+        // `long long`（同上）。
+        for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
             float v = x_row[i];
             smem[i] = v;
             acc = fmaf(v, v, acc);
@@ -139,7 +161,7 @@ extern "C" __global__ void rmsnorm_f32_onepass(
 
         float rstd = rsqrtf(fmaf(acc, inv_n, eps));
 
-        for (int i = lane; i < hidden; i += 32) {
+        for (long long i = lane; i < hidden; i += 32) {
             float normed = smem[i] * rstd;
             if (has_weight) {
                 normed = normed * w[i];
@@ -174,13 +196,16 @@ extern "C" __global__ void rmsnorm_f32_twopass(
     int lane = threadIdx.x;
     int vec_hidden = (hidden % 4 == 0) ? hidden : 0;
 
-    for (int row = blockIdx.x; row < rows; row += gridDim.x) {
-        const float* x_row = x + (long long)row * hidden;
-        float* out_row = out + (long long)row * hidden;
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {
+        const float* x_row = x + row * (long long)hidden;
+        float* out_row = out + row * (long long)hidden;
 
-        // Pass 1: Σx² を計算する（smem 非使用・global 直読）。
+        // Pass 1: Σx² を計算する（smem 非使用・global 直読）。`base`／`i`
+        // は `long long`（本ファイル冒頭コメント「ループ添字の
+        // オーバーフロー安全性」参照。`hidden` が `i32::MAX` 近傍でも
+        // `int` 添字の signed overflow による境界チェック迂回を防ぐ）。
         float acc = 0.0f;
-        for (int base = lane * 4; base < vec_hidden; base += 32 * 4) {
+        for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
                 acc = fmaf(v.x, v.x, acc);
@@ -189,7 +214,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
                 acc = fmaf(v.w, v.w, acc);
             }
         }
-        for (int i = vec_hidden + lane; i < hidden; i += 32) {
+        for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
             float v = x_row[i];
             acc = fmaf(v, v, acc);
         }
@@ -202,8 +227,9 @@ extern "C" __global__ void rmsnorm_f32_twopass(
         float rstd = rsqrtf(fmaf(acc, inv_n, eps));
 
         // Pass 2: x を再度 global から読み正規化して書き出す（同一カーネル・
-        // 同一行ループ内で完結。中間テンソルは書き出さない）。
-        for (int base = lane * 4; base < vec_hidden; base += 32 * 4) {
+        // 同一行ループ内で完結。中間テンソルは書き出さない）。`base`／`i`
+        // は `long long`（同上）。
+        for (long long base = lane * 4; base < vec_hidden; base += 32 * 4) {
             if (base + 3 < hidden) {
                 float4 v = *reinterpret_cast<const float4*>(x_row + base);
                 float4 o;
@@ -220,7 +246,7 @@ extern "C" __global__ void rmsnorm_f32_twopass(
                 *reinterpret_cast<float4*>(out_row + base) = o;
             }
         }
-        for (int i = vec_hidden + lane; i < hidden; i += 32) {
+        for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32) {
             float v = x_row[i] * rstd;
             if (has_weight) {
                 v = v * w[i];
