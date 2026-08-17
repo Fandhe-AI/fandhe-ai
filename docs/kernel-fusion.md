@@ -22,6 +22,19 @@
 >   〈#163・#164〉が結線を相手のスコープと委ね合っていたギャップ）で
 >   あることが判明したため、同イシューの前提ステップとして結線を実施
 >   したうえで実測している（詳細は同記録 §0）。
+>   その後 **Phase G（#582。融合・正規化・量子化の複合ワークロード
+>   軸）**の G-2（#586）・G-3（#588）で `FusionOp` へ `Sum`／`Max`／
+>   `Rsqrt`／`Sub`／`Div` を追加し、行方向 reduction + broadcast
+>   （RMSNorm／softmax 型）セグメントをプラン表現・`FusionPlanError`
+>   による fail-closed 検証まで実装した（`crates/tensor-core/src/
+>   fusion/{graph,plan}.rs`）。ただしバックエンド側の `run_fused` 実行
+>   はこの拡張に追随しておらず、CPU 実装（`crates/backend-cpu/src/
+>   fused_elementwise.rs:129`）は reduction（`Sum`／`Max`）・`Rsqrt` を
+>   含むプランを明示的に未対応として拒否する。バックエンドカーネル実装は
+>   G-6 以降（CUDA #592・#594、Metal #604、CPU #607）で進行中であり、
+>   本文書の更新時点では未完了である。本イシュー（#591）はこの Phase G
+>   による IR 拡張を受けた §1・§3 の記述改定要否を判断した結果を反映
+>   したものであり、判断の詳細は §7 に記録する。
 
 ## 1. 判断サマリ
 
@@ -30,11 +43,24 @@
   （bias・activation）** の 2 系統に限る（`docs/fusion-graph-design.md`
   §1・§2.1、TASK-12.1f・#203）。
 - (b) **reduction エピローグ（`.sum()`／`.max()`）・matmul／softmax を
-  挟む複合連鎖は初期スコープ外**とする（`docs/fusion-graph-design.md`
-  §3.2 (a)(b)、PoC-9 実測が根拠）。
+  挟む複合連鎖は初期スコープ外**とする（TASK-12.2b 策定時点＝
+  `docs/fusion-graph-design.md` §3.2 (a)(b)、PoC-9 実測が根拠）。
+  **Phase G（#582。#591 で反映）による更新**: G-2（#586）・G-3
+  （#588）で `FusionOp` に `Sum`／`Max`／`Rsqrt` を追加し、行方向
+  reduction + broadcast（RMSNorm／softmax 型）セグメントを IR・プラン
+  検証（`FusionPlanError` による fail-closed 拒否）レベルで表現可能に
+  した。これにより「初期スコープ外」なのは matmul を挟む連鎖のみで
+  あり、reduction エピローグ・softmax 型の行方向縮約は IR 表現上は
+  スコープ内に拡張された。ただしバックエンド実行（`run_fused`）は
+  この IR 拡張に未追随（CPU は reduction／`Rsqrt` を含むプランを明示
+  的に未対応拒否。§3 表 1・3 行目参照）であり、**利用者が観測できる
+  性能挙動としては本文書執筆時点でなお変化していない**（詳細は §7）。
 - (c) **matmul・softmax を含む複合ワークロード（attention 系連鎖等）
   では融合効果を前提とした性能目標を設定しない**（REQ-12 受け入れ
   基準 `docs/spec/04-requirements.md:255`。REQ-8 整合。§5 参照）。
+  **Phase G 後も現行維持**（§4・§7 参照。Phase G は複合 WL の実効性能を
+  改善しうる実装群だが、REQ-8 下限（`docs/performance-targets.md`）の
+  前提を変更するものではない）。
 - (d) **利用者向け融合制御 API は提供しない**（REQ-12 受け入れ基準
   `docs/spec/04-requirements.md:252`）。融合は `facade` クレートの
   composition root（`Device` → 具体 `BackendOps` の結線）を経由した
@@ -130,9 +156,9 @@ v1 PoC-9（Metal 実機、Burn/CubeCL 前提）の実測知見に基づく判断
 
 | # | パターン | 挙動 | 根拠 |
 |---|---------|------|------|
-| 1 | reduction エピローグ（`.sum()`／`.max()`） | 融合セグメントが `sum`／`max` ノードで打ち切られる（連鎖部分のみ融合、reduction 自体は融合対象外） | `docs/fusion-graph-design.md` §3.2 (a)。PoC-9 `ew_reduce`（連鎖部分は `ElemwiseFuse` に融合されるが `.sum()` は別カーネル群） |
+| 1 | reduction エピローグ（`.sum()`／`.max()`） | **IR・プラン検証レベル（Phase G・G-2 #586 以降）**: セグメント軸が一致する限り `Sum`／`Max` を融合セグメントへ組み込める（軸不一致は `FusionPlanError::MismatchedReductionAxis` で fail-closed 拒否）。**バックエンド実行レベル**: CPU の `run_fused_elementwise`（`crates/backend-cpu/src/fused_elementwise.rs:129`）は reduction を含むプランを明示的に未対応として拒否し、per-op フォールバックへ倒す。CUDA／Metal も本文書執筆時点で reduction 融合カーネル未実装（G-6 以降 #592・#594・#604・#607 で進行中）。したがって利用者が観測できる挙動は当初と同じ「連鎖部分のみ融合、reduction 自体は融合対象外」のまま（Phase G で解消予定） | IR: `docs/fusion-graph-design.md` §3.2 (a) 改定・`crates/tensor-core/src/fusion/graph.rs`（`FusionOp::Sum`／`Max`）。バックエンド未実装: `crates/backend-cpu/src/fused_elementwise.rs:129`。TASK-12.2b 策定時点の根拠: PoC-9 `ew_reduce`（連鎖部分は `ElemwiseFuse` に融合されるが `.sum()` は別カーネル群） |
 | 2 | matmul を挟む連鎖 | `gemm` ノードで融合セグメントが分断される（GEMM 本体は §2.2 の epilogue 融合対象だが、matmul をまたいだ elementwise 連鎖全体の融合ではない） | `docs/fusion-graph-design.md` §3.2 (b)。PoC-9 `ew_matmul_ew`（matmul 前後は個別カーネルのまま） |
-| 3 | softmax 単体・attention 系連鎖 | 融合機構の対象外（softmax は組込み複合演算として別実装であり、本融合 IR の `FusionOp` enum に含まれない） | REQ-12 受け入れ基準（`docs/spec/04-requirements.md:255`）。PoC-9 `softmax`・`attention_chain`（融合の影響をほぼ受けない、または部分的） |
+| 3 | softmax 単体・attention 系連鎖 | **IR レベル（Phase G・G-3 #588 以降）**: softmax の構成要素（`x - max(x)`・`exp(..)`・`.. / sum(..)`）を表現する `Sub`／`Div`（G-3）・`Rsqrt`（G-2、RMSNorm 用）が `FusionOp` enum に追加され、行方向 reduction + broadcast セグメントとしてプラン表現・検証（`FusionPlanError`）まで実装済み。「`FusionOp` enum に含まれない」という当初の記述はもはや正確ではない。**バックエンド実行レベル**: CPU／CUDA／Metal のいずれも softmax・attention 系の融合カーネルは未実装（表 1 行目と同じギャップ。G-6 以降で進行中）であり、matmul（attention の QK^T・AV）を挟む連鎖は §3.2 (b)・表 2 行目のとおり分断されるため attention 全体の融合は引き続きスコープ外。利用者が観測できる挙動は当初と同じ「融合の影響をほぼ受けない」のまま（Phase G で解消予定） | IR: `docs/fusion-graph-design.md` §3.2 (b) 関連・`crates/tensor-core/src/fusion/graph.rs`（`FusionOp::Sub`／`Div`／`Rsqrt`）。REQ-12 受け入れ基準（`docs/spec/04-requirements.md:255`）。TASK-12.2b 策定時点の根拠: PoC-9 `softmax`・`attention_chain`（融合の影響をほぼ受けない、または部分的） |
 | 4 | transpose 混在連鎖 | `NodeMeta.contiguous == false` を検出した時点で融合セグメントを打ち切り、非融合フォールバックへ倒す（初期スコープでは transpose を融合対象に含めない）。**実測（#167、5 回計測の中央値）**: 融合条件（`run_fused` を試みて `Unsupported` で失敗 → per-op フォールバック再実行の 2 段経路）と非融合条件（最初から per-op 経路のみ）の速度比中央値は 0.981x（ほぼ互角）。5 回のレンジは 0.865〜1.581x と QEMU 仮想 CPU のノイズで大きくばらつくため、フォールバック試行コストは実測上ノイズに埋もれる程度であり明確な悪化とは言えない（当初予測の「速度比 ≈ 1.0」を裏付ける結果。計測条件・5 回分の内訳は `docs/perf/cpu-elementwise-fusion-effect.md` §5 を参照） | `docs/fusion-graph-design.md` §1「transpose を挟む連鎖は融合しない」・§2.3。実測: `docs/perf/cpu-elementwise-fusion-effect.md` §5 |
 | 5 | 連鎖長が 4〜6 段の上限を超える | 上限到達時点でその場の演算を実体化してから連鎖を再開する（実装済み・#404。codex-review PR #406 の P1 是正で fan-in 反例を修正）。`Tape::push_lazy`（`crates/autodiff/src/tape.rs`）が新規ノードの `lazy_chain_size`（未実体化入力の実効サイズの**総和** + 1。fan-in で合流する枝ごとのノード数を合算して捉える）を計算し、`tensor_core::MAX_FUSED_CHAIN_LEN`（= 6。`crates/tensor-core/src/fusion/detect.rs` を単一真実源とし遅延評価経路と結線済み）到達時に呼び出し元（`Var::add`/`mul`/`relu`/`exp`/`tanh`）がその場実体化する。以後このノードは実体化済み扱いとなり連鎖のカウントが自然にリセットされるため、`build_lazy_plan` が構築する `interior` の distinct ノード数は常に `lazy_chain_size`（したがって上限）未満で有界（`node_index` の線形探索コストも定数上限で抑えられる） | `docs/fusion-graph-design.md` §3.2 (d)・§3.5.4。実装は #404 |
 | 6 | backward（VJP）の勾配式計算 | `grad.rs::vjp` が計算する勾配式そのもの（例: `tanh` の VJP `grad * (1 - y * y)`）は融合 IR に記録されず、常に具体 `Tensor` として直接計算される。融合されるのは forward が記録した elementwise 遅延グラフを `Tape::backward` が読み出す箇所のみ | `docs/fusion-graph-design.md` §3.3「backward（VJP）は融合対象外」 |
@@ -182,6 +208,16 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
   という限定範囲のみであり、複合ワークロードの性能下限は
   `docs/performance-targets.md` を正とする（本文書はその根拠の一部を
   提供するのみで、下限値そのものを重複管理しない）。
+- **Phase G（#582）との関係**: トラッキングイシュー #479 は Phase G
+  （融合・正規化・量子化）を「GEMM 単体（REQ-8 の 5 行）への寄与は
+  0% であり、REQ-8 の別行『Transformer 複合ワークロード』を対象とする
+  別軸の Phase」と定義する。Phase G の G-4・G-12・G-14 等は実機
+  ベースラインの確定を目的とし、`docs/performance-targets.md:30` の
+  Transformer 複合ワークロード行を「下限を設定しない」から「目標を
+  前提化する」方向へ変更するものではない。すなわち Phase G は §1 (b)
+  の IR 表現力を拡張したが、§1 (c)・本節が定める「複合 WL では融合を
+  性能目標の前提にしない」という方針自体は不変である（REQ-8 下限の
+  変更は F-5・#577・人間承認事項に限定され、本文書の改定範囲外）。
 
 ## 5. 実測結果の参照
 
@@ -228,3 +264,45 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
   elementwise 融合機構）に基づいて記述しているが、REQ-12 自体の文言
   更新は正本リポジトリ（`Fandhe-AI/rust-ai-library-spec`）側の課題で
   あり、本文書のスコープ外である（`docs/spec/` は編集しない）。
+
+## 7. Phase G を受けた方針改定要否の判断（#591）
+
+Phase G（#582）の G-2（#586）・G-3（#588）が融合 IR のスコープを
+拡張したことを受け、本文書の方針記述の改定要否を次の 3 分岐で判断
+した。
+
+- (i) 本リポ `docs/kernel-fusion.md` の改定のみで足りる
+- (ii) REQ-12 の改定提案として正本リポジトリ側へ回す（`docs/spec/`
+  は編集せず、提案文を作成して回付する）
+- (iii) 現行のまま維持する
+
+**採用: (i)**。根拠:
+
+- §1 判断サマリ (c)・§4 が定める「matmul・softmax を含む複合 WL では
+  融合効果を前提とした**性能目標**を設定しない」（REQ-12 受け入れ
+  基準 `docs/spec/04-requirements.md:255` 由来）は、Phase G 完了後も
+  引き続き有効である。`docs/performance-targets.md:30` の Transformer
+  複合ワークロード行は初期リリース・最適化後のいずれも「下限を
+  設定しない」のまま変更されておらず、トラッキングイシュー #479 も
+  Phase G を「GEMM 単体 REQ-8 比への寄与 0%・REQ-8 別行を対象とする
+  別軸の Phase」と定義する（G-4・G-12・G-14 はベースライン確定で
+  あって目標の前提化ではない）。REQ-8 下限の変更は F-5（#577・人間
+  承認）に限定される
+- したがって REQ-12 の受け入れ基準（性能目標の建て付け）自体は
+  改定不要であり、(ii) は不要と判断する。乖離していたのは本リポ
+  文書側の**実装状態の記述**（IR スコープ・限界表。§1 (b)・§3 表
+  1・3 行目）のみであり、これは本リポの docs 改定（本コミット）で
+  完結する
+- REQ-12 の文言が v1（`burn-wgpu` `fusion` feature）前提のままである
+  という既知の spec 側課題は §6「REQ-12 自体の v2 書き直し」に従来
+  どおり残置し、本判断で新たに拡大しない（F-7・#580 への統合が必要な
+  新規論点は生じていない）
+- (iii) は §3 表 3 行目の「`FusionOp` enum に含まれない」が Phase G
+  後は事実と反する記述になっていたため不採用とした
+
+**確定した改定内容**: §1 判断サマリ (b) を「初期スコープ（TASK-12.2b
+策定時点）」である旨を明示したうえで Phase G による IR 拡張を注記、
+(c) は現行維持を明記、§3 限界表 1・3 行目を実装状態（IR 表現は
+拡張済み・バックエンド実行は未追随）へ更新、§4 に Phase G の別軸
+位置づけを追記した。`docs/performance-targets.md`・`crates/`・CI
+設定・`docs/spec/` への変更は行っていない（docs-only 変更）。
