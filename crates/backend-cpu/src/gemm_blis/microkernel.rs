@@ -259,6 +259,51 @@ impl Microkernel for Neon12x8Kernel {
     fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
         neon::kernel_12x8(ap, bp, c_tile, kc_len);
     }
+
+    /// `run_with_ldc` の override（Cursor Bugbot 指摘・review 4947832636・
+    /// thread PRRT_kwDOTuUCJc6Zq5PH への対応）。
+    ///
+    /// このトークンはオーバーライドせず [`Microkernel::run_with_ldc`] の
+    /// デフォルト実装（`ldc != NR` でヒープ確保 `Vec` によるギャザー/
+    /// スキャッタ）に頼っていたが、`super::gemm_blis_region` の完全タイル
+    /// 経路（#557）は `ldc = n`（C の実列数）で常に `run_with_ldc` を呼ぶ
+    /// ため、[`NeonKernel`]（8×12 側）が `run_with_ldc` を直接オーバー
+    /// ライドして直接ロード/ストアで応じるのに対し、`Neon12x8Kernel`
+    /// （12×8 側）のみ full-tile 呼び出しのたびに `MR*NR`（=96 要素）タイル
+    /// を毎回ヒープ確保するという非対称が生じていた。本トークンは
+    /// `super::dispatch_region` の駆動経路には接続せず `gemm_blis::mod` の
+    /// `#[cfg(test)]` A/B 計測テスト（8×12 vs 12×8 のスループット比較。
+    /// #559）専用のため、正当性への影響はなかったが、比較対象の
+    /// `NeonKernel` 側だけコピー往復が省かれヒープ確保も無い一方
+    /// `Neon12x8Kernel` 側は毎呼び出しヒープ確保が乗るため、A/B 比較の
+    /// 公平性が損なわれていた。
+    ///
+    /// [`neon::kernel_12x8`] 自体は `ldc` 一般化（[`neon::kernel_with_ldc`]
+    /// 相当の strided ロード/ストア）を持たないため、ここではスタック
+    /// 固定長バッファ（ヒープ確保なし）へのギャザー/スキャッタで
+    /// デフォルト実装と同じ正当性を保ちつつ `Vec` 確保のみを除去する
+    /// （A/B 計測の対称性回復が目的であり、`NeonKernel` と同水準の
+    /// strided 直接アクセスへ揃えるほどの追加実装コストは、本番駆動
+    /// 経路に接続しないテスト専用トークンには見合わないと判断した）。
+    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+        if ldc == Self::NR {
+            self.run(ap, bp, c, kc_len);
+            return;
+        }
+        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len());
+        // ヒープ確保（`Vec`）を避けるため MR_12X8*NR_12X8（=96）固定長の
+        // スタック配列を使う（`super::MAX_TILE`〈256〉以内。デフォルト
+        // 実装との唯一の差分はここのみで、ギャザー/スキャッタのロジック
+        // 自体は同一）。
+        let mut tile = [0.0f32; neon::MR_12X8 * neon::NR_12X8];
+        for i in 0..Self::MR {
+            tile[i * Self::NR..(i + 1) * Self::NR].copy_from_slice(&c[i * ldc..i * ldc + Self::NR]);
+        }
+        neon::kernel_12x8(ap, bp, &mut tile, kc_len);
+        for i in 0..Self::MR {
+            c[i * ldc..i * ldc + Self::NR].copy_from_slice(&tile[i * Self::NR..(i + 1) * Self::NR]);
+        }
+    }
 }
 
 /// x86_64 AVX2+FMA トークン。[`Avx2Kernel::try_new`] 経由でのみ構築でき、
