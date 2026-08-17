@@ -9,6 +9,13 @@
 本実装セッションには `docs/real-hardware-verification-env.local.md`（実ホスト名。`.gitignore` 対象・実機接続情報）が存在せず、DGX Spark GB10 実機へ到達できない。`docs/perf/cuda-jit-template-expansion.md`「状態」節・`docs/perf/cuda-jit-cache-*` 系の先例と同じ位置づけで、本ファイルはベンチコード（`crates/backend-cuda/src/jit_cache_bench_tests.rs`）とドキュメント骨子のみを用意し、実測値は空欄のまま実機セッションでの追記対象とする。
 
 - 通常 CI で機械検証済みの事項（§4）: ベンチコードのコンパイル成立（`cargo build --workspace`）・`cargo test --workspace --all-features`（`#[ignore]` テストはコンパイル検査のみ）・fmt／clippy
+
+**Phase B/C 完了後の GEMM スループット確定計測との関係**: 本ドキュメントが計測する初回コンパイル時間・
+2 回目ロード時間・モジュールロード時間は NVRTC コンパイル経路固有のレイテンシ計測であり、GEMM
+スループット自体の対 PyTorch 比確定計測は `docs/perf/cuda-optimized-remeasurement.md`（#571・
+Phase F-1）が別レイヤとして担う（同ドキュメント「動作確認」節参照。JIT キャッシュは公開 launch API の
+シグネチャ・戻り値契約を変えないため `cuda_floor_bench.rs` 側の変更は不要と確認済み）。両ドキュメント
+とも 2026-08-17 時点で実機到達性は不達のまま。
 - 実機必須・未実測の事項（§3）: NVRTC 実コンパイル時間・キャッシュ I/O のレイテンシ・モジュールロード時間・GEMM スループット
 
 ## 1. 計測対象と「JIT キャッシュ導入前後」の対応付け
