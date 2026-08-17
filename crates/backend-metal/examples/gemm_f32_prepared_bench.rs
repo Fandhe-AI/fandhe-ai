@@ -77,8 +77,12 @@ mod macos_impl {
     /// `Measurement` の 3 フィールドすべてを保持したまま呼び出し元へ返す
     /// （codex-review #700 P1 指摘: 従来は `median_secs` のみを変換し
     /// `q1_secs`/`q3_secs` を破棄していた）。時間が短いほど TFLOPS が高いため、
-    /// 秒の昇順（q1 <= median <= q3）は TFLOPS の降順（q1_tflops >= median_tflops
-    /// >= q3_tflops）に反転する。
+    /// 秒の昇順（`q1_secs` <= `median_secs` <= `q3_secs`）をそのまま TFLOPS へ
+    /// 変換すると大小関係が反転する。本構造体の `q1`/`q3` は変換元の秒を
+    /// 入れ替えて算出することでこの反転を打ち消し（`q1` は `q3_secs` から、
+    /// `q3` は `q1_secs` から）、TFLOPS 側でも昇順（q1_tflops <= median_tflops
+    /// <= q3_tflops）を保つ（codex-review #700 P1 指摘の分位点入れ替え・
+    /// コメント誤記修正の双方に対応）。
     struct TflopsQuartiles {
         median: f64,
         q1: f64,
