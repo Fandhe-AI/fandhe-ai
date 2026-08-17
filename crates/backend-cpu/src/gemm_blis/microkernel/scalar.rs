@@ -67,7 +67,14 @@ pub fn kernel_with_ldc(
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    compute(ap, bp, c, ldc, kc_len);
+    Ok(())
+}
 
+/// [`kernel_with_ldc`]／[`kernel`] 共通の演算本体（境界検査は呼び出し元の
+/// 責務。#691 レビュー P1 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: `Result` を
+/// `panic!` へ変換する経路をなくすため、検査ロジックと演算を分離する）。
+fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     for p in 0..kc_len {
         let a_p = &ap[p * MR..p * MR + MR];
         let b_p = &bp[p * NR..p * NR + NR];
@@ -78,7 +85,6 @@ pub fn kernel_with_ldc(
             }
         }
     }
-    Ok(())
 }
 
 /// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
@@ -93,15 +99,20 @@ pub fn kernel_with_ldc(
 /// 「従来 `()` を返す本関数を関数ポインタ・末尾式で使う既存の外部
 /// 呼び出し元」をコンパイル不能にする破壊的変更だった（codex-review・
 /// GraphQL reviewThreads 双方の指摘。AGENTS.md 公開 API 非破壊規約）。
-/// 本関数は従来どおり `()` を返す必須シグネチャへ戻し、契約違反は
-/// [`kernel_with_ldc`] と同じく panic で表面化させる（本関数はもともと
-/// `assert_eq!` で panic する契約だったため、観測可能な挙動は #557 以前
-/// と同一）。`ldc` を選べる新設 API は [`kernel_with_ldc`]（`Result` を
-/// 返す）側にのみ存在する非対称な形とする。
+/// 本関数は従来どおり `()` を返す必須シグネチャへ戻す。`c_tile` の長さ
+/// 契約違反はここでは検査せず（#691 レビュー P1 再指摘
+/// `PRRT_kwDOTuUCJc6ZrQZG` 対応: `check_c_tile_bounds` の `Result` を
+/// `panic!("{e}")` へ変換する経路を作らない）、[`compute`] 内の通常の
+/// スライス添字アクセスに委ねる。これは #557 以前（`kernel` が唯一の
+/// 実装で、密パッキング契約〈`c_tile.len() == MR*NR`〉は呼び出し元の
+/// 責務だった頃）と観測可能な挙動が同一である（契約違反時は言語組み込み
+/// の範囲外添字 panic になる。本関数が新規に panic 経路を追加している
+/// わけではない）。`ldc` を選べる新設 API は [`kernel_with_ldc`]（`Result`
+/// を返す）側にのみ存在する非対称な形とする。
 pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    if let Err(e) = kernel_with_ldc(ap, bp, c_tile, NR, kc_len) {
-        panic!("{e}");
-    }
+    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
+    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    compute(ap, bp, c_tile, NR, kc_len);
 }
 
 #[cfg(test)]

@@ -136,7 +136,14 @@ pub fn kernel_with_ldc(
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    compute(ap, bp, c, ldc, kc_len);
+    Ok(())
+}
 
+/// [`kernel_with_ldc`]／[`kernel`] 共通の演算本体（境界検査は呼び出し元の
+/// 責務。#691 レビュー P1 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: `Result` を
+/// `panic!` へ変換する経路をなくすため、検査ロジックと演算を分離する）。
+fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
     // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
     // ことが保証されている（#557: `ldc` 一般化。完全タイル呼び出しでは
     // `ldc = n` で C バッファへ直接、端タイル呼び出しでは `ldc = NR` で
@@ -279,7 +286,6 @@ pub fn kernel_with_ldc(
             vst1q_f32(c[i * ldc + 8..].as_mut_ptr(), acc_i[2]);
         }
     }
-    Ok(())
 }
 
 /// マイクロカーネルタイルの行数（12×8 変種。firestorm 型 A/B 対抗。#559）。
@@ -467,13 +473,14 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
 ///
 /// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
 ///
-/// [`super::scalar::kernel`] のドキュメント参照。本モジュールも同じ
-/// 理由で従来どおり `()` を返す必須シグネチャへ戻し、契約違反は panic
-/// で表面化させる。
+/// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
+/// 従来どおり `()` を返す必須シグネチャへ戻し、`check_c_tile_bounds` の
+/// `Result` を `panic!` へ変換する経路は持たない（`compute` へ直接
+/// 委譲する。契約違反時の挙動は #557 以前と同一）。
 pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    if let Err(e) = kernel_with_ldc(ap, bp, c_tile, NR, kc_len) {
-        panic!("{e}");
-    }
+    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
+    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    compute(ap, bp, c_tile, NR, kc_len);
 }
 
 #[cfg(test)]

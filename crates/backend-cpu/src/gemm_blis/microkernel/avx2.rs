@@ -75,15 +75,31 @@ pub unsafe fn kernel_unchecked_with_ldc(
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
+    // SAFETY: [`compute`] のドキュメント参照（直前の検査により前提を
+    // 満たす）。
+    unsafe { compute(ap, bp, c, ldc, kc_len) };
+    Ok(())
+}
 
-    // SAFETY: 直前の assert により ap は MR*kc_len 要素、bp は kc_len*NR
-    // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
-    // ことが保証されている。以下のロード／ストアはいずれもこの範囲内の
-    // オフセットに限定される（p*NR+8..p*NR+16 の最大値は kc_len-1 でも
-    // bp.len() を超えない。c も i*ldc+8..i*ldc+16 が最大 i=MR-1 でも
-    // c.len() を超えない）。AVX2+FMA 命令の発行自体は、この関数の
-    // `#[target_feature]` 契約により呼び出し元が実行 CPU の対応を
-    // 保証している前提で健全（関数ドキュメントの `# Safety` 節参照）。
+/// [`kernel_unchecked_with_ldc`]／[`kernel_unchecked`] 共通の演算本体
+/// （境界検査は呼び出し元の責務。#691 レビュー P1 再指摘
+/// `PRRT_kwDOTuUCJc6ZrQZG` 対応: `Result` を `panic!` へ変換する経路を
+/// なくすため、検査ロジックと演算を分離する）。
+///
+/// # Safety
+///
+/// 呼び出し元は次を保証しなければならない: 実行 CPU が AVX2・FMA を
+/// サポートする（[`kernel_unchecked_with_ldc`] と同一の `# Safety` 契約）・
+/// `ap.len() == MR * kc_len`・`bp.len() == kc_len * NR`・
+/// `c.len() >= (MR - 1) * ldc + NR`（`ldc >= NR`）。
+#[target_feature(enable = "avx2,fma")]
+unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    // SAFETY: 呼び出し元契約（本関数の `# Safety` 節）により、以下の
+    // ロード／ストアはいずれもこの範囲内のオフセットに限定される
+    // （p*NR+8..p*NR+16 の最大値は kc_len-1 でも bp.len() を超えない。
+    // c も i*ldc+8..i*ldc+16 が最大 i=MR-1 でも c.len() を超えない）。
+    // AVX2+FMA 命令の発行自体は、この関数の `#[target_feature]` 契約に
+    // より呼び出し元が実行 CPU の対応を保証している前提で健全。
     unsafe {
         let mut acc: [[__m256; 2]; MR] = std::array::from_fn(|i| {
             [
@@ -108,7 +124,6 @@ pub unsafe fn kernel_unchecked_with_ldc(
             _mm256_storeu_ps(c[i * ldc + 8..].as_mut_ptr(), acc_i[1]);
         }
     }
-    Ok(())
 }
 
 /// [`kernel_unchecked_with_ldc`] の従来シグネチャ後方互換ラッパー（unsafe。
@@ -123,15 +138,16 @@ pub unsafe fn kernel_unchecked_with_ldc(
 /// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
 ///
 /// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
-/// 従来どおり `()` を返す必須シグネチャへ戻し、契約違反は panic で
-/// 表面化させる。
+/// 従来どおり `()` を返す必須シグネチャへ戻す。`check_c_tile_bounds` の
+/// `Result` を `panic!` へ変換する経路は持たない（#691 レビュー P1
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: [`compute`] へ直接委譲する）。
 #[target_feature(enable = "avx2,fma")]
 pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
+    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
+    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
     // SAFETY: 呼び出し元契約を本関数の `# Safety` 節としてそのまま
-    // 引き継いでいる。
-    if let Err(e) = unsafe { kernel_unchecked_with_ldc(ap, bp, c, NR, kc_len) } {
-        panic!("{e}");
-    }
+    // 引き継いでいる（[`compute`] の `# Safety` 節参照）。
+    unsafe { compute(ap, bp, c, NR, kc_len) };
 }
 
 /// [`kernel_unchecked_with_ldc`] の安全なラッパー（`ldc` 指定可能）。
@@ -163,13 +179,18 @@ pub fn kernel_with_ldc(
 /// ## 戻り値非破壊（#691 レビュー P1 再指摘への対応）
 ///
 /// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
-/// 従来どおり `()` を返す必須シグネチャへ戻し、契約違反は panic で
-/// 表面化させる。
+/// 従来どおり `()` を返す必須シグネチャへ戻す。`check_c_tile_bounds` の
+/// `Result` を `panic!` へ変換する経路は持たない（#691 レビュー P1
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: [`compute`] へ直接委譲する）。
 #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
 pub fn kernel(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
-    if let Err(e) = kernel_with_ldc(ap, bp, c, NR, kc_len) {
-        panic!("{e}");
-    }
+    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
+    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    // SAFETY: この関数がコンパイルされている時点で `cfg(target_feature =
+    // "avx2", target_feature = "fma")` が成立しており、ビルド対象 CPU は
+    // AVX2+FMA をサポートすると明示されている（[`compute`] の `# Safety`
+    // 契約を満たす）。
+    unsafe { compute(ap, bp, c, NR, kc_len) };
 }
 
 #[cfg(test)]
