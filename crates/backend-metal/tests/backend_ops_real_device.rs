@@ -97,42 +97,38 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
     assert_backend_ops_gemm_parity(511, 512, 97, 71, 83);
 }
 
-/// elementwise・reduction の `Unsupported` 契約を検証する。
+/// reduction（`sum`／`max`）の `Unsupported` 契約を検証する。
 ///
-/// `MetalBackendOps::add`／`mul`／`relu`／`exp`／`tanh`／`sum`／`max`
-/// （`backend-metal/src/ops.rs`）はいずれも `MetalContext::new` を呼ばず
-/// 即座に `BackendError::Unsupported` を返す実装（TASK-1.9c スコープ外の
-/// 未実装カーネル用プレースホルダ）のため、本テストは Metal 実機・
-/// デバイス初期化を一切必要としない。他の実機依存テストと同じファイルに
+/// `MetalBackendOps::sum`／`max`（`backend-metal/src/ops.rs`）は
+/// `MetalContext::new` を呼ばず即座に `BackendError::Unsupported` を返す
+/// 実装（スコープ外の未実装カーネル用プレースホルダ。
+/// out-of-scope-tracking.md 対象）のため、本テストは Metal 実機・デバイス
+/// 初期化を一切必要としない。他の実機依存テストと同じファイルに
 /// 置かれてはいるが（`MetalBackendOps` 自体が `cfg(target_os = "macos")`
 /// 限定のため非 macOS 環境ではコンパイル対象に入らない）、実機依存では
 /// ないため `#[ignore]` を付けない。macOS 上での通常の
 /// `cargo test -p backend-metal`（`--ignored` なし）で毎回実行され、
-/// `MetalBackendOps::gemm` 以外の 7 演算が `Unsupported` を返し続ける
-/// ことを回帰的に固定する。
+/// `sum`／`max` が `Unsupported` を返し続けることを回帰的に固定する。
+///
+/// `add`／`mul`／`relu`／`exp`／`tanh` はイシュー #605 で実カーネル化
+/// 済みのため（`elementwise::MetalElementwise` 経由。`MetalContext::new`
+/// を呼びデバイス初期化を要する）本テストの対象外とし、実機での数値
+/// 一致検証は下記 `#[ignore]` 付き
+/// `backend_ops_elementwise_matches_cpu` が引き継ぐ（Cursor Bugbot
+/// 指摘・PR #717 レビュースレッド。旧テストはこの分離前に 5 演算も
+/// `Unsupported` と誤って assert しており、実カーネル化後は macOS の
+/// 通常 `cargo test` が失敗していた）。
 ///
 /// `backend_ops_dispatch.rs`（`backend-cpu/tests/`）は `ops_for` 経由の
-/// GEMM ディスパッチのみを検証しており、Metal の elementwise・reduction
-/// カバレッジは含まない（Cursor Bugbot 指摘・PR #264 レビュースレッド。
-/// 旧コメントは誤って「テストと分離していない」と記述していたが、実際は
-/// 「そもそもカバーしていない」が正確な記述である）。
+/// GEMM ディスパッチのみを検証しており、Metal の reduction カバレッジは
+/// 含まない（Cursor Bugbot 指摘・PR #264 レビュースレッド。旧コメントは
+/// 誤って「テストと分離していない」と記述していたが、実際は「そもそも
+/// カバーしていない」が正確な記述である）。
 #[test]
-fn elementwise_and_reduction_remain_unsupported_without_device_init() {
+fn reduction_remains_unsupported_without_device_init() {
     let metal = MetalBackendOps::new();
     let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0], &[2, 2]).expect("valid tensor");
-    let b = a.clone();
 
-    assert!(matches!(
-        metal.add(&a, &b),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(
-        metal.mul(&a, &b),
-        Err(BackendError::Unsupported(_))
-    ));
-    assert!(matches!(metal.relu(&a), Err(BackendError::Unsupported(_))));
-    assert!(matches!(metal.exp(&a), Err(BackendError::Unsupported(_))));
-    assert!(matches!(metal.tanh(&a), Err(BackendError::Unsupported(_))));
     assert!(matches!(
         metal.sum(&a, None),
         Err(BackendError::Unsupported(_))
@@ -141,6 +137,56 @@ fn elementwise_and_reduction_remain_unsupported_without_device_init() {
         metal.max(&a, None),
         Err(BackendError::Unsupported(_))
     ));
+}
+
+/// `add`／`mul`／`relu`／`exp`／`tanh`（`elementwise::MetalElementwise`
+/// 経由。イシュー #605）が CPU 参照実装と数値一致することを実機で固定
+/// する（複合判定は REQ-2・`.claude/rules/coding-rust.md`。他の
+/// `#[ignore]` 実機依存テストと同方針）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn backend_ops_elementwise_matches_cpu() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    let a = Tensor::new(vec![1.0, -2.0, 3.0, -4.0, 0.5, -0.25], &[2, 3]).expect("valid tensor");
+    let b = Tensor::new(vec![2.0, 0.5, -1.0, 4.0, -3.0, 1.5], &[2, 3]).expect("valid tensor");
+
+    let cpu_add = cpu.add(&a, &b).expect("cpu add");
+    let metal_add = metal.add(&a, &b).expect("metal add");
+    assert_tensor_parity("BackendOps cpu-metal add parity", &cpu_add, &metal_add);
+
+    let cpu_mul = cpu.mul(&a, &b).expect("cpu mul");
+    let metal_mul = metal.mul(&a, &b).expect("metal mul");
+    assert_tensor_parity("BackendOps cpu-metal mul parity", &cpu_mul, &metal_mul);
+
+    let cpu_relu = cpu.relu(&a).expect("cpu relu");
+    let metal_relu = metal.relu(&a).expect("metal relu");
+    assert_tensor_parity("BackendOps cpu-metal relu parity", &cpu_relu, &metal_relu);
+
+    let cpu_exp = cpu.exp(&a).expect("cpu exp");
+    let metal_exp = metal.exp(&a).expect("metal exp");
+    assert_tensor_parity("BackendOps cpu-metal exp parity", &cpu_exp, &metal_exp);
+
+    let cpu_tanh = cpu.tanh(&a).expect("cpu tanh");
+    let metal_tanh = metal.tanh(&a).expect("metal tanh");
+    assert_tensor_parity("BackendOps cpu-metal tanh parity", &cpu_tanh, &metal_tanh);
+}
+
+/// [`backend_ops_elementwise_matches_cpu`] 用の複合判定ヘルパー（REQ-2:
+/// 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。`backend_cpu::parity`
+/// を唯一の参照とする方針（`.claude/rules/coding-rust.md`）に合わせ、
+/// 判定式は再定義せず [`assert_backend_ops_gemm_parity`] と同じ
+/// `backend_cpu::parity::assert_parity` へ委譲する。
+fn assert_tensor_parity(label: &str, cpu: &Tensor<f32>, metal: &Tensor<f32>) {
+    assert_eq!(cpu.shape(), metal.shape());
+    let cpu_owned = cpu.contiguous();
+    let metal_owned = metal.contiguous();
+    backend_cpu::parity::assert_parity(
+        label,
+        metal_owned.as_slice().expect("metal contiguous"),
+        cpu_owned.as_slice().expect("cpu contiguous"),
+    );
 }
 
 /// `ops_for`（`tensor_core::backend_ops`）を介したディスパッチでも同じ

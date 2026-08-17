@@ -21,7 +21,7 @@
 //! `MetalGemm { pipeline_naive, pipeline_tiled, pipeline_simdgroup, .. }`
 //! と同型の設計。#39 時点は naive のみを productize していた）。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use objc2::rc::Retained;
@@ -46,6 +46,34 @@ const THREADGROUP_SIDE: usize = 16;
 /// `div_ceil` は不要（`shaders/gemm.metal` の `gemm_simdgroup` コメント
 /// 参照。1 threadgroup が C の 8×8 タイルを 1 つ担当する）。
 const SIMDGROUP_THREADGROUP_WIDTH: usize = 32;
+
+thread_local! {
+    /// [`MetalGemm::run_tiled_bias_act_f32`] が実際に GPU カーネルを起動した
+    /// 回数（イシュー #605。CUDA 側
+    /// `backend_cuda::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`〈#599〉と同じ
+    /// 役割・同じスレッドローカル化の理由）。
+    ///
+    /// `ops.rs::MetalBackendOps::gemm_bias_act` の経路選択（融合 vs
+    /// `tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
+    /// 非融合 3 段合成）が実際に融合カーネルへ到達しているかを、実機なしの
+    /// 単体テスト（`ops.rs` 内 `#[cfg(test)]`）が検証するための可観測点。
+    /// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない。
+    /// `m == 0 || n == 0`（no-op）・`k == 0`（ホスト側で直接 epilogue のみ
+    /// 計算し GPU 起動を回避する分岐）の場合はカーネルを起動しないため
+    /// カウントしない。バッファ確保・`dispatch_sync` の**成功後**にのみ
+    /// 増加させる（codex-review 指摘・PR #717: 確保／dispatch 失敗時に
+    /// 「起動済み」として誤記録すると経路検証テスト・診断が偽陽性になる）。
+    ///
+    /// **スレッドローカルにする理由**（CUDA 側 `gemm.rs` の該当コメントと
+    /// 同一の論拠）: `static AtomicU64`（プロセス全体共有）だと `cargo test`
+    /// 既定の並列実行下で「`before` 読み取り〜`gemm_bias_act` 呼び出し〜
+    /// `after` 読み取り」の間に別スレッドで実行中の別テストが同じ融合
+    /// カーネルを起動すると偽陽性になりうる。Rust の既定テストハーネストは
+    /// 各テスト関数の実行を単一スレッド内で完結させるため、カウンタを
+    /// スレッドローカルにすれば呼び出し元スレッドが実際に起動した回数のみを
+    /// 観測できる。
+    pub(crate) static BIAS_ACT_FUSED_LAUNCH_COUNT: Cell<u64> = const { Cell::new(0) };
+}
 
 /// `shaders/gemm.metal` の 3 段カーネルのどれを使うかを表す。
 ///
@@ -117,6 +145,14 @@ pub struct MetalGemm {
     /// f16 経路は `dispatch_variant` の既存分岐に統合しない設計判断。
     /// `crate::lib` クレートコメント参照）。
     pipeline_simdgroup_f16: objc2::rc::Retained<MtlPipeline>,
+    /// `gemm_tiled_bias_act`（イシュー #605）のパイプライン。GEMM epilogue
+    /// （bias 加算・activation）を融合した tiled GEMM。`ops.rs::
+    /// MetalBackendOps::gemm_bias_act` から
+    /// [`Self::run_tiled_bias_act_f32`] 経由でのみ参照する（`GemmVariant`
+    /// には含めない。CUDA 側 `tiled_bias_act_f32` フィールドと同じ設計
+    /// 判断: `#include` を使わず全 GPU family で成立するため `Option` 化
+    /// しない）。
+    pipeline_tiled_bias_act: objc2::rc::Retained<MtlPipeline>,
     /// `gemm_simdgroup_tiled` のコンパイル済みライブラリ（`crate::pipeline::
     /// make_pipeline_with_constants` が構成キーごとにパイプラインを特殊化
     /// する際に再利用する。TASK-1.8f・#188）。
@@ -155,11 +191,14 @@ impl MetalGemm {
         // 参照。上記フィールドコメント参照）。
         let pipeline_simdgroup_f16 =
             pipeline::make_pipeline(ctx.device(), &library, "gemm_simdgroup_f16")?;
+        let pipeline_tiled_bias_act =
+            pipeline::make_pipeline(ctx.device(), &library, "gemm_tiled_bias_act")?;
         Ok(Self {
             pipeline_naive,
             pipeline_tiled,
             pipeline_simdgroup,
             pipeline_simdgroup_f16,
+            pipeline_tiled_bias_act,
             library,
             tiled_cache: RefCell::new(HashMap::new()),
         })
@@ -439,6 +478,115 @@ impl MetalGemm {
         self.dispatch_variant(ctx, GemmVariant::Naive, a, b, m, n, k)
     }
 
+    /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM（f32。
+    /// イシュー #605）を実行し、結果をホストへ読み出す。
+    /// `ops.rs::MetalBackendOps::gemm_bias_act` の融合経路
+    /// （[`crate::ops::gemm_bias_act_route`]）からのみ呼ばれる。
+    ///
+    /// `bias` が `Some` の場合は `bias.len() == n` を fail-closed に検証
+    /// する（`shaders/gemm.metal::gemm_tiled_bias_act` の `bias[col]`
+    /// epilogue が `n` 要素を前提とするため）。
+    ///
+    /// `m == 0 || n == 0` は no-op（空の結果）、`k == 0` は CPU 参照実装
+    /// （`backend_cpu::gemm_blis::gemm_blis_bias_act_parallel`）・CUDA 側
+    /// `run_tiled_bias_act_f32` と同じ契約で epilogue のみホスト側で計算し
+    /// GPU 起動を回避する（[`BIAS_ACT_FUSED_LAUNCH_COUNT`] は増加させない。
+    /// `validate_dims`〈`m/n/k == 0` を一律 `ZeroDimension` として拒否〉を
+    /// 経由せず、本関数専用の [`validate_bias_act_dims`] で検証してから
+    /// この縮退分岐を判定する）。
+    ///
+    /// `bias` が `None` の場合は `n` 要素のゼロ初期化バッファを渡す
+    /// （1 要素ダミーではない。`shaders/gemm.metal::gemm_tiled_bias_act`
+    /// 冒頭コメント「`bias` が `None`」参照: select 化の可能性がある
+    /// Metal コンパイラの最適化戦略に依存しない fail-closed な対策）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_tiled_bias_act_f32(
+        &self,
+        ctx: &MetalContext,
+        a: &[f32],
+        b: &[f32],
+        bias: Option<&[f32]>,
+        act_relu: bool,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<f32>, MetalError> {
+        validate_bias_act_dims(a.len(), b.len(), m, n, k)?;
+        if let Some(bias) = bias
+            && bias.len() != n
+        {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!(
+                    "bias length mismatch: expected {n} (n), actual {}",
+                    bias.len()
+                ),
+            });
+        }
+
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+
+        if k == 0 {
+            // 上記ドキュメンテーションコメント「k == 0」参照: CPU 参照
+            // 実装・CUDA 側と同じく epilogue はホスト側で直接適用し、GPU
+            // 起動は行わない（BIAS_ACT_FUSED_LAUNCH_COUNT は増加させない）。
+            let mut out = vec![0.0f32; m * n];
+            if let Some(bias) = bias {
+                for row in out.chunks_mut(n) {
+                    for (x, bv) in row.iter_mut().zip(bias.iter()) {
+                        *x += *bv;
+                    }
+                }
+            }
+            if act_relu {
+                for x in out.iter_mut() {
+                    *x = x.max(0.0);
+                }
+            }
+            return Ok(out);
+        }
+
+        let a_buf = MetalBuffer::new_with_data(ctx, a)?;
+        let b_buf = MetalBuffer::new_with_data(ctx, b)?;
+        // `bias` が `None` の場合は `n` 要素のゼロ初期化バッファを渡す
+        // （`shaders/gemm.metal::gemm_tiled_bias_act` 冒頭コメント参照）。
+        let (bias_buf, has_bias): (MetalBuffer, i32) = match bias {
+            Some(bias) => (MetalBuffer::new_with_data(ctx, bias)?, 1),
+            None => (MetalBuffer::new_zeroed(ctx, n)?, 0),
+        };
+        let c_buf = MetalBuffer::new_zeroed(ctx, m * n)?;
+
+        let dims = Dims {
+            m: m as u32,
+            n: n as u32,
+            k: k as u32,
+        };
+        let act_i: i32 = if act_relu { 1 } else { 0 };
+
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_bias_act(
+                encoder,
+                &self.pipeline_tiled_bias_act,
+                &a_buf,
+                &b_buf,
+                &bias_buf,
+                &c_buf,
+                dims,
+                has_bias,
+                act_i,
+            );
+        })?;
+
+        // バッファ確保（`MetalBuffer::new_with_data`／`new_zeroed`）・
+        // `ctx.dispatch_sync` がすべて成功した後にのみ増加させる（codex-review
+        // 指摘・PR #717。確保／dispatch 失敗時に「起動済み」として誤記録
+        // すると、経路検証テスト・診断が偽陽性になるため）。
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+
+        Ok(c_buf.read_to_vec())
+    }
+
     /// f16 GEMM（`C = A @ B`。TASK-8.3b・#156）を実行し、結果をホストへ
     /// 読み出す。`gemm_simdgroup_f16`（`shaders/gemm.metal`）のみを対象と
     /// する明示ディスパッチ入口であり、[`Self::dispatch_auto`]／
@@ -704,6 +852,49 @@ fn validate_dims(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Result<D
     })
 }
 
+/// [`MetalGemm::run_tiled_bias_act_f32`] 専用の形状検証（イシュー #605）。
+///
+/// [`validate_dims`] と異なり `m/n/k == 0` を一律拒否しない
+/// （`run_tiled_bias_act_f32` は `m == 0 || n == 0` を no-op・`k == 0` を
+/// ホスト側 epilogue のみの縮退経路として受理する契約のため。CUDA 側
+/// `gemm.rs::validate_gemm_dims` と同じ「ゼロ次元を許容し、呼び出し元が
+/// 縮退分岐を判定する」設計）。長さ一致検証・`checked_mul` オーバーフロー
+/// 検出・`u32::MAX` 超過検出（`Dims` への cast 前検証）を行う。
+fn validate_bias_act_dims(
+    a_len: usize,
+    b_len: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<Dims, MetalError> {
+    let mk = m.checked_mul(k).ok_or(MetalError::DimProductOverflow)?;
+    let kn = k.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+    m.checked_mul(n).ok_or(MetalError::DimProductOverflow)?;
+
+    if m > u32::MAX as usize || n > u32::MAX as usize || k > u32::MAX as usize {
+        return Err(MetalError::DimensionExceedsU32 { m, n, k });
+    }
+
+    if a_len != mk {
+        return Err(MetalError::ALenMismatch {
+            expected: mk,
+            actual: a_len,
+        });
+    }
+    if b_len != kn {
+        return Err(MetalError::BLenMismatch {
+            expected: kn,
+            actual: b_len,
+        });
+    }
+
+    Ok(Dims {
+        m: m as u32,
+        n: n as u32,
+        k: k as u32,
+    })
+}
+
 /// [`validate_dims`] の f16 版（TASK-8.3b・#156）。判定ロジック自体は
 /// 要素数（`.len()`）にのみ依存し dtype に非依存のため中身は同一だが、
 /// `MetalGemm::dispatch_f16_unverified` の入力型（`&[half::f16]`）に合わせて独立実装
@@ -925,7 +1116,7 @@ fn encode_dispatch(
 ) {
     encoder.setComputePipelineState(pipeline);
 
-    // SAFETY（FFI 境界 1/2）: `setBuffer_offset_atIndex` は生存中の
+    // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きはしない
     // （実際のアクセスは `dispatchThreadgroups` 後、GPU 側の非同期実行で
     // 発生する）。`a_buf`/`b_buf`/`c_buf` は本関数の呼び出し元
@@ -938,7 +1129,7 @@ fn encode_dispatch(
         encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
     }
 
-    // SAFETY（FFI 境界 2/2）: `setBytes_length_atIndex` は指定ポインタから
+    // SAFETY: FFI 境界 2/2。`setBytes_length_atIndex` は指定ポインタから
     // `size_of::<Dims>()` バイトを即座に複製する（PoC-v2-4 `metal_gemm.rs`
     // と同じ呼び出し形）。`dims` はローカル変数でありポインタは本呼び出し
     // 中生存し、長さは `size_of::<Dims>()` と正確に一致する。
@@ -981,6 +1172,72 @@ fn encode_dispatch(
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
+/// `gemm_tiled_bias_act`（イシュー #605）用のパイプライン設定・バッファ
+/// 結線（index 0〜3）・`Dims`（index 4）・`has_bias`（index 5）・`act`
+/// （index 6）の `setBytes`・ディスパッチを行う。
+/// [`MetalGemm::run_tiled_bias_act_f32`] が [`MetalContext::dispatch_sync`]
+/// のクロージャから呼ぶ。threadgroup・grid 計算は `Tiled` variant と同一
+/// （16×16・`div_ceil(16)`。`gemm_tiled_bias_act` は `gemm_tiled` と同じ
+/// タイリング形状のため）。
+#[allow(clippy::too_many_arguments)]
+fn encode_dispatch_bias_act(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    a_buf: &MetalBuffer,
+    b_buf: &MetalBuffer,
+    bias_buf: &MetalBuffer,
+    c_buf: &MetalBuffer,
+    dims: Dims,
+    has_bias: i32,
+    act: i32,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: FFI 境界 1/2。`encode_dispatch` の同種コメントと同一の
+    // 契約（`a_buf`/`b_buf`/`bias_buf`/`c_buf` は `dispatch_sync` の同期
+    // 完了まで呼び出し元スタックフレームで生存する）。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(bias_buf.raw()), 0, 2);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 3);
+    }
+
+    // SAFETY: FFI 境界 2/2。`encode_dispatch` の同種コメントと同一の
+    // 契約（各ローカル変数は本呼び出し中生存し、型・バイト数は
+    // `shaders/gemm.metal::gemm_tiled_bias_act` の
+    // `constant Dims&`/`constant int&` 宣言と一致させている）。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&dims).cast(),
+            std::mem::size_of::<Dims>(),
+            4,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&has_bias).cast(),
+            std::mem::size_of::<i32>(),
+            5,
+        );
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&act).cast(),
+            std::mem::size_of::<i32>(),
+            6,
+        );
+    }
+
+    let threads_per_tg = MTLSize {
+        width: THREADGROUP_SIDE,
+        height: THREADGROUP_SIDE,
+        depth: 1,
+    };
+    let threadgroups = MTLSize {
+        width: (dims.n as usize).div_ceil(THREADGROUP_SIDE),
+        height: (dims.m as usize).div_ceil(THREADGROUP_SIDE),
         depth: 1,
     };
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
@@ -1294,6 +1551,67 @@ mod tests {
         ));
     }
 
+    // --- validate_bias_act_dims（pure・実機不要。イシュー #605） ---
+
+    #[test]
+    fn validate_bias_act_dims_accepts_valid_shape() {
+        let a = vec![0.0f32; 6]; // m=2, k=3
+        let b = vec![0.0f32; 12]; // k=3, n=4
+        let dims = validate_bias_act_dims(a.len(), b.len(), 2, 4, 3).unwrap();
+        assert_eq!((dims.m, dims.n, dims.k), (2, 4, 3));
+    }
+
+    #[test]
+    fn validate_bias_act_dims_accepts_zero_m_n_k_unlike_validate_dims() {
+        // `run_tiled_bias_act_f32` は m/n/k==0 を縮退分岐として受理する契約
+        // であり、`validate_dims`（`ZeroDimension` で一律拒否）とは異なる。
+        // 長さ検証は `a_len == m*k`・`b_len == k*n` を要求するため（m/n/k
+        // のいずれかが 0 でも `a_len`／`b_len` は対応する非ゼロの積を渡す
+        // 必要がある。Cursor Bugbot 指摘・PR #717 レビュースレッド:
+        // 旧テストは 3 ケース全てで a_len=0, b_len=0 を渡しており、
+        // (m=0,n=4,k=3) は kn=12 との不一致で `BLenMismatch`、
+        // (m=2,n=0,k=3) は mk=6 との不一致で `ALenMismatch` を返し、
+        // 意図した成功ケースになっていなかった。k=0 のケースのみ
+        // mk=kn=0 になり元のまま成功する）。
+        assert!(validate_bias_act_dims(0, 12, 0, 4, 3).is_ok());
+        assert!(validate_bias_act_dims(6, 0, 2, 0, 3).is_ok());
+        assert!(validate_bias_act_dims(0, 0, 2, 4, 0).is_ok());
+    }
+
+    #[test]
+    fn validate_bias_act_dims_rejects_a_len_mismatch() {
+        let err = validate_bias_act_dims(5, 12, 2, 4, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::ALenMismatch {
+                expected: 6,
+                actual: 5
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_bias_act_dims_rejects_b_len_mismatch() {
+        let err = validate_bias_act_dims(6, 11, 2, 4, 3).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::BLenMismatch {
+                expected: 12,
+                actual: 11
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_bias_act_dims_rejects_dimension_exceeding_u32() {
+        let over_u32 = u32::MAX as usize + 1;
+        let err = validate_bias_act_dims(0, 0, over_u32, 1, 1).unwrap_err();
+        assert!(matches!(
+            err,
+            MetalError::DimensionExceedsU32 { m, n: 1, k: 1 } if m == over_u32
+        ));
+    }
+
     // --- GemmVariant ---
 
     #[test]
@@ -1325,6 +1643,60 @@ mod tests {
     /// ループ刻み幅として実在することを contains 検査でロックし、値の乖離を
     /// 検出可能にする（`crates/backend-metal/tests/shader_source_evidence.rs`
     /// と同じ静的検査方式。Linux CI で GPU 実機不要）。
+    // --- run_tiled_bias_act_f32 融合カーネル起動カウンタ（イシュー #605。
+    //     Metal 実機依存。`BIAS_ACT_FUSED_LAUNCH_COUNT` は `pub(crate)`
+    //     のため、クレート境界外の `tests/` からは参照できない
+    //     〈`resolve_tile_config` ドキュメンテーションコメントが記録する
+    //     codex-review 是正と同じ理由で `#[doc(hidden)] pub` 化を避ける〉。
+    //     「フォールバック非経由」の確認は本クレート内テストに閉じる）。
+
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn run_tiled_bias_act_f32_increments_fused_launch_counter() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let a = vec![1.0f32; 4 * 4];
+        let b = vec![1.0f32; 4 * 4];
+        let bias = vec![0.0f32; 4];
+
+        let before = BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.get());
+        gemm.run_tiled_bias_act_f32(&ctx, &a, &b, Some(&bias), true, 4, 4, 4)
+            .expect("run_tiled_bias_act_f32 must succeed on Metal-equipped test runner");
+        let after = BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.get());
+
+        assert_eq!(
+            after,
+            before + 1,
+            "bias=[n] は融合カーネルへ進み BIAS_ACT_FUSED_LAUNCH_COUNT を \
+             1 増加させる契約"
+        );
+    }
+
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+        let bias = vec![0.0f32; 4];
+
+        let before = BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.get());
+        let out = gemm
+            .run_tiled_bias_act_f32(&ctx, &[], &[], Some(&bias), false, 3, 4, 0)
+            .expect("run_tiled_bias_act_f32 (k=0) must succeed without touching the GPU");
+        let after = BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.get());
+
+        assert_eq!(out, vec![0.0f32; 3 * 4]);
+        assert_eq!(
+            after, before,
+            "k=0 はホスト側 epilogue のみで完結し GPU 起動を回避する契約 \
+             （BIAS_ACT_FUSED_LAUNCH_COUNT は増加しない）"
+        );
+    }
+
     #[test]
     fn simdgroup_f16_epilogue_stride_matches_threadgroup_width_constant() {
         let expected_stride = format!("i += {SIMDGROUP_THREADGROUP_WIDTH}u");
