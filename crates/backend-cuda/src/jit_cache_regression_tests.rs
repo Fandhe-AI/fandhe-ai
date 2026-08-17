@@ -894,3 +894,266 @@ fn stale_tmp_dirs_do_not_break_store_or_load() {
     let _ = fs::remove_dir_all(&stale_tmp);
     let _ = fs::remove_dir_all(&root);
 }
+
+// ============================================================================
+// PR #703 codex-review P0 回帰テスト（イシュー #511）
+//
+// 1. `runtime_workspace_root` の境界解決を cwd 直接採用からマーカー探索
+//    （`.git`／`[workspace]` Cargo.toml）へ変更した契約の回帰確認
+//    （`find_workspace_root_from`）。
+// 2. `load_cache_entry_at` のキャッシュエントリ権限検査（group／other
+//    書き込み可能なエントリはミス扱いにする）の回帰確認
+//    （`is_cache_entry_permission_untrusted`・`load_cache_entry_in` 経由）。
+// ============================================================================
+
+/// `.git` ディレクトリを持つ祖先が境界として検出されること。
+#[test]
+fn find_workspace_root_from_detects_git_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("workspace-root-git");
+    // 環境の umask（例 `002`）に依存せず group 書き込みビットを持たない
+    // ことを保証する（イシュー #511 PR #703 codex-review P0 再指摘対応で
+    // `has_workspace_root_marker` が group 書き込みビットも拒否条件に
+    // 含めるようになったため、`fs::create_dir_all` の既定モードが umask
+    // `002` 環境で `0o775` になり誤ってミス扱いされるのを防ぐ）。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("must pin workspace root dir permissions to non-group-writable");
+    fs::create_dir_all(root.join(".git")).expect("must create .git marker dir");
+    let nested = root.join("crates").join("backend-cuda").join("src");
+    fs::create_dir_all(&nested).expect("must create nested descendant dir");
+
+    let found = find_workspace_root_from(&nested)
+        .expect("must find the .git-marked ancestor from a nested descendant");
+    assert_eq!(
+        found.canonicalize().expect("root must canonicalize"),
+        root.canonicalize().expect("root must canonicalize")
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// `[workspace]` を持つ `Cargo.toml` の祖先が境界として検出されること。
+#[test]
+fn find_workspace_root_from_detects_workspace_cargo_toml_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("workspace-root-cargo-toml");
+    // 環境の umask（例 `002`）に依存せず group 書き込みビットを持たない
+    // ことを保証する（上記 `find_workspace_root_from_detects_git_ancestor`
+    // と同じ理由。イシュー #511 PR #703 codex-review P0 再指摘対応）。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o755))
+        .expect("must pin workspace root dir permissions to non-group-writable");
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"crates/*\"]\n",
+    )
+    .expect("must write workspace Cargo.toml marker");
+    let nested = root.join("crates").join("backend-cuda");
+    fs::create_dir_all(&nested).expect("must create nested descendant dir");
+
+    let found = find_workspace_root_from(&nested)
+        .expect("must find the [workspace] Cargo.toml ancestor from a nested descendant");
+    assert_eq!(
+        found.canonicalize().expect("root must canonicalize"),
+        root.canonicalize().expect("root must canonicalize")
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// マーカーのない `Cargo.toml`（`[package]` のみ・workspace メンバー側の
+/// クレート単体を模したもの）は境界として検出されないこと（メンバー
+/// クレート自身を誤って workspace 境界と判定しないことの確認）。
+#[test]
+fn find_workspace_root_from_ignores_non_workspace_cargo_toml() {
+    let root = fresh_temp_dir("workspace-root-member-only");
+    fs::write(root.join("Cargo.toml"), "[package]\nname = \"member\"\n")
+        .expect("must write non-workspace Cargo.toml");
+
+    assert!(
+        !has_workspace_root_marker(&root),
+        "a [package]-only Cargo.toml must not be treated as a workspace boundary marker"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// group／other 書き込み可能なディレクトリに置かれた `.git` は境界
+/// マーカーとして信頼されないこと（Cursor Bugbot 指摘〈Forgeable
+/// workspace root markers〉対応の回帰確認: `/tmp` 等の共有祖先ディレクトリ
+/// 配下に攻撃者が `.git` を仕込むだけで `workspace_root` を偽造できない
+/// ことを検証する。所有 uid が異なるケースはテスト環境で別 uid の
+/// プロセスを起動できないため権限ビットのみで検証するが、
+/// `has_workspace_root_marker` は mode・uid いずれか一方でも信頼できない
+/// 場合に拒否する実装のため、mode 側の検証だけでも「両方満たす場合のみ
+/// 信頼する」契約の主要部分をカバーする）。
+#[test]
+fn has_workspace_root_marker_rejects_world_writable_git_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("workspace-root-forged-git");
+    fs::create_dir_all(root.join(".git")).expect("must create .git marker dir");
+    // 攻撃シナリオの模擬: 通常このディレクトリを所有するユーザー以外も
+    // 書き込める共有ディレクトリ（例: `/tmp` 直下）を想定し、`root`
+    // 自体を other 書き込み可能（`0o707`）へ緩める。中身（`.git`）は
+    // 変更しない。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o707))
+        .expect("must relax workspace root dir permissions to other-writable");
+
+    assert!(
+        !has_workspace_root_marker(&root),
+        "a world-writable ancestor must not be trusted as a workspace root marker \
+         even if it contains a .git directory"
+    );
+
+    // 権限を戻してからでないと `remove_dir_all` の後始末で権限起因の
+    // 失敗が起きうる環境があるため、テスト終了前に元へ戻す。
+    let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o755));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// group 書き込み可能なディレクトリに置かれた `.git` は境界マーカーと
+/// して信頼されないこと（イシュー #511 PR #703 codex-review P0 再指摘
+/// 〈group-writable ancestor を workspace root として信頼している〉への
+/// 回帰確認）。旧実装は other 書き込みビット〈`0o002`〉のみを拒否条件と
+/// し、group 書き込みビット〈`0o020`〉を意図的に許容していたため、
+/// 同一グループの別 uid のユーザーが `.git`／`[workspace]` Cargo.toml を
+/// 仕込んで `workspace_root` を偽装できた。所有 uid が異なるケースは
+/// テスト環境で別 uid のプロセスを起動できないため権限ビットのみで
+/// 検証する（上記 `has_workspace_root_marker_rejects_world_writable_git_ancestor`
+/// と同じ理由）。
+#[test]
+fn has_workspace_root_marker_rejects_group_writable_git_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("workspace-root-group-writable-git");
+    fs::create_dir_all(root.join(".git")).expect("must create .git marker dir");
+    // 攻撃シナリオの模擬: group 共有ワークツリー（umask `002` 環境の
+    // `git init` 等で生じる `0o775`）を想定し、`root` 自体を group
+    // 書き込み可能（`0o770`。other 書き込みビットは立てない）へ緩める。
+    // 中身（`.git`）は変更しない。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o770))
+        .expect("must relax workspace root dir permissions to group-writable");
+
+    assert!(
+        !has_workspace_root_marker(&root),
+        "a group-writable ancestor must not be trusted as a workspace root marker \
+         even if it contains a .git directory"
+    );
+
+    // 権限を戻してからでないと `remove_dir_all` の後始末で権限起因の
+    // 失敗が起きうる環境があるため、テスト終了前に元へ戻す。
+    let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o755));
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// マーカーがどの祖先にも存在しない場合は `None`（呼び出し元
+/// `runtime_workspace_root` は `Err` へ変換し、ディスクキャッシュなし
+/// 運転へ縮退する。境界不明を許容側で埋めない契約の回帰確認。イシュー
+/// #511 PR #703 codex-review P0 指摘: 旧実装は cwd をそのまま境界として
+/// 受理しており、この「不明なら拒否」という契約自体を持たなかった）。
+#[test]
+fn find_workspace_root_from_returns_none_without_any_marker() {
+    // マーカーを一切置かない孤立した一時ディレクトリ木。祖先を root まで
+    // 辿っても `.git`／`[workspace]` Cargo.toml のいずれにも遭遇しない
+    // 前提（テスト環境の一時ディレクトリ配下にこれらが存在しないこと。
+    // 既存の `resolve_cache_root` 系テストと同じ `std::env::temp_dir()`
+    // 配下を使う前提を踏襲する）。
+    let root = fresh_temp_dir("workspace-root-none");
+    let nested = root.join("a").join("b").join("c");
+    fs::create_dir_all(&nested).expect("must create nested descendant dir");
+
+    assert!(
+        find_workspace_root_from(&nested).is_none(),
+        "an isolated temp dir tree with no .git/[workspace] marker must resolve to None, \
+         not silently fall back to an unverified boundary"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// group 書き込み可能な `kernel.ptx` を持つ既存エントリは、`kernel.cu`
+/// が要求元ソースと一致していてもミス扱い（`Ok(None)`）になり、NVRTC
+/// 再コンパイルへフォールバックすること（PR #703 codex-review P0 指摘の
+/// 再現条件: `kernel.cu` を維持したまま `kernel.ptx` だけを書き換える
+/// 攻撃シナリオに対する権限ベースの防御を検証する）。
+#[test]
+fn load_cache_entry_rejects_group_writable_ptx_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("c10-ptx-group-writable");
+    let key = sample_key();
+    let src = sample_source();
+    store_cache_entry_in(&root, &key, &src, "authentic-ptx-body")
+        .expect("initial store must succeed");
+
+    let entry_dir = root.join(
+        key.cache_entry_dir_name()
+            .expect("cache_entry_dir_name must succeed for a valid key"),
+    );
+    let ptx_path = entry_dir.join(CACHE_ENTRY_PTX_FILE);
+    // 攻撃シナリオの模擬: `kernel.cu` はそのまま、`kernel.ptx` のみ
+    // group 書き込み可能（`0o660`。owner rw + group rw）へ権限を緩める。
+    // ファイル内容自体は変更しない（内容の改竄検出ではなく権限境界の
+    // 検証が目的のため）。
+    fs::set_permissions(&ptx_path, fs::Permissions::from_mode(0o660))
+        .expect("must relax kernel.ptx permissions to group-writable");
+
+    let loaded = load_cache_entry_in(&root, &key, &src).expect("load call itself must not error");
+    assert!(
+        loaded.is_none(),
+        "a group-writable kernel.ptx must be treated as untrusted (miss), even when \
+         kernel.cu still matches the expected source byte-for-byte"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// other 書き込み可能なエントリディレクトリ自体もミス扱いになること
+/// （ファイル個別の権限だけでなく、エントリディレクトリの権限も検査
+/// 対象であることの確認）。
+#[test]
+fn load_cache_entry_rejects_other_writable_entry_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("c10-dir-other-writable");
+    let key = sample_key();
+    let src = sample_source();
+    store_cache_entry_in(&root, &key, &src, "authentic-ptx-body")
+        .expect("initial store must succeed");
+
+    let entry_dir = root.join(
+        key.cache_entry_dir_name()
+            .expect("cache_entry_dir_name must succeed for a valid key"),
+    );
+    fs::set_permissions(&entry_dir, fs::Permissions::from_mode(0o707))
+        .expect("must relax entry dir permissions to other-writable");
+
+    let loaded = load_cache_entry_in(&root, &key, &src).expect("load call itself must not error");
+    assert!(
+        loaded.is_none(),
+        "an other-writable entry directory must be treated as untrusted (miss)"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// 通常の権限（store 直後のデフォルト）ではこの新しい権限検査によって
+/// 正当なヒットが壊れないことの回帰確認（他の roundtrip 系テストと
+/// 独立に、権限検査追加そのものが既存の正常系を壊さないことを明示する）。
+#[test]
+fn load_cache_entry_accepts_default_permissions_from_store() {
+    let root = fresh_temp_dir("c10-default-permissions-ok");
+    let key = sample_key();
+    let src = sample_source();
+    store_cache_entry_in(&root, &key, &src, "authentic-ptx-body")
+        .expect("initial store must succeed");
+
+    let loaded = load_cache_entry_in(&root, &key, &src)
+        .expect("load call itself must not error")
+        .expect("default store-created permissions must remain trusted (hit)");
+    assert_eq!(loaded.kernel_ptx, "authentic-ptx-body");
+
+    let _ = fs::remove_dir_all(&root);
+}
