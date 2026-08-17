@@ -1152,31 +1152,85 @@ pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
     )
 }
 
+/// `dir` 自体が「リポジトリツリーの境界」を示すマーカーを持つかを判定
+/// する（[`find_workspace_root_from`] 用の純関数。fs 読み取りのみで
+/// 副作用なし）。
+///
+/// マーカーは 2 種類: (1) `.git`（通常の checkout ではディレクトリ、
+/// worktree・submodule では `gitdir: ...` を指すファイルのいずれも
+/// `Path::exists` で検出できるため種別を問わない）、(2) ルート
+/// `Cargo.toml` に `[workspace]` セクションがあること（cargo workspace
+/// の境界。TOML パーサを新規導入せず行単位の文字列一致で十分: 本判定は
+/// 「このディレクトリが境界か」を粗く判定する目的で、誤検知の帰結は
+/// 「ディスクキャッシュが効かない」で fail-safe に収まるため厳密な TOML
+/// パースは過剰）。
+fn has_workspace_root_marker(dir: &Path) -> bool {
+    if dir.join(".git").exists() {
+        return true;
+    }
+    match fs::read_to_string(dir.join("Cargo.toml")) {
+        Ok(contents) => contents.lines().any(|line| line.trim() == "[workspace]"),
+        Err(_) => false,
+    }
+}
+
+/// `start` から祖先方向へ [`has_workspace_root_marker`] を満たす最初の
+/// ディレクトリを探す（[`runtime_workspace_root`] の中核。イシュー #511
+/// PR #703 codex-review P0 指摘への対応。テスト容易性のため純関数として
+/// 分離: `start` を注入することでプロセス実 cwd に依存せず一時ディレクトリ
+/// ツリーで決定的にテストできる。`resolve_cache_root` が実環境変数読み取り
+/// を薄いラッパーへ追い出す設計〈本ファイル冒頭 doc〉と同じパターン）。
+///
+/// マーカーが 1 つも見つからないまま `Path::parent()` が `None` になる
+/// （ファイルシステムルートに到達）まで祖先を辿った場合は `None` を返す。
+fn find_workspace_root_from(start: &Path) -> Option<PathBuf> {
+    let mut current = Some(start);
+    while let Some(dir) = current {
+        if has_workspace_root_marker(dir) {
+            return Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 /// [`cache_root`]／[`cache_entry_path`] へ渡す `workspace_root` を実行時に
 /// 確定する C-4（#511）の結線用ヘルパー。
 ///
-/// 本関数直上のドキュメンテーションコメントは「プロセスのカレント
-/// ディレクトリは『リポジトリツリーの境界』ではないため使わない」と
-/// 注意している（`XDG_CACHE_HOME`／`HOME` 未設定時、カレントディレクトリが
-/// たまたまホーム配下だと正当な `~/.cache/...` フォールバックが誤って
-/// 拒否されるため）。本関数はこの懸念を承知のうえで
-/// `std::env::current_dir()`（取得成功時は `canonicalize` を試みる）を
-/// 採用する。理由は、C-4 の呼び出し元（[`crate::kernels_mma::
-/// RenderedMmaKernel::compile`]）が本関数の失敗（および後続の
-/// [`store_cache_entry`]／[`load_cache_entry`] の失敗）を**コンパイル失敗
-/// にせず「ディスクキャッシュなしの縮退運転」へ落とす** fail-safe 方針を
-/// 採るため（`RenderedMmaKernel::compile` ドキュメンテーションコメント
-/// 参照）。上記の誤拒否が起きても帰結は「ディスクキャッシュが効かない」
-/// だけであり、NVRTC 直コンパイル＋プロセス内 LRU（`module_cache.rs`）
-/// のみで機能・数値経路は正しく続行する。ビルド時定数（`CARGO_MANIFEST_DIR`
-/// 等）のハードコードは実行環境が変わると素通りする既知の問題
-/// （`cache_root` ドキュメンテーションコメント「PR #659 codex-review P0
-/// 再指摘」参照）を再導入しないため避け、実行時に確定する境界としてこれを
-/// 採用した（実装計画 §3.5）。
+/// **プロセスのカレントディレクトリをそのまま境界として使わない
+/// （イシュー #511 PR #703 codex-review P0 指摘への対応。設計変更）**:
+/// 旧実装は「`current_dir()` は『リポジトリツリーの境界』ではない」という
+/// 懸念を doc に明記したうえで、それでも `current_dir()` をそのまま
+/// `workspace_root` として採用していた。この doc の fail-safe 論拠
+/// （「本関数の失敗は縮退運転へ落ちるだけで安全」）は**誤って境界解決に
+/// 失敗する方向**（false reject）のみを正当化しており、**誤って広すぎる
+/// 境界を受理する方向**（false accept）を検証していなかった。実際、
+/// プロセスの cwd をリポジトリツリー外に設定したまま
+/// `RUST_AI_CUDA_CACHE_DIR` にリポジトリツリー内の絶対パスを指定すると、
+/// `resolve_cache_root` の containment 検証は「cwd（=誤った境界）の配下
+/// でないこと」しか確認できず、本来拒否すべき「リポジトリツリー内への
+/// キャッシュ書き込み」を通過させてしまっていた（PR #703 codex-review
+/// 指摘の再現条件そのもの）。
+///
+/// 本関数はこの反省を踏まえ、cwd を境界そのものとして使うのではなく
+/// **cwd から祖先方向へ実際の境界マーカー（`.git` または `[workspace]`
+/// を持つ `Cargo.toml`）を探索**する（[`find_workspace_root_from`]）。
+/// cwd がリポジトリツリー外にある限り、探索はマーカーに到達できず
+/// `None` になり、本関数は `Err` を返す（許容側へフォールバックしない）。
+/// これにより「境界を解決できないなら縮退運転（ディスクキャッシュなし）
+/// へ倒す。誤った境界を許容側で埋めない」という契約を境界解決自体にも
+/// 一貫させる（呼び出し元 [`crate::kernels_mma::RenderedMmaKernel::compile`]
+/// は本関数の `Err` を受けて `.ok()` でディスクキャッシュなし運転へ縮退
+/// する。プロセス内 LRU・NVRTC 直コンパイル経路は影響を受けない）。
+///
+/// マーカー探索が成功した場合、cwd がリポジトリの深いサブディレクトリ
+/// であっても実際のリポジトリルートを返す点で、旧実装（cwd をそのまま
+/// 返す）より正確でもある。
 ///
 /// `current_dir()` 自体が失敗した場合（プロセスの作業ディレクトリが削除
-/// された等）は `CudaError::CacheDirUnavailable` を返し、呼び出し元は
-/// 同じ fail-safe 方針でディスクキャッシュなし運転へ縮退する。
+/// された等）・マーカーが見つからなかった場合のいずれも
+/// `CudaError::CacheDirUnavailable` を返し、呼び出し元は同じ fail-safe
+/// 方針でディスクキャッシュなし運転へ縮退する。
 pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
     let cwd = std::env::current_dir().map_err(|e| CudaError::CacheDirUnavailable {
         detail: format!("failed to resolve current_dir() for cache workspace_root: {e}"),
@@ -1188,7 +1242,15 @@ pub(crate) fn runtime_workspace_root() -> Result<PathBuf, CudaError> {
     // 絶対パスであれば通過するため機能上問題ない。字句正規化のみを行う
     // `path_lexically_within` はシンボリックリンク非対応である点は
     // `resolve_cache_root` ドキュメンテーションコメントの既存の限界と同じ）。
-    Ok(cwd.canonicalize().unwrap_or(cwd))
+    let canonical_cwd = cwd.canonicalize().unwrap_or(cwd);
+    find_workspace_root_from(&canonical_cwd).ok_or_else(|| CudaError::CacheDirUnavailable {
+        detail: format!(
+            "could not locate a workspace root (an ancestor with .git or a \
+             [workspace] Cargo.toml) starting from {canonical_cwd:?}; disk \
+             cache falls back to disabled rather than trusting an unverified \
+             boundary"
+        ),
+    })
 }
 
 /// `root` と [`CudaKernelCacheKey::cache_entry_dir_name`] を合成し、
@@ -2073,8 +2135,21 @@ fn temp_entry_dir_name(final_entry_name: &str) -> String {
 fn create_subdir_pinned(parent: &fs::File, name: &str) -> std::io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {
+        // `DirBuilder::mode(0o700)` を明示する（イシュー #511 PR #703
+        // codex-review P0 指摘対応。[`is_cache_entry_permission_untrusted`]
+        // ドキュメンテーションコメント参照）: `fs::create_dir` の既定
+        // モード（`0o777` をプロセス umask でマスクした結果）は umask
+        // 002（グループ共有ワークツリーで一般的）では `0o775`（group
+        // 書き込み可能）になり、キャッシュエントリを「同一 uid のみ
+        // 書き込み可能」に保つという新設の権限検査の前提が umask 設定
+        // 次第で崩れていた。`mode(0o700)` は umask による減算（`AND`）
+        // のみを受けるため、どの umask でも結果は `0o700` の部分集合に
+        // 収まる（umask は許可ビットを追加できない）。macOS 版
+        // （下記 `mkdirat_raw(parent, name)`）は元から固定 `0o700` を
+        // 明示済みのため対称になる。
+        use std::os::unix::fs::DirBuilderExt;
         let child_path = proc_fd_path(parent).join(name);
-        fs::create_dir(&child_path)?;
+        fs::DirBuilder::new().mode(0o700).create(&child_path)?;
         open_dir_nofollow(&child_path)
     }
     #[cfg(not(target_os = "linux"))]
@@ -2100,11 +2175,19 @@ fn create_subdir_pinned(parent: &fs::File, name: &str) -> std::io::Result<fs::Fi
 fn create_file_pinned(parent: &fs::File, name: &str) -> std::io::Result<fs::File> {
     #[cfg(target_os = "linux")]
     {
+        // `.mode(0o600)` を明示する（イシュー #511 PR #703 codex-review
+        // P0 指摘対応。[`create_subdir_pinned`] Linux 版と同じ理由:
+        // `OpenOptions::create_new` の既定モード `0o666` はプロセス
+        // umask 次第で group／other 書き込みビットが残り得るため、umask
+        // に依存せず常に `0o600` の部分集合になる明示指定へ変更する。
+        // macOS 版 [`create_file_pinned_at`] は元から固定 `0o600` を
+        // 明示済みのため対称になる）。
         use std::os::unix::fs::OpenOptionsExt;
         let path = proc_fd_path(parent).join(name);
         fs::OpenOptions::new()
             .write(true)
             .create_new(true)
+            .mode(0o600)
             .custom_flags(O_NOFOLLOW | O_NONBLOCK)
             .open(&path)
     }
@@ -3303,6 +3386,23 @@ fn load_cache_entry_in(
     load_cache_entry_at(&root_fd, key, expected_src)
 }
 
+/// `handle`（ディレクトリ・通常ファイルいずれの fd でもよい）が group／
+/// other 書き込み可能（`mode & 0o022 != 0`）かを判定する（イシュー #511
+/// PR #703 codex-review P0 指摘対応。[`load_cache_entry_at`] のトラスト
+/// 境界ドキュメンテーションコメント参照）。
+///
+/// `fstat`（`File::metadata` が fd 経由で呼ぶ。パス再解決を伴わないため
+/// 本関数呼び出し元が pin 済みの fd で防いでいる TOCTOU を再導入しない）
+/// が失敗した場合も安全側（`true`＝信頼しない）に倒す。
+#[cfg(unix)]
+fn is_cache_entry_permission_untrusted(handle: &fs::File) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match handle.metadata() {
+        Ok(meta) => meta.mode() & 0o022 != 0,
+        Err(_) => true,
+    }
+}
+
 /// [`load_cache_entry_in`]（Unix 版）が pin 済みの `root_fd` を渡して呼ぶ、
 /// fd 相対操作のみで完結する実処理本体（[`store_cache_entry_at`] と対称。
 /// イシュー #509 PR #677 codex-review P0 再指摘対応）。
@@ -3321,15 +3421,40 @@ fn load_cache_entry_at(
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
+    // トラスト境界の宣言（イシュー #511 PR #703 codex-review P0 指摘
+    // 対応）: `kernel_cu` はこの下でソース全文をバイト照合するが、
+    // `kernel_ptx` はそれと不可分に認証する手段を持たない（`half`／
+    // `serde` 等の許容依存 8 区分〈deps-policy.md〉に暗号ハッシュ用
+    // クレートは含まれず、新規追加はユーザー承認が要るため本 PR の
+    // スコープでは導入しない）。同一ディレクトリに置いた非暗号
+    // ダイジェストは「ファイルを書き換えられる主体はダイジェストも
+    // 書き換えられる」ため認証にならない。よって本関数が実際に採用する
+    // 防御は「**このプロセスと同一 uid のみが書き込めるエントリだけを
+    // 信頼する**」という OS のファイル権限に基づく境界とする:
+    // エントリディレクトリ・`kernel.cu`・`kernel.ptx` のいずれかが
+    // group／other 書き込み可能（`mode & 0o022 != 0`）であれば、異なる
+    // uid のプロセスが書き換え得るためミス扱い（`Ok(None)`）で
+    // NVRTC 再コンパイルへフォールバックする。同一 uid の別プロセスに
+    // よる改竄はこの境界の外（`~/.cargo`・`target/` 等と同じ既存の信頼
+    // 前提であり、本キャッシュ固有の新規脅威ではない）。
+    if is_cache_entry_permission_untrusted(&dir) {
+        return Ok(None);
+    }
 
     let cu_file = match open_file_child_nofollow(&dir, CACHE_ENTRY_SOURCE_FILE) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
+    if is_cache_entry_permission_untrusted(&cu_file) {
+        return Ok(None);
+    }
     let ptx_file = match open_file_child_nofollow(&dir, CACHE_ENTRY_PTX_FILE) {
         Ok(f) => f,
         Err(_) => return Ok(None),
     };
+    if is_cache_entry_permission_untrusted(&ptx_file) {
+        return Ok(None);
+    }
 
     let kernel_cu =
         match read_verified_cache_entry_file(cu_file).map_err(|e| CudaError::CacheIo {
