@@ -995,35 +995,57 @@ mod tests {
             (600, 700, 300),
             (512, 256, 128),
         ];
+        // 検証対象の BlockSizes 候補（レビュー指摘 #564: 既定値のみでは
+        // `gemm_blis_with_kernel_and_blocks`／`gemm_blis_parallel_with_blocks`
+        // が新規に開放した非既定 blocks 経路の upper bound 不変条件を
+        // 検証できない）。既定値・MC/KC/NC 境界を跨ぐ小さめの値・firestorm
+        // 参照値近傍（実機スイープ候補として想定される大きめの値）を含める。
+        // この不変条件が破れた場合の失敗モードは `gemm_blis_region` 内での
+        // スライスインデックスパニックであり、境界を跨ぐ値でこそ検知できる。
+        let blocks_candidates: [BlockSizes; 3] = [
+            default_blocks(),
+            BlockSizes {
+                mc: 16,
+                kc: 17,
+                nc: 19,
+            },
+            BlockSizes {
+                mc: 480,
+                kc: 4096,
+                nc: 9600,
+            },
+        ];
 
-        let blocks = default_blocks();
-        for &(mr, nr) in &KERNEL_DIMS {
-            for &(n, k_dim, mc_total) in &SHAPES {
-                let (b_cap, a_cap) = panel_capacity(n, k_dim, mc_total, mr, nr, blocks);
+        for &blocks in &blocks_candidates {
+            for &(mr, nr) in &KERNEL_DIMS {
+                for &(n, k_dim, mc_total) in &SHAPES {
+                    let (b_cap, a_cap) = panel_capacity(n, k_dim, mc_total, mr, nr, blocks);
 
-                for jc in (0..n).step_by(blocks.nc) {
-                    let nc_len = blocks.nc.min(n - jc);
-                    for pc in (0..k_dim).step_by(blocks.kc) {
-                        let kc_len = blocks.kc.min(k_dim - pc);
-                        let nr_blocks = nc_len.div_ceil(nr);
-                        let b_needed = nr_blocks * kc_len * nr;
-                        assert!(
-                            b_needed <= b_cap,
-                            "B 容量不足: mr={mr},nr={nr},n={n},k={k_dim},mc_total={mc_total},\
-                             jc={jc},pc={pc}: needed={b_needed} > cap={b_cap}"
-                        );
-
-                        let mut ic = 0;
-                        while ic < mc_total {
-                            let mc_len = blocks.mc.min(mc_total - ic);
-                            let mr_blocks = mc_len.div_ceil(mr);
-                            let a_needed = mr_blocks * kc_len * mr;
+                    for jc in (0..n).step_by(blocks.nc) {
+                        let nc_len = blocks.nc.min(n - jc);
+                        for pc in (0..k_dim).step_by(blocks.kc) {
+                            let kc_len = blocks.kc.min(k_dim - pc);
+                            let nr_blocks = nc_len.div_ceil(nr);
+                            let b_needed = nr_blocks * kc_len * nr;
                             assert!(
-                                a_needed <= a_cap,
-                                "A 容量不足: mr={mr},nr={nr},n={n},k={k_dim},mc_total={mc_total},\
-                                 jc={jc},pc={pc},ic={ic}: needed={a_needed} > cap={a_cap}"
+                                b_needed <= b_cap,
+                                "B 容量不足: blocks={blocks:?},mr={mr},nr={nr},n={n},k={k_dim},\
+                                 mc_total={mc_total},jc={jc},pc={pc}: needed={b_needed} > cap={b_cap}"
                             );
-                            ic += blocks.mc;
+
+                            let mut ic = 0;
+                            while ic < mc_total {
+                                let mc_len = blocks.mc.min(mc_total - ic);
+                                let mr_blocks = mc_len.div_ceil(mr);
+                                let a_needed = mr_blocks * kc_len * mr;
+                                assert!(
+                                    a_needed <= a_cap,
+                                    "A 容量不足: blocks={blocks:?},mr={mr},nr={nr},n={n},k={k_dim},\
+                                     mc_total={mc_total},jc={jc},pc={pc},ic={ic}: \
+                                     needed={a_needed} > cap={a_cap}"
+                                );
+                                ic += blocks.mc;
+                            }
                         }
                     }
                 }
