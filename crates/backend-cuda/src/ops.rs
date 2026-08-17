@@ -135,6 +135,31 @@ pub(crate) enum GemmBiasActRoute {
     ComposedFallback,
 }
 
+/// [`CudaRmsNorm::new`] の初期化失敗を `BackendError` へ変換する（純関数。
+/// 実機なしで単体テスト可能）。
+///
+/// `CudaError::DriverUnavailable`／`NvrtcUnavailable` のみを環境不在
+/// （`BackendError::CudaUnavailable`。CUDA/NVRTC 非搭載環境での早期
+/// フォールバックを想定した variant）として扱う。それ以外
+/// （NVRTC コンパイルエラー・関数ロード失敗・デバイス属性負値検出の
+/// `InvalidKernelDescriptor` 等）を一律 `CudaUnavailable` に丸めると、
+/// CUDA/NVRTC が利用可能な環境でもカーネル実装側の回帰が「環境不在」に
+/// 化けて握りつぶされる（`tests/rmsnorm_parity.rs` の env-adaptive
+/// スモークテストは `CudaUnavailable` を無条件に成功扱いするため。
+/// codex-review 指摘・PR #706 レビュー）。よって環境不在の既知 variant
+/// 以外は `BackendError::KernelLaunchFailed` として実装回帰を検出できる
+/// ようにする（`memory.rs::map_cuda_error` と同じ variant 分岐方針。
+/// `#[non_exhaustive]` の `CudaError` に対する将来 variant 追加への
+/// フォールバックとして `KernelLaunchFailed` を wildcard の受け皿とする
+/// 点も揃える）。
+fn map_rmsnorm_init_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::DriverUnavailable { detail } => BackendError::CudaUnavailable(detail),
+        CudaError::NvrtcUnavailable { detail } => BackendError::CudaUnavailable(detail),
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
+}
+
 /// [`GemmBiasActRoute`] の選択ロジック（純関数。実機なしで単体テスト可能。
 /// 本ファイル末尾 `#[cfg(test)]` 参照）。
 ///
@@ -386,8 +411,7 @@ impl BackendOps for CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let rmsnorm = CudaRmsNorm::new(&device)
-            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        let rmsnorm = CudaRmsNorm::new(&device).map_err(map_rmsnorm_init_error)?;
         let out = rmsnorm
             .run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden)
             .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -416,6 +440,41 @@ impl BackendOps for CudaBackendOps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`map_rmsnorm_init_error`]: `DriverUnavailable`／`NvrtcUnavailable`
+    /// は環境不在として `BackendError::CudaUnavailable` へ変換される
+    /// （env-adaptive スモークテストの早期 return 判定と揃う）。
+    #[test]
+    fn map_rmsnorm_init_error_treats_known_unavailable_variants_as_cuda_unavailable() {
+        assert!(matches!(
+            map_rmsnorm_init_error(CudaError::DriverUnavailable {
+                detail: "no libcuda".into()
+            }),
+            BackendError::CudaUnavailable(msg) if msg.contains("no libcuda")
+        ));
+        assert!(matches!(
+            map_rmsnorm_init_error(CudaError::NvrtcUnavailable {
+                detail: "no libnvrtc".into()
+            }),
+            BackendError::CudaUnavailable(msg) if msg.contains("no libnvrtc")
+        ));
+    }
+
+    /// [`map_rmsnorm_init_error`]: 環境不在以外の失敗（NVRTC コンパイル
+    /// エラー・デバイス属性負値検出等）は `BackendError::KernelLaunchFailed`
+    /// として実装回帰を検出できる状態を保つ（`CudaUnavailable` に丸めて
+    /// env-adaptive テストの早期 return に握りつぶされるのを防ぐ。
+    /// codex-review 指摘・PR #706 レビュー）。
+    #[test]
+    fn map_rmsnorm_init_error_treats_other_variants_as_kernel_launch_failed() {
+        let err = map_rmsnorm_init_error(CudaError::InvalidKernelDescriptor {
+            detail: "negative SM count".into(),
+        });
+        assert!(matches!(
+            err,
+            BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
+        ));
+    }
 
     #[test]
     fn gemm_bias_act_route_selects_fused_when_bias_is_none() {
