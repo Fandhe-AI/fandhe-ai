@@ -132,6 +132,20 @@ pub fn report_name(backend: &str) -> String {
     }
 }
 
+/// [`report_name`] の「Phase G 適用後（融合あり経路）」版ベンチ名。
+///
+/// イシュー #602（G-12）が Phase G（融合 RMSNorm・online softmax・
+/// `gemm_bias_act` epilogue 融合。親 #582）適用前後の相対改善を計測する
+/// ため、CUDA 実測経路（`crates/bench-harness/tests/transformer_workload.rs`）
+/// は同一ワークロード形状に対し [`report_name`]（改善前＝非融合経路）と
+/// 本関数（改善後＝融合経路）の 2 種類のベンチ名を使い分ける。単純に
+/// `"-fused"` サフィックスを付与するだけの薄いヘルパーだが、実測経路の
+/// 直書きを避け [`BENCH_NAME_PREFIX`] 変更への追従を保つ単一真実源として
+/// [`report_name`] と同じ理由で切り出す。
+pub fn report_name_fused(backend: &str) -> String {
+    format!("{}-fused", report_name(backend))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,5 +206,19 @@ mod tests {
     fn report_name_uses_shared_prefix() {
         assert_eq!(report_name("cpu"), "transformer-block-forward-cpu-blis");
         assert_eq!(report_name("cuda"), "transformer-block-forward-cuda");
+    }
+
+    /// #602（G-12）: 融合あり経路のベンチ名は非融合経路（[`report_name`]）に
+    /// `"-fused"` サフィックスを付与した値になる。
+    #[test]
+    fn report_name_fused_appends_suffix() {
+        assert_eq!(
+            report_name_fused("cuda"),
+            "transformer-block-forward-cuda-fused"
+        );
+        assert_eq!(
+            report_name_fused("cpu"),
+            "transformer-block-forward-cpu-blis-fused"
+        );
     }
 }
