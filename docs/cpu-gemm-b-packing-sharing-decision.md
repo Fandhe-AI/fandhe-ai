@@ -175,6 +175,22 @@ nr ブロック単位で `par_iter` 化することも可能）。pack 完了後
   むしろ**減る**方向（現行 NC=512/KC=256 では M=N=K=4096 で 8×16=128 回、firestorm 値
   NC=9600/KC=4096 なら 1 回）。A packing は元々 ic ブロックごとにタスクローカルで行われるため、
   この設計変更でも A 側の構造（`PanelBuffers::a_panel`）は変えずに済む
+- **融合 epilogue（bias/activation）との整合**: 現行の `gemm_blis_bias_act_parallel`
+  （`mod.rs:278-323`）は行パネルタスクごとに `dispatch_region` が全 jc/pc ループを走らせた
+  **直後に 1 回だけ** `apply_epilogue`（`mod.rs:336-`）を呼ぶ契約であり（`mod.rs:321`）、
+  1 つの C 行範囲に対して bias 加算・活性化関数を **ちょうど 1 回**適用することを前提にしている。
+  案 B は並列軸を「行パネルタスクが (jc,pc) を含む全域を担当」から「(jc,pc) ブロックごとに
+  ic 並列を挟む」構造へ変えるため、素朴に epilogue 呼び出しを jc／pc ループの内側（各
+  (jc,pc) ブロックの ic 並列直後）へ移すと、同じ C 行範囲に対して (n/NC)×(k_dim/KC) 回
+  epilogue が重複適用されてしまう（bias が複数回加算される、活性化関数が非線形なら結果自体が
+  変わる誤り）。案 B を bias/activation 融合カーネル（`gemm_blis_bias_act_parallel` 相当）へ
+  適用する場合は、**全 (jc,pc) ブロックの ic 並列が完了した後（最終 pc ブロック処理後）にのみ、
+  各 C 行範囲について 1 回だけ** `apply_epilogue` を呼ぶ構造を維持する必要がある。具体的には
+  (a) epilogue 呼び出しを (jc,pc) ループの外（現行と同じく行パネルタスク単位の後処理として）に
+  据え置き、jc/pc ループ側は純粋に GEMM 本体（B 共有 pack＋ic 並列）のみを担当する形に留めるか、
+  (b) (jc,pc) ループを共有 pack 構造に変えた上で最終ブロック判定（残り pc・jc が無いことの判定）
+  を明示的に行い、そのタイミングでのみ epilogue を適用するかのいずれかを実装タスク側で選択する。
+  bias-free の `gemm_blis_parallel`（epilogue 呼び出しなし）にはこの制約は生じない
 
 ### 案 C: `rayon::join` ネスト 2 階層
 
