@@ -136,7 +136,11 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" \
 cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
 
 # 4. 同一実機で PyTorch 参照値を再計測する（size ∈ {512, 1024, 2048, 4096} × {f32, f16}）
-python3 docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py <size> 20 20
+# `<size>` はプレースホルダーであり、そのまま貼り付けると POSIX shell が入力リダイレクトと
+# 誤解釈し `size: No such file or directory` で停止する。SIZE 変数へ実値を入れて渡すこと。
+for SIZE in 512 1024 2048 4096; do
+  python3 docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py "$SIZE" 20 20
+done
 
 # 5. env override を設定し cuda_floor_bench を 3 回反復実行する
 export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), <実施日>, 同一 GB10 個体"
