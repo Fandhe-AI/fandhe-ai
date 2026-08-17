@@ -81,18 +81,38 @@ use std::sync::OnceLock;
 /// （`.claude/rules/coding-rust.md`「本番経路で unwrap()/expect() を
 /// 使わない」）。
 ///
-/// `ldc < NR`・`(MR-1)*ldc+NR` のオーバーフロー・`c` の長さ不足のいずれか
-/// であれば panic する（呼び出し元契約違反〈呼び出し元バグ〉を早期検出
-/// する REQ-8 境界検査規約に基づく検証であり、実行時外部入力の検証では
-/// ない。各 ISA の `kernel`／`kernel_unchecked` 入口から呼ばれる）。
+/// `mr == 0`・`ldc < NR`・`(MR-1)*ldc+NR` のオーバーフロー・`c` の長さ
+/// 不足のいずれかであれば panic する（呼び出し元契約違反〈呼び出し元
+/// バグ〉を早期検出する REQ-8 境界検査規約に基づく検証であり、実行時
+/// 外部入力の検証ではない。各 ISA の `kernel`／`kernel_unchecked` 入口
+/// から呼ばれる）。
+///
+/// ## `mr > 0` の明示検査（#691 レビュー再指摘への対応）
+///
+/// [`Microkernel`] trait は `MR > 0` を型・ドキュメントいずれでも契約と
+/// して課していなかった（本対応で trait 側にも明記。[`Microkernel::MR`]
+/// 参照）。外部実装が `MR = 0` の状態で（`ldc != NR` の）
+/// [`Microkernel::run_with_ldc`] 既定実装から本関数を呼ぶと、`mr - 1` の
+/// 減算が本来の境界検査より先に発生してしまう（debug ビルドでは減算
+/// オーバーフローで panic、release ビルド〈overflow-checks 無効〉では
+/// `usize::MAX` へラップし後続の `checked_mul`/`checked_add` がほぼ全ての
+/// `ldc`/`nr` 組み合わせで `None` または長さ不足の assert 失敗に倒れる
+/// ため実害は無いが、意図した「MR must be positive」という診断ではなく
+/// 偶発的なオーバーフロー起因の panic になってしまう）。`mr.checked_sub(1)`
+/// を計算チェーンへ含め、`mr == 0` を明示的に検出して意図の分かる panic
+/// メッセージを出す。
 pub(crate) fn check_c_tile_bounds(mr: usize, nr: usize, ldc: usize, c_len: usize) {
     assert!(ldc >= nr, "ldc must be at least NR");
-    match (mr - 1).checked_mul(ldc).and_then(|v| v.checked_add(nr)) {
+    match mr
+        .checked_sub(1)
+        .and_then(|mr_minus_1| mr_minus_1.checked_mul(ldc))
+        .and_then(|v| v.checked_add(nr))
+    {
         Some(required) => assert!(
             c_len >= required,
             "C tile buffer too small for MR*ldc access pattern"
         ),
-        None => panic!("ldc*MR overflow"),
+        None => panic!("MR must be positive, or ldc*MR overflow"),
     }
 }
 
@@ -128,9 +148,17 @@ pub use scalar::{MR, NR, kernel};
 /// [`Avx512Kernel`]）は `Copy + Sync` な ZST（サイズ 0 の型）であり、
 /// rayon のクロージャへそのまま値渡しできる。
 pub trait Microkernel: Copy + Sync {
-    /// マイクロカーネルタイルの行数。
+    /// マイクロカーネルタイルの行数。**契約: 1 以上でなければならない**
+    /// （#691 レビュー指摘。`MR == 0` は [`check_c_tile_bounds`] の
+    /// `mr.checked_sub(1)` 経由で明示的に panic するが、`0` を許容する
+    /// 設計ではない。実装がこの契約を破ると
+    /// [`Microkernel::run_with_ldc`] 既定実装・各 ISA の
+    /// `kernel`／`kernel_unchecked` は正しい結果を返さない）。
     const MR: usize;
-    /// マイクロカーネルタイルの列数。
+    /// マイクロカーネルタイルの列数。**契約: 1 以上でなければならない**
+    /// （[`Self::MR`] 同様。`NR == 0` は本 trait 側では明示検査していない
+    /// が、`ldc >= NR` の `assert` および呼び出し元のタイル分割ロジック
+    /// が非ゼロを前提とするため、実装は 0 を返してはならない）。
     const NR: usize;
 
     /// `ap`（packed A）・`bp`（packed B）から `c_tile`（MR×NR、row-major・
@@ -535,6 +563,18 @@ mod tests {
         // ギャップ列（各行末尾）には触れない契約であるはず。
         assert_eq!(strided[2], 0.0);
         assert_eq!(strided[5], 0.0);
+    }
+
+    /// `mr == 0`（[`Microkernel::MR`] の契約違反）を [`check_c_tile_bounds`]
+    /// が意図の分かる panic メッセージで検出することの回帰テスト（PR #691
+    /// レビュー指摘 `PRRT_kwDOTuUCJc6Zq7vw`）。修正前は `mr - 1` の減算
+    /// オーバーフロー由来の panic（debug ビルド）だったが、
+    /// `mr.checked_sub(1)` により意図した「MR must be positive」診断へ
+    /// 変わったことを確認する。
+    #[test]
+    #[should_panic(expected = "MR must be positive")]
+    fn check_c_tile_bounds_rejects_mr_zero_with_explicit_message() {
+        check_c_tile_bounds(0, 2, 2, 4);
     }
 
     #[test]
