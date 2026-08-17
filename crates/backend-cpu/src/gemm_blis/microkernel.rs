@@ -434,7 +434,16 @@ pub trait Microkernel: Copy + Sync {
         // 境界検査契約・AGENTS.md「本番経路の panic 禁止」）。
         check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         if ldc == Self::NR {
-            self.run(ap, bp, c, kc_len);
+            // #691 レビュー P1 指摘（PRRT_kwDOTuUCJc6Zr-hh）への対応:
+            // `check_c_tile_bounds` は密パッキング（`ldc == Self::NR`）でも
+            // `c.len() >= Self::MR * Self::NR` しか要求しないため、`c` は
+            // 検証済みタイル範囲より長いことがある。`Self::run` の契約は
+            // 「ちょうど `MR * NR` の密な `c_tile`」であり、外部の
+            // `Microkernel` 実装が組み込みカーネル同様に長さの完全一致を
+            // 検査していると、余剰領域を含む `c` をそのまま渡した場合に
+            // panic しうる（本番経路 panic 禁止。AGENTS.md）。検証済みの
+            // 先頭 `MR * NR` 要素だけを切り出して渡す。
+            self.run(ap, bp, &mut c[..Self::MR * Self::NR], kc_len);
             return Ok(());
         }
         let mut tile = vec![0.0f32; Self::MR * Self::NR];
@@ -573,7 +582,13 @@ impl Microkernel for Neon12x8Kernel {
         check_panel_lengths(Self::MR, Self::NR, kc_len, ap.len(), bp.len())?;
         check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         if ldc == Self::NR {
-            self.run(ap, bp, c, kc_len);
+            // #691 レビュー P1 指摘（PRRT_kwDOTuUCJc6Zr-hh）と同種の修正
+            // （[`Microkernel::run_with_ldc`] デフォルト実装コメント参照）:
+            // `check_c_tile_bounds` は `c.len() >= Self::MR * Self::NR` しか
+            // 要求せず、`c` は検証済みタイル範囲より長いことがある。`run`
+            // の契約はちょうど `MR * NR` の密な `c_tile` のため、検証済み
+            // の先頭 `MR * NR` 要素だけを切り出して渡す。
+            self.run(ap, bp, &mut c[..Self::MR * Self::NR], kc_len);
             return Ok(());
         }
         // ヒープ確保（`Vec`）を避けるため MR_12X8*NR_12X8（=96）固定長の
@@ -820,6 +835,67 @@ mod tests {
         assert_eq!(
             via_run, via_default_ldc,
             "ldc == NR では run へ委譲するはず"
+        );
+    }
+
+    /// `c_tile.len() == Self::MR * Self::NR`（ちょうど密なタイル長）を
+    /// 検査する「クレート外部実装」を模したトークン（#691 レビュー P1
+    /// 指摘 `PRRT_kwDOTuUCJc6Zr-hh` への回帰テスト専用）。`run` の従来
+    /// 契約はちょうど `MR * NR` の密な `c_tile` であるため、この検査自体
+    /// は契約に忠実な実装として正当であり、`run_with_ldc` のデフォルト
+    /// 実装側が余剰領域を含む `c` を切り詰めずに渡すと panic する。
+    #[derive(Clone, Copy)]
+    struct ExactLenAssertingKernel;
+
+    impl Microkernel for ExactLenAssertingKernel {
+        const MR: usize = 2;
+        const NR: usize = 2;
+
+        fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+            assert_eq!(
+                c_tile.len(),
+                Self::MR * Self::NR,
+                "run は MR*NR ぴったりの密な c_tile のみを受け取る契約"
+            );
+            for i in 0..Self::MR {
+                for j in 0..Self::NR {
+                    let mut acc = c_tile[i * Self::NR + j];
+                    for p in 0..kc_len {
+                        acc = ap[p * Self::MR + i].mul_add(bp[p * Self::NR + j], acc);
+                    }
+                    c_tile[i * Self::NR + j] = acc;
+                }
+            }
+        }
+    }
+
+    /// 密パッキング（`ldc == NR`）でも `check_c_tile_bounds` は
+    /// `c.len() >= MR * NR` しか要求しないため、`c` がタイル長より長い
+    /// 場合に `run_with_ldc` のデフォルト実装が余剰領域を切り詰めずに
+    /// `run` へ渡すと、長さ完全一致を検査する外部実装で panic しうる
+    /// （#691 レビュー P1 指摘 `PRRT_kwDOTuUCJc6Zr-hh`）。検証済みの先頭
+    /// `MR * NR` 要素だけが渡ることを確認する。
+    #[test]
+    fn run_with_ldc_default_impl_slices_tile_exactly_for_dense_packing_with_excess_len() {
+        let k = ExactLenAssertingKernel;
+        let ap = [1.0f32, 2.0, 3.0, 4.0];
+        let bp = [5.0f32, 6.0, 7.0, 8.0];
+
+        // MR*NR(=4) より長い c（末尾に余剰領域を含む）を ldc == NR で渡す。
+        let mut c = [0.0f32, 0.0, 0.0, 0.0, 9.0, 9.0];
+        k.run_with_ldc(&ap, &bp, &mut c, 2, 2).unwrap();
+
+        let mut expected_tile = [0.0f32; 4];
+        k.run(&ap, &bp, &mut expected_tile, 2);
+        assert_eq!(
+            &c[..4],
+            &expected_tile[..],
+            "タイル範囲の計算結果は run と一致するはず"
+        );
+        assert_eq!(
+            &c[4..],
+            &[9.0, 9.0],
+            "検証済みタイル範囲外の余剰領域は変更されないはず"
         );
     }
 
