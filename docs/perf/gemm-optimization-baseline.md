@@ -105,8 +105,11 @@ run 間ばらつきの一例としてのみ扱う）。
    PyTorch MPS 側も同一の転送除外境界で再計測するか、(ii) `docs/performance-targets.md` §4 の計測
    プロトコル自体を正式な承認付き変更として改定するか、いずれかが前提となる。両者ともコード変更・
    プロトコル改定を伴い本イシュー（ドキュメントの分母・分子突合のみ）のスコープ外であり、別タスクとして
-   切り出す。(i) の f32 側再計測は Phase F の Metal 確定計測タスク（#572）、下限値への反映は Phase F
-   の人間承認タスク（#577）が既存の追跡先である。(ii) のプロトコル改定は上記いずれの既存子イシューにも
+   切り出す。(i) の f32 側再計測は Phase F の Metal 確定計測タスク（#572。f32 prepared 入口
+   `MetalGemm::dispatch_tiled_prepared`〈`crates/backend-metal/src/gemm.rs`〉を追加し、
+   計測手順・記録テンプレートを `docs/perf/metal-floor-remeasurement.md` に整備済み。実測値の記入は
+   Mac 実機セッションへ申し送り）、下限値への反映は Phase F の人間承認タスク（#577）が既存の追跡先
+   である。(ii) のプロトコル改定は上記いずれの既存子イシューにも
    明示のスコープとして含まれておらず、新規の子イシュー起票が必要だが、起票自体は
    `.claude/rules/out-of-scope-tracking.md` の定める人間承認事項のため本ドキュメントでは起票しない
    （承認後に Phase D〈#530〉または Phase F 配下へ追加する）。

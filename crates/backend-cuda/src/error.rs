@@ -185,6 +185,29 @@ pub enum CudaError {
     /// `error.rs` 冒頭の `InvalidElementwiseShape` ドキュメンテーション
     /// コメント参照）。
     InvalidRmsNormShape { detail: String },
+
+    /// プロセス内 LRU カーネルモジュールキャッシュ（`module_cache.rs`。
+    /// イシュー #511・Phase C-4）の容量設定 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`
+    /// が不正だった。
+    ///
+    /// `resolve_module_cache_capacity` は 10 進整数 `1..=1024` のみを許容し、
+    /// 空文字列・非数値・`0`・範囲外・非 UTF-8 は本 variant で fail-closed に
+    /// 拒否する（A03 対策。`CacheDirUnavailable`〈`resolve_cache_root`〉と
+    /// 同じ「外部プロセス環境変数由来の入力を明示検証する」方針。
+    /// `.claude/rules/security.md`）。panic 経路は持たない。
+    InvalidModuleCacheCapacity { detail: String },
+
+    /// プロセス内 LRU カーネルモジュールキャッシュ（`module_cache.rs`。
+    /// イシュー #511・Phase C-4）を保護する `Mutex` が poison していた
+    /// （別スレッドがロック保持中に panic した場合にのみ発生。本クレートの
+    /// 臨界区間自体は `unwrap`/`expect` を持たないため通常到達しない）。
+    ///
+    /// `.claude/rules/coding-rust.md`「本番経路で `unwrap()`/`expect()` を
+    /// 使わない」に従い、`lock().unwrap()` で panic させず本 variant へ
+    /// 写像する（キャッシュはあくまで最適化であり、取得できなければ
+    /// キャッシュなしの縮退運転〈`kernels_mma.rs::RenderedMmaKernel::compile`
+    /// の fail-safe 方針〉へフォールバックすればよい）。
+    ModuleCacheUnavailable { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -238,6 +261,15 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidRmsNormShape { detail } => {
                 write!(f, "invalid RMSNorm shape/argument: {detail}")
+            }
+            CudaError::InvalidModuleCacheCapacity { detail } => {
+                write!(
+                    f,
+                    "invalid RUST_AI_CUDA_MODULE_CACHE_CAPACITY value: {detail}"
+                )
+            }
+            CudaError::ModuleCacheUnavailable { detail } => {
+                write!(f, "CUDA kernel module cache unavailable: {detail}")
             }
         }
     }

@@ -162,6 +162,25 @@
 //! ない厳密形状。`rmsnorm::match_rmsnorm_plan`）検出時のみ本カーネルへ
 //! ルーティングし、一致しないプランはデフォルトの `Unsupported`
 //! フォールバックのまま維持する。
+//!
+//! Phase C-4（#511。親イシュー #503 の最終タスク）で [`module_cache`]
+//! （非公開 `mod`。`pub use` で再公開しない内部実装詳細）を追加し、
+//! `kernels_mma.rs::RenderedMmaKernel::compile` をプロセス内 LRU
+//! （ロード済みモジュールハンドル再利用）→ ディスクキャッシュ
+//! （`nvrtc.rs::load_cache_entry`／`store_cache_entry`。C-3・#509）→
+//! NVRTC 直コンパイルの 3 段フォールバックへ結線した。これにより
+//! `gemm_auto.rs::SpecializedMmaKernelHandle::compile`（従来は呼び出し
+//! ごとに NVRTC コンパイルしていた shape 特化経路）が自動的に再利用化
+//! される。容量は環境変数 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`
+//! （既定 32・上限 1024）で調整可能（`module_cache.rs` ドキュメンテー
+//! ションコメント参照）。ディスクキャッシュ関連の失敗（`workspace_root`
+//! 解決不能・fs I/O 失敗）はコンパイル失敗にせず「ディスクキャッシュ
+//! なしの縮退運転」へフォールバックする fail-safe 方針を採る
+//! （`kernels_mma.rs::RenderedMmaKernel::compile` ドキュメンテーション
+//! コメント参照）。固定ソースの一回コンパイル経路（`CudaGemm::new`・
+//! `CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群）は
+//! インスタンス構築時 1 回のみのコンパイルであり本タスクでは結線しない
+//! （拡大は効果に対しリスク過大と判断。実装計画 §3.4 スコープ境界）。
 
 pub mod device;
 mod elementwise;
@@ -178,6 +197,7 @@ mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
 pub mod memory;
+mod module_cache;
 mod nvrtc;
 mod ops;
 mod rmsnorm;
@@ -269,5 +289,32 @@ pub mod diagnostics {
     /// 同じ feature ゲート方針）。
     pub fn mma_swizzle_group_width(num_sms: u32) -> u32 {
         swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
+    }
+
+    /// プロセス内 LRU カーネルモジュールキャッシュ（イシュー #511・C-4。
+    /// `crate::module_cache`。非公開 `mod` のため crate 外部から直接
+    /// 到達できない）のヒット件数。`crate::module_cache::
+    /// KernelModuleCache::global` の初期化自体が失敗した場合（不正な
+    /// `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`）は `None` を返す。
+    ///
+    /// `tests/specialized_mma_parity.rs`（`#[ignore]` 実機テスト）が
+    /// 「同一形状・同一 `CompiledDims` での 2 回目以降の
+    /// `SpecializedMmaKernelHandle::compile` が NVRTC 再コンパイルを
+    /// 回避してプロセス内 LRU をヒットする」ことを検証するための観測点
+    /// （`wmma_tf32_opt_block_tile` 等と同じ「非公開モジュールへの薄い
+    /// 診断用ラッパー」方針。`internal-diagnostics` feature〈既定 off〉
+    /// でのみコンパイルされる）。
+    pub fn module_cache_hit_count() -> Option<u64> {
+        crate::module_cache::KernelModuleCache::global()
+            .ok()
+            .map(|cache| cache.hit_count())
+    }
+
+    /// プロセス内 LRU カーネルモジュールキャッシュのミス件数。
+    /// [`module_cache_hit_count`] と同じ理由・同じ feature ゲート方針。
+    pub fn module_cache_miss_count() -> Option<u64> {
+        crate::module_cache::KernelModuleCache::global()
+            .ok()
+            .map(|cache| cache.miss_count())
     }
 }

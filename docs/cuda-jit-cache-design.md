@@ -1,8 +1,8 @@
 # CUDA JIT コンパイルキャッシュ ディレクトリ解決規則
 
-- 対応イシュー: 親 #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・静的タイル選定）／C-1 #504（キー型定義）／C-2 #506（自作非暗号ハッシュ・ディレクトリ命名規則。PR #659）／C-3 #509（一時ディレクトリコンパイル → アトミック rename によるキャッシュ書き込み。本節を本タスクで更新）
+- 対応イシュー: 親 #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・静的タイル選定）／C-1 #504（キー型定義）／C-2 #506（自作非暗号ハッシュ・ディレクトリ命名規則。PR #659）／C-3 #509（一時ディレクトリコンパイル → アトミック rename によるキャッシュ書き込み）／C-4 #511（プロセス内 LRU カーネルモジュールキャッシュ・GEMM 経路への結線。本節を本タスクで更新）
 - 位置づけ: 本文書は `crates/backend-cuda/src/nvrtc.rs` のキャッシュルート解決・エントリパス組み立て・実 I/O ロジックの**利用者向け参照**である。実装本体のドキュメンテーションコメント（同ファイル）を正とし、本文書はそれを要約・横断参照可能な形にまとめたものにすぎない（二重管理を避けるため詳細ロジックはコードコメント側で保守する）。
-- **現状（C-3・#509 実装後）**: `resolve_cache_root`／`cache_root`／`cache_entry_path`／`ensure_cache_root`／`store_cache_entry`／`load_cache_entry` はいずれも `pub(crate)`（crate 内限定）であり、`backend-cuda` クレートの外から呼び出す手段はまだない。C-3 でディスクへの実際の読み書き（`ensure_cache_root` の既存祖先の containment 事前検証＋pin 済みディレクトリ fd 起点の階層作成〈`create_dir_all_verified`。単純な `fs::create_dir_all` ではない。下記「エントリ内ファイル構成と書き込みプロトコル」節参照〉、`store_cache_entry`／`load_cache_entry` の一時ディレクトリ書き込み・fsync・アトミック rename）を実装したことで、以下の環境変数は**実効化されている**（crate 内公開範囲の判断は `crates/backend-cuda/src/lib.rs` 直下 `pub use` から意図的に除外している。理由は同ファイル該当関数のドキュメンテーションコメント参照）。ただし GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ導線・プロセス内 LRU）は C-4（#511）のスコープであり、本タスク時点では未結線（先行スキャフォールディング）。
+- **現状（C-4・#511 実装後）**: `resolve_cache_root`／`cache_root`／`ensure_cache_root`／`store_cache_entry`／`load_cache_entry` はいずれも `pub(crate)`（crate 内限定）のまま（`backend-cuda` クレートの外から呼び出す手段はない）だが、C-4 で GEMM 経路への結線（`kernels_mma.rs::RenderedMmaKernel::compile` が `runtime_workspace_root()` で `workspace_root` を解決し、コンパイル前に `load_cache_entry` を引き・コンパイル成功後に `store_cache_entry` を呼ぶ導線）とプロセス内 LRU（`module_cache.rs::KernelModuleCache`。ロード済み `Arc<CudaModule>` の再利用）を実装した。これにより以下の環境変数は実際に GEMM 実行経路から**実効化されている**（`cache_entry_path` のみ、fd pin を経由しない便宜 API として crate 内呼び出し元を持たないまま残置。理由は同関数のドキュメンテーションコメント参照）。ディスクキャッシュ関連の失敗（`workspace_root` 解決不能・fs I/O 失敗）はコンパイル失敗にせず「ディスクキャッシュなしの縮退運転」（NVRTC 直コンパイル＋プロセス内 LRU のみ）へフォールバックする fail-safe 方針を採る（`RenderedMmaKernel::compile` ドキュメンテーションコメント参照）。
 
 ## 環境変数と優先順位
 
@@ -13,6 +13,8 @@
 3. `HOME` — 上記 2 つが未設定の場合、`${HOME}/.cache/rust-ai-library/cuda` を使う（一般的な `~/.cache` 相当の Linux 慣行に対する最終フォールバック）
 
 3 つとも未設定（環境変数が全欠落）の場合は `CudaError::CacheDirUnavailable` を返す（panic しない。呼び出し元がコンパイルキャッシュを使わない経路へフォールバックするか、エラーとして利用者へ伝播するかは C-3（#509）以降のスコープ）。
+
+上記 3 つはいずれもディスクキャッシュ（`nvrtc.rs`）の配置先を決める。プロセス内 LRU カーネルモジュールキャッシュ（C-4・#511。下記「プロセス内 LRU カーネルモジュールキャッシュと GEMM 経路への結線」節）は別系統の環境変数 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`（容量。既定 `32`・許容範囲 `1..=1024`）を持つ。
 
 ## 検証条件（A03 インジェクション対応）
 
@@ -25,7 +27,11 @@
 
 現行実装（`nvrtc::resolve_cache_root`）は `workspace_root: &Path` を**必須引数**（`Option` ではない）として受け取り、`RUST_AI_CUDA_CACHE_DIR`・`XDG_CACHE_HOME`・`HOME` の 3 分岐すべてで、解決結果が `workspace_root` 配下（`nvrtc::path_lexically_within` による `..` 折り畳み込みの字句正規化済み比較）でないことを検証し、配下であれば `CudaError::CacheDirUnavailable` で拒否する。`RUST_AI_CUDA_CACHE_DIR` だけを検証対象外にする例外は設けない（それが P0 再指摘の核心のため）。`workspace_root` を `Option` にして呼び出し元が `None` を渡せる余地を残すと検証を迂回できる構造が復活するため、必須引数として契約に組み込んでいる。
 
-`workspace_root` を「どの値にするか」はビルド時定数のハードコードを避けつつ、かつプロセスのカレントディレクトリ（`std::env::current_dir()`）のような「プロセス起動時の作業ディレクトリ」を安易に使わない（`XDG_CACHE_HOME`／`HOME` 未設定でカレントディレクトリがたまたまホームディレクトリ配下だった場合、`~/.cache/...` という正当なフォールバック結果が誤って拒否される）。C-3（#509）が実際にディレクトリを作成・オープンする際に、実行時に確定する信頼できる境界（例: 明示設定される runtime workspace 設定値）をどう決定するかを含めて設計する。加えて、`canonicalize` 済みパスによる symlink 解決込みの再検証（symlink 解決込みの実在ベース検証はパスの実在を要求するため、fs I/O を行わない C-2 の純関数では原理的に実行できない）も C-3 のスコープとして残る。
+`workspace_root` を「どの値にするか」はビルド時定数のハードコードを避ける（C-3・#509 で確定した方針）。C-4（#511）は結線時点でこの `workspace_root` を実際に決定する必要がある。
+
+**`current_dir()` を境界そのものとしては使わない（イシュー #511 PR #703 codex-review P0 指摘への対応。設計変更）**: 当初案は `nvrtc::runtime_workspace_root()` が `std::env::current_dir()`（取得成功時は `canonicalize`）の結果をそのまま `workspace_root` として採用していた。しかしこれは「境界解決に失敗する方向」（false reject。誤拒否の帰結は「ディスクキャッシュが効かないだけ」で fail-safe）のみを正当化しており、「誤って広すぎる境界を受理する方向」（false accept）を防げていなかった。実際、プロセスの cwd をリポジトリツリー外に設定したまま `RUST_AI_CUDA_CACHE_DIR` にリポジトリツリー内の絶対パスを指定すると、`resolve_cache_root` の containment 検証は「cwd（＝誤った境界）の配下でないこと」しか確認できず、本来拒否すべき「リポジトリツリー内へのキャッシュ書き込み」を通過させてしまっていた。
+
+現行実装の `nvrtc::runtime_workspace_root()` は、`canonicalize` 済みの cwd を起点に祖先方向へ実際の境界マーカー（`.git`、または `[workspace]` セクションを持つ `Cargo.toml`）を探索する（`nvrtc::find_workspace_root_from`／`nvrtc::has_workspace_root_marker`）。マーカー探索が cwd から到達できない場合（cwd がリポジトリツリー外にある等）は `None` として扱い、許容側へフォールバックせず `CudaError::CacheDirUnavailable` を返す（「境界を解決できないなら縮退運転〈ディスクキャッシュなし〉へ倒す。誤った境界を許容側で埋めない」という契約を境界解決自体にも一貫させる）。加えて `has_workspace_root_marker` はマーカー候補ディレクトリ自体の所有 uid（このプロセスの実効 uid と一致すること）・group／other 書き込みビット（`mode & 0o022 == 0` であること）を検査してから初めて `.git`／`Cargo.toml` の中身を見る（イシュー #511 PR #703 codex-review Bugbot 指摘〈Forgeable workspace root markers〉・P0 再指摘〈group 書き込みビット除外〉への対応。共有祖先ディレクトリ配下に攻撃者が偽のマーカーを仕込んで `workspace_root` を偽装する経路を遮断する）。この検査の帰結として、umask `002` の group 共有ワークツリー等では `workspace_root` 解決が常に失敗しディスクキャッシュが常に効かない縮退運転になりうるが、これは「他グループメンバーによる workspace boundary 偽装を許す」という P0 より安全側であるため受け入れている。判断の詳細は `nvrtc::runtime_workspace_root`／`nvrtc::has_workspace_root_marker` のドキュメンテーションコメントを正とする。加えて、`canonicalize` 済みパスによる symlink 解決込みの再検証（symlink 解決込みの実在ベース検証はパスの実在を要求するため、fs I/O を行わない C-2 の純関数では原理的に実行できない）は C-3（`ensure_cache_root`）が実ディレクトリのオープン時点で担う。
 
 さらに、キャッシュエントリパス（`cache_entry_path`）の組み立て結果は必ず解決済みルート配下（`starts_with(root)`）に収まることを保証する多層防御を持つ（第 1 層: `CudaKernelDescriptor::new` の構築時検証、第 2 層: `CudaKernelCacheKey::cache_entry_dir_name` 内の縦深防御検査、第 3 層: `cache_entry_path_in` のユニットテスト）。「ルート自体がリポジトリツリー外にある」ことは上記の `workspace_root` containment 検証（`resolve_cache_root` 側）が担う（第 0 層）。
 
@@ -45,7 +51,7 @@
 読み出し側はさらに 2 つの追加検査を行う（実装計画 §3.1・§7 のハッシュ衝突安全弁）。いずれも通常運用で偽陽性にならない（`store_cache_entry_at` は非空バイト列を書き込んだ後に一時ディレクトリを fsync してから rename するため）ため、`Ok(None)`（ミス）扱いにしてよい:
 
 1. **非空検査**: `kernel.cu`／`kernel.ptx` のいずれかが 0 バイトならミス（クラッシュ残骸 0 バイトファイルを有効なエントリと誤認しない）
-2. **ソース照合**: `load_cache_entry`／`load_cache_entry_in` は呼び出し元がこれからコンパイルしようとしているソース全文（`expected_src`）を引数に取り、保存済み `kernel.cu` とバイト単位で照合する。不一致ならミス。エントリ名のハッシュ（FNV-1a 64bit・非暗号）が偶然衝突した場合に、別ソースの PTX を誤ってヒット扱いして GPU 上で実行してしまう経路を閉じる（C-4・#511 配線後、NVRTC 結線でこのフィールドが実際に GPU 上で実行される PTX になるため重要）
+2. **ソース照合**: `load_cache_entry`／`load_cache_entry_in` は呼び出し元がこれからコンパイルしようとしているソース全文（`expected_src`）を引数に取り、保存済み `kernel.cu` とバイト単位で照合する。不一致ならミス。エントリ名のハッシュ（FNV-1a 64bit・非暗号）が偶然衝突した場合に、別ソースのエントリを誤ってヒット扱いする経路を閉じる。**ただし本照合は「保存済みソースが要求元ソースと一致すること」までしか保証せず、同一ディレクトリの `kernel.ptx` がそのソースから生成された成果物であることは保証しない**（この残余ギャップへの対応は下記「プロセス内 LRU カーネルモジュールキャッシュと GEMM 経路への結線（C-4・#511）」節「ディスク PTX を実行入力にしない判断」を参照。C-4 配線後の呼び出し元 `kernels_mma.rs::RenderedMmaKernel::compile` は disk hit を得ても `kernel_ptx` フィールドを `load_module` の実行入力へは使わない）
 
 `store_cache_entry`（実体は `store_cache_entry_in` → `store_cache_entry_at`）は DeepGEMM の compiler（一時ディレクトリでビルド後 rename、先着プロセスがいた場合は rename 失敗を正常系として吸収）に倣うが、TOCTOU 対策のため全操作を「キャッシュルートを指す 1 個の pin 済みディレクトリ fd（`root_fd`）」からの fd 相対操作に統一している（イシュー #509 PR #677 codex-review P0 指摘対応。`root.join(..)` のようなパス再解決を経由すると、pin 後に `root` 自体が別ディレクトリへの symlink へ差し替えられた場合に symlink 先を誤って操作しうる）。
 
@@ -62,9 +68,31 @@
 - **エンコーディング**: `canonical_bytes` の `ENCODING_VERSION` を `1` → `2` へ上げ、`compile_flags` の後段に `source` を長さプレフィクス付きで追記した。C-2（#506）時点のディスクキャッシュエントリ（C-3・#509 実装後に実体化）は本変更により全て無効化される契約（意図どおり）。
 - **情報露出対策**: `source`（数十 KB になりうる）は `derive(Debug)` をやめ手動 `Debug` 実装とし、ログ・パニックメッセージには長さと非暗号な変更検知用フィンガープリント（FNV-1a 64bit。`stable_hash` と同一アルゴリズム）のみを出す（PR #676 codex-review P1 是正。当初案の先頭 40 文字平文要約はカーネル名・シグネチャ等の識別情報を含みうる部分的漏出だったため撤回した）。外部公開 getter は追加していない（`RenderedMmaKernel` がソース文字列を外部へ返さない設計〈PR #643〉と同じ理由）。
 
+## プロセス内 LRU カーネルモジュールキャッシュと GEMM 経路への結線（C-4・#511）
+
+C-1〜C-3・C-5 が用意したキー型・ディレクトリ命名・ディスク I/O は、C-4 まで GEMM 経路へ未結線（`#[allow(dead_code)]` の先行スキャフォールディング）だった。C-4 は以下 2 点を実装する。
+
+1. **プロセス内 LRU**（`crates/backend-cuda/src/module_cache.rs::KernelModuleCache`）: ロード済み `Arc<CudaModule>`（cudarc 0.19.8。`CudaContext::load_module` の戻り値）をプロセス内で再利用する容量上限つき LRU。std のみの自作実装（tick 方式・`HashMap<K, (V, tick)>`）で `lru` 等の追加依存はしない（許容依存 8 区分外。deps-policy.md）。キーは `(ctx_id, CudaKernelCacheKey)`（`ctx_id` は要求元 `Arc<CudaContext>` のポインタ識別。別 context への誤共有をキーレベルで遮断する）。容量は環境変数 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`（既定 `32`・許容範囲 `1..=1024`。不正値は `CudaError::InvalidModuleCacheCapacity` で fail-closed に拒否）で調整可能。プロセスワイドの唯一のインスタンス（`static` + `OnceLock`）として保持し、容量は初回利用時に一度だけ確定する。
+2. **GEMM 経路への結線**（`crates/backend-cuda/src/kernels_mma.rs::RenderedMmaKernel::compile`）: 従来は呼び出しごとに NVRTC コンパイルしていた経路（`gemm_auto.rs::SpecializedMmaKernelHandle::compile` から到達する shape 特化経路）を、次のフォールバックへ結線した。
+   1. プロセス内 LRU をキー（`self.cfg` から内部導出した `CudaKernelDescriptor`＋環境パラメータ＋`self.source`）で検索し、ヒットなら `cuModuleGetFunction` のみで済ませる
+   2. ミスならディスクキャッシュ（`load_cache_entry`。ソース全文のバイト照合込み）を引く。ヒットしても、この段で得られる `kernel.ptx` は**実行入力としては使わない**（下記「ディスク PTX を実行入力にしない判断（イシュー #511 PR #703 codex-review P0 再指摘対応）」参照）。ヒット／ミスいずれの場合も `compile_ptx` を実行し、ミスの場合のみ成功後に `store_cache_entry` でディスクへ保存してから `load_module`
+   いずれの段でロードした `Arc<CudaModule>` も最終的にプロセス内 LRU へ登録する。
+
+**縮退方針（fail-safe）**: プロセス内 LRU（容量設定不正・`Mutex` poison）・ディスクキャッシュ（`workspace_root` 解決不能・fs I/O 失敗）いずれの失敗もコンパイル失敗にせず次の段（最終的には NVRTC 直コンパイル）へフォールバックする。両キャッシュは純粋な最適化であり、数値正しさは NVRTC 直コンパイル・ディスクキャッシュのソース全文照合のいずれでも独立に保たれるため、キャッシュ層の可用性低下が誤った PTX の実行につながることはない。
+
+### ディスク PTX を実行入力にしない判断（イシュー #511 PR #703 codex-review P0 再指摘対応）
+
+初回実装（本 PR #703 内の先行コミット）は上記 2 段目のディスクキャッシュヒット時、保存済み `kernel.ptx` を `Ptx::from_src` で直接 `load_module` していた。codex-review・Cursor Bugbot がいずれも P0 として指摘したとおり、`load_cache_entry` が検証するのは「保存済み `kernel.cu` が要求元ソースとバイト単位で一致すること」のみで、同一ディレクトリの `kernel.ptx` がそのソースから実際に生成された成果物であることまでは検証しない。追加した権限検査（`nvrtc::is_cache_entry_permission_untrusted`。エントリの mode が group／other 書き込み不可であり、かつ所有 uid がこのプロセスの実効 uid と一致することを要求）を経てもなお、**同一 uid の別プロセス・侵害プロセス**が `kernel.cu` を保ったまま `kernel.ptx` だけを任意の有効な PTX へ差し替える攻撃は防げない: ファイルを書き換えられる主体は同じ uid で新たな「正当に見える」エントリ一式（`kernel.cu`＋改竄済み `kernel.ptx`＋権限検査を通る mode）を作れてしまうため、暗号学的ダイジェストや署名をディスク上へ同居させても認証（authenticity の証明）にはならない（秘密鍵を持たないハッシュ／ダイジェストは完全性の検査にしかならず、同一 uid の書き込み主体に対しては無力）。許容依存 8 区分（`.claude/rules/deps-policy.md`）に署名検証用クレートは含まれず、新規追加はユーザー承認が要るため本 PR のスコープでは導入しない。
+
+よって現行実装は disk hit を「ソース一致が確認できた」というシグナルとしてのみ扱い、実際にロードする PTX は常にこのプロセス内で NVRTC が生成したものに限る（ヒット・ミスいずれの分岐でも `compile_ptx` を経由する）。`load_cache_entry` の呼び出しそのもの（C-3・#509 の fs 配線・権限検査）は将来、認証済み検証手段（例: NVRTC を実行できる信頼済みプロセスのみが持つ鍵での署名検証）を導入した際に実行入力として再有効化できるよう維持する。この判断により、ディスクキャッシュはプロセス再起動をまたいだ NVRTC コンパイル時間の短縮には現時点で寄与しない（`store_cache_entry` によるディスク永続化自体は維持しており、将来の認証手段導入時に即座に活用できる）。プロセス内 LRU（1 段目）は本判断の影響を受けず、同一プロセス内での再利用は従来どおり `cuModuleGetFunction` のみで完結する。
+
+**スコープ境界**: 固定ソースの一回コンパイル経路（`CudaGemm::new`・`CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群。いずれもインスタンス構築時に 1 回だけコンパイルする設計）は本タスクでは結線しない（拡大は効果に対しリスク過大と判断）。
+
 ## 関連
 
-- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`store_cache_entry`／`store_cache_entry_in`／`store_cache_entry_at`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry_at`（本番経路）／`validate_cache_entry`（`#[cfg(test)]` 限定）／`rename_pinned`／`create_dir_all_verified`／`CudaKernelCacheKey`）
-- `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`／`CudaError::CacheIo`
-- C-4（#511）: プロセス内 LRU カーネルキャッシュ・GEMM 経路への結線（NVRTC コンパイル成功後に `store_cache_entry` を呼ぶ導線）
+- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`runtime_workspace_root`／`store_cache_entry`／`store_cache_entry_in`／`store_cache_entry_at`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry_at`（本番経路）／`validate_cache_entry`（`#[cfg(test)]` 限定）／`rename_pinned`／`create_dir_all_verified`／`CudaKernelCacheKey`）
+- `crates/backend-cuda/src/module_cache.rs`: プロセス内 LRU 本体（`LruCache`／`KernelModuleCache`／`resolve_module_cache_capacity`）
+- `crates/backend-cuda/src/kernels_mma.rs`: GEMM 経路への結線（`RenderedMmaKernel::cache_descriptor`／`cache_key`／`compile`）
+- `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`／`CudaError::CacheIo`／`CudaError::InvalidModuleCacheCapacity`／`CudaError::ModuleCacheUnavailable`
 - C-10（#529）: ヒット/ミス・並行競合・破損検出の網羅的回帰テスト拡充。実装済み（`crates/backend-cuda/src/jit_cache_regression_tests.rs`。`nvrtc` モジュール直下の兄弟モジュールとして `#[path]` 属性で配置。キャッシュ API が `pub(crate)` にも満たない module-private のため `crates/backend-cuda/tests/`〈integration test〉ではなく in-crate ユニットテストとした判断理由は同ファイル冒頭のドキュメンテーションコメントを参照）
+- C-9b（#527）: 最良構成選定。C-12（#534）: 性能計測（本キャッシュの hit/miss カウンタ〈`KernelModuleCache::hit_count`／`miss_count`〉を観測点として使う想定）

@@ -23,7 +23,8 @@
 #![cfg(target_os = "macos")]
 
 use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_metal::{GemmVariant, MetalContext, MetalGemm, TileConfig};
+use backend_metal::pad::{pad_matrix, pad8};
+use backend_metal::{GemmVariant, MetalBuffer, MetalContext, MetalError, MetalGemm, TileConfig};
 use bench_harness::rng::Xorshift64Star;
 
 /// `variant`（[`GemmVariant::SimdgroupTiled`]）・`(seed_a, seed_b, m, n, k)`
@@ -274,3 +275,99 @@ fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
 // `#[cfg(test)] mod tests`
 // （`all_tile_candidates_validate_under_actual_device_shared_memory_limit`）
 // へ移設済み。
+
+// --- イシュー #572（Phase F-2）: f32 §4 準拠 prepared 入口 ---
+//
+// `MetalGemm::dispatch_tiled_prepared`（`crates/backend-metal/src/gemm.rs`）
+// の数値一致・入力検証を検証する。`docs/perf/gemm-optimization-baseline.md`
+// §2 が f32 prepared 入口整備を本イシューのスコープと明記した対応。
+
+/// `dispatch_tiled_prepared`（事前確保・アップロード済みバッファへの
+/// エンコード＋コマンドバッファ完了待ちのみの入口）が `dispatch_variant`
+/// （一括入口）と同じ数値を返すことを確認する（計測境界のみが異なる同一
+/// カーネル呼び出しであるため、両者は完全一致するはずという契約の検証）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn dispatch_tiled_prepared_matches_dispatch_variant() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+
+    let (m, n, k) = (256usize, 256usize, 256usize);
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+
+    let a = Xorshift64Star::new(70).fill_vec(m * k);
+    let b = Xorshift64Star::new(71).fill_vec(k * n);
+
+    let expected = gemm
+        .dispatch_variant(&ctx, GemmVariant::SimdgroupTiled(cfg), &a, &b, m, n, k)
+        .expect("dispatch_variant（一括入口）に失敗した");
+
+    let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+    let a_padded = pad_matrix(&a, m, k, m_eff, k_eff);
+    let b_padded = pad_matrix(&b, k, n, k_eff, n_eff);
+    let a_buf = MetalBuffer::new_with_data(&ctx, &a_padded).expect("A バッファ確保に失敗した");
+    let b_buf = MetalBuffer::new_with_data(&ctx, &b_padded).expect("B バッファ確保に失敗した");
+    let c_buf = MetalBuffer::new_zeroed(&ctx, m_eff * n_eff).expect("C バッファ確保に失敗した");
+
+    let resolved_cfg = gemm
+        .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff, cfg)
+        .expect("dispatch_tiled_prepared（§4 準拠 prepared 入口）に失敗した");
+    assert_eq!(
+        resolved_cfg, cfg,
+        "本テストの cfg はデバイス上限内で構築できる想定のためフォールバックしないはず"
+    );
+
+    let padded_c = c_buf.read_to_vec();
+    let actual = backend_metal::pad::unpad_matrix(padded_c, m_eff, n_eff, m, n);
+
+    assert_parity(
+        "metal dispatch_tiled_prepared vs dispatch_variant m=256 n=256 k=256",
+        &actual,
+        &expected,
+    );
+}
+
+/// `dispatch_tiled_prepared`（`MetalGemm::dispatch_tiled_prepared`）の
+/// 入力検証（`validate_prepared_inputs_f32`。イシュー #572）が、8 の倍数
+/// 違反・バッファ長不一致をエンコード前に fail-closed で拒否することを
+/// 確認する（f16 版 `f16_dispatch_prepared_rejects_undersized_and_
+/// misaligned_inputs`〈`tests/cpu_metal_f16_parity.rs`〉と同型の検証。
+/// PR #346 codex-review P1-1 指摘と同水準）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
+    let cfg = TileConfig::SINGLE_SIMDGROUP_8X8;
+
+    // 8 の倍数でない m_eff（本来は pad8 済みの実効次元を渡す契約に違反）。
+    let a_buf = MetalBuffer::new_zeroed(&ctx, 10 * 8).expect("A バッファ確保に失敗した");
+    let b_buf = MetalBuffer::new_zeroed(&ctx, 8 * 8).expect("B バッファ確保に失敗した");
+    let c_buf = MetalBuffer::new_zeroed(&ctx, 10 * 8).expect("C バッファ確保に失敗した");
+    let err = gemm
+        .dispatch_tiled_prepared(&ctx, &a_buf, &b_buf, &c_buf, 10, 8, 8, cfg)
+        .expect_err("8 の倍数でない m_eff は拒否されるはず");
+    assert!(
+        matches!(err, MetalError::NotEightAligned { .. }),
+        "期待した NotEightAligned ではなかった: {err:?}"
+    );
+
+    // 8 の倍数だが A バッファ長が m_eff*k_eff と不一致（短すぎる）。
+    let a_buf_short = MetalBuffer::new_zeroed(&ctx, 8 * 8 - 1).expect("A バッファ確保に失敗した");
+    let b_buf2 = MetalBuffer::new_zeroed(&ctx, 8 * 8).expect("B バッファ確保に失敗した");
+    let c_buf2 = MetalBuffer::new_zeroed(&ctx, 8 * 8).expect("C バッファ確保に失敗した");
+    let err2 = gemm
+        .dispatch_tiled_prepared(&ctx, &a_buf_short, &b_buf2, &c_buf2, 8, 8, 8, cfg)
+        .expect_err("A バッファ長不一致は拒否されるはず");
+    assert!(
+        matches!(err2, MetalError::ALenMismatch { .. }),
+        "期待した ALenMismatch ではなかった: {err2:?}"
+    );
+}

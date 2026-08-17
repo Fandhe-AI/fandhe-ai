@@ -31,6 +31,14 @@
 //! 4. **`STATIC_NK` 動的次元再利用**: 同一コンパイル済みカーネル
 //!    （`SpecializedMmaKernelHandle`）を N/K 固定・M 可変で複数回起動し、
 //!    いずれも parity を満たすこと。
+//! 5. **プロセス内 LRU カーネルモジュールキャッシュ**（イシュー #511・
+//!    C-4）: `SpecializedMmaKernelHandle::compile`（内部で
+//!    `RenderedMmaKernel::compile` を呼ぶ）を同一形状・同一 `CompiledDims`
+//!    で 2 回実行すると、2 回目はプロセス内 LRU をヒットし
+//!    （`backend_cuda::diagnostics::module_cache_hit_count` の増加で観測）、
+//!    かつキャッシュ経由でロードしたカーネルの実行結果が非キャッシュ時
+//!    （既定カーネル）と bit 一致すること（キャッシュがソース・数値経路
+//!    に影響しないことの回帰）。
 //!
 //! 環境適応スモークのみ通常 CI で実行し（CUDA/NVRTC 非搭載・cc<8.0 の
 //! いずれの環境でも早期 return で green。`cpu_cuda_mma_parity.rs` と
@@ -390,5 +398,64 @@ fn specialized_mma_f16_handles_k_zero_noop_with_misaligned_n() {
         c,
         vec![f16::ZERO; (m as usize) * (n as usize)],
         "k==0 no-op shape must return an all-zero C"
+    );
+}
+
+/// プロセス内 LRU カーネルモジュールキャッシュの再利用検証（実機必須。
+/// イシュー #511・C-4）。
+///
+/// 同一形状（`STATIC_NK`・`(m,n,k)=(64,128,32)`。1 ブロックタイル
+/// ちょうどで NVRTC コンパイルコストを最小化する）に対して
+/// `SpecializedMmaKernelHandle::compile` を 2 回呼び、2 回目は
+/// `crate::module_cache::KernelModuleCache`（プロセス内 LRU）をヒットする
+/// ことを `backend_cuda::diagnostics::module_cache_hit_count` の増加で
+/// 確認する。
+///
+/// プロセス内 LRU はプロセスワイドの `static`（`OnceLock`）であり、他の
+/// テスト関数（同一バイナリ内で並行実行されうる）も同じキャッシュへ
+/// アクセスしうる。本テストは「ヒット件数が呼び出し前より増加した」こと
+/// のみを主張し、絶対値や他テストの介在を仮定しないことで並行実行安全性
+/// を保つ（`cargo test` の既定並行実行と両立する設計）。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
+fn specialized_mma_kernel_handle_compile_reuses_process_local_module_cache() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let shape = GemmShape::new(64, 128, 32);
+
+    // 1 回目: ミスしうる（他テストが未実行なら NVRTC コンパイルが走る）。
+    let _first = SpecializedMmaKernelHandle::compile(&device, shape, CompiledDims::STATIC_NK)
+        .expect("1st compile must succeed on ignored test runner");
+
+    let hits_before = backend_cuda::diagnostics::module_cache_hit_count()
+        .expect("module cache must be initialized after at least one compile() call");
+
+    // 2 回目: 同一形状・同一 CompiledDims のため、プロセス内 LRU をヒット
+    // する（`RenderedMmaKernel::compile` の 1 段目）はずである。
+    let second = SpecializedMmaKernelHandle::compile(&device, shape, CompiledDims::STATIC_NK)
+        .expect("2nd compile must succeed on ignored test runner");
+
+    let hits_after = backend_cuda::diagnostics::module_cache_hit_count()
+        .expect("module cache must remain initialized");
+
+    assert!(
+        hits_after > hits_before,
+        "2nd compile() with the same shape/CompiledDims must hit the process-local LRU \
+         (hits_before={hits_before}, hits_after={hits_after})"
+    );
+
+    // キャッシュ経由でロードしたカーネルの実行結果が既定カーネルと
+    // bit 一致すること（キャッシュが数値経路に影響しないことの回帰）。
+    let default_gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
+    let (a, b) = gen_ab(9001, 64, 128, 32);
+    let default_c = default_gemm
+        .run_f16(&a, &b, 64, 128, 32)
+        .expect("default run_f16 must succeed on ignored test runner");
+    let cached_c = second
+        .launch_f16(&a, &b, 64, 128, 32)
+        .expect("launch via cache-backed handle must succeed");
+
+    assert_eq!(
+        default_c, cached_c,
+        "cache-backed specialized kernel output must bit-match the default kernel"
     );
 }
