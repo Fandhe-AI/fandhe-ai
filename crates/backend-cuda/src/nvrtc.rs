@@ -1165,6 +1165,46 @@ pub(crate) fn cache_root(workspace_root: &Path) -> Result<PathBuf, CudaError> {
 /// 「ディスクキャッシュが効かない」で fail-safe に収まるため厳密な TOML
 /// パースは過剰）。
 fn has_workspace_root_marker(dir: &Path) -> bool {
+    // `dir` 自体の所有者・書き込み権限を先に検査する（イシュー #511
+    // PR #703 codex-review Bugbot 指摘〈Forgeable workspace root
+    // markers〉対応）: この検査を欠いたままだと、`/tmp` のような共有
+    // 祖先ディレクトリ配下（他ユーザーも書き込み可能、またはこのプロセス
+    // とは異なる uid が所有）に攻撃者が `.git`／`[workspace]` 付き
+    // `Cargo.toml` を仕込むだけで `workspace_root` を偽造でき、
+    // `resolve_cache_root` の containment 検証がその偽の境界を「安全な
+    // 境界」として受理してしまう（本来はキャッシュ書き込みを拒否すべき
+    // 領域を通過させる）。[`is_cache_entry_permission_untrusted`] と同じ
+    // トラストモデル（同一 uid が所有し、かつ group／other 書き込み不可の
+    // ディレクトリのみを信頼する）をここでも適用し、`.git`／`Cargo.toml`
+    // の中身を読む前に fail-closed で拒否する。
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return false;
+    };
+    {
+        use std::os::unix::fs::MetadataExt;
+        // **group 書き込みビット（`0o020`）は検査しない
+        // （[`is_cache_entry_permission_untrusted`] との意図的な差分）**:
+        // キャッシュエントリ自体は本クレートが `create_subdir_pinned`／
+        // `create_file_pinned` で明示 `mode(0o700)`／`mode(0o600)` を
+        // 指定して作成するため umask に左右されず group 書き込みを
+        // 常に排除できる（同関数のドキュメンテーションコメント参照）。
+        // 一方 `.git`／`Cargo.toml` はユーザーの既存リポジトリであり
+        // 本クレートが作成・権限制御するものではない。group 共有ワーク
+        // ツリー（umask `002`）は珍しくなく、その場合 `git init` 等で
+        // 作成された正当なディレクトリも group 書き込み可能（`0o775`
+        // 等）になる。ここで group ビットまで拒否条件に含めると、umask
+        // `002` を使う一般的な開発環境で正当な `workspace_root` 解決が
+        // 軒並み失敗し「ディスクキャッシュが常に効かない」規模の回帰に
+        // なる。よって「他ユーザーが任意に書き込める」ことを直接示す
+        // other 書き込みビット（`0o002`）と所有 uid 不一致のみを検査
+        // する: この 2 条件は「見知らぬ第三者が当該ディレクトリへ書き
+        // 込めた可能性」を捉える一方、同一ユーザーが管理するグループ
+        // 共有ワークツリーは正当に通す。
+        if meta.mode() & 0o002 != 0 || meta.uid() != current_euid() {
+            return false;
+        }
+    }
+
     if dir.join(".git").exists() {
         return true;
     }
@@ -3386,10 +3426,57 @@ fn load_cache_entry_in(
     load_cache_entry_at(&root_fd, key, expected_src)
 }
 
-/// `handle`（ディレクトリ・通常ファイルいずれの fd でもよい）が group／
-/// other 書き込み可能（`mode & 0o022 != 0`）かを判定する（イシュー #511
-/// PR #703 codex-review P0 指摘対応。[`load_cache_entry_at`] のトラスト
-/// 境界ドキュメンテーションコメント参照）。
+// POSIX `geteuid(2)` の FFI 宣言（イシュー #511 PR #703 codex-review
+// Bugbot 指摘〈Trust check skips owner uid〉対応:
+// [`is_cache_entry_permission_untrusted`] がエントリの所有 uid をこの
+// プロセスの実効 uid と比較するために使う）。
+//
+// std には現在のプロセスの実効 uid を取得する API がない。`libc`／
+// `rustix` クレートは許容依存 8 区分（`.claude/rules/deps-policy.md`）
+// 外のためユーザー承認なしに追加できない（本ファイル冒頭の `openat`／
+// `mkdirat`／`renameat`／`unlinkat` の FFI 宣言と同じ制約・同じ対応
+// 方針）。`geteuid` は Linux・macOS いずれでも `uid_t geteuid(void)`
+// （引数なし・エラーを返さない非 variadic 関数）という同一シグネチャの
+// ため、`openat` 宣言のような可変引数 ABI 上の注意点は生じない
+// （`uid_t` は両 OS とも 32bit 幅で `u32` と一致する。`std::os::unix::
+// fs::MetadataExt::uid()` の戻り値型も `u32` であり、下記の比較で型が
+// 揃う）。
+#[cfg(unix)]
+unsafe extern "C" {
+    fn geteuid() -> u32;
+}
+
+/// このプロセスの実効 uid を返す（[`is_cache_entry_permission_untrusted`]
+/// 用）。
+///
+/// # Safety（`unsafe` 使用箇所）
+///
+/// `geteuid(2)` は引数を取らず、失敗という概念がなく（常に成功する）、
+/// 呼び出し中に呼び出し元と共有する可変状態へアクセスしない POSIX 標準
+/// 関数のため、呼び出し自体に前提条件はない。
+#[cfg(unix)]
+fn current_euid() -> u32 {
+    // SAFETY: 上記ドキュメンテーションコメントのとおり、引数なし・
+    // 副作用なし・エラーを返さない POSIX 標準関数の呼び出しであり、
+    // 呼び出しごとに追加の前提条件は生じない。
+    unsafe { geteuid() }
+}
+
+/// `handle`（ディレクトリ・通常ファイルいずれの fd でもよい）が (1)
+/// group／other 書き込み可能（`mode & 0o022 != 0`）、または (2) 所有 uid が
+/// このプロセスの実効 uid と一致しない、のいずれかを満たすかを判定する
+/// （イシュー #511 PR #703 codex-review P0 指摘・Bugbot 指摘〈Trust check
+/// skips owner uid〉対応。[`load_cache_entry_at`] のトラスト境界ドキュメン
+/// テーションコメント参照）。
+///
+/// (2) を欠いたままだと「同一 uid のみを信頼する」というトラストモデルが
+/// 実際には検査されない: group／other 書き込みビットが立っていない
+/// （`mode & 0o022 == 0`）エントリであっても、別 uid が所有していれば
+/// （例えば group 書き込み可能な共有ディレクトリの配下で別ユーザーが
+/// 作成したエントリ）そのユーザーの意図どおりに改竄されたファイルを
+/// 「信頼できる」と誤判定してしまう。(1)・(2) いずれか一方でも満たせば
+/// 「信頼しない」（`true`）側に倒す（縦深防御。両方を満たす場合のみが
+/// 本キャッシュのトラストモデルが実際に想定する状態）。
 ///
 /// `fstat`（`File::metadata` が fd 経由で呼ぶ。パス再解決を伴わないため
 /// 本関数呼び出し元が pin 済みの fd で防いでいる TOCTOU を再導入しない）
@@ -3398,7 +3485,7 @@ fn load_cache_entry_in(
 fn is_cache_entry_permission_untrusted(handle: &fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
     match handle.metadata() {
-        Ok(meta) => meta.mode() & 0o022 != 0,
+        Ok(meta) => meta.mode() & 0o022 != 0 || meta.uid() != current_euid(),
         Err(_) => true,
     }
 }

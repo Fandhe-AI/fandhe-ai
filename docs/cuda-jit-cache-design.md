@@ -47,7 +47,7 @@
 読み出し側はさらに 2 つの追加検査を行う（実装計画 §3.1・§7 のハッシュ衝突安全弁）。いずれも通常運用で偽陽性にならない（`store_cache_entry_at` は非空バイト列を書き込んだ後に一時ディレクトリを fsync してから rename するため）ため、`Ok(None)`（ミス）扱いにしてよい:
 
 1. **非空検査**: `kernel.cu`／`kernel.ptx` のいずれかが 0 バイトならミス（クラッシュ残骸 0 バイトファイルを有効なエントリと誤認しない）
-2. **ソース照合**: `load_cache_entry`／`load_cache_entry_in` は呼び出し元がこれからコンパイルしようとしているソース全文（`expected_src`）を引数に取り、保存済み `kernel.cu` とバイト単位で照合する。不一致ならミス。エントリ名のハッシュ（FNV-1a 64bit・非暗号）が偶然衝突した場合に、別ソースの PTX を誤ってヒット扱いして GPU 上で実行してしまう経路を閉じる（C-4・#511 配線後、NVRTC 結線でこのフィールドが実際に GPU 上で実行される PTX になるため重要）
+2. **ソース照合**: `load_cache_entry`／`load_cache_entry_in` は呼び出し元がこれからコンパイルしようとしているソース全文（`expected_src`）を引数に取り、保存済み `kernel.cu` とバイト単位で照合する。不一致ならミス。エントリ名のハッシュ（FNV-1a 64bit・非暗号）が偶然衝突した場合に、別ソースのエントリを誤ってヒット扱いする経路を閉じる。**ただし本照合は「保存済みソースが要求元ソースと一致すること」までしか保証せず、同一ディレクトリの `kernel.ptx` がそのソースから生成された成果物であることは保証しない**（この残余ギャップへの対応は下記「プロセス内 LRU カーネルモジュールキャッシュと GEMM 経路への結線（C-4・#511）」節「ディスク PTX を実行入力にしない判断」を参照。C-4 配線後の呼び出し元 `kernels_mma.rs::RenderedMmaKernel::compile` は disk hit を得ても `kernel_ptx` フィールドを `load_module` の実行入力へは使わない）
 
 `store_cache_entry`（実体は `store_cache_entry_in` → `store_cache_entry_at`）は DeepGEMM の compiler（一時ディレクトリでビルド後 rename、先着プロセスがいた場合は rename 失敗を正常系として吸収）に倣うが、TOCTOU 対策のため全操作を「キャッシュルートを指す 1 個の pin 済みディレクトリ fd（`root_fd`）」からの fd 相対操作に統一している（イシュー #509 PR #677 codex-review P0 指摘対応。`root.join(..)` のようなパス再解決を経由すると、pin 後に `root` 自体が別ディレクトリへの symlink へ差し替えられた場合に symlink 先を誤って操作しうる）。
 
@@ -69,13 +69,18 @@
 C-1〜C-3・C-5 が用意したキー型・ディレクトリ命名・ディスク I/O は、C-4 まで GEMM 経路へ未結線（`#[allow(dead_code)]` の先行スキャフォールディング）だった。C-4 は以下 2 点を実装する。
 
 1. **プロセス内 LRU**（`crates/backend-cuda/src/module_cache.rs::KernelModuleCache`）: ロード済み `Arc<CudaModule>`（cudarc 0.19.8。`CudaContext::load_module` の戻り値）をプロセス内で再利用する容量上限つき LRU。std のみの自作実装（tick 方式・`HashMap<K, (V, tick)>`）で `lru` 等の追加依存はしない（許容依存 8 区分外。deps-policy.md）。キーは `(ctx_id, CudaKernelCacheKey)`（`ctx_id` は要求元 `Arc<CudaContext>` のポインタ識別。別 context への誤共有をキーレベルで遮断する）。容量は環境変数 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`（既定 `32`・許容範囲 `1..=1024`。不正値は `CudaError::InvalidModuleCacheCapacity` で fail-closed に拒否）で調整可能。プロセスワイドの唯一のインスタンス（`static` + `OnceLock`）として保持し、容量は初回利用時に一度だけ確定する。
-2. **GEMM 経路への結線**（`crates/backend-cuda/src/kernels_mma.rs::RenderedMmaKernel::compile`）: 従来は呼び出しごとに NVRTC コンパイルしていた経路（`gemm_auto.rs::SpecializedMmaKernelHandle::compile` から到達する shape 特化経路）を、次の 3 段フォールバックへ結線した。
+2. **GEMM 経路への結線**（`crates/backend-cuda/src/kernels_mma.rs::RenderedMmaKernel::compile`）: 従来は呼び出しごとに NVRTC コンパイルしていた経路（`gemm_auto.rs::SpecializedMmaKernelHandle::compile` から到達する shape 特化経路）を、次のフォールバックへ結線した。
    1. プロセス内 LRU をキー（`self.cfg` から内部導出した `CudaKernelDescriptor`＋環境パラメータ＋`self.source`）で検索し、ヒットなら `cuModuleGetFunction` のみで済ませる
-   2. ミスならディスクキャッシュ（`load_cache_entry`。ソース全文のバイト照合込み）を引き、ヒットなら `Ptx::from_src` で `load_module`（NVRTC 自体をスキップ）
-   3. フルミスなら `compile_ptx` を実行し、成功後に `store_cache_entry` でディスクへ保存してから `load_module`
+   2. ミスならディスクキャッシュ（`load_cache_entry`。ソース全文のバイト照合込み）を引く。ヒットしても、この段で得られる `kernel.ptx` は**実行入力としては使わない**（下記「ディスク PTX を実行入力にしない判断（イシュー #511 PR #703 codex-review P0 再指摘対応）」参照）。ヒット／ミスいずれの場合も `compile_ptx` を実行し、ミスの場合のみ成功後に `store_cache_entry` でディスクへ保存してから `load_module`
    いずれの段でロードした `Arc<CudaModule>` も最終的にプロセス内 LRU へ登録する。
 
 **縮退方針（fail-safe）**: プロセス内 LRU（容量設定不正・`Mutex` poison）・ディスクキャッシュ（`workspace_root` 解決不能・fs I/O 失敗）いずれの失敗もコンパイル失敗にせず次の段（最終的には NVRTC 直コンパイル）へフォールバックする。両キャッシュは純粋な最適化であり、数値正しさは NVRTC 直コンパイル・ディスクキャッシュのソース全文照合のいずれでも独立に保たれるため、キャッシュ層の可用性低下が誤った PTX の実行につながることはない。
+
+### ディスク PTX を実行入力にしない判断（イシュー #511 PR #703 codex-review P0 再指摘対応）
+
+初回実装（本 PR #703 内の先行コミット）は上記 2 段目のディスクキャッシュヒット時、保存済み `kernel.ptx` を `Ptx::from_src` で直接 `load_module` していた。codex-review・Cursor Bugbot がいずれも P0 として指摘したとおり、`load_cache_entry` が検証するのは「保存済み `kernel.cu` が要求元ソースとバイト単位で一致すること」のみで、同一ディレクトリの `kernel.ptx` がそのソースから実際に生成された成果物であることまでは検証しない。追加した権限検査（`nvrtc::is_cache_entry_permission_untrusted`。エントリの mode が group／other 書き込み不可であり、かつ所有 uid がこのプロセスの実効 uid と一致することを要求）を経てもなお、**同一 uid の別プロセス・侵害プロセス**が `kernel.cu` を保ったまま `kernel.ptx` だけを任意の有効な PTX へ差し替える攻撃は防げない: ファイルを書き換えられる主体は同じ uid で新たな「正当に見える」エントリ一式（`kernel.cu`＋改竄済み `kernel.ptx`＋権限検査を通る mode）を作れてしまうため、暗号学的ダイジェストや署名をディスク上へ同居させても認証（authenticity の証明）にはならない（秘密鍵を持たないハッシュ／ダイジェストは完全性の検査にしかならず、同一 uid の書き込み主体に対しては無力）。許容依存 8 区分（`.claude/rules/deps-policy.md`）に署名検証用クレートは含まれず、新規追加はユーザー承認が要るため本 PR のスコープでは導入しない。
+
+よって現行実装は disk hit を「ソース一致が確認できた」というシグナルとしてのみ扱い、実際にロードする PTX は常にこのプロセス内で NVRTC が生成したものに限る（ヒット・ミスいずれの分岐でも `compile_ptx` を経由する）。`load_cache_entry` の呼び出しそのもの（C-3・#509 の fs 配線・権限検査）は将来、認証済み検証手段（例: NVRTC を実行できる信頼済みプロセスのみが持つ鍵での署名検証）を導入した際に実行入力として再有効化できるよう維持する。この判断により、ディスクキャッシュはプロセス再起動をまたいだ NVRTC コンパイル時間の短縮には現時点で寄与しない（`store_cache_entry` によるディスク永続化自体は維持しており、将来の認証手段導入時に即座に活用できる）。プロセス内 LRU（1 段目）は本判断の影響を受けず、同一プロセス内での再利用は従来どおり `cuModuleGetFunction` のみで完結する。
 
 **スコープ境界**: 固定ソースの一回コンパイル経路（`CudaGemm::new`・`CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群。いずれもインスタンス構築時に 1 回だけコンパイルする設計）は本タスクでは結線しない（拡大は効果に対しリスク過大と判断）。
 

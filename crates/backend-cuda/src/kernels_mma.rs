@@ -1024,27 +1024,53 @@ impl RenderedMmaKernel {
         let workspace_root = crate::nvrtc::runtime_workspace_root().ok();
 
         // 2 段目: ディスクキャッシュ（ソース全文のバイト照合込み）。
+        //
+        // **ヒットしてもディスク上の `kernel.ptx` バイト列を実行入力として
+        // 使わない（イシュー #511 PR #703 codex-review P0 再指摘対応）**:
+        // `load_cache_entry` がここで検証するのは「保存済み `kernel.cu` が
+        // `self.source` とバイト単位で一致すること」のみであり、同一
+        // ディレクトリの `kernel.ptx` がそのソースから実際に生成された
+        // 成果物であることまでは検証しない。追加した権限検査
+        // （`nvrtc::is_cache_entry_permission_untrusted`。同一 uid のみ
+        // 信頼）を経てもなお、同一 uid の別プロセス・侵害プロセスが
+        // `kernel.cu` を保ったまま `kernel.ptx` だけを任意の有効な PTX へ
+        // 差し替える攻撃は防げない（ファイルを書き換えられる主体は同じ
+        // uid で新たな正当エントリも作れてしまうため、暗号学的ダイジェスト
+        // をディスク上へ同居させても認証にはならない。許容依存 8 区分
+        // `.claude/rules/deps-policy.md` に署名検証用クレートは含まれず
+        // 新規追加はユーザー承認が要るため本 PR のスコープでは導入
+        // しない）。よって disk hit は「ソース一致が確認できた」という
+        // シグナルとしてのみ扱い、実際にロードする PTX は常にこのプロセス
+        // 内で NVRTC が生成したものに限る（hit／miss いずれの分岐でも
+        // `compile_ptx` を経由する。下記参照）。`load_cache_entry` 呼び
+        // 出しそのもの（#509 の fs 配線・権限検査）は将来、認証済み検証
+        // 手段を導入した際に実行入力として再有効化できるよう維持する。
         let disk_hit = workspace_root.as_ref().and_then(|root| {
             crate::nvrtc::load_cache_entry(root, &key, &self.source)
                 .ok()
                 .flatten()
         });
 
-        let module = if let Some(cached) = disk_hit {
-            let ptx = cudarc::nvrtc::Ptx::from_src(cached.kernel_ptx);
-            ctx.load_module(ptx)?
-        } else {
-            // 3 段目: NVRTC 直コンパイル（フルミス）。
-            let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
-            if let Some(root) = workspace_root.as_ref() {
-                // C-4 導線: コンパイル成功後に store_cache_entry を呼ぶ
-                // （設計文書 `docs/cuda-jit-cache-design.md` C-4 節）。保存
-                // 失敗はコンパイル結果自体には影響しない（縮退方針）ため
-                // 戻り値は無視する。
-                let _ = crate::nvrtc::store_cache_entry(root, &key, &self.source, &ptx.to_src());
-            }
-            ctx.load_module(ptx)?
-        };
+        // 3 段目: NVRTC 直コンパイル。上記の理由によりディスクキャッシュが
+        // 保持する PTX バイト列は信頼せず、hit／miss いずれの場合も
+        // このプロセス内で NVRTC を実行して得た PTX のみをロードする
+        // （ディスク PTX を実行しない、という codex-review 指摘の対応案を
+        // 採用。安全な認証手段〈署名／暗号学的バインディング〉を導入する
+        // までの間の恒常方針とする）。
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        if disk_hit.is_none()
+            && let Some(root) = workspace_root.as_ref()
+        {
+            // C-4 導線: コンパイル成功後、ディスクに当該キーのエントリが
+            // まだない場合のみ store_cache_entry を呼ぶ（設計文書
+            // `docs/cuda-jit-cache-design.md` C-4 節）。保存失敗はコン
+            // パイル結果自体には影響しない（縮退方針）ため戻り値は無視
+            // する。上記のとおりこのエントリは将来の認証済み検証手段
+            // 導入まで実行入力としては使われないが、#509 のディスク
+            // 永続化自体は今後の再有効化に備えて維持する。
+            let _ = crate::nvrtc::store_cache_entry(root, &key, &self.source, &ptx.to_src());
+        }
+        let module = ctx.load_module(ptx)?;
 
         // ロード済みモジュールをプロセス内 LRU へ登録する（挿入失敗＝
         // poison も縮退方針でコンパイル結果自体は返す）。

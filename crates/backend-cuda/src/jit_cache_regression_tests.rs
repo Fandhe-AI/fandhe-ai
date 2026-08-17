@@ -963,6 +963,40 @@ fn find_workspace_root_from_ignores_non_workspace_cargo_toml() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// group／other 書き込み可能なディレクトリに置かれた `.git` は境界
+/// マーカーとして信頼されないこと（Cursor Bugbot 指摘〈Forgeable
+/// workspace root markers〉対応の回帰確認: `/tmp` 等の共有祖先ディレクトリ
+/// 配下に攻撃者が `.git` を仕込むだけで `workspace_root` を偽造できない
+/// ことを検証する。所有 uid が異なるケースはテスト環境で別 uid の
+/// プロセスを起動できないため権限ビットのみで検証するが、
+/// `has_workspace_root_marker` は mode・uid いずれか一方でも信頼できない
+/// 場合に拒否する実装のため、mode 側の検証だけでも「両方満たす場合のみ
+/// 信頼する」契約の主要部分をカバーする）。
+#[test]
+fn has_workspace_root_marker_rejects_world_writable_git_ancestor() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = fresh_temp_dir("workspace-root-forged-git");
+    fs::create_dir_all(root.join(".git")).expect("must create .git marker dir");
+    // 攻撃シナリオの模擬: 通常このディレクトリを所有するユーザー以外も
+    // 書き込める共有ディレクトリ（例: `/tmp` 直下）を想定し、`root`
+    // 自体を other 書き込み可能（`0o707`）へ緩める。中身（`.git`）は
+    // 変更しない。
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o707))
+        .expect("must relax workspace root dir permissions to other-writable");
+
+    assert!(
+        !has_workspace_root_marker(&root),
+        "a world-writable ancestor must not be trusted as a workspace root marker \
+         even if it contains a .git directory"
+    );
+
+    // 権限を戻してからでないと `remove_dir_all` の後始末で権限起因の
+    // 失敗が起きうる環境があるため、テスト終了前に元へ戻す。
+    let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o755));
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// マーカーがどの祖先にも存在しない場合は `None`（呼び出し元
 /// `runtime_workspace_root` は `Err` へ変換し、ディスクキャッシュなし
 /// 運転へ縮退する。境界不明を許容側で埋めない契約の回帰確認。イシュー
