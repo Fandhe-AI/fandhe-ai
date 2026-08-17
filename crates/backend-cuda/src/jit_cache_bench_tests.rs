@@ -422,25 +422,25 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
 
     let mut fresh_load_samples = Vec::with_capacity(TRIALS);
     let mut cached_load_samples = Vec::with_capacity(TRIALS);
-    // ロード順を trial ごとに交互化する（Review #534〈codex-review〉指摘:
-    // 常に fresh を先・cached を後の順で同一 context へロードすると、
-    // ドライバの PTX→SASS キャッシュ・初回初期化コスト等の順序依存の
-    // 一時的コストが一方（先にロードする側）にのみ乗りうる。
-    // `ptx_fresh`／`ptx_cached` は上で byte 一致を assert 済みの同一内容
-    // なので、この交互化は「同一入力の比較で順序バイアスを打ち消す」
-    // ための決定的な措置であり、乱数は使わない
-    // （`docs/spec` REQ-8 の決定的シード方針と同様、計測系は再現可能な
-    // 手順を優先する）。奇数 trial では cached を先に測る。
-    for i in 0..TRIALS {
-        if i % 2 == 0 {
-            fresh_load_samples.push(module_load_and_resolve_secs(&ptx_fresh));
-            cached_load_samples.push(module_load_and_resolve_secs(&ptx_cached));
-        } else {
-            let cached_secs = module_load_and_resolve_secs(&ptx_cached);
-            let fresh_secs = module_load_and_resolve_secs(&ptx_fresh);
-            cached_load_samples.push(cached_secs);
-            fresh_load_samples.push(fresh_secs);
-        }
+    // trial 内 ABBA カウンターバランスでロード順バイアスを相殺する
+    // （PR #698 codex-review 指摘 PRRT_kwDOTuUCJc6Zqwpy 対応: 単純な
+    // trial 偶奇交互化は `TRIALS=5`〈奇数〉だと fresh 先行 3 回・cached
+    // 先行 2 回の非対称が残り、各経路を独立に中央値化する方式では先行/
+    // 後行ペナルティが系列ごとに偏って乗りうるため順序バイアスを完全には
+    // 相殺できない）。各 trial 内で fresh→cached→cached→fresh の 4 回を
+    // 測り、各経路の trial 代表値を「同一 trial 内 2 計測の平均」とする。
+    // これにより経路ごとに先行 1 回・後行 1 回が trial 内で厳密に対になり、
+    // ドライバの PTX→SASS キャッシュ・初回初期化コスト等の順序依存コストは
+    // trial 単位で相殺される。外側は `TRIALS`（5）回のまま
+    // （`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」規約に
+    // 準拠。乱数は使わない決定的手順）。
+    for _ in 0..TRIALS {
+        let a = module_load_and_resolve_secs(&ptx_fresh);
+        let b = module_load_and_resolve_secs(&ptx_cached);
+        let c = module_load_and_resolve_secs(&ptx_cached);
+        let d = module_load_and_resolve_secs(&ptx_fresh);
+        fresh_load_samples.push((a + d) / 2.0);
+        cached_load_samples.push((b + c) / 2.0);
     }
     let fresh_load_q = median_q1_q3(&fresh_load_samples)
         .expect("5 non-NaN fresh-PTX module-load samples must yield quartiles");
@@ -591,59 +591,55 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
         .alloc_zeros::<f16>((m as usize) * (n as usize))
         .expect("device output buffer allocation must succeed on the bench runner");
 
-    // TFLOPS 計測をラウンド交互方式で行う（PR #698 codex-review 指摘・
-    // スレッド PRRT_kwDOTuUCJc6ZoNaU 対応）。上のモジュールロード計測
-    // （:434-444）は trial 偶奇でロード順を交互化済みだが、この直下の
-    // TFLOPS 計測は fresh を warmup/iters 込みで全実行してから cached を
-    // 実行する順序固定のままだった。GPU クロック・温度・電力制限の時間
-    // 変動（DVFS スロットリング等）が計測順序に系統的に乗ると、
-    // `tflops_fresh`／`tflops_cached` の比較が測定順序に左右されうる。
-    // #684（`backend-metal` occupancy 比較ベンチ）で確立したラウンド交互
-    // 方式に合わせ、ROUNDS 回の独立ラウンドに分割し、ラウンドごとに
-    // fresh→cached／cached→fresh の順序を反転させながら交互計測し、
-    // それぞれのラウンド中央値（本ファイルで既に使っている
-    // `median_q1_q3`。coding-rust.md「ベンチは 5 回計測の中央値」）を
-    // 採用する。tolerance・受け入れ基準・gating 方針（TFLOPS は
-    // non-gating。本関数冒頭コメント参照）は変更しない。
-    // ROUNDS は偶数（6）とする: 奇数だと fresh 先行ラウンドと cached 先行
-    // ラウンドの回数が非対称になり（例: 5 なら fresh 先行 3 回・cached
-    // 先行 2 回）、順序バイアスを完全には相殺できない。#684 でも同じ
-    // 指摘（codex-review）を受けて偶数化した前例に合わせる。
-    const ROUNDS: usize = 6;
+    // TFLOPS 計測を round 内 ABBA カウンターバランスで行う（PR #698
+    // codex-review 指摘 PRRT_kwDOTuUCJc6ZqyCo〈P1〉対応）。先行版は
+    // ラウンド単位で fresh→cached／cached→fresh を交互反転させる方式
+    // だったが、規約準拠のため ROUNDS を奇数の 5 に維持すると fresh 先行
+    // ラウンド 3 回・cached 先行ラウンド 2 回の非対称が残り、ラウンド間で
+    // 相殺しきれない（ROUNDS を偶数化する案は「ベンチは 5 回計測の中央値」
+    // 規約〈`.claude/rules/coding-rust.md`〉から逸脱するため不採用）。
+    // 5 回規約を維持したまま順序バイアスを相殺するため、上のモジュール
+    // ロード計測と同じ trial 内 ABBA 方式へ揃える: 各 round 内で
+    // fresh→cached→cached→fresh の 4 回 `bench_harness::run` を実行し、
+    // 各経路の round 代表値を「同一 round 内 2 run の `median_secs` の
+    // 平均」とする。これにより経路ごとに先行 1 回・後行 1 回が round 内で
+    // 厳密に対になり、GPU クロック・温度・電力制限の時間変動（DVFS
+    // スロットリング等）による順序バイアスは round 単位で相殺される。
+    // TFLOPS はこの平均後の secs から算出する（round 内の 4 run 個々の
+    // TFLOPS を平均するのではない）。外側は `ROUNDS`（5）回のまま
+    // （coding-rust.md の 5 回規約に準拠）。tolerance・受け入れ基準・
+    // gating 方針（TFLOPS は non-gating。本関数冒頭コメント参照）は
+    // 変更しない。
+    const ROUNDS: usize = 5;
     let mut fresh_tflops_samples = Vec::with_capacity(ROUNDS);
     let mut cached_tflops_samples = Vec::with_capacity(ROUNDS);
     let mut fresh_secs_samples = Vec::with_capacity(ROUNDS);
     let mut cached_secs_samples = Vec::with_capacity(ROUNDS);
 
-    for round in 0..ROUNDS {
-        // 偶数ラウンド（0-origin）は fresh→cached、奇数ラウンドは
-        // cached→fresh に反転し、順序バイアスをラウンド間で打ち消す。
-        let (meas_fresh, meas_cached) = if round % 2 == 0 {
-            let meas_fresh = bench_harness::run(&measurement_cfg, || {
-                launch_gemm(&func_fresh, &mut c_dev_fresh);
-            })
-            .expect("protocol::run must succeed with the default (20/20) measurement config");
-            let meas_cached = bench_harness::run(&measurement_cfg, || {
-                launch_gemm(&func_cached, &mut c_dev_cached);
-            })
-            .expect("protocol::run must succeed with the default (20/20) measurement config");
-            (meas_fresh, meas_cached)
-        } else {
-            let meas_cached = bench_harness::run(&measurement_cfg, || {
-                launch_gemm(&func_cached, &mut c_dev_cached);
-            })
-            .expect("protocol::run must succeed with the default (20/20) measurement config");
-            let meas_fresh = bench_harness::run(&measurement_cfg, || {
-                launch_gemm(&func_fresh, &mut c_dev_fresh);
-            })
-            .expect("protocol::run must succeed with the default (20/20) measurement config");
-            (meas_fresh, meas_cached)
-        };
+    for _ in 0..ROUNDS {
+        let run_a = bench_harness::run(&measurement_cfg, || {
+            launch_gemm(&func_fresh, &mut c_dev_fresh);
+        })
+        .expect("protocol::run must succeed with the default (20/20) measurement config");
+        let run_b = bench_harness::run(&measurement_cfg, || {
+            launch_gemm(&func_cached, &mut c_dev_cached);
+        })
+        .expect("protocol::run must succeed with the default (20/20) measurement config");
+        let run_c = bench_harness::run(&measurement_cfg, || {
+            launch_gemm(&func_cached, &mut c_dev_cached);
+        })
+        .expect("protocol::run must succeed with the default (20/20) measurement config");
+        let run_d = bench_harness::run(&measurement_cfg, || {
+            launch_gemm(&func_fresh, &mut c_dev_fresh);
+        })
+        .expect("protocol::run must succeed with the default (20/20) measurement config");
 
-        fresh_tflops_samples.push(flops / meas_fresh.median_secs / 1e12);
-        cached_tflops_samples.push(flops / meas_cached.median_secs / 1e12);
-        fresh_secs_samples.push(meas_fresh.median_secs);
-        cached_secs_samples.push(meas_cached.median_secs);
+        let fresh_secs = (run_a.median_secs + run_d.median_secs) / 2.0;
+        let cached_secs = (run_b.median_secs + run_c.median_secs) / 2.0;
+        fresh_tflops_samples.push(flops / fresh_secs / 1e12);
+        cached_tflops_samples.push(flops / cached_secs / 1e12);
+        fresh_secs_samples.push(fresh_secs);
+        cached_secs_samples.push(cached_secs);
     }
 
     let fresh_tflops_q = median_q1_q3(&fresh_tflops_samples)
@@ -661,7 +657,7 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
          cached_tflops={:.2} (median_s={:.6}) \
          — kernel launch + sync only (excludes buffer alloc/D2H; comparable with \
          gemm_mma_bench::measure_mma_f16), record only, non-gating (see module doc comment), \
-         round-interleaved order (ROUNDS={ROUNDS}, see comment above)",
+         ABBA counter-balanced order within each round (ROUNDS={ROUNDS}, see comment above)",
         fresh_tflops_q.median, fresh_secs_q.median, cached_tflops_q.median, cached_secs_q.median,
     );
 

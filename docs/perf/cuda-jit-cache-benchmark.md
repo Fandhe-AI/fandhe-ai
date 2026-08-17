@@ -34,7 +34,7 @@ C-4（本番 GEMM ディスパッチ経路〈`gemm_auto.rs::CudaGemmAuto::run_f1
 `crates/backend-cuda/src/jit_cache_bench_tests.rs`（`nvrtc` モジュールの子モジュール。C-10 の `jit_cache_regression_tests.rs` と同じ配置理由。同ファイル冒頭ドキュメンテーションコメント参照）に 2 個の `#[ignore]` テストを追加した。
 
 - `jit_cache_bench_cold_compile_vs_warm_load_latency`: `STATIC_MNK`（1024³・4096³）・`DYNAMIC_ALL`（4096³。既定プリセット）の 3 descriptor × 5 trial で、trial ごとに新規キャッシュルートを使い「コンパイル → store → 2 回目ロード」を計測する。区間別（compile／store／warm load）に `Instant` で計測し、`bench_harness::stats::median_q1_q3` で中央値・Q1・Q3 を求める
-- `jit_cache_bench_module_load_and_throughput_parity`: 4096³ 形状で (a) フレッシュコンパイル PTX と (b) キャッシュ経由でロードした PTX それぞれのモジュールロード時間（5 回計測中央値）を記録し、両者から起動した GEMM（f16・4096³）の出力が bit 一致することを assert する。スループット（TFLOPS）は `bench_harness::protocol::run`（warmup 20 回・計測 20 回。TASK-8.1 下限）で計測し記録のみに留める（hard assert にしない。§2.1 参照）
+- `jit_cache_bench_module_load_and_throughput_parity`: 4096³ 形状で (a) フレッシュコンパイル PTX と (b) キャッシュ経由でロードした PTX それぞれのモジュールロード時間・GEMM（f16・4096³）スループットを計測する。モジュールロードは 5 trial、スループットは 5 round、いずれも **trial／round 内 ABBA カウンターバランス**（`fresh→cached→cached→fresh` の 4 計測を 1 trial／round 内で行い、各経路の代表値を同一 trial／round 内 2 計測の平均とする）で先行/後行の順序バイアスを trial／round 単位で厳密に相殺しつつ、外側は 5 サンプルへ `median_q1_q3` を適用する（`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値」規約に準拠。PR #698 codex-review 指摘 PRRT_kwDOTuUCJc6Zqwpy・PRRT_kwDOTuUCJc6ZqyCo 対応）。両経路から起動した GEMM の出力が bit 一致することを assert する（gating）。スループット（TFLOPS）は `bench_harness::protocol::run`（warmup 20 回・計測 20 回。TASK-8.1 下限）で計測した `median_secs` を ABBA 平均してから算出し、記録のみに留める（hard assert にしない。§2.1 参照）
 
 いずれも `#[ignore]`（実機必須。`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]` で分離」）。実行コマンド（実機・§3）:
 
