@@ -157,14 +157,19 @@ pub mod pipeline;
 #[cfg(target_os = "macos")]
 pub mod rmsnorm;
 // `pad`／`tile` と同じ設計判断: `objc2` 系 FFI に触れないため
-// `cfg(target_os = "macos")` を付けず Linux でも単体テストが回るが、
-// 実際の呼び出し元（`ops.rs`／`rmsnorm.rs`／`softmax.rs`）は macOS 限定
-// のため、`pub(crate)` のままだと Linux 単体ビルド（`cargo build`／
-// `cargo clippy` の非テストパス）で「クレート内から到達不能」と
-// 判定され dead_code lint が誤検知する。`pad`／`tile` に倣い `pub` に
-// する（`row_kernel` モジュール自体は公開 API 面〈`facade`〉から到達
-// しないため実質的な公開面拡大にはならない）。
-pub mod row_kernel;
+// `cfg(target_os = "macos")` を付けず Linux でも単体テストが回る。
+// ただし `pad`／`tile` と異なり `row_kernel` は経路選択・occupancy 定数・
+// 起動検証エラー・canonical FusionPlan 照合などバックエンド内部実装の
+// 密度が高いため、`pub`（クレート外部から `backend_metal::row_kernel::*`
+// として到達可能）にはせず `pub(crate)` を維持する（codex-review P1
+// 指摘・PR #714）。実際の呼び出し元（`ops.rs`／`rmsnorm.rs`／
+// `softmax.rs`）は macOS 限定のため、Linux 単体ビルド（`cargo build`／
+// `cargo clippy` の非テストパス）では `row_kernel` の各項目が
+// 「クレート内から到達不能」と判定され dead_code lint が誤検知する。
+// これは `pub` へ広げず、`row_kernel.rs` モジュール冒頭の
+// `#![cfg_attr(not(target_os = "macos"), allow(dead_code))]`
+// （対象を non-macOS ビルドに限定した allow）で個別に抑制する。
+pub(crate) mod row_kernel;
 #[cfg(target_os = "macos")]
 pub mod softmax;
 pub mod tile;

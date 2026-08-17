@@ -18,6 +18,15 @@
 //! バイト数」（CUDA `hidden * 4`）ではなく「コンパイル時に宣言済みの固定
 //! バイト数」（[`ONEPASS_SMEM_BYTES_PER_GROUP`]。宣言した configure
 //! threadgroup memory は使用量に関わらず GPU が予約するため）を渡す。
+//!
+//! `lib.rs` で `pub(crate) mod row_kernel;`（`pub` にしない）としている。
+//! 呼び出し元（`ops.rs`／`rmsnorm.rs`／`softmax.rs`）は macOS 限定の
+//! ため、Linux 単体ビルド（`cargo build`／`cargo clippy` の非テスト
+//! パス）では本モジュールの各項目が到達不能になり dead_code lint が
+//! 誤検知する。`pub` へ広げて回避せず、non-macOS ビルドに限定した
+//! 以下の `allow` で個別に抑制する（codex-review P1 指摘・PR #714。
+//! `lib.rs` 側コメント参照）。
+#![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
 use tensor_core::{DType, FusedOpKind, FusionPlan, RowFusionMeta};
 
