@@ -140,7 +140,12 @@ pub fn derive_stages_for_device(
 /// 返す `min_required` 未達エラーが「予算 0」という誤解を招く診断に
 /// なる。`TryFrom` 失敗を明示的な `InvalidKernelDescriptor` として伝播し、
 /// fail-closed のまま原因を追跡可能にする。
-fn read_clamped_smem_budget_bytes(device: &CudaDevice) -> Result<u64, CudaError> {
+///
+/// `pub(crate)`: イシュー #592（融合 RMSNorm 順伝播カーネル・`rmsnorm.rs`）
+/// が persistent block 数導出の SMEM 予算クランプを本関数と共有するため
+/// クレート内公開に広げた（#521 の「同じ属性取得・クランプ・エラー処理の
+/// 重複を避ける」教訓を GEMM 外のカーネルにも適用する）。
+pub(crate) fn read_clamped_smem_budget_bytes(device: &CudaDevice) -> Result<u64, CudaError> {
     let raw_attr = device
         .context()
         .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?;

@@ -5,9 +5,12 @@
 //! `gemm::CudaGemm::run_tiled_f32` へ委譲する（既存カーネル・許容誤差・
 //! 境界検査には触れない）。elementwise（`add`／`mul`／`relu`／`exp`／
 //! `tanh`）は `elementwise::CudaElementwise` へ委譲する（イシュー #599）。
-//! reduction（`sum`／`max`）は本イシュー時点でも未実装のため
+//! 汎用 reduction（`sum`／`max`）は未実装のまま
 //! [`tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
-//! out-of-scope-tracking.md 対象）。
+//! out-of-scope-tracking.md 対象）。イシュー #592 で `run_fused` を
+//! オーバーライドし、canonical RMSNorm 融合プラン（`x * rsqrt(sum(x^2))`）
+//! 検出時のみ融合カーネル（[`crate::rmsnorm::CudaRmsNorm`]）へルーティング
+//! する（`sum`／`max` 単独 API とは独立した経路）。
 //!
 //! `device.rs` の「動的ロード panic 回避ゲート」方針をそのまま踏襲する:
 //! `CudaDevice::new` は driver 不在を `Err(CudaError::DriverUnavailable)`
@@ -16,12 +19,13 @@
 //! `.claude/rules/coding-rust.md`）。
 
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, Tensor};
+use tensor_core::{Activation, BackendOps, FusionPlan, Tensor};
 
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
+use crate::rmsnorm::{CudaRmsNorm, match_rmsnorm_plan};
 
 /// CUDA バックエンドの `BackendOps` 実装。`ordinal` は `Device::Cuda(_)`
 /// の一致判定に使う `cudarc` のデバイス番号
@@ -298,12 +302,79 @@ impl BackendOps for CudaBackendOps {
         self.elementwise_unary(a, |ew, a_s| ew.run_tanh_f32(a_s))
     }
 
+    /// [`tensor_core::BackendOps::run_fused`] のデフォルト実装
+    /// （`Unsupported` fail-safe）を、canonical RMSNorm 融合プラン
+    /// （`x * rsqrt(sum(x^2))`。mean 化・eps・weight を含まない厳密形状）
+    /// 検出時のみ融合カーネル（[`crate::rmsnorm::CudaRmsNorm`]）へ
+    /// ルーティングする（イシュー #592）。
+    ///
+    /// プラン一致判定は [`match_rmsnorm_plan`]（純関数。プランの op 列・
+    /// leaf 数・`row_fusion()` の形状を厳密照合する）に委ねる。一致しない
+    /// プラン（softmax 型・elementwise-only 等）は本オーバーライドの対象
+    /// 外としてデフォルト実装（`Unsupported`）へ委ね、呼び出し元
+    /// （`autodiff::Tape` の実体化経路）の per-op フォールバックへ倒す
+    /// （`backend-cpu::fused_elementwise::run_fused_elementwise` の
+    /// allowlist 拒否方針と同じ fail-closed。`.claude/rules/security.md`
+    /// A08「判定の迂回経路を作らない」）。
+    ///
+    /// 一致した場合、プランの意味論 `x * rsqrt(sum(x^2))` に厳密一致させる
+    /// ため [`crate::rmsnorm::CudaRmsNorm::run_rmsnorm_f32_raw`]（`inv_n`
+    /// を明示できる内部エントリ）を `inv_n = 1.0`・`eps = 0.0`・
+    /// `w = None`（`has_weight = 0`）で直接呼ぶ（`mean` 化・`eps` 加算・
+    /// `weight` 乗算を勝手に補わない。標準 RMSNorm 用の公開 API
+    /// [`crate::rmsnorm::CudaRmsNorm::run_rmsnorm_f32`] は `inv_n =
+    /// 1/hidden` を内部導出してしまうため canonical プランには使えない。
+    /// `rmsnorm.rs` ドキュメンテーションコメント参照）。`rows = 1` は
+    /// canonical プランが `axis: None`（全軸縮約）のみを受理する
+    /// （`match_rmsnorm_plan` 参照）ため、行方向融合ではなく単一行として
+    /// 扱う。
+    fn run_fused(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let Some(hidden) = match_rmsnorm_plan(plan) else {
+            return Err(BackendError::Unsupported(
+                "CudaBackendOps::run_fused: プランが canonical RMSNorm 形状（x * \
+                 rsqrt(sum(x^2))）に一致しないため融合カーネルへルーティングできない \
+                 （#592 スコープ。呼び出し元の per-op フォールバックに委ねる）"
+                    .into(),
+            ));
+        };
+        let [x] = leaves else {
+            return Err(BackendError::Unsupported(format!(
+                "CudaBackendOps::run_fused: canonical RMSNorm プランは leaf 1 個を要求するが \
+                 {} 個が渡された",
+                leaves.len()
+            )));
+        };
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("run_fused: rmsnorm input not contiguous".into())
+        })?;
+
+        let device = self.device_handle()?;
+        let rmsnorm = CudaRmsNorm::new(&device)
+            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        let out = rmsnorm
+            .run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden)
+            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// 汎用 reduction カーネルは未実装のまま（#599 スコープ外・イシュー
+    /// #592 でも対象外）。イシュー #592 は融合 RMSNorm カーネル
+    /// （[`Self::run_fused`] 経由のみ）に閉じた縮約を実装したが、
+    /// `BackendOps::sum`（任意軸・非融合の単独縮約 API）自体の GPU
+    /// カーネル化は別イシューのスコープ（out-of-scope-tracking.md 対象）。
     fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "CudaBackendOps::sum: reduction カーネル未実装（#599 スコープ外）".into(),
         ))
     }
 
+    /// [`Self::sum`] と同じ理由（汎用 reduction 未実装）。
     fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "CudaBackendOps::max: reduction カーネル未実装（#599 スコープ外）".into(),
