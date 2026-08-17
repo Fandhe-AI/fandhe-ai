@@ -867,6 +867,53 @@ mod tests {
         assert!(src.contains("dw_partial[(long long)b * (long long)hidden + i] = acc;"));
     }
 
+    /// ソース中の `needle[` の各出現について、対応する `]` の直後
+    /// （空白を読み飛ばした先）が代入演算子 `=`（`==` 等の比較演算子は
+    /// 除く）であるかどうかを走査し、代入箇所（`needle[<式>] = ...`）の
+    /// 個数を返す。添字式中に `[`／`]` を含む可能性（本カーネルには
+    /// ないが将来の変更に備える）を考慮し、括弧の対応を数えて閉じ括弧
+    /// を特定する（Bugbot 指摘・PR #716: 旧実装は
+    /// `dw_partial[...] = `（`...` はリテラルの 3 文字）という実カーネル
+    /// コードに存在しない文字列をそのまま `contains` していたため、
+    /// 実際に `dw_partial[<式>] = <式>;` という書き戻しが混入しても
+    /// 常に真になり回帰を検知できない vacuous check になっていた）。
+    fn count_bracket_assignments(src: &str, needle: &str) -> usize {
+        let bytes = src.as_bytes();
+        let mut count = 0;
+        let mut search_from = 0;
+        while let Some(rel) = src[search_from..].find(needle) {
+            let open = search_from + rel + needle.len() - 1;
+            debug_assert_eq!(bytes[open], b'[');
+            let mut depth = 1i32;
+            let mut idx = open + 1;
+            let mut close = None;
+            while idx < bytes.len() {
+                match bytes[idx] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(idx);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+            let Some(close) = close else { break };
+            let mut after = close + 1;
+            while after < bytes.len() && (bytes[after] as char).is_whitespace() {
+                after += 1;
+            }
+            if bytes.get(after) == Some(&b'=') && bytes.get(after + 1) != Some(&b'=') {
+                count += 1;
+            }
+            search_from = close + 1;
+        }
+        count
+    }
+
     /// 縮約カーネルの epilogue が `dw` へ 1 回だけ書き、中間の縮約結果を
     /// HBM へ書き戻す第 3 パスを作らないことを検査する（§3.1・受け入れ
     /// 基準 2）。
@@ -880,10 +927,11 @@ mod tests {
         );
 
         // `dw_partial` は読み出し専用（`const float* __restrict__` 引数）
-        // であることを確認する。`dw_partial[...] = ` の代入パターン
-        // （縮約結果を HBM へ書いて読み戻す第 3 パスに相当）が存在しない
-        // ことを検査し、読み出し自体（`dw_partial[...]` が式の右辺に
-        // 現れる形）はテストの前提として最低 1 回存在することを確認する。
+        // であることを確認する。`dw_partial[<式>] = ` という代入パターン
+        // （縮約結果を HBM へ書いて読み戻す第 3 パスに相当）が実際に
+        // 存在しないことを `count_bracket_assignments` で検査し、読み出し
+        // 自体（`dw_partial[...]` が式の右辺に現れる形）はテストの前提
+        // として最低 1 回存在することを確認する。
         assert!(
             src.contains("const float* __restrict__ dw_partial"),
             "dw_partial は const（読み出し専用）引数である契約"
@@ -892,8 +940,9 @@ mod tests {
             src.matches("dw_partial[").count() >= 1,
             "dw_partial の読み出しが見つからない（テスト自体の前提崩れ）"
         );
-        assert!(
-            !src.contains("dw_partial[") || !src.contains("dw_partial[...] ="),
+        assert_eq!(
+            count_bracket_assignments(src, "dw_partial["),
+            0,
             "縮約カーネルは dw_partial へ書き出さない契約"
         );
     }
