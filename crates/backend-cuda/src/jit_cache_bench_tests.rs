@@ -136,15 +136,51 @@ impl Drop for TempDirGuard {
 /// 独立して定義する（`jit_cache_regression_tests.rs` 冒頭コメント参照）。
 /// 戻り値は [`TempDirGuard`] であり、呼び出し元スコープを抜けるときに
 /// panic 経路も含めて自動的に片付けられる。
+///
+/// # PID 再利用時の衝突対策（Review #698 指摘）
+///
+/// PID とプロセス内カウンタだけでは、実機ベンチが SIGKILL・ホスト停止等で
+/// [`TempDirGuard::drop`] を実行できずに一時ディレクトリが残存した場合、
+/// 後続プロセスで OS が同じ PID を再利用すると `seq` の再現（プロセス起動
+/// 直後は `SEQ == 0` から再開する）によって同名ディレクトリへ書き込む
+/// 可能性が理論上残る（実機ランナー上で繰り返し実行される用途のため無視
+/// できない）。そこで `tempfile` 相当の「実際に新規であること」を
+/// 以下の 2 点で保証する:
+/// - 名前に `SystemTime::now()` のナノ秒成分を追加し、PID 再利用が起きても
+///   同名になる確率を実用上無視できる水準まで下げる
+/// - `create_dir_all`（既存ディレクトリを黙って受け入れる）ではなく
+///   `create_dir`（既存なら `AlreadyExists` で失敗する排他的な作成）を使い、
+///   衝突を検出したら新しい名前で再試行する（最大 [`CREATE_DIR_RETRIES`] 回）
 fn fresh_temp_dir(label: &str) -> TempDirGuard {
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "rust-ai-library-cache-bench.c12.{label}.{}.{seq}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&dir).expect("failed to create bench temp dir");
-    TempDirGuard(dir)
+    const CREATE_DIR_RETRIES: u32 = 8;
+
+    let pid = std::process::id();
+    for attempt in 0..CREATE_DIR_RETRIES {
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after UNIX_EPOCH")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "rust-ai-library-cache-bench.c12.{label}.{pid}.{seq}.{nanos}"
+        ));
+        match fs::create_dir(&dir) {
+            Ok(()) => return TempDirGuard(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // PID 再利用等による稀な名前衝突。新しい seq・nanos で
+                // 作り直す（最大 CREATE_DIR_RETRIES 回まで）。
+                continue;
+            }
+            Err(e) => {
+                panic!("failed to create bench temp dir on attempt {attempt}: {e}")
+            }
+        }
+    }
+    panic!(
+        "failed to create a fresh bench temp dir after {CREATE_DIR_RETRIES} retries \
+         (persistent AlreadyExists collisions)"
+    );
 }
 
 /// 決定的シードで GEMM 入力（A・B、f16）を生成する（`specialized_mma_parity.rs::gen_ab`
