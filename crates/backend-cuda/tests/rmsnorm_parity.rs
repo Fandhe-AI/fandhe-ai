@@ -18,7 +18,7 @@
 //! cargo test -p backend-cuda --release --test rmsnorm_parity -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaRmsNorm};
+use backend_cuda::{CudaDevice, CudaError, CudaRmsNorm};
 use bench_harness::rng::Xorshift64Star;
 
 mod common;
@@ -102,11 +102,21 @@ fn assert_rmsnorm_parity(
 /// （`gemm_bias_act_parity.rs::gemm_bias_act_parity_smoke_env_adaptive`
 /// と同じ分岐パターンを、カーネルコンパイルの失敗可能性まで含めて拡張）。
 /// 実機なら形状網羅ケースまで実行する。
+///
+/// いずれの `match` も環境不在を表す既知の variant
+/// （`DriverUnavailable`／`NvrtcUnavailable`）のみを早期 return の対象と
+/// し、それ以外（カーネルのコンパイルエラー・関数名不一致・属性取得
+/// エラー等）は `panic!` する。全 `Err` を無条件に環境不在扱いすると、
+/// CUDA/NVRTC が利用可能な CI 環境でも実際のバグが握りつぶされテストが
+/// 誤って成功してしまう（codex-review 指摘・PR #706 レビュー
+/// r3793473253。`device_init.rs`／`transpose_parity.rs` と同じ厳密な
+/// variant match パターンを踏襲する）。
 #[test]
 fn rmsnorm_parity_smoke_env_adaptive() {
     let device = match CudaDevice::new(0) {
         Ok(device) => device,
-        Err(_) => return, // CUDA driver 非搭載環境。panic しないことのみ確認する。
+        Err(CudaError::DriverUnavailable { .. }) => return,
+        Err(other) => panic!("unexpected error variant for CudaDevice::new: {other}"),
     };
     match CudaRmsNorm::new(&device) {
         Ok(rmsnorm) => {
@@ -114,10 +124,11 @@ fn rmsnorm_parity_smoke_env_adaptive() {
             assert_rmsnorm_parity(&rmsnorm, 801, 802, 1, 8, false, 1e-5);
             assert_rmsnorm_parity(&rmsnorm, 803, 804, 3, 1024, true, 1e-5);
         }
-        Err(_) => {
+        Err(CudaError::NvrtcUnavailable { .. }) => {
             // NVRTC 非搭載環境（driver はあるが nvrtc が無い）。panic
             // しないことのみ確認する。
         }
+        Err(other) => panic!("unexpected error variant for CudaRmsNorm::new: {other}"),
     }
 }
 

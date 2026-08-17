@@ -104,12 +104,14 @@ pub(crate) fn derive_persistent_grid_two_pass(sm_count: u32, rows: u32) -> u32 {
 /// ホスト側検証（起動前・fail-closed）: `rows * hidden == x_len`（checked
 /// 乗算）・`w_len == Some(hidden)`（`w` 指定時のみ）・`rows`／`hidden`／
 /// `numel` が `i32::MAX`（カーネル引数 `int rows`／`int hidden` 契約）に
-/// 収まること・`eps` が有限値（`is_finite()`。`0.0` も有限値として許容
-/// する。`run_fused` 経由の canonical プラン起動は `eps = 0.0` を渡す
-/// 契約——`ops.rs` ドキュメンテーションコメント参照——であり、有限値
-/// チェックはこれを妨げない）を検証する（`elementwise.rs::
-/// validate_elementwise_len` と同じ OWASP A03 対策。`.claude/rules/
-/// security.md`）。
+/// 収まること・`eps` が有限かつ非負（`is_finite() && eps >= 0.0`。`0.0`
+/// は許容する——`run_fused` 経由の canonical プラン起動は `eps = 0.0` を
+/// 渡す契約——`ops.rs` ドキュメンテーションコメント参照。負の `eps` を
+/// 許すと `sum(x^2) * inv_n + eps` が負化しうる〈有限入力から `sqrt` が
+/// NaN を生成する経路。codex-review 指摘・PR #706 レビュー
+/// r3793473250〉ため fail-closed で拒否する）を検証する
+/// （`elementwise.rs::validate_elementwise_len` と同じ OWASP A03 対策。
+/// `.claude/rules/security.md`）。
 pub(crate) fn validate_rmsnorm_launch(
     rows: usize,
     hidden: usize,
@@ -117,9 +119,9 @@ pub(crate) fn validate_rmsnorm_launch(
     w_len: Option<usize>,
     eps: f32,
 ) -> Result<(), CudaError> {
-    if !eps.is_finite() {
+    if !eps.is_finite() || eps < 0.0 {
         return Err(CudaError::InvalidRmsNormShape {
-            detail: format!("rmsnorm eps must be finite: eps={eps}"),
+            detail: format!("rmsnorm eps must be finite and non-negative: eps={eps}"),
         });
     }
 
@@ -359,20 +361,25 @@ impl CudaRmsNorm {
 
         let (func, cfg): (&CudaFunction, LaunchConfig) = match route {
             RmsNormRoute::OnePassSmem => {
+                // `derive_persistent_grid_one_pass` の `smem_bytes_per_block`
+                // 引数は「1 ブロックが実際に確保する SMEM バイト数」を
+                // 受け取る契約（同関数のドキュメンテーションコメント
+                // 参照）。予算上限（`self.smem_per_block_budget_bytes`。
+                // 通常 48KiB）をそのまま渡すと、行サイズが予算より小さい
+                // 一般的な hidden で `blocks_per_sm` が過小評価され、
+                // 意図した persistent occupancy 上限（16）を大きく下回る
+                // （cursor[bot] 指摘・PR #706 レビュー r3793478990）。
+                // 経路判定〈`rmsnorm_route`〉は予算上限との比較のままで
+                // よいが、grid 導出とカーネル起動の `shared_mem_bytes` は
+                // 実際に確保する `hidden * 4` を単一の真実源として揃える。
+                let smem_bytes_per_block = (hidden as u64).saturating_mul(4);
                 let grid = derive_persistent_grid_one_pass(
                     self.smem_per_sm_budget_bytes,
                     self.sm_count,
-                    self.smem_per_block_budget_bytes,
+                    smem_bytes_per_block,
                     rows_i as u32,
                 );
-                // `hidden * 4` は `rmsnorm_route` が `smem_per_block_budget_bytes`
-                // 以下であることを既に確認済み（同一クランプ済み予算を
-                // 経路判定・起動の双方が参照する。両者が異なる予算値を
-                // 参照すると smem 超過で実機起動が失敗しうるため、
-                // 経路判定〈`rmsnorm_route`〉と起動〈本関数〉は同一の
-                // `self.smem_per_block_budget_bytes` を単一の真実源とする）。
-                let shared_mem_bytes =
-                    (hidden as u64).saturating_mul(4).min(u32::MAX as u64) as u32;
+                let shared_mem_bytes = smem_bytes_per_block.min(u32::MAX as u64) as u32;
                 (
                     &self.onepass_f32,
                     LaunchConfig {
@@ -400,9 +407,12 @@ impl CudaRmsNorm {
         // 形状と 1:1 対応するデバイスバッファ長・値であり、カーネル内の
         // 手動境界チェック（`if (base+3 < hidden)`／グリッドストライド
         // `row < rows`・REQ-8）と合わせて OOB 読み書きが起きない根拠と
-        // する。1 パス経路の `shared_mem_bytes` は上記コメントのとおり
-        // `rmsnorm_route` の判定と同一の予算値から導出しており、smem
-        // 予算超過による起動失敗を経路選択の時点で排除している。
+        // する。1 パス経路の `shared_mem_bytes` は `hidden * 4`（実際に
+        // 確保する SMEM バイト数）であり、`rmsnorm_route` が判定した
+        // `smem_per_block_budget_bytes` 以下であることを既に確認済み
+        // （経路判定は予算上限との比較、起動は実バイト数という異なる
+        // 量を扱うが、`hidden * 4 <= 予算上限` の不変条件により smem
+        // 予算超過による起動失敗は起きない）。
         unsafe {
             self.stream
                 .launch_builder(func)
@@ -532,6 +542,16 @@ mod tests {
         let err = validate_rmsnorm_launch(3, 8, 24, None, f32::NAN).unwrap_err();
         assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
         let err = validate_rmsnorm_launch(3, 8, 24, None, f32::INFINITY).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_rmsnorm_launch_rejects_negative_eps() {
+        // 負の eps は `sum(x^2) * inv_n + eps` を負化しうるため fail-closed
+        // で拒否する（codex-review 指摘・PR #706 レビュー r3793473250）。
+        let err = validate_rmsnorm_launch(3, 8, 24, None, -1e-5).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+        let err = validate_rmsnorm_launch(3, 8, 24, None, -0.0001).unwrap_err();
         assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
     }
 
