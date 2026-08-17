@@ -10,19 +10,34 @@
 //!
 //! # 数値契約（online softmax 固有）
 //!
-//! - **`log2(e)` 事前スケール + `exp2f` のみ使用**: `scale` 引数（ホスト側
+//! - **`log2(e)` 事前スケールは「最大値との差分を取った後」に適用し
+//!   `exp2f` のみを使用**: `scale` 引数（ホスト側
 //!   `softmax.rs::CudaSoftmax::run_softmax_f32` が `std::f32::consts::LOG2_E`
 //!   を渡す。将来 attention 融合時の `log2(e)/sqrt(d)` 合成を見込んだ引数化）
-//!   を入力へ乗算してから `exp2f` を適用することで、`e^x = 2^(x*log2(e))`
-//!   の恒等式によりカーネル内は **`expf` を一切使わず `exp2f` のみ**で
-//!   完結する（GPU のハードウェア `exp2` 命令に直結させる定石）。
+//!   は、オンライン最大値 `m`（**入力と同じ生ドメイン。スケール未適用**）
+//!   との差分 `(raw - m) * scale` を計算する `exp2f` 呼び出し直前でのみ
+//!   乗算する。`e^x = 2^(x*log2(e))` の恒等式によりカーネル内は
+//!   **`expf` を一切使わず `exp2f` のみ**で完結する（GPU のハードウェア
+//!   `exp2` 命令に直結させる定石）という性質は保ったまま、`raw * scale`
+//!   を先に計算しない（イシュー #594 PR #712 codex-review 指摘・P1 修正:
+//!   旧実装は `v = raw * scale` を最大値減算より先に行っていたため、
+//!   `raw = f32::MAX` のような有限な極値でも `v = +Inf` へオーバーフロー
+//!   し、続く `m_new = max(m, v) = +Inf` と合わせて `exp2f(v - m_new) =
+//!   exp2f(Inf - Inf) = NaN` が発生していた。CPU 参照実装
+//!   〈`tests/softmax_parity.rs`〉は max-sub 後に指数を取るため同じ
+//!   `±f32::MAX` 付近の入力でも有限な結果になり、バックエンド間の数値
+//!   契約〈`.claude/rules/coding-rust.md` の FMA 契約統一・複合誤差判定と
+//!   同種の一致要件〉が破られていた。差分 `raw - m` は `m` が走査済み
+//!   最大値であるため常に `<= 0` であり、スケール未適用の生ドメインで
+//!   引き算することで同種のオーバーフローを避ける）。
 //! - **オンライン最大値更新・補正係数スキップ**: 各 lane は担当要素を
-//!   走査しながら `m`（走査済み最大値。exp2 ドメイン）・`l`（走査済み
-//!   分母）を同時更新する。`m_new = max(m, v)` が **更新されたときのみ**
-//!   `l *= exp2f(m - m_new)` を実行し（更新されない場合は `correction = 1`
-//!   の乗算を省く）、続けて `l += exp2f(v - m_new)` する。warp 内の
-//!   32 lane 間の結合（5 段 `__shfl_xor_sync` butterfly。offset
-//!   16→8→4→2→1）でも同じ補正係数スキップを適用する。
+//!   走査しながら `m`（走査済み最大値。**生ドメイン**。上記参照）・`l`
+//!   （走査済み分母）を同時更新する。`m_new = max(m, raw)` が **更新
+//!   されたときのみ** `l *= exp2f((m - m_new) * scale)` を実行し
+//!   （更新されない場合は `correction = 1` の乗算を省く）、続けて
+//!   `l += exp2f((raw - m_new) * scale)` する。warp 内の 32 lane 間の
+//!   結合（5 段 `__shfl_xor_sync` butterfly。offset 16→8→4→2→1）でも
+//!   同じ補正係数スキップを適用する。
 //! - **2 段シャッフルではなく 5 段 butterfly を採る理由**: 参照実装
 //!   （metal-flash-attention）は幅 1・8 の 2 段シャッフルで済ませるが、
 //!   これは Metal simdgroup の Morton 順（zigzag）レーンレイアウト
@@ -34,8 +49,10 @@
 //!   （offset 16→1）を採用し、CUDA の線形レーンレイアウトで全 lane の
 //!   `(m, l)` ペアを正しく結合する。
 //! - **境界マスク定数（有限値。`-INFINITY` 不使用）**: lane の初期値は
-//!   `m = SOFTMAX_MASK_E2`（`-0.875f * __FLT_MAX__`。exp2 ドメインの
-//!   有限な大きな負値）・`l = 0`。`__FLT_MAX__` は Clang/NVRTC の
+//!   `m = SOFTMAX_MASK_E2`（`-0.875f * __FLT_MAX__`。**生ドメイン**〈上記
+//!   「`log2(e)` 事前スケール」参照。`m` はスケール未適用のため、この
+//!   マスク値も生ドメインの有限な大きな負値として機能する〉・`l = 0`。
+//!   `__FLT_MAX__` は Clang/NVRTC の
 //!   プリプロセッサ組み込みマクロ（`<cfloat>`/`<float.h>` の include を
 //!   要求しない。`kernels_rmsnorm.rs` 同様「ビルド時に nvrtc/CUDA
 //!   ヘッダを一切要求しない」契約を維持する）。`-INFINITY` を直接使うと
@@ -100,15 +117,20 @@ extern "C" __global__ void softmax_f32_onepass(
         const float* x_row = x + row * (long long)cols;
         float* out_row = out + row * (long long)cols;
 
-        // online softmax の走査済み最大値（exp2 ドメイン）・走査済み分母。
-        // `m` の初期値は有限マージン値（本ファイル冒頭コメント「境界
-        // マスク定数」参照）。
+        // online softmax の走査済み最大値（**生ドメイン**。スケール未適用。
+        // 本ファイル冒頭コメント「`log2(e)` 事前スケールは『最大値との
+        // 差分を取った後』に適用」参照）・走査済み分母。`m` の初期値は
+        // 有限マージン値（本ファイル冒頭コメント「境界マスク定数」参照）。
         float m = SOFTMAX_MASK_E2;
         float l = 0.0f;
 
         // ベクトル化ロード（float4）+ SMEM への raw 値格納 + online 更新。
         // `base` は `long long`（本ファイル冒頭コメント「ベクトル化・
-        // ループ添字・REQ-8 境界検査」参照）。
+        // ループ添字・REQ-8 境界検査」参照）。`scale` は最大値との差分
+        // 計算後の `exp2f` 直前でのみ乗算する（イシュー #594 PR #712
+        // codex-review 指摘・P1 修正: `raw * scale` を先に計算すると
+        // `raw = f32::MAX` 等の有限な極値で `+Inf` へオーバーフローし
+        // `exp2f(Inf - Inf) = NaN` になるため）。
         for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
@@ -116,21 +138,19 @@ extern "C" __global__ void softmax_f32_onepass(
                 smem[base + 1] = v4.y;
                 smem[base + 2] = v4.z;
                 smem[base + 3] = v4.w;
-                float vals[4] = {
-                    v4.x * scale, v4.y * scale, v4.z * scale, v4.w * scale
-                };
+                float vals[4] = { v4.x, v4.y, v4.z, v4.w };
                 #pragma unroll
                 for (int k = 0; k < 4; ++k) {
-                    float v = vals[k];
-                    float m_new = fmaxf(m, v);
+                    float raw = vals[k];
+                    float m_new = fmaxf(m, raw);
                     // 補正係数スキップ: 最大値が更新されないときは
                     // `correction = 1` の乗算を省く（本ファイル冒頭
                     // コメント「オンライン最大値更新・補正係数スキップ」
                     // 参照）。
                     if (m_new > m) {
-                        l *= exp2f(m - m_new);
+                        l *= exp2f((m - m_new) * scale);
                     }
-                    l += exp2f(v - m_new);
+                    l += exp2f((raw - m_new) * scale);
                     m = m_new;
                 }
             }
@@ -139,12 +159,11 @@ extern "C" __global__ void softmax_f32_onepass(
         for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
             float raw = x_row[i];
             smem[i] = raw;
-            float v = raw * scale;
-            float m_new = fmaxf(m, v);
+            float m_new = fmaxf(m, raw);
             if (m_new > m) {
-                l *= exp2f(m - m_new);
+                l *= exp2f((m - m_new) * scale);
             }
-            l += exp2f(v - m_new);
+            l += exp2f((raw - m_new) * scale);
             m = m_new;
         }
 
@@ -156,14 +175,15 @@ extern "C" __global__ void softmax_f32_onepass(
         // warp 内 (m, l) ペアの butterfly 結合（5 段。offset 16→1。本
         // ファイル冒頭コメント「2 段シャッフルではなく 5 段 butterfly を
         // 採る理由」参照）。等値側（`m_t == m` または `m_t == m_o`）は
-        // 補正係数スキップを適用する。
+        // 補正係数スキップを適用する。`m`／`m_o` は生ドメインのため差分
+        // 計算後に `scale` を乗算する（上記と同じ理由）。
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
             float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
             float m_t = fmaxf(m, m_o);
-            float l_self = (m_t > m) ? (l * exp2f(m - m_t)) : l;
-            float l_peer = (m_t > m_o) ? (l_o * exp2f(m_o - m_t)) : l_o;
+            float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
+            float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
             l = l_self + l_peer;
             m = m_t;
         }
@@ -171,8 +191,7 @@ extern "C" __global__ void softmax_f32_onepass(
         float inv_l = 1.0f / l;
 
         for (long long i = lane; i < cols; i += 32) {
-            float v = smem[i] * scale;
-            out_row[i] = exp2f(v - m) * inv_l;
+            out_row[i] = exp2f((smem[i] - m) * scale) * inv_l;
         }
 
         // 次の行（grid-stride ループの次反復）が smem を上書きする前に、
@@ -184,11 +203,12 @@ extern "C" __global__ void softmax_f32_onepass(
 
 /// 2 パス経路（global 再読）: 1 パス経路の SMEM 予算を超える行長
 /// （`softmax_route` が `TwoPass` を選んだ場合）で使う。Pass 1 で `x` を
-/// global から読み online softmax の `(m, l)` を確定、Pass 2 で同一
-/// カーネル・同一行ループ内で `x` を再度 global から読み
-/// `exp2f(v - m) * inv_l` を書き出す（Pass 1 とビット同一の
-/// `v = x[i] * scale` を再計算する。決定性維持。`kernels_rmsnorm.rs`
-/// の 2 パス経路と同じ「中間テンソルを書き出さない」構造）。
+/// global から読み online softmax の `(m, l)`（`m` は生ドメイン。本
+/// ファイル冒頭コメント「`log2(e)` 事前スケール」参照）を確定、Pass 2 で
+/// 同一カーネル・同一行ループ内で `x` を再度 global から読み
+/// `exp2f((raw - m) * scale) * inv_l` を書き出す（Pass 1 とビット同一の
+/// `raw = x[i]` を再計算する。決定性維持。`kernels_rmsnorm.rs` の
+/// 2 パス経路と同じ「中間テンソルを書き出さない」構造）。
 pub const SOFTMAX_F32_TWOPASS: &str = r#"
 #define SOFTMAX_MASK_E2 (-0.875f * __FLT_MAX__)
 
@@ -207,33 +227,34 @@ extern "C" __global__ void softmax_f32_twopass(
         float* out_row = out + row * (long long)cols;
 
         // Pass 1: online (m, l) を計算する（smem 非使用・global 直読）。
+        // `m` は生ドメイン（スケール未適用）。`scale` は差分計算後の
+        // `exp2f` 直前でのみ乗算する（イシュー #594 PR #712 codex-review
+        // 指摘・P1 修正。本ファイル冒頭コメント参照）。
         float m = SOFTMAX_MASK_E2;
         float l = 0.0f;
         for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
-                float vals[4] = {
-                    v4.x * scale, v4.y * scale, v4.z * scale, v4.w * scale
-                };
+                float vals[4] = { v4.x, v4.y, v4.z, v4.w };
                 #pragma unroll
                 for (int k = 0; k < 4; ++k) {
-                    float v = vals[k];
-                    float m_new = fmaxf(m, v);
+                    float raw = vals[k];
+                    float m_new = fmaxf(m, raw);
                     if (m_new > m) {
-                        l *= exp2f(m - m_new);
+                        l *= exp2f((m - m_new) * scale);
                     }
-                    l += exp2f(v - m_new);
+                    l += exp2f((raw - m_new) * scale);
                     m = m_new;
                 }
             }
         }
         for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
-            float v = x_row[i] * scale;
-            float m_new = fmaxf(m, v);
+            float raw = x_row[i];
+            float m_new = fmaxf(m, raw);
             if (m_new > m) {
-                l *= exp2f(m - m_new);
+                l *= exp2f((m - m_new) * scale);
             }
-            l += exp2f(v - m_new);
+            l += exp2f((raw - m_new) * scale);
             m = m_new;
         }
 
@@ -242,8 +263,8 @@ extern "C" __global__ void softmax_f32_twopass(
             float m_o = __shfl_xor_sync(0xffffffffu, m, offset);
             float l_o = __shfl_xor_sync(0xffffffffu, l, offset);
             float m_t = fmaxf(m, m_o);
-            float l_self = (m_t > m) ? (l * exp2f(m - m_t)) : l;
-            float l_peer = (m_t > m_o) ? (l_o * exp2f(m_o - m_t)) : l_o;
+            float l_self = (m_t > m) ? (l * exp2f((m - m_t) * scale)) : l;
+            float l_peer = (m_t > m_o) ? (l_o * exp2f((m_o - m_t) * scale)) : l_o;
             l = l_self + l_peer;
             m = m_t;
         }
@@ -251,21 +272,22 @@ extern "C" __global__ void softmax_f32_twopass(
         float inv_l = 1.0f / l;
 
         // Pass 2: x を再度 global から読み、Pass 1 とビット同一の
-        // `v = x[i] * scale` を再計算して書き出す（同一カーネル・同一
-        // 行ループ内で完結。中間テンソルは書き出さない）。
+        // `raw = x[i]` を再計算し `exp2f((raw - m) * scale)` を書き出す
+        // （同一カーネル・同一行ループ内で完結。中間テンソルは書き出さ
+        // ない）。
         for (long long base = lane * 4; base < vec_cols; base += 32 * 4) {
             if (base + 3 < cols) {
                 float4 v4 = *reinterpret_cast<const float4*>(x_row + base);
                 float4 o;
-                o.x = exp2f(v4.x * scale - m) * inv_l;
-                o.y = exp2f(v4.y * scale - m) * inv_l;
-                o.z = exp2f(v4.z * scale - m) * inv_l;
-                o.w = exp2f(v4.w * scale - m) * inv_l;
+                o.x = exp2f((v4.x - m) * scale) * inv_l;
+                o.y = exp2f((v4.y - m) * scale) * inv_l;
+                o.z = exp2f((v4.z - m) * scale) * inv_l;
+                o.w = exp2f((v4.w - m) * scale) * inv_l;
                 *reinterpret_cast<float4*>(out_row + base) = o;
             }
         }
         for (long long i = (long long)vec_cols + lane; i < cols; i += 32) {
-            out_row[i] = exp2f(x_row[i] * scale - m) * inv_l;
+            out_row[i] = exp2f((x_row[i] - m) * scale) * inv_l;
         }
     }
 }

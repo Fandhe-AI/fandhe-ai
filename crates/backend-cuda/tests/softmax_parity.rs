@@ -177,6 +177,32 @@ fn softmax_numerically_stable_for_extreme_inputs() {
         "softmax output must sum to ~1.0, got {sum}"
     );
 
+    // `±f32::MAX` 付近（イシュー #594 PR #712 codex-review 指摘・P1
+    // 修正の直接的な回帰テスト）。旧実装は `raw * scale`（`scale =
+    // log2(e)`）を最大値減算より先に行っていたため、`f32::MAX` のような
+    // 有限な極値が `+Inf` へオーバーフローし、続く `exp2f(Inf - Inf) =
+    // NaN` が発生していた（`kernels_softmax.rs` 冒頭コメント「`log2(e)`
+    // 事前スケール」参照）。
+    let f32_max_x: Vec<f32> = vec![f32::MAX, f32::MAX, 0.0, -f32::MAX];
+    let out = softmax
+        .run_softmax_f32(&f32_max_x, 1, 4)
+        .expect("softmax must succeed for ±f32::MAX input");
+    assert!(
+        out.iter().all(|v| v.is_finite() && !v.is_nan()),
+        "output must not contain NaN/Inf for ±f32::MAX input: {out:?}"
+    );
+    let sum: f32 = out.iter().sum();
+    assert!(
+        (sum - 1.0).abs() < 1e-3,
+        "softmax output must sum to ~1.0 for ±f32::MAX input, got {sum}"
+    );
+    // 2 要素が `f32::MAX` で並ぶため、そのペアがおよそ 0.5 ずつを分け合う
+    // （`-f32::MAX`・`0.0` は寄与がアンダーフローして無視できる）。
+    assert!(
+        (out[0] - 0.5).abs() < 1e-3 && (out[1] - 0.5).abs() < 1e-3,
+        "±f32::MAX input: tied maxima should each get ~0.5, got {out:?}"
+    );
+
     // 行長 1 → 出力は恒等的に 1.0。
     let single_x = vec![42.0f32];
     let out = softmax

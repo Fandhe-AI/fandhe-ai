@@ -282,8 +282,10 @@ impl CudaSoftmax {
         self.run_softmax_f32_raw(x, std::f32::consts::LOG2_E, rows, cols)
     }
 
-    /// `out[r, :] = exp2(x[r, :] * scale - m_r) / l_r`（`m_r`／`l_r` は行
-    /// `r` の online softmax 統計）を実行する内部エントリ。`scale` を
+    /// `out[r, :] = exp2((x[r, :] - m_r) * scale) / l_r`（`m_r`／`l_r` は行
+    /// `r` の online softmax 統計。`m_r` は生ドメイン〈スケール未適用〉。
+    /// `kernels_softmax.rs` 冒頭コメント「`log2(e)` 事前スケール」参照）を
+    /// 実行する内部エントリ。`scale` を
     /// 呼び出し元が明示するため、標準公開 API（[`Self::run_softmax_f32`]・
     /// `scale = log2(e)`）と将来の attention 融合（`scale = log2(e)/sqrt(d)`
     /// 合成。実装計画 §3.1「将来の attention 合成を見込んだ引数化」）の
