@@ -108,6 +108,59 @@ G-12／G-14 のスコープであり、下表は実測後の記入枠として�
 | 改善後 | Rust（自作コア。融合 RMSNorm / online softmax / 量子化キャスト適用後） | （記入） | （記入） | （記入） | （記入） | （記入） | （記入） |
 | 基準 | PyTorch 2.13.0+cu130 | （記入） | （記入） | （記入） | 1.00（基準） | （記入） | （記入） |
 
+### CUDA 実行手順・実装状況（#602・G-12。本イシューで追記）
+
+G-12（#602）のスコープである CUDA 実行経路（Phase G 融合カーネル適用前後の両方）は
+`crates/bench-harness/tests/transformer_workload.rs` に実装済み（`#[ignore]` 分離。通常 CI
+では実行されない）。DGX Spark GB10 実機での実測自体は未実施（下記「未実測の理由」参照）。
+
+- **改善前**（融合カーネル未適用）: `transformer_block_forward_bench_cuda_prefusion`
+  （既存の `full_forward`／`linear`／`multi_head_attention` をそのまま
+  `CudaBackendOps` へ適用。`report_name("cuda")` を `BenchReport.name` に使う）
+- **改善後**（`gemm_bias_act` epilogue 融合・#599／online softmax・#594 適用）:
+  `transformer_block_forward_bench_cuda_fused`（`full_forward_fused` を適用。
+  `report_name_fused("cuda")` を `BenchReport.name` に使う）
+- **数値一致検証**: `transformer_block_forward_cuda_fused_parity`（改善前後の出力を
+  REQ-2 複合判定〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉で照合）
+- 実行コマンド（`docs/real-hardware-verification-env.md` §4.1 形式）:
+
+  ```sh
+  env PATH=...:$PATH CARGO_TARGET_DIR=... \
+    cargo test -p bench-harness --release --test transformer_workload \
+    -- transformer_block_forward_bench_cuda_prefusion --ignored --nocapture
+  ```
+
+  改善後・parity も同様に**関数名を完全一致で指定**して個別実行すること。
+  `-- --ignored transformer` のような部分一致フィルタは
+  `transformer_block_forward_bench_cpu`（CPU 経路。本イシューのスコープ外）にも
+  一致してしまうため使わない。
+
+- **適用範囲の非対称性（相対改善率を読む際の注意）**: 「改善後」経路は QKV／出力射影／
+  FFN の GEMM＋bias（`linear` → `linear_fused`。真の epilogue 融合効果）と、attention
+  softmax（ホスト naive `softmax` → `run_fused` 経由の GPU online softmax カーネル。
+  こちらは非融合側がそもそも GPU に触れていないため「融合効果」ではなく「ホスト→GPU
+  移行効果」）の 2 種類の異なる性質の差分を含む。attention バッチ行列積・
+  LayerNormalization・GELU・残差 `Add` は両経路とも同一のホスト naive 実装のまま
+  （Phase G がこれらの融合カーネルを提供していないため）。相対改善率を記入する際は
+  この非対称性（linear 側＝真の融合効果、softmax 側＝ホスト→GPU 移行効果の混入）を
+  注記した上で記入すること
+- 同期方式は CPU と同じく契約上ホスト常駐 `Tensor<f32>` を同期的に返す
+  （§3 の CUDA 行）が、`CudaBackendOps` はデバイス常駐バッファを保持しないため
+  **per-op（GEMM／bias-add／softmax／LayerNorm 等ごと）にホスト転送が発生し、
+  その転送コストが計測値へそのまま含まれる**（`docs/perf/
+  transformer-workload-baseline.md` 改訂時の既知の制約。デバイス常駐化による
+  転送削減は本イシューのスコープ外）
+
+**未実測の理由（fail-closed。#602 実装計画 §10）**: 本イシューの実装作業を行った
+worktree は DGX Spark GB10 実機ではなく、CUDA driver（`nvidia-smi` で確認可能）はあるが
+NVRTC（`libnvrtc.so`。CUDA toolkit 由来）を欠く別の GPU（sm_121 と異なる sm 世代）の
+開発ボックスであり、`docs/real-hardware-verification-env.local.md`（実機接続情報。
+Git 管理外）も存在しない。実機と異なるハードウェアでの計測値を本文書へ記入すると
+誤った基準値として扱われるおそれがあるため、**実測は行わず上記コードの実装のみを
+本イシューの成果とする**。DGX Spark GB10 実機での §7 CUDA 表・GEMM 単体非劣化確認
+（`cuda_floor_bench`）・対 PyTorch 比計測は後続の対応が必要（本 PR の out-of-scope
+記録を参照）。
+
 ### Metal（Apple M4 Max。G-14・#605 のスコープ）
 
 | 段階 | 実装 | median | Q1 | Q3 | 対 PyTorch 比 | commit SHA | 実施日 |
