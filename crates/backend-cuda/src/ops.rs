@@ -5,9 +5,12 @@
 //! `gemm::CudaGemm::run_tiled_f32` へ委譲する（既存カーネル・許容誤差・
 //! 境界検査には触れない）。elementwise（`add`／`mul`／`relu`／`exp`／
 //! `tanh`）は `elementwise::CudaElementwise` へ委譲する（イシュー #599）。
-//! reduction（`sum`／`max`）は本イシュー時点でも未実装のため
+//! 汎用 reduction（`sum`／`max`）は未実装のまま
 //! [`tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
-//! out-of-scope-tracking.md 対象）。
+//! out-of-scope-tracking.md 対象）。イシュー #592 で `run_fused` を
+//! オーバーライドし、canonical RMSNorm 融合プラン（`x * rsqrt(sum(x^2))`）
+//! 検出時のみ融合カーネル（[`crate::rmsnorm::CudaRmsNorm`]）へルーティング
+//! する（`sum`／`max` 単独 API とは独立した経路）。
 //!
 //! `device.rs` の「動的ロード panic 回避ゲート」方針をそのまま踏襲する:
 //! `CudaDevice::new` は driver 不在を `Err(CudaError::DriverUnavailable)`
@@ -16,12 +19,13 @@
 //! `.claude/rules/coding-rust.md`）。
 
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, Tensor};
+use tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
+use crate::rmsnorm::{CudaRmsNorm, match_rmsnorm_plan};
 
 /// CUDA バックエンドの `BackendOps` 実装。`ordinal` は `Device::Cuda(_)`
 /// の一致判定に使う `cudarc` のデバイス番号
@@ -129,6 +133,31 @@ pub(crate) enum GemmBiasActRoute {
     Fused,
     /// デフォルト実装（`gemm`→`add`→act の非融合合成）へフォールバックする。
     ComposedFallback,
+}
+
+/// [`CudaRmsNorm::new`] の初期化失敗を `BackendError` へ変換する（純関数。
+/// 実機なしで単体テスト可能）。
+///
+/// `CudaError::DriverUnavailable`／`NvrtcUnavailable` のみを環境不在
+/// （`BackendError::CudaUnavailable`。CUDA/NVRTC 非搭載環境での早期
+/// フォールバックを想定した variant）として扱う。それ以外
+/// （NVRTC コンパイルエラー・関数ロード失敗・デバイス属性負値検出の
+/// `InvalidKernelDescriptor` 等）を一律 `CudaUnavailable` に丸めると、
+/// CUDA/NVRTC が利用可能な環境でもカーネル実装側の回帰が「環境不在」に
+/// 化けて握りつぶされる（`tests/rmsnorm_parity.rs` の env-adaptive
+/// スモークテストは `CudaUnavailable` を無条件に成功扱いするため。
+/// codex-review 指摘・PR #706 レビュー）。よって環境不在の既知 variant
+/// 以外は `BackendError::KernelLaunchFailed` として実装回帰を検出できる
+/// ようにする（`memory.rs::map_cuda_error` と同じ variant 分岐方針。
+/// `#[non_exhaustive]` の `CudaError` に対する将来 variant 追加への
+/// フォールバックとして `KernelLaunchFailed` を wildcard の受け皿とする
+/// 点も揃える）。
+fn map_rmsnorm_init_error(err: CudaError) -> BackendError {
+    match err {
+        CudaError::DriverUnavailable { detail } => BackendError::CudaUnavailable(detail),
+        CudaError::NvrtcUnavailable { detail } => BackendError::CudaUnavailable(detail),
+        other => BackendError::KernelLaunchFailed(other.to_string()),
+    }
 }
 
 /// [`GemmBiasActRoute`] の選択ロジック（純関数。実機なしで単体テスト可能。
@@ -298,12 +327,109 @@ impl BackendOps for CudaBackendOps {
         self.elementwise_unary(a, |ew, a_s| ew.run_tanh_f32(a_s))
     }
 
+    /// [`tensor_core::BackendOps::run_fused`] のデフォルト実装
+    /// （`Unsupported` fail-safe）を、canonical RMSNorm 融合プラン
+    /// （`x * rsqrt(sum(x^2))`。mean 化・eps・weight を含まない厳密形状）
+    /// 検出時のみ融合カーネル（[`crate::rmsnorm::CudaRmsNorm`]）へ
+    /// ルーティングする（イシュー #592）。
+    ///
+    /// プラン一致判定は [`match_rmsnorm_plan`]（純関数。プランの op 列・
+    /// leaf 数・`row_fusion()` の形状を厳密照合する）に委ねる。一致しない
+    /// プラン（softmax 型・elementwise-only 等）は本オーバーライドの対象
+    /// 外としてデフォルト実装（`Unsupported`）へ委ね、呼び出し元
+    /// （`autodiff::Tape` の実体化経路）の per-op フォールバックへ倒す
+    /// （`backend-cpu::fused_elementwise::run_fused_elementwise` の
+    /// allowlist 拒否方針と同じ fail-closed。`.claude/rules/security.md`
+    /// A08「判定の迂回経路を作らない」）。
+    ///
+    /// 一致した場合、プランの意味論 `x * rsqrt(sum(x^2))` に厳密一致させる
+    /// ため [`crate::rmsnorm::CudaRmsNorm::run_rmsnorm_f32_raw`]（`inv_n`
+    /// を明示できる内部エントリ）を `inv_n = 1.0`・`eps = 0.0`・
+    /// `w = None`（`has_weight = 0`）で直接呼ぶ（`mean` 化・`eps` 加算・
+    /// `weight` 乗算を勝手に補わない。標準 RMSNorm 用の公開 API
+    /// [`crate::rmsnorm::CudaRmsNorm::run_rmsnorm_f32`] は `inv_n =
+    /// 1/hidden` を内部導出してしまうため canonical プランには使えない。
+    /// `rmsnorm.rs` ドキュメンテーションコメント参照）。`rows = 1` は
+    /// canonical プランが `axis: None`（全軸縮約）のみを受理する
+    /// （`match_rmsnorm_plan` 参照）ため、行方向融合ではなく単一行として
+    /// 扱う。
+    fn run_fused(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+    ) -> Result<Tensor<f32>, BackendError> {
+        let Some(hidden) = match_rmsnorm_plan(plan) else {
+            return Err(BackendError::Unsupported(
+                "CudaBackendOps::run_fused: プランが canonical RMSNorm 形状（x * \
+                 rsqrt(sum(x^2))）に一致しないため融合カーネルへルーティングできない \
+                 （#592 スコープ。呼び出し元の per-op フォールバックに委ねる）"
+                    .into(),
+            ));
+        };
+        // `match_rmsnorm_plan` は op 列・leaf 数・`row_fusion()` の形状
+        // のみを照合し、`FusionPlan::from_ops` が受理しうる任意の
+        // `dtype`（`FusionPlan` の DTO は現状 `DType` を素通しする。
+        // `plan.rs` §2.1 参照）を検査しない。カーネル起動前に
+        // `plan.dtype() == DType::F32` を明示検証しないと、例えば
+        // `DType::F64` のプランでも f32 CUDA カーネルとして実行されて
+        // しまう（`backend-cpu::fused_elementwise::run_fused_elementwise`
+        // が実施する同種の fail-closed 検証との不整合。codex-review
+        // 指摘・PR #706 レビュー）。
+        if plan.dtype() != DType::F32 {
+            return Err(BackendError::Unsupported(format!(
+                "CudaBackendOps::run_fused: unsupported dtype {:?} (canonical RMSNorm fusion \
+                 kernel supports F32 only)",
+                plan.dtype()
+            )));
+        }
+        let [x] = leaves else {
+            return Err(BackendError::Unsupported(format!(
+                "CudaBackendOps::run_fused: canonical RMSNorm プランは leaf 1 個を要求するが \
+                 {} 個が渡された",
+                leaves.len()
+            )));
+        };
+        // leaf の shape が `plan.output_shape()` と一致することも明示
+        // 検証する。`match_rmsnorm_plan` は要素数（`row_fusion().row_len()`）
+        // のみを照合するため、要素数が一致しつつ shape（次元分割）が
+        // 異なる leaf（例: `[8]` に対する `[2, 4]`）を渡しても
+        // `run_rmsnorm_f32_raw` の長さ検証だけでは検出できない。canonical
+        // プランは `axis: None`（全軸縮約）で `x` と出力の shape が恒等
+        // （elementwise 型の最終 Mul）である契約のため、ここで shape 恒等
+        // を fail-closed に強制する（`backend-cpu::fused_elementwise` の
+        // leaf shape 検証と同じ契約）。
+        if x.shape() != plan.output_shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: plan.output_shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            }));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned.as_slice().ok_or_else(|| {
+            BackendError::KernelLaunchFailed("run_fused: rmsnorm input not contiguous".into())
+        })?;
+
+        let device = self.device_handle()?;
+        let rmsnorm = CudaRmsNorm::new(&device).map_err(map_rmsnorm_init_error)?;
+        let out = rmsnorm
+            .run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden)
+            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// 汎用 reduction カーネルは未実装のまま（#599 スコープ外・イシュー
+    /// #592 でも対象外）。イシュー #592 は融合 RMSNorm カーネル
+    /// （[`Self::run_fused`] 経由のみ）に閉じた縮約を実装したが、
+    /// `BackendOps::sum`（任意軸・非融合の単独縮約 API）自体の GPU
+    /// カーネル化は別イシューのスコープ（out-of-scope-tracking.md 対象）。
     fn sum(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "CudaBackendOps::sum: reduction カーネル未実装（#599 スコープ外）".into(),
         ))
     }
 
+    /// [`Self::sum`] と同じ理由（汎用 reduction 未実装）。
     fn max(&self, _a: &Tensor<f32>, _dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         Err(BackendError::Unsupported(
             "CudaBackendOps::max: reduction カーネル未実装（#599 スコープ外）".into(),
@@ -314,6 +440,41 @@ impl BackendOps for CudaBackendOps {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`map_rmsnorm_init_error`]: `DriverUnavailable`／`NvrtcUnavailable`
+    /// は環境不在として `BackendError::CudaUnavailable` へ変換される
+    /// （env-adaptive スモークテストの早期 return 判定と揃う）。
+    #[test]
+    fn map_rmsnorm_init_error_treats_known_unavailable_variants_as_cuda_unavailable() {
+        assert!(matches!(
+            map_rmsnorm_init_error(CudaError::DriverUnavailable {
+                detail: "no libcuda".into()
+            }),
+            BackendError::CudaUnavailable(msg) if msg.contains("no libcuda")
+        ));
+        assert!(matches!(
+            map_rmsnorm_init_error(CudaError::NvrtcUnavailable {
+                detail: "no libnvrtc".into()
+            }),
+            BackendError::CudaUnavailable(msg) if msg.contains("no libnvrtc")
+        ));
+    }
+
+    /// [`map_rmsnorm_init_error`]: 環境不在以外の失敗（NVRTC コンパイル
+    /// エラー・デバイス属性負値検出等）は `BackendError::KernelLaunchFailed`
+    /// として実装回帰を検出できる状態を保つ（`CudaUnavailable` に丸めて
+    /// env-adaptive テストの早期 return に握りつぶされるのを防ぐ。
+    /// codex-review 指摘・PR #706 レビュー）。
+    #[test]
+    fn map_rmsnorm_init_error_treats_other_variants_as_kernel_launch_failed() {
+        let err = map_rmsnorm_init_error(CudaError::InvalidKernelDescriptor {
+            detail: "negative SM count".into(),
+        });
+        assert!(matches!(
+            err,
+            BackendError::KernelLaunchFailed(msg) if msg.contains("negative SM count")
+        ));
+    }
 
     #[test]
     fn gemm_bias_act_route_selects_fused_when_bias_is_none() {
@@ -388,5 +549,67 @@ mod tests {
             }
             Err(other) => panic!("unexpected error variant for gemm_bias_act: {other}"),
         }
+    }
+
+    /// `run_fused` の canonical RMSNorm プラン検出（`rmsnorm.rs::
+    /// match_rmsnorm_plan`）の型と同型の 6 op 列を組み立てる（`hidden`
+    /// のみ差し替え）。`rmsnorm.rs::tests::build_canonical_rmsnorm_plan`
+    /// と同じ op 列（`plan.rs::
+    /// from_segment_builds_rmsnorm_plan_with_row_fusion_metadata` 参照）。
+    fn build_canonical_rmsnorm_plan(hidden: usize, dtype: tensor_core::DType) -> FusionPlan {
+        let ops = vec![
+            tensor_core::FusedOpKind::Input { leaf_index: 0 },
+            tensor_core::FusedOpKind::Mul { lhs: 0, rhs: 0 },
+            tensor_core::FusedOpKind::Sum {
+                input: 1,
+                axis: None,
+            },
+            tensor_core::FusedOpKind::Rsqrt { input: 2 },
+            tensor_core::FusedOpKind::Broadcast {
+                input: 3,
+                axis: None,
+            },
+            tensor_core::FusedOpKind::Mul { lhs: 4, rhs: 0 },
+        ];
+        FusionPlan::from_ops(ops, vec![hidden], dtype, 1).unwrap()
+    }
+
+    /// `run_fused` はカーネル起動（デバイスアクセス）前に `plan.dtype()
+    /// == DType::F32` を検証するため、非 F32 プランは
+    /// `BackendError::Unsupported` を返す（CUDA 非搭載環境でも決定的に
+    /// 実行可能。`match_rmsnorm_plan` が一致した後の検証であることを
+    /// 確認するため canonical op 列をそのまま使う。codex-review 指摘・
+    /// PR #706 レビュー「融合プランの dtype と leaf shape を起動前に
+    /// 検証する」）。
+    #[test]
+    fn run_fused_rejects_non_f32_dtype_before_device_access() {
+        let plan = build_canonical_rmsnorm_plan(8, tensor_core::DType::F16);
+        let x = Tensor::new(vec![1.0f32; 8], &[8]).expect("valid tensor");
+        let cuda = CudaBackendOps::new(0);
+
+        let err = cuda.run_fused(&plan, &[&x]).unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "expected Unsupported for non-F32 dtype, got {err:?}"
+        );
+    }
+
+    /// `run_fused` は leaf の shape が `plan.output_shape()` と厳密一致
+    /// することも起動前に検証する。要素数が `row_len` と一致するだけの
+    /// 異なる shape（`[8]` に対する `[2, 4]`）は
+    /// `BackendError::ShapeMismatch` で拒否する（codex-review 指摘・
+    /// PR #706 レビュー同上）。
+    #[test]
+    fn run_fused_rejects_leaf_shape_mismatch_before_device_access() {
+        let plan = build_canonical_rmsnorm_plan(8, tensor_core::DType::F32);
+        // 要素数（8）は `row_len` と一致するが shape が異なる。
+        let x = Tensor::new(vec![1.0f32; 8], &[2, 4]).expect("valid tensor");
+        let cuda = CudaBackendOps::new(0);
+
+        let err = cuda.run_fused(&plan, &[&x]).unwrap_err();
+        assert!(
+            matches!(err, BackendError::ShapeMismatch(_)),
+            "expected ShapeMismatch for leaf shape != output_shape, got {err:?}"
+        );
     }
 }

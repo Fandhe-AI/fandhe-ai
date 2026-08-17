@@ -173,6 +173,19 @@ pub enum CudaError {
     /// `unwrap()`/`expect()` を使わない」）。
     CacheIo { detail: String },
 
+    /// 融合 RMSNorm 順伝播カーネル起動 API（`rmsnorm.rs::CudaRmsNorm`）の
+    /// ホスト側形状・数値検証が拒否した入力。
+    ///
+    /// イシュー #592: `rows*hidden == x.len()`（checked 乗算）・
+    /// `w.len() == hidden`（`w` 指定時）・`numel/rows/hidden` が
+    /// `i32::MAX`（カーネル引数の `int rows`／`int hidden` 契約）に
+    /// 収まること・`eps` が有限値（`is_finite()`）であることを起動前に
+    /// 検証する（OWASP A03。`elementwise.rs::InvalidElementwiseShape` と
+    /// 同じ「専用 variant で `Display` メッセージの誤表示を避ける」方針。
+    /// `error.rs` 冒頭の `InvalidElementwiseShape` ドキュメンテーション
+    /// コメント参照）。
+    InvalidRmsNormShape { detail: String },
+
     /// プロセス内 LRU カーネルモジュールキャッシュ（`module_cache.rs`。
     /// イシュー #511・Phase C-4）の容量設定 `RUST_AI_CUDA_MODULE_CACHE_CAPACITY`
     /// が不正だった。
@@ -245,6 +258,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::CacheIo { detail } => {
                 write!(f, "CUDA kernel compile cache I/O failed: {detail}")
+            }
+            CudaError::InvalidRmsNormShape { detail } => {
+                write!(f, "invalid RMSNorm shape/argument: {detail}")
             }
             CudaError::InvalidModuleCacheCapacity { detail } => {
                 write!(

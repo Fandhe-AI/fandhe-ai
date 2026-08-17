@@ -146,6 +146,23 @@
 //! テンプレート展開は実装しない（`nvrtc.rs` ドキュメンテーションコメント
 //! 参照）。
 //!
+//! イシュー #592 で融合 RMSNorm 順伝播カーネル（[`rmsnorm::CudaRmsNorm`]）を
+//! 追加した。TileKernels engram gate カーネルの構造イディオム（1 CTA =
+//! 1 warp・`__syncthreads()` 不使用・persistent block）を転用し、
+//! `out = x * rsqrt(sum(x^2) * inv_n + eps) * w` を 1 カーネルで完結させる
+//! （中間テンソルの HBM 非書き出し。`kernels_rmsnorm.rs` 冒頭ドキュメント
+//! コメント参照）。行長が SMEM 予算に収まる場合は動的共有メモリ常駐の
+//! 1 パス経路、収まらない場合は global 再読の 2 パス経路（[`rmsnorm::
+//! rmsnorm_route`]。予算は `gemm_auto::read_clamped_smem_budget_bytes` と
+//! 同一のクランプ済み値を単一の真実源として共有する）を選ぶ。persistent
+//! block 数は sm_121 の SMEM/SM 上限を実行時属性取得から導出する
+//! （Hopper 固定値を流用しない。`docs/perf/sm121-device-attributes.md`
+//! C-8 注記と同方針）。`CudaBackendOps::run_fused`（`ops.rs`）は canonical
+//! RMSNorm 融合プラン（`x * rsqrt(sum(x^2))`。mean 化・eps・weight を含ま
+//! ない厳密形状。`rmsnorm::match_rmsnorm_plan`）検出時のみ本カーネルへ
+//! ルーティングし、一致しないプランはデフォルトの `Unsupported`
+//! フォールバックのまま維持する。
+//!
 //! Phase C-4（#511。親イシュー #503 の最終タスク）で [`module_cache`]
 //! （非公開 `mod`。`pub use` で再公開しない内部実装詳細）を追加し、
 //! `kernels_mma.rs::RenderedMmaKernel::compile` をプロセス内 LRU
@@ -175,6 +192,7 @@ mod gemm_wmma;
 mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;
+mod kernels_rmsnorm;
 mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
@@ -182,6 +200,7 @@ pub mod memory;
 mod module_cache;
 mod nvrtc;
 mod ops;
+mod rmsnorm;
 mod swizzle;
 mod transpose;
 
@@ -214,6 +233,7 @@ pub use nvrtc::{
     derive_pipeline_stages, nvrtc_version,
 };
 pub use ops::CudaBackendOps;
+pub use rmsnorm::CudaRmsNorm;
 pub use transpose::CudaTranspose;
 
 /// `kernels_mma`／`kernels_wmma_opt`（非公開 `mod`。カーネル本体は crate
