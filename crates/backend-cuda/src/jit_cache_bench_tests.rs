@@ -591,25 +591,74 @@ fn jit_cache_bench_module_load_and_throughput_parity() {
         .alloc_zeros::<f16>((m as usize) * (n as usize))
         .expect("device output buffer allocation must succeed on the bench runner");
 
-    let meas_fresh = bench_harness::run(&measurement_cfg, || {
-        launch_gemm(&func_fresh, &mut c_dev_fresh);
-    })
-    .expect("protocol::run must succeed with the default (20/20) measurement config");
-    let meas_cached = bench_harness::run(&measurement_cfg, || {
-        launch_gemm(&func_cached, &mut c_dev_cached);
-    })
-    .expect("protocol::run must succeed with the default (20/20) measurement config");
+    // TFLOPS 計測をラウンド交互方式で行う（PR #698 codex-review 指摘・
+    // スレッド PRRT_kwDOTuUCJc6ZoNaU 対応）。上のモジュールロード計測
+    // （:434-444）は trial 偶奇でロード順を交互化済みだが、この直下の
+    // TFLOPS 計測は fresh を warmup/iters 込みで全実行してから cached を
+    // 実行する順序固定のままだった。GPU クロック・温度・電力制限の時間
+    // 変動（DVFS スロットリング等）が計測順序に系統的に乗ると、
+    // `tflops_fresh`／`tflops_cached` の比較が測定順序に左右されうる。
+    // #684（`backend-metal` occupancy 比較ベンチ）で確立したラウンド交互
+    // 方式に合わせ、ROUNDS 回の独立ラウンドに分割し、ラウンドごとに
+    // fresh→cached／cached→fresh の順序を反転させながら交互計測し、
+    // それぞれのラウンド中央値（本ファイルで既に使っている
+    // `median_q1_q3`。coding-rust.md「ベンチは 5 回計測の中央値」）を
+    // 採用する。tolerance・受け入れ基準・gating 方針（TFLOPS は
+    // non-gating。本関数冒頭コメント参照）は変更しない。
+    const ROUNDS: usize = 5;
+    let mut fresh_tflops_samples = Vec::with_capacity(ROUNDS);
+    let mut cached_tflops_samples = Vec::with_capacity(ROUNDS);
+    let mut fresh_secs_samples = Vec::with_capacity(ROUNDS);
+    let mut cached_secs_samples = Vec::with_capacity(ROUNDS);
 
-    let tflops_fresh = flops / meas_fresh.median_secs / 1e12;
-    let tflops_cached = flops / meas_cached.median_secs / 1e12;
+    for round in 0..ROUNDS {
+        // 偶数ラウンド（0-origin）は fresh→cached、奇数ラウンドは
+        // cached→fresh に反転し、順序バイアスをラウンド間で打ち消す。
+        let (meas_fresh, meas_cached) = if round % 2 == 0 {
+            let meas_fresh = bench_harness::run(&measurement_cfg, || {
+                launch_gemm(&func_fresh, &mut c_dev_fresh);
+            })
+            .expect("protocol::run must succeed with the default (20/20) measurement config");
+            let meas_cached = bench_harness::run(&measurement_cfg, || {
+                launch_gemm(&func_cached, &mut c_dev_cached);
+            })
+            .expect("protocol::run must succeed with the default (20/20) measurement config");
+            (meas_fresh, meas_cached)
+        } else {
+            let meas_cached = bench_harness::run(&measurement_cfg, || {
+                launch_gemm(&func_cached, &mut c_dev_cached);
+            })
+            .expect("protocol::run must succeed with the default (20/20) measurement config");
+            let meas_fresh = bench_harness::run(&measurement_cfg, || {
+                launch_gemm(&func_fresh, &mut c_dev_fresh);
+            })
+            .expect("protocol::run must succeed with the default (20/20) measurement config");
+            (meas_fresh, meas_cached)
+        };
+
+        fresh_tflops_samples.push(flops / meas_fresh.median_secs / 1e12);
+        cached_tflops_samples.push(flops / meas_cached.median_secs / 1e12);
+        fresh_secs_samples.push(meas_fresh.median_secs);
+        cached_secs_samples.push(meas_cached.median_secs);
+    }
+
+    let fresh_tflops_q = median_q1_q3(&fresh_tflops_samples)
+        .expect("5 non-NaN fresh-PTX TFLOPS round samples must yield quartiles");
+    let cached_tflops_q = median_q1_q3(&cached_tflops_samples)
+        .expect("5 non-NaN cached-PTX TFLOPS round samples must yield quartiles");
+    let fresh_secs_q = median_q1_q3(&fresh_secs_samples)
+        .expect("5 non-NaN fresh-PTX median_secs round samples must yield quartiles");
+    let cached_secs_q = median_q1_q3(&cached_secs_samples)
+        .expect("5 non-NaN cached-PTX median_secs round samples must yield quartiles");
 
     println!(
         "[jit_cache_bench:throughput] shape=(4096,4096,4096) \
-         fresh_tflops={tflops_fresh:.2} (median_s={:.6}) \
-         cached_tflops={tflops_cached:.2} (median_s={:.6}) \
+         fresh_tflops={:.2} (median_s={:.6}) \
+         cached_tflops={:.2} (median_s={:.6}) \
          — kernel launch + sync only (excludes buffer alloc/D2H; comparable with \
-         gemm_mma_bench::measure_mma_f16), record only, non-gating (see module doc comment)",
-        meas_fresh.median_secs, meas_cached.median_secs,
+         gemm_mma_bench::measure_mma_f16), record only, non-gating (see module doc comment), \
+         round-interleaved order (ROUNDS={ROUNDS}, see comment above)",
+        fresh_tflops_q.median, fresh_secs_q.median, cached_tflops_q.median, cached_secs_q.median,
     );
 
     // `root`（`_root_guard`）は関数終了時に `Drop` で自動的に片付けられる。
