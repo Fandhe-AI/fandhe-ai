@@ -186,6 +186,9 @@ Phase E 各改善（E-1・E-4・E-5・E-6）による累積改善の程度を記
 - **`cpu-gemm-baseline-remeasurement.md` の実測値記入**: 本イシューと同一実機セッションで併せて
   埋めるのが効率的（両ドキュメントとも Rust 側は同一ハーネス・PyTorch 側は同一スクリプトのため、
   ベースライン SHA 側の 1 セットの計測で両ドキュメントの表を同時に満たせる）。
+- **`docs/perf/cpu-gemm-optimized-remeasurement.md`（#574・Phase F）の実測値記入**: 本ドキュメントの
+  HEAD 計測と対 PyTorch 比の判定対象形状が重なるため、同一 M4 Max 実機セッションで併せて消化する
+  のが効率的（Rust・PyTorch とも同一ハーネス・同一スクリプトのため二重計測を避けられる）。
 - **REQ-8 下限値の変更**: 本イシューでは行わない。Phase F の人間承認タスク（#577）へ申し送る。
 - **E-7（明示プリフェッチ）の採否判断**: `docs/cpu-gemm-prefetch-decision.md` の保留判断のまま。
   本イシューのスコープ外。
