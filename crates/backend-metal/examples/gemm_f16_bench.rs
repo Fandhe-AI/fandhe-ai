@@ -68,6 +68,23 @@ mod macos_impl {
     /// `torch.mps.synchronize()` のみを計測するのと同一の同期境界に揃える
     /// ため（PR #346 Bugbot 指摘 2）。readback／アンパディングも本ベンチの
     /// 出力には不要なため計測対象に含めない。
+    /// 中央値・Q1・Q3（秒）を TFLOPS へ変換した 3 つ組。`docs/performance-targets.md`
+    /// §4 が中央値に加え Q1/Q3 の記録を必須とする（REQ-8）ため、`measure` は
+    /// `Measurement` の 3 フィールドすべてを保持したまま呼び出し元へ返す
+    /// （codex-review #700 P1 指摘の f32 側修正に揃え、f16 側にも同様に適用。
+    /// `gemm_f32_prepared_bench.rs::TflopsQuartiles` と同型・独立定義）。時間が
+    /// 短いほど TFLOPS が高いため、秒の昇順（`q1_secs` <= `median_secs` <=
+    /// `q3_secs`）をそのまま TFLOPS へ変換すると大小関係が反転する。本構造体の
+    /// `q1`/`q3` は変換元の秒を入れ替えて算出することでこの反転を打ち消し
+    /// （`q1` は `q3_secs` から、`q3` は `q1_secs` から）、TFLOPS 側でも昇順
+    /// （q1_tflops <= median_tflops <= q3_tflops）を保つ（codex-review #700
+    /// P1 指摘の分位点入れ替え・コメント誤記修正の双方に対応）。
+    struct TflopsQuartiles {
+        median: f64,
+        q1: f64,
+        q3: f64,
+    }
+
     fn measure(
         gemm: &MetalGemm,
         ctx: &MetalContext,
@@ -75,7 +92,7 @@ mod macos_impl {
         n: usize,
         k: usize,
         config: &MeasurementConfig,
-    ) -> f64 {
+    ) -> TflopsQuartiles {
         let mut rng = Xorshift64Star::new(SEED);
         let a: Vec<f16> = rng.fill_vec_f16(m * k);
         let b: Vec<f16> = rng.fill_vec_f16(k * n);
@@ -97,7 +114,13 @@ mod macos_impl {
         })
         .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
 
-        tflops(m, n, k, measurement.median_secs)
+        // TFLOPS の Q1/Q3 は時間の Q3/Q1 から算出する（上のドキュメンテーション
+        // コメント参照。Bugbot #231 の gemm_bench.rs / gemm_blis_perf.rs と同一対応）。
+        TflopsQuartiles {
+            median: tflops(m, n, k, measurement.median_secs),
+            q1: tflops(m, n, k, measurement.q3_secs),
+            q3: tflops(m, n, k, measurement.q1_secs),
+        }
     }
 
     pub fn main() {
@@ -108,8 +131,11 @@ mod macos_impl {
         // 参考値。PoC-v2-4 先例。実装計画 §3.3）。
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
-            let f16_tflops = measure(&gemm, &ctx, size, size, size, &config);
-            println!("size={size} metal_f16_simdgroup_tflops={f16_tflops:.4}");
+            let q = measure(&gemm, &ctx, size, size, size, &config);
+            println!(
+                "size={size} metal_f16_simdgroup_tflops={:.4} q1_tflops={:.4} q3_tflops={:.4}",
+                q.median, q.q1, q.q3
+            );
         }
     }
 }
