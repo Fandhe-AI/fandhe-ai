@@ -47,7 +47,13 @@ pub(crate) enum RmsNormRoute {
 /// 2 値を使い回すため共有する）。
 #[derive(Debug, Clone, Copy)]
 pub struct RmsNormShape {
+    /// 正規化対象の行数（バッチ次元。`x`／`dy`／`dx` の長さは
+    /// `rows * hidden` に一致する契約）。
     pub rows: usize,
+    /// 1 行あたりの要素数（正規化軸の長さ。`w`／`dw` の長さおよび
+    /// [`CudaRmsNorm::run_rmsnorm_f32_train`]・
+    /// [`CudaRmsNorm::run_rmsnorm_bwd_f32`] が内部導出する
+    /// `inv_n = 1.0 / hidden`（`hidden == 0` は 1.0）の分母に一致する契約）。
     pub hidden: usize,
 }
 
