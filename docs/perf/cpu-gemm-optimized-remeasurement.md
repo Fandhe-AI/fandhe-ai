@@ -72,7 +72,7 @@ git checkout bench/574-cpu-optimized-remeasurement   # 本イシューの実装�
 git log b96c3b3..main -- crates/backend-cpu           # 空であることを再確認（空でなければ b96c3b3 を使う）
 
 # 1. 数値一致確認を先に行う（既存 parity テスト群。閾値は緩和しない）
-cargo test -p backend-cpu --release -- --ignored gemm_blis_parity
+cargo test -p backend-cpu --release --test gemm_blis_parity
 
 # 2. Rust 側ベンチを 5 回独立実行し、size ごとに 5 run の中央値の中央値を採用する
 #    （MeasurementConfig::default() 自体が warmup 20・iters 20・中央値を内包するため、
