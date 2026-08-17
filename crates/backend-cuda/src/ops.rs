@@ -19,7 +19,7 @@
 //! `.claude/rules/coding-rust.md`）。
 
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, FusionPlan, Tensor};
+use tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
@@ -341,6 +341,22 @@ impl BackendOps for CudaBackendOps {
                     .into(),
             ));
         };
+        // `match_rmsnorm_plan` は op 列・leaf 数・`row_fusion()` の形状
+        // のみを照合し、`FusionPlan::from_ops` が受理しうる任意の
+        // `dtype`（`FusionPlan` の DTO は現状 `DType` を素通しする。
+        // `plan.rs` §2.1 参照）を検査しない。カーネル起動前に
+        // `plan.dtype() == DType::F32` を明示検証しないと、例えば
+        // `DType::F64` のプランでも f32 CUDA カーネルとして実行されて
+        // しまう（`backend-cpu::fused_elementwise::run_fused_elementwise`
+        // が実施する同種の fail-closed 検証との不整合。codex-review
+        // 指摘・PR #706 レビュー）。
+        if plan.dtype() != DType::F32 {
+            return Err(BackendError::Unsupported(format!(
+                "CudaBackendOps::run_fused: unsupported dtype {:?} (canonical RMSNorm fusion \
+                 kernel supports F32 only)",
+                plan.dtype()
+            )));
+        }
         let [x] = leaves else {
             return Err(BackendError::Unsupported(format!(
                 "CudaBackendOps::run_fused: canonical RMSNorm プランは leaf 1 個を要求するが \
@@ -348,6 +364,21 @@ impl BackendOps for CudaBackendOps {
                 leaves.len()
             )));
         };
+        // leaf の shape が `plan.output_shape()` と一致することも明示
+        // 検証する。`match_rmsnorm_plan` は要素数（`row_fusion().row_len()`）
+        // のみを照合するため、要素数が一致しつつ shape（次元分割）が
+        // 異なる leaf（例: `[8]` に対する `[2, 4]`）を渡しても
+        // `run_rmsnorm_f32_raw` の長さ検証だけでは検出できない。canonical
+        // プランは `axis: None`（全軸縮約）で `x` と出力の shape が恒等
+        // （elementwise 型の最終 Mul）である契約のため、ここで shape 恒等
+        // を fail-closed に強制する（`backend-cpu::fused_elementwise` の
+        // leaf shape 検証と同じ契約）。
+        if x.shape() != plan.output_shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: plan.output_shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            }));
+        }
 
         let x_owned = x.contiguous();
         let x_slice = x_owned.as_slice().ok_or_else(|| {
@@ -459,5 +490,67 @@ mod tests {
             }
             Err(other) => panic!("unexpected error variant for gemm_bias_act: {other}"),
         }
+    }
+
+    /// `run_fused` の canonical RMSNorm プラン検出（`rmsnorm.rs::
+    /// match_rmsnorm_plan`）の型と同型の 6 op 列を組み立てる（`hidden`
+    /// のみ差し替え）。`rmsnorm.rs::tests::build_canonical_rmsnorm_plan`
+    /// と同じ op 列（`plan.rs::
+    /// from_segment_builds_rmsnorm_plan_with_row_fusion_metadata` 参照）。
+    fn build_canonical_rmsnorm_plan(hidden: usize, dtype: tensor_core::DType) -> FusionPlan {
+        let ops = vec![
+            tensor_core::FusedOpKind::Input { leaf_index: 0 },
+            tensor_core::FusedOpKind::Mul { lhs: 0, rhs: 0 },
+            tensor_core::FusedOpKind::Sum {
+                input: 1,
+                axis: None,
+            },
+            tensor_core::FusedOpKind::Rsqrt { input: 2 },
+            tensor_core::FusedOpKind::Broadcast {
+                input: 3,
+                axis: None,
+            },
+            tensor_core::FusedOpKind::Mul { lhs: 4, rhs: 0 },
+        ];
+        FusionPlan::from_ops(ops, vec![hidden], dtype, 1).unwrap()
+    }
+
+    /// `run_fused` はカーネル起動（デバイスアクセス）前に `plan.dtype()
+    /// == DType::F32` を検証するため、非 F32 プランは
+    /// `BackendError::Unsupported` を返す（CUDA 非搭載環境でも決定的に
+    /// 実行可能。`match_rmsnorm_plan` が一致した後の検証であることを
+    /// 確認するため canonical op 列をそのまま使う。codex-review 指摘・
+    /// PR #706 レビュー「融合プランの dtype と leaf shape を起動前に
+    /// 検証する」）。
+    #[test]
+    fn run_fused_rejects_non_f32_dtype_before_device_access() {
+        let plan = build_canonical_rmsnorm_plan(8, tensor_core::DType::F16);
+        let x = Tensor::new(vec![1.0f32; 8], &[8]).expect("valid tensor");
+        let cuda = CudaBackendOps::new(0);
+
+        let err = cuda.run_fused(&plan, &[&x]).unwrap_err();
+        assert!(
+            matches!(err, BackendError::Unsupported(_)),
+            "expected Unsupported for non-F32 dtype, got {err:?}"
+        );
+    }
+
+    /// `run_fused` は leaf の shape が `plan.output_shape()` と厳密一致
+    /// することも起動前に検証する。要素数が `row_len` と一致するだけの
+    /// 異なる shape（`[8]` に対する `[2, 4]`）は
+    /// `BackendError::ShapeMismatch` で拒否する（codex-review 指摘・
+    /// PR #706 レビュー同上）。
+    #[test]
+    fn run_fused_rejects_leaf_shape_mismatch_before_device_access() {
+        let plan = build_canonical_rmsnorm_plan(8, tensor_core::DType::F32);
+        // 要素数（8）は `row_len` と一致するが shape が異なる。
+        let x = Tensor::new(vec![1.0f32; 8], &[2, 4]).expect("valid tensor");
+        let cuda = CudaBackendOps::new(0);
+
+        let err = cuda.run_fused(&plan, &[&x]).unwrap_err();
+        assert!(
+            matches!(err, BackendError::ShapeMismatch(_)),
+            "expected ShapeMismatch for leaf shape != output_shape, got {err:?}"
+        );
     }
 }

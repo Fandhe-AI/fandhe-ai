@@ -256,8 +256,14 @@ impl CudaRmsNorm {
         let raw_smem_per_sm = device.context().attribute(
             CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR,
         )?;
+        // 属性取得失敗（`TryFrom` の負値検出）は `InvalidRmsNormShape`
+        // （入力テンソルの shape/eps 起因のホスト側検証エラー）ではなく
+        // `InvalidKernelDescriptor` を使う。`gemm_auto.rs::
+        // read_clamped_smem_budget_bytes` が同種のデバイス属性負値検出に
+        // 使う variant と揃え、`CudaError::Display` の意味論的な誤表示を
+        // 避ける（cursor[bot] 指摘・PR #706 レビュー r3793478993）。
         let smem_per_sm_budget_bytes =
-            u64::try_from(raw_smem_per_sm).map_err(|_| CudaError::InvalidRmsNormShape {
+            u64::try_from(raw_smem_per_sm).map_err(|_| CudaError::InvalidKernelDescriptor {
                 detail: format!(
                     "CudaRmsNorm::new: CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR \
                      returned a negative value ({raw_smem_per_sm}), which cannot be a valid \
@@ -268,12 +274,13 @@ impl CudaRmsNorm {
         let raw_sm_count = device
             .context()
             .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
-        let sm_count = u32::try_from(raw_sm_count).map_err(|_| CudaError::InvalidRmsNormShape {
-            detail: format!(
-                "CudaRmsNorm::new: CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT returned a \
-                 negative value ({raw_sm_count}), which cannot be a valid SM count"
-            ),
-        })?;
+        let sm_count =
+            u32::try_from(raw_sm_count).map_err(|_| CudaError::InvalidKernelDescriptor {
+                detail: format!(
+                    "CudaRmsNorm::new: CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT returned a \
+                     negative value ({raw_sm_count}), which cannot be a valid SM count"
+                ),
+            })?;
 
         Ok(Self {
             stream: device.stream().clone(),
