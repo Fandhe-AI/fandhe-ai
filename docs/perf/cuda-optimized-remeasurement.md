@@ -113,7 +113,16 @@ mean_abs_diff が `docs/perf/cuda-floor-remeasurement.md`「数値一致（parit
 
 ```sh
 git fetch origin
-git checkout bench/571-cuda-optimized-remeasurement   # 本イシューの実装ブランチ
+
+# 本イシューの実装ブランチ（bench/571-cuda-optimized-remeasurement）は PR マージ後に削除される
+# 一時ブランチのため、恒久参照として使わない。以下のいずれかで対象コミットを取得する:
+#   a) PR #710 が未マージ・ブランチ現存の場合: 上記ブランチを直接 checkout してよい
+#   b) マージ済みの場合: 本ドキュメントが記録するコミット SHA を main 上で checkout する
+#      （17ff13ab8590e404cf7ef8d3f36f339e86178d72。本イシュー実装完了時点の HEAD）
+#   c) 上記 SHA 時点より後の実装状態を計測対象としたい場合: 最新 main を対象とする契約とし、
+#      その旨（「実測時点の最新 main、コミット <SHA>」）を「状態」節に明記する
+git checkout 17ff13ab8590e404cf7ef8d3f36f339e86178d72   # 本イシュー実装完了時点のコミット（b の場合）
+# あるいは: git checkout main && git pull                # 最新 main を対象とする場合（c の場合）
 
 # 1. 到達性・GPU 排他性の確認（docs/real-hardware-verification-env.local.md から CUDA_NODE を取得）
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" \
