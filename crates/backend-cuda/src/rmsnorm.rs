@@ -973,6 +973,18 @@ impl CudaRmsNorm {
             let mut dw_dev = self.stream.alloc_zeros::<f32>(w_slice.len())?;
             let auto_num_blocks = derive_dw_split(self.sm_count, rows_i as u32, hidden_i as u32);
             let num_blocks = force_dw_num_blocks.unwrap_or(auto_num_blocks);
+            // `force_dw_num_blocks`（テストフック経由）はホスト境界から任意値
+            // （`0` を含む）が来うるため、分岐（単段 `num_blocks <= 1` か
+            // split-K か）で検証有無が変わらないよう、分岐前に必ず検証する
+            // （fail-closed。security.md A03。codex-review P2 指摘・PR #716:
+            // 旧実装は `num_blocks <= 1` 分岐内で検証しておらず
+            // `Some(0)` が禁止値のまま単段カーネルへ通っていた）。
+            // `derive_dw_split` によるヒューリスティクス由来（`force_dw_
+            // num_blocks == None`）は常に `>= 1` を返す契約のため、検証は
+            // `force_dw_num_blocks.is_some()` の場合のみで十分だが、
+            // 検証コスト自体が軽量なため分岐なく常に通す（境界条件の
+            // 実装ドリフトを避ける）。
+            validate_dw_split_launch(rows, hidden, num_blocks)?;
             let col_grid = derive_persistent_grid_dw(self.sm_count, hidden_i as u32);
 
             if num_blocks <= 1 {
@@ -1001,11 +1013,9 @@ impl CudaRmsNorm {
                         })?;
                 }
             } else {
-                // split-K 二段リダクション（イシュー #597）。`force_dw_
-                // num_blocks`（テストフック経由）はホスト境界から任意値が
-                // 来うるため、ヒューリスティクス経由（常に妥当な範囲）と
-                // 同じ検証関数を必ず通す（fail-closed。security.md A03）。
-                validate_dw_split_launch(rows, hidden, num_blocks)?;
+                // split-K 二段リダクション（イシュー #597）。`num_blocks` の
+                // fail-closed 検証は分岐前（上記 `validate_dw_split_launch`
+                // 呼び出し）で完了済み。
                 let num_blocks_i = num_blocks as i32;
 
                 let partial_len = (num_blocks as usize).checked_mul(hidden).ok_or_else(|| {

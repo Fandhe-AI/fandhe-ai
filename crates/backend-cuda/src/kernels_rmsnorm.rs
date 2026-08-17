@@ -639,15 +639,34 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
     int tid = threadIdx.x;
     int num_batches = (num_blocks + 3) / 4;
 
-    for (long long col = (long long)blockIdx.x * blockDim.x + tid; col < hidden;
-         col += (long long)blockDim.x * gridDim.x) {
+    // 外側ループの継続条件は `base`（= blockIdx.x * blockDim.x を起点に
+    // ブロック単位で進める block-stride 添字）でのみ判定する。`base` は
+    // ブロック内の全スレッドで共通の値であり、`threadIdx.x`（`tid`）に
+    // 依存しない。これにより「同一ブロック内の全スレッドが
+    // `__syncthreads()` へ到達する回数を必ず揃える」という CUDA の
+    // ブロック同期契約を満たす（codex-review P0 指摘・PR #716:
+    // 旧実装は `col < hidden` という tid 依存の条件でループを継続して
+    // いたため、`hidden` がブロック幅未満の部分ブロック（例:
+    // `hidden=32` かつ `blockDim.x=256`）で `col >= hidden` の
+    // スレッドがループ本体へ一度も入らず `__syncthreads()` を踏まず、
+    // 残りのスレッドだけがバリアへ到達して不一致・ハングを起こしていた）。
+    // 個々のスレッドの有効性（`col < hidden`）は `active` フラグで
+    // マスクし、範囲外スレッドは smem ロード・加算・`dw` 書き出しを
+    // 素通り（0.0f 充填・書き出しスキップ）しつつバリアには全員で
+    // 到達する。
+    for (long long base = (long long)blockIdx.x * blockDim.x; base < hidden;
+         base += (long long)blockDim.x * gridDim.x) {
+        long long col = base + tid;
+        bool active = col < hidden;
 
         // プロローグ: バッチ 0 を smem[0] へロードする（範囲外
-        // `b >= num_blocks` は 0.0f 充填。REQ-8 手動境界チェック）。
+        // `b >= num_blocks` または `!active`（列自体が範囲外）は
+        // 0.0f 充填。REQ-8 手動境界チェック）。
         #pragma unroll
         for (int j = 0; j < 4; j++) {
             int b = j;
-            float v = (b < num_blocks) ? dw_partial[(long long)b * (long long)hidden + col] : 0.0f;
+            float v =
+                (active && b < num_blocks) ? dw_partial[(long long)b * (long long)hidden + col] : 0.0f;
             smem[0][j][tid] = v;
         }
         __syncthreads();
@@ -662,8 +681,9 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
                 #pragma unroll
                 for (int j = 0; j < 4; j++) {
                     int b = (batch + 1) * 4 + j;
-                    float v =
-                        (b < num_blocks) ? dw_partial[(long long)b * (long long)hidden + col] : 0.0f;
+                    float v = (active && b < num_blocks)
+                                   ? dw_partial[(long long)b * (long long)hidden + col]
+                                   : 0.0f;
                     smem[next_buf][j][tid] = v;
                 }
             }
@@ -677,8 +697,11 @@ extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
         }
 
         // epilogue: 最終 dw を 1 回だけ書く（縮約結果を HBM へ往復させる
-        // 第 3 パスを作らない。本ファイル冒頭コメント参照）。
-        dw[col] = acc;
+        // 第 3 パスを作らない。本ファイル冒頭コメント参照）。範囲外
+        // スレッド（`!active`）は書き出さない。
+        if (active) {
+            dw[col] = acc;
+        }
     }
 }
 "#;
@@ -804,9 +827,34 @@ mod tests {
     #[test]
     fn split_k_dw_reduce_loop_index_is_declared_long_long() {
         let src = RMSNORM_BWD_DW_REDUCE_F32;
-        assert!(src.contains(
-            "for (long long col = (long long)blockIdx.x * blockDim.x + tid; col < hidden;"
-        ));
+        // 外側ループは `base`（ブロック内全スレッド共通）で継続判定する
+        // （codex-review P0 修正・PR #716。本ファイル冒頭「divergent
+        // barrier」コメント参照）。`col` は `base + tid` から `long long`
+        // で導出される。
+        assert!(
+            src.contains(
+                "for (long long base = (long long)blockIdx.x * blockDim.x; base < hidden;"
+            )
+        );
+        assert!(src.contains("long long col = base + tid;"));
+    }
+
+    /// `__syncthreads()` を含む外側ループの継続条件が `tid`（スレッド
+    /// 固有の値）に依存しないことを検査する（codex-review P0 指摘・
+    /// PR #716「部分ブロックが `__syncthreads()` に到達せずカーネルが
+    /// 停止する」の回帰防止）。修正前は `col < hidden` という tid 依存の
+    /// 条件でループ本体（バリアを含む）への進入可否が決まっており、
+    /// `hidden` がブロック幅未満の部分ブロックでスレッド間の到達回数が
+    /// 不一致になっていた。
+    #[test]
+    fn split_k_dw_reduce_outer_loop_condition_is_block_uniform() {
+        let src = RMSNORM_BWD_DW_REDUCE_F32;
+        assert!(
+            !src.contains("col < hidden;\n         col +="),
+            "外側ループの継続条件に tid 依存の `col` を使ってはならない（divergent barrier 回帰）"
+        );
+        assert!(src.contains("bool active = col < hidden;"));
+        assert!(src.contains("if (active) {\n            dw[col] = acc;\n        }"));
     }
 
     /// 部分和は末尾の空 block でも無条件に書かれる（受け入れ基準 1・
