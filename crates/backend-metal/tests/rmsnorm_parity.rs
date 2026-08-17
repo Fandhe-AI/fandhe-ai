@@ -184,3 +184,33 @@ fn rmsnorm_run_fused_matches_cpu_composed() {
         &composed,
     );
 }
+
+/// CPU-Metal 直接突合（イシュー #607）: `backend_cpu::rmsnorm::
+/// run_rmsnorm_f32`（NEON/rayon 参照実装）を GPU 出力と直接比較する。
+/// 実機必須（`#[ignore]`。CI ではコンパイルのみ）。既存の
+/// `cpu_rmsnorm_reference`（テスト専用ローカル参照実装）と数学的に同一
+/// だが、本テストは実クレート API の呼び出し経路自体を検証する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn rmsnorm_matches_backend_cpu_directly() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let rmsnorm = MetalRmsNorm::new(&ctx).expect("RMSNorm パイプラインの構築に失敗した");
+
+    let rows = 3usize;
+    let hidden = 4097usize; // NEON 端要素を含む。
+    let eps = 1e-5f32;
+    let x_data = Xorshift64Star::new(41_001).fill_vec(rows * hidden);
+    let w_data = Xorshift64Star::new(41_002).fill_vec(hidden);
+
+    let gpu_out = rmsnorm
+        .run_rmsnorm_f32(&ctx, &x_data, Some(&w_data), eps, rows, hidden)
+        .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed on Metal-equipped test runner");
+    let cpu_out = backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, Some(&w_data), eps, rows, hidden)
+        .expect("backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+
+    assert_parity(
+        "rmsnorm cpu(backend_cpu)-metal direct parity",
+        &gpu_out,
+        &cpu_out,
+    );
+}

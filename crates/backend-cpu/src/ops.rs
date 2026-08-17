@@ -11,9 +11,11 @@
 //! 実カーネルを実行できることを保証する）。
 
 use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, FusionPlan, Tensor};
+use tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
 use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
+use crate::rmsnorm::{self, match_rmsnorm_plan};
+use crate::softmax::{self, match_softmax_plan};
 use crate::{elementwise, fused_elementwise, reduction};
 
 /// CPU バックエンドの `BackendOps` 実装。状態を持たないゼロサイズ型
@@ -213,12 +215,23 @@ impl BackendOps for CpuBackendOps {
     /// してここで結線する（新規設計を含まない・両先行イシューの設計文書
     /// が明示的に予定していた結線であることが安全側判断の根拠）。
     ///
+    /// # 3 分岐ルーティング（イシュー #607 で拡張）
+    /// `match_rmsnorm_plan`／`match_softmax_plan`（いずれも純関数。プランの
+    /// op 列・leaf 数・`row_fusion()` の形状を厳密照合する。
+    /// `backend-cuda::rmsnorm`／`backend-cuda::softmax` と同一契約の CPU
+    /// 側ミラー）で canonical RMSNorm／softmax 融合プランを検出した場合は
+    /// それぞれ [`rmsnorm::run_rmsnorm_f32_raw`]／[`softmax::run_softmax_f32`]
+    /// へルーティングする。どちらにも一致しない場合（elementwise-only・
+    /// 中間軸 softmax 等）は従来どおり [`fused_elementwise::
+    /// run_fused_elementwise`] の allowlist 検査へ委ねる（既存 elementwise
+    /// 融合経路の挙動は不変）。RMSNorm 判定を先に試す理由は CUDA 側と同じ
+    /// （op 列長〈6 vs 8〉が異なるため両方に一致するプランは存在しない）。
+    ///
     /// # 呼び出し元
     /// `autodiff::tape` の遅延評価 2 層（`materialize_fallible`／
     /// `materialize_non_fallible`）から `BackendOps::run_fused` 経由で
-    /// 呼ばれる。CUDA／Metal は融合カーネル生成が未実装のためデフォルト
-    /// （`Unsupported`）のままとし、呼び出し元の per-op フォールバックへ
-    /// 委ねる（本オーバーライドは CPU 限定）。
+    /// 呼ばれる。CUDA／Metal は独自の融合カーネル実装（#592/#594/#604）を
+    /// 持つため本オーバーライドとは独立。
     ///
     /// # 数値契約
     /// `run_fused_elementwise` は per-op 逐次合成と同一スカラー演算
@@ -226,12 +239,106 @@ impl BackendOps for CpuBackendOps {
     /// 数値は不変。REQ-2 複合判定（相対誤差 1e-3 未満 または絶対誤差
     /// 1e-5 未満）での一致は
     /// `crates/backend-cpu/tests/fused_elementwise_parity.rs` で検証済み。
+    /// RMSNorm／softmax 経路の数値一致は `tests/rmsnorm_parity.rs`・
+    /// `tests/softmax_parity.rs` で検証する。
     fn run_fused(
         &self,
         plan: &FusionPlan,
         leaves: &[&Tensor<f32>],
     ) -> Result<Tensor<f32>, BackendError> {
+        if let Some(hidden) = match_rmsnorm_plan(plan) {
+            return self.run_fused_rmsnorm(plan, leaves, hidden);
+        }
+        if let Some((rows, cols)) = match_softmax_plan(plan) {
+            return self.run_fused_softmax(plan, leaves, rows, cols);
+        }
         fused_elementwise::run_fused_elementwise(plan, leaves)
+    }
+}
+
+impl CpuBackendOps {
+    /// [`BackendOps::run_fused`] の RMSNorm 一致経路（イシュー #607）。
+    /// `match_rmsnorm_plan` が一致した後の dtype／leaf 数／leaf shape の
+    /// 起動前 fail-closed 検証（`backend-cuda::ops::CudaBackendOps::
+    /// run_fused_rmsnorm` と同じ検査順序）と、
+    /// [`rmsnorm::run_rmsnorm_f32_raw`]（`inv_n = 1.0`・`eps = 0.0`・
+    /// `w = None`）への委譲を行う。
+    fn run_fused_rmsnorm(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+        hidden: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if plan.dtype() != DType::F32 {
+            return Err(BackendError::Unsupported(format!(
+                "CpuBackendOps::run_fused: unsupported dtype {:?} (canonical RMSNorm fusion \
+                 kernel supports F32 only)",
+                plan.dtype()
+            )));
+        }
+        let [x] = leaves else {
+            return Err(BackendError::Unsupported(format!(
+                "CpuBackendOps::run_fused: canonical RMSNorm プランは leaf 1 個を要求するが \
+                 {} 個が渡された",
+                leaves.len()
+            )));
+        };
+        if x.shape() != plan.output_shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: plan.output_shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            }));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("run_fused: rmsnorm input not contiguous"))?;
+
+        let out = rmsnorm::run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
+    }
+
+    /// [`BackendOps::run_fused`] の softmax 一致経路（イシュー #607）。
+    /// `run_fused_rmsnorm` と同じ起動前 fail-closed 検証パターンを踏襲し、
+    /// [`softmax::run_softmax_f32`] を直接呼ぶ。
+    fn run_fused_softmax(
+        &self,
+        plan: &FusionPlan,
+        leaves: &[&Tensor<f32>],
+        rows: usize,
+        cols: usize,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if plan.dtype() != DType::F32 {
+            return Err(BackendError::Unsupported(format!(
+                "CpuBackendOps::run_fused: unsupported dtype {:?} (canonical softmax fusion \
+                 kernel supports F32 only)",
+                plan.dtype()
+            )));
+        }
+        let [x] = leaves else {
+            return Err(BackendError::Unsupported(format!(
+                "CpuBackendOps::run_fused: canonical softmax プランは leaf 1 個を要求するが \
+                 {} 個が渡された",
+                leaves.len()
+            )));
+        };
+        if x.shape() != plan.output_shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: plan.output_shape().to_vec(),
+                rhs: x.shape().to_vec(),
+            }));
+        }
+
+        let x_owned = x.contiguous();
+        let x_slice = x_owned
+            .as_slice()
+            .ok_or_else(|| gemm_contiguity_fail_safe("run_fused: softmax input not contiguous"))?;
+
+        let out = softmax::run_softmax_f32(x_slice, rows, cols)
+            .map_err(|e| BackendError::KernelLaunchFailed(e.to_string()))?;
+        Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
     }
 }
 
