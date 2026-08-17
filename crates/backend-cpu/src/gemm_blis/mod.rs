@@ -53,7 +53,7 @@ use std::ops::Range;
 
 use tensor_core::Activation;
 
-use crate::gemm::{GemmError, validate_dims};
+use crate::gemm::{BlockSizes, GemmError, validate_dims};
 #[cfg(not(target_arch = "x86_64"))]
 use microkernel::Isa;
 use microkernel::Microkernel;
@@ -78,13 +78,37 @@ const MAX_TILE: usize = 256;
 /// [`crate::gemm`] の既存定数（PoC-v2-1 実測環境で選定）を起点値として
 /// 踏襲する。マイクロカーネルの MR/NR は ISA ごとに異なる（[`microkernel`]
 /// 参照）ため、本モジュール独自の定数として持つ（`gemm` モジュールの
-/// MC/KC/NC とは独立にチューニング可能にする）。再チューニングは #24 の
-/// スコープ。
+/// MC/KC/NC とは独立にチューニング可能にする）。
+///
+/// **対象実機・再選定状況（#564）**: 本 3 定数のチューニング対象実機は
+/// **Apple M4 Max**（firestorm 系。`docs/perf/gemm-optimization-baseline.md`
+/// §3・イシュー #481 で確定）。BLIS/OpenBLAS の aarch64 向け参照実装値
+/// （firestorm: MC=480/KC=4096/NC=9600 等）近傍を含む実機スイープ候補・
+/// 選定手順・実測結果（未実施ならその引き継ぎ手順）は
+/// `docs/perf/cpu-gemm-blocking-sweep.md` に記録する。M4 Max 実機に到達
+/// できるセッションで実測・選定を完了するまでは本 PoC-v2-1 値を維持する
+/// （fail-closed。実測値の捏造・placeholder 化はしない）。
 const MC: usize = 128;
-/// 縮約次元（K）のブロックサイズ。
+/// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
 const KC: usize = 256;
 /// 列方向ブロックサイズ（B のパネル幅）。
 const NC: usize = 512;
+
+/// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
+/// （本番 3 公開関数）が使う既定ブロックサイズ（上記 `MC`/`KC`/`NC`
+/// 定数と同一値）。[`crate::gemm::BlockSizes`] 型を再利用してパラメータ化
+/// した理由は [`dispatch_region`] のドキュメント参照（#564・§3.1
+/// `crate::gemm::gemm_blocked` 向け `BlockSizes` 導入〈#24〉と同じ前例
+/// 踏襲）。値自体は `gemm` モジュールの既定値と独立にチューニング可能な
+/// ままにするため、`BlockSizes::poc_v2_1_default()` を直接使わずここで
+/// 本モジュール専用の定数から構築する。
+const fn default_blocks() -> BlockSizes {
+    BlockSizes {
+        mc: MC,
+        kc: KC,
+        nc: NC,
+    }
+}
 
 /// panel packing バッファ（A/B 各 1 本）を gemm 呼び出し単位で 1 回だけ
 /// 確保し、5-loop 内の全 jc×pc×ic ブロックで使い回すための保持構造体
@@ -117,16 +141,24 @@ impl PanelBuffers {
     /// 担当する行数。並列時はパネル 1 つぶん）から、[`gemm_blis_region`]
     /// の全反復を通じて必要になる最大バッファ長を 1 回で計算し確保する。
     ///
-    /// 各反復の必要量は `min(NC, n).div_ceil(nr)*min(KC,k_dim)*nr`
-    /// （B）／`min(MC, mc_total).div_ceil(mr)*min(KC,k_dim)*mr`（A）が
-    /// 常に上界になる（先頭ブロックが nc_len/mc_len/kc_len 最大で、末尾
-    /// ブロックはこれらが縮むのみ。§4.1 計画）。MC/KC/NC はコンパイル時
-    /// 定数（B ≦ 512KiB・A ≦ 約 132KiB 相当）で上界が押さえられるため
-    /// 乗算オーバーフローの懸念はない。`n == 0`／`k_dim == 0`／
-    /// `mc_total == 0` では長さ 0 のバッファになり、5-loop 自体が回らない
-    /// ためサブスライス取得も発生せず問題ない。
-    fn new<K: Microkernel>(n: usize, k_dim: usize, mc_total: usize) -> Self {
-        let (b_len, a_len) = panel_capacity(n, k_dim, mc_total, K::MR, K::NR);
+    /// 各反復の必要量は `min(blocks.nc, n).div_ceil(nr)*min(blocks.kc,k_dim)*nr`
+    /// （B）／`min(blocks.mc, mc_total).div_ceil(mr)*min(blocks.kc,k_dim)*mr`
+    /// （A）が常に上界になる（先頭ブロックが nc_len/mc_len/kc_len 最大で、
+    /// 末尾ブロックはこれらが縮むのみ。§4.1 計画）。`blocks`（[`BlockSizes`]）
+    /// はパラメータ化（#564）により実行時値になったが、乗算オーバーフローの
+    /// 懸念はない: 呼び出し元（[`gemm_blis_with_kernel_and_blocks`]／
+    /// [`gemm_blis_parallel_with_blocks`] 等のパラメータ化入口）が
+    /// [`validate_dims`] を先に通しており、`m*k`／`k*n`／`m*n` が `usize`
+    /// で非オーバーフローと確定済みの `n`／`k_dim`／`mc_total` に対して
+    /// `blocks.{nc,kc,mc}` は常に `.min()` でクランプしてから乗算される
+    /// （`blocks` 側にどれだけ大きな値〈firestorm 参照値 KC=4096/NC=9600
+    /// 等〉を渡しても、実際の乗算対象は非オーバーフロー確定済みの dim
+    /// 由来値に収まる）。本番 3 公開関数は [`default_blocks`]（コンパイル
+    /// 時定数）のみを渡すためこの経路も従来通り安全。`n == 0`／
+    /// `k_dim == 0`／`mc_total == 0` では長さ 0 のバッファになり、5-loop
+    /// 自体が回らないためサブスライス取得も発生せず問題ない。
+    fn new<K: Microkernel>(n: usize, k_dim: usize, mc_total: usize, blocks: BlockSizes) -> Self {
+        let (b_len, a_len) = panel_capacity(n, k_dim, mc_total, K::MR, K::NR, blocks);
         PanelBuffers {
             b_panel: vec![0.0f32; b_len],
             a_panel: vec![0.0f32; a_len],
@@ -138,11 +170,18 @@ impl PanelBuffers {
 /// を型パラメータでなく引数に取ることで、単体テストが
 /// [`Microkernel`] 実装を経由せず MR/NR の任意の組（全 ISA カーネル定数
 /// 相当）に対して総当たり検証できるようにしている（#556 テスト計画
-/// §5-3）。
-fn panel_capacity(n: usize, k_dim: usize, mc_total: usize, mr: usize, nr: usize) -> (usize, usize) {
-    let kc_len_max = KC.min(k_dim);
-    let nc_len_max = NC.min(n);
-    let mc_len_max = MC.min(mc_total);
+/// §5-3）。`blocks`（[`BlockSizes`]）は #564 でパラメータ化した MC/KC/NC。
+fn panel_capacity(
+    n: usize,
+    k_dim: usize,
+    mc_total: usize,
+    mr: usize,
+    nr: usize,
+    blocks: BlockSizes,
+) -> (usize, usize) {
+    let kc_len_max = blocks.kc.min(k_dim);
+    let nc_len_max = blocks.nc.min(n);
+    let mc_len_max = blocks.mc.min(mc_total);
     let nr_blocks_max = nc_len_max.div_ceil(nr);
     let mr_blocks_max = mc_len_max.div_ceil(mr);
     (
@@ -165,7 +204,7 @@ pub fn gemm_blis(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    dispatch_region(a, b, c, n, k, 0..m);
+    dispatch_region(a, b, c, n, k, 0..m, default_blocks());
     Ok(())
 }
 
@@ -199,7 +238,7 @@ pub fn gemm_blis_parallel(
         .for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks());
         });
     Ok(())
 }
@@ -278,7 +317,7 @@ pub fn gemm_blis_bias_act_parallel(
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks());
             apply_epilogue(c_chunk, n, bias, act)
         })
 }
@@ -330,7 +369,15 @@ fn apply_epilogue(
 /// introspection API として残す）。環境変数等による dispatch 上書きは
 /// 設けない（OWASP A03・`.claude/rules/security.md`）。
 #[cfg(target_arch = "x86_64")]
-fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows: Range<usize>) {
+fn dispatch_region(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) {
     // AVX-512 経路は `avx512_stable` cfg（`backend-cpu` クレートルートの
     // `build.rs` が AVX-512F intrinsics のコンパイル可否を実測して発行。
     // [`microkernel::avx512`] モジュールドキュメント参照）が立っている
@@ -342,15 +389,15 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
     let mc_total = rows.end - rows.start;
     #[cfg(avx512_stable)]
     if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
-        let mut bufs = PanelBuffers::new::<microkernel::Avx512Kernel>(n, k, mc_total);
-        return gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs);
+        let mut bufs = PanelBuffers::new::<microkernel::Avx512Kernel>(n, k, mc_total, blocks);
+        return gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks);
     }
     if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
-        let mut bufs = PanelBuffers::new::<microkernel::Avx2Kernel>(n, k, mc_total);
-        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs);
+        let mut bufs = PanelBuffers::new::<microkernel::Avx2Kernel>(n, k, mc_total, blocks);
+        gemm_blis_region(kernel, a, b, c, n, k, rows, &mut bufs, blocks);
     } else {
-        let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total);
-        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs);
+        let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total, blocks);
+        gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks);
     }
 }
 
@@ -358,21 +405,47 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
 /// [`microkernel::Isa::detect`] は常に `Isa::Neon` を返す（実行時検出不要。
 /// [`microkernel`] モジュールドキュメント参照）。
 #[cfg(target_arch = "aarch64")]
-fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows: Range<usize>) {
+fn dispatch_region(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) {
     debug_assert_eq!(Isa::detect(), Isa::Neon);
     let mc_total = rows.end - rows.start;
-    let mut bufs = PanelBuffers::new::<microkernel::NeonKernel>(n, k, mc_total);
-    gemm_blis_region(microkernel::NeonKernel, a, b, c, n, k, rows, &mut bufs);
+    let mut bufs = PanelBuffers::new::<microkernel::NeonKernel>(n, k, mc_total, blocks);
+    gemm_blis_region(
+        microkernel::NeonKernel,
+        a,
+        b,
+        c,
+        n,
+        k,
+        rows,
+        &mut bufs,
+        blocks,
+    );
 }
 
 /// aarch64／x86_64 以外の arch 版 [`dispatch_region`]。実行時検出対象の
 /// ISA を持たないため常に [`ScalarKernel`] を使う。
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows: Range<usize>) {
+fn dispatch_region(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) {
     debug_assert_eq!(Isa::detect(), Isa::Scalar);
     let mc_total = rows.end - rows.start;
-    let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total);
-    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs);
+    let mut bufs = PanelBuffers::new::<ScalarKernel>(n, k, mc_total, blocks);
+    gemm_blis_region(ScalarKernel, a, b, c, n, k, rows, &mut bufs, blocks);
 }
 
 /// `gemm_blis`／`gemm_blis_parallel` 共通の 5-loop 本体。`c` はパネル
@@ -408,10 +481,16 @@ fn dispatch_region(a: &[f32], b: &[f32], c: &mut [f32], n: usize, k: usize, rows
 /// には依存せず、bit 完全一致契約（REQ-2）・FMA 契約・累積順序は一切
 /// 変更しない。
 ///
-/// `#[allow(clippy::too_many_arguments)]`: `bufs` 追加により 8 引数に
-/// なる。本ファイル内の既存慣例（[`gemm_blis_bias_act_parallel`] の
+/// `#[allow(clippy::too_many_arguments)]`: `bufs`／`blocks` 追加により
+/// 9 引数になる。本ファイル内の既存慣例（[`gemm_blis_bias_act_parallel`] の
 /// 同 attribute 使用箇所と同方針）に従い、構造体化はせず素朴な引数列の
 /// まま許容する。
+///
+/// `blocks`（[`BlockSizes`]）は #564 で MC/KC/NC をパラメータ化したもの。
+/// K 方向の加算順序・C タイルのロード／書き戻し構造は `blocks` の値に
+/// 依らず不変のため、任意の `blocks` で [`crate::gemm::gemm_naive`] との
+/// bit 完全一致契約（REQ-2）が成立する（`gemm_blis_with_kernel_and_blocks`
+/// のパリティテストで直接検証）。
 #[allow(clippy::too_many_arguments)]
 fn gemm_blis_region<K: Microkernel>(
     kernel: K,
@@ -422,6 +501,7 @@ fn gemm_blis_region<K: Microkernel>(
     k_dim: usize,
     rows: Range<usize>,
     bufs: &mut PanelBuffers,
+    blocks: BlockSizes,
 ) {
     let mr = K::MR;
     let nr = K::NR;
@@ -429,10 +509,10 @@ fn gemm_blis_region<K: Microkernel>(
     let mc_total = rows.end - rows.start;
     let a = &a[row_start * k_dim..];
 
-    for jc in (0..n).step_by(NC) {
-        let nc_len = NC.min(n - jc);
-        for pc in (0..k_dim).step_by(KC) {
-            let kc_len = KC.min(k_dim - pc);
+    for jc in (0..n).step_by(blocks.nc) {
+        let nc_len = blocks.nc.min(n - jc);
+        for pc in (0..k_dim).step_by(blocks.kc) {
+            let kc_len = blocks.kc.min(k_dim - pc);
 
             // B パネル packing: nc_len を NR 単位のブロックに分割し、各
             // ブロックを kc_len*NR 要素の連続領域として 1 本のバッファに
@@ -465,7 +545,7 @@ fn gemm_blis_region<K: Microkernel>(
 
             let mut ic = 0;
             while ic < mc_total {
-                let mc_len = MC.min(mc_total - ic);
+                let mc_len = blocks.mc.min(mc_total - ic);
 
                 // A パネル packing: mc_len を MR 単位のブロックに分割
                 // （jr ループ全体で使い回すため ic ブロックごとに 1 回のみ）。
@@ -533,7 +613,7 @@ fn gemm_blis_region<K: Microkernel>(
                     }
                 }
 
-                ic += MC;
+                ic += blocks.mc;
             }
         }
     }
@@ -555,8 +635,97 @@ pub(crate) fn gemm_blis_with_kernel<K: Microkernel>(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    let mut bufs = PanelBuffers::new::<K>(n, k, m);
-    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs);
+    let mut bufs = PanelBuffers::new::<K>(n, k, m, default_blocks());
+    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, default_blocks());
+    Ok(())
+}
+
+/// [`gemm_blis_with_kernel_and_blocks`]／[`gemm_blis_parallel_with_blocks`]
+/// （実行時に任意の [`BlockSizes`] を受け付けるパラメータ化入口。#564
+/// スイープ基盤）が [`PanelBuffers::new`] へ到達する前に検証する:
+/// `mc`／`kc`／`nc` のいずれかが 0 だと `gemm_blis_region` 内の
+/// `step_by(0)`（`crate::gemm::gemm_blocked_region` の同種バグ〈Cursor
+/// Bugbot #231〉と同じ既知の危険）でパニックするため、`GemmError::
+/// ZeroBlockSize`（`crate::gemm` 側で既に定義済みのエラー variant。
+/// gemm/gemm_blis 間で共有する `GemmError` 型のため新規 variant 追加は
+/// 不要）を再利用して早期拒否する（OWASP A03・`.claude/rules/security.md`）。
+///
+/// panel 容量計算（[`panel_capacity`]）の乗算オーバーフローについては、
+/// 本関数の引数として渡る `n`／`k_dim`／`mc_total` が呼び出し元
+/// `validate_dims` を先に通過済み（`m*k`／`k*n`／`m*n` が `usize` に収まると
+/// 検証済み）であることと、`panel_capacity` が常に `blocks.{mc,kc,nc}
+/// .min(dim)` でクランプしてから乗算する構造（[`panel_capacity`] 参照）
+/// により、`blocks` 側にどれだけ大きな値（firestorm 参照値
+/// KC=4096/NC=9600 等）を渡しても実際の乗算対象は非オーバーフロー確定
+/// 済みの dim 由来値に収まるため、追加のオーバーフロー検査は実装上
+/// 到達不能と判断し設けない（0 値検査のみで fail-closed 契約を満たす）。
+#[cfg(test)]
+fn validate_block_sizes(blocks: BlockSizes) -> Result<(), GemmError> {
+    if blocks.mc == 0 || blocks.kc == 0 || blocks.nc == 0 {
+        return Err(GemmError::ZeroBlockSize {
+            mc: blocks.mc,
+            kc: blocks.kc,
+            nc: blocks.nc,
+        });
+    }
+    Ok(())
+}
+
+/// テスト・スイープ専用: [`gemm_blis_with_kernel`] の任意 `BlockSizes` 版
+/// （#564）。実運用経路（[`gemm_blis`] 等）は [`default_blocks`]
+/// （コンパイル時定数）のみを渡すためこの入口は通過しない。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemm_blis_with_kernel_and_blocks<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+    let mut bufs = PanelBuffers::new::<K>(n, k, m, blocks);
+    gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, blocks);
+    Ok(())
+}
+
+/// テスト・スイープ専用: [`gemm_blis_parallel`] の任意 `BlockSizes` 版
+/// （#564）。並列分割戦略（行パネル分割・`dispatch_region` 呼び出し）は
+/// `gemm_blis_parallel` 本体と同一で、`blocks` のみ呼び出し元から注入
+/// できる（実運用経路は [`default_blocks`] 固定のため変更なし）。
+#[cfg(test)]
+pub(crate) fn gemm_blis_parallel_with_blocks(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    // n == 0 の no-op 対処は `gemm_blis_parallel` と同じ理由（本ファイル
+    // 冒頭のコメント参照）。
+    if n == 0 {
+        return Ok(());
+    }
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let panel_rows = m.div_ceil(num_threads).max(1);
+
+    c.par_chunks_mut(panel_rows * n)
+        .enumerate()
+        .for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks);
+        });
     Ok(())
 }
 
@@ -676,6 +845,135 @@ mod tests {
         );
     }
 
+    /// [`validate_block_sizes`] が `mc`／`kc`／`nc` の 0 値を早期拒否する
+    /// ことを検証する（`step_by(0)` パニック防止。`crate::gemm::
+    /// GemmError::ZeroBlockSize` 同種バグ〈Cursor Bugbot #231〉の
+    /// gemm_blis 版再発防止。#564）。3 フィールドそれぞれを 0 にしたケースを
+    /// 個別に検査する。
+    #[test]
+    fn gemm_blis_with_kernel_and_blocks_rejects_zero_block_size() {
+        let a = vec![1.0f32; 4];
+        let b = vec![1.0f32; 4];
+        let mut c = vec![0.0f32; 4];
+
+        for blocks in [
+            BlockSizes {
+                mc: 0,
+                kc: 4,
+                nc: 4,
+            },
+            BlockSizes {
+                mc: 4,
+                kc: 0,
+                nc: 4,
+            },
+            BlockSizes {
+                mc: 4,
+                kc: 4,
+                nc: 0,
+            },
+        ] {
+            let err =
+                gemm_blis_with_kernel_and_blocks(ScalarKernel, &a, &b, &mut c, 2, 2, 2, blocks)
+                    .unwrap_err();
+            assert!(
+                matches!(err, GemmError::ZeroBlockSize { .. }),
+                "blocks={blocks:?} は ZeroBlockSize で拒否されるはず: {err:?}"
+            );
+        }
+    }
+
+    /// 参照実装値近傍を含む非既定 `BlockSizes`（#564 §3.4 候補グリッドの
+    /// 縮小版・境界を跨ぐ／下回る／firestorm 近傍の組）でも
+    /// [`crate::gemm::gemm_naive`] と bit 完全一致することを検証する
+    /// （§3.2「bit 完全一致契約が維持される根拠」の直接検証。x86_64 でも
+    /// 実行可能。ScalarKernel 強制で ISA 差を排除する）。
+    #[test]
+    fn gemm_blis_non_default_block_sizes_match_naive_bit_exact() {
+        let (m, n, k) = (37, 53, 71);
+        let a = xorshift32_vec(0x9999_9999, m * k);
+        let b = xorshift32_vec(0xaaaa_aaaa, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        // 現行値・境界跨ぎの小さい奇数系・firestorm 参照値近傍（MC=480/
+        // KC=4096/NC=9600 は m,n,k=37/53/71 に対して常に 1 ブロックに
+        // クランプされるが、境界跨ぎと同じ「clamp が正しく効く」経路を
+        // 検証する意味を持つ）を横断する。
+        for blocks in [
+            default_blocks(),
+            BlockSizes {
+                mc: 8,
+                kc: 4,
+                nc: 12,
+            },
+            BlockSizes {
+                mc: 16,
+                kc: 17,
+                nc: 19,
+            },
+            BlockSizes {
+                mc: 480,
+                kc: 4096,
+                nc: 9600,
+            },
+            BlockSizes {
+                mc: 256,
+                kc: 1024,
+                nc: 4096,
+            },
+        ] {
+            let mut c_blocked = vec![0.0f32; m * n];
+            gemm_blis_with_kernel_and_blocks(ScalarKernel, &a, &b, &mut c_blocked, m, n, k, blocks)
+                .unwrap();
+
+            assert_eq!(
+                c_naive, c_blocked,
+                "blocks={blocks:?} は gemm_naive と bit 完全一致するはず"
+            );
+        }
+    }
+
+    /// [`gemm_blis_parallel_with_blocks`]（実運用の行パネル並列経路
+    /// `gemm_blis_parallel` の任意 `BlockSizes` 版。#564 スイープ基盤）が、
+    /// 非既定 `blocks`（境界跨ぎ・firestorm 参照値近傍）でも
+    /// [`crate::gemm::gemm_naive`] と bit 完全一致することを検証する
+    /// （epilogue 融合と同じ理由〈要素ごとの演算はタスク分割順序に依存
+    /// しない〉で、並列パネル分割数に依らず結果が一致するはずという
+    /// §3.2 の主張を並列経路でも直接確認する。x86_64 でも実行可能）。
+    #[test]
+    fn gemm_blis_parallel_non_default_block_sizes_match_naive_bit_exact() {
+        let (m, n, k) = (200, 600, 700);
+        let a = xorshift32_vec(0xdddd_dddd, m * k);
+        let b = xorshift32_vec(0xeeee_eeee, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        for blocks in [
+            default_blocks(),
+            BlockSizes {
+                mc: 16,
+                kc: 17,
+                nc: 19,
+            },
+            BlockSizes {
+                mc: 480,
+                kc: 4096,
+                nc: 9600,
+            },
+        ] {
+            let mut c_parallel = vec![0.0f32; m * n];
+            gemm_blis_parallel_with_blocks(&a, &b, &mut c_parallel, m, n, k, blocks).unwrap();
+
+            assert_eq!(
+                c_naive, c_parallel,
+                "blocks={blocks:?} の並列経路は gemm_naive と bit 完全一致するはず"
+            );
+        }
+    }
+
     /// [`panel_capacity`]（[`PanelBuffers::new`] の容量計算本体）が、
     /// `gemm_blis_region` の全 jc×pc×ic ブロック反復における実際の必要量
     /// （`nr_blocks*kc_len*nr`／`mr_blocks*kc_len*mr`）の上界になっている
@@ -697,34 +995,57 @@ mod tests {
             (600, 700, 300),
             (512, 256, 128),
         ];
+        // 検証対象の BlockSizes 候補（レビュー指摘 #564: 既定値のみでは
+        // `gemm_blis_with_kernel_and_blocks`／`gemm_blis_parallel_with_blocks`
+        // が新規に開放した非既定 blocks 経路の upper bound 不変条件を
+        // 検証できない）。既定値・MC/KC/NC 境界を跨ぐ小さめの値・firestorm
+        // 参照値近傍（実機スイープ候補として想定される大きめの値）を含める。
+        // この不変条件が破れた場合の失敗モードは `gemm_blis_region` 内での
+        // スライスインデックスパニックであり、境界を跨ぐ値でこそ検知できる。
+        let blocks_candidates: [BlockSizes; 3] = [
+            default_blocks(),
+            BlockSizes {
+                mc: 16,
+                kc: 17,
+                nc: 19,
+            },
+            BlockSizes {
+                mc: 480,
+                kc: 4096,
+                nc: 9600,
+            },
+        ];
 
-        for &(mr, nr) in &KERNEL_DIMS {
-            for &(n, k_dim, mc_total) in &SHAPES {
-                let (b_cap, a_cap) = panel_capacity(n, k_dim, mc_total, mr, nr);
+        for &blocks in &blocks_candidates {
+            for &(mr, nr) in &KERNEL_DIMS {
+                for &(n, k_dim, mc_total) in &SHAPES {
+                    let (b_cap, a_cap) = panel_capacity(n, k_dim, mc_total, mr, nr, blocks);
 
-                for jc in (0..n).step_by(NC) {
-                    let nc_len = NC.min(n - jc);
-                    for pc in (0..k_dim).step_by(KC) {
-                        let kc_len = KC.min(k_dim - pc);
-                        let nr_blocks = nc_len.div_ceil(nr);
-                        let b_needed = nr_blocks * kc_len * nr;
-                        assert!(
-                            b_needed <= b_cap,
-                            "B 容量不足: mr={mr},nr={nr},n={n},k={k_dim},mc_total={mc_total},\
-                             jc={jc},pc={pc}: needed={b_needed} > cap={b_cap}"
-                        );
-
-                        let mut ic = 0;
-                        while ic < mc_total {
-                            let mc_len = MC.min(mc_total - ic);
-                            let mr_blocks = mc_len.div_ceil(mr);
-                            let a_needed = mr_blocks * kc_len * mr;
+                    for jc in (0..n).step_by(blocks.nc) {
+                        let nc_len = blocks.nc.min(n - jc);
+                        for pc in (0..k_dim).step_by(blocks.kc) {
+                            let kc_len = blocks.kc.min(k_dim - pc);
+                            let nr_blocks = nc_len.div_ceil(nr);
+                            let b_needed = nr_blocks * kc_len * nr;
                             assert!(
-                                a_needed <= a_cap,
-                                "A 容量不足: mr={mr},nr={nr},n={n},k={k_dim},mc_total={mc_total},\
-                                 jc={jc},pc={pc},ic={ic}: needed={a_needed} > cap={a_cap}"
+                                b_needed <= b_cap,
+                                "B 容量不足: blocks={blocks:?},mr={mr},nr={nr},n={n},k={k_dim},\
+                                 mc_total={mc_total},jc={jc},pc={pc}: needed={b_needed} > cap={b_cap}"
                             );
-                            ic += MC;
+
+                            let mut ic = 0;
+                            while ic < mc_total {
+                                let mc_len = blocks.mc.min(mc_total - ic);
+                                let mr_blocks = mc_len.div_ceil(mr);
+                                let a_needed = mr_blocks * kc_len * mr;
+                                assert!(
+                                    a_needed <= a_cap,
+                                    "A 容量不足: blocks={blocks:?},mr={mr},nr={nr},n={n},k={k_dim},\
+                                     mc_total={mc_total},jc={jc},pc={pc},ic={ic}: \
+                                     needed={a_needed} > cap={a_cap}"
+                                );
+                                ic += blocks.mc;
+                            }
                         }
                     }
                 }
@@ -860,6 +1181,154 @@ mod tests {
                 "dim={dim}: NeonKernel(8x12) median={median_8x12:.6}s, \
                  Neon12x8Kernel(12x8) median={median_12x8:.6}s"
             );
+        }
+    }
+
+    /// MC/KC/NC 実機スイープ（イシュー #564）: 参照実装値（BLIS
+    /// firestorm: MC=480/KC=4096/NC=9600・OpenBLAS: NC 相当 4096）近傍を
+    /// 含む候補グリッド × REQ-8 判定形状で [`gemm_blis_parallel_with_blocks`]
+    /// （実運用経路 `gemm_blis_parallel` 相当）の中央値スループットを
+    /// 計測・報告する（`.claude/rules/coding-rust.md` の 5 回計測中央値
+    /// 規約。計測順は [`neon_8x12_vs_12x8_ab_median_throughput`] と同じ
+    /// 理由でインターリーブし cache/TLB の系統的偏りを避ける）。
+    ///
+    /// 対象実機は **Apple M4 Max**（firestorm 系。#481 §3 確定・
+    /// `docs/perf/gemm-optimization-baseline.md`）。候補グリッド・選定
+    /// 判断基準・実測結果の記録先は `docs/perf/cpu-gemm-blocking-sweep.md`
+    /// を参照。採用可否の判定は本テストの出力を見た人間／後続セッションが
+    /// 行うため、本テスト自体は勝敗を assert しない（#559 §2.3 と同方針）。
+    ///
+    /// `#[ignore]` 分離（実機実行専用。`cargo test -p backend-cpu --release
+    /// -- --ignored mc_kc_nc_blocking_sweep_median_throughput` で M4 Max
+    /// 上から実行する）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "aarch64 実機（Apple M4 Max）での MC/KC/NC スイープ計測専用（--release 実行推奨。#564）"]
+    fn mc_kc_nc_blocking_sweep_median_throughput() {
+        use std::time::Instant;
+
+        // §3.4 候補グリッド（現行値・軸別分離・firestorm 参照値そのまま・
+        // 中間点）。MC は NEON 既定マイクロカーネル MR=8（#559）の倍数。
+        const CANDIDATES: [(&str, BlockSizes); 8] = [
+            (
+                "現行値",
+                BlockSizes {
+                    mc: 128,
+                    kc: 256,
+                    nc: 512,
+                },
+            ),
+            (
+                "NC拡大(OpenBLAS相当)",
+                BlockSizes {
+                    mc: 128,
+                    kc: 256,
+                    nc: 4096,
+                },
+            ),
+            (
+                "NC拡大(firestorm)",
+                BlockSizes {
+                    mc: 128,
+                    kc: 256,
+                    nc: 9600,
+                },
+            ),
+            (
+                "KC拡大(firestorm)",
+                BlockSizes {
+                    mc: 128,
+                    kc: 4096,
+                    nc: 512,
+                },
+            ),
+            (
+                "MC拡大(firestorm)",
+                BlockSizes {
+                    mc: 480,
+                    kc: 256,
+                    nc: 512,
+                },
+            ),
+            (
+                "firestorm全軸",
+                BlockSizes {
+                    mc: 480,
+                    kc: 4096,
+                    nc: 9600,
+                },
+            ),
+            (
+                "中間点",
+                BlockSizes {
+                    mc: 256,
+                    kc: 1024,
+                    nc: 4096,
+                },
+            ),
+            (
+                "firestormMC/KC+OpenBLAS-NC",
+                BlockSizes {
+                    mc: 480,
+                    kc: 4096,
+                    nc: 4096,
+                },
+            ),
+        ];
+
+        fn run_once(
+            a: &[f32],
+            b: &[f32],
+            m: usize,
+            n: usize,
+            k_dim: usize,
+            blocks: BlockSizes,
+        ) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_parallel_with_blocks(a, b, &mut c, m, n, k_dim, blocks).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            samples[samples.len() / 2]
+        }
+
+        // REQ-8 判定形状（M=N=K=2048/4096）+ 参考 1024（計画 §3.4）。
+        for dim in [1024usize, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xbbbb_bbbb, m * k);
+            let b = xorshift32_vec(0xcccc_cccc, k * n);
+
+            // 全候補を 1 巡ウォームアップしてから計測に入る（cache/TLB を
+            // 均等に温める。単純な「先頭候補が cold cache を引く」偏りを
+            // 避ける）。
+            for &(_, blocks) in &CANDIDATES {
+                run_once(&a, &b, m, n, k, blocks);
+            }
+
+            // 各反復で候補の計測順序をローテーションし、特定候補が常に
+            // 先頭/末尾になることによる系統的偏りを避ける
+            // （[`neon_8x12_vs_12x8_ab_median_throughput`] の A/B
+            // インターリーブと同じ狙いを候補数 N へ一般化）。
+            let mut samples: Vec<Vec<f64>> = vec![Vec::with_capacity(5); CANDIDATES.len()];
+            for rep in 0..5 {
+                for offset in 0..CANDIDATES.len() {
+                    let idx = (offset + rep) % CANDIDATES.len();
+                    let (_, blocks) = CANDIDATES[idx];
+                    samples[idx].push(run_once(&a, &b, m, n, k, blocks));
+                }
+            }
+
+            println!("=== dim={dim} ===");
+            for (i, &(label, blocks)) in CANDIDATES.iter().enumerate() {
+                let med = median(samples[i].clone());
+                println!(
+                    "  {label} (mc={},kc={},nc={}): median={med:.6}s",
+                    blocks.mc, blocks.kc, blocks.nc
+                );
+            }
         }
     }
 }
