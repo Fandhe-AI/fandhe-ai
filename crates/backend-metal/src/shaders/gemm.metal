@@ -97,7 +97,12 @@ kernel void gemm_tiled(
     uint row = gid.y, col = gid.x;
     float acc = 0.0;
 
-    uint num_tiles = (k + TILE - 1) / TILE;
+    // オーバーフロー安全なタイル数計算: `(k + TILE - 1) / TILE` は
+    // `k > u32::MAX - (TILE - 1)` で uint 加算がラップし、必要なタイルを
+    // 処理せず誤った結果を正常応答してしまう（REQ-8・codex-review 指摘）。
+    // 商と余りを別々に計算する `k / TILE + (k % TILE != 0)` はいずれの
+    // 演算も k を超えない範囲に収まりオーバーフローしない。
+    uint num_tiles = k / TILE + ((k % TILE != 0) ? 1u : 0u);
     for (uint t = 0; t < num_tiles; t++) {
         uint a_col = t * TILE + lid.x;
         uint b_row = t * TILE + lid.y;
@@ -177,7 +182,12 @@ kernel void gemm_tiled_bias_act(
     uint row = gid.y, col = gid.x;
     float acc = 0.0;
 
-    uint num_tiles = (k + TILE - 1) / TILE;
+    // オーバーフロー安全なタイル数計算: `(k + TILE - 1) / TILE` は
+    // `k > u32::MAX - (TILE - 1)` で uint 加算がラップし、必要なタイルを
+    // 処理せず誤った結果を正常応答してしまう（REQ-8・codex-review 指摘）。
+    // 商と余りを別々に計算する `k / TILE + (k % TILE != 0)` はいずれの
+    // 演算も k を超えない範囲に収まりオーバーフローしない。
+    uint num_tiles = k / TILE + ((k % TILE != 0) ? 1u : 0u);
     for (uint t = 0; t < num_tiles; t++) {
         uint a_col = t * TILE + lid.x;
         uint b_row = t * TILE + lid.y;

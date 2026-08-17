@@ -1559,8 +1559,16 @@ mod tests {
     fn validate_bias_act_dims_accepts_zero_m_n_k_unlike_validate_dims() {
         // `run_tiled_bias_act_f32` は m/n/k==0 を縮退分岐として受理する契約
         // であり、`validate_dims`（`ZeroDimension` で一律拒否）とは異なる。
-        assert!(validate_bias_act_dims(0, 0, 0, 4, 3).is_ok());
-        assert!(validate_bias_act_dims(0, 0, 2, 0, 3).is_ok());
+        // 長さ検証は `a_len == m*k`・`b_len == k*n` を要求するため（m/n/k
+        // のいずれかが 0 でも `a_len`／`b_len` は対応する非ゼロの積を渡す
+        // 必要がある。Cursor Bugbot 指摘・PR #717 レビュースレッド:
+        // 旧テストは 3 ケース全てで a_len=0, b_len=0 を渡しており、
+        // (m=0,n=4,k=3) は kn=12 との不一致で `BLenMismatch`、
+        // (m=2,n=0,k=3) は mk=6 との不一致で `ALenMismatch` を返し、
+        // 意図した成功ケースになっていなかった。k=0 のケースのみ
+        // mk=kn=0 になり元のまま成功する）。
+        assert!(validate_bias_act_dims(0, 12, 0, 4, 3).is_ok());
+        assert!(validate_bias_act_dims(6, 0, 2, 0, 3).is_ok());
         assert!(validate_bias_act_dims(0, 0, 2, 4, 0).is_ok());
     }
 

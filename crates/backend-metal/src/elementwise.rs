@@ -47,6 +47,25 @@ pub(crate) fn validate_elementwise_binary_dims(
             detail: format!("elementwise length mismatch: a_len={a_len}, b_len={b_len}"),
         });
     }
+    validate_elementwise_len(a_len)
+}
+
+/// 単項演算向け: 長さが `u32::MAX` に収まることのみを検証する。
+///
+/// カーネル引数 `constant uint& numel`（`shaders/elementwise.metal`）は
+/// 32bit のため、`numel as u32` キャストが検証なしだと `numel >
+/// u32::MAX` で切り詰まり、出力バッファの一部のみ計算されゼロ埋めの
+/// まま正常応答してしまう（数値契約違反。codex-review 指摘・CUDA 側
+/// `elementwise.rs::validate_elementwise_len` と同じ理由。OWASP A03。
+/// `.claude/rules/security.md`）。
+pub(crate) fn validate_elementwise_len(len: usize) -> Result<(), MetalError> {
+    if len > u32::MAX as usize {
+        return Err(MetalError::InvalidElementwiseShape {
+            detail: format!(
+                "elementwise numel must fit in u32 (kernel argument type): numel={len}"
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -132,6 +151,7 @@ impl MetalElementwise {
         pipeline: &MtlPipeline,
         a: &[f32],
     ) -> Result<Vec<f32>, MetalError> {
+        validate_elementwise_len(a.len())?;
         let numel = a.len();
         if numel == 0 {
             return Ok(Vec::new());
@@ -287,6 +307,24 @@ mod tests {
     #[test]
     fn validate_elementwise_binary_dims_rejects_length_mismatch() {
         let err = validate_elementwise_binary_dims(4, 5).unwrap_err();
+        assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
+    }
+
+    #[test]
+    fn validate_elementwise_len_accepts_small_len() {
+        assert!(validate_elementwise_len(4).is_ok());
+    }
+
+    #[test]
+    fn validate_elementwise_len_rejects_len_exceeding_u32() {
+        let err = validate_elementwise_len(u32::MAX as usize + 1).unwrap_err();
+        assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
+    }
+
+    #[test]
+    fn validate_elementwise_binary_dims_rejects_len_exceeding_u32_even_when_matching() {
+        let len = u32::MAX as usize + 1;
+        let err = validate_elementwise_binary_dims(len, len).unwrap_err();
         assert!(matches!(err, MetalError::InvalidElementwiseShape { .. }));
     }
 
