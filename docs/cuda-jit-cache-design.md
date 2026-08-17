@@ -1,8 +1,12 @@
-# CUDA JIT コンパイルキャッシュ ディレクトリ解決規則
+# CUDA JIT shape 特化・コンパイルキャッシュ設計
 
-- 対応イシュー: 親 #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・静的タイル選定）／C-1 #504（キー型定義）／C-2 #506（自作非暗号ハッシュ・ディレクトリ命名規則。PR #659）／C-3 #509（一時ディレクトリコンパイル → アトミック rename によるキャッシュ書き込み）／C-4 #511（プロセス内 LRU カーネルモジュールキャッシュ・GEMM 経路への結線。本節を本タスクで更新）
-- 位置づけ: 本文書は `crates/backend-cuda/src/nvrtc.rs` のキャッシュルート解決・エントリパス組み立て・実 I/O ロジックの**利用者向け参照**である。実装本体のドキュメンテーションコメント（同ファイル）を正とし、本文書はそれを要約・横断参照可能な形にまとめたものにすぎない（二重管理を避けるため詳細ロジックはコードコメント側で保守する）。
+- 対応イシュー: 親 #503（Phase C: CUDA JIT shape 特化・コンパイルキャッシュ・静的タイル選定）／C-1 #504（キー型定義）／C-2 #506（自作非暗号ハッシュ・ディレクトリ命名規則。PR #659）／C-3 #509（一時ディレクトリコンパイル → アトミック rename によるキャッシュ書き込み）／C-4 #511（プロセス内 LRU カーネルモジュールキャッシュ・GEMM 経路への結線）／C-5 #514（ソース断片の取り込み・`ENCODING_VERSION` v2 化）／C-6・C-7（#516・#519。テンプレート展開・次元別定数化選択・`ENCODING_VERSION` v3 化）／C-8・C-9a・C-9b（#521・#524・#527。SMEM 予算からの段数逆算・候補列挙・L1/L2 帯域コストモデル）／C-10（#529。網羅的回帰テスト）／C-12（#534。性能計測）／**C-14 #539（本タスク。JIT shape 特化・キャッシュ設計とコストモデル定数の実機再測定手順の記録。総括更新）**
+- 位置づけ: 本文書は `crates/backend-cuda/src/nvrtc.rs` のキャッシュキー構成・キャッシュルート解決・エントリパス組み立て・実 I/O ロジック、および `gemm_auto.rs::cost_model` のコストモデル定数の**利用者向け参照**である。実装本体のドキュメンテーションコメント（`nvrtc.rs`・`gemm_auto.rs`）を正とし、本文書はそれを要約・横断参照可能な形にまとめたものにすぎない（二重管理を避けるため詳細ロジックはコードコメント側で保守する）。C-14（#539）はコード変更を伴わない docs のみのタスクであり、本節以下は既存記述の総括・ドリフト修正（下記「現状」の `ENCODING_VERSION` 訂正）と新設節（§キャッシュキー構成の総括・§キャッシュ無効化条件の総括・§shape 特化と静的タイル選定・§コストモデル定数の実機再測定手順）の追加のみを行う
 - **現状（C-4・#511 実装後）**: `resolve_cache_root`／`cache_root`／`ensure_cache_root`／`store_cache_entry`／`load_cache_entry` はいずれも `pub(crate)`（crate 内限定）のまま（`backend-cuda` クレートの外から呼び出す手段はない）だが、C-4 で GEMM 経路への結線（`kernels_mma.rs::RenderedMmaKernel::compile` が `runtime_workspace_root()` で `workspace_root` を解決し、コンパイル前に `load_cache_entry` を引き・コンパイル成功後に `store_cache_entry` を呼ぶ導線）とプロセス内 LRU（`module_cache.rs::KernelModuleCache`。ロード済み `Arc<CudaModule>` の再利用）を実装した。これにより以下の環境変数は実際に GEMM 実行経路から**実効化されている**（`cache_entry_path` のみ、fd pin を経由しない便宜 API として crate 内呼び出し元を持たないまま残置。理由は同関数のドキュメンテーションコメント参照）。ディスクキャッシュ関連の失敗（`workspace_root` 解決不能・fs I/O 失敗）はコンパイル失敗にせず「ディスクキャッシュなしの縮退運転」（NVRTC 直コンパイル＋プロセス内 LRU のみ）へフォールバックする fail-safe 方針を採る（`RenderedMmaKernel::compile` ドキュメンテーションコメント参照）。
+
+## キャッシュ配置ポリシー（要約）
+
+キャッシュのルート（ディスク側）はリポジトリツリー外への配置を **fail-closed で強制**する（`workspace_root` containment 検証。詳細は下記「検証条件」節）。環境変数による上書きは `RUST_AI_CUDA_CACHE_DIR` > `XDG_CACHE_HOME` > `HOME` の優先順位（詳細は次節）。境界（`workspace_root`）自体が解決できない場合・全環境変数が未設定の場合は、コンパイル失敗にはせずディスクキャッシュなしの縮退運転（NVRTC 直コンパイル＋プロセス内 LRU のみ）へ fail-safe にフォールバックする（詳細は下記「プロセス内 LRU カーネルモジュールキャッシュと GEMM 経路への結線」節「縮退方針」）。
 
 ## 環境変数と優先順位
 
@@ -65,7 +69,7 @@
 `CudaKernelCacheKey` は descriptor・環境パラメータに加え、最終レンダー済みカーネルソース全体（`source: String`）をキーへ含める。
 
 - **必要性判断**: DeepGEMM 型の「`#include` を正規表現抽出して再帰的にハッシュへ取り込む」機構は不要と判断した。本クレートのカーネルソースは `kernels_mma::render_mma_f16` 等がプロセス内で最終 `String` を確定させ、リポジトリ内ヘッダファイルへの `#include` 参照を持たないため（toolkit 標準ヘッダの変更は既存の `nvrtc_version` フィールドが追従する）。最終ソース文字列そのものをキーへ含めれば、断片（`kernels_mma.rs` の `*_BODY` 定数等）をどう編集しても推移的にキーが変わり、DeepGEMM の再帰ハッシュと同じ「ソース変更で確実にキャッシュミスする」性質を、ファイルパース・fs I/O ゼロで得られる。判断根拠の詳細は `crates/backend-cuda/src/nvrtc.rs` の `CudaKernelCacheKey` ドキュメンテーションコメントを正とする。
-- **エンコーディング**: `canonical_bytes` の `ENCODING_VERSION` を `1` → `2` へ上げ、`compile_flags` の後段に `source` を長さプレフィクス付きで追記した。C-2（#506）時点のディスクキャッシュエントリ（C-3・#509 実装後に実体化）は本変更により全て無効化される契約（意図どおり）。
+- **エンコーディング**: `canonical_bytes` の `ENCODING_VERSION` を `1` → `2` へ上げ、`compile_flags` の後段に `source` を長さプレフィクス付きで追記した。C-2（#506）時点のディスクキャッシュエントリ（C-3・#509 実装後に実体化）は本変更により全て無効化される契約（意図どおり）。**現行は `ENCODING_VERSION = 3`**（C-7・#519・PR #674 でさらに引き上げ済み。詳細は下記「shape 特化と静的タイル選定」節・「キャッシュ無効化条件（総括）」節を参照。本節の `1 → 2` の記述は C-5 時点の変更履歴として維持し、v2 → v3 の変更理由は C-7 側の記述に譲る）。
 - **情報露出対策**: `source`（数十 KB になりうる）は `derive(Debug)` をやめ手動 `Debug` 実装とし、ログ・パニックメッセージには長さと非暗号な変更検知用フィンガープリント（FNV-1a 64bit。`stable_hash` と同一アルゴリズム）のみを出す（PR #676 codex-review P1 是正。当初案の先頭 40 文字平文要約はカーネル名・シグネチャ等の識別情報を含みうる部分的漏出だったため撤回した）。外部公開 getter は追加していない（`RenderedMmaKernel` がソース文字列を外部へ返さない設計〈PR #643〉と同じ理由）。
 
 ## プロセス内 LRU カーネルモジュールキャッシュと GEMM 経路への結線（C-4・#511）
@@ -88,11 +92,77 @@ C-1〜C-3・C-5 が用意したキー型・ディレクトリ命名・ディス�
 
 **スコープ境界**: 固定ソースの一回コンパイル経路（`CudaGemm::new`・`CudaWmmaGemm::new`・`CudaMmaGemm::new`・elementwise/transpose 群。いずれもインスタンス構築時に 1 回だけコンパイルする設計）は本タスクでは結線しない（拡大は効果に対しリスク過大と判断）。
 
+## キャッシュキー構成（総括。C-14・#539）
+
+キャッシュキーは `CudaKernelDescriptor`（カーネル形状・タイル構成側）と `CudaKernelCacheKey`（環境パラメータ・ソース側）の 2 層で構成される（`crates/backend-cuda/src/nvrtc.rs`）。各項目の正はコード側ドキュメンテーションコメントであり、本節は横断参照用の一覧にとどめる（詳細ロジックの複写はしない）。
+
+- **`CudaKernelDescriptor`**（`nvrtc.rs`）:
+  - `kernel_name`（`&'static str` 限定。実行時文字列を受け付けない設計で A03 対策済み）
+  - `cache_key_shape`（`compiled_dims` で定数化対象とした次元を sentinel `0` に正規化した shape。実行に使う実 shape である `shape()` とはフィールド・意味とも分離しており、`Hash`／`Eq` 実装はキャッシュキーとしての同一性判定に `cache_key_shape` のみを用いる〈`shape` は含めない〉）
+  - `block_m`／`block_n`／`block_k`／`stages`（静的タイル構成。C-6〜C-9b の選定結果を表す）
+  - `dtype`
+  - `compiled_dims`（`Option<CompiledDims>`。C-7・#519 で導入した次元別定数化選択。`None` は次元特化なし〈従来コンストラクタ経由〉を表す）
+- **`CudaKernelCacheKey`** の環境パラメータ（`nvrtc.rs`）:
+  - `compute_capability`
+  - `nvrtc_version`
+  - `compile_flags`（`canonical_bytes` へのエンコード順序を決定的に固定。詳細はコード側コメント参照）
+  - `source`（最終レンダー済みカーネルソース全文。C-5・#514。外部公開 getter は追加していない〈`RenderedMmaKernel` がソース文字列を外部へ返さない設計と同一方針〉）
+
+キー全体のバイト列表現は `CudaKernelCacheKey::canonical_bytes`（`ENCODING_VERSION = 3`。下記「キャッシュ無効化条件」節参照）が組み立て、`fnv1a_64`（自作 FNV-1a 64bit・非暗号ハッシュ）でハッシュ化した値がディレクトリ命名（`kernel.<name>.<hash16>`）へ使われる（詳細は上記「ディレクトリ命名規則（C-2・#506）」節）。
+
+## キャッシュ無効化条件（総括。C-14・#539）
+
+以下のいずれかが発生すると、対応するキャッシュエントリ（ディスク側）は無効化される（`Ok(None)` としてミス扱い、または別キーとして扱われる）。
+
+1. **カーネルソース変更**: `source` がキーに含まれるため（C-5・#514）、`kernels_mma.rs` の `*_BODY` 定数等ソース断片の編集は最終レンダー済みソース全文へ推移的に反映され、確実にキャッシュミスする
+2. **`ENCODING_VERSION` 引き上げによる全エントリ無効化**: `v1 → v2`（C-5・#514。`compile_flags` の後段に `source` を長さプレフィクス付きで追記）→ **`v2 → v3`（C-7・#519・PR #674。`cache_key_shape` の動的次元 sentinel 正規化＋ `compiled_dims` をキーへ追記。誤ヒット是正）**。現行は `v3`。バージョン引き上げのたびに旧バージョンのエントリは全て無効（意図どおりの契約）
+3. **環境変化**: `compute_capability`・`nvrtc_version`・`compile_flags` のいずれかが変われば別エントリ化される（同一マシンでも toolkit 更新等で自動的に別キーへ切り替わる）
+4. **shape・特化ポリシーの違い**: `cache_key_shape`（動的次元を正規化した shape）・`compiled_dims`（次元別定数化選択）の組み合わせが異なれば別エントリ化される。同一の実 `shape` でも `compiled_dims` の選択が異なれば別キーになる
+5. **エントリ破損**: 片ファイル（`kernel.cu`／`kernel.ptx`）欠落・0 バイト・ソース照合不一致は「ミス」として扱う（削除はしない。置き換えは書き込み側〈`store_cache_entry`〉に一元化。詳細は上記「エントリ内ファイル構成と書き込みプロトコル（C-3・#509）」節）
+6. **プロセス内 LRU の evict**: ディスク側の無効化とは独立に、`KernelModuleCache`（プロセス内 LRU）は容量（`RUST_AI_CUDA_MODULE_CACHE_CAPACITY`。既定 `32`・許容範囲 `1..=1024`）超過時に最も古いエントリを evict する（ディスクエントリ自体は消えない）
+
+補足: ディスクキャッシュのヒットは「保存済みソースが要求元ソースと一致すること」までしか保証しない。同一ディレクトリの `kernel.ptx` がそのソースから実際に生成された成果物であることの保証は別問題であり、この残余ギャップへの対応は上記「ディスク PTX を実行入力にしない判断（イシュー #511 PR #703 codex-review P0 再指摘対応）」節を参照（ディスクヒット時も実行入力は常にプロセス内で NVRTC が生成した PTX に限る）。
+
+## shape 特化と静的タイル選定（C-6〜C-9b）
+
+Phase C は「テンプレート展開」「次元別定数化選択」「SMEM 予算からの段数逆算」「候補列挙」「コストモデルによる静的選定」の 5 段階で構成される。各段の詳細設計・実測記録は個別ドキュメントを正とし、本節は横断参照用の要約にとどめる。
+
+- **C-6（テンプレート展開・#516）**: カーネルソースのタイル寸法（`DIM_M`／`DIM_N`／`DIM_K` 等）をマクロ間接化し、コンパイル時定数として展開可能にする。展開後も REQ-8 の手動境界チェック（`.claude/rules/coding-rust.md` カーネル境界検査節）は維持する。詳細は `docs/perf/cuda-jit-template-expansion.md`
+- **C-7（次元別定数化選択・#519）**: `CompiledDims` により、shape の一部次元のみを定数化（残りは動的のまま）する選択を可能にした。`CudaKernelDescriptor::new_with_compiled_dims` 経由で構築し、`cache_key_shape` は選択に応じて動的次元を sentinel `0` に正規化する（上記「キャッシュキー構成」節参照）。詳細は `crates/backend-cuda/src/nvrtc.rs` の `CompiledDims`・`CudaKernelDescriptor::new_with_compiled_dims` ドキュメンテーションコメント
+- **C-8（SMEM 予算からの段数逆算・#521）・C-9a（候補列挙・#524）**: 共有メモリ予算から実行可能な `stages` 段数を逆算し、`enumerate_tile_candidates` がタイル候補群を列挙する
+- **C-9b（L1/L2 帯域コストモデル・#527）**: `gemm_auto.rs::cost_model` モジュールが実行時ベンチマークなしに候補群から最良 1 件を決定的に選ぶ。定数の実機再測定手順は下記「コストモデル定数の実機再測定手順」節を参照。詳細は `docs/perf/cuda-gemm-cost-model-selection.md`
+
+**スコープ境界**: shape 特化・コストモデル選定はいずれも既定の本番 GEMM 経路（`CudaGemmAuto::run_f16`・`gemm_mma.rs::CudaMmaGemm` の `MMA_STAGES=3` 固定構成）へは**未結線**である。`SpecializedMmaKernelHandle`（shape 特化コンパイル導線）はテスト・ベンチ向けであり、既定経路の実行結果・parity ベースラインには影響しない（`docs/perf/cuda-gemm-cost-model-selection.md` §3・§4 参照）。適用判断は実機実測・補正判定完了後の後続タスクに委ねる。
+
+## コストモデル定数の実機再測定手順（C-14・#539）
+
+手順本体は複写せず `docs/perf/cuda-gemm-cost-model-selection.md` §1 を正として参照する（二重管理回避）。本節はトリガ・参照連鎖・関連ドキュメントとの相互参照のみを記録する。
+
+- **現状**: `SM121_MEASURED_BANDWIDTH: Option<MeasuredBandwidth> = None`（`crates/backend-cuda/src/gemm_auto.rs::cost_model`）。`None` である限り `select_tile_config` はコストモデルを一切評価せず、固定選定テーブル（`MMA_BM=64`／`MMA_BN=128`／`MMA_BK=32`／`MMA_STAGES=3`。#494 実測記録が根拠）へ fail-closed にフォールバックする。DeepGEMM（`sm90.hpp`）の H100 実測定数は流用しない契約
+- **再測定のトリガ**:
+  1. 初回実測（`docs/perf/sm121-device-attributes.md`・A-2・#482 が未実測のまま安全側クローズしている）
+  2. CUDA ドライバ／toolkit の更新
+  3. 対象ハードウェアの変更（`SM121_COMPUTE_CAPABILITY = (12, 1)` との突合により、他アーキテクチャへの誤適用は構造的に遮断済み。`select_tile_config_for_device` が `device.compute_capability()` と一致する場合のみ `SM121_MEASURED_BANDWIDTH` を使う）
+  4. カーネルのメモリトラフィック構造を変える変更（タイル構成そのものの変更を含む）
+- **更新の流れ（参照連鎖）**:
+  1. `docs/perf/sm121-device-attributes.md` へ L1/L2 帯域実測値を記入する
+  2. `crates/backend-cuda/src/gemm_auto.rs::cost_model::SM121_MEASURED_BANDWIDTH` を `Some(MeasuredBandwidth { .. })` へ更新する
+  3. `docs/perf/cuda-gemm-cost-model-selection.md` §1 の手順に従い、3 形状（M=N=K = 4096／2048／1024）でモデル選定と実測最良構成を照合する（**3 形状中 2 形状以上一致**で採用）
+  4. 不一致の場合はモデル定数の実機補正を **1 回だけ** 行い再判定する（補正ループ禁止。2 回目の補正は行わない）。補正後も不一致なら `SM121_MEASURED_BANDWIDTH` を `None` に固定し、固定選定テーブル採用を確定する
+  5. `docs/perf/cuda-gemm-cost-model-selection.md` §1 の記録欄（形状別の実測最良構成・コストモデル選定・一致／補正実施の表）へ結果を記入する
+- **JIT キャッシュ効果の再計測**: 本節はコストモデル定数（タイル選定の質）の再測定手順であり、JIT キャッシュそのものの効果（初期化レイテンシ短縮効果）の計測手順とは別スコープ。後者は `docs/perf/cuda-jit-cache-benchmark.md` §3（計測方法）・§5（C-4 結線後の本番経路再計測への引き継ぎ）を参照
+- **実機接続情報**: ホスト名等の実値は本ドキュメントへ書かず、`docs/real-hardware-verification-env.md`（実値はローカル管理外ファイル `docs/real-hardware-verification-env.local.md` を参照する方式）に従う
+
 ## 関連
 
-- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`runtime_workspace_root`／`store_cache_entry`／`store_cache_entry_in`／`store_cache_entry_at`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry_at`（本番経路）／`validate_cache_entry`（`#[cfg(test)]` 限定）／`rename_pinned`／`create_dir_all_verified`／`CudaKernelCacheKey`）
+- `crates/backend-cuda/src/nvrtc.rs`: 実装本体（`resolve_cache_root`／`cache_root`／`cache_entry_path`／`cache_entry_path_in`／`fnv1a_64`／`ensure_cache_root`／`ensure_cache_root_in`／`runtime_workspace_root`／`store_cache_entry`／`store_cache_entry_in`／`store_cache_entry_at`／`load_cache_entry`／`load_cache_entry_in`／`validate_cache_entry_at`（本番経路）／`validate_cache_entry`（`#[cfg(test)]` 限定）／`rename_pinned`／`create_dir_all_verified`／`CudaKernelDescriptor`／`CompiledDims`／`CudaKernelCacheKey`／`canonical_bytes`）
 - `crates/backend-cuda/src/module_cache.rs`: プロセス内 LRU 本体（`LruCache`／`KernelModuleCache`／`resolve_module_cache_capacity`）
 - `crates/backend-cuda/src/kernels_mma.rs`: GEMM 経路への結線（`RenderedMmaKernel::cache_descriptor`／`cache_key`／`compile`）
+- `crates/backend-cuda/src/gemm_auto.rs`: `cost_model` モジュール（`SM121_MEASURED_BANDWIDTH`／`SM121_COMPUTE_CAPABILITY`／`estimate_candidate_cost`）・`select_tile_config`／`select_tile_config_for_device`・`enumerate_tile_candidates`・`SpecializedMmaKernelHandle`
 - `crates/backend-cuda/src/error.rs`: `CudaError::CacheDirUnavailable`／`CudaError::CacheIo`／`CudaError::InvalidModuleCacheCapacity`／`CudaError::ModuleCacheUnavailable`
 - C-10（#529）: ヒット/ミス・並行競合・破損検出の網羅的回帰テスト拡充。実装済み（`crates/backend-cuda/src/jit_cache_regression_tests.rs`。`nvrtc` モジュール直下の兄弟モジュールとして `#[path]` 属性で配置。キャッシュ API が `pub(crate)` にも満たない module-private のため `crates/backend-cuda/tests/`〈integration test〉ではなく in-crate ユニットテストとした判断理由は同ファイル冒頭のドキュメンテーションコメントを参照）
-- C-9b（#527）: 最良構成選定。C-12（#534）: 性能計測（本キャッシュの hit/miss カウンタ〈`KernelModuleCache::hit_count`／`miss_count`〉を観測点として使う想定）
+- C-9b（#527）: 最良構成選定。C-12（#534）: 性能計測（本キャッシュの hit/miss カウンタ〈`KernelModuleCache::hit_count`／`miss_count`〉を観測点として使う想定。計測コード・一次実測データの担当は #534 側であり、#539〈本文書〉は実機検証手順の文書化を担当。役割重複なし。`docs/perf/cuda-jit-cache-benchmark.md` §5 参照）
+- `docs/perf/cuda-jit-template-expansion.md`: C-6／C-7 の設計要約・スコープ境界
+- `docs/perf/cuda-gemm-cost-model-selection.md`: C-9b コストモデル定数の実機再測定手順の本体（本文書「コストモデル定数の実機再測定手順」節が参照する正）
+- `docs/perf/sm121-device-attributes.md`: L1/L2 帯域の実測記入先（A-2・#482）
+- `docs/perf/cuda-jit-cache-benchmark.md`: C-12 計測方法・C-4 結線後の本番経路再計測の引き継ぎ
