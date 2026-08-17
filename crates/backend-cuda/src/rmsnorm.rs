@@ -26,7 +26,10 @@ use tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm_auto::read_clamped_smem_budget_bytes;
-use crate::kernels_rmsnorm::{self, RMSNORM_BLOCK_DIM, RMSNORM_BWD_BLOCK_DIM};
+use crate::kernels_rmsnorm::{
+    self, RMSNORM_BLOCK_DIM, RMSNORM_BWD_BLOCK_DIM, RMSNORM_BWD_DW_PARTIAL_BLOCK_DIM,
+    RMSNORM_DW_REDUCE_BLOCK_DIM,
+};
 use crate::nvrtc::compile_ptx;
 
 /// [`rmsnorm_route`] が返す経路選択。行長（`RowFusionMeta::row_len`／
@@ -139,6 +142,168 @@ pub(crate) fn derive_persistent_grid_dw(sm_count: u32, hidden: u32) -> u32 {
     let blocks_needed = hidden.div_ceil(RMSNORM_BWD_DW_BLOCK_DIM);
     let grid = (sm_count as u64).saturating_mul(16);
     grid.clamp(1, blocks_needed as u64) as u32
+}
+
+/// dw split-K（イシュー #597）: 部分和バッファ（`num_blocks * hidden * 4`
+/// bytes）が超えてはならない上限。`derive_dw_split` の fail-closed
+/// フォールバック判定にのみ使う（`.claude/rules/security.md` A03:
+/// `checked_mul` によるホスト側 usize/u64 オーバーフロー防止）。
+pub(crate) const RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES: u64 = 64 * 1024 * 1024;
+
+/// dw split-K の 1 CTA（`blockIdx.y`）が担当する行数の下限。これを下回る
+/// 細分化は、部分和の書き出しコスト（追加の縮約カーネル起動・HBM
+/// トラフィック）が並列化の利得を上回るため split-K を適用しない基準に
+/// 使う（実装計画 §3.3。実測ではなくコード上の初期値）。
+pub(crate) const RMSNORM_DW_MIN_ROWS_PER_BLOCK: u32 = 32;
+
+/// dw split-K の `num_blocks`（gridDim.y）上限。部分和バッファサイズと
+/// 縮約カーネルのバッチ数（[`RMSNORM_DW_REDUCE_BATCH`]〈`kernels_rmsnorm`〉
+/// 単位）を抑える（実装計画 §3.3。実測ではなくコード上の初期値）。
+pub(crate) const RMSNORM_DW_MAX_SPLIT: u32 = 64;
+
+/// dw split-K の段数 `num_blocks` を導出する純関数（実装計画 §3.3。
+/// `CudaRmsNorm::run_rmsnorm_bwd_f32` から呼ばれる）。
+///
+/// 目標 occupancy は既存 [`derive_persistent_grid_dw`] と同じ
+/// `sm_count * 16` を「列タイル数 × num_blocks」の積で狙う: `hidden` が
+/// 広く列タイル数だけで occupancy を確保できる形状では `num_blocks` を
+/// 増やす余地がないため `1`（単段固定。呼び出し元はこの場合
+/// [`kernels_rmsnorm::RMSNORM_BWD_DW_F32`] へフォールバックする）を返す。
+/// `hidden` が狭く `rows` が大きい形状でのみ split-K の並列度が効く
+/// （advisor 指摘: 「rows が大きければ必ず num_blocks >= 2」という単純な
+/// 主張は `hidden` 依存で偽になるため採らない）。
+///
+/// クランプ順序: `sm_count * 16 / col_tiles` を `[1, rows/
+/// RMSNORM_DW_MIN_ROWS_PER_BLOCK, RMSNORM_DW_MAX_SPLIT, rows]` の下限へ
+/// クランプした後、部分和バッファが [`RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES`]
+/// を超える場合は `num_blocks` を単調減少させ、`2` 未満になったら `1`
+/// （単段）へフォールバックする（`checked_mul` で usize/u64
+/// オーバーフローを検査。上限側から線形に下げるだけで十分（`num_blocks`
+/// は高々 [`RMSNORM_DW_MAX_SPLIT`] であり性能上のホットパスでもない）。
+pub(crate) fn derive_dw_split(sm_count: u32, rows: u32, hidden: u32) -> u32 {
+    if rows == 0 || hidden == 0 {
+        return 1;
+    }
+
+    let col_tiles = hidden.div_ceil(RMSNORM_BWD_DW_PARTIAL_BLOCK_DIM).max(1);
+    let target = (sm_count as u64).saturating_mul(16);
+    let raw_num_blocks = (target / col_tiles as u64).max(1);
+
+    // 行数下限（`RMSNORM_DW_MIN_ROWS_PER_BLOCK` 未満の細分化を避ける）・
+    // `RMSNORM_DW_MAX_SPLIT`・`rows` 自体（1 block = 最低 1 行）の 3 つで
+    // 上限をクランプする。
+    let rows_cap = (rows / RMSNORM_DW_MIN_ROWS_PER_BLOCK).max(1);
+    let max_num_blocks = rows_cap.min(RMSNORM_DW_MAX_SPLIT).min(rows);
+    if max_num_blocks < 2 {
+        return 1;
+    }
+
+    let mut num_blocks = raw_num_blocks.clamp(1, max_num_blocks as u64) as u32;
+    if num_blocks < 2 {
+        return 1;
+    }
+
+    // 部分和バッファ上限検査。境界超過時は `num_blocks` を単調減少させる
+    // （`num_blocks` は高々 `RMSNORM_DW_MAX_SPLIT` = 64 のため最大 63 回の
+    // ループで確実に停止する）。
+    let fits_budget = |n: u32| -> bool {
+        (n as u64)
+            .checked_mul(hidden as u64)
+            .and_then(|v| v.checked_mul(4))
+            .is_some_and(|bytes| bytes <= RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES)
+    };
+    while num_blocks >= 2 && !fits_budget(num_blocks) {
+        num_blocks -= 1;
+    }
+
+    if num_blocks < 2 { 1 } else { num_blocks }
+}
+
+/// [`kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32`] の行範囲計算
+/// （`rows_per_block = ceil(rows / num_blocks)`・`row_start = b *
+/// rows_per_block`・`row_end = min(row_start + rows_per_block, rows)`）を
+/// 純粋 Rust でミラーする（advisor 指摘: 実機なしでカーネルの行分割契約
+/// 〈ギャップなし・重複なしで `0..rows` を分割する〉を検証できる唯一の
+/// CI 到達可能な保証点）。`u64` を使うのはカーネル側の `long long`
+/// 算術と同じ理由（本ファイル・`kernels_rmsnorm.rs` 冒頭コメント
+/// 「ループ添字のオーバーフロー安全性」参照）。`num_blocks == 0` は
+/// カーネルへは渡らない契約（[`derive_dw_split`] は常に `>= 1` を返す）
+/// だが、フェイルセーフとして空範囲 `(0, 0)` を返す。
+///
+/// `#[allow(dead_code)]` について: 本関数は実行経路（カーネル起動）から
+/// 呼ばれず、`mod tests::dw_split_row_range_partitions_rows_without_gaps_
+/// or_overlap` の検証専用（`kernels_rmsnorm.rs::RMSNORM_DW_REDUCE_BATCH`
+/// の同アノテーションと同じ理由）。
+#[allow(dead_code)]
+pub(crate) fn dw_split_row_range(rows: u64, num_blocks: u32, b: u32) -> (u64, u64) {
+    if num_blocks == 0 {
+        return (0, 0);
+    }
+    let rows_per_block = rows.div_ceil(num_blocks as u64);
+    let row_start = (b as u64).saturating_mul(rows_per_block);
+    let row_end = row_start.saturating_add(rows_per_block).min(rows);
+    (row_start, row_end)
+}
+
+/// split-K dw 経路（[`kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32`]／
+/// [`kernels_rmsnorm::RMSNORM_BWD_DW_REDUCE_F32`]）専用のホスト側検証
+/// （起動前・fail-closed）。[`validate_rmsnorm_backward_launch`]（`x`/
+/// `dy`/`rstd`/`w` の形状検証で 7 個の既存テストを持つ）は拡張せず、
+/// `num_blocks` 固有の検査を本関数へ分離する（advisor 指摘:
+/// `#[doc(hidden)] pub` の split 強制テスト API が任意の `num_blocks` を
+/// 受け取るため fail-closed で検証する必要があり、既存関数の確立した
+/// 挙動を壊さないため）。呼び出し元は `rows > 0 && hidden > 0`
+/// （早期 return 済み）の文脈でのみ本関数を呼ぶ契約。
+///
+/// `num_blocks` 自体の検査（`>= 1`・`<= rows`）は分岐（単段／split-K）に
+/// 依らず常に行うが、部分和バッファの [`RMSNORM_DW_PARTIAL_BUFFER_CAP_
+/// BYTES`] cap 検査は `num_blocks > 1`（split-K 経路が実際にバッファを
+/// 確保する場合）のみに限定する（cursor[bot] 指摘・PR #716）。
+pub(crate) fn validate_dw_split_launch(
+    rows: usize,
+    hidden: usize,
+    num_blocks: u32,
+) -> Result<(), CudaError> {
+    if num_blocks < 1 {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!("rmsnorm dw split num_blocks must be >= 1: num_blocks={num_blocks}"),
+        });
+    }
+    if num_blocks as usize > rows {
+        return Err(CudaError::InvalidRmsNormShape {
+            detail: format!(
+                "rmsnorm dw split num_blocks must not exceed rows: num_blocks={num_blocks}, \
+                 rows={rows}"
+            ),
+        });
+    }
+    // 部分和バッファの cap 検査は split-K 経路（`num_blocks > 1`）にのみ
+    // 適用する。単段フォールバック（`num_blocks <= 1`）はこのバッファを
+    // 一切確保しないため、cap 超過を理由に拒否すると旧実装（単段カーネル
+    // のみ）で成功していた大きな `hidden` の形状を退行させてしまう
+    // （cursor[bot] 指摘・PR #716: `hidden * 4` だけで cap を超える形状は
+    // `derive_dw_split` が正しく `1` を返すにもかかわらず、分岐前の検証で
+    // 一律に拒否されていた）。
+    if num_blocks > 1 {
+        let partial_bytes = (num_blocks as u64)
+            .checked_mul(hidden as u64)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| CudaError::InvalidRmsNormShape {
+                detail: format!(
+                    "rmsnorm dw split partial buffer size overflowed u64: \
+                     num_blocks={num_blocks}, hidden={hidden}"
+                ),
+            })?;
+        if partial_bytes > RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES {
+            return Err(CudaError::InvalidRmsNormShape {
+                detail: format!(
+                    "rmsnorm dw split partial buffer exceeds cap: bytes={partial_bytes}, \
+                     cap={RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES}"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// ホスト側検証（逆伝播起動前・fail-closed。イシュー #596）:
@@ -322,7 +487,14 @@ pub struct CudaRmsNorm {
     /// 逆伝播 dx カーネル（イシュー #596。recompute-in-backward）。
     bwd_dx_f32: CudaFunction,
     /// 逆伝播 dw カーネル（`w.is_some()` の場合のみ起動元が呼ぶ）。
+    /// `derive_dw_split` が `num_blocks <= 1` を返す小規模形状のみで使う
+    /// フォールバック経路（イシュー #597。`kernels_rmsnorm::
+    /// RMSNORM_BWD_DW_F32` ドキュメンテーションコメント参照）。
     bwd_dw_f32: CudaFunction,
+    /// dw split-K 第 1 カーネル（部分和生成。イシュー #597）。
+    bwd_dw_partial_f32: CudaFunction,
+    /// dw split-K 第 2 カーネル（縮約＋epilogue。イシュー #597）。
+    bwd_dw_reduce_f32: CudaFunction,
     /// per-block SMEM 予算（[`crate::gemm_auto::STATIC_SMEM_BUDGET_CAP_BYTES`]
     /// でクランプ済み。[`rmsnorm_route`] の分岐に使う）。
     smem_per_block_budget_bytes: u64,
@@ -368,6 +540,21 @@ impl CudaRmsNorm {
             .load_module(bwd_dw_ptx)?
             .load_function("rmsnorm_bwd_dw_f32")?;
 
+        // dw split-K 二段リダクション（イシュー #597）: 部分和生成・縮約
+        // の 2 カーネルを追加コンパイル・ロードする（`bwd_dw_f32` と同じ
+        // 「NVRTC を事前コンパイルせず文字列のまま埋め込む」契約。
+        // `kernels_rmsnorm.rs` 冒頭コメント参照）。
+        let bwd_dw_partial_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32, arch)?;
+        let bwd_dw_reduce_ptx = compile_ptx(kernels_rmsnorm::RMSNORM_BWD_DW_REDUCE_F32, arch)?;
+        let bwd_dw_partial_f32 = device
+            .context()
+            .load_module(bwd_dw_partial_ptx)?
+            .load_function("rmsnorm_bwd_dw_partial_f32")?;
+        let bwd_dw_reduce_f32 = device
+            .context()
+            .load_module(bwd_dw_reduce_ptx)?
+            .load_function("rmsnorm_bwd_dw_reduce_f32")?;
+
         let smem_per_block_budget_bytes = read_clamped_smem_budget_bytes(device)?;
 
         let raw_smem_per_sm = device.context().attribute(
@@ -405,6 +592,8 @@ impl CudaRmsNorm {
             twopass_f32,
             bwd_dx_f32,
             bwd_dw_f32,
+            bwd_dw_partial_f32,
+            bwd_dw_reduce_f32,
             smem_per_block_budget_bytes,
             smem_per_sm_budget_bytes,
             sm_count,
@@ -675,6 +864,49 @@ impl CudaRmsNorm {
         rstd: &[f32],
         shape: RmsNormShape,
     ) -> Result<(Vec<f32>, Option<Vec<f32>>), CudaError> {
+        self.run_rmsnorm_bwd_f32_inner(x, w, dy, rstd, shape, None)
+    }
+
+    /// [`Self::run_rmsnorm_bwd_f32`] のテスト専用フック（イシュー #597）:
+    /// dw の split-K 段数（`num_blocks`）を [`derive_dw_split`] の
+    /// ヒューリスティクス（`sm_count` 依存で実機ごとに変わりうる）に
+    /// 頼らず明示指定し、単段（`num_blocks == 1`）・split-K
+    /// （`num_blocks >= 2`）の両経路を決定的に検証できるようにする
+    /// （実装計画 §3.3「テスト用に num_blocks を明示指定できる経路」）。
+    ///
+    /// `pub`（`#[doc(hidden)]`）である都合上、`num_blocks` はホスト側
+    /// 呼び出し元が任意に指定できてしまうため、内部の
+    /// [`validate_dw_split_launch`]（`num_blocks >= 1`・`<= rows`・部分和
+    /// バッファ上限）による fail-closed 検証を必ず経由する
+    /// （`.claude/rules/security.md` A03: テストコードだからといって
+    /// 検証を省略しない）。
+    #[doc(hidden)]
+    pub fn run_rmsnorm_bwd_f32_with_forced_dw_split(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        dy: &[f32],
+        rstd: &[f32],
+        shape: RmsNormShape,
+        num_blocks: u32,
+    ) -> Result<(Vec<f32>, Option<Vec<f32>>), CudaError> {
+        self.run_rmsnorm_bwd_f32_inner(x, w, dy, rstd, shape, Some(num_blocks))
+    }
+
+    /// [`Self::run_rmsnorm_bwd_f32`]／[`Self::
+    /// run_rmsnorm_bwd_f32_with_forced_dw_split`] の共通実装。
+    /// `force_dw_num_blocks` が `None` の場合は [`derive_dw_split`] の
+    /// ヒューリスティクスへ委ね、`Some(n)` の場合は `n` を
+    /// [`validate_dw_split_launch`] で検証したうえで使う。
+    fn run_rmsnorm_bwd_f32_inner(
+        &self,
+        x: &[f32],
+        w: Option<&[f32]>,
+        dy: &[f32],
+        rstd: &[f32],
+        shape: RmsNormShape,
+        force_dw_num_blocks: Option<u32>,
+    ) -> Result<(Vec<f32>, Option<Vec<f32>>), CudaError> {
         let RmsNormShape { rows, hidden } = shape;
         validate_rmsnorm_backward_launch(
             rows,
@@ -753,27 +985,120 @@ impl CudaRmsNorm {
 
         let dw = if let Some(w_slice) = w {
             let mut dw_dev = self.stream.alloc_zeros::<f32>(w_slice.len())?;
-            let dw_grid = derive_persistent_grid_dw(self.sm_count, hidden_i as u32);
-            // SAFETY: dw カーネルは列方向 grid-stride（`i < hidden`）で
-            // 起動する。`x`/`dy` の長さは `rows*hidden` と検証済み
-            // （`validate_rmsnorm_backward_launch`）であり、行方向は
-            // カーネル内ループ条件 `row < rows` で境界保証される
-            // （REQ-8）。
-            unsafe {
-                self.stream
-                    .launch_builder(&self.bwd_dw_f32)
-                    .arg(&x_dev)
-                    .arg(&dy_dev)
-                    .arg(&rstd_dev)
-                    .arg(&mut dw_dev)
-                    .arg(&rows_i)
-                    .arg(&hidden_i)
-                    .launch(LaunchConfig {
-                        grid_dim: (dw_grid, 1, 1),
-                        block_dim: (RMSNORM_BWD_DW_BLOCK_DIM, 1, 1),
-                        shared_mem_bytes: 0,
-                    })?;
+            let auto_num_blocks = derive_dw_split(self.sm_count, rows_i as u32, hidden_i as u32);
+            let num_blocks = force_dw_num_blocks.unwrap_or(auto_num_blocks);
+            // `force_dw_num_blocks`（テストフック経由）はホスト境界から任意値
+            // （`0` を含む）が来うるため、分岐（単段 `num_blocks <= 1` か
+            // split-K か）で検証有無が変わらないよう、分岐前に必ず検証する
+            // （fail-closed。security.md A03。codex-review P2 指摘・PR #716:
+            // 旧実装は `num_blocks <= 1` 分岐内で検証しておらず
+            // `Some(0)` が禁止値のまま単段カーネルへ通っていた）。
+            // `derive_dw_split` によるヒューリスティクス由来（`force_dw_
+            // num_blocks == None`）は常に `>= 1` を返す契約のため、検証は
+            // `force_dw_num_blocks.is_some()` の場合のみで十分だが、
+            // 検証コスト自体が軽量なため分岐なく常に通す（境界条件の
+            // 実装ドリフトを避ける）。
+            validate_dw_split_launch(rows, hidden, num_blocks)?;
+            let col_grid = derive_persistent_grid_dw(self.sm_count, hidden_i as u32);
+
+            if num_blocks <= 1 {
+                // 単段フォールバック（小規模形状で余分なカーネル起動・
+                // 部分和バッファを避ける。`derive_dw_split` ドキュメン
+                // テーションコメント参照。実装計画 §3.3）。
+                //
+                // SAFETY: dw カーネルは列方向 grid-stride（`i < hidden`）で
+                // 起動する。`x`/`dy` の長さは `rows*hidden` と検証済み
+                // （`validate_rmsnorm_backward_launch`）であり、行方向は
+                // カーネル内ループ条件 `row < rows` で境界保証される
+                // （REQ-8）。
+                unsafe {
+                    self.stream
+                        .launch_builder(&self.bwd_dw_f32)
+                        .arg(&x_dev)
+                        .arg(&dy_dev)
+                        .arg(&rstd_dev)
+                        .arg(&mut dw_dev)
+                        .arg(&rows_i)
+                        .arg(&hidden_i)
+                        .launch(LaunchConfig {
+                            grid_dim: (col_grid, 1, 1),
+                            block_dim: (RMSNORM_BWD_DW_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes: 0,
+                        })?;
+                }
+            } else {
+                // split-K 二段リダクション（イシュー #597）。`num_blocks` の
+                // fail-closed 検証は分岐前（上記 `validate_dw_split_launch`
+                // 呼び出し）で完了済み。
+                let num_blocks_i = num_blocks as i32;
+
+                let partial_len = (num_blocks as usize).checked_mul(hidden).ok_or_else(|| {
+                    CudaError::InvalidRmsNormShape {
+                        detail: format!(
+                            "rmsnorm dw split partial buffer length overflowed usize: \
+                             num_blocks={num_blocks}, hidden={hidden}"
+                        ),
+                    }
+                })?;
+                let mut dw_partial_dev = self.stream.alloc_zeros::<f32>(partial_len)?;
+
+                // SAFETY（第 1 カーネル）: `validate_dw_split_launch` で
+                // `num_blocks` が `[1, rows]` かつ部分和バッファが上限内で
+                // あることを検証済み。`x`/`dy`/`rstd` の長さは
+                // `validate_rmsnorm_backward_launch` で検証済み。カーネル内
+                // の手動境界チェック（`i < hidden`・`row < row_end` かつ
+                // `row_end <= rows`・REQ-8）と合わせて OOB 読み書きが
+                // 起きない根拠とする。`dw_partial` は `num_blocks * hidden`
+                // 要素で `blockIdx.y = b` が一意に `[b*hidden, (b+1)*hidden)`
+                // 範囲へのみ書くため、CTA 間の書き込み競合は起きない
+                // （atomics 不使用でも決定的）。
+                unsafe {
+                    self.stream
+                        .launch_builder(&self.bwd_dw_partial_f32)
+                        .arg(&x_dev)
+                        .arg(&dy_dev)
+                        .arg(&rstd_dev)
+                        .arg(&mut dw_partial_dev)
+                        .arg(&rows_i)
+                        .arg(&hidden_i)
+                        .arg(&num_blocks_i)
+                        .launch(LaunchConfig {
+                            grid_dim: (col_grid, num_blocks, 1),
+                            block_dim: (RMSNORM_BWD_DW_PARTIAL_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes: 0,
+                        })?;
+                }
+
+                // SAFETY（第 2 カーネル）: `dw_partial_dev` は上記カーネルが
+                // `num_blocks * hidden` 要素を無条件に埋める契約
+                // （`kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32` ドキュメン
+                // テーションコメント「末尾要素ブロックの扱い」参照）。両
+                // カーネルは同一 `self.stream` 上へ順に enqueue されるため、
+                // stream 順序保証により第 2 カーネルは第 1 カーネルの完了後
+                // にのみ `dw_partial_dev` を読む（明示的な追加同期は不要）。
+                // `dw_partial_dev`（デバイスバッファのバインディング）は
+                // この `unsafe` ブロックと下の `synchronize` の両方を
+                // 包む本スコープの終わりまで生存するため、カーネル実行中に
+                // Rust 側で先に drop され解放されることはない。
+                // `RMSNORM_DW_REDUCE_BLOCK_DIM` は縮約カーネルの静的 smem
+                // 配列サイズ（`kernels_rmsnorm.rs` 参照）と一致する契約の
+                // ためブロック幅を固定で渡す（`RMSNORM_BWD_DW_BLOCK_DIM`
+                // 〈単段〉とは独立の値だが現状同じ 256）。
+                unsafe {
+                    self.stream
+                        .launch_builder(&self.bwd_dw_reduce_f32)
+                        .arg(&dw_partial_dev)
+                        .arg(&mut dw_dev)
+                        .arg(&hidden_i)
+                        .arg(&num_blocks_i)
+                        .launch(LaunchConfig {
+                            grid_dim: (col_grid, 1, 1),
+                            block_dim: (RMSNORM_DW_REDUCE_BLOCK_DIM, 1, 1),
+                            shared_mem_bytes: 0,
+                        })?;
+                }
             }
+
             self.stream.synchronize()?;
             Some(self.stream.clone_dtoh(&dw_dev)?)
         } else {
@@ -1104,5 +1429,169 @@ mod tests {
         ];
         let plan = FusionPlan::from_ops(ops, vec![2, 8], tensor_core::DType::F32, 1).unwrap();
         assert_eq!(match_rmsnorm_plan(&plan), None);
+    }
+
+    // --- derive_dw_split（イシュー #597） ---
+
+    #[test]
+    fn derive_dw_split_returns_one_for_zero_rows_or_hidden() {
+        assert_eq!(derive_dw_split(4, 0, 8), 1);
+        assert_eq!(derive_dw_split(4, 8, 0), 1);
+    }
+
+    #[test]
+    fn derive_dw_split_splits_when_hidden_small_and_rows_large() {
+        // hidden=64（列タイル 1）・rows=10000（十分な行数）・sm_count=4 →
+        // target=64・col_tiles=1・raw=64。rows_cap=10000/32=312、
+        // MAX_SPLIT=64 でクランプされ num_blocks=64（部分和バッファ
+        // 64*64*4=16KiB は上限内）。
+        assert_eq!(derive_dw_split(4, 10_000, 64), 64);
+    }
+
+    #[test]
+    fn derive_dw_split_stays_single_stage_when_hidden_saturates_occupancy() {
+        // advisor 指摘: 「rows が大きければ必ず num_blocks >= 2」は
+        // hidden 依存で偽になる（列タイル数だけで occupancy が確保できる
+        // 形状では split-K の余地がない）。hidden=100000 → col_tiles=391 >
+        // sm_count*16=64 のため raw_num_blocks は 1 未満に切り捨たり
+        // `.max(1)` で 1 に floor される → 単段（1）を返す。
+        assert_eq!(derive_dw_split(4, 10_000_000, 100_000), 1);
+    }
+
+    #[test]
+    fn derive_dw_split_stays_single_stage_when_rows_below_min_rows_per_block() {
+        // rows=10 < RMSNORM_DW_MIN_ROWS_PER_BLOCK（32）→ rows_cap が 1 に
+        // floor され split-K の余地がない。
+        assert_eq!(derive_dw_split(4, 10, 8), 1);
+    }
+
+    #[test]
+    fn derive_dw_split_never_exceeds_max_split_const() {
+        // sm_count を極端に大きくしても RMSNORM_DW_MAX_SPLIT（64）で
+        // クランプされる。
+        assert_eq!(
+            derive_dw_split(1_000_000, 1_000_000, 8),
+            RMSNORM_DW_MAX_SPLIT
+        );
+    }
+
+    #[test]
+    fn derive_dw_split_falls_back_when_partial_buffer_exceeds_cap() {
+        // sm_count=20000・rows=100000・hidden=1000000 では
+        // col_tiles=ceil(1000000/256)=3907・target=320000・
+        // raw_num_blocks=320000/3907=81 → rows_cap（100000/32=3125）・
+        // MAX_SPLIT（64）でクランプされ num_blocks 候補は 64。しかし
+        // 64*1000000*4=256,000,000 bytes（約 244 MiB）は
+        // RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES（64 MiB）を超えるため、
+        // 上限に収まる最大値（floor(64 MiB / (hidden*4)) = 16）まで
+        // 単調減少する。
+        let num_blocks = derive_dw_split(20_000, 100_000, 1_000_000);
+        assert_eq!(num_blocks, 16);
+        let bytes = (num_blocks as u64) * 1_000_000 * 4;
+        assert!(bytes <= RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES);
+        // 17 block では上限を超える（= 16 が「収まる最大値」であることの
+        // 根拠。`clippy::assertions_on_constants` を避けるため、両辺の
+        // 定数を変数へ束縛してから比較する）。
+        let bytes_at_17 = 17u64 * 1_000_000 * 4;
+        assert!(bytes_at_17 > RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES);
+    }
+
+    // --- dw_split_row_range（イシュー #597） ---
+
+    #[test]
+    fn dw_split_row_range_zero_num_blocks_is_empty() {
+        assert_eq!(dw_split_row_range(100, 0, 0), (0, 0));
+    }
+
+    /// カーネル [`kernels_rmsnorm::RMSNORM_BWD_DW_PARTIAL_F32`] の行分割
+    /// 契約（ギャップなし・重複なしで `0..rows` を分割する）を、複数の
+    /// `(rows, num_blocks)` 組み合わせで検証する（advisor 指摘: 実機
+    /// なしで検証できる唯一の CI 到達可能な保証点）。
+    #[test]
+    fn dw_split_row_range_partitions_rows_without_gaps_or_overlap() {
+        let cases: &[(u64, u32)] = &[
+            (100, 1),
+            (100, 4),
+            (10, 6), // rows_per_block=2, 末尾 block(5) は空範囲になる
+            (7, 3),  // rows_per_block=3, 末尾 block(2) は 1 行のみ
+            (1, 5),  // rows < num_blocks（呼び出し元は起こさない契約だが
+            // 分割ロジック自体はここでも矛盾しないことを確認する）
+            (1_000_003, 64),
+        ];
+        for &(rows, num_blocks) in cases {
+            let mut prev_end = 0u64;
+            let mut covered_all = false;
+            for b in 0..num_blocks {
+                let (start, end) = dw_split_row_range(rows, num_blocks, b);
+                if start >= end {
+                    // 空範囲に達したら、それ以前の非空範囲の合計が
+                    // 既に rows 全体を覆っている必要がある。
+                    assert_eq!(
+                        prev_end, rows,
+                        "空範囲に達する前に 0..rows を覆い切れていない: \
+                         rows={rows}, num_blocks={num_blocks}, b={b}"
+                    );
+                    covered_all = true;
+                } else {
+                    assert_eq!(
+                        start, prev_end,
+                        "ギャップまたは重複を検出: rows={rows}, num_blocks={num_blocks}, b={b}"
+                    );
+                    assert!(end <= rows);
+                    prev_end = end;
+                }
+            }
+            assert!(
+                covered_all || prev_end == rows,
+                "0..rows を覆い切れていない: rows={rows}, num_blocks={num_blocks}, \
+                 prev_end={prev_end}"
+            );
+        }
+    }
+
+    // --- validate_dw_split_launch（イシュー #597） ---
+
+    #[test]
+    fn validate_dw_split_launch_accepts_valid_split() {
+        assert!(validate_dw_split_launch(1000, 64, 8).is_ok());
+    }
+
+    #[test]
+    fn validate_dw_split_launch_rejects_zero_num_blocks() {
+        let err = validate_dw_split_launch(1000, 64, 0).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_dw_split_launch_rejects_num_blocks_exceeding_rows() {
+        let err = validate_dw_split_launch(4, 64, 5).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_dw_split_launch_accepts_num_blocks_equal_to_rows() {
+        assert!(validate_dw_split_launch(4, 64, 4).is_ok());
+    }
+
+    #[test]
+    fn validate_dw_split_launch_rejects_partial_buffer_exceeding_cap() {
+        // 64 * 300_000_000 * 4 bytes は明らかに 64 MiB を超える
+        // （テストフック `run_rmsnorm_bwd_f32_with_forced_dw_split` が
+        // 任意の `num_blocks` を渡せることに対する fail-closed 検証。
+        // advisor 指摘・security.md A03）。
+        let err = validate_dw_split_launch(1_000_000_000, 300_000_000, 64).unwrap_err();
+        assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_dw_split_launch_accepts_single_stage_even_if_hidden_alone_exceeds_cap() {
+        // cursor[bot] 指摘（PR #716）の回帰テスト: `num_blocks == 1`
+        // （単段フォールバック）は部分和バッファを一切確保しないため、
+        // `hidden * 4` 単体が cap（64 MiB = 16_777_216 要素）を超える
+        // 大きな `hidden` でも拒否してはならない。`derive_dw_split` は
+        // このような形状では正しく `1` を返す契約（本テストは呼び出し元
+        // の分岐に依らず `validate_dw_split_launch` 単体で保証する）。
+        let hidden = 20_000_000; // hidden * 4 bytes ≈ 76 MiB > 64 MiB cap
+        assert!(validate_dw_split_launch(1, hidden, 1).is_ok());
     }
 }

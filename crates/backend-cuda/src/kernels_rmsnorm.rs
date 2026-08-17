@@ -451,6 +451,14 @@ extern "C" __global__ void rmsnorm_bwd_dx_f32(
 /// dx カーネルとはグリッド構成の軸が異なる（dx は行方向 persistent grid・
 /// dw は列方向 grid-stride）ため、grid 導出は共有しない
 /// （`rmsnorm.rs::derive_persistent_grid_dw` 参照）。
+///
+/// **行数が大きい形状では並列度 1（列方向のみ）に頭打ちになる**性能限界を
+/// 持つ（1 スレッドが `rows` 全体を serial 蓄積するため）。この限界を
+/// 解消する split-K 二段構成（[`RMSNORM_BWD_DW_PARTIAL_F32`]／
+/// [`RMSNORM_BWD_DW_REDUCE_F32`]。イシュー #597）を新設したが、本カーネルは
+/// 小規模形状（`rmsnorm.rs::derive_dw_split` が `num_blocks <= 1` を返す
+/// 場合）のフォールバック経路として削除せず維持する（余分なカーネル起動・
+/// 部分和バッファ確保を避けるため）。
 pub const RMSNORM_BWD_DW_F32: &str = r#"
 extern "C" __global__ void rmsnorm_bwd_dw_f32(
     const float* __restrict__ x,
@@ -471,6 +479,229 @@ extern "C" __global__ void rmsnorm_bwd_dw_f32(
             acc = fmaf(dyv * r, xv, acc);
         }
         dw[i] = acc;
+    }
+}
+"#;
+
+/// [`RMSNORM_BWD_DW_PARTIAL_F32`] のブロックあたりスレッド数（列方向
+/// grid-stride の 1 スレッド = 1 列。[`RMSNORM_BWD_DW_F32`] の実行時
+/// ブロック幅（`rmsnorm.rs::RMSNORM_BWD_DW_BLOCK_DIM` = 256）と同じ値だが、
+/// 意味的に独立したパラメータ（列方向 grid-stride の幅）として split-K
+/// 経路専用に持つ（イシュー #597 実装計画 §3.2）。
+pub const RMSNORM_BWD_DW_PARTIAL_BLOCK_DIM: u32 = 256;
+
+/// [`RMSNORM_BWD_DW_REDUCE_F32`] のブロックあたりスレッド数（1 スレッド =
+/// 1 列。静的 smem `smem[2][RMSNORM_DW_REDUCE_BATCH][RMSNORM_DW_REDUCE_
+/// BLOCK_DIM]` の第 3 次元と一致する契約——起動時ブロック幅がこの値と
+/// 異なると `threadIdx.x` が smem 配列境界を超えうる。ホスト側
+/// （`rmsnorm.rs`）は必ずこの定数を `block_dim` に渡す）。
+pub const RMSNORM_DW_REDUCE_BLOCK_DIM: u32 = 256;
+
+/// [`RMSNORM_BWD_DW_REDUCE_F32`] の 2 段パイプラインが 1 イテレーションで
+/// 処理する block（`num_blocks` 次元）のバッチ数。smem double buffer の
+/// 静的サイズは「2 かける RMSNORM_DW_REDUCE_BATCH かける
+/// RMSNORM_DW_REDUCE_BLOCK_DIM かける 4」バイト（`BATCH=4`・
+/// `BLOCK_DIM=256` で 8 KiB。静的 smem 予算に常に収まる小さな固定値）。
+///
+/// `#[allow(dead_code)]` について: 通常ビルドではカーネル文字列内の
+/// リテラル（`smem[2][4][256]`／`(num_blocks + 3) / 4`）を直接埋め込む
+/// ため本定数はホスト側実行経路から参照されないが、
+/// `mod tests::split_k_dw_reduce_smem_size_matches_batch_and_block_dim_consts`
+/// がこの定数を単一の真実源として `format!` でリテラルを再構成し
+/// 一致検証する（advisor 指摘: 定数変更時のソース側乖離を防ぐ回帰検出。
+/// `module_cache.rs`／`swizzle.rs` の同アノテーションと同じ理由）。
+#[allow(dead_code)]
+pub const RMSNORM_DW_REDUCE_BATCH: u32 = 4;
+
+/// weight gradient の split-K 二段リダクション（イシュー #597）:
+/// 第 1 カーネル。[`RMSNORM_BWD_DW_F32`]（列 1 スレッドが `rows` 全体を
+/// serial 蓄積）の行方向並列度 1 という限界を、行（`rows`）方向を
+/// `num_blocks`（`blockIdx.y`）個の CTA へ分割することで解消する。
+///
+/// # 参照実装（TileKernels engram gate カーネル）との対応付け
+///
+/// 参照実装は `[num_blocks, ...]` 形状の部分和バッファを書き出し、第 2
+/// カーネルで縮約する 2 段構成を取る。本カーネルはその第 1 段に相当し、
+/// 各 `(col_tile, b)` の CTA が担当する行範囲
+/// `[b*rows_per_block, min((b+1)*rows_per_block, rows))`
+/// （`rows_per_block = ceil(rows / num_blocks)`）を **レジスタ `acc` で
+/// 蓄積し、最後に 1 回だけ** `dw_partial[b*hidden + i] = acc` を
+/// 書く（atomics 不使用。各 `(b, i)` の書き手 CTA は一意のため決定的。
+/// [`RMSNORM_BWD_DW_F32`] と同じ `fmaf` 蓄積で FMA 契約を統一する）。
+///
+/// # §3.1 連鎖則対応付け（設計判断）
+///
+/// 参照実装は重みが 2 因子（`wh`・`we`）で縮約 epilogue に連鎖則の乗算が
+/// 残るが、本リポジトリの RMSNorm は単一重み `w`
+/// （`out = x·rstd ⊙ w`）であり、連鎖則係数 `rstd[row]` は**行ごとの
+/// スカラー**である。よって連鎖則は列方向の後置演算にはならず、本カーネル
+/// （行方向蓄積）のレジスタ加算へ直接融合するしかない
+/// （`acc = fmaf(dy·rstd, x, acc)`）。中間の正規化済みテンソルは HBM へ
+/// 一切書かない（イシュー #596 の recompute-in-backward 契約を split-K化後も
+/// 維持する）。
+///
+/// # 末尾要素ブロックの扱い（REQ-8・決定的性）
+///
+/// `b*rows_per_block >= rows` となる末尾 block（`num_blocks` が `rows` を
+/// 割り切らない場合に生じる）は行範囲が空になるが、`acc = 0.0f` の
+/// まま**無条件に** `dw_partial` へ書く（早期 return や条件付き書き出しに
+/// しない）。これにより `dw_partial` の全要素が必ず書かれることを保証し、
+/// `alloc_zeros` のゼロ初期化に依存しない（ホスト側の未初期化読み出しを
+/// 防ぐ fail-closed な設計）。
+///
+/// # ループ添字のオーバーフロー安全性
+///
+/// `row_start`／`row_end`／`idx` は `long long`（本ファイル冒頭コメント
+/// 「ループ添字のオーバーフロー安全性」と同じ理由。`rows`／`num_blocks`
+/// は `int` の乗算前に `long long` へ昇格する）。
+pub const RMSNORM_BWD_DW_PARTIAL_F32: &str = r#"
+extern "C" __global__ void rmsnorm_bwd_dw_partial_f32(
+    const float* __restrict__ x,
+    const float* __restrict__ dy,
+    const float* __restrict__ rstd,
+    float* __restrict__ dw_partial,
+    int rows,
+    int hidden,
+    int num_blocks)
+{
+    int b = blockIdx.y;
+    long long rows_per_block = ((long long)rows + num_blocks - 1) / num_blocks;
+    long long row_start = (long long)b * rows_per_block;
+    long long row_end = row_start + rows_per_block;
+    if (row_end > rows) {
+        row_end = rows;
+    }
+
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < hidden;
+         i += (long long)blockDim.x * gridDim.x) {
+        float acc = 0.0f;
+        // `row_start >= row_end`（末尾の空 block）ではこのループが 0 回
+        // 実行され `acc` は `0.0f` のまま。本ファイル冒頭コメント
+        // 「末尾要素ブロックの扱い」参照。
+        for (long long row = row_start; row < row_end; row += 1) {
+            long long idx = row * (long long)hidden + i;
+            float xv = x[idx];
+            float dyv = dy[idx];
+            float r = rstd[row];
+            acc = fmaf(dyv * r, xv, acc);
+        }
+        // 無条件書き出し（条件分岐で省略しない。REQ-8 と同じ
+        // 「最適化を理由に手動保証を省略しない」精神を空 block の扱いにも
+        // 適用する）。
+        dw_partial[(long long)b * (long long)hidden + i] = acc;
+    }
+}
+"#;
+
+/// weight gradient の split-K 二段リダクション（イシュー #597）:
+/// 第 2 カーネル。[`RMSNORM_BWD_DW_PARTIAL_F32`] が書いた
+/// `[num_blocks, hidden]` 形状の部分和バッファを `num_blocks` 次元方向に
+/// 縮約し、最終 `dw` を **1 回だけ** HBM へ書く（縮約結果を HBM へ書いて
+/// 読み戻す第 3 パスを作らない。§3.1 の epilogue 融合方針）。
+///
+/// # 2 段パイプライン（受け入れ基準 3）
+///
+/// `num_blocks` を [`RMSNORM_DW_REDUCE_BATCH`] 個ずつのバッチに分け、
+/// 静的 smem double buffer `smem[2][RMSNORM_DW_REDUCE_BATCH][
+/// RMSNORM_DW_REDUCE_BLOCK_DIM]`（8 KiB）で「次バッチの global ロードを
+/// レジスタ経由で発行してから今バッチの加算を行う」順に進める（プロローグで
+/// バッチ 0 をロード → ループ内で「次バッチロード発行 → 今バッチ加算 →
+/// バッファ入替」を繰り返す）。範囲外バッチ要素（`b >= num_blocks`）は
+/// `0.0f` 充填で手動ガードする（REQ-8）。
+///
+/// # smem の役割（1 スレッド = 1 列という本カーネル構成に固有の注記）
+///
+/// 1 スレッドが 1 列（`col`）を担当し、各スレッドは自分の `col` に対応する
+/// `smem[*][*][threadIdx.x]` スロットのみを読み書きする。**スレッド間で
+/// smem を共有しない**（参照実装〈TileKernels engram gate カーネル〉は
+/// `b` 次元をスレッド次元へ割る変種でスレッド間共有が生じるが、本カーネル
+/// の列並列構成ではその前提が成立しない）。したがって本カーネルの
+/// `__syncthreads()` はスレッド間データ競合の防止としては pass-through
+/// （各スレッドが自分のスロットのみを触るため理論上は不要）であり、
+/// 実際のロード/加算オーバーラップは「次バッチの global ロード命令を
+/// 今バッチの加算命令より先に発行する」というプログラム順序（コンパイラ・
+/// スケジューラによる命令レベル並列性）に由来する。受け入れ基準 3
+/// （2 段パイプライン・smem double buffer）を文字通り満たすため smem
+/// 構成自体は維持するが、この非自明な前提を記録する（`code-comment-
+/// style.md`: 非自明な前提を書く）。
+///
+/// # ループ添字のオーバーフロー安全性
+///
+/// `col` は `long long`（本ファイル冒頭コメントと同じ理由）。
+pub const RMSNORM_BWD_DW_REDUCE_F32: &str = r#"
+extern "C" __global__ void rmsnorm_bwd_dw_reduce_f32(
+    const float* __restrict__ dw_partial,
+    float* __restrict__ dw,
+    int hidden,
+    int num_blocks)
+{
+    __shared__ float smem[2][4][256];
+    int tid = threadIdx.x;
+    int num_batches = (num_blocks + 3) / 4;
+
+    // 外側ループの継続条件は `base`（= blockIdx.x * blockDim.x を起点に
+    // ブロック単位で進める block-stride 添字）でのみ判定する。`base` は
+    // ブロック内の全スレッドで共通の値であり、`threadIdx.x`（`tid`）に
+    // 依存しない。これにより「同一ブロック内の全スレッドが
+    // `__syncthreads()` へ到達する回数を必ず揃える」という CUDA の
+    // ブロック同期契約を満たす（codex-review P0 指摘・PR #716:
+    // 旧実装は `col < hidden` という tid 依存の条件でループを継続して
+    // いたため、`hidden` がブロック幅未満の部分ブロック（例:
+    // `hidden=32` かつ `blockDim.x=256`）で `col >= hidden` の
+    // スレッドがループ本体へ一度も入らず `__syncthreads()` を踏まず、
+    // 残りのスレッドだけがバリアへ到達して不一致・ハングを起こしていた）。
+    // 個々のスレッドの有効性（`col < hidden`）は `active` フラグで
+    // マスクし、範囲外スレッドは smem ロード・加算・`dw` 書き出しを
+    // 素通り（0.0f 充填・書き出しスキップ）しつつバリアには全員で
+    // 到達する。
+    for (long long base = (long long)blockIdx.x * blockDim.x; base < hidden;
+         base += (long long)blockDim.x * gridDim.x) {
+        long long col = base + tid;
+        bool active = col < hidden;
+
+        // プロローグ: バッチ 0 を smem[0] へロードする（範囲外
+        // `b >= num_blocks` または `!active`（列自体が範囲外）は
+        // 0.0f 充填。REQ-8 手動境界チェック）。
+        #pragma unroll
+        for (int j = 0; j < 4; j++) {
+            int b = j;
+            float v =
+                (active && b < num_blocks) ? dw_partial[(long long)b * (long long)hidden + col] : 0.0f;
+            smem[0][j][tid] = v;
+        }
+        __syncthreads();
+
+        float acc = 0.0f;
+        int buf = 0;
+        for (int batch = 0; batch < num_batches; batch++) {
+            int next_buf = buf ^ 1;
+            // (1) 次バッチの global ロードを発行（今バッチの加算命令より
+            // 先にコンパイラへ提示することでレイテンシを重ねる）。
+            if (batch + 1 < num_batches) {
+                #pragma unroll
+                for (int j = 0; j < 4; j++) {
+                    int b = (batch + 1) * 4 + j;
+                    float v = (active && b < num_blocks)
+                                   ? dw_partial[(long long)b * (long long)hidden + col]
+                                   : 0.0f;
+                    smem[next_buf][j][tid] = v;
+                }
+            }
+            // (2) 今バッチを加算する。
+            #pragma unroll
+            for (int j = 0; j < 4; j++) {
+                acc += smem[buf][j][tid];
+            }
+            __syncthreads();
+            buf = next_buf;
+        }
+
+        // epilogue: 最終 dw を 1 回だけ書く（縮約結果を HBM へ往復させる
+        // 第 3 パスを作らない。本ファイル冒頭コメント参照）。範囲外
+        // スレッド（`!active`）は書き出さない。
+        if (active) {
+            dw[col] = acc;
+        }
     }
 }
 "#;
@@ -562,5 +793,193 @@ mod tests {
             assert!(src.contains("int save_rstd"));
             assert!(src.contains("if (save_rstd && lane == 0)"));
         }
+    }
+
+    // --- split-K dw（イシュー #597） ---
+
+    /// 受け入れ基準 1「atomicAdd 等を一切使わない」の機械検査。
+    #[test]
+    fn split_k_dw_kernels_do_not_use_atomics() {
+        for src in [RMSNORM_BWD_DW_PARTIAL_F32, RMSNORM_BWD_DW_REDUCE_F32] {
+            assert!(
+                !src.contains("atomicAdd"),
+                "atomics 不使用の受け入れ基準に反する"
+            );
+        }
+    }
+
+    /// ループ添字（`row_start`／`row_end`／`idx`・`col`）が `long long`
+    /// 宣言であることを検査する（本ファイル冒頭コメント「ループ添字の
+    /// オーバーフロー安全性」と同じ根拠）。
+    #[test]
+    fn split_k_dw_partial_loop_indices_are_declared_long_long() {
+        let src = RMSNORM_BWD_DW_PARTIAL_F32;
+        assert!(src.contains("long long rows_per_block ="));
+        assert!(src.contains("long long row_start ="));
+        assert!(src.contains("long long row_end ="));
+        assert!(src.contains(
+            "for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < hidden;"
+        ));
+        assert!(src.contains("for (long long row = row_start; row < row_end; row += 1)"));
+        assert!(src.contains("long long idx ="));
+    }
+
+    #[test]
+    fn split_k_dw_reduce_loop_index_is_declared_long_long() {
+        let src = RMSNORM_BWD_DW_REDUCE_F32;
+        // 外側ループは `base`（ブロック内全スレッド共通）で継続判定する
+        // （codex-review P0 修正・PR #716。本ファイル冒頭「divergent
+        // barrier」コメント参照）。`col` は `base + tid` から `long long`
+        // で導出される。
+        assert!(
+            src.contains(
+                "for (long long base = (long long)blockIdx.x * blockDim.x; base < hidden;"
+            )
+        );
+        assert!(src.contains("long long col = base + tid;"));
+    }
+
+    /// `__syncthreads()` を含む外側ループの継続条件が `tid`（スレッド
+    /// 固有の値）に依存しないことを検査する（codex-review P0 指摘・
+    /// PR #716「部分ブロックが `__syncthreads()` に到達せずカーネルが
+    /// 停止する」の回帰防止）。修正前は `col < hidden` という tid 依存の
+    /// 条件でループ本体（バリアを含む）への進入可否が決まっており、
+    /// `hidden` がブロック幅未満の部分ブロックでスレッド間の到達回数が
+    /// 不一致になっていた。
+    #[test]
+    fn split_k_dw_reduce_outer_loop_condition_is_block_uniform() {
+        let src = RMSNORM_BWD_DW_REDUCE_F32;
+        assert!(
+            !src.contains("col < hidden;\n         col +="),
+            "外側ループの継続条件に tid 依存の `col` を使ってはならない（divergent barrier 回帰）"
+        );
+        assert!(src.contains("bool active = col < hidden;"));
+        assert!(src.contains("if (active) {\n            dw[col] = acc;\n        }"));
+    }
+
+    /// 部分和は末尾の空 block でも無条件に書かれる（受け入れ基準 1・
+    /// REQ-8「末尾要素ブロックの扱い」参照。条件分岐に包まれた回帰
+    /// （`if (row_start < row_end) { dw_partial[...] = acc; }` 等）を
+    /// 検出する）。
+    #[test]
+    fn split_k_dw_partial_writes_unconditionally() {
+        let src = RMSNORM_BWD_DW_PARTIAL_F32;
+        assert!(src.contains("dw_partial[(long long)b * (long long)hidden + i] = acc;"));
+    }
+
+    /// ソース中の `needle[` の各出現について、対応する `]` の直後
+    /// （空白を読み飛ばした先）が代入演算子 `=`（`==` 等の比較演算子は
+    /// 除く）であるかどうかを走査し、代入箇所（`needle[<式>] = ...`）の
+    /// 個数を返す。添字式中に `[`／`]` を含む可能性（本カーネルには
+    /// ないが将来の変更に備える）を考慮し、括弧の対応を数えて閉じ括弧
+    /// を特定する（Bugbot 指摘・PR #716: 旧実装は
+    /// `dw_partial[...] = `（`...` はリテラルの 3 文字）という実カーネル
+    /// コードに存在しない文字列をそのまま `contains` していたため、
+    /// 実際に `dw_partial[<式>] = <式>;` という書き戻しが混入しても
+    /// 常に真になり回帰を検知できない vacuous check になっていた）。
+    fn count_bracket_assignments(src: &str, needle: &str) -> usize {
+        let bytes = src.as_bytes();
+        let mut count = 0;
+        let mut search_from = 0;
+        while let Some(rel) = src[search_from..].find(needle) {
+            let open = search_from + rel + needle.len() - 1;
+            debug_assert_eq!(bytes[open], b'[');
+            let mut depth = 1i32;
+            let mut idx = open + 1;
+            let mut close = None;
+            while idx < bytes.len() {
+                match bytes[idx] {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(idx);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                idx += 1;
+            }
+            let Some(close) = close else { break };
+            let mut after = close + 1;
+            while after < bytes.len() && (bytes[after] as char).is_whitespace() {
+                after += 1;
+            }
+            if bytes.get(after) == Some(&b'=') && bytes.get(after + 1) != Some(&b'=') {
+                count += 1;
+            }
+            search_from = close + 1;
+        }
+        count
+    }
+
+    /// 縮約カーネルの epilogue が `dw` へ 1 回だけ書き、中間の縮約結果を
+    /// HBM へ書き戻す第 3 パスを作らないことを検査する（§3.1・受け入れ
+    /// 基準 2）。
+    #[test]
+    fn split_k_dw_reduce_writes_dw_exactly_once_in_epilogue() {
+        let src = RMSNORM_BWD_DW_REDUCE_F32;
+        let occurrences = src.matches("dw[col] = acc;").count();
+        assert_eq!(
+            occurrences, 1,
+            "epilogue の dw 書き出しは 1 回のみである契約"
+        );
+
+        // `dw_partial` は読み出し専用（`const float* __restrict__` 引数）
+        // であることを確認する。`dw_partial[<式>] = ` という代入パターン
+        // （縮約結果を HBM へ書いて読み戻す第 3 パスに相当）が実際に
+        // 存在しないことを `count_bracket_assignments` で検査し、読み出し
+        // 自体（`dw_partial[...]` が式の右辺に現れる形）はテストの前提
+        // として最低 1 回存在することを確認する。
+        assert!(
+            src.contains("const float* __restrict__ dw_partial"),
+            "dw_partial は const（読み出し専用）引数である契約"
+        );
+        assert!(
+            src.matches("dw_partial[").count() >= 1,
+            "dw_partial の読み出しが見つからない（テスト自体の前提崩れ）"
+        );
+        assert_eq!(
+            count_bracket_assignments(src, "dw_partial["),
+            0,
+            "縮約カーネルは dw_partial へ書き出さない契約"
+        );
+    }
+
+    /// smem double buffer の静的サイズが [`RMSNORM_DW_REDUCE_BATCH`]／
+    /// [`RMSNORM_DW_REDUCE_BLOCK_DIM`] と一致することを回帰検出する
+    /// （advisor 指摘: 定数変更時にソース側の宣言が黙って乖離するのを
+    /// 防ぐため、期待値をハードコードせず定数から `format!` で組み立てる）。
+    #[test]
+    fn split_k_dw_reduce_smem_size_matches_batch_and_block_dim_consts() {
+        let expected = format!(
+            "__shared__ float smem[2][{}][{}];",
+            RMSNORM_DW_REDUCE_BATCH, RMSNORM_DW_REDUCE_BLOCK_DIM
+        );
+        assert!(
+            RMSNORM_BWD_DW_REDUCE_F32.contains(&expected),
+            "smem 宣言が RMSNORM_DW_REDUCE_BATCH/RMSNORM_DW_REDUCE_BLOCK_DIM と乖離している: \
+             expected `{expected}`"
+        );
+        // バッチ内アンロールのループ境界（`j < RMSNORM_DW_REDUCE_BATCH`）も
+        // 定数と揃っていることを確認する。
+        let expected_unroll_bound = format!("j < {}", RMSNORM_DW_REDUCE_BATCH);
+        assert!(RMSNORM_BWD_DW_REDUCE_F32.contains(&expected_unroll_bound));
+        let expected_batch_advance = format!("(batch + 1) * {}", RMSNORM_DW_REDUCE_BATCH);
+        assert!(RMSNORM_BWD_DW_REDUCE_F32.contains(&expected_batch_advance));
+    }
+
+    /// [`RMSNORM_DW_REDUCE_BATCH`]（4）が num_batches 導出の除数（`+3`／
+    /// `/4`）と一致することを検査する（`(num_blocks + BATCH - 1) / BATCH`
+    /// の意図。定数変更時の乖離を防ぐ）。
+    #[test]
+    fn split_k_dw_reduce_num_batches_uses_batch_const() {
+        let expected = format!(
+            "int num_batches = (num_blocks + {}) / {};",
+            RMSNORM_DW_REDUCE_BATCH - 1,
+            RMSNORM_DW_REDUCE_BATCH
+        );
+        assert!(RMSNORM_BWD_DW_REDUCE_F32.contains(&expected));
     }
 }
