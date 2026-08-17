@@ -60,7 +60,9 @@ thread_local! {
     /// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない。
     /// `m == 0 || n == 0`（no-op）・`k == 0`（ホスト側で直接 epilogue のみ
     /// 計算し GPU 起動を回避する分岐）の場合はカーネルを起動しないため
-    /// カウントしない。
+    /// カウントしない。バッファ確保・`dispatch_sync` の**成功後**にのみ
+    /// 増加させる（codex-review 指摘・PR #717: 確保／dispatch 失敗時に
+    /// 「起動済み」として誤記録すると経路検証テスト・診断が偽陽性になる）。
     ///
     /// **スレッドローカルにする理由**（CUDA 側 `gemm.rs` の該当コメントと
     /// 同一の論拠）: `static AtomicU64`（プロセス全体共有）だと `cargo test`
@@ -545,8 +547,6 @@ impl MetalGemm {
             return Ok(out);
         }
 
-        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
-
         let a_buf = MetalBuffer::new_with_data(ctx, a)?;
         let b_buf = MetalBuffer::new_with_data(ctx, b)?;
         // `bias` が `None` の場合は `n` 要素のゼロ初期化バッファを渡す
@@ -577,6 +577,12 @@ impl MetalGemm {
                 act_i,
             );
         })?;
+
+        // バッファ確保（`MetalBuffer::new_with_data`／`new_zeroed`）・
+        // `ctx.dispatch_sync` がすべて成功した後にのみ増加させる（codex-review
+        // 指摘・PR #717。確保／dispatch 失敗時に「起動済み」として誤記録
+        // すると、経路検証テスト・診断が偽陽性になるため）。
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
 
         Ok(c_buf.read_to_vec())
     }
