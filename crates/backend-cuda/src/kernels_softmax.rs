@@ -383,6 +383,46 @@ mod tests {
         }
     }
 
+    /// `log2(e)` 事前スケール順序（本ファイル冒頭コメント「`log2(e)`
+    /// 事前スケール」参照。イシュー #594 PR #712 codex-review 指摘・P1・
+    /// threadId PRRT_kwDOTuUCJc6ZtHwL の直接的な回帰テスト）: ソース文字列
+    /// に対し「最大値との差分を取った後に `scale` を乗算する」形
+    /// （`(raw - m_new) * scale` 等）が存在し、「差分より先に `scale` を
+    /// 乗算する」形（`raw * scale` 等。旧実装は `float v = raw * scale;`
+    /// のように最大値減算より先にスケールしていた）が存在しないことを
+    /// 検査する。実機必須の数値回帰（`f32::MAX` 入力）は
+    /// `softmax_parity.rs::softmax_numerically_stable_for_extreme_inputs`
+    /// （`#[ignore]`）で別途検証するため、本テストは実機非依存で
+    /// ソースコード構造そのものの後退を防ぐ役割を持つ。
+    #[test]
+    fn onepass_and_twopass_scale_multiply_happens_after_max_subtraction() {
+        for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
+            assert!(
+                src.contains("exp2f((raw - m_new) * scale)"),
+                "online 更新の exp2f が『差分後に scale 乗算』の形になっていない"
+            );
+            assert!(
+                src.contains("exp2f((m - m_new) * scale)"),
+                "補正係数の exp2f が『差分後に scale 乗算』の形になっていない"
+            );
+            assert!(
+                !src.contains("= raw * scale"),
+                "raw に scale を先乗算する旧実装のパターンが残っている（最大値減算前のオーバーフローを招く）"
+            );
+        }
+        // 正規化書き出しの exp2f も同じ順序であることを個別に検査する
+        // （1 パス: smem 読み出し／2 パス: x_row・v4 直読の 2 形態）。
+        assert!(
+            SOFTMAX_F32_ONEPASS.contains("exp2f((smem[i] - m) * scale)"),
+            "1 パス経路の正規化書き出しが『差分後に scale 乗算』の形になっていない"
+        );
+        assert!(
+            SOFTMAX_F32_TWOPASS.contains("exp2f((x_row[i] - m) * scale)")
+                && SOFTMAX_F32_TWOPASS.contains("exp2f((v4.x - m) * scale)"),
+            "2 パス経路の正規化書き出しが『差分後に scale 乗算』の形になっていない"
+        );
+    }
+
     /// 境界マスク定数（本ファイル冒頭コメント「境界マスク定数」参照）:
     /// `-INFINITY` を直接使わず、`f32` の値域下限（`-__FLT_MAX__`）を
     /// 使うことを検査する。
