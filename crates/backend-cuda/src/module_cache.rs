@@ -329,17 +329,29 @@ impl KernelModuleCache {
         module: Arc<CudaModule>,
     ) -> Result<(), CudaError> {
         let ctx_id = Arc::as_ptr(ctx) as usize;
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| CudaError::ModuleCacheUnavailable {
-                detail: format!("module cache mutex poisoned: {e}"),
-            })?;
-        // 戻り値（evict／置換で外れた旧 `Arc<CudaModule>`）はこの文の終端で
-        // drop される。呼び出し元へは返さない（本メソッドの責務は登録の
-        // みであり、解放タイミングの構造的保証は `LruCache::insert` の
-        // ドキュメンテーションコメント参照）。
-        let _evicted = guard.insert((ctx_id, key), module);
+        // `Mutex` guard をブロックへ閉じ込め、evict／置換で外れた旧
+        // `Arc<CudaModule>`（`evicted`）をブロック外へ持ち出してから
+        // drop する（Bugbot 指摘〈Evict drops under cache lock〉対応）。
+        // ローカル変数は宣言の逆順で drop されるため、旧実装のように
+        // `guard` を先に・`_evicted` を後に宣言すると `_evicted` が
+        // `guard` より先に drop され、evict された `Arc<CudaModule>` の
+        // `cuModuleUnload`（本モジュール冒頭ドキュメンテーションコメント
+        // 「所有モデル」参照）がこのプロセス全体の `Mutex` を保持した
+        // ままドライバへ発行されてしまう。並行する他 `get`／`insert`
+        // 呼び出し元がその unload の完了を待つ間ロックが占有され続け、
+        // モジュールキャッシュ全体が不必要に足止めされる。`guard` を
+        // ブロックの終端で drop してからロック外で `evicted` を drop
+        // することで、unload はロック解放後に実行される。
+        let evicted = {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|e| CudaError::ModuleCacheUnavailable {
+                    detail: format!("module cache mutex poisoned: {e}"),
+                })?;
+            guard.insert((ctx_id, key), module)
+        };
+        drop(evicted);
         Ok(())
     }
 

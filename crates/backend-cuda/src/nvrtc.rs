@@ -2325,28 +2325,53 @@ fn entry_exists_at(root_fd: &fs::File, entry_name: &str) -> bool {
 /// 満たすかを、パスを再解決せず fd 相対の open のみで判定する
 /// （[`store_cache_entry_at`] 用。イシュー #509 PR #677 codex-review P0
 /// 再指摘対応。パスベース版 [`validate_cache_entry`] の fd 版）。
+///
+/// エントリディレクトリ・2 ファイルいずれかが
+/// [`is_cache_entry_permission_untrusted`] の意味で信頼できない
+/// （group／other 書き込み可能、または所有 uid がこのプロセスの実効
+/// uid と異なる）場合も不変条件を満たさない（`false`）として扱う
+/// （イシュー #511 PR #703 Bugbot 指摘〈Untrusted entries block cache
+/// store〉対応）。[`load_cache_entry_at`] はこの信頼境界を満たさない
+/// エントリを常にミス扱い（`Ok(None)`）にして再コンパイルへ
+/// フォールバックするが、本関数がそれを「有効なエントリ」と判定して
+/// しまうと、[`store_cache_entry_at`] の rename 失敗時分岐（他プロセス
+/// 先着・破損エントリ判別）が信頼できないスロットを「先勝ち」として
+/// 受理し置き換えない。結果、同一キーへのコンパイルのたびに rename が
+/// 失敗し続け、読み出し側は常にミスして再コンパイル・保存側は常に
+/// 失敗を繰り返す永続的なキー汚染に陥る。両関数の判定基準を揃えることで
+/// 信頼できないスロットを破損エントリと同じ経路で置換対象にする。
 #[cfg(unix)]
 fn validate_cache_entry_at(root_fd: &fs::File, entry_name: &str) -> bool {
     let dir_fd = match open_dir_child_nofollow(root_fd, entry_name) {
         Ok(f) => f,
         Err(_) => return false,
     };
-    is_plain_file_at(&dir_fd, CACHE_ENTRY_SOURCE_FILE)
-        && is_plain_file_at(&dir_fd, CACHE_ENTRY_PTX_FILE)
+    if is_cache_entry_permission_untrusted(&dir_fd) {
+        return false;
+    }
+    is_plain_trusted_file_at(&dir_fd, CACHE_ENTRY_SOURCE_FILE)
+        && is_plain_trusted_file_at(&dir_fd, CACHE_ENTRY_PTX_FILE)
 }
 
-/// `dir_fd` 起点で `name` が symlink ではない非空の通常ファイルかを、
-/// fd 経由の `fstat`（`open_file_child_nofollow` が成功した時点で
-/// symlink・特殊ファイルは既に拒否済み。[`open_nofollow`]・
-/// [`openat_nofollow`] のドキュメンテーションコメント参照）で判定する
-/// （[`validate_cache_entry_at`] 用）。
+/// `dir_fd` 起点で `name` が symlink ではない非空の通常ファイルであり、
+/// かつ [`is_cache_entry_permission_untrusted`] の意味で信頼できる
+/// （同一 uid のみが書き込める）ことを、fd 経由の `fstat`
+/// （`open_file_child_nofollow` が成功した時点で symlink・特殊ファイルは
+/// 既に拒否済み。[`open_nofollow`]・[`openat_nofollow`] のドキュメン
+/// テーションコメント参照）で判定する（[`validate_cache_entry_at`] 用。
+/// 信頼境界の追加はイシュー #511 PR #703 Bugbot 指摘〈Untrusted entries
+/// block cache store〉対応: [`load_cache_entry_at`] が使う信頼判定と
+/// 揃え、信頼できないエントリを本関数が「有効」と誤判定して
+/// `store_cache_entry_at` の置換対象から漏らさないようにする）。
 #[cfg(unix)]
-fn is_plain_file_at(dir_fd: &fs::File, name: &str) -> bool {
+fn is_plain_trusted_file_at(dir_fd: &fs::File, name: &str) -> bool {
     match open_file_child_nofollow(dir_fd, name) {
-        Ok(f) => f
-            .metadata()
-            .map(|m| m.file_type().is_file() && m.len() > 0)
-            .unwrap_or(false),
+        Ok(f) => {
+            !is_cache_entry_permission_untrusted(&f)
+                && f.metadata()
+                    .map(|m| m.file_type().is_file() && m.len() > 0)
+                    .unwrap_or(false)
+        }
         Err(_) => false,
     }
 }
@@ -5913,6 +5938,55 @@ mod tests {
             .expect("store must replace a non-directory occupant instead of failing permanently");
         assert_eq!(replaced, entry_dir);
 
+        let loaded = load_cache_entry_in(&root, &key, "fresh-cu")
+            .expect("load must succeed")
+            .expect("replaced entry must be a hit");
+        assert_eq!(loaded.kernel_cu, "fresh-cu");
+        assert_eq!(loaded.kernel_ptx, "fresh-ptx");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // イシュー #511 PR #703 Bugbot 指摘〈Untrusted entries block cache
+    // store〉の回帰テスト: 最終エントリが group 書き込み可能（信頼でき
+    // ない。`load_cache_entry_in` はミス扱いにする）状態のまま
+    // `store_cache_entry_in` の rename 衝突時判定に到達した場合、旧実装の
+    // `validate_cache_entry_at`（存在確認のみ）はこれを「先勝ち」として
+    // 受理し置換しなかった。これは `load_cache_entry_in` の判定基準
+    // （`is_cache_entry_permission_untrusted`）と食い違い、同一キーへの
+    // 保存が rename 失敗→受理を繰り返す恒久的なキー汚染を招く
+    // （`load_cache_entry_in` は常にミス・`store_cache_entry_in` は
+    // 常に「既に有効」と誤判定して置換しない）。修正後は信頼できない
+    // エントリを破損エントリと同じ経路で置換できることを検証する。
+    #[cfg(unix)]
+    #[test]
+    fn store_replaces_group_writable_untrusted_entry() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = fresh_temp_dir("group-writable-untrusted");
+        let key = sample_key();
+
+        let entry_dir = store_cache_entry_in(&root, &key, "stale-cu", "stale-ptx")
+            .expect("initial store must succeed");
+        // エントリディレクトリを group 書き込み可能（`mode & 0o020 != 0`）
+        // へ変更する（外部からの権限緩和・想定外の破壊を模す）。
+        fs::set_permissions(&entry_dir, fs::Permissions::from_mode(0o770))
+            .expect("must relax entry dir permission to group-writable");
+
+        assert!(
+            load_cache_entry_in(&root, &key, "stale-cu")
+                .expect("load must not hard-error")
+                .is_none(),
+            "group-writable entry must be treated as a miss by the load path"
+        );
+
+        let replaced = store_cache_entry_in(&root, &key, "fresh-cu", "fresh-ptx").expect(
+            "store must replace the untrusted entry instead of absorbing it as first-writer-wins",
+        );
+        assert_eq!(replaced, entry_dir);
+
+        // 置換後は通常権限（`create_subdir_pinned` の `mode(0o700)`）に
+        // 戻っており、信頼できるエントリとしてヒットする。
         let loaded = load_cache_entry_in(&root, &key, "fresh-cu")
             .expect("load must succeed")
             .expect("replaced entry must be a hit");
