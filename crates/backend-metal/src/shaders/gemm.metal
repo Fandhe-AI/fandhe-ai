@@ -121,6 +121,96 @@ kernel void gemm_tiled(
     }
 }
 
+// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM（f32）。
+// イシュー #605（CUDA 側 `TILED_BIAS_ACT_F32`〈#599〉の Metal 対応版）。
+//
+// `gemm_tiled` のアキュムレーション部分（threadgroup 共有メモリタイリング・
+// 内積ループ）はそのまま維持し、C への書き込み直前の epilogue で
+// `has_bias` が真なら `acc + bias[col]`、`act == 1` なら続けて
+// `max(v, 0)` を適用してから 1 回だけ書く（`gemm` → `add` → `relu` の
+// 非融合合成のように中間結果をバッファへ書いて読み直すことをしない。
+// CPU 側 `gemm_blis_bias_act_parallel`・CUDA 側 `TILED_BIAS_ACT_F32` と
+// 同じ「epilogue をカーネル内で完結させる」設計思想。`docs/kernel-fusion.md`
+// §2.2）。
+//
+// **数値契約**: アキュムレーション自体は `gemm_tiled` と完全に同一の
+// 演算順序（同じ threadgroup タイリング・同じ `fma()` ループ）のため、
+// `gemm`→`add`→`relu` の非融合合成（同じ `gemm_tiled` を経由した後に
+// 別カーネルで bias 加算・relu を適用する経路）と bit 完全一致になる
+// （epilogue の加算・比較は要素独立で演算順序に依存しないため。
+// `.claude/rules/coding-rust.md` の FMA 契約統一節・
+// `docs/kernel-fusion.md` §2.2「bit 完全一致」と同じ論拠）。
+//
+// **`bias` が `None`（`has_bias == 0`）の場合**: ホスト側
+// （`crate::gemm::MetalGemm::run_tiled_bias_act_f32`）は 1 要素ダミー
+// バッファではなく `n` 要素のゼロ初期化バッファを渡す契約とする
+// （`crate::rmsnorm::MetalRmsNorm::run_rmsnorm_f32_raw` の `w_buf` 契約と
+// 同じ理由: `has_bias` ガードは条件分岐として書かれているが、Metal
+// コンパイラがこれを両辺無条件評価の select 命令へ最適化する可能性が
+// あり、その場合 `has_bias == 0` でも `bias[col]`〈`col` は最大 `n - 1`〉
+// が実際にロードされうる。1 要素バッファでは `n > 1` のとき範囲外読み出し
+// になるため、コンパイラの最適化戦略に依存しない fail-closed な対策として
+// `n` 要素確保する。CUDA 側は条件分岐がハードウェア的に安全なため 1 要素
+// ダミーで足りるが、Metal 側はこの追加保証が必要）。
+//
+// # REQ-8（カーネル境界検査規約）
+//
+// タイルロード時の三項ガード・C への書き込み時の `row < m && col < n`
+// ガードは `gemm_tiled` と同一（該当コメント参照）。epilogue の
+// `bias[col]` 参照は書き込みガード（したがって `col < n`）の内側でのみ
+// 行うため、`bias`（`n` 要素確保済み）への範囲外読み出しは発生しない。
+kernel void gemm_tiled_bias_act(
+    device const float* a [[buffer(0)]],
+    device const float* b [[buffer(1)]],
+    device const float* bias [[buffer(2)]],
+    device float* c [[buffer(3)]],
+    constant Dims& dims [[buffer(4)]],
+    constant int& has_bias [[buffer(5)]],
+    constant int& act [[buffer(6)]],
+    uint2 gid [[thread_position_in_grid]],
+    uint2 lid [[thread_position_in_threadgroup]]
+) {
+    threadgroup float tile_a[TILE][TILE];
+    threadgroup float tile_b[TILE][TILE];
+
+    uint m = dims.m, n = dims.n, k = dims.k;
+    uint row = gid.y, col = gid.x;
+    float acc = 0.0;
+
+    uint num_tiles = (k + TILE - 1) / TILE;
+    for (uint t = 0; t < num_tiles; t++) {
+        uint a_col = t * TILE + lid.x;
+        uint b_row = t * TILE + lid.y;
+
+        tile_a[lid.y][lid.x] =
+            (row < m && a_col < k) ? a[(size_t)row * (size_t)k + (size_t)a_col] : 0.0;
+        tile_b[lid.y][lid.x] =
+            (b_row < k && col < n) ? b[(size_t)b_row * (size_t)n + (size_t)col] : 0.0;
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint i = 0; i < TILE; i++) {
+            acc = fma(tile_a[lid.y][i], tile_b[i][lid.x], acc);
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    // REQ-8: C への書き込み時の手動境界チェック（`gemm_tiled` と同一）。
+    // epilogue（bias 加算・activation）はこのガードの内側でのみ適用し、
+    // 中間結果を別カーネルへ渡さず 1 回の書き込みで完結させる。
+    if (row < m && col < n) {
+        float v = acc;
+        if (has_bias != 0) {
+            v += bias[col];
+        }
+        if (act == 1) {
+            v = v > 0.0f ? v : 0.0f;
+        }
+        c[(size_t)row * (size_t)n + (size_t)col] = v;
+    }
+}
+
 // `simdgroup_matrix`（8x8 ハードウェア行列演算命令。TASK-1.8c・#40）。
 //
 // 1 threadgroup = 1 simdgroup（32 スレッド）とし、各 simdgroup が C の

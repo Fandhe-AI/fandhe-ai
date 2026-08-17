@@ -121,6 +121,12 @@ pub enum MetalError {
     /// `threadExecutionWidth == 32` を起動前に検証」。デバイス・ドライバの
     /// 想定外挙動を fail-closed で検出する）。
     UnexpectedThreadExecutionWidth { expected: usize, actual: usize },
+    /// elementwise（`crate::elementwise`）・`gemm_bias_act` 融合カーネル
+    /// （`crate::gemm::MetalGemm::run_tiled_bias_act_f32`）の起動前 shape
+    /// 検証が拒否した（イシュー #605。CUDA 側
+    /// `CudaError::InvalidElementwiseShape` と同じ役割）。`detail` に
+    /// 具体的な不整合内容（長さ不一致等）を保持する。
+    InvalidElementwiseShape { detail: String },
 }
 
 impl fmt::Display for MetalError {
@@ -210,6 +216,9 @@ impl fmt::Display for MetalError {
                     f,
                     "unexpected threadExecutionWidth: expected {expected}, actual {actual}"
                 )
+            }
+            MetalError::InvalidElementwiseShape { detail } => {
+                write!(f, "invalid elementwise/gemm_bias_act shape: {detail}")
             }
         }
     }

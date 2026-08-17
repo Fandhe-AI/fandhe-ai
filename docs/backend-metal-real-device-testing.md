@@ -34,10 +34,15 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 
 ## テスト一覧と対応 REQ/TASK
 
-`crates/backend-metal/tests/` は 15 ファイル（イシュー #604 で `rmsnorm_parity.rs`・`softmax_parity.rs`・
-`rmsnorm_softmax_source_evidence.rs` の 3 ファイルを追加）。うち 13 ファイルが `#[ignore]` 実機テストを持ち、
-合計 57 件（#380 実機実測時点の 52 件 + #604 追加分 5 件〈`rmsnorm_parity.rs` 2 件・`softmax_parity.rs` 3 件〉。
-件数根拠は per-file 合計を正とする）。残る 2 ファイル（`shader_source_evidence.rs`・
+`crates/backend-metal/tests/` は 17 ファイル（イシュー #604 で `rmsnorm_parity.rs`・`softmax_parity.rs`・
+`rmsnorm_softmax_source_evidence.rs` の 3 ファイルを、イシュー #605 で `gemm_bias_act_parity.rs`・
+`elementwise_gemm_bias_act_source_evidence.rs` の 2 ファイルを追加）。うち 14 ファイルが `#[ignore]` 実機
+テストを持ち、合計 63 件（#380 実機実測時点の 52 件 + #604 追加分 5 件〈`rmsnorm_parity.rs` 2 件・
+`softmax_parity.rs` 3 件〉+ #605 追加分 6 件〈`gemm_bias_act_parity.rs`〉。件数根拠は per-file 合計を正と
+する。`gemm.rs` 内クレート内テスト 2 件〈`run_tiled_bias_act_f32_increments_fused_launch_counter`・
+`run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter`〉は `tests/` 配下ではないため
+本節の集計に含めない）。残る 3 ファイル（`shader_source_evidence.rs`・
+`elementwise_gemm_bias_act_source_evidence.rs`・
 `rmsnorm_softmax_source_evidence.rs`）は `#[ignore]` を持たず Linux CI でも実行される。
 
 | ファイル | `#[ignore]` 件数 | 対応 TASK/Issue | 検証内容 |
@@ -55,6 +60,8 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 | `tests/memory_roundtrip.rs` | 6 | TASK-2.1 系 | メモリ確保・ゼロ初期化・プール再利用・アップロード/ダウンロード roundtrip・リーク検査 |
 | `tests/rmsnorm_parity.rs` | 2 | イシュー #604 | 融合 RMSNorm 順伝播カーネルの CPU 参照実装（`f32::mul_add`。CUDA 側 `cpu_rmsnorm_reference` と同一意味論）との複合判定（REQ-2）。hidden の 1 パス／2 パス境界（4096/4097）網羅・`run_fused` 経由の canonical プラン検証を含む |
 | `tests/softmax_parity.rs` | 3 | イシュー #604 | online softmax カーネルの CPU 参照実装（素朴な `exp(x-max(x))/sum`）との複合判定（REQ-2）。CUDA 直接の parity 相手（#594・G-7）は本イシュー時点で未実装のため CPU 参照経由の推移的な担保に留まる（`softmax.rs` ドキュメンテーションコメント参照）。極値安定性（全要素同値・大きな正負値）・`run_fused` 経由の canonical プラン検証を含む |
+| `tests/gemm_bias_act_parity.rs` | 6 | イシュー #605 | elementwise 5 演算・`gemm_bias_act` epilogue 融合カーネルの CPU-Metal 数値一致（REQ-2 複合判定）。形状網羅・K ストレス・bias 未指定・`k=0` 縮退・bias ブロードキャストフォールバック・bias 形状不整合の拒否を含む |
+| `tests/elementwise_gemm_bias_act_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | イシュー #605 | `elementwise.metal` 5 カーネルの実在・REQ-8 手動境界チェック・precise math 使用検査、`gemm.metal::gemm_tiled_bias_act` の実在・REQ-8 境界チェック・bias/activation epilogue の文字列証跡検査 |
 | `tests/shader_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | TASK-11.3（#70） | `gemm.metal` の行列演算ユニット命令（`simdgroup_matrix` API）実在検査・REQ-8 境界チェック維持検査 |
 | `tests/rmsnorm_softmax_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | イシュー #604 | `rmsnorm.metal`／`softmax.metal` のアルゴリズム契約（5 段 butterfly reduction・`simdgroup_barrier` のみ使用・`exp2` のみ使用・有限負値境界マスク・REQ-8 手動境界チェック・FMA 契約）の文字列証跡検査 |
 

@@ -140,12 +140,18 @@
   フォールバックする（CUDA は本イシューで `add`／`relu` を実装済みの
   ため CPU と異なり `Unsupported` を経由しない）。実機での実測（融合 vs
   非融合の 5 回計測中央値）は `docs/perf/cuda-gemm-epilogue-fusion.md`
-  を参照（未実施の場合はその旨が明記される）。Metal は本文書執筆時点で
-  GEMM カーネルのみ実装済みで elementwise 未実装のままであり、`bias`／
-  `act` 指定時は引き続き `Unsupported` 経由でデフォルト実装（非融合
-  合成）へフォールバックする。Metal 側 epilogue 融合の実装自体は実機
-  検証前提のため未着手（`out-of-scope-tracking.md` に従いユーザー承認
-  取得後に別イシューで追跡する）。
+  を参照（未実施の場合はその旨が明記される）。Metal はイシュー #605 で
+  同様の elementwise 5 演算と `gemm_bias_act` epilogue 融合カーネル
+  （`shaders/gemm.metal::gemm_tiled_bias_act`・
+  `MetalGemm::run_tiled_bias_act_f32`）を実装した。経路選択の分岐条件
+  （`ops::gemm_bias_act_route`）・bit 完全一致の論拠は CUDA 側と同一
+  （いずれも `gemm_tiled`／`gemm_tiled_bias_act` の同一タイリング順序を
+  経由するため）。既存 `gemm_naive`／`gemm_tiled`／`gemm_simdgroup`／
+  `gemm_simdgroup_tiled`／`gemm_simdgroup_f16` カーネルには一切触れて
+  おらず GEMM 単体は構造的に非後退。実機での実測（融合 vs 非融合の 5 回
+  計測中央値・複合 WL 適用前後）は `docs/perf/metal-gemm-epilogue-fusion.md`
+  を参照（本リポの開発環境が Linux のため実機検証未完・再現コマンドの
+  記録に留まる）。
 
 ## 3. 限界
 

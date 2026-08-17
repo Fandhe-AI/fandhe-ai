@@ -134,6 +134,15 @@
 //! 両バックエンドとも CPU 参照実装（REQ-2 統一複合判定）に対する数値一致を
 //! 経由した推移的な担保に留まる（`softmax.rs`／`tests/softmax_parity.rs`
 //! ドキュメンテーションコメント参照）。
+//!
+//! イシュー #605（Phase G・G-14）で elementwise 5 演算
+//! （[`elementwise::MetalElementwise`]。CUDA 側 #599 の対応版）を追加し、
+//! `ops::MetalBackendOps::gemm_bias_act` を GEMM epilogue 実融合カーネル
+//! （[`gemm::MetalGemm::run_tiled_bias_act_f32`]・`shaders/gemm.metal::
+//! gemm_tiled_bias_act`）でオーバーライドした。既存 `gemm_naive`／
+//! `gemm_tiled`／`gemm_simdgroup`／`gemm_simdgroup_tiled`／
+//! `gemm_simdgroup_f16` カーネルには一切触れておらず、GEMM 単体の性能・
+//! 数値契約は構造的に非後退（新規カーネルの追加のみ）。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -141,6 +150,8 @@ pub mod buffer;
 pub mod context;
 #[cfg(target_os = "macos")]
 pub mod device;
+#[cfg(target_os = "macos")]
+pub mod elementwise;
 #[cfg(target_os = "macos")]
 pub mod error;
 #[cfg(target_os = "macos")]
@@ -195,6 +206,8 @@ pub use context::MetalContext;
 pub use device::MetalDeviceProvider;
 #[cfg(target_os = "macos")]
 pub use device::{MetalOccupancyInfo, probe_gpu_core_count};
+#[cfg(target_os = "macos")]
+pub use elementwise::MetalElementwise;
 #[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
