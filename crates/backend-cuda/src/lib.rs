@@ -163,6 +163,16 @@
 //! ルーティングし、一致しないプランはデフォルトの `Unsupported`
 //! フォールバックのまま維持する。
 //!
+//! イシュー #594 で online softmax（FlashAttention-2 型）順伝播カーネル
+//! （[`softmax::CudaSoftmax`]）を追加した。RMSNorm と同じ構造イディオム
+//! （1 CTA = 1 warp・persistent block・1 パス／2 パスの 2 経路）を転用し、
+//! `log2(e)` 事前スケール + `exp2f`（`expf` 不使用）・オンライン最大値
+//! 更新の補正係数スキップ・有限マージンの境界マスク（`-INFINITY` 不
+//! 使用）で数値安定性を確保する（`kernels_softmax.rs` 冒頭コメント参照）。
+//! `CudaBackendOps::run_fused`（`ops.rs`）は canonical softmax 融合プラン
+//! （`exp(x-max(x))/sum(...)`。最終軸または全軸縮約の厳密形状。
+//! `softmax::match_softmax_plan`）検出時のみ本カーネルへルーティングする。
+//!
 //! Phase C-4（#511。親イシュー #503 の最終タスク）で [`module_cache`]
 //! （非公開 `mod`。`pub use` で再公開しない内部実装詳細）を追加し、
 //! `kernels_mma.rs::RenderedMmaKernel::compile` をプロセス内 LRU
@@ -193,6 +203,7 @@ mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;
 mod kernels_rmsnorm;
+mod kernels_softmax;
 mod kernels_transpose;
 mod kernels_wmma;
 mod kernels_wmma_opt;
@@ -201,6 +212,7 @@ mod module_cache;
 mod nvrtc;
 mod ops;
 mod rmsnorm;
+mod softmax;
 mod swizzle;
 mod transpose;
 
@@ -234,6 +246,7 @@ pub use nvrtc::{
 };
 pub use ops::CudaBackendOps;
 pub use rmsnorm::{CudaRmsNorm, RmsNormShape};
+pub use softmax::CudaSoftmax;
 pub use transpose::CudaTranspose;
 
 /// `kernels_mma`／`kernels_wmma_opt`（非公開 `mod`。カーネル本体は crate

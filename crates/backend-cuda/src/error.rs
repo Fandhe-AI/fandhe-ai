@@ -208,6 +208,17 @@ pub enum CudaError {
     /// キャッシュなしの縮退運転〈`kernels_mma.rs::RenderedMmaKernel::compile`
     /// の fail-safe 方針〉へフォールバックすればよい）。
     ModuleCacheUnavailable { detail: String },
+
+    /// online softmax 順伝播カーネル起動 API（`softmax.rs::CudaSoftmax`）の
+    /// ホスト側形状検証が拒否した入力。
+    ///
+    /// イシュー #594: `rows*cols == x.len()`（checked 乗算）・
+    /// `numel/rows/cols` が `i32::MAX`（カーネル引数の `int rows`／
+    /// `int cols` 契約）に収まることを起動前に検証する（OWASP A03。
+    /// `InvalidRmsNormShape` と同じ「専用 variant で `Display` メッセージの
+    /// 誤表示を避ける」方針。本 variant 上部の `InvalidRmsNormShape`
+    /// ドキュメンテーションコメント参照）。
+    InvalidSoftmaxShape { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -270,6 +281,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::ModuleCacheUnavailable { detail } => {
                 write!(f, "CUDA kernel module cache unavailable: {detail}")
+            }
+            CudaError::InvalidSoftmaxShape { detail } => {
+                write!(f, "invalid softmax shape/argument: {detail}")
             }
         }
     }
