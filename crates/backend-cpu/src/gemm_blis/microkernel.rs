@@ -131,6 +131,22 @@ pub enum TileBoundsError {
         /// 呼び出し元が渡した `nr`（常に 0）。
         nr: usize,
     },
+    /// `ap`／`bp`（packed A／B パネル）の長さが `MR * kc_len`／`kc_len * NR`
+    /// と一致しない、またはその積が `usize` でオーバーフローする（#691
+    /// レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。
+    ///
+    /// [`check_panel_lengths`] のドキュメント参照。素朴な `usize` 乗算
+    /// （`MR * kc_len` 等）は release ビルド（`overflow-checks` 無効）で
+    /// オーバーフロー時にラップし、意図しない短い `ap`／`bp` を境界検査の
+    /// 素通りさせて後続の `unsafe` SIMD ロードを未定義動作へ導きうる
+    /// （NEON `kernel_with_ldc` で具体的に指摘された経路）ため、
+    /// `checked_mul` で判定しオーバーフロー自体も不一致として扱う。
+    PanelLengthMismatch {
+        /// 検証対象のパネル種別（`"ap"` または `"bp"`）。
+        panel: &'static str,
+        /// 呼び出し元が渡した実際の長さ。
+        actual: usize,
+    },
 }
 
 impl fmt::Display for TileBoundsError {
@@ -148,11 +164,69 @@ impl fmt::Display for TileBoundsError {
                 "C tile buffer too small for MR*ldc access pattern (required={required}, actual={actual})"
             ),
             Self::NonPositiveNr { nr } => write!(f, "NR must be positive (NR={nr})"),
+            Self::PanelLengthMismatch { panel, actual } => write!(
+                f,
+                "packed {panel} panel length mismatch (or overflow computing the expected length): actual={actual}"
+            ),
         }
     }
 }
 
 impl std::error::Error for TileBoundsError {}
+
+/// `actual == factor_a * factor_b` を `checked_mul` で判定する（#691
+/// レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs` への対応）。
+///
+/// 各 ISA の `kernel`／`kernel_unchecked`／`kernel_with_ldc`／
+/// `kernel_unchecked_with_ldc` は入口で `ap.len() == MR * kc_len`・
+/// `bp.len() == kc_len * NR` を検証しているが、`kc_len` は呼び出し元
+/// （5-loop ドライバ）が渡す値で理論上任意の `usize` を取りうる。素朴な
+/// `MR * kc_len` の乗算は release ビルド（`overflow-checks` 無効）では
+/// オーバーフロー時に `usize::MAX` からラップし、極端に大きい `kc_len`
+/// と短い `ap`／`bp` の組み合わせでも偶然一致し検査を素通りしうる。その
+/// 状態で `compute` 内の NEON／AVX2／AVX-512 `unsafe` ロード（スライスの
+/// 範囲チェックを経ない生ポインタ読み出し）へ進むと未定義動作になる
+/// （NEON `kernel_with_ldc` で具体的に指摘された経路。同型の未検査乗算は
+/// 全 ISA の入口に共通するため、本関数へ集約し `checked_mul` で
+/// オーバーフローそのものを「不一致」として扱う）。
+pub(crate) fn panel_len_matches(actual: usize, factor_a: usize, factor_b: usize) -> bool {
+    factor_a.checked_mul(factor_b) == Some(actual)
+}
+
+/// `ap`／`bp` の長さ契約（[`panel_len_matches`]）を検査し、違反時は
+/// [`TileBoundsError::PanelLengthMismatch`] を返す。
+///
+/// 各 ISA の `kernel_with_ldc`／`kernel_unchecked_with_ldc`（既に `Result`
+/// を返す公開入口）が [`check_c_tile_bounds`] の直前に呼ぶ。従来これらの
+/// 入口は `assert_eq!` で ap/bp 長不一致を検出していたが、`Result` を
+/// 返せる入口である以上ここも panic ではなく型付きエラーへ揃えるのが
+/// 一貫する（#691 レビュー P0 再指摘への対応）。一方、従来どおり `()` を
+/// 返す必須シグネチャの後方互換ラッパー（各 ISA の `kernel`／
+/// `kernel_unchecked`／`kernel_12x8`）は `Result` を返せないため、
+/// [`panel_len_matches`] を直接使う `assert!` のまま維持する（`assert!`
+/// は `debug_assert!` と異なり release ビルドでも有効であり、
+/// オーバーフロー起因の検査素通りは起きない）。
+pub(crate) fn check_panel_lengths(
+    mr: usize,
+    nr: usize,
+    kc_len: usize,
+    ap_len: usize,
+    bp_len: usize,
+) -> Result<(), TileBoundsError> {
+    if !panel_len_matches(ap_len, mr, kc_len) {
+        return Err(TileBoundsError::PanelLengthMismatch {
+            panel: "ap",
+            actual: ap_len,
+        });
+    }
+    if !panel_len_matches(bp_len, kc_len, nr) {
+        return Err(TileBoundsError::PanelLengthMismatch {
+            panel: "bp",
+            actual: bp_len,
+        });
+    }
+    Ok(())
+}
 
 /// `ldc`／`c` 長の契約検査（scalar・neon・avx2・avx512 の各 ISA 実装間で
 /// 重複していたロジックを集約）。
@@ -253,9 +327,13 @@ pub trait Microkernel: Copy + Sync {
     /// `kernel`／`kernel_unchecked` は正しい結果を返さない）。
     const MR: usize;
     /// マイクロカーネルタイルの列数。**契約: 1 以上でなければならない**
-    /// （[`Self::MR`] 同様。`NR == 0` は本 trait 側では明示検査していない
-    /// が、`ldc >= NR` の `assert` および呼び出し元のタイル分割ロジック
-    /// が非ゼロを前提とするため、実装は 0 を返してはならない）。
+    /// （[`Self::MR`] 同様。`NR == 0` は [`check_c_tile_bounds`] が
+    /// `nr == 0` を明示的に検出して
+    /// [`TileBoundsError::NonPositiveNr`] を返す〈#691 レビュー P0 再指摘
+    /// `PRRT_kwDOTuUCJc6ZrQZE`〉。以前は `ldc < nr` 判定が `nr == 0` の
+    /// とき `usize` の性質上恒偽になり後続の算術検査もろとも素通りしていた
+    /// が、現在は本ガードにより「0 を返してはならない」契約が明示検査で
+    /// 担保される）。
     const NR: usize;
 
     /// `ap`（packed A）・`bp`（packed B）から `c_tile`（MR×NR、row-major・
@@ -755,6 +833,51 @@ mod tests {
         // ギャップ列（各行末尾）には触れない契約であるはず。
         assert_eq!(strided[2], 0.0);
         assert_eq!(strided[5], 0.0);
+    }
+
+    /// [`panel_len_matches`] は通常の一致・不一致を `usize` 乗算どおりに
+    /// 判定する（オーバーフロー無関係の基本ケース）。
+    #[test]
+    fn panel_len_matches_basic_cases() {
+        assert!(panel_len_matches(12, 3, 4));
+        assert!(!panel_len_matches(11, 3, 4));
+    }
+
+    /// [`panel_len_matches`] は `factor_a * factor_b` がオーバーフローする
+    /// 組み合わせを必ず不一致として扱う（#691 レビュー P0 再指摘
+    /// `PRRT_kwDOTuUCJc6ZrXKs` への回帰テスト）。指摘の具体例（NEON の
+    /// `MR=8`・`kc_len = 1 << (usize::BITS - 2)`）に基づき、素朴な `usize`
+    /// 乗算では `8 * 2^62` が `usize::MAX` を超えラップし `0` になって
+    /// 空の `ap`（`actual=0`）と一致してしまうケースを直接検証する。
+    #[test]
+    fn panel_len_matches_rejects_overflowing_factors() {
+        let huge_kc_len = 1usize << (usize::BITS - 2);
+        assert!(!panel_len_matches(0, 8, huge_kc_len));
+        assert!(!panel_len_matches(usize::MAX, huge_kc_len, huge_kc_len));
+    }
+
+    /// [`check_panel_lengths`] は ap/bp 長不一致・オーバーフローいずれも
+    /// panic ではなく `Result::Err(TileBoundsError::PanelLengthMismatch)`
+    /// として返す（#691 レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs` への
+    /// 対応: NEON `kernel_with_ldc` 等の公開 `*_with_ldc` 入口はこの関数
+    /// 経由で ap/bp 長を検証する）。
+    #[test]
+    fn check_panel_lengths_rejects_ap_and_bp_mismatch() {
+        assert_eq!(
+            check_panel_lengths(2, 2, 2, 3, 4),
+            Err(TileBoundsError::PanelLengthMismatch {
+                panel: "ap",
+                actual: 3
+            })
+        );
+        assert_eq!(
+            check_panel_lengths(2, 2, 2, 4, 3),
+            Err(TileBoundsError::PanelLengthMismatch {
+                panel: "bp",
+                actual: 3
+            })
+        );
+        assert_eq!(check_panel_lengths(2, 2, 2, 4, 4), Ok(()));
     }
 
     /// `mr == 0`（[`Microkernel::MR`] の契約違反）を [`check_c_tile_bounds`]

@@ -44,15 +44,15 @@ const _: () = assert!(MR * NR <= 256);
 /// 端タイル呼び出しでは `ldc = NR` で密パッキングされたスタックバッファへ
 /// アクセスする（[`super::Microkernel::run`] 契約と同一）。
 ///
-/// # Panics
+/// # エラー（#691 レビュー P0 再指摘への対応）
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR` であればパニック
-/// する（REQ-8 境界検査規約: packing 段の呼び出し元バグ検出であり、
-/// 本 PR〈#691〉P1 対応のスコープ外。呼び出し頻度はマイクロカーネル
-/// 呼び出し 1 回につき 1 回のみで、内側の SIMD ループには一切挟まない）。
-/// `ldc < NR`／`c.len() < (MR - 1) * ldc + NR` は [`super::TileBoundsError`]
-/// として `Result::Err` を返す（#691 レビュー P1 再指摘: 本関数は外部の
-/// `Microkernel` 実装からも到達しうる公開入口のため panic させない）。
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`（その積の
+/// オーバーフローを含む。#691 レビュー P0 再指摘
+/// `PRRT_kwDOTuUCJc6ZrXKs`）・`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`
+/// のいずれも [`super::TileBoundsError`] として `Result::Err` を返す
+/// （panic しない。本関数は外部の `Microkernel` 実装からも到達しうる
+/// 公開入口のため。呼び出し頻度はマイクロカーネル呼び出し 1 回につき
+/// 1 回のみで、内側の SIMD ループには一切挟まない）。
 ///
 /// # Safety
 ///
@@ -72,8 +72,7 @@ pub unsafe fn kernel_unchecked_with_ldc(
     ldc: usize,
     kc_len: usize,
 ) -> Result<(), super::TileBoundsError> {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
     // SAFETY: [`compute`] のドキュメント参照（直前の検査により前提を
     // 満たす）。
@@ -141,10 +140,27 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// 従来どおり `()` を返す必須シグネチャへ戻す。`check_c_tile_bounds` の
 /// `Result` を `panic!` へ変換する経路は持たない（#691 レビュー P1
 /// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: [`compute`] へ直接委譲する）。
+/// `ap`／`bp` の長さ検査は [`super::panel_len_matches`] で `checked_mul`
+/// によりオーバーフローも確実に不一致として扱う（#691 レビュー P0
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。`c.len() == MR * NR` の検査は `ldc`
+/// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に
+/// 明示的に復元した（#691 レビュー再指摘 cursor
+/// `PRRT_kwDOTuUCJc6ZrXO1`。avx2.rs 側と同型の指摘: `compute` は生ポインタ
+/// の AVX-512F ロード/ストア（`_mm512_loadu_ps` 等）であり範囲チェックを
+/// 経ないため、検査なしでは未定義動作に到達しうる）。
 #[target_feature(enable = "avx512f")]
 pub unsafe fn kernel_unchecked(ap: &[f32], bp: &[f32], c: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c.len(), MR * NR, "C tile length mismatch");
     // SAFETY: 呼び出し元契約を本関数の `# Safety` 節としてそのまま
     // 引き継いでいる（[`compute`] の `# Safety` 節参照）。
     unsafe { compute(ap, bp, c, NR, kc_len) };

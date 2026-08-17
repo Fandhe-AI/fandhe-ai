@@ -112,15 +112,15 @@ const _: () = assert!(MR == 8 && NR == 12);
 /// 端タイル呼び出しでは `ldc = NR` で密パッキングされたスタックバッファへ
 /// アクセスする（[`super::Microkernel::run`] 契約と同一）。
 ///
-/// # Panics
+/// # エラー（#691 レビュー P0 再指摘への対応）
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR` であればパニック
-/// する（REQ-8 境界検査規約: packing 段の呼び出し元バグ検出であり、
-/// 本 PR〈#691〉P1 対応のスコープ外）。`ldc < NR`／
-/// `c.len() < (MR - 1) * ldc + NR` は [`super::TileBoundsError`] として
-/// `Result::Err` を返す（#691 レビュー P1 再指摘: 本関数は外部の
-/// `Microkernel` 実装からも到達しうる公開入口のため panic させない）。
-/// 以降の `unsafe` ロード／ストアはこの検査済み長さの範囲内でのみ行う。
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`（その積の
+/// オーバーフローを含む。#691 レビュー P0 再指摘
+/// `PRRT_kwDOTuUCJc6ZrXKs`）・`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`
+/// のいずれも [`super::TileBoundsError`] として `Result::Err` を返す
+/// （panic しない。本関数は外部の `Microkernel` 実装からも到達しうる
+/// 公開入口のため）。以降の `unsafe` ロード／ストアはこの検査済み長さの
+/// 範囲内でのみ行う。
 ///
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
 ///
@@ -133,8 +133,7 @@ pub fn kernel_with_ldc(
     ldc: usize,
     kc_len: usize,
 ) -> Result<(), super::TileBoundsError> {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
     compute(ap, bp, c, ldc, kc_len);
     Ok(())
@@ -313,8 +312,19 @@ const _: () = assert!(MR_12X8 == 12 && NR_12X8 == 8);
 /// `c_tile.len() != MR_12X8 * NR_12X8` のいずれかであればパニックする
 /// （REQ-8 境界検査規約。[`kernel`] と同じ契約）。
 pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR_12X8 * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR_12X8, "packed B panel length mismatch");
+    // `ap`／`bp` の長さ検査は `checked_mul` 判定の [`super::panel_len_matches`]
+    // 経由に統一する（#691 レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs` と
+    // 同型の未検査乗算オーバーフローを防ぐ）。
+    assert!(
+        super::panel_len_matches(ap.len(), MR_12X8, kc_len),
+        "packed A panel length mismatch (or MR_12X8*kc_len overflow): ap.len()={}, MR_12X8={MR_12X8}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR_12X8),
+        "packed B panel length mismatch (or kc_len*NR_12X8 overflow): bp.len()={}, kc_len={kc_len}, NR_12X8={NR_12X8}",
+        bp.len()
+    );
     assert_eq!(c_tile.len(), MR_12X8 * NR_12X8, "C tile length mismatch");
 
     // SAFETY: 直前の assert により ap は MR_12X8*kc_len 要素、bp は
@@ -476,10 +486,26 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
 /// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
 /// 従来どおり `()` を返す必須シグネチャへ戻し、`check_c_tile_bounds` の
 /// `Result` を `panic!` へ変換する経路は持たない（`compute` へ直接
-/// 委譲する。契約違反時の挙動は #557 以前と同一）。
+/// 委譲する。契約違反時の挙動は #557 以前と同一）。`ap`／`bp` の長さ検査は
+/// [`super::panel_len_matches`] で `checked_mul` によりオーバーフローも
+/// 確実に不一致として扱う（#691 レビュー P0 再指摘
+/// `PRRT_kwDOTuUCJc6ZrXKs`）。`c_tile.len() == MR * NR` の検査は `ldc`
+/// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に
+/// 明示的に復元した（#691 レビュー再指摘 cursor
+/// `PRRT_kwDOTuUCJc6ZrXO1`: `compute` は生ポインタの NEON ロード/ストア
+/// であり範囲チェックを経ないため、検査なしでは未定義動作に到達しうる）。
 pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
     compute(ap, bp, c_tile, NR, kc_len);
 }
 

@@ -39,16 +39,18 @@ const _: () = assert!(MR * NR <= 256);
 /// 導入で変わるのはロード/ストアのアドレッシングのみで演算値・順序は
 /// 不変のため、この契約は `ldc` に依らず成立する。
 ///
-/// # Panics
+/// # エラー（#691 レビュー P0 再指摘への対応）
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR` であればパニック
-/// する（呼び出し元のバグを早期検出する契約前提の検証。REQ-8 境界検査
-/// 規約。packing 段の呼び出し元バグ検出であり、本 PR〈#691〉P1 対応の
-/// スコープ外）。`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`（本関数が
-/// アクセスする最大オフセット `+1`）は [`super::TileBoundsError`] として
-/// `Result::Err` を返す（#691 レビュー P1 再指摘: 本関数は
-/// `backend_cpu::gemm_blis::microkernel` 経由で外部の `Microkernel`
-/// 実装からも到達しうる公開入口のため panic させない）。
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`（その積の
+/// オーバーフローを含む）・`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`
+/// （本関数がアクセスする最大オフセット `+1`）のいずれも
+/// [`super::TileBoundsError`] として `Result::Err` を返す（panic しない。
+/// 本関数は `backend_cpu::gemm_blis::microkernel` 経由で外部の
+/// `Microkernel` 実装からも到達しうる公開入口のため）。`ap`／`bp` の長さ
+/// 検査は当初 `assert_eq!`（panic）のままだったが、本関数が既に `Result`
+/// を返す入口である以上ここも型付きエラーへ揃えるのが一貫すると判断し
+/// （#691 レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）、
+/// [`super::check_panel_lengths`] 経由の検証へ変更した。
 ///
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
 ///
@@ -64,8 +66,7 @@ pub fn kernel_with_ldc(
     ldc: usize,
     kc_len: usize,
 ) -> Result<(), super::TileBoundsError> {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    super::check_panel_lengths(MR, NR, kc_len, ap.len(), bp.len())?;
     super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
     compute(ap, bp, c, ldc, kc_len);
     Ok(())
@@ -99,19 +100,32 @@ fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
 /// 「従来 `()` を返す本関数を関数ポインタ・末尾式で使う既存の外部
 /// 呼び出し元」をコンパイル不能にする破壊的変更だった（codex-review・
 /// GraphQL reviewThreads 双方の指摘。AGENTS.md 公開 API 非破壊規約）。
-/// 本関数は従来どおり `()` を返す必須シグネチャへ戻す。`c_tile` の長さ
-/// 契約違反はここでは検査せず（#691 レビュー P1 再指摘
-/// `PRRT_kwDOTuUCJc6ZrQZG` 対応: `check_c_tile_bounds` の `Result` を
-/// `panic!("{e}")` へ変換する経路を作らない）、[`compute`] 内の通常の
-/// スライス添字アクセスに委ねる。これは #557 以前（`kernel` が唯一の
-/// 実装で、密パッキング契約〈`c_tile.len() == MR*NR`〉は呼び出し元の
-/// 責務だった頃）と観測可能な挙動が同一である（契約違反時は言語組み込み
-/// の範囲外添字 panic になる。本関数が新規に panic 経路を追加している
-/// わけではない）。`ldc` を選べる新設 API は [`kernel_with_ldc`]（`Result`
-/// を返す）側にのみ存在する非対称な形とする。
+/// 本関数は従来どおり `()` を返す必須シグネチャへ戻す。`Result` を返せない
+/// ため、`ap`／`bp`／`c_tile` の長さ契約違反はいずれも `assert!`（release
+/// ビルドでも有効。`debug_assert!` ではない）で検出し panic する（#557
+/// 以前〈`kernel` が唯一の実装だった頃〉と同じ「呼び出し元契約違反は早期
+/// panic で検出する」方針を維持する。REQ-8 手動境界チェック省略禁止）。
+/// `ap`／`bp` の長さ検査は [`super::panel_len_matches`] で `checked_mul`
+/// によりオーバーフローも確実に不一致として扱う（#691 レビュー P0
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。`c_tile.len() == MR * NR` の検査は
+/// `ldc` 一般化のリファクタで一時的に失われていたが、`compute` への
+/// 委譲前に明示的に復元した（#691 レビュー再指摘 cursor
+/// `PRRT_kwDOTuUCJc6ZrXO1`: 検査なしに `compute` へ委譲すると範囲外
+/// アクセスへの手動境界チェックを省略したことになる）。`ldc` を選べる
+/// 新設 API は [`kernel_with_ldc`]（`Result` を返す）側にのみ存在する
+/// 非対称な形とする。
 pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
-    assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
+    assert!(
+        super::panel_len_matches(ap.len(), MR, kc_len),
+        "packed A panel length mismatch (or MR*kc_len overflow): ap.len()={}, MR={MR}, kc_len={kc_len}",
+        ap.len()
+    );
+    assert!(
+        super::panel_len_matches(bp.len(), kc_len, NR),
+        "packed B panel length mismatch (or kc_len*NR overflow): bp.len()={}, kc_len={kc_len}, NR={NR}",
+        bp.len()
+    );
+    assert_eq!(c_tile.len(), MR * NR, "C tile length mismatch");
     compute(ap, bp, c_tile, NR, kc_len);
 }
 
