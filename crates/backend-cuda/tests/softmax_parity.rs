@@ -317,3 +317,33 @@ fn softmax_run_fused_matches_cpu_composed_env_adaptive() {
         Err(other) => panic!("unexpected error variant for CudaBackendOps::run_fused: {other}"),
     }
 }
+
+/// CPU-CUDA 直接突合（イシュー #607）: `backend_cpu::softmax::
+/// run_softmax_f32`（NEON/rayon 参照実装。`f32::exp` ベース）を GPU 出力
+/// （`exp2` ベース）と直接比較する。実機必須（`#[ignore]`。CI では
+/// コンパイルのみ）。丸めが異なるため一致判定は REQ-2 複合判定に依る
+/// （モジュール冒頭コメント参照。実装計画 §4「Step 5」）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn softmax_matches_backend_cpu_directly() {
+    common::parity_baseline::assert_tolerance_constants_pinned();
+
+    let device = CudaDevice::new(0).expect("CUDA device must be available on real-device runner");
+    let softmax = CudaSoftmax::new(&device).expect("softmax kernel compile must succeed");
+
+    let rows = 3usize;
+    let cols = 4097usize; // NEON 端要素を含む。
+    let x_data = Xorshift64Star::new(32_001).fill_vec(rows * cols);
+
+    let gpu_out = softmax
+        .run_softmax_f32(&x_data, rows, cols)
+        .expect("CudaSoftmax::run_softmax_f32 must succeed on CUDA-equipped test runner");
+    let cpu_out = backend_cpu::softmax::run_softmax_f32(&x_data, rows, cols)
+        .expect("backend_cpu::softmax::run_softmax_f32 must succeed");
+
+    backend_cpu::parity::assert_parity(
+        "softmax cpu(backend_cpu)-cuda direct parity",
+        &gpu_out,
+        &cpu_out,
+    );
+}

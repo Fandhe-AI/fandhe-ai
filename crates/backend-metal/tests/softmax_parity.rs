@@ -250,3 +250,29 @@ fn softmax_run_fused_matches_cpu_reference() {
         &composed,
     );
 }
+
+/// CPU-Metal 直接突合（イシュー #607）: `backend_cpu::softmax::
+/// run_softmax_f32`（NEON/rayon 参照実装。`f32::exp` ベース）を GPU 出力
+/// と直接比較する。実機必須（`#[ignore]`。CI ではコンパイルのみ）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn softmax_matches_backend_cpu_directly() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let softmax = MetalSoftmax::new(&ctx).expect("softmax パイプラインの構築に失敗した");
+
+    let rows = 3usize;
+    let hidden = 4097usize; // NEON 端要素を含む。
+    let x_data = Xorshift64Star::new(42_001).fill_vec(rows * hidden);
+
+    let gpu_out = softmax
+        .run_softmax_f32(&ctx, &x_data, rows, hidden)
+        .expect("MetalSoftmax::run_softmax_f32 must succeed on Metal-equipped test runner");
+    let cpu_out = backend_cpu::softmax::run_softmax_f32(&x_data, rows, hidden)
+        .expect("backend_cpu::softmax::run_softmax_f32 must succeed");
+
+    assert_parity(
+        "softmax cpu(backend_cpu)-metal direct parity",
+        &gpu_out,
+        &cpu_out,
+    );
+}
