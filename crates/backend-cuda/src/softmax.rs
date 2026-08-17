@@ -46,33 +46,38 @@ use crate::rmsnorm::{
 
 /// exp2 ドメインの境界マスク値（有限。`f32` 版）。
 ///
-/// `kernels_softmax.rs` の `SOFTMAX_MASK_E2` マクロ（`-0.875f * __FLT_MAX__`）
-/// と同一の IEEE 754 単精度乗算であり、ホスト・デバイス間でビット同一の
-/// 値になる（`kernels_softmax.rs` 冒頭コメント「境界マスク定数」参照）。
-/// `-INFINITY` ではなくこの値を使う理由・数値的な妥当性は本モジュール末尾
-/// の `mask_value_e2_f32` 系テストで検証する（実装計画 §3.3。参照実装
-/// 〈metal-flash-attention〉の値を無検証で採用しない）。カーネル起動経路
-/// （`run_softmax_f32_raw` 等）はマスク値を一切参照しない（マスクは
-/// カーネルソース文字列内に完結する定数であり、ホスト側はその妥当性を
+/// `kernels_softmax.rs` の `SOFTMAX_MASK_E2` マクロ（`-__FLT_MAX__`）と
+/// 同一の値であり、ホスト・デバイス間でビット同一の値になる
+/// （`kernels_softmax.rs` 冒頭コメント「境界マスク定数」参照）。
+/// `f32` が表現できる最小の有限値（`f32::MIN == -f32::MAX`）を使う理由・
+/// 数値的な妥当性は本モジュール末尾の `mask_value_e2_f32` 系テストで検証
+/// する（実装計画 §3.3。参照実装〈metal-flash-attention〉の値を無検証で
+/// 採用しない）。旧実装（`-0.875 * f32::MAX` のマージン値）は「行の全要素
+/// がこのマスク値未満の正規の有限入力」（例: 全要素 `-f32::MAX`）で `m`
+/// が一度も更新されず最終出力が NaN になる欠陥があった（イシュー #594
+/// PR #712 codex-review 指摘・Cursor Bugbot 指摘の P1 修正。
+/// `kernels_softmax.rs` 冒頭コメント「境界マスク定数」参照）。カーネル
+/// 起動経路（`run_softmax_f32_raw` 等）はマスク値を一切参照しない（マスク
+/// はカーネルソース文字列内に完結する定数であり、ホスト側はその妥当性を
 /// 検証するためだけにこの値を保持する）ため `#[cfg(test)]` に限定する。
 #[cfg(test)]
-const SOFTMAX_MASK_E2_F32: f32 = -0.875 * f32::MAX;
+const SOFTMAX_MASK_E2_F32: f32 = -f32::MAX;
 
 /// exp2 ドメインの境界マスク値（有限。`half::f16` の動的レンジ版）。
 ///
 /// f16 **カーネル**経路自体は本イシュー対象外（backend-cuda の演算面が
 /// f32 で統一されている現状に整合。実装計画 §8「スコープ外」）だが、
 /// 将来の f16 経路が無検証採用にならないよう定数の妥当性のみ先行検証する
-/// （実装計画 §3.3）。f16 の `MAX`（`half::f16::MAX` ≈ 65504）から導出する
-/// （f32 マージン値の縮小写像ではない。実装計画 §3.3 の指示どおり）。上記
-/// `SOFTMAX_MASK_E2_F32` と同じ理由で `#[cfg(test)]` に限定する。
+/// （実装計画 §3.3）。f16 が表現できる最小の有限値（`-half::f16::MAX`。
+/// `half::f16::MAX` ≈ 65504）を使う。上記 `SOFTMAX_MASK_E2_F32` と同じ
+/// 理由で `#[cfg(test)]` に限定する。
 #[cfg(test)]
 fn softmax_mask_e2_f16() -> half::f16 {
-    // `half::f16` の乗算は Rust 側でソフトウェア実装される（ハードウェア
+    // `half::f16` の演算は Rust 側でソフトウェア実装される（ハードウェア
     // f16 演算命令は使わない）ため、デバイス側 f16 カーネル（スコープ外）
     // とのビット同一性契約は持たない。あくまで定数の有限性・妥当性のみを
     // 検証する目的の値である（本ファイル冒頭コメント参照）。
-    half::f16::from_f32(-0.875 * half::f16::MAX.to_f32())
+    -half::f16::MAX
 }
 
 /// [`softmax_route`] が返す経路選択。[`RmsNormRoute`] をそのまま再利用する
@@ -537,7 +542,7 @@ mod tests {
         assert_eq!(match_softmax_plan(&plan), None);
     }
 
-    // --- マージン係数の数値検証（実装計画 §3.3。実機不要のホスト単体
+    // --- 境界マスク値の数値検証（実装計画 §3.3。実機不要のホスト単体
     // テスト。無検証採用しない） ---
 
     #[test]
@@ -549,20 +554,71 @@ mod tests {
     /// `-INFINITY` を使った場合は `(-INF) - (-INF) = NaN` になり、warp
     /// 結合で「担当要素ゼロの lane 同士」が組み合わさった際に NaN が
     /// 伝播しうる（`kernels_softmax.rs` 冒頭コメント「境界マスク定数」
-    /// 参照）。有限マージン値であればこの性質を持たないことを実証する。
+    /// 参照）。有限値（`-f32::MAX`）であればこの性質を持たないことを
+    /// 実証する。
     #[test]
     fn mask_value_e2_f32_self_difference_is_finite_unlike_neg_infinity() {
         let diff = SOFTMAX_MASK_E2_F32 - SOFTMAX_MASK_E2_F32;
-        assert_eq!(diff, 0.0, "有限マージン値どうしの差分は 0.0 になるはず");
+        assert_eq!(diff, 0.0, "有限マスク値どうしの差分は 0.0 になるはず");
         assert!(diff.is_finite());
 
         // 対比: -INFINITY だとこの性質が崩れる（NaN になる）ことを併せて
-        // 実証し、マージンの必要性自体を検証する（実装計画 §3.3 (b)）。
+        // 実証し、有限値方式の必要性自体を検証する（実装計画 §3.3 (b)）。
         let neg_inf_diff = f32::NEG_INFINITY - f32::NEG_INFINITY;
         assert!(
             neg_inf_diff.is_nan(),
-            "-INFINITY 同士の差分が NaN になることを対比確認する（マージン方式の必要性の根拠）"
+            "-INFINITY 同士の差分が NaN になることを対比確認する（有限値方式の必要性の根拠）"
         );
+    }
+
+    /// イシュー #594 PR #712 codex-review 指摘・Cursor Bugbot 指摘
+    /// （P1）の直接的な回帰テスト: 行の全要素がマスク値そのもの
+    /// （`-f32::MAX`）である場合でも、online スキャン（本テストは
+    /// `kernels_softmax.rs` の 1 パス経路スカラーループと同じ更新式を
+    /// ホスト側でシミュレートする）が `l` を正しく要素数まで積算し、
+    /// `l == 0`（→ `inv_l == Inf` → 出力が `0 * Inf == NaN`）にならない
+    /// ことを検証する。旧実装（`-0.875 * f32::MAX` のマージン値）では
+    /// `raw < mask` となり `m` が一度も更新されず `l` が 0 のまま
+    /// アンダーフローしていた（`kernels_softmax.rs` 冒頭コメント
+    /// 「境界マスク定数」参照）。`-f32::MAX` は `f32` の値域下限その
+    /// ものであるため、この入力でも `raw == m`（等値）となり `l` が
+    /// 正しく積算される。
+    #[test]
+    fn mask_value_e2_f32_all_elements_at_mask_value_scan_is_correct() {
+        let row = [SOFTMAX_MASK_E2_F32; 4];
+        let scale = std::f32::consts::LOG2_E;
+
+        let mut m = SOFTMAX_MASK_E2_F32;
+        let mut l = 0.0f32;
+        for &raw in &row {
+            let m_new = m.max(raw);
+            if m_new > m {
+                l *= ((m - m_new) * scale).exp2();
+            }
+            l += ((raw - m_new) * scale).exp2();
+            m = m_new;
+        }
+
+        assert!(l.is_finite() && !l.is_nan(), "l が NaN/Inf になった: {l}");
+        assert_eq!(
+            l,
+            row.len() as f32,
+            "全要素がマスク値の行では l は要素数と一致するはず（各要素の寄与が 1.0）"
+        );
+
+        let inv_l = 1.0f32 / l;
+        assert!(
+            inv_l.is_finite(),
+            "l != 0 のため inv_l は有限になるはず: {inv_l}"
+        );
+        for &raw in &row {
+            let out = ((raw - m) * scale).exp2() * inv_l;
+            assert!(!out.is_nan(), "出力が NaN になった: {out}");
+            assert!(
+                (out - 1.0 / row.len() as f32).abs() < 1e-6,
+                "全要素同値の行は一様分布になるはず: got {out}"
+            );
+        }
     }
 
     /// `exp2f(mask - m)` が代表的な `m`（0・大きな正負値）で NaN を生まず
@@ -610,6 +666,51 @@ mod tests {
         );
         assert!(!combined_l.is_nan(), "空 lane との結合で NaN が発生した");
         assert_eq!(combined_l, l_data, "空 lane との結合は l を変えないはず");
+    }
+
+    /// `mask_value_e2_f32_empty_lane_combine_is_identity` の対比ケース:
+    /// 「担当要素ゼロの空 lane」ではなく「実データを持つが、行の最大値が
+    /// たまたまマスク値そのもの（`m == SOFTMAX_MASK_E2_F32`。例えば行の
+    /// 最大値が `-f32::MAX`）である lane」を、別の空 lane（`m = MASK,
+    /// l = 0`）と結合するシミュレーション。`kernels_softmax.rs` の
+    /// butterfly 結合ロジック（PR #712 Cursor Bugbot 指摘の L190-194
+    /// 相当箇所）が、この「マスク値との衝突」ケースでも NaN を生まず
+    /// `l` を正しく保つことを検証する（本ファイル冒頭コメント
+    /// 「境界マスク定数」参照。等値の場合は分岐で減算をスキップする
+    /// 構造が「空 lane との結合」に限らず適用されることの直接的な根拠）。
+    #[test]
+    fn mask_value_e2_f32_data_lane_at_mask_value_combine_with_empty_lane_is_identity() {
+        // 実データを持つが m がマスク値と一致する lane（行の最大値自体が
+        // マスク値だったケースに相当）。
+        let (m_data, l_data) = (SOFTMAX_MASK_E2_F32, 4.0f32);
+        // 担当要素ゼロの空 lane。
+        let (m_empty, l_empty) = (SOFTMAX_MASK_E2_F32, 0.0f32);
+
+        let m_t = m_data.max(m_empty);
+        let l_self = if m_t > m_data {
+            l_data * (m_data - m_t).exp2()
+        } else {
+            l_data
+        };
+        let l_peer = if m_t > m_empty {
+            l_empty * (m_empty - m_t).exp2()
+        } else {
+            l_empty
+        };
+        let combined_l = l_self + l_peer;
+
+        assert_eq!(
+            m_t, SOFTMAX_MASK_E2_F32,
+            "両者ともマスク値のため結合後の最大値もマスク値のまま"
+        );
+        assert!(
+            !combined_l.is_nan(),
+            "マスク値どうしの結合で NaN が発生した"
+        );
+        assert_eq!(
+            combined_l, l_data,
+            "空 lane との結合は実データ側の l を変えないはず"
+        );
     }
 
     // --- f16 マージン値の数値検証（実装計画 §3.3。カーネル経路自体は

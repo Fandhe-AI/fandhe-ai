@@ -203,6 +203,30 @@ fn softmax_numerically_stable_for_extreme_inputs() {
         "±f32::MAX input: tied maxima should each get ~0.5, got {out:?}"
     );
 
+    // 全要素が `-f32::MAX`（境界マスク値そのもの。イシュー #594 PR #712
+    // codex-review 指摘・Cursor Bugbot 指摘・P1 の直接的な回帰テスト）。
+    // 旧実装は `m` の初期値を有限マージン値（`-0.875 * f32::MAX`）に
+    // していたため、行の全要素がこのマージン値未満（`-f32::MAX` は
+    // `-0.875 * f32::MAX` より小さい）の場合に `m` が一度も更新されず
+    // `l == 0` のまま `inv_l == Inf`・出力が `0 * Inf == NaN` になって
+    // いた（`kernels_softmax.rs` 冒頭コメント「境界マスク定数」参照）。
+    // 一様分布（`1/cols`）になるはずの正規の入力である。
+    let all_min_x: Vec<f32> = vec![-f32::MAX; 8];
+    let out = softmax
+        .run_softmax_f32(&all_min_x, 1, 8)
+        .expect("softmax must succeed for all-elements-at-mask-value input");
+    assert!(
+        out.iter().all(|v| v.is_finite() && !v.is_nan()),
+        "output must not contain NaN/Inf for all -f32::MAX input: {out:?}"
+    );
+    let expected = 1.0f32 / 8.0;
+    for &v in &out {
+        assert!(
+            (v - expected).abs() < 1e-6,
+            "all -f32::MAX row should be uniform ~1/8={expected}, got {v}"
+        );
+    }
+
     // 行長 1 → 出力は恒等的に 1.0。
     let single_x = vec![42.0f32];
     let out = softmax

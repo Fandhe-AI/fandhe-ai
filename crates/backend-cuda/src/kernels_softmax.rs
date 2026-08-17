@@ -48,23 +48,52 @@
 //!   `kernels_rmsnorm.rs` の Σx² butterfly reduction と同じ 5 段
 //!   （offset 16→1）を採用し、CUDA の線形レーンレイアウトで全 lane の
 //!   `(m, l)` ペアを正しく結合する。
-//! - **境界マスク定数（有限値。`-INFINITY` 不使用）**: lane の初期値は
-//!   `m = SOFTMAX_MASK_E2`（`-0.875f * __FLT_MAX__`。**生ドメイン**〈上記
-//!   「`log2(e)` 事前スケール」参照。`m` はスケール未適用のため、この
-//!   マスク値も生ドメインの有限な大きな負値として機能する〉・`l = 0`。
-//!   `__FLT_MAX__` は Clang/NVRTC の
+//! - **境界マスク定数（有限値。`-INFINITY` 不使用。イシュー #594 PR #712
+//!   codex-review 指摘・Cursor Bugbot 指摘の P1 修正で `-0.875f *
+//!   __FLT_MAX__` マージン方式から本方式へ変更）**: lane の初期値は
+//!   `m = SOFTMAX_MASK_E2`（`-__FLT_MAX__`。`f32` が表現できる**最小の
+//!   有限値**。**生ドメイン**〈上記「`log2(e)` 事前スケール」参照。`m` は
+//!   スケール未適用のため、このマスク値も生ドメインの値として機能する〉・
+//!   `l = 0`。`__FLT_MAX__` は Clang/NVRTC の
 //!   プリプロセッサ組み込みマクロ（`<cfloat>`/`<float.h>` の include を
 //!   要求しない。`kernels_rmsnorm.rs` 同様「ビルド時に nvrtc/CUDA
-//!   ヘッダを一切要求しない」契約を維持する）。`-INFINITY` を直接使うと
-//!   「担当要素ゼロの lane 同士」が結合する際に `(-INF) - (-INF) = NaN`
-//!   が発生しうる（`m_t - m` の差分計算が両者とも `-INF` になるケース）。
-//!   有限マージン値であれば `mask - mask == 0.0`（有限）となり NaN を
-//!   生まない。マージン係数 0.875（`f32::MAX` に対して掛ける）・値の
-//!   妥当性は `softmax.rs` の数値検証テスト（`mask_value_e2_f32` 系）で
-//!   個別に確認する（参照実装の値を無検証で採用しない。実装計画 §3.3）。
-//!   ホスト側の `softmax.rs::SOFTMAX_MASK_E2_F32` 定数と同じ IEEE 754
-//!   単精度乗算（`-0.875 * f32::MAX`）であるため、ホスト・デバイス間で
-//!   ビット同一の値になる。
+//!   ヘッダを一切要求しない」契約を維持する）。
+//!   旧実装（`-0.875f * __FLT_MAX__` のマージン値）は「行の全要素がこの
+//!   マスク値未満の正規の有限入力」（例: 全要素 `-f32::MAX`）で `m` が
+//!   一度も更新されず、`exp2f((raw - m) * scale)` が 0 へアンダーフロー
+//!   して `l == 0` のまま `inv_l == Inf`・最終出力 `0 * Inf == NaN` に
+//!   なる欠陥があった。**`-__FLT_MAX__` は `f32` の有効な値域の下限その
+//!   ものであるため、いかなる正規の有限入力 `raw` についても常に
+//!   `raw >= m_init` が成立する**。よって `fmaxf` によるオンライン最大値
+//!   `m` は非空の行では必ずその行の真の最大値へ収束する（`raw` が
+//!   マスク値そのもの、すなわち `raw == m` の場合は `m_new == m` となり
+//!   `m` は「更新されない」が、これは既に真の値と一致しているため無害
+//!   であり、旧実装の「マスク値未満の入力に対して `m` が真の値へ到達
+//!   できない」欠陥とは異なる）。最大値を保持する要素は常に
+//!   `exp2f((raw - m) * scale) == exp2f(0) == 1` を `l` へ加算するため、
+//!   非空の行では常に `l >= 1` となり `inv_l = 1.0f / l` が有限になる
+//!   （旧実装の `l == 0 → inv_l == Inf → 0 * Inf == NaN` という失敗
+//!   経路がそもそも成立しなくなる）。加えて「担当要素ゼロの lane 同士」
+//!   が結合する場合も `m_t == m == m_o`（マスク値どうしで等しい）となり、
+//!   本ファイルの補正係数スキップ条件（`m_new > m` のときのみ `exp2f`
+//!   の差分計算を行う。この条件は **狭義**の `>` であり `m_new == m` の
+//!   等値ケースは分岐に入らない）により減算自体が発生しないため NaN を
+//!   生まない（`-INFINITY` を直接使わない理由と同じ設計。
+//!   `(-INF) - (-INF) = NaN` を避けるのと同様、等値の場合は分岐で減算を
+//!   スキップする構造そのものが NaN を防ぐ。この性質は「実データを持つ
+//!   lane の `m` がたまたまマスク値と一致する」ケース——例えば行の最大値
+//!   自体が `-f32::MAX` であるケース——にも同様に適用され、空 lane との
+//!   結合に限らない）。値の妥当性は `softmax.rs` の数値検証テスト
+//!   （`mask_value_e2_f32` 系）で個別に確認する（参照実装の値を無検証で
+//!   採用しない。実装計画 §3.3）。ホスト側の
+//!   `softmax.rs::SOFTMAX_MASK_E2_F32` 定数（`-f32::MAX`）と同一の値で
+//!   あるため、ホスト・デバイス間でビット同一の値になる。
+//!   **なお全要素が `-INFINITY` である行は本方式でも `l == 0` のまま
+//!   （`exp2f(-inf) == 0` が全要素で加算されるため）であり出力は NaN に
+//!   なるが、これは数学的に softmax(全要素 `-inf`) が `0/0` で未定義な
+//!   ケースであり、CPU 参照実装（`tests/softmax_parity.rs`）も
+//!   `(-inf) - (-inf) = NaN` で同じく NaN を返すため、バックエンド間の
+//!   数値契約は破られない（本欠陥修正の対象は有限入力のみ）。
 //! - **意味論の正**: `tests/softmax_parity.rs` 内のテスト専用 CPU 参照
 //!   実装（`f32::mul_add` 使用）が意味論の正である。`onnx-interop` 側の
 //!   素朴実装（3 パス）とも parity を取るが、本カーネルの数値的な正は
@@ -97,7 +126,7 @@ pub const SOFTMAX_BLOCK_DIM: u32 = 32;
 /// （`rmsnorm.rs::rmsnorm_route` を共有再利用）が判定し、収まらない場合は
 /// [`SOFTMAX_F32_TWOPASS`] へルーティングする。
 pub const SOFTMAX_F32_ONEPASS: &str = r#"
-#define SOFTMAX_MASK_E2 (-0.875f * __FLT_MAX__)
+#define SOFTMAX_MASK_E2 (-__FLT_MAX__)
 
 extern "C" __global__ void softmax_f32_onepass(
     const float* __restrict__ x,
@@ -120,7 +149,7 @@ extern "C" __global__ void softmax_f32_onepass(
         // online softmax の走査済み最大値（**生ドメイン**。スケール未適用。
         // 本ファイル冒頭コメント「`log2(e)` 事前スケールは『最大値との
         // 差分を取った後』に適用」参照）・走査済み分母。`m` の初期値は
-        // 有限マージン値（本ファイル冒頭コメント「境界マスク定数」参照）。
+        // `f32` の値域下限（本ファイル冒頭コメント「境界マスク定数」参照）。
         float m = SOFTMAX_MASK_E2;
         float l = 0.0f;
 
@@ -210,7 +239,7 @@ extern "C" __global__ void softmax_f32_onepass(
 /// `raw = x[i]` を再計算する。決定性維持。`kernels_rmsnorm.rs` の
 /// 2 パス経路と同じ「中間テンソルを書き出さない」構造）。
 pub const SOFTMAX_F32_TWOPASS: &str = r#"
-#define SOFTMAX_MASK_E2 (-0.875f * __FLT_MAX__)
+#define SOFTMAX_MASK_E2 (-__FLT_MAX__)
 
 extern "C" __global__ void softmax_f32_twopass(
     const float* __restrict__ x,
@@ -355,14 +384,14 @@ mod tests {
     }
 
     /// 境界マスク定数（本ファイル冒頭コメント「境界マスク定数」参照）:
-    /// `-INFINITY` を直接使わず、有限の大きな負値マクロを使うことを検査
-    /// する。
+    /// `-INFINITY` を直接使わず、`f32` の値域下限（`-__FLT_MAX__`）を
+    /// 使うことを検査する。
     #[test]
     fn onepass_and_twopass_use_finite_mask_not_infinity() {
         for src in [SOFTMAX_F32_ONEPASS, SOFTMAX_F32_TWOPASS] {
             assert!(
-                src.contains("#define SOFTMAX_MASK_E2 (-0.875f * __FLT_MAX__)"),
-                "有限マージンの境界マスク定数が定義されていない"
+                src.contains("#define SOFTMAX_MASK_E2 (-__FLT_MAX__)"),
+                "境界マスク定数が f32 値域下限（-__FLT_MAX__）で定義されていない"
             );
             assert!(
                 !src.contains("-INFINITY") && !src.contains("-INFINITY)"),
