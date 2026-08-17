@@ -41,10 +41,14 @@ const _: () = assert!(MR * NR <= 256);
 ///
 /// # Panics
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／`ldc < NR`／
-/// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする
-/// （呼び出し元のバグを早期検出する契約前提の検証。REQ-8 境界検査規約。
-/// `(MR-1)*ldc+NR` は本関数がアクセスする最大オフセット `+1`）。
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR` であればパニック
+/// する（呼び出し元のバグを早期検出する契約前提の検証。REQ-8 境界検査
+/// 規約。packing 段の呼び出し元バグ検出であり、本 PR〈#691〉P1 対応の
+/// スコープ外）。`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`（本関数が
+/// アクセスする最大オフセット `+1`）は [`super::TileBoundsError`] として
+/// `Result::Err` を返す（#691 レビュー P1 再指摘: 本関数は
+/// `backend_cpu::gemm_blis::microkernel` 経由で外部の `Microkernel`
+/// 実装からも到達しうる公開入口のため panic させない）。
 ///
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
 ///
@@ -53,10 +57,16 @@ const _: () = assert!(MR * NR <= 256);
 /// `pub mod` であり既存呼び出し元を壊すため（AGENTS.md「公開 API の
 /// 破壊的変更は P1」）、従来シグネチャは [`kernel`] として残し、本関数へ
 /// `ldc = NR` で委譲する薄い後方互換ラッパーとする。
-pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+pub fn kernel_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    super::check_c_tile_bounds(MR, NR, ldc, c.len());
+    super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
 
     for p in 0..kc_len {
         let a_p = &ap[p * MR..p * MR + MR];
@@ -68,13 +78,19 @@ pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len
             }
         }
     }
+    Ok(())
 }
 
 /// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
 /// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
 /// [`kernel_with_ldc`] を使うこと。
-pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    kernel_with_ldc(ap, bp, c_tile, NR, kc_len);
+pub fn kernel(
+    ap: &[f32],
+    bp: &[f32],
+    c_tile: &mut [f32],
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    kernel_with_ldc(ap, bp, c_tile, NR, kc_len)
 }
 
 #[cfg(test)]
@@ -104,7 +120,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, 2);
+        kernel(&ap, &bp, &mut c_tile, 2).unwrap();
 
         assert_eq!(c_tile[0], 19.0); // 1*5+2*7（行 0 の先頭は c_tile[0]）
         assert_eq!(c_tile[1], 22.0); // 1*6+2*8
@@ -118,7 +134,7 @@ mod tests {
         let ap = vec![0.0f32; MR * 2 - 1];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, 2);
+        let _ = kernel(&ap, &bp, &mut c_tile, 2);
     }
 
     /// #557: `ldc > NR`（完全タイル C 直接経路の想定）でも `ldc = NR`
@@ -139,7 +155,7 @@ mod tests {
         ];
 
         let mut c_tight = vec![0.0f32; MR * NR];
-        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len).unwrap();
 
         // ldc = NR + 3 のギャップ付きバッファ。ギャップ列は番兵値
         // （追跡しやすい負の値）で埋め、カーネル実行後も不変であることを
@@ -154,7 +170,7 @@ mod tests {
                 c_gapped[i * ldc + j] = 0.0;
             }
         }
-        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len).unwrap();
 
         for i in 0..MR {
             for j in 0..NR {
@@ -174,23 +190,39 @@ mod tests {
         }
     }
 
+    /// `ldc < NR` は panic ではなく `Result::Err` として返る（#691
+    /// レビュー P1 再指摘への対応。従来は `should_panic` テストだった）。
     #[test]
-    #[should_panic(expected = "ldc must be at least NR")]
     fn kernel_rejects_ldc_smaller_than_nr() {
         let ap = vec![0.0f32; MR * 2];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2);
+        let err = kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            super::super::TileBoundsError::LdcTooSmall {
+                ldc: NR - 1,
+                nr: NR
+            }
+        );
     }
 
+    /// `c` バッファ不足は panic ではなく `Result::Err` として返る（#691
+    /// レビュー P1 再指摘への対応。従来は `should_panic` テストだった）。
     #[test]
-    #[should_panic(expected = "C tile buffer too small")]
     fn kernel_rejects_c_buffer_too_small_for_ldc() {
         let ap = vec![0.0f32; MR * 2];
         let bp = vec![0.0f32; 2 * NR];
         // ldc = NR + 1 なら必要長は (MR-1)*(NR+1)+NR だが、ここでは
         // 密パッキング（MR*NR）ぶんしか用意しない。
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel_with_ldc(&ap, &bp, &mut c_tile, NR + 1, 2);
+        let err = kernel_with_ldc(&ap, &bp, &mut c_tile, NR + 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            super::super::TileBoundsError::CBufferTooSmall {
+                required: (MR - 1) * (NR + 1) + NR,
+                actual: MR * NR,
+            }
+        );
     }
 }

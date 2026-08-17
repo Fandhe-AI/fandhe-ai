@@ -526,11 +526,30 @@ fn gemm_blis_region<K: Microkernel>(
                             // （[`microkernel::Microkernel::run_with_ldc`] の `ldc`
                             // 契約参照）。スライス取得自体が範囲外なら
                             // panic する安全操作であり、カーネル入口の
-                            // `ldc`／長さ assert と合わせ REQ-8 の境界
-                            // 検査を二重に満たす。
+                            // `ldc`／長さ検査と合わせ REQ-8 の境界検査を
+                            // 二重に満たす。`run_with_ldc` は外部の
+                            // `Microkernel` 実装からも到達しうる公開入口
+                            // のため `Result` を返す契約（#691 レビュー
+                            // P1 対応）だが、本呼び出しは private な
+                            // `gemm_blis_region` 内部から組み込みカーネル
+                            // （`ScalarKernel`／`NeonKernel`／`Avx2Kernel`／
+                            // `Avx512Kernel`。いずれも `MR`／`NR` はモジュール
+                            // 定数でコンパイル時に 1 以上）へ、完全タイル
+                            // ゆえ自動的に満たされる `ldc(=n) >= nr` と、
+                            // 上記スライス長 `(mr-1)*n+nr`（= 必要長そのもの）
+                            // で呼ぶため、境界検査は構築上常に成功する
+                            // （`unreachable!` は本当に到達不能であることの
+                            // 表明であり、外部入力起因の panic ではない）。
                             let row0 = (ic + ir) * n + col_base;
                             let c_direct = &mut c[row0..row0 + (mr - 1) * n + nr];
-                            kernel.run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len);
+                            kernel
+                                .run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len)
+                                .unwrap_or_else(|e| {
+                                    unreachable!(
+                                        "gemm_blis_region 内部契約違反: 完全タイル呼び出しは \
+                                         構築上常に境界検査を満たすはず（{e}）"
+                                    )
+                                });
                         } else {
                             // 端タイル: 従来どおり `MAX_TILE` スタック
                             // バッファへコピーインし、有効部
@@ -550,7 +569,19 @@ fn gemm_blis_region<K: Microkernel>(
                                 c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
                             }
 
-                            kernel.run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len);
+                            // `ldc = nr` は組み込みカーネルの `NR` 定数
+                            // そのものであり `c_tile` は `mr*nr` ちょうど
+                            // の長さで確保しているため、境界検査は構築上
+                            // 常に成功する（上記完全タイル分岐の
+                            // `unreachable!` と同じ根拠）。
+                            kernel
+                                .run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len)
+                                .unwrap_or_else(|e| {
+                                    unreachable!(
+                                        "gemm_blis_region 内部契約違反: 端タイル呼び出しは \
+                                         構築上常に境界検査を満たすはず（{e}）"
+                                    )
+                                });
 
                             for i in 0..mr_eff {
                                 let dst = &mut c[(ic + ir + i) * n + col_base

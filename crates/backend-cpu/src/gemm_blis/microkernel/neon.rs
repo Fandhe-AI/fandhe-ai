@@ -114,19 +114,28 @@ const _: () = assert!(MR == 8 && NR == 12);
 ///
 /// # Panics
 ///
-/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR`／`ldc < NR`／
-/// `c.len() < (MR - 1) * ldc + NR` のいずれかであればパニックする（REQ-8
-/// 境界検査規約: 呼び出し元契約を関数入口で明示検査し、以降の
-/// `unsafe` ロード／ストアはこの検査済み長さの範囲内でのみ行う）。
+/// `ap.len() != MR * kc_len`／`bp.len() != kc_len * NR` であればパニック
+/// する（REQ-8 境界検査規約: packing 段の呼び出し元バグ検出であり、
+/// 本 PR〈#691〉P1 対応のスコープ外）。`ldc < NR`／
+/// `c.len() < (MR - 1) * ldc + NR` は [`super::TileBoundsError`] として
+/// `Result::Err` を返す（#691 レビュー P1 再指摘: 本関数は外部の
+/// `Microkernel` 実装からも到達しうる公開入口のため panic させない）。
+/// 以降の `unsafe` ロード／ストアはこの検査済み長さの範囲内でのみ行う。
 ///
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
 ///
 /// [`super::scalar::kernel_with_ldc`] のドキュメント参照。本モジュールも
 /// 同じ理由で従来シグネチャを [`kernel`] として残す。
-pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+pub fn kernel_with_ldc(
+    ap: &[f32],
+    bp: &[f32],
+    c: &mut [f32],
+    ldc: usize,
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
     assert_eq!(ap.len(), MR * kc_len, "packed A panel length mismatch");
     assert_eq!(bp.len(), kc_len * NR, "packed B panel length mismatch");
-    super::check_c_tile_bounds(MR, NR, ldc, c.len());
+    super::check_c_tile_bounds(MR, NR, ldc, c.len())?;
 
     // 要素、c は最大アクセスオフセット `(MR-1)*ldc+NR-1` を含む長さである
     // ことが保証されている（#557: `ldc` 一般化。完全タイル呼び出しでは
@@ -270,6 +279,7 @@ pub fn kernel_with_ldc(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len
             vst1q_f32(c[i * ldc + 8..].as_mut_ptr(), acc_i[2]);
         }
     }
+    Ok(())
 }
 
 /// マイクロカーネルタイルの行数（12×8 変種。firestorm 型 A/B 対抗。#559）。
@@ -454,8 +464,13 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
 /// [`kernel_with_ldc`] の従来シグネチャ後方互換ラッパー（`ldc = NR` 固定・
 /// 密パッキング契約）。新規呼び出し元は `ldc` を明示できる
 /// [`kernel_with_ldc`] を使うこと。
-pub fn kernel(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-    kernel_with_ldc(ap, bp, c_tile, NR, kc_len);
+pub fn kernel(
+    ap: &[f32],
+    bp: &[f32],
+    c_tile: &mut [f32],
+    kc_len: usize,
+) -> Result<(), super::TileBoundsError> {
+    kernel_with_ldc(ap, bp, c_tile, NR, kc_len)
 }
 
 #[cfg(test)]
@@ -494,7 +509,7 @@ mod tests {
         bp[NR + 1] = 8.0;
 
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel(&ap, &bp, &mut c_tile, kc_len);
+        kernel(&ap, &bp, &mut c_tile, kc_len).unwrap();
 
         assert_eq!(c_tile[0], 19.0);
         assert_eq!(c_tile[1], 22.0);
@@ -513,7 +528,7 @@ mod tests {
         let c_init = xorshift32_vec(0xE0FF_EE03, MR * NR);
 
         let mut c_tight = c_init.clone();
-        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_tight, NR, kc_len).unwrap();
 
         let ldc = NR + 5;
         let sentinel = -777.0f32;
@@ -521,7 +536,7 @@ mod tests {
         for i in 0..MR {
             c_gapped[i * ldc..i * ldc + NR].copy_from_slice(&c_init[i * NR..i * NR + NR]);
         }
-        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len);
+        kernel_with_ldc(&ap, &bp, &mut c_gapped, ldc, kc_len).unwrap();
 
         for i in 0..MR {
             for j in 0..NR {
@@ -541,12 +556,20 @@ mod tests {
         }
     }
 
+    /// `ldc < NR` は panic ではなく `Result::Err` として返る（#691
+    /// レビュー P1 再指摘への対応。従来は `should_panic` テストだった）。
     #[test]
-    #[should_panic(expected = "ldc must be at least NR")]
     fn kernel_rejects_ldc_smaller_than_nr() {
         let ap = vec![0.0f32; MR * 2];
         let bp = vec![0.0f32; 2 * NR];
         let mut c_tile = vec![0.0f32; MR * NR];
-        kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2);
+        let err = kernel_with_ldc(&ap, &bp, &mut c_tile, NR - 1, 2).unwrap_err();
+        assert_eq!(
+            err,
+            super::super::TileBoundsError::LdcTooSmall {
+                ldc: NR - 1,
+                nr: NR
+            }
+        );
     }
 }

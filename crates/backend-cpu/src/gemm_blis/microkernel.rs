@@ -73,19 +73,76 @@ pub mod avx2;
 #[cfg(all(target_arch = "x86_64", avx512_stable))]
 pub mod avx512;
 
+use std::fmt;
 use std::sync::OnceLock;
 
+/// [`check_c_tile_bounds`] が検出する `ldc`／`c` 長の契約違反を表す型付き
+/// エラー（#691 レビュー P1 再指摘への対応）。
+///
+/// 従来は `assert!`／`panic!` で検出結果を通知していたが、
+/// [`Microkernel::run_with_ldc`] 既定実装・各 ISA の `kernel_with_ldc`／
+/// `kernel_unchecked_with_ldc` 入口は外部の `Microkernel` 実装からも到達
+/// 可能な**公開**入口であり、呼び出し元が誤った `ldc`／`c` を渡した場合に
+/// panic が本番ライブラリ経路から漏れていた（AGENTS.md「本番経路の panic
+/// 禁止」・`.claude/rules/coding-rust.md`「本番経路で unwrap()/expect() を
+/// 使わない」）。本型により検出結果を `Result::Err` として公開入口まで
+/// 伝播させ、呼び出し元がハンドリングできるようにする。検査ロジック
+/// 自体（REQ-8 境界検査規約に基づく呼び出し元契約違反の早期検出）は
+/// 変更しない。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TileBoundsError {
+    /// `ldc` が `NR` 未満。
+    LdcTooSmall {
+        /// 呼び出し元が渡した `ldc`。
+        ldc: usize,
+        /// マイクロカーネルタイルの列数（[`Microkernel::NR`]）。
+        nr: usize,
+    },
+    /// `MR` が 0、または `(MR-1)*ldc` がオーバーフローする（[`Microkernel::MR`]
+    /// の「1 以上」契約違反を含む）。
+    NonPositiveMrOrOverflow {
+        /// マイクロカーネルタイルの行数（[`Microkernel::MR`]）。
+        mr: usize,
+        /// 呼び出し元が渡した `ldc`。
+        ldc: usize,
+    },
+    /// `c` の長さが必要長（`(MR-1)*ldc+NR`）未満。
+    CBufferTooSmall {
+        /// `(MR-1)*ldc+NR` で求まる必要長。
+        required: usize,
+        /// 呼び出し元が渡した `c` の実際の長さ。
+        actual: usize,
+    },
+}
+
+impl fmt::Display for TileBoundsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::LdcTooSmall { ldc, nr } => {
+                write!(f, "ldc must be at least NR (ldc={ldc}, NR={nr})")
+            }
+            Self::NonPositiveMrOrOverflow { mr, ldc } => write!(
+                f,
+                "MR must be positive, or ldc*MR overflow (MR={mr}, ldc={ldc})"
+            ),
+            Self::CBufferTooSmall { required, actual } => write!(
+                f,
+                "C tile buffer too small for MR*ldc access pattern (required={required}, actual={actual})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TileBoundsError {}
+
 /// `ldc`／`c` 長の契約検査（scalar・neon・avx2・avx512 の各 ISA 実装間で
-/// 重複していたロジックを集約。#691 レビュー指摘: 本番経路で `.expect()`
-/// を使わず、オーバーフロー検査を明示的な `match` で分岐する
-/// （`.claude/rules/coding-rust.md`「本番経路で unwrap()/expect() を
-/// 使わない」）。
+/// 重複していたロジックを集約）。
 ///
 /// `mr == 0`・`ldc < NR`・`(MR-1)*ldc+NR` のオーバーフロー・`c` の長さ
-/// 不足のいずれかであれば panic する（呼び出し元契約違反〈呼び出し元
-/// バグ〉を早期検出する REQ-8 境界検査規約に基づく検証であり、実行時
-/// 外部入力の検証ではない。各 ISA の `kernel`／`kernel_unchecked` 入口
-/// から呼ばれる）。
+/// 不足のいずれかであれば [`TileBoundsError`] を返す（呼び出し元契約違反
+/// 〈呼び出し元バグ〉を早期検出する REQ-8 境界検査規約に基づく検証で
+/// あり、実行時外部入力の検証ではない。各 ISA の `kernel_with_ldc`／
+/// `kernel_unchecked_with_ldc` 入口から呼ばれる）。
 ///
 /// ## `mr > 0` の明示検査（#691 レビュー再指摘への対応）
 ///
@@ -96,23 +153,31 @@ use std::sync::OnceLock;
 /// 減算が本来の境界検査より先に発生してしまう（debug ビルドでは減算
 /// オーバーフローで panic、release ビルド〈overflow-checks 無効〉では
 /// `usize::MAX` へラップし後続の `checked_mul`/`checked_add` がほぼ全ての
-/// `ldc`/`nr` 組み合わせで `None` または長さ不足の assert 失敗に倒れる
-/// ため実害は無いが、意図した「MR must be positive」という診断ではなく
-/// 偶発的なオーバーフロー起因の panic になってしまう）。`mr.checked_sub(1)`
-/// を計算チェーンへ含め、`mr == 0` を明示的に検出して意図の分かる panic
-/// メッセージを出す。
-pub(crate) fn check_c_tile_bounds(mr: usize, nr: usize, ldc: usize, c_len: usize) {
-    assert!(ldc >= nr, "ldc must be at least NR");
+/// `ldc`/`nr` 組み合わせで `None` または長さ不足の `Err` に倒れるため
+/// 実害は無いが、意図した「MR must be positive」という診断ではなく
+/// 偶発的なオーバーフロー起因の結果になってしまう）。`mr.checked_sub(1)`
+/// を計算チェーンへ含め、`mr == 0` を明示的に検出して意図の分かる
+/// [`TileBoundsError::NonPositiveMrOrOverflow`] を返す。
+pub(crate) fn check_c_tile_bounds(
+    mr: usize,
+    nr: usize,
+    ldc: usize,
+    c_len: usize,
+) -> Result<(), TileBoundsError> {
+    if ldc < nr {
+        return Err(TileBoundsError::LdcTooSmall { ldc, nr });
+    }
     match mr
         .checked_sub(1)
         .and_then(|mr_minus_1| mr_minus_1.checked_mul(ldc))
         .and_then(|v| v.checked_add(nr))
     {
-        Some(required) => assert!(
-            c_len >= required,
-            "C tile buffer too small for MR*ldc access pattern"
-        ),
-        None => panic!("MR must be positive, or ldc*MR overflow"),
+        Some(required) if c_len >= required => Ok(()),
+        Some(required) => Err(TileBoundsError::CBufferTooSmall {
+            required,
+            actual: c_len,
+        }),
+        None => Err(TileBoundsError::NonPositiveMrOrOverflow { mr, ldc }),
     }
 }
 
@@ -150,8 +215,9 @@ pub use scalar::{MR, NR, kernel};
 pub trait Microkernel: Copy + Sync {
     /// マイクロカーネルタイルの行数。**契約: 1 以上でなければならない**
     /// （#691 レビュー指摘。`MR == 0` は [`check_c_tile_bounds`] の
-    /// `mr.checked_sub(1)` 経由で明示的に panic するが、`0` を許容する
-    /// 設計ではない。実装がこの契約を破ると
+    /// `mr.checked_sub(1)` 経由で明示的に
+    /// [`TileBoundsError::NonPositiveMrOrOverflow`] を返すが、`0` を許容
+    /// する設計ではない。実装がこの契約を破ると
     /// [`Microkernel::run_with_ldc`] 既定実装・各 ISA の
     /// `kernel`／`kernel_unchecked` は正しい結果を返さない）。
     const MR: usize;
@@ -216,12 +282,31 @@ pub trait Microkernel: Copy + Sync {
     ///   [`Avx512Kernel`]）は全て本メソッドを直接オーバーライドしており
     ///   本番の駆動経路（[`super::gemm_blis_region`]）はこのフォールバック
     ///   を通らない）
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    ///
+    /// ## 型付きエラー化（#691 レビュー P1 再指摘への対応）
+    ///
+    /// `ldc`／`c` 長の契約検査（[`check_c_tile_bounds`]）は本メソッド・
+    /// 各 ISA の `kernel_with_ldc`／`kernel_unchecked_with_ldc` から到達
+    /// 可能な**公開**入口であり、外部の `Microkernel` 実装が誤った
+    /// `ldc`／`c` を渡した場合に panic が本番経路から漏れていた
+    /// （AGENTS.md「本番経路の panic 禁止」）。契約違反の早期検出という
+    /// 目的（REQ-8 境界検査規約）自体は変えず、検出結果を
+    /// `Result::Err(TileBoundsError)` として返す。[`Self::run`] は
+    /// `ldc == Self::NR`（密パッキング契約）でのみ呼ばれ境界検査を経ない
+    /// ため無変更（既存の必須メソッドのシグネチャは非破壊のまま）。
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
         if ldc == Self::NR {
             self.run(ap, bp, c, kc_len);
-            return;
+            return Ok(());
         }
-        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len());
+        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         let mut tile = vec![0.0f32; Self::MR * Self::NR];
         for i in 0..Self::MR {
             tile[i * Self::NR..(i + 1) * Self::NR].copy_from_slice(&c[i * ldc..i * ldc + Self::NR]);
@@ -230,6 +315,7 @@ pub trait Microkernel: Copy + Sync {
         for i in 0..Self::MR {
             c[i * ldc..i * ldc + Self::NR].copy_from_slice(&tile[i * Self::NR..(i + 1) * Self::NR]);
         }
+        Ok(())
     }
 }
 
@@ -243,11 +329,29 @@ impl Microkernel for ScalarKernel {
     const NR: usize = scalar::NR;
 
     fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+        // `run` は #691 レビュー再指摘（公開 API 非破壊）により従来どおり
+        // 返り値を持たない必須メソッドとして維持しているため、境界検査
+        // 違反（[`Self::run_with_ldc`] の `Result` 化とは独立の制約）を
+        // 型付きエラーとして呼び出し元へ返せない。`ldc == Self::NR`
+        // （密パッキング契約）でも `c_tile` 長不一致等の契約違反は理論上
+        // あり得るが、これは #557 以前から `scalar::kernel_with_ldc` を
+        // 直接呼んでいた旧実装と観測可能な挙動（panic）が同一であり、
+        // 本 P1 対応（外部 `Microkernel` 実装から到達する
+        // [`Self::run_with_ldc`] 経路の panic 解消）のスコープには含まない。
+        if let Err(e) = self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len) {
+            panic!("{e}");
+        }
     }
 
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
-        scalar::kernel_with_ldc(ap, bp, c, ldc, kc_len);
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
+        scalar::kernel_with_ldc(ap, bp, c, ldc, kc_len)
     }
 }
 
@@ -263,11 +367,23 @@ impl Microkernel for NeonKernel {
     const NR: usize = neon::NR;
 
     fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+        // [`ScalarKernel::run`] のドキュメント参照（`run` 自体は公開 API
+        // 非破壊のため返り値を持たない必須メソッドのまま。本 P1 対応の
+        // スコープ外）。
+        if let Err(e) = self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len) {
+            panic!("{e}");
+        }
     }
 
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
-        neon::kernel_with_ldc(ap, bp, c, ldc, kc_len);
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
+        neon::kernel_with_ldc(ap, bp, c, ldc, kc_len)
     }
 }
 
@@ -313,12 +429,19 @@ impl Microkernel for Neon12x8Kernel {
     /// （A/B 計測の対称性回復が目的であり、`NeonKernel` と同水準の
     /// strided 直接アクセスへ揃えるほどの追加実装コストは、本番駆動
     /// 経路に接続しないテスト専用トークンには見合わないと判断した）。
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
         if ldc == Self::NR {
             self.run(ap, bp, c, kc_len);
-            return;
+            return Ok(());
         }
-        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len());
+        check_c_tile_bounds(Self::MR, Self::NR, ldc, c.len())?;
         // ヒープ確保（`Vec`）を避けるため MR_12X8*NR_12X8（=96）固定長の
         // スタック配列を使う（`super::MAX_TILE`〈256〉以内。デフォルト
         // 実装との唯一の差分はここのみで、ギャザー/スキャッタのロジック
@@ -331,6 +454,7 @@ impl Microkernel for Neon12x8Kernel {
         for i in 0..Self::MR {
             c[i * ldc..i * ldc + Self::NR].copy_from_slice(&tile[i * Self::NR..(i + 1) * Self::NR]);
         }
+        Ok(())
     }
 }
 
@@ -364,10 +488,22 @@ impl Microkernel for Avx2Kernel {
     const NR: usize = avx2::NR;
 
     fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+        // [`ScalarKernel::run`] のドキュメント参照（`run` 自体は公開 API
+        // 非破壊のため返り値を持たない必須メソッドのまま。本 P1 対応の
+        // スコープ外）。
+        if let Err(e) = self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len) {
+            panic!("{e}");
+        }
     }
 
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
         // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
         // is_x86_feature_detected!("avx2") && ("fma") を確認済み
         // （avx2::kernel_unchecked_with_ldc の `# Safety` 契約を満たす）。
@@ -405,10 +541,22 @@ impl Microkernel for Avx512Kernel {
     const NR: usize = avx512::NR;
 
     fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
-        self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len);
+        // [`ScalarKernel::run`] のドキュメント参照（`run` 自体は公開 API
+        // 非破壊のため返り値を持たない必須メソッドのまま。本 P1 対応の
+        // スコープ外）。
+        if let Err(e) = self.run_with_ldc(ap, bp, c_tile, Self::NR, kc_len) {
+            panic!("{e}");
+        }
     }
 
-    fn run_with_ldc(&self, ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
         // SAFETY: Self は try_new() 経由でのみ構築可能であり、構築時点で
         // is_x86_feature_detected!("avx512f") を確認済み
         // （avx512::kernel_unchecked_with_ldc の `# Safety` 契約を満たす）。
@@ -529,7 +677,8 @@ mod tests {
         k.run(&ap, &bp, &mut via_run, 2);
 
         let mut via_default_ldc = [0.0f32; 4];
-        k.run_with_ldc(&ap, &bp, &mut via_default_ldc, 2, 2);
+        k.run_with_ldc(&ap, &bp, &mut via_default_ldc, 2, 2)
+            .unwrap();
 
         assert_eq!(
             via_run, via_default_ldc,
@@ -549,12 +698,12 @@ mod tests {
 
         // 密パッキング（ldc = NR = 2）で得られる期待値。
         let mut dense = [0.0f32; 4];
-        k.run_with_ldc(&ap, &bp, &mut dense, 2, 2);
+        k.run_with_ldc(&ap, &bp, &mut dense, 2, 2).unwrap();
 
         // ldc = 3 の広い C バッファ（行間に 1 要素のギャップ）へ同じ演算を行う。
         // 初期値は 0 埋めなので dense と同じ結果になるはず。
         let mut strided = [0.0f32; 6];
-        k.run_with_ldc(&ap, &bp, &mut strided, 3, 2);
+        k.run_with_ldc(&ap, &bp, &mut strided, 3, 2).unwrap();
 
         assert_eq!(strided[0], dense[0]);
         assert_eq!(strided[1], dense[1]);
@@ -566,15 +715,48 @@ mod tests {
     }
 
     /// `mr == 0`（[`Microkernel::MR`] の契約違反）を [`check_c_tile_bounds`]
-    /// が意図の分かる panic メッセージで検出することの回帰テスト（PR #691
+    /// が意図の分かる型付きエラーで検出することの回帰テスト（PR #691
     /// レビュー指摘 `PRRT_kwDOTuUCJc6Zq7vw`）。修正前は `mr - 1` の減算
     /// オーバーフロー由来の panic（debug ビルド）だったが、
-    /// `mr.checked_sub(1)` により意図した「MR must be positive」診断へ
-    /// 変わったことを確認する。
+    /// `mr.checked_sub(1)` により意図した
+    /// `TileBoundsError::NonPositiveMrOrOverflow` へ変わったことを確認
+    /// する（さらに #691 P1 再指摘対応で panic ではなく `Result::Err` に
+    /// なった）。
     #[test]
-    #[should_panic(expected = "MR must be positive")]
     fn check_c_tile_bounds_rejects_mr_zero_with_explicit_message() {
-        check_c_tile_bounds(0, 2, 2, 4);
+        assert_eq!(
+            check_c_tile_bounds(0, 2, 2, 4),
+            Err(TileBoundsError::NonPositiveMrOrOverflow { mr: 0, ldc: 2 })
+        );
+    }
+
+    /// [`check_c_tile_bounds`] が検出する境界違反は、[`Microkernel::run_with_ldc`]
+    /// の公開入口（外部の `Microkernel` 実装からも到達可能）まで panic せず
+    /// `Result::Err` として伝播することの回帰テスト（#691 レビュー P1
+    /// 再指摘 `PRRT_kwDOTuUCJc6Zq_7u` への対応）。
+    #[test]
+    fn run_with_ldc_returns_err_instead_of_panicking_on_ldc_too_small() {
+        let k = LegacyRunOnlyKernel;
+        let ap = [1.0f32, 2.0, 3.0, 4.0];
+        let bp = [5.0f32, 6.0, 7.0, 8.0];
+        let mut c = [0.0f32; 4];
+
+        // ldc = 1 < NR(=2) は境界検査違反だが、panic せず Err を返す。
+        let err = k.run_with_ldc(&ap, &bp, &mut c, 1, 2).unwrap_err();
+        assert_eq!(err, TileBoundsError::LdcTooSmall { ldc: 1, nr: 2 });
+    }
+
+    /// [`check_c_tile_bounds`] の `c` バッファ不足検出が `Result::Err`
+    /// として返ることの回帰テスト（#691 レビュー P1 再指摘への対応）。
+    #[test]
+    fn check_c_tile_bounds_rejects_c_buffer_too_small() {
+        assert_eq!(
+            check_c_tile_bounds(2, 2, 3, 4),
+            Err(TileBoundsError::CBufferTooSmall {
+                required: 5,
+                actual: 4
+            })
+        );
     }
 
     #[test]
