@@ -1,19 +1,26 @@
 # 外部ソース（docs/spec サブモジュール・エージェントスキル）の自動追従ワークフロー。
 #
-# Fandhe-AI/fandhe-multi-platform の update-external.yml と同一方針
-# （permissions 最小・Fandhe-AI/actions の共通アクション利用）。本リポジトリは
-# 更新対象が「docs/spec（Fandhe-AI/rust-ai-library-spec サブモジュール）」
-# 「.claude/skills 配下のエージェントスキル（skills-lock.json 管理）」の 2 種のみで、
-# 参考リポジトリの submodule/skill ジョブ構成をそのまま適用できる（大きな読み替えなし）。
-# Rust コード未実装（Cargo.toml なし）だが、本ワークフローは cargo を一切呼び出さないため
-# Cargo.toml 存在チェックのガードは不要。
+# 実装本体は Fandhe-AI/actions の reusable workflow
+# `.github/workflows/update-external.yml`（Fandhe-AI/agent-cli-skills イシュー #259 で
+# reusable 化）。本ファイルはリポジトリ固有の設定だけを持つ薄い wrapper であり、
+# fail-closed ガード・`persist-credentials`・`source-token`・外部 action の pin・
+# Node / skills CLI の版数は共通側で集中管理される。
+#
+# 移行前は 145 行のテンプレートを本リポジトリで手管理していた。上流の強化
+# （skills ジョブの `persist-credentials: false`、`source-token` の明示、
+# `auto-merge-immediate-fallback: 'false'`、Node 20 → 24.19.0）は
+# `.github/workflows/**` が skills-update の配布対象外であるため届いておらず、
+# 本 wrapper への移行で一括して適用される。
 #
 # runs-on: public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #468）で
-# self-hosted から ubuntu-latest へ変更した（upstream との差分理由。組織 runner 方針の
-# public 側適用〈.claude/rules/ci.md『runner』節〉に従う。update-external.yml 節が定める
-# 「upstream をほぼ変更せず流用する」方針とは別軸の変更であり、その方針を破るものではない）。
-# secrets 経路（SUBMODULE_PAT フォールバック）・permissions・persist-credentials・
-# auto-merge 変数は本イシューでは不変（受け入れ条件）。
+# self-hosted から ubuntu-latest へ変更した。組織 runner 方針の public 側適用
+# （.claude/rules/ci.md『runner』節）に従う。移行後は runner-json input で指定する。
+#
+# docs/spec は private 維持方針（#463。2026-08-14 決定）。本リポジトリを public 化した
+# 後も docs/spec 自体は private のまま残るため、submodule の取得には org secret
+# SUBMODULE_PAT（visibility=all）が実効的な経路となる。共通側は PAT 未設定時に
+# GITHUB_TOKEN へフォールバックせず fail-closed で停止する（bot 作成 PR が
+# pull_request workflow を発火させず必須チェック未実行で恒久 BLOCKED になる事故の回避）。
 name: Update external sources
 
 on:
@@ -34,112 +41,31 @@ on:
 permissions:
   contents: read
 
+# reusable workflow のトップレベル concurrency は機能しないため呼び出し側で設定する
 concurrency:
   group: update-external
   cancel-in-progress: false
 
 jobs:
-  # --------------------------------------------------
-  # docs/spec サブモジュール参照の更新（Fandhe-AI/actions/submodule-update）
-  # --------------------------------------------------
-  submodule:
-    name: Update submodule references
-    if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "submodule"]'), inputs.target) }}
-    runs-on: ubuntu-latest
-    # ハングしたジョブが runner を無期限占有するのを防ぐため、多層防御として
-    # timeout を必ず設定する。
-    timeout-minutes: 15
+  update-external:
+    # Fandhe-AI/actions はタグ未公開のため main 追従の最新コミット SHA に固定する
+    uses: Fandhe-AI/actions/.github/workflows/update-external.yml@0655187f7c71aafbe94098f7613d2cea1876e29f # main
     permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Checkout
-        # actions/checkout v6.0.3（参考リポジトリと同一 SHA に固定）。
-        # 本ジョブは checkout 後に `git submodule update --remote --recursive`
-        # （Fandhe-AI/actions/submodule-update 内、docs/spec は private リポジトリ）を
-        # 実行するため、persist-credentials は既定（true）のまま維持する
-        # （後続ステップの git 操作が認証情報を必要とするため）。
-        # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意。
-        # 下記 secrets.SUBMODULE_PAT 参照）。
-        # docs/spec は private 維持方針（#463。2026-08-14 決定）。本リポジトリを
-        # public 化した後も docs/spec 自体は private のまま残すため、GITHUB_TOKEN
-        # フォールバックでは submodule を取得できなくなる。org secret
-        # SUBMODULE_PAT（visibility=all で全リポジトリに供給）が実効的な取得経路であり、
-        # public 化後もこの構成のまま機能する（#463 で org secret 実測確認済み）。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          # base-branch: main と整合させる。workflow_dispatch で main 以外の
-          # ブランチから手動実行されても、更新 PR には main のツリーのみを焼き込む。
-          ref: main
-          submodules: recursive
-          fetch-depth: 0
-          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Update submodules and open PR
-        # Fandhe-AI/actions はタグ未作成のため最新コミット SHA に固定する。
-        uses: Fandhe-AI/actions/submodule-update@fed9c07d98367f77e5e2b63bca38843f46feee96
-        with:
-          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
-          base-branch: main
-          branch-prefix: chore/submodule-update
-          commit-message: 'chore: submodule を最新に更新'
-          pr-title: 'chore: submodule を最新に更新'
-          pr-labels: 'dependencies,automated'
-          # auto-merge の ON/OFF。未設定（null/空）を有効と解釈する非対称設計のため、
-          # 未設定時は明示的に 'false' へフォールバックしオプトイン運用とする。
-          auto-merge: ${{ vars.SUBMODULE_AUTO_MERGE || 'false' }}
-          auto-merge-allowlist: ${{ vars.SUBMODULE_AUTO_MERGE_ALLOWLIST }}
-          auto-merge-strategy: squash
-
-  # --------------------------------------------------
-  # エージェントスキル（.claude/skills・skills-lock.json）の更新
-  # （Fandhe-AI/actions/skills-update）
-  # --------------------------------------------------
-  skills:
-    name: Update agent skills
-    if: ${{ github.event_name != 'workflow_dispatch' || contains(fromJSON('["all", "skill"]'), inputs.target) }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-      pull-requests: write
-    steps:
-      - name: Checkout
-        # actions/checkout v6.0.3。
-        # persist-credentials: false: skills-update の action.yml はソース取得を
-        # `git config --global url."https://x-access-token:${FETCH_TOKEN}@github.com/".insteadOf`
-        # による自前注入 + trap での破棄、push も `git remote set-url` + trap での復元で
-        # 完結しており、checkout が既定で永続化する認証情報には依存していない
-        # （submodule ジョブとは異なり、後続ステップが checkout の persist-credentials に
-        # 依存しない）。よって不要な認証情報を .git/config に残さないよう無効化する。
-        # PAT 未設定時は GITHUB_TOKEN にフォールバック（auto-merge 後の CI 未発火に注意）。
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
-        with:
-          # base-branch: main と整合させる。workflow_dispatch で main 以外の
-          # ブランチから手動実行されても、更新 PR には main のツリーのみを焼き込む。
-          ref: main
-          fetch-depth: 0
-          persist-credentials: false
-          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
-
-      - name: Setup Node.js
-        # actions/setup-node v6.4.0。skills-update が使う npx skills のため node を固定する。
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
-        with:
-          node-version: '20'
-
-      - name: Update skills and open PR
-        # Fandhe-AI/actions はタグ未作成のため最新コミット SHA に固定する。
-        uses: Fandhe-AI/actions/skills-update@fed9c07d98367f77e5e2b63bca38843f46feee96
-        with:
-          token: ${{ secrets.SUBMODULE_PAT || secrets.GITHUB_TOKEN }}
-          base-branch: main
-          branch-prefix: chore/skills-update
-          commit-message: 'chore: エージェントスキルを最新に更新'
-          pr-title: 'chore: エージェントスキルを最新に更新'
-          pr-labels: 'dependencies,automated'
-          # auto-merge の ON/OFF。未設定（null/空）を有効と解釈する非対称設計のため、
-          # 未設定時は明示的に 'false' へフォールバックしオプトイン運用とする。
-          auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
-          auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
-          auto-merge-strategy: squash
+      contents: read
+    with:
+      # schedule 起動では inputs が null になるため all へフォールバックする
+      target: ${{ inputs.target || 'all' }}
+      # public リポジトリのため GitHub ホステッドランナーを使う（上記 runs-on の注記参照）。
+      # 必ず JSON リテラルで指定する（素の ubuntu-latest は fromJSON が失敗する）。
+      runner-json: '"ubuntu-latest"'
+      # auto-merge はマージ可否を左右する設定のため、組織変数を呼び出し側で解決して渡す。
+      # 未設定（null/空）を有効と解釈する composite action の非対称設計に合わせ、
+      # 明示的に 'false' へフォールバックしオプトイン運用とする。
+      submodule-auto-merge: ${{ vars.SUBMODULE_AUTO_MERGE || 'false' }}
+      submodule-auto-merge-allowlist: ${{ vars.SUBMODULE_AUTO_MERGE_ALLOWLIST }}
+      skills-auto-merge: ${{ vars.SKILLS_AUTO_MERGE || 'false' }}
+      skills-auto-merge-allowlist: ${{ vars.SKILLS_AUTO_MERGE_ALLOWLIST }}
+    secrets:
+      # SKILLS_PAT は未登録のため空文字となり、共通側が SUBMODULE_PAT へフォールバックする。
+      SUBMODULE_PAT: ${{ secrets.SUBMODULE_PAT }}
+      SKILLS_PAT: ${{ secrets.SKILLS_PAT }}
