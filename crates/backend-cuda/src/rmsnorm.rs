@@ -254,6 +254,11 @@ pub(crate) fn dw_split_row_range(rows: u64, num_blocks: u32, b: u32) -> (u64, u6
 /// 受け取るため fail-closed で検証する必要があり、既存関数の確立した
 /// 挙動を壊さないため）。呼び出し元は `rows > 0 && hidden > 0`
 /// （早期 return 済み）の文脈でのみ本関数を呼ぶ契約。
+///
+/// `num_blocks` 自体の検査（`>= 1`・`<= rows`）は分岐（単段／split-K）に
+/// 依らず常に行うが、部分和バッファの [`RMSNORM_DW_PARTIAL_BUFFER_CAP_
+/// BYTES`] cap 検査は `num_blocks > 1`（split-K 経路が実際にバッファを
+/// 確保する場合）のみに限定する（cursor[bot] 指摘・PR #716）。
 pub(crate) fn validate_dw_split_launch(
     rows: usize,
     hidden: usize,
@@ -272,22 +277,31 @@ pub(crate) fn validate_dw_split_launch(
             ),
         });
     }
-    let partial_bytes = (num_blocks as u64)
-        .checked_mul(hidden as u64)
-        .and_then(|v| v.checked_mul(4))
-        .ok_or_else(|| CudaError::InvalidRmsNormShape {
-            detail: format!(
-                "rmsnorm dw split partial buffer size overflowed u64: num_blocks={num_blocks}, \
-                 hidden={hidden}"
-            ),
-        })?;
-    if partial_bytes > RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES {
-        return Err(CudaError::InvalidRmsNormShape {
-            detail: format!(
-                "rmsnorm dw split partial buffer exceeds cap: bytes={partial_bytes}, \
-                 cap={RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES}"
-            ),
-        });
+    // 部分和バッファの cap 検査は split-K 経路（`num_blocks > 1`）にのみ
+    // 適用する。単段フォールバック（`num_blocks <= 1`）はこのバッファを
+    // 一切確保しないため、cap 超過を理由に拒否すると旧実装（単段カーネル
+    // のみ）で成功していた大きな `hidden` の形状を退行させてしまう
+    // （cursor[bot] 指摘・PR #716: `hidden * 4` だけで cap を超える形状は
+    // `derive_dw_split` が正しく `1` を返すにもかかわらず、分岐前の検証で
+    // 一律に拒否されていた）。
+    if num_blocks > 1 {
+        let partial_bytes = (num_blocks as u64)
+            .checked_mul(hidden as u64)
+            .and_then(|v| v.checked_mul(4))
+            .ok_or_else(|| CudaError::InvalidRmsNormShape {
+                detail: format!(
+                    "rmsnorm dw split partial buffer size overflowed u64: \
+                     num_blocks={num_blocks}, hidden={hidden}"
+                ),
+            })?;
+        if partial_bytes > RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES {
+            return Err(CudaError::InvalidRmsNormShape {
+                detail: format!(
+                    "rmsnorm dw split partial buffer exceeds cap: bytes={partial_bytes}, \
+                     cap={RMSNORM_DW_PARTIAL_BUFFER_CAP_BYTES}"
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -1567,5 +1581,17 @@ mod tests {
         // advisor 指摘・security.md A03）。
         let err = validate_dw_split_launch(1_000_000_000, 300_000_000, 64).unwrap_err();
         assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
+    }
+
+    #[test]
+    fn validate_dw_split_launch_accepts_single_stage_even_if_hidden_alone_exceeds_cap() {
+        // cursor[bot] 指摘（PR #716）の回帰テスト: `num_blocks == 1`
+        // （単段フォールバック）は部分和バッファを一切確保しないため、
+        // `hidden * 4` 単体が cap（64 MiB = 16_777_216 要素）を超える
+        // 大きな `hidden` でも拒否してはならない。`derive_dw_split` は
+        // このような形状では正しく `1` を返す契約（本テストは呼び出し元
+        // の分岐に依らず `validate_dw_split_launch` 単体で保証する）。
+        let hidden = 20_000_000; // hidden * 4 bytes ≈ 76 MiB > 64 MiB cap
+        assert!(validate_dw_split_launch(1, hidden, 1).is_ok());
     }
 }
