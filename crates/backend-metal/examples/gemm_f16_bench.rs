@@ -68,6 +68,19 @@ mod macos_impl {
     /// `torch.mps.synchronize()` のみを計測するのと同一の同期境界に揃える
     /// ため（PR #346 Bugbot 指摘 2）。readback／アンパディングも本ベンチの
     /// 出力には不要なため計測対象に含めない。
+    /// 中央値・Q1・Q3（秒）を TFLOPS へ変換した 3 つ組。`docs/performance-targets.md`
+    /// §4 が中央値に加え Q1/Q3 の記録を必須とする（REQ-8）ため、`measure` は
+    /// `Measurement` の 3 フィールドすべてを保持したまま呼び出し元へ返す
+    /// （codex-review #700 P1 指摘の f32 側修正に揃え、f16 側にも同様に適用。
+    /// `gemm_f32_prepared_bench.rs::TflopsQuartiles` と同型・独立定義）。時間が
+    /// 短いほど TFLOPS が高いため、秒の昇順（q1 <= median <= q3）は TFLOPS の
+    /// 降順（q1_tflops >= median_tflops >= q3_tflops）に反転する。
+    struct TflopsQuartiles {
+        median: f64,
+        q1: f64,
+        q3: f64,
+    }
+
     fn measure(
         gemm: &MetalGemm,
         ctx: &MetalContext,
@@ -75,7 +88,7 @@ mod macos_impl {
         n: usize,
         k: usize,
         config: &MeasurementConfig,
-    ) -> f64 {
+    ) -> TflopsQuartiles {
         let mut rng = Xorshift64Star::new(SEED);
         let a: Vec<f16> = rng.fill_vec_f16(m * k);
         let b: Vec<f16> = rng.fill_vec_f16(k * n);
@@ -97,7 +110,11 @@ mod macos_impl {
         })
         .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
 
-        tflops(m, n, k, measurement.median_secs)
+        TflopsQuartiles {
+            median: tflops(m, n, k, measurement.median_secs),
+            q1: tflops(m, n, k, measurement.q1_secs),
+            q3: tflops(m, n, k, measurement.q3_secs),
+        }
     }
 
     pub fn main() {
@@ -108,8 +125,11 @@ mod macos_impl {
         // 参考値。PoC-v2-4 先例。実装計画 §3.3）。
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
-            let f16_tflops = measure(&gemm, &ctx, size, size, size, &config);
-            println!("size={size} metal_f16_simdgroup_tflops={f16_tflops:.4}");
+            let q = measure(&gemm, &ctx, size, size, size, &config);
+            println!(
+                "size={size} metal_f16_simdgroup_tflops={:.4} q1_tflops={:.4} q3_tflops={:.4}",
+                q.median, q.q1, q.q3
+            );
         }
     }
 }

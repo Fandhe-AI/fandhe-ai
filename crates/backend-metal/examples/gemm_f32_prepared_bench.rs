@@ -72,6 +72,19 @@ mod macos_impl {
     /// 入力をループ外でデバイス転送し、ループ内は `torch.mm` +
     /// `torch.mps.synchronize()` のみを計測するのと同一の同期境界に揃える
     /// ため。readback は本ベンチの出力には不要なため計測対象に含めない。
+    /// 中央値・Q1・Q3（秒）を TFLOPS へ変換した 3 つ組。`docs/performance-targets.md`
+    /// §4 が中央値に加え Q1/Q3 の記録を必須とする（REQ-8）ため、`measure` は
+    /// `Measurement` の 3 フィールドすべてを保持したまま呼び出し元へ返す
+    /// （codex-review #700 P1 指摘: 従来は `median_secs` のみを変換し
+    /// `q1_secs`/`q3_secs` を破棄していた）。時間が短いほど TFLOPS が高いため、
+    /// 秒の昇順（q1 <= median <= q3）は TFLOPS の降順（q1_tflops >= median_tflops
+    /// >= q3_tflops）に反転する。
+    struct TflopsQuartiles {
+        median: f64,
+        q1: f64,
+        q3: f64,
+    }
+
     fn measure(
         gemm: &MetalGemm,
         ctx: &MetalContext,
@@ -79,7 +92,7 @@ mod macos_impl {
         n: usize,
         k: usize,
         config: &MeasurementConfig,
-    ) -> (f64, tile::TileConfig) {
+    ) -> (TflopsQuartiles, tile::TileConfig) {
         let mut rng = Xorshift64Star::new(SEED);
         let a: Vec<f32> = rng.fill_vec(m * k);
         let b: Vec<f32> = rng.fill_vec(k * n);
@@ -112,7 +125,12 @@ mod macos_impl {
         })
         .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
 
-        (tflops(m, n, k, measurement.median_secs), resolved_cfg)
+        let quartiles = TflopsQuartiles {
+            median: tflops(m, n, k, measurement.median_secs),
+            q1: tflops(m, n, k, measurement.q1_secs),
+            q3: tflops(m, n, k, measurement.q3_secs),
+        };
+        (quartiles, resolved_cfg)
     }
 
     pub fn main() {
@@ -123,9 +141,10 @@ mod macos_impl {
         // 参考値。PoC-v2-4 先例・`gemm_f16_bench.rs` と同一形状帯）。
         for size in [512usize, 1024, 2048, 4096] {
             let config = MeasurementConfig::default();
-            let (f32_tflops, resolved_cfg) = measure(&gemm, &ctx, size, size, size, &config);
+            let (q, resolved_cfg) = measure(&gemm, &ctx, size, size, size, &config);
             println!(
-                "size={size} metal_f32_simdgroup_tiled_tflops={f32_tflops:.4} resolved_tile_config={resolved_cfg:?}"
+                "size={size} metal_f32_simdgroup_tiled_tflops={:.4} q1_tflops={:.4} q3_tflops={:.4} resolved_tile_config={resolved_cfg:?}",
+                q.median, q.q1, q.q3
             );
         }
     }
