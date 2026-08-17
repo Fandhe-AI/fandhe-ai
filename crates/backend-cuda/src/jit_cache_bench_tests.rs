@@ -130,12 +130,12 @@ impl Drop for TempDirGuard {
     }
 }
 
-/// `jit_cache_regression_tests::fresh_temp_dir` と同型: テスト・ベンチ用に
-/// 一意な一時ディレクトリを払い出す（プロセス内 `AtomicU64` カウンタ＋PID
-/// で並行実行時の衝突を避ける）。モジュール境界をまたいだ結合を避けるため
-/// 独立して定義する（`jit_cache_regression_tests.rs` 冒頭コメント参照）。
-/// 戻り値は [`TempDirGuard`] であり、呼び出し元スコープを抜けるときに
-/// panic 経路も含めて自動的に片付けられる。
+/// `jit_cache_regression_tests::fresh_temp_dir` と同趣旨（テスト・ベンチ用に
+/// 一意な一時ディレクトリを払い出す）だが、以下の PID 再利用対策
+/// （Review #698 指摘）により実装は同型ではない。モジュール境界をまたいだ
+/// 結合を避けるため独立して定義する（`jit_cache_regression_tests.rs`
+/// 冒頭コメント参照）。戻り値は [`TempDirGuard`] であり、呼び出し元
+/// スコープを抜けるときに panic 経路も含めて自動的に片付けられる。
 ///
 /// # PID 再利用時の衝突対策（Review #698 指摘）
 ///
@@ -145,7 +145,8 @@ impl Drop for TempDirGuard {
 /// 直後は `SEQ == 0` から再開する）によって同名ディレクトリへ書き込む
 /// 可能性が理論上残る（実機ランナー上で繰り返し実行される用途のため無視
 /// できない）。そこで `tempfile` 相当の「実際に新規であること」を
-/// 以下の 2 点で保証する:
+/// 以下の 2 点で保証する（`jit_cache_regression_tests::fresh_temp_dir` の
+/// 「PID＋カウンタのみ・`create_dir_all`」方式からの差分）:
 /// - 名前に `SystemTime::now()` のナノ秒成分を追加し、PID 再利用が起きても
 ///   同名になる確率を実用上無視できる水準まで下げる
 /// - `create_dir_all`（既存ディレクトリを黙って受け入れる）ではなく
@@ -154,6 +155,11 @@ impl Drop for TempDirGuard {
 fn fresh_temp_dir(label: &str) -> TempDirGuard {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     const CREATE_DIR_RETRIES: u32 = 8;
+
+    // `std::env::temp_dir()` 自体が未作成の環境（コンテナ等）でも
+    // 以降の排他的 `create_dir` が失敗しないよう、親ディレクトリの存在は
+    // 通常の `create_dir_all` で保証しておく（衝突検出には関与しない）。
+    fs::create_dir_all(std::env::temp_dir()).expect("failed to ensure system temp dir exists");
 
     let pid = std::process::id();
     for attempt in 0..CREATE_DIR_RETRIES {
