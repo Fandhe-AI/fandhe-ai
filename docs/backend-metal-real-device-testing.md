@@ -34,11 +34,11 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 
 ## テスト一覧と対応 REQ/TASK
 
-`crates/backend-metal/tests/` は 12 ファイル。うち 11 ファイルが `#[ignore]` 実機テストを持ち、合計 52 件
-（イシュー #380 実機実測で確定。件数根拠は per-file 合計を正とする。`cargo test` 出力の
-`N filtered out` 行は lib unittest ターゲットが非 `#[ignore]` テストを除外した数で偶然の一致にすぎず
-根拠に使わない）。残る 1 ファイル（`shader_source_evidence.rs`）は `#[ignore]` を持たず Linux CI でも実行
-される。
+`crates/backend-metal/tests/` は 15 ファイル（イシュー #604 で `rmsnorm_parity.rs`・`softmax_parity.rs`・
+`rmsnorm_softmax_source_evidence.rs` の 3 ファイルを追加）。うち 13 ファイルが `#[ignore]` 実機テストを持ち、
+合計 57 件（#380 実機実測時点の 52 件 + #604 追加分 5 件〈`rmsnorm_parity.rs` 2 件・`softmax_parity.rs` 3 件〉。
+件数根拠は per-file 合計を正とする）。残る 2 ファイル（`shader_source_evidence.rs`・
+`rmsnorm_softmax_source_evidence.rs`）は `#[ignore]` を持たず Linux CI でも実行される。
 
 | ファイル | `#[ignore]` 件数 | 対応 TASK/Issue | 検証内容 |
 |---------|:---:|-----------------|---------|
@@ -53,7 +53,10 @@ macOS 側の型検査は Linux CI でも成立させている（後述の「Linu
 | `tests/cpu_metal_f16_parity.rs` | 6 | TASK-8.3b（#156） | `gemm_simdgroup_f16` の CPU 参照一致（8×8×8 基準・512 基準・非倍数境界・K=4096 ストレス・決定性・不正入力の拒否）。累算精度契約はイシュー #380 で f32 累算へ変更済み（`docs/perf/metal-f16-vs-mps-f16.md`「精度契約」節） |
 | `tests/dispatch_boundary.rs` | 2 | #382 | `dispatch_auto` の境界形状 TFLOPS 記録・`dispatch_backend_auto` の出力と CPU 参照実装との数値一致検証（実機が実際にどの経路を選んだかの検証ではない。`route_verified=false`）。TFLOPS 数値の転記・`METAL_SIMDGROUP_MIN_DIM` の妥当性判定は #382 で実施済み（`docs/perf/dispatch-boundary-measurement.md`） |
 | `tests/memory_roundtrip.rs` | 6 | TASK-2.1 系 | メモリ確保・ゼロ初期化・プール再利用・アップロード/ダウンロード roundtrip・リーク検査 |
+| `tests/rmsnorm_parity.rs` | 2 | イシュー #604 | 融合 RMSNorm 順伝播カーネルの CPU 参照実装（`f32::mul_add`。CUDA 側 `cpu_rmsnorm_reference` と同一意味論）との複合判定（REQ-2）。hidden の 1 パス／2 パス境界（4096/4097）網羅・`run_fused` 経由の canonical プラン検証を含む |
+| `tests/softmax_parity.rs` | 3 | イシュー #604 | online softmax カーネルの CPU 参照実装（素朴な `exp(x-max(x))/sum`）との複合判定（REQ-2）。CUDA 直接の parity 相手（#594・G-7）は本イシュー時点で未実装のため CPU 参照経由の推移的な担保に留まる（`softmax.rs` ドキュメンテーションコメント参照）。極値安定性（全要素同値・大きな正負値）・`run_fused` 経由の canonical プラン検証を含む |
 | `tests/shader_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | TASK-11.3（#70） | `gemm.metal` の行列演算ユニット命令（`simdgroup_matrix` API）実在検査・REQ-8 境界チェック維持検査 |
+| `tests/rmsnorm_softmax_source_evidence.rs` | 0（`#[ignore]` なし。Linux CI でも実行） | イシュー #604 | `rmsnorm.metal`／`softmax.metal` のアルゴリズム契約（5 段 butterfly reduction・`simdgroup_barrier` のみ使用・`exp2` のみ使用・有限負値境界マスク・REQ-8 手動境界チェック・FMA 契約）の文字列証跡検査 |
 
 判定は数値一致系ファイル共通で `backend_cpu::parity::{compare, assert_parity}`（REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体）を使う。**閾値の独自定義・緩和はしない**（`.claude/rules/security.md`・`.claude/rules/coding-rust.md`）。入力生成は `bench_harness::rng::Xorshift64Star`（決定的シード）で固定する。
 
@@ -115,6 +118,28 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
   pass/fail のみを記録対象とする。数値の `docs/perf/dispatch-boundary-measurement.md` への転記・
   `METAL_SIMDGROUP_MIN_DIM` の妥当性判定は #382 で完了済み（判定: 変更提案あり・提案値 384。
   コード未変更・実施は別レビュー・別 PR・ユーザー承認）
+
+### イシュー #604 追加分の実機実測状況（未実施）
+
+`rmsnorm_parity.rs`（2 件）・`softmax_parity.rs`（3 件）は本実装セッション（Linux 環境。Mac 実機へ到達
+不能）では実行できていない。Linux 側では以下で代替検証済み: `cargo build --target aarch64-apple-darwin
+-p backend-metal`（型検査・リンク前コンパイル成立）・`cargo test -p backend-metal`（`row_kernel.rs` の
+純関数単体テスト 34 件・`rmsnorm_softmax_source_evidence.rs` の文字列証跡テスト 10 件が green）。Mac
+実機での `#[ignore]` テスト実行・「実行結果」節への追記はユーザー環境での確認を依頼する
+（未検証のままマージ可否判断をユーザーに委ねる。実装計画 §6.2「実機へ到達できない場合は実施不能である旨を
+PR に明記」）。
+
+**MSL 実行時コンパイル自体も未検証**（重要な盲点）: 上記の Linux 側代替検証は Rust 側の型検査のみを
+カバーし、`shaders/rmsnorm.metal`・`shaders/softmax.metal` は `MetalRmsNorm::new`／`MetalSoftmax::new`
+の `newLibraryWithSource_options_error` による**実行時**コンパイル（`gemm.metal` と同じ経路）である
+ため、構文・オーバーロード解決の誤りは Mac 実機で `MetalError::LibraryCompilation` として初めて表面化
+する。`tests/rmsnorm_softmax_source_evidence.rs` は文字列の `contains` 検査のみで MSL コンパイラを
+一切呼ばない。Mac 実機実行時は特に以下を確認すること: (1) `simd_shuffle_xor(v, 16u)` 等の第 2 引数
+（宣言上は `ushort`）へ `uint` リテラルを渡している箇所（暗黙変換の成立を仮定）、(2) `<metal_stdlib>`
+のみを include し `<metal_simdgroup_matrix>` を include していない点（`simd_shuffle_xor`／
+`simdgroup_barrier` は matrix 系ではなく SIMD-group 関数のため `<metal_stdlib>` 単独で足りるという
+判断だが実機未確認）、(3) `constant float SOFTMAX_MASK_Y = -(0.875f * 3.402823466e+38f);`
+（namespace scope の `constant` 変数を計算式で初期化する宣言）。
 
 過去に機械検証済みだった以下の項目は、上記の実機実行によって補完・上書きされた:
 

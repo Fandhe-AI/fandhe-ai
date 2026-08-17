@@ -109,6 +109,18 @@ pub enum MetalError {
     /// しているが、こちらは shape 不整合の詳細を保持する必要があるため
     /// 専用 variant とする）。
     ShapeMismatch { detail: String },
+    /// `crate::row_kernel::validate_row_kernel_launch`（RMSNorm・softmax
+    /// 共通のホスト側 fail-closed 検証。イシュー #604）が拒否した形状・
+    /// `eps` 値。`detail` は元の
+    /// `row_kernel::RowKernelValidationError` の `Display` 文字列表現。
+    InvalidRowKernelShape { detail: String },
+    /// `crate::rmsnorm::MetalRmsNorm::new`／`crate::softmax::MetalSoftmax::new`
+    /// が構築直後に検証する `MTLComputePipelineState::threadExecutionWidth`
+    /// が期待値（32。1 threadgroup = 1 simdgroup 固定の前提）と一致しない
+    /// （イシュー #604 実装計画 §4.1「ホスト側で
+    /// `threadExecutionWidth == 32` を起動前に検証」。デバイス・ドライバの
+    /// 想定外挙動を fail-closed で検出する）。
+    UnexpectedThreadExecutionWidth { expected: usize, actual: usize },
 }
 
 impl fmt::Display for MetalError {
@@ -189,6 +201,15 @@ impl fmt::Display for MetalError {
             }
             MetalError::ShapeMismatch { detail } => {
                 write!(f, "shape mismatch: {detail}")
+            }
+            MetalError::InvalidRowKernelShape { detail } => {
+                write!(f, "row kernel launch validation failed: {detail}")
+            }
+            MetalError::UnexpectedThreadExecutionWidth { expected, actual } => {
+                write!(
+                    f,
+                    "unexpected threadExecutionWidth: expected {expected}, actual {actual}"
+                )
             }
         }
     }
