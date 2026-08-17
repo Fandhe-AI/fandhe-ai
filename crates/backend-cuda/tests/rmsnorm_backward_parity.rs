@@ -90,17 +90,16 @@ fn assert_rmsnorm_backward_parity(
         None
     };
 
-    // 順伝播（学習経路）で rstd を得る。inv_n は `run_rmsnorm_f32_train`
-    // 内部で `1/hidden` に固定されるため、逆伝播にも同じ `inv_n` を渡す
-    // （`run_rmsnorm_bwd_f32` ドキュメンテーションコメント「二重契約」
-    // 参照）。
+    // 順伝播（学習経路）で rstd を得る。`inv_n` は `run_rmsnorm_bwd_f32`
+    // 内部で `shape.hidden` から `run_rmsnorm_f32_train` と同じ式
+    // （`1/hidden`）で導出される（公開引数からは除去済み。codex-review P1
+    // 是正・PR #711 レビュー r3794149870）。
     let (_out, rstd) = rmsnorm
         .run_rmsnorm_f32_train(&x_data, w_data.as_deref(), eps, rows, hidden)
         .expect("CudaRmsNorm::run_rmsnorm_f32_train must succeed on CUDA-equipped test runner");
-    let inv_n = 1.0f32 / hidden as f32;
 
     let (gpu_dx, gpu_dw) = rmsnorm
-        .run_rmsnorm_bwd_f32(&x_data, w_data.as_deref(), &dy_data, &rstd, inv_n, shape)
+        .run_rmsnorm_bwd_f32(&x_data, w_data.as_deref(), &dy_data, &rstd, shape)
         .expect("CudaRmsNorm::run_rmsnorm_bwd_f32 must succeed on CUDA-equipped test runner");
     let (cpu_dx, cpu_dw) =
         cpu_rmsnorm_backward_reference(&x_data, w_data.as_deref(), &dy_data, eps, rows, hidden);
@@ -164,6 +163,28 @@ fn rmsnorm_backward_parity_smoke_env_adaptive() {
                     hidden: 1024,
                 },
                 true,
+                1e-5,
+            );
+            // 退化ケース（PR #711 レビュー r3794159146・r3794149870
+            // 是正の回帰確認）: `rows == 0`（`w` あり。`dw` が `hidden`
+            // 長のゼロベクトルになる契約）と `hidden == 0`（`rstd` が
+            // `rows` 長を維持する契約）。
+            assert_rmsnorm_backward_parity(
+                &rmsnorm,
+                817,
+                818,
+                819,
+                RmsNormShape { rows: 0, hidden: 8 },
+                true,
+                1e-5,
+            );
+            assert_rmsnorm_backward_parity(
+                &rmsnorm,
+                820,
+                821,
+                822,
+                RmsNormShape { rows: 3, hidden: 0 },
+                false,
                 1e-5,
             );
         }

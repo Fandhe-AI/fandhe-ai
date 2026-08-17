@@ -505,7 +505,29 @@ impl CudaRmsNorm {
         validate_rmsnorm_launch(rows, hidden, x.len(), w.map(|s| s.len()), eps)?;
 
         if rows == 0 || hidden == 0 {
-            return Ok((Vec::new(), save_rstd.then(Vec::new)));
+            // `save_rstd == true`（学習経路）の契約は「`rstd.len() ==
+            // rows`」（[`Self::run_rmsnorm_f32_train`] ドキュメンテーション
+            // コメント）であり、`hidden == 0` でもこれを維持しなければ
+            // ならない。`hidden == 0` の行は要素を持たないため
+            // `sum(x^2) == 0` が数学的に確定し、`inv_n` の値に関わらず
+            // `rstd = rsqrt(0 * inv_n + eps) = rsqrt(eps)`（全行同一値）が
+            // 一意に定まる（`eps` は `validate_rmsnorm_launch` で有限・
+            // 非負を検証済みのため `eps.sqrt()` は NaN 化しない。`eps ==
+            // 0.0` は `rsqrt(0) == inf` になるが有限性検証の対象外＝許容
+            // 済みの退化値）。`rows == 0` の場合は `vec![_; 0]` が自然に
+            // 空になるため分岐不要。Cursor Bugbot 指摘（PR #711 レビュー
+            // r3794159146）: この早期 return が常に空 Vec を返すと、
+            // `run_rmsnorm_f32_train` 経由で `hidden == 0 && rows > 0` を
+            // 逆伝播へ渡した際 `validate_rmsnorm_backward_launch` の
+            // `rstd.len() == rows` 検証が `hidden == 0` の空判定より先に
+            // 失敗してしまう。
+            let rstd = if save_rstd {
+                let degenerate_rstd = 1.0f32 / eps.sqrt();
+                Some(vec![degenerate_rstd; rows])
+            } else {
+                None
+            };
+            return Ok((Vec::new(), rstd));
         }
 
         let route = rmsnorm_route(hidden, self.smem_per_block_budget_bytes);
@@ -628,19 +650,23 @@ impl CudaRmsNorm {
     /// （`kernels_rmsnorm.rs::RMSNORM_BWD_DX_F32`／`RMSNORM_BWD_DW_F32`
     /// ドキュメンテーションコメント参照）。
     ///
-    /// `inv_n` は呼び出し元が明示する契約（[`Self::run_rmsnorm_f32_raw`]
-    /// が `ops.rs::run_fused` 経由で `inv_n = 1.0` を、
-    /// [`Self::run_rmsnorm_f32_train`] が `inv_n = 1/hidden` を渡すのと
-    /// 同じ二重契約——順伝播時に使った `inv_n` と必ず同一の値を渡す必要が
-    /// ある。異なる `inv_n` を渡すと `rstd` の導出時前提と再計算式が
-    /// 食い違い、数学的に誤った `dx` を生成する）。
+    /// `inv_n` は公開引数に含めない。現状の唯一の学習用順伝播
+    /// （[`Self::run_rmsnorm_f32_train`]）が `rstd` を常に `inv_n =
+    /// 1/hidden`（`hidden == 0` は `1.0` の退化値。ゼロ除算回避）で導出する
+    /// ため、本関数も `shape.hidden` から同一式で内部導出する（呼び出し元
+    /// が任意の `inv_n` を渡せると、`rstd` の導出時前提と再計算式が食い違い
+    /// `validate_rmsnorm_backward_launch` をすり抜けたまま数学的に誤った
+    /// `dx` を「正常結果」として返しうる。codex-review P1 指摘・PR #711
+    /// レビュー r3794149870）。将来 `ops.rs::run_fused`〈`inv_n = 1.0`〉
+    /// 経路の逆伝播を追加する場合は、`inv_n` を復活させるのではなく
+    /// 順伝播側の係数選択（`raw` か `train` か）を型で分ける設計とし、
+    /// 本関数の暗黙導出を安易に上書きしないこと。
     pub fn run_rmsnorm_bwd_f32(
         &self,
         x: &[f32],
         w: Option<&[f32]>,
         dy: &[f32],
         rstd: &[f32],
-        inv_n: f32,
         shape: RmsNormShape,
     ) -> Result<(Vec<f32>, Option<Vec<f32>>), CudaError> {
         let RmsNormShape { rows, hidden } = shape;
@@ -653,8 +679,27 @@ impl CudaRmsNorm {
             w.map(|s| s.len()),
         )?;
 
+        // `run_rmsnorm_f32_train` と同一式（呼び出し元が指定する余地を
+        // なくすことで数値契約を強制する。上記ドキュメンテーションコメント
+        // 参照）。
+        let inv_n = if hidden == 0 {
+            1.0f32
+        } else {
+            1.0f32 / hidden as f32
+        };
+
         if rows == 0 || hidden == 0 {
-            return Ok((Vec::new(), w.map(|_| Vec::new())));
+            // `dx` は `x` と同じ形状（`numel = rows*hidden`）のため常に
+            // 空。`dw` は `w` と同じ形状（`len == hidden`）を維持する契約
+            // （`validate_rmsnorm_backward_launch` の `w_len == hidden`
+            // 検証・CPU 参照実装と揃える）。`rows == 0` かつ `hidden > 0`
+            // では「0 行分の勾配和」= 全要素 0 の `hidden` 長ベクトルが
+            // 正しい形状（`w` の長さは検証済みで `hidden` と一致）。
+            // Cursor Bugbot 指摘（PR #711 レビュー r3794159146）: 従来は
+            // 常に空 Vec を返し `w.len() == hidden` の検証・CPU 参照実装と
+            // 形状が食い違っていた。
+            let dw = w.map(|w_slice| vec![0.0f32; w_slice.len()]);
+            return Ok((Vec::new(), dw));
         }
 
         let x_dev = self.stream.clone_htod(x)?;
