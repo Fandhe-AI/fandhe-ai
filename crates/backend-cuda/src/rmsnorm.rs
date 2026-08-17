@@ -577,6 +577,20 @@ mod tests {
         assert!(matches!(err, CudaError::InvalidRmsNormShape { .. }));
     }
 
+    #[test]
+    fn validate_rmsnorm_launch_accepts_hidden_at_i32_max_boundary() {
+        // `hidden == i32::MAX`（許容上限ちょうど）は受理される契約
+        // （`kernels_rmsnorm.rs` 冒頭コメント「ループ添字のオーバーフロー
+        // 安全性」参照）。実機でこの `hidden` を実行するには行あたり
+        // 約 8 GiB のバッファが要るため実行までは検証しないが、ホスト側
+        // 検証がこの境界を「拒否しすぎていない」ことのみ回帰確認する
+        // （`validate_rmsnorm_launch_rejects_dims_exceeding_i32_max` の
+        // 対となる境界値ケース）。
+        assert!(
+            validate_rmsnorm_launch(1, i32::MAX as usize, i32::MAX as usize, None, 1e-5).is_ok()
+        );
+    }
+
     // --- match_rmsnorm_plan ---
     //
     // `tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の

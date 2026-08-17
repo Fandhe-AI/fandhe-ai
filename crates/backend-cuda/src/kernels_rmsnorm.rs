@@ -256,3 +256,49 @@ extern "C" __global__ void rmsnorm_f32_twopass(
     }
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// grid-stride ループの添字（`row`／`base`／`i`）が `long long` で
+    /// 宣言されていることをソース文字列に対して検査する（本ファイル
+    /// 冒頭コメント「ループ添字のオーバーフロー安全性」参照）。
+    ///
+    /// `hidden`／`rows` は `i32::MAX` まで許容され（`rmsnorm.rs::
+    /// validate_rmsnorm_launch`）、実機で `hidden == i32::MAX` を実行する
+    /// には行あたり約 8 GiB のバッファが要るため決定的な実行検証は
+    /// 非現実的（実機依存の `#[ignore]` テストの対象にもしない）。
+    /// 代わりに、オーバーフロー安全性の根拠となる「添字が `int` へ縮退
+    /// していない」ことをソース文字列上で回帰検出する。1 パス・2 パス
+    /// 双方のカーネルで 3 種の添字（`row`／`base`／`i`）を検査する
+    /// （codex-review 指摘・PR #706 レビュー r3793473231 相当）。
+    #[test]
+    fn onepass_and_twopass_loop_indices_are_declared_long_long() {
+        for src in [RMSNORM_F32_ONEPASS, RMSNORM_F32_TWOPASS] {
+            assert!(
+                src.contains("for (long long row = blockIdx.x; row < rows; row += gridDim.x)"),
+                "row ループ添字が long long で宣言されていない"
+            );
+            assert!(
+                src.contains("for (long long base = lane * 4; base < vec_hidden; base += 32 * 4)"),
+                "base ループ添字が long long で宣言されていない"
+            );
+            assert!(
+                src.contains(
+                    "for (long long i = (long long)vec_hidden + lane; i < hidden; i += 32)"
+                ),
+                "i ループ添字が long long で宣言されていない"
+            );
+            // ループ添字が `int` のまま宣言される回帰（今回是正した
+            // signed overflow の再発）を検出する。
+            assert!(
+                !src.contains("for (int row = blockIdx.x")
+                    && !src.contains("for (int base = lane * 4")
+                    && !src.contains("for (int i = vec_hidden + lane")
+                    && !src.contains("for (int i = (int)vec_hidden + lane"),
+                "grid-stride ループ添字が int へ縮退している"
+            );
+        }
+    }
+}
