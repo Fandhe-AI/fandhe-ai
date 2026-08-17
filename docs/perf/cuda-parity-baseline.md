@@ -203,3 +203,124 @@ pass」は本イシューのスコープでは未達のまま確定している�
 - イシュー #186（Tensor Core 経路の数値一致閾値の実測再評価。REQ-2 改定
   候補の引き渡し先）
 - イシュー #490（GEMM 性能改善ツリー Phase 2 親）
+- `docs/perf/cuda-optimized-remeasurement.md`「役割分担」節（#575 は性能値
+  採用の前提ゲートとして非後退を確認する側であることの相互参照）
+
+## 8. Phase F-4 最終確認（#575）
+
+GEMM 性能改善ツリー（ルート #479）Phase F（親 #569）の F-4。B-0（#491・
+PR #640）で確立した非後退契約に対し、Phase B/C のカーネル改修完了時点で
+最終確認を行った記録。
+
+### 8.1 B-0 基準に対する差分確認（実機非依存・完了）
+
+B-0 の基準コミット `01872cb`（PR #640・#491）から本イシュー着手時点の
+`origin/main`（`a0fc666f26a427758a30eed67cdccc88b2a54e67`。本イシュー用
+ブランチの分岐元）までの差分を機械確認した。この確認は「契約側
+（tolerance 定数・fixture 上限値）が緩和されていないこと」の静的検証で
+あり、Phase B/C カーネル改修後の**実測値**が現行ベースラインを下回って
+いることの証明ではない（8.6 で区別する）。
+
+- **tolerance 定数**: `git diff 01872cb..HEAD -- crates/backend-cpu/src/parity.rs`
+  は**差分なし**。`RELATIVE_TOLERANCE`（1e-3）・`ABSOLUTE_RESCUE_THRESHOLD`
+  （1e-5）は B-0 から一度も変更されていない
+- **ベースライン fixture**: `git diff 01872cb..HEAD --
+  crates/backend-cuda/tests/common/parity_baseline.rs` の変更は
+  `1df5c0a`（PR #678・イシュー #500）1 コミットのみ。内容は
+  (a) `wmma_tf32_staged` 行の新規追加（fail-closed プレースホルダ。
+  `baseline_fail_count: 0`・`baseline_mean_abs_diff_ceiling: 0.0`・
+  `baseline_provenance_unconfirmed: true`。§6「未計測形状・シードの行
+  追加」の例外条件どおり推定値ではなくプレースホルダ）、(b) opt カーネル
+  単独検査の `src/gemm.rs` への移設に伴うコメント更新、(c) フィールド名
+  `basic_kernel_baseline_unconfirmed` → `baseline_provenance_unconfirmed`
+  への改名（`WmmaTf32Staged` 行にも同じ意味で使うための一般化）のみで、
+  **既存行の `baseline_fail_count`・`baseline_mean_abs_diff_ceiling` に
+  上方更新（緩和）は存在しない**（値はいずれも B-0 記録値のまま）。よって
+  §6 の「上方更新はユーザー承認必須」規約に抵触する変更はなく、**契約
+  自体（判定式・上限値）はカーネル改修（Phase B/C）を通じて一貫して
+  緩和されていない**
+
+一方、`1df5c0a`（PR #678・イシュー #500）は `kernels_wmma_opt.rs`（TF32
+経路）へ Phase B 技法を横展開しており、TF32 経路のカーネル実装自体は
+B-0 時点から変化している。したがって「契約が緩和されていないこと」と
+「実測 fail_count・mean_abs_diff が現行ベースラインを実際に下回って
+いること」は別の主張であり、後者は 8.3 の実機不達により本イシューでは
+確認できていない（8.6 で明示的に区別する）
+
+### 8.2 GPU 不要のロジック検査（実機非依存・完了・green）
+
+`cargo test -p backend-cuda --test parity_nonregression` を実行し、
+実機必須テスト（`parity_baselines_do_not_regress`。CUDA 実機・compute
+capability 8.0 以降が必須で `#[ignore]` 分離済み）を除く 8 件（fixture
+自己整合性・`tolerance_constants_are_pinned`・fail-closed 契約の
+falsification 検査群）が全て green であることを確認した。
+
+### 8.3 実機到達性ゲートの再確認（不達・#571/#572/#502 と同型）
+
+`docs/real-hardware-verification-env.local.md`（実ホスト名を記録するローカル
+用ファイル。`.gitignore` 対象）の存在を確認したところ、本セッションの作業
+環境には存在しなかった。直前の F-1（#571・PR #710）・F-2（#572）・B-11
+（#502）と同一の実機不達状態であり、同方式（実測せず安全側に倒し、推定値
+を記載しない）を踏襲する。
+
+**確定できないまま残る行（実機到達可能なセッションへの申し送り。2 状態を
+区別する）**:
+
+| 経路 | 形状・シード | 状態 | 未確定の理由 |
+|---|---|---|---|
+| `wmma_tf32`（基本版） | 32×32×32 seed=2000 | 要再測定（現行記録値は provenance 未確定） | §3 に実測値（154/1024・3.698e-4）は存在するが、記録元テストが opt 可用性を確認せず呼んでいるため opt 実測結果である疑いが残る（§「既知の限界」）。基本版カーネル専用の再測定が必要 |
+| `wmma_tf32`（基本版） | 256×256×4096 seed=8888 | 要再測定（現行記録値は provenance 未確定） | 同上（§3 実測値: 10647/65536・4.476e-3） |
+| `wmma_tf32_staged` | 512×512×4096 seed=0xC0FFEE | 未計測（実測値なし） | #500 で行のみ先行追加（`baseline_fail_count: 0`・`baseline_mean_abs_diff_ceiling: 0.0` はプレースホルダで実測値ではない） |
+
+### 8.4 実機実測手順（申し送りテンプレート）
+
+実機到達可能なセッションが引き継ぐ手順（`docs/real-hardware-verification-env.md`
+§2〜3 に準拠）。
+
+1. `.rev-stamp` 記録 → `rsync`（`--filter=':- .gitignore'` で `.env*`・
+   `real-hardware-verification-env.local.md` 等の秘密情報・内部実値を除外）
+   で DGX Spark GB10（`CUDA_NODE` プレースホルダ表記）へ転送する
+2. 非ログイン shell の PATH を明示したうえで以下を実行する:
+   ```bash
+   cargo test -p backend-cuda --release --test parity_nonregression -- --ignored --nocapture
+   cargo test -p backend-cuda --release --lib -- --ignored --nocapture
+   ```
+3. stdout の `fail_count/total`・`mean_abs_diff` を機械転記する（目測・
+   推定を混ぜない）
+4. **後退していない場合**: 8.3 表の該当行を実機実測値へ更新し、fixture
+   （`crates/backend-cuda/tests/common/parity_baseline.rs`）の
+   `baseline_fail_count`・`baseline_mean_abs_diff_ceiling`（4 節の表記丸め
+   天井値対応を適用）を実測値へ差し替え、`baseline_provenance_unconfirmed`
+   を `false` へ更新する（§6「下方更新」に該当し人間承認不要）
+5. **後退している場合（実測値が現行のベースライン上限を上回った場合）**:
+   ベースラインを緩めない。後退の事実を本節へ記録し、上方更新は
+   `.claude/rules/security.md` A08 に従いユーザー承認事項として停止・
+   申し送る（自動運転では実施不可）
+
+### 8.5 最終値記入テンプレート（実機セッションが埋める）
+
+| 経路 | 形状（M×N×K） | seed | fail_count/total | mean_abs_diff | 実測日 | 実測コミット |
+|---|---|---|---|---|---|---|
+| `wmma_tf32`（基本版） | 32×32×32 | 2000 | 要再測定・申し送り（現行記録値 154/1024 は provenance 未確定） | 要再測定・申し送り（現行記録値 3.698e-4 は provenance 未確定） | — | — |
+| `wmma_tf32`（基本版） | 256×256×4096 | 8888 | 要再測定・申し送り（現行記録値 10647/65536 は provenance 未確定） | 要再測定・申し送り（現行記録値 4.476e-3 は provenance 未確定） | — | — |
+| `wmma_tf32_staged` | 512×512×4096 | 0xC0FFEE | 未計測・申し送り | 未計測・申し送り | — | — |
+
+### 8.6 結論（本イシュー #575 のスコープでの完了状態）
+
+- 受け入れ基準 1「B-0 基準に対し全経路が非後退であること」: **2 つの主張
+  に分けて評価する（8.1 の指摘どおり、契約の非緩和と実測の非後退は別命題
+  のため両者を同一視しない）**
+  - 1a. 契約側の非緩和（tolerance 定数・fixture 上限値の上方更新がない
+    こと）: **確認完了**（8.1・8.2。fixture の静的検査・GPU 不要のロジック
+    検査で B-0 からの緩和が存在しないことを機械確認済み）
+  - 1b. 実測による非後退（Phase B/C 適用後のカーネル実測値が現行
+    ベースラインを実際に下回っていること）: **実機不達のため未達**。
+    `1df5c0a`（TF32 経路への Phase B 技法横展開）でカーネル実装自体は
+    B-0 時点から変化しており、実測での裏取りが必要（8.3〜8.5 へ申し送り）
+- 受け入れ基準 2「tolerance 定数が未変更であることの差分確認」: **完了**
+  （8.1）
+- 受け入れ基準 3「`fail_count` 比率・`mean_abs_diff` の最終値の本ドキュメ
+  ントへの更新」: **実機不達のため未達。手順・テンプレートを整備し 8.3〜8.5
+  で申し送り**（推定値は記載しない）
+- 受け入れ基準 4「共通契約の遵守」: **遵守**（境界チェック・tolerance・
+  依存関係・`docs/spec/`・REQ-8 下限のいずれも本イシューで変更していない）

@@ -252,8 +252,10 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
   未到達記録。実機セッションが本ドキュメントと合わせて埋める判断は実機セッション側に委ねる
 - **`docs/perf/cuda-jit-cache-benchmark.md`（#534・C-12）**: Phase C（JIT キャッシュ）固有の初回コンパ
   イル／2 回目ロード時間の実機未到達記録。本ドキュメントのスループット計測とは別レイヤ
-- **#575（Phase F-4）**: parity 非後退の最終確認。本ドキュメントは性能値採用の前提ゲートとして非後退を
-  確認するに留め、最終確認は #575 が行う
+- **#575（Phase F-4）**: parity 非後退の最終確認。記録先は
+  `docs/perf/cuda-parity-baseline.md` §8「Phase F-4 最終確認（#575）」。本
+  ドキュメントは性能値採用の前提ゲートとして非後退を確認するに留め、最終
+  確認は #575（同 §8）が行う
 - **#577（Phase F-5・人間承認）**: REQ-8 下限値の最終確定・`docs/spec/04-requirements.md` への反映判断
   （`docs/spec/` は本リポでは編集しない）
 - **#569（Phase F 親）・#579**: 全バックエンド横断の集約・`docs/performance-targets.md` 更新
