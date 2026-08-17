@@ -87,6 +87,40 @@
 /// block 数を導出する）。
 pub const RMSNORM_BLOCK_DIM: u32 = 32;
 
+/// 逆伝播カーネル（[`RMSNORM_BWD_DX_F32`]／[`RMSNORM_BWD_DW_F32`]）専用の
+/// ブロックあたりスレッド数（イシュー #596）。
+///
+/// 順伝播 [`RMSNORM_BLOCK_DIM`]（32・1 CTA = 1 warp）とは**独立**の
+/// パラメータである。逆伝播は保存 `rstd` から再計算する 2 パス構成
+/// （Σ(dy·w·x) の縮約 → dx 書き出し）のみで SMEM 常駐を必要とせず、warp
+/// 内 reduction 単体では収まらない広い `hidden` でもスループットを確保
+/// するため 8 warp（256 スレッド）のクロス warp reduction 構成を採る
+/// （参照実装〈TileKernels engram gate カーネル〉の 2 段 reduction
+/// イディオムを転用。実装計画 §3.2）。`derive_persistent_grid_two_pass`
+/// （grid = SM 数 × 16 を `rows` でクランプ）はブロック幅に依存しない
+/// 行方向の persistent grid 導出のため、`RMSNORM_BLOCK_DIM` 前提の
+/// ドキュメンテーションコメント（32 以外は「本カーネル設計」= 順伝播
+/// warp-only reduction と両立しないという記述）と矛盾しない: 逆伝播は
+/// 独自の `RMSNORM_BWD_BLOCK_DIM` の下で `derive_persistent_grid_two_pass`
+/// を再利用し（`rmsnorm.rs` 参照）、block_dim は起動時に呼び出し元が
+/// 明示的に差し替える。
+pub const RMSNORM_BWD_BLOCK_DIM: u32 = 256;
+
+#[cfg(test)]
+mod bwd_block_dim_tests {
+    use super::RMSNORM_BWD_BLOCK_DIM;
+
+    /// `RMSNORM_BWD_DX_F32` 内の `__shared__ float smem_dot[8]`
+    /// （warp あたり 1 要素の静的配列）が `RMSNORM_BWD_BLOCK_DIM / 32`
+    /// と一致することを回帰検出する（不一致は未初期化 warp スロットの
+    /// 読み出しに繋がる）。
+    #[test]
+    fn smem_dot_array_size_matches_warps_per_block() {
+        assert_eq!(RMSNORM_BWD_BLOCK_DIM / 32, 8);
+        assert!(super::RMSNORM_BWD_DX_F32.contains("__shared__ float smem_dot[8]"));
+    }
+}
+
 /// 1 パス経路（動的 SMEM 常駐）: `x` を 1 回だけロードしつつ Σx² を
 /// 同時蓄積し、warp 内 butterfly reduction → 正規化 → 書き出しまでを
 /// 中間テンソルの HBM 書き出しなしで完結する。
@@ -101,11 +135,13 @@ extern "C" __global__ void rmsnorm_f32_onepass(
     const float* __restrict__ x,
     const float* __restrict__ w,
     float* __restrict__ out,
+    float* __restrict__ rstd_out,
     int rows,
     int hidden,
     float eps,
     float inv_n,
-    int has_weight)
+    int has_weight,
+    int save_rstd)
 {
     extern __shared__ float smem[];
     int lane = threadIdx.x;
@@ -161,6 +197,15 @@ extern "C" __global__ void rmsnorm_f32_onepass(
 
         float rstd = rsqrtf(fmaf(acc, inv_n, eps));
 
+        // 学習経路（`save_rstd != 0`）でのみ行あたり 1 スカラーを書く
+        // （イシュー #596: 逆伝播は正規化済みテンソルを保存せず、この
+        // `rstd` と生の `x` から再計算する）。推論経路
+        // （`save_rstd == 0`）では `rstd_out` を一切デリファレンスしない
+        // （受け入れ基準「保存はスカラーのみ」を推論時ゼロ保存で満たす）。
+        if (save_rstd && lane == 0) {
+            rstd_out[row] = rstd;
+        }
+
         for (long long i = lane; i < hidden; i += 32) {
             float normed = smem[i] * rstd;
             if (has_weight) {
@@ -187,11 +232,13 @@ extern "C" __global__ void rmsnorm_f32_twopass(
     const float* __restrict__ x,
     const float* __restrict__ w,
     float* __restrict__ out,
+    float* __restrict__ rstd_out,
     int rows,
     int hidden,
     float eps,
     float inv_n,
-    int has_weight)
+    int has_weight,
+    int save_rstd)
 {
     int lane = threadIdx.x;
     int vec_hidden = (hidden % 4 == 0) ? hidden : 0;
@@ -226,6 +273,12 @@ extern "C" __global__ void rmsnorm_f32_twopass(
 
         float rstd = rsqrtf(fmaf(acc, inv_n, eps));
 
+        // 学習経路のみ行あたり 1 スカラーを保存する（1 パス経路と同じ
+        // 契約。本ファイル冒頭コメント「意味論」・イシュー #596 参照）。
+        if (save_rstd && lane == 0) {
+            rstd_out[row] = rstd;
+        }
+
         // Pass 2: x を再度 global から読み正規化して書き出す（同一カーネル・
         // 同一行ループ内で完結。中間テンソルは書き出さない）。`base`／`i`
         // は `long long`（同上）。
@@ -253,6 +306,171 @@ extern "C" __global__ void rmsnorm_f32_twopass(
             }
             out_row[i] = v;
         }
+    }
+}
+"#;
+
+/// 逆伝播 dx カーネル（recompute-in-backward。イシュー #596）:
+/// 正規化済みテンソルを保存せず、生の `x` と保存スカラー `rstd`（行あたり
+/// 1 要素。[`RMSNORM_F32_ONEPASS`]／[`RMSNORM_F32_TWOPASS`] が
+/// `save_rstd != 0` 時に書く）から dx をその場で再計算する。
+///
+/// 数式（`out = x * rstd * w`・`rstd = rsqrt(sum(x^2) * inv_n + eps)`）:
+/// `dx_i = rstd·dy_i·w_i − rstd³·inv_n·x_i·Σ_j(dy_j·w_j·x_j)`。
+///
+/// [`RMSNORM_BWD_BLOCK_DIM`]（256・8 warp）の 2 段 reduction（warp 内
+/// butterfly → 静的 smem 経由クロス warp reduction）で `Σ_j(dy_j·w_j·x_j)`
+/// を求める。1 行の処理につき `__syncthreads()` を 3 回使う: (1)
+/// 各 warp が部分和を `smem_dot` へ書いた後、(2) warp 0 が縮約結果を
+/// `dot_broadcast` へ書いた後、(3) persistent grid-stride ループの次反復が
+/// `smem_dot`/`dot_broadcast` を上書きする前（速い warp が遅い warp の
+/// 読み出し前に上書きするデータ競合を防ぐ。順伝播 1 パスカーネルの末尾
+/// `__syncwarp` と同じ目的をブロック全体スコープで担う）。
+pub const RMSNORM_BWD_DX_F32: &str = r#"
+extern "C" __global__ void rmsnorm_bwd_dx_f32(
+    const float* __restrict__ x,
+    const float* __restrict__ w,
+    const float* __restrict__ dy,
+    const float* __restrict__ rstd,
+    float* __restrict__ dx,
+    int rows,
+    int hidden,
+    float inv_n,
+    int has_weight)
+{
+    __shared__ float smem_dot[8];
+    __shared__ float dot_broadcast;
+
+    int tid = threadIdx.x;
+    int lane = tid % 32;
+    int warp_id = tid / 32;
+    int vec_hidden = (hidden % 4 == 0) ? hidden : 0;
+
+    for (long long row = blockIdx.x; row < rows; row += gridDim.x) {
+        const float* x_row = x + row * (long long)hidden;
+        const float* dy_row = dy + row * (long long)hidden;
+        float* dx_row = dx + row * (long long)hidden;
+        float r = rstd[row];
+
+        // Pass 1: acc = Σ(dy_j * w_j * x_j)（`base`/`i` は `long long`。
+        // `kernels_rmsnorm.rs` 冒頭コメント「ループ添字のオーバーフロー
+        // 安全性」と同じ理由で signed overflow による境界チェック迂回を
+        // 防ぐ）。
+        float acc = 0.0f;
+        for (long long base = tid * 4; base < vec_hidden; base += 256 * 4) {
+            if (base + 3 < hidden) {
+                float4 xv = *reinterpret_cast<const float4*>(x_row + base);
+                float4 dyv = *reinterpret_cast<const float4*>(dy_row + base);
+                if (has_weight) {
+                    float4 wv = *reinterpret_cast<const float4*>(w + base);
+                    acc = fmaf(dyv.x * wv.x, xv.x, acc);
+                    acc = fmaf(dyv.y * wv.y, xv.y, acc);
+                    acc = fmaf(dyv.z * wv.z, xv.z, acc);
+                    acc = fmaf(dyv.w * wv.w, xv.w, acc);
+                } else {
+                    acc = fmaf(dyv.x, xv.x, acc);
+                    acc = fmaf(dyv.y, xv.y, acc);
+                    acc = fmaf(dyv.z, xv.z, acc);
+                    acc = fmaf(dyv.w, xv.w, acc);
+                }
+            }
+        }
+        for (long long i = (long long)vec_hidden + tid; i < hidden; i += 256) {
+            float xv = x_row[i];
+            float dyv = dy_row[i];
+            float wv = has_weight ? w[i] : 1.0f;
+            acc = fmaf(dyv * wv, xv, acc);
+        }
+
+        // warp 内 butterfly reduction（5 段、全レーンが warp 内総和を保持）。
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1) {
+            acc += __shfl_xor_sync(0xffffffffu, acc, offset);
+        }
+        if (lane == 0) {
+            smem_dot[warp_id] = acc;
+        }
+        __syncthreads();
+
+        float dot = 0.0f;
+        if (warp_id == 0) {
+            float v = (lane < 8) ? smem_dot[lane] : 0.0f;
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset >>= 1) {
+                v += __shfl_xor_sync(0xffffffffu, v, offset);
+            }
+            if (lane == 0) {
+                dot_broadcast = v;
+            }
+        }
+        __syncthreads();
+        dot = dot_broadcast;
+
+        // Pass 2: x/dy を再度 global から読み dx を書き出す
+        // （中間テンソルは一切保存・参照しない。イシュー #596 の主旨）。
+        float coef = -(r * r * r * inv_n * dot);
+
+        for (long long base = tid * 4; base < vec_hidden; base += 256 * 4) {
+            if (base + 3 < hidden) {
+                float4 xv = *reinterpret_cast<const float4*>(x_row + base);
+                float4 dyv = *reinterpret_cast<const float4*>(dy_row + base);
+                float4 o;
+                if (has_weight) {
+                    float4 wv = *reinterpret_cast<const float4*>(w + base);
+                    o.x = fmaf(coef, xv.x, r * dyv.x * wv.x);
+                    o.y = fmaf(coef, xv.y, r * dyv.y * wv.y);
+                    o.z = fmaf(coef, xv.z, r * dyv.z * wv.z);
+                    o.w = fmaf(coef, xv.w, r * dyv.w * wv.w);
+                } else {
+                    o.x = fmaf(coef, xv.x, r * dyv.x);
+                    o.y = fmaf(coef, xv.y, r * dyv.y);
+                    o.z = fmaf(coef, xv.z, r * dyv.z);
+                    o.w = fmaf(coef, xv.w, r * dyv.w);
+                }
+                *reinterpret_cast<float4*>(dx_row + base) = o;
+            }
+        }
+        for (long long i = (long long)vec_hidden + tid; i < hidden; i += 256) {
+            float wv = has_weight ? w[i] : 1.0f;
+            dx_row[i] = fmaf(coef, x_row[i], r * dy_row[i] * wv);
+        }
+
+        // 次の persistent grid-stride 反復が smem_dot/dot_broadcast を
+        // 上書きする前に、全スレッドの Pass2 読み出しが完了していることを
+        // 保証するバリア（本カーネルコメント冒頭「__syncthreads() を
+        // 3 回使う」参照）。
+        __syncthreads();
+    }
+}
+"#;
+
+/// 逆伝播 dw カーネル（`has_weight` 時のみホスト側が起動する。イシュー
+/// #596）: `dw_i = Σ_r dy[r,i]·x[r,i]·rstd[r]` を列（`hidden`）方向
+/// grid-stride で導出する。1 スレッドが 1 列を担当し `rows` を serial に
+/// 蓄積する（atomics 不使用のため決定的。`fmaf` で FMA 契約統一）。
+/// dx カーネルとはグリッド構成の軸が異なる（dx は行方向 persistent grid・
+/// dw は列方向 grid-stride）ため、grid 導出は共有しない
+/// （`rmsnorm.rs::derive_persistent_grid_dw` 参照）。
+pub const RMSNORM_BWD_DW_F32: &str = r#"
+extern "C" __global__ void rmsnorm_bwd_dw_f32(
+    const float* __restrict__ x,
+    const float* __restrict__ dy,
+    const float* __restrict__ rstd,
+    float* __restrict__ dw,
+    int rows,
+    int hidden)
+{
+    for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < hidden;
+         i += (long long)blockDim.x * gridDim.x) {
+        float acc = 0.0f;
+        for (long long row = 0; row < rows; row += 1) {
+            long long idx = row * (long long)hidden + i;
+            float xv = x[idx];
+            float dyv = dy[idx];
+            float r = rstd[row];
+            acc = fmaf(dyv * r, xv, acc);
+        }
+        dw[i] = acc;
     }
 }
 "#;
@@ -299,6 +517,50 @@ mod tests {
                     && !src.contains("for (int i = (int)vec_hidden + lane"),
                 "grid-stride ループ添字が int へ縮退している"
             );
+        }
+    }
+
+    /// 逆伝播カーネル（[`RMSNORM_BWD_BLOCK_DIM`] = 256 前提のため
+    /// ストライド定数が順伝播〈32〉と異なる）のループ添字が `long long`
+    /// 宣言であることを検査する。`onepass_and_twopass_loop_indices_are_
+    /// declared_long_long` の対象配列には含めず、256 スレッド構成専用の
+    /// 文字列で別途回帰検出する（本ファイル冒頭コメント「ループ添字の
+    /// オーバーフロー安全性」と同じ根拠。イシュー #596）。
+    #[test]
+    fn bwd_dx_loop_indices_are_declared_long_long() {
+        let src = RMSNORM_BWD_DX_F32;
+        assert!(src.contains("for (long long row = blockIdx.x; row < rows; row += gridDim.x)"));
+        assert!(src.contains("for (long long base = tid * 4; base < vec_hidden; base += 256 * 4)"));
+        assert!(
+            src.contains("for (long long i = (long long)vec_hidden + tid; i < hidden; i += 256)")
+        );
+        assert!(
+            !src.contains("for (int row =")
+                && !src.contains("for (int base =")
+                && !src.contains("for (int i =")
+        );
+    }
+
+    #[test]
+    fn bwd_dw_loop_indices_are_declared_long_long() {
+        let src = RMSNORM_BWD_DW_F32;
+        assert!(src.contains(
+            "for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < hidden;"
+        ));
+        assert!(src.contains("for (long long row = 0; row < rows; row += 1)"));
+        assert!(!src.contains("for (int i =") && !src.contains("for (int row ="));
+    }
+
+    /// 順伝播カーネルの [`RMSNORM_F32_ONEPASS`]／[`RMSNORM_F32_TWOPASS`]
+    /// が `save_rstd`/`rstd_out` の学習経路パラメータを持つことを回帰
+    /// 検出する（イシュー #596 の受け入れ基準「保存はスカラーのみ」の
+    /// 入口）。
+    #[test]
+    fn forward_kernels_have_save_rstd_train_params() {
+        for src in [RMSNORM_F32_ONEPASS, RMSNORM_F32_TWOPASS] {
+            assert!(src.contains("float* __restrict__ rstd_out"));
+            assert!(src.contains("int save_rstd"));
+            assert!(src.contains("if (save_rstd && lane == 0)"));
         }
     }
 }
