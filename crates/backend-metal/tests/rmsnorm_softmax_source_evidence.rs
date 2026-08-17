@@ -64,7 +64,7 @@ fn rmsnorm_and_softmax_do_not_use_threadgroup_barrier() {
 }
 
 /// softmax は `exp2` のみを使い `exp(` を使わないことをロックする
-/// （実装計画 §4.3「`log2(e)` 事前スケール + `exp2` のみ使用」）。
+/// （実装計画 §4.3「`log2(e)` スケール + `exp2` のみ使用」）。
 #[test]
 fn softmax_uses_exp2_only_not_exp() {
     assert!(
@@ -77,21 +77,25 @@ fn softmax_uses_exp2_only_not_exp() {
     );
 }
 
-/// softmax の境界マスクが有限負値（`-INFINITY` を直接使わない）である
-/// ことをロックする（実装計画 §4.3「境界マスク」）。
+/// softmax の境界外レーン sentinel が有限負値（`-INFINITY` を直接使わない）
+/// であり、かつ sum への寄与が `valid` フラグで明示的にゲートされている
+/// ことをロックする（実装計画 §4.3「境界マスク」・PR #714 codex-review
+/// 是正: sentinel の大小関係のみに依存した暗黙除外は `-f32::MAX` 付近の
+/// 有限入力で sum を汚染しうるため、`valid ? ... : 0.0` の明示ゲートへ
+/// 是正した。`shaders/softmax.metal` ファイル冒頭コメント参照）。
 #[test]
-fn softmax_uses_finite_negative_mask_not_infinity() {
+fn softmax_uses_finite_negative_sentinel_not_infinity_and_gates_sum_by_valid() {
     assert!(
-        SOFTMAX_METAL_SOURCE.contains("SOFTMAX_MASK_Y"),
-        "softmax.metal に SOFTMAX_MASK_Y が見つかりません"
+        SOFTMAX_METAL_SOURCE.contains("SOFTMAX_NEG_FLT_MAX"),
+        "softmax.metal に SOFTMAX_NEG_FLT_MAX が見つかりません"
     );
     assert!(
         !SOFTMAX_METAL_SOURCE.contains("INFINITY"),
-        "softmax.metal は -INFINITY を直接使わない契約（有限負値マスクのみ使用）"
+        "softmax.metal は -INFINITY を直接使わない契約（有限負値 sentinel のみ使用）"
     );
     assert!(
-        SOFTMAX_METAL_SOURCE.contains("0.875f"),
-        "境界マスクのマージン係数 0.875 が見つかりません"
+        SOFTMAX_METAL_SOURCE.contains("valid ? exp2((xv - m_new) * SOFTMAX_LOG2E) : 0.0f"),
+        "sum への寄与を valid フラグで明示的にゲートする式が見つかりません"
     );
 }
 

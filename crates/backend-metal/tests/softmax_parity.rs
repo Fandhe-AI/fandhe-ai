@@ -25,7 +25,8 @@ use backend_metal::{MetalContext, MetalSoftmax};
 use bench_harness::rng::Xorshift64Star;
 
 /// テスト専用 CPU 参照実装（素朴な `exp(x - max(x)) / sum(exp(x -
-/// max(x)))`。カーネル側の `log2(e)` 事前スケール＋`exp2` 実装とは異なる
+/// max(x)))`。カーネル側の「最大値減算後に `log2(e)` を適用 + `exp2`」
+/// 実装（`shaders/softmax.metal` ファイル冒頭コメント参照）とは異なる
 /// 数式だが、数学的に同一の softmax を計算するため REQ-2 統一複合判定で
 /// 突き合わせられる）。
 fn cpu_softmax_reference(x: &[f32], rows: usize, hidden: usize) -> Vec<f32> {
@@ -134,6 +135,65 @@ fn softmax_is_numerically_stable_at_extreme_values() {
         .expect("large negative softmax must succeed");
     let cpu_out = cpu_softmax_reference(&large_negative, 1, hidden);
     assert_parity("softmax large negative values", &gpu_out, &cpu_out);
+}
+
+/// softmax 事前スケーリングのオーバーフロー・sum 汚染回帰（PR #714
+/// codex-review 指摘の 2 点を同時に検証する）:
+///
+/// 1. `x * log2(e)` を最大値減算より先に適用すると、有限だが `f32::MAX`
+///    付近の入力で `+inf` へオーバーフローし後続の `exp2(inf - inf)` が
+///    `NaN` になっていた（行 0: `f32::MAX` 付近の正の巨大値）。
+/// 2. 範囲外レーンの寄与を sentinel の大小関係のみで暗黙に除外する設計は、
+///    実データが `-f32::MAX` 付近の場合に sentinel と拮抗し sum を汚染
+///    しうる（行 1: `-f32::MAX` 付近の負の巨大値）。
+///
+/// `shaders/softmax.metal` は最大値減算後に `log2(e)` を適用し、かつ
+/// sum への寄与を `valid` フラグで明示的にゲートする構成へ是正済み
+/// 〈ファイル冒頭コメント参照〉。本テストは ±`f32::MAX` 付近の有限値と、
+/// hidden=37（32 の非倍数。SIMD 幅 32 の端数チャンクを強制する）の
+/// 組み合わせで実機上の非 NaN・CPU 一致を検証する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn softmax_is_numerically_stable_near_f32_max_with_non_multiple_of_32_hidden() {
+    let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
+    let softmax = MetalSoftmax::new(&ctx).expect("softmax パイプラインの構築に失敗した");
+
+    // hidden=37: SIMD 幅 32 の非倍数（最終チャンクが 5 要素の端数になる）。
+    let hidden = 37usize;
+
+    // 行 0: 先頭要素が f32::MAX、残りは緩やかに減少する有限大値。
+    let mut near_max_positive = vec![0.0f32; hidden];
+    near_max_positive[0] = f32::MAX;
+    for (i, v) in near_max_positive.iter_mut().enumerate().skip(1) {
+        *v = f32::MAX - (i as f32) * 1.0e30;
+    }
+
+    // 行 1: 先頭要素が -f32::MAX、残りは緩やかに増加する有限大負値。
+    let mut near_max_negative = vec![0.0f32; hidden];
+    near_max_negative[0] = -f32::MAX;
+    for (i, v) in near_max_negative.iter_mut().enumerate().skip(1) {
+        *v = -f32::MAX + (i as f32) * 1.0e30;
+    }
+
+    let mut x_data = Vec::with_capacity(2 * hidden);
+    x_data.extend_from_slice(&near_max_positive);
+    x_data.extend_from_slice(&near_max_negative);
+
+    let gpu_out = softmax
+        .run_softmax_f32(&ctx, &x_data, 2, hidden)
+        .expect("f32::MAX 付近の有限入力でも run_softmax_f32 は成功しなければならない");
+
+    assert!(
+        gpu_out.iter().all(|v| v.is_finite()),
+        "f32::MAX 付近の有限入力から NaN/inf が出力された: {gpu_out:?}"
+    );
+
+    let cpu_out = cpu_softmax_reference(&x_data, 2, hidden);
+    assert_parity(
+        "softmax near f32::MAX, hidden=37 (non-multiple of 32)",
+        &gpu_out,
+        &cpu_out,
+    );
 }
 
 /// `run_fused`（`ops.rs::MetalBackendOps::run_fused`）経由の canonical

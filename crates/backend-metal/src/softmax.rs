@@ -165,14 +165,14 @@ fn encode_softmax_dispatch(
 ) {
     encoder.setComputePipelineState(pipeline);
 
-    // SAFETY（FFI 境界 1/2）: `crate::rmsnorm::encode_rmsnorm_dispatch` と
+    // SAFETY: FFI 境界 1/2。`crate::rmsnorm::encode_rmsnorm_dispatch` と
     // 同じ「生存中の参照を保持するのみ」契約。
     unsafe {
         encoder.setBuffer_offset_atIndex(Some(x_buf.raw()), 0, 0);
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 1);
     }
 
-    // SAFETY（FFI 境界 2/2）: `crate::rmsnorm::encode_rmsnorm_dispatch` と
+    // SAFETY: FFI 境界 2/2。`crate::rmsnorm::encode_rmsnorm_dispatch` と
     // 同じ「即時複製」契約。
     unsafe {
         encoder.setBytes_length_atIndex(

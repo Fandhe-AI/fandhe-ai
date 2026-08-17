@@ -346,19 +346,20 @@ pub fn plan_dtype_is_f32(plan: &FusionPlan) -> bool {
     plan.dtype() == DType::F32
 }
 
-/// [`softmax_mask_value`] のマージン係数（MFA の `(0.875 / log2(e)) *
-/// -FLT_MAX` を y ドメイン〈`x * log2(e)` 事前スケール後〉へ写像した値の
-/// 係数部分。実装計画 §4.3「境界マスク」）。
-pub const SOFTMAX_MASK_MARGIN: f32 = 0.875;
-
-/// online softmax の境界マスク値（y ドメイン。`shaders/softmax.metal` の
-/// `SOFTMAX_MASK_Y` と同じ値を Rust 側で再現する単一の真実源）。
-/// 範囲外レーンの寄与を `-INFINITY` を直接使わず有限負値で表現し、
-/// `exp2(mask - m)` が NaN 化しないことを保証する（`tests` モジュールの
-/// 数値検証参照）。
-pub fn softmax_mask_value() -> f32 {
-    -(SOFTMAX_MASK_MARGIN * f32::MAX)
-}
+/// online softmax の online max 初期値・範囲外レーンの sentinel（x
+/// ドメイン。`log2(e)` 適用前の生値。`shaders/softmax.metal` の
+/// `SOFTMAX_NEG_FLT_MAX` と同じ値を Rust 側で再現する単一の真実源）。
+///
+/// `f32::MIN`（== `-f32::MAX`。IEEE 754 単精度の最小有限値そのもの）を
+/// 直接使う。マージンを設けない理由（PR #714 codex-review 是正。旧版は
+/// `-(0.875 * f32::MAX)` のマージン付き sentinel を sum 側の暗黙除外にも
+/// 流用していたが、入力が `-f32::MAX` 付近の有限値の場合に sentinel と
+/// 実データが数値的に拮抗し範囲外レーンの寄与が sum に混入する欠陥が
+/// あった）: sum への寄与は `shaders/softmax.metal` 側で `valid` フラグに
+/// より明示的にゲートするため、この sentinel は「どんな有限入力より真に
+/// 小さいか等しい」ことだけを保証すればよく、マージンは不要かつ有害
+/// （マージンを設けると sentinel 自身が有効な入力レンジを狭める）。
+pub const SOFTMAX_NEG_FLT_MAX: f32 = f32::MIN;
 
 #[cfg(test)]
 mod tests {
@@ -692,48 +693,43 @@ mod tests {
         assert!(plan_dtype_is_f32(&plan));
     }
 
-    // --- softmax_mask_value ---
+    // --- SOFTMAX_NEG_FLT_MAX ---
     //
-    // マージン係数 0.875 の数値検証（実装計画 §6.1「純 Rust の再現テスト」）。
+    // online max sentinel の数値検証（PR #714 codex-review 是正）。
     // f16 版は本タスクのスコープ外（`BackendOps` が f32 専用のため）。
 
     #[test]
-    fn softmax_mask_value_is_finite() {
-        assert!(softmax_mask_value().is_finite());
-        assert!(softmax_mask_value() < 0.0);
+    fn softmax_neg_flt_max_is_finite() {
+        assert!(SOFTMAX_NEG_FLT_MAX.is_finite());
     }
 
     #[test]
-    fn softmax_mask_value_does_not_pollute_sum_for_representative_m() {
-        // 代表的な `m`（正規化後の最大値。0.0〜数百程度の y ドメイン値を
-        // 想定）に対し `exp2(mask - m)` が 0.0 に潰れ、オンライン総和
-        // `l` を汚さないことを確認する。
-        let mask = softmax_mask_value();
-        for &m in &[0.0f32, 1.0, 100.0, 1e4, 1e6] {
-            let contribution = (mask - m).exp2();
-            assert_eq!(
-                contribution, 0.0,
-                "mask={mask}, m={m}: exp2(mask-m)={contribution} (0.0 に潰れていない)"
+    fn softmax_neg_flt_max_equals_negative_f32_max() {
+        // `f32::MIN == -f32::MAX`（IEEE 754 単精度の最小有限値。負値の
+        // 検証も兼ねる）。マージンなしの sentinel であることをロックする。
+        assert_eq!(SOFTMAX_NEG_FLT_MAX, -f32::MAX);
+    }
+
+    #[test]
+    fn softmax_neg_flt_max_survives_fma_without_producing_negative_infinity() {
+        // FMA 経由（`fma(1.0, sentinel, 0.0)` 等の恒等演算）でも -inf を
+        // 生まないことを確認する。
+        let via_fma = 1.0f32.mul_add(SOFTMAX_NEG_FLT_MAX, 0.0);
+        assert!(via_fma.is_finite());
+        assert_eq!(via_fma, SOFTMAX_NEG_FLT_MAX);
+    }
+
+    #[test]
+    fn softmax_neg_flt_max_is_less_than_or_equal_to_any_finite_f32() {
+        // sentinel はどんな有限な `f32` 入力よりも真に小さいか等しく、
+        // オンライン最大値更新 `m_new = max(m, chunk_max)` が初期状態
+        // （sentinel）を実データで確実に上書きする（同値の場合も含め
+        // 安全）ことを保証する。
+        for &v in &[0.0f32, 1.0, -1.0, 1e4, -1e4, f32::MAX, -f32::MAX] {
+            assert!(
+                SOFTMAX_NEG_FLT_MAX <= v,
+                "sentinel={SOFTMAX_NEG_FLT_MAX} は有限値 {v} 以下でなければならない"
             );
         }
-    }
-
-    #[test]
-    fn softmax_mask_value_survives_fma_without_producing_negative_infinity() {
-        // FMA 経由（`fma(1.0, mask, 0.0)` 等の恒等演算）でも -inf を生まない
-        // ことを確認する（実装計画 §6.1 (c)）。
-        let mask = softmax_mask_value();
-        let via_fma = 1.0f32.mul_add(mask, 0.0);
-        assert!(via_fma.is_finite());
-        assert_eq!(via_fma, mask);
-    }
-
-    #[test]
-    fn softmax_mask_value_is_less_than_any_realistic_finite_max() {
-        // mask はどんな有限な `m`（現実的な入力レンジ）よりも十分小さく、
-        // オンライン最大値更新 `m_new = max(m, chunk_max)` が初期状態
-        // （mask）を実データで確実に上書きすることを保証する。
-        let mask = softmax_mask_value();
-        assert!(mask < -1.0e37);
     }
 }

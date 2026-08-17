@@ -224,7 +224,7 @@ fn encode_rmsnorm_dispatch(
 ) {
     encoder.setComputePipelineState(pipeline);
 
-    // SAFETY（FFI 境界 1/2）: `setBuffer_offset_atIndex` は生存中の
+    // SAFETY: FFI 境界 1/2。`setBuffer_offset_atIndex` は生存中の
     // `MTLBuffer` への参照を保持するのみで即座に読み書きはしない
     // （`crate::gemm::encode_dispatch` の同種コメント参照）。
     // `x_buf`/`w_buf`/`out_buf` は呼び出し元 `ctx.dispatch_sync` が
@@ -235,7 +235,7 @@ fn encode_rmsnorm_dispatch(
         encoder.setBuffer_offset_atIndex(Some(out_buf.raw()), 0, 2);
     }
 
-    // SAFETY（FFI 境界 2/2）: `setBytes_length_atIndex` は指定ポインタから
+    // SAFETY: FFI 境界 2/2。`setBytes_length_atIndex` は指定ポインタから
     // 指定バイト数を即座に複製する（`crate::gemm::encode_dispatch` と同じ
     // 「即時複製」契約）。各ローカル変数は本呼び出し中生存しており、
     // 型・バイト数はカーネル引数宣言（`shaders/rmsnorm.metal` の
