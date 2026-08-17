@@ -13,17 +13,24 @@
 //! 1. `onnx-interop` 素朴実装（`ops/softmax.rs`）・GPU parity テストの CPU
 //!    参照実装がいずれも `f32::exp`／`expf` を使うため、REQ-2 一致が構成上
 //!    保証される。
-//! 2. `exp2` 変換（GPU カーネルが実際に計算する `exp2(x * log2(e))`）・NEON
-//!    多項式近似は、本実装セッション・CI が x86_64 のため aarch64 実機での
-//!    実測 A/B 検証ができない。未検証の近似実装を出荷経路として採用すると
-//!    REQ-2 複合判定（相対誤差 1e-3 未満 または絶対誤差 1e-5 未満）に対し
-//!    安全側でないため、標準 `f32::exp` に留める。
-//! 3. GPU 側 `exp2` カーネルとの一致は既存 CUDA/Metal parity テスト
+//! 2. `exp2` 変換（GPU カーネルが実際に計算する `exp2(x * log2(e))`）との
+//!    A/B 比較はアーキテクチャ非依存の算術（`f32::exp2` と `f32::exp` の
+//!    比較のみで NEON intrinsic を要さない）であり x86_64 でも実行可能
+//!    なため、`tests::exp2_matches_exp_within_parity_tolerance`（本モジュール
+//!    末尾）で実施済み。softmax の実引数域（`v - max <= 0`。極値
+//!    `[-1e30, 0]` を含む）で REQ-2 統一複合判定
+//!    （[`crate::parity::compare`]）を満たすことを確認したうえで、桁数
+//!    増（追加の `log2(e)` 乗算・`exp2` 呼び出し）に見合う性能上の利点が
+//!    softmax 単体では小さいため、実装を分岐させず `f32::exp` に統一する
+//!    判断とした（GPU 側との一致根拠は 3. を参照）。
+//! 3. NEON 多項式近似 exp は、本実装セッション・CI が x86_64 のため
+//!    aarch64 実機での実測 A/B 検証ができない。未検証の近似実装を出荷
+//!    経路として採用すると REQ-2 複合判定に対し安全側でないため不採用。
+//!    実機 A/B による将来採用はフォローアップ（実機検証環境
+//!    `docs/real-hardware-verification-env.md` でのみ実行可能）。
+//! 4. GPU 側 `exp2` カーネルとの一致は既存 CUDA/Metal parity テスト
 //!    （`f32::exp` ベース CPU 参照で green）が実証済みであり、本実装が
 //!    同じ参照点を使うことで一致根拠を引き継ぐ。
-//!
-//! NEON 近似 exp の実機 A/B による将来採用はフォローアップ（実機検証環境
-//! `docs/real-hardware-verification-env.md` でのみ実行可能）。
 //!
 //! # NEON / スカラー二重経路・FMA 契約・境界検査
 //!
@@ -367,6 +374,30 @@ mod tests {
         ];
         let plan = FusionPlan::from_ops(ops, vec![8], DType::F32, 1).unwrap();
         assert_eq!(match_softmax_plan(&plan), None);
+    }
+
+    /// exp 実装方式 A/B 比較（受入基準 2）: 標準 `f32::exp(x)` と GPU
+    /// カーネルが実際に計算する `exp2(x * log2(e))`（`f32::exp2` ベース。
+    /// アーキテクチャ非依存の算術のため x86_64 CI でも実行可能——モジュール
+    /// 冒頭「exp 実装方式の採用判断」2. 参照）を、softmax の実引数域
+    /// （`v - max <= 0`。最大値 0・極値 -1e30 を含む）で突き合わせる。
+    /// REQ-2 統一複合判定（[`crate::parity::compare`]。tolerance 緩和なし）
+    /// を満たすことを確認する。
+    #[test]
+    fn exp2_matches_exp_within_parity_tolerance() {
+        use crate::parity::assert_parity;
+
+        let xs: Vec<f32> = vec![
+            0.0, -1e-6, -0.001, -0.1, -0.5, -1.0, -2.0, -5.0, -10.0, -20.0, -50.0,
+            -87.0, // f32::exp(-87) はアンダーフロー境界付近
+            -1e3, -1e6, -1e30,
+        ];
+        let via_exp: Vec<f32> = xs.iter().map(|&v| v.exp()).collect();
+        let via_exp2: Vec<f32> = xs
+            .iter()
+            .map(|&v| (v * std::f32::consts::LOG2_E).exp2())
+            .collect();
+        assert_parity("softmax exp vs exp2(x*log2(e)) A/B", &via_exp2, &via_exp);
     }
 
     #[cfg(target_arch = "aarch64")]
