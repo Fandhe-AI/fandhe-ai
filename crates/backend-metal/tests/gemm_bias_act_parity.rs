@@ -268,3 +268,58 @@ fn gemm_bias_act_rejects_incompatible_bias_shape_like_cpu() {
         Err(tensor_core::device::BackendError::ShapeMismatch(_))
     ));
 }
+
+/// ブロードキャスト bias（`[1]`／`[1, n]`。非融合合成へフォールバックする
+/// 経路）かつ `m`／`n`／`k` のいずれかがゼロの CPU-Metal 一致
+/// （`gemm_bias_act_broadcast_fallback_matches_cpu` の非ゼロ形状に対し、
+/// ゼロ次元専用の回帰。`self.gemm`〈`ZeroDimension` を拒否〉ではなく
+/// CPU／CUDA と同じゼロ初期化結果を返す契約になったことを確認する。
+/// Cursor Bugbot 指摘。PR #717 レビュースレッド
+/// `discussion_r3795178880`）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn gemm_bias_act_broadcast_fallback_zero_dim_matches_cpu() {
+    let cpu = CpuBackendOps::new();
+    let metal = MetalBackendOps::new();
+
+    // (m, n, k, bias_shape) のうち、いずれか 1 軸がゼロで
+    // `gemm_bias_act_route` が `ComposedFallback` を選ぶ形状を網羅する。
+    let cases: &[(usize, usize, usize, Vec<usize>)] = &[
+        (0, 8, 6, vec![1]),
+        (0, 8, 6, vec![1, 8]),
+        (10, 0, 6, vec![1]),
+        (10, 6, 0, vec![1]),
+        (10, 6, 0, vec![1, 6]),
+    ];
+
+    for (m, n, k, bias_shape) in cases.iter().cloned() {
+        let a =
+            Tensor::new(Xorshift64Star::new(801).fill_vec(m * k), &[m, k]).expect("valid tensor");
+        let b =
+            Tensor::new(Xorshift64Star::new(802).fill_vec(k * n), &[k, n]).expect("valid tensor");
+        let bias_len = bias_shape.iter().product();
+        let bias = Tensor::new(Xorshift64Star::new(803).fill_vec(bias_len), &bias_shape)
+            .expect("valid tensor");
+
+        let cpu_result = cpu
+            .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)
+            .expect("cpu gemm_bias_act always succeeds");
+        let metal_result = metal
+            .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)
+            .unwrap_or_else(|e| {
+                panic!(
+                    "metal gemm_bias_act (broadcast fallback, zero-dim m={m} n={n} k={k} \
+                     bias_shape={bias_shape:?}) must succeed like cpu/cuda: {e}"
+                )
+            });
+        assert_eq!(metal_result.shape(), cpu_result.shape());
+        backend_cpu::parity::assert_parity(
+            &format!(
+                "gemm_bias_act broadcast-fallback zero-dim cpu-metal parity \
+                 m={m} n={n} k={k} bias_shape={bias_shape:?}"
+            ),
+            metal_result.as_slice().expect("contiguous"),
+            cpu_result.as_slice().expect("contiguous"),
+        );
+    }
+}

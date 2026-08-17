@@ -213,7 +213,26 @@ impl BackendOps for MetalBackendOps {
                     tensor_core::broadcast_shape(&out_shape, bias.shape())
                         .map_err(BackendError::ShapeMismatch)?;
                 }
-                let mut out = self.gemm(a, b)?;
+                // `self.gemm`（`MetalGemm::dispatch_auto` 経由）は
+                // `m`/`n`/`k == 0` を `ZeroDimension` として拒否する
+                // （`gemm.rs::validate_dims`）が、CPU／CUDA の `gemm`
+                // （`gemm_blis_parallel`・CUDA 側実装）はゼロ次元を合法な
+                // 形状として受理しゼロ初期化バッファをそのまま返す。この
+                // 非対称のため、ブロードキャスト bias（`[1]`・`[1, n]` 等。
+                // `Fused` 経路に乗らない形状）かつゼロ次元の場合に
+                // `self.gemm` を呼ぶと Metal のみ `ZeroDimension` で失敗し
+                // `gemm_bias_act` の CPU／CUDA と共有される契約が破れる
+                // （Cursor Bugbot 指摘。PR #717 レビュースレッド）。
+                // `Fused` 経路（本関数末尾）は既にゼロ次元をホスト側
+                // epilogue で受理しているため、ここでも `self.gemm` を
+                // 経由せず CPU／CUDA と同じゼロ初期化 `m * n` 結果を直接
+                // 構築することで両経路の zero-dim 挙動を揃える。
+                let mut out = if m == 0 || n == 0 || k == 0 {
+                    Tensor::new(vec![0.0f32; m * n], &out_shape)
+                        .map_err(BackendError::ShapeMismatch)?
+                } else {
+                    self.gemm(a, b)?
+                };
                 if let Some(bias) = bias {
                     out = self.add(&out, bias)?;
                 }
