@@ -120,6 +120,20 @@
 //! `_unverified` suffix・`#[doc(hidden)]` は当面維持する。詳細は
 //! [`gemm::MetalGemm::dispatch_f16_unverified`] のドキュメントコメントを
 //! 参照）。
+//!
+//! イシュー #604 で融合 RMSNorm 順伝播カーネル（[`rmsnorm::MetalRmsNorm`]）と
+//! online softmax カーネル（[`softmax::MetalSoftmax`]）を MSL で追加した。
+//! CUDA 側 G-6（#592）と同一アルゴリズム契約（1 パス／2 パス経路・
+//! persistent threadgroup・FMA 契約統一）を採るが、`MetalContext::
+//! dispatch_sync` が動的 threadgroup memory 設定 API を経由しないため
+//! 1 パス経路はコンパイル時固定長の `threadgroup` 配列を使う（[`row_kernel`]
+//! モジュール冒頭コメント参照）。両カーネル・`row_kernel` の経路選択・
+//! canonical 融合プラン照合の cfg 非依存部分は [`row_kernel`] に集約し、
+//! [`ops::MetalBackendOps::run_fused`] からルーティングする。softmax の
+//! CUDA 直接 parity 相手（#594・G-7）は本イシュー時点で未実装のため、
+//! 両バックエンドとも CPU 参照実装（REQ-2 統一複合判定）に対する数値一致を
+//! 経由した推移的な担保に留まる（`softmax.rs`／`tests/softmax_parity.rs`
+//! ドキュメンテーションコメント参照）。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -140,6 +154,19 @@ pub mod ops;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
+#[cfg(target_os = "macos")]
+pub mod rmsnorm;
+// `pad`／`tile` と同じ設計判断: `objc2` 系 FFI に触れないため
+// `cfg(target_os = "macos")` を付けず Linux でも単体テストが回るが、
+// 実際の呼び出し元（`ops.rs`／`rmsnorm.rs`／`softmax.rs`）は macOS 限定
+// のため、`pub(crate)` のままだと Linux 単体ビルド（`cargo build`／
+// `cargo clippy` の非テストパス）で「クレート内から到達不能」と
+// 判定され dead_code lint が誤検知する。`pad`／`tile` に倣い `pub` に
+// する（`row_kernel` モジュール自体は公開 API 面〈`facade`〉から到達
+// しないため実質的な公開面拡大にはならない）。
+pub mod row_kernel;
+#[cfg(target_os = "macos")]
+pub mod softmax;
 pub mod tile;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
@@ -173,4 +200,8 @@ pub use half_buffer::MetalHalfBuffer;
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
+#[cfg(target_os = "macos")]
+pub use rmsnorm::MetalRmsNorm;
+#[cfg(target_os = "macos")]
+pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
