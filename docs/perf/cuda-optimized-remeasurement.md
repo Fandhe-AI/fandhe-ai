@@ -140,26 +140,33 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" \
 #    「数値一致（parity）確認」節参照）
 cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
 
-# 4. 同一実機で PyTorch 参照値を再計測する（size ∈ {512, 1024, 2048, 4096} × {f32, f16}）
+# 4. 同一実機で PyTorch 参照値を計 5 回計測する（size ∈ {512, 1024, 2048, 4096} × {f32, f16}）。
+#    リポジトリ規約「ベンチは 5 回計測の中央値」（coding-rust.md）に合わせ、PyTorch 参照値も
+#    Rust 側 cuda_floor_bench と同数の 5 run を計測し、size×dtype ごとに run 間中央値を採る
+#    （当初は 1 run のみで確定していたが、codex レビュー P1 指摘を受け run2〜run5 を追加計測し
+#    5 run 中央値ベースへ統一した。「PyTorch 参照値の再集計」節参照）。
 # `<size>` はプレースホルダーであり、そのまま貼り付けると POSIX shell が入力リダイレクトと
 # 誤解釈し `size: No such file or directory` で停止する。SIZE 変数へ実値を入れて渡すこと。
-for SIZE in 512 1024 2048 4096; do
-  python3 docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py "$SIZE" 20 20
+for RUN in 1 2 3 4 5; do
+  for SIZE in 512 1024 2048 4096; do
+    python3 docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py "$SIZE" 20 20
+  done
 done
+# ↑ run ごとに出力を保存し、size×dtype ごとに 5 run の median_tflops を独立に中央値化する。
 
-# 5. env override を設定し cuda_floor_bench を 3 回反復実行する
-export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), <実施日>, 同一 GB10 個体"
-export CUDA_FLOOR_BENCH_PYTORCH_F32_512=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F32_1024=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F32_2048=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F32_4096=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_512=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_1024=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_2048=<再計測値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_4096=<再計測値>
+# 5. env override へ size×dtype ごとの PyTorch 5 run 中央値を設定し cuda_floor_bench を 5 回反復実行する
+export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 5 run 再実行 (warmup=20 iters=20) の run 間中央値, <実施日>, 同一 GB10 個体"
+export CUDA_FLOOR_BENCH_PYTORCH_F32_512=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F32_1024=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F32_2048=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F32_4096=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_512=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_1024=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_2048=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F16_4096=<5 run 中央値>
 cargo run -p backend-cuda --example cuda_floor_bench --release --locked
-# ↑ を 3 回反復実行し、run 間中央値を代表値として下表へ機械転記する（stdout からの転記のみ。
-#   後付け調整は行わない）
+# ↑ を 5 回反復実行し、経路×形状のセルごとに run1〜run5 の median_tflops を独立に中央値化した
+#   ものを代表値として下表へ機械転記する（stdout からの転記のみ。後付け調整は行わない）
 ```
 
 実機個体名は公開ドキュメントでは `<cuda-node>` にマスクする（`docs/git-history-exposure-decision.md`
@@ -175,11 +182,11 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 | rustc | 1.97.0 (2d8144b78 2026-07-07) |
 | commit SHA（`.rev-stamp` と転送後の値が一致確認済みであること） | `abaa94e`（下記「計測対象コミットの補足」参照） |
 | 実施日 | 2026-08-18 |
-| PyTorch 参照値の出典（`pytorch reference provenance:` 行を転記。実機個体名はマスク） | `measured this run (gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), 2026-08-18T14:26:04Z (UTC), 同一 GB10 個体 <cuda-node>, torch=2.13.0+cu130)` |
+| PyTorch 参照値の出典（`pytorch reference provenance:` 行を転記。実機個体名はマスク） | `measured this run (gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), 2026-08-18T14:26:04Z (UTC), 同一 GB10 個体 <cuda-node>, torch=2.13.0+cu130)`（run1 実行時の出典文字列。size×dtype ごとの正式な参照値は run1〜run5 の 5 run 中央値を採用する。下記「PyTorch 参照値の再集計（5 run 中央値）」節参照） |
 | 計測プロトコル | `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1） |
 | 決定的シード | `0xC0FFEE`（`cuda_floor_bench.rs::SEED`） |
 | GPU 排他性（実行前後） | 確認済み。`nvidia-smi --query-gpu=utilization.gpu` は計測前後とも 0% で一貫（実質アイドル）。常駐 2 プロセス（ノード管理用）は計測前後で変化なし、計測対象ジョブ以外の GPU 使用プロセスは検出されず |
-| 反復回数 | `cuda_floor_bench` を 3 回反復実行し、経路×形状のセルごとに run1〜run3 の中央値を代表値として採用した（「経路×形状 TFLOPS 実測」節参照。セルによって中央値を与える run が異なる）。f16 は floor 境界近傍のため run4/run5 を追加した計 5 run（下記「f16 境界注記」参照） |
+| 反復回数 | `cuda_floor_bench` を 5 回反復実行し、経路×形状のセルごとに run1〜run5 の中央値を代表値として採用した（「経路×形状 TFLOPS 実測」節参照。セルによって中央値を与える run が異なる）。PyTorch 参照値も同じく 5 run 計測し size×dtype ごとに中央値を採用した（下記「PyTorch 参照値の再集計（5 run 中央値）」節）。当初はリポジトリ規約「ベンチは 5 回計測の中央値」（coding-rust.md）に対し f32 が 3 run・PyTorch が 1 run のまま確定していたが、codex レビュー P1 指摘を受け PyTorch 側の追加 4 run を計測し、Rust・PyTorch とも 5 run 中央値ベースへ統一した |
 
 ### 計測対象コミットの補足
 
@@ -190,28 +197,59 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 parity 関連ファイル（tolerance 定数・`BASELINES`・parity 判定ロジック）に差分がないことを確認済み
 （本イシューの数値一致確認前提を崩していない）。
 
+## PyTorch 参照値の再集計（5 run 中央値。codex レビュー P1 対応）
+
+初回計測時は PyTorch 参照値を 1 run（`pytorch_size{512,1024,2048,4096}.log`）のみで確定し、Rust 側
+（`cuda_floor_bench`）の f32 経路も 3 run で確定していた。この構成はリポジトリ規約「ベンチは 5 回計測
+の中央値」（`.claude/rules/coding-rust.md`）と不整合であるという codex レビュー P1 指摘を受け、PyTorch
+参照値の追加 4 run（`pytorch_size*_run{2..5}.log`）を計測し、Rust・PyTorch とも 5 run 分のデータを揃え
+たうえで**全セルを 5 run 中央値ベースへ再集計した**（本節以降がその再集計結果であり、以下の全ての表・
+判定・候補下限値は 5 run 中央値ベースの確定値である）。
+
+size×dtype ごとの PyTorch 5 run 中央値（`<中央値>(q1=<Q1由来値>,q3=<Q3由来値>)`、括弧内 `〔〕` は
+run1〜run5 の最小〜最大レンジ）:
+
+| size | f32（5 run 中央値） | f16（5 run 中央値） |
+|------|----------------------|----------------------|
+| 512  | 7.8472(q1=7.8070,q3=7.8729)〔7.7997〜7.8767〕（run3） | 17.0153(q1=16.8278,q3=17.1024)〔16.8956〜17.1021〕（run1） |
+| 1024 | 15.6503(q1=15.5794,q3=15.6650)〔15.6121〜15.7329〕（run1） | 55.8542(q1=55.7149,q3=55.8772)〔48.7885〜56.0644〕（run1） |
+| 2048 | 17.1582(q1=17.0755,q3=17.2727)〔17.0845〜17.3309〕（run5） | 92.6039(q1=92.2147,q3=92.8121)〔92.4767〜92.7398〕（run4） |
+| 4096 | 17.4467(q1=17.2560,q3=17.4687)〔17.3663〜17.4750〕（run4） | 87.4117(q1=86.2003,q3=88.0560)〔81.9354〜88.5662〕（run2） |
+
+**PyTorch 異常値の記録**: size=1024 f16 run4 = 48.7885（q1=40.8702, q3=54.4714。他 4 run は
+55.8309〜56.0644）は一過性ジッタと推定される（q1/q3 の広がり自体が計測中の外れ値混入を示唆する）。
+5 値中央値化のため採用値（55.8542・run1）へは影響しない。
+
+**f16 4096 の run 間分散**: PyTorch f16 4096 は 81.9354〜88.5662（約 8% の広がり）と他 size・他 dtype
+より分散が大きい。`docs/perf/cuda-floor-remeasurement.md`「f16 ヒューリスティクスのばらつき」系列・
+#391 が既に記録した PyTorch cuDNN/cuBLAS ヒューリスティクス選択のばらつきと同種の事象と考えられ、下記
+「対 PyTorch 比」節の比率にもこの分散が反映される（4096 f16 の比率は PyTorch 側の run 間変動の影響を
+受けやすい点に留意する）。
+
 ## 経路×形状 TFLOPS 実測（実測時に記入）
 
 各セルは `<中央値>(q1=<Q1由来値>,q3=<Q3由来値>)` の形式で `size=<N> ...` 出力行から転記する
-（`cuda_floor_bench.rs::TflopsSample`）。経路×形状のセルごとに run1〜run3 の 3 値（各 run の
+（`cuda_floor_bench.rs::TflopsSample`）。経路×形状のセルごとに run1〜run5 の 5 値（各 run の
 `median_tflops`）を独立に中央値化し、その中央値を与えた run の出力行から `<中央値>(q1=,q3=)` を転記
 する（中央値を与える run はセルごとに異なりうるため、q1/q3 も当該 run のものを採用する。
 `docs/perf/cuda-floor-remeasurement.md`「経路×形状 TFLOPS 実測」節と同形式）。括弧内 `〔〕` へは
-run1〜run3 の中央値レンジ（3 値の最小〜最大）を注記する。
+run1〜run5 の中央値レンジ（5 値の最小〜最大）を注記する。**当初は 3 run（run1〜run3）で確定していたが、
+codex レビュー P1 指摘を受け run4・run5 を含む 5 run 中央値ベースへ統一した**（上記「PyTorch 参照値の
+再集計」節参照）。
 
 | M=N=K | tiled f32（中央値/Q1/Q3、run 間レンジ） | WMMA(TF32) opt（同左） | WMMA f16 opt（同左） | mma.sync f16（同左） | f32 最良経路 | f16 candidate 経路 |
 |-------|-----------------------------|-----------------------------|-----------------------------|-----------------------------|---------------|---------------------|
-| 512（参考値） | 2.0896(q1=2.0904,q3=2.0880)〔2.0896〜2.1037〕 | 8.2687(q1=8.3135,q3=8.2161)〔8.1960〜8.3220〕 | 4.1191(q1=4.1630,q3=4.1060)〔4.1111〜4.1323〕 | 15.2937(q1=15.3217,q3=15.2382)〔15.1556〜15.3638〕 | wmma_tf32 | mma_f16 |
-| 1024（参考値） | 2.3820(q1=2.3826,q3=2.3687)〔2.3811〜2.3838〕 | 12.6453(q1=12.6584,q3=12.6025)〔12.6168〜12.7353〕 | 8.8470(q1=8.8522,q3=8.7867)〔8.8191〜8.8645〕 | 33.5460(q1=33.8763,q3=33.4041)〔33.4457〜33.7995〕 | wmma_tf32 | mma_f16 |
-| 2048 | 2.3422(q1=2.3428,q3=2.3412)〔2.3404〜2.3432〕 | 14.3540(q1=14.3719,q3=14.2383)〔14.3201〜14.3842〕 | 7.1973(q1=7.2126,q3=7.1702)〔5.6792〜8.9661〕 | 48.3274(q1=48.5547,q3=46.2002)〔47.9647〜48.3383〕 | wmma_tf32 | mma_f16 |
-| 4096 | 1.9798(q1=1.9804,q3=1.9789)〔1.9723〜1.9847〕 | 9.0164(q1=9.0225,q3=9.0061)〔9.0109〜9.0655〕 | 4.3521(q1=4.3528,q3=4.3511)〔4.3508〜4.3620〕 | 33.2252(q1=33.9328,q3=31.0918)〔32.7499〜34.5145〕 | wmma_tf32 | mma_f16 |
+| 512（参考値） | 2.0896(q1=2.0904,q3=2.0880)〔2.0893〜2.1037〕 | 8.2687(q1=8.3135,q3=8.2161)〔8.1960〜8.3220〕 | 4.1191(q1=4.1630,q3=4.1060)〔4.1100〜4.1323〕 | 15.2937(q1=15.3217,q3=15.2382)〔15.1556〜15.4202〕 | wmma_tf32 | mma_f16 |
+| 1024（参考値） | 2.3830(q1=2.3841,q3=2.3811)〔2.3811〜2.3840〕 | 12.6453(q1=12.6584,q3=12.6025)〔12.6096〜12.7486〕 | 8.8470(q1=8.8522,q3=8.7867)〔8.7959〜8.8892〕 | 33.4457(q1=33.6385,q3=33.3709)〔32.6009〜33.7995〕 | wmma_tf32 | mma_f16 |
+| 2048 | 2.3425(q1=2.3448,q3=2.3414)〔2.3404〜2.3432〕 | 14.3326(q1=14.3634,q3=14.1159)〔14.1789〜14.3842〕 | 7.7525(q1=7.7799,q3=7.6902)〔5.6792〜8.9661〕 | 48.3274(q1=48.5547,q3=46.2002)〔47.9647〜48.6295〕 | wmma_tf32 | mma_f16 |
+| 4096 | 1.9723(q1=1.9726,q3=1.9722)〔1.9682〜1.9847〕 | 9.0655(q1=9.0768,q3=9.0581)〔9.0109〜9.0745〕 | 4.3546(q1=4.3567,q3=4.3543)〔4.3508〜4.3634〕 | 32.7499(q1=34.2161,q3=29.9705)〔31.4362〜34.5145〕 | wmma_tf32 | mma_f16 |
 
 代表値の出典 run（セルごとの中央値を与えた run）は次のとおり: 512 の `tiled_f32` は run2/run3 が同値
-（2.0896。q1/q3 は run2 側を採用）、512 の `mma_f16` は run3（15.2937）、2048 の `wmma_f16` は run3
-（7.1973）、2048 の `mma_f16` は run1（48.3274）、4096 の `tiled_f32` は run3（1.9798）、4096 の
-`wmma_tf32` は run3（9.0164）。それ以外のセルは run2 が中央値と一致する。4096 の `mma_f16` レンジ
-〔32.7499〜34.5145〕は run1〜run3 のみの範囲であり、境界注記（下記「f16 境界注記」節）で追加した
-run4（31.4362 TFLOPS）・run5（32.6191 TFLOPS）は含まない（Appendix の生ログ抜粋参照）。
+（2.0896。q1/q3 は run2 側を採用）、512 の `wmma_tf32`・`wmma_f16` は run2、512 の `mma_f16` は run3
+（15.2937）、1024 の `tiled_f32` は run5（2.3830）、1024 の `wmma_tf32`・`wmma_f16` は run2、1024 の
+`mma_f16` は run1（33.4457）、2048 の `tiled_f32`・`wmma_tf32`・`wmma_f16` は run4、2048 の `mma_f16`
+は run1（48.3274）、4096 の `tiled_f32`・`wmma_tf32` は run1、4096 の `wmma_f16` は run5（4.3546）、
+4096 の `mma_f16` は run3（32.7499）。
 
 `wmma_f16`（f16 opt。候補経路ではない）は 2048 形状で run 間ばらつきが大きい（5.68〜8.97 TFLOPS）が、
 これは `docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 系列・#391 が既に記録した既知の変動であり、f16 最良
@@ -219,48 +257,57 @@ run4（31.4362 TFLOPS）・run5（32.6191 TFLOPS）は含まない（Appendix �
 
 ## 対 PyTorch 比（実測時に記入）
 
-PyTorch 参照値は本セッション内で一度だけ計測し全 run で共通のため、「経路×形状 TFLOPS 実測」節で
-セルの中央値を与えた run の出力行がそのまま当該セルの正しい対 PyTorch 比になる。したがって
-`f32_best_over_pytorch=`/`f16_candidate_over_pytorch=` はセルごとの中央値出典 run（前節の注記）から
-転記する。
+対 PyTorch 比 = Rust セル 5 run 中央値（「経路×形状 TFLOPS 実測」節）÷ PyTorch 5 run 中央値（「PyTorch
+参照値の再集計（5 run 中央値）」節）で size×dtype ごとに新規に計算する（Rust・PyTorch のセル中央値は
+出典 run が size×dtype ごとに異なりうるため、両者とも独立に中央値化した値どうしを組み合わせる）。
 
 | M=N=K | f32 最良（実測大小比較で選出） / PyTorch f32 比 | f16 candidate（実測大小比較で選出） / PyTorch f16 比 |
 |-------|----------------------------------------------------|------------------------------------------------------|
-| 512（参考値） | wmma_tf32 = 105.32%（run2） | mma_f16 = 89.88%（run3） |
-| 1024（参考値） | wmma_tf32 = 80.80%（run2） | mma_f16 = 60.06%（run2） |
-| 2048 | wmma_tf32 = 82.82%（run2） | mma_f16 = 52.15%（run1） |
-| 4096 | wmma_tf32 = **51.60%**（run3） | mma_f16 = **39.42%**（run2） |
+| 512（参考値） | wmma_tf32 = 8.2687 / 7.8472 = 105.37% | mma_f16 = 15.2937 / 17.0153 = 89.88% |
+| 1024（参考値） | wmma_tf32 = 12.6453 / 15.6503 = 80.80% | mma_f16 = 33.4457 / 55.8542 = 59.88% |
+| 2048 | wmma_tf32 = 14.3326 / 17.1582 = 83.53% | mma_f16 = 48.3274 / 92.6039 = 52.19% |
+| 4096 | wmma_tf32 = 9.0655 / 17.4467 = **51.96%** | mma_f16 = 32.7499 / 87.4117 = **37.47%** |
 
-判定対象形状（2048/4096）の最小比率: f32 = 51.60%（4096）・f16 = 39.42%（4096）。
+判定対象形状（2048/4096）の最小比率: f32 = 51.96%（4096）・f16 = 37.47%（4096）。
 
 ## 丸め適用後の候補下限値（実測時に記入）
 
 | 精度 | 判定対象形状の最小比率（2048/4096） | 丸め規則適用後の候補下限値 | #390 実測値（f32=25%・f16=10%）との比較 |
 |------|--------------------------------------|------------------------------|------------------------------|
-| f32  | 51.60%（4096） | **50%** | #390 の 25% を 25pt 上回る |
-| f16  | 39.42%（4096） | **35%**（境界注記あり。下記参照） | #390 の 10% を 25pt 上回る |
+| f32  | 51.96%（4096） | **50%** | #390 の 25% を 25pt 上回る |
+| f16  | 37.47%（4096） | **35%**（境界注記あり。下記参照） | #390 の 10% を 25pt 上回る |
+
+丸め規則（`bench_harness::rounding::floor_lower_bound`。10% 以上は 5% 刻み切り下げ）を適用すると、
+f32: `floor(51.96 / 5) * 5 = 50`、f16: `floor(37.47 / 5) * 5 = 35` となり、3 run・PyTorch 1 run 時点の
+確定値（f32=50%・f16=35%）から**変化しない**（下記「f16 境界注記」節参照）。
 
 ### f16 境界注記（必読）
 
 f16 candidate（4096 形状）の対 PyTorch 比は `bench_harness::floor_lower_bound` の丸め刻み（5% 刻み切り
-下げ）の境界近傍（35% 台後半〜40% 台前半）に位置するため、run1〜run3 の 3 run に加えて run4・run5 を
-追加した **計 5 run** を実行し境界跨ぎの有無を確認した。
+下げ）の境界近傍に位置するため、PyTorch 参照値を 5 run 中央値へ再集計した後も引き続き境界跨ぎの有無を
+確認する。
 
-| run | 4096 f16 candidate 対 PyTorch 比 | 丸め後 floor |
-|-----|-----------------------------------|--------------|
-| run1 | 40.95% | 40 |
-| run2 | 39.42% | 35 |
-| run3 | 38.86% | 35 |
-| run4 | 37.30% | 35 |
-| run5 | 38.70% | 35 |
+**正式な確定実測値**は Rust 5 run 中央値（32.7499 TFLOPS・run3）÷ PyTorch 5 run 中央値（87.4117
+TFLOPS・run2）= **37.47%**（丸め後 floor **35**）である。
 
-**本ドキュメントの正式な確定実測値は本文プロトコル（3 run のセル単位中央値）どおり 39.42%
-（4096・run2 が中央値）であり、上表の 5 run 拡張は確定集計ではなく境界跨ぎ有無を確認するための
-感度分析である**（run4/run5 は規定外の追加計測のため正式集計へは算入しない）。感度分析の参考値と
-して 5 run 中央値 = 38.86%（run3）→ 丸め後 35%。正式値 39.42% と感度分析 38.86% は丸め後いずれも
-候補下限値 **35%** で一致する。run1 のみが 40% 境界を跨いだ事実（run1 だけ 40.95% で floor=40 相当）
-を明記し、**境界近傍のため 5 run 中 1/5 が隣接刻みへ振れる程度の run 間変動があることを申し送る**。
-採否・最終確定は F-5（#577）へ引き継ぐ。
+参考として、Rust 側の run1〜run5 各 run の `mma_f16`（4096）TFLOPS 実測値を、正式な PyTorch 参照値
+（5 run 中央値 87.4117）に対する比率として並べる（Rust 側の run 間ばらつきが丸め境界へ与える影響を
+確認するための感度分析であり、正式集計は上記の中央値どうしの比較 37.47% である）:
+
+| run | mma_f16 (4096) TFLOPS | PyTorch 5 run 中央値比 | 丸め後 floor |
+|-----|------------------------|--------------------------|--------------|
+| run1 | 34.5145 | 39.48% | 35 |
+| run2 | 33.2252 | 38.01% | 35 |
+| run3 | 32.7499 | 37.47% | 35 |
+| run4 | 31.4362 | 35.96% | 35 |
+| run5 | 32.6191 | 37.32% | 35 |
+
+**PyTorch 参照値を正しく 5 run 中央値化した結果、Rust 側の run1〜run5 は全て floor=35 に収まり境界跨ぎ
+は生じない**（旧版は PyTorch を run1 単独の 1 run 値〈84.2850〉のまま固定していたため、Rust run1 の
+比率だけが 40.95% となり floor=40 相当に跨ぐ事実があったが、これは分母〈PyTorch 参照値〉が本来必要な
+5 run 中央値へ未集計だったことによる見かけ上の跨ぎであり、PyTorch 側を正しく 5 run 中央値化した本表
+では再現しない）。正式値 37.47% と感度分析レンジ（35.96%〜39.48%）はいずれも丸め後 **35%** で一致し、
+候補下限値の安定性を裏付ける。採否・最終確定は F-5（#577）へ引き継ぐ。
 
 **候補下限値は参考算出に留める。** REQ-8 下限値（現行確定値: f32=25%・f16=10%。
 `docs/perf/performance-floor-decision.md` §9）の変更判断は本ドキュメントでは行わない。変更は F-5
@@ -347,7 +394,13 @@ cargo 1.97.0 (c980f4866 2026-06-30)
 NVIDIA GB10, 580.159.03, 12.1
 ```
 
-### PyTorch 参照値（`pytorch_size{512,1024,2048,4096}.log`）
+### PyTorch 参照値・run1（`pytorch_size{512,1024,2048,4096}.log`）
+
+初回（run1）計測時の生ログ。この時点では 1 run のみで確定していたため、`cuda_floor_bench` の
+`CUDA_FLOOR_BENCH_PYTORCH_*` env override は本 run の値で固定して 5 回の `cuda_floor_bench` 実行
+（`floor_bench_run{1..5}.log`）に共通適用していた（下記「`cuda_floor_bench` 生ログ全文」節の各 run の
+`f32_best_over_pytorch`/`f16_candidate_over_pytorch` はこの run1 単独の PyTorch 値に対する比率であり、
+本ドキュメント本文の確定値〈PyTorch 5 run 中央値に対する比率〉とは異なる。詳細は次項）。
 
 ```
 torch=2.13.0+cu130 numpy=2.2.6 cuda=13.0 device=NVIDIA GB10
@@ -361,49 +414,73 @@ kernel=torch_matmul_cuda dtype=f32 size=4096 warmup=20 iters=20 median_tflops=17
 kernel=torch_matmul_cuda dtype=f16 size=4096 warmup=20 iters=20 median_tflops=84.2850 q1=77.8918 q3=84.8805
 ```
 
-### `cuda_floor_bench` run2（生ログ全文。`floor_bench_run2.log`）
+### PyTorch 参照値・run2〜run5（codex レビュー P1 対応の追加計測）
 
-run2 は 1 回の実行として全形状を通しで実行しており生ログの原文はそのまま残すが、下記「経路×形状
-TFLOPS 実測」節のセル中央値は run ごとに独立に算出するため、run2 の `f32_best_over_pytorch`/
-`f16_candidate_over_pytorch`（末尾 2 行の丸め結果を含む）が全セルの代表値と一致するとは限らない
-（一致しないセルの裏付けは次項参照）。
+`pytorch_size{512,1024,2048,4096}_run{2,3,4,5}.log`（`median_tflops` のみ抜粋。q1/q3 は上記「PyTorch
+参照値の再集計（5 run 中央値）」節の表を参照）。
 
 ```
-device: name=NVIDIA GB10 compute_capability=(12, 1)
-pytorch reference provenance: measured this run (gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), 2026-08-18T14:26:04Z (UTC), 同一 GB10 個体 <cuda-node>, torch=2.13.0+cu130)
-size=512  tiled_f32_tflops=2.0896 wmma_tf32_tflops=8.2687 wmma_f16_tflops=4.1191 mma_f16_tflops=15.3638 f32_best_over_pytorch=105.32% f16_candidate_over_pytorch=90.29%
-size=1024 tiled_f32_tflops=2.3820 wmma_tf32_tflops=12.6453 wmma_f16_tflops=8.8470 mma_f16_tflops=33.5460 f32_best_over_pytorch=80.80% f16_candidate_over_pytorch=60.06%
-size=2048 tiled_f32_tflops=2.3422 wmma_tf32_tflops=14.3540 wmma_f16_tflops=5.6792 mma_f16_tflops=48.3383 f32_best_over_pytorch=82.82% f16_candidate_over_pytorch=52.16%
-size=4096 tiled_f32_tflops=1.9847 wmma_tf32_tflops=9.0109 wmma_f16_tflops=4.3521 mma_f16_tflops=33.2252 f32_best_over_pytorch=51.56% f16_candidate_over_pytorch=39.42%
-CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.56%) = 50%
-CUDA f16 candidate optimized floor (rounding rule applied to min ratio 39.42%) = 35%
+                f32 median_tflops                  f16 median_tflops
+size   run2     run3     run4     run5     run2     run3     run4     run5
+512    7.8767   7.8472   7.7997   7.8435   17.1021  16.9809  16.8956  17.0500
+1024   15.6980  15.7329  15.6321  15.6121  55.9006  56.0644  48.7885  55.8309
+2048   17.1662  17.1169  17.0845  17.1582  92.5320  92.4767  92.6039  92.7398
+4096   17.4721  17.4108  17.4467  17.3663  87.4117  81.9354  88.0821  88.5662
 ```
 
-run2 単体の丸め結果（f32=50%・f16=35%）は「経路×形状 TFLOPS 実測」節のセル中央値を使った判定対象
-形状の最小比率（f32=51.60%・f16=39.42%）から導く丸め結果と一致する（下記「丸め適用後の候補下限値」
-節参照）。
+（1024 f16 run4 = 48.7885 は上記「PyTorch 異常値の記録」節のとおり一過性ジッタと推定し、5 値中央値化
+のため採用値へは影響しない。）
 
-### セル中央値が run2 と異なるセルの裏付け（`floor_bench_run{1,3}.log` 該当行）
+### `cuda_floor_bench` 生ログ全文（`floor_bench_run{1,2,3,4,5}.log`）
 
-PyTorch 参照値は全 run 共通のため、各 run が自身の出力行で報告する
-`f32_best_over_pytorch`/`f16_candidate_over_pytorch` は、そのまま当該 run の値をセル中央値として採用
-した場合の正しい対 PyTorch 比になる。
-
-```
-run3 size=512:  wmma_tf32_tflops=8.1960 mma_f16_tflops=15.2937 f32_best_over_pytorch=104.40% f16_candidate_over_pytorch=89.88%
-run1 size=2048: wmma_tf32_tflops=14.3842 mma_f16_tflops=48.3274 f32_best_over_pytorch=83.00% f16_candidate_over_pytorch=52.15%
-run3 size=2048: wmma_tf32_tflops=14.3201 wmma_f16_tflops=7.1973 mma_f16_tflops=47.9647 f32_best_over_pytorch=82.63% f16_candidate_over_pytorch=51.76%
-run3 size=4096: tiled_f32_tflops=1.9798 wmma_tf32_tflops=9.0164 f32_best_over_pytorch=51.60% f16_candidate_over_pytorch=38.86%
-```
-
-### f16 境界注記の裏付け（run1・run3〜run5 の size=4096 行）
+各 run は 1 回の実行として全形状を通しで実行しており生ログの原文はそのまま残す。ログ中の
+`f32_best_over_pytorch`/`f16_candidate_over_pytorch`（末尾 2 行の丸め結果を含む）は、`cuda_floor_bench`
+バイナリが内部で参照する `CUDA_FLOOR_BENCH_PYTORCH_*`（run1 単独の PyTorch 1 run 値。上記「PyTorch 参照
+値・run1」節）に対する比率であり、本ドキュメント本文の確定値（Rust 5 run 中央値 ÷ PyTorch 5 run 中央値。
+「対 PyTorch 比」節）とは分母が異なるため一致しない。本文の確定値の再現には、下表の各セルの
+`*_tflops` 値（Rust 側）と「PyTorch 参照値の再集計」節の 5 run 中央値（PyTorch 側）を独立に組み合わせる
+必要がある。
 
 ```
-run1: mma_f16_tflops=34.5145 f16_candidate_over_pytorch=40.95%
-run3: mma_f16_tflops=32.7499 f16_candidate_over_pytorch=38.86%
-run4: mma_f16_tflops=31.4362 f16_candidate_over_pytorch=37.30%
-run5: mma_f16_tflops=32.6191 f16_candidate_over_pytorch=38.70%
+run1 size=512  tiled_f32_tflops=2.1037 wmma_tf32_tflops=8.3220 wmma_f16_tflops=4.1323 mma_f16_tflops=15.1556 f32_best_over_pytorch=106.00% f16_candidate_over_pytorch=89.07%
+run1 size=1024 tiled_f32_tflops=2.3838 wmma_tf32_tflops=12.7353 wmma_f16_tflops=8.8645 mma_f16_tflops=33.4457 f32_best_over_pytorch=81.37% f16_candidate_over_pytorch=59.88%
+run1 size=2048 tiled_f32_tflops=2.3432 wmma_tf32_tflops=14.3842 wmma_f16_tflops=8.9661 mma_f16_tflops=48.3274 f32_best_over_pytorch=83.00% f16_candidate_over_pytorch=52.15%
+run1 size=4096 tiled_f32_tflops=1.9723 wmma_tf32_tflops=9.0655 wmma_f16_tflops=4.3620 mma_f16_tflops=34.5145 f32_best_over_pytorch=51.88% f16_candidate_over_pytorch=40.95%
+run1 CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.88%) = 50%
+run1 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 40.95%) = 40%
+
+run2 size=512  tiled_f32_tflops=2.0896 wmma_tf32_tflops=8.2687 wmma_f16_tflops=4.1191 mma_f16_tflops=15.3638 f32_best_over_pytorch=105.32% f16_candidate_over_pytorch=90.29%
+run2 size=1024 tiled_f32_tflops=2.3820 wmma_tf32_tflops=12.6453 wmma_f16_tflops=8.8470 mma_f16_tflops=33.5460 f32_best_over_pytorch=80.80% f16_candidate_over_pytorch=60.06%
+run2 size=2048 tiled_f32_tflops=2.3422 wmma_tf32_tflops=14.3540 wmma_f16_tflops=5.6792 mma_f16_tflops=48.3383 f32_best_over_pytorch=82.82% f16_candidate_over_pytorch=52.16%
+run2 size=4096 tiled_f32_tflops=1.9847 wmma_tf32_tflops=9.0109 wmma_f16_tflops=4.3521 mma_f16_tflops=33.2252 f32_best_over_pytorch=51.56% f16_candidate_over_pytorch=39.42%
+run2 CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.56%) = 50%
+run2 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 39.42%) = 35%
+
+run3 size=512  tiled_f32_tflops=2.0896 wmma_tf32_tflops=8.1960 wmma_f16_tflops=4.1111 mma_f16_tflops=15.2937 f32_best_over_pytorch=104.40% f16_candidate_over_pytorch=89.88%
+run3 size=1024 tiled_f32_tflops=2.3811 wmma_tf32_tflops=12.6168 wmma_f16_tflops=8.8191 mma_f16_tflops=33.7995 f32_best_over_pytorch=80.62% f16_candidate_over_pytorch=60.51%
+run3 size=2048 tiled_f32_tflops=2.3404 wmma_tf32_tflops=14.3201 wmma_f16_tflops=7.1973 mma_f16_tflops=47.9647 f32_best_over_pytorch=82.63% f16_candidate_over_pytorch=51.76%
+run3 size=4096 tiled_f32_tflops=1.9798 wmma_tf32_tflops=9.0164 wmma_f16_tflops=4.3508 mma_f16_tflops=32.7499 f32_best_over_pytorch=51.60% f16_candidate_over_pytorch=38.86%
+run3 CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.60%) = 50%
+run3 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.86%) = 35%
+
+run4 size=512  tiled_f32_tflops=2.1027 wmma_tf32_tflops=8.2769 wmma_f16_tflops=4.1252 mma_f16_tflops=15.2382 f32_best_over_pytorch=105.43% f16_candidate_over_pytorch=89.56%
+run4 size=1024 tiled_f32_tflops=2.3840 wmma_tf32_tflops=12.7486 wmma_f16_tflops=8.8892 mma_f16_tflops=32.6009 f32_best_over_pytorch=81.46% f16_candidate_over_pytorch=58.37%
+run4 size=2048 tiled_f32_tflops=2.3425 wmma_tf32_tflops=14.3326 wmma_f16_tflops=7.7525 mma_f16_tflops=48.6295 f32_best_over_pytorch=82.70% f16_candidate_over_pytorch=52.48%
+run4 size=4096 tiled_f32_tflops=1.9722 wmma_tf32_tflops=9.0725 wmma_f16_tflops=4.3634 mma_f16_tflops=31.4362 f32_best_over_pytorch=51.92% f16_candidate_over_pytorch=37.30%
+run4 CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.92%) = 50%
+run4 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 37.30%) = 35%
+
+run5 size=512  tiled_f32_tflops=2.0893 wmma_tf32_tflops=8.2403 wmma_f16_tflops=4.1100 mma_f16_tflops=15.4202 f32_best_over_pytorch=104.96% f16_candidate_over_pytorch=90.63%
+run5 size=1024 tiled_f32_tflops=2.3830 wmma_tf32_tflops=12.6096 wmma_f16_tflops=8.7959 mma_f16_tflops=33.3124 f32_best_over_pytorch=80.57% f16_candidate_over_pytorch=59.64%
+run5 size=2048 tiled_f32_tflops=2.3428 wmma_tf32_tflops=14.1789 wmma_f16_tflops=8.2042 mma_f16_tflops=48.3013 f32_best_over_pytorch=81.81% f16_candidate_over_pytorch=52.12%
+run5 size=4096 tiled_f32_tflops=1.9682 wmma_tf32_tflops=9.0745 wmma_f16_tflops=4.3546 mma_f16_tflops=32.6191 f32_best_over_pytorch=51.93% f16_candidate_over_pytorch=38.70%
+run5 CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.93%) = 50%
+run5 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.70%) = 35%
 ```
+
+各セルの q1/q3 は「経路×形状 TFLOPS 実測」節の表へ転記済み（当該セルの中央値を与えた run のもの）。
+上記 5 run 全文と PyTorch 5 run 中央値（前項）を独立に組み合わせることで、「対 PyTorch 比」節の全セルを
+第三者が再計算・検算できる。
 
 ### parity 実行結果（抜粋）
 
