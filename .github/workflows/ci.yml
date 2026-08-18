@@ -3,7 +3,7 @@
 # fmt / clippy / test / cargo-deny のベースライン品質ゲートは Fandhe-AI/actions の
 # rust-base-ci reusable workflow（rust-ci ジョブ）へ集約した（イシュー #325。
 # local-llm-server と同型だった重複ジョブ定義の解消）。Cargo.toml 有無を各ステップの
-# `if:` で判定する自己修復方式・rustup の冪等セルフヒール・cargo-deny のバージョン
+# `if:` で判定する自己修復方式・rust-toolchain.toml 同期・cargo-deny のバージョン
 # 固定導入は共通 workflow 側の実装を参照（Fandhe-AI/actions の
 # .github/workflows/rust-base-ci.yml および rust-base-ci/README.md）。
 #
@@ -229,14 +229,16 @@ jobs:
   #     恒常対策は不要と判断する。共通側改善は Issue 起票にユーザー承認が
   #     要るため本変更では見送る（out-of-scope-tracking.md）
   #
-  # 前提: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
+  # 前提1: runner に正常動作する rustup が導入済みであること。共通側 v1.2.0 以降、
+  # rustup 不在時はネットワーク導入せず fail-closed で失敗する（Fandhe-AI/actions#86）。
+  # 前提2: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
   # 単一真実源として参照する。本移行で追加）。
   rust-ci:
     # reusable workflow は呼び出し側が付与した以上の権限を持てないため、
     # 共通側ジョブが必要とする最小権限をここでも付与する
     permissions:
       contents: read
-    uses: Fandhe-AI/actions/.github/workflows/rust-base-ci.yml@fed9c07d98367f77e5e2b63bca38843f46feee96 # main
+    uses: Fandhe-AI/actions/.github/workflows/rust-base-ci.yml@05ae036b8564d05e26db1a36d93b178894707326 # v1.2.0
     with:
       # public 区分（GitHub ホステッド既定。#457 Phase 1・#464 で反転）。共通側入力の
       # 既定値は self-hosted のため、public 区分への反転を明示するオーバーライドとして
@@ -288,11 +290,12 @@ jobs:
 
       # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
       # rust-toolchain.toml（stable + rustfmt/clippy）へ同期する（rust-ci ジョブが使う
-      # 共通側 composite action と同一実装。SHA は
-      # `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決。追跡 ref: main）。
+      # 共通側 composite action と同一実装。SHA はリリースタグ v1.1.0 の実コミットで固定
+      # （`gh api repos/Fandhe-AI/actions/git/ref/tags/v1.1.0 --jq '.object.sha'` で解決）。
+      # v1.1.0 以降、rustup 不在時はネットワーク導入せず fail-closed で失敗する）。
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
+        uses: Fandhe-AI/actions/rust-toolchain-setup@749afc98a179a545bc1bdaab68cd07b6f6659970 # v1.1.0
 
       # 共有ツールチェーンを不要に汚さないよう、未導入の場合のみ追加する（冪等。.claude/rules/ci.md）。
       - name: Ensure aarch64-apple-darwin target
@@ -414,7 +417,7 @@ jobs:
       # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
+        uses: Fandhe-AI/actions/rust-toolchain-setup@749afc98a179a545bc1bdaab68cd07b6f6659970 # v1.1.0
 
       # cargo registry（3 ジョブ共通・本ファイル冒頭コメントのキャッシュ設計参照）。
       - name: Cache cargo registry
@@ -500,7 +503,7 @@ jobs:
       # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
+        uses: Fandhe-AI/actions/rust-toolchain-setup@749afc98a179a545bc1bdaab68cd07b6f6659970 # v1.1.0
 
       # cargo registry のみ（cargo tree は依存解決・フェッチのみでビルドしないため target
       # キャッシュは不要。本ファイル冒頭コメントのキャッシュ設計参照）。
@@ -605,7 +608,7 @@ jobs:
       # 旧「Ensure rustup is installed」「Sync toolchain」の 2 手動ステップを置換する。
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
+        uses: Fandhe-AI/actions/rust-toolchain-setup@749afc98a179a545bc1bdaab68cd07b6f6659970 # v1.1.0
 
       # cargo registry（build 系ジョブと共通・本ファイル冒頭コメントのキャッシュ設計参照）。
       - name: Cache cargo registry
@@ -686,7 +689,7 @@ jobs:
       # が同期するため、手動 Ensure ステップは不要になる。
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
+        uses: Fandhe-AI/actions/rust-toolchain-setup@749afc98a179a545bc1bdaab68cd07b6f6659970 # v1.1.0
 
       # cargo registry（build 系ジョブと共通・本ファイル冒頭コメントのキャッシュ設計参照）。
       - name: Cache cargo registry
