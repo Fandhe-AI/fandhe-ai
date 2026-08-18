@@ -73,16 +73,17 @@ fn cpu_f32_initial_release_fails_when_below_floor() {
 #[test]
 fn cuda_f32_optimized_confirmed_floor_is_not_flagged_provisional() {
     let own = own_report("cuda", 1.0);
-    // ratio = 0.5/1.0*100 = 50% >= 最適化後下限 25%（#393 で確定）。
+    // ratio = 0.5/1.0*100 = 50% >= 最適化後下限 50%（#577 で再確定。下限ちょうどは Pass）。
     let pytorch = pytorch_report_with_median("cuda", 0.5);
 
     let j = judge(&own, &pytorch, BackendDtype::CudaF32, Stage::Optimized).unwrap();
     assert_eq!(j.verdict, Verdict::Pass);
-    assert_eq!(j.floor_percent, Some(25.0));
+    assert_eq!(j.floor_percent, Some(50.0));
     // CUDA 最適化後下限はイシュー #393（PR #444 実測・2026-08-10 ユーザー承認）で
-    // 40%（暫定）→ 25%（確定）へ再確定済み。承認記録の限定条件（候補算出経路
+    // 40%（暫定）→ 25%（確定）へ、さらにイシュー #577（Phase F 再計測・2026-08-18
+    // ユーザー承認）で 25%→50% へ再確定済み。承認記録の限定条件（候補算出経路
     // `wmma_tf32` が #389 §5.3 の数値一致 parity 恒常 fail 対象と一致・#186 解決後の
-    // 再確認）は `docs/perf/performance-floor-decision.md` §9 で追跡し、`provisional`
+    // 再確認）は `docs/perf/performance-floor-decision.md` §10 で追跡し、`provisional`
     // フラグでは表現しない（`.claude/rules/coding-rust.md`）。
     assert_eq!(j.floor_provisional, Some(false));
 }
@@ -103,9 +104,12 @@ fn cuda_f16_initial_release_records_ratio_without_verdict() {
 #[test]
 fn metal_f32_both_stages_use_distinct_floors() {
     let own = own_report("metal", 1.0);
-    // ratio = 0.25/1.0*100 = 25%。初期リリース下限 20% は満たすが、最適化後下限 30% は満たさない
-    // （同一実測値でも段階が異なれば合否が変わることを確認する）。
-    let pytorch = pytorch_report_with_median("metal", 0.25);
+    // ratio = 0.15/1.0*100 = 15%。イシュー #577 で最適化後下限が 30%→10% へ引き下げられたため
+    // 「最適化後の方が下限が低い」逆転が生じている（Metal f32 の計測境界を §4 準拠 prepared
+    // 入口へ揃えたことで判明した実態値。`docs/perf/performance-floor-decision.md` §10 参照）。
+    // 初期リリース下限 20% は満たさないが、最適化後下限 10% は満たすことを確認する
+    // （同一実測値でも段階が異なれば合否が変わることを確認する趣旨は維持）。
+    let pytorch = pytorch_report_with_median("metal", 0.15);
 
     let initial = judge(
         &own,
@@ -114,12 +118,12 @@ fn metal_f32_both_stages_use_distinct_floors() {
         Stage::InitialRelease,
     )
     .unwrap();
-    assert_eq!(initial.verdict, Verdict::Pass);
+    assert_eq!(initial.verdict, Verdict::Fail);
     assert_eq!(initial.floor_percent, Some(20.0));
 
     let optimized = judge(&own, &pytorch, BackendDtype::MetalF32, Stage::Optimized).unwrap();
-    assert_eq!(optimized.verdict, Verdict::Fail);
-    assert_eq!(optimized.floor_percent, Some(30.0));
+    assert_eq!(optimized.verdict, Verdict::Pass);
+    assert_eq!(optimized.floor_percent, Some(10.0));
 }
 
 #[test]

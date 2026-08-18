@@ -25,10 +25,16 @@
 //! §8）で 15% に確定済みだが、spec 側（2026-08-05 版）への反映は未実施（spec リポジトリ側対応待ち）。
 //! 本モジュールの値が一時的に spec 表へ先行する（先例 #158 §5(a) と同じ運用）。
 //!
-//! **例外（CUDA f32/f16 最適化後行）**: イシュー #393（人間承認・`docs/perf/performance-floor-decision.md`
-//! §9）で 25%／10% に確定済みだが、同じく spec 側への反映は spec リポジトリ側対応待ち。承認記録に
-//! 限定条件（候補算出経路が #389 §5.3 の数値一致 parity 恒常 fail 対象と一致・#186 解決後の再確認）が
-//! 付されており、`(CudaF32, Optimized)`／`(CudaF16, Optimized)` 各行のコメントに詳細を記載する。
+//! **例外（CUDA f32/f16 最適化後行）**: イシュー #577（人間承認・`docs/perf/performance-floor-decision.md`
+//! §10）で 50%／35% に再確定済みだが、同じく spec 側への反映は spec リポジトリ側対応待ち（旧値は
+//! #393・§9 で 25%／10% に確定していたもの）。承認記録に限定条件（候補算出経路が #389 §5.3 の数値
+//! 一致 parity 恒常 fail 対象と一致・#186 解決後の再確認）が継続して付されており、
+//! `(CudaF32, Optimized)`／`(CudaF16, Optimized)` 各行のコメントに詳細を記載する。
+//!
+//! **例外（Metal f32/f16 最適化後行）**: イシュー #577（人間承認・`docs/perf/performance-floor-decision.md`
+//! §10）で Metal f32 最適化後を 30%→10% へ引き下げ、Metal f16 最適化後を新設で 15% に確定したが、
+//! 同じく spec 側への反映は spec リポジトリ側対応待ち。`(MetalF32, Optimized)`／`(MetalF16, Optimized)`
+//! 各行のコメントに詳細を記載する。
 
 use crate::report::BenchReport;
 use crate::stats::BenchError;
@@ -78,11 +84,12 @@ pub enum Stage {
 /// 下限の設定状態。
 ///
 /// REQ-8 下限表は「下限を設定しない」（例: CUDA f16 初期リリース。tensor core 未使用の
-/// スカラー実装同士の比較は指標として無意味）と「未設定」（例: Metal f16 最適化後。
-/// 自作カーネルでの追加最適化後の実測を待つ段階。Metal f16 初期リリースはイシュー #386 で
-/// 15% に確定済みのため本 enum 上は `Ratio` へ移行した）という 2 種類の「下限なし」状態を
-/// 持つが、いずれも判定結果を `Verdict::NotApplicable`（Pass でも Fail でもない）として
-/// 扱う点は共通のため、本 enum では区別せず `reason` に出典を記録するのみとする。
+/// スカラー実装同士の比較は指標として無意味）と「未設定」（実測未了で丸め規則を適用する
+/// 根拠がまだない段階。Metal f16 初期リリースはイシュー #386 で 15% に、Metal f16 最適化後は
+/// イシュー #577 で 15% に確定済みのため、本 enum 上はいずれも `Ratio` へ移行済みで、現時点で
+/// 「未設定」に残る行は CUDA f16 初期リリースのみ）という 2 種類の「下限なし」状態を持つが、
+/// いずれも判定結果を `Verdict::NotApplicable`（Pass でも Fail でもない）として扱う点は共通の
+/// ため、本 enum では区別せず `reason` に出典を記録するのみとする。
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum FloorSpec {
     /// 下限（PyTorch 比パーセント）が設定されている行。
@@ -112,6 +119,10 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
         },
         // NEON intrinsics 適用時の実効効率見積もり（PyTorch 比 29〜40% 相当）に対し
         // AMX 非搭載を踏まえ安全側に設定した確定値（REQ-8。暫定値ではない）。
+        // イシュー #577（人間承認・`docs/perf/performance-floor-decision.md` §10）で、Phase F
+        // 実測（`docs/perf/cpu-gemm-optimized-remeasurement.md`。判定対象形状の最小比率 24.7%
+        // 〈size=2048〉に `floor_lower_bound` を適用すると 20%）に基づき 20% を「維持・確定」
+        // として再確認済み（値は変更しない）。
         (CpuF32, Optimized) => FloorSpec::Ratio {
             percent: 20.0,
             provisional: false,
@@ -121,18 +132,19 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
             percent: 10.0,
             provisional: false,
         },
-        // CUDA f32 対 PyTorch CUDA（最適化後、DGX Spark GB10）。暫定 40% は #390（PR #444）の
-        // 実機実測（tiled f32 基準・WMMA(TF32) opt 候補、3 run 完全一致）で再確定した:
-        // 判定対象形状（M=N=K=2048/4096）の実測比率最小値 25.64〜25.69%（4096 側が最小）に
-        // `bench_harness::floor_lower_bound` を適用し 25%（10% 以上のため 5% 刻み切り下げ）。
-        // イシュー #393 のユーザー承認記録（2026-08-10）で確定
-        // （`docs/perf/performance-floor-decision.md` §9）。`provisional: false` とする根拠:
-        // 暫定値の解消条件（「tensor core 実装完了後の実測で再確定すること」）を実測再確定によって
-        // 満たしたため。
+        // CUDA f32 対 PyTorch CUDA（最適化後、DGX Spark GB10）。#393（§9）で 25% に確定していたが、
+        // GEMM 性能改善ツリー（#479）Phase F の再計測（#571・PR #725 系列。
+        // `docs/perf/cuda-optimized-remeasurement.md`）で経路が引き続き `wmma_tf32` のまま
+        // スループットが向上したため再確定した: 判定対象形状（M=N=K=2048/4096）の実測比率
+        // 最小値 51.56%（4096・代表 run2）に `bench_harness::floor_lower_bound` を適用し
+        // 50%（10% 以上のため 5% 刻み切り下げ）。イシュー #577 のユーザー承認記録（2026-08-18・
+        // 本セッションの対話承認。承認者: リポジトリオーナー Nancy さん〈GitHub: aLiz-Nancy〉）で
+        // 確定（`docs/perf/performance-floor-decision.md` §10）。`provisional: false` は #393 から
+        // 引き続き据え置き。
         //
-        // 限定条件（承認記録に明記。追跡は #393 参照）:
+        // 限定条件（#393 承認記録から継続。#577 でも解消せず維持。追跡は #577 参照）:
         // - 候補算出経路 `wmma_tf32` は #389 §5.3 の数値一致 parity 恒常 fail 対象と一致する
-        //   （`docs/perf/cuda-floor-remeasurement.md`「数値一致（parity）状態の限定条件」節）
+        //   （`docs/perf/cuda-optimized-remeasurement.md`「数値一致（parity）状態の限定条件」節）
         // - 本承認は「実測基準でゲートを機能させ、今後の最適化で性能を改善していく」方針による
         // - #186（REQ-2 閾値改定）は 2026-08-06 に close 済みだが、閾値定数自体は変更されておらず
         //   （commit 紐付けなし）、TF32/f16 Tensor Core 経路の複合判定改定は spec リポ側対応待ちの
@@ -141,7 +153,7 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
         // - spec 表（2026-08-05 版）への反映は spec リポジトリ側対応待ち（本モジュール冒頭コメント
         //   「例外」節参照）
         (CudaF32, Optimized) => FloorSpec::Ratio {
-            percent: 25.0,
+            percent: 50.0,
             provisional: false,
         },
         // 実測 1.9%（PoC-v2-3）は tensor core 未使用のスカラー実装同士の比較であり、
@@ -149,15 +161,22 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
         (CudaF16, InitialRelease) => FloorSpec::NotSet {
             reason: "tensor core 未実装のスカラー実装同士の比較（実測 1.9%）は指標として無意味なため下限を設定しない（REQ-8 脚注）",
         },
-        // CUDA f16 対 PyTorch f16（最適化後、DGX Spark GB10）。暫定 40% は #390（PR #444）の
-        // 実機実測（`mma.sync` f16 パイプライン候補、3 run 完全一致）で再確定した:
-        // 判定対象形状の実測比率最小値 12.97%（2048 側が最小）に `floor_lower_bound` を適用し
-        // 10%（10% 以上のため 5% 刻み切り下げ）。イシュー #393 のユーザー承認記録（2026-08-10）で
-        // 確定（`docs/perf/performance-floor-decision.md` §9）。`provisional: false` とする根拠・
-        // 限定条件は CudaF32/Optimized と同一（候補算出経路は `mma_f16`。#389 §5.3 の parity
-        // 恒常 fail 対象と一致・#186 解決後の再確認を継続）。
+        // CUDA f16 対 PyTorch f16（最適化後、DGX Spark GB10）。#393（§9）で 10% に確定していたが、
+        // Phase F の再計測（#571・`docs/perf/cuda-optimized-remeasurement.md`）で経路は引き続き
+        // `mma_f16` のままスループットが向上したため再確定した: 判定対象形状の実測比率最小値
+        // 39.42%（4096・代表 run2。5 run 中央値 38.86%）に `floor_lower_bound` を適用し 35%
+        // （10% 以上のため 5% 刻み切り下げ）。イシュー #577 のユーザー承認記録（2026-08-18・本
+        // セッションの対話承認。承認者: リポジトリオーナー Nancy さん〈GitHub: aLiz-Nancy〉）で確定
+        // （`docs/perf/performance-floor-decision.md` §10）。`provisional: false` は #393 から
+        // 引き続き据え置き。限定条件は CudaF32/Optimized と同一（候補算出経路は `mma_f16`。
+        // #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続）。
+        //
+        // f16 境界注記: 判定対象形状（4096）の対 PyTorch 比は丸め刻み境界近傍（run1 のみ
+        // 40.95% で丸め後 40 相当）に位置するため 5 run 計測とした
+        // （`docs/perf/cuda-optimized-remeasurement.md`「f16 境界注記」節）。5 run 中央値
+        // 38.86%（run3）を採用根拠とし、境界近傍の run 間変動があることを申し送る。
         (CudaF16, Optimized) => FloorSpec::Ratio {
-            percent: 10.0,
+            percent: 35.0,
             provisional: false,
         },
         // Metal f32 対 PyTorch MPS（Apple M4 Max）。実測 23.2%（PoC-v2-4、10% 以上のため 5% 刻み切り下げ）。
@@ -165,9 +184,19 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
             percent: 20.0,
             provisional: false,
         },
-        // PoC-v2-4 の事前固定判定基準（30%）を最適化後段階の目標として据え置き（確定値）。
+        // Metal f32 対 PyTorch MPS（最適化後、Apple M4 Max）。旧値 30%（PoC-v2-4 の事前固定判定
+        // 基準を据え置いた確定値）は当時のカーネル（バッファ常駐前提）・計測系列に基づくもので、
+        // `docs/performance-targets.md` §4 準拠の現行計測系列（`dispatch_tiled_prepared` prepared
+        // 入口。#572）とは非互換であり、その計測系列では恒常的に未達（旧計測 23.2% 相当の系列と
+        // 現行系列は比較不能）だったため、Phase F 再計測（#572・
+        // `docs/perf/metal-floor-remeasurement.md`）に基づき引き下げて再確定した: 判定対象形状の
+        // 実測比率最小値 13.01%（4096）に `floor_lower_bound` を適用し 10%（10% 以上のため 5% 刻み
+        // 切り下げ）。イシュー #577 のユーザー承認記録（2026-08-18・本セッションの対話承認。承認者:
+        // リポジトリオーナー Nancy さん〈GitHub: aLiz-Nancy〉）で確定
+        // （`docs/perf/performance-floor-decision.md` §10）。CUDA 行と異なり数値一致（parity）は
+        // 全件 PASS のため限定条件は付けない。
         (MetalF32, Optimized) => FloorSpec::Ratio {
-            percent: 30.0,
+            percent: 10.0,
             provisional: false,
         },
         // Metal f16 対 PyTorch MPS f16（Apple M4 Max）。実測 18.6%（#383・size=4096。
@@ -180,10 +209,18 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
             percent: 15.0,
             provisional: false,
         },
-        // 初期リリース下限は #386 で確定済み（15%）。最適化後は今後の最適化タスクの実測に基づき
-        // 丸め規則で再確定する（REQ-8・#386 承認記録。カーネル最適化・要因分析は #387 のスコープ）。
-        (MetalF16, Optimized) => FloorSpec::NotSet {
-            reason: "初期リリース下限は #386 で確定済み（15%）。最適化後は今後の最適化タスクの実測に基づき丸め規則で再確定する（REQ-8・#386 承認記録）",
+        // Metal f16 対 PyTorch MPS f16（最適化後、Apple M4 Max）。初期リリース下限は #386 で
+        // 確定済み（15%）。最適化後は #386 承認記録どおり「今後の最適化タスクの実測に基づき丸め
+        // 規則で再確定する」段階として `NotSet` としていたが、Phase F 再計測（#572・
+        // `docs/perf/metal-floor-remeasurement.md`）で初の実測値が揃ったため新設で確定した:
+        // 判定対象形状の実測比率最小値 18.78%（4096）に `floor_lower_bound` を適用し 15%
+        // （10% 以上のため 5% 刻み切り下げ）。イシュー #577 のユーザー承認記録（2026-08-18・本
+        // セッションの対話承認。承認者: リポジトリオーナー Nancy さん〈GitHub: aLiz-Nancy〉）で確定
+        // （`docs/perf/performance-floor-decision.md` §10）。数値一致（`cpu_metal_f16_parity.rs`
+        // 6 件）は全 PASS のため限定条件は付けない。
+        (MetalF16, Optimized) => FloorSpec::Ratio {
+            percent: 15.0,
+            provisional: false,
         },
     }
 }
@@ -533,14 +570,33 @@ mod tests {
     }
 
     #[test]
-    fn metal_f16_optimized_is_not_applicable() {
-        // 最適化後段階は #386 では設定しない（承認記録どおり今後の最適化タスクで再確定）。
+    fn metal_f16_optimized_floor_15_percent_boundary() {
+        // イシュー #577（Phase F 実測 18.78%〈4096〉に基づき新設・確定）で最適化後段階も
+        // 15% の `Ratio` へ移行した（#386 時点は今後の最適化タスクで再確定する `NotSet` だった）。
+        // 境界固定は既存の metal_f16_initial_floor_15_percent_boundary と同型。
         let own = report("metal", 1.0, 0.9, 1.1);
-        let pytorch = report("metal", 0.5, 0.45, 0.55);
-        let j = judge(&own, &pytorch, BackendDtype::MetalF16, Stage::Optimized).unwrap();
-        assert_eq!(j.verdict, Verdict::NotApplicable);
-        assert_eq!(j.floor_percent, None);
-        assert_eq!(j.floor_provisional, None);
+
+        let pytorch_pass = report("metal", 0.15, 0.135, 0.165);
+        let pass = judge(
+            &own,
+            &pytorch_pass,
+            BackendDtype::MetalF16,
+            Stage::Optimized,
+        )
+        .unwrap();
+        assert_eq!(pass.verdict, Verdict::Pass);
+        assert_eq!(pass.floor_percent, Some(15.0));
+        assert_eq!(pass.floor_provisional, Some(false));
+
+        let pytorch_fail = report("metal", 0.149, 0.134, 0.164);
+        let fail = judge(
+            &own,
+            &pytorch_fail,
+            BackendDtype::MetalF16,
+            Stage::Optimized,
+        )
+        .unwrap();
+        assert_eq!(fail.verdict, Verdict::Fail);
     }
 
     #[test]
