@@ -37,7 +37,7 @@
 | バックエンド・精度 | 段階 | 現行値 | 確定状態 | 根拠 |
 |---|---|---|---|---|
 | CPU 対 PyTorch CPU | 初期リリース | 5% | 確定（変更なし） | PoC-v2-1 実測 5.3%（10% 未満 1% 刻み切り下げ）。確定済み値であり本イシュー対象外 |
-| CPU 対 PyTorch CPU | 最適化後 | 20% | 確定（変更なし）（当時。**→ §10 で 20% を再確認〈#577〉**） | NEON intrinsics 実効効率見積もりに基づく確定値（暫定値ではない）。本イシュー対象外 |
+| CPU 対 PyTorch CPU | 最適化後 | 20% | 確定（変更なし）（**→ §10 で 20% を再確認〈#577〉**） | NEON intrinsics 実効効率見積もりに基づく確定値（暫定値ではない）。本イシュー対象外 |
 | CUDA f32 対 PyTorch CUDA | 初期リリース | 10% | 確定（変更なし） | PoC-v2-3 実測 10.3%（10% 以上 5% 刻み切り下げ）。確定済み値であり本イシュー対象外 |
 | CUDA f32 対 PyTorch CUDA | 最適化後 | 40%（暫定） | **暫定維持**（当時。**→ §9 で 25% に確定〈#393〉。→ §10 で 50% に再確定〈#577〉**） | #157: 実機（GB10+NVRTC）再実測なし。candidate floor は `n/a`。再確定条件は §4 に従う |
 | CUDA f16 対 PyTorch f16 | 初期リリース | 下限を設定しない | **未設定維持** | tensor core 未使用のスカラー実装同士の比較（実測 1.9%）は指標として無意味（REQ-8 脚注）。本イシュー対象外 |
@@ -218,7 +218,7 @@ GEMM 性能改善ツリー（ルート #479）Phase F（親 #569「再計測・p
 | backend_dtype | 入力ドキュメント | 判定対象形状の実測比率最小値 | 候補算出経路 |
 |---|---|---|---|
 | CpuF32 | `docs/perf/cpu-gemm-optimized-remeasurement.md` | 24.7%（size=2048） | NEON intrinsics 適用済みカーネル |
-| CudaF32 | `docs/perf/cuda-optimized-remeasurement.md`（#571・PR #725 系列） | 51.56%（size=4096・代表 run2） | `wmma_tf32`（WMMA(TF32) opt） |
+| CudaF32 | `docs/perf/cuda-optimized-remeasurement.md`（#571・PR #725 系列） | 51.56%（size=4096・代表 run2。セル単位 run 間中央値では 51.60%〈run3〉で丸め後 50% は不変） | `wmma_tf32`（WMMA(TF32) opt） |
 | CudaF16 | 同上 | 39.42%（size=4096・代表 run2。5 run 中央値 38.86%） | `mma_f16`（`mma.sync` パイプライン） |
 | MetalF32 | `docs/perf/metal-floor-remeasurement.md`（#572・PR #725 系列） | 13.01%（size=4096） | `dispatch_tiled_prepared`（simdgroup タイル化） |
 | MetalF16 | 同上 | 18.78%（size=4096） | `dispatch_f16_prepared_unverified` |
@@ -237,8 +237,10 @@ GEMM 性能改善ツリー（ルート #479）Phase F（親 #569「再計測・p
 
 初期リリース段（`InitialRelease`）は全行変更しない。
 
-**CpuF32（維持・確定）**: §3 の据え置き確定（本行は §3 対象外・確定済み値）を Phase F 実測
-（24.7%・10% 以上のため 5% 刻み切り下げで 20%）が再確認した。値は変更しない。
+**CpuF32（維持・確定）**: §3 では「本イシュー対象外」（#158 当時から既に確定済みの値）として
+扱われていた行であり、本追補で新たに丸め規則を適用したわけではない。Phase F 実測
+（24.7%・10% 以上のため 5% 刻み切り下げで 20%）は既存の確定値と一致することを再確認したのみで、
+値は変更しない。
 
 **CudaF32／CudaF16（引き上げ）**: §9 で 25%／10% に確定した後、Phase F の再計測で候補算出経路
 （`wmma_tf32`／`mma_f16`）が変わらないままスループットが向上し、判定対象形状の実測比率が
