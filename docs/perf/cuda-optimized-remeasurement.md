@@ -255,6 +255,10 @@ codex レビュー P1 指摘を受け run4・run5 を含む 5 run 中央値ベ�
 これは `docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 系列・#391 が既に記録した既知の変動であり、f16 最良
 経路として採用するのは常に `mma_f16` であるため候補下限値の算出には影響しない。
 
+上表の「WMMA(TF32) opt」列ラベルは `cuda_floor_bench.rs` の起動時診断メッセージ（`wmma_tf32_opt_available()`
+由来）をそのまま踏襲したものであり、本セッションで実際に選択・計測された経路は staged である（「数値
+一致（parity）状態の限定条件」節「f32 候補下限（50%）への影響に関する重要な注記」参照）。
+
 ## 対 PyTorch 比（実測時に記入）
 
 対 PyTorch 比 = Rust セル 5 run 中央値（「経路×形状 TFLOPS 実測」節）÷ PyTorch 5 run 中央値（「PyTorch
@@ -318,37 +322,110 @@ TFLOPS・run2）= **37.47%**（丸め後 floor **35**）である。
 `docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測（#502）」節の手順 3 と同一コマンド
 （`cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`。debug/release
 両プロファイルで実行し同一結果を確認）を実行した結果、`parity_baselines_do_not_regress` は
-`wmma_tf32_staged 512×512×4096 seed=0xC0FFEE` の 1 件で FAIL した。この FAIL は数値乖離ではなく
-`baseline_provenance_unconfirmed == true`（基本版カーネル専用の確定ベースラインが未整備のための
-fail-closed プレースホルダ。#500 由来。参考実測 `fail_count=43019/262144, mean_abs_diff=4.463436e-3`
-は合否判定に不使用）であり、**tolerance 定数・parity ロジック自体は無変更**（「計測環境」節の
-`git diff 86e7e7e..abaa94e` 確認結果）のため後退ではない。
+`wmma_tf32_staged 512×512×4096 seed=0xC0FFEE` の 1 件（`WmmaTf32Staged` 行を検査する内部ヘルパー
+`check_wmma_tf32_staged_baseline`）で FAIL した（`MmaF16` 行は同じテスト内で検査され pass。下記表参照）。
+この FAIL は `ParityBaseline::baseline_provenance_unconfirmed == true`
+（`crates/backend-cuda/tests/common/parity_baseline.rs::assert_no_parity_regression`）による
+fail-closed 判定であり、正本 `docs/perf/cuda-parity-baseline.md` §3 のベースライン表でもこの行
+（`wmma_tf32_staged` 512×512×4096 seed=0xC0FFEE）は **`fail_count`/`mean_abs_diff` とも「未計測」**
+のまま（実機再測定待ち）であることを確認した。panic メッセージの「この行は基本版カーネル専用の確定
+ベースラインが未整備です」という文言は `assert_no_parity_regression` が `baseline_provenance_unconfirmed
+== true` の全行（`wmma_tf32`〈基本版〉2 行・`wmma_tf32_staged` 1 行）へ共通で出す定型文であり、
+staged 行固有の理由ではない。staged 行が未確定な実際の理由は、staged カーネル追加（#500）時点で
+実機未到達だったため**staged 経路自体の確定ベースラインがまだ一度も記録されていない**ことである
+（`crates/backend-cuda/tests/common/parity_baseline.rs:289-300` のコメント参照）。
 
-`--ignored` の非 `parity_nonregression` 系（`cargo test -p backend-cuda --lib -- --ignored`・
-`cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored`）でも同様に選出経路の恒常 fail を
-確認した:
+参考実測 `fail_count=43019/262144, mean_abs_diff=4.463436e-3`（panic メッセージが出力する
+`report.fail_count`/`report.mean_abs_diff`）は、`check_wmma_tf32_staged_baseline` が本セッションで
+`run_wmma_tf32`（cp.async 16 バイト整列条件を満たす 512×512×4096 形状のため公開 API が staged 経路を
+自動選択する）を実際に実行して得た**staged 経路自身の今回実測値**である（`wmma_tf32_opt` の記録済み
+ベースライン値をそのまま転記したものではない）。この値が下表の `wmma_tf32_opt_kernel_k4096_stress`
+（同一形状・同一シードで `fail_count=43019/262144, mean_abs_diff=4.463e-3`）と一致しているのは転記
+ミスではなく、両者を独立に実行して得た実測値がたまたま一致したものである。**一致の理由（カーネル実装
+上、staged と opt の演算結果が本当に一致するのか等）は本ドキュメントでは調査・断定しない**（推定値の
+記載を禁止する `docs/perf/cuda-parity-baseline.md` §6 の方針に従う）。いずれにせよこの一致は staged
+経路固有の**確定ベースラインではない**（正本にまだ記録されていない参考値に過ぎない）ため、この PR の
+範囲では正本 `docs/perf/cuda-parity-baseline.md` への新規ベースライン追加は行わず、後続課題として
+「未実施・後続作業」節へ申し送る。
 
-| 候補下限の経路 | テスト | fail 内容（実測） | #389 §5.3 の恒常 fail 対象との一致 |
-|---|---|---|---|
-| `wmma_tf32`（基本版） | `wmma_tf32_basic_kernel_parity_does_not_regress` | 32×32×32: fail_count=154/1024（15.04%）／256×256×4096 stress: fail_count=10647/65536（16.25%） | 一致（`baseline_provenance_unconfirmed` 経路） |
-| `wmma_tf32` opt | `wmma_tf32_opt_kernel_k4096_stress` | 512×512×4096: fail_count=43019/262144（**16.41%**） | 一致（#389 §5.3 K4096 stress） |
-| `wmma_tf32` opt | `wmma_tf32_opt_kernel_matches_reference_across_shapes` | m=n=k=64: fail_count=699/4096（**17.06%**） | 一致（#389 §5.3 shape grid） |
-| `mma_f16`（f16 candidate） | `mma_f16_k4096_stress` | 256×256×4096: fail_count=101/65536（**0.154%**） | 一致（#389 §5.3 K4096 tail） |
+**tolerance 定数・parity ロジック自体は無変更**（「計測環境」節の `git diff 86e7e7e..abaa94e` 確認結果）
+だが、これは非後退の**必要条件**であって**十分条件ではない**——比較対象の確定ベースラインが正本に
+存在しない以上、「後退していないこと」自体を確認する手段がない。したがって `wmma_tf32_staged`
+512×512×4096 は「後退なし」ではなく**判定不能（fail-closed）**として扱う。
 
-いずれも #389 §5.3 が記録した恒常 fail 範囲内（TF32 系 16〜17% 台・f16 K4096 stress 0.15% 台）で
-**後退なし**と判定した。`wmma_tf32_opt_kernel_parity_does_not_regress`・`wmma_tf32_staged_kernel_...`・
-`mma_f16_cross_check_against_wmma_f16`・`mma_f16_matches_reference_across_shapes` は pass。
+**f32 候補下限（50%）への影響に関する重要な注記**: `crates/backend-cuda/src/gemm.rs::launch_wmma_tf32`
+（「経路×形状 TFLOPS 実測」節の計測に使う `cuda_floor_bench.rs::measure_wmma_tf32` が呼ぶ関数）は
+`run_wmma_tf32` と同一の 3 段選択（staged が利用可能かつ整列形状なら staged を最優先。分岐条件は
+`self.wmma_tf32_staged.is_some() && wmma_tf32_staged_alignment_ok(n, k)`）で経路を選ぶ
+（`gemm.rs:1458-1461`）。今回の実機セッションでは `wmma_tf32_staged_available() == true`
+（`check_wmma_tf32_staged_baseline` の事前 assert が通過した事実から確認済み）であり、判定対象形状
+（512/1024/2048/4096）はすべて `n%4==0 && k%4==0`（cp.async 整列条件）を満たす。staged 分岐は
+`validate_wmma_tf32_staged_k_bound(k)?` が `Err` を返せば早期リターンし opt へフォールスルーしない
+（`gemm.rs:1463-1475`）ため、4096 形状で TFLOPS が実測できている以上 staged 分岐が実際に成功実行され
+たことも確定している。よって**本ドキュメントの「WMMA(TF32) opt」列として記録した f32 最良経路の実測
+値は、実際には staged 経路を計測したものである**（推測ではなく上記のコード上の分岐条件・実測データ
+から確定できる事実）。`cuda_floor_bench.rs` の起動時診断メッセージ「WMMA(TF32) opt AVAILABLE」は
+`wmma_tf32_opt_available()` のみを確認する表示であり staged の選択有無は出力しないため、実行ログ単体
+からはこの事実を読み取れない（`floor_bench_run1.log:6`）。したがって f32 候補下限（50%）の性能値
+採用ゲートは、**staged 経路の parity 判定不能（上記）の影響を直接受ける**——f16 候補（`mma_f16`。
+`CudaMmaGemm::run_f16` に staged/opt の分岐はなく本注記の対象外）とは異なり、区分 1（後退なし確認済み。
+`wmma_tf32` opt）ではなく区分 2（判定不能）の経路の実測値である。後続課題は「未実施・後続作業」節へ
+申し送る。
+
+本セッションで実行した parity 系テスト全体（`parity_nonregression`・`cargo test -p backend-cuda --lib
+-- --ignored`・`cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored`）の結果を、各テスト
+が実際に比較する対象（正本ベースラインとの相対比較 `assert_no_parity_regression` か、REQ-2 tolerance
+との絶対比較 `backend_cpu::assert_parity` か）に基づき 3 区分に分けて整理する:
+
+| 候補下限の経路 | テスト | 判定方式 | fail 内容（実測） | 区分 |
+|---|---|---|---|---|
+| `wmma_tf32`（基本版） | `wmma_tf32_basic_kernel_parity_does_not_regress` | `assert_no_parity_regression`（`WmmaTf32` 行。`baseline_provenance_unconfirmed == true`） | 32×32×32: fail_count=154/1024（15.04%）／256×256×4096 stress: fail_count=10647/65536（16.25%） | **判定不能（fail-closed）** |
+| `wmma_tf32_staged` | `parity_baselines_do_not_regress`（内部で `check_wmma_tf32_staged_baseline`） | `assert_no_parity_regression`（`WmmaTf32Staged` 行。`baseline_provenance_unconfirmed == true`） | 512×512×4096: fail_count=43019/262144（16.41%） | **判定不能（fail-closed）** |
+| `wmma_tf32` opt（3 行） | `wmma_tf32_opt_kernel_parity_does_not_regress` | `assert_no_parity_regression`（`WmmaTf32Opt` 3 行。いずれも `baseline_provenance_unconfirmed == false`） | 全 3 行 pass（512×512×512／64×64×64／512×512×4096） | **後退なしを確認できた** |
+| `mma_f16` | `parity_baselines_do_not_regress`（内部で `check_mma_f16_baseline`） | `assert_no_parity_regression`（`MmaF16` 行。`baseline_provenance_unconfirmed == false`） | 256×256×4096: pass（staged 行のみ FAIL、`MmaF16` 行は非後退確認済み） | **後退なしを確認できた** |
+| `wmma_tf32` opt（単体テスト） | `wmma_tf32_opt_kernel_k4096_stress` | `backend_cpu::assert_parity`（REQ-2 tolerance との絶対比較。ベースライン相対比較ではない） | 512×512×4096: fail_count=43019/262144（**16.41%**） | **既知恒常 fail の再現** |
+| `wmma_tf32` opt（単体テスト） | `wmma_tf32_opt_kernel_matches_reference_across_shapes` | `backend_cpu::assert_parity`（同上） | m=n=k=64: fail_count=699/4096（**17.06%**） | **既知恒常 fail の再現** |
+| `mma_f16`（単体テスト） | `mma_f16_k4096_stress`（`cpu_cuda_mma_parity.rs`） | `assert_parity` 相当（同上） | 256×256×4096: fail_count=101/65536（**0.154%**） | **既知恒常 fail の再現** |
+
+`wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`（parity ではなく TFLOPS 比較の性能テスト。
+staged 経路の parity 非後退とは無関係）・`mma_f16_cross_check_against_wmma_f16`・
+`mma_f16_matches_reference_across_shapes` も pass だが、いずれも上表のいずれの行とも異なる独立した検査
+（形状網羅・相互検算用）であり非後退判定の根拠には数えない。
 
 （`nvrtc::jit_cache_bench_tests::*` の 2 件 FAIL は `/tmp` 配下の cache root pin に関する環境依存
 エラーで、GEMM スループット・parity とは無関係のため本ドキュメントのスコープ外。#534〈C-12〉の
 JIT キャッシュベンチ側の既知事象として申し送る。）
 
-- **後退の有無**: tolerance 定数不変（コミット確認済み）・fail 比率/mean_abs_diff が #389 §5.3
-  ベースライン以下 → **後退なし**
-- 後退が無い場合でも、既知の parity 恒常 fail（#389 §5.3）自体は解消されていない
-- 本 candidate floor（f32=50%・f16=35%）は数値一致未達の経路（`wmma_tf32`／`mma_f16`）の実測値であり、
-  #186（REQ-2 閾値改定。spec リポジトリ側対応待ち）の解決前は #577 の下限確定根拠として**単独採用
-  できない**（#186 限定条件は継続）
+**非後退判定の最終整理（3 区分）**:
+
+1. **後退なしを確認できた経路**（`assert_no_parity_regression` によるベースライン相対比較で
+   `baseline_provenance_unconfirmed == false` の行が全て pass）: `wmma_tf32_opt`（512×512×4096・
+   64×64×64・512×512×512。`wmma_tf32_opt_kernel_parity_does_not_regress`）・`mma_f16`（256×256×4096。
+   `parity_baselines_do_not_regress` の `MmaF16` 行）。いずれも記録済み確定ベースラインを上回って
+   おらず後退なしと判定できる
+2. **判定不能（fail-closed）**: `wmma_tf32`（基本版）2 行・`wmma_tf32_staged`（512×512×4096）1 行。
+   `baseline_provenance_unconfirmed == true` のため正本に比較対象となる確定ベースラインがなく、
+   tolerance 定数・parity ロジック不変というだけでは非後退を主張できない。`wmma_tf32_staged` は
+   上記「f32 候補下限（50%）への影響に関する重要な注記」のとおり、f32 候補下限（`wmma_tf32` 最良経路）
+   の実測に使われた経路そのもの（`launch_wmma_tf32` の 3 段選択・cp.async 整列条件・staged 分岐の
+   非フォールスルーから確定）であるため、この判定不能は f32=50% 候補下限に**直接影響する**（f16 候補
+   `mma_f16` は区分 1 で確認済みのため対象外）。staged 固有ベースラインの確立は本 PR のスコープ外の
+   後続課題とする（「未実施・後続作業」節参照）
+3. **既知恒常 fail の再現（#389 §5.3 範囲内）**: `backend_cpu::assert_parity`（REQ-2 tolerance との
+   絶対比較。ベースライン相対比較ではない）による直接判定で、TF32 opt 単体テストの k4096 stress
+   16.41%・shape grid 17.06%、f16 単体テストの K4096 stress 0.154% がいずれも #389 §5.3 が記録した
+   恒常 fail 範囲内で再現した。これらは非後退ゲート自体の合否とは別建てのテストであり、区分 1 の
+   `assert_no_parity_regression` 判定結果とは独立した事実である（数値は同一形状・同一シードの
+   ベースライン記録元でもあるため一致するが、判定方式が異なる点に注意）
+
+- 区分 1（後退なし確認済み）の経路でも、既知の parity 恒常 fail（#389 §5.3・区分 3）自体は解消されて
+  いない
+- 本 candidate floor（f32=50%・f16=35%）のうち f16=35%（`mma_f16`）は区分 1（後退なし確認済み）の経路
+  の実測値である。f32=50%（`wmma_tf32` 最良経路）は上記注記のとおり実際には `wmma_tf32_staged` 経路の
+  実測値であり、区分 2（判定不能）に属する
+- 候補下限は #186（REQ-2 閾値改定。spec リポジトリ側対応待ち）の解決前は #577 の下限確定根拠として
+  単独採用できない（#186 限定条件は継続）。本 PR ではこの限定に加え f32=50% が区分 2（判定不能）の
+  実測値であることも踏まえ、性能値を確定させない（候補値としての記録に留める）
 
 ## 状態: 実測完了（2026-08-18・DGX Spark GB10）
 
@@ -373,8 +450,10 @@ PyTorch 参照値計測スクリプト（`gemm_bench_torch_cuda.py`）は Mac �
 - `cargo build -p backend-cuda --example cuda_floor_bench --release` — example のビルド成立（無変更）
 - `cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`（debug/release
   両方）・`cargo test -p backend-cuda --lib -- --ignored`・
-  `cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored` — 上記「数値一致（parity）状態
-  の限定条件」節のとおり既知 fail のみ、後退なし
+  `cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored` — 既知 fail のみで新規 fail は
+  ない。非後退の判定可否は経路別（上記「数値一致（parity）状態の限定条件」節の 3 区分）に従う——
+  `wmma_tf32` opt・`mma_f16` は後退なしを確認できたが、`wmma_tf32`（基本版）・`wmma_tf32_staged`
+  （f32 候補下限の実測経路）は `baseline_provenance_unconfirmed` により判定不能
 - `cargo run -p backend-cuda --example cuda_floor_bench --release --locked` を計 5 回実行（生ログ
   `floor_bench_run{1..5}.log`）
 - `git diff 86e7e7e..abaa94e -- crates/backend-cuda/src crates/backend-cuda/tests/common crates/bench-harness`
@@ -508,8 +587,9 @@ run5 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.7
   イル／2 回目ロード時間の実機未到達記録。本ドキュメントのスループット計測とは別レイヤ
 - **#575（Phase F-4）**: parity 非後退の最終確認。記録先は
   `docs/perf/cuda-parity-baseline.md` §8「Phase F-4 最終確認（#575）」。本
-  ドキュメントは性能値採用の前提ゲートとして非後退を確認するに留め、最終
-  確認は #575（同 §8）が行う
+  ドキュメントは性能値採用の前提ゲートとして経路別の非後退確認結果（上記「数値一致（parity）状態の
+  限定条件」節の 3 区分。`wmma_tf32_staged` は判定不能）を記録するに留め、最終確認は #575（同 §8）が
+  行う
 - **#577（Phase F-5・人間承認）**: REQ-8 下限値の最終確定・`docs/spec/04-requirements.md` への反映判断
   （`docs/spec/` は本リポでは編集しない）
 - **#569（Phase F 親）・#579**: 全バックエンド横断の集約・`docs/performance-targets.md` 更新
@@ -518,8 +598,11 @@ run5 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.7
 
 - **実機実測**: 「状態」節のとおり 2026-08-18 実測完了。本節は完了扱い
 - **候補下限値の最終確定・REQ-8 反映判断**: F-5（#577・人間承認）が本ドキュメントの実測結果
-  （f32 候補 50%・f16 候補 35%〈境界注記あり〉）を受けて対応する
-- **parity 非後退の最終確認**: F-4（#575）が本ドキュメントの非後退確認結果を受けて最終確認する
+  （f32 候補 50%・f16 候補 35%〈境界注記あり〉）を受けて対応する（f32=50% は `wmma_tf32_staged` 経路の
+  実測値であり、同経路の parity 非後退は判定不能。「数値一致（parity）状態の限定条件」節「f32 候補
+  下限（50%）への影響に関する重要な注記」参照）
+- **parity 非後退の最終確認**: F-4（#575）が本ドキュメントの経路別の非後退確認結果（3 区分。上記
+  「数値一致（parity）状態の限定条件」節）を受けて最終確認する
 - **コストモデル選定・JIT shape 特化経路（`gemm_auto.rs::CudaGemmAuto`／`run_specialized_mma_f16`）の
   本番化判断**: 「実測バイナリ（経路カバレッジ確認結果）」節のとおり、この経路は現時点で
   `internal-diagnostics` feature 限定かつ `CudaBackendOps::gemm` からも到達しないため本イシューの
@@ -527,3 +610,13 @@ run5 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.7
   組み込まれた場合は `cuda_floor_bench.rs` への経路追加が再度必要になる
 - **`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` §7 の未計測テンプレート**: 実機セッションが本ドキュメント
   と合わせて転記対象とするかは実機セッション側の判断に委ねる（本イシューのスコープ外）
+- **`cuda_floor_bench.rs` の staged 可用性診断出力の追加・`wmma_tf32_staged` 固有ベースラインの確立
+  （codex レビュー P1 対応で判明。「数値一致（parity）状態の限定条件」節「f32 候補下限（50%）への
+  影響に関する重要な注記」参照）**: 本ドキュメントの f32 候補下限（50%）は `wmma_tf32_staged` 経路の
+  実測値であることをコード上の分岐条件（`gemm.rs::launch_wmma_tf32` の 3 段選択・cp.async 整列条件・
+  staged 分岐の非フォールスルー）から確定済みだが、`cuda_floor_bench.rs` の起動時診断メッセージは
+  `wmma_tf32_opt_available()` のみを表示し staged の選択有無を出力しないため、実行ログ単体からは
+  この経路を再構成できない。後続セッションで (a) `cuda_floor_bench.rs` の診断メッセージへ
+  `wmma_tf32_staged_available()` の出力を追加し、(b) `wmma_tf32_staged` 512×512×4096 の確定
+  ベースラインを正本 `docs/perf/cuda-parity-baseline.md` へ実機実測とセットで記録することが必要
+  （推定値の記載は禁止）。本 PR のスコープ外（別イシューへの切り出しはユーザー承認を得て行う）
