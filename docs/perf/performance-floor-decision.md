@@ -282,6 +282,13 @@ worst-case ペアリング（最遅 Metal ÷ 最速 PyTorch）確認でも 10% �
    だが、閾値定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）自体は変更されておらず、
    TF32/f16 Tensor Core 経路の複合判定改定は REQ-2 改定として spec リポジトリ側対応待ちのままである。
    よって本限定条件は §9 から**解消しておらず、継続する**
+4. **（本追補で新規追加・CudaF32 のみ）f32 候補下限 50% の根拠実測は `wmma_tf32_staged` 経路の値
+   である**（`launch_wmma_tf32` の 3 段選択が判定対象形状で staged を選ぶため。
+   `cuda-optimized-remeasurement.md`「数値一致（parity）確認」節の経路対応を参照）。staged 経路は
+   正本 `docs/perf/cuda-parity-baseline.md` にベースライン未計測（`baseline_provenance_unconfirmed`）
+   のため **parity 非後退が判定不能**であり、staged 固有ベースラインの確立・非後退確認を後続タスク
+   として追跡する（f16 側 `mma_f16` は非後退確認済みでこの限定条件の対象外）。本限定条件を承知の
+   うえで 50% を維持する判断を 2026-08-19 にユーザーが承認した（#577 イシューコメントの追記参照）
 
 ### 承認記録
 
