@@ -21,6 +21,11 @@ CUDA 比を**確定計測**し、`docs/perf/cuda-floor-remeasurement.md`（#157/
 
 ## 実行環境の制約（本ドキュメント作成セッション）
 
+**2026-08-18 追記**: 本節は 2026-08-17 のドキュメント初回整備セッション時点の記録であり、CUDA 実機
+（DGX Spark GB10）に到達できないという制約は当時のものである。2026-08-18 に実機到達可能なセッション
+で計測を完了した（「計測環境」節以降の実測値・「状態」節を参照）。本節は経緯の記録として書き換えず
+残す。
+
 本ドキュメントは Linux worktree で作成された。`docs/real-hardware-verification-env.local.md`（実ホスト
 名・接続情報を記す Git 管理外ファイル）は本 worktree に**存在しない**（`.example` のみ存在。下記
 「実機到達性の確認結果」参照）。これは `docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測
@@ -164,17 +169,26 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 
 | 項目 | 値 |
 |------|-----|
-| GPU（`CudaDevice::name()`） | （未計測） |
-| compute capability（`CudaDevice::compute_capability()`） | （未計測） |
-| driver バージョン（`nvidia-smi`） | （未計測） |
-| rustc | （未計測） |
-| commit SHA（`.rev-stamp` と転送後の値が一致確認済みであること） | （未計測） |
-| 実施日 | （未計測） |
-| PyTorch 参照値の出典（`pytorch reference provenance:` 行を転記。実機個体名はマスク） | （未計測） |
+| GPU（`CudaDevice::name()`） | NVIDIA GB10 |
+| compute capability（`CudaDevice::compute_capability()`） | (12, 1) |
+| driver バージョン（`nvidia-smi`） | 580.159.03（CUDA 13.0・`nvcc V13.0.88`） |
+| rustc | 1.97.0 (2d8144b78 2026-07-07) |
+| commit SHA（`.rev-stamp` と転送後の値が一致確認済みであること） | `abaa94e`（下記「計測対象コミットの補足」参照） |
+| 実施日 | 2026-08-18 |
+| PyTorch 参照値の出典（`pytorch reference provenance:` 行を転記。実機個体名はマスク） | `measured this run (gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), 2026-08-18T14:26:04Z (UTC), 同一 GB10 個体 <cuda-node>, torch=2.13.0+cu130)` |
 | 計測プロトコル | `bench_harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1） |
 | 決定的シード | `0xC0FFEE`（`cuda_floor_bench.rs::SEED`） |
-| GPU 排他性（実行前後） | （未計測。`utilization.gpu` 0% ・第三プロセス非介在を確認すること） |
-| 反復回数 | `cuda_floor_bench` を 3 回反復実行し、run 間中央値を代表値として採用する（#390 先例と同方式） |
+| GPU 排他性（実行前後） | 確認済み。`nvidia-smi --query-gpu=utilization.gpu` は計測前後とも 0% で一貫（実質アイドル）。常駐 2 プロセス（ノード管理用）は計測前後で変化なし、計測対象ジョブ以外の GPU 使用プロセスは検出されず |
+| 反復回数 | `cuda_floor_bench` を 3 回反復実行し、run2 を代表 run として採用（セル単位の run 間中央値との差異は「経路×形状 TFLOPS 実測」節の注記を参照。#390 先例と同方式）。f16 は floor 境界近傍のため run4/run5 を追加した計 5 run（下記「f16 境界注記」参照） |
+
+### 計測対象コミットの補足
+
+計測手順「状態」節が挙げる SHA `17ff13ab8590e404cf7ef8d3f36f339e86178d72` は PR #710 ブランチ側の
+コミットであり、squash マージ後の main には存在しない（マージコミットは `86e7e7e`）。よって手順オプ
+ション (c)（実測時点の最新 main を対象とし、その旨を明記する）を採用し、実測時点の main tip
+`abaa94e`（bench(backend-cpu) コミット #713）を計測対象とした。`git diff 86e7e7e..abaa94e` を確認し、
+parity 関連ファイル（tolerance 定数・`BASELINES`・parity 判定ロジック）に差分がないことを確認済み
+（本イシューの数値一致確認前提を崩していない）。
 
 ## 経路×形状 TFLOPS 実測（実測時に記入）
 
@@ -185,26 +199,64 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 
 | M=N=K | tiled f32（中央値/Q1/Q3、run 間レンジ） | WMMA(TF32) opt（同左） | WMMA f16 opt（同左） | mma.sync f16（同左） | f32 最良経路 | f16 candidate 経路 |
 |-------|-----------------------------|-----------------------------|-----------------------------|-----------------------------|---------------|---------------------|
-| 512（参考値） | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 1024（参考値） | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 2048 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 4096 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
+| 512（参考値） | 2.0896(q1=2.0904,q3=2.0880)〔2.0896〜2.1037〕 | 8.2687(q1=8.3135,q3=8.2161)〔8.1960〜8.3220〕 | 4.1191(q1=4.1630,q3=4.1060)〔4.1111〜4.1323〕 | 15.3638(q1=15.4202,q3=15.2798)〔15.1556〜15.3638〕 | wmma_tf32 | mma_f16 |
+| 1024（参考値） | 2.3820(q1=2.3826,q3=2.3687)〔2.3811〜2.3838〕 | 12.6453(q1=12.6584,q3=12.6025)〔12.6168〜12.7353〕 | 8.8470(q1=8.8522,q3=8.7867)〔8.8191〜8.8645〕 | 33.5460(q1=33.8763,q3=33.4041)〔33.4457〜33.7995〕 | wmma_tf32 | mma_f16 |
+| 2048 | 2.3422(q1=2.3428,q3=2.3412)〔2.3404〜2.3432〕 | 14.3540(q1=14.3719,q3=14.2383)〔14.3201〜14.3842〕 | 5.6792(q1=5.6880,q3=5.6641)〔5.6792〜8.9661〕 | 48.3383(q1=48.4364,q3=48.1648)〔47.9647〜48.3383〕 | wmma_tf32 | mma_f16 |
+| 4096 | 1.9847(q1=1.9849,q3=1.9842)〔1.9723〜1.9847〕 | 9.0109(q1=9.0150,q3=9.0073)〔9.0109〜9.0655〕 | 4.3521(q1=4.3528,q3=4.3511)〔4.3508〜4.3620〕 | 33.2252(q1=33.9328,q3=31.0918)〔32.7499〜34.5145〕 | wmma_tf32 | mma_f16 |
+
+各セルは代表 run として **run2** の出力行を機械転記し `<中央値>(q1=,q3=)` を記載し、`〔〕` 内へ
+run1〜run3 の中央値レンジ（3 値の最小〜最大）を注記した。代表 run を run2 に固定して転記したため、
+セルによっては run2 の値がそのセルの run1〜run3 中の真の中央値と一致しない（512 の `mma_f16`・2048 の
+`wmma_f16`／`mma_f16`・4096 の `tiled_f32`／`wmma_tf32`）。判定対象形状（2048/4096）についてセル単位の
+run 間中央値を採った場合の f32/f16 最良経路の対 PyTorch 比は f32=51.60%（4096・run3 出力の
+`f32_best_over_pytorch=51.60%`）・f16=39.42%（4096・run2 が真の中央値のため不変）であり、下記「丸め
+適用後の候補下限値」節の候補値（f32 50%・f16 35%）は run2 代表値のまま採用しても不変であることを
+確認した。4096 の `mma_f16` レンジ〔32.7499〜34.5145〕は run1〜run3 のみの範囲であり、境界注記
+（下記「f16 境界注記」節）で追加した run4（31.4362 TFLOPS）・run5（32.6191 TFLOPS）は含まない
+（Appendix の生ログ抜粋参照）。
+
+`wmma_f16`（f16 opt。候補経路ではない）は 2048 形状で run 間ばらつきが大きい（5.68〜8.97 TFLOPS）が、
+これは `docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 系列・#391 が既に記録した既知の変動であり、f16 最良
+経路として採用するのは常に `mma_f16` であるため候補下限値の算出には影響しない。
 
 ## 対 PyTorch 比（実測時に記入）
 
+代表 run（run2）の出力行 `f32_best_over_pytorch=`/`f16_candidate_over_pytorch=` をそのまま転記する。
+
 | M=N=K | f32 最良（実測大小比較で選出） / PyTorch f32 比 | f16 candidate（実測大小比較で選出） / PyTorch f16 比 |
 |-------|----------------------------------------------------|------------------------------------------------------|
-| 512（参考値） | （未計測） | （未計測） |
-| 1024（参考値） | （未計測） | （未計測） |
-| 2048 | （未計測） | （未計測） |
-| 4096 | （未計測） | （未計測） |
+| 512（参考値） | wmma_tf32 = 105.32% | mma_f16 = 90.29% |
+| 1024（参考値） | wmma_tf32 = 80.80% | mma_f16 = 60.06% |
+| 2048 | wmma_tf32 = 82.82% | mma_f16 = 52.16% |
+| 4096 | wmma_tf32 = **51.56%** | mma_f16 = **39.42%** |
+
+判定対象形状（2048/4096）の最小比率: f32 = 51.56%（4096）・f16 = 39.42%（4096）。
 
 ## 丸め適用後の候補下限値（実測時に記入）
 
 | 精度 | 判定対象形状の最小比率（2048/4096） | 丸め規則適用後の候補下限値 | #390 実測値（f32=25%・f16=10%）との比較 |
 |------|--------------------------------------|------------------------------|------------------------------|
-| f32  | （未計測） | （未計測） | （未計測） |
-| f16  | （未計測） | （未計測） | （未計測） |
+| f32  | 51.56%（4096） | **50%** | #390 の 25% を 25pt 上回る |
+| f16  | 39.42%（4096） | **35%**（境界注記あり。下記参照） | #390 の 10% を 25pt 上回る |
+
+### f16 境界注記（必読）
+
+f16 candidate（4096 形状）の対 PyTorch 比は `bench_harness::floor_lower_bound` の丸め刻み（5% 刻み切り
+下げ）の境界近傍（35% 台後半〜40% 台前半）に位置するため、run1〜run3 の 3 run に加えて run4・run5 を
+追加した **計 5 run** を実行し境界跨ぎの有無を確認した。
+
+| run | 4096 f16 candidate 対 PyTorch 比 | 丸め後 floor |
+|-----|-----------------------------------|--------------|
+| run1 | 40.95% | 40 |
+| run2 | 39.42% | 35 |
+| run3 | 38.86% | 35 |
+| run4 | 37.30% | 35 |
+| run5 | 38.70% | 35 |
+
+5 run 中央値 = 38.86%（run3）→ 丸め後候補下限値 **35%**。run1 のみが 40% 境界を跨いだ事実（run1 だけ
+40.95% で floor=40 相当）を明記する。3 run 運用（「計測環境」節・#390 先例）では run2 が代表値のため
+本ドキュメントの確定候補値は 35% とするが、**境界近傍のため 5 run 中 1/5 が隣接刻みへ振れる程度の
+run 間変動があることを申し送る**。採否・最終確定は F-5（#577）へ引き継ぐ。
 
 **候補下限値は参考算出に留める。** REQ-8 下限値（現行確定値: f32=25%・f16=10%。
 `docs/perf/performance-floor-decision.md` §9）の変更判断は本ドキュメントでは行わない。変更は F-5
@@ -212,42 +264,141 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 
 ## 数値一致（parity）状態の限定条件
 
-実測完了後、選出された経路（`wmma_tf32`／`mma_f16`）が `docs/perf/cuda-floor-remeasurement.md`「数値
-一致（parity）状態の限定条件」節の恒常 fail 対象と一致するかを確認し、以下を明記すること:
+`docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測（#502）」節の手順 3 と同一コマンド
+（`cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`。debug/release
+両プロファイルで実行し同一結果を確認）を実行した結果、`parity_baselines_do_not_regress` は
+`wmma_tf32_staged 512×512×4096 seed=0xC0FFEE` の 1 件で FAIL した。この FAIL は数値乖離ではなく
+`baseline_provenance_unconfirmed == true`（基本版カーネル専用の確定ベースラインが未整備のための
+fail-closed プレースホルダ。#500 由来。参考実測 `fail_count=43019/262144, mean_abs_diff=4.463436e-3`
+は合否判定に不使用）であり、**tolerance 定数・parity ロジック自体は無変更**（「計測環境」節の
+`git diff 86e7e7e..abaa94e` 確認結果）のため後退ではない。
 
-- 後退の有無（tolerance 定数不変・fail 比率/mean_abs_diff がベースライン以下であること）
-- 後退が無い場合でも、既知の parity 恒常 fail（#389 §5.3）自体は解消されていない旨
-- 本 candidate floor は数値一致未達の経路の実測値であり、#186（REQ-2 閾値改定。spec リポジトリ側対応
-  待ち）の解決前は #577 の下限確定根拠として単独採用できない旨
+`--ignored` の非 `parity_nonregression` 系（`cargo test -p backend-cuda --lib -- --ignored`・
+`cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored`）でも同様に選出経路の恒常 fail を
+確認した:
 
-## 状態: 未計測。実機セッションで消化
+| 候補下限の経路 | テスト | fail 内容（実測） | #389 §5.3 の恒常 fail 対象との一致 |
+|---|---|---|---|
+| `wmma_tf32`（基本版） | `wmma_tf32_basic_kernel_parity_does_not_regress` | 32×32×32: fail_count=154/1024（15.04%）／256×256×4096 stress: fail_count=10647/65536（16.25%） | 一致（`baseline_provenance_unconfirmed` 経路） |
+| `wmma_tf32` opt | `wmma_tf32_opt_kernel_k4096_stress` | 512×512×4096: fail_count=43019/262144（**16.41%**） | 一致（#389 §5.3 K4096 stress） |
+| `wmma_tf32` opt | `wmma_tf32_opt_kernel_matches_reference_across_shapes` | m=n=k=64: fail_count=699/4096（**17.06%**） | 一致（#389 §5.3 shape grid） |
+| `mma_f16`（f16 candidate） | `mma_f16_k4096_stress` | 256×256×4096: fail_count=101/65536（**0.154%**） | 一致（#389 §5.3 K4096 tail） |
 
-本ドキュメントは Linux worktree で作成され、CUDA 実機（DGX Spark GB10）が同一セッションで到達できない
-ため計測手順・記録テンプレートのみを整備した（#502・#534（C-12）・#572 先例と同方式）。実機到達可能な
-セッションが「計測手順」節の手順で計測し、上記「計測環境」「経路×形状 TFLOPS 実測」「対 PyTorch 比」
-「丸め適用後の候補下限値」「数値一致（parity）状態の限定条件」の各表・節を実測値で埋めること。
+いずれも #389 §5.3 が記録した恒常 fail 範囲内（TF32 系 16〜17% 台・f16 K4096 stress 0.15% 台）で
+**後退なし**と判定した。`wmma_tf32_opt_kernel_parity_does_not_regress`・`wmma_tf32_staged_kernel_...`・
+`mma_f16_cross_check_against_wmma_f16`・`mma_f16_matches_reference_across_shapes` は pass。
+
+（`nvrtc::jit_cache_bench_tests::*` の 2 件 FAIL は `/tmp` 配下の cache root pin に関する環境依存
+エラーで、GEMM スループット・parity とは無関係のため本ドキュメントのスコープ外。#534〈C-12〉の
+JIT キャッシュベンチ側の既知事象として申し送る。）
+
+- **後退の有無**: tolerance 定数不変（コミット確認済み）・fail 比率/mean_abs_diff が #389 §5.3
+  ベースライン以下 → **後退なし**
+- 後退が無い場合でも、既知の parity 恒常 fail（#389 §5.3）自体は解消されていない
+- 本 candidate floor（f32=50%・f16=35%）は数値一致未達の経路（`wmma_tf32`／`mma_f16`）の実測値であり、
+  #186（REQ-2 閾値改定。spec リポジトリ側対応待ち）の解決前は #577 の下限確定根拠として**単独採用
+  できない**（#186 限定条件は継続）
+
+## 状態: 実測完了（2026-08-18・DGX Spark GB10）
+
+本ドキュメントは当初 Linux worktree で計測手順・記録テンプレートのみを整備していたが（#502・
+#534（C-12）・#572 先例と同方式）、2026-08-18 に CUDA 実機（DGX Spark GB10。`<cuda-node>`。実名は
+`docs/real-hardware-verification-env.local.md` 参照）到達可能なセッションで上記「計測環境」「経路×
+形状 TFLOPS 実測」「対 PyTorch 比」「丸め適用後の候補下限値」「数値一致（parity）状態の限定条件」の
+各表・節を実測値で埋めた。
+
+ノード同期は public 化に伴い GitHub 匿名 fetch（`git fetch origin && git reset --hard FETCH_HEAD`）で
+行い、`abaa94e` 一致を確認した。`docs/spec`（private submodule）はノード上で初期化不能なため、
+PyTorch 参照値計測スクリプト（`gemm_bench_torch_cuda.py`）は Mac から scp 転送して実行した。
 
 内部ホスト名等の実値は書かない（#461 のプレースホルダ方針。実測時の原文は
-`docs/real-hardware-verification-env.local.md` へ記録する）。
+`docs/real-hardware-verification-env.local.md` へ記録済み）。
 
-## 動作確認（Linux セッションで実施済み）
+## 動作確認（実機セッションで実施済み）
 
 - `cargo build --workspace --locked` — `cudarc` 動的ロード契約（CUDA toolkit 非搭載環境でもビルド成立
-  する。`.claude/rules/coding-rust.md`）を崩していないことを確認済み
+  する。`.claude/rules/coding-rust.md`）を崩していないことを確認済み（実機は CUDA 13.0 搭載のため本
+  確認は Linux worktree 側の当初整備セッションの結果を踏襲）
 - `cargo build -p backend-cuda --example cuda_floor_bench --release` — example のビルド成立（無変更）
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test --workspace`（Linux 実行分。実機依存 `#[ignore]` テストは除外）
-- `git diff origin/main -- crates/backend-cuda/src crates/backend-cuda/tests/common crates/bench-harness`
+- `cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`（debug/release
+  両方）・`cargo test -p backend-cuda --lib -- --ignored`・
+  `cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored` — 上記「数値一致（parity）状態
+  の限定条件」節のとおり既知 fail のみ、後退なし
+- `cargo run -p backend-cuda --example cuda_floor_bench --release --locked` を計 5 回実行（生ログ
+  `floor_bench_run{1..5}.log`）
+- `git diff 86e7e7e..abaa94e -- crates/backend-cuda/src crates/backend-cuda/tests/common crates/bench-harness`
   が tolerance 定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parity fixture・`FloorSpec`・
   カーネルソースに差分を持たないことを確認（#502・#390 の検証項目を踏襲）
+
+## Appendix: 生ログ抜粋
+
+実測実行時の生ログはセッション限定の scratchpad 配下（`bench571/`）にのみ存在しコミット対象外のため、
+本節へ最小限を転記する（内部ホスト名は `<cuda-node>` へマスク済み）。
+
+### 環境情報（`env_info.txt`）
+
+```
+rustc 1.97.0 (2d8144b78 2026-07-07)
+cargo 1.97.0 (c980f4866 2026-06-30)
+NVIDIA GB10, 580.159.03, 12.1
+```
+
+### PyTorch 参照値（`pytorch_size{512,1024,2048,4096}.log`）
+
+```
+torch=2.13.0+cu130 numpy=2.2.6 cuda=13.0 device=NVIDIA GB10
+kernel=torch_matmul_cuda dtype=f32 size=512  warmup=20 iters=20 median_tflops=7.8508  q1=7.8033  q3=7.8618
+kernel=torch_matmul_cuda dtype=f16 size=512  warmup=20 iters=20 median_tflops=17.0153 q1=16.8278 q3=17.1024
+kernel=torch_matmul_cuda dtype=f32 size=1024 warmup=20 iters=20 median_tflops=15.6503 q1=15.5794 q3=15.6650
+kernel=torch_matmul_cuda dtype=f16 size=1024 warmup=20 iters=20 median_tflops=55.8542 q1=55.7149 q3=55.8772
+kernel=torch_matmul_cuda dtype=f32 size=2048 warmup=20 iters=20 median_tflops=17.3309 q1=17.2416 q3=17.4023
+kernel=torch_matmul_cuda dtype=f16 size=2048 warmup=20 iters=20 median_tflops=92.6679 q1=92.2691 q3=92.8516
+kernel=torch_matmul_cuda dtype=f32 size=4096 warmup=20 iters=20 median_tflops=17.4750 q1=17.2059 q3=17.5175
+kernel=torch_matmul_cuda dtype=f16 size=4096 warmup=20 iters=20 median_tflops=84.2850 q1=77.8918 q3=84.8805
+```
+
+### `cuda_floor_bench` run2（代表値。`floor_bench_run2.log`）
+
+```
+device: name=NVIDIA GB10 compute_capability=(12, 1)
+pytorch reference provenance: measured this run (gemm_bench_torch_cuda.py 再実行 (warmup=20 iters=20), 2026-08-18T14:26:04Z (UTC), 同一 GB10 個体 <cuda-node>, torch=2.13.0+cu130)
+size=512  tiled_f32_tflops=2.0896 wmma_tf32_tflops=8.2687 wmma_f16_tflops=4.1191 mma_f16_tflops=15.3638 f32_best_over_pytorch=105.32% f16_candidate_over_pytorch=90.29%
+size=1024 tiled_f32_tflops=2.3820 wmma_tf32_tflops=12.6453 wmma_f16_tflops=8.8470 mma_f16_tflops=33.5460 f32_best_over_pytorch=80.80% f16_candidate_over_pytorch=60.06%
+size=2048 tiled_f32_tflops=2.3422 wmma_tf32_tflops=14.3540 wmma_f16_tflops=5.6792 mma_f16_tflops=48.3383 f32_best_over_pytorch=82.82% f16_candidate_over_pytorch=52.16%
+size=4096 tiled_f32_tflops=1.9847 wmma_tf32_tflops=9.0109 wmma_f16_tflops=4.3521 mma_f16_tflops=33.2252 f32_best_over_pytorch=51.56% f16_candidate_over_pytorch=39.42%
+CUDA f32 candidate optimized floor (rounding rule applied to min ratio 51.56%) = 50%
+CUDA f16 candidate optimized floor (rounding rule applied to min ratio 39.42%) = 35%
+```
+
+### f16 境界注記の裏付け（run1・run3〜run5 の size=4096 行）
+
+```
+run1: mma_f16_tflops=34.5145 f16_candidate_over_pytorch=40.95%
+run3: mma_f16_tflops=32.7499 f16_candidate_over_pytorch=38.86%
+run4: mma_f16_tflops=31.4362 f16_candidate_over_pytorch=37.30%
+run5: mma_f16_tflops=32.6191 f16_candidate_over_pytorch=38.70%
+```
+
+### parity 実行結果（抜粋）
+
+- `parity_nonregression`（debug/release 両方・`--test-threads=1`）: `wmma_tf32_staged 512x512x4096` の
+  1 件 FAIL（`baseline_provenance_unconfirmed`。参考実測 `fail_count=43019/262144,
+  mean_abs_diff=4.463436e-3`）
+- `--lib -- --ignored`: `wmma_tf32_basic_kernel_parity_does_not_regress`
+  （32×32×32 `fail_count=154/1024`・256×256×4096 stress `fail_count=10647/65536`）・
+  `wmma_tf32_opt_kernel_k4096_stress`（512×512×4096 `fail_count=43019/262144, mean_abs_diff=4.463e-3`）・
+  `wmma_tf32_opt_kernel_matches_reference_across_shapes`（m=n=k=64 `fail_count=699/4096,
+  mean_abs_diff=5.676e-4`）が FAIL。他 7 件は pass（`nvrtc::jit_cache_bench_tests::*` 2 件の FAIL は
+  `/tmp` cache root pin の環境依存エラーで GEMM parity と無関係。「動作確認」節参照）
+- `cpu_cuda_mma_parity -- --ignored`: `mma_f16_k4096_stress`（256×256×4096
+  `fail_count=101/65536, mean_abs_diff=7.646e-5`）のみ FAIL。`mma_f16_cross_check_against_wmma_f16`・
+  `mma_f16_matches_reference_across_shapes` は pass
 
 ## 役割分担（二重管理を避ける）
 
 - **`docs/perf/cuda-floor-remeasurement.md`（#157/#390）**: TASK-8.3c 時点（Phase B/C 適用前）の確定
   記録。本ドキュメントでは書き換えない
-- **本ドキュメント（#571・Phase F-1）**: Phase B/C 適用後の再計測記録。実測値記入は実機セッションへ
-  申し送り
+- **本ドキュメント（#571・Phase F-1）**: Phase B/C 適用後の再計測記録。2026-08-18 実測完了
 - **`docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測（#502）」節**: Phase B 単独の実機
   未到達記録。実機セッションが本ドキュメントと合わせて埋める判断は実機セッション側に委ねる
 - **`docs/perf/cuda-jit-cache-benchmark.md`（#534・C-12）**: Phase C（JIT キャッシュ）固有の初回コンパ
@@ -262,10 +413,10 @@ cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 
 ## 未実施・後続作業
 
-- **実機実測**: 「状態」節のとおり本イシューでは未実施。CUDA 実機（DGX Spark GB10）到達可能なセッション
-  へ申し送る
-- **候補下限値の最終確定・REQ-8 反映判断**: F-5（#577・人間承認）が実測完了後に対応する
-- **parity 非後退の最終確認**: F-4（#575）が実測完了後に対応する
+- **実機実測**: 「状態」節のとおり 2026-08-18 実測完了。本節は完了扱い
+- **候補下限値の最終確定・REQ-8 反映判断**: F-5（#577・人間承認）が本ドキュメントの実測結果
+  （f32 候補 50%・f16 候補 35%〈境界注記あり〉）を受けて対応する
+- **parity 非後退の最終確認**: F-4（#575）が本ドキュメントの非後退確認結果を受けて最終確認する
 - **コストモデル選定・JIT shape 特化経路（`gemm_auto.rs::CudaGemmAuto`／`run_specialized_mma_f16`）の
   本番化判断**: 「実測バイナリ（経路カバレッジ確認結果）」節のとおり、この経路は現時点で
   `internal-diagnostics` feature 限定かつ `CudaBackendOps::gemm` からも到達しないため本イシューの
