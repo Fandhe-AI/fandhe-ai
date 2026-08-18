@@ -136,7 +136,7 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
         // GEMM 性能改善ツリー（#479）Phase F の再計測（#571・PR #725 系列。
         // `docs/perf/cuda-optimized-remeasurement.md`）で経路が引き続き `wmma_tf32` のまま
         // スループットが向上したため再確定した: 判定対象形状（M=N=K=2048/4096）の実測比率
-        // 最小値 51.56%（4096・代表 run2）に `bench_harness::floor_lower_bound` を適用し
+        // 最小値 51.96%（4096・Rust/PyTorch とも 5 run 中央値）に `bench_harness::floor_lower_bound` を適用し
         // 50%（10% 以上のため 5% 刻み切り下げ）。イシュー #577 のユーザー承認記録（2026-08-18・
         // 本セッションの対話承認。承認者: リポジトリオーナー Nancy さん〈GitHub: aLiz-Nancy〉）で
         // 確定（`docs/perf/performance-floor-decision.md` §10）。`provisional: false` は #393 から
@@ -164,17 +164,17 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
         // CUDA f16 対 PyTorch f16（最適化後、DGX Spark GB10）。#393（§9）で 10% に確定していたが、
         // Phase F の再計測（#571・`docs/perf/cuda-optimized-remeasurement.md`）で経路は引き続き
         // `mma_f16` のままスループットが向上したため再確定した: 判定対象形状の実測比率最小値
-        // 39.42%（4096・代表 run2。5 run 中央値 38.86%）に `floor_lower_bound` を適用し 35%
+        // 37.47%（4096・Rust/PyTorch とも 5 run 中央値）に `floor_lower_bound` を適用し 35%
         // （10% 以上のため 5% 刻み切り下げ）。イシュー #577 のユーザー承認記録（2026-08-18・本
         // セッションの対話承認。承認者: リポジトリオーナー Nancy さん〈GitHub: aLiz-Nancy〉）で確定
         // （`docs/perf/performance-floor-decision.md` §10）。`provisional: false` は #393 から
         // 引き続き据え置き。限定条件は CudaF32/Optimized と同一（候補算出経路は `mma_f16`。
         // #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続）。
         //
-        // f16 境界注記: 判定対象形状（4096）の対 PyTorch 比は丸め刻み境界近傍（run1 のみ
-        // 40.95% で丸め後 40 相当）に位置するため 5 run 計測とした
-        // （`docs/perf/cuda-optimized-remeasurement.md`「f16 境界注記」節）。5 run 中央値
-        // 38.86%（run3）を採用根拠とし、境界近傍の run 間変動があることを申し送る。
+        // f16 境界注記: 判定対象形状（4096）の対 PyTorch 比は丸め刻み境界近傍に位置するため
+        // 5 run 計測（Rust・PyTorch とも）で確認した。5 run 中央値どうしの比 37.47% を採用根拠と
+        // し、分母を 5 run 中央値化すると全 run が 35% 帯に収まること・境界近傍の run 間変動が
+        // あることを申し送る（`docs/perf/cuda-optimized-remeasurement.md`「f16 境界注記」節）。
         (CudaF16, Optimized) => FloorSpec::Ratio {
             percent: 35.0,
             provisional: false,

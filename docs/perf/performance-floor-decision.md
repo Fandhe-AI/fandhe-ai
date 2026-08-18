@@ -218,8 +218,8 @@ GEMM 性能改善ツリー（ルート #479）Phase F（親 #569「再計測・p
 | backend_dtype | 入力ドキュメント | 判定対象形状の実測比率最小値 | 候補算出経路 |
 |---|---|---|---|
 | CpuF32 | `docs/perf/cpu-gemm-optimized-remeasurement.md` | 24.7%（size=2048） | NEON intrinsics 適用済みカーネル |
-| CudaF32 | `docs/perf/cuda-optimized-remeasurement.md`（#571・PR #725 系列） | 51.56%（size=4096・代表 run2。セル単位 run 間中央値では 51.60%〈run3〉で丸め後 50% は不変） | `wmma_tf32`（WMMA(TF32) opt） |
-| CudaF16 | 同上 | 39.42%（size=4096・代表 run2。5 run 中央値 38.86%） | `mma_f16`（`mma.sync` パイプライン） |
+| CudaF32 | `docs/perf/cuda-optimized-remeasurement.md`（#571・PR #725 系列） | 51.96%（size=4096・Rust/PyTorch とも 5 run 中央値） | `wmma_tf32`（WMMA(TF32) opt） |
+| CudaF16 | 同上 | 37.47%（size=4096・Rust/PyTorch とも 5 run 中央値） | `mma_f16`（`mma.sync` パイプライン） |
 | MetalF32 | `docs/perf/metal-floor-remeasurement.md`（#572・PR #725 系列） | 13.01%（size=4096） | `dispatch_tiled_prepared`（simdgroup タイル化） |
 | MetalF16 | 同上 | 18.78%（size=4096） | `dispatch_f16_prepared_unverified` |
 
@@ -230,8 +230,8 @@ GEMM 性能改善ツリー（ルート #479）Phase F（親 #569「再計測・p
 | backend_dtype | 旧値 | 新値 | 変化 |
 |---|---|---|---|
 | CpuF32 | 20% | **20%** | 維持・確定（`floor_lower_bound(24.7)` = 20） |
-| CudaF32 | 25%（#393） | **50%** | 引き上げ（`floor_lower_bound(51.56)` = 50） |
-| CudaF16 | 10%（#393） | **35%** | 引き上げ（`floor_lower_bound(38.86〜39.42)` = 35） |
+| CudaF32 | 25%（#393） | **50%** | 引き上げ（`floor_lower_bound(51.96)` = 50） |
+| CudaF16 | 10%（#393） | **35%** | 引き上げ（`floor_lower_bound(37.47)` = 35） |
 | MetalF32 | 30% | **10%** | 引き下げ（`floor_lower_bound(13.01)` = 10） |
 | MetalF16 | 未設定 | **15%**（新設） | 新設（`floor_lower_bound(18.78)` = 15） |
 
@@ -244,14 +244,14 @@ GEMM 性能改善ツリー（ルート #479）Phase F（親 #569「再計測・p
 
 **CudaF32／CudaF16（引き上げ）**: §9 で 25%／10% に確定した後、Phase F の再計測で候補算出経路
 （`wmma_tf32`／`mma_f16`）が変わらないままスループットが向上し、判定対象形状の実測比率が
-51.56%／39.42%（4096 側が最小）へ改善した。§9 の限定条件（下記「CUDA 限定条件の継続」節）は
+51.96%／37.47%（4096 側が最小。Rust・PyTorch とも 5 run 中央値）へ改善した。§9 の限定条件（下記「CUDA 限定条件の継続」節）は
 本追補でも**解消しておらず、継続する**。
 
-CudaF16 は丸め刻み境界近傍（35% 台後半〜40% 台前半）のため、`cuda-optimized-remeasurement.md`
-「f16 境界注記」節のとおり run1〜run3 に加え run4・run5 を追加した 5 run 計測を実施した。5 run 中
-run1 のみが 40.95%（丸め後 40 相当）で、残り 4 run は 35% 帯（37.30〜39.42%）に収まる。5 run 中央値
-38.86%（run3）を採用根拠とし、35% を確定値とする。境界近傍のため run 間で隣接刻みへ振れる程度の
-変動があることを申し送る。
+CudaF16 は丸め刻み境界近傍のため、`cuda-optimized-remeasurement.md`「f16 境界注記」節のとおり
+5 run 計測（Rust・PyTorch とも）で確認した。分母（PyTorch f16）を 5 run 中央値へ正しく集計すると
+run1〜run5 の比はすべて 35% 帯に収まる（当初の 1 run 分母では run1 のみ 40.95% で見かけ上 40% 境界を
+跨いでいた）。5 run 中央値 37.47% を採用根拠とし、35% を確定値とする。境界近傍のため run 間で隣接
+刻みへ振れる程度の変動があることを申し送る。
 
 **MetalF32（引き下げ）**: 現行 30% は PoC-v2-4 の事前固定判定基準（当時の旧カーネル・バッファ常駐
 前提の実測 23.2% 系列）に基づく確定値だった。`docs/performance-targets.md` §4 が定める計測境界
