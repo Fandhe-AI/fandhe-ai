@@ -9,9 +9,11 @@ E-1〜E-8: #552・#554・#556・#557・#559・#561・#562・#564）が全て clo
 **本ドキュメントは REQ-8 の下限値（`docs/performance-targets.md` §2）を一切変更しない**（下限値の
 変更は Phase F の人間承認タスク #577 へ申し送る。`cpu-gemm-baseline-remeasurement.md` §0 と同方針）。
 
-## 状態: 計測手順・Phase E 反映状況の切り分け表・記録枠の整備まで完了。M4 Max 実機での実測は未実施（環境ゲートで未達）
+## 状態: 実測完了（2026-08-18・Apple M4 Max 実機）
 
-### 実行環境ゲート判定（本イシュー実装セッション時点）
+### 実行環境ゲート判定
+
+#### 旧セッション（Linux x86_64・実測未達）
 
 計測は Apple M4 Max 実機（`docs/real-hardware-verification-env.md` §7: Mac はローカル直接実行）
 でのみ有効という前提のもと、実装セッション開始時に以下を判定した（A-8・Metal #547 と同一のゲート
@@ -21,11 +23,18 @@ E-1〜E-8: #552・#554・#556・#557・#559・#561・#562・#564）が全て clo
 2. `docs/real-hardware-verification-env.local.md`（Git 管理外のローカル用ファイル）→ 不存在（実測）。
    M4 Max への到達経路が定義されていないため代替経路もなし。
 
-**結論**: 本セッションでは M4 Max 実機に到達できないため、Phase E 反映状況の切り分け・計測手順と
+**結論**: 当該セッションでは M4 Max 実機に到達できないため、Phase E 反映状況の切り分け・計測手順と
 記録テンプレートの整備までを実施し、**実測値の捏造・placeholder 値での完了扱いは行わない**
-（fail-closed。A-8・Metal #547 先例と同方針）。実測（ベースライン SHA・HEAD の 2 点 × Rust 5 run ×
-4 形状、PyTorch 5 run × 4 形状）は M4 Max 実機へ到達可能な後続セッション・Agent（`bench-runner`
-委譲想定）が引き継いで実施する。
+（fail-closed。A-8・Metal #547 先例と同方針）。実測は M4 Max 実機へ到達可能な後続セッション・Agent
+（`bench-runner` 委譲想定）が引き継いで実施する方針とした。
+
+#### 実測セッション（2026-08-18・Apple M4 Max ローカル直接実行）
+
+1. `uname -sm` → `Darwin arm64`（実測。M4 Max 実機に到達）。
+2. SHA 規則の再判定（`git log b96c3b3..origin/main -- crates/backend-cpu`）は非空（`b054530` #718）
+   だったため、`b96c3b3` を HEAD SHA として使用した（下記「ベースライン基準コミットの確定」節参照）。
+3. ベースライン SHA `1cb2938`・HEAD SHA `b96c3b3` の 2 点 × Rust 5 run × 4 形状、PyTorch 5 run ×
+   4 形状の実測を実施した。
 
 ## Phase E 変更の本番経路反映状況（ソースコード実測による切り分け）
 
@@ -110,11 +119,11 @@ cargo test -p backend-cpu --release --test gemm_blis_perf \
 
 ### PyTorch 側
 
-A-8 §「PyTorch 側」と同じ未検証事項が残る: 本セッションの worktree では `docs/spec` submodule が
-未初期化（`git submodule status` が `-44c5e6271ad679e7f4822528b9dec616768ceeaa docs/spec` を返し、
-`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/pytorch/` が実在しない）。実機セッションで submodule
-初期化後にスクリプト冒頭（`argparse`／`sys.argv` 定義箇所）を確認し、下記コマンド例の引数順序が
-異なる場合は訂正すること。
+旧セッション（Linux x86_64）の worktree では `docs/spec` submodule が未初期化（`git submodule status`
+が `-44c5e6271ad679e7f4822528b9dec616768ceeaa docs/spec` を返し、
+`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/pytorch/` が実在しない）のため、下記コマンド例の
+引数順序は未検証だった。**実測セッション（2026-08-18）で submodule 初期化後にスクリプトを実行し、
+`<size> <warmup> <iters>` の位置引数順序で想定どおり動作することを確認した。**
 
 ```bash
 python3 -m venv .venv-gemm-phase-e
@@ -132,34 +141,60 @@ python3 docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/pytorch/gemm_bench_torch_
 計測中は他負荷の混入に注意し、異常 run（外れ値の明確な原因があるもの）は破棄・取り直しを記録に
 残す。
 
-## 実測結果（未実施。M4 Max 実機セッションで記入する）
+## 実測結果（2026-08-18・Apple M4 Max 実機。計測環境は下記「計測環境」参照）
+
+### 計測環境
+
+| 項目 | 値 |
+|---|---|
+| チップ | Apple M4 Max |
+| OS | macOS 26.6.1 |
+| 論理コア数 | 16 |
+| rustc | 1.96.0 (ac68faa20 2026-05-25) |
+| torch | 2.13.0（macOS arm64） |
+| `torch.get_num_threads()` | 12 |
+| PyTorch BLAS | `BLAS_INFO=accelerate`（Apple Accelerate/vecLib。AMX 経路を含みうる） |
+| venv 構成 | `python3 -m venv` + `pip install torch==2.13.0 numpy`（リポジトリ管理外） |
+| ベースライン SHA | `1cb2938` |
+| HEAD SHA | `b96c3b3` |
+| parity（`gemm_blis_parity`、HEAD） | 16 passed; 0 failed（HEAD `b96c3b3` の worktree でのみ実行。ベースライン SHA `1cb2938` 側は未実行） |
+
+ベースライン側（`1cb2938`）の数値正当性は、各 perf run 内でハーネスが計測区間外に実行する
+`gemm_parallel`（参照実装）との bit 一致 `assert_eq!` で担保する。この `assert_eq!` はベースライン
+5 run・HEAD 5 run の**全 10 run で pass** し、A-8 §「計測手順」が予告していた M=N=K=4096・NEON 経路
+の bit 一致（未実施だった組合せ）が実機で初めて確認された（詳細は `cpu-gemm-baseline-remeasurement.md`
+§「実測結果」参照）。
 
 ### 対 A-8 ベースライン改善率
 
 | 形状 | ベースライン（`1cb2938`）median TFLOPS | Phase E（HEAD）median TFLOPS | 改善率（HEAD ÷ ベースライン） |
 |---|---|---|---|
-| 512（参考値） | 実測待ち | 実測待ち | 実測待ち |
-| 1024（参考値） | 実測待ち | 実測待ち | 実測待ち |
-| 2048 | 実測待ち | 実測待ち | 実測待ち |
-| 4096 | 実測待ち | 実測待ち | 実測待ち |
+| 512（参考値） | 0.355661 | 0.470527 | 132.3% |
+| 1024（参考値） | 0.530036 | 0.711176 | 134.2% |
+| 2048 | 0.577056 | 0.800964 | 138.8% |
+| 4096 | 0.663931 | 0.931332 | 140.3% |
 
 ### 対 PyTorch 比（REQ-8 分子・分母定義）
 
 | 形状 | Rust median TFLOPS（Phase E・HEAD） | PyTorch median TFLOPS | 対 PyTorch 比率 |
 |---|---|---|---|
-| 512（参考値） | 実測待ち | 実測待ち | 実測待ち |
-| 1024（参考値） | 実測待ち | 実測待ち | 実測待ち |
-| 2048 | 実測待ち | 実測待ち | 実測待ち |
-| 4096 | 実測待ち | 実測待ち | 実測待ち |
+| 512（参考値） | 0.470527 | 2.6040 | 18.1% |
+| 1024（参考値） | 0.711176 | 3.1666 | 22.5% |
+| 2048 | 0.800964 | 3.2375 | 24.7% |
+| 4096 | 0.931332 | 3.0101 | 30.9% |
 
 判定主対象（2048/4096）の比率最小値を Phase E 完了時点の対 PyTorch 比として本節に明記する
-（`gemm-optimization-baseline.md` §1・A-8 と同方針）。
+（`gemm-optimization-baseline.md` §1・A-8 と同方針）。**Phase E 完了時点の対 PyTorch 比は 24.7%
+（size=2048）**。
 
-### PoC-v2-1（5.3%）との対比（未実施）
+異常 run の扱い: 明確な原因のある外れ値はなく、全 5 run を採用した（生ログは Appendix 参照）。
 
-実測完了後、本ドキュメントの Phase E 完了時点の値と PoC-v2-1 旧経路の 5.3%
-（`docs/performance-targets.md:25`）を対比し、SIMD 適用（NEON マイクロカーネル・BLIS 5-loop）と
-Phase E 各改善（E-1・E-4・E-5・E-6）による累積改善の程度を記録する。
+### PoC-v2-1（5.3%）との対比
+
+Phase E 完了時点の対 PyTorch 比 24.7%（size=2048）は、PoC-v2-1 旧経路（SIMD 未適用）の 5.3%
+（`docs/performance-targets.md:25`）に対し**約 4.7 倍**（24.7 / 5.3 ≈ 4.66）の改善である。SIMD 適用
+（NEON マイクロカーネル・BLIS 5-loop）と Phase E 各改善（E-1・E-4・E-5・E-6）の累積効果により、
+対 PyTorch 比が旧経路比で大幅に向上したことを確認した。
 
 ## REQ-8 下限値との関係（変更しない）
 
@@ -180,19 +215,112 @@ Phase E 各改善（E-1・E-4・E-5・E-6）による累積改善の程度を記
 
 ## スコープ外・申し送り
 
-- **M4 Max 実機での実測**（ベースライン SHA `1cb2938`・HEAD の 2 点 × Rust 5 run × 4 形状、PyTorch
-  5 run × 4 形状）: 本セッションでは環境ゲート未達のため未実施。後続の実機到達可能セッション
-  （`bench-runner` 委譲想定）へ引き継ぐ。
+- **M4 Max 実機での実測**（ベースライン SHA `1cb2938`・HEAD SHA `b96c3b3` の 2 点 × Rust 5 run ×
+  4 形状、PyTorch 5 run × 4 形状）: 2026-08-18 に実施済み。
 - **`cpu-gemm-baseline-remeasurement.md` の実測値記入**: 本イシューと同一実機セッションで併せて
-  埋めるのが効率的（両ドキュメントとも Rust 側は同一ハーネス・PyTorch 側は同一スクリプトのため、
-  ベースライン SHA 側の 1 セットの計測で両ドキュメントの表を同時に満たせる）。
+  記入済み（両ドキュメントとも Rust 側は同一ハーネス・PyTorch 側は同一スクリプトのため、
+  ベースライン SHA 側の 1 セットの計測で両ドキュメントの表を同時に満たした）。
+- **`docs/perf/cpu-gemm-optimized-remeasurement.md`（#574・Phase F）の実測値記入**: 本ドキュメントの
+  HEAD 計測と対 PyTorch 比の判定対象形状が重なるため、同一 M4 Max 実機セッションで併せて記入済み
+  （Rust・PyTorch とも同一ハーネス・同一スクリプトのため二重計測を回避した）。
 - **REQ-8 下限値の変更**: 本イシューでは行わない。Phase F の人間承認タスク（#577）へ申し送る。
 - **E-7（明示プリフェッチ）の採否判断**: `docs/cpu-gemm-prefetch-decision.md` の保留判断のまま。
   本イシューのスコープ外。
 - **E-8（MC/KC/NC）の実機スイープ・選定**: #564 の申し送り事項であり本イシューでは扱わない
-  （現行値 MC=128/KC=256/NC=512 のまま計測する）。
+  （現行値 MC=128/KC=256/NC=512 のまま計測した）。
 
 ## Appendix: 全 run 生ログ
 
-実測完了後、ベースライン SHA・HEAD それぞれについて Rust 側 5 run × 4 形状、PyTorch 側 5 run ×
-4 形状の生ログをここへ記録する。
+ベースライン SHA `1cb2938`・HEAD SHA `b96c3b3` それぞれについて Rust 側 5 run × 4 形状、PyTorch 側
+5 run × 4 形状の生ログ（1 行形式）。PyTorch 側はベースライン・HEAD で共用（`torch.matmul` のみで
+演算経路が変わらないため）。
+
+### Rust 側（ベースライン `1cb2938`、5 run）
+
+```text
+run1: size=512 median_tflops=0.354760 q1_tflops=0.350762 q3_tflops=0.362649 median_secs=0.000757
+run1: size=1024 median_tflops=0.551721 q1_tflops=0.530254 q3_tflops=0.560250 median_secs=0.003892
+run1: size=2048 median_tflops=0.594819 q1_tflops=0.561821 q3_tflops=0.629246 median_secs=0.028882
+run1: size=4096 median_tflops=0.648539 q1_tflops=0.633239 q3_tflops=0.682169 median_secs=0.211921
+run2: size=512 median_tflops=0.355661 q1_tflops=0.336210 q3_tflops=0.368434 median_secs=0.000755
+run2: size=1024 median_tflops=0.540146 q1_tflops=0.519526 q3_tflops=0.549205 median_secs=0.003976
+run2: size=2048 median_tflops=0.578491 q1_tflops=0.549575 q3_tflops=0.600689 median_secs=0.029698
+run2: size=4096 median_tflops=0.664804 q1_tflops=0.643260 q3_tflops=0.675550 median_secs=0.206736
+run3: size=512 median_tflops=0.367049 q1_tflops=0.359491 q3_tflops=0.375325 median_secs=0.000731
+run3: size=1024 median_tflops=0.529252 q1_tflops=0.513942 q3_tflops=0.537403 median_secs=0.004058
+run3: size=2048 median_tflops=0.577056 q1_tflops=0.558697 q3_tflops=0.593423 median_secs=0.029772
+run3: size=4096 median_tflops=0.671800 q1_tflops=0.648174 q3_tflops=0.682826 median_secs=0.204583
+run4: size=512 median_tflops=0.371515 q1_tflops=0.356528 q3_tflops=0.378634 median_secs=0.000723
+run4: size=1024 median_tflops=0.467522 q1_tflops=0.463632 q3_tflops=0.520266 median_secs=0.004593
+run4: size=2048 median_tflops=0.571542 q1_tflops=0.565606 q3_tflops=0.600703 median_secs=0.030059
+run4: size=4096 median_tflops=0.663931 q1_tflops=0.639499 q3_tflops=0.674484 median_secs=0.207008
+run5: size=512 median_tflops=0.342994 q1_tflops=0.334551 q3_tflops=0.353069 median_secs=0.000783
+run5: size=1024 median_tflops=0.530036 q1_tflops=0.515468 q3_tflops=0.537919 median_secs=0.004052
+run5: size=2048 median_tflops=0.567919 q1_tflops=0.534839 q3_tflops=0.584703 median_secs=0.030251
+run5: size=4096 median_tflops=0.650659 q1_tflops=0.630356 q3_tflops=0.667101 median_secs=0.211231
+```
+
+### Rust 側（HEAD `b96c3b3`、5 run）
+
+```text
+run1: size=512 median_tflops=0.469395 q1_tflops=0.438710 q3_tflops=0.491040 median_secs=0.000572
+run1: size=1024 median_tflops=0.712188 q1_tflops=0.705462 q3_tflops=0.743975 median_secs=0.003015
+run1: size=2048 median_tflops=0.839325 q1_tflops=0.802042 q3_tflops=0.856456 median_secs=0.020469
+run1: size=4096 median_tflops=1.034018 q1_tflops=0.995078 q3_tflops=1.063882 median_secs=0.132917
+run2: size=512 median_tflops=0.386215 q1_tflops=0.350457 q3_tflops=0.429325 median_secs=0.000695
+run2: size=1024 median_tflops=0.684030 q1_tflops=0.666248 q3_tflops=0.693268 median_secs=0.003139
+run2: size=2048 median_tflops=0.725492 q1_tflops=0.714098 q3_tflops=0.773227 median_secs=0.023680
+run2: size=4096 median_tflops=0.912519 q1_tflops=0.837805 q3_tflops=0.963546 median_secs=0.150615
+run3: size=512 median_tflops=0.470527 q1_tflops=0.460701 q3_tflops=0.482219 median_secs=0.000571
+run3: size=1024 median_tflops=0.711176 q1_tflops=0.703219 q3_tflops=0.739089 median_secs=0.003020
+run3: size=2048 median_tflops=0.800964 q1_tflops=0.779322 q3_tflops=0.834401 median_secs=0.021449
+run3: size=4096 median_tflops=0.931332 q1_tflops=0.903771 q3_tflops=0.960642 median_secs=0.147572
+run4: size=512 median_tflops=0.481031 q1_tflops=0.469293 q3_tflops=0.488842 median_secs=0.000558
+run4: size=1024 median_tflops=0.730064 q1_tflops=0.695288 q3_tflops=0.764671 median_secs=0.002942
+run4: size=2048 median_tflops=0.820975 q1_tflops=0.793633 q3_tflops=0.884352 median_secs=0.020926
+run4: size=4096 median_tflops=0.957944 q1_tflops=0.931804 q3_tflops=0.997889 median_secs=0.143473
+run5: size=512 median_tflops=0.472217 q1_tflops=0.466034 q3_tflops=0.495230 median_secs=0.000568
+run5: size=1024 median_tflops=0.705635 q1_tflops=0.685987 q3_tflops=0.735387 median_secs=0.003043
+run5: size=2048 median_tflops=0.786558 q1_tflops=0.771323 q3_tflops=0.812389 median_secs=0.021842
+run5: size=4096 median_tflops=0.881967 q1_tflops=0.848707 q3_tflops=0.934798 median_secs=0.155832
+```
+
+（`docs/perf/cpu-gemm-optimized-remeasurement.md` の Appendix「Rust 側（HEAD、5 run）」と同一の計測。
+同一ハーネス実行の再利用のため二重計測ではない。）
+
+### PyTorch 側（5 run。ベースライン・HEAD 双方に共用）
+
+```text
+run1: torch=2.13.0 numpy=2.5.2 threads=12 size=512 median_tflops=2.8108 q1=2.7913 q3=2.8994
+run1: size=1024 median_tflops=3.1711 q1=3.1557 q3=3.1915
+run1: size=2048 median_tflops=3.2440 q1=3.2368 q3=3.2452
+run1: size=4096 median_tflops=3.0432 q1=2.9049 q3=3.0597
+run2: size=512 median_tflops=2.6178 q1=2.5515 q3=2.8748
+run2: size=1024 median_tflops=3.1691 q1=3.1486 q3=3.1953
+run2: size=2048 median_tflops=3.3803 q1=3.3511 q3=3.3920
+run2: size=4096 median_tflops=2.9889 q1=2.8987 q3=3.0596
+run3: size=512 median_tflops=2.5915 q1=2.5195 q3=2.7461
+run3: size=1024 median_tflops=3.1473 q1=3.0840 q3=3.1666
+run3: size=2048 median_tflops=3.2091 q1=3.1392 q3=3.2380
+run3: size=4096 median_tflops=3.0101 q1=2.8946 q3=3.0404
+run4: size=512 median_tflops=2.5978 q1=2.5565 q3=2.8419
+run4: size=1024 median_tflops=3.1666 q1=3.0805 q3=3.1789
+run4: size=2048 median_tflops=3.2255 q1=3.2074 q3=3.2396
+run4: size=4096 median_tflops=2.9914 q1=2.9072 q3=3.0045
+run5: size=512 median_tflops=2.6040 q1=2.5434 q3=2.8506
+run5: size=1024 median_tflops=3.1621 q1=3.1511 q3=3.1674
+run5: size=2048 median_tflops=3.2375 q1=3.2029 q3=3.2446
+run5: size=4096 median_tflops=3.0115 q1=2.9043 q3=3.0152
+```
+
+（同一実機・同一 venv・同一 `torch==2.13.0` での 1 回の計測をベースライン・Phase E（HEAD）・A-8 の
+3 ドキュメントで共用。`docs/perf/cpu-gemm-optimized-remeasurement.md`・
+`docs/perf/cpu-gemm-baseline-remeasurement.md` の Appendix と同一値。）
+
+### parity（HEAD `b96c3b3`）
+
+```text
+running 16 tests
+（全 16 test ok）
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+```
