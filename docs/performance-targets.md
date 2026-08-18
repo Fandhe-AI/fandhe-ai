@@ -70,8 +70,18 @@ REQ-8）。
 
 ## 4. 計測プロトコル
 
-- warmup 20 回以上・計測 20 回以上の中央値・Q1/Q3 を記録する（PoC-v2-1/3/4 はすべて本条件で
-  実施済み）
+計測は 2 層構造を取る（§2 表の「最適化後」列・`docs/perf/cuda-optimized-remeasurement.md`・
+`docs/perf/metal-floor-remeasurement.md` で採用した構成）。
+
+- **内層（1 run 内）**: warmup 20 回以上・計測 20 回以上の中央値・Q1/Q3 を記録する
+  （`bench_harness::protocol::run`。PoC-v2-1/3/4 はすべて本条件で実施済み）
+- **外層（run 間）**: 内層プロトコルに従う 1 回の実行を「1 run」とし、これを独立に 5 回実行して
+  run 間の中央値を代表値として採用する（コーディング規約 `.claude/rules/coding-rust.md`
+  「ベンチは 5 回計測の中央値を採用」に合わせる）。§2 表の「Rust/PyTorch とも 5 run 中央値」等の
+  記載はこの外層 5 run を指す。PoC-v2 時点の初期リリース確定値は外層 5 run 化以前の内層のみの
+  計測であり、Phase F（GEMM 性能改善ツリー #479・`docs/perf/performance-floor-decision.md` §10）
+  による最適化後の再計測から外層 5 run を追加適用した（内層の warmup 20／計測 20 という下限自体は
+  変更していない）
 - 同期方式は「ホスト転送を伴わない完了待ち」で統一する。具体的な完了待ち手段はバックエンド固有
   API に委ねる:
   - CUDA: `stream.synchronize()`（`03-poc/poc-v2-3-cuda-gemm/README.md`）
