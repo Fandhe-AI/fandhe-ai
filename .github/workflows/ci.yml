@@ -229,14 +229,16 @@ jobs:
   #     恒常対策は不要と判断する。共通側改善は Issue 起票にユーザー承認が
   #     要るため本変更では見送る（out-of-scope-tracking.md）
   #
-  # 前提: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
+  # 前提1: runner に正常動作する rustup が導入済みであること。共通側 v1.2.0 以降、
+  # rustup 不在時はネットワーク導入せず fail-closed で失敗する（Fandhe-AI/actions#86）。
+  # 前提2: リポジトリルートの rust-toolchain.toml（共通側 rust-toolchain-setup が
   # 単一真実源として参照する。本移行で追加）。
   rust-ci:
     # reusable workflow は呼び出し側が付与した以上の権限を持てないため、
     # 共通側ジョブが必要とする最小権限をここでも付与する
     permissions:
       contents: read
-    uses: Fandhe-AI/actions/.github/workflows/rust-base-ci.yml@fed9c07d98367f77e5e2b63bca38843f46feee96 # main
+    uses: Fandhe-AI/actions/.github/workflows/rust-base-ci.yml@05ae036b8564d05e26db1a36d93b178894707326 # v1.2.0
     with:
       # public 区分（GitHub ホステッド既定。#457 Phase 1・#464 で反転）。共通側入力の
       # 既定値は self-hosted のため、public 区分への反転を明示するオーバーライドとして
