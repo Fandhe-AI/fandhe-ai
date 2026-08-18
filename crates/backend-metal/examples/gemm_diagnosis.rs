@@ -172,6 +172,13 @@ mod analytics {
         /// （MFA 経験則の f32 系係数）をそのまま参照し、診断経路と
         /// ライブラリ経路で係数値が食い違わないようにする（単一真実源。
         /// codex-review 指摘・PR #662）。
+        // macOS 実行時は `resolve_device_profile`（`macos_impl`）が CLI 引数の
+        // 明示指定を必須化し `M4_MAX` を既定値として使わない（fail-closed。
+        // 上記ドキュメンテーションコメント参照）ため、macOS ビルドでは
+        // 参照元が存在しない。唯一の参照元は非 macOS フォールバック
+        // （本ファイル末尾の `#[cfg(not(target_os = "macos"))] fn main`）
+        // のため、それに合わせて `cfg` を付ける。
+        #[cfg(not(target_os = "macos"))]
         pub const M4_MAX: DeviceProfile = DeviceProfile {
             gpu_core_count: 40,
             ideal_groups_multiplier: backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32 as u64,

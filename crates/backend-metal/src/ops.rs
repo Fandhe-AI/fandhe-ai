@@ -408,7 +408,8 @@ impl MetalBackendOps {
     /// 検証済みのため `x_slice.len()` は `plan.output_shape()` の要素数積
     /// と一致する）から導出する。`hidden == 0` は
     /// `MetalSoftmax::run_softmax_f32` 側の 0 要素早期 return 契約に委ね、
-    /// ここではゼロ除算を避けるためのみ分岐する。
+    /// ここでは `checked_div`（`hidden == 0` なら `rows = 0`）でゼロ除算
+    /// のみを避ける。
     fn run_fused_softmax(
         &self,
         plan: &FusionPlan,
@@ -421,11 +422,10 @@ impl MetalBackendOps {
         let x_slice = x_owned.as_slice().ok_or_else(|| {
             BackendError::KernelLaunchFailed("run_fused: softmax input not contiguous".into())
         })?;
-        let rows = if hidden == 0 {
-            0
-        } else {
-            x_slice.len() / hidden
-        };
+        // `checked_div` を使い `hidden == 0` を除算前に排除する（clippy
+        // `manual_checked_ops`。挙動は従来の if 分岐と同一: `hidden == 0`
+        // の場合は `rows = 0`、それ以外は通常の整数除算）。
+        let rows = x_slice.len().checked_div(hidden).unwrap_or(0);
 
         let ctx = MetalContext::new().map_err(map_metal_error)?;
         let softmax = MetalSoftmax::new(&ctx)

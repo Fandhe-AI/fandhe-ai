@@ -356,8 +356,11 @@ pub fn plan_dtype_is_f32(plan: &FusionPlan) -> bool {
 }
 
 /// online softmax の online max 初期値・範囲外レーンの sentinel（x
-/// ドメイン。`log2(e)` 適用前の生値。`shaders/softmax.metal` の
-/// `SOFTMAX_NEG_FLT_MAX` と同じ値を Rust 側で再現する単一の真実源）。
+/// ドメイン。`log2(e)` 適用前の生値）を `shaders/softmax.metal` の
+/// `SOFTMAX_NEG_FLT_MAX` と同じ値でテスト側にロックする参照値。
+/// 実際の計算は MSL シェーダ側のみが行う（本コメント末尾の注記参照）ため、
+/// 「単一の真実源」はシェーダ側の定義であり、本定数はそれをテストで
+/// 検証するための Rust 側ミラーである（`#[cfg(test)]` 限定の理由）。
 ///
 /// `f32::MIN`（== `-f32::MAX`。IEEE 754 単精度の最小有限値そのもの）を
 /// 直接使う。マージンを設けない理由（PR #714 codex-review 是正。旧版は
@@ -368,6 +371,14 @@ pub fn plan_dtype_is_f32(plan: &FusionPlan) -> bool {
 /// より明示的にゲートするため、この sentinel は「どんな有限入力より真に
 /// 小さいか等しい」ことだけを保証すればよく、マージンは不要かつ有害
 /// （マージンを設けると sentinel 自身が有効な入力レンジを狭める）。
+///
+/// online max・sum の計算自体は MSL シェーダ側（`shaders/softmax.metal`）
+/// のみが行い、Rust 側に対応する CPU 実行経路は存在しないため、本定数の
+/// 実際の消費者は本ファイル末尾 `#[cfg(test)] mod tests`（数値特性の
+/// ロック）のみである。`#[cfg(test)]` を付けないと、この値を読む唯一の
+/// 経路がテストビルドにしか存在しないため、テストを含まない通常の `lib`
+/// ターゲットビルド（dead_code 判定はターゲットごと）で dead_code になる。
+#[cfg(test)]
 pub const SOFTMAX_NEG_FLT_MAX: f32 = f32::MIN;
 
 #[cfg(test)]
