@@ -32,7 +32,8 @@ GEMM 性能改善ツリー Phase F による Optimized 段 5 行の再確定）�
 | Transformer 複合ワークロード（attention/softmax/LayerNorm を含む複合演算） | 非実機参考値 約 6.1%（QEMU 仮想 CPU） | **下限を設定しない** | **下限を設定しない** | 未実測（`docs/perf/transformer-workload-measurement.md`・#155。QEMU 参考値は naive 経路混入・非実機の 2 重下振れ要因を含むため根拠に使わない） |
 
 上記各行の対象カーネル関数名・計測境界・Metal 2 系列の対応関係・CPU 基準実機の突合は
-`docs/perf/gemm-optimization-baseline.md`（#481）を参照（本表の数値・下限・状態列は変更していない）。
+`docs/perf/gemm-optimization-baseline.md`（#481）を参照（#481 自体は本表の数値・下限・状態列を
+変更していない。最適化後下限・状態列のその後の更改は #577・§10 による）。
 
 - **CUDA f16 初期リリースの扱い（脚注）**: 実測比率 1.9%（`03-poc/poc-v2-3-cuda-gemm/README.md`）
   は tensor core 未使用のスカラー実装同士の比較であり、下限値として意味を持たない。
@@ -45,7 +46,8 @@ GEMM 性能改善ツリー Phase F による Optimized 段 5 行の再確定）�
   再確定した（CPU f32 は既存値と一致を再確認、CUDA f32/f16 は引き上げ、Metal f32 は引き下げ、
   Metal f16 は新設）。「暫定」は tensor core 実装完了後の実機再実測で再確定する値（本表には
   現存しない）。「未設定」は実機実測が未実施、または実測はあるが下限を設定しない判断のため
-  下限自体を設定していない状態（本表には現時点で該当行はない）。CUDA f32/f16 最適化後の「確定」
+  下限自体を設定していない状態（GEMM 5 行には現時点で該当行はない。Transformer 複合ワークロード
+  行は実機実測自体が未実施のため状態列では「未実測」と区別する。§6 参照）。CUDA f32/f16 最適化後の「確定」
   には限定条件が付く（候補算出経路が数値一致 parity 恒常 fail 対象と一致・#186 解決後の再確認を
   要する、に加え CUDA f32 は根拠実測の staged 経路 parity ベースライン未確定。§6 参照）。
 
@@ -101,9 +103,9 @@ v2 では各バックエンドのカーネルを個別に自作するため最�
 
 ## 6. 未確定領域と再確定手順
 
-未設定行（Transformer 複合ワークロードのみ。GEMM 5 行はすべて初期リリース・最適化後の両段が
-確定済み。Metal f16 最適化後は #386 で未設定だったが Phase F 再計測に基づき #577（§10）で
-15% を新設して確定済みのため、GEMM 側の未確定領域は解消している）は、実機実測
+未確定行（Transformer 複合ワークロードのみ。状態列は「未実測」。GEMM 5 行はすべて初期リリース・
+最適化後の両段が確定済み。Metal f16 最適化後は #386 で未設定だったが Phase F 再計測に基づき
+#577（§10）で 15% を新設して確定済みのため、GEMM 側の未確定領域は解消している）は、実機実測
 （Apple M4 Max・DGX Spark GB10）が揃い次第、以下の手順で再確定する
 （`docs/perf/performance-floor-decision.md` §4 を要約）。
 
@@ -124,12 +126,14 @@ CUDA f32 は新規の限定条件が付く: 50% の根拠実測は `launch_wmma_
 ベースライン未計測のため parity 非後退が判定不能である。staged 固有ベースラインの確立は後続
 タスクで追跡する（`docs/perf/performance-floor-decision.md` §10 限定条件 4 参照）。
 
-1. 各記録テンプレート（`docs/perf/transformer-workload-measurement.md`・
-   `docs/perf/metal-f16-vs-mps-f16.md`・`docs/perf/cuda-floor-remeasurement.md`）の記入待ち箇所に
-   実機実測値（中央値・Q1/Q3）を転記する
+1. 記録テンプレート（`docs/perf/transformer-workload-measurement.md`）の記入待ち箇所に実機実測値
+   （中央値・Q1/Q3）を転記する（`metal-f16-vs-mps-f16.md`・`cuda-floor-remeasurement.md` はすでに
+   実測記入済み。#386・#393 で確定済みのため対象外）
 2. 判定対象形状（§4 参照）の実測比率の最小値を `bench_harness::floor_lower_bound` へ適用し
    候補下限値を得る
-3. `docs/perf/performance-floor-decision.md` §3 の確定表を実測結果で更新する
+3. `docs/perf/performance-floor-decision.md` へ §3・§8〜§10 と同形式の新規追補（節）を追加し、
+   確定判断・根拠実測・限定条件を記録する（§3 の確定表そのものは書き換えない。追補方式は §8〜§10
+   の先例を踏襲する）
 4. ユーザー承認（PR レビュー・マージ）を経る
 5. `docs/spec/04-requirements.md` REQ-8 節への反映は spec リポジトリ
    （Fandhe-AI/rust-ai-library-spec）側での対応をユーザーへ提案する（本リポの `docs/spec/`
