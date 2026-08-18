@@ -113,6 +113,21 @@ impl MetalRmsNorm {
     /// エントリ（CUDA 側 `run_rmsnorm_f32_raw` と同じ二重入口構成。
     /// `ops.rs::MetalBackendOps::run_fused` は `inv_n = 1.0`・`eps = 0.0`
     /// で直接呼ぶ）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`（8/7）: `&self`・`ctx`・`x`・
+    /// `w`・`eps`・`inv_n`・`rows`・`hidden` はいずれもカーネル起動に
+    /// 必須の独立パラメータで、構造体へ集約すると呼び出し元
+    /// （[`Self::run_rmsnorm_f32`]・`ops.rs::MetalBackendOps::run_fused`。
+    /// いずれも一部を固定値で呼ぶ）側の可読性がかえって下がるため
+    /// `encode_rmsnorm_dispatch`（本ファイル）と同じ方針で許容する。
+    /// CUDA 側 `backend-cuda::rmsnorm` は同じ引数超過を `RmsNormShape {
+    /// rows, hidden }`（`backend-cuda/src/rmsnorm.rs`）への集約で回避して
+    /// いるが、`rows`・`hidden` の 2 値のみ束ねても 8→7 引数にしかならず
+    /// 単体では閾値を割らない上、Metal 側は `w`（`Option<&[f32]>`）を
+    /// 追加で持つため同じ 1 対の集約では解消しない。既存の CUDA 側構造体
+    /// を再利用する（クレート跨ぎの結合を増やす）よりも、この内部専用
+    /// エントリ 1 箇所を許容する方が単純と判断した。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_rmsnorm_f32_raw(
         &self,
         ctx: &MetalContext,

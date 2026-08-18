@@ -16,8 +16,11 @@
 //! 使い、他アーキテクチャ（x86_64 開発環境・CI）はスカラー経路を使う
 //! （`gemm_blis/microkernel/neon.rs` 冒頭コメントの既存整理を踏襲。
 //! `target_feature` によるコンパイル時分岐は不要）。スカラー経路は
-//! `pub(crate)` で常時コンパイルし、NEON との A/B 同値テスト
-//! （`tests/rmsnorm_parity.rs`。aarch64 限定）の参照に使う。
+//! `pub(crate)` とし、非 aarch64 では常時コンパイル、aarch64 では本ファイル
+//! 内 `#[cfg(test)] mod tests` の NEON との A/B 同値テストからのみ参照する
+//! （`cfg(any(not(aarch64), test))`。dead_code 判定はコンパイル単位ごとの
+//! ため、テスト専用参照のみでは aarch64 の非テストビルドで dead_code に
+//! なる点に注意）。
 //!
 //! # FMA 契約（REQ-2）
 //!
@@ -159,10 +162,17 @@ fn rmsnorm_row(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_row: &m
     }
 }
 
-/// スカラー経路（`pub(crate)`: aarch64 での NEON/スカラー A/B 同値テストの
-/// 参照実装として `tests/rmsnorm_parity.rs` から直接呼ばれる）。
+/// スカラー経路（`pub(crate)`: 非 aarch64 では [`rmsnorm_row`] の通常経路
+/// として使う。aarch64 では本体からは呼ばれないが、本ファイル内
+/// `#[cfg(test)] mod tests` の `neon_matches_scalar_various_hidden`
+/// （NEON/スカラー A/B 同値テスト）が参照実装として直接呼ぶため、
+/// `cfg(any(not(aarch64), test))` で当該テスト構成時のみ aarch64 でも
+/// 残す（さもないと aarch64 の非テストビルドで dead_code になる。
+/// dead_code 判定はコンパイル単位ごとであり、テスト専用の呼び出しは
+/// 通常の `lib` ターゲットビルドには含まれないため）。
 ///
 /// `f32::mul_add` で二乗和を累積し FMA 契約（REQ-2）を GPU 側と揃える。
+#[cfg(any(not(target_arch = "aarch64"), test))]
 pub(crate) fn rmsnorm_row_scalar(
     row: &[f32],
     w: Option<&[f32]>,

@@ -120,13 +120,18 @@ fn softmax_row(row: &[f32], out_row: &mut [f32]) {
     }
 }
 
-/// スカラー経路（`pub(crate)`: aarch64 での NEON/スカラー A/B 同値テスト・
-/// exp 方式 A/B ハーネスの参照実装として `tests/softmax_parity.rs` から
-/// 直接呼ばれる）。
+/// スカラー経路（`pub(crate)`: 非 aarch64 では [`softmax_row`] の通常経路
+/// として使う。aarch64 では本体からは呼ばれないが、本ファイル内
+/// `#[cfg(test)] mod tests` の NEON/スカラー A/B 同値テストが参照実装として
+/// 直接呼ぶため、`cfg(any(not(aarch64), test))` で当該テスト構成時のみ
+/// aarch64 でも残す（[`crate::rmsnorm::rmsnorm_row_scalar`] と同じ理由。
+/// dead_code 判定はコンパイル単位ごとであり、テスト専用の呼び出しは通常の
+/// `lib` ターゲットビルドには含まれないため）。
 ///
 /// pass1: 行 max（`onnx-interop::ops::softmax` と同一セマンティクス。
 /// 初期値 `f32::NEG_INFINITY`）。pass2: `exp(v - max)` を書き込みつつ
 /// `sum` を集約。pass3: `1/sum` を乗算。
+#[cfg(any(not(target_arch = "aarch64"), test))]
 pub(crate) fn softmax_row_scalar(row: &[f32], out_row: &mut [f32]) {
     let mut max_v = f32::NEG_INFINITY;
     for &v in row {
