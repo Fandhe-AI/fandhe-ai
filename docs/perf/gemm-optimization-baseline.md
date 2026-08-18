@@ -32,7 +32,7 @@ Phase F の人間承認タスク（#577）のスコープであり、本ドキ�
 補足:
 
 - CUDA `wmma_tf32`・`mma_f16` は `docs/perf/cuda-floor-remeasurement.md`「数値一致（parity）状態の限定条件」節に記載の通り、#389 §5.3 の parity 恒常 fail 対象と一致する（#186 由来。REQ-2 改定は spec リポジトリ側対応待ち。詳細は `docs/performance-targets.md` §6）。
-- 上表の CUDA f32/f16 行は Phase B（親 #490）着手前・TASK-8.3c（#157/#390）時点の実測。Phase B・Phase C（親 #503）適用後の確定計測は `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1）が別ファイルとして記録する（実測値記入は実機セッションへ申し送り中）。
+- 上表の CUDA f32/f16 行は Phase B（親 #490）着手前・TASK-8.3c（#157/#390）時点の実測。Phase B・Phase C（親 #503）適用後の確定計測は `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1。2026-08-18 に DGX Spark GB10 実機で実測完了。当初 Rust f32=3 run・PyTorch=1 run で確定していたが、リポジトリ規約「ベンチは 5 回計測の中央値」との不整合を指摘した codex レビュー P1 対応として PyTorch 参照値の追加 4 run を計測し、Rust・PyTorch とも 5 run 中央値ベースへ再集計した。判定対象形状の対 PyTorch 比最小値 f32=51.96%〈4096・Rust/PyTorch とも 5 run 中央値〉・f16=37.47%〈4096〉、候補下限値 f32=50%・f16=35%〈丸め結果は再集計前後で不変。境界注記あり〉。反映判断は #577）が別ファイルとして記録する。
 - Transformer 複合ワークロード行（非実機参考値 約 6.1%。QEMU 仮想 CPU）は本表のスコープ外（対象は GEMM 5 行のみ）。#479 の整理（分母に使わない・実機実測は Phase G で確定予定）を参照。
 
 ## §2 Metal 2 系列の対応関係と基準系列の決定
@@ -111,9 +111,9 @@ run 間ばらつきの一例としてのみ扱う）。
    プロトコル改定を伴い本イシュー（ドキュメントの分母・分子突合のみ）のスコープ外であり、別タスクとして
    切り出す。(i) の f32 側再計測は Phase F の Metal 確定計測タスク（#572。f32 prepared 入口
    `MetalGemm::dispatch_tiled_prepared`〈`crates/backend-metal/src/gemm.rs`〉を追加し、
-   計測手順・記録テンプレートを `docs/perf/metal-floor-remeasurement.md` に整備済み。実測値の記入は
-   Mac 実機セッションへ申し送り）、下限値への反映は Phase F の人間承認タスク（#577）が既存の追跡先
-   である。(ii) のプロトコル改定は上記いずれの既存子イシューにも
+   2026-08-18 に Mac 実機セッションで確定計測を完了した〈対 PyTorch 比 13.01%（4096）・候補下限値
+   10%。`docs/perf/metal-floor-remeasurement.md` 参照〉）、下限値への反映は Phase F の人間承認タスク
+   （#577）が既存の追跡先である。(ii) のプロトコル改定は上記いずれの既存子イシューにも
    明示のスコープとして含まれておらず、新規の子イシュー起票が必要だが、起票自体は
    `.claude/rules/out-of-scope-tracking.md` の定める人間承認事項のため本ドキュメントでは起票しない
    （承認後に Phase D〈#530〉または Phase F 配下へ追加する）。

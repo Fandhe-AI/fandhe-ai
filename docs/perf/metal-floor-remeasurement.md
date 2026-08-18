@@ -30,6 +30,11 @@ Phase D（Metal マルチ simdgroup 化・ロード最適化。親 #530、D-1〜
 
 ## 実行環境の制約（本ドキュメント作成セッション）
 
+**2026-08-18 追記**: 本節は当初のドキュメント整備セッション時点の記録であり、Metal 実機（Apple M4
+Max）に到達できないという制約は当時のものである。2026-08-18 に実機（Mac ローカル）セッションで計測を
+完了した（「f32 結果」「f16 結果」節以降の実測値・「状態」節を参照）。本節は経緯の記録として書き換え
+ず残す。
+
 本ドキュメントは Linux worktree で作成された。`docs/real-hardware-verification-env.md` §1 のとおり
 Metal 実機（Apple M4 Max）は「ローカル直接実行」であり、本 Linux 環境からは到達できない（SSH リモートは
 CUDA ノードのみ）。よって本イシューは #547（D-10）の先例と同方式を採る:
@@ -74,6 +79,20 @@ CUDA ノードのみ）。よって本イシューは #547（D-10）の先例と
 回帰確認は `tests/gemm_dynamic_tile_parity.rs::dispatch_tiled_prepared_rejects_undersized_and_misaligned_inputs`
 （`#[ignore]`・Metal 実機依存。`MetalBuffer` の確保に Metal デバイスが必要なため Linux 上の pure 単体
 テストは書けない。`crates/backend-metal/src/gemm.rs` 内コメント参照）で行う。
+
+### `scripts/bench/gemm_bench_torch_mps_f32.py` docstring 注記の適用範囲整理
+
+同スクリプトの docstring は「f32 側は `dispatch_auto` が転送込み境界のため …
+本スクリプトによる対 MPS f32 比は計測境界差の注記付き参考値とし、REQ-8 の分母・分子には使わない」と
+記す。この注記は **`crates/backend-metal/examples/gemm_bench.rs`（`dispatch_auto`。転送込み境界）と
+対で比較する場合**（`docs/perf/gemm-optimization-baseline.md` §2 系列 (b)）に限定した注意書きであり、
+本ドキュメントが用いる `dispatch_tiled_prepared`（§4 準拠 prepared 入口。エンコード＋コマンドバッファ
+完了待ちのみ計測）との比較には適用されない。同スクリプト自体は PyTorch 側テンソルを事前に MPS デバイス
+へ配置した状態で `torch.mm()` 呼び出しのみを計測しており（アップロード・readback を計測区間に含まない）、
+Metal 側の計測境界を prepared 入口へ揃えた本ドキュメントの比較では両者の同期方式契約（ホスト転送を
+伴わない完了待ち）が一致する。したがって本ドキュメントの f32 対 PyTorch 比は REQ-8 の分母・分子として
+そのまま使用できる（本イシュー #572 の核心である「f32 側計測境界問題の解消」の帰結。「目的・受け入れ
+条件対応」節参照）。
 
 ## 数値一致（parity）確認
 
@@ -121,14 +140,27 @@ Rust 側と同様に各 5 回独立実行し、size ごとの中央値を採用�
 
 | 項目 | 値 |
 |------|-----|
-| チップ | （未計測） |
-| OS | （未計測） |
-| rustc | （未計測） |
-| torch | （未計測） |
-| 計測コミット SHA | （未計測） |
+| チップ | Apple M4 Max |
+| OS | macOS 26.6.1 (25G76) |
+| rustc | 1.96.0 |
+| torch | 2.13.0（`torch.backends.mps.is_available()` true） |
+| 計測コミット SHA | `abaa94e`（下記「計測対象コミットの補足」参照） |
+| 実施日 | 2026-08-18 |
+| 計測衛生 | AC 電源接続・他 GPU 負荷アプリなし。各ラン前後に `pgrep -fl "gemm_f32_prepared_bench\|gemm_f16_bench\|gemm_bench_torch_mps"` で競合プロセス非介在を確認 |
 | 計測プロトコル | `bench_harness::protocol::run`（warmup 20・計測 20・中央値/Q1/Q3。TASK-8.1）を 5 回独立実行し size ごとに中央値採用（Rust・PyTorch 双方） |
 | 決定的シード | `0xC0FFEE` |
 | 同期境界 | Rust: コマンドバッファ完了待ち（f32: `dispatch_tiled_prepared`／f16: `dispatch_f16_prepared_unverified`）／PyTorch: `torch.mps.synchronize()` |
+
+### 計測対象コミットの補足
+
+計測手順「状態」節が挙げるブランチ `bench/572-metal-floor-remeasurement` は origin に存在しない
+（イシュー消化後にブランチ削除済みと判断）。当該ドキュメントを新設した実装コミット `35514db`
+（PR #700）は main へマージ済みで、実測時点の main tip `abaa94e` はその子孫であるため、`abaa94e` を
+計測対象とした。`35514db..abaa94e` の `crates/backend-metal` 差分（#717 の elementwise カーネル追加・
+`gemm_bias_act` の実融合化〈`encode_dispatch_bias_act`・`validate_bias_act_dims` 等はいずれも
+`run_tiled_bias_act_f32` 専用の新規追加関数〉・#724 の clippy 修正）を `git diff` で確認し、計測対象
+入口（`dispatch_tiled_prepared`・`dispatch_f16_prepared_unverified`・`encode_dispatch`・
+`validate_prepared_inputs_f32`・`tile::select`）本体に差分がないことを直接確認した。
 
 ## f32 結果（`dispatch_tiled_prepared`。§4 準拠 prepared 入口）
 
@@ -139,30 +171,58 @@ Rust 側と同様に各 5 回独立実行し、size ごとの中央値を採用�
 
 | size | Metal f32 TFLOPS（5 回中央値） | Metal f32 Q1/Q3 TFLOPS | 採用 TileConfig（resolved） | PyTorch MPS f32 TFLOPS（5 回中央値） | Metal/PyTorch 比 |
 |------|------|------|------|------|------|
-| 512  | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 1024 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 2048 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 4096 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
+| 512  | 0.5769 | 0.5424 / 0.7004 | `{bm:64,bn:64,bk:16,wm:2,wn:2,staged:true}` | 0.8221 | 70.17% |
+| 1024 | 1.4650 | 1.3483 / 1.4947 | `{bm:64,bn:64,bk:16,wm:2,wn:2,staged:true}` | 5.3128 | 27.57% |
+| 2048 | 1.4543 | 1.4472 / 1.4685 | `{bm:64,bn:64,bk:16,wm:2,wn:2,staged:true}` | 10.0123 | 14.53% |
+| 4096 | 1.5666 | 1.5601 / 1.5731 | `{bm:64,bn:64,bk:16,wm:2,wn:2,staged:true}` | 12.0447 | **13.01%** |
+
+採用 TileConfig は全 5 run・全 size で一貫して `{bm:64,bn:64,bk:16,wm:2,wn:2,staged:true}` が resolved
+された（`pipeline_for_tile` によるフォールバック発生なし）。
 
 判定対象形状（REQ-8「判定対象形状」節）は **M=N=K=2048・4096 の実測比率の最小値**。512/1024 は参考値。
+判定対象形状の最小比率 = 13.01%（4096）。
 
-候補下限値（参考算出。`bench_harness::floor_lower_bound` を用いる）: （未計測）
+候補下限値（参考算出。`bench_harness::floor_lower_bound` を用いる）: `floor_lower_bound(13.01%)` = **10%**
 
 ## f16 結果（`dispatch_f16_prepared_unverified`。既存入口）
 
 f32 側と同様、`gemm_f16_bench` の出力（`q1_tflops=`/`q3_tflops=`）を Q1/Q3 列へ転記する
 （`docs/performance-targets.md` §4 必須。本イシューで `gemm_f16_bench.rs` の出力へ Q1/Q3 を追加した）。
 
-| size | Metal f16 TFLOPS（5 回中央値） | Metal f16 Q1/Q3 TFLOPS | PyTorch MPS f16 TFLOPS（5 回中央値） | Metal/PyTorch 比 | 対 #383 分母改善率 |
+| size | Metal f16 TFLOPS（5 回中央値） | Metal f16 Q1/Q3 TFLOPS | PyTorch MPS f16 TFLOPS（5 回中央値） | Metal/PyTorch 比 | 対 #383 分母（PyTorch）変化率 |
 |------|------|------|------|------|------|
-| 512  | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 1024 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 2048 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
-| 4096 | （未計測） | （未計測） | （未計測） | （未計測） | （未計測） |
+| 512  | 0.8749 | 0.8520 / 0.8918 | 0.9755 | 89.69% | -19.08%（#383: 1.2055） |
+| 1024 | 2.0661 | 2.0360 / 2.0865 | 5.4229 | 38.10% | -2.60%（#383: 5.5679） |
+| 2048 | 2.4791 | 2.4696 / 2.4902 | 12.5509 | 19.75% | +11.26%（#383: 11.2803） |
+| 4096 | 2.5230 | 2.4852 / 2.5504 | 13.4365 | **18.78%** | +11.41%（#383: 12.0605） |
 
-判定対象形状は f32 と同じく M=N=K=2048・4096 の最小値。
+`f16_run3` の 512 形状（0.3730 TFLOPS）は中央値からの外れ値だが、判定対象形状（2048/4096）ではなく
+512 は参考値のため候補下限値の算出には影響しない（生ログ `bench572/rust/f16_run3.log` に保持）。
 
-候補下限値（参考算出。`bench_harness::floor_lower_bound` を用いる）: （未計測）
+判定対象形状は f32 と同じく M=N=K=2048・4096 の最小値。判定対象形状の最小比率 = 18.78%（4096）。
+
+対 #383（`metal-f16-vs-mps-f16.md`。イシュー #387）比較（判定対象形状）: 分母（PyTorch）側は 2048 で
++11.26%・4096 で +11.41% 増加（M4 Max ローカル環境の PyTorch MPS 側性能向上）。分子（Metal）側は 2048
+で 2.4426→2.4791（+1.5%）・4096 で 2.2411→2.5230（+12.6%）。結果として比自体（Metal/PyTorch）は
+2048 が 21.6%→19.75%（-1.85pt）・4096 が 18.6%→18.78%（+0.18pt）と、4096 側はほぼ横ばい・2048 側は
+わずかに悪化した。
+
+候補下限値（参考算出。`bench_harness::floor_lower_bound` を用いる）: `floor_lower_bound(18.78%)` = **15%**
+
+### 温度ドリフト注記
+
+run 系列で単調減少傾向（例: `torch/f32_run{1,2,3}.log` の size=4096 が 12.6100→12.5838→12.0447）を
+観測した。worst-case ペアリング（最遅 Metal ÷ 最速 PyTorch）でも候補下限値が変わらないことを確認する
+ため以下を算出した:
+
+| 形状 | worst-case 比（min Metal / max PyTorch） | 丸め後 floor |
+|------|--------------------------------------------|--------------|
+| f32 4096 | min(1.5645) / max(12.6100) = 12.41% | 10（不変） |
+| f32 2048 | min(1.4484) / max(11.5636) = 12.53% | 10（不変。判定対象形状の最小ではないため参考） |
+| f16 4096 | min(2.3919) / max(13.9954) = 17.09% | 15（不変） |
+
+候補下限値（f32=10%・f16=15%）は観測された温度ドリフト（各ラン独立実行に伴う自然な性能ばらつき）に
+対して頑健であることを確認した。
 
 ## REQ-8 下限値の扱い
 
@@ -171,32 +231,84 @@ f32 側と同様、`gemm_f16_bench` の出力（`q1_tflops=`/`q3_tflops=`）を 
 `bench_harness::floor_lower_bound` 欄）を提供するに留め、下限の最終確定・
 `docs/spec/04-requirements.md` への反映判断は行わない（`docs/spec/` は本リポでは編集しない）。
 
-## 状態: 未計測。実機セッションで消化
+現行値との比較（参考。最終判断は F-5）:
 
-本ドキュメントは Linux worktree で作成され、Metal 実機（Apple Silicon）が同一セッションで使用できない
-ため計測手順・記録テンプレートのみを整備した（#547 節・`metal-gemm-float4-staged-load.md` 先例と同
-方式）。実機到達可能なセッションが「計測手順」節の手順で計測し、上記「f32 結果」「f16 結果」「計測
-環境」の各表を実測値で埋めること。
+| 精度 | 現行 REQ-8 値（最適化後） | 本ドキュメントの候補下限値 |
+|------|------------------------------|------------------------------|
+| f32  | 30% | 10% |
+| f16  | 未設定 | 15% |
+
+f32 は現行 30% を候補下限値 10% が下回る（Metal f32 の計測境界を §4 準拠 prepared 入口へ揃えたことで
+判明した実態値。「目的・受け入れ条件対応」節参照）。f16 は現行未設定のため、候補下限値 15% が
+「自作カーネルでの f16 実測後に丸め規則で設定する」方針（`docs/perf/performance-floor-decision.md`
+の Metal f16 行の申し送り）に沿った初の具体値となる。
+
+## 状態: 実測完了（2026-08-18・Apple M4 Max）
+
+本ドキュメントは当初 Linux worktree で作成され、Metal 実機（Apple Silicon）が同一セッションで使用でき
+ないため計測手順・記録テンプレートのみを整備していた（#547 節・`metal-gemm-float4-staged-load.md` 先例
+と同方式）。2026-08-18 に Mac 実機セッションで「計測手順」節の手順に沿って計測し、上記「f32 結果」
+「f16 結果」「計測環境」「REQ-8 下限値の扱い」の各表・節を実測値で埋めた。
 
 **#547 節（`docs/perf/metal-gemm-dynamic-tile.md`「Phase D 完了時点再計測」）の未計測テンプレートの
-記入は本イシューのスコープ外**（close 済みイシューの記録）。同一 Mac セッションで併せて埋める判断は
-実機セッション側に委ねる。
+記入は本イシューのスコープ外**（close 済みイシューの記録）のため実施していない。
 
 内部ホスト名等の実値は書かない（#461 のプレースホルダ方針。実測時の原文は
-`docs/real-hardware-verification-env.local.md` へ記録する）。
+`docs/real-hardware-verification-env.local.md` へ記録済み）。
 
-## 動作確認（Linux セッションで実施済み）
+## 動作確認（実機セッションで実施済み）
 
 - `cargo build --workspace --all-targets`
-- `cargo build -p backend-metal --examples --release`（`gemm_f32_prepared_bench` を含む stub ビルド
-  成立を確認）
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test --workspace`（Linux 実行分。実機依存 `#[ignore]` テストは除外）
-- `git diff --stat` で `crates/bench-harness/src/threshold.rs`・数値一致 tolerance 定数・
-  `docs/spec/`・`guardrail.toml` に差分がないことを確認
+- `cargo build -p backend-metal --examples --release`（`gemm_f32_prepared_bench`・`gemm_f16_bench` の
+  ビルド成立を確認。生ログ `bench572/build.log`）
+- `cargo test -p backend-metal --release -- --ignored --nocapture` — 80 テスト全 pass（0 failed。
+  `dispatch_tiled_prepared_matches_dispatch_variant`・`cpu_metal_f16_parity` 系 6 件を含む。生ログ
+  `bench572/parity_test.log`。「数値一致（parity）確認」節参照）
+- `git diff 35514db..abaa94e -- crates/bench-harness/src/threshold.rs` および数値一致 tolerance 定数
+  （`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・`docs/spec/`・`guardrail.toml` に差分がない
+  ことを確認
+
+## Appendix: 生ログ抜粋
+
+実測実行時の生ログはセッション限定の scratchpad 配下（`bench572/`）にのみ存在しコミット対象外のため、
+本節へ最小限を転記する。代表値として採用した run は size ごとに異なる（5 回独立実行した中央値を採用
+する運用〈「計測手順」節〉のため。詳細は `bench572/aggregate.md`）。
+
+### f32 代表 run（`bench572/rust/f32_run{2,3,4,2}.log`。512=run2・1024=run3・2048=run4・4096=run2）
+
+```
+size=512  metal_f32_simdgroup_tiled_tflops=0.5769 q1_tflops=0.5424 q3_tflops=0.7004 resolved_tile_config=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+size=1024 metal_f32_simdgroup_tiled_tflops=1.4650 q1_tflops=1.3483 q3_tflops=1.4947 resolved_tile_config=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+size=2048 metal_f32_simdgroup_tiled_tflops=1.4543 q1_tflops=1.4472 q3_tflops=1.4685 resolved_tile_config=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+size=4096 metal_f32_simdgroup_tiled_tflops=1.5666 q1_tflops=1.5601 q3_tflops=1.5731 resolved_tile_config=TileConfig { bm: 64, bn: 64, bk: 16, wm: 2, wn: 2, staged: true }
+```
+
+### f16 代表 run（`bench572/rust/f16_run{2,3,1,3}.log`。512=run2・1024=run3・2048=run1・4096=run3）
+
+```
+size=512  metal_f16_simdgroup_tflops=0.8749 q1_tflops=0.8520 q3_tflops=0.8918
+size=1024 metal_f16_simdgroup_tflops=2.0661 q1_tflops=2.0360 q3_tflops=2.0865
+size=2048 metal_f16_simdgroup_tflops=2.4791 q1_tflops=2.4696 q3_tflops=2.4902
+size=4096 metal_f16_simdgroup_tflops=2.5230 q1_tflops=2.4852 q3_tflops=2.5504
+```
+
+### PyTorch MPS 参照値（各 5 回独立実行の中央値。`bench572/torch/{f32,f16}_run{1..5}.log`）
+
+```
+torch=2.13.0 device=mps
+f32: size=512 median=0.8221  size=1024 median=5.3128  size=2048 median=10.0123 size=4096 median=12.0447
+f16: size=512 median=0.9755  size=1024 median=5.4229  size=2048 median=12.5509 size=4096 median=13.4365
+```
+
+### parity 実行結果（`bench572/parity_test.log`）
+
+- `cargo test -p backend-metal --release -- --ignored --nocapture`: 80 テスト全 pass（0 failed）
+- `dispatch_tiled_prepared_matches_dispatch_variant`（`tests/gemm_dynamic_tile_parity.rs`）: pass
+- `cpu_metal_f16_parity.rs`: 6 テスト全 pass
 
 ## 未実施・後続作業
 
-- **実機実測**: 「状態」節のとおり本イシューでは未実施。実機セッションへ申し送る
-- **候補下限値の最終確定・REQ-8 反映判断**: F-5（#577・人間承認）が実測完了後に対応する
+- **実機実測**: 「状態」節のとおり 2026-08-18 実測完了。本節は完了扱い
+- **候補下限値の最終確定・REQ-8 反映判断**: F-5（#577・人間承認）が本ドキュメントの実測結果
+  （f32 候補 10%・f16 候補 15%）を受けて対応する
+- **#547 節の未計測テンプレート記入**: 本イシューのスコープ外のため引き続き未実施（「状態」節参照）
