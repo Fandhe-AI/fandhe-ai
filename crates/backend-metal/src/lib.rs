@@ -180,6 +180,13 @@ pub mod rmsnorm;
 // これは `pub` へ広げず、`row_kernel.rs` モジュール冒頭の
 // `#![cfg_attr(not(target_os = "macos"), allow(dead_code))]`
 // （対象を non-macOS ビルドに限定した allow）で個別に抑制する。
+//
+// 例外: `row_kernel::SOFTMAX_NEG_FLT_MAX`（テスト専用の数値特性ロック値。
+// 本番経路〈`ops.rs`／`softmax.rs`〉からは参照されない）は上記の
+// `cfg_attr` では救えない（macOS ビルドでも `#[cfg(test)] mod tests` の
+// 外からは到達不能なため dead_code になる）。この 1 項目のみ
+// `#[cfg(test)]` を個別付与している（macOS/aarch64 ローカル clippy 実測。
+// PR「fix(backend): macOS/aarch64 ローカル clippy エラーを解消」）。
 pub(crate) mod row_kernel;
 #[cfg(target_os = "macos")]
 pub mod softmax;

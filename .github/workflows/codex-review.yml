@@ -1,5 +1,5 @@
 # OpenAI Codex CLI による PR 自動レビュー（Fandhe-AI/actions の codex-review reusable
-# workflow を SHA 固定で呼び出す薄い wrapper。イシュー #326）。
+# workflow を @latest で呼び出す薄い wrapper。イシュー #326）。
 # Fandhe-AI/actions の codex-review/templates/codex-review.public.yml（public リポジトリ
 # 向けテンプレート）を導入手順（codex-review/README.md「セットアップ」）どおりコピーし、
 # <SHA> を差し替えたもの。fandhe-backend / local-llm-server の同名 wrapper と同型。
@@ -25,8 +25,7 @@ permissions:
 
 jobs:
   codex-review:
-    # <SHA> は Fandhe-AI/actions のコミット SHA で固定する（@main 不可）
-    uses: Fandhe-AI/actions/.github/workflows/codex-review.yml@7cb2c6029ef9b00faab9718738a763f48cd66289 # main
+    uses: Fandhe-AI/actions/.github/workflows/codex-review.yml@latest
     permissions:
       contents: read
       pull-requests: write

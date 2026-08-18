@@ -309,6 +309,13 @@ impl MetalGemm {
     /// （`tests/gemm_dynamic_tile_parity.rs`）側は本メソッドを呼ばず
     /// `dispatch_variant` の数値一致確認に限定した（フォールバック検知は
     /// クレート内テストが担う）。
+    ///
+    /// 呼び出し元は `crate::tile` の `#[cfg(test)] mod tests`（実機依存・
+    /// `#[ignore]`）のみで、本番ディスパッチ経路（[`Self::dispatch_auto`]・
+    /// [`Self::dispatch_variant`]）からは呼ばれない。よってテストを含まない
+    /// 通常の `lib` ターゲットビルドでは到達不能になる（dead_code 判定は
+    /// ターゲットごとのため）ため `#[cfg(test)]` を付ける。
+    #[cfg(test)]
     pub(crate) fn resolve_tile_config(
         &self,
         ctx: &MetalContext,
@@ -1555,8 +1562,8 @@ mod tests {
 
     #[test]
     fn validate_bias_act_dims_accepts_valid_shape() {
-        let a = vec![0.0f32; 6]; // m=2, k=3
-        let b = vec![0.0f32; 12]; // k=3, n=4
+        let a = [0.0f32; 6]; // m=2, k=3
+        let b = [0.0f32; 12]; // k=3, n=4
         let dims = validate_bias_act_dims(a.len(), b.len(), 2, 4, 3).unwrap();
         assert_eq!((dims.m, dims.n, dims.k), (2, 4, 3));
     }
