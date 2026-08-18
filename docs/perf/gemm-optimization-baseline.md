@@ -31,6 +31,7 @@ M4 Max 実機未到達のため実測値は未記入）を参照） | Apple M4 M
 補足:
 
 - CUDA `wmma_tf32`・`mma_f16` は `docs/perf/cuda-floor-remeasurement.md`「数値一致（parity）状態の限定条件」節に記載の通り、#389 §5.3 の parity 恒常 fail 対象と一致する（#186 由来。REQ-2 改定は spec リポジトリ側対応待ち。詳細は `docs/performance-targets.md` §6）。
+- 上表の CUDA f32/f16 行は Phase B（親 #490）着手前・TASK-8.3c（#157/#390）時点の実測。Phase B・Phase C（親 #503）適用後の確定計測は `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1）が別ファイルとして記録する（実測値記入は実機セッションへ申し送り中）。
 - Transformer 複合ワークロード行（非実機参考値 約 6.1%。QEMU 仮想 CPU）は本表のスコープ外（対象は GEMM 5 行のみ）。#479 の整理（分母に使わない・実機実測は Phase G で確定予定）を参照。
 
 ## §2 Metal 2 系列の対応関係と基準系列の決定

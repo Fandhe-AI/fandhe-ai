@@ -75,7 +75,7 @@ jobs:
       # 旧「Ensure rustup is installed」「Sync toolchain」の 2 手動ステップを置換する。
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: Fandhe-AI/actions/rust-toolchain-setup@39d6d5cfd275338ec2e4bcead179b6a017712772 # main
+        uses: Fandhe-AI/actions/rust-toolchain-setup@749afc98a179a545bc1bdaab68cd07b6f6659970 # v1.1.0
 
       # cargo registry（ci.yml の build 系ジョブと共通のキー構成。#466 で確立したキャッシュ
       # 設計を踏襲する）。

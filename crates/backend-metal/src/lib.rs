@@ -120,6 +120,29 @@
 //! `_unverified` suffix・`#[doc(hidden)]` は当面維持する。詳細は
 //! [`gemm::MetalGemm::dispatch_f16_unverified`] のドキュメントコメントを
 //! 参照）。
+//!
+//! イシュー #604 で融合 RMSNorm 順伝播カーネル（[`rmsnorm::MetalRmsNorm`]）と
+//! online softmax カーネル（[`softmax::MetalSoftmax`]）を MSL で追加した。
+//! CUDA 側 G-6（#592）と同一アルゴリズム契約（1 パス／2 パス経路・
+//! persistent threadgroup・FMA 契約統一）を採るが、`MetalContext::
+//! dispatch_sync` が動的 threadgroup memory 設定 API を経由しないため
+//! 1 パス経路はコンパイル時固定長の `threadgroup` 配列を使う（[`row_kernel`]
+//! モジュール冒頭コメント参照）。両カーネル・`row_kernel` の経路選択・
+//! canonical 融合プラン照合の cfg 非依存部分は [`row_kernel`] に集約し、
+//! [`ops::MetalBackendOps::run_fused`] からルーティングする。softmax の
+//! CUDA 直接 parity 相手（#594・G-7）は本イシュー時点で未実装のため、
+//! 両バックエンドとも CPU 参照実装（REQ-2 統一複合判定）に対する数値一致を
+//! 経由した推移的な担保に留まる（`softmax.rs`／`tests/softmax_parity.rs`
+//! ドキュメンテーションコメント参照）。
+//!
+//! イシュー #605（Phase G・G-14）で elementwise 5 演算
+//! （[`elementwise::MetalElementwise`]。CUDA 側 #599 の対応版）を追加し、
+//! `ops::MetalBackendOps::gemm_bias_act` を GEMM epilogue 実融合カーネル
+//! （[`gemm::MetalGemm::run_tiled_bias_act_f32`]・`shaders/gemm.metal::
+//! gemm_tiled_bias_act`）でオーバーライドした。既存 `gemm_naive`／
+//! `gemm_tiled`／`gemm_simdgroup`／`gemm_simdgroup_tiled`／
+//! `gemm_simdgroup_f16` カーネルには一切触れておらず、GEMM 単体の性能・
+//! 数値契約は構造的に非後退（新規カーネルの追加のみ）。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
@@ -127,6 +150,8 @@ pub mod buffer;
 pub mod context;
 #[cfg(target_os = "macos")]
 pub mod device;
+#[cfg(target_os = "macos")]
+pub mod elementwise;
 #[cfg(target_os = "macos")]
 pub mod error;
 #[cfg(target_os = "macos")]
@@ -140,6 +165,24 @@ pub mod ops;
 pub mod pad;
 #[cfg(target_os = "macos")]
 pub mod pipeline;
+#[cfg(target_os = "macos")]
+pub mod rmsnorm;
+// `pad`／`tile` と同じ設計判断: `objc2` 系 FFI に触れないため
+// `cfg(target_os = "macos")` を付けず Linux でも単体テストが回る。
+// ただし `pad`／`tile` と異なり `row_kernel` は経路選択・occupancy 定数・
+// 起動検証エラー・canonical FusionPlan 照合などバックエンド内部実装の
+// 密度が高いため、`pub`（クレート外部から `backend_metal::row_kernel::*`
+// として到達可能）にはせず `pub(crate)` を維持する（codex-review P1
+// 指摘・PR #714）。実際の呼び出し元（`ops.rs`／`rmsnorm.rs`／
+// `softmax.rs`）は macOS 限定のため、Linux 単体ビルド（`cargo build`／
+// `cargo clippy` の非テストパス）では `row_kernel` の各項目が
+// 「クレート内から到達不能」と判定され dead_code lint が誤検知する。
+// これは `pub` へ広げず、`row_kernel.rs` モジュール冒頭の
+// `#![cfg_attr(not(target_os = "macos"), allow(dead_code))]`
+// （対象を non-macOS ビルドに限定した allow）で個別に抑制する。
+pub(crate) mod row_kernel;
+#[cfg(target_os = "macos")]
+pub mod softmax;
 pub mod tile;
 
 // `MTLCreateSystemDefaultDevice` は CoreGraphics framework がリンクされた
@@ -164,6 +207,8 @@ pub use device::MetalDeviceProvider;
 #[cfg(target_os = "macos")]
 pub use device::{MetalOccupancyInfo, probe_gpu_core_count};
 #[cfg(target_os = "macos")]
+pub use elementwise::MetalElementwise;
+#[cfg(target_os = "macos")]
 pub use error::MetalError;
 #[cfg(target_os = "macos")]
 pub use gemm::{GemmVariant, MetalGemm};
@@ -173,4 +218,8 @@ pub use half_buffer::MetalHalfBuffer;
 pub use memory::MetalMemory;
 #[cfg(target_os = "macos")]
 pub use ops::MetalBackendOps;
+#[cfg(target_os = "macos")]
+pub use rmsnorm::MetalRmsNorm;
+#[cfg(target_os = "macos")]
+pub use softmax::MetalSoftmax;
 pub use tile::TileConfig;
