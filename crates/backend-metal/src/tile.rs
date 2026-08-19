@@ -830,22 +830,54 @@ pub(crate) fn swizzled_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
 }
 
 /// `crate::gemm::encode_dispatch_tiled` が使う dispatch grid を
-/// `SWIZZLE_ENABLED` に応じて決定する（PR #661 codex-review 指摘対応:
-/// 未検証のスウィズルを本番経路へ無条件適用しない）。`SWIZZLE_ENABLED`
-/// （既定 `false`）が `false` の間は素朴な `(tiles_n, tiles_m)` grid
-/// （スウィズル前の threadgroup 数）を返し、`shaders/gemm.metal` 側の
-/// 恒等変換（`SWIZZLE_ENABLED=false` 分岐）と同期する契約。`true` の場合は
+/// `swizzle_enabled` に応じて決定する（PR #661 codex-review 指摘対応:
+/// 未検証のスウィズルを本番経路へ無条件適用しない）。`swizzle_enabled` が
+/// `false` の間は素朴な `(tiles_n, tiles_m)` grid（スウィズル前の
+/// threadgroup 数）を返し、`shaders/gemm.metal` 側の恒等変換
+/// （`SWIZZLE_ENABLED=false` 分岐）と同期する契約。`true` の場合は
 /// [`swizzled_grid`] へ委譲する。
+///
+/// イシュー #746 で `bool` 引数へ格上げした: 従来はクレート定数
+/// [`SWIZZLE_ENABLED`] を直接読んでいたが、`crate::gemm::MetalGemm` を
+/// base（off）/head（on）の 2 インスタンスで同一プロセス内に構築し
+/// interleaved に A/B 計測する運用（`docs/perf/metal-gemm-tgid-swizzle-ab.md`）
+/// のため、呼び出し元（`encode_dispatch_tiled`）がインスタンス保持の値を
+/// 渡せるようにする。呼び出し元は `crate::pipeline::
+/// make_pipeline_with_constants` へ渡す function constant 値と**同じ**
+/// `swizzle_enabled` を渡す責務を負う（シェーダ側 tgid 変換と grid 形状の
+/// 同期契約が崩れるため）。
 ///
 /// `#[cfg(any(test, target_os = "macos"))]` の理由は [`SWIZZLE_LOG`] の
 /// doc comment を参照（同一の dead_code 誤検知回避）。
 #[cfg(any(test, target_os = "macos"))]
-pub(crate) fn tiled_dispatch_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
-    if SWIZZLE_ENABLED {
+pub(crate) fn tiled_dispatch_grid_with(
+    tiles_n: usize,
+    tiles_m: usize,
+    swizzle_enabled: bool,
+) -> (usize, usize) {
+    if swizzle_enabled {
         swizzled_grid(tiles_n, tiles_m)
     } else {
         (tiles_n, tiles_m)
     }
+}
+
+/// [`tiled_dispatch_grid_with`] を本番既定値（[`SWIZZLE_ENABLED`]）で
+/// 呼ぶ薄いラッパー。既存の crate 内 unit test
+/// （`tiled_dispatch_grid_matches_swizzle_enabled_gate` 等。本ファイル末尾）
+/// が「コミット状態の既定値が意図通りか」を検証する対象として維持する
+/// （イシュー #746 の引数化で `MetalGemm` 本番経路〈`MetalGemm::new`〉が
+/// 直接この関数を呼ぶことはなくなったが、既定値の非後退ロックとして残す）。
+///
+/// `#[cfg(test)]` 限定（`#[cfg(any(test, target_os = "macos"))]` ではない）:
+/// 本番ディスパッチ経路（`crate::gemm::encode_dispatch_tiled`）は
+/// `MetalGemm::swizzle_enabled` を明示的に渡す `tiled_dispatch_grid_with` を
+/// 直接呼ぶため、macOS 非テストビルドではこの関数への到達パスが存在せず
+/// `dead_code` lint（`clippy -D warnings`）が誤検知する。テスト専用のため
+/// テストビルドのみで到達可能にする。
+#[cfg(test)]
+pub(crate) fn tiled_dispatch_grid(tiles_n: usize, tiles_m: usize) -> (usize, usize) {
+    tiled_dispatch_grid_with(tiles_n, tiles_m, SWIZZLE_ENABLED)
 }
 
 // --- occupancy 目標算出（イシュー #541・D-7a）---
