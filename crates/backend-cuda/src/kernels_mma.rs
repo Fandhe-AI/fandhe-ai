@@ -1801,11 +1801,14 @@ extern "C" __global__ void gemm_mma_f16(
 /// `1` 未満・`1` そのものは拒否する）。
 ///
 /// イシュー #740 で `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ。
-/// feature 非依存）が動的選択した `group_width` を渡して直接呼ぶよう結線
-/// したため、本関数は通常ビルド（feature 指定なし）でも常に到達可能であり
-/// `#[allow(dead_code)]` は不要になった（旧 #499 セッション時点の判断は
-/// 上記変更前のコメント参照。`internal-diagnostics` feature 限定の
-/// `new_with_swizzle`〈診断用・明示幅指定〉も引き続き本関数を呼ぶ）。
+/// feature 非依存）へ一時結線したため通常ビルドでも到達可能だったが、
+/// PR #758 レビュー指摘により `new` は base カーネルへ差し戻し済み
+/// （`gemm_mma.rs::CudaMmaGemm::new` ドキュメンテーションコメント参照）。
+/// 呼び出し元は `internal-diagnostics` feature 限定の `new_with_swizzle`
+/// （診断用・明示幅指定）のみに戻ったため、通常ビルド（feature 指定なし）
+/// では再び到達不能になり `#[allow(dead_code)]` が必要（`render_mma_f16`
+/// と同型の理由。旧 #499 セッション時点の判断も同じ）。
+#[allow(dead_code)]
 pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
     if group_width < 2 {
         return Err(crate::error::CudaError::InvalidShape {

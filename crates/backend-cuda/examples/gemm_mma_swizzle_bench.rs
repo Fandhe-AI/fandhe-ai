@@ -1,5 +1,7 @@
-//! L2 再利用のためのタイル→SM 割り当てスウィズル（イシュー #499・
-//! イシュー #740 で本番既定へ結線済み）の A/B 計測バイナリ。
+//! L2 再利用のためのタイル→SM 割り当てスウィズル（イシュー #499。
+//! イシュー #740 で一時本番既定へ結線したが PR #758 レビュー指摘により
+//! 差し戻し済み。`docs/perf/cuda-gemm-swizzle-ab.md` §2 参照）の
+//! A/B 計測バイナリ。
 //!
 //! `kernels_mma::mma_f16_source()`（swizzle 無適用の base カーネル）を使う
 //! base（[`CudaMmaGemm::new_without_swizzle`]。`internal-diagnostics`
@@ -97,10 +99,10 @@ fn main() {
         }
     };
 
-    // base はイシュー #740 で `CudaMmaGemm::new` が swizzle 既定化された
-    // ため、swizzle 無適用の `new_without_swizzle`（診断専用入口）を使う
-    // （`new` のまま base にすると swizzle 対 swizzle の無意味な A/B に
-    // なる）。
+    // base は明示的に swizzle 無適用の `new_without_swizzle`（診断専用
+    // 入口）を使う（`new` は現在も base カーネルを返すため代用できるが、
+    // 将来 `new` が再結線された場合でも本ベンチの base 側が意図せず
+    // swizzle 適用にならないよう、常に `new_without_swizzle` を明示する）。
     let base = match CudaMmaGemm::new_without_swizzle(&device) {
         Ok(g) => g,
         Err(e) => {

@@ -20,31 +20,37 @@ N を先に全走査してから次の M グループへ移る順序へ並べ替
 - 本イシューはこの確信度差を踏まえ、DeepGEMM 同型の方式のみを実装対象とする（MLX 側の shift/mask 方式は
   対象外）。
 
-## 2. 状態: 採用・本番結線済み（イシュー #740）
+## 2. 状態: 未採用（差し戻し済み。PR #758 レビュー是正）
 
-GB10 実機 A/B 計測（2026-08-19。イシュー #740 記載の実測値。§6 参照）で 4096: 34.3279 → 54.7754 TFLOPS
-（×1.5957・group_width=8）を確認し、512〜2048 は 0.97〜1.00 倍とほぼ中立（劣化許容 5% 以内）だったため、
-`crates/backend-cuda/src/gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ）へ swizzle を**本番結線
-済み**とした。`new` は `device.multiprocessor_count()` から `swizzle::select_swizzle_group_width` で
-グルーピング幅を動的選択し、`kernels_mma::mma_f16_source_with_swizzle(group_width)` を常にコンパイルする
-（サイズ条件分岐なしの全サイズ適用。§4 の判断基準・実装計画 §3.1 参照）。
+イシュー #740 で一度 `crates/backend-cuda/src/gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ）へ
+swizzle を本番結線したが、PR #758 の codex-review／Cursor Bugbot 指摘により差し戻した。理由:
+
+- **§4 の採用基準を字義どおり満たしていない**: §4 は size ∈ {2048, 4096} の**両方**で中央値 TFLOPS 改善を
+  要求するが、実測（§6）は 4096 のみ大幅改善（×1.5957）で 2048 は ×0.97〜1.00（未改善・中立）。「4096 大幅
+  改善＋512〜2048 中立」を代替の採用基準として読み替えたが、これは人間承認を経ていない基準改訂に相当する
+- **結線前必須の確認が未実施**: レジスタスピル確認（§3）・本番コンストラクタ自身での bit 一致再検証・
+  parity 非後退再検証（§5）が結線当時に完了していなかった
+- **CI 恒久検査の入力値の誤り**: `select_swizzle_group_width` の CI 恒久検査
+  （`crates/backend-cuda/src/swizzle.rs`）が使う SM 数 `28` を「GB10 実測 SM 数」として扱っていたが、
+  `docs/perf/sm121-device-attributes.md` L58 の `28` は RTX 3060（sm_121 ではない）の例示ダンプであり、
+  同ドキュメント L79 のとおり GB10（sm_121）自体の SM 数は本リポでは未実測（Cursor Bugbot 指摘・PR #758）
+
+`CudaMmaGemm::new` は base カーネル（`kernels_mma::mma_f16_source()`。swizzle 無適用）へ差し戻し済み。
+swizzle 適用版は引き続き `CudaMmaGemm::new_with_swizzle`（`internal-diagnostics` feature 限定）から opt-in
+で利用できる。§4 の採用基準を字義どおり満たすか、満たさない場合は人間承認を伴って採用基準を正式改訂した
+うえで、上記 3 点（採用基準・事前確認・SM 数入力値）をすべて解消してから再結線を検討する。
 
 `ops.rs`／`gemm_auto.rs` は mma_f16 経路自体を参照しないため（`CudaGemmAuto::run_f16` の MatrixUnit 分岐は
 WMMA のみ）無変更のままであり、結線点は `CudaMmaGemm::new` に閉じる（イシュー #740 実装計画 §2「結線点の
-特定」）。swizzle 無適用の base カーネルは診断専用の `CudaMmaGemm::new_without_swizzle`
-（`internal-diagnostics` feature 限定）へ役割を移した（旧 #499 セッション時点では逆に swizzle 側がこの
-位置で opt-in ゲートされていた）。実際に選択された `group_width` は `CudaMmaGemm::swizzle_group_width()`
+特定」）。実際に選択された `group_width`（`new_with_swizzle` 経由時）は `CudaMmaGemm::swizzle_group_width()`
 アクセサ（feature 非依存）で可観測（`examples/cuda_floor_bench.rs` の起動時診断が出力する）。
 
-**本セッション（実装エージェント。RTX 3060・NVRTC 非搭載環境）による再検証範囲**: 上記の実測値は本セッション
-が新規に計測したものではなく、イシュー #740 に記載された実測値をそのまま記録・結線根拠として採用した
-（`docs/perf/sm121-device-attributes.md` の GB10 実測 SM 数 28 に対する `select_swizzle_group_width(28, 64,
-128) == 8` の CI 恒久検査は本セッションで追加し green を確認済み。§5 の機械確認・非実機テスト・
-`--all-features` コンパイルも本セッションで実施し green）。§3「計測手順」・実機 `--ignored` テスト
-（`mma_f16_swizzle_variant_matches_base_bit_exact_output`・`cargo test -p backend-cuda --lib --features
-internal-diagnostics -- --ignored`）・`cuda_floor_bench` の実機再計測は、本セッションの実行環境が GB10 実機
-に接続できないため未実施（fail-closed。§4「未計測の間は『採用済み』として扱わない」の裏返しとして、結線後の
-再計測未実施を主張しない）。次回 GB10 実機セッションでこれらを実行し、本ドキュメントへ追記することを推奨する。
+**本 PR（#758）時点の再検証範囲**: 本 PR は上記差し戻しのみを行い、§6 の実測値の新規再計測は行っていない
+（実行環境が NVRTC 非搭載のため）。§6 は「未採用」判断に至った過去の実測記録として保持する。§3「計測手順」・
+実機 `--ignored` テスト（`mma_f16_swizzle_variant_matches_base_bit_exact_output`・`cargo test -p
+backend-cuda --lib --features internal-diagnostics -- --ignored`）・`cuda_floor_bench` の実機再計測は、
+実行環境が GB10 実機に接続できないため未実施。次回 GB10 実機セッションで §4 の採用基準（2048/4096 両方の
+改善）を満たすか再計測し、満たす場合のみ再結線・本ドキュメント更新を行うことを推奨する。
 
 ## 3. 計測手順（DGX Spark GB10・sm_121 実機。#499 時点の手順・イシュー #740 の採否判断根拠となった A/B）
 
@@ -132,13 +138,18 @@ git diff origin/main -- crates/backend-cuda/tests/parity_nonregression.rs crates
 | 4096 | 34.3279 | 54.7754 | ×1.5957 |
 | 512〜2048 | — | — | ×0.97〜1.00（ほぼ中立。個別サイズ内訳は未転記） |
 
-**判断**: §4 の判断基準（改善が確認できれば採用）に対し、4096 の大幅改善（4096 は §4 が要求する 2 サイズの
-うち 1 つ）と 512〜2048 の中立（劣化許容 5% 以内。実装計画 §3.1「コンティンジェンシー」の閾値）を根拠に
-「採用」と判断し、サイズ条件分岐なしの全サイズ適用（実装計画 §3.1）で `CudaMmaGemm::new` へ結線した
-（§2 参照）。2048 単独の改善幅は本節に未転記のため、§4 の字義どおりの「2048/4096 両方の改善」ではなく
-「4096 大幅改善 + 512〜2048 中立」を採用条件として扱った判断根拠は実装計画 §3.3 に記録する。
+**旧判断（差し戻し済み。§2 参照）**: イシュー #740 時点では、4096 の大幅改善（4096 は §4 が要求する 2
+サイズのうち 1 つ）と 512〜2048 の中立（劣化許容 5% 以内。実装計画 §3.1「コンティンジェンシー」の閾値）を
+根拠に「採用」と判断し、サイズ条件分岐なしの全サイズ適用（実装計画 §3.1）で `CudaMmaGemm::new` へ結線した。
+しかし 2048 単独の改善幅は本節に未転記のままであり、§4 の字義どおりの「2048/4096 両方の改善」を満たして
+いないにもかかわらず「4096 大幅改善 + 512〜2048 中立」を採用条件として代替した判断は人間承認を経ていな
+かった。PR #758 レビュー指摘（codex-review P1）によりこの判断は差し戻し、`CudaMmaGemm::new` は base
+カーネルへ戻した（§2 参照）。§4 の採用基準を字義どおり満たす実測（2048 単独の中央値 TFLOPS を含む）が
+得られ、かつ結線前必須の確認（レジスタスピル・bit 一致・parity）が完了してから再結線を判断する。
 
-**結線後の再計測**: 未実施（§2 参照）。次回 GB10 実機セッションで下記を実行し、本節を追記・更新する。
+**結線後の再計測**: 未実施（§2 参照）。次回 GB10 実機セッションで下記を実行し、2048 単独の改善有無を含めて
+本節を追記・更新する。再結線は §4 の採用基準を満たす場合、または人間承認を伴う採用基準の正式改訂を経た
+場合に限る。
 
 - `cargo test -p backend-cuda --lib --features internal-diagnostics -- --ignored --nocapture
   mma_f16_swizzle_variant_matches_base_bit_exact_output`（`CudaMmaGemm::new`〈本番既定〉自身の bit 一致を

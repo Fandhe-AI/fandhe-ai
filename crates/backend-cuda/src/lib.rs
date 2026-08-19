@@ -123,16 +123,17 @@
 //!
 //! イシュー #740 で GB10 実機 A/B 計測（4096: ×1.5957・group_width=8、
 //! 512〜2048 は 0.97〜1.00 倍とほぼ中立。`docs/perf/cuda-gemm-swizzle-ab.md`
-//! §6 参照）を根拠に、`gemm_mma::CudaMmaGemm::new`（本番既定コンストラクタ。
-//! feature 非依存）へ**本番結線済み**とした。`new` は
-//! `device.multiprocessor_count()` から `swizzle::select_swizzle_group_width`
-//! でグルーピング幅を動的選択し、常に swizzle 変種カーネルをコンパイル
-//! する。`ops.rs`／`gemm_auto.rs` は mma_f16 経路自体を参照しないため
-//! （`CudaGemmAuto::run_f16` の MatrixUnit 分岐は WMMA のみ）無変更のまま
-//! であり、結線点は `CudaMmaGemm::new` に閉じる。swizzle 無適用の base
-//! カーネルは診断専用の `new_without_swizzle`（`internal-diagnostics`
-//! feature 限定）へ役割を移した（明示幅指定の `new_with_swizzle` も
-//! 引き続き診断用として存続）。
+//! §6 参照）を根拠に一時的に `gemm_mma::CudaMmaGemm::new`（本番既定
+//! コンストラクタ）へ本番結線したが、PR #758 レビュー指摘（採用基準
+//! 〈2048/4096 両方の改善〉未達のまま代替基準へ読み替えていたこと・
+//! 結線前必須確認〈spill／bit 一致／parity〉未実施・CI 恒久検査が
+//! GB10 未実測の SM 数を実測値と誤扱いしていたこと）により差し戻した
+//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2 参照）。`new` は現在
+//! swizzle 無適用の base カーネル（`kernels_mma::mma_f16_source()`）を
+//! 返す。swizzle 適用版は引き続き `new_with_swizzle`（`internal-
+//! diagnostics` feature 限定）から opt-in で利用できる。§4 の採用基準を
+//! 字義どおり満たすか、人間承認を伴って基準を正式改訂したうえで
+//! 再結線を検討する。
 //!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
@@ -303,13 +304,13 @@ pub mod diagnostics {
     /// のため、crate 外部（`examples/gemm_mma_swizzle_bench.rs`）から
     /// 到達するにはこの diagnostics 経由の薄いラッパーが必要
     /// （`mma_f16_block_tile`・`wmma_tf32_opt_block_tile` と同じ理由・
-    /// 同じ feature ゲート方針）。イシュー #740 で `gemm_mma::CudaMmaGemm::
-    /// new`（本番既定コンストラクタ。feature 非依存）自身も同じ
-    /// `swizzle::select_swizzle_group_width` を直接呼ぶよう結線されたため、
-    /// 本関数は A/B 計測（`examples/gemm_mma_swizzle_bench.rs`）専用の
-    /// 診断用ラッパーとしての役割に限定される（本番経路が実際に選択した
-    /// 幅の可観測性は `gemm_mma::CudaMmaGemm::swizzle_group_width`
-    /// アクセサ〈feature 非依存〉が担う）。
+    /// 同じ feature ゲート方針）。`gemm_mma::CudaMmaGemm::new`（本番既定
+    /// コンストラクタ）はイシュー #740 で一時この式を直接呼ぶよう結線
+    /// されたが、PR #758 レビュー指摘により差し戻し済み（`new` は現在
+    /// swizzle 無適用の base カーネルを返す。`gemm_mma.rs::CudaMmaGemm::
+    /// new` ドキュメンテーションコメント参照）。本関数は A/B 計測
+    /// （`examples/gemm_mma_swizzle_bench.rs`）専用の診断用ラッパーで
+    /// あり続ける。
     pub fn mma_swizzle_group_width(num_sms: u32) -> u32 {
         swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }

@@ -20,25 +20,23 @@
 //! 到達しない（[`swizzled_block_idx`] は本ファイルの単体テストのみが
 //! 呼ぶ参照実装）。
 //!
-//! [`select_swizzle_group_width`] は **`gemm_mma.rs::CudaMmaGemm::new`
-//! （本番既定コンストラクタ）から本番経路として結線されている**
-//! （イシュー #740。GB10 実機 A/B 計測で 4096: ×1.5957・512〜2048 は
-//! 0.97〜1.00 倍とほぼ中立を確認済み。`docs/perf/cuda-gemm-swizzle-ab.md`
-//! §6 参照）。旧 #499 セッションでは opt-in（`internal-diagnostics`
-//! feature）経由の `lib.rs::diagnostics::mma_swizzle_group_width` からしか
-//! 到達しなかったが、本番結線後は `CudaMmaGemm::new` が直接
-//! `device.multiprocessor_count()` を渡して呼ぶ（`gemm_mma.rs` 参照）。
-//! 診断用ラッパー（`diagnostics::mma_swizzle_group_width`。
-//! `examples/gemm_mma_swizzle_bench.rs` の A/B 計測専用）は引き続き存在
-//! する。
+//! [`select_swizzle_group_width`] はイシュー #740 で一時
+//! `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ）へ本番結線
+//! したが、PR #758 レビュー指摘（採用基準未達・事前確認未実施・本
+//! モジュールが依拠する SM 数入力の誤り）により差し戻し済み
+//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2 参照）。旧 #499 セッション時と
+//! 同様、opt-in（`internal-diagnostics` feature）経由の
+//! `lib.rs::diagnostics::mma_swizzle_group_width`（`examples/
+//! gemm_mma_swizzle_bench.rs` の A/B 計測専用）からのみ到達する。
 
 /// グルーピング幅の選択候補（DeepGEMM 同型の 2 候補。実装計画 1 節）。
 ///
-/// イシュー #740 で `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ）
-/// が [`select_swizzle_group_width`] を直接呼ぶよう結線したため、本定数は
-/// 通常ビルド（feature 指定なし）でも常に到達可能であり `#[allow(dead_code)]`
-/// は不要になった（旧 #499 セッション時点の判断は本ファイル冒頭コメント
-/// 参照）。
+/// イシュー #740 の本番結線は PR #758 レビュー指摘により差し戻し済み
+/// （本ファイル冒頭コメント参照）。呼び出し元は `internal-diagnostics`
+/// feature 限定の診断用ラッパー経由のみに戻ったため、通常ビルド
+/// （feature 指定なし）では到達不能で `#[allow(dead_code)]` が必要
+/// （旧 #499 セッション時点と同じ判断）。
+#[allow(dead_code)]
 const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 
 /// グルーピング幅 `g` を仮定した場合の L2 footprint 近似コスト
@@ -62,6 +60,11 @@ const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 /// `num_sms` は実測値だが、桁溢れを事前に排除しておくことで呼び出し側の
 /// 追加検証を不要にする。REQ-8 の「境界検査を省略しない」精神を数値計算
 /// 側にも適用した安全側の実装）。
+///
+/// [`GROUP_WIDTH_CANDIDATES`] と同じ理由（イシュー #740 の本番結線差し
+/// 戻し。本ファイル冒頭コメント参照）で通常ビルドでは到達不能なため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u32) -> u64 {
     let (num_sms, block_m, block_n, group_width) = (
         u64::from(num_sms),
@@ -81,15 +84,16 @@ fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u3
 /// 小さいほど 1 グループが専有する SM 数・L2 footprint が小さく、
 /// 効果が過大に振れるリスクが低い）。
 ///
-/// 呼び出し文脈（イシュー #740 で本番結線後）: `gemm_mma.rs::
-/// CudaMmaGemm::new`（本番既定コンストラクタ）が
-/// `device.multiprocessor_count()`（`device.rs`）と
-/// `kernels_mma::MMA_BM`/`MMA_BN` を渡して直接呼ぶ。加えて診断用ラッパー
-/// `lib.rs::diagnostics::mma_swizzle_group_width`（`internal-diagnostics`
-/// feature 経由）が `examples/gemm_mma_swizzle_bench.rs` の A/B 計測用に
-/// 同じ関数を呼ぶ（`new_with_swizzle` へ明示的に渡す `group_width` を
-/// 決める用途。`new_with_swizzle` 自身は本関数を呼ばず、呼び出し元が
-/// 渡した値をそのまま使う。本モジュール冒頭コメント参照）。
+/// 呼び出し文脈: イシュー #740 で一時 `gemm_mma.rs::CudaMmaGemm::new`
+/// （本番既定コンストラクタ）から本番結線したが PR #758 レビュー指摘に
+/// より差し戻し済み（本ファイル冒頭コメント参照）。現在の呼び出し元は
+/// 診断用ラッパー `lib.rs::diagnostics::mma_swizzle_group_width`
+/// （`internal-diagnostics` feature 経由）のみ（`examples/
+/// gemm_mma_swizzle_bench.rs` の A/B 計測用に `new_with_swizzle` へ
+/// 明示的に渡す `group_width` を決める用途。`new_with_swizzle` 自身は
+/// 本関数を呼ばず、呼び出し元が渡した値をそのまま使う）。通常ビルド
+/// （feature 指定なし）では到達不能なため `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub fn select_swizzle_group_width(num_sms: u32, block_m: u32, block_n: u32) -> u32 {
     let mut best = GROUP_WIDTH_CANDIDATES[0];
     let mut best_usage = swizzle_group_usage(num_sms, block_m, block_n, best);
@@ -217,18 +221,23 @@ mod tests {
         assert_eq!(select_swizzle_group_width(100_000, 64, 128), 16);
     }
 
-    /// GB10 実機（DGX Spark。sm_121）の実測 SM 数（28。
-    /// `docs/perf/sm121-device-attributes.md` L58）で
-    /// `select_swizzle_group_width` を固定し、イシュー #740 の実機 A/B 計測
-    /// が選んだ勝者 `group_width=8` と一致することを CI 上で恒久検査する
-    /// （実機再計測なしに `CudaMmaGemm::new` の動的選択結果が回帰しないこと
-    /// を保証する。`gemm_mma.rs::CudaMmaGemm::new` ドキュメンテーション
-    /// コメント参照）。
+    /// **注意（PR #758 レビュー是正）**: この `28` は GB10（sm_121）の
+    /// 実測 SM 数ではない。`docs/perf/sm121-device-attributes.md` L58 の
+    /// `MULTIPROCESSOR_COUNT = 28` は同ドキュメント §「動作検証」が明記
+    /// するとおり RTX 3060（compute capability 8.6・sm_121 ではない）の
+    /// 例示ダンプであり、同ドキュメント L79 のとおり sm_121 自体の SM 数は
+    /// 本リポでは未実測（GB10 実機接続情報が本 PR 時点で未整備のため）。
+    /// 以前の版はこの値を「GB10 実機の実測 SM 数」と誤って扱っていた
+    /// （Cursor Bugbot 指摘・PR #758）。本テストは GB10 実機値のピン留めと
+    /// してではなく、`select_swizzle_group_width` の入力 `28`（他の
+    /// テストケースと同様の代表値の一つ）に対する回帰検知としてのみ
+    /// 位置づける。GB10 実機の実測 SM 数が判明次第、本テストをその値へ
+    /// 更新し GB10 実測として扱ってよい。
     #[test]
-    fn select_swizzle_group_width_pins_gb10_measured_sm_count_to_g8() {
+    fn select_swizzle_group_width_pins_example_sm_count_28_to_g8() {
         // usage(8)  = 8*64  + ceil(28/8)*128  = 512  + 4*128 = 512+512=1024
         // usage(16) = 16*64 + ceil(28/16)*128 = 1024 + 2*128 = 1024+256=1280
-        // -> 8 が最小（実機実測 g8 と一致）。
+        // -> 8 が最小。
         assert_eq!(select_swizzle_group_width(28, 64, 128), 8);
     }
 
