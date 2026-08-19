@@ -103,17 +103,35 @@ AI 列は `crates/backend-metal/examples/gemm_diagnosis.rs::analytics::analyze` 
 
 `docs/real-hardware-verification-env.md` の接続・転送手順に従う（実ホスト名はローカル管理外ファイル参照）。
 
+**base/head は「head の `gemm_bench` バイナリ（計測コードは固定）に対しシェーダのみを差し替えて」計測する**
+（codex-review 指摘・#745）。旧手順（base=main の `gemm_bench` を実行・head=本ブランチの `gemm_bench` を実行）は、
+main 側の候補比較ループが `measure()`（`dispatch_variant` 経由。A・B アップロードと C readback を計測区間に含む）
+を使い、head 側は `measure_tiled_prepared()`（アップロード・readback をループ外の 1 回に切り出し、ディスパッチ単体
+のみを計測）を使う非対称な構成になり、計測対象の範囲そのものが base/head で異なってしまう
+（フラグメントレジスタ常駐化の効果とは無関係に head が有利に見える方向のバイアス）。これを避けるため、計測コード
+（`measure_tiled_prepared`・出力フォーマットとも本ブランチのもので固定）は変えず、`gemm_simdgroup_tiled` の
+シェーダ実体（`crates/backend-metal/src/shaders/gemm.metal`）のみを base/head で差し替える。
+
 ```sh
 git fetch origin
 
-# base（是正前 main）
-git checkout main
+# head ブランチ上で作業する（gemm_bench.rs・計測コードは本ブランチのものに固定）
+git checkout perf/745-metal-register-accumulator-tile
+
+# base（是正前 main のシェーダ）: gemm.metal のみ main のものへ差し替えて計測する
+git checkout origin/main -- crates/backend-metal/src/shaders/gemm.metal
 cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_base.txt
 
-# head（本イシューの実装ブランチ）
-git checkout perf/745-metal-register-accumulator-tile
+# head（本イシューの是正後シェーダ）へ復元して計測する
+git checkout perf/745-metal-register-accumulator-tile -- crates/backend-metal/src/shaders/gemm.metal
 cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_head.txt
+
+# 作業ツリーを head の状態へ戻す（上の checkout で index に変更が乗っていないか確認する）
+git status --short crates/backend-metal/src/shaders/gemm.metal
 ```
+
+計測コード（`gemm_bench.rs`）が base/head で共通のため、`size=4096` の候補行も base/head 双方に出力される
+（旧手順では head 側にしか出力されなかった非対称も解消する）。
 
 `examples/gemm_bench.rs` の「候補構成の明示比較」節（size ∈ {2048, 4096}）が baseline・拡大候補 3 種すべてを
 `size=<N> candidate=<label> tflops=<T> requested=(...) resolved=(...) resolved_matches_requested=<bool>` 形式で

@@ -214,14 +214,21 @@ fn gemm_simdgroup_tiled_source_uses_register_resident_fragment_arrays() {
             "gemm_simdgroup_tiled の staged 経路にフラグメントレジスタ常駐構造 `{needle}` が見つかりません"
         );
     }
-    // MMA 発行がフラグメントロードから分離され、内側ループで再ロード
-    // されていないことの追加確認: `simdgroup_multiply_accumulate` の
-    // 呼び出しは staged 経路で 1 箇所のみ（旧構造は kk ループ内の (r, ci)
-    // 二重ループ内に 1 箇所だったが呼び出し自体の出現数は変わらないため、
-    // ここでは a_frag[r]/b_frag[c_] を直接引数に取る形になっている
-    // （インラインの a_tile/b_tile 変数を経由しない）ことを主目的とする。
+    // 退行検出（インラインの a_tile 変数へ巻き戻されていないこと）: staged
+    // 経路の kk ループ部分（`kernel_body` 先頭〜direct-load 経路〈else 節〉
+    // 開始位置の手前まで）に検査範囲を限定する。`kernel_body` 全体（staged
+    // ・direct-load 両経路を含む）を対象にすると、direct-load 経路側の
+    // フラグメント変数宣言文言が偶然一致した場合に staged 経路の退行だと
+    // 誤診断しうるため（現状 direct-load 側は
+    // `simdgroup_float8x8 a_tile = simdgroup_float8x8(0.0f);` という別の
+    // 宣言文言を使っており本 needle とは一致しないが、将来 direct-load 側の
+    // 文言が変わった場合に備えて検査範囲自体を staged 経路へ絞る）。
+    let direct_load_marker = "// 直接ロード: device メモリから simdgroup ごとに直接";
+    let staged_scope = &kernel_body[..kernel_body.find(direct_load_marker).expect(
+        "gemm_simdgroup_tiled の direct-load 経路（else 節）の目印コメントが見つかりません",
+    )];
     assert!(
-        !kernel_body.contains("simdgroup_float8x8 a_tile;"),
+        !staged_scope.contains("simdgroup_float8x8 a_tile;"),
         "staged 経路の kk ループ内に旧来のインライン a_tile 宣言が残っています（フラグメント巻き上げの退行）"
     );
 }
