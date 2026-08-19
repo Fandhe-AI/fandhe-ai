@@ -113,10 +113,11 @@ const NC: usize = 512;
 /// Max（firestorm 系 aarch64）でのみ実測されており、x86_64 等の他アーキ
 /// テクチャでは性能・パネルメモリ増加（NC=9600 は既定 NC=512 比 B パネル
 /// バッファが約 18.75 倍）のいずれも未検証のため、[`select_blocks`] は
-/// `cfg(target_arch = "aarch64")` でこの値の適用を M4 Max 相当の aarch64
-/// ターゲットに限定する（codex-review 指摘・PR #766。`.claude/rules/coding-rust.md`
-/// の実機固有値ハードコード回避方針）。
-#[cfg(target_arch = "aarch64")]
+/// `cfg(all(target_arch = "aarch64", target_os = "macos"))` でこの値の
+/// 適用を Apple Silicon Mac に限定する（Linux aarch64 実機〈DGX Spark
+/// GB10 の Grace CPU 等〉は対象外。codex-review 再指摘・PR #766。
+/// `.claude/rules/coding-rust.md` の実機固有値ハードコード回避方針）。
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const NC_LARGE_N: usize = 9600;
 
 /// [`select_blocks`] が aarch64 で NC を [`NC_LARGE_N`] へ切り替える n の
@@ -127,7 +128,7 @@ const NC_LARGE_N: usize = 9600;
 /// 4096 のみを NC 拡大の対象にする（`docs/perf/cpu-gemm-blocking-sweep.md`
 /// §7。dim=1024 も NC=9600 で約 7.1% 改善したが、512 未計測・非単調な
 /// テーブルになるため #749 では適用せず #753 へ引き継ぐ）。
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const LARGE_N_THRESHOLD: usize = 4096;
 
 /// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
@@ -160,24 +161,30 @@ const fn default_blocks() -> BlockSizes {
 /// ループ内再利用）は n に直結することから m／k は条件に含めない。
 /// 非正方形状（m 小・k 大等）での挙動は同 docs のリスク節を参照。
 ///
-/// **アーキテクチャ限定（PR #766・codex-review 指摘）**: [`NC_LARGE_N`]
-/// は Apple M4 Max（aarch64）実機のみで実測した値であり、x86_64 等の
-/// 他アーキテクチャでは性能改善・B パネルバッファ増加の影響いずれも
-/// 未検証。実機固有の実測値を検証していないターゲットへ無条件適用する
-/// のは `.claude/rules/coding-rust.md` の方針に反するため、n 分岐は
-/// `cfg(target_arch = "aarch64")` でガードし、非対象アーキテクチャは
-/// fail-closed で常に [`default_blocks`]（= 従来の固定 NC=512）を返す。
-/// aarch64 の中でも M4 Max 以外（例: 他ベンダーの aarch64 SoC）を厳密に
-/// 弁別する実行時 CPU 特性検出は本 PR のスコープ外とし、aarch64 全体を
-/// 対象範囲として扱う（同アーキ内の非最適ケースは #749 実測範囲外の
-/// リスクとして許容。将来より厳密な選択が必要になれば実行時検出へ
-/// 分離検討する）。
+/// **機種限定（PR #766・codex-review 再指摘）**: [`NC_LARGE_N`] は Apple
+/// M4 Max（macOS／aarch64）実機のみで実測した値であり、Linux aarch64
+/// （例: DGX Spark GB10 の Grace CPU）や他ベンダーの aarch64 SoC では
+/// 性能改善・B パネルバッファ増加の影響いずれも未検証。当初
+/// `cfg(target_arch = "aarch64")` のみでガードしていたが、これは
+/// アーキテクチャ一致であって実測機種の一致を意味せず、Linux aarch64
+/// 実機にも無条件適用されてしまう（codex-review 指摘・未解決スレッド
+/// `PRRT_kwDOTuUCJc6agzD4`／`PRRT_kwDOTuUCJc6ahEaV`）。実機固有の実測値を
+/// 検証していないターゲットへ適用するのは `.claude/rules/coding-rust.md`
+/// の方針に反するため、n 分岐は `cfg(all(target_arch = "aarch64",
+/// target_os = "macos"))`（= Apple Silicon Mac）でガードし、それ以外
+/// （Linux aarch64・x86_64 等）は fail-closed で常に [`default_blocks`]
+/// （= 従来の固定 NC=512）を返す。macOS／aarch64 の中でも M4 Max 以外
+/// （M1〜M3 系等）を厳密に弁別する実行時 CPU 特性・機種判定（`sysctlbyname`
+/// 等）は本 PR のスコープ外とし、Apple Silicon Mac 全体を対象範囲として
+/// 扱う（同機種帯内の非最適ケースは #749 実測範囲外のリスクとして許容。
+/// より厳密な機種判定は #753〈sysctl ベース MC/KC/NC 動的算出〉側で検討
+/// する）。
 ///
 /// 環境変数等の外部入力による上書き口は設けない（OWASP A03・
 /// `.claude/rules/security.md`。`dispatch_region` の ISA トークン選択と
 /// 同じ「入力は `validate_dims` 通過済みの形状のみ」という方針）。
 const fn select_blocks(n: usize) -> BlockSizes {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     {
         if n >= LARGE_N_THRESHOLD {
             return BlockSizes {
@@ -187,11 +194,12 @@ const fn select_blocks(n: usize) -> BlockSizes {
             };
         }
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
     {
-        // n を未使用にしないための no-op 参照。aarch64 以外では常に
-        // default_blocks() へ fail-closed フォールバックする
-        // （codex-review 指摘・PR #766）。
+        // n を未使用にしないための no-op 参照。Apple Silicon Mac
+        // （aarch64 + macOS）以外では常に default_blocks() へ
+        // fail-closed フォールバックする（Linux aarch64 実機を含む。
+        // codex-review 再指摘・PR #766）。
         let _ = n;
     }
     default_blocks()
@@ -1242,10 +1250,12 @@ mod tests {
                 "n={n}（LARGE_N_THRESHOLD 未満）は既定ブロックのはず"
             );
         }
-        // NC_LARGE_N（M4 Max 実測値）の適用は aarch64 限定（PR #766・
-        // codex-review 指摘）。x86_64 等では n の値によらず常に
-        // default_blocks() へ fail-closed フォールバックすることを確認する。
-        #[cfg(target_arch = "aarch64")]
+        // NC_LARGE_N（M4 Max 実測値）の適用は Apple Silicon Mac
+        // （aarch64 + macOS）限定（PR #766・codex-review 再指摘）。
+        // Linux aarch64（DGX Spark GB10 の Grace CPU 等）・x86_64 等では
+        // n の値によらず常に default_blocks() へ fail-closed
+        // フォールバックすることを確認する。
+        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         for n in [4096usize, 4097, 9600, 9601, 20000] {
             let blocks = select_blocks(n);
             assert_eq!(blocks.mc, MC, "n={n} でも MC は不変のはず");
@@ -1255,13 +1265,13 @@ mod tests {
                 "n={n}（閾値以上）は NC_LARGE_N のはず"
             );
         }
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
         for n in [4096usize, 4097, 9600, 9601, 20000] {
             let blocks = select_blocks(n);
             assert_eq!(
                 blocks,
                 default_blocks(),
-                "n={n}（非 aarch64）は M4 Max 実測値を適用せず既定ブロックのはず"
+                "n={n}（非 Apple Silicon Mac）は M4 Max 実測値を適用せず既定ブロックのはず"
             );
         }
     }
