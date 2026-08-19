@@ -344,21 +344,24 @@ mod macos_impl {
 
         // occupancy 判定組み込み比較（イシュー #542。受け入れ条件 2:
         // 「size ∈ {512, 1024, 2048, 4096} で現行 select() 比の劣化がない
-        // ことを実測確認する」）。
+        // ことを実測確認する」）。**イシュー #747 でこの帯域は #744 是正へ
+        // 吸収されたと判断済み**（`dispatch_auto` への `select_with_occupancy`
+        // 組み込みは不採用確定。`docs/perf/metal-gemm-occupancy-select.md`
+        // 「#747 判断」節）。本セクションは吸収判断の実測記録・回帰確認用
+        // として維持する。
         //
         // 「旧」: `tile::select`（形状のみの判定。occupancy 縮退なし）が
         // 選ぶ構成を `SimdgroupTiled` へ明示指定してディスパッチする
-        // （`dispatch_auto` の現行本番挙動と同一。`select_with_occupancy`
-        // は M4 Max 実機での性能非劣化確認が未完了のため `dispatch_auto`
-        // へは未適用〈codex-review P1・PR #684。`crate::gemm` モジュール
-        // ドキュメンテーションコメント参照〉）。
+        // （`dispatch_auto` の現行本番挙動と同一）。
         // 「新」: `tile::select_with_occupancy`（`ctx.occupancy_params()`
         // 経由の occupancy 縮退込み判定）が選ぶ構成を同じく `SimdgroupTiled`
         // へ明示指定してディスパッチする（`dispatch_auto` 経由ではなく
         // 直接 `select_with_occupancy` の結果を計測する。GPU コア数取得
         // 不能時は `tile::select` と同一構成へ fail-safe フォールバックする）。
-        // 本比較で非劣化を確認できたら `dispatch_auto` を
-        // `select_with_occupancy` 呼び出しへ切り替える（別 PR）。
+        // #744 是正後は実測帯域〈512/1024/2048/4096〉で旧・新が常に同一
+        // 構成〈32x32 staged〉を選ぶため、本比較は主に計測ノイズの確認・
+        // 将来の再逆転検知（`docs/perf/metal-tile-select-correction.md`
+        // 「再逆転時の再計測手順」節）に資する。
         //
         // 選択された `TileConfig`（`bm`/`bn`）も出力し、`docs/perf/
         // metal-gemm-occupancy-select.md` の記録テンプレへ転記できるように
