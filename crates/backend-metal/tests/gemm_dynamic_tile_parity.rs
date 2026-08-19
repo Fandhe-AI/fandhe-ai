@@ -271,16 +271,17 @@ fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
 //
 // `shaders/gemm.metal` の `ALIGN_M`/`ALIGN_N`/`ALIGN_K` function constant
 // （`crate::tile::AlignFlags::for_dims` が実効次元と `TileConfig` から導出。
-// `MetalGemm::pipeline_for_tile` が畳み込む）は「整列が証明された場合の
-// 恒真化」であり検査式自体は残る（REQ-8）ため、整列形状・非整列形状の
-// いずれでも CPU 参照実装と数値一致することを確認する。整列版・検査版は
-// 「ロードする値の集合と MMA 発行順」が同一（検査が恒真の場合に消える
-// だけ）のため、結果はビット単位一致する契約（イシュー #752 計画
-// 「設計方針」§3.2 数値契約）。
+// `MetalGemm::pipeline_for_tile` が畳み込む）はパイプラインバリアントの
+// 識別に使うのみで、境界検査式自体は `ALIGN_*` の値に関わらず常に評価
+// される（PR #764 codex-review 指摘・P0 を受け、OR 合成による恒真化は
+// 不採用に変更。REQ-8・`shaders/gemm.metal` の `ALIGN_M` 宣言部コメント
+// 参照）。整列形状・非整列形状のいずれでも CPU 参照実装と数値一致する
+// ことを確認する（境界検査を常に通っても「ロードする値の集合と MMA
+// 発行順」自体は変わらないため、結果はビット単位一致する契約）。
 
 /// 32x32/bk16/staged 構成（`CANDIDATES[3]`）で m/n/k がすべて bm/bn/bk へ
-/// 整列する形状（`ALIGN_M`/`ALIGN_N`/`ALIGN_K` すべて `true` で畳み込まれる
-/// 経路）を検証する。
+/// 整列する形状（`ALIGN_M`/`ALIGN_N`/`ALIGN_K` すべて `true` になる
+/// パイプラインバリアント）を検証する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn staged_path_matches_cpu_reference_fully_aligned() {
@@ -317,8 +318,8 @@ fn staged_path_matches_cpu_reference_partially_aligned() {
 }
 
 /// 直接ロード経路（`staged=false`）の完全整列形状。direct-load 側の
-/// `ALIGN_M || a_row < dims.m`・`ALIGN_N || b_col < dims.n` 恒真化分岐を
-/// exercise する。
+/// `a_row < dims.m`・`b_col < dims.n` 境界検査（`ALIGN_M`/`ALIGN_N` の
+/// 値に関わらず常に評価される。PR #764）を exercise する。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn direct_load_path_matches_cpu_reference_fully_aligned() {
