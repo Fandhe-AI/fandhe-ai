@@ -94,42 +94,50 @@ ssh "$CUDA_NODE" 'ncu --query-metrics | grep -E "sm__warps_active|lts__t_sector_
 個別に存在することを検証し、1 つでも欠けていれば非 0 終了する:
 
 ```sh
-# §3.3 の METRICS と同一の 6 メトリクス（basename。サフィックス "." 以降は除く）を
-# 1 つずつ照合し、いずれか 1 つでも --query-metrics の出力に現れなければ
-# fail-closed で中断する（grep -E の「いずれか 1 つでもマッチすれば成功」という
-# 性質では個々のメトリクス欠落を検出できないため。codex-review 指摘・出典: イシュー #739）。
-REQUIRED_METRICS=(
-  "sm__warps_active.avg.pct_of_peak_sustained_active"
-  "lts__t_sector_hit_rate.pct"
-  "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
-  "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum"
-  "lts__t_bytes.sum.per_second"
-  "sm__inst_issued.avg.pct_of_peak_sustained_active"
-)
-AVAILABLE=$(ssh "$CUDA_NODE" 'ncu --query-metrics')
-for m in "${REQUIRED_METRICS[@]}"; do
-  base="${m%%.*}"
-  if ! grep -qF -- "$base" <<<"$AVAILABLE"; then
-    echo "abort: required metric '$m'（basename '$base'）が ncu --query-metrics の出力に" \
-         "見つからない。§3.3 の METRICS または本リストを実機の実際の名称へ読み替えること。" >&2
+# §3.3 の METRICS と同一の 6 メトリクスを完全名（rollup サフィックス込み）で
+# 1 つずつ照合し、いずれか 1 つでも見つからなければ fail-closed で中断する
+# （grep -E の「いずれか 1 つでもマッチすれば成功」という性質では個々の
+# メトリクス欠落を検出できないため。codex-review 指摘・出典: イシュー #739）。
+# `ncu --query-metrics`（引数なし）はベースメトリクス名のみを列挙し
+# `.sum`／`.avg.pct_of_peak_sustained_active` 等のサフィックス組み合わせを
+# 含まないため、完全名の照合には `--query-metrics-mode all`（サフィックス
+# 展開済みの完全名を列挙するモード）を用いる。完全名を 1 行 1 件で厳密一致
+# （`grep -qxF`）させることで、存在しないサフィックス組み合わせの指定も
+# 検出できる（codex-review 指摘・出典: イシュー #739）。
+# POSIX sh 互換（配列・here-string は bash 固有のため使わない。改行区切り文字列 +
+# printf | grep で代替）。
+REQUIRED_METRICS='
+sm__warps_active.avg.pct_of_peak_sustained_active
+lts__t_sector_hit_rate.pct
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum
+lts__t_bytes.sum.per_second
+sm__inst_issued.avg.pct_of_peak_sustained_active
+'
+AVAILABLE=$(ssh "$CUDA_NODE" 'ncu --query-metrics-mode all')
+for m in $REQUIRED_METRICS; do
+  if ! printf '%s\n' "$AVAILABLE" | grep -qxF -- "$m"; then
+    echo "abort: required metric '$m' が ncu --query-metrics-mode all の出力に" \
+         "完全名で見つからない。§3.3 の METRICS または本リストを実機の実際の名称へ" \
+         "読み替えること。" >&2
     exit 1
   fi
 done
 ```
 
-**basename 一致判定の限界と、完全名（rollup サフィックス込み）検証の実施箇所（codex-review 指摘・出典:
-イシュー #739）**: `ncu --query-metrics` はベースメトリクス名（rollup サフィックスを含まない名前）のみを
-列挙し、`.sum`／`.avg.pct_of_peak_sustained_active` 等のサフィックス組み合わせは列挙しない（サフィックスは
-呼び出し側が任意に組み合わせるため）。したがって上記チェックは basename の存在確認に留まり、**完全名
-（サフィックス込み）の誤り（例: 存在しないサフィックスの指定）を本チェックだけでは検出できない**。この
-限界を残したまま採取ループへ進めるのは、完全名の誤りが §3.3 の実採取（6 通りループ）まで気づかれないまま
-というリスクがある。この限界に対する実際の防御は §3.3 側にある: `sudo ncu --metrics "$METRICS" ...` は
-`$METRICS` に無効な完全名（存在しないサフィックス組み合わせ）が 1 つでも含まれていれば ncu 自身が
-非 0 終了し、§3.3 の `if ! sudo ncu ... ; then abort ...; fi` により fail-closed で検知される（黙って
-一部メトリクスを無視して続行することはない）。すなわち本節（§3.1）の basename チェックは「6 通り採取
-ループに入る前の早期検知（無駄な採取往復の削減）」を目的とした一次防御であり、完全名の正当性という
-最終的な保証は §3.3 の ncu 実行自体の exit code 検査（二次防御）が担う。両節を合わせて fail-closed が
-成立する構成であり、本節単体を完全名検証として過大評価しないこと。
+**`--query-metrics-mode all` の実機対応可否（codex-review 指摘・出典: イシュー #739）**:
+`--query-metrics-mode`（`base`／`suffix`／`all` を選べ、`all` はサフィックス展開済みの完全名を列挙する）
+は ncu CLI の一般的なオプションだが、GB10 実機に導入済みの ncu バージョンでの対応は**本セッションでは
+未確認**（実機アクセスなしのため）。§3.3.1 の事前確認と同様、6 通り採取ループへ進む前に一度
+`ssh "$CUDA_NODE" 'ncu --query-metrics-mode all | head'` 等で当該オプションが認識されることを確認し、
+非対応（`ncu` 自体がオプション未知エラーを返す）の場合は導入済み ncu のバージョンに応じた代替手段
+（例: `ncu --query-metrics-mode suffix` で個別メトリクスのサフィックス一覧を取得し完全名を組み立てて
+照合する）へ読み替えること。いずれの場合も、完全名の誤りに対する最終防御は §3.3 側にある:
+`sudo ncu --metrics "$METRICS" ...` は `$METRICS` に無効な完全名が 1 つでも含まれていれば ncu 自身が
+非 0 終了し、§3.3 の `if [ "$status" -ne 0 ]; then abort ...; fi` により fail-closed で検知される
+（黙って一部メトリクスを無視して続行することはない）。本節（§3.1）の完全名チェックは「6 通り採取
+ループに入る前の早期検知（無駄な採取往復の削減）」を目的とした一次防御であり、最終的な保証は §3.3 の
+ncu 実行自体の exit code 検査（二次防御）が担う。
 
 **ncu の GPU カウンタアクセス権限（2026-08-19 実測での運用確立）**: GB10 実機の ncu GPU カウンタは
 `RmProfilingAdminOnly` 制限下にあり、`ERR_NVGPUCTRPERM` を避けるには sudo 実行が必要。実運用では
