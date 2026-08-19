@@ -191,62 +191,57 @@ cargo test -p backend-cpu --release -- --ignored mc_kc_nc_blocking_sweep_median_
 | 1024 | NC 拡大 firestorm（#3） | ― | 約 7.1% 改善（今回は未適用。理由は (iv)） |
 | 全サイズ | KC 拡大単独（#4）・MC 拡大単独（#5）・firestorm 全軸（#6） | ― | 全サイズで劣化 |
 
-### (ii) 採用ルールと定数・実装箇所
+### (ii) 採用ルール（未導入）と撤去の経緯
 
-`crates/backend-cpu/src/gemm_blis/mod.rs` に `select_blocks(n: usize) -> BlockSizes` を追加し、
-本番 3 公開関数（[`gemm_blis`]／[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]。同ファイル
-`mod.rs`）が呼び出しごとに 1 回だけ呼ぶよう変更した:
+**本節は #749 実装セッション内で一時実装 → PR #766・codex-review 再指摘を受けて撤去した
+経緯の記録であり、以下に記す `select_blocks`／`machine_detect` 等は HEAD の
+`crates/backend-cpu/src/gemm_blis/mod.rs` にはもう存在しない**（撤去コミット: 「fix(backend-cpu):
+未有効化の NC=9600 機種判定機構を撤去する」）。HEAD の本番 3 公開関数
+（[`gemm_blis`]／[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]）は常に
+`default_blocks()`（MC=128／KC=256／NC=512）のみを使い、n 依存分岐・機種判定コードは
+一切残っていない。
 
-- `n >= LARGE_N_THRESHOLD`（= 4096）: `NC = NC_LARGE_N`（= 9600）・MC/KC は現行値のまま
-- `n < LARGE_N_THRESHOLD`: 従来どおり `default_blocks()`（MC=128／KC=256／NC=512）
+当初の採用ルール案は「`n >= LARGE_N_THRESHOLD`（= 4096）で `NC = NC_LARGE_N`（= 9600）・
+MC/KC は現行値のまま、`n < LARGE_N_THRESHOLD` では従来どおり `default_blocks()`」という
+n（B のパネル幅を分割する次元）のみを鍵にした分岐だった。実測が正方形状のみで m／k 依存の
+知見がないため m／k は条件に含めない設計だった（非正方形状でのリスクは (vi) 参照）。
 
-選択キーは `n`（B のパネル幅を分割する次元）のみ。実測が正方形状のみで m／k 依存の知見が
-ないこと、NC の効果（B パネルの jc 反復回数・ic ループ内再利用）が n に直結することから
-m／k は条件に含めない（非正方形状でのリスクは (vi) 参照）。閾値・NC 値は環境変数等の外部
-入力での上書き口を設けていない（OWASP A03。`.claude/rules/security.md`）。
+**適用対象の実行時機種判定を試みた経緯（PR #766・codex-review 再指摘 1 巡目への対応）**:
+`NC_LARGE_N` は上表のとおり Apple M4 Max 実機 1 台でのみ実測した値であり、
+`cfg(target_arch = "aarch64", target_os = "macos")`（Apple Silicon Mac 全般）は M1〜M3 等の
+未検証機種も含んでしまう。そこで `select_blocks` に `machine_detect::is_m4_family`
+（実測個体の `hw.model` を `machine_detect::VERIFIED_M4_MAX_HW_MODEL` と厳密一致で判定。
+`sysctlbyname` FFI 経由）を組み合わせ、`true` を返した場合のみ `NC_LARGE_N` を適用し
+それ以外は fail-closed で `default_blocks()` に留める実装を追加した。
 
-**適用対象の実行時機種判定（PR #766・codex-review 再指摘への対応）**: `NC_LARGE_N` は
-上表のとおり Apple M4 Max 実機 1 台でのみ実測した値であり、`cfg(target_arch = "aarch64",
-target_os = "macos")`（Apple Silicon Mac 全般）は M1〜M3 等の未検証機種も含んでしまう。
-`select_blocks` は上記 cfg に加え、`crates/backend-cpu/src/gemm_blis/mod.rs` の
-`machine_detect::is_m4_family`（実測個体の `hw.model` を
-`machine_detect::VERIFIED_M4_MAX_HW_MODEL` と厳密一致で判定。結果は `OnceLock` で
-プロセス内キャッシュ）が `true` を返した場合のみ `NC_LARGE_N` を適用し、それ以外は
-fail-closed で `default_blocks()` に留まる。
-
-**識別子未記録につき現状は不活性（PR #766 再指摘・2 巡目）**: 当初 `hw.model` の
+**識別子未記録につき常に不活性だった（PR #766 再指摘・2 巡目）**: 当初 `hw.model` の
 `"Mac16,"` prefix 一致で判定していたが、Apple の `Mac16,*` 識別子は 2024 発表の M4 世代
 Mac 全機種（M4 無印・M4 Pro・M4 Max 搭載の MacBook Pro／Mac mini／iMac 各モデル）に
-割り当てられており、M4 Max 以外の未検証機種にも一致してしまう。実測セッション終了時点で
-個体の正確な `hw.model` 値が本 issue・親 issue #738・#735 のいずれにも記録されておらず
-復元不能なため、`machine_detect::VERIFIED_M4_MAX_HW_MODEL` は `None`（未記録）とし、
-判明するまで `is_m4_family()` は常に `false` を返す（= `NC_LARGE_N` はどの実機にも
-適用されない。実測値の捏造・placeholder 値での完了扱いはしない fail-closed 方針）。
-実測機の正確な識別子が判明し次第、同定数を `Some("Mac16,X")` へ更新することで本節の
-最適化を再度有効化できる。M1〜M3 等での実測に基づく機種別最適化（sysctl ベースの
-MC/KC/NC 動的算出への一般化）は引き続き #753 の対象とする。
+割り当てられており、M4 Max 以外の未検証機種にも一致してしまう問題があった。実測セッション
+終了時点で個体の正確な `hw.model` 値が本 issue・親 issue #738・#735 のいずれにも記録されて
+おらず復元不能なため、`machine_detect::VERIFIED_M4_MAX_HW_MODEL` を `None`（未記録）に
+変更し、判明するまで `is_m4_family()` が常に `false` を返す（= `NC_LARGE_N` がどの実機にも
+適用されない）状態にしていた。
 
-**判定ロジックのテスト注入可能性（PR #766・codex-review 再指摘・3 巡目）**: 識別子が
-未記録の間は実機（macOS／aarch64 かつ M4 系）が無くても `NC_LARGE_N` 経路自体の正しさを
-検証できる必要がある。`select_blocks(n)` は「cfg 判定＋`machine_detect::is_m4_family()`
-（実機 FFI・macOS／aarch64 限定）」と「n・機種一致フラグから `BlockSizes` を決める判定
-ロジック本体」を分離しており、後者は `select_blocks_for(n: usize, matched: bool) ->
-BlockSizes` というプラットフォーム非依存の純粋関数として切り出してある
-（`crates/backend-cpu/src/gemm_blis/mod.rs`）。`matched: true` を直接渡すことで、本リポの
-通常 CI（`ubuntu-latest`。`.claude/rules/ci.md`）を含む任意の環境から NC=9600 経路
-（値の選択・`LARGE_N_THRESHOLD` 境界・fail-closed フォールバック）を単体テストで検証できる
-（`select_blocks_for_matched_large_n_uses_nc_large_n` 等・同ファイル `mod tests`）。本番
-3 公開関数は必ず `select_blocks` 経由でこの注入口を経由しないため、テスト可能性の追加が
-本番の fail-closed 挙動を弱めることはない。
+**発火しない unsafe FFI を残すこと自体がリスクと判断し撤去（PR #766 再指摘・3 巡目）**:
+識別子が判明する見込みが立たないまま「常に `false` を返すだけの `sysctlbyname` FFI 呼び出し」
+を本番ビルドへ残すこと自体が codex-review P0（`unsafe extern "C"` 宣言への `// SAFETY:` 欠落）・
+P1（最適化が一度も有効化されずデッドコード化）の指摘対象になったため、`select_blocks`／
+`select_blocks_for`（判定ロジック）・`machine_detect`（`sysctlbyname` FFI 宣言・
+`VERIFIED_M4_MAX_HW_MODEL` を含む）と対応する単体テストを撤去し、常に `default_blocks()`
+を返す従来経路のみへ戻した。実測機の正確な識別子が判明し機種判定を安全に実装できる段階で、
+本ドキュメントの実測値（§7 (i)）を根拠に再導入を検討する。M1〜M3 等での実測に基づく機種別
+最適化（sysctl ベースの MC/KC/NC 動的算出への一般化）は引き続き #753 の対象とする。
 
-### (iii) 512〜2048 が劣化 0% である構造的根拠
+### (iii) 512〜2048 が劣化 0% である構造的根拠（未導入案の時点の記録）
 
-`n < LARGE_N_THRESHOLD` では `select_blocks(n)` は `default_blocks()` と完全に同一の
-`BlockSizes` を返す（`crates/backend-cpu/src/gemm_blis/mod.rs` の
-`select_blocks_switches_nc_only_at_large_n_threshold` テストで n ∈
-{0, 1, 511, 512, 2048, 4095} を保証）ため、512〜2048 は分岐 1 回の定数コストを除き変更前と
-完全に同一のコード経路・ブロック値で実行される。よって受け入れ条件「512〜2048 の劣化が
-中央値 5% 以内」は実測を待たずに構造的に満たす。
+(ii) で撤去した当初案では、`n < LARGE_N_THRESHOLD` の場合 `select_blocks(n)` が
+`default_blocks()` と完全に同一の `BlockSizes` を返す設計だった（`select_blocks_switches_nc_only_at_large_n_threshold`
+テストで n ∈ {0, 1, 511, 512, 2048, 4095} を保証していた）ため、512〜2048 は分岐 1 回の
+定数コストを除き変更前と完全に同一のコード経路・ブロック値で実行され、受け入れ条件
+「512〜2048 の劣化が中央値 5% 以内」を実測を待たずに構造的に満たす、という設計上の性質
+だった。HEAD では `select_blocks` 自体が撤去済みで、本番経路は常に `default_blocks()`
+のみを使うため本節の分岐は存在しない（劣化 0% は自明に成立する）。
 
 ### (iv) 1024（7.1% 改善）を今回適用しない理由
 
@@ -276,16 +271,13 @@ n=4096・NR=12（NEON 既定）では `342 * 256 * 12 * 4B ≈ 4 MiB`／タス�
 - **B パネルのスレッド間共有**（NC 拡大でタスクごとの B パネル重複確保が増える問題）→ #750
 - **MR12×NR8 不採用等の記録** → #751
 
-### (vii) 再計測手順
+### (vii) 再計測手順（未導入。再導入時に復元する手順の記録）
 
-```bash
-cargo test -p backend-cpu --release -- --ignored \
-  shape_dependent_nc_vs_fixed_default_ab_median_throughput --nocapture
-```
-
-本番経路（`gemm_blis_parallel` = `select_blocks`）と旧来固定既定値
+`select_blocks` を経由する A/B ハーネス（`shape_dependent_nc_vs_fixed_default_ab_median_throughput`
+テスト）は (ii) の撤去に伴い削除済みで、HEAD には存在しない。再導入時（#753 での機種判定の
+安全な実装完了後）は、本番経路（`gemm_blis_parallel`）と旧来固定既定値
 （`gemm_blis_parallel_with_blocks(default_blocks())`）を dim ∈ {512, 1024, 2048, 4096} で
-A/B 比較する（`crates/backend-cpu/src/gemm_blis/mod.rs`。`#[cfg(target_arch = "aarch64")]`
-+ `#[ignore]`）。受け入れ条件（4096 で改善・512〜2048 で劣化 5% 以内）の実機再確認に使う。
+A/B 比較するハーネスを `crates/backend-cpu/src/gemm_blis/mod.rs` へ再実装し、受け入れ条件
+（4096 で改善・512〜2048 で劣化 5% 以内）を実機再確認する。
 
 REQ-8 下限値・数値一致許容誤差は本イシューでも一切変更しない。
