@@ -88,6 +88,14 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
   保つ。C タイル転置はデータ移動のみで丸め・演算順序に影響しない。この理論的根拠の実機
   検証（`compute_b_laneq_matches_compute_bit_exact`）は下記「未実測」節のとおり本セッション
   では未実施であり、aarch64 実機で実際に確認するまでは理論上の根拠にとどまる。
+  なお bit 完全一致契約は「FMA 乗数可換性」だけでなく、`compute_b_laneq` が
+  `vld1q_f32_x2`／`vld1q_f32_x3` の複数レジスタロード（戻り値タプルの `.0`／`.1`／`.2` が
+  ロード元アドレスの offset `+0`／`+4`／`+8` の f32 レーンへ連続対応するという AArch64
+  NEON のレーン順序セマンティクス）にも依存する。この前提はコンパイル可否検証（実測済み・
+  上記参照）とは別種であり本セッションでは未検証だが、
+  `compute_b_laneq_matches_compute_bit_exact` は前提が誤っていれば必ず失敗する構成（既定
+  `kernel_with_ldc` の出力との `assert_eq!` bit 比較）のため、実機実行前に見落としが
+  読み手へ伝播するリスクは小さい。
 - **既定切り替えの fail-closed 方針**: C タイル転置という劣化要因を新規に抱えるため、
   #559 の `kernel_12x8` と同じ前例に従い、まず変種カーネルとして併設し、既定ディスパッチ
   （`NeonKernel` → `kernel_with_ldc`）は実機で非劣化＋改善が確認できるまで切り替えない。
@@ -134,7 +142,9 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
 
 1. **bit 完全一致（実機）**: 以下いずれも aarch64 実機（M4 Max または Grace CPU）で
    実行し pass を確認する必要がある（`gemm_blis_parity` 全件は既定 `NeonKernel` 経路のみを
-   検証するため `NeonBLaneqKernel` には影響しない）:
+   検証するため `NeonBLaneqKernel` には影響しない）。検証対象は「設計判断の要点」節で
+   述べた FMA 乗数可換性に加え、複数レジスタロードのレーン順序セマンティクス（前提が
+   誤っていれば下記テストは必ず失敗する）の 2 点:
    - `cargo test -p backend-cpu --release --lib -- neon_8x12_and_12x8_match_scalar_forced_bit_exact`
      （`NeonBLaneqKernel` の ScalarKernel 強制経路との bit 完全一致を含む拡張後版）
    - `cargo test -p backend-cpu --lib -- compute_b_laneq_matches_compute_bit_exact
