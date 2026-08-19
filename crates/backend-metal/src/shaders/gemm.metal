@@ -667,31 +667,42 @@ kernel void gemm_simdgroup_tiled(
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
             for (uint kk = 0; kk < BK; kk += 8) {
+                // フラグメントのレジスタ常駐化（イシュー #745）: kk ステップ
+                // 先頭で A の acc_rows 個・B の acc_cols 個の simdgroup
+                // フラグメントを一括ロードしてから TM×TN の外積 MMA を発行
+                // する（MLX steel `mma.h` の tile_matmad 型構造。#487 診断
+                // で確認した「アキュムレータは K 全域でレジスタ常駐済み・
+                // 差分はフラグメントロード構造のみ」を踏まえた是正）。従来は
+                // (r, ci) の内側ループで毎回 b_tile を再ロードしていたため
+                // 1 kk ステップあたり threadgroup→register ロードが
+                // TM + TM*TN 回発生していた（acc_rows=acc_cols=4 で
+                // 4+16=20 回）。フラグメント配列へ先出しすることで
+                // TM + TN 回（4+4=8 回）まで削減する。旧蛇行（serpentine）
+                // 走査（#536）は b_tile 再ロードの局所性向上を狙った技法
+                // だったが、本巻き上げにより再ロード自体が構造的に消滅する
+                // ため効果の前提が失われ撤去し、MMA 発行順は行優先へ戻す
+                // （direct-load 経路〈else 節〉はフラグメント再ロードが
+                // 残るため #536 の蛇行走査を引き続き維持する）。
+                // 各 acc[r][c_] の K 方向累算オペランド列（値・順序）は
+                // ロードスケジューリングを変えても c_/r の訪問順によらず
+                // 不変なため、結果はビット単位で従来と一致する（#536・#538
+                // と同じ論法）。
+                simdgroup_float8x8 a_frag[MAX_ACC];
+                simdgroup_float8x8 b_frag[MAX_ACC];
                 for (uint r = 0; r < acc_rows; r++) {
-                    simdgroup_float8x8 a_tile;
                     // ストライドを BK ではなく lda（パディング込み）にする
                     // ことで、パディングにより実際にずれた行の先頭アドレス
                     // を正しく指す（イシュー #538）。
-                    simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
-                    for (uint ci = 0; ci < acc_cols; ci++) {
-                        // 蛇行（serpentine）走査: 奇数行 r では列を逆順（acc_cols-1-ci）に
-                        // 辿る。a_tile は r ループ内で 1 回だけロードされ ci に
-                        // 依らず不変なため、走査順が影響するのは tile_b からの
-                        // `simdgroup_load` アドレス列（行切替時に直前で使った
-                        // 列位置付近を再訪する）のみである（MLX `tile_matmad`
-                        // 〈mma.h〉・CUTLASS `mma_tensor_op.h` 同型の技法。CUDA 側
-                        // #497 B-6 と同一。#536）。この tile_b アクセス局所性向上は
-                        // 期待効果であり、実測結果は `docs/perf/metal-gemm-serpentine-ab.md`
-                        // に記録する（未計測時点では性能上の主張を断定しない）。
-                        // acc[r][c_] ごとの累算オペランド列（K 方向の順序）は
-                        // c_ の訪問順に依らず不変なので、結果はビット単位で
-                        // 従来の行優先走査と一致する。
-                        uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
-                        simdgroup_float8x8 b_tile;
-                        // ストライドを BN ではなく ldb（パディング込み）にする
-                        // （上記 A タイル側と同じ理由。イシュー #538）。
-                        simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
-                        simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
+                    simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                }
+                for (uint c_ = 0; c_ < acc_cols; c_++) {
+                    // ストライドを BN ではなく ldb（パディング込み）にする
+                    // （上記 A タイル側と同じ理由。イシュー #538）。
+                    simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                }
+                for (uint r = 0; r < acc_rows; r++) {
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
                     }
                 }
             }

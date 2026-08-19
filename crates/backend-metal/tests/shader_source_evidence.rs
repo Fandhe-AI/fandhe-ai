@@ -160,12 +160,19 @@ fn gemm_simdgroup_tiled_kernel_body() -> &'static str {
     &GEMM_METAL_SOURCE[kernel_start..]
 }
 
-/// イシュー #536 の証跡: `gemm_simdgroup_tiled` の MMA 発行ループ（staged
-/// 経路・直接ロード経路の両方）が蛇行（serpentine）走査順
-/// （`acc_cols - 1 - ci`。奇数行 r で列を逆順に辿る）へ移植されている
-/// ことを Linux CI（ubuntu-latest）上でロックする。Mac 実機依存の A/B 計測
-/// （`docs/perf/metal-gemm-serpentine-ab.md`）は別途実施し、改善が無ければ
-/// このテストごと変更を撤去（revert）する運用とする。
+/// イシュー #536 の証跡（#745 でも staged 経路の残存有無を再確認）:
+/// `gemm_simdgroup_tiled` の MMA 発行ループが蛇行（serpentine）走査順
+/// （`acc_cols - 1 - ci`。奇数行 r で列を逆順に辿る）を使用している箇所を
+/// Linux CI（ubuntu-latest）上でロックする。
+///
+/// イシュー #745 でフラグメント（`a_frag`/`b_frag`）を kk ステップ先頭で
+/// 一括ロードしてからレジスタ常駐のまま TM×TN の外積 MMA を発行する構造へ
+/// staged 経路を再構成した結果、蛇行走査が狙っていた「tile_b 再ロード
+/// アドレスの局所性向上」という前提（b_tile を (r, ci) の内側で毎回
+/// 再ロードしていたこと）が構造的に消滅したため、staged 経路の蛇行走査は
+/// 撤去し MMA 発行順を行優先へ戻した。direct-load 経路（else 節）は
+/// フラグメント再ロードが引き続き残る構造のため #536 の蛇行走査を維持して
+/// いる。よって出現数は 1（direct-load 経路のみ）へ変わる。
 ///
 /// 走査順の並べ替えのみで `acc[r][c_]` ごとの累算オペランド列（K 方向の
 /// 順序）は不変のため、既存の数値一致テスト（tolerance 変更なし）はこの
@@ -177,8 +184,45 @@ fn gemm_simdgroup_tiled_source_uses_serpentine_scan_order() {
     let needle = "uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;";
     let occurrences = kernel_body.matches(needle).count();
     assert_eq!(
-        occurrences, 2,
-        "gemm_simdgroup_tiled の staged 経路・直接ロード経路の両方に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}）"
+        occurrences, 1,
+        "gemm_simdgroup_tiled の直接ロード経路に蛇行走査式 `{needle}` が見つかりません（見つかった数: {occurrences}。イシュー #745 で staged 経路の蛇行走査はフラグメントレジスタ常駐化により撤去済み）"
+    );
+}
+
+/// イシュー #745 の証跡: `gemm_simdgroup_tiled` の staged 経路が MLX
+/// steel `mma.h` 型の「kk ステップ先頭でフラグメント配列を一括ロードして
+/// からレジスタ常駐のまま TM×TN の外積 MMA を発行する」構造へ移植されて
+/// いることを Linux CI（ubuntu-latest）上でロックする。従来は (r, ci) の
+/// 内側ループで毎回 `b_tile` を再ロードしていたため 1 kk ステップあたり
+/// TM + TM*TN 回のロードが発生していたが、本構造では TM + TN 回まで
+/// 削減される（`docs/perf/metal-gemm-register-accumulator-ab.md` §2
+/// 診断記録参照）。フラグメントロードと MMA 発行が分離された 3 段構成
+/// （A ロード → B ロード → MMA 二重ループ）であることを検査することで、
+/// 将来ロードが再び内側ループへ巻き戻される退行を検出する。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_register_resident_fragment_arrays() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "simdgroup_float8x8 a_frag[MAX_ACC];",
+        "simdgroup_float8x8 b_frag[MAX_ACC];",
+        "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
+        "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
+        "simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled の staged 経路にフラグメントレジスタ常駐構造 `{needle}` が見つかりません"
+        );
+    }
+    // MMA 発行がフラグメントロードから分離され、内側ループで再ロード
+    // されていないことの追加確認: `simdgroup_multiply_accumulate` の
+    // 呼び出しは staged 経路で 1 箇所のみ（旧構造は kk ループ内の (r, ci)
+    // 二重ループ内に 1 箇所だったが呼び出し自体の出現数は変わらないため、
+    // ここでは a_frag[r]/b_frag[c_] を直接引数に取る形になっている
+    // （インラインの a_tile/b_tile 変数を経由しない）ことを主目的とする。
+    assert!(
+        !kernel_body.contains("simdgroup_float8x8 a_tile;"),
+        "staged 経路の kk ループ内に旧来のインライン a_tile 宣言が残っています（フラグメント巻き上げの退行）"
     );
 }
 
@@ -259,8 +303,11 @@ fn gemm_simdgroup_tiled_source_uses_tgp_padding_stride() {
     for needle in [
         "uint lda = BK + TGP_PAD;",
         "uint ldb = BN + TGP_PAD;",
-        "simdgroup_load(a_tile, tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
-        "simdgroup_load(b_tile, tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
+        // イシュー #745 でフラグメント配列（`a_frag`/`b_frag`）へ移植された後も
+        // パディング込みストライド（`lda`/`ldb`）でのロードは維持される
+        // （変数名のみ変更。ストライド式自体は不変）。
+        "simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);",
+        "simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);",
     ] {
         assert!(
             kernel_body.contains(needle),
