@@ -723,6 +723,69 @@ impl CudaGemm {
         })
     }
 
+    /// `device` 上で、L2 再利用のためのタイル→SM 割り当てスウィズル
+    /// （イシュー #741。f16 経路の #499・`gemm_mma.rs::
+    /// CudaMmaGemm::new_with_swizzle` と同一設計）を TF32 opt-staged
+    /// カーネルへ適用した変種を NVRTC コンパイルし保持するハンドルを
+    /// 構築する（**opt-in・未計測の実験実装**）。
+    ///
+    /// 手順: [`new`](Self::new) で通常構築した後、`wmma_tf32_staged`
+    /// スロットのみを `kernels_wmma_opt::
+    /// wmma_tf32_f32_staged_source_with_swizzle(group_width)` のコンパイル
+    /// 結果へ差し替える。naive/tiled・WMMA 基本版・opt 版の各スロットは
+    /// [`new`](Self::new) の構築結果をそのまま保持し、swizzle 変種の
+    /// コンパイル失敗の影響を受けない。
+    ///
+    /// **変種のコンパイル失敗は base へ黙ってフォールバックせず `Err` を
+    /// 返す**（`run_wmma_tf32` の 3 段選択のように `None` へ退避すると、
+    /// 実験経路のつもりで呼んだ A/B ベンチが気づかず base（無 swizzle）を
+    /// 計測してしまう A/A 誤認を招くため。fail-closed な安全側判断）。
+    ///
+    /// 返す [`CudaGemm`] は [`new`](Self::new) が返すものと同一の型・API
+    /// （`run_wmma_tf32` 含む）を持ち、grid/block 構成・形状検証・整列
+    /// 判定（[`wmma_tf32_staged_alignment_ok`]）・K 上限検証
+    /// （[`validate_wmma_tf32_staged_k_bound`]）はブロックタイル定数
+    /// （`WMMA_TF32_STAGED_BLOCK_M`/`_N`）を変更しないため共有できる
+    /// （swizzle はブロックがどの `(m_block, n_block)` を担当するかの
+    /// 割り当てのみを変え、各出力要素のアキュムレート順序・ブロックあたり
+    /// の計算内容は変えない）。
+    ///
+    /// 任意ソースを受ける公開 API（`new_with_source` 型）は意図的に作らず、
+    /// `group_width: u32` のみを受けてカプセル化する
+    /// （`kernels_wmma_opt.rs` 側で固定文字列アンカーの `replacen` と数値
+    /// `format!` 埋め込みのみを行う契約を維持し、外部入力を直接カーネル
+    /// ソースへ流し込む経路を作らない。`.claude/rules/security.md` A03
+    /// インジェクション対策）。`group_width < 2` は
+    /// `kernels_wmma_opt::wmma_tf32_f32_staged_source_with_swizzle` が
+    /// `CudaError::InvalidShape` で拒否する。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`gemm_mma.rs::CudaMmaGemm::new_with_swizzle` と同じ feature ゲート
+    /// 方針。`Cargo.toml` の `[features]` 参照）。
+    /// `examples/gemm_wmma_tf32_swizzle_bench.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）専用の入口であり、実機
+    /// A/B 計測後に採用確定した段階で feature ゲートを外し安定 API へ
+    /// 昇格する（`docs/perf/cuda-gemm-swizzle-ab.md` 参照）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_with_tf32_staged_swizzle(
+        device: &CudaDevice,
+        group_width: u32,
+    ) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+
+        let arch = device.arch();
+        let src = kernels_wmma_opt::wmma_tf32_f32_staged_source_with_swizzle(group_width)?;
+        let ptx = compile_ptx(&src, arch)?;
+        let wmma_tf32_staged = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_wmma_tf32_staged")?;
+
+        gemm.wmma_tf32_staged = Some(wmma_tf32_staged);
+        gemm.wmma_tf32_staged_error = None;
+        Ok(gemm)
+    }
+
     /// naive f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     ///
     /// ホスト側形状検証（[`validate_gemm_dims`]）を先行させた後、
@@ -2209,5 +2272,110 @@ mod tests {
     fn wmma_tf32_staged_launch_config_exact_multiple_shape_has_no_extra_tile() {
         let cfg = wmma_tf32_staged_launch_config(128, 192);
         assert_eq!(cfg.grid_dim, (3, 2, 1));
+    }
+
+    /// イシュー #741 受け入れ基準（実機検証）:
+    /// [`CudaGemm::new_with_tf32_staged_swizzle`] が生成する各
+    /// `group_width` の変種が、[`CudaGemm::new`]（base。TF32 opt-staged
+    /// 経路）と **ビット一致**の出力を返すことを確認する。
+    ///
+    /// swizzle はブロックがどの `(m_block, n_block)` を担当するかの割り当て
+    /// のみを変え、各ブロック内部の計算（wmma フラグメントロード・
+    /// アキュムレート順序）は変えないため（`kernels_wmma_opt.rs::
+    /// wmma_tf32_f32_staged_source_with_swizzle` ドキュメンテーション
+    /// コメント参照）、`gemm_mma.rs::
+    /// mma_f16_swizzle_variant_matches_base_bit_exact_output` と同じ論法
+    /// で tolerance を使わない bit 等値で主張できる（`.claude/rules/
+    /// coding-rust.md` の「バックエンド間数値一致テストの許容誤差を単独で
+    /// 緩和しない」契約に抵触しない。swizzle 変種間比較はバックエンド間
+    /// 比較ではなく同一バックエンド内の実装詳細比較のため tolerance の
+    /// 対象外）。
+    ///
+    /// `group_width` は動的選択結果（`device.multiprocessor_count()`
+    /// 実測値ベース）に加え、参考として固定候補 `8`/`16` も検査する
+    /// （実装計画 4 節「ステップ 5」）。
+    ///
+    /// fail-closed（実装計画 4 節「ステップ 5」）: staged カーネルが
+    /// `CudaGemm::new` 時点でコンパイル・ロードに失敗する環境では
+    /// `wmma_tf32_staged_available()` の assert が先に落ち、本テストが
+    /// 静かに basic 経路同士の空比較へ退化しない。
+    ///
+    /// 形状: 全形状とも staged 整列条件（`n % 4 == 0 && k % 4 == 0`）を
+    /// 満たす:
+    /// - `(512, 512, 512)`: ブロックタイル（`WMMA_TF32_STAGED_BLOCK_M/N`
+    ///   = 64）の整数倍（`num_m_blocks=8`）。group_width=8 では
+    ///   `full_groups=1・remainder=0`（remainder 分岐は経由しない）、
+    ///   group_width=16 では `full_groups=0・remainder=8`（remainder
+    ///   分岐のみ経由）となり、両分岐を候補幅間でカバーする。
+    /// - `(80, 136, 160)`: タイル端形状（`m` がブロックタイル非整数倍）。
+    /// - `(1088, 256, 2048)`: `gemm_mma.rs` の f16 側 bit 一致テストと
+    ///   同じ `full_groups` 分岐形状（`num_m_blocks=17`）を再利用し、
+    ///   TF32 側でも full_groups・remainder の両分岐を group_width∈
+    ///   {8,16} 双方で経由させる。
+    ///
+    /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
+    /// Spark GB10 等の実機で `cargo test -p backend-cuda --lib --release
+    /// --features internal-diagnostics -- --ignored --nocapture
+    /// wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output` から
+    /// 実行する。`internal-diagnostics` feature（既定 off）でのみコンパイル
+    /// される（[`CudaGemm::new_with_tf32_staged_swizzle`] 自体が同 feature
+    /// でゲートされているため）。
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let base =
+            CudaGemm::new(&device).expect("base CudaGemm::new must succeed on ignored test runner");
+        assert!(
+            base.wmma_tf32_staged_available(),
+            "TF32 opt-staged kernel must be available on ignored test runner \
+             (reason: {:?}); a fallback-to-basic comparison would degenerate \
+             into a no-op",
+            base.wmma_tf32_staged_unavailable_reason()
+        );
+
+        let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
+        let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M,
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
+        );
+
+        let shapes: [(u32, u32, u32); 3] = [(512, 512, 512), (80, 136, 160), (1088, 256, 2048)];
+        let seed: u64 = 424_243;
+
+        for group_width in [dynamic_group_width, 8, 16] {
+            let variant = CudaGemm::new_with_tf32_staged_swizzle(&device, group_width)
+                .unwrap_or_else(|err| {
+                    panic!("group_width={group_width}: new_with_tf32_staged_swizzle failed: {err}")
+                });
+
+            for &(m, n, k) in &shapes {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+                let a: Vec<f32> = rng.fill_vec((m as usize) * (k as usize));
+                let b: Vec<f32> = rng.fill_vec((k as usize) * (n as usize));
+
+                let base_c = base.run_wmma_tf32(&a, &b, m, n, k).unwrap_or_else(|err| {
+                    panic!("base run_wmma_tf32 failed for shape (m={m}, n={n}, k={k}): {err}")
+                });
+                let variant_c = variant
+                    .run_wmma_tf32(&a, &b, m, n, k)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "group_width={group_width} run_wmma_tf32 failed for shape \
+                         (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
+
+                assert_eq!(
+                    variant_c, base_c,
+                    "shape (m={m}, n={n}, k={k}) group_width={group_width}: swizzle \
+                     変種の出力が base と bit 一致しません（remap がブロック内部の \
+                     計算・アキュムレート順序に影響していないか確認すること）"
+                );
+            }
+        }
     }
 }

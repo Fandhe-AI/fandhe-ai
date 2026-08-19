@@ -1137,6 +1137,146 @@ static WMMA_TF32_F32_STAGED_SOURCE: LazyLock<String> = LazyLock::new(|| {
     render_wmma_tf32_staged_unchecked(&WmmaTf32StagedKernelConfig::default_tf32_staged())
 });
 
+/// TF32 opt-staged カーネル（[`wmma_tf32_f32_staged_source`]）のブロック
+/// 原点（`block_row_base`／`block_col_base`）を、イシュー #499（f16 経路。
+/// `kernels_mma.rs::mma_f16_source_with_swizzle`）と同一設計の
+/// threadblock swizzle remap へ置換した変種ソースを生成する（イシュー
+/// #741）。
+///
+/// # 背景（イシュー #741）
+///
+/// ncu 実測（2026-08-19・GB10）で M=N=K=4096 時に TF32 opt-staged 経路の
+/// L2 hit rate が 96.77%→76.51% へ崩壊しており（`docs/perf/
+/// cuda-gemm-bottleneck-diagnosis.md`）、f16 経路で同型対策（#499）が
+/// 4096 で約 1.60 倍（`docs/perf/cuda-gemm-swizzle-ab.md` 実測記録）を
+/// 出したことから、TF32 staged 側にも同じ remap を横展開して A/B 計測
+/// する。remap 自体は `mma_f16_source_with_swizzle` の式をブロックタイル
+/// 幅（`WMMA_TF32_STAGED_BLOCK_M`/`_N`）向けに転用したもので、
+/// `swizzle.rs::swizzled_block_idx` と単一の設計を共有する（本関数と
+/// `swizzle.rs` のホスト側参照実装は独立実装のため、不一致は本ファイル
+/// `tests` モジュールが機械検出する。`swizzle.rs` 冒頭コメント参照）。
+///
+/// # 呼び出し元
+///
+/// `gemm.rs::CudaGemm::new_with_tf32_staged_swizzle`
+/// （`internal-diagnostics` feature ゲート）のみであり、本番ディスパッチ
+/// 経路（`ops.rs`／`gemm_auto.rs`／`run_wmma_tf32` の既定選択）からは
+/// 呼ばれない（実装計画 3 節「本番ディスパッチ経路は 1 バイトも変更
+/// しない」）。**`wmma_tf32_f32_staged_source()` 自体は変更しない**
+/// （`wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_wmma_tf32_f32_staged_source`
+/// が回帰検査する）。
+///
+/// # グリッド軸の対応
+///
+/// staged の launch config（[`WmmaTf32StagedKernelConfig::launch_config`]:
+/// `grid_dim = (n.div_ceil(block_n), m.div_ceil(block_m), 1)`）に合わせ
+/// `num_m_blocks = gridDim.y`・`num_n_blocks = gridDim.x` とする
+/// （f16 側 `mma_f16_source_with_swizzle` と同一の対応）。
+///
+/// # エラー契約
+///
+/// `group_width < 2` は `CudaError::InvalidShape` で拒否する
+/// （`group_width == 1` は恒等写像に等しく L2 再利用効果を持たない。
+/// `mma_f16_source_with_swizzle` と同じ判断）。
+///
+/// # セキュリティ（OWASP A03 インジェクション対策）
+///
+/// 任意のソース文字列・任意の書式文字列を受ける公開 API は作らない。
+/// 受理するのは `u32`（`group_width`）のみで、生成断片への埋め込みは
+/// 固定テンプレート文字列内の数値 `format!` のみに限定する
+/// （`mma_f16_source_with_swizzle` と同一契約）。
+///
+/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
+/// feature 既定 off）からの唯一の呼び出し元
+/// `gemm.rs::CudaGemm::new_with_tf32_staged_swizzle` が同 feature で
+/// ゲートされているため、`cargo build`（feature 指定なし）では呼び出し元
+/// が存在せず dead-code lint が誤検出する（`mma_f16_source_with_swizzle`
+/// と同じパターン）。本関数自体は `#[cfg(test)]` 下のソース生成検査
+/// テスト（本ファイル末尾）からは feature 非依存に呼ばれ続ける。
+#[allow(dead_code)]
+pub fn wmma_tf32_f32_staged_source_with_swizzle(
+    group_width: u32,
+) -> Result<String, crate::error::CudaError> {
+    if group_width < 2 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "wmma_tf32_f32_staged_source_with_swizzle requires group_width >= 2 \
+                 (got {group_width}); group_width == 1 degenerates to the identity \
+                 block mapping (swizzle.rs::swizzled_block_idx_group_width_one_is_identity_mapping) \
+                 and offers no L2 reuse benefit"
+            ),
+        });
+    }
+
+    const ANCHOR: &str = "    const int block_row_base = blockIdx.y * WMMA_TF32_STAGED_BLOCK_M;\n    const int block_col_base = blockIdx.x * WMMA_TF32_STAGED_BLOCK_N;\n";
+    let source = wmma_tf32_f32_staged_source();
+    let occurrences = source.matches(ANCHOR).count();
+    // `unwrap()`/`expect()`・panic 系マクロを本番経路で使わない方針
+    // （coding-rust.md「エラーは型付きエラーとし、本番経路で unwrap()
+    // / expect() を使わない」）に合わせ、`assert_eq!` ではなく型付き
+    // エラーで返す。`wmma_tf32_f32_staged_source()` 側の不変条件は
+    // `wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_wmma_tf32_f32_staged_source`
+    // が別途 CI 上で回帰検査するため通常到達しない前提だが、
+    // `new_with_tf32_staged_swizzle` から到達しうる公開関数として panic
+    // を避ける。
+    if occurrences != 1 {
+        return Err(crate::error::CudaError::InvalidShape {
+            detail: format!(
+                "TF32 opt-staged カーネル中のブロック原点アンカー \
+                 （block_row_base/block_col_base）の出現数が 1 ではありません \
+                 （{occurrences} 件検出。wmma_tf32_f32_staged_source_with_swizzle \
+                 の前提が崩れています）"
+            ),
+        });
+    }
+
+    let remap = format!(
+        "    // イシュー #741: L2 再利用のためのタイル→SM 割り当てスウィズル\n\
+         \x20   // （#499 の f16 経路と同一設計。remap 式は\n\
+         \x20   // swizzle.rs::swizzled_block_idx・kernels_mma.rs::\n\
+         \x20   // mma_f16_source_with_swizzle と単一の設計を共有する。本ファイル\n\
+         \x20   // wmma_tf32_f32_staged_source_with_swizzle ドキュメンテーション\n\
+         \x20   // コメント参照）。\n\
+         \x20   // PR #667 codex-review P0 是正の踏襲: 線形 index・ブロック数・積は\n\
+         \x20   // `long long`（64 bit）で計算する（`blockIdx.y * gridDim.x` 等の\n\
+         \x20   // `int`（32 bit 符号付き）オーバーフロー防止。REQ-8「境界検査の\n\
+         \x20   // 省略禁止」）。最終座標は `gridDim` 内であることを明示的に検査\n\
+         \x20   // してから `int` へ縮小する（縮小前に範囲外を検査するため、この\n\
+         \x20   // 縮小自体は新たな符号なし/符号付きオーバーフロー経路を導入\n\
+         \x20   // しない）。\n\
+         \x20   #define WMMA_TF32_STAGED_SWIZZLE_GROUP {group_width}\n\
+         \x20   long long num_m_blocks = gridDim.y;\n\
+         \x20   long long num_n_blocks = gridDim.x;\n\
+         \x20   long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;\n\
+         \x20   long long full_groups = num_m_blocks / WMMA_TF32_STAGED_SWIZZLE_GROUP;\n\
+         \x20   long long remainder = num_m_blocks % WMMA_TF32_STAGED_SWIZZLE_GROUP;\n\
+         \x20   long long full_group_blocks =\n\
+         \x20       (long long)WMMA_TF32_STAGED_SWIZZLE_GROUP * num_n_blocks;\n\
+         \x20   long long full_groups_total_blocks = full_groups * full_group_blocks;\n\
+         \x20   long long m_block, n_block;\n\
+         \x20   if (linear_idx < full_groups_total_blocks) {{\n\
+         \x20       long long group_idx = linear_idx / full_group_blocks;\n\
+         \x20       long long idx_in_group = linear_idx % full_group_blocks;\n\
+         \x20       m_block = group_idx * WMMA_TF32_STAGED_SWIZZLE_GROUP +\n\
+         \x20           (idx_in_group % WMMA_TF32_STAGED_SWIZZLE_GROUP);\n\
+         \x20       n_block = idx_in_group / WMMA_TF32_STAGED_SWIZZLE_GROUP;\n\
+         \x20   }} else {{\n\
+         \x20       long long idx_in_group = linear_idx - full_groups_total_blocks;\n\
+         \x20       m_block = full_groups * WMMA_TF32_STAGED_SWIZZLE_GROUP +\n\
+         \x20           (idx_in_group % remainder);\n\
+         \x20       n_block = idx_in_group / remainder;\n\
+         \x20   }}\n\
+         \x20   if (m_block < 0 || m_block >= num_m_blocks || n_block < 0 ||\n\
+         \x20       n_block >= num_n_blocks) {{\n\
+         \x20       return;\n\
+         \x20   }}\n\
+         \x20   const int block_row_base = (int)(m_block * WMMA_TF32_STAGED_BLOCK_M);\n\
+         \x20   const int block_col_base = (int)(n_block * WMMA_TF32_STAGED_BLOCK_N);\n"
+    );
+
+    Ok(source.replacen(ANCHOR, &remap, 1))
+}
+
 /// [`render_wmma_tf32_staged`] に渡す構成値（イシュー #500）。
 ///
 /// 既存 [`WmmaOptKernelConfig`]（TF32 opt・f16 opt 共通）へ `stages`
@@ -3713,5 +3853,93 @@ mod tests {
         );
         assert_eq!(launch.block_dim, (128, 1, 1));
         assert_eq!(launch.shared_mem_bytes, 0);
+    }
+
+    /// イシュー #741 受け入れ基準: `group_width < 2` を拒否する
+    /// （本ファイル `wmma_tf32_f32_staged_source_with_swizzle`
+    /// ドキュメンテーションコメント「エラー契約」参照。
+    /// `kernels_mma.rs::mma_f16_source_with_swizzle_rejects_group_width_below_two`
+    /// と同型）。
+    #[test]
+    fn wmma_tf32_f32_staged_source_with_swizzle_rejects_group_width_below_two() {
+        let err = wmma_tf32_f32_staged_source_with_swizzle(1)
+            .expect_err("group_width=1 must be rejected");
+        assert!(matches!(err, crate::error::CudaError::InvalidShape { .. }));
+        let err = wmma_tf32_f32_staged_source_with_swizzle(0)
+            .expect_err("group_width=0 must be rejected");
+        assert!(matches!(err, crate::error::CudaError::InvalidShape { .. }));
+    }
+
+    /// イシュー #741 受け入れ基準: `group_width >= 2` では生成ソースに
+    /// `#define WMMA_TF32_STAGED_SWIZZLE_GROUP <group_width>` と remap
+    /// 断片が含まれ、かつ元のアンカー（`block_row_base`/`block_col_base`
+    /// 直書き）は除去されていることを検査する（アンカー出現数 1 の pin を
+    /// 兼ねる。`mma_f16_source_with_swizzle_contains_group_define_and_remap_fragment`
+    /// と同型）。また、エントリポイント名 `gemm_wmma_tf32_staged` が
+    /// 変種ソースにも保持されることも検査する（`gemm.rs::
+    /// CudaGemm::new_with_tf32_staged_swizzle` が同名で `load_function`
+    /// する契約）。
+    #[test]
+    fn wmma_tf32_f32_staged_source_with_swizzle_contains_group_define_and_remap_fragment() {
+        for group_width in [2u32, 8, 16] {
+            let src = wmma_tf32_f32_staged_source_with_swizzle(group_width)
+                .unwrap_or_else(|err| panic!("group_width={group_width}: {err}"));
+
+            let expected_define = format!("#define WMMA_TF32_STAGED_SWIZZLE_GROUP {group_width}");
+            assert!(
+                src.contains(&expected_define),
+                "group_width={group_width}: 生成ソースに `{expected_define}` が \
+                 見つかりません"
+            );
+            for needle in [
+                "long long linear_idx = (long long)blockIdx.y * gridDim.x + blockIdx.x;",
+                "long long full_groups = num_m_blocks / WMMA_TF32_STAGED_SWIZZLE_GROUP;",
+                "long long remainder = num_m_blocks % WMMA_TF32_STAGED_SWIZZLE_GROUP;",
+                "const int block_row_base = (int)(m_block * WMMA_TF32_STAGED_BLOCK_M);",
+                "const int block_col_base = (int)(n_block * WMMA_TF32_STAGED_BLOCK_N);",
+            ] {
+                assert!(
+                    src.contains(needle),
+                    "group_width={group_width}: 生成ソースに remap 断片 `{needle}` \
+                     が見つかりません"
+                );
+            }
+            assert!(
+                !src.contains(
+                    "    const int block_row_base = blockIdx.y * WMMA_TF32_STAGED_BLOCK_M;\n"
+                ),
+                "group_width={group_width}: 元のアンカー（blockIdx.y 直書き）が \
+                 remap 後も残っています"
+            );
+            assert!(
+                src.contains("extern \"C\" __global__ void gemm_wmma_tf32_staged("),
+                "group_width={group_width}: エントリポイント名 gemm_wmma_tf32_staged \
+                 が変種ソースで保持されていません"
+            );
+        }
+    }
+
+    /// `wmma_tf32_f32_staged_source_with_swizzle` はアンカー置換のみを
+    /// 行い、`wmma_tf32_f32_staged_source()`（base）自体は不変であることを
+    /// ロックする（`mma_f16_source_with_swizzle_does_not_mutate_mma_f16_source`
+    /// と同型。実装計画 3 節「本番カーネル本体・定数は無変更」の回帰防止）。
+    #[test]
+    fn wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_wmma_tf32_f32_staged_source() {
+        let before = wmma_tf32_f32_staged_source();
+        let _ =
+            wmma_tf32_f32_staged_source_with_swizzle(8).expect("group_width=8 must be accepted");
+        assert_eq!(
+            wmma_tf32_f32_staged_source(),
+            before,
+            "wmma_tf32_f32_staged_source_with_swizzle 呼び出し後に \
+             wmma_tf32_f32_staged_source() が変化しています"
+        );
+        assert!(
+            wmma_tf32_f32_staged_source().contains(
+                "    const int block_row_base = blockIdx.y * WMMA_TF32_STAGED_BLOCK_M;\n"
+            ),
+            "wmma_tf32_f32_staged_source() の元のアンカー行が失われています \
+             （本番カーネルは無変更のはず）"
+        );
     }
 }

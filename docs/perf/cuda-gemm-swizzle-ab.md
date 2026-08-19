@@ -110,3 +110,88 @@ git diff origin/main -- crates/backend-cuda/tests/parity_nonregression.rs crates
 ## 6. 実測結果
 
 （未計測。実機セッションで本節へ追記する）
+
+## 7. TF32 opt-staged 経路への横展開（#741）
+
+イシュー #741「feat(backend-cuda): wmma_tf32_staged への threadblock swizzle 実装 + 実機 A/B」の
+記録。#1〜#6 節は f16 `mma.sync` 経路（#499）の記録であり、本節は TF32 opt-staged 経路
+（`kernels_wmma_opt.rs::gemm_wmma_tf32_staged`）への同型対策の横展開を扱う。
+
+### 7.1 設計根拠
+
+- **ncu 実測**（2026-08-19・GB10）: M=N=K=4096 時に TF32 opt-staged 経路の L2 hit rate が
+  96.77%→76.51% へ崩壊している（`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）。#499 の効果仮説
+  （タイル→SM 割り当て順を変えることで L2 上の A/B タイル再利用率を上げる）が TF32 staged 経路にも
+  適用できるかを検証する。
+- **f16 経路の実測**（#499・#740）: 同型対策で M=N=K=4096 において約 1.60 倍（34.33→54.78 TFLOPS・
+  グループ幅 8）の改善が確認されている（#740 記載値）。ただし f16 経路とブロックタイル形状
+  （f16: 64×128、TF32 staged: 64×64）・カーネル構造（cp.async 多段パイプライン段数等）が異なるため、
+  同等の改善幅を保証するものではなく、本節の A/B 計測で個別に確認する。
+- remap 式自体は `swizzle.rs::swizzled_block_idx`・`kernels_mma.rs::mma_f16_source_with_swizzle` と
+  単一の設計を共有する（`kernels_wmma_opt.rs::wmma_tf32_f32_staged_source_with_swizzle` ドキュメンテー
+  ションコメント参照）。
+
+### 7.2 状態: opt-in 実装のみ完了。未計測のまま本番カーネルへ導入しない
+
+`kernels_wmma_opt.rs::wmma_tf32_f32_staged_source_with_swizzle`（変種ソース生成）・
+`gemm.rs::CudaGemm::new_with_tf32_staged_swizzle`（変種カーネルのコンパイル・保持。`internal-diagnostics`
+feature ゲート）を実装したが、本 §2 節と同一の判断（本実装セッションは NVRTC 非搭載のため実機 A/B
+計測ができない）により、**本番カーネル（`kernels_wmma_opt::wmma_tf32_f32_staged_source()`）・本番
+ディスパッチ経路（`ops.rs`／`gemm_auto.rs`／`run_wmma_tf32` の 3 段選択）は 1 バイトも変更していない**。
+
+並行イシュー（#740: f16 swizzle の本番結線、#743: TF32 staged の SMEM バンクコンフリクト対策）との
+コンフリクトを避けるため、本イシューは `ops.rs`／`gemm_auto.rs`／`swizzle.rs` を変更せず、
+`kernels_wmma_opt.rs` への変更もブロック原点アンカー置換の変種生成関数の追記のみに限定した
+（既存カーネル本体・定数は無変更）。
+
+### 7.3 計測手順（DGX Spark GB10・sm_121 実機）
+
+base（`CudaGemm::new`。本番 TF32 opt-staged カーネル）と head
+（`CudaGemm::new_with_tf32_staged_swizzle`。動的選択幅 + 参考として固定候補 `{8, 16}`）それぞれについて、
+中央値 TFLOPS を比較する（`bench-harness::protocol::run`。§3 と同じ計測コア）。
+
+```sh
+git fetch origin
+gh pr checkout <本イシューの PR 番号>   # perf/741-wmma-tf32-staged-swizzle（opt-in 経路のみ・本番カーネル無変更）
+
+# 数値一致確認（TFLOPS 比較より前に必須）。既存 parity 系（feature 非依存）はこの通常経路で実行される。
+cargo test -p backend-cuda --release -- --ignored --nocapture
+
+# wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output は internal-diagnostics
+# feature（既定 off）配下の #[cfg] のみでコンパイルされる（gemm.rs 同テスト doc コメント参照）。
+# 上記コマンドには --features がないため対象テストがコンパイル・実行されず green と誤認する
+# （#499 §3 と同じ注意点）。
+cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --ignored --nocapture wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output
+
+# NVRTC ログでのレジスタ/スピル差分確認（§3 と同じ理由。remap は追加の整数演算のため
+# コンパイラが定数畳み込みしきれない場合はレジスタ使用量が変わりうる）
+
+# A/B 計測（動的選択幅の表示 + base/head の TFLOPS 比較。internal-diagnostics feature 必須）
+cargo run -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics
+```
+
+### 7.4 判断基準
+
+- base に対し head（動的選択幅）の中央値 TFLOPS が size ∈ {2048, 4096} の両方で改善していれば「採用」とし、
+  `kernels_wmma_opt.rs::wmma_tf32_f32_staged_source()`／`gemm.rs`（本番経路。`run_wmma_tf32` の 3 段選択）
+  へ swizzle remap を結線する後続 PR を起票する。結線後は parity 非後退テスト全 pass に加え、
+  `examples/cuda_floor_bench.rs` で REQ-8 CudaF32 50% 下限（`docs/performance-targets.md`）への余裕改善を
+  確認する
+- 改善が確認できなければ「採用しない」と判断し、実測値を本節へ記録した上で opt-in 実装を温存するか
+  revert するかをユーザーと相談する（§4 と同型の判断）
+- **未計測の間は「採用済み」として扱わない**
+
+### 7.5 §2 本番ディスパッチ経路無変更の機械確認
+
+```sh
+git diff origin/main -- crates/backend-cuda/src/ops.rs crates/backend-cuda/src/gemm_auto.rs crates/backend-cuda/src/swizzle.rs
+```
+
+無差分であることを確認する（本節「状態」の裏付け。並行イシュー #740／#743 とのコンフリクト回避の
+裏取りを兼ねる）。
+
+### 7.6 実測結果
+
+（未計測。実機到達不可のためこのセッションでは計測していない。実機セッションで本節へ追記する。
+実機到達可能時は §7.3 の手順で bit 一致テスト → NVRTC ログ確認 → A/B 計測の順に実行し、結果を
+ここへ記録する）

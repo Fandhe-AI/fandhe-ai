@@ -92,6 +92,13 @@ required-features = ["internal-diagnostics"]
 name = "gemm_wmma_tf32_staged_stages_bench"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #741: TF32 opt-staged 経路への swizzle 横展開の A/B ベンチ
+# （`gemm_mma_swizzle_bench` と同型）。`gemm.rs::
+# CudaGemm::new_with_tf32_staged_swizzle`（同 feature ゲート）を使う。
+name = "gemm_wmma_tf32_swizzle_bench"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート
