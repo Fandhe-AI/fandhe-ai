@@ -603,11 +603,15 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 }
 
 /// `(m, n, k)` から [`TileConfig`] を選択する（occupancy 判定込み。イシュー
-/// #542）。**現時点では [`crate::gemm::MetalGemm::dispatch_auto`] の入口
-/// ではない**（本番ディスパッチは引き続き [`select`] を使う。M4 Max
-/// 実機での性能非劣化確認が未完了のため。`crate::gemm` モジュール
-/// ドキュメンテーションコメント・`docs/perf/metal-gemm-occupancy-select.md`
-/// §5 参照）。`examples/gemm_bench.rs` の旧/新比較セクションから明示的に
+/// #542）。**[`crate::gemm::MetalGemm::dispatch_auto`] の入口としては不採用
+/// 確定**（本番ディスパッチは引き続き [`select`] を使う。イシュー #747 で、
+/// #744 是正（段 1 が実測範囲内の正方立方形状に対し occupancy 縮退を経ず
+/// 直接 [`CANDIDATES`]`[3]` を返すよう是正済み）により本関数の縮退経路が
+/// 実測帯域〈512/1024/2048/4096〉で `select()` と常に同一結果へ収束する
+/// ことを確認し、「小サイズ帯のみ occupancy 有効化」という #747 の目的は
+/// #744 是正へ吸収されたと判断した。`crate::gemm` モジュールドキュメンテー
+/// ションコメント・`docs/perf/metal-gemm-occupancy-select.md`「#747 判断」節
+/// 参照）。`examples/gemm_bench.rs` の旧/新比較セクションから明示的に
 /// 呼ばれる。
 ///
 /// 2 段階判定（MFA 型方法論。本ファイル「occupancy 目標算出」節参照）:
@@ -692,9 +696,14 @@ pub fn select_with_occupancy(
     // #760 レビュー。2026-08-19 実測は `m == n == k` の 4 点のみで、この帯域へ
     // 一律 CANDIDATES[3] を広げる根拠がなかった）。安全側として #744 以前の
     // 挙動（`m,n >= LARGE` なら CANDIDATES[0]、それ未満は CANDIDATES[3]）を
-    // そのまま維持する。この帯域の候補比較実測は #747（サイズ帯条件分岐）の
-    // スコープで扱う。縦長・横長の分岐自体も 2026-08-19 実測が正方形状のみを
-    // 対象としているため変更しない（安全側）。
+    // そのまま維持する。イシュー #747（occupancy 選定式のサイズ帯条件分岐）
+    // は `m == n == k` の実測帯域については #744 是正で目的が吸収されたと
+    // 判断済み（`select_with_occupancy` 本体コメント・`docs/perf/
+    // metal-gemm-occupancy-select.md`「#747 判断」節）。この準正方長方形帯域
+    // の候補比較実測は #747 のスコープには含まれず、実測は Mac 実機セッション
+    // （実機ツリー #408 系）に委ねる（`docs/perf/metal-tile-select-correction.md`
+    // 「実機確認結果（記入欄）」節）。縦長・横長の分岐自体も 2026-08-19 実測が
+    // 正方形状のみを対象としているため変更しない（安全側）。
     let shape_cfg = match (tall, wide) {
         (true, _) => CANDIDATES[1], // 64x32（縦長）
         (_, true) => CANDIDATES[2], // 32x64（横長）
@@ -1591,8 +1600,9 @@ mod tests {
         // 正方形状）512〜4096 の 4 点のみであり、縦長・横長いずれにも該当
         // しないが `m != n` の準正方長方形（本例は m:n=1.5:1）へ CANDIDATES[3]
         // 一律選択を広げる根拠はない。この帯域は #744 是正前の挙動
-        // （`m,n >= 512` なら CANDIDATES[0]）をそのまま維持する（実測は
-        // #747 のスコープ）。
+        // （`m,n >= 512` なら CANDIDATES[0]）をそのまま維持する。#747 の
+        // 判断は `m == n == k` の実測帯域に限られ本帯域は対象外（実測は
+        // Mac 実機セッション〈実機ツリー #408 系〉に委ねる）。
         let cfg = select(1536, 1024, 1024);
         assert_eq!(cfg, CANDIDATES[0]);
         assert_eq!((cfg.bm, cfg.bn), (64, 64));
@@ -1675,6 +1685,27 @@ mod tests {
         for &size in &[512usize, 1024, 2048, 4096] {
             let cfg = select_with_occupancy(size, size, size, Some(m4_max_expected_params()));
             assert_eq!(cfg, CANDIDATES[3], "size={size}");
+        }
+    }
+
+    #[test]
+    fn select_with_occupancy_747_confirms_absorption_by_744_correction() {
+        // イシュー #747「occupancy 選定式のサイズ帯条件分岐」の判断確定を
+        // 直接固定する回帰テスト: 2026-08-19 M4 Max 実機比較（512 で
+        // +45.6%・2048 で −5.6%・1024/4096 で ±1% 未満）が求めていた
+        // 「小サイズ帯のみ occupancy 有効化」は、#744 是正（段 1 が実測
+        // 帯域の正方立方形状に対し occupancy 縮退を経ず直接 CANDIDATES[3]
+        // を返すよう是正）により吸収された。実測帯域〈512/1024/2048/4096〉
+        // で occupancy 縮退込み（`Some(params)`）と形状のみ（`select`）が
+        // 常に同一構成を返すことを固定し、`dispatch_auto` への
+        // `select_with_occupancy` 組み込み不採用の判断根拠とする
+        // （docs/perf/metal-gemm-occupancy-select.md「#747 判断」節）。
+        for &size in &[512usize, 1024, 2048, 4096] {
+            assert_eq!(
+                select_with_occupancy(size, size, size, Some(m4_max_expected_params())),
+                select(size, size, size),
+                "size={size}"
+            );
         }
     }
 
