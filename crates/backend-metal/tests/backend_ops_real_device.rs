@@ -11,7 +11,12 @@
 //! `cpu_metal_parity.rs`（基準形状 512^3・K=4096 ストレス）とは異なる形状を
 //! 選び、`tile.rs::select` の動的タイル選択境界（`SMALL=64`。`crate::tile`
 //! 参照）近傍を 1〜2 ケース含める。`LARGE=512` 境界はイシュー #744 是正で
-//! 撤去済み（正方形状は全帯域で `CANDIDATES[3]` を返す。詳細は
+//! **真の正方形状（`m == n`）に限り、かつ実測範囲内（`m <= 4096`）でのみ**
+//! 撤去済み（この範囲の正方形状は全帯域で `CANDIDATES[3]` を返す）。
+//! `m != n` の準正方長方形、および `m == n` でも 4096 超（実測対象外）の
+//! 場合は `select_with_occupancy` が引き続き `m >= LARGE && n >= LARGE` で
+//! 境界前後の候補を切り替える（#744 是正前と同一挙動。PR #760 codex-review
+//! 指摘対応で本コメントを実装へ整合。詳細は
 //! `docs/perf/metal-tile-select-correction.md`）。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する

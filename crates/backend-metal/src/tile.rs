@@ -21,15 +21,17 @@
 //! MLX steel の実装傾向を参考にした暫定初期値であり、Apple Silicon 実機
 //! での `examples/gemm_bench.rs` 実測（`docs/perf/metal-gemm-dynamic-tile.md`
 //! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**真の正方形状
-//! （`m == n`。縦長・横長に該当しない形状の部分集合）の閾値はイシュー #744・
-//! 2026-08-19 M4 Max 実機実測により CANDIDATES[3]（32x32/bk16/staged）
-//! への一律選択で確定済み**（512〜4096 の `m == n` 全帯域で最良候補比の
-//! 逸失なし。判断根拠は `docs/perf/metal-tile-select-correction.md`）。
-//! 縦長・横長の閾値、および `m != n` の準正方長方形（縦長・横長いずれにも
-//! 該当しないが `m == n` でもない形状。例: 1536x1024）は引き続き暫定値の
-//! まま（#744 の実測対象は `m == n` のみであり、準正方長方形へ実測範囲を
-//! 広げるのは根拠不一致になるため #744 是正前の挙動を維持する。PR #760
-//! codex-review 指摘対応）。
+//! （`m == n`。縦長・横長に該当しない形状の部分集合）かつ `m <= 4096`
+//! （実測範囲内）の閾値はイシュー #744・2026-08-19 M4 Max 実機実測により
+//! CANDIDATES[3]（32x32/bk16/staged）への一律選択で確定済み**（512〜4096
+//! の `m == n` 全帯域で最良候補比の逸失なし。判断根拠は
+//! `docs/perf/metal-tile-select-correction.md`）。`m == n` かつ `m > 4096`
+//! （実測範囲外の正方形状）、縦長・横長の閾値、および `m != n` の準正方
+//! 長方形（縦長・横長いずれにも該当しないが `m == n` でもない形状。例:
+//! 1536x1024）は引き続き暫定値のまま（#744 の実測対象は `m == n` の
+//! 512/1024/2048/4096 の 4 点のみであり、この範囲を超えて性能選択閾値を
+//! 無制限に拡張するのは根拠不一致になるため #744 是正前の挙動を維持する。
+//! PR #760 codex-review 指摘対応）。
 //! `docs/dispatch-rules-design.md`（accelerated 経路選択は
 //! `min(M,N,K) >= 512`）とはレイヤが異なる点に注意: 本モジュールは
 //! 「accelerated（Metal）経路に入った後」のタイル構成選択であり、
@@ -478,17 +480,20 @@ impl TileConfig {
 /// （クレート内部・`pub(crate)` を参照可能）に置く。
 ///
 /// **`CANDIDATES[0]`（64x64 大形状）は #744 是正後、`select` の形状判定では
-/// `m == n`（真の正方形状）に対しては選ばれない**（2026-08-19 M4 Max 実機
-/// 実測で `m == n` 全帯域〈512〜4096〉において `CANDIDATES[3]`〈32x32〉に
-/// 一貫して劣後することを確認したため。`select_with_occupancy` 本体コメント・
-/// `docs/perf/metal-tile-select-correction.md` 参照）。**`m != n` の準正方
-/// 大形状長方形（`m,n >= 512` かつ縦長・横長いずれにも非該当。例:
-/// 1536x1024）は #744 実測対象外のため、引き続き `CANDIDATES[0]` を返す**
-/// （PR #760 codex-review 指摘対応: `m == n` のみが実測範囲であり、準正方
-/// 長方形へ実測範囲を広げるのは根拠不一致になるため #744 是正前の挙動を
-/// 維持する）。それでも配列からは削除しない: `select` の添字依存（上記）を
-/// 壊すうえ、`fallback_chain`・occupancy 縮退判定（縦長/横長・準正方長方形
-/// 経路の比較対象）・#747（サイズ帯条件分岐）での再利用対象として残す。
+/// `m == n` かつ `m <= 4096`（実測範囲内の真の正方形状）に対しては選ばれ
+/// ない**（2026-08-19 M4 Max 実機実測で `m == n` 全帯域〈512〜4096〉において
+/// `CANDIDATES[3]`〈32x32〉に一貫して劣後することを確認したため。
+/// `select_with_occupancy` 本体コメント・`docs/perf/metal-tile-select-correction.md`
+/// 参照）。**`m == n` かつ `m > 4096`（実測範囲外の正方形状）、および
+/// `m != n` の準正方大形状長方形（`m,n >= 512` かつ縦長・横長いずれにも
+/// 非該当。例: 1536x1024）は #744 実測対象外のため、引き続き
+/// `CANDIDATES[0]` を返す**（PR #760 codex-review 指摘対応: 実測は
+/// `m == n` の 512/1024/2048/4096 の 4 点のみであり、この範囲を超えて
+/// 性能選択閾値を無制限に拡張するのは根拠不一致になるため #744 是正前の
+/// 挙動を維持する）。それでも配列からは削除しない: `select` の添字依存
+/// （上記）を壊すうえ、`fallback_chain`・occupancy 縮退判定（縦長/横長・
+/// 準正方長方形・4096 超の正方形状経路の比較対象）・#747（サイズ帯条件
+/// 分岐）での再利用対象として残す。
 pub(crate) const CANDIDATES: &[TileConfig] = &[
     // 大形状（正方）: 64x64 ブロックを 2x2=4 simdgroup で分担。
     TileConfig {
@@ -638,6 +643,14 @@ pub fn select_with_occupancy(
     const SMALL: usize = 64;
     const ASPECT_RATIO: usize = 2;
     const LARGE: usize = 512;
+    // `m == n`（真の正方形状）の実測上限。イシュー #744・2026-08-19 M4 Max
+    // 実機実測（5 回中央値）は 512/1024/2048/4096 の 4 点のみで、この帯域を
+    // 超える正方形状（例: 8192）は実測対象外（codex-review 指摘・PR #760
+    // レビュー）。実測範囲外まで無条件に CANDIDATES[3] へ広げると、大規模
+    // GEMM の性能退行を検知できないまま許容してしまうため、実測済み上限で
+    // 打ち切り、それを超える正方形状は #744 是正前の挙動（`m,n >= LARGE`
+    // なら CANDIDATES[0]）へ安全側でフォールバックする。
+    const SQUARE_MEASURED_MAX: usize = 4096;
 
     if m < SMALL || n < SMALL || k < SMALL {
         return TileConfig::SINGLE_SIMDGROUP_8X8;
@@ -646,17 +659,20 @@ pub fn select_with_occupancy(
     let tall = m >= n.saturating_mul(ASPECT_RATIO);
     let wide = n >= m.saturating_mul(ASPECT_RATIO);
 
-    // 真の正方形状（`m == n`。縦長・横長いずれにも該当しない場合の部分集合）は
-    // サイズによらず一律 CANDIDATES[3] を返す。イシュー #744・2026-08-19
-    // M4 Max 実機実測（5 回中央値）で 512〜4096 の `m == n` 全帯域において
-    // CANDIDATES[0]（64x64 staged）が CANDIDATES[3]（32x32/bk16/staged）に
-    // 一貫して劣後することを確認した（size=2048: 64x64 staged ≈1.18 TFLOPS
-    // に対し 32x32 staged ≈3.31 TFLOPS、最良候補比で約 2.8 倍の逸失）。旧分岐
-    // （#188 導入時の `docs/perf/metal-gemm-dynamic-tile.md` #381 計測では
-    // ほぼ同等だった）はその後の staged 経路変更（#533 float4 協調ロード・
-    // #538 TGP パディング・#572 prepared 境界確立）を経て逆転しており、本
-    // 分岐撤去は実測追従の是正（詳細・判断式は
-    // `docs/perf/metal-tile-select-correction.md`）。
+    // 真の正方形状（`m == n`。縦長・横長いずれにも該当しない場合の部分集合）
+    // かつ実測範囲内（`m <= SQUARE_MEASURED_MAX`）は CANDIDATES[3] を返す。
+    // イシュー #744・2026-08-19 M4 Max 実機実測（5 回中央値）で 512〜4096 の
+    // `m == n` 全帯域において CANDIDATES[0]（64x64 staged）が
+    // CANDIDATES[3]（32x32/bk16/staged）に一貫して劣後することを確認した
+    // （size=2048: 64x64 staged ≈1.18 TFLOPS に対し 32x32 staged ≈3.31
+    // TFLOPS、最良候補比で約 2.8 倍の逸失）。旧分岐（#188 導入時の
+    // `docs/perf/metal-gemm-dynamic-tile.md` #381 計測ではほぼ同等だった）は
+    // その後の staged 経路変更（#533 float4 協調ロード・#538 TGP パディング・
+    // #572 prepared 境界確立）を経て逆転しており、本分岐撤去は実測追従の是正
+    // （詳細・判断式は `docs/perf/metal-tile-select-correction.md`）。
+    // 4096 超の正方形状は実測範囲外のため、下の `m,n >= LARGE` 分岐へ落ちて
+    // #744 是正前の挙動（CANDIDATES[0]）を維持する（codex-review 指摘・PR
+    // #760 レビュー。実測なしに性能選択閾値を無制限拡張しない）。
     //
     // **`m != n`（縦長・横長いずれにも該当しないが正方でもない準正方長方形。
     // 例: 1536x1024〈比 1.5:1〉）は #744 実測対象外**（codex-review 指摘・PR
@@ -667,21 +683,23 @@ pub fn select_with_occupancy(
     // スコープで扱う。縦長・横長の分岐自体も 2026-08-19 実測が正方形状のみを
     // 対象としているため変更しない（安全側）。
     let shape_cfg = match (tall, wide) {
-        (true, _) => CANDIDATES[1],                     // 64x32（縦長）
-        (_, true) => CANDIDATES[2],                     // 32x64（横長）
-        _ if m == n => CANDIDATES[3],                   // 32x32（真の正方。#744 実測範囲）
-        _ if m >= LARGE && n >= LARGE => CANDIDATES[0], // 準正方大形状長方形（#744 実測対象外・是正前の挙動を維持）
+        (true, _) => CANDIDATES[1],                               // 64x32（縦長）
+        (_, true) => CANDIDATES[2],                               // 32x64（横長）
+        _ if m == n && m <= SQUARE_MEASURED_MAX => CANDIDATES[3], // 32x32（真の正方・実測範囲内。#744）
+        _ if m >= LARGE && n >= LARGE => CANDIDATES[0], // 大形状（4096 超の正方含む・準正方大形状長方形）。#744 実測対象外・是正前の挙動を維持
         _ => CANDIDATES[3], // 32x32（準正方中形状長方形。#744 是正前と同一挙動）
     };
 
     // occupancy 縮退の対象は段 1 が大タイル系（CANDIDATES[0..=2]）を選んだ
     // 場合のみ。CANDIDATES[3]（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8
     // は段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
-    // 来ない）。`m == n` の真の正方形状は #744 是正後 CANDIDATES[3] を直接
-    // 返すため縮退対象から外れるが、`m != n` の準正方大形状長方形（上記
-    // `m,n >= LARGE` 分岐）は引き続き CANDIDATES[0] を返しうるため、縮退判定
-    // （actual/ideal 比較）は縦長・横長に加えてこの経路でも生きたままになる
-    // （#744 是正前と同一挙動。PR #760 レビュー対応でコメントを実装へ整合）。
+    // 来ない）。`m == n` かつ `m <= SQUARE_MEASURED_MAX`（実測範囲内）の真の
+    // 正方形状は #744 是正後 CANDIDATES[3] を直接返すため縮退対象から外れる
+    // が、`m != n` の準正方大形状長方形、および `SQUARE_MEASURED_MAX` 超の
+    // 正方形状（上記 `m,n >= LARGE` 分岐）は引き続き CANDIDATES[0] を返し
+    // うるため、縮退判定（actual/ideal 比較）は縦長・横長に加えてこの経路
+    // でも生きたままになる（#744 是正前と同一挙動。PR #760 レビュー対応で
+    // コメントを実装へ整合）。
     let is_large_tile_candidate =
         shape_cfg == CANDIDATES[0] || shape_cfg == CANDIDATES[1] || shape_cfg == CANDIDATES[2];
 
@@ -1521,6 +1539,17 @@ mod tests {
             assert_eq!(cfg, CANDIDATES[3], "size={size}");
             assert_eq!((cfg.bm, cfg.bn), (32, 32), "size={size}");
         }
+    }
+
+    #[test]
+    fn select_keeps_pre_744_behavior_for_true_square_beyond_measured_range() {
+        // P1・codex-review 指摘対応（PR #760）: `m == n` の実測は
+        // 512/1024/2048/4096 の 4 点のみ（#744）。4096 超の正方形状（実測
+        // 対象外）へ CANDIDATES[3] 一律選択を無制限に広げないことを固定する
+        // （#744 是正前の挙動 `m,n >= LARGE(512)` なら CANDIDATES[0] を維持）。
+        let cfg = select(8192, 8192, 8192);
+        assert_eq!(cfg, CANDIDATES[0]);
+        assert_eq!((cfg.bm, cfg.bn), (64, 64));
     }
 
     #[test]
