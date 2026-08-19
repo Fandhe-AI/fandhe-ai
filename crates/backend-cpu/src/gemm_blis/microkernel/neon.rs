@@ -88,12 +88,23 @@
 //! （`acc + a * b[LANE]`）。この場合アキュムレータは列優先（acc[j][h] =
 //! C の列 j・行 4h..4h+4）へ転置される。
 //!
-//! [`compute_b_laneq`] はこの変種を実装する。IEEE-754 の fused
-//! multiply-add は乗数 2 項について可換（`acc + b*a` と `acc + a*b` は
-//! bit 同一）であり、各 C 要素は引き続き p ごとに 1 回だけ FMA を受け
-//! p 昇順の連鎖も不変であるため、[`compute`] と bit 完全一致する
-//! （冒頭の bit 完全一致契約は維持される。ローカル検証は
-//! `compute_b_laneq_matches_compute_bit_exact` テスト）。
+//! [`compute_b_laneq`] はこの変種を実装する。**この bit 完全一致契約は
+//! 有限値（非 NaN）の乗数に限る**: IEEE-754-2008 は乗算の可換性
+//! （`a*b` と `b*a` が同一結果）を要求するが、両オペランドが NaN の
+//! 場合にどちらの NaN を（どの符号・payload で）返すかは実装依存と
+//! されており（§6.2）、オペランド順序を入れ替える本変種
+//! （`acc + a*b[LANE]`。[`compute`] の `acc + b*a[LANE]` から乗数順を
+//! 交換）が同じ NaN 選択規則に従う保証はない。したがって
+//! `acc + b*a` と `acc + a*b` の bit 完全一致は**有限値の入力に対して
+//! のみ**主張する（各 C 要素は引き続き p ごとに 1 回だけ FMA を受け
+//! p 昇順の連鎖も不変であるため、有限値では [`compute`] と bit 完全
+//! 一致する。ローカル検証は `compute_b_laneq_matches_compute_bit_exact`
+//! テスト・有限値のみ）。NaN を含む入力に対する両変種間の一致は
+//! 主張しない（未検証。`compute_b_laneq_nan_input_does_not_panic`
+//! テストで NaN 入力自体がパニックしないことのみ確認する）。呼び出し元
+//! （現在は [`super::NeonBLaneqKernel`] 経由の A/B 計測専用で既定
+//! ディスパッチには未接続）が NaN を含むタイルに対し両変種の bit 一致を
+//! 前提にしてはならない。
 //!
 //! C タイル入口ロード・出口ストアは、C メモリが row-major
 //! （`c[i*ldc+j]`）である一方 acc が列優先であるため転置を要する。
@@ -379,7 +390,9 @@ fn compute_b_laneq(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: us
         // ため、列 j (<4) は `(b0, j)`、列 j (4..8) は `(b1, j-4)`、
         // 列 j (8..12) は `(b2, j-8)` を参照する。列 j 昇順・行グループ
         // h 昇順（`[0]`→`[1]`）・p 昇順の FMA 連鎖を主・端数ループ通じて
-        // 一貫させ、bit 完全一致契約（冒頭モジュールコメント）を保つ。
+        // 一貫させ、bit 完全一致契約（冒頭モジュールコメント）を保つ
+        // （この契約は有限値の入力に限る。NaN 入力での [`compute`] との
+        // bit 一致は主張しない。冒頭モジュールコメント §748 節参照）。
         macro_rules! fma_col {
             ($acc_j:expr, $b:expr, $lane:literal, $a0:expr, $a1:expr) => {{
                 $acc_j[0] = vfmaq_laneq_f32::<$lane>($acc_j[0], $a0, $b);
@@ -937,6 +950,39 @@ mod tests {
                 c_default, c_b_laneq,
                 "kernel_b_laneq_with_ldc（B レーン参照・kc_len={kc_len}）は \
                  kernel_with_ldc（既定・A レーン参照）と bit 完全一致するはず"
+            );
+        }
+    }
+
+    /// NaN を含む入力に対し [`kernel_b_laneq_with_ldc`] がパニックせず完了する
+    /// ことのみを確認する（#765 codex-review P1 再指摘対応）。冒頭モジュール
+    /// コメント §748 節で明記した通り、NaN 入力に対する
+    /// [`kernel_with_ldc`]（A レーン参照）との bit 完全一致は主張しない
+    /// （IEEE-754-2008 §6.2: 両オペランドが NaN の場合にどちらの NaN
+    /// payload/符号を返すかは実装依存であり、乗数順序を交換する本変種が
+    /// 同一の選択規則に従う保証がないため）。よって本テストは
+    /// `assert_eq!` による bit 一致比較を行わず、NaN 伝播により C タイルの
+    /// 該当要素が NaN になること（非 NaN へ「消える」誤り方はしないこと）
+    /// のみを検査する。
+    #[test]
+    fn compute_b_laneq_nan_input_does_not_panic() {
+        let kc_len = 4;
+        let mut ap = vec![1.0f32; MR * kc_len];
+        let bp = vec![1.0f32; kc_len * NR];
+        ap[0] = f32::NAN;
+        let mut c_tile = vec![0.0f32; MR * NR];
+
+        // パニックしないことが本テストの主目的（ldc=NR の密パッキング契約）。
+        kernel_b_laneq_with_ldc(&ap, &bp, &mut c_tile, NR, kc_len).unwrap();
+
+        // ap[0] は A の行 0・p=0 に対応し、B レーン参照変種では列優先 acc へ
+        // 転置されるため C の行 0・全列（j=0..NR）が p=0 の FMA で NaN に
+        // 汚染される。NaN が汚染前提の要素へ伝播していること（消失しない
+        // こと）のみを確認し、payload/符号の bit 一致は検査しない。
+        for (j, &v) in c_tile.iter().enumerate().take(NR) {
+            assert!(
+                v.is_nan(),
+                "NaN 入力（ap[0]）は C の行 0・列 {j} へ伝播するはず"
             );
         }
     }
