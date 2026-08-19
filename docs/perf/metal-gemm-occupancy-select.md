@@ -1,5 +1,15 @@
 # Metal GEMM occupancy 判定の `tile.rs::select()` 組み込み（#542）
 
+> **段 1（形状判定）の正方大形状閾値は #744 で是正済み**: 本ファイルの「1. 判定式」「3. 事前検証値」
+> 節が前提とする「正方形状は `LARGE=512` 以上で `CANDIDATES[0]`（64×64）を選ぶ」という段 1 の挙動は、
+> イシュー #744・2026-08-19 M4 Max 実機実測（size=2048 で `CANDIDATES[3]`〈32×32 staged〉が
+> `CANDIDATES[0]` 比 2.8 倍）により撤去され、正方形状は全帯域で一律 `CANDIDATES[3]` を返すようになった
+> （`LARGE` 定数自体が存在しない）。本ファイルの本文・実測値・記録テンプレートは記録当時のまま変更して
+> いない。段 2（occupancy 縮退）自体のロジック（縮退対象を大タイル系 `CANDIDATES[0..=2]` に限る旨）は
+> 変更されていないが、#744 是正後は段 1 が正方形状に対し `CANDIDATES[0]` を返すことがなくなったため、
+> 正方形状での縮退対象は実質発生しない。是正の判断根拠・実測値は `docs/perf/metal-tile-select-correction.md`
+> を参照。
+
 イシュー #542「perf(backend-metal): occupancy 判定を tile.rs::select() のタイル選択へ組み込み」の記録。
 親 #480（GEMM 最適化）D-7b（D-7 の分割: `docs/perf/metal-gemm-bottleneck-diagnosis.md` 冒頭リスト参照）。
 #541（D-7a・`docs/perf/metal-gemm-occupancy-target.md`）で実装した occupancy 目標算出の基盤

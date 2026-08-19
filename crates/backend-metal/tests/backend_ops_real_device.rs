@@ -9,8 +9,10 @@
 //! （`.claude/rules/coding-rust.md`）。
 //!
 //! `cpu_metal_parity.rs`（基準形状 512^3・K=4096 ストレス）とは異なる形状を
-//! 選び、`tile.rs::select` の動的タイル選択境界
-//! （`SMALL=64`・`LARGE=512`。`crate::tile` 参照）近傍を 1〜2 ケース含める。
+//! 選び、`tile.rs::select` の動的タイル選択境界（`SMALL=64`。`crate::tile`
+//! 参照）近傍を 1〜2 ケース含める。`LARGE=512` 境界はイシュー #744 是正で
+//! 撤去済み（正方形状は全帯域で `CANDIDATES[3]` を返す。詳細は
+//! `docs/perf/metal-tile-select-correction.md`）。
 //!
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する
 //! （`cpu_metal_parity.rs` と同方針。`#![cfg(target_os = "macos")]` により
@@ -62,8 +64,8 @@ fn assert_backend_ops_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, 
     );
 }
 
-/// 基準ケース（`tile.rs::select` の中形状経路。SMALL=64 以上・LARGE=512
-/// 未満で正方形状 → `CANDIDATES[3]`〈32x32〉が選ばれる想定）。
+/// 基準ケース（`tile.rs::select` の中形状経路。SMALL=64 以上の正方形状は
+/// #744 是正後、全帯域で `CANDIDATES[3]`〈32x32〉が選ばれる想定）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn backend_ops_gemm_matches_cpu_mid_square_shape() {
