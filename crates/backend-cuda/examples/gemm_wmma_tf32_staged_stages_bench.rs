@@ -87,9 +87,32 @@ fn cpu_reference_f32(a: &[f32], b: &[f32], m: u32, n: u32, k: u32) -> Vec<f32> {
     c
 }
 
-fn tflops(size: usize, median_secs: f64) -> f64 {
+fn tflops(size: usize, secs: f64) -> f64 {
     let flops = 2.0 * (size as f64).powi(3);
-    flops / median_secs / 1e12
+    flops / secs / 1e12
+}
+
+/// `bench_harness::Measurement`（所要時間の中央値/Q1/Q3）を TFLOPS へ
+/// 変換した計測結果（codex-review 指摘 #742 PR #759。CSV 出力から Q1/Q3 が
+/// 失われ `docs/perf/cuda-gemm-wmma-tf32-staged-stages-sweep.md:84`・`:138`
+/// の「中央値/Q1/Q3 を CSV 出力」契約を満たさない問題への対応）。
+///
+/// 所要時間は小さいほど高速（TFLOPS が高い）ため、時間の Q1（速い側）が
+/// TFLOPS の上限、Q3（遅い側）が TFLOPS の下限になる点に注意。
+struct TflopsMeasurement {
+    median: f64,
+    q1: f64,
+    q3: f64,
+}
+
+impl TflopsMeasurement {
+    fn from_secs(size: usize, measurement: &bench_harness::Measurement) -> Self {
+        Self {
+            median: tflops(size, measurement.median_secs),
+            q1: tflops(size, measurement.q3_secs),
+            q3: tflops(size, measurement.q1_secs),
+        }
+    }
 }
 
 /// 動的 SMEM 変種の GPU 実行のみを計測する（H2D/D2H・出力確保は計測区間
@@ -100,7 +123,7 @@ fn measure_dyn_staged(
     gemm: &CudaGemm,
     size: usize,
     config: &MeasurementConfig,
-) -> Result<f64, CudaError> {
+) -> Result<TflopsMeasurement, CudaError> {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f32> = rng.fill_vec(size * size);
     let b: Vec<f32> = rng.fill_vec(size * size);
@@ -112,9 +135,9 @@ fn measure_dyn_staged(
     // `.expect()` すると計測中（ウォームアップ／反復）の CUDA 起動失敗が
     // そのまま panic してスイープ全体を落としてしまう（codex-review 指摘
     // #742 PR #759）。呼び出し側は「起動失敗はこの段数・サイズの SKIP」
-    // という契約（本関数の戻り値 `Result<f64, CudaError>`）を持つため、
-    // 最初の `CudaError` をここで捕捉し、計測終了後に `Err` として返す
-    // （2 回目以降の呼び出しは無駄な起動を避けて no-op にする）。
+    // という契約（本関数の戻り値 `Result<TflopsMeasurement, CudaError>`）を
+    // 持つため、最初の `CudaError` をここで捕捉し、計測終了後に `Err` として
+    // 返す（2 回目以降の呼び出しは無駄な起動を避けて no-op にする）。
     let stream = device.stream();
     let mut first_err: Option<CudaError> = None;
     let measurement = bench_run(config, || {
@@ -137,7 +160,7 @@ fn measure_dyn_staged(
     if let Some(e) = first_err {
         return Err(e);
     }
-    Ok(tflops(size, measurement.median_secs))
+    Ok(TflopsMeasurement::from_secs(size, &measurement))
 }
 
 /// 本番経路（static・3 段フォールバック選択。多くの場合 staged
@@ -149,7 +172,7 @@ fn measure_production_wmma_tf32(
     gemm: &CudaGemm,
     size: usize,
     config: &MeasurementConfig,
-) -> Result<f64, CudaError> {
+) -> Result<TflopsMeasurement, CudaError> {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f32> = rng.fill_vec(size * size);
     let b: Vec<f32> = rng.fill_vec(size * size);
@@ -179,7 +202,7 @@ fn measure_production_wmma_tf32(
     if let Some(e) = first_err {
         return Err(e);
     }
-    Ok(tflops(size, measurement.median_secs))
+    Ok(TflopsMeasurement::from_secs(size, &measurement))
 }
 
 fn main() {
@@ -237,11 +260,17 @@ fn main() {
     let b_ref: Vec<f32> = rng.fill_vec((CORRECTNESS_K * CORRECTNESS_N) as usize);
     let expected = cpu_reference_f32(&a_ref, &b_ref, CORRECTNESS_M, CORRECTNESS_N, CORRECTNESS_K);
 
+    // 各サイズにつき dyn/static の中央値・Q1/Q3 TFLOPS を全て CSV へ出力する
+    // （codex-review 指摘 #742 PR #759。docs/perf/cuda-gemm-wmma-tf32-staged-
+    // stages-sweep.md:84・:138 の「中央値/Q1/Q3 を CSV 出力」契約）。
     println!(
         "stages,smem_bytes,blocks_per_sm_limit,warps_per_sm_limit,{}",
         BENCH_SIZES
             .iter()
-            .map(|s| format!("dyn_tflops_{s},static_tflops_{s},ratio_{s}"))
+            .map(|s| format!(
+                "dyn_tflops_median_{s},dyn_tflops_q1_{s},dyn_tflops_q3_{s},\
+                 static_tflops_median_{s},static_tflops_q1_{s},static_tflops_q3_{s},ratio_{s}"
+            ))
             .collect::<Vec<_>>()
             .join(",")
     );
@@ -350,26 +379,32 @@ fn main() {
             // 残りの段数の計測を継続する（実装計画 §6。codex-review 指摘
             // #742 PR #759 で比較基準側も dyn 側と同じ Err 契約へ揃えた）。
             match (dyn_result, static_result) {
-                (Ok(dyn_tflops), Ok(static_tflops)) => {
-                    let ratio = if static_tflops != 0.0 {
-                        dyn_tflops / static_tflops
+                (Ok(dyn_m), Ok(static_m)) => {
+                    // ratio は従来どおり中央値ベース（他段数・他サイズとの
+                    // 比較用の代表値。Q1/Q3 はレンジの参考情報として別列に
+                    // 出力する）。
+                    let ratio = if static_m.median != 0.0 {
+                        dyn_m.median / static_m.median
                     } else {
                         f64::NAN
                     };
-                    row.push_str(&format!(",{dyn_tflops:.4},{static_tflops:.4},{ratio:.4}"));
+                    row.push_str(&format!(
+                        ",{:.4},{:.4},{:.4},{:.4},{:.4},{:.4},{ratio:.4}",
+                        dyn_m.median, dyn_m.q1, dyn_m.q3, static_m.median, static_m.q1, static_m.q3
+                    ));
                 }
                 (Err(e), _) => {
                     println!(
                         "stages={stages} size={size}: SKIP measurement (dyn launch failed: {e})"
                     );
-                    row.push_str(",n/a,n/a,n/a");
+                    row.push_str(",n/a,n/a,n/a,n/a,n/a,n/a,n/a");
                 }
                 (Ok(_), Err(e)) => {
                     println!(
                         "stages={stages} size={size}: SKIP measurement \
                          (static baseline launch failed: {e})"
                     );
-                    row.push_str(",n/a,n/a,n/a");
+                    row.push_str(",n/a,n/a,n/a,n/a,n/a,n/a,n/a");
                 }
             }
         }
