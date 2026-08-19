@@ -72,7 +72,10 @@ pmset -g therm
 - `run_stability(&AbConfig, &MeasurementConfig, workload) -> StabilityResult`: 単一ワークロードを `rounds` ラウンド
   計測し、ラウンド中央値の列と `relative_spread`（`StabilityResult::spread`）を返す
 - `run_ab(&AbConfig, &MeasurementConfig, workload_a, workload_b) -> AbResult`: A/B を interleaved に計測し、
-  各 side のラウンド中央値列・全体中央値・`b_over_a_ratio`（head/base 比）・各 side の spread を返す
+  各 side のラウンド中央値列・全体中央値・`b_over_a_ratio`・各 side の spread を返す。
+  `b_over_a_ratio` は `median_b_secs / median_a_secs`（**実行時間の比**。1.0 未満なら B が速い）であり、
+  TFLOPS 等スループット指標の head/base 比はその**逆数**になる点に注意（`ab.rs` の `AbResult::b_over_a_ratio`
+  doc comment 参照。イシュー #746 PR #763 で取り違えによる判定逆転が指摘された）
 
 いずれも `crate::protocol::run`（既存の warmup 20 回以上・計測 20 回以上・中央値/Q1/Q3 プロトコル）をラウンドごとに
 呼ぶ上位ユーティリティであり、`guardrail`／`self-repair` が依存する `protocol::run`・`MeasurementConfig` の

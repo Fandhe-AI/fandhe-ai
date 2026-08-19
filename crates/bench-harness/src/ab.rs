@@ -40,20 +40,28 @@ use std::time::{Duration, Instant};
 /// 比較・`ROUNDS=6` 偶数固定と同じ order-bias 相殺根拠）。奇数を
 /// `BenchError::ProtocolViolation` で fail-closed に拒否し、非対称な
 /// interleave を黙って許容しない。
+///
+/// フィールドは非公開とし [`AbConfig::new`] の検証（偶数・2 以上）を経由した
+/// 構築のみを許す（codex-review 指摘対応。イシュー #746 PR #763: 全フィールドが
+/// `pub` だと `AbConfig { rounds: 3, .. }` のような直接構築で検証をバイパスでき、
+/// `run_ab`／`run_stability` 側は入口で再検証しないため、奇数 rounds のまま
+/// order-bias 相殺前提が崩れた計測が fail-closed 契約を経由せず実行されてしまう）。
+/// 値の参照は [`AbConfig::rounds`]／[`AbConfig::cooldown`]／[`AbConfig::min_warmup`]
+/// の getter を使う。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AbConfig {
     /// A/B（または単一系列）を計測するラウンド数。偶数・2 以上が必須。
-    pub rounds: usize,
+    rounds: usize,
     /// ラウンド間（各 side の計測直後）に挟む待機時間。
     /// `protocol::run` の計測区間（`Instant` 計測ループ）の外側でのみ
     /// 発生させるため、計測サンプルへは混入しない（本モジュール実装の
     /// `std::thread::sleep` 呼び出し位置がその契約を担保する）。
-    pub cooldown: Duration,
+    cooldown: Duration,
     /// 各ラウンドの計測直前に追加実行するウォームアップの最低経過時間。
     /// `MeasurementConfig::warmup`（回数下限）に加え、小サイズワークロードで
     /// GPU クロックが未昇圧のまま計測へ入るのを防ぐための時間ベース下限
     /// （`docs/perf/metal-bench-noise-protocol.md` 参照）。
-    pub min_warmup: Duration,
+    min_warmup: Duration,
 }
 
 impl AbConfig {
@@ -77,6 +85,21 @@ impl AbConfig {
             cooldown,
             min_warmup,
         })
+    }
+
+    /// 検証済みのラウンド数（偶数・2 以上。[`AbConfig::new`] が保証）。
+    pub fn rounds(&self) -> usize {
+        self.rounds
+    }
+
+    /// ラウンド間の待機時間。
+    pub fn cooldown(&self) -> Duration {
+        self.cooldown
+    }
+
+    /// 時間ベースの追加ウォームアップ下限。
+    pub fn min_warmup(&self) -> Duration {
+        self.min_warmup
     }
 }
 
@@ -162,8 +185,14 @@ pub struct AbResult {
     pub median_a_secs: f64,
     /// side B の全ラウンド中央値。
     pub median_b_secs: f64,
-    /// `median_b_secs / median_a_secs`。1.0 未満なら B が A より速い
-    /// （#540 の採否判定に使う「head/base 比」に対応）。
+    /// `median_b_secs / median_a_secs`。**実行時間（レイテンシ）の比**であり、
+    /// 1.0 未満なら B が A より速い。TFLOPS 等スループット指標の head/base 比は
+    /// 時間の逆数のためこの値の**逆数**（`median_a_secs / median_b_secs`）になる。
+    /// #540 の採否判定基準（`head_over_base` > 1.0 で採用）はスループット比を
+    /// 前提とするため、呼び出し側でそのまま `head_over_base` として使わない
+    /// こと（codex-review・Cursor Bugbot 指摘対応。イシュー #746 PR #763:
+    /// `crates/backend-metal/examples/gemm_swizzle_ab_bench.rs` がこの値を
+    /// そのまま `head_over_base` として出力し判定を逆転させていた）。
     pub b_over_a_ratio: f64,
     /// side A のラウンド間ばらつき（[`crate::relative_spread()`]）。
     pub spread_a: f64,
@@ -366,6 +395,46 @@ mod tests {
         // 軽量ダミーワークロードの中央値は cooldown（5ms）よりはるかに小さいはず。
         assert!(result.median_a_secs < 0.001);
         assert!(result.median_b_secs < 0.001);
+    }
+
+    #[test]
+    fn b_over_a_ratio_is_a_latency_ratio_not_a_throughput_ratio() {
+        // `AbResult::b_over_a_ratio` が「実行時間（レイテンシ）の比」であり、
+        // スループット（TFLOPS 等）比の head/base とは逆数の関係になることを
+        // 固定する回帰テスト（codex-review・Cursor Bugbot 指摘対応。イシュー
+        // #746 PR #763: `gemm_swizzle_ab_bench.rs` がこの値をそのまま
+        // `head_over_base`〈スループット比〉として出力し #540 の採否判定
+        // 〈> 1.0 で採用〉を逆転させていた）。B（head 相当）を A（base 相当）
+        // より明確に遅くし、`b_over_a_ratio` が 1.0 を大きく超える
+        // （= B が遅い）ことを検証する。これはスループット比では
+        // `head_over_base < 1.0`（悪化）に対応するはずの状況であり、
+        // 両者が同じ向きの値だと誤って扱わないことをロックする。
+        let ab_config = AbConfig::new(2, Duration::ZERO, Duration::ZERO).unwrap();
+        let measurement_config = MeasurementConfig::new(20, 20).unwrap();
+        let result = run_ab(
+            &ab_config,
+            &measurement_config,
+            || {},
+            || std::thread::sleep(Duration::from_micros(200)),
+        )
+        .unwrap();
+        assert!(
+            result.b_over_a_ratio > 1.0,
+            "B（head 相当）を遅くしたので b_over_a_ratio（レイテンシ比）は 1.0 を超えるはず: {}",
+            result.b_over_a_ratio
+        );
+        // スループット比（head_over_base 相当）はレイテンシ比の逆数であるべき。
+        let throughput_ratio = result.median_a_secs / result.median_b_secs;
+        assert!(
+            (throughput_ratio - result.b_over_a_ratio.recip()).abs() < 1e-9,
+            "スループット比は b_over_a_ratio の逆数であるべき: throughput_ratio={throughput_ratio} \
+             b_over_a_ratio={}",
+            result.b_over_a_ratio
+        );
+        assert!(
+            throughput_ratio < 1.0,
+            "B が遅い（head 悪化）状況ではスループット比は 1.0 未満（不採用方向）のはず: {throughput_ratio}"
+        );
     }
 
     #[test]

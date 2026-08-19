@@ -178,6 +178,18 @@ mod macos_impl {
                 .map(|&secs| tflops(size, secs))
                 .collect();
 
+            let base_median_tflops = tflops(size, result.median_a_secs);
+            let head_median_tflops = tflops(size, result.median_b_secs);
+            // `result.b_over_a_ratio`（= median_b_secs / median_a_secs）は実行時間の比
+            // （レイテンシ比）であり、TFLOPS は時間の逆数のため TFLOPS 比の
+            // head/base はその逆数（median_a_secs / median_b_secs）になる。
+            // ここを取り違えて `b_over_a_ratio` をそのまま `head_over_base` として
+            // 出力すると、#540 の採否判定基準（`head_over_base` > 1.0 で採用）が
+            // 逆転する（head が実際に高速でも 1.0 未満になる）ため、
+            // TFLOPS 値同士の比として明示的に計算する（codex-review・Cursor Bugbot
+            // 指摘対応。イシュー #746 PR #763）。
+            let head_over_base = head_median_tflops / base_median_tflops;
+
             println!(
                 "size={size} base_resolved=({}x{}, {}) head_resolved=({}x{}, {}) \
                  base_median_tflops={:.4} head_median_tflops={:.4} head_over_base={:.4} \
@@ -197,9 +209,9 @@ mod macos_impl {
                 } else {
                     "resolved!=requested(fallback)"
                 },
-                tflops(size, result.median_a_secs),
-                tflops(size, result.median_b_secs),
-                result.b_over_a_ratio,
+                base_median_tflops,
+                head_median_tflops,
+                head_over_base,
                 result.spread_a,
                 result.spread_b,
             );
