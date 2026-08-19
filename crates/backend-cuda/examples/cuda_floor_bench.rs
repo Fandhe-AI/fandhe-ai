@@ -547,24 +547,78 @@ fn main() {
     // floor`）に `same_hardware` と同様の gate として合成する
     // （PR #349 未解決スレッド「Opt kernel use not verified」対応。
     // `docs/perf/cuda-floor-remeasurement.md`「実測バイナリ」節参照）。
+    // f32 経路 provenance 診断（イシュー #732。PR #725 codex P1 で判明した
+    // 「実行ログ単体から staged 選択の有無を再構成できない」問題への対応）:
+    // `launch_wmma_tf32` の 3 段選択（staged → opt → basic）に沿って、
+    // 判定対象形状（512〜4096。すべて cp.async 16 バイト整列条件
+    // n%4==0 && k%4==0 を満たす）で wmma_tf32 計測が実際に通る経路を
+    // 1 本のメッセージへ統合して出力する（staged/opt を別行で個別報告する
+    // と「opt を使用」「staged を使用」が併記され矛盾する — PR #733
+    // codex P2 第 3 指摘対応）。REQ-8 CudaF32 最適化後下限 50% の根拠実測・
+    // parity ベースライン（#726）は staged 経路のものであり、staged 不能時
+    // の実測は経路 provenance がそれらと異なることを明示する。確定判定
+    // `f32_opt_confirmed` は、判定対象形状ごとに 3 段選択を再現する
+    // `wmma_tf32_routed_path_available`（staged×整列 or opt）で「最適化
+    // 経路が実際に選ばれる」ことを確認する（PR #349 対応時は opt 可用性
+    // のみを見ていたが、staged が REQ-8 根拠経路そのものであるため
+    // staged-only 環境で正当な実測を n/a に落とすのは誤り — PR #733
+    // codex P1 指摘対応）。
     let f32_opt_confirmed = match &tiled_gemm {
-        Some(g) if g.wmma_tf32_opt_available() => {
-            println!(
-                "f32 optimized kernel: WMMA(TF32) opt AVAILABLE (used for wmma_tf32 measurements below)."
-            );
-            true
-        }
         Some(g) => {
-            println!(
-                "WARNING: f32 WMMA(TF32) opt kernel UNAVAILABLE ({}); wmma_tf32 measurements in \
-                 this run silently fall back to the basic (non-optimized) WMMA(TF32) kernel \
-                 (`gemm.rs::CudaGemm::run_wmma_tf32` フォールバック方針参照), so they do NOT \
-                 represent the REQ-8 post-optimization floor. The f32 candidate floor below will \
-                 be reported as n/a for this reason.",
-                g.wmma_tf32_opt_unavailable_reason()
-                    .unwrap_or("unknown reason")
-            );
-            false
+            let opt_av = g.wmma_tf32_opt_available();
+            match (g.wmma_tf32_staged_available(), opt_av) {
+                (true, true) => println!(
+                    "f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt AVAILABLE \
+                     (wmma_tf32 measurements below route to the staged kernel for \
+                     cp.async-aligned shapes [n%4==0 && k%4==0], which includes all judged \
+                     sizes; the opt kernel is available but not used for these shapes. Same \
+                     path as the REQ-8 CudaF32 optimized-floor basis and the #726 parity \
+                     baseline)."
+                ),
+                (true, false) => println!(
+                    "f32 optimized kernel: WMMA(TF32) staged AVAILABLE, opt UNAVAILABLE ({}) \
+                     (wmma_tf32 measurements below route to the staged kernel for \
+                     cp.async-aligned shapes, which includes all judged sizes; same path as \
+                     the REQ-8 CudaF32 optimized-floor basis and the #726 parity baseline. \
+                     The candidate-floor confirmation gate treats the staged path as a \
+                     confirmed optimized path for the judged sizes).",
+                    g.wmma_tf32_opt_unavailable_reason()
+                        .unwrap_or("unknown reason")
+                ),
+                (false, true) => println!(
+                    "NOTE: f32 WMMA(TF32) staged kernel UNAVAILABLE ({}); wmma_tf32 \
+                     measurements in this run use the opt (non-staged) kernel path. The REQ-8 \
+                     CudaF32 optimized-floor basis and the #726 parity baseline were measured \
+                     on the staged path, so the path provenance of this run's f32 measurements \
+                     differs from them.",
+                    g.wmma_tf32_staged_unavailable_reason()
+                        .unwrap_or("unknown reason")
+                ),
+                // 全段不能側: basic の可用性は `CudaGemm::new` の成功だけでは
+                // 保証されない（全 WMMA カーネル不能なら計測は
+                // `WmmaUnavailable` で skip される）ため、basic と断定せず
+                // 「basic を試行し、不能なら skip」と表現する（PR #733
+                // codex P2 第 2 指摘対応）。
+                (false, false) => println!(
+                    "WARNING: f32 WMMA(TF32) staged kernel UNAVAILABLE ({}), opt kernel \
+                     UNAVAILABLE ({}); wmma_tf32 measurements in this run fall back to the \
+                     basic (non-optimized) WMMA(TF32) kernel if available \
+                     (`gemm.rs::CudaGemm::run_wmma_tf32` フォールバック方針参照; if the \
+                     basic WMMA kernel is unavailable too, the wmma_tf32 measurements are \
+                     skipped as WmmaUnavailable), so they do NOT represent the REQ-8 \
+                     post-optimization floor. The f32 candidate floor below will be reported \
+                     as n/a for this reason.",
+                    g.wmma_tf32_staged_unavailable_reason()
+                        .unwrap_or("unknown reason"),
+                    g.wmma_tf32_opt_unavailable_reason()
+                        .unwrap_or("unknown reason")
+                ),
+            }
+            // 判定対象形状ごとに 3 段選択を再現し、staged（整列条件込み）
+            // または opt の最適化経路が実際に選ばれることを確認する。
+            JUDGED_SIZES
+                .iter()
+                .all(|&s| g.wmma_tf32_routed_path_available(s as u32, s as u32))
         }
         // tiled_gemm 自体が利用不能な場合は f32 列全体が skip されるため
         // opt 未確認として扱う（後続の f32_judged_count が 0 のまま残り、
@@ -756,6 +810,7 @@ fn main() {
     );
     print_candidate_floor(
         "f32",
+        "staged (for cp.async-aligned shapes) or opt",
         min_f32_ratio_percent,
         f32_same_hardware,
         f32_judged_count,
@@ -763,6 +818,7 @@ fn main() {
     );
     print_candidate_floor(
         "f16",
+        "opt",
         min_f16_ratio_percent,
         f16_same_hardware,
         f16_judged_count,
@@ -778,7 +834,8 @@ fn main() {
 
 /// 判定対象形状（`JUDGED_SIZES`）すべての比率が揃い（`judged_count ==
 /// JUDGED_SIZES.len()`）、同一実機再計測値のみを根拠とし（`same_hardware
-/// == true`）、かつ選出された経路が opt カーネル未確認のフォールバックに
+/// == true`）、かつ判定対象形状で最適化経路（f32 は staged〈整列条件込み〉
+/// または opt、f16 は opt）の選択が確認済みでありフォールバックに
 /// 依っていない（`opt_ok == true`）場合にのみ、正式な candidate floor を
 /// 確定値として返す。いずれか 1 つでも欠ける場合は `None`（`n/a` 扱い）と
 /// する（REQ-8「2048・4096 の実測比率の最小値」契約。PR #349 codex-review
@@ -806,6 +863,10 @@ fn confirmed_candidate_floor(
 /// 「PyTorch 参照値の再計測」参照）。
 fn print_candidate_floor(
     label: &str,
+    // ラベルの精度で利用しうる最適化 WMMA 経路の説明（f32 は staged/opt、
+    // f16 は opt のみ。f16 に存在しない staged を共用文へ出さないための
+    // 呼び出し側指定 — PR #733 codex P2 指摘対応）。
+    optimized_paths_desc: &str,
     min_ratio_percent: Option<f64>,
     same_hardware: bool,
     judged_count: usize,
@@ -841,11 +902,11 @@ fn print_candidate_floor(
             min_ratio_percent.map_or("n/a".to_string(), |r| format!("{r:.2}%"))
         ),
         None if !opt_ok => println!(
-            "CUDA {label} candidate optimized floor: n/a (the selected best-of path for one or \
-             more judged sizes was the opt WMMA kernel, but the opt kernel was unavailable in \
-             this environment and silently fell back to the basic kernel; reference-only ratio \
-             {} does NOT represent the REQ-8 post-optimization floor. See the \"f32/f16 optimized \
-             kernel\" warning above for the unavailability reason.)",
+            "CUDA {label} candidate optimized floor: n/a (no optimized WMMA path \
+             [{optimized_paths_desc}] was available for one or more judged sizes, \
+             so the measurements fall back to the basic kernel if available; reference-only \
+             ratio {} does NOT represent the REQ-8 post-optimization floor. See the \
+             \"f32/f16 optimized kernel\" warning above for the unavailability reason.)",
             min_ratio_percent.map_or("n/a".to_string(), |r| format!("{r:.2}%"))
         ),
         None if !same_hardware => println!(
