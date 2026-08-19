@@ -20,7 +20,12 @@
 //! **選択閾値は暫定値**: 下記 [`select`] のサイズ閾値・候補パラメータは
 //! MLX steel の実装傾向を参考にした暫定初期値であり、Apple Silicon 実機
 //! での `examples/gemm_bench.rs` 実測（`docs/perf/metal-gemm-dynamic-tile.md`
-//! に記録）で確定させる前提（イシュー #188 計画のスコープ）。
+//! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**正方形状
+//! （縦長・横長に該当しない `SMALL` 以上の形状）の閾値はイシュー #744・
+//! 2026-08-19 M4 Max 実機実測により CANDIDATES[3]（32x32/bk16/staged）
+//! への一律選択で確定済み**（512〜4096 の全帯域で最良候補比の逸失なし。
+//! 判断根拠は `docs/perf/metal-tile-select-correction.md`）。縦長・横長の
+//! 閾値は引き続き暫定値のまま（#744 の実測対象外）。
 //! `docs/dispatch-rules-design.md`（accelerated 経路選択は
 //! `min(M,N,K) >= 512`）とはレイヤが異なる点に注意: 本モジュールは
 //! 「accelerated（Metal）経路に入った後」のタイル構成選択であり、
@@ -467,6 +472,14 @@ impl TileConfig {
 /// #651）。本セットを直接巡回するテストは統合テスト（`tests/` 配下・別
 /// コンパイル単位）ではなく本ファイル末尾の `#[cfg(test)] mod tests`
 /// （クレート内部・`pub(crate)` を参照可能）に置く。
+///
+/// **`CANDIDATES[0]`（64x64 大形状）は #744 是正後、`select` の形状判定
+/// からは選ばれない**（2026-08-19 M4 Max 実機実測で正方全帯域〈512〜4096〉
+/// において `CANDIDATES[3]`〈32x32〉に一貫して劣後することを確認したため。
+/// `select_with_occupancy` 本体コメント・`docs/perf/metal-tile-select-correction.md`
+/// 参照）。それでも配列からは削除しない: `select` の添字依存（上記）を壊す
+/// うえ、`fallback_chain`・occupancy 縮退判定（縦長/横長経路の fail-safe
+/// 比較）・#747（サイズ帯条件分岐）での再利用対象として残す。
 pub(crate) const CANDIDATES: &[TileConfig] = &[
     // 大形状（正方）: 64x64 ブロックを 2x2=4 simdgroup で分担。
     TileConfig {
@@ -614,28 +627,42 @@ pub fn select_with_occupancy(
     params: Option<OccupancyParams>,
 ) -> TileConfig {
     const SMALL: usize = 64;
-    const LARGE: usize = 512;
     const ASPECT_RATIO: usize = 2;
 
     if m < SMALL || n < SMALL || k < SMALL {
         return TileConfig::SINGLE_SIMDGROUP_8X8;
     }
 
-    let large = m >= LARGE && n >= LARGE;
     let tall = m >= n.saturating_mul(ASPECT_RATIO);
     let wide = n >= m.saturating_mul(ASPECT_RATIO);
 
-    let shape_cfg = match (large, tall, wide) {
-        (_, true, _) => CANDIDATES[1], // 64x32（縦長）
-        (_, _, true) => CANDIDATES[2], // 32x64（横長）
-        (true, _, _) => CANDIDATES[0], // 64x64（大形状・正方）
-        _ => CANDIDATES[3],            // 32x32（中形状・正方）
+    // 正方形状（縦長・横長いずれにも該当しない）は `LARGE`（旧 512）以上でも
+    // 一律 CANDIDATES[3] を返す。イシュー #744・2026-08-19 M4 Max 実機実測
+    // （5 回中央値）で 512〜4096 の正方全帯域において CANDIDATES[0]（64x64
+    // staged）が CANDIDATES[3]（32x32/bk16/staged）に一貫して劣後することを
+    // 確認した（size=2048: 64x64 staged ≈1.18 TFLOPS に対し 32x32 staged
+    // ≈3.31 TFLOPS、最良候補比で約 2.8 倍の逸失）。旧分岐（#188 導入時の
+    // `docs/perf/metal-gemm-dynamic-tile.md` #381 計測ではほぼ同等だった）は
+    // その後の staged 経路変更（#533 float4 協調ロード・#538 TGP パディング・
+    // #572 prepared 境界確立）を経て逆転しており、本分岐撤去は実測追従の是正
+    // （詳細・判断式は `docs/perf/metal-tile-select-correction.md`）。縦長・
+    // 横長の分岐は 2026-08-19 実測が正方形状のみを対象としているため変更
+    // しない（安全側）。CANDIDATES[0] 自体は候補配列に残す（縦長/横長の
+    // occupancy 縮退判定・`fallback_chain`・#747 の再利用に必要なため。並び
+    // 順・添字は `select` が依存するため変更不可）。
+    let shape_cfg = match (tall, wide) {
+        (true, _) => CANDIDATES[1], // 64x32（縦長）
+        (_, true) => CANDIDATES[2], // 32x64（横長）
+        _ => CANDIDATES[3],         // 32x32（正方。#744 是正後の一律選択）
     };
 
     // occupancy 縮退の対象は段 1 が大タイル系（CANDIDATES[0..=2]）を選んだ
     // 場合のみ。CANDIDATES[3]（既に中形状）は縮退不要、SINGLE_SIMDGROUP_8X8
     // は段 1 の SMALL 判定のみが返しうる（上の match の到達条件上ここには
-    // 来ない）。
+    // 来ない）。#744 是正後は段 1 が CANDIDATES[0]（64x64・正方大形状）を
+    // 返すことはなくなったため、縮退対象は実質 CANDIDATES[1]/[2]（縦長/横長）
+    // のみになる（CANDIDATES[0] との比較は将来 #747 等で正方分岐が復活する
+    // 場合に備え fail-safe として残す）。
     let is_large_tile_candidate =
         shape_cfg == CANDIDATES[0] || shape_cfg == CANDIDATES[1] || shape_cfg == CANDIDATES[2];
 
@@ -1462,10 +1489,19 @@ mod tests {
     }
 
     #[test]
-    fn select_picks_large_square_config_above_threshold() {
-        let cfg = select(1024, 1024, 1024);
-        assert_eq!(cfg, CANDIDATES[0]);
-        assert_eq!((cfg.bm, cfg.bn), (64, 64));
+    fn select_picks_mid_square_config_for_large_square_shapes() {
+        // #744・2026-08-19 M4 Max 実機実測（5 回中央値）: 512〜4096 の正方
+        // 全帯域で CANDIDATES[3]（32x32/bk16/staged）が CANDIDATES[0]
+        // （64x64/bk16/staged）に一貫して優越する（size=2048 で最良候補比
+        // 約 2.8 倍の逸失が是正前は生じていた）。旧テスト名
+        // `select_picks_large_square_config_above_threshold` は是正前の
+        // 「正方大形状 → CANDIDATES[0]」分岐を前提にしていたためリネームし
+        // 期待値を更新する（`docs/perf/metal-tile-select-correction.md`）。
+        for &size in &[512usize, 1024, 2048, 4096] {
+            let cfg = select(size, size, size);
+            assert_eq!(cfg, CANDIDATES[3], "size={size}");
+            assert_eq!((cfg.bm, cfg.bn), (32, 32), "size={size}");
+        }
     }
 
     #[test]
@@ -1523,22 +1559,20 @@ mod tests {
     }
 
     #[test]
-    fn select_with_occupancy_shrinks_512_square_under_m4_max_expected_params() {
-        // CANDIDATES[0]（64x64x16）: shared_mem_bytes=9472 → smem_groups_per_core=3
-        // → ideal_groups=40*3=120。512 正方の actual_groups=8*8=64 <= 120 で
-        // under-occupied のため CANDIDATES[3]（32x32）へ縮退する
-        // （#542 計画「現状分析」節の事前検証表）。
-        let cfg = select_with_occupancy(512, 512, 512, Some(m4_max_expected_params()));
-        assert_eq!(cfg, CANDIDATES[3]);
-    }
-
-    #[test]
-    fn select_with_occupancy_keeps_large_squares_from_1024_under_m4_max_expected_params() {
-        // 1024/2048/4096 正方はいずれも actual_groups > ideal_groups=120 の
-        // ため CANDIDATES[0]（64x64）を維持する（#542 計画「現状分析」節）。
-        for &size in &[1024usize, 2048, 4096] {
+    fn select_with_occupancy_square_shapes_bypass_occupancy_shrink_via_step1() {
+        // #744 是正後、段 1（形状判定）は正方形状に対して常に
+        // CANDIDATES[3]（大タイル系 CANDIDATES[0..=2] に非該当）を返すため、
+        // occupancy 縮退（段 2）の対象外となり params の値に関わらず
+        // CANDIDATES[3] のまま確定する。旧テスト
+        // `select_with_occupancy_shrinks_512_square_under_m4_max_expected_params`・
+        // `select_with_occupancy_keeps_large_squares_from_1024_under_m4_max_expected_params`
+        // は「正方大形状 → CANDIDATES[0]」だった段 1 の挙動を前提に occupancy
+        // 縮退の有無で 512 と 1024/2048/4096 を書き分けていたが、その分岐が
+        // 撤去されたため意味を失い本テストへ統合する
+        // （occupancy 縮退の検証自体は縦長/横長形状のテストが引き続き担う）。
+        for &size in &[512usize, 1024, 2048, 4096] {
             let cfg = select_with_occupancy(size, size, size, Some(m4_max_expected_params()));
-            assert_eq!(cfg, CANDIDATES[0], "size={size}");
+            assert_eq!(cfg, CANDIDATES[3], "size={size}");
         }
     }
 
@@ -1566,15 +1600,21 @@ mod tests {
         // 境界一致（actual == ideal）は縮退側に倒れる fail-safe 契約
         // （`is_underoccupied` の既存契約。本テストは select_with_occupancy
         // 統合後もその契約が保たれることを固定する）。
+        //
+        // #744 是正で段 1 が正方形状に対し CANDIDATES[0]（大タイル系）を
+        // 返さなくなったため、旧テストの m=n=768 正方形状は本境界を検証
+        // できなくなった（段 1 で CANDIDATES[3] が確定し occupancy 縮退の
+        // 対象外になる）。縦長形状（CANDIDATES[1]・64x32）へ retarget する:
         // gpu_core_count=24・十分大きい max_threadgroup_memory_bytes（SMEM
         // 制約が効かず effective_multiplier が IDEAL_GROUPS_MULTIPLIER_F32=6
-        // のまま）なら ideal_groups(CANDIDATES[0]) = 24*6 = 144。
-        // m=n=768（大形状・正方）: actual_groups = ceil(768/64)^2 = 12*12 = 144。
+        // のまま）なら ideal_groups(CANDIDATES[1]) = 24*6 = 144。
+        // m=2304, n=128（tall: m >= 2*n）: 段 1 は CANDIDATES[1] を選ぶ。
+        // actual_groups = ceil(2304/64) * ceil(128/32) = 36*4 = 144。
         let params = OccupancyParams {
             gpu_core_count: 24,
             max_threadgroup_memory_bytes: 1024 * 1024,
         };
-        let cfg = select_with_occupancy(768, 768, 768, Some(params));
+        let cfg = select_with_occupancy(2304, 128, 768, Some(params));
         assert_eq!(cfg, CANDIDATES[3]);
     }
 
