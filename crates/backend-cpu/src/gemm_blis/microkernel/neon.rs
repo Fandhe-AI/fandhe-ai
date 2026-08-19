@@ -330,21 +330,33 @@ fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
 /// ストアを行う（[`compute`] と同じ分離方針。#691 レビュー P1 再指摘
 /// `PRRT_kwDOTuUCJc6ZrQZG` 対応の踏襲）。
 fn compute_b_laneq(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
-    // オフセット上界の証明は [`compute`] と同一の入口契約（呼び出し元が
+    // SAFETY: オフセット上界の証明は [`compute`] と同一の入口契約（呼び出し元が
     // `check_panel_lengths`／`check_c_tile_bounds` を通す）に基づく:
     // - bp: p*NR..p*NR+12 の最大は p=kc_len-1 でも (kc_len-1)*NR+12 =
-    //   bp.len() を超えない。
+    //   bp.len() を超えない（panel 長 = kc_len*NR 以上であることを
+    //   `check_panel_lengths` が保証）。
     // - ap: p*MR..p*MR+8 の最大は p=kc_len-1 でも (kc_len-1)*MR+8 =
-    //   ap.len() を超えない。
-    // - c: [`compute`] と同じく `(MR-1)*ldc+NR <= c.len()` が入口 assert
-    //   で保証済み。列優先アクセス（`(4*h+r)*ldc+j`、r in 0..4・h in
-    //   0..2・j in 0..NR）の最大オフセットは r=3,h=1,j=NR-1 のとき
-    //   `(MR-1)*ldc+NR-1 < c.len()` に一致し、行優先の [`compute`] と
+    //   ap.len() を超えない（panel 長 = kc_len*MR 以上であることを同様に
+    //   保証）。
+    // - c: [`compute`] と同じく `(MR-1)*ldc+NR <= c.len()`（C タイル境界）が
+    //   入口 assert で保証済み。列優先アクセス（`(4*h+r)*ldc+j`、r in
+    //   0..4・h in 0..2・j in 0..NR）の最大オフセットは r=3,h=1,j=NR-1 の
+    //   とき `(MR-1)*ldc+NR-1 < c.len()` に一致し、行優先の [`compute`] と
     //   同じ要素集合を走査するのみで新たな範囲外アクセスを生まない。
-    // k=4 アンロール（#561 と同型）: 主ループはチャンク内（p..p+3、p は
-    // 4 の倍数）でのみ先読みし、`k_main = kc_len - kc_len%4` のとき
-    // p+3 <= k_main-1 < kc_len が常に成り立つため上記オフセット上界の
-    // 内側に収まる。
+    // - k=4 アンロール（#561 と同型）の先読み上界: 主ループはチャンク内
+    //   （p..p+3、p は 4 の倍数）でのみ先読みし、`k_main = kc_len -
+    //   kc_len%4` のとき p+3 <= k_main-1 < kc_len が常に成り立つため
+    //   上記オフセット上界の内側に収まる。
+    // - 各 intrinsic のポインタ有効範囲: 入口の C ロード・主／端数ループの
+    //   `vld1q_f32`／`vld1q_f32_x2`／`vld1q_f32_x3` はいずれも
+    //   `.as_ptr()` から連続 4／8／12 要素分を読むのみで、読み取り元は
+    //   上記で範囲内が証明済みのスライス（`ap`／`bp`）またはスタック上の
+    //   固定長配列 `lane: [f32; 4]`（常に 4 要素分の有効領域を持つ）の
+    //   内部ポインタである。出口の `vst1q_f32` も同じスタック上
+    //   `lane: [f32; 4]` への書き込みのみで `c` へは直接ストアせず、
+    //   スカラー代入で `c[(4*h+r)*ldc+j]` へ書き戻す（この添字は上記
+    //   `(MR-1)*ldc+NR-1 < c.len()` の証明と同一集合）。`vfmaq_laneq_f32`
+    //   はポインタを取らずレジスタのみを扱うため対象外。
     unsafe {
         // C タイルロード＋転置: acc[j][h] = C の列 j・行 4h..4h+4
         // （[`compute`] の行優先 acc[i][g] = C の行 i・列 4g..4g+4 とは
