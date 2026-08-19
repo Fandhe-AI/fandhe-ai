@@ -125,9 +125,13 @@ METRICS="sm__warps_active.avg.pct_of_peak_sustained_active,\
 lts__t_sector_hit_rate.pct,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
-dram__bytes.sum.per_second,\
+lts__t_bytes.sum.per_second,\
 gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,\
 sm__inst_issued.avg.pct_of_peak_sustained_active"
+# `dram__bytes.sum.per_second` は GB10（sm_121/Blackwell）に存在しないため
+# §3.1 の読み替えどおり `lts__t_bytes.sum.per_second` を使う（未対応メトリクス
+# 指定は ncu が fail-closed で拒否するため、実採取前に §3.1 の
+# `--query-metrics` 確認を必ず通す。出典: イシュー #739）。
 
 for path in wmma_tf32 mma_f16; do
   for size in 1024 2048 4096; do
@@ -135,7 +139,10 @@ for path in wmma_tf32 mma_f16; do
     # cuLaunchKernel を経由しないため ncu の起動通し番号に含まれず、
     # 加算は不要（§3.3 冒頭の説明・`gemm_profile_target.rs` の
     # `ALLOC_ZEROS_LAUNCHES` 定義コメント参照）。
-    if ! ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
+    # §3.1 のとおり GPU カウンタは RmProfilingAdminOnly 制限下にあり、
+    # sudo NOPASSWD 運用が確立済みのため sudo 経由で起動する（bare ncu では
+    # ERR_NVGPUCTRPERM になる。出典: イシュー #739）。
+    if ! sudo ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
         "$BIN" --path "$path" --size "$size" \
         2>&1 | tee "ncu-${path}-${size}.log"; then
       echo "abort: path=${path} size=${size} で gemm_profile_target または ncu が非 0 終了した" \
@@ -165,7 +172,8 @@ done
 # --launch-skip なしで先頭数回分の起動を全部並べ、カーネル名の並びを目視確認する。
 # `--launch-count` は `warmup + iters`（既定なら 2 + 5 = 7）以上を指定する
 # （memset がカーネル起動として現れない想定のため、旧版の `1 +` は不要）。
-ncu --launch-count 7 --print-kernel-base full \
+# §3.3 と同じ理由（RmProfilingAdminOnly）で sudo 経由とする。
+sudo ncu --launch-count 7 --print-kernel-base full \
     "$BIN" --path wmma_tf32 --size 1024 2>&1 | tee ncu-verify-launch-skip.log
 ```
 
@@ -233,15 +241,25 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
 
 ## 5. 分析・結論（2026-08-19 実測に基づく確定。出典: イシュー #739・#736・#740〜#743）
 
-上記 §4.2 の 2048→4096 実測から、**wmma_tf32 の 4096 崩壊は単一要因ではなく以下 3 要因の複合**と判断する:
+上記 §4.2 の 2048→4096 実測から、**wmma_tf32 の 4096 崩壊は単一要因ではなく以下の複合**と判断する:
 
 - **(A) L2 ヒット率の崩壊**（96.77% → 76.51%）: 主因候補 A に該当。→ B-8／新ツリー #736 配下の
   L2 スウィズル対応（#741）へつなぐ
-- **(B) SMEM バンクコンフリクトの非線形悪化**（ld: 8.53M → 67.5M。約 7.9 倍で、サイズ比 2 倍・
-  タイル数比 4 倍〈本ドキュメント §2〉を上回る増加率）: 主因候補 B に該当。→ B-7／#743（バンク
-  コンフリクト対策）へつなぐ
+- **(B) SMEM バンクコンフリクト（ld: 8.53M → 67.5M。約 7.91 倍）**: GEMM の総仕事量（`2 × M × N × K`
+  FLOP）は M=N=K を 2048→4096 にすると 8 倍（`(4096/2048)^3 = 8`）増えるため、タイル数比の 4 倍
+  （〈本ドキュメント §2〉）ではなく**総仕事量比 8 倍を分母に正規化して比較する必要がある**（codex-review
+  指摘。旧記述の「タイル数比 4 倍を上回る」は分母の選定が誤りだった）。実測の約 7.91 倍は総仕事量比
+  8 倍とほぼ同率（7.91/8 ≈ 0.989）であり、**単位仕事量あたりのバンクコンフリクト発生率はほぼ横ばい**
+  で「非線形悪化」とは言えない。よって (B) 単独をサイズ増に対する非線形な主因として確定はしない
+  （バンクコンフリクトの絶対件数自体が大きいこと自体は事実であり、B-7／#743（バンクコンフリクト対策）
+  は引き続き着手対象とするが、その根拠は「非線形悪化」ではなく「絶対件数が大きい」点に修正する）
 - **(C) 低 occupancy**（4096 で 16.6%）: 主因候補 C に該当。→ B-2／#742（パイプライン段数スイープ）
   へつなぐ
+
+**確定できる主因は (A) L2 ヒット率の崩壊・(C) 低 occupancy の 2 点**であり、(B) は「サイズ増に対する
+非線形悪化」としては確定しない（上記正規化の結果、総仕事量に比例した増加とほぼ整合するため）。
+B-7／#743 は (B) の絶対件数の大きさを理由に着手対象として残すが、優先順位づけの根拠を「非線形悪化」
+から修正する。
 
 **mma_f16 の 4096 側の低下（軽微・約 −4.8%。本ドキュメント §1）は主に L2 ヒット率の低下**
 （96.92% → 83.51%）が効いており、SMEM バンクコンフリクト（ld: 10.9K → 38.3K・st は両サイズとも 0）・
