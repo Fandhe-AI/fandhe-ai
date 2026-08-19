@@ -56,9 +56,14 @@ ceil(N/タイル)` vs `idealGroups = コア数 × 係数`）→ 閾値でタイ�
 
 **2026-08-19 実測での読み替え**: GB10（sm_121/Blackwell）では `dram__bytes.sum` /
 `gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed` 等の `dram__*` 系メトリクスが存在しなかった
-ため、DRAM throughput の代替として `lts__t_bytes.sum.per_second` を用いた（本節冒頭の想定どおりリネーム
-を確認したうえでの読み替え。出典: イシュー #739）。**`lts__t_bytes.sum`（絶対量。per-second でない値）は
-未計測**であり、下記 §4.2 の DRAM throughput 列は per-second 値のみの記録である旨に注意すること。
+ため、DRAM throughput の**代替ではなく**、L2（LTS）を通過するトラフィックの参考指標として
+`lts__t_bytes.sum.per_second` を用いた（本節冒頭の想定どおりリネームを確認したうえでの読み替え。
+出典: イシュー #739）。**`lts__t_bytes.sum.per_second` は L2 ヒットによる転送も含む L2/LTS 通過
+トラフィックであり、L2 を経由しない DRAM 直接転送のみを表す真の DRAM throughput とは異なる**
+（codex-review 指摘。L2 ヒット率が変化すると L2/LTS 通過量も連動して変化するため、L2 ヒット率の
+変化と切り離してこの値単独で DRAM 帯域律速を判定しない）。以降本ドキュメントでは列名・注記を
+「L2/LTS throughput（DRAM 非代替）」と表記する。**`lts__t_bytes.sum`（絶対量。per-second でない値）は
+未計測**であり、下記 §4.2 の当該列は per-second 値のみの記録である旨に注意すること。
 
 ```sh
 ssh "$CUDA_NODE" 'ncu --version'
@@ -67,7 +72,7 @@ ssh "$CUDA_NODE" 'ncu --version'
 # 旧名が実機に存在しないこと」を確認する目的でのみ列挙する（§3.1 実測どおり
 # GB10 では非該当がヒットしない想定。実採取対象は §3.3 の METRICS＝
 # `lts__t_bytes.sum.per_second` に一本化済み）。
-ssh "$CUDA_NODE" 'ncu --query-metrics | grep -E "sm__warps_active|lts__t_sector_hit_rate|l1tex__data_bank_conflicts|dram__bytes|gpu__dram_throughput|sm__inst_issued"'
+ssh "$CUDA_NODE" 'ncu --query-metrics | grep -E "sm__warps_active|lts__t_sector_hit_rate|lts__t_bytes|l1tex__data_bank_conflicts|dram__bytes|gpu__dram_throughput|sm__inst_issued"'
 ```
 
 `--query-metrics` の出力でメトリクス名の存在を確認してから採取する（sm_121/Blackwell 世代でのリネームに
@@ -133,9 +138,10 @@ lts__t_bytes.sum.per_second,\
 sm__inst_issued.avg.pct_of_peak_sustained_active"
 # `dram__bytes.sum.per_second` / `gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed`
 # はいずれも GB10（sm_121/Blackwell）に存在しない（§3.1 実測）ため METRICS
-# から除外し、DRAM throughput の代替として `lts__t_bytes.sum.per_second` に
-# 一本化する（未対応メトリクス指定は ncu が fail-closed で拒否するため、
-# 実採取前に §3.1 の `--query-metrics` 確認を必ず通す。出典: イシュー #739）。
+# から除外し、L2/LTS throughput（DRAM 非代替。§3.1 参照）の参考指標として
+# `lts__t_bytes.sum.per_second` に一本化する（未対応メトリクス指定は ncu が
+# fail-closed で拒否するため、実採取前に §3.1 の `--query-metrics` 確認を
+# 必ず通す。出典: イシュー #739）。
 
 for path in wmma_tf32 mma_f16; do
   for size in 1024 2048 4096; do
@@ -222,7 +228,7 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
 
 **2026-08-19 実測**（出典: イシュー #739。1024 行は転記元に値が無いため「(未採取)」のまま残す）:
 
-| path | size | achieved occupancy（%） | L2 hit rate（%） | SMEM bank conflicts（ld, sum） | DRAM throughput（bytes/s） | instruction issue rate（%peak） |
+| path | size | achieved occupancy（%） | L2 hit rate（%） | SMEM bank conflicts（ld, sum） | L2/LTS throughput（bytes/s、DRAM 非代替） | instruction issue rate（%peak） |
 |------|------|--------------------------|--------------------|-------------------------------------|-----------------------------|-------------------------------------|
 | wmma_tf32 | 1024 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
 | wmma_tf32 | 2048 | (未採取) | 96.77 | 8.53M | (未採取) | (未採取) |
@@ -240,8 +246,9 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
 - **SMEM bank conflicts の ld/st 区別**: mma_f16 は st=0 であることがイシュー本文に明記されている
   （出典: イシュー #743）。wmma_tf32 の st は転記元に個別値の記載が無いため、上表は ld（sum）のみを
   記録する。
-- DRAM throughput 列は §3.1 の読み替え（`lts__t_bytes.sum.per_second` 代替）を前提とするが、イシュー
-  本文に個別数値の記載が無いため「(未採取)」のまま残す。
+- L2/LTS throughput 列は §3.1 のとおり `lts__t_bytes.sum.per_second`（L2 ヒット含む L2/LTS 通過
+  トラフィックであり DRAM throughput の代替ではない）を記録する列だが、イシュー本文に個別数値の
+  記載が無いため「(未採取)」のまま残す。
 
 ## 5. 分析・結論（2026-08-19 実測に基づく確定。出典: イシュー #739・#736・#740〜#743）
 
@@ -257,13 +264,19 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
   で「非線形悪化」とは言えない。よって (B) 単独をサイズ増に対する非線形な主因として確定はしない
   （バンクコンフリクトの絶対件数自体が大きいこと自体は事実であり、B-7／#743（バンクコンフリクト対策）
   は引き続き着手対象とするが、その根拠は「非線形悪化」ではなく「絶対件数が大きい」点に修正する）
-- **(C) 低 occupancy**（4096 で 16.6%）: 主因候補 C に該当。→ B-2／#742（パイプライン段数スイープ）
-  へつなぐ
+- **(C) 低 occupancy**（4096 で 16.6%）: 上表 §4.2 のとおり 2048 側の occupancy は「(未採取)」であり、
+  2048→4096 の**変化**（低下したかどうか）は実測比較できていない。確定できるのは「4096 単体の値が
+  16.6% と低い」という絶対水準のみであり、これをサイズ増に伴う低下の**確定できる主因**として結論する
+  ことはできない（codex-review 指摘。比較対象がない一点のみでの因果確定を避ける）。主因**候補** C として
+  扱い、2048 側の occupancy 実測（再実機セッション）を待って確定判断する。→ B-2／#742（パイプライン
+  段数スイープ）へつなぐ
 
-**確定できる主因は (A) L2 ヒット率の崩壊・(C) 低 occupancy の 2 点**であり、(B) は「サイズ増に対する
-非線形悪化」としては確定しない（上記正規化の結果、総仕事量に比例した増加とほぼ整合するため）。
-B-7／#743 は (B) の絶対件数の大きさを理由に着手対象として残すが、優先順位づけの根拠を「非線形悪化」
-から修正する。
+**実測から確定できる主因は (A) L2 ヒット率の崩壊の 1 点**である。(C) 低 occupancy は 4096 単体の絶対値が
+低いことは実測済みだが、2048 側が未採取のため「サイズ増に伴う低下」としては確定せず主因候補にとどめる
+（上記 (C) 参照）。(B) は「サイズ増に対する非線形悪化」としては確定しない（上記正規化の結果、総仕事量に
+比例した増加とほぼ整合するため）。B-7／#743 は (B) の絶対件数の大きさを理由に着手対象として残すが、
+優先順位づけの根拠を「非線形悪化」から修正する。B-2／#742 は (C) の確定判断待ちの候補として着手対象に
+残す。
 
 **mma_f16 の 4096 側の低下（軽微・約 −4.8%。本ドキュメント §1）は主に L2 ヒット率の低下**
 （96.92% → 83.51%）が効いており、SMEM バンクコンフリクト（ld: 10.9K → 38.3K・st は両サイズとも 0）・
