@@ -83,6 +83,16 @@ name = "gemm_mma_swizzle_bench"
 required-features = ["internal-diagnostics"]
 
 [[example]]
+# イシュー #742: TF32 opt-staged 段数スイープ計測は動的共有メモリ変種
+# （`backend_cuda::diagnostics::render_wmma_tf32_staged_dyn`・
+# `CompiledWmmaTf32StagedDynKernel`・`wmma_tf32_staged_dyn_smem_bytes`）を
+# 使うため、`gemm_profile_target`・`gemm_mma_swizzle_bench` と同じ feature
+# ゲートを要求する（`examples/gemm_wmma_tf32_staged_stages_bench.rs` 冒頭
+# コメント参照）。
+name = "gemm_wmma_tf32_staged_stages_bench"
+required-features = ["internal-diagnostics"]
+
+[[example]]
 # イシュー #741: TF32 opt-staged 経路への swizzle 横展開の A/B ベンチ
 # （`gemm_mma_swizzle_bench` と同型）。`gemm.rs::
 # CudaGemm::new_with_tf32_staged_swizzle`（同 feature ゲート）を使う。
