@@ -94,11 +94,11 @@ pub enum GemmVariant {
     /// `USE_TGP_STAGING`）で特殊化してディスパッチする。行列サイズから
     /// 構成を自動選択する入口は [`MetalGemm::dispatch_auto`]（[`tile::select`]
     /// を使う。`tile::select_with_occupancy` による occupancy 縮退はイシュー
-    /// #542 で実装済みだが、実機実測（受け入れ基準 2: size ∈
-    /// {512,1024,2048,4096} での `select()` 比の性能非劣化確認。
-    /// `docs/perf/metal-gemm-occupancy-select.md` §5）が未完了のため
-    /// `dispatch_auto` への適用は見送っている。非劣化確認後に有効化する
-    /// 判断は PR レビュー〈codex-review P1〉を経て行う）。`m`・`n`・`k` は
+    /// #542 で実装済みだが、`dispatch_auto` への適用はイシュー #747 で
+    /// **不採用確定**（#744 是正により、実測帯域〈512/1024/2048/4096〉では
+    /// 段 1〈形状判定〉が occupancy 縮退を経ず `select()` と同一結果へ収束
+    /// するため。`docs/perf/metal-gemm-occupancy-select.md`「#747 判断」節）。
+    /// `m`・`n`・`k` は
     /// `Simdgroup` と同じく 8 の倍数へパディングして実行する
     /// （[`MetalGemm::dispatch_variant`] 参照）。
     SimdgroupTiled(TileConfig),
@@ -333,13 +333,14 @@ impl MetalGemm {
     /// イシュー #188 計画「スコープ外」節）。
     ///
     /// **occupancy 判定（イシュー #542・[`tile::select_with_occupancy`]）は
-    /// 未適用**: `ctx.occupancy_params()` は実機値（GPU コア数・
-    /// threadgroup memory 上限）からキャッシュされるが、`ideal_groups` の
-    /// 係数（`IDEAL_GROUPS_MULTIPLIER_F32` 等）は MFA 経験式由来の暫定値で
-    /// あり M4 Max 実機での `select()` 比・性能非劣化確認
-    /// （`docs/perf/metal-gemm-occupancy-select.md` §5「要実機実測記入」）が
-    /// 未完了のため、本番ディスパッチへは組み込まない（codex-review P1・
-    /// PR #684）。実機実測で非劣化を確認したうえで別 PR にて有効化する。
+    /// 不採用確定（イシュー #747）**: `ctx.occupancy_params()` は実機値
+    /// （GPU コア数・threadgroup memory 上限）からキャッシュされるが、
+    /// #744 是正（段 1 の正方立方形状判定是正）により実測帯域
+    /// 〈512/1024/2048/4096〉では occupancy 縮退の適用対象が実質消滅し
+    /// `select()` と常に同一結果になることを確認したため、本番ディスパッチ
+    /// へは組み込まない（`docs/perf/metal-gemm-occupancy-select.md`
+    /// 「#747 判断」節・`crate::tile::select_with_occupancy` ドキュメンテー
+    /// ションコメント参照）。
     pub fn dispatch_auto(
         &self,
         ctx: &MetalContext,
@@ -362,9 +363,9 @@ impl MetalGemm {
     /// する（`docs/dispatch-rules-design.md` §5.3 決定表の Metal 側行）:
     ///
     /// - `MatrixUnit` → [`Self::dispatch_auto`]（[`tile::select`] による
-    ///   動的タイル選択。occupancy 判定〈イシュー #542〉は実機実測未完了の
-    ///   ため未適用〈[`Self::dispatch_auto`] ドキュメンテーションコメント
-    ///   参照〉。「Metal GEMM を実行すると決まった後のタイル構成選択」と
+    ///   動的タイル選択。occupancy 判定〈イシュー #542〉はイシュー #747 で
+    ///   不採用確定のため未適用〈[`Self::dispatch_auto`] ドキュメンテー
+    ///   ションコメント参照〉。「Metal GEMM を実行すると決まった後のタイル構成選択」と
     ///   いう別レイヤの責務は [`Self::dispatch_auto`] のドキュメンテー
     ///   ションコメントどおり変更しない。実装計画 §3.3）
     /// - `Tiled` → [`GemmVariant::Tiled`]

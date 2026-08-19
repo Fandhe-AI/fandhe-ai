@@ -3,6 +3,12 @@
 イシュー #188「perf(backend-metal): TASK-1.8f 動的タイル選択（行列サイズ別パラメータ化）の実装」の実測記録テンプレート。
 受け入れ条件「動的タイル選択（`dispatch_auto`）が simdgroup 版（TASK-1.8c・#40）比で性能向上を示す実測記録」に対応する。
 
+> **選択閾値は #744 で是正済み**: 本ファイルの実測値・本文は当時の記録のまま変更していないが、
+> `crate::tile::select`（`select_with_occupancy` 段 1）の正方大形状閾値（下記「実測結果」節の
+> 64x64 staged 優位の前提）はその後の staged 経路変更（#533/#538/#572）で実測が逆転したため、
+> イシュー #744・2026-08-19 M4 Max 実機実測に基づき是正済み。是正の判断根拠・実測値は
+> `docs/perf/metal-tile-select-correction.md` を参照。
+
 ## 状態: MSL 構文検証・数値一致は実機検証済み（イシュー #380）。**TFLOPS 実測は #381 で完了**
 
 本ファイルは当初 Linux worktree で作成され、Metal 実機（Apple Silicon）が同一セッションで使用できなかった
