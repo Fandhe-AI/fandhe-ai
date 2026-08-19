@@ -532,6 +532,25 @@ fn main() {
             None
         }
     };
+    // イシュー #740: `CudaMmaGemm::new`（本番既定コンストラクタ）は L2
+    // 再利用のためのタイル→SM 割り当てスウィズル（イシュー #499）を
+    // `device.multiprocessor_count()` から動的選択した group_width で常に
+    // 適用する。実際に選択された幅を起動時診断として出力する（#733 の
+    // `wmma_tf32_staged` 可用性出力と同型の可観測性。以降の mma_f16
+    // 計測値がこの swizzle 適用済みカーネルによるものであることを明示
+    // する）。
+    if let Some(g) = &mma_gemm {
+        match g.swizzle_group_width() {
+            Some(w) => println!(
+                "mma_f16 kernel: threadblock swizzle group_width={w} (production-wired, \
+                 issue #740; see docs/perf/cuda-gemm-swizzle-ab.md)."
+            ),
+            None => println!(
+                "mma_f16 kernel: threadblock swizzle NOT applied (unexpected for \
+                 CudaMmaGemm::new; issue #740 wiring may have regressed)."
+            ),
+        }
+    }
 
     // `run_wmma_tf32`/`run_f16` は opt カーネル（共有メモリ・タイル最適化版）
     // が `new` 時点で利用不能な場合、基本版へ「公開シグネチャ・呼び出し側の

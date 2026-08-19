@@ -1768,15 +1768,16 @@ extern "C" __global__ void gemm_mma_f16(
 /// [`mma_f16_source`] のアンカー 2 行（`block_row0`/`block_col0` のブロック
 /// 原点計算）を、`swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
 /// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
-/// 生成する（イシュー #499 受け入れ基準 1〜2 項の opt-in 経路）。
+/// 生成する（イシュー #499 受け入れ基準 1〜2 項。イシュー #740 で本番
+/// 既定コンストラクタへ結線済み）。
 ///
 /// **`mma_f16_source()`（既定 config の render 結果。イシュー #516 で
 /// `MMA_F16` 定数からテンプレート展開へ移行済み）自体は変更しない**
 /// （`replacen` で新規 `String` を都度構築するのみ）。呼び出し元は
-/// `gemm_mma.rs::CudaMmaGemm::
-/// new_with_swizzle` のみであり、本番ディスパッチ経路（`ops.rs`／
-/// `gemm_auto.rs`）からは到達しない（本ファイルクレートルート
-/// `lib.rs` 冒頭コメント「#499」節参照）。
+/// `gemm_mma.rs::CudaMmaGemm::new`（本番既定。動的選択幅）・
+/// `new_with_swizzle`（診断用・明示幅指定）であり、`ops.rs`／
+/// `gemm_auto.rs` は mma_f16 経路自体を参照しないため無変更のまま
+/// （本ファイルクレートルート `lib.rs` 冒頭コメント「#740」節参照）。
 ///
 /// # remap の整数式（`swizzle.rs::swizzled_block_idx` と単一の設計を共有）
 ///
@@ -1799,15 +1800,12 @@ extern "C" __global__ void gemm_mma_f16(
 /// select_swizzle_group_width` の候補 `{8, 16}` 以外の値も受理するが
 /// `1` 未満・`1` そのものは拒否する）。
 ///
-/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
-/// feature 既定 off）からの唯一の呼び出し元 `gemm_mma.rs::
-/// CudaMmaGemm::new_with_swizzle` が同 feature でゲートされたため
-/// （PR #667 codex-review P1 是正）、`cargo build`（feature 指定なし）では
-/// 呼び出し元が存在せず dead-code lint が誤検出する。本関数自体は
-/// `#[cfg(test)]` 下のソース生成検査テスト（本ファイル末尾）からは feature
-/// 非依存に呼ばれ続ける（`swizzle.rs::GROUP_WIDTH_CANDIDATES` と同じ
-/// 判断パターン）。
-#[allow(dead_code)]
+/// イシュー #740 で `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ。
+/// feature 非依存）が動的選択した `group_width` を渡して直接呼ぶよう結線
+/// したため、本関数は通常ビルド（feature 指定なし）でも常に到達可能であり
+/// `#[allow(dead_code)]` は不要になった（旧 #499 セッション時点の判断は
+/// 上記変更前のコメント参照。`internal-diagnostics` feature 限定の
+/// `new_with_swizzle`〈診断用・明示幅指定〉も引き続き本関数を呼ぶ）。
 pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
     if group_width < 2 {
         return Err(crate::error::CudaError::InvalidShape {

@@ -116,19 +116,23 @@
 //!
 //! イシュー #499（GEMM 性能改善ツリー #479 の後続）で L2 再利用のための
 //! タイル→SM 割り当てスウィズル（[`swizzle`]・`kernels_mma::
-//! mma_f16_source_with_swizzle`・`gemm_mma::CudaMmaGemm::new_with_swizzle`）
-//! を **opt-in・`internal-diagnostics` feature（既定 off）ゲート経路**
-//! として追加した。本セッション実行環境（RTX 3060・NVRTC 非搭載）では
-//! 実機 A/B 計測ができないため（`docs/perf/cuda-gemm-swizzle-ab.md`
-//! 参照。#497 と同型の判断）、本番カーネル（`kernels_mma::MMA_F16`
-//! 定数）・本番ディスパッチ経路（`ops.rs`／`gemm_auto.rs`）は変更して
-//! いない。`swizzle` モジュールはホスト側グルーピング幅選択・remap の
-//! 純関数のみを持ち、`new_with_swizzle` を明示的に呼ばない限り到達
-//! しない。`new_with_swizzle` 自体も通常ビルド（feature 指定なし）では
-//! コンパイルされないため crate 外部から到達不能（PR #667 codex-review
-//! P1 是正: `#[cfg(feature = "internal-diagnostics")]`。`gemm_mma.rs::
-//! CudaMmaGemm::new_with_swizzle` ドキュメンテーションコメント参照）。
-//! 実機 A/B 計測・採否確定は実機ツリー #408 側セッションへ引き継ぐ。
+//! mma_f16_source_with_swizzle`）を opt-in・`internal-diagnostics`
+//! feature（既定 off）ゲート経路として追加した（#497 と同型の判断。本
+//! セッション実行環境〈RTX 3060・NVRTC 非搭載〉では実機 A/B 計測が
+//! できなかったため）。
+//!
+//! イシュー #740 で GB10 実機 A/B 計測（4096: ×1.5957・group_width=8、
+//! 512〜2048 は 0.97〜1.00 倍とほぼ中立。`docs/perf/cuda-gemm-swizzle-ab.md`
+//! §6 参照）を根拠に、`gemm_mma::CudaMmaGemm::new`（本番既定コンストラクタ。
+//! feature 非依存）へ**本番結線済み**とした。`new` は
+//! `device.multiprocessor_count()` から `swizzle::select_swizzle_group_width`
+//! でグルーピング幅を動的選択し、常に swizzle 変種カーネルをコンパイル
+//! する。`ops.rs`／`gemm_auto.rs` は mma_f16 経路自体を参照しないため
+//! （`CudaGemmAuto::run_f16` の MatrixUnit 分岐は WMMA のみ）無変更のまま
+//! であり、結線点は `CudaMmaGemm::new` に閉じる。swizzle 無適用の base
+//! カーネルは診断専用の `new_without_swizzle`（`internal-diagnostics`
+//! feature 限定）へ役割を移した（明示幅指定の `new_with_swizzle` も
+//! 引き続き診断用として存続）。
 //!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
@@ -299,7 +303,13 @@ pub mod diagnostics {
     /// のため、crate 外部（`examples/gemm_mma_swizzle_bench.rs`）から
     /// 到達するにはこの diagnostics 経由の薄いラッパーが必要
     /// （`mma_f16_block_tile`・`wmma_tf32_opt_block_tile` と同じ理由・
-    /// 同じ feature ゲート方針）。
+    /// 同じ feature ゲート方針）。イシュー #740 で `gemm_mma::CudaMmaGemm::
+    /// new`（本番既定コンストラクタ。feature 非依存）自身も同じ
+    /// `swizzle::select_swizzle_group_width` を直接呼ぶよう結線されたため、
+    /// 本関数は A/B 計測（`examples/gemm_mma_swizzle_bench.rs`）専用の
+    /// 診断用ラッパーとしての役割に限定される（本番経路が実際に選択した
+    /// 幅の可観測性は `gemm_mma::CudaMmaGemm::swizzle_group_width`
+    /// アクセサ〈feature 非依存〉が担う）。
     pub fn mma_swizzle_group_width(num_sms: u32) -> u32 {
         swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }

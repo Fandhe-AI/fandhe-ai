@@ -93,9 +93,38 @@ pub(crate) fn validate_mma_grid_bounds(m: u32) -> Result<(), CudaError> {
 ///
 /// `stream` は `CudaDevice` から `Arc` クローンで受け取る（`gemm_wmma.rs`
 /// と同じ共有契約）。
+///
+/// `swizzle_group_width`: [`new`](Self::new) が動的選択した L2 再利用
+/// スウィズル（イシュー #499・#740）のグルーピング幅。`Some(_)` は
+/// swizzle 適用済み・`None` は無適用（[`new_without_swizzle`
+/// ](Self::new_without_swizzle) 経由）を意味する。[`swizzle_group_width`
+/// ](Self::swizzle_group_width) アクセサ経由で可観測にする（#733 の
+/// `wmma_tf32_staged` 可用性出力と同型の起動時診断。
+/// `examples/cuda_floor_bench.rs` 参照）。
 pub struct CudaMmaGemm {
     stream: Arc<CudaStream>,
     mma_f16: CudaFunction,
+    swizzle_group_width: Option<u32>,
+}
+
+/// [`check_min_compute_capability`] のゲート検査後、`source` を NVRTC
+/// コンパイルし `gemm_mma_f16` 関数ハンドルをロードする共通手順
+/// （[`CudaMmaGemm::new`]・[`new_with_swizzle`](CudaMmaGemm::new_with_swizzle)・
+/// [`new_without_swizzle`](CudaMmaGemm::new_without_swizzle) の 3
+/// コンストラクタが共有する。イシュー #740 で `new` が swizzle 変種を
+/// コンパイルするようになり、3 者ともコンパイル対象ソース文字列のみが
+/// 異なる同一手順になったため重複を排除した）。
+fn compile_mma_f16(
+    device: &CudaDevice,
+    source: &str,
+) -> Result<(Arc<CudaStream>, CudaFunction), CudaError> {
+    let arch = device.arch();
+    let ptx = compile_ptx(source, arch)?;
+    let mma_f16 = device
+        .context()
+        .load_module(ptx)?
+        .load_function("gemm_mma_f16")?;
+    Ok((device.stream().clone(), mma_f16))
 }
 
 /// [`MIN_COMPUTE_CAPABILITY_MAJOR`]（8.0）のゲート検査を行う（
@@ -138,13 +167,27 @@ impl CudaMmaGemm {
     /// 試みず `CudaError::TensorCoreUnsupported` を返す（`gemm_wmma.rs::new`
     /// と同じ判断。cc 判定をコンパイル前に行うことで、非対応デバイス上での
     /// 無駄な NVRTC 呼び出し・コンパイル失敗の紛れ込みを避ける）。(2)
-    /// `kernels_mma::mma_f16_source()` を `device.arch()` 向けに `nvrtc::compile_ptx`
-    /// でコンパイル。(3) `device.context().load_module()` →
-    /// `load_function("gemm_mma_f16")`。`libnvrtc` 不在時は
-    /// `CudaError::NvrtcUnavailable` を返す（`compile_ptx` のプローブゲート
-    /// を経由。panic しない。本セッションの実行環境がまさにこの分岐
-    /// ——CUDA driver はあるが NVRTC はない——であり、`tests/gemm_mma.rs`
-    /// の環境適応テストで確認済み。`kernels_mma.rs` 冒頭「検証状態」参照）。
+    /// `device.multiprocessor_count()`（`device.rs`。取得失敗時は
+    /// `unwrap_or(1).max(1)` で安全側フォールバック）から
+    /// `swizzle::select_swizzle_group_width` で L2 再利用のためのタイル→SM
+    /// 割り当てスウィズル（イシュー #499）のグルーピング幅を動的選択し、
+    /// `kernels_mma::mma_f16_source_with_swizzle(group_width)` を
+    /// `device.arch()` 向けに `nvrtc::compile_ptx` でコンパイルする（**本番
+    /// 既定へ結線済み**。イシュー #740。GB10 実機 A/B 計測で 4096:
+    /// ×1.5957（group_width=8）・512〜2048 は 0.97〜1.00 倍とほぼ中立を
+    /// 確認済み。`docs/perf/cuda-gemm-swizzle-ab.md` §6 参照。動的選択の
+    /// 候補は常に `{8, 16}` ⊆ `>= 2` のため
+    /// `mma_f16_source_with_swizzle` の fail-closed 検証は必ず通る）。(3)
+    /// `device.context().load_module()` → `load_function("gemm_mma_f16")`。
+    /// `libnvrtc` 不在時は `CudaError::NvrtcUnavailable` を返す
+    /// （`compile_ptx` のプローブゲートを経由。panic しない。本セッションの
+    /// 実行環境がまさにこの分岐——CUDA driver はあるが NVRTC はない——で
+    /// あり、`tests/gemm_mma.rs` の環境適応テストで確認済み。
+    /// `kernels_mma.rs` 冒頭「検証状態」参照）。
+    ///
+    /// swizzle 無適用の base カーネルが必要な場合（A/B 計測・bit 一致
+    /// 検証専用）は [`new_without_swizzle`](Self::new_without_swizzle)
+    /// （`internal-diagnostics` feature 限定）を使う。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         // カーネル定数の内部整合性（静的共有メモリの 48KiB 上限・`MMA_BK`
         // の `MMA_K` 整除性・`MMA_STAGES >= 2`）は `kernels_mma.rs` の
@@ -172,24 +215,57 @@ impl CudaMmaGemm {
 
         check_min_compute_capability(device)?;
 
-        let arch = device.arch();
-        let ptx = compile_ptx(kernels_mma::mma_f16_source(), arch)?;
-        let mma_f16 = device
-            .context()
-            .load_module(ptx)?
-            .load_function("gemm_mma_f16")?;
+        let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
+        let group_width = crate::swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels_mma::MMA_BM,
+            kernels_mma::MMA_BN,
+        );
+        let src = kernels_mma::mma_f16_source_with_swizzle(group_width)?;
+        let (stream, mma_f16) = compile_mma_f16(device, &src)?;
 
         Ok(Self {
-            stream: device.stream().clone(),
+            stream,
             mma_f16,
+            swizzle_group_width: Some(group_width),
+        })
+    }
+
+    /// `device` 上で、swizzle 変種と同じ [`check_min_compute_capability`]・
+    /// NVRTC コンパイル手順で、**swizzle remap を適用しない base カーネル**
+    /// （`kernels_mma::mma_f16_source()`）を NVRTC コンパイルし保持する
+    /// ハンドルを構築する。
+    ///
+    /// イシュー #740 で [`new`](Self::new) が swizzle 既定へ切り替わった
+    /// ため、A/B 計測（`examples/gemm_mma_swizzle_bench.rs`）・bit 一致
+    /// 検証（本ファイル `mod tests` の swizzle 変種比較テスト）が base
+    /// カーネルへアクセスする入口として新設した（役割が反転: #499
+    /// セッションでは swizzle 側がこの位置で opt-in ゲートされていたが、
+    /// 今後は base 側が診断専用としてゲートされる）。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （[`new_with_swizzle`](Self::new_with_swizzle) と同じ理由・同じ
+    /// feature ゲート方針。通常ビルドの公開 API 面からは除外する）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_without_swizzle(device: &CudaDevice) -> Result<Self, CudaError> {
+        check_min_compute_capability(device)?;
+
+        let (stream, mma_f16) = compile_mma_f16(device, kernels_mma::mma_f16_source())?;
+
+        Ok(Self {
+            stream,
+            mma_f16,
+            swizzle_group_width: None,
         })
     }
 
     /// `device` 上で、L2 再利用のためのタイル→SM 割り当てスウィズル
     /// （イシュー #499・`kernels_mma::mma_f16_source_with_swizzle`）を
-    /// 適用した変種カーネルを NVRTC コンパイルし保持するハンドルを構築
-    /// する（**opt-in・未計測の実験実装**。本ファイル冒頭・`lib.rs` 冒頭
-    /// コメント「#499」節参照）。
+    /// 明示指定の `group_width` で適用した変種カーネルを NVRTC コンパイル
+    /// し保持するハンドルを構築する（**診断用・明示幅指定の入口**。
+    /// [`new`](Self::new) が実機 A/B 計測に基づき本番既定へ結線済みの
+    /// ため〈イシュー #740〉、本コンストラクタは A/B 計測・bit 一致検証で
+    /// 候補幅 `{8, 16}` を個別に指定したい場合の用途に限定される）。
     ///
     /// [`new`](Self::new) と同じ cc ゲート・NVRTC コンパイル手順を共有し
     /// （[`check_min_compute_capability`]）、コンパイルするソース文字列
@@ -228,18 +304,28 @@ impl CudaMmaGemm {
     pub fn new_with_swizzle(device: &CudaDevice, group_width: u32) -> Result<Self, CudaError> {
         check_min_compute_capability(device)?;
 
-        let arch = device.arch();
         let src = kernels_mma::mma_f16_source_with_swizzle(group_width)?;
-        let ptx = compile_ptx(&src, arch)?;
-        let mma_f16 = device
-            .context()
-            .load_module(ptx)?
-            .load_function("gemm_mma_f16")?;
+        let (stream, mma_f16) = compile_mma_f16(device, &src)?;
 
         Ok(Self {
-            stream: device.stream().clone(),
+            stream,
             mma_f16,
+            swizzle_group_width: Some(group_width),
         })
+    }
+
+    /// [`new`](Self::new) が動的選択した L2 再利用スウィズル（イシュー
+    /// #499・#740）のグルーピング幅を返す（構造体ドキュメンテーション
+    /// コメント参照）。`None` は swizzle 無適用
+    /// （[`new_without_swizzle`](Self::new_without_swizzle) 経由。
+    /// `internal-diagnostics` feature 限定）を意味する。
+    ///
+    /// `examples/cuda_floor_bench.rs` の起動時診断（#733 の
+    /// `wmma_tf32_staged` 可用性出力と同型）が、本番経路で実際に選択された
+    /// `group_width` を可観測にするために呼ぶ。feature 非依存の常時公開
+    /// API（`new` 自体が feature 非依存のため）。
+    pub fn swizzle_group_width(&self) -> Option<u32> {
+        self.swizzle_group_width
     }
 
     /// f16 `mma.sync`/`ldmatrix`/`cp.async` GEMM を実行する。C = A @ B
@@ -608,7 +694,9 @@ mod tests {
     }
 
     /// #499 受け入れ基準（実機検証）: [`CudaMmaGemm::new_with_swizzle`]
-    /// が生成する各 `group_width` の変種が、[`CudaMmaGemm::new`]（base）と
+    /// が生成する各 `group_width` の変種、および本番既定の
+    /// [`CudaMmaGemm::new`]（イシュー #740 で swizzle 既定化済み）自身が、
+    /// swizzle 無適用の [`CudaMmaGemm::new_without_swizzle`]（base）と
     /// **ビット一致**の出力を返すことを確認する。
     ///
     /// swizzle はブロックがどの `(m_block, n_block)` を担当するかの割り当て
@@ -646,8 +734,14 @@ mod tests {
     fn mma_f16_swizzle_variant_matches_base_bit_exact_output() {
         let device =
             CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-        let base = CudaMmaGemm::new(&device)
-            .expect("base CudaMmaGemm::new must succeed on ignored test runner");
+        let base = CudaMmaGemm::new_without_swizzle(&device)
+            .expect("base CudaMmaGemm::new_without_swizzle must succeed on ignored test runner");
+        // 本番既定コンストラクタ（イシュー #740 で swizzle 既定化済み）
+        // 自身も base と bit 一致することを検査する（`new_with_swizzle`
+        // 経由の明示幅指定だけでなく、実際の本番結線経路そのものを検証
+        // 対象に含める）。
+        let production = CudaMmaGemm::new(&device)
+            .expect("production CudaMmaGemm::new must succeed on ignored test runner");
 
         let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
         let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
@@ -713,6 +807,27 @@ mod tests {
                      変種の出力が base と bit 一致しません（remap がブロック内部の \
                      計算・アキュムレート順序に影響していないか確認すること）"
                 );
+
+                // 本番既定コンストラクタ（`new`）自身も base と bit 一致
+                // することを検査する（イシュー #740。`new` は
+                // `dynamic_group_width` と同じ選択式で自身の group_width を
+                // 決めるため、`variant`〈`new_with_swizzle(dynamic_group_width)`〉
+                // と同一カーネルになるはずだが、実際の本番結線経路
+                // （`new` 自体）を独立に検証する）。
+                if group_width == dynamic_group_width {
+                    let production_c = production.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
+                        panic!(
+                            "production CudaMmaGemm::new run_f16 failed for shape \
+                             (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
+                    assert_eq!(
+                        production_c, base_c,
+                        "shape (m={m}, n={n}, k={k}): 本番既定コンストラクタ \
+                         CudaMmaGemm::new（イシュー #740 で swizzle 既定化済み）の \
+                         出力が base と bit 一致しません"
+                    );
+                }
             }
         }
     }
