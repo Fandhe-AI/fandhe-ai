@@ -25,7 +25,7 @@ GEMM 性能改善ツリー Phase F による Optimized 段 5 行の再確定）�
 | バックエンド・精度（比較対象・実機） | 実測比率の最小値（2048/4096、出典） | 初期リリース下限 | 最適化後下限 | 状態 |
 |---|---|---|---|---|
 | CPU 対 PyTorch CPU（Apple M4 Max、PyTorch 2.13.0 macOS arm64） | 初期リリース: 5.3%（`03-poc/poc-v2-1-tensor-cpu-gemm/README.md`「計測結果」節）／最適化後: 24.7%（size=2048、`docs/perf/cpu-gemm-optimized-remeasurement.md`。#574・PR #713） | **5%** | **20%** | 確定（最適化後は #577・§10 で既存確定値 20% と一致を再確認。値は変更なし） |
-| CUDA f32 対 PyTorch CUDA（DGX Spark GB10、PyTorch 2.13.0+cu130） | 初期リリース: 25.64〜25.69%（`docs/perf/cuda-floor-remeasurement.md`「実測結果（#390 実機実測）」節、size=4096 が最小）／最適化後: 51.96%（size=4096・Rust/PyTorch とも 5 run 中央値、`docs/perf/cuda-optimized-remeasurement.md`。#571・PR #725） | **10%** | **50%** | 初期リリース: 確定／最適化後: **確定**（#577・§10。25%→50% へ引き上げ。限定条件: §9 由来の限定条件 1〜3〈候補経路 `wmma_tf32` は #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続〉に加え、限定条件 4〈根拠実測が `wmma_tf32_staged` 経路で `cuda-parity-baseline.md` にベースライン未確定・parity 非後退判定不能。後続タスクで追跡〉） |
+| CUDA f32 対 PyTorch CUDA（DGX Spark GB10、PyTorch 2.13.0+cu130） | 初期リリース: 25.64〜25.69%（`docs/perf/cuda-floor-remeasurement.md`「実測結果（#390 実機実測）」節、size=4096 が最小）／最適化後: 51.96%（size=4096・Rust/PyTorch とも 5 run 中央値、`docs/perf/cuda-optimized-remeasurement.md`。#571・PR #725） | **10%** | **50%** | 初期リリース: 確定／最適化後: **確定**（#577・§10。25%→50% へ引き上げ。限定条件: §9 由来の限定条件 1〜3〈候補経路 `wmma_tf32` は #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続〉に加え、限定条件 4〈根拠実測が `wmma_tf32_staged` 経路〉は #726・2026-08-19 の実機ベースライン確立で**解消済み**〈`cuda-parity-baseline.md` §3・staged 行の非後退 pass 確認済み〉） |
 | CUDA f16 対 PyTorch f16（同上） | 初期リリース: 12.97%（同上、size=2048 が最小）／最適化後: 37.47%（size=4096・Rust/PyTorch とも 5 run 中央値、同上） | **下限を設定しない**（脚注参照） | **35%** | 初期リリース: 未設定（構造的に指標無意味）／最適化後: **確定**（#577・§10。10%→35% へ引き上げ。限定条件: §9 由来の限定条件 1〜3〈候補経路 `mma_f16` は #389 §5.3 の parity 恒常 fail 対象と一致・#186 解決後の再確認を継続〉。丸め刻み境界近傍のため 5 run 計測で確認済み。`mma_f16` は非後退確認済み） |
 | Metal f32 対 PyTorch MPS（Apple M4 Max、PyTorch 2.13.0） | 初期リリース: 23.2%（`03-poc/poc-v2-4-metal-gemm/README.md`「PyTorch MPS 比」表、size=4096）／最適化後: 13.01%（size=4096、`docs/perf/metal-floor-remeasurement.md`。#572・PR #725） | **20%** | **10%** | 確定（最適化後は #577・§10。旧 30% は §4 準拠前の非互換な旧計測系列由来のため、現行 prepared 計測系列〈`dispatch_tiled_prepared`〉で 30%→10% へ再確定。限定条件なし） |
 | Metal f16 対 PyTorch MPS f16（同上） | 初期リリース: 18.6%（`docs/perf/metal-f16-vs-mps-f16.md`「実測結果」節、size=4096。#383）／最適化後: 18.78%（size=4096、`docs/perf/metal-floor-remeasurement.md`。同上） | **15%** | **15%**（新設） | 初期リリース: 確定（#386・実機実測に基づく。数値一致 #380 全 PASS・限定条件なし）／最適化後: **確定**（#577・§10 で新設。数値一致〈`cpu_metal_f16_parity.rs` 6 件〉全 PASS・限定条件なし） |
@@ -131,10 +131,11 @@ v2 では各バックエンドのカーネルを個別に自作するため最�
 （#479）Phase F の再計測（`docs/perf/cuda-optimized-remeasurement.md`）を踏まえ、#577（§10）で
 下限値そのものは 25%→50%（CUDA f32）・10%→35%（CUDA f16）へ更改済みだが、上記限定条件
 （候補経路が parity 恒常 fail 対象と一致・#186 解決後の再確認）は解消しておらず継続する。加えて
-CUDA f32 は新規の限定条件が付く: 50% の根拠実測は `launch_wmma_tf32` の 3 段選択が判定対象形状で
-選ぶ `wmma_tf32_staged` 経路の値だが、staged 経路は正本 `docs/perf/cuda-parity-baseline.md` に
-ベースライン未計測のため parity 非後退が判定不能である。staged 固有ベースラインの確立は後続
-タスクで追跡する（`docs/perf/performance-floor-decision.md` §10 限定条件 4 参照）。
+CUDA f32 の 50% の根拠実測は `launch_wmma_tf32` の 3 段選択が判定対象形状で選ぶ
+`wmma_tf32_staged` 経路の値である。#577 承認時点では staged 経路のベースライン未計測により
+parity 非後退が判定不能（限定条件 4）だったが、#726（2026-08-19）で staged 固有ベースラインを
+実機確立し非後退 pass を確認したため、この限定条件は**解消済み**である
+（`docs/perf/performance-floor-decision.md` §10 限定条件 4 の解消追記参照）。
 
 1. 記録テンプレート（`docs/perf/transformer-workload-measurement.md`）の記入待ち箇所に実機実測値
    （中央値・Q1/Q3）を転記する（`metal-f16-vs-mps-f16.md`・`cuda-floor-remeasurement.md` はすでに

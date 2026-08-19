@@ -288,7 +288,11 @@ worst-case ペアリング（最遅 Metal ÷ 最速 PyTorch）確認でも 10% �
    正本 `docs/perf/cuda-parity-baseline.md` にベースライン未計測（`baseline_provenance_unconfirmed`）
    のため **parity 非後退が判定不能**であり、staged 固有ベースラインの確立・非後退確認を後続タスク
    として追跡する（f16 側 `mma_f16` は非後退確認済みでこの限定条件の対象外）。本限定条件を承知の
-   うえで 50% を維持する判断を 2026-08-19 にユーザーが承認した（#577 イシューコメントの追記参照）
+   うえで 50% を維持する判断を 2026-08-19 にユーザーが承認した（#577 イシューコメントの追記参照）。
+   → **解消済み（イシュー #726・2026-08-19）**: DGX Spark GB10 実機（コミット 06b24b4）で staged 固有
+   ベースラインを確立し（fail_count=43019/262144・mean_abs_diff=4.463436e-3。正本
+   `docs/perf/cuda-parity-baseline.md` §3 表参照）、`parity_baselines_do_not_regress` が staged 行を
+   含む全対象行で pass することを確認した。限定条件 1〜3 は #726 のスコープ外のため継続する
 
 ### 承認記録
 

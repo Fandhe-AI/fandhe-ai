@@ -122,11 +122,11 @@ REQ-2 の parity 恒常 fail 対象と一致する（`docs/perf/performance-floo
   **解消しておらず継続する**（同 §10「CUDA 限定条件の継続」節 3 点目）。
 - REQ-2 改定（1 節）で parity が green 化した場合、CUDA f32／f16 の候補算出経路の実測値が変わりうる
   ため、REQ-8 側の下限値は REQ-2 改定解決後に再実測・再確認が必要になる。
-- CudaF32 の 50% は `wmma_tf32_staged` 経路の実測値に基づくが、staged 経路は正本
-  `docs/perf/cuda-parity-baseline.md` にベースライン未計測（`baseline_provenance_unconfirmed`）であり
-  parity 非後退が判定不能という追加の限定条件がある（`performance-floor-decision.md` §10「CUDA 限定条件
-  の継続」節 4 点目、2026-08-19 ユーザー承認済み）。この限定条件も REQ-8 表更新後に継続記載することを
-  提案する。
+- CudaF32 の 50% は `wmma_tf32_staged` 経路の実測値に基づく。#577 承認時点では staged 経路が正本
+  `docs/perf/cuda-parity-baseline.md` にベースライン未計測（`baseline_provenance_unconfirmed`）で
+  parity 非後退が判定不能という追加の限定条件があった（`performance-floor-decision.md` §10「CUDA 限定
+  条件の継続」節 4 点目、2026-08-19 ユーザー承認済み）が、#726（2026-08-19）の実機ベースライン確立で
+  この限定条件は**解消済み**のため、REQ-8 表更新後の継続記載は不要である（限定条件 1〜3 のみ継続）。
 
 ### 2.3 Transformer 複合ワークロード行
 

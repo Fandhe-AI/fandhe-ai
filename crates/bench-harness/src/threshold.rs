@@ -150,11 +150,11 @@ pub fn floor_spec(backend_dtype: BackendDtype, stage: Stage) -> FloorSpec {
         //   （commit 紐付けなし）、TF32/f16 Tensor Core 経路の複合判定改定は spec リポ側対応待ちの
         //   ままである。よって「#186 解決後に本下限値を再確認する」限定条件は継続する
         //   （parity green の経路で再実測し、必要なら再確定する）
-        // - （#577 で新規追加）50% の根拠実測は `launch_wmma_tf32` の 3 段選択が判定対象形状で
-        //   選ぶ `wmma_tf32_staged` 経路の値であり、staged は正本 `cuda-parity-baseline.md` に
-        //   ベースライン未計測のため parity 非後退が判定不能。staged 固有ベースラインの確立を
-        //   後続タスクとして追跡する（この限定条件を承知のうえで 50% 維持を 2026-08-19 に
-        //   ユーザーが承認。`performance-floor-decision.md` §10 限定条件 4 参照）
+        // - （#577 で新規追加 → #726 で解消済み）50% の根拠実測は `launch_wmma_tf32` の 3 段選択が
+        //   判定対象形状で選ぶ `wmma_tf32_staged` 経路の値。#577 時点では staged が正本
+        //   `cuda-parity-baseline.md` にベースライン未計測で parity 非後退が判定不能だったが、
+        //   #726（2026-08-19・DGX Spark GB10 実機）で staged 固有ベースラインを確立し非後退 pass を
+        //   確認済み（`performance-floor-decision.md` §10 限定条件 4 の解消追記参照）
         // - spec 表（2026-08-05 版）への反映は spec リポジトリ側対応待ち（本モジュール冒頭コメント
         //   「例外」節参照）
         (CudaF32, Optimized) => FloorSpec::Ratio {

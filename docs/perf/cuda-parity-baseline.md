@@ -55,7 +55,7 @@ sm_121・2026 年 8 月時点実測）。関連: `docs/perf/cuda-tensor-core-mea
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 64×64×64 | 3000 | 699/4096 (17.1%) | 5.676e-4 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_matches_reference_across_shapes`（記録元・改名前。現行は `wmma_tf32_routed_path_matches_reference_across_shapes`。先頭ケース） |
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 512×512×512 | 0x7A0 | 42493/262144 (16.2%) | 1.574e-3 | `tensor_core_real_device.rs::tensor_core_parity_record`（記録元。TF32 部分。計測前に `wmma_tf32_opt_available()` を assert） |
 | `wmma_tf32_opt` | `CudaGemm::run_wmma_tf32_opt_kernel`（private。gemm.rs 内部テスト経由） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `gemm_wmma_tf32_opt.rs::wmma_tf32_opt_k4096_stress`（記録元・改名前。現行は `wmma_tf32_routed_path_k4096_stress`。先頭呼出し） |
-| `wmma_tf32_staged` | `CudaGemm::run_wmma_tf32`（staged 利用可能・整列形状） | 512×512×4096 | 0xC0FFEE | 未計測 | 未計測 | `tests/gemm_wmma_tf32_staged.rs::wmma_tf32_staged_k4096_stress`（記録元候補。実機再測定待ち） |
+| `wmma_tf32_staged` | `CudaGemm::run_wmma_tf32`（staged 利用可能・整列形状） | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463e-3 | `parity_nonregression.rs::parity_baselines_do_not_regress`（`check_wmma_tf32_staged_baseline`。#726・DGX Spark GB10 実機・コミット 06b24b4・2026-08-19。release/debug 各 2 回で同一値を確認。実測生値 mean_abs_diff=4.463436e-3。値は `wmma_tf32_opt` 同形状行と一致 — staged は opt と同一の FMA 契約・積和順序を保つ cp.async 二重バッファ版であることの実測裏付け） |
 | `mma_f16` | `CudaMmaGemm::run_f16` | 256×256×4096 | 9999 | 101/65536 (0.15%) | 7.646e-5 | `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（先頭呼出し） |
 
 **ルーティング変更（PR #678 codex-review P1 指摘対応・イシュー #500）**:
@@ -128,10 +128,13 @@ pass」は本イシューのスコープでは未達のまま確定している�
 **§5.3 の記録は「各テストで最初に fail した (形状, シード) の値」のみ
 （`assert_parity` が最初の fail で panic する契約のため）**。上表 6 行
 （`wmma_tf32_staged` を除く）はその実測値の転記であり、未計測形状・シード
-の行は本表に含めていない。`wmma_tf32_staged` 行は §6「未計測形状・シードの
-行追加」の例外として、実機再測定を強制する fail-closed プレースホルダで
-ある（数値は実測値ではない。実測完了までは実機で実行するたびに必ず fail
-する契約）。
+の行は本表に含めていない。`wmma_tf32_staged` 行は #500 時点では §6
+「未計測形状・シードの行追加」の例外として実機再測定を強制する fail-closed
+プレースホルダだったが、イシュー #726 の実機実測（8.5 表・§3 表参照）で
+確定値へ差し替え済み（記録元は `parity_nonregression.rs::
+parity_baselines_do_not_regress` の staged 検査。`assert_parity` 系と異なり
+最初の fail で panic せず全要素集計の `CompareReport` を返す経路のため、
+fail_count・mean_abs_diff は全 262144 要素の集計値である）。
 
 ## 4. 表記丸め対応
 
@@ -270,7 +273,7 @@ falsification 検査群）が全て green であることを確認した。
 |---|---|---|---|
 | `wmma_tf32`（基本版） | 32×32×32 seed=2000 | 要再測定（現行記録値は provenance 未確定） | §3 に実測値（154/1024・3.698e-4）は存在するが、記録元テストが opt 可用性を確認せず呼んでいるため opt 実測結果である疑いが残る（§「既知の限界」）。基本版カーネル専用の再測定が必要 |
 | `wmma_tf32`（基本版） | 256×256×4096 seed=8888 | 要再測定（現行記録値は provenance 未確定） | 同上（§3 実測値: 10647/65536・4.476e-3） |
-| `wmma_tf32_staged` | 512×512×4096 seed=0xC0FFEE | 未計測（実測値なし） | #500 で行のみ先行追加（`baseline_fail_count: 0`・`baseline_mean_abs_diff_ceiling: 0.0` はプレースホルダで実測値ではない） |
+| `wmma_tf32_staged` | 512×512×4096 seed=0xC0FFEE | **確定済み（#726・2026-08-19）** | #500 で行のみ先行追加（プレースホルダ）→ #726 の実機実測（§3 表・8.5 表参照）で確定値へ差し替え・`baseline_provenance_unconfirmed: false` へ更新済み |
 
 ### 8.4 実機実測手順（申し送りテンプレート）
 
@@ -303,7 +306,7 @@ falsification 検査群）が全て green であることを確認した。
 |---|---|---|---|---|---|---|
 | `wmma_tf32`（基本版） | 32×32×32 | 2000 | 要再測定・申し送り（現行記録値 154/1024 は provenance 未確定） | 要再測定・申し送り（現行記録値 3.698e-4 は provenance 未確定） | — | — |
 | `wmma_tf32`（基本版） | 256×256×4096 | 8888 | 要再測定・申し送り（現行記録値 10647/65536 は provenance 未確定） | 要再測定・申し送り（現行記録値 4.476e-3 は provenance 未確定） | — | — |
-| `wmma_tf32_staged` | 512×512×4096 | 0xC0FFEE | 未計測・申し送り | 未計測・申し送り | — | — |
+| `wmma_tf32_staged` | 512×512×4096 | 0xC0FFEE | 43019/262144 (16.4%) | 4.463436e-3（記録表記 4.463e-3・fixture 天井値 4.464e-3） | 2026-08-19 | 06b24b4（#726。release/debug 各 2 回・計 4 回で同一値） |
 
 ### 8.6 結論（本イシュー #575 のスコープでの完了状態）
 
