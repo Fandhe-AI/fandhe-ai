@@ -754,6 +754,19 @@ mod tests {
         // していないかを検知する回帰テストとして、この一致検査を維持する。
         let production = CudaMmaGemm::new(&device)
             .expect("production CudaMmaGemm::new must succeed on ignored test runner");
+        // bit 一致検査（下記 production_c vs base_c）だけでは、swizzle は
+        // 仕様上ビット一致のため「動的幅カーネルへサイレントに再結線され
+        // ても出力が変わらず検知できない」（PR #758 cursor[bot] レビュー
+        // 指摘）。`swizzle_group_width()` を直接検査し、`new` が
+        // 「swizzle 無適用（`None`）」という差し戻し後の契約から外れて
+        // いないかをここで可観測にする。
+        assert_eq!(
+            production.swizzle_group_width(),
+            None,
+            "CudaMmaGemm::new の swizzle_group_width が None ではありません \
+             （イシュー #740 の本番結線は PR #758 レビュー指摘により差し \
+             戻し済みのため、意図しない再結線が起きていないか確認すること）"
+        );
 
         let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
         let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
