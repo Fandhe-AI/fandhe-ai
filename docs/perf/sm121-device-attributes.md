@@ -169,15 +169,20 @@ DeepGEMM Hopper（SM90）定数と sm_121 実測値の対比表。**後続タス
 | L1 帯域（per-SM per-cycle 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（スペック値＋出典欄参照。per-SM） |
 | SM 数 | Hopper 固有（機種依存） | — | 48（2026-08-19 実測。出典: イシュー #739） |
 
-**C-8（#521）注記**: 本表の SMEM 容量は「未実測」のままであり、実測値が無い状態で DeepGEMM の
-Hopper 固有値（232448）を sm_121 向けに流用・推定で定数化することはしない。C-8 の
-`derive_pipeline_stages`（`crates/backend-cuda/src/nvrtc.rs`）は SMEM 容量をコード定数として
-持たず、`gemm_auto::derive_stages_for_device` が `device.context().attribute(
+**C-8（#521）注記**: 本表の sm_121 SMEM 容量は上記のとおり 2026-08-19 に実機実測済み
+（`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`＝101376 bytes／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`＝
+102400 bytes。出典: イシュー #739）であり、DeepGEMM の Hopper 固有値（232448）を sm_121 向けに
+流用・推定で定数化することはしない。C-8 の `derive_pipeline_stages`
+（`crates/backend-cuda/src/nvrtc.rs`）は SMEM 容量をコード定数として持たず、
+`gemm_auto::derive_stages_for_device` が `device.context().attribute(
 CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)` で**実行時に**取得した値を（静的
-`__shared__` 構成の per-block 上限 49,152 バイトでクランプしたうえで）渡す方式を採る。sm_121
-実機で本表の値が実測記入された際は、実機上で `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`
-の取得値と本表の記入値が一致することを確認すること（不一致は属性クエリ側かドキュメント記載側の
-いずれかに誤りがあることを示す）。
+`__shared__` 構成の per-block 上限 49,152 バイトでクランプしたうえで）渡す方式を採る。ただし
+`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`（非 OPTIN・静的 `__shared__` の既定上限）自体は
+上表のとおり本ドキュメントでは依然「未実測」であり、`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（動的確保
+opt-in 時の上限。両者は異なる属性で非 OPTIN の方が通常小さい）とは別物のため両者を混同しないこと。
+実機で `MAX_SHARED_MEMORY_PER_BLOCK` を実測記入する際は、実機上の取得値が上表の
+`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（101376 bytes）以下であることを確認すること（超過は属性クエリ側
+かドキュメント記載側のいずれかに誤りがあることを示す）。
 
 ## 限界・注意
 

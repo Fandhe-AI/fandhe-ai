@@ -63,6 +63,10 @@ ceil(N/タイル)` vs `idealGroups = コア数 × 係数`）→ 閾値でタイ�
 ```sh
 ssh "$CUDA_NODE" 'ncu --version'
 # GPU カウンタ権限（ERR_NVGPUCTRPERM が出る場合は sudo 実行可否を確認）
+# `dram__bytes`／`gpu__dram_throughput` はここでは「§3.3 の METRICS には含めない
+# 旧名が実機に存在しないこと」を確認する目的でのみ列挙する（§3.1 実測どおり
+# GB10 では非該当がヒットしない想定。実採取対象は §3.3 の METRICS＝
+# `lts__t_bytes.sum.per_second` に一本化済み）。
 ssh "$CUDA_NODE" 'ncu --query-metrics | grep -E "sm__warps_active|lts__t_sector_hit_rate|l1tex__data_bank_conflicts|dram__bytes|gpu__dram_throughput|sm__inst_issued"'
 ```
 
@@ -126,12 +130,12 @@ lts__t_sector_hit_rate.pct,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 lts__t_bytes.sum.per_second,\
-gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed,\
 sm__inst_issued.avg.pct_of_peak_sustained_active"
-# `dram__bytes.sum.per_second` は GB10（sm_121/Blackwell）に存在しないため
-# §3.1 の読み替えどおり `lts__t_bytes.sum.per_second` を使う（未対応メトリクス
-# 指定は ncu が fail-closed で拒否するため、実採取前に §3.1 の
-# `--query-metrics` 確認を必ず通す。出典: イシュー #739）。
+# `dram__bytes.sum.per_second` / `gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed`
+# はいずれも GB10（sm_121/Blackwell）に存在しない（§3.1 実測）ため METRICS
+# から除外し、DRAM throughput の代替として `lts__t_bytes.sum.per_second` に
+# 一本化する（未対応メトリクス指定は ncu が fail-closed で拒否するため、
+# 実採取前に §3.1 の `--query-metrics` 確認を必ず通す。出典: イシュー #739）。
 
 for path in wmma_tf32 mma_f16; do
   for size in 1024 2048 4096; do
@@ -218,7 +222,7 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
 
 **2026-08-19 実測**（出典: イシュー #739。1024 行は転記元に値が無いため「(未採取)」のまま残す）:
 
-| path | size | achieved occupancy（%） | L2 hit rate（%） | SMEM bank conflicts（ld, sum） | DRAM throughput（%peak） | instruction issue rate（%peak） |
+| path | size | achieved occupancy（%） | L2 hit rate（%） | SMEM bank conflicts（ld, sum） | DRAM throughput（bytes/s） | instruction issue rate（%peak） |
 |------|------|--------------------------|--------------------|-------------------------------------|-----------------------------|-------------------------------------|
 | wmma_tf32 | 1024 | (未採取) | (未採取) | (未採取) | (未採取) | (未採取) |
 | wmma_tf32 | 2048 | (未採取) | 96.77 | 8.53M | (未採取) | (未採取) |
@@ -264,8 +268,10 @@ B-7／#743 は (B) の絶対件数の大きさを理由に着手対象として�
 **mma_f16 の 4096 側の低下（軽微・約 −4.8%。本ドキュメント §1）は主に L2 ヒット率の低下**
 （96.92% → 83.51%）が効いており、SMEM バンクコンフリクト（ld: 10.9K → 38.3K・st は両サイズとも 0）・
 occupancy（64%）は wmma_tf32 ほど深刻ではない。この診断に基づき、mma_f16 側の L2 スウィズル（swizzle
-A/B・#499・後述 §6 の兄弟ドキュメント `cuda-gemm-swizzle-ab.md`）は **4096 で ×1.5957 の実測改善を
-既に確立済み**（#740。詳細は `docs/perf/cuda-gemm-swizzle-ab.md` §6）。
+A/B・#499・後述 §6 の兄弟ドキュメント `cuda-gemm-swizzle-ab.md`）は **4096 で ×1.5957 の実測改善値
+自体は確立済み**だが、`cuda-gemm-swizzle-ab.md` §4 の既存判断基準（2048・4096 両方の改善が必要）には
+2048 が未達のため**不採用が確定**しており、本番結線は行っていない（4096 限定基準への変更はユーザー
+承認が必要。詳細は `docs/perf/cuda-gemm-swizzle-ab.md` §2・§4・§6）。
 
 候補 D（命令発行律速）は §4.2 の脚注 2 のとおり具体的な数値がイシュー本文に無く定性記録（サイズ増で
 低下）に留まるため、単独の主因としては確定しない。
@@ -274,7 +280,7 @@ A/B・#499・後述 §6 の兄弟ドキュメント `cuda-gemm-swizzle-ab.md`）
 
 | 旧 Phase B タスク | 内容 | 新ツリー #736 配下 |
 |---|---|---|
-| B-8（#499） | L2 スウィズル | #740（mma_f16 本番結線）・#741（TF32 swizzle） |
+| B-8（#499） | L2 スウィズル | #740（mma_f16。現行基準では不採用確定・承認後の基準改定検討）・#741（TF32 swizzle） |
 | B-7（#498） | バンクコンフリクト対策 | #743 |
 | B-2（#493） | レジスタブロッキング／パイプライン段数 | #742（段数スイープ） |
 | B-3（#494） | タイル拡大 | #742 と関連（未分離） |
