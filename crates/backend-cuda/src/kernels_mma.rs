@@ -1775,8 +1775,10 @@ extern "C" __global__ void gemm_mma_f16(
 /// **`mma_f16_source()`（既定 config の render 結果。イシュー #516 で
 /// `MMA_F16` 定数からテンプレート展開へ移行済み）自体は変更しない**
 /// （`replacen` で新規 `String` を都度構築するのみ）。呼び出し元は
-/// `gemm_mma.rs::CudaMmaGemm::new`（本番既定。動的選択幅）・
-/// `new_with_swizzle`（診断用・明示幅指定）であり、`ops.rs`／
+/// `gemm_mma.rs::CudaMmaGemm::new_with_swizzle`（`internal-diagnostics`
+/// feature 限定・診断用・明示幅指定）のみであり、`new`（本番既定）は
+/// イシュー #740 の一時結線を PR #758 レビュー指摘により差し戻し済み
+/// のため呼び出し元ではない（下記「イシュー #740」節参照）。`ops.rs`／
 /// `gemm_auto.rs` は mma_f16 経路自体を参照しないため無変更のまま
 /// （本ファイルクレートルート `lib.rs` 冒頭コメント「#740」節参照）。
 ///
