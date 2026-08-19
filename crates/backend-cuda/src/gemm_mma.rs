@@ -266,9 +266,10 @@ impl CudaMmaGemm {
     /// （イシュー #499・`kernels_mma::mma_f16_source_with_swizzle`）を
     /// 明示指定の `group_width` で適用した変種カーネルを NVRTC コンパイル
     /// し保持するハンドルを構築する（**診断用・明示幅指定の入口**。
-    /// [`new`](Self::new) が実機 A/B 計測に基づき本番既定へ結線済みの
-    /// ため〈イシュー #740〉、本コンストラクタは A/B 計測・bit 一致検証で
-    /// 候補幅 `{8, 16}` を個別に指定したい場合の用途に限定される）。
+    /// [`new`](Self::new) はイシュー #740 で一時本番既定へ結線したが
+    /// PR #758 レビュー指摘により base カーネルへ差し戻し済みのため
+    /// 〈`new` doc comment 参照〉、本コンストラクタは A/B 計測・bit 一致
+    /// 検証で候補幅 `{8, 16}` を個別に指定したい場合の用途に限定される）。
     ///
     /// [`new`](Self::new) と同じ cc ゲート・NVRTC コンパイル手順を共有し
     /// （[`check_min_compute_capability`]）、コンパイルするソース文字列
@@ -317,16 +318,20 @@ impl CudaMmaGemm {
         })
     }
 
-    /// [`new`](Self::new) が動的選択した L2 再利用スウィズル（イシュー
-    /// #499・#740）のグルーピング幅を返す（構造体ドキュメンテーション
-    /// コメント参照）。`None` は swizzle 無適用
-    /// （[`new_without_swizzle`](Self::new_without_swizzle) 経由。
-    /// `internal-diagnostics` feature 限定）を意味する。
+    /// L2 再利用スウィズル（イシュー #499・#740）の適用グルーピング幅を
+    /// 返す（構造体ドキュメンテーションコメント参照）。`new` はイシュー
+    /// #740 で一時 swizzle 既定へ動的選択結線したが、PR #758 レビュー
+    /// 指摘により base カーネルへ差し戻し済みのため、現時点で `new` が
+    /// 返すハンドルは常に `None`（`new` doc comment 参照）。`Some(_)` は
+    /// [`new_with_swizzle`](Self::new_with_swizzle)（診断用・明示幅指定。
+    /// `internal-diagnostics` feature 限定）経由のみで観測される。`None`
+    /// はそれ以外（`new`・[`new_without_swizzle`](Self::new_without_swizzle)
+    /// いずれも該当）を意味する。
     ///
     /// `examples/cuda_floor_bench.rs` の起動時診断（#733 の
-    /// `wmma_tf32_staged` 可用性出力と同型）が、本番経路で実際に選択された
-    /// `group_width` を可観測にするために呼ぶ。feature 非依存の常時公開
-    /// API（`new` 自体が feature 非依存のため）。
+    /// `wmma_tf32_staged` 可用性出力と同型）が、現在選択されている値
+    /// （差し戻し後の通常ビルドでは常に `None`）を可観測にするために呼ぶ。
+    /// feature 非依存の常時公開 API（`new` 自体が feature 非依存のため）。
     pub fn swizzle_group_width(&self) -> Option<u32> {
         self.swizzle_group_width
     }
