@@ -1954,7 +1954,14 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
     // （static 48KiB 検査）は dyn 側には適用しない
     // （`wmma_tf32_staged_dyn_smem_bytes` が動的側の予算検査を別途行う）。
 #if WMMA_TF32_STAGED_DYNAMIC_SMEM
-    extern __shared__ __align__(16) unsigned char wmma_tf32_staged_smem[];
+    // __align__(32): as_tile/bs_tile としての利用は 16 バイト整列で足りるが、
+    // 後段でこの領域先頭を c_tile としてエイリアスし
+    // `wmma::store_matrix_sync` へ渡す（本関数末尾のエピローグ節参照）。
+    // WMMA の load/store 対象ポインタは 256-bit（32 バイト）整列が
+    // 契約であり（static 側 `c_tile` の `__align__(32)` と同じ根拠）、
+    // 動的 extern __shared__ の整列指定はこの中で最も厳しい要求に
+    // 揃える必要があるため 32 バイトを指定する。
+    extern __shared__ __align__(32) unsigned char wmma_tf32_staged_smem[];
     float (*as_tile)[WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD] =
         reinterpret_cast<float(*)[WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD]>(wmma_tf32_staged_smem);
     float (*bs_tile)[WMMA_TF32_STAGED_K_TILE][WMMA_TF32_STAGED_B_PAD] =
@@ -3463,7 +3470,7 @@ mod tests {
         );
         assert!(
             source
-                .contains("extern __shared__ __align__(16) unsigned char wmma_tf32_staged_smem[];"),
+                .contains("extern __shared__ __align__(32) unsigned char wmma_tf32_staged_smem[];"),
             "dyn レンダーは extern __shared__ 宣言を含むはずです"
         );
     }
