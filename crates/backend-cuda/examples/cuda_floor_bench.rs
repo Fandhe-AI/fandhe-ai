@@ -591,13 +591,23 @@ fn main() {
                  basis and the #726 parity baseline)."
             );
         } else {
+            // staged 不能時の実経路は `launch_wmma_tf32` の 3 段選択
+            // （staged → opt → basic）に従い opt 可用性でさらに分岐する
+            // （opt も不能なら basic。opt 経路と断定するとログの provenance
+            // 再構成が壊れる — PR #733 codex P2 / Bugbot Medium 指摘対応）。
+            let fallback_path = if g.wmma_tf32_opt_available() {
+                "the opt (non-staged) kernel path"
+            } else {
+                "the basic kernel path (opt is also unavailable; see the preceding opt warning)"
+            };
             println!(
                 "NOTE: f32 WMMA(TF32) staged kernel UNAVAILABLE ({}); wmma_tf32 measurements in \
-                 this run use the opt (non-staged) kernel path. The REQ-8 CudaF32 \
-                 optimized-floor basis and the #726 parity baseline were measured on the staged \
-                 path, so the path provenance of this run's f32 measurements differs from them.",
+                 this run use {}. The REQ-8 CudaF32 optimized-floor basis and the #726 parity \
+                 baseline were measured on the staged path, so the path provenance of this \
+                 run's f32 measurements differs from them.",
                 g.wmma_tf32_staged_unavailable_reason()
-                    .unwrap_or("unknown reason")
+                    .unwrap_or("unknown reason"),
+                fallback_path
             );
         }
     }
