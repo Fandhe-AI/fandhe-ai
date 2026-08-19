@@ -251,8 +251,18 @@ done
 # `--launch-count` は `warmup + iters`（既定なら 2 + 5 = 7）以上を指定する
 # （memset がカーネル起動として現れない想定のため、旧版の `1 +` は不要）。
 # §3.3 と同じ理由（RmProfilingAdminOnly）で sudo 経由とする。
+# §3.3 と同じ理由で `tee` パイプには依存しない: パイプ構成では末尾の `tee` の
+# 終了ステータスが判定対象になり、sudo 権限エラー・ncu 起動失敗・対象バイナリの
+# 異常終了を検知できないまま本採取へ進み得る。出力を直接ログへリダイレクトして
+# `$?` を保存・検査した後にログを表示し、非 0 なら中断する（fail-closed）。
 sudo ncu --launch-count 7 --print-kernel-base full \
-    "$BIN" --path wmma_tf32 --size 1024 2>&1 | tee ncu-verify-launch-skip.log
+    "$BIN" --path wmma_tf32 --size 1024 > ncu-verify-launch-skip.log 2>&1
+status=$?
+cat ncu-verify-launch-skip.log
+if [ "${status}" -ne 0 ]; then
+  echo "ncu 事前検証が exit ${status} で失敗した。前提未検証のため §3.3 へ進まず中断する" >&2
+  exit 1
+fi
 ```
 
 想定どおり（memset 系カーネルの起動が現れず、先頭から対象カーネルが `warmup + iters` 回連続）であれば
