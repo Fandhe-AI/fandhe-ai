@@ -153,6 +153,31 @@ fn gemm_bias_act_passes_unified_parity_check() {
     backend_cpu::assert_parity("gemm_bias_act vs 非融合合成", &c_fused, &c_ref);
 }
 
+/// `n = 4096`（#749 で `select_blocks` が NC=9600 へ切り替える閾値。
+/// `src/gemm_blis/mod.rs` の `LARGE_N_THRESHOLD`）の本番経路が、
+/// `gemm_blis_parallel` → bias 加算 → Relu の非融合合成参照と bit
+/// 完全一致することを確認する（GEMM 本体のブロックサイズ変更が
+/// epilogue 融合の bit 完全一致契約〈本ファイル冒頭ドキュメント〉に
+/// 影響しないことの回帰）。
+#[test]
+fn gemm_bias_act_large_n_matches_composed_reference_bit_exact() {
+    let (m, n, k) = (9, 4096, 13);
+    let a = random_matrix(0x1111_2222, m * k);
+    let b = random_matrix(0x3333_4444, k * n);
+    let bias = random_matrix(0x5555_6666, n);
+
+    let mut c_fused = vec![0.0f32; m * n];
+    gemm_blis_bias_act_parallel(&a, &b, &mut c_fused, m, n, k, Some(&bias), Activation::Relu)
+        .unwrap();
+
+    let c_ref = compose_reference(&a, &b, m, n, k, Some(&bias), Activation::Relu);
+
+    assert_eq!(
+        c_fused, c_ref,
+        "gemm_blis_bias_act_parallel（n=4096）は非融合合成参照と bit 完全一致するはず"
+    );
+}
+
 // --- 4. エッジケース ---
 
 #[test]

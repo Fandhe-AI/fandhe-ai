@@ -88,19 +88,37 @@ const MAX_TILE: usize = 256;
 /// 参照）ため、本モジュール独自の定数として持つ（`gemm` モジュールの
 /// MC/KC/NC とは独立にチューニング可能にする）。
 ///
-/// **対象実機・再選定状況（#564）**: 本 3 定数のチューニング対象実機は
-/// **Apple M4 Max**（firestorm 系。`docs/perf/gemm-optimization-baseline.md`
+/// **対象実機・再選定状況（#564・#749）**: 本 3 定数のチューニング対象
+/// 実機は **Apple M4 Max**（firestorm 系。`docs/perf/gemm-optimization-baseline.md`
 /// §3・イシュー #481 で確定）。BLIS/OpenBLAS の aarch64 向け参照実装値
-/// （firestorm: MC=480/KC=4096/NC=9600 等）近傍を含む実機スイープ候補・
-/// 選定手順・実測結果（未実施ならその引き継ぎ手順）は
-/// `docs/perf/cpu-gemm-blocking-sweep.md` に記録する。M4 Max 実機に到達
-/// できるセッションで実測・選定を完了するまでは本 PoC-v2-1 値を維持する
-/// （fail-closed。実測値の捏造・placeholder 化はしない）。
+/// （firestorm: MC=480/KC=4096/NC=9600 等）近傍を含む実機スイープは
+/// 2026-08-19 に M4 Max で実施済みで、詳細実測値・採否根拠は
+/// `docs/perf/cpu-gemm-blocking-sweep.md` §7 に記録する（#749）。
+/// MC・KC は単独拡大が全サイズで劣化したため PoC-v2-1 値のまま維持し、
+/// NC のみ [`select_blocks`] により n（B のパネル幅を分割する次元）に
+/// 応じて条件分岐する（fail-closed。実測値の捏造・placeholder 化はしない）。
 const MC: usize = 128;
 /// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
 const KC: usize = 256;
-/// 列方向ブロックサイズ（B のパネル幅）。
+/// 列方向ブロックサイズ（B のパネル幅）。`n < LARGE_N_THRESHOLD` の
+/// 既定値（[`select_blocks`] 参照）。
 const NC: usize = 512;
+
+/// [`select_blocks`] が `n >= LARGE_N_THRESHOLD` で採用する NC 値。
+///
+/// 2026-08-19 M4 Max 実測（`docs/perf/cpu-gemm-blocking-sweep.md` §7）で
+/// dim=4096 が現行 NC=512 比 約 9.9% 改善（0.134019 s → 0.120774 s）した
+/// BLIS firestorm 参照値をそのまま採用する（#749）。
+const NC_LARGE_N: usize = 9600;
+
+/// [`select_blocks`] が NC を [`NC_LARGE_N`] へ切り替える n の閾値。
+///
+/// 2026-08-19 M4 Max 実測で dim=2048 は現行値（NC=512）が最良、
+/// dim=4096 は NC=9600 が最良だったため、REQ-8 判定形状のうち
+/// 4096 のみを NC 拡大の対象にする（`docs/perf/cpu-gemm-blocking-sweep.md`
+/// §7。dim=1024 も NC=9600 で約 7.1% 改善したが、512 未計測・非単調な
+/// テーブルになるため #749 では適用せず #753 へ引き継ぐ）。
+const LARGE_N_THRESHOLD: usize = 4096;
 
 /// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
 /// （本番 3 公開関数）が使う既定ブロックサイズ（上記 `MC`/`KC`/`NC`
@@ -110,11 +128,40 @@ const NC: usize = 512;
 /// 踏襲）。値自体は `gemm` モジュールの既定値と独立にチューニング可能な
 /// ままにするため、`BlockSizes::poc_v2_1_default()` を直接使わずここで
 /// 本モジュール専用の定数から構築する。
+///
+/// #749 の n 依存分岐（[`select_blocks`]）導入後も、小形状（n <
+/// `LARGE_N_THRESHOLD`）向けの既定値として本関数は残す（テスト・
+/// `gemm_blis_with_kernel`〈`#[cfg(test)]` 経路〉が参照する）。
 const fn default_blocks() -> BlockSizes {
     BlockSizes {
         mc: MC,
         kc: KC,
         nc: NC,
+    }
+}
+
+/// 本番 3 公開関数（[`gemm_blis`]／[`gemm_blis_parallel`]／
+/// [`gemm_blis_bias_act_parallel`]）が呼び出しごとに 1 回だけ呼ぶ
+/// ブロックサイズ選択（#749）。
+///
+/// 選択キーは **`n`（NC が分割する次元）のみ**。実測（2026-08-19 M4
+/// Max・`docs/perf/cpu-gemm-blocking-sweep.md` §7）が正方形状のみで
+/// m／k 依存の知見がないこと、NC の効果（B パネルの jc 反復回数・ic
+/// ループ内再利用）は n に直結することから m／k は条件に含めない。
+/// 非正方形状（m 小・k 大等）での挙動は同 docs のリスク節を参照。
+///
+/// 環境変数等の外部入力による上書き口は設けない（OWASP A03・
+/// `.claude/rules/security.md`。`dispatch_region` の ISA トークン選択と
+/// 同じ「入力は `validate_dims` 通過済みの形状のみ」という方針）。
+const fn select_blocks(n: usize) -> BlockSizes {
+    if n >= LARGE_N_THRESHOLD {
+        BlockSizes {
+            mc: MC,
+            kc: KC,
+            nc: NC_LARGE_N,
+        }
+    } else {
+        default_blocks()
     }
 }
 
@@ -212,7 +259,7 @@ pub fn gemm_blis(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    dispatch_region(a, b, c, n, k, 0..m, default_blocks())
+    dispatch_region(a, b, c, n, k, 0..m, select_blocks(n))
 }
 
 /// `gemm_blis` を `rayon` で行パネル並列化した版。
@@ -239,13 +286,17 @@ pub fn gemm_blis_parallel(
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
+    // 呼び出しあたり 1 回だけ選択し、全 rayon 行パネルタスクへ同一値を
+    // キャプチャして渡す（#749。タスクごとに再計算しても結果は同一だが
+    // n は不変のためループ外で確定させる）。
+    let blocks = select_blocks(n);
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks())
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
         })
 }
 
@@ -317,13 +368,16 @@ pub fn gemm_blis_bias_act_parallel(
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
+    // 呼び出しあたり 1 回だけ選択し、全 rayon 行パネルタスクへ同一値を
+    // キャプチャして渡す（#749。`gemm_blis_parallel` と同じ理由）。
+    let blocks = select_blocks(n);
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks())?;
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)?;
             apply_epilogue(c_chunk, n, bias, act)
         })
 }
@@ -1143,6 +1197,73 @@ mod tests {
         }
     }
 
+    /// [`select_blocks`] が `n` に応じて NC のみを切り替え、MC/KC は不変
+    /// のままであることを境界値で検証する（#749 受け入れ条件: 4096 で
+    /// NC=9600・512〜2048 は現行値〈= `default_blocks()`〉と同一）。
+    #[test]
+    fn select_blocks_switches_nc_only_at_large_n_threshold() {
+        for n in [0usize, 1, 511, 512, 2048, 4095] {
+            let blocks = select_blocks(n);
+            assert_eq!(
+                blocks,
+                default_blocks(),
+                "n={n}（LARGE_N_THRESHOLD 未満）は既定ブロックのはず"
+            );
+        }
+        for n in [4096usize, 4097, 9600, 9601, 20000] {
+            let blocks = select_blocks(n);
+            assert_eq!(blocks.mc, MC, "n={n} でも MC は不変のはず");
+            assert_eq!(blocks.kc, KC, "n={n} でも KC は不変のはず");
+            assert_eq!(
+                blocks.nc, NC_LARGE_N,
+                "n={n}（閾値以上）は NC_LARGE_N のはず"
+            );
+        }
+    }
+
+    /// `select_blocks` の値がすべて 0 でないこと（0 だと `panel_capacity`
+    /// の `div_ceil`／`step_by` がパニックしうる）を全分岐で確認する
+    /// （#749。実装計画 §6 OWASP A03 の静的保証をテストで裏付ける）。
+    #[test]
+    fn select_blocks_never_returns_zero_sized_block() {
+        for n in [0usize, 1, 4095, 4096, 20000] {
+            let blocks = select_blocks(n);
+            assert!(blocks.mc > 0 && blocks.kc > 0 && blocks.nc > 0);
+        }
+    }
+
+    /// `n >= LARGE_N_THRESHOLD`（NC=9600 分岐）の本番経路（[`gemm_blis`]／
+    /// [`gemm_blis_parallel`]）が `gemm_naive` と bit 完全一致することを、
+    /// 閾値の直前・直後・NR=12（NEON 8×12 既定カーネルの NR）非整数倍の
+    /// 端タイルが生じる n で検証する（#749。m／k は小さく保ち実行時間を
+    /// 抑える）。
+    #[test]
+    fn gemm_blis_and_parallel_large_n_match_naive_bit_exact() {
+        for &(m, k) in &[(5usize, 7usize), (131, 259)] {
+            for n in [4095usize, 4096, 4097, 4100] {
+                let a = xorshift32_vec(0x1234_5678, m * k);
+                let b = xorshift32_vec(0x9abc_def0, k * n);
+
+                let mut c_naive = vec![0.0f32; m * n];
+                crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+                let mut c_blis = vec![0.0f32; m * n];
+                gemm_blis(&a, &b, &mut c_blis, m, n, k).unwrap();
+                assert_eq!(
+                    c_naive, c_blis,
+                    "gemm_blis（m={m},n={n},k={k}）は gemm_naive と bit 完全一致するはず"
+                );
+
+                let mut c_parallel = vec![0.0f32; m * n];
+                gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+                assert_eq!(
+                    c_naive, c_parallel,
+                    "gemm_blis_parallel（m={m},n={n},k={k}）は gemm_naive と bit 完全一致するはず"
+                );
+            }
+        }
+    }
+
     // --- NEON MR=8×NR=12 拡張の aarch64 限定検証（イシュー #559）---
     //
     // x86_64 開発環境では実行不能なため `cfg(target_arch = "aarch64")` で
@@ -1419,6 +1540,76 @@ mod tests {
                     blocks.mc, blocks.kc, blocks.nc
                 );
             }
+        }
+    }
+
+    /// #749 受け入れ条件 1（「4096 で 9% 級改善を本番経路で獲得し、
+    /// 512〜2048 の劣化が中央値 5% 以内」）の実機再確認用 A/B ハーネス。
+    ///
+    /// 本番経路（`gemm_blis_parallel` = [`select_blocks`] による n 依存
+    /// NC 分岐）と旧来固定値（`gemm_blis_parallel_with_blocks(default_blocks())`）
+    /// を [`neon_8x12_vs_12x8_ab_median_throughput`] と同じインターリーブ
+    /// 方式で比較する。512〜2048 は `select_blocks` が `default_blocks()`
+    /// と同一値を返す（`select_blocks_switches_nc_only_at_large_n_threshold`
+    /// で構造的に保証済み）ため理論上は誤差程度の差になるはずで、4096 の
+    /// み有意差が出ることを実機で確認する用途（[`mc_kc_nc_blocking_sweep_median_throughput`]
+    /// と同方針で勝敗を assert しない）。
+    ///
+    /// `#[ignore]` 分離（実機実行専用。`cargo test -p backend-cpu --release
+    /// -- --ignored shape_dependent_nc_vs_fixed_default_ab_median_throughput
+    /// --nocapture` で M4 Max 上から実行する）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "aarch64 実機（Apple M4 Max）での NC 形状依存分岐 A/B 再確認専用（--release 実行推奨。#749）"]
+    fn shape_dependent_nc_vs_fixed_default_ab_median_throughput() {
+        use std::time::Instant;
+
+        fn run_production(a: &[f32], b: &[f32], m: usize, n: usize, k_dim: usize) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_parallel(a, b, &mut c, m, n, k_dim).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn run_fixed_default(a: &[f32], b: &[f32], m: usize, n: usize, k_dim: usize) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_parallel_with_blocks(a, b, &mut c, m, n, k_dim, default_blocks()).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            samples[samples.len() / 2]
+        }
+
+        for dim in [512usize, 1024, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0xdddd_1111, m * k);
+            let b = xorshift32_vec(0xeeee_2222, k * n);
+
+            run_production(&a, &b, m, n, k);
+            run_fixed_default(&a, &b, m, n, k);
+
+            let mut samples_production = Vec::with_capacity(5);
+            let mut samples_fixed = Vec::with_capacity(5);
+            for i in 0..5 {
+                if i % 2 == 0 {
+                    samples_production.push(run_production(&a, &b, m, n, k));
+                    samples_fixed.push(run_fixed_default(&a, &b, m, n, k));
+                } else {
+                    samples_fixed.push(run_fixed_default(&a, &b, m, n, k));
+                    samples_production.push(run_production(&a, &b, m, n, k));
+                }
+            }
+
+            let median_production = median(samples_production);
+            let median_fixed = median(samples_fixed);
+
+            println!(
+                "dim={dim}: 本番経路(select_blocks) median={median_production:.6}s, \
+                 固定既定値(default_blocks) median={median_fixed:.6}s"
+            );
         }
     }
 }
