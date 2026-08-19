@@ -1109,11 +1109,42 @@ const _: () = assert!(
 /// `K_TILE`（16）に 4 要素加算する（既存 TF32 opt の [`WMMA_TF32_OPT_A_PAD`]
 /// と同じ根拠）。cp.async の 16 バイト転送粒度は f32 4 要素のため、
 /// パディング幅も 4 要素の倍数である必要がある（下記 const アサーション）。
+/// [`WmmaTf32StagedKernelConfig::default_tf32_staged`] の `a_pad` 既定値の
+/// 唯一の真実源（イシュー #743 でパディングを config フィールド化した後も、
+/// 本番経路が展開する値そのものは本定数のまま変更していない）。
 #[allow(dead_code)]
 pub const WMMA_TF32_STAGED_A_PAD: u32 = WMMA_TF32_STAGED_K_TILE + 4;
 
 /// B タイル（`bs_tile[STAGES][K_TILE][B_PAD]`）の行幅（パディング後）。
 /// `BLOCK_N`（64）に 4 要素加算する。A パディングと同じ根拠。
+/// [`WmmaTf32StagedKernelConfig::default_tf32_staged`] の `b_pad` 既定値の
+/// 唯一の真実源。
+///
+/// # イシュー #743: SMEM バンクコンフリクト解析（既定値は未変更）
+///
+/// 実機 ncu 計測（2026-08-19・GB10）で TF32 staged 経路の
+/// `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` が
+/// M=N=K=2048 で 8.53M、4096 で 67.5M 検出された。理論解析
+/// （PTX ISA `mma.m16n8k8.tf32` フラグメントの lane→(row,col) 対応を
+/// `wmma::load_matrix_sync` の row_major 読み出しへ適用したモデル。
+/// [`wmma_tf32_staged_b_fragment_ld_wavefronts`]／
+/// [`wmma_tf32_staged_a_fragment_ld_wavefronts`] が同モデルを実装し値を
+/// 固定する）によれば、本定数の 68（`BLOCK_N + 4`）は B フラグメント
+/// ロード 1 命令あたり 2-way バンクコンフリクト（余剰 wavefront 1）を
+/// 生み、この余剰が ncu 実測値（4096 で ≈67M 命令 × 余剰 1 ≒ 67.5M）と
+/// ほぼ一致する。`B_PAD mod 32 ∈ {8, 24}`（例: 72 = `BLOCK_N + 8`）を
+/// 満たすと 32 バンクを完全被覆しコンフリクトが理論上ゼロになる一方、
+/// A 側（本ファイル [`WMMA_TF32_STAGED_A_PAD`] = 20）は既にコンフリクト
+/// フリーである（詳細な位相計算・定量突合・SMEM/occupancy 影響・XOR
+/// swizzle 不採用理由は
+/// `docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md` を参照）。
+///
+/// 本定数自体は実機 ncu で「ld 有意減少・TFLOPS 非劣化・parity 全 pass・
+/// bit 一致」を確認できるまで **68 のまま変更しない**（実装計画 §1・
+/// #497/#499/#741/#742 と同じ「未計測の間は採用済みとして扱わない」判断。
+/// 変更する場合は本定数 1 行の書き換えで済む設計とするため、パディング幅
+/// 自体は [`WmmaTf32StagedKernelConfig`] の `a_pad`/`b_pad` フィールドへ
+/// config 化してある）。
 #[allow(dead_code)]
 pub const WMMA_TF32_STAGED_B_PAD: u32 = WMMA_TF32_STAGED_BLOCK_N + 4;
 
@@ -1296,6 +1327,19 @@ pub struct WmmaTf32StagedKernelConfig {
     /// `cp.async` multi-stage pipelining のステージ数（`>= 2` 必須。
     /// [`WMMA_TF32_STAGED_STAGES`] 直下コメント参照）。
     pub stages: u32,
+    /// A タイル（`as_tile[STAGES][BLOCK_M][A_PAD]`）の行幅（パディング後。
+    /// イシュー #743。既定値は [`WMMA_TF32_STAGED_A_PAD`]）。SMEM バンク
+    /// コンフリクト計測のため config フィールド化してあるが、本番経路
+    /// （[`default_tf32_staged`](Self::default_tf32_staged)）は従来の
+    /// 定数値のまま byte 完全一致で展開する
+    /// （`wmma_tf32_staged_default_config_render_is_byte_identical_to_production_source`
+    /// が回帰検査する）。[`validate_wmma_tf32_staged_padding`] が
+    /// `k_tile` との整合・4 要素倍数・余剰上限を fail-closed 検査する。
+    pub a_pad: u32,
+    /// B タイル（`bs_tile[STAGES][K_TILE][B_PAD]`）の行幅（パディング後。
+    /// イシュー #743）。`a_pad` と同じ契約。既定値は
+    /// [`WMMA_TF32_STAGED_B_PAD`]。
+    pub b_pad: u32,
     /// M 次元の焼き込み方式。
     pub dim_m: DimSpec,
     /// N 次元の焼き込み方式。
@@ -1306,13 +1350,18 @@ pub struct WmmaTf32StagedKernelConfig {
 
 impl WmmaTf32StagedKernelConfig {
     /// TF32 opt-staged カーネルの既定構成（Rust 側タイル定数と同一値。
-    /// 全次元 `Dynamic`）。
+    /// 全次元 `Dynamic`）。`a_pad`/`b_pad` は
+    /// [`WMMA_TF32_STAGED_A_PAD`]/[`WMMA_TF32_STAGED_B_PAD`]（本番経路の
+    /// 唯一の真実源）をそのまま採用するため、本関数が返す構成の展開結果は
+    /// イシュー #743 のパディング config 化の前後で byte 完全一致を保つ。
     pub fn default_tf32_staged() -> Self {
         Self {
             block_m: WMMA_TF32_STAGED_BLOCK_M,
             block_n: WMMA_TF32_STAGED_BLOCK_N,
             k_tile: WMMA_TF32_STAGED_K_TILE,
             stages: WMMA_TF32_STAGED_STAGES,
+            a_pad: WMMA_TF32_STAGED_A_PAD,
+            b_pad: WMMA_TF32_STAGED_B_PAD,
             dim_m: DimSpec::Dynamic,
             dim_n: DimSpec::Dynamic,
             dim_k: DimSpec::Dynamic,
@@ -1490,9 +1539,134 @@ impl CompiledWmmaTf32StagedKernel {
     }
 }
 
+/// TF32 opt-staged カーネルの A/B フラグメントロード（イシュー #743）が
+/// 1 命令あたり要する SMEM バンク wavefront 数を理論モデルで算出する
+/// 共通ヘルパ。GPU 不要（純粋な整数演算）で `internal-diagnostics`
+/// feature 非依存に呼べるため、`#[cfg(test)]` 内のロック用テスト
+/// （`wmma_tf32_staged_b_pad_72_is_bank_conflict_free_and_68_is_two_way`）
+/// と `diagnostics` モジュール（計測 example・イシュー #743 §計測基盤）の
+/// 双方から参照する単一ソース。
+///
+/// # モデルの前提（PTX ISA `mma.m16n8k8.tf32` フラグメントレイアウト）
+///
+/// `wmma::load_matrix_sync` の実際の lowering は不透明だが、TF32
+/// `m16n16k8` は PTX `mma.m16n8k8.tf32` 相当の 32 レーン割り当て
+/// （groupID = lane/4, thread-in-group = lane%4）に従うと仮定し、
+/// row_major な `as_tile[..][A_PAD]`/`bs_tile[..][B_PAD]` からの 1 回の
+/// フラグメントロード命令が発行する 32 レーン分のシェアードメモリアクセス
+/// を次のようにモデル化する（32 バンク・4B/バンク・実装計画 §1.1(b)）:
+///
+/// - A（8 行 × 4 列、行ストライドが `a_pad`）: `bank(g, t) = (a_pad*g + t)
+///   mod 32`（g=0..8 が行、t=0..4 が列）
+/// - B（4 行 × 8 列、行ストライドが `b_pad`）: `bank(t, g) = (b_pad*t + g)
+///   mod 32`（t=0..4 が行、g=0..8 が列）
+///
+/// wavefront 数は 32 バンクのうち最も競合したバンクへの多重度（同一
+/// サイクルで処理しきれず追加 wavefront を要する回数）。この
+/// lane→(row,col) 対応は WMMA lowering の実装詳細を保証するものではなく、
+/// あくまで実測 ncu 値との定量突合（本ファイル
+/// [`WMMA_TF32_STAGED_B_PAD`] ドキュメンテーションコメント参照）が
+/// 支持する仮説であるため、実機 ncu 実測が最終的な正である。
+fn wmma_tf32_staged_fragment_ld_wavefronts(pad: u32, outer_count: u32, inner_count: u32) -> u32 {
+    const BANKS: usize = 32;
+    let mut bank_hits = [0u32; BANKS];
+    for outer in 0..outer_count {
+        for inner in 0..inner_count {
+            // `pad`/`outer`/`inner` は本ファイル内の小さい定数（タイル幅
+            // 由来。u32::MAX に到達しえない）のみを受けるため折返し乗算で
+            // 十分だが、境界検査省略禁止方針（REQ-8）に合わせ checked 系で
+            // 計算し、万一のオーバーフローは wavefront 未定義として扱わず
+            // 飽和させる（本関数は診断専用でありパニックさせない）。
+            let bank = pad
+                .checked_mul(outer)
+                .and_then(|v| v.checked_add(inner))
+                .map(|v| (v % BANKS as u32) as usize)
+                .unwrap_or(0);
+            bank_hits[bank] += 1;
+        }
+    }
+    bank_hits.into_iter().max().unwrap_or(0)
+}
+
+/// A フラグメント（`as_tile`。行 8・列 4）のロード 1 命令あたりの SMEM
+/// バンク wavefront 数（[`wmma_tf32_staged_fragment_ld_wavefronts`]
+/// 参照）。既定 `a_pad`（[`WMMA_TF32_STAGED_A_PAD`] = 20）は 1
+/// （コンフリクトフリー）。
+#[allow(dead_code)]
+pub fn wmma_tf32_staged_a_fragment_ld_wavefronts(a_pad: u32) -> u32 {
+    wmma_tf32_staged_fragment_ld_wavefronts(a_pad, 8, 4)
+}
+
+/// B フラグメント（`bs_tile`。行 4・列 8）のロード 1 命令あたりの SMEM
+/// バンク wavefront 数（[`wmma_tf32_staged_fragment_ld_wavefronts`]
+/// 参照）。既定 `b_pad`（[`WMMA_TF32_STAGED_B_PAD`] = 68）は 2
+/// （実機 ncu 実測の ld バンクコンフリクトの主因。本ファイル
+/// [`WMMA_TF32_STAGED_B_PAD`] ドキュメンテーションコメント参照）。
+#[allow(dead_code)]
+pub fn wmma_tf32_staged_b_fragment_ld_wavefronts(b_pad: u32) -> u32 {
+    wmma_tf32_staged_fragment_ld_wavefronts(b_pad, 4, 8)
+}
+
 /// [`WmmaTf32StagedKernelConfig`] を TF32 opt-staged カーネル向けに
 /// fail-closed 検証する（[`validate_wmma_tf32_opt_config`] と同じ方針。
 /// 追加で `stages`・cp.async 4 要素整列制約を検査する）。
+/// `cfg.a_pad`/`cfg.b_pad`（イシュー #743）を fail-closed 検査する共通
+/// ヘルパ。[`validate_wmma_tf32_staged_config`]（static 変種）・
+/// [`validate_wmma_tf32_staged_dyn_config`]（`internal-diagnostics` 計測
+/// 変種。イシュー #742）の双方から呼ばれる単一ソース。
+///
+/// 検査項目（実装計画 §3「pad 検証」）:
+/// - `a_pad >= k_tile`・`b_pad >= block_n`（負のパディングは
+///   `as_tile`/`bs_tile` の行内で隣接要素と重なり OOB 相当の破損を招く
+///   ため拒否する）
+/// - `a_pad`/`b_pad` は 4 要素（16 バイト）の倍数（cp.async 転送粒度。
+///   [`WMMA_TF32_STAGED_A_PAD`]/[`WMMA_TF32_STAGED_B_PAD`] 直下の const
+///   アサーションと同じ根拠を可変 config でも検査する）
+/// - 余剰（`a_pad - k_tile`／`b_pad - block_n`）は 32 要素（バンク周期。
+///   本ファイル [`WMMA_TF32_STAGED_B_PAD`] ドキュメンテーションコメント
+///   「イシュー #743」節参照）以下。バンク周期を超える余剰はバンク
+///   コンフリクト対策として無意味な SMEM 浪費にしかならないため、
+///   誤設定を早期に拒否する
+fn validate_wmma_tf32_staged_padding(cfg: &WmmaTf32StagedKernelConfig) -> Result<(), CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+    const BANK_PERIOD_ELEMENTS: u32 = 32;
+
+    if !cfg.a_pad.is_multiple_of(4) || !cfg.b_pad.is_multiple_of(4) {
+        return Err(invalid(format!(
+            "a_pad ({}) and b_pad ({}) must both be multiples of 4 (cp.async 16-byte transfer \
+             granularity for f32 elements)",
+            cfg.a_pad, cfg.b_pad
+        )));
+    }
+
+    let a_extra = cfg.a_pad.checked_sub(cfg.k_tile).ok_or_else(|| {
+        invalid(format!(
+            "a_pad ({}) must be >= k_tile ({}) (negative padding would overlap adjacent \
+             as_tile row elements)",
+            cfg.a_pad, cfg.k_tile
+        ))
+    })?;
+    let b_extra = cfg.b_pad.checked_sub(cfg.block_n).ok_or_else(|| {
+        invalid(format!(
+            "b_pad ({}) must be >= block_n ({}) (negative padding would overlap adjacent \
+             bs_tile row elements)",
+            cfg.b_pad, cfg.block_n
+        ))
+    })?;
+
+    if a_extra > BANK_PERIOD_ELEMENTS || b_extra > BANK_PERIOD_ELEMENTS {
+        return Err(invalid(format!(
+            "padding extra beyond the tile width (a_extra={a_extra}, b_extra={b_extra}) must \
+             not exceed the {BANK_PERIOD_ELEMENTS}-element SMEM bank period; extra padding \
+             beyond one full bank period cannot reduce bank conflicts further and only wastes \
+             shared memory (a_pad={}, k_tile={}, b_pad={}, block_n={})",
+            cfg.a_pad, cfg.k_tile, cfg.b_pad, cfg.block_n
+        )));
+    }
+
+    Ok(())
+}
+
 fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<(), CudaError> {
     let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
     let warp_tile = WMMA_TF32_STAGED_WARP_TILE;
@@ -1563,6 +1737,11 @@ fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<
             cfg.block_m, cfg.block_n, cfg.k_tile
         )));
     }
+    // イシュー #743: a_pad/b_pad は config フィールド化されているため、
+    // ここで独立に fail-closed 検査する（共通ヘルパの契約は
+    // validate_wmma_tf32_staged_padding ドキュメンテーションコメント
+    // 参照）。
+    validate_wmma_tf32_staged_padding(cfg)?;
 
     let warp_grid_m = cfg.block_m / warp_tile;
     let warp_grid_n = cfg.block_n / warp_tile;
@@ -1576,14 +1755,8 @@ fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<
         )));
     }
 
-    let a_pad = cfg
-        .k_tile
-        .checked_add(4)
-        .ok_or_else(|| invalid("a_pad (k_tile + 4) overflow".to_string()))?;
-    let b_pad = cfg
-        .block_n
-        .checked_add(4)
-        .ok_or_else(|| invalid("b_pad (block_n + 4) overflow".to_string()))?;
+    let a_pad = cfg.a_pad;
+    let b_pad = cfg.b_pad;
 
     // ステージ数分の as_tile/bs_tile 多段バッファ + エピローグ c_tile の
     // 静的共有メモリ合計（`docs/perf/cuda-gemm-wmma-tf32-phase-b.md`
@@ -1643,8 +1816,12 @@ fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<
 fn render_wmma_tf32_staged_header(cfg: &WmmaTf32StagedKernelConfig, dynamic_smem: u32) -> String {
     let warp_grid_n = cfg.block_n / WMMA_TF32_STAGED_WARP_TILE;
     let threads = (cfg.block_m / WMMA_TF32_STAGED_WARP_TILE) * warp_grid_n * 32;
-    let a_pad = cfg.k_tile + 4;
-    let b_pad = cfg.block_n + 4;
+    // イシュー #743: パディング幅は cfg フィールド（呼び出し元が
+    // validate_wmma_tf32_staged_padding で検査済み）から直接取る。
+    // 本番経路（default_tf32_staged）では WMMA_TF32_STAGED_A_PAD/B_PAD と
+    // 一致するため展開結果は従来と byte 完全一致のまま。
+    let a_pad = cfg.a_pad;
+    let b_pad = cfg.b_pad;
     let k_substeps = cfg.k_tile / WMMA_TF32_STAGED_FRAG_K;
     let dim_m_define = render_dim_define("DIM_M", "m", cfg.dim_m);
     let dim_n_define = render_dim_define("DIM_N", "n", cfg.dim_n);
@@ -1716,8 +1893,10 @@ pub fn render_wmma_tf32_staged(
 #[allow(dead_code)]
 pub fn wmma_tf32_staged_dyn_smem_bytes(cfg: &WmmaTf32StagedKernelConfig) -> Result<u64, CudaError> {
     let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
-    let a_pad = u64::from(cfg.k_tile) + 4;
-    let b_pad = u64::from(cfg.block_n) + 4;
+    // イシュー #743: パディング幅は cfg フィールドから直接取る（本番既定
+    // 構成では従来の k_tile+4/block_n+4 と同じ値になる）。
+    let a_pad = u64::from(cfg.a_pad);
+    let b_pad = u64::from(cfg.b_pad);
 
     let stage_bytes_a = u64::from(cfg.stages)
         .checked_mul(u64::from(cfg.block_m))
@@ -1807,6 +1986,10 @@ fn validate_wmma_tf32_staged_dyn_config(
             cfg.block_m, cfg.block_n, cfg.k_tile
         )));
     }
+    // イシュー #743: static 側と同じ共通ヘルパで a_pad/b_pad を検査する
+    // （validate_wmma_tf32_staged_padding ドキュメンテーションコメント
+    // 参照）。
+    validate_wmma_tf32_staged_padding(cfg)?;
 
     let warp_grid_m = cfg.block_m / warp_tile;
     let warp_grid_n = cfg.block_n / warp_tile;
@@ -3770,6 +3953,15 @@ mod tests {
             block_n: WMMA_TF32_STAGED_WARP_TILE,
             k_tile: WMMA_TF32_STAGED_FRAG_K,
             stages: MAX_PIPELINE_STAGES, // 16 == 上限ちょうど
+            // イシュー #743: a_pad/b_pad は既定構成（block_m/block_n=64,
+            // k_tile=16 前提の 20/68）を引き継ぐと、本テストの最小構成
+            // （block_n=32, k_tile=8）に対しては余剰がバンク周期
+            // （32 要素）を超えてしまい、意図しない
+            // validate_wmma_tf32_staged_padding 拒否を招く。本テストの
+            // 主眼（stages 上限の境界値）に無関係なため、最小構成に自然な
+            // パディング（k_tile+4/block_n+4）へ合わせる。
+            a_pad: WMMA_TF32_STAGED_FRAG_K + 4,
+            b_pad: WMMA_TF32_STAGED_WARP_TILE + 4,
             ..WmmaTf32StagedKernelConfig::default_tf32_staged()
         };
         let result = validate_wmma_tf32_staged_config(&cfg);
@@ -3819,6 +4011,142 @@ mod tests {
         assert!(
             matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
             "k_tile=10（4 の倍数でない）が拒否されませんでした: {result:?}"
+        );
+    }
+
+    // ========================================================================
+    // TF32 opt-staged SMEM バンクコンフリクト対策（イシュー #743）
+    // ========================================================================
+
+    /// [`WmmaTf32StagedKernelConfig::default_tf32_staged`] からの
+    /// [`render_wmma_tf32_staged`] 展開結果が、パディング config 化
+    /// （イシュー #743）の前後で byte 完全一致であることをロックする
+    /// （実装計画 §1「本番ディスパッチ経路は 1 バイトも変更しない」の
+    /// 回帰防止。`wmma_tf32_staged_constants_match_kernel_source_defines`
+    /// が個々の `#define` 値を検査するのに対し、本テストはソース全体の
+    /// byte 一致を保証する）。
+    #[test]
+    fn wmma_tf32_staged_default_config_render_is_byte_identical_to_production_source() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let rendered = render_wmma_tf32_staged(&cfg).expect("既定構成は検証を通過するはずです");
+        assert_eq!(
+            rendered.source(),
+            wmma_tf32_f32_staged_source(),
+            "既定構成からの render_wmma_tf32_staged が本番経路の \
+             wmma_tf32_f32_staged_source() と byte 一致しません"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_padding`] の fail-closed 検証: `a_pad`/
+    /// `b_pad` が 4 の倍数でない場合を拒否する。
+    #[test]
+    fn validate_wmma_tf32_staged_padding_rejects_non_multiple_of_four() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            b_pad: WMMA_TF32_STAGED_BLOCK_N + 5, // 4 の倍数でない
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "b_pad が 4 の倍数でない構成が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_padding`] の fail-closed 検証: `a_pad`/
+    /// `b_pad` が対応するタイル幅（`k_tile`/`block_n`）を下回る場合を
+    /// 拒否する（負のパディングは行内で隣接要素と重なる）。
+    #[test]
+    fn validate_wmma_tf32_staged_padding_rejects_pad_below_tile_width() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            a_pad: WMMA_TF32_STAGED_K_TILE - 4, // k_tile を下回る
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_config(&cfg);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "a_pad が k_tile を下回る構成が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_padding`] の境界値検査: 余剰
+    /// （`pad - tile_width`）がバンク周期（32 要素）ちょうどなら受理され、
+    /// それを 4 要素超えると拒否されることを確認する（過剰拒否を防ぐ
+    /// 境界値テストを兼ねる）。パディング検査そのものの境界値のみを
+    /// 検査対象とするため、[`validate_wmma_tf32_staged_config`]（SMEM
+    /// 予算等の他の検査も課す上位関数）ではなく
+    /// [`validate_wmma_tf32_staged_padding`] を直接呼ぶ。
+    #[test]
+    fn validate_wmma_tf32_staged_padding_boundary_at_bank_period() {
+        let accepted = WmmaTf32StagedKernelConfig {
+            b_pad: WMMA_TF32_STAGED_BLOCK_N + 32, // 余剰ちょうど 32
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_padding(&accepted);
+        assert!(
+            result.is_ok(),
+            "余剰 32（バンク周期ちょうど）の b_pad が拒否されました: {result:?}"
+        );
+
+        let rejected = WmmaTf32StagedKernelConfig {
+            b_pad: WMMA_TF32_STAGED_BLOCK_N + 36, // 余剰 32 超過
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        let result = validate_wmma_tf32_staged_padding(&rejected);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "余剰 36（バンク周期 32 超過）の b_pad が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// イシュー #743 の中核解析（本ファイル [`WMMA_TF32_STAGED_B_PAD`]
+    /// ドキュメンテーションコメント「イシュー #743」節）を固定する
+    /// ロックテスト: 既定 `b_pad`（68）は 2-way、候補 `b_pad=72`
+    /// （`BLOCK_N + 8`）はコンフリクトフリー（1）、無パディング相当の
+    /// `b_pad=64` は 4-way。`a_pad`（既定 20）は 1（コンフリクトフリー）。
+    #[test]
+    fn wmma_tf32_staged_b_pad_72_is_bank_conflict_free_and_68_is_two_way() {
+        assert_eq!(
+            wmma_tf32_staged_b_fragment_ld_wavefronts(WMMA_TF32_STAGED_BLOCK_N + 4), // 68
+            2,
+            "既定 b_pad=68 の B フラグメントロード wavefront 数が期待値（2-way）と \
+             一致しません"
+        );
+        assert_eq!(
+            wmma_tf32_staged_b_fragment_ld_wavefronts(WMMA_TF32_STAGED_BLOCK_N + 8), // 72
+            1,
+            "候補 b_pad=72 の B フラグメントロード wavefront 数が期待値（コンフリクト \
+             フリー）と一致しません"
+        );
+        assert_eq!(
+            wmma_tf32_staged_b_fragment_ld_wavefronts(WMMA_TF32_STAGED_BLOCK_N), // 64（無パディング）
+            4,
+            "無パディング相当 b_pad=64 の B フラグメントロード wavefront 数が期待値 \
+             （4-way）と一致しません"
+        );
+        assert_eq!(
+            wmma_tf32_staged_a_fragment_ld_wavefronts(WMMA_TF32_STAGED_K_TILE + 4), // 20
+            1,
+            "既定 a_pad=20 の A フラグメントロード wavefront 数が期待値（コンフリクト \
+             フリー）と一致しません"
+        );
+    }
+
+    /// [`wmma_tf32_staged_dyn_smem_bytes`] が config フィールド化された
+    /// `a_pad`/`b_pad`（イシュー #743）を実際に反映することを検査する
+    /// （既定 68→72 へ変更すると所要バイト数が増えることの回帰検査。
+    /// `wmma_tf32_staged_dyn_smem_bytes_matches_expected_values` の既定値
+    /// 固定と対になる）。試算: stages=3 の場合
+    /// `3*(64*20 + 16*72)*4 = 3*(1280+1152)*4 = 3*2432*4 = 29,184B`。
+    #[test]
+    fn wmma_tf32_staged_dyn_smem_bytes_reflects_custom_b_pad() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            b_pad: WMMA_TF32_STAGED_BLOCK_N + 8, // 72
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        assert_eq!(
+            wmma_tf32_staged_dyn_smem_bytes(&cfg).expect("計算に成功するはずです"),
+            29_184,
+            "b_pad=72 の動的 SMEM 所要バイト数が期待値と一致しません"
         );
     }
 
