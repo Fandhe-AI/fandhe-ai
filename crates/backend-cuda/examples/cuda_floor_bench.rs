@@ -810,6 +810,7 @@ fn main() {
     );
     print_candidate_floor(
         "f32",
+        "staged (for cp.async-aligned shapes) or opt",
         min_f32_ratio_percent,
         f32_same_hardware,
         f32_judged_count,
@@ -817,6 +818,7 @@ fn main() {
     );
     print_candidate_floor(
         "f16",
+        "opt",
         min_f16_ratio_percent,
         f16_same_hardware,
         f16_judged_count,
@@ -861,6 +863,10 @@ fn confirmed_candidate_floor(
 /// 「PyTorch 参照値の再計測」参照）。
 fn print_candidate_floor(
     label: &str,
+    // ラベルの精度で利用しうる最適化 WMMA 経路の説明（f32 は staged/opt、
+    // f16 は opt のみ。f16 に存在しない staged を共用文へ出さないための
+    // 呼び出し側指定 — PR #733 codex P2 指摘対応）。
+    optimized_paths_desc: &str,
     min_ratio_percent: Option<f64>,
     same_hardware: bool,
     judged_count: usize,
@@ -897,7 +903,7 @@ fn print_candidate_floor(
         ),
         None if !opt_ok => println!(
             "CUDA {label} candidate optimized floor: n/a (no optimized WMMA path \
-             [staged for aligned shapes, or opt] was available for one or more judged sizes, \
+             [{optimized_paths_desc}] was available for one or more judged sizes, \
              so the measurements fall back to the basic kernel if available; reference-only \
              ratio {} does NOT represent the REQ-8 post-optimization floor. See the \
              \"f32/f16 optimized kernel\" warning above for the unavailability reason.)",
