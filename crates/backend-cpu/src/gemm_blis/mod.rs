@@ -119,7 +119,15 @@ const NC: usize = 512;
 /// 〈DGX Spark GB10 の Grace CPU 等〉・x86_64 は fail-closed で
 /// [`default_blocks`] に留まる。codex-review 再指摘・PR #766。
 /// `.claude/rules/coding-rust.md` の実機固有値ハードコード回避方針）。
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+///
+/// **cfg で隔離しない理由（PR #766・codex-review 再指摘への追加対応）**:
+/// 定数自体はプラットフォーム非依存の `usize` 値であり、これを
+/// `cfg(aarch64, macos)` で隔離すると [`select_blocks_for`]（判定ロジック
+/// 本体）が macOS／aarch64 の CI（本リポの通常 CI は `ubuntu-latest`。
+/// `.claude/rules/ci.md`）でコンパイル・テスト不能になる。値の適用可否は
+/// [`select_blocks`] 側の cfg 分岐と [`machine_detect::is_m4_family`] の
+/// 実行時判定が担うため、定数自体は常時コンパイルしてテスト可能性を
+/// 優先する。
 const NC_LARGE_N: usize = 9600;
 
 /// [`select_blocks`] が aarch64 で NC を [`NC_LARGE_N`] へ切り替える n の
@@ -130,7 +138,9 @@ const NC_LARGE_N: usize = 9600;
 /// 4096 のみを NC 拡大の対象にする（`docs/perf/cpu-gemm-blocking-sweep.md`
 /// §7。dim=1024 も NC=9600 で約 7.1% 改善したが、512 未計測・非単調な
 /// テーブルになるため #749 では適用せず #753 へ引き継ぐ）。
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+///
+/// [`NC_LARGE_N`] と同じ理由で cfg 隔離しない（[`select_blocks_for`] を
+/// 全プラットフォームでテスト可能にするため）。
 const LARGE_N_THRESHOLD: usize = 4096;
 
 /// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
@@ -191,30 +201,52 @@ const fn default_blocks() -> BlockSizes {
 /// （#749）に合わせて通常の `fn` へ変更した（呼び出し元は本番 3 公開
 /// 関数からの呼び出しごとに 1 回のみで、[`machine_detect`] 側が結果を
 /// `OnceLock` でキャッシュするため実行コストは無視できる）。
+///
+/// 判定ロジック本体は [`select_blocks_for`] へ切り出してある
+/// （プラットフォーム非依存・純粋関数。テスト注入可能性については
+/// 同関数のドキュメント参照。PR #766・codex-review 再指摘）。本関数は
+/// 「実行環境が Apple Silicon Mac か」（cfg）と「実機が M4 系と実行時に
+/// 一致するか」（[`machine_detect::is_m4_family`]）を確定させて
+/// [`select_blocks_for`] へ渡す薄い配線のみを担う。
 fn select_blocks(n: usize) -> BlockSizes {
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    {
-        // Apple Silicon Mac の cfg 一致だけでは M1〜M3 等の未検証機種も
-        // 含んでしまう（codex-review 再指摘・PR #766・未解決スレッド
-        // `PRRT_kwDOTuUCJc6ahOOW`）。実測済みの M4 系実機であることを
-        // `sysctlbyname` による実行時機種判定で確認できた場合のみ
-        // NC_LARGE_N を適用し、それ以外（判定失敗・非 M4 系）は
-        // fail-closed で default_blocks() に留まる。
-        if n >= LARGE_N_THRESHOLD && machine_detect::is_m4_family() {
-            return BlockSizes {
-                mc: MC,
-                kc: KC,
-                nc: NC_LARGE_N,
-            };
-        }
-    }
+    let matched = machine_detect::is_m4_family();
+    // Apple Silicon Mac（aarch64 + macOS）以外は実機固有値
+    // （NC_LARGE_N）が未検証のため常に不一致扱いとする（Linux aarch64
+    // 実機〈DGX Spark GB10 の Grace CPU 等〉・x86_64 を含む。
+    // codex-review 再指摘・PR #766）。
     #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-    {
-        // n を未使用にしないための no-op 参照。Apple Silicon Mac
-        // （aarch64 + macOS）以外では常に default_blocks() へ
-        // fail-closed フォールバックする（Linux aarch64 実機を含む。
-        // codex-review 再指摘・PR #766）。
-        let _ = n;
+    let matched = false;
+
+    select_blocks_for(n, matched)
+}
+
+/// [`select_blocks`] の判定ロジック本体（プラットフォーム非依存の純粋
+/// 関数）。`matched`（呼び出し元が確定させた「実測済み M4 系実機と
+/// 一致するか」）が `true` かつ `n >= LARGE_N_THRESHOLD` の場合のみ
+/// [`NC_LARGE_N`] を適用し、それ以外は fail-closed で
+/// [`default_blocks`] を返す。
+///
+/// **テスト注入点（PR #766・codex-review 再指摘・未解決スレッド
+/// `PRRT_kwDOTuUCJc6ahr0G`／`PRRT_kwDOTuUCJc6ahcYY`）**: 本番では
+/// `matched` は macOS／aarch64 実機の `sysctlbyname` 判定
+/// （[`machine_detect::is_m4_family`]）からのみ得られ、実測個体の
+/// `hw.model` 識別子が未記録（[`machine_detect::VERIFIED_M4_MAX_HW_MODEL`]
+/// が `None`）の間は常に `false`（= NC_LARGE_N は本番のどの実機にも
+/// 未適用）。この関数を cfg・FFI から切り離したことで、`matched: true`
+/// を直接渡すことにより NC=9600 経路（値の選択・境界〈`LARGE_N_THRESHOLD`〉
+/// ・`default_blocks` へのフォールバック）を機種判定・実行 OS に依らず
+/// 単体テストで検証できる（`#[cfg(test)] mod tests` 内のテスト参照）。
+/// 本番 3 公開関数（[`gemm_blis`] 等）はこの注入口を経由せず必ず
+/// [`select_blocks`] 経由で呼ぶため、本関数の存在自体が本番の
+/// fail-closed 挙動を弱めることはない。
+fn select_blocks_for(n: usize, matched: bool) -> BlockSizes {
+    if matched && n >= LARGE_N_THRESHOLD {
+        return BlockSizes {
+            mc: MC,
+            kc: KC,
+            nc: NC_LARGE_N,
+        };
     }
     default_blocks()
 }
@@ -1031,6 +1063,37 @@ mod tests {
                 actual: 3
             }
         ));
+    }
+
+    // `select_blocks`（実機 cfg／sysctl 判定込み）の本番挙動は macOS／
+    // aarch64・かつ実機 hw.model が VERIFIED_M4_MAX_HW_MODEL と一致する
+    // 場合のみ発火するため通常 CI（ubuntu-latest）では検証できないが、
+    // 判定ロジック本体 `select_blocks_for` は cfg・FFI から独立した純粋
+    // 関数のため、`matched` を直接注入して NC=9600 経路をプラットフォーム
+    // に依らず検証できる（PR #766・codex-review 再指摘・未解決スレッド
+    // `PRRT_kwDOTuUCJc6ahr0G`／`PRRT_kwDOTuUCJc6ahcYY`）。
+
+    #[test]
+    fn select_blocks_for_matched_large_n_uses_nc_large_n() {
+        let blocks = select_blocks_for(LARGE_N_THRESHOLD, true);
+        assert_eq!(blocks.nc, NC_LARGE_N);
+        assert_eq!(blocks.mc, MC);
+        assert_eq!(blocks.kc, KC);
+    }
+
+    #[test]
+    fn select_blocks_for_matched_below_threshold_uses_default() {
+        let blocks = select_blocks_for(LARGE_N_THRESHOLD - 1, true);
+        assert_eq!(blocks.nc, NC);
+    }
+
+    #[test]
+    fn select_blocks_for_unmatched_large_n_uses_default_fail_closed() {
+        // 未検証機種（`matched == false`）は n がどれだけ大きくても
+        // NC_LARGE_N を適用しない（fail-closed。本番の `VERIFIED_M4_MAX_HW_MODEL
+        // == None` 状態〈PR #766〉と同一の分岐）。
+        let blocks = select_blocks_for(LARGE_N_THRESHOLD * 4, false);
+        assert_eq!(blocks.nc, NC);
     }
 
     // MC/KC/NC 境界を跨ぐ多ブロック形状・並列版との bit 完全一致は

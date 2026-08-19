@@ -9,7 +9,14 @@ NC=512）は PoC-v2-1 実測環境で選定した起点値のままで、Grace�
 
 **本ドキュメントは REQ-8 の下限値・数値一致許容誤差を一切変更しない**。
 
-## 状態: 実測・選定完了（2026-08-19 M4 Max。#749 で NC 形状依存分岐を本番経路へ採用。詳細は §7）
+## 状態: 実測・選定完了、本番適用は識別子未記録のため不活性（2026-08-19 M4 Max。#749 で NC 形状依存分岐の実装を導入。詳細は §7）
+
+**注記（PR #766・codex-review 再指摘。2 巡目）**: 「完了」は実測・選定・実装（`select_blocks`／
+`select_blocks_for` の判定ロジック・単体テスト）が完了したことを指し、**本番での NC=9600 適用
+（実機での実際の性能改善効果の享受）が完了したことは意味しない**。実測個体の正確な `hw.model`
+識別子（`machine_detect::VERIFIED_M4_MAX_HW_MODEL`）が未記録のため、判明するまで
+`is_m4_family()` は常に `false` を返し、`NC_LARGE_N` はどの実機にも適用されない（= 本番では
+不活性）。詳細・再有効化手順は §7 (ii)。
 
 ### 実行環境ゲート判定（本イシュー実装セッション時点）
 
@@ -159,7 +166,7 @@ cargo test -p backend-cpu --release -- --ignored mc_kc_nc_blocking_sweep_median_
     **アクティブスレッド数倍**になる（例: M4 Max の性能コア数相当で並列実行時、150MiB 級
     候補なら概算 150MiB × スレッド数）。実機実測時はスレッド数を含めて候補を絞る
 
-## §7 実機実測結果（2026-08-19・M4 Max）と形状依存 NC 分岐の採用（#749）
+## §7 実機実測結果（2026-08-19・M4 Max）と形状依存 NC 分岐の実装（#749。本番適用は §(ii) 参照）
 
 ### (i) 実測値表
 
@@ -209,6 +216,19 @@ Mac 全機種（M4 無印・M4 Pro・M4 Max 搭載の MacBook Pro／Mac mini／i
 実測機の正確な識別子が判明し次第、同定数を `Some("Mac16,X")` へ更新することで本節の
 最適化を再度有効化できる。M1〜M3 等での実測に基づく機種別最適化（sysctl ベースの
 MC/KC/NC 動的算出への一般化）は引き続き #753 の対象とする。
+
+**判定ロジックのテスト注入可能性（PR #766・codex-review 再指摘・3 巡目）**: 識別子が
+未記録の間は実機（macOS／aarch64 かつ M4 系）が無くても `NC_LARGE_N` 経路自体の正しさを
+検証できる必要がある。`select_blocks(n)` は「cfg 判定＋`machine_detect::is_m4_family()`
+（実機 FFI・macOS／aarch64 限定）」と「n・機種一致フラグから `BlockSizes` を決める判定
+ロジック本体」を分離しており、後者は `select_blocks_for(n: usize, matched: bool) ->
+BlockSizes` というプラットフォーム非依存の純粋関数として切り出してある
+（`crates/backend-cpu/src/gemm_blis/mod.rs`）。`matched: true` を直接渡すことで、本リポの
+通常 CI（`ubuntu-latest`。`.claude/rules/ci.md`）を含む任意の環境から NC=9600 経路
+（値の選択・`LARGE_N_THRESHOLD` 境界・fail-closed フォールバック）を単体テストで検証できる
+（`select_blocks_for_matched_large_n_uses_nc_large_n` 等・同ファイル `mod tests`）。本番
+3 公開関数は必ず `select_blocks` 経由でこの注入口を経由しないため、テスト可能性の追加が
+本番の fail-closed 挙動を弱めることはない。
 
 ### (iii) 512〜2048 が劣化 0% である構造的根拠
 
