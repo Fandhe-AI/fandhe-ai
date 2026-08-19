@@ -54,10 +54,15 @@ backend-cuda --lib --features internal-diagnostics -- --ignored`）・`cuda_floo
 
 ## 3. 計測手順（DGX Spark GB10・sm_121 実機。#499 時点の手順・イシュー #740 の採否判断根拠となった A/B）
 
-**注意（イシュー #740 で `CudaMmaGemm::new`/`new_with_swizzle` の役割が反転）**: 下記手順は #499 当時
-（swizzle が opt-in だった時点）の記録であり、`new` を base（swizzle 無適用）として記述している。#740 で
-`new` 自身が swizzle 既定になったため、現在この役割の base は `CudaMmaGemm::new_without_swizzle`
-（`internal-diagnostics` feature 限定）が担う（§2 参照）。本節は歴史的記録として当時の手順文言のまま残す。
+**注意（イシュー #740 で一時反転した役割は PR #758 レビュー指摘により差し戻し済み）**: 下記手順は #499
+当時（swizzle が opt-in だった時点）の記録であり、`new` を base（swizzle 無適用）として記述している。
+#740 で `new` 自身が一時 swizzle 既定へ切り替わった際は、この役割の base を `CudaMmaGemm::
+new_without_swizzle`（`internal-diagnostics` feature 限定・診断用入口）が代替で担っていたが、PR #758
+レビュー指摘によりその結線自体を差し戻したため、現在は `new`（feature 非依存・本番既定コンストラクタ）と
+`new_without_swizzle`（`internal-diagnostics` feature 限定）の**双方が base カーネルを返す**（§2 参照。
+`new_without_swizzle` は `new` の差し戻し後は冗長だが、`new_with_swizzle` と対称の明示的な base 入口として
+`gemm_mma.rs::CudaMmaGemm::new_without_swizzle` ドキュメンテーションコメントのとおり維持している）。本節は
+#499 当時の歴史的記録として当時の手順文言のまま残す。
 
 base（`CudaMmaGemm::new`。本番カーネル）と head（`CudaMmaGemm::new_with_swizzle`。動的選択幅 + 参考として
 固定候補 `{8, 16}`）それぞれについて、5 回計測の中央値 TFLOPS を比較する（`bench-harness::protocol::run`
