@@ -104,20 +104,30 @@ const KC: usize = 256;
 /// 既定値（[`select_blocks`] 参照）。
 const NC: usize = 512;
 
-/// [`select_blocks`] が `n >= LARGE_N_THRESHOLD` で採用する NC 値。
+/// [`select_blocks`] が aarch64 かつ `n >= LARGE_N_THRESHOLD` で採用する
+/// NC 値。
 ///
 /// 2026-08-19 M4 Max 実測（`docs/perf/cpu-gemm-blocking-sweep.md` §7）で
 /// dim=4096 が現行 NC=512 比 約 9.9% 改善（0.134019 s → 0.120774 s）した
-/// BLIS firestorm 参照値をそのまま採用する（#749）。
+/// BLIS firestorm 参照値をそのまま採用する（#749）。この値は Apple M4
+/// Max（firestorm 系 aarch64）でのみ実測されており、x86_64 等の他アーキ
+/// テクチャでは性能・パネルメモリ増加（NC=9600 は既定 NC=512 比 B パネル
+/// バッファが約 18.75 倍）のいずれも未検証のため、[`select_blocks`] は
+/// `cfg(target_arch = "aarch64")` でこの値の適用を M4 Max 相当の aarch64
+/// ターゲットに限定する（codex-review 指摘・PR #766。`.claude/rules/coding-rust.md`
+/// の実機固有値ハードコード回避方針）。
+#[cfg(target_arch = "aarch64")]
 const NC_LARGE_N: usize = 9600;
 
-/// [`select_blocks`] が NC を [`NC_LARGE_N`] へ切り替える n の閾値。
+/// [`select_blocks`] が aarch64 で NC を [`NC_LARGE_N`] へ切り替える n の
+/// 閾値。
 ///
 /// 2026-08-19 M4 Max 実測で dim=2048 は現行値（NC=512）が最良、
 /// dim=4096 は NC=9600 が最良だったため、REQ-8 判定形状のうち
 /// 4096 のみを NC 拡大の対象にする（`docs/perf/cpu-gemm-blocking-sweep.md`
 /// §7。dim=1024 も NC=9600 で約 7.1% 改善したが、512 未計測・非単調な
 /// テーブルになるため #749 では適用せず #753 へ引き継ぐ）。
+#[cfg(target_arch = "aarch64")]
 const LARGE_N_THRESHOLD: usize = 4096;
 
 /// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
@@ -150,19 +160,41 @@ const fn default_blocks() -> BlockSizes {
 /// ループ内再利用）は n に直結することから m／k は条件に含めない。
 /// 非正方形状（m 小・k 大等）での挙動は同 docs のリスク節を参照。
 ///
+/// **アーキテクチャ限定（PR #766・codex-review 指摘）**: [`NC_LARGE_N`]
+/// は Apple M4 Max（aarch64）実機のみで実測した値であり、x86_64 等の
+/// 他アーキテクチャでは性能改善・B パネルバッファ増加の影響いずれも
+/// 未検証。実機固有の実測値を検証していないターゲットへ無条件適用する
+/// のは `.claude/rules/coding-rust.md` の方針に反するため、n 分岐は
+/// `cfg(target_arch = "aarch64")` でガードし、非対象アーキテクチャは
+/// fail-closed で常に [`default_blocks`]（= 従来の固定 NC=512）を返す。
+/// aarch64 の中でも M4 Max 以外（例: 他ベンダーの aarch64 SoC）を厳密に
+/// 弁別する実行時 CPU 特性検出は本 PR のスコープ外とし、aarch64 全体を
+/// 対象範囲として扱う（同アーキ内の非最適ケースは #749 実測範囲外の
+/// リスクとして許容。将来より厳密な選択が必要になれば実行時検出へ
+/// 分離検討する）。
+///
 /// 環境変数等の外部入力による上書き口は設けない（OWASP A03・
 /// `.claude/rules/security.md`。`dispatch_region` の ISA トークン選択と
 /// 同じ「入力は `validate_dims` 通過済みの形状のみ」という方針）。
 const fn select_blocks(n: usize) -> BlockSizes {
-    if n >= LARGE_N_THRESHOLD {
-        BlockSizes {
-            mc: MC,
-            kc: KC,
-            nc: NC_LARGE_N,
+    #[cfg(target_arch = "aarch64")]
+    {
+        if n >= LARGE_N_THRESHOLD {
+            return BlockSizes {
+                mc: MC,
+                kc: KC,
+                nc: NC_LARGE_N,
+            };
         }
-    } else {
-        default_blocks()
     }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        // n を未使用にしないための no-op 参照。aarch64 以外では常に
+        // default_blocks() へ fail-closed フォールバックする
+        // （codex-review 指摘・PR #766）。
+        let _ = n;
+    }
+    default_blocks()
 }
 
 /// panel packing バッファ（A/B 各 1 本）を gemm 呼び出し単位で 1 回だけ
@@ -1210,6 +1242,10 @@ mod tests {
                 "n={n}（LARGE_N_THRESHOLD 未満）は既定ブロックのはず"
             );
         }
+        // NC_LARGE_N（M4 Max 実測値）の適用は aarch64 限定（PR #766・
+        // codex-review 指摘）。x86_64 等では n の値によらず常に
+        // default_blocks() へ fail-closed フォールバックすることを確認する。
+        #[cfg(target_arch = "aarch64")]
         for n in [4096usize, 4097, 9600, 9601, 20000] {
             let blocks = select_blocks(n);
             assert_eq!(blocks.mc, MC, "n={n} でも MC は不変のはず");
@@ -1217,6 +1253,15 @@ mod tests {
             assert_eq!(
                 blocks.nc, NC_LARGE_N,
                 "n={n}（閾値以上）は NC_LARGE_N のはず"
+            );
+        }
+        #[cfg(not(target_arch = "aarch64"))]
+        for n in [4096usize, 4097, 9600, 9601, 20000] {
+            let blocks = select_blocks(n);
+            assert_eq!(
+                blocks,
+                default_blocks(),
+                "n={n}（非 aarch64）は M4 Max 実測値を適用せず既定ブロックのはず"
             );
         }
     }
