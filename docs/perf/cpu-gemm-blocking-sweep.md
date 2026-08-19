@@ -190,14 +190,25 @@ m／k は条件に含めない（非正方形状でのリスクは (vi) 参照�
 入力での上書き口を設けていない（OWASP A03。`.claude/rules/security.md`）。
 
 **適用対象の実行時機種判定（PR #766・codex-review 再指摘への対応）**: `NC_LARGE_N` は
-上表のとおり Apple M4 Max 実機でのみ実測した値であり、`cfg(target_arch = "aarch64",
+上表のとおり Apple M4 Max 実機 1 台でのみ実測した値であり、`cfg(target_arch = "aarch64",
 target_os = "macos")`（Apple Silicon Mac 全般）は M1〜M3 等の未検証機種も含んでしまう。
 `select_blocks` は上記 cfg に加え、`crates/backend-cpu/src/gemm_blis/mod.rs` の
-`machine_detect::is_m4_family`（`sysctlbyname("hw.model")` が `"Mac16,"` prefix と
-一致するかを判定。結果は `OnceLock` でプロセス内キャッシュ）が `true` を返した場合のみ
-`NC_LARGE_N` を適用し、それ以外（判定失敗・M1〜M3 等の非 M4 系・Linux aarch64・x86_64）は
-fail-closed で `default_blocks()` に留まる。M1〜M3 等での実測に基づく機種別最適化（sysctl
-ベースの MC/KC/NC 動的算出への一般化）は引き続き #753 の対象とする。
+`machine_detect::is_m4_family`（実測個体の `hw.model` を
+`machine_detect::VERIFIED_M4_MAX_HW_MODEL` と厳密一致で判定。結果は `OnceLock` で
+プロセス内キャッシュ）が `true` を返した場合のみ `NC_LARGE_N` を適用し、それ以外は
+fail-closed で `default_blocks()` に留まる。
+
+**識別子未記録につき現状は不活性（PR #766 再指摘・2 巡目）**: 当初 `hw.model` の
+`"Mac16,"` prefix 一致で判定していたが、Apple の `Mac16,*` 識別子は 2024 発表の M4 世代
+Mac 全機種（M4 無印・M4 Pro・M4 Max 搭載の MacBook Pro／Mac mini／iMac 各モデル）に
+割り当てられており、M4 Max 以外の未検証機種にも一致してしまう。実測セッション終了時点で
+個体の正確な `hw.model` 値が本 issue・親 issue #738・#735 のいずれにも記録されておらず
+復元不能なため、`machine_detect::VERIFIED_M4_MAX_HW_MODEL` は `None`（未記録）とし、
+判明するまで `is_m4_family()` は常に `false` を返す（= `NC_LARGE_N` はどの実機にも
+適用されない。実測値の捏造・placeholder 値での完了扱いはしない fail-closed 方針）。
+実測機の正確な識別子が判明し次第、同定数を `Some("Mac16,X")` へ更新することで本節の
+最適化を再度有効化できる。M1〜M3 等での実測に基づく機種別最適化（sysctl ベースの
+MC/KC/NC 動的算出への一般化）は引き続き #753 の対象とする。
 
 ### (iii) 512〜2048 が劣化 0% である構造的根拠
 
