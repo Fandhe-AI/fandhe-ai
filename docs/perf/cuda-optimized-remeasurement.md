@@ -635,4 +635,6 @@ run5 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.7
   ベースラインを正本 `docs/perf/cuda-parity-baseline.md` へ実機実測とセットで記録することが必要
   （推定値の記載は禁止）。本 PR のスコープ外（別イシューへの切り出しはユーザー承認を得て行う）。
   → **(b) はイシュー #726（2026-08-19）で完了**（「数値一致（parity）状態の限定条件」節の追記参照）。
-  (a) の診断メッセージ追加は #726 のスコープ外のため未了のまま残る
+  **(a) はイシュー #732（2026-08-19）で完了**（起動時診断へ `wmma_tf32_staged_available()` の
+  AVAILABLE／UNAVAILABLE + 理由を出力し、staged 不能時は実測の経路 provenance が REQ-8 根拠・#726
+  ベースラインと異なる旨を警告する。DGX Spark GB10 実機で出力確認済み）。本項は完了扱い
