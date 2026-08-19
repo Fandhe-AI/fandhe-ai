@@ -275,6 +275,18 @@ pub use transpose::CudaTranspose;
 pub mod diagnostics {
     use crate::{kernels_mma, kernels_wmma_opt, swizzle};
 
+    // イシュー #742: TF32 opt-staged 段数スイープ example
+    // （`examples/gemm_wmma_tf32_staged_stages_bench.rs`）専用の再公開。
+    // `kernels_wmma_opt` は非公開 `mod` のため、本モジュール（
+    // `internal-diagnostics` feature 配下）を経由しないと crate 外部から
+    // 到達できない（上記関数群と同じ「非公開モジュールへの薄い診断用
+    // ラッパー」方針）。本番経路（`gemm.rs` の 3 段フォールバック選択・
+    // `CudaGemm::run_wmma_tf32`）はこの再公開に一切依存しない。
+    pub use kernels_wmma_opt::{
+        CompiledWmmaTf32StagedDynKernel, RenderedWmmaTf32StagedDynKernel,
+        WmmaTf32StagedKernelConfig, render_wmma_tf32_staged_dyn, wmma_tf32_staged_dyn_smem_bytes,
+    };
+
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
     /// occupancy 概算専用。
@@ -302,6 +314,20 @@ pub mod diagnostics {
     /// 同じ feature ゲート方針）。
     pub fn mma_swizzle_group_width(num_sms: u32) -> u32 {
         swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
+    }
+
+    /// イシュー #741: [`mma_swizzle_group_width`] の TF32 opt-staged 版。
+    /// `swizzle::select_swizzle_group_width` を TF32 opt-staged の
+    /// ブロックタイル（`WMMA_TF32_STAGED_BLOCK_M`/`_N`。64×64）に対して
+    /// 適用する。`mma_f16` のブロックタイル（64×128）と異なるため専用
+    /// ラッパーが必要（`swizzle.rs` 本体は無変更。#740 とのコンフリクト
+    /// 回避）。`examples/gemm_wmma_tf32_swizzle_bench.rs` から到達する。
+    pub fn wmma_tf32_staged_swizzle_group_width(num_sms: u32) -> u32 {
+        swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M,
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
+        )
     }
 
     /// プロセス内 LRU カーネルモジュールキャッシュ（イシュー #511・C-4。

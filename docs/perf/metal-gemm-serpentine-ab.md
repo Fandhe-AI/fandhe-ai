@@ -12,6 +12,14 @@
 `gemm_simdgroup_tiled_source_uses_serpentine_scan_order` により蛇行走査式の実在は Linux CI（ubuntu-latest）上で
 機械検査済みだが、性能効果の実測・採否判断（下記「判断基準」）は Mac 実機セッションでの後続対応が必要。
 
+**イシュー #745 による構造変化（重要）**: #745 で `gemm_simdgroup_tiled` の staged 経路を「kk ステップ先頭で
+A/B フラグメントを一括ロードしてからレジスタ常駐のまま MMA を発行する」構造（MLX steel `mma.h` 型）へ再構成した
+結果、staged 経路の蛇行走査（本ドキュメントが対象としていたもの）は「`b_tile` を内側ループで毎回再ロードする
+構造」という前提自体が消滅したため撤去した。本ドキュメントが計測対象とする蛇行走査は、以後 **direct-load 経路
+（`staged=false`。本番では `SINGLE_SIMDGROUP_8X8` のみで使用）にのみ残存する**。staged 経路（`CANDIDATES` の
+本番候補すべて）の A/B 比較は `docs/perf/metal-gemm-register-accumulator-ab.md`（#745）が引き継ぐ。本ドキュメントの
+実機計測・採否判断は direct-load 経路（影響範囲が狭い）に限定して行う。
+
 ## 計測手順（Apple Silicon 実機）
 
 base（変更前）と head（変更後）それぞれについて計測し、5 回計測の中央値 TFLOPS を比較する
