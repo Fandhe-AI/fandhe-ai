@@ -65,6 +65,14 @@ ceil(N/タイル)` vs `idealGroups = コア数 × 係数`）→ 閾値でタイ�
 「L2/LTS throughput（DRAM 非代替）」と表記する。**`lts__t_bytes.sum`（絶対量。per-second でない値）は
 未計測**であり、下記 §4.2 の当該列は per-second 値のみの記録である旨に注意すること。
 
+**sudo の要否（codex-review 指摘・出典: イシュー #739）**: `ncu --version`／`ncu --query-metrics` は
+GPU パフォーマンスカウンタへアクセスしない単なるメタデータ照会（インストール済み ncu のバージョン表示・
+対応メトリクス名の列挙）であり、`RmProfilingAdminOnly` 制限の対象外のため bare `ncu`（非 sudo）で実行
+できる。一方、実際にカーネルを起動してカウンタを採取する §3.3／§3.3.1 の採取コマンドは
+`RmProfilingAdminOnly` の対象であり `sudo ncu` が必須（下記のとおり両節とも `sudo ncu` で統一済み）。
+このため本節（事前確認）のみ bare `ncu`、実採取（§3.3／§3.3.1）は `sudo ncu` という使い分けは意図的な
+ものであり、統一漏れではない。
+
 ```sh
 ssh "$CUDA_NODE" 'ncu --version'
 # GPU カウンタ権限（ERR_NVGPUCTRPERM が出る場合は sudo 実行可否を確認）
@@ -78,6 +86,36 @@ ssh "$CUDA_NODE" 'ncu --query-metrics | grep -E "sm__warps_active|lts__t_sector_
 `--query-metrics` の出力でメトリクス名の存在を確認してから採取する（sm_121/Blackwell 世代でのリネームに
 備える。名称が変わっていた場合は本節の採取コマンド・下記「4. 記録表」の指標名を実際の名称へ読み替えて
 記録し、変更した旨をこのドキュメントに追記する）。
+
+**fail-closed 化（codex-review 指摘: grep のみでは §3.3 METRICS の各メトリクスが個別に存在することを
+保証できない。出典: イシュー #739）**: 上記の `grep -E` は複数パターンの**いずれか 1 つでも**マッチすれば
+成功（exit 0）してしまうため、§3.3 METRICS が実際に採取する 6 メトリクスのうち一部が欠けていても検出
+できない。6 通り採取ループ（§3.3）へ進む前に、以下で `$METRICS`（§3.3 で定義するのと同じ値）の各要素が
+個別に存在することを検証し、1 つでも欠けていれば非 0 終了する:
+
+```sh
+# §3.3 の METRICS と同一の 6 メトリクス（basename。サフィックス "." 以降は除く）を
+# 1 つずつ照合し、いずれか 1 つでも --query-metrics の出力に現れなければ
+# fail-closed で中断する（grep -E の「いずれか 1 つでもマッチすれば成功」という
+# 性質では個々のメトリクス欠落を検出できないため。codex-review 指摘・出典: イシュー #739）。
+REQUIRED_METRICS=(
+  "sm__warps_active.avg.pct_of_peak_sustained_active"
+  "lts__t_sector_hit_rate.pct"
+  "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum"
+  "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum"
+  "lts__t_bytes.sum.per_second"
+  "sm__inst_issued.avg.pct_of_peak_sustained_active"
+)
+AVAILABLE=$(ssh "$CUDA_NODE" 'ncu --query-metrics')
+for m in "${REQUIRED_METRICS[@]}"; do
+  base="${m%%.*}"
+  if ! grep -qF -- "$base" <<<"$AVAILABLE"; then
+    echo "abort: required metric '$m'（basename '$base'）が ncu --query-metrics の出力に" \
+         "見つからない。§3.3 の METRICS または本リストを実機の実際の名称へ読み替えること。" >&2
+    exit 1
+  fi
+done
+```
 
 **ncu の GPU カウンタアクセス権限（2026-08-19 実測での運用確立）**: GB10 実機の ncu GPU カウンタは
 `RmProfilingAdminOnly` 制限下にあり、`ERR_NVGPUCTRPERM` を避けるには sudo 実行が必要。実運用では
@@ -271,16 +309,28 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
   扱い、2048 側の occupancy 実測（再実機セッション）を待って確定判断する。→ B-2／#742（パイプライン
   段数スイープ）へつなぐ
 
-**実測から確定できる主因は (A) L2 ヒット率の崩壊の 1 点**である。(C) 低 occupancy は 4096 単体の絶対値が
-低いことは実測済みだが、2048 側が未採取のため「サイズ増に伴う低下」としては確定せず主因候補にとどめる
-（上記 (C) 参照）。(B) は「サイズ増に対する非線形悪化」としては確定しない（上記正規化の結果、総仕事量に
-比例した増加とほぼ整合するため）。B-7／#743 は (B) の絶対件数の大きさを理由に着手対象として残すが、
-優先順位づけの根拠を「非線形悪化」から修正する。B-2／#742 は (C) の確定判断待ちの候補として着手対象に
-残す。
+**(A) L2 ヒット率の崩壊は現時点で最有力の主因候補だが、「実測から確定できる主因」とまでは言えない**
+（codex-review 指摘。出典: イシュー #739）。L2 hit rate の低下（96.77% → 76.51%）と TFLOPS 低下との間に
+相関は実測できているが、L2/LTS throughput は §4.2 のとおり未採取、instruction issue rate は「サイズ増で
+低下」という定性記録に留まり数値化されておらず、occupancy も 2048 側が未採取であるため、他の候補
+（(B)・(C)・命令発行律速）を対照実験や定量比較で切り分けて因果・寄与度を分離できていない。よって (A) は
+確定した主因ではなく他候補より確度の高い**主因候補**として扱う。確定には L2/LTS throughput の実採取・
+instruction issue rate の数値化・2048/4096 両サイズの occupancy 実測比較・L2 挙動のみを変える対照実験の
+いずれかが必要である。B-8／新ツリー #736 配下の L2 スウィズル対応（#741）は現時点の最有力候補としての
+優先着手対象に変わりないが、確定した主因としての結論づけは上記の追加実測後に行う。(C) 低 occupancy は
+4096 単体の絶対値が低いことは実測済みだが、2048 側が未採取のため「サイズ増に伴う低下」としては確定せず
+主因候補にとどめる（上記 (C) 参照）。(B) は「サイズ増に対する非線形悪化」としては確定しない（上記正規化
+の結果、総仕事量に比例した増加とほぼ整合するため）。B-7／#743 は (B) の絶対件数の大きさを理由に着手対象
+として残すが、優先順位づけの根拠を「非線形悪化」から修正する。B-2／#742 は (C) の確定判断待ちの候補として
+着手対象に残す。
 
-**mma_f16 の 4096 側の低下（軽微・約 −4.8%。本ドキュメント §1）は主に L2 ヒット率の低下**
-（96.92% → 83.51%）が効いており、SMEM バンクコンフリクト（ld: 10.9K → 38.3K・st は両サイズとも 0）・
-occupancy（64%）は wmma_tf32 ほど深刻ではない。この診断に基づき、mma_f16 側の L2 スウィズル（swizzle
+**mma_f16 の 4096 側の低下（軽微・約 −4.8%。本ドキュメント §1）も L2 ヒット率の低下**
+（96.92% → 83.51%）との相関が最も目立つが、上記 wmma_tf32 と同じ理由（L2/LTS throughput 未採取・
+instruction issue rate 未数値化・occupancy 2048 側未採取）により因果・寄与度を分離できていないため、
+確定した主因ではなく**主因候補**の 1 つとして扱う（codex-review 指摘・出典: イシュー #739）。SMEM バンク
+コンフリクト（ld: 10.9K → 38.3K・st は両サイズとも 0）・occupancy（64%）は wmma_tf32 ほど深刻ではないと
+いう相対的な傾向は実測されているが、これらも同様に確定的な除外根拠ではない。この診断に基づき、mma_f16
+側の L2 スウィズル（swizzle
 A/B・#499・後述 §6 の兄弟ドキュメント `cuda-gemm-swizzle-ab.md`）は **4096 で ×1.5957 の実測改善値
 自体は確立済み**だが、`cuda-gemm-swizzle-ab.md` §4 の既存判断基準（2048・4096 両方の改善が必要）には
 2048 が未達のため**不採用が確定**しており、本番結線は行っていない（4096 限定基準への変更はユーザー
