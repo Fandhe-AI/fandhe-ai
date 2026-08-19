@@ -593,12 +593,18 @@ fn main() {
         } else {
             // staged 不能時の実経路は `launch_wmma_tf32` の 3 段選択
             // （staged → opt → basic）に従い opt 可用性でさらに分岐する
-            // （opt も不能なら basic。opt 経路と断定するとログの provenance
-            // 再構成が壊れる — PR #733 codex P2 / Bugbot Medium 指摘対応）。
+            // （opt 経路と断定するとログの provenance 再構成が壊れる —
+            // PR #733 codex P2 / Bugbot Medium 指摘対応）。opt も不能な場合、
+            // basic の可用性は `CudaGemm::new` の成功だけでは保証されない
+            // （全 WMMA カーネル不能なら計測は `WmmaUnavailable` で skip
+            // される）ため、basic と断定せず「basic を試行し、不能なら
+            // skip」と表現する（PR #733 codex P2 第 2 指摘対応）。
             let fallback_path = if g.wmma_tf32_opt_available() {
                 "the opt (non-staged) kernel path"
             } else {
-                "the basic kernel path (opt is also unavailable; see the preceding opt warning)"
+                "the basic kernel path if available (opt is also unavailable — see the \
+                 preceding opt warning; if the basic WMMA kernel is unavailable too, the \
+                 wmma_tf32 measurements are skipped as WmmaUnavailable)"
             };
             println!(
                 "NOTE: f32 WMMA(TF32) staged kernel UNAVAILABLE ({}); wmma_tf32 measurements in \
