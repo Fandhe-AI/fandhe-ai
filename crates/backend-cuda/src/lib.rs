@@ -275,6 +275,18 @@ pub use transpose::CudaTranspose;
 pub mod diagnostics {
     use crate::{kernels_mma, kernels_wmma_opt, swizzle};
 
+    // イシュー #742: TF32 opt-staged 段数スイープ example
+    // （`examples/gemm_wmma_tf32_staged_stages_bench.rs`）専用の再公開。
+    // `kernels_wmma_opt` は非公開 `mod` のため、本モジュール（
+    // `internal-diagnostics` feature 配下）を経由しないと crate 外部から
+    // 到達できない（上記関数群と同じ「非公開モジュールへの薄い診断用
+    // ラッパー」方針）。本番経路（`gemm.rs` の 3 段フォールバック選択・
+    // `CudaGemm::run_wmma_tf32`）はこの再公開に一切依存しない。
+    pub use kernels_wmma_opt::{
+        CompiledWmmaTf32StagedDynKernel, RenderedWmmaTf32StagedDynKernel,
+        WmmaTf32StagedKernelConfig, render_wmma_tf32_staged_dyn, wmma_tf32_staged_dyn_smem_bytes,
+    };
+
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
     /// occupancy 概算専用。
