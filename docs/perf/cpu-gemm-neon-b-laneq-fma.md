@@ -54,9 +54,14 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
     複数レジスタ同時ロードを用い、`kernel`（既定）と同型の k=4 アンロール＋2 段ソフトウェア
     パイプライン構造（#561）を踏襲した。先読み境界の証明は既定カーネルと同一（
     `p+3 <= k_main-1 < kc_len`）。
-  - `kernel_b_laneq_with_ldc`（`Result` 版・`ldc` 一般化。`kernel_with_ldc` と同型）・
-    `kernel_b_laneq`（`assert!` 版・`ldc = NR` 密パッキング固定。`kernel` と同型）を公開
-    入口として追加した。
+  - `kernel_b_laneq_with_ldc`（`Result` 版・`ldc` 一般化。`kernel_with_ldc` と同型）を通常の
+    公開入口として追加した。`kernel_b_laneq`（`assert!` 版・`ldc = NR` 密パッキング固定。
+    `kernel` と同型）は本番経路 panic 禁止規約（`.claude/rules/coding-rust.md`）への抵触を
+    コンパイル単位で防ぐため、後続の PR #765 codex-review P1 対応（コミット
+    `12e4225`）で `#[cfg(test)]` 限定へ変更済みである（`gemm_blis::mod` の
+    `#[cfg(test)]` A/B 計測テスト専用。既定ディスパッチには未接続）。本節は追加時点の
+    記録であり、現在の可視性は `neon.rs` の [`kernel_b_laneq`] ドキュメンテーションコメント
+    を正とする。
   - モジュール冒頭に `## B 側レーン参照 FMA 変種（イシュー #748）` 節を追加し、技法・
     bit 完全一致契約が可換性により保たれる理由・転置コストのトレードオフ・複数レジスタ
     ロードの stable 可用性を記録した。
@@ -66,7 +71,11 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
   トークン。MR=8/NR=12）を追加した。`Neon12x8Kernel` で判明した A/B 公平性問題（ヒープ
   確保の非対称。同トークンのドキュメント参照）を避けるため、`run_with_ldc` は最初から
   `kernel_b_laneq_with_ldc` への直接委譲とした（デフォルト実装のヒープ確保ギャザー/
-  スキャッタに頼らない）。既定の `dispatch_region` 経路には接続しない。
+  スキャッタに頼らない）。既定の `dispatch_region` 経路には接続しない。**`NeonBLaneqKernel`
+  自体も `run` が委譲する `kernel_b_laneq`（`assert!` 版）の panic 経路を本番ビルドへ
+  含めないため、型・`impl` を PR #765 codex-review P1 対応（コミット `12e4225`）で
+  `#[cfg(all(target_arch = "aarch64", test))]` 限定へ変更済み**（`gemm_blis::mod` の
+  `#[cfg(test)]` テストからのみ構築可能）。
 - `crates/backend-cpu/src/gemm_blis/mod.rs`:
   - `neon_8x12_and_12x8_match_scalar_forced_bit_exact` に `NeonBLaneqKernel` の
     `ScalarKernel` 強制経路との bit 完全一致検証を追加した（既存の k グリッド
