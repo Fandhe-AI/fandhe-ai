@@ -222,22 +222,31 @@ pub struct AbResult {
 /// を返してしまい、呼び出し側（`gemm_swizzle_ab_bench.rs`）の `head_over_base`
 /// 計算へ非有限値が silent に伝播する（codex-review 指摘対応。イシュー #746 PR #763）。
 ///
+/// `median_b_secs` も 0.0 未満に加え **0.0 そのものを拒否**する: 呼び出し側は
+/// `median_b_secs` を `b_over_a_ratio` の分子だけでなく `tflops(size, median_b_secs)`
+/// （時間の逆数）の分母としても使うため、0.0 を非負として素通しすると
+/// `head_median_tflops` が無限大になり `head_over_base` へ非有限値が伝播する。
+/// 「非負なら許容」では本関数のドキュメント上の目的（非有限値の伝播防止）を
+/// 達成できないため、`median_a_secs` と同じ「正の有限値」を要求する
+/// （codex-review 指摘対応。イシュー #746 PR #763 再指摘）。
+///
 /// 単体テスト（`tests::validate_ab_medians_*`）から直接呼べるよう、[`run_ab`] 本体
 /// （実測タイマー依存で 0 秒を決定的に再現できない）とは切り離した関数にする。
 ///
 /// # Errors
 ///
-/// `median_a_secs` が正の有限値でない場合、または `median_b_secs` が非負の有限値で
-/// ない場合、`BenchError::ProtocolViolation`。
+/// `median_a_secs`・`median_b_secs` のいずれかが正の有限値でない場合、
+/// `BenchError::ProtocolViolation`。
 fn validate_ab_medians(median_a_secs: f64, median_b_secs: f64) -> Result<(), BenchError> {
     if !(median_a_secs.is_finite() && median_a_secs > 0.0) {
         return Err(BenchError::ProtocolViolation(format!(
             "median_a_secs は正の有限値が必須（b_over_a_ratio の分母）。実際: {median_a_secs}"
         )));
     }
-    if !median_b_secs.is_finite() || median_b_secs < 0.0 {
+    if !(median_b_secs.is_finite() && median_b_secs > 0.0) {
         return Err(BenchError::ProtocolViolation(format!(
-            "median_b_secs は非負の有限値が必須。実際: {median_b_secs}"
+            "median_b_secs は正の有限値が必須（呼び出し側の tflops 計算で分母にも \
+             使われるため 0.0 も拒否する）。実際: {median_b_secs}"
         )));
     }
     Ok(())
@@ -519,6 +528,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_ab_medians_rejects_zero_median_b_secs() {
+        // median_b_secs=0.0 は b_over_a_ratio 上は非負として許容できて見えるが、
+        // 呼び出し側の tflops(size, median_b_secs) の分母にもなるため無限大が
+        // 伝播しうる。0.0 も拒否されることを固定する（codex-review 再指摘対応。
+        // イシュー #746 PR #763）。
+        let err = validate_ab_medians(1.0, 0.0)
+            .expect_err("median_b_secs=0 は拒否されるはず（tflops 計算の分母保護）");
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
     fn validate_ab_medians_rejects_non_finite_values() {
         assert!(validate_ab_medians(f64::NAN, 1.0).is_err());
         assert!(validate_ab_medians(1.0, f64::INFINITY).is_err());
@@ -529,8 +549,6 @@ mod tests {
     #[test]
     fn validate_ab_medians_accepts_positive_finite_values() {
         assert!(validate_ab_medians(1.0, 2.0).is_ok());
-        // median_b_secs=0.0 は非負のため許容する（median_a_secs のみ正が必須）。
-        assert!(validate_ab_medians(1.0, 0.0).is_ok());
     }
 
     #[test]
