@@ -531,6 +531,21 @@ pub fn kernel_b_laneq_with_ldc(
 /// （[`kernel`] と同型の `assert!` 検査。`Result` を `panic!` へ変換する
 /// 経路を作らないための独立関数。[`super::NeonBLaneqKernel::run`] から
 /// 直接委譲される）。
+///
+/// ## `#[cfg(test)]` 限定（PR #765 codex-review P1 対応）
+///
+/// [`super::NeonBLaneqKernel`] は `super::super::dispatch_region` の既定
+/// 駆動経路に接続されない `gemm_blis::mod` の `#[cfg(test)]` A/B 計測
+/// テスト専用トークンであり、本番ビルドの到達可能経路を持たない
+/// （呼び出し元は本関数のドキュメント参照）。にもかかわらず本関数
+/// 自体が本番ビルドへコンパイルされていると、契約違反時に `panic!` へ
+/// 変換する `assert!`/`assert_eq!` を含む関数が「本番経路の panic 禁止」
+/// 規約（`.claude/rules/coding-rust.md` テスト・ベンチ節・AGENTS.md）の
+/// 対象として誤認・誤用されうる。唯一の呼び出し元
+/// [`super::NeonBLaneqKernel::run`] 側と対にして `#[cfg(test)]` を付け、
+/// 本番ビルドから完全に除外する（テスト専用の性質をコンパイル単位でも
+/// 保証する）。
+#[cfg(test)]
 pub fn kernel_b_laneq(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
     assert!(
         super::panel_len_matches(ap.len(), MR, kc_len),
