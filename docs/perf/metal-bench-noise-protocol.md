@@ -46,10 +46,13 @@ Metal 側は `MetalGemm::new_with_swizzle(ctx, bool)` で swizzle off/on の 2 �
 
 ### 5. 安定性ゲートと不成立時の中断規定
 
-対照カーネルの spread が概ね 5% を超えるサイズがある計測セッションは、A/B 判定の土台となる計測プロトコル自体が
+対照カーネルの spread が概ね 5%（`bench_harness::ab::STABILITY_SPREAD_GATE` が単一真実源。
+`crates/bench-harness/src/ab.rs`）を超えるサイズがある計測セッションは、A/B 判定の土台となる計測プロトコル自体が
 まだノイズを十分抑えられていないとみなし、**A/B 判定へ進まない**（判定を無効化して中断する、安全側の設計）。
-`crates/backend-metal/examples/gemm_swizzle_ab_bench.rs` のフェーズ 1（安定性セルフチェック）がこのゲートを実装し、
-不成立時はフェーズ 2（swizzle A/B）をスキップして「判定不可」を出力する。
+`crates/backend-metal/examples/gemm_swizzle_ab_bench.rs` のフェーズ 1（安定性セルフチェック）が
+`STABILITY_SPREAD_GATE` を参照してこのゲートを実装し、不成立時はフェーズ 2（swizzle A/B）をスキップして
+「判定不可」を出力する。閾値を変更する場合は `STABILITY_SPREAD_GATE` の定義（コメント含む）と本節の両方を
+更新すること（ガードレール閾値相当のためユーザー承認必須。`.claude/rules/security.md`）。
 
 不成立の場合の調整手順: `crates/backend-metal/examples/gemm_swizzle_ab_bench.rs` の `ROUNDS`・`COOLDOWN`・
 `MIN_WARMUP` 定数を**増やす方向のみ**調整して再実行する（減らす調整は spread 実測 green が条件。実装計画 §4.2）。

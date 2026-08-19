@@ -32,6 +32,17 @@ use crate::protocol::{self, MeasurementConfig};
 use crate::stats::{self, BenchError};
 use std::time::{Duration, Instant};
 
+/// 安定性ゲート（[`StabilityResult::spread`] の許容上限）の単一真実源。
+///
+/// `docs/perf/metal-bench-noise-protocol.md`「5. 安定性ゲートと不成立時の中断規定」の
+/// 「spread が概ね 5% を超えるサイズがある計測セッションは A/B 判定へ進まない」基準値。
+/// 呼び出し側（`crates/backend-metal/examples/gemm_swizzle_ab_bench.rs`）が同じ値を
+/// example 内へ直接定義すると、閾値変更時にコードと文書が独立に乖離しうる
+/// （codex-review 指摘対応。イシュー #746 PR #763）。値を変更する場合は本定数と
+/// 上記文書の記述を両方更新すること（ガードレール閾値相当のためユーザー承認必須。
+/// `.claude/rules/security.md`）。
+pub const STABILITY_SPREAD_GATE: f64 = 0.05;
+
 /// [`run_ab`]／[`run_stability`] のラウンド構成。
 ///
 /// `rounds` を偶数必須とするのは、ラウンド交互（A→B / B→A の順序反転）が
@@ -200,6 +211,38 @@ pub struct AbResult {
     pub spread_b: f64,
 }
 
+/// [`run_ab`] が `b_over_a_ratio`（`median_b_secs / median_a_secs`）を計算する前に
+/// 両中央値の符号・有限性を検証する（`crate::threshold::judge` が own.median_secs に
+/// 課す検証と同じ理由・同じ fail-closed 方針）。
+///
+/// `stats::relative_spread` は全サンプルが 0 のときのみ median=0.0 を許容して
+/// `Ok(0.0)` を返す設計のため、`protocol::run` の計測精度がタイマー分解能を下回る
+/// 極小ワークロードでは `median_a_secs`／`median_b_secs` が 0.0 になりうる。ここで
+/// 検証せずに比を計算すると NaN（両方 0）や無限大（片方のみ 0）を含む `Ok(AbResult)`
+/// を返してしまい、呼び出し側（`gemm_swizzle_ab_bench.rs`）の `head_over_base`
+/// 計算へ非有限値が silent に伝播する（codex-review 指摘対応。イシュー #746 PR #763）。
+///
+/// 単体テスト（`tests::validate_ab_medians_*`）から直接呼べるよう、[`run_ab`] 本体
+/// （実測タイマー依存で 0 秒を決定的に再現できない）とは切り離した関数にする。
+///
+/// # Errors
+///
+/// `median_a_secs` が正の有限値でない場合、または `median_b_secs` が非負の有限値で
+/// ない場合、`BenchError::ProtocolViolation`。
+fn validate_ab_medians(median_a_secs: f64, median_b_secs: f64) -> Result<(), BenchError> {
+    if !(median_a_secs.is_finite() && median_a_secs > 0.0) {
+        return Err(BenchError::ProtocolViolation(format!(
+            "median_a_secs は正の有限値が必須（b_over_a_ratio の分母）。実際: {median_a_secs}"
+        )));
+    }
+    if !median_b_secs.is_finite() || median_b_secs < 0.0 {
+        return Err(BenchError::ProtocolViolation(format!(
+            "median_b_secs は非負の有限値が必須。実際: {median_b_secs}"
+        )));
+    }
+    Ok(())
+}
+
 /// `workload_a`（例: base = swizzle off）・`workload_b`（例: head = swizzle on）を
 /// `ab_config.rounds` ラウンド interleaved に計測する。
 ///
@@ -276,6 +319,8 @@ pub fn run_ab<FA: FnMut(), FB: FnMut()>(
     let spread_b = stats::relative_spread(&b_round_medians_secs)?;
     let median_a_secs = stats::median_q1_q3(&a_round_medians_secs)?.median;
     let median_b_secs = stats::median_q1_q3(&b_round_medians_secs)?.median;
+
+    validate_ab_medians(median_a_secs, median_b_secs)?;
 
     Ok(AbResult {
         a_round_medians_secs,
@@ -452,6 +497,40 @@ mod tests {
             "min_warmup による時間ベース延長が機能していれば 20 回を超えるはず: {}",
             call_count.load(Ordering::SeqCst)
         );
+    }
+
+    #[test]
+    fn validate_ab_medians_rejects_zero_median_a_secs() {
+        // median_a_secs=0（タイマー分解能未満の極小ワークロード等で発生しうる）は
+        // b_over_a_ratio の分母がゼロになり NaN/無限大混入の AbResult を Ok で
+        // 返してしまうため、fail-closed に拒否されることを確認する
+        // （codex-review 指摘対応。イシュー #746 PR #763）。
+        let err = validate_ab_medians(0.0, 1.0)
+            .expect_err("median_a_secs=0 は拒否されるはず（ゼロ除算防止）");
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn validate_ab_medians_rejects_both_zero() {
+        // 両中央値が 0 だと比率計算は 0.0/0.0 = NaN になるため拒否されるはず。
+        let err = validate_ab_medians(0.0, 0.0)
+            .expect_err("median_a_secs=median_b_secs=0 は拒否されるはず");
+        assert!(matches!(err, BenchError::ProtocolViolation(_)));
+    }
+
+    #[test]
+    fn validate_ab_medians_rejects_non_finite_values() {
+        assert!(validate_ab_medians(f64::NAN, 1.0).is_err());
+        assert!(validate_ab_medians(1.0, f64::INFINITY).is_err());
+        assert!(validate_ab_medians(-1.0, 1.0).is_err());
+        assert!(validate_ab_medians(1.0, -1.0).is_err());
+    }
+
+    #[test]
+    fn validate_ab_medians_accepts_positive_finite_values() {
+        assert!(validate_ab_medians(1.0, 2.0).is_ok());
+        // median_b_secs=0.0 は非負のため許容する（median_a_secs のみ正が必須）。
+        assert!(validate_ab_medians(1.0, 0.0).is_ok());
     }
 
     #[test]

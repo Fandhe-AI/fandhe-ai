@@ -61,7 +61,11 @@ mod macos_impl {
     /// 進めるかどうかの判定材料。閾値そのものは呼び出し元 `main` が
     /// 出力メッセージとして明示するのみで、本関数はブール判定のみ返す）。
     fn phase1_stability_selfcheck(ctx: &MetalContext, gemm: &MetalGemm) -> bool {
-        const SPREAD_GATE: f64 = 0.05;
+        // 安定性ゲートの値自体は `bench_harness::ab::STABILITY_SPREAD_GATE` を
+        // 単一真実源とする（`docs/perf/metal-bench-noise-protocol.md` と同じ値を
+        // example 内に直接複製すると、閾値変更時にコードと文書が独立に乖離しうる
+        // ため。codex-review 指摘対応。イシュー #746 PR #763）。
+        const SPREAD_GATE: f64 = bench_harness::ab::STABILITY_SPREAD_GATE;
         println!(
             "--- フェーズ 1: 安定性セルフチェック（対照カーネル: SimdgroupTiled auto 選択）---"
         );
