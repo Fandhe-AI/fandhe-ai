@@ -134,16 +134,19 @@ fn baseline_fixture_is_self_consistent() {
 /// 存在しないためこの不確実性が原理的に生じない（`common/parity_baseline.rs`
 /// 各行コメント参照）。このテストは `WmmaTf32Opt`/`MmaF16` の行に
 /// `baseline_provenance_unconfirmed: true` が誤って付与されていないことを
-/// 固定し、非後退ゲートが意図せず広くスキップされる回帰を防ぐ（`WmmaTf32`・
-/// `WmmaTf32Staged` は実機未到達で記録値が存在しないため許容する）。
+/// 固定し、非後退ゲートが意図せず広くスキップされる回帰を防ぐ（`WmmaTf32`
+/// は基本版カーネル単独の再測定が未了のため許容する。`WmmaTf32Staged` は
+/// イシュー #726 の実機実測で確定済みとなったため許容経路から外した —
+/// 確定後に再び unconfirmed へ戻す変更はゲートの弱体化でありこのテストが
+/// 検出する）。
 #[test]
 fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
     for b in BASELINES {
-        if b.path != ParityPath::WmmaTf32 && b.path != ParityPath::WmmaTf32Staged {
+        if b.path != ParityPath::WmmaTf32 {
             assert!(
                 !b.baseline_provenance_unconfirmed,
-                "{}: baseline_provenance_unconfirmed は WmmaTf32（基本版）・\
-                 WmmaTf32Staged 行専用です。経路 {:?} で true になっており、\
+                "{}: baseline_provenance_unconfirmed は WmmaTf32（基本版）\
+                 行専用です。経路 {:?} で true になっており、\
                  非後退ゲートが意図せずスキップされます",
                 b.context, b.path
             );
@@ -155,11 +158,11 @@ fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
 /// （codex-review P1 指摘対応の副作用への対策・イシュー #491）。
 ///
 /// `WmmaTf32Opt`・`MmaF16` は provenance 不確実性が原理的に生じない経路
-/// （`common/parity_baseline.rs` 各行コメント参照）のため、全行が
+/// （`common/parity_baseline.rs` 各行コメント参照）、`WmmaTf32Staged` は
+/// イシュー #726 の実機実測で確定済みの経路のため、全行が
 /// enforced（`baseline_provenance_unconfirmed == false`）であることを
-/// 固定する。`WmmaTf32`（基本版）・`WmmaTf32Staged` は対象外（前者は現状
-/// 2 行とも、後者は実機未到達のため 1 行とも
-/// `baseline_provenance_unconfirmed: true` であり、これは
+/// 固定する。`WmmaTf32`（基本版）は対象外（現状
+/// 2 行とも `baseline_provenance_unconfirmed: true` であり、これは
 /// `assert_no_parity_regression` の fail-closed 契約
 /// （`assert_no_parity_regression_panics_on_unconfirmed_baseline`
 /// が下で機械検査する）によって「実機必須テストが黙って green になる」
@@ -168,7 +171,11 @@ fn baseline_provenance_unconfirmed_is_scoped_to_unmeasured_paths_only() {
 /// を正常状態として固定する」パターンになるため）。
 #[test]
 fn wmma_tf32_opt_and_mma_f16_rows_are_fully_enforced() {
-    for path in [ParityPath::WmmaTf32Opt, ParityPath::MmaF16] {
+    for path in [
+        ParityPath::WmmaTf32Opt,
+        ParityPath::WmmaTf32Staged,
+        ParityPath::MmaF16,
+    ] {
         let total = BASELINES.iter().filter(|b| b.path == path).count();
         let enforced = BASELINES
             .iter()

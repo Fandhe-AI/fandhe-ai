@@ -427,6 +427,20 @@ JIT キャッシュベンチ側の既知事象として申し送る。）
   単独採用できない（#186 限定条件は継続）。本 PR ではこの限定に加え f32=50% が区分 2（判定不能）の
   実測値であることも踏まえ、性能値を確定させない（候補値としての記録に留める）
 
+### 追記（#726・2026-08-19）: `wmma_tf32_staged` の判定不能状態は解消済み
+
+上記 3 区分の区分 2 のうち `wmma_tf32_staged`（512×512×4096 seed=0xC0FFEE）は、イシュー #726 で
+DGX Spark GB10 実機（コミット 06b24b4）にて確定ベースラインを確立した（fail_count=43019/262144
+〈16.4%〉・mean_abs_diff=4.463436e-3。release/debug 各 2 回・計 4 回で同一値。正本
+`docs/perf/cuda-parity-baseline.md` §3 表・§8.5 表参照）。fixture
+（`crates/backend-cuda/tests/common/parity_baseline.rs` の `WmmaTf32Staged` 行）は確定値 +
+`baseline_provenance_unconfirmed: false` へ更新済みで、`parity_baselines_do_not_regress` は staged
+行を含む全対象行で pass する（更新後の実機再実行で確認済み）。これにより f32 候補下限 50% の根拠
+経路（staged）の parity 非後退判定は可能になり、`docs/perf/performance-floor-decision.md` §10 の
+限定条件 4 は解消された。本節上記の「判定不能（fail-closed）」記述は 2026-08-18 実測時点の記録として
+保存する。なお `wmma_tf32`（基本版）2 行の判定不能（基本版カーネル単独の再測定未了）と、#186・
+#389 §5.3 由来の限定条件 1〜3 は #726 のスコープ外であり継続する。
+
 ## 状態: 実測完了（2026-08-18・DGX Spark GB10）
 
 本ドキュメントは当初 Linux worktree で計測手順・記録テンプレートのみを整備していたが（#502・
@@ -619,4 +633,6 @@ run5 CUDA f16 candidate optimized floor (rounding rule applied to min ratio 38.7
   この経路を再構成できない。後続セッションで (a) `cuda_floor_bench.rs` の診断メッセージへ
   `wmma_tf32_staged_available()` の出力を追加し、(b) `wmma_tf32_staged` 512×512×4096 の確定
   ベースラインを正本 `docs/perf/cuda-parity-baseline.md` へ実機実測とセットで記録することが必要
-  （推定値の記載は禁止）。本 PR のスコープ外（別イシューへの切り出しはユーザー承認を得て行う）
+  （推定値の記載は禁止）。本 PR のスコープ外（別イシューへの切り出しはユーザー承認を得て行う）。
+  → **(b) はイシュー #726（2026-08-19）で完了**（「数値一致（parity）状態の限定条件」節の追記参照）。
+  (a) の診断メッセージ追加は #726 のスコープ外のため未了のまま残る

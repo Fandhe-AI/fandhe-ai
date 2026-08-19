@@ -288,27 +288,30 @@ pub static BASELINES: &[ParityBaseline] = &[
     },
     // wmma_tf32_staged: K=4096 ストレスケース（512x512x4096）。既存
     // wmma_tf32_opt ストレス行（直上、seed=0xC0FFEE）と同形状に揃え、
-    // 実機再測定後に opt 対比の改善量を直接比較できるようにする（PR #678
-    // codex-review P1 指摘対応・イシュー #500）。staged カーネルはこの PR を
-    // 作成したセッションでは実機未到達のため実測値が存在せず、fail_count・
-    // ceiling とも未確定を表すプレースホルダ（0）を入れ
-    // `baseline_provenance_unconfirmed: true` で fail-closed に倒す
-    // （`docs/perf/cuda-parity-baseline.md` §6「未計測形状・シードの行追加は
-    // 実機実測とセットでのみ行う」— 推定値を記載しない代わりに、
-    // 実測が完了するまで検査自体を必ず失敗させることで非後退ゲートが
-    // 「何も検査せず green になる」状態を防ぐ）。実機再測定でイシュー #502
-    // へ引き継ぎ、確定値へ差し替える。
+    // opt 対比の改善量を直接比較できるようにする（PR #678 codex-review P1
+    // 指摘対応・イシュー #500）。#500 時点では実機未到達のためプレース
+    // ホルダ + `baseline_provenance_unconfirmed: true` の fail-closed 行
+    // だったが、イシュー #726 で DGX Spark GB10 実機（コミット 06b24b4・
+    // 2026-08-19）にて `parity_baselines_do_not_regress` の staged 検査
+    // （公開 API `run_wmma_tf32` 経由・`wmma_tf32_staged_available()`
+    // assert 済み）を release/debug 各 2 回実行し、4 回とも同一の
+    // fail_count=43019/262144・mean_abs_diff=4.463436e-3 を確認して確定値
+    // へ差し替えた。値は直上の wmma_tf32_opt 同形状行と一致する（staged は
+    // opt と同一の FMA 契約・積和順序を保つ cp.async 二重バッファ版であり、
+    // 数値結果が変わらないことの実測裏付け）。ceiling は 4 有効桁表記
+    // 4.463e-3 の最終桁切り上げ天井値（`docs/perf/cuda-parity-baseline.md`
+    // §4）。
     ParityBaseline {
         path: ParityPath::WmmaTf32Staged,
-        context: "wmma_tf32_staged 512x512x4096 seed=0xC0FFEE (未計測・実機再測定待ち)",
+        context: "wmma_tf32_staged 512x512x4096 seed=0xC0FFEE",
         m: 512,
         n: 512,
         k: 4096,
         seed: 0xC0FFEE,
         total: 512 * 512,
-        baseline_fail_count: 0,
-        baseline_mean_abs_diff_ceiling: 0.0,
-        baseline_provenance_unconfirmed: true,
+        baseline_fail_count: 43019,
+        baseline_mean_abs_diff_ceiling: 4.464e-3,
+        baseline_provenance_unconfirmed: false,
     },
     // mma_f16: K=4096 ストレスケース（256x256x4096、seed=9999）。
     // `tests/cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` の先頭呼出し
