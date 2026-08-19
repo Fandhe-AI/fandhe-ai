@@ -346,3 +346,73 @@ fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
         "パディング導入後も A タイル・B タイル双方の group_in_bounds 判定が必要です"
     );
 }
+
+/// イシュー #752 の証跡 (a): アラインメント特化ロード分岐が使う
+/// `ALIGN_M`/`ALIGN_N`/`ALIGN_K` の 3 つの MSL function constant（index
+/// 8/9/10）が宣言されていることを Linux CI（ubuntu-latest）上でロックする。
+/// `crate::pipeline::make_pipeline_with_constants` が渡す
+/// `crate::tile::AlignFlags` と 1:1 対応する契約（Rust 側は
+/// `crates/backend-metal/src/tile.rs`・`crates/backend-metal/src/pipeline.rs`
+/// の単体テストで別途検証する）。
+#[test]
+fn gemm_metal_source_declares_align_function_constants() {
+    for needle in [
+        "constant bool ALIGN_M [[function_constant(8)]];",
+        "constant bool ALIGN_N [[function_constant(9)]];",
+        "constant bool ALIGN_K [[function_constant(10)]];",
+    ] {
+        assert!(
+            GEMM_METAL_SOURCE.contains(needle),
+            "gemm.metal に ALIGN_M/N/K function constant 宣言 `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #752 の証跡 (b): staged ロード（協調ロード）経路の
+/// `group_in_bounds` 判定が `ALIGN_M`/`ALIGN_N`/`ALIGN_K` との OR 合成へ
+/// 書き換えられており、かつ検査式自体（`kk + 4 <= bk_eff` 等）が引き続き
+/// ソース上に残っていることをロックする（「境界検査の省略」ではなく
+/// 「整列が証明された場合の恒真化」であることの機械検証。REQ-8・
+/// `.claude/rules/coding-rust.md`「カーネル実装の境界検査」）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_align_flags_in_staged_guards() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "bool group_in_bounds = (ALIGN_K || (kk + 4 <= bk_eff && global_k + 4 <= dims.k)) &&",
+        "(ALIGN_M || global_row < dims.m);",
+        "bool group_in_bounds = (ALIGN_K || (kk < bk_eff && global_k < dims.k)) &&",
+        "(ALIGN_N || global_col + 4 <= dims.n);",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled の staged 経路に ALIGN_* との OR 合成 `{needle}` が見つかりません"
+        );
+    }
+    // OR 合成後も group_in_bounds 判定自体は A タイル・B タイルの 2 箇所
+    // （既存検査 `gemm_simdgroup_tiled_source_retains_float4_load_boundary_fallback`
+    // と同数）のまま維持されることを再確認する。
+    assert_eq!(
+        kernel_body.matches("bool group_in_bounds =").count(),
+        2,
+        "ALIGN_* 導入後も A タイル・B タイル双方の group_in_bounds 判定が必要です"
+    );
+}
+
+/// イシュー #752 の証跡 (c): direct-load 経路（`staged=false`）の行/列
+/// ガード（`a_row < dims.m`・`b_col < dims.n`）も `ALIGN_M`/`ALIGN_N` との
+/// OR 合成へ書き換えられていることをロックする（staged 経路と同じ恒真化
+/// パターンを direct-load 経路にも適用する契約。イシュー #752 計画
+/// 「設計方針」§3.1）。
+#[test]
+fn gemm_simdgroup_tiled_source_uses_align_flags_in_direct_load_guards() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+    for needle in [
+        "if (ALIGN_M || a_row < dims.m) {",
+        "if (ALIGN_N || b_col < dims.n) {",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled の direct-load 経路に ALIGN_* との OR 合成 `{needle}` が見つかりません"
+        );
+    }
+}

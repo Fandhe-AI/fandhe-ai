@@ -442,6 +442,49 @@ constant uint TGP_PAD [[function_constant(6)]];
 // （main への rebase 時点での未使用最小 index）を割り当てる。
 constant bool SWIZZLE_ENABLED [[function_constant(7)]];
 
+// アラインメント特化ロード分岐（イシュー #752。MLX steel `matmul.cpp` の
+// align_M/align_N/align_K を参考にした技法。技法の参照のみでコード転記は
+// しない）。`crate::tile::AlignFlags::for_dims`（`crate::gemm::MetalGemm::
+// pipeline_for_tile` が候補ごとに実効次元 `(m_eff, n_eff, k_eff)` と
+// `TileConfig` から導出し `crate::pipeline::make_pipeline_with_constants`
+// 経由で畳み込む。唯一の真実源）が「実効次元が bm/bn/bk へ厳密に整除する」
+// ことをホスト側で証明できた場合のみ `true` を渡す契約。
+//
+// バリアント数: `TileConfig` ごとに最大 2^3=8 通り（align_m/n/k の
+// 組合せ）だが、実際に構築されるのは `pipeline_for_tile` の遅延キャッシュが
+// 観測した組合せのみ（起動コストは増えない。`crate::gemm::MetalGemm::
+// tiled_cache` フィールドコメント参照）。
+//
+// `true` の場合、下記 `USE_TGP_STAGING` 協調ロードの `group_in_bounds`
+// 判定・direct-load 経路の行/列ガードのうち該当方向の項を
+// `ALIGN_* || (元の検査式)` という OR 合成へ書き換えている。
+// `ALIGN_*=true` はコンパイラにとって定数畳み込みであり、OR の右辺（検査式）
+// は到達不能なデッドコードとして除去される。`ALIGN_*=false`（非整列。
+// 既定の安全側）では OR の左辺が恒偽のため式全体は元の検査式と完全に同一の
+// 評価になり、`.claude/rules/coding-rust.md`「カーネル実装の境界検査
+// （REQ-8）」が要求する手動境界チェックは非整列形状に対しては一切変更なく
+// 残る（「検査の省略」ではなく「整列が証明された場合の恒真化」）。
+//
+// 恒真化の正当性（`ALIGN_K` を例に導出）: `ALIGN_K` は
+// `dims.k % BK == 0`（実効次元は `BK` の倍数）をホスト側が証明済みという
+// 意味。K タイルループは `k_full_tiles = dims.k / BK`・
+// `k_tail = dims.k - k_full_tiles*BK` で末尾タイルを判定するが、
+// `dims.k % BK == 0` なら `k_tail == 0` であり `bk_eff = min(BK, dims.k-p0)`
+// は全タイルで常に `BK` になる。よって A タイル側の
+// `kk + 4 <= bk_eff` は `kk + 4 <= BK` と恒等（`kk` は `0..BK` の 4 刻み
+// のためこの式は `kk` の全域で真）、B タイル側の `kk < bk_eff` も
+// `kk < BK` と恒等（同じく全域で真）になる。`global_k + 4 <= dims.k`（A
+// 側）・`global_k < dims.k`（B 側）も `p0 = t*BK`（`t < k_full_tiles`）・
+// `dims.k = k_full_tiles*BK` から `global_k = p0+kk < k_full_tiles*BK =
+// dims.k` が常に成り立つため恒真になる（`ALIGN_M`/`ALIGN_N` も同型の
+// 導出で `global_row < dims.m`／`global_col+4 <= dims.n` を恒真化する）。
+// この導出は本ファイルの `USE_TGP_STAGING` 分岐コメント（float4 ロードの
+// アラインメント前提）が既に確立した「`p0`/`col0` は常に対応ブロック幅の
+// 倍数」という前提の上に成り立つ。
+constant bool ALIGN_M [[function_constant(8)]];
+constant bool ALIGN_N [[function_constant(9)]];
+constant bool ALIGN_K [[function_constant(10)]];
+
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
 // atIndex`（`crate::gemm::encode_dispatch_tiled`）で渡す。A タイル
@@ -620,8 +663,15 @@ kernel void gemm_simdgroup_tiled(
                 uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
-                bool group_in_bounds =
-                    (kk + 4 <= bk_eff) && (global_row < dims.m) && (global_k + 4 <= dims.k);
+                // アラインメント特化ロード分岐（イシュー #752。本ファイル
+                // 冒頭の `ALIGN_M`/`ALIGN_K` 宣言部コメント「恒真化の正当性」
+                // 参照）: `ALIGN_K` 証明済みなら `kk+4<=bk_eff` の項、
+                // `ALIGN_M` 証明済みなら `global_row<dims.m` の項が
+                // コンパイル時に恒真化されデッドコード除去される。
+                // `global_k+4<=dims.k` は `ALIGN_K` の導出（K タイル数・
+                // `k_tail==0`）に含意されるため `ALIGN_K` 側の OR 合成に含める。
+                bool group_in_bounds = (ALIGN_K || (kk + 4 <= bk_eff && global_k + 4 <= dims.k)) &&
+                                        (ALIGN_M || global_row < dims.m);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
@@ -646,8 +696,12 @@ kernel void gemm_simdgroup_tiled(
                 uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
-                bool group_in_bounds =
-                    (kk < bk_eff) && (global_k < dims.k) && (global_col + 4 <= dims.n);
+                // アラインメント特化ロード分岐（イシュー #752。A タイル側と
+                // 同じ論拠）: `ALIGN_K` 証明済みなら `kk<bk_eff`・
+                // `global_k<dims.k` の項、`ALIGN_N` 証明済みなら
+                // `global_col+4<=dims.n` の項が恒真化される。
+                bool group_in_bounds = (ALIGN_K || (kk < bk_eff && global_k < dims.k)) &&
+                                        (ALIGN_N || global_col + 4 <= dims.n);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
@@ -729,8 +783,14 @@ kernel void gemm_simdgroup_tiled(
                     // ことが保証される。不成立時は 0 埋めタイルを使う
                     // （協調ロード経路の 0 埋めと同じ契約。レビュー指摘。
                     // #188 PR review）。
+                    // アラインメント特化ロード分岐（イシュー #752）: `ALIGN_M`
+                    // 証明済みなら `a_row<dims.m` はコンパイル時に恒真化される
+                    // （`a_row` は常に 8 の倍数で `dims.m` も pad8 済みで 8 の
+                    // 倍数、かつ `ALIGN_M ⟹ dims.m % BM == 0` の証明により
+                    // `sub_row0` 由来の `a_row` は必ず `dims.m` 未満に収まる。
+                    // 上記コメント「境界チェック（REQ-8）」の導出と同型）。
                     simdgroup_float8x8 a_tile = simdgroup_float8x8(0.0f);
-                    if (a_row < dims.m) {
+                    if (ALIGN_M || a_row < dims.m) {
                         simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
                     }
                     for (uint ci = 0; ci < acc_cols; ci++) {
@@ -741,8 +801,11 @@ kernel void gemm_simdgroup_tiled(
                         uint b_col = sub_col0 + c_ * 8;
                         // 上記と同じ理屈（`dims.n` も pad8 済みで 8 の倍数、
                         // `b_col` も常に 8 の倍数）。
+                        // アラインメント特化ロード分岐（イシュー #752。
+                        // `a_row` 側と同じ論拠。`ALIGN_N` 証明済みなら
+                        // `b_col<dims.n` を恒真化する）。
                         simdgroup_float8x8 b_tile = simdgroup_float8x8(0.0f);
-                        if (b_col < dims.n) {
+                        if (ALIGN_N || b_col < dims.n) {
                             simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);
                         }
                         simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);

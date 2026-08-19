@@ -267,6 +267,73 @@ fn wm1_wn2_candidate_matches_cpu_reference_non_multiple_of_tile() {
     run_case(cfg, 66, 67, 100, 130, 70);
 }
 
+// --- イシュー #752: アラインメント特化ロード分岐（align_M/N/K） ---
+//
+// `shaders/gemm.metal` の `ALIGN_M`/`ALIGN_N`/`ALIGN_K` function constant
+// （`crate::tile::AlignFlags::for_dims` が実効次元と `TileConfig` から導出。
+// `MetalGemm::pipeline_for_tile` が畳み込む）は「整列が証明された場合の
+// 恒真化」であり検査式自体は残る（REQ-8）ため、整列形状・非整列形状の
+// いずれでも CPU 参照実装と数値一致することを確認する。整列版・検査版は
+// 「ロードする値の集合と MMA 発行順」が同一（検査が恒真の場合に消える
+// だけ）のため、結果はビット単位一致する契約（イシュー #752 計画
+// 「設計方針」§3.2 数値契約）。
+
+/// 32x32/bk16/staged 構成（`CANDIDATES[3]`）で m/n/k がすべて bm/bn/bk へ
+/// 整列する形状（`ALIGN_M`/`ALIGN_N`/`ALIGN_K` すべて `true` で畳み込まれる
+/// 経路）を検証する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn staged_path_matches_cpu_reference_fully_aligned() {
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    // 512 は bm=32・bn=32・bk=16 いずれの倍数（真の正方立方形状）。
+    run_case(cfg, 70, 71, 512, 512, 512);
+}
+
+/// 同一構成で m のみ非整列（n/k は整列）にした形状。`ALIGN_M=false`・
+/// `ALIGN_N=ALIGN_K=true` の混在パイプラインを exercise する
+/// （`AlignFlags` は方向ごとに独立して導出される契約。
+/// `crate::tile::AlignFlags::for_dims` ドキュメント参照）。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn staged_path_matches_cpu_reference_partially_aligned() {
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: true,
+    };
+    // pad8(100)=104（32 の倍数でない。ALIGN_M=false）・n=512（32 の倍数。
+    // ALIGN_N=true）・k=512（16 の倍数。ALIGN_K=true）。
+    run_case(cfg, 72, 73, 100, 512, 512);
+}
+
+/// 直接ロード経路（`staged=false`）の完全整列形状。direct-load 側の
+/// `ALIGN_M || a_row < dims.m`・`ALIGN_N || b_col < dims.n` 恒真化分岐を
+/// exercise する。
+#[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+fn direct_load_path_matches_cpu_reference_fully_aligned() {
+    let cfg = TileConfig {
+        bm: 32,
+        bn: 32,
+        bk: 16,
+        wm: 2,
+        wn: 2,
+        staged: false,
+    };
+    // 512 は bm=32・bn=32・bk=16 いずれの倍数。
+    run_case(cfg, 74, 75, 512, 512, 512);
+}
+
 // デバイス上限直接検証（イシュー #532 受け入れ基準「SMEM 上限内の実機
 // 確認」）は `crate::tile::CANDIDATES` を直接参照する必要があるが、
 // `CANDIDATES` はクレート内部表現のため `pub(crate)` であり
