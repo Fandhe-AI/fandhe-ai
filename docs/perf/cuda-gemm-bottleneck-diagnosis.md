@@ -171,15 +171,19 @@ env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
 依存しうるため、この前提を鵜呑みにせず §3.3.1 の事前確認を必ず行う。
 
 ```sh
-# `set -o pipefail`: `gemm_profile_target` が opt カーネル不在等で非 0 終了
-# しても `| tee` の終了コードは tee 自身の 0 で上書きされてしまう
-# （bash の pipefail 既定 off の挙動）。`gemm_profile_target` は opt カーネル
-# 不在時に基本カーネルへ黙ってフォールバックせず非 0 終了するよう変更済み
-# のため（PR #637 codex-review 指摘。`gemm_profile_target.rs` 該当コメント
-# 参照）、本ループ側も pipefail を有効化して非 0 終了を確実に検知し、
-# 誤ったカーネルの ncu 結果を「正常計測」として次サイズへ進めないように
-# する。
-set -o pipefail
+# `gemm_profile_target` は opt カーネル不在等の異常系で基本カーネルへ黙って
+# フォールバックせず非 0 終了するよう変更済み（PR #637 codex-review 指摘。
+# `gemm_profile_target.rs` 該当コメント参照）。この非 0 終了を本ループ側で
+# 確実に検知する必要があるが、`if ! CMD 2>&1 | tee LOG; then` という
+# パイプ構成は既定のシェル設定下では末尾の `tee` 自身の終了ステータス
+# （常に 0 側に倒れやすい）を判定してしまい、`CMD`（ncu／対象バイナリ）が
+# 非 0 終了しても検知できないまま次の採取へ進みかねない（`set -o pipefail`
+# は bash 固有でありコードブロックの ```sh 表記〈POSIX sh 実行を含みうる〉
+# 下では有効化が保証されない。codex-review 指摘・出典: イシュー #739）。
+# このためパイプ経由の `tee` には依存せず、`ncu` の標準出力・標準エラーを
+# 直接ログファイルへリダイレクトしたうえで `$?` を明示的に検査し、検査後に
+# ログを表示する構成へ変更した（シェル実装・pipefail 設定に依存しない
+# fail-closed 判定）。
 
 BIN=$HOME/work/target-rust-ai-library/release/examples/gemm_profile_target
 METRICS="sm__warps_active.avg.pct_of_peak_sustained_active,\
@@ -204,11 +208,15 @@ for path in wmma_tf32 mma_f16; do
     # §3.1 のとおり GPU カウンタは RmProfilingAdminOnly 制限下にあり、
     # sudo NOPASSWD 運用が確立済みのため sudo 経由で起動する（bare ncu では
     # ERR_NVGPUCTRPERM になる。出典: イシュー #739）。
-    if ! sudo ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
+    LOG="ncu-${path}-${size}.log"
+    sudo ncu --launch-skip 2 --launch-count 5 --metrics "$METRICS" \
         "$BIN" --path "$path" --size "$size" \
-        2>&1 | tee "ncu-${path}-${size}.log"; then
+        > "$LOG" 2>&1
+    status=$?
+    cat "$LOG"
+    if [ "$status" -ne 0 ]; then
       echo "abort: path=${path} size=${size} で gemm_profile_target または ncu が非 0 終了した" \
-           "（opt カーネル不在等の異常系。ログ ncu-${path}-${size}.log を確認する）。" >&2
+           "（opt カーネル不在等の異常系。ログ ${LOG} を確認する）。" >&2
       exit 1
     fi
   done
