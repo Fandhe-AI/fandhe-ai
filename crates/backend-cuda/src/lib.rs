@@ -304,6 +304,20 @@ pub mod diagnostics {
         swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }
 
+    /// イシュー #741: [`mma_swizzle_group_width`] の TF32 opt-staged 版。
+    /// `swizzle::select_swizzle_group_width` を TF32 opt-staged の
+    /// ブロックタイル（`WMMA_TF32_STAGED_BLOCK_M`/`_N`。64×64）に対して
+    /// 適用する。`mma_f16` のブロックタイル（64×128）と異なるため専用
+    /// ラッパーが必要（`swizzle.rs` 本体は無変更。#740 とのコンフリクト
+    /// 回避）。`examples/gemm_wmma_tf32_swizzle_bench.rs` から到達する。
+    pub fn wmma_tf32_staged_swizzle_group_width(num_sms: u32) -> u32 {
+        swizzle::select_swizzle_group_width(
+            num_sms,
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M,
+            kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
+        )
+    }
+
     /// プロセス内 LRU カーネルモジュールキャッシュ（イシュー #511・C-4。
     /// `crate::module_cache`。非公開 `mod` のため crate 外部から直接
     /// 到達できない）のヒット件数。`crate::module_cache::
