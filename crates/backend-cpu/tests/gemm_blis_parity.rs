@@ -149,13 +149,16 @@ fn gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools() {
     }
 }
 
-/// `n >= 4096`（#749 で `select_blocks` が NC=9600 へ切り替える本番経路）
-/// が `gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools` と
+/// `n >= 4096`（#749 で NC=9600 拡大分岐の対象だった形状域。PR #766・
+/// codex-review 再指摘により当該分岐は本 PR 時点で未有効化〈常に
+/// `default_blocks()`〉。詳細は `src/gemm_blis/mod.rs` の `NC` 定数の
+/// ドキュメンテーションコメント参照）が
+/// `gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools` と
 /// 同じくスレッド数横断で `gemm_naive` と bit 完全一致することを確認する。
-/// `select_blocks` は呼び出しごとに 1 回だけ計算し全 rayon タスクへ同一値を
+/// ブロックサイズは呼び出しごとに 1 回だけ計算し全 rayon タスクへ同一値を
 /// キャプチャして渡す設計（`src/gemm_blis/mod.rs` の `gemm_blis_parallel`
-/// 実装コメント参照）のため、タスク分割数（num_threads）を跨いでも NC=9600
-/// が一貫して使われることを本テストが検証する。
+/// 実装コメント参照）のため、タスク分割数（num_threads）を跨いでも同一の
+/// ブロックサイズが一貫して使われることを本テストが検証する。
 #[test]
 fn gemm_blis_parallel_large_n_matches_naive_bit_exact_across_thread_pools() {
     let (m, n, k) = (37, 4096, 41);

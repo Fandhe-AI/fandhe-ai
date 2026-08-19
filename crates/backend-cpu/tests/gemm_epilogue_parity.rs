@@ -153,12 +153,13 @@ fn gemm_bias_act_passes_unified_parity_check() {
     backend_cpu::assert_parity("gemm_bias_act vs 非融合合成", &c_fused, &c_ref);
 }
 
-/// `n = 4096`（#749 で `select_blocks` が NC=9600 へ切り替える閾値。
-/// `src/gemm_blis/mod.rs` の `LARGE_N_THRESHOLD`）の本番経路が、
-/// `gemm_blis_parallel` → bias 加算 → Relu の非融合合成参照と bit
-/// 完全一致することを確認する（GEMM 本体のブロックサイズ変更が
-/// epilogue 融合の bit 完全一致契約〈本ファイル冒頭ドキュメント〉に
-/// 影響しないことの回帰）。
+/// `n = 4096`（#749 で NC=9600 拡大分岐の対象だった閾値。PR #766・
+/// codex-review 再指摘により当該分岐は本 PR 時点で未有効化〈常に
+/// `default_blocks()`〉。詳細は `src/gemm_blis/mod.rs` の `NC` 定数の
+/// ドキュメンテーションコメント参照）の本番経路が、`gemm_blis_parallel`
+/// → bias 加算 → Relu の非融合合成参照と bit 完全一致することを確認する
+/// （GEMM 本体のブロックサイズ変更が epilogue 融合の bit 完全一致契約
+/// 〈本ファイル冒頭ドキュメント〉に影響しないことの回帰）。
 #[test]
 fn gemm_bias_act_large_n_matches_composed_reference_bit_exact() {
     let (m, n, k) = (9, 4096, 13);

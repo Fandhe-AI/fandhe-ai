@@ -88,60 +88,31 @@ const MAX_TILE: usize = 256;
 /// 参照）ため、本モジュール独自の定数として持つ（`gemm` モジュールの
 /// MC/KC/NC とは独立にチューニング可能にする）。
 ///
-/// **対象実機・再選定状況（#564・#749）**: 本 3 定数のチューニング対象
-/// 実機は **Apple M4 Max**（firestorm 系。`docs/perf/gemm-optimization-baseline.md`
-/// §3・イシュー #481 で確定）。BLIS/OpenBLAS の aarch64 向け参照実装値
-/// （firestorm: MC=480/KC=4096/NC=9600 等）近傍を含む実機スイープは
-/// 2026-08-19 に M4 Max で実施済みで、詳細実測値・採否根拠は
-/// `docs/perf/cpu-gemm-blocking-sweep.md` §7 に記録する（#749）。
-/// MC・KC は単独拡大が全サイズで劣化したため PoC-v2-1 値のまま維持し、
-/// NC のみ [`select_blocks`] により n（B のパネル幅を分割する次元）に
-/// 応じて条件分岐する（fail-closed。実測値の捏造・placeholder 化はしない）。
+/// **対象実機・再選定状況（#564・#749・#753 へ引き継ぎ）**: 本 3 定数の
+/// チューニング対象実機は **Apple M4 Max**（firestorm 系。
+/// `docs/perf/gemm-optimization-baseline.md` §3・イシュー #481 で確定）。
+/// BLIS/OpenBLAS の aarch64 向け参照実装値（firestorm: MC=480/KC=4096/
+/// NC=9600 等）近傍を含む実機スイープは 2026-08-19 に M4 Max で実施済みで、
+/// 詳細実測値・採否根拠は `docs/perf/cpu-gemm-blocking-sweep.md` §7 に
+/// 記録する（#749）。MC・KC は単独拡大が全サイズで劣化したため PoC-v2-1
+/// 値のまま維持する。
+///
+/// **NC の n 依存拡大（NC=9600・n>=4096 で約 9.9% 改善）は本 PR 時点で
+/// 未有効化（PR #766・codex-review 再指摘）**: 実測を行った M4 Max
+/// 個体の正確な `hw.model` 識別子が実測セッション終了時点で記録されて
+/// おらず本 PR 時点では復元不能（`docs/perf/cpu-gemm-blocking-sweep.md`
+/// の「実測値の捏造・placeholder 値での完了扱いは行わない」方針に従い、
+/// `Mac16,` prefix 等の広い一致条件へ後退させて有効化することもしない）。
+/// 実機固有値を検証していないターゲット・機種への適用は
+/// `.claude/rules/coding-rust.md` の方針に反するため、識別子が判明する
+/// までは常時 `default_blocks()`（固定 NC=512）を返す（#753〈sysctl
+/// ベース MC/KC/NC 動的算出〉で機種識別を含めて再検討する）。
 const MC: usize = 128;
 /// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
 const KC: usize = 256;
-/// 列方向ブロックサイズ（B のパネル幅）。`n < LARGE_N_THRESHOLD` の
-/// 既定値（[`select_blocks`] 参照）。
+/// 列方向ブロックサイズ（B のパネル幅）。本 PR 時点の唯一の適用値
+/// （上記 NC 拡大の未有効化理由を参照）。
 const NC: usize = 512;
-
-/// [`select_blocks`] が aarch64 かつ `n >= LARGE_N_THRESHOLD` で採用する
-/// NC 値。
-///
-/// 2026-08-19 M4 Max 実測（`docs/perf/cpu-gemm-blocking-sweep.md` §7）で
-/// dim=4096 が現行 NC=512 比 約 9.9% 改善（0.134019 s → 0.120774 s）した
-/// BLIS firestorm 参照値をそのまま採用する（#749）。この値は Apple M4
-/// Max（firestorm 系 aarch64）でのみ実測されており、x86_64 等の他アーキ
-/// テクチャでは性能・パネルメモリ増加（NC=9600 は既定 NC=512 比 B パネル
-/// バッファが約 18.75 倍）のいずれも未検証のため、[`select_blocks`] は
-/// `cfg(all(target_arch = "aarch64", target_os = "macos"))` に加え、
-/// [`machine_detect::is_m4_family`] による実行時機種判定を通過した場合
-/// のみこの値を適用する（M1〜M3 等の未検証機種・Linux aarch64 実機
-/// 〈DGX Spark GB10 の Grace CPU 等〉・x86_64 は fail-closed で
-/// [`default_blocks`] に留まる。codex-review 再指摘・PR #766。
-/// `.claude/rules/coding-rust.md` の実機固有値ハードコード回避方針）。
-///
-/// **cfg で隔離しない理由（PR #766・codex-review 再指摘への追加対応）**:
-/// 定数自体はプラットフォーム非依存の `usize` 値であり、これを
-/// `cfg(aarch64, macos)` で隔離すると [`select_blocks_for`]（判定ロジック
-/// 本体）が macOS／aarch64 の CI（本リポの通常 CI は `ubuntu-latest`。
-/// `.claude/rules/ci.md`）でコンパイル・テスト不能になる。値の適用可否は
-/// [`select_blocks`] 側の cfg 分岐と [`machine_detect::is_m4_family`] の
-/// 実行時判定が担うため、定数自体は常時コンパイルしてテスト可能性を
-/// 優先する。
-const NC_LARGE_N: usize = 9600;
-
-/// [`select_blocks`] が aarch64 で NC を [`NC_LARGE_N`] へ切り替える n の
-/// 閾値。
-///
-/// 2026-08-19 M4 Max 実測で dim=2048 は現行値（NC=512）が最良、
-/// dim=4096 は NC=9600 が最良だったため、REQ-8 判定形状のうち
-/// 4096 のみを NC 拡大の対象にする（`docs/perf/cpu-gemm-blocking-sweep.md`
-/// §7。dim=1024 も NC=9600 で約 7.1% 改善したが、512 未計測・非単調な
-/// テーブルになるため #749 では適用せず #753 へ引き継ぐ）。
-///
-/// [`NC_LARGE_N`] と同じ理由で cfg 隔離しない（[`select_blocks_for`] を
-/// 全プラットフォームでテスト可能にするため）。
-const LARGE_N_THRESHOLD: usize = 4096;
 
 /// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
 /// （本番 3 公開関数）が使う既定ブロックサイズ（上記 `MC`/`KC`/`NC`
@@ -151,211 +122,11 @@ const LARGE_N_THRESHOLD: usize = 4096;
 /// 踏襲）。値自体は `gemm` モジュールの既定値と独立にチューニング可能な
 /// ままにするため、`BlockSizes::poc_v2_1_default()` を直接使わずここで
 /// 本モジュール専用の定数から構築する。
-///
-/// #749 の n 依存分岐（[`select_blocks`]）導入後も、小形状（n <
-/// `LARGE_N_THRESHOLD`）向けの既定値として本関数は残す（テスト・
-/// `gemm_blis_with_kernel`〈`#[cfg(test)]` 経路〉が参照する）。
 const fn default_blocks() -> BlockSizes {
     BlockSizes {
         mc: MC,
         kc: KC,
         nc: NC,
-    }
-}
-
-/// 本番 3 公開関数（[`gemm_blis`]／[`gemm_blis_parallel`]／
-/// [`gemm_blis_bias_act_parallel`]）が呼び出しごとに 1 回だけ呼ぶ
-/// ブロックサイズ選択（#749）。
-///
-/// 選択キーは **`n`（NC が分割する次元）のみ**。実測（2026-08-19 M4
-/// Max・`docs/perf/cpu-gemm-blocking-sweep.md` §7）が正方形状のみで
-/// m／k 依存の知見がないこと、NC の効果（B パネルの jc 反復回数・ic
-/// ループ内再利用）は n に直結することから m／k は条件に含めない。
-/// 非正方形状（m 小・k 大等）での挙動は同 docs のリスク節を参照。
-///
-/// **機種限定（PR #766・codex-review 再指摘）**: [`NC_LARGE_N`] は Apple
-/// M4 Max（macOS／aarch64）実機のみで実測した値であり、Linux aarch64
-/// （例: DGX Spark GB10 の Grace CPU）や他ベンダーの aarch64 SoC では
-/// 性能改善・B パネルバッファ増加の影響いずれも未検証。当初
-/// `cfg(target_arch = "aarch64")` のみでガードしていたが、これは
-/// アーキテクチャ一致であって実測機種の一致を意味せず、Linux aarch64
-/// 実機にも無条件適用されてしまう（codex-review 指摘・未解決スレッド
-/// `PRRT_kwDOTuUCJc6agzD4`／`PRRT_kwDOTuUCJc6ahEaV`）。実機固有の実測値を
-/// 検証していないターゲットへ適用するのは `.claude/rules/coding-rust.md`
-/// の方針に反するため、n 分岐は `cfg(all(target_arch = "aarch64",
-/// target_os = "macos"))`（= Apple Silicon Mac）でガードし、それ以外
-/// （Linux aarch64・x86_64 等）は fail-closed で常に [`default_blocks`]
-/// （= 従来の固定 NC=512）を返す。macOS／aarch64 の中でも M4 Max 以外
-/// （M1〜M3 系等）を厳密に弁別する実行時 CPU 特性・機種判定（`sysctlbyname`
-/// 等）は本 PR のスコープ外とし、Apple Silicon Mac 全体を対象範囲として
-/// 扱う（同機種帯内の非最適ケースは #749 実測範囲外のリスクとして許容。
-/// より厳密な機種判定は #753〈sysctl ベース MC/KC/NC 動的算出〉側で検討
-/// する）。
-///
-/// 環境変数等の外部入力による上書き口は設けない（OWASP A03・
-/// `.claude/rules/security.md`。`dispatch_region` の ISA トークン選択と
-/// 同じ「入力は `validate_dims` 通過済みの形状のみ」という方針）。
-///
-/// `const fn` を維持できないため（[`machine_detect::is_m4_family`] は
-/// `sysctlbyname` FFI 呼び出しを伴い const 評価不能）、`NC_LARGE_N` 導入
-/// （#749）に合わせて通常の `fn` へ変更した（呼び出し元は本番 3 公開
-/// 関数からの呼び出しごとに 1 回のみで、[`machine_detect`] 側が結果を
-/// `OnceLock` でキャッシュするため実行コストは無視できる）。
-///
-/// 判定ロジック本体は [`select_blocks_for`] へ切り出してある
-/// （プラットフォーム非依存・純粋関数。テスト注入可能性については
-/// 同関数のドキュメント参照。PR #766・codex-review 再指摘）。本関数は
-/// 「実行環境が Apple Silicon Mac か」（cfg）と「実機が M4 系と実行時に
-/// 一致するか」（[`machine_detect::is_m4_family`]）を確定させて
-/// [`select_blocks_for`] へ渡す薄い配線のみを担う。
-fn select_blocks(n: usize) -> BlockSizes {
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    let matched = machine_detect::is_m4_family();
-    // Apple Silicon Mac（aarch64 + macOS）以外は実機固有値
-    // （NC_LARGE_N）が未検証のため常に不一致扱いとする（Linux aarch64
-    // 実機〈DGX Spark GB10 の Grace CPU 等〉・x86_64 を含む。
-    // codex-review 再指摘・PR #766）。
-    #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-    let matched = false;
-
-    select_blocks_for(n, matched)
-}
-
-/// [`select_blocks`] の判定ロジック本体（プラットフォーム非依存の純粋
-/// 関数）。`matched`（呼び出し元が確定させた「実測済み M4 系実機と
-/// 一致するか」）が `true` かつ `n >= LARGE_N_THRESHOLD` の場合のみ
-/// [`NC_LARGE_N`] を適用し、それ以外は fail-closed で
-/// [`default_blocks`] を返す。
-///
-/// **テスト注入点（PR #766・codex-review 再指摘・未解決スレッド
-/// `PRRT_kwDOTuUCJc6ahr0G`／`PRRT_kwDOTuUCJc6ahcYY`）**: 本番では
-/// `matched` は macOS／aarch64 実機の `sysctlbyname` 判定
-/// （[`machine_detect::is_m4_family`]）からのみ得られ、実測個体の
-/// `hw.model` 識別子が未記録（[`machine_detect::VERIFIED_M4_MAX_HW_MODEL`]
-/// が `None`）の間は常に `false`（= NC_LARGE_N は本番のどの実機にも
-/// 未適用）。この関数を cfg・FFI から切り離したことで、`matched: true`
-/// を直接渡すことにより NC=9600 経路（値の選択・境界〈`LARGE_N_THRESHOLD`〉
-/// ・`default_blocks` へのフォールバック）を機種判定・実行 OS に依らず
-/// 単体テストで検証できる（`#[cfg(test)] mod tests` 内のテスト参照）。
-/// 本番 3 公開関数（[`gemm_blis`] 等）はこの注入口を経由せず必ず
-/// [`select_blocks`] 経由で呼ぶため、本関数の存在自体が本番の
-/// fail-closed 挙動を弱めることはない。
-fn select_blocks_for(n: usize, matched: bool) -> BlockSizes {
-    if matched && n >= LARGE_N_THRESHOLD {
-        return BlockSizes {
-            mc: MC,
-            kc: KC,
-            nc: NC_LARGE_N,
-        };
-    }
-    default_blocks()
-}
-
-/// macOS `sysctlbyname` を用いた実行時機種判定（#749・codex-review
-/// 再指摘・PR #766・未解決スレッド `PRRT_kwDOTuUCJc6ahOOW`）。
-///
-/// [`NC_LARGE_N`] は Apple M4 Max の実測機 1 台のみで実測した値であり、
-/// `cfg(aarch64, macos)` は M1〜M3・M4 無印・M4 Pro 等の未検証機種も
-/// 含んでしまうため、[`select_blocks`] が実測個体そのものであることを
-/// 実行時に確認するための最小限の FFI 境界（`.claude/rules/
-/// coding-rust.md` の unsafe 方針: FFI 境界に限定し理由コメントを
-/// 明記する）。`libSystem`（macOS 標準 C ライブラリ）は追加リンク設定
-/// なしで `*-apple-darwin` ターゲットにリンクされるため、新規外部
-/// クレート依存の追加には当たらない（deps-policy.md の許容依存 8 区分
-/// の対象外）。判定は [`VERIFIED_M4_MAX_HW_MODEL`] 参照（未記録の間は
-/// 常に不一致＝ fail-closed）。
-#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-mod machine_detect {
-    use std::ffi::{CStr, c_char, c_int, c_void};
-    use std::sync::OnceLock;
-
-    // `sysctlbyname(3)` の FFI 宣言。`hw.model`（例: "Mac16,8"）を読み取る
-    // 用途のみに使う読み取り専用呼び出しで、`newp`/`newlen` には常に
-    // `null_mut()`/`0` を渡す（値の書き換えは行わない）。
-    unsafe extern "C" {
-        fn sysctlbyname(
-            name: *const c_char,
-            oldp: *mut c_void,
-            oldlenp: *mut usize,
-            newp: *mut c_void,
-            newlen: usize,
-        ) -> c_int;
-    }
-
-    /// 実機の `hw.model` が [`VERIFIED_M4_MAX_HW_MODEL`]（2026-08-19
-    /// 実測を行った M4 Max 個体の識別子。厳密一致のみ許可）と一致する
-    /// かどうかを判定する。`sysctlbyname` 呼び出しは gemm 呼び出しごとに
-    /// 発生しうる [`super::select_blocks`] から呼ばれるため、結果を
-    /// `OnceLock` でプロセス生存期間中キャッシュする（機種は実行中に
-    /// 変化しない）。
-    ///
-    /// 判定失敗（sysctl 呼び出しエラー・NUL 終端不整合・非 UTF-8・
-    /// 識別子未記録等）はすべて fail-closed で `false`（= 実測範囲外
-    /// として扱い `default_blocks()` へフォールバック）を返す。
-    pub(super) fn is_m4_family() -> bool {
-        static CACHED: OnceLock<bool> = OnceLock::new();
-        *CACHED.get_or_init(detect_m4_family)
-    }
-
-    /// 2026-08-19 の M4 Max 実測（`docs/perf/cpu-gemm-blocking-sweep.md`
-    /// §7）を行った実機個体の正確な `hw.model` 値。
-    ///
-    /// **未記録（`None`。PR #766・codex-review 再指摘）**: 当初
-    /// `"Mac16,"` prefix 一致で判定していたが、Apple の `Mac16,*`
-    /// 識別子は 2024 発表の M4 世代 Mac 全機種（M4 無印・M4 Pro・M4 Max
-    /// を積んだ MacBook Pro／Mac mini／iMac 各モデル）に割り当てられて
-    /// おり、M4 Max 以外の未検証機種にも一致してしまう（未解決スレッド
-    /// `PRRT_kwDOTuUCJc6ahcYU` 他）。実測セッション終了時点で個体の
-    /// 正確な `hw.model` 値がイシュー #749／親 issue #738・#735・
-    /// `docs/perf/cpu-gemm-blocking-sweep.md` のいずれにも記録されて
-    /// おらず、本 PR 時点では復元不能。「実測値の捏造・placeholder
-    /// 値での完了扱いは行わない（fail-closed）」方針
-    /// （`docs/perf/cpu-gemm-blocking-sweep.md`）に従い、未記録の間は
-    /// [`detect_m4_family`] が常に `false` を返し `NC_LARGE_N` は
-    /// どの実機にも適用されない（= 本 PR の n 依存 NC 拡大は当面
-    /// 不活性）。実測機の正確な識別子が判明し次第この定数を
-    /// `Some("Mac16,X")` へ更新することで再度有効化できる
-    /// （follow-up: #753〈sysctl ベース MC/KC/NC 動的算出〉で検討）。
-    const VERIFIED_M4_MAX_HW_MODEL: Option<&str> = None;
-
-    fn detect_m4_family() -> bool {
-        // 識別子が未記録の間は sysctl 呼び出し自体を行わず fail-closed
-        // で `false` を返す（上記 `VERIFIED_M4_MAX_HW_MODEL` 参照）。
-        let Some(expected) = VERIFIED_M4_MAX_HW_MODEL else {
-            return false;
-        };
-        let mut buf = [0u8; 64];
-        let mut len = buf.len();
-        // "hw.model\0" — sysctlbyname は NUL 終端 C 文字列を要求する。
-        let name = c"hw.model";
-        // SAFETY: `name` は静的な NUL 終端 C 文字列。`oldp` は `buf` の
-        // 長さ分だけ書き込み可能な有効なバッファで `oldlenp` にその
-        // 容量を渡す。`newp`/`newlen` は null/0 のため sysctl 側の値を
-        // 変更しない（読み取り専用呼び出し）。戻り値を検査し、失敗時は
-        // バッファ内容を読まない（初期化済みの `[0u8; 64]` のみ以後
-        // 使用する分岐に限定するため未初期化メモリ読み出しは発生しない）。
-        let ret = unsafe {
-            sysctlbyname(
-                name.as_ptr(),
-                buf.as_mut_ptr().cast::<c_void>(),
-                &mut len,
-                std::ptr::null_mut(),
-                0,
-            )
-        };
-        if ret != 0 || len == 0 || len > buf.len() {
-            return false;
-        }
-        // SAFETY: `len` は上記呼び出しが書き込んだバイト数（NUL 終端
-        // 込み。`sysctlbyname` の文字列系プロパティの契約）で
-        // `buf.len()` 以下であることを検査済み。
-        let Ok(model) = CStr::from_bytes_until_nul(&buf[..len]) else {
-            return false;
-        };
-        let Ok(model) = model.to_str() else {
-            return false;
-        };
-        model == expected
     }
 }
 
@@ -453,7 +224,7 @@ pub fn gemm_blis(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
-    dispatch_region(a, b, c, n, k, 0..m, select_blocks(n))
+    dispatch_region(a, b, c, n, k, 0..m, default_blocks())
 }
 
 /// `gemm_blis` を `rayon` で行パネル並列化した版。
@@ -480,10 +251,11 @@ pub fn gemm_blis_parallel(
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
-    // 呼び出しあたり 1 回だけ選択し、全 rayon 行パネルタスクへ同一値を
-    // キャプチャして渡す（#749。タスクごとに再計算しても結果は同一だが
-    // n は不変のためループ外で確定させる）。
-    let blocks = select_blocks(n);
+    // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
+    // キャプチャして渡す（既定ブロックサイズは n に依存しないため
+    // ループ外で確定させても意味は変わらないが、`dispatch_region`
+    // 呼び出しごとの再計算を避ける従来方針を踏襲する）。
+    let blocks = default_blocks();
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
@@ -562,9 +334,9 @@ pub fn gemm_blis_bias_act_parallel(
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
-    // 呼び出しあたり 1 回だけ選択し、全 rayon 行パネルタスクへ同一値を
-    // キャプチャして渡す（#749。`gemm_blis_parallel` と同じ理由）。
-    let blocks = select_blocks(n);
+    // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
+    // キャプチャして渡す（`gemm_blis_parallel` と同じ理由）。
+    let blocks = default_blocks();
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
@@ -1065,37 +837,6 @@ mod tests {
         ));
     }
 
-    // `select_blocks`（実機 cfg／sysctl 判定込み）の本番挙動は macOS／
-    // aarch64・かつ実機 hw.model が VERIFIED_M4_MAX_HW_MODEL と一致する
-    // 場合のみ発火するため通常 CI（ubuntu-latest）では検証できないが、
-    // 判定ロジック本体 `select_blocks_for` は cfg・FFI から独立した純粋
-    // 関数のため、`matched` を直接注入して NC=9600 経路をプラットフォーム
-    // に依らず検証できる（PR #766・codex-review 再指摘・未解決スレッド
-    // `PRRT_kwDOTuUCJc6ahr0G`／`PRRT_kwDOTuUCJc6ahcYY`）。
-
-    #[test]
-    fn select_blocks_for_matched_large_n_uses_nc_large_n() {
-        let blocks = select_blocks_for(LARGE_N_THRESHOLD, true);
-        assert_eq!(blocks.nc, NC_LARGE_N);
-        assert_eq!(blocks.mc, MC);
-        assert_eq!(blocks.kc, KC);
-    }
-
-    #[test]
-    fn select_blocks_for_matched_below_threshold_uses_default() {
-        let blocks = select_blocks_for(LARGE_N_THRESHOLD - 1, true);
-        assert_eq!(blocks.nc, NC);
-    }
-
-    #[test]
-    fn select_blocks_for_unmatched_large_n_uses_default_fail_closed() {
-        // 未検証機種（`matched == false`）は n がどれだけ大きくても
-        // NC_LARGE_N を適用しない（fail-closed。本番の `VERIFIED_M4_MAX_HW_MODEL
-        // == None` 状態〈PR #766〉と同一の分岐）。
-        let blocks = select_blocks_for(LARGE_N_THRESHOLD * 4, false);
-        assert_eq!(blocks.nc, NC);
-    }
-
     // MC/KC/NC 境界を跨ぐ多ブロック形状・並列版との bit 完全一致は
     // `bench_harness`（乱数生成）を要するため、lib 単体テスト
     // （本 `mod tests`）ではなく統合テスト `tests/gemm_blis_parity.rs`
@@ -1422,97 +1163,20 @@ mod tests {
         }
     }
 
-    /// [`select_blocks`] が `n` に応じて NC のみを切り替え、MC/KC は不変
-    /// のままであることを境界値で検証する（#749 受け入れ条件: 4096 で
-    /// NC=9600・512〜2048 は現行値〈= `default_blocks()`〉と同一）。
-    ///
-    /// **契約ベースへ変更（PR #766・codex-review 再指摘・未解決スレッド
-    /// `PRRT_kwDOTuUCJc6ahcYY`）**: 旧テストは `cfg(aarch64, macos)` の
-    /// 全実機で `n >= LARGE_N_THRESHOLD` なら必ず `NC_LARGE_N` になる
-    /// ことを期待しており、非 M4 実機（M1〜M3 等）や
-    /// [`machine_detect::VERIFIED_M4_MAX_HW_MODEL`] 未記録時（現状。
-    /// 上記定数のコメント参照）には常に失敗していた。本テストは実際の
-    /// ゲート `machine_detect::is_m4_family()` の戻り値に対する契約
-    /// （「ゲートが `true` を返す場合のみ NC_LARGE_N、それ以外は
-    /// `default_blocks()`」）として書き直すことで、機種・実測識別子の
-    /// 記録状況に関わらず（macOS／aarch64 上で）常に green を保つ。
+    /// `default_blocks()` の値がすべて 0 でないこと（0 だと
+    /// `panel_capacity` の `div_ceil`／`step_by` がパニックしうる）を
+    /// 確認する（実装計画 §6 OWASP A03 の静的保証をテストで裏付ける）。
     #[test]
-    fn select_blocks_switches_nc_only_at_large_n_threshold() {
-        for n in [0usize, 1, 511, 512, 2048, 4095] {
-            let blocks = select_blocks(n);
-            assert_eq!(
-                blocks,
-                default_blocks(),
-                "n={n}（LARGE_N_THRESHOLD 未満）は既定ブロックのはず"
-            );
-        }
-        #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-        for n in [4096usize, 4097, 9600, 9601, 20000] {
-            let blocks = select_blocks(n);
-            if machine_detect::is_m4_family() {
-                assert_eq!(blocks.mc, MC, "n={n} でも MC は不変のはず");
-                assert_eq!(blocks.kc, KC, "n={n} でも KC は不変のはず");
-                assert_eq!(
-                    blocks.nc, NC_LARGE_N,
-                    "n={n}（閾値以上）は is_m4_family()==true のとき \
-                     NC_LARGE_N のはず"
-                );
-            } else {
-                assert_eq!(
-                    blocks,
-                    default_blocks(),
-                    "n={n}（閾値以上）は is_m4_family()==false のとき \
-                     既定ブロックのはず（実測機の hw.model が未記録の間は \
-                     常にこの分岐。machine_detect::VERIFIED_M4_MAX_HW_MODEL \
-                     参照）"
-                );
-            }
-        }
-        // Linux aarch64（DGX Spark GB10 の Grace CPU 等）・x86_64 等では
-        // n の値によらず常に default_blocks() へ fail-closed
-        // フォールバックすることを確認する。
-        #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
-        for n in [4096usize, 4097, 9600, 9601, 20000] {
-            let blocks = select_blocks(n);
-            assert_eq!(
-                blocks,
-                default_blocks(),
-                "n={n}（非 Apple Silicon Mac）は M4 Max 実測値を適用せず既定ブロックのはず"
-            );
-        }
+    fn default_blocks_never_returns_zero_sized_block() {
+        let blocks = default_blocks();
+        assert!(blocks.mc > 0 && blocks.kc > 0 && blocks.nc > 0);
     }
 
-    /// `select_blocks` の値がすべて 0 でないこと（0 だと `panel_capacity`
-    /// の `div_ceil`／`step_by` がパニックしうる）を全分岐で確認する
-    /// （#749。実装計画 §6 OWASP A03 の静的保証をテストで裏付ける）。
-    #[test]
-    fn select_blocks_never_returns_zero_sized_block() {
-        for n in [0usize, 1, 4095, 4096, 20000] {
-            let blocks = select_blocks(n);
-            assert!(blocks.mc > 0 && blocks.kc > 0 && blocks.nc > 0);
-        }
-    }
-
-    /// [`machine_detect::is_m4_family`] が `sysctlbyname` 呼び出し経路で
-    /// パニックせず、`OnceLock` キャッシュにより複数回呼び出しても
-    /// 同一結果を返すことを確認する（PR #766・codex-review 再指摘）。
-    /// 実行機種が M4 系かどうか自体はテスト実行環境に依存するため
-    /// `bool` の具体値は検証しない（具体値の検証は
-    /// `select_blocks_switches_nc_only_at_large_n_threshold` 側が
-    /// 実機〈M4 Max〉限定で担う）。
-    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    #[test]
-    fn is_m4_family_is_deterministic_across_calls() {
-        let first = machine_detect::is_m4_family();
-        let second = machine_detect::is_m4_family();
-        assert_eq!(first, second, "OnceLock キャッシュにより結果は不変のはず");
-    }
-
-    /// `n >= LARGE_N_THRESHOLD`（NC=9600 分岐）の本番経路（[`gemm_blis`]／
-    /// [`gemm_blis_parallel`]）が `gemm_naive` と bit 完全一致することを、
-    /// 閾値の直前・直後・NR=12（NEON 8×12 既定カーネルの NR）非整数倍の
-    /// 端タイルが生じる n で検証する（#749。m／k は小さく保ち実行時間を
-    /// 抑える）。
+    /// n が大きい場合（4096 前後。#749 で NC 拡大分岐の対象だった範囲）
+    /// でも本番経路（[`gemm_blis`]／[`gemm_blis_parallel`]）が
+    /// `gemm_naive` と bit 完全一致することを、閾値の直前・直後・NR=12
+    /// （NEON 8×12 既定カーネルの NR）非整数倍の端タイルが生じる n で
+    /// 検証する（m／k は小さく保ち実行時間を抑える）。
     #[test]
     fn gemm_blis_and_parallel_large_n_match_naive_bit_exact() {
         for &(m, k) in &[(5usize, 7usize), (131, 259)] {
@@ -1816,76 +1480,6 @@ mod tests {
                     blocks.mc, blocks.kc, blocks.nc
                 );
             }
-        }
-    }
-
-    /// #749 受け入れ条件 1（「4096 で 9% 級改善を本番経路で獲得し、
-    /// 512〜2048 の劣化が中央値 5% 以内」）の実機再確認用 A/B ハーネス。
-    ///
-    /// 本番経路（`gemm_blis_parallel` = [`select_blocks`] による n 依存
-    /// NC 分岐）と旧来固定値（`gemm_blis_parallel_with_blocks(default_blocks())`）
-    /// を [`neon_8x12_vs_12x8_ab_median_throughput`] と同じインターリーブ
-    /// 方式で比較する。512〜2048 は `select_blocks` が `default_blocks()`
-    /// と同一値を返す（`select_blocks_switches_nc_only_at_large_n_threshold`
-    /// で構造的に保証済み）ため理論上は誤差程度の差になるはずで、4096 の
-    /// み有意差が出ることを実機で確認する用途（[`mc_kc_nc_blocking_sweep_median_throughput`]
-    /// と同方針で勝敗を assert しない）。
-    ///
-    /// `#[ignore]` 分離（実機実行専用。`cargo test -p backend-cpu --release
-    /// -- --ignored shape_dependent_nc_vs_fixed_default_ab_median_throughput
-    /// --nocapture` で M4 Max 上から実行する）。
-    #[cfg(target_arch = "aarch64")]
-    #[test]
-    #[ignore = "aarch64 実機（Apple M4 Max）での NC 形状依存分岐 A/B 再確認専用（--release 実行推奨。#749）"]
-    fn shape_dependent_nc_vs_fixed_default_ab_median_throughput() {
-        use std::time::Instant;
-
-        fn run_production(a: &[f32], b: &[f32], m: usize, n: usize, k_dim: usize) -> f64 {
-            let mut c = vec![0.0f32; m * n];
-            let start = Instant::now();
-            gemm_blis_parallel(a, b, &mut c, m, n, k_dim).unwrap();
-            start.elapsed().as_secs_f64()
-        }
-
-        fn run_fixed_default(a: &[f32], b: &[f32], m: usize, n: usize, k_dim: usize) -> f64 {
-            let mut c = vec![0.0f32; m * n];
-            let start = Instant::now();
-            gemm_blis_parallel_with_blocks(a, b, &mut c, m, n, k_dim, default_blocks()).unwrap();
-            start.elapsed().as_secs_f64()
-        }
-
-        fn median(mut samples: Vec<f64>) -> f64 {
-            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
-            samples[samples.len() / 2]
-        }
-
-        for dim in [512usize, 1024, 2048, 4096] {
-            let (m, n, k) = (dim, dim, dim);
-            let a = xorshift32_vec(0xdddd_1111, m * k);
-            let b = xorshift32_vec(0xeeee_2222, k * n);
-
-            run_production(&a, &b, m, n, k);
-            run_fixed_default(&a, &b, m, n, k);
-
-            let mut samples_production = Vec::with_capacity(5);
-            let mut samples_fixed = Vec::with_capacity(5);
-            for i in 0..5 {
-                if i % 2 == 0 {
-                    samples_production.push(run_production(&a, &b, m, n, k));
-                    samples_fixed.push(run_fixed_default(&a, &b, m, n, k));
-                } else {
-                    samples_fixed.push(run_fixed_default(&a, &b, m, n, k));
-                    samples_production.push(run_production(&a, &b, m, n, k));
-                }
-            }
-
-            let median_production = median(samples_production);
-            let median_fixed = median(samples_fixed);
-
-            println!(
-                "dim={dim}: 本番経路(select_blocks) median={median_production:.6}s, \
-                 固定既定値(default_blocks) median={median_fixed:.6}s"
-            );
         }
     }
 }
