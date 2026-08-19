@@ -442,41 +442,6 @@ constant uint TGP_PAD [[function_constant(6)]];
 // （main への rebase 時点での未使用最小 index）を割り当てる。
 constant bool SWIZZLE_ENABLED [[function_constant(7)]];
 
-// アラインメント特化ロード分岐（イシュー #752。MLX steel `matmul.cpp` の
-// align_M/align_N/align_K を参考にした技法。技法の参照のみでコード転記は
-// しない）。`crate::tile::AlignFlags::for_dims`（`crate::gemm::MetalGemm::
-// pipeline_for_tile` が候補ごとに実効次元 `(m_eff, n_eff, k_eff)` と
-// `TileConfig` から導出し `crate::pipeline::make_pipeline_with_constants`
-// 経由で畳み込む。唯一の真実源）が「実効次元が bm/bn/bk へ厳密に整除する」
-// ことをホスト側で証明できた場合のみ `true` を渡す契約。
-//
-// バリアント数: `TileConfig` ごとに最大 2^3=8 通り（align_m/n/k の
-// 組合せ）だが、実際に構築されるのは `pipeline_for_tile` の遅延キャッシュが
-// 観測した組合せのみ（起動コストは増えない。`crate::gemm::MetalGemm::
-// tiled_cache` フィールドコメント参照）。
-//
-// PR #764 codex-review 指摘（P0・gemm.metal:673 付近）を受けた設計変更:
-// 当初案は下記 `USE_TGP_STAGING` 協調ロードの `group_in_bounds` 判定・
-// direct-load 経路の行/列ガードを `ALIGN_* || (元の検査式)` という OR
-// 合成へ書き換え、`ALIGN_*=true`（ホスト側で整除を証明済み）の場合に
-// コンパイラの定数畳み込みで検査式側をデッドコード除去させる「証明に
-// 基づく恒真化」を狙っていた。しかし `.claude/rules/coding-rust.md`
-// 「カーネル実装の境界検査（REQ-8）」は「性能下限・最適化の達成を
-// 理由に、シェーダ・カーネル側の手動境界チェックを省略しない」ことを
-// 無条件に要求しており、恒真化の数学的正当性の有無に関わらず境界検査
-// 式そのものがコンパイル時に消えてしまう構成は本規約に抵触する
-// （codex-review 指摘）。そのため各 device/threadgroup アクセスの
-// 明示的な範囲検査（下記 `group_in_bounds` 算出・direct-load 経路の
-// `a_row < dims.m`／`b_col < dims.n` ガード）は `ALIGN_*` の値に関わらず
-// 常に評価される形へ戻し、`ALIGN_M`/`ALIGN_N`/`ALIGN_K` は境界検査の
-// 成立・不成立を左右しない（本カーネル内では現在未参照。パイプライン
-// バリアント識別のためのホスト側キー・将来「検査を消さない」形の
-// ロード方式選択を追加する際の拡張点として `crate::tile::AlignFlags`
-// 側の構造は維持する）。
-constant bool ALIGN_M [[function_constant(8)]];
-constant bool ALIGN_N [[function_constant(9)]];
-constant bool ALIGN_K [[function_constant(10)]];
-
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
 // atIndex`（`crate::gemm::encode_dispatch_tiled`）で渡す。A タイル
@@ -655,13 +620,8 @@ kernel void gemm_simdgroup_tiled(
                 uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
-                // 境界チェック（REQ-8）: PR #764 codex-review 指摘（P0）を
-                // 受け、`ALIGN_K`/`ALIGN_M` による OR 合成での恒真化は
-                // 行わない（本ファイル冒頭 `ALIGN_M` 宣言部コメント参照）。
-                // 整列バリアント（`ALIGN_*=true`）でも下記の式は常に評価
-                // され、手動境界チェックは省略しない。
-                bool group_in_bounds = (kk + 4 <= bk_eff && global_k + 4 <= dims.k) &&
-                                        (global_row < dims.m);
+                bool group_in_bounds =
+                    (kk + 4 <= bk_eff) && (global_row < dims.m) && (global_k + 4 <= dims.k);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
@@ -686,11 +646,8 @@ kernel void gemm_simdgroup_tiled(
                 uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
-                // 境界チェック（REQ-8）: A タイル側と同じ理由（PR #764
-                // codex-review 指摘・P0）で `ALIGN_K`/`ALIGN_N` による恒真化
-                // は行わず、下記の式を常に評価する。
-                bool group_in_bounds = (kk < bk_eff && global_k < dims.k) &&
-                                        (global_col + 4 <= dims.n);
+                bool group_in_bounds =
+                    (kk < bk_eff) && (global_k < dims.k) && (global_col + 4 <= dims.n);
                 if (group_in_bounds) {
                     device const float4* src = reinterpret_cast<device const float4*>(
                         b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
@@ -772,9 +729,6 @@ kernel void gemm_simdgroup_tiled(
                     // ことが保証される。不成立時は 0 埋めタイルを使う
                     // （協調ロード経路の 0 埋めと同じ契約。レビュー指摘。
                     // #188 PR review）。
-                    // PR #764 codex-review 指摘（P0）を受け、`ALIGN_M` による
-                    // 恒真化（OR 合成での検査式除去）は行わない。整列
-                    // バリアントでも `a_row < dims.m` は常に評価される。
                     simdgroup_float8x8 a_tile = simdgroup_float8x8(0.0f);
                     if (a_row < dims.m) {
                         simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
@@ -787,9 +741,6 @@ kernel void gemm_simdgroup_tiled(
                         uint b_col = sub_col0 + c_ * 8;
                         // 上記と同じ理屈（`dims.n` も pad8 済みで 8 の倍数、
                         // `b_col` も常に 8 の倍数）。
-                        // `a_row` 側と同じ理由（PR #764 codex-review 指摘・
-                        // P0）で `ALIGN_N` による恒真化は行わず、
-                        // `b_col < dims.n` を常に評価する。
                         simdgroup_float8x8 b_tile = simdgroup_float8x8(0.0f);
                         if (b_col < dims.n) {
                             simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);

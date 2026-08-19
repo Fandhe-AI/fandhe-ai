@@ -33,7 +33,7 @@ use crate::error::MetalError;
 use crate::half_buffer::MetalHalfBuffer;
 use crate::pad::{pad_matrix, pad_matrix_f16, pad8, unpad_matrix, unpad_matrix_f16};
 use crate::pipeline::{self, MtlLibrary, MtlPipeline};
-use crate::tile::{self, AlignFlags, TileConfig};
+use crate::tile::{self, TileConfig};
 
 /// threadgroup サイズ（16×16）。`Naive`/`Tiled` 用（PoC-v2-4 実測構成。
 /// `metal_gemm.rs` の naive/tiled 両段で採用）を踏襲する。grid は
@@ -157,23 +157,15 @@ pub struct MetalGemm {
     /// make_pipeline_with_constants` が構成キーごとにパイプラインを特殊化
     /// する際に再利用する。TASK-1.8f・#188）。
     library: objc2::rc::Retained<MtlLibrary>,
-    /// 構成キー（`(`[`TileConfig`]`, `[`AlignFlags`]`)`）→ パイプラインの
-    /// 遅延キャッシュ（[`Self::pipeline_for_tile`]）。候補構成は有限個の
-    /// ため、初回ディスパッチ時に構築したパイプラインを以降のディスパッチで
-    /// 使い回す（`MTLFunctionConstantValues` を介したコンパイルは比較的重い
-    /// 処理。イシュー #188 計画「パイプライン管理」節）。`&self` の非可変
-    /// 参照から書き込むため `RefCell` で内部可変性を持たせる（`Retained` は
+    /// 構成キー（[`TileConfig`]）→ パイプラインの遅延キャッシュ
+    /// （[`Self::pipeline_for_tile`]）。候補構成は有限個のため、初回
+    /// ディスパッチ時に構築したパイプラインを以降のディスパッチで使い回す
+    /// （`MTLFunctionConstantValues` を介したコンパイルは比較的重い処理。
+    /// イシュー #188 計画「パイプライン管理」節）。`&self` の非可変参照から
+    /// 書き込むため `RefCell` で内部可変性を持たせる（`Retained` は
     /// 参照カウント型でありスレッド境界を跨がない前提。本クレートの
     /// ディスパッチは呼び出しごとに同期完了するため並行アクセスは想定しない）。
-    ///
-    /// キーへの [`AlignFlags`] 追加（イシュー #752）: 同一 [`TileConfig`]
-    /// でも実効次元の整列可否によりコンパイル済みシェーダバリアント
-    /// （`ALIGN_M`/`ALIGN_N`/`ALIGN_K` function constant）が異なるため、
-    /// キーを合成タプルへ拡張した。組合せは `CANDIDATES`（有限個）×
-    /// 観測された align 組合せ（最大 8 通り）に限られ遅延構築のため、
-    /// 起動コスト増はない（`crate::tile` の `ALIGN_M`/`ALIGN_N`/`ALIGN_K`
-    /// 宣言部コメント参照）。
-    tiled_cache: RefCell<HashMap<(TileConfig, AlignFlags), objc2::rc::Retained<MtlPipeline>>>,
+    tiled_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
 }
 
 impl MetalGemm {
@@ -239,27 +231,16 @@ impl MetalGemm {
     /// の対象外）。返り値は実際に使用する構成（フォールバック後）を含み、
     /// [`Self::dispatch_variant`] がエンコード時の grid・threadgroup 計算に
     /// 使う。
-    ///
-    /// `m_eff`/`n_eff`/`k_eff`（呼び出し元が [`crate::pad::pad8`] 済みの
-    /// 実効次元。イシュー #752）: フォールバック候補ごとに
-    /// [`AlignFlags::for_dims`] を再計算する（`SINGLE_SIMDGROUP_8X8` は
-    /// `bm`/`bn`/`bk` が主候補と異なるため、整列可否も候補ごとに変わりうる。
-    /// 本 doc 冒頭「アラインメント特化ロード分岐」節参照）。
     fn pipeline_for_tile(
         &self,
         ctx: &MetalContext,
         cfg: TileConfig,
-        m_eff: usize,
-        n_eff: usize,
-        k_eff: usize,
-    ) -> Result<(Retained<MtlPipeline>, TileConfig, AlignFlags), MetalError> {
+    ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
         let mut last_err: Option<MetalError> = None;
 
         for candidate in tile::fallback_chain(cfg) {
-            let align = AlignFlags::for_dims(m_eff, n_eff, k_eff, candidate);
-            let key = (candidate, align);
-            if let Some(pipeline) = self.tiled_cache.borrow().get(&key) {
-                return Ok((Retained::clone(pipeline), candidate, align));
+            if let Some(pipeline) = self.tiled_cache.borrow().get(&candidate) {
+                return Ok((Retained::clone(pipeline), candidate));
             }
 
             // デバイスの threadgroup メモリ上限（`maxThreadgroupMemoryLength`）
@@ -277,7 +258,6 @@ impl MetalGemm {
                 &self.library,
                 GemmVariant::SimdgroupTiled(candidate).function_name(),
                 candidate,
-                align,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
@@ -286,8 +266,8 @@ impl MetalGemm {
                     }
                     self.tiled_cache
                         .borrow_mut()
-                        .insert(key, Retained::clone(&pipeline));
-                    return Ok((pipeline, candidate, align));
+                        .insert(candidate, Retained::clone(&pipeline));
+                    return Ok((pipeline, candidate));
                 }
                 Err(err) => {
                     last_err = Some(err);
@@ -335,22 +315,14 @@ impl MetalGemm {
     /// [`Self::dispatch_variant`]）からは呼ばれない。よってテストを含まない
     /// 通常の `lib` ターゲットビルドでは到達不能になる（dead_code 判定は
     /// ターゲットごとのため）ため `#[cfg(test)]` を付ける。
-    /// `m_eff`/`n_eff`/`k_eff`（イシュー #752 で追加。呼び出し元が
-    /// [`crate::pad::pad8`] 済みの実効次元を渡す契約）: [`AlignFlags`] 導出
-    /// のため [`Self::pipeline_for_tile`] へそのまま転送する。戻り値は
-    /// 採用された [`TileConfig`] に加え、実際に畳み込まれた [`AlignFlags`]
-    /// も返す（整列版が実際に選ばれたことをテストで検証可能にするため）。
     #[cfg(test)]
     pub(crate) fn resolve_tile_config(
         &self,
         ctx: &MetalContext,
         cfg: TileConfig,
-        m_eff: usize,
-        n_eff: usize,
-        k_eff: usize,
-    ) -> Result<(TileConfig, AlignFlags), MetalError> {
-        self.pipeline_for_tile(ctx, cfg, m_eff, n_eff, k_eff)
-            .map(|(_, resolved, align)| (resolved, align))
+    ) -> Result<TileConfig, MetalError> {
+        self.pipeline_for_tile(ctx, cfg)
+            .map(|(_, resolved)| resolved)
     }
 
     /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
@@ -489,8 +461,7 @@ impl MetalGemm {
         let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
         validate_prepared_inputs_f32(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
 
-        let (pipeline, resolved_cfg, _align) =
-            self.pipeline_for_tile(ctx, cfg, m_eff, n_eff, k_eff)?;
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
         ctx.dispatch_sync(|encoder| {
             encode_dispatch_tiled(encoder, &pipeline, a_buf, b_buf, c_buf, dims, resolved_cfg);
         })?;
@@ -804,8 +775,7 @@ impl MetalGemm {
 
         match variant {
             GemmVariant::SimdgroupTiled(cfg) => {
-                let (pipeline, resolved_cfg, _align) =
-                    self.pipeline_for_tile(ctx, cfg, m_eff, n_eff, k_eff)?;
+                let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
                 ctx.dispatch_sync(|encoder| {
                     encode_dispatch_tiled(
                         encoder,

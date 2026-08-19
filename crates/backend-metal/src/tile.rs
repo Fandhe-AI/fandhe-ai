@@ -461,73 +461,6 @@ impl TileConfig {
     }
 }
 
-/// `gemm_simdgroup_tiled`（`shaders/gemm.metal`）のアラインメント特化ロード
-/// 分岐（イシュー #752）向け、M/N/K それぞれの整列可否を表す純粋値型。
-///
-/// MLX steel `matmul.cpp` の `align_M`/`align_N`/`align_K`（Metal function
-/// constant 経由でシェーダをコンパイル時特殊化する技法）を参考にした
-/// パイプラインバリアント識別キー（技法の参照のみでコード転記はしない。
-/// イシュー #752 計画「背景・目的」節）。**PR #764 codex-review 指摘
-/// （P0）を受けた設計変更**: 当初は `true` の場合に `shaders/gemm.metal`
-/// の該当方向の境界チェック（`group_in_bounds` の一部項・direct-load
-/// 経路の行/列ガード）をコンパイル時定数畳み込みで恒真化しデッドコード
-/// 除去する狙いだったが、`.claude/rules/coding-rust.md`「カーネル実装の
-/// 境界検査（REQ-8）」は最適化を理由にした手動境界チェックの省略を
-/// 無条件禁止しており、恒真化の数学的正当性の有無に関わらず検査式が
-/// コンパイル時に消える構成は同規約に抵触するため不採用に変更した。
-/// 現在 `shaders/gemm.metal` 側では `ALIGN_M`/`ALIGN_N`/`ALIGN_K` は
-/// 境界検査の成立・不成立を左右しない（宣言のみで未参照。将来「検査を
-/// 消さない」形のロード方式選択を追加する拡張点として構造は維持する）。
-///
-/// **fail-closed 契約**: [`for_dims`](Self::for_dims) は実効次元が
-/// `TileConfig` のブロック幅（`bm`/`bn`/`bk`）へ厳密に整除する場合のみ
-/// `true` を返す。誤って `true` を返すと検査消去版カーネルが範囲外
-/// メモリへアクセスするため、判定は `%` の厳密一致のみで行い推定・近似を
-/// 持ち込まない。`cfg.bm`/`bn`/`bk` が `0`（`TileConfig::validate` を経て
-/// いない異常入力）の場合も [`UNALIGNED`](Self::UNALIGNED)（全 `false`）を
-/// 返し、未確定経路は常に検査版へ倒す。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
-pub struct AlignFlags {
-    /// `dims.m %  cfg.bm == 0` がホスト側で証明済みか（`shaders/gemm.metal`
-    /// の `ALIGN_M` function constant へ渡す値）。
-    pub align_m: bool,
-    /// `dims.n % cfg.bn == 0` の同上（`ALIGN_N`）。
-    pub align_n: bool,
-    /// `dims.k % cfg.bk == 0` の同上（`ALIGN_K`）。
-    pub align_k: bool,
-}
-
-impl AlignFlags {
-    /// 整列が未証明（全検査版。安全側の既定値）。`cfg.bm`/`bn`/`bk` が `0`
-    /// の異常入力時のフォールバックとしても使う（[`for_dims`](Self::for_dims)
-    /// 参照）。
-    pub const UNALIGNED: AlignFlags = AlignFlags {
-        align_m: false,
-        align_n: false,
-        align_k: false,
-    };
-
-    /// 実効次元 `(m_eff, n_eff, k_eff)`（`crate::pad::pad8` 適用後。
-    /// `crate::gemm::MetalGemm::dispatch_variant`/`dispatch_tiled_prepared`
-    /// が保持する値）と `cfg`（[`TileConfig`]）から整列フラグを導出する。
-    ///
-    /// `cfg.bm`/`bn`/`bk` のいずれかが `0` の場合は [`UNALIGNED`](Self::UNALIGNED)
-    /// を返す（`%` によるゼロ除算 panic を避ける fail-closed 分岐。
-    /// `TileConfig::validate` を通過した構成では `bm`/`bn`/`bk` は常に非
-    /// ゼロのため通常経路では到達しないが、本関数は `validate` 呼び出し
-    /// 前後どちらからも安全に呼べるよう防御的に判定する）。
-    pub fn for_dims(m_eff: usize, n_eff: usize, k_eff: usize, cfg: TileConfig) -> AlignFlags {
-        if cfg.bm == 0 || cfg.bn == 0 || cfg.bk == 0 {
-            return Self::UNALIGNED;
-        }
-        AlignFlags {
-            align_m: m_eff.is_multiple_of(cfg.bm as usize),
-            align_n: n_eff.is_multiple_of(cfg.bn as usize),
-            align_k: k_eff.is_multiple_of(cfg.bk as usize),
-        }
-    }
-}
-
 /// [`select`] が候補として巡回する構成（大 → 小の優先順）。MLX steel の
 /// 実装傾向（大形状ほど大きい BM/BN・複数 simdgroup 分担）を参考にした
 /// 暫定初期値（本ファイル冒頭コメント参照。実機実測で確定させる）。
@@ -1076,98 +1009,6 @@ pub fn is_underoccupied(actual: u64, ideal: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // --- AlignFlags::for_dims（イシュー #752。pure・Linux で実行可能） ---
-
-    #[test]
-    fn align_flags_for_dims_true_when_all_dimensions_divide_evenly() {
-        let cfg = TileConfig {
-            bm: 64,
-            bn: 64,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        };
-        // 4096 は bm=64・bn=64・bk=16 いずれの倍数でもある（真の正方立方形状）。
-        let align = AlignFlags::for_dims(4096, 4096, 4096, cfg);
-        assert_eq!(
-            align,
-            AlignFlags {
-                align_m: true,
-                align_n: true,
-                align_k: true,
-            }
-        );
-    }
-
-    #[test]
-    fn align_flags_for_dims_is_false_per_dimension_independently() {
-        let cfg = TileConfig {
-            bm: 64,
-            bn: 32,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        };
-        // m=100（64 で割り切れない）・n=64（32 の倍数）・k=48（16 の倍数）。
-        let align = AlignFlags::for_dims(100, 64, 48, cfg);
-        assert_eq!(
-            align,
-            AlignFlags {
-                align_m: false,
-                align_n: true,
-                align_k: true,
-            }
-        );
-    }
-
-    #[test]
-    fn align_flags_for_dims_is_unaligned_when_no_dimension_divides_evenly() {
-        let cfg = TileConfig {
-            bm: 32,
-            bn: 32,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: false,
-        };
-        // pad8(100)=104・pad8(70)=72・pad8(70)=72（32/32/16 いずれも割り切らない。
-        // `tests/gemm_dynamic_tile_parity.rs` の
-        // `direct_load_path_matches_cpu_reference_non_multiple_of_tile` と同一形状）。
-        let align = AlignFlags::for_dims(104, 72, 72, cfg);
-        assert_eq!(align, AlignFlags::UNALIGNED);
-    }
-
-    #[test]
-    fn align_flags_for_dims_fails_closed_on_zero_block_dims() {
-        // `TileConfig::validate` を経由しない異常入力（`bm`/`bn`/`bk` が 0）
-        // でもゼロ除算 panic せず全検査版（`UNALIGNED`）へ倒れることを固定する
-        // （fail-closed 契約。本ファイル冒頭 [`AlignFlags`] ドキュメント参照）。
-        let cfg = TileConfig {
-            bm: 0,
-            bn: 32,
-            bk: 16,
-            wm: 2,
-            wn: 2,
-            staged: true,
-        };
-        assert_eq!(AlignFlags::for_dims(64, 64, 64, cfg), AlignFlags::UNALIGNED);
-    }
-
-    #[test]
-    fn align_flags_default_and_unaligned_are_all_false() {
-        assert_eq!(AlignFlags::default(), AlignFlags::UNALIGNED);
-        assert_eq!(
-            AlignFlags::UNALIGNED,
-            AlignFlags {
-                align_m: false,
-                align_n: false,
-                align_k: false,
-            }
-        );
-    }
 
     // --- TileConfig::thread_count / shared_mem_bytes（pure） ---
 
@@ -2548,19 +2389,16 @@ mod tests {
         let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
         for (i, &cfg) in CANDIDATES.iter().enumerate() {
-            let (m, n, k) = (256, 256, 256);
-            let (resolved, _align) = gemm.resolve_tile_config(&ctx, cfg, m, n, k).unwrap_or_else(
-                |err| {
-                    panic!(
-                        "候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}"
-                    )
-                },
-            );
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?} のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
             assert_eq!(
                 resolved, cfg,
                 "候補 {cfg:?} が実デバイス上でサイレントに {resolved:?} へフォールバックした \
                  （構成失敗を検知できていない）"
             );
+
+            let (m, n, k) = (256, 256, 256);
             let seed_a = 10 + i as u64;
             let seed_b = 20 + i as u64;
 
@@ -2622,15 +2460,12 @@ mod tests {
         let gemm = crate::gemm::MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
         for &cfg in CANDIDATES {
-            let (m, n, k) = (256, 256, 256);
-            let (resolved, _align) = gemm.resolve_tile_config(&ctx, cfg, m, n, k).unwrap_or_else(
-                |err| {
-                    panic!(
-                        "candidate {cfg:?} は実デバイス上限（SMEM・スレッド数）でのパイプライン \
-                         構築・検証に失敗した: {err}"
-                    )
-                },
-            );
+            let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+                panic!(
+                    "candidate {cfg:?} は実デバイス上限（SMEM・スレッド数）でのパイプライン \
+                     構築・検証に失敗した: {err}"
+                )
+            });
             assert_eq!(
                 resolved, cfg,
                 "candidate {cfg:?} が実デバイス上限で {resolved:?} へサイレントに \
@@ -2679,16 +2514,9 @@ mod tests {
             staged: false,
         };
 
-        // `tests/gemm_dynamic_tile_parity.rs` の
-        // `direct_load_path_matches_cpu_reference` と同じ形状（256,256,256）
-        // を使う（本テストのドキュメンテーションコメント「同期させること」
-        // 参照）。
-        let (m, n, k) = (256, 256, 256);
-        let (resolved, _align) =
-            gemm.resolve_tile_config(&ctx, cfg, m, n, k)
-                .unwrap_or_else(|err| {
-                    panic!("direct-load 構成 {cfg:?} のパイプライン構築・検証に失敗した: {err}")
-                });
+        let resolved = gemm.resolve_tile_config(&ctx, cfg).unwrap_or_else(|err| {
+            panic!("direct-load 構成 {cfg:?} のパイプライン構築・検証に失敗した: {err}")
+        });
         assert_eq!(
             resolved, cfg,
             "direct-load 構成 {cfg:?} が実デバイス上でサイレントに {resolved:?} へ \
