@@ -29,9 +29,12 @@
 //! CUDA 非搭載・NVRTC 非搭載・cc<8.0（cp.async 前提）・opt-in 予算
 //! 未取得環境では、理由を表示して正常終了する
 //! （`gemm_mma_swizzle_bench.rs` と同じ環境適応分岐）。段数ごとの
-//! コンパイル失敗・optin 予算超過・parity 不一致は理由付きで
-//! SKIP／FAIL 表示し、残りの段数の計測は継続する（fail-closed だが
-//! スイープ全体は止めない設計。実装計画 §6「リスクと安全側の倒し方」）。
+//! コンパイル失敗・optin 予算超過・parity 不一致・計測中（ウォームアップ／
+//! 反復）の CUDA 起動失敗（動的 SMEM 変種側・static 比較基準側の双方）は
+//! 理由付きで SKIP／FAIL 表示し、残りの段数の計測は継続する（fail-closed
+//! だがスイープ全体は止めない設計。実装計画 §6「リスクと安全側の倒し方」。
+//! `measure_dyn_staged`／`measure_production_wmma_tf32` は計測クロージャ内で
+//! 最初の `CudaError` を捕捉し `Result` として返すことでこの契約を守る）。
 //!
 //! 実測値・SMEM/occupancy 試算・採否判断は
 //! `docs/perf/cuda-gemm-wmma-tf32-staged-stages-sweep.md` へ記録する。
@@ -105,51 +108,78 @@ fn measure_dyn_staged(
     let (a_dev, b_dev) = gemm.upload_f32(&a, &b)?;
     let mut c_dev = gemm.alloc_output_f32(size as u32, size as u32)?;
 
+    // `bench_run` のクロージャは `FnMut()` （非 fallible）契約のため、ここで
+    // `.expect()` すると計測中（ウォームアップ／反復）の CUDA 起動失敗が
+    // そのまま panic してスイープ全体を落としてしまう（codex-review 指摘
+    // #742 PR #759）。呼び出し側は「起動失敗はこの段数・サイズの SKIP」
+    // という契約（本関数の戻り値 `Result<f64, CudaError>`）を持つため、
+    // 最初の `CudaError` をここで捕捉し、計測終了後に `Err` として返す
+    // （2 回目以降の呼び出しは無駄な起動を避けて no-op にする）。
     let stream = device.stream();
+    let mut first_err: Option<CudaError> = None;
     let measurement = bench_run(config, || {
-        compiled
-            .launch_tf32_staged_dyn(
-                stream,
-                &a_dev,
-                &b_dev,
-                &mut c_dev,
-                size as u32,
-                size as u32,
-                size as u32,
-            )
-            .expect("dyn staged GEMM launch must succeed on CUDA-equipped runner");
-    })
-    .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    Ok(tflops(size, measurement.median_secs))
-}
-
-/// 本番経路（static・3 段フォールバック選択。多くの場合 staged
-/// stages=3）の GPU 実行のみを計測する（比較基準行）。
-fn measure_production_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
-    let mut rng = Xorshift64Star::new(SEED);
-    let a: Vec<f32> = rng.fill_vec(size * size);
-    let b: Vec<f32> = rng.fill_vec(size * size);
-
-    let (a_dev, b_dev) = gemm
-        .upload_f32(&a, &b)
-        .expect("f32 upload must succeed on CUDA-equipped runner");
-    let mut c_dev = gemm
-        .alloc_output_f32(size as u32, size as u32)
-        .expect("f32 output allocation must succeed on CUDA-equipped runner");
-
-    let measurement = bench_run(config, || {
-        gemm.launch_wmma_tf32(
+        if first_err.is_some() {
+            return;
+        }
+        if let Err(e) = compiled.launch_tf32_staged_dyn(
+            stream,
             &a_dev,
             &b_dev,
             &mut c_dev,
             size as u32,
             size as u32,
             size as u32,
-        )
-        .expect("production wmma tf32 GEMM must succeed on CUDA-equipped runner");
+        ) {
+            first_err = Some(e);
+        }
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
-    tflops(size, measurement.median_secs)
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(tflops(size, measurement.median_secs))
+}
+
+/// 本番経路（static・3 段フォールバック選択。多くの場合 staged
+/// stages=3）の GPU 実行のみを計測する（比較基準行）。
+///
+/// `measure_dyn_staged` と同じ契約（起動失敗は `Err` として呼び出し側の
+/// SKIP 処理へ委ねる。codex-review 指摘 #742 PR #759）に揃える。
+fn measure_production_wmma_tf32(
+    gemm: &CudaGemm,
+    size: usize,
+    config: &MeasurementConfig,
+) -> Result<f64, CudaError> {
+    let mut rng = Xorshift64Star::new(SEED);
+    let a: Vec<f32> = rng.fill_vec(size * size);
+    let b: Vec<f32> = rng.fill_vec(size * size);
+
+    let (a_dev, b_dev) = gemm.upload_f32(&a, &b)?;
+    let mut c_dev = gemm.alloc_output_f32(size as u32, size as u32)?;
+
+    // 起動失敗（ウォームアップ／反復中）は最初の `CudaError` を捕捉し、
+    // 計測終了後に `Err` として返す（`measure_dyn_staged` と同じ理由）。
+    let mut first_err: Option<CudaError> = None;
+    let measurement = bench_run(config, || {
+        if first_err.is_some() {
+            return;
+        }
+        if let Err(e) = gemm.launch_wmma_tf32(
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+            size as u32,
+            size as u32,
+            size as u32,
+        ) {
+            first_err = Some(e);
+        }
+    })
+    .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
+    if let Some(e) = first_err {
+        return Err(e);
+    }
+    Ok(tflops(size, measurement.median_secs))
 }
 
 fn main() {
@@ -315,9 +345,12 @@ fn main() {
         for &size in &BENCH_SIZES {
             let config = MeasurementConfig::default();
             let dyn_result = measure_dyn_staged(&compiled, &device, &gemm, size, &config);
-            let static_tflops = measure_production_wmma_tf32(&gemm, size, &config);
-            match dyn_result {
-                Ok(dyn_tflops) => {
+            let static_result = measure_production_wmma_tf32(&gemm, size, &config);
+            // 起動失敗はいずれの側も「この段数・サイズの SKIP」として扱い
+            // 残りの段数の計測を継続する（実装計画 §6。codex-review 指摘
+            // #742 PR #759 で比較基準側も dyn 側と同じ Err 契約へ揃えた）。
+            match (dyn_result, static_result) {
+                (Ok(dyn_tflops), Ok(static_tflops)) => {
                     let ratio = if static_tflops != 0.0 {
                         dyn_tflops / static_tflops
                     } else {
@@ -325,9 +358,16 @@ fn main() {
                     };
                     row.push_str(&format!(",{dyn_tflops:.4},{static_tflops:.4},{ratio:.4}"));
                 }
-                Err(e) => {
+                (Err(e), _) => {
                     println!(
                         "stages={stages} size={size}: SKIP measurement (dyn launch failed: {e})"
+                    );
+                    row.push_str(",n/a,n/a,n/a");
+                }
+                (Ok(_), Err(e)) => {
+                    println!(
+                        "stages={stages} size={size}: SKIP measurement \
+                         (static baseline launch failed: {e})"
                     );
                     row.push_str(",n/a,n/a,n/a");
                 }
