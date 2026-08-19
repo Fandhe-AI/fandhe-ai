@@ -15,16 +15,22 @@ DeepGEMM（`csrc/jit_kernels/heuristics/sm90.hpp`）が持つ SMEM 予算・L1/L
 計測環境: GB10・sm_121・driver 版・CUDA 13.0（`docs/real-hardware-verification-env.md` の実機。実ホスト名
 は内部管理外ファイル `docs/real-hardware-verification-env.local.md` を参照し本ドキュメントには書かない）。
 
-## ステータス: 未実測・要実機実行
+## ステータス: 部分実測完了（2026-08-19・commit `cbc16e7`）
 
-**本 PR 時点では DGX Spark GB10 実機への接続情報（`docs/real-hardware-verification-env.local.md`）が本
-作業環境に存在せず、実機実行ができなかった。** 実装計画（#482）§4 Step 3 の安全側フォールバック
-「実機に接続できない場合は example とドキュメント骨子までを本 PR のスコープとし、実測値の記入が残る旨を
-明記する」に従い、以下の表は骨子（属性名・単位・実測欄）のみを用意し、実測値は空欄のまま残す。
+**2026-08-19、DGX Spark GB10（sm_121）実機（commit `cbc16e7`）で `device_attributes_dump` を実行し、
+イシュー #739 の受け入れ条件に記載された 5 属性（`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`・
+`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`・`MULTIPROCESSOR_COUNT`・`MAX_REGISTERS_PER_MULTIPROCESSOR`・
+`L2_CACHE_SIZE`）と global／L2 実効帯域の実測値を確定させた。** 転記元はイシュー #739 本文（複数の
+兄弟イシュー #736・#740〜#743 本文の数値と相互一致することを確認済み）であり、**転記元に個別値の記載が
+無い属性（`MAX_SHARED_MEMORY_PER_BLOCK`・`RESERVED_SHARED_MEMORY_PER_BLOCK`・`MAX_REGISTERS_PER_BLOCK`・
+`CLOCK_RATE`・`MEMORY_CLOCK_RATE`・`GLOBAL_MEMORY_BUS_WIDTH`・`MAX_THREADS_PER_MULTIPROCESSOR`・
+`MAX_THREADS_PER_BLOCK`・デバイス名・compute capability・総メモリ容量）は推定で埋めず「未実測」のまま
+残す**（`out-of-scope-tracking.md`・捏造禁止の安全側フォールバック）。これら残欄は
+`device_attributes_dump` の出力全文（生ログ）を実機セッションで回収し転記することで充足する。
 
 `docs/real-hardware-verification-env.md` の手順（`.rev-stamp` → rsync → SSH 実行 →
 `cargo run -p backend-cuda --example device_attributes_dump --release` → 出力回収）に従って実機実行し、
-以下の表を埋めること。
+残る「未実測」欄を埋めること。
 
 ### 動作検証（sm_121 ではない代替 CUDA GPU 上での機能確認。参考値・DGX Spark GB10 の代替ではない）
 
@@ -68,18 +74,18 @@ global: n=67108864 median_secs=0.001656 bandwidth=324.26 GB/s bytes_per_cycle=18
 l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_secs=0.000006 bandwidth=190.42 GB/s bytes_per_cycle=106.2608
 ```
 
-## デバイス属性実測表（要実機記入）
+## デバイス属性実測表（2026-08-19・GB10 実機・commit `cbc16e7`。部分実測。出典: イシュー #739）
 
 | 属性名（`CUdevice_attribute`） | 実測値（生値） | 単位換算値 |
 |---|---|---|
-| `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN` | 未実測 | bytes |
+| `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN` | 101376 | bytes |
 | `MAX_SHARED_MEMORY_PER_BLOCK` | 未実測 | bytes |
-| `MAX_SHARED_MEMORY_PER_MULTIPROCESSOR` | 未実測 | bytes |
+| `MAX_SHARED_MEMORY_PER_MULTIPROCESSOR` | 102400 | bytes |
 | `RESERVED_SHARED_MEMORY_PER_BLOCK` | 未実測 | bytes |
-| `MULTIPROCESSOR_COUNT`（SM 数） | 未実測 | 個 |
-| `MAX_REGISTERS_PER_MULTIPROCESSOR` | 未実測 | 32bit レジスタ数 |
+| `MULTIPROCESSOR_COUNT`（SM 数） | 48 | 個 |
+| `MAX_REGISTERS_PER_MULTIPROCESSOR` | 65536 | 32bit レジスタ数 |
 | `MAX_REGISTERS_PER_BLOCK` | 未実測 | 32bit レジスタ数 |
-| `L2_CACHE_SIZE` | 未実測 | bytes |
+| `L2_CACHE_SIZE` | 25165824 | bytes |
 | `CLOCK_RATE` | 未実測 | kHz |
 | `MEMORY_CLOCK_RATE` | 未実測 | kHz |
 | `GLOBAL_MEMORY_BUS_WIDTH` | 未実測 | bit |
@@ -88,6 +94,10 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 | デバイス名 | 未実測 | — |
 | compute capability | 未実測 | (major, minor) |
 | 総メモリ容量 | 未実測 | bytes |
+
+上記「未実測」の行は #739 実測作業では転記元（イシュー #739・#736・#740〜#743 本文）に個別値の記載が
+無いため未実測のまま残す（推定値を書かない）。実機での `device_attributes_dump` 出力全文の回収により
+充足する。
 
 ## L1/L2/global 実効帯域（要実機記入）
 
@@ -104,9 +114,14 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 
 | 区分 | バッファサイズ | 実効帯域（中央値） | bytes/cycle（device-wide） | 備考 |
 |---|---|---|---|---|
-| global（L2 超） | n=67108864（256 MiB/バッファ） | 未実測 GB/s | 未実測 | L2 非依存の参照帯域。`bytes_per_cycle_device_wide`（`device_attributes_dump.rs` 出力ラベル）をそのまま転記 |
-| L2（L2 未満） | 未実測（`L2_CACHE_SIZE/16` 要素。`device_attributes_dump.rs` の算出式 `l2_bytes / 4 / size_of::<f32>()` 実測） | 未実測 GB/s | 未実測 | src+dst 合計が L2 に収まる設定。同上 |
+| global（L2 超） | n=67108864（256 MiB/バッファ） | 212.34 GB/s | 未実測（`CLOCK_RATE` 未実測のため算出せず） | L2 非依存の参照帯域。出典: イシュー #739（`device_attributes_dump` 実行値）。`bytes_per_cycle_device_wide` は `CLOCK_RATE` が未実測のため未算出（推定計算をしない） |
+| L2（L2 未満） | `L2_CACHE_SIZE/16` 要素（`device_attributes_dump.rs` の算出式 `l2_bytes / 4 / size_of::<f32>()`） | 1237.62 GB/s | 未実測（同上） | src+dst 合計が L2 に収まる設定。出典: イシュー #739 |
 | L1（SM あたり） | — | スペック値＋出典を記録（下記参照） | — （per-SM。上 2 行とは基準が異なる） | 本バイナリでは未実装（下記「限界」参照） |
+
+**転記前チェックの合否（2026-08-19 実測）**: 上記「転記前チェック」の条件（`l2` の実効帯域が `global`
+の実効帯域を下回った場合は転記しない）を判定すると、1237.62 GB/s（L2）> 212.34 GB/s（global）で
+**合格**しており、旧版で観測された非物理的な逆転（L2 < global）は解消している。よって上表への転記を
+実施した。
 
 **単位に関する注意（Review 指摘対応・#482）**: 上表の `bytes/cycle` 列は global/L2 行が **device-wide**
 （デバイス全体の実効帯域をデバイスクロックで割った値。`device_attributes_dump.rs::bytes_per_cycle`
@@ -149,20 +164,25 @@ DeepGEMM Hopper（SM90）定数と sm_121 実測値の対比表。**後続タス
 
 | 定数 | DeepGEMM Hopper（SM90）値 | 出典 | sm_121 実測値 |
 |---|---|---|---|
-| SMEM 容量（`smem_capacity`） | 232448 bytes | DeepGEMM `csrc/jit_kernels/heuristics/sm90.hpp` 14 行付近 | 未実測（上表 `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR` 参照） |
-| L2 帯域（`l2_bandwidth_per_cycle` 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（上表「L2」行は **device-wide** の bytes/cycle。DeepGEMM 側定数の単位基準〈device-wide か per-SM か〉は本ドキュメントでは未確認のため、転記時に両者の基準を揃えること。上記「単位に関する注意」参照） |
+| SMEM 容量（`smem_capacity`） | 232448 bytes | DeepGEMM `csrc/jit_kernels/heuristics/sm90.hpp` 14 行付近 | `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`＝101376 bytes／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`＝102400 bytes（2026-08-19 実測。出典: イシュー #739） |
+| L2 帯域（`l2_bandwidth_per_cycle` 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 1237.62 GB/s（**device-wide**。DeepGEMM 側定数の単位基準〈device-wide か per-SM か〉は本ドキュメントでは未確認のため、転記時に両者の基準を揃えること。上記「単位に関する注意」参照。出典: イシュー #739） |
 | L1 帯域（per-SM per-cycle 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（スペック値＋出典欄参照。per-SM） |
-| SM 数 | Hopper 固有（機種依存） | — | 未実測 |
+| SM 数 | Hopper 固有（機種依存） | — | 48（2026-08-19 実測。出典: イシュー #739） |
 
-**C-8（#521）注記**: 本表の SMEM 容量は「未実測」のままであり、実測値が無い状態で DeepGEMM の
-Hopper 固有値（232448）を sm_121 向けに流用・推定で定数化することはしない。C-8 の
-`derive_pipeline_stages`（`crates/backend-cuda/src/nvrtc.rs`）は SMEM 容量をコード定数として
-持たず、`gemm_auto::derive_stages_for_device` が `device.context().attribute(
+**C-8（#521）注記**: 本表の sm_121 SMEM 容量は上記のとおり 2026-08-19 に実機実測済み
+（`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`＝101376 bytes／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`＝
+102400 bytes。出典: イシュー #739）であり、DeepGEMM の Hopper 固有値（232448）を sm_121 向けに
+流用・推定で定数化することはしない。C-8 の `derive_pipeline_stages`
+（`crates/backend-cuda/src/nvrtc.rs`）は SMEM 容量をコード定数として持たず、
+`gemm_auto::derive_stages_for_device` が `device.context().attribute(
 CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)` で**実行時に**取得した値を（静的
-`__shared__` 構成の per-block 上限 49,152 バイトでクランプしたうえで）渡す方式を採る。sm_121
-実機で本表の値が実測記入された際は、実機上で `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`
-の取得値と本表の記入値が一致することを確認すること（不一致は属性クエリ側かドキュメント記載側の
-いずれかに誤りがあることを示す）。
+`__shared__` 構成の per-block 上限 49,152 バイトでクランプしたうえで）渡す方式を採る。ただし
+`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`（非 OPTIN・静的 `__shared__` の既定上限）自体は
+上表のとおり本ドキュメントでは依然「未実測」であり、`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（動的確保
+opt-in 時の上限。両者は異なる属性で非 OPTIN の方が通常小さい）とは別物のため両者を混同しないこと。
+実機で `MAX_SHARED_MEMORY_PER_BLOCK` を実測記入する際は、実機上の取得値が上表の
+`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（101376 bytes）以下であることを確認すること（超過は属性クエリ側
+かドキュメント記載側のいずれかに誤りがあることを示す）。
 
 ## 限界・注意
 
@@ -205,3 +225,10 @@ CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)` で**実行時に**取得し�
   「転記前チェック」の追加診断手順も参照）。
 - 本イシューはコストモデル定数のコードへの組み込みを行わない（C-8/C-9・#521・#524 等のスコープ）。
 - REQ-8 の性能下限・tolerance・ガードレール閾値には一切影響しない（計測記録のみ）。
+- **残課題（2026-08-19 時点）**: 上記「転記前チェック」が要求する `volatile` あり／なしの比較計測、
+  および複数バッファサイズでの追試は、#739 実測セッションでは実施した証跡がイシュー本文に無いため
+  未実施として扱う。次回実機セッションで実施し本ドキュメントへ追記すること。同様に `MAX_SHARED_MEMORY_PER_BLOCK`・
+  `RESERVED_SHARED_MEMORY_PER_BLOCK`・`MAX_REGISTERS_PER_BLOCK`・`CLOCK_RATE`・`MEMORY_CLOCK_RATE`・
+  `GLOBAL_MEMORY_BUS_WIDTH`・`MAX_THREADS_PER_MULTIPROCESSOR`・`MAX_THREADS_PER_BLOCK`・デバイス名・
+  compute capability・総メモリ容量（上表「未実測」欄）は `device_attributes_dump` 出力全文の回収により
+  充足する残課題。
