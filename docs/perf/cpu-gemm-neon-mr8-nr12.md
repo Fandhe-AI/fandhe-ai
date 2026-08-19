@@ -9,9 +9,9 @@ Apple M1 系 firestorm コア向けの MR=12×NR=8 変種（同じく acc 24 本
 
 **本ドキュメントは REQ-8 の下限値・数値一致許容誤差を一切変更しない**。
 
-## 状態: 実装・クロス型検査・x86 側リグレッションまで完了。aarch64 実機での bit 一致・A/B スループット実測は未実施（環境ゲートで未達）
+## 状態: 実機実測完了（2026-08-19・Apple M4 Max）。MR=8×NR=12 既定を確定、12×8 変種は不採用
 
-### 実行環境ゲート判定（本イシュー実装セッション時点）
+### 経緯（実装セッション時点の環境ゲート判定）
 
 受け入れ基準の bit 完全一致・A/B 実測は aarch64 実機（Apple M4 Max・DGX Spark GB10 の
 Grace CPU）でのみ有効という前提のもと、実装セッション開始時に以下を判定した
@@ -61,19 +61,18 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
 ## 設計判断の要点
 
 - **レジスタ収支**: 8×12・12×8 いずれも acc 24 本 + オペランド 5 本 = 計 29 本で aarch64
-  の v0〜v31（32 本）に収まる。コンパイラのスピル余地は小さいが、実効性能・スピル有無は
-  実機計測でのみ確認可能（x86_64 環境では判定不能。fail-closed 引き継ぎ対象）。
+  の v0〜v31（32 本）に収まる。2026-08-19 実機実測（上記「実測結果」節）で 8×12 が全サイズ
+  優位と確認済み。
 - **bit 完全一致契約（REQ-2）**: C 各要素の累積は「p 昇順の FMA 連鎖・レーン間縮約なし」の
-  まま形状だけを変えるため、`gemm_naive` との bit 完全一致は理論上維持される。ただし
-  受け入れ基準に従い、実機での parity 実測で不一致が出た場合は **実装を revert して差分の
-  性質（最大 ULP 差・発生形状）を報告し停止する**（tolerance の変更・複合判定への降格は
-  行わない。採用可否はユーザー承認事項）。
+  まま形状だけを変えるため、`gemm_naive` との bit 完全一致は理論上維持される。2026-08-19
+  実機実測で `neon_8x12_and_12x8_match_scalar_forced_bit_exact`・`gemm_blis_parity` の
+  green を確認済み（tolerance の変更・複合判定への降格は行っていない）。
 - **端タイル（NR=12 の非 8 の倍数）**: NR=12 は 4 の倍数だが 8 の倍数でないため端タイル
   （`nr_eff < 12`）の頻度が変わるが、`pack_b` のゼロ充填と C 書き戻しの `nr_eff` 制限で
   既存ドライバがそのまま正しく扱う（ドライバ変更なし。`pack.rs` は MR/NR ジェネリック）。
 - **12×8 変種の位置づけ**: 駆動経路（`dispatch_region`）には接続しない A/B 専用コードとして
-  残る。実機 A/B 実測で 12×8 が優位と判明した場合、既定（`neon::{MR, NR, kernel}`）の入替は
-  後続セッションのスコープとする（本 PR 本文で追跡を明示）。
+  残る。2026-08-19 実機 A/B 実測で 8×12（既定）が全サイズ優位と確定したため、既定入替は
+  行わない（上記「12×8 変種コードの扱い（決定）」節参照）。
 
 ## 検証済み事項（本セッションで実施）
 
@@ -86,22 +85,40 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
 | NEON クロス clippy | `cargo clippy -p backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
 | リグレッション | `cargo test --workspace` | 全 pass（x86_64 では scalar/AVX2/AVX-512 経路。`KERNEL_DIMS` 更新後の `panel_capacity` 検証・parity グリッド追加分を含む） |
 
-## 未実測（fail-closed・後続セッションへの引き継ぎ事項）
+## 実測結果（2026-08-19）
 
-以下 2 項目は受け入れ基準だが、本セッションでは aarch64 実機に到達できないため未実施:
+- **計測条件**: Apple M4 Max・main `cbc16e7` 時点・
+  `neon_8x12_vs_12x8_ab_median_throughput`（`--release --ignored`）・形状 512/1024/2048
+  平方・5 回計測中央値（インターリーブ計測。`.claude/rules/coding-rust.md` 規約）
+- **結果**: MR=8×NR=12（既定）が MR=12×NR=8 に **512／1024／2048 の全形状で 4〜8% 優位**。
+  `neon_8x12_and_12x8_match_scalar_forced_bit_exact`・`gemm_blis_parity` はいずれも green
+  （`gemm_naive` との bit 完全一致を維持。tolerance の変更は行っていない）
+- **出典**: イシュー #735「起点となる実測事実」節・#738 概要（いずれも 2026-08-19 実機計測、
+  Apple M4 Max）。**形状別の生中央値（秒）は本リポジトリに一次ログとして保存されていないため
+  未記載**（数値の捏造は行わない。再計測が必要な場合は下記コマンドで同一ハーネスにより
+  再現できる）
+- **結論**: MR=8×NR=12 を既定として確定する。12×8 変種への既定入替は行わない
 
-1. **bit 完全一致**: `cargo test -p backend-cpu --release --test gemm_blis_parity` および
-   `neon_8x12_and_12x8_match_scalar_forced_bit_exact`（lib 単体テスト）を aarch64 実機
-   （M4 Max または Grace CPU）で実行する。aarch64 では `Isa::detect` が無条件に NEON（既定
-   8×12）を選ぶため、`gemm_blis_parity` の実行自体が新形状 NEON 経路の `gemm_naive` との
-   bit 完全一致検証になる。**不一致の場合は実装を revert し、tolerance の変更・テスト側の
-   調整で通すことは行わない**（`.claude/rules/coding-rust.md`）。
-2. **A/B スループット比較**: `neon_8x12_vs_12x8_ab_median_throughput`（`--ignored`）を
-   `--release` 実行し、8×12（既定）と 12×8（firestorm 型）の中央値を比較する。良い方を
-   既定として採用するかはこの実測結果を見た人間／後続セッションが判断する（不採用の判断
-   も含め、実測なしに達成を偽装しない）。
+## 12×8 変種コードの扱い（決定）
 
-### 再現コマンド（後続セッション向け）
+12×8 変種（`crates/backend-cpu/src/gemm_blis/microkernel/neon.rs` の `kernel_12x8`・
+`crates/backend-cpu/src/gemm_blis/microkernel.rs` の `Neon12x8Kernel`）は**温存する（削除しない）**。
+
+理由:
+
+1. 駆動経路（`gemm_blis::dispatch_region`）には接続されておらず、本番挙動に一切影響しない
+2. `neon_8x12_and_12x8_match_scalar_forced_bit_exact`・A/B ハーネス
+   （`neon_8x12_vs_12x8_ab_median_throughput`）の対照実装として機能しており、参考系列
+   Grace CPU（DGX Spark GB10）での A/B は本イシューでは未実施のため、対照コードを残す価値
+   がある
+3. 削除するかどうかの判断は別 Issue・別 PR で行う（本イシューの受け入れ条件に含めない。
+   `.claude/rules/out-of-scope-tracking.md`）
+
+将来 Grace 実機での A/B でも不採用が確定した場合、または `neon.rs` の保守コスト（形状変更時の
+2 系統追随コスト）が問題化した場合は、削除の是非を新規 Issue で起票しユーザー承認を得たうえで
+判断する。
+
+### 再現コマンド（再計測が必要な場合）
 
 ```bash
 # bit 完全一致（aarch64 実機）
@@ -116,5 +133,7 @@ cargo test -p backend-cpu --release --lib gemm_blis::tests::neon_8x12_vs_12x8_ab
 
 ## スコープ外（本 PR に含めない）
 
-- k アンロールは #561、MC/KC/NC 再選定は #564 の対象（イシュー #559 では扱わない）。
-- 12×8 変種の採用判断後の削除／既定入替は、実機 A/B 実測を行う後続セッションのスコープ。
+- k アンロールは #561、MC/KC/NC 再選定は #564（実測は #751 §「12×8 変種コードの扱い」参照先の
+  `docs/perf/cpu-gemm-blocking-sweep.md` §7）の対象（イシュー #559 では扱わない）。
+- 12×8 変種コードの削除は「12×8 変種コードの扱い（決定）」節のとおり温存が確定済みのため
+  スコープ外（削除の要否は別 Issue）。
