@@ -50,6 +50,7 @@ rust-ai-library/
 │   ├── workflows/           # implement-issue-tree.js（skills への相対 symlink）
 │   └── settings.json        # SessionStart / PostToolUse hooks
 └── docs/
+    ├── backend-metal-aligned-load-decision.md # Metal GEMM アラインメント特化ロード分岐（align_M/N/K function constant 方式）不採用・保留判断（#752）
     ├── backend-metal-async-copy-decision.md # Metal 非公式 simdgroup_async_copy 系 AIR intrinsic 不採用の決定記録（#546）
     ├── backend-metal-mlx-classic-nax-decision.md # MLX classic 経路と CANDIDATES の構成対比・NAX 経路不採用判断（#549）
     ├── backend-metal-morton-mapping-decision.md # 標準 simdgroup_matrix API 下での Morton 順レーン→要素マッピング適用不可の判断（#544）
