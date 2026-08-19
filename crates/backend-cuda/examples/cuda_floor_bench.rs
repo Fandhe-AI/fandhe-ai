@@ -571,6 +571,36 @@ fn main() {
         // `print_candidate_floor` は「n/a（判定対象サイズ欠測）」を出す）。
         None => false,
     };
+    // wmma_tf32 計測の経路 provenance 診断（イシュー #732。PR #725 codex P1
+    // で判明した「実行ログ単体から staged 選択の有無を再構成できない」問題
+    // への対応）: `launch_wmma_tf32` の 3 段選択は staged カーネルが利用可能
+    // かつ cp.async 16 バイト整列条件（n%4==0 && k%4==0）を満たす形状で
+    // staged を最優先するため、判定対象形状（512〜4096。すべて整列条件を
+    // 満たす）の wmma_tf32 実測は staged 可用性で実経路が変わる。REQ-8
+    // CudaF32 最適化後下限 50% の根拠実測・parity ベースライン（#726）は
+    // staged 経路のものであり、staged 不能時の実測は opt 経路の値になる
+    // （provenance が異なる）ことをログへ明示する。ここでは診断出力のみを
+    // 行い、計測ロジック・候補下限の確定判定（`f32_opt_confirmed` ゲート）
+    // は変更しない。
+    if let Some(g) = &tiled_gemm {
+        if g.wmma_tf32_staged_available() {
+            println!(
+                "f32 staged kernel: WMMA(TF32) staged AVAILABLE (wmma_tf32 measurements below \
+                 route to the staged kernel for cp.async-aligned shapes [n%4==0 && k%4==0], \
+                 which includes all judged sizes; same path as the REQ-8 CudaF32 optimized-floor \
+                 basis and the #726 parity baseline)."
+            );
+        } else {
+            println!(
+                "NOTE: f32 WMMA(TF32) staged kernel UNAVAILABLE ({}); wmma_tf32 measurements in \
+                 this run use the opt (non-staged) kernel path. The REQ-8 CudaF32 \
+                 optimized-floor basis and the #726 parity baseline were measured on the staged \
+                 path, so the path provenance of this run's f32 measurements differs from them.",
+                g.wmma_tf32_staged_unavailable_reason()
+                    .unwrap_or("unknown reason")
+            );
+        }
+    }
     let f16_opt_confirmed = match &wmma_gemm {
         Some(g) if g.wmma_f16_opt_available() => {
             println!(
