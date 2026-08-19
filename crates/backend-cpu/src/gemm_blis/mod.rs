@@ -113,9 +113,11 @@ const NC: usize = 512;
 /// Max（firestorm 系 aarch64）でのみ実測されており、x86_64 等の他アーキ
 /// テクチャでは性能・パネルメモリ増加（NC=9600 は既定 NC=512 比 B パネル
 /// バッファが約 18.75 倍）のいずれも未検証のため、[`select_blocks`] は
-/// `cfg(all(target_arch = "aarch64", target_os = "macos"))` でこの値の
-/// 適用を Apple Silicon Mac に限定する（Linux aarch64 実機〈DGX Spark
-/// GB10 の Grace CPU 等〉は対象外。codex-review 再指摘・PR #766。
+/// `cfg(all(target_arch = "aarch64", target_os = "macos"))` に加え、
+/// [`machine_detect::is_m4_family`] による実行時機種判定を通過した場合
+/// のみこの値を適用する（M1〜M3 等の未検証機種・Linux aarch64 実機
+/// 〈DGX Spark GB10 の Grace CPU 等〉・x86_64 は fail-closed で
+/// [`default_blocks`] に留まる。codex-review 再指摘・PR #766。
 /// `.claude/rules/coding-rust.md` の実機固有値ハードコード回避方針）。
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 const NC_LARGE_N: usize = 9600;
@@ -183,10 +185,22 @@ const fn default_blocks() -> BlockSizes {
 /// 環境変数等の外部入力による上書き口は設けない（OWASP A03・
 /// `.claude/rules/security.md`。`dispatch_region` の ISA トークン選択と
 /// 同じ「入力は `validate_dims` 通過済みの形状のみ」という方針）。
-const fn select_blocks(n: usize) -> BlockSizes {
+///
+/// `const fn` を維持できないため（[`machine_detect::is_m4_family`] は
+/// `sysctlbyname` FFI 呼び出しを伴い const 評価不能）、`NC_LARGE_N` 導入
+/// （#749）に合わせて通常の `fn` へ変更した（呼び出し元は本番 3 公開
+/// 関数からの呼び出しごとに 1 回のみで、[`machine_detect`] 側が結果を
+/// `OnceLock` でキャッシュするため実行コストは無視できる）。
+fn select_blocks(n: usize) -> BlockSizes {
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
     {
-        if n >= LARGE_N_THRESHOLD {
+        // Apple Silicon Mac の cfg 一致だけでは M1〜M3 等の未検証機種も
+        // 含んでしまう（codex-review 再指摘・PR #766・未解決スレッド
+        // `PRRT_kwDOTuUCJc6ahOOW`）。実測済みの M4 系実機であることを
+        // `sysctlbyname` による実行時機種判定で確認できた場合のみ
+        // NC_LARGE_N を適用し、それ以外（判定失敗・非 M4 系）は
+        // fail-closed で default_blocks() に留まる。
+        if n >= LARGE_N_THRESHOLD && machine_detect::is_m4_family() {
             return BlockSizes {
                 mc: MC,
                 kc: KC,
@@ -203,6 +217,85 @@ const fn select_blocks(n: usize) -> BlockSizes {
         let _ = n;
     }
     default_blocks()
+}
+
+/// macOS `sysctlbyname` を用いた実行時機種判定（#749・codex-review
+/// 再指摘・PR #766・未解決スレッド `PRRT_kwDOTuUCJc6ahOOW`）。
+///
+/// [`NC_LARGE_N`] は Apple M4 Max のみで実測した値であり、`cfg(aarch64,
+/// macos)` は M1〜M3 等の未検証機種も含んでしまうため、[`select_blocks`]
+/// が実測範囲（M4 系）であることを実行時に確認するための最小限の
+/// FFI 境界（`.claude/rules/coding-rust.md` の unsafe 方針: FFI 境界に
+/// 限定し理由コメントを明記する）。`libSystem`（macOS 標準 C ライブラリ）
+/// は追加リンク設定なしで `*-apple-darwin` ターゲットにリンクされる
+/// ため、新規外部クレート依存の追加には当たらない（deps-policy.md の
+/// 許容依存 8 区分の対象外）。
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+mod machine_detect {
+    use std::ffi::{CStr, c_char, c_int, c_void};
+    use std::sync::OnceLock;
+
+    // `sysctlbyname(3)` の FFI 宣言。`hw.model`（例: "Mac16,8"）を読み取る
+    // 用途のみに使う読み取り専用呼び出しで、`newp`/`newlen` には常に
+    // `null_mut()`/`0` を渡す（値の書き換えは行わない）。
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
+    }
+
+    /// 実機が Apple M4 系（`hw.model` が "Mac16," で始まる。2026-08-19
+    /// M4 Max 実測機の識別子はこの prefix に一致する）かどうかを判定
+    /// する。`sysctlbyname` 呼び出しは gemm 呼び出しごとに発生しうる
+    /// [`super::select_blocks`] から呼ばれるため、結果を `OnceLock` で
+    /// プロセス生存期間中キャッシュする（機種は実行中に変化しない）。
+    ///
+    /// 判定失敗（sysctl 呼び出しエラー・NUL 終端不整合・非 UTF-8 等）は
+    /// すべて fail-closed で `false`（= 非 M4 系として扱い
+    /// `default_blocks()` へフォールバック）を返す。
+    pub(super) fn is_m4_family() -> bool {
+        static CACHED: OnceLock<bool> = OnceLock::new();
+        *CACHED.get_or_init(detect_m4_family)
+    }
+
+    fn detect_m4_family() -> bool {
+        let mut buf = [0u8; 64];
+        let mut len = buf.len();
+        // "hw.model\0" — sysctlbyname は NUL 終端 C 文字列を要求する。
+        let name = c"hw.model";
+        // SAFETY: `name` は静的な NUL 終端 C 文字列。`oldp` は `buf` の
+        // 長さ分だけ書き込み可能な有効なバッファで `oldlenp` にその
+        // 容量を渡す。`newp`/`newlen` は null/0 のため sysctl 側の値を
+        // 変更しない（読み取り専用呼び出し）。戻り値を検査し、失敗時は
+        // バッファ内容を読まない（初期化済みの `[0u8; 64]` のみ以後
+        // 使用する分岐に限定するため未初期化メモリ読み出しは発生しない）。
+        let ret = unsafe {
+            sysctlbyname(
+                name.as_ptr(),
+                buf.as_mut_ptr().cast::<c_void>(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ret != 0 || len == 0 || len > buf.len() {
+            return false;
+        }
+        // SAFETY: `len` は上記呼び出しが書き込んだバイト数（NUL 終端
+        // 込み。`sysctlbyname` の文字列系プロパティの契約）で
+        // `buf.len()` 以下であることを検査済み。
+        let Ok(model) = CStr::from_bytes_until_nul(&buf[..len]) else {
+            return false;
+        };
+        let Ok(model) = model.to_str() else {
+            return false;
+        };
+        model.starts_with("Mac16,")
+    }
 }
 
 /// panel packing バッファ（A/B 各 1 本）を gemm 呼び出し単位で 1 回だけ
@@ -1251,7 +1344,15 @@ mod tests {
             );
         }
         // NC_LARGE_N（M4 Max 実測値）の適用は Apple Silicon Mac
-        // （aarch64 + macOS）限定（PR #766・codex-review 再指摘）。
+        // （aarch64 + macOS）かつ実行時機種判定（`machine_detect::
+        // is_m4_family`）が M4 系と確認できた場合限定（PR #766・
+        // codex-review 再指摘）。CI は macOS ターゲットを cross-compile
+        // ビルドするのみでテスト実行はしない（`ci.md`）ため、本分岐は
+        // 実機（M4 Max）でのみ実行される。それ以外の Apple Silicon Mac
+        // （M1〜M3 等）実機で実行した場合は `is_m4_family()` が `false`
+        // を返し default_blocks() に留まるため、本アサーションは
+        // 「実機が M4 系である」ことも暗黙に検証する（実機検証手順は
+        // `docs/real-hardware-verification-env.md` 参照）。
         // Linux aarch64（DGX Spark GB10 の Grace CPU 等）・x86_64 等では
         // n の値によらず常に default_blocks() へ fail-closed
         // フォールバックすることを確認する。
@@ -1262,7 +1363,8 @@ mod tests {
             assert_eq!(blocks.kc, KC, "n={n} でも KC は不変のはず");
             assert_eq!(
                 blocks.nc, NC_LARGE_N,
-                "n={n}（閾値以上）は NC_LARGE_N のはず"
+                "n={n}（閾値以上）は NC_LARGE_N のはず（実機が M4 系でない場合は失敗する。\
+                 machine_detect::is_m4_family() が false を返した可能性がある）"
             );
         }
         #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
@@ -1285,6 +1387,21 @@ mod tests {
             let blocks = select_blocks(n);
             assert!(blocks.mc > 0 && blocks.kc > 0 && blocks.nc > 0);
         }
+    }
+
+    /// [`machine_detect::is_m4_family`] が `sysctlbyname` 呼び出し経路で
+    /// パニックせず、`OnceLock` キャッシュにより複数回呼び出しても
+    /// 同一結果を返すことを確認する（PR #766・codex-review 再指摘）。
+    /// 実行機種が M4 系かどうか自体はテスト実行環境に依存するため
+    /// `bool` の具体値は検証しない（具体値の検証は
+    /// `select_blocks_switches_nc_only_at_large_n_threshold` 側が
+    /// 実機〈M4 Max〉限定で担う）。
+    #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+    #[test]
+    fn is_m4_family_is_deterministic_across_calls() {
+        let first = machine_detect::is_m4_family();
+        let second = machine_detect::is_m4_family();
+        assert_eq!(first, second, "OnceLock キャッシュにより結果は不変のはず");
     }
 
     /// `n >= LARGE_N_THRESHOLD`（NC=9600 分岐）の本番経路（[`gemm_blis`]／

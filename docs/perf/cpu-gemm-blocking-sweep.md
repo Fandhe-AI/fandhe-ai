@@ -189,6 +189,16 @@ cargo test -p backend-cpu --release -- --ignored mc_kc_nc_blocking_sweep_median_
 m／k は条件に含めない（非正方形状でのリスクは (vi) 参照）。閾値・NC 値は環境変数等の外部
 入力での上書き口を設けていない（OWASP A03。`.claude/rules/security.md`）。
 
+**適用対象の実行時機種判定（PR #766・codex-review 再指摘への対応）**: `NC_LARGE_N` は
+上表のとおり Apple M4 Max 実機でのみ実測した値であり、`cfg(target_arch = "aarch64",
+target_os = "macos")`（Apple Silicon Mac 全般）は M1〜M3 等の未検証機種も含んでしまう。
+`select_blocks` は上記 cfg に加え、`crates/backend-cpu/src/gemm_blis/mod.rs` の
+`machine_detect::is_m4_family`（`sysctlbyname("hw.model")` が `"Mac16,"` prefix と
+一致するかを判定。結果は `OnceLock` でプロセス内キャッシュ）が `true` を返した場合のみ
+`NC_LARGE_N` を適用し、それ以外（判定失敗・M1〜M3 等の非 M4 系・Linux aarch64・x86_64）は
+fail-closed で `default_blocks()` に留まる。M1〜M3 等での実測に基づく機種別最適化（sysctl
+ベースの MC/KC/NC 動的算出への一般化）は引き続き #753 の対象とする。
+
 ### (iii) 512〜2048 が劣化 0% である構造的根拠
 
 `n < LARGE_N_THRESHOLD` では `select_blocks(n)` は `default_blocks()` と完全に同一の
