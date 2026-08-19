@@ -195,6 +195,43 @@ impl CudaDevice {
     pub fn multiprocessor_count(&self) -> Option<u32> {
         self.compute_units()
     }
+
+    /// ブロックあたり opt-in 可能な共有メモリの上限バイト数
+    /// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`。
+    /// イシュー #742）。
+    ///
+    /// `cudaFuncAttributeMaxDynamicSharedMemorySize`（driver API では
+    /// `cuFuncSetAttribute` の同名属性）で 1 ブロックへ割り当て可能な
+    /// **動的**共有メモリの実効上限で、既定の
+    /// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`（48KiB。static
+    /// `__shared__` 宣言の実効上限と同一値。
+    /// [`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]）より大きい
+    /// （sm_121 GB10 実測 101,376B。`docs/perf/sm121-device-attributes.md`
+    /// §「SMEM 実効帯域」参照）。[`multiprocessor_count`](Self::multiprocessor_count)
+    /// と同じ fail-soft 方針（取得失敗時 `None`）。呼び出し元は
+    /// `internal-diagnostics` feature 配下の TF32 staged 段数スイープ
+    /// example（`examples/gemm_wmma_tf32_staged_stages_bench.rs`）で、
+    /// 動的共有メモリ変種カーネルの opt-in 予算検査に使う。
+    pub fn shared_memory_per_block_optin(&self) -> Option<u32> {
+        self.ctx
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)
+            .ok()
+            .and_then(|bytes| u32::try_from(bytes).ok())
+    }
+
+    /// SM（マルチプロセッサ）1 個あたりの共有メモリ上限バイト数
+    /// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`。
+    /// イシュー #742）。
+    ///
+    /// [`shared_memory_per_block_optin`](Self::shared_memory_per_block_optin)
+    /// と同じ呼び出し元が、段数ごとの occupancy 上限
+    /// （`floor(この値 / ブロックあたり SMEM 所要)`）算出に使う。
+    pub fn shared_memory_per_multiprocessor(&self) -> Option<u32> {
+        self.ctx
+            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR)
+            .ok()
+            .and_then(|bytes| u32::try_from(bytes).ok())
+    }
 }
 
 /// CUDA バックエンドの `DeviceProvider` 実装（TASK-1.9a・#44）。
