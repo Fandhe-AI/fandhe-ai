@@ -91,7 +91,13 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 - **許容依存 8 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
   rayon / half / criterion〈dev 限定〉）以外の依存追加**、または許容依存でも
   `=x.y.z` 完全固定でないバージョン指定・`docs/license-matrix.md` 更新やユーザー承認の
-  記録を伴わない依存追加・更新: **P1**
+  記録を伴わない依存追加・更新: **P1**。ただし本規約の適用範囲は本体 workspace
+  （ルート `Cargo.toml`／`Cargo.lock`）であり、`scripts/bench/oss-gemm-compare/`
+  （`[workspace]` を空テーブルで持つ独立 Cargo プロジェクト。本体 workspace の
+  member ではなく依存グラフにも現れない）の `matrixmultiply`・`gemm` crate は
+  deps-policy.md「適用範囲（本体 workspace 限定）」節の 2 条件（本体 workspace への
+  非混入・専用 `deny.toml` によるライセンス監査の CI 組み込み）を満たす限り対象外
+  （2026-08-20 ユーザー承認。イシュー #755）
 - **`// SAFETY:`（理由コメント）のない `unsafe`**、および不変条件の根拠が不十分な
   `unsafe`: **P0**。`unsafe` の使用域は FFI 境界（cudarc・objc2 系）・CPU SIMD
   intrinsics（backend-cpu のカーネル実装）等の必要最小限に限る規約

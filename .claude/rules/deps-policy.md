@@ -1,5 +1,30 @@
 # 依存管理規約（REQ-1 v2）
 
+## 適用範囲（本体 workspace 限定）
+
+本規約（許容依存 8 区分・バージョン固定・ライセンス要件）が統制するのは
+**本体 workspace**（ルート `Cargo.toml`／`Cargo.lock`）の依存グラフである。
+
+`scripts/bench/oss-gemm-compare/`（本体 workspace 外の独立 Cargo プロジェクト。
+`[workspace]` を空テーブルで持ち本体 workspace の member ではないため、本体
+workspace の依存グラフ・CI の依存禁止検査の走査対象には現れない構成）に限り、
+`matrixmultiply =0.3.11`・`gemm =0.19.0`（いずれも許容依存 8 区分の対象外）を、
+以下の条件を満たす場合に限り本規約の統制対象外として扱う（2026-08-20 ユーザー
+承認。イシュー #755）:
+
+1. 本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）への混入を禁止する
+2. 本パッケージ専用の `deny.toml` によるライセンス監査（`cargo deny --manifest-path
+   scripts/bench/oss-gemm-compare/Cargo.toml --locked check licenses sources`）を
+   CI（`.github/workflows/ci.yml` の `deps-forbidden` ジョブ）へ必須ステップとして
+   組み込む
+
+上記 2 条件を満たさない追加・変更（本体 workspace への混入・CI 監査ステップの
+欠落）は通常どおり本規約の許容依存 8 区分の対象となりユーザー承認が必要。本例外は
+`scripts/bench/oss-gemm-compare/` パッケージに限定したものであり、他パッケージ・
+本体クレートへは適用されない。ハーネス自体の設計判断・実測記録は
+`docs/oss-comparison-harness-decision.md`（イシュー #755）を参照（同ドキュメントは
+本規約が定める例外条件に従って書かれる）。
+
 ## 許容依存 8 区分（これ以外の追加はユーザー承認必須）
 
 | 区分 | クレート | 条件 |
