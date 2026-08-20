@@ -143,6 +143,20 @@ scripts/bench/oss-gemm-compare/deny.toml licenses sources` を毎回実行して
 リストの実体は本表と二重管理しない（`scripts/bench/oss-gemm-compare/deny.toml`
 冒頭コメント参照）。
 
+### 8a-1. 実測（イシュー #755 review 指摘対応。`matrixmultiply`・`gemm` の実ライセンス）
+
+- 実測日: 2026-08-20
+- 対象 `Cargo.lock`: `scripts/bench/oss-gemm-compare/Cargo.lock`
+- `cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --locked check --config scripts/bench/oss-gemm-compare/deny.toml licenses sources` の実行結果: `licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --format-version 1` で直接依存 2 crate のライセンス式を抽出（推定記載ではなく実測値）:
+
+| crate | version | license（`cargo metadata` 実測） |
+|-------|---------|-----------------------------------|
+| `matrixmultiply` | 0.3.11 | `MIT/Apache-2.0` |
+| `gemm` | 0.19.0 | `MIT` |
+
+いずれも deny.toml の `[licenses] allow` リスト（MIT・Apache-2.0 等。本表 2 節と同一方針）の範囲内であることを `cargo deny check licenses` が機械検査済み。推移的依存（`gemm-common`・`gemm-f32`・`pulp`・`dyn-stack` 等）を含む全域監査は同コマンドの `sources` 検査と合わせて CI（`ci.yml` の `deps-forbidden` ジョブ「OSS 直接比較ハーネスのライセンス監査」ステップ）で毎回再実行し、本表への転記のみに依拠しない（cargo-deny の fail-closed 機械検査が一次情報源）。
+
 ## 8. 運用
 
 - 依存の追加・更新は本表の更新とセットで行う（**ユーザー承認必須**。REQ-5・deps-policy.md）
