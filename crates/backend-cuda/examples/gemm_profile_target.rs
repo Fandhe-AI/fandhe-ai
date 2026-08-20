@@ -72,6 +72,25 @@
 //! 採取手順・実測記録・主因分析は `docs/perf/cuda-gemm-bottleneck-diagnosis.md`
 //! を参照。
 //!
+//! `--b-pad <N>`（イシュー #743。`--path wmma_tf32` 限定・任意）を指定
+//! すると、`gemm.launch_wmma_tf32`（本番経路。固定 `WMMA_TF32_STAGED_B_PAD`
+//! 既定値）の代わりに `backend_cuda::diagnostics::render_wmma_tf32_staged_dyn`
+//! （`WmmaTf32StagedKernelConfig { b_pad: N, ..default_tf32_staged() }`。
+//! `gemm_wmma_tf32_staged_stages_bench.rs`〈#742〉が確立した動的 SMEM
+//! 計測専用変種と同じ経路）でコンパイル・起動する。SMEM バンクコンフリクト
+//! 対策候補（`docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md` §3
+//! 「採否基準」1「ncu で 4096 の ld バンクコンフリクトが有意に減少して
+//! いること」）を ncu で実測するための唯一の経路であり、本番カーネル
+//! ソース（`kernels_wmma_opt.rs`）自体は変更しない（モジュール冒頭の
+//! 「カーネル本体は一切変更しない」契約に対し、config 経由で既存の診断
+//! 専用変種を選べるようにする点のみが差分）。未指定時（既定）は従来どおり
+//! 本番経路のみを計測し、本フィールド追加による挙動変化はない。
+//! `--b-pad` を `--path mma_f16` と併用した場合・値が
+//! `validate_wmma_tf32_staged_padding` の制約（4 要素倍数・タイル幅以上・
+//! 余剰 32 要素以下）を満たさない場合は、いずれも fail-closed で非 0
+//! 終了する（前者は CLI 引数検証・後者は `render_wmma_tf32_staged_dyn` の
+//! `Result::Err`）。
+//!
 //! `CudaDevice::new`／`CudaGemm::new`／`CudaMmaGemm::new`／opt カーネル
 //! 不在（`wmma_tf32_opt_available() == false`）のいずれの失敗も、既定では
 //! 理由を表示したうえで `panic!` を使わず `std::process::exit(1)`（非 0
@@ -151,6 +170,11 @@ struct Args {
     /// `--launch-skip` 算出の唯一の構築点を `parse_args` に保つ意図で
     /// フィールドとして残す）。`--launch-skip` 値の算出に使う（同上）。
     launch_skip: usize,
+    /// `--b-pad` 指定値（イシュー #743。`--path wmma_tf32` 限定）。`None`
+    /// （既定）は本番経路（`gemm.launch_wmma_tf32`）を、`Some(v)` は
+    /// `WmmaTf32StagedKernelConfig { b_pad: v, .. }` の動的 SMEM 診断変種を
+    /// 起動する（モジュール冒頭ドキュメンテーションコメント参照）。
+    b_pad: Option<u32>,
     /// `CudaDevice::new` が `CudaError::DriverUnavailable`（CUDA 非搭載
     /// 環境）を返した場合に終了コード 0 でスキップすることを明示的に
     /// 許可するフラグ。既定は `false`（非 0 終了）。`docs/perf/`
@@ -164,7 +188,22 @@ struct Args {
     allow_missing_driver: bool,
 }
 
-const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N] [--allow-missing-driver]";
+const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--allow-missing-driver]";
+
+/// `--b-pad` は動的 SMEM 診断変種（`render_wmma_tf32_staged_dyn`。イシュー
+/// #742）でのみ意味を持つ TF32 staged 固有のパラメータのため、
+/// `--path mma_f16` との併用を拒否する（イシュー #743。`.claude/rules/
+/// security.md` A03「外部入力の検証」。無視して静かに no-op にすると、
+/// オペレーターが指定した候補値が計測に反映されない誤計測を fail-closed
+/// に検知できない）。`parse_args` 本体は `std::env::args` を直接読むため
+/// 単体テストから差し替えられない（`Path::parse` と同じ理由）が、この
+/// 純粋な検査ロジックは分離することで直接テストできる。
+fn validate_b_pad_requires_wmma_tf32(b_pad: Option<u32>, path: Option<Path>) -> Result<(), String> {
+    if b_pad.is_some() && path != Some(Path::WmmaTf32) {
+        return Err("--b-pad は --path wmma_tf32 の場合のみ指定できる".to_string());
+    }
+    Ok(())
+}
 
 /// `std::env::args` のみで CLI 引数をパースする（依存追加なし。実装計画
 /// §3 Step 1「CLI 引数を `std::env::args` のみでパースする」）。
@@ -177,6 +216,7 @@ fn parse_args() -> Result<Args, String> {
     let mut iters: usize = 5;
     let mut warmup: usize = 2;
     let mut allow_missing_driver = false;
+    let mut b_pad: Option<u32> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -217,9 +257,18 @@ fn parse_args() -> Result<Args, String> {
             "--allow-missing-driver" => {
                 allow_missing_driver = true;
             }
+            "--b-pad" => {
+                let v = it.next().ok_or("--b-pad には値が必要")?;
+                b_pad = Some(
+                    v.parse::<u32>()
+                        .map_err(|_| format!("--b-pad は正の整数のみ受理する（指定値: '{v}'）"))?,
+                );
+            }
             other => return Err(format!("未知の引数: '{other}'")),
         }
     }
+
+    validate_b_pad_requires_wmma_tf32(b_pad, path)?;
 
     // `--warmup`／`--iters` は usize へ変換できれば無制限に受理していたため、
     // `args.warmup + args.iters`（total_launches 算出）や
@@ -244,6 +293,7 @@ fn parse_args() -> Result<Args, String> {
         warmup,
         total_launches,
         launch_skip,
+        b_pad,
         allow_missing_driver,
     })
 }
@@ -462,20 +512,6 @@ fn main() {
             // ループ（`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）側の
             // `set -o pipefail` と組み合わせて誤計測をループ内で検知
             // させる。
-            if gemm.wmma_tf32_opt_available() {
-                println!("wmma_tf32 opt kernel: AVAILABLE (used for this run's launches).");
-            } else {
-                eprintln!(
-                    "backend-cuda gemm_profile_target: wmma_tf32 opt kernel unavailable ({}); \
-                     aborting instead of falling back to the basic (non-optimized) WMMA(TF32) \
-                     kernel, because ncu results for the fallback kernel would not represent the \
-                     opt-kernel data-reuse characteristics under diagnosis.",
-                    gemm.wmma_tf32_opt_unavailable_reason()
-                        .unwrap_or("unknown reason")
-                );
-                std::process::exit(1);
-            }
-
             let a = rng.fill_vec((m as usize) * (k as usize));
             let b = rng.fill_vec((k as usize) * (n as usize));
             let (a_dev, b_dev) = gemm
@@ -491,32 +527,159 @@ fn main() {
                 .alloc_output_f32(m, n)
                 .expect("wmma_tf32 output allocation must succeed on CUDA-equipped runner");
 
-            // ncu は `--launch-skip <warmup 起動数 + alloc_zeros memset 起動数>
-            // --launch-count <iters>` でこのループ内のカーネル起動番号を
-            // 直接指定してプロファイルする（モジュール冒頭ドキュメンテー
-            // ションコメント「実行手順」参照）。`launch_wmma_tf32` は
-            // 呼び出しごとに内部で `stream.synchronize()` するため
-            // （`gemm.rs::launch_wmma_tf32` 末尾参照）、ここでの追加同期は
-            // 不要。
-            for _ in 0..args.warmup {
-                gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
-                    .expect("wmma_tf32 warmup launch must succeed on CUDA-equipped runner");
+            // `--b-pad` 未指定（既定）は従来どおり本番経路
+            // （`gemm.launch_wmma_tf32`。固定 `WMMA_TF32_STAGED_B_PAD`）を
+            // 計測する。指定時（イシュー #743）は
+            // `render_wmma_tf32_staged_dyn` 経由の動的 SMEM 診断変種を
+            // コンパイル・起動し、SMEM バンクコンフリクト対策候補を ncu で
+            // 実測できるようにする（モジュール冒頭ドキュメンテーション
+            // コメント参照）。
+            if let Some(b_pad) = args.b_pad {
+                let optin_budget = match device.shared_memory_per_block_optin() {
+                    Some(b) => b,
+                    None => {
+                        eprintln!(
+                            "backend-cuda gemm_profile_target: \
+                             CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN unavailable; \
+                             aborting because --b-pad requires the dynamic-SMEM diagnostic \
+                             variant's opt-in budget."
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                let cfg = diagnostics::WmmaTf32StagedKernelConfig {
+                    b_pad,
+                    ..diagnostics::WmmaTf32StagedKernelConfig::default_tf32_staged()
+                };
+                let compiled = match diagnostics::render_wmma_tf32_staged_dyn(&cfg, optin_budget)
+                    .and_then(|rendered| rendered.compile(&device))
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!(
+                            "backend-cuda gemm_profile_target: --b-pad {b_pad} dynamic-SMEM \
+                             variant unavailable ({e}); aborting because the target kernel \
+                             never launched (this is not an environment-adaptive skip)."
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                println!(
+                    "wmma_tf32 staged (dyn, b_pad={b_pad}) kernel: compiled (used for this \
+                     run's launches)."
+                );
+
+                let stream = device.stream();
+                for _ in 0..args.warmup {
+                    compiled
+                        .launch_tf32_staged_dyn(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)
+                        .expect(
+                            "wmma_tf32 staged (dyn) warmup launch must succeed on \
+                             CUDA-equipped runner",
+                        );
+                }
+                let start = Instant::now();
+                for _ in 0..args.iters {
+                    compiled
+                        .launch_tf32_staged_dyn(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)
+                        .expect(
+                            "wmma_tf32 staged (dyn) measured launch must succeed on \
+                             CUDA-equipped runner",
+                        );
+                }
+                let elapsed = start.elapsed().as_secs_f64();
+                let per_iter_secs = elapsed / args.iters as f64;
+                println!(
+                    "wall-clock (wmma_tf32 dyn b_pad={b_pad}, launch-only, {} iters): \
+                     total={elapsed:.6}s per_iter={per_iter_secs:.6}s tflops={:.4} \
+                     (ncu 実測値との突合用の参考値。ncu 実行中は計測区間にプロファイラの \
+                     オーバーヘッドが乗るため単体実行時の数値とは一致しない)",
+                    args.iters,
+                    tflops(args.size, per_iter_secs)
+                );
+            } else {
+                // 実測時に誤ってフォールバック版（基本 WMMA(TF32)）を
+                // プロファイルする事故を防ぐため、opt カーネルの可用性を
+                // 明示する（`cuda_floor_bench.rs` の先例と同じ判断）。
+                //
+                // `CudaGemm::launch_wmma_tf32` は opt カーネル未ロード時に
+                // 基本カーネルへ自動フォールバックし（両方未ロードの場合
+                // のみ `CudaError::WmmaUnavailable` を返す。
+                // `gemm.rs::launch_wmma_tf32` 参照）、本バイナリはこの経路
+                // には依存しない。「単一経路・単一形状のみを計測する」
+                // 契約（モジュール冒頭ドキュメンテーションコメント参照）
+                // 上、opt カーネル不在時に基本カーネルへ黙ってフォール
+                // バックして計測を続けると、診断対象と異なるカーネルの
+                // ncu 結果を正常計測として生成してしまう（PR #637
+                // codex-review 指摘）。
+                //
+                // ここでの終了コードは上の `CudaDevice::new`／
+                // `CudaGemm::new` 失敗時の扱いと揃える: `CudaDevice::new`
+                // の `CudaError::DriverUnavailable` は既定でも非 0 終了と
+                // し（`--allow-missing-driver` を明示指定した場合のみ
+                // opt-in で exit 0 スキップ）、それ以外
+                // （`DriverUnavailable` 以外の `CudaDevice::new` エラー・
+                // `CudaGemm::new`／`CudaMmaGemm::new` 失敗）は常に非 0
+                // 終了する。ここに到達するのは CUDA デバイス・
+                // `CudaGemm::new` 自体は成立した上で opt カーネルの
+                // NVRTC ロードのみが失敗した場合
+                // （`wmma_tf32_opt_unavailable_reason()` が理由を保持
+                // していることからも NVRTC コンパイル失敗等の異常系で
+                // あることが分かる）であり、オペレーターは opt カーネル
+                // をプロファイルする意図でこのバイナリを実機（GPU が
+                // 動く環境）で起動している。この場合に exit 0 で「正常
+                // 終了」に見せると、ncu 実行スクリプト側が失敗を検知
+                // できず基本カーネルの結果を opt カーネルの正常計測と
+                // して記録表へ転記してしまう（PR #637 codex-review 指摘
+                // の「実行手順もこの終了状態を検査しないため誤った
+                // ボトルネック分析に進みうる」の直接原因）。よって非 0
+                // 終了させ、§3.3 の採取ループ
+                // （`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）側の
+                // `set -o pipefail` と組み合わせて誤計測をループ内で
+                // 検知させる。
+                if gemm.wmma_tf32_opt_available() {
+                    println!("wmma_tf32 opt kernel: AVAILABLE (used for this run's launches).");
+                } else {
+                    eprintln!(
+                        "backend-cuda gemm_profile_target: wmma_tf32 opt kernel unavailable \
+                         ({}); aborting instead of falling back to the basic (non-optimized) \
+                         WMMA(TF32) kernel, because ncu results for the fallback kernel would \
+                         not represent the opt-kernel data-reuse characteristics under \
+                         diagnosis.",
+                        gemm.wmma_tf32_opt_unavailable_reason()
+                            .unwrap_or("unknown reason")
+                    );
+                    std::process::exit(1);
+                }
+
+                // ncu は `--launch-skip <warmup 起動数 + alloc_zeros memset
+                // 起動数> --launch-count <iters>` でこのループ内のカーネル
+                // 起動番号を直接指定してプロファイルする（モジュール冒頭
+                // ドキュメンテーションコメント「実行手順」参照）。
+                // `launch_wmma_tf32` は呼び出しごとに内部で
+                // `stream.synchronize()` するため
+                // （`gemm.rs::launch_wmma_tf32` 末尾参照）、ここでの追加
+                // 同期は不要。
+                for _ in 0..args.warmup {
+                    gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                        .expect("wmma_tf32 warmup launch must succeed on CUDA-equipped runner");
+                }
+                let start = Instant::now();
+                for _ in 0..args.iters {
+                    gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+                        .expect("wmma_tf32 measured launch must succeed on CUDA-equipped runner");
+                }
+                let elapsed = start.elapsed().as_secs_f64();
+                let per_iter_secs = elapsed / args.iters as f64;
+                println!(
+                    "wall-clock (wmma_tf32, launch-only, {} iters): total={elapsed:.6}s \
+                     per_iter={per_iter_secs:.6}s tflops={:.4} (ncu 実測値との突合用の参考値。\
+                     ncu 実行中は計測区間にプロファイラのオーバーヘッドが乗るため単体実行時の \
+                     数値とは一致しない)",
+                    args.iters,
+                    tflops(args.size, per_iter_secs)
+                );
             }
-            let start = Instant::now();
-            for _ in 0..args.iters {
-                gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
-                    .expect("wmma_tf32 measured launch must succeed on CUDA-equipped runner");
-            }
-            let elapsed = start.elapsed().as_secs_f64();
-            let per_iter_secs = elapsed / args.iters as f64;
-            println!(
-                "wall-clock (wmma_tf32, launch-only, {} iters): total={elapsed:.6}s \
-                 per_iter={per_iter_secs:.6}s tflops={:.4} (ncu 実測値との突合用の参考値。\
-                 ncu 実行中は計測区間にプロファイラのオーバーヘッドが乗るため単体実行時の \
-                 数値とは一致しない)",
-                args.iters,
-                tflops(args.size, per_iter_secs)
-            );
         }
         Path::MmaF16 => {
             let gemm = match CudaMmaGemm::new(&device) {
@@ -573,7 +736,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{Path, tflops};
+    use super::{Path, tflops, validate_b_pad_requires_wmma_tf32};
 
     // CLI 引数は固定 allowlist との完全一致のみ受理する
     // （`.claude/rules/security.md` A03「シェル呼び出しでユーザー入力を
@@ -607,5 +770,21 @@ mod tests {
         let secs = 1.0;
         let expected = 2.0 * (size as f64).powi(3) / secs / 1e12;
         assert_eq!(tflops(size, secs), expected);
+    }
+
+    // イシュー #743: `--b-pad` は `--path wmma_tf32` 限定（動的 SMEM 診断
+    // 変種は TF32 staged 専用のため）。
+
+    #[test]
+    fn b_pad_without_path_wmma_tf32_is_rejected() {
+        assert!(validate_b_pad_requires_wmma_tf32(Some(72), None).is_err());
+        assert!(validate_b_pad_requires_wmma_tf32(Some(72), Some(Path::MmaF16)).is_err());
+    }
+
+    #[test]
+    fn b_pad_with_path_wmma_tf32_or_absent_is_accepted() {
+        assert!(validate_b_pad_requires_wmma_tf32(Some(72), Some(Path::WmmaTf32)).is_ok());
+        assert!(validate_b_pad_requires_wmma_tf32(None, Some(Path::MmaF16)).is_ok());
+        assert!(validate_b_pad_requires_wmma_tf32(None, None).is_ok());
     }
 }

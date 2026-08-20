@@ -119,18 +119,36 @@ git checkout perf/743-wmma-tf32-staged-smem-padding
 # 1) parity 非後退（数値一致を性能計測より先に確認する）
 cargo test -p backend-cuda --release -- --ignored --nocapture
 
-# 2) bit 一致 + TFLOPS（config 化した a_pad/b_pad の候補を切り替えて計測する
-#    診断コードは本 PR では config フィールド化のみで、実機セッション側で
-#    WmmaTf32StagedKernelConfig { b_pad: 72, ..default_tf32_staged() } を
-#    internal-diagnostics 経由の計測コードから利用する）
+# 2) bit 一致 + TFLOPS（b_pad=68/72 双方を internal-diagnostics 経由の
+#    render_wmma_tf32_staged_dyn 診断変種で計測し突合する。
+#    gemm_wmma_tf32_staged_stages_bench.rs（#742）と同じ
+#    WmmaTf32StagedKernelConfig { b_pad: N, ..default_tf32_staged() }
+#    構築パターンを使う専用計測コードを実機セッション側で書く）
 
-# 3) ncu（メトリクス名は --query-metrics で事前確認する）
+# 3) ncu（メトリクス名は --query-metrics で事前確認する。--b-pad は
+#    gemm_profile_target 側で #743 のために追加した任意引数
+#    〈--path wmma_tf32 限定〉。未指定〈既定〉は本番経路〈b_pad=68 固定〉、
+#    指定時は render_wmma_tf32_staged_dyn 診断変種を b_pad=N でコンパイル・
+#    起動する）
+cargo build -p backend-cuda --example gemm_profile_target --release \
+    --features internal-diagnostics
+
+# 3a) 既定（b_pad=68・本番経路）
 ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
 smsp__inst_executed_op_shared_ld.sum,\
 sm__warps_active.avg.pct_of_peak_sustained_active \
-    cargo run -p backend-cuda --example gemm_profile_target --release
+    ./target/release/examples/gemm_profile_target --path wmma_tf32 --size 4096
+
+# 3b) 候補（b_pad=72・動的 SMEM 診断変種）
+ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
+l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
+smsp__inst_executed_op_shared_ld.sum,\
+sm__warps_active.avg.pct_of_peak_sustained_active \
+    ./target/release/examples/gemm_profile_target --path wmma_tf32 --size 4096 \
+    --b-pad 72
 
 # 4) 採用時: REQ-8 下限余裕の確認
 cargo run -p backend-cuda --example cuda_floor_bench --release
