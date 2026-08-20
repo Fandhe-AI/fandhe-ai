@@ -61,32 +61,41 @@ CPU（自作 vs `matrixmultiply`・`gemm` crate）・Metal（自作 vs MLX ≈ P
   ないため、CI（`deps-forbidden` ジョブ）へ検査対象として追加した
   （`.github/workflows/ci.yml` の該当ステップ参照）
 
-**未確定の残課題（イシュー #755 review 指摘・ユーザー承認が必要）**: 上記
-「本体 workspace の統制範囲外＝ユーザー承認対象の依存追加に当たらない」という
-スコープ解釈自体は、`deps-policy.md`・`CLAUDE.md`「依存の追加・更新…はユーザー
-承認必須」の文言がルート workspace 限定と明記していないため、実装 Agent 自身の
-推論による判断である。判断の是非（設計自体の妥当性）と、この解釈をユーザーが
-追認するかは別軸であり、**本記録の時点ではユーザーの明示的な追認を得ていない**。
-`.claude/rules/out-of-scope-tracking.md` に従い、この適用範囲確認自体を自動運転下で
-拡大解釈しない（新たな独立パッケージの追加や依存追加は本判断の追認前に行わない）
-方針とし、ユーザー承認取得は別途対応する。
+**スコープ解釈のユーザー承認（2026-08-20 取得済み）**: 上記「本体 workspace の
+統制範囲外＝ユーザー承認対象の依存追加に当たらない」というスコープ解釈自体は、
+実装 Agent 自身の推論による判断であったため当初はユーザーの明示的な追認を
+得ていなかったが、2026-08-20 にユーザーが以下の条件付きで承認した:
 
-### ライセンス監査（cargo tree 実測。イシュー #755 review 指摘対応）
+1. 本体 workspace（ルート `Cargo.toml` / `Cargo.lock`）への `matrixmultiply`・
+   `gemm` crate の混入は引き続き禁止する
+2. ライセンス監査（`cargo-deny` 相当）を CI に組み込む（本節「ライセンス監査」
+   参照。従来の手動実行から `.github/workflows/ci.yml`
+   `deps-forbidden` ジョブへのステップ追加へ切り替えた）
+
+以後、本パッケージへの依存追加・変更は上記条件（本体 workspace 非混入・
+CI ライセンス監査の維持）を満たす限りにおいて許容される。
+
+### ライセンス監査（専用 deny.toml + CI 組み込み。イシュー #755 review 指摘対応）
 
 本体 `deny.toml` は `cargo-deny` の走査対象をルート workspace の `Cargo.lock` に
 限るため、本パッケージ配下の推移的依存（`gemm-f32`/`f64`/`c32`/`c64`/`f16`・
 `pulp`・`dyn-stack` 等）は本体 CI のライセンス監査の対象外になる。この監査欠落を
-埋めるため、本パッケージの `Cargo.lock`（`cargo metadata --locked` 実測、104
-パッケージ相当の推移的依存を含む本体側と同水準の網羅性）に対し、本体
-`deny.toml` の `[licenses] allow` 一覧（MIT・Apache-2.0・Apache-2.0 WITH
-LLVM-exception・ISC・Zlib・Unicode-3.0・Unlicense・BSD-2-Clause）と同一の許可
-リストで `cargo deny check licenses sources` を手動実行し、`licenses ok, sources
-ok` を確認した（2026-08-20 実測。MPL-2.0 等コピーレフトの混入なし）。本パッケージ
-自身の `Cargo.toml` に `license = "MIT OR Apache-2.0"`（ルート `Cargo.toml` の
-`[workspace.package] license` と同一値）を明示し `unlicensed` 警告も解消した。
+埋めるため、本パッケージ直下に専用の `scripts/bench/oss-gemm-compare/deny.toml`
+を新設した。`[licenses] allow` 一覧は本体 `deny.toml` と同一
+（MIT・Apache-2.0・Apache-2.0 WITH LLVM-exception・ISC・Zlib・Unicode-3.0・
+Unlicense・BSD-2-Clause）、`[sources]` も crates.io 限定（`unknown-registry` /
+`unknown-git` を `deny`）で本体と同一方針とする。本パッケージ自身の `Cargo.toml`
+に `license = "MIT OR Apache-2.0"`（ルート `Cargo.toml` の `[workspace.package]
+license` と同一値）を明示し `unlicensed` 警告も解消済み。
 
-この監査は手動実行であり CI に組み込んでいない（本パッケージを CI の走査対象へ
-恒常的に含めるかどうかは、上記スコープ解釈のユーザー承認と併せて検討する）。
+**CI 組み込み（2026-08-20・ユーザー承認条件 (2) 対応）**: `.github/workflows/ci.yml`
+の `deps-forbidden` ジョブに「OSS 直接比較ハーネスのライセンス監査」ステップを
+追加し、`cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml
+--locked check licenses sources` を毎 CI 実行で走らせる（既存ジョブへのステップ
+追加でありジョブ追加ではないため ruleset の required contexts 更新は不要。
+`.claude/rules/ci.md`）。ローカル実測（`cargo metadata --locked` 実測、104
+パッケージ相当の推移的依存を含む本体側と同水準の網羅性）でも `licenses ok,
+sources ok` を確認済み（2026-08-20 実測。MPL-2.0 等コピーレフトの混入なし）。
 
 ### CLI 引数の扱い（OWASP A03）
 

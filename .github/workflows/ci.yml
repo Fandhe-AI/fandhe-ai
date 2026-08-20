@@ -466,7 +466,10 @@ jobs:
     # public 化に伴うホステッドランナー移行（#457 Phase 2・イシュー #466）。
     runs-on: ubuntu-latest
     # cargo tree 検査（cargo フェッチ・解決を伴う）を追加したため 10 → 15 に引き上げる。
-    timeout-minutes: 15
+    # OSS 直接比較ハーネスの cargo-deny 監査ステップ（`cargo install cargo-deny` の
+    # ソースビルドを含む）を追加したため 15 → 25 に引き上げる（イシュー #755
+    # review 対応・ユーザー承認条件「ライセンス監査を CI に組み込む」）。
+    timeout-minutes: 25
     steps:
       - name: Checkout
         # persist-credentials: false（fmt ジョブと同一方針）。
@@ -535,6 +538,31 @@ jobs:
       # ruleset の required contexts 更新も不要。`.claude/rules/ci.md`）。
       - name: OSS 直接比較ハーネスの依存禁止検査
         run: bash scripts/check-forbidden-deps.sh lock scripts/bench/oss-gemm-compare/Cargo.lock
+
+      # OSS 直接比較ハーネス（scripts/bench/oss-gemm-compare/）専用のライセンス監査
+      # （イシュー #755 review 指摘対応・ユーザー承認条件「ライセンス監査を CI に
+      # 組み込む」の実体）。本パッケージは本体 workspace の member ではないため
+      # ルート `deny.toml`（rust-ci ジョブ経由の cargo-deny）の走査対象に含まれず、
+      # 従来は手動実行のみだった（`docs/oss-comparison-harness-decision.md`）。
+      # ここでは本パッケージ専用の `deny.toml`（licenses・sources のみ。同ファイル
+      # 冒頭コメント参照）を対象に `cargo deny check licenses sources` を実行する。
+      - name: cargo-deny バイナリのキャッシュ
+        if: steps.detect.outputs.has_cargo == 'true'
+        id: cargo-deny-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-bin-${{ runner.os }}
+
+      - name: Ensure cargo-deny（未導入時のみソースビルド。lefthook/Makefile と同一の冪等パターン）
+        if: steps.detect.outputs.has_cargo == 'true' && steps.cargo-deny-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked
+
+      - name: OSS 直接比較ハーネスのライセンス監査
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml \
+            --locked check licenses sources
 
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。

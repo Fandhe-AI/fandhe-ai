@@ -75,6 +75,16 @@ const ABS_TOL: f32 = 1e-5;
 /// カンマ区切りの正整数列を受理する。パース失敗・0 以下の値は即座に
 /// エラーメッセージを表示して非 0 終了する（fail-closed。シェル展開・eval は
 /// 一切使わない）。
+///
+/// 各 `size` について `size * size` 要素の `Vec<f32>`（`main` の `a`/`b`/`c_*`
+/// 系バッファ）を確保するため、`size * size` がバイト換算（`* 4`）を含め
+/// `usize` の範囲に収まることを [`checked_mul`](usize::checked_mul) で明示検証する
+/// （レビュー指摘対応。イシュー #755）。オーバーフローする巨大値は、
+/// `unsafe` ブロック（`matrixmultiply::sgemm`・`gemm::gemm` 呼び出し）が
+/// 前提とする「`size*size` 要素の連続確保」という SAFETY コメントの前提が
+/// 実際のアロケーションで破綻しうる（`Vec` 確保自体は容量超過で panic するため
+/// 未定義動作には至らないが、意図しない巨大確保・panic による異常終了を
+/// 事前に型付きエラーで防ぐ。fail-closed）。
 fn parse_sizes() -> Vec<usize> {
     let args: Vec<String> = std::env::args().collect();
     let sizes_arg = args
@@ -89,7 +99,13 @@ fn parse_sizes() -> Vec<usize> {
     let mut sizes = Vec::new();
     for token in raw.split(',') {
         match token.trim().parse::<usize>() {
-            Ok(n) if n > 0 => sizes.push(n),
+            Ok(n) if n > 0 => match validate_size_no_overflow(n) {
+                Ok(()) => sizes.push(n),
+                Err(msg) => {
+                    eprintln!("error: --sizes の値 \"{token}\" が不正: {msg}");
+                    std::process::exit(2);
+                }
+            },
             _ => {
                 eprintln!(
                     "error: --sizes は正整数のカンマ区切りで指定する（不正な値: \"{token}\"）"
@@ -103,6 +119,24 @@ fn parse_sizes() -> Vec<usize> {
         std::process::exit(2);
     }
     sizes
+}
+
+/// `size` から確保する `size * size` 要素の `Vec<f32>`（4 バイト要素）が
+/// `usize` 範囲でオーバーフローしないことを検証する。
+///
+/// `main` の各行列バッファ（`a`・`b`・`c_ref`・`c_mm`・`c_gemm`・`c_buf`）は
+/// すべて `size * size` 要素で確保するため、要素数計算（`size * size`）と
+/// バイト数換算（`* 4`）の両方を [`usize::checked_mul`] で検証する
+/// （`unsafe` ブロックの SAFETY コメントが前提とする
+/// 「size*size 要素の連続確保」を常に成立させるための事前検証）。
+fn validate_size_no_overflow(size: usize) -> Result<(), String> {
+    let elems = size
+        .checked_mul(size)
+        .ok_or_else(|| format!("size={size} は size*size で usize をオーバーフローする"))?;
+    elems
+        .checked_mul(std::mem::size_of::<f32>())
+        .ok_or_else(|| format!("size={size} は size*size*4 バイトで usize をオーバーフローする"))?;
+    Ok(())
 }
 
 /// `--strict-compare` の指定有無を返す（レビュー指摘対応。イシュー #755）。
@@ -137,6 +171,26 @@ fn git_commit_short() -> String {
 
 /// 統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）で 2 つの C 行列を照合する。
 /// 不一致要素があれば、最初に見つかった不一致の情報を含むメッセージを返す。
+///
+/// 判定式は `crates/backend-cpu/src/parity.rs::compare` と同方針に揃える
+/// （レビュー指摘対応。イシュー #755）:
+///
+/// - 合格条件を肯定形（`pass = rel < REL_TOL || abs < ABS_TOL`）で先に判定し、
+///   その否定を fail とする。旧実装は否定形（`rel >= REL_TOL && abs >= ABS_TOL`
+///   を fail とする）を直接書いており、`reference`/`candidate` に NaN・Inf が
+///   混入すると `rel`/`abs` も NaN になり、IEEE 754 上 `>=` 比較は NaN を含むと
+///   常に false になるため両辺 false（fail 条件不成立）＝誤って「合格」と
+///   判定してしまう欠陥があった（parity.rs 同コメント・Cursor Bugbot 指摘・
+///   PR #239 で判明した既知のバグパターン）。肯定形の `pass` 判定なら `rel < TOL`
+///   は NaN で必ず false になり `pass` も false（＝ fail）に倒れるため
+///   fail-closed になる
+/// - 相対誤差の分母（scale）を `reference` のみでなく
+///   `max(|reference|, |candidate|, 1e-12)` とする（parity.rs と同一）。
+///   `reference` が 0 近傍のとき分母を `reference` 単独に頼ると、`candidate`
+///   側の実際のスケールを無視した過大な相対誤差になりうる。`abs_diff` が
+///   `ABS_TOL` 未満なら（0 近傍の絶対誤差救済）相対誤差の値によらず合格になる
+///   点は従来どおり（このため実質的な挙動差は「NaN/Inf を fail-closed で
+///   検出できるようになった」点が主）
 fn compare_outputs(reference: &[f32], candidate: &[f32], label: &str) -> Result<(), String> {
     if reference.len() != candidate.len() {
         return Err(format!(
@@ -147,8 +201,10 @@ fn compare_outputs(reference: &[f32], candidate: &[f32], label: &str) -> Result<
     }
     for (i, (&r, &c)) in reference.iter().zip(candidate.iter()).enumerate() {
         let abs_diff = (r - c).abs();
-        let rel_diff = abs_diff / r.abs().max(f32::EPSILON);
-        if rel_diff >= REL_TOL && abs_diff >= ABS_TOL {
+        let scale = r.abs().max(c.abs()).max(1e-12);
+        let rel_diff = abs_diff / scale;
+        let pass = rel_diff < REL_TOL || abs_diff < ABS_TOL;
+        if !pass {
             return Err(format!(
                 "{label}: index={i} reference={r} candidate={c} abs_diff={abs_diff} rel_diff={rel_diff}"
             ));
