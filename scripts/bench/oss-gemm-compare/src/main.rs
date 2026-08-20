@@ -19,7 +19,7 @@
 //! 存在しない）で計測する。詳細な境界定義・Metal 側（MLX・PyTorch MPS）の対応する
 //! 2 境界の定義は `docs/perf/oss-gemm-comparison-baseline.md` を参照。
 //!
-//! ## 出力突合（既定は非 fatal・`--strict-compare` で fail-closed に切替）
+//! ## 出力突合（既定で fail-closed。レビュー指摘対応・イシュー #755）
 //!
 //! 自作実装（`gemm_blis_parallel`）の出力 C を基準に、matrixmultiply・gemm crate の
 //! 出力 C を統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
@@ -30,16 +30,22 @@
 //! 実装との比較のため同ルールの直接の適用対象ではないが、許容誤差の数値自体は
 //! 予防的に据え置く）。
 //!
+//! 複合判定を超える不一致は常にエラーとし、既定で非 0 終了する（旧
+//! `--strict-compare` opt-in 方式は fail-open であり P1/P2 レビュー指摘対応として
+//! 撤回した。性能値の正しさを検証しない既定挙動は許容しない）。全サイズの
+//! 計測完了後に `had_mismatch` を検査し、不一致が 1 件でもあれば非 0 終了する
+//! （各レコードの `output_match`／`mismatch_detail` フィールドへの記録・JSON Lines
+//! 出力自体は全サイズぶん先に完了させるため、性能値そのものは exit code に
+//! かかわらず後段で参照できる）。
+//!
 //! `docs/oss-comparison-harness-decision.md`「出力突合とその限界」節に実測記録の
 //! とおり、K が大きいサイズ（1024〜4096）では OSS 実装間の縮約順序差に由来する
 //! 丸め誤差の蓄積により、複合判定をわずかに超える不一致が実装バグなしに発生しうる
-//! ことが分かっている。本ハーネスの主目的（#735 各 Phase 完了時の素朴な再実行による
-//! 性能再計測）を既定引数のまま成立させるため、既定では不一致を fatal にしない:
-//! 各レコードの `output_match` フィールドに突合結果を記録し（不一致時は
-//! `mismatch_detail` に詳細を併記）、標準エラー出力に警告を出したうえで性能計測は
-//! 継続し、プロセスは 0 終了する。`--strict-compare` を指定した場合のみ、不一致を
-//! 検出した時点で非 0 終了する（性能比較の前提となる正しさの検証自体は変更しない。
-//! 単に「検証結果をどう扱うか」を既定と opt-in で分離する。REQ-8）。
+//! ことが分かっている。これは実装バグではないが、複合判定の許容誤差自体を緩和
+//! すべき理由にもならない（coding-rust.md）。当該既知の不一致を理由に fail-open を
+//! 既定にはせず、大サイズでの非 0 終了は「性能値と併せて既知の限界を確認する」
+//! 運用（`--sizes` で対象を絞る、`mismatch_detail` を確認したうえで許容する等）に
+//! 委ねる。
 //!
 //! ## スレッド構成（比較の公平性軸）
 //!
@@ -168,17 +174,6 @@ fn validate_size_no_overflow(size: usize) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// `--strict-compare` の指定有無を返す（レビュー指摘対応。イシュー #755）。
-///
-/// 指定時は出力突合 NG を検出した時点で非 0 終了する（従来の既定挙動）。
-/// 未指定（既定）では、K が大きいサイズで実装バグなしに複合判定をわずかに
-/// 超えうる既知の限界（`docs/oss-comparison-harness-decision.md` 参照）により
-/// 本ハーネスの主目的（既定引数での素朴な再実行）が阻害されないよう、
-/// 突合結果を JSON Lines の情報項目として記録するに留め非 fatal とする。
-fn parse_strict_compare() -> bool {
-    std::env::args().any(|a| a == "--strict-compare")
 }
 
 fn tflops(size: usize, median_secs: f64) -> f64 {
@@ -327,7 +322,6 @@ fn chrono_like_utc_date() -> String {
 /// （レビュー指摘対応。イシュー #755）。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sizes = parse_sizes();
-    let strict_compare = parse_strict_compare();
     let commit = git_commit_short();
     let hw = format!(
         "{}/{} ({} logical cores)",
@@ -338,7 +332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = MeasurementConfig::default();
 
     eprintln!(
-        "oss-gemm-compare: commit={commit} hw={hw} rayon_threads={} strict_compare={strict_compare}",
+        "oss-gemm-compare: commit={commit} hw={hw} rayon_threads={}",
         rayon::current_num_threads()
     );
 
@@ -385,8 +379,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let compare_mm = compare_outputs(&c_ref, &c_mm, "matrixmultiply");
         if let Err(msg) = &compare_mm {
-            // 既定では警告に留める（既知の限界。上記モジュールドキュメント参照）。
-            // `--strict-compare` 指定時のみ非 0 終了の対象として集計する。
+            // 全サイズの JSON Lines 出力完了後にまとめて非 0 終了するため、
+            // ここでは警告出力と集計のみ行う（上記モジュールドキュメント参照）。
             eprintln!("::warning::size={size} 出力不一致（matrixmultiply）: {msg}");
             had_mismatch = true;
         }
@@ -554,18 +548,128 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if had_mismatch {
+        // 既定で fail-closed（レビュー指摘対応。イシュー #755）: 出力不一致を
+        // 検出したら、全サイズの JSON Lines 出力を終えたうえで必ず非 0 終了する。
+        // 性能値そのものは標準出力に既に出力済みのため、`mismatch_detail` を
+        // 確認したうえで利用側が判断できる。
         eprintln!(
-            "::warning::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。\
+            "::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。\
              各 JSON Lines レコードの output_match / mismatch_detail を参照。\
              既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。"
         );
-        if strict_compare {
-            eprintln!(
-                "::error::--strict-compare 指定のため出力突合 NG を fatal として扱い非 0 終了する"
-            );
-            std::process::exit(1);
-        }
+        std::process::exit(1);
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    //! `main` が `matrixmultiply::sgemm`／`gemm::gemm` へ渡す row-major stride が
+    //! `A * B`（`B * A` ではない）を計算する契約であることを、非対称（非可換）な
+    //! 小サイズ行列で機械的に証明する回帰テスト（レビュー指摘対応。イシュー #755）。
+    //!
+    //! `A * B != B * A` となるよう対角優位でない非対称値を用いる。3x3 の naive
+    //! row-major 三重ループで基準値を計算し、それぞれの unsafe 呼び出しの結果と
+    //! 完全一致（f32 の決定的な小規模積のため丸め差を考慮する必要はない）することを
+    //! 確認する。
+
+    const SIZE: usize = 3;
+    // 非対称（A*B と B*A が異なる値になる）行列。`main` 本体のシード値とは無関係の
+    // 固定値でよい（stride 契約の検証のみが目的）。
+    const A: [f32; 9] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0];
+    const B: [f32; 9] = [9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+
+    /// row-major 三重ループによる素朴な `lhs * rhs`（基準実装）。
+    fn naive_matmul(lhs: &[f32], rhs: &[f32]) -> [f32; SIZE * SIZE] {
+        let mut out = [0.0f32; SIZE * SIZE];
+        for i in 0..SIZE {
+            for j in 0..SIZE {
+                let mut acc = 0.0f32;
+                for k in 0..SIZE {
+                    acc += lhs[i * SIZE + k] * rhs[k * SIZE + j];
+                }
+                out[i * SIZE + j] = acc;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn naive_a_times_b_differs_from_b_times_a() {
+        // 本テストの前提（A・B が非可換であること）自体が成立していることを
+        // 先に確認する。成立しなければ以降の比較に意味がない。
+        assert_ne!(naive_matmul(&A, &B), naive_matmul(&B, &A));
+    }
+
+    #[test]
+    fn matrixmultiply_sgemm_computes_a_times_b() {
+        let expected = naive_matmul(&A, &B);
+        let mut c = [0.0f32; SIZE * SIZE];
+        // SAFETY: a・b・c は全て SIZE*SIZE 要素の連続配列で、row-major
+        // （rs=SIZE・cs=1）。`main` 本体の呼び出しと同一 stride 規約。
+        unsafe {
+            matrixmultiply::sgemm(
+                SIZE,
+                SIZE,
+                SIZE,
+                1.0,
+                A.as_ptr(),
+                SIZE as isize,
+                1,
+                B.as_ptr(),
+                SIZE as isize,
+                1,
+                0.0,
+                c.as_mut_ptr(),
+                SIZE as isize,
+                1,
+            );
+        }
+        assert_eq!(
+            c, expected,
+            "matrixmultiply::sgemm は A*B を計算するはずが一致しない"
+        );
+    }
+
+    #[test]
+    fn gemm_crate_computes_a_times_b_not_b_times_a() {
+        let expected_ab = naive_matmul(&A, &B);
+        let expected_ba = naive_matmul(&B, &A);
+        let mut c = [0.0f32; SIZE * SIZE];
+        // SAFETY: `main` 本体の gemm::gemm 呼び出しと同一 stride 規約
+        // （dst_cs=1・dst_rs=SIZE・lhs_cs=1・lhs_rs=SIZE・rhs_cs=1・rhs_rs=SIZE）。
+        // a・b・c は全て SIZE*SIZE 要素の連続配列。
+        unsafe {
+            gemm::gemm(
+                SIZE,
+                SIZE,
+                SIZE,
+                c.as_mut_ptr(),
+                1,
+                SIZE as isize,
+                false,
+                A.as_ptr(),
+                1,
+                SIZE as isize,
+                B.as_ptr(),
+                1,
+                SIZE as isize,
+                0.0f32,
+                1.0f32,
+                false,
+                false,
+                false,
+                gemm::Parallelism::None,
+            );
+        }
+        assert_eq!(
+            c, expected_ab,
+            "gemm::gemm へ渡す stride は A*B を計算する契約のはずが一致しない（B*A 疑義の再現確認）"
+        );
+        assert_ne!(
+            c, expected_ba,
+            "gemm::gemm の結果が B*A と一致した（レビュー指摘の再現。stride 修正が必要）"
+        );
+    }
 }
