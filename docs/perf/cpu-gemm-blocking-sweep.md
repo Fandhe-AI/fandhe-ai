@@ -289,3 +289,25 @@ A/B 比較するハーネスを `crates/backend-cpu/src/gemm_blis/mod.rs` へ再
 （4096 で改善・512〜2048 で劣化 5% 以内）を実機再確認する。
 
 REQ-8 下限値・数値一致許容誤差は本イシューでも一切変更しない。
+
+## §8 #753 引き継ぎ状況（実装済み・実機計測待ち）
+
+イシュー #753「ブロッキングの実行時キャッシュ検出（sysctl）と 2 次元タイルジョブ分配」で
+実装した内容と状況を記録する。詳細な設計判断・算出式の根拠は
+`docs/perf/cpu-gemm-runtime-cache-detect.md` を参照。
+
+- **実装済み**: `sysctl`（`hw.perflevel0.l1dcachesize`／`l2cachesize`）実測値からの
+  MC/KC/NC 算出（`crates/backend-cpu/src/gemm_blis/cache_params.rs`）・タイル境界に整列した
+  2 次元寄りの行範囲分配（`crates/backend-cpu/src/gemm_blis/partition.rs`）・両者を組み合わせた
+  実機 A/B 計測ハーネス（`crates/backend-cpu/src/gemm_blis/mod.rs` の
+  `runtime_cache_detect_and_2d_partition_ab_median_throughput`。`#[ignore]`）
+- **未実施**: Apple M4 Max 実機での A/B 計測（受け入れ条件 2）・本番 3 公開関数
+  （`gemm_blis`／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）への結線判断
+- **本番未結線の理由**: #750・#758 と同型の「実装は入れるが実機ゲート未通過のうちは本番結線
+  しない」判断（本セッション環境が Linux x86_64 で M4 Max 実機に到達不能なため）。§7 の
+  機種判定方式（識別子未記録で撤去）とは異なり、本実装は機種判定を行わない算出式方式のため
+  同じ理由での撤去リスクはない（詳細は `cpu-gemm-runtime-cache-detect.md` 参照）
+- **再計測手順**: §(vii) と同じ位置づけで、実機セッションで
+  `cargo test -p backend-cpu --release -- --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
+  を実行し、`default`／`detected`／`2d-partition` の中央値を dim ∈ {512, 1024, 2048, 4096} で
+  比較・記録する
