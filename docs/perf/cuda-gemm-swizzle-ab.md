@@ -22,21 +22,37 @@ N を先に全走査してから次の M グループへ移る順序へ並べ替
 
 ## 2. 状態: 採用（サイズ条件付き結線済み。イシュー #775）
 
-**2026-08-20、DGX Spark GB10 実機で再計測を実施**（イシュー #775。5 回計測中央値・
-`gemm_mma_swizzle_bench --features internal-diagnostics`）。4096 は base 34.4089 → swizzle(動的幅 g8)
-54.3055 TFLOPS（×1.578）の改善が安定再現する一方、512/1024/2048 は ×0.979〜0.992（-0.8〜-2.1% の微減〜
-中立）だった。
+**出典（承認記録の一次確認）**: イシュー #775 は GitHub アカウント `aLiz-Nancy`（本リポジトリのユーザー
+アカウント）が起票した（`gh issue view 775 --json author,body` で 2026-08-21 実装セッションが実測確認）。
+Issue 本文に記載の A/B 実測表（DGX Spark GB10・sm_121・5 回計測中央値・`gemm_mma_swizzle_bench
+--features internal-diagnostics`。2026-08-20）は以下のとおり（下記「サイズ条件付き適用の実装」節の閾値
+2048 タイルはこの実測表から導出）:
 
-**採用基準の改訂（2026-08-20・イシュー #775・ユーザー起票の受け入れ条件が承認記録）**: 下記「4. 判断基準」
-の旧基準（size ∈ {2048, 4096} 両方の中央値 TFLOPS 改善）は 2048 が字義上未達のままだが、イシュー #775 の
-Issue 本文がユーザーアカウント（aLiz-Nancy）起票で明示した受け入れ条件（4096 級で適用・512〜2048 は劣化
-5% 以内の非後退ガードレール）自体を、**サイズ条件付き適用という改訂後の採用基準**として扱う（`.claude/
-rules/coding-rust.md`／`.claude/rules/security.md` の「性能採用基準の変更はユーザー承認必須」に対する承認
-記録に相当）。#758 差し戻し理由（下記「以下は #758 時点までの経緯」参照）3 点のうち、(a) 採用基準の無承認
-読み替えはこの改訂を明記することで、(c) `select_swizzle_group_width` の CI 恒久検査が依拠する SM 数入力は
-`gemm_mma.rs::CudaMmaGemm::new` が `device.multiprocessor_count()` の実測値を動的に使う（ハードコード値へ
-依存しない）ことで、それぞれ解消した。(b) 結線前必須の確認（レジスタスピル・bit 一致再検証・parity 非後退
-再検証）は本 PR の実機検証手順（§3・実装計画 §4）で実施する。
+| size (M=N=K) | base TFLOPS | swizzle(動的幅g8) TFLOPS | 比 |
+|---|---|---|---|
+| 512 | 14.8866 | 14.5762 | 0.979 |
+| 1024 | 33.5042 | 33.1729 | 0.990 |
+| 2048 | 48.3496 | 47.9694 | 0.992 |
+| 4096 | 34.4089 | 54.3055 | 1.578 |
+
+**採用基準の改訂（2026-08-20 実測・イシュー #775 起票時点でユーザー自身が明示した受け入れ条件が承認記録）**:
+下記「4. 判断基準」の旧基準（size ∈ {2048, 4096} 両方の中央値 TFLOPS 改善）は 2048 が字義上未達のままだが、
+イシュー #775 の受け入れ条件（4096 級で適用・512〜2048 は劣化 5% 以内の非後退ガードレール）自体を、
+**サイズ条件付き適用という改訂後の採用基準**として扱う（`.claude/rules/coding-rust.md`／`.claude/
+rules/security.md` の「性能採用基準の変更はユーザー承認必須」に対する承認記録に相当）。#758 差し戻し理由
+（下記「以下は #758 時点までの経緯」参照）3 点のうち、(a) 採用基準の無承認読み替えはこの改訂を明記する
+ことで、(c) `select_swizzle_group_width` の CI 恒久検査が依拠する SM 数入力は `gemm_mma.rs::CudaMmaGemm::
+new` が `device.multiprocessor_count()` の実測値を動的に使う（ハードコード値へ依存しない）ことで、それぞれ
+解消した。
+
+**(b) 結線前必須の確認は本 PR 時点で未実施**: レジスタスピル確認・`CudaMmaGemm::new` 自身での bit 一致
+実機再検証・parity 非後退実機再検証・`cuda_floor_bench` 実機再計測は、本 PR の実装セッションが NVRTC・
+CUDA 実機非搭載の環境で作業したため**未実施**（下記「§3 計測手順」「§6.1 結線後の検証」参照）。ホスト側
+検証（`cargo fmt`/`clippy`/`test --workspace --all-features`・`swizzle.rs` の境界値ユニットテスト・
+`git diff origin/main -- tests/parity_nonregression.rs tests/common/parity_baseline` の無差分確認）は
+実施済みで全て pass しているが、これは GB10 実機での bit 一致・parity・レジスタスピル・性能の実機検証を
+代替しない。GB10 実機到達可能なセッションでこれらを実行し、本ドキュメントを更新したうえでマージ判断を
+行うこと。
 
 **サイズ条件付き適用の実装**: `crates/backend-cuda/src/swizzle.rs::should_apply_swizzle`（総ブロックタイル
 数 `num_m_blocks * num_n_blocks >= 2048`。4096 実測点〈2048 タイル〉以上のみ適用し、2048 実測点〈512
@@ -234,14 +250,14 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
 
 ### 6.1 2026-08-20 実測（イシュー #775・サイズ条件付き結線の根拠）
 
-**出典**: イシュー #775 記載の GB10 実機再計測（2026-08-20。DGX Spark GB10・sm_121・5 回計測中央値・
-`gemm_mma_swizzle_bench --features internal-diagnostics`）。
+**出典**: イシュー #775 Issue 本文記載の GB10 実機 A/B 計測（2026-08-20。DGX Spark GB10・sm_121・5 回計測
+中央値・`gemm_mma_swizzle_bench --features internal-diagnostics`。§2 の表と同一データ）。
 
 | size (M=N=K) | base TFLOPS | swizzle (動的幅 g8) TFLOPS | 比 |
 |---|---|---|---|
-| 512 | — | — | ×0.979〜0.992 |
-| 1024 | — | — | ×0.979〜0.992 |
-| 2048 | — | — | ×0.979〜0.992 |
+| 512 | 14.8866 | 14.5762 | ×0.979 |
+| 1024 | 33.5042 | 33.1729 | ×0.990 |
+| 2048 | 48.3496 | 47.9694 | ×0.992 |
 | 4096 | 34.4089 | 54.3055 | ×1.578 |
 
 4096（総ブロックタイル数 2048）の改善が §6（2026-08-19 実測）と同水準（×1.578 vs ×1.5957）で安定再現し、
@@ -250,13 +266,19 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
 2048）を確定し、`swizzle.rs::should_apply_swizzle`／`gemm_mma.rs::CudaMmaGemm::new`／`launch_f16` へ本番
 結線した（§2 参照）。
 
-**結線後の検証**（本 PR で実施。実施できなかった項目は本 PR の実装エージェント報告を参照）:
+**結線後の検証: 本 PR 時点では未実施（§2「(b) 結線前必須の確認」参照）**。本 PR の実装セッションは
+NVRTC・CUDA 実機非搭載の環境で作業したため、下記コマンドはいずれも実行できていない。ホスト側検証
+（`cargo fmt`/`clippy`/`test --workspace --all-features`・`swizzle.rs` の境界値ユニットテスト・
+`parity_nonregression.rs`／`tests/common/parity_baseline` の無差分確認）は実施し全て pass しているが、
+下記の実機検証を代替しない。GB10 実機到達可能なセッションで以下を実行し、結果をこの節へ追記すること:
 
 - `cargo test -p backend-cuda --lib --features internal-diagnostics -- --ignored --nocapture
   mma_f16_swizzle_variant_matches_base_bit_exact_output`（`CudaMmaGemm::new`〈本番既定〉自身の bit 一致
   ——base 選択時〈閾値未満形状〉・swizzle 選択時〈閾値以上形状。m=n=4096, k=32〉の両方——を検証する版。
   `gemm_mma.rs` 参照）
 - `cargo test -p backend-cuda --test parity_nonregression -- --ignored`（結線後の parity 非後退確認）
+- レジスタスピル確認（§3「レジスタスピル確認」節の手順。base／swizzle 変種間でレジスタ数・local memory
+  使用量に有意差がないことを確認する）
 - `cargo run -p backend-cuda --release --example cuda_floor_bench`（5 回中央値。起動時診断に
   `mma_f16 kernel: threadblock swizzle variant compiled (group_width=..., size-conditional; ...)` と
   各判定対象サイズの `swizzle_applies=...` が出力されることを確認する）
@@ -345,6 +367,10 @@ git diff origin/main -- crates/backend-cuda/src/ops.rs crates/backend-cuda/src/g
 sm_count_28_to_g8` テスト追加。§2 参照）が未取り込みの間は非空差分として現れる。これは #741 自身が
 `swizzle.rs` を変更したことを意味しない（#741 のコミット自体は本ファイルに触れていない）。#740（PR #758）が
 main へマージされた後にこのチェックを実行すれば、`origin/main` 自体に同変更が含まれるため差分は再び空になる。
+
+**追記（イシュー #775 時点）**: イシュー #775 が `swizzle.rs`（`should_apply_swizzle` 追加等）を変更した
+ため、#775 マージ後は本チェックが再び非空差分を示す。これも上記と同型の一時的な非対称であり、#741 自身が
+`swizzle.rs` を変更したことを意味しない。
 
 ### 7.6 実測結果
 

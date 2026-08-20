@@ -118,11 +118,20 @@ pub(crate) fn validate_mma_grid_bounds(m: u32) -> Result<(), CudaError> {
 /// 同型の起動時診断。`examples/cuda_floor_bench.rs` 参照）。個別呼び出し
 /// で実際に swizzle が適用されるかは
 /// [`swizzle_applies`](Self::swizzle_applies) を使う。
+///
+/// `swizzle_compile_error`: [`new`](Self::new) が SM 数実測に成功した
+/// にもかかわらず swizzle 変種のソース生成・NVRTC コンパイルに失敗した
+/// 場合の理由文字列（`gemm_wmma.rs::CudaWmmaGemm::wmma_f16_opt_error` と
+/// 同型の fail-soft 方針。swizzle は base カーネルの可用性とは独立な
+/// 性能最適化に過ぎないため、この失敗で `new` 全体を `Err` にはしない）。
+/// [`swizzle_unavailable_reason`](Self::swizzle_unavailable_reason) 経由で
+/// 読み取れる。
 pub struct CudaMmaGemm {
     stream: Arc<CudaStream>,
     mma_f16: CudaFunction,
     mma_f16_swizzle: Option<CudaFunction>,
     swizzle_group_width: Option<u32>,
+    swizzle_compile_error: Option<String>,
 }
 
 /// [`check_min_compute_capability`] のゲート検査後、`source` を NVRTC
@@ -190,11 +199,15 @@ impl CudaMmaGemm {
     /// `device.multiprocessor_count()` が実測 SM 数を返せた場合、
     /// [`crate::swizzle::select_swizzle_group_width`]（動的幅選択）で
     /// グルーピング幅を決め、`kernels_mma::mma_f16_source_with_swizzle`
-    /// 変種を追加コンパイルして `mma_f16_swizzle` に保持する。取得できな
-    /// かった場合は変種をコンパイルせず（`mma_f16_swizzle = None`）安全側
-    /// で base カーネルのみを保持する（swizzle は L2 再利用の性能最適化に
-    /// 過ぎず、SM 数不明のまま推測で適用するより非適用側へフォール
-    /// バックする方が安全）。
+    /// 変種を追加コンパイルして `mma_f16_swizzle` に保持する。SM 数を
+    /// 取得できなかった場合、または変種のソース生成・NVRTC コンパイル
+    /// 自体が失敗した場合は、いずれも `new` 全体を `Err` にはせず
+    /// fail-soft に base カーネルのみを保持する（`mma_f16_swizzle =
+    /// None`。swizzle は base カーネルの可用性とは独立な L2 再利用の
+    /// 性能最適化に過ぎないため。`gemm_wmma.rs::CudaWmmaGemm::new` の
+    /// `wmma_f16_opt` 分岐と同型の判断）。コンパイル失敗時の理由は
+    /// [`swizzle_unavailable_reason`](Self::swizzle_unavailable_reason)
+    /// から読める。
     ///
     /// L2 再利用のためのタイル→SM 割り当てスウィズル（イシュー #499）は
     /// **サイズ条件付きで本番結線済み**（イシュー #775。`launch_f16` が
@@ -253,28 +266,42 @@ impl CudaMmaGemm {
 
         let (stream, mma_f16) = compile_mma_f16(device, kernels_mma::mma_f16_source())?;
 
-        // SM 数が実測できた場合のみ swizzle 変種を追加コンパイルする
-        // （安全側フォールバック。構造体ドキュメンテーションコメント
-        // 「mma_f16_swizzle」節参照）。
-        let (mma_f16_swizzle, swizzle_group_width) = match device.multiprocessor_count() {
-            Some(num_sms) => {
-                let group_width = crate::swizzle::select_swizzle_group_width(
-                    num_sms,
-                    kernels_mma::MMA_BM,
-                    kernels_mma::MMA_BN,
-                );
-                let swizzle_src = kernels_mma::mma_f16_source_with_swizzle(group_width)?;
-                let (_swizzle_stream, swizzle_func) = compile_mma_f16(device, &swizzle_src)?;
-                (Some(swizzle_func), Some(group_width))
-            }
-            None => (None, None),
-        };
+        // SM 数が実測できた場合のみ swizzle 変種を追加コンパイルする。
+        // swizzle はあくまで L2 再利用の性能最適化であり base カーネルの
+        // 可用性とは独立であるべきため、ソース生成・コンパイルいずれの
+        // 失敗も `new` 全体の `Err` へ波及させず fail-soft に
+        // `(mma_f16_swizzle: None, swizzle_group_width: None)` へ縮退する
+        // （`gemm_wmma.rs::CudaWmmaGemm::new` の `wmma_f16_opt` 分岐と同型
+        // の判断。構造体ドキュメンテーションコメント「mma_f16_swizzle」
+        // 節参照）。失敗理由は [`swizzle_unavailable_reason`
+        // ](Self::swizzle_unavailable_reason) 経由でテストから参照できる
+        // ようにする。
+        let (mma_f16_swizzle, swizzle_group_width, swizzle_compile_error) =
+            match device.multiprocessor_count() {
+                Some(num_sms) => {
+                    let group_width = crate::swizzle::select_swizzle_group_width(
+                        num_sms,
+                        kernels_mma::MMA_BM,
+                        kernels_mma::MMA_BN,
+                    );
+                    match kernels_mma::mma_f16_source_with_swizzle(group_width)
+                        .and_then(|swizzle_src| compile_mma_f16(device, &swizzle_src))
+                    {
+                        Ok((_swizzle_stream, swizzle_func)) => {
+                            (Some(swizzle_func), Some(group_width), None)
+                        }
+                        Err(err) => (None, None, Some(err.to_string())),
+                    }
+                }
+                None => (None, None, None),
+            };
 
         Ok(Self {
             stream,
             mma_f16,
             mma_f16_swizzle,
             swizzle_group_width,
+            swizzle_compile_error,
         })
     }
 
@@ -305,6 +332,7 @@ impl CudaMmaGemm {
             mma_f16,
             mma_f16_swizzle: None,
             swizzle_group_width: None,
+            swizzle_compile_error: None,
         })
     }
 
@@ -364,6 +392,7 @@ impl CudaMmaGemm {
             mma_f16,
             mma_f16_swizzle: None,
             swizzle_group_width: Some(group_width),
+            swizzle_compile_error: None,
         })
     }
 
@@ -387,6 +416,17 @@ impl CudaMmaGemm {
     /// feature 非依存のため）。
     pub fn swizzle_group_width(&self) -> Option<u32> {
         self.swizzle_group_width
+    }
+
+    /// [`new`](Self::new) が `device.multiprocessor_count()` の実測に成功
+    /// した（＝ swizzle 変種を試みた）にもかかわらず、ソース生成・NVRTC
+    /// コンパイルに失敗し swizzle 変種を保持できなかった場合の理由文字列
+    /// （構造体ドキュメンテーションコメント「swizzle_compile_error」参照。
+    /// `gemm_wmma.rs::CudaWmmaGemm::wmma_f16_opt_unavailable_reason` と
+    /// 同型）。swizzle 変種を保持している場合・SM 数自体が取得できず
+    /// 試みなかった場合は `None`。
+    pub fn swizzle_unavailable_reason(&self) -> Option<&str> {
+        self.swizzle_compile_error.as_deref()
     }
 
     /// `run_f16`/`launch_f16` が形状 `(m, n)` に対して実際に swizzle 変種
