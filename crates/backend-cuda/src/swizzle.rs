@@ -28,11 +28,16 @@
 //! g8) 54.3055 TFLOPS・×1.578。512/1024/2048 は ×0.979〜0.992）を根拠に、
 //! **サイズ条件付き適用**（[`should_apply_swizzle`]。総タイル数
 //! `num_m_blocks * num_n_blocks >= SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` の
-//! 場合のみ）で `gemm_mma.rs::CudaMmaGemm::launch_f16` へ再結線した
-//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2・§4 参照。#758 差し戻し理由
-//! 3 点のうち (a) 採用基準はイシュー #775 のユーザー承認記録として本番
-//! doc へ明記、(c) SM 数は `device.multiprocessor_count()` 実測値を動的
-//! に使う〈ハードコード値への依存を排除〉ことで解消）。
+//! 場合のみ）ロジック自体は実装したが、`gemm_mma.rs::CudaMmaGemm::new`
+//! （本番既定コンストラクタ）への結線は見送っている（PR レビュー指摘。
+//! #758 差し戻し理由のうち (a) 採用基準・(c) SM 数入力は解消したが、
+//! (b) 結線前必須確認〈レジスタスピル・bit 一致・parity 非後退・実測〉が
+//! GB10 実機到達可能なセッションで未実施のため。`docs/perf/
+//! cuda-gemm-swizzle-ab.md` §2・§6.1 参照）。サイズ条件付き適用は
+//! `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`（opt-in・
+//! `internal-diagnostics` feature 限定・実機検証専用入口）からのみ
+//! `launch_f16` へ到達する。実機検証完了後の後続 PR で `new` の既定へ
+//! 昇格する。
 
 /// グルーピング幅の選択候補（DeepGEMM 同型の 2 候補。実装計画 1 節）。
 const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
@@ -185,16 +190,35 @@ pub fn swizzled_block_idx(
 /// 512）は ×0.992（中立〜微減）だった。実測で改善を確認した点（総タイル数
 /// 2048）以上のみ適用する保守的な閾値とし、実測点未満（512〜2048 側）へは
 /// 外挿しない（`should_apply_swizzle` 参照）。
+///
+/// **未検証の外挿（非正方形形状。PR レビュー指摘・Medium）**: 上記実測点は
+/// いずれも正方形形状（M=N=K）であり、本閾値は総ブロックタイル数
+/// `num_m_blocks * num_n_blocks` のみで判定するためアスペクト比を考慮しない。
+/// したがって M=32768, N=512（総タイル数 32768/64 * 512/128 = 512*4=2048。
+/// 閾値ちょうど）のような縦長・横長形状は、4096 正方形の実測点（総タイル数
+/// も 2048）とは全く異なるメモリアクセスパターン・L2 再利用特性を持ちうるが、
+/// 本閾値はそれらを 4096 正方形と同一に「適用」判定する。この非正方形形状
+/// への外挿は未検証であり、イシュー #775 の承認記録（`docs/perf/
+/// cuda-gemm-swizzle-ab.md` §2「4096 級のみ適用・512〜2048 は劣化 5% 以内」）
+/// が前提とする正方形実測とは厳密には整合しない。本値は
+/// [`gemm_mma::CudaMmaGemm::new`]（本番既定コンストラクタ）には結線されて
+/// おらず（実機検証未了。同 doc comment 参照）、`new_with_size_conditional_
+/// swizzle`（opt-in・実機検証専用入口）でのみ到達するため実害は限定的だが、
+/// GB10 実機での結線前必須確認（`docs/perf/cuda-gemm-swizzle-ab.md` §6.1）
+/// を行う際は非正方形形状（縦長・横長）でも A/B 計測し、必要なら閾値をアスペ
+/// クト比考慮の判定式へ改訂することを検討すること。
 pub const SWIZZLE_APPLY_TILE_COUNT_THRESHOLD: u64 = 2048;
 
 /// グリッド形状（`num_m_blocks x num_n_blocks`。`gemm_mma.rs::
 /// mma_launch_config` が構築する grid_dim.y/x に対応）から、swizzle remap
-/// を適用すべきかを判定する（イシュー #775 のサイズ条件付き本番結線。
+/// を適用すべきかを判定する（イシュー #775 のサイズ条件付き適用ロジック。
 /// [`SWIZZLE_APPLY_TILE_COUNT_THRESHOLD`] ドキュメンテーションコメント
 /// 参照）。
 ///
-/// 呼び出し元: `gemm_mma.rs::CudaMmaGemm::launch_f16`（本番既定経路。形状
-/// ごとに base／swizzle 変種いずれのカーネルを起動するか、この関数の
+/// 呼び出し元: `gemm_mma.rs::CudaMmaGemm::launch_f16`（`mma_f16_swizzle` が
+/// `Some` の場合——`new_with_size_conditional_swizzle` 経由でのみ発生。
+/// 本番既定コンストラクタ `new` は実機検証未了のため到達しない——に、
+/// 形状ごとに base／swizzle 変種いずれのカーネルを起動するか、この関数の
 /// 戻り値で分岐する）。`u64` 積で `u32` 同士のオーバーフローを避ける
 /// （[`swizzle_group_usage`] と同じ安全側方針。REQ-8 の「境界検査を省略
 /// しない」精神を数値計算側にも適用）。

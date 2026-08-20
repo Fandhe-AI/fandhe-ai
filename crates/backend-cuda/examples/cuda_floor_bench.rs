@@ -533,35 +533,30 @@ fn main() {
         }
     };
     // イシュー #775 で L2 再利用のためのタイル→SM 割り当てスウィズル
-    // （イシュー #499）を `CudaMmaGemm::new`（本番既定コンストラクタ）へ
-    // サイズ条件付きで本番結線した（`docs/perf/cuda-gemm-swizzle-ab.md`
-    // §2・§4 参照）。`swizzle_group_width()` は `device.
-    // multiprocessor_count()` の実測成否に依存する（成功時 `Some(_)`・
-    // 失敗時 `None`）。起動時診断として可観測にする（#733 の
-    // `wmma_tf32_staged` 可用性出力と同型）。判定対象サイズ
-    // （`REFERENCE_ONLY_SIZES`・`JUDGED_SIZES`）ごとの適用有無も
-    // `swizzle_applies` で可観測にし、閾値（総ブロックタイル数 2048）の
-    // 境界がどのサイズから効くかを実行ログのみから再構成できるようにする
-    // （イシュー #732 で判明した「実行ログから経路選択を再構成できない」
-    // 問題への対応方針を踏襲）。
+    // （イシュー #499）のサイズ条件付き適用ロジック自体は実装したが、
+    // `CudaMmaGemm::new`（本番既定コンストラクタ。本バイナリが使う経路）
+    // への結線は GB10 実機での結線前必須確認（レジスタスピル・bit 一致・
+    // parity 非後退・本バイナリでの実測）が未完了のため見送っている（PR
+    // レビュー是正。`docs/perf/cuda-gemm-swizzle-ab.md` §2・§6.1 参照）。
+    // したがって `new` が返すハンドルの `swizzle_group_width()` は
+    // `device.multiprocessor_count()` の実測成否に関わらず常に `None`
+    // （swizzle 変種を一切コンパイルしない）。診断用の opt-in 入口
+    // `CudaMmaGemm::new_with_size_conditional_swizzle`
+    // （`internal-diagnostics` feature 限定）は本バイナリの計測対象経路
+    // ではないため使わない（実機検証はイシュー #775 の実機セッションで
+    // `gemm_mma.rs` の `#[ignore]` テスト・`gemm_mma_swizzle_bench` 経由で
+    // 行う）。
     if let Some(g) = &mma_gemm {
-        match g.swizzle_group_width() {
-            Some(w) => {
-                println!(
-                    "mma_f16 kernel: threadblock swizzle variant compiled (group_width={w}, \
-                     size-conditional; applied when num_m_blocks*num_n_blocks >= 2048)."
-                );
-                for size in REFERENCE_ONLY_SIZES.into_iter().chain(JUDGED_SIZES) {
-                    let (m, n) = (size as u32, size as u32);
-                    println!("  size={size}: swizzle_applies={}", g.swizzle_applies(m, n));
-                }
-            }
-            None => println!(
-                "mma_f16 kernel: threadblock swizzle variant NOT compiled (device.\
-                 multiprocessor_count() unavailable; base kernel used unconditionally \
-                 — see docs/perf/cuda-gemm-swizzle-ab.md §2)."
-            ),
-        }
+        debug_assert!(
+            g.swizzle_group_width().is_none(),
+            "CudaMmaGemm::new は実機検証未了のため常に base 専用のはずです \
+             （swizzle_group_width は常に None）"
+        );
+        println!(
+            "mma_f16 kernel: threadblock swizzle variant NOT wired into the production \
+             constructor (CudaMmaGemm::new); base kernel used unconditionally \
+             — see docs/perf/cuda-gemm-swizzle-ab.md §2."
+        );
     }
 
     // `run_wmma_tf32`/`run_f16` は opt カーネル（共有メモリ・タイル最適化版）
