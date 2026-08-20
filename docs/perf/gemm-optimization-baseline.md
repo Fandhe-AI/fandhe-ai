@@ -147,8 +147,10 @@ QEMU 仮想 CPU 環境（`docs/perf/cpu-gemm-rayon-tuning.md`）は改善「比�
 
 **E-8（#564）の実施状況**: `crates/backend-cpu/src/gemm_blis/mod.rs` の MC/KC/NC 定数コメントへ
 対象実機（M4 Max）とスイープ記録ドキュメントへの参照を追記し、パラメータ化・パリティテスト・
-実機スイープハーネスまで整備した（`docs/perf/cpu-gemm-blocking-sweep.md`）。M4 Max 実機での実測・
-選定は環境ゲート未達のため未実施（fail-closed。現行値 128/256/512 を維持）。
+実機スイープハーネスまで整備した（`docs/perf/cpu-gemm-blocking-sweep.md`）。2026-08-19 実測済み
+（`docs/perf/cpu-gemm-blocking-sweep.md` §7。4096 で NC=9600 が約 9.9% 改善する一方 2048 は
+現行値が最良という形状依存の結果となったため、本イシューでは現行値 128/256/512 を維持し、
+形状依存の NC 分岐実装はイシュー #749 へ引き継いだ）。
 
 ## §4 共通契約の遵守
 

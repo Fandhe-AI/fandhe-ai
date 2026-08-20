@@ -1632,7 +1632,15 @@ fn validate_wmma_tf32_staged_config(cfg: &WmmaTf32StagedKernelConfig) -> Result<
     Ok(())
 }
 
-fn render_wmma_tf32_staged_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String {
+/// [`render_wmma_tf32_staged_unchecked`]／[`render_wmma_tf32_staged_dyn_unchecked`]
+/// が共有するヘッダ展開本体。`dynamic_smem`（`WMMA_TF32_STAGED_DYNAMIC_SMEM`
+/// の値。0 = static `__shared__`〈既定・本番経路〉、1 = 動的共有メモリ
+/// 〈`internal-diagnostics` 計測専用〉）のみが両呼び出し元の差分（イシュー
+/// #742）。0 側は本 define の追加を除き従来の展開結果と byte 完全一致で
+/// あり、[`WMMA_TF32_F32_STAGED_BODY`] 側の `#if` 分岐が static 宣言へ
+/// フォールバックする（本番経路 parity への影響なし。
+/// `docs/perf/cuda-parity-baseline.md`）。
+fn render_wmma_tf32_staged_header(cfg: &WmmaTf32StagedKernelConfig, dynamic_smem: u32) -> String {
     let warp_grid_n = cfg.block_n / WMMA_TF32_STAGED_WARP_TILE;
     let threads = (cfg.block_m / WMMA_TF32_STAGED_WARP_TILE) * warp_grid_n * 32;
     let a_pad = cfg.k_tile + 4;
@@ -1659,6 +1667,7 @@ fn render_wmma_tf32_staged_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String
          #define WMMA_TF32_STAGED_K_SUBSTEPS {k_substeps}\n\
          #define WMMA_TF32_STAGED_WARP_GRID_N {warp_grid_n}\n\
          #define WMMA_TF32_STAGED_STAGES {stages}\n\
+         #define WMMA_TF32_STAGED_DYNAMIC_SMEM {dynamic_smem}\n\
          {dim_m_define}\n\
          {dim_n_define}\n\
          {dim_k_define}\n\
@@ -1671,6 +1680,10 @@ fn render_wmma_tf32_staged_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String
         warp_tile = WMMA_TF32_STAGED_WARP_TILE,
         stages = cfg.stages,
     )
+}
+
+fn render_wmma_tf32_staged_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String {
+    render_wmma_tf32_staged_header(cfg, 0)
 }
 
 /// [`WmmaTf32StagedKernelConfig`] を TF32 opt-staged カーネルソースへ展開
@@ -1686,6 +1699,334 @@ pub fn render_wmma_tf32_staged(
         source: render_wmma_tf32_staged_unchecked(cfg),
         cfg: *cfg,
     })
+}
+
+/// TF32 opt-staged 動的共有メモリ変種（`WMMA_TF32_STAGED_DYNAMIC_SMEM=1`）
+/// が要求する共有メモリバイト数を計算する単一ソース（イシュー #742）。
+///
+/// [`WMMA_TF32_F32_STAGED_BODY`] の dyn 分岐は c_tile をステージバッファ
+/// 先頭へエイリアスする（同分岐のコメント参照）ため、所要量は
+/// `max(stages 段の as_tile+bs_tile 合計, c_tile)` であり、単純合算
+/// （static 側 [`validate_wmma_tf32_staged_config`] の
+/// `stage_bytes_a + stage_bytes_b + c_tile_bytes`）とは異なる。
+/// [`validate_wmma_tf32_staged_dyn_config`]（起動前検証）と
+/// `examples/gemm_wmma_tf32_staged_stages_bench.rs`（occupancy 概算表示。
+/// `internal-diagnostics` feature 配下の `diagnostics` モジュール経由）の
+/// 両方がこの関数を単一ソースとして呼ぶ。
+#[allow(dead_code)]
+pub fn wmma_tf32_staged_dyn_smem_bytes(cfg: &WmmaTf32StagedKernelConfig) -> Result<u64, CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+    let a_pad = u64::from(cfg.k_tile) + 4;
+    let b_pad = u64::from(cfg.block_n) + 4;
+
+    let stage_bytes_a = u64::from(cfg.stages)
+        .checked_mul(u64::from(cfg.block_m))
+        .and_then(|v| v.checked_mul(a_pad))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| invalid("A stage shared memory byte count overflow (dyn)".to_string()))?;
+    let stage_bytes_b = u64::from(cfg.stages)
+        .checked_mul(u64::from(cfg.k_tile))
+        .and_then(|v| v.checked_mul(b_pad))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| invalid("B stage shared memory byte count overflow (dyn)".to_string()))?;
+    let stage_bytes_total = stage_bytes_a
+        .checked_add(stage_bytes_b)
+        .ok_or_else(|| invalid("stage shared memory byte count overflow (dyn)".to_string()))?;
+    let c_tile_bytes = u64::from(cfg.block_m)
+        .checked_mul(u64::from(cfg.block_n))
+        .and_then(|v| v.checked_mul(4))
+        .ok_or_else(|| invalid("c_tile shared memory byte count overflow (dyn)".to_string()))?;
+
+    Ok(stage_bytes_total.max(c_tile_bytes))
+}
+
+/// [`validate_wmma_tf32_staged_config`] と同じ形状検査（stages 範囲・warp
+/// タイル整合・cp.async 4 要素整列・スレッド数上限）を課すが、共有メモリ
+/// 予算検査だけを static 48KiB 固定
+/// （[`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]）ではなく
+/// 呼び出し元が指定する `optin_budget_bytes`（デバイス実測の
+/// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`。
+/// `device.rs::shared_memory_per_block_optin`）に対して行う（イシュー
+/// #742）。
+///
+/// static 側の [`validate_wmma_tf32_staged_config`] は変更しない
+/// （本番経路の 48KiB fail-closed 拒否契約を保つため。実装計画 §1.1）。
+/// 検査に成功した場合、算出した動的共有メモリバイト数を返す
+/// （呼び出し元が [`RenderedWmmaTf32StagedDynKernel`] へ格納し、compile
+/// 時の opt-in 属性設定・launch 時の `shared_mem_bytes` に再利用する）。
+#[allow(dead_code)]
+fn validate_wmma_tf32_staged_dyn_config(
+    cfg: &WmmaTf32StagedKernelConfig,
+    optin_budget_bytes: u32,
+) -> Result<u64, CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+    let warp_tile = WMMA_TF32_STAGED_WARP_TILE;
+    let frag_k = WMMA_TF32_STAGED_FRAG_K;
+
+    if cfg.block_m == 0 || cfg.block_n == 0 || cfg.k_tile == 0 {
+        return Err(invalid(
+            "block_m/block_n/k_tile must all be non-zero".to_string(),
+        ));
+    }
+    // [`WMMA_TF32_STAGED_STAGES`] 直下コメントと同じ根拠
+    // （cp.async.wait_group (STAGES-2) の即値非負制約）。
+    if cfg.stages < 2 {
+        return Err(invalid(format!(
+            "stages ({}) must be >= 2 (cp.async wait_group (STAGES-2) immediate must be \
+             non-negative)",
+            cfg.stages
+        )));
+    }
+    // static 側と同じ理由（[`validate_wmma_tf32_staged_config`] 該当コメント
+    // 参照）で `derive_pipeline_stages`（`nvrtc.rs`）と同じ上限を適用する。
+    if cfg.stages > MAX_PIPELINE_STAGES {
+        return Err(invalid(format!(
+            "stages ({}) exceeds MAX_PIPELINE_STAGES ({MAX_PIPELINE_STAGES})",
+            cfg.stages
+        )));
+    }
+    if !cfg.block_m.is_multiple_of(warp_tile) || !cfg.block_n.is_multiple_of(warp_tile) {
+        return Err(invalid(format!(
+            "block_m ({}) and block_n ({}) must both be multiples of WARP_TILE ({warp_tile})",
+            cfg.block_m, cfg.block_n
+        )));
+    }
+    if !cfg.k_tile.is_multiple_of(frag_k) {
+        return Err(invalid(format!(
+            "k_tile ({}) must be a multiple of FRAG_K ({frag_k})",
+            cfg.k_tile
+        )));
+    }
+    if !cfg.block_m.is_multiple_of(4)
+        || !cfg.block_n.is_multiple_of(4)
+        || !cfg.k_tile.is_multiple_of(4)
+    {
+        return Err(invalid(format!(
+            "block_m ({}), block_n ({}), k_tile ({}) must all be multiples of 4 (cp.async \
+             16-byte transfer granularity for f32 elements)",
+            cfg.block_m, cfg.block_n, cfg.k_tile
+        )));
+    }
+
+    let warp_grid_m = cfg.block_m / warp_tile;
+    let warp_grid_n = cfg.block_n / warp_tile;
+    let threads = warp_grid_m
+        .checked_mul(warp_grid_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| invalid("block thread count overflow".to_string()))?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "block thread count {threads} exceeds CUDA's per-block limit (1024)"
+        )));
+    }
+
+    let smem_bytes = wmma_tf32_staged_dyn_smem_bytes(cfg)?;
+    if smem_bytes > u64::from(optin_budget_bytes) {
+        return Err(invalid(format!(
+            "dynamic shared memory usage {smem_bytes} bytes exceeds the device opt-in budget \
+             ({optin_budget_bytes} bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN) \
+             (stages={}, block_m={}, block_n={}, k_tile={})",
+            cfg.stages, cfg.block_m, cfg.block_n, cfg.k_tile
+        )));
+    }
+
+    for (name, spec) in [
+        ("dim_m", cfg.dim_m),
+        ("dim_n", cfg.dim_n),
+        ("dim_k", cfg.dim_k),
+    ] {
+        if let DimSpec::Static(0) = spec {
+            return Err(invalid(format!(
+                "{name} static value must not be zero (degenerate dimension)"
+            )));
+        }
+    }
+
+    Ok(smem_bytes)
+}
+
+fn render_wmma_tf32_staged_dyn_unchecked(cfg: &WmmaTf32StagedKernelConfig) -> String {
+    render_wmma_tf32_staged_header(cfg, 1)
+}
+
+/// [`WmmaTf32StagedKernelConfig`] を TF32 opt-staged カーネルの**動的共有
+/// メモリ変種**ソースへ展開する（イシュー #742。`internal-diagnostics`
+/// feature 配下の段数スイープ計測専用。[`render_wmma_tf32_staged`] の
+/// 本番経路には一切関与しない）。展開前に
+/// [`validate_wmma_tf32_staged_dyn_config`] で `optin_budget_bytes` に
+/// 対する動的 SMEM 予算・倍数関係・スレッド数上限を fail-closed 検査する。
+#[allow(dead_code)]
+pub fn render_wmma_tf32_staged_dyn(
+    cfg: &WmmaTf32StagedKernelConfig,
+    optin_budget_bytes: u32,
+) -> Result<RenderedWmmaTf32StagedDynKernel, CudaError> {
+    let smem_bytes = validate_wmma_tf32_staged_dyn_config(cfg, optin_budget_bytes)?;
+    Ok(RenderedWmmaTf32StagedDynKernel {
+        source: render_wmma_tf32_staged_dyn_unchecked(cfg),
+        cfg: *cfg,
+        smem_bytes,
+    })
+}
+
+/// [`render_wmma_tf32_staged_dyn`] が返す、展開済み動的 SMEM 変種ソース・
+/// 展開元 config・算出済み共有メモリバイト数を 1 個にまとめた descriptor
+/// （[`RenderedWmmaTf32StagedKernel`] と同じ設計。イシュー #742）。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RenderedWmmaTf32StagedDynKernel {
+    source: String,
+    cfg: WmmaTf32StagedKernelConfig,
+    smem_bytes: u64,
+}
+
+impl RenderedWmmaTf32StagedDynKernel {
+    /// [`RenderedWmmaTf32StagedKernel::compile`] と同じ設計だが、算出済み
+    /// `smem_bytes` が static 48KiB 上限を超える場合のみ
+    /// `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES` を opt-in 設定する
+    /// （cudarc 0.19.8 の安全 API
+    /// `CudaFunction::set_attribute`〈`unsafe` を要求しない〉。48KiB 以下
+    /// では opt-in 不要かつ `cuFuncSetAttribute` が許容範囲内の値をそのまま
+    /// 受理するため、常時呼んでも安全だが、48KiB 以下でも常に呼ぶと
+    /// 「デバイス既定を明示的に狭めている」ように読めるため必要時のみに
+    /// 限定する）。
+    #[allow(dead_code)]
+    pub fn compile(
+        &self,
+        device: &crate::device::CudaDevice,
+    ) -> Result<CompiledWmmaTf32StagedDynKernel, CudaError> {
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        let func = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_wmma_tf32_staged")?;
+        if self.smem_bytes > u64::from(MMA_STATIC_SMEM_LIMIT_BYTES) {
+            let bytes_i32 =
+                i32::try_from(self.smem_bytes).map_err(|_| CudaError::InvalidKernelConfig {
+                    detail: format!(
+                        "dynamic shared memory byte count {} exceeds i32 range required by \
+                         cuFuncSetAttribute",
+                        self.smem_bytes
+                    ),
+                })?;
+            func.set_attribute(
+                cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                bytes_i32,
+            )
+            .map_err(CudaError::from)?;
+        }
+        Ok(CompiledWmmaTf32StagedDynKernel {
+            func,
+            cfg: self.cfg,
+            smem_bytes: self.smem_bytes,
+        })
+    }
+
+    #[cfg(test)]
+    fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// [`RenderedWmmaTf32StagedDynKernel::compile`] が返す、コンパイル済み
+/// `CudaFunction`・展開元 config・動的共有メモリバイト数を不可分に束ねた
+/// descriptor（イシュー #742）。
+#[allow(dead_code)]
+pub struct CompiledWmmaTf32StagedDynKernel {
+    func: cudarc::driver::CudaFunction,
+    cfg: WmmaTf32StagedKernelConfig,
+    smem_bytes: u64,
+}
+
+impl CompiledWmmaTf32StagedDynKernel {
+    /// [`CompiledWmmaTf32StagedKernel::launch_tf32_staged`] と同じ検証・
+    /// 起動手順に加え、`LaunchConfig.shared_mem_bytes` へ算出済み
+    /// `smem_bytes` を設定する（static 変種は常に 0）。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_tf32_staged_dyn(
+        &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        self.cfg.validate_launch_shape(m, n, k)?;
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        if !crate::gemm::wmma_tf32_staged_alignment_ok(n, k) {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma tf32 staged (dyn) path requires n % 4 == 0 && k % 4 == 0 (cp.async \
+                     16-byte transfer granularity), but got n={n}, k={k}"
+                ),
+            });
+        }
+
+        // static 変種 CompiledWmmaTf32StagedKernel と同一の grid/k タイル
+        // 境界検査（validate_grid_bounds／validate_k_tile_bound と同じ
+        // ロジック・同じ理由）。dyn 変種は独立 struct のため、汎用実装
+        // `validate_wmma_opt_k_tile_bound` を直接呼ぶ。
+        const MAX_GRID_DIM_Y: u32 = 65_535;
+        let grid_y = m.div_ceil(self.cfg.block_m);
+        if grid_y > MAX_GRID_DIM_Y {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "wmma staged (dyn) path grid_dim.y ({grid_y}) exceeds CUDA's \
+                     {MAX_GRID_DIM_Y} limit for grid dimensions y/z (block_m={}); m={m} is \
+                     too large",
+                    self.cfg.block_m
+                ),
+            });
+        }
+        validate_wmma_opt_k_tile_bound(k, self.cfg.k_tile)?;
+
+        let smem_bytes_u32 =
+            u32::try_from(self.smem_bytes).map_err(|_| CudaError::InvalidKernelConfig {
+                detail: format!(
+                    "dynamic shared memory byte count {} exceeds u32 range required by \
+                     LaunchConfig.shared_mem_bytes",
+                    self.smem_bytes
+                ),
+            })?;
+        let warp_grid_m = self.cfg.block_m / WMMA_TF32_STAGED_WARP_TILE;
+        let warp_grid_n = self.cfg.block_n / WMMA_TF32_STAGED_WARP_TILE;
+        let launch_config = LaunchConfig {
+            grid_dim: (
+                n.div_ceil(self.cfg.block_n),
+                m.div_ceil(self.cfg.block_m),
+                1,
+            ),
+            block_dim: (warp_grid_m * warp_grid_n * 32, 1, 1),
+            shared_mem_bytes: smem_bytes_u32,
+        };
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: CompiledWmmaTf32StagedKernel::launch_tf32_staged と同一の
+        // 根拠。カーネル引数は上記で検証済みの m/n/k から導出しており、
+        // opt-staged カーネル内の手動境界チェック（guarded load・エピローグ
+        // store のガード付きコピー。REQ-8）と合わせて OOB 読み書きが起きない
+        // 根拠とする。`shared_mem_bytes` は `RenderedWmmaTf32StagedDynKernel::compile`
+        // が算出・opt-in 設定した値と同一（`self.smem_bytes`）であり、
+        // カーネル側 `extern __shared__` の実際の使用量を過不足なく満たす。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
 }
 
 /// [`render_wmma_tf32_staged_unchecked`]／[`wmma_tf32_f32_staged_source`]
@@ -1740,8 +2081,37 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
     // ドキュメントコメント「アライメント」・kernels_mma.rs 冒頭コメント
     // 「整列制約」と同じ根拠）。A_PAD/B_PAD が 4 要素（16 バイト）の倍数
     // のため各行の先頭は常に整列する。
+    //
+    // イシュー #742: `WMMA_TF32_STAGED_DYNAMIC_SMEM` は既定 0（static
+    // `__shared__`。本番経路〈gemm.rs 3 段フォールバック選択〉が使う唯一の
+    // 分岐で、宣言は本行以下 static 側のみで従来と byte 完全一致）。
+    // `render_wmma_tf32_staged_dyn`（計測専用。`internal-diagnostics`
+    // feature 配下）のみが 1 を渡す。dyn 側は動的共有メモリ（opt-in 属性で
+    // 48KiB を超える割り当てが可能。`device.rs::shared_memory_per_block_optin`）
+    // を `extern __shared__` 経由で受け取り、`as_tile`/`bs_tile` へ
+    // reinterpret_cast する。stages 段数を static 48KiB 制限（既定タイルで
+    // stages<=3）を超えて計測するための変種であり、`validate_wmma_tf32_staged_config`
+    // （static 48KiB 検査）は dyn 側には適用しない
+    // （`wmma_tf32_staged_dyn_smem_bytes` が動的側の予算検査を別途行う）。
+#if WMMA_TF32_STAGED_DYNAMIC_SMEM
+    // __align__(32): as_tile/bs_tile としての利用は 16 バイト整列で足りるが、
+    // 後段でこの領域先頭を c_tile としてエイリアスし
+    // `wmma::store_matrix_sync` へ渡す（本関数末尾のエピローグ節参照）。
+    // WMMA の load/store 対象ポインタは 256-bit（32 バイト）整列が
+    // 契約であり（static 側 `c_tile` の `__align__(32)` と同じ根拠）、
+    // 動的 extern __shared__ の整列指定はこの中で最も厳しい要求に
+    // 揃える必要があるため 32 バイトを指定する。
+    extern __shared__ __align__(32) unsigned char wmma_tf32_staged_smem[];
+    float (*as_tile)[WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD] =
+        reinterpret_cast<float(*)[WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD]>(wmma_tf32_staged_smem);
+    float (*bs_tile)[WMMA_TF32_STAGED_K_TILE][WMMA_TF32_STAGED_B_PAD] =
+        reinterpret_cast<float(*)[WMMA_TF32_STAGED_K_TILE][WMMA_TF32_STAGED_B_PAD]>(
+            wmma_tf32_staged_smem
+            + (size_t)WMMA_TF32_STAGED_STAGES * WMMA_TF32_STAGED_BLOCK_M * WMMA_TF32_STAGED_A_PAD * sizeof(float));
+#else
     __shared__ __align__(16) float as_tile[WMMA_TF32_STAGED_STAGES][WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD];
     __shared__ __align__(16) float bs_tile[WMMA_TF32_STAGED_STAGES][WMMA_TF32_STAGED_K_TILE][WMMA_TF32_STAGED_B_PAD];
+#endif
 
     const int tid = threadIdx.x;
     const int num_threads = blockDim.x;
@@ -1977,7 +2347,21 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
 
     // REQ-8: エピローグ store のガード条件。既存 TF32 opt
     // （WMMA_TF32_F32_OPT_BODY）エピローグと同一の guarded store 方式。
+    //
+    // イシュー #742 dyn 側: c_tile を `wmma_tf32_staged_smem` 先頭へ
+    // エイリアスする（動的 SMEM 所要を
+    // `max(stages 段バッファ, c_tile)` に抑え、stages=10 でも GB10 の
+    // optin 予算 101,376B 以内に収める設計。
+    // `docs/perf/cuda-gemm-wmma-tf32-staged-stages-sweep.md` 参照）。直上の
+    // `cp.async.wait_group 0; __syncthreads();` により、このエイリアス化の
+    // 時点で as_tile/bs_tile はどのスレッドからも二度と読まれないため、
+    // 同一領域への上書きは安全（本コメント直上のループ外 drain 節参照）。
+#if WMMA_TF32_STAGED_DYNAMIC_SMEM
+    float (*c_tile)[WMMA_TF32_STAGED_BLOCK_N] =
+        reinterpret_cast<float(*)[WMMA_TF32_STAGED_BLOCK_N]>(wmma_tf32_staged_smem);
+#else
     __shared__ __align__(32) float c_tile[WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_BLOCK_N];
+#endif
 #pragma unroll
     for (int fi = 0; fi < WMMA_TF32_STAGED_FRAG_ROWS; ++fi) {
 #pragma unroll
@@ -3157,6 +3541,178 @@ mod tests {
             b.source(),
             "同一 WmmaTf32StagedKernelConfig からの render_wmma_tf32_staged が byte 一致しません \
              （非決定的な展開はキャッシュ・再現性の前提を壊す）"
+        );
+    }
+
+    /// イシュー #742: 既定構成（`WMMA_TF32_STAGED_DYNAMIC_SMEM` を明示指定
+    /// しない）の静的レンダー結果が、動的 SMEM 分岐追加後も本番経路が
+    /// 従来どおり static `__shared__` 宣言のみを含むことをロックする
+    /// （`#if` 分岐の 0 側が壊れていないことの直接証拠。実装計画 §1.1
+    /// 「本番経路は一切変更しない」の受け皿）。
+    #[test]
+    fn render_wmma_tf32_staged_static_source_keeps_static_shared_declarations() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let rendered = render_wmma_tf32_staged(&cfg).expect("既定構成は検証を通過するはずです");
+        let source = rendered.source();
+        assert!(
+            source.contains("#define WMMA_TF32_STAGED_DYNAMIC_SMEM 0"),
+            "既定（static）レンダーは WMMA_TF32_STAGED_DYNAMIC_SMEM 0 を \
+             定義するはずです: {source}"
+        );
+        assert!(
+            source.contains(
+                "__shared__ __align__(16) float as_tile[WMMA_TF32_STAGED_STAGES]\
+                 [WMMA_TF32_STAGED_BLOCK_M][WMMA_TF32_STAGED_A_PAD];"
+            ),
+            "既定（static）レンダーは as_tile の static __shared__ 宣言を \
+             含むはずです"
+        );
+        assert!(
+            source.contains(
+                "__shared__ __align__(32) float c_tile[WMMA_TF32_STAGED_BLOCK_M]\
+                 [WMMA_TF32_STAGED_BLOCK_N];"
+            ),
+            "既定（static）レンダーは c_tile の static __shared__ 宣言を \
+             含むはずです"
+        );
+        // 注意: `WMMA_TF32_F32_STAGED_BODY` は `#if WMMA_TF32_STAGED_DYNAMIC_SMEM`
+        // による **C プリプロセッサ**分岐であり、Rust 側の文字列テンプレート
+        // 自体は static・dyn 両分岐のソーステキストを常に含む（`#define
+        // WMMA_TF32_STAGED_DYNAMIC_SMEM 0` により NVRTC コンパイル時に
+        // dyn 側が prune される）。そのため `extern __shared__` の不在を
+        // Rust レベルのテキスト検査で断定することはできない
+        // （NVRTC 非搭載環境で本テストを実行するため、実際のプリプロセス
+        // 結果は検査できない）。本テストは static 宣言側のテキストが
+        // 変更されていないことのみを保証する。
+    }
+
+    /// [`render_wmma_tf32_staged_dyn`] が `WMMA_TF32_STAGED_DYNAMIC_SMEM 1`
+    /// と要求 stages を正しく焼き込み、`extern __shared__` 分岐を含むことを
+    /// 確認する（イシュー #742）。
+    #[test]
+    fn render_wmma_tf32_staged_dyn_sets_dynamic_smem_define_and_stages() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            stages: 10,
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        // GB10 実測 optin 上限（101,376B。docs/perf/sm121-device-attributes.md）
+        // 相当の予算を渡す。stages=10 の所要（94,720B）はこれ以内。
+        let rendered = render_wmma_tf32_staged_dyn(&cfg, 101_376)
+            .expect("stages=10 は optin 予算 101,376B 以内のはずです");
+        let source = rendered.source();
+        assert!(
+            source.contains("#define WMMA_TF32_STAGED_DYNAMIC_SMEM 1"),
+            "dyn レンダーは WMMA_TF32_STAGED_DYNAMIC_SMEM 1 を定義するはずです"
+        );
+        assert!(
+            source.contains("#define WMMA_TF32_STAGED_STAGES 10"),
+            "dyn レンダーは要求 stages=10 を焼き込むはずです"
+        );
+        assert!(
+            source
+                .contains("extern __shared__ __align__(32) unsigned char wmma_tf32_staged_smem[];"),
+            "dyn レンダーは extern __shared__ 宣言を含むはずです"
+        );
+    }
+
+    /// 同一 config からの [`render_wmma_tf32_staged_dyn`] が byte 一致する
+    /// ことをロックする（static 側
+    /// `render_wmma_tf32_staged_is_deterministic_for_same_config` と同方式）。
+    #[test]
+    fn render_wmma_tf32_staged_dyn_is_deterministic_for_same_config() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let a = render_wmma_tf32_staged_dyn(&cfg, 101_376)
+            .expect("既定構成は optin 予算内で検証を通過するはずです");
+        let b = render_wmma_tf32_staged_dyn(&cfg, 101_376)
+            .expect("既定構成は optin 予算内で検証を通過するはずです");
+        assert_eq!(
+            a.source(),
+            b.source(),
+            "同一 WmmaTf32StagedKernelConfig からの render_wmma_tf32_staged_dyn が \
+             byte 一致しません"
+        );
+    }
+
+    /// [`wmma_tf32_staged_dyn_smem_bytes`] の期待値固定
+    /// （実装計画 §1.1 の試算式と一致することの回帰検査。stages=3:
+    /// 3*(64*20+16*68)*4 = 28,416B、stages=10: 10*9,472 = 94,720B。いずれも
+    /// エピローグ c_tile（16,384B）を下回るため max 式の支配項は
+    /// stages 段バッファ側）。
+    #[test]
+    fn wmma_tf32_staged_dyn_smem_bytes_matches_expected_values() {
+        let cfg_stages_3 = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        assert_eq!(
+            wmma_tf32_staged_dyn_smem_bytes(&cfg_stages_3).expect("計算に成功するはずです"),
+            28_416,
+            "stages=3 の動的 SMEM 所要バイト数が期待値と一致しません"
+        );
+
+        let cfg_stages_10 = WmmaTf32StagedKernelConfig {
+            stages: 10,
+            ..cfg_stages_3
+        };
+        assert_eq!(
+            wmma_tf32_staged_dyn_smem_bytes(&cfg_stages_10).expect("計算に成功するはずです"),
+            94_720,
+            "stages=10 の動的 SMEM 所要バイト数が期待値と一致しません"
+        );
+    }
+
+    /// [`validate_wmma_tf32_staged_dyn_config`] の fail-closed 検証:
+    /// optin 予算をわずかに下回る budget（smem_bytes - 1）を拒否すること
+    /// を確認する。
+    #[test]
+    fn validate_wmma_tf32_staged_dyn_config_rejects_budget_just_below_requirement() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let smem_bytes = wmma_tf32_staged_dyn_smem_bytes(&cfg).expect("計算に成功するはずです");
+        let budget = u32::try_from(smem_bytes - 1).expect("テスト用の小さい値です");
+        let result = validate_wmma_tf32_staged_dyn_config(&cfg, budget);
+        assert!(
+            matches!(result, Err(CudaError::InvalidKernelConfig { .. })),
+            "所要バイト数を 1 バイト下回る optin 予算が拒否されませんでした: {result:?}"
+        );
+    }
+
+    /// 上記の境界値検査: budget が所要バイト数ちょうどのときは受理される
+    /// ことを確認する（過剰拒否を防ぐ境界値テスト）。
+    #[test]
+    fn validate_wmma_tf32_staged_dyn_config_accepts_budget_exactly_at_requirement() {
+        let cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+        let smem_bytes = wmma_tf32_staged_dyn_smem_bytes(&cfg).expect("計算に成功するはずです");
+        let budget = u32::try_from(smem_bytes).expect("テスト用の小さい値です");
+        let result = validate_wmma_tf32_staged_dyn_config(&cfg, budget);
+        match result {
+            Ok(actual) => assert_eq!(
+                actual, smem_bytes,
+                "受理はされたが返り値の smem_bytes が期待値と異なります"
+            ),
+            Err(e) => panic!("所要バイト数ちょうどの optin 予算が拒否されました: {e:?}"),
+        }
+    }
+
+    /// イシュー #742 の中核受入条件: static 変種では 48KiB 超過で拒否される
+    /// stages=8（既定タイル）が、動的変種では GB10 実測 optin 予算
+    /// （101,376B）内であれば受理されることを確認する（static 側の
+    /// `validate_wmma_tf32_staged_config_accepts_default_and_rejects_smem_overflow`
+    /// と対になる検査）。
+    #[test]
+    fn validate_wmma_tf32_staged_dyn_config_accepts_stages_beyond_static_smem_limit() {
+        let cfg = WmmaTf32StagedKernelConfig {
+            stages: 8,
+            ..WmmaTf32StagedKernelConfig::default_tf32_staged()
+        };
+        // static 側は 48KiB 超過（130,048B 相当。静的宣言の単純合算式との
+        // 差は c_tile エイリアス化の有無によるが、動的側も 8 段バッファ
+        // 単独で 8*9,472=75,776B のため static 48KiB は依然超過する）。
+        assert!(
+            validate_wmma_tf32_staged_config(&cfg).is_err(),
+            "static 変種は stages=8 を 48KiB 超過として拒否するはずです（前提確認）"
+        );
+        // dyn 側は GB10 実測 optin 予算内であれば受理される。
+        let result = validate_wmma_tf32_staged_dyn_config(&cfg, 101_376);
+        assert!(
+            result.is_ok(),
+            "dyn 変種は stages=8 を optin 予算 101,376B 以内として受理するはずです: {result:?}"
         );
     }
 

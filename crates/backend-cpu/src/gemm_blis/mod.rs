@@ -1229,7 +1229,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_8x12_and_12x8_match_scalar_forced_bit_exact() {
-        use microkernel::{Neon12x8Kernel, NeonKernel};
+        use microkernel::{Neon12x8Kernel, NeonBLaneqKernel, NeonKernel};
 
         for (i, &(m, n, k)) in [
             (200usize, 600usize, 700usize),
@@ -1260,6 +1260,16 @@ mod tests {
             assert_eq!(
                 c_scalar, c_neon_12x8,
                 "Neon12x8Kernel（A/B 対抗変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+
+            // イシュー #748: B 側レーン参照 FMA 変種（列優先 acc）も
+            // ScalarKernel 強制経路と bit 完全一致するはず（k%4 の剰余
+            // 網羅は上記グリッドを共用）。
+            let mut c_neon_b_laneq = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(NeonBLaneqKernel, &a, &b, &mut c_neon_b_laneq, m, n, k).unwrap();
+            assert_eq!(
+                c_scalar, c_neon_b_laneq,
+                "NeonBLaneqKernel（B レーン参照変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
             );
         }
     }
@@ -1331,6 +1341,75 @@ mod tests {
             println!(
                 "dim={dim}: NeonKernel(8x12) median={median_8x12:.6}s, \
                  Neon12x8Kernel(12x8) median={median_12x8:.6}s"
+            );
+        }
+    }
+
+    /// [`microkernel::NeonKernel`]（既定・A レーン参照・行優先 acc）と
+    /// [`microkernel::NeonBLaneqKernel`]（B レーン参照・列優先 acc。
+    /// イシュー #748）のスループットを同一形状で計測し中央値を報告する
+    /// （`.claude/rules/coding-rust.md` の 5 回計測中央値規約・上記
+    /// `neon_8x12_vs_12x8_ab_median_throughput` と同型のウォームアップ・
+    /// 交互実行パターン）。C タイル転置コストを新規に抱えるため、
+    /// 採用可否（既定ディスパッチへの接続）の判定は本テスト出力を見た
+    /// 人間／後続セッションが行う（本テスト自体は勝敗を assert しない。
+    /// #748 実装計画 §2 の fail-closed 方針）。`#[ignore]` 分離（実機実行
+    /// 専用。`.claude/rules/coding-rust.md` 実機分離方針）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "aarch64 実機での A/B 性能計測専用（--release 実行推奨）"]
+    fn neon_8x12_vs_b_laneq_ab_median_throughput() {
+        use microkernel::{NeonBLaneqKernel, NeonKernel};
+        use std::time::Instant;
+
+        fn run_once<K: Microkernel>(
+            kernel: K,
+            a: &[f32],
+            b: &[f32],
+            m: usize,
+            n: usize,
+            k_dim: usize,
+        ) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_with_kernel(kernel, a, b, &mut c, m, n, k_dim).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            samples[samples.len() / 2]
+        }
+
+        for dim in [512usize, 1024, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0x9999_9999, m * k);
+            let b = xorshift32_vec(0xAAAA_AAAA, k * n);
+
+            // ウォームアップ（キャッシュ・TLB を双方カーネルで温める。
+            // `neon_8x12_vs_12x8_ab_median_throughput` と同じ理由）。
+            run_once(NeonKernel, &a, &b, m, n, k);
+            run_once(NeonBLaneqKernel, &a, &b, m, n, k);
+
+            // 計測順序を交互化し系統的偏りを避ける（同上）。
+            let mut samples_a_lane = Vec::with_capacity(5);
+            let mut samples_b_lane = Vec::with_capacity(5);
+            for i in 0..5 {
+                if i % 2 == 0 {
+                    samples_a_lane.push(run_once(NeonKernel, &a, &b, m, n, k));
+                    samples_b_lane.push(run_once(NeonBLaneqKernel, &a, &b, m, n, k));
+                } else {
+                    samples_b_lane.push(run_once(NeonBLaneqKernel, &a, &b, m, n, k));
+                    samples_a_lane.push(run_once(NeonKernel, &a, &b, m, n, k));
+                }
+            }
+
+            let median_a_lane = median(samples_a_lane);
+            let median_b_lane = median(samples_b_lane);
+
+            println!(
+                "dim={dim}: NeonKernel(A-lane) median={median_a_lane:.6}s, \
+                 NeonBLaneqKernel(B-lane) median={median_b_lane:.6}s"
             );
         }
     }

@@ -84,6 +84,55 @@ pub fn median_q1_q3(samples: &[f64]) -> Result<Quartiles, BenchError> {
     })
 }
 
+/// サンプル列の相対ばらつき `(max − min) / median` を求める。
+///
+/// [`ab::run_stability`]（同クレート `ab` モジュール。イシュー #746）が
+/// 「対照カーネルの複数ラウンド計測がどの程度ばらついたか」を定量化する
+/// ために呼ぶ。ノイズ対策プロトコル（`docs/perf/metal-bench-noise-protocol.md`）
+/// の安定性ゲート（spread ≤5% 程度）の判定材料であり、本関数自体は
+/// 閾値判定を行わない（判定は呼び出し側 example の責務。ガードレール
+/// 閾値・許容誤差の単独緩和はユーザー承認必須という方針
+/// `.claude/rules/security.md` に触れないよう、閾値をこのクレートに
+/// 埋め込まない設計）。
+///
+/// `median` の定義は [`median_q1_q3`] と同一（median-of-halves 方式）。
+///
+/// # Errors
+///
+/// - `samples` が空の場合は `BenchError::EmptySamples`
+/// - NaN が混入している場合は `BenchError::NanSample`
+///
+/// `median` が 0.0 の場合（全サンプルが 0 秒。理論上は起こりうるが実務では
+/// 到達しない）は `max == min == 0.0` のときのみ spread を `0.0` として返し、
+/// それ以外（0 除算で無限大・NaN になるケース）は `BenchError::NanSample`
+/// として fail-closed に拒否する（本番経路 `unwrap()`/`expect()` 禁止方針
+/// `.claude/rules/coding-rust.md` に基づき、無限大・NaN を判定結果として
+/// 黙って伝播させない）。
+pub fn relative_spread(samples: &[f64]) -> Result<f64, BenchError> {
+    let Quartiles { median, .. } = median_q1_q3(samples)?;
+
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for &s in samples {
+        min = min.min(s);
+        max = max.max(s);
+    }
+
+    if median == 0.0 {
+        return if max == 0.0 && min == 0.0 {
+            Ok(0.0)
+        } else {
+            Err(BenchError::NanSample)
+        };
+    }
+
+    let spread = (max - min) / median;
+    if spread.is_nan() {
+        return Err(BenchError::NanSample);
+    }
+    Ok(spread)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -129,5 +178,31 @@ mod tests {
     fn nan_sample_is_error() {
         let samples = vec![1.0, f64::NAN, 3.0];
         assert_eq!(median_q1_q3(&samples), Err(BenchError::NanSample));
+    }
+
+    #[test]
+    fn relative_spread_all_same_value_is_zero() {
+        // 境界値: 全同値サンプルは max == min のため spread は必ず 0。
+        let samples = vec![2.0, 2.0, 2.0, 2.0];
+        assert_eq!(relative_spread(&samples), Ok(0.0));
+    }
+
+    #[test]
+    fn relative_spread_monotonic_sequence_matches_expected_value() {
+        // 境界値: 単調列（median-of-halves 方式で median=5, idx=4 は
+        // odd_count_known_distribution と同じ n=9 系列）は
+        // (max-min)/median = (9-1)/5 = 1.6 になる。
+        let samples: Vec<f64> = (1..=9).map(f64::from).collect();
+        let spread = relative_spread(&samples).expect("非空・非 NaN のため成功するはず");
+        assert!((spread - 1.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn relative_spread_propagates_empty_and_nan_errors() {
+        assert_eq!(relative_spread(&[]), Err(BenchError::EmptySamples));
+        assert_eq!(
+            relative_spread(&[1.0, f64::NAN]),
+            Err(BenchError::NanSample)
+        );
     }
 }
