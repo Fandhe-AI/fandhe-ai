@@ -108,8 +108,11 @@
 //! いずれも fail-closed で非 0 終了する（1 番目は CLI 引数検証・
 //! 2〜3 番目は `render_wmma_tf32_staged` の `Result::Err`）。
 //!
-//! `CudaDevice::new`／`CudaGemm::new`／`CudaMmaGemm::new`／opt カーネル
-//! 不在（`wmma_tf32_opt_available() == false`）のいずれの失敗も、既定では
+//! `CudaDevice::new`／`CudaGemm::new`／`CudaMmaGemm::new`／
+//! `--path wmma_tf32` 選択カーネル不在（`--b-pad` 未指定時は
+//! `wmma_tf32_staged_available() == false`〈PR #769 codex-review P1
+//! 指摘対応。「実行手順」節参照〉、`--path mma_f16` は mma.sync f16
+//! カーネル不在）のいずれの失敗も、既定では
 //! 理由を表示したうえで `panic!` を使わず `std::process::exit(1)`（非 0
 //! 終了）する。`docs/perf/cuda-gemm-bottleneck-diagnosis.md` §3.3 の採取
 //! ループが `set -o pipefail` で非 0 終了を検知する fail-closed 契約のため
@@ -624,20 +627,33 @@ fn main() {
                     tflops(args.size, per_iter_secs)
                 );
             } else {
-                // 実測時に誤ってフォールバック版（基本 WMMA(TF32)）を
-                // プロファイルする事故を防ぐため、opt カーネルの可用性を
+                // 実測時に誤ってフォールバック版（opt／基本 WMMA(TF32)）を
+                // プロファイルする事故を防ぐため、staged カーネルの可用性を
                 // 明示する（`cuda_floor_bench.rs` の先例と同じ判断）。
                 //
-                // `CudaGemm::launch_wmma_tf32` は opt カーネル未ロード時に
-                // 基本カーネルへ自動フォールバックし（両方未ロードの場合
-                // のみ `CudaError::WmmaUnavailable` を返す。
-                // `gemm.rs::launch_wmma_tf32` 参照）、本バイナリはこの経路
-                // には依存しない。「単一経路・単一形状のみを計測する」
-                // 契約（モジュール冒頭ドキュメンテーションコメント参照）
-                // 上、opt カーネル不在時に基本カーネルへ黙ってフォール
-                // バックして計測を続けると、診断対象と異なるカーネルの
-                // ncu 結果を正常計測として生成してしまう（PR #637
-                // codex-review 指摘）。
+                // `CudaGemm::launch_wmma_tf32` は staged → opt → basic の
+                // 3 段選択（`gemm.rs::launch_wmma_tf32` 参照。staged は
+                // `wmma_tf32_staged_available() && wmma_tf32_staged_
+                // alignment_ok(n, k)` の場合のみ選ばれる）。本バイナリの
+                // `--size` は `{1024, 2048, 4096}` の allowlist に限定され
+                // `m == n == k == size` かつ全て 4 の倍数のため
+                // （`wmma_tf32_staged_alignment_ok` は `n%4==0 && k%4==0`
+                // のみを見る。上の `(m, n, k)` 束縛参照）、alignment 条件は
+                // 本バイナリでは常に成立する。よって `wmma_tf32_staged_
+                // available()` のみを fail-closed 条件とすれば staged 選択
+                // を保証できる。
+                //
+                // PR #769 codex-review P1 指摘（discussion_r3817849763）の
+                // 是正: 旧実装は `wmma_tf32_opt_available()` のみを確認して
+                // いたため、staged のコンパイルだけが失敗し opt が利用可能
+                // な環境では、`--b-pad` 未指定側が opt カーネル（3a）へ
+                // 静かにフォールバックする一方 `--b-pad` 指定側は常に
+                // static staged 変種（3b）を使う非対称が生じ、両者の差分を
+                // `b_pad` の効果と誤認しうる（`docs/perf/
+                // cuda-gemm-wmma-tf32-staged-bank-conflict.md` の採否基準
+                // へ誤った値が使われる恐れ）。staged 不在時は opt へ
+                // フォールバックせず非 0 終了し、両側が同一の static
+                // staged 実装で比較されることを保証する。
                 //
                 // ここでの終了コードは上の `CudaDevice::new`／
                 // `CudaGemm::new` 失敗時の扱いと揃える: `CudaDevice::new`
@@ -647,32 +663,36 @@ fn main() {
                 // （`DriverUnavailable` 以外の `CudaDevice::new` エラー・
                 // `CudaGemm::new`／`CudaMmaGemm::new` 失敗）は常に非 0
                 // 終了する。ここに到達するのは CUDA デバイス・
-                // `CudaGemm::new` 自体は成立した上で opt カーネルの
+                // `CudaGemm::new` 自体は成立した上で staged カーネルの
                 // NVRTC ロードのみが失敗した場合
-                // （`wmma_tf32_opt_unavailable_reason()` が理由を保持
+                // （`wmma_tf32_staged_unavailable_reason()` が理由を保持
                 // していることからも NVRTC コンパイル失敗等の異常系で
-                // あることが分かる）であり、オペレーターは opt カーネル
+                // あることが分かる）であり、オペレーターは staged カーネル
                 // をプロファイルする意図でこのバイナリを実機（GPU が
                 // 動く環境）で起動している。この場合に exit 0 で「正常
                 // 終了」に見せると、ncu 実行スクリプト側が失敗を検知
-                // できず基本カーネルの結果を opt カーネルの正常計測と
-                // して記録表へ転記してしまう（PR #637 codex-review 指摘
-                // の「実行手順もこの終了状態を検査しないため誤った
-                // ボトルネック分析に進みうる」の直接原因）。よって非 0
-                // 終了させ、§3.3 の採取ループ
+                // できずフォールバックカーネルの結果を staged カーネルの
+                // 正常計測として記録表へ転記してしまう（PR #637
+                // codex-review 指摘の「実行手順もこの終了状態を検査しない
+                // ため誤ったボトルネック分析に進みうる」と同型のリスク）。
+                // よって非 0 終了させ、§3.3 の採取ループ
                 // （`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）側の
                 // `set -o pipefail` と組み合わせて誤計測をループ内で
                 // 検知させる。
-                if gemm.wmma_tf32_opt_available() {
-                    println!("wmma_tf32 opt kernel: AVAILABLE (used for this run's launches).");
+                if gemm.wmma_tf32_staged_available() {
+                    println!(
+                        "wmma_tf32 staged kernel: AVAILABLE (used for this run's launches; \
+                         same static __shared__ layout/occupancy as a --b-pad run of this \
+                         binary)."
+                    );
                 } else {
                     eprintln!(
-                        "backend-cuda gemm_profile_target: wmma_tf32 opt kernel unavailable \
-                         ({}); aborting instead of falling back to the basic (non-optimized) \
+                        "backend-cuda gemm_profile_target: wmma_tf32 staged kernel unavailable \
+                         ({}); aborting instead of falling back to the opt/basic (non-staged) \
                          WMMA(TF32) kernel, because ncu results for the fallback kernel would \
-                         not represent the opt-kernel data-reuse characteristics under \
-                         diagnosis.",
-                        gemm.wmma_tf32_opt_unavailable_reason()
+                         not be directly comparable to a --b-pad run (which always uses the \
+                         static staged variant), and could be misattributed to b_pad's effect.",
+                        gemm.wmma_tf32_staged_unavailable_reason()
                             .unwrap_or("unknown reason")
                     );
                     std::process::exit(1);
