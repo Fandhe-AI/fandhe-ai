@@ -127,13 +127,18 @@
 //! コンストラクタ）へ本番結線したが、PR #758 レビュー指摘（採用基準
 //! 〈2048/4096 両方の改善〉未達のまま代替基準へ読み替えていたこと・
 //! 結線前必須確認〈spill／bit 一致／parity〉未実施・CI 恒久検査が
-//! GB10 未実測の SM 数を実測値と誤扱いしていたこと）により差し戻した
-//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2 参照）。`new` は現在
-//! swizzle 無適用の base カーネル（`kernels_mma::mma_f16_source()`）を
-//! 返す。swizzle 適用版は引き続き `new_with_swizzle`（`internal-
-//! diagnostics` feature 限定）から opt-in で利用できる。§4 の採用基準を
-//! 字義どおり満たすか、人間承認を伴って基準を正式改訂したうえで
-//! 再結線を検討する。
+//! GB10 未実測の SM 数を実測値と誤扱いしていたこと）により差し戻した。
+//!
+//! イシュー #775 で 2026-08-20 GB10 実機再計測（4096: base 34.4089 →
+//! swizzle(動的幅 g8) 54.3055 TFLOPS・×1.578 が安定再現。512〜2048 は
+//! ×0.979〜0.992）を根拠に、**サイズ条件付き適用**（総タイル数
+//! `num_m_blocks * num_n_blocks >= 2048`。[`swizzle::should_apply_swizzle`]）
+//! で `gemm_mma::CudaMmaGemm::new`／`launch_f16` へ再結線した
+//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2・§4 参照。#758 差し戻し理由の
+//! うち採用基準はイシュー #775 のユーザー起票の受け入れ条件を承認記録
+//! として明記、SM 数は `device.multiprocessor_count()` 実測値を動的に
+//! 使うことでハードコード依存を解消）。`new` は base・swizzle 変種の両方を
+//! コンパイルし、`launch_f16` が形状ごとに適用有無を判定する。
 //!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
@@ -331,12 +336,13 @@ pub mod diagnostics {
     /// 到達するにはこの diagnostics 経由の薄いラッパーが必要
     /// （`mma_f16_block_tile`・`wmma_tf32_opt_block_tile` と同じ理由・
     /// 同じ feature ゲート方針）。`gemm_mma::CudaMmaGemm::new`（本番既定
-    /// コンストラクタ）はイシュー #740 で一時この式を直接呼ぶよう結線
-    /// されたが、PR #758 レビュー指摘により差し戻し済み（`new` は現在
-    /// swizzle 無適用の base カーネルを返す。`gemm_mma.rs::CudaMmaGemm::
-    /// new` ドキュメンテーションコメント参照）。本関数は A/B 計測
+    /// コンストラクタ）はイシュー #775 でこの式を直接呼ぶよう結線した
+    /// （`gemm_mma.rs::CudaMmaGemm::new` ドキュメンテーションコメント
+    /// 参照。サイズ条件付き適用は `swizzle::should_apply_swizzle` が
+    /// 別途判定する）。本関数は A/B 計測
     /// （`examples/gemm_mma_swizzle_bench.rs`）専用の診断用ラッパーで
-    /// あり続ける。
+    /// あり続ける（本番経路とは独立に固定候補 `{8,16}` を個別計測する
+    /// 用途のため）。
     pub fn mma_swizzle_group_width(num_sms: u32) -> u32 {
         swizzle::select_swizzle_group_width(num_sms, kernels_mma::MMA_BM, kernels_mma::MMA_BN)
     }

@@ -23,20 +23,18 @@
 //! [`select_swizzle_group_width`] はイシュー #740 で一時
 //! `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ）へ本番結線
 //! したが、PR #758 レビュー指摘（採用基準未達・事前確認未実施・本
-//! モジュールが依拠する SM 数入力の誤り）により差し戻し済み
-//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2 参照）。旧 #499 セッション時と
-//! 同様、opt-in（`internal-diagnostics` feature）経由の
-//! `lib.rs::diagnostics::mma_swizzle_group_width`（`examples/
-//! gemm_mma_swizzle_bench.rs` の A/B 計測専用）からのみ到達する。
+//! モジュールが依拠する SM 数入力の誤り）により差し戻された。イシュー
+//! #775 で 2026-08-20 GB10 実機再計測（4096: base 34.4089 → swizzle(動的
+//! g8) 54.3055 TFLOPS・×1.578。512/1024/2048 は ×0.979〜0.992）を根拠に、
+//! **サイズ条件付き適用**（[`should_apply_swizzle`]。総タイル数
+//! `num_m_blocks * num_n_blocks >= SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` の
+//! 場合のみ）で `gemm_mma.rs::CudaMmaGemm::launch_f16` へ再結線した
+//! （`docs/perf/cuda-gemm-swizzle-ab.md` §2・§4 参照。#758 差し戻し理由
+//! 3 点のうち (a) 採用基準はイシュー #775 のユーザー承認記録として本番
+//! doc へ明記、(c) SM 数は `device.multiprocessor_count()` 実測値を動的
+//! に使う〈ハードコード値への依存を排除〉ことで解消）。
 
 /// グルーピング幅の選択候補（DeepGEMM 同型の 2 候補。実装計画 1 節）。
-///
-/// イシュー #740 の本番結線は PR #758 レビュー指摘により差し戻し済み
-/// （本ファイル冒頭コメント参照）。呼び出し元は `internal-diagnostics`
-/// feature 限定の診断用ラッパー経由のみに戻ったため、通常ビルド
-/// （feature 指定なし）では到達不能で `#[allow(dead_code)]` が必要
-/// （旧 #499 セッション時点と同じ判断）。
-#[allow(dead_code)]
 const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 
 /// グルーピング幅 `g` を仮定した場合の L2 footprint 近似コスト
@@ -60,11 +58,6 @@ const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 /// `num_sms` は実測値だが、桁溢れを事前に排除しておくことで呼び出し側の
 /// 追加検証を不要にする。REQ-8 の「境界検査を省略しない」精神を数値計算
 /// 側にも適用した安全側の実装）。
-///
-/// [`GROUP_WIDTH_CANDIDATES`] と同じ理由（イシュー #740 の本番結線差し
-/// 戻し。本ファイル冒頭コメント参照）で通常ビルドでは到達不能なため
-/// `#[allow(dead_code)]` を付す。
-#[allow(dead_code)]
 fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u32) -> u64 {
     let (num_sms, block_m, block_n, group_width) = (
         u64::from(num_sms),
@@ -84,16 +77,13 @@ fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u3
 /// 小さいほど 1 グループが専有する SM 数・L2 footprint が小さく、
 /// 効果が過大に振れるリスクが低い）。
 ///
-/// 呼び出し文脈: イシュー #740 で一時 `gemm_mma.rs::CudaMmaGemm::new`
-/// （本番既定コンストラクタ）から本番結線したが PR #758 レビュー指摘に
-/// より差し戻し済み（本ファイル冒頭コメント参照）。現在の呼び出し元は
-/// 診断用ラッパー `lib.rs::diagnostics::mma_swizzle_group_width`
-/// （`internal-diagnostics` feature 経由）のみ（`examples/
-/// gemm_mma_swizzle_bench.rs` の A/B 計測用に `new_with_swizzle` へ
-/// 明示的に渡す `group_width` を決める用途。`new_with_swizzle` 自身は
-/// 本関数を呼ばず、呼び出し元が渡した値をそのまま使う）。通常ビルド
-/// （feature 指定なし）では到達不能なため `#[allow(dead_code)]` を付す。
-#[allow(dead_code)]
+/// 呼び出し文脈: イシュー #775 で `gemm_mma.rs::CudaMmaGemm::new`
+/// （本番既定コンストラクタ）が、swizzle 変種カーネルをコンパイルする際の
+/// グルーピング幅決定にこの関数を使う（`device.multiprocessor_count()`
+/// 実測値ベース。本ファイル冒頭コメント参照）。診断用ラッパー
+/// `lib.rs::diagnostics::mma_swizzle_group_width`（`internal-diagnostics`
+/// feature 経由。`examples/gemm_mma_swizzle_bench.rs` の A/B 計測用）からも
+/// 引き続き呼ばれる。
 pub fn select_swizzle_group_width(num_sms: u32, block_m: u32, block_n: u32) -> u32 {
     let mut best = GROUP_WIDTH_CANDIDATES[0];
     let mut best_usage = swizzle_group_usage(num_sms, block_m, block_n, best);
@@ -183,6 +173,33 @@ pub fn swizzled_block_idx(
         let m_block = full_groups * group_width + m_in_group;
         (m_block, n_block)
     }
+}
+
+/// swizzle 適用の閾値（総ブロックタイル数。`num_m_blocks * num_n_blocks`）。
+///
+/// イシュー #775 の 2026-08-20 GB10 実機 A/B 計測（`docs/perf/
+/// cuda-gemm-swizzle-ab.md` §6）で、M=N=K=4096（`num_m_blocks=64・
+/// num_n_blocks=32`。`kernels_mma::MMA_BM=64`/`MMA_BN=128` 単位。総タイル数
+/// 2048）が ×1.578（base 34.4089 → swizzle 54.3055 TFLOPS）の改善を安定
+/// 再現した一方、M=N=K=2048（`num_m_blocks=32・num_n_blocks=16`。総タイル数
+/// 512）は ×0.992（中立〜微減）だった。実測で改善を確認した点（総タイル数
+/// 2048）以上のみ適用する保守的な閾値とし、実測点未満（512〜2048 側）へは
+/// 外挿しない（`should_apply_swizzle` 参照）。
+pub const SWIZZLE_APPLY_TILE_COUNT_THRESHOLD: u64 = 2048;
+
+/// グリッド形状（`num_m_blocks x num_n_blocks`。`gemm_mma.rs::
+/// mma_launch_config` が構築する grid_dim.y/x に対応）から、swizzle remap
+/// を適用すべきかを判定する（イシュー #775 のサイズ条件付き本番結線。
+/// [`SWIZZLE_APPLY_TILE_COUNT_THRESHOLD`] ドキュメンテーションコメント
+/// 参照）。
+///
+/// 呼び出し元: `gemm_mma.rs::CudaMmaGemm::launch_f16`（本番既定経路。形状
+/// ごとに base／swizzle 変種いずれのカーネルを起動するか、この関数の
+/// 戻り値で分岐する）。`u64` 積で `u32` 同士のオーバーフローを避ける
+/// （[`swizzle_group_usage`] と同じ安全側方針。REQ-8 の「境界検査を省略
+/// しない」精神を数値計算側にも適用）。
+pub fn should_apply_swizzle(num_m_blocks: u32, num_n_blocks: u32) -> bool {
+    u64::from(num_m_blocks) * u64::from(num_n_blocks) >= SWIZZLE_APPLY_TILE_COUNT_THRESHOLD
 }
 
 #[cfg(test)]
@@ -343,5 +360,41 @@ mod tests {
                 swizzled_block_idx(linear_idx as u32, num_m_blocks, num_n_blocks, group_width);
             assert_eq!(got, want, "linear_idx={linear_idx}");
         }
+    }
+
+    /// [`should_apply_swizzle`] の境界値検査（実装計画 2 節「swizzle.rs」）。
+    /// M=N=K=4096（`num_m_blocks=64・num_n_blocks=32`。総タイル数 2048）は
+    /// 閾値ちょうど・M=N=K=2048（`num_m_blocks=32・num_n_blocks=16`。総タイル数
+    /// 512）は明確に未達（`docs/perf/cuda-gemm-swizzle-ab.md` §6 実測値と
+    /// 対応する具体的な形状で検査する。閾値定数直下のドキュメンテーション
+    /// コメント参照）。
+    #[test]
+    fn should_apply_swizzle_matches_4096_and_2048_measured_shapes() {
+        // M=N=K=4096 相当: num_m_blocks=64, num_n_blocks=32 → 総タイル数 2048。
+        assert!(should_apply_swizzle(64, 32));
+        // M=N=K=2048 相当: num_m_blocks=32, num_n_blocks=16 → 総タイル数 512。
+        assert!(!should_apply_swizzle(32, 16));
+    }
+
+    /// 閾値の丁度・1 個未満の境界を直接検査する（`SWIZZLE_APPLY_TILE_COUNT_
+    /// THRESHOLD = 2048`）。
+    #[test]
+    fn should_apply_swizzle_boundary_at_threshold() {
+        // 2047 タイル（例: 89 x 23 = 2047）は未適用。
+        assert!(!should_apply_swizzle(89, 23));
+        // 2048 タイル（例: 64 x 32、または 2048 x 1）はちょうど適用。
+        assert!(should_apply_swizzle(64, 32));
+        assert!(should_apply_swizzle(2048, 1));
+        // 非正方形状（M 方向のみ大きい）でも総タイル数基準で判定する。
+        assert!(should_apply_swizzle(4096, 1));
+        assert!(!should_apply_swizzle(1, 2047));
+    }
+
+    /// `u32::MAX` 同士の積で `u64` 計算がオーバーフローしないことを検査する
+    /// （閾値定数直下ドキュメンテーションコメント「REQ-8 の境界検査を数値
+    /// 計算側にも適用」参照）。
+    #[test]
+    fn should_apply_swizzle_does_not_overflow_on_large_inputs() {
+        assert!(should_apply_swizzle(u32::MAX, u32::MAX));
     }
 }

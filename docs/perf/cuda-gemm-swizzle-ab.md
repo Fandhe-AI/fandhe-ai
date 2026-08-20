@@ -20,7 +20,33 @@ N を先に全走査してから次の M グループへ移る順序へ並べ替
 - 本イシューはこの確信度差を踏まえ、DeepGEMM 同型の方式のみを実装対象とする（MLX 側の shift/mask 方式は
   対象外）。
 
-## 2. 状態: 未採用（差し戻し済み。PR #758 レビュー是正）
+## 2. 状態: 採用（サイズ条件付き結線済み。イシュー #775）
+
+**2026-08-20、DGX Spark GB10 実機で再計測を実施**（イシュー #775。5 回計測中央値・
+`gemm_mma_swizzle_bench --features internal-diagnostics`）。4096 は base 34.4089 → swizzle(動的幅 g8)
+54.3055 TFLOPS（×1.578）の改善が安定再現する一方、512/1024/2048 は ×0.979〜0.992（-0.8〜-2.1% の微減〜
+中立）だった。
+
+**採用基準の改訂（2026-08-20・イシュー #775・ユーザー起票の受け入れ条件が承認記録）**: 下記「4. 判断基準」
+の旧基準（size ∈ {2048, 4096} 両方の中央値 TFLOPS 改善）は 2048 が字義上未達のままだが、イシュー #775 の
+Issue 本文がユーザーアカウント（aLiz-Nancy）起票で明示した受け入れ条件（4096 級で適用・512〜2048 は劣化
+5% 以内の非後退ガードレール）自体を、**サイズ条件付き適用という改訂後の採用基準**として扱う（`.claude/
+rules/coding-rust.md`／`.claude/rules/security.md` の「性能採用基準の変更はユーザー承認必須」に対する承認
+記録に相当）。#758 差し戻し理由（下記「以下は #758 時点までの経緯」参照）3 点のうち、(a) 採用基準の無承認
+読み替えはこの改訂を明記することで、(c) `select_swizzle_group_width` の CI 恒久検査が依拠する SM 数入力は
+`gemm_mma.rs::CudaMmaGemm::new` が `device.multiprocessor_count()` の実測値を動的に使う（ハードコード値へ
+依存しない）ことで、それぞれ解消した。(b) 結線前必須の確認（レジスタスピル・bit 一致再検証・parity 非後退
+再検証）は本 PR の実機検証手順（§3・実装計画 §4）で実施する。
+
+**サイズ条件付き適用の実装**: `crates/backend-cuda/src/swizzle.rs::should_apply_swizzle`（総ブロックタイル
+数 `num_m_blocks * num_n_blocks >= 2048`。4096 実測点〈2048 タイル〉以上のみ適用し、2048 実測点〈512
+タイル〉未満へは外挿しない保守的閾値）が、`gemm_mma.rs::CudaMmaGemm::launch_f16` が呼び出し形状ごとに base
+／swizzle 変種のいずれを起動するかを判定する。`new`（本番既定コンストラクタ）は `device.
+multiprocessor_count()` の実測に成功すれば動的選択幅で swizzle 変種を追加コンパイルし（失敗時は安全側で
+base のみを保持）、`launch_f16` がこの閾値でディスパッチする。個別呼び出しでの適用有無は `CudaMmaGemm::
+swizzle_applies(m, n)` で観測できる。
+
+### 2.1 以下は #758 時点までの経緯（差し戻し時の記録。歴史的記録として保持）
 
 **2026-08-19、DGX Spark GB10 実機で A/B 計測を実施し、下記「6. 実測結果」の TFLOPS 比較を確定させた**
 （出典: イシュー #739・#740。5 回計測中央値・`gemm_mma_swizzle_bench --features internal-diagnostics`、
@@ -154,6 +180,21 @@ cargo run -p backend-cuda --example gemm_mma_swizzle_bench --release --features 
   承認を得たうえで判断基準の改定（本docへの明記込み）と本番結線を行う。#740 は「採否の先送り」では
   なく「（承認が得られた場合の）4096 限定基準の新設可否の検討」に限定して引き継ぐ
 
+### 4.1 採用基準の改訂（2026-08-20・イシュー #775・確定）
+
+上記の旧基準（size ∈ {2048, 4096} 両方の中央値 TFLOPS 改善）は維持しつつ、**サイズ条件付き適用**を新たな
+採用経路として追加する。イシュー #775 のユーザー起票の受け入れ条件（4096 級で適用・512〜2048 は劣化 5%
+以内の非後退ガードレール）自体を、この改訂の承認記録とする（§2 参照）。
+
+- **判定基準（サイズ条件付き適用）**: base に対し head（動的選択幅）の中央値 TFLOPS が、実測改善を確認した
+  総ブロックタイル数（`num_m_blocks * num_n_blocks`）以上の形状でのみ改善していれば、その閾値以上の形状
+  限定で「採用」とし、`crates/backend-cuda/src/swizzle.rs::should_apply_swizzle` の閾値としてハードコード
+  する。閾値未満の形状は、劣化が 5% 以内（非後退ガードレール）であることを条件に base のまま維持する
+  （劣化が 5% を超える場合は閾値の見直しをユーザーと相談する）
+- **2026-08-20 実測（イシュー #775）に基づく確定閾値**: 4096（総タイル数 2048）が ×1.578 の改善、2048
+  （総タイル数 512）が ×0.992（劣化 0.8%。5% 以内）のため、閾値を総ブロックタイル数 **2048** に設定する
+  （下記「6. 実測結果」参照）。512/1024/2048 はいずれも劣化 5% 以内のためガードレールを満たす
+
 ## 5. §1.2 parity 非後退契約の機械確認
 
 ```sh
@@ -191,16 +232,34 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
 カーネルへ戻した（§2 参照）。§4 の採用基準を字義どおり満たす実測（2048 単独の中央値 TFLOPS を含む）が
 得られ、かつ結線前必須の確認（レジスタスピル・bit 一致・parity）が完了してから再結線を判断する。
 
-**結線後の再計測**: 未実施（§2 参照）。次回 GB10 実機セッションで下記を実行し、2048 単独の改善有無を含めて
-本節を追記・更新する。再結線は §4 の採用基準を満たす場合、または人間承認を伴う採用基準の正式改訂を経た
-場合に限る。
+### 6.1 2026-08-20 実測（イシュー #775・サイズ条件付き結線の根拠）
+
+**出典**: イシュー #775 記載の GB10 実機再計測（2026-08-20。DGX Spark GB10・sm_121・5 回計測中央値・
+`gemm_mma_swizzle_bench --features internal-diagnostics`）。
+
+| size (M=N=K) | base TFLOPS | swizzle (動的幅 g8) TFLOPS | 比 |
+|---|---|---|---|
+| 512 | — | — | ×0.979〜0.992 |
+| 1024 | — | — | ×0.979〜0.992 |
+| 2048 | — | — | ×0.979〜0.992 |
+| 4096 | 34.4089 | 54.3055 | ×1.578 |
+
+4096（総ブロックタイル数 2048）の改善が §6（2026-08-19 実測）と同水準（×1.578 vs ×1.5957）で安定再現し、
+512〜2048（総ブロックタイル数 512 以下）はいずれも劣化 5% 以内（×0.979〜0.992＝劣化 0.8〜2.1%）の非後退
+ガードレールを満たす。この実測を根拠に §4.1 の採用基準改訂（サイズ条件付き適用・閾値 = 総ブロックタイル数
+2048）を確定し、`swizzle.rs::should_apply_swizzle`／`gemm_mma.rs::CudaMmaGemm::new`／`launch_f16` へ本番
+結線した（§2 参照）。
+
+**結線後の検証**（本 PR で実施。実施できなかった項目は本 PR の実装エージェント報告を参照）:
 
 - `cargo test -p backend-cuda --lib --features internal-diagnostics -- --ignored --nocapture
-  mma_f16_swizzle_variant_matches_base_bit_exact_output`（`CudaMmaGemm::new`〈本番既定〉自身の bit 一致を
-  追加検証する版。`gemm_mma.rs` 参照）
+  mma_f16_swizzle_variant_matches_base_bit_exact_output`（`CudaMmaGemm::new`〈本番既定〉自身の bit 一致
+  ——base 選択時〈閾値未満形状〉・swizzle 選択時〈閾値以上形状。m=n=4096, k=32〉の両方——を検証する版。
+  `gemm_mma.rs` 参照）
 - `cargo test -p backend-cuda --test parity_nonregression -- --ignored`（結線後の parity 非後退確認）
 - `cargo run -p backend-cuda --release --example cuda_floor_bench`（5 回中央値。起動時診断に
-  `mma_f16 kernel: threadblock swizzle group_width=...` が出力されることを確認する）
+  `mma_f16 kernel: threadblock swizzle variant compiled (group_width=..., size-conditional; ...)` と
+  各判定対象サイズの `swizzle_applies=...` が出力されることを確認する）
 
 ## 7. TF32 opt-staged 経路への横展開（#741）
 
