@@ -546,17 +546,28 @@ jobs:
       # 従来は手動実行のみだった（`docs/oss-comparison-harness-decision.md`）。
       # ここでは本パッケージ専用の `deny.toml`（licenses・sources のみ。同ファイル
       # 冒頭コメント参照）を対象に `cargo deny check licenses sources` を実行する。
+      # cargo-deny バイナリのバージョンをキャッシュキーに含める（CI 実障害の原因調査・
+      # イシュー #755 review 指摘対応）。従来はバージョン非固定（`cargo install
+      # cargo-deny --locked` のみ）かつキャッシュキーにバージョンを含めていなかった
+      # ため、過去に一度キャッシュされた古い cargo-deny バイナリ（`check` サブコマンド
+      # 配下で `--config` を受け付けない版）が永続的に再利用され、コマンド呼び出し側
+      # の引数順序（`check --config ...`）を先に正しく直しても
+      # `error: unexpected argument '--config' found` で fail し続けていた（実行ログ
+      # 実測: run 32325590243 job 96296066750。ローカルで同一コマンドを cargo-deny
+      # 0.19.8 で実行すると `licenses ok, sources ok` で成功することを確認済み）。
+      # バージョンを明示固定しキャッシュキーへ含めることで、バージョン変更時に
+      # 確実にキャッシュが再構築されるようにする。
       - name: cargo-deny バイナリのキャッシュ
         if: steps.detect.outputs.has_cargo == 'true'
         id: cargo-deny-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cargo/bin/cargo-deny
-          key: cargo-deny-bin-${{ runner.os }}
+          key: cargo-deny-bin-${{ runner.os }}-0.19.8
 
       - name: Ensure cargo-deny（未導入時のみソースビルド。lefthook/Makefile と同一の冪等パターン）
         if: steps.detect.outputs.has_cargo == 'true' && steps.cargo-deny-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-deny --locked
+        run: cargo install cargo-deny --version =0.19.8 --locked
 
       - name: OSS 直接比較ハーネスのライセンス監査
         # --config は `check` サブコマンドのオプションのため `check` の後に置く
