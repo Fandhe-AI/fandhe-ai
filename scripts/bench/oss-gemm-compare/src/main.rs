@@ -71,10 +71,19 @@ const ABS_TOL: f32 = 1e-5;
 /// CLI 引数を検証して計測対象サイズ一覧を返す（OWASP A03: 外部入力の検証を
 /// 数値パースの成否のみに委ねず、正の整数であることを明示的に確認する）。
 ///
-/// 引数なしの場合は [`DEFAULT_SIZES`] を使う。`--sizes 512,1024` 形式で
-/// カンマ区切りの正整数列を受理する。パース失敗・0 以下の値は即座に
-/// エラーメッセージを表示して非 0 終了する（fail-closed。シェル展開・eval は
-/// 一切使わない）。
+/// `--sizes` フラグ自体が引数列に存在しない場合のみ [`DEFAULT_SIZES`] を使う。
+/// `--sizes 512,1024` 形式でカンマ区切りの正整数列を受理する。パース失敗・
+/// 0 以下の値・**`--sizes` はあるのに値トークンが続かない場合**（末尾に
+/// `--sizes` だけが置かれた等）は、いずれも即座にエラーメッセージを表示して
+/// 非 0 終了する（fail-closed。シェル展開・eval は一切使わない）。
+///
+/// レビュー指摘対応（イシュー #755）: 従来実装は `--sizes` の直後の値の
+/// 有無を `Option` の `and_then` で素通しし、値が取れなければ「`--sizes`
+/// 自体が未指定」の場合と区別せずに [`DEFAULT_SIZES`] へフォールバックして
+/// いた。これは呼び出し側が明示的にサイズを指定しようとして誤って値を
+/// 書き忘れた場合に、黙って既定サイズで実行してしまう fail-open な挙動
+/// だったため、「フラグ不在」と「フラグはあるが値なし」を明示的に区別し、
+/// 後者はエラー終了させる。
 ///
 /// 各 `size` について `size * size` 要素の `Vec<f32>`（`main` の `a`/`b`/`c_*`
 /// 系バッファ）を確保するため、`size * size` がバイト換算（`* 4`）を含め
@@ -87,13 +96,18 @@ const ABS_TOL: f32 = 1e-5;
 /// 事前に型付きエラーで防ぐ。fail-closed）。
 fn parse_sizes() -> Vec<usize> {
     let args: Vec<String> = std::env::args().collect();
-    let sizes_arg = args
-        .iter()
-        .position(|a| a == "--sizes")
-        .and_then(|idx| args.get(idx + 1));
+    let flag_pos = args.iter().position(|a| a == "--sizes");
 
-    let Some(raw) = sizes_arg else {
+    let Some(idx) = flag_pos else {
+        // `--sizes` フラグ自体が指定されていない: 既定サイズを使う。
         return DEFAULT_SIZES.to_vec();
+    };
+
+    let Some(raw) = args.get(idx + 1) else {
+        // `--sizes` は指定されたが値トークンが続かない: 既定へフォールバック
+        // せず fail-closed でエラー終了する（レビュー指摘対応。イシュー #755）。
+        eprintln!("error: --sizes に値が指定されていない（例: --sizes 512,1024）");
+        std::process::exit(2);
     };
 
     let mut sizes = Vec::new();
