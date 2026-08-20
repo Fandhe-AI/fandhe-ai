@@ -472,7 +472,10 @@ jobs:
     # OSS 直接比較ハーネスのテスト実行ステップ（`cargo test --release`。stride
     # 契約回帰テストを CI 上で実行するため。Cursor Bugbot 指摘対応）を追加したため
     # 25 → 30 に引き上げる。
-    timeout-minutes: 30
+    # advisories/bans を監査範囲へ追加（PR #770 review 指摘 P1 対応）したことで
+    # RUSTSEC アドバイザリ DB の初回 clone が加わるため 30 → 35 に引き上げる
+    # （ルート deny ジョブの `deny-timeout-minutes` 既定 20 分と同様の余裕を確保）。
+    timeout-minutes: 35
     steps:
       - name: Checkout
         # persist-credentials: false（fmt ジョブと同一方針）。
@@ -535,13 +538,17 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/check-forbidden-deps.sh tree
 
-      # OSS 直接比較ハーネス（scripts/bench/oss-gemm-compare/）専用のライセンス監査
+      # OSS 直接比較ハーネス（scripts/bench/oss-gemm-compare/）専用の依存監査
       # （イシュー #755 review 指摘対応・ユーザー承認条件「ライセンス監査を CI に
       # 組み込む」の実体）。本パッケージは本体 workspace の member ではないため
       # ルート `deny.toml`（rust-ci ジョブ経由の cargo-deny）の走査対象に含まれず、
       # 従来は手動実行のみだった（`docs/oss-comparison-harness-decision.md`）。
-      # ここでは本パッケージ専用の `deny.toml`（licenses・sources のみ。同ファイル
-      # 冒頭コメント参照）を対象に `cargo deny check licenses sources` を実行する。
+      # ここでは本パッケージ専用の `deny.toml`（advisories・bans・licenses・sources。
+      # 同ファイル冒頭コメント参照。PR #770 review 指摘 P1 対応・2026-08-20 ユーザー
+      # 承認で advisories/bans へ監査範囲を拡張し `RUSTSEC-2024-0436`〈`paste`
+      # unmaintained・`gemm =0.19.0` の推移的依存・アップグレード先なし〉を理由
+      # コメント付きで ignore 登録済み）を対象に
+      # `cargo deny check advisories bans licenses sources` を実行する。
       # cargo-deny バイナリのバージョンをキャッシュキーに含める（CI 実障害の原因調査・
       # イシュー #755 review 指摘対応）。従来はバージョン非固定（`cargo install
       # cargo-deny --locked` のみ）かつキャッシュキーにバージョンを含めていなかった
@@ -565,23 +572,25 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true' && steps.cargo-deny-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-deny --version =0.19.8 --locked
 
-      - name: OSS 直接比較ハーネスのライセンス監査
+      - name: OSS 直接比較ハーネスの依存監査（advisories/bans/licenses/sources）
         # --config は `check` サブコマンドのオプションのため `check` の後に置く
         # （`cargo-deny --help` 実測: トップレベルには存在せず `check --config` のみ
         # 有効）。明示しないと cargo-deny は既定でカレントディレクトリ（リポジトリ
         # ルート）の deny.toml を探索してしまい、本パッケージ専用の
-        # scripts/bench/oss-gemm-compare/deny.toml（advisories/bans を含まないライセンス
-        # 監査限定の設定）が使われずルート deny.toml が誤って適用される
-        # （--manifest-path は対象 Cargo.toml/Cargo.lock の指定のみで config 探索には
-        # 影響しない。イシュー #755 review 指摘対応。ローカルで
-        # `cargo deny --manifest-path ... --locked check --config ... licenses sources`
-        # が `licenses ok, sources ok` を返すことを実測確認済み）。
+        # scripts/bench/oss-gemm-compare/deny.toml が使われずルート deny.toml が
+        # 誤って適用される（--manifest-path は対象 Cargo.toml/Cargo.lock の指定のみで
+        # config 探索には影響しない。イシュー #755 review 指摘対応）。
+        # advisories/bans を含めるのは PR #770 review 指摘 P1 対応（2026-08-20
+        # ユーザー承認）。ローカルで
+        # `cargo deny --manifest-path ... --locked check --config ...
+        # advisories bans licenses sources` が
+        # `advisories ok, bans ok, licenses ok, sources ok` を返すことを実測確認済み。
         if: steps.detect.outputs.has_cargo == 'true'
         run: |
           cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml \
             --locked check \
             --config scripts/bench/oss-gemm-compare/deny.toml \
-            licenses sources
+            advisories bans licenses sources
 
       # OSS 直接比較ハーネスのテスト実行（Cursor Bugbot 指摘対応。イシュー #755）。
       # 本パッケージは本体 workspace の member ではない独立 Cargo プロジェクトのため、

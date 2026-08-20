@@ -3,15 +3,29 @@
 # ないため、ルート `deny.toml`（`cargo tree --workspace` 相当のルート Cargo.lock を
 # 走査対象とする）の監査範囲に含まれない。この監査欠落を埋めるため、本パッケージ
 # 専用の Cargo.lock を対象に個別に `cargo deny --manifest-path
-# scripts/bench/oss-gemm-compare/Cargo.toml --locked check licenses sources` を
-# CI（.github/workflows/ci.yml の deps-forbidden ジョブ）から実行する
+# scripts/bench/oss-gemm-compare/Cargo.toml --locked check advisories bans licenses
+# sources` を CI（.github/workflows/ci.yml の deps-forbidden ジョブ）から実行する
 # （`docs/oss-comparison-harness-decision.md` 参照。ユーザー承認条件
 # 「ライセンス監査を CI に組み込む」の実体）。
 #
-# advisories・bans はルート `deny.toml` と異なりここでは検査対象に含めない
-# （本パッケージはユーザー承認で「本体 workspace 外限定」の性質を持つ bench
-# 専用ツールであり、承認条件はライセンス監査の CI 組み込みに限定されるため）。
-# ライセンス許可リスト・sources 制約はルート `deny.toml` と同一方針にする。
+# advisories・bans はルート `deny.toml`（#353）と同一方針で監査対象に含める
+# （PR #770 レビュー指摘 P1 対応・2026-08-20 ユーザー承認: 専用 deny.toml の監査範囲を
+# ライセンス限定から advisories/bans へ拡張）。ライセンス許可リスト・sources 制約も
+# 引き続きルート `deny.toml` と同一方針にする。
+
+[advisories]
+# RUSTSEC アドバイザリ監査（vulnerability / unmaintained / unsound / yanked。
+# ルート `deny.toml` の [advisories] と同一方針）。
+version = 2
+ignore = [
+    # RUSTSEC-2024-0436: `paste` （手続き型マクロ crate）が unmaintained
+    # （情報提供型アドバイザリであり脆弱性ではない）。本パッケージの推移的依存
+    # `gemm =0.19.0`（OSS 比較対象の 3 実装の 1 つ。docs/oss-comparison-harness-decision.md）
+    # 経由で固定バージョンとして依存しており、`gemm` 側が `paste` を安全な代替へ
+    # 差し替えた新版は本 PR 時点で存在しない（アップグレード先なし）。
+    # 2026-08-20 ユーザー承認（PR #770 レビュー指摘 P1 対応）。
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2
@@ -38,3 +52,26 @@ confidence-threshold = 0.8
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# 重複バージョン・ワイルドカード依存の監査（ルート `deny.toml` の [bans] と同一方針）。
+# 依存禁止リスト（.claude/rules/deps-policy.md）は scripts/check-forbidden-deps.sh
+# lock-all が本パッケージの Cargo.lock も走査対象に含めて別途検査するため、
+# 本ファイルでは重複させない（`deny = [...]` の明示リストは持たない）。
+
+# 同一クレートの複数バージョン混入の検出。ルート deny.toml と同じく "deny" では
+# ノイズが上回るため警告に留める。
+multiple-versions = "warn"
+
+# バージョン要求 `*` の依存宣言を拒否する（deps-policy.md の `=x.y.z` 完全固定方針に
+# 反するため fail-closed で弾く）。
+wildcards = "deny"
+# 本パッケージは本体 workspace member（`backend-cpu`・`bench-harness`。いずれも
+# `publish = false`）へ version 無指定の path 依存を持つ（比較対象の実装取り込み・
+# 計測プロトコル共用のため。Cargo.toml 冒頭コメント参照）。これらは cargo 上
+# `*` 扱いになるため、ルート `deny.toml` と同一理由で path 依存に限り
+# wildcards の対象外とする（cargo-deny の仕様上 publish 対象クレートの path 依存には
+# 引き続き適用される）。ローカル実測（2026-08-20）で本設定なしでは
+# `backend-cpu`/`backend-cuda`/`backend-metal`/`bench-harness`/`oss-gemm-compare`
+# の path 依存が wildcard エラーとして検出されることを確認済み。
+allow-wildcard-paths = true

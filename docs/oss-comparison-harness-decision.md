@@ -109,6 +109,27 @@ license` と同一値）を明示し `unlicensed` 警告も解消済み。
 パッケージ相当の推移的依存を含む本体側と同水準の網羅性）でも `licenses ok,
 sources ok` を確認済み（2026-08-20 実測。MPL-2.0 等コピーレフトの混入なし）。
 
+**監査範囲の advisories/bans への拡張（PR #770 review 指摘 P1 対応・2026-08-20
+ユーザー承認）**: 上記の初期実装は監査範囲をライセンス（licenses/sources）限定と
+し、advisories（RUSTSEC アドバイザリ）・bans（重複バージョン・ワイルドカード）を
+本体 `deny.toml`（#353）と非対称に除外していた。PR #770 レビューで
+「専用 `deny.toml` に advisories/bans がない」との P1 指摘を受け、監査範囲を
+本体 `deny.toml` と同一方針（advisories/bans/licenses/sources の 4 種）へ拡張する
+方針をユーザーが承認した。`scripts/bench/oss-gemm-compare/deny.toml` に
+`[advisories]`・`[bans]` セクションを追加し、`.github/workflows/ci.yml` の
+「OSS 直接比較ハーネスの依存監査」ステップを
+`cargo deny check advisories bans licenses sources` へ拡張した。
+
+advisories 実測で `RUSTSEC-2024-0436`（`paste` unmaintained）が検出された。
+`paste`（手続き型マクロ crate）は本パッケージの推移的依存 `gemm =0.19.0`
+（OSS 比較対象の 3 実装の 1 つ）経由の固定バージョン依存であり、`gemm` 側が
+`paste` を安全な代替へ差し替えた新版は本 PR 時点で存在しない（アップグレード先
+なし）。同アドバイザリは vulnerability ではなく unmaintained（情報提供型）の
+分類であるため、`[advisories] ignore = ["RUSTSEC-2024-0436"]` として理由コメント
+付きで ignore 登録することを 2026-08-20 にユーザーが承認した
+（`scripts/bench/oss-gemm-compare/deny.toml` の該当コメント参照）。bans 実測
+（`multiple-versions = "warn"`・`wildcards = "deny"`）は違反 0 件を確認済み。
+
 ### CLI 引数の扱い（OWASP A03）
 
 `--sizes` 引数は正整数のカンマ区切りのみを受理し、パース失敗・0 以下の値は
