@@ -75,6 +75,18 @@ CPU（自作 vs `matrixmultiply`・`gemm` crate）・Metal（自作 vs MLX ≈ P
 以後、本パッケージへの依存追加・変更は上記条件（本体 workspace 非混入・
 CI ライセンス監査の維持）を満たす限りにおいて許容される。
 
+**規約側への反映（codex-review P1 指摘対応。先行 PR #772）**: 当初は本承認を
+このハーネス実装 PR（#770）自身の中で規約（`.claude/rules/deps-policy.md`・
+`AGENTS.md`・`.github/codex/prompts/review.md`）へ直接反映していたが、codex-review
+から「例外化の恩恵を受ける PR 自身が同一 PR 内でレビュー基準を書き換えるのは
+enforcement の弱体化であり、独立に審査できる先行 PR へ分離すべき」との P1 指摘
+（未解決スレッド `PRRT_kwDOTuUCJc6ar3-Q`・`PRRT_kwDOTuUCJc6ar3-W`）を受けた。
+指摘は正当と判断し、規約側の変更は先行 PR #772（`docs/755-oss-deps-policy-exception`
+ブランチ）へ分離した。本 PR（#770）は #772 マージ後に確定した基準の下でハーネス
+実体（本ファイル・実装・CI ステップ・実測記録）のみを追加する。適用範囲・承認条件の
+正本は `.claude/rules/deps-policy.md`「適用範囲（本体 workspace 限定）」節であり、
+本節では二重管理しない。
+
 ### ライセンス監査（専用 deny.toml + CI 組み込み。イシュー #755 review 指摘対応）
 
 本体 `deny.toml` は `cargo-deny` の走査対象をルート workspace の `Cargo.lock` に

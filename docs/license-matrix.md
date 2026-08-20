@@ -125,23 +125,13 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 
 ## 8a. 本表の適用範囲外にある監査対象（OSS 直接比較ハーネス。イシュー #755）
 
-本表・`deny.toml`（ルート）が対象とするのは**本体 workspace**（ルート `Cargo.toml`／
-`Cargo.lock`）の依存グラフに限られる（`.claude/rules/deps-policy.md`「適用範囲」節）。
-
-`scripts/bench/oss-gemm-compare/` は `[workspace]` を空テーブルで持つ独立 Cargo
-プロジェクトで、本体 workspace の member ではないため本表の走査対象（4〜5 節の
-`cargo tree`／`cargo metadata` 実測範囲）に含まれない。比較対象として使う
-`matrixmultiply`・`gemm` crate（許容依存 8 区分外）のライセンス監査は、本表とは
-別に本パッケージ専用の `scripts/bench/oss-gemm-compare/deny.toml`（allow リストは
-本表 2 節と同一方針）を用い、CI（`ci.yml` の `deps-forbidden` ジョブ「OSS 直接比較
-ハーネスのライセンス監査」ステップ）で `cargo deny --manifest-path
-scripts/bench/oss-gemm-compare/Cargo.toml --locked check --config
-scripts/bench/oss-gemm-compare/deny.toml licenses sources` を毎回実行して行う。
-
-設計判断の詳細・ユーザー承認条件は `docs/oss-comparison-harness-decision.md`
-（§2.1「スコープ解釈のユーザー承認」・「ライセンス監査」節）を参照。allow
-リストの実体は本表と二重管理しない（`scripts/bench/oss-gemm-compare/deny.toml`
-冒頭コメント参照）。
+`scripts/bench/oss-gemm-compare/`（本体 workspace 外の独立 Cargo プロジェクト）の
+`matrixmultiply`・`gemm` crate は、本表・`deny.toml`（ルート）の走査対象（本体
+workspace の依存グラフ）に含まれない。適用範囲の定義・ユーザー承認条件は
+`.claude/rules/deps-policy.md`「適用範囲（本体 workspace 限定）」節（PR #772 で
+先行して整備）を正とし、本節では二重管理しない。allow リストの実体は本表と二重
+管理せず `scripts/bench/oss-gemm-compare/deny.toml` 冒頭コメントを参照する。
+設計判断の詳細は `docs/oss-comparison-harness-decision.md`（イシュー #755）を参照。
 
 ### 8a-1. 実測（イシュー #755 review 指摘対応。`matrixmultiply`・`gemm` の実ライセンス）
 
