@@ -74,18 +74,21 @@ BLIS 解析モデル系の一般的なキャッシュ階層ブロッキング導
 ため、個別に `#[allow(dead_code)]` で黙らせる代わりにモジュール自体を条件付ける方が
 `.claude/rules/coding-rust.md`（`#[allow]` の安易な追加で黙らせない）と整合する。
 
-トレードオフ: この構成では CI の `cargo build (linux / aarch64-apple-darwin)` ジョブ
-（`cargo build --workspace --locked --target aarch64-apple-darwin --lib`。`cfg(test)` 無効）
-は `cache_params` モジュールをコンパイル対象に含めないため、sysctl FFI（`unsafe` を含む
-唯一の箇所）の型・借用検査は同ジョブでは行われない。この検証は本セッションでローカルに
-`cargo check -p backend-cpu --lib --tests --target aarch64-apple-darwin` を実行して確認
-済み（`unsafe extern "C" fn sysctlbyname` 宣言・呼び出し双方が objc2 系依存を含むクロス
-コンパイル環境で型・借用検査を通過することを確認。実行時の正当性〈実際に正しい値を返すか〉
-は macOS 実機セッションでの検証が必要で、これは本 PR のスコープ外の「実機計測」に含まれる）。
-CI で自動的に検証され続ける経路が必要な場合は、`aarch64-apple-darwin` 向けの `cargo check
---tests` ステップを追加する判断を別途行う（本 PR では追加しない。追加はスコープ外の
-CI ワークフロー変更でありユーザー承認・`.claude/rules/ci.md` の運用注意〈ジョブ追加時の
-ruleset required contexts 更新〉が関わるため）。
+トレードオフ（**#753 レビュー対応で解消**）: この構成では CI の
+`cargo build (linux / aarch64-apple-darwin)` ジョブの既存ステップ（`cargo build
+--workspace --locked --target aarch64-apple-darwin --lib`。`cfg(test)` 無効）は
+`cache_params` モジュールをコンパイル対象に含めないため、sysctl FFI（`unsafe` を含む
+唯一の箇所）の型・借用検査は同ステップでは行われない。当初はローカル実行
+（`cargo check -p backend-cpu --lib --tests --target aarch64-apple-darwin`）での確認
+（`unsafe extern "C" fn sysctlbyname` 宣言・呼び出し双方が objc2 系依存を含むクロス
+コンパイル環境で型・借用検査を通過）に留め、CI での自動検証ステップ追加は「既存ジョブへの
+ステップ追加であり `ci-complete` の `needs`・ruleset required contexts の変更を伴わない」
+ため本 PR スコープ内と判断し直し、`ci.yml` の `build` ジョブへ `cargo check -p backend-cpu
+--tests --target aarch64-apple-darwin`（`Makefile` の `check-cross-cpu-tests` と同一コマンド。
+backend-metal 向け既存ステップと同型）を追加した。同ステップは `cfg(test)` 有効かつ
+`target_os = "macos"` を満たすため `sysctl_ffi` を継続的コンパイル検証の対象に含める
+（実行時の正当性〈実際に正しい値を返すか〉は macOS 実機セッションでの検証が引き続き必要で、
+これは本 PR のスコープ外の「実機計測」に含まれる）。
 
 sysctl FFI 自体は `unsafe` を 1 箇所（`sysctlbyname` 呼び出し）に限定し、`// SAFETY:`
 コメントで不変条件（NUL 終端 C 文字列・書き込み先の有効性・読み取り専用呼び出しの契約）を

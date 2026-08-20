@@ -200,6 +200,24 @@ else
 	@echo "skip: Cargo.toml 未追加のため check-cross-metal-tests をスキップ"
 endif
 
+# イシュー #753 レビュー指摘（codex-review P2）: `backend-cpu::gemm_blis::cache_params`
+# モジュールは本番未結線のため `#[cfg(test)]` 限定でしかコンパイルされず、その内部の
+# `sysctl_ffi`（`cfg(target_os = "macos")` 限定の FFI 宣言）は Linux CI の
+# 通常 `cargo test` では `target_os != "macos"` のため到達しない。上記
+# check-cross-metal-tests と同じ手法（`--tests` で `cfg(test)` を有効化した状態のまま
+# aarch64-apple-darwin へクロス型検査）で `sysctl_ffi` を継続的コンパイル検証の対象に
+# 含める。criterion → alloca 問題は check-cross-metal-tests と同じ理由で
+# `-p backend-cpu --tests` への限定で回避する（`cargo check` はリンクを行わないため
+# macOS SDK 非搭載でも成立する）。
+.PHONY: check-cross-cpu-tests
+check-cross-cpu-tests: ## backend-cpu の cfg(test) 限定コード（sysctl_ffi 等）を aarch64-apple-darwin で型検査する
+ifdef HAS_CARGO
+	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
+	cargo check -p backend-cpu --tests --target aarch64-apple-darwin
+else
+	@echo "skip: Cargo.toml 未追加のため check-cross-cpu-tests をスキップ"
+endif
+
 .PHONY: deny
 deny: ## cargo deny check advisories bans licenses sources（依存監査。cargo-deny 未導入なら自動導入。#353 で advisories / bans 追加）
 ifneq ($(and $(HAS_CARGO),$(HAS_DENY)),)
@@ -358,7 +376,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）

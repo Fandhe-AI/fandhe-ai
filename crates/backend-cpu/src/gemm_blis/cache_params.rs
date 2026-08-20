@@ -24,10 +24,18 @@
 //!    `#[cfg(test)]` のため、CI の通常ビルドジョブ
 //!    （`cargo build (linux / aarch64-apple-darwin)`。`.claude/rules/ci.md`）
 //!    には**含まれない**（`cfg(test)` 無効時は構造的にコンパイル対象外）。
-//!    sysctl FFI 部（[`sysctl_ffi`]）の型・借用検査は `rust-ci` の
-//!    test ジョブ（`cargo test`。`cfg(test)` 有効）が担う。同ジョブは
-//!    Linux ホストのため `cfg(target_os = "macos")` 自体は無効化され
-//!    `sysctl_ffi` はコンパイル対象に含まれない（詳細は
+//!    純関数（[`compute_blocks`] 等・`cfg(target_os = "macos")` 非依存）の
+//!    型・借用検査は `rust-ci` の test ジョブ（`cargo test`。`cfg(test)` 有効）
+//!    が Linux ホスト上で担うが、同ジョブは `target_os != "macos"` のため
+//!    sysctl FFI 部（[`sysctl_ffi`]）自体はコンパイル対象に含まれない
+//!    （**レビュー指摘・#753**: 通常の macOS クロスビルドジョブも
+//!    `cfg(test)` 無効のため到達せず、結果として `sysctl_ffi` を継続的に
+//!    型・借用検査するジョブが存在しない状態だった）。この空白を埋めるため
+//!    `ci.yml` build ジョブに `cargo check -p backend-cpu --tests --target
+//!    aarch64-apple-darwin`（`cfg(test)` 有効かつ `target_os = "macos"`
+//!    クロスターゲット。backend-metal 向け同型ステップと同じ手法。
+//!    `Makefile` の `check-cross-cpu-tests` と同一コマンド）を追加し、
+//!    `sysctl_ffi` を継続的コンパイル検証の対象に含めている（詳細は
 //!    `docs/perf/cpu-gemm-runtime-cache-detect.md` §3）。
 //! 3. **常に到達可能な公開入口**（[`detected_blocks`]）: `#[cfg(test)]`
 //!    ではなく通常ビルドから到達可能な `pub(crate)` 関数とし、

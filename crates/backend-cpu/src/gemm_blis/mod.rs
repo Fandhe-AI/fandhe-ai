@@ -1548,6 +1548,18 @@ mod tests {
     /// （L1D=192KiB・L2=16MiB。#481 §3）を渡して得た `BlockSizes`
     /// （`default_blocks()` とは異なる算出値になる）を GEMM 本体へ通し、
     /// `gemm_naive` と bit 完全一致することを検証する。
+    ///
+    /// #753 レビュー指摘（Bugbot／codex-review）: 本テストは
+    /// `gemm_blis_parallel_with_blocks` を直接呼ぶため、aarch64 実行時は
+    /// `dispatch_region`（aarch64 版）が常に `NeonKernel`（MR=8・NR=12。
+    /// #559）を選ぶ。`compute_blocks` へ渡す `mr`／`nr` を実行時に選ばれる
+    /// カーネルと一致させないと「M4 Max 相当の代表値」の意図から外れる
+    /// ため、`ScalarKernel::MR`／`NR`（4×4）ではなく実際に aarch64 上で
+    /// 走る `NeonKernel` の値を使う（他 arch でも `cargo test` は本テストを
+    /// コンパイル対象に含むため、`NeonKernel` 型自体が存在しない非 aarch64
+    /// では `ScalarKernel` の値へフォールバックする。bit 完全一致の
+    /// 検証意図には mr/nr の実値そのものは影響しない＝非 aarch64 での
+    /// フォールバックは検証結果を歪めない）。
     #[test]
     fn gemm_blis_parallel_compute_blocks_m4_max_like_values_match_naive_bit_exact() {
         let (m, n, k) = (200, 600, 700);
@@ -1557,13 +1569,13 @@ mod tests {
         let mut c_naive = vec![0.0f32; m * n];
         crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
 
-        let blocks = cache_params::compute_blocks(
-            192 * 1024,
-            16 * 1024 * 1024,
-            ScalarKernel::MR,
-            ScalarKernel::NR,
-        )
-        .expect("M4 Max 相当の正当な値は Some を返すはず");
+        #[cfg(target_arch = "aarch64")]
+        let (mr, nr) = (microkernel::NeonKernel::MR, microkernel::NeonKernel::NR);
+        #[cfg(not(target_arch = "aarch64"))]
+        let (mr, nr) = (ScalarKernel::MR, ScalarKernel::NR);
+
+        let blocks = cache_params::compute_blocks(192 * 1024, 16 * 1024 * 1024, mr, nr)
+            .expect("M4 Max 相当の正当な値は Some を返すはず");
         assert_ne!(
             blocks,
             default_blocks(),
@@ -2198,13 +2210,28 @@ mod tests {
             samples[samples.len() / 2]
         }
 
-        // 実行時に一度だけ決定する: 対象は本テスト実行環境で実際に
-        // dispatch_region が選ぶマイクロカーネルではなく、
-        // `default_blocks()` と同じく ISA 非依存の代表値（ScalarKernel の
-        // MR/NR）で `detected_blocks()` を評価する（本番 3 公開関数の
-        // `blocks` が ISA によらず単一の値である設計〈本ファイル冒頭
-        // `default_blocks` ドキュメント参照〉と揃える）。
-        let detected = cache_params::detected_blocks(ScalarKernel::MR, ScalarKernel::NR);
+        // #753 レビュー指摘（Bugbot／codex-review）: 本ハーネスは実機
+        // （Apple M4 Max）実行時の性能ゲート判断材料のため、
+        // `dispatch_region`（aarch64 版）が実際に選ぶ `NeonKernel`
+        // （MR=8・NR=12。#559）の値で `detected_blocks()` を評価する
+        // 必要がある。従来 `ScalarKernel` の MR/NR（4×4）を渡していたが、
+        // これは実行される `run_detected`／`run_2d`（いずれも
+        // `gemm_blis_parallel_*_with_blocks` 経由で aarch64 上は常に
+        // `NeonKernel` を実行する）のカーネル形状と乖離しており、
+        // KC = (L1/2)/(4*(mr+nr)) の算出結果が実カーネルに対して最適化
+        // されない値になっていた（本番 3 公開関数の既定 `default_blocks()`
+        // は MR/NR に依存しない固定定数〈本ファイル冒頭ドキュメント参照〉
+        // のため無関係）。他 arch でも `cargo test`（`--ignored` を渡さない
+        // 通常実行時含む）が本関数をコンパイル対象に含むため、
+        // `NeonKernel` 型自体が存在しない非 aarch64 では `ScalarKernel` の
+        // 値へフォールバックする（本ハーネス自体が Apple M4 Max 実機専用
+        // のため非 aarch64 での実行は想定外＝フォールバック値は計測結果に
+        // 影響しない）。
+        #[cfg(target_arch = "aarch64")]
+        let (mr, nr) = (microkernel::NeonKernel::MR, microkernel::NeonKernel::NR);
+        #[cfg(not(target_arch = "aarch64"))]
+        let (mr, nr) = (ScalarKernel::MR, ScalarKernel::NR);
+        let detected = cache_params::detected_blocks(mr, nr);
         println!(
             "detected_blocks: mc={} kc={} nc={} (default: mc={} kc={} nc={})",
             detected.mc, detected.kc, detected.nc, MC, KC, NC

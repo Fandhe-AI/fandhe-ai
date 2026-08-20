@@ -355,6 +355,18 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo check -p backend-metal --tests --target aarch64-apple-darwin
 
+      # イシュー #753 レビュー指摘（codex-review P2）: `backend-cpu::gemm_blis::cache_params`
+      # モジュールは本番未結線のため `#[cfg(test)]` 限定でしかコンパイルされず、内部の
+      # `sysctl_ffi`（`cfg(target_os = "macos")` 限定）は Linux CI の通常
+      # `cargo test`（`target_os != "macos"`）では到達しない。上記 backend-metal と同じ
+      # 手法（`--tests` で cfg(test) を有効にしたまま aarch64-apple-darwin へクロス型検査）
+      # で `sysctl_ffi` を継続的コンパイル検証の対象に含める（Makefile の
+      # check-cross-cpu-tests と同一コマンド）。cargo check はリンクを行わないため
+      # macOS SDK 非搭載でも成立する。
+      - name: cargo check（backend-cpu の cfg(test) 限定コード・macOS ターゲット）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo check -p backend-cpu --tests --target aarch64-apple-darwin
+
   # --------------------------------------------------
   # CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・イシュー #35／
   # TASK-2.3・イシュー #56）。
