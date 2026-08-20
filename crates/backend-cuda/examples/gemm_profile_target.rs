@@ -74,22 +74,39 @@
 //!
 //! `--b-pad <N>`（イシュー #743。`--path wmma_tf32` 限定・任意）を指定
 //! すると、`gemm.launch_wmma_tf32`（本番経路。固定 `WMMA_TF32_STAGED_B_PAD`
-//! 既定値）の代わりに `backend_cuda::diagnostics::render_wmma_tf32_staged_dyn`
-//! （`WmmaTf32StagedKernelConfig { b_pad: N, ..default_tf32_staged() }`。
-//! `gemm_wmma_tf32_staged_stages_bench.rs`〈#742〉が確立した動的 SMEM
-//! 計測専用変種と同じ経路）でコンパイル・起動する。SMEM バンクコンフリクト
-//! 対策候補（`docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md` §3
-//! 「採否基準」1「ncu で 4096 の ld バンクコンフリクトが有意に減少して
-//! いること」）を ncu で実測するための唯一の経路であり、本番カーネル
-//! ソース（`kernels_wmma_opt.rs`）自体は変更しない（モジュール冒頭の
-//! 「カーネル本体は一切変更しない」契約に対し、config 経由で既存の診断
-//! 専用変種を選べるようにする点のみが差分）。未指定時（既定）は従来どおり
-//! 本番経路のみを計測し、本フィールド追加による挙動変化はない。
+//! 既定値）の代わりに `backend_cuda::diagnostics::render_wmma_tf32_staged`
+//! （**static** 共有メモリ変種。`WmmaTf32StagedKernelConfig { b_pad: N,
+//! ..default_tf32_staged() }`）でコンパイル・起動する。static 変種は本番
+//! カーネルと同一の `__shared__` 宣言・同一 occupancy を持つため、
+//! `b_pad` の差分だけを ncu で切り分けられる（PR #769 Bugbot 指摘 review
+//! id 4978031442 の是正: 旧実装は動的共有メモリ変種
+//! `render_wmma_tf32_staged_dyn`〈`c_tile` を `as_tile`/`bs_tile` へ
+//! エイリアスし約 29KiB・3 blocks/SM〉を使っており、本番の静的変種
+//! 〈44.8〜45.6KiB・2 blocks/SM〉との比較に dyn/static の occupancy 差が
+//! 交絡していた）。SMEM バンクコンフリクト対策候補（`docs/perf/
+//! cuda-gemm-wmma-tf32-staged-bank-conflict.md` §3「採否基準」1「ncu で
+//! 4096 の ld バンクコンフリクトが有意に減少していること」）を ncu で
+//! 実測するための経路であり、本番カーネルソース（`kernels_wmma_opt.rs`）
+//! 自体は変更しない（モジュール冒頭の「カーネル本体は一切変更しない」
+//! 契約に対し、config 経由で既存の static レンダリング関数を選べるように
+//! する点のみが差分）。未指定時（既定）は従来どおり本番経路のみを計測し、
+//! 本フィールド追加による挙動変化はない。
+//!
+//! `render_wmma_tf32_staged`（static）は展開前に `validate_wmma_tf32_
+//! staged_config` で静的共有メモリ予算（48KiB。`MMA_STATIC_SMEM_LIMIT_
+//! BYTES`）を fail-closed 検査するため、`b_pad` が予算を超える場合は
+//! `--b-pad` 自体を非 0 終了で拒否する。この場合、動的共有メモリ変種
+//! （opt-in budget を要する `render_wmma_tf32_staged_dyn`）でしか計測
+//! できない `b_pad` は本バイナリではなく `gemm_wmma_tf32_staged_stages_
+//! bench.rs`〈#742〉側の専用計測コードを使う（本バイナリで dyn 変種へ
+//! 静かにフォールバックすると、上記の occupancy 交絡が再発するため
+//! 意図的にフォールバックしない）。
+//!
 //! `--b-pad` を `--path mma_f16` と併用した場合・値が
 //! `validate_wmma_tf32_staged_padding` の制約（4 要素倍数・タイル幅以上・
-//! 余剰 32 要素以下）を満たさない場合は、いずれも fail-closed で非 0
-//! 終了する（前者は CLI 引数検証・後者は `render_wmma_tf32_staged_dyn` の
-//! `Result::Err`）。
+//! 余剰 32 要素以下）を満たさない場合・静的 SMEM 予算を超える場合は、
+//! いずれも fail-closed で非 0 終了する（1 番目は CLI 引数検証・
+//! 2〜3 番目は `render_wmma_tf32_staged` の `Result::Err`）。
 //!
 //! `CudaDevice::new`／`CudaGemm::new`／`CudaMmaGemm::new`／opt カーネル
 //! 不在（`wmma_tf32_opt_available() == false`）のいずれの失敗も、既定では
@@ -172,8 +189,9 @@ struct Args {
     launch_skip: usize,
     /// `--b-pad` 指定値（イシュー #743。`--path wmma_tf32` 限定）。`None`
     /// （既定）は本番経路（`gemm.launch_wmma_tf32`）を、`Some(v)` は
-    /// `WmmaTf32StagedKernelConfig { b_pad: v, .. }` の動的 SMEM 診断変種を
-    /// 起動する（モジュール冒頭ドキュメンテーションコメント参照）。
+    /// `WmmaTf32StagedKernelConfig { b_pad: v, .. }` の **static** 共有
+    /// メモリ変種（本番と同一レイアウト・同一 occupancy）を起動する
+    /// （モジュール冒頭ドキュメンテーションコメント参照）。
     b_pad: Option<u32>,
     /// `CudaDevice::new` が `CudaError::DriverUnavailable`（CUDA 非搭載
     /// 環境）を返した場合に終了コード 0 でスキップすることを明示的に
@@ -190,8 +208,8 @@ struct Args {
 
 const USAGE: &str = "usage: gemm_profile_target --path {wmma_tf32|mma_f16} --size {1024|2048|4096} [--iters N] [--warmup N] [--b-pad N (wmma_tf32 only)] [--allow-missing-driver]";
 
-/// `--b-pad` は動的 SMEM 診断変種（`render_wmma_tf32_staged_dyn`。イシュー
-/// #742）でのみ意味を持つ TF32 staged 固有のパラメータのため、
+/// `--b-pad` は static 共有メモリ変種（`render_wmma_tf32_staged`。イシュー
+/// #743）でのみ意味を持つ TF32 staged 固有のパラメータのため、
 /// `--path mma_f16` との併用を拒否する（イシュー #743。`.claude/rules/
 /// security.md` A03「外部入力の検証」。無視して静かに no-op にすると、
 /// オペレーターが指定した候補値が計測に反映されない誤計測を fail-closed
@@ -529,68 +547,76 @@ fn main() {
 
             // `--b-pad` 未指定（既定）は従来どおり本番経路
             // （`gemm.launch_wmma_tf32`。固定 `WMMA_TF32_STAGED_B_PAD`）を
-            // 計測する。指定時（イシュー #743）は
-            // `render_wmma_tf32_staged_dyn` 経由の動的 SMEM 診断変種を
-            // コンパイル・起動し、SMEM バンクコンフリクト対策候補を ncu で
-            // 実測できるようにする（モジュール冒頭ドキュメンテーション
-            // コメント参照）。
+            // 計測する。指定時（イシュー #743）は `render_wmma_tf32_staged`
+            // 経由の **static** 共有メモリ変種をコンパイル・起動し、SMEM
+            // バンクコンフリクト対策候補を ncu で実測できるようにする
+            // （モジュール冒頭ドキュメンテーションコメント参照）。
+            //
+            // PR #769 Bugbot 指摘（Medium・review id 4978031442）の是正:
+            // 旧実装は動的共有メモリ変種（`render_wmma_tf32_staged_dyn`。
+            // `c_tile` を `as_tile`/`bs_tile` へエイリアスし約 29KiB・
+            // 3 blocks/SM）を使っていたため、既定（本番・static・
+            // 44.8〜45.6KiB・2 blocks/SM）との ncu 比較が `b_pad` の差と
+            // dyn/static の occupancy 差を交絡していた。static 変種は
+            // 本番と同一の `__shared__` 宣言・同一 occupancy のため、
+            // `b_pad` のみを変数化して切り分けられる。`render_wmma_tf32_
+            // staged` は `validate_wmma_tf32_staged_config` で 48KiB の
+            // 静的 SMEM 予算を fail-closed 検査するため、予算を超える
+            // `b_pad`（static では計測不能な候補）は dyn 変種へ静かに
+            // フォールバックせずここで非 0 終了させる（フォールバックする
+            // と上記の occupancy 交絡が再発するため、意図的にしない。
+            // 予算超過の候補は `gemm_wmma_tf32_staged_stages_bench.rs`
+            // 〈#742〉側の専用計測コードを使う）。
             if let Some(b_pad) = args.b_pad {
-                let optin_budget = match device.shared_memory_per_block_optin() {
-                    Some(b) => b,
-                    None => {
-                        eprintln!(
-                            "backend-cuda gemm_profile_target: \
-                             CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN unavailable; \
-                             aborting because --b-pad requires the dynamic-SMEM diagnostic \
-                             variant's opt-in budget."
-                        );
-                        std::process::exit(1);
-                    }
-                };
                 let cfg = diagnostics::WmmaTf32StagedKernelConfig {
                     b_pad,
                     ..diagnostics::WmmaTf32StagedKernelConfig::default_tf32_staged()
                 };
-                let compiled = match diagnostics::render_wmma_tf32_staged_dyn(&cfg, optin_budget)
+                let compiled = match diagnostics::render_wmma_tf32_staged(&cfg)
                     .and_then(|rendered| rendered.compile(&device))
                 {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!(
-                            "backend-cuda gemm_profile_target: --b-pad {b_pad} dynamic-SMEM \
+                            "backend-cuda gemm_profile_target: --b-pad {b_pad} static-SMEM \
                              variant unavailable ({e}); aborting because the target kernel \
-                             never launched (this is not an environment-adaptive skip)."
+                             never launched (this is not an environment-adaptive skip). If \
+                             this b_pad exceeds the 48KiB static shared memory budget, use \
+                             gemm_wmma_tf32_staged_stages_bench.rs (#742) instead, which is \
+                             purpose-built for the dynamic-SMEM variant."
                         );
                         std::process::exit(1);
                     }
                 };
                 println!(
-                    "wmma_tf32 staged (dyn, b_pad={b_pad}) kernel: compiled (used for this \
-                     run's launches)."
+                    "wmma_tf32 staged (static, b_pad={b_pad}) kernel: compiled (used for this \
+                     run's launches; production-identical __shared__ layout/occupancy, so this \
+                     result is directly comparable to a separate --b-pad-less run of this same \
+                     binary)."
                 );
 
                 let stream = device.stream();
                 for _ in 0..args.warmup {
                     compiled
-                        .launch_tf32_staged_dyn(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)
+                        .launch_tf32_staged(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)
                         .expect(
-                            "wmma_tf32 staged (dyn) warmup launch must succeed on \
+                            "wmma_tf32 staged (static) warmup launch must succeed on \
                              CUDA-equipped runner",
                         );
                 }
                 let start = Instant::now();
                 for _ in 0..args.iters {
                     compiled
-                        .launch_tf32_staged_dyn(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)
+                        .launch_tf32_staged(stream, &a_dev, &b_dev, &mut c_dev, m, n, k)
                         .expect(
-                            "wmma_tf32 staged (dyn) measured launch must succeed on \
+                            "wmma_tf32 staged (static) measured launch must succeed on \
                              CUDA-equipped runner",
                         );
                 }
                 let elapsed = start.elapsed().as_secs_f64();
                 let per_iter_secs = elapsed / args.iters as f64;
                 println!(
-                    "wall-clock (wmma_tf32 dyn b_pad={b_pad}, launch-only, {} iters): \
+                    "wall-clock (wmma_tf32 static b_pad={b_pad}, launch-only, {} iters): \
                      total={elapsed:.6}s per_iter={per_iter_secs:.6}s tflops={:.4} \
                      (ncu 実測値との突合用の参考値。ncu 実行中は計測区間にプロファイラの \
                      オーバーヘッドが乗るため単体実行時の数値とは一致しない)",

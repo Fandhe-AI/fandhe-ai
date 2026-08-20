@@ -282,9 +282,23 @@ pub mod diagnostics {
     // 到達できない（上記関数群と同じ「非公開モジュールへの薄い診断用
     // ラッパー」方針）。本番経路（`gemm.rs` の 3 段フォールバック選択・
     // `CudaGemm::run_wmma_tf32`）はこの再公開に一切依存しない。
+    //
+    // イシュー #743 追補（PR #769 Bugbot 指摘 review id 4978031442 の
+    // 是正）: `render_wmma_tf32_staged`／`RenderedWmmaTf32StagedKernel`／
+    // `CompiledWmmaTf32StagedKernel`（**static** 共有メモリ変種。本番経路
+    // と同一の `__shared__` 宣言・同一 occupancy）も併せて再公開する。
+    // `examples/gemm_profile_target.rs` の `--b-pad` 計測が動的共有メモリ
+    // 変種（`render_wmma_tf32_staged_dyn`。`c_tile` を `as_tile`/`bs_tile`
+    // へエイリアスし約 29KiB・3 blocks/SM）だけを使って本番の静的変種
+    // （44.8〜45.6KiB・2 blocks/SM）と比較していたため、`b_pad` の効果と
+    // dyn/static の occupancy 差が交絡していた（ncu 実測がどちらの要因か
+    // 切り分けられない）。static 変種を config 経由で `b_pad` を変えて
+    // 起動できるようにし、本番と同一レイアウトのまま `b_pad` のみを
+    // 変数化して切り分ける。
     pub use kernels_wmma_opt::{
-        CompiledWmmaTf32StagedDynKernel, RenderedWmmaTf32StagedDynKernel,
-        WmmaTf32StagedKernelConfig, render_wmma_tf32_staged_dyn, wmma_tf32_staged_dyn_smem_bytes,
+        CompiledWmmaTf32StagedDynKernel, CompiledWmmaTf32StagedKernel,
+        RenderedWmmaTf32StagedDynKernel, RenderedWmmaTf32StagedKernel, WmmaTf32StagedKernelConfig,
+        render_wmma_tf32_staged, render_wmma_tf32_staged_dyn, wmma_tf32_staged_dyn_smem_bytes,
     };
 
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状

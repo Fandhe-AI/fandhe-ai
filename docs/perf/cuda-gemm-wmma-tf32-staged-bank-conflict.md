@@ -127,13 +127,21 @@ cargo test -p backend-cuda --release -- --ignored --nocapture
 
 # 3) ncu（メトリクス名は --query-metrics で事前確認する。--b-pad は
 #    gemm_profile_target 側で #743 のために追加した任意引数
-#    〈--path wmma_tf32 限定〉。未指定〈既定〉は本番経路〈b_pad=68 固定〉、
-#    指定時は render_wmma_tf32_staged_dyn 診断変種を b_pad=N でコンパイル・
-#    起動する）
+#    〈--path wmma_tf32 限定〉。未指定〈既定〉は本番経路〈b_pad=68 固定・
+#    static 共有メモリ〉、指定時は render_wmma_tf32_staged（**static**
+#    共有メモリ変種。本番と同一の __shared__ 宣言・同一 occupancy）を
+#    b_pad=N でコンパイル・起動する。PR #769 Bugbot 指摘 review id
+#    4978031442 の是正: 当初は動的共有メモリ変種
+#    〈render_wmma_tf32_staged_dyn。c_tile を as_tile/bs_tile へエイリアス
+#    し約 29KiB・3 blocks/SM〉を使っており、3a〈本番・static・
+#    44.8〜45.6KiB・2 blocks/SM〉との比較が b_pad の差と dyn/static の
+#    occupancy 差を交絡していた。static 変種へ切替後は 3a/3b が b_pad の
+#    みで差分化されるため、ld バンクコンフリクトの差分は occupancy 変化
+#    を含まない）
 cargo build -p backend-cuda --example gemm_profile_target --release \
     --features internal-diagnostics
 
-# 3a) 既定（b_pad=68・本番経路）
+# 3a) 既定（b_pad=68・本番経路・static 共有メモリ）
 ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
@@ -141,7 +149,8 @@ smsp__inst_executed_op_shared_ld.sum,\
 sm__warps_active.avg.pct_of_peak_sustained_active \
     ./target/release/examples/gemm_profile_target --path wmma_tf32 --size 4096
 
-# 3b) 候補（b_pad=72・動的 SMEM 診断変種）
+# 3b) 候補（b_pad=72・static 共有メモリ変種。3a と __shared__
+#     レイアウト／occupancy が同一のため b_pad の差分のみを計測する）
 ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
