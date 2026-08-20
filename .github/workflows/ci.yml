@@ -469,7 +469,10 @@ jobs:
     # OSS 直接比較ハーネスの cargo-deny 監査ステップ（`cargo install cargo-deny` の
     # ソースビルドを含む）を追加したため 15 → 25 に引き上げる（イシュー #755
     # review 対応・ユーザー承認条件「ライセンス監査を CI に組み込む」）。
-    timeout-minutes: 25
+    # OSS 直接比較ハーネスのテスト実行ステップ（`cargo test --release`。stride
+    # 契約回帰テストを CI 上で実行するため。Cursor Bugbot 指摘対応）を追加したため
+    # 25 → 30 に引き上げる。
+    timeout-minutes: 30
     steps:
       - name: Checkout
         # persist-credentials: false（fmt ジョブと同一方針）。
@@ -586,6 +589,17 @@ jobs:
             --locked check \
             --config scripts/bench/oss-gemm-compare/deny.toml \
             licenses sources
+
+      # OSS 直接比較ハーネスのテスト実行（Cursor Bugbot 指摘対応。イシュー #755）。
+      # 本パッケージは本体 workspace の member ではない独立 Cargo プロジェクトのため、
+      # ルート `cargo test`（rust-ci ジョブ・reusable workflow 側）のビルド対象には
+      # 一切現れず、`src/main.rs` の stride 契約回帰テスト（`gemm::gemm` が A*B を
+      # 計算し B*A ではないことを証明するテスト。review P1 指摘対応）が PR 上で
+      # 一度も実行されないまま埋没する欠落があった。本パッケージ専用の Cargo.lock を
+      # 対象に `--locked` でテストを実行し、CI 上で毎回検証する。
+      - name: OSS 直接比較ハーネスのテスト実行
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --locked --release
 
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
