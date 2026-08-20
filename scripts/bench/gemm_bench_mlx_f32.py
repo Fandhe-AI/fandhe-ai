@@ -6,9 +6,10 @@
 同一実機・同一形状（M=N=K=512/1024/2048/4096）・同一決定的シード
 （`0xC0FFEE`）で計測する。`scripts/bench/gemm_bench_torch_mps_f32.py`
 （既存・PyTorch MPS 版）と同一プロトコル（warmup 20 回・計測 20 回・
-`time.perf_counter()` 中央値）・同一出力形式に揃え、CPU vs matrixmultiply
-/ gemm crate（`scripts/bench/oss-gemm-compare/`）と対になる Metal 側の
-OSS 直接比較を担う（`docs/perf/oss-gemm-comparison-baseline.md` 参照）。
+`time.perf_counter()` 中央値）・同一出力形式に揃え、Metal 側の OSS 直接比較を
+担う（CPU 側 matrixmultiply / gemm crate との比較はユーザー承認未取得のため
+本リポジトリには未導入。`docs/oss-comparison-harness-decision.md`「経緯」節・
+`docs/perf/oss-gemm-comparison-baseline.md` 参照）。
 
 ## 2 つの計測境界（MLX のユニファイドメモリ特性に関する注記）
 
