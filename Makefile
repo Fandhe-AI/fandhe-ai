@@ -216,16 +216,15 @@ endif
 # 依存禁止リスト（deps-policy.md: burn 系・cubecl・candle・tch・ndarray）の混入検査。
 # TASK-1.2 の CI 機械検査と同一の判定を scripts/check-forbidden-deps.sh 経由でローカル再現する
 # （検査ロジックは ci.yml の deps-forbidden ジョブと同一スクリプトを共用し、二重管理しない）。
-# self-test で検査ロジック自体の退行を検出したうえで、Cargo.lock（存在すれば）・
-# cargo tree（Cargo.toml があれば）を検査する。
+# self-test で検査ロジック自体の退行を検出したうえで、lock-all（本体 workspace ルート
+# Cargo.lock・OSS 直接比較ハーネス scripts/bench/oss-gemm-compare/Cargo.lock。許容依存
+# 第 9 区分・イシュー #755。走査対象パスの列挙は scripts/check-forbidden-deps.sh 側の
+# lock-all サブコマンドに集約済みでここではハードコードしない）・cargo tree
+# （Cargo.toml があれば）を検査する。
 .PHONY: deps-forbidden
-deps-forbidden: ## 依存禁止リスト（burn 系等）の混入を検査する（self-test → lock → tree）
+deps-forbidden: ## 依存禁止リスト（burn 系等）の混入を検査する（self-test → lock-all → tree）
 	@bash scripts/check-forbidden-deps.sh self-test
-	@if [ -f Cargo.lock ]; then \
-		bash scripts/check-forbidden-deps.sh lock Cargo.lock; \
-	else \
-		echo "skip: Cargo.lock 未追加のため lock 検査をスキップ"; \
-	fi
+	@bash scripts/check-forbidden-deps.sh lock-all
 ifdef HAS_CARGO
 	@bash scripts/check-forbidden-deps.sh tree
 else

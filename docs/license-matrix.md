@@ -123,6 +123,33 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - 対象 `Cargo.lock` のコミット SHA: `65dea84463472db78ab5dfcb7205b69cf43f4c1b`（origin/main）
 - `cargo metadata --locked --format-version 1` で `zerocopy`／`zerocopy-derive` の `version`・`license` を抽出し、両パッケージとも `v0.8.56`・`BSD-2-Clause OR Apache-2.0 OR MIT`（6 節記載の `v0.8.55` から**バージョンのみ更新、ライセンス式は不変**）であることを確認した。実行後 `git status --porcelain Cargo.lock` で差分がないことを確認した（依存・バージョン自体は変更していない）
 
+## 8a. 本表（1〜8 節）の直接の走査対象外にある第 9 区分の監査（OSS 直接比較ハーネス。イシュー #755）
+
+`scripts/bench/oss-gemm-compare/`（本体 workspace 外の独立 Cargo プロジェクト）の
+`matrixmultiply`・`gemm` crate は、許容依存第 9 区分（ベンチ比較対象）として
+2026-08-20 に条件付きユーザー承認済みの依存であり、本表 1〜8 節・`deny.toml`
+（ルート）の走査対象（本体 workspace の依存グラフ）には含まれないが、監査対象
+外の例外ではなく本節（8a）と 9 節で正式に統制する（詳細は 9 節を参照）。適用範囲の
+定義・ユーザー承認条件は `.claude/rules/deps-policy.md`「許容依存 9 区分」表の
+第 9 区分の行（PR #772 で先行して整備）を正とし、本節では二重管理しない。allow
+リストの実体は本表と二重管理せず `scripts/bench/oss-gemm-compare/deny.toml`
+冒頭コメントを参照する。設計判断の詳細は `docs/oss-comparison-harness-decision.md`
+（イシュー #755）を参照。
+
+### 8a-1. 実測（イシュー #755 review 指摘対応。`matrixmultiply`・`gemm` の実ライセンス）
+
+- 実測日: 2026-08-20
+- 対象 `Cargo.lock`: `scripts/bench/oss-gemm-compare/Cargo.lock`
+- `cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --locked check --config scripts/bench/oss-gemm-compare/deny.toml licenses sources` の実行結果: `licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --format-version 1` で直接依存 2 crate のライセンス式を抽出（推定記載ではなく実測値）:
+
+| crate | version | license（`cargo metadata` 実測） |
+|-------|---------|-----------------------------------|
+| `matrixmultiply` | 0.3.11 | `MIT/Apache-2.0` |
+| `gemm` | 0.19.0 | `MIT` |
+
+いずれも deny.toml の `[licenses] allow` リスト（MIT・Apache-2.0 等。本表 2 節と同一方針）の範囲内であることを `cargo deny check licenses` が機械検査済み。推移的依存（`gemm-common`・`gemm-f32`・`pulp`・`dyn-stack` 等）を含む全域監査は同コマンドの `sources` 検査と合わせて CI（`ci.yml` の `deps-forbidden` ジョブ「OSS 直接比較ハーネスのライセンス監査」ステップ）で毎回再実行し、本表への転記のみに依拠しない（cargo-deny の fail-closed 機械検査が一次情報源）。
+
 ## 8. 運用
 
 - 依存の追加・更新は本表の更新とセットで行う（**ユーザー承認必須**。REQ-5・deps-policy.md）

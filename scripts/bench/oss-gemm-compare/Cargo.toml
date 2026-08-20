@@ -1,0 +1,53 @@
+# OSS 直接比較ハーネス（イシュー #755）専用の独立 Cargo パッケージ。
+#
+# 本パッケージは本体 workspace（ルート `Cargo.toml`）の member ではない
+# （`[workspace]` を空テーブルで持たせ、ルートから独立した Cargo プロジェクトとして
+# 切り離す）。matrixmultiply・gemm crate は許容依存第 9 区分（ベンチ比較対象。
+# .claude/rules/deps-policy.md）として条件付きユーザー承認済み（2026-08-20）であり、
+# 本体 workspace の依存グラフ（`cargo tree --workspace`・cargo-deny・各 CI ジョブの
+# 走査対象）へは一切現れない構成とする（`docs/oss-comparison-harness-decision.md`
+# §2.1 の設計判断）。
+#
+# `backend-cpu`・`bench-harness` は workspace member への path 依存で参照する。
+# member 側の `version.workspace = true` 等の継承は「member 自身が属する workspace」
+# （ルート `Cargo.toml`）から解決されるため、本パッケージが独立 workspace でも
+# 問題なく解決できる（本パッケージ作成時に `cargo build --release` で実地確認済み）。
+[workspace]
+
+[package]
+name = "oss-gemm-compare"
+version = "0.1.0"
+# ルート `rust-toolchain.toml`（stable）と同一 edition を明示する
+# （workspace 継承ができないため、ルート `[workspace.package] edition = "2024"`
+# と同じ値をここで明示的に指定する）。
+edition = "2024"
+publish = false
+# ルート `Cargo.toml` の `[workspace.package] license` と同一値を明示する
+# （workspace 継承ができないため独立指定。cargo-deny の `unlicensed` 検査
+# クリア用。イシュー #755 review 対応）。
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# workspace 内部クレート（path 依存）。本体の現行最適 CPU GEMM 経路
+# （BLIS 5-loop・rayon 並列。`gemm_blis_parallel`）を比較対象として使う。
+backend-cpu = { path = "../../../crates/backend-cpu" }
+# 計測プロトコル（warmup 20・iters 20・中央値/Q1/Q3。TASK-8.1）を OSS 側にも
+# 同一で適用するために使う。
+bench-harness = { path = "../../../crates/bench-harness" }
+rayon = "=1.12.0"
+
+# OSS 比較対象。許容依存第 9 区分（ベンチ比較対象。`.claude/rules/deps-policy.md`）
+# として 2026-08-20 にユーザーが条件付きで承認済み: (1) 本体 workspace（ルート
+# `Cargo.toml` / `Cargo.lock`）への混入禁止・(2) 独立 workspace（`scripts/bench/
+# oss-gemm-compare/` 限定・`=x.y.z` 完全固定）・(3) 専用 `deny.toml` による
+# advisories/bans/licenses/sources 監査・(4) `scripts/check-forbidden-deps.sh` の
+# 走査対象化、が必須条件（`docs/oss-comparison-harness-decision.md` §2.1「スコープ
+# 解釈のユーザー承認」節）。以後の本パッケージへの依存追加・変更もこれらの条件を
+# 満たす限りで許容される。再現性確保のため `=x.y.z` 完全固定＋本パッケージ専用
+# `Cargo.lock` をコミットする。crates.io 実測最新安定版（2026-08-20 時点）を採用する。
+#
+# matrixmultiply: MIT/Apache-2.0（デュアルライセンス。crates.io API 実測）。
+matrixmultiply = "=0.3.11"
+# gemm: MIT（crates.io API 実測）。エントリポイントが `unsafe fn` のみのため
+# 呼び出し側（`src/main.rs`）で unsafe ブロックを最小範囲に閉じて使う。
+gemm = "=0.19.0"

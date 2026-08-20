@@ -4,18 +4,29 @@
 # 混入を fail-closed で検査する単一ソース（TASK-1.2・docs/spec/05-tasks.md）。
 #
 # 呼び出し元:
-#   - .github/workflows/ci.yml の deps-forbidden ジョブ（self-test → lock → tree の順で呼ぶ）
+#   - .github/workflows/ci.yml の deps-forbidden ジョブ（self-test → lock-all → tree の順で呼ぶ）
 #   - Makefile の deps-forbidden ターゲット（CI と同一判定をローカル再現）
 #
 # サブコマンド:
 #   lock <path>  Cargo.lock の `name = "<crate>"` 行を検査する（Cargo.toml 未追加時は
 #                呼び出し側で存在チェックしてからこのスクリプトを呼ぶ想定）
+#   lock-all     本リポジトリが持つ全 Cargo.lock（本体 workspace ルート・
+#                scripts/bench/oss-gemm-compare/ の OSS 直接比較ハーネス〈許容依存
+#                第 9 区分。.claude/rules/deps-policy.md〉）をまとめて検査する。
+#                対象パスの列挙をこの 1 箇所に集約し、呼び出し側（ci.yml・Makefile）で
+#                個別パスをハードコードしない（「CI と同一判定をローカル再現」を
+#                二重管理なしで満たすため）。ルート Cargo.lock は workspace 骨格
+#                構築前の不在を許容し notice でスキップするが、ハーネスの Cargo.lock は
+#                第 9 区分有効化後は常時存在すべきものとして fail-closed（不在はエラー）
+#                とする
 #   tree         `cargo tree` 出力を検査する（cargo 必須。呼び出し側で Cargo.toml の
 #                有無を判定してから呼ぶ想定。--target all で cfg(target_os = "macos")
 #                限定の Metal 系依存も検査範囲に含める）
 #   self-test    scripts/testdata/ の固定 fixture に対しネガティブ・ポジティブ判定を行い、
 #                本スクリプトの検査ロジック自体の退行（パターン破損等）を検出する
-#                （受け入れ条件「禁止クレート混入時に fail-closed で失敗する」の機械検証）
+#                （受け入れ条件「禁止クレート混入時に fail-closed で失敗する」の機械検証）。
+#                lock-all は check_lock を再利用する薄いラッパーのため、検査ロジック
+#                自体は本 self-test の対象で足り、専用 fixture は追加しない
 #
 # 禁止クレート名の候補はここ 1 箇所だけに定義し、lock / tree / self-test の全パターンを
 # 導出する（計画どおり「正規表現はスクリプト内 1 箇所に定義し共用する」を満たす）。
@@ -34,7 +45,7 @@ FORBIDDEN_LOCK_PATTERN="^name = \"(${FORBIDDEN_CRATES_ALT})\"\$"
 FORBIDDEN_TREE_PATTERN="^(${FORBIDDEN_CRATES_ALT}) v"
 
 usage() {
-  echo "usage: $0 {lock <Cargo.lock のパス>|tree|self-test}" >&2
+  echo "usage: $0 {lock <Cargo.lock のパス>|lock-all|tree|self-test}" >&2
   exit 2
 }
 
@@ -50,6 +61,38 @@ check_lock() {
     return 1
   fi
   echo "OK: ${lock_path} に依存禁止リストの混入なし"
+}
+
+# 本リポジトリが持つ全 Cargo.lock を一括検査する（lock-all サブコマンド本体）。
+# 対象パスの列挙をこの関数 1 箇所に集約する（呼び出し元コメント参照）。
+# check_lock（既存ロジック）をそのまま再利用し、新しい正規表現・grep 経路は
+# 追加しない。
+check_lock_all() {
+  local failed=0
+
+  # 本体 workspace のルート Cargo.lock。workspace 骨格構築前（TASK-1.1 未着手時）は
+  # 不在を許容し notice でスキップする（deps-forbidden ジョブの既存挙動を踏襲）。
+  if [ -f "Cargo.lock" ]; then
+    check_lock "Cargo.lock" || failed=1
+  else
+    echo "::notice::Cargo.lock が未追加のため依存禁止検査をスキップしました（workspace 作成後に有効化されます）"
+  fi
+
+  # OSS 直接比較ハーネス（scripts/bench/oss-gemm-compare/。許容依存第 9 区分。
+  # .claude/rules/deps-policy.md）の Cargo.lock。第 9 区分有効化後は常時存在すべき
+  # ものとして fail-closed（不在はエラー。本体 Cargo.lock と異なり notice スキップしない）
+  # とする。
+  local oss_gemm_compare_lock="scripts/bench/oss-gemm-compare/Cargo.lock"
+  if [ -f "${oss_gemm_compare_lock}" ]; then
+    check_lock "${oss_gemm_compare_lock}" || failed=1
+  else
+    echo "::error::${oss_gemm_compare_lock} が見つかりません（許容依存第 9 区分は有効化済みのため必須。.claude/rules/deps-policy.md）" >&2
+    failed=1
+  fi
+
+  if [ "${failed}" -ne 0 ]; then
+    return 1
+  fi
 }
 
 # cargo tree 形式（`<crate> v<version>` 行）のテキストに対する検査本体。
@@ -143,6 +186,9 @@ main() {
       local lock_path="${2:-}"
       [ -n "${lock_path}" ] || usage
       check_lock "${lock_path}"
+      ;;
+    lock-all)
+      check_lock_all
       ;;
     tree)
       check_tree
