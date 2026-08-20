@@ -296,7 +296,7 @@ REQ-8 下限値・数値一致許容誤差は本イシューでも一切変更�
 実装した内容と状況を記録する。詳細な設計判断・算出式の根拠は
 `docs/perf/cpu-gemm-runtime-cache-detect.md` を参照。
 
-- **実装済み**: `sysctl`（`hw.perflevel0.l1dcachesize`／`l2dcachesize`）実測値からの
+- **実装済み**: `sysctl`（`hw.perflevel0.l1dcachesize`／`l2cachesize`）実測値からの
   MC/KC/NC 算出（`crates/backend-cpu/src/gemm_blis/cache_params.rs`）・タイル境界に整列した
   2 次元寄りの行範囲分配（`crates/backend-cpu/src/gemm_blis/partition.rs`）・両者を組み合わせた
   実機 A/B 計測ハーネス（`crates/backend-cpu/src/gemm_blis/mod.rs` の
