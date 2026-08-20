@@ -1308,6 +1308,56 @@ pub fn wmma_tf32_f32_staged_source_with_swizzle(
     Ok(source.replacen(ANCHOR, &remap, 1))
 }
 
+/// [`WmmaTf32StagedKernelConfig::default_tf32_staged`] の `a_pad`/`b_pad`
+/// のみを差し替えた変種ソースを生成する（イシュー #743。
+/// [`wmma_tf32_f32_staged_source_with_swizzle`] と同じ「`CudaGemm::new` の
+/// `wmma_tf32_staged` スロットを差し替える opt-in 変種」設計）。
+///
+/// # 背景（イシュー #743）
+///
+/// `WMMA_TF32_STAGED_B_PAD`（既定 68 = `BLOCK_N + 4`）直下コメントの理論
+/// 解析どおり、B フラグメントロードは 2-way バンクコンフリクトを持ち、
+/// `b_pad mod 32 ∈ {8, 24}`（例: 72）で理論上ゼロになる。本関数は
+/// `a_pad`/`b_pad` のみを config 経由で差し替えたソースを生成し、
+/// `gemm.rs::CudaGemm::new_with_tf32_staged_pads` から実機 ncu A/B 計測
+/// （`docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md`）に使う。
+///
+/// パディングはタイルの行ストライドのみを変え、各要素の値・累積順序は
+/// 変えない（`as_tile`/`bs_tile` は依然として `WMMA_TF32_STAGED_K_TILE`/
+/// `WMMA_TF32_STAGED_BLOCK_N` 個の有効要素を保持し、パディング領域は
+/// 読み書きされない）。よって swizzle 変種と同じ論法で base との
+/// **bit 一致**を主張できる（`gemm.rs::
+/// wmma_tf32_staged_pad_variant_matches_base_bit_exact_output` 参照）。
+///
+/// # エラー契約
+///
+/// `a_pad`/`b_pad` の妥当性（`k_tile`/`block_n` 以上・4 要素倍数・SMEM
+/// 予算内）は [`validate_wmma_tf32_staged_config`] が fail-closed 検査する
+/// （`render_wmma_tf32_staged` と同じ経路）。
+///
+/// # セキュリティ（OWASP A03）
+///
+/// [`wmma_tf32_f32_staged_source_with_swizzle`] と同じ契約: 受理するのは
+/// `u32` 2 個のみで、生成断片への埋め込みは固定テンプレート文字列内の
+/// 数値 `format!`（`render_wmma_tf32_staged_header`）のみに限定する。
+///
+/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
+/// feature 既定 off）からの唯一の呼び出し元
+/// `gemm.rs::CudaGemm::new_with_tf32_staged_pads` が同 feature でゲート
+/// されているため、`cargo build`（feature 指定なし）では呼び出し元が
+/// 存在せず dead-code lint が誤検出する（swizzle 版と同じパターン）。
+#[allow(dead_code)]
+pub fn wmma_tf32_f32_staged_source_with_pads(
+    a_pad: u32,
+    b_pad: u32,
+) -> Result<String, crate::error::CudaError> {
+    let mut cfg = WmmaTf32StagedKernelConfig::default_tf32_staged();
+    cfg.a_pad = a_pad;
+    cfg.b_pad = b_pad;
+    validate_wmma_tf32_staged_config(&cfg)?;
+    Ok(render_wmma_tf32_staged_unchecked(&cfg))
+}
+
 /// [`render_wmma_tf32_staged`] に渡す構成値（イシュー #500）。
 ///
 /// 既存 [`WmmaOptKernelConfig`]（TF32 opt・f16 opt 共通）へ `stages`

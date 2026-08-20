@@ -119,7 +119,13 @@ git checkout perf/743-wmma-tf32-staged-smem-padding
 # 1) parity 非後退（数値一致を性能計測より先に確認する）
 cargo test -p backend-cuda --release -- --ignored --nocapture
 
-# 2) bit 一致 + TFLOPS（b_pad=68/72 双方を internal-diagnostics 経由の
+# 2) bit 一致（b_pad=68/72 の突合。gemm.rs の #[ignore] テストとして
+#    実装済み。CudaGemm::new_with_tf32_staged_pads 〈internal-diagnostics
+#    feature〉が生成する変種と base の run_wmma_tf32 出力を比較する）
+cargo test -p backend-cuda --lib --release --features internal-diagnostics \
+    -- --ignored --nocapture wmma_tf32_staged_pad_variant_matches_base_bit_exact_output
+
+# 2b) TFLOPS（b_pad=68/72 双方を internal-diagnostics 経由の
 #    render_wmma_tf32_staged_dyn 診断変種で計測し突合する。
 #    gemm_wmma_tf32_staged_stages_bench.rs（#742）と同じ
 #    WmmaTf32StagedKernelConfig { b_pad: N, ..default_tf32_staged() }

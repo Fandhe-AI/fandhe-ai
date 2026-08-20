@@ -787,6 +787,48 @@ impl CudaGemm {
     }
 
     /// naive f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
+    /// `device` 上で、`wmma_tf32_staged` の SMEM パディング幅（`a_pad`/
+    /// `b_pad`）のみを差し替えた変種を NVRTC コンパイルし保持するハンドルを
+    /// 構築する（イシュー #743・`kernels_wmma_opt::
+    /// wmma_tf32_f32_staged_source_with_pads` 参照。**opt-in・未計測の
+    /// 実験実装**）。[`new_with_tf32_staged_swizzle`](Self::new_with_tf32_staged_swizzle)
+    /// と同じ設計（`new` で通常構築した後 `wmma_tf32_staged` スロットのみ
+    /// 差し替え、変種のコンパイル失敗は base へフォールバックせず `Err` を
+    /// 返す。理由も同じ: A/B ベンチが気づかず base を計測してしまう
+    /// A/A 誤認を防ぐ fail-closed 判断）。
+    ///
+    /// `a_pad`/`b_pad` の妥当性検査（4 要素倍数・下限・SMEM 予算内）は
+    /// [`kernels_wmma_opt::wmma_tf32_f32_staged_source_with_pads`] が
+    /// 経由する `validate_wmma_tf32_staged_config` に委譲する。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （swizzle 版と同じ feature ゲート方針）。
+    /// `examples/gemm_wmma_tf32_staged_pad_bench.rs`（`Cargo.toml` の
+    /// `required-features` で同 feature を要求）専用の入口であり、実機
+    /// A/B 計測後に採用確定した段階で `WMMA_TF32_STAGED_B_PAD`（本番既定値）
+    /// を書き換える判断へつなげる（`docs/perf/
+    /// cuda-gemm-wmma-tf32-staged-bank-conflict.md` 参照）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_with_tf32_staged_pads(
+        device: &CudaDevice,
+        a_pad: u32,
+        b_pad: u32,
+    ) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+
+        let arch = device.arch();
+        let src = kernels_wmma_opt::wmma_tf32_f32_staged_source_with_pads(a_pad, b_pad)?;
+        let ptx = compile_ptx(&src, arch)?;
+        let wmma_tf32_staged = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_wmma_tf32_staged")?;
+
+        gemm.wmma_tf32_staged = Some(wmma_tf32_staged);
+        gemm.wmma_tf32_staged_error = None;
+        Ok(gemm)
+    }
+
     ///
     /// ホスト側形状検証（[`validate_gemm_dims`]）を先行させた後、
     /// 16x16 ブロック・`div_ceil` グリッドで [`Self::run_f32_kernel`] を呼ぶ
@@ -2374,6 +2416,96 @@ mod tests {
                     "shape (m={m}, n={n}, k={k}) group_width={group_width}: swizzle \
                      変種の出力が base と bit 一致しません（remap がブロック内部の \
                      計算・アキュムレート順序に影響していないか確認すること）"
+                );
+            }
+        }
+    }
+
+    /// イシュー #743 受け入れ基準（実機検証）: [`CudaGemm::
+    /// new_with_tf32_staged_pads`] が生成する SMEM パディング変種が、
+    /// [`CudaGemm::new`]（base）と**ビット一致**の出力を返すことを確認
+    /// する。
+    ///
+    /// パディングはタイル行ストライドのみを変え、各ブロック内部の計算・
+    /// アキュムレート順序は変えない（`kernels_wmma_opt.rs::
+    /// wmma_tf32_f32_staged_source_with_pads` ドキュメンテーションコメント
+    /// 参照）ため、
+    /// `wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output` と
+    /// 同じ論法で tolerance を使わない bit 等値で主張できる（同変種間比較は
+    /// バックエンド間比較ではなく同一バックエンド内の実装詳細比較のため
+    /// `.claude/rules/coding-rust.md` の許容誤差緩和禁止契約の対象外）。
+    ///
+    /// `(a_pad, b_pad)` 候補: `(WMMA_TF32_STAGED_A_PAD, WMMA_TF32_STAGED_B_PAD)`
+    /// （本番既定値と同一構成。恒等変換として byte 完全一致の回帰も兼ねる）
+    /// と `(WMMA_TF32_STAGED_A_PAD, WMMA_TF32_STAGED_B_PAD + 4)`（72。
+    /// バンクコンフリクト解消候補。本ファイル `WMMA_TF32_STAGED_B_PAD`
+    /// 直下コメント参照）。
+    ///
+    /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
+    /// Spark GB10 等の実機で `cargo test -p backend-cuda --lib --release
+    /// --features internal-diagnostics -- --ignored --nocapture
+    /// wmma_tf32_staged_pad_variant_matches_base_bit_exact_output` から
+    /// 実行する。`internal-diagnostics` feature（既定 off）でのみ
+    /// コンパイルされる（[`CudaGemm::new_with_tf32_staged_pads`] 自体が
+    /// 同 feature でゲートされているため）。
+    #[cfg(feature = "internal-diagnostics")]
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn wmma_tf32_staged_pad_variant_matches_base_bit_exact_output() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let base =
+            CudaGemm::new(&device).expect("base CudaGemm::new must succeed on ignored test runner");
+        assert!(
+            base.wmma_tf32_staged_available(),
+            "TF32 opt-staged kernel must be available on ignored test runner \
+             (reason: {:?}); a fallback-to-basic comparison would degenerate \
+             into a no-op",
+            base.wmma_tf32_staged_unavailable_reason()
+        );
+
+        let shapes: [(u32, u32, u32); 3] = [(512, 512, 512), (80, 136, 160), (1088, 256, 2048)];
+        let seed: u64 = 743_001;
+
+        let candidates: [(u32, u32); 2] = [
+            (
+                kernels_wmma_opt::WMMA_TF32_STAGED_A_PAD,
+                kernels_wmma_opt::WMMA_TF32_STAGED_B_PAD,
+            ),
+            (
+                kernels_wmma_opt::WMMA_TF32_STAGED_A_PAD,
+                kernels_wmma_opt::WMMA_TF32_STAGED_B_PAD + 4,
+            ),
+        ];
+
+        for (a_pad, b_pad) in candidates {
+            let variant = CudaGemm::new_with_tf32_staged_pads(&device, a_pad, b_pad)
+                .unwrap_or_else(|err| {
+                    panic!("a_pad={a_pad} b_pad={b_pad}: new_with_tf32_staged_pads failed: {err}")
+                });
+
+            for &(m, n, k) in &shapes {
+                let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+                let a: Vec<f32> = rng.fill_vec((m as usize) * (k as usize));
+                let b: Vec<f32> = rng.fill_vec((k as usize) * (n as usize));
+
+                let base_c = base.run_wmma_tf32(&a, &b, m, n, k).unwrap_or_else(|err| {
+                    panic!("base run_wmma_tf32 failed for shape (m={m}, n={n}, k={k}): {err}")
+                });
+                let variant_c = variant
+                    .run_wmma_tf32(&a, &b, m, n, k)
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "a_pad={a_pad} b_pad={b_pad} run_wmma_tf32 failed for shape \
+                         (m={m}, n={n}, k={k}): {err}"
+                        )
+                    });
+
+                assert_eq!(
+                    variant_c, base_c,
+                    "shape (m={m}, n={n}, k={k}) a_pad={a_pad} b_pad={b_pad}: pad \
+                     変種の出力が base と bit 一致しません（パディング変更がタイル \
+                     行ストライド以外に影響していないか確認すること）"
                 );
             }
         }

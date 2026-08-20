@@ -201,6 +201,7 @@ rate。§2 採取コマンド参照）は生ログを非コミット運用とす
 
 - 主因候補 A: L2 ヒット率の低下（→ B-8 #499 L2 スウィズル）
 - 主因候補 B: SMEM バンクコンフリクトの増加（→ B-7 #498 バンクコンフリクト）
+  - TF32 opt-staged 経路（`kernels_wmma_opt.rs::gemm_wmma_tf32_staged`）の同種解析はイシュー #743 で実施し、実機 ncu 実測（2026-08-19・GB10）で `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` が M=N=K=2048 で 8.53M、4096 で 67.5M（増加率は総仕事量比 8 倍とほぼ同率であり非線形悪化ではない）と確認した。解析・対策の詳細は `docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md` を参照。
 - 主因候補 C: occupancy の低下（→ B-2 #493 レジスタブロッキング／B-3 #494 タイル拡大）
 - 主因候補 D: 命令発行律速（→ B-2 #493 レジスタブロッキング）
 
