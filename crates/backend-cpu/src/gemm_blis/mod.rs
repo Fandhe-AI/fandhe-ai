@@ -46,8 +46,26 @@
 //! [`microkernel::avx512`] 参照）。dispatch 導入を理由とした境界検査の
 //! 省略は行わない。
 
+// `cache_params`／`partition` は #753 の本番未結線スコープ（下記
+// [`gemm_blis_parallel_2d_with_blocks`] ドキュメント参照）のため、
+// 呼び出し元がテスト専用パラメータ化入口・実機 A/B ハーネス
+// （いずれも `#[cfg(test)]`）に限られる。`gemm_blis_with_kernel_and_blocks`・
+// `gemm_blis_parallel_with_blocks`（#564）・`gemm_blis_shared_b_region`・
+// `dispatch_shared_b`（#750）と同じ「本番未結線の間はモジュール自体を
+// `#[cfg(test)]` にする」既存パターンを踏襲し、`cargo build`（`cfg(test)`
+// 無効時）での dead_code 検出を構造的に避ける（`#[allow(dead_code)]` に
+// よる黙らせは行わない。`.claude/rules/coding-rust.md`）。sysctl FFI
+// （`cache_params::sysctl_ffi`。macOS 限定）の型・借用検査は `cargo test`
+// （`rust-ci` の test ジョブ）が `cfg(test)` を有効化した状態でコンパイル
+// する際に行われる（同ジョブは Linux ホストのため `cfg(target_os =
+// "macos")` 自体は無効化されコンパイル対象に含まれない。macOS 実機での
+// 検証手順は `docs/perf/cpu-gemm-runtime-cache-detect.md` 参照）。
+#[cfg(test)]
+mod cache_params;
 pub mod microkernel;
 mod pack;
+#[cfg(test)]
+mod partition;
 
 use std::ops::Range;
 
@@ -1106,6 +1124,73 @@ pub(crate) fn gemm_blis_parallel_with_blocks(
     dispatch_shared_b(a, b, c, n, k, 0..m, blocks)
 }
 
+/// #753: MC タイル境界に整列した行範囲分配（[`partition::row_ranges_for_workers`]）
+/// を使う `gemm_blis_parallel` の 2 次元タイルジョブ分配版。
+///
+/// 従来の `panel_rows = m.div_ceil(num_threads)` による静的パネル分割
+/// （[`gemm_blis_parallel`]）は、MC タイル**数**が `num_threads` で
+/// 割り切れない形状では端数タイルを特定 worker へ偏らせる（#753 実装
+/// 計画 §3.2）。本関数は行バンド数を [`partition::split_evenly`]
+/// （gemm crate `gemm.rs` の n_jobs 分配方式を参照した均等割り）で
+/// 均等化してから行範囲へ変換することで、その偏りを ±1 タイルへ抑える。
+///
+/// 各 worker が受け取る行範囲は依然として `[0, m)` を隙間なく分割した
+/// disjoint な連続区間であるため、`c.split_at_mut` の連鎖のみで
+/// `unsafe` なしに実現できる。タイル単位で非連続に分配する完全な 2 次元
+/// ジョブ分配（gemm crate 本来の方式）は生ポインタによる `unsafe`
+/// ラッパーを要するため、PR #766（「常に不活性な sysctl FFI」が P0/P1
+/// 指摘で撤去された経緯）を踏まえ #753 では採用しない（
+/// [`partition`] モジュールドキュメント「unsafe を使わない設計判断」・
+/// `docs/perf/cpu-gemm-runtime-cache-detect.md` 参照）。
+///
+/// 本番未結線（[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]
+/// からは呼ばれない。受け入れ条件 2＝実機 5 回中央値での非劣化確認が
+/// 本 PR のスコープ外のため。#750・#758 と同型の判断）。テスト専用
+/// パラメータ化入口として `blocks` を直接受け取る（[`gemm_blis_parallel_with_blocks`]
+/// と同じ設計）。
+#[cfg(test)]
+pub(crate) fn gemm_blis_parallel_2d_with_blocks(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    validate_dims(a, b, c, m, n, k)?;
+    validate_block_sizes(blocks)?;
+
+    // n == 0 の no-op 対処は `gemm_blis_parallel` と同じ理由（本ファイル
+    // 冒頭のコメント参照）。
+    if n == 0 {
+        return Ok(());
+    }
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let row_ranges = partition::row_ranges_for_workers(m, blocks.mc, num_threads);
+
+    // 安全な disjoint 分割: `row_ranges` は `[0, m)` を隙間なく連続分割
+    // したものなので（[`partition::row_ranges_for_workers`] の被覆完全性
+    // 契約。`partition::tests::row_ranges_for_workers_covers_m_contiguously_and_disjointly`
+    // で検証済み）、`c` を先頭から順に `split_at_mut` で切り出せば各
+    // worker の担当範囲が構築上重複しない（コンパイル時の借用検査で保証。
+    // `unsafe` 不要）。
+    let mut remaining: &mut [f32] = c;
+    let mut chunks: Vec<(usize, &mut [f32])> = Vec::with_capacity(row_ranges.len());
+    for r in &row_ranges {
+        let len = (r.end - r.start) * n;
+        let (head, tail) = remaining.split_at_mut(len);
+        chunks.push((r.start, head));
+        remaining = tail;
+    }
+
+    chunks.into_par_iter().try_for_each(|(row_start, c_chunk)| {
+        let row_end = row_start + c_chunk.len() / n;
+        dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1379,6 +1464,76 @@ mod tests {
                 "blocks={blocks:?} の並列経路は gemm_naive と bit 完全一致するはず"
             );
         }
+    }
+
+    /// #753: 2 次元タイルジョブ分配版
+    /// [`gemm_blis_parallel_2d_with_blocks`] が `gemm_naive` と bit 完全
+    /// 一致することを、MC タイル数がスレッド数で割り切れない形状
+    /// （`blocks.mc=64` に対し `m=523` → タイル数 9・スレッド数
+    /// [1,2,3,5,16] のいずれとも非整除）× 複数スレッド数で検証する。
+    /// `gemm_blis_parallel_with_blocks` と異なる行範囲計算
+    /// （[`partition::row_ranges_for_workers`]）を経由しても、C 各要素の
+    /// FMA 連鎖・累積順序は `dispatch_region`／`gemm_blis_region` を
+    /// そのまま再利用するため変化しない（bit 完全一致契約・REQ-2）。
+    #[test]
+    fn gemm_blis_parallel_2d_matches_naive_bit_exact_across_thread_pools() {
+        let (m, n, k) = (523, 600, 700);
+        let blocks = BlockSizes {
+            mc: 64,
+            kc: 256,
+            nc: 512,
+        };
+        let a = xorshift32_vec(0x5e5e_5e5e, m * k);
+        let b = xorshift32_vec(0x6f6f_6f6f, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        for num_threads in [1usize, 2, 3, 5, 16] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+            let mut c_2d = vec![0.0f32; m * n];
+            pool.install(|| {
+                gemm_blis_parallel_2d_with_blocks(&a, &b, &mut c_2d, m, n, k, blocks).unwrap()
+            });
+
+            assert_eq!(
+                c_naive, c_2d,
+                "gemm_blis_parallel_2d_with_blocks（num_threads={num_threads}）が \
+                 gemm_naive と bit 一致しない"
+            );
+        }
+    }
+
+    /// #753: MC/KC/NC の実行時キャッシュ検出（[`cache_params::detected_blocks`]）
+    /// で算出したブロックサイズを [`gemm_blis_parallel_with_blocks`] へ
+    /// 渡しても `gemm_naive` と bit 完全一致することを検証する（実行環境
+    /// 依存の値であっても、GEMM 本体の FMA 契約・累積順序は `blocks` の
+    /// 値に依らず不変という [`gemm_blis_region`] の契約〈本ファイル冒頭
+    /// ドキュメント「bit 完全一致契約」〉が MC/KC/NC の動的算出後も
+    /// 成立することの回帰テスト）。`ScalarKernel` の `MR`／`NR` を渡し、
+    /// 実行 ISA に依らず全環境で同じ形状の `blocks` になるようにする。
+    #[test]
+    fn gemm_blis_parallel_detected_blocks_match_naive_bit_exact() {
+        let (m, n, k) = (200, 600, 700);
+        let a = xorshift32_vec(0x7a7a_7a7a, m * k);
+        let b = xorshift32_vec(0x8b8b_8b8b, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let blocks = cache_params::detected_blocks(ScalarKernel::MR, ScalarKernel::NR);
+
+        let mut c_parallel = vec![0.0f32; m * n];
+        gemm_blis_parallel_with_blocks(&a, &b, &mut c_parallel, m, n, k, blocks).unwrap();
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "detected_blocks() 由来の blocks={blocks:?} は gemm_naive と bit 完全一致するはず"
+        );
     }
 
     /// イシュー #750 の受け入れ条件 3（スレッド数 1 では従来と同一経路・
@@ -1966,6 +2121,126 @@ mod tests {
                     blocks.mc, blocks.kc, blocks.nc
                 );
             }
+        }
+    }
+
+    /// #753 実装計画 §3.3: `default_blocks()`（固定値）・
+    /// `cache_params::detected_blocks()`（実行時キャッシュ検出）・
+    /// `gemm_blis_parallel_2d_with_blocks`（2 次元タイルジョブ分配）の
+    /// 3 経路を dim ∈ {512, 1024, 2048, 4096} で 5 回計測の中央値により
+    /// A/B 計測する（`.claude/rules/coding-rust.md` の 5 回計測中央値
+    /// 規約・[`mc_kc_nc_blocking_sweep_median_throughput`] と同じ計測順
+    /// インターリーブ方針）。
+    ///
+    /// 受け入れ条件 2（実機 5 回中央値での非劣化・gemm crate との差の
+    /// 縮小または逆転）の判定自体は本テストの範囲外（本テストは計測結果を
+    /// 標準出力へ記録するのみで勝敗を assert しない。`.claude/rules/coding-rust.md`
+    /// の「実機依存テストは `#[ignore]` で分離」・#564 の
+    /// `mc_kc_nc_blocking_sweep_median_throughput` と同方針）。
+    ///
+    /// `#[ignore]`（実機実行専用。`cargo test -p backend-cpu --release --
+    /// --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
+    /// で個別実行する想定。非 macOS・非実機環境でも `--release` なしで
+    /// フォールバック経路のスモークとして完走することは
+    /// `cache_params::tests::detected_blocks_returns_valid_block_sizes_on_any_platform`
+    /// が別途保証する）。
+    #[test]
+    #[ignore = "実機（対象は Apple M4 Max。#753）での A/B 計測専用。--release 推奨"]
+    fn runtime_cache_detect_and_2d_partition_ab_median_throughput() {
+        use std::time::Instant;
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            samples[samples.len() / 2]
+        }
+
+        // 実行時に一度だけ決定する: 対象は本テスト実行環境で実際に
+        // dispatch_region が選ぶマイクロカーネルではなく、
+        // `default_blocks()` と同じく ISA 非依存の代表値（ScalarKernel の
+        // MR/NR）で `detected_blocks()` を評価する（本番 3 公開関数の
+        // `blocks` が ISA によらず単一の値である設計〈本ファイル冒頭
+        // `default_blocks` ドキュメント参照〉と揃える）。
+        let detected = cache_params::detected_blocks(ScalarKernel::MR, ScalarKernel::NR);
+        println!(
+            "detected_blocks: mc={} kc={} nc={} (default: mc={} kc={} nc={})",
+            detected.mc, detected.kc, detected.nc, MC, KC, NC
+        );
+
+        for dim in [512usize, 1024, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0x9c9c_9c9c, m * k);
+            let b = xorshift32_vec(0xadad_adad, k * n);
+
+            fn run_default(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> f64 {
+                let mut c = vec![0.0f32; m * n];
+                let start = Instant::now();
+                gemm_blis_parallel(a, b, &mut c, m, n, k).unwrap();
+                start.elapsed().as_secs_f64()
+            }
+            fn run_detected(
+                a: &[f32],
+                b: &[f32],
+                m: usize,
+                n: usize,
+                k: usize,
+                blocks: BlockSizes,
+            ) -> f64 {
+                let mut c = vec![0.0f32; m * n];
+                let start = Instant::now();
+                gemm_blis_parallel_with_blocks(a, b, &mut c, m, n, k, blocks).unwrap();
+                start.elapsed().as_secs_f64()
+            }
+            fn run_2d(
+                a: &[f32],
+                b: &[f32],
+                m: usize,
+                n: usize,
+                k: usize,
+                blocks: BlockSizes,
+            ) -> f64 {
+                let mut c = vec![0.0f32; m * n];
+                let start = Instant::now();
+                gemm_blis_parallel_2d_with_blocks(a, b, &mut c, m, n, k, blocks).unwrap();
+                start.elapsed().as_secs_f64()
+            }
+
+            // 全経路を 1 巡ウォームアップ（cache/TLB を均等に温める。
+            // `mc_kc_nc_blocking_sweep_median_throughput` と同じ狙い）。
+            run_default(&a, &b, m, n, k);
+            run_detected(&a, &b, m, n, k, detected);
+            run_2d(&a, &b, m, n, k, default_blocks());
+
+            let mut samples_default = Vec::with_capacity(5);
+            let mut samples_detected = Vec::with_capacity(5);
+            let mut samples_2d = Vec::with_capacity(5);
+            for i in 0..5 {
+                // 計測順序を交互化し系統的偏りを避ける（同上）。
+                match i % 3 {
+                    0 => {
+                        samples_default.push(run_default(&a, &b, m, n, k));
+                        samples_detected.push(run_detected(&a, &b, m, n, k, detected));
+                        samples_2d.push(run_2d(&a, &b, m, n, k, default_blocks()));
+                    }
+                    1 => {
+                        samples_detected.push(run_detected(&a, &b, m, n, k, detected));
+                        samples_2d.push(run_2d(&a, &b, m, n, k, default_blocks()));
+                        samples_default.push(run_default(&a, &b, m, n, k));
+                    }
+                    _ => {
+                        samples_2d.push(run_2d(&a, &b, m, n, k, default_blocks()));
+                        samples_default.push(run_default(&a, &b, m, n, k));
+                        samples_detected.push(run_detected(&a, &b, m, n, k, detected));
+                    }
+                }
+            }
+
+            println!(
+                "dim={dim}: default median={:.6}s / detected median={:.6}s / \
+                 2d-partition median={:.6}s",
+                median(samples_default),
+                median(samples_detected),
+                median(samples_2d),
+            );
         }
     }
 }
