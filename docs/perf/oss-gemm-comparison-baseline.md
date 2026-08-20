@@ -79,9 +79,22 @@ MLX はユニファイドメモリ特性により、Rust 側 Metal 実装ほど�
 |---|---|---|---|
 | CPU `gemm_blis_parallel` | `matrixmultiply` (0.3.11) | デバイス内相当（ホスト完結） | 可（同一プロトコル・同一入力） |
 | CPU `gemm_blis_parallel` | `gemm` crate (0.19.0, `Parallelism::Rayon(0)`) | デバイス内相当（ホスト完結） | 可（同一プロトコル・同一入力） |
-| Metal `gemm_f32_prepared_bench` | MLX デバイス内 | デバイス内 | 可 |
+| Metal `gemm_f32_prepared_bench` | MLX デバイス内 | デバイス内 | 参考値（出力確保コストの非対称性あり。§3.1 参照） |
 | Metal `gemm_bench`（`dispatch_auto`） | MLX 転送込み | 転送込み | 可（ただし `dispatch_auto` 自体が REQ-8 の同期方式契約〈ホスト転送を伴わない完了待ち〉を満たさない参考値。`docs/perf/gemm-optimization-baseline.md` §2） |
 | Metal `gemm_bench`（`dispatch_auto`） | PyTorch MPS f32 | 転送込み | 可（同上・参考値。`gemm_bench_torch_mps_f32.py` 冒頭コメント） |
+
+### 3.1 デバイス内境界（Metal ↔ MLX）の出力確保コスト非対称性（レビュー指摘対応。イシュー #755）
+
+`gemm_f32_prepared_bench.rs` は出力バッファ `c_buf` をループ外で 1 回だけ確保し、
+計測ループ内では同一バッファへの書き込みを繰り返す（同ファイル 114 行・
+123〜127 行）。一方 MLX の `mx.matmul(a, b)`（`gemm_bench_mlx_f32.py::
+measure_device_resident`）は immutable な関数型配列を返す言語仕様上、
+呼び出しのたびに新しい出力配列を確保する（`out=` 相当の書き込み先指定 API を
+持たない）。この非対称性は MLX 側の言語仕様上の制約でありコード側で対称化
+できないため、上表では「可」ではなく「参考値」とし、非対称の方向
+（MLX 側にのみ出力確保コストが乗る＝自作実装を実際より有利に見せる方向には
+ならない）を明記する。詳細は `gemm_bench_mlx_f32.py` 冒頭コメント
+「デバイス内境界の残存非対称性」節を参照。
 
 ## 4. スレッド構成（CPU 比較の公平性軸）
 
@@ -103,11 +116,11 @@ MLX はユニファイドメモリ特性により、Rust 側 Metal 実装ほど�
 値自体は `.claude/rules/coding-rust.md` に従い単独緩和しない）で自作実装を
 基準に照合する。K=1024 以降で複合判定をわずかに超える不一致が観測される
 既知の実測結果があり、実装バグではなく縮約順序差由来の丸め誤差蓄積と
-判断している。**既定では突合 NG は非 fatal**（`output_match`／
-`mismatch_detail` フィールドへ記録し警告を出すのみで 0 終了。#735 各 Phase
-完了時の素朴な再実行という主目的を既定引数のまま成立させるため）。
-従来の fail-closed 挙動（突合 NG で非 0 終了）が必要な場合は
-`--strict-compare` を指定する（イシュー #755 review 反映）。
+判断している。**既定で fail-closed**（レビュー指摘対応。イシュー #755）:
+全サイズの JSON Lines 出力（`output_match`／`mismatch_detail` フィールドを
+含む）を終えたうえで、突合 NG を 1 件でも検出していれば非 0 終了する。
+既知の限界（K=1024 以降の丸め誤差蓄積）を理由に既定挙動を非 fatal へ戻す
+ことはしない。
 
 ## 6. 2026-08-19 ベースライン（出典: #735・#752・#753 本文。scratchpad ハーネス消失により集約値のみ）
 
@@ -143,9 +156,9 @@ smoke run のログは本節 7.1 に要約として記録し、実機での第 0
 - サイズ 512〜4096: ビルド・計測・JSON Lines 出力は正常動作。出力突合は
   `matrixmultiply`・`gemm` crate 双方で K≧1024 において複合判定をわずかに
   超える不一致を検出した（§5「出力突合と既知の限界」参照。ハーネス自体の
-  不具合ではなく実測結果）。既定引数では非 fatal（`output_match=false` を
-  JSON Lines に記録し 0 終了）、`--strict-compare` 指定時は非 0 終了する
-  ことを確認した
+  不具合ではなく実測結果）。`output_match=false` を JSON Lines に記録した
+  うえで、全サイズの出力完了後に非 0 終了する既定の fail-closed 挙動を
+  確認した（レビュー指摘対応。イシュー #755）
 - 結論: ハーネスの配線（ビルド・計測・JSON 出力・突合判定）は
   意図どおり機能することを確認した。実機（Apple Silicon・NEON 最適経路）
   での第 0 回フル計測は次回実機アクセス時に実施し、本表へ per-size 詳細
