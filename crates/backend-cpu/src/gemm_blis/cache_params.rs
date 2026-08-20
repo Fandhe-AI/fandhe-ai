@@ -193,6 +193,19 @@ pub(crate) fn compute_blocks(
 mod sysctl_ffi {
     use std::ffi::{CString, c_char, c_int, c_void};
 
+    // SAFETY: この `extern "C"` 宣言は macOS/BSD 系 libSystem が公開する
+    // 標準 API `sysctlbyname`（`<sys/sysctl.h>`、`man 3 sysctlbyname`）の
+    // シグネチャと一致させている: 戻り値は `c_int`（0 は成功、非 0 はエラー。
+    // errno 相当）、引数は `name: *const c_char`（NUL 終端文字列）・
+    // `oldp: *mut c_void`／`oldlenp: *mut usize`（読み取り先バッファと
+    // その長さ、in/out）・`newp: *mut c_void`／`newlen: usize`（書き込み
+    // 値、本モジュールでは常に null／0 で読み取り専用呼び出しに限定）で、
+    // C ABI 上の型幅・呼び出し規約（`extern "C"`）は libSystem のヘッダ
+    // 定義と 1:1 対応する。シンボルは全 macOS 実行環境に常にリンクされる
+    // libSystem が提供するため動的ロード不要で解決可能（`cfg(target_os =
+    // "macos")` 限定でのみコンパイルされ、他 OS では宣言自体が存在しない）。
+    // 個々の呼び出し引数の安全性（ポインタ有効性・長さ整合）は呼び出し側
+    // `read_usize` の SAFETY コメントを参照。
     unsafe extern "C" {
         fn sysctlbyname(
             name: *const c_char,
