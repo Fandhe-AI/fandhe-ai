@@ -149,6 +149,42 @@ fn gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools() {
     }
 }
 
+/// `n >= 4096`（#749 で NC=9600 拡大分岐の対象だった形状域。PR #766・
+/// codex-review 再指摘により当該分岐は本 PR 時点で未有効化〈常に
+/// `default_blocks()`〉。詳細は `src/gemm_blis/mod.rs` の `NC` 定数の
+/// ドキュメンテーションコメント参照）が
+/// `gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools` と
+/// 同じくスレッド数横断で `gemm_naive` と bit 完全一致することを確認する。
+/// ブロックサイズは呼び出しごとに 1 回だけ計算し全 rayon タスクへ同一値を
+/// キャプチャして渡す設計（`src/gemm_blis/mod.rs` の `gemm_blis_parallel`
+/// 実装コメント参照）のため、タスク分割数（num_threads）を跨いでも同一の
+/// ブロックサイズが一貫して使われることを本テストが検証する。
+#[test]
+fn gemm_blis_parallel_large_n_matches_naive_bit_exact_across_thread_pools() {
+    let (m, n, k) = (37, 4096, 41);
+    let a = random_matrix(50, m * k);
+    let b = random_matrix(51, k * n);
+
+    let mut c_naive = vec![0.0; m * n];
+    gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+    for num_threads in [1usize, 2, 3, 5, 8] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_parallel = vec![0.0; m * n];
+        pool.install(|| gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "gemm_blis_parallel（n=4096・num_threads={num_threads}）が \
+             gemm_naive と bit 一致しない（NC=9600 分岐の回帰）"
+        );
+    }
+}
+
 /// panel packing バッファを gemm 呼び出し単位で 1 回確保・再利用する
 /// 変更（#556）の回帰テスト。各 rayon 行パネルタスクが `PanelBuffers`
 /// を所有する設計（`src/gemm_blis/mod.rs` の [`PanelBuffers`] ドキュメント
