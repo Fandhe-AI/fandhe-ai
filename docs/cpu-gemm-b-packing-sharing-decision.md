@@ -253,6 +253,16 @@ nr ブロック単位で `par_iter` 化することも可能）。pack 完了後
   に従いユーザー承認を経て行う。自動運転モードの本セッションでは Issue 起票を行わず、
   切り出し候補として本ドキュメント・PR 本文に記録するに留める
 
+## §F 実装済み（イシュー #750）
+
+案 B を実装した（イシュー #750。`crates/backend-cpu/src/gemm_blis/mod.rs` の
+`gemm_blis_shared_b_region`／`gemm_blis_ic_loop`／`IcLoopContext`／`dispatch_shared_b`）。
+併せて B packing 自体を `nr` ブロック単位で `par_chunks_mut` により並列化した。実タスク数が
+1（`m <= panel_rows`。`num_threads == 1` を含む）の場合は本節で述べた「共有 pack」経路を
+一切経由せず、従来の `dispatch_region` 単発呼び出しへ早期分岐する（受け入れ条件 3）。
+数値一致（bit 完全一致契約）・実機性能実測の状況は `docs/perf/cpu-gemm-b-packing-sharing.md`
+を参照（実機性能実測は本 PR 時点で環境ゲート未達・未実施の fail-closed 記録）。
+
 ## 出典
 
 - イシュー #565（本ドキュメントの起票元）・#564／PR #701（E-8。MC/KC/NC パラメータ化・NC 拡大
