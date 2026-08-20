@@ -2248,6 +2248,16 @@ mod tests {
                 gemm_blis_parallel(a, b, &mut c, m, n, k).unwrap();
                 start.elapsed().as_secs_f64()
             }
+            // #753 レビュー指摘（codex-review P2）: `gemm_blis_parallel_with_blocks`
+            // は実タスク数が 2 以上のとき常に `dispatch_shared_b`（B パネル
+            // 共有経路。#750・本番未採用）を経由するため、これを A/B 計測に
+            // 使うと「キャッシュ検出由来の MC/KC/NC 変更」に「B packing
+            // 戦略の変更」が混入し、受け入れ条件 2（実機 5 回中央値での
+            // 非劣化確認）の判断材料として解釈できなくなる。本関数は
+            // `gemm_blis_parallel`（本番公開入口）と同じ分配（`panel_rows`
+            // 静的パネル分割）・同じ dispatch（`dispatch_region`。B パネル
+            // 共有なし）を用い、`blocks` だけを差し替えることで、比較対象を
+            // 「キャッシュ検出の効果」のみに限定する。
             fn run_detected(
                 a: &[f32],
                 b: &[f32],
@@ -2258,7 +2268,16 @@ mod tests {
             ) -> f64 {
                 let mut c = vec![0.0f32; m * n];
                 let start = Instant::now();
-                gemm_blis_parallel_with_blocks(a, b, &mut c, m, n, k, blocks).unwrap();
+                let num_threads = rayon::current_num_threads().max(1);
+                let panel_rows = m.div_ceil(num_threads).max(1);
+                c.par_chunks_mut(panel_rows * n)
+                    .enumerate()
+                    .try_for_each(|(panel_idx, c_chunk)| {
+                        let row_start = panel_idx * panel_rows;
+                        let row_end = (row_start + c_chunk.len() / n).min(m);
+                        dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+                    })
+                    .unwrap();
                 start.elapsed().as_secs_f64()
             }
             fn run_2d(

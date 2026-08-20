@@ -91,15 +91,20 @@ const L1D_SANE_MAX: usize = 8 * 1024 * 1024;
 const L2_SANE_MIN: usize = 128 * 1024;
 const L2_SANE_MAX: usize = 256 * 1024 * 1024;
 
-/// `x` を `multiple` の倍数へ切り上げる（`multiple == 0` は `x` を素通し。
-/// 呼び出し元は `mr`／`nr` が 0 でないことを [`compute_blocks`] 冒頭で
-/// 既に検査済みのため実運用では到達しないが、本関数自体は全 `usize` 入力
-/// に対し panic しない全域関数として書く）。
-fn round_up_to_multiple(x: usize, multiple: usize) -> usize {
+/// `x` を `multiple` の倍数へ切り上げる（`multiple == 0` は `x` を素通し）。
+///
+/// レビュー指摘（#753）: `mr`／`nr`（[`compute_blocks`] 冒頭で 0 のみ検査
+/// 済みで上限は検査していない）を `multiple` に渡すと `div_ceil(...) *
+/// multiple` が大きな値で `usize` オーバーフローしうる（debug では
+/// panic、release ではラップして誤ったブロックサイズを返す）。`checked_mul`
+/// で防御し、オーバーフロー時は `None` を返す（呼び出し元は
+/// [`compute_blocks`] を経由し最終的に [`super::default_blocks`] への
+/// フォールバックへ落ちる。受け入れ条件 3 と同じ fail-closed 方針）。
+fn round_up_to_multiple(x: usize, multiple: usize) -> Option<usize> {
     if multiple == 0 {
-        return x;
+        return Some(x);
     }
-    x.div_ceil(multiple) * multiple
+    x.div_ceil(multiple).checked_mul(multiple)
 }
 
 /// `raw` を `[min, max]` へクランプしたうえで `multiple` の倍数へ丸める
@@ -113,14 +118,17 @@ fn round_up_to_multiple(x: usize, multiple: usize) -> usize {
 /// へ切り下げる。これにより返り値は常に `multiple` の倍数であり、かつ
 /// `max` を超えない（`min` をわずかに下回りうるが、`multiple` が `min`
 /// 以下である通常のマイクロカーネル構成では起こらない）。
-fn clamp_to_multiple(raw: usize, min: usize, max: usize, multiple: usize) -> usize {
+///
+/// [`round_up_to_multiple`] のオーバーフロー検出（`multiple` に極端に
+/// 大きな `mr`／`nr` が渡された場合）を `None` として伝播する。
+fn clamp_to_multiple(raw: usize, min: usize, max: usize, multiple: usize) -> Option<usize> {
     let clamped = raw.clamp(min, max);
-    let rounded = round_up_to_multiple(clamped, multiple);
-    if rounded <= max {
+    let rounded = round_up_to_multiple(clamped, multiple)?;
+    Some(if rounded <= max {
         rounded
     } else {
         (max / multiple) * multiple
-    }
+    })
 }
 
 /// L1D／L2 実測値（バイト）と、対象マイクロカーネルの `MR`／`NR`
@@ -143,9 +151,13 @@ fn clamp_to_multiple(raw: usize, min: usize, max: usize, multiple: usize) -> usi
 ///   する。
 ///
 /// 各値は [`KC_MIN`]〜[`NC_MAX`] の範囲へクランプする。`l1d_bytes`／
-/// `l2_bytes` が正当性検査範囲外、または `mr`／`nr` が 0 の場合は `None`
-/// （呼び出し元は [`super::default_blocks`] へフォールバックする。
-/// 受け入れ条件 3）。
+/// `l2_bytes` が正当性検査範囲外、`mr`／`nr` が 0 の場合、または
+/// `mr`／`nr` に起因する中間計算（`mr + nr`・`F32_BYTES * (mr + nr)`・
+/// [`clamp_to_multiple`] 内の丸め）が `usize` オーバーフローする場合は
+/// `None`（呼び出し元は [`super::default_blocks`] へフォールバックする。
+/// 受け入れ条件 3。オーバーフロー検出はレビュー指摘 #753: `mr`／`nr` は
+/// 0 のみ検査しており上限を検査していなかったため、大きな値で
+/// debug では panic・release では誤った丸め値が生じうる状態だった）。
 pub(crate) fn compute_blocks(
     l1d_bytes: usize,
     l2_bytes: usize,
@@ -163,19 +175,30 @@ pub(crate) fn compute_blocks(
     }
 
     let l1_budget = l1d_bytes / 2;
-    let per_k_bytes = F32_BYTES * (mr + nr);
-    // `mr`／`nr` を 0 排除済みのため `per_k_bytes` は常に非ゼロ。
+    // `checked_add`／`checked_mul` で防御する（`mr`／`nr` の 0 排除だけでは
+    // 上限未検証のため大きな値でオーバーフローしうる。オーバーフロー時は
+    // `None` を返し呼び出し元のフォールバックへ委ねる）。
+    let per_k_bytes = F32_BYTES.checked_mul(mr.checked_add(nr)?)?;
+    if per_k_bytes == 0 {
+        // `mr`／`nr` を 0 排除済みのため理論上到達しないが、`compute_blocks`
+        // 全体の fail-closed 方針（0 除算防止）に合わせ明示的に拒否する。
+        return None;
+    }
     let kc = (l1_budget / per_k_bytes).clamp(KC_MIN, KC_MAX);
 
     let l2_budget = l2_bytes / 2;
-    let mc_raw = l2_budget / (F32_BYTES * kc);
-    let mc = clamp_to_multiple(mc_raw, MC_MIN, MC_MAX, mr);
+    let kc_bytes = F32_BYTES.checked_mul(kc)?;
+    if kc_bytes == 0 {
+        return None;
+    }
+    let mc_raw = l2_budget / kc_bytes;
+    let mc = clamp_to_multiple(mc_raw, MC_MIN, MC_MAX, mr)?;
 
     // NC は B パネルが占有できる L2 残余（A パネル分を除いた残り）から
     // 算出する。`l2_budget` は A パネルに割り当てた予算のため、B 側は
     // 残りの半分（`l2_bytes - l2_budget == l2_budget`）を使う。
-    let nc_raw = l2_budget / (F32_BYTES * kc);
-    let nc = clamp_to_multiple(nc_raw, NC_MIN, NC_MAX, nr);
+    let nc_raw = l2_budget / kc_bytes;
+    let nc = clamp_to_multiple(nc_raw, NC_MIN, NC_MAX, nr)?;
 
     Some(BlockSizes { mc, kc, nc })
 }
@@ -369,6 +392,32 @@ mod tests {
         // （マイクロカーネル 1 反復あたりの演算密度を落としすぎない下限）。
         let blocks = compute_blocks(L1D_SANE_MIN, 16 * 1024 * 1024, 8, 12).unwrap();
         assert_eq!(blocks.kc, KC_MIN);
+    }
+
+    #[test]
+    fn compute_blocks_rejects_mr_nr_overflowing_intermediate_arithmetic() {
+        // レビュー指摘（#753）: `mr`／`nr` は 0 のみ検査しており上限を
+        // 検査していなかったため、`mr + nr`（`checked_add`）・
+        // `F32_BYTES * (mr + nr)`（`checked_mul`）が `usize` オーバーフロー
+        // する組み合わせで debug では panic・release では誤った丸め値が
+        // 生じうる状態だった。`usize::MAX` に近い `mr`／`nr` で `None`
+        // （fail-closed。呼び出し元は `default_blocks()` へフォールバック）
+        // を返すことを検証する。
+        assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, usize::MAX, 1).is_none());
+        assert!(
+            compute_blocks(
+                192 * 1024,
+                16 * 1024 * 1024,
+                usize::MAX / 2,
+                usize::MAX / 2 + 2
+            )
+            .is_none()
+        );
+        // `clamp_to_multiple` 側（`round_up_to_multiple` の `checked_mul`）
+        // も同様に防御されていることを、`mc_raw`／`nc_raw` が確実にクランプ
+        // される極端に大きな L2 実容量と、それ自体は `mr + nr` を
+        // オーバーフローさせない範囲の巨大な `mr` の組み合わせで検証する。
+        assert!(compute_blocks(192 * 1024, L2_SANE_MAX, usize::MAX / 4, 12).is_none());
     }
 
     /// [`detected_blocks`] は非 macOS・sysctl 失敗時に必ず
