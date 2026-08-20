@@ -8,9 +8,10 @@
 //!
 //! 本パッケージはリポジトリ内・本体 workspace 外の独立 Cargo プロジェクトである
 //! （`Cargo.toml` の `[workspace]` 空テーブル）。matrixmultiply・gemm crate は
-//! 許容依存 8 区分（`.claude/rules/deps-policy.md`）の対象外の外部依存だが、
-//! 本体 workspace の依存グラフには一切現れないためユーザー承認対象の「依存追加」に
-//! 当たらないと判断している（設計判断の詳細は `docs/oss-comparison-harness-decision.md`）。
+//! 許容依存第 9 区分（ベンチ比較対象。`.claude/rules/deps-policy.md`）として
+//! 2026-08-20 に条件付きユーザー承認済み（独立 workspace・`=x.y.z` 完全固定・
+//! 専用 `deny.toml` 監査・`check-forbidden-deps.sh` 走査・本体 workspace 非混入が
+//! 必須条件。設計判断の詳細は `docs/oss-comparison-harness-decision.md`）。
 //!
 //! ## 計測境界
 //!
@@ -290,8 +291,8 @@ fn print_record(commit: &str, hw: &str, boundary: &str, r: &Record) {
 }
 
 /// UTC 日付（YYYY-MM-DD）を `SystemTime` から手計算する。`chrono` は許容依存
-/// 8 区分外のため使わない（JSON Lines のメタデータ生成のみに外部クレートを
-/// 追加する必要はない）。
+/// 9 区分のいずれにも該当しないため使わない（JSON Lines のメタデータ生成のみに
+/// 外部クレートを追加する必要はない）。
 fn chrono_like_utc_date() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()

@@ -10,9 +10,12 @@ CPU（自作 vs `matrixmultiply`・`gemm` crate）・Metal（自作 vs MLX ≈ P
 
 ## 中核の制約
 
-`matrixmultiply`・`gemm` crate は許容依存 8 区分（`.claude/rules/deps-policy.md`）の
-対象外である。本体 workspace（ルート `Cargo.toml` / `Cargo.lock`）へ dev-dependencies
-としても追加しない（deps-policy.md の統制対象を汚さないため）。
+`matrixmultiply`・`gemm` crate は許容依存第 9 区分（ベンチ比較対象。
+`.claude/rules/deps-policy.md`）として条件付きユーザー承認済み（2026-08-20。
+詳細は本節末尾「スコープ解釈のユーザー承認」）である。本体 workspace（ルート
+`Cargo.toml` / `Cargo.lock`）へ dev-dependencies としても追加しない
+（deps-policy.md が定める本体 workspace の統制対象を汚さないため。第 9 区分の
+承認条件そのもの）。
 
 ## 選択肢比較
 
@@ -52,9 +55,12 @@ CPU（自作 vs `matrixmultiply`・`gemm` crate）・Metal（自作 vs MLX ≈ P
   本パッケージ専用の `Cargo.lock`（`scripts/bench/oss-gemm-compare/Cargo.lock`）を
   コミットして再現性を確保する
 - 本体 workspace の依存グラフ（`cargo tree --workspace`・cargo-deny・各 CI ジョブの
-  走査対象）に一切現れないため、`.claude/rules/deps-policy.md` が定める「許容依存
-  8 区分」の統制範囲（本体 workspace）の対象外であり、ユーザー承認対象の依存追加には
-  当たらないと判断する
+  走査対象）に一切現れないため、実装当初は `.claude/rules/deps-policy.md` が定める
+  「許容依存 8 区分」の統制範囲（本体 workspace）の対象外であり、ユーザー承認対象の
+  依存追加には当たらないと実装 Agent 自身の推論で判断していた（後述のとおり、この
+  スコープ解釈は 2026-08-20 にユーザーの条件付き承認を経て許容依存第 9 区分
+  〈ベンチ比較対象〉として正式化されている。現在の扱いは deps-policy.md 該当節が
+  正）
 - ただし依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`。
   deps-policy.md）の混入検査（`scripts/check-forbidden-deps.sh`）は、統制対象外の
   独立パッケージであっても fail-closed 検査の網を広げる方向の変更であり緩和では

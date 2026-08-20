@@ -68,7 +68,7 @@ rust-ai-library/
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
     ├── kernel-fusion.md     # TASK-12.2b カーネル融合の適用範囲・限界（複合WLで融合を性能目標の前提にしない。#168）
     ├── license-matrix.md    # 許容依存 8 区分のライセンス可否表（TASK-1.3）
-    ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断（#755）
+    ├── oss-comparison-harness-decision.md # OSS 直接比較ハーネス（matrixmultiply・gemm crate・MLX・PyTorch）の恒久化・本体 workspace 外配置の設計判断・matrixmultiply/gemm の許容依存第 9 区分〈ベンチ比較対象〉としての条件付きユーザー承認記録（#755）
     ├── perf/                # 性能実測・下限確定の記録群（`performance-floor-decision.md` ほか。GEMM 最適化ツリー #479 の実測記録を含む）
     │   ├── performance-floor-decision.md # REQ-8 段階的下限の確定判断・追補記録（#158・#386・#393・#577）
     │   ├── gemm-optimization-baseline.md # REQ-8 GEMM 5 行の分母・分子（対象カーネル・実機・PyTorch 版・出典）の突合基準（#481）

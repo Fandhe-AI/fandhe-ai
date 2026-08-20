@@ -2,8 +2,9 @@
 
 CPU GEMM の OSS 直接比較ハーネス（イシュー #755）。本体の現行最適 CPU 経路
 （`backend_cpu::gemm_blis_parallel`。BLIS 5-loop + rayon 並列）を、
-`matrixmultiply`・`gemm` crate（いずれも本体 workspace の許容依存 8 区分
-〈`.claude/rules/deps-policy.md`〉の対象外）と同一プロトコルで計測する。
+`matrixmultiply`・`gemm` crate（いずれも許容依存第 9 区分〈ベンチ比較対象。
+`.claude/rules/deps-policy.md`〉として条件付きユーザー承認済み〈2026-08-20〉。
+本体 workspace の直接依存〈第 1〜8 区分〉には含まれない）と同一プロトコルで計測する。
 
 設計判断（本パッケージがなぜ本体 workspace 外の独立プロジェクトなのか）は
 `docs/oss-comparison-harness-decision.md` を、計測境界・再現手順・実測記録は
@@ -43,8 +44,9 @@ OSS 比較でありバックエンド間比較ではないため直接の適用�
 
 本パッケージは本体 workspace の member ではなく、独立の `[workspace]` を持つ
 Cargo プロジェクトである（ルート `Cargo.toml` / `Cargo.lock` に一切影響しない）。
-そのため `docs/license-matrix.md`（許容依存 8 区分の対象）の掲載対象外であり、
-上記ライセンス注記を本 README に個別記載する。
+そのため `docs/license-matrix.md`（本体 workspace 直接依存の第 1〜8 区分の可否表）
+には掲載せず、第 9 区分（ベンチ比較対象）の実測記録として上記ライセンス注記を
+本 README に個別記載する。
 
 ## 依存関係
 

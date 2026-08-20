@@ -2,9 +2,10 @@
 #
 # 本パッケージは本体 workspace（ルート `Cargo.toml`）の member ではない
 # （`[workspace]` を空テーブルで持たせ、ルートから独立した Cargo プロジェクトとして
-# 切り離す）。matrixmultiply・gemm crate は許容依存 8 区分（.claude/rules/deps-policy.md）
-# の対象外であり、本体 workspace の依存グラフ（`cargo tree --workspace`・cargo-deny・
-# 各 CI ジョブの走査対象）へは一切現れない構成とする（`docs/oss-comparison-harness-decision.md`
+# 切り離す）。matrixmultiply・gemm crate は許容依存第 9 区分（ベンチ比較対象。
+# .claude/rules/deps-policy.md）として条件付きユーザー承認済み（2026-08-20）であり、
+# 本体 workspace の依存グラフ（`cargo tree --workspace`・cargo-deny・各 CI ジョブの
+# 走査対象）へは一切現れない構成とする（`docs/oss-comparison-harness-decision.md`
 # §2.1 の設計判断）。
 #
 # `backend-cpu`・`bench-harness` は workspace member への path 依存で参照する。
@@ -35,15 +36,15 @@ backend-cpu = { path = "../../../crates/backend-cpu" }
 bench-harness = { path = "../../../crates/bench-harness" }
 rayon = "=1.12.0"
 
-# OSS 比較対象（許容依存 8 区分の対象外。deps-policy.md の統制範囲は本体 workspace
-# ＝ ルート `Cargo.toml` / `Cargo.lock` であり、本パッケージは workspace 外の独立
-# プロジェクトのため当初はユーザー承認対象の「依存追加」に当たらないと実装 Agent の
-# 判断で追加したが、そのスコープ解釈自体を 2026-08-20 にユーザーが (1) 本体
-# workspace への混入禁止・(2) ライセンス監査の CI 組み込み、の 2 条件付きで承認
-# 済み（`docs/oss-comparison-harness-decision.md` §2.1「スコープ解釈のユーザー
-# 承認」節）。以後の本パッケージへの依存追加・変更もこの 2 条件を満たす限りで
-# 許容される。再現性確保のため `=x.y.z` 完全固定＋本パッケージ専用 `Cargo.lock`
-# をコミットする。crates.io 実測最新安定版（2026-08-20 時点）を採用する。
+# OSS 比較対象。許容依存第 9 区分（ベンチ比較対象。`.claude/rules/deps-policy.md`）
+# として 2026-08-20 にユーザーが条件付きで承認済み: (1) 本体 workspace（ルート
+# `Cargo.toml` / `Cargo.lock`）への混入禁止・(2) 独立 workspace（`scripts/bench/
+# oss-gemm-compare/` 限定・`=x.y.z` 完全固定）・(3) 専用 `deny.toml` による
+# advisories/bans/licenses/sources 監査・(4) `scripts/check-forbidden-deps.sh` の
+# 走査対象化、が必須条件（`docs/oss-comparison-harness-decision.md` §2.1「スコープ
+# 解釈のユーザー承認」節）。以後の本パッケージへの依存追加・変更もこれらの条件を
+# 満たす限りで許容される。再現性確保のため `=x.y.z` 完全固定＋本パッケージ専用
+# `Cargo.lock` をコミットする。crates.io 実測最新安定版（2026-08-20 時点）を採用する。
 #
 # matrixmultiply: MIT/Apache-2.0（デュアルライセンス。crates.io API 実測）。
 matrixmultiply = "=0.3.11"
