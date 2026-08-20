@@ -39,7 +39,11 @@
   `ndarray`。直接・推移を問わない）の混入は P0。許容依存 8 区分以外の追加、
   `=x.y.z` 完全固定でないバージョン指定、`docs/license-matrix.md` 更新・ユーザー承認
   記録を伴わない依存追加・更新は P1（A06。`deny.toml` の licenses / sources /
-  advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）
+  advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）。
+  本規約の適用範囲は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）であり、
+  `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト。本体 workspace 外）の
+  `matrixmultiply`・`gemm` crate は deps-policy.md「適用範囲（本体 workspace 限定）」
+  節の 2 条件を満たす限り対象外（2026-08-20 ユーザー承認）
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、
   シェル呼び出しへの外部入力の非クォート展開等のインジェクション経路は P0（A03）

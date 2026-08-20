@@ -1,5 +1,28 @@
 # 依存管理規約（REQ-1 v2）
 
+## 適用範囲（本体 workspace 限定）
+
+本規約（許容依存 8 区分・バージョン固定・ライセンス要件）が統制するのは
+**本体 workspace**（ルート `Cargo.toml`／`Cargo.lock`）の依存グラフである。
+
+`scripts/bench/oss-gemm-compare/`（OSS 直接比較ハーネス。イシュー #755）は
+`[workspace]` を空テーブルで持つ独立 Cargo プロジェクトであり、本体 workspace の
+member ではない（本体 workspace の依存グラフ・CI の依存禁止検査の走査対象へは
+現れない構成。`docs/oss-comparison-harness-decision.md` §2.1）。本パッケージが
+比較対象として使う `matrixmultiply`・`gemm` crate（許容依存 8 区分の対象外）は、
+以下の条件を満たす場合に限り本規約の統制対象外として扱う（2026-08-20 ユーザー
+承認。`docs/oss-comparison-harness-decision.md` §2.1「スコープ解釈のユーザー
+承認」節が承認の一次記録、本節はその内容を規約側へ正式に反映したもの）:
+
+1. 本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）へ混入させない
+2. 専用 `deny.toml` によるライセンス監査を CI に組み込む（`.github/workflows/ci.yml`
+   「OSS 直接比較ハーネスのライセンス監査」ステップ）
+
+上記 2 条件を満たさない追加・変更（本体 workspace への混入・監査の欠落）は
+通常どおり本規約の許容依存 8 区分の対象となりユーザー承認が必要。本パッケージが
+別リポジトリへ切り出される場合は本節の適用も終了する（切り出し条件は
+`docs/oss-comparison-harness-decision.md`「将来の別リポジトリ移行の条件」節）。
+
 ## 許容依存 8 区分（これ以外の追加はユーザー承認必須）
 
 | 区分 | クレート | 条件 |
