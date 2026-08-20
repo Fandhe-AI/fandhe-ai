@@ -166,6 +166,17 @@ pub struct MetalGemm {
     /// 参照カウント型でありスレッド境界を跨がない前提。本クレートの
     /// ディスパッチは呼び出しごとに同期完了するため並行アクセスは想定しない）。
     tiled_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
+    /// threadgroup ID スウィズル（イシュー #540）をこのインスタンスの
+    /// `SimdgroupTiled` 経路（[`Self::pipeline_for_tile`]・
+    /// `encode_dispatch_tiled`）で有効化するかどうか。イシュー #746 で
+    /// クレート定数 `tile::SWIZZLE_ENABLED` の直接参照から instance
+    /// フィールドへ格上げした: 同一プロセス内で base（`false`）/head
+    /// （`true`）の 2 `MetalGemm` を構築し interleaved に A/B 計測する運用
+    /// （`docs/perf/metal-gemm-tgid-swizzle-ab.md`）のため、CUDA 側
+    /// `CudaMmaGemm`（`crates/backend-cuda/src/gemm.rs`）と同型の設計に揃えた。
+    /// `MetalGemm::new` は本番既定 `tile::SWIZZLE_ENABLED`（`false`）を渡すため
+    /// 既定挙動は不変。
+    swizzle_enabled: bool,
 }
 
 impl MetalGemm {
@@ -175,7 +186,28 @@ impl MetalGemm {
     /// ライブラリのみ保持し、構成別パイプラインは [`Self::pipeline_for_tile`]
     /// が初回ディスパッチ時に遅延構築する（候補が有限個でも全構成を
     /// 前もって構築すると起動コストが増えるため）。
+    ///
+    /// threadgroup ID スウィズル（イシュー #540）は本番既定
+    /// `tile::SWIZZLE_ENABLED`（`false`）で [`Self::new_with_swizzle`] へ
+    /// 委譲する薄いラッパー（同フィールドドキュメンテーションコメント参照）。
     pub fn new(ctx: &MetalContext) -> Result<Self, MetalError> {
+        Self::new_with_swizzle(ctx, tile::SWIZZLE_ENABLED)
+    }
+
+    /// [`Self::new`] と同じ構築を行うが、threadgroup ID スウィズル
+    /// （イシュー #540）の有効・無効を明示的な `swizzle_enabled` 引数で
+    /// 指定する（イシュー #746）。ベンチ用途専用の入口: 同一プロセス内で
+    /// base（`swizzle_enabled=false`）/head（`swizzle_enabled=true`）の
+    /// 2 インスタンスを構築し、interleaved に A/B 計測することで
+    /// checkout 切替方式（base/head 計測が時間的に分離されサーマル
+    /// ドリフトが系統誤差になる）を回避する狙い
+    /// （`docs/perf/metal-gemm-tgid-swizzle-ab.md`・
+    /// `crates/backend-metal/examples/gemm_swizzle_ab_bench.rs`）。
+    /// CUDA 側 `CudaMmaGemm::new_with_swizzle`
+    /// （`crates/backend-cuda/examples/gemm_mma_swizzle_bench.rs`）と同型の
+    /// 設計。本番経路（`Self::new`）は常に `tile::SWIZZLE_ENABLED`（`false`）
+    /// を渡すため、本関数の追加自体は既定挙動を変えない。
+    pub fn new_with_swizzle(ctx: &MetalContext, swizzle_enabled: bool) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
             pipeline::make_pipeline(ctx.device(), &library, GemmVariant::Naive.function_name())?;
@@ -201,6 +233,7 @@ impl MetalGemm {
             pipeline_tiled_bias_act,
             library,
             tiled_cache: RefCell::new(HashMap::new()),
+            swizzle_enabled,
         })
     }
 
@@ -258,6 +291,7 @@ impl MetalGemm {
                 &self.library,
                 GemmVariant::SimdgroupTiled(candidate).function_name(),
                 candidate,
+                self.swizzle_enabled,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
@@ -464,7 +498,16 @@ impl MetalGemm {
 
         let (pipeline, resolved_cfg) = self.pipeline_for_tile(ctx, cfg)?;
         ctx.dispatch_sync(|encoder| {
-            encode_dispatch_tiled(encoder, &pipeline, a_buf, b_buf, c_buf, dims, resolved_cfg);
+            encode_dispatch_tiled(
+                encoder,
+                &pipeline,
+                a_buf,
+                b_buf,
+                c_buf,
+                dims,
+                resolved_cfg,
+                self.swizzle_enabled,
+            );
         })?;
 
         Ok(resolved_cfg)
@@ -786,6 +829,7 @@ impl MetalGemm {
                         &c_buf,
                         dims,
                         resolved_cfg,
+                        self.swizzle_enabled,
                     );
                 })?;
             }
@@ -1306,19 +1350,20 @@ fn encode_dispatch_f16(
 /// フォールバック解決した後の実際の構成（`resolved_cfg`）。
 ///
 /// grid は素朴には `div_ceil(dims.n, cfg.bn) × div_ceil(dims.m, cfg.bm)`
-/// （threadgroup 単位のブロック分割数）だが、`tile::SWIZZLE_ENABLED`
-/// （既定 `false`。イシュー #540・実験的機構）が `true` の場合のみ
-/// threadgroup ID スウィズル（`swizzle_log` 相当）を適用するため
-/// `tile::tiled_dispatch_grid` へ委譲する（`shaders/gemm.metal` の
+/// （threadgroup 単位のブロック分割数）だが、`swizzle_enabled`
+/// （呼び出し元 [`MetalGemm`] インスタンスが保持する固定値。既定は本番経路
+/// `tile::SWIZZLE_ENABLED` = `false`。イシュー #540・実験的機構）が `true`
+/// の場合のみ threadgroup ID スウィズル（`swizzle_log` 相当）を適用するため
+/// `tile::tiled_dispatch_grid_with` へ委譲する（`shaders/gemm.metal` の
 /// `gemm_simdgroup_tiled` 冒頭の tgid 変換と 1:1 対応する契約。採否は
 /// `docs/perf/metal-gemm-tgid-swizzle-ab.md` の A/B 計測で判断する）。
-/// `SWIZZLE_ENABLED=false`（本番既定。PR #661 codex-review 指摘: 未検証の
-/// スウィズルを本番経路へ無条件適用しない）では素朴な
-/// `(tiles_n, tiles_m)` grid をそのまま使う。シェーダ側は同じ
-/// `SWIZZLE_ENABLED` function constant（`crate::pipeline::
-/// make_pipeline_with_constants`）で同期し、恒等変換（`tid_y = tgid.y`・
-/// `tid_x = tgid.x`）になる。threadgroup スレッド数は `cfg.thread_count()`
-/// （`wm*wn*32`）。
+/// `swizzle_enabled=false` では素朴な `(tiles_n, tiles_m)` grid をそのまま
+/// 使う。シェーダ側は同じ `swizzle_enabled` 値から決まる `SWIZZLE_ENABLED`
+/// function constant（`crate::pipeline::make_pipeline_with_constants`。
+/// 呼び出し元が同一の `MetalGemm::swizzle_enabled` を両呼び出しへ渡す責務を
+/// 負う）で同期し、恒等変換（`tid_y = tgid.y`・`tid_x = tgid.x`）になる。
+/// threadgroup スレッド数は `cfg.thread_count()`（`wm*wn*32`）。
+#[allow(clippy::too_many_arguments)]
 fn encode_dispatch_tiled(
     encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
@@ -1327,6 +1372,7 @@ fn encode_dispatch_tiled(
     c_buf: &MetalBuffer,
     dims: Dims,
     cfg: TileConfig,
+    swizzle_enabled: bool,
 ) {
     encoder.setComputePipelineState(pipeline);
 
@@ -1386,7 +1432,7 @@ fn encode_dispatch_tiled(
     };
     let tiles_n = (dims.n as usize).div_ceil(cfg.bn as usize);
     let tiles_m = (dims.m as usize).div_ceil(cfg.bm as usize);
-    let (grid_w, grid_h) = crate::tile::tiled_dispatch_grid(tiles_n, tiles_m);
+    let (grid_w, grid_h) = crate::tile::tiled_dispatch_grid_with(tiles_n, tiles_m, swizzle_enabled);
     let threadgroups = MTLSize {
         width: grid_w,
         height: grid_h,
