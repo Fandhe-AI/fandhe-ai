@@ -37,10 +37,13 @@ rayon = "=1.12.0"
 
 # OSS 比較対象（許容依存 8 区分の対象外。deps-policy.md の統制範囲は本体 workspace
 # ＝ ルート `Cargo.toml` / `Cargo.lock` であり、本パッケージは workspace 外の独立
-# プロジェクトのためユーザー承認対象の「依存追加」に当たらないと判断する
-# （`docs/oss-comparison-harness-decision.md` §2.1）。再現性確保のため `=x.y.z`
-# 完全固定＋本パッケージ専用 `Cargo.lock` をコミットする。crates.io 実測
-# 最新安定版（2026-08-20 時点）を採用する。
+# プロジェクトのため当初はユーザー承認対象の「依存追加」に当たらないと実装 Agent の
+# 判断で追加したが、そのスコープ解釈自体を 2026-08-20 にユーザーが (1) 本体
+# workspace への混入禁止・(2) ライセンス監査の CI 組み込み、の 2 条件付きで承認
+# 済み（`docs/oss-comparison-harness-decision.md` §2.1「スコープ解釈のユーザー
+# 承認」節）。以後の本パッケージへの依存追加・変更もこの 2 条件を満たす限りで
+# 許容される。再現性確保のため `=x.y.z` 完全固定＋本パッケージ専用 `Cargo.lock`
+# をコミットする。crates.io 実測最新安定版（2026-08-20 時点）を採用する。
 #
 # matrixmultiply: MIT/Apache-2.0（デュアルライセンス。crates.io API 実測）。
 matrixmultiply = "=0.3.11"
