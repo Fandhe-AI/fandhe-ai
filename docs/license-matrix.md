@@ -123,6 +123,26 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - 対象 `Cargo.lock` のコミット SHA: `65dea84463472db78ab5dfcb7205b69cf43f4c1b`（origin/main）
 - `cargo metadata --locked --format-version 1` で `zerocopy`／`zerocopy-derive` の `version`・`license` を抽出し、両パッケージとも `v0.8.56`・`BSD-2-Clause OR Apache-2.0 OR MIT`（6 節記載の `v0.8.55` から**バージョンのみ更新、ライセンス式は不変**）であることを確認した。実行後 `git status --porcelain Cargo.lock` で差分がないことを確認した（依存・バージョン自体は変更していない）
 
+## 8a. 本表の適用範囲外にある監査対象（OSS 直接比較ハーネス。イシュー #755）
+
+本表・`deny.toml`（ルート）が対象とするのは**本体 workspace**（ルート `Cargo.toml`／
+`Cargo.lock`）の依存グラフに限られる（`.claude/rules/deps-policy.md`「適用範囲」節）。
+
+`scripts/bench/oss-gemm-compare/` は `[workspace]` を空テーブルで持つ独立 Cargo
+プロジェクトで、本体 workspace の member ではないため本表の走査対象（4〜5 節の
+`cargo tree`／`cargo metadata` 実測範囲）に含まれない。比較対象として使う
+`matrixmultiply`・`gemm` crate（許容依存 8 区分外）のライセンス監査は、本表とは
+別に本パッケージ専用の `scripts/bench/oss-gemm-compare/deny.toml`（allow リストは
+本表 2 節と同一方針）を用い、CI（`ci.yml` の `deps-forbidden` ジョブ「OSS 直接比較
+ハーネスのライセンス監査」ステップ）で `cargo deny --manifest-path
+scripts/bench/oss-gemm-compare/Cargo.toml --locked check --config
+scripts/bench/oss-gemm-compare/deny.toml licenses sources` を毎回実行して行う。
+
+設計判断の詳細・ユーザー承認条件は `docs/oss-comparison-harness-decision.md`
+（§2.1「スコープ解釈のユーザー承認」・「ライセンス監査」節）を参照。allow
+リストの実体は本表と二重管理しない（`scripts/bench/oss-gemm-compare/deny.toml`
+冒頭コメント参照）。
+
 ## 8. 運用
 
 - 依存の追加・更新は本表の更新とセットで行う（**ユーザー承認必須**。REQ-5・deps-policy.md）
