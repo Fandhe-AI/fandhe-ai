@@ -135,21 +135,38 @@ fn parse_sizes() -> Vec<usize> {
     sizes
 }
 
+/// 1 サイズあたりに許容する総確保バイト数の上限（レビュー指摘対応。イシュー #755）。
+///
+/// `main` は 1 サイズにつき 6 バッファ（`a`・`b`・`c_ref`・`c_mm`・`c_gemm`・`c_buf`）を
+/// 同時に確保する。`usize` オーバーフローを検証するだけでは `--sizes` に大きいが
+/// オーバーフローしない値（例: 10 万）を与えられた場合の無制限メモリ確保・OOM を
+/// 防げない（`checked_mul` は `usize` の桁あふれのみを検出し、実メモリ量には
+/// 無関係）。DEFAULT_SIZES の最大値（4096・1 バッファ 64 MiB）に対し余裕を持った
+/// 8192（1 バッファ 256 MiB・6 バッファ計 1.5 GiB）を 1 バッファあたりの上限とする。
+const MAX_BUFFER_BYTES: usize = 8192 * 8192 * std::mem::size_of::<f32>();
+
 /// `size` から確保する `size * size` 要素の `Vec<f32>`（4 バイト要素）が
-/// `usize` 範囲でオーバーフローしないことを検証する。
+/// `usize` 範囲でオーバーフローせず、かつ [`MAX_BUFFER_BYTES`] の上限に
+/// 収まることを検証する（OWASP A03: 外部入力 `--sizes` から無制限メモリ確保・
+/// OOM を引き起こせないようにする。レビュー指摘対応。イシュー #755）。
 ///
 /// `main` の各行列バッファ（`a`・`b`・`c_ref`・`c_mm`・`c_gemm`・`c_buf`）は
 /// すべて `size * size` 要素で確保するため、要素数計算（`size * size`）と
-/// バイト数換算（`* 4`）の両方を [`usize::checked_mul`] で検証する
-/// （`unsafe` ブロックの SAFETY コメントが前提とする
-/// 「size*size 要素の連続確保」を常に成立させるための事前検証）。
+/// バイト数換算（`* 4`）の両方を [`usize::checked_mul`] で検証したうえで、
+/// `unsafe` ブロックの SAFETY コメントが前提とする「size*size 要素の連続確保」を
+/// 常に成立させる。
 fn validate_size_no_overflow(size: usize) -> Result<(), String> {
     let elems = size
         .checked_mul(size)
         .ok_or_else(|| format!("size={size} は size*size で usize をオーバーフローする"))?;
-    elems
+    let bytes = elems
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| format!("size={size} は size*size*4 バイトで usize をオーバーフローする"))?;
+    if bytes > MAX_BUFFER_BYTES {
+        return Err(format!(
+            "size={size} は 1 バッファ {bytes} バイトとなり上限 {MAX_BUFFER_BYTES} バイト（8192 四方相当）を超える"
+        ));
+    }
     Ok(())
 }
 
