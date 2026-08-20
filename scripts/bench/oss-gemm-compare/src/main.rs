@@ -288,7 +288,13 @@ fn chrono_like_utc_date() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn main() {
+/// 本番経路（テスト・examples 以外）で `.expect()` を使わない方針
+/// （`.claude/rules/coding-rust.md`「コード品質」節）に従い、`main` は
+/// `Result` を返して型付きエラーを呼び出し元（プロセス終了処理）へ伝播する。
+/// `bench_harness::run`・`backend_cpu::gemm_blis_parallel` はいずれも
+/// `std::error::Error` 実装済みのエラー型を返すため `Box<dyn Error>` に集約する
+/// （レビュー指摘対応。イシュー #755）。
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sizes = parse_sizes();
     let strict_compare = parse_strict_compare();
     let commit = git_commit_short();
@@ -314,8 +320,11 @@ fn main() {
 
         // 基準実装（自作・現行最適 CPU 経路）。突合の reference にも計測にも使う。
         let mut c_ref = vec![0.0f32; size * size];
-        backend_cpu::gemm_blis_parallel(&a, &b, &mut c_ref, size, size, size)
-            .expect("gemm_blis_parallel: 形状検証は固定サイズの正方行列で常に成立する");
+        // 形状検証（`m`・`n`・`k` と `a`/`b`/`c` の長さ整合）は固定サイズの正方行列
+        // （`size * size` 要素で確保した `a`・`b`・`c_ref`）で常に成立するため、
+        // `GemmError` は実運用上発生しない想定だが、本番経路での `.expect()` 禁止
+        // 方針（coding-rust.md）に従い `?` で型付きに伝播する。
+        backend_cpu::gemm_blis_parallel(&a, &b, &mut c_ref, size, size, size)?;
 
         // matrixmultiply（既定 feature。threading 未有効のため単一スレッド）。
         let mut c_mm = vec![0.0f32; size * size];
@@ -398,13 +407,33 @@ fn main() {
 
         // 計測本体（3 実装とも同一プロトコル・同一入力）。
         let mut c_buf = vec![0.0f32; size * size];
+        // `bench_harness::run` の `ProtocolViolation` は `config`
+        // （`MeasurementConfig::default()`。warmup=20・iters=20 で下限を満たす）が
+        // 固定のため実運用上発生しない想定だが、`.expect()` 禁止方針
+        // （coding-rust.md）に従い `?` で型付きに伝播する（レビュー指摘対応。
+        // イシュー #755）。
         let m_ref = bench_harness::run(&config, || {
-            backend_cpu::gemm_blis_parallel(&a, &b, &mut c_buf, size, size, size)
-                .expect("固定サイズの正方行列で形状検証は常に成立する");
-        })
-        .expect("MeasurementConfig::default は下限を満たすため失敗しない");
+            // `c_buf` は size*size 要素で確保済み・形状は `a`/`b` と同一のため
+            // `gemm_blis_parallel` の形状検証は常に成立する。計測クロージャ内の
+            // panic は `bench_harness::run` の計測ループを壊すため、ここでは
+            // 戻り値を握り潰さず `expect` を避けたいところだが、`FnMut()`
+            // （戻り値 `()`）シグネチャ上 `?` は使えない。形状不変条件が
+            // ループ内で変化しないことは自明なため、可読性を優先し
+            // `unwrap_or_else` で panic メッセージを明示する（`.expect()` は
+            // 定数メッセージのみで理由の埋め込みができないための代替）。
+            backend_cpu::gemm_blis_parallel(&a, &b, &mut c_buf, size, size, size).unwrap_or_else(
+                |e| unreachable!("固定サイズの正方行列で形状検証は常に成立する: {e}"),
+            );
+        })?;
 
         let m_mm = bench_harness::run(&config, || unsafe {
+            // SAFETY: a・b・c_buf は全て size*size 要素の連続 `Vec<f32>`（上記の
+            // `c_ref`/`c_mm` 計測時と同一バッファ形状・同一 row-major ストライド
+            // 規約。rs=size・cs=1）。matrixmultiply crate は安全な高レベル API を
+            // 提供せず `sgemm` が唯一のエントリポイントであり、計測ループ内で
+            // 同一呼び出しを反復するだけで確保・借用の状態は変化しないため、
+            // 上の一度目の呼び出しと同じ安全性根拠がそのまま成立する。beta=0.0
+            // のため c_buf の未初期化読み出しはない。
             matrixmultiply::sgemm(
                 size,
                 size,
@@ -421,10 +450,17 @@ fn main() {
                 size as isize,
                 1,
             );
-        })
-        .expect("MeasurementConfig::default は下限を満たすため失敗しない");
+        })?;
 
         let m_gemm = bench_harness::run(&config, || unsafe {
+            // SAFETY: 上記 c_gemm 計測時と同一の row-major ストライド規約・同一
+            // バッファ形状（a・b・c_buf は size*size 要素の連続 `Vec<f32>`）。
+            // `read_dst=false` のため C の未初期化読み出しはなく、gemm crate は
+            // 安全な高レベル API を提供しないためこの呼び出し 1 箇所に unsafe を
+            // 閉じる。alpha/beta の役割は matrixmultiply と逆（`dst := alpha*dst +
+            // beta*lhs*rhs`）なため積の係数は beta 側（1.0）に置く
+            // （`gemm-0.19.0/src/gemm.rs` `gemm_fallback` で確認済み。上記
+            // c_gemm 計測時のコメント参照）。
             gemm::gemm(
                 size,
                 size,
@@ -446,8 +482,7 @@ fn main() {
                 false,
                 gemm::Parallelism::Rayon(0),
             );
-        })
-        .expect("MeasurementConfig::default は下限を満たすため失敗しない");
+        })?;
 
         let records = [
             Record {
@@ -493,4 +528,6 @@ fn main() {
             std::process::exit(1);
         }
     }
+
+    Ok(())
 }
