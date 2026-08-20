@@ -36,10 +36,16 @@
 - **シークレットの混入（P0）**: API キー・トークン・パスワード・秘密鍵・`.env` を
   コード・ログ・hooks・CI 設定・コミットメッセージへ含めない
 - **依存監査（P0/P1）**: 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・
-  `ndarray`。直接・推移を問わない）の混入は P0。許容依存 8 区分以外の追加、
+  `ndarray`。直接・推移を問わない）の混入は P0。許容依存 9 区分以外の追加、
   `=x.y.z` 完全固定でないバージョン指定、`docs/license-matrix.md` 更新・ユーザー承認
   記録を伴わない依存追加・更新は P1（A06。`deny.toml` の licenses / sources /
-  advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）
+  advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）。
+  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`）は
+  `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト。本体 workspace 外）
+  限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体 workspace〈ルート
+  `Cargo.toml`／`Cargo.lock`〉への非混入・専用 `deny.toml` による CI 監査。
+  `.claude/rules/deps-policy.md`「許容依存 9 区分」表を参照）の違反は従来どおり
+  P1（2026-08-20 ユーザー承認。イシュー #755）
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、
   シェル呼び出しへの外部入力の非クォート展開等のインジェクション経路は P0（A03）

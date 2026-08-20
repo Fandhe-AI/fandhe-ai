@@ -88,10 +88,16 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 - **依存禁止リストのクレート混入**（`burn` 系一式・`cubecl`・`candle`・`tch`・
   `ndarray`。直接・推移を問わない）、および既存 ML フレームワークへの統合・完全自作
   コア方針（REQ-1 v2）の放棄: **P0**
-- **許容依存 8 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
-  rayon / half / criterion〈dev 限定〉）以外の依存追加**、または許容依存でも
-  `=x.y.z` 完全固定でないバージョン指定・`docs/license-matrix.md` 更新やユーザー承認の
-  記録を伴わない依存追加・更新: **P1**
+- **許容依存 9 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
+  rayon / half / criterion〈dev 限定〉/ ベンチ比較対象〈matrixmultiply・gemm〉）以外
+  の依存追加**、または許容依存でも `=x.y.z` 完全固定でないバージョン指定・
+  `docs/license-matrix.md` 更新やユーザー承認の記録を伴わない依存追加・更新: **P1**。
+  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`）は
+  `scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立 Cargo
+  プロジェクト）限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体 workspace
+  〈ルート `Cargo.toml`／`Cargo.lock`〉への非混入・専用 `deny.toml` による CI 監査。
+  deps-policy.md「許容依存 9 区分」表を参照）の違反は従来どおり **P1**
+  （2026-08-20 ユーザー承認。イシュー #755）
 - **`// SAFETY:`（理由コメント）のない `unsafe`**、および不変条件の根拠が不十分な
   `unsafe`: **P0**。`unsafe` の使用域は FFI 境界（cudarc・objc2 系）・CPU SIMD
   intrinsics（backend-cpu のカーネル実装）等の必要最小限に限る規約
