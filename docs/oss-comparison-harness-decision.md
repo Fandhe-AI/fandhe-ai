@@ -127,8 +127,18 @@ advisories 実測で `RUSTSEC-2024-0436`（`paste` unmaintained）が検出さ�
 なし）。同アドバイザリは vulnerability ではなく unmaintained（情報提供型）の
 分類であるため、`[advisories] ignore = ["RUSTSEC-2024-0436"]` として理由コメント
 付きで ignore 登録することを 2026-08-20 にユーザーが承認した
-（`scripts/bench/oss-gemm-compare/deny.toml` の該当コメント参照）。bans 実測
-（`multiple-versions = "warn"`・`wildcards = "deny"`）は違反 0 件を確認済み。
+（`scripts/bench/oss-gemm-compare/deny.toml` の該当コメント参照。解消予定は
+「`gemm` が `paste` 依存を解消した新版をリリースした時点で再評価」とし、追跡
+Issue は本 PR 時点で未起票〈起票の要否は別途ユーザー確認〉）。
+
+bans 実測（`multiple-versions = "warn"`・`wildcards = "deny"`）で違反 0 件を
+確認したのは `allow-wildcard-paths = true` を明示したうえでの結果である。
+本パッケージは本体 workspace member（`backend-cpu`・`bench-harness`。いずれも
+`publish = false`）へ version 無指定の path 依存を持ち、これらは cargo 上 `*`
+扱いになるため、`allow-wildcard-paths` を指定しないと wildcard エラーとして
+検出される（ローカル実測で確認済み）。ルート `deny.toml` が同じ理由（workspace
+内 path 依存の scope）で同一設定を持つのと同一方針であり、`wildcards = "deny"`
+自体の意図（`=x.y.z` 完全固定の未指定バージョン検出）を弱めるものではない。
 
 ### CLI 引数の扱い（OWASP A03）
 
