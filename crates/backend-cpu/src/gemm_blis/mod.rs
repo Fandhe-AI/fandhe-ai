@@ -796,10 +796,12 @@ fn gemm_blis_ic_loop<K: Microkernel>(
     Ok(())
 }
 
-/// [`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]／
-/// [`gemm_blis_parallel_with_blocks`] の複数タスク経路（実タスク数 >= 2）
-/// が呼ぶ、B パネルをタスク間で 1 本だけ共有する 5-loop 本体（イシュー
-/// #750・設計 doc `docs/cpu-gemm-b-packing-sharing-decision.md` 案 B）。
+/// `#[cfg(test)]` の [`gemm_blis_parallel_with_blocks`] の複数タスク経路
+/// （実タスク数 >= 2）が呼ぶ、B パネルをタスク間で 1 本だけ共有する
+/// 5-loop 本体（イシュー #750・設計 doc
+/// `docs/cpu-gemm-b-packing-sharing-decision.md` 案 B）。本番公開入口
+/// （[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]）からは
+/// 呼ばれない（下記「本番未結線」節参照）。
 ///
 /// jc/pc ループは直列（[`gemm_blis_region`] と同じ昇順）のまま、各
 /// (jc,pc) ブロックで B を 1 本だけ pack して `&[f32]` として全タスクへ
