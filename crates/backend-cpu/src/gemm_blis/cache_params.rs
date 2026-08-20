@@ -19,10 +19,16 @@
 //!    サイズからの算出式のため、macOS 以外を含む全プラットフォームで
 //!    単体テスト可能（`mod tests` 参照。CI（GitHub ホステッド
 //!    `ubuntu-latest`）上でも実行され続ける）。
-//! 2. **コンパイル対象への算入**: sysctl FFI 部（[`sysctl_ffi`]）は
-//!    `cfg(target_os = "macos")` のみで、CI の
-//!    `cargo build (linux / aarch64-apple-darwin)` ジョブ（`.claude/rules/ci.md`）
-//!    がクロスコンパイル経路として毎回コンパイル対象に含める。
+//! 2. **`cargo test` 経由でのコンパイル検証**: 本モジュール自体
+//!    （[`super`] の `mod cache_params;` 宣言）は本番未結線の間
+//!    `#[cfg(test)]` のため、CI の通常ビルドジョブ
+//!    （`cargo build (linux / aarch64-apple-darwin)`。`.claude/rules/ci.md`）
+//!    には**含まれない**（`cfg(test)` 無効時は構造的にコンパイル対象外）。
+//!    sysctl FFI 部（[`sysctl_ffi`]）の型・借用検査は `rust-ci` の
+//!    test ジョブ（`cargo test`。`cfg(test)` 有効）が担う。同ジョブは
+//!    Linux ホストのため `cfg(target_os = "macos")` 自体は無効化され
+//!    `sysctl_ffi` はコンパイル対象に含まれない（詳細は
+//!    `docs/perf/cpu-gemm-runtime-cache-detect.md` §3）。
 //! 3. **常に到達可能な公開入口**（[`detected_blocks`]）: `#[cfg(test)]`
 //!    ではなく通常ビルドから到達可能な `pub(crate)` 関数とし、
 //!    非 macOS・sysctl 失敗時は [`super::default_blocks`] へ
@@ -88,6 +94,27 @@ fn round_up_to_multiple(x: usize, multiple: usize) -> usize {
     x.div_ceil(multiple) * multiple
 }
 
+/// `raw` を `[min, max]` へクランプしたうえで `multiple` の倍数へ丸める
+/// （レビュー指摘 #753: 従来は「切り上げしてからクランプ」の順だったため、
+/// クランプが効いた場合に結果が `multiple` の倍数であるという契約が
+/// 破れていた。`MC_MIN=64`／`NC_MIN=256` は NEON `NR=12` 等では倍数に
+/// ならない値のため、先にクランプしてから倍数へ丸める必要がある）。
+///
+/// 切り上げた結果が `max` を超える場合（`max` 自体が `multiple` の倍数で
+/// ない場合に起こりうる）は、`max` 以下で `multiple` の倍数になる最大値
+/// へ切り下げる。これにより返り値は常に `multiple` の倍数であり、かつ
+/// `max` を超えない（`min` をわずかに下回りうるが、`multiple` が `min`
+/// 以下である通常のマイクロカーネル構成では起こらない）。
+fn clamp_to_multiple(raw: usize, min: usize, max: usize, multiple: usize) -> usize {
+    let clamped = raw.clamp(min, max);
+    let rounded = round_up_to_multiple(clamped, multiple);
+    if rounded <= max {
+        rounded
+    } else {
+        (max / multiple) * multiple
+    }
+}
+
 /// L1D／L2 実測値（バイト）と、対象マイクロカーネルの `MR`／`NR`
 /// （[`super::microkernel::Microkernel`] の型定数）から MC/KC/NC を算出する
 /// 純関数（全プラットフォームで単体テスト可能。#753 §3.1）。
@@ -134,13 +161,13 @@ pub(crate) fn compute_blocks(
 
     let l2_budget = l2_bytes / 2;
     let mc_raw = l2_budget / (F32_BYTES * kc);
-    let mc = round_up_to_multiple(mc_raw, mr).clamp(MC_MIN, MC_MAX);
+    let mc = clamp_to_multiple(mc_raw, MC_MIN, MC_MAX, mr);
 
     // NC は B パネルが占有できる L2 残余（A パネル分を除いた残り）から
     // 算出する。`l2_budget` は A パネルに割り当てた予算のため、B 側は
     // 残りの半分（`l2_bytes - l2_budget == l2_budget`）を使う。
     let nc_raw = l2_budget / (F32_BYTES * kc);
-    let nc = round_up_to_multiple(nc_raw, nr).clamp(NC_MIN, NC_MAX);
+    let nc = clamp_to_multiple(nc_raw, NC_MIN, NC_MAX, nr);
 
     Some(BlockSizes { mc, kc, nc })
 }
@@ -288,6 +315,31 @@ mod tests {
         // みなし拒否する（0 値検査だけでは捉えられない fail-closed 契約）。
         assert!(compute_blocks(64 * 1024 * 1024, 16 * 1024 * 1024, 8, 12).is_none());
         assert!(compute_blocks(192 * 1024, 1024 * 1024 * 1024, 8, 12).is_none());
+    }
+
+    #[test]
+    fn compute_blocks_clamped_mc_nc_stay_multiples_for_non_divisor_mr_nr() {
+        // レビュー指摘（#753）: `MC_MIN`／`NC_MIN`（64／256）は `mr`／`nr`
+        // が 7 のような非自明な値のとき倍数にならない。クランプが効く
+        // 状況（L2 実容量を極端に大きくし `mc_raw`／`nc_raw` を
+        // `MC_MAX`／`NC_MAX` へ張り付かせる）でも `mc`／`nc` が `mr`／`nr`
+        // の倍数であるというドキュメント契約（本ファイル冒頭・
+        // `docs/perf/cpu-gemm-runtime-cache-detect.md` §2）が成立し続ける
+        // ことを検証する（M4 Max 相当値〈MR=8・NR=12〉は `MC_MAX=1024`・
+        // `NC_MAX=16384` がたまたま倍数のため、この回帰は非自明な
+        // `mr`／`nr` でなければ検出できない）。
+        let blocks = compute_blocks(192 * 1024, 1024 * 1024 * 1024 / 8, 7, 13)
+            .or_else(|| compute_blocks(192 * 1024, L2_SANE_MAX, 7, 13))
+            .expect("正当な範囲の値は Some を返すはず");
+        assert_eq!(blocks.mc % 7, 0, "mc={} は mr=7 の倍数ではない", blocks.mc);
+        assert_eq!(
+            blocks.nc % 13,
+            0,
+            "nc={} は nr=13 の倍数ではない",
+            blocks.nc
+        );
+        assert!((MC_MIN..=MC_MAX).contains(&blocks.mc));
+        assert!((NC_MIN..=NC_MAX).contains(&blocks.nc));
     }
 
     #[test]

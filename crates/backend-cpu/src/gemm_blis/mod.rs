@@ -1536,6 +1536,50 @@ mod tests {
         );
     }
 
+    /// #753 レビュー指摘: 上記
+    /// `gemm_blis_parallel_detected_blocks_match_naive_bit_exact` は Linux CI
+    /// 上では `cache_params::read_cache_sizes()` が常に `None` を返すため
+    /// `detected_blocks()` が実質 `default_blocks()` へフォールバックし、
+    /// 動的算出（`compute_blocks`）経由の `BlockSizes` を一度も
+    /// `gemm_blis_parallel_with_blocks` へ通していなかった（Linux では
+    /// `sysctl` 自体が存在せず実測は macOS 実機限定のため、CI 上で動的
+    /// 検出を再現するには [`cache_params::compute_blocks`] へ具体値を
+    /// 直接渡す必要がある）。Apple M4 Max P コア相当の代表値
+    /// （L1D=192KiB・L2=16MiB。#481 §3）を渡して得た `BlockSizes`
+    /// （`default_blocks()` とは異なる算出値になる）を GEMM 本体へ通し、
+    /// `gemm_naive` と bit 完全一致することを検証する。
+    #[test]
+    fn gemm_blis_parallel_compute_blocks_m4_max_like_values_match_naive_bit_exact() {
+        let (m, n, k) = (200, 600, 700);
+        let a = xorshift32_vec(0x9c9c_9c9c, m * k);
+        let b = xorshift32_vec(0xadad_adad, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let blocks = cache_params::compute_blocks(
+            192 * 1024,
+            16 * 1024 * 1024,
+            ScalarKernel::MR,
+            ScalarKernel::NR,
+        )
+        .expect("M4 Max 相当の正当な値は Some を返すはず");
+        assert_ne!(
+            blocks,
+            default_blocks(),
+            "本テストは動的算出経路（default_blocks と異なる値）を検証する意図のため、\
+             両者が一致すると検証意図が失われる"
+        );
+
+        let mut c_parallel = vec![0.0f32; m * n];
+        gemm_blis_parallel_with_blocks(&a, &b, &mut c_parallel, m, n, k, blocks).unwrap();
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "compute_blocks() 由来の blocks={blocks:?} は gemm_naive と bit 完全一致するはず"
+        );
+    }
+
     /// イシュー #750 の受け入れ条件 3（スレッド数 1 では従来と同一経路・
     /// 同一性能）を直接検証する: `num_threads(1)` の rayon プール内で
     /// `gemm_blis_parallel` を呼ぶと `m <= panel_rows`（`panel_rows == m`）
