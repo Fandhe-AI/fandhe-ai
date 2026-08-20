@@ -119,16 +119,28 @@ fn round_up_to_multiple(x: usize, multiple: usize) -> Option<usize> {
 /// `max` を超えない（`min` をわずかに下回りうるが、`multiple` が `min`
 /// 以下である通常のマイクロカーネル構成では起こらない）。
 ///
+/// `multiple > max`（切り下げ先が `0` になる）場合は `None` を返す
+/// （レビュー指摘 #753: 従来は `(max / multiple) * multiple` が `0` に
+/// なる場合をそのまま `Some(0)` として返しており、[`compute_blocks`] の
+/// 「MR/NR が非 0 かつ容量が正当なら有効なブロックサイズを返し、算出
+/// 不能時は `None` で fail-closed にフォールバックする」契約に反していた。
+/// 現行のマイクロカーネル定数〈`ScalarKernel` MR=4/NR=4・`NeonKernel`
+/// MR=8/NR=12 等〉は `MC_MAX`／`NC_MAX` を大きく下回るため到達しないが、
+/// 将来より大きな MR/NR のマイクロカーネルを追加した際の回帰を防ぐ）。
+///
 /// [`round_up_to_multiple`] のオーバーフロー検出（`multiple` に極端に
-/// 大きな `mr`／`nr` が渡された場合）を `None` として伝播する。
+/// 大きな `mr`／`nr` が渡された場合）も `None` として伝播する。
 fn clamp_to_multiple(raw: usize, min: usize, max: usize, multiple: usize) -> Option<usize> {
     let clamped = raw.clamp(min, max);
     let rounded = round_up_to_multiple(clamped, multiple)?;
-    Some(if rounded <= max {
-        rounded
-    } else {
-        (max / multiple) * multiple
-    })
+    if rounded <= max {
+        return Some(rounded);
+    }
+    let floor = (max / multiple) * multiple;
+    if floor == 0 {
+        return None;
+    }
+    Some(floor)
 }
 
 /// L1D／L2 実測値（バイト）と、対象マイクロカーネルの `MR`／`NR`
@@ -158,6 +170,12 @@ fn clamp_to_multiple(raw: usize, min: usize, max: usize, multiple: usize) -> Opt
 /// 受け入れ条件 3。オーバーフロー検出はレビュー指摘 #753: `mr`／`nr` は
 /// 0 のみ検査しており上限を検査していなかったため、大きな値で
 /// debug では panic・release では誤った丸め値が生じうる状態だった）。
+/// オーバーフローしない範囲でも `mr`／`nr` が [`MC_MAX`]／[`NC_MAX`]
+/// を超える場合（[`clamp_to_multiple`] が倍数への切り下げ先を `0` としか
+/// 表現できない）も同じく `None` とする（レビュー指摘 #753: 従来は
+/// `Some(BlockSizes { mc: 0, .. })` 等の無効値をそのまま返しており、
+/// 「0 以外の MR/NR と正当な容量なら有効なブロックサイズを返す」契約に
+/// 反していた）。
 pub(crate) fn compute_blocks(
     l1d_bytes: usize,
     l2_bytes: usize,
@@ -418,6 +436,22 @@ mod tests {
         // される極端に大きな L2 実容量と、それ自体は `mr + nr` を
         // オーバーフローさせない範囲の巨大な `mr` の組み合わせで検証する。
         assert!(compute_blocks(192 * 1024, L2_SANE_MAX, usize::MAX / 4, 12).is_none());
+    }
+
+    #[test]
+    fn compute_blocks_rejects_mr_exceeding_mc_max_without_overflow() {
+        // レビュー指摘（#753）: `mr = 2048` は `usize` オーバーフローを
+        // 起こさないが `MC_MAX = 1024` を超えるため、従来の
+        // `clamp_to_multiple` は `(MC_MAX / mr) * mr == 0` をそのまま
+        // `Some(mc = 0)` として返していた（「0 以外の MR/NR と正当な容量
+        // なら有効なブロックサイズを返す」契約違反）。現行のマイクロ
+        // カーネル定数（最大でも `NeonKernel` MR=8/NR=12）はこの値に到達
+        // しないが、将来より大きな MR/NR を追加した際の回帰を防ぐため
+        // `None`（fail-closed）を返すことを固定する。
+        assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, 2048, 12).is_none());
+        // 同じ理由で NC 側（`nr` が `NC_MAX = 16384` を超える場合）も
+        // `None` を返すことを検証する。
+        assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 32768).is_none());
     }
 
     /// [`detected_blocks`] は非 macOS・sysctl 失敗時に必ず
