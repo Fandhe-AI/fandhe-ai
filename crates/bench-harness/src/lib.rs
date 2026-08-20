@@ -104,6 +104,7 @@
 //! 含めない（[`threshold`] モジュールへの変更なし）。定義の確定経緯・計測プロトコル・
 //! 比較対象 PyTorch 構成・評価方式は `docs/perf/transformer-workload-baseline.md`（#589）を参照。
 
+pub mod ab;
 pub mod alloc_tracker;
 pub mod peak_memory;
 mod protocol;
@@ -124,7 +125,7 @@ pub use peak_memory::{
 pub use protocol::{Measurement, MeasurementConfig, run};
 pub use report::{BenchReport, SCHEMA_VERSION};
 pub use rounding::{RoundingError, floor_lower_bound};
-pub use stats::{BenchError, Quartiles, median_q1_q3};
+pub use stats::{BenchError, Quartiles, median_q1_q3, relative_spread};
 pub use threshold::{
     BackendDtype, FloorJudgment, FloorSpec, Stage, THRESHOLD_SCHEMA_VERSION, Verdict, floor_spec,
     judge,

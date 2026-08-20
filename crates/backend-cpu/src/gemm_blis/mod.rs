@@ -88,18 +88,30 @@ const MAX_TILE: usize = 256;
 /// 参照）ため、本モジュール独自の定数として持つ（`gemm` モジュールの
 /// MC/KC/NC とは独立にチューニング可能にする）。
 ///
-/// **対象実機・再選定状況（#564）**: 本 3 定数のチューニング対象実機は
-/// **Apple M4 Max**（firestorm 系。`docs/perf/gemm-optimization-baseline.md`
-/// §3・イシュー #481 で確定）。BLIS/OpenBLAS の aarch64 向け参照実装値
-/// （firestorm: MC=480/KC=4096/NC=9600 等）近傍を含む実機スイープ候補・
-/// 選定手順・実測結果（未実施ならその引き継ぎ手順）は
-/// `docs/perf/cpu-gemm-blocking-sweep.md` に記録する。M4 Max 実機に到達
-/// できるセッションで実測・選定を完了するまでは本 PoC-v2-1 値を維持する
-/// （fail-closed。実測値の捏造・placeholder 化はしない）。
+/// **対象実機・再選定状況（#564・#749・#753 へ引き継ぎ）**: 本 3 定数の
+/// チューニング対象実機は **Apple M4 Max**（firestorm 系。
+/// `docs/perf/gemm-optimization-baseline.md` §3・イシュー #481 で確定）。
+/// BLIS/OpenBLAS の aarch64 向け参照実装値（firestorm: MC=480/KC=4096/
+/// NC=9600 等）近傍を含む実機スイープは 2026-08-19 に M4 Max で実施済みで、
+/// 詳細実測値・採否根拠は `docs/perf/cpu-gemm-blocking-sweep.md` §7 に
+/// 記録する（#749）。MC・KC は単独拡大が全サイズで劣化したため PoC-v2-1
+/// 値のまま維持する。
+///
+/// **NC の n 依存拡大（NC=9600・n>=4096 で約 9.9% 改善）は本 PR 時点で
+/// 未有効化（PR #766・codex-review 再指摘）**: 実測を行った M4 Max
+/// 個体の正確な `hw.model` 識別子が実測セッション終了時点で記録されて
+/// おらず本 PR 時点では復元不能（`docs/perf/cpu-gemm-blocking-sweep.md`
+/// の「実測値の捏造・placeholder 値での完了扱いは行わない」方針に従い、
+/// `Mac16,` prefix 等の広い一致条件へ後退させて有効化することもしない）。
+/// 実機固有値を検証していないターゲット・機種への適用は
+/// `.claude/rules/coding-rust.md` の方針に反するため、識別子が判明する
+/// までは常時 `default_blocks()`（固定 NC=512）を返す（#753〈sysctl
+/// ベース MC/KC/NC 動的算出〉で機種識別を含めて再検討する）。
 const MC: usize = 128;
 /// 縮約次元（K）のブロックサイズ。B パネル（KC×NC×4B）が L1/L2 に収まる値。
 const KC: usize = 256;
-/// 列方向ブロックサイズ（B のパネル幅）。
+/// 列方向ブロックサイズ（B のパネル幅）。本 PR 時点の唯一の適用値
+/// （上記 NC 拡大の未有効化理由を参照）。
 const NC: usize = 512;
 
 /// [`gemm_blis`]／`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`
@@ -239,13 +251,18 @@ pub fn gemm_blis_parallel(
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
+    // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
+    // キャプチャして渡す（既定ブロックサイズは n に依存しないため
+    // ループ外で確定させても意味は変わらないが、`dispatch_region`
+    // 呼び出しごとの再計算を避ける従来方針を踏襲する）。
+    let blocks = default_blocks();
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks())
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
         })
 }
 
@@ -317,13 +334,16 @@ pub fn gemm_blis_bias_act_parallel(
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
+    // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
+    // キャプチャして渡す（`gemm_blis_parallel` と同じ理由）。
+    let blocks = default_blocks();
 
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
             let row_start = panel_idx * panel_rows;
             let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, default_blocks())?;
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)?;
             apply_epilogue(c_chunk, n, bias, act)
         })
 }
@@ -1143,6 +1163,47 @@ mod tests {
         }
     }
 
+    /// `default_blocks()` の値がすべて 0 でないこと（0 だと
+    /// `panel_capacity` の `div_ceil`／`step_by` がパニックしうる）を
+    /// 確認する（実装計画 §6 OWASP A03 の静的保証をテストで裏付ける）。
+    #[test]
+    fn default_blocks_never_returns_zero_sized_block() {
+        let blocks = default_blocks();
+        assert!(blocks.mc > 0 && blocks.kc > 0 && blocks.nc > 0);
+    }
+
+    /// n が大きい場合（4096 前後。#749 で NC 拡大分岐の対象だった範囲）
+    /// でも本番経路（[`gemm_blis`]／[`gemm_blis_parallel`]）が
+    /// `gemm_naive` と bit 完全一致することを、閾値の直前・直後・NR=12
+    /// （NEON 8×12 既定カーネルの NR）非整数倍の端タイルが生じる n で
+    /// 検証する（m／k は小さく保ち実行時間を抑える）。
+    #[test]
+    fn gemm_blis_and_parallel_large_n_match_naive_bit_exact() {
+        for &(m, k) in &[(5usize, 7usize), (131, 259)] {
+            for n in [4095usize, 4096, 4097, 4100] {
+                let a = xorshift32_vec(0x1234_5678, m * k);
+                let b = xorshift32_vec(0x9abc_def0, k * n);
+
+                let mut c_naive = vec![0.0f32; m * n];
+                crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+                let mut c_blis = vec![0.0f32; m * n];
+                gemm_blis(&a, &b, &mut c_blis, m, n, k).unwrap();
+                assert_eq!(
+                    c_naive, c_blis,
+                    "gemm_blis（m={m},n={n},k={k}）は gemm_naive と bit 完全一致するはず"
+                );
+
+                let mut c_parallel = vec![0.0f32; m * n];
+                gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+                assert_eq!(
+                    c_naive, c_parallel,
+                    "gemm_blis_parallel（m={m},n={n},k={k}）は gemm_naive と bit 完全一致するはず"
+                );
+            }
+        }
+    }
+
     // --- NEON MR=8×NR=12 拡張の aarch64 限定検証（イシュー #559）---
     //
     // x86_64 開発環境では実行不能なため `cfg(target_arch = "aarch64")` で
@@ -1168,7 +1229,7 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     #[test]
     fn neon_8x12_and_12x8_match_scalar_forced_bit_exact() {
-        use microkernel::{Neon12x8Kernel, NeonKernel};
+        use microkernel::{Neon12x8Kernel, NeonBLaneqKernel, NeonKernel};
 
         for (i, &(m, n, k)) in [
             (200usize, 600usize, 700usize),
@@ -1199,6 +1260,16 @@ mod tests {
             assert_eq!(
                 c_scalar, c_neon_12x8,
                 "Neon12x8Kernel（A/B 対抗変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
+            );
+
+            // イシュー #748: B 側レーン参照 FMA 変種（列優先 acc）も
+            // ScalarKernel 強制経路と bit 完全一致するはず（k%4 の剰余
+            // 網羅は上記グリッドを共用）。
+            let mut c_neon_b_laneq = vec![0.0f32; m * n];
+            gemm_blis_with_kernel(NeonBLaneqKernel, &a, &b, &mut c_neon_b_laneq, m, n, k).unwrap();
+            assert_eq!(
+                c_scalar, c_neon_b_laneq,
+                "NeonBLaneqKernel（B レーン参照変種・k={k}）は ScalarKernel 強制経路と bit 完全一致するはず"
             );
         }
     }
@@ -1270,6 +1341,75 @@ mod tests {
             println!(
                 "dim={dim}: NeonKernel(8x12) median={median_8x12:.6}s, \
                  Neon12x8Kernel(12x8) median={median_12x8:.6}s"
+            );
+        }
+    }
+
+    /// [`microkernel::NeonKernel`]（既定・A レーン参照・行優先 acc）と
+    /// [`microkernel::NeonBLaneqKernel`]（B レーン参照・列優先 acc。
+    /// イシュー #748）のスループットを同一形状で計測し中央値を報告する
+    /// （`.claude/rules/coding-rust.md` の 5 回計測中央値規約・上記
+    /// `neon_8x12_vs_12x8_ab_median_throughput` と同型のウォームアップ・
+    /// 交互実行パターン）。C タイル転置コストを新規に抱えるため、
+    /// 採用可否（既定ディスパッチへの接続）の判定は本テスト出力を見た
+    /// 人間／後続セッションが行う（本テスト自体は勝敗を assert しない。
+    /// #748 実装計画 §2 の fail-closed 方針）。`#[ignore]` 分離（実機実行
+    /// 専用。`.claude/rules/coding-rust.md` 実機分離方針）。
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    #[ignore = "aarch64 実機での A/B 性能計測専用（--release 実行推奨）"]
+    fn neon_8x12_vs_b_laneq_ab_median_throughput() {
+        use microkernel::{NeonBLaneqKernel, NeonKernel};
+        use std::time::Instant;
+
+        fn run_once<K: Microkernel>(
+            kernel: K,
+            a: &[f32],
+            b: &[f32],
+            m: usize,
+            n: usize,
+            k_dim: usize,
+        ) -> f64 {
+            let mut c = vec![0.0f32; m * n];
+            let start = Instant::now();
+            gemm_blis_with_kernel(kernel, a, b, &mut c, m, n, k_dim).unwrap();
+            start.elapsed().as_secs_f64()
+        }
+
+        fn median(mut samples: Vec<f64>) -> f64 {
+            samples.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            samples[samples.len() / 2]
+        }
+
+        for dim in [512usize, 1024, 2048, 4096] {
+            let (m, n, k) = (dim, dim, dim);
+            let a = xorshift32_vec(0x9999_9999, m * k);
+            let b = xorshift32_vec(0xAAAA_AAAA, k * n);
+
+            // ウォームアップ（キャッシュ・TLB を双方カーネルで温める。
+            // `neon_8x12_vs_12x8_ab_median_throughput` と同じ理由）。
+            run_once(NeonKernel, &a, &b, m, n, k);
+            run_once(NeonBLaneqKernel, &a, &b, m, n, k);
+
+            // 計測順序を交互化し系統的偏りを避ける（同上）。
+            let mut samples_a_lane = Vec::with_capacity(5);
+            let mut samples_b_lane = Vec::with_capacity(5);
+            for i in 0..5 {
+                if i % 2 == 0 {
+                    samples_a_lane.push(run_once(NeonKernel, &a, &b, m, n, k));
+                    samples_b_lane.push(run_once(NeonBLaneqKernel, &a, &b, m, n, k));
+                } else {
+                    samples_b_lane.push(run_once(NeonBLaneqKernel, &a, &b, m, n, k));
+                    samples_a_lane.push(run_once(NeonKernel, &a, &b, m, n, k));
+                }
+            }
+
+            let median_a_lane = median(samples_a_lane);
+            let median_b_lane = median(samples_b_lane);
+
+            println!(
+                "dim={dim}: NeonKernel(A-lane) median={median_a_lane:.6}s, \
+                 NeonBLaneqKernel(B-lane) median={median_b_lane:.6}s"
             );
         }
     }

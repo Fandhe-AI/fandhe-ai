@@ -107,11 +107,23 @@ pub(crate) fn make_pipeline(
 /// `library` は [`compile_gemm_library`] が返す `shaders/gemm.metal` 全体の
 /// ライブラリを再利用する（function constant はコンパイル済みライブラリ
 /// から関数を「特殊化」する API であり、ソース側の再コンパイルは不要）。
+///
+/// `swizzle_enabled`（index 7 の function constant 値。イシュー #746）は
+/// 呼び出し元 [`crate::gemm::MetalGemm`] インスタンスが保持する固定値
+/// （`MetalGemm::new` は `crate::tile::SWIZZLE_ENABLED`〈既定 `false`〉を
+/// 渡し、`MetalGemm::new_with_swizzle` はベンチ用途で任意値を渡せる。
+/// `crate::gemm::gemm.rs` 冒頭のフィールドコメント参照）をそのまま特殊化に
+/// 使う。以前はここで `crate::tile::SWIZZLE_ENABLED` を直接参照していたが、
+/// 同一プロセス内で base（off）/head（on）の 2 インスタンスを構築し
+/// interleaved に A/B 計測する運用（`docs/perf/metal-gemm-tgid-swizzle-ab.md`）
+/// のため引数化した（CUDA 側 `CudaMmaGemm::new_with_swizzle` と同型の設計。
+/// `crates/backend-cuda/examples/gemm_mma_swizzle_bench.rs` 参照）。
 pub(crate) fn make_pipeline_with_constants(
     device: &MtlDevice,
     library: &MtlLibrary,
     function_name: &'static str,
     cfg: TileConfig,
+    swizzle_enabled: bool,
 ) -> Result<Retained<MtlPipeline>, MetalError> {
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -169,14 +181,18 @@ pub(crate) fn make_pipeline_with_constants(
             MTLDataType::UInt,
             6,
         );
-        // threadgroup ID スウィズル（イシュー #540）のゲート。既定
-        // `false`（`crate::tile::SWIZZLE_ENABLED`）で、実機未検証の間は
-        // `shaders/gemm.metal` 側を恒等変換のまま動作させる（PR #661
-        // codex-review 指摘: 未検証のまま本番経路へ無条件適用しない）。
-        // `crate::gemm::encode_dispatch_tiled` の grid 計算も同じ定数で
-        // 分岐させ、シェーダ側の tgid 変換と grid 形状を同期させる契約。
-        // index 7（`TGP_PAD`〈#538・index 6〉の直後）を割り当てる。
-        let swizzle_enabled = crate::tile::SWIZZLE_ENABLED;
+        // threadgroup ID スウィズル（イシュー #540）のゲート。本番経路
+        // （`MetalGemm::new`）は既定 `false`（`crate::tile::SWIZZLE_ENABLED`）
+        // で、実機未検証の間は `shaders/gemm.metal` 側を恒等変換のまま動作
+        // させる（PR #661 codex-review 指摘: 未検証のまま本番経路へ無条件
+        // 適用しない）。イシュー #746 で本関数の引数へ格上げしたのは、A/B
+        // 計測用の `MetalGemm::new_with_swizzle` インスタンスが `true` を
+        // 渡せるようにするため（上記関数ドキュメンテーションコメント参照）。
+        // `crate::gemm::encode_dispatch_tiled` の grid 計算も同じ
+        // `swizzle_enabled` 値で分岐させ、シェーダ側の tgid 変換と grid
+        // 形状を同期させる契約（`MetalGemm` が両呼び出しへ同一フィールド値
+        // を伝播する）。index 7（`TGP_PAD`〈#538・index 6〉の直後）を
+        // 割り当てる。
         constants.setConstantValue_type_atIndex(
             std::ptr::NonNull::from(&swizzle_enabled).cast(),
             MTLDataType::Bool,
