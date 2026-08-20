@@ -496,14 +496,17 @@ jobs:
             echo "has_cargo=false" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Cargo.lock の依存禁止検査
-        run: |
-          set -euo pipefail
-          if [ ! -f "Cargo.lock" ]; then
-            echo "::notice::Cargo.lock が未追加のため依存禁止検査をスキップしました（workspace 作成後に有効化されます）"
-            exit 0
-          fi
-          bash scripts/check-forbidden-deps.sh lock Cargo.lock
+      # 本体 workspace ルート Cargo.lock・OSS 直接比較ハーネス
+      # （scripts/bench/oss-gemm-compare/。許容依存第 9 区分・イシュー #755。
+      # `docs/oss-comparison-harness-decision.md`）の Cargo.lock を一括検査する。
+      # 対象パスの列挙は scripts/check-forbidden-deps.sh 側（lock-all サブコマンド）に
+      # 集約済みで、ここではパスをハードコードしない（Makefile の deps-forbidden
+      # ターゲットと同一スクリプト・同一サブコマンドを共用し二重管理しない。
+      # 第 9 区分有効化のマージ条件「scripts/check-forbidden-deps.sh の走査対象化」の
+      # 実体。.claude/rules/deps-policy.md）。ルート Cargo.lock 未追加時の notice
+      # スキップ・ハーネス Cargo.lock 不在時の fail-closed は lock-all 内部の挙動。
+      - name: Cargo.lock 群の依存禁止検査（本体 workspace・OSS 直接比較ハーネス）
+        run: bash scripts/check-forbidden-deps.sh lock-all
 
       # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
       # rust-toolchain.toml へ同期する（build ジョブと同一方針。本ファイル冒頭コメント参照）。
@@ -531,16 +534,6 @@ jobs:
         # （TASK-1.2 の成果物「cargo tree 出力の禁止クレート grep 検査」）。
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/check-forbidden-deps.sh tree
-
-      # OSS 直接比較ハーネス（scripts/bench/oss-gemm-compare/。イシュー #755）専用の
-      # 独立 Cargo パッケージ（本体 workspace 外・`docs/oss-comparison-harness-decision.md`）。
-      # matrixmultiply・gemm crate は許容依存 8 区分の対象外の外部依存であり、本体
-      # workspace の cargo tree 走査（上記ステップ）には現れないため、当該パッケージの
-      # Cargo.lock を個別に走査対象へ加える。fail-closed 検査の検出範囲拡張であり
-      # 緩和ではないため承認不要（既存ジョブ内ステップの追加でありジョブ追加ではないため
-      # ruleset の required contexts 更新も不要。`.claude/rules/ci.md`）。
-      - name: OSS 直接比較ハーネスの依存禁止検査
-        run: bash scripts/check-forbidden-deps.sh lock scripts/bench/oss-gemm-compare/Cargo.lock
 
       # OSS 直接比較ハーネス（scripts/bench/oss-gemm-compare/）専用のライセンス監査
       # （イシュー #755 review 指摘対応・ユーザー承認条件「ライセンス監査を CI に
