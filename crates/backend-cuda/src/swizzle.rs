@@ -40,6 +40,13 @@
 //! 昇格する。
 
 /// グルーピング幅の選択候補（DeepGEMM 同型の 2 候補。実装計画 1 節）。
+///
+/// 呼び出し元（[`select_swizzle_group_width`]）が `internal-diagnostics`
+/// feature 限定の opt-in 入口からのみ呼ばれる（本ファイル冒頭コメント・
+/// [`select_swizzle_group_width`] ドキュメンテーションコメント参照）ため、
+/// 通常ビルド（feature 指定なし）では到達不能。dead-code 誤検知を避ける
+/// ため `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 
 /// グルーピング幅 `g` を仮定した場合の L2 footprint 近似コスト
@@ -63,6 +70,12 @@ const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 /// `num_sms` は実測値だが、桁溢れを事前に排除しておくことで呼び出し側の
 /// 追加検証を不要にする。REQ-8 の「境界検査を省略しない」精神を数値計算
 /// 側にも適用した安全側の実装）。
+///
+/// 呼び出し元（[`select_swizzle_group_width`]）が `internal-diagnostics`
+/// feature 限定の opt-in 入口からのみ呼ばれるため、通常ビルド（feature
+/// 指定なし）では到達不能。dead-code 誤検知を避けるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u32) -> u64 {
     let (num_sms, block_m, block_n, group_width) = (
         u64::from(num_sms),
@@ -82,13 +95,20 @@ fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u3
 /// 小さいほど 1 グループが専有する SM 数・L2 footprint が小さく、
 /// 効果が過大に振れるリスクが低い）。
 ///
-/// 呼び出し文脈: イシュー #775 で `gemm_mma.rs::CudaMmaGemm::new`
-/// （本番既定コンストラクタ）が、swizzle 変種カーネルをコンパイルする際の
-/// グルーピング幅決定にこの関数を使う（`device.multiprocessor_count()`
-/// 実測値ベース。本ファイル冒頭コメント参照）。診断用ラッパー
-/// `lib.rs::diagnostics::mma_swizzle_group_width`（`internal-diagnostics`
-/// feature 経由。`examples/gemm_mma_swizzle_bench.rs` の A/B 計測用）からも
-/// 引き続き呼ばれる。
+/// 呼び出し文脈: イシュー #775 で `gemm_mma.rs::CudaMmaGemm::
+/// new_with_size_conditional_swizzle`（`internal-diagnostics` feature
+/// 限定・実機検証専用 opt-in 入口）が、swizzle 変種カーネルをコンパイル
+/// する際のグルーピング幅決定にこの関数を使う
+/// （`device.multiprocessor_count()` 実測値ベース。本ファイル冒頭コメント
+/// 参照）。診断用ラッパー `lib.rs::diagnostics::mma_swizzle_group_width`
+/// （同じく `internal-diagnostics` feature 経由。
+/// `examples/gemm_mma_swizzle_bench.rs` の A/B 計測用）からも引き続き
+/// 呼ばれる。**本番既定コンストラクタ `gemm_mma.rs::CudaMmaGemm::new` は
+/// 実機未検証のためこの関数を呼ばない**（本ファイル冒頭コメント参照）。
+/// 呼び出し元がいずれも `internal-diagnostics` feature 限定のため、通常
+/// ビルド（feature 指定なし）では到達不能。dead-code 誤検知を避けるため
+/// `#[allow(dead_code)]` を付す。
+#[allow(dead_code)]
 pub fn select_swizzle_group_width(num_sms: u32, block_m: u32, block_n: u32) -> u32 {
     let mut best = GROUP_WIDTH_CANDIDATES[0];
     let mut best_usage = swizzle_group_usage(num_sms, block_m, block_n, best);
