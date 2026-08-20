@@ -45,14 +45,17 @@ pub(crate) struct Tile {
 /// `[0, total)` を `size` 幅の連続区間へ分割する（最終区間のみ端数で
 /// 短くなる）。`total == 0` または `size == 0` は空の結果を返す全域関数
 /// （境界値であっても panic しない。REQ-8 境界検査の精神を純関数側にも
-/// 適用する）。
+/// 適用する）。区間終端は `start + size` を素朴に評価せず
+/// `saturating_add` してから `total` へ丸める（`size` に `usize::MAX`
+/// 近傍の値が渡された場合でもオーバーフロー panic（debug）・折り返し
+/// （release）せず `total` に飽和させる。codex-review 指摘・PR #773）。
 pub(crate) fn bands(total: usize, size: usize) -> Vec<Range<usize>> {
     if total == 0 || size == 0 {
         return Vec::new();
     }
     (0..total)
         .step_by(size)
-        .map(|start| start..(start + size).min(total))
+        .map(|start| start..start.saturating_add(size).min(total))
         .collect()
 }
 
@@ -144,6 +147,16 @@ mod tests {
     #[test]
     fn bands_exact_multiple_has_no_short_tail() {
         assert_eq!(bands(16, 8), vec![0..8, 8..16]);
+    }
+
+    /// `size` が `usize::MAX` 近傍でも `start + size` の素朴な加算で
+    /// オーバーフロー panic（debug）・折り返し（release）しないことを
+    /// 固定する（codex-review 指摘・PR #773。`saturating_add` により
+    /// 終端は `total` へ飽和する）。
+    #[test]
+    fn bands_saturates_end_when_size_is_near_usize_max() {
+        let b = bands(23, usize::MAX);
+        assert_eq!(b, vec![0..23]);
     }
 
     /// [`tile_grid`] が表す 2 次元ジョブ空間の「重複なし・被覆完全」不変
