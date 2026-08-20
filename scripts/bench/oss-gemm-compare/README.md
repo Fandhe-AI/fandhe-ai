@@ -1,0 +1,45 @@
+# oss-gemm-compare
+
+CPU GEMM の OSS 直接比較ハーネス（イシュー #755）。本体の現行最適 CPU 経路
+（`backend_cpu::gemm_blis_parallel`。BLIS 5-loop + rayon 並列）を、
+`matrixmultiply`・`gemm` crate（いずれも本体 workspace の許容依存 8 区分
+〈`.claude/rules/deps-policy.md`〉の対象外）と同一プロトコルで計測する。
+
+設計判断（本パッケージがなぜ本体 workspace 外の独立プロジェクトなのか）は
+`docs/oss-comparison-harness-decision.md` を、計測境界・再現手順・実測記録は
+`docs/perf/oss-gemm-comparison-baseline.md` を参照。
+
+## 使い方
+
+```sh
+cd scripts/bench/oss-gemm-compare
+cargo build --release
+./target/release/oss-gemm-compare                    # 既定サイズ（512/1024/2048/4096）
+./target/release/oss-gemm-compare --sizes 64,128,256  # サイズを明示指定（正整数カンマ区切り）
+```
+
+標準出力に JSON Lines（1 行 1 レコード = 1 実装 × 1 サイズ）を出力する。
+標準エラー出力には実行時メタデータ（git commit・HW 表記・rayon スレッド数）と、
+出力突合（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）の
+NG 詳細を出力する。**1 件でも突合 NG があれば非 0 終了する**（fail-closed。
+`.claude/rules/coding-rust.md`「性能下限・最適化の達成を理由に…検査を省略しない」の
+精神を出力正しさの検証にも適用する）。既知の限界（大きい K での OSS 実装間の
+突合が複合判定をわずかに超えうる実測結果）は `docs/oss-comparison-harness-decision.md`
+「出力突合とその限界」節を参照。
+
+## ライセンス注記
+
+- `matrixmultiply` (=0.3.11): MIT/Apache-2.0（デュアルライセンス。crates.io API 実測）
+- `gemm` (=0.19.0): MIT（crates.io API 実測）
+
+本パッケージは本体 workspace の member ではなく、独立の `[workspace]` を持つ
+Cargo プロジェクトである（ルート `Cargo.toml` / `Cargo.lock` に一切影響しない）。
+そのため `docs/license-matrix.md`（許容依存 8 区分の対象）の掲載対象外であり、
+上記ライセンス注記を本 README に個別記載する。
+
+## 依存関係
+
+`Cargo.toml` を参照。`backend-cpu`・`bench-harness` は本体 workspace member への
+path 依存（外部依存の新規追加ではない）。`matrixmultiply`・`gemm` は本パッケージ
+専用の外部依存として `=x.y.z` 完全固定し、`Cargo.lock` をコミットして
+再現性を確保する。
