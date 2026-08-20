@@ -328,13 +328,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // matrixmultiply（既定 feature。threading 未有効のため単一スレッド）。
         let mut c_mm = vec![0.0f32; size * size];
+        // SAFETY: a・b・c_mm は全て size*size 要素の連続 `Vec<f32>` で、
+        // 行主導（row-major）レイアウトのため rs=size・cs=1 で strides を渡す。
+        // matrixmultiply crate は安全な高レベル API を提供せず（`sgemm` が
+        // 唯一のエントリポイント）、C 側は書き込み専用（beta=0.0 のため
+        // 未初期化読み出しはない。上記 `vec![0.0f32; ...]` で初期化済みだが
+        // beta=0.0 なら本来読み出されない）。
         unsafe {
-            // SAFETY: a・b・c_mm は全て size*size 要素の連続 `Vec<f32>` で、
-            // 行主導（row-major）レイアウトのため rs=size・cs=1 で strides を渡す。
-            // matrixmultiply crate は安全な高レベル API を提供せず（`sgemm` が
-            // 唯一のエントリポイント）、C 側は書き込み専用（beta=0.0 のため
-            // 未初期化読み出しはない。上記 `vec![0.0f32; ...]` で初期化済みだが
-            // beta=0.0 なら本来読み出されない）。
             matrixmultiply::sgemm(
                 size,
                 size,
@@ -362,21 +362,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // gemm crate（Parallelism::Rayon(0) = 既定スレッド数で rayon 共有プールを使う）。
         let mut c_gemm = vec![0.0f32; size * size];
+        // SAFETY: matrixmultiply と同じ row-major ストライド規約
+        // （`gemm::gemm` は `*_rs`/`*_cs` を要素単位ストライドとして扱う）。
+        // `read_dst=false` のため C の初期値は使われず、未初期化読み出しは
+        // 発生しない。gemm crate は安全な高レベル API を提供しない
+        // （エントリポイントが `unsafe fn` のみ）ため、この呼び出し 1 箇所に
+        // unsafe を閉じる。
+        //
+        // gemm crate の契約は `dst := alpha*dst + beta*lhs*rhs`
+        // （matrixmultiply・自作カーネルの一般的な「alpha が積、beta が
+        // 既存 dst」という慣例とは alpha/beta の役割が逆）。ここでは
+        // `read_dst=false` のため alpha は無視されるが、積の係数は beta
+        // 側（1.0）に置く必要がある（`gemm-0.19.0/src/gemm.rs`
+        // `gemm_fallback` の `accum = accum * beta; if read_dst { accum
+        // += alpha * dst }` 実装で確認済み）。
         unsafe {
-            // SAFETY: matrixmultiply と同じ row-major ストライド規約
-            // （`gemm::gemm` は `*_rs`/`*_cs` を要素単位ストライドとして扱う）。
-            // `read_dst=false` のため C の初期値は使われず、未初期化読み出しは
-            // 発生しない。gemm crate は安全な高レベル API を提供しない
-            // （エントリポイントが `unsafe fn` のみ）ため、この呼び出し 1 箇所に
-            // unsafe を閉じる。
-            //
-            // gemm crate の契約は `dst := alpha*dst + beta*lhs*rhs`
-            // （matrixmultiply・自作カーネルの一般的な「alpha が積、beta が
-            // 既存 dst」という慣例とは alpha/beta の役割が逆）。ここでは
-            // `read_dst=false` のため alpha は無視されるが、積の係数は beta
-            // 側（1.0）に置く必要がある（`gemm-0.19.0/src/gemm.rs`
-            // `gemm_fallback` の `accum = accum * beta; if read_dst { accum
-            // += alpha * dst }` 実装で確認済み）。
             gemm::gemm(
                 size,
                 size,
@@ -412,21 +412,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 固定のため実運用上発生しない想定だが、`.expect()` 禁止方針
         // （coding-rust.md）に従い `?` で型付きに伝播する（レビュー指摘対応。
         // イシュー #755）。
+        // `bench_harness::run` の計測クロージャは `FnMut()`（戻り値 `()`）の
+        // ため `?` を直接使えない。計測クロージャ内で panic
+        // （`.expect()`／`unreachable!` 等）を起こすと本番 CLI 経路（本
+        // ハーネスの主目的である既定引数での再計測実行）に panic が漏れる
+        // ため（レビュー指摘対応。イシュー #755）、エラーはループ外の
+        // `Option` に捕捉するのみに留め、`bench_harness::run` 呼び出し後に
+        // `?` で型付きに伝播する。
+        let mut ref_gemm_err = None;
         let m_ref = bench_harness::run(&config, || {
-            // `c_buf` は size*size 要素で確保済み・形状は `a`/`b` と同一のため
-            // `gemm_blis_parallel` の形状検証は常に成立する。計測クロージャ内の
-            // panic は `bench_harness::run` の計測ループを壊すため、ここでは
-            // 戻り値を握り潰さず `expect` を避けたいところだが、`FnMut()`
-            // （戻り値 `()`）シグネチャ上 `?` は使えない。形状不変条件が
-            // ループ内で変化しないことは自明なため、可読性を優先し
-            // `unwrap_or_else` で panic メッセージを明示する（`.expect()` は
-            // 定数メッセージのみで理由の埋め込みができないための代替）。
-            backend_cpu::gemm_blis_parallel(&a, &b, &mut c_buf, size, size, size).unwrap_or_else(
-                |e| unreachable!("固定サイズの正方行列で形状検証は常に成立する: {e}"),
-            );
+            if let Err(e) = backend_cpu::gemm_blis_parallel(&a, &b, &mut c_buf, size, size, size) {
+                ref_gemm_err = Some(e);
+            }
         })?;
+        if let Some(e) = ref_gemm_err {
+            return Err(Box::new(e));
+        }
 
-        let m_mm = bench_harness::run(&config, || unsafe {
+        let m_mm = bench_harness::run(&config, || {
             // SAFETY: a・b・c_buf は全て size*size 要素の連続 `Vec<f32>`（上記の
             // `c_ref`/`c_mm` 計測時と同一バッファ形状・同一 row-major ストライド
             // 規約。rs=size・cs=1）。matrixmultiply crate は安全な高レベル API を
@@ -434,25 +437,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // 同一呼び出しを反復するだけで確保・借用の状態は変化しないため、
             // 上の一度目の呼び出しと同じ安全性根拠がそのまま成立する。beta=0.0
             // のため c_buf の未初期化読み出しはない。
-            matrixmultiply::sgemm(
-                size,
-                size,
-                size,
-                1.0,
-                a.as_ptr(),
-                size as isize,
-                1,
-                b.as_ptr(),
-                size as isize,
-                1,
-                0.0,
-                c_buf.as_mut_ptr(),
-                size as isize,
-                1,
-            );
+            unsafe {
+                matrixmultiply::sgemm(
+                    size,
+                    size,
+                    size,
+                    1.0,
+                    a.as_ptr(),
+                    size as isize,
+                    1,
+                    b.as_ptr(),
+                    size as isize,
+                    1,
+                    0.0,
+                    c_buf.as_mut_ptr(),
+                    size as isize,
+                    1,
+                );
+            }
         })?;
 
-        let m_gemm = bench_harness::run(&config, || unsafe {
+        let m_gemm = bench_harness::run(&config, || {
             // SAFETY: 上記 c_gemm 計測時と同一の row-major ストライド規約・同一
             // バッファ形状（a・b・c_buf は size*size 要素の連続 `Vec<f32>`）。
             // `read_dst=false` のため C の未初期化読み出しはなく、gemm crate は
@@ -461,27 +466,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // beta*lhs*rhs`）なため積の係数は beta 側（1.0）に置く
             // （`gemm-0.19.0/src/gemm.rs` `gemm_fallback` で確認済み。上記
             // c_gemm 計測時のコメント参照）。
-            gemm::gemm(
-                size,
-                size,
-                size,
-                c_buf.as_mut_ptr(),
-                1,
-                size as isize,
-                false,
-                a.as_ptr(),
-                1,
-                size as isize,
-                b.as_ptr(),
-                1,
-                size as isize,
-                0.0f32,
-                1.0f32,
-                false,
-                false,
-                false,
-                gemm::Parallelism::Rayon(0),
-            );
+            unsafe {
+                gemm::gemm(
+                    size,
+                    size,
+                    size,
+                    c_buf.as_mut_ptr(),
+                    1,
+                    size as isize,
+                    false,
+                    a.as_ptr(),
+                    1,
+                    size as isize,
+                    b.as_ptr(),
+                    1,
+                    size as isize,
+                    0.0f32,
+                    1.0f32,
+                    false,
+                    false,
+                    false,
+                    gemm::Parallelism::Rayon(0),
+                );
+            }
         })?;
 
         let records = [
