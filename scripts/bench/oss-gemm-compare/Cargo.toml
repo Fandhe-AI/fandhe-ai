@@ -21,6 +21,10 @@ version = "0.1.0"
 # と同じ値をここで明示的に指定する）。
 edition = "2024"
 publish = false
+# ルート `Cargo.toml` の `[workspace.package] license` と同一値を明示する
+# （workspace 継承ができないため独立指定。cargo-deny の `unlicensed` 検査
+# クリア用。イシュー #755 review 対応）。
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 # workspace 内部クレート（path 依存）。本体の現行最適 CPU GEMM 経路

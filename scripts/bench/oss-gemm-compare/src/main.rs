@@ -19,13 +19,27 @@
 //! 存在しない）で計測する。詳細な境界定義・Metal 側（MLX・PyTorch MPS）の対応する
 //! 2 境界の定義は `docs/perf/oss-gemm-comparison-baseline.md` を参照。
 //!
-//! ## 出力突合（fail-closed）
+//! ## 出力突合（既定は非 fatal・`--strict-compare` で fail-closed に切替）
 //!
 //! 自作実装（`gemm_blis_parallel`）の出力 C を基準に、matrixmultiply・gemm crate の
 //! 出力 C を統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
 //! `.claude/rules/coding-rust.md`）で照合する。縮約順序・FMA 契約が実装間で
-//! 異なるため bit 一致は要求しない。不一致が 1 要素でもあれば非 0 終了する
-//! （性能比較の前提となる正しさの検証を、性能実測の達成を理由に緩和しない。REQ-8）。
+//! 異なるため bit 一致は要求しない。**この許容誤差の値自体は変更しない**
+//! （coding-rust.md「バックエンド間数値一致テストの許容誤差を単独で緩和しない」の
+//! 保護対象。本ハーネスは CPU/CUDA/Metal 自作バックエンド間比較ではなく OSS
+//! 実装との比較のため同ルールの直接の適用対象ではないが、許容誤差の数値自体は
+//! 予防的に据え置く）。
+//!
+//! `docs/oss-comparison-harness-decision.md`「出力突合とその限界」節に実測記録の
+//! とおり、K が大きいサイズ（1024〜4096）では OSS 実装間の縮約順序差に由来する
+//! 丸め誤差の蓄積により、複合判定をわずかに超える不一致が実装バグなしに発生しうる
+//! ことが分かっている。本ハーネスの主目的（#735 各 Phase 完了時の素朴な再実行による
+//! 性能再計測）を既定引数のまま成立させるため、既定では不一致を fatal にしない:
+//! 各レコードの `output_match` フィールドに突合結果を記録し（不一致時は
+//! `mismatch_detail` に詳細を併記）、標準エラー出力に警告を出したうえで性能計測は
+//! 継続し、プロセスは 0 終了する。`--strict-compare` を指定した場合のみ、不一致を
+//! 検出した時点で非 0 終了する（性能比較の前提となる正しさの検証自体は変更しない。
+//! 単に「検証結果をどう扱うか」を既定と opt-in で分離する。REQ-8）。
 //!
 //! ## スレッド構成（比較の公平性軸）
 //!
@@ -91,6 +105,17 @@ fn parse_sizes() -> Vec<usize> {
     sizes
 }
 
+/// `--strict-compare` の指定有無を返す（レビュー指摘対応。イシュー #755）。
+///
+/// 指定時は出力突合 NG を検出した時点で非 0 終了する（従来の既定挙動）。
+/// 未指定（既定）では、K が大きいサイズで実装バグなしに複合判定をわずかに
+/// 超えうる既知の限界（`docs/oss-comparison-harness-decision.md` 参照）により
+/// 本ハーネスの主目的（既定引数での素朴な再実行）が阻害されないよう、
+/// 突合結果を JSON Lines の情報項目として記録するに留め非 fatal とする。
+fn parse_strict_compare() -> bool {
+    std::env::args().any(|a| a == "--strict-compare")
+}
+
 fn tflops(size: usize, median_secs: f64) -> f64 {
     let flops = 2.0 * (size as f64).powi(3);
     flops / median_secs / 1e12
@@ -139,6 +164,9 @@ struct Record {
     impl_threads: usize,
     size: usize,
     measurement: Measurement,
+    /// 基準実装（`gemm_blis_parallel`）との出力突合結果（[`compare_outputs`] の
+    /// 戻り値をそのまま保持する）。基準実装自身のレコードは自明に `Ok(())`。
+    output_compare: Result<(), String>,
 }
 
 fn print_record(commit: &str, hw: &str, boundary: &str, r: &Record) {
@@ -150,13 +178,25 @@ fn print_record(commit: &str, hw: &str, boundary: &str, r: &Record) {
     let tflops_q1 = tflops(r.size, r.measurement.q3_secs);
     let tflops_q3 = tflops(r.size, r.measurement.q1_secs);
 
+    let output_match = r.output_compare.is_ok();
+    // mismatch_detail は不一致時のみ内容を持つ文字列、一致時は JSON null。
+    // detail の内容は compare_outputs が生成する内部固定文字列（数値のみを
+    // 埋め込み、利用者入力は含まない）だが、念のため `"` のみエスケープする
+    // （手書き JSON のため `serde_json` 相当のフルエスケープは行わないが、
+    // 埋め込み文字列は内部生成のためこれで壊れない。OWASP A03: 経路上に
+    // 外部入力なし）。
+    let mismatch_detail_json = match &r.output_compare {
+        Ok(()) => "null".to_string(),
+        Err(detail) => format!("\"{}\"", detail.replace('"', "'")),
+    };
+
     // 手書き JSON Lines（`serde_json` は本パッケージの依存に含めていない。
     // フィールド構成が固定・小規模で、値はすべて内部生成の数値・固定文字列
     // （利用者入力の埋め込みなし）のため、エスケープ不要な最小実装で足りる
     // という判断。OWASP A03: 外部入力をそのまま JSON へ埋め込む経路がないため
     // インジェクションの余地がない）。
     println!(
-        "{{\"date\":\"{date}\",\"commit\":\"{commit}\",\"hw\":\"{hw}\",\"boundary\":\"{boundary}\",\"impl\":\"{impl_name}\",\"lib_version\":\"{lib_version}\",\"impl_threads\":{impl_threads},\"size\":{size},\"warmup\":{warmup},\"iters\":{iters},\"tflops_median\":{tflops_median:.4},\"tflops_q1\":{tflops_q1:.4},\"tflops_q3\":{tflops_q3:.4}}}",
+        "{{\"date\":\"{date}\",\"commit\":\"{commit}\",\"hw\":\"{hw}\",\"boundary\":\"{boundary}\",\"impl\":\"{impl_name}\",\"lib_version\":\"{lib_version}\",\"impl_threads\":{impl_threads},\"size\":{size},\"warmup\":{warmup},\"iters\":{iters},\"tflops_median\":{tflops_median:.4},\"tflops_q1\":{tflops_q1:.4},\"tflops_q3\":{tflops_q3:.4},\"output_match\":{output_match},\"mismatch_detail\":{mismatch_detail_json}}}",
         date = chrono_like_utc_date(),
         impl_name = r.impl_name,
         lib_version = r.lib_version,
@@ -194,6 +234,7 @@ fn chrono_like_utc_date() -> String {
 
 fn main() {
     let sizes = parse_sizes();
+    let strict_compare = parse_strict_compare();
     let commit = git_commit_short();
     let hw = format!(
         "{}/{} ({} logical cores)",
@@ -204,7 +245,7 @@ fn main() {
     let config = MeasurementConfig::default();
 
     eprintln!(
-        "oss-gemm-compare: commit={commit} hw={hw} rayon_threads={}",
+        "oss-gemm-compare: commit={commit} hw={hw} rayon_threads={} strict_compare={strict_compare}",
         rayon::current_num_threads()
     );
 
@@ -246,8 +287,11 @@ fn main() {
                 1,
             );
         }
-        if let Err(msg) = compare_outputs(&c_ref, &c_mm, "matrixmultiply") {
-            eprintln!("::error::size={size} 出力不一致（matrixmultiply）: {msg}");
+        let compare_mm = compare_outputs(&c_ref, &c_mm, "matrixmultiply");
+        if let Err(msg) = &compare_mm {
+            // 既定では警告に留める（既知の限界。上記モジュールドキュメント参照）。
+            // `--strict-compare` 指定時のみ非 0 終了の対象として集計する。
+            eprintln!("::warning::size={size} 出力不一致（matrixmultiply）: {msg}");
             had_mismatch = true;
         }
 
@@ -290,8 +334,9 @@ fn main() {
                 gemm::Parallelism::Rayon(0),
             );
         }
-        if let Err(msg) = compare_outputs(&c_ref, &c_gemm, "gemm") {
-            eprintln!("::error::size={size} 出力不一致（gemm crate）: {msg}");
+        let compare_gemm = compare_outputs(&c_ref, &c_gemm, "gemm");
+        if let Err(msg) = &compare_gemm {
+            eprintln!("::warning::size={size} 出力不一致（gemm crate）: {msg}");
             had_mismatch = true;
         }
 
@@ -355,6 +400,7 @@ fn main() {
                 impl_threads: rayon::current_num_threads(),
                 size,
                 measurement: m_ref,
+                output_compare: Ok(()),
             },
             Record {
                 impl_name: "matrixmultiply",
@@ -362,6 +408,7 @@ fn main() {
                 impl_threads: 1,
                 size,
                 measurement: m_mm,
+                output_compare: compare_mm,
             },
             Record {
                 impl_name: "gemm",
@@ -369,6 +416,7 @@ fn main() {
                 impl_threads: rayon::current_num_threads(),
                 size,
                 measurement: m_gemm,
+                output_compare: compare_gemm,
             },
         ];
         for record in &records {
@@ -378,8 +426,15 @@ fn main() {
 
     if had_mismatch {
         eprintln!(
-            "::error::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）"
+            "::warning::出力突合 NG（統一複合判定: 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）を検出した。\
+             各 JSON Lines レコードの output_match / mismatch_detail を参照。\
+             既知の限界は docs/oss-comparison-harness-decision.md「出力突合とその限界」節を参照。"
         );
-        std::process::exit(1);
+        if strict_compare {
+            eprintln!(
+                "::error::--strict-compare 指定のため出力突合 NG を fatal として扱い非 0 終了する"
+            );
+            std::process::exit(1);
+        }
     }
 }

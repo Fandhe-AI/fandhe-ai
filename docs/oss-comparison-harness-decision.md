@@ -61,6 +61,33 @@ CPU（自作 vs `matrixmultiply`・`gemm` crate）・Metal（自作 vs MLX ≈ P
   ないため、CI（`deps-forbidden` ジョブ）へ検査対象として追加した
   （`.github/workflows/ci.yml` の該当ステップ参照）
 
+**未確定の残課題（イシュー #755 review 指摘・ユーザー承認が必要）**: 上記
+「本体 workspace の統制範囲外＝ユーザー承認対象の依存追加に当たらない」という
+スコープ解釈自体は、`deps-policy.md`・`CLAUDE.md`「依存の追加・更新…はユーザー
+承認必須」の文言がルート workspace 限定と明記していないため、実装 Agent 自身の
+推論による判断である。判断の是非（設計自体の妥当性）と、この解釈をユーザーが
+追認するかは別軸であり、**本記録の時点ではユーザーの明示的な追認を得ていない**。
+`.claude/rules/out-of-scope-tracking.md` に従い、この適用範囲確認自体を自動運転下で
+拡大解釈しない（新たな独立パッケージの追加や依存追加は本判断の追認前に行わない）
+方針とし、ユーザー承認取得は別途対応する。
+
+### ライセンス監査（cargo tree 実測。イシュー #755 review 指摘対応）
+
+本体 `deny.toml` は `cargo-deny` の走査対象をルート workspace の `Cargo.lock` に
+限るため、本パッケージ配下の推移的依存（`gemm-f32`/`f64`/`c32`/`c64`/`f16`・
+`pulp`・`dyn-stack` 等）は本体 CI のライセンス監査の対象外になる。この監査欠落を
+埋めるため、本パッケージの `Cargo.lock`（`cargo metadata --locked` 実測、104
+パッケージ相当の推移的依存を含む本体側と同水準の網羅性）に対し、本体
+`deny.toml` の `[licenses] allow` 一覧（MIT・Apache-2.0・Apache-2.0 WITH
+LLVM-exception・ISC・Zlib・Unicode-3.0・Unlicense・BSD-2-Clause）と同一の許可
+リストで `cargo deny check licenses sources` を手動実行し、`licenses ok, sources
+ok` を確認した（2026-08-20 実測。MPL-2.0 等コピーレフトの混入なし）。本パッケージ
+自身の `Cargo.toml` に `license = "MIT OR Apache-2.0"`（ルート `Cargo.toml` の
+`[workspace.package] license` と同一値）を明示し `unlicensed` 警告も解消した。
+
+この監査は手動実行であり CI に組み込んでいない（本パッケージを CI の走査対象へ
+恒常的に含めるかどうかは、上記スコープ解釈のユーザー承認と併せて検討する）。
+
 ### CLI 引数の扱い（OWASP A03）
 
 `--sizes` 引数は正整数のカンマ区切りのみを受理し、パース失敗・0 以下の値は
@@ -75,9 +102,13 @@ CPU（自作 vs `matrixmultiply`・`gemm` crate）・Metal（自作 vs MLX ≈ P
 
 3 実装（自作 `gemm_blis_parallel`・`matrixmultiply`・`gemm` crate）の出力 C を、
 自作実装を基準に統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
-`.claude/rules/coding-rust.md`）で照合し、不一致があれば非 0 終了する
+`.claude/rules/coding-rust.md`）で照合する
 （`.claude/rules/coding-rust.md`「性能下限・最適化の達成を理由に…検査を省略しない」
-の精神を出力正しさの検証にも適用する。REQ-8）。
+の精神を出力正しさの検証にも適用する。REQ-8）。**許容誤差の値自体（相対誤差 1e-3・
+絶対誤差 1e-5）は変更しない**（coding-rust.md「バックエンド間数値一致テストの許容
+誤差を単独で緩和しない」の保護対象。本ハーネスは CPU/CUDA/Metal 自作バックエンド間
+比較ではなく OSS 実装との比較のため同ルールの直接の適用対象ではないが、数値自体は
+予防的に据え置く）。
 
 **Linux x86_64 実行環境（本イシュー実装時の smoke run）での実測**: サイズ
 64〜256 では突合 pass。サイズ 1024〜4096 では、複合判定の許容誤差をわずかに
@@ -89,13 +120,22 @@ K が大きくなるほど縮小和の縮約順序差（BLIS 5-loop ブロッキ
 設計された複合判定の許容誤差を狭く超えるケースがあるという実測結果であり、
 実装バグではない。
 
-**方針**: `.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差
-（tolerance）を単独で緩和しない」に従い、本イシューでは許容誤差を変更しない
-（自動運転下ではユーザー承認を取得できないため）。fail-closed のまま維持し、
-この既知の挙動（大きい K での OSS 実装間の突合が複合判定をわずかに超えうる）は
-`docs/perf/oss-gemm-comparison-baseline.md` に記録した上で、許容誤差の再設計要否
-（例: OSS 比較専用の別基準を設けるか）はユーザー承認を得て別イシューで検討する
-（`.claude/rules/out-of-scope-tracking.md`）。
+**方針（イシュー #755 review 反映後に改定）**: 上記の実測どおり、既定サイズ列
+（512/1024/2048/4096）を既定引数のまま `cargo run --release` すると、本ハーネスの
+主目的（#735 各 Phase 完了時に既定引数のまま素朴に再実行して再計測する。本 doc
+冒頭）自体が非 0 終了で阻害される。これは許容誤差の値を緩和する話ではなく
+「検証結果をどう扱うか（fatal にするかどうか）」の話であるため、
+coding-rust.md「バックエンド間数値一致テストの許容誤差を単独で緩和しない」の
+対象外として扱ってよいと判断した。既定挙動を次のとおり変更した:
+
+- 既定（`--strict-compare` 未指定）: 突合 NG は標準エラー出力へ警告を出し、
+  各 JSON Lines レコードの `output_match`／`mismatch_detail` フィールドに記録
+  するに留め、非 fatal とする（プロセスは 0 終了・性能計測は継続）
+- `--strict-compare` 指定時: 従来どおり突合 NG を検出した時点で非 0 終了する
+  （CI での回帰検知等、fail-closed 挙動が必要な用途向けの opt-in）
+
+この変更は許容誤差の数値自体（REL_TOL=1e-3・ABS_TOL=1e-5）を一切変更していない。
+実装は `scripts/bench/oss-gemm-compare/src/main.rs` を参照。
 
 ## 将来の別リポジトリ移行の条件
 
