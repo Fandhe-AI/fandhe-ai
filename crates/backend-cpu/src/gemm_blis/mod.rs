@@ -257,19 +257,26 @@ pub fn gemm_blis_parallel(
     // 呼び出しごとの再計算を避ける従来方針を踏襲する）。
     let blocks = default_blocks();
 
-    // 実タスク数が 1（`m <= panel_rows`）の場合は従来の
-    // `dispatch_region` 単発呼び出しへ早期分岐する。`num_threads == 1`
-    // では `panel_rows == m` が常に成立するためこの分岐に必ず含まれる
-    // （受け入れ条件 3: スレッド数 1 では従来と同一経路・同一性能。
-    // イシュー #750）。
-    if m <= panel_rows {
-        return dispatch_region(a, b, c, n, k, 0..m, blocks);
-    }
-
-    // 実タスク数 >= 2: B パネルをタスク間で 1 本だけ共有する経路
-    // （案 B・イシュー #750。`docs/cpu-gemm-b-packing-sharing-decision.md`
-    // が推奨する構成。B の pack 総コピー量を Q×k×n から k×n へ削減する）。
-    dispatch_shared_b(a, b, c, n, k, 0..m, blocks)
+    // B パネル共有経路（`dispatch_shared_b`。案 B・イシュー #750）は
+    // 本番既定へは**採用しない**（`docs/cpu-gemm-b-packing-sharing.md`・
+    // `docs/cpu-gemm-b-packing-sharing-decision.md` 参照）。受け入れ条件 2
+    // （Apple M4 Max 実機実測での M=N=K=2048/4096 非劣化確認）を満たす
+    // 前提条件が未充足のため、実装・bit 完全一致検証・単体/統合テスト
+    // （`dispatch_shared_b`／`gemm_blis_shared_b_region`／
+    // `gemm_blis_ic_loop`・`#[cfg(test)]` の
+    // [`gemm_blis_parallel_with_blocks`] 経由）は残しつつ、本番公開入口
+    // からの呼び出しは行わない（PR #758〈#740 mma_f16 swizzle〉の
+    // 「実装は入れるが実機ゲート未通過のうちは本番結線しない」判断と
+    // 同型。実機実測とユーザー承認を経た別 PR でのみ既定切替を検討する）。
+    // 従来どおり行パネルごとに [`dispatch_region`] を独立呼び出しする
+    // （B packing はタスクごとに個別実行＝共有化前の挙動）。
+    c.par_chunks_mut(panel_rows * n)
+        .enumerate()
+        .try_for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
+        })
 }
 
 /// `gemm_blis_parallel` に GEMM epilogue（bias 加算・activation）を融合した版
@@ -344,23 +351,25 @@ pub fn gemm_blis_bias_act_parallel(
     // キャプチャして渡す（`gemm_blis_parallel` と同じ理由）。
     let blocks = default_blocks();
 
-    // GEMM 本体は `gemm_blis_parallel` と同じ分岐（実タスク数 1 なら
-    // 従来の `dispatch_region` 経路、2 以上なら B パネル共有経路。
-    // イシュー #750）。epilogue（bias 加算・activation）は要素ごとに
-    // 独立な演算でパネル分割順序に依存しないため（本関数冒頭の
-    // ドキュメンテーションコメント「bit 完全一致契約」参照）、GEMM 本体の
-    // 完了後に `c` 全体へ 1 回だけ適用する（設計 doc §C 案 B の選択肢 (a)。
+    // GEMM 本体は `gemm_blis_parallel` と同じ理由で B パネル共有経路
+    // （`dispatch_shared_b`）を本番既定へ採用しない（上記
+    // `gemm_blis_parallel` 実装コメント参照。イシュー #750・実機ゲート
+    // 未通過）。従来どおり行パネルごとに `dispatch_region` を独立呼び出し
+    // する。epilogue（bias 加算・activation）は要素ごとに独立な演算で
+    // パネル分割順序に依存しないため（本関数冒頭のドキュメンテーション
+    // コメント「bit 完全一致契約」参照）、GEMM 本体の完了後に `c` 全体へ
+    // 1 回だけ適用する（設計 doc §C 案 B の選択肢 (a)。
     // `par_chunks_mut(panel_rows * n)` で行パネル並列に適用することで、
     // T=1（`panel_rows == m` で単一チャンク）では従来と同一の 1 パスに
     // なる）。
-    if m <= panel_rows {
-        dispatch_region(a, b, c, n, k, 0..m, blocks)?;
-    } else {
-        dispatch_shared_b(a, b, c, n, k, 0..m, blocks)?;
-    }
-
     c.par_chunks_mut(panel_rows * n)
-        .try_for_each(|c_chunk| apply_epilogue(c_chunk, n, bias, act))
+        .enumerate()
+        .try_for_each(|(panel_idx, c_chunk)| {
+            let row_start = panel_idx * panel_rows;
+            let row_end = (row_start + c_chunk.len() / n).min(m);
+            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)?;
+            apply_epilogue(c_chunk, n, bias, act)
+        })
 }
 
 /// [`gemm_blis_bias_act_parallel`] の epilogue 適用部（bias 行ブロード
@@ -811,6 +820,15 @@ fn gemm_blis_ic_loop<K: Microkernel>(
 /// 「タスクごとに 1 組所有する」と述べていた従来設計をそのまま踏襲する）
 /// gemm 呼び出しの (jc,pc) ループ全体で使い回すため、ループ外で 1 回だけ
 /// 確保する（#556 の確保削減方針をタスク数ぶんに拡張）。
+///
+/// **本番未結線（#750・codex-review P1 是正）**: 本関数・
+/// [`dispatch_shared_b`] は本番公開入口（[`gemm_blis_parallel`]／
+/// [`gemm_blis_bias_act_parallel`]）からは呼ばれない
+/// （`docs/perf/cpu-gemm-b-packing-sharing.md` 参照。受け入れ条件 2
+/// ＝ Apple M4 Max 実測非劣化確認を満たすまでの採用ゲート）。
+/// `#[cfg(test)]`（`#[cfg(test)]` の [`gemm_blis_parallel_with_blocks`]
+/// 経由）で bit 完全一致検証のみ行う。
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn gemm_blis_shared_b_region<K: Microkernel>(
     kernel: K,
@@ -916,7 +934,9 @@ fn gemm_blis_shared_b_region<K: Microkernel>(
 /// し、最初に構築できたトークンで [`gemm_blis_shared_b_region`] を呼ぶ
 /// （[`dispatch_region`] の共有 B 版・実タスク数 >= 2 の並列経路専用の
 /// dispatch 入口。イシュー #750）。ロジックは `dispatch_region` と同一で、
-/// 呼ぶ先の関数のみが異なる。
+/// 呼ぶ先の関数のみが異なる。本番未結線（[`gemm_blis_shared_b_region`]
+/// ドキュメンテーションコメント参照）のため `#[cfg(test)]`。
+#[cfg(test)]
 #[cfg(target_arch = "x86_64")]
 fn dispatch_shared_b(
     a: &[f32],
@@ -939,7 +959,10 @@ fn dispatch_shared_b(
 }
 
 /// aarch64 版 [`dispatch_shared_b`]（#750）。[`dispatch_region`] の
-/// aarch64 版と同じ理由で NEON 固定（実行時検出不要）。
+/// aarch64 版と同じ理由で NEON 固定（実行時検出不要）。本番未結線
+/// （[`gemm_blis_shared_b_region`] ドキュメンテーションコメント参照）
+/// のため `#[cfg(test)]`。
+#[cfg(test)]
 #[cfg(target_arch = "aarch64")]
 fn dispatch_shared_b(
     a: &[f32],
@@ -956,6 +979,9 @@ fn dispatch_shared_b(
 
 /// aarch64／x86_64 以外の arch 版 [`dispatch_shared_b`]（#750）。
 /// [`dispatch_region`] の同 arch 版と同じ理由で [`ScalarKernel`] 固定。
+/// 本番未結線（[`gemm_blis_shared_b_region`] ドキュメンテーションコメント
+/// 参照）のため `#[cfg(test)]`。
+#[cfg(test)]
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 fn dispatch_shared_b(
     a: &[f32],
@@ -1042,11 +1068,14 @@ pub(crate) fn gemm_blis_with_kernel_and_blocks<K: Microkernel>(
     gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, blocks)
 }
 
-/// テスト・スイープ専用: [`gemm_blis_parallel`] の任意 `BlockSizes` 版
-/// （#564）。並列分割戦略（実タスク数 1 なら `dispatch_region`・2 以上
-/// なら B パネル共有経路 `dispatch_shared_b`。#750）は `gemm_blis_parallel`
-/// 本体と同一で、`blocks` のみ呼び出し元から注入できる（実運用経路は
-/// [`default_blocks`] 固定のため変更なし）。
+/// テスト専用: [`gemm_blis_shared_b_region`]（B パネル共有経路。#750）の
+/// bit 完全一致を任意 `BlockSizes`（#564）で検証するための入口。
+/// `gemm_blis_parallel`（本番公開入口）は共有経路を採用しない
+/// （[`gemm_blis_shared_b_region`] ドキュメンテーションコメント参照）ため、
+/// 本関数は `gemm_blis_parallel` 本体とは分岐が異なる（実タスク数 1 なら
+/// `dispatch_region`・2 以上なら `dispatch_shared_b` を常に経由し、
+/// 共有経路のテストカバレッジを維持する）。`blocks` のみ呼び出し元から
+/// 注入できる。
 #[cfg(test)]
 pub(crate) fn gemm_blis_parallel_with_blocks(
     a: &[f32],

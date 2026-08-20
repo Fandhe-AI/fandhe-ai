@@ -253,15 +253,30 @@ nr ブロック単位で `par_iter` 化することも可能）。pack 完了後
   に従いユーザー承認を経て行う。自動運転モードの本セッションでは Issue 起票を行わず、
   切り出し候補として本ドキュメント・PR 本文に記録するに留める
 
-## §F 実装済み（イシュー #750）
+## §F 実装済み・本番不採用（イシュー #750。採用ゲート未通過）
 
 案 B を実装した（イシュー #750。`crates/backend-cpu/src/gemm_blis/mod.rs` の
 `gemm_blis_shared_b_region`／`gemm_blis_ic_loop`／`IcLoopContext`／`dispatch_shared_b`）。
-併せて B packing 自体を `nr` ブロック単位で `par_chunks_mut` により並列化した。実タスク数が
-1（`m <= panel_rows`。`num_threads == 1` を含む）の場合は本節で述べた「共有 pack」経路を
-一切経由せず、従来の `dispatch_region` 単発呼び出しへ早期分岐する（受け入れ条件 3）。
-数値一致（bit 完全一致契約）・実機性能実測の状況は `docs/perf/cpu-gemm-b-packing-sharing.md`
-を参照（実機性能実測は本 PR 時点で環境ゲート未達・未実施の fail-closed 記録）。
+併せて B packing 自体を `nr` ブロック単位で `par_chunks_mut` により並列化した。
+
+本番公開入口（`gemm_blis_parallel`／`gemm_blis_bias_act_parallel`）は本節で述べた「共有
+pack」経路（`dispatch_shared_b`）を**採用しない**（codex-review P1 指摘・
+thread `PRRT_kwDOTuUCJc6arIUt` を受けた是正）。実タスク数の多寡に関わらず常に従来の
+`dispatch_region`（行パネルごとに B を個別 pack する PerTaskPrivateB 相当方式）を呼ぶ。
+`gemm_blis_shared_b_region`／`dispatch_shared_b` は `#[cfg(test)]` 限定で実装・bit 完全一致
+テストのみに使う（テスト専用入口 `gemm_blis_parallel_with_blocks` 経由）。
+
+理由は §E の適用条件（E-8 実機実測完了）と同型の未充足に加え、REQ-8 の受け入れ条件 2
+（Apple M4 Max 実機実測での M=N=K=2048/4096 非劣化確認）が本 PR 時点で環境ゲート未達・
+未実施のため。本ドキュメント §E で「実装は別タスクである」としていた区切りに続き、
+**「本番採用も実機実測を前提条件とする別タスク（別 PR）である」**という区切りを追加する
+（PR #758〈イシュー #740・mma_f16 threadblock swizzle〉の最終マージ状態と整合する運用。
+同 PR は commit `8269801`「mma_f16 threadblock swizzle の本番結線を差し戻す」により、一時的に
+本番既定コンストラクタへ結線した swizzle 変種を `internal-diagnostics` feature 限定の経路へ
+差し戻した状態でマージされている＝実機ゲート未達のうちは本番へ結線しない判断）。
+
+数値一致（bit 完全一致契約）・実機性能実測の状況・採用ゲートの詳細は
+`docs/perf/cpu-gemm-b-packing-sharing.md` を参照。
 
 ## 出典
 
