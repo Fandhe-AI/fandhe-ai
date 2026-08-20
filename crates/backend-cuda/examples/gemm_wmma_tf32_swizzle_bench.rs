@@ -16,6 +16,24 @@
 //! 経由でのみ到達できる（`gemm_mma_swizzle_bench.rs` と同じ feature
 //! ゲート方針）。
 //!
+//! ## 計測境界の是正経緯（イシュー #776）
+//!
+//! 当初の実装は `run_wmma_tf32`（H2D×2＋`alloc_zeros`＋launch＋sync＋D2H
+//! を毎 iteration 行う高水準 API）を計測クロージャに直接使っていた。
+//! M=N=K=4096 では毎 iteration 約 192MB のデバイス確保・解放が計測区間に
+//! 混入し、GB10 の unified memory 環境でアロケータ・ページマッピングの
+//! 状態依存揺らぎが計測値を支配して run 間で最大約 16 倍の乖離を生んで
+//! いた（同一カーネルの launch-only 計測である `cuda_floor_bench.rs` は
+//! 4096 で安定していたため、原因はカーネル自体ではなく本ベンチの計測
+//! 境界設計であると切り分けた）。是正として `upload_f32`/
+//! `alloc_output_f32` を計測ループ外へ出し、`launch_wmma_tf32`
+//! （GPU 実行＋synchronize のみ）を計測対象に限定した
+//! （`cuda_floor_bench.rs::measure_wmma_tf32`・`gemm_mma_swizzle_bench.rs::
+//! measure_mma_f16` と同じ低水準 API 方式へ統一）。この境界変更により
+//! 本ベンチの絶対値は是正前（H2D 込み）の記録と比較不能になる。
+//! 切り分け過程・是正後の全サイズ実測は
+//! `docs/perf/cuda-gemm-swizzle-ab.md` §7.7 を参照。
+//!
 //! ## 実行手順
 //!
 //! ```sh
@@ -47,22 +65,36 @@ fn tflops(size: usize, median_secs: f64) -> f64 {
     flops / median_secs / 1e12
 }
 
-/// `run_wmma_tf32` はホスト側スライスを受け取り GPU 実行して `Vec<f32>` を
-/// 返す高水準 API（`upload`/`download` を内部で行う）。H2D/D2H を含めた
-/// 計測になるが、base／head 双方に同一方針を適用するため
-/// apples-to-apples の比較になる（`gemm_mma_swizzle_bench.rs` は
-/// upload/launch/download を分離した低水準 API を使うが、`CudaGemm`
-/// （TF32 経路）はこの高水準 API のみを公開するため計測区間の切り出し方が
-/// 異なる。`docs/perf/cuda-gemm-swizzle-ab.md` #741 節に明記）。
+/// H2D/D2H 転送・出力バッファ確保を計測区間の外へ出し、GPU 実行
+/// （カーネル起動＋同期）のみを計測する（`cuda_floor_bench.rs::
+/// measure_wmma_tf32`・`gemm_mma_swizzle_bench.rs::measure_mma_f16` と
+/// 同じ計測方針。base／head 双方に同一方針を適用するため
+/// apples-to-apples の比較になる）。イシュー #776: 是正前は高水準 API
+/// `run_wmma_tf32`（毎 iteration H2D×2＋`alloc_zeros`＋D2H を含む）を
+/// 計測クロージャに直接使っており、M=N=K=4096 で毎 iteration 約 192MB の
+/// デバイス確保・解放が計測値を支配し run 間で最大約 16 倍の乖離が生じて
+/// いた（本ファイル冒頭コメント参照）。`run_wmma_tf32` は 1 回だけ probe
+/// 実行して可用性を確認する（`launch_wmma_tf32` の前提契約。`gemm.rs`
+/// 該当ドキュメンテーションコメント参照）。
 fn measure_wmma_tf32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -> f64 {
     let mut rng = Xorshift64Star::new(SEED);
     let a: Vec<f32> = rng.fill_vec(size * size);
     let b: Vec<f32> = rng.fill_vec(size * size);
+    let (m, n, k) = (size as u32, size as u32, size as u32);
+
+    gemm.run_wmma_tf32(&a, &b, m, n, k)
+        .expect("wmma_tf32 probe must succeed on CUDA-equipped runner");
+
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&a, &b)
+        .expect("WMMA(TF32) upload must succeed on CUDA-equipped runner (probed above)");
+    let mut c_dev = gemm
+        .alloc_output_f32(m, n)
+        .expect("WMMA(TF32) output allocation must succeed on CUDA-equipped runner (probed above)");
 
     let measurement = bench_run(config, || {
-        let _ = gemm
-            .run_wmma_tf32(&a, &b, size as u32, size as u32, size as u32)
-            .expect("wmma_tf32 GEMM must succeed on CUDA-equipped runner");
+        gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+            .expect("WMMA(TF32) GEMM must succeed on CUDA-equipped runner (probed above)");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops(size, measurement.median_secs)

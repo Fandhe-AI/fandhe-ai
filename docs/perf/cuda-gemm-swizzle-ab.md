@@ -261,6 +261,15 @@ cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --
 cargo run -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics
 ```
 
+**計測境界（イシュー #776 で是正・#7.7 参照）**: `measure_wmma_tf32` は
+H2D/D2H 転送・出力バッファ確保を計測ループ外へ出し、GPU 実行（カーネル起動＋同期）
+のみを計測する（`cuda_floor_bench.rs::measure_wmma_tf32`・`gemm_mma_swizzle_bench.rs::
+measure_mma_f16` と同じ方針。base／head 双方に同一方針を適用するため
+apples-to-apples の比較になる）。#776 以前は高水準 API `run_wmma_tf32`（毎 iteration
+H2D×2＋`alloc_zeros`＋D2H を含む）を直接計測しており、M=N=K=4096 で計測が極端に
+不安定だった（§7.7 参照）。#776 以前の記録（本節 §7.6 も含む「未計測」時点の手順）と
+#776 以後の記録は計測境界が異なるため絶対値を比較しない。
+
 ### 7.4 判断基準
 
 - base に対し head（動的選択幅）の中央値 TFLOPS が size ∈ {2048, 4096} の両方で改善していれば「採用」とし、
@@ -289,6 +298,81 @@ main へマージされた後にこのチェックを実行すれば、`origin/m
 
 ### 7.6 実測結果
 
-（未計測。実機到達不可のためこのセッションでは計測していない。実機セッションで本節へ追記する。
-実機到達可能時は §7.3 の手順で bit 一致テスト → NVRTC ログ確認 → A/B 計測の順に実行し、結果を
-ここへ記録する）
+（未計測。実機到達不可のためこのセッションでは計測していない。イシュー #776 の
+2026-08-20 再計測・原因調査・是正の記録は §7.7 を参照。#776 是正後の実機再計測結果も
+判明次第 §7.7 へ追記する。実機到達可能時は §7.3 の手順で bit 一致テスト →
+NVRTC ログ確認 → A/B 計測の順に実行する）
+
+### 7.7 4096 計測異常の原因調査・是正（イシュー #776）
+
+イシュー #776 報告値（2026-08-20 DGX GB10 実機再計測。イシュー本文記載）によると、
+`gemm_wmma_tf32_swizzle_bench` の M=N=K=4096 計測が run 間で最大約 16 倍
+（base 生値 0.21〜3.08 TFLOPS）と極端に不安定だった。同イシュー本文は、同一カーネル
+（`wmma_tf32_staged`）の launch-only 計測である `cuda_floor_bench` の 4096 計測が
+約 9.0 TFLOPS で安定していたことも報告している。本節は本 PR（#776）セッションでの
+原因調査・是正の記録である。§7.4 の採用判定は是正後の実機再計測が揃うまで「未計測」の
+ままとする。
+
+#### 7.7.1 一次仮説（コード調査）
+
+是正前の `measure_wmma_tf32`（`gemm_wmma_tf32_swizzle_bench.rs`）は高水準 API
+`run_wmma_tf32`（`gemm.rs:1107` 以降）を計測クロージャへ直接渡していた。この API は
+ホスト側スライスを受け取り、**毎 iteration** H2D 転送×2（`clone_htod`）・出力バッファ
+確保（`alloc_zeros`。M=N=4096 で 64MB）・カーネル起動・同期・D2H 転送を行う。M=4096 では
+毎 iteration 約 192MB のデバイス確保・解放が計測区間に混入する。
+
+一方、`cuda_floor_bench.rs::measure_wmma_tf32`（`upload_f32`/`alloc_output_f32` を
+ループ外・`launch_wmma_tf32`〈launch+sync のみ〉を計測）・姉妹ベンチ
+`gemm_mma_swizzle_bench.rs::measure_mma_f16`（同型の低水準 API 方式）はいずれも
+毎 iteration のデバイス確保・解放を計測区間に含めない設計であり、上記イシュー報告の
+とおり 4096 でも安定している。
+
+**一次仮説**: GB10 の unified memory 構成（nvidia-smi の memory 表示が [N/A]）上で、
+毎 iteration の大容量デバイス確保・解放によるアロケータ・ページマッピングの状態依存
+揺らぎが計測値を支配していた。カーネル自体（`wmma_tf32_staged`）の性能特性ではなく、
+本ベンチの計測境界設計（H2D/D2H・確保/解放を計測区間に含めていたこと）が原因と判断した。
+本 PR セッションでは実機接続情報がなく上記仮説の実機検証（§7.7.3）は実施できていない。
+
+#### 7.7.2 是正内容
+
+`measure_wmma_tf32`（`gemm_wmma_tf32_swizzle_bench.rs`）を `cuda_floor_bench.rs`・
+`gemm_mma_swizzle_bench.rs` と同じ低水準 API 方式へ統一した:
+
+1. `run_wmma_tf32` を 1 回 probe 実行して可用性を確認する
+2. `upload_f32`/`alloc_output_f32` を計測ループ外で 1 回だけ実行する
+3. 計測クロージャは `launch_wmma_tf32`（GPU 実行＋synchronize のみ）に限定する
+
+swizzle 変種の計測は維持される: `new_with_tf32_staged_swizzle` は `wmma_tf32_staged`
+スロットを差し替え、`launch_wmma_tf32` は同スロットを最優先する 3 段選択のため、
+低水準 API 経由でも head 変種カーネルが起動される（A/A 誤認は起きない。本ベンチの
+形状は全て正方かつ `n % 4 == 0 && k % 4 == 0` を満たし staged 整列条件を満たす）。
+
+**本 PR（#776）で変更したのは `crates/backend-cuda/examples/gemm_wmma_tf32_swizzle_bench.rs`
+と本ドキュメントのみであり、本番カーネル・本番ディスパッチ経路
+（`kernels_wmma_opt.rs`・`gemm.rs` の 3 段選択・`ops.rs`／`gemm_auto.rs`／`swizzle.rs`）は
+1 バイトも変更していない**（§7.5 と同型の確認: `git diff origin/main --
+crates/backend-cuda/src/` が空であることをローカルで確認済み）。
+
+計測境界が変わるため、本節・§7.6 以前の記録（是正前の高水準 API 計測。実測値は
+本節へ記録されていないため直接比較対象なし）と #776 是正後の記録は絶対値を比較しない
+（§7.3 追記を参照）。
+
+#### 7.7.3 実機再計測
+
+**実機再計測待ち**: 本実装セッション（2026-08-21）は DGX Spark GB10 実機
+（`docs/real-hardware-verification-env.local.md`）への接続情報がローカルに存在せず、
+実機切り分け（§2.2 の 5 run 生値記録・`nvidia-smi dmon` 併走）・§7.4 の採用判定が
+実施できなかった。本セッションで完了したのはハーネス是正とローカル検証のみである:
+`cargo build -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release
+--features internal-diagnostics` でのビルド成立確認、実行して CUDA 非搭載環境での
+DriverUnavailable スキップ経路が正常動作することの確認、`cargo fmt --all -- --check`・
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`・
+`cargo test --workspace` の全 pass。実機到達可能なセッションで以下を実施し、
+本節へ追記する:
+
+1. 是正後ハーネスで 512/1024/2048/4096 の 5 run を実行し生値を記録する
+2. 4096 の 5 run 生値が中央値の ±10% 程度以内に収まることを確認する（収まらない場合は
+   追加要因〈クロックスロットリング・メモリ断片化等〉を切り分けて追記する）
+3. 512〜2048 の非後退確認（新境界の絶対値が旧値を下回らないこと・swizzle 比が旧計測と
+   矛盾しないことの両面）
+4. §7.4 の採用判定（2048・4096 両方の中央値 TFLOPS 改善の有無）を実施し結果を記録する
