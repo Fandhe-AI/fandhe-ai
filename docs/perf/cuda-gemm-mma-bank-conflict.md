@@ -74,6 +74,8 @@ SMEM 36,864B→41,472B の増加で SM あたり常駐ブロック数が変わ�
 3. パディング適用後もコンフリクトが有意に残存する場合のみ、CUTLASS 2 段 XOR の適用を検討する（索引演算が複雑になりコンパイル未検証環境では誤り検出不能なリスクが高いため、実測で残存が確認された場合のみ着手する）
 4. XOR swizzle を採用する場合は本ファイルへ適用案概要・実測結果を追記し、`kernels_mma.rs` 冒頭コメント「バンクコンフリクト対策」節を更新する
 
+**TF32 opt-staged 経路（`kernels_wmma_opt.rs::gemm_wmma_tf32_staged`）は本ファイルの対象外**であり、同経路のバンクコンフリクト解析・対策記録は `docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md`（イシュー #743）を参照する。両経路は共有メモリのアクセス API が異なる（本ファイルは raw `ldmatrix`/`mma.sync` 前提、TF32 staged 経路は `nvcuda::wmma::load_matrix_sync` 前提）ため XOR swizzle 採否判断も個別に行っている。
+
 ## 4. 実機計測手順（実機・CUDA driver + NVRTC 搭載・compute capability 8.0 以上）
 
 ```sh
