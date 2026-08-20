@@ -98,6 +98,26 @@ sysctl FFI 自体は `unsafe` を 1 箇所（`sysctlbyname` 呼び出し）に�
 常にリンクされる libSystem の C ABI 関数のため、`objc2` 系〈`cfg(target_os = "macos")` 限定の
 許容依存〉と同様に自前 `extern "C"` 宣言で足りる）。
 
+### §3.1 書き戻し長 4／8 バイト両対応（PR #773 レビュー対応）
+
+初版実装は `sysctlbyname` の書き戻し長が `size_of::<usize>()`（64-bit で 8 バイト）と完全
+一致しない場合を一律で読み取り失敗として扱っていた。しかし Darwin の
+`hw.perflevel0.l1dcachesize`／`l2cachesize` は `CTLTYPE_INT`（4 バイト）で提供されうる
+ノードであり（`man 3 sysctl` の型一覧）、該当する場合は検出が恒久的に
+[`super::default_blocks`](../../crates/backend-cpu/src/gemm_blis/cache_params.rs) へ
+フォールバックし、§5 の実機 A/B ハーネスが「既定 vs 既定」の自己比較になってしまう
+（Cursor Bugbot Medium 指摘・PR #773）。
+
+対応として `sysctl_ffi::read_usize` は 8 バイトのゼロ初期化バッファへ読み、書き戻し長が
+`4`（`CTLTYPE_INT`。`u32` として解釈し `usize` へ拡張）または `8`（`CTLTYPE_QUAD`。`u64`
+としてそのまま解釈）のいずれかのときのみ受理するよう是正した（`assemble_cache_value_le`。
+FFI から独立した純関数としてテスト可能）。それ以外の長さは従来どおり fail-closed で `None`
+（受け入れ条件 3）。Darwin/aarch64 はリトルエンディアンのため `from_le_bytes` で組み立てる。
+
+本対応も macOS 実機不可のため**型検査のみ**（`cargo check -p backend-cpu --tests --target
+aarch64-apple-darwin`）に留まり、実際に `hw.perflevel0.*cachesize` が `CTLTYPE_INT`／
+`CTLTYPE_QUAD` いずれで報告されるかの実測確認は §5 の実機計測時に併せて行う。
+
 ## §4 2 次元タイルジョブ分配: unsafe を使わない設計判断
 
 ### 検討した案（不採用）: gemm crate 方式の完全な 2D 分配

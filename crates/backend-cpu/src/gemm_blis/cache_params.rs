@@ -221,6 +221,44 @@ pub(crate) fn compute_blocks(
     Some(BlockSizes { mc, kc, nc })
 }
 
+/// `sysctlbyname` の書き戻し長 `len` と 8 バイトのゼロ初期化バッファ `buf`
+/// から `usize` を組み立てる純関数（FFI 呼び出し（[`sysctl_ffi::read_usize`]）
+/// から切り離し、`cfg(target_os = "macos")` に依存せず全プラットフォームで
+/// 単体テスト可能にしたもの。`compute_blocks` と同じ設計方針。`mod tests`
+/// 参照）。
+///
+/// レビュー指摘（Cursor Bugbot Medium・PR #773）: Darwin の
+/// `hw.perflevel0.*cachesize` 系 sysctl ノードは `CTLTYPE_INT`（`man 3
+/// sysctl` の型一覧。4 バイト）でありうるが、旧実装は書き戻し長が
+/// `size_of::<usize>()`（64-bit で 8 バイト、`CTLTYPE_QUAD` 相当）と完全
+/// 一致しないと失敗扱いにしていた。該当ノードが `CTLTYPE_INT` の実機
+/// （M4 実測。macOS 実機不可のため本 PR では型検査のみで実測は未確定）
+/// では検出が常に [`super::default_blocks`] へフォールバックし、実機 A/B
+/// ハーネス（`docs/perf/cpu-gemm-runtime-cache-detect.md` §3）が「既定 vs
+/// 既定」の自己比較になってしまう。
+///
+/// 本関数は書き戻し長が `4`（`CTLTYPE_INT` 相当。`u32` として解釈し
+/// `usize` へ拡張）または `8`（`CTLTYPE_QUAD` 相当。`u64` としてそのまま
+/// 解釈）のときのみ受理し、それ以外の長さは `compute_blocks` と同じ
+/// fail-closed 方針で `None` を返す。Darwin/aarch64（本モジュールが対象と
+/// する唯一の環境。`cfg(target_os = "macos")` はこのファイル内では
+/// aarch64-apple-darwin にのみ及ぶ）はリトルエンディアンのため
+/// `from_le_bytes` で組み立てて良い。`buf` は呼び出し元
+/// （[`sysctl_ffi::read_usize`]）でゼロ初期化してから渡す前提のため、
+/// 4 バイト書き戻し時に未使用の上位 4 バイトは `0` であることを利用しない
+/// （`4` の分岐で明示的に先頭 4 バイトのみを読む）。
+fn assemble_cache_value_le(buf: [u8; 8], len: usize) -> Option<usize> {
+    match len {
+        4 => {
+            let mut b4 = [0u8; 4];
+            b4.copy_from_slice(&buf[..4]);
+            Some(u32::from_le_bytes(b4) as usize)
+        }
+        8 => Some(u64::from_le_bytes(buf) as usize),
+        _ => None,
+    }
+}
+
 /// `sysctlbyname`（macOS/BSD 系 libSystem が提供する標準 API）による
 /// L1D／L2 実測値の読み取り（`cfg(target_os = "macos")` 限定）。
 ///
@@ -258,35 +296,50 @@ mod sysctl_ffi {
     }
 
     /// 指定した sysctl 名の `usize` 値を読む。取得失敗（戻り値 != 0）・
-    /// 長さ不一致・値 0 は `None`（外部入力の検証。OWASP A03・
-    /// `.claude/rules/security.md`）。
+    /// 書き戻し長が 4／8 バイトいずれでもない・値 0 は `None`（外部入力の
+    /// 検証。OWASP A03・`.claude/rules/security.md`）。
+    ///
+    /// レビュー指摘（Cursor Bugbot Medium・PR #773）: `hw.perflevel0.*
+    /// cachesize` 系 sysctl ノードは `CTLTYPE_INT`（4 バイト）でありうるため、
+    /// 従来の「書き戻し長が `size_of::<usize>()`（8 バイト）と完全一致」
+    /// 検査は該当ノードで常に失敗し検出が恒久的にフォールバックしていた。
+    /// 8 バイトのゼロ初期化バッファへ読み、書き戻し長 4／8 双方を
+    /// [`super::assemble_cache_value_le`]（FFI から独立した純関数。単体
+    /// テスト対象）で解釈する。
     pub(super) fn read_usize(name: &str) -> Option<usize> {
         // `sysctlbyname` は NUL 終端 C 文字列を要求する契約
         // （`man 3 sysctlbyname`）。`name` に埋め込み NUL が含まれる
         // 呼び出しは本モジュール内の固定文字列のみのため到達しないが、
         // `CString::new` は防御的に検査してから変換する。
         let cname = CString::new(name).ok()?;
-        let mut value: usize = 0;
-        let mut len = size_of::<usize>();
+        let mut buf = [0u8; 8];
+        let mut len = buf.len();
         // SAFETY: `cname` はこの呼び出しの生存期間中有効な NUL 終端 C
-        // 文字列。`oldp` は `size_of::<usize>()` ちょうどの有効な書き込み
-        // 先（ローカル変数 `value` のアドレス）で、`oldlenp` にその長さを
+        // 文字列。`oldp` は `buf.len()`（8 バイト）ちょうどの有効な書き込み
+        // 先（ローカル配列 `buf` の先頭アドレス）で、`oldlenp` にその長さを
         // 渡す（`sysctlbyname` の「呼び出し前に `*oldlenp` へバッファ長を
-        // 設定する」契約）。`newp` は null・`newlen` は 0 とし「値を変更
-        // しない読み取り専用呼び出し」の契約を満たす。戻り値・書き戻された
-        // `len` は呼び出し直後に検査する。FFI 境界の `unsafe` はこの 1
-        // 箇所に限定する（`.claude/rules/coding-rust.md`「`unsafe` は FFI
-        // 境界等の必要最小限に留め、理由をコメントで明記」）。
+        // 設定する」契約）。ノードが `CTLTYPE_INT`（4 バイト）でも
+        // `CTLTYPE_QUAD`（8 バイト）でも `oldp` の書き込み先は 8 バイト
+        // 分確保済みのため書き込み超過は起こらない。`newp` は null・
+        // `newlen` は 0 とし「値を変更しない読み取り専用呼び出し」の契約を
+        // 満たす。戻り値・書き戻された `len` は呼び出し直後に検査する。
+        // FFI 境界の `unsafe` はこの 1 箇所に限定する
+        // （`.claude/rules/coding-rust.md`「`unsafe` は FFI 境界等の必要
+        // 最小限に留め、理由をコメントで明記」）。
         let ret = unsafe {
             sysctlbyname(
                 cname.as_ptr(),
-                &mut value as *mut usize as *mut c_void,
+                buf.as_mut_ptr() as *mut c_void,
                 &mut len,
                 std::ptr::null_mut(),
                 0,
             )
         };
-        if ret != 0 || len != size_of::<usize>() || value == 0 {
+        if ret != 0 {
+            return None;
+        }
+        let value = super::assemble_cache_value_le(buf, len)?;
+        if value == 0 {
             return None;
         }
         Some(value)
@@ -463,5 +516,36 @@ mod tests {
     fn detected_blocks_returns_valid_block_sizes_on_any_platform() {
         let blocks = detected_blocks(8, 12);
         assert!(blocks.mc > 0 && blocks.kc > 0 && blocks.nc > 0);
+    }
+
+    /// レビュー指摘（Cursor Bugbot Medium・PR #773）の回帰テスト:
+    /// `hw.perflevel0.*cachesize` 系ノードが `CTLTYPE_INT`（4 バイト）で
+    /// 書き戻された場合でも正しく解釈できることを FFI を経由せず検証する。
+    #[test]
+    fn assemble_cache_value_le_accepts_4_byte_ctltype_int() {
+        // 192 * 1024 = 196608 (0x00030000) を 4 バイト・リトルエンディアンで格納。
+        let mut buf = [0u8; 8];
+        buf[..4].copy_from_slice(&192u32.wrapping_mul(1024).to_le_bytes());
+        assert_eq!(assemble_cache_value_le(buf, 4), Some(192 * 1024));
+    }
+
+    /// 8 バイト（`CTLTYPE_QUAD` 相当）の書き戻しは従来どおり受理する。
+    #[test]
+    fn assemble_cache_value_le_accepts_8_byte_ctltype_quad() {
+        let value: usize = 16 * 1024 * 1024;
+        let buf = (value as u64).to_le_bytes();
+        assert_eq!(assemble_cache_value_le(buf, 8), Some(value));
+    }
+
+    /// 4／8 以外の書き戻し長は fail-closed で `None`（`compute_blocks` と
+    /// 同じ方針。異常値をそのまま数値として解釈しない）。
+    #[test]
+    fn assemble_cache_value_le_rejects_other_lengths() {
+        let buf = [0u8; 8];
+        assert!(assemble_cache_value_le(buf, 0).is_none());
+        assert!(assemble_cache_value_le(buf, 1).is_none());
+        assert!(assemble_cache_value_le(buf, 3).is_none());
+        assert!(assemble_cache_value_le(buf, 5).is_none());
+        assert!(assemble_cache_value_le(buf, 7).is_none());
     }
 }
