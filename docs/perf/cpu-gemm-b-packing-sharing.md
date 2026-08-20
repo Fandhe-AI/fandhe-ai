@@ -87,14 +87,19 @@ num_threads(1)` で強制し `gemm_naive` と bit 完全一致することを確
   ほか。num_threads = 1/3/16 を横断し bit 完全一致を検証）・`tests/gemm_epilogue_parity.rs` は
   無変更で全 pass（`cargo test -p backend-cpu` 実測。141 lib 単体テスト・17 gemm_blis_parity・
   14 gemm_epilogue_parity すべて green）
-- 新設した単体テスト（`crates/backend-cpu/src/gemm_blis/mod.rs`。`#[cfg(test)]` 限定の
-  `gemm_blis_parallel_with_blocks` 経由で共有経路を検証）:
-  - `gemm_blis_parallel_single_thread_pool_matches_naive_bit_exact`（受け入れ条件 3 の直接検証）
-  - `gemm_blis_shared_b_region_multi_sync_point_matches_serial_bit_exact`（小さい
-    `BlockSizes`〈mc=16/kc=17/nc=19〉で多数の (jc,pc) 同期点を強制し、B パネル共有経路が
-    直列経路と bit 完全一致することを検証）
-  - `gemm_blis_parallel_matches_naive_bit_exact_when_tasks_fewer_than_threads`（実タスク数
-    Q が rayon 稼働スレッド数 T を下回る形状〈m=10・num_threads=16〉の回帰）
+- 新設した単体テスト（`crates/backend-cpu/src/gemm_blis/mod.rs`）:
+  - `gemm_blis_parallel_single_thread_pool_matches_naive_bit_exact`（受け入れ条件 3 の直接検証。
+    本番公開入口 `gemm_blis_parallel` を直接呼ぶ。T=1 では共有経路を経由しないため本番経路の
+    検証で十分）
+  - `gemm_blis_shared_b_region_multi_sync_point_matches_serial_bit_exact`（`#[cfg(test)]` 限定の
+    テスト専用入口 `gemm_blis_parallel_with_blocks` 経由。小さい `BlockSizes`〈mc=16/kc=17/
+    nc=19〉で多数の (jc,pc) 同期点を強制し、B パネル共有経路が直列経路と bit 完全一致すること
+    を検証）
+  - `gemm_blis_parallel_matches_naive_bit_exact_when_tasks_fewer_than_threads`（`#[cfg(test)]`
+    限定の `gemm_blis_parallel_with_blocks` 経由。実タスク数 Q が rayon 稼働スレッド数 T を
+    下回る形状〈m=10・num_threads=16〉での `gemm_blis_shared_b_region` の `num_tasks` 導出回帰。
+    本番公開入口 `gemm_blis_parallel` は共有経路を採用しないため、共有経路自体の回帰検証には
+    テスト専用入口を経由する必要がある〈Cursor Bugbot 指摘・commit f27f233 是正〉）
 - 新設した統合テスト（`crates/backend-cpu/tests/gemm_epilogue_parity.rs`）:
   - `gemm_bias_act_matches_composed_reference_bit_exact_across_thread_pools`（num_threads =
     1/2/3/16 を横断し、epilogue が GEMM 本体完了後にちょうど 1 回だけ適用されることを

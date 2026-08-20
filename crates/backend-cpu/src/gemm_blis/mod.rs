@@ -1453,6 +1453,15 @@ mod tests {
     /// （`gemm_blis_shared_b_region` の `num_tasks = mc_total.div_ceil(
     /// panel_rows)` が実際のタスク数を正しく導出し、`a_bufs`／
     /// `c.par_chunks_mut` の長さがずれないことの回帰）。
+    ///
+    /// 本番公開入口 `gemm_blis_parallel` は B パネル共有経路
+    /// （`dispatch_shared_b`）を採用しない（本ファイル冒頭
+    /// `gemm_blis_parallel` 実装コメント参照。#750・codex-review P1 是正）
+    /// ため、`gemm_blis_shared_b_region` の Q<T 回帰を実際に検証するには
+    /// `#[cfg(test)]` 限定のテスト専用入口 [`gemm_blis_parallel_with_blocks`]
+    /// を経由する必要がある（Cursor Bugbot 指摘・commit f27f233 是正: 本
+    /// テストが `gemm_blis_parallel` を直接呼ぶと共有経路を一切経由せず
+    /// 回帰検証が失効する）。
     #[test]
     fn gemm_blis_parallel_matches_naive_bit_exact_when_tasks_fewer_than_threads() {
         let (m, n, k) = (10, 130, 40);
@@ -1468,7 +1477,10 @@ mod tests {
             .unwrap_or_else(|e| panic!("16 スレッドの rayon プール構築に失敗: {e}"));
 
         let mut c_parallel = vec![0.0f32; m * n];
-        pool.install(|| gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+        pool.install(|| {
+            gemm_blis_parallel_with_blocks(&a, &b, &mut c_parallel, m, n, k, default_blocks())
+                .unwrap()
+        });
 
         assert_eq!(
             c_naive, c_parallel,
