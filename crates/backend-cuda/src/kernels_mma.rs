@@ -1768,15 +1768,19 @@ extern "C" __global__ void gemm_mma_f16(
 /// [`mma_f16_source`] のアンカー 2 行（`block_row0`/`block_col0` のブロック
 /// 原点計算）を、`swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
 /// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
-/// 生成する（イシュー #499 受け入れ基準 1〜2 項の opt-in 経路）。
+/// 生成する（イシュー #499 受け入れ基準 1〜2 項。イシュー #740 で一時
+/// 本番既定コンストラクタへ結線したが、PR #758 レビュー指摘により
+/// 差し戻し済み。下記「イシュー #740」節参照）。
 ///
 /// **`mma_f16_source()`（既定 config の render 結果。イシュー #516 で
 /// `MMA_F16` 定数からテンプレート展開へ移行済み）自体は変更しない**
 /// （`replacen` で新規 `String` を都度構築するのみ）。呼び出し元は
-/// `gemm_mma.rs::CudaMmaGemm::
-/// new_with_swizzle` のみであり、本番ディスパッチ経路（`ops.rs`／
-/// `gemm_auto.rs`）からは到達しない（本ファイルクレートルート
-/// `lib.rs` 冒頭コメント「#499」節参照）。
+/// `gemm_mma.rs::CudaMmaGemm::new_with_swizzle`（`internal-diagnostics`
+/// feature 限定・診断用・明示幅指定）のみであり、`new`（本番既定）は
+/// イシュー #740 の一時結線を PR #758 レビュー指摘により差し戻し済み
+/// のため呼び出し元ではない（下記「イシュー #740」節参照）。`ops.rs`／
+/// `gemm_auto.rs` は mma_f16 経路自体を参照しないため無変更のまま
+/// （本ファイルクレートルート `lib.rs` 冒頭コメント「#740」節参照）。
 ///
 /// # remap の整数式（`swizzle.rs::swizzled_block_idx` と単一の設計を共有）
 ///
@@ -1799,14 +1803,14 @@ extern "C" __global__ void gemm_mma_f16(
 /// select_swizzle_group_width` の候補 `{8, 16}` 以外の値も受理するが
 /// `1` 未満・`1` そのものは拒否する）。
 ///
-/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
-/// feature 既定 off）からの唯一の呼び出し元 `gemm_mma.rs::
-/// CudaMmaGemm::new_with_swizzle` が同 feature でゲートされたため
-/// （PR #667 codex-review P1 是正）、`cargo build`（feature 指定なし）では
-/// 呼び出し元が存在せず dead-code lint が誤検出する。本関数自体は
-/// `#[cfg(test)]` 下のソース生成検査テスト（本ファイル末尾）からは feature
-/// 非依存に呼ばれ続ける（`swizzle.rs::GROUP_WIDTH_CANDIDATES` と同じ
-/// 判断パターン）。
+/// イシュー #740 で `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ。
+/// feature 非依存）へ一時結線したため通常ビルドでも到達可能だったが、
+/// PR #758 レビュー指摘により `new` は base カーネルへ差し戻し済み
+/// （`gemm_mma.rs::CudaMmaGemm::new` ドキュメンテーションコメント参照）。
+/// 呼び出し元は `internal-diagnostics` feature 限定の `new_with_swizzle`
+/// （診断用・明示幅指定）のみに戻ったため、通常ビルド（feature 指定なし）
+/// では再び到達不能になり `#[allow(dead_code)]` が必要（`render_mma_f16`
+/// と同型の理由。旧 #499 セッション時点の判断も同じ）。
 #[allow(dead_code)]
 pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
     if group_width < 2 {
