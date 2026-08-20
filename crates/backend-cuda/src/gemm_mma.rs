@@ -948,6 +948,42 @@ mod tests {
         }
     }
 
+    /// PR #758 是正時に確立した安全網の直接検査を復元する（レビュー
+    /// 是正・イシュー #775）: 本番既定コンストラクタ [`CudaMmaGemm::new`]
+    /// 自体は実機検証未了のため swizzle 変種を一切コンパイルせず、
+    /// `swizzle_group_width()` は常に `None` を返す契約（`new` doc comment
+    /// 「実機未検証結線を避ける安全側フォールバック」参照）。swizzle は
+    /// ビット一致のため出力からは再結線を検知できない
+    /// （`mma_f16_swizzle_variant_matches_base_bit_exact_output` doc comment
+    /// 参照）ので、`new` の内部実装が誤って
+    /// `new_with_size_conditional_swizzle` 相当（またはそれ以外の swizzle
+    /// 適用経路）へ再結線された場合に検知できる唯一の手段は
+    /// `swizzle_group_width()` を直接 assert することである。この直接
+    /// assert が `new_with_size_conditional_swizzle` 側の契約検査
+    /// （直後のテスト）へ差し替えられ、`new` 自身に対する検査がテストから
+    /// 消えていた（Review 指摘）ため復元する。`internal-diagnostics`
+    /// feature 非依存（`new`・`swizzle_group_width` はどちらも常時
+    /// 公開 API）で成立するテストのため feature ゲートしない。
+    ///
+    /// `#[ignore]`: `CudaDevice::new` が CUDA 実機を要求するため
+    /// （本ファイル冒頭コメント「検証状態」）。DGX Spark GB10 等の実機で
+    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する。
+    #[test]
+    #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
+    fn mma_f16_new_never_wires_swizzle_into_production_constructor() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let production = CudaMmaGemm::new(&device)
+            .expect("CudaMmaGemm::new must succeed on ignored test runner");
+        assert_eq!(
+            production.swizzle_group_width(),
+            None,
+            "CudaMmaGemm::new（本番既定コンストラクタ）は実機検証未了のため \
+             swizzle_group_width() は常に None のはずです（誤って swizzle 変種へ \
+             再結線されていないか確認すること。イシュー #775 レビュー是正）"
+        );
+    }
+
     /// #499/#775 受け入れ基準（実機検証）: [`CudaMmaGemm::new_with_swizzle`]
     /// が生成する各 `group_width` の変種が、swizzle 無適用の
     /// [`CudaMmaGemm::new_without_swizzle`]（base）と**ビット一致**の
@@ -1003,27 +1039,70 @@ mod tests {
             "CudaMmaGemm::new_with_size_conditional_swizzle must succeed on ignored test runner",
         );
 
-        // `new_with_size_conditional_swizzle` の契約: `swizzle_group_width()`
-        // は `device.multiprocessor_count()` が実測に成功すれば動的選択幅
-        // `Some(_)`（`crate::swizzle::select_swizzle_group_width` と同一
-        // 計算）、失敗すれば安全側フォールバックで `None`（構造体
-        // ドキュメンテーションコメント「mma_f16_swizzle」参照）。実測値の
-        // 有無に依存せずどちらの分岐でも検証可能なようにこの契約自体を
-        // ピン留めする。
-        let expected_group_width = device.multiprocessor_count().map(|num_sms| {
-            crate::swizzle::select_swizzle_group_width(
-                num_sms,
-                kernels_mma::MMA_BM,
-                kernels_mma::MMA_BN,
-            )
-        });
-        assert_eq!(
+        // `new_with_size_conditional_swizzle` の fail-soft 3 分岐（3255823
+        // で導入。レビュー是正・イシュー #775）を、`swizzle_unavailable_
+        // reason()`（doc comment「テストから参照できるようにする」の唯一の
+        // 参照元）を使って明示的にピン留めする:
+        //   (a) SM 数取得失敗                       → group_width=None・reason=None
+        //   (b) SM 数取得成功 かつ 変種コンパイル成功 → group_width=Some(_)・reason=None
+        //   (c) SM 数取得成功 かつ 変種コンパイル失敗 → group_width=None・reason=Some(_)
+        // 旧テストは (a)/(b) のみを想定し
+        // `production.swizzle_group_width() == expected_group_width`
+        // （`expected_group_width` はコンパイル成否を考慮しない
+        // `select_swizzle_group_width` の純計算）を assert していたため、
+        // 実機で (c) が起きた場合に誤って失敗する契約になっていた
+        // （Review 指摘）。
+        let expected_group_width_if_compile_succeeds =
+            device.multiprocessor_count().map(|num_sms| {
+                crate::swizzle::select_swizzle_group_width(
+                    num_sms,
+                    kernels_mma::MMA_BM,
+                    kernels_mma::MMA_BN,
+                )
+            });
+        match (
+            device.multiprocessor_count(),
             production.swizzle_group_width(),
-            expected_group_width,
-            "CudaMmaGemm::new_with_size_conditional_swizzle の swizzle_group_width が \
-             期待契約と一致しません（device.multiprocessor_count() 実測成功時は \
-             動的選択幅 Some(_)・失敗時は安全側 None）"
-        );
+            production.swizzle_unavailable_reason(),
+        ) {
+            (None, actual_group_width, reason) => {
+                // 分岐 (a)
+                assert_eq!(
+                    actual_group_width, None,
+                    "分岐 (a)（SM 数取得失敗）では swizzle_group_width は None のはずです"
+                );
+                assert_eq!(
+                    reason, None,
+                    "分岐 (a)（SM 数取得失敗）では swizzle_unavailable_reason は None の \
+                     はずです（コンパイル自体を試みていないため）"
+                );
+            }
+            (Some(_), Some(actual_group_width), reason) => {
+                // 分岐 (b)
+                assert_eq!(
+                    Some(actual_group_width),
+                    expected_group_width_if_compile_succeeds,
+                    "分岐 (b)（SM 数取得成功・コンパイル成功）では swizzle_group_width が \
+                     select_swizzle_group_width の動的選択幅と一致するはずです"
+                );
+                assert_eq!(
+                    reason, None,
+                    "分岐 (b)（コンパイル成功）では swizzle_unavailable_reason は None の \
+                     はずです"
+                );
+            }
+            (Some(_), None, reason) => {
+                // 分岐 (c): 実機の NVRTC 状態次第で発生しうる縮退。
+                // fail-soft 契約どおり Err へ波及していないこと・理由が
+                // 記録されていることのみを検査する（コンパイル失敗の
+                // 発生自体を本テストで強制はできないため）。
+                assert!(
+                    reason.is_some(),
+                    "分岐 (c)（SM 数取得成功・コンパイル失敗）では \
+                     swizzle_unavailable_reason に失敗理由が記録されているはずです"
+                );
+            }
+        }
 
         let num_sms = device.multiprocessor_count().unwrap_or(1).max(1);
         let dynamic_group_width = crate::swizzle::select_swizzle_group_width(
@@ -1125,10 +1204,11 @@ mod tests {
         // num_m_blocks=4096.div_ceil(MMA_BM=64)=64・
         // num_n_blocks=4096.div_ceil(MMA_BN=128)=32 → 総タイル数
         // 64*32=2048（`SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` ちょうど）。
-        // `device.multiprocessor_count()` が実測に成功した場合のみ
-        // `mma_f16_swizzle` が `Some` となり本チェックが意味を持つため、
-        // 失敗時（`expected_group_width.is_none()`）はスキップする。
-        if expected_group_width.is_some() {
+        // `production.swizzle_group_width()` が `Some`（fail-soft 分岐
+        // (b)：SM 数取得成功・変種コンパイル成功）の場合のみ
+        // `mma_f16_swizzle` が使用可能で本チェックが意味を持つため、
+        // それ以外（分岐 (a)/(c)）はスキップする。
+        if production.swizzle_group_width().is_some() {
             let (m, n, k) = (4096u32, 4096u32, 32u32);
             assert!(
                 production.swizzle_applies(m, n),
