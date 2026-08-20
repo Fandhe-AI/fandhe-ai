@@ -607,6 +607,61 @@ impl Microkernel for Neon12x8Kernel {
     }
 }
 
+/// aarch64 NEON B 側レーン参照 FMA 変種トークン（イシュー #748）。
+/// [`neon::kernel_b_laneq_with_ldc`] へ委譲する。MR/NR は [`NeonKernel`]
+/// （既定 8×12）と同一だが、`vfmaq_laneq_f32` のレーン参照オペランドを
+/// B 側に割り当てアキュムレータを列優先で保持する点が異なる
+/// （[`neon`] モジュール冒頭 #748 節参照）。[`Neon12x8Kernel`] で判明した
+/// A/B 公平性問題（ヒープ確保の非対称。同トークンのドキュメント参照）を
+/// 避けるため、当初から strided 直接ロード/ストア経路
+/// （[`neon::kernel_b_laneq_with_ldc`]）を `run_with_ldc` で直接呼び、
+/// デフォルト実装（ヒープ確保するギャザー/スキャッタ）に頼らない。
+/// `super::dispatch_region` の既定駆動経路には接続せず、`gemm_blis::mod`
+/// の `#[cfg(test)]` A/B 計測テスト専用（#748 実装計画。実機での bit
+/// 一致・非劣化確認後に既定接続を判断する fail-closed 方針）。
+///
+/// ## `#[cfg(test)]` 限定（PR #765 codex-review P1 対応）
+///
+/// 上記のとおり本トークンは `gemm_blis::mod` の `#[cfg(test)]` テストからのみ
+/// 使われ、本番駆動経路（`Isa::detect` 経由の実行時 dispatch）には一切
+/// 接続されない。にもかかわらず型・`impl`（および委譲先の
+/// [`neon::kernel_b_laneq`]）が本番ビルドへコンパイルされていると、
+/// `run` が `assert!`/`assert_eq!` で `panic!` する経路を本番コードが
+/// 抱える形になり「本番経路の panic 禁止」規約
+/// （`.claude/rules/coding-rust.md`・AGENTS.md）の対象として誤認・誤用
+/// されうる。テスト専用の性質をコンパイル単位でも保証するため
+/// `#[cfg(test)]` を追加する。本番で当該変種を使う場合は
+/// [`neon::kernel_b_laneq_with_ldc`]（`Result` を返す境界検査版）を
+/// 直接呼ぶ設計へ変更すること（`assert!` 版へ戻さない）。
+#[cfg(all(target_arch = "aarch64", test))]
+#[derive(Clone, Copy)]
+pub struct NeonBLaneqKernel;
+
+#[cfg(all(target_arch = "aarch64", test))]
+impl Microkernel for NeonBLaneqKernel {
+    const MR: usize = neon::MR;
+    const NR: usize = neon::NR;
+
+    fn run(&self, ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
+        // [`ScalarKernel::run`] のドキュメント参照（`Result` を `panic!`
+        // へ変換する経路を持たず、`assert!` 検査版の
+        // [`neon::kernel_b_laneq`] へ直接委譲する）。両者とも
+        // `#[cfg(test)]` 限定（本コメント冒頭参照）。
+        neon::kernel_b_laneq(ap, bp, c_tile, kc_len);
+    }
+
+    fn run_with_ldc(
+        &self,
+        ap: &[f32],
+        bp: &[f32],
+        c: &mut [f32],
+        ldc: usize,
+        kc_len: usize,
+    ) -> Result<(), TileBoundsError> {
+        neon::kernel_b_laneq_with_ldc(ap, bp, c, ldc, kc_len)
+    }
+}
+
 /// x86_64 AVX2+FMA トークン。[`Avx2Kernel::try_new`] 経由でのみ構築でき、
 /// これが実行 CPU の AVX2+FMA 対応を保証する（[`Microkernel::run`] 内部の
 /// `unsafe { avx2::kernel_unchecked(...) }` の SAFETY 根拠）。
