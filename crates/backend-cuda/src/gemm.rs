@@ -786,7 +786,6 @@ impl CudaGemm {
         Ok(gemm)
     }
 
-    /// naive f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     /// `device` 上で、`wmma_tf32_staged` の SMEM パディング幅（`a_pad`/
     /// `b_pad`）のみを差し替えた変種を NVRTC コンパイルし保持するハンドルを
     /// 構築する（イシュー #743・`kernels_wmma_opt::
@@ -802,11 +801,12 @@ impl CudaGemm {
     /// 経由する `validate_wmma_tf32_staged_config` に委譲する。
     ///
     /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
-    /// （swizzle 版と同じ feature ゲート方針）。
-    /// `examples/gemm_wmma_tf32_staged_pad_bench.rs`（`Cargo.toml` の
-    /// `required-features` で同 feature を要求）専用の入口であり、実機
-    /// A/B 計測後に採用確定した段階で `WMMA_TF32_STAGED_B_PAD`（本番既定値）
-    /// を書き換える判断へつなげる（`docs/perf/
+    /// （swizzle 版と同じ feature ゲート方針）。唯一の呼び出し元は
+    /// `gemm.rs` 内の `#[ignore]` 付き bit 一致テスト（本ファイル下部
+    /// 参照）であり、ncu 計測経路は `gemm_profile_target --b-pad`
+    /// （`diagnostics::render_wmma_tf32_staged` 経由。本関数は不使用）。
+    /// 実機 A/B 計測後に採用確定した段階で `WMMA_TF32_STAGED_B_PAD`
+    /// （本番既定値）を書き換える判断へつなげる（`docs/perf/
     /// cuda-gemm-wmma-tf32-staged-bank-conflict.md` 参照）。
     #[cfg(feature = "internal-diagnostics")]
     pub fn new_with_tf32_staged_pads(
@@ -829,6 +829,7 @@ impl CudaGemm {
         Ok(gemm)
     }
 
+    /// naive f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     ///
     /// ホスト側形状検証（[`validate_gemm_dims`]）を先行させた後、
     /// 16x16 ブロック・`div_ceil` グリッドで [`Self::run_f32_kernel`] を呼ぶ
