@@ -179,6 +179,61 @@ fn gemm_bias_act_large_n_matches_composed_reference_bit_exact() {
     );
 }
 
+/// イシュー #750（B パネル packing のスレッド間共有化・案 B）の回帰:
+/// `gemm_blis_bias_act_parallel` は GEMM 本体を計算した後、epilogue を
+/// `c` 全体へちょうど 1 回だけ適用する設計（`src/gemm_blis/mod.rs` の
+/// 実装コメント参照）。本テストは MC/KC/NC 境界を跨ぐ形状・複数のスレッド
+/// 数（1／2／3／16）を横断し、非融合合成参照（bias 加算 1 回・Relu 1 回）
+/// と bit 完全一致することを確認する（epilogue が並列パネル分割数の増減に
+/// 応じて重複適用・未適用にならないことの直接検証）。
+///
+/// **B パネル共有経路（`dispatch_shared_b`）は本番未結線（codex-review P2
+/// 指摘・commit f27f233 是正）**: `gemm_blis_bias_act_parallel`（本番公開
+/// 入口）はスレッド数に関わらず常に従来の `dispatch_region` 経路を使う
+/// （`docs/perf/cpu-gemm-b-packing-sharing.md` 参照）ため、本テストが
+/// 検証するのは従来経路と epilogue の組み合わせのみである。共有 B 経路
+/// と epilogue の組み合わせは `gemm_blis_shared_b_region`（`#[cfg(test)]`
+/// 限定）が epilogue を持たないため現状カバーされておらず、将来共有経路
+/// を本番採用する別 PR（本ファイル `src/gemm_blis/mod.rs` の採用ゲート
+/// 記述参照）でテスト専用の epilogue 付き共有経路入口を追加検証する。
+#[test]
+fn gemm_bias_act_matches_composed_reference_bit_exact_across_thread_pools() {
+    let (m, n, k) = (257, 600, 700);
+    let a = random_matrix(0x7777_8888, m * k);
+    let b = random_matrix(0x9999_aaaa, k * n);
+    let bias = random_matrix(0xbbbb_cccc, n);
+
+    let c_ref = compose_reference(&a, &b, m, n, k, Some(&bias), Activation::Relu);
+
+    for num_threads in [1usize, 2, 3, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(num_threads)
+            .build()
+            .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_fused = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_bias_act_parallel(
+                &a,
+                &b,
+                &mut c_fused,
+                m,
+                n,
+                k,
+                Some(&bias),
+                Activation::Relu,
+            )
+            .unwrap()
+        });
+
+        assert_eq!(
+            c_fused, c_ref,
+            "gemm_blis_bias_act_parallel（num_threads={num_threads}）は非融合合成参照と \
+             bit 完全一致するはず（epilogue の重複適用・未適用の回帰。#750）"
+        );
+    }
+}
+
 // --- 4. エッジケース ---
 
 #[test]

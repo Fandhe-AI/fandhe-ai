@@ -257,6 +257,19 @@ pub fn gemm_blis_parallel(
     // 呼び出しごとの再計算を避ける従来方針を踏襲する）。
     let blocks = default_blocks();
 
+    // B パネル共有経路（`dispatch_shared_b`。案 B・イシュー #750）は
+    // 本番既定へは**採用しない**（`docs/cpu-gemm-b-packing-sharing.md`・
+    // `docs/cpu-gemm-b-packing-sharing-decision.md` 参照）。受け入れ条件 2
+    // （Apple M4 Max 実機実測での M=N=K=2048/4096 非劣化確認）を満たす
+    // 前提条件が未充足のため、実装・bit 完全一致検証・単体/統合テスト
+    // （`dispatch_shared_b`／`gemm_blis_shared_b_region`／
+    // `gemm_blis_ic_loop`・`#[cfg(test)]` の
+    // [`gemm_blis_parallel_with_blocks`] 経由）は残しつつ、本番公開入口
+    // からの呼び出しは行わない（PR #758〈#740 mma_f16 swizzle〉の
+    // 「実装は入れるが実機ゲート未通過のうちは本番結線しない」判断と
+    // 同型。実機実測とユーザー承認を経た別 PR でのみ既定切替を検討する）。
+    // 従来どおり行パネルごとに [`dispatch_region`] を独立呼び出しする
+    // （B packing はタスクごとに個別実行＝共有化前の挙動）。
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
@@ -338,6 +351,17 @@ pub fn gemm_blis_bias_act_parallel(
     // キャプチャして渡す（`gemm_blis_parallel` と同じ理由）。
     let blocks = default_blocks();
 
+    // GEMM 本体は `gemm_blis_parallel` と同じ理由で B パネル共有経路
+    // （`dispatch_shared_b`）を本番既定へ採用しない（上記
+    // `gemm_blis_parallel` 実装コメント参照。イシュー #750・実機ゲート
+    // 未通過）。従来どおり行パネルごとに `dispatch_region` を独立呼び出し
+    // する。epilogue（bias 加算・activation）は要素ごとに独立な演算で
+    // パネル分割順序に依存しないため（本関数冒頭のドキュメンテーション
+    // コメント「bit 完全一致契約」参照）、GEMM 本体の完了後に `c` 全体へ
+    // 1 回だけ適用する（設計 doc §C 案 B の選択肢 (a)。
+    // `par_chunks_mut(panel_rows * n)` で行パネル並列に適用することで、
+    // T=1（`panel_rows == m` で単一チャンク）では従来と同一の 1 パスに
+    // なる）。
     c.par_chunks_mut(panel_rows * n)
         .enumerate()
         .try_for_each(|(panel_idx, c_chunk)| {
@@ -541,7 +565,6 @@ fn gemm_blis_region<K: Microkernel>(
     bufs: &mut PanelBuffers,
     blocks: BlockSizes,
 ) -> Result<(), GemmError> {
-    let mr = K::MR;
     let nr = K::NR;
     let row_start = rows.start;
     let mc_total = rows.end - rows.start;
@@ -561,7 +584,9 @@ fn gemm_blis_region<K: Microkernel>(
             // packing 方式に合わせ二段コピーを廃止）。バッファ自体は
             // `bufs.b_panel`（呼び出し元 `dispatch_region` が 1 回確保
             // 済み）の先頭サブスライスを再借用する（#556。ループ内での
-            // `vec![...]` 確保をゼロにする）。
+            // `vec![...]` 確保をゼロにする）。直列経路（本関数）は単一
+            // タスクのみが呼ぶため、B packing はここでは並列化しない
+            // （並列化版は [`gemm_blis_shared_b_region`] 側。#750）。
             let nr_blocks = nc_len.div_ceil(nr);
             let b_panel = &mut bufs.b_panel[..nr_blocks * kc_len * nr];
             for jr_block in 0..nr_blocks {
@@ -581,125 +606,396 @@ fn gemm_blis_region<K: Microkernel>(
                 );
             }
 
-            let mut ic = 0;
-            while ic < mc_total {
-                let mc_len = blocks.mc.min(mc_total - ic);
-
-                // A パネル packing: mc_len を MR 単位のブロックに分割
-                // （jr ループ全体で使い回すため ic ブロックごとに 1 回のみ）。
-                // pack_a が panel サブスライスへ直接書き込むため中間 Vec
-                // 確保・copy_from_slice は発生しない（#554。B packing と
-                // 同じ理由）。バッファ自体は `bufs.a_panel`（呼び出し元
-                // `dispatch_region` が 1 回確保済み）の先頭サブスライスを
-                // 再借用する（#556）。
-                let mr_blocks = mc_len.div_ceil(mr);
-                let a_panel = &mut bufs.a_panel[..mr_blocks * kc_len * mr];
-                for ir_block in 0..mr_blocks {
-                    let ir = ir_block * mr;
-                    let mr_eff = mr.min(mc_len - ir);
-                    pack_a(
-                        &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
-                        a,
-                        APackTile {
-                            k_total: k_dim,
-                            row_start: ic + ir,
-                            mr,
-                            mr_eff,
-                            kc_start: pc,
-                            kc_len,
-                        },
-                    );
-                }
-
-                for jr_block in 0..nr_blocks {
-                    let jr = jr_block * nr;
-                    let nr_eff = nr.min(nc_len - jr);
-                    let bp_slice = &b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
-
-                    for ir_block in 0..mr_blocks {
-                        let ir = ir_block * mr;
-                        let mr_eff = mr.min(mc_len - ir);
-                        let ap_slice =
-                            &a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr];
-                        let col_base = jc + jr;
-
-                        if mr_eff == mr && nr_eff == nr {
-                            // 完全タイル（#557）: C の実バッファへ
-                            // `Microkernel::run_with_ldc` の `ldc` 契約経由で直接
-                            // ロード/ストアし、コピーイン/コピーアウトの
-                            // 往復を省く。`row0` はこのタイル原点（行
-                            // ic+ir・列 col_base）の C 上のオフセットで、
-                            // サブスライス長 `(mr-1)*n + nr` は行 mr-1・
-                            // 列 nr-1 までを覆う（`ldc = n`）。完全タイル
-                            // ゆえ `col_base + nr <= n` が成立し
-                            // `ldc(=n) >= nr` も自動的に満たされる
-                            // （[`microkernel::Microkernel::run_with_ldc`] の `ldc`
-                            // 契約参照）。スライス取得自体が範囲外なら
-                            // panic する安全操作であり、カーネル入口の
-                            // `ldc`／長さ検査と合わせ REQ-8 の境界検査を
-                            // 二重に満たす。`run_with_ldc` は外部の
-                            // `Microkernel` 実装からも到達しうる公開入口
-                            // のため `Result` を返す契約（#691 レビュー
-                            // P1 対応）で、本呼び出しは private な
-                            // `gemm_blis_region` 内部から組み込みカーネル
-                            // （`ScalarKernel`／`NeonKernel`／`Avx2Kernel`／
-                            // `Avx512Kernel`。いずれも `MR`／`NR` はモジュール
-                            // 定数でコンパイル時に 1 以上）へ、完全タイル
-                            // ゆえ自動的に満たされる `ldc(=n) >= nr` と、
-                            // 上記スライス長 `(mr-1)*n+nr`（= 必要長そのもの）
-                            // で呼ぶため、境界検査は構築上常に成功するはず
-                            // だが、`unreachable!` による panic 変換
-                            // （#691 レビュー P1 再指摘）を避け、`?` で
-                            // `GemmError::MicrokernelTileBounds` として
-                            // 呼び出し元まで型付きエラーで伝播させる
-                            // （実際に `Err` になることは想定していない
-                            // fail-safe だが、本番経路の panic 禁止規約
-                            // を優先する）。
-                            let row0 = (ic + ir) * n + col_base;
-                            let c_direct = &mut c[row0..row0 + (mr - 1) * n + nr];
-                            kernel.run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len)?;
-                        } else {
-                            // 端タイル: 従来どおり `MAX_TILE` スタック
-                            // バッファへコピーインし、有効部
-                            // （mr_eff×nr_eff）のみコピーバックする
-                            // （padding レーン mr_eff..mr, nr_eff..nr は
-                            // ゼロのままでよい。書き戻し時に不使用）。
-                            // ir_block×jr_block のたびのヒープ確保を避ける
-                            // ため固定長スタック配列を使う（Review 指摘:
-                            // M=N=K=2048 では ir/jr ループの反復数が数十万
-                            // に達し `Vec` 確保が無視できないオーバー
-                            // ヘッドになるため）。
-                            let mut c_tile_buf = [0.0f32; MAX_TILE];
-                            let c_tile = &mut c_tile_buf[..mr * nr];
-                            for i in 0..mr_eff {
-                                let src = &c[(ic + ir + i) * n + col_base
-                                    ..(ic + ir + i) * n + col_base + nr_eff];
-                                c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
-                            }
-
-                            // `ldc = nr` は組み込みカーネルの `NR` 定数
-                            // そのものであり `c_tile` は `mr*nr` ちょうど
-                            // の長さで確保しているため、境界検査は構築上
-                            // 常に成功するはず（上記完全タイル分岐と同じ
-                            // 根拠）。同様に `?` で型付きエラーとして
-                            // 伝播させ、`unreachable!` による panic 変換
-                            // を避ける（#691 レビュー P1 再指摘）。
-                            kernel.run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len)?;
-
-                            for i in 0..mr_eff {
-                                let dst = &mut c[(ic + ir + i) * n + col_base
-                                    ..(ic + ir + i) * n + col_base + nr_eff];
-                                dst.copy_from_slice(&c_tile[i * nr..i * nr + nr_eff]);
-                            }
-                        }
-                    }
-                }
-
-                ic += blocks.mc;
-            }
+            // ic（行パネル）以下のループ本体は [`gemm_blis_ic_loop`] へ
+            // 切り出し済み（#750）。並列経路（[`gemm_blis_shared_b_region`]）
+            // が「共有 B パネルをタスクごとの行範囲へ適用する」ために同じ
+            // 関数を再利用するための共通化であり、本関数（直列経路）では
+            // `bufs.a_panel` 全体・`mc_total`（このパネル全域）をそのまま
+            // 渡すだけで従来どおりの計算になる。
+            let ctx = IcLoopContext {
+                b_panel,
+                n,
+                k_dim,
+                pc,
+                kc_len,
+                jc,
+                nr_blocks,
+                nc_len,
+                blocks,
+            };
+            gemm_blis_ic_loop(kernel, a, c, mc_total, &mut bufs.a_panel, &ctx)?;
         }
     }
     Ok(())
+}
+
+/// [`gemm_blis_ic_loop`] へ渡す (jc,pc) ブロック文脈パラメータ（引数数を
+/// 抑えるための束ね。[`pack::APackTile`]／[`pack::BPackTile`] と同じ設計
+/// 判断。#750）。全フィールド `Copy`（`b_panel` は共有参照）のため
+/// `#[derive(Clone, Copy)]` で値渡しできる。
+#[derive(Clone, Copy)]
+struct IcLoopContext<'b> {
+    /// 呼び出し元が pc/jc ブロックごとに 1 回だけ pack 済みの B パネル
+    /// （`nr_blocks * kc_len * nr` 要素）。[`gemm_blis_region`]（直列）
+    /// では `bufs.b_panel` のサブスライス、[`gemm_blis_shared_b_region`]
+    /// （並列・#750）ではタスク間で共有する 1 本のバッファのサブスライス。
+    b_panel: &'b [f32],
+    n: usize,
+    k_dim: usize,
+    pc: usize,
+    kc_len: usize,
+    jc: usize,
+    nr_blocks: usize,
+    nc_len: usize,
+    blocks: BlockSizes,
+}
+
+/// `gemm_blis_region`（直列）・`gemm_blis_shared_b_region`（並列・共有 B。
+/// #750）共通の ic（行パネル）以下のループ本体（ic→jr→ir）。
+///
+/// 呼び出し元が pc/jc ブロックごとに 1 回だけ pack 済みの `ctx.b_panel`
+/// を読み取り専用で受け取り、`a`（このタスクが担当する行範囲の先頭が
+/// 行 0 に対応するよう既にオフセット済みのスライス）・`c`（同じく行 0
+/// 対応でオフセット済み）に対して `mc_total` 行ぶんの A packing・カーネル
+/// 呼び出しを行う。A packing 用バッファ `a_panel` は呼び出し元が所有する
+/// もの（直列経路は `bufs.a_panel`、並列経路はタスクローカルな
+/// `Vec<f32>`）を可変参照で受け取り、`gemm_blis_region` から移設した
+/// ロジック自体は一切変更していない（ic/jr/ir の反復順・`pack_a` の
+/// 書き込み内容・C タイルのロード/書き戻し構造がそのままのため、
+/// bit 完全一致契約〈REQ-2〉・FMA 契約・累積順序を保つ。#750 実装計画
+/// §4.1「誰がいつ pack したか」だけが変わるという設計根拠の直接反映）。
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_ic_loop<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    c: &mut [f32],
+    mc_total: usize,
+    a_panel: &mut [f32],
+    ctx: &IcLoopContext,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    let IcLoopContext {
+        b_panel,
+        n,
+        k_dim,
+        pc,
+        kc_len,
+        jc,
+        nr_blocks,
+        nc_len,
+        blocks,
+    } = *ctx;
+
+    let mut ic = 0;
+    while ic < mc_total {
+        let mc_len = blocks.mc.min(mc_total - ic);
+
+        // A パネル packing: mc_len を MR 単位のブロックに分割（jr ループ
+        // 全体で使い回すため ic ブロックごとに 1 回のみ）。pack_a が
+        // panel サブスライスへ直接書き込むため中間 Vec 確保・
+        // copy_from_slice は発生しない（#554。B packing と同じ理由）。
+        let mr_blocks = mc_len.div_ceil(mr);
+        let a_panel = &mut a_panel[..mr_blocks * kc_len * mr];
+        for ir_block in 0..mr_blocks {
+            let ir = ir_block * mr;
+            let mr_eff = mr.min(mc_len - ir);
+            pack_a(
+                &mut a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr],
+                a,
+                APackTile {
+                    k_total: k_dim,
+                    row_start: ic + ir,
+                    mr,
+                    mr_eff,
+                    kc_start: pc,
+                    kc_len,
+                },
+            );
+        }
+
+        for jr_block in 0..nr_blocks {
+            let jr = jr_block * nr;
+            let nr_eff = nr.min(nc_len - jr);
+            let bp_slice = &b_panel[jr_block * kc_len * nr..(jr_block + 1) * kc_len * nr];
+
+            for ir_block in 0..mr_blocks {
+                let ir = ir_block * mr;
+                let mr_eff = mr.min(mc_len - ir);
+                let ap_slice = &a_panel[ir_block * kc_len * mr..(ir_block + 1) * kc_len * mr];
+                let col_base = jc + jr;
+
+                if mr_eff == mr && nr_eff == nr {
+                    // 完全タイル（#557）: C の実バッファへ
+                    // `Microkernel::run_with_ldc` の `ldc` 契約経由で直接
+                    // ロード/ストアし、コピーイン/コピーアウトの往復を
+                    // 省く。`row0` はこのタイル原点（行 ic+ir・列
+                    // col_base）の C 上のオフセットで、サブスライス長
+                    // `(mr-1)*n + nr` は行 mr-1・列 nr-1 までを覆う
+                    // （`ldc = n`）。完全タイルゆえ `col_base + nr <= n`
+                    // が成立し `ldc(=n) >= nr` も自動的に満たされる
+                    // （[`microkernel::Microkernel::run_with_ldc`] の
+                    // `ldc` 契約参照）。スライス取得自体が範囲外なら
+                    // panic する安全操作であり、カーネル入口の `ldc`／
+                    // 長さ検査と合わせ REQ-8 の境界検査を二重に満たす。
+                    // `run_with_ldc` は外部の `Microkernel` 実装からも
+                    // 到達しうる公開入口のため `Result` を返す契約
+                    // （#691 レビュー P1 対応）で、本呼び出しは private
+                    // な本関数内部から組み込みカーネル（`ScalarKernel`／
+                    // `NeonKernel`／`Avx2Kernel`／`Avx512Kernel`。いずれも
+                    // `MR`／`NR` はモジュール定数でコンパイル時に 1
+                    // 以上）へ、完全タイルゆえ自動的に満たされる
+                    // `ldc(=n) >= nr` と、上記スライス長
+                    // `(mr-1)*n+nr`（= 必要長そのもの）で呼ぶため、
+                    // 境界検査は構築上常に成功するはずだが、
+                    // `unreachable!` による panic 変換（#691 レビュー
+                    // P1 再指摘）を避け、`?` で
+                    // `GemmError::MicrokernelTileBounds` として呼び出し
+                    // 元まで型付きエラーで伝播させる（実際に `Err` に
+                    // なることは想定していない fail-safe だが、本番経路
+                    // の panic 禁止規約を優先する）。
+                    let row0 = (ic + ir) * n + col_base;
+                    let c_direct = &mut c[row0..row0 + (mr - 1) * n + nr];
+                    kernel.run_with_ldc(ap_slice, bp_slice, c_direct, n, kc_len)?;
+                } else {
+                    // 端タイル: 従来どおり `MAX_TILE` スタックバッファへ
+                    // コピーインし、有効部（mr_eff×nr_eff）のみコピー
+                    // バックする（padding レーン mr_eff..mr, nr_eff..nr
+                    // はゼロのままでよい。書き戻し時に不使用）。
+                    // ir_block×jr_block のたびのヒープ確保を避けるため
+                    // 固定長スタック配列を使う（Review 指摘: M=N=K=2048
+                    // では ir/jr ループの反復数が数十万に達し `Vec`
+                    // 確保が無視できないオーバーヘッドになるため）。
+                    let mut c_tile_buf = [0.0f32; MAX_TILE];
+                    let c_tile = &mut c_tile_buf[..mr * nr];
+                    for i in 0..mr_eff {
+                        let src =
+                            &c[(ic + ir + i) * n + col_base..(ic + ir + i) * n + col_base + nr_eff];
+                        c_tile[i * nr..i * nr + nr_eff].copy_from_slice(src);
+                    }
+
+                    // `ldc = nr` は組み込みカーネルの `NR` 定数そのもの
+                    // であり `c_tile` は `mr*nr` ちょうどの長さで確保
+                    // しているため、境界検査は構築上常に成功するはず
+                    // （上記完全タイル分岐と同じ根拠）。同様に `?` で
+                    // 型付きエラーとして伝播させ、`unreachable!` による
+                    // panic 変換を避ける（#691 レビュー P1 再指摘）。
+                    kernel.run_with_ldc(ap_slice, bp_slice, c_tile, nr, kc_len)?;
+
+                    for i in 0..mr_eff {
+                        let dst = &mut c
+                            [(ic + ir + i) * n + col_base..(ic + ir + i) * n + col_base + nr_eff];
+                        dst.copy_from_slice(&c_tile[i * nr..i * nr + nr_eff]);
+                    }
+                }
+            }
+        }
+
+        ic += blocks.mc;
+    }
+    Ok(())
+}
+
+/// `#[cfg(test)]` の [`gemm_blis_parallel_with_blocks`] の複数タスク経路
+/// （実タスク数 >= 2）が呼ぶ、B パネルをタスク間で 1 本だけ共有する
+/// 5-loop 本体（イシュー #750・設計 doc
+/// `docs/cpu-gemm-b-packing-sharing-decision.md` 案 B）。本番公開入口
+/// （[`gemm_blis_parallel`]／[`gemm_blis_bias_act_parallel`]）からは
+/// 呼ばれない（下記「本番未結線」節参照）。
+///
+/// jc/pc ループは直列（[`gemm_blis_region`] と同じ昇順）のまま、各
+/// (jc,pc) ブロックで B を 1 本だけ pack して `&[f32]` として全タスクへ
+/// 共有し、ic（行パネル）だけをタスク間で並列化する（[`gemm_blis_ic_loop`]
+/// を「可変 pack → 不変 `&[f32]` 共有読み」の借用分割で呼ぶ。データ競合は
+/// コンパイル時に排除される。`unsafe` は使わない）。C 各要素の FMA 連鎖
+/// （p 昇順）・`pack_a`／`pack_b` の書き込み内容は [`gemm_blis_region`]
+/// と一切変わらないため、`gemm_naive` との bit 完全一致契約（REQ-2）を
+/// 保つ（「誰がいつ pack したか」だけが変わる）。
+///
+/// B packing 自体も `nr` ブロック単位で `par_chunks_mut` により並列化する
+/// （各チャンクは書き込み先が排他かつ内容が他チャンクに依存しないため
+/// 実行順序に関わらず結果は直列版と同一。#750）。
+///
+/// A パネル用バッファはタスクごとに 1 本ずつ（`Vec` の所有権がタスク
+/// ローカルに閉じるため事前一括確保＋オフセット分割を要さずコンパイル時
+/// にデータ競合が排除される。[`PanelBuffers`] ドキュメントコメントが
+/// 「タスクごとに 1 組所有する」と述べていた従来設計をそのまま踏襲する）
+/// gemm 呼び出しの (jc,pc) ループ全体で使い回すため、ループ外で 1 回だけ
+/// 確保する（#556 の確保削減方針をタスク数ぶんに拡張）。
+///
+/// **本番未結線（#750・codex-review P1 是正）**: 本関数・
+/// [`dispatch_shared_b`] は本番公開入口（[`gemm_blis_parallel`]／
+/// [`gemm_blis_bias_act_parallel`]）からは呼ばれない
+/// （`docs/perf/cpu-gemm-b-packing-sharing.md` 参照。受け入れ条件 2
+/// ＝ Apple M4 Max 実測非劣化確認を満たすまでの採用ゲート）。
+/// `#[cfg(test)]`（`#[cfg(test)]` の [`gemm_blis_parallel_with_blocks`]
+/// 経由）で bit 完全一致検証のみ行う。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_shared_b_region<K: Microkernel>(
+    kernel: K,
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k_dim: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    let mr = K::MR;
+    let nr = K::NR;
+    let row_start = rows.start;
+    let mc_total = rows.end - rows.start;
+    let a = &a[row_start * k_dim..];
+
+    let num_threads = rayon::current_num_threads().max(1);
+    let panel_rows = mc_total.div_ceil(num_threads).max(1);
+    let num_tasks = mc_total.div_ceil(panel_rows);
+
+    // 共有 B バッファ: 全 jc ブロック中の最大 nc_len に対応する 1 本
+    // （`panel_capacity` の B 長算出は `mc_total` に依存しない）。
+    let (b_cap, _) = panel_capacity(n, k_dim, mc_total, mr, nr, blocks);
+    let mut b_panel_buf = vec![0.0f32; b_cap];
+
+    // タスクローカル A バッファ: 各タスクが担当しうる最大行数
+    // （`panel_rows`。最終タスクのみこれより少ない行数を担当しうるが、
+    // `panel_capacity` は `mc_total` に対して単調非減少なため
+    // `panel_rows` を渡した容量が全タスクの上界になる）に対応する容量で
+    // 1 回だけ確保し、(jc,pc) 反復間で使い回す。
+    let (_, a_cap) = panel_capacity(n, k_dim, panel_rows, mr, nr, blocks);
+    let mut a_bufs: Vec<Vec<f32>> = (0..num_tasks).map(|_| vec![0.0f32; a_cap]).collect();
+
+    for jc in (0..n).step_by(blocks.nc) {
+        let nc_len = blocks.nc.min(n - jc);
+        for pc in (0..k_dim).step_by(blocks.kc) {
+            let kc_len = blocks.kc.min(k_dim - pc);
+            let nr_blocks = nc_len.div_ceil(nr);
+            let b_panel = &mut b_panel_buf[..nr_blocks * kc_len * nr];
+
+            // B packing の nr ブロック単位並列化（#750）。各チャンクは
+            // 排他的な書き込み先で内容も他チャンクに依存しないため、
+            // 実行順序に関わらず結果は直列版（[`gemm_blis_region`]）と
+            // 同一（bit 完全一致契約に影響しない）。
+            b_panel
+                .par_chunks_mut(kc_len * nr)
+                .enumerate()
+                .for_each(|(jr_block, dst)| {
+                    let jr = jr_block * nr;
+                    let nr_eff = nr.min(nc_len - jr);
+                    pack_b(
+                        dst,
+                        b,
+                        BPackTile {
+                            n_total: n,
+                            kc_start: pc,
+                            kc_len,
+                            col_start: jc + jr,
+                            nr,
+                            nr_eff,
+                        },
+                    );
+                });
+
+            let b_panel_ref: &[f32] = b_panel;
+            let ctx = IcLoopContext {
+                b_panel: b_panel_ref,
+                n,
+                k_dim,
+                pc,
+                kc_len,
+                jc,
+                nr_blocks,
+                nc_len,
+                blocks,
+            };
+
+            // ic（行パネル）のタスク間並列化。`c`（この呼び出しが担当する
+            // 行範囲全体）を `panel_rows` 行ずつに分割し、各タスクが
+            // `b_panel_ref`（この (jc,pc) ブロックで 1 回だけ pack 済み・
+            // 全タスク共有の読み取り専用スライス）を参照しつつ、自分の
+            // タスクローカル A バッファへ packing して計算する
+            // （データ競合はコンパイル時の借用分割で排除。`unsafe` 不要）。
+            c.par_chunks_mut(panel_rows * n)
+                .enumerate()
+                .zip(a_bufs.par_iter_mut())
+                .try_for_each(|((task_idx, c_chunk), a_buf)| {
+                    let task_mc = c_chunk.len() / n;
+                    if task_mc == 0 {
+                        return Ok(());
+                    }
+                    let task_row_start = task_idx * panel_rows;
+                    let a_task = &a[task_row_start * k_dim..];
+                    gemm_blis_ic_loop(kernel, a_task, c_chunk, task_mc, a_buf, &ctx)
+                })?;
+        }
+    }
+    Ok(())
+}
+
+/// 検出済みトークンを優先順位（Avx512 > Avx2 > Scalar）で直接 `try_new`
+/// し、最初に構築できたトークンで [`gemm_blis_shared_b_region`] を呼ぶ
+/// （[`dispatch_region`] の共有 B 版・実タスク数 >= 2 の並列経路専用の
+/// dispatch 入口。イシュー #750）。ロジックは `dispatch_region` と同一で、
+/// 呼ぶ先の関数のみが異なる。本番未結線（[`gemm_blis_shared_b_region`]
+/// ドキュメンテーションコメント参照）のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "x86_64")]
+fn dispatch_shared_b(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    #[cfg(avx512_stable)]
+    if let Some(kernel) = microkernel::Avx512Kernel::try_new() {
+        return gemm_blis_shared_b_region(kernel, a, b, c, n, k, rows, blocks);
+    }
+    if let Some(kernel) = microkernel::Avx2Kernel::try_new() {
+        gemm_blis_shared_b_region(kernel, a, b, c, n, k, rows, blocks)
+    } else {
+        gemm_blis_shared_b_region(ScalarKernel, a, b, c, n, k, rows, blocks)
+    }
+}
+
+/// aarch64 版 [`dispatch_shared_b`]（#750）。[`dispatch_region`] の
+/// aarch64 版と同じ理由で NEON 固定（実行時検出不要）。本番未結線
+/// （[`gemm_blis_shared_b_region`] ドキュメンテーションコメント参照）
+/// のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(target_arch = "aarch64")]
+fn dispatch_shared_b(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Neon);
+    gemm_blis_shared_b_region(microkernel::NeonKernel, a, b, c, n, k, rows, blocks)
+}
+
+/// aarch64／x86_64 以外の arch 版 [`dispatch_shared_b`]（#750）。
+/// [`dispatch_region`] の同 arch 版と同じ理由で [`ScalarKernel`] 固定。
+/// 本番未結線（[`gemm_blis_shared_b_region`] ドキュメンテーションコメント
+/// 参照）のため `#[cfg(test)]`。
+#[cfg(test)]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+fn dispatch_shared_b(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    n: usize,
+    k: usize,
+    rows: Range<usize>,
+    blocks: BlockSizes,
+) -> Result<(), GemmError> {
+    debug_assert_eq!(Isa::detect(), Isa::Scalar);
+    gemm_blis_shared_b_region(ScalarKernel, a, b, c, n, k, rows, blocks)
 }
 
 /// テスト専用: 実行環境の実際の ISA 検出結果に依らず、指定したカーネル
@@ -774,10 +1070,14 @@ pub(crate) fn gemm_blis_with_kernel_and_blocks<K: Microkernel>(
     gemm_blis_region(kernel, a, b, c, n, k, 0..m, &mut bufs, blocks)
 }
 
-/// テスト・スイープ専用: [`gemm_blis_parallel`] の任意 `BlockSizes` 版
-/// （#564）。並列分割戦略（行パネル分割・`dispatch_region` 呼び出し）は
-/// `gemm_blis_parallel` 本体と同一で、`blocks` のみ呼び出し元から注入
-/// できる（実運用経路は [`default_blocks`] 固定のため変更なし）。
+/// テスト専用: [`gemm_blis_shared_b_region`]（B パネル共有経路。#750）の
+/// bit 完全一致を任意 `BlockSizes`（#564）で検証するための入口。
+/// `gemm_blis_parallel`（本番公開入口）は共有経路を採用しない
+/// （[`gemm_blis_shared_b_region`] ドキュメンテーションコメント参照）ため、
+/// 本関数は `gemm_blis_parallel` 本体とは分岐が異なる（実タスク数 1 なら
+/// `dispatch_region`・2 以上なら `dispatch_shared_b` を常に経由し、
+/// 共有経路のテストカバレッジを維持する）。`blocks` のみ呼び出し元から
+/// 注入できる。
 #[cfg(test)]
 pub(crate) fn gemm_blis_parallel_with_blocks(
     a: &[f32],
@@ -800,13 +1100,10 @@ pub(crate) fn gemm_blis_parallel_with_blocks(
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
 
-    c.par_chunks_mut(panel_rows * n)
-        .enumerate()
-        .try_for_each(|(panel_idx, c_chunk)| {
-            let row_start = panel_idx * panel_rows;
-            let row_end = (row_start + c_chunk.len() / n).min(m);
-            dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)
-        })
+    if m <= panel_rows {
+        return dispatch_region(a, b, c, n, k, 0..m, blocks);
+    }
+    dispatch_shared_b(a, b, c, n, k, 0..m, blocks)
 }
 
 #[cfg(test)]
@@ -1082,6 +1379,116 @@ mod tests {
                 "blocks={blocks:?} の並列経路は gemm_naive と bit 完全一致するはず"
             );
         }
+    }
+
+    /// イシュー #750 の受け入れ条件 3（スレッド数 1 では従来と同一経路・
+    /// 同一性能）を直接検証する: `num_threads(1)` の rayon プール内で
+    /// `gemm_blis_parallel` を呼ぶと `m <= panel_rows`（`panel_rows == m`）
+    /// が常に成立し `dispatch_shared_b`（B パネル共有経路）を一切経由し
+    /// ない設計になっている（`gemm_blis_parallel` 実装コメント参照）。
+    /// 本テストはその結果として `gemm_naive` と bit 完全一致することを
+    /// MC/KC/NC 境界を跨ぐ形状で確認する。
+    #[test]
+    fn gemm_blis_parallel_single_thread_pool_matches_naive_bit_exact() {
+        let (m, n, k) = (200, 600, 700);
+        let a = xorshift32_vec(0x1a1a_1a1a, m * k);
+        let b = xorshift32_vec(0x2b2b_2b2b, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .unwrap_or_else(|e| panic!("1 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_parallel = vec![0.0f32; m * n];
+        pool.install(|| gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "num_threads=1 の gemm_blis_parallel は gemm_naive と bit 完全一致するはず（#750 受け入れ条件 3）"
+        );
+    }
+
+    /// イシュー #750: B パネル共有経路（[`gemm_blis_shared_b_region`]）が
+    /// 複数 (jc,pc) ブロック（＝複数回の同期点）を跨いでも
+    /// [`gemm_blis_region`]（直列経路）と bit 完全一致することを、小さい
+    /// `BlockSizes`（mc=16・kc=17・nc=19。既定値より大幅に小さく多数の
+    /// (jc,pc) 反復を強制する）で検証する。固定 4 スレッドプールで
+    /// `m > panel_rows`（実タスク数 >= 2）を確定させ、共有 B 経路を確実に
+    /// 通す。
+    #[test]
+    fn gemm_blis_shared_b_region_multi_sync_point_matches_serial_bit_exact() {
+        let (m, n, k) = (200, 600, 700);
+        let blocks = BlockSizes {
+            mc: 16,
+            kc: 17,
+            nc: 19,
+        };
+        let a = xorshift32_vec(0x3c3c_3c3c, m * k);
+        let b = xorshift32_vec(0x4d4d_4d4d, k * n);
+
+        let mut c_serial = vec![0.0f32; m * n];
+        gemm_blis_with_kernel_and_blocks(ScalarKernel, &a, &b, &mut c_serial, m, n, k, blocks)
+            .unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap_or_else(|e| panic!("4 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_shared_b = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_parallel_with_blocks(&a, &b, &mut c_shared_b, m, n, k, blocks).unwrap()
+        });
+
+        assert_eq!(
+            c_serial, c_shared_b,
+            "多 (jc,pc) 同期点を跨ぐ B パネル共有経路は直列経路と bit 完全一致するはず（#750）"
+        );
+    }
+
+    /// イシュー #750: 実タスク数 Q が rayon の稼働スレッド数 T を下回る
+    /// 形状（m が小さく `m.div_ceil(num_threads) < num_threads` となる
+    /// ケース）でも `gemm_naive` と bit 完全一致することを確認する
+    /// （`gemm_blis_shared_b_region` の `num_tasks = mc_total.div_ceil(
+    /// panel_rows)` が実際のタスク数を正しく導出し、`a_bufs`／
+    /// `c.par_chunks_mut` の長さがずれないことの回帰）。
+    ///
+    /// 本番公開入口 `gemm_blis_parallel` は B パネル共有経路
+    /// （`dispatch_shared_b`）を採用しない（本ファイル冒頭
+    /// `gemm_blis_parallel` 実装コメント参照。#750・codex-review P1 是正）
+    /// ため、`gemm_blis_shared_b_region` の Q<T 回帰を実際に検証するには
+    /// `#[cfg(test)]` 限定のテスト専用入口 [`gemm_blis_parallel_with_blocks`]
+    /// を経由する必要がある（Cursor Bugbot 指摘・commit f27f233 是正: 本
+    /// テストが `gemm_blis_parallel` を直接呼ぶと共有経路を一切経由せず
+    /// 回帰検証が失効する）。
+    #[test]
+    fn gemm_blis_parallel_matches_naive_bit_exact_when_tasks_fewer_than_threads() {
+        let (m, n, k) = (10, 130, 40);
+        let a = xorshift32_vec(0x5e5e_5e5e, m * k);
+        let b = xorshift32_vec(0x6f6f_6f6f, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(16)
+            .build()
+            .unwrap_or_else(|e| panic!("16 スレッドの rayon プール構築に失敗: {e}"));
+
+        let mut c_parallel = vec![0.0f32; m * n];
+        pool.install(|| {
+            gemm_blis_parallel_with_blocks(&a, &b, &mut c_parallel, m, n, k, default_blocks())
+                .unwrap()
+        });
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "m={m} 行を num_threads=16 で分割する実タスク数 Q < T のケースは \
+             gemm_naive と bit 完全一致するはず（#750）"
+        );
     }
 
     /// [`panel_capacity`]（[`PanelBuffers::new`] の容量計算本体）が、
