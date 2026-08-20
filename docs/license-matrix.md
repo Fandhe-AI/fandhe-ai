@@ -123,30 +123,36 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 - 対象 `Cargo.lock` のコミット SHA: `65dea84463472db78ab5dfcb7205b69cf43f4c1b`（origin/main）
 - `cargo metadata --locked --format-version 1` で `zerocopy`／`zerocopy-derive` の `version`・`license` を抽出し、両パッケージとも `v0.8.56`・`BSD-2-Clause OR Apache-2.0 OR MIT`（6 節記載の `v0.8.55` から**バージョンのみ更新、ライセンス式は不変**）であることを確認した。実行後 `git status --porcelain Cargo.lock` で差分がないことを確認した（依存・バージョン自体は変更していない）
 
-## 8a. 本表の適用範囲外にある監査対象（OSS 直接比較ハーネス。イシュー #755）
-
-本表・`deny.toml`（ルート）が対象とするのは**本体 workspace**（ルート `Cargo.toml`／
-`Cargo.lock`）の依存グラフに限られる（`.claude/rules/deps-policy.md`「適用範囲」節）。
-
-`scripts/bench/oss-gemm-compare/` は `[workspace]` を空テーブルで持つ独立 Cargo
-プロジェクトで、本体 workspace の member ではないため本表の走査対象（4〜5 節の
-`cargo tree`／`cargo metadata` 実測範囲）に含まれない。比較対象として使う
-`matrixmultiply`・`gemm` crate（許容依存 8 区分外）のライセンス監査は、本表とは
-別に本パッケージ専用の `scripts/bench/oss-gemm-compare/deny.toml`（allow リストは
-本表 2 節と同一方針）を用い、CI（`ci.yml` の `deps-forbidden` ジョブ）で
-`cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --locked check
---config scripts/bench/oss-gemm-compare/deny.toml licenses sources` を毎回実行して
-行う（2026-08-20 ユーザー承認。条件は `.claude/rules/deps-policy.md`「適用範囲
-（本体 workspace 限定）」節を参照）。
-
-設計判断の詳細・実測記録（`matrixmultiply`・`gemm` の実ライセンス実測値を含む）は
-`docs/oss-comparison-harness-decision.md`（イシュー #755）を参照。allow リストの
-実体は本表と二重管理しない（`scripts/bench/oss-gemm-compare/deny.toml` 冒頭コメント
-参照）。
-
 ## 8. 運用
 
 - 依存の追加・更新は本表の更新とセットで行う（**ユーザー承認必須**。REQ-5・deps-policy.md）
 - `deny.toml` の `[licenses]` allow リストの変更（新規ライセンス式の許可）も同じ承認フローに従う。allow リストは本表 5 節の実測結果をそのまま運用化したものであり、単独での緩和は行わない
 - MPL-2.0 等コピーレフト混入の監視は CI の `deny` ジョブ（`cargo deny --locked check licenses sources`）で継続する
 - `deny.toml` の `[licenses]` は `include-dev = true` を明示する。既定値（`false`）のままだと `criterion`（`bench-harness` の `dev-dependencies` 限定）とその推移的依存サブツリーがライセンス監査から漏れ、本表が前提とする「Cargo.lock 全域」（3 節・4 節 #4）の実測スコープと不整合になる（PR #211 Bugbot 指摘）
+
+## 9. 第 9 区分（ベンチ比較対象。OSS 直接比較ハーネス。イシュー #755）
+
+`matrixmultiply`・`gemm` は `.claude/rules/deps-policy.md`「許容依存 9 区分」表の
+第 9 区分（ベンチ比較対象）として正式に許容された依存であり、監査対象外の例外
+ではなく、`scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立
+Cargo プロジェクト）限定で正式に統制される依存として扱う。本表 2 節「直接依存
+8 区分」は本体 workspace（ルート `Cargo.toml`／`Cargo.lock`）の直接依存のみを
+指し、第 9 区分は別枠として本節で扱う。
+
+本表 4〜5 節（`cargo tree`／`cargo metadata` 実測）はルート `Cargo.lock` を対象と
+するため、この独立プロジェクトの依存グラフには及ばない。そのため第 9 区分の
+ライセンス監査は、本パッケージ専用の `scripts/bench/oss-gemm-compare/deny.toml`
+（allow リストは本表 2 節と同一方針）を用い、CI（`ci.yml` の `deps-forbidden`
+ジョブ）で `cargo deny --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml
+--locked check --config scripts/bench/oss-gemm-compare/deny.toml licenses sources`
+を実行することを必須条件とする（`.claude/rules/deps-policy.md` 第 9 区分の行を
+参照）。同ハーネスの `Cargo.lock` は依存禁止リスト検査（`scripts/check-forbidden-deps.sh`）
+の走査対象にも含める。
+
+**本節時点では `scripts/bench/oss-gemm-compare/` はリポジトリに未追加**であり、
+上記の CI 監査ステップ・依存禁止リスト検査の対象化は、第 9 区分を実際に導入する
+PR（イシュー #755・PR #770）がマージされる際の必須条件として課す。`matrixmultiply`・
+`gemm` の実ライセンス実測値は、PR #770 で記録される
+`docs/oss-comparison-harness-decision.md`（イシュー #755）を出典として参照する
+（本節では転記しない）。allow リストの実体は本表と二重管理しない
+（`scripts/bench/oss-gemm-compare/deny.toml` 冒頭コメント参照）。
