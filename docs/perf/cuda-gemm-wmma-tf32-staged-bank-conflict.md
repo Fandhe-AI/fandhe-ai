@@ -137,12 +137,18 @@ cargo test -p backend-cuda --release -- --ignored --nocapture
 #    44.8〜45.6KiB・2 blocks/SM〉との比較が b_pad の差と dyn/static の
 #    occupancy 差を交絡していた。static 変種へ切替後は 3a/3b が b_pad の
 #    みで差分化されるため、ld バンクコンフリクトの差分は occupancy 変化
-#    を含まない）
+#    を含まない。--launch-skip/--launch-count は gemm_profile_target の
+#    既定 warmup=2・iters=5（バイナリ実行時に `warmup=... iters=...` の
+#    直後に `ncu --launch-skip <値>` として明示出力される値と一致させる。
+#    PR #769 codex-review 指摘 thread PRRT_kwDOTuUCJc6aqMvm の是正: 指定
+#    なしだと warmup 2 回を含む計 7 起動が採取され、記録対象カーネル起動
+#    の判別を誤りうる）
 cargo build -p backend-cuda --example gemm_profile_target --release \
     --features internal-diagnostics
 
 # 3a) 既定（b_pad=68・本番経路・static 共有メモリ）
-ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+ncu --launch-skip 2 --launch-count 5 \
+--metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
 smsp__inst_executed_op_shared_ld.sum,\
@@ -151,7 +157,8 @@ sm__warps_active.avg.pct_of_peak_sustained_active \
 
 # 3b) 候補（b_pad=72・static 共有メモリ変種。3a と __shared__
 #     レイアウト／occupancy が同一のため b_pad の差分のみを計測する）
-ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+ncu --launch-skip 2 --launch-count 5 \
+--metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum,\
 l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
 smsp__inst_executed_op_shared_ld.sum,\
