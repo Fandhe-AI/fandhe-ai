@@ -5,7 +5,7 @@ mma_f16 ブロックタイル拡大とステージ数増」の実測記録。先
 cuda-gemm-mma-warp-tile-register-budget.md`）の warp タイル拡大候補の実機実測が
 「実行待ち」のまま引き継がれた状態で着手した。
 
-## 状態: 実機 A/B 実測完了（イシュー #840）。採否判断は #842
+## 状態: 実機 A/B 実測完了（イシュー #840）。採否判断は #842 で確定（§7。**不採用**）
 
 #804（PR #831）は本ドキュメントを「未実測・実機実行待ち（Step F フォール
 バック）」のまま残した。イシュー #840 は DGX Spark GB10（sm_121）実機へ
@@ -251,3 +251,77 @@ design.md` の役割分担を踏襲）。
   `4096 / 新BN` への再導出）・`gemm_auto.rs` の静的 SMEM 予算 assert の追従
 - `gemm_mma_bench` による 512/1024/2048/4096 の 5 回中央値ベンチ・小サイズ
   非劣化確認（劣化時はサイズ条件付き選択の実装）
+
+## 7. #842 実装セッションの結果（採否判断の確定・実機再到達不可）
+
+**状態: 不採用（現行 `mma_f16_base` 定数を維持）を確定。#789 は本判断を
+もってスコープ再定義・完了クローズとする**（詳細は
+`docs/cuda-tensor-core-design.md` §16・#789 クローズコメント参照）。
+
+- **実機到達性**: 本セッションも本 worktree に `ptxas`/`nvcc`（CUDA
+  toolkit 本体）が存在せず、`docs/real-hardware-verification-env.local.md`
+  も未配置のため DGX Spark GB10 実機へ到達できなかった（§6 の
+  「原因調査」「`__launch_bounds__(512)` 境界値実測」「再計測」は実行
+  できていない）。よって本セッションの成果は §6 の 3 項目のうち
+  bench 診断出力拡張（下記）のみに留まる。
+- **bench 診断出力拡張（実施済み・CI 検証可能）**:
+  `crates/backend-cuda/examples/gemm_mma_block_tile_bench.rs::
+  candidate_parity_ok` の戻り値を bool から `ParityDiagnostics`
+  （mismatch 件数・最大絶対誤差・最大相対誤差・初回不一致座標）へ拡張
+  した。FAIL 時の標準出力に `mismatch_count=.../..., max_abs_diff=...,
+  max_rel_err=..., first_mismatch=(row=.., col=..)` を追加出力する
+  （実機再到達時に `bt64x128_s4`／`bt128x128_s3_wt2x4` の不一致規模を
+  即座に把握できるようにする準備）。対称性維持のため
+  `gemm_mma_tf32_block_tile_bench.rs` にも同型の `mismatch_diagnostics`
+  関数を追加した（TF32 側は #839 の既知 correctness bug により恒常的に
+  大量 mismatch となるが、bug 修正後の回帰確認・規模比較に使える）。
+- **数値不一致の原因机上調査（実施・結論に至らず）**: `kernels_mma.rs`
+  の `DYNAMIC_SMEM_REPLACEMENT`（`extern __shared__` 変換。2518 行付近）
+  について、静的宣言 `as_tile[STAGES][BM][A_PAD]`/`bs_tile[STAGES][BK]
+  [B_PAD]` と、`typedef` 配列型ポインタ経由の動的宣言との等価性を
+  以下の観点で机上検証したが、いずれも整合しており明確な欠陥を特定
+  できなかった:
+  - `as_tile[stage][row][col]` の多次元添字は、`MmaAsTileT* as_tile`
+    （`MmaAsTileT = __half[BM][A_PAD]`）でも静的宣言と同じアドレス
+    計算式（`stage` オフセット = `sizeof(MmaAsTileT)`）になる
+  - `bs_tile` の開始オフセット（`sizeof(MmaAsTileT) * STAGES`）は
+    `as_tile` 全体（`STAGES` 段分）の直後であり、`smem_bytes` の
+    机上見積もり式（§3.1 `SMEM(bm,bn,bk,stages)` 式）とバイト単位で
+    一致する（手動バンプアロケータとして自己整合的）
+  - 全候補（`BM`/`A_PAD`/`STAGES` の組み合わせ）で `sizeof(MmaAsTileT)
+    * STAGES` は 16 の倍数（`bt64x128_s4`: 5,120*4=20,480、
+    `bt128x128_s3_wt2x4`: 10,240*3=30,720 等）であり、`bs_tile` の
+    16 バイトアライメントは `mma_dyn_smem` バッファの `__align__(16)`
+    起点から保たれる（`mma_cp_async16`・`ldmatrix` の 16B 整列要件を
+    崩さない）
+  - `LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP`（cp.async 発行）・
+    `LDSM_A_FRAG`/`LDSM_B_FRAG`（ldmatrix 発行）はいずれも
+    `__cvta_generic_to_shared` でランタイムのポインタ値からシェアード
+    アドレスへ変換しており、コンパイル時の型属性（`__align__(16)` が
+    `MmaAsTileT`/`MmaBsTileT` 型自体には付与されていない点）に依存する
+    箇所は見当たらなかった
+  - `extern __shared__ unsigned char[]` を型付きポインタへ
+    `reinterpret_cast` する手法自体は CUDA の動的共有メモリ確保の標準
+    パターンであり、strict aliasing 由来の未定義動作は本件の原因と
+    考えにくい
+  - **結論**: 机上調査だけでは原因を特定できなかった。実機での
+    `compute-sanitizer`（memcheck）・中間 SMEM ダンプ等、実行時観測を
+    伴う切り分けが必要（次に実機到達できたセッションへ引き継ぐ）
+- **`__launch_bounds__(512)` 付き `bt128x256_s3_wt4x4` 変種の実起動確認**:
+  実機到達不可のため本セッションでは未実施（§6 記載のまま引き継ぎ）
+- **本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・`gemm_mma.rs`
+  本番コンストラクタ・`swizzle.rs`・`gemm_auto.rs`・tolerance 定数は
+  本セッションでも一切変更していない**（不採用判断に伴い変更不要）。
+
+### 7.1 #842 への（さらなる）引き継ぎ事項
+
+§6 の未消化項目（原因調査の実機切り分け・`__launch_bounds__(512)` 変種
+実測・再計測・採用時の本番結線手順）はそのまま有効。加えて:
+
+- 拡張済みの bench 診断出力（mismatch 件数・最大誤差・初回不一致座標）
+  を使い、`bt64x128_s4`／`bt128x128_s3_wt2x4` の不一致がタイル境界
+  付近（境界検査ロジック関連）か、タイル内部全域（アドレス計算・
+  バンク位相関連）かをまず切り分けることを推奨する
+- `compute-sanitizer --tool memcheck`／`--tool racecheck` による
+  `extern __shared__` 変換経路の実行時検証（境界外アクセス・
+  レース検出）

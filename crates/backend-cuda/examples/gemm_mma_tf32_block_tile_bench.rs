@@ -93,11 +93,21 @@ const CORRECTNESS_M: u32 = 520;
 const CORRECTNESS_N: u32 = 512;
 const CORRECTNESS_K: u32 = 512;
 
-/// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」
-/// （`.claude/rules/coding-rust.md`「バックエンド構成」。緩和しない）。
-fn within_tolerance(actual: f32, expected: f32) -> bool {
-    let abs_diff = (actual - expected).abs();
-    abs_diff < 1e-5 || abs_diff < 1e-3 * expected.abs()
+/// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の要素単位
+/// 判定を `backend_cpu::compare`（`RELATIVE_TOLERANCE`/
+/// `ABSOLUTE_RESCUE_THRESHOLD`）と**同一式**で再現する
+/// （`gemm_mma_block_tile_bench.rs::is_mismatch` と同型設計・同じ理由。
+/// 独自の許容誤差式を再実装しない）。
+fn is_mismatch(actual: f32, expected: f32) -> bool {
+    let diff = (actual as f64 - expected as f64).abs();
+    let scale = (actual as f64)
+        .abs()
+        .max((expected as f64).abs())
+        .max(1e-12);
+    let rel = diff / scale;
+    let pass =
+        rel < backend_cpu::RELATIVE_TOLERANCE || diff < backend_cpu::ABSOLUTE_RESCUE_THRESHOLD;
+    !pass
 }
 
 fn tflops(size: usize, secs: f64) -> f64 {
@@ -305,14 +315,41 @@ fn run_correctness_shape(
 }
 
 /// 候補出力と参照出力（要素ごと）を統一複合判定で比較し、mismatch が
-/// 0 件かを返す。
+/// 0 件かを返す（`backend_cpu::compare` へ委譲。REQ-2 統一複合判定の
+/// 唯一の正であり、独自の許容誤差式を再実装しない）。
 fn matches_reference(actual: &[f32], expected: &[f32]) -> bool {
-    actual
+    backend_cpu::compare(actual, expected)
+        .map(|report| report.passes())
+        .unwrap_or(false)
+}
+
+/// `matches_reference` の bool 判定に加え、mismatch 件数・最大絶対/相対
+/// 誤差・初回不一致座標を出力する診断版
+/// （`gemm_mma_block_tile_bench.rs::ParityDiagnostics`/
+/// `candidate_parity_ok` と同型設計。#842 実装計画「TF32 側
+/// `gemm_mma_tf32_block_tile_bench.rs` にも同型拡張を適用してよい
+/// （低コスト・対称性維持）」を受けた拡張。本経路は #839 の既知
+/// correctness bug により恒常的に大量 mismatch となるが、件数・規模を
+/// ログへ残すことで bug 修正後の回帰確認や規模比較の材料になる）。
+/// `mismatch_count`/`max_abs_diff`/`max_rel_err` は [`backend_cpu::
+/// CompareReport`]（全セル対象の集計。`docs/perf/cuda-gemm-mma-tf32-ab.md`
+/// が引用する同名統計と同じ由来）をそのまま転記し、初回不一致座標のみ
+/// `is_mismatch`（`CompareReport` と同一の判定式）で別途走査する。
+fn mismatch_diagnostics(actual: &[f32], expected: &[f32]) -> (usize, f64, f64, Option<usize>) {
+    let report = match backend_cpu::compare(actual, expected) {
+        Ok(r) => r,
+        Err(_) => return (0, 0.0, 0.0, None),
+    };
+    let first_mismatch_index = actual
         .iter()
         .zip(expected.iter())
-        .filter(|(a, e)| !within_tolerance(**a, **e))
-        .count()
-        == 0
+        .position(|(a, e)| is_mismatch(*a, *e));
+    (
+        report.fail_count,
+        report.max_abs_diff,
+        report.max_rel_err,
+        first_mismatch_index,
+    )
 }
 
 /// 候補が opt-in 予算内かを実測レイアウトから判定する（固定除外を避け、
@@ -568,11 +605,27 @@ fn main() {
             continue;
         }
         if parity_cpu == Some(false) {
+            // Ok アームで parity_cpu = Some(_) を設定した経路のみ ここへ
+            // 到達するため candidate_actual は必ず Ok（診断出力の再計算に
+            // 追加の CUDA 起動は不要。既に得た actual を再利用する）。
+            let actual = candidate_actual
+                .as_ref()
+                .expect("parity_cpu == Some(false) implies candidate_actual is Ok");
+            let (mismatch_count, max_abs_diff, max_rel_err, first_mismatch_index) =
+                mismatch_diagnostics(actual, &expected_cpu);
+            let (row_idx, col_idx) = first_mismatch_index
+                .map(|idx| (idx / CORRECTNESS_N as usize, idx % CORRECTNESS_N as usize))
+                .expect("parity_cpu == Some(false) implies mismatch_count > 0");
             println!(
                 "{}: FAIL (parity mismatch vs CPU f32::mul_add reference; measuring anyway as \
                  reference-only value — not usable for adoption decisions until #839's known \
-                 correctness bug is fixed)",
-                candidate.label
+                 correctness bug is fixed; mismatch_count={}/{}, max_abs_diff={:.3e}, \
+                 max_rel_err={:.3e}, first_mismatch=(row={row_idx}, col={col_idx}))",
+                candidate.label,
+                mismatch_count,
+                (CORRECTNESS_M * CORRECTNESS_N) as usize,
+                max_abs_diff,
+                max_rel_err,
             );
         }
 
