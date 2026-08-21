@@ -1967,8 +1967,27 @@ pub fn mma_f16_source_with_warp_tiles(
             ),
         });
     }
-    let warp_m = MMA_M * warp_tiles_m;
-    let warp_n = MMA_N * warp_tiles_n;
+    // `MMA_M`/`MMA_N` は定数だが `warp_tiles_m`/`warp_tiles_n` は任意の
+    // `u32`（呼び出し元検証なしの公開 API）のため、乗算は `checked_mul`
+    // で行い、オーバーフローする入力は境界検査（0 除算・wrap 混入）より
+    // 前に fail-closed で `CudaError::InvalidKernelConfig` として拒否する
+    // （本番経路 panic 禁止規約・関数自身の fail-closed 契約。#822 codex-review 指摘）。
+    let warp_m = warp_tiles_m
+        .checked_mul(MMA_M)
+        .ok_or_else(|| CudaError::InvalidKernelConfig {
+            detail: format!(
+                "mma_f16_source_with_warp_tiles warp_tiles_m={warp_tiles_m} overflows u32 when \
+             multiplied by MMA_M={MMA_M}"
+            ),
+        })?;
+    let warp_n = warp_tiles_n
+        .checked_mul(MMA_N)
+        .ok_or_else(|| CudaError::InvalidKernelConfig {
+            detail: format!(
+                "mma_f16_source_with_warp_tiles warp_tiles_n={warp_tiles_n} overflows u32 when \
+             multiplied by MMA_N={MMA_N}"
+            ),
+        })?;
     if !MMA_BM.is_multiple_of(warp_m) || !MMA_BN.is_multiple_of(warp_n) {
         return Err(CudaError::InvalidKernelConfig {
             detail: format!(
@@ -3409,6 +3428,28 @@ mod tests {
         // launch_bounds 値の不一致（wt=2x2 の正しい導出値は 512）。
         let err = mma_f16_source_with_warp_tiles(2, 2, Some(256))
             .expect_err("launch_bounds mismatch must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    #[test]
+    fn mma_f16_source_with_warp_tiles_rejects_multiplication_overflow() {
+        // `warp_tiles_m * MMA_M` / `warp_tiles_n * MMA_N` が `u32` を
+        // オーバーフローする境界値。境界検査（0 除算・wrap 混入）より前に
+        // `checked_mul` で fail-closed に拒否されることを確認する回帰
+        // テスト（#822 codex-review 指摘）。デバッグビルドの panic・
+        // リリースビルドの wrap 混入いずれも防ぐ。
+        let err = mma_f16_source_with_warp_tiles(u32::MAX, 2, None)
+            .expect_err("warp_tiles_m * MMA_M must not overflow silently");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+
+        let err = mma_f16_source_with_warp_tiles(2, u32::MAX, None)
+            .expect_err("warp_tiles_n * MMA_N must not overflow silently");
         assert!(matches!(
             err,
             crate::error::CudaError::InvalidKernelConfig { .. }
