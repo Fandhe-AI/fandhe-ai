@@ -185,6 +185,51 @@ fn gemm_blis_parallel_large_n_matches_naive_bit_exact_across_thread_pools() {
     }
 }
 
+/// ワークロード閾値直列フォールバック（イシュー #811）・gemv 相当
+/// （m==1）専用経路がスレッド数横断で `gemm_naive` と bit 完全一致する
+/// ことを確認する（`src/gemm_blis/mod.rs` の `mod tests` に閾値境界・
+/// m==1 の単体テストがあるが、それらは実行環境の既定 rayon プールのみを
+/// 対象にする。本テストは `gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools`
+/// と同じくスレッド数横断で確認することで、閾値フォールバック分岐・
+/// m==1 分岐がどちらも rayon プールサイズに依存しない純粋な形状判定
+/// であることを裏付ける）。
+#[test]
+fn gemm_blis_parallel_small_and_elongated_shapes_match_naive_bit_exact_across_thread_pools() {
+    // (67, 61, 63): 67*61*63 = 257,481 < GEMM_THREADING_THRESHOLD
+    // （589,824）。閾値直列フォールバック経路。
+    // (1, 900, 700): m==1（gemv 相当）専用経路。m*n*k=630,000 は閾値を
+    // 超えるため、m==1 判定が閾値判定より先に効くことも併せて確認する。
+    // (500, 1, 600): n==1（列ベクトル。BLIS 経路のまま）。
+    // (400, 400, 2): k==2（gevv 相当。BLIS 経路のまま）。
+    let shapes: [(usize, usize, usize); 4] =
+        [(67, 61, 63), (1, 900, 700), (500, 1, 600), (400, 400, 2)];
+
+    for (idx, &(m, n, k)) in shapes.iter().enumerate() {
+        let seed = 60 + idx as u64;
+        let a = random_matrix(seed, m * k);
+        let b = random_matrix(seed + 1000, k * n);
+
+        let mut c_naive = vec![0.0; m * n];
+        gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        for num_threads in [1usize, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .unwrap_or_else(|e| panic!("{num_threads} スレッドの rayon プール構築に失敗: {e}"));
+
+            let mut c_parallel = vec![0.0; m * n];
+            pool.install(|| gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap());
+
+            assert_eq!(
+                c_naive, c_parallel,
+                "gemm_blis_parallel（m={m}, n={n}, k={k}, num_threads={num_threads}）が \
+                 gemm_naive と bit 一致しない"
+            );
+        }
+    }
+}
+
 /// panel packing バッファを gemm 呼び出し単位で 1 回確保・再利用する
 /// 変更（#556）の回帰テスト。各 rayon 行パネルタスクが `PanelBuffers`
 /// を所有する設計（`src/gemm_blis/mod.rs` の [`PanelBuffers`] ドキュメント
