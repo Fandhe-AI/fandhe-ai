@@ -356,6 +356,6 @@ TF32 経路は `CudaMmaTf32Gemm` 自体に既知 correctness bug（#839。数値
 - OSS 比較キャンペーン表: `docs/perf/oss-gemm-comparison-baseline.md` §7.2
 - #804/#806 の未結線状態の詳細: `docs/perf/cuda-gemm-mma-block-tile-stages.md`（#840 で
   f16 側実機 A/B 実測を完了。§15 参照）・`docs/perf/cuda-gemm-mma-tf32-block-tile.md`
-  （#841 で実行系整備・実機実測は未達。§15 参照）
+  （#841 で実行系整備・実機実測を完了。§15 参照）
 - 実機接続手順: `docs/real-hardware-verification-env.md`（実ホスト名は `docs/
   real-hardware-verification-env.local.md`。Git 管理外）

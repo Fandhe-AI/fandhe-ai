@@ -175,9 +175,10 @@ DGX Spark GB10 実機（CUDA 13.0 toolkit）へ `.ptx` ファイルを転送し
 ## 7. 実測表（DGX Spark GB10 実機・2026-08-22・イシュー #841 実装セッション）
 
 `launch_bounds` は §5.1 記載どおり全候補付与なし（比較基準行と同条件）で計測。
-regs/thread・spill は §6 手順で全候補（`launch_bounds` あり/なし各 2 通り）を
-`ptxas -arch=sm_121 -v` 実測した結果、**13 個全候補で spill 0**（採用ゲート
-条件を全候補が満たす）。以下は `launch_bounds` なし版（計測に使った版）の
+regs/thread・spill は §6 手順で、比較基準行（`launch_bounds` なし 1 通りの
+み）と 6 候補（`launch_bounds` あり/なし各 2 通り）の計 13 ソースを
+`ptxas -arch=sm_121 -v` 実測した結果、**13 個全ソースで spill 0**（採用ゲート
+条件を全ソースが満たす）。以下は `launch_bounds` なし版（計測に使った版）の
 regs/thread を記載する。ms は `gemm_mma_tf32_block_tile_bench` 5 回プロセス
 起動・候補×形状ごとの 5 run 中央値（TFLOPS）から `2*size^3/tflops` で逆算。
 生ログは `/tmp/mma-tf32-block-tile-bench-841/run{1..5}.log`（DGX Spark GB10
@@ -256,8 +257,9 @@ correctness bug」節・実装計画の運用方針を踏襲）。
 0. 実行系（A/B ランナー・計測バイナリ・ユニットテスト）は #841 前半セッション
    で整備済み（§5.1）。本セッションで DGX Spark GB10 実機へ到達し、以下
    1〜3・5 を完了した（§7・§7.1 参照）。
-1. **完了**: §6 の手順で全候補（`launch_bounds` あり/なし各 2 通り・計 13
-   ソース）を `ptxas -v` 実測。**全候補 spill 0**（§7 表・脚注）。
+1. **完了**: §6 の手順で比較基準行（`launch_bounds` なし 1 通りのみ）と
+   6 候補（`launch_bounds` あり/なし各 2 通り）の計 13 ソースを `ptxas -v`
+   実測。**全ソース spill 0**（§7 表・脚注）。
 2. **完了**: `#[ignore]` 数値一致テスト（`tests/gemm_mma_tf32.rs`・
    `tests/mma_tf32_vs_wmma_tf32_staged.rs`）と `parity_nonregression` を実機
    実行。`CudaMmaTf32Gemm` 自体の既知 correctness bug（#839）により想定どお
