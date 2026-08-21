@@ -778,8 +778,13 @@ fn main() {
         None => false,
     };
 
-    if tiled_gemm.is_none() && wmma_gemm.is_none() && mma_gemm.is_none() && mma_tf32_gemm.is_none()
-    {
+    // 判定対象は本番 4 経路（tiled/wmma/mma/wmma_f16 相当）の可用性のみ。
+    // mma_tf32_gemm は参考列専用（best_f32・候補下限には一切組み込まない。
+    // 下記コメント参照）であり、このガードに含めると「本番経路が 1 つも
+    // 使えない」状況でも mma_tf32 のみコンパイル成功した環境で計測ループへ
+    // 入ってしまい、ガードの意図（本番経路の可用性で早期終了を決める）と
+    // ずれる（イシュー #802 Review 指摘）。
+    if tiled_gemm.is_none() && wmma_gemm.is_none() && mma_gemm.is_none() {
         println!(
             "backend-cuda cuda_floor_bench: no kernel path available in this environment \
              (NVRTC unavailable or device unsupported); nothing to measure. \
