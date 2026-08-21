@@ -27,12 +27,37 @@
 //! cargo run -p backend-metal --example gemm_splitk_shapes_bench --release
 //! ```
 //!
-//! 壁時計計測（`wall_ms`・`tflops_lower_bound`）は macOS 実機限定
-//! （`MetalGemm::dispatch_auto` を `bench_harness::protocol::run` で計測する
-//! `gemm_diagnosis.rs` と同型のフォールバック経路。同ファイルの「実測部分の
-//! 設計」節参照。`crate::pipeline::make_pipeline_with_constants` は
-//! `pub(crate)` で example から呼べないため、既存公開 API 経由の
-//! end-to-end 壁時計計測に留め、転送時間の分離は試みない）。
+//! 実測（`tflops`）は macOS 実機限定。**計測境界は `dispatch_tiled_prepared`
+//! （§4 準拠 prepared 入口。`crates/backend-metal/examples/
+//! gemm_f32_prepared_bench.rs`〈#572〉と同型）を使い、A・B バッファの確保・
+//! アップロードは計測ループの外で 1 回だけ行い、計測対象はエンコード＋
+//! コマンドバッファ完了待ちのみに限定する**（readback も対象外）。
+//!
+//! この境界を選ぶ理由: 対象（K 支配的非正方。M・N が小さい）と対照（同程度
+//! FLOPs の正方立方）は総 FLOPs をほぼ揃えていても A・B の転送要素数
+//! （`m*k + k*n = 2*m*k`〈`M==N` のため〉対 `2*s^2`）は対象側が常に多く、
+//! 対象 12 点中で比率（対象/対照）は 2.0〜6.5536 倍の範囲で変動する（最大は
+//! `(32,32,8192)` 対 `(200,200,200)`: `2*32*8192=524288` 要素対
+//! `2*200^2=80000` 要素で 6.5536 倍。最小は `(256,256,2048)` 対
+//! `(512,512,512)` で 2.0 倍）。対象側が常により多くの転送を要する
+//! 方向性のある差のため、`dispatch_auto`（アップロード・readback を含む
+//! end-to-end 壁時計境界）で判定基準
+//! （`docs/perf/metal-gemm-splitk-shapes.md` §5 の `target/control < 0.7`）を
+//! 判定すると、この転送量差だけで閾値を跨ぎうる（実装の並列度不足とは
+//! 無関係な要因が判定へ混入する。codex-review 指摘対応。#810 PR #829）。
+//! `dispatch_tiled_prepared` はクレート内部（`crate::pipeline::
+//! make_pipeline_with_constants` 等）へアクセスせず公開 API のみで
+//! 転送を計測区間外へ切り離せるため、「本イシューは `crates/backend-metal/src/`
+//! を変更しない」制約と両立する。
+//!
+//! **順序バイアス対策**: 対象→対照の固定順で計測すると、サーマル状態・GPU
+//! クロック（DVFS）変動の系統誤差が一方だけに乗りうる（`bench_harness::ab`
+//! モジュールドキュメント・`docs/perf/metal-bench-noise-protocol.md` 参照）。
+//! 本 example は `bench_harness::ab::run_ab`（`crates/backend-metal/examples/
+//! gemm_swizzle_ab_bench.rs` フェーズ 2 と同型）で対象（side A）・対照
+//! （side B）をラウンドごとに順序反転（偶数ラウンドは対象先頭、奇数
+//! ラウンドは対照先頭）した interleaved 計測にし、ドリフトをラウンド間で
+//! 相殺する。
 //!
 //! ## 対象形状・対照形状
 //!
@@ -212,65 +237,75 @@ fn print_analytics_line(label: &str, a: &analytics::ShapeAnalytics) {
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use super::{analytics, print_analytics_line, shape_pairs};
-    use backend_metal::{MetalContext, MetalGemm};
+    use backend_metal::pad::{pad_matrix, pad8};
+    use backend_metal::{MetalBuffer, MetalContext, MetalGemm};
+    use bench_harness::MeasurementConfig;
+    use bench_harness::ab::{AbConfig, run_ab};
     use bench_harness::rng::Xorshift64Star;
-    use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
+    use std::time::Duration;
 
     /// 決定的シード（`gemm_bench.rs::SEED`・`gemm_diagnosis.rs::SEED` と同一値。
     /// 既存ベンチと同じ入力分布に揃える）。
     const SEED: u64 = 0xC0FFEE;
 
-    /// `m×n×k` の `dispatch_auto` を計測する（`gemm_diagnosis.rs::
-    /// wall_measurement` と同型）。呼び出しごとに A・B のアップロード・C の
-    /// readback を含む end-to-end 壁時計計測であり、カーネル時間の下限のみ
-    /// を与える（`gemm_diagnosis.rs` モジュールドキュメント「転送時間分離を
-    /// 試みて撤回した経緯」節と同じ理由でこの example も分離を試みない）。
-    fn wall_measurement(
-        gemm: &MetalGemm,
-        ctx: &MetalContext,
-        m: usize,
-        n: usize,
-        k: usize,
-        config: &MeasurementConfig,
-    ) -> Measurement {
-        let mut rng = Xorshift64Star::new(SEED);
-        let a = rng.fill_vec(m * k);
-        let b = rng.fill_vec(k * n);
+    /// ラウンド数・cooldown・時間ベースウォームアップ下限
+    /// （`gemm_swizzle_ab_bench.rs::{ROUNDS,COOLDOWN,MIN_WARMUP}` と同一値。
+    /// #746 実装計画 §4.2 の初期値を踏襲する）。
+    const ROUNDS: usize = 6;
+    const COOLDOWN: Duration = Duration::from_secs(2);
+    const MIN_WARMUP: Duration = Duration::from_secs(1);
 
-        bench_run(config, || {
-            gemm.dispatch_auto(ctx, &a, &b, m, n, k)
-                .expect("Metal GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
-        })
-        .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない")
+    /// `m×n×k` 用に確保・アップロード済みの prepared 入力一式
+    /// （`gemm_f32_prepared_bench.rs::measure` と同型。計測ループの外で
+    /// 1 回だけ構築し、計測対象からパディング・アップロードを除外する）。
+    struct PreparedShape {
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: backend_metal::tile::TileConfig,
+        a_buf: MetalBuffer,
+        b_buf: MetalBuffer,
+        c_buf: MetalBuffer,
     }
 
-    /// 1 形状分の壁時計 TFLOPS 下限を算出・出力する。
-    fn measure_and_print(
-        label: &str,
-        gemm: &MetalGemm,
-        ctx: &MetalContext,
-        m: usize,
-        n: usize,
-        k: usize,
-        config: &MeasurementConfig,
-    ) {
-        let a = analytics::analyze(m, n, k);
-        print_analytics_line(label, &a);
+    fn prepare(ctx: &MetalContext, m: usize, n: usize, k: usize) -> PreparedShape {
+        let mut rng = Xorshift64Star::new(SEED);
+        let a: Vec<f32> = rng.fill_vec(m * k);
+        let b: Vec<f32> = rng.fill_vec(k * n);
 
-        let measurement = wall_measurement(gemm, ctx, m, n, k, config);
-        let wall = measurement.median_secs;
-        // `tflops_lower_bound`: 転送時間は非負という不等式のみから導かれる
-        // 健全な下限値（`gemm_diagnosis.rs` の同名指標と同一の設計判断）。
-        let tflops_lower_bound = a.flops as f64 / wall / 1e12;
+        let cfg = backend_metal::tile::select(m, n, k);
+        let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+        let a_padded = pad_matrix(&a, m, k, m_eff, k_eff);
+        let b_padded = pad_matrix(&b, k, n, k_eff, n_eff);
 
-        println!(
-            "label={label} m={m} n={n} k={k} wall_ms={:.4} wall_q1_ms={:.4} wall_q3_ms={:.4} \
-             tflops_lower_bound={:.4}",
-            wall * 1e3,
-            measurement.q1_secs * 1e3,
-            measurement.q3_secs * 1e3,
-            tflops_lower_bound,
-        );
+        let a_buf = MetalBuffer::new_with_data(ctx, &a_padded)
+            .expect("A バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
+        let b_buf = MetalBuffer::new_with_data(ctx, &b_padded)
+            .expect("B バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
+        let c_buf = MetalBuffer::new_zeroed(ctx, m_eff * n_eff)
+            .expect("C バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
+
+        PreparedShape {
+            m_eff,
+            n_eff,
+            k_eff,
+            cfg,
+            a_buf,
+            b_buf,
+            c_buf,
+        }
+    }
+
+    fn dispatch_prepared(gemm: &MetalGemm, ctx: &MetalContext, p: &PreparedShape) {
+        gemm.dispatch_tiled_prepared(
+            ctx, &p.a_buf, &p.b_buf, &p.c_buf, p.m_eff, p.n_eff, p.k_eff, p.cfg,
+        )
+        .expect("Metal f32 SimdgroupTiled GEMM dispatch_tiled_prepared に失敗した（実機でのみ実行する前提）");
+    }
+
+    fn tflops(m: usize, n: usize, k: usize, median_secs: f64) -> f64 {
+        let flops = 2.0 * (m as f64) * (n as f64) * (k as f64);
+        flops / median_secs / 1e12
     }
 
     /// `--iters=<N>` で warmup・計測回数を引き上げる（`gemm_diagnosis.rs::
@@ -288,26 +323,83 @@ mod macos_impl {
         Ok(MeasurementConfig::default())
     }
 
+    /// 対象（side A）・対照（side B）1 組を prepared 境界・`run_ab` の
+    /// 順序反転 interleave で計測し、劣化率（§5 判定基準の分子/分母）を
+    /// 出力する。
+    fn measure_and_print_pair(
+        gemm: &MetalGemm,
+        ctx: &MetalContext,
+        target: (usize, usize, usize),
+        control_side: usize,
+        ab_config: &AbConfig,
+        measurement_config: &MeasurementConfig,
+    ) {
+        let (tm, tn, tk) = target;
+        let s = control_side;
+
+        let target_analytics = analytics::analyze(tm, tn, tk);
+        let control_analytics = analytics::analyze(s, s, s);
+        print_analytics_line("target", &target_analytics);
+        print_analytics_line("control", &control_analytics);
+
+        let target_prepared = prepare(ctx, tm, tn, tk);
+        let control_prepared = prepare(ctx, s, s, s);
+
+        // ウォームアップディスパッチ 1 回（`gemm_f32_prepared_bench.rs::measure`
+        // と同じ狙い。`run_ab` 内の `extended_warmup` に先立って構成解決の
+        // 副作用〈パイプラインキャッシュ〉を確定させる）。
+        dispatch_prepared(gemm, ctx, &target_prepared);
+        dispatch_prepared(gemm, ctx, &control_prepared);
+
+        let result = run_ab(
+            ab_config,
+            measurement_config,
+            || dispatch_prepared(gemm, ctx, &target_prepared),
+            || dispatch_prepared(gemm, ctx, &control_prepared),
+        )
+        .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
+
+        let target_tflops = tflops(tm, tn, tk, result.median_a_secs);
+        let control_tflops = tflops(s, s, s, result.median_b_secs);
+        let degradation_ratio = target_tflops / control_tflops;
+
+        println!(
+            "target=({tm},{tn},{tk}) control=({s},{s},{s}) target_tflops={:.4} \
+             control_tflops={:.4} target_over_control={:.4} spread_target={:.4} \
+             spread_control={:.4} target_actual_groups={} control_actual_groups={}",
+            target_tflops,
+            control_tflops,
+            degradation_ratio,
+            result.spread_a,
+            result.spread_b,
+            target_analytics.actual_groups,
+            control_analytics.actual_groups,
+        );
+    }
+
     pub fn main() {
-        let config = match resolve_measurement_config() {
+        let measurement_config = match resolve_measurement_config() {
             Ok(config) => config,
             Err(msg) => {
                 eprintln!("{msg}");
                 std::process::exit(1);
             }
         };
+        let ab_config = AbConfig::new(ROUNDS, COOLDOWN, MIN_WARMUP)
+            .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
 
         let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
         let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した");
 
-        // サーマルドリフト対策として対象・対照を interleave する
-        // （`docs/perf/metal-bench-noise-protocol.md` の順序バイアス相殺の
-        // 趣旨。A/B 採否判定ではないため `run_ab` までは不要）。
         for pair in shape_pairs() {
-            let (m, n, k) = pair.target;
-            let s = pair.control_side;
-            measure_and_print("target", &gemm, &ctx, m, n, k, &config);
-            measure_and_print("control", &gemm, &ctx, s, s, s, &config);
+            measure_and_print_pair(
+                &gemm,
+                &ctx,
+                pair.target,
+                pair.control_side,
+                &ab_config,
+                &measurement_config,
+            );
         }
     }
 }
@@ -322,9 +414,10 @@ fn main() {
 #[cfg(not(target_os = "macos"))]
 fn main() {
     println!(
-        "backend-metal gemm_splitk_shapes_bench example: wall_ms/tflops_lower_bound measurement \
-         requires macOS (Apple Silicon). Analytical values (tile::select 選択結果・threadgroup 数・ \
-         K ループ回数・MLX split-K Case 1 選択域該当) below are computed on any platform.\n"
+        "backend-metal gemm_splitk_shapes_bench example: tflops measurement (dispatch_tiled_prepared \
+         boundary・run_ab interleaved) requires macOS (Apple Silicon). Analytical values \
+         (tile::select 選択結果・threadgroup 数・K ループ回数・MLX split-K Case 1 選択域該当) \
+         below are computed on any platform.\n"
     );
     for pair in shape_pairs() {
         let (m, n, k) = pair.target;

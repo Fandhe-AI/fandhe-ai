@@ -24,12 +24,17 @@ gemm_splitk_shapes_bench --release` を実行してから記入する。**
   `tile::select(m, n, k)` の選択結果から threadgroup 数（`actual_groups`）・K ループタイル数
   （`k_tile_count`）・MLX `steel_gemm_splitk_axpby`（Case 1・非 NAX）選択条件への該当有無
   （`mlx_case1_domain`。式の出典は `docs/backend-metal-splitk-decision.md` §1）を算出する
-- **実測値**（macOS 限定。`macos_impl` モジュール）: `MetalGemm::dispatch_auto` を
-  `bench-harness::protocol::run`（`MeasurementConfig::default()` = warmup 20 回・計測 20 回・中央値/Q1/Q3。
-  TASK-8.1）で壁時計計測する。`crate::pipeline::make_pipeline_with_constants` が `pub(crate)` で example
-  から呼べないため（#487 と同一の制約）、転送時間の分離は試みず `wall_ms` を A・B アップロード＋カーネル
-  実行＋C readback の end-to-end 時間として報告し、`tflops_lower_bound`（転送時間は非負という不等式のみ
-  から導かれる健全な下限値）を算出する
+- **実測値**（macOS 限定。`macos_impl` モジュール）: `MetalGemm::dispatch_tiled_prepared`（§4 準拠
+  prepared 入口。イシュー #572）を使い、A・B バッファの確保・アップロードを計測ループの外で 1 回だけ
+  行い、計測対象をエンコード＋コマンドバッファ完了待ちのみに限定する（readback も対象外）。対象
+  （K 支配的非正方）・対照（正方立方）は総 FLOPs をほぼ揃えていても A・B の転送要素数は対象側が
+  常に多く（2.0〜6.5536 倍。`gemm_splitk_shapes_bench.rs` モジュールドキュメント参照）、`dispatch_auto`
+  （アップロード・readback を含む end-to-end 境界）で判定すると転送量差だけで §5 の判定基準
+  （`< 0.7`）を跨ぎうるため（codex-review 指摘対応。#810 PR #829）、prepared 境界を採用した。
+  併せて `bench_harness::ab::run_ab`（`gemm_swizzle_ab_bench.rs` フェーズ 2 と同型）で対象（side A）・
+  対照（side B）をラウンド（`ROUNDS=6`）ごとに順序反転した interleaved 計測にし、サーマル状態・GPU
+  クロック（DVFS）変動の順序バイアスをラウンド間で相殺する（`docs/perf/metal-bench-noise-protocol.md`
+  参照。同じく codex-review 指摘対応。#810 PR #829）
 
 ## 2. 対象形状群
 
@@ -83,27 +88,31 @@ gemm_splitk_shapes_bench --release` を実行してから記入する。**
 
 ## 4. 実測結果（記入欄。Mac 実機セッションで記入）
 
-`cargo run -p backend-metal --example gemm_splitk_shapes_bench --release`（既定 20/20 計測。ノイズが
-大きい場合は `--iters=200` を付与）の出力を転記する。
+`cargo run -p backend-metal --example gemm_splitk_shapes_bench --release`（既定 `ROUNDS=6`・warmup 20
+回・計測 20 回。`ROUNDS` 単位で `dispatch_tiled_prepared` を interleaved 計測するため、`--iters=N` の
+引き上げは 12 形状組 × `ROUNDS` × 2 side 分の実行時間に直接乗る点に注意する。ノイズが大きい場合は
+`--iters=200` より先に `docs/perf/metal-bench-noise-protocol.md` の cooldown／ROUNDS 調整手順を検討
+すること）の出力（`target_tflops`／`control_tflops`／`target_over_control`／`spread_target`／
+`spread_control`）を転記する。
 
 - 実行コミット SHA: `______`
 - 実機: `______`（`docs/real-hardware-verification-env.md` §1 準拠。想定 M4 Max）
 - 実行日時: `______`
 
-| target (M,N,K) | target wall_ms (median) | target tflops_lower_bound | control (S,S,S) | control wall_ms (median) | control tflops_lower_bound | 劣化率 (target/control) |
+| target (M,N,K) | target_tflops (median) | control (S,S,S) | control_tflops (median) | target_over_control | spread_target | spread_control |
 |---|---|---|---|---|---|---|
-| (32,32,2048) | | | (128,128,128) | | | |
-| (32,32,4096) | | | (160,160,160) | | | |
-| (32,32,8192) | | | (200,200,200) | | | |
-| (64,64,2048) | | | (200,200,200) | | | |
-| (64,64,4096) | | | (256,256,256) | | | |
-| (64,64,8192) | | | (320,320,320) | | | |
-| (128,128,2048) | | | (320,320,320) | | | |
-| (128,128,4096) | | | (408,408,408) | | | |
-| (128,128,8192) | | | (512,512,512) | | | |
-| (256,256,2048) | | | (512,512,512) | | | |
-| (256,256,4096) | | | (648,648,648) | | | |
-| (256,256,8192) | | | (816,816,816) | | | |
+| (32,32,2048) | | (128,128,128) | | | | |
+| (32,32,4096) | | (160,160,160) | | | | |
+| (32,32,8192) | | (200,200,200) | | | | |
+| (64,64,2048) | | (200,200,200) | | | | |
+| (64,64,4096) | | (256,256,256) | | | | |
+| (64,64,8192) | | (320,320,320) | | | | |
+| (128,128,2048) | | (320,320,320) | | | | |
+| (128,128,4096) | | (408,408,408) | | | | |
+| (128,128,8192) | | (512,512,512) | | | | |
+| (256,256,2048) | | (512,512,512) | | | | |
+| (256,256,4096) | | (648,648,648) | | | | |
+| (256,256,8192) | | (816,816,816) | | | | |
 
 ## 5. 判定基準（計測前に事前定義。ベンチ判定基準であり、ガードレール閾値・テスト許容誤差とは別軸）
 
@@ -111,12 +120,13 @@ gemm_splitk_shapes_bench --release` を実行してから記入する。**
 「採用検討推奨」と判定する（確定的な採用可否は別途実装 issue でのユーザー承認を要する。
 `.claude/rules/out-of-scope-tracking.md`）:
 
-1. **劣化率**: 中央値ベースで `target tflops_lower_bound / control tflops_lower_bound < 0.7`
-   （同程度 FLOPs の正方立方形状比で 30% 以上の劣化）
+1. **劣化率**: 中央値ベースで `target_tflops / control_tflops < 0.7`（`target_over_control` 列。
+   同程度 FLOPs の正方立方形状比で 30% 以上の劣化）
 2. **並列度不足の解析裏付け**: `actual_groups < 40`（実機 GPU コア数。§3 参照）
 
-いずれも満たさない、または実測ばらつき（Q1/Q3）が判定を左右する水準の場合は「不採用（現状維持）」
-とし、その根拠を §6 に記録する。本判定基準は本イシューが新規に事前登録する数値であり、
+いずれも満たさない、または実測ばらつき（`spread_target`／`spread_control`。
+`bench_harness::ab::STABILITY_SPREAD_GATE`＝0.05 を目安とする）が判定を左右する水準の場合は
+「不採用（現状維持）」とし、その根拠を §6 に記録する。本判定基準は本イシューが新規に事前登録する数値であり、
 `guardrail.toml`・バックエンド間数値一致テストの許容誤差（`.claude/rules/coding-rust.md`）とは
 無関係である（`.claude/rules/security.md`「自己修復ループ固有のガードレール」の対象外）。
 
