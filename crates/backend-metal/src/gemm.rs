@@ -187,8 +187,15 @@ pub struct MetalGemm {
     /// 既定挙動は不変。
     swizzle_enabled: bool,
     /// simdgroup 細粒度同期（イシュー #809）をこのインスタンスの
-    /// `SimdgroupTiled`（f32/f16 とも）経路（[`Self::pipeline_for_tile`]・
-    /// [`Self::pipeline_for_tile_f16`]）で有効化するかどうか。
+    /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]）で
+    /// 有効化するかどうか。`shaders/gemm.metal` の `gemm_simdgroup_tiled`
+    /// staged 経路のみが `FINE_BARRIER_ENABLED` を参照する。
+    /// [`Self::pipeline_for_tile_f16`] にも同じ値を伝播するが、
+    /// `gemm_simdgroup_tiled_f16` は `FINE_BARRIER_ENABLED` を参照しないため
+    /// 値の特殊化自体は無害な no-op（`crate::pipeline::
+    /// make_pipeline_with_constants` の同名引数ドキュメンテーションコメント
+    /// 参照）で、f16 経路の挙動は本フィールドの値に関わらず不変（f16 側へ
+    /// 細粒度同期を実装する場合は本コメントと合わせて更新すること）。
     /// `swizzle_enabled` と同じ設計判断（instance フィールド化により
     /// base（`false`）/head（`true`）の 2 `MetalGemm` を同一プロセス内に
     /// 構築して interleaved A/B 計測できるようにする）。`MetalGemm::new` は

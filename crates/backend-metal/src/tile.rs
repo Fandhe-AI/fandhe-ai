@@ -883,9 +883,14 @@ pub(crate) const SWIZZLE_LOG: u32 = 2;
 pub(crate) const SWIZZLE_ENABLED: bool = false;
 
 /// simdgroup 細粒度同期（イシュー #809）を本番 dispatch 経路
-/// （`crate::gemm::MetalGemm::pipeline_for_tile`/`pipeline_for_tile_f16`）と
+/// （`crate::gemm::MetalGemm::pipeline_for_tile`。**f32 経路のみ**）と
 /// シェーダ側 `FINE_BARRIER_ENABLED` function constant で実際に有効化する
 /// かどうかのゲート（[`SWIZZLE_ENABLED`] と同型の設計判断）。
+/// `crate::gemm::MetalGemm::pipeline_for_tile_f16`（`gemm_simdgroup_tiled_f16`）
+/// にも同じ値が伝播するが、当該カーネルは `FINE_BARRIER_ENABLED` を
+/// 参照しないため無害な no-op であり f16 経路の挙動は変化しない
+/// （`crate::gemm::MetalGemm` の `fine_barrier_enabled` フィールド
+/// ドキュメンテーションコメント参照）。
 ///
 /// **既定は `false`（無効）**: `gemm_simdgroup_tiled` の staged 経路 kk ループへ
 /// `simdgroup_barrier(mem_flags::mem_none)` を挿入する構成の性能効果が
