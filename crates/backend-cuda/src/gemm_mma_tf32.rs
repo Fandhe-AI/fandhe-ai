@@ -173,7 +173,15 @@ impl CudaMmaTf32Gemm {
             return Ok(());
         }
         if k == 0 {
+            // `memset_zeros` は非同期発行のため、本関数の「GPU 処理完了を
+            // 待って return する」契約（本関数ドキュメンテーションコメント
+            // 冒頭）をこの分岐でも守るには明示的な `synchronize` が必要
+            // （PR #823 codex-review 指摘是正: 通常経路はカーネル起動後に
+            // `synchronize` を呼ぶが、この早期 return パスは呼ばずに戻って
+            // いたため、host 側がゼロ埋め完了前に完了を観測しうるレースが
+            // あった）。
             self.stream.memset_zeros(c_dev)?;
+            self.stream.synchronize()?;
             return Ok(());
         }
 

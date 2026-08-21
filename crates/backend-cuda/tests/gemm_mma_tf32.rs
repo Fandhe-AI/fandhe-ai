@@ -162,7 +162,15 @@ fn launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
         CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
 
     // m==0: グリッド次元がゼロになり起動自体が no-op。c_dev は 0 要素。
-    let (a_dev, b_dev) = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
+    // `launch_tf32` は no-op 早期 return 前に `validate_gemm_dims`
+    // （a.len()==m*k・b.len()==k*n の厳密一致要求）を通すため、m==0 でも
+    // b は k*n=16 要素必要（`tests/gemm_mma.rs::
+    // mma_f16_zero_dim_shape_returns_empty_without_launch` と同じ契約。
+    // PR #823 codex-review 指摘是正: 空バッファのままだと b の長さ不一致で
+    // no-op 契約の検証前に `InvalidShape` になる）。
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[], &[0.0f32; 16])
+        .expect("upload_f32 must succeed");
     let mut c_dev = gemm
         .alloc_output_f32(0, 4)
         .expect("alloc_output_f32 must succeed");
@@ -170,8 +178,10 @@ fn launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
         .expect("launch_tf32 must succeed as a no-op for m==0");
     assert_eq!(gemm.download_f32(&c_dev).unwrap(), Vec::<f32>::new());
 
-    // n==0: 同様。
-    let (a_dev, b_dev) = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
+    // n==0: 同様。a は m*k=16 要素必要。
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&[0.0f32; 16], &[])
+        .expect("upload_f32 must succeed");
     let mut c_dev = gemm
         .alloc_output_f32(4, 0)
         .expect("alloc_output_f32 must succeed");
