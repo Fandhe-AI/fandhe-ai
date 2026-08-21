@@ -394,6 +394,38 @@ pub mod diagnostics {
     // 本イシュー時点で実機到達不能のため無変更のまま。計画 Step F 参照）。
     pub use kernels_mma::mma_f16_source_with_block_tile;
 
+    // イシュー #840: #804 が整備したブロックタイル拡大・ステージ数増
+    // 候補ソース生成（上記 `mma_f16_source_with_block_tile`）を実際に
+    // NVRTC コンパイル・起動して実機 A/B 計測するためのランナー型・
+    // レイアウト導出ヘルパーの再公開。`examples/
+    // gemm_mma_block_tile_bench.rs`（診断専用 A/B ランナー）専用。
+    // `mma_f16_source_with_block_tile` と同じ「非公開モジュールへの薄い
+    // 診断用ラッパー」方針。本番経路（`gemm_mma.rs`）はこの再公開・型に
+    // 一切依存しない（本番定数〈`MMA_BM`/`MMA_BN`/`MMA_STAGES`〉・
+    // `gemm_mma.rs` 本番コンストラクタは本イシューで無変更。採否判断・
+    // 本番結線は後続イシュー #842 のスコープ）。
+    pub use kernels_mma::{
+        CompiledMmaF16BlockTileKernel, MmaBlockTileLayout, RenderedMmaF16BlockTileKernel,
+        render_mma_f16_block_tile,
+    };
+
+    // derive_mma_block_tile_layout は非公開関数（`kernels_mma.rs` 内部の
+    // レイアウト導出ロジックの単一の真実源）だが、`examples/
+    // gemm_mma_block_tile_bench.rs` は候補表定義・opt-in 予算比較・
+    // 除外ログ出力に導出結果（`MmaBlockTileLayout`）を必要とするため、
+    // 薄いラッパー関数として再公開する（`mma_swizzle_group_width` 等の
+    // 「非公開ロジックへの薄い診断用関数ラッパー」方針と同型）。
+    pub fn mma_f16_block_tile_layout(
+        bm: u32,
+        bn: u32,
+        bk: u32,
+        stages: u32,
+        warp_tiles_m: u32,
+        warp_tiles_n: u32,
+    ) -> Result<MmaBlockTileLayout, crate::error::CudaError> {
+        kernels_mma::derive_mma_block_tile_layout(bm, bn, bk, stages, warp_tiles_m, warp_tiles_n)
+    }
+
     // イシュー #806: TF32 生 mma.sync 経路（`kernels_mma_tf32.rs`）の
     // ベースソース・ブロックタイル拡大候補を `examples/
     // mma_tf32_ptx_dump.rs` から観測するための再公開。

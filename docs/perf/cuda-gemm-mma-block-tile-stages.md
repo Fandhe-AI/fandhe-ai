@@ -5,32 +5,32 @@ mma_f16 ブロックタイル拡大とステージ数増」の実測記録。先
 cuda-gemm-mma-warp-tile-register-budget.md`）の warp タイル拡大候補の実機実測が
 「実行待ち」のまま引き継がれた状態で着手した。
 
-## 状態: 未実測・実機実行待ち（Step F フォールバック）
+## 状態: 実機 A/B 実測完了（イシュー #840）。採否判断は #842
 
-本実装セッションでは以下 2 経路のいずれからも CUDA toolkit（`ptxas`/`nvrtc`
-本体）へ到達できなかった:
+#804（PR #831）は本ドキュメントを「未実測・実機実行待ち（Step F フォール
+バック）」のまま残した。イシュー #840 は DGX Spark GB10（sm_121）実機へ
+到達し、以下を実施した:
 
-1. **DGX Spark GB10 実機 SSH 経路**: `docs/real-hardware-verification-env.local.md`
-   （実ホスト名を記す gitignore 対象ファイル）が本 worktree に存在せず、
-   `CUDA_NODE` 環境変数・SSH config 上のノード alias も未設定のため到達不能
-   （#803 の実測記録セッションと同一の制約。`docs/perf/
-   cuda-gemm-mma-warp-tile-register-budget.md` §5 の到達試行記録参照）。
-2. **ローカル toolkit 経由の静的 `ptxas` 実測経路**: `which ptxas nvcc` はいずれも
-   未検出、`ldconfig -p` にも `libnvrtc`/`ptxas` 相当のエントリはなく、
-   `libcuda.so.1`（driver stub）のみが存在した。
+1. 候補を実際に NVRTC コンパイル・起動する A/B ランナー（`kernels_mma.rs::
+   RenderedMmaF16BlockTileKernel`/`CompiledMmaF16BlockTileKernel`・
+   `examples/gemm_mma_block_tile_bench.rs`。#742 の `RenderedWmmaTf32StagedDynKernel`
+   と同型設計）を新設
+2. 実機 parity ゲート（`tests/gemm_mma.rs`・`cpu_cuda_mma_parity.rs`・
+   `parity_nonregression.rs`。debug/release 両プロファイル）で非後退を確認
+3. A/B ランナーを 5 回プロセス起動し、候補×形状ごとの実測値を記録（§4・
+   新設 §4.1「A/B 実測（5 回計測）」）
+4. `mma_ptx_dump` example で候補 PTX をダンプし、ノード上 `ptxas -arch=sm_121
+   -v` で registers/thread・spill を実測（§4 表を充足）
 
-推定値で実測表を埋めず、**実装計画 Step F（実機不達時のフォールバック）**に
-従い、以下のみを本イシューの成果物とする:
+**結果を先取りすると、4 候補中 3 候補が実機で構造的な不備（数値不一致・
+起動時リソース超過）を示し、残る 1 候補（`bt128x256_s4`）は机上除外のまま
+だった。よって #840 時点で採用可能な候補は無い**（詳細根拠は §4・§4.1）。
+**採否の最終判断・原因調査・是正・本番結線は後続 #842 のスコープ**とし、
+本イシューでは実測記録に専念する。
 
-- 診断機構の拡張（`kernels_mma.rs::mma_f16_source_with_block_tile`。§2 参照）
-- 本ドキュメントの机上候補表（§3）
-- `examples/mma_ptx_dump.rs` への候補ダンプ追加
-
-**本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・`swizzle.rs` の
-`SWIZZLE_APPLY_MIN_M_BLOCKS`/`_N_BLOCKS`・`gemm_auto.rs` の予算 assert は
-一切変更していない**。後続セッションが実機（または `ptxas`/`nvrtc` を持つ
-ローカル環境）へ到達できた場合、以下の 2 経路のいずれかで §4 の実測表を
-埋めればよい（本探索を再実施する必要はない）。
+**本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・`gemm_mma.rs` 本番
+コンストラクタ・`swizzle.rs` の `SWIZZLE_APPLY_MIN_M_BLOCKS`/`_N_BLOCKS`・
+`gemm_auto.rs` の予算 assert・tolerance 定数は一切変更していない**。
 
 ## 1. 背景
 
@@ -68,8 +68,11 @@ validate_wmma_tf32_staged_dyn_config` と同じ「デバイス実測値を呼び
   （`as_tile`/`bs_tile`）を `extern __shared__` バッファ上のポインタへ変換した
   候補ソースを返す。多次元添字構文（`as_tile[stage][row][col]`）はそのまま
   流用し、宣言 2 行の置換のみでインデックス計算・バンク位相設計を不変に保つ。
-  **この経路は `nvrtc`/`ptxas` 実機での構文検証を一度も通過していない**（本節
-  冒頭「状態」参照）。
+  **この経路はイシュー #840 で GB10 実機の NVRTC/ptxas 構文検証・起動検証を
+  通過した**（4 候補すべてが NVRTC コンパイル・`ptxas -v` に成功。§4）。
+  構文としては有効だが、`bt128x256_s3_wt4x4` は起動時リソース超過
+  （§4.1「実測結果」参照）、`bt64x128_s4`/`bt128x128_s3_wt2x4` は数値一致
+  fail であり、いずれも構文検証とは別の欠陥として残っている。
 - `optin_budget_bytes` 超: 机上除外として `CudaError::InvalidKernelConfig` を
   返す（実機到達を待たず判定できる）。
 
@@ -105,66 +108,145 @@ PR #831。`crates/backend-cuda/examples/mma_ptx_dump.rs` 該当コメント参�
 GB10 より opt-in 上限が大きいデバイスでは本候補もダンプされ、8 ファイル
 （4 候補 × launch_bounds なし/あり）が生成されうる。
 
-### 3.2 occupancy 導出式（実測後に埋める）
+### 3.2 occupancy 導出式
 
 `docs/perf/cuda-gemm-mma-warp-tile-register-budget.md` §3.2 と同じ導出式
 （レジスタ制約 `floor(65536 / (regs/thread × threads/block))`・smem 制約
 `floor(SM あたり smem 容量 / SMEM_BYTES)`・`warps/SM = blocks/SM ×
-threads/block / 32`）を適用する。SM あたり総レジスタ数・smem 容量は
-`docs/perf/sm121-device-attributes.md` の実測値を出典とする。
+threads/block / 32`）を適用する。SM あたり総レジスタ数（`MAX_REGISTERS_
+PER_MULTIPROCESSOR=65,536`）・SM あたり smem 容量（`MAX_SHARED_MEMORY_
+PER_MULTIPROCESSOR=102,400 bytes`）は `docs/perf/sm121-device-attributes.md`
+の実測値を出典とする。
 
 ### 3.3 spill 判定
 
 `ptxas -v` の `spill stores`/`spill loads` が 0 bytes かどうかを候補ごとに
 記録する（#804 受け入れ条件「spill 0 維持」の分母になる）。
 
-## 4. 実機実測結果
+## 4. 実機実測結果（イシュー #840・GB10・2026-08-22）
 
-**実行待ち**（`docs/real-hardware-verification-env.md` の手順で DGX Spark GB10
-（sm_121）実機へ到達し `mma_ptx_dump` example を実行、または `ptxas`/`nvrtc` を
-持つローカル環境で同等のコンパイル・計測を行い、GB10（opt-in 上限
-101,376B）では 3 候補 × launch_bounds なし/あり の 6 ファイル分（`bt128x256_s4`
-は GB10 実測上限超過のため非致命的に除外されダンプされない。§3.1 参照）、
-GB10 より opt-in 上限が大きいデバイスでは `bt128x256_s4` を含む 4 候補 ×
-launch_bounds なし/あり の 8 ファイル分の `ptxas -v` を掛けて本節を埋める
-こと。到達できない場合は推定で埋めず本記録のまま残す。`docs/perf/
-cuda-gemm-mma-warp-tile-register-budget.md` §5 と同じ「実行待ち」記録方式）。
+`examples/mma_ptx_dump.rs --out-dir /tmp/issue840-ptx` で候補 PTX をダンプし
+（`device: optin_budget_bytes=101376`・`num_sms=48`。GB10 実測。`bt128x256_s4`
+は §3.1 のとおり非致命的に desk-excluded、6 ファイルが生成された）、ノード上
+`ptxas -arch=sm_121 -v` を実行して registers/thread・spill・occupancy 上限を
+取得した。
 
-| 候補 | launch_bounds | registers/thread | spill stores (bytes) | spill loads (bytes) | blocks/SM（レジスタ制約） | blocks/SM（smem 制約） | warps/SM |
-|------|---------------|-------------------|----------------------|----------------------|--------------------------|--------------------------|----------|
-| ステージ増のみ | なし | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| ステージ増のみ | あり(512) | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| タイル拡大 | なし | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| タイル拡大 | あり(512) | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| タイル拡大+ | なし | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| タイル拡大+ | あり(512) | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| タイル拡大+ステージ増（opt-in 上限がより大きいデバイスのみ） | なし | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
-| タイル拡大+ステージ増（opt-in 上限がより大きいデバイスのみ） | あり(512) | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
+| 候補 | launch_bounds | registers/thread | spill stores (bytes) | spill loads (bytes) | blocks/SM（レジスタ制約） | blocks/SM（smem 制約） | blocks/SM（採用値） | warps/SM |
+|------|---------------|-------------------|----------------------|----------------------|--------------------------|--------------------------|------|----------|
+| 現行（基準） `mma_f16_base` | なし | 58 | 0 | 0 | floor(65536/(58×512))=2 | floor(102400/41472)=2 | 2 | 32 |
+| ステージ増のみ `bt64x128_s4` | なし | 54 | 0 | 0 | floor(65536/(54×512))=2 | floor(102400/55296)=1 | **1** | 16 |
+| ステージ増のみ `bt64x128_s4` | あり(512) | 60 | 0 | 0 | floor(65536/(60×512))=2 | floor(102400/55296)=1 | **1** | 16 |
+| タイル拡大 `bt128x128_s3_wt2x4` | なし | 82 | 0 | 0 | floor(65536/(82×512))=1 | floor(102400/56832)=1 | **1** | 16 |
+| タイル拡大 `bt128x128_s3_wt2x4` | あり(512) | 92 | 0 | 0 | floor(65536/(92×512))=1 | floor(102400/56832)=1 | **1** | 16 |
+| タイル拡大+ `bt128x256_s3_wt4x4` | なし | 130 | 0 | 0 | floor(65536/(130×512))=**0** | floor(102400/81408)=1 | **0**（起動不能） | 0 |
+| タイル拡大+ `bt128x256_s3_wt4x4` | あり(512) | 128 | 0 | 0 | floor(65536/(128×512))=1（境界値 128×512=65,536） | floor(102400/81408)=1 | 1（未計測。下記 §4.1 参照） | 16 |
+| タイル拡大+ステージ増 `bt128x256_s4` | — | — | — | — | — | — | 机上除外（108,544B > opt-in 101,376B） | — |
+
+**spill は全候補 0（stores/loads とも）**。`bt128x256_s3_wt4x4`（`launch_bounds`
+なし）は 130 registers/thread × 512 threads/block = 66,560 > `MAX_REGISTERS_
+PER_MULTIPROCESSOR`（65,536）で **1 ブロック分のレジスタすら SM に収まらない**
+（`blocks/SM（レジスタ制約）=0`）。これが §4.1 で観測した
+`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`（"too many resources requested for
+launch"）の定量的な根拠である。`__launch_bounds__(512)` 付き変種（128
+registers/thread）は 128×512=65,536 とちょうど境界値に収まり `blocks/SM=1`
+の計算上は起動可能だが、**本イシューの A/B 計測（§4.1）は `launch_bounds` を
+付与しない構成のみを対象としたため未計測**（占有率ヒントなしでの本番同条件
+比較を優先したため。実装計画「全候補 threads/block=512（launch_bounds は
+付与しない）」参照）。境界値での実起動可否・実測は #842 のスコープとする。
+
+`bt64x128_s4`／`bt128x128_s3_wt2x4` はいずれも `blocks/SM=1`（現行基準の
+`2` より低い）で、たとえ数値一致 fail が解消されても **occupancy 面では現行
+基準を下回る**ことが机上・実測の両方から確認できる（後述 §4.1 の性能比較は
+数値不一致のため未実施だが、occupancy だけで見ても改善余地は薄い）。
+
+## 4.1 A/B 実測（5 回計測。イシュー #840）
+
+`cargo run -p backend-cuda --example gemm_mma_block_tile_bench --release
+--features internal-diagnostics` を **5 回**プロセス起動した（計測前後の
+GPU 占有状況: `nvidia-smi --query-gpu=utilization.gpu` は 5 run 通じて
+`0 %`、`--query-compute-apps` は `comfyui-env`〈170MiB〉・`kokoro`〈870MiB〉の
+アイドル常駐プロセスのみで、計測対象プロセスの競合なし）。
+
+**実機 parity ゲート（性能値採用に先立ち実施。#807 契約）**: `cargo test -p
+backend-cuda --features internal-diagnostics --test gemm_mma --test
+cpu_cuda_mma_parity --test parity_nonregression -- --ignored
+--test-threads=1` を debug/release 両プロファイルで実行。`mma_f16_
+k4096_stress`（既知 fail・#389 §5.3。`fail_count=101/65536,
+max_abs_diff=6.250e-2, max_rel_err=5.849e-1`）は debug/release で完全に
+同一の統計値となり非後退を確認した。他の parity テスト・`parity_
+baselines_do_not_regress` はいずれも pass。
+
+**結果（5 run とも決定的に同一の結果。乱数シード `0xC0FFEE` 固定・入力競合
+なしのため run 間の分岐なし）**:
+
+| 候補 | 512 | 1024 | 2048 | 4096 | 判定 |
+|------|-----|------|------|------|------|
+| `mma_f16_base`（現行・比較基準） | 17.39 TFLOPS | 38.68 TFLOPS | 52.23 TFLOPS | 55.78 TFLOPS | 比較基準（5 run 中央値。ratio=1.0000） |
+| `bt64x128_s4` | — | — | — | — | **FAIL**（parity mismatch vs CPU `f32::mul_add` 参照値。統一複合判定〈相対 1e-3 未満 or 絶対 1e-5 未満〉不通過。計測せず） |
+| `bt128x128_s3_wt2x4` | — | — | — | — | **FAIL**（同上） |
+| `bt128x256_s3_wt4x4` | — | — | — | — | **SKIP**（`CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES: "too many resources requested for launch"`。§4 の register 予算超過が定量的根拠） |
+| `bt128x256_s4` | — | — | — | — | 机上除外（108,544B > opt-in 101,376B。§3.1） |
+
+`mma_f16_base` の 512/1024/2048/4096 各列は 5 run の中央値（TFLOPS。生値は
+`/tmp/issue840-ab/run{1..5}.log`。512: [17.3857, 17.4581, 17.2074, 17.2417,
+17.4218] → 中央値 17.3857、1024: [39.0622, 37.7653, 38.6795, 38.7129,
+38.6120] → 中央値 38.6795、2048: [52.5597, 52.2858, 52.2045, 52.2299,
+52.2045] → 中央値 52.2299、4096: [55.8658, 55.7754, 55.8291, 55.6349,
+55.6999] → 中央値 55.7754。四捨五入して表に記載）。
+
+**4 候補すべてが実機で不採用**（3 候補は実機不良〈数値不一致 2・起動失敗
+1〉、1 候補は机上除外）だったため、**本イシュー時点で `mma_f16_base` を
+上回る候補の実測は得られなかった**。
 
 ## 5. 判断
 
-実機実測が完了するまで採用構成は未確定。**動的 SMEM opt-in の起動側結線
-（`CudaFunction::set_attribute`・`shared_mem_bytes`）・`extern __shared__`
-変換済みソースの構文検証・本番定数変更・swizzle/`gemm_auto.rs` 追従・4096
-ベンチ（5 回中央値）・parity 非後退契約の確認は、いずれも実機到達を前提とする
-ため本イシューでは未実施**。判断が確定した際は `docs/cuda-tensor-core-design.md`
+**イシュー #840 時点で採用可能な候補は無い**。4 候補すべてが実機 A/B で
+不採用となった内訳:
+
+- `bt64x128_s4`／`bt128x128_s3_wt2x4`: NVRTC コンパイル・起動には成功する
+  が、カーネル出力が CPU 参照値と数値不一致（統一複合判定不通過）。
+  `extern __shared__` 変換（§2「共有メモリ予算」節）が焼き込み済みの
+  `as_tile`/`bs_tile` インデックス算術・バンク位相設計と整合しているかは
+  §4.1 の FAIL のみでは特定できておらず、**原因調査は #842 のスコープ**
+  とする
+- `bt128x256_s3_wt4x4`（`launch_bounds` なし）: 130 registers/thread ×
+  512 threads/block が per-SM レジスタ上限（65,536）を超え、1 ブロックも
+  起動できない（§4）。`__launch_bounds__(512)` 付き変種は境界値
+  （65,536 ちょうど）で理論上 1 block/SM に収まるが本イシューでは未計測
+  （§4 参照）
+- `bt128x256_s4`: 机上見積もり（108,544B）が GB10 実測 opt-in 上限
+  （101,376B）を超え、実行時に非致命的除外（§3.1）
+
+**動的 SMEM opt-in の起動側結線自体（`CudaFunction::set_attribute`・
+`shared_mem_bytes`）は本イシューで実装・実機動作確認済み**（§4.1 の
+`bt64x128_s4`/`bt128x128_s3_wt2x4`/`bt128x256_s3_wt4x4` はいずれも
+opt-in 属性設定を経て起動を試み、実際にカーネルが実行された〈parity
+mismatch は計算結果の不一致であり起動自体は成功している〉ため、結線
+機構そのものは機能を確認済みである）。**本番定数変更・swizzle/
+`gemm_auto.rs` 追従・採否判断は、#842 で数値不一致の原因調査・是正が
+完了してから行う**。判断が確定した際は `docs/cuda-tensor-core-design.md`
 §16 へ記録する（`docs/perf/cuda-gemm-mma-block-tile.md` と `cuda-tensor-core-
 design.md` の役割分担を踏襲）。
 
-## 6. 引き継ぎ事項（次に実機到達できたセッションへ）
+## 6. 引き継ぎ事項（#842 へ）
 
-- §4 の実測表（`mma_ptx_dump` 実行 → GB10 では 6 ファイル分、GB10 より
-  opt-in 上限が大きいデバイスでは `bt128x256_s4` を含む 8 ファイル分の
-  `ptxas -v`）
-- 採用構成（spill 0 かつ occupancy 最良の候補。spill が出る候補は除外根拠として
-  その値を記録する）の決定
-- 採用構成が opt-in（48KiB 超）の場合の本番起動側結線: `CudaFunction::
+- `bt64x128_s4`／`bt128x128_s3_wt2x4` の数値不一致原因調査（`extern
+  __shared__` 変換〈§2〉のインデックス算術・バンク位相・cp.async 転送
+  先アドレスのいずれかに実装齟齬がある可能性が高い。§4.1 の FAIL 詳細は
+  ミスマッチ件数までは出力していないため、まず `within_tolerance` 判定を
+  ミスマッチ件数・最大誤差付きで出力するよう `gemm_mma_block_tile_bench.rs`
+  を拡張し、再現・切り分けを行うことを推奨する）
+- `bt128x256_s3_wt4x4` の `__launch_bounds__(512)` 付き変種（128
+  registers/thread。§4 参照）の実起動可否の実測（境界値 65,536 での
+  実際の occupancy・spill・レジスタ再割当ての有無を確認する）
+- 上記原因調査の結果、いずれかの候補が数値一致・起動成功に至った場合の
+  再計測（512/1024/2048/4096・5 回中央値）・`mma_f16_base` との比較
+- 採用構成が確定した場合の本番起動側結線: `CudaFunction::
   set_attribute(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, ...)`・
   `LaunchConfig::shared_mem_bytes`・`device.rs::shared_memory_per_block_optin`
   による実行時予算検証・予算不足デバイスでの base 構成へのフォールバック
-- `extern __shared__` 変換済みソースの実機コンパイル（構文検証）・
-  `tests/gemm_mma.rs`/`cpu_cuda_mma_parity.rs`/`parity_nonregression.rs` の
-  `#[ignore]` テスト実行
+  （opt-in 属性設定自体は #840 の A/B ランナーで実機動作確認済み。上記
+  「判断」節参照）
 - `swizzle.rs::SWIZZLE_APPLY_MIN_M_BLOCKS`/`_N_BLOCKS`（`4096 / 新BM`・
   `4096 / 新BN` への再導出）・`gemm_auto.rs` の静的 SMEM 予算 assert の追従
 - `gemm_mma_bench` による 512/1024/2048/4096 の 5 回中央値ベンチ・小サイズ

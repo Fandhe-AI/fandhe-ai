@@ -2155,72 +2155,77 @@ fn replace_source_anchor(
     Ok(src.replacen(anchor, replacement, 1))
 }
 
-/// 診断専用（`internal-diagnostics` feature 限定。イシュー #804）:
-/// ブロックタイル（`bm`/`bn`/`bk`）・`cp.async` パイプライン段数
-/// （`stages`）・warp タイル形状（`warp_tiles_m`/`_n`）・
-/// `__launch_bounds__` を任意に組み合わせた候補カーネルソースを生成する。
+/// [`derive_mma_block_tile_layout`] が返す、候補ブロックタイル・段数・warp
+/// タイル構成から導出したカーネル起動パラメータの束（イシュー #840）。
 ///
-/// `mma_f16_source_with_warp_tiles`（#803・#822）が warp タイル形状のみを
-/// `mma_f16_source()` の `#define` へアンカー置換していたのに対し、本関数は
-/// ブロックタイル・段数の `#define`（`BM`/`BN`/`BK`/`STAGES`/`A_PAD`/
-/// `B_PAD`）も同じ方式で置換し、warp タイル置換と合成する。
-///
-/// # 本番結線の `validate_mma_kernel_config`（`render_mma_f16` 用）との違い
-///
-/// 本番検査は `cfg.stages != 3` を拒否する（cp.async 二値分岐撤去〈#492〉
-/// 後もステージ可変化の本番結線〈#492 Phase B〉が未完のための暫定制約。
-/// 本ファイル `validate_mma_kernel_config` 該当コメント参照）。本関数は
-/// `mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain`
-/// テストが担保する段数一般形（ループ内 `wait_group %0;` の即値制約が
-/// `STAGES - 2`）が既に成立していることを前提に `stages >= 2` のみを
-/// 要求し、3 以外の段数も候補として生成できるようにする（#804 の
-/// ステージ数増候補向け）。
-///
-/// # 共有メモリ予算（2 段階判定。#804 実装計画 Step 1）
-///
-/// `optin_budget_bytes` は呼び出し元がデバイス実測値
-/// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`。GB10 実測
-/// 101,376B。出典 `docs/perf/sm121-device-attributes.md`）から渡す
-/// （`kernels_wmma_opt.rs::validate_wmma_tf32_staged_dyn_config` と同じ
-/// 「ハードコード定数ではなく呼び出し元供給」の方針）。
-///
-/// - 静的共有メモリ予算（[`MMA_STATIC_SMEM_LIMIT_BYTES`]・48KiB）以下:
-///   本番と同じ静的 `__shared__` 配列宣言のまま候補ソースを返す
-///   （`needs_dynamic_smem=false`。呼び出し元は `mma_ptx_dump` の
-///   `dump_ptx` に渡すだけで `ptxas -v` 計測できる）。
-/// - 静的予算超・`optin_budget_bytes` 以下: 静的 `__shared__` 配列宣言
-///   （`as_tile`/`bs_tile`）を `extern __shared__` バッファ上の
-///   ポインタへ変換した候補ソースを返す（`needs_dynamic_smem=true`）。
-///   多次元添字構文（`as_tile[stage][row][col]`）は配列本体
-///   （`AsTileT`/`BsTileT` の `typedef`）をそのまま流用し、宣言 2 行の
-///   置換のみでインデックス計算・バンク位相設計（`docs/perf/
-///   cuda-gemm-mma-bank-conflict.md` §2）を不変に保つ。**この経路は
-///   `nvrtc`/`ptxas` 実機での構文検証を経ていない**（#804 実装セッション
-///   時点で本 worktree・DGX Spark GB10 実機のいずれにも CUDA toolkit へ
-///   到達できなかったため。計画 Step F 参照）。本番起動側の動的 SMEM
-///   opt-in 結線（`CudaFunction::set_attribute`・`shared_mem_bytes`）は
-///   本関数のスコープ外（生成した候補ソースを実際に起動するのは後続
-///   セッションの責務）。
-/// - `optin_budget_bytes` 超: 机上除外として `CudaError::InvalidKernelConfig`
-///   を返す（実機到達を待たず判定できる）。
-///
-/// # 呼び出し元
-///
-/// `examples/mma_ptx_dump.rs`（`internal-diagnostics` feature 限定・
-/// `lib.rs::diagnostics` 経由）専用。本番経路（`gemm_mma.rs`）はこの関数を
-/// 呼ばない（`mma_f16_source_with_warp_tiles` と同じ非消費契約）。
+/// `mma_f16_source_with_block_tile`（下記）のカーネルソース展開と、
+/// `examples/gemm_mma_block_tile_bench.rs`（診断専用 A/B ランナー。
+/// `internal-diagnostics` feature 限定）のカーネル起動（`threads`・
+/// `smem_bytes`・opt-in 動的 SMEM 要否判定）の両方が本構造体を経由する
+/// ことで、ブロックスレッド数・共有メモリバイト数の算出式が 1 箇所
+/// （[`derive_mma_block_tile_layout`]）にのみ存在する状態を保つ
+/// （実装計画「レイアウト導出ヘルパー」節: 「既存
+/// `mma_f16_source_with_block_tile` 内部の SMEM 式を共有化し二重定義を
+/// 作らない」）。
 #[allow(dead_code)] // 理由は mma_f16_source_with_warp_tiles と同じ（非公開モジュール）
-#[allow(clippy::too_many_arguments)] // 診断専用の候補パラメータを 1 関数に集約する設計上の要求
-pub fn mma_f16_source_with_block_tile(
+#[derive(Debug, Clone, Copy)]
+pub struct MmaBlockTileLayout {
+    pub bm: u32,
+    pub bn: u32,
+    pub bk: u32,
+    pub stages: u32,
+    pub warp_tiles_m: u32,
+    pub warp_tiles_n: u32,
+    /// warp グリッド（`bm`/`warp_m` 行 × `bn`/`warp_n` 列）の行数。
+    pub warps_m: u32,
+    /// warp グリッドの列数。カーネルソース側 `#define WARPS_N` に対応
+    /// （`render_mma_f16_unchecked`・`mma_f16_source_with_warp_tiles` と
+    /// 同じ「1 warp = C の `warp_m x warp_n` タイル 1 個」設計）。
+    pub warps_n: u32,
+    /// 導出ブロックスレッド数（`warps_m * warps_n * 32`）。
+    /// `LaunchConfig.block_dim.x`・`__launch_bounds__` 一致検査の両方に
+    /// 使う。
+    pub threads: u32,
+    /// A タイル 1 行あたりのパディング済み要素数（`bk + 8`。#498 バンク
+    /// コンフリクト対策）。
+    pub a_pad: u32,
+    /// B タイル 1 行あたりのパディング済み要素数（`bn + 8`）。
+    pub b_pad: u32,
+    /// 共有メモリ総使用量（バイト）。`(bm*a_pad + bk*b_pad) * 2B(f16) *
+    /// stages`（`validate_mma_kernel_config`・従来の
+    /// `mma_f16_source_with_block_tile` 内 `smem_bytes` 算出と同一式）。
+    pub smem_bytes: u32,
+}
+
+impl MmaBlockTileLayout {
+    /// `smem_bytes` が静的 48KiB 上限（[`MMA_STATIC_SMEM_LIMIT_BYTES`]）を
+    /// 超え、`extern __shared__`（opt-in 動的 SMEM）変種を要求するか。
+    #[allow(dead_code)] // 理由は Self と同じ（非公開モジュール）
+    pub fn needs_dynamic_smem(&self) -> bool {
+        self.smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES
+    }
+}
+
+/// 候補 `bm`/`bn`/`bk`/`stages`/`warp_tiles_m`/`_n` から
+/// [`MmaBlockTileLayout`] を導出する（イシュー #840。従来
+/// `mma_f16_source_with_block_tile` 内にインライン展開されていた検証・
+/// 算出ロジックの切り出し）。
+///
+/// 検査する不変条件は元の `mma_f16_source_with_block_tile` と同一
+/// （零値拒否・段数範囲・`bk`/`MMA_K` 倍数関係・`bm`/`bn` の 8 の倍数・
+/// warp タイルの整数除算・スレッド数上限）。`optin_budget_bytes` との
+/// 比較・`launch_bounds` 一致検査は行わない（呼び出し元ごとに許容判断が
+/// 異なる: `mma_f16_source_with_block_tile` は超過を拒否してソースを
+/// 生成しないが、`gemm_mma_block_tile_bench.rs` は除外理由をログへ残し
+/// つつスイープを継続する。比較・検査は各呼び出し元へ委ねる）。
+pub(crate) fn derive_mma_block_tile_layout(
     bm: u32,
     bn: u32,
     bk: u32,
     stages: u32,
     warp_tiles_m: u32,
     warp_tiles_n: u32,
-    launch_bounds: Option<u32>,
-    optin_budget_bytes: u32,
-) -> Result<String, CudaError> {
+) -> Result<MmaBlockTileLayout, CudaError> {
     let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
 
     if bm == 0 || bn == 0 || bk == 0 || stages == 0 || warp_tiles_m == 0 || warp_tiles_n == 0 {
@@ -2229,7 +2234,8 @@ pub fn mma_f16_source_with_block_tile(
                 .to_string(),
         ));
     }
-    // 段数一般形の前提（本関数ドキュメンテーションコメント参照）。
+    // 段数一般形の前提（`mma_f16_source_with_block_tile` ドキュメンテー
+    // ションコメント「本番結線の validate_mma_kernel_config との違い」節）。
     if stages < 2 {
         return Err(invalid(format!(
             "mma_f16_source_with_block_tile stages ({stages}) must be >= 2 (cp.async \
@@ -2306,17 +2312,10 @@ pub fn mma_f16_source_with_block_tile(
              exceeding CUDA's per-block limit (1024)"
         )));
     }
-    if let Some(v) = launch_bounds
-        && v != threads
-    {
-        return Err(invalid(format!(
-            "mma_f16_source_with_block_tile launch_bounds ({v}) must equal the derived thread \
-             count ({threads})"
-        )));
-    }
 
-    // 共有メモリ予算（`validate_mma_kernel_config` と同じ式。本関数
-    // ドキュメンテーションコメント「共有メモリ予算」参照）。
+    // 共有メモリ予算（`validate_mma_kernel_config` と同じ式。
+    // `mma_f16_source_with_block_tile` ドキュメンテーションコメント
+    // 「共有メモリ予算」参照）。
     let a_pad = bk.checked_add(8).ok_or_else(|| {
         invalid("mma_f16_source_with_block_tile A tile padded row width overflow".to_string())
     })?;
@@ -2331,6 +2330,114 @@ pub fn mma_f16_source_with_block_tile(
         .ok_or_else(|| {
             invalid("mma_f16_source_with_block_tile shared memory byte count overflow".to_string())
         })?;
+
+    Ok(MmaBlockTileLayout {
+        bm,
+        bn,
+        bk,
+        stages,
+        warp_tiles_m,
+        warp_tiles_n,
+        warps_m,
+        warps_n,
+        threads,
+        a_pad,
+        b_pad,
+        smem_bytes,
+    })
+}
+
+/// 診断専用（`internal-diagnostics` feature 限定。イシュー #804）:
+/// ブロックタイル（`bm`/`bn`/`bk`）・`cp.async` パイプライン段数
+/// （`stages`）・warp タイル形状（`warp_tiles_m`/`_n`）・
+/// `__launch_bounds__` を任意に組み合わせた候補カーネルソースを生成する。
+///
+/// `mma_f16_source_with_warp_tiles`（#803・#822）が warp タイル形状のみを
+/// `mma_f16_source()` の `#define` へアンカー置換していたのに対し、本関数は
+/// ブロックタイル・段数の `#define`（`BM`/`BN`/`BK`/`STAGES`/`A_PAD`/
+/// `B_PAD`）も同じ方式で置換し、warp タイル置換と合成する。
+///
+/// # 本番結線の `validate_mma_kernel_config`（`render_mma_f16` 用）との違い
+///
+/// 本番検査は `cfg.stages != 3` を拒否する（cp.async 二値分岐撤去〈#492〉
+/// 後もステージ可変化の本番結線〈#492 Phase B〉が未完のための暫定制約。
+/// 本ファイル `validate_mma_kernel_config` 該当コメント参照）。本関数は
+/// `mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain`
+/// テストが担保する段数一般形（ループ内 `wait_group %0;` の即値制約が
+/// `STAGES - 2`）が既に成立していることを前提に `stages >= 2` のみを
+/// 要求し、3 以外の段数も候補として生成できるようにする（#804 の
+/// ステージ数増候補向け）。
+///
+/// # 共有メモリ予算（2 段階判定。#804 実装計画 Step 1）
+///
+/// `optin_budget_bytes` は呼び出し元がデバイス実測値
+/// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`。GB10 実測
+/// 101,376B。出典 `docs/perf/sm121-device-attributes.md`）から渡す
+/// （`kernels_wmma_opt.rs::validate_wmma_tf32_staged_dyn_config` と同じ
+/// 「ハードコード定数ではなく呼び出し元供給」の方針）。
+///
+/// - 静的共有メモリ予算（[`MMA_STATIC_SMEM_LIMIT_BYTES`]・48KiB）以下:
+///   本番と同じ静的 `__shared__` 配列宣言のまま候補ソースを返す
+///   （`needs_dynamic_smem=false`。呼び出し元は `mma_ptx_dump` の
+///   `dump_ptx` に渡すだけで `ptxas -v` 計測できる）。
+/// - 静的予算超・`optin_budget_bytes` 以下: 静的 `__shared__` 配列宣言
+///   （`as_tile`/`bs_tile`）を `extern __shared__` バッファ上の
+///   ポインタへ変換した候補ソースを返す（`needs_dynamic_smem=true`）。
+///   多次元添字構文（`as_tile[stage][row][col]`）は配列本体
+///   （`AsTileT`/`BsTileT` の `typedef`）をそのまま流用し、宣言 2 行の
+///   置換のみでインデックス計算・バンク位相設計（`docs/perf/
+///   cuda-gemm-mma-bank-conflict.md` §2）を不変に保つ。**この経路は
+///   `nvrtc`/`ptxas` 実機での構文検証を経ていない**（#804 実装セッション
+///   時点で本 worktree・DGX Spark GB10 実機のいずれにも CUDA toolkit へ
+///   到達できなかったため。計画 Step F 参照）。本番起動側の動的 SMEM
+///   opt-in 結線（`CudaFunction::set_attribute`・`shared_mem_bytes`）は
+///   本関数のスコープ外（生成した候補ソースを実際に起動するのは後続
+///   セッションの責務）。
+/// - `optin_budget_bytes` 超: 机上除外として `CudaError::InvalidKernelConfig`
+///   を返す（実機到達を待たず判定できる）。
+///
+/// # 呼び出し元
+///
+/// `examples/mma_ptx_dump.rs`（`internal-diagnostics` feature 限定・
+/// `lib.rs::diagnostics` 経由）専用。本番経路（`gemm_mma.rs`）はこの関数を
+/// 呼ばない（`mma_f16_source_with_warp_tiles` と同じ非消費契約）。
+#[allow(dead_code)] // 理由は mma_f16_source_with_warp_tiles と同じ（非公開モジュール）
+#[allow(clippy::too_many_arguments)] // 診断専用の候補パラメータを 1 関数に集約する設計上の要求
+pub fn mma_f16_source_with_block_tile(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+) -> Result<String, CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+
+    // レイアウト導出（不変条件検査込み）は [`derive_mma_block_tile_layout`]
+    // へ切り出し済み（イシュー #840 実装計画「レイアウト導出ヘルパー」節。
+    // `examples/gemm_mma_block_tile_bench.rs`（診断専用 A/B ランナー）が
+    // 同じ式を再定義せず参照できるようにするため、`smem_bytes`/`threads`
+    // 算出ロジックの単一の真実源をここへ集約した）。
+    let layout = derive_mma_block_tile_layout(bm, bn, bk, stages, warp_tiles_m, warp_tiles_n)?;
+    let (warps_n, threads, a_pad, b_pad, smem_bytes) = (
+        layout.warps_n,
+        layout.threads,
+        layout.a_pad,
+        layout.b_pad,
+        layout.smem_bytes,
+    );
+
+    if let Some(v) = launch_bounds
+        && v != threads
+    {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile launch_bounds ({v}) must equal the derived thread \
+             count ({threads})"
+        )));
+    }
+
     if smem_bytes > optin_budget_bytes {
         return Err(invalid(format!(
             "mma_f16_source_with_block_tile candidate bm={bm} bn={bn} bk={bk} stages={stages} \
@@ -2431,6 +2538,210 @@ pub fn mma_f16_source_with_block_tile(
     };
 
     Ok(source)
+}
+
+/// [`render_mma_f16_block_tile`] が返す、展開済み候補ソース・展開元
+/// [`MmaBlockTileLayout`] を 1 個にまとめた descriptor（イシュー #840。
+/// `kernels_wmma_opt.rs::RenderedWmmaTf32StagedDynKernel` と同型）。
+///
+/// フィールドは非公開。生ソースを外部へ返す公開メソッドは持たない
+/// （`RenderedMmaKernel` と同じ「検査を経ずに `CudaFunction` へ到達する
+/// 経路を作らない」契約）。診断専用（`internal-diagnostics` feature
+/// 限定）: `examples/gemm_mma_block_tile_bench.rs` が唯一の呼び出し元。
+/// 本番経路（`gemm_mma.rs::CudaMmaGemm`）はこの型に一切依存しない
+/// （`MMA_BM`/`MMA_BN`/`MMA_STAGES` 等の本番定数は本イシューでは無変更）。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct RenderedMmaF16BlockTileKernel {
+    source: String,
+    layout: MmaBlockTileLayout,
+}
+
+impl RenderedMmaF16BlockTileKernel {
+    /// カーネルソースを NVRTC コンパイル → 固定エントリポイント
+    /// `"gemm_mma_f16"`（`mma_f16_source_with_block_tile` は `#define` 群の
+    /// みを置換しシグネチャ名自体は変えないため、本番既定コンストラクタ
+    /// `CompiledMmaKernel::compile` と同じエントリポイント名になる）の
+    /// ロードまで完結させる。`layout.needs_dynamic_smem()` が真の候補
+    /// （静的 48KiB 超）のみ `CudaFunction::set_attribute`
+    /// （`CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`。cudarc 0.19.8
+    /// の安全 API・`unsafe` を要求しない）で opt-in 予算を設定する
+    /// （`kernels_wmma_opt.rs::RenderedWmmaTf32StagedDynKernel::compile` と
+    /// 同じ「必要時のみ opt-in する」方針）。
+    ///
+    /// プロセス内 LRU／ディスクキャッシュ（[`RenderedMmaKernel::compile`]
+    /// の 3 段フォールバック）は使わない: 本 A/B ランナーは候補ごとに
+    /// 1 回だけコンパイルすればよく（計測対象は起動後のカーネル実行時間の
+    /// み）、キャッシュ層を経由する複雑さを避ける（`gemm_wmma_tf32_staged_
+    /// stages_bench.rs` の `RenderedWmmaTf32StagedDynKernel::compile` も
+    /// 同じ判断）。
+    #[allow(dead_code)]
+    pub fn compile(
+        &self,
+        device: &crate::device::CudaDevice,
+    ) -> Result<CompiledMmaF16BlockTileKernel, CudaError> {
+        let ptx = crate::nvrtc::compile_ptx(&self.source, device.arch())?;
+        let func = device
+            .context()
+            .load_module(ptx)?
+            .load_function("gemm_mma_f16")?;
+        if self.layout.needs_dynamic_smem() {
+            let bytes_i32 = i32::try_from(self.layout.smem_bytes).map_err(|_| {
+                CudaError::InvalidKernelConfig {
+                    detail: format!(
+                        "dynamic shared memory byte count {} exceeds i32 range required by \
+                         cuFuncSetAttribute",
+                        self.layout.smem_bytes
+                    ),
+                }
+            })?;
+            func.set_attribute(
+                cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                bytes_i32,
+            )
+            .map_err(CudaError::from)?;
+        }
+        Ok(CompiledMmaF16BlockTileKernel {
+            func,
+            layout: self.layout,
+        })
+    }
+
+    /// テスト専用ソースアクセサ（`RenderedMmaKernel::source` と同じ理由・
+    /// 同じ「本番公開 API には現れない」契約）。
+    #[cfg(test)]
+    fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// 候補ブロックタイル・段数・warp タイル構成からカーネルソースを展開し、
+/// [`RenderedMmaF16BlockTileKernel`] を返す（イシュー #840）。
+///
+/// `mma_f16_source_with_block_tile`（ソース文字列のみを返す既存 API。
+/// #804）の結果と、その展開に使った [`derive_mma_block_tile_layout`] の
+/// 結果を 1 個の descriptor へ束ねる薄いラッパー。`optin_budget_bytes`
+/// 超過時は `mma_f16_source_with_block_tile` と同じ理由で
+/// `CudaError::InvalidKernelConfig` を返す（呼び出し元
+/// `examples/gemm_mma_block_tile_bench.rs` はこれを「机上除外」として
+/// 非致命的に扱い、除外理由をログへ残してスイープを継続する）。
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn render_mma_f16_block_tile(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+) -> Result<RenderedMmaF16BlockTileKernel, CudaError> {
+    let layout = derive_mma_block_tile_layout(bm, bn, bk, stages, warp_tiles_m, warp_tiles_n)?;
+    if layout.smem_bytes > optin_budget_bytes {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "render_mma_f16_block_tile candidate bm={bm} bn={bn} bk={bk} stages={stages} \
+                 requires {} bytes of shared memory, exceeding the opt-in budget \
+                 ({optin_budget_bytes} bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)",
+                layout.smem_bytes
+            ),
+        });
+    }
+    let source = mma_f16_source_with_block_tile(
+        bm,
+        bn,
+        bk,
+        stages,
+        warp_tiles_m,
+        warp_tiles_n,
+        launch_bounds,
+        optin_budget_bytes,
+    )?;
+    Ok(RenderedMmaF16BlockTileKernel { source, layout })
+}
+
+/// [`RenderedMmaF16BlockTileKernel::compile`] が返す、コンパイル済み
+/// `CudaFunction`・展開元 [`MmaBlockTileLayout`] を不可分に束ねた
+/// descriptor（イシュー #840。`CompiledMmaKernel`・
+/// `CompiledWmmaTf32StagedDynKernel` と同型）。
+#[allow(dead_code)]
+pub struct CompiledMmaF16BlockTileKernel {
+    func: cudarc::driver::CudaFunction,
+    layout: MmaBlockTileLayout,
+}
+
+impl CompiledMmaF16BlockTileKernel {
+    /// [`CompiledMmaKernel::launch_f16`] と同じ検証手順（`validate_launch_
+    /// shape` 相当は候補生成時に固定済みのため不要・`validate_gemm_dims`／
+    /// `validate_output_len`／no-op 早期 return／`validate_mma_alignment`／
+    /// grid y 上限検査／K タイル境界検査）に加え、`LaunchConfig.
+    /// shared_mem_bytes` へ `self.layout.smem_bytes`（動的変種のみ非零。
+    /// 静的変種は 0）を設定する。
+    #[allow(dead_code, clippy::too_many_arguments)]
+    pub fn launch_f16(
+        &self,
+        stream: &CudaStream,
+        a_dev: &CudaSlice<f16>,
+        b_dev: &CudaSlice<f16>,
+        c_dev: &mut CudaSlice<f16>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        crate::gemm::validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        crate::gemm_mma::validate_mma_alignment(n, k)?;
+
+        const MAX_GRID_DIM_Y: u32 = 65_535;
+        let grid_y = m.div_ceil(self.layout.bm);
+        if grid_y > MAX_GRID_DIM_Y {
+            return Err(CudaError::InvalidShape {
+                detail: format!(
+                    "mma_f16 block-tile candidate grid_dim.y ({grid_y}) exceeds CUDA's \
+                     {MAX_GRID_DIM_Y} limit for grid dimensions y/z (bm={}); m={m} is too large",
+                    self.layout.bm
+                ),
+            });
+        }
+        validate_mma_k_tile_bound(k, self.layout.bk)?;
+
+        let smem_bytes_u32 = if self.layout.needs_dynamic_smem() {
+            self.layout.smem_bytes
+        } else {
+            0
+        };
+        let launch_config = LaunchConfig {
+            grid_dim: (n.div_ceil(self.layout.bn), m.div_ceil(self.layout.bm), 1),
+            block_dim: (self.layout.threads, 1, 1),
+            shared_mem_bytes: smem_bytes_u32,
+        };
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+
+        // SAFETY: `CompiledMmaKernel::launch_f16` と同一の根拠。カーネル
+        // 引数は上記で検証済みの m/n/k から導出しており、カーネル内の
+        // 手動境界チェック（REQ-8）と合わせて OOB 読み書きが起きない
+        // 根拠とする。`shared_mem_bytes` は `RenderedMmaF16BlockTileKernel::
+        // compile` が算出・opt-in 設定した値（`self.layout.smem_bytes`）と
+        // 同一であり、カーネル側 `extern __shared__` の実際の使用量を
+        // 過不足なく満たす（静的変種は 0 のまま。static `__shared__`
+        // 宣言は起動時設定を要求しない）。
+        unsafe {
+            stream
+                .launch_builder(&self.func)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .launch(launch_config)?;
+        }
+        stream.synchronize()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -4022,5 +4333,100 @@ mod tests {
                 crate::error::CudaError::InvalidKernelConfig { .. }
             ));
         }
+    }
+
+    /// イシュー #840: `derive_mma_block_tile_layout` の既定値
+    /// （`MMA_BM`/`MMA_BN`/`MMA_BK`/`MMA_STAGES`/`MMA_WARP_TILES_M`/`_N`）が
+    /// 現行の本番タイル定数と一致することをロックする（`mma_f16_source_
+    /// with_block_tile_default_matches_mma_f16_source` と同じ回帰方針。
+    /// レイアウト導出ヘルパーの切り出し〈#840〉が既定構成の算出値を
+    /// 変えていないことを機械的に担保する）。
+    #[test]
+    fn derive_mma_block_tile_layout_default_matches_production_constants() {
+        let layout = derive_mma_block_tile_layout(
+            MMA_BM,
+            MMA_BN,
+            MMA_BK,
+            MMA_STAGES,
+            MMA_WARP_TILES_M,
+            MMA_WARP_TILES_N,
+        )
+        .expect("default block tile config must succeed");
+        assert_eq!(layout.warps_m, MMA_WARPS_M);
+        assert_eq!(layout.warps_n, MMA_WARPS_N);
+        assert_eq!(layout.threads, MMA_WARPS_M * MMA_WARPS_N * 32);
+        assert_eq!(layout.a_pad, MMA_A_PAD);
+        assert_eq!(layout.b_pad, MMA_B_PAD);
+        assert_eq!(layout.smem_bytes, MMA_SHARED_MEM_BYTES);
+        assert!(
+            !layout.needs_dynamic_smem(),
+            "default (static-fit) config must not require the opt-in dynamic SMEM path"
+        );
+    }
+
+    /// イシュー #840 実装計画候補表（`docs/perf/
+    /// cuda-gemm-mma-block-tile-stages.md` §3.1）の 4 候補について、
+    /// `derive_mma_block_tile_layout` が候補表記載の SMEM 実測要求量と
+    /// 一致する値を導出することをロックする（実測値の出典は
+    /// `examples/mma_ptx_dump.rs` 冒頭コメント「ブロックタイル拡大・
+    /// ステージ数増候補」節・PR #831 と同一の机上見積もり）。
+    #[test]
+    fn derive_mma_block_tile_layout_matches_candidate_table_smem_bytes() {
+        for (label, bm, bn, bk, stages, wtm, wtn, expected_smem_bytes) in [
+            (
+                "bt64x128_s4",
+                64u32,
+                128u32,
+                32u32,
+                4u32,
+                2u32,
+                2u32,
+                55_296u32,
+            ),
+            ("bt128x128_s3_wt2x4", 128, 128, 32, 3, 2, 4, 56_832),
+            ("bt128x256_s3_wt4x4", 128, 256, 32, 3, 4, 4, 81_408),
+            ("bt128x256_s4", 128, 256, 32, 4, 4, 4, 108_544),
+        ] {
+            let layout = derive_mma_block_tile_layout(bm, bn, bk, stages, wtm, wtn)
+                .unwrap_or_else(|e| panic!("{label}: layout derivation must succeed ({e:?})"));
+            assert_eq!(
+                layout.smem_bytes, expected_smem_bytes,
+                "{label}: smem_bytes mismatch"
+            );
+            assert!(
+                layout.needs_dynamic_smem(),
+                "{label}: all four §3.1 candidates exceed the 48KiB static limit"
+            );
+        }
+    }
+
+    /// `render_mma_f16_block_tile` は `optin_budget_bytes` 超過候補を
+    /// 非致命的な `CudaError::InvalidKernelConfig` として拒否する
+    /// （`gemm_mma_block_tile_bench.rs` が「机上除外」としてログへ残し
+    /// スイープを継続するための契約。`mma_f16_source_with_block_tile_
+    /// rejects_over_optin_budget` と同じ 128x256x32 S4 候補〈机上見積もり
+    /// 108,544B〉で GB10 実測上限 101,376B との比較を確認する）。
+    #[test]
+    fn render_mma_f16_block_tile_rejects_over_optin_budget() {
+        let err = render_mma_f16_block_tile(128, 256, 32, 4, 4, 4, None, 101_376)
+            .expect_err("108,544B candidate must exceed the 101,376B opt-in budget");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    /// `render_mma_f16_block_tile` が返す descriptor のソースが
+    /// `mma_f16_source_with_block_tile` 単体呼び出しと同一バイト列で
+    /// あることを確認する（`RenderedMmaF16BlockTileKernel` が独自の
+    /// ソース組み立て経路を持たず、公開済み関数へ委譲するだけであることの
+    /// 回帰防止）。
+    #[test]
+    fn render_mma_f16_block_tile_source_matches_mma_f16_source_with_block_tile() {
+        let rendered = render_mma_f16_block_tile(64, 128, 32, 4, 2, 2, None, 101_376)
+            .expect("64x128x32 S4 must fit within the opt-in budget");
+        let direct = mma_f16_source_with_block_tile(64, 128, 32, 4, 2, 2, None, 101_376)
+            .expect("64x128x32 S4 must fit within the opt-in budget");
+        assert_eq!(rendered.source(), direct);
     }
 }
