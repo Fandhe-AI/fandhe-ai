@@ -80,19 +80,34 @@ gevv 形状は BLIS 経路が naive よりやや遅い傾向（0.52〜0.87x）�
 ほど比が改善する（k がボトルネックにならない形状ほど BLIS の他の
 最適化〈packing 再利用等〉が効いてくるため）。
 
-## 判断 1: ワークロード閾値直列フォールバック → **採用**
+## 判断 1: ワークロード閾値直列フォールバック → **採用（本番未結線。#811 追補・PR #830 レビュー対応）**
 
 - **閾値**: `GEMM_THREADING_THRESHOLD = 48 * 48 * 256 = 589,824`
   （`gemm` crate の既定値と同値）
 - **根拠**: 上記正方形状の実測で並列/直列の優劣が明確に交差する境界
   （262,144 と 2,097,152 の間）に本閾値が収まっており、保守的な採用
   として妥当
-- **実装**: `gemm_blis_parallel`／`gemm_blis_bias_act_parallel` の入口で
+- **本番未結線（追補）**: 本閾値は `#[cfg(test)]` 限定（`GEMM_THREADING_
+  THRESHOLD` ドキュメントコメント「本番未結線」節）とし、
+  `gemm_blis_parallel`／`gemm_blis_bias_act_parallel`（本番公開入口）
+  からは呼ばない。理由は 2 点: (1) 実測環境がローカル QEMU x86_64 に
+  限られ REQ-8 の正式対象実機 Apple M4 Max での境界再スイープが未実施
+  （PR #830 codex-review P1 指摘）。(2) 単純な `m*n*k` 積は並列度が
+  実質 `m` に依存する行パネル分割の非対称性を捉えられず、`m` が大きく
+  `n`／`k` が小さい細長形状（例 m=512,n=1,k=512）を誤って直列側へ倒す
+  （Cursor Bugbot 指摘・下記「実測 1」の当該行 parallel/serial 2.233x
+  参照）。テスト専用の適用経路（`gemm_blis_parallel_thresholded`／
+  `gemm_blis_bias_act_parallel_thresholded`。`crates/backend-cpu/src/
+  gemm_blis/mod.rs`）で境界形状の bit 完全一致・回帰検知は維持する。
+  M4 Max 実機での境界再スイープ・`m*n*k` 単純積の限界解消（`m` を加味
+  した判定への拡張、または `gemm` crate と同じブロック単位判定への
+  変更）が完了し次第、本番結線を再検討する
+- **実装**: テスト専用入口の入口で
   `m.saturating_mul(n).saturating_mul(k) < GEMM_THREADING_THRESHOLD` を
-  判定し、真なら `dispatch_region` を直列で呼ぶ（`crates/backend-cpu/src/
-  gemm_blis/mod.rs` の `GEMM_THREADING_THRESHOLD` ドキュメントコメント
-  参照）。`saturating_mul` を使うため三重積オーバーフロー時も安全側
-  （並列側）へ倒れる
+  判定し、真なら [`gemm_blis`]（直列）、偽なら [`gemm_blis_parallel`]
+  （並列）へ振り分ける（`crates/backend-cpu/src/gemm_blis/mod.rs` の
+  `GEMM_THREADING_THRESHOLD` ドキュメントコメント参照）。`saturating_mul`
+  を使うため三重積オーバーフロー時も安全側（並列側）へ倒れる
 - **bit 完全一致契約への影響なし**: 直列フォールバックは呼び出し経路を
   変えるだけで累積順序（p 昇順 FMA 連鎖）には触れないため、`gemm_naive`
   と bit 完全一致のまま不変（`tests/gemm_blis_parity.rs`・
@@ -202,6 +217,11 @@ gevv 形状は BLIS 経路が naive よりやや遅い傾向（0.52〜0.87x）�
 
 ## 残課題（PR 本文にも記載）
 
-- 閾値 589,824・専用経路の要否判断の M4 Max 実機での再確認
+- 閾値 589,824 の M4 Max 実機での境界再スイープ、および `m*n*k` 単純積
+  の限界（`m` が大きく `n`／`k` が小さい細長形状の誤判定。PR #830
+  Cursor Bugbot 指摘）解消（`m` を加味した判定への拡張、または `gemm`
+  crate と同じブロック単位判定への変更）。いずれも完了するまでワーク
+  ロード閾値直列フォールバックは `#[cfg(test)]` 限定のまま本番結線
+  しない（判断 1「本番未結線」節参照）
 - gevv（k<=2）専用経路の再検討（実機実測・実ワークロードでの出現頻度
   判明後）
