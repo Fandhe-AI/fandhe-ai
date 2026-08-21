@@ -330,8 +330,11 @@ DGX Spark GB10 実機・CUDA 13.0 toolkit を要求する点が共通のため�
 記録する」方針で実行系（A/B ランナー・計測バイナリ・ユニットテスト）を
 整備した（`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5.1・§7.1）。
 実行系整備を行った前半セッションでは DGX Spark GB10 実機へ到達できなかっ
-たが、後続セッション（2026-08-22）で実機（`spark-dbd9`）へ到達し、13
-候補全ての `ptxas -v` regs/thread・spill 実測（**全候補 spill 0**）・
+たが、後続セッション（2026-08-22 JST＝2026-08-21 UTC。実行時刻の検証可能
+な記録はコミット `3268d18`／`aa8f582`）で DGX Spark GB10 実機（実ホスト名
+は `docs/real-hardware-verification-env.local.md`〈Git 管理外〉を参照）へ
+到達し、13 候補全ての `ptxas -v` regs/thread・spill 実測（**全候補 spill
+0**）・
 `#[ignore]` 数値一致テストの実機実行・`gemm_mma_tf32_block_tile_bench`
 5 run 計測を完了した（`cuda-gemm-mma-tf32-block-tile.md` §7・§7.1・§8）。
 数値一致テストは本節（§2〜§3）と完全一致する FAIL パターン（非後退）を

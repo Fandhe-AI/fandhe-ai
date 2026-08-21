@@ -331,7 +331,10 @@ parity ゲート → 5 回計測 → `ptxas -v` 実測。§4・§6 と同型の�
 バイナリ・ユニットテストを整備した（#841。
 `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5.1・§7.1）。実行系整備を
 行った前半セッションでは DGX Spark GB10 実機へ到達できなかったが、本
-セッション（2026-08-22）で実機（`spark-dbd9`）へ到達し、13 候補全ての
+セッション（2026-08-22 JST＝2026-08-21 UTC。実行時刻の検証可能な記録は
+コミット `3268d18`／`aa8f582`）で DGX Spark GB10 実機（実ホスト名は
+`docs/real-hardware-verification-env.local.md`〈Git 管理外〉を参照）へ
+到達し、13 候補全ての
 `ptxas -v` regs/thread・spill 実測（**全候補 spill 0**）・`#[ignore]`
 数値一致テストの実機実行・`gemm_mma_tf32_block_tile_bench` 5 run 計測を
 完了した（`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §7・§7.1・§8）。
