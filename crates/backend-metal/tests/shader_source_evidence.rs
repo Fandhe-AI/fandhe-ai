@@ -214,19 +214,25 @@ fn gemm_simdgroup_tiled_f16_source_uses_matrix_unit_instructions() {
     }
 }
 
-/// REQ-8 の証跡（イシュー #796）: `gemm_simdgroup_tiled_f16` が
-/// 手動境界チェック（ブロック原点の早期 return・協調ロードの要素単位
-/// in-bounds 判定・エピローグ書き戻しの要素単位 in-bounds 判定）を
+/// REQ-8 の証跡（イシュー #796・協調ロードのベクトル化はイシュー #797）:
+/// `gemm_simdgroup_tiled_f16` が手動境界チェック（ブロック原点の早期
+/// return・協調ロードのグループ単位 in-bounds 判定＋要素単位スカラー
+/// フォールバック・エピローグ書き戻しの要素単位 in-bounds 判定）を
 /// 維持していることをロックする（`gemm_simdgroup_tiled_source_retains_*`
 /// と同種の検査。性能上の下限・最適化の達成を理由に境界チェックを省略
-/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。
+/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。#797 でベクトル
+/// 化した A/B 協調ロードは 8 要素グループ単位の `group_in_bounds` 判定と、
+/// 境界グループの要素単位スカラーフォールバック（`kk_e`/`global_k_e`・
+/// `c_e`/`global_col_e`）の 2 段構成になる。
 #[test]
 fn gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards() {
     let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
     for needle in [
         "if (row0 >= dims.m || col0 >= dims.n)",
-        "(kk < bk_eff && global_row < dims.m && global_k < dims.k)",
-        "(kk < bk_eff && global_k < dims.k && global_col < dims.n)",
+        "(kk + 8 <= bk_eff) && (global_row < dims.m) && (global_k + 8 <= dims.k)",
+        "(kk < bk_eff) && (global_k < dims.k) && (global_col + 8 <= dims.n)",
+        "(kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)",
+        "(kk < bk_eff && global_k < dims.k && global_col_e < dims.n)",
         "if (out_row < dims.m && out_col < dims.n)",
     ] {
         assert!(
@@ -236,20 +242,41 @@ fn gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards() {
     }
 }
 
-/// イシュー #796 スコープ境界の証跡: `gemm_simdgroup_tiled_f16` の協調
-/// ロードが本イシューでは**スカラーロード**に留まり、ベクトル化ロード
-/// （イシュー #797 のスコープ）へ先走っていないことをロックする（計画
-/// 「スコープ境界」節）。ベクトル化されると `reinterpret_cast<device
-/// const half4*>`（もしくは f32 版と同じ `float4` 系の再解釈キャスト）が
-/// 現れるはずだが、本カーネルには現れないことを確認する（コメント内の
-/// 単語一致による偽陽性を避けるため、`reinterpret_cast<device const` を
-/// 含む実コードの言い回しのみを検査対象にする）。
+/// イシュー #797 の証跡: `gemm_simdgroup_tiled_f16` の協調ロードが
+/// half 8 要素（128bit）幅のベクトルロードへ移行済みであることをロックする
+/// （#796 時点はスカラーロードに留まっていた。上記
+/// `gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards` の
+/// group_in_bounds 判定と対になる証跡）。`reinterpret_cast<device const
+/// float4*>`（half8 を 128bit ビットコピーする device 側読み出し）と、
+/// threadgroup 側の 8 バイト境界 half4 分割 store（`as_type<half4>`）の
+/// 両方が現れることを確認する。
 #[test]
-fn gemm_simdgroup_tiled_f16_source_uses_scalar_staged_load_not_vectorized() {
+fn gemm_simdgroup_tiled_f16_source_uses_vectorized_staged_load() {
     let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
-    assert!(
-        !kernel_body.contains("reinterpret_cast<device const"),
-        "gemm_simdgroup_tiled_f16 にベクトルロードの再解釈キャストが見つかりました（イシュー #797 のスコープ先取り）"
+    for needle in ["reinterpret_cast<device const float4*>", "as_type<half4>"] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 にベクトルロードの証跡 `{needle}` が見つかりません（イシュー #797 の実装漏れ）"
+        );
+    }
+}
+
+/// イシュー #797 の証跡: `gemm_simdgroup_tiled_f16` のエピローグが
+/// サブタイル全体単位（`sub_bm*sub_bn`）へ統合され、`simdgroup_barrier` が
+/// 1 simdgroup あたり 1 回だけ発生することをロックする（#796 時点は 8x8
+/// acc タイル毎に store→barrier→書き戻し→barrier の 2 回、
+/// `acc_rows*acc_cols` 個のタイル分＝ `2*acc_rows*acc_cols` 回発生していた）。
+/// カーネル本体全体（すべて 1 個の staging スラブを扱うエピローグ節に
+/// 属する）に現れる `simdgroup_barrier` の出現回数を数える。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_epilogue_uses_single_barrier() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    let barrier_count = kernel_body
+        .matches("simdgroup_barrier(mem_flags::mem_threadgroup)")
+        .count();
+    assert_eq!(
+        barrier_count, 1,
+        "gemm_simdgroup_tiled_f16 の simdgroup_barrier 出現数が 1 ではありません（エピローグの barrier 粒度統合が崩れている可能性。イシュー #797）"
     );
 }
 

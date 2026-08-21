@@ -337,8 +337,9 @@ impl MetalGemm {
     /// 2. デバイス上限の事前検証を `candidate.validate(1024,
     ///    max_shared_mem_bytes)`（f32 単位の `shared_mem_bytes` を見る）に
     ///    加えて `candidate.shared_mem_bytes_f16() <= max_shared_mem_bytes`
-    ///    でも行う。f16 版はエピローグ staging 領域（f32。`wm*wn*64*4`
-    ///    バイト）を常に追加確保するため、`staged=false`（f32 版
+    ///    でも行う。f16 版はエピローグ staging 領域（f32。`bm*bn*4`
+    ///    バイト。イシュー #797 でタイル粒度へ拡大）を常に追加確保するため、
+    ///    `staged=false`（f32 版
     ///    `shared_mem_bytes()` は 0 を返し `validate` を素通りする）構成
     ///    でも f16 版は非 0 バイトを要求する（`TileConfig::
     ///    shared_mem_bytes_f16` ドキュメントコメント参照）。この追加検査を

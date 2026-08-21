@@ -770,19 +770,18 @@ kernel void gemm_simdgroup_tiled(
     }
 }
 
-// half 版タイル化 GEMM 本体（イシュー #796）: `gemm_simdgroup_tiled`
+// half 版タイル化 GEMM 本体（イシュー #796。協調ロードの 8 要素ベクトル化・
+// エピローグのタイル粒度統合はイシュー #797 で実施済み）: `gemm_simdgroup_tiled`
 // （f32 版・BM/BN/BK/WM/WN・協調ロード＋レジスタ常駐フラグメント構成）を
 // half 入力へ移植する。既存 `gemm_simdgroup_f16`（1 threadgroup =
 // 1 simdgroup = C の 8x8 タイル 1 つの非タイル化構造）が対 PyTorch MPS
 // f16 で大きく劣後する主因（親イシュー #787）に対応する。
 //
-// **スコープ境界（兄弟イシューとの分担。イシュー #796 計画「スコープ境界」
-// 節）**: 本カーネルの協調ロードは float4 ではなく**スカラーロード**に
-// 留める（128bit 幅ベクトルロード〈イシュー #533 の f16 対応版〉は #797）。
-// エピローグは 8x8 タイル毎の `simdgroup_barrier` 同期で正しさを優先する
-// （barrier 粒度の最適化・タイル粒度統合も #797）。動的タイル選択
-// （`tile::select`/`dispatch_auto`）への統合・バックエンド間数値一致回帰
-// テストの拡張は #798、実機再計測・ベースライン更新は #799。
+// **スコープ境界**: 協調ロードの 8 要素（128bit）ベクトル化と、エピローグの
+// barrier 粒度をタイル単位からサブタイル全体単位へ統合する対応は #797 で
+// 完了済み（USE_TGP_STAGING 分岐・エピローグ実装の各コメント参照）。動的
+// タイル選択（`tile::select`/`dispatch_auto`）への統合・バックエンド間
+// 数値一致回帰テストの拡張は #798、実機再計測・ベースライン更新は #799。
 //
 // **function constant の再利用**: `BM`/`BN`/`BK`/`WM`/`WN`/
 // `USE_TGP_STAGING`/`TGP_PAD`/`SWIZZLE_ENABLED`（index 0〜7。本ファイル
@@ -803,19 +802,20 @@ kernel void gemm_simdgroup_tiled(
 //
 // **threadgroup 共有メモリのレイアウト**: 先頭に staged 経路の A タイル
 // （BM×(BK+TGP_PAD)。half）・B タイル（BK×(BN+TGP_PAD)。half）、直後に
-// エピローグ staging 領域（f32。WM*WN simdgroup 分、各 64 要素）を続ける。
-// `USE_TGP_STAGING=false`（direct-load 経路。フォールバック終端
-// `TileConfig::SINGLE_SIMDGROUP_8X8` を含む）ではタイル領域を確保しない
-// （`crate::tile::TileConfig::shared_mem_bytes_f16` 参照）ため、エピローグ
-// 領域の先頭オフセットは `USE_TGP_STAGING` の値で分岐して決める（`shared_mem`
-// の実確保長は `TileConfig::shared_mem_bytes_f16().max(16)` を呼び出し元が
-// エンコード時に指定する契約。`crate::gemm::encode_dispatch_tiled_f16`
-// 参照）。A タイル＋B タイルの要素数（half 単位）は BM/BK/BN がいずれも
-// 8 の倍数・TGP_PAD が 0 または 4（`TileConfig::validate` が保証する不変
-// 条件）のため常に偶数であり、half 2 バイト単位で確保しても続くエピローグ
-// 領域は f32 4 バイト境界に整合する（`reinterpret_cast<threadgroup
-// float*>` で安全に参照できる根拠。`TileConfig::shared_mem_bytes_f16`
-// ドキュメントコメント参照）。
+// エピローグ staging 領域（f32。WM*WN simdgroup 分、各 simdgroup が担当
+// サブタイル全体〈(BM/WM)*(BN/WN) 要素〉分。イシュー #797 でタイル粒度へ
+// 拡大。合計 BM*BN 要素）を続ける。`USE_TGP_STAGING=false`（direct-load
+// 経路。フォールバック終端 `TileConfig::SINGLE_SIMDGROUP_8X8` を含む）
+// ではタイル領域を確保しない（`crate::tile::TileConfig::shared_mem_bytes_f16`
+// 参照）ため、エピローグ領域の先頭オフセットは `USE_TGP_STAGING` の値で
+// 分岐して決める（`shared_mem` の実確保長は
+// `TileConfig::shared_mem_bytes_f16().max(16)` を呼び出し元がエンコード時に
+// 指定する契約。`crate::gemm::encode_dispatch_tiled_f16` 参照）。A タイル＋
+// B タイルの要素数（half 単位）は BM/BK/BN がいずれも 8 の倍数・TGP_PAD が
+// 0 または 4（`TileConfig::validate` が保証する不変条件）のため常に偶数
+// であり、half 2 バイト単位で確保しても続くエピローグ領域は f32 4 バイト
+// 境界に整合する（`reinterpret_cast<threadgroup float*>` で安全に参照できる
+// 根拠。`TileConfig::shared_mem_bytes_f16` ドキュメントコメント参照）。
 //
 // **手動境界チェック（REQ-8。省略禁止）**: ブロック原点の早期 return・
 // staged ロード時の要素単位 in-bounds 判定＋0 埋め・direct-load 時の
@@ -901,37 +901,103 @@ kernel void gemm_simdgroup_tiled_f16(
         uint bk_eff = min(BK, dims.k - p0);
 
         if (USE_TGP_STAGING) {
-            // 協調ロード（スカラー。イシュー #796 スコープ境界: float4
-            // ベクトルロード化は #797）: threadgroup 内の全スレッド
-            // （WM*WN*32 個）で A タイル（BM*BK 要素）・B タイル（BK*BN
-            // 要素）を分担してロードする。実効次元・K タイル端をはみ出す
-            // 要素は 0 埋めする（最適化を理由に境界チェックを省略しない。
-            // REQ-8）。
+            // 協調ロード（8 要素ベクトル化。イシュー #797。f32 版
+            // `gemm_simdgroup_tiled` の float4〈128bit・4 要素〉ベクトル
+            // ロード〈#533/#538〉と同じ構造を half 8 要素幅〈128bit〉へ
+            // 移植する: threadgroup 内の全スレッド（WM*WN*32 個）が
+            // 8 要素グループ単位で A タイル（BM*BK 要素）・B タイル
+            // （BK*BN 要素）を分担してロードする。
+            //
+            // **アラインメント成立根拠**（f32 版 float4 ロードのコメントと
+            // 同型の論拠。VEC_WIDTH_F16=8 版）:
+            //   - `dims.k`/`dims.n` は呼び出し元が `crate::pad::pad8` で
+            //     8 の倍数へ実効次元パディング済みで渡す契約
+            //     （`crate::gemm::MetalGemm::dispatch_auto` 参照）
+            //   - `p0`/`col0` は BK・BN のタイル境界（`TileConfig::validate`
+            //     が `bk % 8 == 0`・`bn % (wn*8) == 0` ⟹ `bn % 8 == 0` を
+            //     dispatch 前に fail-closed 保証）のため常に 8 の倍数
+            //   - よって device 側の読み出し先頭オフセットは常に 8 half
+            //     要素（16 バイト）境界に揃う（MTLBuffer 先頭はページ
+            //     境界確保）
+            // これにより `device const float4*` へ再解釈した 128bit（half
+            // 8 要素分のビット幅）一括ロードが安全に成立する（数値変換は
+            // 発生しないビットコピー）。
+            //
+            // **threadgroup 側は 4 要素（8 バイト）境界までしか保証されない**:
+            // `lda = BK + TGP_PAD`・`ldb = BN + TGP_PAD` の `TGP_PAD` は
+            // half 4 要素（8 バイト）単位（`TileConfig::TGP_PAD_ELEMS=4`）
+            // のため、書き込み先添字は 16 バイト境界を跨ぐ書き込み先へ
+            // 整合しない。よって 128bit 単発 store ではなく
+            // `as_type<half4>` で分解した **2 回の half4（8 バイト境界）
+            // store** とする（TGP_PAD の 16 バイト境界化・occupancy 影響は
+            // #799 の計測課題）。
+            //
+            // **境界チェック（REQ-8。省略禁止）**: グループ全 8 要素の
+            // in-bounds を明示判定し、境界グループは範囲外アドレスへ一切
+            // 触れず要素単位スカラー読み出し + 0 埋めへフォールバックする
+            // （f32 版 float4 ロードと同じ二層防御。上記
+            // `TileConfig::validate` の dispatch 前検査が構成レベルで、
+            // 本判定が実行時の端数タイルレベルで、それぞれ担保する）。
+            // 共有メモリへ格納される値は変更前スカラーループとビット単位で
+            // 一致する（格納順・添字導出は不変、ロード命令幅のみ変更のため。
+            // 以降の `simdgroup_load`／MMA 発行順も不変）。
             uint local_tid = simd_id * 32 + simd_lane;
             uint threads_total = WM * WN * 32;
 
-            uint a_elems = BM * BK;
-            for (uint idx = local_tid; idx < a_elems; idx += threads_total) {
+            uint a_vecs = (BM * BK) / 8;
+            for (uint vi = local_tid; vi < a_vecs; vi += threads_total) {
+                uint idx = vi * 8;
                 uint r = idx / BK;
                 uint kk = idx % BK;
                 uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
                 uint global_row = row0 + r;
                 uint global_k = p0 + kk;
-                tile_a[dst_idx] = (kk < bk_eff && global_row < dims.m && global_k < dims.k)
-                    ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k]
-                    : half(0.0h);
+                bool group_in_bounds =
+                    (kk + 8 <= bk_eff) && (global_row < dims.m) && (global_k + 8 <= dims.k);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        a + (size_t)global_row * (size_t)dims.k + (size_t)global_k);
+                    float4 v = *src; // half8 を float4（128bit）としてビットコピー。
+                    threadgroup half4* dst = reinterpret_cast<threadgroup half4*>(tile_a + dst_idx);
+                    dst[0] = as_type<half4>(v.xy);
+                    dst[1] = as_type<half4>(v.zw);
+                } else {
+                    for (uint e = 0; e < 8; e++) {
+                        uint kk_e = kk + e;
+                        uint global_k_e = global_k + e;
+                        tile_a[dst_idx + e] = (kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)
+                            ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k_e]
+                            : half(0.0h);
+                    }
+                }
             }
 
-            uint b_elems = BK * BN;
-            for (uint idx = local_tid; idx < b_elems; idx += threads_total) {
+            uint b_vecs = (BK * BN) / 8;
+            for (uint vi = local_tid; vi < b_vecs; vi += threads_total) {
+                uint idx = vi * 8;
                 uint kk = idx / BN;
                 uint c_ = idx % BN;
                 uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
                 uint global_k = p0 + kk;
                 uint global_col = col0 + c_;
-                tile_b[dst_idx] = (kk < bk_eff && global_k < dims.k && global_col < dims.n)
-                    ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col]
-                    : half(0.0h);
+                bool group_in_bounds =
+                    (kk < bk_eff) && (global_k < dims.k) && (global_col + 8 <= dims.n);
+                if (group_in_bounds) {
+                    device const float4* src = reinterpret_cast<device const float4*>(
+                        b + (size_t)global_k * (size_t)dims.n + (size_t)global_col);
+                    float4 v = *src;
+                    threadgroup half4* dst = reinterpret_cast<threadgroup half4*>(tile_b + dst_idx);
+                    dst[0] = as_type<half4>(v.xy);
+                    dst[1] = as_type<half4>(v.zw);
+                } else {
+                    for (uint e = 0; e < 8; e++) {
+                        uint c_e = c_ + e;
+                        uint global_col_e = global_col + e;
+                        tile_b[dst_idx + e] = (kk < bk_eff && global_k < dims.k && global_col_e < dims.n)
+                            ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col_e]
+                            : half(0.0h);
+                    }
+                }
             }
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -984,40 +1050,45 @@ kernel void gemm_simdgroup_tiled_f16(
         }
     }
 
-    // エピローグ（2 段。#380 で確定した変種 B の多タイル版。イシュー #796
-    // 計画「設計方針」節）: `simdgroup_store(simdgroup_float8x8, device
-    // half*)` はコンパイル不可（#380 spike で確認済み）なため、各 acc
-    // タイルを自 simdgroup 専用の staging スラブ（`stage + simd_id*64`）へ
-    // 一旦 f32 のまま store し、`simdgroup_barrier` で同期してから 32
-    // レーンが half へ変換して `c` へ書き戻す。書き戻し後・次タイル store
-    // 前にも `simdgroup_barrier` を挟む（read-after-write /
-    // write-after-read の両順序）。自 simdgroup 内の同期で足りるため
-    // `threadgroup_barrier` は不要（barrier 粒度の最適化は #797）。
-    threadgroup float* my_stage = stage + simd_id * 64;
+    // エピローグ（3 段・タイル粒度統合。イシュー #797。#380 で確定した
+    // 変種 B〈f32 のまま staging → 最後に 1 回だけ half 変換〉を維持し
+    // つつ、barrier 粒度のみをタイル単位からサブタイル全体単位へ統合する）:
+    // `simdgroup_store(simdgroup_float8x8, device half*)` はコンパイル不可
+    // （#380 spike で確認済み）なため、まず各 simdgroup 専用の staging
+    // スラブ（`sub_bm*sub_bn` 要素。担当サブタイル全体分）へ全 acc タイルを
+    // f32 のまま一括 store し、`simdgroup_barrier` で 1 回だけ同期してから
+    // 32 レーンがサブタイル全体を half へ変換して `c` へ書き戻す。
+    //
+    // #796 時点は acc タイル（8x8）1 個ごとに store→barrier→書き戻し→
+    // barrier を回しており、barrier が 1 simdgroup あたり
+    // `2 * acc_rows * acc_cols` 回発生していた。各 simdgroup は自スラブの
+    // みを読み書きするため他 simdgroup との競合はなく、サブタイル全体を
+    // 一括 store してから読み出す構成に変えても正しさは変わらない
+    // （store→barrier→読み出しの順序自体は不変。read-after-write の
+    // 依存関係は 1 回の barrier で満たされる）。よって barrier は
+    // 1 simdgroup あたり 1 回まで削減できる（書き戻し後に次の store が
+    // 続かないため trailing barrier も不要。自 simdgroup 内の同期で足りる
+    // ため `threadgroup_barrier` も不要）。
+    threadgroup float* my_stage = stage + simd_id * (sub_bm * sub_bn);
     for (uint r = 0; r < acc_rows; r++) {
-        uint out_row_base = sub_row0 + r * 8;
-        if (out_row_base >= dims.m) {
-            continue;
-        }
         for (uint c_ = 0; c_ < acc_cols; c_++) {
-            uint out_col_base = sub_col0 + c_ * 8;
-            if (out_col_base >= dims.n) {
-                continue;
-            }
-            simdgroup_store(acc[r][c_], my_stage, 8);
-            simdgroup_barrier(mem_flags::mem_threadgroup);
-            // REQ-8: 要素単位の境界チェック（`out_row`/`out_col` が実効
-            // 次元を超える要素への書き込みをスキップする）を維持する。
-            for (uint i = simd_lane; i < 64; i += 32u) {
-                uint rr = i / 8;
-                uint cc = i % 8;
-                uint out_row = out_row_base + rr;
-                uint out_col = out_col_base + cc;
-                if (out_row < dims.m && out_col < dims.n) {
-                    c[(size_t)out_row * (size_t)dims.n + (size_t)out_col] = (half)my_stage[i];
-                }
-            }
-            simdgroup_barrier(mem_flags::mem_threadgroup);
+            // ストライドを `sub_bn`（担当サブタイルの列幅）にすることで、
+            // acc タイル群をサブタイル内の正しい位置へ隙間なく配置する。
+            simdgroup_store(acc[r][c_], my_stage + (size_t)(r * 8) * (size_t)sub_bn + (size_t)(c_ * 8), sub_bn);
+        }
+    }
+    simdgroup_barrier(mem_flags::mem_threadgroup);
+    // REQ-8: 要素単位の境界チェック（`out_row`/`out_col` が実効次元を
+    // 超える要素への書き込みをスキップする）を維持する。タイル原点の
+    // 早期 continue は不要（staging はローカル領域で安全に読み書きできる。
+    // 実効次元外への書き込みは本判定で完全に代替される）。
+    for (uint i = simd_lane; i < sub_bm * sub_bn; i += 32u) {
+        uint rr = i / sub_bn;
+        uint cc = i % sub_bn;
+        uint out_row = sub_row0 + rr;
+        uint out_col = sub_col0 + cc;
+        if (out_row < dims.m && out_col < dims.n) {
+            c[(size_t)out_row * (size_t)dims.n + (size_t)out_col] = (half)my_stage[i];
         }
     }
 }
