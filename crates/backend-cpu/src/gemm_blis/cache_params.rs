@@ -49,10 +49,42 @@
 //! [`detected_blocks`] は本番 3 公開関数（[`super::gemm_blis`]／
 //! [`super::gemm_blis_parallel`]／[`super::gemm_blis_bias_act_parallel`]）
 //! からは呼ばれない（受け入れ条件 2＝実機 5 回中央値での非劣化確認が
-//! 本 PR のスコープ外のため。#750・#758 と同型の判断。
-//! `docs/perf/cpu-gemm-runtime-cache-detect.md` 参照）。テスト専用の
-//! パラメータ化入口（[`super::gemm_blis_parallel_with_blocks`] 等）・
-//! 実機 A/B ハーネス（`mod tests` の `#[ignore]` テスト）から到達する。
+//! 本 PR（イシュー #794）のスコープ外のため。Apple M4 Max 実機への到達
+//! 手段が本セッション環境（Linux x86_64）に存在せず（`docs/
+//! real-hardware-verification-env.local.md` 不在）実機計測を実行できない
+//! ことを確認し、#750・#758・#753 と同型の fail-closed 判断として本番
+//! 既定を切り替えていない。`docs/perf/cpu-gemm-runtime-cache-detect.md`
+//! 参照）。テスト専用のパラメータ化入口（[`super::gemm_blis_parallel_with_blocks`]
+//! 等）・実機 A/B ハーネス（`mod tests` の `#[ignore]` テスト）から到達する。
+//!
+//! ## MC/KC のキャップ・NC の動的算出（イシュー #794）
+//!
+//! [`compute_blocks`] の KC／MC は「L1D／L2 実容量から導出した理論値」と
+//! 「#749 実測（M4 Max・`docs/perf/cpu-gemm-blocking-sweep.md` §7）で
+//! 非劣化を確認済みの現行コンパイル時既定（[`super::KC`]＝256・
+//! [`super::MC`]＝128）」の小さい方をとる。理論値を無条件に採用しない
+//! 理由: #749 は KC／MC の単独拡大が全サイズで劣化することを実測しており、
+//! L1D／L2 実容量からの素朴な理論値（M4 Max 代表値では KC≈1228・
+//! MC≈1024 相当）はこの劣化域に張り付く。逆に、M4 Max の実測最適点
+//! そのものへ一致するよう予算比率等の定数を調整すると `hw.model` 分岐を
+//! 「容量から逆算した係数」の形へ置き換えただけの機種固定化になり、
+//! PR #766 の撤去理由（本ファイル冒頭「デッドコード化を避ける設計」節）
+//! に反する。実測で確認済みの上限をキャップとして課すだけに留めるため、
+//! 小容量 L1D／L2 環境（組込み・仮想化等）では理論値がキャップを下回り
+//! 引き続き縮む（fail-closed 方向は維持。実測未確認の「拡大」方向にのみ
+//! キャップをかける）。
+//!
+//! NC（本イシューの主眼）は逆に #749 で拡大（NC=9600）が n>=4096 で
+//! 改善しているため、キャップを課さず L2 残余からの理論値をそのまま
+//! 採用する。KC が上記キャップにより `super::KC`（256）へ収束する結果、
+//! B パネル 1 要素あたりの K 方向バイト数が固定され、NC は L2 実容量へ
+//! 比例して動的に決まる（M4 Max 代表値では nc_raw ≈ 8192。#749 実測の
+//! 改善域〈NC=9600〉に近い値だが、機種名や実測値そのものへの逆算では
+//! なく L2 容量からの算出のため PR #766 の撤去理由に抵触しない）。
+//! n=2048 で NC 拡大が劣化した実測（#749 §7 (iv)）と非両立の可能性が
+//! 残るが、[`detected_blocks`] は上記のとおり本番未結線のため、
+//! 形状（n）依存の扱いは実機計測イテレーションで別途判断する
+//! （イシュー #794 §8・`docs/perf/cpu-gemm-runtime-cache-detect.md`）。
 
 use std::sync::OnceLock;
 
@@ -202,19 +234,50 @@ pub(crate) fn compute_blocks(
         // 全体の fail-closed 方針（0 除算防止）に合わせ明示的に拒否する。
         return None;
     }
-    let kc = (l1_budget / per_k_bytes).clamp(KC_MIN, KC_MAX);
+    // KC は「L1D 実容量から算出できる理論上限」と「#749 実測（M4 Max・
+    // `docs/perf/cpu-gemm-blocking-sweep.md` §7）で確認済みの非劣化点
+    // `super::KC`（現行コンパイル時既定 256）」の小さい方をとる。理論値を
+    // 直接使わない理由（イシュー #794 レビュー指摘）: #749 は KC の
+    // 単独拡大が全サイズで劣化することを実測しており、L1D 実容量から
+    // 素朴に導出した理論値（M4 Max 代表値では KC≈1228）はこの劣化域に
+    // 張り付く。かといって M4 Max 実測値そのものに一致するよう予算比率
+    // 等の定数を逆算すると、`hw.model` 分岐を「係数」の形に置き換えた
+    // だけの機種固定化になり PR #766 の撤去理由（`cache_params.rs:12-16`
+    // モジュールドキュメント）に反する。実測で確認済みの上限を
+    // キャップとして課すだけに留め、小容量 L1D 環境（組込み・仮想化等）
+    // では理論値がキャップを下回り引き続き縮む（fail-closed 方向は
+    // 維持。実測未確認の「拡大」方向にのみキャップをかける）。
+    let kc_theoretical = l1_budget / per_k_bytes;
+    let kc = kc_theoretical.min(super::KC).clamp(KC_MIN, KC_MAX);
 
     let l2_budget = l2_bytes / 2;
     let kc_bytes = F32_BYTES.checked_mul(kc)?;
     if kc_bytes == 0 {
         return None;
     }
-    let mc_raw = l2_budget / kc_bytes;
+    // MC も KC と同じ理由（#749: 単独拡大が全サイズで劣化）で
+    // `super::MC`（現行既定 128）をキャップとする。`clamp_to_multiple`
+    // （`mr` の倍数への丸め）へ渡す**前**にキャップする（丸めた後に
+    // キャップすると倍数契約が破れうるため。丸め前キャップ→丸めの順で
+    // 倍数契約〈`mc % mr == 0`〉と非劣化キャップの両立を保つ）。
+    let mc_raw = (l2_budget / kc_bytes).min(super::MC);
     let mc = clamp_to_multiple(mc_raw, MC_MIN, MC_MAX, mr)?;
 
-    // NC は B パネルが占有できる L2 残余（A パネル分を除いた残り）から
-    // 算出する。`l2_budget` は A パネルに割り当てた予算のため、B 側は
-    // 残りの半分（`l2_bytes - l2_budget == l2_budget`）を使う。
+    // NC は #794 の主眼（本イシュー: NC 動的算出）。MC/KC と異なり
+    // #749 実測では NC 拡大（NC=9600）が n>=4096 で改善しており、
+    // キャップを課さず L2 残余（A パネル分を除いた残り。`l2_budget` は
+    // A 側に割り当てた予算のため、B 側は残りの半分＝`l2_budget` 自体を
+    // 使う）から算出した理論値をそのまま採用する。上記で `kc` が
+    // `super::KC`（256）へキャップされた結果、`kc_bytes` は `KC` 由来の
+    // 小さい値に固定され、L2 実容量が大きいほど `nc_raw` も比例して
+    // 大きくなる（M4 Max 代表値では nc_raw ≈ 8192。#749 実測の
+    // 改善域〈NC=9600〉に近い一方、機種名や実測値そのものへの逆算では
+    // なく L2 容量からの算出のため PR #766 の撤去理由に抵触しない）。
+    // n=2048 で NC 拡大が劣化した実測（#749 §7 (iv)）とは非両立の
+    // 可能性が残るが、本関数は実機ゲート未通過のため本番未結線
+    // （`detected_blocks` の呼び出し元がテスト専用入口・A/B ハーネスに
+    // 限られる。`mod.rs` 冒頭コメント）であり、形状（n）依存の扱いは
+    // 実機計測イテレーションで別途判断する（イシュー #794 §8）。
     let nc_raw = l2_budget / kc_bytes;
     let nc = clamp_to_multiple(nc_raw, NC_MIN, NC_MAX, nr)?;
 
