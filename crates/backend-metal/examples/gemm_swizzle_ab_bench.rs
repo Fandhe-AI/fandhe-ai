@@ -7,7 +7,17 @@
 //! （#540 が定める）判定が成立しなかった。本バイナリはサーマル・GPU クロック
 //! （DVFS）挙動の系統誤差を抑える計測プロトコル
 //! （`bench_harness::ab`・`docs/perf/metal-bench-noise-protocol.md`）で
-//! フェーズ 1（安定性セルフチェック）・フェーズ 2（swizzle A/B）を行う。
+//! フェーズ 1（安定性セルフチェック）・フェーズ 2（prepared 境界 swizzle
+//! A/B）・フェーズ 3（転送込み境界 swizzle A/B。イシュー #795）を行う。
+//!
+//! フェーズ 3 はフェーズ 2 の `dispatch_tiled_prepared`（アップロード済み
+//! バッファ・確定 `TileConfig` を直接渡す prepared 境界）と異なり、
+//! `dispatch_auto`（ホストスライス入力・アップロード + GEMM + 読み戻しを
+//! 1 計測区間に含む本番相当の呼び出し経路）を使う。計測境界の定義は
+//! `docs/perf/oss-gemm-comparison-baseline.md` §計測境界と同じ「転送込み」
+//! 区分に合わせている（本番 `MetalGemm::dispatch_auto` 呼び出しがまさに
+//! この境界で計測されるため、prepared 境界だけでは見えない転送コストの
+//! 影響を含めた採否判断材料として使う。イシュー #795 計画 Step 1）。
 //!
 //! `examples/` に置く理由・非 macOS stub の位置づけは `gemm_bench.rs`
 //! ドキュメンテーションコメント（同ディレクトリ）と同一。
@@ -51,6 +61,17 @@ mod macos_impl {
     fn tflops(size: usize, median_secs: f64) -> f64 {
         let flops = 2.0 * (size as f64).powi(3);
         flops / median_secs / 1e12
+    }
+
+    /// `AbResult` の base/head 中央値秒数から `head_over_base`（TFLOPS 比）を
+    /// 計算する共有ヘルパ。フェーズ 2・フェーズ 3 で同一ロジックを使う
+    /// （`result.b_over_a_ratio` は実行時間の比〈レイテンシ比〉であり
+    /// TFLOPS 比はその逆数になる。取り違えると #540 の採否判定基準
+    /// 〈`head_over_base` > 1.0 で改善〉が逆転するため、フェーズ間で
+    /// 重複実装せず 1 箇所に集約する。イシュー #746 PR #763 の
+    /// codex-review・Cursor Bugbot 指摘の再発防止。イシュー #795 計画 Step 1）。
+    fn head_over_base_tflops_ratio(size: usize, median_a_secs: f64, median_b_secs: f64) -> f64 {
+        tflops(size, median_b_secs) / tflops(size, median_a_secs)
     }
 
     /// フェーズ 1: `gemm.dispatch_variant(GemmVariant::SimdgroupTiled(tile::select(..)))`
@@ -184,15 +205,8 @@ mod macos_impl {
 
             let base_median_tflops = tflops(size, result.median_a_secs);
             let head_median_tflops = tflops(size, result.median_b_secs);
-            // `result.b_over_a_ratio`（= median_b_secs / median_a_secs）は実行時間の比
-            // （レイテンシ比）であり、TFLOPS は時間の逆数のため TFLOPS 比の
-            // head/base はその逆数（median_a_secs / median_b_secs）になる。
-            // ここを取り違えて `b_over_a_ratio` をそのまま `head_over_base` として
-            // 出力すると、#540 の採否判定基準（`head_over_base` > 1.0 で採用）が
-            // 逆転する（head が実際に高速でも 1.0 未満になる）ため、
-            // TFLOPS 値同士の比として明示的に計算する（codex-review・Cursor Bugbot
-            // 指摘対応。イシュー #746 PR #763）。
-            let head_over_base = head_median_tflops / base_median_tflops;
+            let head_over_base =
+                head_over_base_tflops_ratio(size, result.median_a_secs, result.median_b_secs);
 
             println!(
                 "size={size} base_resolved=({}x{}, {}) head_resolved=({}x{}, {}) \
@@ -222,8 +236,88 @@ mod macos_impl {
         }
 
         println!(
-            "--- フェーズ 2 完了。採否判定は #540 既存基準（2048/4096 の中央値改善で採用、\
-             なければ revert）に従い、`docs/perf/metal-gemm-tgid-swizzle-ab.md` へ記録すること。"
+            "--- フェーズ 2 完了。採否判定は #795 判断基準（2048/4096 の中央値改善で採用、\
+             改善なしなら SWIZZLE_ENABLED=false 維持）に従い、\
+             `docs/perf/metal-gemm-tgid-swizzle-ab.md` へ記録すること。"
+        );
+    }
+
+    /// フェーズ 3（イシュー #795）: `MetalGemm::new_with_swizzle` で構築した
+    /// base/head の 2 インスタンスへ `dispatch_auto`（ホストスライス入力。
+    /// アップロード + GEMM + 読み戻しを 1 計測区間に含む転送込み境界）を
+    /// [`run_ab`] で interleaved 計測する。フェーズ 2（prepared 境界。
+    /// アップロード済みバッファを使い回す）では見えない、swizzle 適用に伴う
+    /// grid 形状変化がアップロード/読み戻しコストと相互作用する効果
+    /// （もしあれば）を捕捉するのが狙い（計画 Step 1）。
+    ///
+    /// サイズは 512〜4096（256 は #795 計画のフェーズ 3 対象範囲外。
+    /// prepared 境界フェーズ 2 で既に全サイズ計測済みのため、フェーズ 3 は
+    /// 転送込み境界での「大形状での効果」確認に絞る）。
+    fn phase3_swizzle_ab_transfer_included(ctx: &MetalContext) {
+        println!("--- フェーズ 3: tgid swizzle A/B（転送込み境界。base=off / head=on）---");
+
+        let base_gemm = MetalGemm::new_with_swizzle(ctx, false)
+            .expect("base GEMM パイプラインの構築に失敗した");
+        let head_gemm =
+            MetalGemm::new_with_swizzle(ctx, true).expect("head GEMM パイプラインの構築に失敗した");
+
+        let ab_config = AbConfig::new(ROUNDS, COOLDOWN, MIN_WARMUP)
+            .expect("ROUNDS は偶数固定のため AbConfig::new は失敗しない");
+        let measurement_config = MeasurementConfig::default();
+
+        for size in [512usize, 1024, 2048, 4096] {
+            let mut rng = Xorshift64Star::new(SEED);
+            let a = rng.fill_vec(size * size);
+            let b = rng.fill_vec(size * size);
+
+            let result = run_ab(
+                &ab_config,
+                &measurement_config,
+                || {
+                    base_gemm
+                        .dispatch_auto(ctx, &a, &b, size, size, size)
+                        .expect("base GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+                },
+                || {
+                    head_gemm
+                        .dispatch_auto(ctx, &a, &b, size, size, size)
+                        .expect("head GEMM dispatch_auto に失敗した（実機でのみ実行する前提）");
+                },
+            )
+            .expect("MeasurementConfig::default は下限（20/20）を満たすため失敗しない");
+
+            let base_tflops: Vec<f64> = result
+                .a_round_medians_secs
+                .iter()
+                .map(|&secs| tflops(size, secs))
+                .collect();
+            let head_tflops: Vec<f64> = result
+                .b_round_medians_secs
+                .iter()
+                .map(|&secs| tflops(size, secs))
+                .collect();
+
+            let base_median_tflops = tflops(size, result.median_a_secs);
+            let head_median_tflops = tflops(size, result.median_b_secs);
+            let head_over_base =
+                head_over_base_tflops_ratio(size, result.median_a_secs, result.median_b_secs);
+
+            println!(
+                "size={size} base_median_tflops={:.4} head_median_tflops={:.4} \
+                 head_over_base={:.4} spread_base={:.4} spread_head={:.4} \
+                 base_round_tflops={base_tflops:.4?} head_round_tflops={head_tflops:.4?}",
+                base_median_tflops,
+                head_median_tflops,
+                head_over_base,
+                result.spread_a,
+                result.spread_b,
+            );
+        }
+
+        println!(
+            "--- フェーズ 3 完了。転送込み境界の実測もフェーズ 2 と合わせて \
+             `docs/perf/metal-gemm-tgid-swizzle-ab.md` へ記録し、#795 判断基準の \
+             根拠に含めること。"
         );
     }
 
@@ -240,6 +334,7 @@ mod macos_impl {
         }
 
         phase2_swizzle_ab(&ctx);
+        phase3_swizzle_ab_transfer_included(&ctx);
     }
 }
 
