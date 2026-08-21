@@ -143,6 +143,22 @@
 //! `gemm_tiled`／`gemm_simdgroup`／`gemm_simdgroup_tiled`／
 //! `gemm_simdgroup_f16` カーネルには一切触れておらず、GEMM 単体の性能・
 //! 数値契約は構造的に非後退（新規カーネルの追加のみ）。
+//!
+//! イシュー #796 で f16 タイル化カーネル本体（`shaders/gemm.metal::
+//! gemm_simdgroup_tiled_f16`。BM/BN/BK/WM/WN・協調ロード〈スカラー〉・
+//! direct-load 分岐・f32 アキュムレータ・2 段エピローグ）を追加した。
+//! 既存 `gemm_simdgroup_f16`（1 threadgroup = 1 simdgroup = C の 8x8
+//! タイル 1 つの非タイル化構造）が対 PyTorch MPS f16 で大きく劣後する
+//! 主因（親イシュー #787）への対応で、f32 版 `gemm_simdgroup_tiled`
+//! （TASK-1.8f・#188）の構造を half 入力対応で移植した。明示 `TileConfig`
+//! 指定の単体ディスパッチ入口（[`gemm::MetalGemm::dispatch_f16_tiled_unverified`]・
+//! [`gemm::MetalGemm::dispatch_f16_tiled_prepared_unverified`]）を追加した
+//! が、`dispatch_auto`／`dispatch_backend_auto`（production 経路）へは
+//! まだ統合していない（`_unverified` suffix・`#[doc(hidden)]` の判断根拠は
+//! [`gemm::MetalGemm::dispatch_f16_unverified`] と同一）。協調ロードの
+//! float4 ベクトル化・エピローグの barrier 粒度最適化は #797、動的タイル
+//! 選択への統合・バックエンド間数値一致回帰テストの拡張は #798、実機
+//! 再計測・ベースライン更新は #799 のスコープとする。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;

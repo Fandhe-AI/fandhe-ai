@@ -150,14 +150,107 @@ fn gemm_simdgroup_f16_source_retains_req8_boundary_guard() {
 }
 
 /// `gemm_simdgroup_tiled` カーネル本体（`kernel void gemm_simdgroup_tiled(`
-/// 開始位置から EOF まで）を切り出す。本ファイル内で最後に定義される
-/// カーネルのため EOF までのスライスで安全（次カーネル境界を考慮する
-/// 必要がない）。
+/// 開始位置から、次に定義される `gemm_simdgroup_tiled_f16`
+/// （イシュー #796）開始位置までを切り出す。
+///
+/// **イシュー #796 で境界の取り方を変更**: 本ファイル追加当初は
+/// `gemm_simdgroup_tiled` がファイル内最後のカーネルだったため EOF までの
+/// スライスで安全だったが、#796 で末尾に `gemm_simdgroup_tiled_f16`
+/// （f32 版と同じ蛇行走査式・`bool group_in_bounds =`・
+/// `simdgroup_float8x8 a_frag[MAX_ACC];` 相当の文言をコメントに含む）を
+/// 追加したため、EOF までのスライスのままでは以下の既存 exact-occurrence
+/// 検査（`gemm_simdgroup_tiled_source_uses_serpentine_scan_order` 等）が
+/// f16 カーネル側の記述を誤って算入し偽陽性・偽陰性を招く
+/// （`gemm_simdgroup_f16_kernel_body` が f32 版 `gemm_simdgroup` との混同を
+/// 避けるために境界を絞っているのと同じ理由。PR #346 Bugbot 指摘の系譜）。
 fn gemm_simdgroup_tiled_kernel_body() -> &'static str {
     let kernel_start = GEMM_METAL_SOURCE
         .find("kernel void gemm_simdgroup_tiled(")
         .expect("gemm_simdgroup_tiled カーネル本体が見つかりません");
+    let next_kernel_start = GEMM_METAL_SOURCE[kernel_start..]
+        .find("kernel void gemm_simdgroup_tiled_f16(")
+        .map(|offset| kernel_start + offset)
+        .expect(
+            "gemm_simdgroup_tiled_f16 カーネル本体が見つかりません（次カーネル境界の特定に失敗）",
+        );
+    &GEMM_METAL_SOURCE[kernel_start..next_kernel_start]
+}
+
+/// `gemm_simdgroup_tiled_f16` カーネル本体（`kernel void
+/// gemm_simdgroup_tiled_f16(` 開始位置から EOF まで）を切り出す
+/// （イシュー #796）。本ファイル内で最後に定義されるカーネルのため EOF
+/// までのスライスで安全。
+fn gemm_simdgroup_tiled_f16_kernel_body() -> &'static str {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_tiled_f16(")
+        .expect("gemm_simdgroup_tiled_f16 カーネル本体が見つかりません");
     &GEMM_METAL_SOURCE[kernel_start..]
+}
+
+/// REQ-11・イシュー #796 の証跡: `gemm_simdgroup_tiled_f16` が半精度
+/// simdgroup 行列型（`MM_T`＝`simdgroup_half8x8`）・f32 累算
+/// （`ACC_T`＝`simdgroup_float8x8`）・行列演算ユニット命令
+/// （`simdgroup_load`/`simdgroup_multiply_accumulate`/`simdgroup_store`）を
+/// 実際に使用していることをロックする（`gemm_simdgroup_f16_source_uses_*`
+/// と対になる検査。`docs/matrix-unit-dispatch.md` の命令実在一覧表が
+/// 参照する）。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_uses_matrix_unit_instructions() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in [
+        "device const half* a",
+        "device half* c",
+        "MM_T a_frag[MAX_ACC];",
+        "MM_T b_frag[MAX_ACC];",
+        "ACC_T acc[MAX_ACC][MAX_ACC];",
+        "simdgroup_load",
+        "simdgroup_multiply_accumulate",
+        "simdgroup_store",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm.metal の gemm_simdgroup_tiled_f16 に `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// REQ-8 の証跡（イシュー #796）: `gemm_simdgroup_tiled_f16` が
+/// 手動境界チェック（ブロック原点の早期 return・協調ロードの要素単位
+/// in-bounds 判定・エピローグ書き戻しの要素単位 in-bounds 判定）を
+/// 維持していることをロックする（`gemm_simdgroup_tiled_source_retains_*`
+/// と同種の検査。性能上の下限・最適化の達成を理由に境界チェックを省略
+/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in [
+        "if (row0 >= dims.m || col0 >= dims.n)",
+        "(kk < bk_eff && global_row < dims.m && global_k < dims.k)",
+        "(kk < bk_eff && global_k < dims.k && global_col < dims.n)",
+        "if (out_row < dims.m && out_col < dims.n)",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 に REQ-8 手動境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #796 スコープ境界の証跡: `gemm_simdgroup_tiled_f16` の協調
+/// ロードが本イシューでは**スカラーロード**に留まり、ベクトル化ロード
+/// （イシュー #797 のスコープ）へ先走っていないことをロックする（計画
+/// 「スコープ境界」節）。ベクトル化されると `reinterpret_cast<device
+/// const half4*>`（もしくは f32 版と同じ `float4` 系の再解釈キャスト）が
+/// 現れるはずだが、本カーネルには現れないことを確認する（コメント内の
+/// 単語一致による偽陽性を避けるため、`reinterpret_cast<device const` を
+/// 含む実コードの言い回しのみを検査対象にする）。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_uses_scalar_staged_load_not_vectorized() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    assert!(
+        !kernel_body.contains("reinterpret_cast<device const"),
+        "gemm_simdgroup_tiled_f16 にベクトルロードの再解釈キャストが見つかりました（イシュー #797 のスコープ先取り）"
+    );
 }
 
 /// イシュー #536 の証跡（#745 でも staged 経路の残存有無を再確認）:
