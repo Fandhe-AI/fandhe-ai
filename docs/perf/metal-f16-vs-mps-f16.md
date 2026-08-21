@@ -300,13 +300,22 @@ HEAD コミット SHA を、マージ後は `origin/main` 上のマージコミ�
 いずれの場合も **実際に checkout した SHA を計測結果表へ記録する**（下記「状態」節・
 実測完了時の記録項目「計測リビジョン」を参照）。
 
+本 PR は計測プロトコル整備自体がレビュー対象のため、この節をコミットするたびに
+HEAD SHA が変わる。ドキュメント中に個別コミット SHA を固定値として書き写すと
+次のコミットで直ちに陳腐化する（PR review 指摘・実際に旧コミット SHA が残存し
+乖離した事例あり）ため、**固定値をここに書かず `gh pr view` で実行時に PR #825 の
+実際の HEAD を解決してから checkout する**。
+
 ```sh
 git fetch origin
 
-# 本 PR（#825）の HEAD コミット SHA を明示して checkout する。
+# 本 PR（#825）の実際の HEAD コミット SHA を実行時に解決して checkout する
+# （ドキュメントへ個別 SHA を固定値で書き写すと次のコミットで陳腐化するため、
+# `gh pr view` で都度取得する）。
+git checkout "$(gh pr view 825 --repo Fandhe-AI/rust-ai-library --json headRefOid --jq .headRefOid)"
+
 # マージ後に再計測する場合は、代わりに origin/main 上のマージコミット SHA
 # （`git log origin/main --grep '#799'` 等で特定）を使う。
-git checkout d69130eb2d49a5360a37d7c53dd60947d35f44d9
 
 # 1. 数値一致の先行確認（3 系統。全 PASS が計測の前提）
 cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
