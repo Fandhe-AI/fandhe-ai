@@ -109,7 +109,25 @@
 //! `docs/perf/cuda-floor-remeasurement.md`「経路×形状 TFLOPS 実測」表にも
 //! 中央値・Q1・Q3 の記入欄がある。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
+//! ## `mma_tf32`（TF32 生 `mma.sync` 経路）の追加計測（イシュー #802）
+//!
+//! `gemm_mma_tf32.rs::CudaMmaTf32Gemm`（イシュー #801。`ops.rs`／
+//! `gemm.rs`／`gemm_auto.rs` のディスパッチからは呼ばれない直接指定
+//! API。同ファイル冒頭「本番結線なし」参照）を [`measure_mma_tf32`] で
+//! 上記 4 経路と同じ launch-only 境界で計測し、`wmma_tf32`（既存
+//! f32 最良経路。staged/opt）との A/B 比較用の**参考列**として出力する。
+//! **`best_f32`（f32 候補下限の算出ロジック）には一切組み込まない**
+//! （実装計画 Step A-3「f32 candidate floor の算出ロジックは変更しない」。
+//! 下限値算出への組み込みは本経路の採否判断
+//! （`docs/perf/cuda-gemm-mma-tf32-ab.md`）が出た後の別スコープ）。
+//! 本イシュー（#802）の実装セッションは DGX Spark GB10 実機に到達できず
+//! （本セッションの実行環境には別 GPU〈sm_121 ではない〉のみ存在し、
+//! `docs/real-hardware-verification-env.local.md` も不在。前例 #792/#821
+//! と同型のブロック状態）、`mma_tf32` 列の実測値・A/B 判定・本番結線は
+//! 未実施のまま計測経路の追加（実機到達時に即実行できる状態）のみを
+//! 本 PR に含める（`docs/perf/cuda-gemm-mma-tf32-ab.md` 参照）。
+
+use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaMmaTf32Gemm, CudaWmmaGemm};
 use bench_harness::floor_lower_bound;
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
@@ -401,6 +419,63 @@ fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) 
     tflops_sample(size, &measurement)
 }
 
+/// H2D/D2H 転送・出力バッファ確保を計測区間の外へ出し、GPU 実行
+/// （カーネル起動 + 同期）のみを計測する（`measure_mma_f16` と同じ
+/// launch-only 境界。モジュール冒頭ドキュメンテーションコメント
+/// 「`mma_tf32`（TF32 生 `mma.sync` 経路）の追加計測（イシュー #802）」
+/// 参照）。
+///
+/// `CudaMmaTf32Gemm`（`gemm_mma_tf32.rs`。イシュー #801）は `wmma_tf32`
+/// のような opt/staged/basic の 3 段フォールバックを持たないが、`new` の
+/// 成功は形状非依存のカーネルコンパイルのみを保証し、`launch_tf32` は
+/// 形状ごとに `validate_mma_tf32_alignment`（`n%4==0 && k%4==0`）／
+/// `validate_mma_tf32_grid_bounds`（grid_dim.y 上限）／
+/// `validate_mma_tf32_k_bound`（K タイル添字の i32 オーバーフロー）を
+/// 追加検証する（`gemm_mma_tf32.rs` 参照）。判定対象形状
+/// （512〜4096・4 の倍数）はいずれも通過する計算だが、この参考列は
+/// `best_f32`（f32 候補下限の算出）に組み込まれない付随情報のため、
+/// 万一 `launch_tf32` が失敗しても既存 4 経路（候補下限の算出根拠）の
+/// 計測を失わせてはならない。`measure_wmma_tf32` と同じ理由
+/// （PR #349 Bugbot 指摘 High「WMMA path panics on skip」）で probe
+/// してから `Option` を返し、呼び出し側 `main` は `and_then` で
+/// 平坦化する（`measure_wmma_tf32` ドキュメンテーションコメント参照）。
+fn measure_mma_tf32(
+    gemm: &CudaMmaTf32Gemm,
+    size: usize,
+    config: &MeasurementConfig,
+) -> Option<TflopsSample> {
+    let mut rng = Xorshift64Star::new(SEED);
+    let a = rng.fill_vec(size * size);
+    let b = rng.fill_vec(size * size);
+    let (m, n, k) = (size as u32, size as u32, size as u32);
+
+    let (a_dev, b_dev) = gemm
+        .upload_f32(&a, &b)
+        .expect("mma.sync TF32 upload must succeed on CUDA-equipped runner");
+    let mut c_dev = gemm
+        .alloc_output_f32(m, n)
+        .expect("mma.sync TF32 output allocation must succeed on CUDA-equipped runner");
+
+    // probe: 1 回起動して形状固有の検証（整列・grid 上限・K 上限）を
+    // 通過するか確認する。失敗時はこの経路のみ skip し、他経路の計測は
+    // 継続する（本関数ドキュメンテーションコメント参照）。
+    if let Err(e) = gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k) {
+        println!(
+            "mma.sync TF32 unavailable for size={size} ({e}); mma_tf32 skipped for this size."
+        );
+        return None;
+    }
+
+    let measurement = bench_run(config, || {
+        gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
+            .expect(
+                "mma.sync TF32 GEMM must succeed on CUDA-equipped runner (availability probed above)",
+            );
+    })
+    .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
+    Some(tflops_sample(size, &measurement))
+}
+
 /// 2 経路の実測値のうち大きい方（＝実際に速い方）を選ぶ。両方存在する
 /// 場合は非有限値（NaN・Inf。`gemm.rs` 側の理論上ありえない返り値に対する
 /// 防御）を除外したうえで最大値を採り、片方のみ存在する場合はそちらへ
@@ -529,6 +604,20 @@ fn main() {
         Ok(g) => Some(g),
         Err(e) => {
             println!("mma.sync f16 kernel unavailable ({e}); mma_f16 column will be skipped.");
+            None
+        }
+    };
+    // TF32 生 `mma.sync`(m16n8k8) 経路（イシュー #801・#802）。本番結線
+    // なしの直接指定 API のため `run_wmma_tf32` のような opt/staged/basic
+    // フォールバックは持たず、`new` の成否だけが利用可否を決める
+    // （`measure_mma_tf32` ドキュメンテーションコメント参照）。
+    let mma_tf32_gemm = match CudaMmaTf32Gemm::new(&device) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            println!(
+                "mma.sync TF32 kernel unavailable ({e}); mma_tf32 (reference-only) column will \
+                 be skipped."
+            );
             None
         }
     };
@@ -689,7 +778,8 @@ fn main() {
         None => false,
     };
 
-    if tiled_gemm.is_none() && wmma_gemm.is_none() && mma_gemm.is_none() {
+    if tiled_gemm.is_none() && wmma_gemm.is_none() && mma_gemm.is_none() && mma_tf32_gemm.is_none()
+    {
         println!(
             "backend-cuda cuda_floor_bench: no kernel path available in this environment \
              (NVRTC unavailable or device unsupported); nothing to measure. \
@@ -744,6 +834,12 @@ fn main() {
             .as_ref()
             .map(|g| measure_wmma_f16(g, size, &config));
         let mma_f16 = mma_gemm.as_ref().map(|g| measure_mma_f16(g, size, &config));
+        // 参考列のみ（`best_f32`／候補下限には組み込まない。モジュール
+        // 冒頭ドキュメンテーションコメント「`mma_tf32`（TF32 生
+        // `mma.sync` 経路）の追加計測（イシュー #802）」参照）。
+        let mma_tf32 = mma_tf32_gemm
+            .as_ref()
+            .and_then(|g| measure_mma_tf32(g, size, &config));
 
         // 経路選択・候補下限の算出は中央値（`TflopsSample::median`）のみを
         // 根拠とする（従来どおり）。Q1/Q3 は選択には使わず、出力行・
@@ -796,17 +892,33 @@ fn main() {
             }
             _ => None,
         };
+        // `mma_tf32` vs `wmma_tf32`（f32 最良経路の候補。staged/opt）の
+        // A/B 比。両方とも launch-only 計測のため apples-to-apples
+        // （モジュール冒頭ドキュメンテーションコメント参照）。イシュー
+        // #802 の採否判断（`docs/perf/cuda-gemm-mma-tf32-ab.md`）はこの
+        // 比の実測値を根拠とする。
+        let mma_tf32_over_wmma_tf32_percent = match (mma_tf32, wmma_tf32) {
+            (Some(m), Some(w))
+                if w.median.is_finite() && w.median > 0.0 && m.median.is_finite() =>
+            {
+                Some(m.median / w.median * 100.0)
+            }
+            _ => None,
+        };
 
         println!(
             "size={size} tiled_f32_tflops={} wmma_tf32_tflops={} wmma_f16_tflops={} \
-             mma_f16_tflops={} f32_best_path={} f16_candidate_path={} f32_best_over_pytorch={} \
-             f16_candidate_over_pytorch={} (pytorch_f32={:.4} pytorch_f16={:.4}, \
-             f32_ref_measured={f32_measured} f16_ref_measured={f16_measured}, \
-             mma_over_wmma_f16(apples-to-apples, launch-only, median-based)={})",
+             mma_f16_tflops={} mma_tf32_tflops={} f32_best_path={} f16_candidate_path={} \
+             f32_best_over_pytorch={} f16_candidate_over_pytorch={} (pytorch_f32={:.4} \
+             pytorch_f16={:.4}, f32_ref_measured={f32_measured} f16_ref_measured={f16_measured}, \
+             mma_over_wmma_f16(apples-to-apples, launch-only, median-based)={}, \
+             mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, \
+             apples-to-apples, launch-only, median-based)={})",
             fmt_sample(tiled),
             fmt_sample(wmma_tf32),
             fmt_sample(wmma_f16),
             fmt_sample(mma_f16),
+            fmt_sample(mma_tf32),
             fmt_path(f32_best),
             fmt_path(f16_candidate),
             fmt_ratio(f32_ratio_percent),
@@ -814,6 +926,7 @@ fn main() {
             pytorch_f32,
             pytorch_f16,
             fmt_ratio(mma_over_wmma_f16_percent),
+            fmt_ratio(mma_tf32_over_wmma_tf32_percent),
         );
 
         if JUDGED_SIZES.contains(&size) {
