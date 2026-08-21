@@ -442,6 +442,15 @@ fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) 
 /// へ縮退させ、呼び出し側 `main` は `and_then` で平坦化する
 /// （codex-review 指摘 P2「バッファ準備失敗がベンチ全体を停止させる」
 /// 対応。`measure_wmma_tf32` ドキュメンテーションコメント参照）。
+/// さらに probe（1 回起動）の成功は形状検証を通過したことのみを保証し、
+/// 以降の `bench_run` 反復中（ウォームアップ／計測双方）に一時的な CUDA
+/// エラー・デバイス障害が起きないことまでは保証しない。`bench_run` の
+/// クロージャは `FnMut()`（非 fallible）契約のため、反復中の
+/// `launch_tf32` 呼び出しも `.expect()` で panic 化せず、最初のエラーを
+/// 捕捉して計測後に `None` へ縮退させる（`measure_dyn_staged`／
+/// `measure_production_wmma_tf32`〈`gemm_wmma_tf32_staged_stages_bench.rs`〉
+/// と同じ契約。codex-review 指摘 P2「probe 後の起動失敗でベンチ全体が
+/// 停止する」対応。イシュー #802 PR #826）。
 fn measure_mma_tf32(
     gemm: &CudaMmaTf32Gemm,
     size: usize,
@@ -481,13 +490,32 @@ fn measure_mma_tf32(
         return None;
     }
 
+    // probe 成功は「形状検証を 1 回通過した」ことのみを保証し、以降の
+    // ウォームアップ／反復中に一時的な CUDA エラー・デバイス障害が
+    // 起きないことまでは保証しない。`bench_run` のクロージャは
+    // `FnMut()`（非 fallible）契約のため、ここで `.expect()` すると
+    // その一時的失敗がそのままベンチ全体（後続サイズ含む）を落として
+    // しまう（codex-review 指摘 P2、イシュー #802 PR #826）。
+    // `measure_dyn_staged`／`measure_production_wmma_tf32`
+    // （`gemm_wmma_tf32_staged_stages_bench.rs`）と同じ理由・同じ契約で、
+    // 最初のエラーを捕捉し、計測後にこの参考経路のみ `None` へ縮退させる
+    // （2 回目以降の呼び出しは無駄な起動を避けて no-op にする）。
+    let mut first_err = None;
     let measurement = bench_run(config, || {
-        gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
-            .expect(
-                "mma.sync TF32 GEMM must succeed on CUDA-equipped runner (availability probed above)",
-            );
+        if first_err.is_some() {
+            return;
+        }
+        if let Err(e) = gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k) {
+            first_err = Some(e);
+        }
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
+    if let Some(e) = first_err {
+        println!(
+            "mma.sync TF32 unavailable for size={size} (launch failed during measurement: {e}); mma_tf32 skipped for this size."
+        );
+        return None;
+    }
     Some(tflops_sample(size, &measurement))
 }
 
