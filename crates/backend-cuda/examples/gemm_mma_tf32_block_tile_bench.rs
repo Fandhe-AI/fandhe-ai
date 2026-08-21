@@ -549,11 +549,15 @@ fn main() {
         let (parity_cpu, parity_vs_base) = match &candidate_actual {
             Ok(actual) => {
                 let vs_cpu = matches_reference(actual, &expected_cpu);
+                // base_actual が Err（base 起動失敗）の場合は false ではなく
+                // n/a（None）にする。本番行の SKIP 扱いと整合させ、base
+                // 不使用時に誤って不一致扱いの false が CSV に出るのを防ぐ
+                // （Cursor Bugbot 指摘。PR #846 review thread）。
                 let vs_base = base_actual
                     .as_ref()
-                    .map(|base| matches_reference(actual, base))
-                    .unwrap_or(false);
-                (Some(vs_cpu), Some(vs_base))
+                    .ok()
+                    .map(|base| matches_reference(actual, base));
+                (Some(vs_cpu), vs_base)
             }
             Err(e) => {
                 println!("{}: SKIP (parity launch failed: {e})", candidate.label);
