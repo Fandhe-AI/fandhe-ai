@@ -32,7 +32,7 @@ Phase F の人間承認タスク（#577）のスコープであり、本ドキ�
 補足:
 
 - CUDA `wmma_tf32`・`mma_f16` は `docs/perf/cuda-floor-remeasurement.md`「数値一致（parity）状態の限定条件」節に記載の通り、#389 §5.3 の parity 恒常 fail 対象と一致する（#186 由来。REQ-2 改定は spec リポジトリ側対応待ち。詳細は `docs/performance-targets.md` §6）。
-- 上表の CUDA f32/f16 行は Phase B（親 #490）着手前・TASK-8.3c（#157/#390）時点の実測。Phase B・Phase C（親 #503）適用後の確定計測は `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1。2026-08-18 に DGX Spark GB10 実機で実測完了。当初 Rust f32=3 run・PyTorch=1 run で確定していたが、リポジトリ規約「ベンチは 5 回計測の中央値」との不整合を指摘した codex レビュー P1 対応として PyTorch 参照値の追加 4 run を計測し、Rust・PyTorch とも 5 run 中央値ベースへ再集計した。判定対象形状の対 PyTorch 比最小値 f32=51.96%〈4096・Rust/PyTorch とも 5 run 中央値〉・f16=37.47%〈4096〉、候補下限値 f32=50%・f16=35%〈丸め結果は再集計前後で不変。境界注記あり〉。反映判断は #577）が別ファイルとして記録する。
+- 上表の CUDA f32/f16 行は Phase B（親 #490）着手前・TASK-8.3c（#157/#390）時点の実測。Phase B・Phase C（親 #503）適用後の確定計測は `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1。2026-08-18 に DGX Spark GB10 実機で実測完了。当初 Rust f32=3 run・PyTorch=1 run で確定していたが、リポジトリ規約「ベンチは 5 回計測の中央値」との不整合を指摘した codex レビュー P1 対応として PyTorch 参照値の追加 4 run を計測し、Rust・PyTorch とも 5 run 中央値ベースへ再集計した。判定対象形状の対 PyTorch 比最小値 f32=51.96%〈4096・Rust/PyTorch とも 5 run 中央値〉・f16=37.47%〈4096〉、候補下限値 f32=50%・f16=35%〈丸め結果は再集計前後で不変。境界注記あり〉。反映判断は #577）が別ファイルとして記録する。GEMM OSS 比較ギャップ改修ツリー（#785）Phase 3/4（親 #789「CUDA タイル形状拡大」。依存 #804・#806 は CLOSED だが本番カーネル定数は未変更）完了後の確定計測は `docs/perf/cuda-phase34-remeasurement.md`（#807）を参照（本ドキュメント作成時点では実機未到達のため未実測。実測値・数値の書き換えは本ドキュメントでは行わない）。
 - Transformer 複合ワークロード行（非実機参考値 約 6.1%。QEMU 仮想 CPU）は本表のスコープ外（対象は GEMM 5 行のみ）。#479 の整理（分母に使わない・実機実測は Phase G で確定予定）を参照。
 
 ## §2 Metal 2 系列の対応関係と基準系列の決定
