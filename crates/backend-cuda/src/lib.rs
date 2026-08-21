@@ -156,8 +156,10 @@
 //! `new_without_swizzle`）のみを opt-in・`internal-diagnostics` feature
 //! 限定のまま残す。**parity 非後退確認・結線後の `cuda_floor_bench` 実測
 //! （≥50 TFLOPS 確認）・レジスタスピル確認は #782 の受け入れ条件
-//! チェックリストで「マージ後確認可」と明記された未解消のマージ後確認
-//! 事項として残る**（`docs/perf/cuda-gemm-swizzle-ab.md` §6.2 参照）。
+//! チェックリストで「マージ後確認可」と明記されていたが、PR #784
+//! codex-review 指摘への対応として結線済みコード自身に対するマージ前
+//! 検証（2026-08-21・DGX Spark GB10 実機）で全項目解消済み**
+//! （`docs/perf/cuda-gemm-swizzle-ab.md` §6.3 参照）。
 //! PR #784 codex-review P1 是正で、[`swizzle::should_apply_swizzle`] は
 //! 上記の総タイル数閾値に加えて M/N 各軸のブロック数が実測点
 //! M=N=K=4096 相当以上（`swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/

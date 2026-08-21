@@ -35,8 +35,10 @@
 //! （`internal-diagnostics` feature 限定）からのみ `launch_f16` へ到達
 //! するよう限定していた。イシュー #782 で 2026-08-21 の GB10 実機再計測
 //! （A/B 実測・bit 一致の 2 項目を解消。parity 非後退・結線後
-//! `cuda_floor_bench` 実測・レジスタスピル確認は「マージ後確認可」の
-//! 未解消事項として残る。`docs/perf/cuda-gemm-swizzle-ab.md` §6.2 参照）を
+//! `cuda_floor_bench` 実測・レジスタスピル確認は当初「マージ後確認可」の
+//! 未解消事項として残っていたが、PR #784 codex-review 指摘への対応として
+//! 結線済みコード自身に対するマージ前検証（2026-08-21・DGX Spark GB10
+//! 実機）で全項目解消済み。`docs/perf/cuda-gemm-swizzle-ab.md` §6.3 参照）を
 //! 根拠にユーザー承認のもと `gemm_mma.rs::CudaMmaGemm::new`（本番既定
 //! コンストラクタ）へ結線した。したがって [`select_swizzle_group_width`]
 //! は通常ビルド（feature 指定なし）でも `new` から到達可能である。

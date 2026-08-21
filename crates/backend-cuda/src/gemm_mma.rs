@@ -294,9 +294,10 @@ impl CudaMmaGemm {
     /// 結線し `new_with_size_conditional_swizzle`（重複となるため）を
     /// 廃止した。**parity 非後退確認・結線後の `cuda_floor_bench` 実測
     /// （≥50 TFLOPS 確認）・レジスタスピル確認はイシュー #782 の受け入れ
-    /// 条件チェックリストで「マージ後確認可」と明記された未解消のマージ後
-    /// 確認事項として残る**（`docs/perf/cuda-gemm-swizzle-ab.md` §6.2
-    /// 参照）。
+    /// 条件チェックリストで「マージ後確認可」と明記されていたが、
+    /// PR #784 codex-review 指摘への対応として結線済みコード自身に対する
+    /// マージ前検証（2026-08-21・DGX Spark GB10 実機）で全項目解消済み**
+    /// （`docs/perf/cuda-gemm-swizzle-ab.md` §6.3 参照）。
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         // カーネル定数の内部整合性（静的共有メモリの 48KiB 上限・`MMA_BK`
         // の `MMA_K` 整除性・`MMA_STAGES >= 2`）は `kernels_mma.rs` の
@@ -1325,6 +1326,65 @@ mod tests {
                 "shape (m={m}, n={n}, k={k}): M=N=4096 スケールで強制適用した \
                  swizzle 変種の出力が base と bit 一致しません（remap ロジック \
                  の正しさを production の dispatch 判定とは独立に確認する）"
+            );
+
+            // 段 3（PR #784 codex-review P1 是正）: 上記の段 1（dispatch
+            // 判定のみ）・段 2（強制適用ハンドル・k=32）はいずれも
+            // `production`（`CudaMmaGemm::new` 経由のハンドル）自身が
+            // 実際に swizzle カーネルを起動する経路を検証していない
+            // （段 1 は `swizzle_applies` の述語確認のみ・段 2 は
+            // `new_with_swizzle` という別ハンドルで k=32 のため
+            // `swizzle_applies` が false になり production では base を
+            // 選ぶ形状）。ここでは `should_apply_swizzle` の全ガード
+            // （タイル数閾値・K 閾値・M=N 正方形制約）を満たす
+            // m=n=k=4096 で `production.run_f16`（`new` 経由の本番
+            // ディスパッチ）を実行し、実際に `mma_f16_swizzle` へ
+            // 分岐していることを前提に base と bit 一致することを検証
+            // する。
+            //
+            // **`swizzle_applies` の assert が実ディスパッチの根拠になる
+            // 理由**: `run_f16` は受け取った `k` をそのまま `launch_f16`
+            // へ渡し（途中で欠落・デフォルト化されない。`run_f16` 実装
+            // 冒頭を参照）、`launch_f16` のカーネル選択分岐は
+            // `self.should_launch_swizzle_kernel(m, n, k)` を条件式に
+            // 直接使う。`swizzle_applies` はこの `should_launch_swizzle_
+            // kernel` を呼ぶだけの薄いラッパーであるため（同関数の実装
+            // 冒頭を参照）、上記の `assert!(production.swizzle_applies(
+            // m, n, k))` は `launch_f16` が実際に選ぶ分岐と単一の真実源を
+            // 共有しており、host 側の述語確認が実カーネル選択の根拠として
+            // 成立する（`launch_f16` ドキュメンテーションコメント「カーネル
+            // 選択」節も参照）。
+            //
+            // 4096^3 は本テストの他の形状より計算量が大きいため
+            // 反復は 1 回のみとし、決定的シードで入力を生成する
+            // （f16 32MiB バッファ x3 は GB10 unified memory で許容量）。
+            let (m, n, k) = (4096u32, 4096u32, 4096u32);
+            assert!(
+                production.swizzle_applies(m, n, k),
+                "shape (m={m}, n={n}, k={k}): 本段の前提（swizzle 実ディスパッチ \
+                 の検証）が成立するには swizzle_applies が true である必要が \
+                 あります"
+            );
+
+            let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
+            let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
+            let b: Vec<f16> = rng.fill_vec_f16((k as usize) * (n as usize));
+
+            let base_c = base.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
+                panic!("base run_f16 failed for shape (m={m}, n={n}, k={k}): {err}")
+            });
+            let production_c = production.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
+                panic!(
+                    "CudaMmaGemm::new (production) run_f16 failed for full-scale \
+                     shape (m={m}, n={n}, k={k}): {err}"
+                )
+            });
+            assert_eq!(
+                production_c, base_c,
+                "shape (m={m}, n={n}, k={k}): swizzle が実際に適用される本番 \
+                 ディスパッチ（CudaMmaGemm::new・run_f16）の出力が base と \
+                 bit 一致しません（PR #784 codex-review P1 是正: 本番ハンドル \
+                 が適用形状で実際に swizzle カーネルを起動した結果を検証する）"
             );
         }
     }
