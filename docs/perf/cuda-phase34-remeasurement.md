@@ -324,24 +324,29 @@ parity ゲート → 5 回計測 → `ptxas -v` 実測。§4・§6 と同型の�
   扱う tiled f32／WMMA 系の性能確定計測（§7〜§10）とは独立**であり、
   本ドキュメントの実測待ち表・下限値判断への影響はない
 
-## 15. #841 実機 A/B 実装セッション（実機到達不能）の追記（イシュー #841）
+## 15. #841 実機 A/B 実装セッションの追記（イシュー #841）
 
 §14 の f16 側（#840）に続き、TF32 生 `mma.sync`（`CudaMmaTf32Gemm`）側の
 ブロックタイル・ステージ数増候補についても同型の A/B ランナー・計測
 バイナリ・ユニットテストを整備した（#841。
-`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5.1・§7.1）。ただし本実装
-セッションでは §14 の f16 側実測時とは異なり DGX Spark GB10 実機へ到達
-できず、実機実測（regs/thread・spill・5 回計測中央値・数値一致結果）は
-「未実測・実行待ち」のまま残った。加えて TF32 経路は `CudaMmaTf32Gemm`
-自体に既知 correctness bug（#839。数値一致 6 本中 4 本 FAIL）があり
-未修正のため、実機到達後も候補の数値一致結果は FAIL が主体になる見込み
-である（`docs/perf/cuda-gemm-mma-tf32-ab.md` §7.1）。
+`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5.1・§7.1）。実行系整備を
+行った前半セッションでは DGX Spark GB10 実機へ到達できなかったが、本
+セッション（2026-08-22）で実機（`spark-dbd9`）へ到達し、13 候補全ての
+`ptxas -v` regs/thread・spill 実測（**全候補 spill 0**）・`#[ignore]`
+数値一致テストの実機実行・`gemm_mma_tf32_block_tile_bench` 5 run 計測を
+完了した（`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §7・§7.1・§8）。
+TF32 経路は `CudaMmaTf32Gemm` 自体に既知 correctness bug（#839。数値一致
+6 本中 4 本 FAIL）が未修正のまま残っており、本セッションの実機実行でも
+同一 FAIL パターン（既存記録と完全一致・非後退）を確認した。したがって
+候補ごとの TFLOPS 計測値はいずれも「参考値（採否判断に使用不可。#839
+修正後に再計測が必要）」区分で記録した。
 
 - **本番カーネル定数（`MMA_TF32_BM`/`MMA_TF32_BN`/`MMA_TF32_STAGES`）・
   本ドキュメントが扱う tiled f32／WMMA 系の性能確定計測（§7〜§10）とは
   独立**であり、本ドキュメントの実測待ち表・下限値判断への影響はない
-- 次に実機到達できたセッションの再開手順は
-  `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §8 を参照
+- 採否判断・本番結線は #842 のスコープ（#839 の correctness bug 修正・
+  再計測が前提）。詳細は
+  `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §8 参照
 
 ## 16. 相互参照
 
