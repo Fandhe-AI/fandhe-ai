@@ -117,7 +117,13 @@
 //! 非後退契約は `tests/parity_nonregression.rs` が機械検査。tolerance・
 //! fixture は変更なし）。未実測（実機 NVRTC 非搭載環境のため。本ファイル
 //! 冒頭コメント「検証状態」参照）: 実測記録・レジスタ予算リスクは
-//! `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md` を参照。
+//! `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md` を参照。イシュー
+//! #812 は実機到達不能のまま机上定量化で再評価し、**保留**（`K_STEPS=2`
+//! で非先読み kstep が全体の 50% を占めるが、wait/sync 再構成の同期バグ
+//! リスクが依然許容できないためのリスク起点判断。より安価な代替案
+//! `MMA_BK` 拡大による `K_STEPS` 増を提示）と結論した。詳細・再評価条件は
+//! `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md`「#812 追加判断」節・
+//! `docs/cuda-tensor-core-design.md` §17 を参照。
 //!
 //! 共有メモリのバンクコンフリクト対策（#498。`docs/perf/cuda-gemm-mma-bank-conflict.md`）:
 //! 非 2 冪パディング（`MMA_A_PAD`/`MMA_B_PAD` 定数参照）を適用済み。
@@ -129,7 +135,12 @@
 //! 場合のみ検討する（採否判断基準は上記 docs/perf ファイル参照。
 //! 先送り理由だった「コンパイル未検証環境では誤り検出不能」は #486 の
 //! プロファイル手段整備で解消済みという位置づけ。
-//! out-of-scope-tracking.md に従い記録）。
+//! out-of-scope-tracking.md に従い記録）。イシュー #812 は実機到達不能の
+//! まま**不採用（保留）**を維持しつつ、SMEM フットプリント差分（パディング
+//! で `STAGES=4` が静的上限ぴったり適合から動的 SMEM opt-in 必須へ後退）を
+//! 第 2 の再評価トリガーとして追加した。詳細は
+//! `docs/perf/cuda-gemm-mma-bank-conflict.md`「#812 追加判断」節・
+//! `docs/cuda-tensor-core-design.md` §17 を参照。
 //!
 //! エピローグの `__half2` ベクトル store 化は #805 で実装済み（CUTLASS
 //! `predicated_tile_iterator.h` の AlignedArray 方式を簡易化した形）。

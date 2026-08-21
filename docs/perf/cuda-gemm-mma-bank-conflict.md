@@ -74,6 +74,30 @@ SMEM 36,864B→41,472B の増加で SM あたり常駐ブロック数が変わ�
 3. パディング適用後もコンフリクトが有意に残存する場合のみ、CUTLASS 2 段 XOR の適用を検討する（索引演算が複雑になりコンパイル未検証環境では誤り検出不能なリスクが高いため、実測で残存が確認された場合のみ着手する）
 4. XOR swizzle を採用する場合は本ファイルへ適用案概要・実測結果を追記し、`kernels_mma.rs` 冒頭コメント「バンクコンフリクト対策」節を更新する
 
+### #812 追加判断（実機到達不能・机上分析。SMEM フットプリント差分の再評価トリガー追加）
+
+イシュー #812「perf(backend-cuda): クロスタイル先読み・XOR swizzle・StreamK の要否判断」の実装セッションでも
+`docs/real-hardware-verification-env.local.md`・`CUDA_NODE` が不在で DGX Spark GB10 実機へ到達できなかった
+（#804・#803 と同じ制約）ため、上記 §3 の 4 基準（バンクコンフリクト実測での残存確認）は依然「実行待ち」の
+まま変更しない。本節は実測とは独立に成立する **SMEM フットプリントの定量差分**を第 2 の再評価トリガーとして
+追記する。
+
+- パディング適用によるステージあたり SMEM 増分: `(64*40 + 32*136)*2B = 13,824B/stage`（パディング前
+  `(64*32 + 32*128)*2B = 12,288B/stage`。差分 `+1,536B/stage`）
+- パディング前後の `STAGES=4` 構成の静的 SMEM 使用量: パディング前 `12,288B × 4 = 49,152B`（`kernels_mma.rs::
+  MMA_STATIC_SMEM_LIMIT_BYTES = 49,152` と**厳密に一致**。`<=` 判定のためマージンゼロで静的上限内）／
+  パディング後 `13,824B × 4 = 55,296B`（上限を 6,144B 超過。動的 SMEM opt-in が必須になる）
+- すなわちパディングは「STAGES=4 を新たに可能にする」わけではなく（パディング前から既にマージンゼロで
+  静的上限内）、**パディングがなければマージンゼロのまま静的上限に収まっていた `STAGES=4` を、動的 SMEM
+  opt-in 必須の構成へ追いやっている**。XOR swizzle は同じバンク分散効果をパディングの SMEM 増分なしで
+  得られるため、`STAGES` 拡大（#804 `docs/perf/cuda-gemm-mma-block-tile-stages.md` §3 の候補
+  `bt64x128_s4`〈55,296B〉を含む）を静的 SMEM 予算内へ収めたい場合の手段としても意味を持つ
+
+**再評価条件（§3 の基準に追加）**: 上記 4 基準（バンクコンフリクト残存の実測）に加え、**`docs/perf/
+cuda-gemm-mma-block-tile-stages.md` の `STAGES` 拡大候補を動的 SMEM opt-in なしで採用したい場合**も
+XOR swizzle 検討の再評価トリガーとする。現時点ではいずれの条件も実測・採用判断が確定していないため、
+XOR swizzle は引き続き **不採用（保留）** のまま据え置く。
+
 **TF32 opt-staged 経路（`kernels_wmma_opt.rs::gemm_wmma_tf32_staged`）は本ファイルの対象外**であり、同経路のバンクコンフリクト解析・対策記録は `docs/perf/cuda-gemm-wmma-tf32-staged-bank-conflict.md`（イシュー #743）を参照する。両経路は共有メモリのアクセス API が異なる（本ファイルは raw `ldmatrix`/`mma.sync` 前提、TF32 staged 経路は `nvcuda::wmma::load_matrix_sync` 前提）ため XOR swizzle 採否判断も個別に行っている。
 
 ## 4. 実機計測手順（実機・CUDA driver + NVRTC 搭載・compute capability 8.0 以上）
@@ -100,7 +124,7 @@ ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__da
 | バンクコンフリクトメトリクス（st.sum） | 未計測 | 未計測 | 未計測 |
 | M=N=K=2048 TFLOPS（5 回中央値） | 未計測 | 未計測 | 未計測 |
 | M=N=K=4096 TFLOPS（5 回中央値） | 未計測 | 未計測 | 未計測 |
-| XOR swizzle 採否判断 | — | 未確定 | — |
+| XOR swizzle 採否判断 | — | 不採用（保留。バンクコンフリクト実測は実行待ちのまま。#812 追加判断: 上記「#812 追加判断」節の再評価条件を参照） | — |
 
 判定基準（§3）: パディング後にバンクコンフリクトメトリクスが有意に減少していること。TFLOPS 改善は付随的な確認事項（バンクコンフリクト削減が必ずしもエンドツーエンド TFLOPS へ線形に反映するとは限らないため、メトリクス自体を主判定とする）。
 
