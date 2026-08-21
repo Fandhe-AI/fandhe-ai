@@ -99,6 +99,15 @@ required-features = ["internal-diagnostics"]
 name = "gemm_wmma_tf32_swizzle_bench"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #840: #804 が整備した f16 `mma.sync` ブロックタイル・ステージ数
+# 拡大候補（`diagnostics::mma_f16_source_with_block_tile`）を実際に NVRTC
+# コンパイル・起動して現行本番定数と実機 A/B 計測する（`gemm_wmma_tf32_
+# staged_stages_bench` と同型）。`diagnostics::render_mma_f16_block_tile`/
+# `CompiledMmaF16BlockTileKernel`（同 feature ゲート）を使う。
+name = "gemm_mma_block_tile_bench"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

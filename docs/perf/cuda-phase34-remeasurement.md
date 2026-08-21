@@ -305,13 +305,32 @@ F-5（#577・人間承認タスク）と同様の人間承認プロセスへ引�
 - #804/#806 のタイル拡大候補の実機選定・本番結線は本イシューのスコープ外（両ドキュメントの「引き継ぎ
   事項」節が正）
 
-## 14. 相互参照
+## 14. #840 実機 A/B 実測完了の追記（イシュー #840）
+
+#804/#806 が「未結線・未実測」のまま残していた f16 `mma.sync` ブロックタイル・
+ステージ数増候補（§13「引き継ぎ事項」参照）のうち、f16 側は #840 で実機
+A/B 実測を完了した。#807 が整備した計測線・parity ゲート手順（実機
+parity ゲート → 5 回計測 → `ptxas -v` 実測。§4・§6 と同型の三段階）に
+そのまま従っており、本ドキュメント §4〜§6 の手順を別カーネル（f16
+`mma.sync`）へ適用した先例にあたる。
+
+- 実測記録の記録先: `docs/perf/cuda-gemm-mma-block-tile-stages.md` §4・
+  §4.1（新設）。4 候補すべてが実機で不採用（数値不一致 2・起動時
+  リソース超過 1・机上除外 1）となり、本イシュー時点で `mma_f16_base`
+  （現行本番構成）を上回る候補の実測は得られなかった
+- 原因調査・是正・採否の最終判断は #842 へ申し送り済み（同ドキュメント
+  §5・§6）
+- **本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・本ドキュメントが
+  扱う tiled f32／WMMA 系の性能確定計測（§7〜§10）とは独立**であり、
+  本ドキュメントの実測待ち表・下限値判断への影響はない
+
+## 15. 相互参照
 
 - 前回ベースライン: `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1）
 - parity 正本: `docs/perf/cuda-parity-baseline.md`
 - REQ-8 突合基準: `docs/perf/gemm-optimization-baseline.md` §1
 - OSS 比較キャンペーン表: `docs/perf/oss-gemm-comparison-baseline.md` §7.2
-- #804/#806 の未結線状態の詳細: `docs/perf/cuda-gemm-mma-block-tile-stages.md`・`docs/perf/
-  cuda-gemm-mma-tf32-block-tile.md`
+- #804/#806 の未結線状態の詳細: `docs/perf/cuda-gemm-mma-block-tile-stages.md`（#840 で
+  f16 側実機 A/B 実測を完了。§15 参照）・`docs/perf/cuda-gemm-mma-tf32-block-tile.md`
 - 実機接続手順: `docs/real-hardware-verification-env.md`（実ホスト名は `docs/
   real-hardware-verification-env.local.md`。Git 管理外）
