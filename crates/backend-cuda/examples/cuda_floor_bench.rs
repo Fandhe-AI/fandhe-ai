@@ -434,11 +434,14 @@ fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) 
 /// 追加検証する（`gemm_mma_tf32.rs` 参照）。判定対象形状
 /// （512〜4096・4 の倍数）はいずれも通過する計算だが、この参考列は
 /// `best_f32`（f32 候補下限の算出）に組み込まれない付随情報のため、
-/// 万一 `launch_tf32` が失敗しても既存 4 経路（候補下限の算出根拠）の
-/// 計測を失わせてはならない。`measure_wmma_tf32` と同じ理由
-/// （PR #349 Bugbot 指摘 High「WMMA path panics on skip」）で probe
-/// してから `Option` を返し、呼び出し側 `main` は `and_then` で
-/// 平坦化する（`measure_wmma_tf32` ドキュメンテーションコメント参照）。
+/// 万一 `launch_tf32` はもちろん `upload_f32`／`alloc_output_f32`
+/// （VRAM 不足等で失敗しうる）が失敗しても既存 4 経路（候補下限の算出
+/// 根拠）の計測を失わせてはならない。`measure_wmma_tf32` と同じ理由
+/// （PR #349 Bugbot 指摘 High「WMMA path panics on skip」）でバッファ
+/// 準備・probe いずれも `.expect()` で panic 化せず `match` で `Option`
+/// へ縮退させ、呼び出し側 `main` は `and_then` で平坦化する
+/// （codex-review 指摘 P2「バッファ準備失敗がベンチ全体を停止させる」
+/// 対応。`measure_wmma_tf32` ドキュメンテーションコメント参照）。
 fn measure_mma_tf32(
     gemm: &CudaMmaTf32Gemm,
     size: usize,
@@ -449,12 +452,24 @@ fn measure_mma_tf32(
     let b = rng.fill_vec(size * size);
     let (m, n, k) = (size as u32, size as u32, size as u32);
 
-    let (a_dev, b_dev) = gemm
-        .upload_f32(&a, &b)
-        .expect("mma.sync TF32 upload must succeed on CUDA-equipped runner");
-    let mut c_dev = gemm
-        .alloc_output_f32(m, n)
-        .expect("mma.sync TF32 output allocation must succeed on CUDA-equipped runner");
+    let (a_dev, b_dev) = match gemm.upload_f32(&a, &b) {
+        Ok(bufs) => bufs,
+        Err(e) => {
+            println!(
+                "mma.sync TF32 unavailable for size={size} (upload failed: {e}); mma_tf32 skipped for this size."
+            );
+            return None;
+        }
+    };
+    let mut c_dev = match gemm.alloc_output_f32(m, n) {
+        Ok(buf) => buf,
+        Err(e) => {
+            println!(
+                "mma.sync TF32 unavailable for size={size} (output allocation failed: {e}); mma_tf32 skipped for this size."
+            );
+            return None;
+        }
+    };
 
     // probe: 1 回起動して形状固有の検証（整列・grid 上限・K 上限）を
     // 通過するか確認する。失敗時はこの経路のみ skip し、他経路の計測は
