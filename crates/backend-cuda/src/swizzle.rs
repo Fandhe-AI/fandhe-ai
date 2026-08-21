@@ -243,6 +243,23 @@ pub const SWIZZLE_APPLY_MIN_M_BLOCKS: u32 = 64;
 /// [`SWIZZLE_APPLY_MIN_M_BLOCKS`] と同様。
 pub const SWIZZLE_APPLY_MIN_N_BLOCKS: u32 = 32;
 
+/// K 方向の適用下限（イシュー #775 実測点 M=N=K=4096 由来。K の生値を
+/// そのまま下限とする。PR #784 codex-review 追加指摘の是正）。
+///
+/// [`SWIZZLE_APPLY_MIN_M_BLOCKS`]/[`SWIZZLE_APPLY_MIN_N_BLOCKS`] はグリッド
+/// 分割軸（`MMA_BM`/`MMA_BN` 単位のブロック数）であるのに対し、K は
+/// `mma_launch_config` のグリッド構築に現れず（`kernels_mma.rs` のカーネル
+/// 内 `for` ループで `MMA_BK` 単位に消費されるのみ）、ブロック数への換算対象
+/// ではない。そのため他 2 定数と異なり `kernels_mma::MMA_BK` からの再導出は
+/// 行わず、実測承認点 M=N=K=4096 の生の K 値をそのまま定数化する
+/// （`should_apply_swizzle` ドキュメンテーションコメント参照）。
+///
+/// `should_apply_swizzle` へ K ガードを追加しない場合、M=N=4096・K=8 の
+/// ような形状（M/N 軸ガードは満たすが、メモリアクセス量・L2 再利用特性が
+/// 実測承認点 M=N=K=4096 と大きく異なる）にも本番 swizzle が適用されて
+/// しまう（codex-review P1 指摘・PR #784）。
+pub const SWIZZLE_APPLY_MIN_K: u32 = 4096;
+
 /// グリッド形状（`num_m_blocks x num_n_blocks`。`gemm_mma.rs::
 /// mma_launch_config` が構築する grid_dim.y/x に対応）から、swizzle remap
 /// を適用すべきかを判定する（イシュー #775 のサイズ条件付き適用ロジック。
@@ -253,9 +270,17 @@ pub const SWIZZLE_APPLY_MIN_N_BLOCKS: u32 = 32;
 /// [`SWIZZLE_APPLY_MIN_M_BLOCKS`]/[`SWIZZLE_APPLY_MIN_N_BLOCKS`] 以上
 /// （実測点 M=N=K=4096 と同水準以上）であることを要求する（PR #784
 /// codex-review P1 是正: 総タイル数のみの判定では M=32768, N=512 のような
-/// 未検証の非正方形形状にも適用してしまうため）。3 条件すべてを満たす
-/// 場合のみ `true` を返し、いずれか一つでも未達なら base 経路へ
-/// フォールバックする。
+/// 未検証の非正方形形状にも適用してしまうため）。
+///
+/// さらに `k`（グリッド分割軸ではなく `mma_launch_config` の grid 構築には
+/// 現れない引数。呼び出し元の実 K 値をそのまま渡す）が
+/// [`SWIZZLE_APPLY_MIN_K`] 以上であることも要求する（PR #784 codex-review
+/// 追加指摘の是正: M/N 軸ガードのみでは M=N=4096, K=8 のような形状——
+/// メモリアクセス量・L2 再利用特性が実測承認点 M=N=K=4096 と大きく異なる
+/// ——にも適用してしまうため）。
+///
+/// 4 条件すべてを満たす場合のみ `true` を返し、いずれか一つでも未達なら
+/// base 経路へフォールバックする。
 ///
 /// **`tile_count_ok` は現行の軸別ガード下では常に冗長**（`SWIZZLE_APPLY_
 /// MIN_M_BLOCKS * SWIZZLE_APPLY_MIN_N_BLOCKS == 64 * 32 == 2048 ==
@@ -277,12 +302,13 @@ pub const SWIZZLE_APPLY_MIN_N_BLOCKS: u32 = 32;
 /// `u64` 積で `u32` 同士のオーバーフローを避ける（[`swizzle_group_usage`]
 /// と同じ安全側方針。REQ-8 の「境界検査を省略しない」精神を数値計算側にも
 /// 適用）。
-pub fn should_apply_swizzle(num_m_blocks: u32, num_n_blocks: u32) -> bool {
+pub fn should_apply_swizzle(num_m_blocks: u32, num_n_blocks: u32, k: u32) -> bool {
     let tile_count_ok =
         u64::from(num_m_blocks) * u64::from(num_n_blocks) >= SWIZZLE_APPLY_TILE_COUNT_THRESHOLD;
     let axis_ok =
         num_m_blocks >= SWIZZLE_APPLY_MIN_M_BLOCKS && num_n_blocks >= SWIZZLE_APPLY_MIN_N_BLOCKS;
-    tile_count_ok && axis_ok
+    let k_ok = k >= SWIZZLE_APPLY_MIN_K;
+    tile_count_ok && axis_ok && k_ok
 }
 
 #[cfg(test)]
@@ -463,46 +489,49 @@ mod tests {
     /// コメント参照）。
     #[test]
     fn should_apply_swizzle_matches_4096_and_2048_measured_shapes() {
-        // M=N=K=4096 相当: num_m_blocks=64, num_n_blocks=32 → 総タイル数 2048。
-        assert!(should_apply_swizzle(64, 32));
-        // M=N=K=2048 相当: num_m_blocks=32, num_n_blocks=16 → 総タイル数 512。
-        assert!(!should_apply_swizzle(32, 16));
+        // M=N=K=4096 相当: num_m_blocks=64, num_n_blocks=32, k=4096 → 総タイル数 2048。
+        assert!(should_apply_swizzle(64, 32, 4096));
+        // M=N=K=2048 相当: num_m_blocks=32, num_n_blocks=16, k=2048 → 総タイル数 512。
+        assert!(!should_apply_swizzle(32, 16, 2048));
     }
 
     /// 閾値の丁度・1 個未満の境界を直接検査する（`SWIZZLE_APPLY_TILE_COUNT_
     /// THRESHOLD = 2048`。軸別ガード `SWIZZLE_APPLY_MIN_M_BLOCKS=64`/
-    /// `SWIZZLE_APPLY_MIN_N_BLOCKS=32` を両方満たす形状のみで検査する）。
+    /// `SWIZZLE_APPLY_MIN_N_BLOCKS=32` を両方満たす形状のみで検査する。K は
+    /// いずれのケースも `SWIZZLE_APPLY_MIN_K`（4096）以上を渡し、M/N 軸の
+    /// 判定のみを分離して検査する）。
     #[test]
     fn should_apply_swizzle_boundary_at_threshold() {
         // 2047 タイル（例: 89 x 23 = 2047）は総タイル数・軸ガードいずれも未達で未適用。
-        assert!(!should_apply_swizzle(89, 23));
+        assert!(!should_apply_swizzle(89, 23, 4096));
         // 2048 タイル（64 x 32）は総タイル数ちょうど・軸ガードも両方ちょうど満たすため適用。
-        assert!(should_apply_swizzle(64, 32));
+        assert!(should_apply_swizzle(64, 32, 4096));
         // 総タイル数は 2048 以上（2048 x 1）だが N 軸ブロック数 1 が
         // SWIZZLE_APPLY_MIN_N_BLOCKS(32) 未達のため未適用（PR #784 是正）。
-        assert!(!should_apply_swizzle(2048, 1));
+        assert!(!should_apply_swizzle(2048, 1, 4096));
         // 同様に M 方向のみ大きい非正方形状（総タイル数 4096 は閾値以上）も
         // N 軸ブロック数 1 が未達のため未適用。
-        assert!(!should_apply_swizzle(4096, 1));
-        assert!(!should_apply_swizzle(1, 2047));
+        assert!(!should_apply_swizzle(4096, 1, 4096));
+        assert!(!should_apply_swizzle(1, 2047, 4096));
     }
 
     /// 非正方形形状（M 軸のみ実測水準・N 軸は小さい／逆に N 軸のみ実測水準・
     /// M 軸は小さい）は、総タイル数が閾値 2048 以上でも軸別ガードにより
     /// 未適用（base フォールバック）になることを検査する（codex-review P1
     /// 指摘・PR #784: 実測承認範囲〈M=N=K=4096 正方形〉を超える非正方形
-    /// 形状への外挿を防ぐガード）。
+    /// 形状への外挿を防ぐガード）。K はいずれも `SWIZZLE_APPLY_MIN_K`
+    /// 以上を渡し、M/N 軸の判定のみを分離して検査する。
     #[test]
     fn should_apply_swizzle_rejects_unverified_skewed_shapes_even_when_tile_count_is_sufficient() {
         // 指摘に挙げられた具体例そのもの: M=32768, N=512
         // （num_m_blocks=32768/64=512, num_n_blocks=512/128=4）。
         // 総タイル数 512*4=2048（閾値ちょうど）だが N 軸ブロック数 4 が
         // SWIZZLE_APPLY_MIN_N_BLOCKS(32) 未達のため未適用。
-        assert!(!should_apply_swizzle(512, 4));
+        assert!(!should_apply_swizzle(512, 4, 4096));
         // 逆方向（N 軸のみ大きい・M 軸が小さい）: num_m_blocks=4,
         // num_n_blocks=512 → 総タイル数 2048 だが M 軸ブロック数 4 が
         // SWIZZLE_APPLY_MIN_M_BLOCKS(64) 未達のため未適用。
-        assert!(!should_apply_swizzle(4, 512));
+        assert!(!should_apply_swizzle(4, 512, 4096));
     }
 
     /// 正方形形状で軸別ガードの境界を直接検査する: 実測水準ちょうど
@@ -510,10 +539,37 @@ mod tests {
     /// （既存の総タイル数基準の判定と一致することを確認する回帰）。
     #[test]
     fn should_apply_swizzle_axis_guard_matches_measured_square_shapes() {
-        // M=N=K=4096 相当: num_m_blocks=64, num_n_blocks=32（軸ガードちょうど）。
-        assert!(should_apply_swizzle(64, 32));
-        // M=N=K=2048 相当: num_m_blocks=32, num_n_blocks=16（総タイル数・軸ガード共に未達）。
-        assert!(!should_apply_swizzle(32, 16));
+        // M=N=K=4096 相当: num_m_blocks=64, num_n_blocks=32, k=4096（軸ガードちょうど）。
+        assert!(should_apply_swizzle(64, 32, 4096));
+        // M=N=K=2048 相当: num_m_blocks=32, num_n_blocks=16, k=2048（総タイル数・軸ガード共に未達）。
+        assert!(!should_apply_swizzle(32, 16, 2048));
+    }
+
+    /// K ガードの境界値検査（PR #784 codex-review 追加指摘の是正）:
+    /// M/N 軸は実測承認点ちょうど（`num_m_blocks=64, num_n_blocks=32`。総
+    /// タイル数 2048）を満たすが K が実測承認点未満の形状（例: 指摘に挙がった
+    /// M=N=4096, K=8）は未適用へフォールバックし、K が実測承認点
+    /// （[`SWIZZLE_APPLY_MIN_K`]=4096）ちょうど・以上の場合のみ適用される
+    /// ことを検査する。
+    #[test]
+    fn should_apply_swizzle_rejects_shapes_with_k_below_measured_point() {
+        // 指摘に挙げられた具体例そのもの: M=N=4096, K=8。
+        assert!(!should_apply_swizzle(64, 32, 8));
+        // 従来 (m,n,k)=(4096,4096,32) の bit 一致検証で使っていた
+        // 省メモリ用 k=32 も、K ガード追加後は未適用になる
+        // （`gemm_mma.rs` の実機 bit 一致テスト再構成と対応）。
+        assert!(!should_apply_swizzle(64, 32, 32));
+        // SWIZZLE_APPLY_MIN_K ちょうど 1 個未満。
+        assert!(!should_apply_swizzle(64, 32, SWIZZLE_APPLY_MIN_K - 1));
+    }
+
+    /// K が実測承認点ちょうど・それ以上の場合は M/N 軸ガードと合わせて
+    /// 適用されることを検査する（[`should_apply_swizzle_rejects_shapes_
+    /// with_k_below_measured_point`] の裏側）。
+    #[test]
+    fn should_apply_swizzle_accepts_shapes_with_k_at_or_above_measured_point() {
+        assert!(should_apply_swizzle(64, 32, SWIZZLE_APPLY_MIN_K));
+        assert!(should_apply_swizzle(64, 32, SWIZZLE_APPLY_MIN_K + 1));
     }
 
     /// `u32::MAX` 同士の積で `u64` 計算がオーバーフローしないことを検査する
@@ -521,7 +577,7 @@ mod tests {
     /// 計算側にも適用」参照）。
     #[test]
     fn should_apply_swizzle_does_not_overflow_on_large_inputs() {
-        assert!(should_apply_swizzle(u32::MAX, u32::MAX));
+        assert!(should_apply_swizzle(u32::MAX, u32::MAX, u32::MAX));
     }
 
     /// 軸別ガード（`SWIZZLE_APPLY_MIN_M_BLOCKS`/`SWIZZLE_APPLY_MIN_N_BLOCKS`）

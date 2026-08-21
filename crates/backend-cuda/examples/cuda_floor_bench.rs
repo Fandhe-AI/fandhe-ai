@@ -541,11 +541,15 @@ fn main() {
     // multiprocessor_count()` の実測に成功すれば動的選択幅で `Some(_)` を
     // 返し（fail-soft: SM 数取得失敗・変種コンパイル失敗時は安全側で
     // `None` に縮退する。`gemm_mma.rs::CudaMmaGemm::new` doc comment
-    // 参照）、各呼び出し形状での実際の適用有無は `swizzle_applies(m, n)`
+    // 参照）、各呼び出し形状での実際の適用有無は `swizzle_applies(m, n, k)`
     // で確認できる（総ブロックタイル数 `>= 2048` かつ M/N 各軸のブロック数
-    // が実測点 M=N=K=4096 相当以上の形状のみ適用。PR #784 codex-review P1
-    // 是正で軸別ガードを追加し、未検証の非正方形形状への外挿を base 経路へ
+    // が実測点 M=N=K=4096 相当以上 かつ K も実測点 M=N=K=4096 相当以上の
+    // 形状のみ適用。PR #784 codex-review P1 是正で軸別ガードを、追加指摘の
+    // 是正で K ガード（`swizzle::SWIZZLE_APPLY_MIN_K`）を追加し、未検証の
+    // 非正方形形状・未検証の極端な K 形状への外挿を base 経路へ
     // フォールバックさせる。`swizzle::should_apply_swizzle` 参照）。
+    // 本バイナリは M=N=K の正方形のみを計測するため、以下 `swizzle_applies`
+    // 呼び出しは `k` にも `size_u32` を渡す。
     if let Some(g) = &mma_gemm {
         // 実測値をそのまま出力する（固定文字列だと `new` の内部実装が
         // 変わった場合に出力だけは追従せず実態と乖離するおそれがあるため、
@@ -564,8 +568,8 @@ fn main() {
         for &size in JUDGED_SIZES.iter().chain(REFERENCE_ONLY_SIZES.iter()) {
             let size_u32 = size as u32;
             println!(
-                "  mma_f16 swizzle_applies({size}, {size}) = {}",
-                g.swizzle_applies(size_u32, size_u32)
+                "  mma_f16 swizzle_applies({size}, {size}, {size}) = {}",
+                g.swizzle_applies(size_u32, size_u32, size_u32)
             );
         }
     }

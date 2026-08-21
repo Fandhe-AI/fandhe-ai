@@ -47,12 +47,21 @@ const MMA_BLOCK_DIM: (u32, u32, u32) = (kernels_mma::MMA_BLOCK_THREADS, 1, 1);
 /// 検査。GPU 実機到達可否に依存せず通常ビルドで常時検査されるため、
 /// `MMA_BM`/`MMA_BN` を将来変更した際に軸別ガードの更新漏れを fail-closed
 /// で検知する）。
+///
+/// `swizzle::SWIZZLE_APPLY_MIN_K`（PR #784 codex-review 追加指摘の是正で
+/// 追加した K ガード）は K がグリッド分割軸ではない（`kernels_mma::MMA_BK`
+/// 単位のブロック数への換算対象ではない）ため `MMA_BM`/`MMA_BN` 同様の
+/// 再導出はできないが、実測承認点 M=N=K=4096 の生の K 値からの乖離が
+/// ないことは同じ assert 内で検査する（M/N と別々の値に静かに更新される
+/// のを防ぐ多層防御。`swizzle.rs::SWIZZLE_APPLY_MIN_K` ドキュメンテーション
+/// コメント参照）。
 const _: () = assert!(
     crate::swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS == 4096 / kernels_mma::MMA_BM
-        && crate::swizzle::SWIZZLE_APPLY_MIN_N_BLOCKS == 4096 / kernels_mma::MMA_BN,
-    "swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS/SWIZZLE_APPLY_MIN_N_BLOCKS が \
-     kernels_mma::MMA_BM/MMA_BN から再導出した実測点 M=N=K=4096 相当の \
-     軸別ブロック数と乖離しています（swizzle.rs を更新すること）"
+        && crate::swizzle::SWIZZLE_APPLY_MIN_N_BLOCKS == 4096 / kernels_mma::MMA_BN
+        && crate::swizzle::SWIZZLE_APPLY_MIN_K == 4096,
+    "swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS/SWIZZLE_APPLY_MIN_N_BLOCKS/SWIZZLE_APPLY_MIN_K が \
+     実測点 M=N=K=4096 相当の軸別ブロック数・K 値と乖離しています \
+     （swizzle.rs を更新すること）"
 );
 
 /// `cp.async.cg.shared.global` の 16 バイト転送粒度が要求するグローバル側
@@ -254,10 +263,12 @@ impl CudaMmaGemm {
     /// should_apply_swizzle`]（総ブロックタイル数
     /// `num_m_blocks * num_n_blocks >= 2048` **かつ** M/N 各軸のブロック数が
     /// 実測点 M=N=K=4096 級以上〈`swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/
-    /// `SWIZZLE_APPLY_MIN_N_BLOCKS`〉。イシュー #775 のユーザー起票の受け入れ
-    /// 条件〈4096 級のみ適用・512〜2048 は劣化 5% 以内〉を承認記録として
-    /// 採用し、PR #784 codex-review P1 是正で軸別ガードを追加して未検証の
-    /// 非正方形形状〈例: M=32768, N=512〉への外挿を防いだ。
+    /// `SWIZZLE_APPLY_MIN_N_BLOCKS`〉**かつ** K も実測点 M=N=K=4096 級以上
+    /// 〈`swizzle::SWIZZLE_APPLY_MIN_K`〉。イシュー #775 のユーザー起票の
+    /// 受け入れ条件〈4096 級のみ適用・512〜2048 は劣化 5% 以内〉を承認記録
+    /// として採用し、PR #784 codex-review P1 是正で軸別ガードを、追加指摘
+    /// の是正で K ガードを加え、未検証の非正方形形状〈例: M=32768,
+    /// N=512〉・未検証の極端な K 形状〈例: M=N=4096, K=8〉への外挿を防いだ。
     /// `docs/perf/cuda-gemm-swizzle-ab.md` §4）で
     /// `mma_f16`（base）／`mma_f16_swizzle`（変種）のいずれを起動するか
     /// 判定する。個別呼び出しで実際に適用されたかは
@@ -480,8 +491,8 @@ impl CudaMmaGemm {
         self.swizzle_compile_error.as_deref()
     }
 
-    /// `run_f16`/`launch_f16` が形状 `(m, n)` に対して実際に swizzle 変種
-    /// カーネルを起動するかを返す（構造体ドキュメンテーションコメント
+    /// `run_f16`/`launch_f16` が形状 `(m, n, k)` に対して実際に swizzle
+    /// 変種カーネルを起動するかを返す（構造体ドキュメンテーションコメント
     /// 「mma_f16_swizzle」参照。イシュー #775・#782）。
     ///
     /// 判定規則（[`should_launch_swizzle_kernel`](Self::should_launch_swizzle_kernel)
@@ -490,8 +501,9 @@ impl CudaMmaGemm {
     ///   `mma_f16_swizzle` が `Some`（SM 数実測に成功しサイズ条件付き
     ///   変種を保持している）: [`crate::swizzle::should_apply_swizzle`] を
     ///   `(m, n)` から導出したブロックタイル数（`MMA_BM`/`MMA_BN` 単位の
-    ///   `div_ceil`。`mma_launch_config` の grid 次元と同じ導出式）へ
-    ///   適用した結果
+    ///   `div_ceil`。`mma_launch_config` の grid 次元と同じ導出式）と `k`
+    ///   （PR #784 codex-review 追加指摘の是正で追加した K ガード。K は
+    ///   グリッド分割軸ではないため生の値をそのまま渡す）へ適用した結果
     /// - [`new_with_swizzle`](Self::new_with_swizzle) 経由（強制適用。
     ///   `mma_f16_swizzle` は `None` だが `swizzle_group_width` が
     ///   `Some`）: 形状に関わらず常に `true`
@@ -500,18 +512,20 @@ impl CudaMmaGemm {
     ///   `None`）: 形状に関わらず常に `false`
     ///
     /// `examples/cuda_floor_bench.rs` の起動時診断が、判定対象サイズ
-    /// （512/1024/2048/4096）ごとの適用有無を出力するために呼ぶ。
-    pub fn swizzle_applies(&self, m: u32, n: u32) -> bool {
+    /// （512/1024/2048/4096。M=N=K の正方形のため `k` に同じ値を渡す）
+    /// ごとの適用有無を出力するために呼ぶ。
+    pub fn swizzle_applies(&self, m: u32, n: u32, k: u32) -> bool {
         let num_m_blocks = m.div_ceil(kernels_mma::MMA_BM);
         let num_n_blocks = n.div_ceil(kernels_mma::MMA_BN);
-        self.should_launch_swizzle_kernel(num_m_blocks, num_n_blocks)
+        self.should_launch_swizzle_kernel(num_m_blocks, num_n_blocks, k)
     }
 
     /// ブロックタイル数 `(num_m_blocks, num_n_blocks)`（`mma_launch_config`
-    /// の grid 次元 `(grid_dim.1, grid_dim.0)` と同じ導出式）から、
-    /// `launch_f16` が起動すべきカーネルが swizzle 変種か base かを判定
-    /// する共通ロジック（[`swizzle_applies`](Self::swizzle_applies) と
-    /// `launch_f16` の両方が参照する単一の真実源）。
+    /// の grid 次元 `(grid_dim.1, grid_dim.0)` と同じ導出式）と `k`
+    /// （グリッド分割軸ではなく生の K 値。PR #784 codex-review 追加指摘の
+    /// 是正で追加）から、`launch_f16` が起動すべきカーネルが swizzle 変種か
+    /// base かを判定する共通ロジック（[`swizzle_applies`](Self::swizzle_applies)
+    /// と `launch_f16` の両方が参照する単一の真実源）。
     ///
     /// `mma_f16_swizzle` が `Some`（[`new`](Self::new)（本番既定
     /// コンストラクタ）が SM 数実測に成功しサイズ条件付き変種を保持して
@@ -521,9 +535,9 @@ impl CudaMmaGemm {
     /// swizzle 変種）／強制非適用（[`new_without_swizzle`
     /// ](Self::new_without_swizzle)・SM 数未取得時の `new`。`mma_f16` は
     /// base）のいずれかを返す。
-    fn should_launch_swizzle_kernel(&self, num_m_blocks: u32, num_n_blocks: u32) -> bool {
+    fn should_launch_swizzle_kernel(&self, num_m_blocks: u32, num_n_blocks: u32, k: u32) -> bool {
         match &self.mma_f16_swizzle {
-            Some(_) => crate::swizzle::should_apply_swizzle(num_m_blocks, num_n_blocks),
+            Some(_) => crate::swizzle::should_apply_swizzle(num_m_blocks, num_n_blocks, k),
             None => self.swizzle_group_width.is_some(),
         }
     }
@@ -649,7 +663,7 @@ impl CudaMmaGemm {
         // m.div_ceil(MMA_BM), 1) として構築しているため、(num_m_blocks,
         // num_n_blocks) = (grid_dim.1, grid_dim.0)。
         let (num_n_blocks, num_m_blocks) = (cfg.grid_dim.0, cfg.grid_dim.1);
-        let kernel = if self.should_launch_swizzle_kernel(num_m_blocks, num_n_blocks) {
+        let kernel = if self.should_launch_swizzle_kernel(num_m_blocks, num_n_blocks, k) {
             // `mma_f16_swizzle` が `None`（`new_with_swizzle` 経由。
             // `mma_f16` 自体が swizzle 変種）の場合は `mma_f16` へ
             // フォールバックする（`should_launch_swizzle_kernel` の
@@ -1189,7 +1203,7 @@ mod tests {
                 // `swizzle_applies` の閾値未満側の分岐を検証する）。
                 if group_width == dynamic_group_width {
                     assert!(
-                        !production.swizzle_applies(m, n),
+                        !production.swizzle_applies(m, n, k),
                         "shape (m={m}, n={n}, k={k}): 総ブロックタイル数が \
                          閾値未満のため swizzle_applies は false のはずです"
                     );
@@ -1208,11 +1222,12 @@ mod tests {
             }
         }
 
-        // 閾値以上（総ブロックタイル数 >= 2048）の形状で production
-        // （CudaMmaGemm::new）の経路が実際に swizzle 変種へディスパッチ
-        // することを検証する（実装計画 2 節「gemm_mma.rs」）。
-        // m=n=4096・k=32（省メモリ）で
-        // num_m_blocks=4096.div_ceil(MMA_BM=64)=64・
+        // 閾値以上（総ブロックタイル数 >= 2048 かつ M/N/K いずれも実測承認点
+        // M=N=K=4096 相当以上）の形状で production（CudaMmaGemm::new）の
+        // 経路が実際に swizzle 変種へディスパッチすることを検証する
+        // （実装計画 2 節「gemm_mma.rs」。PR #784 codex-review 追加指摘の
+        // 是正で K ガードを追加したため、下記 2 段に分けて検証する）。
+        // m=n=4096 で num_m_blocks=4096.div_ceil(MMA_BM=64)=64・
         // num_n_blocks=4096.div_ceil(MMA_BN=128)=32 → 総タイル数
         // 64*32=2048（`SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` ちょうど）。
         // `production.swizzle_group_width()` が `Some`（fail-soft 分岐
@@ -1220,12 +1235,67 @@ mod tests {
         // `mma_f16_swizzle` が使用可能で本チェックが意味を持つため、
         // それ以外（分岐 (a)/(c)）はスキップする。
         if production.swizzle_group_width().is_some() {
-            let (m, n, k) = (4096u32, 4096u32, 32u32);
+            let (m, n) = (4096u32, 4096u32);
+
+            // 段 1: dispatch 判定（K ガード込み）そのものの検証。
+            // `swizzle_applies` はブロックタイル数・K の純粋な比較のみで
+            // カーネル起動を伴わないため安価に検査できる（境界値の網羅は
+            // `swizzle.rs::should_apply_swizzle` のホスト側ユニットテストが
+            // 担うため、ここでは production 経由でその判定へ正しく到達する
+            // ことのみ確認する）。
+            //
+            // K が実測承認点（`SWIZZLE_APPLY_MIN_K`）以上の場合のみ適用。
             assert!(
-                production.swizzle_applies(m, n),
-                "shape (m={m}, n={n}, k={k}): 総ブロックタイル数が閾値以上の \
-                 ため swizzle_applies は true のはずです"
+                production.swizzle_applies(m, n, crate::swizzle::SWIZZLE_APPLY_MIN_K),
+                "shape (m={m}, n={n}, k={}): 総ブロックタイル数・K いずれも \
+                 閾値以上のため swizzle_applies は true のはずです",
+                crate::swizzle::SWIZZLE_APPLY_MIN_K
             );
+            // K が実測承認点未満（旧テストが bit 一致検証に使っていた
+            // 省メモリ用 k=32 を含む）では、M/N 軸が閾値以上でも K ガードに
+            // より未適用へ縮退することを検査する（本 PR の主眼である K
+            // ガード追加の直接的な回帰検知）。
+            assert!(
+                !production.swizzle_applies(m, n, 32),
+                "shape (m={m}, n={n}, k=32): K が SWIZZLE_APPLY_MIN_K 未満のため \
+                 swizzle_applies は false のはずです（PR #784 codex-review \
+                 追加指摘の是正）"
+            );
+
+            // 段 2: swizzle 変種カーネル自体（M=N=4096 スケールでの remap
+            // ロジック）が base と bit 一致することの実機検証。
+            //
+            // K まで実測承認点（4096）まで膨らませると 4096^3 の計算量に
+            // なり本テストの目的（dispatch 判定・remap ロジックの正しさ
+            // 確認）には過大なため、production の dispatch 判定は経由せず
+            // 強制適用の診断入口（`new_with_swizzle`。`internal-diagnostics`
+            // feature 限定）を使って、旧テストと同じ省メモリ用 k=32 の
+            // まま検証を維持する（production 自体は上記段 1 の検査により
+            // この k=32 では base を選択する契約になったため、production
+            // ではなく明示的に swizzle 変種を保持するハンドルを使う）。
+            //
+            // **同一ソース契約**: この bit 一致の結果が production
+            // （`new`）の swizzle 分岐にも転用できる根拠は、`new` が SM 数
+            // 実測成功時に `mma_f16_swizzle` へ保持するソースと
+            // `new_with_swizzle(group_width)` がコンパイルするソースが
+            // 同一の生成関数 `kernels_mma::mma_f16_source_with_swizzle(
+            // group_width)` の呼び出し結果である点にある（`new` 実装
+            // 冒頭・`new_with_swizzle` 実装冒頭を参照。group_width が同じ
+            // であれば生成される CUDA C++ ソース文字列も同一になる —— ソース
+            // 生成に SM 数以外の実行時状態は関与しない）。`dynamic_group_width`
+            // はこのブロックの外で `select_swizzle_group_width` の純計算
+            // から求めており、`production.swizzle_group_width()` が
+            // `Some` である分岐（上記 `if` の前提）では `new` 内部で実際に
+            // 選ばれた幅と一致することを上記「分岐 (b)」の pin テスト
+            // （`mma_f16_new_wires_size_conditional_swizzle_into_production_
+            // constructor`）が別途検証済みのため、ここでは
+            // `forced_variant`（`new_with_swizzle(dynamic_group_width)`）が
+            // production と同一ソースをコンパイルしていると言える。
+            let (m, n, k) = (4096u32, 4096u32, 32u32);
+            let forced_variant = CudaMmaGemm::new_with_swizzle(&device, dynamic_group_width)
+                .unwrap_or_else(|err| {
+                    panic!("group_width={dynamic_group_width}: new_with_swizzle failed: {err}")
+                });
 
             let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
             let a: Vec<f16> = rng.fill_vec_f16((m as usize) * (k as usize));
@@ -1234,17 +1304,19 @@ mod tests {
             let base_c = base.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
                 panic!("base run_f16 failed for shape (m={m}, n={n}, k={k}): {err}")
             });
-            let production_c = production.run_f16(&a, &b, m, n, k).unwrap_or_else(|err| {
-                panic!(
-                    "CudaMmaGemm::new (production) run_f16 failed for \
+            let forced_variant_c = forced_variant
+                .run_f16(&a, &b, m, n, k)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "group_width={dynamic_group_width} run_f16 failed for \
                      shape (m={m}, n={n}, k={k}): {err}"
-                )
-            });
+                    )
+                });
             assert_eq!(
-                production_c, base_c,
-                "shape (m={m}, n={n}, k={k}): 閾値以上形状で CudaMmaGemm::new \
-                 （本番既定コンストラクタ。swizzle 変種を選択するはず）の \
-                 出力が base と bit 一致しません"
+                forced_variant_c, base_c,
+                "shape (m={m}, n={n}, k={k}): M=N=4096 スケールで強制適用した \
+                 swizzle 変種の出力が base と bit 一致しません（remap ロジック \
+                 の正しさを production の dispatch 判定とは独立に確認する）"
             );
         }
     }

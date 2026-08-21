@@ -42,13 +42,17 @@ stores・spill loads・stack frame はいずれも両カーネルとも 0 bytes�
 入口）は `new` へ統合されたため廃止した。以下は結線判断に至るまでの経緯（#775 時点までの歴史的記録）
 として保持する。
 
-**現行の適用条件（PR #784 codex-review P1 是正・2026-08-21 現在）**: `swizzle.rs::should_apply_swizzle`
+**現行の適用条件（PR #784 codex-review 追加指摘の是正・2026-08-21 現在）**: `swizzle.rs::should_apply_swizzle`
 は「総ブロックタイル数 `num_m_blocks * num_n_blocks >= 2048`」**かつ**「M/N 各軸のブロック数が実測点
-M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_M_BLOCKS=64`/`SWIZZLE_APPLY_MIN_N_BLOCKS=32`）」の両方を満たす
-場合のみ `true` を返す。当初（結線時点）は総タイル数のみで判定しており、M=32768, N=512 のような未検証の
-非正方形形状にも適用してしまう不備があった（PR #784 codex-review 指摘）ため、軸別ガードを追加して実測
-承認範囲（正方形形状 M=N=K=4096）を超える適用を防いだ（詳細は `swizzle.rs::should_apply_swizzle` ドキュ
-メンテーションコメント参照）。
+M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_M_BLOCKS=64`/`SWIZZLE_APPLY_MIN_N_BLOCKS=32`）」**かつ**「K が
+実測点 M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_K=4096`）」の 3 条件すべてを満たす場合のみ `true` を返す。
+当初（結線時点）は総タイル数のみで判定しており、M=32768, N=512 のような未検証の非正方形形状にも適用し
+てしまう不備があった（PR #784 codex-review 1 回目の指摘）ため軸別ガードを追加したが、M/N 軸別ガードのみ
+では K を見ないため M=N=4096, K=8 のような未検証の極端な K 形状（メモリアクセス量・L2 再利用特性が実測
+点 M=N=K=4096 と大きく異なる）にも適用してしまう不備が残っていた（PR #784 codex-review 2 回目の指摘）。
+これに対し K の生値をそのまま下限とする `SWIZZLE_APPLY_MIN_K`（実測点の K=4096）を追加し、M/N 軸別ガード
+と同様に AND 条件へ組み込むことで実測承認範囲（正方形形状 M=N=K=4096）を超える適用を防いだ（詳細は
+`swizzle.rs::should_apply_swizzle`／`swizzle.rs::SWIZZLE_APPLY_MIN_K` ドキュメンテーションコメント参照）。
 
 ### 2.0 以下は #775 時点までの経緯（結線待ち時の記録。歴史的記録として保持）
 
@@ -499,6 +503,14 @@ DGX Spark GB10 へ転送して実施したマージ前検証。各ベンチ直�
   「base と head で差がない（特に spill stores/loads が両方とも 0 のまま）」条件を満たす（レジスタ +2 は
   swizzle remap のインデックス計算分で、スピル・occupancy への影響なし）。結線後 4096 実測（53.9033）が
   opt-in A/B の swizzle 側実測（54.04〜54.31）と同水準である間接根拠とも整合する
+
+**追記（PR #784 codex-review 追加指摘・K ガード追加）**: 上記「結線後 `cuda_floor_bench` 実測」の
+`swizzle_applies` 出力（512/1024/2048 false・4096 true）は `cuda_floor_bench.rs` が `swizzle_applies(size,
+size, size)`（M=N=K の正方形。§2 参照）を呼ぶ計測であり、K は各サイズと同値（512/1024/2048/4096）である。
+`SWIZZLE_APPLY_MIN_K=4096` の追加は「K < 4096 の形状を未適用へ倒す」変更のみで、正方形形状では M/N 軸別
+ガードと同じ境界（4096 でちょうど成立・4096 未満は不成立）に一致するため、この実測記録の判定結果
+（512/1024/2048 false・4096 true）は K ガード追加後も変わらず同一である。ソースコード側の該当変更は
+`crates/backend-cuda/src/swizzle.rs::should_apply_swizzle`／`SWIZZLE_APPLY_MIN_K` を参照。
 
 ## 7. TF32 opt-staged 経路への横展開（#741）
 

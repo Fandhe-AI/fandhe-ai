@@ -166,6 +166,17 @@
 //! M=32768, N=512）への外挿を base 経路へフォールバックさせる（`swizzle.rs`
 //! ドキュメンテーションコメント参照）。
 //!
+//! **PR #784 codex-review 追加指摘の是正**: 上記 M/N 軸別ガードは K を
+//! 見ないため、M=N=4096, K=8 のような未検証形状（メモリアクセス量・L2
+//! 再利用特性が実測承認点 M=N=K=4096 と大きく異なる）にも適用してしまう
+//! 不備が残っていた。K の生値をそのまま下限とする
+//! `swizzle::SWIZZLE_APPLY_MIN_K`（実測承認点の K=4096）を追加し、
+//! M/N 軸別ガード・総タイル数条件と AND で結合することで、実測承認範囲
+//! （M=N=K=4096 相当以上）を超える適用を防いだ（`swizzle.rs::
+//! should_apply_swizzle` ドキュメンテーションコメント参照）。
+//! [`gemm_mma::CudaMmaGemm::swizzle_applies`]／`launch_f16` の呼び出し
+//! シグネチャも `k` を受け取る形へ更新した。
+//!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
 //! [`CudaKernelCacheKey`]・[`nvrtc_version`] を追加した。カーネル特化
