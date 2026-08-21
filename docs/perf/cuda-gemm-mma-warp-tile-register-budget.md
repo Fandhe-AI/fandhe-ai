@@ -101,6 +101,17 @@ CUTLASS `device_kernel.h` 方式に倣い `__launch_bounds__(<ブロックスレ
 `docs/cuda-tensor-core-design.md` §12「TMA プローブ」・§13「setmaxnreg プローブ」と
 同じ「実行待ち」記録方式）。
 
+> **2026-08-21 到達試行記録**: 本イシューの継続実装 worktree で到達を試みたが、
+> (1) `docs/real-hardware-verification-env.local.md`（DGX ノードの実ホスト名を
+> 記す gitignore 対象ファイル）が本 worktree に存在せず、(2) `CUDA_NODE` 環境変数・
+> SSH config 上のノード alias も未設定のため、SSH 経路で実機へ到達できなかった。
+> 加えて `ptxas`/`nvcc` は本 worktree のローカル環境にも存在せず（`libcuda.so.1`
+> の driver stub のみ存在し CUDA toolkit 本体は非搭載）、`ptxas -arch=sm_121 -v`
+> をホスト側コンパイルとしてローカル代替実行する経路も取れなかった。推定値で
+> 埋めず本節を「実行待ち」のまま維持する。後続の実機到達可能なセッションは
+> 上記 2 経路（実機 SSH／ローカル toolkit 経由の静的 `ptxas` 実測）のいずれかを
+> 再確認すればよく、本探索を再実施する必要はない。
+
 | 候補 | launch_bounds | registers/thread | spill stores (bytes) | spill loads (bytes) | blocks/SM（レジスタ制約） | blocks/SM（smem 制約） |
 |------|---------------|-------------------|----------------------|----------------------|--------------------------|--------------------------|
 | 現行 2x2 | なし | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
