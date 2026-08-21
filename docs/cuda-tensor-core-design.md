@@ -202,6 +202,86 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - **実機実行**: **未了**（本イシューの実行環境ではローカル GPU が RTX 3060／compute capability 8.6 であり sm_121 実機ではないため、`docs/real-hardware-verification-env.md` が要求する `docs/real-hardware-verification-env.local.md`（実機ホスト名。`.gitignore` 対象・本 worktree には未配置）経由の DGX Spark GB10 接続を行っていない。9 節「実機検証プローブについて」と同じ理由で、到達できない実機の結果を推定で記載しない）。負対照実行（cc 8.6・本 worktree・2026-08-15）: `libnvrtc` 自体が本環境に未導入のため 4 ファイルとも `nvrtc_compile` 段階で `result=inconclusive`（`CudaError::NvrtcUnavailable`）として記録され、`panic` せず pass した。これは「非対応 arch での命令拒否」の実測ではなく「toolchain 不在」の実測に留まるが、4 ファイル分割後のプロセス分離・非ハング・構造化ログ出力という再設計後の実行経路自体が機能することは確認できた（一過性の負対照記録であり、恒久的な環境詳細としては記載しない）。
 - **B-3 への引き渡し（プローブ実行前の fail-closed 既定）**: 実機プローブが完了し `setmaxnreg` の使用可否が確定するまで、B-3（タイル拡大時のレジスタ予算設計）は**対称レジスタ予算前提**でタイル上限を設計する（`setmaxnreg` の使用を前提にした非対称配分設計を仮定しない）。**使用可と確定した場合**、B-3 は producer/consumer 間の dealloc/alloc 量の設計自由度を本節の実測結果（`probe_self_regs`・`execute` の `result`）で更新した内容から引き継ぐ。確定自体は実機実行後の作業であり、本節はその条件付き方針のみを記す。
 
+## 14. TF32 経路の生 `mma.sync`(m16n8k8) 移行（#801）
+
+- **位置づけ**: `crates/backend-cuda/src/kernels_mma_tf32.rs`／
+  `gemm_mma_tf32.rs`（`CudaMmaTf32Gemm`）。既存 TF32 本番経路
+  （`CudaGemm::run_wmma_tf32` の WMMA C++ API ベース 3 段選択。11〜13 節）
+  は無変更のまま並存させる独立経路であり、f16 `mma.sync`/`ldmatrix`/
+  `cp.async` 経路（`kernels_mma.rs`。TASK-11.1h・#187）の構造を TF32
+  精度へ移植した refactor。**本番ディスパッチ（`ops.rs`／`gemm.rs`／
+  `gemm_auto.rs` の 3 段選択・JIT 特化基盤）へは結線しない**。数値一致
+  回帰の実機確認・parity 非後退契約・本番採否判断は後続イシュー #802 の
+  スコープ。
+
+### 14.1 A フラグメント: ldmatrix の b16 流用と象限順序の再導出
+
+TF32 の A タイル（16 行 x 8 列・f32 4B/要素）をビット等価な 16 行 x 16
+列の b16（2B/要素）タイルとして再解釈すると、
+`ldmatrix.sync.aligned.m8n8.x4.shared.b16` が読む 4 個の 8x8 b16 象限
+（各象限 = 8 行 x 4 f32 列）にちょうど一致する（CUTLASS が用いる既知の
+技法）。f16 `mma.sync.aligned.m16n8k16` の A オペランド（16x16 を直接
+4 象限が覆う）は象限順序 **TL, BL, TR, BR**（`kernels_mma.rs::LDSM_A_FRAG`
+の `a_quad_row = (lane/8)%2`・`a_quad_col = (lane/8)/2`）だが、TF32
+`mma.sync.aligned.m16n8k8` の A オペランド（16x8 を b16 換算 16x16 として
+異なる行/列分解で覆う）は PTX ISA の当該命令 A オペランドテーブルから
+導出すると象限順序 **TL, TR, BL, BR** になる（`a0`=TL・`a1`=TR・`a2`=BL・
+`a3`=BR。`row=groupID`/`groupID+8` が a0/a1 と a2/a3 を分け、
+`col=tid_in_group`/`tid_in_group+4` が a0/a2 と a1/a3 を分ける分解）。
+
+f16 版の定数（`a_quad_row = (lane/8)%2`, `a_quad_col = (lane/8)/2`）を
+そのまま「列オフセットの掛け算数のみ 8→4 に変更」して移植すると、
+BL/TR の位置が入れ替わったまま出力されるため誤った演算結果になる
+（実装計画のレビューで検出。単純な定数流用は不可）。本実装は
+`a_quad_row = (lane/8)/2`・`a_quad_col = (lane/8)%2`（f16 版から `/2`・
+`%2` を入れ替え）とすることで、`ldmatrix.x4` がレーングループ
+`g = lane/8`（0..3）の象限データを出力レジスタ `r_g` へ配る仕様と
+組み合わせ、`a_frag[0..3] = {TL,TR,BL,BR}` を得ている
+（`kernels_mma_tf32.rs::LDSM_A_FRAG` 定義部・冒頭コメント「命令選定」
+参照）。
+
+### 14.2 B フラグメント: 素の共有メモリロード
+
+`ldmatrix .trans` は b16 粒度の転置命令であり 32bit 要素（tf32）を 2 個
+の b16 に分断してしまうため使用できない。PTX ISA の m16n8k8 tf32 B
+オペランド分解（`row = tid_in_group(+4)`・`col = groupID`）に従い、
+row-major の共有メモリから `bs_tile[stage][k0+tid_in_group][col+group_id]`・
+`bs_tile[stage][k0+tid_in_group+4][col+group_id]` を `__float_as_uint`
+で直接レジスタへロードする（`LDS_B_FRAG` マクロ。`.trans` ldmatrix は
+不使用）。
+
+### 14.3 TF32 丸めの継承（#800）
+
+`mma.sync` の tf32 オペランドは明示変換済みビットを要求し、cp.async は
+生バイトコピーのため転送「中」に丸めを挟めない。`kernels_wmma_opt.rs::
+CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（#800）と同一構造・同一の
+正しさ論証（走査添字が LOAD マクロと完全一致することに依存する 3 点
+論証）を移植し、各 compute イテレーション先頭・`cp.async.wait_group`
+直後・`__syncthreads()` 前に stage の smem チャンクを 1 回だけ丸める。
+変換関数は `wmma::__float_to_tf32`（`#include <mma.h>` 経由。既存カーネル
+で NVRTC 構文検証実績のある経路を優先し、インライン PTX
+`cvt.rna.tf32.f32` は採用しなかった）。
+
+### 14.4 初期タイル定数
+
+既存 TF32 opt-staged（`WMMA_TF32_STAGED_BLOCK_M/_N` = 64x64・K タイル
+16・3 ステージ）と同一のブロック形状を採用し、#802 の A/B 比較を同条件に
+する: `MMA_TF32_BM=64・BN=64・BK=16・STAGES=3`、warp タイル
+`WARP_TILES_M=2・WARP_TILES_N=4`（warp タイル実寸 32x32・
+`WARPS_M=2・WARPS_N=2`・128 スレッド）、`A_PAD=BK+4=20・B_PAD=BN+4=68`
+（静的共有メモリ 28,416B）。Phase 4（タイル拡大）の起点として、これらの
+定数の変更検討・実測はイシュー #802 以降へ引き継ぐ。
+
+### 14.5 検証状態（未検証の明記）
+
+本実装セッションの環境（CUDA driver あり・NVRTC なし）では上記カーネル
+ソースは NVRTC による構文検証を一度も通過していない（`kernels_mma.rs`
+冒頭コメント「検証状態」と同じ制約）。数値一致テスト（`tests/
+gemm_mma_tf32.rs`・`tests/mma_tf32_vs_wmma_tf32_staged.rs`）は実装・同梱
+済みだが、`#[ignore]` 実機テストは DGX Spark GB10 実機へ到達できず
+未実行のまま残す。実機での最初の実行が構文検証を兼ね、数値一致の実機
+確認は #802 のスコープとして引き継ぐ。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）
