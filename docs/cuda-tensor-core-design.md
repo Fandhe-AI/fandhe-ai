@@ -290,17 +290,25 @@ row-major の共有メモリから `bs_tile[stage][k0+tid_in_group][col+group_id
 で直接レジスタへロードする（`LDS_B_FRAG` マクロ。`.trans` ldmatrix は
 不使用）。
 
-### 15.3 TF32 丸めの継承（#800）
+### 15.3 TF32 丸めの継承（#800・wmma 側は #851 で revert 済み）
 
 `mma.sync` の tf32 オペランドは明示変換済みビットを要求し、cp.async は
-生バイトコピーのため転送「中」に丸めを挟めない。`kernels_wmma_opt.rs::
-CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（#800）と同一構造・同一の
-正しさ論証（走査添字が LOAD マクロと完全一致することに依存する 3 点
-論証）を移植し、各 compute イテレーション先頭・`cp.async.wait_group`
+生バイトコピーのため転送「中」に丸めを挟めない。`kernels_mma_tf32.rs::
+CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（#800 で設計・同一構造・
+同一の正しさ論証。走査添字が LOAD マクロと完全一致することに依存する
+3 点論証）により、各 compute イテレーション先頭・`cp.async.wait_group`
 直後・`__syncthreads()` 前に stage の smem チャンクを 1 回だけ丸める。
 変換関数は `wmma::__float_to_tf32`（`#include <mma.h>` 経由。既存カーネル
 で NVRTC 構文検証実績のある経路を優先し、インライン PTX
 `cvt.rna.tf32.f32` は採用しなかった）。
+
+同型の丸め位置変更は `kernels_wmma_opt.rs`（wmma 経路）にも #800 で
+横展開されていたが、GB10 実機 bisect で M=N=K=512〜2048 において
+約 −16〜−20% の性能回帰が単独確定したため #851 で revert 済み（丸め位置
+を kstep ループ内・fragment ロード直後の毎回丸めへ戻した。実測・不採用
+判断の記録: `docs/perf/cuda-gemm-wmma-tf32-smem-staging-rounding.md`）。
+本ファイル（mma 経路）は bisect 対象外で回帰が確認されていないため、
+本節の設計をそのまま維持する。
 
 ### 15.4 初期タイル定数
 
