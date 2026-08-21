@@ -405,6 +405,27 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
   opt-in の起動側結線・実測値記録）。TF32 mma.sync 経路自体の本番 3 段選択への結線・採否判断は
   #802 のスコープのまま変わらない。
 
+## 18. クロスタイル先読み・XOR swizzle・StreamK の要否判断（#812）
+
+イシュー #812「perf(backend-cuda): クロスタイル先読み・XOR swizzle・StreamK の要否判断」。GEMM OSS 比較
+ギャップ改修ツリー #785 → Phase 5 親 #790 配下の CUDA 残候補 3 点。§14（#803）・§16（#804）と同じ制約
+（`docs/real-hardware-verification-env.local.md`・`CUDA_NODE` 不在）により DGX Spark GB10 実機へ到達
+できず、実測は全て「実行待ち」のまま。3 候補いずれも本イシューでは `crates/backend-cuda/src/` の
+本番カーネル定数・実装（`gemm*.rs`・`swizzle.rs`・`crates/backend-cuda/tests/`）を変更しない（判断記録
+のみ）。ただし `kernels_mma.rs` 冒頭モジュールドキュメントコメント（`//!`。クロスタイル先読み・XOR
+swizzle 節への本イシュー判断の参照追記）は本イシュー内で更新しており、既存ソースの設計コメントのみの
+更新である（本番カーネル定数・実装は不変）。
+
+| 候補 | 判断 | 根拠 | 詳細 |
+|------|------|------|------|
+| クロスタイル先読み | 保留 | wait/sync 再構成の同期バグリスクが NVRTC 構文検証不能な環境では許容できない（露出比率は `K_STEPS=2` で 50% と大きいが、露出量ではなくリスク起点の判断）。より安価な代替（`MMA_BK` 拡大による `K_STEPS` 増）を優先候補として提示 | `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md`「#812 追加判断」節 |
+| XOR swizzle | 不採用（保留） | バンクコンフリクト残存の実測（既存基準）は実行待ちのまま。SMEM フットプリント差分（パディングでステージあたり `+1,536B`、`STAGES=4` が静的上限ぴったり適合〈49,152B〉から動的 SMEM opt-in 必須〈55,296B〉へ後退）を第 2 の再評価トリガーとして追加 | `docs/perf/cuda-gemm-mma-bank-conflict.md`「#812 追加判断」節 |
+| StreamK | 不採用（保留） | 主要ワークロード（M=N=K=4096）では tail effect 解消の主効果が小さいが（quantization loss 約 3.0%）中間サイズ（2048・1024）では非小さい。加えて fixup がアキュムレート順序を変えるため、既存の bit 一致論拠（実測不要の十分条件）は使えなくなる。ただし `MmaF16` 経路は既に統一複合判定による非後退契約（`assert_no_parity_regression`。bit 一致は合否条件ではない）で運用済みのため、順序変更が既存 tolerance・fixture のまま非後退契約を通るかどうかは実機実測でしか確定できない。この未確定性（実機未到達で判定不能）そのものが不採用（保留）の根拠であり、通らなかった場合に限り fixture 再生成はユーザー承認必須事項となる | `docs/cuda-streamk-decision.md`（新規） |
+
+3 候補とも「不採用」ではなく「保留（再評価条件付き）」である点が共通する: いずれも実機実測・追加承認が
+得られれば再検討しうる余地を残し、`.claude/rules/out-of-scope-tracking.md` の方針に沿って各 doc に再評価
+条件を明記した（採用判断が確定した場合の実装そのものは別イシューへ切り出す）。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）
