@@ -255,6 +255,16 @@ impl TileConfig {
     /// （`TileConfigError` の公開面を変更しないための判断。上記 doc 参照）。
     pub const VEC_WIDTH: u32 = 4;
 
+    /// `shaders/gemm.metal` の `gemm_simdgroup_tiled_f16`（イシュー #797）が
+    /// 使う `half` 版協調ロードのベクトルロード幅（要素数）。half は
+    /// 128bit = 8 要素のため [`VEC_WIDTH`](Self::VEC_WIDTH)（f32 の 4 要素）
+    /// の 2 倍になる。[`validate`](Self::validate) の既存 8 整除検査
+    /// （`bk % 8 == 0`・`bn % (wn*8) == 0` ⟹ `bn % 8 == 0`）がちょうど
+    /// `VEC_WIDTH_F16`（8）整除を包含する（`VEC_WIDTH`〈4〉整除を包含する
+    /// のと同じ論法。本ファイル末尾
+    /// `validate_ok_implies_vec_width_f16_divisibility` で固定する）。
+    pub const VEC_WIDTH_F16: u32 = 8;
+
     /// staged 経路（[`TileConfig::pad`]）が使う共有メモリタイルの行末
     /// パディング要素数（`f32` 単位。イシュー #538）。`CANDIDATES`
     /// （本ファイル）の全 `staged: true` 構成が採用する値と一致させる
@@ -356,6 +366,77 @@ impl TileConfig {
             let a_tile = bm.checked_mul(a_row)?;
             let b_tile = bk.checked_mul(b_row)?;
             a_tile.checked_add(b_tile)?.checked_mul(4)
+        };
+        compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
+    }
+
+    /// `shaders/gemm.metal` の `gemm_simdgroup_tiled_f16`（イシュー #796・
+    /// エピローグのタイル粒度統合はイシュー #797）が確保する threadgroup
+    /// 共有メモリのバイト数。[`shared_mem_bytes`]（f32 版）とレイアウトの
+    /// 考え方は同じだが、2 点異なる:
+    ///
+    /// 1. staged 経路の A・B タイル要素は `half`（2 バイト）単位で確保する
+    ///    （f32 版は `f32` 4 バイト単位）。
+    /// 2. `gemm_simdgroup_f16` と同じ理由（`simdgroup_store` が
+    ///    `simdgroup_float8x8` から `device half*` へ直接 store できない。
+    ///    #380 実機 spike で確定済み）により、`staged` の有無を問わず常に
+    ///    エピローグ staging 領域（f32）を追加で確保する。`gemm_simdgroup_tiled_f16`
+    ///    の threadgroup メモリレイアウトはタイル領域（staged のみ）＋
+    ///    エピローグ領域（常時）の順（同カーネル冒頭コメント参照）。
+    ///
+    /// **エピローグ領域のサイズ（イシュー #797 でタイル粒度へ拡大）**: 従来
+    /// （#796）は 8x8 acc タイル 1 個分（64 要素）の staging スラブを
+    /// simdgroup ごとに使い回し、acc タイル毎に `simdgroup_store`→
+    /// `simdgroup_barrier`→書き戻し→`simdgroup_barrier` を回していた
+    /// （barrier が 1 simdgroup あたり `2 * acc_rows * acc_cols` 回発生）。
+    /// #797 では各 simdgroup 専用スラブを担当サブタイル全体
+    /// （`sub_bm = bm/wm` × `sub_bn = bn/wn` 要素）へ拡大し、全 acc タイルを
+    /// 一括 store → `simdgroup_barrier` 1 回 → 一括書き戻しへ再構成した
+    /// （barrier 回数を `2 * acc_rows * acc_cols` から 1 回へ削減）。
+    /// 1 simdgroup あたりの必要量は `sub_bm * sub_bn * 4` バイトで、
+    /// `wm * wn` simdgroup 分を合計すると `wm*sub_bm * wn*sub_bn * 4 =
+    /// bm * bn * 4` バイトに簡約される（`sub_bm = bm/wm`・`sub_bn = bn/wn`
+    /// の定義より。`bm`/`bn`/`wm`/`wn` は [`TileConfig::validate`] が
+    /// `bm % (wm*8) == 0`・`bn % (wn*8) == 0` を要求するため `wm | bm`・
+    /// `wn | bn` が常に成立し割り切れる）。
+    ///
+    /// タイル領域の要素数合計（`bm*(bk+pad) + bk*(bn+pad)`）は `bm`/`bk`/`bn`
+    /// が 8 の倍数・`pad` が 0 または 4（[`TileConfig::validate`] が保証する
+    /// 不変条件）のため常に偶数になり、half 2 バイト単位で確保しても続く
+    /// エピローグ領域の f32 4 バイト境界に整合する（`gemm_simdgroup_tiled_f16`
+    /// が `reinterpret_cast<threadgroup float*>` で安全に参照できる根拠）。
+    ///
+    /// `crate::gemm::MetalGemm::pipeline_for_tile_f16`（macOS 限定・非公開の
+    /// private メソッドのため intra-doc link にはしない）が
+    /// [`TileConfig::validate`]（f32 版と共通）に加えてこのメソッドで
+    /// デバイス上限超過を追加検査する（f32 版 `validate` は f32 単位の
+    /// `shared_mem_bytes` しか見ないため、f16 版の実際の確保量を別途
+    /// 検査する必要がある）。
+    pub fn shared_mem_bytes_f16(&self) -> u32 {
+        // エピローグ領域は `staged` を問わず常に必要（上記ドキュメント
+        // コメント 2 点目）。`bm*bn*4`（#797 でタイル粒度へ拡大。上記
+        // ドキュメントコメント参照）を `shared_mem_bytes`（f32 版）と同じ
+        // checked u64 演算・飽和方針で計算する。
+        let epilogue = (self.bm as u64)
+            .checked_mul(self.bn as u64)
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(u64::MAX);
+
+        if !self.staged {
+            return epilogue.min(u32::MAX as u64) as u32;
+        }
+
+        let bm = self.bm as u64;
+        let bn = self.bn as u64;
+        let bk = self.bk as u64;
+        let pad = self.pad() as u64;
+        let compute = || -> Option<u64> {
+            let a_row = bk.checked_add(pad)?;
+            let b_row = bn.checked_add(pad)?;
+            let a_tile = bm.checked_mul(a_row)?;
+            let b_tile = bk.checked_mul(b_row)?;
+            let tile_bytes = a_tile.checked_add(b_tile)?.checked_mul(2)?; // half = 2 バイト
+            tile_bytes.checked_add(epilogue)
         };
         compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
     }
@@ -801,6 +882,29 @@ pub(crate) const SWIZZLE_LOG: u32 = 2;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const SWIZZLE_ENABLED: bool = false;
 
+/// simdgroup 細粒度同期（イシュー #809）を本番 dispatch 経路
+/// （`crate::gemm::MetalGemm::pipeline_for_tile`。**f32 経路のみ**）と
+/// シェーダ側 `FINE_BARRIER_ENABLED` function constant で実際に有効化する
+/// かどうかのゲート（[`SWIZZLE_ENABLED`] と同型の設計判断）。
+/// `crate::gemm::MetalGemm::pipeline_for_tile_f16`（`gemm_simdgroup_tiled_f16`）
+/// にも同じ値が伝播するが、当該カーネルは `FINE_BARRIER_ENABLED` を
+/// 参照しないため無害な no-op であり f16 経路の挙動は変化しない
+/// （`crate::gemm::MetalGemm` の `fine_barrier_enabled` フィールド
+/// ドキュメンテーションコメント参照）。
+///
+/// **既定は `false`（無効）**: `gemm_simdgroup_tiled` の staged 経路 kk ループへ
+/// `simdgroup_barrier(mem_flags::mem_none)` を挿入する構成の性能効果が
+/// `docs/perf/metal-gemm-fine-barrier-ab.md` の判断基準を満たすまで、本番経路
+/// はバリア非挿入のまま動作する。A/B 計測は実機セッションで
+/// `examples/gemm_fine_barrier_ab_bench.rs` を使う（この定数自体は変更せず、
+/// `MetalGemm::new_with_fine_barrier` へ明示的に `true` を渡した head
+/// インスタンスで計測する。#540 の運用方式〈#746 で `SWIZZLE_ENABLED` を
+/// instance フィールドへ格上げした判断〉を踏襲）。採用判断後に応じて
+/// （採用: 既定を `true` へ確定 / 不採用: 本機構一式を revert）このコメント
+/// ごと更新する。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const FINE_BARRIER_ENABLED: bool = false;
+
 /// `encode_dispatch_tiled`（`crate::gemm`）が呼ぶ、スウィズル後の dispatch
 /// grid（`(grid_width, grid_height)` = `(threadgroups.width,
 /// threadgroups.height)`）を計算する純粋関数。
@@ -1128,6 +1232,155 @@ mod tests {
                 max_shared_mem_bytes: 32 * 1024,
             })
         );
+    }
+
+    // --- TileConfig::shared_mem_bytes_f16（イシュー #796・エピローグの
+    // タイル粒度統合はイシュー #797。pure） ---
+
+    #[test]
+    fn shared_mem_bytes_f16_returns_epilogue_only_when_not_staged() {
+        // `staged=false` はタイル領域を確保しないが、エピローグ staging
+        // 領域（f32。#797 でタイル粒度〈bm*bn*4 バイト〉へ拡大。本メソッド
+        // doc コメント「エピローグ領域のサイズ」節参照）は常に必要。
+        // `SINGLE_SIMDGROUP_8X8`（bm=8,bn=8,staged=false）は
+        // 8*8*4=256 バイト（16 の倍数。#796 時点の 1*1*64*4=256 と偶然一致
+        // する。8x8 タイル 1 個のみを担当する最小構成のため）。
+        assert_eq!(TileConfig::SINGLE_SIMDGROUP_8X8.shared_mem_bytes_f16(), 256);
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_includes_half_tile_region_plus_epilogue_when_staged() {
+        // `shared_mem_bytes_includes_derived_pad_in_both_tile_strides_when_staged`
+        // （f32 版）と同一の cfg（bm=bn=64, bk=16, wm=wn=2, staged=true）。
+        // タイル領域: A 64x(16+4)=64x20=1280 要素、B 16x(64+4)=16x68=1088
+        // 要素、合計 2368 要素 * 2 バイト（half）= 4736 バイト。
+        // エピローグ（#797 でタイル粒度へ拡大）: bm*bn*4 = 64*64*4 = 16384
+        // バイト。合計 4736+16384 = 21120 バイト。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_f16(), 21120);
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_all_candidates_within_32kib_device_limit() {
+        // #797 でエピローグ領域が `wm*wn*64*4` から `bm*bn*4` へ拡大した
+        // ことで、`CANDIDATES` のいずれかが Apple Silicon の一般的な
+        // threadgroup メモリ上限（32KiB=32768 バイト）を超過していないかを
+        // 静的に固定する（超過構成は `pipeline_for_tile_f16` の
+        // `shared_mem_bytes_f16() > max_shared_mem_bytes` 検査で拒否・
+        // フォールバックされるが、その前提が崩れていないことをここで
+        // 明示的に保証する。計画「設計方針」節の最大値実測 21120 バイト参照）。
+        for cfg in CANDIDATES {
+            let bytes = cfg.shared_mem_bytes_f16();
+            assert!(
+                bytes <= 32 * 1024,
+                "cfg {cfg:?} の shared_mem_bytes_f16={bytes} が 32KiB を超過"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_is_multiple_of_16_for_all_candidates() {
+        // `setThreadgroupMemoryLength_atIndex`（`crate::gemm::
+        // encode_dispatch_tiled_f16`）は 16 バイト境界整合を要求する
+        // （f32 版 `encode_dispatch_tiled` と同じ制約。本テストは
+        // `CANDIDATES`・`SINGLE_SIMDGROUP_8X8` の全構成が f16 版でも
+        // この制約を満たすことを確認する）。
+        for cfg in CANDIDATES {
+            let bytes = cfg.shared_mem_bytes_f16();
+            assert!(
+                bytes.is_multiple_of(16),
+                "cfg {cfg:?} の shared_mem_bytes_f16={bytes} が 16 の倍数でない"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_fits_standard_shared_mem_limit_for_all_candidates() {
+        // イシュー #798: `dispatch_f16_auto_unverified` は `tile::select` が
+        // `CANDIDATES` から選んだ構成をそのまま `pipeline_for_tile_f16`
+        // （f16 版デバイス上限検査。`shared_mem_bytes_f16` ドキュメント
+        // コメント参照）へ渡す。標準 Apple Silicon 上限（32KiB。本ファイル
+        // 内の `validate` 系テストが揃って使う `32 * 1024` と同じ値）を
+        // どの候補も超えていなければ、`select` の出力がデバイス実測なしに
+        // サイレント縮退（`SINGLE_SIMDGROUP_8X8` へのフォールバック）を
+        // 起こさないことを CI（Linux・GPU 非依存）上で担保できる。
+        const STANDARD_SHARED_MEM_LIMIT: u32 = 32 * 1024;
+        for cfg in CANDIDATES {
+            let bytes = cfg.shared_mem_bytes_f16();
+            assert!(
+                bytes <= STANDARD_SHARED_MEM_LIMIT,
+                "cfg {cfg:?} の shared_mem_bytes_f16={bytes} が標準上限 \
+                 {STANDARD_SHARED_MEM_LIMIT} を超過しており、標準 Apple \
+                 Silicon 上ではサイレント縮退が起きる"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_f16_auto_shapes_resolve_to_expected_candidate() {
+        // `tests/gemm_f16_auto_parity.rs`（`dispatch_f16_auto_unverified`。イシュー
+        // #798）の各ケースが「どの `CANDIDATES` 分岐を検証しているか」の
+        // 主張は、その統合テスト自体が Metal 実機依存・`#[ignore]` のため
+        // 実機なしでは検証できない。`select`（`tile::select_with_occupancy`
+        // への委譲）は `objc2` 系 FFI に触れない純粋関数のため、同じ形状を
+        // ここで固定し Linux（CI）上でも分岐主張のドリフトを検知する。
+        assert_eq!(
+            select(2048, 256, 512),
+            CANDIDATES[1],
+            "縦長 → CANDIDATES[1]"
+        );
+        assert_eq!(
+            select(256, 2048, 512),
+            CANDIDATES[2],
+            "横長 → CANDIDATES[2]"
+        );
+        assert_eq!(
+            select(512, 512, 512),
+            CANDIDATES[3],
+            "正方立方（実測範囲内） → CANDIDATES[3]"
+        );
+        assert_eq!(
+            select(1536, 1024, 512),
+            CANDIDATES[0],
+            "準正方大形状長方形 → CANDIDATES[0]"
+        );
+        assert_eq!(
+            select(32, 32, 32),
+            TileConfig::SINGLE_SIMDGROUP_8X8,
+            "微小形状 → SINGLE_SIMDGROUP_8X8"
+        );
+        // 端数形状ケース（`gemm_f16_auto_parity.rs::
+        // dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape`）
+        // が staged 経路（CANDIDATES[3]）を踏むことを固定する。
+        assert_eq!(
+            select(521, 265, 131),
+            CANDIDATES[3],
+            "8 非整列の端数形状（m,n,k は SMALL=64 以上） → CANDIDATES[3]"
+        );
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_saturates_instead_of_wrapping_on_overflow() {
+        // `shared_mem_bytes_saturates_instead_of_wrapping_on_overflow`
+        // （f32 版）と同じ regression 意図: `bk` に極端に大きい値を渡しても
+        // `u32::MAX` へ飽和し、`validate` 相当の上限比較で確実に拒否される
+        // ことを確認する（wrap による小さい値への回帰を防ぐ）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: u32::MAX - 7, // 8 の倍数へ切り下げ
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_f16(), u32::MAX);
     }
 
     #[test]
@@ -1480,6 +1733,45 @@ mod tests {
                                 assert!(
                                     bn.is_multiple_of(TileConfig::VEC_WIDTH),
                                     "validate({cfg:?}) が Ok を返したが bn が VEC_WIDTH の倍数でない"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn validate_ok_implies_vec_width_f16_divisibility() {
+        // `validate_ok_implies_vec_width_divisibility`（f32・VEC_WIDTH=4）
+        // の half 版（イシュー #797）: `VEC_WIDTH_F16`（8）は既存の 8 整除
+        // 検査（`bk % 8 == 0`・`bn % (wn*8) == 0` ⟹ `bn % 8 == 0`）と
+        // ちょうど同じ整除数のため、`validate` が Ok を返す `staged=true`
+        // 構成の `bk`/`bn` は必ず `VEC_WIDTH_F16` の倍数であることを固定する
+        // （`gemm_simdgroup_tiled_f16` の 8 要素グループ協調ロードが
+        // グループ境界で行/列をまたがない前提の裏付け）。
+        for bm in [8u32, 16, 32, 64] {
+            for bn in [8u32, 16, 32, 64] {
+                for bk in [8u32, 16, 24, 32] {
+                    for wm in [1u32, 2, 4] {
+                        for wn in [1u32, 2, 4] {
+                            let cfg = TileConfig {
+                                bm,
+                                bn,
+                                bk,
+                                wm,
+                                wn,
+                                staged: true,
+                            };
+                            if cfg.validate(1024, 32 * 1024).is_ok() {
+                                assert!(
+                                    bk.is_multiple_of(TileConfig::VEC_WIDTH_F16),
+                                    "validate({cfg:?}) が Ok を返したが bk が VEC_WIDTH_F16 の倍数でない"
+                                );
+                                assert!(
+                                    bn.is_multiple_of(TileConfig::VEC_WIDTH_F16),
+                                    "validate({cfg:?}) が Ok を返したが bn が VEC_WIDTH_F16 の倍数でない"
                                 );
                             }
                         }
@@ -2107,6 +2399,32 @@ mod tests {
         );
     }
 
+    /// `FINE_BARRIER_ENABLED` の**コミット状態既定値**が `false` に固定
+    /// されていることをロックする独立テスト（`tiled_dispatch_grid_is_
+    /// identity_by_default`〈`SWIZZLE_ENABLED` 用〉と同じ設計判断: この
+    /// 定数は `crate::gemm::MetalGemm::new`（`target_os = "macos"` 限定）
+    /// からのみ参照されるため、Linux 上の `tile` モジュール単体では
+    /// 到達不能で dead_code 警告の対象になる。本テストは定数値を直接
+    /// assert することで dead_code を解消しつつ、A/B 計測セッションで
+    /// 一時的に `true` へ書き換えたまま誤コミットされた状態を通常 CI
+    /// （`cargo test`）で確実に検出する（`tile.rs` 冒頭
+    /// `FINE_BARRIER_ENABLED` doc comment参照）。
+    #[test]
+    fn fine_barrier_enabled_is_false_by_default() {
+        // `assert!(!FINE_BARRIER_ENABLED, ..)` は clippy
+        // `assertions_on_constants` に抵触する（値がコンパイル時定数のため。
+        // `SWIZZLE_ENABLED` 側は `tiled_dispatch_grid(..)` という消費側関数
+        // 呼び出しを経由することでこの lint を回避している。本定数には
+        // tile.rs 内に消費側関数が無いため、`std::hint::black_box` で
+        // 「コンパイル時に定数畳み込みされない値」へ変換して同じ回避を行う）。
+        assert!(
+            !std::hint::black_box(FINE_BARRIER_ENABLED),
+            "FINE_BARRIER_ENABLED が true のままコミットされている疑いがあります。\
+             実機未検証の simdgroup 細粒度同期は本番既定 false に固定する契約です \
+             （tile.rs 冒頭 FINE_BARRIER_ENABLED doc comment・イシュー #809 参照）。"
+        );
+    }
+
     // --- shaders/gemm.metal のスウィズル証跡検査（イシュー #540・PR #661
     // codex-review 指摘対応） ---
     //
@@ -2490,6 +2808,116 @@ mod tests {
                 &format!("metal SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
                 &actual,
                 &expected,
+            );
+        }
+    }
+
+    /// `CANDIDATES` を全て、`gemm_simdgroup_tiled_f16`（イシュー #796）で
+    /// 巡回し CPU 参照実装との一致を確認する
+    /// （`all_tile_candidates_match_cpu_reference_medium_shape`（f32 版）と
+    /// 同じ判断根拠・同じフォールバック検知手法。`MetalGemm::
+    /// resolve_tile_config_f16` で実際に採用された構成が `cfg` と一致する
+    /// ことを assert してからディスパッチする）。参照値は f16→f32→
+    /// `matmul_reference_fma`→f16 丸め→f32 の 3 段階
+    /// （`tests/cpu_metal_f16_parity.rs` 冒頭コメント「参照実装との比較
+    /// 方法」と同一）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape() {
+        use backend_cpu::parity::assert_parity;
+        use bench_harness::rng::Xorshift64Star;
+        use half::f16;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx)
+            .expect("GEMM パイプラインの構築に失敗した（f16 タイル化含む）");
+
+        for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let resolved = gemm.resolve_tile_config_f16(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?}（f16）のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let (m, n, k) = (256, 256, 256);
+            let mut rng_a = Xorshift64Star::new(300 + i as u64);
+            let mut rng_b = Xorshift64Star::new(400 + i as u64);
+            let a_f16: Vec<f16> = rng_a.fill_vec_f16(m * k);
+            let b_f16: Vec<f16> = rng_b.fill_vec_f16(k * n);
+
+            let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+            let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+            let mut c_ref_f32 = vec![0.0f32; m * n];
+            backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+            let c_ref_rounded: Vec<f32> = c_ref_f32
+                .iter()
+                .map(|&x| f16::from_f32(x).to_f32())
+                .collect();
+
+            let c_gpu_f16 = gemm
+                .dispatch_f16_tiled_unverified(&ctx, &a_f16, &b_f16, m, n, k, cfg)
+                .unwrap_or_else(|err| {
+                    panic!("Metal f16 SimdgroupTiled({cfg:?}) GEMM のディスパッチに失敗した: {err}")
+                });
+            let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+
+            assert_parity(
+                &format!("metal f16 SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
+                &c_gpu_f32,
+                &c_ref_rounded,
+            );
+        }
+    }
+
+    /// `dispatch_f16_auto_unverified`（イシュー #798）が実際に呼ぶ経路——
+    /// `tile::select(m, n, k)` の出力をそのまま `resolve_tile_config_f16`
+    /// へ渡す——を、`select` の各分岐を代表する形状で検証する
+    /// （`all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`
+    /// が `CANDIDATES` を直接巡回するのに対し、本テストは `select` の
+    /// 分岐判定ロジックが実際にどの候補へ写像するかを検証対象に含む）。
+    /// 採用構成が `select` の返り値と一致することを assert することで、
+    /// 自動経路がフォールバックなしに動作することを確認する。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn dispatch_f16_auto_tile_select_shapes_resolve_without_fallback() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx)
+            .expect("GEMM パイプラインの構築に失敗した（f16 タイル化含む）");
+
+        // `select_with_occupancy` 本体コメントの分岐判定に対応する代表形状:
+        // 縦長 → CANDIDATES[1]、横長 → CANDIDATES[2]、正方立方（実測範囲内）
+        // → CANDIDATES[3]、大形状 → CANDIDATES[0]、微小形状 →
+        // SINGLE_SIMDGROUP_8X8。
+        let shapes: &[(usize, usize, usize)] = &[
+            (2048, 256, 512),  // 縦長 → CANDIDATES[1]
+            (256, 2048, 512),  // 横長 → CANDIDATES[2]
+            (512, 512, 512),   // 正方立方（実測範囲内）→ CANDIDATES[3]
+            (1536, 1024, 512), // 準正方大形状長方形 → CANDIDATES[0]
+            (32, 32, 32),      // 微小形状 → SINGLE_SIMDGROUP_8X8
+        ];
+
+        for &(m, n, k) in shapes {
+            let expected = select(m, n, k);
+            let resolved = gemm
+                .resolve_tile_config_f16(&ctx, expected)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "shape (m={m}, n={n}, k={k}) が選んだ構成 {expected:?} の \
+                     パイプライン構築・検証（実デバイス上限）に失敗した: {err}"
+                    )
+                });
+            assert_eq!(
+                resolved, expected,
+                "shape (m={m}, n={n}, k={k}) の select 出力 {expected:?} が \
+                 実デバイス上でサイレントに {resolved:?} へフォールバックした"
             );
         }
     }

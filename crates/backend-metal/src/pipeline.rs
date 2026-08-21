@@ -118,12 +118,19 @@ pub(crate) fn make_pipeline(
 /// interleaved に A/B 計測する運用（`docs/perf/metal-gemm-tgid-swizzle-ab.md`）
 /// のため引数化した（CUDA 側 `CudaMmaGemm::new_with_swizzle` と同型の設計。
 /// `crates/backend-cuda/examples/gemm_mma_swizzle_bench.rs` 参照）。
+///
+/// `fine_barrier_enabled`（index 8 の function constant 値。イシュー #809）は
+/// `swizzle_enabled` と同じ設計判断で `crate::gemm::MetalGemm` インスタンスが
+/// 保持する固定値を伝播する（`MetalGemm::new` は `crate::tile::
+/// FINE_BARRIER_ENABLED`〈既定 `false`〉を渡し、`MetalGemm::new_with_fine_barrier`
+/// はベンチ用途で任意値を渡せる）。
 pub(crate) fn make_pipeline_with_constants(
     device: &MtlDevice,
     library: &MtlLibrary,
     function_name: &'static str,
     cfg: TileConfig,
     swizzle_enabled: bool,
+    fine_barrier_enabled: bool,
 ) -> Result<Retained<MtlPipeline>, MetalError> {
     let name = NSString::from_str(function_name);
     let constants = MTLFunctionConstantValues::new();
@@ -197,6 +204,17 @@ pub(crate) fn make_pipeline_with_constants(
             std::ptr::NonNull::from(&swizzle_enabled).cast(),
             MTLDataType::Bool,
             7,
+        );
+        // simdgroup 細粒度同期（イシュー #809）のゲート。`gemm_simdgroup_tiled`
+        // の staged 経路のみが参照する定数だが、`gemm_simdgroup_tiled_f16`
+        // など未参照の関数へ特殊化する際も値の設定自体は無害（Metal は
+        // 関数が実際に参照しない function constant への値設定を許容する）。
+        // index は SWIZZLE_ENABLED（index 7）の直後の index 8。
+        let fine_barrier = fine_barrier_enabled;
+        constants.setConstantValue_type_atIndex(
+            std::ptr::NonNull::from(&fine_barrier).cast(),
+            MTLDataType::Bool,
+            8,
         );
     }
 

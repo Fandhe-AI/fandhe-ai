@@ -241,16 +241,27 @@
 //! インスタンス構築時 1 回のみのコンパイルであり本タスクでは結線しない
 //! （拡大は効果に対しリスク過大と判断。実装計画 §3.4 スコープ境界）。
 
+//! イシュー #801（refactor）で TF32 `mma.sync`(m16n8k8)/`ldmatrix`/`cp.async`
+//! 経路（[`CudaMmaTf32Gemm`]。`kernels_mma_tf32.rs`／`gemm_mma_tf32.rs`）を
+//! 追加した。既存 TF32 本番経路（`CudaGemm::run_wmma_tf32` の WMMA C++ API
+//! ベース 3 段選択）は無変更のまま並存させる独立経路であり、本番
+//! ディスパッチ（`ops.rs`／`gemm.rs`／`gemm_auto.rs`）へは結線しない
+//! （`kernels_mma_tf32.rs` 冒頭ドキュメンテーションコメント「位置づけ・
+//! 非結線」参照）。数値一致回帰・parity 非後退契約・本番採否判断は後続
+//! イシュー #802 のスコープ。
+
 pub mod device;
 mod elementwise;
 mod error;
 mod gemm;
 mod gemm_auto;
 mod gemm_mma;
+mod gemm_mma_tf32;
 mod gemm_wmma;
 mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;
+mod kernels_mma_tf32;
 mod kernels_rmsnorm;
 mod kernels_softmax;
 mod kernels_transpose;
@@ -287,6 +298,7 @@ pub use gemm_auto::{
 #[cfg(feature = "internal-diagnostics")]
 pub use gemm_auto::{SpecializedMmaKernelHandle, run_specialized_mma_f16};
 pub use gemm_mma::CudaMmaGemm;
+pub use gemm_mma_tf32::CudaMmaTf32Gemm;
 pub use gemm_wmma::CudaWmmaGemm;
 pub use memory::CudaMemory;
 pub use nvrtc::{

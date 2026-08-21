@@ -166,6 +166,15 @@ pub struct MetalGemm {
     /// 参照カウント型でありスレッド境界を跨がない前提。本クレートの
     /// ディスパッチは呼び出しごとに同期完了するため並行アクセスは想定しない）。
     tiled_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
+    /// `gemm_simdgroup_tiled_f16`（イシュー #796）の構成キー
+    /// （[`TileConfig`]）→ パイプラインの遅延キャッシュ（[`Self::pipeline_for_tile_f16`]）。
+    /// f32 版 [`Self::tiled_cache`] と同じ設計判断（候補構成は有限個のため
+    /// 初回ディスパッチ時に構築したパイプラインを使い回す）だが、
+    /// `gemm_simdgroup_tiled`（f32）と `gemm_simdgroup_tiled_f16`
+    /// は関数名が異なる別パイプラインのため、同一 `TileConfig` キーで
+    /// あってもキャッシュを混在させない（f32 版キャッシュとの取り違えは
+    /// 誤った関数へのディスパッチに直結するため独立フィールドとして持つ）。
+    tiled_f16_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
     /// threadgroup ID スウィズル（イシュー #540）をこのインスタンスの
     /// `SimdgroupTiled` 経路（[`Self::pipeline_for_tile`]・
     /// `encode_dispatch_tiled`）で有効化するかどうか。イシュー #746 で
@@ -177,6 +186,22 @@ pub struct MetalGemm {
     /// `MetalGemm::new` は本番既定 `tile::SWIZZLE_ENABLED`（`false`）を渡すため
     /// 既定挙動は不変。
     swizzle_enabled: bool,
+    /// simdgroup 細粒度同期（イシュー #809）をこのインスタンスの
+    /// `SimdgroupTiled` **f32 経路**（[`Self::pipeline_for_tile`]）で
+    /// 有効化するかどうか。`shaders/gemm.metal` の `gemm_simdgroup_tiled`
+    /// staged 経路のみが `FINE_BARRIER_ENABLED` を参照する。
+    /// [`Self::pipeline_for_tile_f16`] にも同じ値を伝播するが、
+    /// `gemm_simdgroup_tiled_f16` は `FINE_BARRIER_ENABLED` を参照しないため
+    /// 値の特殊化自体は無害な no-op（`crate::pipeline::
+    /// make_pipeline_with_constants` の同名引数ドキュメンテーションコメント
+    /// 参照）で、f16 経路の挙動は本フィールドの値に関わらず不変（f16 側へ
+    /// 細粒度同期を実装する場合は本コメントと合わせて更新すること）。
+    /// `swizzle_enabled` と同じ設計判断（instance フィールド化により
+    /// base（`false`）/head（`true`）の 2 `MetalGemm` を同一プロセス内に
+    /// 構築して interleaved A/B 計測できるようにする）。`MetalGemm::new` は
+    /// 本番既定 `tile::FINE_BARRIER_ENABLED`（`false`）を渡すため既定挙動は
+    /// 不変。
+    fine_barrier_enabled: bool,
 }
 
 impl MetalGemm {
@@ -194,6 +219,24 @@ impl MetalGemm {
         Self::new_with_swizzle(ctx, tile::SWIZZLE_ENABLED)
     }
 
+    /// [`Self::new`] と同じ構築を行うが、simdgroup 細粒度同期
+    /// （イシュー #809）の有効・無効を明示的な `fine_barrier_enabled` 引数で
+    /// 指定する。ベンチ用途専用の入口: 同一プロセス内で base
+    /// （`fine_barrier_enabled=false`）/head（`fine_barrier_enabled=true`）
+    /// の 2 インスタンスを構築し、interleaved に A/B 計測する
+    /// （`docs/perf/metal-gemm-fine-barrier-ab.md`・
+    /// `crates/backend-metal/examples/gemm_fine_barrier_ab_bench.rs`）。
+    /// [`Self::new_with_swizzle`] と同型の設計（threadgroup ID スウィズルは
+    /// 本番既定 `tile::SWIZZLE_ENABLED` のまま据え置く）。本番経路
+    /// （[`Self::new`]）は常に `tile::FINE_BARRIER_ENABLED`（`false`）を渡す
+    /// ため、本関数の追加自体は既定挙動を変えない。
+    pub fn new_with_fine_barrier(
+        ctx: &MetalContext,
+        fine_barrier_enabled: bool,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_swizzle_and_fine_barrier(ctx, tile::SWIZZLE_ENABLED, fine_barrier_enabled)
+    }
+
     /// [`Self::new`] と同じ構築を行うが、threadgroup ID スウィズル
     /// （イシュー #540）の有効・無効を明示的な `swizzle_enabled` 引数で
     /// 指定する（イシュー #746）。ベンチ用途専用の入口: 同一プロセス内で
@@ -208,6 +251,22 @@ impl MetalGemm {
     /// 設計。本番経路（`Self::new`）は常に `tile::SWIZZLE_ENABLED`（`false`）
     /// を渡すため、本関数の追加自体は既定挙動を変えない。
     pub fn new_with_swizzle(ctx: &MetalContext, swizzle_enabled: bool) -> Result<Self, MetalError> {
+        Self::new_with_swizzle_and_fine_barrier(ctx, swizzle_enabled, tile::FINE_BARRIER_ENABLED)
+    }
+
+    /// [`Self::new_with_swizzle`]・[`Self::new_with_fine_barrier`] が共に
+    /// 委譲する共通実装（イシュー #809）。threadgroup ID スウィズル
+    /// （イシュー #540）と simdgroup 細粒度同期（イシュー #809）はいずれも
+    /// `crate::pipeline::make_pipeline_with_constants` の function constant
+    /// 特殊化（index 7／8）であり、A/B 計測の対象軸が異なるだけで構築手順
+    /// 自体は独立のため、両フラグを引数に持つ 1 実装へ集約する（各専用入口
+    /// が個別に構築ロジックを複製すると、パイプライン構築手順の変更時に
+    /// 複数箇所を同期させる必要が生じるため）。
+    fn new_with_swizzle_and_fine_barrier(
+        ctx: &MetalContext,
+        swizzle_enabled: bool,
+        fine_barrier_enabled: bool,
+    ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
             pipeline::make_pipeline(ctx.device(), &library, GemmVariant::Naive.function_name())?;
@@ -233,7 +292,9 @@ impl MetalGemm {
             pipeline_tiled_bias_act,
             library,
             tiled_cache: RefCell::new(HashMap::new()),
+            tiled_f16_cache: RefCell::new(HashMap::new()),
             swizzle_enabled,
+            fine_barrier_enabled,
         })
     }
 
@@ -292,6 +353,7 @@ impl MetalGemm {
                 GemmVariant::SimdgroupTiled(candidate).function_name(),
                 candidate,
                 self.swizzle_enabled,
+                self.fine_barrier_enabled,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
@@ -312,6 +374,78 @@ impl MetalGemm {
 
         Err(last_err.unwrap_or(MetalError::PipelineCreation {
             message: "no tile configuration in fallback chain was accepted".to_string(),
+        }))
+    }
+
+    /// [`TileConfig`] 候補に対する `gemm_simdgroup_tiled_f16`
+    /// （イシュー #796）パイプラインをキャッシュから取得、無ければ構築して
+    /// キャッシュする。[`Self::pipeline_for_tile`]（f32 版）と同じ
+    /// フォールバック戦略（`crate::tile::fallback_chain`。デバイス上限超過
+    /// 等で次候補・最終的には常に妥当な [`TileConfig::SINGLE_SIMDGROUP_8X8`]
+    /// へ fail-closed でフォールバック）を踏襲するが、以下 2 点が異なる:
+    ///
+    /// 1. `self.tiled_f16_cache`（f32 版とは独立したキャッシュ。構造体
+    ///    フィールドのドキュメンテーションコメント参照）を使う。
+    /// 2. デバイス上限の事前検証を `candidate.validate(1024,
+    ///    max_shared_mem_bytes)`（f32 単位の `shared_mem_bytes` を見る）に
+    ///    加えて `candidate.shared_mem_bytes_f16() <= max_shared_mem_bytes`
+    ///    でも行う。f16 版はエピローグ staging 領域（f32。`bm*bn*4`
+    ///    バイト。イシュー #797 でタイル粒度へ拡大）を常に追加確保するため、
+    ///    `staged=false`（f32 版
+    ///    `shared_mem_bytes()` は 0 を返し `validate` を素通りする）構成
+    ///    でも f16 版は非 0 バイトを要求する（`TileConfig::
+    ///    shared_mem_bytes_f16` ドキュメントコメント参照）。この追加検査を
+    ///    怠ると、f32 版 `validate` だけを通過した構成が実際には f16 版の
+    ///    デバイス上限を超過したまま `setThreadgroupMemoryLength_atIndex`
+    ///    （`encode_dispatch_tiled_f16`）へ渡ってしまう。
+    fn pipeline_for_tile_f16(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+    ) -> Result<(Retained<MtlPipeline>, TileConfig), MetalError> {
+        let mut last_err: Option<MetalError> = None;
+
+        for candidate in tile::fallback_chain(cfg) {
+            if let Some(pipeline) = self.tiled_f16_cache.borrow().get(&candidate) {
+                return Ok((Retained::clone(pipeline), candidate));
+            }
+
+            let max_shared_mem_bytes = ctx.device().maxThreadgroupMemoryLength() as u32;
+            if candidate.validate(1024, max_shared_mem_bytes).is_err() {
+                continue;
+            }
+            // f16 版専用の追加検査（上記ドキュメントコメント 2 点目）。
+            if candidate.shared_mem_bytes_f16() > max_shared_mem_bytes {
+                continue;
+            }
+
+            match pipeline::make_pipeline_with_constants(
+                ctx.device(),
+                &self.library,
+                "gemm_simdgroup_tiled_f16",
+                candidate,
+                self.swizzle_enabled,
+                self.fine_barrier_enabled,
+            ) {
+                Ok(pipeline) => {
+                    let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
+                    if candidate.thread_count() > actual_max_threads {
+                        continue;
+                    }
+                    self.tiled_f16_cache
+                        .borrow_mut()
+                        .insert(candidate, Retained::clone(&pipeline));
+                    return Ok((pipeline, candidate));
+                }
+                Err(err) => {
+                    last_err = Some(err);
+                    continue;
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or(MetalError::PipelineCreation {
+            message: "no tile configuration in fallback chain was accepted (f16)".to_string(),
         }))
     }
 
@@ -359,6 +493,23 @@ impl MetalGemm {
             .map(|(_, resolved)| resolved)
     }
 
+    /// [`Self::resolve_tile_config`] の f16 版（イシュー #796）。
+    /// [`Self::pipeline_for_tile_f16`] が実際に採用した [`TileConfig`] を
+    /// 検証する。`crate::tile` の `#[cfg(test)] mod tests`（クレート境界の
+    /// 内側のため `pub(crate)` で届く）が `CANDIDATES` を巡回して
+    /// `gemm_simdgroup_tiled_f16` のフォールバック（デバイス上限超過等での
+    /// サイレントな `TileConfig::SINGLE_SIMDGROUP_8X8` 縮退）を検知する
+    /// ために使う（`resolve_tile_config` と同じ判断根拠）。
+    #[cfg(test)]
+    pub(crate) fn resolve_tile_config_f16(
+        &self,
+        ctx: &MetalContext,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        self.pipeline_for_tile_f16(ctx, cfg)
+            .map(|(_, resolved)| resolved)
+    }
+
     /// 動的タイル選択（TASK-1.8f・#188）の自動入口。`(m, n, k)` から
     /// [`tile::select`] で [`TileConfig`] を選び、[`GemmVariant::SimdgroupTiled`]
     /// で [`Self::dispatch_variant`] へ委譲する。バックエンド抽象層からの
@@ -386,6 +537,60 @@ impl MetalGemm {
     ) -> Result<Vec<f32>, MetalError> {
         let cfg = tile::select(m, n, k);
         self.dispatch_variant(ctx, GemmVariant::SimdgroupTiled(cfg), a, b, m, n, k)
+    }
+
+    /// f16 動的タイル選択（イシュー #798）の自動入口。[`Self::dispatch_auto`]
+    /// （f32 版）と同じ「Metal GEMM を実行すると決まった後のタイル構成選択」
+    /// 責務を f16 でも提供する。`(m, n, k)` から [`tile::select`] で
+    /// [`TileConfig`] を選び、[`Self::dispatch_f16_tiled_unverified`]
+    /// （`gemm_simdgroup_tiled_f16`。イシュー #796）へ委譲する。
+    ///
+    /// `GemmVariant` enum への f16 統合は行わない（`dispatch_variant` が
+    /// `&[f32]` 型に閉じている既存設計判断は維持。[`Self::pipeline_simdgroup_f16`]
+    /// フィールドコメント参照）。動的タイル選択機構そのもの（[`tile::select`]・
+    /// fallback chain・パイプラインキャッシュ）は f32 と完全共有するため、
+    /// f16 専用の選択ロジックを別途持たない。
+    ///
+    /// **後方互換方針（イシュー #798 受け入れ条件 3）**: `gemm_simdgroup_f16`
+    /// （非タイル 8x8 カーネル）・[`Self::dispatch_f16_unverified`] 系の明示
+    /// 入口は削除・置換せず維持する。理由は (a)
+    /// `crates/backend-metal/examples/gemm_f16_bench.rs`（REQ-8 実測境界）・
+    /// `tests/cpu_metal_f16_parity.rs` が参照する計測・回帰基線であること、
+    /// (b) 新旧カーネルの相互照合（`tests/cpu_metal_f16_tiled_parity.rs`）の
+    /// 対向として必要なこと。本関数（自動経路）は `gemm_simdgroup_tiled_f16`
+    /// のみを使い、微小形状・フォールバック時も同カーネルの
+    /// `TileConfig::SINGLE_SIMDGROUP_8X8` 構成（旧カーネルと同一の
+    /// 1 threadgroup = 1 simdgroup = 8x8 構造）で賄う——すなわち旧カーネル
+    /// 自体は自動経路の縮退先ではなく、明示入口専用の計測・回帰基線として
+    /// 存置する。
+    ///
+    /// # 精度検証状況・`_unverified` suffix（PR #819 codex-review P1 指摘対応）
+    ///
+    /// REQ-2 統一複合判定（相対誤差 1e-3 未満または絶対誤差 1e-5 未満）の
+    /// 検証は `tests/gemm_f16_auto_parity.rs`（Metal 実機依存・`#[ignore]`）
+    /// の契約だが、本 PR 時点では実機（M4 Max 等）での実行が未完了であり、
+    /// 実機実行は #799 実機セッションで実施する（#796 の
+    /// `tests/cpu_metal_f16_tiled_parity.rs` 引き継ぎと同一様式）。すなわち
+    /// 本関数が委譲する `gemm_simdgroup_tiled_f16`（[`Self::dispatch_f16_tiled_unverified`]。
+    /// `_unverified` suffix・`#[doc(hidden)]`）自体が精度未検証カーネルであり、
+    /// 未検証カーネルを検証済み production 入口へ直接結線しない既存の安全境界
+    /// （[`Self::dispatch_f16_unverified`] ドキュメントコメント参照）に従い、
+    /// 本関数自身も `_unverified` suffix・`#[doc(hidden)]` とする。#799 の
+    /// 実機検証結果をこの経路へ反映し `tests/gemm_f16_auto_parity.rs` が
+    /// green になった時点で、suffix・`#[doc(hidden)]` の解除を別イシューで
+    /// 検討する（[`Self::dispatch_f16_unverified`] と同型の解除条件）。
+    #[doc(hidden)]
+    pub fn dispatch_f16_auto_unverified(
+        &self,
+        ctx: &MetalContext,
+        a: &[half::f16],
+        b: &[half::f16],
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<Vec<half::f16>, MetalError> {
+        let cfg = tile::select(m, n, k);
+        self.dispatch_f16_tiled_unverified(ctx, a, b, m, n, k, cfg)
     }
 
     /// バックエンド抽象層からの GEMM 自動経路選択入口（TASK-11.2b・#68）。
@@ -755,6 +960,124 @@ impl MetalGemm {
                 dims,
             );
         })
+    }
+
+    /// `gemm_simdgroup_tiled_f16`（イシュー #796。BM/BN/BK/WM/WN・協調ロード
+    /// をスカラーロードで実装した half タイル化カーネル）の §4 準拠 prepared
+    /// 入口。[`Self::dispatch_tiled_prepared`]（f32 版）・
+    /// [`Self::dispatch_f16_prepared_unverified`]（非タイル f16 版）と同型の
+    /// 計測境界（エンコード＋コマンドバッファ完了待ちのみ）を提供する。
+    ///
+    /// `#[doc(hidden)]`・`_unverified` suffix の判断根拠は
+    /// [`Self::dispatch_f16_unverified`] のドキュメントコメントと同一
+    /// （REQ-2 複合判定を満たすかは `tests/cpu_metal_f16_tiled_parity.rs`・
+    /// `tests/gemm_f16_auto_parity.rs`〈いずれも Metal 実機依存・`#[ignore]`〉
+    /// で検証する契約）。動的タイル選択入口
+    /// [`Self::dispatch_f16_auto_unverified`]（イシュー #798）が本関数を
+    /// 呼ぶ形で結線済みだが、同関数自体も精度未検証（`_unverified`
+    /// suffix・`#[doc(hidden)]`。PR #819 codex-review P1 指摘対応）であり、
+    /// `ops::MetalBackendOps`・`dispatch_backend_auto` 等の検証済み
+    /// production 経路へはまだ統合されていない（本関数自体は
+    /// `#[doc(hidden)]` の明示入口として維持）。
+    ///
+    /// 呼び出し元は事前に [`pad8`] で実効次元へパディング・確保・
+    /// アップロード済みの [`MetalHalfBuffer`] を渡す契約（`dispatch_variant`
+    /// の `SimdgroupTiled` と同じ `pad8` 契約。[`Self::dispatch_tiled_prepared`]
+    /// ドキュメントコメント参照）。[`validate_prepared_inputs`]（f16 版・
+    /// 非タイルカーネルと共有）で 8 の倍数・バッファ長一致をエンコード前に
+    /// 検証する。
+    ///
+    /// `cfg` は呼び出し元が選んだ候補構成だが、[`Self::pipeline_for_tile_f16`]
+    /// がデバイス上限超過等でサイレントに `TileConfig::SINGLE_SIMDGROUP_8X8`
+    /// へフォールバックしうる（f32 版 `pipeline_for_tile` と同じフォール
+    /// バック透明性の設計）ため、戻り値として実際に採用された構成
+    /// （resolved）を返す。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: [`Self::dispatch_tiled_prepared`]
+    /// と同じ判断根拠（個別引数で呼び出し側の意図が明確になるため構造体へ
+    /// まとめ込まない）。
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn dispatch_f16_tiled_prepared_unverified(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalHalfBuffer,
+        b_buf: &MetalHalfBuffer,
+        c_buf: &MetalHalfBuffer,
+        m_eff: usize,
+        n_eff: usize,
+        k_eff: usize,
+        cfg: TileConfig,
+    ) -> Result<TileConfig, MetalError> {
+        let dims = validate_effective_dims(m_eff, n_eff, k_eff)?;
+        validate_prepared_inputs(a_buf, b_buf, c_buf, m_eff, n_eff, k_eff)?;
+
+        let (pipeline, resolved_cfg) = self.pipeline_for_tile_f16(ctx, cfg)?;
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_tiled_f16(
+                encoder,
+                &pipeline,
+                a_buf,
+                b_buf,
+                c_buf,
+                dims,
+                resolved_cfg,
+                self.swizzle_enabled,
+            );
+        })?;
+
+        Ok(resolved_cfg)
+    }
+
+    /// `gemm_simdgroup_tiled_f16`（イシュー #796）の全部入り入口:
+    /// パディング・バッファ確保／アップロード・ディスパッチ・readback／
+    /// アンパディングを一括で行う。[`Self::dispatch_f16_unverified`]
+    /// （非タイル f16 版）と同じ全部入り構造に、明示 `cfg` を追加した形
+    /// （実装計画 §3.2「明示 `TileConfig` 指定の単体ディスパッチ入口」）。
+    ///
+    /// `#[doc(hidden)]`・`_unverified` suffix の判断根拠は
+    /// [`Self::dispatch_f16_unverified`] のドキュメントコメントと同一。
+    /// 動的タイル選択入口（[`Self::dispatch_f16_auto_unverified`]）は
+    /// イシュー #798 で本関数を `tile::select` が選んだ [`TileConfig`]
+    /// 付きで呼ぶ形で結線済み（本関数自体は明示 `cfg` 指定用の入口として
+    /// 維持。dtype 汎化は `GemmVariant` へ統合しない設計判断のため
+    /// 行わない）。
+    ///
+    /// `#[allow(clippy::too_many_arguments)]`: [`Self::dispatch_f16_unverified`]
+    /// と同じ判断根拠に `cfg` が加わったのみ。
+    #[allow(clippy::too_many_arguments)]
+    #[doc(hidden)]
+    pub fn dispatch_f16_tiled_unverified(
+        &self,
+        ctx: &MetalContext,
+        a: &[half::f16],
+        b: &[half::f16],
+        m: usize,
+        n: usize,
+        k: usize,
+        cfg: TileConfig,
+    ) -> Result<Vec<half::f16>, MetalError> {
+        validate_dims_f16(a, b, m, n, k)?;
+
+        let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
+        // `dispatch_f16_unverified` と同じ順序判断（コメント参照）:
+        // `pad_matrix_f16`／`m_eff * n_eff`（バッファ確保サイズ算出）より
+        // 前に実効次元のオーバーフロー／`u32` 範囲検証を行う。
+        validate_effective_dims(m_eff, n_eff, k_eff)?;
+
+        let a_padded = pad_matrix_f16(a, m, k, m_eff, k_eff);
+        let b_padded = pad_matrix_f16(b, k, n, k_eff, n_eff);
+
+        let a_buf = MetalHalfBuffer::new_with_data(ctx, &a_padded)?;
+        let b_buf = MetalHalfBuffer::new_with_data(ctx, &b_padded)?;
+        let c_buf = MetalHalfBuffer::new_zeroed(ctx, m_eff * n_eff)?;
+
+        self.dispatch_f16_tiled_prepared_unverified(
+            ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff, cfg,
+        )?;
+
+        let padded_c = c_buf.read_to_vec();
+        Ok(unpad_matrix_f16(padded_c, m_eff, n_eff, m, n))
     }
 
     /// `variant` で選択した GEMM カーネルをディスパッチし、結果をホストへ
@@ -1441,6 +1764,82 @@ fn encode_dispatch_tiled(
     encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
 }
 
+/// `gemm_simdgroup_tiled_f16`（イシュー #796）用のパイプライン設定・
+/// バッファ結線・threadgroup 共有メモリ長設定・ディスパッチ。
+/// [`MetalGemm::dispatch_f16_tiled_prepared_unverified`] が
+/// [`MetalContext::dispatch_sync`] のクロージャから呼ぶ。`encode_dispatch_tiled`
+/// （f32 版）と構造は同一（`cfg` は [`MetalGemm::pipeline_for_tile_f16`] が
+/// フォールバック解決した後の実際の構成・grid 計算は `tile::
+/// tiled_dispatch_grid_with` へ同じく委譲）だが、以下 2 点が異なる:
+///
+/// 1. バッファ型が [`MetalHalfBuffer`]（f16）。
+/// 2. `setThreadgroupMemoryLength_atIndex` へ渡す長さは
+///    [`TileConfig::shared_mem_bytes_f16`]（`staged` を問わずエピローグ
+///    staging 領域を含む。f32 版 `shared_mem_bytes` とは異なる計算式。
+///    `crate::tile::TileConfig::shared_mem_bytes_f16` ドキュメントコメント
+///    参照）を使う。
+#[allow(clippy::too_many_arguments)]
+fn encode_dispatch_tiled_f16(
+    encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &MtlPipeline,
+    a_buf: &MetalHalfBuffer,
+    b_buf: &MetalHalfBuffer,
+    c_buf: &MetalHalfBuffer,
+    dims: Dims,
+    cfg: TileConfig,
+    swizzle_enabled: bool,
+) {
+    encoder.setComputePipelineState(pipeline);
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 1/2）と同一の
+    // 契約。`a_buf`/`b_buf`/`c_buf` は `dispatch_sync` の同期完了まで
+    // 呼び出し元スタックフレームで生存する。
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(a_buf.raw()), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(b_buf.raw()), 0, 1);
+        encoder.setBuffer_offset_atIndex(Some(c_buf.raw()), 0, 2);
+    }
+
+    // SAFETY: `encode_dispatch` の SAFETY コメント（FFI 境界 2/2）と同一の
+    // 契約（`dims` はローカル変数、長さは `size_of::<Dims>()` と一致）。
+    unsafe {
+        encoder.setBytes_length_atIndex(
+            std::ptr::NonNull::from(&dims).cast(),
+            std::mem::size_of::<Dims>(),
+            3,
+        );
+    }
+
+    // SAFETY: `encode_dispatch_tiled`（f32 版）の同名 SAFETY コメントと同一
+    // の契約。`TileConfig::shared_mem_bytes_f16` は `staged` の有無を問わず
+    // エピローグ staging 領域を含むため常に非 0（`SINGLE_SIMDGROUP_8X8` でも
+    // 256 バイト）であり `.max(16)` は事実上 no-op だが、f32 版との対称性・
+    // 将来の構成変更に対する fail-safe として同じ下限適用を維持する。
+    let shared_mem_bytes = cfg.shared_mem_bytes_f16().max(16) as usize;
+    debug_assert!(
+        shared_mem_bytes.is_multiple_of(16),
+        "Metal は setThreadgroupMemoryLength に 16 バイト境界整合を要求する"
+    );
+    unsafe {
+        encoder.setThreadgroupMemoryLength_atIndex(shared_mem_bytes, 0);
+    }
+
+    let threads_per_tg = MTLSize {
+        width: cfg.thread_count() as usize,
+        height: 1,
+        depth: 1,
+    };
+    let tiles_n = (dims.n as usize).div_ceil(cfg.bn as usize);
+    let tiles_m = (dims.m as usize).div_ceil(cfg.bm as usize);
+    let (grid_w, grid_h) = crate::tile::tiled_dispatch_grid_with(tiles_n, tiles_m, swizzle_enabled);
+    let threadgroups = MTLSize {
+        width: grid_w,
+        height: grid_h,
+        depth: 1,
+    };
+    encoder.dispatchThreadgroups_threadsPerThreadgroup(threadgroups, threads_per_tg);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1753,9 +2152,35 @@ mod tests {
 
     #[test]
     fn simdgroup_f16_epilogue_stride_matches_threadgroup_width_constant() {
+        // イシュー #796 で追加した `gemm_simdgroup_tiled_f16` のエピローグも
+        // `i += 32u`（`simd_lane` の刻み幅。1 simdgroup = 32 レーン）という
+        // 別の不変条件で偶然同じリテラルを使うため、`GEMM_METAL_SOURCE_
+        // FOR_WIDTH_CHECK`（ファイル全文）への `contains` のままだと
+        // `gemm_simdgroup_f16` 側の刻み幅を `SIMDGROUP_THREADGROUP_WIDTH` と
+        // 無関係な値へ書き換えても、新カーネル側の `i += 32u` に偶然一致し
+        // 検出できない偽陰性が生じる（`gemm_simdgroup_tiled_f16` の刻み幅は
+        // `simd_lane`／simdgroup レーン数に結合したハードウェア定数であり、
+        // `gemm_simdgroup_f16` の刻み幅が結合する Rust 側 dispatch 幅
+        // `SIMDGROUP_THREADGROUP_WIDTH` とは別の不変条件のため、同じ needle
+        // を新カーネルへ拡張しない）。検査範囲を `gemm_simdgroup_f16`
+        // カーネル本体（`typedef simdgroup_half8x8 MM_T;` から
+        // `gemm_simdgroup_tiled(` 開始位置まで。
+        // `tests/shader_source_evidence.rs::gemm_simdgroup_f16_kernel_body`
+        // と同じ境界の取り方）に限定する。
+        let kernel_start = GEMM_METAL_SOURCE_FOR_WIDTH_CHECK
+            .find("typedef simdgroup_half8x8 MM_T;")
+            .expect("gemm_simdgroup_f16 の MM_T typedef が見つかりません");
+        let next_kernel_start = GEMM_METAL_SOURCE_FOR_WIDTH_CHECK[kernel_start..]
+            .find("kernel void gemm_simdgroup_tiled(")
+            .map(|offset| kernel_start + offset)
+            .expect(
+                "gemm_simdgroup_tiled カーネル本体が見つかりません（次カーネル境界の特定に失敗）",
+            );
+        let kernel_body = &GEMM_METAL_SOURCE_FOR_WIDTH_CHECK[kernel_start..next_kernel_start];
+
         let expected_stride = format!("i += {SIMDGROUP_THREADGROUP_WIDTH}u");
         assert!(
-            GEMM_METAL_SOURCE_FOR_WIDTH_CHECK.contains(&expected_stride),
+            kernel_body.contains(&expected_stride),
             "gemm.metal の gemm_simdgroup_f16 エピローグ刻み幅が \
              SIMDGROUP_THREADGROUP_WIDTH（{SIMDGROUP_THREADGROUP_WIDTH}）と \
              一致しません。`{expected_stride}` が見つかりませんでした"

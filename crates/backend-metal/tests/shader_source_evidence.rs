@@ -150,14 +150,134 @@ fn gemm_simdgroup_f16_source_retains_req8_boundary_guard() {
 }
 
 /// `gemm_simdgroup_tiled` カーネル本体（`kernel void gemm_simdgroup_tiled(`
-/// 開始位置から EOF まで）を切り出す。本ファイル内で最後に定義される
-/// カーネルのため EOF までのスライスで安全（次カーネル境界を考慮する
-/// 必要がない）。
+/// 開始位置から、次に定義される `gemm_simdgroup_tiled_f16`
+/// （イシュー #796）開始位置までを切り出す。
+///
+/// **イシュー #796 で境界の取り方を変更**: 本ファイル追加当初は
+/// `gemm_simdgroup_tiled` がファイル内最後のカーネルだったため EOF までの
+/// スライスで安全だったが、#796 で末尾に `gemm_simdgroup_tiled_f16`
+/// （f32 版と同じ蛇行走査式・`bool group_in_bounds =`・
+/// `simdgroup_float8x8 a_frag[MAX_ACC];` 相当の文言をコメントに含む）を
+/// 追加したため、EOF までのスライスのままでは以下の既存 exact-occurrence
+/// 検査（`gemm_simdgroup_tiled_source_uses_serpentine_scan_order` 等）が
+/// f16 カーネル側の記述を誤って算入し偽陽性・偽陰性を招く
+/// （`gemm_simdgroup_f16_kernel_body` が f32 版 `gemm_simdgroup` との混同を
+/// 避けるために境界を絞っているのと同じ理由。PR #346 Bugbot 指摘の系譜）。
 fn gemm_simdgroup_tiled_kernel_body() -> &'static str {
     let kernel_start = GEMM_METAL_SOURCE
         .find("kernel void gemm_simdgroup_tiled(")
         .expect("gemm_simdgroup_tiled カーネル本体が見つかりません");
+    let next_kernel_start = GEMM_METAL_SOURCE[kernel_start..]
+        .find("kernel void gemm_simdgroup_tiled_f16(")
+        .map(|offset| kernel_start + offset)
+        .expect(
+            "gemm_simdgroup_tiled_f16 カーネル本体が見つかりません（次カーネル境界の特定に失敗）",
+        );
+    &GEMM_METAL_SOURCE[kernel_start..next_kernel_start]
+}
+
+/// `gemm_simdgroup_tiled_f16` カーネル本体（`kernel void
+/// gemm_simdgroup_tiled_f16(` 開始位置から EOF まで）を切り出す
+/// （イシュー #796）。本ファイル内で最後に定義されるカーネルのため EOF
+/// までのスライスで安全。
+fn gemm_simdgroup_tiled_f16_kernel_body() -> &'static str {
+    let kernel_start = GEMM_METAL_SOURCE
+        .find("kernel void gemm_simdgroup_tiled_f16(")
+        .expect("gemm_simdgroup_tiled_f16 カーネル本体が見つかりません");
     &GEMM_METAL_SOURCE[kernel_start..]
+}
+
+/// REQ-11・イシュー #796 の証跡: `gemm_simdgroup_tiled_f16` が半精度
+/// simdgroup 行列型（`MM_T`＝`simdgroup_half8x8`）・f32 累算
+/// （`ACC_T`＝`simdgroup_float8x8`）・行列演算ユニット命令
+/// （`simdgroup_load`/`simdgroup_multiply_accumulate`/`simdgroup_store`）を
+/// 実際に使用していることをロックする（`gemm_simdgroup_f16_source_uses_*`
+/// と対になる検査。`docs/matrix-unit-dispatch.md` の命令実在一覧表が
+/// 参照する）。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_uses_matrix_unit_instructions() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in [
+        "device const half* a",
+        "device half* c",
+        "MM_T a_frag[MAX_ACC];",
+        "MM_T b_frag[MAX_ACC];",
+        "ACC_T acc[MAX_ACC][MAX_ACC];",
+        "simdgroup_load",
+        "simdgroup_multiply_accumulate",
+        "simdgroup_store",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm.metal の gemm_simdgroup_tiled_f16 に `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// REQ-8 の証跡（イシュー #796・協調ロードのベクトル化はイシュー #797）:
+/// `gemm_simdgroup_tiled_f16` が手動境界チェック（ブロック原点の早期
+/// return・協調ロードのグループ単位 in-bounds 判定＋要素単位スカラー
+/// フォールバック・エピローグ書き戻しの要素単位 in-bounds 判定）を
+/// 維持していることをロックする（`gemm_simdgroup_tiled_source_retains_*`
+/// と同種の検査。性能上の下限・最適化の達成を理由に境界チェックを省略
+/// しない方針 `.claude/rules/coding-rust.md` の機械検証）。#797 でベクトル
+/// 化した A/B 協調ロードは 8 要素グループ単位の `group_in_bounds` 判定と、
+/// 境界グループの要素単位スカラーフォールバック（`kk_e`/`global_k_e`・
+/// `c_e`/`global_col_e`）の 2 段構成になる。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in [
+        "if (row0 >= dims.m || col0 >= dims.n)",
+        "(kk + 8 <= bk_eff) && (global_row < dims.m) && (global_k + 8 <= dims.k)",
+        "(kk < bk_eff) && (global_k < dims.k) && (global_col + 8 <= dims.n)",
+        "(kk_e < bk_eff && global_row < dims.m && global_k_e < dims.k)",
+        "(kk < bk_eff && global_k < dims.k && global_col_e < dims.n)",
+        "if (out_row < dims.m && out_col < dims.n)",
+    ] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 に REQ-8 手動境界チェック `{needle}` が見つかりません"
+        );
+    }
+}
+
+/// イシュー #797 の証跡: `gemm_simdgroup_tiled_f16` の協調ロードが
+/// half 8 要素（128bit）幅のベクトルロードへ移行済みであることをロックする
+/// （#796 時点はスカラーロードに留まっていた。上記
+/// `gemm_simdgroup_tiled_f16_source_retains_req8_boundary_guards` の
+/// group_in_bounds 判定と対になる証跡）。`reinterpret_cast<device const
+/// float4*>`（half8 を 128bit ビットコピーする device 側読み出し）と、
+/// threadgroup 側の 8 バイト境界 half4 分割 store（`as_type<half4>`）の
+/// 両方が現れることを確認する。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_uses_vectorized_staged_load() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    for needle in ["reinterpret_cast<device const float4*>", "as_type<half4>"] {
+        assert!(
+            kernel_body.contains(needle),
+            "gemm_simdgroup_tiled_f16 にベクトルロードの証跡 `{needle}` が見つかりません（イシュー #797 の実装漏れ）"
+        );
+    }
+}
+
+/// イシュー #797 の証跡: `gemm_simdgroup_tiled_f16` のエピローグが
+/// サブタイル全体単位（`sub_bm*sub_bn`）へ統合され、`simdgroup_barrier` が
+/// 1 simdgroup あたり 1 回だけ発生することをロックする（#796 時点は 8x8
+/// acc タイル毎に store→barrier→書き戻し→barrier の 2 回、
+/// `acc_rows*acc_cols` 個のタイル分＝ `2*acc_rows*acc_cols` 回発生していた）。
+/// カーネル本体全体（すべて 1 個の staging スラブを扱うエピローグ節に
+/// 属する）に現れる `simdgroup_barrier` の出現回数を数える。
+#[test]
+fn gemm_simdgroup_tiled_f16_source_epilogue_uses_single_barrier() {
+    let kernel_body = gemm_simdgroup_tiled_f16_kernel_body();
+    let barrier_count = kernel_body
+        .matches("simdgroup_barrier(mem_flags::mem_threadgroup)")
+        .count();
+    assert_eq!(
+        barrier_count, 1,
+        "gemm_simdgroup_tiled_f16 の simdgroup_barrier 出現数が 1 ではありません（エピローグの barrier 粒度統合が崩れている可能性。イシュー #797）"
+    );
 }
 
 /// イシュー #536 の証跡（#745 でも staged 経路の残存有無を再確認）:
@@ -344,5 +464,54 @@ fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
         kernel_body.matches("bool group_in_bounds =").count(),
         2,
         "パディング導入後も A タイル・B タイル双方の group_in_bounds 判定が必要です"
+    );
+}
+
+/// イシュー #809 の証跡: `FINE_BARRIER_ENABLED` function constant
+/// （index 8。`SWIZZLE_ENABLED`〈#540・index 7〉の直後）がファイル冒頭で
+/// 宣言されていることをロックする。
+#[test]
+fn gemm_metal_source_declares_fine_barrier_enabled_function_constant() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("constant bool FINE_BARRIER_ENABLED [[function_constant(8)]];"),
+        "gemm.metal に FINE_BARRIER_ENABLED function constant（index 8。SWIZZLE_ENABLED〈#540・index 7〉の \
+         直後）宣言が見つかりません"
+    );
+}
+
+/// イシュー #809 の証跡: `gemm_simdgroup_tiled` の staged 経路 kk ループが、
+/// フラグメント一括ロード（`a_frag`/`b_frag`。#745）と MMA 発行の間に
+/// `FINE_BARRIER_ENABLED` でゲートされた `simdgroup_barrier(mem_flags::mem_none)`
+/// を挿入していることをロックする（本番既定 `false` のため実行時コストは
+/// ないが、A/B 計測で `true` を渡した際に実際にこの挿入経路を通ることを
+/// 保証する証跡）。挿入位置は B フラグメントロード（`b_frag[c_]` の
+/// `simdgroup_load`）直後・MMA 発行ループ（`simdgroup_multiply_accumulate`）
+/// 直前であることも合わせて検査する（barrier がフラグメントロード完了後・
+/// MMA 発行前という契約〈本ファイル冒頭 FINE_BARRIER_ENABLED 宣言コメント
+/// 参照〉から外れた位置への移動を検出するため）。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_fine_barrier_between_fragment_load_and_mma() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+
+    assert!(
+        kernel_body.contains("if (FINE_BARRIER_ENABLED) {\n                    simdgroup_barrier(mem_flags::mem_none);\n                }"),
+        "gemm_simdgroup_tiled に FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier(mem_flags::mem_none) \
+         挿入が見つかりません"
+    );
+
+    let b_frag_load_pos = kernel_body
+        .find("simdgroup_load(b_frag[c_],")
+        .expect("B フラグメントロード（b_frag）が見つかりません");
+    let barrier_pos = kernel_body
+        .find("simdgroup_barrier(mem_flags::mem_none);")
+        .expect("FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier が見つかりません");
+    let mma_pos = kernel_body
+        .find("simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);")
+        .expect("MMA 発行（simdgroup_multiply_accumulate）が見つかりません");
+
+    assert!(
+        b_frag_load_pos < barrier_pos && barrier_pos < mma_pos,
+        "simdgroup_barrier(mem_flags::mem_none) は B フラグメントロード直後・MMA 発行直前に \
+         位置する契約です（b_frag_load={b_frag_load_pos} barrier={barrier_pos} mma={mma_pos}）"
     );
 }

@@ -36,3 +36,15 @@ backend-cpu = { path = "../backend-cpu" }
 # （coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
 # 使う」）。上記と同じ判断根拠（path 依存・ユーザー承認不要）。
 bench-harness = { path = "../bench-harness" }
+
+# Cargo は `[[example]]` を既定で `test = false` として扱うため、
+# `cargo test -p backend-metal`（rust-ci が実行する経路）は example 内の
+# `#[cfg(test)]` を素通りしコンパイル検証のみで終わる。本 example は
+# `analytics::mlx_case1_domain`（MLX split-K 選択条件との突合。イシュー
+# #810）の回帰検知テストを持つため、`test = true` を明示して CI 実行対象へ
+# 含める（`docs/backend-metal-splitk-decision.md`・
+# `docs/perf/metal-gemm-splitk-shapes.md` の対象形状群の前提が壊れていない
+# ことを機械的に保証する）。
+[[example]]
+name = "gemm_splitk_shapes_bench"
+test = true

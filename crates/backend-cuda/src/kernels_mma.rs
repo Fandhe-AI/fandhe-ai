@@ -131,6 +131,17 @@
 //! プロファイル手段整備で解消済みという位置づけ。
 //! out-of-scope-tracking.md に従い記録）。
 //!
+//! エピローグの `__half2` ベクトル store 化は #805 で実装済み（CUTLASS
+//! `predicated_tile_iterator.h` の AlignedArray 方式を簡易化した形）。
+//! 隣接列ペア（c0/c1 = c0+1）の C 書き戻しを `__float2half` スカラー
+//! store 4 回から `__floats2half2_rn` の `__half2` ベクトル store 2 回へ
+//! まとめ、エピローグの store 命令数を半減させる。整列（要素添字が常に
+//! 偶数）・ペアの全有効/全無効・丸めの同一性（RN → bit 一致）の根拠は
+//! 本ファイル「境界検査」節・エピローグ実装直前のコメントを参照。丸めが
+//! 変わらないため出力は #782 時点と bit 一致（parity 非後退契約は
+//! `tests/parity_nonregression.rs` が機械検査。tolerance・fixture は
+//! 変更なし）。
+//!
 //! # 命令選定・sm_80+ ゲート
 //!
 //! `cp.async`・`ldmatrix` は compute capability 8.0 以降を要求する
@@ -177,7 +188,14 @@
 //!    メモリへの実読み出し・境界外ポインタ生成のいずれも避ける）。
 //! 2. **エピローグの guarded store**: mma アキュムレータ（`d0..d3`）を
 //!    グローバル C へ書き戻す際、`(gr < m && gc < n)` を満たす要素のみ
-//!    書き込む（範囲外書き込みを発生させない）。
+//!    書き込む（範囲外書き込みを発生させない）。#805 でペア単位の
+//!    `__half2` ベクトル store 化を行った後も、隣接列ペア（c0/c1）が
+//!    「両方有効か両方無効」の二値になる不変条件（`n % 8 == 0` かつ
+//!    `c0` 偶数。本ファイル「整列制約」節）を根拠にペア判定
+//!    （`c1 < DIM_N`）へ切り替えており、範囲外書き込みを許容していない。
+//!    不変条件が到達不能な defensive fallback（`c0 < DIM_N` 単独判定の
+//!    スカラー store）も残し、境界検査を弱めない（下記エピローグ実装
+//!    直前のコメント参照）。
 //! 3. ホスト側 `gemm_mma.rs::CudaMmaGemm::run_f16` は起動前に
 //!    `gemm::validate_gemm_dims`（i32 積ガード含む）と上記整列検証の
 //!    両方を必ず先行させる。
@@ -1751,9 +1769,33 @@ extern "C" __global__ void gemm_mma_f16(
     // レーン対応（groupID/threadID_in_group。本ファイル冒頭コメント
     // 「命令選定」）: d0/d1 は行 groupID、d2/d3 は行 groupID+8。#493 で
     // mi/nj の 2 重ループへ拡張し、warp が担当する WARP_TILES_M x
-    // WARP_TILES_N 個の出力タイルを順に書き戻す（各タイルの guarded 条件
-    // 式の形は単一タイル構成から変えていない。REQ-8 ソーステスト
-    // needle との互換のため）。
+    // WARP_TILES_N 個の出力タイルを順に書き戻す。
+    //
+    // #805: 隣接列ペア（c0/c1 = c0+1）を `__half2`（4 バイト）のベクトル
+    // store 2 回（行 r0 分・行 r1 分）へまとめ、旧来の 4 スカラー store を
+    // 半減させる。正当性の根拠:
+    //   - 整列: `validate_mma_alignment`（ホスト側 `gemm_mma.rs`）が起動前に
+    //     `n % 8 == 0`（`MMA_N = 8`）を fail-closed で検査するため DIM_N は
+    //     常に偶数。`c0 = col0_warp + nj * MMA_N + tid_in_group * 2` も
+    //     （`col0_warp` が 8 の倍数のため）常に偶数。ゆえに要素添字
+    //     `r * DIM_N + c0` は常に偶数 → バイトオフセットは 4 の倍数となり、
+    //     C バッファ（cudarc デバイス確保・256B 整列）基点からの
+    //     `__half2`（4B 整列要求）store は常に整列する。
+    //   - ペアの全有効/全無効: DIM_N 偶数・c0 偶数のため `c0 < DIM_N` ⇔
+    //     `c1 < DIM_N`。列ペアは「両方有効」か「両方無効」の二値になり、
+    //     ペア単位の境界判定（`c1 < DIM_N`）が REQ-8 の境界検査を弱めずに
+    //     成立する（cp.async 側「8 要素チャンクが境界を跨がない」設計と
+    //     同じ論法。本ファイル冒頭「整列制約」節）。
+    //   - 丸めの同一性: `__floats2half2_rn` は `__float2half` と同じ
+    //     round-to-nearest-even のため、書き込まれる値は変わらない
+    //     （bit 一致。`tests/parity_nonregression.rs` の fixture・
+    //     tolerance は無変更で成立）。
+    //   - defensive fallback: 上記不変条件下では `c0 < DIM_N` かつ
+    //     `c1 >= DIM_N` は成立し得ず到達不能だが、将来 `DIM_N` 偶数制約が
+    //     緩んだ場合に列 c0 側の書き落としが起きないよう、ペア判定が
+    //     不成立のときは c0 単独のスカラー store へフォールバックする
+    //     （fail-closed。REQ-8「境界検査を無効化する最適化はシェーダ側で
+    //     手動境界チェックを維持したうえで行う」に準拠）。
 #pragma unroll
     for (int mi = 0; mi < WARP_TILES_M; ++mi) {
 #pragma unroll
@@ -1763,10 +1805,19 @@ extern "C" __global__ void gemm_mma_f16(
             int c0 = col0_warp + nj * MMA_N + tid_in_group * 2;
             int c1 = c0 + 1;
 
-            if (r0 < DIM_M && c0 < DIM_N) c[(size_t)r0 * DIM_N + c0] = __float2half(d[mi][nj][0]);
-            if (r0 < DIM_M && c1 < DIM_N) c[(size_t)r0 * DIM_N + c1] = __float2half(d[mi][nj][1]);
-            if (r1 < DIM_M && c0 < DIM_N) c[(size_t)r1 * DIM_N + c0] = __float2half(d[mi][nj][2]);
-            if (r1 < DIM_M && c1 < DIM_N) c[(size_t)r1 * DIM_N + c1] = __float2half(d[mi][nj][3]);
+            if (r0 < DIM_M && c1 < DIM_N) {
+                *reinterpret_cast<__half2*>(&c[(size_t)r0 * DIM_N + c0]) =
+                    __floats2half2_rn(d[mi][nj][0], d[mi][nj][1]);
+            } else if (r0 < DIM_M && c0 < DIM_N) {
+                c[(size_t)r0 * DIM_N + c0] = __float2half(d[mi][nj][0]);
+            }
+
+            if (r1 < DIM_M && c1 < DIM_N) {
+                *reinterpret_cast<__half2*>(&c[(size_t)r1 * DIM_N + c0]) =
+                    __floats2half2_rn(d[mi][nj][2], d[mi][nj][3]);
+            } else if (r1 < DIM_M && c0 < DIM_N) {
+                c[(size_t)r1 * DIM_N + c0] = __float2half(d[mi][nj][2]);
+            }
         }
     }
 }
@@ -2163,6 +2214,57 @@ mod tests {
                 "mma_f16_source() に REQ-8 境界チェック `{needle}` が見つかりません"
             );
         }
+    }
+
+    /// #805 受け入れ基準 1 の機械検査: エピローグの C 書き戻しが
+    /// `__half2` ペア store（隣接列 c0/c1 をまとめて 1 回で書く）へ
+    /// 置き換わっており、旧来の 4 連スカラー store パターン（4 要素とも
+    /// `__float2half` の直書き）が residual していないことをロックする。
+    /// 旧パターンが残ると、境界検査（`mma_f16_source_retains_req8_boundary_guards`）
+    /// は通過するが store 命令数の半減という本イシューの効果が失われるため、
+    /// 実装がベクトル化 store へ確実に切り替わっていることを別軸で保証する。
+    #[test]
+    fn mma_f16_source_epilogue_uses_half2_pair_store() {
+        let src = mma_f16_source();
+        // (a) __half2 ペア store が存在する（r0 側・r1 側の 2 箇所）。
+        for needle in [
+            "*reinterpret_cast<__half2*>(&c[(size_t)r0 * DIM_N + c0]) =",
+            "__floats2half2_rn(d[mi][nj][0], d[mi][nj][1]);",
+            "*reinterpret_cast<__half2*>(&c[(size_t)r1 * DIM_N + c0]) =",
+            "__floats2half2_rn(d[mi][nj][2], d[mi][nj][3]);",
+        ] {
+            assert!(
+                src.contains(needle),
+                "mma_f16_source() に #805 の __half2 ペア store `{needle}` が見つかりません"
+            );
+        }
+        // (b) 旧来の 4 連スカラー store（c1 要素への直書き）が残っていない。
+        // c0 側のスカラー store（defensive fallback）は不変条件下で到達不能
+        // ながら残置するため、c1 側の旧パターンのみを不在検査する。
+        for stale_needle in [
+            "c[(size_t)r0 * DIM_N + c1] = __float2half(d[mi][nj][1]);",
+            "c[(size_t)r1 * DIM_N + c1] = __float2half(d[mi][nj][3]);",
+        ] {
+            assert!(
+                !src.contains(stale_needle),
+                "mma_f16_source() に #805 で置き換えたはずの旧スカラー store \
+                 `{stale_needle}` が残存しています"
+            );
+        }
+
+        // (c) swizzle 変種（`mma_f16_source_with_swizzle`）はブロック原点
+        // アンカー（`block_row0`/`block_col0`）のみを `replacen` し
+        // エピローグには触れない（`mma_f16_source_with_swizzle` 実装の
+        // `ANCHOR` 定数参照）。#782 で本番既定コンストラクタへ結線済みの
+        // ため GB10 実機で実際に実行される経路であり、その出力にも
+        // `__half2` ペア store が引き継がれていることを検査する。
+        let swizzled =
+            mma_f16_source_with_swizzle(4).expect("mma_f16_source_with_swizzle(4) が失敗しました");
+        assert!(
+            swizzled.contains("__floats2half2_rn(d[mi][nj][0], d[mi][nj][1]);"),
+            "mma_f16_source_with_swizzle() に #805 の __half2 ペア store が \
+             見つかりません（swizzle 変種でエピローグが欠落・変質した疑い）"
+        );
     }
 
     /// `MMA_BLOCK_THREADS` が CUDA の 1 ブロックあたり最大スレッド数
@@ -3210,8 +3312,10 @@ mod tests {
         let loop_pos = src
             .find("for (int mi = 0; mi < WARP_TILES_M; ++mi) {\n#pragma unroll\n        for (int nj = 0; nj < WARP_TILES_N; ++nj) {\n            int r0 = row0_warp")
             .expect("mma_f16_source() にエピローグの mi/nj 2 重ループが見つかりません");
+        // #805: エピローグ主 store は `__half2` ペア store（下記 needle）へ
+        // 置き換わっているため、本テストは新 needle で検査する。
         let store_pos = src
-            .find("c[(size_t)r0 * DIM_N + c0] = __float2half(d[mi][nj][0]);")
+            .find("__floats2half2_rn(d[mi][nj][0], d[mi][nj][1]);")
             .expect("mma_f16_source() にエピローグの guarded store（d[mi][nj]）が見つかりません");
         assert!(
             store_pos > loop_pos,

@@ -49,10 +49,42 @@
 //! [`detected_blocks`] は本番 3 公開関数（[`super::gemm_blis`]／
 //! [`super::gemm_blis_parallel`]／[`super::gemm_blis_bias_act_parallel`]）
 //! からは呼ばれない（受け入れ条件 2＝実機 5 回中央値での非劣化確認が
-//! 本 PR のスコープ外のため。#750・#758 と同型の判断。
-//! `docs/perf/cpu-gemm-runtime-cache-detect.md` 参照）。テスト専用の
-//! パラメータ化入口（[`super::gemm_blis_parallel_with_blocks`] 等）・
-//! 実機 A/B ハーネス（`mod tests` の `#[ignore]` テスト）から到達する。
+//! 本 PR（イシュー #794）のスコープ外のため。Apple M4 Max 実機への到達
+//! 手段が本セッション環境（Linux x86_64）に存在せず（`docs/
+//! real-hardware-verification-env.local.md` 不在）実機計測を実行できない
+//! ことを確認し、#750・#758・#753 と同型の fail-closed 判断として本番
+//! 既定を切り替えていない。`docs/perf/cpu-gemm-runtime-cache-detect.md`
+//! 参照）。テスト専用のパラメータ化入口（[`super::gemm_blis_parallel_with_blocks`]
+//! 等）・実機 A/B ハーネス（`mod tests` の `#[ignore]` テスト）から到達する。
+//!
+//! ## MC/KC のキャップ・NC の動的算出（イシュー #794）
+//!
+//! [`compute_blocks`] の KC／MC は「L1D／L2 実容量から導出した理論値」と
+//! 「#749 実測（M4 Max・`docs/perf/cpu-gemm-blocking-sweep.md` §7）で
+//! 非劣化を確認済みの現行コンパイル時既定（[`super::KC`]＝256・
+//! [`super::MC`]＝128）」の小さい方をとる。理論値を無条件に採用しない
+//! 理由: #749 は KC／MC の単独拡大が全サイズで劣化することを実測しており、
+//! L1D／L2 実容量からの素朴な理論値（M4 Max 代表値では KC≈1228・
+//! MC≈1024 相当）はこの劣化域に張り付く。逆に、M4 Max の実測最適点
+//! そのものへ一致するよう予算比率等の定数を調整すると `hw.model` 分岐を
+//! 「容量から逆算した係数」の形へ置き換えただけの機種固定化になり、
+//! PR #766 の撤去理由（本ファイル冒頭「デッドコード化を避ける設計」節）
+//! に反する。実測で確認済みの上限をキャップとして課すだけに留めるため、
+//! 小容量 L1D／L2 環境（組込み・仮想化等）では理論値がキャップを下回り
+//! 引き続き縮む（fail-closed 方向は維持。実測未確認の「拡大」方向にのみ
+//! キャップをかける）。
+//!
+//! NC（本イシューの主眼）は逆に #749 で拡大（NC=9600）が n>=4096 で
+//! 改善しているため、キャップを課さず L2 残余からの理論値をそのまま
+//! 採用する。KC が上記キャップにより `super::KC`（256）へ収束する結果、
+//! B パネル 1 要素あたりの K 方向バイト数が固定され、NC は L2 実容量へ
+//! 比例して動的に決まる（M4 Max 代表値では nc_raw ≈ 8192。#749 実測の
+//! 改善域〈NC=9600〉に近い値だが、機種名や実測値そのものへの逆算では
+//! なく L2 容量からの算出のため PR #766 の撤去理由に抵触しない）。
+//! n=2048 で NC 拡大が劣化した実測（#749 §7 (iv)）と非両立の可能性が
+//! 残るが、[`detected_blocks`] は上記のとおり本番未結線のため、
+//! 形状（n）依存の扱いは実機計測イテレーションで別途判断する
+//! （イシュー #794 §8・`docs/perf/cpu-gemm-runtime-cache-detect.md`）。
 
 use std::sync::OnceLock;
 
@@ -202,19 +234,66 @@ pub(crate) fn compute_blocks(
         // 全体の fail-closed 方針（0 除算防止）に合わせ明示的に拒否する。
         return None;
     }
-    let kc = (l1_budget / per_k_bytes).clamp(KC_MIN, KC_MAX);
+    // KC は「L1D 実容量から算出できる理論上限」と「#749 実測（M4 Max・
+    // `docs/perf/cpu-gemm-blocking-sweep.md` §7）で確認済みの非劣化点
+    // `super::KC`（現行コンパイル時既定 256）」の小さい方をとる。理論値を
+    // 直接使わない理由（イシュー #794 レビュー指摘）: #749 は KC の
+    // 単独拡大が全サイズで劣化することを実測しており、L1D 実容量から
+    // 素朴に導出した理論値（M4 Max 代表値では KC≈1228）はこの劣化域に
+    // 張り付く。かといって M4 Max 実測値そのものに一致するよう予算比率
+    // 等の定数を逆算すると、`hw.model` 分岐を「係数」の形に置き換えた
+    // だけの機種固定化になり PR #766 の撤去理由（`cache_params.rs:12-16`
+    // モジュールドキュメント）に反する。実測で確認済みの上限を
+    // キャップとして課すだけに留め、小容量 L1D 環境（組込み・仮想化等）
+    // では理論値がキャップを下回り引き続き縮む（fail-closed 方向は
+    // 維持。実測未確認の「拡大」方向にのみキャップをかける）。
+    let kc_theoretical = l1_budget / per_k_bytes;
+    let kc = kc_theoretical.min(super::KC).clamp(KC_MIN, KC_MAX);
 
     let l2_budget = l2_bytes / 2;
     let kc_bytes = F32_BYTES.checked_mul(kc)?;
     if kc_bytes == 0 {
         return None;
     }
+    // MC も KC と同じ理由（#749: 単独拡大が全サイズで劣化）で
+    // `super::MC`（現行既定 128）をキャップとする。
+    //
+    // レビュー指摘（イシュー #794・codex-review P2・Cursor Bugbot Medium。
+    // PR #815）: 従来は「`mc_raw` を `super::MC` へキャップ→
+    // `clamp_to_multiple(.., MC_MIN, MC_MAX, mr)` で `mr` の倍数へ丸め」
+    // という順序だった。`clamp_to_multiple` 自身は渡された `max`
+    // （`MC_MAX=1024`）に対してのみ「丸め上げが `max` を超えたら `max`
+    // 以下の倍数へ切り下げる」安全策を持つため、`mr` が `super::MC`
+    // （128）の約数でない場合（例: `Avx2Kernel` の `MR=6`）は丸め上げが
+    // `super::MC` は超えつつ `MC_MAX` は超えない値（132）に着地し、
+    // 非劣化キャップ契約が破られていた。
+    //
+    // 修正: `clamp_to_multiple` の `max` 引数へ直接 `super::MC` を渡す
+    // （`MC_MAX` との `min` で `super::MC` が将来 `MC_MAX` を上回る
+    // 設定ミスをしても安全側に倒す）。これにより「丸め上げが `max` を
+    // 超えたら `max` 以下の倍数へ切り下げ、それも不可能なら `None`」
+    // という既存の（テスト済みの）安全策がそのまま非劣化キャップにも
+    // 適用され、倍数契約〈`mc % mr == 0`〉と非劣化キャップ
+    //〈`mc <= super::MC`〉の両立を常に保つ。
+    let mc_cap = super::MC.min(MC_MAX);
     let mc_raw = l2_budget / kc_bytes;
-    let mc = clamp_to_multiple(mc_raw, MC_MIN, MC_MAX, mr)?;
+    let mc = clamp_to_multiple(mc_raw, MC_MIN, mc_cap, mr)?;
 
-    // NC は B パネルが占有できる L2 残余（A パネル分を除いた残り）から
-    // 算出する。`l2_budget` は A パネルに割り当てた予算のため、B 側は
-    // 残りの半分（`l2_bytes - l2_budget == l2_budget`）を使う。
+    // NC は #794 の主眼（本イシュー: NC 動的算出）。MC/KC と異なり
+    // #749 実測では NC 拡大（NC=9600）が n>=4096 で改善しており、
+    // キャップを課さず L2 残余（A パネル分を除いた残り。`l2_budget` は
+    // A 側に割り当てた予算のため、B 側は残りの半分＝`l2_budget` 自体を
+    // 使う）から算出した理論値をそのまま採用する。上記で `kc` が
+    // `super::KC`（256）へキャップされた結果、`kc_bytes` は `KC` 由来の
+    // 小さい値に固定され、L2 実容量が大きいほど `nc_raw` も比例して
+    // 大きくなる（M4 Max 代表値では nc_raw ≈ 8192。#749 実測の
+    // 改善域〈NC=9600〉に近い一方、機種名や実測値そのものへの逆算では
+    // なく L2 容量からの算出のため PR #766 の撤去理由に抵触しない）。
+    // n=2048 で NC 拡大が劣化した実測（#749 §7 (iv)）とは非両立の
+    // 可能性が残るが、本関数は実機ゲート未通過のため本番未結線
+    // （`detected_blocks` の呼び出し元がテスト専用入口・A/B ハーネスに
+    // 限られる。`mod.rs` 冒頭コメント）であり、形状（n）依存の扱いは
+    // 実機計測イテレーションで別途判断する（イシュー #794 §8）。
     let nc_raw = l2_budget / kc_bytes;
     let nc = clamp_to_multiple(nc_raw, NC_MIN, NC_MAX, nr)?;
 
@@ -404,6 +483,55 @@ mod tests {
     }
 
     #[test]
+    fn compute_blocks_m4_max_like_values_kc_mc_cap_to_current_defaults() {
+        // レビュー指摘（イシュー #794）: 既存の
+        // `compute_blocks_apple_m4_max_like_values_stays_within_clamp_bounds`
+        // は range 内であることしか検証しておらず、
+        // `.min(super::KC)`／`.min(super::MC)`（本 PR の主要な挙動変更＝
+        // キャップ）を削除しても pass し続けるため新挙動を保証しない。
+        // M4 Max P コア相当（L1D=192KiB・L2=16MiB・NEON MR=8/NR=12）では
+        // 理論値（KC≈1228・MC≈1024 相当）がキャップを上回るため、
+        // キャップが効いて `kc == super::KC`（256）・`mc == super::MC`
+        // （128）へ一致することを明示的に固定する。
+        let blocks = compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 12)
+            .expect("正当な範囲の値は Some を返すはず");
+        // `mod tests` は `cache_params` の子モジュールのため、`super` は
+        // `cache_params` を指す（`KC`／`MC` の定義元 `gemm_blis` ではない）。
+        // `cache_params` 本体（`mod tests` の外）の `super::KC` と異なり、
+        // ここでは `super::super::KC` で `gemm_blis::KC` を参照する。
+        assert_eq!(
+            blocks.kc,
+            super::super::KC,
+            "kc は super::KC へキャップされるはず"
+        );
+        assert_eq!(
+            blocks.mc,
+            super::super::MC,
+            "mc は super::MC へキャップされるはず"
+        );
+    }
+
+    #[test]
+    fn compute_blocks_nc_grows_monotonically_with_l2_capacity() {
+        // レビュー指摘（イシュー #794）: NC はキャップなしで L2 実容量に
+        // 比例して動的に算出される（本 PR の主眼）。この挙動を直接検証する
+        // テストがなかったため、L2 サイズが異なる 2 ケース（4 MiB と
+        // 16 MiB。KC/MC は上記キャップにより両ケースとも
+        // `super::KC`／`super::MC` へ収束し固定されるため、NC の差分のみが
+        // L2 容量差を反映する）で NC が単調増加することを固定する。
+        let small_l2 = compute_blocks(192 * 1024, 4 * 1024 * 1024, 8, 12)
+            .expect("正当な範囲の値は Some を返すはず");
+        let large_l2 = compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 12)
+            .expect("正当な範囲の値は Some を返すはず");
+        assert!(
+            large_l2.nc > small_l2.nc,
+            "L2 実容量が大きいほど nc も大きくなるはず（small={}, large={}）",
+            small_l2.nc,
+            large_l2.nc
+        );
+    }
+
+    #[test]
     fn compute_blocks_rejects_zero_mr_or_nr() {
         assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, 0, 12).is_none());
         assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 0).is_none());
@@ -455,6 +583,29 @@ mod tests {
         );
         assert!((MC_MIN..=MC_MAX).contains(&blocks.mc));
         assert!((NC_MIN..=NC_MAX).contains(&blocks.nc));
+    }
+
+    /// レビュー指摘（イシュー #794・codex-review P2・Cursor Bugbot Medium。
+    /// PR #815）の回帰テスト: `mr` が `super::MC`（128）の約数でない場合
+    /// （`Avx2Kernel` の `MR=6`。128 は 6 の倍数でないため `clamp_to_multiple`
+    /// が 128 へ丸め上げると 132 になり非劣化キャップを超えていた）でも
+    /// `mc <= super::MC` が常に成立することを、L2 実容量を極端に大きく
+    /// して `mc_raw` をキャップへ張り付かせた状態で検証する。
+    #[test]
+    fn compute_blocks_mc_never_exceeds_non_degradation_cap_for_non_divisor_mr() {
+        // AVX2 マイクロカーネル実値（MR=6・NR=16）を使う。L2 を
+        // `L2_SANE_MAX` まで大きくし `mc_raw` が確実に `super::MC` へ
+        // 張り付く（キャップされる）状況を作る。
+        let blocks = compute_blocks(192 * 1024, L2_SANE_MAX, 6, 16)
+            .expect("正当な範囲の値は Some を返すはず");
+        assert!(
+            blocks.mc <= super::super::MC,
+            "mc={} は非劣化キャップ super::MC={} を超えている（#794 レビュー指摘の回帰）",
+            blocks.mc,
+            super::super::MC
+        );
+        assert_eq!(blocks.mc % 6, 0, "mc={} は mr=6 の倍数ではない", blocks.mc);
+        assert!((MC_MIN..=MC_MAX).contains(&blocks.mc));
     }
 
     #[test]

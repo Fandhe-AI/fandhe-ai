@@ -252,3 +252,100 @@ PoC-v2-4 を主対比として維持する。#437 との対比を含めた要因
 - ~~Metal/PyTorch 比が主指標（2048/4096）で 2 割前後に留まった実測事実の総括・要因分析は **#387** へ引き継ぐ
   （本イシューではカーネル最適化を行わない）~~ → **#387 で完了**（本ファイル「総括・要因分析（イシュー
   #387）」節を参照。カーネル最適化は未実施のまま残存項目として記録）
+
+## タイル化後再計測（イシュー #799）
+
+GEMM OSS 比較ギャップ改修ツリー（#785）Phase 2（#796〜#798）で、上記「総括・要因分析（イシュー #387）」
+節が要因 1 として挙げた「dynamic-tile 相当の最適化が f16 カーネルに未適用」を解消した。非タイル
+`gemm_simdgroup_f16`（1 threadgroup 1 simdgroup 8x8）を、タイル化カーネル `gemm_simdgroup_tiled_f16`
+（BM/BN/BK/WM/WN・ベクトル化ロード・動的タイル選択込み。#796 本体・#797 ベクトル化ロード／エピローグの
+タイル粒度統合・#798 動的タイル選択統合）へ世代更新した後の再計測プロトコルを本節に追補する。
+
+### 直近の確定実測（本節着手時点の対 MPS f16 比。#785 本文・2026-08-21 再計測）
+
+旧経路（非タイル `gemm_simdgroup_f16`）での最新値: size=4096 で 2.27 TFLOPS 対 PyTorch MPS f16
+12.26 TFLOPS ＝ **18.5%**（`docs/perf/metal-gemm-tgid-swizzle-ab.md`・`docs/perf/metal-floor-remeasurement.md`
+の系譜と同一計測プロトコル）。GEMM OSS 比較ギャップ改修ツリー（#785）本文が挙げる負けカードの中で最大の
+負け幅であり、本追補節が対象とする改善対象値である。
+
+### 新経路の計測線の追加（`gemm_f16_bench.rs`）
+
+`crates/backend-metal/examples/gemm_f16_bench.rs` へ新経路の計測線を追加した（イシュー #799）。旧経路
+（`measure`・`metal_f16_simdgroup_tflops=` 行）に加え、`tile::select(m, n, k)`（本番ディスパッチ
+`dispatch_auto` と同じ選択関数）が選ぶ `TileConfig` で
+`MetalGemm::dispatch_f16_tiled_prepared_unverified` を計測する `measure_tiled`
+（`metal_f16_tiled_tflops=` 行）を並記出力する。計測境界（プリパド済みバッファを計測外で準備し、
+計測対象はエンコード＋コマンドバッファ完了待ちのみ）・`SEED`（`0xC0FFEE`）・入力分布は新旧経路で揃えて
+あり、同一プロセス内で新旧比較ができる。`pipeline_for_tile_f16` がデバイス上限超過等でサイレントに
+`TileConfig::SINGLE_SIMDGROUP_8X8` へフォールバックしうる（`gemm.rs::dispatch_f16_tiled_prepared_unverified`
+ドキュメントコメント参照）ため、resolved 構成を `tile=` として出力へ含め、実際に採用された構成を透明化
+している。
+
+ただし完全対称ではない残存差分が 1 点ある（PR review 指摘）: 新経路の計測ループ内で毎回呼ぶ
+`dispatch_f16_tiled_prepared_unverified` は内部で `pipeline_for_tile_f16` を毎回呼ぶため、キャッシュ
+ヒット時でも `RefCell::borrow()` + `HashMap::get` + `Retained::clone`（ObjC retain のアトミック増分）が
+計測区間に含まれる。旧経路 `dispatch_f16_prepared_unverified` は事前構築済みフィールド
+`self.pipeline_simdgroup_f16` を直接使うためこのコストを含まない。フルディスパッチ（GEMM 本体の計算・
+メモリアクセス）に比べて無視できる大きさと見込むが実測未検証であり、系統誤差の可能性としてここに明記
+する（新経路が実際より不利に測定される方向）。詳細は
+`crates/backend-metal/examples/gemm_f16_bench.rs` の `measure_tiled` 関数コメントを参照。
+
+### 実機計測手順（macOS・Apple Silicon。タイル化後経路を含む）
+
+計測対象は**確定 SHA を明示した `checkout`** で固定する（PR review 指摘）。ブランチ名
+（例: `perf/799-metal-f16-remeasurement`）への `checkout` は、マージ後にブランチが
+削除されれば手順が実行不能になり、ブランチが残存していても追加コミットで計測対象が
+動いてしまい再現性を損なう。マージ前に本ブランチで計測する場合は本 PR（#825）の
+HEAD コミット SHA を、マージ後は `origin/main` 上のマージコミット SHA を用いる。
+いずれの場合も **実際に checkout した SHA を計測結果表へ記録する**（下記「状態」節・
+実測完了時の記録項目「計測リビジョン」を参照）。
+
+本 PR は計測プロトコル整備自体がレビュー対象のため、この節をコミットするたびに
+HEAD SHA が変わる。ドキュメント中に個別コミット SHA を固定値として書き写すと
+次のコミットで直ちに陳腐化する（PR review 指摘・実際に旧コミット SHA が残存し
+乖離した事例あり）ため、**固定値をここに書かず `gh pr view` で実行時に PR #825 の
+実際の HEAD を解決してから checkout する**。
+
+```sh
+git fetch origin
+
+# 本 PR（#825）の実際の HEAD コミット SHA を実行時に解決して checkout する
+# （ドキュメントへ個別 SHA を固定値で書き写すと次のコミットで陳腐化するため、
+# `gh pr view` で都度取得する）。
+git checkout "$(gh pr view 825 --repo Fandhe-AI/rust-ai-library --json headRefOid --jq .headRefOid)"
+
+# マージ後に再計測する場合は、代わりに origin/main 上のマージコミット SHA
+# （`git log origin/main --grep '#799'` 等で特定）を使う。
+
+# 1. 数値一致の先行確認（3 系統。全 PASS が計測の前提）
+cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
+cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_tiled_parity
+cargo test -p backend-metal --release -- --ignored --nocapture gemm_f16_auto_parity
+
+# 2. Rust 側（新旧 f16 経路。プロセス単位で 5 回独立実行）
+cargo run -p backend-metal --example gemm_f16_bench --release
+
+# 3. PyTorch 側（MPS f16。同一セッションで 5 回独立実行）
+source .venv-mps-bench/bin/activate
+python3 scripts/bench/gemm_bench_torch_mps_f16.py
+```
+
+出力形式（`gemm_f16_bench.rs` 参照）: size ごとに `metal_f16_simdgroup_tflops=`（旧経路。回帰基線として
+維持）と `metal_f16_tiled_tflops=`（新経路。`tile=` で resolved `TileConfig` を併記）の 2 行を出力する。
+比較手順・GPU 排他・計測衛生（AC 電源・`pmset -g therm`）は上記「実測結果（イシュー #383）」節の
+「計測環境」表と同一条件を踏襲する。
+
+### 状態: プロトコル整備済み・実測は Mac 実機セッションで消化（#799 未消化）
+
+本実装セッションは Linux dev-box（`.claude/worktrees/wf_6c80a1fd-533-85`）であり、`docs/real-hardware-verification-env.md`
+§1 が定める Metal 実機（M4 Max）到達手段は「ローカル直接実行」のみで、Linux dev-box からの SSH 経路・
+`docs/real-hardware-verification-env.local.md` はいずれも本環境に存在しない（同型の Metal イシュー
+#795・#814・#818・#821 と同じ実機到達不可の先例）。したがって本節は計測線の追加（上記「新経路の計測線の
+追加」節）・計測手順の確立に留め、per-size（512/1024/2048/4096）の 5 回中央値・Q1/Q3・対 MPS f16 比・
+改善幅（旧経路 18.5%（#785）〜18.78%（#437 系譜）→ 新経路実測値）・残ギャップの実測記入は **Mac 実機
+セッションでの後続消化**へ引き継ぐ。**実測値の推定・外挿・捏造は一切行わない**
+（`.claude/rules/coding-rust.md`「テスト・ベンチ」節）。
+
+実測完了時は本節（または新設の実測結果表）へ以下を記録する: 計測環境表（GPU・OS・rustc・torch
+バージョン・計測リビジョン）・数値一致 3 系統の PASS 確認・per-size 5 回生値・中央値/Q1/Q3・
+新旧経路それぞれの対 MPS f16 比・改善幅（pt）。

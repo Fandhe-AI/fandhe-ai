@@ -242,6 +242,102 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
   （`mma_f16_source_with_swizzle`）や `gemm_auto.rs` の warp 刻み定数
   （`MMA_WARP_M`/`_N` を候補列挙の刻みとして参照する箇所）への波及有無。
 
+## 15. TF32 経路の生 `mma.sync`(m16n8k8) 移行（#801）
+
+- **位置づけ**: `crates/backend-cuda/src/kernels_mma_tf32.rs`／
+  `gemm_mma_tf32.rs`（`CudaMmaTf32Gemm`）。既存 TF32 本番経路
+  （`CudaGemm::run_wmma_tf32` の WMMA C++ API ベース 3 段選択。11〜13 節）
+  は無変更のまま並存させる独立経路であり、f16 `mma.sync`/`ldmatrix`/
+  `cp.async` 経路（`kernels_mma.rs`。TASK-11.1h・#187）の構造を TF32
+  精度へ移植した refactor。**本番ディスパッチ（`ops.rs`／`gemm.rs`／
+  `gemm_auto.rs` の 3 段選択・JIT 特化基盤）へは結線しない**。数値一致
+  回帰の実機確認・parity 非後退契約・本番採否判断は後続イシュー #802 の
+  スコープ。
+
+### 15.1 A フラグメント: ldmatrix の b16 流用と象限順序の再導出
+
+TF32 の A タイル（16 行 x 8 列・f32 4B/要素）をビット等価な 16 行 x 16
+列の b16（2B/要素）タイルとして再解釈すると、
+`ldmatrix.sync.aligned.m8n8.x4.shared.b16` が読む 4 個の 8x8 b16 象限
+（各象限 = 8 行 x 4 f32 列）にちょうど一致する（CUTLASS が用いる既知の
+技法）。f16 `mma.sync.aligned.m16n8k16` の A オペランド（16x16 を直接
+4 象限が覆う）は象限順序 **TL, BL, TR, BR**（`kernels_mma.rs::LDSM_A_FRAG`
+の `a_quad_row = (lane/8)%2`・`a_quad_col = (lane/8)/2`）だが、TF32
+`mma.sync.aligned.m16n8k8` の A オペランド（16x8 を b16 換算 16x16 として
+異なる行/列分解で覆う）は PTX ISA の当該命令 A オペランドテーブルから
+導出すると象限順序 **TL, TR, BL, BR** になる（`a0`=TL・`a1`=TR・`a2`=BL・
+`a3`=BR。`row=groupID`/`groupID+8` が a0/a1 と a2/a3 を分け、
+`col=tid_in_group`/`tid_in_group+4` が a0/a2 と a1/a3 を分ける分解）。
+
+f16 版の定数（`a_quad_row = (lane/8)%2`, `a_quad_col = (lane/8)/2`）を
+そのまま「列オフセットの掛け算数のみ 8→4 に変更」して移植すると、
+BL/TR の位置が入れ替わったまま出力されるため誤った演算結果になる
+（実装計画のレビューで検出。単純な定数流用は不可）。本実装は
+`a_quad_row = (lane/8)/2`・`a_quad_col = (lane/8)%2`（f16 版から `/2`・
+`%2` を入れ替え）とすることで、`ldmatrix.x4` がレーングループ
+`g = lane/8`（0..3）の象限データを出力レジスタ `r_g` へ配る仕様と
+組み合わせ、`a_frag[0..3] = {TL,TR,BL,BR}` を得ている
+（`kernels_mma_tf32.rs::LDSM_A_FRAG` 定義部・冒頭コメント「命令選定」
+参照）。
+
+### 15.2 B フラグメント: 素の共有メモリロード
+
+`ldmatrix .trans` は b16 粒度の転置命令であり 32bit 要素（tf32）を 2 個
+の b16 に分断してしまうため使用できない。PTX ISA の m16n8k8 tf32 B
+オペランド分解（`row = tid_in_group(+4)`・`col = groupID`）に従い、
+row-major の共有メモリから `bs_tile[stage][k0+tid_in_group][col+group_id]`・
+`bs_tile[stage][k0+tid_in_group+4][col+group_id]` を `__float_as_uint`
+で直接レジスタへロードする（`LDS_B_FRAG` マクロ。`.trans` ldmatrix は
+不使用）。
+
+### 15.3 TF32 丸めの継承（#800）
+
+`mma.sync` の tf32 オペランドは明示変換済みビットを要求し、cp.async は
+生バイトコピーのため転送「中」に丸めを挟めない。`kernels_wmma_opt.rs::
+CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（#800）と同一構造・同一の
+正しさ論証（走査添字が LOAD マクロと完全一致することに依存する 3 点
+論証）を移植し、各 compute イテレーション先頭・`cp.async.wait_group`
+直後・`__syncthreads()` 前に stage の smem チャンクを 1 回だけ丸める。
+変換関数は `wmma::__float_to_tf32`（`#include <mma.h>` 経由。既存カーネル
+で NVRTC 構文検証実績のある経路を優先し、インライン PTX
+`cvt.rna.tf32.f32` は採用しなかった）。
+
+### 15.4 初期タイル定数
+
+既存 TF32 opt-staged（`WMMA_TF32_STAGED_BLOCK_M/_N` = 64x64・K タイル
+16・3 ステージ）と同一のブロック形状を採用し、#802 の A/B 比較を同条件に
+する: `MMA_TF32_BM=64・BN=64・BK=16・STAGES=3`、warp タイル
+`WARP_TILES_M=2・WARP_TILES_N=4`（warp タイル実寸 32x32・
+`WARPS_M=2・WARPS_N=2`・128 スレッド）、`A_PAD=BK+4=20・B_PAD=BN+4=68`
+（静的共有メモリ 28,416B）。Phase 4（タイル拡大）の起点として、これらの
+定数の変更検討・実測はイシュー #802 以降へ引き継ぐ。
+
+### 15.5 検証状態（未検証の明記）
+
+本実装セッションの環境（CUDA driver あり・NVRTC なし）では上記カーネル
+ソースは NVRTC による構文検証を一度も通過していない（`kernels_mma.rs`
+冒頭コメント「検証状態」と同じ制約）。数値一致テスト（`tests/
+gemm_mma_tf32.rs`・`tests/mma_tf32_vs_wmma_tf32_staged.rs`）は実装・同梱
+済みだが、`#[ignore]` 実機テストは DGX Spark GB10 実機へ到達できず
+未実行のまま残す。実機での最初の実行が構文検証を兼ね、数値一致の実機
+確認は #802 のスコープとして引き継ぐ。
+
+### 15.6 数値一致・parity・実機ベンチの確定状況（#802・2026-08-21 実装セッション）
+
+イシュー #802（本節冒頭「数値一致回帰の実機確認・parity 非後退契約・本番採否判断は後続イシュー
+#802 のスコープ」の引き継ぎ先）の実装セッションも、#792／#821 と同型の理由で DGX Spark GB10
+実機へ到達できなかった（実行環境には対象外 GPU〈NVIDIA GeForce RTX 3060。sm_121 ではない〉のみ
+存在し、`docs/real-hardware-verification-env.local.md` も未配置）。したがって §15.5 の「未検証の
+明記」は本セッション終了時点でも解消していない: `#[ignore]` 実機テスト（`tests/gemm_mma_tf32.rs`・
+`tests/mma_tf32_vs_wmma_tf32_staged.rs`）は未実行のまま、`docs/perf/cuda-parity-baseline.md` への
+ベースライン追記もなし、本番結線（`gemm.rs::run_wmma_tf32` への `mma_tf32` 追加）も未実施。
+
+本セッションで実施したのは、実機到達可能セッションで即座に A/B 計測へ進めるための準備のみ:
+`crates/backend-cuda/examples/cuda_floor_bench.rs` に `measure_mma_tf32`（既存 4 経路と同一の
+launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比較用**参考列**として出力する
+（f32 候補下限の算出ロジック `best_f32` には組み込まない）。詳細な再開手順・記録テンプレは
+`docs/perf/cuda-gemm-mma-tf32-ab.md` を参照。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）

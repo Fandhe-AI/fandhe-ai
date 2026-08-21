@@ -311,3 +311,8 @@ REQ-8 下限値・数値一致許容誤差は本イシューでも一切変更�
   `cargo test -p backend-cpu --release -- --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
   を実行し、`default`／`detected`／`2d-partition` の中央値を dim ∈ {512, 1024, 2048, 4096} で
   比較・記録する
+- **イシュー #794 への引き継ぎ（本イベント時点で未実施のまま）**: `compute_blocks` の算出式を
+  「KC／MC は理論値と現行既定〈256／128〉の小さい方（キャップ）・NC は理論値をそのまま
+  採用（キャップなし＝動的算出）」へ再較正した（M4 Max 実機未到達のため実機計測は #794 でも
+  未実施。詳細・記録テンプレートは `cpu-gemm-runtime-cache-detect.md` §6）。本番未結線の
+  状態・理由（実機ゲート未通過）は変わらない
