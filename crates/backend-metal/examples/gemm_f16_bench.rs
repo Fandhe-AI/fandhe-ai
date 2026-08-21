@@ -173,9 +173,22 @@ mod macos_impl {
             .expect("C バッファ確保（計測外の事前準備）に失敗した（実機でのみ実行する前提）");
 
         let cfg = tile::select(m, n, k);
-        // 計測ループの外で一度だけ resolved 構成を取得する（ループ内で
-        // 毎回呼ぶと計測区間にパイプライン解決コストが混入するため）。
-        // フォールバックが発生しなければ `cfg` と一致する。
+        // ループの外で一度 `dispatch_f16_tiled_prepared_unverified` を呼び、
+        // resolved 構成の取得と `MetalGemm::tiled_f16_cache`（`gemm.rs`
+        // `pipeline_for_tile_f16`）のウォームアップを行う。フォールバックが
+        // 発生しなければ `cfg` と一致する。
+        //
+        // 計測ループ内でも同じ `dispatch_f16_tiled_prepared_unverified` を
+        // 呼ぶため、`pipeline_for_tile_f16` のキャッシュヒット経路
+        // （`borrow()` + `HashMap::get` + `Retained::clone`）は計測区間に
+        // 残る。旧経路 `dispatch_f16_prepared_unverified` は事前構築済みの
+        // `self.pipeline_simdgroup_f16` を直接使うためこのコストを含まず、
+        // 新旧経路の計測区間には非対称なオーバーヘッド（キャッシュ照会 1 回
+        // 分。フルディスパッチに比べ無視できる大きさと見込むが未検証）が
+        // 残る。レビュー指摘（イシュー #799 PR review）を受けて明記する。
+        // 真に対称な計測境界にするには新経路にも「呼び出し前にパイプライン
+        // 確定済み」入口が必要（将来の改善候補。フォローアップ Issue で
+        // 追跡）。
         let resolved = gemm
             .dispatch_f16_tiled_prepared_unverified(
                 ctx, &a_buf, &b_buf, &c_buf, m_eff, n_eff, k_eff, cfg,

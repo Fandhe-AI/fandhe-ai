@@ -275,11 +275,20 @@ GEMM OSS 比較ギャップ改修ツリー（#785）Phase 2（#796〜#798）で�
 `dispatch_auto` と同じ選択関数）が選ぶ `TileConfig` で
 `MetalGemm::dispatch_f16_tiled_prepared_unverified` を計測する `measure_tiled`
 （`metal_f16_tiled_tflops=` 行）を並記出力する。計測境界（プリパド済みバッファを計測外で準備し、
-計測対象はエンコード＋コマンドバッファ完了待ちのみ）・`SEED`（`0xC0FFEE`）・入力分布は新旧経路で完全に
-揃えてあり、同一プロセス内で新旧比較ができる。`pipeline_for_tile_f16` がデバイス上限超過等でサイレントに
+計測対象はエンコード＋コマンドバッファ完了待ちのみ）・`SEED`（`0xC0FFEE`）・入力分布は新旧経路で揃えて
+あり、同一プロセス内で新旧比較ができる。`pipeline_for_tile_f16` がデバイス上限超過等でサイレントに
 `TileConfig::SINGLE_SIMDGROUP_8X8` へフォールバックしうる（`gemm.rs::dispatch_f16_tiled_prepared_unverified`
 ドキュメントコメント参照）ため、resolved 構成を `tile=` として出力へ含め、実際に採用された構成を透明化
 している。
+
+ただし完全対称ではない残存差分が 1 点ある（PR review 指摘）: 新経路の計測ループ内で毎回呼ぶ
+`dispatch_f16_tiled_prepared_unverified` は内部で `pipeline_for_tile_f16` を毎回呼ぶため、キャッシュ
+ヒット時でも `RefCell::borrow()` + `HashMap::get` + `Retained::clone`（ObjC retain のアトミック増分）が
+計測区間に含まれる。旧経路 `dispatch_f16_prepared_unverified` は事前構築済みフィールド
+`self.pipeline_simdgroup_f16` を直接使うためこのコストを含まない。フルディスパッチ（GEMM 本体の計算・
+メモリアクセス）に比べて無視できる大きさと見込むが実測未検証であり、系統誤差の可能性としてここに明記
+する（新経路が実際より不利に測定される方向）。詳細は
+`crates/backend-metal/examples/gemm_f16_bench.rs` の `measure_tiled` 関数コメントを参照。
 
 ### 実機計測手順（macOS・Apple Silicon。タイル化後経路を含む）
 
