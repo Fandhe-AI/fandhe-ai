@@ -613,14 +613,30 @@ fn main() {
                 .expect("parity_cpu == Some(false) implies candidate_actual is Ok");
             let (mismatch_count, max_abs_diff, max_rel_err, first_mismatch_index) =
                 mismatch_diagnostics(actual, &expected_cpu);
-            let (row_idx, col_idx) = first_mismatch_index
-                .map(|idx| (idx / CORRECTNESS_N as usize, idx % CORRECTNESS_N as usize))
-                .expect("parity_cpu == Some(false) implies mismatch_count > 0");
+            // 通常経路では parity_cpu == Some(false) は mismatch_count > 0 を含意する
+            // （actual/expected_cpu は共に CORRECTNESS_M*CORRECTNESS_N から構築され
+            // 長さが一致するため）。ただし `mismatch_diagnostics` は
+            // `backend_cpu::compare` の Err（長さ不一致）を fail-open に
+            // `(0, 0.0, 0.0, None)` へ丸めており、`matches_reference` 側の
+            // fail-closed 丸め（Err → false）と非対称なため、万一 Err 経路を
+            // 通ると mismatch_count == 0 かつ first_mismatch_index == None に
+            // なりうる（PR #842 review 指摘）。診断専用パスを panic させず
+            // 部分情報のまま出力を続けるため、expect ではなく "n/a" へ
+            // fallback する。
+            let first_mismatch = first_mismatch_index
+                .map(|idx| {
+                    format!(
+                        "(row={}, col={})",
+                        idx / CORRECTNESS_N as usize,
+                        idx % CORRECTNESS_N as usize
+                    )
+                })
+                .unwrap_or_else(|| "n/a".to_string());
             println!(
                 "{}: FAIL (parity mismatch vs CPU f32::mul_add reference; measuring anyway as \
                  reference-only value — not usable for adoption decisions until #839's known \
                  correctness bug is fixed; mismatch_count={}/{}, max_abs_diff={:.3e}, \
-                 max_rel_err={:.3e}, first_mismatch=(row={row_idx}, col={col_idx}))",
+                 max_rel_err={:.3e}, first_mismatch={first_mismatch})",
                 candidate.label,
                 mismatch_count,
                 (CORRECTNESS_M * CORRECTNESS_N) as usize,
