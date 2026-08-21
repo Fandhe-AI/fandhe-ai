@@ -943,11 +943,26 @@ fn main() {
         // `mma_tf32` vs `wmma_tf32`（f32 最良経路の候補。staged/opt）の
         // A/B 比。両方とも launch-only 計測のため apples-to-apples
         // （モジュール冒頭ドキュメンテーションコメント参照）。イシュー
-        // #802 の採否判断（`docs/perf/cuda-gemm-mma-tf32-ab.md`）はこの
-        // 比の実測値を根拠とする。
+        // #802 の採否判断（`docs/perf/cuda-gemm-mma-tf32-ab.md` §5）は
+        // 比較対象を明示的に `wmma_tf32`（staged）としているため、この比は
+        // staged 経路が実際に選ばれた形状でのみ算出する。`wmma_tf32` 内部
+        // が staged → opt → basic の 3 段フォールバックを持つため
+        // （`gemm.rs::run_wmma_tf32` 参照）、staged が利用不能／未整列な
+        // 実機・形状では `wmma_tf32` の実測値が opt（または basic）の
+        // ものになり、それを `wmma_tf32`（staged）扱いで比率化すると
+        // staged との A/B 結果と誤認され本番結線の採否判断を誤らせる
+        // （codex-review 指摘。PR #826）。`wmma_tf32_routed_path_is_staged`
+        // で staged 選択を確認できない場合は `n/a` に落とし、採否判断が
+        // staged 実測に限定されることを出力からも担保する。
+        let wmma_tf32_staged_routed = tiled_gemm
+            .as_ref()
+            .is_some_and(|g| g.wmma_tf32_routed_path_is_staged(size as u32, size as u32));
         let mma_tf32_over_wmma_tf32_percent = match (mma_tf32, wmma_tf32) {
             (Some(m), Some(w))
-                if w.median.is_finite() && w.median > 0.0 && m.median.is_finite() =>
+                if wmma_tf32_staged_routed
+                    && w.median.is_finite()
+                    && w.median > 0.0
+                    && m.median.is_finite() =>
             {
                 Some(m.median / w.median * 100.0)
             }
@@ -961,7 +976,8 @@ fn main() {
              pytorch_f16={:.4}, f32_ref_measured={f32_measured} f16_ref_measured={f16_measured}, \
              mma_over_wmma_f16(apples-to-apples, launch-only, median-based)={}, \
              mma_tf32_over_wmma_tf32(reference-only, not part of f32 candidate floor, \
-             apples-to-apples, launch-only, median-based)={})",
+             apples-to-apples, launch-only, median-based, n/a unless wmma_tf32 routed to the \
+             staged kernel for this shape)={})",
             fmt_sample(tiled),
             fmt_sample(wmma_tf32),
             fmt_sample(wmma_f16),

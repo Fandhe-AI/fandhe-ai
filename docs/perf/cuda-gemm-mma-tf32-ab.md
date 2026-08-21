@@ -107,6 +107,12 @@ cargo run -p backend-cuda --example cuda_floor_bench --release
   `mma_tf32_over_wmma_tf32(...)` 行を **5 回起動**して記録し、各サイズの中央値を採る
   （`CLAUDE.md`「5 回計測中央値」規約。`docs/perf/cuda-gemm-swizzle-ab.md` の運用と同型）。
 - 生ログ・5 回分の値・中央値・比率を下表へ転記する。
+- `mma_tf32_over_wmma_tf32` は `wmma_tf32` が **staged 経路**へ実際にルーティングされた形状
+  でのみ算出される（`gemm.rs::CudaGemm::wmma_tf32_routed_path_is_staged` で判定。staged
+  カーネルが未コンパイル・未整列形状で opt／basic へフォールバックした場合は `n/a` になる。
+  codex-review 指摘対応。PR #826）。該当実機で `n/a` が出力された場合、staged 経路が不能な
+  環境（`docs/perf/cuda-gemm-mma-tf32-ab.md` 実機の cc・cp.async 対応状況を確認）である旨を
+  本節へ追記し、§5 の採否判断には使わない。
 
 ### 4.1 実測記録テンプレート（実機到達可能セッションが埋める）
 
