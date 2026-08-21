@@ -136,6 +136,18 @@ fn f16_tiled_parity_direct_load_single_simdgroup_8x8() {
 
 /// BM/BN/BK の倍数でない非正方形状（REQ-8 手動境界検査・`pad8` パディング
 /// 経路の回帰）。staged 構成（32x32/bk16/wm2/wn2）を明示指定する。
+///
+/// **イシュー #797 との関係（協調ロードのベクトル化。8 要素グループ単位）**:
+/// この形状（m=100,n=50,k=72）は K 端・N 端の双方で `gemm_simdgroup_tiled_f16`
+/// のベクトル化協調ロード（`shaders/gemm.metal::gemm_simdgroup_tiled_f16`
+/// の `group_in_bounds` 判定）のスカラーフォールバック経路を通る:
+/// K 側は `k=72` が `bk=16` で割り切れず末尾タイルの `bk_eff=8` となり、
+/// 同タイル内の後半 8 要素グループ（`kk=8`）が `kk+8 <= bk_eff` を満たさず
+/// 要素単位フォールバックへ落ちる。N 側は `n=50` が `pad8` で 56 へ実効
+/// 拡張されるが `bn=32` の列グループ境界とは揃わないため、タイル端の
+/// 8 要素グループが `global_col+8 <= dims.n` を満たさずフォールバックへ
+/// 落ちる。数値契約（f32 累算・K 昇順・最後に 1 回だけ half 丸め）は
+/// ベクトル化の有無で不変なため、期待値・tolerance は変更しない。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn f16_tiled_parity_boundary_shape_non_multiple_of_tile() {
