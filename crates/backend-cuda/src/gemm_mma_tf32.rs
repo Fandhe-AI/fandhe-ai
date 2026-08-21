@@ -15,6 +15,13 @@
 //! （`pub(crate)`）を再利用する（f16 mma.sync 経路〈cc>=8.0〉と同一の
 //! `cp.async`/`ldmatrix` 命令セットが要求する下限のため、ゲート自体を
 //! 独立定義せず単一の真実源を共有する）。
+//!
+//! **#839 で凍結判断済み**: #838 の DGX Spark GB10 実機実測で数値一致
+//! 6 本中 4 本 FAIL（`m=16 n=8 k=8` で `fail_count=128/128`。TF32 精度差
+//! では説明不能な機能欠陥の疑い）となったため、#839 は本経路を不採用
+//! （凍結）と確定した。再評価条件（機能欠陥修正・数値一致 6 本 pass・
+//! `cuda_floor_bench` 採用条件充足）は
+//! `docs/perf/cuda-gemm-mma-tf32-ab.md` §5.1 参照。
 
 use std::sync::Arc;
 
@@ -38,7 +45,8 @@ const MMA_TF32_BLOCK_DIM: (u32, u32, u32) = (kernels_mma_tf32::MMA_TF32_BLOCK_TH
 /// **本番結線なし**（`kernels_mma_tf32.rs` 冒頭コメント「位置づけ・
 /// 非結線」参照）: 本経路は `ops.rs`／`gemm_auto.rs`／`gemm.rs` の
 /// ディスパッチから呼ばれない。テスト・A/B 比較（#802）専用の直接指定
-/// API として提供する。
+/// API として提供する。**#839 で凍結判断済み**（本ファイル冒頭 `//!`
+/// 参照）。
 pub struct CudaMmaTf32Gemm {
     stream: Arc<CudaStream>,
     mma_tf32: CudaFunction,
