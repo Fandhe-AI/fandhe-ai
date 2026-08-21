@@ -882,6 +882,24 @@ pub(crate) const SWIZZLE_LOG: u32 = 2;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) const SWIZZLE_ENABLED: bool = false;
 
+/// simdgroup 細粒度同期（イシュー #809）を本番 dispatch 経路
+/// （`crate::gemm::MetalGemm::pipeline_for_tile`/`pipeline_for_tile_f16`）と
+/// シェーダ側 `FINE_BARRIER_ENABLED` function constant で実際に有効化する
+/// かどうかのゲート（[`SWIZZLE_ENABLED`] と同型の設計判断）。
+///
+/// **既定は `false`（無効）**: `gemm_simdgroup_tiled` の staged 経路 kk ループへ
+/// `simdgroup_barrier(mem_flags::mem_none)` を挿入する構成の性能効果が
+/// `docs/perf/metal-gemm-fine-barrier-ab.md` の判断基準を満たすまで、本番経路
+/// はバリア非挿入のまま動作する。A/B 計測は実機セッションで
+/// `examples/gemm_fine_barrier_ab_bench.rs` を使う（この定数自体は変更せず、
+/// `MetalGemm::new_with_fine_barrier` へ明示的に `true` を渡した head
+/// インスタンスで計測する。#540 の運用方式〈#746 で `SWIZZLE_ENABLED` を
+/// instance フィールドへ格上げした判断〉を踏襲）。採用判断後に応じて
+/// （採用: 既定を `true` へ確定 / 不採用: 本機構一式を revert）このコメント
+/// ごと更新する。
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) const FINE_BARRIER_ENABLED: bool = false;
+
 /// `encode_dispatch_tiled`（`crate::gemm`）が呼ぶ、スウィズル後の dispatch
 /// grid（`(grid_width, grid_height)` = `(threadgroups.width,
 /// threadgroups.height)`）を計算する純粋関数。
@@ -2373,6 +2391,32 @@ mod tests {
             "SWIZZLE_ENABLED が true のままコミットされている疑いがあります。\
              実機未検証のスウィズルは本番既定 false に固定する契約です \
              （tile.rs 冒頭の SWIZZLE_ENABLED doc comment・PR #661 参照）。"
+        );
+    }
+
+    /// `FINE_BARRIER_ENABLED` の**コミット状態既定値**が `false` に固定
+    /// されていることをロックする独立テスト（`tiled_dispatch_grid_is_
+    /// identity_by_default`〈`SWIZZLE_ENABLED` 用〉と同じ設計判断: この
+    /// 定数は `crate::gemm::MetalGemm::new`（`target_os = "macos"` 限定）
+    /// からのみ参照されるため、Linux 上の `tile` モジュール単体では
+    /// 到達不能で dead_code 警告の対象になる。本テストは定数値を直接
+    /// assert することで dead_code を解消しつつ、A/B 計測セッションで
+    /// 一時的に `true` へ書き換えたまま誤コミットされた状態を通常 CI
+    /// （`cargo test`）で確実に検出する（`tile.rs` 冒頭
+    /// `FINE_BARRIER_ENABLED` doc comment参照）。
+    #[test]
+    fn fine_barrier_enabled_is_false_by_default() {
+        // `assert!(!FINE_BARRIER_ENABLED, ..)` は clippy
+        // `assertions_on_constants` に抵触する（値がコンパイル時定数のため。
+        // `SWIZZLE_ENABLED` 側は `tiled_dispatch_grid(..)` という消費側関数
+        // 呼び出しを経由することでこの lint を回避している。本定数には
+        // tile.rs 内に消費側関数が無いため、`std::hint::black_box` で
+        // 「コンパイル時に定数畳み込みされない値」へ変換して同じ回避を行う）。
+        assert!(
+            !std::hint::black_box(FINE_BARRIER_ENABLED),
+            "FINE_BARRIER_ENABLED が true のままコミットされている疑いがあります。\
+             実機未検証の simdgroup 細粒度同期は本番既定 false に固定する契約です \
+             （tile.rs 冒頭 FINE_BARRIER_ENABLED doc comment・イシュー #809 参照）。"
         );
     }
 

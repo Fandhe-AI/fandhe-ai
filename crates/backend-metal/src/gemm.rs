@@ -186,6 +186,15 @@ pub struct MetalGemm {
     /// `MetalGemm::new` は本番既定 `tile::SWIZZLE_ENABLED`（`false`）を渡すため
     /// 既定挙動は不変。
     swizzle_enabled: bool,
+    /// simdgroup 細粒度同期（イシュー #809）をこのインスタンスの
+    /// `SimdgroupTiled`（f32/f16 とも）経路（[`Self::pipeline_for_tile`]・
+    /// [`Self::pipeline_for_tile_f16`]）で有効化するかどうか。
+    /// `swizzle_enabled` と同じ設計判断（instance フィールド化により
+    /// base（`false`）/head（`true`）の 2 `MetalGemm` を同一プロセス内に
+    /// 構築して interleaved A/B 計測できるようにする）。`MetalGemm::new` は
+    /// 本番既定 `tile::FINE_BARRIER_ENABLED`（`false`）を渡すため既定挙動は
+    /// 不変。
+    fine_barrier_enabled: bool,
 }
 
 impl MetalGemm {
@@ -203,6 +212,24 @@ impl MetalGemm {
         Self::new_with_swizzle(ctx, tile::SWIZZLE_ENABLED)
     }
 
+    /// [`Self::new`] と同じ構築を行うが、simdgroup 細粒度同期
+    /// （イシュー #809）の有効・無効を明示的な `fine_barrier_enabled` 引数で
+    /// 指定する。ベンチ用途専用の入口: 同一プロセス内で base
+    /// （`fine_barrier_enabled=false`）/head（`fine_barrier_enabled=true`）
+    /// の 2 インスタンスを構築し、interleaved に A/B 計測する
+    /// （`docs/perf/metal-gemm-fine-barrier-ab.md`・
+    /// `crates/backend-metal/examples/gemm_fine_barrier_ab_bench.rs`）。
+    /// [`Self::new_with_swizzle`] と同型の設計（threadgroup ID スウィズルは
+    /// 本番既定 `tile::SWIZZLE_ENABLED` のまま据え置く）。本番経路
+    /// （[`Self::new`]）は常に `tile::FINE_BARRIER_ENABLED`（`false`）を渡す
+    /// ため、本関数の追加自体は既定挙動を変えない。
+    pub fn new_with_fine_barrier(
+        ctx: &MetalContext,
+        fine_barrier_enabled: bool,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_swizzle_and_fine_barrier(ctx, tile::SWIZZLE_ENABLED, fine_barrier_enabled)
+    }
+
     /// [`Self::new`] と同じ構築を行うが、threadgroup ID スウィズル
     /// （イシュー #540）の有効・無効を明示的な `swizzle_enabled` 引数で
     /// 指定する（イシュー #746）。ベンチ用途専用の入口: 同一プロセス内で
@@ -217,6 +244,22 @@ impl MetalGemm {
     /// 設計。本番経路（`Self::new`）は常に `tile::SWIZZLE_ENABLED`（`false`）
     /// を渡すため、本関数の追加自体は既定挙動を変えない。
     pub fn new_with_swizzle(ctx: &MetalContext, swizzle_enabled: bool) -> Result<Self, MetalError> {
+        Self::new_with_swizzle_and_fine_barrier(ctx, swizzle_enabled, tile::FINE_BARRIER_ENABLED)
+    }
+
+    /// [`Self::new_with_swizzle`]・[`Self::new_with_fine_barrier`] が共に
+    /// 委譲する共通実装（イシュー #809）。threadgroup ID スウィズル
+    /// （イシュー #540）と simdgroup 細粒度同期（イシュー #809）はいずれも
+    /// `crate::pipeline::make_pipeline_with_constants` の function constant
+    /// 特殊化（index 7／8）であり、A/B 計測の対象軸が異なるだけで構築手順
+    /// 自体は独立のため、両フラグを引数に持つ 1 実装へ集約する（各専用入口
+    /// が個別に構築ロジックを複製すると、パイプライン構築手順の変更時に
+    /// 複数箇所を同期させる必要が生じるため）。
+    fn new_with_swizzle_and_fine_barrier(
+        ctx: &MetalContext,
+        swizzle_enabled: bool,
+        fine_barrier_enabled: bool,
+    ) -> Result<Self, MetalError> {
         let library = pipeline::compile_gemm_library(ctx.device())?;
         let pipeline_naive =
             pipeline::make_pipeline(ctx.device(), &library, GemmVariant::Naive.function_name())?;
@@ -244,6 +287,7 @@ impl MetalGemm {
             tiled_cache: RefCell::new(HashMap::new()),
             tiled_f16_cache: RefCell::new(HashMap::new()),
             swizzle_enabled,
+            fine_barrier_enabled,
         })
     }
 
@@ -302,6 +346,7 @@ impl MetalGemm {
                 GemmVariant::SimdgroupTiled(candidate).function_name(),
                 candidate,
                 self.swizzle_enabled,
+                self.fine_barrier_enabled,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
@@ -373,6 +418,7 @@ impl MetalGemm {
                 "gemm_simdgroup_tiled_f16",
                 candidate,
                 self.swizzle_enabled,
+                self.fine_barrier_enabled,
             ) {
                 Ok(pipeline) => {
                     let actual_max_threads = pipeline.maxTotalThreadsPerThreadgroup() as u32;
