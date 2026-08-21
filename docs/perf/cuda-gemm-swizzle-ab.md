@@ -29,8 +29,14 @@ base_bit_exact_output`）を実施し、この結果と §4.1 の採用基準を
 下記「(b) 結線前必須の確認」4 項目は、結線後の PR HEAD（`52d71ae`）そのものに対する 2026-08-21 の
 GB10 実機マージ前検証（下記 §6.3）で **bit 一致（`new` 自身）・parity 非後退・結線後の
 `cuda_floor_bench` 実測（4096 = 53.9033 TFLOPS・≥50 TFLOPS 確認）の 3 項目を解消済み**。
-**レジスタスピル確認のみ、現行コードにレジスタ使用量ログの観測経路が存在しないため実行不能であり
-未解消として残る**（実行不能の理由と間接根拠は §6.3 を参照。観測経路の新設は別イシューで追跡する）。
+**レジスタスピル確認のみ、当時は現行コードにレジスタ使用量ログの観測経路が存在せず実行不能であり
+未解消として残っていた**（実行不能だった理由と間接根拠は §6.3 を参照）。**2026-08-21 追補（イシュー
+#782 codex-review P1 是正・本 PR #784）**: `crates/backend-cuda/examples/mma_ptx_dump.rs`
+（`internal-diagnostics` feature 限定。NVRTC で PTX を生成しファイルへダンプし、DGX Spark GB10 実機の
+`ptxas -arch=sm_121 -v` へオフラインで掛ける経路）を新設し、**観測経路自体はここで解消した**（§3
+「レジスタスピル確認」節参照）。ただし**実測（DGX Spark GB10 実機での `ptxas -v` 実行・spill
+stores/loads・register 数の base/head 比較）自体は本 PR 時点でもまだ未実施**であり、次回 GB10 実機
+セッションで実施し本ドキュメントへ結果を追記する必要がある。
 `CudaMmaGemm::new_with_size_conditional_swizzle`（`internal-diagnostics` feature 限定の実機検証専用
 入口）は `new` へ統合されたため廃止した。以下は結線判断に至るまでの経緯（#775 時点までの歴史的記録）
 として保持する。
@@ -205,15 +211,73 @@ cargo run -p backend-cuda --example gemm_mma_swizzle_bench --release --features 
 導出する追加の整数演算であり、コンパイラが定数畳み込みしきれない場合はレジスタ使用量が変わりうる。スピルが
 起きると効果測定が「改善なし」ではなく「性能後退」として現れるため、両者を切り分ける）:
 
+**2026-08-21 更新（イシュー #782 codex-review P1 是正）**: `nvrtc::compile_ptx` は NVRTC の `-Xptxas -v`
+相当（レジスタ使用量ログ）のオプションを渡さず、`kernels_mma.rs` のカーネルソース取得関数は crate 外から
+到達不能、JIT キャッシュ（`module_cache.rs`）もコンパイル成果物をディスクへ残さないため、上記コマンド例
+（NVRTC 側でログを直接得る）は実行不能だった。`crates/backend-cuda/examples/mma_ptx_dump.rs`
+（`internal-diagnostics` feature 限定）を新設し、**NVRTC で PTX を生成してファイルへダンプし、DGX Spark
+GB10 実機の CUDA 13.0 toolkit（`/usr/local/cuda-13.0/bin/ptxas`）へオフラインで掛ける**経路で置き換えた。
+
 ```sh
-# NVRTC の -Xptxas -v 相当（レジスタ使用量ログ）で base/head 間の register 数・
-# local memory 使用量に差がないことを確認してから TFLOPS を比較する
+# 1. base（mma_f16_source）・head（mma_f16_source_with_swizzle、動的選択幅）の
+#    2 種類の PTX をダンプする（出力先は既定で target/mma-ptx-dump。--out-dir で変更可）。
+cargo run -p backend-cuda --example mma_ptx_dump --release \
+    --features internal-diagnostics -- --out-dir /tmp/mma-ptx-dump
+
+# 標準出力に num_sms・動的 group_width・出力ファイルパス（mma_f16_base.ptx・
+# mma_f16_swizzle_g<width>.ptx）・2 種類の arch 値（nvrtc_arch=compute_XY。
+# NVRTC へ渡した値・ptxas_arch=sm_XY。次段の ptxas -arch にそのまま使う値）が
+# 表示される。標準出力末尾に次段のコマンド列がそのまま印字されるため、
+# 基本は転記不要（コピー＆ペーストでよい）。
+
+# 0. base/head の PTX が実際に異なることを確認する（remap が実際に
+#    ソースへ反映されているかの安全確認。同一ファイルを 2 回比較しても
+#    「差なし」が偽陽性になるため）。swizzle 側のファイル名
+#    mma_f16_swizzle_g<width>.ptx の <width> は動的選択幅（GB10・SM48 実測
+#    では g8。実際の値は標準出力の "swizzle: wrote ..." 行で確認する）。
+diff /tmp/mma-ptx-dump/mma_f16_base.ptx /tmp/mma-ptx-dump/mma_f16_swizzle_g8.ptx | head -20
+
+# 2. ptxas -v でレジスタ使用量ログを取得する（arch は上記標準出力の
+#    ptxas_arch 値をそのまま使う。cubin 出力先はスクラッチファイルを
+#    明示する——`-o /dev/null` は toolkit バージョンによってはレジスタ
+#    割り当て完了前に打ち切られうるため使わない。cubin 自体は破棄して
+#    よく、stderr の -v ログのみが目的）。
+/usr/local/cuda-13.0/bin/ptxas -arch=sm_121 -v \
+    /tmp/mma-ptx-dump/mma_f16_base.ptx -o /tmp/mma-ptx-dump/mma_f16_base.cubin
+/usr/local/cuda-13.0/bin/ptxas -arch=sm_121 -v \
+    /tmp/mma-ptx-dump/mma_f16_swizzle_g8.ptx -o /tmp/mma-ptx-dump/mma_f16_swizzle_g8.cubin
 ```
 
-**2026-08-19 実測での注記**: 上記のレジスタスピル確認・bit 一致テスト（`cpu_cuda_mma_parity`・
+`ptxas -v` の出力（stderr）は概ね次の形式で、1 行につき 1 カーネル（本カーネルは `extern "C" __global__
+void gemm_mma_f16` の 1 個のみ）のレジスタ・共有メモリ・定数メモリ使用量を報告する:
+
+```
+ptxas info    : Compiling entry function 'gemm_mma_f16' for 'sm_121'
+ptxas info    : Function properties for gemm_mma_f16
+    <N> bytes stack frame, <M> bytes spill stores, <M> bytes spill loads
+ptxas info    : Used <R> registers, <S> bytes smem, <C> bytes cmem[0]
+```
+
+読み方（base/head 間で以下を比較する）:
+
+- **`registers`**（`Used <R> registers`）: base と head で register 数が増えていないか確認する。remap の
+  追加整数演算がコンパイラによって定数畳み込みされていれば差は生じないはずである
+- **`spill stores`/`spill loads`**（`Function properties` 行の `bytes spill stores`/`bytes spill loads`）:
+  いずれも `0 bytes` であることを確認する。非 0 の場合はレジスタ割り当てがオーバーフローし local memory
+  （実質的にはグローバルメモリ経由の低速アクセス）へ退避している状態であり、TFLOPS 比較の「改善なし」が
+  スピルによる副作用なのか swizzle remap 自体の効果なのかを切り分けられなくなる
+- **`stack frame`**（`<N> bytes stack frame`）: spill と同様、0 であることが望ましい。非 0 の場合は
+  レジスタ圧の高さを示す間接指標になる
+
+base と head でこれらの値に差がない（特に spill stores/loads が両方とも 0 のまま）ことを確認してから、
+`gemm_mma_swizzle_bench`（TFLOPS 比較）の実測値を採否判断の根拠として使う。
+
+**2026-08-19 実測での注記（歴史的記録）**: 上記のレジスタスピル確認・bit 一致テスト（`cpu_cuda_mma_parity`・
 `mma_f16_swizzle_variant_matches_base_bit_exact_output` 等）の実施証跡はイシュー #739 本文に記載が無い
 ため、本ドキュメントでは実施済みと断定しない。「6. 実測結果」の TFLOPS 比較は確定済みだが、これら前提
-手順の実施は本番結線を担う #740 側で必須事項として引き継ぐ。
+手順の実施は本番結線を担う #740 側で必須事項として引き継ぐ。イシュー #782 の本番結線ゲート（§6.2）・
+マージ前検証（§6.3）時点でもレジスタスピル確認自体は依然として未実施のまま残っていた（観測経路が本更新
+まで存在しなかったため）。次回 GB10 実機セッションで上記手順を実施し、結果を本ドキュメントへ追記すること。
 
 ## 4. 判断基準
 

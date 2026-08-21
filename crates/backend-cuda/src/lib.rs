@@ -337,6 +337,20 @@ pub mod diagnostics {
         render_wmma_tf32_staged, render_wmma_tf32_staged_dyn, wmma_tf32_staged_dyn_smem_bytes,
     };
 
+    // イシュー #782 codex-review P1 是正（本番結線前必須のレジスタスピル
+    // 確認が未実施のまま残っていた不備）: `examples/mma_ptx_dump.rs`
+    // （NVRTC で PTX を生成しファイルへダンプし、DGX 実機の
+    // `ptxas -arch=sm_121 -v` へオフラインで掛けてレジスタ使用量・スピル
+    // を観測する診断バイナリ）がカーネルソース文字列を必要とする。
+    // `kernels_mma` は非公開 `mod` のため、`mma_f16_source`／
+    // `mma_f16_source_with_swizzle`（いずれも `kernels_mma.rs` 側では
+    // `pub fn` だが到達境界がない）を本モジュール経由でのみ crate 外部
+    // （example）へ公開する（上記関数群と同じ「非公開モジュールへの薄い
+    // 診断用ラッパー」方針）。本番経路（`gemm_mma.rs::CudaMmaGemm::new`・
+    // `new_with_swizzle`・`new_without_swizzle`）はこの再公開に依存せず
+    // `kernels_mma` を直接 `use` し続ける。
+    pub use kernels_mma::{mma_f16_source, mma_f16_source_with_swizzle};
+
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
     /// occupancy 概算専用。
