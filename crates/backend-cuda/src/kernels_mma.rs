@@ -2080,42 +2080,39 @@ pub fn mma_f16_source_with_warp_tiles(
     // 実際に現れる値（`MMA_WARPS_N`/`MMA_WARP_TILES_M`/`_N` 定数）から
     // 組み立てる（`mma_f16_source_with_swizzle` と同じ、定数変更に追従する
     // 方式）。出現回数 1 を検査してから置換する（fail-closed）。
-    let replace_anchor =
-        |src: String, anchor: &str, replacement: &str| -> Result<String, CudaError> {
-            let occurrences = src.matches(anchor).count();
-            if occurrences != 1 {
-                return Err(CudaError::InvalidKernelConfig {
-                    detail: format!(
-                        "mma_f16_source_with_warp_tiles: anchor {anchor:?} occurs \
-                         {occurrences} times in mma_f16_source() (expected exactly 1); the \
-                         warp-tile define replacement assumption no longer holds"
-                    ),
-                });
-            }
-            Ok(src.replacen(anchor, replacement, 1))
-        };
-
-    let source = replace_anchor(
+    // Bugbot 指摘是正（PR #831）: 以前は本関数内にローカルクロージャとして
+    // 同じ置換ロジックを重複定義していた。`mma_f16_source_with_block_tile`
+    // 向けに切り出した [`replace_source_anchor`] へ一本化する（同一契約が
+    // 2 箇所に存在する状態を解消）。
+    let source = replace_source_anchor(
         mma_f16_source().to_owned(),
         &format!("#define WARPS_N {MMA_WARPS_N}\n"),
         &format!("#define WARPS_N {warps_n}\n"),
+        "mma_f16_source_with_warp_tiles",
     )?;
-    let source = replace_anchor(
+    let source = replace_source_anchor(
         source,
         &format!("#define WARP_TILES_M {MMA_WARP_TILES_M}\n"),
         &format!("#define WARP_TILES_M {warp_tiles_m}\n"),
+        "mma_f16_source_with_warp_tiles",
     )?;
-    let source = replace_anchor(
+    let source = replace_source_anchor(
         source,
         &format!("#define WARP_TILES_N {MMA_WARP_TILES_N}\n"),
         &format!("#define WARP_TILES_N {warp_tiles_n}\n"),
+        "mma_f16_source_with_warp_tiles",
     )?;
 
     let source = if let Some(v) = launch_bounds {
         const SIG_ANCHOR: &str = "extern \"C\" __global__ void gemm_mma_f16(";
         let sig_replacement =
             format!("extern \"C\" __global__ void __launch_bounds__({v}) gemm_mma_f16(");
-        replace_anchor(source, SIG_ANCHOR, &sig_replacement)?
+        replace_source_anchor(
+            source,
+            SIG_ANCHOR,
+            &sig_replacement,
+            "mma_f16_source_with_warp_tiles",
+        )?
     } else {
         source
     };
@@ -2226,6 +2223,23 @@ pub fn mma_f16_source_with_block_tile(
         return Err(invalid(format!(
             "mma_f16_source_with_block_tile stages ({stages}) must be >= 2 (cp.async \
              software pipeline invariant; see mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain)"
+        )));
+    }
+    // codex-review P2 是正（PR #831）: ループ内固定即値
+    // `cp.async.wait_group "n"(STAGES - 2)` の `"n"` オペランドは
+    // `cp.async.wait_group` の即値オペランド（0〜7 の範囲。PTX ISA
+    // `cp.async.wait_group` 命令仕様）を要求する。`STAGES - 2` がこの範囲を
+    // 超える（`stages >= 10`）候補を受理すると、NVRTC/ptxas 側で不正な
+    // 即値としてコンパイル失敗する（後段での失敗であり fail-closed
+    // 契約違反）。ここで `stages <= 9`（`STAGES - 2 <= 7`）を検査し、
+    // 実機・NVRTC 到達前に机上で拒否する。
+    const MAX_WAIT_GROUP_IMMEDIATE: u32 = 7;
+    const MAX_STAGES: u32 = MAX_WAIT_GROUP_IMMEDIATE + 2;
+    if stages > MAX_STAGES {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile stages ({stages}) must be <= {MAX_STAGES} \
+             (cp.async.wait_group immediate operand STAGES - 2 must fit in \
+             [0, {MAX_WAIT_GROUP_IMMEDIATE}])"
         )));
     }
     // `validate_mma_kernel_config` と同じ kWarpGemmIterations 相当条件。
@@ -3939,6 +3953,31 @@ mod tests {
             err,
             crate::error::CudaError::InvalidKernelConfig { .. }
         ));
+    }
+
+    /// codex-review P2 是正（PR #831）: `cp.async.wait_group "n"(STAGES - 2)`
+    /// の即値オペランドは 0〜7 の範囲でなければならない（PTX ISA
+    /// `cp.async.wait_group` 命令仕様）ため、`stages` は 9 以下でなければ
+    /// ならない。`stages=10`（`STAGES - 2 = 8`）は即値範囲超過として
+    /// 拒否される必要がある。`optin_budget_bytes` は
+    /// `u32::MAX` を渡し、拒否理由が共有メモリ予算超過ではなく段数上限
+    /// であることを切り分ける。
+    #[test]
+    fn mma_f16_source_with_block_tile_rejects_stages_above_nine() {
+        let err = mma_f16_source_with_block_tile(64, 128, 32, 10, 2, 2, None, u32::MAX)
+            .expect_err("stages=10 must be rejected (cp.async.wait_group immediate overflow)");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    /// `stages=9`（`STAGES - 2 = 7`）は即値範囲の境界値であり受理される
+    /// ことを確認する（上限検証が過剰に厳しくないことの回帰防止）。
+    #[test]
+    fn mma_f16_source_with_block_tile_accepts_stages_at_nine() {
+        mma_f16_source_with_block_tile(64, 128, 32, 9, 2, 2, None, u32::MAX)
+            .expect("stages=9 is the maximum allowed by the cp.async.wait_group immediate range");
     }
 
     /// launch_bounds の値が導出スレッド数と食い違う場合は拒否される

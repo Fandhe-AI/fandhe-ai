@@ -419,12 +419,29 @@ fn main() {
     // イシュー #804: ブロックタイル拡大・ステージ数増候補（実装計画
     // Step 1 の候補表。`docs/perf/cuda-gemm-mma-block-tile-stages.md` §3.1）を
     // launch_bounds なし/あり（値=導出スレッド数）の 2 通りずつダンプする。
-    // `optin_budget_bytes` は GB10 実測の
-    // `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（`docs/perf/
-    // sm121-device-attributes.md` 出典。101,376B）を渡す。#803 の warp
+    // `optin_budget_bytes` は codex-review P1 是正（PR #831）: GB10 実測値
+    // （101,376B。`docs/perf/sm121-device-attributes.md` 出典）を直書きせず、
+    // 接続中の実デバイスから `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`
+    // （`device.rs::shared_memory_per_block_optin`）を都度取得して渡す
+    // （`num_sms` と同じ fail-closed 方針: 取得失敗時は既知の固定値へ
+    // フォールバックせずエラー終了する。`docs/perf/sm121-device-attributes.md`
+    // の教訓——他デバイスの実測値を GB10 の値と誤扱いした過去の不備
+    // 〈#758〉の再発防止）。これにより GB10 以外のデバイスで実行した場合も
+    // その実機の opt-in 上限で候補の受理・除外を判定できる。#803 の warp
     // タイル拡大ループ（上記）と同じ「不一致は生成関数自体が fail-closed で
     // 拒否する」契約に依拠する。
-    const OPTIN_BUDGET_BYTES: u32 = 101_376;
+    let optin_budget_bytes = match device.shared_memory_per_block_optin() {
+        Some(v) => v,
+        None => {
+            eprintln!(
+                "backend-cuda mma_ptx_dump: device.shared_memory_per_block_optin() returned \
+                 None; cannot derive the opt-in shared memory budget without a real device \
+                 attribute value."
+            );
+            std::process::exit(1);
+        }
+    };
+    println!("device: optin_budget_bytes={optin_budget_bytes}");
     for (label, bm, bn, bk, stages, warp_tiles_m, warp_tiles_n, threads) in [
         // ステージ増のみ（現行ブロックタイルのまま S3→S4。55,296B）。
         (
@@ -455,7 +472,7 @@ fn main() {
                 warp_tiles_m,
                 warp_tiles_n,
                 launch_bounds,
-                OPTIN_BUDGET_BYTES,
+                optin_budget_bytes,
             ) {
                 Ok(src) => src,
                 Err(e) => {
@@ -482,7 +499,7 @@ fn main() {
     // 待たずダンプ対象から外せる）。
     println!(
         "desk-excluded: bt128x256_s4 (128x256x32 S4) requires 108,544B, exceeding the \
-         {OPTIN_BUDGET_BYTES}B opt-in budget; not dumped"
+         {optin_budget_bytes}B opt-in budget; not dumped"
     );
 
     // 冒頭の `out_dir={}` は `key=value` 形式の情報表示行であり、下記の
