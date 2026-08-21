@@ -292,9 +292,21 @@ GEMM OSS 比較ギャップ改修ツリー（#785）Phase 2（#796〜#798）で�
 
 ### 実機計測手順（macOS・Apple Silicon。タイル化後経路を含む）
 
+計測対象は**確定 SHA を明示した `checkout`** で固定する（PR review 指摘）。ブランチ名
+（例: `perf/799-metal-f16-remeasurement`）への `checkout` は、マージ後にブランチが
+削除されれば手順が実行不能になり、ブランチが残存していても追加コミットで計測対象が
+動いてしまい再現性を損なう。マージ前に本ブランチで計測する場合は本 PR（#825）の
+HEAD コミット SHA を、マージ後は `origin/main` 上のマージコミット SHA を用いる。
+いずれの場合も **実際に checkout した SHA を計測結果表へ記録する**（下記「状態」節・
+実測完了時の記録項目「計測リビジョン」を参照）。
+
 ```sh
 git fetch origin
-git checkout perf/799-metal-f16-remeasurement   # イシュー #799 の実装ブランチ（origin/main〈f8d26c4〉以降から作成）
+
+# 本 PR（#825）の HEAD コミット SHA を明示して checkout する。
+# マージ後に再計測する場合は、代わりに origin/main 上のマージコミット SHA
+# （`git log origin/main --grep '#799'` 等で特定）を使う。
+git checkout d69130eb2d49a5360a37d7c53dd60947d35f44d9
 
 # 1. 数値一致の先行確認（3 系統。全 PASS が計測の前提）
 cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
