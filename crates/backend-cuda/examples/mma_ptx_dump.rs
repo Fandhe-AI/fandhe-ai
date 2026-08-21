@@ -45,12 +45,18 @@
 //! （`STAGES`）を組み合わせた候補（`docs/perf/
 //! cuda-gemm-mma-block-tile-stages.md` §3.1 候補表: ステージ増のみ
 //! `bt64x128_s4`・タイル拡大 `bt128x128_s3_wt2x4`・タイル拡大+
-//! `bt128x256_s3_wt4x4`）× `__launch_bounds__`（なし／導出スレッド数）を
+//! `bt128x256_s3_wt4x4`・タイル拡大+ステージ増 `bt128x256_s4`）×
+//! `__launch_bounds__`（なし／導出スレッド数）を
 //! `diagnostics::mma_f16_source_with_block_tile` でダンプする。全候補が
-//! 静的 48KiB を超え opt-in 動的共有メモリ（GB10 実測上限 101,376B）を
-//! 要求するため、生成ソースは `extern __shared__` 変種になる。
-//! `bt128x256_s4`（108,544B）は opt-in 上限超過のため机上除外し、除外根拠を
-//! 標準出力へ記録するのみでダンプしない。**本番カーネル定数
+//! 静的 48KiB を超え opt-in 動的共有メモリを要求するため、生成ソースは
+//! `extern __shared__` 変種になる。各候補の共有メモリ要求量は接続中の
+//! 実デバイスの opt-in 上限（`optin_budget_bytes`。下記）と比較し、
+//! 超過する候補のみ机上除外して除外根拠（実測要求量・実測上限）を
+//! 標準出力へ記録しダンプしない（codex-review P1 是正・PR #831:
+//! `bt128x256_s4`〈机上見積もり 108,544B〉を GB10 実測値〈101,376B〉との
+//! 比較で固定的に除外していたのを、実測上限との動的比較へ是正した。
+//! GB10 以外の opt-in 上限がより大きいデバイスでは本候補も他候補と
+//! 同様にダンプされる）。**本番カーネル定数
 //! （`MMA_BM`/`MMA_BN`/`MMA_STAGES`）は変更しない**（実機到達不能のため
 //! #804 実装セッション時点では本番結線を行わず、診断機構整備のみに留めた。
 //! `docs/cuda-tensor-core-design.md` §16 参照）。動的 SMEM 化を伴う生成
@@ -458,6 +464,16 @@ fn main() {
         ("bt128x128_s3_wt2x4", 128, 128, 32, 3, 2, 4, 512),
         // ブロックタイル拡大+（128x256・warp4x4。81,408B）。
         ("bt128x256_s3_wt4x4", 128, 256, 32, 3, 4, 4, 512),
+        // ブロックタイル拡大+ステージ増（128x256・S4・warp4x4。机上見積もり
+        // 108,544B。codex-review P1 是正（PR #831）: GB10 実測値
+        // 101,376B ではハードコードで固定除外していたが、実測上限
+        // （`optin_budget_bytes`。上記）以下のデバイスでは有効な候補
+        // のため固定除外せず、他候補と同じ経路（下記ループ）へ通す。
+        // 収まらない場合の判定は `mma_f16_source_with_block_tile` 側の
+        // 実測比較（`smem_bytes > optin_budget_bytes`）に委譲し、下記
+        // ループが opt-in 予算超過エラーのみ非致命的に扱ってログへ
+        // 実測値を出力する（#804 実装計画 Step 1 候補表参照）。
+        ("bt128x256_s4", 128, 256, 32, 4, 4, 4, 512),
     ] {
         for launch_bounds in [None, Some(threads)] {
             let file_label = match launch_bounds {
@@ -475,6 +491,17 @@ fn main() {
                 optin_budget_bytes,
             ) {
                 Ok(src) => src,
+                // opt-in 予算超過（`smem_bytes > optin_budget_bytes`。
+                // `kernels_mma.rs::mma_f16_source_with_block_tile` 参照）は
+                // 実測上限に対する正当な机上除外であり非致命的に扱う。
+                // それ以外の `InvalidKernelConfig`（引数検証エラー等）は
+                // 候補表・導出ロジックの不整合を示すため従来どおり fatal。
+                Err(CudaError::InvalidKernelConfig { detail })
+                    if detail.contains("exceeding the opt-in budget") =>
+                {
+                    println!("desk-excluded: {file_label} ({bm}x{bn}x{bk} S{stages}) {detail}");
+                    continue;
+                }
                 Err(e) => {
                     eprintln!(
                         "backend-cuda mma_ptx_dump: mma_f16_source_with_block_tile({bm}, {bn}, \
@@ -494,13 +521,6 @@ fn main() {
             ptxas_lines.push(format!("ptxas -arch={ptxas_arch} -v {path_q} -o {cubin_q}"));
         }
     }
-    // 128x256x32・S4 は机上見積もり 108,544B で opt-in 上限 101,376B を
-    // 超えるため机上除外する（#804 実装計画 Step 1 候補表参照。実機到達を
-    // 待たずダンプ対象から外せる）。
-    println!(
-        "desk-excluded: bt128x256_s4 (128x256x32 S4) requires 108,544B, exceeding the \
-         {optin_budget_bytes}B opt-in budget; not dumped"
-    );
 
     // 冒頭の `out_dir={}` は `key=value` 形式の情報表示行であり、下記の
     // `ptxas ...` コマンド行（オペレーターがそのまま端末へ貼り付けて実行する
