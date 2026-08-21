@@ -99,6 +99,13 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 無いため未実測のまま残す（推定値を書かない）。実機での `device_attributes_dump` 出力全文の回収により
 充足する。
 
+**`MULTIPROCESSOR_COUNT`（SM 数）48 の再確認（2026-08-20・イシュー #777）**: 上表の SM 数実測値 48 は、
+2026-08-20 の GB10 実機再計測（main `0bca711` 時点）でベンチ起動診断からも再確認された。
+`gemm_mma_swizzle_bench`・`cuda_floor_bench`（`crates/backend-cuda/examples/gemm_mma_swizzle_bench.rs`
+L117-120 等）は起動時に `device.multiprocessor_count()` を実行時取得してログ出力しており、両ベンチとも
+`num_sms=48` を出力した。本番経路（`gemm_auto`・`swizzle`）は同じ実行時取得値を動的に使うため、この
+再確認は実測値の裏付けであり値の変更・カーネル挙動の変更は伴わない。
+
 ## L1/L2/global 実効帯域（要実機記入）
 
 `device_attributes_dump.rs` の grid-stride コピーカーネル（読み出し N・書き込み N の f32 トラフィック、
@@ -167,7 +174,7 @@ DeepGEMM Hopper（SM90）定数と sm_121 実測値の対比表。**後続タス
 | SMEM 容量（`smem_capacity`） | 232448 bytes | DeepGEMM `csrc/jit_kernels/heuristics/sm90.hpp` 14 行付近 | `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`＝101376 bytes／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`＝102400 bytes（2026-08-19 実測。出典: イシュー #739） |
 | L2 帯域（`l2_bandwidth_per_cycle` 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 1237.62 GB/s（**device-wide**。DeepGEMM 側定数の単位基準〈device-wide か per-SM か〉は本ドキュメントでは未確認のため、転記時に両者の基準を揃えること。上記「単位に関する注意」参照。出典: イシュー #739） |
 | L1 帯域（per-SM per-cycle 相当） | Hopper 固有値（同ファイル 201-238 行付近） | 同上 | 未実測（スペック値＋出典欄参照。per-SM） |
-| SM 数 | Hopper 固有（機種依存） | — | 48（2026-08-19 実測。出典: イシュー #739） |
+| SM 数 | Hopper 固有（機種依存） | — | 48（2026-08-19 実測。出典: イシュー #739。2026-08-20 ベンチ起動診断の `num_sms=48` 出力で再確認。出典: イシュー #777） |
 
 **C-8（#521）注記**: 本表の sm_121 SMEM 容量は上記のとおり 2026-08-19 に実機実測済み
 （`MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`＝101376 bytes／`MAX_SHARED_MEMORY_PER_MULTIPROCESSOR`＝
