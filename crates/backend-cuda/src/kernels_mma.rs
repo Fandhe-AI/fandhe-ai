@@ -242,9 +242,11 @@ pub const MMA_STAGES: u32 = 3;
 /// warp タイル拡大候補（2x4／4x2／4x4）のレジスタ収支・`__launch_bounds__`
 /// 設計は #803（`mma_f16_source_with_warp_tiles`・
 /// `docs/perf/cuda-gemm-mma-warp-tile-register-budget.md`・
-/// `docs/cuda-tensor-core-design.md` §14）で検証済み。本番結線（この定数
-/// 自体の変更・`gemm_mma.rs` からの呼び出し）は #804 のスコープであり、
-/// 本定数は本イシューでは変更しない。
+/// `docs/cuda-tensor-core-design.md` §14）で診断機構と検証方針を整備済み。
+/// レジスタ収支の実機 `ptxas -v` 実測は未了（採用形状・
+/// `__launch_bounds__` 付与値は未確定。詳細は上記 perf ドキュメント §5）。
+/// 本番結線（この定数自体の変更・`gemm_mma.rs` からの呼び出し）は #804 の
+/// スコープであり、本定数は本イシューでは変更しない。
 pub const MMA_WARP_TILES_M: u32 = 2;
 pub const MMA_WARP_TILES_N: u32 = 2;
 
