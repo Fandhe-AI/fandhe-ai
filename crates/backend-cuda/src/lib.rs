@@ -376,6 +376,15 @@ pub mod diagnostics {
     // `kernels_mma` を直接 `use` し続ける。
     pub use kernels_mma::{mma_f16_source, mma_f16_source_with_swizzle};
 
+    // イシュー #803: warp タイル拡大候補（`docs/perf/
+    // cuda-gemm-mma-warp-tile-register-budget.md` §3.1 候補表）のレジスタ
+    // 収支を `examples/mma_ptx_dump.rs` から実機 `ptxas -v` で観測するための
+    // 再公開。`mma_f16_source`／`mma_f16_source_with_swizzle` と同じ「非公開
+    // モジュールへの薄い診断用ラッパー」方針（本モジュール冒頭コメント
+    // 参照）。本番経路（`gemm_mma.rs`）はこの再公開に依存しない（#804 の
+    // 本番結線まで `MMA_WARP_TILES_M`/`_N` 定数自体は無変更）。
+    pub use kernels_mma::mma_f16_source_with_warp_tiles;
+
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
     /// occupancy 概算専用。

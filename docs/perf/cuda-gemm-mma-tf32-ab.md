@@ -10,7 +10,8 @@ basic の 3 段選択）との A/B 実機ベンチ、(3) 本番結線の採否�
 
 - `CudaMmaTf32Gemm`（#801。PR #823 でコミット `09f9f98`）は **本番非結線**の直接指定 API であり、
   `ops.rs`／`gemm.rs`／`gemm_auto.rs` のディスパッチからは呼ばれない
-  （`docs/cuda-tensor-core-design.md` §14 冒頭「位置づけ」参照）。
+  （`docs/cuda-tensor-core-design.md` §15 冒頭「位置づけ」参照。#803 の main 追従マージで
+  §14 = warp タイル拡大設計、§15 = 本 TF32 経路へ節番号を振り直し済み）。
 - 同梱の実機テスト（`crates/backend-cuda/tests/gemm_mma_tf32.rs`〈`#[ignore]` 4 本〉・
   `tests/mma_tf32_vs_wmma_tf32_staged.rs`〈`#[ignore]` 2 本〉。計 6 本）は #801 実装セッション・
   #802 本セッションのいずれも DGX Spark GB10 実機へ到達できず**未実行**のまま。
@@ -39,7 +40,7 @@ basic の 3 段選択）との A/B 実機ベンチ、(3) 本番結線の採否�
    launch-only 計測境界）を追加し、`mma_tf32` 列を出力する。**`best_f32`（f32 候補下限の算出
    ロジック）には一切組み込まない**（実機実測・採否判断が出るまでは参考列に留める）。
 2. 本ドキュメントの新設（実測テンプレート・再開手順の記録）。
-3. `docs/cuda-tensor-core-design.md` §14.6 へ本状態への参照を追記。
+3. `docs/cuda-tensor-core-design.md` §15.6 へ本状態への参照を追記。
 
 **未実施のまま残る事項**（実機到達可能セッションへの引き継ぎ）:
 

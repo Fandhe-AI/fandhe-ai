@@ -202,7 +202,47 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
 - **実機実行**: **未了**（本イシューの実行環境ではローカル GPU が RTX 3060／compute capability 8.6 であり sm_121 実機ではないため、`docs/real-hardware-verification-env.md` が要求する `docs/real-hardware-verification-env.local.md`（実機ホスト名。`.gitignore` 対象・本 worktree には未配置）経由の DGX Spark GB10 接続を行っていない。9 節「実機検証プローブについて」と同じ理由で、到達できない実機の結果を推定で記載しない）。負対照実行（cc 8.6・本 worktree・2026-08-15）: `libnvrtc` 自体が本環境に未導入のため 4 ファイルとも `nvrtc_compile` 段階で `result=inconclusive`（`CudaError::NvrtcUnavailable`）として記録され、`panic` せず pass した。これは「非対応 arch での命令拒否」の実測ではなく「toolchain 不在」の実測に留まるが、4 ファイル分割後のプロセス分離・非ハング・構造化ログ出力という再設計後の実行経路自体が機能することは確認できた（一過性の負対照記録であり、恒久的な環境詳細としては記載しない）。
 - **B-3 への引き渡し（プローブ実行前の fail-closed 既定）**: 実機プローブが完了し `setmaxnreg` の使用可否が確定するまで、B-3（タイル拡大時のレジスタ予算設計）は**対称レジスタ予算前提**でタイル上限を設計する（`setmaxnreg` の使用を前提にした非対称配分設計を仮定しない）。**使用可と確定した場合**、B-3 は producer/consumer 間の dealloc/alloc 量の設計自由度を本節の実測結果（`probe_self_regs`・`execute` の `result`）で更新した内容から引き継ぐ。確定自体は実機実行後の作業であり、本節はその条件付き方針のみを記す。
 
-## 14. TF32 経路の生 `mma.sync`(m16n8k8) 移行（#801）
+## 14. mma_f16 warp タイル拡大設計と __launch_bounds__ 方針（#803）
+
+- **位置づけ**: 親イシュー #479（GEMM 性能改善ツリー）→ Phase 4 親 #789 配下の
+  #803「mma_f16 warp タイル拡大の設計とレジスタ収支検証」。現行の `mma_f16`
+  カーネル（`kernels_mma.rs`）は warp あたり `2x2` 命令タイル（warp タイル
+  `32x16`）で、CUTLASS 標準 WarpShape `64x64` の 1/8 面積に留まり、`ldmatrix`
+  フラグメントロード比が高く smem→レジスタ帯域が律速になりうる構造上の課題を
+  持つ（Phase 4 診断・`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）。
+- **本イシューは設計・事前検証のみ**を担う。**本番カーネル定数
+  （`MMA_WARP_TILES_M`/`_N`）は本イシューでは変更しない**。本番結線（採用形状
+  への定数変更・`__launch_bounds__` 実付与・実機ベンチ 5 回中央値）は後続 #804
+  （dependsOn: #803）のスコープであり、parity 非後退契約
+  （`tests/parity_nonregression.rs`）・バックエンド間数値一致テストへの影響は
+  ゼロに保たれる。
+- **診断機構**: `kernels_mma.rs::mma_f16_source_with_warp_tiles(warp_tiles_m,
+  warp_tiles_n, launch_bounds)`（`mma_f16_source_with_swizzle`〈#499・#782〉と
+  同型の、`mma_f16_source()` に対するアンカー完全一致置換方式。アンカー不在・
+  複数出現は `CudaError::InvalidKernelConfig` で fail-closed）を新設し、
+  `internal-diagnostics` feature 限定で `lib.rs::diagnostics` 経由・
+  `examples/mma_ptx_dump.rs` から到達可能にした。既定値
+  `(MMA_WARP_TILES_M, MMA_WARP_TILES_N, None)` は `mma_f16_source()` とバイト
+  一致することをユニットテストで固定しており、本番経路への影響がないことを
+  機械的に担保する。
+- **候補・実測結果・occupancy 導出**: `docs/perf/
+  cuda-gemm-mma-warp-tile-register-budget.md` を参照（候補表: 2x2 現行・2x4
+  案 A・4x2 案 B・4x4 案 C。loads/mma 比・机上レジスタ見積もり・実機 `ptxas -v`
+  実測表〈本イシュー時点では実行待ち〉）。
+- **`__launch_bounds__` 方針**: CUTLASS `device_kernel.h` 方式
+  （`__launch_bounds__(<ブロックスレッド数>)`。`minBlocksPerMultiprocessor` は
+  指定しない）を基本案とし、各候補を launch_bounds なし／あり（値 = 導出
+  スレッド数）の 2 通りで比較して付与要否・付与値を確定する方針とした
+  （`.maxntid` が PTX に載ることで ptxas のレジスタ割り当て前提が本番起動
+  構成と一致するため）。付与値は診断関数側で「導出スレッド数と完全一致」を
+  fail-closed で検査する（誤った `.maxntid` での計測を防ぐ）。実測に基づく
+  最終決定は上記 perf ドキュメントへ記録する。
+- **#804 への引き渡し事項**: 採用形状（spill 0 かつ loads/mma 比最小の候補）・
+  `__launch_bounds__` 付与値と付与要否・swizzle 条件
+  （`mma_f16_source_with_swizzle`）や `gemm_auto.rs` の warp 刻み定数
+  （`MMA_WARP_M`/`_N` を候補列挙の刻みとして参照する箇所）への波及有無。
+
+## 15. TF32 経路の生 `mma.sync`(m16n8k8) 移行（#801）
 
 - **位置づけ**: `crates/backend-cuda/src/kernels_mma_tf32.rs`／
   `gemm_mma_tf32.rs`（`CudaMmaTf32Gemm`）。既存 TF32 本番経路
@@ -214,7 +254,7 @@ TASK-11.2（#66）でディスパッチ規則を設計・実装する際、本�
   回帰の実機確認・parity 非後退契約・本番採否判断は後続イシュー #802 の
   スコープ。
 
-### 14.1 A フラグメント: ldmatrix の b16 流用と象限順序の再導出
+### 15.1 A フラグメント: ldmatrix の b16 流用と象限順序の再導出
 
 TF32 の A タイル（16 行 x 8 列・f32 4B/要素）をビット等価な 16 行 x 16
 列の b16（2B/要素）タイルとして再解釈すると、
@@ -240,7 +280,7 @@ BL/TR の位置が入れ替わったまま出力されるため誤った演算�
 （`kernels_mma_tf32.rs::LDSM_A_FRAG` 定義部・冒頭コメント「命令選定」
 参照）。
 
-### 14.2 B フラグメント: 素の共有メモリロード
+### 15.2 B フラグメント: 素の共有メモリロード
 
 `ldmatrix .trans` は b16 粒度の転置命令であり 32bit 要素（tf32）を 2 個
 の b16 に分断してしまうため使用できない。PTX ISA の m16n8k8 tf32 B
@@ -250,7 +290,7 @@ row-major の共有メモリから `bs_tile[stage][k0+tid_in_group][col+group_id
 で直接レジスタへロードする（`LDS_B_FRAG` マクロ。`.trans` ldmatrix は
 不使用）。
 
-### 14.3 TF32 丸めの継承（#800）
+### 15.3 TF32 丸めの継承（#800）
 
 `mma.sync` の tf32 オペランドは明示変換済みビットを要求し、cp.async は
 生バイトコピーのため転送「中」に丸めを挟めない。`kernels_wmma_opt.rs::
@@ -262,7 +302,7 @@ CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（#800）と同一構造・同一
 で NVRTC 構文検証実績のある経路を優先し、インライン PTX
 `cvt.rna.tf32.f32` は採用しなかった）。
 
-### 14.4 初期タイル定数
+### 15.4 初期タイル定数
 
 既存 TF32 opt-staged（`WMMA_TF32_STAGED_BLOCK_M/_N` = 64x64・K タイル
 16・3 ステージ）と同一のブロック形状を採用し、#802 の A/B 比較を同条件に
@@ -272,7 +312,7 @@ CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（#800）と同一構造・同一
 （静的共有メモリ 28,416B）。Phase 4（タイル拡大）の起点として、これらの
 定数の変更検討・実測はイシュー #802 以降へ引き継ぐ。
 
-### 14.5 検証状態（未検証の明記）
+### 15.5 検証状態（未検証の明記）
 
 本実装セッションの環境（CUDA driver あり・NVRTC なし）では上記カーネル
 ソースは NVRTC による構文検証を一度も通過していない（`kernels_mma.rs`
@@ -282,12 +322,12 @@ gemm_mma_tf32.rs`・`tests/mma_tf32_vs_wmma_tf32_staged.rs`）は実装・同梱
 未実行のまま残す。実機での最初の実行が構文検証を兼ね、数値一致の実機
 確認は #802 のスコープとして引き継ぐ。
 
-### 14.6 数値一致・parity・実機ベンチの確定状況（#802・2026-08-21 実装セッション）
+### 15.6 数値一致・parity・実機ベンチの確定状況（#802・2026-08-21 実装セッション）
 
 イシュー #802（本節冒頭「数値一致回帰の実機確認・parity 非後退契約・本番採否判断は後続イシュー
 #802 のスコープ」の引き継ぎ先）の実装セッションも、#792／#821 と同型の理由で DGX Spark GB10
 実機へ到達できなかった（実行環境には対象外 GPU〈NVIDIA GeForce RTX 3060。sm_121 ではない〉のみ
-存在し、`docs/real-hardware-verification-env.local.md` も未配置）。したがって §14.5 の「未検証の
+存在し、`docs/real-hardware-verification-env.local.md` も未配置）。したがって §15.5 の「未検証の
 明記」は本セッション終了時点でも解消していない: `#[ignore]` 実機テスト（`tests/gemm_mma_tf32.rs`・
 `tests/mma_tf32_vs_wmma_tf32_staged.rs`）は未実行のまま、`docs/perf/cuda-parity-baseline.md` への
 ベースライン追記もなし、本番結線（`gemm.rs::run_wmma_tf32` への `mma_tf32` 追加）も未実施。
