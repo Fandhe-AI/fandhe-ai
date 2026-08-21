@@ -282,6 +282,22 @@ gemm_mma_tf32.rs`・`tests/mma_tf32_vs_wmma_tf32_staged.rs`）は実装・同梱
 未実行のまま残す。実機での最初の実行が構文検証を兼ね、数値一致の実機
 確認は #802 のスコープとして引き継ぐ。
 
+### 14.6 数値一致・parity・実機ベンチの確定状況（#802・2026-08-21 実装セッション）
+
+イシュー #802（本節冒頭「数値一致回帰の実機確認・parity 非後退契約・本番採否判断は後続イシュー
+#802 のスコープ」の引き継ぎ先）の実装セッションも、#792／#821 と同型の理由で DGX Spark GB10
+実機へ到達できなかった（実行環境には対象外 GPU〈NVIDIA GeForce RTX 3060。sm_121 ではない〉のみ
+存在し、`docs/real-hardware-verification-env.local.md` も未配置）。したがって §14.5 の「未検証の
+明記」は本セッション終了時点でも解消していない: `#[ignore]` 実機テスト（`tests/gemm_mma_tf32.rs`・
+`tests/mma_tf32_vs_wmma_tf32_staged.rs`）は未実行のまま、`docs/perf/cuda-parity-baseline.md` への
+ベースライン追記もなし、本番結線（`gemm.rs::run_wmma_tf32` への `mma_tf32` 追加）も未実施。
+
+本セッションで実施したのは、実機到達可能セッションで即座に A/B 計測へ進めるための準備のみ:
+`crates/backend-cuda/examples/cuda_floor_bench.rs` に `measure_mma_tf32`（既存 4 経路と同一の
+launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比較用**参考列**として出力する
+（f32 候補下限の算出ロジック `best_f32` には組み込まない）。詳細な再開手順・記録テンプレは
+`docs/perf/cuda-gemm-mma-tf32-ab.md` を参照。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）

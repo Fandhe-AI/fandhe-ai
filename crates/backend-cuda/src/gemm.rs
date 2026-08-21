@@ -1104,6 +1104,22 @@ impl CudaGemm {
             || self.wmma_tf32_opt_available()
     }
 
+    /// 指定した `(n, k)` の形状で `run_wmma_tf32` が実際に **staged 経路**
+    /// を選ぶかを判定する（[`Self::wmma_tf32_routed_path_available`] は
+    /// staged／opt いずれかへのルーティングを束ねて判定するのに対し、本
+    /// 関数は staged 経路そのものが選ばれたかに限定する）。
+    ///
+    /// `mma_tf32` vs `wmma_tf32` の A/B 比較（`cuda_floor_bench.rs`
+    /// `measure_wmma_tf32` 呼び出し元。イシュー #802・
+    /// `docs/perf/cuda-gemm-mma-tf32-ab.md` §5 採否条件）は比較対象を
+    /// 明示的に `wmma_tf32`（staged）としているため、staged 以外
+    /// （opt／basic）へフォールバックした実測値を staged との A/B 結果と
+    /// して扱うと採否判断を誤らせる（codex-review 指摘。PR #826）。呼び
+    /// 出し側はこの関数で staged 選択を確認したうえで比率を出力する。
+    pub fn wmma_tf32_routed_path_is_staged(&self, n: u32, k: u32) -> bool {
+        self.wmma_tf32_staged_available() && wmma_tf32_staged_alignment_ok(n, k)
+    }
+
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],
