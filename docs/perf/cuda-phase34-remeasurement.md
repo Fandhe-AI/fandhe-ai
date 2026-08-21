@@ -67,11 +67,23 @@ cuda-gemm-mma-tf32-block-tile.md` §7「実測表（実行待ち）」・§8「�
 のベースライン以下）を確認すること。既存 tolerance 定数・REQ-2 統一複合判定（相対誤差 1e-3 未満
 または絶対誤差 1e-5 未満）は本イシューでは変更しない。
 
+**以下は CUDA 実機ノード（`$CUDA_NODE`）上で実行するコマンドであり、転送元（Mac 等）でローカル実行
+してはならない**（`docs/real-hardware-verification-env.md` §2.2「環境変数・PATH の制約」・§4.1「基本
+形式」が要求するリモートシェル形式。非ログイン shell は `cargo`・`nvcc` を PATH に含まないため、
+`ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && env PATH=... cargo ...'` の形式で実行する。§3「実機
+到達性ゲート」で `docs/real-hardware-verification-env.local.md` から取得した `CUDA_NODE` を使う）:
+
 ```sh
 # debug プロファイル
-cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+  cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
 # release プロファイル（debug と同一結果であることを確認する。両プロファイル実行が必須）
-cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+  cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
 ```
 
 `--test-threads=1` は必須: 同一バイナリ内 `#[test]` の並列実行は GPU 時間分割により計測値を約 5 倍
@@ -94,15 +106,25 @@ cuda-parity-baseline.md` §3・§8.5）であり、`docs/perf/cuda-optimized-rem
 `cuda_floor_bench` と同数の 5 run を計測し、size×dtype ごとに run 間中央値を採る
 （`docs/perf/cuda-optimized-remeasurement.md`「PyTorch 参照値の再集計」節が確立した方式を踏襲）。
 
+**このコマンドも CUDA 実機ノード（`$CUDA_NODE`）上で実行する**（§4 と同じ理由。torch は system には
+未導入のため `docs/real-hardware-verification-env.md` §5.1 が指す実ホスト上の既存 venv を読み取り
+利用のみで使う。venv の実パスは `docs/real-hardware-verification-env.local.md` を参照し、下記
+`$TORCH_VENV_PYTHON` へ設定する）:
+
 ```sh
 # `<size>` はプレースホルダーであり、そのまま貼り付けると POSIX shell が入力リダイレクトと
 # 誤解釈し `size: No such file or directory` で停止する。SIZE 変数へ実値を入れて渡すこと。
+# TORCH_VENV_PYTHON はノード側の既存 venv の python バイナリへの絶対パス
+# （docs/real-hardware-verification-env.local.md 参照。読み取り利用のみ・追加/更新はしない）。
 for RUN in 1 2 3 4 5; do
   for SIZE in 512 1024 2048 4096; do
-    python3 docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py "$SIZE" 20 20
+    ssh "$CUDA_NODE" "cd ~/work/rust-ai-library-run && \
+      $TORCH_VENV_PYTHON docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py $SIZE 20 20" \
+      | tee "pytorch_size${SIZE}_run${RUN}.log"
   done
 done
-# ↑ run ごとに出力を保存し、size×dtype ごとに 5 run の median_tflops を独立に中央値化する。
+# ↑ run ごとに出力を保存し（run×size ごとに ssh を分けることで「実行ごとに出力保存」を素直に守る）、
+#   size×dtype ごとに 5 run の median_tflops を独立に中央値化する。
 ```
 
 ## 6. `cuda_floor_bench` 実測手順（env override・5 回反復）
@@ -117,33 +139,61 @@ git fetch origin
 #   c) 上記 SHA 時点より後の実装状態を計測対象としたい場合: 最新 main を対象とする契約とし、
 #      その旨（「実測時点の最新 main、コミット <SHA>」）を「状態」節に明記する
 
-# 1. 到達性・GPU 排他性の確認（docs/real-hardware-verification-env.local.md から CUDA_NODE を取得）
+# 1. 到達性・GPU 排他性の確認（計測前。docs/real-hardware-verification-env.local.md から
+#    CUDA_NODE を取得。docs/real-hardware-verification-env.md §6.1 が要求する
+#    compute-apps／utilization.gpu の両方を確認する）
 ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" \
   'hostname && nvidia-smi --query-gpu=name,utilization.gpu --format=csv,noheader'
+ssh "$CUDA_NODE" \
+  'nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; \
+   nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'
+# ↑ 出力を計測開始前の占有状況としてメモしておく（ステップ 6 の計測後確認との突合に使う）。
+#   計測対象ジョブ以外の compute process が既に存在する場合は計測を開始しない。
 
 # 2. docs/real-hardware-verification-env.md §3 の rsync 手順でコードを転送し、.rev-stamp でリビジョン一致を確認する
+#    （転送後は ~/work/rust-ai-library-run がノード側の作業ディレクトリになる。以下の全コマンドは
+#    このディレクトリを cd 先とする ssh リモート実行で統一する。§2.2「環境変数・PATH の制約」参照）
 
 # 3. 数値一致確認を性能値採用より先に行う（§4 参照。debug/release 両プロファイルとも実行し同一結果を確認する）
-cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
-cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+  cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+  cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
 
-# 4. PyTorch 参照値を計 5 回計測する（§5 参照）
+# 4. PyTorch 参照値を計 5 回計測する（§5 参照。同じくノード上で ssh リモート実行する）
 
 # 5. env override へ size×dtype ごとの PyTorch 5 run 中央値を設定し cuda_floor_bench を 5 回反復実行する
-#    以下の <...> はプレースホルダー。実測後は各行の値を実測値（クォート付き文字列）へ置換してから実行する
-#    （引用符で囲むことで '<' が POSIX shell の入力リダイレクトと解釈されるのを防いでいる）
-export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 5 run 再実行 (warmup=20 iters=20) の run 間中央値, <実施日>, 同一 GB10 個体"
-export CUDA_FLOOR_BENCH_PYTORCH_F32_512="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F32_1024="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F32_2048="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F32_4096="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F16_512="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F16_1024="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F16_2048="<5 run 中央値>"
-export CUDA_FLOOR_BENCH_PYTORCH_F16_4096="<5 run 中央値>"
-cargo run -p backend-cuda --example cuda_floor_bench --release --locked
+#    （ノード上で実行する。以下の <...> はプレースホルダー。実測後は各行の値を実測値
+#    （クォート付き文字列）へ置換してから実行する。引用符で囲むことで '<' が POSIX shell の
+#    入力リダイレクトと解釈されるのを防いでいる）
+ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
+  env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
+      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 5 run 再実行 (warmup=20 iters=20) の run 間中央値, <実施日>, 同一 GB10 個体" \
+      CUDA_FLOOR_BENCH_PYTORCH_F32_512="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F32_1024="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F32_2048="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F32_4096="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F16_512="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F16_1024="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F16_2048="<5 run 中央値>" \
+      CUDA_FLOOR_BENCH_PYTORCH_F16_4096="<5 run 中央値>" \
+  cargo run -p backend-cuda --example cuda_floor_bench --release --locked'
 # ↑ を 5 回反復実行し、経路×形状のセルごとに run1〜run5 の median_tflops を独立に中央値化した
 #   ものを代表値として下表へ機械転記する（stdout からの転記のみ。後付け調整は行わない）
+
+# 6. 計測後の GPU 排他性再確認（docs/real-hardware-verification-env.md §6.1「計測前後の占有状況確認」）
+ssh "$CUDA_NODE" \
+  'nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader; \
+   nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader'
+# ↑ をステップ 1 の計測前確認と突合する。計測対象ジョブ以外の compute process が計測の途中で
+#   新たに現れていた場合、またはステップ 1 との整合が取れない場合は当該 5 run を破棄し、
+#   ステップ 1 からやり直す（§6.1「他プロセスが計測中に現れたランは破棄して取り直す」）。
+#   破棄の有無・判断根拠は「状態」節（§11）へ記録する。
 ```
 
 実機個体名は公開ドキュメントでは `<cuda-node>` にマスクする（`docs/git-history-exposure-decision.md`
@@ -235,7 +285,9 @@ F-5（#577・人間承認タスク）と同様の人間承認プロセスへ引�
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`: warning 0 件で green
 - `cargo test --workspace`（実機依存は `#[ignore]` 分離済みのため CI 可）: 全クレート green
   （集計: `test result: ok` 全件・failed 0 件。ignored はいずれも実機依存分離分。日付: 2026-08-21・
-  対象コミット: 本 PR の直前コミット `53c9d9f`）
+  対象コミット: `53c9d9f`。以降のコミット（本ドキュメントへの codex-review 指摘対応を含む）は
+  本ドキュメントの手順記述のみの変更でありコード非影響のため、`53c9d9f` 時点の実行結果をそのまま
+  引き継ぐ。コード変更を伴うコミットが加わった場合は本節の実行結果・対象コミットを再取得すること）
 
 本節はコード変更を伴わないドキュメントのみの PR におけるコミット前チェックの実施記録であり、CUDA
 実機での性能確定計測（§11「状態」参照）とは別物である。
