@@ -36,7 +36,7 @@ cuda-gemm-mma-tf32-block-tile.md` §7「実測表（実行待ち）」・§8「�
   決定的シード `0xC0FFEE`）も無変更
 - **`internal-diagnostics` feature は既定ビルドに混入しない**: `crates/backend-cuda/Cargo.toml` の
   `[features]` に `internal-diagnostics = []` が定義され、`default` feature リストには含まれない
-  （`[package]` 節に `default-features` 指定なし＝既定で無効）。`#804`／`#806` が追加した診断専用
+  （`[features]` の `default` に含まれないため既定で無効）。`#804`／`#806` が追加した診断専用
   example（`mma_ptx_dump` 系。`required-features = ["internal-diagnostics"]`）は
   `cargo build --example cuda_floor_bench`（feature 指定なし）では到達しないことを確認した
 - 結論: **本イシューでの `cuda_floor_bench.rs` への追加変更は不要**（#571 が下した同判断を踏襲）
