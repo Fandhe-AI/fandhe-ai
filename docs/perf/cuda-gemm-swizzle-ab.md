@@ -229,7 +229,14 @@ cargo run -p backend-cuda --example mma_ptx_dump --release \
 # mma_f16_swizzle_g<width>.ptx）・2 種類の arch 値（nvrtc_arch=compute_XY。
 # NVRTC へ渡した値・ptxas_arch=sm_XY。次段の ptxas -arch にそのまま使う値）が
 # 表示される。標準出力末尾に次段のコマンド列がそのまま印字されるため、
-# 基本は転記不要（コピー＆ペーストでよい）。
+# 基本は転記不要（コピー＆ペーストでよい。パスは貼り付け実行時の
+# シェルインジェクション対策としてシングルクォートで囲んで表示される）。
+#
+# 出力ファイルは新規作成のみ許可する（symlink 経由の任意ファイル破壊を
+# 防ぐため、既存ファイルは上書きしない。codex-review P0 是正・PR #784
+# イシュー #782）。同じ --out-dir で再実行する場合は、実行前に
+# 既存の .ptx ファイルを削除しておくこと（例:
+# rm -f /tmp/mma-ptx-dump/mma_f16_base.ptx /tmp/mma-ptx-dump/mma_f16_swizzle_g*.ptx）。
 
 # 0. base/head の PTX が実際に異なることを確認する（remap が実際に
 #    ソースへ反映されているかの安全確認。同一ファイルを 2 回比較しても

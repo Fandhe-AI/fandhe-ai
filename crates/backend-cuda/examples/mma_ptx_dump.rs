@@ -117,6 +117,15 @@ fn sm_arch_string(device: &CudaDevice) -> String {
 /// 同一の引数形式で NVRTC を呼ぶ必要がある。`sm_arch_string` の `sm_XY`
 /// 形式を誤って渡すと、レジスタ確認の対象が本番と異なるコンパイル結果に
 /// なってしまう）。
+/// `out_path` に PTX テキストを書き出す。codex-review P0 是正
+/// （PR #784 イシュー #782）: `std::fs::write` は対象が symlink でも無条件
+/// truncate するため、`--out-dir` 配下に攻撃者が仕込んだ symlink（例:
+/// `mma_f16_base.ptx -> /etc/passwd`）経由でリンク先の任意ファイルを
+/// 破壊できてしまう。`OpenOptions::create_new(true)` は対象パスが
+/// 既存（symlink を含む）の場合に `AlreadyExists` で失敗し新規作成しか
+/// 許さないため、既存ファイル・symlink への書き込み（上書き）を構造的に
+/// 防げる。ファイル名は呼び出し元で固定名（`mma_f16_base.ptx` 等）のみを
+/// 渡す契約を維持し、外部入力から合成しない。
 #[cfg(feature = "internal-diagnostics")]
 fn dump_ptx(
     src: &str,
@@ -124,9 +133,30 @@ fn dump_ptx(
     out_path: &std::path::Path,
     label: &str,
 ) -> Result<(), String> {
+    use std::io::Write as _;
+
     let ptx = compile_ptx(src, nvrtc_arch)
         .map_err(|e| format!("{label}: NVRTC コンパイルに失敗しました ({e})"))?;
-    std::fs::write(out_path, ptx.to_src()).map_err(|e| {
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out_path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!(
+                    "{label}: {} は既に存在します（symlink の可能性があるため上書きしません）。\
+                     削除してから再実行してください。",
+                    out_path.display()
+                )
+            } else {
+                format!(
+                    "{label}: {} への書き出しに失敗しました ({e})",
+                    out_path.display()
+                )
+            }
+        })?;
+    file.write_all(ptx.to_src().as_bytes()).map_err(|e| {
         format!(
             "{label}: {} への書き出しに失敗しました ({e})",
             out_path.display()
@@ -137,6 +167,26 @@ fn dump_ptx(
         out_path.display()
     );
     Ok(())
+}
+
+/// シェルの単一引用符でパスをクォートする（貼り付け実行時の任意コマンド
+/// 実行対策。codex-review P0 是正・PR #784 イシュー #782）。`--out-dir`
+/// はオペレーター入力であり空白・`;`・`$()` 等を含みうるため、手順出力
+/// （operator がそのまま端末に貼り付ける想定の `ptxas` コマンド例）へ
+/// 未クォートで埋め込むとコマンドインジェクションが成立する。POSIX
+/// シェルの単一引用符内では `'` 自身のみがエスケープを要し、
+/// `'\''`（引用符を閉じる→エスケープした `'` を挟む→再度開く）で
+/// 表現するのが標準的な手法。手動でのシェル往復確認済み（`/tmp/a b`・
+/// `/tmp/x;id`・`/tmp/$(id)`・`/tmp/it's` の 4 ケースで `sh -c "printf %s
+/// <quoted>"` が原文をバイト単位で再現することを確認。パスの実体は
+/// `PathBuf::display()`（呼び出し元）由来のため、非 UTF-8 パスでは
+/// `display()` 自体が置換文字 `U+FFFD` を挿入しうる点に注意（不正な
+/// バイト列を安全に丸めるだけで、`'` を合成することはないためクォート
+/// 安全性には影響しないが、生成されるコマンドが本来のファイルを指さなく
+/// なりうる）。
+#[cfg(feature = "internal-diagnostics")]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 #[cfg(feature = "internal-diagnostics")]
@@ -171,6 +221,40 @@ fn main() {
             out_dir.display()
         );
         std::process::exit(1);
+    }
+
+    // codex-review P0 是正（PR #784 イシュー #782）: `--out-dir` が
+    // symlink（またはその途中要素が symlink）の場合でも `create_dir_all`
+    // はリンク先を辿って成功しうる。`canonicalize` でシンボリックリンクを
+    // 解決した実パスへ確定させ、かつ解決先が実在するディレクトリで
+    // あることを検査してから、以降のファイル書き出しに使う（この
+    // 実パスに対して `dump_ptx` の `create_new` が効くようにする）。
+    let out_dir = match std::fs::canonicalize(&out_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "backend-cuda mma_ptx_dump: failed to canonicalize output directory {} ({e})",
+                out_dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    match out_dir.metadata() {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            eprintln!(
+                "backend-cuda mma_ptx_dump: output path {} resolves to a non-directory",
+                out_dir.display()
+            );
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "backend-cuda mma_ptx_dump: failed to stat output directory {} ({e})",
+                out_dir.display()
+            );
+            std::process::exit(1);
+        }
     }
 
     // NVRTC へ渡す arch は `device.arch()`（`compute_XY` 形式）をそのまま
@@ -237,15 +321,28 @@ fn main() {
     // 完了前に打ち切られる可能性があるため使わず、スクラッチファイルへ
     // cubin を出力させる（advisor 指摘の是正。cubin 自体は破棄してよく
     // `-v` の stderr ログのみが目的）。
+    //
+    // codex-review P0 是正（PR #784 イシュー #782）: `base`/`swizzle` は
+    // `--out-dir`（オペレーター入力）由来のパスを含むため、貼り付け実行を
+    // 想定した手順文字列へ未クォートで埋め込むとシェルインジェクションが
+    // 成立しうる（空白・`;`・`$()` を含むパス等）。`shell_quote` で各パスを
+    // 単一引用符クォートしたうえで埋め込む。
+    let base_q = shell_quote(&base_path.display().to_string());
+    let base_cubin_q = shell_quote(&format!("{}.cubin", base_path.display()));
+    let swizzle_q = shell_quote(&swizzle_path.display().to_string());
+    let swizzle_cubin_q = shell_quote(&format!("{}.cubin", swizzle_path.display()));
+    // 冒頭の `out_dir={}` は `key=value` 形式の情報表示行であり、下記 2 行の
+    // `ptxas ...` コマンド行（オペレーターがそのまま端末へ貼り付けて実行する
+    // 想定）とは異なり、シェルコマンドとして貼り付けられる文脈ではない
+    // ため未クォートのままとする（クォートすると `out_dir='...'` のように
+    // 値として読みづらくなるだけで安全性向上に寄与しない）。
     println!(
         "done. out_dir={} nvrtc_arch={nvrtc_arch} ptxas_arch={ptxas_arch} \
          group_width={group_width}. Run the following to inspect register/spill counts \
          (docs/perf/cuda-gemm-swizzle-ab.md §3):\n\
-         \x20   ptxas -arch={ptxas_arch} -v {base} -o {base}.cubin\n\
-         \x20   ptxas -arch={ptxas_arch} -v {swizzle} -o {swizzle}.cubin",
+         \x20   ptxas -arch={ptxas_arch} -v {base_q} -o {base_cubin_q}\n\
+         \x20   ptxas -arch={ptxas_arch} -v {swizzle_q} -o {swizzle_cubin_q}",
         out_dir.display(),
-        base = base_path.display(),
-        swizzle = swizzle_path.display(),
     );
 }
 
