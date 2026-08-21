@@ -455,6 +455,67 @@ pub mod diagnostics {
     // 本イシュー時点で実機到達不能のため無変更のまま）。
     pub use kernels_mma_tf32::{mma_tf32_source, mma_tf32_source_with_block_tile};
 
+    // イシュー #841: #806（PR #832）が整備した TF32 生 `mma.sync` ブロック
+    // タイル拡大・ステージ数増候補ソース生成（上記
+    // `mma_tf32_source_with_block_tile`）を実際に NVRTC コンパイル・起動
+    // して実機 A/B 計測するためのランナー型・レイアウト導出ヘルパーの
+    // 再公開。`examples/gemm_mma_tf32_block_tile_bench.rs`（診断専用 A/B
+    // ランナー）専用。`CompiledMmaF16BlockTileKernel`/
+    // `RenderedMmaF16BlockTileKernel`/`render_mma_f16_block_tile`（#840）と
+    // 同じ「非公開モジュールへの薄い診断用ラッパー」方針。本番経路
+    // （`gemm_mma_tf32.rs::CudaMmaTf32Gemm`）はこの再公開・型に一切依存
+    // しない（`MMA_TF32_BM`/`MMA_TF32_BN`/`MMA_TF32_STAGES` 等の本番定数は
+    // 本イシューで無変更。`CudaMmaTf32Gemm` 自体が #839 で不採用〈凍結〉
+    // 判断済み）。
+    pub use kernels_mma_tf32::{
+        CompiledMmaTf32BlockTileKernel, MmaTf32BlockTileLayout, RenderedMmaTf32BlockTileKernel,
+        render_mma_tf32_block_tile,
+    };
+
+    // derive_mma_tf32_block_tile_layout は非公開関数（`kernels_mma_tf32.rs`
+    // 内部のレイアウト導出ロジックの単一の真実源）だが、`examples/
+    // gemm_mma_tf32_block_tile_bench.rs` は候補表定義・opt-in 予算比較・
+    // 除外ログ出力に導出結果（`MmaTf32BlockTileLayout`）を必要とするため、
+    // 薄いラッパー関数として再公開する（`mma_f16_block_tile_layout`
+    // （#840）と同型）。
+    pub fn mma_tf32_block_tile_layout(
+        bm: u32,
+        bn: u32,
+        bk: u32,
+        stages: u32,
+        warp_tiles_m: u32,
+        warp_tiles_n: u32,
+    ) -> Result<MmaTf32BlockTileLayout, crate::error::CudaError> {
+        kernels_mma_tf32::derive_mma_tf32_block_tile_layout(
+            bm,
+            bn,
+            bk,
+            stages,
+            warp_tiles_m,
+            warp_tiles_n,
+        )
+    }
+
+    // イシュー #841: `examples/gemm_mma_tf32_block_tile_bench.rs` の比較
+    // 基準行（現行本番構成）が `threads`/`smem_bytes`/`needs_dynamic_smem`
+    // をハードコードしたリテラルではなく、候補行と同じ「単一の真実源」
+    // （`derive_mma_tf32_block_tile_layout`）経由で取得できるようにする
+    // ための薄いラッパー（`mma_f16_block_tile_layout_production`（#840）と
+    // 同型）。`MMA_TF32_STAGES`・パディング定数（`MMA_TF32_A_PAD`/`_B_PAD`）
+    // が将来変更された際にベンチ CSV・`docs/perf/*.md` 転記値が自動追従
+    // するようにする。
+    pub fn mma_tf32_block_tile_layout_production()
+    -> Result<MmaTf32BlockTileLayout, crate::error::CudaError> {
+        kernels_mma_tf32::derive_mma_tf32_block_tile_layout(
+            kernels_mma_tf32::MMA_TF32_BM,
+            kernels_mma_tf32::MMA_TF32_BN,
+            kernels_mma_tf32::MMA_TF32_BK,
+            kernels_mma_tf32::MMA_TF32_STAGES,
+            kernels_mma_tf32::MMA_TF32_WARP_TILES_M,
+            kernels_mma_tf32::MMA_TF32_WARP_TILES_N,
+        )
+    }
+
     /// `mma_tf32`（TF32 `mma.sync` 経路）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/mma_tf32_ptx_dump.rs` の occupancy
     /// 概算専用（`mma_f16_block_tile` と同じ「非公開モジュールへの薄い
