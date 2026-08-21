@@ -139,6 +139,24 @@ impl CudaMmaTf32Gemm {
     /// （`a_dev`/`b_dev`/`c_dev`）を行う（`gemm_mma.rs::CudaMmaGemm::
     /// launch_f16` ドキュメンテーションコメント「PR #349 codex-review
     /// 指摘 P0」と同一方針）。
+    ///
+    /// no-op 形状（`m == 0 || n == 0 || k == 0`）は `run_tf32` と同じ
+    /// 契約で処理する（PR #823 codex-review P1 是正）: `run_tf32` は
+    /// no-op 判定をカーネル起動前に済ませ `launch_tf32` を呼ばずに
+    /// return するため、`run_tf32` 経由では本関数までゼロ形状が到達
+    /// しない。しかし本関数は「本経路固有の 3 検証（整列・グリッド・K
+    /// 上限）が no-op 判定より後に来る」ことを保証する唯一の場所ではなく、
+    /// `run_tf32` を経由しない直接呼び出し（テスト・ベンチマーク。構造体
+    /// ドキュメンテーションコメント「本番結線なし」参照）にも safe な
+    /// 公開 API として同一契約を守る必要がある。`m == 0 || n == 0` は
+    /// `mma_tf32_launch_config` がゼロの grid 次元（`div_ceil(0, BM/BN)
+    /// == 0`）を生成し空グリッド起動（no-op）になるため検証・起動を
+    /// 経ずに成功として早期 return する。`k == 0` は m,n > 0 のまま
+    /// カーネルを起動すると K ループが一度も走らず `c_dev` の既存内容
+    /// （呼び出し元がゼロ初期化していない場合は未定義）を GEMM の結果
+    /// （ゼロ行列）へ更新しないため、`memset_zeros` で明示的にゼロ化
+    /// してから return する（`run_tf32` の `vec![0.0f32; ...]` 一括
+    /// API 版と同じ契約をデバイス常駐バッファ版で再現する）。
     pub fn launch_tf32(
         &self,
         a_dev: &CudaSlice<f32>,
@@ -149,10 +167,19 @@ impl CudaMmaTf32Gemm {
         k: u32,
     ) -> Result<(), CudaError> {
         validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
+
+        if m == 0 || n == 0 {
+            return Ok(());
+        }
+        if k == 0 {
+            self.stream.memset_zeros(c_dev)?;
+            return Ok(());
+        }
+
         validate_mma_tf32_alignment(n, k)?;
         validate_mma_tf32_grid_bounds(m)?;
         validate_mma_tf32_k_bound(k)?;
-        crate::gemm::validate_output_len(c_dev.len(), m, n)?;
 
         let cfg = mma_tf32_launch_config(m, n);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);

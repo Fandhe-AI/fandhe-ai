@@ -147,6 +147,55 @@ fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
     assert_eq!(gemm.run_tf32(&[], &[], 4, 4, 0).unwrap(), vec![0.0f32; 16]);
 }
 
+/// `launch_tf32`（直接起動 safe API）も `run_tf32` と同じ no-op 形状契約
+/// （PR #823 codex-review P1 是正）を守ることを実機で確認する:
+/// `m==0 || n==0` はカーネル起動せず成功、`k==0` は `c_dev` を明示的に
+/// ゼロ化してから成功する（`gemm_mma_tf32.rs::launch_tf32` ドキュメン
+/// テーションコメント参照）。`run_tf32` は内部で `launch_tf32` を
+/// 呼ばずに no-op を処理するため、この契約は `launch_tf32` を直接
+/// 呼ばない限り検証できない。
+#[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須。実装セッション中は実機未到達のため未実行"]
+fn launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm =
+        CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
+
+    // m==0: グリッド次元がゼロになり起動自体が no-op。c_dev は 0 要素。
+    let (a_dev, b_dev) = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
+    let mut c_dev = gemm
+        .alloc_output_f32(0, 4)
+        .expect("alloc_output_f32 must succeed");
+    gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, 0, 4, 4)
+        .expect("launch_tf32 must succeed as a no-op for m==0");
+    assert_eq!(gemm.download_f32(&c_dev).unwrap(), Vec::<f32>::new());
+
+    // n==0: 同様。
+    let (a_dev, b_dev) = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
+    let mut c_dev = gemm
+        .alloc_output_f32(4, 0)
+        .expect("alloc_output_f32 must succeed");
+    gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, 4, 0, 4)
+        .expect("launch_tf32 must succeed as a no-op for n==0");
+    assert_eq!(gemm.download_f32(&c_dev).unwrap(), Vec::<f32>::new());
+
+    // k==0: カーネルを起動せず c_dev を明示的にゼロ化する。非ゼロで
+    // 初期化した c_dev を渡し、呼び出し前の残存内容が反映されないこと
+    // （GEMM 契約: K ループが空でも結果はゼロ行列）を確認する。
+    let (a_dev, b_dev) = gemm.upload_f32(&[], &[]).expect("upload_f32 must succeed");
+    // `upload_f32` は A・B いずれも `clone_htod` を呼ぶだけの汎用 H2D
+    // 転送であるため（`gemm_mma_tf32.rs::upload_f32` 参照）、c 用の
+    // 事前非ゼロデータ転送にも同じ経路を流用してよい。第 1 戻り値
+    // （本来は a_dev 用）を「呼び出し前に非ゼロ値が入った c_dev」として
+    // 使う。
+    let (mut c_dev, _unused) = gemm
+        .upload_f32(&[9.0f32; 16], &[])
+        .expect("uploading a pre-populated c buffer must succeed");
+    gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, 4, 4, 0)
+        .expect("launch_tf32 must succeed and zero-fill c_dev for k==0");
+    assert_eq!(gemm.download_f32(&c_dev).unwrap(), vec![0.0f32; 16]);
+}
+
 /// 起動前検証（fail-closed）の実機非依存契約テスト: 整列非対応形状
 /// （`n`/`k` が 4 の倍数でない）を `run_tf32` が `InvalidShape` で拒否
 /// することを確認する。`CudaMmaTf32Gemm::new` の成功可否に依存しない
