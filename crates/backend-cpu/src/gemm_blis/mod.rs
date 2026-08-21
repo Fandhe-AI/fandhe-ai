@@ -576,6 +576,23 @@ fn gemm_blis_bias_act_parallel_thresholded(
     bias: Option<&[f32]>,
     act: Activation,
 ) -> Result<(), GemmError> {
+    // 本番側 `gemm_blis_bias_act_parallel` と同じ順序で検証してから
+    // n == 0 の早期 return へ入る（`validate_dims`／bias 長／activation
+    // 検証を経ずに Ok(()) を返すと、不正な n == 0 入力が本来のエラーを
+    // 素通りしてしまう。PR #830 Cursor Bugbot 指摘）。
+    validate_dims(a, b, c, m, n, k)?;
+    if let Some(bias) = bias
+        && bias.len() != n
+    {
+        return Err(GemmError::BiasLenMismatch {
+            expected: n,
+            actual: bias.len(),
+        });
+    }
+    if !matches!(act, Activation::None | Activation::Relu) {
+        return Err(GemmError::UnsupportedActivation);
+    }
+
     // n == 0 は `gemm_blis_bias_act_parallel` と同じ理由（本関数冒頭の
     // ドキュメンテーションコメント参照）で shape として合法な no-op。
     // `m.saturating_mul(n).saturating_mul(k)` は n == 0 のとき常に
@@ -1566,6 +1583,39 @@ mod tests {
                 Activation::Relu,
             )
             .is_ok()
+        );
+    }
+
+    /// `n == 0` の早期 return が検証（`validate_dims`／bias 長／
+    /// activation）より前に実行されて不正入力を素通りしないことを確認する
+    /// （PR #830 Cursor Bugbot 指摘）。`a` の長さが `m * k` と不一致な
+    /// n == 0 形状は、本番側 `gemm_blis_bias_act_parallel` と同じく
+    /// `GemmError::ALenMismatch` を返すはず。
+    #[test]
+    fn gemm_blis_bias_act_parallel_thresholded_validates_before_zero_n_early_return() {
+        let a = vec![1.0f32; 3]; // m * k == 4 を期待するが 3 要素しかない不正形状
+        let b: Vec<f32> = vec![];
+        let mut c: Vec<f32> = vec![];
+        let bias: [f32; 0] = [];
+        let result = gemm_blis_bias_act_parallel_thresholded(
+            &a,
+            &b,
+            &mut c,
+            2,
+            0,
+            2,
+            Some(&bias),
+            Activation::Relu,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(GemmError::ALenMismatch {
+                    expected: 4,
+                    actual: 3
+                })
+            ),
+            "n == 0 でも validate_dims の検証は先に実行されるはず: {result:?}"
         );
     }
 
