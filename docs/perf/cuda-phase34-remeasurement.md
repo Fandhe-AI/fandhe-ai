@@ -60,12 +60,15 @@ cuda-gemm-mma-tf32-block-tile.md` §7「実測表（実行待ち）」・§8「�
 または絶対誤差 1e-5 未満）は本イシューでは変更しない。
 
 ```sh
+# debug プロファイル
 cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
+# release プロファイル（debug と同一結果であることを確認する。両プロファイル実行が必須）
+cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1
 ```
 
 `--test-threads=1` は必須: 同一バイナリ内 `#[test]` の並列実行は GPU 時間分割により計測値を約 5 倍
 歪ませた実績がある（`docs/perf/cuda-floor-remeasurement.md`「tiled f32 @4096 のバイナリ間乖離の突合
-結果」節）。debug/release 両プロファイルで実行し同一結果を確認すること。
+結果」節）。debug/release 両プロファイルで実行し同一結果を確認すること（上記 2 コマンドとも実行する）。
 
 **既知の前提**: `wmma_tf32`・`mma_f16` は #389 §5.3 が記録した parity 恒常 fail 対象である
 （TF32 経路 5 件・f16 K=4096 tail 3 件。REQ-2 閾値改定は #186〈spec リポジトリ側対応待ち〉へ引き渡し
@@ -112,8 +115,9 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" \
 
 # 2. docs/real-hardware-verification-env.md §3 の rsync 手順でコードを転送し、.rev-stamp でリビジョン一致を確認する
 
-# 3. 数値一致確認を性能値採用より先に行う（§4 参照）
+# 3. 数値一致確認を性能値採用より先に行う（§4 参照。debug/release 両プロファイルとも実行し同一結果を確認する）
 cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
+cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1
 
 # 4. PyTorch 参照値を計 5 回計測する（§5 参照）
 
