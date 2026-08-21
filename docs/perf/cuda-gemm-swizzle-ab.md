@@ -35,6 +35,14 @@ GB10 実機マージ前検証（下記 §6.3）で **bit 一致（`new` 自身�
 入口）は `new` へ統合されたため廃止した。以下は結線判断に至るまでの経緯（#775 時点までの歴史的記録）
 として保持する。
 
+**現行の適用条件（PR #784 codex-review P1 是正・2026-08-21 現在）**: `swizzle.rs::should_apply_swizzle`
+は「総ブロックタイル数 `num_m_blocks * num_n_blocks >= 2048`」**かつ**「M/N 各軸のブロック数が実測点
+M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_M_BLOCKS=64`/`SWIZZLE_APPLY_MIN_N_BLOCKS=32`）」の両方を満たす
+場合のみ `true` を返す。当初（結線時点）は総タイル数のみで判定しており、M=32768, N=512 のような未検証の
+非正方形形状にも適用してしまう不備があった（PR #784 codex-review 指摘）ため、軸別ガードを追加して実測
+承認範囲（正方形形状 M=N=K=4096）を超える適用を防いだ（詳細は `swizzle.rs::should_apply_swizzle` ドキュ
+メンテーションコメント参照）。
+
 ### 2.0 以下は #775 時点までの経緯（結線待ち時の記録。歴史的記録として保持）
 
 **出典（承認記録の一次確認）**: イシュー #775 は GitHub アカウント `aLiz-Nancy`（本リポジトリのユーザー
@@ -81,8 +89,12 @@ parity_nonregression.rs tests/common/parity_baseline` の無差分確認）は�
 ブロックタイル数 `num_m_blocks * num_n_blocks >= 2048`。4096 実測点〈2048 タイル〉以上のみ適用し、2048
 実測点〈512 タイル〉未満へは外挿しない保守的閾値。**この閾値は正方形形状〈M=N=K〉の実測点のみに基づき、
 非正方形形状〈例: M=32768, N=512〉への外挿は未検証**——`swizzle.rs::SWIZZLE_APPLY_TILE_COUNT_THRESHOLD`
-ドキュメンテーションコメント参照。PR レビュー指摘・Medium）が、`gemm_mma.rs::CudaMmaGemm::launch_f16` が
-呼び出し形状ごとに base／swizzle 変種のいずれを起動するかを判定する。
+ドキュメンテーションコメント参照。PR レビュー指摘・Medium。**PR #784 codex-review P1 是正で解消**:
+総タイル数閾値に加えて M/N 各軸のブロック数がそれぞれ実測点 M=N=K=4096 相当以上
+〈`SWIZZLE_APPLY_MIN_M_BLOCKS=64`/`SWIZZLE_APPLY_MIN_N_BLOCKS=32`〉であることを要求する軸別ガードを
+追加し、M=32768, N=512 のような未検証の非正方形形状は base 経路へフォールバックするよう制限した）が、
+`gemm_mma.rs::CudaMmaGemm::launch_f16` が呼び出し形状ごとに base／swizzle 変種のいずれを起動するかを
+判定する。
 `new_with_size_conditional_swizzle`（opt-in・実機検証専用入口）は `device.multiprocessor_count()` の実測に
 成功すれば動的選択幅で swizzle 変種を追加コンパイルし（失敗時は安全側で base のみを保持）、`launch_f16`
 がこの閾値でディスパッチする。個別呼び出しでの適用有無は `CudaMmaGemm::swizzle_applies(m, n)` で観測できる。
@@ -315,7 +327,10 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
   使用量に有意差がないことを確認する）
 - 非正方形形状（縦長・横長。M≠N）での A/B 計測（PR レビュー指摘・Medium。上記実測はいずれも正方形形状
   のみで、`should_apply_swizzle` の閾値はアスペクト比を考慮しないため非正方形形状への外挿は未検証。
-  `swizzle.rs::SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` ドキュメンテーションコメント参照）
+  `swizzle.rs::SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` ドキュメンテーションコメント参照。**PR #784 で
+  非正方形形状は軸別ガード〈`SWIZZLE_APPLY_MIN_M_BLOCKS`/`SWIZZLE_APPLY_MIN_N_BLOCKS`〉により適用対象外
+  へ制限済みのため、この A/B 計測は「適用範囲を広げる場合の将来の検証項目」であり結線の前提条件では
+  なくなった**）
 - `cargo run -p backend-cuda --release --example cuda_floor_bench`（5 回中央値。実機検証・`new` 既定切替
   後に、起動時診断が swizzle 適用状態を正しく報告することを確認する）
 
@@ -361,8 +376,14 @@ dynamic_group_width=8`（SM=48 → 動的選択幅 g8 の再現）を出力し�
 `CudaMmaGemm::new_with_size_conditional_swizzle`（`internal-diagnostics` feature 限定の実機検証専用
 入口）は `new` と重複するため廃止した。
 
-**未検証のまま残る事項（§2.0「非正方形形状」節参照）**: 非正方形形状（縦長・横長）での A/B 計測は
-本ゲートでも実施していない。今後の性能調査で必要になった場合に別途対応する。
+**未検証のため適用対象外にガード済み（§2.0「非正方形形状」節参照）**: 非正方形形状（縦長・横長）での
+A/B 計測は本ゲートでも実施していない。ただし PR #784 codex-review P1 是正により
+`should_apply_swizzle` は M/N 各軸のブロック数が実測点 M=N=K=4096 相当以上であることも要求する
+軸別ガードを追加したため、未検証の非正方形形状（例: M=32768, N=512）は swizzle 変種へディスパッチ
+されず base 経路へフォールバックする契約になった。したがって本節の「未検証」は「未承認の外挿を本番へ
+含めてしまうリスク」ではなく「適用範囲を拡張する余地が残っている」という意味に変わった。今後
+非正方形形状の A/B 計測で改善を確認できた場合は、軸別ガードをアスペクト比考慮の判定式へ改訂すること
+を検討する。
 
 ### 6.3 2026-08-21 マージ前検証（イシュー #782・結線後 PR HEAD `52d71ae` 自身に対する実機確認）
 

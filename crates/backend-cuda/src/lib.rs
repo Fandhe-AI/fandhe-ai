@@ -158,6 +158,13 @@
 //! （≥50 TFLOPS 確認）・レジスタスピル確認は #782 の受け入れ条件
 //! チェックリストで「マージ後確認可」と明記された未解消のマージ後確認
 //! 事項として残る**（`docs/perf/cuda-gemm-swizzle-ab.md` §6.2 参照）。
+//! PR #784 codex-review P1 是正で、[`swizzle::should_apply_swizzle`] は
+//! 上記の総タイル数閾値に加えて M/N 各軸のブロック数が実測点
+//! M=N=K=4096 相当以上（`swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/
+//! `SWIZZLE_APPLY_MIN_N_BLOCKS`）であることも要求するよう改訂した。実測
+//! 承認範囲が正方形形状（M=N=K）に限られるため、非正方形形状（例:
+//! M=32768, N=512）への外挿を base 経路へフォールバックさせる（`swizzle.rs`
+//! ドキュメンテーションコメント参照）。
 //!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・

@@ -542,8 +542,10 @@ fn main() {
     // 返し（fail-soft: SM 数取得失敗・変種コンパイル失敗時は安全側で
     // `None` に縮退する。`gemm_mma.rs::CudaMmaGemm::new` doc comment
     // 参照）、各呼び出し形状での実際の適用有無は `swizzle_applies(m, n)`
-    // で確認できる（総ブロックタイル数 `>= 2048` の形状のみ適用。
-    // `swizzle::should_apply_swizzle` 参照）。
+    // で確認できる（総ブロックタイル数 `>= 2048` かつ M/N 各軸のブロック数
+    // が実測点 M=N=K=4096 相当以上の形状のみ適用。PR #784 codex-review P1
+    // 是正で軸別ガードを追加し、未検証の非正方形形状への外挿を base 経路へ
+    // フォールバックさせる。`swizzle::should_apply_swizzle` 参照）。
     if let Some(g) = &mma_gemm {
         // 実測値をそのまま出力する（固定文字列だと `new` の内部実装が
         // 変わった場合に出力だけは追従せず実態と乖離するおそれがあるため、

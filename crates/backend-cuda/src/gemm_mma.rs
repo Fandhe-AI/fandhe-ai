@@ -35,6 +35,26 @@ const MIN_COMPUTE_CAPABILITY_MAJOR: i32 = 8;
 /// `kernels_mma::MMA_BLOCK_THREADS` に 1:1 対応するブロック次元。
 const MMA_BLOCK_DIM: (u32, u32, u32) = (kernels_mma::MMA_BLOCK_THREADS, 1, 1);
 
+/// `swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/`SWIZZLE_APPLY_MIN_N_BLOCKS`
+/// （PR #784 codex-review P1 是正で追加した軸別ガード。実測点 M=N=K=4096 を
+/// `kernels_mma::MMA_BM`/`MMA_BN` で割った値として導出）が、`swizzle.rs`
+/// 側で `kernels_mma` に依存しない独立定数として焼き込まれている値
+/// （`swizzle.rs::SWIZZLE_APPLY_MIN_M_BLOCKS` ドキュメンテーションコメント
+/// 「本モジュールが `kernels_mma` に依存しない参照実装として独立性を保つ」
+/// 参照）と、この本番結線側から見た再導出値（`4096 / MMA_BM`・
+/// `4096 / MMA_BN`）とで乖離していないことをコンパイル時に検証する
+/// （`kernels_mma.rs:352`/`:387` の `const` アサートと同型の設計時契約
+/// 検査。GPU 実機到達可否に依存せず通常ビルドで常時検査されるため、
+/// `MMA_BM`/`MMA_BN` を将来変更した際に軸別ガードの更新漏れを fail-closed
+/// で検知する）。
+const _: () = assert!(
+    crate::swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS == 4096 / kernels_mma::MMA_BM
+        && crate::swizzle::SWIZZLE_APPLY_MIN_N_BLOCKS == 4096 / kernels_mma::MMA_BN,
+    "swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS/SWIZZLE_APPLY_MIN_N_BLOCKS が \
+     kernels_mma::MMA_BM/MMA_BN から再導出した実測点 M=N=K=4096 相当の \
+     軸別ブロック数と乖離しています（swizzle.rs を更新すること）"
+);
+
 /// `cp.async.cg.shared.global` の 16 バイト転送粒度が要求するグローバル側
 /// 整列制約を検証する（`kernels_mma.rs` 冒頭コメント「整列制約」参照）。
 ///
@@ -232,9 +252,13 @@ impl CudaMmaGemm {
     ///
     /// `launch_f16` は呼び出し形状ごとに [`crate::swizzle::
     /// should_apply_swizzle`]（総ブロックタイル数
-    /// `num_m_blocks * num_n_blocks >= 2048`。イシュー #775 のユーザー
-    /// 起票の受け入れ条件〈4096 級のみ適用・512〜2048 は劣化 5% 以内〉を
-    /// 承認記録として採用。`docs/perf/cuda-gemm-swizzle-ab.md` §4）で
+    /// `num_m_blocks * num_n_blocks >= 2048` **かつ** M/N 各軸のブロック数が
+    /// 実測点 M=N=K=4096 級以上〈`swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/
+    /// `SWIZZLE_APPLY_MIN_N_BLOCKS`〉。イシュー #775 のユーザー起票の受け入れ
+    /// 条件〈4096 級のみ適用・512〜2048 は劣化 5% 以内〉を承認記録として
+    /// 採用し、PR #784 codex-review P1 是正で軸別ガードを追加して未検証の
+    /// 非正方形形状〈例: M=32768, N=512〉への外挿を防いだ。
+    /// `docs/perf/cuda-gemm-swizzle-ab.md` §4）で
     /// `mma_f16`（base）／`mma_f16_swizzle`（変種）のいずれを起動するか
     /// 判定する。個別呼び出しで実際に適用されたかは
     /// [`swizzle_applies`](Self::swizzle_applies) で確認できる。SM 数は
