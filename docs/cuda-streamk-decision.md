@@ -65,12 +65,17 @@ grid_x = ceil(N / MMA_BN) = ceil(4096 / 128) = 32
 grid_y = ceil(M / MMA_BM) = ceil(4096 / 64)  = 64
 grid   = grid_x * grid_y = 2048 blocks
 
-waves  = grid / スロット数 = 2048 / 96 ≈ 21.33 waves
-端数 wave の比率 ≈ 0.33 / 21.33 ≈ 1.5%
+waves      = grid / スロット数 = 2048 / 96 ≈ 21.33 waves（理想 waves。整数境界を無視した理論値）
+実効 waves = ceil(waves) = 22 waves（実際に GPU が消化するラウンド数。端数 wave も 1 wave 分の
+             レイテンシを要するため切り上げになる）
+quantization loss ＝ (実効 waves − 理想 waves) / 実効 waves = (22 − 21.33) / 22 ≈ 3.0%
 ```
 
-M=N=K=4096（および 2048・1024 系列も同様に grid が数百〜数千 blocks となり波数は 2 桁）では端数 wave
-が支配する比率は数 % 未満に留まり、StreamK の主効果（tail effect 解消）による改善余地は小さい。
+（端数 block 数 32 / 総 block 数 2048 ≈ 1.5% は「端数 wave に属する block の割合」であり、tail effect
+による実際のコスト増（quantization loss）とは分母が異なる別の指標のため、上式とは一致しない）
+
+M=N=K=4096（および 2048・1024 系列も同様に grid が数百〜数千 blocks となり波数は 2 桁）では quantization
+loss は数 % 未満に留まり、StreamK の主効果（tail effect 解消）による改善余地は小さい。
 
 一方、小サイズ（例 M=N=512: `grid = ceil(512/128) * ceil(512/64) = 4 * 8 = 32 blocks < 96 スロット`）は
 そもそも 1 wave 未満で全 SM を使い切れず端数 wave が支配的になるが、この領域は `gemm_auto.rs` の

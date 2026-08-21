@@ -383,7 +383,7 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
 |------|------|------|------|
 | クロスタイル先読み | 保留 | wait/sync 再構成の同期バグリスクが NVRTC 構文検証不能な環境では許容できない（露出比率は `K_STEPS=2` で 50% と大きいが、露出量ではなくリスク起点の判断）。より安価な代替（`MMA_BK` 拡大による `K_STEPS` 増）を優先候補として提示 | `docs/perf/cuda-gemm-mma-ldmatrix-double-buffer.md`「#812 追加判断」節 |
 | XOR swizzle | 不採用（保留） | バンクコンフリクト残存の実測（既存基準）は実行待ちのまま。SMEM フットプリント差分（パディングでステージあたり `+1,536B`、`STAGES=4` が静的上限ぴったり適合〈49,152B〉から動的 SMEM opt-in 必須〈55,296B〉へ後退）を第 2 の再評価トリガーとして追加 | `docs/perf/cuda-gemm-mma-bank-conflict.md`「#812 追加判断」節 |
-| StreamK | 不採用（保留） | 主要ワークロード（M=N=K=4096・grid=2048 blocks・96 スロット→約 21.3 waves）では tail effect 解消の主効果が小さい（端数 wave 比率 約 1.5%）。加えて fixup がアキュムレート順序を変え、本リポジトリの parity 非後退契約（bit 一致論拠）と衝突しユーザー承認必須の tolerance・fixture 再生成を要する | `docs/cuda-streamk-decision.md`（新規） |
+| StreamK | 不採用（保留） | 主要ワークロード（M=N=K=4096・grid=2048 blocks・96 スロット→理想 21.33 waves・実効 22 waves）では tail effect 解消の主効果が小さい（quantization loss = (22−21.33)/22 約 3.0%）。加えて fixup がアキュムレート順序を変え、本リポジトリの parity 非後退契約（bit 一致論拠）と衝突しユーザー承認必須の tolerance・fixture 再生成を要する | `docs/cuda-streamk-decision.md`（新規） |
 
 3 候補とも「不採用」ではなく「保留（再評価条件付き）」である点が共通する: いずれも実機実測・追加承認が
 得られれば再検討しうる余地を残し、`.claude/rules/out-of-scope-tracking.md` の方針に沿って各 doc に再評価

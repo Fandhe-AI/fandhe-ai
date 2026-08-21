@@ -96,7 +96,7 @@ CUTLASS `mac_loop_iter` は `(warp_mma_k+1) % K` の wrap-around で**次タイ�
 境界の露出が Tensor Core 発行密度に対し有意（例: 総ストールサイクルの 2 桁 % 台）と確認された場合、かつ
 (2) NVRTC による構文検証が可能な環境（実機 CUDA toolkit 到達）で wait/sync 再構成の正しさをテスト
 （`--ignored` parity テスト含む）で確認できる場合。(1) を満たさない場合は §2「より安価な代替案」（`BK`
-拡大）を優先候補として#804 の候補表拡張で扱う。
+拡大）を優先候補として #804 の候補表拡張で扱う。
 
 ## 3. 段階的計測手順（実機・CUDA driver + NVRTC 搭載・compute capability 8.0 以上）
 
