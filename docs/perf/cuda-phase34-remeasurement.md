@@ -213,15 +213,19 @@ F-5（#577・人間承認タスク）と同様の人間承認プロセスへ引�
 で計測手順・記録テンプレートの整備のみを行った（#502・#571・#572・#799・#803・#804・#806 の確立済み
 先例と同方式）。実測値の記入は CUDA 実機（DGX Spark GB10）到達可能なセッションへ申し送る。
 
-## 12. 動作確認（本実装セッションで実施済み）
+## 12. 動作確認（本実装セッションで実施済み・結果記録）
 
 - `cargo build --example cuda_floor_bench -p backend-cuda`（cudarc 動的ロードにより CUDA toolkit
   非搭載環境でもビルド成立することを確認。実行結果は下記参照）
 - 経路カバレッジ再確認（§2）: `grep` によるコード上の確認のみ。GPU 実行は伴わない
-- `cargo fmt --all -- --check`・`cargo clippy --workspace --all-targets --all-features -- -D
-  warnings`・`cargo test --workspace`（実機依存は `#[ignore]` 分離済みのため CI 可）は本 PR のコミット
-  前チェックとして実行する（コード変更なし・ドキュメントのみのためビルド影響はない前提だが、
-  workspace 全体の green を確認する）
+- `cargo fmt --all -- --check`: 差分なし（green）
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`: warning 0 件で green
+- `cargo test --workspace`（実機依存は `#[ignore]` 分離済みのため CI 可）: 全クレート green
+  （集計: `test result: ok` 全件・failed 0 件。ignored はいずれも実機依存分離分。日付: 2026-08-21・
+  対象コミット: 本 PR の直前コミット `53c9d9f`）
+
+本節はコード変更を伴わないドキュメントのみの PR におけるコミット前チェックの実施記録であり、CUDA
+実機での性能確定計測（§11「状態」参照）とは別物である。
 
 ## 13. 引き継ぎ事項（次に実機到達できたセッションへ）
 
