@@ -290,8 +290,11 @@ mod tests {
     /// 実測表」節の値ではない。同表の `MULTIPROCESSOR_COUNT`〈SM 数〉は 48）。
     /// GB10（sm_121）自体の実測 SM 数は
     /// 48（同ドキュメント「デバイス属性実測表」節。2026-08-19 実測・イシュー #739、
-    /// 2026-08-20 のベンチ起動診断〈`gemm_mma_swizzle_bench`・`cuda_floor_bench` の
-    /// `num_sms=48` 出力〉で再確認・イシュー #777）であり、以前の版が主張していた
+    /// 2026-08-20 のベンチ起動診断〈`gemm_mma_swizzle_bench` の `num_sms=48` 出力〉で
+    /// 再確認・イシュー #777。#781 codex-review 指摘是正: `cuda_floor_bench` は
+    /// `swizzle_group_width()` が `None` であることを診断するのみで
+    /// `multiprocessor_count()`／`num_sms` 出力は行わないため再確認元に含めない）
+    /// であり、以前の版が主張していた
     /// 「本リポでは未実測」はもはや事実誤り（Cursor Bugbot 指摘・PR #758 当時は
     /// 未実測だった）。本テストは GB10 実機値のピン留めとしてではなく、
     /// `select_swizzle_group_width` の入力 `28`（他のテストケースと同様の代表値の

@@ -101,10 +101,13 @@ l2: n=147456 (src+dst=1179648 bytes, L2_CACHE_SIZE=Some(2359296) bytes) median_s
 
 **`MULTIPROCESSOR_COUNT`（SM 数）48 の再確認（2026-08-20・イシュー #777）**: 上表の SM 数実測値 48 は、
 2026-08-20 の GB10 実機再計測（main `0bca711` 時点）でベンチ起動診断からも再確認された。
-`gemm_mma_swizzle_bench`・`cuda_floor_bench`（`crates/backend-cuda/examples/gemm_mma_swizzle_bench.rs`
-L117-120 等）は起動時に `device.multiprocessor_count()` を実行時取得してログ出力しており、両ベンチとも
-`num_sms=48` を出力した。本番経路（`gemm_auto`・`swizzle`）は同じ実行時取得値を動的に使うため、この
-再確認は実測値の裏付けであり値の変更・カーネル挙動の変更は伴わない。
+`gemm_mma_swizzle_bench`（`crates/backend-cuda/examples/gemm_mma_swizzle_bench.rs` L117-120）は起動時に
+`device.multiprocessor_count()` を実行時取得してログ出力しており、`num_sms=48` を出力した（#781
+codex-review 指摘是正: `cuda_floor_bench` は `CudaMmaGemm::new` の `swizzle_group_width()` が実機検証未了
+のため常に `None` であることを診断するのみで、`multiprocessor_count()` の取得・`num_sms` のログ出力は
+行わない。再確認元は `gemm_mma_swizzle_bench` のみであり `cuda_floor_bench` は含まない）。本番経路
+（`gemm_auto`・`swizzle`）は同じ実行時取得値を動的に使うため、この再確認は実測値の裏付けであり値の変更・
+カーネル挙動の変更は伴わない。
 
 ## L1/L2/global 実効帯域（要実機記入）
 
