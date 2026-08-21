@@ -532,26 +532,43 @@ fn main() {
             None
         }
     };
-    // イシュー #740 で L2 再利用のためのタイル→SM 割り当てスウィズル
-    // （イシュー #499）を一時 `CudaMmaGemm::new`（本番既定コンストラクタ）
-    // へ本番結線したが、PR #758 レビュー指摘（採用基準未達・事前確認未
-    // 実施・CI 恒久検査の SM 数入力誤り）により差し戻し済み
-    // （`docs/perf/cuda-gemm-swizzle-ab.md` §2 参照）。`new` は現在
-    // swizzle 無適用の base カーネルを返すため `swizzle_group_width()`
-    // は常に `None` が期待値。起動時診断として可観測にする（#733 の
-    // `wmma_tf32_staged` 可用性出力と同型）。
+    // イシュー #775 で L2 再利用のためのタイル→SM 割り当てスウィズル
+    // （イシュー #499）のサイズ条件付き適用ロジック自体は実装したが、
+    // `CudaMmaGemm::new`（本番既定コンストラクタ。本バイナリが使う経路）
+    // への結線は GB10 実機での結線前必須確認（レジスタスピル・bit 一致・
+    // parity 非後退・本バイナリでの実測）が未完了のため見送っている（PR
+    // レビュー是正。`docs/perf/cuda-gemm-swizzle-ab.md` §2・§6.1 参照）。
+    // したがって `new` が返すハンドルの `swizzle_group_width()` は
+    // `device.multiprocessor_count()` の実測成否に関わらず常に `None`
+    // （swizzle 変種を一切コンパイルしない）。診断用の opt-in 入口
+    // `CudaMmaGemm::new_with_size_conditional_swizzle`
+    // （`internal-diagnostics` feature 限定）は本バイナリの計測対象経路
+    // ではないため使わない（実機検証はイシュー #775 の実機セッションで
+    // `gemm_mma.rs` の `#[ignore]` テスト・`gemm_mma_swizzle_bench` 経由で
+    // 行う）。
     if let Some(g) = &mma_gemm {
-        match g.swizzle_group_width() {
-            Some(w) => println!(
-                "mma_f16 kernel: threadblock swizzle group_width={w} (unexpected for \
-                 CudaMmaGemm::new; swizzle production wiring should be reverted per \
-                 docs/perf/cuda-gemm-swizzle-ab.md §2)."
-            ),
-            None => println!(
-                "mma_f16 kernel: threadblock swizzle NOT applied (base kernel; expected \
-                 — see docs/perf/cuda-gemm-swizzle-ab.md §2)."
-            ),
-        }
+        // レビュー是正（イシュー #775）: `debug_assert!` は本バイナリの
+        // 想定実行形態（`docs/perf/cuda-gemm-swizzle-ab.md` §6.1 の
+        // `cargo run --release`）では release ビルドのため最適化で除去され
+        // 検査自体が発火しない。PR #758 是正時に確立した安全網（`new` が
+        // 誤って swizzle 変種へ再結線されても検知できるようにする）を release
+        // 実行でも維持するため、無条件の `assert!` に変更する。
+        assert!(
+            g.swizzle_group_width().is_none(),
+            "CudaMmaGemm::new は実機検証未了のため常に base 専用のはずです \
+             （swizzle_group_width は常に None）"
+        );
+        // 実測値をそのまま出力する（固定文字列だと `new` の内部実装が
+        // 変わって上記 assert が意図せず外れた場合にも出力だけは
+        // 変化せず「未結線」を誤って主張し続けるおそれがあるため、
+        // `swizzle_group_width()` の実測結果を明示的に埋め込む）。
+        println!(
+            "mma_f16 kernel: threadblock swizzle variant NOT wired into the production \
+             constructor (CudaMmaGemm::new); base kernel used unconditionally \
+             (observed swizzle_group_width() = {:?}) \
+             — see docs/perf/cuda-gemm-swizzle-ab.md §2.",
+            g.swizzle_group_width()
+        );
     }
 
     // `run_wmma_tf32`/`run_f16` は opt カーネル（共有メモリ・タイル最適化版）

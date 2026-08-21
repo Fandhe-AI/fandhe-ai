@@ -1768,19 +1768,29 @@ extern "C" __global__ void gemm_mma_f16(
 /// [`mma_f16_source`] のアンカー 2 行（`block_row0`/`block_col0` のブロック
 /// 原点計算）を、`swizzle.rs::swizzled_block_idx` と同一の整数式（グループ幅
 /// `group_width` の M 方向グルーピング remap）へ差し替えた変種ソースを
-/// 生成する（イシュー #499 受け入れ基準 1〜2 項。イシュー #740 で一時
-/// 本番既定コンストラクタへ結線したが、PR #758 レビュー指摘により
-/// 差し戻し済み。下記「イシュー #740」節参照）。
+/// 生成する（イシュー #499 受け入れ基準 1〜2 項。イシュー #775 で
+/// `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`
+/// （`internal-diagnostics` feature 限定・実機検証専用 opt-in 入口）へ
+/// サイズ条件付きで再結線した。下記「呼び出し元」節参照）。
 ///
 /// **`mma_f16_source()`（既定 config の render 結果。イシュー #516 で
 /// `MMA_F16` 定数からテンプレート展開へ移行済み）自体は変更しない**
-/// （`replacen` で新規 `String` を都度構築するのみ）。呼び出し元は
-/// `gemm_mma.rs::CudaMmaGemm::new_with_swizzle`（`internal-diagnostics`
-/// feature 限定・診断用・明示幅指定）のみであり、`new`（本番既定）は
-/// イシュー #740 の一時結線を PR #758 レビュー指摘により差し戻し済み
-/// のため呼び出し元ではない（下記「イシュー #740」節参照）。`ops.rs`／
-/// `gemm_auto.rs` は mma_f16 経路自体を参照しないため無変更のまま
-/// （本ファイルクレートルート `lib.rs` 冒頭コメント「#740」節参照）。
+/// （`replacen` で新規 `String` を都度構築するのみ）。
+///
+/// # 呼び出し元
+///
+/// `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`
+/// （`internal-diagnostics` feature 限定・実機検証専用 opt-in 入口。
+/// `device.multiprocessor_count()` の実測に成功した場合のみ swizzle 変種を
+/// 追加コンパイルする。`launch_f16` が呼び出し形状ごとに
+/// `swizzle::should_apply_swizzle` で base／swizzle 変種いずれを起動する
+/// か判定する）と `new_with_swizzle`（同じく `internal-diagnostics`
+/// feature 限定・診断用・明示幅指定・強制適用）の両方から呼ばれる。
+/// **本番既定コンストラクタ `gemm_mma.rs::CudaMmaGemm::new` はこの関数を
+/// 呼ばない**（実機未検証のため base 専用に留める是正。`new`
+/// ドキュメンテーションコメント参照）。`ops.rs`／`gemm_auto.rs` は
+/// mma_f16 経路自体を参照しないため無変更のまま（`lib.rs` 冒頭コメント
+/// 「#775」節参照）。
 ///
 /// # remap の整数式（`swizzle.rs::swizzled_block_idx` と単一の設計を共有）
 ///
@@ -1803,14 +1813,12 @@ extern "C" __global__ void gemm_mma_f16(
 /// select_swizzle_group_width` の候補 `{8, 16}` 以外の値も受理するが
 /// `1` 未満・`1` そのものは拒否する）。
 ///
-/// イシュー #740 で `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ。
-/// feature 非依存）へ一時結線したため通常ビルドでも到達可能だったが、
-/// PR #758 レビュー指摘により `new` は base カーネルへ差し戻し済み
-/// （`gemm_mma.rs::CudaMmaGemm::new` ドキュメンテーションコメント参照）。
-/// 呼び出し元は `internal-diagnostics` feature 限定の `new_with_swizzle`
-/// （診断用・明示幅指定）のみに戻ったため、通常ビルド（feature 指定なし）
-/// では再び到達不能になり `#[allow(dead_code)]` が必要（`render_mma_f16`
-/// と同型の理由。旧 #499 セッション時点の判断も同じ）。
+/// イシュー #775 是正（628573f）: `gemm_mma.rs::CudaMmaGemm::new`（本番
+/// 既定コンストラクタ）は実機未検証のため本関数を呼ばない。呼び出し元は
+/// 上記「呼び出し元」節のとおり `internal-diagnostics` feature 限定の
+/// opt-in 入口のみであるため、通常ビルド（feature 指定なし）では
+/// 到達不能。`cargo build -p backend-cuda`（feature 指定なし）での
+/// dead-code 誤検知を避けるため `#[allow(dead_code)]` を付す。
 #[allow(dead_code)]
 pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::error::CudaError> {
     if group_width < 2 {
