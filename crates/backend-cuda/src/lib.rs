@@ -334,7 +334,7 @@ pub use transpose::CudaTranspose;
 /// 経由してバックエンドを利用し、本 feature を有効化する必要はない。
 #[cfg(feature = "internal-diagnostics")]
 pub mod diagnostics {
-    use crate::{kernels_mma, kernels_wmma_opt, swizzle};
+    use crate::{kernels_mma, kernels_mma_tf32, kernels_wmma_opt, swizzle};
 
     // イシュー #742: TF32 opt-staged 段数スイープ example
     // （`examples/gemm_wmma_tf32_staged_stages_bench.rs`）専用の再公開。
@@ -393,6 +393,24 @@ pub mod diagnostics {
     // この再公開に依存しない（`MMA_BM`/`MMA_BN`/`MMA_STAGES` 等の本番定数は
     // 本イシュー時点で実機到達不能のため無変更のまま。計画 Step F 参照）。
     pub use kernels_mma::mma_f16_source_with_block_tile;
+
+    // イシュー #806: TF32 生 mma.sync 経路（`kernels_mma_tf32.rs`）の
+    // ベースソース・ブロックタイル拡大候補を `examples/
+    // mma_tf32_ptx_dump.rs` から観測するための再公開。
+    // `mma_f16_source`/`mma_f16_source_with_block_tile`（#782・#804）と
+    // 同じ「非公開モジュールへの薄い診断用ラッパー」方針。本番経路
+    // （`gemm_mma_tf32.rs::CudaMmaTf32Gemm`）はこの再公開に依存しない
+    // （`MMA_TF32_BM`/`MMA_TF32_BN`/`MMA_TF32_STAGES` 等の本番定数は
+    // 本イシュー時点で実機到達不能のため無変更のまま）。
+    pub use kernels_mma_tf32::{mma_tf32_source, mma_tf32_source_with_block_tile};
+
+    /// `mma_tf32`（TF32 `mma.sync` 経路）カーネルのブロックタイル形状
+    /// `(block_m, block_n)`。`examples/mma_tf32_ptx_dump.rs` の occupancy
+    /// 概算専用（`mma_f16_block_tile` と同じ「非公開モジュールへの薄い
+    /// 診断用ラッパー」方針）。
+    pub fn mma_tf32_block_tile() -> (u32, u32) {
+        (kernels_mma_tf32::MMA_TF32_BM, kernels_mma_tf32::MMA_TF32_BN)
+    }
 
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の

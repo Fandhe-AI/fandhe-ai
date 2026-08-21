@@ -149,7 +149,22 @@ cargo run -p backend-cuda --example cuda_floor_bench --release
 
 ## 6. スコープ外（追跡）
 
-- TF32 タイル定数拡大（Phase 4・#806）
+- TF32 タイル定数拡大（Phase 4・#806。診断機構・机上候補表は整備済み。
+  `docs/perf/cuda-gemm-mma-tf32-block-tile.md` 参照。実機実測・本番採用は
+  実機到達可能セッションへの引き継ぎのまま）
 - swizzle 変種の TF32 `mma.sync` への適用（実測を伴うため別途）
 - REQ-8 下限値の再確定（候補値の記録まで。確定は人間判断・TASK-8.3 系）
 - 部分改善時のサイズ条件付き適用の実装（採否判断で必要と出た場合にフォローアップ Issue を提案）
+
+## 7. #806 との相互参照
+
+イシュー #806（本節見出し §6 の「TF32 タイル定数拡大」）は本イシュー
+（#802）と同一の実機到達不能セッション制約（§2）を引き継ぎ、Step F
+フォールバックとして診断機構（`kernels_mma_tf32.rs::
+mma_tf32_source_with_block_tile`）・机上候補表・`examples/
+mma_tf32_ptx_dump.rs` を整備した（`docs/perf/
+cuda-gemm-mma-tf32-block-tile.md`）。実機到達可能セッションでは、本
+ドキュメント §3・§4（数値一致・parity・`cuda_floor_bench` A/B 計測）と
+`cuda-gemm-mma-tf32-block-tile.md` §6・§8（タイル拡大候補の `ptxas -v`
+実測・4096/2048 ベンチ）を同一セッションでまとめて消化できる（両者とも
+DGX Spark GB10 実機・CUDA 13.0 toolkit を要求する点が共通のため）。
