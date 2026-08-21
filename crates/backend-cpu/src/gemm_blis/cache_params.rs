@@ -467,6 +467,55 @@ mod tests {
     }
 
     #[test]
+    fn compute_blocks_m4_max_like_values_kc_mc_cap_to_current_defaults() {
+        // レビュー指摘（イシュー #794）: 既存の
+        // `compute_blocks_apple_m4_max_like_values_stays_within_clamp_bounds`
+        // は range 内であることしか検証しておらず、
+        // `.min(super::KC)`／`.min(super::MC)`（本 PR の主要な挙動変更＝
+        // キャップ）を削除しても pass し続けるため新挙動を保証しない。
+        // M4 Max P コア相当（L1D=192KiB・L2=16MiB・NEON MR=8/NR=12）では
+        // 理論値（KC≈1228・MC≈1024 相当）がキャップを上回るため、
+        // キャップが効いて `kc == super::KC`（256）・`mc == super::MC`
+        // （128）へ一致することを明示的に固定する。
+        let blocks = compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 12)
+            .expect("正当な範囲の値は Some を返すはず");
+        // `mod tests` は `cache_params` の子モジュールのため、`super` は
+        // `cache_params` を指す（`KC`／`MC` の定義元 `gemm_blis` ではない）。
+        // `cache_params` 本体（`mod tests` の外）の `super::KC` と異なり、
+        // ここでは `super::super::KC` で `gemm_blis::KC` を参照する。
+        assert_eq!(
+            blocks.kc,
+            super::super::KC,
+            "kc は super::KC へキャップされるはず"
+        );
+        assert_eq!(
+            blocks.mc,
+            super::super::MC,
+            "mc は super::MC へキャップされるはず"
+        );
+    }
+
+    #[test]
+    fn compute_blocks_nc_grows_monotonically_with_l2_capacity() {
+        // レビュー指摘（イシュー #794）: NC はキャップなしで L2 実容量に
+        // 比例して動的に算出される（本 PR の主眼）。この挙動を直接検証する
+        // テストがなかったため、L2 サイズが異なる 2 ケース（4 MiB と
+        // 16 MiB。KC/MC は上記キャップにより両ケースとも
+        // `super::KC`／`super::MC` へ収束し固定されるため、NC の差分のみが
+        // L2 容量差を反映する）で NC が単調増加することを固定する。
+        let small_l2 = compute_blocks(192 * 1024, 4 * 1024 * 1024, 8, 12)
+            .expect("正当な範囲の値は Some を返すはず");
+        let large_l2 = compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 12)
+            .expect("正当な範囲の値は Some を返すはず");
+        assert!(
+            large_l2.nc > small_l2.nc,
+            "L2 実容量が大きいほど nc も大きくなるはず（small={}, large={}）",
+            small_l2.nc,
+            large_l2.nc
+        );
+    }
+
+    #[test]
     fn compute_blocks_rejects_zero_mr_or_nr() {
         assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, 0, 12).is_none());
         assert!(compute_blocks(192 * 1024, 16 * 1024 * 1024, 8, 0).is_none());
