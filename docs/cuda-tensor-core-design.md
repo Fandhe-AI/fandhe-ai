@@ -371,6 +371,40 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
   cuda-gemm-mma-block-tile-stages.md` §6 を参照（実測・採用構成決定・動的 SMEM opt-in の起動側
   結線・swizzle/`gemm_auto.rs` 追従・4096 ベンチ・parity 非後退確認）。
 
+## 17. TF32 mma.sync タイル拡大（#806・Step F フォールバック）
+
+- **位置づけ**: 親イシュー #479（GEMM 性能改善ツリー）→ Phase 4 親 #789 配下の #806
+  「perf(backend-cuda): TF32 タイル拡大（mma.sync 化後）」。§16（#804）の f16 ブロックタイル拡大
+  手法を、生 `mma.sync`(m16n8k8) TF32 経路（§15・#801→PR #823。`CudaMmaTf32Gemm`）へ展開する。
+  現行 TF32 ブロックタイル（64x64x16・S3・28,416B）は f16 経路（64x128）よりさらに小さく、
+  M=N=K=4096 で対 PyTorch 比 52.0% に留まる（§15.6・`docs/perf/gemm-optimization-baseline.md`）。
+- **実機到達不能（Step F フォールバック）**: 本イシューの実装セッションも §15.6・§16 と同型の
+  制約（本 worktree に `ptxas`/`nvcc` 不在・`docs/real-hardware-verification-env.local.md` 未配置）
+  により DGX Spark GB10 実機へ到達できなかった。したがって**本番カーネル定数（`MMA_TF32_BM`/
+  `MMA_TF32_BN`/`MMA_TF32_BK`/`MMA_TF32_STAGES` 等）・`gemm_mma_tf32.rs` の起動結線は一切変更して
+  いない**。診断機構の新設・机上候補表の記録のみを本イシューの成果物とした（実装計画 Step F）。
+  `CudaMmaTf32Gemm` は本番ディスパッチ非結線のままであり（§15 冒頭「位置づけ」参照）、本イシューの
+  タイル拡大もこの非結線 API・診断経路上でのみ行う。
+- **診断機構**: `kernels_mma_tf32.rs::mma_tf32_source_with_block_tile(bm, bn, bk, stages,
+  warp_tiles_m, warp_tiles_n, launch_bounds, optin_budget_bytes)`（`kernels_mma.rs::
+  mma_f16_source_with_block_tile`〈§16・#804〉と同型のアンカー完全一致置換方式を TF32 の
+  `#define` 名前空間〈`MMA_TF32_*` 接頭辞〉へ適用）を新設し、`internal-diagnostics` feature 限定で
+  `lib.rs::diagnostics` 経由・`examples/mma_tf32_ptx_dump.rs`（TF32 専用の新規 example。f16 用
+  `mma_ptx_dump.rs` を直接拡張せず分離した理由は同ファイル冒頭コメント参照）から到達可能にした。
+  f16 版との差分（cp.async 転送粒度が f32 4 要素/16B・`A_PAD`/`B_PAD` が `BK+4`/`BN+4`・SMEM 予算式
+  の乗数が 4B/要素）は `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5 を参照。既定値は
+  `mma_tf32_source()` とバイト一致することをユニットテストで固定しており、本番経路
+  （`gemm_mma_tf32.rs`）への影響がないことを機械的に担保する。**`extern __shared__` 変換経路は
+  `nvrtc`/`ptxas` 実機での構文検証を一度も通過していない**。
+- **候補・机上見積もり**: `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §4 を参照（候補: ステージ増
+  のみ〈37,888B〉・M 拡大〈43,776B〉・N 拡大〈40,704B〉・両拡大〈56,064B〉・両拡大+ステージ増
+  〈74,752B〉・BK 拡大〈53,760B〉。両拡大以降は静的 48KiB を超え opt-in 経路。全候補が GB10 実測
+  opt-in 上限 101,376B 以下）。実機 `ptxas -v` 実測表は本イシュー時点では実行待ち。
+- **#806 の残作業（次に実機到達できたセッションへ）**: `docs/perf/cuda-gemm-mma-tf32-block-tile.md`
+  §8 を参照（spill 実測・数値一致 `#[ignore]` テスト・4096/2048 ベンチ・採用構成決定・動的 SMEM
+  opt-in の起動側結線・実測値記録）。TF32 mma.sync 経路自体の本番 3 段選択への結線・採否判断は
+  #802 のスコープのまま変わらない。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）

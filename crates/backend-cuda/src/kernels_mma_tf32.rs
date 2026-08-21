@@ -132,6 +132,8 @@
 
 use std::sync::LazyLock;
 
+use crate::error::CudaError;
+
 /// mma 命令 1 回あたりの行列形状（`m16n8k8`。sm_80+ の TF32 標準 shape）。
 pub const MMA_TF32_M: u32 = 16;
 pub const MMA_TF32_N: u32 = 8;
@@ -615,6 +617,291 @@ extern "C" __global__ void gemm_mma_tf32(
 }
 "#;
 
+/// 診断専用（`internal-diagnostics` feature 限定。イシュー #806）:
+/// ブロックタイル（`bm`/`bn`/`bk`）・`cp.async` パイプライン段数
+/// （`stages`）・warp タイル形状（`warp_tiles_m`/`_n`）・
+/// `__launch_bounds__` を任意に組み合わせた候補 TF32 カーネルソースを
+/// 生成する。`kernels_mma.rs::mma_f16_source_with_block_tile`（#804）と
+/// 同型の設計（アンカー完全一致置換・2 段階 SMEM 予算判定・fail-closed
+/// 検証）を TF32 `mma.sync`(m16n8k8) 経路へ移植したもの。
+///
+/// # f16 版との差分
+///
+/// - cp.async 転送粒度は f32 4 要素（16B）であり、f16 版の 8 要素/16B
+///   とは異なる（本ファイル冒頭コメント「整列制約」参照）。よって
+///   `bm`/`bn` の倍数制約は 4（f16 版は 8）。
+/// - `A_PAD`/`B_PAD` は `BK+4`/`BN+4`（f16 版は `BK+8`/`BN+8`。要素サイズが
+///   4B〈f32〉であるためパディング加算量も異なる。本ファイル
+///   [`MMA_TF32_A_PAD`]/[`MMA_TF32_B_PAD`] 定数直下コメント参照）。
+/// - 共有メモリ 1 要素あたり 4B（f32。f16 版は 2B）のため SMEM 予算式の
+///   乗数が異なる（[`MMA_TF32_SHARED_MEM_BYTES`] 定数と同じ式）。
+/// - `#define` 名前空間は `MMA_TF32_*` 接頭辞（f16 版は無接頭辞の
+///   `BM`/`BN`/`STAGES` 等）。
+///
+/// # 本番結線との違い
+///
+/// 本関数は本番ディスパッチ（`gemm_mma_tf32.rs::CudaMmaTf32Gemm`。本
+/// ファイル冒頭コメント「位置づけ・非結線」参照）から一切呼ばれない。
+/// `examples/mma_tf32_ptx_dump.rs`（`internal-diagnostics` feature 限定・
+/// `lib.rs::diagnostics` 経由）専用。
+///
+/// # 共有メモリ予算（2 段階判定。`kernels_mma.rs::
+/// mma_f16_source_with_block_tile` と同じ方針）
+///
+/// `optin_budget_bytes` は呼び出し元がデバイス実測値
+/// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`）から渡す。
+///
+/// - 静的共有メモリ予算（[`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]・
+///   48KiB）以下: 本番と同じ静的 `__shared__` 配列宣言のまま候補ソース
+///   を返す。
+/// - 静的予算超・`optin_budget_bytes` 以下: `as_tile`/`bs_tile` の静的
+///   宣言を `extern __shared__` バッファ上のポインタへ変換した候補
+///   ソースを返す（宣言 2 行のみの置換。**この経路は `nvrtc`/`ptxas`
+///   実機での構文検証を経ていない**）。本番起動側の動的 SMEM opt-in
+///   結線は本関数のスコープ外。
+/// - `optin_budget_bytes` 超: 机上除外として `CudaError::InvalidKernelConfig`
+///   を返す。
+#[allow(dead_code)] // 理由は mma_f16_source_with_block_tile と同じ（非公開モジュール）
+#[allow(clippy::too_many_arguments)] // 診断専用の候補パラメータを 1 関数に集約する設計上の要求
+pub fn mma_tf32_source_with_block_tile(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+) -> Result<String, CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+
+    if bm == 0 || bn == 0 || bk == 0 || stages == 0 || warp_tiles_m == 0 || warp_tiles_n == 0 {
+        return Err(invalid(
+            "mma_tf32_source_with_block_tile requires bm/bn/bk/stages/warp_tiles_m/n >= 1"
+                .to_string(),
+        ));
+    }
+    if stages < 2 {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile stages ({stages}) must be >= 2 (cp.async \
+             software pipeline invariant; see mma_tf32_source_commit_wait_group_invariant)"
+        )));
+    }
+    // `kernels_mma.rs::mma_f16_source_with_block_tile` と同じ即値範囲検査
+    // （PTX ISA `cp.async.wait_group` の `"n"` オペランドは 0〜7）。
+    const MAX_WAIT_GROUP_IMMEDIATE: u32 = 7;
+    const MAX_STAGES: u32 = MAX_WAIT_GROUP_IMMEDIATE + 2;
+    if stages > MAX_STAGES {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile stages ({stages}) must be <= {MAX_STAGES} \
+             (cp.async.wait_group immediate operand STAGES - 2 must fit in \
+             [0, {MAX_WAIT_GROUP_IMMEDIATE}])"
+        )));
+    }
+    if !bk.is_multiple_of(MMA_TF32_K) {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile bk ({bk}) must be a multiple of MMA_TF32_K \
+             ({MMA_TF32_K})"
+        )));
+    }
+    let k_steps_per_stage = bk / MMA_TF32_K;
+    if k_steps_per_stage < 2 {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile bk / MMA_TF32_K ({k_steps_per_stage}) must be >= 2"
+        )));
+    }
+    // cp.async 16 バイト転送粒度の前提（f32 4 要素。本ファイル冒頭コメント
+    // 「整列制約」参照。f16 版の 8 要素とは異なる）。
+    if !bm.is_multiple_of(4) || !bn.is_multiple_of(4) {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile bm ({bm}) and bn ({bn}) must both be multiples \
+             of 4 (cp.async 16-byte / f32 4-element transfer granularity)"
+        )));
+    }
+
+    let warp_m = warp_tiles_m.checked_mul(MMA_TF32_M).ok_or_else(|| {
+        invalid(format!(
+            "mma_tf32_source_with_block_tile warp_tiles_m={warp_tiles_m} overflows u32 when \
+             multiplied by MMA_TF32_M={MMA_TF32_M}"
+        ))
+    })?;
+    let warp_n = warp_tiles_n.checked_mul(MMA_TF32_N).ok_or_else(|| {
+        invalid(format!(
+            "mma_tf32_source_with_block_tile warp_tiles_n={warp_tiles_n} overflows u32 when \
+             multiplied by MMA_TF32_N={MMA_TF32_N}"
+        ))
+    })?;
+    if !bm.is_multiple_of(warp_m) || !bn.is_multiple_of(warp_n) {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile candidate warp tile {warp_m}x{warp_n} \
+             (warp_tiles_m={warp_tiles_m}, warp_tiles_n={warp_tiles_n}) does not evenly divide \
+             the candidate block tile bm={bm}x bn={bn}"
+        )));
+    }
+    let warps_m = bm / warp_m;
+    let warps_n = bn / warp_n;
+    let threads = warps_m
+        .checked_mul(warps_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| {
+            invalid("mma_tf32_source_with_block_tile block thread count overflow".to_string())
+        })?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile candidate derives {threads} threads/block, \
+             exceeding CUDA's per-block limit (1024)"
+        )));
+    }
+    if let Some(v) = launch_bounds
+        && v != threads
+    {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile launch_bounds ({v}) must equal the derived thread \
+             count ({threads})"
+        )));
+    }
+
+    // 共有メモリ予算（1 要素 4B〈f32〉。`MMA_TF32_SHARED_MEM_BYTES` と
+    // 同じ式）。
+    let a_pad = bk.checked_add(4).ok_or_else(|| {
+        invalid("mma_tf32_source_with_block_tile A tile padded row width overflow".to_string())
+    })?;
+    let b_pad = bn.checked_add(4).ok_or_else(|| {
+        invalid("mma_tf32_source_with_block_tile B tile padded row width overflow".to_string())
+    })?;
+    let smem_bytes = bm
+        .checked_mul(a_pad)
+        .and_then(|a| bk.checked_mul(b_pad).and_then(|b| a.checked_add(b)))
+        .and_then(|sum| sum.checked_mul(4))
+        .and_then(|v| v.checked_mul(stages))
+        .ok_or_else(|| {
+            invalid("mma_tf32_source_with_block_tile shared memory byte count overflow".to_string())
+        })?;
+    if smem_bytes > optin_budget_bytes {
+        return Err(invalid(format!(
+            "mma_tf32_source_with_block_tile candidate bm={bm} bn={bn} bk={bk} stages={stages} \
+             requires {smem_bytes} bytes of shared memory, exceeding the opt-in budget \
+             ({optin_budget_bytes} bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)"
+        )));
+    }
+    let needs_dynamic_smem = smem_bytes > crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES;
+
+    // ブロックタイル・段数の #define をアンカー置換する（`mma_tf32_source()`
+    // 実体は既定 config の bm=64/bn=64/bk=16/stages=3/a_pad=20/b_pad=68 が
+    // 焼き込み済みのため、これらを候補値へ差し替える）。
+    let source = replace_source_anchor(
+        mma_tf32_source().to_owned(),
+        &format!("#define MMA_TF32_BM {MMA_TF32_BM}\n"),
+        &format!("#define MMA_TF32_BM {bm}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_BN {MMA_TF32_BN}\n"),
+        &format!("#define MMA_TF32_BN {bn}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_BK {MMA_TF32_BK}\n"),
+        &format!("#define MMA_TF32_BK {bk}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_WARPS_N {MMA_TF32_WARPS_N}\n"),
+        &format!("#define MMA_TF32_WARPS_N {warps_n}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_WARP_TILES_M {MMA_TF32_WARP_TILES_M}\n"),
+        &format!("#define MMA_TF32_WARP_TILES_M {warp_tiles_m}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_WARP_TILES_N {MMA_TF32_WARP_TILES_N}\n"),
+        &format!("#define MMA_TF32_WARP_TILES_N {warp_tiles_n}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_STAGES {MMA_TF32_STAGES}\n"),
+        &format!("#define MMA_TF32_STAGES {stages}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_A_PAD {MMA_TF32_A_PAD}\n"),
+        &format!("#define MMA_TF32_A_PAD {a_pad}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define MMA_TF32_B_PAD {MMA_TF32_B_PAD}\n"),
+        &format!("#define MMA_TF32_B_PAD {b_pad}\n"),
+        "mma_tf32_source_with_block_tile",
+    )?;
+
+    // 動的 SMEM 化（`kernels_mma.rs::mma_f16_source_with_block_tile` と
+    // 同じ「宣言 2 行のみ置換」方式。多次元添字構文
+    // `as_tile[stage][row][col]`/`bs_tile[stage][row][col]` は本体側の
+    // 参照を無変更のまま流用する）。
+    const STATIC_SMEM_ANCHOR: &str = "    __shared__ __align__(16) float as_tile[MMA_TF32_STAGES][MMA_TF32_BM][MMA_TF32_A_PAD];\n    __shared__ __align__(16) float bs_tile[MMA_TF32_STAGES][MMA_TF32_BK][MMA_TF32_B_PAD];\n";
+    const DYNAMIC_SMEM_REPLACEMENT: &str = "    extern __shared__ __align__(16) unsigned char mma_tf32_dyn_smem[];\n    typedef float MmaTf32AsTileT[MMA_TF32_BM][MMA_TF32_A_PAD];\n    typedef float MmaTf32BsTileT[MMA_TF32_BK][MMA_TF32_B_PAD];\n    MmaTf32AsTileT* as_tile = reinterpret_cast<MmaTf32AsTileT*>(mma_tf32_dyn_smem);\n    MmaTf32BsTileT* bs_tile = reinterpret_cast<MmaTf32BsTileT*>(mma_tf32_dyn_smem + sizeof(MmaTf32AsTileT) * MMA_TF32_STAGES);\n";
+    let source = if needs_dynamic_smem {
+        replace_source_anchor(
+            source,
+            STATIC_SMEM_ANCHOR,
+            DYNAMIC_SMEM_REPLACEMENT,
+            "mma_tf32_source_with_block_tile",
+        )?
+    } else {
+        source
+    };
+
+    let source = if let Some(v) = launch_bounds {
+        const SIG_ANCHOR: &str = "extern \"C\" __global__ void gemm_mma_tf32(";
+        let sig_replacement =
+            format!("extern \"C\" __global__ void __launch_bounds__({v}) gemm_mma_tf32(");
+        replace_source_anchor(
+            source,
+            SIG_ANCHOR,
+            &sig_replacement,
+            "mma_tf32_source_with_block_tile",
+        )?
+    } else {
+        source
+    };
+
+    Ok(source)
+}
+
+/// [`mma_tf32_source_with_block_tile`] 専用のアンカー完全一致置換
+/// ヘルパー（`kernels_mma.rs::replace_source_anchor` と同型・同一契約。
+/// `kernels_mma` の当該関数は非公開のためモジュールをまたいで再利用
+/// できず、本ファイルへ同型のものを複製する）。`anchor` の出現回数が
+/// 1 でない場合は定数変更等で置換前提が崩れたとみなし fail-closed で
+/// 拒否する。
+fn replace_source_anchor(
+    src: String,
+    anchor: &str,
+    replacement: &str,
+    caller: &str,
+) -> Result<String, CudaError> {
+    let occurrences = src.matches(anchor).count();
+    if occurrences != 1 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "{caller}: anchor {anchor:?} occurs {occurrences} times in mma_tf32_source() \
+                 (expected exactly 1); the define replacement assumption no longer holds"
+            ),
+        });
+    }
+    Ok(src.replacen(anchor, replacement, 1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,5 +1040,154 @@ mod tests {
         assert_eq!(MMA_TF32_WARP_N, 32);
         assert_eq!(MMA_TF32_WARPS_M, 2);
         assert_eq!(MMA_TF32_WARPS_N, 2);
+    }
+
+    /// イシュー #806: 既定値 `(MMA_TF32_BM, MMA_TF32_BN, MMA_TF32_BK,
+    /// MMA_TF32_STAGES, MMA_TF32_WARP_TILES_M, MMA_TF32_WARP_TILES_N, None,
+    /// MMA_TF32_SHARED_MEM_BYTES)` を渡すと `mma_tf32_source()` とバイト
+    /// 一致することをロックする（`kernels_mma.rs::
+    /// mma_f16_source_with_block_tile_default_matches_mma_f16_source` と
+    /// 同じ回帰方針。既定引数では本番ソースへの影響がないことを機械的に
+    /// 担保する）。
+    #[test]
+    fn mma_tf32_source_with_block_tile_default_matches_mma_tf32_source() {
+        let src = mma_tf32_source_with_block_tile(
+            MMA_TF32_BM,
+            MMA_TF32_BN,
+            MMA_TF32_BK,
+            MMA_TF32_STAGES,
+            MMA_TF32_WARP_TILES_M,
+            MMA_TF32_WARP_TILES_N,
+            None,
+            MMA_TF32_SHARED_MEM_BYTES,
+        )
+        .expect("default block tile config must succeed");
+        assert_eq!(src, mma_tf32_source());
+    }
+
+    /// 実装計画（イシュー #806）候補表の「両拡大」候補
+    /// （128x128x16・S3・warp2x4）が静的 48KiB を超え opt-in 予算内に
+    /// 収まること、`extern __shared__` 変種になることを確認する
+    /// （`(128*20 + 16*132) * 4B * 3 stages = 56,064B`。48KiB=49,152B を
+    /// 超え GB10 実測 opt-in 上限 101,376B 以下）。
+    #[test]
+    fn mma_tf32_source_with_block_tile_expanded_tile_uses_dynamic_smem() {
+        let src = mma_tf32_source_with_block_tile(128, 128, 16, 3, 2, 4, None, 101_376)
+            .expect("128x128x16 S3 warp2x4 must fit within the opt-in budget");
+        assert!(
+            src.contains("extern __shared__ __align__(16) unsigned char mma_tf32_dyn_smem[];"),
+            "56,064B (> 48KiB static limit) candidate must use the extern __shared__ variant"
+        );
+        for needle in [
+            "#define MMA_TF32_BM 128\n",
+            "#define MMA_TF32_BN 128\n",
+            "#define MMA_TF32_BK 16\n",
+            "#define MMA_TF32_WARP_TILES_M 2\n",
+            "#define MMA_TF32_WARP_TILES_N 4\n",
+            "#define MMA_TF32_WARPS_N 4\n",
+            "#define MMA_TF32_A_PAD 20\n",
+            "#define MMA_TF32_B_PAD 132\n",
+        ] {
+            assert!(
+                src.contains(needle),
+                "missing {needle:?} in generated source"
+            );
+        }
+        assert!(
+            !src.contains(
+                "__shared__ __align__(16) float as_tile[MMA_TF32_STAGES][MMA_TF32_BM][MMA_TF32_A_PAD];"
+            ),
+            "the static declaration must be fully replaced, not left alongside the dynamic one"
+        );
+    }
+
+    /// `launch_bounds` を導出スレッド数（512）で明示付与した場合に
+    /// シグネチャへ反映されることを確認する。
+    #[test]
+    fn mma_tf32_source_with_block_tile_applies_launch_bounds() {
+        let src = mma_tf32_source_with_block_tile(128, 128, 16, 3, 2, 4, Some(512), 101_376)
+            .expect("128x128x16 S3 warp2x4 with explicit launch_bounds must succeed");
+        assert!(src.contains("__launch_bounds__(512)"));
+    }
+
+    /// 実装計画候補表の「BK 拡大」候補（64x64x32・S3・warp2x2）は机上
+    /// 見積もり 53,760B。GB10 実測 opt-in 上限 101,376B より小さい仮想
+    /// 予算（50,000B）を渡すと opt-in 予算超過として拒否されることを
+    /// ロックする（実機到達前でも判定できることの確認。
+    /// `mma_f16_source_with_block_tile_rejects_over_optin_budget` と同型）。
+    #[test]
+    fn mma_tf32_source_with_block_tile_rejects_over_optin_budget() {
+        let err = mma_tf32_source_with_block_tile(64, 64, 32, 3, 2, 2, None, 50_000)
+            .expect_err("64x64x32 S3 (53,760B) must exceed the 50,000B opt-in budget");
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// `stages < 2` は cp.async ソフトウェアパイプラインの不変条件違反
+    /// として拒否される。
+    #[test]
+    fn mma_tf32_source_with_block_tile_rejects_stages_below_two() {
+        let err = mma_tf32_source_with_block_tile(64, 64, 16, 1, 2, 4, None, u32::MAX)
+            .expect_err("stages=1 must be rejected");
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// `cp.async.wait_group "n"(STAGES - 2)` の即値オペランドは 0〜7 の
+    /// 範囲でなければならない（PTX ISA 仕様）ため、`stages` は 9 以下で
+    /// なければならない。`stages=10`（`STAGES - 2 = 8`）は即値範囲超過と
+    /// して拒否される必要がある。`optin_budget_bytes` は `u32::MAX` を
+    /// 渡し、拒否理由が共有メモリ予算超過ではなく段数上限であることを
+    /// 切り分ける。
+    #[test]
+    fn mma_tf32_source_with_block_tile_rejects_stages_above_nine() {
+        let err = mma_tf32_source_with_block_tile(64, 64, 16, 10, 2, 4, None, u32::MAX)
+            .expect_err("stages=10 must be rejected (cp.async.wait_group immediate overflow)");
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// `stages=9`（`STAGES - 2 = 7`）は即値範囲の境界値であり受理される
+    /// ことを確認する（上限検証が過剰に厳しくないことの回帰防止）。
+    #[test]
+    fn mma_tf32_source_with_block_tile_accepts_stages_at_nine() {
+        mma_tf32_source_with_block_tile(64, 64, 16, 9, 2, 4, None, u32::MAX)
+            .expect("stages=9 is the maximum allowed by the cp.async.wait_group immediate range");
+    }
+
+    /// launch_bounds の値が導出スレッド数と食い違う場合は拒否される
+    /// （fail-closed 契約）。
+    #[test]
+    fn mma_tf32_source_with_block_tile_rejects_launch_bounds_mismatch() {
+        let err = mma_tf32_source_with_block_tile(64, 64, 16, 3, 2, 4, Some(256), u32::MAX)
+            .expect_err("launch_bounds mismatch (actual threads=128) must be rejected");
+        assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+    }
+
+    /// 0 引数（`bm`/`bn`/`bk`/`stages`/`warp_tiles_m`/`warp_tiles_n`）は
+    /// すべて fail-closed で拒否される。
+    #[test]
+    fn mma_tf32_source_with_block_tile_rejects_zero_arguments() {
+        for (bm, bn, bk, stages, wtm, wtn) in [
+            (0, 64, 16, 3, 2, 4),
+            (64, 0, 16, 3, 2, 4),
+            (64, 64, 0, 3, 2, 4),
+            (64, 64, 16, 0, 2, 4),
+            (64, 64, 16, 3, 0, 4),
+            (64, 64, 16, 3, 2, 0),
+        ] {
+            let err = mma_tf32_source_with_block_tile(bm, bn, bk, stages, wtm, wtn, None, 101_376)
+                .expect_err("zero-valued argument must be rejected");
+            assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+        }
+    }
+
+    /// `bm`/`bn` が cp.async 転送粒度（f32 4 要素）の倍数でない場合は
+    /// 拒否される（f16 版の 8 要素倍数制約とは異なる TF32 固有の粒度。
+    /// 本ファイル冒頭コメント「整列制約」参照）。
+    #[test]
+    fn mma_tf32_source_with_block_tile_rejects_non_multiple_of_four_bm_bn() {
+        for (bm, bn) in [(65, 64), (64, 65)] {
+            let err = mma_tf32_source_with_block_tile(bm, bn, 16, 3, 2, 4, None, u32::MAX)
+                .expect_err("bm/bn not a multiple of 4 must be rejected");
+            assert!(matches!(err, CudaError::InvalidKernelConfig { .. }));
+        }
     }
 }
