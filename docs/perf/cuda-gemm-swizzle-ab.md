@@ -43,7 +43,8 @@ rules/security.md` の「性能採用基準の変更はユーザー承認必須�
 （下記「以下は #758 時点までの経緯」参照）3 点のうち、(a) 採用基準の無承認読み替えはこの改訂を明記する
 ことで、(c) `select_swizzle_group_width` の CI 恒久検査が依拠する SM 数入力は
 `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`（下記参照）が
-`device.multiprocessor_count()` の実測値を動的に使う（ハードコード値へ依存しない）ことで、それぞれ解消した。
+`device.multiprocessor_count()` の実測値を動的に使う（ハードコード値へ依存しない）ことで、それぞれ解消した
+（SM 数実測値 48。2026-08-19 実測〈イシュー #739〉・2026-08-20 ベンチ起動診断で再確認〈イシュー #777〉）。
 
 **(b) 結線前必須の確認は本 PR 時点でも未実施（PR レビュー是正・#758 と同型の不備の再発防止）**: レジスタ
 スピル確認・`CudaMmaGemm::new` 自身での bit 一致実機再検証・parity 非後退実機再検証・`cuda_floor_bench`
@@ -98,6 +99,9 @@ swizzle を本番結線したが、PR #758 の codex-review／Cursor Bugbot 指�
   （`crates/backend-cuda/src/swizzle.rs`）が使う SM 数 `28` を「GB10 実測 SM 数」として扱っていたが、
   `docs/perf/sm121-device-attributes.md` L58 の `28` は RTX 3060（sm_121 ではない）の例示ダンプであり、
   同ドキュメント L79 のとおり GB10（sm_121）自体の SM 数は本リポでは未実測（Cursor Bugbot 指摘・PR #758）
+  （当時の記述。その後 2026-08-19 実測〈イシュー #739〉・2026-08-20 ベンチ起動診断の再確認〈イシュー #777〉
+  で GB10 の SM 数は 48 と実測済み。本番経路は `device.multiprocessor_count()` 実測値を動的に使うため
+  本件は解消済み〈上記 §2 冒頭「採用基準の改訂」段落 (c) 参照〉）
 
 `CudaMmaGemm::new` は base カーネル（`kernels_mma::mma_f16_source()`。swizzle 無適用）へ差し戻し済み。
 swizzle 適用版は引き続き `CudaMmaGemm::new_with_swizzle`（`internal-diagnostics` feature 限定）から opt-in
