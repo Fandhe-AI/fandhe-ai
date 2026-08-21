@@ -184,3 +184,25 @@ GEMM OSS 比較ギャップ改修ツリー（#785）Phase 2 完了（#796〜#798
   `docs/perf/metal-f16-vs-mps-f16.md`「タイル化後再計測」節（詳細結果表）の両方
 
 （次回実機計測時に追記。列: 日付・commit・per-size 比率・前回比差分）
+
+#### CUDA f32/f16（対 PyTorch CUDA）Phase 3/4 完了後再計測（イシュー #807・状態: 実機セッション待ち）
+
+GEMM OSS 比較ギャップ改修ツリー（#785）Phase 4 完了（親 #789「CUDA タイル形状拡大」。依存 #804・#806 は
+CLOSED だが本番カーネル定数は未変更）を受けた、対 PyTorch CUDA 比の確定計測枠。本節が対象とする実測
+手順・per-size 結果表は `docs/perf/cuda-phase34-remeasurement.md`（#807）が正であり、本節では二重管理
+せず状態のみを記録する。
+
+- 直近の確定値（Phase B/C 適用後・#571・2026-08-18 実測）: 判定対象形状の対 PyTorch 比最小値
+  f32=51.96%（4096）・f16=37.47%（4096）
+- 本イシュー（#807）着手時点: Linux dev-box（本イシュー実装セッション）から CUDA 実機（DGX Spark GB10）
+  への到達手段が `docs/real-hardware-verification-env.md`／`docs/real-hardware-verification-env.local.md`
+  のいずれにも存在せず、**実機未到達のため per-size 詳細・比率・前回比差分は未記入**（同型の #502・
+  #571・#572・#799・#803・#804・#806 と同じ先例に従い、実測線・計測手順の整備のみ完了させ実測は
+  DGX Spark GB10 実機セッションへ引き継ぐ。推定・外挿・捏造は行わない）
+- #804/#806（Phase 4 の依存イシュー）はいずれも「診断機構・机上候補表の整備」までで CLOSED しており、
+  本番カーネル定数（ブロックタイル・ステージ数）は変更されていない。本イシューの実測対象は main HEAD
+  の本番経路そのままである（`docs/perf/cuda-phase34-remeasurement.md` §1 参照）
+- 後続消化時の追記先: 本節（日付・commit・per-size 比率・前回比差分）と
+  `docs/perf/cuda-phase34-remeasurement.md`（詳細結果表）の両方
+
+（次回実機計測時に追記。列: 日付・commit・per-size 比率・前回比差分）
