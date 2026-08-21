@@ -11,8 +11,8 @@ basic の 3 段選択）との A/B 実機ベンチ、(3) 本番結線の採否�
 - `CudaMmaTf32Gemm`（#801。PR #823 でコミット `09f9f98`）は **本番非結線**の直接指定 API であり、
   `ops.rs`／`gemm.rs`／`gemm_auto.rs` のディスパッチからは呼ばれない
   （`docs/cuda-tensor-core-design.md` §14 冒頭「位置づけ」参照）。
-- 同梱の実機テスト（`crates/backend-cuda/tests/gemm_mma_tf32.rs`・
-  `tests/mma_tf32_vs_wmma_tf32_staged.rs`。いずれも `#[ignore]` 5 本）は #801 実装セッション・
+- 同梱の実機テスト（`crates/backend-cuda/tests/gemm_mma_tf32.rs`〈`#[ignore]` 4 本〉・
+  `tests/mma_tf32_vs_wmma_tf32_staged.rs`〈`#[ignore]` 2 本〉。計 6 本）は #801 実装セッション・
   #802 本セッションのいずれも DGX Spark GB10 実機へ到達できず**未実行**のまま。
 - 本ファイルは #802 の受け入れ条件 3 項（数値一致・parity・実機ベンチ）がいずれも実機実測を要する
   ため、実機到達可能なセッションが引き継いで完了させる前提の記録である。
@@ -54,14 +54,24 @@ basic の 3 段選択）との A/B 実機ベンチ、(3) 本番結線の採否�
 2. 以下を実行し、実行ログを本節へ追記する:
 
    ```sh
-   cargo test -p backend-cuda --release -- --ignored --nocapture \
-     mma_tf32_matches_reference_across_shapes \
-     mma_tf32_k4096_stress \
-     mma_tf32_zero_dim_shape_returns_empty_without_launch \
+   # rust libtest の位置引数 FILTER は 1 個のみ受理する（2 個目以降は
+   # unexpected argument になり実行不能）ため、`--test <file>` でテスト
+   # バイナリを限定したうえで 1 呼び出し 1 FILTER に分割する。
+
+   # crates/backend-cuda/tests/gemm_mma_tf32.rs（#[ignore] 4 本）
+   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+     mma_tf32_matches_reference_across_shapes
+   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+     mma_tf32_k4096_stress
+   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+     mma_tf32_zero_dim_shape_returns_empty_without_launch
+   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch
 
-   cargo test -p backend-cuda --release -- --ignored --nocapture \
-     mma_tf32_matches_wmma_tf32_staged_across_shapes \
+   # crates/backend-cuda/tests/mma_tf32_vs_wmma_tf32_staged.rs（#[ignore] 2 本）
+   cargo test -p backend-cuda --release --test mma_tf32_vs_wmma_tf32_staged -- --ignored --nocapture \
+     mma_tf32_matches_wmma_tf32_staged_across_shapes
+   cargo test -p backend-cuda --release --test mma_tf32_vs_wmma_tf32_staged -- --ignored --nocapture \
      mma_tf32_matches_wmma_tf32_staged_k4096_stress
 
    cargo test -p backend-cuda --release --test parity_nonregression -- --ignored --nocapture \
