@@ -278,6 +278,13 @@ thread `PRRT_kwDOTuUCJc6arIUt` を受けた是正）。実タスク数の多寡�
 数値一致（bit 完全一致契約）・実機性能実測の状況・採用ゲートの詳細は
 `docs/perf/cpu-gemm-b-packing-sharing.md` を参照。
 
+**追記（イシュー #793）**: 本節「実装済み・本番不採用」の状態は #793 でも変わらない。#793 は
+本番結線（採用ゲート＝実機実測での非劣化確認）の実施を試みたが、実装セッションの環境が
+Apple M4 Max 実機に到達できず（`docs/perf/cpu-gemm-b-packing-sharing.md` 追記節参照）、
+`gemm_blis_shared_b_region`／`dispatch_shared_b` は引き続き `#[cfg(test)]` 限定のまま
+本番未結線である。本節タイトルの「§F を『結線済み』へ更新する」は実機ゲート通過後の別セッション
+に持ち越す。
+
 ## 出典
 
 - イシュー #565（本ドキュメントの起票元）・#564／PR #701（E-8。MC/KC/NC パラメータ化・NC 拡大
