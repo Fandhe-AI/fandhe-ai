@@ -220,6 +220,13 @@ pub const MMA_STAGES: u32 = 3;
 /// `MMA_M x MMA_N` タイルを `MMA_WARP_TILES_M x MMA_WARP_TILES_N`（2x2）
 /// 個担当し、ロード済み A/B フラグメントを 4 通りの `mma.sync` で再利用
 /// する（本ファイル冒頭コメント「タイル構成」参照）。
+///
+/// warp タイル拡大候補（2x4／4x2／4x4）のレジスタ収支・`__launch_bounds__`
+/// 設計は #803（`mma_f16_source_with_warp_tiles`・
+/// `docs/perf/cuda-gemm-mma-warp-tile-register-budget.md`・
+/// `docs/cuda-tensor-core-design.md` §14）で検証済み。本番結線（この定数
+/// 自体の変更・`gemm_mma.rs` からの呼び出し）は #804 のスコープであり、
+/// 本定数は本イシューでは変更しない。
 pub const MMA_WARP_TILES_M: u32 = 2;
 pub const MMA_WARP_TILES_N: u32 = 2;
 
@@ -1900,6 +1907,150 @@ pub fn mma_f16_source_with_swizzle(group_width: u32) -> Result<String, crate::er
     Ok(source.replacen(ANCHOR, &remap, 1))
 }
 
+/// warp タイル拡大候補（イシュー #803）のレジスタ収支を実機 `ptxas -v` で
+/// 比較するための診断用ソース生成器。`mma_f16_source_with_swizzle` と同型の
+/// 方式（`mma_f16_source()`〈既定 config の render 結果〉に対するアンカー
+/// 完全一致置換・アンカー不在／複数出現は fail-closed エラー）で、本番
+/// カーネル定数（`MMA_WARP_TILES_M`/`_N`・`MMA_WARPS_N` 等）は一切変更せず
+/// カーネルソース文字列だけを差し替える。**本番結線（`MMA_WARP_TILES_M`/
+/// `_N` 定数の変更・`gemm_mma.rs` からの呼び出し）は本イシューのスコープ外
+/// であり後続 #804 が担う**（本ファイル `MMA_WARP_TILES_M`/`_N` 定数直下の
+/// ドキュメンテーションコメント参照）。
+///
+/// # 引数
+///
+/// - `warp_tiles_m`/`warp_tiles_n`: 候補の warp あたりレジスタブロッキング
+///   係数（`MMA_WARP_TILES_M`/`_N` 相当）。
+/// - `launch_bounds`: `Some(v)` の場合、カーネルシグネチャへ
+///   `__launch_bounds__(v)` を付与する（CUTLASS `device_kernel.h` 方式。
+///   `docs/cuda-tensor-core-design.md` §14 参照）。`v` は本関数が導出する
+///   ブロックスレッド数と完全一致する必要がある（不一致は誤った
+///   `.maxntid` での計測を招くため拒否する）。`None` は付与しない。
+///
+/// # エラー契約（fail-closed。REQ-8 の境界検査省略禁止と同方針）
+///
+/// - `warp_tiles_m == 0 || warp_tiles_n == 0`
+/// - `MMA_BM`/`MMA_BN` が `MMA_M * warp_tiles_m`/`MMA_N * warp_tiles_n` の
+///   倍数でない（warp グリッドを割り切らない構成は `MMA_WARPS_M`/`_N` の
+///   整数除算が余りを切り捨て、誤ったブロックタイル被覆を静かに生成する。
+///   `MMA_WARPS_M`/`_N` 定数直下のコンパイル時契約検査と同じ理由）
+/// - 導出ブロックスレッド数が `1024`（CUDA の per-block 上限）を超える
+/// - `launch_bounds == Some(v)` かつ `v` が導出ブロックスレッド数と不一致
+///
+/// 既定値 `(MMA_WARP_TILES_M, MMA_WARP_TILES_N, None)` を渡すと
+/// `mma_f16_source()` と完全に同一のバイト列を返す（本ファイル `tests`
+/// モジュールの `mma_f16_source_with_warp_tiles_default_matches_mma_f16_source`
+/// が回帰検査する）。
+///
+/// # 呼び出し元
+///
+/// `examples/mma_ptx_dump.rs`（`internal-diagnostics` feature 限定・
+/// `lib.rs::diagnostics` 経由）専用。本番経路（`gemm_mma.rs`）はこの関数を
+/// 呼ばない。
+///
+/// `mma_f16_source_with_swizzle` と異なり本番経路から無条件に呼ばれる
+/// 消費者を持たない（本番結線は #804 のスコープ）ため、`internal-
+/// diagnostics` feature 未指定の既定ビルドでは `lib.rs::diagnostics` の
+/// 再公開のみが唯一の参照元になり、rustc の dead-code 解析が未使用と
+/// 誤検知する（`kernels_wmma_opt.rs` の同種定数群と同じ理由）。
+#[allow(dead_code)]
+pub fn mma_f16_source_with_warp_tiles(
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+) -> Result<String, CudaError> {
+    if warp_tiles_m == 0 || warp_tiles_n == 0 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "mma_f16_source_with_warp_tiles requires warp_tiles_m/n >= 1 \
+                 (got warp_tiles_m={warp_tiles_m}, warp_tiles_n={warp_tiles_n})"
+            ),
+        });
+    }
+    let warp_m = MMA_M * warp_tiles_m;
+    let warp_n = MMA_N * warp_tiles_n;
+    if !MMA_BM.is_multiple_of(warp_m) || !MMA_BN.is_multiple_of(warp_n) {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "mma_f16_source_with_warp_tiles candidate warp tile {warp_m}x{warp_n} \
+                 (warp_tiles_m={warp_tiles_m}, warp_tiles_n={warp_tiles_n}) does not evenly \
+                 divide the block tile MMA_BM={MMA_BM}x MMA_BN={MMA_BN}"
+            ),
+        });
+    }
+    let warps_m = MMA_BM / warp_m;
+    let warps_n = MMA_BN / warp_n;
+    // `warps_m`/`warps_n` は上記倍数検査により常に `>= 1`（0 除算・0 warp
+    // は生じない）。
+    let threads = warps_m * warps_n * 32;
+    if threads > 1024 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "mma_f16_source_with_warp_tiles candidate warp tile {warp_m}x{warp_n} derives \
+                 {threads} threads/block, exceeding CUDA's per-block limit (1024)"
+            ),
+        });
+    }
+    if let Some(v) = launch_bounds
+        && v != threads
+    {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "mma_f16_source_with_warp_tiles launch_bounds ({v}) must equal the derived \
+                 thread count ({threads}) for warp tile {warp_m}x{warp_n}; a mismatched value \
+                 would measure ptxas register allocation under a `.maxntid` that does not \
+                 match the actual launch configuration"
+            ),
+        });
+    }
+
+    // #define アンカーは `mma_f16_source()`（既定 config の render 結果）に
+    // 実際に現れる値（`MMA_WARPS_N`/`MMA_WARP_TILES_M`/`_N` 定数）から
+    // 組み立てる（`mma_f16_source_with_swizzle` と同じ、定数変更に追従する
+    // 方式）。出現回数 1 を検査してから置換する（fail-closed）。
+    let replace_anchor =
+        |src: String, anchor: &str, replacement: &str| -> Result<String, CudaError> {
+            let occurrences = src.matches(anchor).count();
+            if occurrences != 1 {
+                return Err(CudaError::InvalidKernelConfig {
+                    detail: format!(
+                        "mma_f16_source_with_warp_tiles: anchor {anchor:?} occurs \
+                         {occurrences} times in mma_f16_source() (expected exactly 1); the \
+                         warp-tile define replacement assumption no longer holds"
+                    ),
+                });
+            }
+            Ok(src.replacen(anchor, replacement, 1))
+        };
+
+    let source = replace_anchor(
+        mma_f16_source().to_owned(),
+        &format!("#define WARPS_N {MMA_WARPS_N}\n"),
+        &format!("#define WARPS_N {warps_n}\n"),
+    )?;
+    let source = replace_anchor(
+        source,
+        &format!("#define WARP_TILES_M {MMA_WARP_TILES_M}\n"),
+        &format!("#define WARP_TILES_M {warp_tiles_m}\n"),
+    )?;
+    let source = replace_anchor(
+        source,
+        &format!("#define WARP_TILES_N {MMA_WARP_TILES_N}\n"),
+        &format!("#define WARP_TILES_N {warp_tiles_n}\n"),
+    )?;
+
+    let source = if let Some(v) = launch_bounds {
+        const SIG_ANCHOR: &str = "extern \"C\" __global__ void gemm_mma_f16(";
+        let sig_replacement =
+            format!("extern \"C\" __global__ void __launch_bounds__({v}) gemm_mma_f16(");
+        replace_anchor(source, SIG_ANCHOR, &sig_replacement)?
+    } else {
+        source
+    };
+
+    Ok(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3148,5 +3299,119 @@ mod tests {
             mma_f16_source().contains("int block_row0 = blockIdx.y * BM;"),
             "mma_f16_source() の元のアンカー行が失われています（本番カーネルは無変更のはず）"
         );
+    }
+
+    /// #803 受け入れ基準: 既定値
+    /// `(MMA_WARP_TILES_M, MMA_WARP_TILES_N, None)` は `mma_f16_source()` と
+    /// バイト一致する（`mma_f16_source_with_warp_tiles` ドキュメンテーション
+    /// コメント「既定値」節参照。parity 非後退契約への無影響を機械確認する）。
+    #[test]
+    fn mma_f16_source_with_warp_tiles_default_matches_mma_f16_source() {
+        let src = mma_f16_source_with_warp_tiles(MMA_WARP_TILES_M, MMA_WARP_TILES_N, None)
+            .expect("default warp tile config must be accepted");
+        assert_eq!(
+            src,
+            mma_f16_source(),
+            "既定値 (MMA_WARP_TILES_M, MMA_WARP_TILES_N, None) は mma_f16_source() と \
+             バイト一致するはず"
+        );
+    }
+
+    /// #803 実装計画 §3.1 の候補 A/B/C を含む複数の warp タイルで
+    /// `#define WARP_TILES_M`/`WARP_TILES_N`/`WARPS_N` が期待どおり置換
+    /// されることを検査する（候補表: 2x2 現行・2x4 案 A・4x2 案 B・4x4 案 C）。
+    #[test]
+    fn mma_f16_source_with_warp_tiles_replaces_defines_for_each_candidate() {
+        // (warp_tiles_m, warp_tiles_n, expected_warps_n, expected_threads)
+        let candidates = [
+            (2u32, 2u32, 8u32, 512u32),
+            (2, 4, 4, 256),
+            (4, 2, 8, 256),
+            (4, 4, 4, 128),
+        ];
+        for (wtm, wtn, expected_warps_n, expected_threads) in candidates {
+            let src = mma_f16_source_with_warp_tiles(wtm, wtn, None)
+                .unwrap_or_else(|err| panic!("wt={wtm}x{wtn}: {err}"));
+            assert!(
+                src.contains(&format!("#define WARP_TILES_M {wtm}\n")),
+                "wt={wtm}x{wtn}: WARP_TILES_M define が期待値になっていません"
+            );
+            assert!(
+                src.contains(&format!("#define WARP_TILES_N {wtn}\n")),
+                "wt={wtm}x{wtn}: WARP_TILES_N define が期待値になっていません"
+            );
+            assert!(
+                src.contains(&format!("#define WARPS_N {expected_warps_n}\n")),
+                "wt={wtm}x{wtn}: WARPS_N define が期待値（{expected_warps_n}）になっていません"
+            );
+            // ブロックスレッド数と launch_bounds 導出値との整合を launch_bounds
+            // 経路でも独立検査する（下記テスト参照）ため、ここでは導出値
+            // そのもの（expected_threads）が候補表の設計どおりであることを
+            // pin する。
+            let with_lb = mma_f16_source_with_warp_tiles(wtm, wtn, Some(expected_threads))
+                .unwrap_or_else(|err| panic!("wt={wtm}x{wtn} lb={expected_threads}: {err}"));
+            assert!(
+                with_lb.contains(&format!(
+                    "extern \"C\" __global__ void __launch_bounds__({expected_threads}) gemm_mma_f16("
+                )),
+                "wt={wtm}x{wtn}: __launch_bounds__({expected_threads}) がシグネチャに \
+                 見つかりません"
+            );
+        }
+    }
+
+    /// launch_bounds 指定時にシグネチャへ `__launch_bounds__` が 1 箇所だけ
+    /// 入り、非指定時（`None`）は元のシグネチャのまま（`__launch_bounds__`
+    /// を含まない）ことを検査する。
+    #[test]
+    fn mma_f16_source_with_warp_tiles_launch_bounds_none_omits_attribute() {
+        let src = mma_f16_source_with_warp_tiles(2, 2, None)
+            .expect("warp_tiles=2x2 with launch_bounds=None must be accepted");
+        assert!(
+            !src.contains("__launch_bounds__"),
+            "launch_bounds=None のとき __launch_bounds__ を含んではならない"
+        );
+        assert_eq!(
+            src.matches("extern \"C\" __global__ void gemm_mma_f16(")
+                .count(),
+            1,
+            "元のシグネチャがちょうど 1 回だけ残っているはず"
+        );
+    }
+
+    /// 不正入力（0・`MMA_BM`/`MMA_BN` を割り切らない値・`launch_bounds` 値
+    /// 不一致）が `Err(CudaError::InvalidKernelConfig)` になることを検査
+    /// する（`mma_f16_source_with_warp_tiles` ドキュメンテーションコメント
+    /// 「エラー契約」節参照）。
+    #[test]
+    fn mma_f16_source_with_warp_tiles_rejects_invalid_inputs() {
+        // warp_tiles_m/n == 0
+        let err = mma_f16_source_with_warp_tiles(0, 2, None).expect_err("warp_tiles_m=0");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+        let err = mma_f16_source_with_warp_tiles(2, 0, None).expect_err("warp_tiles_n=0");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+
+        // MMA_BM=64/MMA_BN=128 を割り切らない値（MMA_M=16・MMA_N=8 なので
+        // warp_tiles_m=3 → warp_m=48 は 64 を割り切らない）。
+        let err = mma_f16_source_with_warp_tiles(3, 2, None)
+            .expect_err("warp_tiles_m=3 does not evenly divide MMA_BM");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+
+        // launch_bounds 値の不一致（wt=2x2 の正しい導出値は 512）。
+        let err = mma_f16_source_with_warp_tiles(2, 2, Some(256))
+            .expect_err("launch_bounds mismatch must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
     }
 }

@@ -29,12 +29,23 @@
 //! オペレーターが手動で行う）、具体的な手順は `docs/perf/
 //! cuda-gemm-swizzle-ab.md` §3「レジスタスピル確認」に記載する。
 //!
+//! ## warp タイル拡大候補（イシュー #803 追加）
+//!
+//! 上記 base／swizzle に加え、warp タイル拡大候補（`docs/perf/
+//! cuda-gemm-mma-warp-tile-register-budget.md` §3.1 候補表: 2x2 現行・
+//! 2x4 案 A・4x2 案 B・4x4 案 C）× `__launch_bounds__`（なし／導出スレッド
+//! 数で明示付与）の組み合わせを `diagnostics::mma_f16_source_with_warp_tiles`
+//! （`kernels_mma.rs` 側ドキュメンテーションコメント参照）でダンプする。
+//! **本番カーネル定数（`MMA_WARP_TILES_M`/`_N`）は変更しない**（本番結線は
+//! 後続 #804 のスコープ）。
+//!
 //! `internal-diagnostics` feature（既定 off）を要求する。本 example が使う
 //! `backend_cuda::diagnostics::{mma_f16_source, mma_f16_source_with_swizzle,
-//! mma_swizzle_group_width}` は非公開 `mod kernels_mma`／`mod swizzle` への
-//! 薄い診断用ラッパーであり、既定ビルドの公開 API 面（`facade`）には
-//! 出さない契約（`lib.rs::diagnostics` モジュール冒頭コメント・
-//! `examples/gemm_mma_swizzle_bench.rs` と同じ feature ゲート方針を踏襲）。
+//! mma_f16_source_with_warp_tiles, mma_swizzle_group_width}` は非公開 `mod
+//! kernels_mma`／`mod swizzle` への薄い診断用ラッパーであり、既定ビルドの
+//! 公開 API 面（`facade`）には出さない契約（`lib.rs::diagnostics` モジュール
+//! 冒頭コメント・`examples/gemm_mma_swizzle_bench.rs` と同じ feature ゲート
+//! 方針を踏襲）。
 //! `gemm_mma_swizzle_bench.rs` は `Cargo.toml` の `[[example]]
 //! required-features` で本 feature を要求し、feature 未指定時は
 //! `cargo build --workspace --all-targets`（自動ターゲット走査）から
@@ -331,17 +342,71 @@ fn main() {
     let base_cubin_q = shell_quote(&format!("{}.cubin", base_path.display()));
     let swizzle_q = shell_quote(&swizzle_path.display().to_string());
     let swizzle_cubin_q = shell_quote(&format!("{}.cubin", swizzle_path.display()));
-    // 冒頭の `out_dir={}` は `key=value` 形式の情報表示行であり、下記 2 行の
+
+    let mut ptxas_lines = vec![
+        format!("ptxas -arch={ptxas_arch} -v {base_q} -o {base_cubin_q}"),
+        format!("ptxas -arch={ptxas_arch} -v {swizzle_q} -o {swizzle_cubin_q}"),
+    ];
+
+    // イシュー #803: warp タイル拡大候補（本ファイル冒頭コメント「warp
+    // タイル拡大候補」節）を launch_bounds なし/あり（値=導出スレッド数）の
+    // 2 通りずつダンプする。`(warp_tiles_m, warp_tiles_n)` は
+    // `docs/perf/cuda-gemm-mma-warp-tile-register-budget.md` §3.1 候補表と
+    // 一致させる（2x2 現行を含む: 既定構成との差分比較の基準点として
+    // 必要）。導出スレッド数（`launch_bounds` の値）は
+    // `diagnostics::mma_f16_source_with_warp_tiles` が fail-closed で検査
+    // するため、ここでは候補表由来の値をハードコードせず None 経路の
+    // 成功から独立に確定できないが、値自体は候補表と `kernels_mma.rs`
+    // 側ユニットテスト（`mma_f16_source_with_warp_tiles_replaces_defines_for_each_candidate`）
+    // が pin 済みのため、ここでは候補表の値をそのまま埋め込む。
+    for (warp_tiles_m, warp_tiles_n, threads) in
+        [(2u32, 2u32, 512u32), (2, 4, 256), (4, 2, 256), (4, 4, 128)]
+    {
+        for launch_bounds in [None, Some(threads)] {
+            let label = match launch_bounds {
+                None => format!("wt{warp_tiles_m}x{warp_tiles_n}"),
+                Some(v) => format!("wt{warp_tiles_m}x{warp_tiles_n}_lb{v}"),
+            };
+            let source = match diagnostics::mma_f16_source_with_warp_tiles(
+                warp_tiles_m,
+                warp_tiles_n,
+                launch_bounds,
+            ) {
+                Ok(src) => src,
+                Err(e) => {
+                    eprintln!(
+                        "backend-cuda mma_ptx_dump: mma_f16_source_with_warp_tiles(\
+                         {warp_tiles_m}, {warp_tiles_n}, {launch_bounds:?}) failed ({e})"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let path = out_dir.join(format!("mma_f16_{label}.ptx"));
+            if let Err(e) = dump_ptx(&source, &nvrtc_arch, &path, &label) {
+                eprintln!("backend-cuda mma_ptx_dump: {e}");
+                std::process::exit(1);
+            }
+            let path_q = shell_quote(&path.display().to_string());
+            let cubin_q = shell_quote(&format!("{}.cubin", path.display()));
+            ptxas_lines.push(format!("ptxas -arch={ptxas_arch} -v {path_q} -o {cubin_q}"));
+        }
+    }
+
+    // 冒頭の `out_dir={}` は `key=value` 形式の情報表示行であり、下記の
     // `ptxas ...` コマンド行（オペレーターがそのまま端末へ貼り付けて実行する
     // 想定）とは異なり、シェルコマンドとして貼り付けられる文脈ではない
     // ため未クォートのままとする（クォートすると `out_dir='...'` のように
     // 値として読みづらくなるだけで安全性向上に寄与しない）。
+    let ptxas_commands = ptxas_lines
+        .iter()
+        .map(|line| format!("\x20   {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     println!(
         "done. out_dir={} nvrtc_arch={nvrtc_arch} ptxas_arch={ptxas_arch} \
          group_width={group_width}. Run the following to inspect register/spill counts \
-         (docs/perf/cuda-gemm-swizzle-ab.md §3):\n\
-         \x20   ptxas -arch={ptxas_arch} -v {base_q} -o {base_cubin_q}\n\
-         \x20   ptxas -arch={ptxas_arch} -v {swizzle_q} -o {swizzle_cubin_q}",
+         (docs/perf/cuda-gemm-swizzle-ab.md §3・docs/perf/\
+         cuda-gemm-mma-warp-tile-register-budget.md §4):\n{ptxas_commands}",
         out_dir.display(),
     );
 }
