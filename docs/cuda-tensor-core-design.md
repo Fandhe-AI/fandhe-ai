@@ -338,6 +338,39 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
 （f32 候補下限の算出ロジック `best_f32` には組み込まない）。詳細な再開手順・記録テンプレは
 `docs/perf/cuda-gemm-mma-tf32-ab.md` を参照。
 
+## 16. mma_f16 ブロックタイル拡大・ステージ数増（#804・Step F フォールバック）
+
+- **位置づけ**: 親イシュー #479（GEMM 性能改善ツリー）→ Phase 4 親 #789 配下の #804
+  「perf(backend-cuda): mma_f16 ブロックタイル拡大とステージ数増」。§14（#803）の warp タイル
+  拡大候補と組み合わせ、ブロックタイル（`MMA_BM`/`MMA_BN`）・`cp.async` パイプライン段数
+  （`MMA_STAGES`）を拡大してデータ再利用と Tensor Core 発行密度を上げる狙い。
+- **実機到達不能（Step F フォールバック）**: 本イシューの実装セッションでも #803（§14）・#801
+  （§15.6）と同型の制約により DGX Spark GB10 実機へ到達できず、加えて本 worktree のローカル
+  環境にも `ptxas`/`nvrtc`（CUDA toolkit 本体）が存在しなかった（`libcuda.so.1` の driver stub
+  のみ）。したがって**本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・
+  `swizzle.rs::SWIZZLE_APPLY_MIN_M_BLOCKS`/`_N_BLOCKS`・`gemm_auto.rs` の静的 SMEM 予算 assert は
+  一切変更していない**。診断機構の拡張・机上候補表の記録のみを本イシューの成果物とした
+  （実装計画 Step F）。
+- **診断機構**: `kernels_mma.rs::mma_f16_source_with_block_tile(bm, bn, bk, stages, warp_tiles_m,
+  warp_tiles_n, launch_bounds, optin_budget_bytes)`（`mma_f16_source_with_warp_tiles`〈#803・#822〉
+  と同型のアンカー完全一致置換方式を `BM`/`BN`/`BK`/`STAGES`/`A_PAD`/`B_PAD` へ拡張）を新設し、
+  `internal-diagnostics` feature 限定で `lib.rs::diagnostics` 経由・`examples/mma_ptx_dump.rs` から
+  到達可能にした。共有メモリ予算は呼び出し元供給の `optin_budget_bytes`（デバイス実測値。
+  `kernels_wmma_opt.rs` と同じ方針）に対し、静的 48KiB 以下ならそのまま、超過・opt-in 予算以下
+  なら `extern __shared__` 変換（多次元添字構文を保つ `typedef` 配列型ポインタ方式）、opt-in 予算
+  超過なら机上除外エラーの 3 分岐で判定する。既定値 `(MMA_BM, MMA_BN, MMA_BK, MMA_STAGES,
+  MMA_WARP_TILES_M, MMA_WARP_TILES_N, None, MMA_SHARED_MEM_BYTES)` は `mma_f16_source()` とバイト
+  一致することをユニットテストで固定しており、本番経路への影響がないことを機械的に担保する。
+  **`extern __shared__` 変換経路は `nvrtc`/`ptxas` 実機での構文検証を一度も通過していない**。
+- **候補・机上見積もり**: `docs/perf/cuda-gemm-mma-block-tile-stages.md` を参照（候補: ステージ増
+  のみ `bt64x128_s4`〈55,296B〉・タイル拡大 `bt128x128_s3_wt2x4`〈56,832B〉・タイル拡大+
+  `bt128x256_s3_wt4x4`〈81,408B〉。いずれも静的 48KiB を超え GB10 実測 opt-in 上限 101,376B 以下。
+  `bt128x256_s4`〈108,544B〉は opt-in 上限超過のため机上除外）。実機 `ptxas -v` 実測表は本イシュー
+  時点では実行待ち。
+- **#804 の残作業（次に実機到達できたセッションへ）**: `docs/perf/
+  cuda-gemm-mma-block-tile-stages.md` §6 を参照（実測・採用構成決定・動的 SMEM opt-in の起動側
+  結線・swizzle/`gemm_auto.rs` 追従・4096 ベンチ・parity 非後退確認）。
+
 ## 参考文献
 
 - [Analyzing Nvidia GB10's GPU — Chester Lam](https://chipsandcheese.com/p/analyzing-nvidia-gb10s-gpu)（SM12x の `mma.sync` 系譜、`tcgen05`/`wgmma` 非対応の根拠）

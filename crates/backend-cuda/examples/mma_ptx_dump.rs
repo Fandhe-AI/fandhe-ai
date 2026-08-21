@@ -39,10 +39,30 @@
 //! **本番カーネル定数（`MMA_WARP_TILES_M`/`_N`）は変更しない**（本番結線は
 //! 後続 #804 のスコープ）。
 //!
+//! ## ブロックタイル拡大・ステージ数増候補（イシュー #804 追加）
+//!
+//! 上記 warp タイル候補に加え、ブロックタイル（`BM`/`BN`/`BK`）・段数
+//! （`STAGES`）を組み合わせた候補（`docs/perf/
+//! cuda-gemm-mma-block-tile-stages.md` §3.1 候補表: ステージ増のみ
+//! `bt64x128_s4`・タイル拡大 `bt128x128_s3_wt2x4`・タイル拡大+
+//! `bt128x256_s3_wt4x4`）× `__launch_bounds__`（なし／導出スレッド数）を
+//! `diagnostics::mma_f16_source_with_block_tile` でダンプする。全候補が
+//! 静的 48KiB を超え opt-in 動的共有メモリ（GB10 実測上限 101,376B）を
+//! 要求するため、生成ソースは `extern __shared__` 変種になる。
+//! `bt128x256_s4`（108,544B）は opt-in 上限超過のため机上除外し、除外根拠を
+//! 標準出力へ記録するのみでダンプしない。**本番カーネル定数
+//! （`MMA_BM`/`MMA_BN`/`MMA_STAGES`）は変更しない**（実機到達不能のため
+//! #804 実装セッション時点では本番結線を行わず、診断機構整備のみに留めた。
+//! `docs/cuda-tensor-core-design.md` §16 参照）。動的 SMEM 化を伴う生成
+//! ソースは NVRTC/ptxas での実機構文検証を経ておらず、本番起動側の
+//! opt-in 結線（`CudaFunction::set_attribute`・`shared_mem_bytes`）も
+//! 未実装のままである。
+//!
 //! `internal-diagnostics` feature（既定 off）を要求する。本 example が使う
 //! `backend_cuda::diagnostics::{mma_f16_source, mma_f16_source_with_swizzle,
-//! mma_f16_source_with_warp_tiles, mma_swizzle_group_width}` は非公開 `mod
-//! kernels_mma`／`mod swizzle` への薄い診断用ラッパーであり、既定ビルドの
+//! mma_f16_source_with_warp_tiles, mma_f16_source_with_block_tile,
+//! mma_swizzle_group_width}` は非公開 `mod kernels_mma`／`mod swizzle` への
+//! 薄い診断用ラッパーであり、既定ビルドの
 //! 公開 API 面（`facade`）には出さない契約（`lib.rs::diagnostics` モジュール
 //! 冒頭コメント・`examples/gemm_mma_swizzle_bench.rs` と同じ feature ゲート
 //! 方針を踏襲）。
@@ -396,6 +416,75 @@ fn main() {
         }
     }
 
+    // イシュー #804: ブロックタイル拡大・ステージ数増候補（実装計画
+    // Step 1 の候補表。`docs/perf/cuda-gemm-mma-block-tile-stages.md` §3.1）を
+    // launch_bounds なし/あり（値=導出スレッド数）の 2 通りずつダンプする。
+    // `optin_budget_bytes` は GB10 実測の
+    // `MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`（`docs/perf/
+    // sm121-device-attributes.md` 出典。101,376B）を渡す。#803 の warp
+    // タイル拡大ループ（上記）と同じ「不一致は生成関数自体が fail-closed で
+    // 拒否する」契約に依拠する。
+    const OPTIN_BUDGET_BYTES: u32 = 101_376;
+    for (label, bm, bn, bk, stages, warp_tiles_m, warp_tiles_n, threads) in [
+        // ステージ増のみ（現行ブロックタイルのまま S3→S4。55,296B）。
+        (
+            "bt64x128_s4",
+            64u32,
+            128u32,
+            32u32,
+            4u32,
+            2u32,
+            2u32,
+            512u32,
+        ),
+        // ブロックタイル拡大（128x128・warp2x4。56,832B）。
+        ("bt128x128_s3_wt2x4", 128, 128, 32, 3, 2, 4, 512),
+        // ブロックタイル拡大+（128x256・warp4x4。81,408B）。
+        ("bt128x256_s3_wt4x4", 128, 256, 32, 3, 4, 4, 512),
+    ] {
+        for launch_bounds in [None, Some(threads)] {
+            let file_label = match launch_bounds {
+                None => label.to_string(),
+                Some(v) => format!("{label}_lb{v}"),
+            };
+            let source = match diagnostics::mma_f16_source_with_block_tile(
+                bm,
+                bn,
+                bk,
+                stages,
+                warp_tiles_m,
+                warp_tiles_n,
+                launch_bounds,
+                OPTIN_BUDGET_BYTES,
+            ) {
+                Ok(src) => src,
+                Err(e) => {
+                    eprintln!(
+                        "backend-cuda mma_ptx_dump: mma_f16_source_with_block_tile({bm}, {bn}, \
+                         {bk}, {stages}, {warp_tiles_m}, {warp_tiles_n}, {launch_bounds:?}) \
+                         failed ({e})"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let path = out_dir.join(format!("mma_f16_{file_label}.ptx"));
+            if let Err(e) = dump_ptx(&source, &nvrtc_arch, &path, &file_label) {
+                eprintln!("backend-cuda mma_ptx_dump: {e}");
+                std::process::exit(1);
+            }
+            let path_q = shell_quote(&path.display().to_string());
+            let cubin_q = shell_quote(&format!("{}.cubin", path.display()));
+            ptxas_lines.push(format!("ptxas -arch={ptxas_arch} -v {path_q} -o {cubin_q}"));
+        }
+    }
+    // 128x256x32・S4 は机上見積もり 108,544B で opt-in 上限 101,376B を
+    // 超えるため机上除外する（#804 実装計画 Step 1 候補表参照。実機到達を
+    // 待たずダンプ対象から外せる）。
+    println!(
+        "desk-excluded: bt128x256_s4 (128x256x32 S4) requires 108,544B, exceeding the \
+         {OPTIN_BUDGET_BYTES}B opt-in budget; not dumped"
+    );
+
     // 冒頭の `out_dir={}` は `key=value` 形式の情報表示行であり、下記の
     // `ptxas ...` コマンド行（オペレーターがそのまま端末へ貼り付けて実行する
     // 想定）とは異なり、シェルコマンドとして貼り付けられる文脈ではない
@@ -410,7 +499,8 @@ fn main() {
         "done. out_dir={} nvrtc_arch={nvrtc_arch} ptxas_arch={ptxas_arch} \
          group_width={group_width}. Run the following to inspect register/spill counts \
          (docs/perf/cuda-gemm-swizzle-ab.md §3・docs/perf/\
-         cuda-gemm-mma-warp-tile-register-budget.md §4):\n{ptxas_commands}",
+         cuda-gemm-mma-warp-tile-register-budget.md §4・docs/perf/\
+         cuda-gemm-mma-block-tile-stages.md §3):\n{ptxas_commands}",
         out_dir.display(),
     );
 }

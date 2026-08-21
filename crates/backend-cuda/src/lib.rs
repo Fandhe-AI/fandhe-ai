@@ -385,6 +385,15 @@ pub mod diagnostics {
     // 本番結線まで `MMA_WARP_TILES_M`/`_N` 定数自体は無変更）。
     pub use kernels_mma::mma_f16_source_with_warp_tiles;
 
+    // イシュー #804: ブロックタイル拡大・ステージ数増候補（実装計画
+    // Step 1 の候補表。`docs/perf/cuda-gemm-mma-block-tile-stages.md`）を
+    // `examples/mma_ptx_dump.rs` から観測するための再公開。
+    // `mma_f16_source_with_warp_tiles`（#803・#822）と同じ「非公開
+    // モジュールへの薄い診断用ラッパー」方針。本番経路（`gemm_mma.rs`）は
+    // この再公開に依存しない（`MMA_BM`/`MMA_BN`/`MMA_STAGES` 等の本番定数は
+    // 本イシュー時点で実機到達不能のため無変更のまま。計画 Step F 参照）。
+    pub use kernels_mma::mma_f16_source_with_block_tile;
+
     /// `wmma_tf32`（WMMA(TF32) opt）カーネルのブロックタイル形状
     /// `(block_m, block_n)`。`examples/gemm_profile_target.rs` の
     /// occupancy 概算専用。
