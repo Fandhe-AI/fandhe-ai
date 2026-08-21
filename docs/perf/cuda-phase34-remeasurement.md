@@ -324,7 +324,26 @@ parity ゲート → 5 回計測 → `ptxas -v` 実測。§4・§6 と同型の�
   扱う tiled f32／WMMA 系の性能確定計測（§7〜§10）とは独立**であり、
   本ドキュメントの実測待ち表・下限値判断への影響はない
 
-## 15. 相互参照
+## 16. #841 実機 A/B 実装セッション（実機到達不能）の追記（イシュー #841）
+
+§14 の f16 側（#840）に続き、TF32 生 `mma.sync`（`CudaMmaTf32Gemm`）側の
+ブロックタイル・ステージ数増候補についても同型の A/B ランナー・計測
+バイナリ・ユニットテストを整備した（#841。
+`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5.1・§7.1）。ただし本実装
+セッションでは §14 の f16 側実測時とは異なり DGX Spark GB10 実機へ到達
+できず、実機実測（regs/thread・spill・5 回計測中央値・数値一致結果）は
+「未実測・実行待ち」のまま残った。加えて TF32 経路は `CudaMmaTf32Gemm`
+自体に既知 correctness bug（#839。数値一致 6 本中 4 本 FAIL）があり
+未修正のため、実機到達後も候補の数値一致結果は FAIL が主体になる見込み
+である（`docs/perf/cuda-gemm-mma-tf32-ab.md` §7.1）。
+
+- **本番カーネル定数（`MMA_TF32_BM`/`MMA_TF32_BN`/`MMA_TF32_STAGES`）・
+  本ドキュメントが扱う tiled f32／WMMA 系の性能確定計測（§7〜§10）とは
+  独立**であり、本ドキュメントの実測待ち表・下限値判断への影響はない
+- 次に実機到達できたセッションの再開手順は
+  `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §8 を参照
+
+## 17. 相互参照
 
 - 前回ベースライン: `docs/perf/cuda-optimized-remeasurement.md`（#571・Phase F-1）
 - parity 正本: `docs/perf/cuda-parity-baseline.md`
@@ -332,5 +351,6 @@ parity ゲート → 5 回計測 → `ptxas -v` 実測。§4・§6 と同型の�
 - OSS 比較キャンペーン表: `docs/perf/oss-gemm-comparison-baseline.md` §7.2
 - #804/#806 の未結線状態の詳細: `docs/perf/cuda-gemm-mma-block-tile-stages.md`（#840 で
   f16 側実機 A/B 実測を完了。§15 参照）・`docs/perf/cuda-gemm-mma-tf32-block-tile.md`
+  （#841 で実行系整備・実機実測は未達。§16 参照）
 - 実機接続手順: `docs/real-hardware-verification-env.md`（実ホスト名は `docs/
   real-hardware-verification-env.local.md`。Git 管理外）

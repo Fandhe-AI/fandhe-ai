@@ -115,6 +115,46 @@ MMA_TF32_SHARED_MEM_BYTES)` は `mma_tf32_source()` とバイト一致するこ�
 をユニットテストで固定しており、本番経路（`gemm_mma_tf32.rs`）への影響
 がないことを機械的に担保する。
 
+### 5.1 A/B ランナー（イシュー #841 で追加）
+
+上記の候補ソース生成（`mma_tf32_source_with_block_tile`）を実際に NVRTC
+コンパイル・起動して計測するための実行系を追加した
+（`kernels_mma.rs::render_mma_f16_block_tile`/
+`RenderedMmaF16BlockTileKernel`/`CompiledMmaF16BlockTileKernel`〈#840・
+f16 版〉と同型設計）。
+
+- `MmaTf32BlockTileLayout`（`derive_mma_tf32_block_tile_layout` が返す、
+  `threads`/`a_pad`/`b_pad`/`smem_bytes`/`needs_dynamic_smem()` を含む
+  レイアウト descriptor。SMEM 式・スレッド数導出式の単一の真実源）
+- `RenderedMmaTf32BlockTileKernel`/`render_mma_tf32_block_tile(bm, bn,
+  bk, stages, warp_tiles_m, warp_tiles_n, launch_bounds,
+  optin_budget_bytes)`（候補ソース＋レイアウトを 1 個の descriptor に
+  束ねる。`optin_budget_bytes` 超過時は `mma_tf32_source_with_block_tile`
+  と同じ理由で `CudaError::InvalidKernelConfig` を返す）
+- `RenderedMmaTf32BlockTileKernel::compile(device)` → NVRTC コンパイル・
+  固定エントリポイント `"gemm_mma_tf32"` のロード・`needs_dynamic_smem()`
+  時のみ `CudaFunction::set_attribute`
+  （`CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`）で opt-in 予算を
+  設定し `CompiledMmaTf32BlockTileKernel` を返す
+- `CompiledMmaTf32BlockTileKernel::launch_tf32(...)` →
+  `CudaMmaTf32Gemm::launch_tf32` と同じ検証手順（`validate_gemm_dims`／
+  `validate_output_len`／no-op 早期 return／
+  `validate_mma_tf32_alignment`／grid y 上限検査／K タイル境界検査）＋
+  `LaunchConfig.shared_mem_bytes` の設定
+
+いずれも `internal-diagnostics` feature 限定で `lib.rs::diagnostics`
+経由・`examples/gemm_mma_tf32_block_tile_bench.rs`（本イシューで追加。
+§6.1）から到達可能にした。`crates/backend-cuda/src/kernels_mma_tf32.rs::
+tests` に既定値一致・候補表 SMEM 実測値一致・opt-in 予算超過拒否・
+`RenderedMmaTf32BlockTileKernel` のソース一致の 4 種のユニットテストを
+追加済み（CI 常時実行・CUDA 非搭載環境でも成立）。
+
+**`CudaMmaTf32Gemm` 自体は #839 で不採用（凍結）と確定済み**（本ドキュ
+メント §1・`docs/perf/cuda-gemm-mma-tf32-ab.md` §2 参照）。A/B ランナー
+追加・実機計測（本イシュー）はこの凍結判断を覆すものではなく、既知
+correctness bug が未修正のまま実機計測を実施し結果を正直に記録する
+（§7.1）。
+
 ## 6. ダンプ手順
 
 ```sh
@@ -139,28 +179,65 @@ DGX Spark GB10 実機（CUDA 13.0 toolkit）へ `.ptx` ファイルを転送し
 | 両拡大+ステージ増 | なし/512 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 | BK 拡大 | なし/256 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 | 未実測 |
 
-本イシュー時点では実機到達不能のため上記は未実測のまま「実行待ち」と
-明記する（推定値を記入しない。`docs/perf/cuda-parity-baseline.md` §2
-検査項目に従う）。
+本イシュー（#841）時点でも実機到達不能のため上記は未実測のまま「実行
+待ち」と明記する（推定値を記入しない。`docs/perf/cuda-parity-baseline.md`
+§2 検査項目に従う）。§7.1 に本イシューで完了した範囲（実行系整備）と
+未達項目を記録する。
+
+### 7.1 #841 実装セッションの実施範囲（実機到達不能）
+
+- **完了**: A/B ランナー（`kernels_mma_tf32.rs::RenderedMmaTf32BlockTileKernel`/
+  `CompiledMmaTf32BlockTileKernel`/`render_mma_tf32_block_tile`）・計測
+  バイナリ（`examples/gemm_mma_tf32_block_tile_bench.rs`）・CUDA 非搭載
+  環境でも通るユニットテスト（`kernels_mma_tf32.rs::tests`。既定引数
+  バイト一致・候補表 SMEM 実測値一致・opt-in 予算超過拒否・
+  `RenderedMmaTf32BlockTileKernel` ソース一致）を実装し、`cargo build -p
+  backend-cuda --examples --features internal-diagnostics`・`cargo test -p
+  backend-cuda --features internal-diagnostics`・`cargo clippy --workspace
+  --all-targets --all-features -- -D warnings`・`cargo fmt --all -- --check`
+  がいずれも green であることを CUDA 非搭載環境で確認済み（本 PR コミット
+  時点）。
+- **未達（本イシューの受け入れ条件そのもの）**: 実装セッション中は
+  DGX Spark GB10 実機へ到達できなかったため、(1) 候補ごとの
+  `ptxas -arch=sm_121 -v` regs/thread・spill 実測、(2) `#[ignore]` 数値
+  一致テストの実機実行、(3) `gemm_mma_tf32_block_tile_bench` の 5 回
+  プロセス起動・候補×形状ごとの中央値記録、のいずれも実施できていない。
+  §7 表は「未実測」のまま据え置く（実測値の捏造・placeholder 記入は
+  行わない。実装計画§4「コンティンジェンシー」節の Step F 型フォール
+  バックを踏襲）。
+- 本イシューは受け入れ条件（実測記録）未達のため **close しない**。
+  次回実機到達セッションは §8 の手順から再開する。
 
 ## 8. 次に実機到達できたセッションへの引き継ぎ事項
 
+0. **本イシュー（#841）時点で実行系（A/B ランナー・計測バイナリ・
+   ユニットテスト）は整備済み**（§5.1・§7.1）。以下 1〜5 は「実装」で
+   はなく「実行」のみで消化できる状態にある。
 1. §6 の手順で全候補（`launch_bounds` あり/なし各 2 通り）を `ptxas -v`
    実測し、spill 0 の候補のみ §7 表へ記録する。
 2. `#[ignore]` 数値一致テスト（`tests/gemm_mma_tf32.rs`・
    `tests/mma_tf32_vs_wmma_tf32_staged.rs`）と `parity_nonregression` 系を
    実行し、既存の統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5
-   未満）で確認する。
-3. 5 回計測中央値で 512〜4096 を計測し、4096 改善・2048 非劣化を確認
-   する。
+   未満）で確認する。`CudaMmaTf32Gemm` 自体の既知 correctness bug（#839。
+   `docs/perf/cuda-gemm-mma-tf32-ab.md` §2〜§3）は未修正のため FAIL が
+   想定される結果であり、非後退（既存記録と同一の FAIL パターンである
+   こと）の確認が目的。
+3. `cargo run -p backend-cuda --example gemm_mma_tf32_block_tile_bench
+   --release --features internal-diagnostics` を **5 回プロセス起動**し、
+   候補×形状ごとに 5 run の中央値を §7 表・§7.1 へ記録する（生ログ・
+   生値も残す）。数値一致 FAIL の候補値は「参考値（採否判断に使用不可）」
+   と明記する。
 4. 合格候補があれば `MMA_TF32_BM`/`MMA_TF32_BN`/`MMA_TF32_BK`/
    `MMA_TF32_STAGES`/`MMA_TF32_WARP_TILES_M`/`_N` 定数を更新する
    （`CudaMmaTf32Gemm` は本番非結線のため 3 段選択には触れない。opt-in
    構成が最良の場合は `gemm_mma_tf32.rs` 側の起動結線
    〈`set_attribute`・`shared_mem_bytes`・実行時予算検証〉も同 PR で
-   実装する）。
+   実装する）。ただし採否判断・本番反映自体は #842 のスコープであり、
+   本イシュー（#841）では実測記録までに留める。
 5. 実測値を本ドキュメント §7・`docs/perf/cuda-parity-baseline.md` へ
    記録する。
-6. TF32 mma.sync 経路の本番 3 段選択への結線・採否判断自体は #802 の
+6. TF32 mma.sync 経路の本番 3 段選択への結線・採否判断自体は #842 の
    スコープであり、本イシューでは行わない（`docs/perf/
-   cuda-gemm-mma-tf32-ab.md` §2 参照）。
+   cuda-gemm-mma-tf32-ab.md` §2 参照）。`CudaMmaTf32Gemm` の既知
+   correctness bug の原因調査・修正は別イシュー（ユーザー承認待ち、
+   `docs/perf/cuda-gemm-mma-tf32-ab.md` §6 記載）。

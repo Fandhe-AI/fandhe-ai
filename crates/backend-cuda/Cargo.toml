@@ -108,6 +108,16 @@ required-features = ["internal-diagnostics"]
 name = "gemm_mma_block_tile_bench"
 required-features = ["internal-diagnostics"]
 
+[[example]]
+# イシュー #841: #806（PR #832）が整備した TF32 生 `mma.sync` ブロック
+# タイル・ステージ数拡大候補（`diagnostics::mma_tf32_source_with_block_
+# tile`）を実際に NVRTC コンパイル・起動して現行本番定数と実機 A/B 計測
+# する（`gemm_mma_block_tile_bench`〈#840・f16 版〉と同型）。
+# `diagnostics::render_mma_tf32_block_tile`/`CompiledMmaTf32BlockTileKernel`
+# （同 feature ゲート）を使う。
+name = "gemm_mma_tf32_block_tile_bench"
+required-features = ["internal-diagnostics"]
+
 [dev-dependencies]
 # CPU 参照実装（`gemm_naive`。`mul_add` FMA 契約）を GEMM 数値一致テスト
 # （tests/gemm_naive.rs・#33）の比較対象として使う。workspace 内クレート

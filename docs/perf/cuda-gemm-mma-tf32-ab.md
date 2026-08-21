@@ -322,3 +322,17 @@ cuda-gemm-mma-tf32-block-tile.md`）。この実機到達不能制約自体は #
 `cuda-gemm-mma-tf32-block-tile.md` §6・§8（タイル拡大候補の `ptxas -v`
 実測・4096/2048 ベンチ）を同一セッションでまとめて消化できる（両者とも
 DGX Spark GB10 実機・CUDA 13.0 toolkit を要求する点が共通のため）。
+
+### 7.1 #841 実装セッションの追記（実機到達不能・実行系整備のみ完了）
+
+イシュー #841 は上記ブロック（`CudaMmaTf32Gemm` の既知 correctness bug
+未修正）を認識したうえで「候補ごとの結果（pass/FAIL）を実測して正直に
+記録する」方針で実行系（A/B ランナー・計測バイナリ・ユニットテスト）を
+整備した（`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §5.1・§7.1）。
+本実装セッションでも DGX Spark GB10 実機へ到達できなかったため、実機
+実測（regs/thread・spill・5 回計測中央値・数値一致結果）は未達のまま
+「実行待ち」で据え置いている。次に実機到達できたセッションは
+`cuda-gemm-mma-tf32-block-tile.md` §8 の手順（0〜6）からそのまま再開
+できる（実装済みの `examples/gemm_mma_tf32_block_tile_bench.rs` を実行
+するのみで、追加実装は不要）。数値一致 FAIL の候補値は「参考値（採否
+判断に使用不可）」として区分して記録する運用（§4 の踏襲）とした。
