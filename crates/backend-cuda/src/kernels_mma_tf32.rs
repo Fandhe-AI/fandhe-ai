@@ -1,0 +1,757 @@
+//! TF32 `mma.sync`(m16n8k8)/`ldmatrix`/`cp.async` GEMM の CUDA カーネルソース
+//! （イシュー #801。TF32 経路を WMMA C++ API〈`kernels_wmma_opt.rs` の
+//! `WMMA_TF32_F32_STAGED_BODY`〉から生 PTX 直叩きへ移行する refactor）。
+//!
+//! # 位置づけ・非結線（重要）
+//!
+//! 本モジュールは `kernels_mma.rs::MMA_F16_BODY`（f16 `mma.sync`/`ldmatrix`/
+//! `cp.async` 経路。TASK-11.1h・#187）の構造を TF32 精度へ移植したもので
+//! あり、fragment が opaque な WMMA C++ API とは異なり ldmatrix 運用・
+//! レジスタダブルバッファ・タイル形状を直接制御できる（実装計画 1 節）。
+//! **本イシューでは本番ディスパッチ経路（`gemm.rs`／`ops.rs`／
+//! `gemm_auto.rs` の 3 段選択・JIT 特化基盤）へは一切結線しない**。数値
+//! 一致回帰（#802 が実機で確定）・parity 非後退契約・本番採否判断は後続
+//! イシュー #802 のスコープとして引き継ぐ（`.claude/rules/
+//! out-of-scope-tracking.md`）。
+//!
+//! # 検証状態（重要）
+//!
+//! `kernels_mma.rs` 冒頭コメント「検証状態」と同じ制約: 本実装セッションの
+//! 環境には CUDA driver はあるが NVRTC が無く、本ファイルのカーネルソースは
+//! **NVRTC による構文検証を一度も通過していない**。実機（DGX Spark GB10）
+//! での最初の実行が構文検証を兼ねる。数値一致は同梱テスト（
+//! `tests/gemm_mma_tf32.rs`／`tests/mma_tf32_vs_wmma_tf32_staged.rs`）に
+//! 実装済みだが **実機未到達のため未検証**（#802 が実機で確認する）。
+//!
+//! # 命令選定
+//!
+//! `mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32` は TF32 tensor core
+//! 経路の `mma.sync` 標準 shape（sm_80+。PTX ISA 9.7.15.5.3 相当）。cc>=8.0
+//! ゲートは `kernels_mma.rs::MIN_COMPUTE_CAPABILITY_MAJOR`（f16 経路）と
+//! 同一根拠（`cp.async`/`ldmatrix` は LDGSTS・sm_80+ 限定）を
+//! `gemm_mma.rs::check_min_compute_capability` から再利用する
+//! （`gemm_mma_tf32.rs` 参照）。
+//!
+//! ## A フラグメント: ldmatrix の b16 流用
+//!
+//! TF32 の A タイル（16 行 x 8 列・f32 4B/要素）を、メモリレイアウトが
+//! ビット等価な 16 行 x 16 列の b16（2B/要素）タイルとして再解釈すると、
+//! `ldmatrix.sync.aligned.m8n8.x4.shared.b16` が読む 4 個の 8x8 b16
+//! 象限（各象限 = 8 行 x 4 f32 列）にちょうど一致する（CUTLASS が用いる
+//! 既知の技法）。
+//!
+//! PTX ISA の m16n8k8 tf32 A オペランド分解（groupID = lane/4,
+//! tid_in_group = lane%4 という標準表記とは別に、ldmatrix.x4 が実際に
+//! 各出力レジスタへどの物理象限を配るかは「アドレスを供給したレーン
+//! グループ（lane/8 の 0..3）」で決まる。本カーネルの `a0..a3` 各々が
+//! 保持すべき象限は PTX ISA の当該命令の A オペランドテーブルから
+//! 以下のとおり導出される（`row = groupID` は a0/a1、`row = groupID+8`
+//! は a2/a3、`col = tid_in_group` は a0/a2、`col = tid_in_group+4` は
+//! a1/a3。ここでの groupID/tid_in_group は「オペランド論理位置」の表記
+//! であり後述のレーン→ldmatrix 対応とは独立）:
+//!
+//! - a0 = 左上象限（行 0-7・列 0-3）
+//! - a1 = 右上象限（行 0-7・列 4-7）
+//! - a2 = 左下象限（行 8-15・列 0-3）
+//! - a3 = 右下象限（行 8-15・列 4-7）
+//!
+//! すなわち象限順序は **TL, TR, BL, BR**（`kernels_mma.rs::LDSM_A_FRAG` の
+//! f16 版が用いる **TL, BL, TR, BR** から BL/TR の位置が入れ替わっている
+//! 点に注意。理由: f16 m16n8k16 の A オペランドは 16x16 全体を直接
+//! `ldmatrix.x4` の 4 象限がそのまま覆うが、TF32 m16n8k8 の A オペランドは
+//! 16x8（=b16 換算 16x16）を上記の異なる行/列分解で覆うため、対応する
+//! 象限順序が異なる。単純な流用〈定数のみ変更〉は誤った出力を生む）。
+//! `ldmatrix.x4` はアドレスを供給したレーングループ `g = lane/8`
+//! （0..3）の象限データを出力レジスタ `r_g` へ配る（f16 版と共通の
+//! ldmatrix 仕様）ため、`LDSM_A_FRAG` は `g` から上記 4 象限への写像を
+//! `a_quad_row = g/2`・`a_quad_col = g%2`（f16 版は `g%2`/`g/2` で逆）と
+//! することで a_frag[0..3] = {TL,TR,BL,BR} を得る。
+//!
+//! ## B フラグメント: 素の共有メモリロード（`.trans` ldmatrix 不使用）
+//!
+//! `ldmatrix .trans` は b16 粒度の転置命令であり、32bit 要素（tf32）を
+//! 2 個の b16 に分断してしまうため使用できない。B オペランド分解
+//! （`row = tid_in_group(+4)`・`col = groupID`。groupID=lane/4,
+//! tid_in_group=lane%4）に従い、row-major の共有メモリ（`cp.async` の
+//! 生バイトコピーの帰結）から `bs_tile[stage][k0+tid_in_group][col+group_id]`・
+//! `bs_tile[stage][k0+tid_in_group+4][col+group_id]` を `__float_as_uint`
+//! でレジスタへ直接ロードする（`LDS_B_FRAG` マクロ）。
+//!
+//! ## TF32 丸め（イシュー #800 の設計を踏襲）
+//!
+//! `mma.sync` の tf32 オペランドは明示変換済みビットを要求する。cp.async
+//! は生バイトコピーのため転送「中」に丸めを挟めない。よって
+//! `kernels_wmma_opt.rs::CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`
+//! （イシュー #800）と同一構造・同一の正しさ論証（走査添字が
+//! `LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP` と完全一致することに依存する
+//! 3 点論証。本ファイル `CONVERT_A_STAGE_GROUP` 定義直上コメント参照）を
+//! 移植し、各 compute イテレーション t の先頭・`cp.async.wait_group` 直後・
+//! `__syncthreads()` 前に、その stage の smem チャンクを 1 回だけ丸める。
+//! 変換関数は `wmma::__float_to_tf32`（`#include <mma.h>` 経由。インライン
+//! PTX `cvt.rna.tf32.f32` と同一命令でビット一致・NVRTC 構文検証不能環境
+//! での asm 構文リスクを避けるため既存カーネルで実証済みのこちらを採用）。
+//!
+//! # パイプライン骨格
+//!
+//! `kernels_mma.rs::MMA_F16_BODY` を忠実に踏襲する: プロローグ無条件
+//! commit（1 イテレーション = 1 commit 不変条件・#492）、ループ内
+//! `cp.async.wait_group (STAGES-2)` 固定即値、cp.async issue interleaving
+//! （`K_GROUPS = BK / MMA_K` を kstep ループへ分散・#496）、ldmatrix/lds
+//! 先読み 2 面レジスタダブルバッファ（タイル内限定・クロスタイル先読み
+//! 不採用・#495）、ループ外 `wait_group 0` drain。各所の正しさ論証は
+//! f16 版と同一のためここでは繰り返さず、`kernels_mma.rs` 該当コメントを
+//! 参照する形にする。
+//!
+//! # 整列制約（cp.async 16 バイト境界。`gemm_mma_tf32.rs` が起動前検証）
+//!
+//! `cp.async.cg.shared.global` の 1 回のコピー粒度は 16 バイト（f32 4
+//! 要素）に固定される（`kernels_wmma_opt.rs::WMMA_TF32_F32_STAGED_BODY`
+//! と同じ粒度・同じ理由。f16 版の 8 要素/16B とは粒度が異なる）。
+//! `gemm_mma_tf32.rs::CudaMmaTf32Gemm::run_tf32` はホスト側で
+//! `n % 4 == 0 && k % 4 == 0` を検証する。
+//!
+//! # 境界検査（REQ-8。省略禁止）
+//!
+//! `kernels_mma.rs` 冒頭コメント「境界検査」と同一方針:
+//! 1. A/B タイルの `cp.async` ロードは範囲外チャンクで `src_size = 0`
+//!    を渡しゼロ充填する。アドレスクランプは f32 4 要素（16B）境界へ
+//!    切り下げる（`kernels_wmma_opt.rs` の staged tf32 版と同一式。f16 版
+//!    の 8 要素境界とは異なる点に注意）。
+//! 2. エピローグの guarded store は `(r < m && c < n)` を満たす要素のみ
+//!    書き込む。
+//! 3. ホスト側 `gemm_mma_tf32.rs::CudaMmaTf32Gemm::run_tf32` は起動前に
+//!    `gemm::validate_gemm_dims`・整列検証・グリッド上限検証・K タイル
+//!    添字オーバーフロー検証を必ず先行させる。
+//!
+//! # 数値契約
+//!
+//! f32 入出力・f32 内部アキュムレート、TF32 丸めは `mma.sync` 投入直前に
+//! smem 上で 1 回適用する（`.claude/rules/coding-rust.md` FMA 契約統一節。
+//! 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」は
+//! TF32 前提の複合指標として適用する）。
+
+use std::sync::LazyLock;
+
+/// mma 命令 1 回あたりの行列形状（`m16n8k8`。sm_80+ の TF32 標準 shape）。
+pub const MMA_TF32_M: u32 = 16;
+pub const MMA_TF32_N: u32 = 8;
+pub const MMA_TF32_K: u32 = 8;
+
+/// ブロックタイル。既存 TF32 opt-staged（`kernels_wmma_opt.rs::
+/// WMMA_TF32_STAGED_BLOCK_M/_N` = 64x64・K タイル 16・3 ステージ）と同一の
+/// ブロック形状を採用し、A/B 比較（#802）を同条件にする（実装計画 3.2 節）。
+pub const MMA_TF32_BM: u32 = 64;
+pub const MMA_TF32_BN: u32 = 64;
+pub const MMA_TF32_BK: u32 = 16;
+
+/// `cp.async` multi-stage pipelining のステージ数。
+pub const MMA_TF32_STAGES: u32 = 3;
+
+/// warp あたりのレジスタブロッキング係数。1 warp が C の `MMA_TF32_M x
+/// MMA_TF32_N` タイルを `WARP_TILES_M x WARP_TILES_N`（2x4）個担当する
+/// （warp タイル実寸 32x32。実装計画 3.2 節）。
+pub const MMA_TF32_WARP_TILES_M: u32 = 2;
+pub const MMA_TF32_WARP_TILES_N: u32 = 4;
+
+/// 1 warp が担当する C タイルの実寸。
+pub const MMA_TF32_WARP_M: u32 = MMA_TF32_M * MMA_TF32_WARP_TILES_M; // 32
+pub const MMA_TF32_WARP_N: u32 = MMA_TF32_N * MMA_TF32_WARP_TILES_N; // 32
+
+/// 1 ブロックあたりの warp 構成（M 方向 2・N 方向 2 = 4 warp = 128
+/// スレッド。実装計画 3.2 節）。
+pub const MMA_TF32_WARPS_M: u32 = MMA_TF32_BM / MMA_TF32_WARP_M; // 2
+pub const MMA_TF32_WARPS_N: u32 = MMA_TF32_BN / MMA_TF32_WARP_N; // 2
+
+/// ブロック内スレッド総数（32 スレッド/warp x warp 数）。
+pub const MMA_TF32_BLOCK_THREADS: u32 = MMA_TF32_WARPS_M * MMA_TF32_WARPS_N * 32;
+
+/// 1 ステージあたりの `mma.sync` 呼び出し回数（`BK / MMA_K`）。カーネル内
+/// `for (int kstep = 0; kstep < MMA_TF32_BK / MMA_TF32_K; ++kstep)` に対応
+/// する Rust 側の唯一の真実源。
+pub const MMA_TF32_K_STEPS_PER_STAGE: u32 = MMA_TF32_BK / MMA_TF32_K;
+
+/// A タイル（`as_tile[STAGES][BM][A_PAD]`）の行幅（パディング後）。
+/// `kernels_wmma_opt.rs::WMMA_TF32_STAGED_A_PAD` と同一パディング方針
+/// （`BK + 4` 要素。cp.async 16B = f32 4 要素粒度の整列を保つ最小加算）。
+pub const MMA_TF32_A_PAD: u32 = MMA_TF32_BK + 4;
+
+/// B タイル（`bs_tile[STAGES][BK][B_PAD]`）の行幅（パディング後）。
+/// `kernels_wmma_opt.rs::WMMA_TF32_STAGED_B_PAD` と同一パディング方針
+/// （`BN + 4` 要素）。
+pub const MMA_TF32_B_PAD: u32 = MMA_TF32_BN + 4;
+
+/// 静的共有メモリ使用量（バイト）。`(BM*A_PAD + BK*B_PAD) * 4B * STAGES`。
+pub const MMA_TF32_SHARED_MEM_BYTES: u32 =
+    (MMA_TF32_BM * MMA_TF32_A_PAD + MMA_TF32_BK * MMA_TF32_B_PAD) * 4 * MMA_TF32_STAGES;
+
+// コンパイル時契約検査（`kernels_mma.rs` 冒頭の f16 版 const assert 群と
+// 同型。実機コンパイルできない環境でも `cargo build` の時点で機械検出
+// できる代替チェック）。
+const _: () = assert!(
+    MMA_TF32_SHARED_MEM_BYTES <= crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES,
+    "kernels_mma_tf32 static shared memory exceeds the 48KiB per-block limit \
+     shared by every compute capability"
+);
+const _: () = assert!(
+    MMA_TF32_BK.is_multiple_of(MMA_TF32_K),
+    "MMA_TF32_BK must be a multiple of MMA_TF32_K (kernel-side kstep loop divisibility)"
+);
+const _: () = assert!(
+    MMA_TF32_BM.is_multiple_of(4) && MMA_TF32_BN.is_multiple_of(4),
+    "MMA_TF32_BM/MMA_TF32_BN must be multiples of 4 (cp.async 16-byte / f32 \
+     4-element transfer granularity)"
+);
+const _: () = assert!(
+    MMA_TF32_A_PAD.is_multiple_of(4) && MMA_TF32_B_PAD.is_multiple_of(4),
+    "MMA_TF32_A_PAD/MMA_TF32_B_PAD must be multiples of 4 (cp.async 16-byte \
+     transfer granularity / f32 element alignment)"
+);
+const _: () = assert!(
+    !(MMA_TF32_A_PAD * 4).is_multiple_of(128) && !(MMA_TF32_B_PAD * 4).is_multiple_of(128),
+    "MMA_TF32_A_PAD/MMA_TF32_B_PAD row stride in bytes must not be a multiple \
+     of 128B (32 banks x 4B) or bank-phase padding degenerates to no-op"
+);
+const _: () = assert!(
+    MMA_TF32_BLOCK_THREADS <= 1024,
+    "MMA_TF32_BLOCK_THREADS must not exceed CUDA's per-block thread limit (1024)"
+);
+const _: () = assert!(
+    MMA_TF32_BM.is_multiple_of(MMA_TF32_WARP_M) && MMA_TF32_BN.is_multiple_of(MMA_TF32_WARP_N),
+    "MMA_TF32_BM/MMA_TF32_BN must be exact multiples of MMA_TF32_WARP_M/MMA_TF32_WARP_N \
+     (warp register-blocking tile must evenly divide the block tile)"
+);
+const _: () = assert!(
+    MMA_TF32_STAGES >= 2,
+    "kernels_mma_tf32 の cp.async パイプラインは MMA_TF32_STAGES >= 2 を \
+     前提とする（カーネルソース側の `STAGES - 2` 計算が u32 で \
+     アンダーフローしないため）"
+);
+const _: () = assert!(
+    MMA_TF32_K_STEPS_PER_STAGE >= 2,
+    "kernels_mma_tf32 は CUTLASS mma_base.h の kWarpGemmIterations >= 2 相当 \
+     （MMA_TF32_BK / MMA_TF32_K >= 2）を要求する（ソフトウェアパイプライン化の \
+     前提。kernels_mma.rs::MMA_K_STEPS_PER_STAGE 直下コメントと同じ理由）"
+);
+
+/// TF32 `mma.sync`(m16n8k8) GEMM（f32 入出力・f32 内部アキュムレート）の
+/// 既定構成カーネルソース。`gemm_mma_tf32.rs::CudaMmaTf32Gemm::new` は
+/// この文字列を `nvrtc::compile_ptx` に渡して `CudaFunction` を得る。
+/// カーネルソースはコンパイル時定数のみから `format!` で組み立て、外部
+/// 入力文字列を連結しない（`nvrtc.rs` A03 節と同じ契約。
+/// `.claude/rules/security.md` A03）。
+pub fn mma_tf32_source() -> &'static str {
+    &MMA_TF32_SOURCE
+}
+
+static MMA_TF32_SOURCE: LazyLock<String> = LazyLock::new(|| {
+    format!(
+        "\n#include <mma.h>\n\n\
+         using namespace nvcuda;\n\n\
+         #define MMA_TF32_M {m}\n\
+         #define MMA_TF32_N {n}\n\
+         #define MMA_TF32_K {k}\n\
+         #define MMA_TF32_BM {bm}\n\
+         #define MMA_TF32_BN {bn}\n\
+         #define MMA_TF32_BK {bk}\n\
+         #define MMA_TF32_STAGES {stages}\n\
+         #define MMA_TF32_WARP_TILES_M {warp_tiles_m}\n\
+         #define MMA_TF32_WARP_TILES_N {warp_tiles_n}\n\
+         #define MMA_TF32_WARPS_N {warps_n}\n\
+         #define MMA_TF32_A_PAD {a_pad}\n\
+         #define MMA_TF32_B_PAD {b_pad}\n\
+         \n{body}",
+        m = MMA_TF32_M,
+        n = MMA_TF32_N,
+        k = MMA_TF32_K,
+        bm = MMA_TF32_BM,
+        bn = MMA_TF32_BN,
+        bk = MMA_TF32_BK,
+        stages = MMA_TF32_STAGES,
+        warp_tiles_m = MMA_TF32_WARP_TILES_M,
+        warp_tiles_n = MMA_TF32_WARP_TILES_N,
+        warps_n = MMA_TF32_WARPS_N,
+        a_pad = MMA_TF32_A_PAD,
+        b_pad = MMA_TF32_B_PAD,
+        body = MMA_TF32_BODY,
+    )
+});
+
+/// [`mma_tf32_source`] が結合するカーネル本体テンプレート。
+/// `kernels_mma.rs::MMA_F16_BODY` の構造（cp.async 3 ステージ・issue
+/// interleaving・レジスタ先読みダブルバッファ）を、TF32 `mma.sync`
+/// (m16n8k8) 経路へ移植したもの（本ファイル冒頭コメント「命令選定」
+/// 「パイプライン骨格」参照）。差分は (1) グローバル→共有メモリの
+/// ロード粒度が f16 8 要素/16B ではなく f32 4 要素/16B である点、
+/// (2) A フラグメントは ldmatrix の b16 流用・B フラグメントは素の
+/// 共有メモリロード（`.trans` ldmatrix 不使用）である点、(3) 各 stage
+/// 到着直後に TF32 丸め（`CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`。
+/// イシュー #800 の設計踏襲）を挟む点のみで、cp.async 段数管理・
+/// commit/wait 配置・issue interleaving の骨格は f16 版と同一の t/stage
+/// 添字算術を使う。
+const MMA_TF32_BODY: &str = r#"
+// REQ-8: グローバル→共有メモリの 16 バイト単位（f32 4 要素）非同期
+// コピー。src_size==16 で実データをコピーし、src_size==0 で共有メモリ側を
+// ゼロ充填する（kernels_mma.rs::mma_cp_async16 と同じ契約・同じ PTX
+// 命令。関数名は同一 NVRTC コンパイル単位内での衝突を避けるため本カーネル
+// 専用の接頭辞を付す）。
+__device__ __forceinline__ void mma_tf32_cp_async16(void* smem_ptr, const void* gmem_ptr, int src_size)
+{
+    unsigned smem_addr = (unsigned)__cvta_generic_to_shared(smem_ptr);
+    asm volatile(
+        "cp.async.cg.shared.global [%0], [%1], 16, %2;\n"
+        :
+        : "r"(smem_addr), "l"(gmem_ptr), "r"(src_size)
+    );
+}
+
+extern "C" __global__ void gemm_mma_tf32(
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ c,
+    int m, int n, int k)
+{
+    // __align__(16): cp.async の 16 バイト転送先整列要件。A_PAD/B_PAD が
+    // 4 要素の倍数のため各行の先頭は常に 16 バイト整列する。
+    __shared__ __align__(16) float as_tile[MMA_TF32_STAGES][MMA_TF32_BM][MMA_TF32_A_PAD];
+    __shared__ __align__(16) float bs_tile[MMA_TF32_STAGES][MMA_TF32_BK][MMA_TF32_B_PAD];
+
+    int block_row0 = blockIdx.y * MMA_TF32_BM;
+    int block_col0 = blockIdx.x * MMA_TF32_BN;
+
+    int tid = threadIdx.x;
+    int num_threads = blockDim.x;
+    int warp_id = tid / 32;
+    int lane = tid % 32;
+    int warp_row = warp_id / MMA_TF32_WARPS_N;
+    int warp_col = warp_id % MMA_TF32_WARPS_N;
+    int row0_warp = block_row0 + warp_row * (MMA_TF32_M * MMA_TF32_WARP_TILES_M);
+    int col0_warp = block_col0 + warp_col * (MMA_TF32_N * MMA_TF32_WARP_TILES_N);
+
+    // C/D・B オペランドが共有する groupID/tid_in_group（PTX ISA 標準
+    // m16n8k8 分解。本ファイル冒頭コメント「命令選定」参照。C/D のレーン
+    // 対応は f16 m16n8k16 と同一形〈m16n8 出力形状が共通のため〉）。
+    int group_id = lane / 4;
+    int tid_in_group = lane % 4;
+
+    // C アキュムレータ（f32 x4 を WARP_TILES_M x WARP_TILES_N 個）。全ゼロ
+    // 初期化。kernels_mma.rs::MMA_F16_BODY と同じレジスタブロッキング方式。
+    float d[MMA_TF32_WARP_TILES_M][MMA_TF32_WARP_TILES_N][4] = {};
+
+    int num_k_tiles = (k > 0) ? (k - 1) / MMA_TF32_BK + 1 : 0;
+
+    // #496 相当: 1 K タイル分の cp.async 発行を warp 内 kstep ループへ
+    // 分散するための添字空間分割（kernels_mma.rs::MMA_F16_BODY 「#496」
+    // 節と同一設計）。K_GROUPS（= BK/MMA_K）は下記 kstep ループの反復回数
+    // と必ず一致する。
+    #define K_GROUPS (MMA_TF32_BK / MMA_TF32_K)
+    #define A_CHUNKS ((MMA_TF32_BM * MMA_TF32_BK) / 4)
+    #define B_CHUNKS ((MMA_TF32_BK * MMA_TF32_BN) / 4)
+    #define A_GROUP_CHUNKS ((A_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+    #define B_GROUP_CHUNKS ((B_CHUNKS + K_GROUPS - 1) / K_GROUPS)
+
+    // REQ-8: 境界外チャンクでも 16 バイト整列を保ったままクランプする
+    // （列方向は f32 4 要素境界へ切り下げ。kernels_wmma_opt.rs::
+    // LOAD_A_STAGE_GROUP〈TF32 staged 版〉と同一式。行ストライド〈A は
+    // k・B は n〉が 4 の倍数であることは gemm_mma_tf32.rs 側の起動前整列
+    // 検証が保証する）。
+    #define LOAD_A_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * A_GROUP_CHUNKS + tid; \
+             idx < A_CHUNKS && idx < ((g) + 1) * A_GROUP_CHUNKS; \
+             idx += num_threads) { \
+            int row = idx / (MMA_TF32_BK / 4); \
+            int col0 = (idx % (MMA_TF32_BK / 4)) * 4; \
+            int gr = block_row0 + row; \
+            int gc = (k0) + col0; \
+            int gr_c = gr < m ? gr : (m > 0 ? m - 1 : 0); \
+            int gc_c = gc < k ? gc : (k > 0 ? ((k - 1) / 4) * 4 : 0); \
+            int valid = (gr < m && gc < k) ? 16 : 0; \
+            mma_tf32_cp_async16(&as_tile[stage][row][col0], &a[(size_t)gr_c * k + gc_c], valid); \
+        }
+
+    #define LOAD_B_STAGE_GROUP(stage, k0, g) \
+        for (int idx = (g) * B_GROUP_CHUNKS + tid; \
+             idx < B_CHUNKS && idx < ((g) + 1) * B_GROUP_CHUNKS; \
+             idx += num_threads) { \
+            int row = idx / (MMA_TF32_BN / 4); \
+            int col0 = (idx % (MMA_TF32_BN / 4)) * 4; \
+            int gr = (k0) + row; \
+            int gc = block_col0 + col0; \
+            int gr_c = gr < k ? gr : (k > 0 ? k - 1 : 0); \
+            int gc_c = gc < n ? gc : (n > 0 ? ((n - 1) / 4) * 4 : 0); \
+            int valid = (gr < k && gc < n) ? 16 : 0; \
+            mma_tf32_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * n + gc_c], valid); \
+        }
+
+    // イシュー #800 の設計踏襲: smem 到着直後の TF32 丸め（1 回化）。走査
+    // する idx 範囲・row/col0 算術は上記 LOAD_A_STAGE_GROUP/
+    // LOAD_B_STAGE_GROUP と完全に同一（同じ (stage, g) に対し同じ tid が
+    // 同じチャンクを担当する）。
+    //
+    // 正しさの論証（kernels_wmma_opt.rs::CONVERT_A_STAGE_GROUP と同一の
+    // 3 点論証。呼び出し側 = 下記 t ループ先頭）:
+    // 1. 自スレッドの読み取り安全性: wait_group は当該スレッド
+    //    自身が発行した cp.async の完了を保証する（PTX 契約）。上記の
+    //    chunk 一致設計により、本マクロが読む要素は必ず同一スレッドが
+    //    直前に cp.async で書き込んだ要素なので、wait_group のみで安全に
+    //    読める。
+    // 2. 他スレッドへの公開: 変換結果を全 warp の ldmatrix/直接ロードへ
+    //    公開するのは wait_group ではなく、呼び出し直後に保持している
+    //    `__syncthreads()` である（本マクロの呼び出しはその
+    //    `__syncthreads()` より前に置く。順序を入れ替えると本論証は成立
+    //    しない）。
+    // 3. stage バッファ再利用時の WAR 安全性: 同一物理 stage バッファは
+    //    STAGES イテレーションごとに再利用されるが、直前の利用
+    //    （ldmatrix/直接ロード・mma.sync によるフラグメント読み出し）は
+    //    ループ末尾の無条件 `__syncthreads()`（t ループ末尾）で必ず
+    //    完了してから次の cp.async 上書き・本マクロの変換が走る
+    //    （`wmma::__float_to_tf32` は冪等なので万一の重複も数値影響なし）。
+    #define CONVERT_A_STAGE_GROUP(stage, g) \
+        for (int idx = (g) * A_GROUP_CHUNKS + tid; \
+             idx < A_CHUNKS && idx < ((g) + 1) * A_GROUP_CHUNKS; \
+             idx += num_threads) { \
+            int row = idx / (MMA_TF32_BK / 4); \
+            int col0 = (idx % (MMA_TF32_BK / 4)) * 4; \
+            for (int e = 0; e < 4; ++e) { \
+                as_tile[stage][row][col0 + e] = wmma::__float_to_tf32(as_tile[stage][row][col0 + e]); \
+            } \
+        }
+
+    #define CONVERT_B_STAGE_GROUP(stage, g) \
+        for (int idx = (g) * B_GROUP_CHUNKS + tid; \
+             idx < B_CHUNKS && idx < ((g) + 1) * B_GROUP_CHUNKS; \
+             idx += num_threads) { \
+            int row = idx / (MMA_TF32_BN / 4); \
+            int col0 = (idx % (MMA_TF32_BN / 4)) * 4; \
+            for (int e = 0; e < 4; ++e) { \
+                bs_tile[stage][row][col0 + e] = wmma::__float_to_tf32(bs_tile[stage][row][col0 + e]); \
+            } \
+        }
+
+    #define LOAD_A_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_A_STAGE_GROUP(stage, k0, g_); \
+        }
+
+    #define LOAD_B_STAGE(stage, k0) \
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) { \
+            LOAD_B_STAGE_GROUP(stage, k0, g_); \
+        }
+
+    // プロローグ: kernels_mma.rs::MMA_F16_BODY プロローグと同一の
+    // 「1 イテレーション = 必ず 1 commit」不変条件（#492）。
+    for (int s = 0; s < MMA_TF32_STAGES - 1; ++s) {
+        if (s < num_k_tiles) {
+            LOAD_A_STAGE(s, s * MMA_TF32_BK);
+            LOAD_B_STAGE(s, s * MMA_TF32_BK);
+        }
+        asm volatile("cp.async.commit_group;\n");
+    }
+
+    for (int t = 0; t < num_k_tiles; ++t) {
+        int compute_stage = t % MMA_TF32_STAGES;
+        int next_tile = t + MMA_TF32_STAGES - 1;
+        int load_stage = next_tile % MMA_TF32_STAGES;
+
+        // kernels_mma.rs::MMA_F16_BODY 「#492」節と同一の段数一般形
+        // 固定即値（`STAGES - 2`）・同一の正しさ論証（非負性は上記
+        // `MMA_TF32_STAGES >= 2` のコンパイル時 assert が担保する）。
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(MMA_TF32_STAGES - 2));
+
+        // イシュー #800 の設計踏襲: 丸めは smem 到着直後・全 warp への
+        // 公開（下記 __syncthreads）より前にここで 1 回だけ適用する
+        // （正しさの論証は CONVERT_A_STAGE_GROUP/CONVERT_B_STAGE_GROUP
+        // 定義直上コメント参照。本ループと __syncthreads() の順序を
+        // 入れ替えないこと）。
+        for (int g_ = 0; g_ < K_GROUPS; ++g_) {
+            CONVERT_A_STAGE_GROUP(compute_stage, g_);
+            CONVERT_B_STAGE_GROUP(compute_stage, g_);
+        }
+
+        __syncthreads();
+
+        // #495 相当: A/B フラグメントを 2 面バッファ化する
+        // （kernels_mma.rs::MMA_F16_BODY 「#495」節と同一設計。タイル内
+        // 限定・クロスタイル先読み不採用も同一理由）。
+        unsigned a_frag[2][MMA_TF32_WARP_TILES_M][4];
+        unsigned b_frag[2][MMA_TF32_WARP_TILES_N][2];
+
+        // A フラグメントロード（本ファイル冒頭コメント「命令選定」節
+        // 「A フラグメント: ldmatrix の b16 流用」参照。象限順序 TL, TR,
+        // BL, BR は f16 版〈TL, BL, TR, BR〉から入れ替わっている点に注意）。
+        #define LDSM_A_FRAG(buf, stage, kstep, mi) \
+            do { \
+                int a_col_ = (kstep) * MMA_TF32_K; \
+                int a_row = warp_row * (MMA_TF32_M * MMA_TF32_WARP_TILES_M) + (mi) * MMA_TF32_M; \
+                int a_quad_group = lane / 8; \
+                int a_quad_row = a_quad_group / 2; \
+                int a_quad_col = a_quad_group % 2; \
+                int a_row_in_tile = lane % 8; \
+                float* a_addr = &as_tile[stage] \
+                                          [a_row + a_quad_row * 8 + a_row_in_tile] \
+                                          [a_col_ + a_quad_col * 4]; \
+                unsigned a_smem = (unsigned)__cvta_generic_to_shared(a_addr); \
+                asm volatile( \
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" \
+                    : "=r"(a_frag[buf][mi][0]), "=r"(a_frag[buf][mi][1]), \
+                      "=r"(a_frag[buf][mi][2]), "=r"(a_frag[buf][mi][3]) \
+                    : "r"(a_smem) \
+                ); \
+            } while (0)
+
+        // B フラグメントロード（本ファイル冒頭コメント「命令選定」節
+        // 「B フラグメント: 素の共有メモリロード」参照。転置 ldmatrix
+        // 修飾子は使わない）。
+        #define LDS_B_FRAG(buf, stage, kstep, nj) \
+            do { \
+                int b_row0 = (kstep) * MMA_TF32_K; \
+                int b_col = warp_col * (MMA_TF32_N * MMA_TF32_WARP_TILES_N) + (nj) * MMA_TF32_N; \
+                b_frag[buf][nj][0] = __float_as_uint(bs_tile[stage][b_row0 + tid_in_group][b_col + group_id]); \
+                b_frag[buf][nj][1] = __float_as_uint(bs_tile[stage][b_row0 + tid_in_group + 4][b_col + group_id]); \
+            } while (0)
+
+        // #495 warp プロローグ: kstep=0 のフラグメントをバッファ 0 へ
+        // ロードしてから kstep ループへ入る。
+#pragma unroll
+        for (int mi = 0; mi < MMA_TF32_WARP_TILES_M; ++mi) {
+            LDSM_A_FRAG(0, compute_stage, 0, mi);
+        }
+#pragma unroll
+        for (int nj = 0; nj < MMA_TF32_WARP_TILES_N; ++nj) {
+            LDS_B_FRAG(0, compute_stage, 0, nj);
+        }
+
+#pragma unroll
+        for (int kstep = 0; kstep < MMA_TF32_BK / MMA_TF32_K; ++kstep) {
+            int cur = kstep % 2;
+            int nxt = (kstep + 1) % 2;
+
+            // #495 相当: 次段（kstep+1）のフラグメントを先読みする
+            // （kernels_mma.rs::MMA_F16_BODY 「#495」節と同一設計・同一
+            // 「タイル内先読みに限定」判断）。
+            if (kstep + 1 < MMA_TF32_BK / MMA_TF32_K) {
+#pragma unroll
+                for (int mi = 0; mi < MMA_TF32_WARP_TILES_M; ++mi) {
+                    LDSM_A_FRAG(nxt, compute_stage, kstep + 1, mi);
+                }
+#pragma unroll
+                for (int nj = 0; nj < MMA_TF32_WARP_TILES_N; ++nj) {
+                    LDS_B_FRAG(nxt, compute_stage, kstep + 1, nj);
+                }
+            }
+
+            // #496 相当: cp.async issue interleaving（kernels_mma.rs::
+            // MMA_F16_BODY 「#496」節と同一設計・同一の同期の正しさ
+            // 論証）。
+            if (next_tile < num_k_tiles) {
+                LOAD_A_STAGE_GROUP(load_stage, next_tile * MMA_TF32_BK, kstep);
+                LOAD_B_STAGE_GROUP(load_stage, next_tile * MMA_TF32_BK, kstep);
+            }
+
+            // mi x nj の通りで mma.sync を発行し d[mi][nj] へアキュムレート
+            // する（kernels_mma.rs::MMA_F16_BODY 「タイル構成」と同型の
+            // レジスタブロッキング再利用）。
+#pragma unroll
+            for (int mi = 0; mi < MMA_TF32_WARP_TILES_M; ++mi) {
+#pragma unroll
+                for (int nj = 0; nj < MMA_TF32_WARP_TILES_N; ++nj) {
+                    asm volatile(
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+                        : "=f"(d[mi][nj][0]), "=f"(d[mi][nj][1]),
+                          "=f"(d[mi][nj][2]), "=f"(d[mi][nj][3])
+                        : "r"(a_frag[cur][mi][0]), "r"(a_frag[cur][mi][1]),
+                          "r"(a_frag[cur][mi][2]), "r"(a_frag[cur][mi][3]),
+                          "r"(b_frag[cur][nj][0]), "r"(b_frag[cur][nj][1]),
+                          "f"(d[mi][nj][0]), "f"(d[mi][nj][1]),
+                          "f"(d[mi][nj][2]), "f"(d[mi][nj][3])
+                    );
+                }
+            }
+        }
+
+        #undef LDSM_A_FRAG
+        #undef LDS_B_FRAG
+
+        // kernels_mma.rs::MMA_F16_BODY 「#492/#496」節と同一の「1
+        // イテレーション = 必ず 1 commit」不変条件。
+        asm volatile("cp.async.commit_group;\n");
+        __syncthreads();
+    }
+
+    // ループ外 drain（kernels_mma.rs::MMA_F16_BODY と同一の正しさ論証）。
+    asm volatile("cp.async.wait_group 0;\n");
+    __syncthreads();
+
+    #undef LOAD_A_STAGE
+    #undef LOAD_B_STAGE
+    #undef LOAD_A_STAGE_GROUP
+    #undef LOAD_B_STAGE_GROUP
+    #undef CONVERT_A_STAGE_GROUP
+    #undef CONVERT_B_STAGE_GROUP
+    #undef A_GROUP_CHUNKS
+    #undef B_GROUP_CHUNKS
+    #undef A_CHUNKS
+    #undef B_CHUNKS
+    #undef K_GROUPS
+
+    // REQ-8: エピローグの guarded store。mma.m16n8k8 の C/D フラグメント
+    // レーン対応は f16 m16n8k16 版と同一形（本ファイル冒頭コメント
+    // 「命令選定」参照）: d0/d1 は行 groupID、d2/d3 は行 groupID+8。
+#pragma unroll
+    for (int mi = 0; mi < MMA_TF32_WARP_TILES_M; ++mi) {
+#pragma unroll
+        for (int nj = 0; nj < MMA_TF32_WARP_TILES_N; ++nj) {
+            int r0 = row0_warp + mi * MMA_TF32_M + group_id;
+            int r1 = row0_warp + mi * MMA_TF32_M + group_id + 8;
+            int c0 = col0_warp + nj * MMA_TF32_N + tid_in_group * 2;
+            int c1 = c0 + 1;
+
+            if (r0 < m && c0 < n) c[(size_t)r0 * n + c0] = d[mi][nj][0];
+            if (r0 < m && c1 < n) c[(size_t)r0 * n + c1] = d[mi][nj][1];
+            if (r1 < m && c0 < n) c[(size_t)r1 * n + c0] = d[mi][nj][2];
+            if (r1 < m && c1 < n) c[(size_t)r1 * n + c1] = d[mi][nj][3];
+        }
+    }
+}
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// カーネルソースが `mma.sync`・`ldmatrix`・`cp.async` の主要命令を
+    /// 実在させることを検査する（`kernels_mma.rs::
+    /// mma_f16_source_uses_mma_sync_ldmatrix_cp_async_instructions` と
+    /// 同型）。
+    #[test]
+    fn mma_tf32_source_uses_mma_sync_ldmatrix_cp_async_instructions() {
+        let src = mma_tf32_source();
+        for needle in [
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+            "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+        ] {
+            assert!(
+                src.contains(needle),
+                "expected kernel source to contain {needle:?}"
+            );
+        }
+        // B フラグメントは `.trans` ldmatrix を使わない契約（本ファイル
+        // 冒頭コメント「B フラグメント」参照）。
+        assert!(
+            !src.contains(".trans"),
+            "TF32 mma.sync kernel must not use `.trans` ldmatrix for the B \
+             operand (32bit tf32 elements would be split by b16-granularity \
+             transpose)"
+        );
+    }
+
+    /// mma.sync 発行が単一ループサイトのみであることを検査する
+    /// （`kernels_mma.rs::mma_f16_source_issues_mma_sync_from_single_loop_site`
+    /// と同型。コピペ増殖の回帰検出）。
+    #[test]
+    fn mma_tf32_source_issues_mma_sync_from_single_loop_site() {
+        let src = mma_tf32_source();
+        let count = src
+            .matches("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32")
+            .count();
+        assert_eq!(
+            count, 1,
+            "expected exactly 1 occurrence of the mma.sync instruction text \
+             (single loop site emitting it at compile time), found {count}"
+        );
+    }
+
+    /// REQ-8 手動境界チェック（guarded load のゼロ充填分岐・guarded
+    /// store）がソース中に存置されていることを検査する。
+    #[test]
+    fn mma_tf32_source_retains_req8_boundary_checks() {
+        let src = mma_tf32_source();
+        for needle in [
+            "int valid = (gr < m && gc < k) ? 16 : 0;",
+            "int valid = (gr < k && gc < n) ? 16 : 0;",
+            "if (r0 < m && c0 < n)",
+            "if (r1 < m && c1 < n)",
+        ] {
+            assert!(
+                src.contains(needle),
+                "expected REQ-8 boundary check text {needle:?} to remain in the kernel source"
+            );
+        }
+    }
+
+    /// TF32 丸め（`wmma::__float_to_tf32`）の出現箇所が
+    /// `CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP` マクロ定義内のみ
+    /// であり、kstep ループ内（mma.sync 発行帯）には存在しないことを検査
+    /// する（イシュー #800 の設計「smem ステージング時 1 回化」を本移植
+    /// でも壊していないことの回帰検査。`kernels_wmma_opt.rs` の同型
+    /// テストを参照）。
+    #[test]
+    fn mma_tf32_source_rounds_only_in_convert_stage_group_macros() {
+        let src = mma_tf32_source();
+        let convert_count = src.matches("wmma::__float_to_tf32(").count();
+        assert_eq!(
+            convert_count, 2,
+            "expected exactly 2 wmma::__float_to_tf32 call sites (one each in \
+             CONVERT_A_STAGE_GROUP/CONVERT_B_STAGE_GROUP), found {convert_count}"
+        );
+
+        let kstep_loop_pos = src
+            .find("for (int kstep = 0; kstep < MMA_TF32_BK / MMA_TF32_K; ++kstep)")
+            .expect("kstep loop must exist in the kernel source");
+        assert!(
+            !src[kstep_loop_pos..].contains("wmma::__float_to_tf32("),
+            "found wmma::__float_to_tf32 at/after the kstep loop (position \
+             {kstep_loop_pos}); rounding must stay confined to \
+             CONVERT_A_STAGE_GROUP/CONVERT_B_STAGE_GROUP before the loop"
+        );
+    }
+
+    /// `cp.async.commit_group` がループ内で 1 箇所（無条件・ループ末尾）
+    /// のみから発行され、`cp.async.wait_group` がプロローグ後・ループ内・
+    /// drain の計 3 箇所から発行されることを検査する（#492 の「1
+    /// イテレーション = 必ず 1 commit」不変条件・段数一般形固定即値の
+    /// 構造回帰検査）。
+    #[test]
+    fn mma_tf32_source_commit_wait_group_invariant() {
+        let src = mma_tf32_source();
+        let commit_count = src.matches("cp.async.commit_group;").count();
+        // プロローグ（STAGES-1 回のループ本体で 1 箇所発行）+ t ループ末尾
+        // （1 箇所発行）= ソース上の commit 発行サイトは 2 箇所（両者とも
+        // 実行時に複数回評価されるループ内の単一サイト）。
+        assert_eq!(
+            commit_count, 2,
+            "expected exactly 2 cp.async.commit_group call sites (prologue \
+             loop body, t loop tail), found {commit_count}"
+        );
+
+        let wait_count = src.matches("cp.async.wait_group").count();
+        // ループ内固定即値 wait（1 サイト）+ ループ外 drain（1 サイト）
+        // = 2 箇所。
+        assert_eq!(
+            wait_count, 2,
+            "expected exactly 2 cp.async.wait_group call sites (fixed-immediate \
+             in-loop wait, out-of-loop drain), found {wait_count}"
+        );
+    }
+
+    /// タイル定数の内部整合性（f16 版 `kernels_mma.rs` の同型 const assert
+    /// と同じ不変条件）を実行時にも再確認する（コンパイル時 assert の
+    /// 二重化ではなく、`cargo test` 実行時に値そのものを表示できるようにする
+    /// ための可読性目的の重複）。
+    #[test]
+    fn mma_tf32_tile_constants_are_internally_consistent() {
+        // smem 上限内であることはコンパイル時 `const _: () = assert!(...)`
+        // で既に検査済み（本ファイル冒頭）。ここでは値そのものを表示
+        // できる形で再確認する（可読性目的の重複）。
+        assert_eq!(MMA_TF32_SHARED_MEM_BYTES, 28_416);
+        assert_eq!(MMA_TF32_BLOCK_THREADS, 128);
+        assert_eq!(MMA_TF32_K_STEPS_PER_STAGE, 2);
+        assert_eq!(MMA_TF32_WARP_M, 32);
+        assert_eq!(MMA_TF32_WARP_N, 32);
+        assert_eq!(MMA_TF32_WARPS_M, 2);
+        assert_eq!(MMA_TF32_WARPS_N, 2);
+    }
+}
