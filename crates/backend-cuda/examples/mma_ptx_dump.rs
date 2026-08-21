@@ -353,12 +353,12 @@ fn main() {
     // 2 通りずつダンプする。`(warp_tiles_m, warp_tiles_n)` は
     // `docs/perf/cuda-gemm-mma-warp-tile-register-budget.md` §3.1 候補表と
     // 一致させる（2x2 現行を含む: 既定構成との差分比較の基準点として
-    // 必要）。導出スレッド数（`launch_bounds` の値）は
-    // `diagnostics::mma_f16_source_with_warp_tiles` が fail-closed で検査
-    // するため、ここでは候補表由来の値をハードコードせず None 経路の
-    // 成功から独立に確定できないが、値自体は候補表と `kernels_mma.rs`
-    // 側ユニットテスト（`mma_f16_source_with_warp_tiles_replaces_defines_for_each_candidate`）
-    // が pin 済みのため、ここでは候補表の値をそのまま埋め込む。
+    // 必要）。`threads`（`launch_bounds` に渡す導出スレッド数）は候補表の
+    // 値をそのままハードコードする。`diagnostics::mma_f16_source_with_warp_tiles`
+    // 自体は None 経路のみで動作し launch_bounds の値を導出・検査しないため、
+    // 値の正しさは候補表と `kernels_mma.rs` 側ユニットテスト
+    // （`mma_f16_source_with_warp_tiles_replaces_defines_for_each_candidate`）が
+    // pin していることに依拠する。
     for (warp_tiles_m, warp_tiles_n, threads) in
         [(2u32, 2u32, 512u32), (2, 4, 256), (4, 2, 256), (4, 4, 128)]
     {
