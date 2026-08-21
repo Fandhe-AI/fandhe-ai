@@ -81,11 +81,27 @@ const CORRECTNESS_M: u32 = 520;
 const CORRECTNESS_N: u32 = 512;
 const CORRECTNESS_K: u32 = 512;
 
-/// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」
-/// （`.claude/rules/coding-rust.md`「バックエンド構成」。緩和しない）。
-fn within_tolerance(actual: f32, expected: f32) -> bool {
-    let abs_diff = (actual - expected).abs();
-    abs_diff < 1e-5 || abs_diff < 1e-3 * expected.abs()
+/// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の要素単位
+/// 判定を `backend_cpu::compare`（`RELATIVE_TOLERANCE`/
+/// `ABSOLUTE_RESCUE_THRESHOLD`。`.claude/rules/coding-rust.md`「バックエンド
+/// 構成」）と**同一式**で再現する（`docs/perf/
+/// cuda-gemm-mma-tf32-ab.md`／`parity_baseline.rs` が引用する
+/// `fail_count`/`max_abs_diff`/`max_rel_err` はいずれも `compare` 由来の
+/// ため、初回不一致座標の特定にも同じ分母規約〈`max(|a|,|b|,1e-12)`〉を
+/// 使い、集計値〈`ParityDiagnostics`〉との整合を保つ。#842 codex-review
+/// 想定是正: 独自の許容誤差式を再実装すると `expected.abs()` のみを分母に
+/// 使う旧実装との間で判定境界がわずかに乖離しうるため、既存の唯一の正
+/// である `compare` の式へ委譲する）。
+fn is_mismatch(actual: f32, expected: f32) -> bool {
+    let diff = (actual as f64 - expected as f64).abs();
+    let scale = (actual as f64)
+        .abs()
+        .max((expected as f64).abs())
+        .max(1e-12);
+    let rel = diff / scale;
+    let pass =
+        rel < backend_cpu::RELATIVE_TOLERANCE || diff < backend_cpu::ABSOLUTE_RESCUE_THRESHOLD;
+    !pass
 }
 
 fn tflops(size: usize, secs: f64) -> f64 {
@@ -251,12 +267,44 @@ fn measure_candidate(
     Ok(TflopsMeasurement::from_secs(size, &measurement))
 }
 
+/// 数値一致検査の診断出力（#842 引き継ぎ事項。`docs/perf/
+/// cuda-gemm-mma-block-tile-stages.md` §6「まず `within_tolerance` 判定を
+/// ミスマッチ件数・最大誤差付きで出力するよう拡張し、再現・切り分けを
+/// 行う」を受けた拡張。#840 時点の `candidate_parity_ok` は bool のみを
+/// 返しており、`bt64x128_s4`／`bt128x128_s3_wt2x4` の FAIL がどの座標・
+/// どの規模の不一致かを追加ログなしには特定できなかった）。
+///
+/// `mismatch_count`/`max_abs_diff`/`max_rel_err` は [`backend_cpu::
+/// CompareReport`]（`fail_count`/`max_abs_diff`/`max_rel_err`。全セル
+/// 対象の集計）をそのまま転記する。`docs/perf/cuda-gemm-mma-tf32-ab.md`・
+/// `tests/common/parity_baseline.rs` が引用する同名統計はいずれもこの
+/// `CompareReport` 由来のため、本診断出力も同じ集計方式に揃えることで
+/// 実測記録との比較可能性を保つ（独自の集計方式を再実装しない）。
+struct ParityDiagnostics {
+    mismatch_count: usize,
+    max_abs_diff: f64,
+    max_rel_err: f64,
+    /// 最初に不一致となった要素の行優先フラットインデックス
+    /// （`row = idx / CORRECTNESS_N`・`col = idx % CORRECTNESS_N`）。
+    /// `is_mismatch`（`CompareReport` と同一の判定式）で `mismatch_count`
+    /// と独立に再走査して求める（`CompareReport` 自体は座標を保持しない
+    /// ため）。
+    first_mismatch_index: Option<usize>,
+}
+
+impl ParityDiagnostics {
+    fn is_pass(&self) -> bool {
+        self.mismatch_count == 0
+    }
+}
+
 /// 候補カーネルの数値一致を検査する（計測の前に必ず実施。fail 時は
 /// 当該候補を計測から除外し、残候補の計測は継続する。実装計画「計測
 /// 前へ数値一致検査」節）。CPU 参照実装は `backend_cpu::matmul_reference_
 /// fma`（`f32::mul_add` FMA 契約。`tests/cpu_cuda_mma_parity.rs` と同一
 /// 手順: f16→f32→参照 FMA→f16 丸め→f32 の経路で得た参照値と、カーネル
-/// 出力（f16→f32）を統一複合判定で照合する）。
+/// 出力（f16→f32）を統一複合判定で照合する）。判定・集計は
+/// `backend_cpu::compare`（REQ-2 統一複合判定の唯一の正）へ委譲する。
 fn candidate_parity_ok(
     compiled: &diagnostics::CompiledMmaF16BlockTileKernel,
     gemm: &CudaMmaGemm,
@@ -264,7 +312,7 @@ fn candidate_parity_ok(
     a_f16: &[f16],
     b_f16: &[f16],
     expected_f32: &[f32],
-) -> Result<bool, CudaError> {
+) -> Result<ParityDiagnostics, CudaError> {
     let (a_dev, b_dev) = gemm.upload_f16(a_f16, b_f16)?;
     let mut c_dev = gemm.alloc_output_f16(CORRECTNESS_M, CORRECTNESS_N)?;
     compiled.launch_f16(
@@ -277,12 +325,23 @@ fn candidate_parity_ok(
         CORRECTNESS_K,
     )?;
     let actual_f16 = gemm.download_f16(&c_dev)?;
-    let mismatch = actual_f16
+    let actual_f32: Vec<f32> = actual_f16.iter().map(|x| x.to_f32()).collect();
+
+    let report = backend_cpu::compare(&actual_f32, expected_f32).map_err(|e| {
+        CudaError::InvalidKernelConfig {
+            detail: format!("candidate_parity_ok: length mismatch in backend_cpu::compare: {e}"),
+        }
+    })?;
+    let first_mismatch_index = actual_f32
         .iter()
         .zip(expected_f32.iter())
-        .filter(|(a, e)| !within_tolerance(a.to_f32(), **e))
-        .count();
-    Ok(mismatch == 0)
+        .position(|(a, e)| is_mismatch(*a, *e));
+    Ok(ParityDiagnostics {
+        mismatch_count: report.fail_count,
+        max_abs_diff: report.max_abs_diff,
+        max_rel_err: report.max_rel_err,
+        first_mismatch_index,
+    })
 }
 
 /// 候補が opt-in 予算内かを実測レイアウトから判定する（固定除外を
@@ -488,11 +547,21 @@ fn main() {
         // 数値一致検査（計測より先に実施。実装計画「計測前へ数値一致
         // 検査」節）。
         match candidate_parity_ok(&compiled, &gemm, &device, &a_ref, &b_ref, &expected_f32) {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(diag) if diag.is_pass() => {}
+            Ok(diag) => {
+                let (row, col) = diag
+                    .first_mismatch_index
+                    .map(|idx| (idx / CORRECTNESS_N as usize, idx % CORRECTNESS_N as usize))
+                    .expect("mismatch_count > 0 implies first_mismatch_index is Some");
                 println!(
-                    "{}: FAIL (parity mismatch vs CPU f32::mul_add reference; not measuring)",
-                    candidate.label
+                    "{}: FAIL (parity mismatch vs CPU f32::mul_add reference; not measuring; \
+                     mismatch_count={}/{}, max_abs_diff={:.3e}, max_rel_err={:.3e}, \
+                     first_mismatch=(row={row}, col={col}))",
+                    candidate.label,
+                    diag.mismatch_count,
+                    (CORRECTNESS_M * CORRECTNESS_N) as usize,
+                    diag.max_abs_diff,
+                    diag.max_rel_err,
                 );
                 continue;
             }

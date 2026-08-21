@@ -351,7 +351,22 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
 実測値・判断根拠・再評価条件の詳細は `docs/perf/cuda-gemm-mma-tf32-ab.md` §2〜§5.1 を正とし、
 本節では二重管理しない。
 
-## 16. mma_f16 ブロックタイル拡大・ステージ数増（#804・Step F フォールバック）
+## 16. mma_f16 ブロックタイル拡大・ステージ数増（#804 → #840 実機 A/B → #842 採否確定）
+
+**採否判断（#842・確定）: 不採用（現行 `MMA_BM=64`/`MMA_BN=128`/
+`MMA_STAGES=3` を維持）**。#840 で DGX Spark GB10 実機 A/B を完了し、
+4 候補すべてが不採用（`bt64x128_s4`／`bt128x128_s3_wt2x4` は数値一致
+FAIL、`bt128x256_s3_wt4x4` は起動時リソース超過、`bt128x256_s4` は
+机上除外）と判明した（詳細実測は `docs/perf/
+cuda-gemm-mma-block-tile-stages.md` §4・§4.1・§5）。#842 は実機へ
+再到達できず（本 worktree に `ptxas`/`nvcc` 不在・
+`real-hardware-verification-env.local.md` 未配置）、原因調査は bench
+診断出力の拡張（mismatch 件数・最大誤差・初回不一致座標）と机上検証に
+留まったが（同 doc §7）、**#840 時点の実機不採用結果自体は確定済みの
+事実であり、これを覆す新たな実機実測が得られない限り不採用判断は
+変わらない**。よって #842 では本番カーネル定数・`swizzle.rs`・
+`gemm_auto.rs` を変更せず不採用判断を確定記録する。以下は #804 時点
+（実機未到達）の記録:
 
 - **位置づけ**: 親イシュー #479（GEMM 性能改善ツリー）→ Phase 4 親 #789 配下の #804
   「perf(backend-cuda): mma_f16 ブロックタイル拡大とステージ数増」。§14（#803）の warp タイル
@@ -380,11 +395,22 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
   `bt128x256_s3_wt4x4`〈81,408B〉。いずれも静的 48KiB を超え GB10 実測 opt-in 上限 101,376B 以下。
   `bt128x256_s4`〈108,544B〉は opt-in 上限超過のため机上除外）。実機 `ptxas -v` 実測表は本イシュー
   時点では実行待ち。
-- **#804 の残作業（次に実機到達できたセッションへ）**: `docs/perf/
-  cuda-gemm-mma-block-tile-stages.md` §6 を参照（実測・採用構成決定・動的 SMEM opt-in の起動側
-  結線・swizzle/`gemm_auto.rs` 追従・4096 ベンチ・parity 非後退確認）。
+- **#804 の残作業（当初記録。#840/#842 で実測・判断は完了、残るのは原因調査のみ）**:
+  `docs/perf/cuda-gemm-mma-block-tile-stages.md` §6・§7・§7.1 を参照（数値不一致 2 候補の実機
+  原因調査〈`compute-sanitizer` 等の実行時観測が必要〉のみが未消化として残る。実測・採用構成決定・
+  動的 SMEM opt-in の起動側結線・swizzle/`gemm_auto.rs` 追従は「不採用確定」により対象外になった）。
 
-## 17. TF32 mma.sync タイル拡大（#806・Step F フォールバック）
+## 17. TF32 mma.sync タイル拡大（#806 → #841 実機 A/B → #842 判断材料なしのまま凍結継続）
+
+**採否判断（#842・確定）: 不採用（現行 `MMA_TF32_BM=64`/`MMA_TF32_BN=64`/`MMA_TF32_BK=16`/
+`MMA_TF32_STAGES=3` を維持）。判断材料なし（`CudaMmaTf32Gemm` 自体の既知 correctness bug〈#839〉
+未解消のため全実測が参考値）につき凍結継続**。#841 で DGX Spark GB10 実機 A/B を完了したが、
+全候補（比較基準行含む）が CPU 参照値との数値一致 FAIL（`parity_cpu=false`。§15.7 の #839 凍結
+判断と同一原因）のため、TFLOPS 実測値は採否判断に使用不可の参考値に留まる（詳細は `docs/perf/
+cuda-gemm-mma-tf32-block-tile.md` §7・§7.1・§9）。#842 は #839（`CudaMmaTf32Gemm` の
+correctness bug 修正）とは独立に本イシューのスコープを閉じ、bug 修正 → 再計測 → 採否判断の順序が
+必要という結論を再確認した（`docs/perf/cuda-gemm-mma-tf32-block-tile.md` §9「再評価条件」）。以下は
+#806 時点（実機未到達）の記録:
 
 - **位置づけ**: 親イシュー #479（GEMM 性能改善ツリー）→ Phase 4 親 #789 配下の #806
   「perf(backend-cuda): TF32 タイル拡大（mma.sync 化後）」。§16（#804）の f16 ブロックタイル拡大
@@ -413,10 +439,11 @@ launch-only 計測境界）を追加し、`mma_tf32` を `wmma_tf32` との比�
   のみ〈37,888B〉・M 拡大〈43,776B〉・N 拡大〈40,704B〉・両拡大〈56,064B〉・両拡大+ステージ増
   〈74,752B〉・BK 拡大〈53,760B〉。両拡大以降は静的 48KiB を超え opt-in 経路。全候補が GB10 実測
   opt-in 上限 101,376B 以下）。実機 `ptxas -v` 実測表は本イシュー時点では実行待ち。
-- **#806 の残作業（次に実機到達できたセッションへ）**: `docs/perf/cuda-gemm-mma-tf32-block-tile.md`
-  §8 を参照（spill 実測・数値一致 `#[ignore]` テスト・4096/2048 ベンチ・採用構成決定・動的 SMEM
-  opt-in の起動側結線・実測値記録）。TF32 mma.sync 経路自体の本番 3 段選択への結線・採否判断は
-  #802 のスコープのまま変わらない。
+- **#806 の残作業（当初記録。#841/#842 で実測・実機実行は完了、残るのは #839 の bug 修正待ち）**:
+  `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §7〜§9 を参照（spill 実測・数値一致 `#[ignore]`
+  テスト・4096/2048 ベンチはいずれも #841 で完了済み。採用構成決定・動的 SMEM opt-in の起動側結線は
+  `CudaMmaTf32Gemm` の correctness bug〈#839〉修正・再計測後に持ち越し）。TF32 mma.sync 経路自体の
+  本番 3 段選択への結線・採否判断は #802 のスコープのまま変わらない。
 
 ## 18. クロスタイル先読み・XOR swizzle・StreamK の要否判断（#812）
 

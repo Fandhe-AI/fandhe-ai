@@ -286,3 +286,31 @@ correctness bug」節・実装計画の運用方針を踏襲）。
    cuda-gemm-mma-tf32-ab.md` §2 参照）。`CudaMmaTf32Gemm` の既知
    correctness bug の原因調査・修正は別イシュー（ユーザー承認待ち、
    `docs/perf/cuda-gemm-mma-tf32-ab.md` §6 記載）。
+
+## 9. #842 の判断（判断材料なし・凍結維持）
+
+**状態: 不採用（現行 `MMA_TF32_*` 定数を維持・凍結継続）を記録**。
+
+- §7 の全候補 TFLOPS は `CudaMmaTf32Gemm` 自体の既知 correctness bug
+  （#839。§7 冒頭「数値一致（正しさ）」参照）により「参考値（採否判断に
+  使用不可）」区分のままであり、本イシューで新たに実測を追加しても
+  この位置づけは変わらない。**判断材料（bug 修正後の再計測値）が存在
+  しないため、タイル・ステージ拡大候補の採否自体を判断できる状態には
+  ない**。
+- `CudaMmaTf32Gemm` は #839 で凍結確定済み（`docs/cuda-tensor-core-
+  design.md` §15.7）であり、本イシューはこの凍結判断を変更しない。
+  `MMA_TF32_BM`/`MMA_TF32_BN`/`MMA_TF32_BK`/`MMA_TF32_STAGES`/
+  `MMA_TF32_WARP_TILES_M`/`_N`・`gemm_mma_tf32.rs` の起動結線は本
+  イシューでも一切変更していない。
+- **bench 診断出力拡張**: `examples/gemm_mma_tf32_block_tile_bench.rs`
+  に `mismatch_diagnostics`（mismatch 件数・最大絶対/相対誤差・初回
+  不一致座標を返す。`gemm_mma_block_tile_bench.rs::ParityDiagnostics`
+  と同型設計）を追加し、`parity_cpu=false` 時の標準出力へ規模情報を
+  追記した（#839 修正後の再計測時に FAIL パターンの回帰確認・規模比較
+  に使える準備。低コストな対称性維持のための拡張であり、本判断の
+  根拠には使っていない）。
+- **再評価条件**（不変）: (a) `CudaMmaTf32Gemm` 自体の correctness bug
+  修正、(b) 実機での数値一致 6 本 pass、(c) 修正後の本ブロックタイル
+  拡大候補の再計測、の順で行う。correctness bug 修正の新規イシュー
+  起票はユーザー承認必須のため本イシューでは行わず、PR 本文で提案に
+  留める（`.claude/rules/out-of-scope-tracking.md`）。
