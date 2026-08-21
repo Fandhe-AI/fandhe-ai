@@ -466,3 +466,52 @@ fn gemm_simdgroup_tiled_source_retains_boundary_guard_with_padding() {
         "パディング導入後も A タイル・B タイル双方の group_in_bounds 判定が必要です"
     );
 }
+
+/// イシュー #809 の証跡: `FINE_BARRIER_ENABLED` function constant
+/// （index 8。`SWIZZLE_ENABLED`〈#540・index 7〉の直後）がファイル冒頭で
+/// 宣言されていることをロックする。
+#[test]
+fn gemm_metal_source_declares_fine_barrier_enabled_function_constant() {
+    assert!(
+        GEMM_METAL_SOURCE.contains("constant bool FINE_BARRIER_ENABLED [[function_constant(8)]];"),
+        "gemm.metal に FINE_BARRIER_ENABLED function constant（index 8。SWIZZLE_ENABLED〈#540・index 7〉の \
+         直後）宣言が見つかりません"
+    );
+}
+
+/// イシュー #809 の証跡: `gemm_simdgroup_tiled` の staged 経路 kk ループが、
+/// フラグメント一括ロード（`a_frag`/`b_frag`。#745）と MMA 発行の間に
+/// `FINE_BARRIER_ENABLED` でゲートされた `simdgroup_barrier(mem_flags::mem_none)`
+/// を挿入していることをロックする（本番既定 `false` のため実行時コストは
+/// ないが、A/B 計測で `true` を渡した際に実際にこの挿入経路を通ることを
+/// 保証する証跡）。挿入位置は B フラグメントロード（`b_frag[c_]` の
+/// `simdgroup_load`）直後・MMA 発行ループ（`simdgroup_multiply_accumulate`）
+/// 直前であることも合わせて検査する（barrier がフラグメントロード完了後・
+/// MMA 発行前という契約〈本ファイル冒頭 FINE_BARRIER_ENABLED 宣言コメント
+/// 参照〉から外れた位置への移動を検出するため）。
+#[test]
+fn gemm_simdgroup_tiled_source_gates_fine_barrier_between_fragment_load_and_mma() {
+    let kernel_body = gemm_simdgroup_tiled_kernel_body();
+
+    assert!(
+        kernel_body.contains("if (FINE_BARRIER_ENABLED) {\n                    simdgroup_barrier(mem_flags::mem_none);\n                }"),
+        "gemm_simdgroup_tiled に FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier(mem_flags::mem_none) \
+         挿入が見つかりません"
+    );
+
+    let b_frag_load_pos = kernel_body
+        .find("simdgroup_load(b_frag[c_],")
+        .expect("B フラグメントロード（b_frag）が見つかりません");
+    let barrier_pos = kernel_body
+        .find("simdgroup_barrier(mem_flags::mem_none);")
+        .expect("FINE_BARRIER_ENABLED ゲート付き simdgroup_barrier が見つかりません");
+    let mma_pos = kernel_body
+        .find("simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);")
+        .expect("MMA 発行（simdgroup_multiply_accumulate）が見つかりません");
+
+    assert!(
+        b_frag_load_pos < barrier_pos && barrier_pos < mma_pos,
+        "simdgroup_barrier(mem_flags::mem_none) は B フラグメントロード直後・MMA 発行直前に \
+         位置する契約です（b_frag_load={b_frag_load_pos} barrier={barrier_pos} mma={mma_pos}）"
+    );
+}

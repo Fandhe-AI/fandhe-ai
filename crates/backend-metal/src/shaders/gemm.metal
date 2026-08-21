@@ -442,6 +442,24 @@ constant uint TGP_PAD [[function_constant(6)]];
 // （main への rebase 時点での未使用最小 index）を割り当てる。
 constant bool SWIZZLE_ENABLED [[function_constant(7)]];
 
+// simdgroup 細粒度同期ゲート（イシュー #809・実験的機構）。
+// `crate::tile::FINE_BARRIER_ENABLED`（既定 `false`）が
+// `crate::pipeline::make_pipeline_with_constants` 経由で畳み込む。
+// `gemm_simdgroup_tiled` の staged 経路（`USE_TGP_STAGING=true`）のみが
+// 対象で、kk ループ内でフラグメント一括ロード（`a_frag`/`b_frag`。#745）
+// と MMA 発行の間に `simdgroup_barrier(mem_flags::mem_none)`（MLX steel
+// `mma.h` 型。`threadgroup_barrier` より軽量な simdgroup スコープの
+// フェンス）を挿入するかどうかを切り替える。`tile_a`/`tile_b` の内容自体
+// は前段の `threadgroup_barrier(mem_flags::mem_threadgroup)`（協調ロード
+// 直後）で既に確定済みのため、この挿入は演算オペランド列を一切変えず
+// （フラグメントロード順・MMA 発行順は不変）、有効化時も数値はビット単位
+// で不変（#536・#538 と同じ論法）。採否は A/B 実測
+// （`examples/gemm_fine_barrier_ab_bench.rs`・
+// `docs/perf/metal-gemm-fine-barrier-ab.md`）で判断する。index は
+// SWIZZLE_ENABLED（#540・index 7）の直後、index 8（main への rebase時点
+// での未使用最小 index）を割り当てる。
+constant bool FINE_BARRIER_ENABLED [[function_constant(8)]];
+
 // threadgroup 共有メモリは function constant でサイズ指定できないため、
 // `threadgroup float*` 引数＋エンコード時 `setThreadgroupMemoryLength_
 // atIndex`（`crate::gemm::encode_dispatch_tiled`）で渡す。A タイル
@@ -699,6 +717,14 @@ kernel void gemm_simdgroup_tiled(
                     // ストライドを BN ではなく ldb（パディング込み）にする
                     // （上記 A タイル側と同じ理由。イシュー #538）。
                     simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                }
+                // simdgroup 細粒度同期（イシュー #809・実験的機構。本ファイル
+                // 冒頭 FINE_BARRIER_ENABLED 宣言のコメント参照）。フラグメント
+                // ロード完了後・MMA 発行前に挿入する MLX steel `mma.h` 型の
+                // フェンス。function constant による条件のためコンパイル時
+                // 畳み込みで `false`（本番既定）時の実行時コストはない。
+                if (FINE_BARRIER_ENABLED) {
+                    simdgroup_barrier(mem_flags::mem_none);
                 }
                 for (uint r = 0; r < acc_rows; r++) {
                     for (uint c_ = 0; c_ < acc_cols; c_++) {
