@@ -42,17 +42,25 @@ stores・spill loads・stack frame はいずれも両カーネルとも 0 bytes�
 入口）は `new` へ統合されたため廃止した。以下は結線判断に至るまでの経緯（#775 時点までの歴史的記録）
 として保持する。
 
-**現行の適用条件（PR #784 codex-review 追加指摘の是正・2026-08-21 現在）**: `swizzle.rs::should_apply_swizzle`
-は「総ブロックタイル数 `num_m_blocks * num_n_blocks >= 2048`」**かつ**「M/N 各軸のブロック数が実測点
-M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_M_BLOCKS=64`/`SWIZZLE_APPLY_MIN_N_BLOCKS=32`）」**かつ**「K が
-実測点 M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_K=4096`）」の 3 条件すべてを満たす場合のみ `true` を返す。
-当初（結線時点）は総タイル数のみで判定しており、M=32768, N=512 のような未検証の非正方形形状にも適用し
-てしまう不備があった（PR #784 codex-review 1 回目の指摘）ため軸別ガードを追加したが、M/N 軸別ガードのみ
-では K を見ないため M=N=4096, K=8 のような未検証の極端な K 形状（メモリアクセス量・L2 再利用特性が実測
-点 M=N=K=4096 と大きく異なる）にも適用してしまう不備が残っていた（PR #784 codex-review 2 回目の指摘）。
-これに対し K の生値をそのまま下限とする `SWIZZLE_APPLY_MIN_K`（実測点の K=4096）を追加し、M/N 軸別ガード
-と同様に AND 条件へ組み込むことで実測承認範囲（正方形形状 M=N=K=4096）を超える適用を防いだ（詳細は
-`swizzle.rs::should_apply_swizzle`／`swizzle.rs::SWIZZLE_APPLY_MIN_K` ドキュメンテーションコメント参照）。
+**現行の適用条件（PR #784 codex-review 3 回目の指摘の是正・2026-08-21 現在）**: `swizzle.rs::
+should_apply_swizzle` は「raw 次元が正方形（`m == n`）」**かつ**「raw 次元が実測点 M=N=K=4096 以上
+（`SWIZZLE_APPLY_MIN_SQUARE_DIM=4096`）」**かつ**「総ブロックタイル数 `num_m_blocks * num_n_blocks
+>= 2048`」**かつ**「M/N 各軸のブロック数が実測点 M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_M_BLOCKS=64`/
+`SWIZZLE_APPLY_MIN_N_BLOCKS=32`）」**かつ**「K が実測点 M=N=K=4096 相当以上（`SWIZZLE_APPLY_MIN_K=4096`）」
+の 5 条件すべてを満たす場合のみ `true` を返す。当初（結線時点）は総タイル数のみで判定しており、
+M=32768, N=512 のような未検証の非正方形形状にも適用してしまう不備があった（PR #784 codex-review 1 回目
+の指摘）ため軸別ブロック数ガードを追加したが、M/N 軸別ガードのみでは K を見ないため M=N=4096, K=8 の
+ような未検証の極端な K 形状（メモリアクセス量・L2 再利用特性が実測点 M=N=K=4096 と大きく異なる）にも
+適用してしまう不備が残っていた（PR #784 codex-review 2 回目の指摘）ため K の生値をそのまま下限とする
+`SWIZZLE_APPLY_MIN_K`（実測点の K=4096）を追加した。**さらに、軸別ブロック数ガードは両軸それぞれの下限
+のみを課すため、M=8192, N=4096, K=4096（両軸とも下限以上だが正方形ではない）のような未検証の非正方形
+形状にも適用してしまう不備が残っていた（PR #784 codex-review 3 回目の指摘）**。実測承認（§2/§6.3）は
+M=N=K=4096 の**正方形**のみを対象としているため、raw 次元の厳密一致（`m == n`）を新たな AND 条件として
+追加し、適用範囲を「正方形レイ上（M=N かつ M=N>=4096）かつ K>=4096」のみへ絞った（`m == n` かつ
+`m >= SWIZZLE_APPLY_MIN_SQUARE_DIM` が成立すれば軸別ブロック数ガード・総タイル数ガードは `div_ceil` の
+単調性から自動的に成立するため、実効的な適用条件はこの正方形レイ条件へ単純化できる。冗長になった旧
+条件は多層防御として維持している。詳細は `swizzle.rs::should_apply_swizzle`／
+`swizzle.rs::SWIZZLE_APPLY_MIN_SQUARE_DIM` ドキュメンテーションコメント参照）。
 
 ### 2.0 以下は #775 時点までの経緯（結線待ち時の記録。歴史的記録として保持）
 
@@ -405,9 +413,12 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
 - 非正方形形状（縦長・横長。M≠N）での A/B 計測（PR レビュー指摘・Medium。上記実測はいずれも正方形形状
   のみで、`should_apply_swizzle` の閾値はアスペクト比を考慮しないため非正方形形状への外挿は未検証。
   `swizzle.rs::SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` ドキュメンテーションコメント参照。**PR #784 で
-  非正方形形状は軸別ガード〈`SWIZZLE_APPLY_MIN_M_BLOCKS`/`SWIZZLE_APPLY_MIN_N_BLOCKS`〉により適用対象外
+  非正方形形状は軸別ガード〈`SWIZZLE_APPLY_MIN_M_BLOCKS`/`SWIZZLE_APPLY_MIN_N_BLOCKS`〉に加え、raw 次元の
+  正方形条件（`m == n`。codex-review 3 回目の指摘の是正・`SWIZZLE_APPLY_MIN_SQUARE_DIM`）により適用対象外
   へ制限済みのため、この A/B 計測は「適用範囲を広げる場合の将来の検証項目」であり結線の前提条件では
-  なくなった**）
+  なくなった**。将来この A/B 計測で非正方形形状の改善を確認できた場合は、本節と同じ実機計測手順
+  （§3）に従って実測し、`should_apply_swizzle` の正方形条件をアスペクト比考慮の判定式へ改訂することを
+  検討する）
 - `cargo run -p backend-cuda --release --example cuda_floor_bench`（5 回中央値。実機検証・`new` 既定切替
   後に、起動時診断が swizzle 適用状態を正しく報告することを確認する）
 
@@ -454,11 +465,14 @@ dynamic_group_width=8`（SM=48 → 動的選択幅 g8 の再現）を出力し�
 入口）は `new` と重複するため廃止した。
 
 **未検証のため適用対象外にガード済み（§2.0「非正方形形状」節参照）**: 非正方形形状（縦長・横長）での
-A/B 計測は本ゲートでも実施していない。ただし PR #784 codex-review P1 是正により
-`should_apply_swizzle` は M/N 各軸のブロック数が実測点 M=N=K=4096 相当以上であることも要求する
-軸別ガードを追加したため、未検証の非正方形形状（例: M=32768, N=512）は swizzle 変種へディスパッチ
-されず base 経路へフォールバックする契約になった。したがって本節の「未検証」は「未承認の外挿を本番へ
-含めてしまうリスク」ではなく「適用範囲を拡張する余地が残っている」という意味に変わった。今後
+A/B 計測は本ゲートでも実施していない。PR #784 codex-review P1 是正により `should_apply_swizzle` は
+M/N 各軸のブロック数が実測点 M=N=K=4096 相当以上であることも要求する軸別ガードを追加したが、両軸
+それぞれの下限のみでは M=8192, N=4096 のような「両軸とも下限以上だが正方形ではない」形状を通して
+しまう不備が残っていたため、PR #784 codex-review 3 回目の指摘の是正で raw 次元の正方形条件
+（`m == n`）を追加した。これにより未検証の非正方形形状（例: M=32768, N=512・M=8192, N=4096）はいずれも
+swizzle 変種へディスパッチされず base 経路へフォールバックする契約になった。したがって本節の
+「未検証」は「未承認の外挿を本番へ含めてしまうリスク」ではなく「適用範囲を拡張する余地が残っている」
+という意味に変わった。今後
 非正方形形状の A/B 計測で改善を確認できた場合は、軸別ガードをアスペクト比考慮の判定式へ改訂すること
 を検討する。
 
@@ -511,6 +525,16 @@ size, size)`（M=N=K の正方形。§2 参照）を呼ぶ計測であり、K �
 ガードと同じ境界（4096 でちょうど成立・4096 未満は不成立）に一致するため、この実測記録の判定結果
 （512/1024/2048 false・4096 true）は K ガード追加後も変わらず同一である。ソースコード側の該当変更は
 `crates/backend-cuda/src/swizzle.rs::should_apply_swizzle`／`SWIZZLE_APPLY_MIN_K` を参照。
+
+**追記（PR #784 codex-review 3 回目の指摘・正方形条件 `m == n` 追加）**: 上記「結線後 `cuda_floor_bench`
+実測」・「bit 一致」・「parity 非後退」・「レジスタスピル確認」の 4 項目はいずれも
+`cuda_floor_bench.rs`／`mma_f16_swizzle_variant_matches_base_bit_exact_output` が M=N=K の**正方形**
+形状（512/1024/2048/4096/m=n=4096 等。`swizzle_applies(size, size, size)` 呼び出し）のみを対象に実施
+した実機ゲートである。`should_apply_swizzle` へ `m == n` を新たな AND 条件として追加しても、これらの
+呼び出しはすべて `m == n` を自明に満たす（正方形計測のため）ため、判定結果（512/1024/2048 false・4096
+true）・bit 一致・parity 非後退・レジスタスピル計測結果はいずれも本是正の影響を受けず**不変**である。
+本節の実機ゲート判定は正方形条件追加後も引き続き有効な根拠として扱う。ソースコード側の該当変更は
+`crates/backend-cuda/src/swizzle.rs::should_apply_swizzle`／`SWIZZLE_APPLY_MIN_SQUARE_DIM` を参照。
 
 ## 7. TF32 opt-staged 経路への横展開（#741）
 

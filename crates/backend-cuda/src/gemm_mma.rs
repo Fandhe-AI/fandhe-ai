@@ -58,10 +58,12 @@ const MMA_BLOCK_DIM: (u32, u32, u32) = (kernels_mma::MMA_BLOCK_THREADS, 1, 1);
 const _: () = assert!(
     crate::swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS == 4096 / kernels_mma::MMA_BM
         && crate::swizzle::SWIZZLE_APPLY_MIN_N_BLOCKS == 4096 / kernels_mma::MMA_BN
-        && crate::swizzle::SWIZZLE_APPLY_MIN_K == 4096,
-    "swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS/SWIZZLE_APPLY_MIN_N_BLOCKS/SWIZZLE_APPLY_MIN_K が \
-     実測点 M=N=K=4096 相当の軸別ブロック数・K 値と乖離しています \
-     （swizzle.rs を更新すること）"
+        && crate::swizzle::SWIZZLE_APPLY_MIN_K == 4096
+        && crate::swizzle::SWIZZLE_APPLY_MIN_SQUARE_DIM == 4096,
+    "swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS/SWIZZLE_APPLY_MIN_N_BLOCKS/SWIZZLE_APPLY_MIN_K/ \
+     SWIZZLE_APPLY_MIN_SQUARE_DIM が実測点 M=N=K=4096 相当の軸別ブロック数・K 値・raw \
+     次元下限と乖離しています（PR #784 codex-review P1 是正で SWIZZLE_APPLY_MIN_SQUARE_DIM \
+     を追加。swizzle.rs を更新すること）"
 );
 
 /// `cp.async.cg.shared.global` の 16 バイト転送粒度が要求するグローバル側
@@ -500,10 +502,12 @@ impl CudaMmaGemm {
     /// - [`new`](Self::new)（本番既定コンストラクタ）経由・
     ///   `mma_f16_swizzle` が `Some`（SM 数実測に成功しサイズ条件付き
     ///   変種を保持している）: [`crate::swizzle::should_apply_swizzle`] を
-    ///   `(m, n)` から導出したブロックタイル数（`MMA_BM`/`MMA_BN` 単位の
-    ///   `div_ceil`。`mma_launch_config` の grid 次元と同じ導出式）と `k`
-    ///   （PR #784 codex-review 追加指摘の是正で追加した K ガード。K は
-    ///   グリッド分割軸ではないため生の値をそのまま渡す）へ適用した結果
+    ///   `(m, n)`（raw 次元。PR #784 codex-review P1 是正で追加した正方形
+    ///   条件 `m == n` の判定に使う）・そこから導出したブロックタイル数
+    ///   （`MMA_BM`/`MMA_BN` 単位の `div_ceil`。`mma_launch_config` の
+    ///   grid 次元と同じ導出式）・`k`（PR #784 codex-review 追加指摘の
+    ///   是正で追加した K ガード。K はグリッド分割軸ではないため生の値を
+    ///   そのまま渡す）へ適用した結果
     /// - [`new_with_swizzle`](Self::new_with_swizzle) 経由（強制適用。
     ///   `mma_f16_swizzle` は `None` だが `swizzle_group_width` が
     ///   `Some`）: 形状に関わらず常に `true`
@@ -515,29 +519,32 @@ impl CudaMmaGemm {
     /// （512/1024/2048/4096。M=N=K の正方形のため `k` に同じ値を渡す）
     /// ごとの適用有無を出力するために呼ぶ。
     pub fn swizzle_applies(&self, m: u32, n: u32, k: u32) -> bool {
-        let num_m_blocks = m.div_ceil(kernels_mma::MMA_BM);
-        let num_n_blocks = n.div_ceil(kernels_mma::MMA_BN);
-        self.should_launch_swizzle_kernel(num_m_blocks, num_n_blocks, k)
+        self.should_launch_swizzle_kernel(m, n, k)
     }
 
-    /// ブロックタイル数 `(num_m_blocks, num_n_blocks)`（`mma_launch_config`
-    /// の grid 次元 `(grid_dim.1, grid_dim.0)` と同じ導出式）と `k`
-    /// （グリッド分割軸ではなく生の K 値。PR #784 codex-review 追加指摘の
-    /// 是正で追加）から、`launch_f16` が起動すべきカーネルが swizzle 変種か
-    /// base かを判定する共通ロジック（[`swizzle_applies`](Self::swizzle_applies)
-    /// と `launch_f16` の両方が参照する単一の真実源）。
+    /// raw 次元 `(m, n)`（PR #784 codex-review P1 是正で追加した正方形
+    /// 条件 `m == n` の判定に使う）と `k`（グリッド分割軸ではなく生の K
+    /// 値。PR #784 codex-review 追加指摘の是正で追加）から、`launch_f16`
+    /// が起動すべきカーネルが swizzle 変種か base かを判定する共通ロジック
+    /// （[`swizzle_applies`](Self::swizzle_applies) と `launch_f16` の
+    /// 両方が参照する単一の真実源）。
     ///
     /// `mma_f16_swizzle` が `Some`（[`new`](Self::new)（本番既定
     /// コンストラクタ）が SM 数実測に成功しサイズ条件付き変種を保持して
-    /// いる）場合は [`crate::swizzle::should_apply_swizzle`] で判定し、
-    /// `None` の場合は `swizzle_group_width` の有無で強制適用
-    /// （[`new_with_swizzle`](Self::new_with_swizzle)。`mma_f16` 自体が
-    /// swizzle 変種）／強制非適用（[`new_without_swizzle`
-    /// ](Self::new_without_swizzle)・SM 数未取得時の `new`。`mma_f16` は
-    /// base）のいずれかを返す。
-    fn should_launch_swizzle_kernel(&self, num_m_blocks: u32, num_n_blocks: u32, k: u32) -> bool {
+    /// いる）場合は `(m, n)` からブロックタイル数（`mma_launch_config` の
+    /// grid 次元と同じ `MMA_BM`/`MMA_BN` 単位の `div_ceil`）を導出し
+    /// [`crate::swizzle::should_apply_swizzle`] で判定し、`None` の場合は
+    /// `swizzle_group_width` の有無で強制適用（[`new_with_swizzle`
+    /// ](Self::new_with_swizzle)。`mma_f16` 自体が swizzle 変種）／強制
+    /// 非適用（[`new_without_swizzle`](Self::new_without_swizzle)・SM 数
+    /// 未取得時の `new`。`mma_f16` は base）のいずれかを返す。
+    fn should_launch_swizzle_kernel(&self, m: u32, n: u32, k: u32) -> bool {
         match &self.mma_f16_swizzle {
-            Some(_) => crate::swizzle::should_apply_swizzle(num_m_blocks, num_n_blocks, k),
+            Some(_) => {
+                let num_m_blocks = m.div_ceil(kernels_mma::MMA_BM);
+                let num_n_blocks = n.div_ceil(kernels_mma::MMA_BN);
+                crate::swizzle::should_apply_swizzle(m, n, num_m_blocks, num_n_blocks, k)
+            }
             None => self.swizzle_group_width.is_some(),
         }
     }
@@ -659,11 +666,12 @@ impl CudaMmaGemm {
 
         // カーネル選択（構造体ドキュメンテーションコメント
         // 「mma_f16_swizzle」・`should_launch_swizzle_kernel` 参照）。
-        // grid_dim は mma_launch_config が (n.div_ceil(MMA_BN),
-        // m.div_ceil(MMA_BM), 1) として構築しているため、(num_m_blocks,
-        // num_n_blocks) = (grid_dim.1, grid_dim.0)。
-        let (num_n_blocks, num_m_blocks) = (cfg.grid_dim.0, cfg.grid_dim.1);
-        let kernel = if self.should_launch_swizzle_kernel(num_m_blocks, num_n_blocks, k) {
+        // `should_launch_swizzle_kernel` は raw 次元 (m, n) を直接受け取り
+        // （PR #784 codex-review P1 是正で追加した正方形条件 `m == n` の
+        // 判定に raw 値が必要なため）、ブロックタイル数への変換は内部で
+        // 行う（`mma_launch_config` の grid 次元導出式と同一の
+        // `MMA_BM`/`MMA_BN` 単位の `div_ceil`）。
+        let kernel = if self.should_launch_swizzle_kernel(m, n, k) {
             // `mma_f16_swizzle` が `None`（`new_with_swizzle` 経由。
             // `mma_f16` 自体が swizzle 変種）の場合は `mma_f16` へ
             // フォールバックする（`should_launch_swizzle_kernel` の
