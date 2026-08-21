@@ -138,16 +138,26 @@
 //! 読み替え・結線前必須確認未実施・CI 恒久検査の SM 数入力誤り）のうち
 //! 採用基準はイシュー #775 のユーザー起票の受け入れ条件を承認記録として
 //! 明記し、SM 数は `device.multiprocessor_count()` 実測値を動的に使うこと
-//! でハードコード依存を解消したが、**結線前必須確認（レジスタスピル・
-//! bit 一致・parity 非後退・`cuda_floor_bench` 実測）は GB10 実機到達可能
-//! なセッションで依然として未実施**（`docs/perf/cuda-gemm-swizzle-ab.md`
-//! §2・§6.1 参照）であり、この 1 点を実機未検証のまま本番結線すると #758
-//! と同型の不備を再発させる（本 PR のレビュー是正）。そのため `new` は
-//! base 専用のまま維持し、サイズ条件付き適用のコンパイル・`launch_f16`
-//! ディスパッチは opt-in・`internal-diagnostics` feature 限定の
-//! `gemm_mma::CudaMmaGemm::new_with_size_conditional_swizzle`（実機検証
-//! 専用入口）からのみ到達できるようにした。GB10 実機で上記確認を実施・
-//! 記録した後続 PR で `new` の既定をこの経路へ切り替える。
+//! でハードコード依存を解消したが、結線前必須確認（レジスタスピル・
+//! bit 一致・parity 非後退・`cuda_floor_bench` 実測）は当時 GB10 実機到達
+//! 可能なセッションで未実施だったため、`new` は base 専用のまま維持し、
+//! サイズ条件付き適用のコンパイル・`launch_f16` ディスパッチは opt-in・
+//! `internal-diagnostics` feature 限定の `gemm_mma::CudaMmaGemm::
+//! new_with_size_conditional_swizzle`（実機検証専用入口）からのみ到達
+//! できるようにした。
+//!
+//! イシュー #782 で 2026-08-21 GB10 実機再計測（A/B: 4096 で ×1.592・
+//! 512〜2048 は劣化 5% 以内・`mma_f16_swizzle_variant_matches_
+//! base_bit_exact_output` bit 一致 ok。`docs/perf/cuda-gemm-swizzle-ab.md`
+//! §6.2 参照）を根拠に、A/B 実測・bit 一致の 2 項目についてユーザー承認の
+//! もと `gemm_mma::CudaMmaGemm::new` へサイズ条件付き適用機構を結線した。
+//! `new_with_size_conditional_swizzle` は `new` と重複するため廃止し、
+//! 明示幅指定・強制適用の診断用入口（`new_with_swizzle`／
+//! `new_without_swizzle`）のみを opt-in・`internal-diagnostics` feature
+//! 限定のまま残す。**parity 非後退確認・結線後の `cuda_floor_bench` 実測
+//! （≥50 TFLOPS 確認）・レジスタスピル確認は #782 の受け入れ条件
+//! チェックリストで「マージ後確認可」と明記された未解消のマージ後確認
+//! 事項として残る**（`docs/perf/cuda-gemm-swizzle-ab.md` §6.2 参照）。
 //!
 //! Phase C-1（#504。親イシュー #503「CUDA JIT shape 特化・コンパイル
 //! キャッシュ・静的タイル選定」の先頭タスク）で [`CudaKernelDescriptor`]・
@@ -344,14 +354,11 @@ pub mod diagnostics {
     /// のため、crate 外部（`examples/gemm_mma_swizzle_bench.rs`）から
     /// 到達するにはこの diagnostics 経由の薄いラッパーが必要
     /// （`mma_f16_block_tile`・`wmma_tf32_opt_block_tile` と同じ理由・
-    /// 同じ feature ゲート方針）。`gemm_mma::CudaMmaGemm::
-    /// new_with_size_conditional_swizzle`（opt-in・実機検証専用入口。
-    /// イシュー #775）がこの式を直接呼ぶ（`gemm_mma.rs::CudaMmaGemm::
-    /// new_with_size_conditional_swizzle` ドキュメンテーションコメント
-    /// 参照。サイズ条件付き適用は `swizzle::should_apply_swizzle` が
-    /// 別途判定する）。`gemm_mma::CudaMmaGemm::new`（本番既定コンストラクタ）
-    /// は実機検証未了のためこの式を呼ばない（`new` ドキュメンテーション
-    /// コメント参照）。本関数は A/B 計測
+    /// 同じ feature ゲート方針）。`gemm_mma::CudaMmaGemm::new`（本番既定
+    /// コンストラクタ。イシュー #782 でサイズ条件付き適用機構を結線済み）
+    /// がこの式を直接呼ぶ（`gemm_mma.rs::CudaMmaGemm::new` ドキュメンテー
+    /// ションコメント参照。サイズ条件付き適用は `swizzle::
+    /// should_apply_swizzle` が別途判定する）。本関数自体は A/B 計測
     /// （`examples/gemm_mma_swizzle_bench.rs`）専用の診断用ラッパーで
     /// あり続ける（本番経路とは独立に固定候補 `{8,16}` を個別計測する
     /// 用途のため）。

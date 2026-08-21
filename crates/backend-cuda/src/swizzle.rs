@@ -28,25 +28,25 @@
 //! g8) 54.3055 TFLOPS・×1.578。512/1024/2048 は ×0.979〜0.992）を根拠に、
 //! **サイズ条件付き適用**（[`should_apply_swizzle`]。総タイル数
 //! `num_m_blocks * num_n_blocks >= SWIZZLE_APPLY_TILE_COUNT_THRESHOLD` の
-//! 場合のみ）ロジック自体は実装したが、`gemm_mma.rs::CudaMmaGemm::new`
-//! （本番既定コンストラクタ）への結線は見送っている（PR レビュー指摘。
-//! #758 差し戻し理由のうち (a) 採用基準・(c) SM 数入力は解消したが、
-//! (b) 結線前必須確認〈レジスタスピル・bit 一致・parity 非後退・実測〉が
-//! GB10 実機到達可能なセッションで未実施のため。`docs/perf/
-//! cuda-gemm-swizzle-ab.md` §2・§6.1 参照）。サイズ条件付き適用は
-//! `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`（opt-in・
-//! `internal-diagnostics` feature 限定・実機検証専用入口）からのみ
-//! `launch_f16` へ到達する。実機検証完了後の後続 PR で `new` の既定へ
-//! 昇格する。
+//! 場合のみ）ロジックを実装したが、結線前必須確認〈レジスタスピル・bit
+//! 一致・parity 非後退・実測〉が GB10 実機到達可能なセッションで未実施
+//! だったため、当初は実機検証専用の opt-in 入口
+//! `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`
+//! （`internal-diagnostics` feature 限定）からのみ `launch_f16` へ到達
+//! するよう限定していた。イシュー #782 で 2026-08-21 の GB10 実機再計測
+//! （A/B 実測・bit 一致の 2 項目を解消。parity 非後退・結線後
+//! `cuda_floor_bench` 実測・レジスタスピル確認は「マージ後確認可」の
+//! 未解消事項として残る。`docs/perf/cuda-gemm-swizzle-ab.md` §6.2 参照）を
+//! 根拠にユーザー承認のもと `gemm_mma.rs::CudaMmaGemm::new`（本番既定
+//! コンストラクタ）へ結線した。したがって [`select_swizzle_group_width`]
+//! は通常ビルド（feature 指定なし）でも `new` から到達可能である。
 
 /// グルーピング幅の選択候補（DeepGEMM 同型の 2 候補。実装計画 1 節）。
 ///
-/// 呼び出し元（[`select_swizzle_group_width`]）が `internal-diagnostics`
-/// feature 限定の opt-in 入口からのみ呼ばれる（本ファイル冒頭コメント・
-/// [`select_swizzle_group_width`] ドキュメンテーションコメント参照）ため、
-/// 通常ビルド（feature 指定なし）では到達不能。dead-code 誤検知を避ける
-/// ため `#[allow(dead_code)]` を付す。
-#[allow(dead_code)]
+/// 呼び出し元（[`select_swizzle_group_width`]）はイシュー #782 で
+/// `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ・feature 非
+/// 依存）から到達可能になった（本ファイル冒頭コメント参照）ため、通常
+/// ビルド（feature 指定なし）でも到達する。
 const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 
 /// グルーピング幅 `g` を仮定した場合の L2 footprint 近似コスト
@@ -71,11 +71,10 @@ const GROUP_WIDTH_CANDIDATES: [u32; 2] = [8, 16];
 /// 追加検証を不要にする。REQ-8 の「境界検査を省略しない」精神を数値計算
 /// 側にも適用した安全側の実装）。
 ///
-/// 呼び出し元（[`select_swizzle_group_width`]）が `internal-diagnostics`
-/// feature 限定の opt-in 入口からのみ呼ばれるため、通常ビルド（feature
-/// 指定なし）では到達不能。dead-code 誤検知を避けるため
-/// `#[allow(dead_code)]` を付す。
-#[allow(dead_code)]
+/// 呼び出し元（[`select_swizzle_group_width`]）はイシュー #782 で
+/// `gemm_mma.rs::CudaMmaGemm::new`（本番既定コンストラクタ・feature 非
+/// 依存）から到達可能になったため、通常ビルド（feature 指定なし）でも
+/// 到達する。
 fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u32) -> u64 {
     let (num_sms, block_m, block_n, group_width) = (
         u64::from(num_sms),
@@ -95,20 +94,18 @@ fn swizzle_group_usage(num_sms: u32, block_m: u32, block_n: u32, group_width: u3
 /// 小さいほど 1 グループが専有する SM 数・L2 footprint が小さく、
 /// 効果が過大に振れるリスクが低い）。
 ///
-/// 呼び出し文脈: イシュー #775 で `gemm_mma.rs::CudaMmaGemm::
-/// new_with_size_conditional_swizzle`（`internal-diagnostics` feature
-/// 限定・実機検証専用 opt-in 入口）が、swizzle 変種カーネルをコンパイル
-/// する際のグルーピング幅決定にこの関数を使う
-/// （`device.multiprocessor_count()` 実測値ベース。本ファイル冒頭コメント
-/// 参照）。診断用ラッパー `lib.rs::diagnostics::mma_swizzle_group_width`
-/// （同じく `internal-diagnostics` feature 経由。
-/// `examples/gemm_mma_swizzle_bench.rs` の A/B 計測用）からも引き続き
-/// 呼ばれる。**本番既定コンストラクタ `gemm_mma.rs::CudaMmaGemm::new` は
-/// 実機未検証のためこの関数を呼ばない**（本ファイル冒頭コメント参照）。
-/// 呼び出し元がいずれも `internal-diagnostics` feature 限定のため、通常
-/// ビルド（feature 指定なし）では到達不能。dead-code 誤検知を避けるため
-/// `#[allow(dead_code)]` を付す。
-#[allow(dead_code)]
+/// 呼び出し文脈: イシュー #775 でサイズ条件付き適用ロジックを実装した
+/// 当初は `gemm_mma.rs::CudaMmaGemm::new_with_size_conditional_swizzle`
+/// （`internal-diagnostics` feature 限定・実機検証専用 opt-in 入口）が、
+/// swizzle 変種カーネルをコンパイルする際のグルーピング幅決定にこの関数を
+/// 使っていた（`device.multiprocessor_count()` 実測値ベース。本ファイル
+/// 冒頭コメント参照）。イシュー #782 で結線前必須確認が GB10 実機ゲート
+/// （2026-08-21）で解消したことを根拠に、本番既定コンストラクタ
+/// `gemm_mma.rs::CudaMmaGemm::new` へ同ロジックを昇格したため、現在は
+/// `new`（feature 非依存・常時到達可能）が直接この関数を呼ぶ。診断用
+/// ラッパー `lib.rs::diagnostics::mma_swizzle_group_width`
+/// （`internal-diagnostics` feature 経由。`examples/gemm_mma_swizzle_
+/// bench.rs` の A/B 計測用）からも引き続き呼ばれる。
 pub fn select_swizzle_group_width(num_sms: u32, block_m: u32, block_n: u32) -> u32 {
     let mut best = GROUP_WIDTH_CANDIDATES[0];
     let mut best_usage = swizzle_group_usage(num_sms, block_m, block_n, best);
@@ -220,13 +217,14 @@ pub fn swizzled_block_idx(
 /// 本閾値はそれらを 4096 正方形と同一に「適用」判定する。この非正方形形状
 /// への外挿は未検証であり、イシュー #775 の承認記録（`docs/perf/
 /// cuda-gemm-swizzle-ab.md` §2「4096 級のみ適用・512〜2048 は劣化 5% 以内」）
-/// が前提とする正方形実測とは厳密には整合しない。本値は
-/// [`gemm_mma::CudaMmaGemm::new`]（本番既定コンストラクタ）には結線されて
-/// おらず（実機検証未了。同 doc comment 参照）、`new_with_size_conditional_
-/// swizzle`（opt-in・実機検証専用入口）でのみ到達するため実害は限定的だが、
-/// GB10 実機での結線前必須確認（`docs/perf/cuda-gemm-swizzle-ab.md` §6.1）
-/// を行う際は非正方形形状（縦長・横長）でも A/B 計測し、必要なら閾値をアスペ
-/// クト比考慮の判定式へ改訂することを検討すること。
+/// が前提とする正方形実測とは厳密には整合しない。イシュー #782 で
+/// [`gemm_mma::CudaMmaGemm::new`]（本番既定コンストラクタ）へ本番結線
+/// したため（`docs/perf/cuda-gemm-swizzle-ab.md` §6.2 の GB10 実機受け入れ
+/// ゲート結果参照）、本値は通常ビルドの本番経路から常時到達する。
+/// **非正方形形状（縦長・横長）での A/B 計測は #782 の実機ゲートでも実施
+/// しておらず、依然として未検証のまま**であるため、今後非正方形形状での
+/// 顕著な性能劣化が判明した場合は、閾値をアスペクト比考慮の判定式へ
+/// 改訂することを検討すること。
 pub const SWIZZLE_APPLY_TILE_COUNT_THRESHOLD: u64 = 2048;
 
 /// グリッド形状（`num_m_blocks x num_n_blocks`。`gemm_mma.rs::
@@ -236,12 +234,12 @@ pub const SWIZZLE_APPLY_TILE_COUNT_THRESHOLD: u64 = 2048;
 /// 参照）。
 ///
 /// 呼び出し元: `gemm_mma.rs::CudaMmaGemm::launch_f16`（`mma_f16_swizzle` が
-/// `Some` の場合——`new_with_size_conditional_swizzle` 経由でのみ発生。
-/// 本番既定コンストラクタ `new` は実機検証未了のため到達しない——に、
-/// 形状ごとに base／swizzle 変種いずれのカーネルを起動するか、この関数の
-/// 戻り値で分岐する）。`u64` 積で `u32` 同士のオーバーフローを避ける
-/// （[`swizzle_group_usage`] と同じ安全側方針。REQ-8 の「境界検査を省略
-/// しない」精神を数値計算側にも適用）。
+/// `Some` の場合——本番既定コンストラクタ `new` が SM 数実測に成功した
+/// 場合に発生。イシュー #782 で `new` へ結線済み——に、形状ごとに base／
+/// swizzle 変種いずれのカーネルを起動するか、この関数の戻り値で分岐する）。
+/// `u64` 積で `u32` 同士のオーバーフローを避ける（[`swizzle_group_usage`]
+/// と同じ安全側方針。REQ-8 の「境界検査を省略しない」精神を数値計算側にも
+/// 適用）。
 pub fn should_apply_swizzle(num_m_blocks: u32, num_n_blocks: u32) -> bool {
     u64::from(num_m_blocks) * u64::from(num_n_blocks) >= SWIZZLE_APPLY_TILE_COUNT_THRESHOLD
 }
