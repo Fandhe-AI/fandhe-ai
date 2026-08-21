@@ -256,12 +256,28 @@ pub(crate) fn compute_blocks(
         return None;
     }
     // MC も KC と同じ理由（#749: 単独拡大が全サイズで劣化）で
-    // `super::MC`（現行既定 128）をキャップとする。`clamp_to_multiple`
-    // （`mr` の倍数への丸め）へ渡す**前**にキャップする（丸めた後に
-    // キャップすると倍数契約が破れうるため。丸め前キャップ→丸めの順で
-    // 倍数契約〈`mc % mr == 0`〉と非劣化キャップの両立を保つ）。
-    let mc_raw = (l2_budget / kc_bytes).min(super::MC);
-    let mc = clamp_to_multiple(mc_raw, MC_MIN, MC_MAX, mr)?;
+    // `super::MC`（現行既定 128）をキャップとする。
+    //
+    // レビュー指摘（イシュー #794・codex-review P2・Cursor Bugbot Medium。
+    // PR #815）: 従来は「`mc_raw` を `super::MC` へキャップ→
+    // `clamp_to_multiple(.., MC_MIN, MC_MAX, mr)` で `mr` の倍数へ丸め」
+    // という順序だった。`clamp_to_multiple` 自身は渡された `max`
+    // （`MC_MAX=1024`）に対してのみ「丸め上げが `max` を超えたら `max`
+    // 以下の倍数へ切り下げる」安全策を持つため、`mr` が `super::MC`
+    // （128）の約数でない場合（例: `Avx2Kernel` の `MR=6`）は丸め上げが
+    // `super::MC` は超えつつ `MC_MAX` は超えない値（132）に着地し、
+    // 非劣化キャップ契約が破られていた。
+    //
+    // 修正: `clamp_to_multiple` の `max` 引数へ直接 `super::MC` を渡す
+    // （`MC_MAX` との `min` で `super::MC` が将来 `MC_MAX` を上回る
+    // 設定ミスをしても安全側に倒す）。これにより「丸め上げが `max` を
+    // 超えたら `max` 以下の倍数へ切り下げ、それも不可能なら `None`」
+    // という既存の（テスト済みの）安全策がそのまま非劣化キャップにも
+    // 適用され、倍数契約〈`mc % mr == 0`〉と非劣化キャップ
+    //〈`mc <= super::MC`〉の両立を常に保つ。
+    let mc_cap = super::MC.min(MC_MAX);
+    let mc_raw = l2_budget / kc_bytes;
+    let mc = clamp_to_multiple(mc_raw, MC_MIN, mc_cap, mr)?;
 
     // NC は #794 の主眼（本イシュー: NC 動的算出）。MC/KC と異なり
     // #749 実測では NC 拡大（NC=9600）が n>=4096 で改善しており、
@@ -567,6 +583,29 @@ mod tests {
         );
         assert!((MC_MIN..=MC_MAX).contains(&blocks.mc));
         assert!((NC_MIN..=NC_MAX).contains(&blocks.nc));
+    }
+
+    /// レビュー指摘（イシュー #794・codex-review P2・Cursor Bugbot Medium。
+    /// PR #815）の回帰テスト: `mr` が `super::MC`（128）の約数でない場合
+    /// （`Avx2Kernel` の `MR=6`。128 は 6 の倍数でないため `clamp_to_multiple`
+    /// が 128 へ丸め上げると 132 になり非劣化キャップを超えていた）でも
+    /// `mc <= super::MC` が常に成立することを、L2 実容量を極端に大きく
+    /// して `mc_raw` をキャップへ張り付かせた状態で検証する。
+    #[test]
+    fn compute_blocks_mc_never_exceeds_non_degradation_cap_for_non_divisor_mr() {
+        // AVX2 マイクロカーネル実値（MR=6・NR=16）を使う。L2 を
+        // `L2_SANE_MAX` まで大きくし `mc_raw` が確実に `super::MC` へ
+        // 張り付く（キャップされる）状況を作る。
+        let blocks = compute_blocks(192 * 1024, L2_SANE_MAX, 6, 16)
+            .expect("正当な範囲の値は Some を返すはず");
+        assert!(
+            blocks.mc <= super::super::MC,
+            "mc={} は非劣化キャップ super::MC={} を超えている（#794 レビュー指摘の回帰）",
+            blocks.mc,
+            super::super::MC
+        );
+        assert_eq!(blocks.mc % 6, 0, "mc={} は mr=6 の倍数ではない", blocks.mc);
+        assert!((MC_MIN..=MC_MAX).contains(&blocks.mc));
     }
 
     #[test]
