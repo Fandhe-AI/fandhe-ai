@@ -282,11 +282,13 @@ mod tests {
         assert_eq!(select_swizzle_group_width(100_000, 64, 128), 16);
     }
 
-    /// **注意（PR #758 レビュー是正・イシュー #777 で実測値反映）**: この `28` は
-    /// GB10（sm_121）の実測 SM 数ではない。`docs/perf/sm121-device-attributes.md`
-    /// 「デバイス属性実測表」節の `MULTIPROCESSOR_COUNT = 28` は同ドキュメント
-    /// §「動作検証」が明記するとおり RTX 3060（compute capability 8.6・
-    /// sm_121 ではない）の例示ダンプである。GB10（sm_121）自体の実測 SM 数は
+    /// **注意（PR #758 レビュー是正・イシュー #777 で実測値反映。#781 codex-review
+    /// 指摘で参照先節名を是正）**: この `28` は GB10（sm_121）の実測 SM 数ではない。
+    /// `docs/perf/sm121-device-attributes.md` §「動作検証」の出力例にある
+    /// `MULTIPROCESSOR_COUNT = 28` は、同節が明記するとおり RTX 3060（compute
+    /// capability 8.6・sm_121 ではない）の例示ダンプの値である（「デバイス属性
+    /// 実測表」節の値ではない。同表の `MULTIPROCESSOR_COUNT`〈SM 数〉は 48）。
+    /// GB10（sm_121）自体の実測 SM 数は
     /// 48（同ドキュメント「デバイス属性実測表」節。2026-08-19 実測・イシュー #739、
     /// 2026-08-20 のベンチ起動診断〈`gemm_mma_swizzle_bench`・`cuda_floor_bench` の
     /// `num_sms=48` 出力〉で再確認・イシュー #777）であり、以前の版が主張していた
