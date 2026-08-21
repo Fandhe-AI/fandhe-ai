@@ -33,10 +33,11 @@ GB10 実機マージ前検証（下記 §6.3）で **bit 一致（`new` 自身�
 未解消として残っていた**（実行不能だった理由と間接根拠は §6.3 を参照）。**2026-08-21 追補（イシュー
 #782 codex-review P1 是正・本 PR #784）**: `crates/backend-cuda/examples/mma_ptx_dump.rs`
 （`internal-diagnostics` feature 限定。NVRTC で PTX を生成しファイルへダンプし、DGX Spark GB10 実機の
-`ptxas -arch=sm_121 -v` へオフラインで掛ける経路）を新設し、**観測経路自体はここで解消した**（§3
-「レジスタスピル確認」節参照）。ただし**実測（DGX Spark GB10 実機での `ptxas -v` 実行・spill
-stores/loads・register 数の base/head 比較）自体は本 PR 時点でもまだ未実施**であり、次回 GB10 実機
-セッションで実施し本ドキュメントへ結果を追記する必要がある。
+`ptxas -arch=sm_121 -v` へオフラインで掛ける経路）を新設し、同日中に DGX Spark GB10 実機（PR HEAD
+`5be481c`）で実測を実施した。**結果: base 58 レジスタ／swizzle_g8 60 レジスタ（+2 の微増）、spill
+stores・spill loads・stack frame はいずれも両カーネルとも 0 bytes、smem 41472 bytes・barrier 1 で
+不変 — レジスタスピルは発生しておらず、これで「(b) 結線前必須の確認」4 項目すべてが解消済み**
+（実測の verbatim・PTX 差分の確認手順は §6.3 を参照）。
 `CudaMmaGemm::new_with_size_conditional_swizzle`（`internal-diagnostics` feature 限定の実機検証専用
 入口）は `new` へ統合されたため廃止した。以下は結線判断に至るまでの経緯（#775 時点までの歴史的記録）
 として保持する。
@@ -276,8 +277,9 @@ base と head でこれらの値に差がない（特に spill stores/loads が�
 `mma_f16_swizzle_variant_matches_base_bit_exact_output` 等）の実施証跡はイシュー #739 本文に記載が無い
 ため、本ドキュメントでは実施済みと断定しない。「6. 実測結果」の TFLOPS 比較は確定済みだが、これら前提
 手順の実施は本番結線を担う #740 側で必須事項として引き継ぐ。イシュー #782 の本番結線ゲート（§6.2）・
-マージ前検証（§6.3）時点でもレジスタスピル確認自体は依然として未実施のまま残っていた（観測経路が本更新
-まで存在しなかったため）。次回 GB10 実機セッションで上記手順を実施し、結果を本ドキュメントへ追記すること。
+マージ前検証（§6.3 前半）時点でもレジスタスピル確認自体は未実施のまま残っていた（観測経路が本更新まで
+存在しなかったため）が、2026-08-21 に `mma_ptx_dump` example の新設と同日の GB10 実機実測で解消した
+（結果は §6.3「レジスタスピル確認」項を参照。spill stores/loads とも 0 bytes・レジスタ 58→60）。
 
 ## 4. 判断基準
 
@@ -471,14 +473,25 @@ DGX Spark GB10 へ転送して実施したマージ前検証。各ベンチ直�
   = Some(8)`・`swizzle_applies` = 512/1024/2048 false・4096 true」を出力。mma_f16 中央値（TFLOPS）:
   512 = 15.2105、1024 = 33.2053、2048 = 47.9969、**4096 = 53.9033**（結線前 base 33.92 比 ×1.589・
   ≥50 TFLOPS 確認）。512〜2048 は結線前値比 +1.5%／+0.2%／−0.2% でいずれも劣化 5% 以内
-- **レジスタスピル確認（実行不能・未解消）**: §3 の NVRTC `-Xptxas -v` 相当手順は現行コードでは到達
-  不能であることを実機セッションで確認した。理由: (1) `nvrtc.rs::compile_ptx` はレジスタ使用量ログ
-  出力オプションを渡しておらず、PTX→SASS のレジスタ割り当ては driver JIT 時に行われるためログが
-  どこにも出力されない、(2) `kernels_mma.rs` のカーネルソース取得口が非公開でオフライン `ptxas -v`
-  にも掛けられない、(3) JIT ディスクキャッシュにも成果物が残存せず `cuobjdump` 事後解析も不成立。
-  間接根拠として、結線後 4096 実測（53.9033）が opt-in A/B の swizzle 側実測（54.04〜54.31）と同水準
-  であり、病的なスピルが発生していればこの一致は説明できない。観測経路（ソース取得口・レジスタ使用量
-  ログ要求オプション等）の新設と直接確認は別イシューで追跡する
+- **レジスタスピル確認（解消。2026-08-21 実測）**: 当初は §3 の NVRTC `-Xptxas -v` 相当手順が現行
+  コードでは到達不能だった（(1) `nvrtc.rs::compile_ptx` がレジスタ使用量ログのオプションを渡さない、
+  (2) `kernels_mma.rs` のカーネルソース取得口が非公開、(3) JIT ディスクキャッシュに成果物が残存しない）
+  ため、`examples/mma_ptx_dump.rs`（`internal-diagnostics` feature 限定・イシュー #782 codex-review P1
+  是正）を新設して観測経路を確保し、同日 DGX Spark GB10 実機（PR HEAD `5be481c`・`num_sms=48`・動的
+  group_width=8・nvrtc_arch=compute_121）で実測した。PTX は base/swizzle_g8 で実際に異なる（sha256
+  相違・diff 1708 行・`.entry` は両者とも `gemm_mma_f16` の 1 個のみ）ことを確認のうえ、
+  `/usr/local/cuda-13.0/bin/ptxas -arch=sm_121 -v` の結果:
+
+  | 項目 | base | swizzle_g8 |
+  |---|---|---|
+  | stack frame / spill stores / spill loads | 0 / 0 / 0 bytes | 0 / 0 / 0 bytes |
+  | registers | 58 | 60（+2 の微増） |
+  | barriers / smem | 1 / 41472 bytes | 1 / 41472 bytes（不変） |
+
+  **spill stores・spill loads とも両カーネルで 0 bytes であり、レジスタスピルは発生していない**。§3 の
+  「base と head で差がない（特に spill stores/loads が両方とも 0 のまま）」条件を満たす（レジスタ +2 は
+  swizzle remap のインデックス計算分で、スピル・occupancy への影響なし）。結線後 4096 実測（53.9033）が
+  opt-in A/B の swizzle 側実測（54.04〜54.31）と同水準である間接根拠とも整合する
 
 ## 7. TF32 opt-staged 経路への横展開（#741）
 
