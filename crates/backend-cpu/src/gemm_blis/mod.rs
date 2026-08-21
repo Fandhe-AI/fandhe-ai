@@ -148,6 +148,111 @@ const fn default_blocks() -> BlockSizes {
     }
 }
 
+/// `gemm_blis_parallel`／`gemm_blis_bias_act_parallel` の rayon 行パネル
+/// 並列化を直列（[`dispatch_region`] 直呼び）へフォールバックさせる
+/// `m*n*k` 総積の下限（イシュー #811）。
+///
+/// **本番未結線（PR #830 codex-review P1 指摘・#811 残課題）**: 本モジュール
+/// の他の実機ゲート未通過項目（NC=9600 拡大・`dispatch_shared_b`／
+/// `gemm_blis_shared_b_region`〈#750〉）と同じ「実装は入れるが実機ゲート
+/// 未通過のうちは本番結線しない」方針（`.claude/rules/coding-rust.md`）に
+/// 従う。REQ-8 の正式対象実機は Apple M4 Max（`docs/perf/
+/// gemm-optimization-baseline.md` §3）だが、本閾値の実測はローカル
+/// QEMU x86_64（下記「値の根拠」）に限られ M4 Max での境界再スイープが
+/// 未実施（`docs/perf/cpu-gemm-small-shape-serial-fallback.md` §計測
+/// 環境が「M4 Max 実機での再スイープが残課題」と明記）。未検証ターゲット
+/// の実測だけで全環境の本番ディスパッチを変更しないため `#[cfg(test)]`
+/// 限定とし、[`gemm_blis_parallel`]／`gemm_blis_bias_act_parallel` からは
+/// 呼ばない。テスト専用の適用経路は [`gemm_blis_parallel_thresholded`]／
+/// [`gemm_blis_bias_act_parallel_thresholded`]（`#[cfg(test)]`）を参照。
+/// `m == 1`（gemv）専用経路 [`gemm_row_vector`] は本判断と独立
+/// （マイクロカーネルが複数行分の packing を前提とする構造に対し
+/// `m == 1` が常に無駄になるというアーキテクチャ非依存の性質のため
+/// 実機ゲート対象外とし本番結線を維持する）。M4 Max 実機での境界再
+/// スイープが完了し次第、本番結線を再検討する。
+///
+/// **`m*n*k` 単純積の既知の限界（Cursor Bugbot 指摘・PR #830）**: 並列化は
+/// 呼び出しレベルの行パネル分割（rayon `par_chunks_mut`。並列度は実質
+/// `m` に依存）のため、`m` が大きく `n`／`k` が小さい細長形状（例
+/// m=512,n=1,k=512。`m*n*k=262,144<GEMM_THREADING_THRESHOLD`）では
+/// 総積が閾値未満でも行パネル分割は十分機能し並列が有利なままである
+/// （`docs/perf/cpu-gemm-small-shape-serial-fallback.md` 実測 1 の
+/// `m=512,n=1,k=512` 行: parallel/serial 2.233x）。単純な `m*n*k` 積は
+/// この非対称性を捉えられず当該形状を誤って直列側へ倒すため、これも
+/// 本番結線を見送る理由の一つ。本番結線を再検討する際は `m` を加味した
+/// 判定への拡張、または `gemm` crate と同じブロック単位判定への変更で
+/// この限界を解消する。
+///
+/// **`gemm` crate（OSS 比較対象）との設計差**: `gemm` crate は
+/// (jc,pc) ブロック単位の `total_work = m * n_chunk * k_chunk` を
+/// 閾値と比較し、5-loop の途中でも直列へ切り替えうる（ローカル cargo
+/// cache の `gemm-common-0.19.0/src/gemm.rs:109,515-522` で実体確認済み。
+/// `docs/oss-comparison-harness-decision.md`）。自作実装は並列化が
+/// **呼び出しレベル**（rayon `par_chunks_mut` による行パネル分割）に
+/// 1 箇所しかないため、ブロック単位判定をそのまま移植せず、呼び出し
+/// 直後の 1 回判定という等価な意味論で最も単純な形を採る。
+///
+/// **値の根拠**: `gemm` crate の既定閾値と同値の `48 * 48 * 256 =
+/// 589_824` を採用する。自作実装での実測（ローカル QEMU x86_64 12 コア
+/// AVX2+FMA。`docs/perf/cpu-gemm-small-shape-serial-fallback.md`）でも
+/// 正方形状 64³=262,144 では並列が直列より最大 12 倍遅く、128³=
+/// 2,097,152 では並列が直列より約 1.8〜1.9 倍速いという明確な交差が
+/// この閾値の間（262,144 と 2,097,152 の間）に収まっており、
+/// 保守的な採用として妥当と判断した（同 doc §結論）。
+///
+/// **bit 完全一致契約への影響なし**: 直列フォールバックは
+/// [`dispatch_region`] を呼ぶ経路自体を変えるだけで、C 要素ごとの
+/// p 昇順 FMA 連鎖（モジュール doc「bit 完全一致契約」）には触れない
+/// ため `gemm_naive`／並列実行時と bit 完全一致のまま不変
+/// （`tests/gemm_blis_parity.rs` の境界形状ケースで検証）。
+///
+/// **性能ヒューリスティクスであり非該当事項**: 本閾値はガードレール
+/// 閾値・テスト許容誤差のいずれでもない（数値結果は不変のまま）ため、
+/// `.claude/rules/delegation-impl.md` の「実装 Agent にガードレール
+/// 閾値・テスト許容誤差を緩和させない」禁止事項には該当しない。
+#[cfg(test)]
+pub(crate) const GEMM_THREADING_THRESHOLD: usize = 48 * 48 * 256;
+
+/// gemv 相当（`m == 1`。単一行 × B 全体）の内積計算を BLIS packing・
+/// マイクロカーネルタイル経由ではなく直接計算する専用経路（イシュー
+/// #811・§3.2）。
+///
+/// **採用根拠**: 実測（`docs/perf/cpu-gemm-small-shape-serial-fallback.md`
+/// §gemv_m1）で `m == 1` 形状は [`gemm_blis`]（直列 BLIS 経路）が
+/// `gemm_naive` 比最大 8.3 倍遅い（MR 単位の A パネル packing が
+/// 単一行を MR 行ぶんにゼロパディングする無駄が支配的。NEON では
+/// MR=8・x86_64 AVX2/AVX-512 でも同様に複数行分のタイル前提のため）。
+/// `m == 1` は rayon 行パネル分割でも並列化の恩恵がない（分割対象が
+/// 1 行のみのため `par_chunks_mut` のチャンク数は常に 1 になり、
+/// 並列化オーバーヘッドだけが乗る。実測 `parallel_vs_serial` が
+/// 常におよそ 1.0 前後で推移することからも確認できる）。
+///
+/// **bit 完全一致契約**: [`crate::gemm::gemm_naive`] の `i == 0` 反復と
+/// 完全に同じ p 昇順 `f32::mul_add` 連鎖で計算するため、`gemm_naive`
+/// および BLIS 経路（`tests/gemm_blis_parity.rs` の既存網羅検証により
+/// `gemm_naive` と bit 完全一致することが確認済み）の両方と自明に
+/// bit 完全一致する（新規カーネル・新規累積順序を導入しないため）。
+///
+/// # 契約
+///
+/// 呼び出し元が `m == 1` を確定した上で呼ぶ。`a` は `k` 要素、
+/// `b` は `k * n` 要素、`c` は `n` 要素であることを呼び出し元
+/// （[`validate_dims`] 通過済みの公開入口）が保証する前提とし、
+/// 本関数自体は追加の長さ検査を行わない（構造的にスライス添字が
+/// 境界外に出ないことは `a.iter().enumerate()` と `b[p*n..p*n+n]` の
+/// 組み合わせで保証される。`p < k` かつ `b.len() == k*n` のため
+/// `p*n+n <= k*n == b.len()`）。
+fn gemm_row_vector(a: &[f32], b: &[f32], c: &mut [f32], n: usize) {
+    for (p, &a_p) in a.iter().enumerate() {
+        let b_row = &b[p * n..p * n + n];
+        for (c_j, &b_j) in c.iter_mut().zip(b_row.iter()) {
+            // FMA 契約統一（REQ-2）: `gemm_naive` と同一の
+            // `f32::mul_add` 連鎖（`crate::gemm::gemm_naive` 参照）。
+            *c_j = a_p.mul_add(b_j, *c_j);
+        }
+    }
+}
+
 /// panel packing バッファ（A/B 各 1 本）を gemm 呼び出し単位で 1 回だけ
 /// 確保し、5-loop 内の全 jc×pc×ic ブロックで使い回すための保持構造体
 /// （#556。matrixmultiply 等参照実装の「gemm 呼び出しあたり 1 回確保＋
@@ -242,6 +347,12 @@ pub fn gemm_blis(
     k: usize,
 ) -> Result<(), GemmError> {
     validate_dims(a, b, c, m, n, k)?;
+    // gemv 相当（m == 1）は BLIS packing のパディング無駄が大きいため
+    // 専用経路へ迂回する（[`gemm_row_vector`] ドキュメント参照）。
+    if m == 1 {
+        gemm_row_vector(a, b, c, n);
+        return Ok(());
+    }
     dispatch_region(a, b, c, n, k, 0..m, default_blocks())
 }
 
@@ -266,6 +377,21 @@ pub fn gemm_blis_parallel(
     if n == 0 {
         return Ok(());
     }
+
+    // gemv 相当（m == 1）は rayon 分割の恩恵がなく（`par_chunks_mut` の
+    // チャンク数が常に 1 になる）BLIS packing のパディング無駄だけが
+    // 乗るため専用経路へ迂回する（[`gemm_row_vector`] ドキュメント参照）。
+    if m == 1 {
+        gemm_row_vector(a, b, c, n);
+        return Ok(());
+    }
+
+    // ワークロード閾値直列フォールバック（イシュー #811）は
+    // `GEMM_THREADING_THRESHOLD` ドキュメントコメントの「本番未結線」
+    // 節（PR #830 codex-review P1・Cursor Bugbot 指摘）に従い、M4 Max
+    // 実機ゲート未通過のうちは本番公開入口から呼ばない。テスト専用の
+    // 適用経路は [`gemm_blis_parallel_thresholded`]（`#[cfg(test)]`）
+    // 参照。
 
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
@@ -363,6 +489,21 @@ pub fn gemm_blis_bias_act_parallel(
         return Ok(());
     }
 
+    // gemv 相当（m == 1）は `gemm_blis_parallel` と同じ理由（rayon 分割の
+    // 恩恵なし・BLIS packing パディング無駄）で専用経路へ迂回する。
+    // epilogue（bit 完全一致契約）は要素独立のため `gemm_row_vector` の
+    // 結果（`c` 全 n 要素＝行パネル 1 つ分）へそのまま適用してよい。
+    if m == 1 {
+        gemm_row_vector(a, b, c, n);
+        return apply_epilogue(c, n, bias, act);
+    }
+
+    // ワークロード閾値直列フォールバック（イシュー #811）は
+    // `gemm_blis_parallel` と同じ理由（`GEMM_THREADING_THRESHOLD`
+    // ドキュメントコメント「本番未結線」節参照）で本番公開入口から
+    // 呼ばない。テスト専用の適用経路は
+    // [`gemm_blis_bias_act_parallel_thresholded`]（`#[cfg(test)]`）参照。
+
     let num_threads = rayon::current_num_threads().max(1);
     let panel_rows = m.div_ceil(num_threads).max(1);
     // 呼び出しあたり 1 回だけ確定し、全 rayon 行パネルタスクへ同一値を
@@ -388,6 +529,87 @@ pub fn gemm_blis_bias_act_parallel(
             dispatch_region(a, b, c_chunk, n, k, row_start..row_end, blocks)?;
             apply_epilogue(c_chunk, n, bias, act)
         })
+}
+
+/// [`gemm_blis_parallel`] の**テスト専用**ワークロード閾値直列
+/// フォールバック適用版（イシュー #811・[`GEMM_THREADING_THRESHOLD`]
+/// ドキュメントコメント「本番未結線」節参照）。
+///
+/// M4 Max 実機ゲート未通過のうちは本番公開入口（[`gemm_blis_parallel`]）
+/// から `GEMM_THREADING_THRESHOLD` を参照しないため、境界形状での
+/// フォールバック挙動（bit 完全一致・非劣化）を検証し続けるための
+/// テスト専用エントリを別途設ける（`dispatch_shared_b`〈#750〉と同じ
+/// 「本番未結線でも検証は維持する」既存パターン）。`m == 1` は
+/// [`gemm_blis`]（内部で [`gemm_row_vector`] 専用経路へ迂回する）へも
+/// [`gemm_blis_parallel`]（同じく `gemm_row_vector` へ迂回）へも同じ
+/// 結果を返すため、閾値未満なら [`gemm_blis`]（直列）、以上なら
+/// [`gemm_blis_parallel`]（並列。実機ゲート通過後の本番結線候補と同一
+/// コード経路）へ振り分けるだけで元の inline 判定と等価になる。
+#[cfg(test)]
+fn gemm_blis_parallel_thresholded(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<(), GemmError> {
+    if m.saturating_mul(n).saturating_mul(k) < GEMM_THREADING_THRESHOLD {
+        gemm_blis(a, b, c, m, n, k)
+    } else {
+        gemm_blis_parallel(a, b, c, m, n, k)
+    }
+}
+
+/// [`gemm_blis_bias_act_parallel`] の**テスト専用**ワークロード閾値
+/// 直列フォールバック適用版（[`gemm_blis_parallel_thresholded`] と同じ
+/// 理由・同じ閾値。イシュー #811）。
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn gemm_blis_bias_act_parallel_thresholded(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+    bias: Option<&[f32]>,
+    act: Activation,
+) -> Result<(), GemmError> {
+    // 本番側 `gemm_blis_bias_act_parallel` と同じ順序で検証してから
+    // n == 0 の早期 return へ入る（`validate_dims`／bias 長／activation
+    // 検証を経ずに Ok(()) を返すと、不正な n == 0 入力が本来のエラーを
+    // 素通りしてしまう。PR #830 Cursor Bugbot 指摘）。
+    validate_dims(a, b, c, m, n, k)?;
+    if let Some(bias) = bias
+        && bias.len() != n
+    {
+        return Err(GemmError::BiasLenMismatch {
+            expected: n,
+            actual: bias.len(),
+        });
+    }
+    if !matches!(act, Activation::None | Activation::Relu) {
+        return Err(GemmError::UnsupportedActivation);
+    }
+
+    // n == 0 は `gemm_blis_bias_act_parallel` と同じ理由（本関数冒頭の
+    // ドキュメンテーションコメント参照）で shape として合法な no-op。
+    // `m.saturating_mul(n).saturating_mul(k)` は n == 0 のとき常に
+    // 0 < GEMM_THREADING_THRESHOLD となり以下の直列分岐へ入るため、
+    // この早期 return が無いと `apply_epilogue(c, 0, Some(bias), act)` が
+    // `chunks_mut(0)` でパニックする（本番側 `gemm_blis_bias_act_parallel`
+    // は分岐前に n == 0 を早期 return しており契約が一致していなかった。
+    // イシュー #811 レビュー指摘）。
+    if n == 0 {
+        return Ok(());
+    }
+    if m.saturating_mul(n).saturating_mul(k) < GEMM_THREADING_THRESHOLD {
+        gemm_blis(a, b, c, m, n, k)?;
+        apply_epilogue(c, n, bias, act)
+    } else {
+        gemm_blis_bias_act_parallel(a, b, c, m, n, k, bias, act)
+    }
 }
 
 /// [`gemm_blis_bias_act_parallel`] の epilogue 適用部（bias 行ブロード
@@ -1244,6 +1466,253 @@ mod tests {
         let b: Vec<f32> = vec![];
         let mut c: Vec<f32> = vec![];
         assert!(gemm_blis(&a, &b, &mut c, 0, 0, 0).is_ok());
+    }
+
+    // --- ワークロード閾値直列フォールバック（イシュー #811） ---
+    //
+    // `GEMM_THREADING_THRESHOLD` は本番未結線（`GEMM_THREADING_THRESHOLD`
+    // ドキュメントコメント「本番未結線」節参照。PR #830 codex-review P1・
+    // Cursor Bugbot 指摘）のため、以下は本番公開入口ではなく
+    // `#[cfg(test)]` の [`gemm_blis_parallel_thresholded`]／
+    // [`gemm_blis_bias_act_parallel_thresholded`] を経由して境界の直上・
+    // 直下形状が `gemm_naive`／非融合経路と bit 完全一致することを検証
+    // する（実機ゲート通過後に本番結線を再検討する際の回帰基盤として
+    // 維持する）。乱数生成は `mod tests` 既存の `xorshift32_vec`
+    // （`bench_harness` 非依存の理由は同関数のドキュメントコメント参照）
+    // を再利用する。
+
+    /// `GEMM_THREADING_THRESHOLD` 直下（フォールバック発動＝直列経路）。
+    #[test]
+    fn gemm_blis_parallel_threshold_boundary_below_matches_naive() {
+        // 64*64*64 = 262,144 < GEMM_THREADING_THRESHOLD(589,824)。
+        let (m, n, k) = (64, 64, 64);
+        assert!(m * n * k < GEMM_THREADING_THRESHOLD);
+        let a = xorshift32_vec(0x3333_3333, m * k);
+        let b = xorshift32_vec(0x4444_4444, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_thresholded = vec![0.0f32; m * n];
+        gemm_blis_parallel_thresholded(&a, &b, &mut c_thresholded, m, n, k).unwrap();
+
+        assert_eq!(
+            c_naive, c_thresholded,
+            "閾値直下（直列フォールバック経路）は gemm_naive と bit 完全一致するはず"
+        );
+    }
+
+    /// `GEMM_THREADING_THRESHOLD` 直上（フォールバック非発動＝並列経路）。
+    #[test]
+    fn gemm_blis_parallel_threshold_boundary_above_matches_naive() {
+        // 128*128*128 = 2,097,152 > GEMM_THREADING_THRESHOLD(589,824)。
+        let (m, n, k) = (128, 128, 128);
+        assert!(m * n * k > GEMM_THREADING_THRESHOLD);
+        let a = xorshift32_vec(0x5555_5555, m * k);
+        let b = xorshift32_vec(0x6666_6666, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_thresholded = vec![0.0f32; m * n];
+        gemm_blis_parallel_thresholded(&a, &b, &mut c_thresholded, m, n, k).unwrap();
+
+        assert_eq!(
+            c_naive, c_thresholded,
+            "閾値直上（並列経路）は gemm_naive と bit 完全一致するはず"
+        );
+    }
+
+    /// epilogue 融合版（`gemm_blis_bias_act_parallel_thresholded`）でも
+    /// 閾値直下の直列フォールバック経路が bias 加算・activation を含めて
+    /// `gemm_blis_parallel` → 個別 bias/act 適用と bit 完全一致することを
+    /// 確認する（`gemm_blis_bias_act_parallel` 冒頭ドキュメント「bit
+    /// 完全一致契約」参照）。
+    #[test]
+    fn gemm_blis_bias_act_parallel_threshold_boundary_below_matches_unfused() {
+        let (m, n, k) = (32, 48, 40); // 32*48*40 = 61,440 < 589,824
+        assert!(m * n * k < GEMM_THREADING_THRESHOLD);
+        let a = xorshift32_vec(0x7777_7777, m * k);
+        let b = xorshift32_vec(0x8888_8888, k * n);
+        let bias = xorshift32_vec(0x9999_9999, n);
+
+        let mut c_fused = vec![0.0f32; m * n];
+        gemm_blis_bias_act_parallel_thresholded(
+            &a,
+            &b,
+            &mut c_fused,
+            m,
+            n,
+            k,
+            Some(&bias),
+            Activation::Relu,
+        )
+        .unwrap();
+
+        let mut c_unfused = vec![0.0f32; m * n];
+        gemm_blis_parallel(&a, &b, &mut c_unfused, m, n, k).unwrap();
+        apply_epilogue(&mut c_unfused, n, Some(&bias), Activation::Relu).unwrap();
+
+        assert_eq!(
+            c_fused, c_unfused,
+            "閾値直下の epilogue 融合経路は非融合の gemm_blis_parallel + apply_epilogue と bit 完全一致するはず"
+        );
+    }
+
+    /// `n == 0` は `m.saturating_mul(n).saturating_mul(k)` が常に 0 と
+    /// なり閾値未満分岐（直列 `gemm_blis` + `apply_epilogue`）に入るため、
+    /// `gemm_blis_bias_act_parallel`（本番側。`n == 0` を分岐前に早期
+    /// return）と契約を揃えていないと `apply_epilogue` の `chunks_mut(n)`
+    /// が `chunks_mut(0)` でパニックする（PR #830 Cursor Bugbot 指摘）。
+    /// `bias` が `Some` の境界形状で no-op になることを確認する。
+    #[test]
+    fn gemm_blis_bias_act_parallel_thresholded_handles_zero_n_as_noop() {
+        let a = vec![1.0f32; 4];
+        let b: Vec<f32> = vec![];
+        let mut c: Vec<f32> = vec![];
+        let bias: [f32; 0] = [];
+        assert!(
+            gemm_blis_bias_act_parallel_thresholded(
+                &a,
+                &b,
+                &mut c,
+                2,
+                0,
+                2,
+                Some(&bias),
+                Activation::Relu,
+            )
+            .is_ok()
+        );
+    }
+
+    /// `n == 0` の早期 return が検証（`validate_dims`／bias 長／
+    /// activation）より前に実行されて不正入力を素通りしないことを確認する
+    /// （PR #830 Cursor Bugbot 指摘）。`a` の長さが `m * k` と不一致な
+    /// n == 0 形状は、本番側 `gemm_blis_bias_act_parallel` と同じく
+    /// `GemmError::ALenMismatch` を返すはず。
+    #[test]
+    fn gemm_blis_bias_act_parallel_thresholded_validates_before_zero_n_early_return() {
+        let a = vec![1.0f32; 3]; // m * k == 4 を期待するが 3 要素しかない不正形状
+        let b: Vec<f32> = vec![];
+        let mut c: Vec<f32> = vec![];
+        let bias: [f32; 0] = [];
+        let result = gemm_blis_bias_act_parallel_thresholded(
+            &a,
+            &b,
+            &mut c,
+            2,
+            0,
+            2,
+            Some(&bias),
+            Activation::Relu,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(GemmError::ALenMismatch {
+                    expected: 4,
+                    actual: 3
+                })
+            ),
+            "n == 0 でも validate_dims の検証は先に実行されるはず: {result:?}"
+        );
+    }
+
+    /// Cursor Bugbot 指摘（PR #830）の tall-skinny 回帰形状（`m` が大きく
+    /// `n`/`k` が小さいため `m*n*k` は閾値未満だが行パネル分割は十分
+    /// 機能する）で、テスト専用の閾値適用経路が数値上は `gemm_naive` と
+    /// bit 完全一致することを確認する。本番公開入口
+    /// （[`gemm_blis_parallel`]）は本閾値を参照しない（本番未結線）ため
+    /// 当該回帰は本番経路には現れない。本テストは
+    /// [`gemm_blis_parallel_thresholded`]（実機ゲート通過後の本番結線
+    /// 候補）に対する回帰検知として維持する。
+    #[test]
+    fn gemm_blis_parallel_thresholded_tall_skinny_matches_naive() {
+        // m=512,n=1,k=512: m*n*k = 262,144 < GEMM_THREADING_THRESHOLD(589,824)。
+        let (m, n, k) = (512, 1, 512);
+        assert!(m * n * k < GEMM_THREADING_THRESHOLD);
+        let a = xorshift32_vec(0x1111_2222, m * k);
+        let b = xorshift32_vec(0x3333_4444, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_thresholded = vec![0.0f32; m * n];
+        gemm_blis_parallel_thresholded(&a, &b, &mut c_thresholded, m, n, k).unwrap();
+
+        assert_eq!(
+            c_naive, c_thresholded,
+            "tall-skinny 形状でもテスト専用閾値適用経路は gemm_naive と bit 完全一致するはず"
+        );
+    }
+
+    // --- gemv 相当（m == 1）専用経路（イシュー #811） ---
+
+    /// `gemm_blis`（直列公開入口）の m==1 専用経路が `gemm_naive` と
+    /// bit 完全一致することを確認する。
+    #[test]
+    fn gemm_blis_row_vector_matches_naive() {
+        let (m, n, k) = (1, 777, 513);
+        let a = xorshift32_vec(0xaaaa_aaaa, m * k);
+        let b = xorshift32_vec(0xbbbb_bbbb, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_blis = vec![0.0f32; m * n];
+        gemm_blis(&a, &b, &mut c_blis, m, n, k).unwrap();
+
+        assert_eq!(
+            c_naive, c_blis,
+            "m==1 の gemm_blis 専用経路は gemm_naive と bit 完全一致するはず"
+        );
+    }
+
+    /// `gemm_blis_parallel` の m==1 専用経路が `gemm_naive` と bit 完全
+    /// 一致することを確認する（`m*n*k` が閾値を超える大きい n・k でも
+    /// m==1 判定が閾値判定より先に効くことを確認するため大きめの形状を
+    /// 選ぶ）。
+    #[test]
+    fn gemm_blis_parallel_row_vector_matches_naive() {
+        let (m, n, k) = (1, 4096, 4096);
+        assert!(m * n * k > GEMM_THREADING_THRESHOLD);
+        let a = xorshift32_vec(0xcccc_cccc, m * k);
+        let b = xorshift32_vec(0xdddd_dddd, k * n);
+
+        let mut c_naive = vec![0.0f32; m * n];
+        crate::gemm::gemm_naive(&a, &b, &mut c_naive, m, n, k).unwrap();
+
+        let mut c_parallel = vec![0.0f32; m * n];
+        gemm_blis_parallel(&a, &b, &mut c_parallel, m, n, k).unwrap();
+
+        assert_eq!(
+            c_naive, c_parallel,
+            "m==1 の gemm_blis_parallel 専用経路は gemm_naive と bit 完全一致するはず"
+        );
+    }
+
+    /// `gemm_blis_bias_act_parallel` の m==1 専用経路が bias/act を
+    /// 含めて非融合経路と bit 完全一致することを確認する。
+    #[test]
+    fn gemm_blis_bias_act_parallel_row_vector_matches_unfused() {
+        let (m, n, k) = (1, 300, 250);
+        let a = xorshift32_vec(0xeeee_eeee, m * k);
+        let b = xorshift32_vec(0xffff_0001, k * n);
+        let bias = xorshift32_vec(0xffff_0002, n);
+
+        let mut c_fused = vec![0.0f32; m * n];
+        gemm_blis_bias_act_parallel(&a, &b, &mut c_fused, m, n, k, Some(&bias), Activation::Relu)
+            .unwrap();
+
+        let mut c_unfused = vec![0.0f32; m * n];
+        gemm_blis_parallel(&a, &b, &mut c_unfused, m, n, k).unwrap();
+        apply_epilogue(&mut c_unfused, n, Some(&bias), Activation::Relu).unwrap();
+
+        assert_eq!(
+            c_fused, c_unfused,
+            "m==1 の epilogue 融合経路は非融合経路と bit 完全一致するはず"
+        );
     }
 
     /// xorshift32 による疑似乱数ベクトル生成（テスト専用。`bench_harness`
