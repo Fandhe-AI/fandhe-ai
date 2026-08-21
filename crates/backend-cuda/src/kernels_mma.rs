@@ -2080,42 +2080,341 @@ pub fn mma_f16_source_with_warp_tiles(
     // 実際に現れる値（`MMA_WARPS_N`/`MMA_WARP_TILES_M`/`_N` 定数）から
     // 組み立てる（`mma_f16_source_with_swizzle` と同じ、定数変更に追従する
     // 方式）。出現回数 1 を検査してから置換する（fail-closed）。
-    let replace_anchor =
-        |src: String, anchor: &str, replacement: &str| -> Result<String, CudaError> {
-            let occurrences = src.matches(anchor).count();
-            if occurrences != 1 {
-                return Err(CudaError::InvalidKernelConfig {
-                    detail: format!(
-                        "mma_f16_source_with_warp_tiles: anchor {anchor:?} occurs \
-                         {occurrences} times in mma_f16_source() (expected exactly 1); the \
-                         warp-tile define replacement assumption no longer holds"
-                    ),
-                });
-            }
-            Ok(src.replacen(anchor, replacement, 1))
-        };
-
-    let source = replace_anchor(
+    // Bugbot 指摘是正（PR #831）: 以前は本関数内にローカルクロージャとして
+    // 同じ置換ロジックを重複定義していた。`mma_f16_source_with_block_tile`
+    // 向けに切り出した [`replace_source_anchor`] へ一本化する（同一契約が
+    // 2 箇所に存在する状態を解消）。
+    let source = replace_source_anchor(
         mma_f16_source().to_owned(),
         &format!("#define WARPS_N {MMA_WARPS_N}\n"),
         &format!("#define WARPS_N {warps_n}\n"),
+        "mma_f16_source_with_warp_tiles",
     )?;
-    let source = replace_anchor(
+    let source = replace_source_anchor(
         source,
         &format!("#define WARP_TILES_M {MMA_WARP_TILES_M}\n"),
         &format!("#define WARP_TILES_M {warp_tiles_m}\n"),
+        "mma_f16_source_with_warp_tiles",
     )?;
-    let source = replace_anchor(
+    let source = replace_source_anchor(
         source,
         &format!("#define WARP_TILES_N {MMA_WARP_TILES_N}\n"),
         &format!("#define WARP_TILES_N {warp_tiles_n}\n"),
+        "mma_f16_source_with_warp_tiles",
     )?;
 
     let source = if let Some(v) = launch_bounds {
         const SIG_ANCHOR: &str = "extern \"C\" __global__ void gemm_mma_f16(";
         let sig_replacement =
             format!("extern \"C\" __global__ void __launch_bounds__({v}) gemm_mma_f16(");
-        replace_anchor(source, SIG_ANCHOR, &sig_replacement)?
+        replace_source_anchor(
+            source,
+            SIG_ANCHOR,
+            &sig_replacement,
+            "mma_f16_source_with_warp_tiles",
+        )?
+    } else {
+        source
+    };
+
+    Ok(source)
+}
+
+/// [`mma_f16_source_with_warp_tiles`]／[`mma_f16_source_with_block_tile`]
+/// 共通のアンカー完全一致置換ヘルパー（イシュー #804 でモジュール関数へ
+/// 括り出した。以前は `mma_f16_source_with_warp_tiles` 内のローカル
+/// クロージャとして重複定義されていた）。`anchor` の出現回数が 1 でない
+/// 場合は定数変更等で置換前提が崩れたとみなし fail-closed で拒否する
+/// （PR #822・#804 と同じ契約）。
+fn replace_source_anchor(
+    src: String,
+    anchor: &str,
+    replacement: &str,
+    caller: &str,
+) -> Result<String, CudaError> {
+    let occurrences = src.matches(anchor).count();
+    if occurrences != 1 {
+        return Err(CudaError::InvalidKernelConfig {
+            detail: format!(
+                "{caller}: anchor {anchor:?} occurs {occurrences} times in mma_f16_source() \
+                 (expected exactly 1); the define replacement assumption no longer holds"
+            ),
+        });
+    }
+    Ok(src.replacen(anchor, replacement, 1))
+}
+
+/// 診断専用（`internal-diagnostics` feature 限定。イシュー #804）:
+/// ブロックタイル（`bm`/`bn`/`bk`）・`cp.async` パイプライン段数
+/// （`stages`）・warp タイル形状（`warp_tiles_m`/`_n`）・
+/// `__launch_bounds__` を任意に組み合わせた候補カーネルソースを生成する。
+///
+/// `mma_f16_source_with_warp_tiles`（#803・#822）が warp タイル形状のみを
+/// `mma_f16_source()` の `#define` へアンカー置換していたのに対し、本関数は
+/// ブロックタイル・段数の `#define`（`BM`/`BN`/`BK`/`STAGES`/`A_PAD`/
+/// `B_PAD`）も同じ方式で置換し、warp タイル置換と合成する。
+///
+/// # 本番結線の `validate_mma_kernel_config`（`render_mma_f16` 用）との違い
+///
+/// 本番検査は `cfg.stages != 3` を拒否する（cp.async 二値分岐撤去〈#492〉
+/// 後もステージ可変化の本番結線〈#492 Phase B〉が未完のための暫定制約。
+/// 本ファイル `validate_mma_kernel_config` 該当コメント参照）。本関数は
+/// `mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain`
+/// テストが担保する段数一般形（ループ内 `wait_group %0;` の即値制約が
+/// `STAGES - 2`）が既に成立していることを前提に `stages >= 2` のみを
+/// 要求し、3 以外の段数も候補として生成できるようにする（#804 の
+/// ステージ数増候補向け）。
+///
+/// # 共有メモリ予算（2 段階判定。#804 実装計画 Step 1）
+///
+/// `optin_budget_bytes` は呼び出し元がデバイス実測値
+/// （`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`。GB10 実測
+/// 101,376B。出典 `docs/perf/sm121-device-attributes.md`）から渡す
+/// （`kernels_wmma_opt.rs::validate_wmma_tf32_staged_dyn_config` と同じ
+/// 「ハードコード定数ではなく呼び出し元供給」の方針）。
+///
+/// - 静的共有メモリ予算（[`MMA_STATIC_SMEM_LIMIT_BYTES`]・48KiB）以下:
+///   本番と同じ静的 `__shared__` 配列宣言のまま候補ソースを返す
+///   （`needs_dynamic_smem=false`。呼び出し元は `mma_ptx_dump` の
+///   `dump_ptx` に渡すだけで `ptxas -v` 計測できる）。
+/// - 静的予算超・`optin_budget_bytes` 以下: 静的 `__shared__` 配列宣言
+///   （`as_tile`/`bs_tile`）を `extern __shared__` バッファ上の
+///   ポインタへ変換した候補ソースを返す（`needs_dynamic_smem=true`）。
+///   多次元添字構文（`as_tile[stage][row][col]`）は配列本体
+///   （`AsTileT`/`BsTileT` の `typedef`）をそのまま流用し、宣言 2 行の
+///   置換のみでインデックス計算・バンク位相設計（`docs/perf/
+///   cuda-gemm-mma-bank-conflict.md` §2）を不変に保つ。**この経路は
+///   `nvrtc`/`ptxas` 実機での構文検証を経ていない**（#804 実装セッション
+///   時点で本 worktree・DGX Spark GB10 実機のいずれにも CUDA toolkit へ
+///   到達できなかったため。計画 Step F 参照）。本番起動側の動的 SMEM
+///   opt-in 結線（`CudaFunction::set_attribute`・`shared_mem_bytes`）は
+///   本関数のスコープ外（生成した候補ソースを実際に起動するのは後続
+///   セッションの責務）。
+/// - `optin_budget_bytes` 超: 机上除外として `CudaError::InvalidKernelConfig`
+///   を返す（実機到達を待たず判定できる）。
+///
+/// # 呼び出し元
+///
+/// `examples/mma_ptx_dump.rs`（`internal-diagnostics` feature 限定・
+/// `lib.rs::diagnostics` 経由）専用。本番経路（`gemm_mma.rs`）はこの関数を
+/// 呼ばない（`mma_f16_source_with_warp_tiles` と同じ非消費契約）。
+#[allow(dead_code)] // 理由は mma_f16_source_with_warp_tiles と同じ（非公開モジュール）
+#[allow(clippy::too_many_arguments)] // 診断専用の候補パラメータを 1 関数に集約する設計上の要求
+pub fn mma_f16_source_with_block_tile(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+) -> Result<String, CudaError> {
+    let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
+
+    if bm == 0 || bn == 0 || bk == 0 || stages == 0 || warp_tiles_m == 0 || warp_tiles_n == 0 {
+        return Err(invalid(
+            "mma_f16_source_with_block_tile requires bm/bn/bk/stages/warp_tiles_m/n >= 1"
+                .to_string(),
+        ));
+    }
+    // 段数一般形の前提（本関数ドキュメンテーションコメント参照）。
+    if stages < 2 {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile stages ({stages}) must be >= 2 (cp.async \
+             software pipeline invariant; see mma_f16_source_uses_fixed_immediate_wait_with_loop_exit_drain)"
+        )));
+    }
+    // codex-review P2 是正（PR #831）: ループ内固定即値
+    // `cp.async.wait_group "n"(STAGES - 2)` の `"n"` オペランドは
+    // `cp.async.wait_group` の即値オペランド（0〜7 の範囲。PTX ISA
+    // `cp.async.wait_group` 命令仕様）を要求する。`STAGES - 2` がこの範囲を
+    // 超える（`stages >= 10`）候補を受理すると、NVRTC/ptxas 側で不正な
+    // 即値としてコンパイル失敗する（後段での失敗であり fail-closed
+    // 契約違反）。ここで `stages <= 9`（`STAGES - 2 <= 7`）を検査し、
+    // 実機・NVRTC 到達前に机上で拒否する。
+    const MAX_WAIT_GROUP_IMMEDIATE: u32 = 7;
+    const MAX_STAGES: u32 = MAX_WAIT_GROUP_IMMEDIATE + 2;
+    if stages > MAX_STAGES {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile stages ({stages}) must be <= {MAX_STAGES} \
+             (cp.async.wait_group immediate operand STAGES - 2 must fit in \
+             [0, {MAX_WAIT_GROUP_IMMEDIATE}])"
+        )));
+    }
+    // `validate_mma_kernel_config` と同じ kWarpGemmIterations 相当条件。
+    if !bk.is_multiple_of(MMA_K) {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile bk ({bk}) must be a multiple of MMA_K ({MMA_K})"
+        )));
+    }
+    let k_steps_per_stage = bk / MMA_K;
+    if k_steps_per_stage < 2 {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile bk / MMA_K ({k_steps_per_stage}) must be >= 2"
+        )));
+    }
+    // cp.async 16 バイト転送粒度の前提（`validate_mma_kernel_config` と同じ）。
+    if !bm.is_multiple_of(8) || !bn.is_multiple_of(8) {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile bm ({bm}) and bn ({bn}) must both be multiples \
+             of 8 (cp.async 16-byte transfer granularity)"
+        )));
+    }
+
+    // warp タイル形状の検証（`mma_f16_source_with_warp_tiles` と同じ式だが
+    // `MMA_BM`/`MMA_BN` 固定ではなく候補の `bm`/`bn` に対して行う）。
+    let warp_m = warp_tiles_m
+        .checked_mul(MMA_M)
+        .ok_or_else(|| invalid(format!(
+            "mma_f16_source_with_block_tile warp_tiles_m={warp_tiles_m} overflows u32 when multiplied by MMA_M={MMA_M}"
+        )))?;
+    let warp_n = warp_tiles_n
+        .checked_mul(MMA_N)
+        .ok_or_else(|| invalid(format!(
+            "mma_f16_source_with_block_tile warp_tiles_n={warp_tiles_n} overflows u32 when multiplied by MMA_N={MMA_N}"
+        )))?;
+    if !bm.is_multiple_of(warp_m) || !bn.is_multiple_of(warp_n) {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile candidate warp tile {warp_m}x{warp_n} \
+             (warp_tiles_m={warp_tiles_m}, warp_tiles_n={warp_tiles_n}) does not evenly divide \
+             the candidate block tile bm={bm}x bn={bn}"
+        )));
+    }
+    let warps_m = bm / warp_m;
+    let warps_n = bn / warp_n;
+    let threads = warps_m
+        .checked_mul(warps_n)
+        .and_then(|w| w.checked_mul(32))
+        .ok_or_else(|| {
+            invalid("mma_f16_source_with_block_tile block thread count overflow".to_string())
+        })?;
+    if threads > 1024 {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile candidate derives {threads} threads/block, \
+             exceeding CUDA's per-block limit (1024)"
+        )));
+    }
+    if let Some(v) = launch_bounds
+        && v != threads
+    {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile launch_bounds ({v}) must equal the derived thread \
+             count ({threads})"
+        )));
+    }
+
+    // 共有メモリ予算（`validate_mma_kernel_config` と同じ式。本関数
+    // ドキュメンテーションコメント「共有メモリ予算」参照）。
+    let a_pad = bk.checked_add(8).ok_or_else(|| {
+        invalid("mma_f16_source_with_block_tile A tile padded row width overflow".to_string())
+    })?;
+    let b_pad = bn.checked_add(8).ok_or_else(|| {
+        invalid("mma_f16_source_with_block_tile B tile padded row width overflow".to_string())
+    })?;
+    let smem_bytes = bm
+        .checked_mul(a_pad)
+        .and_then(|a| bk.checked_mul(b_pad).and_then(|b| a.checked_add(b)))
+        .and_then(|sum| sum.checked_mul(2))
+        .and_then(|v| v.checked_mul(stages))
+        .ok_or_else(|| {
+            invalid("mma_f16_source_with_block_tile shared memory byte count overflow".to_string())
+        })?;
+    if smem_bytes > optin_budget_bytes {
+        return Err(invalid(format!(
+            "mma_f16_source_with_block_tile candidate bm={bm} bn={bn} bk={bk} stages={stages} \
+             requires {smem_bytes} bytes of shared memory, exceeding the opt-in budget \
+             ({optin_budget_bytes} bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)"
+        )));
+    }
+    let needs_dynamic_smem = smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES;
+
+    // ブロックタイル・段数の #define をアンカー置換する（`mma_f16_source()`
+    // 実体は既定 config の bm=64/bn=128/bk=32/stages=3/a_pad=40/b_pad=136 が
+    // 焼き込み済みのため、これらを候補値へ差し替える）。
+    let source = replace_source_anchor(
+        mma_f16_source().to_owned(),
+        &format!("#define BM {MMA_BM}\n"),
+        &format!("#define BM {bm}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define BN {MMA_BN}\n"),
+        &format!("#define BN {bn}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define BK {MMA_BK}\n"),
+        &format!("#define BK {bk}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define WARPS_N {MMA_WARPS_N}\n"),
+        &format!("#define WARPS_N {warps_n}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define WARP_TILES_M {MMA_WARP_TILES_M}\n"),
+        &format!("#define WARP_TILES_M {warp_tiles_m}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define WARP_TILES_N {MMA_WARP_TILES_N}\n"),
+        &format!("#define WARP_TILES_N {warp_tiles_n}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define STAGES {MMA_STAGES}\n"),
+        &format!("#define STAGES {stages}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define A_PAD {MMA_A_PAD}\n"),
+        &format!("#define A_PAD {a_pad}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+    let source = replace_source_anchor(
+        source,
+        &format!("#define B_PAD {MMA_B_PAD}\n"),
+        &format!("#define B_PAD {b_pad}\n"),
+        "mma_f16_source_with_block_tile",
+    )?;
+
+    // 動的 SMEM 化（本関数ドキュメンテーションコメント「共有メモリ予算」
+    // 参照）。多次元添字構文をそのまま使えるよう `typedef` 配列型への
+    // ポインタへ変換する（宣言 2 行のみの置換。以降のカーネル本体の
+    // `as_tile[stage][row][col]`/`bs_tile[stage][row][col]` アクセスは
+    // 無変更で成立する）。
+    const STATIC_SMEM_ANCHOR: &str = "    __shared__ __align__(16) __half as_tile[STAGES][BM][A_PAD];\n    __shared__ __align__(16) __half bs_tile[STAGES][BK][B_PAD];\n";
+    const DYNAMIC_SMEM_REPLACEMENT: &str = "    extern __shared__ __align__(16) unsigned char mma_dyn_smem[];\n    typedef __half MmaAsTileT[BM][A_PAD];\n    typedef __half MmaBsTileT[BK][B_PAD];\n    MmaAsTileT* as_tile = reinterpret_cast<MmaAsTileT*>(mma_dyn_smem);\n    MmaBsTileT* bs_tile = reinterpret_cast<MmaBsTileT*>(mma_dyn_smem + sizeof(MmaAsTileT) * STAGES);\n";
+    let source = if needs_dynamic_smem {
+        replace_source_anchor(
+            source,
+            STATIC_SMEM_ANCHOR,
+            DYNAMIC_SMEM_REPLACEMENT,
+            "mma_f16_source_with_block_tile",
+        )?
+    } else {
+        source
+    };
+
+    let source = if let Some(v) = launch_bounds {
+        const SIG_ANCHOR: &str = "extern \"C\" __global__ void gemm_mma_f16(";
+        let sig_replacement =
+            format!("extern \"C\" __global__ void __launch_bounds__({v}) gemm_mma_f16(");
+        replace_source_anchor(
+            source,
+            SIG_ANCHOR,
+            &sig_replacement,
+            "mma_f16_source_with_block_tile",
+        )?
     } else {
         source
     };
@@ -3560,5 +3859,157 @@ mod tests {
             err,
             crate::error::CudaError::InvalidKernelConfig { .. }
         ));
+    }
+
+    /// イシュー #804: 既定値 `(MMA_BM, MMA_BN, MMA_BK, MMA_STAGES,
+    /// MMA_WARP_TILES_M, MMA_WARP_TILES_N, None, MMA_SHARED_MEM_BYTES)` を
+    /// 渡すと `mma_f16_source()` とバイト一致することをロックする
+    /// （`mma_f16_source_with_warp_tiles_default_matches_mma_f16_source` と
+    /// 同じ回帰方針。全アンカー置換が「同じ値への置換」に潰れるため
+    /// 既定引数では本番ソースへの影響がないことを機械的に担保する）。
+    #[test]
+    fn mma_f16_source_with_block_tile_default_matches_mma_f16_source() {
+        let src = mma_f16_source_with_block_tile(
+            MMA_BM,
+            MMA_BN,
+            MMA_BK,
+            MMA_STAGES,
+            MMA_WARP_TILES_M,
+            MMA_WARP_TILES_N,
+            None,
+            MMA_SHARED_MEM_BYTES,
+        )
+        .expect("default block tile config must succeed");
+        assert_eq!(src, mma_f16_source());
+    }
+
+    /// #804 実装計画 Step 1 の候補表（`docs/perf/
+    /// cuda-gemm-mma-warp-tile-register-budget.md` 系の先例）にある
+    /// 「ステージ増のみ」候補（64x128x32・S4・warp2x2）が静的 48KiB を
+    /// 超え opt-in 予算内に収まること、`needs_dynamic_smem` 相当の判定が
+    /// `extern __shared__` 変換を伴うことを確認する（`(64*40 + 32*136) *
+    /// 2B * 4 stages = 55,296B`。48KiB=49,152B を超え 101,376B 以下）。
+    #[test]
+    fn mma_f16_source_with_block_tile_stage_increase_uses_dynamic_smem() {
+        let src = mma_f16_source_with_block_tile(64, 128, 32, 4, 2, 2, None, 101_376)
+            .expect("64x128x32 S4 must fit within the opt-in budget");
+        assert!(
+            src.contains("extern __shared__ __align__(16) unsigned char mma_dyn_smem[];"),
+            "55,296B (> 48KiB static limit) candidate must use the extern __shared__ variant"
+        );
+        assert!(src.contains("#define STAGES 4\n"));
+        assert!(
+            !src.contains("__shared__ __align__(16) __half as_tile[STAGES][BM][A_PAD];"),
+            "the static declaration must be fully replaced, not left alongside the dynamic one"
+        );
+    }
+
+    /// タイル拡大候補（128x256x32・S3・warp4x4）が opt-in 予算 101,376B 内
+    /// （実測 81,408B）に収まり、`WARP_TILES_M`/`_N`/`WARPS_N`/`BM`/`BN` が
+    /// 候補値へ置換されることを確認する。
+    #[test]
+    fn mma_f16_source_with_block_tile_expanded_tile_replaces_all_defines() {
+        let src = mma_f16_source_with_block_tile(128, 256, 32, 3, 4, 4, Some(512), 101_376)
+            .expect("128x256x32 S3 warp4x4 must fit within the opt-in budget");
+        for needle in [
+            "#define BM 128\n",
+            "#define BN 256\n",
+            "#define BK 32\n",
+            "#define WARP_TILES_M 4\n",
+            "#define WARP_TILES_N 4\n",
+            "#define WARPS_N 8\n",
+            "#define A_PAD 40\n",
+            "#define B_PAD 264\n",
+            "extern __shared__ __align__(16) unsigned char mma_dyn_smem[];",
+            "__launch_bounds__(512)",
+        ] {
+            assert!(
+                src.contains(needle),
+                "missing {needle:?} in generated source"
+            );
+        }
+    }
+
+    /// 128x256x32・S4 は机上見積もり 108,544B で opt-in 上限 101,376B を
+    /// 超える（#804 実装計画 Step 1 候補表の机上除外根拠）。実機到達前でも
+    /// 判定できることをロックする。
+    #[test]
+    fn mma_f16_source_with_block_tile_rejects_over_optin_budget() {
+        let err = mma_f16_source_with_block_tile(128, 256, 32, 4, 4, 4, None, 101_376)
+            .expect_err("128x256x32 S4 (108,544B) must exceed the 101,376B opt-in budget");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    /// `stages < 2` は cp.async ソフトウェアパイプラインの不変条件違反
+    /// として拒否される（本関数ドキュメンテーションコメント参照）。
+    #[test]
+    fn mma_f16_source_with_block_tile_rejects_stages_below_two() {
+        let err = mma_f16_source_with_block_tile(64, 128, 32, 1, 2, 2, None, 101_376)
+            .expect_err("stages=1 must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    /// codex-review P2 是正（PR #831）: `cp.async.wait_group "n"(STAGES - 2)`
+    /// の即値オペランドは 0〜7 の範囲でなければならない（PTX ISA
+    /// `cp.async.wait_group` 命令仕様）ため、`stages` は 9 以下でなければ
+    /// ならない。`stages=10`（`STAGES - 2 = 8`）は即値範囲超過として
+    /// 拒否される必要がある。`optin_budget_bytes` は
+    /// `u32::MAX` を渡し、拒否理由が共有メモリ予算超過ではなく段数上限
+    /// であることを切り分ける。
+    #[test]
+    fn mma_f16_source_with_block_tile_rejects_stages_above_nine() {
+        let err = mma_f16_source_with_block_tile(64, 128, 32, 10, 2, 2, None, u32::MAX)
+            .expect_err("stages=10 must be rejected (cp.async.wait_group immediate overflow)");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    /// `stages=9`（`STAGES - 2 = 7`）は即値範囲の境界値であり受理される
+    /// ことを確認する（上限検証が過剰に厳しくないことの回帰防止）。
+    #[test]
+    fn mma_f16_source_with_block_tile_accepts_stages_at_nine() {
+        mma_f16_source_with_block_tile(64, 128, 32, 9, 2, 2, None, u32::MAX)
+            .expect("stages=9 is the maximum allowed by the cp.async.wait_group immediate range");
+    }
+
+    /// launch_bounds の値が導出スレッド数と食い違う場合は拒否される
+    /// （`mma_f16_source_with_warp_tiles` と同じ fail-closed 契約）。
+    #[test]
+    fn mma_f16_source_with_block_tile_rejects_launch_bounds_mismatch() {
+        let err = mma_f16_source_with_block_tile(64, 128, 32, 3, 2, 2, Some(256), 101_376)
+            .expect_err("launch_bounds mismatch (actual threads=512) must be rejected");
+        assert!(matches!(
+            err,
+            crate::error::CudaError::InvalidKernelConfig { .. }
+        ));
+    }
+
+    /// 0 引数（`bm`/`bn`/`bk`/`stages`/`warp_tiles_m`/`warp_tiles_n`）は
+    /// すべて fail-closed で拒否される。
+    #[test]
+    fn mma_f16_source_with_block_tile_rejects_zero_arguments() {
+        for (bm, bn, bk, stages, wtm, wtn) in [
+            (0, 128, 32, 3, 2, 2),
+            (64, 0, 32, 3, 2, 2),
+            (64, 128, 0, 3, 2, 2),
+            (64, 128, 32, 0, 2, 2),
+            (64, 128, 32, 3, 0, 2),
+            (64, 128, 32, 3, 2, 0),
+        ] {
+            let err = mma_f16_source_with_block_tile(bm, bn, bk, stages, wtm, wtn, None, 101_376)
+                .expect_err("zero-valued argument must be rejected");
+            assert!(matches!(
+                err,
+                crate::error::CudaError::InvalidKernelConfig { .. }
+            ));
+        }
     }
 }
