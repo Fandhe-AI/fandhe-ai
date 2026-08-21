@@ -1279,6 +1279,71 @@ mod tests {
     }
 
     #[test]
+    fn shared_mem_bytes_f16_fits_standard_shared_mem_limit_for_all_candidates() {
+        // イシュー #798: `dispatch_f16_auto_unverified` は `tile::select` が
+        // `CANDIDATES` から選んだ構成をそのまま `pipeline_for_tile_f16`
+        // （f16 版デバイス上限検査。`shared_mem_bytes_f16` ドキュメント
+        // コメント参照）へ渡す。標準 Apple Silicon 上限（32KiB。本ファイル
+        // 内の `validate` 系テストが揃って使う `32 * 1024` と同じ値）を
+        // どの候補も超えていなければ、`select` の出力がデバイス実測なしに
+        // サイレント縮退（`SINGLE_SIMDGROUP_8X8` へのフォールバック）を
+        // 起こさないことを CI（Linux・GPU 非依存）上で担保できる。
+        const STANDARD_SHARED_MEM_LIMIT: u32 = 32 * 1024;
+        for cfg in CANDIDATES {
+            let bytes = cfg.shared_mem_bytes_f16();
+            assert!(
+                bytes <= STANDARD_SHARED_MEM_LIMIT,
+                "cfg {cfg:?} の shared_mem_bytes_f16={bytes} が標準上限 \
+                 {STANDARD_SHARED_MEM_LIMIT} を超過しており、標準 Apple \
+                 Silicon 上ではサイレント縮退が起きる"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_f16_auto_shapes_resolve_to_expected_candidate() {
+        // `tests/gemm_f16_auto_parity.rs`（`dispatch_f16_auto_unverified`。イシュー
+        // #798）の各ケースが「どの `CANDIDATES` 分岐を検証しているか」の
+        // 主張は、その統合テスト自体が Metal 実機依存・`#[ignore]` のため
+        // 実機なしでは検証できない。`select`（`tile::select_with_occupancy`
+        // への委譲）は `objc2` 系 FFI に触れない純粋関数のため、同じ形状を
+        // ここで固定し Linux（CI）上でも分岐主張のドリフトを検知する。
+        assert_eq!(
+            select(2048, 256, 512),
+            CANDIDATES[1],
+            "縦長 → CANDIDATES[1]"
+        );
+        assert_eq!(
+            select(256, 2048, 512),
+            CANDIDATES[2],
+            "横長 → CANDIDATES[2]"
+        );
+        assert_eq!(
+            select(512, 512, 512),
+            CANDIDATES[3],
+            "正方立方（実測範囲内） → CANDIDATES[3]"
+        );
+        assert_eq!(
+            select(1536, 1024, 512),
+            CANDIDATES[0],
+            "準正方大形状長方形 → CANDIDATES[0]"
+        );
+        assert_eq!(
+            select(32, 32, 32),
+            TileConfig::SINGLE_SIMDGROUP_8X8,
+            "微小形状 → SINGLE_SIMDGROUP_8X8"
+        );
+        // 端数形状ケース（`gemm_f16_auto_parity.rs::
+        // dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape`）
+        // が staged 経路（CANDIDATES[3]）を踏むことを固定する。
+        assert_eq!(
+            select(521, 265, 131),
+            CANDIDATES[3],
+            "8 非整列の端数形状（m,n,k は SMALL=64 以上） → CANDIDATES[3]"
+        );
+    }
+
+    #[test]
     fn shared_mem_bytes_f16_saturates_instead_of_wrapping_on_overflow() {
         // `shared_mem_bytes_saturates_instead_of_wrapping_on_overflow`
         // （f32 版）と同じ regression 意図: `bk` に極端に大きい値を渡しても
@@ -2757,6 +2822,53 @@ mod tests {
                 &format!("metal f16 SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
                 &c_gpu_f32,
                 &c_ref_rounded,
+            );
+        }
+    }
+
+    /// `dispatch_f16_auto_unverified`（イシュー #798）が実際に呼ぶ経路——
+    /// `tile::select(m, n, k)` の出力をそのまま `resolve_tile_config_f16`
+    /// へ渡す——を、`select` の各分岐を代表する形状で検証する
+    /// （`all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`
+    /// が `CANDIDATES` を直接巡回するのに対し、本テストは `select` の
+    /// 分岐判定ロジックが実際にどの候補へ写像するかを検証対象に含む）。
+    /// 採用構成が `select` の返り値と一致することを assert することで、
+    /// 自動経路がフォールバックなしに動作することを確認する。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn dispatch_f16_auto_tile_select_shapes_resolve_without_fallback() {
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx)
+            .expect("GEMM パイプラインの構築に失敗した（f16 タイル化含む）");
+
+        // `select_with_occupancy` 本体コメントの分岐判定に対応する代表形状:
+        // 縦長 → CANDIDATES[1]、横長 → CANDIDATES[2]、正方立方（実測範囲内）
+        // → CANDIDATES[3]、大形状 → CANDIDATES[0]、微小形状 →
+        // SINGLE_SIMDGROUP_8X8。
+        let shapes: &[(usize, usize, usize)] = &[
+            (2048, 256, 512),  // 縦長 → CANDIDATES[1]
+            (256, 2048, 512),  // 横長 → CANDIDATES[2]
+            (512, 512, 512),   // 正方立方（実測範囲内）→ CANDIDATES[3]
+            (1536, 1024, 512), // 準正方大形状長方形 → CANDIDATES[0]
+            (32, 32, 32),      // 微小形状 → SINGLE_SIMDGROUP_8X8
+        ];
+
+        for &(m, n, k) in shapes {
+            let expected = select(m, n, k);
+            let resolved = gemm
+                .resolve_tile_config_f16(&ctx, expected)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "shape (m={m}, n={n}, k={k}) が選んだ構成 {expected:?} の \
+                     パイプライン構築・検証（実デバイス上限）に失敗した: {err}"
+                    )
+                });
+            assert_eq!(
+                resolved, expected,
+                "shape (m={m}, n={n}, k={k}) の select 出力 {expected:?} が \
+                 実デバイス上でサイレントに {resolved:?} へフォールバックした"
             );
         }
     }
