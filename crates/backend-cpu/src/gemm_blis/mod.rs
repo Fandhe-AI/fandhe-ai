@@ -576,6 +576,17 @@ fn gemm_blis_bias_act_parallel_thresholded(
     bias: Option<&[f32]>,
     act: Activation,
 ) -> Result<(), GemmError> {
+    // n == 0 は `gemm_blis_bias_act_parallel` と同じ理由（本関数冒頭の
+    // ドキュメンテーションコメント参照）で shape として合法な no-op。
+    // `m.saturating_mul(n).saturating_mul(k)` は n == 0 のとき常に
+    // 0 < GEMM_THREADING_THRESHOLD となり以下の直列分岐へ入るため、
+    // この早期 return が無いと `apply_epilogue(c, 0, Some(bias), act)` が
+    // `chunks_mut(0)` でパニックする（本番側 `gemm_blis_bias_act_parallel`
+    // は分岐前に n == 0 を早期 return しており契約が一致していなかった。
+    // イシュー #811 レビュー指摘）。
+    if n == 0 {
+        return Ok(());
+    }
     if m.saturating_mul(n).saturating_mul(k) < GEMM_THREADING_THRESHOLD {
         gemm_blis(a, b, c, m, n, k)?;
         apply_epilogue(c, n, bias, act)
@@ -1528,6 +1539,33 @@ mod tests {
         assert_eq!(
             c_fused, c_unfused,
             "閾値直下の epilogue 融合経路は非融合の gemm_blis_parallel + apply_epilogue と bit 完全一致するはず"
+        );
+    }
+
+    /// `n == 0` は `m.saturating_mul(n).saturating_mul(k)` が常に 0 と
+    /// なり閾値未満分岐（直列 `gemm_blis` + `apply_epilogue`）に入るため、
+    /// `gemm_blis_bias_act_parallel`（本番側。`n == 0` を分岐前に早期
+    /// return）と契約を揃えていないと `apply_epilogue` の `chunks_mut(n)`
+    /// が `chunks_mut(0)` でパニックする（PR #830 Cursor Bugbot 指摘）。
+    /// `bias` が `Some` の境界形状で no-op になることを確認する。
+    #[test]
+    fn gemm_blis_bias_act_parallel_thresholded_handles_zero_n_as_noop() {
+        let a = vec![1.0f32; 4];
+        let b: Vec<f32> = vec![];
+        let mut c: Vec<f32> = vec![];
+        let bias: [f32; 0] = [];
+        assert!(
+            gemm_blis_bias_act_parallel_thresholded(
+                &a,
+                &b,
+                &mut c,
+                2,
+                0,
+                2,
+                Some(&bias),
+                Activation::Relu,
+            )
+            .is_ok()
         );
     }
 
