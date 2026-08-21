@@ -398,16 +398,49 @@ fn main() {
     );
 
     // 比較基準行（現行本番定数）。候補と同じ CSV スキーマで先頭行として
-    // 出力する（`bm`/`bn`/`bk`/`stages`/warp タイルは
-    // `kernels_mma.rs::MMA_BM` 等の現行本番定数と同一値。#804 の
-    // `diagnostics::mma_f16_block_tile` occupancy 概算関数と同じ由来）。
-    {
-        let (bm, bn) = diagnostics::mma_f16_block_tile();
-        let mut row = format!("mma_f16_base(production),{bm},{bn},32,3,2,2,512,41472,false");
+    // 出力する。`bm`/`bn`/`bk`/`stages`/warp タイル・`threads`/
+    // `smem_bytes`/`dynamic_smem` は候補行と同じ「単一の真実源」
+    // （`diagnostics::mma_f16_block_tile_layout_production`
+    // → `derive_mma_block_tile_layout`）から導出する（codex-review 是正:
+    // 以前は `MMA_STAGES` 等をリテラルで再記述しており、定数変更時に
+    // 追従しない不整合の余地があった）。
+    let production_medians: std::collections::HashMap<usize, f64> = {
+        let layout = diagnostics::mma_f16_block_tile_layout_production()
+            .expect("production MMA_BM/BN/BK/STAGES/WARP_TILES must derive a valid layout");
+        let (bm, bn, bk, stages, warp_tiles_m, warp_tiles_n, threads, smem_bytes, dynamic_smem) = (
+            layout.bm,
+            layout.bn,
+            layout.bk,
+            layout.stages,
+            layout.warp_tiles_m,
+            layout.warp_tiles_n,
+            layout.threads,
+            layout.smem_bytes,
+            layout.needs_dynamic_smem(),
+        );
+        let mut row = format!(
+            "mma_f16_base(production),{bm},{bn},{bk},{stages},{warp_tiles_m},{warp_tiles_n},\
+             {threads},{smem_bytes},{dynamic_smem}"
+        );
+        // 比較基準行の実測値は `measure_production` を size ごとに 1 回だけ
+        // 呼び、以下の `production_medians`（ratio 分母）にも同じ結果を
+        // 使い回す（codex-review 是正: 以前は本ブロックと下の
+        // `production_medians` 構築ループが `measure_production` を size
+        // ごとに独立計測しており、直下コメント「単一のベースライン計測
+        // 結果を全候補で共有する」の意図に反して base 行の
+        // `tflops_median_*` と各候補の ratio 分母が別計測値になっていた。
+        // GPU 計測は試行間でばらつくため、この不一致は base 行の
+        // `ratio_vs_production=1.0000` が実際の分母と一致しない・
+        // 計測時間が 2 倍になる、の 2 点の実害を生む）。
+        let mut production_medians: std::collections::HashMap<usize, f64> =
+            std::collections::HashMap::new();
         for &size in &BENCH_SIZES {
             let config = MeasurementConfig::default();
             match measure_production(&gemm, size, &config) {
-                Ok(m) => row.push_str(&format!(",{:.4},{:.4},{:.4},1.0000", m.median, m.q1, m.q3)),
+                Ok(m) => {
+                    row.push_str(&format!(",{:.4},{:.4},{:.4},1.0000", m.median, m.q1, m.q3));
+                    production_medians.insert(size, m.median);
+                }
                 Err(e) => {
                     println!(
                         "mma_f16_base size={size}: SKIP measurement (production launch failed: {e})"
@@ -417,20 +450,8 @@ fn main() {
             }
         }
         println!("{row}");
-    }
-
-    // 比較基準行の 4096 実測値を各候補の ratio 分母に使う（候補ごとに
-    // 独立計測すると分母のばらつきが ratio に混入するため、単一のベース
-    // ライン計測結果を全候補で共有する）。分母が計測できなかった
-    // （SKIP）場合、以降の ratio はすべて "n/a" とする。
-    let mut production_medians: std::collections::HashMap<usize, f64> =
-        std::collections::HashMap::new();
-    for &size in &BENCH_SIZES {
-        let config = MeasurementConfig::default();
-        if let Ok(m) = measure_production(&gemm, size, &config) {
-            production_medians.insert(size, m.median);
-        }
-    }
+        production_medians
+    };
 
     for candidate in &CANDIDATES {
         let Some(layout) = layout_or_print_excluded(candidate, optin_budget_bytes) else {

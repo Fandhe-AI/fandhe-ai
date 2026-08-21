@@ -426,6 +426,25 @@ pub mod diagnostics {
         kernels_mma::derive_mma_block_tile_layout(bm, bn, bk, stages, warp_tiles_m, warp_tiles_n)
     }
 
+    // イシュー #840 codex-review 是正: `examples/gemm_mma_block_tile_bench.rs`
+    // の比較基準行（現行本番構成）が `threads`/`smem_bytes`/
+    // `needs_dynamic_smem` をハードコードしたリテラルではなく、候補行と
+    // 同じ「単一の真実源」（`derive_mma_block_tile_layout`）経由で取得
+    // できるようにするための薄いラッパー。`MMA_STAGES`・パディング定数
+    // （`MMA_A_PAD`/`_B_PAD`）が将来変更された際にベンチ CSV・
+    // `docs/perf/*.md` §4.1 転記値が自動追従するようにする。
+    pub fn mma_f16_block_tile_layout_production()
+    -> Result<MmaBlockTileLayout, crate::error::CudaError> {
+        kernels_mma::derive_mma_block_tile_layout(
+            kernels_mma::MMA_BM,
+            kernels_mma::MMA_BN,
+            kernels_mma::MMA_BK,
+            kernels_mma::MMA_STAGES,
+            kernels_mma::MMA_WARP_TILES_M,
+            kernels_mma::MMA_WARP_TILES_N,
+        )
+    }
+
     // イシュー #806: TF32 生 mma.sync 経路（`kernels_mma_tf32.rs`）の
     // ベースソース・ブロックタイル拡大候補を `examples/
     // mma_tf32_ptx_dump.rs` から観測するための再公開。

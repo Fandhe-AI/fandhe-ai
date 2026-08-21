@@ -2387,20 +2387,24 @@ pub(crate) fn derive_mma_block_tile_layout(
 ///   （`AsTileT`/`BsTileT` の `typedef`）をそのまま流用し、宣言 2 行の
 ///   置換のみでインデックス計算・バンク位相設計（`docs/perf/
 ///   cuda-gemm-mma-bank-conflict.md` §2）を不変に保つ。**この経路は
-///   `nvrtc`/`ptxas` 実機での構文検証を経ていない**（#804 実装セッション
-///   時点で本 worktree・DGX Spark GB10 実機のいずれにも CUDA toolkit へ
-///   到達できなかったため。計画 Step F 参照）。本番起動側の動的 SMEM
-///   opt-in 結線（`CudaFunction::set_attribute`・`shared_mem_bytes`）は
-///   本関数のスコープ外（生成した候補ソースを実際に起動するのは後続
-///   セッションの責務）。
+///   #804 実装セッション時点では `nvrtc`/`ptxas` 実機での構文検証を
+///   経ていなかった**（当時は本 worktree・DGX Spark GB10 実機のいずれにも
+///   CUDA toolkit へ到達できなかったため。計画 Step F 参照）が、
+///   **イシュー #840 で GB10 実機の NVRTC/ptxas 構文検証・起動検証を
+///   通過済み**（`examples/gemm_mma_block_tile_bench.rs` 経由の A/B 計測。
+///   詳細は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §2・§4）。本番
+///   起動側の動的 SMEM opt-in 結線（`CudaFunction::set_attribute`・
+///   `shared_mem_bytes`）は本関数のスコープ外のままであり、採否判断は
+///   #842 へ委譲されている。
 /// - `optin_budget_bytes` 超: 机上除外として `CudaError::InvalidKernelConfig`
 ///   を返す（実機到達を待たず判定できる）。
 ///
 /// # 呼び出し元
 ///
-/// `examples/mma_ptx_dump.rs`（`internal-diagnostics` feature 限定・
-/// `lib.rs::diagnostics` 経由）専用。本番経路（`gemm_mma.rs`）はこの関数を
-/// 呼ばない（`mma_f16_source_with_warp_tiles` と同じ非消費契約）。
+/// `examples/mma_ptx_dump.rs`・`examples/gemm_mma_block_tile_bench.rs`
+/// （いずれも `internal-diagnostics` feature 限定・`lib.rs::diagnostics`
+/// 経由）専用。本番経路（`gemm_mma.rs::CudaMmaGemm`）はこの関数を呼ばない
+/// （`mma_f16_source_with_warp_tiles` と同じ非消費契約）。
 #[allow(dead_code)] // 理由は mma_f16_source_with_warp_tiles と同じ（非公開モジュール）
 #[allow(clippy::too_many_arguments)] // 診断専用の候補パラメータを 1 関数に集約する設計上の要求
 pub fn mma_f16_source_with_block_tile(
