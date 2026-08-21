@@ -122,15 +122,17 @@ cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --
 # 4. PyTorch 参照値を計 5 回計測する（§5 参照）
 
 # 5. env override へ size×dtype ごとの PyTorch 5 run 中央値を設定し cuda_floor_bench を 5 回反復実行する
+#    以下の <...> はプレースホルダー。実測後は各行の値を実測値（クォート付き文字列）へ置換してから実行する
+#    （引用符で囲むことで '<' が POSIX shell の入力リダイレクトと解釈されるのを防いでいる）
 export CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 5 run 再実行 (warmup=20 iters=20) の run 間中央値, <実施日>, 同一 GB10 個体"
-export CUDA_FLOOR_BENCH_PYTORCH_F32_512=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F32_1024=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F32_2048=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F32_4096=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_512=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_1024=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_2048=<5 run 中央値>
-export CUDA_FLOOR_BENCH_PYTORCH_F16_4096=<5 run 中央値>
+export CUDA_FLOOR_BENCH_PYTORCH_F32_512="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F32_1024="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F32_2048="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F32_4096="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F16_512="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F16_1024="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F16_2048="<5 run 中央値>"
+export CUDA_FLOOR_BENCH_PYTORCH_F16_4096="<5 run 中央値>"
 cargo run -p backend-cuda --example cuda_floor_bench --release --locked
 # ↑ を 5 回反復実行し、経路×形状のセルごとに run1〜run5 の median_tflops を独立に中央値化した
 #   ものを代表値として下表へ機械転記する（stdout からの転記のみ。後付け調整は行わない）
