@@ -769,3 +769,255 @@ kernel void gemm_simdgroup_tiled(
         }
     }
 }
+
+// half 版タイル化 GEMM 本体（イシュー #796）: `gemm_simdgroup_tiled`
+// （f32 版・BM/BN/BK/WM/WN・協調ロード＋レジスタ常駐フラグメント構成）を
+// half 入力へ移植する。既存 `gemm_simdgroup_f16`（1 threadgroup =
+// 1 simdgroup = C の 8x8 タイル 1 つの非タイル化構造）が対 PyTorch MPS
+// f16 で大きく劣後する主因（親イシュー #787）に対応する。
+//
+// **スコープ境界（兄弟イシューとの分担。イシュー #796 計画「スコープ境界」
+// 節）**: 本カーネルの協調ロードは float4 ではなく**スカラーロード**に
+// 留める（128bit 幅ベクトルロード〈イシュー #533 の f16 対応版〉は #797）。
+// エピローグは 8x8 タイル毎の `simdgroup_barrier` 同期で正しさを優先する
+// （barrier 粒度の最適化・タイル粒度統合も #797）。動的タイル選択
+// （`tile::select`/`dispatch_auto`）への統合・バックエンド間数値一致回帰
+// テストの拡張は #798、実機再計測・ベースライン更新は #799。
+//
+// **function constant の再利用**: `BM`/`BN`/`BK`/`WM`/`WN`/
+// `USE_TGP_STAGING`/`TGP_PAD`/`SWIZZLE_ENABLED`（index 0〜7。本ファイル
+// 上方の `gemm_simdgroup_tiled` 直前の宣言）はファイルスコープの
+// `constant` 宣言のため、本カーネルも再宣言せずそのまま参照できる。
+// `crate::pipeline::make_pipeline_with_constants` は `function_name` 引数
+// （`"gemm_simdgroup_tiled_f16"`）を切り替えるだけで同じ `TileConfig` から
+// 特殊化パイプラインを構築できるため、Rust 側の変更が最小で済む（イシュー
+// #796 計画「Rust 側」節）。
+//
+// **型**: A/B のタイル型は `MM_T`（`simdgroup_half8x8`）、アキュムレータは
+// `ACC_T`（`simdgroup_float8x8`。f32 累算）を `gemm_simdgroup_f16`
+// （本ファイル上方）の typedef からそのまま再利用する。混在オーバーロード
+// `simdgroup_multiply_accumulate(simdgroup_float8x8&, simdgroup_half8x8,
+// simdgroup_half8x8, simdgroup_float8x8)` の実在・`simdgroup_store` が
+// float→half 直接変換をサポートしない制約は #380 実機 spike で確定済み
+// （`gemm_simdgroup_f16` 冒頭コメント参照）。
+//
+// **threadgroup 共有メモリのレイアウト**: 先頭に staged 経路の A タイル
+// （BM×(BK+TGP_PAD)。half）・B タイル（BK×(BN+TGP_PAD)。half）、直後に
+// エピローグ staging 領域（f32。WM*WN simdgroup 分、各 64 要素）を続ける。
+// `USE_TGP_STAGING=false`（direct-load 経路。フォールバック終端
+// `TileConfig::SINGLE_SIMDGROUP_8X8` を含む）ではタイル領域を確保しない
+// （`crate::tile::TileConfig::shared_mem_bytes_f16` 参照）ため、エピローグ
+// 領域の先頭オフセットは `USE_TGP_STAGING` の値で分岐して決める（`shared_mem`
+// の実確保長は `TileConfig::shared_mem_bytes_f16().max(16)` を呼び出し元が
+// エンコード時に指定する契約。`crate::gemm::encode_dispatch_tiled_f16`
+// 参照）。A タイル＋B タイルの要素数（half 単位）は BM/BK/BN がいずれも
+// 8 の倍数・TGP_PAD が 0 または 4（`TileConfig::validate` が保証する不変
+// 条件）のため常に偶数であり、half 2 バイト単位で確保しても続くエピローグ
+// 領域は f32 4 バイト境界に整合する（`reinterpret_cast<threadgroup
+// float*>` で安全に参照できる根拠。`TileConfig::shared_mem_bytes_f16`
+// ドキュメントコメント参照）。
+//
+// **手動境界チェック（REQ-8。省略禁止）**: ブロック原点の早期 return・
+// staged ロード時の要素単位 in-bounds 判定＋0 埋め・direct-load 時の
+// 行/列ガード＋0 埋めタイル・エピローグ書き戻し時の要素単位 in-bounds
+// 判定を、f32 版 `gemm_simdgroup_tiled`・`gemm_simdgroup_f16` と同じ設計で
+// 維持する。バッファオフセットは `size_t` へ昇格してから乗算する
+// （PR #246 Bugbot 指摘の系譜。両カーネルの既存コメント参照）。
+//
+// **数値契約**: `dims` は呼び出し元が `pad8` で 8 の倍数へ揃えた実効次元
+// （`gemm_simdgroup_tiled` と同じ契約）。累算は f32・K 昇順で、CPU 参照
+// （f32 累算 → 最後に 1 回だけ f16 丸め）・CUDA WMMA f16
+// （`f32.f16.f16.f32`）との精度契約に整合する（`gemm_simdgroup_f16` 冒頭
+// コメント参照）。
+kernel void gemm_simdgroup_tiled_f16(
+    device const half* a [[buffer(0)]],
+    device const half* b [[buffer(1)]],
+    device half* c [[buffer(2)]],
+    constant Dims& dims [[buffer(3)]],
+    threadgroup half* shared_mem [[threadgroup(0)]],
+    uint2 tgid [[threadgroup_position_in_grid]],
+    uint simd_lane [[thread_index_in_simdgroup]],
+    uint simd_id [[simdgroup_index_in_threadgroup]]
+) {
+    // threadgroup ID スウィズル: `gemm_simdgroup_tiled`（f32 版）と同一の
+    // 恒等/スウィズル変換（`SWIZZLE_ENABLED` 分岐・イシュー #540）。本番
+    // 既定 `false` では `tid_y = tgid.y`・`tid_x = tgid.x`（恒等）になる
+    // （同ファイル `gemm_simdgroup_tiled` コメント参照）。
+    constexpr uint SWIZZLE_LOG = 2;
+    constexpr uint SWIZZLE_TILE = 1u << SWIZZLE_LOG;
+    uint tid_y = SWIZZLE_ENABLED ? ((tgid.y << SWIZZLE_LOG) + (tgid.x & (SWIZZLE_TILE - 1))) : tgid.y;
+    uint tid_x = SWIZZLE_ENABLED ? (tgid.x >> SWIZZLE_LOG) : tgid.x;
+
+    uint row0 = tid_y * BM;
+    uint col0 = tid_x * BN;
+
+    // REQ-8: ブロック全体が実効次元を完全に超える場合は早期 return する
+    // （`gemm_simdgroup_tiled` と同一の判断根拠）。
+    if (row0 >= dims.m || col0 >= dims.n) {
+        return;
+    }
+
+    uint wm_idx = simd_id / WN;
+    uint wn_idx = simd_id % WN;
+    uint sub_bm = BM / WM;
+    uint sub_bn = BN / WN;
+    uint sub_row0 = row0 + wm_idx * sub_bm;
+    uint sub_col0 = col0 + wn_idx * sub_bn;
+
+    // `gemm_simdgroup_tiled`（f32 版）と同一の固定上限（`TileConfig::MAX_ACC`
+    // と 1:1 対応。`TileConfig::validate` が dispatch 前に超過構成を拒否する
+    // 契約も同一）。
+    constexpr uint MAX_ACC = 8;
+    uint acc_rows = sub_bm / 8;
+    uint acc_cols = sub_bn / 8;
+    ACC_T acc[MAX_ACC][MAX_ACC];
+    for (uint r = 0; r < acc_rows; r++) {
+        for (uint c_ = 0; c_ < acc_cols; c_++) {
+            acc[r][c_] = ACC_T(0.0f);
+        }
+    }
+
+    uint lda = BK + TGP_PAD;
+    uint ldb = BN + TGP_PAD;
+    threadgroup half* tile_a = shared_mem;
+    threadgroup half* tile_b = shared_mem + (size_t)BM * (size_t)lda;
+    // エピローグ staging 領域の先頭オフセットは USE_TGP_STAGING で分岐する
+    // （direct-load 経路では shared_mem にタイル領域が確保されないため。
+    // 上方レイアウトコメント参照。`tile_a`/`tile_b` 自体は direct-load
+    // 経路でも計算されるが、その経路ではポインタ演算のみで実際に読み書き
+    // されることはない。f32 版 `gemm_simdgroup_tiled` の同名変数と同じ
+    // パターン）。
+    threadgroup float* stage = USE_TGP_STAGING
+        ? reinterpret_cast<threadgroup float*>(tile_b + (size_t)BK * (size_t)ldb)
+        : reinterpret_cast<threadgroup float*>(shared_mem);
+
+    uint k_full_tiles = dims.k / BK;
+    uint k_tail = dims.k - k_full_tiles * BK; // BK の倍数でない末尾（0 埋め扱い）
+    uint k_tile_count = k_full_tiles + (k_tail > 0 ? 1 : 0);
+
+    for (uint t = 0; t < k_tile_count; t++) {
+        uint p0 = t * BK;
+        // 末尾タイルが BK に満たない場合の有効幅（境界チェック。REQ-8）。
+        uint bk_eff = min(BK, dims.k - p0);
+
+        if (USE_TGP_STAGING) {
+            // 協調ロード（スカラー。イシュー #796 スコープ境界: float4
+            // ベクトルロード化は #797）: threadgroup 内の全スレッド
+            // （WM*WN*32 個）で A タイル（BM*BK 要素）・B タイル（BK*BN
+            // 要素）を分担してロードする。実効次元・K タイル端をはみ出す
+            // 要素は 0 埋めする（最適化を理由に境界チェックを省略しない。
+            // REQ-8）。
+            uint local_tid = simd_id * 32 + simd_lane;
+            uint threads_total = WM * WN * 32;
+
+            uint a_elems = BM * BK;
+            for (uint idx = local_tid; idx < a_elems; idx += threads_total) {
+                uint r = idx / BK;
+                uint kk = idx % BK;
+                uint dst_idx = r * lda + kk; // パディング込みの書き込み先添字。
+                uint global_row = row0 + r;
+                uint global_k = p0 + kk;
+                tile_a[dst_idx] = (kk < bk_eff && global_row < dims.m && global_k < dims.k)
+                    ? a[(size_t)global_row * (size_t)dims.k + (size_t)global_k]
+                    : half(0.0h);
+            }
+
+            uint b_elems = BK * BN;
+            for (uint idx = local_tid; idx < b_elems; idx += threads_total) {
+                uint kk = idx / BN;
+                uint c_ = idx % BN;
+                uint dst_idx = kk * ldb + c_; // パディング込みの書き込み先添字。
+                uint global_k = p0 + kk;
+                uint global_col = col0 + c_;
+                tile_b[dst_idx] = (kk < bk_eff && global_k < dims.k && global_col < dims.n)
+                    ? b[(size_t)global_k * (size_t)dims.n + (size_t)global_col]
+                    : half(0.0h);
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (uint kk = 0; kk < BK; kk += 8) {
+                // フラグメントのレジスタ常駐化（`gemm_simdgroup_tiled`
+                // ・イシュー #745 と同じ構造。MLX steel `mma.h` の
+                // tile_matmad 型）: kk ステップ先頭で A の acc_rows 個・
+                // B の acc_cols 個の simdgroup フラグメントを一括ロードして
+                // から TM×TN の外積 MMA を発行する。
+                MM_T a_frag[MAX_ACC];
+                MM_T b_frag[MAX_ACC];
+                for (uint r = 0; r < acc_rows; r++) {
+                    simdgroup_load(a_frag[r], tile_a + (size_t)(wm_idx * sub_bm + r * 8) * (size_t)lda + (size_t)kk, lda);
+                }
+                for (uint c_ = 0; c_ < acc_cols; c_++) {
+                    simdgroup_load(b_frag[c_], tile_b + (size_t)kk * (size_t)ldb + (size_t)(wn_idx * sub_bn + c_ * 8), ldb);
+                }
+                for (uint r = 0; r < acc_rows; r++) {
+                    for (uint c_ = 0; c_ < acc_cols; c_++) {
+                        simdgroup_multiply_accumulate(acc[r][c_], a_frag[r], b_frag[c_], acc[r][c_]);
+                    }
+                }
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        } else {
+            // 直接ロード: `gemm_simdgroup_tiled` の direct-load 経路と同一
+            // 構造（蛇行〈serpentine〉走査・8 の倍数保証による境界チェック
+            // 省略可の論拠も同一。f32 版コメント参照）。
+            uint bk_full8 = (bk_eff / 8) * 8;
+            for (uint kk = 0; kk < bk_full8; kk += 8) {
+                for (uint r = 0; r < acc_rows; r++) {
+                    uint a_row = sub_row0 + r * 8;
+                    MM_T a_tile = MM_T(0.0h);
+                    if (a_row < dims.m) {
+                        simdgroup_load(a_tile, a + (size_t)a_row * (size_t)dims.k + (size_t)(p0 + kk), dims.k);
+                    }
+                    for (uint ci = 0; ci < acc_cols; ci++) {
+                        uint c_ = (r % 2 == 1) ? (acc_cols - 1 - ci) : ci;
+                        uint b_col = sub_col0 + c_ * 8;
+                        MM_T b_tile = MM_T(0.0h);
+                        if (b_col < dims.n) {
+                            simdgroup_load(b_tile, b + (size_t)(p0 + kk) * (size_t)dims.n + (size_t)b_col, dims.n);
+                        }
+                        simdgroup_multiply_accumulate(acc[r][c_], a_tile, b_tile, acc[r][c_]);
+                    }
+                }
+            }
+        }
+    }
+
+    // エピローグ（2 段。#380 で確定した変種 B の多タイル版。イシュー #796
+    // 計画「設計方針」節）: `simdgroup_store(simdgroup_float8x8, device
+    // half*)` はコンパイル不可（#380 spike で確認済み）なため、各 acc
+    // タイルを自 simdgroup 専用の staging スラブ（`stage + simd_id*64`）へ
+    // 一旦 f32 のまま store し、`simdgroup_barrier` で同期してから 32
+    // レーンが half へ変換して `c` へ書き戻す。書き戻し後・次タイル store
+    // 前にも `simdgroup_barrier` を挟む（read-after-write /
+    // write-after-read の両順序）。自 simdgroup 内の同期で足りるため
+    // `threadgroup_barrier` は不要（barrier 粒度の最適化は #797）。
+    threadgroup float* my_stage = stage + simd_id * 64;
+    for (uint r = 0; r < acc_rows; r++) {
+        uint out_row_base = sub_row0 + r * 8;
+        if (out_row_base >= dims.m) {
+            continue;
+        }
+        for (uint c_ = 0; c_ < acc_cols; c_++) {
+            uint out_col_base = sub_col0 + c_ * 8;
+            if (out_col_base >= dims.n) {
+                continue;
+            }
+            simdgroup_store(acc[r][c_], my_stage, 8);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            // REQ-8: 要素単位の境界チェック（`out_row`/`out_col` が実効
+            // 次元を超える要素への書き込みをスキップする）を維持する。
+            for (uint i = simd_lane; i < 64; i += 32u) {
+                uint rr = i / 8;
+                uint cc = i % 8;
+                uint out_row = out_row_base + rr;
+                uint out_col = out_col_base + cc;
+                if (out_row < dims.m && out_col < dims.n) {
+                    c[(size_t)out_row * (size_t)dims.n + (size_t)out_col] = (half)my_stage[i];
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+}

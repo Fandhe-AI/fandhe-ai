@@ -360,6 +360,61 @@ impl TileConfig {
         compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
     }
 
+    /// `shaders/gemm.metal` の `gemm_simdgroup_tiled_f16`（イシュー #796）が
+    /// 確保する threadgroup 共有メモリのバイト数。[`shared_mem_bytes`]
+    /// （f32 版）とレイアウトの考え方は同じだが、2 点異なる:
+    ///
+    /// 1. staged 経路の A・B タイル要素は `half`（2 バイト）単位で確保する
+    ///    （f32 版は `f32` 4 バイト単位）。
+    /// 2. `gemm_simdgroup_f16` と同じ理由（`simdgroup_store` が
+    ///    `simdgroup_float8x8` から `device half*` へ直接 store できない。
+    ///    #380 実機 spike で確定済み）により、`staged` の有無を問わず常に
+    ///    エピローグ staging 領域（f32。`wm*wn` simdgroup 分、1 simdgroup
+    ///    あたり 8x8=64 要素）を追加で確保する。`gemm_simdgroup_tiled_f16`
+    ///    の threadgroup メモリレイアウトはタイル領域（staged のみ）＋
+    ///    エピローグ領域（常時）の順（同カーネル冒頭コメント参照）。
+    ///
+    /// タイル領域の要素数合計（`bm*(bk+pad) + bk*(bn+pad)`）は `bm`/`bk`/`bn`
+    /// が 8 の倍数・`pad` が 0 または 4（[`TileConfig::validate`] が保証する
+    /// 不変条件）のため常に偶数になり、half 2 バイト単位で確保しても続く
+    /// エピローグ領域の f32 4 バイト境界に整合する（`gemm_simdgroup_tiled_f16`
+    /// が `reinterpret_cast<threadgroup float*>` で安全に参照できる根拠）。
+    ///
+    /// `crate::gemm::MetalGemm::pipeline_for_tile_f16`（macOS 限定・非公開の
+    /// private メソッドのため intra-doc link にはしない）が
+    /// [`TileConfig::validate`]（f32 版と共通）に加えてこのメソッドで
+    /// デバイス上限超過を追加検査する（f32 版 `validate` は f32 単位の
+    /// `shared_mem_bytes` しか見ないため、f16 版の実際の確保量を別途
+    /// 検査する必要がある）。
+    pub fn shared_mem_bytes_f16(&self) -> u32 {
+        // エピローグ領域は `staged` を問わず常に必要（上記ドキュメント
+        // コメント 2 点目）。`shared_mem_bytes`（f32 版）と同じ checked u64
+        // 演算・飽和方針で計算する。
+        let epilogue = (self.wm as u64)
+            .checked_mul(self.wn as u64)
+            .and_then(|v| v.checked_mul(64))
+            .and_then(|v| v.checked_mul(4))
+            .unwrap_or(u64::MAX);
+
+        if !self.staged {
+            return epilogue.min(u32::MAX as u64) as u32;
+        }
+
+        let bm = self.bm as u64;
+        let bn = self.bn as u64;
+        let bk = self.bk as u64;
+        let pad = self.pad() as u64;
+        let compute = || -> Option<u64> {
+            let a_row = bk.checked_add(pad)?;
+            let b_row = bn.checked_add(pad)?;
+            let a_tile = bm.checked_mul(a_row)?;
+            let b_tile = bk.checked_mul(b_row)?;
+            let tile_bytes = a_tile.checked_add(b_tile)?.checked_mul(2)?; // half = 2 バイト
+            tile_bytes.checked_add(epilogue)
+        };
+        compute().unwrap_or(u64::MAX).min(u32::MAX as u64) as u32
+    }
+
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
     /// `MTLComputePipelineState::maxTotalThreadsPerThreadgroup`、
     /// `max_shared_mem_bytes`: `MTLDevice::maxThreadgroupMemoryLength`）
@@ -1128,6 +1183,70 @@ mod tests {
                 max_shared_mem_bytes: 32 * 1024,
             })
         );
+    }
+
+    // --- TileConfig::shared_mem_bytes_f16（イシュー #796。pure） ---
+
+    #[test]
+    fn shared_mem_bytes_f16_returns_epilogue_only_when_not_staged() {
+        // `staged=false` はタイル領域を確保しないが、エピローグ staging
+        // 領域（f32。wm*wn*64*4 バイト）は常に必要（本メソッド doc コメント
+        // 「2 点異なる」節の 2 点目）。`SINGLE_SIMDGROUP_8X8`
+        // （wm=1,wn=1,staged=false）は 1*1*64*4=256 バイト（16 の倍数）。
+        assert_eq!(TileConfig::SINGLE_SIMDGROUP_8X8.shared_mem_bytes_f16(), 256);
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_includes_half_tile_region_plus_epilogue_when_staged() {
+        // `shared_mem_bytes_includes_derived_pad_in_both_tile_strides_when_staged`
+        // （f32 版）と同一の cfg（bm=bn=64, bk=16, wm=wn=2, staged=true）。
+        // タイル領域: A 64x(16+4)=64x20=1280 要素、B 16x(64+4)=16x68=1088
+        // 要素、合計 2368 要素 * 2 バイト（half）= 4736 バイト。
+        // エピローグ: wm*wn*64*4 = (2*2)*64*4 = 4*64*4 = 1024 バイト。
+        // 合計 4736+1024 = 5760 バイト（f32 版の同一構成 9472 バイトより
+        // 小さい。half のタイル領域が f32 の半分になるため）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: 16,
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_f16(), 5760);
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_is_multiple_of_16_for_all_candidates() {
+        // `setThreadgroupMemoryLength_atIndex`（`crate::gemm::
+        // encode_dispatch_tiled_f16`）は 16 バイト境界整合を要求する
+        // （f32 版 `encode_dispatch_tiled` と同じ制約。本テストは
+        // `CANDIDATES`・`SINGLE_SIMDGROUP_8X8` の全構成が f16 版でも
+        // この制約を満たすことを確認する）。
+        for cfg in CANDIDATES {
+            let bytes = cfg.shared_mem_bytes_f16();
+            assert!(
+                bytes.is_multiple_of(16),
+                "cfg {cfg:?} の shared_mem_bytes_f16={bytes} が 16 の倍数でない"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_mem_bytes_f16_saturates_instead_of_wrapping_on_overflow() {
+        // `shared_mem_bytes_saturates_instead_of_wrapping_on_overflow`
+        // （f32 版）と同じ regression 意図: `bk` に極端に大きい値を渡しても
+        // `u32::MAX` へ飽和し、`validate` 相当の上限比較で確実に拒否される
+        // ことを確認する（wrap による小さい値への回帰を防ぐ）。
+        let cfg = TileConfig {
+            bm: 64,
+            bn: 64,
+            bk: u32::MAX - 7, // 8 の倍数へ切り下げ
+            wm: 2,
+            wn: 2,
+            staged: true,
+        };
+        assert_eq!(cfg.shared_mem_bytes_f16(), u32::MAX);
     }
 
     #[test]
@@ -2490,6 +2609,69 @@ mod tests {
                 &format!("metal SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
                 &actual,
                 &expected,
+            );
+        }
+    }
+
+    /// `CANDIDATES` を全て、`gemm_simdgroup_tiled_f16`（イシュー #796）で
+    /// 巡回し CPU 参照実装との一致を確認する
+    /// （`all_tile_candidates_match_cpu_reference_medium_shape`（f32 版）と
+    /// 同じ判断根拠・同じフォールバック検知手法。`MetalGemm::
+    /// resolve_tile_config_f16` で実際に採用された構成が `cfg` と一致する
+    /// ことを assert してからディスパッチする）。参照値は f16→f32→
+    /// `matmul_reference_fma`→f16 丸め→f32 の 3 段階
+    /// （`tests/cpu_metal_f16_parity.rs` 冒頭コメント「参照実装との比較
+    /// 方法」と同一）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
+    fn all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape() {
+        use backend_cpu::parity::assert_parity;
+        use bench_harness::rng::Xorshift64Star;
+        use half::f16;
+
+        let ctx = crate::context::MetalContext::new()
+            .expect("Metal デバイス・コマンドキューの初期化に失敗した");
+        let gemm = crate::gemm::MetalGemm::new(&ctx)
+            .expect("GEMM パイプラインの構築に失敗した（f16 タイル化含む）");
+
+        for (i, &cfg) in CANDIDATES.iter().enumerate() {
+            let resolved = gemm.resolve_tile_config_f16(&ctx, cfg).unwrap_or_else(|err| {
+                panic!("候補 {cfg:?}（f16）のパイプライン構築・検証（実デバイス上限）に失敗した: {err}")
+            });
+            assert_eq!(
+                resolved, cfg,
+                "候補 {cfg:?}（f16）が実デバイス上でサイレントに {resolved:?} へフォールバックした \
+                 （構成失敗を検知できていない）"
+            );
+
+            let (m, n, k) = (256, 256, 256);
+            let mut rng_a = Xorshift64Star::new(300 + i as u64);
+            let mut rng_b = Xorshift64Star::new(400 + i as u64);
+            let a_f16: Vec<f16> = rng_a.fill_vec_f16(m * k);
+            let b_f16: Vec<f16> = rng_b.fill_vec_f16(k * n);
+
+            let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
+            let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
+            let mut c_ref_f32 = vec![0.0f32; m * n];
+            backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
+                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+            let c_ref_rounded: Vec<f32> = c_ref_f32
+                .iter()
+                .map(|&x| f16::from_f32(x).to_f32())
+                .collect();
+
+            let c_gpu_f16 = gemm
+                .dispatch_f16_tiled_unverified(&ctx, &a_f16, &b_f16, m, n, k, cfg)
+                .unwrap_or_else(|err| {
+                    panic!("Metal f16 SimdgroupTiled({cfg:?}) GEMM のディスパッチに失敗した: {err}")
+                });
+            let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
+
+            assert_parity(
+                &format!("metal f16 SimdgroupTiled({cfg:?}) gemm m={m} n={n} k={k}"),
+                &c_gpu_f32,
+                &c_ref_rounded,
             );
         }
     }
