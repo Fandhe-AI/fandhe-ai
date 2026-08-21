@@ -1,4 +1,4 @@
-//! f16 動的タイル選択の自動入口 `MetalGemm::dispatch_f16_auto`（イシュー
+//! f16 動的タイル選択の自動入口 `MetalGemm::dispatch_f16_auto_unverified`（イシュー
 //! #798）の数値一致回帰テスト。
 //!
 //! `tests/cpu_metal_f16_tiled_parity.rs`（明示 `TileConfig` 指定の
@@ -8,7 +8,7 @@
 //! `.claude/rules/coding-rust.md`）・同じ 3 段階の参照値構築方法（f16 入力を
 //! f32 化 → `matmul_reference_fma` → f16 丸め → f32 化して比較）を使う。
 //!
-//! 本ファイルが追加で検証するのは「`dispatch_f16_auto` が `tile::select`
+//! 本ファイルが追加で検証するのは「`dispatch_f16_auto_unverified` が `tile::select`
 //! による動的タイル選択で dispatch した結果が CPU 参照実装と一致すること」
 //! （イシュー #798 受け入れ条件 1・2）であり、`tile::select` の分岐
 //! （縦長・横長・正方立方・準正方大形状長方形・微小形状）を代表する形状を
@@ -38,9 +38,9 @@ use bench_harness::rng::Xorshift64Star;
 use half::f16;
 
 /// 決定的シードで A・B（f16）を生成し、f16→f32→参照 matmul→f16 丸め→f32 の
-/// 経路で得た参照値と `dispatch_f16_auto` の出力（f16→f32）を
+/// 経路で得た参照値と `dispatch_f16_auto_unverified` の出力（f16→f32）を
 /// `assert_parity` で照合する（`cpu_metal_f16_tiled_parity.rs::
-/// assert_metal_f16_tiled_parity` と同型。`cfg` を明示せず `dispatch_f16_auto`
+/// assert_metal_f16_tiled_parity` と同型。`cfg` を明示せず `dispatch_f16_auto_unverified`
 /// 内部の `tile::select` に委ねる点のみ異なる）。
 fn assert_dispatch_f16_auto_parity(
     ctx: &MetalContext,
@@ -66,8 +66,10 @@ fn assert_dispatch_f16_auto_parity(
         .collect();
 
     let c_gpu_f16 = gemm
-        .dispatch_f16_auto(ctx, &a_f16, &b_f16, m, n, k)
-        .expect("MetalGemm::dispatch_f16_auto must succeed on Metal-equipped test runner");
+        .dispatch_f16_auto_unverified(ctx, &a_f16, &b_f16, m, n, k)
+        .expect(
+            "MetalGemm::dispatch_f16_auto_unverified must succeed on Metal-equipped test runner",
+        );
     let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
 
     assert_parity(context, &c_gpu_f32, &c_ref_rounded);
@@ -192,7 +194,7 @@ fn dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape() {
 
 /// イシュー #798 後方互換方針: 既存 `gemm_simdgroup_f16`
 /// （`dispatch_f16_unverified`。非タイル 8x8。自動経路の縮退先ではなく
-/// 明示入口専用の計測・回帰基線として存置する）と `dispatch_f16_auto`
+/// 明示入口専用の計測・回帰基線として存置する）と `dispatch_f16_auto_unverified`
 /// が同一入力に対して統一複合判定（REQ-2）で一致する結果を返すことを
 /// 直接照合する（`cpu_metal_f16_tiled_parity.rs::
 /// f16_tiled_parity_matches_existing_8x8_kernel` の自動経路版）。
@@ -211,8 +213,8 @@ fn dispatch_f16_auto_matches_existing_non_tiled_8x8_kernel() {
         .dispatch_f16_unverified(&ctx, &a, &b, m, n, k)
         .expect("既存 gemm_simdgroup_f16（dispatch_f16_unverified）の dispatch に失敗した");
     let auto = gemm
-        .dispatch_f16_auto(&ctx, &a, &b, m, n, k)
-        .expect("dispatch_f16_auto の dispatch に失敗した");
+        .dispatch_f16_auto_unverified(&ctx, &a, &b, m, n, k)
+        .expect("dispatch_f16_auto_unverified の dispatch に失敗した");
 
     let baseline_f32: Vec<f32> = baseline.iter().map(|x| x.to_f32()).collect();
     let auto_f32: Vec<f32> = auto.iter().map(|x| x.to_f32()).collect();
@@ -224,10 +226,10 @@ fn dispatch_f16_auto_matches_existing_non_tiled_8x8_kernel() {
 }
 
 /// `MetalGemm::dispatch_f16_tiled_unverified`（明示 `TileConfig` 指定入口）
-/// が `tile::select` の出力をそのまま受け取っても `dispatch_f16_auto` と
-/// 同一の結果を返すことを確認する（`dispatch_f16_auto` 自体が内部で
+/// が `tile::select` の出力をそのまま受け取っても `dispatch_f16_auto_unverified` と
+/// 同一の結果を返すことを確認する（`dispatch_f16_auto_unverified` 自体が内部で
 /// `tile::select(m, n, k)` → `dispatch_f16_tiled_unverified` へ委譲する薄い
-/// ラッパーであることの直接照合。`gemm.rs::MetalGemm::dispatch_f16_auto`
+/// ラッパーであることの直接照合。`gemm.rs::MetalGemm::dispatch_f16_auto_unverified`
 /// ドキュメンテーションコメント参照）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
@@ -245,8 +247,8 @@ fn dispatch_f16_auto_matches_explicit_tile_select_dispatch() {
         .dispatch_f16_tiled_unverified(&ctx, &a, &b, m, n, k, cfg)
         .expect("dispatch_f16_tiled_unverified の dispatch に失敗した");
     let auto = gemm
-        .dispatch_f16_auto(&ctx, &a, &b, m, n, k)
-        .expect("dispatch_f16_auto の dispatch に失敗した");
+        .dispatch_f16_auto_unverified(&ctx, &a, &b, m, n, k)
+        .expect("dispatch_f16_auto_unverified の dispatch に失敗した");
 
     let explicit_f32: Vec<f32> = explicit.iter().map(|x| x.to_f32()).collect();
     let auto_f32: Vec<f32> = auto.iter().map(|x| x.to_f32()).collect();

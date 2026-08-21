@@ -510,11 +510,23 @@ impl MetalGemm {
     /// 自体は自動経路の縮退先ではなく、明示入口専用の計測・回帰基線として
     /// 存置する。
     ///
+    /// # 精度検証状況・`_unverified` suffix（PR #819 codex-review P1 指摘対応）
+    ///
     /// REQ-2 統一複合判定（相対誤差 1e-3 未満または絶対誤差 1e-5 未満）の
     /// 検証は `tests/gemm_f16_auto_parity.rs`（Metal 実機依存・`#[ignore]`）
-    /// の契約であり、実機実行は #799 実機セッションで実施する（#796 の
-    /// `tests/cpu_metal_f16_tiled_parity.rs` 引き継ぎと同一様式）。
-    pub fn dispatch_f16_auto(
+    /// の契約だが、本 PR 時点では実機（M4 Max 等）での実行が未完了であり、
+    /// 実機実行は #799 実機セッションで実施する（#796 の
+    /// `tests/cpu_metal_f16_tiled_parity.rs` 引き継ぎと同一様式）。すなわち
+    /// 本関数が委譲する `gemm_simdgroup_tiled_f16`（[`Self::dispatch_f16_tiled_unverified`]。
+    /// `_unverified` suffix・`#[doc(hidden)]`）自体が精度未検証カーネルであり、
+    /// 未検証カーネルを検証済み production 入口へ直接結線しない既存の安全境界
+    /// （[`Self::dispatch_f16_unverified`] ドキュメントコメント参照）に従い、
+    /// 本関数自身も `_unverified` suffix・`#[doc(hidden)]` とする。#799 の
+    /// 実機検証結果をこの経路へ反映し `tests/gemm_f16_auto_parity.rs` が
+    /// green になった時点で、suffix・`#[doc(hidden)]` の解除を別イシューで
+    /// 検討する（[`Self::dispatch_f16_unverified`] と同型の解除条件）。
+    #[doc(hidden)]
+    pub fn dispatch_f16_auto_unverified(
         &self,
         ctx: &MetalContext,
         a: &[half::f16],
@@ -906,9 +918,13 @@ impl MetalGemm {
     /// [`Self::dispatch_f16_unverified`] のドキュメントコメントと同一
     /// （REQ-2 複合判定を満たすかは `tests/cpu_metal_f16_tiled_parity.rs`・
     /// `tests/gemm_f16_auto_parity.rs`〈いずれも Metal 実機依存・`#[ignore]`〉
-    /// で検証する契約）。production 経路への統合は
-    /// [`Self::dispatch_f16_auto`]（イシュー #798）が本関数を呼ぶ形で完了
-    /// 済み（本関数自体は `#[doc(hidden)]` の明示入口として維持）。
+    /// で検証する契約）。動的タイル選択入口
+    /// [`Self::dispatch_f16_auto_unverified`]（イシュー #798）が本関数を
+    /// 呼ぶ形で結線済みだが、同関数自体も精度未検証（`_unverified`
+    /// suffix・`#[doc(hidden)]`。PR #819 codex-review P1 指摘対応）であり、
+    /// `ops::MetalBackendOps`・`dispatch_backend_auto` 等の検証済み
+    /// production 経路へはまだ統合されていない（本関数自体は
+    /// `#[doc(hidden)]` の明示入口として維持）。
     ///
     /// 呼び出し元は事前に [`pad8`] で実効次元へパディング・確保・
     /// アップロード済みの [`MetalHalfBuffer`] を渡す契約（`dispatch_variant`
@@ -967,10 +983,11 @@ impl MetalGemm {
     ///
     /// `#[doc(hidden)]`・`_unverified` suffix の判断根拠は
     /// [`Self::dispatch_f16_unverified`] のドキュメントコメントと同一。
-    /// 本番経路（[`Self::dispatch_f16_auto`]）はイシュー #798 で本関数を
-    /// `tile::select` が選んだ [`TileConfig`] 付きで呼ぶ形で結線済み
-    /// （本関数自体は明示 `cfg` 指定用の入口として維持。dtype 汎化は
-    /// `GemmVariant` へ統合しない設計判断のため行わない）。
+    /// 動的タイル選択入口（[`Self::dispatch_f16_auto_unverified`]）は
+    /// イシュー #798 で本関数を `tile::select` が選んだ [`TileConfig`]
+    /// 付きで呼ぶ形で結線済み（本関数自体は明示 `cfg` 指定用の入口として
+    /// 維持。dtype 汎化は `GemmVariant` へ統合しない設計判断のため
+    /// 行わない）。
     ///
     /// `#[allow(clippy::too_many_arguments)]`: [`Self::dispatch_f16_unverified`]
     /// と同じ判断根拠に `cfg` が加わったのみ。

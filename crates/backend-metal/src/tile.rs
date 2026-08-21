@@ -1234,7 +1234,7 @@ mod tests {
 
     #[test]
     fn shared_mem_bytes_f16_fits_standard_shared_mem_limit_for_all_candidates() {
-        // イシュー #798: `dispatch_f16_auto` は `tile::select` が
+        // イシュー #798: `dispatch_f16_auto_unverified` は `tile::select` が
         // `CANDIDATES` から選んだ構成をそのまま `pipeline_for_tile_f16`
         // （f16 版デバイス上限検査。`shared_mem_bytes_f16` ドキュメント
         // コメント参照）へ渡す。標準 Apple Silicon 上限（32KiB。本ファイル
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn dispatch_f16_auto_shapes_resolve_to_expected_candidate() {
-        // `tests/gemm_f16_auto_parity.rs`（`dispatch_f16_auto`。イシュー
+        // `tests/gemm_f16_auto_parity.rs`（`dispatch_f16_auto_unverified`。イシュー
         // #798）の各ケースが「どの `CANDIDATES` 分岐を検証しているか」の
         // 主張は、その統合テスト自体が Metal 実機依存・`#[ignore]` のため
         // 実機なしでは検証できない。`select`（`tile::select_with_occupancy`
@@ -2741,7 +2741,7 @@ mod tests {
         }
     }
 
-    /// `dispatch_f16_auto`（イシュー #798）が実際に呼ぶ経路——
+    /// `dispatch_f16_auto_unverified`（イシュー #798）が実際に呼ぶ経路——
     /// `tile::select(m, n, k)` の出力をそのまま `resolve_tile_config_f16`
     /// へ渡す——を、`select` の各分岐を代表する形状で検証する
     /// （`all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape`

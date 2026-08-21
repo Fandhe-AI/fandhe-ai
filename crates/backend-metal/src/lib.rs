@@ -88,7 +88,7 @@
 //! （`gemm::MetalGemm::dispatch_f16_unverified`）を追加した。既存の
 //! [`gemm::MetalGemm::dispatch_auto`]／`dispatch_backend_auto`（f32 専用の
 //! 自動経路選択）はそのまま変更していない（f16 の自動ディスパッチ統合は
-//! 本 TASK のスコープ外。イシュー #798 で [`gemm::MetalGemm::dispatch_f16_auto`]
+//! 本 TASK のスコープ外。イシュー #798 で [`gemm::MetalGemm::dispatch_f16_auto_unverified`]
 //! として実現した。`docs/dispatch-rules-design.md` 参照）。f16 専用の
 //! Metal バッファ型 [`half_buffer::MetalHalfBuffer`] を新設し、既存
 //! [`buffer::MetalBuffer`]（f32 専用）のシグネチャには一切手を入れていない。
@@ -120,12 +120,12 @@
 //! 自体は production 自動経路（`dispatch_auto`／`dispatch_backend_auto`）へ
 //! 統合しない方針（イシュー #798 の後方互換方針）のため `_unverified`
 //! suffix・`#[doc(hidden)]` は当面維持する。タイル化 f16 カーネル
-//! （`gemm_simdgroup_tiled_f16`）は #798 で [`gemm::MetalGemm::dispatch_f16_auto`]
+//! （`gemm_simdgroup_tiled_f16`）は #798 で [`gemm::MetalGemm::dispatch_f16_auto_unverified`]
 //! から動的タイル選択付きで自動経路へ統合済み（明示 `cfg` 指定用の
 //! `dispatch_f16_tiled_unverified`／`dispatch_f16_tiled_prepared_unverified`
 //! 自体は引き続き `_unverified` suffix・`#[doc(hidden)]` を維持）。詳細は
 //! [`gemm::MetalGemm::dispatch_f16_unverified`]・
-//! [`gemm::MetalGemm::dispatch_f16_auto`] のドキュメントコメントを
+//! [`gemm::MetalGemm::dispatch_f16_auto_unverified`] のドキュメントコメントを
 //! 参照）。
 //!
 //! イシュー #604 で融合 RMSNorm 順伝播カーネル（[`rmsnorm::MetalRmsNorm`]）と
@@ -166,16 +166,22 @@
 //! 再計測・ベースライン更新は #799 のスコープとする。
 //!
 //! イシュー #798 で動的タイル選択の自動入口
-//! （[`gemm::MetalGemm::dispatch_f16_auto`]）を追加し、`gemm_simdgroup_tiled_f16`
+//! （[`gemm::MetalGemm::dispatch_f16_auto_unverified`]）を追加し、`gemm_simdgroup_tiled_f16`
 //! を `tile::select(m, n, k)` による f32 版 `dispatch_auto` と同型のタイル
-//! 構成選択で production 自動経路へ統合した。`GemmVariant` enum へは
+//! 構成選択で使う経路を用意した。`GemmVariant` enum へは
 //! f16 を統合しない（`dispatch_variant` が `&[f32]` に閉じる既存設計判断を
 //! 維持。`gemm::MetalGemm::pipeline_simdgroup_f16` フィールドコメント参照）。
 //! 非タイル `gemm_simdgroup_f16`・`dispatch_f16_unverified` 系入口は
 //! 削除・置換せず、計測・回帰基線として存置する後方互換方針を採った
-//! （[`gemm::MetalGemm::dispatch_f16_auto`] ドキュメンテーションコメント
+//! （[`gemm::MetalGemm::dispatch_f16_auto_unverified`] ドキュメンテーションコメント
 //! 参照）。数値一致回帰は `tests/gemm_f16_auto_parity.rs`（Metal 実機依存・
-//! `#[ignore]`）で REQ-2 統一複合判定を検証する契約とし、`tensor-core`
+//! `#[ignore]`）で REQ-2 統一複合判定を検証する契約だが、本 PR 時点で実機
+//! 実行は未完了（#799 のスコープ）。**PR #819 codex-review P1 指摘対応**として、
+//! 精度未検証カーネルを検証済み production 入口へ結線しない既存の安全境界
+//! に従い、[`gemm::MetalGemm::dispatch_f16_auto_unverified`] 自体も
+//! `_unverified` suffix・`#[doc(hidden)]` とし、`ops::MetalBackendOps` や
+//! `dispatch_backend_auto`（真の production 自動経路）へは統合していない
+//! （#799 の実機検証完了後、別イシューで統合可否を判断する）。`tensor-core`
 //! 決定表（`select_gemm_kernel`）・`dispatch_backend_auto` の f16 拡張は
 //! 本イシューのスコープ外のまま残す。
 
