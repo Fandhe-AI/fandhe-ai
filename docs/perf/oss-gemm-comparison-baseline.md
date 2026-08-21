@@ -167,4 +167,20 @@ smoke run のログは本節 7.1 に要約として記録し、実機での第 0
 
 ### 7.2 以降
 
+#### Metal f16（対 PyTorch MPS f16）タイル化後再計測（イシュー #799・状態: 実機セッション待ち）
+
+GEMM OSS 比較ギャップ改修ツリー（#785）Phase 2 完了（#796〜#798。非タイル `gemm_simdgroup_f16` →
+タイル化 `gemm_simdgroup_tiled_f16` への世代更新）を受けた、対 PyTorch MPS f16 比の追加キャンペーン枠。
+本節が対象とする実測手順・per-size 結果表は `docs/perf/metal-f16-vs-mps-f16.md`「タイル化後再計測
+（イシュー #799）」節が正であり、本節では二重管理せず状態のみを記録する。
+
+- 直近の確定値（旧経路・#785 本文・2026-08-21 再計測）: size=4096 で **18.5%**（2.27 対 12.26 TFLOPS）
+- 本イシュー（#799）着手時点: Linux dev-box（本イシュー実装セッション）から Metal 実機（M4 Max）への
+  到達手段が `docs/real-hardware-verification-env.md`／`docs/real-hardware-verification-env.local.md`
+  のいずれにも存在せず、**実機未到達のため per-size 詳細・比率・前回比差分は未記入**（同型の #795・#814・
+  #818・#821 と同じ先例に従い、実測線・計測手順の整備のみ完了させ実測は Mac 実機セッションへ引き継ぐ。
+  推定・外挿・捏造は行わない）
+- 後続消化時の追記先: 本節（日付・commit・per-size 比率・前回比差分）と
+  `docs/perf/metal-f16-vs-mps-f16.md`「タイル化後再計測」節（詳細結果表）の両方
+
 （次回実機計測時に追記。列: 日付・commit・per-size 比率・前回比差分）
