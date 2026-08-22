@@ -640,7 +640,16 @@ fn main() {
     // 起因すると確定できた。以降の A/B 実行でも production 自身の実測値を
     // 常に記録できるよう、この検査は一時デバッグではなく本バイナリの
     // 標準出力の一部として残す。
-    {
+    // `production_direct_fail_count` はブロック外（下記 fail-closed 分岐）
+    // でも参照するため、ブロック式の値として持ち出す（codex-review 是正:
+    // PR #862 review。以前は `report.fail_count` を println するだけで
+    // ブロック外へ持ち出さず、直後の性能計測（`production_medians`
+    // 構築・全候補の ratio 分母採用）が production 自身の parity 結果を
+    // 一切見ずに進んでいた。本ファイル冒頭コメントおよび PR 本文が掲げる
+    // 「parity ゲートが性能値採用に先立つ」契約・AGENTS.md の数値契約に
+    // 反するため、production も候補〈`candidate_parity_ok` 呼び出し側の
+    // fail-closed 分岐〉と同じ fail-closed ゲートを通す）。
+    let production_direct_fail_count: usize = {
         let (a_dev, b_dev) = gemm
             .upload_f16(&a_ref, &b_ref)
             .expect("production direct-check upload must succeed");
@@ -675,6 +684,28 @@ fn main() {
             report.max_rel_err,
             first_mismatch.map(|idx| (idx / CORRECTNESS_N as usize, idx % CORRECTNESS_N as usize)),
         );
+        report.fail_count
+    };
+
+    // fail-closed 分岐（codex-review P1 是正。PR #862）: production 自身が
+    // 本テストデータに対して統一複合判定に不合格（`mismatch_count != 0`）
+    // の場合、性能計測（production・全候補とも）を一切行わずに終了する。
+    // production が誤った基準のまま候補と比較すると、`ratio_vs_production`
+    // が不正な基準実装との比率になり、本ファイル冒頭コメント・PR 本文が
+    // 掲げる契約に反するため（実装計画: 全行 SKIP ではなく即終了を選択。
+    // 本バイナリは A/B 性能比較専用であり、parity FAIL 時点で比較の前提が
+    // 崩れているため、SKIP 行を並べるより理由を明示して打ち切るほうが
+    // 誤読を防げる）。既知の狭い数値差自体は上記 `production_direct`
+    // ログ・`docs/perf/cuda-gemm-mma-block-tile-stages.md` §8 に記録済み。
+    if production_direct_fail_count != 0 {
+        println!(
+            "mma_f16_base(production): FAIL (parity mismatch vs CPU f32::mul_add reference; \
+             mismatch_count={production_direct_fail_count}; not measuring production or any \
+             candidate — parity ゲートが性能値採用に先立つ契約のため、production 自身が \
+             数値不一致の間は性能比較を行わない。詳細は上記 production_direct ログ・\
+             docs/perf/cuda-gemm-mma-block-tile-stages.md §8 を参照)"
+        );
+        return;
     }
 
     println!(
