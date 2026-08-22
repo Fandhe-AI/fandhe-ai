@@ -146,6 +146,14 @@ fn parse_blocks(lines: &[&str], depth: usize) -> Vec<Node> {
             {
                 break;
             }
+            // GFM テーブル開始行（次行がセパレータ行）でも段落集約を打ち切る。
+            // ここを見落とすと、空行を挟まず段落直後にテーブルが続く原稿
+            // （著者が意図的に書く自然な構成）でテーブル全体がリテラルな
+            // パイプ文字列として段落へ飲み込まれてしまう
+            // （レビュー指摘・イシュー #870。回帰テスト参照）。
+            if l.contains('|') && i + 1 < lines.len() && is_table_separator(lines[i + 1]) {
+                break;
+            }
             para_lines.push(l.trim());
             i += 1;
         }
@@ -700,6 +708,19 @@ mod tests {
         assert_eq!(
             out,
             "<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
+        );
+    }
+
+    #[test]
+    fn renders_table_immediately_after_paragraph_without_blank_line() {
+        // レビュー指摘（イシュー #870）の回帰テスト: 段落集約ループが
+        // GFM テーブル開始行（次行がセパレータ行）で打ち切られない場合、
+        // 空行を挟まず段落直後にテーブルが続く原稿でテーブル全体が
+        // リテラルなパイプ文字列として段落に飲み込まれてしまう。
+        let out = html_of("text\n| A | B |\n|---|---|\n| 1 | 2 |");
+        assert_eq!(
+            out,
+            "<p>text</p><table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>"
         );
     }
 
