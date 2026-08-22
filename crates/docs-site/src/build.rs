@@ -78,7 +78,8 @@ pub enum BuildError {
     /// 既存のシンボリックリンクを上書きしようとした（TOCTOU・意図しない上書き
     /// 対策。レビュー指摘）。
     UnsafeOutputPath(String),
-    /// [`linkcheck::check_links`] がページ間リンク・`#fragment` アンカー・
+    /// `linkcheck::check_links`（`pub(crate)`。private-item への intra-doc
+    /// link を避けるためコードスパンで参照する）がページ間リンク・`#fragment` アンカー・
     /// アセット参照の壊れを 1 件以上検出した（イシュー #872）。fail-closed
     /// 契約: このバリアントを返す時点で `out` へは 1 バイトも書き出されて
     /// いない（`open_out_root_dir` 呼び出しより前に検証するため。
@@ -936,7 +937,8 @@ fn open_out_root_dir(out: &Path) -> Result<fs::File, BuildError> {
 ///    `markdown::markdown_to_nodes` → `layout::docs_page` → `html::render`
 ///    の順で HTML 文字列へ変換する。**全ページの変換をメモリ上で終えてから**
 ///    書き出しを開始する（I/O エラー発生時に部分生成物を減らす安全側の順序）
-/// 4. [`linkcheck::check_links`] で全ページの最終形 Node からページ間リンク・
+/// 4. `linkcheck::check_links`（`pub(crate)`。private-item への intra-doc
+///    link を避けるためコードスパンで参照する）で全ページの最終形 Node からページ間リンク・
 ///    `#fragment` アンカー・アセット参照の実在を突合する（イシュー #872）。
 ///    壊れたリンクが 1 件でもあれば、`out` ディレクトリの作成すら行わずに
 ///    [`BuildError::BrokenLinks`] で早期 return する（fail-closed。手順 3 の

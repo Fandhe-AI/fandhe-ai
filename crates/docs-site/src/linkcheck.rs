@@ -4,7 +4,9 @@
 //!
 //! `crate::build::build_site` が全ページを `markdown::markdown_to_nodes` →
 //! `layout::docs_page` でレンダリングし終えた直後（`out` への書き出し・
-//! `open_out_root_dir` の呼び出しより前）に [`check_links`] を呼ぶ。戻り値が
+//! `open_out_root_dir` の呼び出しより前）に `check_links`（`pub(crate)`。
+//! 本モジュールは `pub` だが本関数は非公開のため、private-item への
+//! intra-doc link を避けコードスパンで参照する）を呼ぶ。戻り値が
 //! 非空であれば `build_site` は `BuildError::BrokenLinks` で早期 return し、
 //! `out` へ 1 バイトも書き出さない（ディレクトリの作成すら行わない）。これが
 //! 本イシューの fail-closed 契約の核: リンク切れのある生成物が GitHub Pages
@@ -14,25 +16,39 @@
 //!
 //! 各ページの最終形 `html::Node`（`layout::docs_page` の戻り値。ヘッダの
 //! セクションメニュー・サイドバー・本文・`<link>`/`<script>` を含む）から
-//! `href`・`src` 属性値を [`crate::html::find_attr_values`] で再帰収集し、
+//! `href`・`src` 属性値を `crate::html::find_attr_values`（`pub(crate)`。
+//! private-item への intra-doc link を避けコードスパンで参照する）で再帰収集し、
 //! 以下のとおり分類する。
 //!
 //! - スキームあり（`http:`/`https:`/`mailto:` 等）・protocol-relative
 //!   （`//...`）→ 対象外（外部リンクのネットワーク到達性検証はスコープ外。
 //!   参照実装 fandhe-backend `crates/docs-site/src/linkcheck.rs` と同判断）
+//! - `href` はまず `split_fragment` で `path?query` 部分と `#fragment` 部分へ
+//!   分け、`path?query` 側はさらに `strip_query` で `?` 以降を切り落として
+//!   から解決する（レビュー指摘・PR #901・github-actions(bot) P2 /
+//!   cursor(bot) Low: query を残したまま解決すると `/guide/?tab=cpu` のような
+//!   UI 状態を表す query 付き既存ページへのリンクが既知ターゲット表〈query を
+//!   含まない `page.path` ベース〉と一致せず誤って壊れたリンク判定される。
+//!   query はサイト内リンク解決に無関係な値として無視する）
 //! - `#fragment` のみ → 解決先ページ（`#fragment` のみなら現在ページ自身。
 //!   `resolve_target` が空パスを現在ページへ解決するため自然に扱える）の
 //!   `id` 属性値集合と突合する。本リポの `markdown.rs` は見出し `id` を
 //!   生成しないため、fragment リンクは実在 `id` が無い限り fail-closed に
-//!   落ちる（これは正しい挙動。実装計画 §2.2）
-//! - ルート相対（`/...`）・相対パス → [`resolve_segments`]（`.`/`..` 解決。
+//!   落ちる（これは正しい挙動。実装計画 §2.2）。ただし **空 fragment**
+//!   （`href` が `...#` で終わる形。同レビュー指摘）は HTML 仕様上「文書
+//!   先頭」を意味し対応する `id` の実在を要求しないため、検証対象から除く
+//! - ルート相対（`/...`）・相対パス → `resolve_segments`（非公開関数。
+//!   private-item への intra-doc link を避けコードスパンで参照する。
+//!   `.`/`..` 解決。
 //!   ルートより上への `..` エスケープは即 broken）で解決し、既知ターゲット表
-//!   と突合。fragment 付きは解決先ページの `id` 集合とも突合する
+//!   と突合。fragment 付き（空 fragment を除く）は解決先ページの `id` 集合
+//!   とも突合する
 //! - 既知ターゲット表 = 全ページの `layout::asset_href(base_path, &page.path)`
 //!   とアセット 3 種（呼び出し元 `build.rs` が `asset_hrefs` として渡す
 //!   `assets/site.css`・`script::SCRIPT_REL_PATH`・`search::INDEX_REL_PATH`
 //!   の `asset_href` 適用済み値）の和集合。末尾 `/` の有無は
-//!   [`normalize_target_key`] で正規化して同一視する（ルート `/` は除く）
+//!   `normalize_target_key`（非公開関数。private-item への intra-doc link を
+//!   避けコードスパンで参照する）で正規化して同一視する（ルート `/` は除く）
 //!
 //! ヘッダの `index_path` リンクは全ページに埋め込まれるため、`index_path` の
 //! ページ実在突合（`nav::Section::index_path` ドキュメンテーションコメントが
@@ -44,7 +60,8 @@
 //! # セキュリティ考慮（`.claude/rules/security.md` A03・多層防御）
 //!
 //! 本モジュールはリンク文字列の読み取り・比較のみを行い、ファイルシステム
-//! アクセス・シェル呼び出しは一切行わない。[`resolve_segments`] が `..` に
+//! アクセス・シェル呼び出しは一切行わない。`resolve_segments`（非公開関数。
+//! private-item への intra-doc link を避けコードスパンで参照する）が `..` に
 //! よるルートエスケープを拒否するのは、`nav::validate_sources` のパス
 //! トラバーサル対策（`page.source` 側）を代替・迂回するものではなく、
 //! 生成済み HTML 側のリンク検証という別レイヤーでの多層防御として位置づける。
@@ -108,10 +125,29 @@ fn is_external_url(href: &str) -> bool {
 }
 
 /// `href` を `(path 部分, fragment 部分)` へ分割する（`#` の有無で判定）。
+/// `path` 部分には query 文字列（`?...`）が含まれうる（`strip_query` で
+/// 別途除去する。URL は `path?query#fragment` の順であるため、まず `#` で
+/// fragment を切り離してから `?` を扱う）。
 fn split_fragment(href: &str) -> (&str, Option<&str>) {
     match href.find('#') {
         Some(idx) => (&href[..idx], Some(&href[idx + 1..])),
         None => (href, None),
+    }
+}
+
+/// `path_part`（`split_fragment` 適用済み。fragment を含まない）から query
+/// 文字列（`?` 以降）を取り除く。
+///
+/// レビュー指摘（PR #901・github-actions(bot) P2 / cursor(bot) Low）:
+/// query を除去せず解決すると `/guide/?tab=cpu` のような UI 状態を表す
+/// query 付きリンクが既知ターゲット表（query を含まない `page.path` ベース）
+/// と一致せず、実在するページへのリンクが誤って壊れたリンクと判定され
+/// fail-closed でビルド全体が失敗しうる。query はサイト内リンク解決に
+/// 無関係な値のため、path のみを既知ターゲット表と突合する。
+fn strip_query(path_part: &str) -> &str {
+    match path_part.find('?') {
+        Some(idx) => &path_part[..idx],
+        None => path_part,
     }
 }
 
@@ -225,6 +261,7 @@ pub(crate) fn check_links(
             }
 
             let (path_part, fragment_part) = split_fragment(&raw);
+            let path_part = strip_query(path_part);
 
             let Some(resolved) = resolve_target(&current_href, path_part) else {
                 broken.push(BrokenLink {
@@ -245,7 +282,10 @@ pub(crate) fn check_links(
                 continue;
             }
 
-            if let Some(fragment) = fragment_part {
+            // レビュー指摘（PR #901・cursor(bot) Low）: 空 fragment（`href` が
+            // `...#` で終わる形。HTML 仕様上「文書先頭」を意味し、ページ側に
+            // 対応する `id` 実在を要求すべきではない）は検証対象から除く。
+            if let Some(fragment) = fragment_part.filter(|fragment| !fragment.is_empty()) {
                 match page_ids_by_key.get(&key) {
                     Some(target_ids) if target_ids.contains(fragment) => {}
                     Some(_) => broken.push(BrokenLink {
@@ -452,6 +492,61 @@ mod tests {
         // 既知ターゲット表側に末尾 `/` が付いていても同一視する。
         let asset_hrefs = vec!["/assets/site.css/".to_string()];
         assert!(check_links(&pages, "", &asset_hrefs).is_empty());
+    }
+
+    #[test]
+    fn query_string_on_an_existing_page_link_is_ignored() {
+        // レビュー指摘（PR #901・github-actions(bot) P2 / cursor(bot) Low）:
+        // `/guide/?tab=cpu` のような query 付きリンクは query を無視して
+        // `/guide/` として解決すべきで、query の有無で誤って壊れたリンク
+        // 判定してはならない。
+        let pages = vec![page(
+            "/guide/",
+            Node::element("html", vec![], vec![link("/guide/?tab=cpu")]),
+        )];
+        assert!(check_links(&pages, "", &[]).is_empty());
+    }
+
+    #[test]
+    fn query_string_before_fragment_is_ignored_and_fragment_still_validated() {
+        let pages = vec![page(
+            "/guide/",
+            Node::element(
+                "html",
+                vec![],
+                vec![link("/guide/?tab=cpu#section"), heading_with_id("section")],
+            ),
+        )];
+        assert!(check_links(&pages, "", &[]).is_empty());
+
+        let pages_missing = vec![page(
+            "/guide/",
+            Node::element("html", vec![], vec![link("/guide/?tab=cpu#missing")]),
+        )];
+        let broken = check_links(&pages_missing, "", &[]);
+        assert_eq!(broken.len(), 1);
+        assert!(broken[0].reason.contains("fragment"));
+    }
+
+    #[test]
+    fn empty_fragment_on_an_existing_page_reports_no_broken_links() {
+        // レビュー指摘（PR #901・cursor(bot) Low）: `href="/guide/#"` の
+        // ような空 fragment は HTML 仕様上「文書先頭」を意味し、対応する
+        // `id` の実在を要求すべきではない。
+        let pages = vec![page(
+            "/guide/",
+            Node::element("html", vec![], vec![link("/guide/#")]),
+        )];
+        assert!(check_links(&pages, "", &[]).is_empty());
+    }
+
+    #[test]
+    fn empty_fragment_on_the_current_page_reports_no_broken_links() {
+        let pages = vec![page(
+            "/guide/",
+            Node::element("html", vec![], vec![link("#")]),
+        )];
+        assert!(check_links(&pages, "", &[]).is_empty());
     }
 
     #[test]

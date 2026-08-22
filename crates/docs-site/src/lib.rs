@@ -35,7 +35,8 @@
 //!   非 0 終了する
 //! - [`build`][]: 上記を結線したビルドパイプライン（`nav.toml` 読み込み →
 //!   パース → 検証 → 各ページの Markdown→HTML 変換・検索索引収集 →
-//!   [`linkcheck::check_links`] → `<out>` への書き出し）
+//!   `linkcheck::check_links`（`pub(crate)`。private-item への intra-doc
+//!   link を避けるためコードスパンで参照する） → `<out>` への書き出し）
 //!
 //! # 参照実装との関係
 //!
