@@ -188,14 +188,64 @@ fn read_verified_source(
     Ok(contents)
 }
 
+/// `out` 配下のディレクトリを 1 階層ずつ作成する。`target`（`out.join(...)` で
+/// 組み立てられた絶対パス）へ向けて、`canonical_out` を起点に相対コンポーネント
+/// を 1 つずつ push・作成・`canonicalize` 再検証してから次の階層へ進む。
+///
+/// **`fs::create_dir_all` を一括で呼んでから事後に `canonicalize` するのでは
+/// 不十分**（レビュー指摘・回帰テストで確認済み）: 中間コンポーネントが `out`
+/// 外を指すシンボリックリンクの場合、一括 `create_dir_all` は検証前にそのリンク
+/// 先へ実際にディレクトリを作成してしまう（副作用が検査より先に発生する）。
+/// 1 階層ごとに「シンボリックリンクでないか確認 → 作成 → canonicalize して
+/// `canonical_out` 配下か確認」の順で進めることで、脱出を検知した時点で
+/// それ以上ディレクトリを作らずに止められる。
+fn create_dir_all_verified(
+    out: &Path,
+    canonical_out: &Path,
+    target: &Path,
+) -> Result<(), BuildError> {
+    let target_display = target.display().to_string();
+    let relative = target.strip_prefix(out).unwrap_or(target);
+    let mut current = canonical_out.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        if let Ok(existing) = fs::symlink_metadata(&current)
+            && existing.file_type().is_symlink()
+        {
+            return Err(BuildError::UnsafeOutputPath(target_display));
+        }
+        match fs::create_dir(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(BuildError::WritePage {
+                    path: target_display,
+                    error,
+                });
+            }
+        }
+        current = current
+            .canonicalize()
+            .map_err(|error| BuildError::WritePage {
+                path: target_display.clone(),
+                error,
+            })?;
+        if !current.starts_with(canonical_out) {
+            return Err(BuildError::UnsafeOutputPath(target_display));
+        }
+    }
+    Ok(())
+}
+
 /// `path` の親ディレクトリを作成してからファイルへ書き出す。
 ///
 /// 書き出し前に 2 点を検査する（レビュー指摘: 出力先の既存シンボリックリンク
 /// を検査せず `create_dir_all`/`fs::write` していたため、`out` 配下外への
 /// 書き込み・既存ファイルの意図しない上書きが可能だった）。
-/// - `create_dir_all` 後の親ディレクトリを `canonicalize` し、`canonical_out`
-///   （`out` の正規化パス）配下であることを確認する（中間コンポーネントが
-///   シンボリックリンクで外を指す場合を拒否する）
+/// - 親ディレクトリの作成を [`create_dir_all_verified`] へ委ね、1 階層ごとに
+///   `canonical_out`（`out` の正規化パス）配下であることを確認する（中間
+///   コンポーネントがシンボリックリンクで外を指す場合を、実際に作成する前に
+///   拒否する）
 /// - 書き込み先が既存のシンボリックリンクでないことを `fs::symlink_metadata`
 ///   （symlink を辿らない）で確認する（既存シンボリックリンク経由の意図しない
 ///   上書きを拒否する）
@@ -205,25 +255,14 @@ fn read_verified_source(
 /// 内に収まるが、`out` が使い回されるビルド環境等で事前に配置されたシンボリック
 /// リンクによる脱出をここで別途防ぐ。
 fn write_file_creating_parent(
+    out: &Path,
     canonical_out: &Path,
     path: &Path,
     contents: &str,
 ) -> Result<(), BuildError> {
     let path_display = path.display().to_string();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| BuildError::WritePage {
-            path: path_display.clone(),
-            error,
-        })?;
-        let canonical_parent = parent
-            .canonicalize()
-            .map_err(|error| BuildError::WritePage {
-                path: path_display.clone(),
-                error,
-            })?;
-        if !canonical_parent.starts_with(canonical_out) {
-            return Err(BuildError::UnsafeOutputPath(path_display));
-        }
+        create_dir_all_verified(out, canonical_out, parent)?;
     }
     if let Ok(existing) = fs::symlink_metadata(path)
         && existing.file_type().is_symlink()
@@ -309,14 +348,14 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
 
     let mut written = Vec::with_capacity(rendered_pages.len() + 1);
     for (out_path, html_out) in &rendered_pages {
-        write_file_creating_parent(&canonical_out, out_path, html_out)?;
+        write_file_creating_parent(out, &canonical_out, out_path, html_out)?;
         if let Ok(relative) = out_path.strip_prefix(out) {
             written.push(relative.to_path_buf());
         }
     }
 
     let css_path = out.join(SITE_CSS_RELATIVE_PATH);
-    write_file_creating_parent(&canonical_out, &css_path, crate::theme::SITE_CSS)?;
+    write_file_creating_parent(out, &canonical_out, &css_path, crate::theme::SITE_CSS)?;
     written.push(PathBuf::from(SITE_CSS_RELATIVE_PATH));
 
     let pages = parsed.sections.iter().map(|s| s.pages.len()).sum();
@@ -354,6 +393,32 @@ mod tests {
     impl Drop for TempDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// レビュー指摘（PR #899）の回帰テスト: `read_verified_source` 自体が、
+    /// 読み込み直前の再検証で `repo_root` 配下外へのシンボリックリンク脱出を
+    /// 拒否することを確認する。`build_site` 経由では [`nav::validate_sources`]
+    /// が先に同じ脱出を検出するため（`nav::tests::validate_sources_rejects_symlink_escape`
+    /// が既にその経路をカバー済み）、`read_verified_source` の再検証ロジック
+    /// 自体は `build_site` からは到達できない。直接呼び出して単体で確認する
+    /// （symlink を使わない環境〈Windows 等〉では対象外のため unix 限定）。
+    #[cfg(unix)]
+    #[test]
+    fn read_verified_source_rejects_symlink_escaping_repo_root() {
+        let root = TempDir::new("read-verified-escape-root");
+        let outside = TempDir::new("read-verified-escape-outside");
+        let secret = outside.0.join("secret.md");
+        fs::write(&secret, b"outside repo_root").expect("write fixture outside repo_root");
+        std::os::unix::fs::symlink(&secret, root.0.join("linked.md"))
+            .expect("create symlink escaping repo_root for test fixture");
+
+        let canonical_root = root.0.canonicalize().expect("canonicalize repo_root");
+        match read_verified_source(&canonical_root, &root.0, "linked.md") {
+            Err(BuildError::Nav(NavError::UnsafeSource(source))) => {
+                assert_eq!(source, "linked.md");
+            }
+            other => panic!("expected UnsafeSource for symlink escape, got {other:?}"),
         }
     }
 
@@ -606,6 +671,14 @@ path = "/guide/intro/"
         assert!(
             !outside.0.join("intro/index.html").exists(),
             "must not write through the symlinked parent into the outside directory"
+        );
+        // `create_dir_all(parent)` 自体がリンク先へディレクトリを作ってしまう
+        // （書き込みより前に副作用が発生する）ケースも合わせて拒否できている
+        // ことを確認する: `intro/` サブディレクトリの作成もリンク先で起きては
+        // ならない（レビュー指摘の再発防止。advisor 指摘）。
+        assert!(
+            !outside.0.join("intro").exists(),
+            "must not create directories through the symlinked parent into the outside directory"
         );
     }
 
