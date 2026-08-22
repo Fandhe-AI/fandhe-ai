@@ -80,9 +80,9 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
 |---|---|---|
 | フォーマット | `cargo fmt --all` | 差分なし（PostToolUse hook 自動適用込み） |
 | lint（x86_64） | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 警告なし |
-| NEON クロス型検査 | `cargo check -p backend-cpu --target aarch64-unknown-linux-gnu` | 成功 |
-| NEON クロス型検査 | `cargo check -p backend-cpu --target aarch64-apple-darwin` | 成功 |
-| NEON クロス clippy | `cargo clippy -p backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
+| NEON クロス型検査 | `cargo check -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu` | 成功 |
+| NEON クロス型検査 | `cargo check -p fandhe-ai-backend-cpu --target aarch64-apple-darwin` | 成功 |
+| NEON クロス clippy | `cargo clippy -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
 | リグレッション | `cargo test --workspace` | 全 pass（x86_64 では scalar/AVX2/AVX-512 経路。`KERNEL_DIMS` 更新後の `panel_capacity` 検証・parity グリッド追加分を含む） |
 
 ## 実測結果（2026-08-19）
@@ -122,11 +122,11 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
 
 ```bash
 # bit 完全一致（aarch64 実機）
-cargo test -p backend-cpu --release --test gemm_blis_parity
-cargo test -p backend-cpu --release --lib gemm_blis::tests::neon_8x12_and_12x8_match_scalar_forced_bit_exact
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_parity
+cargo test -p fandhe-ai-backend-cpu --release --lib gemm_blis::tests::neon_8x12_and_12x8_match_scalar_forced_bit_exact
 
 # A/B スループット（aarch64 実機。--ignored ハーネス使用）
-cargo test -p backend-cpu --release --lib gemm_blis::tests::neon_8x12_vs_12x8_ab_median_throughput -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cpu --release --lib gemm_blis::tests::neon_8x12_vs_12x8_ab_median_throughput -- --ignored --nocapture
 ```
 
 実機接続手順は `docs/real-hardware-verification-env.md` §3-4（rsync 転送・除外フィルタ厳守）を参照する。

@@ -32,11 +32,11 @@ git fetch origin
 
 # base（変更前。TGP_PAD 導入前の直近コミット）
 git checkout <base-sha>
-cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
 
 # head（本イシューの実装ブランチ）
 git checkout perf/538-metal-tgp-padding
-cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
 ```
 
 出力形式（`examples/gemm_bench.rs` 参照）は `docs/perf/metal-gemm-dynamic-tile.md` と同一（`size=<N>` 行・
@@ -50,7 +50,7 @@ staged 経路のためパディングの影響を直接受ける（`bm32_bn32_bk
 `gemm.metal` の staged 経路コメント「パディング列は simdgroup_load が一切読まないため 0 埋め不要」の実機検証）:
 
 ```sh
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 `gemm_dynamic_tile_parity`・`cpu_metal_parity`・`all_tile_candidates_match_cpu_reference_medium_shape` 等が

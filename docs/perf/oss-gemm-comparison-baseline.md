@@ -46,8 +46,8 @@ venv はリポジトリ管理外（`.venv*/` は `.gitignore` 済み）。実測
 新規 Rust コードは追加しない。既存の `crates/backend-metal/examples/` を実機上で
 そのまま実行する:
 
-- デバイス内境界: `cargo run --release -p backend-metal --example gemm_f32_prepared_bench`
-- 転送込み境界: `cargo run --release -p backend-metal --example gemm_bench`
+- デバイス内境界: `cargo run --release -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench`
+- 転送込み境界: `cargo run --release -p fandhe-ai-backend-metal --example gemm_bench`
 
 ## 2. 計測プロトコル
 

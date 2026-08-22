@@ -16,7 +16,7 @@ CUDA 側の同種ドキュメント（`.claude/rules/`・各テストファイ�
 ```bash
 make test-ignored-metal
 # 相当コマンド（--release 推奨。理由は後述）:
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 `--release` を既定にしている理由: `tests/cpu_metal_parity.rs` の `k4096_stress_poc_v2_5`（M=N=512, K=4096 の CPU 参照実装によるストレスケース）は debug ビルドでは著しく遅い。各テストファイル冒頭の doc コメントも同じコマンドを推奨している。
@@ -74,19 +74,19 @@ macOS 実機 runner は未登録のため、`backend-metal` の `#[ignore]` テ�
 ```bash
 make check-cross-metal-tests
 # 相当コマンド:
-cargo check -p backend-metal --tests --target aarch64-apple-darwin
+cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
 ```
 
 `.github/workflows/ci.yml` の `build` ジョブに同一コマンドのステップとして組み込み済み（`cargo build --workspace --locked --target aarch64-apple-darwin` の後段）。
 
-**`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する理由**: `--workspace --all-targets` は `bench-harness` の `dev-dependencies`（`criterion`）を経由して `alloca`（macOS ターゲットでネイティブ C ビルドを要する）を引き込み、macOS クロスコンパイラ非搭載の Linux CI runner では
+**`--workspace --all-targets` ではなく `-p fandhe-ai-backend-metal --tests` に限定する理由**: `--workspace --all-targets` は `bench-harness` の `dev-dependencies`（`criterion`）を経由して `alloca`（macOS ターゲットでネイティブ C ビルドを要する）を引き込み、macOS クロスコンパイラ非搭載の Linux CI runner では
 
 ```
 cc: error: unrecognized command-line option '-arch'
 cc: error: unrecognized command-line option '-mmacosx-version-min=11.0'
 ```
 
-で失敗することを実測した（本イシュー実装時に確認）。`-p backend-metal --tests` に限定すると、`backend-metal` が `bench-harness` を参照する経路は `[dependencies]`（`criterion` を含まない）のみが解決されるため、この失敗を回避しつつ `tests/` 配下の型検査が成立する。`cargo check` はリンクを行わないため、macOS SDK が無い Linux 環境でも成立する（`cargo build` は実機フレームワークのリンクが必要になるため使わない）。
+で失敗することを実測した（本イシュー実装時に確認）。`-p fandhe-ai-backend-metal --tests` に限定すると、`backend-metal` が `bench-harness` を参照する経路は `[dependencies]`（`criterion` を含まない）のみが解決されるため、この失敗を回避しつつ `tests/` 配下の型検査が成立する。`cargo check` はリンクを行わないため、macOS SDK が無い Linux 環境でも成立する（`cargo build` は実機フレームワークのリンクが必要になるため使わない）。
 
 ## 実機実行の実測状況
 
@@ -130,7 +130,7 @@ MSL 構文検証（`MetalGemm::new` による `gemm.metal` 全体のランタイ
 
 `rmsnorm_parity.rs`（2 件）・`softmax_parity.rs`（3 件）は本実装セッション（Linux 環境。Mac 実機へ到達
 不能）では実行できていない。Linux 側では以下で代替検証済み: `cargo build --target aarch64-apple-darwin
--p backend-metal`（型検査・リンク前コンパイル成立）・`cargo test -p backend-metal`（`row_kernel.rs` の
+-p fandhe-ai-backend-metal`（型検査・リンク前コンパイル成立）・`cargo test -p fandhe-ai-backend-metal`（`row_kernel.rs` の
 純関数単体テスト 34 件・`rmsnorm_softmax_source_evidence.rs` の文字列証跡テスト 10 件が green）。Mac
 実機での `#[ignore]` テスト実行・「実行結果」節への追記はユーザー環境での確認を依頼する
 （未検証のままマージ可否判断をユーザーに委ねる。実装計画 §6.2「実機へ到達できない場合は実施不能である旨を
@@ -151,7 +151,7 @@ PR に明記」）。
 過去に機械検証済みだった以下の項目は、上記の実機実行によって補完・上書きされた:
 
 - `cargo test --workspace --all-features`（`#[ignore]` テストが実行されないログの確認 = 「通常 CI では除外される」の検証）
-- `cargo check -p backend-metal --tests --target aarch64-apple-darwin`（型検査成立の確認）
+- `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`（型検査成立の確認）
 - `cargo fmt --all --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`（Linux ホスト分。#380 では実機側でも再確認済み）
 
 ## 将来課題（スコープ外）

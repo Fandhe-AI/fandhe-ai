@@ -29,7 +29,7 @@ simdgroup 版と `dispatch_auto` の性能比較を実機実測し、下記「�
 ```sh
 git fetch origin
 git checkout perf/188-metal-dynamic-tile   # 本イシューの実装ブランチ
-cargo run -p backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
 ```
 
 出力形式（`examples/gemm_bench.rs` 参照）:
@@ -44,7 +44,7 @@ cargo run -p backend-metal --example gemm_bench --release
 数値一致確認（受け入れ条件に必須の前提）:
 
 ```sh
-cargo test -p backend-metal -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture
 ```
 
 `tests/gemm_dynamic_tile_parity.rs` の全ケース（候補構成別・直接ロード経路・境界形状・`dispatch_auto`・
@@ -220,14 +220,14 @@ TGP パディング）を含む経路の実測であり、D-6（swizzle）・D-7
 数値一致確認（性能値採用の前提）:
 
 ```sh
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 全ケース PASS を確認してからベンチを実行する。
 
 ```sh
-cargo run -p backend-metal --example gemm_bench --release
-cargo run -p backend-metal --example gemm_f16_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
 ```
 
 上記 2 コマンドを**各 5 回独立実行**し、size ごとに 5 個の TFLOPS 値の中央値を採用する

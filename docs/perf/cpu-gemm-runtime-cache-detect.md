@@ -83,11 +83,11 @@ BLIS 解析モデル系の一般的なキャッシュ階層ブロッキング導
 --workspace --locked --target aarch64-apple-darwin --lib`。`cfg(test)` 無効）は
 `cache_params` モジュールをコンパイル対象に含めないため、sysctl FFI（`unsafe` を含む
 唯一の箇所）の型・借用検査は同ステップでは行われない。当初はローカル実行
-（`cargo check -p backend-cpu --lib --tests --target aarch64-apple-darwin`）での確認
+（`cargo check -p fandhe-ai-backend-cpu --lib --tests --target aarch64-apple-darwin`）での確認
 （`unsafe extern "C" fn sysctlbyname` 宣言・呼び出し双方が objc2 系依存を含むクロス
 コンパイル環境で型・借用検査を通過）に留め、CI での自動検証ステップ追加は「既存ジョブへの
 ステップ追加であり `ci-complete` の `needs`・ruleset required contexts の変更を伴わない」
-ため本 PR スコープ内と判断し直し、`ci.yml` の `build` ジョブへ `cargo check -p backend-cpu
+ため本 PR スコープ内と判断し直し、`ci.yml` の `build` ジョブへ `cargo check -p fandhe-ai-backend-cpu
 --tests --target aarch64-apple-darwin`（`Makefile` の `check-cross-cpu-tests` と同一コマンド。
 backend-metal 向け既存ステップと同型）を追加した。同ステップは `cfg(test)` 有効かつ
 `target_os = "macos"` を満たすため `sysctl_ffi` を継続的コンパイル検証の対象に含める
@@ -118,7 +118,7 @@ sysctl FFI 自体は `unsafe` を 1 箇所（`sysctlbyname` 呼び出し）に�
 FFI から独立した純関数としてテスト可能）。それ以外の長さは従来どおり fail-closed で `None`
 （受け入れ条件 3）。Darwin/aarch64 はリトルエンディアンのため `from_le_bytes` で組み立てる。
 
-本対応も macOS 実機不可のため**型検査のみ**（`cargo check -p backend-cpu --tests --target
+本対応も macOS 実機不可のため**型検査のみ**（`cargo check -p fandhe-ai-backend-cpu --tests --target
 aarch64-apple-darwin`）に留まり、実際に `hw.perflevel0.*cachesize` が `CTLTYPE_INT`／
 `CTLTYPE_QUAD` いずれで報告されるかの実測確認は §5 の実機計測時に併せて行う。
 
@@ -177,7 +177,7 @@ M×N の完全な 2 次元ミニタイル格子（「重複なし・被覆完全
 ## §5 実機計測手順（後続セッション向け）
 
 1. `docs/real-hardware-verification-env.md` の手順で M4 Max 実機へ接続する
-2. `cargo test -p backend-cpu --release -- --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
+2. `cargo test -p fandhe-ai-backend-cpu --release -- --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
    を実行し、`default`／`detected`／`2d-partition` の中央値を dim ∈ {512, 1024, 2048, 4096}
    で比較する（`crates/backend-cpu/src/gemm_blis/mod.rs` の同名テスト。5 回計測中央値・
    計測順インターリーブ）
@@ -209,7 +209,7 @@ M×N の完全な 2 次元ミニタイル格子（「重複なし・被覆完全
 - **既存テストへの影響**: `cache_params::tests`（13 件）・`gemm_blis::tests` の
   `gemm_blis_parallel_detected_blocks_match_naive_bit_exact`／
   `gemm_blis_parallel_compute_blocks_m4_max_like_values_match_naive_bit_exact` を含む
-  `cargo test -p backend-cpu --lib`（169 件）は**変更なしで全通過**（M4 Max 代表値の
+  `cargo test -p fandhe-ai-backend-cpu --lib`（169 件）は**変更なしで全通過**（M4 Max 代表値の
   pin テストの期待値変更も不要。`compute_blocks_apple_m4_max_like_values_stays_within_clamp_bounds`
   は kc/mc/nc がクランプ範囲内であることのみを検証する設計のため、値そのものの変化を
   吸収する）。numeric parity（`gemm_naive` との bit 完全一致）テストは `blocks != default_blocks()`

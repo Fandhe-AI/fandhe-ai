@@ -1,15 +1,15 @@
 # 学習ループ
 
-`compat::Sequential` を使った学習ループの最小例です。`autodiff::optim::
-{Sgd, AdamW}` は `facade` の公開面（`docs/compat-api-scope.md` §0）に
+`compat::Sequential` を使った学習ループの最小例です。`fandhe_ai_autodiff::optim::
+{Sgd, AdamW}` は `fandhe-ai` の公開面（`docs/compat-api-scope.md` §0）に
 含まれない内部 API のため、この例は `param - lr * grad` を自前で計算
 する手動 SGD にしています。optimizer 実装自体の解説は本ページの対象外
 です。
 
 ```rust
 use bench_harness::rng::Xorshift64Star;
-use facade::Tensor;
-use facade::compat::Sequential;
+use fandhe_ai::Tensor;
+use fandhe_ai::compat::Sequential;
 
 const BATCH: usize = 4;
 const D_IN: usize = 8;
@@ -56,7 +56,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 借用）と `tape` が drop され、直後の `apply_parameters`
         // （`&mut model`）呼び出しと借用が競合しない。
         let updated: Vec<Tensor<f32>> = {
-            let tape = facade::tape();
+            let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
             let x = tape.var(&x_data);
             let y = tape.var(&y_data);
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 このコードブロックは `crates/facade/examples/training_loop.rs` の
 実行コード部分（冒頭のモジュールドキュメンテーションコメントを除く
-`use` 以降）と同一です（`cargo run -p facade --example training_loop`
+`use` 以降）と同一です（`cargo run -p fandhe-ai --example training_loop`
 で実行確認済み。出力は次の 3 行）。
 
 ```

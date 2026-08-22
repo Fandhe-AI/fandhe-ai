@@ -25,10 +25,10 @@
 - `cargo build --workspace --locked` — `cudarc` 動的ロード契約（CUDA toolkit 非搭載環境でもビルド成立する。
   `.claude/rules/coding-rust.md`）を崩していないことを確認済み
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda --release` — 既存スモークテスト（環境適応。CUDA 非搭載環境では早期 return で
+- `cargo test -p fandhe-ai-backend-cuda --release` — 既存スモークテスト（環境適応。CUDA 非搭載環境では早期 return で
   green）に回帰がないこと、新規 `#[ignore]` テスト 2 件（[`tensor_core_tflops_record`]・
   [`tensor_core_parity_record`]）が通常実行から除外されていること
-- `cargo test -p backend-cuda --release -- --list` — 上記 2 件がテスト一覧に登録されていること
+- `cargo test -p fandhe-ai-backend-cuda --release -- --list` — 上記 2 件がテスト一覧に登録されていること
 
 ## 計測手順（DGX Spark GB10 等 CUDA 実機）
 
@@ -37,7 +37,7 @@ git fetch origin
 git checkout test/64-cuda-real-device-measurement   # 本イシューの実装ブランチ
 make test-ignored-cuda                              # backend-cuda に限定した #[ignore] テスト実行（release）
 # 相当コマンド（本ファイルの 2 テストのみに絞る場合）:
-cargo test -p backend-cuda --release -- --ignored --nocapture tensor_core_
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture tensor_core_
 ```
 
 出力形式（`crates/backend-cuda/tests/tensor_core_real_device.rs` 参照）:
@@ -53,7 +53,7 @@ cargo test -p backend-cuda --release -- --ignored --nocapture tensor_core_
 先に確認してから性能値を採用する）:
 
 ```sh
-cargo test -p backend-cuda --release -- --ignored --nocapture wmma_
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture wmma_
 ```
 
 ## 実測結果（#389・2026-08-10 実測）

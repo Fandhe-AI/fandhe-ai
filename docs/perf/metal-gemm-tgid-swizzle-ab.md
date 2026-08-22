@@ -47,7 +47,7 @@ git checkout test/746-metal-bench-noise-protocol   # 本イシューの実装ブ
 # 実行前のサーマル状態を記録する（非特権コマンド。sudo 必須の powermetrics は不使用）。
 pmset -g therm
 
-cargo run -p backend-metal --example gemm_swizzle_ab_bench --release > /tmp/gemm_swizzle_ab_bench.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_swizzle_ab_bench --release > /tmp/gemm_swizzle_ab_bench.txt
 
 # 実行後のサーマル状態も記録する。
 pmset -g therm
@@ -74,7 +74,7 @@ prepared 境界・転送込み境界の両方で `size ∈ {2048, 4096}` の改�
 数値一致確認（採否判断より前に必須。走査順の変更のみでビット単位一致が理論上成立するはずの前提を検証する）:
 
 ```sh
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 `gemm_dynamic_tile_parity`・`cpu_metal_parity`・`gemm_auto_parity` 等が green であること（tolerance は変更しない。coding-rust.md）。
@@ -117,13 +117,13 @@ git fetch origin
 
 # base（変更前。スウィズル導入前の直近コミット）
 git checkout <base-sha>
-cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_base.txt
 
 # head（本イシューの実装ブランチ）。SWIZZLE_ENABLED は既定 false のため、
 # 計測前に crates/backend-metal/src/tile.rs の SWIZZLE_ENABLED を一時的に
 # true へ書き換える（コミットしない。計測後に revert する）。
 git checkout perf/540-metal-gemm-tgid-swizzle
 # （ここで SWIZZLE_ENABLED を true へ一時変更）
-cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_head.txt
 # （計測後: git checkout -- crates/backend-metal/src/tile.rs で revert）
 ```

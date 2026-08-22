@@ -37,7 +37,7 @@
 
 ```
 CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
-  cargo build --release -p backend-cpu --example gemm_bench
+  cargo build --release -p fandhe-ai-backend-cpu --example gemm_bench
 CARGO_PROFILE_RELEASE_LTO=true CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1 \
   ./target/release/examples/gemm_bench 512
 ```

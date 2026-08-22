@@ -91,7 +91,7 @@ cp.async は生バイトコピーのため格納「中」の変換は不可能�
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-cargo test --all-features -p backend-cuda
+cargo test --all-features -p fandhe-ai-backend-cuda
 bash scripts/run-verification-gates.sh all
 ```
 
@@ -131,7 +131,7 @@ revert 前後（A/B）双方を再実測して
 - **ノード**: `spark-dbd9`（`docs/real-hardware-verification-env.md`
   記載の GB10・`nvidia-smi` で GPU utilization 0% を計測直前に確認済み。
   実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）
-- **ベンチバイナリ**: `cargo run -p backend-cuda --example
+- **ベンチバイナリ**: `cargo run -p fandhe-ai-backend-cuda --example
   gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics`
   の `base_tflops`（本番カーネル・swizzle 無効の系列。`CudaGemm::new`
   経由。swizzle 変種列は本 A/B の対象外）
@@ -171,12 +171,12 @@ revert 前後（A/B）双方を再実測して
 
 - [x] NVRTC 実コンパイル確認（`wmma_tf32_staged_available()`/
       `wmma_tf32_opt_available()` が true であること）— B で
-      `cargo test -p backend-cuda --release -- --ignored
+      `cargo test -p fandhe-ai-backend-cuda --release -- --ignored
       kernels_wmma_opt::tests::wmma_opt_sources_compile_with_nvrtc_when_available`
       等が pass することを確認（`gemm_wmma_tf32_swizzle_bench` 自体が
       `wmma_tf32_staged_available()` チェックを経て実行されている）
 - [x] 数値一致・parity 非後退（統一複合判定）: B で
-      `cargo test -p backend-cuda --release -- --ignored --test-threads=1`
+      `cargo test -p fandhe-ai-backend-cuda --release -- --ignored --test-threads=1`
       を実行。`wmma_tf32_opt_kernel_parity_does_not_regress`・
       `wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096` は pass。
       `wmma_tf32_basic_kernel_parity_does_not_regress`（基本版カーネルの

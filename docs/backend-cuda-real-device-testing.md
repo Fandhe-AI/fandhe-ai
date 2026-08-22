@@ -33,7 +33,7 @@
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture'
+  cargo test -p fandhe-ai-backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture'
 ```
 
 `--locked` でノード側の lockfile 暗黙変更を禁止（`deps-policy.md`）。`--no-fail-fast` で全 17 バイナリを
@@ -54,7 +54,7 @@ grep -rnE '^\s*#\[ignore' crates/backend-cuda/tests/*.rs | wc -l   # => 51
 |------|------|
 | grep `#\[ignore` 全マッチ（doc コメント中の言及を含む） | 74 |
 | うち `#[test]` 属性としての `#[ignore = "..."]`（実行対象） | **51** |
-| `cargo test -p backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture` 実行件数（全 17 バイナリの `passed+failed` 合計） | **51**（突合一致） |
+| `cargo test -p fandhe-ai-backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture` 実行件数（全 17 バイナリの `passed+failed` 合計） | **51**（突合一致） |
 
 数字を合わせるための後付け調整は行っていない。「74」はテストファイル群の実装過程で `#[ignore]` という
 語がドキュメンテーションコメントにも多用された結果であり、イシュー起票時の grep が doc コメントも
@@ -217,7 +217,7 @@ fail であり、本イシューのスコープ内〈テスト実行・結果記
 ## 6. `#[ignore]` 分離が通常 CI で機械的に効いている根拠
 
 `docs/backend-metal-real-device-testing.md` と同型の確認。Mac（CUDA 非搭載）・CI（GitHub ホステッド・CUDA
-toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p backend-cuda`（`--ignored` なし）を実行すると、
+toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p fandhe-ai-backend-cuda`（`--ignored` なし）を実行すると、
 本ファイルが対象とする 51 件はすべて `#[ignore]` によりスキップされ、環境適応スモークテスト
 （`*_parity_smoke_env_adaptive` 等）のみが実行される。これらは `CudaDevice::new` が
 `CudaError::DriverUnavailable`／`CudaError::NvrtcUnavailable` を返す分岐で早期 return し green になる
@@ -228,8 +228,8 @@ toolkit 非搭載、`.claude/rules/ci.md`）双方で `cargo test -p backend-cud
 増やさずに到達できないため、`crates/backend-cuda/src/gemm.rs` のライブラリ自身の単体テスト
 （`#[cfg(test)] mod tests` 内 `wmma_tf32_basic_kernel_parity_does_not_regress`。`#[ignore]` で実機必須）
 として実装している。`cargo test` はターゲット未指定時に lib ユニットテスト・統合テスト双方を対象にする
-ため、既存の実行導線（`make test-ignored-cuda`。`cargo test -p backend-cuda --release -- --ignored --nocapture`）
-はこのテストも変更なく含む。個別に実行する場合は `cargo test -p backend-cuda --lib -- --ignored` を使う。
+ため、既存の実行導線（`make test-ignored-cuda`。`cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture`）
+はこのテストも変更なく含む。個別に実行する場合は `cargo test -p fandhe-ai-backend-cuda --lib -- --ignored` を使う。
 `docs/perf/cuda-parity-baseline.md` §7「関連」参照。
 
 ## 7. 未解決事項・エスカレーション先

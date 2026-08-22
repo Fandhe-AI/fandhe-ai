@@ -166,7 +166,7 @@ correctness bug が未修正のまま実機計測を実施し結果を正直に�
 ## 6. ダンプ手順
 
 ```sh
-cargo run -p backend-cuda --example mma_tf32_ptx_dump --release \
+cargo run -p fandhe-ai-backend-cuda --example mma_tf32_ptx_dump --release \
     --features internal-diagnostics -- --out-dir /tmp/mma-tf32-ptx-dump
 ```
 

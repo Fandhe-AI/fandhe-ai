@@ -252,7 +252,7 @@ B-0 時点から変化している。したがって「契約が緩和されて�
 
 ### 8.2 GPU 不要のロジック検査（実機非依存・完了・green）
 
-`cargo test -p backend-cuda --test parity_nonregression` を実行し、
+`cargo test -p fandhe-ai-backend-cuda --test parity_nonregression` を実行し、
 実機必須テスト（`parity_baselines_do_not_regress`。CUDA 実機・compute
 capability 8.0 以降が必須で `#[ignore]` 分離済み）を除く 8 件（fixture
 自己整合性・`tolerance_constants_are_pinned`・fail-closed 契約の
@@ -285,8 +285,8 @@ falsification 検査群）が全て green であることを確認した。
    で DGX Spark GB10（`CUDA_NODE` プレースホルダ表記）へ転送する
 2. 非ログイン shell の PATH を明示したうえで以下を実行する:
    ```bash
-   cargo test -p backend-cuda --release --test parity_nonregression -- --ignored --nocapture
-   cargo test -p backend-cuda --release --lib -- --ignored --nocapture
+   cargo test -p fandhe-ai-backend-cuda --release --test parity_nonregression -- --ignored --nocapture
+   cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --nocapture
    ```
 3. stdout の `fail_count/total`・`mean_abs_diff` を機械転記する（目測・
    推定を混ぜない）

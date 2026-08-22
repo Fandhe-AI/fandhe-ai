@@ -123,7 +123,7 @@ let shape_cfg = match (tall, wide) {
 ### 数値一致（受け入れ条件 3）
 
 ```sh
-cargo test -p backend-metal --release -- --ignored
+cargo test -p fandhe-ai-backend-metal --release -- --ignored
 ```
 
 結果: （未計測）
@@ -131,7 +131,7 @@ cargo test -p backend-metal --release -- --ignored
 ### 候補・自動選択ベンチ（受け入れ条件 1・2）
 
 ```sh
-cargo run -p backend-metal --release --example gemm_bench
+cargo run -p fandhe-ai-backend-metal --release --example gemm_bench
 ```
 
 | size | 是正前 auto TFLOPS | 是正後 auto TFLOPS | 候補中最良 TFLOPS | 是正後 auto/最良 |
@@ -147,7 +147,7 @@ cargo run -p backend-metal --release --example gemm_bench
 ### floor bench 参考記録
 
 ```sh
-cargo run -p backend-metal --release --example gemm_f32_prepared_bench
+cargo run -p fandhe-ai-backend-metal --release --example gemm_f32_prepared_bench
 ```
 
 結果: （未計測。REQ-8 下限判定の正式更新は別スコープ）

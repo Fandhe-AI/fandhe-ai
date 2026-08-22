@@ -148,7 +148,7 @@ cache/TLB の系統的偏りを避ける（#559 の A/B テストのインター
 ## §4 実機での実行手順（M4 Max 到達可能セッション向け）
 
 ```bash
-cargo test -p backend-cpu --release -- --ignored mc_kc_nc_blocking_sweep_median_throughput --nocapture
+cargo test -p fandhe-ai-backend-cpu --release -- --ignored mc_kc_nc_blocking_sweep_median_throughput --nocapture
 ```
 
 ## §5 選定判断基準
@@ -308,7 +308,7 @@ REQ-8 下限値・数値一致許容誤差は本イシューでも一切変更�
   機種判定方式（識別子未記録で撤去）とは異なり、本実装は機種判定を行わない算出式方式のため
   同じ理由での撤去リスクはない（詳細は `cpu-gemm-runtime-cache-detect.md` 参照）
 - **再計測手順**: §(vii) と同じ位置づけで、実機セッションで
-  `cargo test -p backend-cpu --release -- --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
+  `cargo test -p fandhe-ai-backend-cpu --release -- --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
   を実行し、`default`／`detected`／`2d-partition` の中央値を dim ∈ {512, 1024, 2048, 4096} で
   比較・記録する
 - **イシュー #794 への引き継ぎ（本イベント時点で未実施のまま）**: `compute_blocks` の算出式を

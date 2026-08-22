@@ -152,7 +152,7 @@ ncu 実行自体の exit code 検査（二次防御）が担う。
 ```sh
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
     CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-    cargo build -p backend-cuda --example gemm_profile_target --release \
+    cargo build -p fandhe-ai-backend-cuda --example gemm_profile_target --release \
     --features internal-diagnostics
 ```
 

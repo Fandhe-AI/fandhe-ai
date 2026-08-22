@@ -13,7 +13,7 @@
 （イシュー #810 受け入れ条件）。実行環境は Mac 実機（`docs/real-hardware-verification-env.md` §1・§7
 「ローカル直接実行」）だが本セッション環境は Linux のため、#487・#549 の先例に従い、Linux 側で完了できる
 範囲（診断 example の実装・解析値の算出・doc の計測手順・判定基準の確定）のみを本 PR で行う。
-**§4「実測結果」・§5「採否判断」は Mac 実機セッションで `cargo run -p backend-metal --example
+**§4「実測結果」・§5「採否判断」は Mac 実機セッションで `cargo run -p fandhe-ai-backend-metal --example
 gemm_splitk_shapes_bench --release` を実行してから記入する。**
 
 ## 1. 計測手段
@@ -48,7 +48,7 @@ gemm_splitk_shapes_bench --release` を実行してから記入する。**
 - `M=32` は `tile::select` の `SMALL`（64）閾値未満のため `TileConfig::SINGLE_SIMDGROUP_8X8`
   （`bm=bn=bk=8`・単一 simdgroup）に縮退する既存挙動を確認する対照点として残す（本表の該当行）
 
-## 3. 解析値（Linux 算出。2026-08-21 実行・`cargo run -p backend-metal --example gemm_splitk_shapes_bench --release`）
+## 3. 解析値（Linux 算出。2026-08-21 実行・`cargo run -p fandhe-ai-backend-metal --example gemm_splitk_shapes_bench --release`）
 
 | target (M,N,K) | tile (bm×bn×bk, wm×wn) | actual_groups | k_tile_count | target MLX Case1 該当 | control (S,S,S) | control actual_groups | control MLX Case1 該当 | flops_ratio |
 |---|---|---|---|---|---|---|---|---|
@@ -88,7 +88,7 @@ gemm_splitk_shapes_bench --release` を実行してから記入する。**
 
 ## 4. 実測結果（記入欄。Mac 実機セッションで記入）
 
-`cargo run -p backend-metal --example gemm_splitk_shapes_bench --release`（既定 `ROUNDS=6`・warmup 20
+`cargo run -p fandhe-ai-backend-metal --example gemm_splitk_shapes_bench --release`（既定 `ROUNDS=6`・warmup 20
 回・計測 20 回。`ROUNDS` 単位で `dispatch_tiled_prepared` を interleaved 計測するため、`--iters=N` の
 引き上げは 12 形状組 × `ROUNDS` × 2 side 分の実行時間に直接乗る点に注意する。ノイズが大きい場合は
 `--iters=200` より先に `docs/perf/metal-bench-noise-protocol.md` の cooldown／ROUNDS 調整手順を検討

@@ -21,7 +21,7 @@
 
 ### 2.2 `NvrtcUnavailable` graceful skip 分岐（検証済み）
 
-- CUDA driver は存在するが NVRTC が存在しない環境（本リポの複数実装セッションで確認: RTX 3060・compute capability 8.6）では `compile_ptx` が `CudaError::NvrtcUnavailable` を返す。この分岐は環境適応テスト（`crates/backend-cuda/tests/gemm_mma.rs` 等）・`cargo run -p backend-cuda --example gemm_mma_bench` の両方で実際に動作を確認済み（[`docs/perf/cuda-gemm-mma-pipeline.md`](./perf/cuda-gemm-mma-pipeline.md) 「本実装セッションで検証済みの事項」）。
+- CUDA driver は存在するが NVRTC が存在しない環境（本リポの複数実装セッションで確認: RTX 3060・compute capability 8.6）では `compile_ptx` が `CudaError::NvrtcUnavailable` を返す。この分岐は環境適応テスト（`crates/backend-cuda/tests/gemm_mma.rs` 等）・`cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench` の両方で実際に動作を確認済み（[`docs/perf/cuda-gemm-mma-pipeline.md`](./perf/cuda-gemm-mma-pipeline.md) 「本実装セッションで検証済みの事項」）。
 
 ### 2.3 静的共有メモリ per-block 48KiB 上限とタイル構成縮小の判断
 

@@ -11,7 +11,7 @@
 ローカル検証結果、および SMEM/occupancy の事前試算のみを記録し、TFLOPS 実測表は空欄のまま残す
 （`docs/spec/` に対する分母分子突合の慣行〈`docs/perf/gemm-optimization-baseline.md`〉を守るため、実測
 していない数値を記入しない）。`docs/real-hardware-verification-env.md` の手順（`.rev-stamp` → rsync →
-SSH 実行 → `cargo run -p backend-cuda --example gemm_wmma_tf32_staged_stages_bench --release --features
+SSH 実行 → `cargo run -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_staged_stages_bench --release --features
 internal-diagnostics` → 出力回収）に従って実機実行し、以下の表を埋めること。
 
 ## 背景・対象カーネル
@@ -93,7 +93,7 @@ as_tile/bs_tile はどのスレッドからも読まれないため成立する�
 | `cargo fmt --all -- --check` | pass |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | pass（新規警告 0） |
 | `cargo test --workspace --all-features` | pass（`backend-cuda` lib 394 passed。新規追加分含む） |
-| `cargo build -p backend-cuda --example gemm_wmma_tf32_staged_stages_bench --features internal-diagnostics` | pass（CUDA toolkit 非搭載環境でもビルド成立。cudarc 動的ロード契約の維持確認） |
+| `cargo build -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_staged_stages_bench --features internal-diagnostics` | pass（CUDA toolkit 非搭載環境でもビルド成立。cudarc 動的ロード契約の維持確認） |
 | `cargo deny check`（advisories/bans/licenses/sources） | pass（依存追加なし） |
 | `scripts/check-forbidden-deps.sh lock Cargo.lock` | pass |
 

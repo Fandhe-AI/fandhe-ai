@@ -104,7 +104,7 @@ git worktree add /tmp/cpu-gemm-e-head b96c3b3
 各 worktree で以下を 5 回実行する:
 
 ```bash
-cargo test -p backend-cpu --release --test gemm_blis_perf \
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_perf \
     -- --ignored gemm_blis_baseline_pytorch_square_512_to_4096 --nocapture
 ```
 

@@ -11,7 +11,7 @@ GEMM 性能改善ツリー #479 → Phase 2 親 #490 の B-4。先行 B-3（#494
 
 - `cargo build --workspace`（`const _: () = assert!(...)` によるコンパイル時境界検査。変更なし・§1 参照）
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda`（`kernels_mma.rs` 内 `#[cfg(test)]` の `#define` 整合検査・REQ-8 needle・ダブルバッファ構造ロック〈新規〉・タイル定数 pin・`gemm_mma.rs` の launch config div_ceil 被覆テスト）
+- `cargo test -p fandhe-ai-backend-cuda`（`kernels_mma.rs` 内 `#[cfg(test)]` の `#define` 整合検査・REQ-8 needle・ダブルバッファ構造ロック〈新規〉・タイル定数 pin・`gemm_mma.rs` の launch config div_ceil 被覆テスト）
 - `tests/parity_nonregression.rs` の通常 CI 実行分（tolerance 定数 pin・fixture 自己整合。無変更で green）
 - `git diff origin/main -- crates/backend-cuda/tests/parity_nonregression.rs crates/backend-cuda/tests/common/` が無差分（§4 の bit 一致論拠の機械確認）
 
@@ -103,8 +103,8 @@ CUTLASS `mac_loop_iter` は `(warp_mma_k+1) % K` の wrap-around で**次タイ�
 ```sh
 git fetch origin
 git checkout perf/495-mma-ldmatrix-double-buffer   # 本イシューの実装ブランチ
-cargo test -p backend-cuda -- --ignored --nocapture   # parity 非後退の全行検査（数値一致確認を性能計測より先に実施）
-cargo run -p backend-cuda --example gemm_mma_bench --release   # TFLOPS 計測
+cargo test -p fandhe-ai-backend-cuda -- --ignored --nocapture   # parity 非後退の全行検査（数値一致確認を性能計測より先に実施）
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release   # TFLOPS 計測
 ```
 
 ### 記録欄（実機セッションで埋める）

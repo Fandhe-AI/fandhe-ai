@@ -47,11 +47,11 @@ CUDA 実機非依存（GPU driver 不要）の範囲は本セッションのサ�
 ```bash
 cargo fmt --all
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test -p backend-cuda
+cargo test -p fandhe-ai-backend-cuda
 cargo build --workspace --all-targets
 ```
 
-いずれも green（`cargo test -p backend-cuda` はライブラリ内 needle・render
+いずれも green（`cargo test -p fandhe-ai-backend-cuda` はライブラリ内 needle・render
 テスト（`kernels_mma::tests::*`）37 件 pass を含む。新規追加した
 `mma_f16_source_epilogue_uses_half2_pair_store`（#805 受け入れ基準 1 の
 機械検査: `__half2` ペア store の存在・旧 4 連スカラー store パターンの
@@ -64,7 +64,7 @@ cargo build --workspace --all-targets
 `NVIDIA GeForce RTX 3060`・compute capability 8.6 を検出）は存在するが、
 NVRTC（`libnvrtc`）は存在せず `nvrtc::compile_ptx` は
 `CudaError::NvrtcUnavailable` を返す（本ファイル冒頭コメント「検証状態」
-と同じ既知制約。`cargo test -p backend-cuda --release --test
+と同じ既知制約。`cargo test -p fandhe-ai-backend-cuda --release --test
 cpu_cuda_mma_parity -- --ignored --nocapture` で実際に
 `NvrtcUnavailable { detail: "libnvrtc dynamic library not found
 (dlopen failed); ..." }` を確認済み）。したがって以下は**未実施**である
@@ -90,18 +90,18 @@ DGX Spark GB10（sm_121）・本セッションで検出した RTX 3060（sm_86�
 # ブランチを転送したうえで、実機上で実行する。
 
 # 1. mma 系数値一致（最初の実行が NVRTC 構文検証を兼ねる）
-cargo test -p backend-cuda --release --test cpu_cuda_mma_parity \
+cargo test -p fandhe-ai-backend-cuda --release --test cpu_cuda_mma_parity \
   -- --ignored --nocapture
-cargo test -p backend-cuda --release --test specialized_mma_parity \
+cargo test -p fandhe-ai-backend-cuda --release --test specialized_mma_parity \
   -- --ignored --nocapture
-cargo test -p backend-cuda --release --test parity_nonregression \
+cargo test -p fandhe-ai-backend-cuda --release --test parity_nonregression \
   -- --ignored --nocapture
 
 # 2. 性能（変更前後で 5 回計測し中央値を比較）
-cargo run -p backend-cuda --example gemm_mma_bench --release
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release
 
 # 3.（任意）PTX 上で store がペア化されたことの確認
-cargo run -p backend-cuda --example mma_ptx_dump --release
+cargo run -p fandhe-ai-backend-cuda --example mma_ptx_dump --release
 ```
 
 ## 実測すべき項目（実機到達後に本節を実測値で置き換える）

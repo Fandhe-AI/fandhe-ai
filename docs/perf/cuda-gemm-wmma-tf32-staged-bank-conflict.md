@@ -117,12 +117,12 @@ git fetch origin
 git checkout perf/743-wmma-tf32-staged-smem-padding
 
 # 1) parity 非後退（数値一致を性能計測より先に確認する）
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 
 # 2) bit 一致（b_pad=68/72 の突合。gemm.rs の #[ignore] テストとして
 #    実装済み。CudaGemm::new_with_tf32_staged_pads 〈internal-diagnostics
 #    feature〉が生成する変種と base の run_wmma_tf32 出力を比較する）
-cargo test -p backend-cuda --lib --release --features internal-diagnostics \
+cargo test -p fandhe-ai-backend-cuda --lib --release --features internal-diagnostics \
     -- --ignored --nocapture wmma_tf32_staged_pad_variant_matches_base_bit_exact_output
 
 # 2b) TFLOPS（b_pad=68/72 双方を internal-diagnostics 経由の
@@ -149,7 +149,7 @@ cargo test -p backend-cuda --lib --release --features internal-diagnostics \
 #    PR #769 codex-review 指摘 thread PRRT_kwDOTuUCJc6aqMvm の是正: 指定
 #    なしだと warmup 2 回を含む計 7 起動が採取され、記録対象カーネル起動
 #    の判別を誤りうる）
-cargo build -p backend-cuda --example gemm_profile_target --release \
+cargo build -p fandhe-ai-backend-cuda --example gemm_profile_target --release \
     --features internal-diagnostics
 
 # 3a) 既定（b_pad=68・本番経路・static 共有メモリ）
@@ -173,7 +173,7 @@ sm__warps_active.avg.pct_of_peak_sustained_active \
     --b-pad 72
 
 # 4) 採用時: REQ-8 下限余裕の確認
-cargo run -p backend-cuda --example cuda_floor_bench --release
+cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release
 ```
 
 `.ncu-rep`・生ログ・実ホスト名はコミットしない（下記記録表への転記のみ）。

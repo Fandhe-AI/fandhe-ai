@@ -102,17 +102,17 @@ git fetch origin
 gh pr checkout <PR番号>   # 本イシューの実装 PR
 
 # ソース証跡・定数突合・fail-closed 検証（GPU 不要。通常 CI 相当）。
-cargo test -p backend-cuda --lib kernels_wmma_opt
+cargo test -p fandhe-ai-backend-cuda --lib kernels_wmma_opt
 
 # 実機必須テスト（数値一致確認を TFLOPS 比較より前に必須で行う）。
-cargo test -p backend-cuda --test gemm_wmma_tf32_staged -- --ignored --test-threads=1
-cargo test -p backend-cuda --test gemm_wmma_tf32_opt -- --ignored --test-threads=1
-cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --test gemm_wmma_tf32_staged -- --ignored --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --test gemm_wmma_tf32_opt -- --ignored --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1
 # opt カーネル単独の非後退・staged 対 opt の TFLOPS 比較（private field 経由。gemm.rs 内）。
-cargo test -p backend-cuda --lib -- --ignored --test-threads=1 wmma_tf32_opt_kernel_parity_does_not_regress wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096
+cargo test -p fandhe-ai-backend-cuda --lib -- --ignored --test-threads=1 wmma_tf32_opt_kernel_parity_does_not_regress wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096
 
 # cuda_floor_bench（対 PyTorch 比。既存 f32 行の再測定）。
-cargo run -p backend-cuda --example cuda_floor_bench --release -- --shapes 4096x4096x4096
+cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release -- --shapes 4096x4096x4096
 ```
 
 ## 7. 実測結果（実機セッションで記入するプレースホルダ。推定値の記載禁止）

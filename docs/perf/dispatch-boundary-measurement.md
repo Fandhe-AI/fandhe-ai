@@ -19,7 +19,7 @@ Metal（Apple Silicon 実機）側は #382 で実測を完了した（下記「�
 - `cargo build --workspace --locked` — `cudarc` 動的ロード契約（CUDA toolkit 非搭載でもビルド成立）
   を崩していない
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-metal --release`（`#[ignore]` テストは通常実行から除外される）
+- `cargo test -p fandhe-ai-backend-metal --release`（`#[ignore]` テストは通常実行から除外される）
 
 ## 計測手順
 
@@ -28,7 +28,7 @@ Metal（Apple Silicon 実機）側は #382 で実測を完了した（下記「�
 ```sh
 git fetch origin
 git checkout test/69-dispatch-boundary-measurement   # 本イシューの実装ブランチ
-cargo test -p backend-metal --release --test dispatch_boundary -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release --test dispatch_boundary -- --ignored --nocapture
 ```
 
 出力形式（`crates/backend-metal/tests/dispatch_boundary.rs` 参照）:
@@ -48,7 +48,7 @@ cargo test -p backend-metal --release --test dispatch_boundary -- --ignored --no
 ```sh
 git fetch origin
 git checkout test/69-dispatch-boundary-measurement
-cargo test -p backend-cuda --release --test dispatch_boundary -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release --test dispatch_boundary -- --ignored --nocapture
 ```
 
 出力形式（`crates/backend-cuda/tests/dispatch_boundary.rs` 参照）:
@@ -62,8 +62,8 @@ cargo test -p backend-cuda --release --test dispatch_boundary -- --ignored --noc
 数値一致確認（受け入れ条件に必須の前提。性能値採用より先に実施すること）:
 
 ```sh
-cargo test -p backend-metal --release -- --ignored --nocapture   # gemm_auto_parity.rs・dispatch_boundary.rs 双方
-cargo test -p backend-cuda --release -- --ignored --nocapture    # gemm_auto.rs・cpu_cuda_*_parity.rs 双方
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture   # gemm_auto_parity.rs・dispatch_boundary.rs 双方
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture    # gemm_auto.rs・cpu_cuda_*_parity.rs 双方
 ```
 
 `tests/gemm_auto_parity.rs`（Metal）・`tests/gemm_auto.rs`／`tests/cpu_cuda_wmma_parity.rs`（CUDA）の
@@ -118,7 +118,7 @@ dtype・同一バイト数の転送のため比が壊れるほどの歪みはな
 | 768  | 0.370 | 0.783 | 2.116 | 1.367–2.236（50.6%） | MatrixUnit | PASS |
 | 1024 | 0.548 | 0.969 | 1.768 | 1.238–1.780（30.6%） | MatrixUnit | PASS |
 
-`parity` 列は「数値一致ゲート」（`cargo test -p backend-metal --release --test gemm_auto_parity -- --ignored`・
+`parity` 列は「数値一致ゲート」（`cargo test -p fandhe-ai-backend-metal --release --test gemm_auto_parity -- --ignored`・
 `--test dispatch_boundary -- --ignored ... dispatch_backend_auto_matches_reference_at_boundary_shapes`）が
 全 PASS したことに基づく（実測日時点で両ゲートとも 8 形状 × 該当ケース全て green）。
 
@@ -237,7 +237,7 @@ Appendix の生データによると、この揺れは `simdgroup_auto` 側（0.
 
 ## Appendix: Metal 境界形状 5 ラン生データ（#382）
 
-`cargo test -p backend-metal --release --test dispatch_boundary -- --ignored --nocapture
+`cargo test -p fandhe-ai-backend-metal --release --test dispatch_boundary -- --ignored --nocapture
 boundary_shapes_tflops_record` を 5 回反復した各ランの `dispatch_boundary_record` 出力から
 `path=tiled`／`path=simdgroup_auto` の TFLOPS と `simdgroup_auto_over_tiled` を抜粋する
 （`BenchReport::to_json` の完全な `report=` 行〈warmup/計測サンプル全数〉はサイズが大きいため
@@ -299,7 +299,7 @@ run2/3/5 の dim=768・1024 で tiled TFLOPS が run1/4 の約 1.7〜1.9 倍に�
 ## 未実施・後続作業
 
 - CUDA（DGX Spark GB10・NVRTC 搭載）の「実測結果」3 節（計測環境の CUDA 行・小形状表・大形状表）
-  は #388 ツリー配下の #389/#390 が `cargo test -p backend-cuda --release --test dispatch_boundary
+  は #388 ツリー配下の #389/#390 が `cargo test -p fandhe-ai-backend-cuda --release --test dispatch_boundary
   -- --ignored --nocapture` 実行後に埋める（本イシュー #382 では推定値を記入しない）
 - `METAL_SIMDGROUP_MIN_DIM` の妥当性判定（#382）節で要調査事項として記録した「384 未満（256 含む）
   でのクロスオーバー位置の再確認」は、閾値変更・Issue 起票を伴わない範囲では #382 のスコープ外

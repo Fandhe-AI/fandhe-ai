@@ -48,7 +48,7 @@ C-4（本番 GEMM ディスパッチ経路〈`gemm_auto.rs::CudaGemmAuto::run_f1
 いずれも `#[ignore]`（実機必須。`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]` で分離」）。実行コマンド（実機・§3）:
 
 ```bash
-cargo test -p backend-cuda --release --lib -- --ignored --nocapture jit_cache_bench
+cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --nocapture jit_cache_bench
 ```
 
 ### 2.1 スループット差を hard assert にしない理由
@@ -104,7 +104,7 @@ cargo test -p backend-cuda --release --lib -- --ignored --nocapture jit_cache_be
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda`（非 ignore テスト全 green。新規モジュールはコンパイル検査。`cargo test -p backend-cuda --lib -- --list` で `nvrtc::jit_cache_bench_tests::*` の 2 テストが登録されていることを確認済み）
+- `cargo test -p fandhe-ai-backend-cuda`（非 ignore テスト全 green。新規モジュールはコンパイル検査。`cargo test -p fandhe-ai-backend-cuda --lib -- --list` で `nvrtc::jit_cache_bench_tests::*` の 2 テストが登録されていることを確認済み）
 - `cargo test --workspace --all-features`（CI の test ジョブ相当。全 green）
 - `cargo build --workspace`（`build-no-cuda-toolkit` 契約: `#[ignore]` 分離によりビルド成立を確認）
 - `git diff --stat`（`kernels_*.rs`・tolerance 定数・parity ベースライン fixture に差分がないことを確認済み。`crates/backend-cuda/src/nvrtc.rs` への追加は `#[cfg(test)] mod` 登録 1 行〈コメント込み 11 行〉のみ）

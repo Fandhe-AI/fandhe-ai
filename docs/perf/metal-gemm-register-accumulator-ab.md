@@ -120,11 +120,11 @@ git checkout perf/745-metal-register-accumulator-tile
 
 # base（是正前 main のシェーダ）: gemm.metal のみ main のものへ差し替えて計測する
 git checkout origin/main -- crates/backend-metal/src/shaders/gemm.metal
-cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_base.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_base.txt
 
 # head（本イシューの是正後シェーダ）へ復元して計測する
 git checkout perf/745-metal-register-accumulator-tile -- crates/backend-metal/src/shaders/gemm.metal
-cargo run -p backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_head.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release > /tmp/gemm_bench_745_head.txt
 
 # 作業ツリーを head の状態へ戻す（上の checkout で index に変更が乗っていないか確認する）
 git status --short crates/backend-metal/src/shaders/gemm.metal
@@ -141,7 +141,7 @@ git status --short crates/backend-metal/src/shaders/gemm.metal
 ### 数値一致確認（採否判断より前に必須）
 
 ```sh
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 `gemm_dynamic_tile_parity`・`cpu_metal_parity`・`cpu_metal_f16_parity` 等が green であること（tolerance は

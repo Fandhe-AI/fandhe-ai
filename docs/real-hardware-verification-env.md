@@ -36,7 +36,7 @@ Mac 上では CUDA テストは実行不可（hardware 非対応）。
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-  cargo test -p backend-cuda --release -- --ignored --nocapture'
+  cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture'
 ```
 
 直接呼び出しの `ssh host cargo ...` は「コマンドが見つかりません」で失敗する。
@@ -108,12 +108,12 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --release -- --ignored --nocapture'
+  cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture'
 ```
 
 ### 4.2 パフォーマンス
 
-- cold build（`cargo build -p backend-cuda --release --all-targets`・外部 `CARGO_TARGET_DIR` 新規作成時）: 6.28s 実測
+- cold build（`cargo build -p fandhe-ai-backend-cuda --release --all-targets`・外部 `CARGO_TARGET_DIR` 新規作成時）: 6.28s 実測
 - warm build（キャッシュ残存後）: 0.1s 未満
 - `tests/device.rs` の `select_device_zero_on_real_hardware`（`--ignored`）: 実機で pass 済み
 
@@ -129,20 +129,20 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   setsid nohup env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --release -- --ignored --nocapture \
+  cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture \
   > $HOME/work/cuda-test.log 2>&1 < /dev/null & echo started'
 ssh "$CUDA_NODE" 'tail -5 $HOME/work/cuda-test.log'
 ```
 
 ### 4.5 setmaxnreg プローブ（#484）の外部タイムアウト運用契約
 
-`crates/backend-cuda/tests/setmaxnreg_probe_{dec,incdec}_{base,accel}_real_device.rs`（4 ファイル）は、命令拒否とハングを区別するための静的な `num_regs` 実行ゲートを持たない設計（`docs/cuda-tensor-core-design.md` §13.1「実行契約」節）。ロードに成功したカーネルは常に起動・同期するため、ハング対策は各テストファイルを個別に**外部タイムアウト付きで実行する運用契約**へ一本化している。4 ファイルとも `--test <ファイル名>` を単体指定し、`timeout` でラップして実行すること（`cargo test -p backend-cuda --release -- --ignored --nocapture` で一括実行しない）：
+`crates/backend-cuda/tests/setmaxnreg_probe_{dec,incdec}_{base,accel}_real_device.rs`（4 ファイル）は、命令拒否とハングを区別するための静的な `num_regs` 実行ゲートを持たない設計（`docs/cuda-tensor-core-design.md` §13.1「実行契約」節）。ロードに成功したカーネルは常に起動・同期するため、ハング対策は各テストファイルを個別に**外部タイムアウト付きで実行する運用契約**へ一本化している。4 ファイルとも `--test <ファイル名>` を単体指定し、`timeout` でラップして実行すること（`cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture` で一括実行しない）：
 
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  timeout 120 cargo test -p backend-cuda --release \
+  timeout 120 cargo test -p fandhe-ai-backend-cuda --release \
       --test setmaxnreg_probe_dec_base_real_device -- --ignored --nocapture'
 # 他 3 ファイル（setmaxnreg_probe_dec_accel_real_device / incdec_base / incdec_accel）も同様に個別実行する
 ```
@@ -196,8 +196,8 @@ ssh "$CUDA_NODE" 'nvidia-smi --query-compute-apps=pid,process_name,used_memory -
 Mac 上でそのまま実行：
 
 ```bash
-cargo test -p backend-metal --release -- --ignored --nocapture
-cargo bench -p backend-metal --bench gemm_metal_f32 --release -- --ignored
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
+cargo bench -p fandhe-ai-backend-metal --bench gemm_metal_f32 --release -- --ignored
 ```
 
 ### 7.2 PyTorch MPS 参照計測

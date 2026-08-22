@@ -19,9 +19,9 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
 （出典: `docs/spec/04-requirements.md:209-210` の 2026-08-08 追記・
 `docs/spec/05-tasks.md:322` TASK-9.4）。
 
-- **本文書が定める対象範囲（1〜2 節）は `facade::compat` として提供される
-  公開面を指す**（4.2 節参照。旧 `autodiff::compat` は TASK-9.4 で
-  `facade::compat` へ移設済み。**移行期間中は `autodiff::compat` に
+- **本文書が定める対象範囲（1〜2 節）は `fandhe_ai::compat` として提供される
+  公開面を指す**（4.2 節参照。旧 `fandhe_ai_autodiff::compat` は TASK-9.4 で
+  `fandhe_ai::compat` へ移設済み。**移行期間中は `fandhe_ai_autodiff::compat` に
   非推奨シム〈`#[deprecated]`〉を残し、既存コードのソース互換性を保つ**。
   4.3 節参照。codex-review PR #424 P1 是正）
 - `autodiff` の `Tape::new_with_ops`／`nn::Module` 実装等、compat 層が内部で
@@ -30,17 +30,17 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
   REQ-12「利用者向け融合制御 API」・REQ-9「互換 API 層」のいずれにも
   該当しない。技術的に `pub` であることと、利用者向けにサポートされる
   公開面であることは区別する
-- `facade::tape()`／`facade::tape_for(Device)`（composition root。
-  `crates/facade/src/lib.rs`）と `facade::compat::{array, Sequential}`
+- `fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`（composition root。
+  `crates/facade/src/lib.rs`）と `fandhe_ai::compat::{array, Sequential}`
   （本文書が定める compat 公開面）の 2 つが、利用者が使うことを想定する
   唯一の入口である
 - サポート境界の変更（内部クレートの直接利用をサポート対象に含める等）は
   正本 spec リポジトリ側での REQ-9／REQ-12 受け入れ基準の改定を要する
   （5 節「範囲拡張の手続き」と同じ手続き）
 - **内部クレートの `pub` enum への `#[non_exhaustive]` 付与は本節の適用例**
-  （codex-review PR #648 P1 是正）: `tensor_core::fusion::FusedOpKind`
+  （codex-review PR #648 P1 是正）: `fandhe_ai_tensor_core::fusion::FusedOpKind`
   （`crates/tensor-core/src/fusion/plan.rs`）は `facade` から再エクスポート
-  されず（`crates/facade/src/lib.rs` の `pub use tensor_core::{..}` に
+  されず（`crates/facade/src/lib.rs` の `pub use fandhe_ai_tensor_core::{..}` に
   `FusedOpKind` は含まれない）、`tensor-core` 自体も `publish = false`
   （ワークスペース `Cargo.toml`）のため、本節が定める意味での「サポート
   される公開面の利用者」は存在しない。既に安定した公開 enum への
@@ -60,7 +60,7 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   自作テンソル（`tensor-core`）の上に構築する（TASK-9.2a・#95）
 - **`compat::Sequential`**: Keras 慣習のレイヤー積み上げビルダー
   （`.add_linear()`／`.add_relu()` 等のメソッドチェーン、
-  `docs/spec/04-requirements.md:205`）。自作 NN モジュール（`autodiff::nn`）の
+  `docs/spec/04-requirements.md:205`）。自作 NN モジュール（`fandhe_ai_autodiff::nn`）の
   上に構築する（TASK-9.2a・#95）
 - **基本レイヤー・基本活性化関数の薄いラッパー**（TASK-9.1）:
   - Linear 層（TASK-9.1a・#91）
@@ -72,11 +72,11 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 
 - **`Sequential` の学習パラメータ取得 API・optimizer 接続**（#294）:
   `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/facade/src/
-  compat/sequential.rs`。TASK-9.4・#411 で `autodiff::compat` から移設。
+  compat/sequential.rs`。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から移設。
   4.2 節参照）経由で学習可能パラメータ（`Linear` 層の `weight`/`bias`）・
   勾配へアクセスできる。`Sequential::trainable_parameters`/
-  `Sequential::apply_parameters` と組み合わせ `autodiff::optim::Sgd`・
-  `autodiff::nn::optim::AdamW` へ接続する（4 節参照）。`fit()`/`compile()`
+  `Sequential::apply_parameters` と組み合わせ `fandhe_ai_autodiff::optim::Sgd`・
+  `fandhe_ai_autodiff::nn::optim::AdamW` へ接続する（4 節参照）。`fit()`/`compile()`
   等の高水準学習ループ API は 2 節のとおり引き続き対象外
 
 ## 2. 対象外（out of scope）
@@ -104,7 +104,7 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
     （破壊的変更。REQ-12「任意 `BackendOps` 実装を注入できる公開 API を
     設けない」・`crates/facade/tests/api_surface.rs` の機械検査と整合
     させるため。0 節・4.2 節参照）。`Sequential::predict` は既定バック
-    エンド（`facade::tape()`。TASK-2.5 ユーザー承認済み）へ透過的に
+    エンド（`fandhe_ai::tape()`。TASK-2.5 ユーザー承認済み）へ透過的に
     結線される
 - 対象外要望が生じた場合の受け皿は 2 通り。
   - 実装リポ側で追跡が完結する事項: `.claude/rules/out-of-scope-tracking.md`
@@ -137,7 +137,7 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 
 ### 4.1 TASK-9.2a（#95）時点の確定（履歴）
 
-- `compat::array()`／`compat::Sequential` は `autodiff::compat` モジュール
+- `compat::array()`／`compat::Sequential` は `fandhe_ai_autodiff::compat` モジュール
   （`crates/autodiff/src/compat/`）として実装した。当時の 9 クレート構成
   （`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・
   `onnx-interop`・`guardrail`・`self-repair`・`bench-harness`）に compat 専用
@@ -167,13 +167,13 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 
 - 10 クレート化（イシュー #52・`facade` クレート新設。TASK-9.3・#410 で
   composition root の実装が先行完了）を受け、compat 公開面（`compat::array`／
-  `compat::Sequential`）を `autodiff::compat` から **`facade::compat`
+  `compat::Sequential`）を `fandhe_ai_autodiff::compat` から **`fandhe_ai::compat`
   （`crates/facade/src/compat/`）へ移設した**。4.1 節が前提としていた
   「9 クレート構成に compat 専用クレートは存在しない」という制約が
   `facade` 新設により解消したための再配置である
 - `predict_with_ops`（任意 `BackendOps` 実装を注入できる推論入口）は本移設
-  で公開面から撤去した（破壊的変更）。`facade::compat::Sequential::predict`
-  は `facade::tape()`（composition root・既定 CPU・`CpuBackendOps`・融合
+  で公開面から撤去した（破壊的変更）。`fandhe_ai::compat::Sequential::predict`
+  は `fandhe_ai::tape()`（composition root・既定 CPU・`CpuBackendOps`・融合
   有効）へ結線済みであり、ops を明示指定する経路（旧 `predict_with_ops`）は
   REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」・
   `crates/facade/tests/api_surface.rs` の機械検査と矛盾するため維持しない
@@ -181,9 +181,9 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   `Linear`・`activation` 等）を `pub` API として提供し続けるが、これは
   「サポート境界」節（0 節）が定めるとおり内部クレートとしての公開であり、
   compat 層を経由しない直接利用はサポート対象外である
-- `facade::compat::Sequential` の `forward`／`bind` は `autodiff::Tape`
+- `fandhe_ai::compat::Sequential` の `forward`／`bind` は `fandhe_ai_autodiff::Tape`
   （内部クレートの生の型）を直接引数に取らず、`facade` 所有の newtype
-  `facade::Tape`（`crates/facade/src/lib.rs`）を取る。`Var`・
+  `fandhe_ai::Tape`（`crates/facade/src/lib.rs`）を取る。`Var`・
   `Gradients`・`AutodiffError`・`LinearVars`（`autodiff` 由来）・
   `Tensor`（`tensor-core` 由来）は迂回経路を持たない値型・エラー型のため
   `facade` の正式な公開契約として再エクスポートし、`compat` の公開
@@ -192,16 +192,16 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 
 ### 4.3 移行期間中のソース互換シム（codex-review PR #424 P1 是正）
 
-`compat` 公開面の唯一のサポート対象実装は 4.2 節のとおり `facade::compat`
-だが、TASK-9.4（#411）が `autodiff::compat` モジュール自体を互換 shim
-なしで削除したことで、`autodiff::compat::{array, Sequential,
+`compat` 公開面の唯一のサポート対象実装は 4.2 節のとおり `fandhe_ai::compat`
+だが、TASK-9.4（#411）が `fandhe_ai_autodiff::compat` モジュール自体を互換 shim
+なしで削除したことで、`fandhe_ai_autodiff::compat::{array, Sequential,
 SequentialVars}` を利用する既存コードが破壊されるという P1 指摘
 （codex-review PR #424・ベース側レビュー基準「公開 API の破壊的変更は
 P1」）を受けた是正である。
 
 - `crates/autodiff/src/compat/`（`mod.rs`／`array.rs`／`sequential.rs`）に
   移設前の実装を複製して残す（`facade` は `autodiff` に依存する構造の
-  ため、`autodiff::compat` から `facade::compat` へ委譲することはできない
+  ため、`fandhe_ai_autodiff::compat` から `fandhe_ai::compat` へ委譲することはできない
   ―― 依存方向が逆になり循環する。したがって委譲ではなく実装の複製に
   よってのみソース互換を保てる）
 - 復元対象は codex-review が指摘した 3 つの公開項目（`array`・
@@ -209,9 +209,9 @@ P1」）を受けた是正である。
   同じ挙動（`default_ops::naive_ops()` による naive CPU 参照実装）を
   維持する
 - `array`／`Sequential`／`SequentialVars` は `#[deprecated]` を付与し、
-  `facade::compat` への移行を促す（`crates/autodiff/src/compat/mod.rs`
+  `fandhe_ai::compat` への移行を促す（`crates/autodiff/src/compat/mod.rs`
   モジュール doc 参照）
-- 撤去予定: `facade::compat` への移行が完了し利用実績が確認でき次第、
+- 撤去予定: `fandhe_ai::compat` への移行が完了し利用実績が確認でき次第、
   別イシューで本シムごと削除する（`.claude/rules/out-of-scope-tracking.md`
   対象）
 
@@ -221,7 +221,7 @@ P1」）を受けた是正である。
 できる推論入口）を「REQ-12 違反のため復元しない」としていたが、これは
 誤りだった。REQ-12「任意 `BackendOps` 実装を注入できる公開 API を設けない」
 は 0 節が定める**サポート対象公開 API 面（= `facade`）**を対象とする制約
-であり、`autodiff::compat` の非推奨シムは移行期間中のソース互換シム
+であり、`fandhe_ai_autodiff::compat` の非推奨シムは移行期間中のソース互換シム
 （サポート対象公開面ではない）であるため REQ-12 の対象外である。codex-review
 はこの区別を踏まえ「`predict_with_ops` を `#[deprecated]` 付きで維持する」
 ことを P1 として指摘し、本節でこれに従い復元した。
@@ -231,12 +231,12 @@ P1」）を受けた是正である。
   復元し、`predict`（無引数版）はこれへ委譲する（移設前の実装と同一。
   4.2 節「PR #403 の P1 是正で `predict`/`predict_with_ops` に分離」の
   形へ戻す）
-- **`facade::compat::Sequential` 側には追加しない**（4.2 節の判断は維持。
+- **`fandhe_ai::compat::Sequential` 側には追加しない**（4.2 節の判断は維持。
   `facade` は唯一のサポート対象公開面であり、ops 注入経路を設けない
   という REQ-12 の制約はここでこそ効く）
 - 1 節「対象外（out of scope）」の「任意 `BackendOps` 実装を注入できる
-  推論入口は対象外」との記述は、`facade::compat`（サポート対象公開面）
-  の対象範囲についての記述であり、本節の `autodiff::compat` 非推奨
+  推論入口は対象外」との記述は、`fandhe_ai::compat`（サポート対象公開面）
+  の対象範囲についての記述であり、本節の `fandhe_ai_autodiff::compat` 非推奨
   シムでの復元と矛盾しない（0 節「技術的に `pub` であることと、利用者
   向けにサポートされる公開面であることは区別する」を参照）
 

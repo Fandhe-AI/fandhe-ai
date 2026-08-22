@@ -70,13 +70,13 @@ gh pr checkout <本イシューの実装 PR 番号>   # perf/601-cuda-smem-trans
 
 # 数値一致確認（TFLOPS/GB/s 比較より前に必須）。転置は演算を伴わない
 # 純置換のため、複合誤差判定ではなく bit 完全一致で検証する。
-cargo test -p backend-cuda --release --test transpose_parity -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release --test transpose_parity -- --ignored --nocapture
 # 既存回帰（本イシューはカーネル・tolerance 定数を変更していないことの
 # 実機側再確認）。
-cargo test -p backend-cuda --release --test parity_nonregression -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release --test parity_nonregression -- --ignored --nocapture
 
 # A/B 計測（5 回計測中央値。3 経路 x 4 サイズ）。
-cargo run -p backend-cuda --example gemm_transpose_bench --release
+cargo run -p fandhe-ai-backend-cuda --example gemm_transpose_bench --release
 ```
 
 ### nsight-compute バンクコンフリクト実測

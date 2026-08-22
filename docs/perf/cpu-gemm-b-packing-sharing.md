@@ -60,7 +60,7 @@ Apple M4 Max 実機から再現可能な状態にある（**本番採用の可�
 ```bash
 # before（main・本番既定の PerTaskPrivateB 相当経路）・after（`dispatch_shared_b` へ本番結線
 # した検証用ブランチ）それぞれで実行し、1024/2048/4096 の median_secs / TFLOPS を比較する。
-cargo test -p backend-cpu --release -- --ignored gemm_blis_baseline_pytorch_square_512_to_4096 --nocapture
+cargo test -p fandhe-ai-backend-cpu --release -- --ignored gemm_blis_baseline_pytorch_square_512_to_4096 --nocapture
 ```
 
 2048/4096 で非劣化が確認できない場合は、ロードバランス改善（ic チャンク粒度の細分化）を
@@ -95,7 +95,7 @@ num_threads(1)` で強制し `gemm_naive` と bit 完全一致することを確
 
 - 既存 `tests/gemm_blis_parity.rs`（`gemm_blis_parallel_matches_naive_bit_exact_across_thread_pools`
   ほか。num_threads = 1/3/16 を横断し bit 完全一致を検証）・`tests/gemm_epilogue_parity.rs` は
-  無変更で全 pass（`cargo test -p backend-cpu` 実測。141 lib 単体テスト・17 gemm_blis_parity・
+  無変更で全 pass（`cargo test -p fandhe-ai-backend-cpu` 実測。141 lib 単体テスト・17 gemm_blis_parity・
   14 gemm_epilogue_parity すべて green）
 - 新設した単体テスト（`crates/backend-cpu/src/gemm_blis/mod.rs`）:
   - `gemm_blis_parallel_single_thread_pool_matches_naive_bit_exact`（受け入れ条件 3 の直接検証。

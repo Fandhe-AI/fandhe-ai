@@ -43,7 +43,7 @@ backend-cpu 側（#163 のスコープ）」としており、双方が相手に
 | 論理コア数 | 12（`nproc`） |
 | OS | Linux 7.0.0-28-generic |
 | rustc | 1.96.0 (ac68faa20 2026-05-25) |
-| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release --test fusion_effect_perf -- --ignored --nocapture` |
+| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release --test fusion_effect_perf -- --ignored --nocapture` |
 | 計測プロトコル | `bench-harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3 記録。TASK-8.1 準拠）を **5 プロセス独立実行し、パターンごとに速度比の中央値を採用**（coding-rust.md「5 回計測の中央値」準拠。§0-a の再計測から） |
 | 計測バイナリ | `crates/backend-cpu/tests/fusion_effect_perf.rs`（`#[ignore]` 分離） |
 | 比較対象（非融合） | `NonFusedCpuOps`（同ファイル定義）——`CpuBackendOps` の全 per-op メソッドへ委譲しつつ `run_fused` はオーバーライドせずデフォルト `Unsupported` のまま残すラッパー。`autodiff::Tape` が per-op フォールバックへ倒れる |
@@ -56,7 +56,7 @@ backend-cpu 側（#163 のスコープ）」としており、双方が相手に
 ## 2. 再現コマンド
 
 ```bash
-RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release \
+RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release \
   --test fusion_effect_perf -- --ignored --nocapture
 ```
 

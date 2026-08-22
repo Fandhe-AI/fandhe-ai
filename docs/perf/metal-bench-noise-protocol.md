@@ -65,7 +65,7 @@ Metal 側は `MetalGemm::new_with_swizzle(ctx, bool)` で swizzle off/on の 2 �
 
 ```sh
 pmset -g therm
-cargo run -p backend-metal --example gemm_swizzle_ab_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_swizzle_ab_bench --release
 pmset -g therm
 ```
 
