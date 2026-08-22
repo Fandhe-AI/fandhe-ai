@@ -51,11 +51,30 @@ fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 
 理由:
 
-1. **`cargo publish` の自動 strip**: version なし・path のみの dev-dependency
-   は公開パッケージ生成時に自動的に取り除かれ、公開物（crates.io 上の
-   `.crate`）には一切残らない。crates.io の公開要件は通常依存
-   （`[dependencies]`）にのみ及ぶため、dev-dependency に registry
-   解決可能な version を持たせる必要はそもそもない。
+1. **`cargo package` の自動 strip（実測確認済み）**: version なし・path
+   のみの dev-dependency は公開パッケージ生成時に自動的に取り除かれ、
+   公開物（crates.io 上の `.crate`）には一切残らない。crates.io の公開
+   要件は通常依存（`[dependencies]`）にのみ及ぶため、dev-dependency に
+   registry 解決可能な version を持たせる必要はそもそもない。
+
+   **実測記録**（2026-08-22・#881 実装時。コミットしない一時検証。
+   `fandhe-ai-tensor-core` は crates.io 未公開のため `cargo package` の
+   依存解決を通すべく、`.cargo/config.toml`（一時作成・検証後削除）に
+   `[patch.crates-io] fandhe-ai-tensor-core = { path = "crates/tensor-core" }`
+   を設定した上で `cargo package -p fandhe-ai-backend-cpu --no-verify
+   --allow-dirty` を実行し、生成された `.crate`（`target/package/
+   fandhe-ai-backend-cpu-0.3.0.crate`）を展開して同梱の `Cargo.toml`
+   （cargo が自動生成する normalize 済みマニフェスト）を確認した。
+   結果、`[dev-dependencies]` セクションと `[target.'cfg(target_os =
+   "macos")'.dev-dependencies]` セクションはいずれも空で出力され、
+   本来の `Cargo.toml` にあった `bench-harness`・`fandhe-ai-backend-cuda`・
+   `fandhe-ai-autodiff` の path-only dev-dependency 3 件は完全に除去
+   されていた（`[dependencies]` 側の `fandhe-ai-tensor-core`・`half`・
+   `rayon` は version 付きでそのまま残存）。これにより、通常の
+   `[dev-dependencies]` に加えて macOS 限定 target dev-dependencies
+   （`backend-metal` の場合に相当する形）も strip 対象であることを
+   確認した。検証用の `.cargo/config.toml`・`target/package/` は
+   検証後に削除済み（コミットに含まれない）。
 2. **循環依存の解消**: 上表のとおり `backend-cpu ⇄ backend-cuda`・
    `backend-cpu ⇄ backend-metal`（数値一致回帰テストが相互にテスト対象
    クレートを dev-dependency として参照するための構成。REQ-2）は
@@ -88,8 +107,10 @@ fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
    （①・② の全 5 クレートに依存。facade/Cargo.toml [dependencies] 参照）
 ```
 
-- ① `fandhe-ai-tensor-core`: 依存連鎖の起点（他の公開クレートへの
-  `[dependencies]` を持たない）。最初に publish する。
+- ① `fandhe-ai-tensor-core`: 依存連鎖の起点（`crates/tensor-core/Cargo.toml`
+  実測確認済み。`[dependencies]` は許容依存の `half`（外部クレート）のみで
+  他の公開クレートへの依存を持たず、`[dev-dependencies]` セクション自体が
+  存在しない）。最初に publish する。
 - ② の 4 クレート: いずれも `fandhe-ai-tensor-core` のみを公開クレート間の
   `[dependencies]` として持つ（`backend-cuda`・`backend-metal` は加えて
   許容依存区分の外部クレート `cudarc`・`objc2` 系を持つが、これらは
@@ -107,7 +128,8 @@ fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 **バンプ手順**:
 
 1. ルート `Cargo.toml` の `[workspace.package] version = "x.y.z"` を更新する。
-2. 公開 6 クレート間の内部依存 `version = "=x.y.z"`（#881 実装時点で計 10 箇所:
+2. 公開 6 クレート間の内部依存 `version = "=x.y.z"`（#881 実装時点で計 9 箇所。
+   `grep -n 'version = "=0.3.0"' crates/*/Cargo.toml` で実測確認済み:
    `autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal` 各 1 箇所の
    `fandhe-ai-tensor-core` 依存 + `facade` の 5 箇所〈`fandhe-ai-tensor-core`・
    `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
@@ -148,12 +170,15 @@ required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
 
 `onnx-interop`・`guardrail`・`self-repair`・`bench-harness`（いずれも
 `publish.workspace = true` が現状 `false` を継承）への依存（dev-dependency
-含む）は、公開 6 クレートの `Cargo.toml` 全件を実測確認した時点
-（#881 実装時）で以下のいずれかに限られる:
+含む）は、公開 6 クレート（`tensor-core`・`autodiff`・`backend-cpu`・
+`backend-cuda`・`backend-metal`・`facade`）の `Cargo.toml` 全件を実測確認
+した時点（#881 実装時）で以下のいずれかに限られる:
 
 - `[dev-dependencies]` への version なし・path のみの依存
   （`backend-cpu`・`backend-cuda`・`backend-metal`・`autodiff`・`facade` の
   `bench-harness` 依存）
+- `tensor-core` は `[dev-dependencies]` セクション自体を持たず、非公開
+  クレートへの依存は皆無（3 節 ① の実測記録参照）
 
 これらは 2 節と同じ理由（`cargo publish` 時の自動 strip）により公開物に
 一切残らず、非公開クレートへの依存が公開クレートの publish を阻害する
@@ -166,3 +191,7 @@ required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
   済みだった公開クレート間 `[dependencies]` の version 併記（codex-review
   P1 指摘対応）を正式方針として確定し、`[dev-dependencies]` については
   version を外す方針（strip 方式）を新たに確定した。
+- 2026-08-22（#881・同日追補）: `[patch.crates-io]` 一時設定による
+  `cargo package` 実測で strip 方針（2 節）を裏付け、内部依存 version
+  箇所数の誤記（10 → 9）を修正し、`tensor-core` の `Cargo.toml` 実測
+  （非公開クレートへの依存なし・依存連鎖の起点であること）を確認した。
