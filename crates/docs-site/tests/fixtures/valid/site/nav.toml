@@ -1,0 +1,24 @@
+[site]
+title = "Fixture Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Introduction"
+source = "site/guide/intro.md"
+path = "/guide/intro/"
+
+[[section.page]]
+title = "Getting Started"
+source = "site/guide/getting-started.md"
+path = "/guide/getting-started/"
+
+[[section]]
+title = "Reference"
+
+[[section.page]]
+title = "API"
+source = "site/reference/api.md"
+path = "/reference/api/"
