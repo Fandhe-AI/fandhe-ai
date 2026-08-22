@@ -23,7 +23,7 @@ facade = { path = "../rust-ai-library/crates/facade" }
 利用者が直接依存すべきクレートは `facade` だけです。`tensor-core`・
 `autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal` は内部クレートで
 あり、直接の依存・利用はサポート対象外です（詳細は
-[API Reference](/rust-ai-library/api/) を参照）。
+[API Reference](/api/) を参照）。
 
 ## 最小コード例
 
@@ -38,20 +38,25 @@ use facade::compat::{Sequential, array};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // numpy `np.array` 慣習でテンソルを組み立てる（2 行 4 列のバッチ入力）。
+    // 実データ・shape 検査は `tensor_core::Tensor::new` へ委譲される
+    // （compat 層は薄いラッパーに徹する。REQ-9）。
     let input = array(vec![
         vec![0.1_f32, 0.2, 0.3, 0.4],
         vec![0.5_f32, 0.6, 0.7, 0.8],
     ])?;
 
     // Keras `Sequential` 慣習でレイヤーを積み上げる（対象は Linear・
-    // ReLU/Sigmoid/Tanh の 3 種限定）。
+    // ReLU/Sigmoid/Tanh の 3 種限定。`docs/compat-api-scope.md` §1）。
+    // `add_linear` は `in_features == 0` を拒否するため `Result` を返し
+    // `?` で連鎖できる（`Linear::new` への委譲。`autodiff::nn::linear`）。
     let model = Sequential::new()
         .add_linear(4, 8, /* seed = */ 42)?
         .add_relu()
         .add_linear(8, 2, /* seed = */ 43)?;
 
-    // 推論の入口。内部で既定バックエンド（CPU）の Tape を構築して
-    // forward するだけの 1 ステップ呼び出し。
+    // 推論の入口。内部で `facade::tape()`（既定 CPU・`CpuBackendOps`・
+    // 融合有効）を構築し forward するだけの 1 ステップ呼び出し
+    // （`Sequential::predict` のドキュメントコメント参照）。
     let output = model.predict(&input)?;
 
     println!("output shape: {:?}", output.shape());
@@ -59,12 +64,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+このコードブロックは `crates/facade/examples/getting_started.rs` と
+バイト同一です（`cargo run --example getting_started` で実行確認済み。
+出力は `output shape: [2, 2]`）。
+
 `add_linear` の第 3 引数はパラメータ初期化のシード値です。同じシードを
 渡せば毎回同じ初期値になる決定的な構築になります。
 
 学習（勾配取得・パラメータ更新）が必要な場合は `Sequential::bind` が返す
 `SequentialVars` 経由で `LinearVars`（勾配取得の入口）へアクセスできます。
-詳細は [API Reference の compat API](/rust-ai-library/api/compat/) を
+詳細は [API Reference の compat API](/api/compat/) を
 参照してください。
 
 ## バックエンド切替
@@ -83,8 +92,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tape
         }
         Err(err) => {
-            // driver 不在・範囲外 ordinal 等は fail-fast でエラーが返る。
-            // ここでは CPU へフォールバックして実行を継続する。
+            // driver 不在・範囲外 ordinal 等は fail-fast で `BackendError`
+            // が返る（`panic!`/`unwrap()` しない。`.claude/rules/coding-rust.md`）。
+            // ここでは CPU へフォールバックして example の実行を継続する。
             println!("Device::Cuda(0) unavailable ({err}); falling back to Device::Cpu");
             tape_for(Device::Cpu)?
         }
@@ -93,15 +103,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = tape.var(&facade::Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[1, 4])?);
     let loss = input.sum(None)?;
     let grads = tape.backward(&loss)?;
-    let input_grad = grads.get(&input)?.expect("入力は loss に寄与している");
+    // 入力は loss に直接寄与しているため勾配が必ず存在するはずだが、本番経路で
+    // `unwrap()`/`expect()` を使わない方針（`.claude/rules/coding-rust.md`）に
+    // 合わせ `?` で型付きエラーとして伝播する。
+    let input_grad = grads
+        .get(&input)?
+        .ok_or("input has no gradient after backward")?;
 
     println!("input grad shape: {:?}", input_grad.shape());
     Ok(())
 }
 ```
 
-このコードは `crates/facade/examples/backend_switching.rs`（`cargo run
---example backend_switching` で実行確認済み）と同一です。
+このコードブロックは `crates/facade/examples/backend_switching.rs` と
+バイト同一です（`cargo run --example backend_switching` で実行確認済み。
+出力は 1 行目が `Device::Cuda(0) unavailable (...); falling back to
+Device::Cpu`〈GitHub ホステッド CI・CUDA 非搭載環境の場合〉、2 行目が
+`input grad shape: [1, 4]`）。
 
 `Device::Cuda(ordinal)`／`Device::Metal`（macOS 限定）はいずれも構築時に
 デバイスの存在検証を行い、ドライバ不在・範囲外 ordinal の場合はエラーを

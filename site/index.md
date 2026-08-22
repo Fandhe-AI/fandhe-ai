@@ -25,11 +25,11 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 バックエンド切替は feature フラグを使わない **cfg ベース**です。CPU は常に
 利用可能な既定バックエンドで、CUDA・Metal は実行時にデバイスの存在を検証し、
 利用できない場合はエラーを返します（自動フォールバックはしません）。詳細は
-[Getting Started](/rust-ai-library/getting-started/) を参照してください。
+[Getting Started](/getting-started/) を参照してください。
 
 ## 次に読むもの
 
-- [Getting Started](/rust-ai-library/getting-started/): インストール・最小
+- [Getting Started](/getting-started/): インストール・最小
   コード例・バックエンド切替
-- [API Reference](/rust-ai-library/api/): `compat` API・guardrail／self-repair
+- [API Reference](/api/): `compat` API・guardrail／self-repair
   CLI の要点

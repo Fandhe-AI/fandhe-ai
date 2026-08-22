@@ -16,7 +16,7 @@
 
 - `facade::tape()` / `facade::tape_for(Device)`: composition root。
   `Device` 識別子を受け取り、対応するバックエンドへ結線した `Tape` を
-  構築します（詳細は [Getting Started](/rust-ai-library/getting-started/)
+  構築します（詳細は [Getting Started](/getting-started/)
   のバックエンド切替節）
 - `facade::compat::{array, Sequential}`: numpy/Keras 慣習の互換 API 層
 
@@ -26,7 +26,7 @@
 
 ## ページ一覧
 
-- [compat API](/rust-ai-library/api/compat/): `compat::array`・
+- [compat API](/api/compat/): `compat::array`・
   `compat::Sequential` の要点
-- [guardrail / self-repair CLI](/rust-ai-library/api/cli/): ガードレール
+- [guardrail / self-repair CLI](/api/cli/): ガードレール
   判定・自己修復ループの CLI コマンド要点

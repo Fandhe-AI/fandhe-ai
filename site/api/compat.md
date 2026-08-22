@@ -13,12 +13,22 @@ numpy `np.array` 慣習でテンソルを組み立てます。
 ```rust
 use facade::compat::array;
 
-// 1-D: `Vec<f32>` → shape [n]
-let v = array(vec![1.0_f32, 2.0, 3.0])?;
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 1-D: `Vec<f32>` → shape [n]
+    let v = array(vec![1.0_f32, 2.0, 3.0])?;
+    println!("1-D shape: {:?}", v.shape());
 
-// 2-D: `Vec<Vec<f32>>` → 行優先で平坦化し shape [rows, cols]
-let m = array(vec![vec![1.0_f32, 2.0], vec![3.0_f32, 4.0]])?;
+    // 2-D: `Vec<Vec<f32>>` → 行優先で平坦化し shape [rows, cols]
+    let m = array(vec![vec![1.0_f32, 2.0], vec![3.0_f32, 4.0]])?;
+    println!("2-D shape: {:?}", m.shape());
+
+    Ok(())
+}
 ```
+
+このコードブロックは `crates/facade/examples/array_shapes.rs` と
+バイト同一です（`cargo run --example array_shapes` で実行確認済み。
+出力は `1-D shape: [3]` ／ `2-D shape: [2, 2]`）。
 
 行長が不揃い（jagged）な 2-D 入力は、計算前に検証してエラーを返します。
 
@@ -60,4 +70,4 @@ Keras `Sequential` 慣習でレイヤーを積み上げるビルダーです。`
 のは `facade::tape()` / `facade::tape_for(Device)` だけです。
 
 コード例・動作確認済みの一次ソースは
-[Getting Started](/rust-ai-library/getting-started/) を参照してください。
+[Getting Started](/getting-started/) を参照してください。

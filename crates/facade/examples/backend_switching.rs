@@ -28,16 +28,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // が返る（`panic!`/`unwrap()` しない。`.claude/rules/coding-rust.md`）。
             // ここでは CPU へフォールバックして example の実行を継続する。
             println!("Device::Cuda(0) unavailable ({err}); falling back to Device::Cpu");
-            tape_for(facade::Device::Cpu)?
+            tape_for(Device::Cpu)?
         }
     };
 
     let input = tape.var(&facade::Tensor::new(vec![1.0_f32, 2.0, 3.0, 4.0], &[1, 4])?);
     let loss = input.sum(None)?;
     let grads = tape.backward(&loss)?;
+    // 入力は loss に直接寄与しているため勾配が必ず存在するはずだが、本番経路で
+    // `unwrap()`/`expect()` を使わない方針（`.claude/rules/coding-rust.md`）に
+    // 合わせ `?` で型付きエラーとして伝播する。
     let input_grad = grads
         .get(&input)?
-        .expect("入力は loss に直接寄与しているため勾配が必ず存在する");
+        .ok_or("input has no gradient after backward")?;
 
     println!("input grad shape: {:?}", input_grad.shape());
     Ok(())
