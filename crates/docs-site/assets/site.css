@@ -135,6 +135,14 @@ a {
   align-items: center;
 }
 
+/* JS 配線前・配線失敗時は hidden 属性で非表示にする fail-closed 契約（イシュー #871）。
+   author stylesheet の `display: flex` はブラウザ既定の `[hidden] { display: none }` より
+   詳細度で優先されるため、hidden 属性下でも表示されてしまう。明示的に上書きして
+   「配線完了後にのみ表示する」契約を満たす。 */
+.docs-search[hidden] {
+  display: none;
+}
+
 .docs-search label {
   position: absolute;
   width: 1px;
