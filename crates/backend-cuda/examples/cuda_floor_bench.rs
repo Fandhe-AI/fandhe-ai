@@ -706,6 +706,32 @@ fn main() {
         }
     }
 
+    // イシュー #856: `mma_f16` の上記ブロックと同型の起動時診断を
+    // `wmma_tf32_staged`（TF32 opt-staged 経路）へも追加する。`CudaGemm::new`
+    // （本番既定コンストラクタ。`tiled_gemm` がこの経路）が
+    // `wmma_tf32_staged_swizzle_group_width()`/`wmma_tf32_staged_swizzle_
+    // applies(m, n, k)` の唯一の呼び出し元となる（両アクセサとも本バイナリ
+    // 以外に呼び出し元を持たないままだとドキュメンテーションコメントの
+    // 「起動時診断が可観測にするために使う」記述と乖離するため、その記述を
+    // 実際に成立させる）。
+    if let Some(g) = &tiled_gemm {
+        println!(
+            "wmma_tf32_staged kernel: threadblock swizzle variant wired into the production \
+             constructor (CudaGemm::new; issue #856); size-conditional dispatch applies for \
+             M=N square shapes with M=N>=4096 and K>=4096 \
+             (observed wmma_tf32_staged_swizzle_group_width() = {:?}) \
+             — see docs/perf/cuda-gemm-swizzle-ab.md §7.2/§7.7.6.",
+            g.wmma_tf32_staged_swizzle_group_width()
+        );
+        for &size in JUDGED_SIZES.iter().chain(REFERENCE_ONLY_SIZES.iter()) {
+            let size_u32 = size as u32;
+            println!(
+                "  wmma_tf32_staged swizzle_applies({size}, {size}, {size}) = {}",
+                g.wmma_tf32_staged_swizzle_applies(size_u32, size_u32, size_u32)
+            );
+        }
+    }
+
     // `run_wmma_tf32`/`run_f16` は opt カーネル（共有メモリ・タイル最適化版）
     // が `new` 時点で利用不能な場合、基本版へ「公開シグネチャ・呼び出し側の
     // 挙動を変えずに」自動フォールバックする（`gemm.rs::CudaGemm::

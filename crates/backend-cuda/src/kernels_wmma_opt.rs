@@ -1193,11 +1193,17 @@ static WMMA_TF32_F32_STAGED_SOURCE: LazyLock<String> = LazyLock::new(|| {
 ///
 /// # 呼び出し元
 ///
-/// `gemm.rs::CudaGemm::new_with_tf32_staged_swizzle`
-/// （`internal-diagnostics` feature ゲート）のみであり、本番ディスパッチ
-/// 経路（`ops.rs`／`gemm_auto.rs`／`run_wmma_tf32` の既定選択）からは
-/// 呼ばれない（実装計画 3 節「本番ディスパッチ経路は 1 バイトも変更
-/// しない」）。**`wmma_tf32_f32_staged_source()` 自体は変更しない**
+/// **イシュー #856（2026-08-22 GB10 実機 A/B・§7.4.1 サイズ条件付き新
+/// 基準で採用）で本番結線済み**: `gemm.rs::CudaGemm::new`（本番既定
+/// コンストラクタ・feature 非依存）が SM 数実測時に fail-soft でこの
+/// 変種を追加コンパイルし、`run_wmma_tf32`／`launch_wmma_tf32` の staged
+/// 分岐が形状ごとに `swizzle::should_apply_swizzle` で base／変種の
+/// いずれを起動するか判定する（`gemm.rs::CudaGemm::
+/// should_launch_wmma_tf32_staged_swizzle` 参照）。加えて
+/// `gemm.rs::CudaGemm::new_with_tf32_staged_swizzle`（`internal-diagnostics`
+/// feature ゲート・明示幅の強制適用診断入口）からも引き続き呼ばれる。
+/// `ops.rs`／`gemm_auto.rs` の経路選択自体（staged→opt→basic の 3 段
+/// フォールバック）は無変更。**`wmma_tf32_f32_staged_source()` 自体は変更しない**
 /// （`wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_wmma_tf32_f32_staged_source`
 /// が回帰検査する）。
 ///
@@ -1221,14 +1227,12 @@ static WMMA_TF32_F32_STAGED_SOURCE: LazyLock<String> = LazyLock::new(|| {
 /// 固定テンプレート文字列内の数値 `format!` のみに限定する
 /// （`mma_f16_source_with_swizzle` と同一契約）。
 ///
-/// `#[allow(dead_code)]` について: 本番ビルド（`internal-diagnostics`
-/// feature 既定 off）からの唯一の呼び出し元
-/// `gemm.rs::CudaGemm::new_with_tf32_staged_swizzle` が同 feature で
-/// ゲートされているため、`cargo build`（feature 指定なし）では呼び出し元
-/// が存在せず dead-code lint が誤検出する（`mma_f16_source_with_swizzle`
-/// と同じパターン）。本関数自体は `#[cfg(test)]` 下のソース生成検査
-/// テスト（本ファイル末尾）からは feature 非依存に呼ばれ続ける。
-#[allow(dead_code)]
+/// イシュー #856 追記: 旧 `#[allow(dead_code)]`（唯一の呼び出し元が
+/// `internal-diagnostics` feature 限定の `new_with_tf32_staged_swizzle`
+/// のみだった時期の対応）は、本番既定コンストラクタ `gemm.rs::
+/// CudaGemm::new`（feature 非依存）が SM 数実測時にこの関数を直接呼ぶ
+/// ようになったため撤去した（`cargo build` feature 指定なしでも呼び出し元
+/// が存在し dead-code lint は発火しない）。
 pub fn wmma_tf32_f32_staged_source_with_swizzle(
     group_width: u32,
 ) -> Result<String, crate::error::CudaError> {

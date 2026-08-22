@@ -87,6 +87,32 @@ const WMMA_TF32_OPT_BLOCK_DIM: (u32, u32, u32) = (kernels_wmma_opt::WMMA_TF32_OP
 const WMMA_TF32_STAGED_BLOCK_DIM: (u32, u32, u32) =
     (kernels_wmma_opt::WMMA_TF32_STAGED_THREADS, 1, 1);
 
+/// `swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/`SWIZZLE_APPLY_MIN_N_BLOCKS` は
+/// f16 `mma.sync` 経路のブロックタイル（64×128）から導出された定数
+/// （`gemm_mma.rs` 冒頭の同型 `const _: () = assert!(...)` 参照）であり、
+/// TF32 opt-staged のブロックタイル（64×64。`WMMA_TF32_STAGED_BLOCK_M/N`）
+/// からの再導出値とは一致しない（N 方向: `4096/64=64` に対し定数は 32）。
+/// `should_apply_swizzle`（`swizzle.rs`）の実効判定は正方形条件
+/// （`m == n && m >= SWIZZLE_APPLY_MIN_SQUARE_DIM`）が成立すれば軸別
+/// ブロック数下限・総タイル数下限は自動的に成立する冗長条件（`swizzle.rs::
+/// should_apply_swizzle` ドキュメンテーションコメント「呼び出し元が
+/// `mma_launch_config` と同一の `div_ceil`〜」節参照）ため、TF32 staged の
+/// より細かいブロックタイル（64×64）から導出される軸別ブロック数は f16 の
+/// 共有定数を**必ず上回る**（`4096/64=64 >= 64`・`4096/64=64 >= 32`）。
+/// 厳密な等式ではなく不等式で検証するのはこの理由による（イシュー #856。
+/// `gemm_mma.rs` の等式 assert と異なる形になる根拠を明記する）。
+const _: () = assert!(
+    4096 / kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M >= crate::swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS
+        && 4096 / kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N
+            >= crate::swizzle::SWIZZLE_APPLY_MIN_N_BLOCKS
+        && crate::swizzle::SWIZZLE_APPLY_MIN_K == 4096
+        && crate::swizzle::SWIZZLE_APPLY_MIN_SQUARE_DIM == 4096,
+    "swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS/SWIZZLE_APPLY_MIN_N_BLOCKS が WMMA_TF32_STAGED_BLOCK_M/N \
+     から導出される M=N=K=4096 相当のブロック数を上回ってしまっています（TF32 staged 側の \
+     should_apply_swizzle 判定が想定より狭くなる）。swizzle.rs／WMMA_TF32_STAGED_BLOCK_M/N を \
+     確認してください"
+);
+
 thread_local! {
     /// [`CudaGemm::run_tiled_bias_act_f32`] が実際に GPU カーネルを起動した
     /// 回数（イシュー #599）。
@@ -187,6 +213,32 @@ pub struct CudaGemm {
     /// `wmma_tf32_staged` が `None` の場合の失敗理由。`wmma_tf32_opt_error`
     /// と同じ理由で文字列化して保持する。
     wmma_tf32_staged_error: Option<String>,
+    /// イシュー #856。GB10 実機 A/B（2026-08-22・§7.4.1 サイズ条件付き
+    /// 新基準で採用: 4096 で ×1.54・512〜2048 劣化 5% 以内。
+    /// `docs/perf/cuda-gemm-swizzle-ab.md` §7.6/§7.7.6 参照）を根拠に
+    /// `gemm_mma.rs::CudaMmaGemm::mma_f16_swizzle`（イシュー #782）と
+    /// 同型のサイズ条件付き適用機構を `wmma_tf32_staged` へ追加結線した
+    /// swizzle 変種ハンドル。`Some(_)` は [`new`](Self::new) が
+    /// `wmma_tf32_staged` のコンパイルに成功し、かつ `device.
+    /// multiprocessor_count()` の実測に成功した場合（`run_wmma_tf32`／
+    /// `launch_wmma_tf32` の staged 分岐は形状ごとに
+    /// [`Self::should_launch_wmma_tf32_staged_swizzle`] で本フィールドと
+    /// `wmma_tf32_staged`（base）のいずれを起動するか判定する）。`None` は
+    /// `wmma_tf32_staged` 自体が `None`（staged 経路が使用不能）、SM 数が
+    /// 取得できなかった場合、または変種コンパイルが失敗した場合
+    /// （fail-soft。理由は [`Self::wmma_tf32_staged_swizzle_unavailable_reason`]
+    /// 参照）のいずれか。
+    wmma_tf32_staged_swizzle: Option<CudaFunction>,
+    /// [`Self::wmma_tf32_staged_swizzle`] に適用したグルーピング幅
+    /// （`swizzle::select_swizzle_group_width`。`examples/cuda_floor_bench.rs`
+    /// の起動時診断が可観測にするために使う。`gemm_mma.rs::
+    /// CudaMmaGemm::swizzle_group_width` と同型）。
+    wmma_tf32_staged_swizzle_group_width: Option<u32>,
+    /// [`new`](Self::new) が `wmma_tf32_staged`（base）のコンパイルに成功し
+    /// SM 数実測にも成功したにもかかわらず、swizzle 変種のソース生成・
+    /// NVRTC コンパイルに失敗した場合の理由文字列（`wmma_tf32_staged_error`
+    /// と同型の fail-soft 方針。base の可用性へは波及させない）。
+    wmma_tf32_staged_swizzle_error: Option<String>,
 }
 
 /// GEMM 呼び出しの `m`/`n`/`k` とホスト側スライス長の整合性を検証する。
@@ -707,6 +759,39 @@ impl CudaGemm {
                 Err(e) => (None, Some(e.to_string())),
             };
 
+        // イシュー #856: `wmma_tf32_staged`（base）のコンパイルに成功し、
+        // かつ SM 数が実測できた場合のみ swizzle 変種を追加コンパイルする
+        // （`gemm_mma.rs::CudaMmaGemm::new` の `mma_f16_swizzle` 分岐と同型の
+        // fail-soft 判断。swizzle はあくまで L2 再利用の性能最適化であり
+        // base の可用性とは独立であるべきため、ソース生成・NVRTC
+        // コンパイルいずれの失敗も `new` 全体の `Err` へ波及させない）。
+        let (
+            wmma_tf32_staged_swizzle,
+            wmma_tf32_staged_swizzle_group_width,
+            wmma_tf32_staged_swizzle_error,
+        ) = match (&wmma_tf32_staged, device.multiprocessor_count()) {
+            (Some(_), Some(num_sms)) => {
+                let group_width = crate::swizzle::select_swizzle_group_width(
+                    num_sms,
+                    kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M,
+                    kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
+                );
+                match kernels_wmma_opt::wmma_tf32_f32_staged_source_with_swizzle(group_width)
+                    .and_then(|src| {
+                        let ptx = compile_ptx(&src, arch)?;
+                        let func = device
+                            .context()
+                            .load_module(ptx)?
+                            .load_function("gemm_wmma_tf32_staged")?;
+                        Ok(func)
+                    }) {
+                    Ok(func) => (Some(func), Some(group_width), None),
+                    Err(e) => (None, None, Some(e.to_string())),
+                }
+            }
+            _ => (None, None, None),
+        };
+
         Ok(Self {
             stream: device.stream().clone(),
             naive_f32,
@@ -720,21 +805,38 @@ impl CudaGemm {
             wmma_tf32_opt_error,
             wmma_tf32_staged,
             wmma_tf32_staged_error,
+            wmma_tf32_staged_swizzle,
+            wmma_tf32_staged_swizzle_group_width,
+            wmma_tf32_staged_swizzle_error,
         })
     }
 
     /// `device` 上で、L2 再利用のためのタイル→SM 割り当てスウィズル
     /// （イシュー #741。f16 経路の #499・`gemm_mma.rs::
-    /// CudaMmaGemm::new_with_swizzle` と同一設計）を TF32 opt-staged
-    /// カーネルへ適用した変種を NVRTC コンパイルし保持するハンドルを
-    /// 構築する（**opt-in・未計測の実験実装**）。
+    /// CudaMmaGemm::new_with_swizzle` と同一設計）を明示指定の
+    /// `group_width` で TF32 opt-staged カーネルへ**強制適用**した変種を
+    /// NVRTC コンパイルし保持するハンドルを構築する（**診断用・明示幅
+    /// 指定の入口**。[`new`](Self::new)（本番既定コンストラクタ。イシュー
+    /// #856 で GB10 実機 A/B（§7.4.1 サイズ条件付き新基準で採用）を根拠に
+    /// サイズ条件付き適用を結線済み）とは異なり、本コンストラクタは
+    /// 形状・SM 数の判定を経ずに指定幅を全サイズへ強制適用するため、A/B
+    /// 計測・bit 一致検証で候補幅 `{8, 16}` を個別に指定・強制適用したい
+    /// 場合の用途に限定される。`gemm_mma.rs::CudaMmaGemm::new_with_swizzle`
+    /// と同型の位置づけ）。
     ///
     /// 手順: [`new`](Self::new) で通常構築した後、`wmma_tf32_staged`
     /// スロットのみを `kernels_wmma_opt::
     /// wmma_tf32_f32_staged_source_with_swizzle(group_width)` のコンパイル
     /// 結果へ差し替える。naive/tiled・WMMA 基本版・opt 版の各スロットは
     /// [`new`](Self::new) の構築結果をそのまま保持し、swizzle 変種の
-    /// コンパイル失敗の影響を受けない。
+    /// コンパイル失敗の影響を受けない。**`new` が独立に構築したサイズ
+    /// 条件付き動的変種（`wmma_tf32_staged_swizzle`）は破棄し
+    /// `wmma_tf32_staged_swizzle_group_width` のみへ明示指定の
+    /// `group_width` を保持する**（`should_launch_wmma_tf32_staged_swizzle`
+    /// の `None` 分岐が形状に関わらず常に `true` を返すようにするため。
+    /// 破棄しないと、サイズ条件付き適用条件を満たす形状で `new` 由来の
+    /// 動的幅（本関数の明示指定と異なりうる）へ黙ってすり替わり、A/B
+    /// 計測が意図した固定幅を計測できなくなる）。
     ///
     /// **変種のコンパイル失敗は base へ黙ってフォールバックせず `Err` を
     /// 返す**（`run_wmma_tf32` の 3 段選択のように `None` へ退避すると、
@@ -763,9 +865,10 @@ impl CudaGemm {
     /// （`gemm_mma.rs::CudaMmaGemm::new_with_swizzle` と同じ feature ゲート
     /// 方針。`Cargo.toml` の `[features]` 参照）。
     /// `examples/gemm_wmma_tf32_swizzle_bench.rs`（`Cargo.toml` の
-    /// `required-features` で同 feature を要求）専用の入口であり、実機
-    /// A/B 計測後に採用確定した段階で feature ゲートを外し安定 API へ
-    /// 昇格する（`docs/perf/cuda-gemm-swizzle-ab.md` 参照）。
+    /// `required-features` で同 feature を要求）・bit 一致テスト
+    /// （本ファイル下部 `wmma_tf32_staged_swizzle_variant_matches_base_
+    /// bit_exact_output`）専用の入口（`docs/perf/cuda-gemm-swizzle-ab.md`
+    /// §7 参照）。
     #[cfg(feature = "internal-diagnostics")]
     pub fn new_with_tf32_staged_swizzle(
         device: &CudaDevice,
@@ -783,6 +886,22 @@ impl CudaGemm {
 
         gemm.wmma_tf32_staged = Some(wmma_tf32_staged);
         gemm.wmma_tf32_staged_error = None;
+        // イシュー #856: `wmma_tf32_staged` 自体を明示指定の group_width で
+        // 強制変種へ差し替えたため、`new`（本番既定コンストラクタ）由来の
+        // サイズ条件付き動的変種（`wmma_tf32_staged_swizzle`）は破棄し
+        // `wmma_tf32_staged_swizzle_group_width` のみへ group_width を保持
+        // する（`should_launch_wmma_tf32_staged_swizzle` の `None` 分岐が
+        // これを見て形状に関わらず常に `true` を返し、`func`〈= 上記で
+        // 差し替えた強制変種〉が選ばれる。`gemm_mma.rs::CudaMmaGemm::
+        // new_with_swizzle` の `mma_f16_swizzle: None`／
+        // `swizzle_group_width: Some(_)` と同型の設計）。これを怠ると
+        // `new` が偶然この device で選んだ動的幅（例: 8）が、本関数が
+        // 明示指定した幅（例: 16）を形状によっては黙って上書きしてしまい、
+        // A/B 計測が意図した固定幅を計測できなくなる（本関数ドキュメント
+        // コメント「A/A 誤認」節と同じ懸念の裏返し）。
+        gemm.wmma_tf32_staged_swizzle = None;
+        gemm.wmma_tf32_staged_swizzle_group_width = Some(group_width);
+        gemm.wmma_tf32_staged_swizzle_error = None;
         Ok(gemm)
     }
 
@@ -826,6 +945,56 @@ impl CudaGemm {
 
         gemm.wmma_tf32_staged = Some(wmma_tf32_staged);
         gemm.wmma_tf32_staged_error = None;
+        // イシュー #856: `Self::new(device)?` が独立に構築した swizzle 変種
+        // （パディング無変更のソースから導出。本関数が差し替えた pad 変種
+        // とは異なるカーネル）を破棄する。破棄しない場合、サイズ条件付き
+        // 適用条件を満たす形状（M=N=K>=4096 の正方形）では
+        // `should_launch_wmma_tf32_staged_swizzle` が `wmma_tf32_staged_
+        // swizzle`（pad 無変更の swizzle 変種）を選んでしまい、この関数が
+        // 意図する「指定した a_pad/b_pad の効果を計測する」契約を裏切る
+        // （`new_with_tf32_staged_swizzle` の同型是正コメント参照）。
+        gemm.wmma_tf32_staged_swizzle = None;
+        gemm.wmma_tf32_staged_swizzle_group_width = None;
+        gemm.wmma_tf32_staged_swizzle_error = None;
+        Ok(gemm)
+    }
+
+    /// `device` 上で、`wmma_tf32_staged` の swizzle 変種を**常に**保持しない
+    /// ハンドルを構築する（`gemm_mma.rs::CudaMmaGemm::new_without_swizzle`
+    /// の TF32 staged 版。イシュー #856）。
+    ///
+    /// [`new`](Self::new)（本番既定コンストラクタ。SM 数実測に成功した
+    /// device では `wmma_tf32_staged_swizzle` を `Some` に持ちうる）とは
+    /// 独立に、**常に**swizzle 無適用の base（`wmma_tf32_staged`）へアクセス
+    /// するための明示的な入口。手順: [`new`](Self::new) で通常構築した後、
+    /// `wmma_tf32_staged_swizzle`/`wmma_tf32_staged_swizzle_group_width`/
+    /// `wmma_tf32_staged_swizzle_error` を明示的に `None` へ破棄する
+    /// （`should_launch_wmma_tf32_staged_swizzle` の `None` 分岐は
+    /// `wmma_tf32_staged_swizzle_group_width.is_some()` を見るため、これで
+    /// 形状に関わらず常に base が選ばれる）。
+    ///
+    /// **導入理由（A/A 誤認の回避）**: `examples/gemm_wmma_tf32_swizzle_bench.rs`
+    /// の base 計測腕は元々 `CudaGemm::new`（本番既定コンストラクタ）を
+    /// 使っていたが、イシュー #856 の本番結線後は `new` 自体が SM 数実測
+    /// 成功時に swizzle 変種を追加コンパイルし、`launch_wmma_tf32` が
+    /// M=N=K=4096 級正方形では自動的にその変種を選ぶようになった。base 腕を
+    /// `new` のままにすると、4096（採否判定の根拠となった唯一のサイズ）で
+    /// base 腕自身が swizzle 変種を計測してしまい、`swizzle_g8_over_base`
+    /// が ~1.0 に潰れる A/A 誤認が生じる（`new_with_tf32_staged_swizzle`
+    /// ドキュメンテーションコメント「A/A 誤認」節と同型の懸念が、結線後は
+    /// base 腕側にも生じるようになったための追加対応）。本コンストラクタを
+    /// base 腕に使うことで、`new` の内部状態（SM 数実測の成否）に関わらず
+    /// 常に swizzle 無適用の base を計測できるようにする。
+    ///
+    /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
+    /// （`gemm_mma.rs::CudaMmaGemm::new_without_swizzle` と同じ feature
+    /// ゲート方針）。
+    #[cfg(feature = "internal-diagnostics")]
+    pub fn new_without_tf32_staged_swizzle(device: &CudaDevice) -> Result<Self, CudaError> {
+        let mut gemm = Self::new(device)?;
+        gemm.wmma_tf32_staged_swizzle = None;
+        gemm.wmma_tf32_staged_swizzle_group_width = None;
+        gemm.wmma_tf32_staged_swizzle_error = None;
         Ok(gemm)
     }
 
@@ -1120,6 +1289,70 @@ impl CudaGemm {
         self.wmma_tf32_staged_available() && wmma_tf32_staged_alignment_ok(n, k)
     }
 
+    /// イシュー #856。[`Self::wmma_tf32_staged_swizzle`] に適用された
+    /// グルーピング幅（`gemm_mma.rs::CudaMmaGemm::swizzle_group_width` と
+    /// 同型のアクセサ）。`examples/cuda_floor_bench.rs` の起動時診断が
+    /// 現在選択されている値を可観測にするために呼ぶ。
+    pub fn wmma_tf32_staged_swizzle_group_width(&self) -> Option<u32> {
+        self.wmma_tf32_staged_swizzle_group_width
+    }
+
+    /// [`new`](Self::new) が `wmma_tf32_staged`（base）のコンパイルに成功し
+    /// SM 数実測にも成功した（＝ swizzle 変種を試みた）にもかかわらず、
+    /// ソース生成・NVRTC コンパイルに失敗し swizzle 変種を保持できなかった
+    /// 場合の理由文字列（`gemm_mma.rs::CudaMmaGemm::swizzle_unavailable_reason`
+    /// と同型）。swizzle 変種を保持している場合・base 自体が使用不能・
+    /// SM 数が取得できず試みなかった場合は `None`。
+    pub fn wmma_tf32_staged_swizzle_unavailable_reason(&self) -> Option<&str> {
+        self.wmma_tf32_staged_swizzle_error.as_deref()
+    }
+
+    /// `run_wmma_tf32`/`launch_wmma_tf32` が形状 `(m, n, k)` に対して実際に
+    /// staged swizzle 変種を起動するかを返す（`gemm_mma.rs::CudaMmaGemm::
+    /// swizzle_applies` と同型。イシュー #856）。
+    pub fn wmma_tf32_staged_swizzle_applies(&self, m: u32, n: u32, k: u32) -> bool {
+        self.should_launch_wmma_tf32_staged_swizzle(m, n, k)
+    }
+
+    /// raw 次元 `(m, n)` と `k` から、staged 経路が選ばれた場合に起動すべき
+    /// カーネルが swizzle 変種か base かを判定する共通ロジック
+    /// （[`Self::wmma_tf32_staged_swizzle_applies`] と `run_wmma_tf32`／
+    /// `launch_wmma_tf32` の staged 分岐の両方が参照する単一の真実源。
+    /// `gemm_mma.rs::CudaMmaGemm::should_launch_swizzle_kernel` と同型）。
+    ///
+    /// `wmma_tf32_staged_swizzle` が `Some`（[`new`](Self::new) が SM 数
+    /// 実測に成功しサイズ条件付き変種を保持している）場合は `(m, n)` から
+    /// ブロックタイル数（`wmma_tf32_staged_launch_config` の grid 次元と
+    /// 同じ `WMMA_TF32_STAGED_BLOCK_M`/`_N` 単位の `div_ceil`）を導出し
+    /// [`crate::swizzle::should_apply_swizzle`] で判定する。`None`
+    /// （SM 数未取得・変種コンパイル失敗）の場合は常に `false`（base
+    /// フォールバック。強制適用の診断入口は
+    /// [`new_with_tf32_staged_swizzle`](Self::new_with_tf32_staged_swizzle)
+    /// が別途担う——同関数は `wmma_tf32_staged` スロット自体を変種へ
+    /// 差し替えるため、この判定関数を経由せず常に変種を起動する）。
+    fn should_launch_wmma_tf32_staged_swizzle(&self, m: u32, n: u32, k: u32) -> bool {
+        match &self.wmma_tf32_staged_swizzle {
+            Some(_) => {
+                let num_m_blocks = m.div_ceil(kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M);
+                let num_n_blocks = n.div_ceil(kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N);
+                crate::swizzle::should_apply_swizzle(m, n, num_m_blocks, num_n_blocks, k)
+            }
+            // `wmma_tf32_staged_swizzle` が `None` の場合の意味は 2 通り
+            // ある: (a) `new`（本番既定コンストラクタ）が SM 数を取得
+            // できず fail-soft に縮退した場合（`wmma_tf32_staged_swizzle_
+            // group_width` も `None`）、(b)
+            // [`new_with_tf32_staged_swizzle`](Self::new_with_tf32_staged_swizzle)
+            // 経由（強制適用の診断入口。`wmma_tf32_staged` スロット自体を
+            // 変種へ差し替え済みのため `wmma_tf32_staged_swizzle` は使わず
+            // `wmma_tf32_staged_swizzle_group_width` のみを `Some` にする。
+            // `gemm_mma.rs::CudaMmaGemm::new_with_swizzle` と同型）。
+            // (a) は常に false（base フォールバック）、(b) は形状に関わらず
+            // 常に true（`func` 自体が既に強制変種のため `unwrap_or(func)`
+            // で自然に選択される）で区別する。
+            None => self.wmma_tf32_staged_swizzle_group_width.is_some(),
+        }
+    }
+
     pub fn run_wmma_tf32(
         &self,
         a: &[f32],
@@ -1141,7 +1374,17 @@ impl CudaGemm {
         {
             validate_gemm_dims(a.len(), b.len(), m, n, k)?;
             validate_wmma_tf32_staged_k_bound(k)?;
-            return self.run_wmma_tf32_staged_kernel(func, a, b, m, n, k);
+            // イシュー #856: staged 経路が選ばれた形状について、さらに
+            // サイズ条件付き swizzle 変種（`wmma_tf32_staged_swizzle`）を
+            // 起動すべきかを判定する（`gemm_mma.rs::CudaMmaGemm::launch_f16`
+            // の `should_launch_swizzle_kernel` 分岐と同型）。判定 false
+            // または変種未保持の場合は base（`func`）へフォールバックする。
+            let kernel = if self.should_launch_wmma_tf32_staged_swizzle(m, n, k) {
+                self.wmma_tf32_staged_swizzle.as_ref().unwrap_or(func)
+            } else {
+                func
+            };
+            return self.run_wmma_tf32_staged_kernel(kernel, a, b, m, n, k);
         }
 
         if let Some(func) = self.wmma_tf32_opt.as_ref() {
@@ -1583,10 +1826,17 @@ impl CudaGemm {
             .filter(|_| wmma_tf32_staged_alignment_ok(n, k))
         {
             validate_wmma_tf32_staged_k_bound(k)?;
+            // イシュー #856: run_wmma_tf32 と同じサイズ条件付き swizzle
+            // 選択（`should_launch_wmma_tf32_staged_swizzle`）を適用する。
+            let kernel = if self.should_launch_wmma_tf32_staged_swizzle(m, n, k) {
+                self.wmma_tf32_staged_swizzle.as_ref().unwrap_or(func)
+            } else {
+                func
+            };
             let cfg = wmma_tf32_staged_launch_config(m, n);
             unsafe {
                 self.stream
-                    .launch_builder(func)
+                    .launch_builder(kernel)
                     .arg(a_dev)
                     .arg(b_dev)
                     .arg(c_dev)
@@ -1693,6 +1943,55 @@ mod parity_baseline_fixture;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// イシュー #856。`CudaGemm::should_launch_wmma_tf32_staged_swizzle`
+    /// が実際に `self` へ委譲する `swizzle::should_apply_swizzle` を、
+    /// `WMMA_TF32_STAGED_BLOCK_M`/`_N`（64×64）由来のブロック数導出込みで
+    /// 検査する CPU 側単体テスト（実機不要。`CudaGemm` インスタンスの
+    /// 構築自体は実 GPU コンパイルを要するため `#[ignore]` にせざるを
+    /// 得ないが、判定ロジックの入力（raw 次元→ブロック数の導出式）は
+    /// 実機非依存で検証できる。`gemm_mma.rs::CudaMmaGemm::
+    /// should_launch_swizzle_kernel` は private だが同じ導出式
+    /// （`div_ceil` + `should_apply_swizzle`）を使うため、本テストは
+    /// `CudaGemm::should_launch_wmma_tf32_staged_swizzle` 自身と同じ式を
+    /// 直接呼び出す形で退化させず、公開関数 `swizzle::should_apply_swizzle`
+    /// へブロック数を渡す形で再現する）。
+    #[test]
+    fn wmma_tf32_staged_swizzle_size_condition_matches_expected_shapes() {
+        let derive_and_check = |m: u32, n: u32, k: u32| -> bool {
+            let num_m_blocks = m.div_ceil(kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M);
+            let num_n_blocks = n.div_ceil(kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N);
+            crate::swizzle::should_apply_swizzle(m, n, num_m_blocks, num_n_blocks, k)
+        };
+
+        // 実測承認点 M=N=K=4096（正方形）: 採用（§7.4.1・docs/perf/
+        // cuda-gemm-swizzle-ab.md §7.7.6）。
+        assert!(
+            derive_and_check(4096, 4096, 4096),
+            "M=N=K=4096（実測承認点）は適用対象のはずです"
+        );
+        // 2048 正方形は実測承認点（4096）未満のため非適用（§7.4.1 の
+        // サイズ条件付きガードレールが 4096 級正方形限定であることの検査。
+        // 512/1024/2048 は劣化 5% 以内を条件に base のまま扱う契約）。
+        assert!(
+            !derive_and_check(2048, 2048, 2048),
+            "M=N=K=2048 は実測承認点（4096）未満のため非適用のはずです"
+        );
+        // 非正方形（M=8192, N=4096, K=4096）は PR #784 codex-review P1
+        // 是正が導入した正方形ガードにより非適用（未検証の非正方形形状への
+        // 外挿を防ぐ。`swizzle.rs::SWIZZLE_APPLY_MIN_SQUARE_DIM` 参照）。
+        assert!(
+            !derive_and_check(8192, 4096, 4096),
+            "非正方形（M != N）は正方形ガードにより非適用のはずです"
+        );
+        // M=N=4096・K=8 は K ガード未達のため非適用（メモリアクセス量・
+        // L2 再利用特性が実測承認点と大きく異なる形状への外挿を防ぐ。
+        // `swizzle.rs::SWIZZLE_APPLY_MIN_K` 参照）。
+        assert!(
+            !derive_and_check(4096, 4096, 8),
+            "K=8（実測承認点 4096 未満）は K ガードにより非適用のはずです"
+        );
+    }
 
     /// parity 非後退契約（イシュー #491）: 基本版 WMMA(TF32) カーネル
     /// （[`CudaGemm::wmma_tf32`] フィールド）専用の非後退ゲート。
@@ -2333,10 +2632,110 @@ mod tests {
         assert_eq!(cfg.grid_dim, (3, 2, 1));
     }
 
+    /// イシュー #856 受け入れ基準（実機検証）: [`CudaGemm::new`]（本番既定
+    /// コンストラクタ）が実際に `wmma_tf32_staged_swizzle`（サイズ条件付き
+    /// swizzle 変種）を結線していることを確認する
+    /// （`gemm_mma.rs::CudaMmaGemm::
+    /// mma_f16_new_wires_size_conditional_swizzle_into_production_constructor`
+    /// と同型の 3 分岐検査）。
+    ///
+    /// `#[ignore]`: `CudaDevice::new` が CUDA 実機を要求するため
+    /// （本ファイル冒頭コメント「検証状態」）。DGX Spark GB10 等の実機で
+    /// `cargo test -p backend-cuda --lib --release -- --ignored --nocapture
+    /// wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor`
+    /// から実行する。feature 非依存（`wmma_tf32_staged_swizzle`
+    /// フィールド・`CudaGemm::new` はいずれも feature ゲートされていない
+    /// ため、`internal-diagnostics` を要求しない）。
+    #[test]
+    #[ignore = "CUDA 実機（compute capability 8.0 以降）必須"]
+    fn wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor() {
+        let device =
+            CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+        let production =
+            CudaGemm::new(&device).expect("CudaGemm::new must succeed on ignored test runner");
+
+        if !production.wmma_tf32_staged_available() {
+            // staged base 自体がこの device で使用不能な場合、swizzle 変種
+            // も試みられない契約（`new` 実装参照）。この分岐は
+            // `wmma_tf32_staged_available` を主張する他テストで既に
+            // カバーされているため、本テストは何もしない。
+            return;
+        }
+
+        let expected_group_width_if_compile_succeeds =
+            device.multiprocessor_count().map(|num_sms| {
+                crate::swizzle::select_swizzle_group_width(
+                    num_sms,
+                    kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_M,
+                    kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
+                )
+            });
+
+        match (
+            device.multiprocessor_count(),
+            production.wmma_tf32_staged_swizzle_group_width(),
+            production.wmma_tf32_staged_swizzle_unavailable_reason(),
+        ) {
+            (None, actual_group_width, reason) => {
+                // 分岐 (a): SM 数取得失敗。
+                assert_eq!(
+                    actual_group_width, None,
+                    "分岐 (a)（SM 数取得失敗）では wmma_tf32_staged_swizzle_group_width は \
+                     None のはずです"
+                );
+                assert_eq!(
+                    reason, None,
+                    "分岐 (a)（SM 数取得失敗）では \
+                     wmma_tf32_staged_swizzle_unavailable_reason は None のはずです \
+                     （コンパイル自体を試みていないため）"
+                );
+            }
+            (Some(_), Some(actual_group_width), reason) => {
+                // 分岐 (b): SM 数取得成功・コンパイル成功。
+                assert_eq!(
+                    Some(actual_group_width),
+                    expected_group_width_if_compile_succeeds,
+                    "分岐 (b)（SM 数取得成功・コンパイル成功）では \
+                     wmma_tf32_staged_swizzle_group_width が select_swizzle_group_width の \
+                     動的選択幅と一致するはずです"
+                );
+                assert_eq!(
+                    reason, None,
+                    "分岐 (b)（コンパイル成功）では \
+                     wmma_tf32_staged_swizzle_unavailable_reason は None のはずです"
+                );
+                // 分岐 (b) では、実測承認点 M=N=K=4096（正方形）で
+                // should_launch_wmma_tf32_staged_swizzle が true を返す
+                // （＝ launch_wmma_tf32/run_wmma_tf32 が実際に swizzle
+                // 変種を起動する）ことも合わせて確認する。
+                assert!(
+                    production.wmma_tf32_staged_swizzle_applies(4096, 4096, 4096),
+                    "分岐 (b) では M=N=K=4096 で swizzle 変種が適用されるはずです"
+                );
+            }
+            (Some(_), None, reason) => {
+                // 分岐 (c): SM 数取得成功・コンパイル失敗（fail-soft 縮退）。
+                assert!(
+                    reason.is_some(),
+                    "分岐 (c)（SM 数取得成功・コンパイル失敗）では \
+                     wmma_tf32_staged_swizzle_unavailable_reason に失敗理由が記録されている \
+                     はずです"
+                );
+                assert!(
+                    !production.wmma_tf32_staged_swizzle_applies(4096, 4096, 4096),
+                    "分岐 (c)（変種未保持）では swizzle 変種は適用されないはずです"
+                );
+            }
+        }
+    }
+
     /// イシュー #741 受け入れ基準（実機検証）:
     /// [`CudaGemm::new_with_tf32_staged_swizzle`] が生成する各
-    /// `group_width` の変種が、[`CudaGemm::new`]（base。TF32 opt-staged
-    /// 経路）と **ビット一致**の出力を返すことを確認する。
+    /// `group_width` の変種が、[`CudaGemm::new_without_tf32_staged_swizzle`]
+    /// （base。TF32 opt-staged 経路。イシュー #856 で `CudaGemm::new` から
+    /// 切替——本番結線後は `new` 自体が形状によって swizzle 変種を選び
+    /// うるため、恒久的に swizzle 無適用を保証する本コンストラクタを base
+    /// に使う）と**ビット一致**の出力を返すことを確認する。
     ///
     /// swizzle はブロックがどの `(m_block, n_block)` を担当するかの割り当て
     /// のみを変え、各ブロック内部の計算（wmma フラグメントロード・
@@ -2385,8 +2784,17 @@ mod tests {
     fn wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output() {
         let device =
             CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
-        let base =
-            CudaGemm::new(&device).expect("base CudaGemm::new must succeed on ignored test runner");
+        // イシュー #856: `CudaGemm::new`（本番既定コンストラクタ）ではなく
+        // `new_without_tf32_staged_swizzle` を base に使う。本番結線後は
+        // `new` 自体が SM 数実測成功時に swizzle 変種を追加コンパイルする
+        // ため、`shapes` に将来 M=N=K>=4096 の正方形を追加した場合に `new`
+        // のままだと base 自身が swizzle 変種を計測してしまい、本テストが
+        // 自明に pass する A/A 誤認へ退化する
+        // （`new_without_tf32_staged_swizzle` ドキュメンテーションコメント
+        // 「導入理由」節・`examples/gemm_wmma_tf32_swizzle_bench.rs` の同型
+        // 是正参照）。
+        let base = CudaGemm::new_without_tf32_staged_swizzle(&device)
+            .expect("base new_without_tf32_staged_swizzle must succeed on ignored test runner");
         assert!(
             base.wmma_tf32_staged_available(),
             "TF32 opt-staged kernel must be available on ignored test runner \
@@ -2402,6 +2810,11 @@ mod tests {
             kernels_wmma_opt::WMMA_TF32_STAGED_BLOCK_N,
         );
 
+        // 3 形状のうち (512,512,512) は M=N だが実測承認点 4096 未満のため
+        // 現行の should_apply_swizzle では非適用（base に `new` を使っても
+        // 現状は A/A 化しない）。上記コメントのとおり将来 4096 級正方形を
+        // 追加する場合に備え、base は恒久的に `new_without_tf32_staged_
+        // swizzle` を使う契約とする。
         let shapes: [(u32, u32, u32); 3] = [(512, 512, 512), (80, 136, 160), (1088, 256, 2048)];
         let seed: u64 = 424_243;
 
