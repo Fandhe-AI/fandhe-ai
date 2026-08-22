@@ -687,25 +687,34 @@ fn main() {
         report.fail_count
     };
 
-    // fail-closed 分岐（codex-review P1 是正。PR #862）: production 自身が
-    // 本テストデータに対して統一複合判定に不合格（`mismatch_count != 0`）
-    // の場合、性能計測（production・全候補とも）を一切行わずに終了する。
-    // production が誤った基準のまま候補と比較すると、`ratio_vs_production`
-    // が不正な基準実装との比率になり、本ファイル冒頭コメント・PR 本文が
-    // 掲げる契約に反するため（実装計画: 全行 SKIP ではなく即終了を選択。
-    // 本バイナリは A/B 性能比較専用であり、parity FAIL 時点で比較の前提が
-    // 崩れているため、SKIP 行を並べるより理由を明示して打ち切るほうが
-    // 誤読を防げる）。既知の狭い数値差自体は上記 `production_direct`
-    // ログ・`docs/perf/cuda-gemm-mma-block-tile-stages.md` §8 に記録済み。
-    if production_direct_fail_count != 0 {
+    // 二段階ゲート（codex-review P1 是正・PR #862 review 追補。イシュー
+    // #855）: production 自身が本テストデータに対して統一複合判定に
+    // 不合格（`mismatch_count != 0`）の場合でも、**性能計測のみ**を
+    // スキップし、候補（`CANDIDATES`・`CONTROL_CANDIDATES`）の
+    // render/compile/parity 診断（`candidate_parity_ok`）までは実行する。
+    // GB10 実機では `CORRECTNESS_M=520`・固定シードにより production の
+    // parity が常に不合格になるため（`docs/perf/
+    // cuda-gemm-mma-block-tile-stages.md` §8）、旧実装（不合格時に即
+    // `return`）だと `CONTROL_CANDIDATES`（強制 dynamic SMEM・静的対照
+    // 候補・diagnostics 経路）の compile/parity 検査自体が実機で恒常的に
+    // 到達不能になっていた（PR #862 codex-review P2 指摘）。
+    // `ratio_vs_production` 等の性能値は不正な基準実装との比率になり
+    // 得るため採用禁止のまま維持し（本ファイル冒頭コメント・PR 本文の
+    // 契約）、`skip_performance_measurement` で production・候補いずれの
+    // 実測ループも perf 計測部分だけを SKIP させる。既知の狭い数値差
+    // 自体は上記 `production_direct` ログ・
+    // docs/perf/cuda-gemm-mma-block-tile-stages.md §8 に記録済み。
+    let skip_performance_measurement = production_direct_fail_count != 0;
+    if skip_performance_measurement {
         println!(
             "mma_f16_base(production): FAIL (parity mismatch vs CPU f32::mul_add reference; \
-             mismatch_count={production_direct_fail_count}; not measuring production or any \
-             candidate — parity ゲートが性能値採用に先立つ契約のため、production 自身が \
-             数値不一致の間は性能比較を行わない。詳細は上記 production_direct ログ・\
+             mismatch_count={production_direct_fail_count}; skipping performance measurement \
+             for production and all candidates — parity ゲートが性能値採用に先立つ契約のため、\
+             production 自身が数値不一致の間は性能比較を行わない。ただし候補の \
+             render/compile/parity 診断（CONTROL_CANDIDATES を含む）は打ち切らず継続する \
+             （PR #862 codex-review P2 是正）。詳細は上記 production_direct ログ・\
              docs/perf/cuda-gemm-mma-block-tile-stages.md §8 を参照)"
         );
-        return;
     }
 
     println!(
@@ -761,7 +770,17 @@ fn main() {
         // 計測時間が 2 倍になる、の 2 点の実害を生む）。
         let mut production_medians: std::collections::HashMap<usize, f64> =
             std::collections::HashMap::new();
+        // `skip_performance_measurement` が真の場合（production 自身が
+        // parity FAIL）は上記二段階ゲートの契約により性能計測を行わず
+        // 全 size を n/a で埋める。`production_medians` は空のままとなり、
+        // 後続の候補ループでも ratio 分母が見つからず ratio は n/a になる
+        // （`ratio.filter(base != 0.0)` の分母探索が空 HashMap で必ず
+        // `None` を返すため。#855）。
         for &size in &BENCH_SIZES {
+            if skip_performance_measurement {
+                row.push_str(",n/a,n/a,n/a,n/a");
+                continue;
+            }
             let config = MeasurementConfig::default();
             match measure_production(&gemm, size, &config) {
                 Ok(m) => {
@@ -889,7 +908,16 @@ fn main() {
             layout.smem_bytes,
             uses_dynamic_smem,
         );
+        // `skip_performance_measurement` が真の場合、この候補の
+        // render/compile/parity 診断は上で完了済みだが（#855 二段階
+        // ゲート）、production 自身が parity FAIL のため性能値の採用は
+        // 禁止のまま維持し、全 size を n/a で埋めて `measure_candidate`
+        // を呼ばない。
         for &size in &BENCH_SIZES {
+            if skip_performance_measurement {
+                row.push_str(",n/a,n/a,n/a,n/a");
+                continue;
+            }
             let config = MeasurementConfig::default();
             match measure_candidate(&compiled, &gemm, &device, size, &config) {
                 Ok(m) => {
