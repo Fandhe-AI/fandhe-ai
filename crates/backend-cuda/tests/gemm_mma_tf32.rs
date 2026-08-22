@@ -15,9 +15,11 @@
 //! pass。`mma_tf32_matches_reference_across_shapes`・
 //! `mma_tf32_k4096_stress` は #839 時点の機能欠陥（A フラグメント象限
 //! マッピング誤り。`kernels_mma_tf32.rs::LDSM_A_FRAG` 参照）修正後も
-//! 原因未特定の欠陥に起因する FAIL が残る（`wmma_tf32` は同一 CPU 参照・
-//! 同一許容誤差で pass するため TF32 丸め誤差では説明できないことを
-//! 確認済み。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に実測ログを記録）。
+//! FAIL が残る。この残存 FAIL の原因は TF32 丸め誤差・機能欠陥のいずれ
+//! とも確定していない（`wmma_tf32` との GPU-GPU 相互一致誤差が CPU 参照
+//! 比較より小さいことは、両経路が共有する TF32 丸め誤差成分の相殺でも
+//! 説明でき、TF32 丸め誤差説への反証にはならない。
+//! `docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に実測ログ・訂正経緯を記録）。
 
 use backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 
