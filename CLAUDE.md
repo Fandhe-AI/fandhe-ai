@@ -64,6 +64,8 @@ rust-ai-library/
     ├── backend-switching-design.md     # cfg ベースバックエンド切替の設計
     ├── cpu-gemm-b-packing-sharing-decision.md # B パネル packing のスレッド間共有化の設計検討・適用可否判断（#565）
     ├── cpu-gemm-prefetch-decision.md   # aarch64 プリフェッチ intrinsics 到達可能性調査・E-7 保留判断→原則不要へ格下げ（#489・#751）
+    ├── crates-io-naming-decision.md # crates.io 公開クレート名（fandhe-ai prefix）の空き確認・最終名ユーザー承認記録（#878/#879）
+    ├── crates-io-publishing-order.md # crates.io 公開 6 クレート間 path 依存の version 併記方針（[dependencies] は付与・[dev-dependencies] は strip）・公開順序（トポロジカル順）・workspace.version 一括バンプ運用（#881）
     ├── cuda-streamk-decision.md        # CUDA GEMM StreamK スケジューリングの機構要約・wave 定量化・採否判断（保留。#812）
     ├── cuda-tensor-core-design.md      # TASK-11.1a WMMA/mma カーネル設計メモ（#60）
     ├── git-history-exposure-decision.md # git 履歴残存内部情報・個人メールアドレスの扱い判断・暫定方針（#477）

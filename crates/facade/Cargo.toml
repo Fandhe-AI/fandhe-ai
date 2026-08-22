@@ -8,7 +8,10 @@ description = "composition root・compat 公開面（REQ-1・REQ-9・TASK-9.3）
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+# crates.io 公開対象 6 クレートの 1 つ（#881・docs/crates-io-publishing-order.md
+# §6）。ルート `[workspace.package]` の `publish = false`（docs-site 等の非公開
+# クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
+publish = true
 
 # 依存形状は `crates/bench-harness/Cargo.toml` と同型（spec 確定。
 # docs/spec/05-tasks.md TASK-9.3）: `backend-cuda` は無条件依存（`cudarc`
@@ -19,8 +22,9 @@ publish.workspace = true
 # `docs/license-matrix.md` の更新も不要）。
 [dependencies]
 # `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
-# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘。
-# workspace 公開バージョンと完全一致させる）。以下 facade の全 path 依存も同じ。
+# （公開 6 クレート間 path 依存。イシュー #881 で確定した方針。
+# `docs/crates-io-publishing-order.md`。workspace 公開バージョンと完全
+# 一致させる）。以下 facade の全 path 依存も同じ。
 #
 # `Device`／`BackendError`（公開 API の引数・戻り値型として再エクスポート）・
 # `DeviceProvider`／`select_from`（CUDA/Metal 選択時の存在検証）に使用する。
