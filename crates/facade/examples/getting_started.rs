@@ -25,7 +25,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     // Keras `Sequential` 慣習でレイヤーを積み上げる（対象は Linear・
-    // ReLU/Sigmoid/Tanh の 3 種限定。`docs/compat-api-scope.md` §1）。
+    // ReLU/Sigmoid/Tanh の 4 種限定。`docs/compat-api-scope.md` §1）。
     // `add_linear` は `in_features == 0` を拒否するため `Result` を返し
     // `?` で連鎖できる（`Linear::new` への委譲。`autodiff::nn::linear`）。
     let model = Sequential::new()

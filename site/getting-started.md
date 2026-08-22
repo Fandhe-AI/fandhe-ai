@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     // Keras `Sequential` 慣習でレイヤーを積み上げる（対象は Linear・
-    // ReLU/Sigmoid/Tanh の 3 種限定。`docs/compat-api-scope.md` §1）。
+    // ReLU/Sigmoid/Tanh の 4 種限定。`docs/compat-api-scope.md` §1）。
     // `add_linear` は `in_features == 0` を拒否するため `Result` を返し
     // `?` で連鎖できる（`Linear::new` への委譲。`autodiff::nn::linear`）。
     let model = Sequential::new()
@@ -64,9 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-このコードブロックは `crates/facade/examples/getting_started.rs` と
-バイト同一です（`cargo run --example getting_started` で実行確認済み。
-出力は `output shape: [2, 2]`）。
+このコードブロックは `crates/facade/examples/getting_started.rs` の
+実行コード部分（冒頭のモジュールドキュメンテーションコメントを除く
+`use` 以降）と同一です（`cargo run --example getting_started` で実行
+確認済み。出力は `output shape: [2, 2]`）。
 
 `add_linear` の第 3 引数はパラメータ初期化のシード値です。同じシードを
 渡せば毎回同じ初期値になる決定的な構築になります。
@@ -115,8 +116,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-このコードブロックは `crates/facade/examples/backend_switching.rs` と
-バイト同一です（`cargo run --example backend_switching` で実行確認済み。
+このコードブロックは `crates/facade/examples/backend_switching.rs` の
+実行コード部分（冒頭のモジュールドキュメンテーションコメントを除く
+`use` 以降）と同一です（`cargo run --example backend_switching` で実行
+確認済み。
 出力は 1 行目が `Device::Cuda(0) unavailable (...); falling back to
 Device::Cpu`〈GitHub ホステッド CI・CUDA 非搭載環境の場合〉、2 行目が
 `input grad shape: [1, 4]`）。

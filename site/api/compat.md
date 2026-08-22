@@ -4,7 +4,7 @@
 被せた薄いラッパーです。数値ロジック・shape 検査は一切持ち込まず、
 `tensor-core::Tensor::new` や `autodiff::nn::Module` へ委譲します。
 
-対象レイヤーは Linear・ReLU・Sigmoid・Tanh の 3 種限定です。
+対象レイヤーは Linear・ReLU・Sigmoid・Tanh の 4 種限定です。
 
 ## `compat::array`
 
@@ -26,9 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-このコードブロックは `crates/facade/examples/array_shapes.rs` と
-バイト同一です（`cargo run --example array_shapes` で実行確認済み。
-出力は `1-D shape: [3]` ／ `2-D shape: [2, 2]`）。
+このコードブロックは `crates/facade/examples/array_shapes.rs` の
+実行コード部分（冒頭のモジュールドキュメンテーションコメントを除く
+`use` 以降）と同一です（`cargo run --example array_shapes` で実行
+確認済み。出力は `1-D shape: [3]` ／ `2-D shape: [2, 2]`）。
 
 行長が不揃い（jagged）な 2-D 入力は、計算前に検証してエラーを返します。
 
