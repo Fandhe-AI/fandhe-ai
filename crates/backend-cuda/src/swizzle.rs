@@ -339,9 +339,16 @@ pub const SWIZZLE_APPLY_MIN_SQUARE_DIM: u32 = 4096;
 /// `Some` の場合——本番既定コンストラクタ `new` が SM 数実測に成功した
 /// 場合に発生。イシュー #782 で `new` へ結線済み——に、形状ごとに base／
 /// swizzle 変種いずれのカーネルを起動するか、この関数の戻り値で分岐する）。
-/// `u64` 積で `u32` 同士のオーバーフローを避ける（[`swizzle_group_usage`]
-/// と同じ安全側方針。REQ-8 の「境界検査を省略しない」精神を数値計算側にも
-/// 適用）。
+/// **イシュー #856 で `gemm.rs::CudaGemm::should_launch_wmma_tf32_staged_swizzle`
+/// （TF32 opt-staged 経路。`wmma_tf32_staged_swizzle` が `Some` の場合）も
+/// 同じ判定関数を呼ぶようになった**——ブロック数 `num_m_blocks`/
+/// `num_n_blocks` は `WMMA_TF32_STAGED_BLOCK_M`/`_N`（64×64。f16 側の
+/// `MMA_BM`/`_BN`=64×128 とは異なるブロックタイル）から独立に導出される
+/// ため、両呼び出し元は同じ関数を異なるブロックタイル前提で共有する
+/// （2026-08-22 GB10 実機 A/B: 4096 中央値 ×1.5434・512〜2048 劣化 5% 以内。
+/// `docs/perf/cuda-gemm-swizzle-ab.md` §7.6/§7.7.6 参照）。`u64` 積で `u32`
+/// 同士のオーバーフローを避ける（[`swizzle_group_usage`] と同じ安全側方針。
+/// REQ-8 の「境界検査を省略しない」精神を数値計算側にも適用）。
 pub fn should_apply_swizzle(m: u32, n: u32, num_m_blocks: u32, num_n_blocks: u32, k: u32) -> bool {
     let square_ok = m == n;
     let dim_ok = m >= SWIZZLE_APPLY_MIN_SQUARE_DIM;

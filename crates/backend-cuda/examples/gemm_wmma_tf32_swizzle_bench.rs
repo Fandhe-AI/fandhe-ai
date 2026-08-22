@@ -2,11 +2,15 @@
 //! A/B 計測バイナリ。
 //!
 //! `kernels_wmma_opt::wmma_tf32_f32_staged_source()`（本番カーネル・
-//! 無変更）を使う base（[`CudaGemm::new`]）と、swizzle remap を適用した
-//! head 変種（[`CudaGemm::new_with_tf32_staged_swizzle`]。動的選択幅 +
-//! 参考として固定候補 `{8, 16}`）を、`gemm_mma_swizzle_bench.rs` と同じ
-//! 計測コア（`bench-harness::protocol::run`。warmup/計測 20 回以上・
-//! 中央値/Q1/Q3）で比較する（実装計画 3 節「ステップ 6」）。
+//! 無変更）を使う base（[`CudaGemm::new_without_tf32_staged_swizzle`]。
+//! イシュー #856 で本番結線した後は、常に swizzle 無適用を強制する本
+//! コンストラクタを使わないと base 腕自身が 4096 級正方形で swizzle
+//! 変種を計測してしまう A/A 誤認が生じるため、`CudaGemm::new` からこちら
+//! へ切り替えた）と、swizzle remap を適用した head 変種
+//! （[`CudaGemm::new_with_tf32_staged_swizzle`]。動的選択幅 + 参考として
+//! 固定候補 `{8, 16}`）を、`gemm_mma_swizzle_bench.rs` と同じ計測コア
+//! （`bench-harness::protocol::run`。warmup/計測 20 回以上・中央値/Q1/Q3）
+//! で比較する（実装計画 3 節「ステップ 6」）。
 //!
 //! `internal-diagnostics` feature を要求する（`Cargo.toml`
 //! `required-features`）。動的グルーピング幅選択
@@ -120,12 +124,21 @@ fn main() {
         }
     };
 
-    let base = match CudaGemm::new(&device) {
+    // イシュー #856: base 腕は `CudaGemm::new`（本番既定コンストラクタ）
+    // ではなく `new_without_tf32_staged_swizzle` を使う。本番結線後は
+    // `new` 自体が SM 数実測成功時に swizzle 変種を追加コンパイルし、
+    // `launch_wmma_tf32` が M=N=K=4096 級正方形では自動的にその変種を
+    // 選ぶため、`new` のままだと base 腕自身が（採否判定の根拠となった
+    // 唯一のサイズである）4096 で swizzle 変種を計測してしまい、
+    // `swizzle_g*_over_base` が ~1.0 に潰れる A/A 誤認が生じる
+    // （`gemm.rs::CudaGemm::new_without_tf32_staged_swizzle` ドキュメン
+    // テーションコメント「導入理由」節参照）。
+    let base = match CudaGemm::new_without_tf32_staged_swizzle(&device) {
         Ok(g) => g,
         Err(e) => {
             println!(
-                "backend-cuda gemm_wmma_tf32_swizzle_bench: CudaGemm::new failed ({e}); \
-                 nothing to measure. See docs/perf/cuda-gemm-swizzle-ab.md."
+                "backend-cuda gemm_wmma_tf32_swizzle_bench: new_without_tf32_staged_swizzle \
+                 failed ({e}); nothing to measure. See docs/perf/cuda-gemm-swizzle-ab.md."
             );
             return;
         }

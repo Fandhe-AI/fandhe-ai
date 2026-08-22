@@ -584,6 +584,19 @@ pub mod diagnostics {
         )
     }
 
+    // イシュー #856: `examples/wmma_tf32_staged_ptx_dump.rs`
+    // （TF32 opt-staged base／swizzle 変種のレジスタ・スピル差分を
+    // 実機 `ptxas -v` で観測する診断バイナリ。`mma_ptx_dump.rs` と同型）
+    // からの到達用再公開。`kernels_wmma_opt` は非公開 `mod` のため、本
+    // モジュール経由でないと crate 外部（example）へ到達できない
+    // （`mma_f16_source`/`mma_f16_source_with_swizzle` と同じ「非公開
+    // モジュールへの薄い診断用ラッパー」方針）。本番経路（`gemm.rs::
+    // CudaGemm::new`）はこの再公開に依存せず `kernels_wmma_opt` を直接
+    // `use` し続ける。
+    pub use kernels_wmma_opt::{
+        wmma_tf32_f32_staged_source, wmma_tf32_f32_staged_source_with_swizzle,
+    };
+
     /// プロセス内 LRU カーネルモジュールキャッシュ（イシュー #511・C-4。
     /// `crate::module_cache`。非公開 `mod` のため crate 外部から直接
     /// 到達できない）のヒット件数。`crate::module_cache::

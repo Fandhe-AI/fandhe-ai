@@ -556,18 +556,34 @@ true）・bit 一致・parity 非後退・レジスタスピル計測結果は�
   単一の設計を共有する（`kernels_wmma_opt.rs::wmma_tf32_f32_staged_source_with_swizzle` ドキュメンテー
   ションコメント参照）。
 
-### 7.2 状態: opt-in 実装のみ完了。未計測のまま本番カーネルへ導入しない
+### 7.2 状態: サイズ条件付き適用ロジックを本番既定コンストラクタへ結線済み（イシュー #856・2026-08-22 GB10 実機ゲート通過）
 
-`kernels_wmma_opt.rs::wmma_tf32_f32_staged_source_with_swizzle`（変種ソース生成）・
-`gemm.rs::CudaGemm::new_with_tf32_staged_swizzle`（変種カーネルのコンパイル・保持。`internal-diagnostics`
-feature ゲート）を実装したが、本 §2 節と同一の判断（本実装セッションは NVRTC 非搭載のため実機 A/B
-計測ができない）により、**本番カーネル（`kernels_wmma_opt::wmma_tf32_f32_staged_source()`）・本番
-ディスパッチ経路（`ops.rs`／`gemm_auto.rs`／`run_wmma_tf32` の 3 段選択）は 1 バイトも変更していない**。
+**2026-08-22 更新（イシュー #856）**: GB10 実機（main `ab8197e`。結線前・`new` は当時まだ base 専用）で
+A/B 再計測（4096 中央値 ×1.5434・512〜2048 劣化いずれも 5% 以内）・bit 一致テスト
+（`wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output`）・レジスタスピル確認
+（`examples/wmma_tf32_staged_ptx_dump.rs` 新設・base/swizzle とも 96 registers・spill stores/loads
+とも 0 bytes・smem 44800 bytes・barrier 1 で不変）を実施し、この結果と §7.4.1 の採用基準（§7.7.6
+参照）を根拠に `gemm.rs::CudaGemm::new`（本番既定コンストラクタ）へサイズ条件付き適用機構を結線した。
+結線後の PR HEAD 自身に対するマージ前実機ゲート（parity 非後退・bit 一致・`cuda_floor_bench` 実測
+4096=13.9489 TFLOPS）も同日中に実施し解消済み（詳細は §7.7.6）。
+
+`CudaGemm::new_with_tf32_staged_swizzle`（`internal-diagnostics` feature 限定）は明示幅の強制適用
+診断入口として温存し、`gemm_mma.rs::CudaMmaGemm::new_with_swizzle` と同じ位置づけへドキュメンテー
+ションコメントを更新した。以下は結線判断に至るまでの経緯（#856 時点までの歴史的記録）として保持する。
+
+**現行の適用条件**: `swizzle.rs::should_apply_swizzle` を、`WMMA_TF32_STAGED_BLOCK_M`/`_N`（64×64）
+由来のブロック数導出で呼び出す（f16 側の判定式と単一の真実源を共有。`gemm.rs::CudaGemm::
+should_launch_wmma_tf32_staged_swizzle` 参照）。実効的には「正方形レイ上（M=N かつ M=N>=4096）かつ
+K>=4096」（§4.1 の実効判定簡略化と同型の帰結。`gemm.rs` 冒頭の TF32 staged 専用 const アサート
+——`SWIZZLE_APPLY_MIN_M_BLOCKS`/`_N_BLOCKS` が `WMMA_TF32_STAGED_BLOCK_M`/`_N` 由来の 4096 相当
+ブロック数を下回らないことを機械検証——が、共有定数（f16 のブロックタイル由来）を転用しても軸別
+ガードが不当に緩まないことを保証する）。
 
 並行イシュー（#740: f16 swizzle の本番結線、#743: TF32 staged の SMEM バンクコンフリクト対策）との
-コンフリクトを避けるため、本イシューは `ops.rs`／`gemm_auto.rs`／`swizzle.rs` を変更せず、
-`kernels_wmma_opt.rs` への変更もブロック原点アンカー置換の変種生成関数の追記のみに限定した
-（既存カーネル本体・定数は無変更）。
+コンフリクトを避けるため、本イシューは `ops.rs`／`gemm_auto.rs`／`swizzle.rs`（既存定数・判定式）を
+変更せず、`gemm.rs`・`kernels_wmma_opt.rs` のドキュメンテーションコメント更新に限定した
+（既存カーネル本体・`should_apply_swizzle` 判定式は無変更。3 段選択の順序〈staged→opt→basic〉自体も
+無変更）。
 
 ### 7.3 計測手順（DGX Spark GB10・sm_121 実機）
 
@@ -655,11 +671,35 @@ main へマージされた後にこのチェックを実行すれば、`origin/m
 
 ### 7.6 実測結果
 
-（未計測。イシュー #776（2026-08-20）・イシュー #791（2026-08-21）・イシュー #792
-（2026-08-21）のいずれのセッションも実機到達不可のため計測していない。#776 の再計測・
-原因調査・是正の記録、および #791／#792 のブロック状況の記録は §7.7 を参照。是正後
-ハーネスでの実機再計測結果は判明次第 §7.7.3／§7.7.4／§7.7.5 へ追記する。実機到達可能時は
-§7.3 の手順で bit 一致テスト → NVRTC ログ確認 → A/B 計測の順に実行する）
+**2026-08-22 イシュー #856 実機再計測（5 run 中央値。DGX Spark GB10・sm_121・`<cuda-node>`。
+計測 SHA `ab8197e`〈main。#851 相当の丸め是正 #857 取り込み済み〉。ハーネス:
+`examples/gemm_wmma_tf32_swizzle_bench.rs`〈#776 是正後の launch-only 境界〉）**:
+
+| size | base 中央値 (TFLOPS) | dynamic swizzle (g8) 中央値 (TFLOPS) | swizzle/base |
+|------|----------------------|----------------------------------------|--------------|
+| 512  | 8.2360 | 8.0312 | 0.9751（-2.49%） |
+| 1024 | 12.6895 | 12.5283 | 0.9873（-1.27%） |
+| 2048 | 14.3327 | 14.2269 | 0.9926（-0.74%） |
+| 4096 | 9.0340 | 13.9435 | 1.5434（+54.34%） |
+
+`num_sms=48`・動的選択幅 `dynamic_group_width=8`（`swizzle::select_swizzle_group_width` の候補
+`{8, 16}` から選択。固定候補 g16 も併走計測し g8 と同水準〈4096 で 13.87〜13.93 TFLOPS〉であることを
+確認済み）。4096 の 5 run 生値は 8.9962〜9.0665（base）・13.9290〜13.9526（swizzle）で、いずれも
+中央値の ±1% 以内に収まり §7.7.3 手順 2 の許容（±10% 程度）を大きく下回る安定した結果だった。
+`nvidia-smi dmon`（1 秒間隔・8 サンプル）併走観測ではベンチ実行区間で `pclk` が 2398〜2470MHz の
+範囲に留まりクロックスロットリングは観測されなかった（GPU 上に常駐する ComfyUI/Kokoro プロセスは
+アイドル状態で `utilization.gpu` への寄与は 0% だった）。
+
+**§7.4／§7.4.1 採否判定（§7.7.3 手順 4）**:
+
+- **§7.4（旧基準・2048/4096 の両方で厳密改善）**: 2048 が base をわずかに下回る（0.9926 倍・劣化
+  0.74%）ため**不成立**。
+- **§7.4.1（サイズ条件付き新基準・4096 で明確な改善 かつ 512/1024/2048 の劣化いずれも 5% 以内）**:
+  4096 で +54.34% の明確な改善、512/1024/2048 の劣化はそれぞれ 2.49%/1.27%/0.74% でいずれも 5% 以内
+  →**成立**。**「§7.4.1 基準で 4096 級正方形限定採用」と判定した**（§7.4 の 0% 基準を満たさない
+  ことは §7.4.1 経路の不採用理由にならない、という §7.7.3 の基準間関係どおりの判定）。
+
+採用判断を根拠に本番結線（G4）を実施した。詳細は §7.7.6 を参照。
 
 ### 7.7 4096 計測異常の原因調査・是正（イシュー #776）
 
@@ -823,3 +863,141 @@ PR のマージで非空化しうるため、本節の主張は上記の固定 b
 実機到達可能なセッションで §7.7.3 の手順（1〜4）による A/B 計測 → §7.4／§7.4.1 の採否判定 →
 （採用成立時のみ）G3（PTX ダンプ観測経路新設・レジスタスピル確認）→ 本番結線の順で #792 相当の
 作業を再実施すること。本イシュー自体は実機到達可能セッションへの引き継ぎとして記録する。
+
+#### 7.7.6 2026-08-22 実装セッション（イシュー #856）: 実機到達・A/B 計測・採用判定・本番結線を完遂
+
+イシュー #856（「wmma_tf32 swizzle の実機 A/B を実施し結線判断を確定する（#791/#792 の未実施分）」）
+の実装セッションは、DGX Spark GB10（`<cuda-node>`）へ SSH 到達可能であることを確認できた
+（プロジェクトメモリの DGX ノード情報経由。#776・#791・#792 とは異なりノード自体が到達可能だった）。
+以下、G1〜G4 の各ゲート実施記録。
+
+**G1（実機到達性ゲート）**: `ssh <cuda-node> nvidia-smi` で GPU 空き確認（`utilization.gpu=0%`。
+GB10 は `memory.used` が `[N/A]` のため utilization とプロセス一覧で判定。GPU 上に ComfyUI/Kokoro
+プロセスが常駐しているがアイドル状態）。`~/.cargo/bin/cargo`（rustc/cargo 一式）・`/usr/local/cuda/bin/nvcc`
+（CUDA 13.0）到達確認済み。非対話 `ssh` 実行は `PATH` にログインシェルの `~/.cargo/bin` を含まないため
+`bash -lc` またはフルパス指定が必要（`docs/real-hardware-verification-env.md` §2.2 の教訓どおり）。
+
+**転送先ディレクトリの分離**: `~/work/rust-ai-library-run`（`docs/real-hardware-verification-env.md`
+§3 既定パス）は転送時点で他の並列イシュー（#862 相当）の未コミット変更が残っていたため、共有パスへの
+`rsync --delete` によるクロブを避けて `~/work/rust-ai-library-856`（タスク専用ディレクトリ。
+`~/work/target-rust-ai-library-856` を専用 `CARGO_TARGET_DIR` に指定）へ転送した（同ノード上に
+`~/work/issue854-ab`・`~/work/mma-tf32-ptx-dump` 等、同型のタスク専用ディレクトリ命名規則が既に
+存在することを確認し踏襲）。転送元コミット SHA は `ab8197e`（main。§7.6 に記載のとおり #851 相当の
+是正 #857 取り込み済み）。
+
+**G2（A/B 計測。main 基準）**: §7.3 の順に実施。
+
+1. parity 系（`cargo test -p backend-cuda --release -- --ignored --nocapture`）: 8 passed / 5 failed。
+   FAILED はいずれも `docs/perf/cuda-optimized-remeasurement.md`・`docs/perf/cuda-parity-baseline.md`
+   に記録済みの既知恒常 fail（`wmma_tf32_basic_kernel_parity_does_not_regress`〈baseline_provenance_
+   unconfirmed〉・`wmma_tf32_opt_kernel_matches_reference_across_shapes`・`wmma_tf32_opt_kernel_
+   k4096_stress`〈opt カーネルの既知の複合判定 FAIL〉・`jit_cache_bench_*` 2 件〈`/tmp` キャッシュ
+   root pin の既知の環境依存 FAIL〉）であり、本 PR の変更はこの集合を増やさなかった（結線後の
+   再実行でも同一の 5 件のみが FAIL のままであることを確認済み。下記「マージ前実機ゲート」参照）。
+2. bit 一致（`cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --ignored
+   --nocapture wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output`）: pass。
+3. A/B（`cargo run -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features
+   internal-diagnostics`）5 run: §7.6 に記載。`nvidia-smi dmon` 併走でクロック安定を確認（同節）。
+4. §7.4／§7.4.1 の両基準評価: §7.6 に記載（§7.4.1 基準で 4096 級正方形限定採用）。
+
+**G3（PTX ダンプ観測経路の新設・レジスタスピル確認。結線前必須確認）**: 新規
+`crates/backend-cuda/examples/wmma_tf32_staged_ptx_dump.rs`（`mma_ptx_dump.rs`/`mma_tf32_ptx_dump.rs`
+と同型: `internal-diagnostics` feature・feature 未指定でも no-op main でビルド成立・出力は新規作成
+のみ許可〈`OpenOptions::create_new(true)`。symlink 経由の上書き防止。#782 P0 是正と同型〉・base/
+swizzle 変種の 2 種をダンプ）を新設し、GB10 実機で `ptxas -arch=sm_121 -v` へオフラインで掛けた。
+
+結果: **base 96 registers／swizzle（動的選択幅 g8）96 registers（差分 0）、spill stores・spill
+loads はいずれも両カーネルとも 0 bytes、smem 44800 bytes・barrier 1 で不変** — レジスタスピルは
+発生しておらず、レジスタ使用量自体も変化していない（f16 側 #782/#784 の「+2 register の微増」より
+さらに無害な結果）。
+
+```
+$ ptxas -arch=sm_121 -v wmma_tf32_staged_base.ptx -o wmma_tf32_staged_base.ptx.cubin
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'gemm_wmma_tf32_staged' for 'sm_121'
+ptxas info    : Function properties for gemm_wmma_tf32_staged
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 44800 bytes smem
+
+$ ptxas -arch=sm_121 -v wmma_tf32_staged_swizzle_g8.ptx -o wmma_tf32_staged_swizzle_g8.ptx.cubin
+ptxas info    : 0 bytes gmem
+ptxas info    : Compiling entry function 'gemm_wmma_tf32_staged' for 'sm_121'
+ptxas info    : Function properties for gemm_wmma_tf32_staged
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 96 registers, used 1 barriers, 44800 bytes smem
+```
+
+以上で「(b) 結線前必須の確認」4 項目（bit 一致・parity 非後退・`cuda_floor_bench` 実測・レジスタ
+スピル確認）がすべて解消済みとなったため、本番結線（G4）を実施した。
+
+**G4（本番結線）**: `gemm_mma.rs::CudaMmaGemm::new`（#782/#784）と同型のパターンを `gemm.rs::
+CudaGemm` へ適用した。
+
+- フィールド追加: `wmma_tf32_staged_swizzle: Option<CudaFunction>`・
+  `wmma_tf32_staged_swizzle_group_width: Option<u32>`・`wmma_tf32_staged_swizzle_error: Option<String>`
+- `new`: `wmma_tf32_staged`（base）のコンパイルに成功しかつ SM 数実測に成功した場合のみ、
+  `swizzle::select_swizzle_group_width(num_sms, WMMA_TF32_STAGED_BLOCK_M, WMMA_TF32_STAGED_BLOCK_N)`
+  の動的幅で swizzle 変種を fail-soft に追加コンパイルする（失敗は `None` 縮退・base 可用性へ波及
+  させない）
+- 起動選択: `should_launch_wmma_tf32_staged_swizzle(m, n, k)` ヘルパを追加し、`wmma_tf32_staged_
+  launch_config` と同じ `div_ceil` でブロック数を導出して `swizzle::should_apply_swizzle` へ渡す。
+  `run_wmma_tf32`（staged 分岐内）・`launch_wmma_tf32`（staged 分岐内）の両方で、判定 true かつ
+  変種 `Some` の場合のみ swizzle 変種を起動し、`None` 時は base（3 段選択で既に選ばれている
+  `wmma_tf32_staged` ハンドル）へフォールバックする
+- `new_with_tf32_staged_swizzle`（診断用・明示幅の強制適用入口）は温存し、`new` 由来の動的変種
+  スロット（`wmma_tf32_staged_swizzle`）を明示的に `None` へ破棄したうえで
+  `wmma_tf32_staged_swizzle_group_width` のみへ明示指定幅を保持するよう修正した（`gemm_mma.rs::
+  new_with_swizzle` と同型。破棄しないと、大きな正方形形状で `new` 由来の動的幅が本関数の明示指定
+  を黙って上書きしてしまい A/B 計測が固定幅を計測できなくなる不具合を実装中に発見し是正した）。
+  `new_with_tf32_staged_pads`（SMEM パディング診断入口）も同じ理由で `new` 由来の動的変種スロット
+  を破棄するよう修正した（破棄しないと、pad 変種を計測しているつもりが正方形 4096 級形状では
+  pad 無変更の swizzle 変種へ黙ってすり替わってしまう）
+- 判定は既存閾値定数（`SWIZZLE_APPLY_MIN_SQUARE_DIM=4096` 等。4096 級正方形限定）を再利用する
+  のみで、閾値定数・適用条件自体は変更していない（2048 への拡大等は本 PR のスコープ外。§7.4.1
+  参照）
+- CPU 側単体テスト（実機不要）`wmma_tf32_staged_swizzle_size_condition_matches_expected_shapes`
+  を追加し、`should_apply_swizzle` を TF32 staged のブロックタイル（64×64）由来のブロック数導出で
+  呼んだ場合の代表形状（4096 正方形=採用・2048 正方形=非採用・非正方形=非採用・K 過小=非採用）を
+  検査する
+- `gemm.rs` 冒頭へ TF32 staged 専用の const アサート（`SWIZZLE_APPLY_MIN_M_BLOCKS`/`_N_BLOCKS` が
+  `WMMA_TF32_STAGED_BLOCK_M`/`_N` 由来の 4096 相当ブロック数を下回らないことの不等式検証。
+  `gemm_mma.rs` の等式 assert と異なり不等式になる理由——共有定数が f16 のブロックタイル由来で
+  TF32 staged 側は独自導出しないため——を doc comment に明記した）を追加した
+
+**結線後に発覚した A/A 誤認の是正（advisor レビュー指摘）**: 上記結線を実施した直後、
+`examples/gemm_wmma_tf32_swizzle_bench.rs` の base 計測腕が `CudaGemm::new`（本番既定コンストラクタ）
+のままだったため、結線後は base 腕自身が M=N=K=4096 で swizzle 変種を計測してしまい
+`swizzle_g*_over_base` が ~1.0 に潰れる A/A 誤認が生じることが判明した（§7.6 の実測値は結線**前**の
+HEAD で計測したため影響を受けていないが、結線後の HEAD でこのベンチを再実行すると採否根拠の再現性が
+失われる状態だった）。是正として `gemm_mma.rs::CudaMmaGemm::new_without_swizzle` と同型の
+`CudaGemm::new_without_tf32_staged_swizzle`（`internal-diagnostics` feature 限定。`new` 構築後に
+swizzle 3 フィールドを明示的に `None` へ破棄し、形状に関わらず常に base を強制する診断入口）を新設し、
+ベンチの base 腕・bit 一致テスト（`wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output`）の
+base をこちらへ切り替えた。加えて `CudaGemm::new` 自身が実際に swizzle 変種を結線していることを検証
+する実機 `#[ignore]` テスト `wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_
+constructor`（`gemm_mma.rs::mma_f16_new_wires_size_conditional_swizzle_into_production_constructor`
+と同型の 3 分岐検査。M=N=K=4096 で `wmma_tf32_staged_swizzle_applies()` が `true` を返すことも検査）
+と、`examples/cuda_floor_bench.rs` への `wmma_tf32_staged` 版起動時診断（`mma_f16` の既存ブロックと
+同型。`wmma_tf32_staged_swizzle_group_width()`/`wmma_tf32_staged_swizzle_applies()` の唯一の呼び出し元
+としてドキュメンテーションコメントの記述を実際に成立させる）を追加した。
+
+**マージ前実機ゲート（§6.3 同型・上記是正を反映した再実施）**: 是正後の HEAD 自身を新規のタスク専用
+ディレクトリへ再転送し、(a) parity 系（既知恒常 fail 5 件のみ・増加なし）・bit 一致テスト 4 件
+（swizzle 変種・pad 変種・新設の結線検証テスト・4096 flaky テスト〈後述〉）全 pass、
+(b) 是正後の `gemm_wmma_tf32_swizzle_bench` を実際に再実行し base_tflops(4096)=9.0357 TFLOPS
+（swizzle 変種へすり替わっていないことを確認。§7.6 の base 中央値 9.0340 と同水準）・
+swizzle_g8_over_base(4096)=1.5439（§7.6 の 1.5434 と同水準。再現性を確認）、
+(c) `examples/cuda_floor_bench.rs` で結線後の `wmma_tf32_staged` 起動時診断（`swizzle_applies(4096,
+4096, 4096)=true`・`swizzle_applies(2048/1024/512, ...)=false`）と `wmma_tf32` 実測値
+（size=4096: 13.9473 TFLOPS。§7.6 の swizzle 実測値の範囲内）・REQ-8 CudaF32 比 78.46%（PoC-v2-3
+固定参照値との比較。同一ハードウェア再計測 PyTorch 基準は本セッションでは未確認のため参考値。50%
+下限を明確に上回る）を実施し、いずれも解消済みであることを確認した。
+`wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`（高水準 API 直接計測。§7.7 既知の
+不安定性）は 1 回目 FAIL・2 回目 pass の再現性のない flaky であることを確認済みで、本 PR の変更
+（`run_wmma_tf32_staged_kernel`・`wmma_tf32_opt`・`wmma_tf32_staged` フィールドいずれも本 PR では
+無変更）とは無関係な既知の事前不安定性である。
+
+本 PR のコード差分は `crates/backend-cuda/src/{gemm.rs,kernels_wmma_opt.rs,lib.rs,swizzle.rs}`・
+`crates/backend-cuda/examples/{wmma_tf32_staged_ptx_dump.rs（新規）,gemm_wmma_tf32_swizzle_bench.rs,
+cuda_floor_bench.rs}`・本ドキュメントに限定され、
+`ops.rs`／`gemm_auto.rs`／`swizzle.rs`（閾値定数・判定式）は無変更である。
