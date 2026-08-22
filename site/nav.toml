@@ -10,10 +10,11 @@
 # 済み）に合わせて記述する。実ビルド確認（`crates/docs-site` によるパース・
 # linkcheck）は親 #873 の受け入れ条件へ委ねる。
 #
-# セクション順（Getting Started → Guides → Examples → API Reference）を
-# 意識し、姉妹イシュー #875（Guides / Examples 原稿）が本ファイルへ
-# セクションを追記する前提で、本イシュー（#874）は先頭（Getting Started）
-# と末尾（API Reference）の 2 セクションのみを宣言する。
+# セクション順（Getting Started → Guides → Examples → API Reference）で
+# 4 セクション全てを宣言する。Getting Started・API Reference は #874
+# （PR #887）が追加し、中間の Guides・Examples は #875 が追加した
+# （親 #873 の受け入れ条件「4 セクションすべてに 1 ページ以上の原稿が
+# ある」を本ファイルの充足で満たす）。
 
 [site]
 title = "rust-ai-library"
@@ -32,6 +33,59 @@ path = "/"
 title = "Getting Started"
 source = "site/getting-started.md"
 path = "/getting-started/"
+
+[[section]]
+title = "Guides"
+index_path = "/guides/"
+
+[[section.page]]
+title = "Guides"
+source = "site/guides.md"
+path = "/guides/"
+
+[[section.page]]
+title = "バックエンド構成"
+source = "site/guides/backends.md"
+path = "/guides/backends/"
+
+[[section.page]]
+title = "数値一致契約"
+source = "site/guides/numerical-parity.md"
+path = "/guides/numerical-parity/"
+
+[[section.page]]
+title = "性能の考え方"
+source = "site/guides/performance.md"
+path = "/guides/performance/"
+
+[[section.page]]
+title = "ONNX・safetensors 相互運用"
+source = "site/guides/interop.md"
+path = "/guides/interop/"
+
+[[section]]
+title = "Examples"
+index_path = "/examples/"
+
+[[section.page]]
+title = "Examples"
+source = "site/examples.md"
+path = "/examples/"
+
+[[section.page]]
+title = "学習ループ"
+source = "site/examples/training-loop.md"
+path = "/examples/training-loop/"
+
+[[section.page]]
+title = "推論"
+source = "site/examples/inference.md"
+path = "/examples/inference/"
+
+[[section.page]]
+title = "GEMM ベンチ"
+source = "site/examples/gemm-bench.md"
+path = "/examples/gemm-bench/"
 
 [[section]]
 title = "API Reference"
