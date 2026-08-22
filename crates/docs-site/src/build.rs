@@ -135,143 +135,441 @@ fn page_output_path(out: &Path, page_path: &str) -> PathBuf {
     }
 }
 
-/// `canonical_path` の実体を（symlink を辿らない）`lstat` 相当で確認し、
-/// シンボリックリンクでないことを検査したうえでその `(dev, ino)` を返す。
-/// `File::open` より前に呼ぶことで「検証時点の実体」の身分証明として使う。
+/// fd 相対（`openat`/`mkdirat`/`renameat`、いずれも `O_NOFOLLOW`）でのファイル
+/// システム走査。`canonicalize` 後に同じパス文字列を再解決する経路をすべて
+/// 排除し、検証済みディレクトリ fd から一切名前解決をやり直さないことで、
+/// 中間コンポーネント（`repo_root`/`out` から目的のパスまでの途中の
+/// ディレクトリ）のシンボリックリンク差し替え TOCTOU を構造的に閉じる
+/// （codex-review 追加ラウンド指摘・PR #899: `canonicalize` + `starts_with` に
+/// よる事前検証は、その後の `File::open`/`fs::rename` がパス文字列で経路を
+/// 再解決するため、検証と実際のアクセスの間で中間ディレクトリが symlink へ
+/// 差し替えられる race を検知できなかった）。
 ///
-/// 旧実装（PR #899 当初版）は `File::open` の**後**に同じパス文字列を再
-/// `canonicalize` し、開いた fd の `(dev, ino)` と再解決結果を比較していた。
-/// しかしこれは自己無矛盾性の検査に過ぎない: `canonicalize`（`repo_root`
-/// 配下チェック時点）の直後・`File::open` 前にパスがシンボリックリンクへ
-/// 差し替えられた場合、`open` はその新しいリンク先を開き、直後の再
-/// `canonicalize` も同じ新しいリンク先を指すため、両者は常に一致してしまい
-/// race を検知できなかった（Cursor Bugbot 指摘・PR #899）。
+/// - `openat(dirfd, name, O_NOFOLLOW, ...)` はカーネル側で `name` がその
+///   ディレクトリ直下でシンボリックリンクなら `ELOOP` で拒否する
+///   （`fd_walk::is_symlink_rejection` が errno を見て判定する。このツール
+///   チェーンでは `std::io::ErrorKind::FilesystemLoop` が `io_error_more`
+///   〈issue #86442〉未安定のため使えない）。「シンボリックリンクでないか
+///   確認 → 開く」を名前の再解決を挟まない 1 回のシステムコールへ不可分化
+///   できる
+/// - `renameat(dirfd, old, dirfd, new)` は同一の検証済み dirfd を指定するため、
+///   置換先の親ディレクトリを名前で再解決しない（`fs::rename` は絶対/相対
+///   パス文字列を毎回解決し直すため、置換先の親が検証後に差し替えられていて
+///   も検知できなかった）
+/// - Windows 等 unix 以外は `openat` 相当の fd 相対 API がなく本ウォークを
+///   実施できないため fail-closed で拒否する（レビュー指摘のとおり、検証不能
+///   なプラットフォームでは許可しない）。`docs-site` は CI（GitHub ホステッド
+///   ubuntu-latest）・開発者ローカル実行（Linux/macOS）が前提のため実害はない
+///   （`.claude/rules/ci.md` 実機依存節）
 ///
-/// 本関数は `File::open` より**前**に呼び出し、その時点の実体の身分
-/// （`(dev, ino)`）を記録する。呼び出し元はこれを `File::open` 後の
-/// `file.metadata()` と比較する（[`read_verified_source`]）。両者が一致するのは
-/// 「`repo_root` 配下チェックを通過した実体」と「実際に読んだ fd」が同一の
-/// 場合に限られるため、`canonicalize` と `open` の間のシンボリックリンク
-/// 差し替え race を検知できる（差し替え後の新しい実体は身分が異なるため
-/// 不一致になり fail-closed に拒否される）。
-///
-/// unix 以外（Windows 等）では `MetadataExt` が使えないため検査を no-op に
-/// する（`docs-site` は CI〈GitHub ホステッド ubuntu-latest〉・開発者ローカル
-/// 実行が前提で、Windows は現状 CI 対象外。`.claude/rules/ci.md` 実機依存節
-/// 参照）。
+/// 追加 Cargo 依存は発生しない: `libc`/`nix` 等の crate を追加せず、`std` が
+/// 既にリンクする system libc の安定 C ABI 関数（`openat`・`mkdirat`・
+/// `renameat`）を直接 `extern "C"` 宣言する。`docs-site` の「外部依存ゼロ」
+/// 方針（`Cargo.toml` コメント参照）・deps-policy.md の許容依存 9 区分に対する
+/// 新規追加のいずれにも該当しない。
+// SAFETY（モジュール全体）: 本モジュールは `docs-site` 唯一の FFI 境界であり、
+// `lib.rs` の `#![deny(unsafe_code)]` に対してここだけ `#[allow(unsafe_code)]`
+// する（PR #899 codex-review 追加ラウンド P0 x2: `canonicalize` 等のパス文字列
+// ベースの検証では中間ディレクトリのシンボリックリンク差し替え TOCTOU を
+// 防げないため、`std` にない fd 相対 `openat`/`mkdirat`/`renameat`/`unlinkat`
+// を直接 FFI 宣言する。`lib.rs` の「unsafe の使用範囲」節参照）。
 #[cfg(unix)]
-fn lstat_non_symlink_identity(canonical_path: &Path) -> std::io::Result<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    let lstat = fs::symlink_metadata(canonical_path)?;
-    if lstat.file_type().is_symlink() {
-        // 呼び出し元（`read_verified_source`）が `ErrorKind` を見て
-        // `BuildError::Nav(NavError::UnsafeSource(..))` へ詰め替える。
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "path was replaced with a symlink after the repo_root containment check",
-        ));
-    }
-    Ok((lstat.dev(), lstat.ino()))
-}
+#[allow(unsafe_code)]
+mod fd_walk {
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::raw::{c_char, c_int};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::{Component, Path};
 
-#[cfg(not(unix))]
-fn lstat_non_symlink_identity(_canonical_path: &Path) -> std::io::Result<()> {
-    Ok(())
-}
+    // `mkdirat` の `mode` は固定引数であり、`mode_t` の実体幅は OS ごとに
+    // 異なる（Linux は `unsigned int`〈32 bit〉、macOS/Darwin は
+    // `unsigned short`〈16 bit〉）ため、固定引数の呼び出し規約不一致を避ける
+    // べく OS ごとに正しい幅で宣言する。本モジュールで渡す値（`0o755` 等）は
+    // 16 bit に収まるため実害はない。
+    //
+    // 対して `open`/`openat` は POSIX 上 `mode` を**可変長引数**として取る
+    // （`int open(const char *path, int oflag, ... /* mode_t mode */);`）。
+    // 可変長引数は C の既定引数昇格により常に `int` 幅へ昇格されて渡される
+    // （実際の `mode_t` 幅に関係なく）。Rust 側が `mode` を固定引数として
+    // `mode_t`〈macOS では 16 bit〉幅で宣言すると、Apple の AArch64 ABI は
+    // 固定引数をレジスタ渡し・可変長引数をスタック渡しで扱う点が標準 AAPCS64
+    // と異なるため、実体は可変長引数として読み出す `openat` 側の実装と
+    // 呼び出し規約が食い違い、渡した mode が破壊される（実測: Apple Silicon
+    // 上で `0o644` を渡したはずが生成ファイルが `----r-----` になる実害を
+    // 確認済み）。よって `openat` は Rust の可変長引数 extern 宣言
+    // （`...`）で宣言し、呼び出し側は `mode` を `c_uint`〈常に int 幅〉で渡す
+    // ことで C の既定引数昇格と一致させる。
+    #[cfg(target_os = "linux")]
+    type ModeT = u32;
+    #[cfg(target_os = "macos")]
+    type ModeT = u16;
 
-/// [`lstat_non_symlink_identity`] が返した「開く前の身分」と、実際に開いた
-/// `file` の `fstat` 結果が同一であることを検査する。不一致は `canonicalize`
-/// と `File::open` の間のシンボリックリンク差し替え race を意味する。
-#[cfg(unix)]
-fn verify_opened_file_matches_identity(
-    file: &fs::File,
-    expected: (u64, u64),
-) -> std::io::Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let opened = file.metadata()?;
-    Ok((opened.dev(), opened.ino()) == expected)
-}
-
-#[cfg(not(unix))]
-fn verify_opened_file_matches_identity(_file: &fs::File, _expected: ()) -> std::io::Result<bool> {
-    Ok(true)
-}
-
-/// `page.source` を `repo_root` 配下であることを再検証したうえで、単一の
-/// `File` ハンドルからサイズ確認・内容読み込みの両方を行う。
-///
-/// [`nav::validate_sources`] は全ページの一括事前検証（早期にわかりやすい
-/// エラーを返すため）だが、実際に読み込む直前にも同じ経路のパスを
-/// `canonicalize` して `repo_root` 配下であることを**再検証**し、その
-/// canonicalize 結果のパスを 1 回だけ `File::open` してサイズ確認・内容読み込み
-/// の両方をその同一ハンドルから行う。
-///
-/// 単一ハンドルへ収斂させても、なお 2 つの残存 race がある（レビュー指摘・
-/// PR #899）。それぞれ次の手当てで塞ぐ:
-/// 1. `canonicalize` から `File::open` までの間に最終コンポーネントがシンボリック
-///    リンクへ差し替えられる race → `File::open` 前に
-///    [`lstat_non_symlink_identity`] で実体の身分（`(dev, ino)`）を記録し、
-///    開いた fd の `fstat` 結果を [`verify_opened_file_matches_identity`] で
-///    照合する（PR #899 追補: 旧実装は open 後に同じパスを再 canonicalize
-///    して自己無矛盾性しか検査しておらず race を検知できていなかった。
-///    [`lstat_non_symlink_identity`] のドキュメント参照）。不一致なら
-///    fail-closed に拒否する。
-/// 2. `metadata().len()` でのサイズ確認後、同じハンドルから EOF まで無制限に
-///    読み切っていたため、確認後にファイルが増加すると `MAX_SOURCE_BYTES` を
-///    実効的に迂回できた → `Read::take` で同一ハンドルから
-///    `MAX_SOURCE_BYTES + 1` バイトに上限した bounded read に変更し、
-///    上限超過を拒否する。
-///
-/// 中間コンポーネント（`repo_root` から `canonical_path` までの途中の
-/// ディレクトリ）がリンクへ差し替えられる race は、`std` のみでは
-/// `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` 相当の API がなく解消でき
-/// ない。これは `libc`/`nix` 等の追加依存が必要な既知のプラットフォーム制約
-/// であり（deps-policy.md: 追加依存はユーザー承認必須）、対応を省略した判断
-/// ではなく現状の制約として残す。
-fn read_verified_source(
-    canonical_root: &Path,
-    repo_root: &Path,
-    source: &str,
-) -> Result<String, BuildError> {
-    let candidate = repo_root.join(source);
-    let canonical_path = candidate
-        .canonicalize()
-        .map_err(|error| BuildError::ReadSource {
-            source: source.to_string(),
-            error,
-        })?;
-    if !canonical_path.starts_with(canonical_root) {
-        return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string())));
+    // edition 2024 は `extern "C"` ブロック自体に `unsafe` 修飾を要求する
+    // （宣言した関数シグネチャの正しさを保証しないため）。
+    unsafe extern "C" {
+        fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
+        fn mkdirat(dirfd: c_int, pathname: *const c_char, mode: ModeT) -> c_int;
+        fn renameat(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+        ) -> c_int;
+        fn unlinkat(dirfd: c_int, pathname: *const c_char, flags: c_int) -> c_int;
     }
 
-    // `File::open` より前に実体の身分を記録する（race window を最小化する。
-    // `lstat_non_symlink_identity` のドキュメント参照）。
-    let pre_open_identity = lstat_non_symlink_identity(&canonical_path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::InvalidInput {
-            BuildError::Nav(NavError::UnsafeSource(source.to_string()))
-        } else {
-            BuildError::ReadSource {
-                source: source.to_string(),
-                error,
+    /// 対象 OS の `ELOOP`（symlink 解決を `O_NOFOLLOW` が拒否した際の errno）。
+    /// `std::io::ErrorKind::FilesystemLoop` はこのツールチェーン（`rust-toolchain.toml`
+    /// の stable）では `io_error_more`（issue #86442）が未安定のため使えず、
+    /// `raw_os_error()` を直接比較する。
+    #[cfg(target_os = "linux")]
+    const ELOOP: i32 = 40;
+    #[cfg(target_os = "macos")]
+    const ELOOP: i32 = 62;
+
+    /// macOS/Darwin の `ENOTDIR`。`open_subdir`（`O_DIRECTORY | O_NOFOLLOW`）で
+    /// 対象がシンボリックリンクの場合、Linux は一貫して `ELOOP` を返すが、
+    /// Darwin は `O_NOFOLLOW` によりシンボリックリンクとして解決されない
+    /// 実体を「ディレクトリではない」とみなし `ENOTDIR` を返す（実測確認済み:
+    /// `build_site_rejects_output_path_escaping_via_symlinked_parent` 等の
+    /// 回帰テストで Apple Silicon 実機から検出）。よって macOS に限り
+    /// `ENOTDIR` も symlink 拒否として扱う（実際に「ディレクトリを期待した
+    /// 位置に通常ファイルがある」設定ミスも同じ errno になり得るが、いずれの
+    /// 場合も fail-closed に拒否する点は変わらないため安全側の近似として
+    /// 許容する。CI の実行基盤である Linux〈ubuntu-latest〉では発生しない）。
+    #[cfg(target_os = "macos")]
+    const ENOTDIR_AS_SYMLINK_REJECTION: i32 = 20;
+
+    /// `error` が「`O_NOFOLLOW` によるシンボリックリンク拒否」であるかを
+    /// 判定する。呼び出し元（`build.rs` の `classify_*_io_error`・
+    /// `probe_non_symlink_entry` 呼び出し側）がこれを見て `UnsafeSource`/
+    /// `UnsafeOutputPath` へ詰め替える。
+    pub fn is_symlink_rejection(error: &io::Error) -> bool {
+        let raw = error.raw_os_error();
+        #[cfg(target_os = "macos")]
+        {
+            raw == Some(ELOOP) || raw == Some(ENOTDIR_AS_SYMLINK_REJECTION)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            raw == Some(ELOOP)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod flags {
+        use std::os::raw::c_int;
+        pub const O_RDONLY: c_int = 0o0;
+        pub const O_WRONLY: c_int = 0o1;
+        pub const O_CREAT: c_int = 0o100;
+        pub const O_EXCL: c_int = 0o200;
+        pub const O_DIRECTORY: c_int = 0o200_000;
+        pub const O_NOFOLLOW: c_int = 0o400_000;
+        pub const O_CLOEXEC: c_int = 0o2_000_000;
+    }
+
+    #[cfg(target_os = "macos")]
+    mod flags {
+        use std::os::raw::c_int;
+        pub const O_RDONLY: c_int = 0x0000;
+        pub const O_WRONLY: c_int = 0x0001;
+        pub const O_CREAT: c_int = 0x0200;
+        pub const O_EXCL: c_int = 0x0800;
+        pub const O_NOFOLLOW: c_int = 0x0100;
+        pub const O_DIRECTORY: c_int = 0x10_0000;
+        pub const O_CLOEXEC: c_int = 0x100_0000;
+    }
+
+    use flags::*;
+
+    /// コンポーネント（1 セグメント分の `OsStr`）を NUL 終端 C 文字列へ変換
+    /// する。内部 NUL を含む異常な入力は `CString::new` が失敗するため
+    /// fail-closed に拒否する。
+    fn component_cstring(component: &OsStr) -> io::Result<CString> {
+        CString::new(component.as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "path component contains an interior NUL byte",
+            )
+        })
+    }
+
+    /// `relative` を `Normal` コンポーネントのみからなる非空列として検証する。
+    /// `ParentDir`（`..`）・`RootDir`（絶対パス）・`Prefix`（Windows ドライブ）・
+    /// `CurDir`（`.`）はすべて拒否する。呼び出し元（`nav::parse_nav` の
+    /// `validate_source_shape`／`validate_page_path`）側で `..`・絶対パスは既に
+    /// 拒否済みだが、本ウォーク自体を自己完結した安全条件として多層防御で
+    /// 再検査する。
+    fn normalize_components(relative: &Path) -> io::Result<Vec<&OsStr>> {
+        let mut out = Vec::new();
+        for component in relative.components() {
+            match component {
+                Component::Normal(name) => out.push(name),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "path contains a non-normal component (`..`, an absolute root, or `.`)",
+                    ));
+                }
             }
         }
-    })?;
-
-    let file = fs::File::open(&canonical_path).map_err(|error| BuildError::ReadSource {
-        source: source.to_string(),
-        error,
-    })?;
-
-    let matches =
-        verify_opened_file_matches_identity(&file, pre_open_identity).map_err(|error| {
-            BuildError::ReadSource {
-                source: source.to_string(),
-                error,
-            }
-        })?;
-    if !matches {
-        return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string())));
+        if out.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "relative path has no components",
+            ));
+        }
+        Ok(out)
     }
+
+    /// `openat` 1 回分の薄いラッパー。返る fd は呼び出し元が直ちに
+    /// `File::from_raw_fd` で RAII 管理へ委ねる（fd リーク防止）。`mode` は
+    /// 常に `c_uint`（= 昇格後の `int` 幅）で可変長引数として渡す（`openat`
+    /// 宣言のドキュメント参照: 固定引数として渡すと Apple AArch64 ABI 上で
+    /// 破壊される）。
+    fn openat_raw(
+        dirfd: c_int,
+        name: &OsStr,
+        extra_flags: c_int,
+        mode: std::os::raw::c_uint,
+    ) -> io::Result<File> {
+        let cname = component_cstring(name)?;
+        // SAFETY: `dirfd` は呼び出し元が所有する有効なディレクトリ fd、
+        // `cname` は NUL 終端済みの単一パスコンポーネント（`/` を含まない）。
+        // `mode` は C の可変長引数既定昇格と同じ `c_uint`（int 幅）で渡す。
+        // FFI 境界（`.claude/rules/coding-rust.md` unsafe 方針）。返る fd の
+        // 所有権は本関数が引き継ぎ、直後に `File::from_raw_fd` で RAII へ渡す。
+        let fd = unsafe { openat(dirfd, cname.as_ptr(), extra_flags | O_CLOEXEC, mode) };
+        if fd < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            // SAFETY: 直前の `openat` が返した、他に所有者のいない新規 fd。
+            Ok(unsafe { File::from_raw_fd(fd) })
+        }
+    }
+
+    /// `dir` 直下の 1 コンポーネントをディレクトリとして `O_DIRECTORY |
+    /// O_NOFOLLOW` で開く（symlink なら `ELOOP`、非ディレクトリなら
+    /// `ENOTDIR` でカーネルが拒否する）。
+    fn open_subdir(dir: &File, name: &OsStr) -> io::Result<File> {
+        openat_raw(dir.as_raw_fd(), name, O_DIRECTORY | O_NOFOLLOW, 0)
+    }
+
+    /// `dir` 直下の 1 コンポーネントを `O_RDONLY | O_NOFOLLOW` で開く
+    /// （symlink なら `ELOOP` で拒否）。
+    fn open_leaf_readonly(dir: &File, name: &OsStr) -> io::Result<File> {
+        openat_raw(dir.as_raw_fd(), name, O_RDONLY | O_NOFOLLOW, 0)
+    }
+
+    /// `dir` 直下に `name` というサブディレクトリを作る（既存なら成功扱い）。
+    /// symlink への差し替えは呼び出し元が続けて行う `open_subdir` の
+    /// `O_NOFOLLOW` オープンで検出する（ここでは作成のみ担う）。
+    fn mkdirat_if_missing(dir: &File, name: &OsStr, mode: ModeT) -> io::Result<()> {
+        let cname = component_cstring(name)?;
+        // SAFETY: `dir` は呼び出し元が所有する有効なディレクトリ fd。
+        let result = unsafe { mkdirat(dir.as_raw_fd(), cname.as_ptr(), mode) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::AlreadyExists {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+    }
+
+    /// `base` を起点に、`relative` の各コンポーネントを 1 つずつ既存の
+    /// ディレクトリとして `O_NOFOLLOW` で開き進める（作成はしない）。
+    /// `page.source` の親ディレクトリ列（`nav::validate_sources` が実在済みで
+    /// あることを事前検証している）を辿る用途。
+    pub fn open_dir_beneath(base: &File, relative: &Path) -> io::Result<File> {
+        let components = normalize_components(relative)?;
+        let mut current = base.try_clone()?;
+        for name in components {
+            current = open_subdir(&current, name)?;
+        }
+        Ok(current)
+    }
+
+    /// `base` を起点に、`relative` の各コンポーネントを 1 つずつ「なければ
+    /// 作成 → `O_NOFOLLOW` で開く」の順で辿り、最終ディレクトリの fd を返す。
+    /// 出力先（`out` 配下）のディレクトリ列を、シンボリックリンク差し替えを
+    /// 検出しながら作成する用途。
+    pub fn open_or_create_dir_chain(base: &File, relative: &Path) -> io::Result<File> {
+        let components = normalize_components(relative)?;
+        let mut current = base.try_clone()?;
+        for name in components {
+            mkdirat_if_missing(&current, name, 0o755)?;
+            current = open_subdir(&current, name)?;
+        }
+        Ok(current)
+    }
+
+    /// `dir` 直下の `name` を読み取り専用で開く（symlink なら `ELOOP`）。
+    /// `page.source` の最終コンポーネント（ファイル本体）の読み込み用。
+    pub fn open_file_beneath(dir: &File, name: &OsStr) -> io::Result<File> {
+        open_leaf_readonly(dir, name)
+    }
+
+    /// `dir` 直下に `name` を新規作成する（`O_CREAT | O_EXCL | O_NOFOLLOW`）。
+    /// 既存エントリ（通常ファイル・symlink 問わず）があれば `EEXIST` で失敗する
+    /// （一時ファイル名の衝突検出・symlink 追従防止の両方を兼ねる）。
+    pub fn create_new_file_beneath(dir: &File, name: &OsStr, mode: u32) -> io::Result<File> {
+        openat_raw(
+            dir.as_raw_fd(),
+            name,
+            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW,
+            mode,
+        )
+    }
+
+    /// `dir` 直下に既存の `name` があるかを `O_NOFOLLOW` で確認する。
+    /// - `Ok(true)`: 既存の非 symlink エントリ（通常ファイル等）
+    /// - `Ok(false)`: 存在しない
+    /// - `Err` かつ `kind() == FilesystemLoop`: 既存の symlink（呼び出し元が
+    ///   `UnsafeOutputPath` へ詰め替える）
+    pub fn probe_non_symlink_entry(dir: &File, name: &OsStr) -> io::Result<bool> {
+        match open_leaf_readonly(dir, name) {
+            Ok(_file) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// `dir` 直下の `name` をベストエフォートで削除する（一時ファイルの
+    /// 書き込み・rename 失敗時の後始末専用。失敗しても呼び出し元へは伝播しない
+    /// 前提で使う）。
+    pub fn remove_beneath(dir: &File, name: &OsStr) -> io::Result<()> {
+        let cname = component_cstring(name)?;
+        // SAFETY: `dir` は呼び出し元が所有する有効なディレクトリ fd。
+        let result = unsafe { unlinkat(dir.as_raw_fd(), cname.as_ptr(), 0) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    /// 同一の検証済み `dir`（dirfd）内で `old_name` → `new_name` へ不可分に
+    /// rename する。親ディレクトリを名前で再解決しないため、検証後に親が
+    /// 差し替えられていても影響を受けない（`fs::rename` はパス文字列で親を
+    /// 毎回再解決するため対策になっていなかった。レビュー追加ラウンド指摘）。
+    pub fn rename_beneath(dir: &File, old_name: &OsStr, new_name: &OsStr) -> io::Result<()> {
+        let old_c = component_cstring(old_name)?;
+        let new_c = component_cstring(new_name)?;
+        let dirfd = dir.as_raw_fd();
+        // SAFETY: `dir` は検証済みディレクトリの fd。old/new とも `/` を
+        // 含まない単一コンポーネント名の NUL 終端 C 文字列。
+        let result = unsafe { renameat(dirfd, old_c.as_ptr(), dirfd, new_c.as_ptr()) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+}
+
+/// unix 以外（Windows 等）は `openat` 相当の fd 相対 API がなく、
+/// [`fd_walk`]（unix 版）による TOCTOU 対策を実施できない。レビュー指摘の
+/// とおり検証不能なプラットフォームでは許可せず fail-closed に拒否する
+/// （`docs-site` は CI・開発者ローカル実行とも Linux/macOS が前提。
+/// `.claude/rules/ci.md` 実機依存節）。
+#[cfg(not(unix))]
+mod fd_walk {
+    use std::ffi::OsStr;
+    use std::fs::File;
+    use std::io;
+    use std::path::Path;
+
+    fn unsupported() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "fd-relative symlink-safe filesystem access is not implemented on this platform",
+        )
+    }
+
+    pub fn open_dir_beneath(_base: &File, _relative: &Path) -> io::Result<File> {
+        Err(unsupported())
+    }
+    pub fn open_or_create_dir_chain(_base: &File, _relative: &Path) -> io::Result<File> {
+        Err(unsupported())
+    }
+    pub fn open_file_beneath(_dir: &File, _name: &OsStr) -> io::Result<File> {
+        Err(unsupported())
+    }
+    pub fn create_new_file_beneath(_dir: &File, _name: &OsStr, _mode: u32) -> io::Result<File> {
+        Err(unsupported())
+    }
+    pub fn probe_non_symlink_entry(_dir: &File, _name: &OsStr) -> io::Result<bool> {
+        Err(unsupported())
+    }
+    pub fn rename_beneath(_dir: &File, _old_name: &OsStr, _new_name: &OsStr) -> io::Result<()> {
+        Err(unsupported())
+    }
+    pub fn remove_beneath(_dir: &File, _name: &OsStr) -> io::Result<()> {
+        Err(unsupported())
+    }
+    pub fn is_symlink_rejection(_error: &io::Error) -> bool {
+        false
+    }
+}
+
+/// [`read_verified_source`] の I/O エラーを、fd ウォークが検出したシンボリック
+/// リンク差し替え（[`fd_walk::is_symlink_rejection`]）とそれ以外に振り分ける。
+fn classify_source_io_error(source: &str, error: std::io::Error) -> BuildError {
+    if fd_walk::is_symlink_rejection(&error) {
+        BuildError::Nav(NavError::UnsafeSource(source.to_string()))
+    } else {
+        BuildError::ReadSource {
+            source: source.to_string(),
+            error,
+        }
+    }
+}
+
+/// `page.source` を `repo_root_dir`（`repo_root` を検証済みで開いた fd）配下
+/// から fd 相対（[`fd_walk`]）で辿って読み込む。単一の `File` ハンドルから
+/// サイズ確認・内容読み込みの両方を行う。
+///
+/// [`nav::validate_sources`] は全ページの一括事前検証（早期にわかりやすい
+/// エラーを返すため）だが、実際に読み込む直前にも [`fd_walk::open_dir_beneath`]
+/// / [`fd_walk::open_file_beneath`] で `repo_root_dir` 起点の fd 相対アクセスへ
+/// 収斂させる。`canonicalize` によるパス文字列ベースの再検証（旧実装）は
+/// `File::open` がパスを再解決するため、検証と実際のアクセスの間で中間
+/// ディレクトリ（`source` 中の途中のディレクトリコンポーネント）がシンボリック
+/// リンクへ差し替えられる race を検知できなかった（codex-review 追加ラウンド
+/// 指摘・PR #899）。fd ウォークは検証済み dirfd からしか名前解決しないため、
+/// この race が構造的に発生しない。
+///
+/// 残る対策（[`fd_walk`] のドキュメント参照）:
+/// - 各コンポーネントの `openat(..., O_NOFOLLOW)` がシンボリックリンクを
+///   `ELOOP`（`ErrorKind::FilesystemLoop`）で拒否する
+/// - `metadata().len()` でのサイズ確認後、同じハンドルから `Read::take` で
+///   `MAX_SOURCE_BYTES + 1` バイトに上限した bounded read を行い、確認後の
+///   追記による上限迂回を防ぐ
+fn read_verified_source(repo_root_dir: &fs::File, source: &str) -> Result<String, BuildError> {
+    let relative = Path::new(source);
+    let (parent, file_name) = match (relative.parent(), relative.file_name()) {
+        (Some(parent), Some(file_name)) => (parent, file_name),
+        _ => return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string()))),
+    };
+
+    let parent_dir = if parent.as_os_str().is_empty() {
+        repo_root_dir
+            .try_clone()
+            .map_err(|error| classify_source_io_error(source, error))?
+    } else {
+        fd_walk::open_dir_beneath(repo_root_dir, parent)
+            .map_err(|error| classify_source_io_error(source, error))?
+    };
+
+    let file = fd_walk::open_file_beneath(&parent_dir, file_name)
+        .map_err(|error| classify_source_io_error(source, error))?;
 
     let size = file
         .metadata()
@@ -300,145 +598,111 @@ fn read_verified_source(
     Ok(contents)
 }
 
-/// `out` 配下のディレクトリを 1 階層ずつ作成する。`target`（`out.join(...)` で
-/// 組み立てられた絶対パス）へ向けて、`canonical_out` を起点に相対コンポーネント
-/// を 1 つずつ push・作成・`canonicalize` 再検証してから次の階層へ進む。
+/// [`fd_walk::open_or_create_dir_chain`] / [`fd_walk::open_dir_beneath`] の
+/// I/O エラーを、fd ウォークが検出したシンボリックリンク差し替え
+/// （[`fd_walk::is_symlink_rejection`]）とそれ以外に振り分ける。
+fn classify_output_dir_io_error(path_display: &str, error: std::io::Error) -> BuildError {
+    if fd_walk::is_symlink_rejection(&error) {
+        BuildError::UnsafeOutputPath(path_display.to_string())
+    } else {
+        BuildError::WritePage {
+            path: path_display.to_string(),
+            error,
+        }
+    }
+}
+
+/// `out_root_dir`（`out` を検証済みで開いた fd）配下へ、`relative_path`
+/// （`out` からの相対パス。末尾セグメントがファイル名）の親ディレクトリを
+/// [`fd_walk::open_or_create_dir_chain`] で作成しつつ辿り、書き込み先の
+/// ディレクトリ fd を得たうえで一時ファイル＋`renameat` の atomic replace で
+/// 書き出す。
 ///
 /// **`fs::create_dir_all` を一括で呼んでから事後に `canonicalize` するのでは
 /// 不十分**（レビュー指摘・回帰テストで確認済み）: 中間コンポーネントが `out`
 /// 外を指すシンボリックリンクの場合、一括 `create_dir_all` は検証前にそのリンク
 /// 先へ実際にディレクトリを作成してしまう（副作用が検査より先に発生する）。
-/// 1 階層ごとに「シンボリックリンクでないか確認 → 作成 → canonicalize して
-/// `canonical_out` 配下か確認」の順で進めることで、脱出を検知した時点で
-/// それ以上ディレクトリを作らずに止められる。
-fn create_dir_all_verified(
-    out: &Path,
-    canonical_out: &Path,
-    target: &Path,
-) -> Result<(), BuildError> {
-    let target_display = target.display().to_string();
-    let relative = target.strip_prefix(out).unwrap_or(target);
-    let mut current = canonical_out.to_path_buf();
-    for component in relative.components() {
-        current.push(component);
-        if let Ok(existing) = fs::symlink_metadata(&current)
-            && existing.file_type().is_symlink()
-        {
-            return Err(BuildError::UnsafeOutputPath(target_display));
-        }
-        match fs::create_dir(&current) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => {
-                return Err(BuildError::WritePage {
-                    path: target_display,
-                    error,
-                });
-            }
-        }
-        current = current
-            .canonicalize()
-            .map_err(|error| BuildError::WritePage {
-                path: target_display.clone(),
-                error,
-            })?;
-        if !current.starts_with(canonical_out) {
-            return Err(BuildError::UnsafeOutputPath(target_display));
-        }
-    }
-    Ok(())
-}
-
-/// `path` の親ディレクトリを作成してからファイルへ書き出す。
+/// さらに `canonicalize` によるパス文字列ベースの事後検証（旧実装）は、検証と
+/// 実際の `open`/`rename` の間に中間ディレクトリを symlink へ差し替えられる
+/// race を検知できなかった（codex-review 追加ラウンド指摘・PR #899）。
+/// [`fd_walk`] は検証済み dirfd からしか名前解決しないため、この race が
+/// 構造的に発生しない。
 ///
-/// 書き出し前に 2 点を検査する（レビュー指摘: 出力先の既存シンボリックリンク
-/// を検査せず `create_dir_all`/`fs::write` していたため、`out` 配下外への
-/// 書き込み・既存ファイルの意図しない上書きが可能だった）。
-/// - 親ディレクトリの作成を [`create_dir_all_verified`] へ委ね、1 階層ごとに
-///   `canonical_out`（`out` の正規化パス）配下であることを確認する（中間
-///   コンポーネントがシンボリックリンクで外を指す場合を、実際に作成する前に
-///   拒否する）
-/// - 書き込み先が既存のシンボリックリンクでないことを `fs::symlink_metadata`
-///   （symlink を辿らない）で確認する（既存シンボリックリンク経由の意図しない
-///   上書きを拒否する）
-///
-/// `page_output_path` は `page.path` の安全な形式検証（`nav::validate_page_path`。
-/// 英数字・`-`・`_` のみのセグメント）済みの値のみを結合するため通常は `out`
-/// 内に収まるが、`out` が使い回されるビルド環境等で事前に配置されたシンボリック
-/// リンクによる脱出をここで別途防ぐ。
+/// 書き込み本体（`codex-review` 指摘・PR #899・CI ブロック要因の P0 だった
+/// `remove_file` → `create_new` の危険な順序の修正）:
+/// - 一時ファイル名は `.{ファイル名}.tmp-{pid}-{カウンタ}-{nanos}` とし、
+///   同一プロセス内の並行呼び出し・過去の残骸との衝突を避ける
+///   （`AlreadyExists` は限られた回数だけ次の候補へ retry し、それでも衝突
+///   する場合は fail-closed にエラーを返す）
+/// - 一時ファイルは検証済みディレクトリ fd に対する
+///   [`fd_walk::create_new_file_beneath`]（`O_CREAT | O_EXCL | O_NOFOLLOW`）で
+///   作成するため、事前に何か（symlink 含む）がそのパスを指していれば
+///   `EEXIST` で失敗し、その追従先へは書き込まない
+/// - 書き込み・`sync_all` 完了後に [`fd_walk::rename_beneath`]（同一 dirfd 内の
+///   `renameat`）で本来の名前へ不可分に置換する。**親ディレクトリを名前で
+///   再解決しない**ため、検証後に親が symlink へ差し替えられていても影響を
+///   受けない（`fs::rename` はパス文字列で親を毎回再解決するため対策に
+///   なっていなかった。レビュー追加ラウンド指摘）
+/// - 置換先の既存エントリが symlink かどうかは
+///   [`fd_walk::probe_non_symlink_entry`] で事前確認し、symlink なら
+///   `UnsafeOutputPath` で拒否する（既存シンボリックリンク経由の意図しない
+///   上書き対策）。既存の通常ファイルはそのまま `rename` で置換してよい
+///   （リビルド時の正常な更新経路）
+/// - 書き込み・`rename` のいずれかが失敗した場合は一時ファイルをベストエフォート
+///   で削除し、元の生成物・エラー内容はそのまま呼び出し元へ返す
 fn write_file_creating_parent(
     out: &Path,
-    canonical_out: &Path,
-    path: &Path,
+    out_root_dir: &fs::File,
+    relative_path: &Path,
     contents: &str,
 ) -> Result<(), BuildError> {
-    let path_display = path.display().to_string();
-    if let Some(parent) = path.parent() {
-        create_dir_all_verified(out, canonical_out, parent)?;
-    }
-    if let Ok(existing) = fs::symlink_metadata(path)
-        && existing.file_type().is_symlink()
-    {
-        return Err(BuildError::UnsafeOutputPath(path_display));
-    }
+    let path_display = out.join(relative_path).display().to_string();
 
-    // 上の `symlink_metadata` 検査から実際の書き込みまでの間に、当該パスへ
-    // シンボリックリンクを差し替えられる race がなお残る。`fs::write` は
-    // リンクを辿って追従先を上書きしてしまうため、以前は
-    // `remove_file`（既存エントリの unlink）→ `create_new` の 2 手順で
-    // fail-closed に倒していた。しかしこの順序は **codex-review 指摘（PR
-    // #899・CI ブロック要因の P0）**のとおりデータ破壊経路になる: `remove_file`
-    // で既存の正常な生成物を先に消してしまうため、その後の `open`/`write_all`
-    // が権限変更・容量不足・I/O エラー・プロセス停止等で失敗すると、ビルド
-    // エラーになるだけでなく既存生成物も失われる（途中まで書かれた不完全な
-    // ファイルが残ることもある）。
-    //
-    // 修正: 同じ検証済みディレクトリ内（`parent`。`create_dir_all_verified`
-    // が直前に `canonical_out` 配下であることを確認済み）へ一時ファイルを
-    // `create_new` で作成し、書き込み・`sync_all` 完了後に初めて
-    // `fs::rename` で本来のパスへ置換する。
-    // - 一時ファイル名は `.{ファイル名}.tmp-{pid}-{カウンタ}-{nanos}` とし、
-    //   同一プロセス内の並行呼び出し・過去の残骸との衝突を避ける
-    //   （`AlreadyExists` は限られた回数だけ次の候補へ retry し、それでも
-    //   衝突する場合は fail-closed にエラーを返す）。
-    // - 一時ファイル自体も `create_new` で作るため、事前に何か（symlink
-    //   含む）がそのパスを指していれば `EEXIST` で失敗し、その追従先へは
-    //   書き込まない。
-    // - `fs::rename` は POSIX 上、置換先が既存のシンボリックリンクであっても
-    //   そのリンクエントリ自体を置き換えるだけで、リンク先を辿って上書き
-    //   することはない（`remove_file` が持っていた「リンク自体だけを消す」
-    //   性質を rename でも保つ）。よって置換先が既存の通常ファイルであれば
-    //   `rename` は書き込み完了後に不可分に置換し、途中失敗時は元の生成物を
-    //   一切変更しない。
-    // - 書き込み・`rename` のいずれかが失敗した場合は一時ファイルを
-    //   ベストエフォートで削除し、元の生成物・エラー内容はそのまま呼び出し元
-    //   へ返す。
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
+    let parent_relative = relative_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let dir = match parent_relative {
+        Some(parent) => fd_walk::open_or_create_dir_chain(out_root_dir, parent)
+            .map_err(|error| classify_output_dir_io_error(&path_display, error))?,
+        None => out_root_dir
+            .try_clone()
+            .map_err(|error| classify_output_dir_io_error(&path_display, error))?,
+    };
+
+    let file_name = relative_path
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "output".to_string());
+        .ok_or_else(|| BuildError::UnsafeOutputPath(path_display.clone()))?;
 
+    match fd_walk::probe_non_symlink_entry(&dir, file_name) {
+        Ok(_existing_or_missing) => {}
+        Err(error) if fd_walk::is_symlink_rejection(&error) => {
+            return Err(BuildError::UnsafeOutputPath(path_display));
+        }
+        Err(error) => {
+            return Err(BuildError::WritePage {
+                path: path_display,
+                error,
+            });
+        }
+    }
+
+    let file_name_lossy = file_name.to_string_lossy().into_owned();
     static TMP_NAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     const MAX_TMP_NAME_ATTEMPTS: u32 = 8;
 
     let mut attempt = 0u32;
-    let (tmp_path, mut tmp_file) = loop {
+    let (tmp_name, mut tmp_file) = loop {
         let counter = TMP_NAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|duration| duration.as_nanos())
             .unwrap_or(0);
-        let tmp_path = parent.join(format!(
-            ".{file_name}.tmp-{}-{counter}-{nanos}",
+        let tmp_name = format!(
+            ".{file_name_lossy}.tmp-{}-{counter}-{nanos}",
             std::process::id()
-        ));
-        match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp_path)
-        {
-            Ok(file) => break (tmp_path, file),
+        );
+        match fd_walk::create_new_file_beneath(&dir, std::ffi::OsStr::new(&tmp_name), 0o644) {
+            Ok(file) => break (tmp_name, file),
             Err(error)
                 if error.kind() == std::io::ErrorKind::AlreadyExists
                     && attempt < MAX_TMP_NAME_ATTEMPTS =>
@@ -458,15 +722,15 @@ fn write_file_creating_parent(
         .and_then(|()| tmp_file.sync_all());
     drop(tmp_file);
     if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp_path);
+        let _ = fd_walk::remove_beneath(&dir, std::ffi::OsStr::new(&tmp_name));
         return Err(BuildError::WritePage {
             path: path_display,
             error,
         });
     }
 
-    if let Err(error) = fs::rename(&tmp_path, path) {
-        let _ = fs::remove_file(&tmp_path);
+    if let Err(error) = fd_walk::rename_beneath(&dir, std::ffi::OsStr::new(&tmp_name), file_name) {
+        let _ = fd_walk::remove_beneath(&dir, std::ffi::OsStr::new(&tmp_name));
         return Err(BuildError::WritePage {
             path: path_display,
             error,
@@ -535,43 +799,45 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     let parsed: Nav = nav::parse_nav(&input)?;
     nav::validate_sources(&parsed, root)?;
 
-    // 手順 3 の読み込み直前の再検証（TOCTOU 対策。`read_verified_source`
-    // モジュールコメント参照）に使う `root` の正規化パス。`validate_sources` が
-    // 直前に同じ `canonicalize` に成功しているため、通常経路でここが失敗する
-    // ことはない。
-    let canonical_root = root
-        .canonicalize()
+    // 手順 3 の読み込み直前の再検証（TOCTOU 対策。[`fd_walk`]・
+    // [`read_verified_source`] のモジュールコメント参照）に使う `root` の
+    // dirfd。以降の全ページ読み込みをこの単一の検証済み fd から fd 相対で
+    // 辿るため、`validate_sources` 通過後に `root` 自体が別の実体へ差し替え
+    // られない限り（`root` は呼び出し元が制御する起点であり、その先の途中
+    // ディレクトリの差し替えのみを本ウォークで防ぐ）安全である。
+    let root_dir = fs::File::open(root)
         .map_err(|_| BuildError::Nav(NavError::MissingSource(root.display().to_string())))?;
 
     // 手順 3: 全ページを先にメモリ上でレンダリングし切ってから書き出す。
+    // `relative_out_path` は `out` からの相対パス（`page_output_path` に空の
+    // ベースを渡して算出する）。書き出しは fd 相対（[`write_file_creating_parent`]）
+    // で行うため絶対パスは不要で、`out` は表示用にのみ渡す。
     let mut rendered_pages: Vec<(PathBuf, String)> = Vec::new();
     for section in &parsed.sections {
         for page in &section.pages {
-            let markdown_input = read_verified_source(&canonical_root, root, &page.source)?;
+            let markdown_input = read_verified_source(&root_dir, &page.source)?;
 
             let body = markdown::markdown_to_nodes(&markdown_input);
             let page_node = layout::docs_page(&parsed, &page.title, &page.path, body);
             let html_out = format!("{DOCTYPE}{}", html::render(&page_node));
 
-            let out_path = page_output_path(out, &page.path);
-            rendered_pages.push((out_path, html_out));
+            let relative_out_path = page_output_path(Path::new(""), &page.path);
+            rendered_pages.push((relative_out_path, html_out));
         }
     }
 
     // 手順 4: 出力ディレクトリ作成 → ページ書き出し → テーマ CSS 書き出し。
     fs::create_dir_all(out).map_err(BuildError::CreateOutDir)?;
-    let canonical_out = out.canonicalize().map_err(BuildError::CreateOutDir)?;
+    let out_root_dir = fs::File::open(out).map_err(BuildError::CreateOutDir)?;
 
     let mut written = Vec::with_capacity(rendered_pages.len() + 1);
-    for (out_path, html_out) in &rendered_pages {
-        write_file_creating_parent(out, &canonical_out, out_path, html_out)?;
-        if let Ok(relative) = out_path.strip_prefix(out) {
-            written.push(relative.to_path_buf());
-        }
+    for (relative_out_path, html_out) in &rendered_pages {
+        write_file_creating_parent(out, &out_root_dir, relative_out_path, html_out)?;
+        written.push(relative_out_path.clone());
     }
 
-    let css_path = out.join(SITE_CSS_RELATIVE_PATH);
-    write_file_creating_parent(out, &canonical_out, &css_path, crate::theme::SITE_CSS).map_err(
+    let css_path = PathBuf::from(SITE_CSS_RELATIVE_PATH);
+    write_file_creating_parent(out, &out_root_dir, &css_path, crate::theme::SITE_CSS).map_err(
         |error| match error {
             // ページ書き出し（`WritePage`）と同じヘルパーを使うため、この呼び出し
             // 元だけは `assets/site.css` 固有の `WriteAsset` へ詰め替える
@@ -639,12 +905,46 @@ mod tests {
         std::os::unix::fs::symlink(&secret, root.0.join("linked.md"))
             .expect("create symlink escaping repo_root for test fixture");
 
-        let canonical_root = root.0.canonicalize().expect("canonicalize repo_root");
-        match read_verified_source(&canonical_root, &root.0, "linked.md") {
+        let root_dir = fs::File::open(&root.0).expect("open repo_root as dirfd");
+        match read_verified_source(&root_dir, "linked.md") {
             Err(BuildError::Nav(NavError::UnsafeSource(source))) => {
                 assert_eq!(source, "linked.md");
             }
             other => panic!("expected UnsafeSource for symlink escape, got {other:?}"),
+        }
+    }
+
+    /// [`fd_walk`] 追加ラウンドの回帰テスト（PR #899 追加レビュー指摘）:
+    /// `page.source` の**中間ディレクトリ**（`repo_root` 直下ではなく、その
+    /// 内側のディレクトリ）がシンボリックリンクで `repo_root` の外を指す場合に
+    /// `read_verified_source` が拒否することを確認する。旧実装
+    /// （`canonicalize` + `starts_with` によるパス文字列ベースの検証）は
+    /// `canonicalize` がシンボリックリンクを解決してしまうため、この中間
+    /// ディレクトリ差し替え自体は素通りしていた（`canonicalize` 結果が
+    /// たまたま `repo_root` 外を指せば旧実装でも拒否できたが、本テストは
+    /// 「`repo_root` 内側の別ディレクトリへの中間シンボリックリンク」という、
+    /// 旧実装が拒否できなかった具体的な回帰ケースを再現する）。
+    #[cfg(unix)]
+    #[test]
+    fn read_verified_source_rejects_symlinked_intermediate_directory() {
+        let root = TempDir::new("read-verified-intermediate-root");
+        let real_dir = root.0.join("real");
+        fs::create_dir_all(&real_dir).expect("create real intermediate directory");
+        fs::write(real_dir.join("doc.md"), b"# Real").expect("write fixture under real dir");
+        // `linked` は `repo_root` 内側の別ディレクトリ（`real`）を指す中間
+        // シンボリックリンク。`linked/doc.md` という `page.source` はこの
+        // シンボリックリンクを経由する。
+        std::os::unix::fs::symlink(&real_dir, root.0.join("linked"))
+            .expect("create symlinked intermediate directory");
+
+        let root_dir = fs::File::open(&root.0).expect("open repo_root as dirfd");
+        match read_verified_source(&root_dir, "linked/doc.md") {
+            Err(BuildError::Nav(NavError::UnsafeSource(source))) => {
+                assert_eq!(source, "linked/doc.md");
+            }
+            other => {
+                panic!("expected UnsafeSource for symlinked intermediate directory, got {other:?}")
+            }
         }
     }
 

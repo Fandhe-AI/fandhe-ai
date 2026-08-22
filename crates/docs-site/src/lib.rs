@@ -33,11 +33,22 @@
 //! 生 HTML 注入用バリアント（`RawHtml` 相当）はあえて設けず、エスケープを
 //! 構造的に迂回できない設計にしている（`html.rs` モジュールコメント参照）。
 //!
-//! # unsafe 不使用
+//! # unsafe の使用範囲
 //!
-//! 本クレートは FFI 境界を持たないため、クレート全体で `unsafe` を禁止する
+//! 本クレートは既定でクレート全体の `unsafe` を禁止する
 //! （`.claude/rules/coding-rust.md` の unsafe 最小化方針・`.claude/rules/security.md`）。
-#![forbid(unsafe_code)]
+//! 唯一の例外が [`build::fd_walk`]（unix 版）: `page.source`／出力先パスへの
+//! アクセスを fd 相対（`openat`/`mkdirat`/`renameat`/`unlinkat`、いずれも
+//! `O_NOFOLLOW`）で行う FFI 境界であり、`canonicalize` 等のパス文字列ベースの
+//! 検証では防げない中間ディレクトリのシンボリックリンク差し替え TOCTOU
+//! （codex-review 指摘・PR #899 追加ラウンド、P0 x2）を閉じるために新設した。
+//! `std` は `openat` 相当の fd 相対 API を公開していないため、この境界だけは
+//! `unsafe` な `extern "C"` 宣言（追加 Cargo 依存なし。`std` が既にリンクする
+//! system libc の安定 C ABI 関数を直接呼ぶ）が必要になる。よって
+//! `forbid(unsafe_code)` から `deny(unsafe_code)` へ緩め、`fd_walk` モジュール
+//! （unix 版）にのみ `#[allow(unsafe_code)]` を局所付与する。それ以外の
+//! モジュール・関数では `unsafe` は引き続き `deny` により拒否される。
+#![deny(unsafe_code)]
 
 pub mod build;
 pub mod html;
