@@ -1,0 +1,46 @@
+# サイトナビゲーション定義（イシュー #874・親 #873。自作 SSG `crates/docs-site`
+# 〈親イシュー #865〉が読み込むスキーマ。同型リポ fandhe-backend の
+# `site/nav.toml`（`[site]` title/base_path・`[[section]]` title/index_path・
+# `[[section.page]]` title/source/path）に合わせて記述する。
+#
+# セクション順（Getting Started → Guides → Examples → API Reference）を
+# 意識し、姉妹イシュー #875（Guides / Examples 原稿）が本ファイルへ
+# セクションを追記する前提で、本イシュー（#874）は先頭（Getting Started）
+# と末尾（API Reference）の 2 セクションのみを宣言する。
+
+[site]
+title = "rust-ai-library"
+base_path = "/rust-ai-library"
+
+[[section]]
+title = "Getting Started"
+index_path = "/"
+
+[[section.page]]
+title = "Home"
+source = "site/index.md"
+path = "/"
+
+[[section.page]]
+title = "Getting Started"
+source = "site/getting-started.md"
+path = "/getting-started/"
+
+[[section]]
+title = "API Reference"
+index_path = "/api/"
+
+[[section.page]]
+title = "API Reference"
+source = "site/api.md"
+path = "/api/"
+
+[[section.page]]
+title = "compat API"
+source = "site/api/compat.md"
+path = "/api/compat/"
+
+[[section.page]]
+title = "guardrail / self-repair CLI"
+source = "site/api/cli.md"
+path = "/api/cli/"
