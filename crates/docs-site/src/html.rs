@@ -179,6 +179,37 @@ fn render_into(node: &Node, out: &mut String) {
     }
 }
 
+/// `node` を根とする木を再帰的に走査し、属性名が `name` と一致する属性値を
+/// 出現順（深さ優先・子は宣言順）ですべて集める。
+///
+/// `crate::linkcheck::check_links`（イシュー #872）が `layout::docs_page` の
+/// 最終形 `Node`（ヘッダ・サイドバー・本文を含む） から `href`・`src` 属性値・
+/// `id` 属性値を収集する唯一の経路として使う（`search::extract_plain_text` と
+/// 同型の走査パターン）。`pub(crate)` 限定の理由は `Node` のドキュメンテーション
+/// コメント参照（`Node` 自体が `pub(crate)` のため呼び出し元は同一クレート内に
+/// 限られる）。
+pub(crate) fn find_attr_values(node: &Node, name: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    find_attr_values_into(node, name, &mut out);
+    out
+}
+
+fn find_attr_values_into(node: &Node, name: &str, out: &mut Vec<String>) {
+    if let Node::Element {
+        attrs, children, ..
+    } = node
+    {
+        for (key, value) in attrs {
+            if key == name {
+                out.push(value.clone());
+            }
+        }
+        for child in children {
+            find_attr_values_into(child, name, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +272,35 @@ mod tests {
             Node::element("p", vec![], vec![Node::text("Body")]),
         ];
         assert_eq!(render_all(&nodes), "<h1>Title</h1><p>Body</p>");
+    }
+
+    #[test]
+    fn find_attr_values_collects_matching_attrs_depth_first_in_declaration_order() {
+        let node = Node::element(
+            "div",
+            vec![],
+            vec![
+                Node::element("a", vec![("href".to_string(), "/one/".to_string())], vec![]),
+                Node::element(
+                    "div",
+                    vec![],
+                    vec![Node::element(
+                        "a",
+                        vec![("href".to_string(), "/two/".to_string())],
+                        vec![],
+                    )],
+                ),
+            ],
+        );
+        assert_eq!(
+            find_attr_values(&node, "href"),
+            vec!["/one/".to_string(), "/two/".to_string()]
+        );
+    }
+
+    #[test]
+    fn find_attr_values_returns_empty_when_no_match() {
+        let node = Node::element("p", vec![], vec![Node::text("no attrs here")]);
+        assert!(find_attr_values(&node, "href").is_empty());
     }
 }

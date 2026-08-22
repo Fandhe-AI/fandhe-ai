@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use crate::html;
 use crate::layout;
+use crate::linkcheck;
 use crate::markdown;
 use crate::nav::{self, Nav, NavError};
 use crate::script;
@@ -77,6 +78,12 @@ pub enum BuildError {
     /// 既存のシンボリックリンクを上書きしようとした（TOCTOU・意図しない上書き
     /// 対策。レビュー指摘）。
     UnsafeOutputPath(String),
+    /// [`linkcheck::check_links`] がページ間リンク・`#fragment` アンカー・
+    /// アセット参照の壊れを 1 件以上検出した（イシュー #872）。fail-closed
+    /// 契約: このバリアントを返す時点で `out` へは 1 バイトも書き出されて
+    /// いない（`open_out_root_dir` 呼び出しより前に検証するため。
+    /// `build_site` ドキュメンテーションコメント参照）。
+    BrokenLinks(Vec<linkcheck::BrokenLink>),
 }
 
 impl fmt::Display for BuildError {
@@ -115,6 +122,16 @@ impl fmt::Display for BuildError {
                     f,
                     "output path `{path}` escapes the output directory or overwrites an existing symlink"
                 )
+            }
+            BuildError::BrokenLinks(broken) => {
+                writeln!(f, "linkcheck found {} broken link(s):", broken.len())?;
+                for (index, link) in broken.iter().enumerate() {
+                    if index > 0 {
+                        writeln!(f)?;
+                    }
+                    write!(f, "  - {link}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -918,17 +935,22 @@ fn open_out_root_dir(out: &Path) -> Result<fs::File, BuildError> {
 /// 3. 各 `page.source` を（読み込み前サイズ検査つきで）読み、
 ///    `markdown::markdown_to_nodes` → `layout::docs_page` → `html::render`
 ///    の順で HTML 文字列へ変換する。**全ページの変換をメモリ上で終えてから**
-///    書き出しを開始する（I/O エラー発生時に部分生成物を減らす安全側の順序。
-///    完全な fail-closed 原子性は #872 linkcheck の責務）
-/// 4. `out` ディレクトリを作成し、各ページを `<out>{page.path}index.html` へ、
+///    書き出しを開始する（I/O エラー発生時に部分生成物を減らす安全側の順序）
+/// 4. [`linkcheck::check_links`] で全ページの最終形 Node からページ間リンク・
+///    `#fragment` アンカー・アセット参照の実在を突合する（イシュー #872）。
+///    壊れたリンクが 1 件でもあれば、`out` ディレクトリの作成すら行わずに
+///    [`BuildError::BrokenLinks`] で早期 return する（fail-closed。手順 3 の
+///    「安全側の順序」を補完し、リンク切れサイトが `out` へ 1 バイトも
+///    書き出されないことを保証する）
+/// 5. `out` ディレクトリを作成し、各ページを `<out>{page.path}index.html` へ、
 ///    テーマ CSS を `<out>/assets/site.css` へ書き出す
-/// 5. 書き出し件数を含む [`BuildReport`] を返す
+/// 6. 書き出し件数を含む [`BuildReport`] を返す
 ///
 /// # Errors
 ///
 /// `nav.toml` の読み込み失敗・スキーマ／source 検証失敗・`page.source` の
-/// サイズ超過／読み込み失敗・出力ディレクトリ作成失敗・書き出し失敗のいずれかで
-/// [`BuildError`] を返す。
+/// サイズ超過／読み込み失敗・リンク切れ検出・出力ディレクトリ作成失敗・
+/// 書き出し失敗のいずれかで [`BuildError`] を返す。
 pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     let nav_toml_path = root.join(NAV_TOML_RELATIVE_PATH);
 
@@ -984,6 +1006,10 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     // 揃える。
     let mut rendered_pages: Vec<(PathBuf, String)> = Vec::new();
     let mut search_pages: Vec<search::SearchPage> = Vec::new();
+    // linkcheck（イシュー #872）が突合する最終形ページ木の列（`page.path` と
+    // `layout::docs_page` の戻り値）。`html::render` は `&Node` を取るため
+    // 文字列化後も `page_node` を捨てずに保持できる。
+    let mut page_docs: Vec<(String, html::Node)> = Vec::new();
     for section in &parsed.sections {
         for page in &section.pages {
             let markdown_input = read_verified_source(&root_dir, &page.source)?;
@@ -1005,7 +1031,26 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
 
             let relative_out_path = page_output_path(Path::new(""), &page.path);
             rendered_pages.push((relative_out_path, html_out));
+            page_docs.push((page.path.clone(), page_node));
         }
+    }
+
+    // linkcheck（イシュー #872）: `out` への書き出し開始（`open_out_root_dir`
+    // 呼び出し）より前に、全ページの最終形 Node からページ間リンク・
+    // `#fragment` アンカー・アセット参照の実在を突合する。壊れたリンクが
+    // 1 件でもあれば `out` へ 1 バイトも書き出さず（ディレクトリの作成すら
+    // 行わず）fail-closed に拒否する。既知ターゲット表のアセット 3 種は
+    // `write_asset` が実際に書き出す相対パス（`SITE_CSS_RELATIVE_PATH`・
+    // `script::SCRIPT_REL_PATH`・`search::INDEX_REL_PATH`）と揃える
+    // （`linkcheck.rs` モジュール doc「検証対象・分類」参照）。
+    let asset_hrefs = vec![
+        layout::asset_href(&parsed.site.base_path, SITE_CSS_RELATIVE_PATH),
+        layout::asset_href(&parsed.site.base_path, script::SCRIPT_REL_PATH),
+        layout::asset_href(&parsed.site.base_path, search::INDEX_REL_PATH),
+    ];
+    let broken_links = linkcheck::check_links(&page_docs, &parsed.site.base_path, &asset_hrefs);
+    if !broken_links.is_empty() {
+        return Err(BuildError::BrokenLinks(broken_links));
     }
 
     // 検索索引の直列化・サイズ検証は書き出し開始前に行う（`out` へ 1 バイトも
@@ -1265,6 +1310,103 @@ path = "/intro/"
         assert!(html.starts_with("<!DOCTYPE html>\n"));
         assert!(html.contains("<h1>Intro</h1>"));
         assert!(html.contains("assets/site.css"));
+    }
+
+    /// イシュー #872 受け入れ基準: リンク切れ（実在しないページへのルート
+    /// 相対リンク）を含む原稿では `build_site` が [`BuildError::BrokenLinks`]
+    /// を返し、`out` ディレクトリを一切作成しない（`open_out_root_dir` 呼び
+    /// 出しより前に linkcheck が早期 return するため。fail-closed 契約の
+    /// 中核。`linkcheck.rs`・`build_site` ドキュメンテーションコメント参照）。
+    #[test]
+    fn build_site_rejects_broken_links_without_creating_out_directory() {
+        let root = TempDir::new("build-broken-links-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            root.0.join("site/intro.md"),
+            b"# Intro\n\n[missing](/does-not-exist/)\n",
+        )
+        .unwrap();
+
+        // `out` 自体は事前作成せず（`TempDir::new` は即座にディレクトリを
+        // 作ってしまうため、既存の親ディレクトリ配下に未作成のサブパスとして
+        // 払い出す）、linkcheck 失敗時に本当に「ディレクトリの作成すら
+        // 行わない」ことを検証できるようにする。
+        let out_parent = TempDir::new("build-broken-links-out-parent");
+        let out = out_parent.0.join("dist");
+
+        match build_site(&root.0, &out) {
+            Err(BuildError::BrokenLinks(broken)) => {
+                assert_eq!(broken.len(), 1);
+                assert!(broken[0].href.contains("does-not-exist"));
+            }
+            other => panic!("expected BrokenLinks error, got {other:?}"),
+        }
+        assert!(
+            !out.exists(),
+            "out directory must not be created when linkcheck fails"
+        );
+    }
+
+    /// イシュー #872 回帰テスト: `nav::Section::index_path` はフォーマットの
+    /// みを検証し、そのパスが実際にどこかの `page.path` と一致するかは検証
+    /// しない（`nav.rs` の `index_path` ドキュメンテーションコメントが
+    /// 「ページ実在との突合は #872 linkcheck の責務」と明記している）。
+    /// `layout::header` はヘッダのセクションメニューへ `index_path` を
+    /// そのまま `<a href>` として埋め込むため、実在しない `index_path` は
+    /// 生成 HTML 全ページに壊れたリンクとして現れる。linkcheck がこの経路を
+    /// 実際に検出することを確認する（`linkcheck.rs` モジュール doc の
+    /// 主張の regression lock）。
+    #[test]
+    fn build_site_rejects_broken_index_path_that_matches_no_declared_page() {
+        let root = TempDir::new("build-broken-index-path-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+index_path = "/nope/"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro").unwrap();
+
+        let out = TempDir::new("build-broken-index-path-out");
+        match build_site(&root.0, &out.0) {
+            Err(BuildError::BrokenLinks(broken)) => {
+                assert!(
+                    broken.iter().any(|link| link.href == "/nope/"),
+                    "expected a broken link for the undeclared index_path, got {broken:?}"
+                );
+            }
+            other => panic!("expected BrokenLinks error, got {other:?}"),
+        }
     }
 
     /// イシュー #871 受け入れ基準 1: `search-index.json` が nav.toml 宣言の

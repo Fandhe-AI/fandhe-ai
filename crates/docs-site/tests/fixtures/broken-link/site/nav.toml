@@ -1,0 +1,16 @@
+[site]
+title = "Broken Link Fixture"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+
+[[section.page]]
+title = "Getting Started"
+source = "site/getting-started.md"
+path = "/getting-started/"
