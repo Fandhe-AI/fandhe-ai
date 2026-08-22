@@ -15,7 +15,8 @@ publish.workspace = true
 # （外部クレートではなく workspace member 間の依存のためユーザー承認
 # フローの対象にならない。TASK-1.5a・#16）。
 # `version` 併記（crates.io 公開対象 6 クレート間の path 依存。
-# イシュー #881・PR #891 codex-review P1 指摘）: `cargo package`／
+# イシュー #881 で確定した方針。`docs/crates-io-publishing-order.md`）:
+# `cargo package`／
 # `cargo publish` は `[dependencies]`（`dev-dependencies` を除く）の
 # path 依存に crates.io 解決可能な `version` がないと公開パッケージを
 # 生成できないため、workspace 公開バージョン（`Cargo.toml` の

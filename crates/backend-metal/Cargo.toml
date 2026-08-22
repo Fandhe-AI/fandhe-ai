@@ -15,7 +15,8 @@ publish.workspace = true
 # 同種の判断）。TASK-1.9a（#44）でデバイス列挙・選択の共通 trait
 # `tensor_core::device::DeviceProvider` を実装するために追加した。
 # `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
-# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
+# （公開 6 クレート間 path 依存。イシュー #881 で確定した方針。
+# `docs/crates-io-publishing-order.md`）。
 fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 half.workspace = true
 
@@ -36,9 +37,17 @@ objc2-metal.workspace = true
 # 同士の path 依存であり、許容依存 8 区分（外部クレート）の新規追加には
 # 当たらない（`crates/backend-cpu/Cargo.toml` が `bench-harness` を
 # 同様に dev-dependencies へ path 依存させた #29 の先例と同種の判断）。
-# `version` 併記の理由は上記 `fandhe-ai-tensor-core` 依存コメント参照
-# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
-fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.3.0" }
+# `version` を付けない理由（イシュー #881 で確定した dev-dependencies 方針。
+# `docs/crates-io-publishing-order.md`）: `cargo publish` は
+# dev-dependencies から path のみの依存を自動 strip するため、公開物には
+# 一切残らない。加えて本依存は macOS 限定で `backend-cpu ⇄ backend-metal`
+# の循環（backend-cpu 側の macOS 限定 dev-dep で本クレートへ依存。
+# `crates/backend-cpu/Cargo.toml` の `[target.'cfg(target_os = "macos")'.
+# dev-dependencies]` 参照）を成すため、version 併記のままだと初回 publish
+# 時に「registry 未存在バージョンへの依存」でブロックされうる。strip 方式
+# に統一することで公開順序の制約を `[dependencies]` のトポロジカル順のみ
+# に単純化できる。
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }
 # 決定的シード PRNG（`Xorshift64Star`）をパリティテストの入力生成に使う
 # （coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
 # 使う」）。上記と同じ判断根拠（path 依存・ユーザー承認不要）。

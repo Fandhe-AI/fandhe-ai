@@ -16,8 +16,9 @@ publish.workspace = true
 # reduction カーネル（#23・TASK-1.6c）が `reduce_out_shape`（tensor-core::ops_shape）を
 # 利用するために必要。
 # `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
-# （crates.io 公開 6 クレート間 path 依存の公開要件。イシュー #881・PR #891
-# codex-review P1 指摘。workspace 公開バージョンと完全一致させる）。
+# （crates.io 公開 6 クレート間 path 依存の公開要件。イシュー #881 で確定した
+# 方針。`docs/crates-io-publishing-order.md`。workspace 公開バージョンと
+# 完全一致させる）。
 fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 # CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
 rayon.workspace = true
@@ -32,9 +33,15 @@ bench-harness = { path = "../bench-harness" }
 # TASK-1.9a（#44）の受け入れ条件「3 バックエンドが同一 trait でデバイス列挙・選択できる」を
 # `tests/device_provider_integration.rs` で直接検証するための dev 依存（公開依存グラフを
 # 汚さない。上記 bench-harness と同種の判断）。CUDA は無条件依存のため全 OS で追加する。
-# `version` 併記の理由は上記 `fandhe-ai-tensor-core` 依存コメント参照
-# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
-fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.3.0" }
+# `version` を付けない理由（イシュー #881 で確定した dev-dependencies 方針。
+# `docs/crates-io-publishing-order.md`）: `cargo publish` は dev-dependencies
+# から path のみの依存を自動 strip するため、公開物には一切残らない。加えて
+# 本依存は `backend-cpu ⇄ backend-cuda` の循環（backend-cuda 側の dev-dep で
+# 本クレートへ依存）を成すため、version 併記のままだと初回 publish 時に
+# 「registry 未存在バージョンへの依存」でブロックされうる。strip 方式に
+# 統一することで公開順序の制約を `[dependencies]` のトポロジカル順のみに
+# 単純化できる（非公開クレートの bench-harness 依存と同一規則）。
+fandhe-ai-backend-cuda = { path = "../backend-cuda" }
 # TASK-12.2a（#167）の融合効果実測ハーネス（`tests/fusion_effect_perf.rs`）が
 # `autodiff::Tape` 経由の遅延評価（`push_lazy`／`materialize_*`）で融合条件・
 # 非融合条件を within-harness 比較するための dev 依存。workspace 内クレート
@@ -42,14 +49,16 @@ fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.3.0" }
 # backend-cuda と同種の判断）。**逆方向は禁止**: `autodiff` → `backend-cpu` の
 # 依存は `crates/autodiff/tests/architecture_boundaries.rs` が dev 依存も含め
 # 機械検査しているため、本ハーネスは backend-cpu 側に置く。
-# `version` 併記の理由は上記 `fandhe-ai-tensor-core` 依存コメント参照
-# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
-fandhe-ai-autodiff = { path = "../autodiff", version = "=0.3.0" }
+# `version` を付けない理由は上記 `fandhe-ai-backend-cuda` dev-dependency
+# コメント参照（イシュー #881・dev-dependencies は path-only strip 方針。
+# `docs/crates-io-publishing-order.md`）。
+fandhe-ai-autodiff = { path = "../autodiff" }
 
 # Metal は `cfg(target_os = "macos")` 限定（deps-policy.md）。backend-metal クレート自体は
 # 非 macOS でもビルド可能（本体が `#[cfg(target_os = "macos")]` で空になるだけ）だが、
 # dev-dependency の追加自体も cfg で絞り不要な依存解決を避ける。
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-# `version` 併記の理由は上記 `fandhe-ai-tensor-core` 依存コメント参照
-# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
-fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.3.0" }
+# `version` を付けない理由は上記 `fandhe-ai-backend-cuda` dev-dependency
+# コメント参照（イシュー #881・dev-dependencies は path-only strip 方針。
+# `docs/crates-io-publishing-order.md`）。
+fandhe-ai-backend-metal = { path = "../backend-metal" }
