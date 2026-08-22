@@ -8,9 +8,11 @@
 //! `include_str!` でバイナリへ埋め込む（外部依存追加なし。deps-policy.md）。
 //!
 //! ライト/ダークテーマの切替 JS（`localStorage` 永続化・トグルボタン）は
-//! 兄弟イシュー #871 のスコープであり、本モジュールは CSS 側のフック
-//! （`prefers-color-scheme` メディアクエリ + `[data-theme]` 属性セレクタ）のみを
-//! 用意する（実装計画 §2.5）。
+//! イシュー #871 で `crate::script`（`SITE_JS`・`INLINE_THEME_BOOTSTRAP`）
+//! として実装済み。本モジュールは引き続き CSS 側のフック
+//! （`prefers-color-scheme` メディアクエリ + `[data-theme]` 属性セレクタ）と
+//! 検索 UI・トグルボタンの最小スタイル（`assets/site.css` の
+//! `.docs-theme-toggle`/`.docs-search` 一式）を担う。
 
 /// `<out>/assets/site.css` へ書き出すテーマ CSS 全文。
 pub const SITE_CSS: &str = include_str!("../assets/site.css");
