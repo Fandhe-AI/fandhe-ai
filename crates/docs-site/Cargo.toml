@@ -1,0 +1,26 @@
+# docs-site: GitHub Pages 公開ツリー（イシュー #865 Phase 1・#868/#869）向けの
+# 開発者・CI 専用 SSG（静的サイトジェネレータ）クレート。
+#
+# 本体ライブラリ（tensor-core・autodiff・backend-*・facade 等）の公開 API とは
+# 無関係のドキュメントビルドツールのため `publish = false`（workspace 既定を継承）。
+# 外部依存はゼロ（TOML パース・CLI 引数パースとも手実装）。deps-policy.md の
+# 許容依存 9 区分に対する新規追加は発生しない（[dependencies] を意図的に空にする）。
+[package]
+name = "docs-site"
+description = "GitHub Pages 公開ツリー向け自作 SSG（nav.toml fail-closed パーサー + CLI。イシュー #868/#869）"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 外部依存ゼロ（TOML サブセットパーサー・CLI 引数パースを手実装する方針。
+# 実装計画（イシュー #869）・参照実装 fandhe-backend crates/docs-site の設計方針を踏襲）。
+[dependencies]
+
+[lib]
+name = "docs_site"
+path = "src/lib.rs"
+
+[[bin]]
+name = "docs-site"
+path = "src/main.rs"

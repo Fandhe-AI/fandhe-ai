@@ -2,10 +2,15 @@
 #
 # Burn 依存を排した完全自作コア方針（REQ-1 v2。.claude/rules/coding-rust.md）に基づき、
 # tensor-core・autodiff・backend-cpu/cuda/metal・onnx-interop・guardrail・self-repair・
-# bench-harness・facade の 10 クレートを member として明示列挙する（意図しないクレート
+# bench-harness・facade の 10 クレート（+ 開発ツール docs-site）を member として明示列挙する（意図しないクレート
 # 混入防止のため glob は使わない）。TASK-1.1（docs/spec/05-tasks.md）の骨格作成に対応する。
 # facade は TASK-9.3（イシュー #410・spec 確定は rust-ai-library-spec#52）で追加した
 # composition root・compat 公開面クレート。
+#
+# docs-site（11 個目・イシュー #868/#869）は GitHub Pages 公開ツリー（#865 Phase 1）
+# 向けの開発者・CI 専用ツール（`publish = false`。本体ライブラリの公開 API とは無関係）。
+# 外部依存ゼロの自作 SSG（nav.toml パーサー + CLI）であり [workspace.dependencies] へは
+# 一切影響しない。
 #
 # 許容依存 8 区分（.claude/rules/deps-policy.md）は下記 [workspace.dependencies] で
 # =x.y.z 完全固定として一元導入済み（TASK-1.1b・イシュー #5）。8 区分以外の新規追加・
@@ -31,6 +36,7 @@ members = [
     "crates/self-repair",
     "crates/bench-harness",
     "crates/facade",
+    "crates/docs-site",
 ]
 
 [workspace.package]

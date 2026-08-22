@@ -4,7 +4,7 @@
 
 Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public**（#457 Phase 1〜3 完了）で、CI は GitHub ホステッド `ubuntu-latest` 既定へ移行済み（self-hosted への逆戻りは `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
 
-- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（TASK-9.3・イシュー #410 で新設した composition root に、TASK-9.4・イシュー #411 で `autodiff::compat` から compat 公開面〈`compat::array`・`compat::Sequential`〉を移設済み。`facade` が唯一のサポートされる公開 API 面であり `tensor-core`・`autodiff`・`backend-*` は内部クレート。`docs/compat-api-scope.md` §0）
+- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（TASK-9.3・イシュー #410 で新設した composition root に、TASK-9.4・イシュー #411 で `autodiff::compat` から compat 公開面〈`compat::array`・`compat::Sequential`〉を移設済み。`facade` が唯一のサポートされる公開 API 面であり `tensor-core`・`autodiff`・`backend-*` は内部クレート。`docs/compat-api-scope.md` §0）に加え、GitHub Pages 公開ツリー（#865 Phase 1）向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`。イシュー #868/#869。本体ライブラリの公開 API とは無関係で外部依存ゼロ）
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
 - 現状 M0 着手中（TASK-1.1a: workspace `Cargo.toml` と 9 クレート雛形を追加済み。TASK-1.1b: 許容依存 8 区分を `[workspace.dependencies]` に `=x.y.z` 完全固定で反映し `Cargo.lock` をコミット済み。TASK-1.2: 依存禁止検査は CI 上で稼働中〈green〉。TASK-1.3: `deny.toml` 導入・`docs/license-matrix.md` 作成済み）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
@@ -22,13 +22,14 @@ rust-ai-library/
 ├── .editorconfig            # インデント・改行規約
 ├── Dockerfile / compose.yaml # 環境非依存の開発コンテナ（CPU バックエンドのみ）
 ├── skills-lock.json         # 導入スキルのハッシュ管理（npx skills）
-├── Cargo.toml                # workspace 定義（10 クレート・許容依存 8 区分を =x.y.z 固定）
+├── Cargo.toml                # workspace 定義（本体 10 クレート + docs-site〈開発ツール〉・許容依存 8 区分を =x.y.z 固定）
 ├── Cargo.lock                # 依存解決の完全固定（deps-policy.md）
 ├── rust-toolchain.toml       # toolchain 単一真実源（stable + rustfmt/clippy。rust-base-ci 前提。#325）
 ├── deny.toml                 # cargo-deny 設定（licenses 許可リスト・sources = crates.io 限定〈TASK-1.3〉+ advisories / bans〈#353〉）
 ├── guardrail.toml             # guardrail 判定閾値の確定設定（TASK-4.3c・#117。default プリセット）
 ├── crates/                  # tensor-core・autodiff・backend-cpu・backend-cuda・backend-metal・
-│                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）
+│                             # onnx-interop・guardrail・self-repair・bench-harness・facade（composition root・compat 公開面）・
+│                             # docs-site（GitHub Pages 公開ツリー向け SSG。開発者・CI 専用。#868/#869）
 ├── scripts/
 │   ├── check-forbidden-deps.sh # 依存禁止リストの検査ロジック（ci.yml・Makefile 共用。TASK-1.2）
 │   ├── check-workflow-runner-policy.sh # self-hosted runner 逆戻り防止の fail-closed 契約検査の呼び出し面（ci.yml・Makefile 共用。#472）

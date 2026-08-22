@@ -304,6 +304,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "docs-site"
+version = "0.3.0"
+
+[[package]]
 name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

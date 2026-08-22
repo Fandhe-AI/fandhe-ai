@@ -1,0 +1,12 @@
+[site]
+title = "Fixture Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Introduction"
+source = "site/intro.md"
+path = "/guide/intro/"
+weight = 1
