@@ -209,10 +209,18 @@ fn detach_autodiff_cargo_toml(sandbox: &Path) {
     // `[dependencies]` テーブル内）へ挿入することでテーブル境界を跨がない。
     let backend_cpu_abs = repo_root().join("crates/backend-cpu");
     let tensor_core_line = format!(r#"path = "{}""#, tensor_core_abs.display());
+    // rename 後（イシュー #877/#879）は `crates/backend-cpu` の `[package] name` が
+    // `fandhe-ai-backend-cpu` のため、依存キーもそれに追従させる必要がある
+    // （Cargo は依存キーと解決先パッケージ名の不一致を `package = "..."` の
+    // 明示なしには許容しない）。下の `bench_workload_source()` が生成する bin は
+    // `use fandhe_ai_backend_cpu::CpuBackendOps;` でこの依存を参照するため、
+    // 依存キーが旧名 `backend-cpu` のままだとサンドボックス cargo build が
+    // 「no matching package named `backend-cpu`」で失敗する（PR #891 Cursor
+    // Bugbot 指摘）。
     let with_backend_cpu_dep = with_path_deps.replacen(
         &tensor_core_line,
         &format!(
-            "{tensor_core_line}\nbackend-cpu = {{ path = \"{}\" }}",
+            "{tensor_core_line}\nfandhe-ai-backend-cpu = {{ path = \"{}\" }}",
             backend_cpu_abs.display()
         ),
         1,
