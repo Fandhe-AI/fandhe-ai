@@ -11,8 +11,10 @@
 //! **重要（#852 実機再実測結果）**: 本ファイルの `#[ignore]` 実機テストは
 //! #852 で DGX Spark GB10 実機（driver 580.159.03・CUDA 13.0 V13.0.88）に
 //! て実行済み。`mma_tf32_zero_dim_shape_returns_empty_without_launch`
-//! （#853 で環境適応型へ変換済みのため現在は `#[ignore]` なし・通常 CI
-//! 対象）・`launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch`
+//! （#853 で一時的に環境適応型〔`#[ignore]` なし〕へ変換したが、実機
+//! でのみ再現する `InvalidShape` panic を検出できないため `#[ignore]` を
+//! 復元済み。`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]`
+//! で分離」の原則に従う）・`launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch`
 //! は pass。`mma_tf32_matches_reference_across_shapes`・
 //! `mma_tf32_k4096_stress` は #839 時点の機能欠陥（A フラグメント象限
 //! マッピング誤り。`kernels_mma_tf32.rs::LDSM_A_FRAG` 参照）修正後も
