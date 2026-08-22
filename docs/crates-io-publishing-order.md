@@ -353,8 +353,92 @@ step が `--workspace` にせず `--lib` 限定にしている理由（guardrail
 2 クレートへ限定することで不要なリスクを避けた。`make doc-warnings` で
 ローカル再現できるようにした（ci.yml と同一コマンドを共用）。
 
+## 9. release ワークフローによる公開手順（#884）
+
+イシュー #884 で追加した `.github/workflows/release.yml`（workflow_dispatch
+起点・`CARGO_REGISTRY_TOKEN` 方式）を使った公開手順。初回公開の実行自体は
+イシュー #885 のスコープであり、本節は運用手順の記録に留める。
+
+### 9.1 入力
+
+GitHub の Actions タブから `crates.io release` ワークフローを手動実行
+（`workflow_dispatch`）する。入力は 3 つ:
+
+| 入力 | 内容 |
+|---|---|
+| `crate` | 公開対象クレート（choice 型で公開 6 クレートに固定） |
+| `version` | 公開バージョン（対象クレートの `Cargo.toml` の `version` と完全一致必須） |
+| `mode` | `dry-run-only`（既定・トークン不要）／`publish`（実公開。environment 承認ゲートを通る。main ブランチからのディスパッチ限定） |
+
+### 9.2 2 段運用（まず dry-run、次に publish）
+
+1. まず `mode: dry-run-only` で実行し、`verify` ジョブ（semver 形式検証・
+   `Cargo.toml` バージョン一致検証・crates.io 既公開バージョン検証・
+   `cargo package --list`・`cargo publish --dry-run`）が green であることを
+   確認する。
+2. green を確認したら、同一の `crate`／`version` で `mode: publish` を指定して
+   再実行する。`mode: publish` は `refs/heads/main` からのディスパッチのみ
+   受け付ける（`verify` ジョブが fail-closed で検査し、main 以外からの
+   ディスパッチはここで失敗する）。`verify` ジョブが再度走った後、`publish`
+   ジョブが `environment: crates-io-release` の承認ゲートを経て
+   `cargo publish` を実行する。`environment` の deployment branch 制限
+   （main 限定）＋ required reviewers は GitHub 側の設定であり（本ワークフロー
+   自体では代替できない）、`mode: publish` を実運用する前にユーザーが GitHub
+   側で設定しておく前提条件である。
+
+### 9.3 公開順序（3 節のトポロジカル順を 1 クレートずつ実行）
+
+release ワークフロー自身はクレート横断の順序保証を持たないため、3 節の
+順序に従い手動で ①→②→③ の順に 1 クレートずつ実行する:
+
+```
+① fandhe-ai-tensor-core
+② fandhe-ai-autodiff / fandhe-ai-backend-cpu / fandhe-ai-backend-cuda /
+  fandhe-ai-backend-metal（順不同）
+③ fandhe-ai
+```
+
+各クレートの `publish` 完了後、次のクレートを実行する前に sparse index への
+反映を確認する:
+
+```sh
+curl https://index.crates.io/<index-path>
+```
+
+`<index-path>` は crates.io のシャーディング規則（1〜2 文字: `<len>/<name>`、
+3 文字: `3/<先頭1文字>/<name>`、4 文字以上: `<先頭2文字>/<次2文字>/<name>`）に
+従う。公開 6 クレート名はいずれも 9 文字以上のため `<先頭2文字>/<次2文字>/
+<name>` 形（例: `fandhe-ai-tensor-core` → `fa/nd/fandhe-ai-tensor-core`）。
+出力に `"vers":"<公開したバージョン>"` が含まれていれば反映済みと判断できる
+（反映まで数分かかることがある）。反映前に依存先クレートの `publish` を
+実行すると 8.2 節と同型の「no matching package named ...」で想定内失敗に
+なるため、反映確認を待ってから次を実行する。
+
+### 9.4 途中失敗時の再実行
+
+`verify` ジョブの既公開バージョン検証（sparse index 参照）が、同一
+バージョンの再公開を自動的に阻止する（非冪等な `cargo publish` の冪等性を
+CI 側で担保する設計。release.yml 冒頭コメント参照）。よって公開順序の
+途中でいずれかのクレートが失敗した場合、公開済みクレートは再実行しても
+このガードで即座に失敗して停止するため無害であり、**失敗したクレートから
+そのまま再実行すればよい**（origin/main の状態を戻す等の後始末は不要）。
+
+### 9.5 §8.2 との関係
+
+単一クレートの `cargo publish --dry-run`（release.yml の `verify` ジョブが
+実行するのと同じコマンド）は実 crates.io index のみを参照するため、
+依存先クレートが未公開の間は 8.2 節で実測した「no matching package named
+`fandhe-ai-tensor-core`」等の失敗になる。これは release ワークフロー上でも
+同様に発生する想定内の失敗であり、9.3 節の順序どおり ①→②→③ で 1 クレート
+ずつ実行すれば解消されていく。
+
 ## 変更履歴
 
+- 2026-08-23（#884）: release ワークフロー（`.github/workflows/release.yml`。
+  workflow_dispatch + `CARGO_REGISTRY_TOKEN` 方式）による公開手順を新節（§9）
+  として追記した。ワークフロー本体の設計・セキュリティ考慮は
+  `.github/workflows/release.yml` 冒頭コメントを正とし、本節では運用手順の
+  みを記録する。
 - 2026-08-22（#881）: 本ドキュメント新規作成。PR #891（#880 系）で先行実施
   済みだった公開クレート間 `[dependencies]` の version 併記（codex-review
   P1 指摘対応）を正式方針として確定し、`[dev-dependencies]` については
