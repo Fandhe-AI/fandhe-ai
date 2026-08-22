@@ -8,10 +8,15 @@
 //! `CudaMmaTf32Gemm::new` は `CudaError::NvrtcUnavailable` を返す分岐を
 //! 必ず通る（`kernels_mma_tf32.rs` 冒頭コメント「検証状態」参照）。
 //!
-//! **重要（未検証の明記）**: 本ファイルの `#[ignore]` 実機テストは実装
-//! セッション中に DGX Spark GB10 実機へ到達できず未実行のまま同梱する。
-//! 数値一致は「テストとして実装済み」であって「実機で確認済み」ではない
-//! （#802 が実機到達可能なセッションで実行・確認する）。
+//! **重要（#852 実機再実測結果）**: 本ファイルの `#[ignore]` 実機テストは
+//! #852 で DGX Spark GB10 実機（driver 580.159.03・CUDA 13.0 V13.0.88）に
+//! て実行済み。`mma_tf32_zero_dim_shape_returns_empty_without_launch`・
+//! `launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch` は
+//! pass。`mma_tf32_matches_reference_across_shapes`・
+//! `mma_tf32_k4096_stress` は #839 時点の機能欠陥（A フラグメント象限
+//! マッピング誤り。`kernels_mma_tf32.rs::LDSM_A_FRAG` 参照）修正後も
+//! 近似ゼロ出力要素の相対誤差判定で僅かに FAIL が残る（
+//! `docs/perf/cuda-gemm-mma-tf32-ab.md` §8 に実測ログを記録）。
 
 use backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 
@@ -78,10 +83,16 @@ fn new_does_not_panic_and_returns_typed_result() {
 ///
 /// **注意**: この分岐は「コンパイル・起動が成功して複合判定を通過した」
 /// ことのみを green の条件とする。`run_tf32` の `Err` はここでは早期
-/// return せず `panic` させる（実機未到達のためこの分岐自体は本実装
-/// セッションでは通らないが、コンパイル・起動失敗を誤って parity 通過と
-/// みなす退行を防ぐため、CUDA+NVRTC 環境に限っては厳格化する。
-/// `.claude/rules/coding-rust.md` テスト・ベンチ節）。
+/// return せず `panic` させる（CUDA+NVRTC 非搭載の通常 CI では
+/// `DriverUnavailable` 分岐で早期 return し green のまま。コンパイル・
+/// 起動失敗を誤って parity 通過とみなす退行を防ぐため、CUDA+NVRTC
+/// 環境に限っては厳格化する。`.claude/rules/coding-rust.md` テスト・
+/// ベンチ節）。**#852 実機再実測（GB10）**: 64x64x64 形状でも近似ゼロ
+/// 出力要素の相対誤差判定で FAIL が残る（`fail_count=666/4096`。
+/// `docs/perf/cuda-gemm-mma-tf32-ab.md` §8）。本経路は本番未結線・
+/// 凍結継続のため通常 CI（GPU 非搭載）には影響しないが、将来 GPU 搭載
+/// CI／実機セッションでこのテストを走らせると FAIL する状態が残って
+/// いる点に注意（凍結解除判断の一部として #835 系で扱う）。
 #[test]
 fn mma_tf32_parity_smoke_env_adaptive() {
     let device = match CudaDevice::new(0) {
@@ -136,14 +147,27 @@ fn tensor_core_unsupported_display_mentions_compute_capability_8() {
 /// （`tests/gemm_mma.rs::mma_f16_zero_dim_shape_returns_empty_without_launch`
 /// と同型）。
 #[test]
-#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須。実装セッション中は実機未到達のため未実行"]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm =
         CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
 
-    assert_eq!(gemm.run_tf32(&[], &[], 0, 4, 4).unwrap(), Vec::<f32>::new());
-    assert_eq!(gemm.run_tf32(&[], &[], 4, 0, 4).unwrap(), Vec::<f32>::new());
+    // `validate_gemm_dims`（`gemm_mma_tf32.rs::run_tf32` が m==0/n==0 の
+    // 早期 return より先に必ず呼ぶ）は no-op 形状でも a.len()==m*k・
+    // b.len()==k*n の厳密一致を要求する（f16 版 `tests/gemm_mma.rs::
+    // mma_f16_zero_dim_shape_returns_empty_without_launch` と同一契約・
+    // #389 の教訓を踏襲）。よって m=0 の呼び出しは b（k*n=16 要素）を、
+    // n=0 の呼び出しは a（m*k=16 要素）を満たす必要がある（#852 で是正。
+    // `validate_gemm_dims` 側の検証順序・契約は変更しない）。
+    assert_eq!(
+        gemm.run_tf32(&[], &[0.0f32; 16], 0, 4, 4).unwrap(),
+        Vec::<f32>::new()
+    );
+    assert_eq!(
+        gemm.run_tf32(&[0.0f32; 16], &[], 4, 0, 4).unwrap(),
+        Vec::<f32>::new()
+    );
     assert_eq!(gemm.run_tf32(&[], &[], 4, 4, 0).unwrap(), vec![0.0f32; 16]);
 }
 
@@ -155,7 +179,7 @@ fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
 /// 呼ばずに no-op を処理するため、この契約は `launch_tf32` を直接
 /// 呼ばない限り検証できない。
 #[test]
-#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須。実装セッション中は実機未到達のため未実行"]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm =
@@ -242,10 +266,11 @@ fn run_tf32_rejects_misaligned_shape_without_launch() {
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
 /// テスト。受け入れ条件 1〜2 項（cp.async 多段パイプライン動作・数値
-/// 一致）の本体。実装セッション中は実機未到達のため未実行のまま同梱する
+/// 一致）の本体。#852 で実機再実測済み（残存 FAIL は
+/// `docs/perf/cuda-gemm-mma-tf32-ab.md` §8 参照）
 /// （#802 が実機で実行・確認する。本ファイル冒頭コメント「重要」参照）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実装セッション中は実機未到達のため未実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_matches_reference_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm =
@@ -275,10 +300,9 @@ fn mma_tf32_matches_reference_across_shapes() {
 
 /// K 大のストレスケース（`tests/cpu_cuda_mma_parity.rs`
 /// `mma_f16_k4096_stress` と同じ形状。PoC-v2-3 の M=N=K=4096 と揃える）。
-/// 実機未到達のため未実行のまま同梱する（本ファイル冒頭コメント「重要」
-/// 参照）。
+/// #852 で実機再実測済み（本ファイル冒頭コメント「重要」参照）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実装セッション中は実機未到達のため未実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_k4096_stress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let gemm =
