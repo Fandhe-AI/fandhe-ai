@@ -7,7 +7,7 @@
 //! 確保・readback する。`GemmVariant::Simdgroup` は [`crate::pad`] で
 //! 8 の倍数へパディングした実効次元でディスパッチし、readback 後に
 //! 元の m×n 形状へ切り出す（呼び出し元へパディングを隠蔽する）。
-//! `backend_cpu::parity::matmul_reference_fma`（本クレートの `dev-dependencies`
+//! `fandhe_ai_backend_cpu::parity::matmul_reference_fma`（本クレートの `dev-dependencies`
 //! 経由）との数値一致（REQ-2 統一複合判定）は `tests/gemm_naive_parity.rs`・
 //! `tests/gemm_simdgroup_parity.rs` で検証する。
 //!
@@ -50,11 +50,11 @@ const SIMDGROUP_THREADGROUP_WIDTH: usize = 32;
 thread_local! {
     /// [`MetalGemm::run_tiled_bias_act_f32`] が実際に GPU カーネルを起動した
     /// 回数（イシュー #605。CUDA 側
-    /// `backend_cuda::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`〈#599〉と同じ
+    /// `fandhe_ai_backend_cuda::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`〈#599〉と同じ
     /// 役割・同じスレッドローカル化の理由）。
     ///
     /// `ops.rs::MetalBackendOps::gemm_bias_act` の経路選択（融合 vs
-    /// `tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
+    /// `fandhe_ai_tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
     /// 非融合 3 段合成）が実際に融合カーネルへ到達しているかを、実機なしの
     /// 単体テスト（`ops.rs` 内 `#[cfg(test)]`）が検証するための可観測点。
     /// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない。
@@ -597,8 +597,8 @@ impl MetalGemm {
     ///
     /// `ctx.caps()`（`MetalContext::new` 時にキャッシュした
     /// `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)` 判定）と `(m, n, k)`
-    /// から `tensor_core::dispatch::select_gemm_kernel` を呼び、その結果
-    /// （[`tensor_core::dispatch::KernelKind`]）を [`GemmVariant`] へ写像
+    /// から `fandhe_ai_tensor_core::dispatch::select_gemm_kernel` を呼び、その結果
+    /// （[`fandhe_ai_tensor_core::dispatch::KernelKind`]）を [`GemmVariant`] へ写像
     /// する（`docs/dispatch-rules-design.md` §5.3 決定表の Metal 側行）:
     ///
     /// - `MatrixUnit` → [`Self::dispatch_auto`]（[`tile::select`] による
@@ -627,22 +627,24 @@ impl MetalGemm {
         n: usize,
         k: usize,
     ) -> Result<Vec<f32>, MetalError> {
-        let shape = tensor_core::dispatch::GemmShape::new(
+        let shape = fandhe_ai_tensor_core::dispatch::GemmShape::new(
             u32::try_from(m).unwrap_or(u32::MAX),
             u32::try_from(n).unwrap_or(u32::MAX),
             u32::try_from(k).unwrap_or(u32::MAX),
         );
-        let kernel = tensor_core::dispatch::select_gemm_kernel(
+        let kernel = fandhe_ai_tensor_core::dispatch::select_gemm_kernel(
             &ctx.caps(),
             shape,
-            tensor_core::dispatch::DType::F32,
+            fandhe_ai_tensor_core::dispatch::DType::F32,
         );
         match kernel {
-            tensor_core::dispatch::KernelKind::MatrixUnit => self.dispatch_auto(ctx, a, b, m, n, k),
-            tensor_core::dispatch::KernelKind::Tiled => {
+            fandhe_ai_tensor_core::dispatch::KernelKind::MatrixUnit => {
+                self.dispatch_auto(ctx, a, b, m, n, k)
+            }
+            fandhe_ai_tensor_core::dispatch::KernelKind::Tiled => {
                 self.dispatch_variant(ctx, GemmVariant::Tiled, a, b, m, n, k)
             }
-            tensor_core::dispatch::KernelKind::Naive => {
+            fandhe_ai_tensor_core::dispatch::KernelKind::Naive => {
                 self.dispatch_variant(ctx, GemmVariant::Naive, a, b, m, n, k)
             }
         }
@@ -744,7 +746,7 @@ impl MetalGemm {
     /// epilogue が `n` 要素を前提とするため）。
     ///
     /// `m == 0 || n == 0` は no-op（空の結果）、`k == 0` は CPU 参照実装
-    /// （`backend_cpu::gemm_blis::gemm_blis_bias_act_parallel`）・CUDA 側
+    /// （`fandhe_ai_backend_cpu::gemm_blis::gemm_blis_bias_act_parallel`）・CUDA 側
     /// `run_tiled_bias_act_f32` と同じ契約で epilogue のみホスト側で計算し
     /// GPU 起動を回避する（[`BIAS_ACT_FUSED_LAUNCH_COUNT`] は増加させない。
     /// `validate_dims`〈`m/n/k == 0` を一律 `ZeroDimension` として拒否〉を
@@ -1100,7 +1102,7 @@ impl MetalGemm {
     ///
     /// `#[allow(clippy::too_many_arguments)]`: `variant`・`a`・`b`・`m`・
     /// `n`・`k` を個別引数として持つことで呼び出し側の意図が明確になる
-    /// ため、構造体へのまとめ込みは行わない（`backend_cpu::gemm::kernel_block`
+    /// ため、構造体へのまとめ込みは行わない（`fandhe_ai_backend_cpu::gemm::kernel_block`
     /// と同じ判断根拠。理由コメント必須のルール `.claude/rules/coding-rust.md`
     /// に対応）。
     #[allow(clippy::too_many_arguments)]
@@ -1180,7 +1182,7 @@ impl MetalGemm {
 /// `m/n/k == 0` 拒否・長さ一致検証・`checked_mul` によるオーバーフロー
 /// 検出・`u32::MAX` 超過検出（`Dims` への cast 前検証）を行う。
 ///
-/// `backend_cpu::gemm::validate_dims`（`crates/backend-cpu/src/gemm.rs`）
+/// `fandhe_ai_backend_cpu::gemm::validate_dims`（`crates/backend-cpu/src/gemm.rs`）
 /// と同種の検証を Metal 側の型（[`MetalError`]・`u32` cast 制約）に
 /// 合わせて独立実装する（クレートをまたいだ検証ロジック共有は本イシュー
 /// のスコープ外。#40 以降で共通化が必要になった場合に判断する）。

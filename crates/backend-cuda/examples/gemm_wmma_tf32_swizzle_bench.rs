@@ -16,7 +16,7 @@
 //! `required-features`）。動的グルーピング幅選択
 //! （`swizzle::select_swizzle_group_width`）は非公開 `mod swizzle` の
 //! 関数であり、crate 外部（本 example）からは
-//! `backend_cuda::diagnostics::wmma_tf32_staged_swizzle_group_width`
+//! `fandhe_ai_backend_cuda::diagnostics::wmma_tf32_staged_swizzle_group_width`
 //! 経由でのみ到達できる（`gemm_mma_swizzle_bench.rs` と同じ feature
 //! ゲート方針）。
 //!
@@ -44,7 +44,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release \
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_swizzle_bench --release \
 //!     --features internal-diagnostics
 //! ```
 //!
@@ -59,9 +59,9 @@
 //! 0`）を満たす形状のみ対応する（`gemm.rs::wmma_tf32_staged_alignment_ok`）。
 //! 本ベンチの形状はすべてこの制約を満たす正方形状のみを使う。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, diagnostics};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, diagnostics};
 
 /// 決定的シード（`gemm_mma_swizzle_bench.rs` と同一値。過去 PoC・他ベンチと
 /// 同じ入力分布に揃える）。

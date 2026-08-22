@@ -24,8 +24,8 @@
 //! 変更しない）、`extern "C"` の手書き宣言＋`#[link(kind = "framework")]`
 //! で `IOKit`／`CoreFoundation` framework を直接リンクする。
 
+use fandhe_ai_tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
 use objc2_metal::{MTLCopyAllDevices, MTLDevice};
-use tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
 
 /// IOKit／CoreFoundation の手書き FFI 宣言（[`probe_gpu_core_count`] 専用）。
 ///

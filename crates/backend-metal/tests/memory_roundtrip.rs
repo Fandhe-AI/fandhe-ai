@@ -6,17 +6,17 @@
 //! `tests/device_smoke.rs` と同じ構成）。実行するには macOS 実機で以下を叩く:
 //!
 //! ```sh
-//! cargo test -p backend-metal --test memory_roundtrip -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --test memory_roundtrip -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_metal::{MetalContext, MetalMemory};
-use tensor_core::Tensor;
-use tensor_core::buffer::MemoryOps;
-use tensor_core::device::Device;
-use tensor_core::memory_stats::MemoryStats;
-use tensor_core::pool::{PoolConfig, PooledMemory};
+use fandhe_ai_backend_metal::{MetalContext, MetalMemory};
+use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::buffer::MemoryOps;
+use fandhe_ai_tensor_core::device::Device;
+use fandhe_ai_tensor_core::memory_stats::MemoryStats;
+use fandhe_ai_tensor_core::pool::{PoolConfig, PooledMemory};
 
 /// upload → download の roundtrip が bit 完全一致することを確認する
 /// （受け入れ条件「確保・転送がリークなく動作する」の数値面の裏付け。
@@ -65,7 +65,7 @@ fn alloc_zeroed_returns_all_zero() {
 }
 
 /// 空テンソル（numel == 0）が FFI を経由せず roundtrip することを確認
-/// する（`tensor_core::buffer` モジュールコメント「空テンソルの契約」。
+/// する（`fandhe_ai_tensor_core::buffer` モジュールコメント「空テンソルの契約」。
 /// `MetalBuffer::new_with_data`/`new_zeroed` は長さ 0 を
 /// `MetalError::ZeroLengthAllocation` として拒否するため、`MetalMemory`
 /// 側の早期 return が正しく機能していないとこのテストは Err で失敗する）。

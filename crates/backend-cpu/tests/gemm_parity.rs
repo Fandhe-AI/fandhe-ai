@@ -32,10 +32,10 @@
 //! 7. **極小 m の並列パネル分割**: `m < num_threads` でパネル数が
 //!    スレッド数を下回る端数経路。
 
-use backend_cpu::{
+use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::{
     BlockSizes, GemmError, gemm_blocked, gemm_naive, gemm_parallel, gemm_parallel_tuned,
 };
-use bench_harness::rng::Xorshift64Star;
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)

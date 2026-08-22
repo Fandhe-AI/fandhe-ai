@@ -1,17 +1,17 @@
-//! 既定構築（`facade::tape()`）経由の融合有効化＋REQ-2 複合判定（受入
+//! 既定構築（`fandhe_ai::tape()`）経由の融合有効化＋REQ-2 複合判定（受入
 //! 基準 3）。
 //!
-//! `facade::tape()` は `backend_cpu::CpuBackendOps`（`run_fused` を
+//! `fandhe_ai::tape()` は `fandhe_ai_backend_cpu::CpuBackendOps`（`run_fused` を
 //! `run_fused_elementwise` へオーバーライド済み＝融合有効。
 //! `crates/backend-cpu/src/ops.rs`）を結線する唯一の入口である
 //! （`crates/facade/src/lib.rs::tape`）。本テストは
 //!
-//! 1. `facade::tape()` 上で 5 段の elementwise 連鎖（`add`→`mul`→`relu`→
+//! 1. `fandhe_ai::tape()` 上で 5 段の elementwise 連鎖（`add`→`mul`→`relu`→
 //!    `exp`→`tanh`。`docs/fusion-graph-design.md` の融合対象パターン）を
-//!    実行し、無引数 `autodiff::Tape::new()`（`NaiveOps`・融合を経ない
+//!    実行し、無引数 `fandhe_ai_autodiff::Tape::new()`（`NaiveOps`・融合を経ない
 //!    per-op 逐次実装。`crates/autodiff/src/tape.rs::Tape::new`）による
 //!    同一連鎖の参照値と REQ-2 統一複合判定
-//!    （`backend_cpu::parity::assert_parity`。相対誤差 1e-3 未満 または
+//!    （`fandhe_ai_backend_cpu::parity::assert_parity`。相対誤差 1e-3 未満 または
 //!    絶対誤差 1e-5 未満）で比較する。**許容誤差は `parity.rs` の既存
 //!    定数をそのまま使い、新規の緩和・独自閾値を導入しない**（変更は
 //!    ユーザー承認必須。`.claude/rules/coding-rust.md`）。
@@ -21,24 +21,24 @@
 //!    有効であることを確認する（`crates/autodiff/tests/
 //!    fusion_backend_integration.rs` のプラン構築手法を流用）。
 
-use autodiff::{Tape, Var};
-use backend_cpu::CpuBackendOps;
-use backend_cpu::parity::assert_parity;
-use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+use fandhe_ai_autodiff::{Tape, Var};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
-/// `facade::Tape`（newtype）・`autodiff::Tape`（生の型）のいずれからも
+/// `fandhe_ai::Tape`（newtype）・`fandhe_ai_autodiff::Tape`（生の型）のいずれからも
 /// `var()` を呼べるようにする、本テストファイル専用のローカル trait
-/// （codex-review PR #424 P1 是正で `facade::tape()` の戻り値型が
-/// `autodiff::Tape` から `facade::Tape` newtype へ変わったことに伴う
+/// （codex-review PR #424 P1 是正で `fandhe_ai::tape()` の戻り値型が
+/// `fandhe_ai_autodiff::Tape` から `fandhe_ai::Tape` newtype へ変わったことに伴う
 /// 対応。本 trait は facade の公開契約ではなく、単に「融合経路
-/// （`facade::tape()`）と非融合参照実装（`autodiff::Tape::new()`）の
+/// （`fandhe_ai::tape()`）と非融合参照実装（`fandhe_ai_autodiff::Tape::new()`）の
 /// 両方に同じ `run_chain_on` を適用したい」というテストの都合のみで
 /// 導入する）。
 trait VarSource {
     fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_>;
 }
 
-impl VarSource for facade::Tape {
+impl VarSource for fandhe_ai::Tape {
     fn make_var(&self, tensor: &Tensor<f32>) -> Var<'_> {
         self.var(tensor)
     }
@@ -62,9 +62,9 @@ fn leaf_b() -> Tensor<f32> {
     Tensor::new(vec![-0.7, 1.5, -2.2, 0.9], &[2, 2]).expect("leaf_b: shape 一致")
 }
 
-/// `facade::tape()` 上で `add`→`mul`→`relu`→`exp`→`tanh` の 5 段連鎖を
-/// 実行し、最終 `Var` を返す。[`VarSource`] 経由で `facade::Tape`
-/// （newtype）・`autodiff::Tape`（生の型）の両方に適用できる。
+/// `fandhe_ai::tape()` 上で `add`→`mul`→`relu`→`exp`→`tanh` の 5 段連鎖を
+/// 実行し、最終 `Var` を返す。[`VarSource`] 経由で `fandhe_ai::Tape`
+/// （newtype）・`fandhe_ai_autodiff::Tape`（生の型）の両方に適用できる。
 fn run_chain_on<T: VarSource>(tape: &T) -> Var<'_> {
     let a = tape.make_var(&leaf_a());
     let b = tape.make_var(&leaf_b());
@@ -79,7 +79,7 @@ fn run_chain_on<T: VarSource>(tape: &T) -> Var<'_> {
 /// per-op 経路）が REQ-2 複合判定で一致する。
 #[test]
 fn default_facade_tape_matches_naive_reference_within_parity() {
-    let fused_tape = facade::tape();
+    let fused_tape = fandhe_ai::tape();
     let fused_result = run_chain_on(&fused_tape);
     let fused_value = fused_result.to_tensor();
 
@@ -88,7 +88,7 @@ fn default_facade_tape_matches_naive_reference_within_parity() {
     let naive_value = naive_result.to_tensor();
 
     assert_parity(
-        "facade::tape()（融合経路）vs autodiff::Tape::new()（NaiveOps 非融合参照）",
+        "fandhe_ai::tape()（融合経路）vs fandhe_ai_autodiff::Tape::new()（NaiveOps 非融合参照）",
         fused_value
             .as_slice()
             .expect("fused_value は contiguous のはず"),

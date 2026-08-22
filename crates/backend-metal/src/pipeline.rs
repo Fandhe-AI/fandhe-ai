@@ -237,7 +237,7 @@ mod tests {
     /// REQ-2 前提 (b)「Metal は `mathFloatingPointFunctions=Precise` 明示」
     /// の契約テスト（TASK-2.2c・#55）。`MTLCompileOptions::new()` は GPU
     /// デバイスを介さない純粋なオブジェクト生成のため `#[ignore]` は付けず、
-    /// macOS 実機上の `cargo test -p backend-metal`（`--ignored` なし）で
+    /// macOS 実機上の `cargo test -p fandhe-ai-backend-metal`（`--ignored` なし）で
     /// 実行する。
     ///
     /// **CI（self-hosted・Linux）では実行されない**点に注意: 本ファイル

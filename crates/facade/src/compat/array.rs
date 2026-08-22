@@ -1,8 +1,8 @@
 //! numpy `np.array` 慣習のテンソル生成入口（TASK-9.2a・#95。
-//! TASK-9.4・#411 で `autodiff::compat` から本クレートへ移設）。
+//! TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から本クレートへ移設）。
 //!
 //! `compat::array()` は 1-D/2-D の Rust ネイティブ構造から
-//! `tensor_core::Tensor<f32>` を組み立てるだけの薄いラッパーで、
+//! `fandhe_ai_tensor_core::Tensor<f32>` を組み立てるだけの薄いラッパーで、
 //! 数値計算・shape 検査ロジックは持たない（すべて `Tensor::new` へ
 //! 委譲する。REQ-9）。ネストが不揃い（jagged）な 2-D 入力だけは
 //! `Tensor::new` に到達する前に検出する必要がある（各行を平坦化して
@@ -11,7 +11,7 @@
 //! ため。A03: 外部由来入力を計算前に検証する契約。`.claude/rules/
 //! security.md`）。
 //!
-//! エラー型は `autodiff::AutodiffError` をそのまま使う（compat 層は
+//! エラー型は `fandhe_ai_autodiff::AutodiffError` をそのまま使う（compat 層は
 //! `tensor-core`／`autodiff` いずれの pub API のみに依存し、独自の
 //! エラー型を新設しない。REQ-9「薄いラッパーに徹する」）。
 //!
@@ -93,7 +93,7 @@ impl<const M: usize, const N: usize> ArrayData for [[f32; N]; M] {
 
 /// numpy `np.array` 慣習のテンソル生成。1-D（`Vec<f32>`/`&[f32]`/
 /// `[f32; N]`）・2-D（`Vec<Vec<f32>>`/`[[f32; N]; M]`）を受理し、
-/// ネストから shape を推論して `tensor_core::Tensor<f32>` を返す
+/// ネストから shape を推論して `fandhe_ai_tensor_core::Tensor<f32>` を返す
 /// （`Tensor::new` への委譲のみ。モジュール doc 参照）。
 pub fn array<A: ArrayData>(data: A) -> Result<Tensor<f32>, AutodiffError> {
     let (flat, shape) = data.into_array_data()?;
@@ -104,8 +104,8 @@ pub fn array<A: ArrayData>(data: A) -> Result<Tensor<f32>, AutodiffError> {
 mod tests {
     use super::*;
 
-    /// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API
-    /// のみを使用。旧 `autodiff::eval::dense_vec`〈クレート非公開〉の
+    /// テスト専用の連続化ヘルパー（`fandhe_ai_tensor_core::Tensor` の `pub` API
+    /// のみを使用。旧 `fandhe_ai_autodiff::eval::dense_vec`〈クレート非公開〉の
     /// 代替。`crates/facade/tests/fusion_default_parity.rs` の
     /// `as_slice()` 直接利用と同じ発想だが、本テストは `contiguous()`
     /// 前提を明示するため一段挟む）。

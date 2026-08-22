@@ -1,13 +1,13 @@
 //! CPU バックエンドのメモリ操作（TASK-1.9b・#45）。
 //!
-//! `tensor_core::buffer::MemoryOps` の CPU 実装。CPU は「デバイス」が
+//! `fandhe_ai_tensor_core::buffer::MemoryOps` の CPU 実装。CPU は「デバイス」が
 //! ホストメモリそのものであるため、`upload`/`download` は FFI を伴わず
 //! `Vec<f32>` の複製のみで完結する。`backend-cuda::CudaMemory`／
 //! `backend-metal::MetalMemory` の数値一致の参照点（`.claude/rules/coding-rust.md`
 //! の「CPU 参照実装」方針）であり、`CpuDeviceProvider`（`device.rs`・#44）
 //! と同種の位置付けを `MemoryOps` 側で担う。
 //!
-//! TASK-14.1a（#174）で `tensor_core::memory_stats::MemoryStats` を実装し、
+//! TASK-14.1a（#174）で `fandhe_ai_tensor_core::memory_stats::MemoryStats` を実装し、
 //! `alloc_zeroed`/`upload` の確保バイト数を [`AllocationTracker`] へ計上する
 //! ようにした。トラッカーは `CpuMemory` インスタンス間で `Arc` 共有する
 //! （`memory_stats` モジュールコメント「トラッカーの共有範囲」参照。
@@ -20,15 +20,15 @@ use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use tensor_core::Tensor;
-use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
-use tensor_core::device::{BackendError, Device};
-use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
-use tensor_core::pool::PoolZeroFill;
+use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
+use fandhe_ai_tensor_core::pool::PoolZeroFill;
 
 /// CPU バッファの具体ハンドル。ホスト常駐そのものなので `Vec<f32>` を
 /// 直接保持する。`Drop` は `Vec<f32>` の既定 `Drop` に委ねる（RAII 一本化
-/// 方針。`tensor_core::buffer` モジュールコメント参照）。
+/// 方針。`fandhe_ai_tensor_core::buffer` モジュールコメント参照）。
 ///
 /// `_alloc`（[`TrackedAllocation`]）はフィールド順により `data` より後に
 /// drop される（Rust の構造体フィールドは宣言順に drop される）ため、
@@ -88,7 +88,7 @@ impl MemoryStats for CpuMemory {
     }
 }
 
-/// `tensor_core::pool::PooledMemory<CpuMemory>`（TASK-#201・REQ-14 14-3）が
+/// `fandhe_ai_tensor_core::pool::PooledMemory<CpuMemory>`（TASK-#201・REQ-14 14-3）が
 /// プールから再利用したバッファを返す前に呼ぶゼロ初期化フック。
 /// `handle` を `CpuBufferHandle` へダウンキャストし、`data`（`Vec<f32>`）を
 /// `fill(0.0)` で上書きする（`alloc_zeroed` の「全要素 0」契約を再利用時
@@ -126,7 +126,7 @@ fn checked_byte_len(numel: usize) -> Result<u64, BackendError> {
 }
 
 /// shape の要素数積を検査付きで計算する。`Tensor::zeros` 等が内部で行う
-/// 検証と同種だが、`tensor_core::tensor::checked_numel` はクレート内
+/// 検証と同種だが、`fandhe_ai_tensor_core::tensor::checked_numel` はクレート内
 /// 非公開（`pub(crate)`）のため、`backend-cpu` 側で同じ検証をここでも
 /// 独立して行う（`.claude/rules/security.md` A03: 外部由来の shape が
 /// この経路へ流入しうるための前段検証）。
@@ -147,7 +147,7 @@ impl MemoryOps for CpuMemory {
         // numel == 0 でも `vec![0.0f32; 0]` は素通りする（CPU には
         // MetalBuffer::checked_byte_len のような FFI 前ゼロ長拒否は
         // 不要）が、他バックエンドと同じ「空ハンドル」契約
-        // （`tensor_core::buffer` モジュールコメント）に揃えて明示的に
+        // （`fandhe_ai_tensor_core::buffer` モジュールコメント）に揃えて明示的に
         // 分岐しておく（将来 CPU 側にプール確保等を導入した際に契約が
         // 崩れないようにするための保険）。numel == 0 は checked_byte_len も
         // 0 を返すため TrackedAllocation::new への計上は自然な no-op になる
@@ -173,7 +173,7 @@ impl MemoryOps for CpuMemory {
             return Ok(DeviceBuffer::new(Device::Cpu, shape, handle));
         }
         // 非 contiguous な入力（transpose/narrow 後の view）は実体化して
-        // から複製する（`MemoryOps::upload` の契約。`tensor_core::buffer`
+        // から複製する（`MemoryOps::upload` の契約。`fandhe_ai_tensor_core::buffer`
         // モジュールコメント「非 contiguous テンソルの upload」参照）。
         let contiguous = tensor.contiguous();
         let data = contiguous

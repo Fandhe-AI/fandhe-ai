@@ -39,7 +39,7 @@
 //! `--workload-source` で指定した bin（`src/bin/bench_workload.rs`）を
 //! baseline・候補適用後の双方でビルド・実行し、実行時間を直接比較する
 //! （`RepairCompositeGate`。TASK-3.2a・#137）。本ハーネスが用意する
-//! `bench_workload.rs` は `autodiff::Var::relu` の forward+backward を反復する
+//! `bench_workload.rs` は `fandhe_ai_autodiff::Var::relu` の forward+backward を反復する
 //! 決定的ワークロードであり、`tests/fixtures/feature-addition-leaky-relu/
 //! baseline/src/bin/bench_workload.rs` と同じ計測プロトコル（xorshift64 決定的
 //! 入力・`black_box`）を踏襲する。旧版（`SelfRepairBenchGate` による合成
@@ -240,7 +240,7 @@ fn detach_autodiff_cargo_toml(sandbox: &Path) {
 }
 
 /// 候補 diff 直接実測（TASK-3.2a・#137）向けの決定的ベンチワークロード
-/// （`WORKLOAD_SOURCE`）を準備リポジトリへ追加する。`autodiff::Var::relu` の
+/// （`WORKLOAD_SOURCE`）を準備リポジトリへ追加する。`fandhe_ai_autodiff::Var::relu` の
 /// forward+backward を反復する（`tests/fixtures/feature-addition-leaky-relu/
 /// baseline/src/bin/bench_workload.rs` と同じ計測プロトコル: xorshift64 決定的
 /// 入力・`black_box`・1 プロセス実行あたり 10ms 以上の作業量）。
@@ -253,14 +253,14 @@ fn bench_workload_source() -> &'static str {
 //! このファイル自体は `DirectBenchSpec::workload_sources` によってピン留めされ、
 //! 候補 diff が改変すると計測前に fail-closed で拒否される（ゲーミング防止）。
 //!
-//! `autodiff::Var::relu` の forward+backward を反復する（TASK-3.3b・#141 の
+//! `fandhe_ai_autodiff::Var::relu` の forward+backward を反復する（TASK-3.3b・#141 の
 //! バグ注入対象と同一 API）。決定的シード・作業量の方針は
 //! `tests/fixtures/feature-addition-leaky-relu/baseline/src/bin/bench_workload.rs`
 //! と同一（本ハーネス〈`tests/revalidation_bug_fix.rs`〉が生成する）。
 
-use autodiff::Tape;
-use backend_cpu::CpuBackendOps;
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_tensor_core::Tensor;
 
 const SEED: u64 = 42;
 const ELEMENTS: usize = 4096;

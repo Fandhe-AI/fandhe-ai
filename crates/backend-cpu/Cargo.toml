@@ -1,5 +1,8 @@
 [package]
-name = "backend-cpu"
+# crates.io 公開名（イシュー #877/#879・#878 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/backend-cpu`
+# は変更しない。lib 名は Rust 識別子化された `fandhe_ai_backend_cpu`。
+name = "fandhe-ai-backend-cpu"
 description = "CPU バックエンド（rayon 並列カーネル。REQ-2）"
 version.workspace = true
 edition.workspace = true
@@ -12,7 +15,7 @@ publish.workspace = true
 # `Tensor<f32>`・shape 検査 `elementwise_out_shape`（#22・TASK-1.6b）に加え、
 # reduction カーネル（#23・TASK-1.6c）が `reduce_out_shape`（tensor-core::ops_shape）を
 # 利用するために必要。
-tensor-core = { path = "../tensor-core" }
+fandhe-ai-tensor-core = { path = "../tensor-core" }
 # CPU 並列カーネル（REQ-2）。PoC-v2-1 実測（naive/blocked 比 約 6〜8.5 倍改善）に基づく採用。
 rayon.workspace = true
 half.workspace = true
@@ -26,7 +29,7 @@ bench-harness = { path = "../bench-harness" }
 # TASK-1.9a（#44）の受け入れ条件「3 バックエンドが同一 trait でデバイス列挙・選択できる」を
 # `tests/device_provider_integration.rs` で直接検証するための dev 依存（公開依存グラフを
 # 汚さない。上記 bench-harness と同種の判断）。CUDA は無条件依存のため全 OS で追加する。
-backend-cuda = { path = "../backend-cuda" }
+fandhe-ai-backend-cuda = { path = "../backend-cuda" }
 # TASK-12.2a（#167）の融合効果実測ハーネス（`tests/fusion_effect_perf.rs`）が
 # `autodiff::Tape` 経由の遅延評価（`push_lazy`／`materialize_*`）で融合条件・
 # 非融合条件を within-harness 比較するための dev 依存。workspace 内クレート
@@ -34,10 +37,10 @@ backend-cuda = { path = "../backend-cuda" }
 # backend-cuda と同種の判断）。**逆方向は禁止**: `autodiff` → `backend-cpu` の
 # 依存は `crates/autodiff/tests/architecture_boundaries.rs` が dev 依存も含め
 # 機械検査しているため、本ハーネスは backend-cpu 側に置く。
-autodiff = { path = "../autodiff" }
+fandhe-ai-autodiff = { path = "../autodiff" }
 
 # Metal は `cfg(target_os = "macos")` 限定（deps-policy.md）。backend-metal クレート自体は
 # 非 macOS でもビルド可能（本体が `#[cfg(target_os = "macos")]` で空になるだけ）だが、
 # dev-dependency の追加自体も cfg で絞り不要な依存解決を避ける。
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-backend-metal = { path = "../backend-metal" }
+fandhe-ai-backend-metal = { path = "../backend-metal" }

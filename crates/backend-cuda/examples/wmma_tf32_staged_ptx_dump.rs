@@ -23,7 +23,7 @@
 //! 拡大候補ダンプは対象外——TF32 staged 側はそれらの候補が未整備のため）。
 //!
 //! `internal-diagnostics` feature（既定 off）を要求する。本 example が使う
-//! `backend_cuda::diagnostics::{wmma_tf32_f32_staged_source,
+//! `fandhe_ai_backend_cuda::diagnostics::{wmma_tf32_f32_staged_source,
 //! wmma_tf32_f32_staged_source_with_swizzle,
 //! wmma_tf32_staged_swizzle_group_width}` は非公開 `mod kernels_wmma_opt`／
 //! `mod swizzle` への薄い診断用ラッパーであり、既定ビルドの公開 API 面
@@ -36,7 +36,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example wmma_tf32_staged_ptx_dump --release \
+//! cargo run -p fandhe-ai-backend-cuda --example wmma_tf32_staged_ptx_dump --release \
 //!     --features internal-diagnostics -- --out-dir /tmp/wmma-tf32-staged-ptx-dump
 //! ```
 //!
@@ -45,7 +45,7 @@
 //! では実行されず、実機セッションでの手動実行が前提）。
 
 #[cfg(feature = "internal-diagnostics")]
-use backend_cuda::{CudaDevice, CudaError, compile_ptx, diagnostics};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, compile_ptx, diagnostics};
 
 #[cfg(feature = "internal-diagnostics")]
 const USAGE: &str = "usage: wmma_tf32_staged_ptx_dump [--out-dir PATH]";
@@ -294,13 +294,13 @@ fn main() {
 }
 
 /// `internal-diagnostics` feature 未指定時の no-op（本ファイル冒頭コメント
-/// 参照。`cargo build -p backend-cuda --example wmma_tf32_staged_ptx_dump`
+/// 参照。`cargo build -p fandhe-ai-backend-cuda --example wmma_tf32_staged_ptx_dump`
 /// が feature なしでもビルド成立することを保証する）。
 #[cfg(not(feature = "internal-diagnostics"))]
 fn main() {
     println!(
         "wmma_tf32_staged_ptx_dump: internal-diagnostics feature not enabled; this diagnostic \
-         requires `cargo run -p backend-cuda --example wmma_tf32_staged_ptx_dump --features \
+         requires `cargo run -p fandhe-ai-backend-cuda --example wmma_tf32_staged_ptx_dump --features \
          internal-diagnostics`."
     );
 }

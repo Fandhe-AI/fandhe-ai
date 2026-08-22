@@ -206,8 +206,8 @@ const MOD_TESTS_MARKER: &str = "#[cfg(test)]\nmod tests {";
 /// `cargo test --release`〈`CargoVerificationGate` の test ゲート〉が失敗する）。
 fn leaky_relu_candidate_content(baseline: &str) -> String {
     let with_import = baseline.replacen(
-        "use autodiff::Var;\nuse autodiff::nn::activation::{Relu, Sigmoid};\n",
-        "use autodiff::Tape;\nuse autodiff::Var;\nuse autodiff::nn::activation::{Relu, Sigmoid};\nuse tensor_core::Tensor;\n",
+        "use fandhe_ai_autodiff::Var;\nuse fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};\n",
+        "use fandhe_ai_autodiff::Tape;\nuse fandhe_ai_autodiff::Var;\nuse fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};\nuse fandhe_ai_tensor_core::Tensor;\n",
         1,
     );
     assert_ne!(

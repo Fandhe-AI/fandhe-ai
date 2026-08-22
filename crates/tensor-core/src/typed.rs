@@ -195,8 +195,8 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
     /// # 正常系
     ///
     /// ```
-    /// use tensor_core::typed::{BatchedFeatures, FixedMat};
-    /// use tensor_core::Tensor;
+    /// use fandhe_ai_tensor_core::typed::{BatchedFeatures, FixedMat};
+    /// use fandhe_ai_tensor_core::Tensor;
     ///
     /// let x = BatchedFeatures::<f32, 3>::from_tensor(
     ///     Tensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap(),
@@ -218,8 +218,8 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
     /// （関数引数の型不一致・`E0308`）。
     ///
     /// ```compile_fail,E0308
-    /// use tensor_core::typed::{BatchedFeatures, FixedMat};
-    /// use tensor_core::Tensor;
+    /// use fandhe_ai_tensor_core::typed::{BatchedFeatures, FixedMat};
+    /// use fandhe_ai_tensor_core::Tensor;
     ///
     /// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
     /// let w = FixedMat::<f32, 4, 5>::from_tensor(Tensor::zeros(&[4, 5]).unwrap()).unwrap();
@@ -236,8 +236,8 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
     /// （関数引数の型不一致・`E0308`）。
     ///
     /// ```compile_fail,E0308
-    /// use tensor_core::typed::{BatchedFeatures, FixedMat};
-    /// use tensor_core::Tensor;
+    /// use fandhe_ai_tensor_core::typed::{BatchedFeatures, FixedMat};
+    /// use fandhe_ai_tensor_core::Tensor;
     ///
     /// fn apply(x: &BatchedFeatures<f32, 3>, w: &FixedMat<f32, 3, 4>) {
     ///     let _ = x.matmul_with(w, |a, b| {
@@ -277,8 +277,8 @@ impl<T: crate::element::Element, const F: usize> BatchedFeatures<T, F> {
     /// コンパイルエラーになる（関数引数の型不一致・`E0308`）。
     ///
     /// ```compile_fail,E0308
-    /// use tensor_core::typed::{BatchedFeatures, FixedVec};
-    /// use tensor_core::Tensor;
+    /// use fandhe_ai_tensor_core::typed::{BatchedFeatures, FixedVec};
+    /// use fandhe_ai_tensor_core::Tensor;
     ///
     /// let x = BatchedFeatures::<f32, 3>::from_tensor(Tensor::zeros(&[2, 3]).unwrap()).unwrap();
     /// let b = FixedVec::<f32, 4>::from_tensor(Tensor::zeros(&[4]).unwrap()).unwrap();

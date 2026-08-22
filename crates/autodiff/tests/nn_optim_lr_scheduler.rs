@@ -1,7 +1,7 @@
 //! #195（親 #192）: LR スケジューラ最小セット（constant / step）の
 //! 系列テスト・入力検証（fail-closed）テスト。
 
-use autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
+use fandhe_ai_autodiff::nn::optim::{ConstantLr, LrScheduler, StepLr};
 
 #[test]
 fn constant_lr_is_stable_across_steps() {

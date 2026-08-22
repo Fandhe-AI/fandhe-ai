@@ -18,7 +18,7 @@
 //! 追加しないため、`nodes` の不変借用 1 回で走査を完結できる
 //! （`RefCell` の二重可変借用 panic の余地を作らない）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 use crate::grad;

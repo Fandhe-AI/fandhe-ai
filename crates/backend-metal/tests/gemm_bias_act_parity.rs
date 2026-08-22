@@ -7,7 +7,7 @@
 //! `#![cfg(target_os = "macos")]` により Linux CI ではコンパイル対象外に
 //! なり、`#[ignore]` により通常の `cargo test` からも除外される）。
 //!
-//! 判定式・許容誤差は再定義せず `backend_cpu::parity` を唯一の参照とする
+//! 判定式・許容誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の参照とする
 //! （`.claude/rules/coding-rust.md`）。CUDA との数値一致は #604 softmax の
 //! 先例に従い CPU 参照経由の推移的な担保とする（両実機を同時に持つ検証
 //! 環境が存在しないため。両バックエンドとも同一 CPU 参照・同一複合判定で
@@ -16,13 +16,13 @@
 //! Linux CI での型検査（実機なしでもコンパイル可能性を担保）:
 //!
 //! ```sh
-//! cargo check -p backend-metal --tests --target aarch64-apple-darwin
+//! cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
 //! ```
 //!
 //! 実行コマンド（Apple Silicon 実機。`--release` 推奨）:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release --test gemm_bias_act_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release --test gemm_bias_act_parity -- --ignored --nocapture
 //! ```
 //!
 //! `BIAS_ACT_FUSED_LAUNCH_COUNT`（融合カーネル起動回数の可観測点）は
@@ -37,10 +37,10 @@
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::CpuBackendOps;
-use backend_metal::MetalBackendOps;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::{Activation, BackendOps, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_metal::MetalBackendOps;
+use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 /// CPU-Metal の `gemm_bias_act` 複合判定（REQ-2）と、Metal 上での融合 vs
 /// 非融合合成（`gemm`→`add`→act）の bit 完全一致（`shaders/gemm.metal::
@@ -72,7 +72,7 @@ fn assert_gemm_bias_act_parity(
         .gemm_bias_act(&a, &b, Some(&bias), act)
         .expect("MetalBackendOps::gemm_bias_act must succeed on Metal-equipped test runner");
     assert_eq!(metal_result.shape(), cpu_result.shape());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!("gemm_bias_act cpu-metal parity m={m} n={n} k={k} act={act:?}"),
         metal_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
@@ -90,7 +90,7 @@ fn assert_gemm_bias_act_parity(
     if act == Activation::Relu {
         composed = metal.relu(&composed).expect("metal relu must succeed");
     }
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!("gemm_bias_act fused vs composed metal parity m={m} n={n} k={k} act={act:?}"),
         metal_result.as_slice().expect("contiguous"),
         composed.as_slice().expect("contiguous"),
@@ -112,7 +112,7 @@ fn elementwise_matches_cpu_across_ops() {
 
     let add_cpu = cpu.add(&a, &b).expect("cpu add");
     let add_metal = metal.add(&a, &b).expect("metal add");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "elementwise add cpu-metal parity",
         add_metal.as_slice().expect("contiguous"),
         add_cpu.as_slice().expect("contiguous"),
@@ -120,7 +120,7 @@ fn elementwise_matches_cpu_across_ops() {
 
     let mul_cpu = cpu.mul(&a, &b).expect("cpu mul");
     let mul_metal = metal.mul(&a, &b).expect("metal mul");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "elementwise mul cpu-metal parity",
         mul_metal.as_slice().expect("contiguous"),
         mul_cpu.as_slice().expect("contiguous"),
@@ -128,7 +128,7 @@ fn elementwise_matches_cpu_across_ops() {
 
     let relu_cpu = cpu.relu(&a).expect("cpu relu");
     let relu_metal = metal.relu(&a).expect("metal relu");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "elementwise relu cpu-metal parity",
         relu_metal.as_slice().expect("contiguous"),
         relu_cpu.as_slice().expect("contiguous"),
@@ -136,7 +136,7 @@ fn elementwise_matches_cpu_across_ops() {
 
     let exp_cpu = cpu.exp(&a).expect("cpu exp");
     let exp_metal = metal.exp(&a).expect("metal exp");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "elementwise exp cpu-metal parity",
         exp_metal.as_slice().expect("contiguous"),
         exp_cpu.as_slice().expect("contiguous"),
@@ -144,7 +144,7 @@ fn elementwise_matches_cpu_across_ops() {
 
     let tanh_cpu = cpu.tanh(&a).expect("cpu tanh");
     let tanh_metal = metal.tanh(&a).expect("metal tanh");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "elementwise tanh cpu-metal parity",
         tanh_metal.as_slice().expect("contiguous"),
         tanh_cpu.as_slice().expect("contiguous"),
@@ -181,7 +181,7 @@ fn gemm_bias_act_without_bias_matches_cpu() {
     let metal_result = metal
         .gemm_bias_act(&a, &b, None, Activation::Relu)
         .expect("metal gemm_bias_act (no bias) must succeed");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "gemm_bias_act no-bias cpu-metal parity",
         metal_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
@@ -205,7 +205,7 @@ fn gemm_bias_act_k_zero_matches_cpu() {
     let metal_result = metal
         .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)
         .expect("metal gemm_bias_act (k=0) must succeed");
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "gemm_bias_act k=0 cpu-metal parity",
         metal_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
@@ -237,7 +237,7 @@ fn gemm_bias_act_broadcast_fallback_matches_cpu() {
         let metal_result = metal
             .gemm_bias_act(&a, &b, Some(&bias), Activation::Relu)
             .expect("metal gemm_bias_act (broadcast fallback) must succeed");
-        backend_cpu::parity::assert_parity(
+        fandhe_ai_backend_cpu::parity::assert_parity(
             &format!("gemm_bias_act broadcast-fallback cpu-metal parity shape={shape:?}"),
             metal_result.as_slice().expect("contiguous"),
             cpu_result.as_slice().expect("contiguous"),
@@ -261,11 +261,15 @@ fn gemm_bias_act_rejects_incompatible_bias_shape_like_cpu() {
 
     assert!(matches!(
         cpu.gemm_bias_act(&a, &b, Some(&bad_bias), Activation::None),
-        Err(tensor_core::device::BackendError::ShapeMismatch(_))
+        Err(fandhe_ai_tensor_core::device::BackendError::ShapeMismatch(
+            _
+        ))
     ));
     assert!(matches!(
         metal.gemm_bias_act(&a, &b, Some(&bad_bias), Activation::None),
-        Err(tensor_core::device::BackendError::ShapeMismatch(_))
+        Err(fandhe_ai_tensor_core::device::BackendError::ShapeMismatch(
+            _
+        ))
     ));
 }
 
@@ -313,7 +317,7 @@ fn gemm_bias_act_broadcast_fallback_zero_dim_matches_cpu() {
                 )
             });
         assert_eq!(metal_result.shape(), cpu_result.shape());
-        backend_cpu::parity::assert_parity(
+        fandhe_ai_backend_cpu::parity::assert_parity(
             &format!(
                 "gemm_bias_act broadcast-fallback zero-dim cpu-metal parity \
                  m={m} n={n} k={k} bias_shape={bias_shape:?}"

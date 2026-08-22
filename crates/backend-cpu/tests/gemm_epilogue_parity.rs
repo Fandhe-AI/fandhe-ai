@@ -12,15 +12,17 @@
 //!    確認し（epilogue は要素ごとに独立な演算で演算順序に依存しないため。
 //!    `src/gemm_blis/mod.rs` の `gemm_blis_bias_act_parallel` ドキュメント
 //!    コメント参照）、
-//! 3. REQ-2 統一複合判定（`backend_cpu::parity::assert_parity`）でも
+//! 3. REQ-2 統一複合判定（`fandhe_ai_backend_cpu::parity::assert_parity`）でも
 //!    重ねて確認し、
 //! 4. エッジケース（`bias=None`・`act=None`・`m/n/k=0`・bias 長不一致
 //!    エラー・非 contiguous 入力〈`BackendOps::gemm_bias_act` 経由〉）を
 //!    検証する。
 
-use backend_cpu::{CpuBackendOps, GemmError, gemm_blis_bias_act_parallel, gemm_blis_parallel};
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::{Activation, BackendOps, Tensor};
+use fandhe_ai_backend_cpu::{
+    CpuBackendOps, GemmError, gemm_blis_bias_act_parallel, gemm_blis_parallel,
+};
+use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)
@@ -150,7 +152,7 @@ fn gemm_bias_act_passes_unified_parity_check() {
 
     let c_ref = compose_reference(&a, &b, m, n, k, Some(&bias), Activation::Relu);
 
-    backend_cpu::assert_parity("gemm_bias_act vs 非融合合成", &c_fused, &c_ref);
+    fandhe_ai_backend_cpu::assert_parity("gemm_bias_act vs 非融合合成", &c_fused, &c_ref);
 }
 
 /// `n = 4096`（#749 で NC=9600 拡大分岐の対象だった閾値。PR #766・
@@ -386,6 +388,6 @@ fn cpu_backend_ops_gemm_bias_act_rejects_non_broadcastable_bias() {
         .unwrap_err();
     assert!(matches!(
         err,
-        tensor_core::device::BackendError::ShapeMismatch(_)
+        fandhe_ai_tensor_core::device::BackendError::ShapeMismatch(_)
     ));
 }

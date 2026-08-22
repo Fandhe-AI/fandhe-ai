@@ -15,14 +15,14 @@
 //! `min(M,N,K) >= 512` で `simdgroup_matrix`、未満で tiled」）。
 //!
 //! ```sh
-//! cargo test -p backend-metal -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_metal::{MetalContext, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_metal::{MetalContext, MetalGemm};
 
 /// `(seed_a, seed_b, m, n, k)` の 1 ケースを `dispatch_backend_auto` で
 /// 実行し、CPU 参照実装との複合判定 PASS を確認する。

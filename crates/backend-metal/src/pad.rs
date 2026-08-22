@@ -9,7 +9,7 @@
 //!
 //! 本モジュールは `objc2` 系 FFI に一切触れない純粋関数のみで構成する
 //! ため `cfg(target_os = "macos")` を付けず、Linux（CI・本実装環境）の
-//! `cargo test -p backend-metal` でも単体テストが回るようにしてある
+//! `cargo test -p fandhe-ai-backend-metal` でも単体テストが回るようにしてある
 //! （`crate::gemm`・`crate::pipeline` 等の FFI 境界モジュールとは異なり
 //! macOS 実機なしで検証できる部分を切り出した設計判断）。
 //!

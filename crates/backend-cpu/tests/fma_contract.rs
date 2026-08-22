@@ -17,11 +17,11 @@
 //!    512×512×4096 で fail_cells=7/262144 を実測した知見を踏襲し、
 //!    小規模形状でも決定的に fail が出るシードを固定する）。
 
-use backend_cpu::{
+use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::{
     BlockSizes, compare, gemm_blis, gemm_blis_parallel, gemm_blocked, gemm_naive, gemm_parallel,
     gemm_parallel_tuned, matmul_reference_fma,
 };
-use bench_harness::rng::Xorshift64Star;
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)

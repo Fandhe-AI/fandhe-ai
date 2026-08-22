@@ -28,10 +28,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::ops::{GemmAttrs, OpError, gemm, relu, sigmoid};
 use onnx_interop::st_load::{load_safetensors_f32, require_keys};
 use serde::Deserialize;
-use tensor_core::Tensor;
 
 const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

@@ -897,7 +897,7 @@ mod tests {
     ///
     /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
     /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
-    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する
+    /// `cargo test -p fandhe-ai-backend-cuda --lib -- --ignored` から実行する
     /// （`gemm.rs::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
     /// と同じ実行方法）。
     #[test]
@@ -961,7 +961,7 @@ mod tests {
     ///
     /// `#[ignore]`: `CudaDevice::new` が CUDA 実機を要求するため
     /// （本ファイル冒頭コメント「検証状態」）。DGX Spark GB10 等の実機で
-    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する。
+    /// `cargo test -p fandhe-ai-backend-cuda --lib -- --ignored` から実行する。
     #[test]
     #[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
     fn mma_f16_new_wires_size_conditional_swizzle_into_production_constructor() {
@@ -1052,7 +1052,7 @@ mod tests {
     ///
     /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
     /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
-    /// `cargo test -p backend-cuda --lib --features internal-diagnostics --
+    /// `cargo test -p fandhe-ai-backend-cuda --lib --features internal-diagnostics --
     /// --ignored` から実行する（`--features internal-diagnostics` を欠くと
     /// 下記の理由で本テスト自体がコンパイルされず green と誤認する。PR #667
     /// codex-review P1 是正。`docs/perf/cuda-gemm-swizzle-ab.md` の実機検証
@@ -1403,7 +1403,7 @@ mod tests {
     ///
     /// `#[ignore]`: 本セッション（本ファイル冒頭コメント「検証状態」）は
     /// NVRTC 非搭載のため実行できない。DGX Spark GB10 等の実機で
-    /// `cargo test -p backend-cuda --lib -- --ignored` から実行する。
+    /// `cargo test -p fandhe-ai-backend-cuda --lib -- --ignored` から実行する。
     ///
     /// **実機実行時の注意**: 現行タイル構成（#494。`MMA_BM=64`/`MMA_BN=128`/
     /// `MMA_BK=32`・f16）では導出段数は 4（`docs/perf/sm121-device-attributes.md`
@@ -1432,7 +1432,7 @@ mod tests {
             block_m,
             block_n,
             block_k,
-            tensor_core::dispatch::DType::F16,
+            fandhe_ai_tensor_core::dispatch::DType::F16,
         )
         .expect("derive_stages_for_device must succeed for the current tile configuration");
 

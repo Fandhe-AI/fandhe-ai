@@ -147,9 +147,9 @@ impl CompiledDims {
     /// PR #643 レビューの教訓と同方針）。
     pub fn cache_shape(
         &self,
-        shape: tensor_core::dispatch::GemmShape,
-    ) -> tensor_core::dispatch::GemmShape {
-        tensor_core::dispatch::GemmShape::new(
+        shape: fandhe_ai_tensor_core::dispatch::GemmShape,
+    ) -> fandhe_ai_tensor_core::dispatch::GemmShape {
+        fandhe_ai_tensor_core::dispatch::GemmShape::new(
             if self.m { shape.m } else { 0 },
             if self.n { shape.n } else { 0 },
             if self.k { shape.k } else { 0 },
@@ -208,7 +208,7 @@ pub struct CudaKernelDescriptor {
     /// （A03 対策。`compile_ptx` の `src` 引数契約〈本ファイル冒頭〉と
     /// 同型の判断）。
     kernel_name: &'static str,
-    /// GEMM 形状（M/N/K）。`tensor_core::dispatch` の既存 `Hash + Eq` 型を
+    /// GEMM 形状（M/N/K）。`fandhe_ai_tensor_core::dispatch` の既存 `Hash + Eq` 型を
     /// 再利用し、ディスパッチ規則（#67/#68）が扱う形状表現と揃える。
     ///
     /// 呼び出し元が渡した実値をそのまま保持する（正規化しない）。
@@ -216,7 +216,7 @@ pub struct CudaKernelDescriptor {
     /// を参照（codex-review 指摘・PR #674・P1: `shape()` の既存契約
     /// 〈実 shape をそのまま返す〉を壊さないため、正規化後の値は別
     /// フィールド・別 getter に分離する）。
-    shape: tensor_core::dispatch::GemmShape,
+    shape: fandhe_ai_tensor_core::dispatch::GemmShape,
     /// ブロックタイル M 次元。
     block_m: NonZeroU32,
     /// ブロックタイル N 次元。
@@ -227,8 +227,8 @@ pub struct CudaKernelDescriptor {
     /// [`derive_pipeline_stages`]（C-8・#521 で実装）が担い、本型は
     /// 導出済みの値をデータとして保持するのみ。
     stages: NonZeroU32,
-    /// 入出力 dtype。`tensor_core::dispatch::DType` を再利用する。
-    dtype: tensor_core::dispatch::DType,
+    /// 入出力 dtype。`fandhe_ai_tensor_core::dispatch::DType` を再利用する。
+    dtype: fandhe_ai_tensor_core::dispatch::DType,
     /// 次元ごとの compile-time 定数化選択（イシュー #519）。
     /// [`Self::new`]（従来コンストラクタ）経由では `None`（次元特化なし。
     /// 導入前の契約を維持）、[`Self::new_with_compiled_dims`] 経由では
@@ -242,7 +242,7 @@ pub struct CudaKernelDescriptor {
     /// `0` に正規化した値（イシュー #519）。`shape()` の意味は変えず、
     /// キャッシュ用の正規化後表現はこの専用フィールド・専用 getter
     /// （[`Self::cache_key_shape`]）に閉じ込める。
-    cache_key_shape: tensor_core::dispatch::GemmShape,
+    cache_key_shape: fandhe_ai_tensor_core::dispatch::GemmShape,
 }
 
 impl CudaKernelDescriptor {
@@ -263,12 +263,12 @@ impl CudaKernelDescriptor {
     /// コメント参照（検証本体は共通の内部ヘルパへ集約している）。
     pub fn new(
         kernel_name: &'static str,
-        shape: tensor_core::dispatch::GemmShape,
+        shape: fandhe_ai_tensor_core::dispatch::GemmShape,
         block_m: u32,
         block_n: u32,
         block_k: u32,
         stages: u32,
-        dtype: tensor_core::dispatch::DType,
+        dtype: fandhe_ai_tensor_core::dispatch::DType,
     ) -> Result<Self, CudaError> {
         Self::build(
             kernel_name,
@@ -318,12 +318,12 @@ impl CudaKernelDescriptor {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_compiled_dims(
         kernel_name: &'static str,
-        shape: tensor_core::dispatch::GemmShape,
+        shape: fandhe_ai_tensor_core::dispatch::GemmShape,
         block_m: u32,
         block_n: u32,
         block_k: u32,
         stages: u32,
-        dtype: tensor_core::dispatch::DType,
+        dtype: fandhe_ai_tensor_core::dispatch::DType,
         compiled_dims: CompiledDims,
     ) -> Result<Self, CudaError> {
         Self::build(
@@ -344,12 +344,12 @@ impl CudaKernelDescriptor {
     #[allow(clippy::too_many_arguments)]
     fn build(
         kernel_name: &'static str,
-        shape: tensor_core::dispatch::GemmShape,
+        shape: fandhe_ai_tensor_core::dispatch::GemmShape,
         block_m: u32,
         block_n: u32,
         block_k: u32,
         stages: u32,
-        dtype: tensor_core::dispatch::DType,
+        dtype: fandhe_ai_tensor_core::dispatch::DType,
         compiled_dims: Option<CompiledDims>,
     ) -> Result<Self, CudaError> {
         // イシュー #506（Phase C-2）レビュー指摘: 先頭・末尾がドット
@@ -422,7 +422,7 @@ impl CudaKernelDescriptor {
 
     /// GEMM 形状。呼び出し元が渡した実値をそのまま返す（正規化しない。
     /// `new`／`new_with_compiled_dims` いずれの経路でも同じ契約）。
-    pub fn shape(&self) -> tensor_core::dispatch::GemmShape {
+    pub fn shape(&self) -> fandhe_ai_tensor_core::dispatch::GemmShape {
         self.shape
     }
 
@@ -430,7 +430,7 @@ impl CudaKernelDescriptor {
     /// （次元特化なし）では [`Self::shape`] と同一値、
     /// [`Self::new_with_compiled_dims`] 経由では動的次元を sentinel `0`
     /// に正規化した値（[`CompiledDims::cache_shape`] 契約）。
-    pub fn cache_key_shape(&self) -> tensor_core::dispatch::GemmShape {
+    pub fn cache_key_shape(&self) -> fandhe_ai_tensor_core::dispatch::GemmShape {
         self.cache_key_shape
     }
 
@@ -461,7 +461,7 @@ impl CudaKernelDescriptor {
     }
 
     /// 入出力 dtype。
-    pub fn dtype(&self) -> tensor_core::dispatch::DType {
+    pub fn dtype(&self) -> fandhe_ai_tensor_core::dispatch::DType {
         self.dtype
     }
 }
@@ -709,12 +709,12 @@ impl CudaKernelCacheKey {
         buf.extend_from_slice(&self.descriptor.stages.get().to_le_bytes());
 
         // `DType` は non-exhaustive ではない自クレート型ではなく
-        // `tensor_core::dispatch::DType` だが、キー用途では判別子のみが
+        // `fandhe_ai_tensor_core::dispatch::DType` だが、キー用途では判別子のみが
         // 意味を持つため 1 バイトの手書き判別子へ写像する（derive(Hash)
         // に依存しない方針をここでも一貫させる）。
         let dtype_tag: u8 = match self.descriptor.dtype {
-            tensor_core::dispatch::DType::F32 => 0,
-            tensor_core::dispatch::DType::F16 => 1,
+            fandhe_ai_tensor_core::dispatch::DType::F32 => 0,
+            fandhe_ai_tensor_core::dispatch::DType::F16 => 1,
         };
         buf.push(dtype_tag);
 
@@ -3904,7 +3904,7 @@ mod tests {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    use tensor_core::dispatch::{DType, GemmShape};
+    use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
 
     use super::*;
 

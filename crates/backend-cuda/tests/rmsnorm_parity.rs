@@ -3,9 +3,9 @@
 //!
 //! `gemm_bias_act_parity.rs` と同じ構成方針を踏襲する: 環境適応スモーク
 //! （属性なし。通常 CI で実行し、CUDA 非搭載環境では
-//! `backend_cuda::CudaError::DriverUnavailable` を確認して panic しない
+//! `fandhe_ai_backend_cuda::CudaError::DriverUnavailable` を確認して panic しない
 //! ことのみ検証）と、実機必須の形状網羅（`#[ignore]`。DGX Spark GB10 等）を
-//! 分離する。判定式・許容誤差は再定義せず `backend_cpu::parity` を唯一の
+//! 分離する。判定式・許容誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の
 //! 参照とする（`.claude/rules/coding-rust.md`）。
 //!
 //! CPU 参照実装は本ファイル内のテスト専用関数（`f32::mul_add` 使用）で
@@ -15,11 +15,11 @@
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --release --test rmsnorm_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_parity -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaError, CudaRmsNorm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaRmsNorm};
 
 mod common;
 
@@ -85,7 +85,7 @@ fn assert_rmsnorm_parity(
     let cpu_out = cpu_rmsnorm_reference(&x_data, w_data.as_deref(), eps, rows, hidden);
 
     assert_eq!(gpu_out.len(), cpu_out.len());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
             "rmsnorm cpu-cuda parity rows={rows} hidden={hidden} with_weight={with_weight} \
              eps={eps}"
@@ -172,8 +172,8 @@ fn rmsnorm_matches_cpu_across_shapes() {
 /// （`ops.rs` の既存テストパターン踏襲）。
 #[test]
 fn rmsnorm_run_fused_matches_cpu_composed_env_adaptive() {
-    use tensor_core::device::BackendError;
-    use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
     let hidden = 16usize;
     let x_data = Xorshift64Star::new(9101).fill_vec(hidden);
@@ -198,7 +198,7 @@ fn rmsnorm_run_fused_matches_cpu_composed_env_adaptive() {
     let plan = FusionPlan::from_ops(ops, vec![hidden], DType::F32, 1)
         .expect("canonical RMSNorm plan must construct");
 
-    let cuda = backend_cuda::CudaBackendOps::new(0);
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
     match cuda.run_fused(&plan, &[&x]) {
         Ok(fused_out) => {
             // CPU per-op 合成（プランと同じ意味論: mean 化・eps なし）。
@@ -208,7 +208,7 @@ fn rmsnorm_run_fused_matches_cpu_composed_env_adaptive() {
             let composed: Vec<f32> = x_data.iter().map(|v| v * rstd).collect();
 
             assert_eq!(fused_out.shape(), &[hidden]);
-            backend_cpu::parity::assert_parity(
+            fandhe_ai_backend_cpu::parity::assert_parity(
                 "rmsnorm run_fused vs cpu composed (canonical plan)",
                 fused_out.as_slice().expect("contiguous"),
                 &composed,
@@ -221,7 +221,7 @@ fn rmsnorm_run_fused_matches_cpu_composed_env_adaptive() {
     }
 }
 
-/// CPU-CUDA 直接突合（イシュー #607）: `backend_cpu::rmsnorm::
+/// CPU-CUDA 直接突合（イシュー #607）: `fandhe_ai_backend_cpu::rmsnorm::
 /// run_rmsnorm_f32`（NEON/rayon 参照実装）を GPU 出力と直接比較する。
 /// 実機必須（`#[ignore]`。CI ではコンパイルのみ）。既存の
 /// `cpu_rmsnorm_reference`（テスト専用ローカル参照実装）と数学的に同一
@@ -244,10 +244,11 @@ fn rmsnorm_matches_backend_cpu_directly() {
     let gpu_out = rmsnorm
         .run_rmsnorm_f32(&x_data, Some(&w_data), eps, rows, hidden)
         .expect("CudaRmsNorm::run_rmsnorm_f32 must succeed on CUDA-equipped test runner");
-    let cpu_out = backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, Some(&w_data), eps, rows, hidden)
-        .expect("backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+    let cpu_out =
+        fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, Some(&w_data), eps, rows, hidden)
+            .expect("fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
 
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "rmsnorm cpu(backend_cpu)-cuda direct parity",
         &gpu_out,
         &cpu_out,

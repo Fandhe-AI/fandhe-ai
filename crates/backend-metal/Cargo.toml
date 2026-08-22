@@ -1,5 +1,8 @@
 [package]
-name = "backend-metal"
+# crates.io 公開名（イシュー #877/#879・#878 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/backend-metal`
+# は変更しない。lib 名は Rust 識別子化された `fandhe_ai_backend_metal`。
+name = "fandhe-ai-backend-metal"
 description = "Metal バックエンド（objc2 系。macOS 限定。REQ-2）"
 version.workspace = true
 edition.workspace = true
@@ -11,14 +14,14 @@ publish.workspace = true
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
 # 同種の判断）。TASK-1.9a（#44）でデバイス列挙・選択の共通 trait
 # `tensor_core::device::DeviceProvider` を実装するために追加した。
-tensor-core = { path = "../tensor-core" }
+fandhe-ai-tensor-core = { path = "../tensor-core" }
 half.workspace = true
 
 # Apple フレームワークへの FFI 境界（REQ-2）。objc2-metal は macOS 専用 API のバインディング
 # のため他 OS ではビルド対象外にする（PoC-v2-5 実証構成。
 # docs/spec/03-poc/poc-v2-5-backend-numeric-parity/code/rust/Cargo.toml:44-52）。
 # TASK-2.1a（イシュー #49）でこの target cfg 分離を正式なバックエンド切替機構として確定した。
-# 非 macOS（Linux）ターゲットでは `cargo tree -p backend-metal` に objc2 系が現れないことを
+# 非 macOS（Linux）ターゲットでは `cargo tree -p fandhe-ai-backend-metal` に objc2 系が現れないことを
 # 実測確認済み（`cargo build --workspace` も成立する）。
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2.workspace = true
@@ -31,14 +34,14 @@ objc2-metal.workspace = true
 # 同士の path 依存であり、許容依存 8 区分（外部クレート）の新規追加には
 # 当たらない（`crates/backend-cpu/Cargo.toml` が `bench-harness` を
 # 同様に dev-dependencies へ path 依存させた #29 の先例と同種の判断）。
-backend-cpu = { path = "../backend-cpu" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }
 # 決定的シード PRNG（`Xorshift64Star`）をパリティテストの入力生成に使う
 # （coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
 # 使う」）。上記と同じ判断根拠（path 依存・ユーザー承認不要）。
 bench-harness = { path = "../bench-harness" }
 
 # Cargo は `[[example]]` を既定で `test = false` として扱うため、
-# `cargo test -p backend-metal`（rust-ci が実行する経路）は example 内の
+# `cargo test -p fandhe-ai-backend-metal`（rust-ci が実行する経路）は example 内の
 # `#[cfg(test)]` を素通りしコンパイル検証のみで終わる。本 example は
 # `analytics::mlx_case1_domain`（MLX split-K 選択条件との突合。イシュー
 # #810）の回帰検知テストを持つため、`test = true` を明示して CI 実行対象へ

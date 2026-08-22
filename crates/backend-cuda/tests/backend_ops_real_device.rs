@@ -2,11 +2,11 @@
 //!
 //! `cpu_cuda_parity.rs`（TASK-2.2b・#54）は `CudaGemm::run_naive_f32` を
 //! 直接呼び出す形で CPU-CUDA ペアの数値一致を検証しているが、本ファイルは
-//! 抽象層 `tensor_core::backend_ops::CudaBackendOps`（TASK-1.9c・#46）を
+//! 抽象層 `fandhe_ai_tensor_core::backend_ops::CudaBackendOps`（TASK-1.9c・#46）を
 //! 経由した場合にも同じ複合判定（REQ-2）が成立することを固定する
 //! （抽象層自体はカーネル呼び出し前後で shape 検証・contiguous 化・
 //! エラー変換のみを行うため理論上は同値だが、回帰保護として独立に検証
-//! する）。判定式・許容誤差は再定義せず `backend_cpu::parity` を唯一の
+//! する）。判定式・許容誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の
 //! 参照とする（`.claude/rules/coding-rust.md`）。
 //!
 //! `cpu_cuda_parity.rs` と意図的に異なる形状を選び、K=4096 ストレスケース
@@ -15,14 +15,14 @@
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --release -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 //! ```
 
-use backend_cpu::CpuBackendOps;
-use backend_cuda::{CudaBackendOps, CudaDevice, CudaError, CudaGemm};
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cuda::{CudaBackendOps, CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 /// `CudaBackendOps::gemm` を CPU `BackendOps::gemm` と複合判定で突き合わせる。
 fn assert_backend_ops_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, k: usize) {
@@ -40,7 +40,7 @@ fn assert_backend_ops_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, 
         .expect("CudaBackendOps::gemm must succeed on CUDA-equipped test runner");
 
     assert_eq!(cuda_result.shape(), cpu_result.shape());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!("BackendOps cpu-cuda gemm parity m={m} n={n} k={k}"),
         cuda_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
@@ -125,7 +125,7 @@ fn cuda_device_initialization_does_not_panic() {
     }
 }
 
-/// `ops_for`（`tensor_core::backend_ops`）を介したディスパッチでも同じ
+/// `ops_for`（`fandhe_ai_tensor_core::backend_ops`）を介したディスパッチでも同じ
 /// 環境適応スモークが成立することを固定する（`Device::Cuda(0)` 選択の
 /// 回帰保護）。
 #[test]
@@ -137,7 +137,8 @@ fn ops_for_selects_cuda_backend_and_dispatch_does_not_panic() {
     let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
     let b = Tensor::new(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("valid tensor");
 
-    let selected = tensor_core::ops_for(&ops, Device::Cuda(0)).expect("cuda ops registered");
+    let selected =
+        fandhe_ai_tensor_core::ops_for(&ops, Device::Cuda(0)).expect("cuda ops registered");
     match selected.gemm(&a, &b) {
         Ok(_) | Err(BackendError::CudaUnavailable(_)) => {}
         Err(other) => panic!("unexpected error variant for ops_for-dispatched gemm: {other}"),

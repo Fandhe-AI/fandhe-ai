@@ -1,6 +1,6 @@
 //! Metal バックエンドのメモリ操作（TASK-1.9b・#45）。
 //!
-//! `tensor_core::buffer::MemoryOps` の Metal 実装。既存の
+//! `fandhe_ai_tensor_core::buffer::MemoryOps` の Metal 実装。既存の
 //! [`crate::buffer::MetalBuffer`]（TASK-1.8a・#38。`new_with_data`／
 //! `new_zeroed`／`read_to_vec`）をそのまま再利用する。本モジュール
 //! 自体は新規 `unsafe` を追加しない（`.claude/rules/security.md` の
@@ -23,15 +23,15 @@ use std::sync::Arc;
 use crate::buffer::MetalBuffer;
 use crate::context::MetalContext;
 use crate::error::MetalError;
-use tensor_core::Tensor;
-use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
-use tensor_core::device::{BackendError, Device};
-use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
-use tensor_core::pool::PoolZeroFill;
+use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
+use fandhe_ai_tensor_core::pool::PoolZeroFill;
 
 /// Metal バッファの具体ハンドル。
 ///
-/// `numel == 0`（空テンソルの契約。`tensor_core::buffer` モジュール
+/// `numel == 0`（空テンソルの契約。`fandhe_ai_tensor_core::buffer` モジュール
 /// コメント参照）では `buffer` を `None` とする。`MetalBuffer::new_with_data`／
 /// `new_zeroed` はいずれも長さ 0 を `MetalError::ZeroLengthAllocation`
 /// として FFI 呼び出し前に拒否するため（`buffer.rs::checked_byte_len`）、
@@ -222,7 +222,7 @@ impl MetalMemory {
             return Ok(DeviceBuffer::new(Device::Metal, shape, handle));
         }
         // 非 contiguous な入力は実体化してから転送する（`MemoryOps::upload`
-        // の契約。`tensor_core::buffer` モジュールコメント参照）。
+        // の契約。`fandhe_ai_tensor_core::buffer` モジュールコメント参照）。
         let contiguous = tensor.contiguous();
         let data = contiguous.as_slice().ok_or(MetalError::BufferAllocation {
             bytes: 0, // contiguous() 直後に as_slice が None を返す到達不能パス。
@@ -282,7 +282,7 @@ impl MemoryOps for MetalMemory {
     }
 }
 
-/// `tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・REQ-14
+/// `fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・REQ-14
 /// 14-3）が再利用バッファを返す前に呼ぶゼロ初期化フック。
 /// `MetalBuffer::zero_fill`（`buffer.rs`）へ委譲する（`StorageModeShared`
 /// の CPU 可視アドレスへの直接書き込み。モジュール冒頭コメント
@@ -363,6 +363,6 @@ mod tests {
     #[test]
     fn metal_memory_and_pooled_metal_memory_implement_memory_stats() {
         assert_memory_stats::<MetalMemory>();
-        assert_memory_stats::<tensor_core::pool::PooledMemory<MetalMemory>>();
+        assert_memory_stats::<fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>>();
     }
 }

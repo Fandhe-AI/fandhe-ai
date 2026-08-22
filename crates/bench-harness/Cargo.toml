@@ -42,13 +42,13 @@ serde_json.workspace = true
 # 循環を作らない。Cargo が許容する「dev-dependency はパッケージ自身への逆依存を許す」
 # 一般則の一種）。ユーザー承認不要（外部依存の新規追加ではない。workspace member 間の
 # path 依存であり、これまでの dev-dependency 循環の先例と同様の内部整理）。
-tensor-core = { path = "../tensor-core" }
+fandhe-ai-tensor-core = { path = "../tensor-core" }
 # 最適化済み自作カーネル（BLIS 型 GEMM・rayon 並列。`CpuBackendOps::gemm`）を
 # probe バイナリの CPU 経路（`startup_probe.rs::run_cpu`）の計測対象として使う。
-backend-cpu = { path = "../backend-cpu" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }
 # probe バイナリの CUDA 経路（`startup_probe.rs::run_cuda`）が
 # `CudaBackendOps::gemm`／`CudaDevice::{is_available,new}` を使うために必要。
-backend-cuda = { path = "../backend-cuda" }
+fandhe-ai-backend-cuda = { path = "../backend-cuda" }
 
 # Metal コマンドバッファの完了待ち（sync.rs・TASK-8.1b）、および probe バイナリの
 # Metal 経路（`startup_probe.rs::run_metal`。`MetalBackendOps::gemm`／`MetalContext::new`）
@@ -57,7 +57,7 @@ backend-cuda = { path = "../backend-cuda" }
 objc2.workspace = true
 objc2-foundation.workspace = true
 objc2-metal.workspace = true
-backend-metal = { path = "../backend-metal" }
+fandhe-ai-backend-metal = { path = "../backend-metal" }
 
 # criterion は dev-dependencies 限定（deps-policy.md）。5 回計測の中央値を採用する
 # ベンチ規約（.claude/rules/coding-rust.md）の実行基盤として使用する。

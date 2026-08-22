@@ -112,7 +112,7 @@ pub enum GemmError {
     /// 一致しない。`gemm_blis::gemm_blis_bias_act_parallel` の公開入口で
     /// カーネル本体アクセス前に検証する（REQ-8・OWASP A03）。
     BiasLenMismatch { expected: usize, actual: usize },
-    /// `tensor_core::Activation` の未知 variant（`#[non_exhaustive]`）を
+    /// `fandhe_ai_tensor_core::Activation` の未知 variant（`#[non_exhaustive]`）を
     /// `gemm_blis::gemm_blis_bias_act_parallel` の epilogue が受け取った。
     /// 本クレートは `tensor-core` と同一ワークスペースで管理されるため
     /// 通常到達しないが、`Activation` へ variant が追加され本クレート側の

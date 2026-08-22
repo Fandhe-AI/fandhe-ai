@@ -10,7 +10,7 @@
 //! 省略時は全軸 1）。境界のクランプは NumPy 拡張スライス互換の規則に従う:
 //! `step > 0` は `[0, dim]`・`step < 0` は `[-1, dim-1]` へクランプする。
 
-use tensor_core::{Element, Tensor};
+use fandhe_ai_tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;

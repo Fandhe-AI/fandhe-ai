@@ -141,7 +141,7 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
         let rel = diff / scale;
 
         // 合格条件（REQ-2）を肯定形で先に判定し、その否定を fail とする
-        // （`autodiff::poc_v2_2_parity::composite_close` と同方針）。
+        // （`fandhe_ai_autodiff::poc_v2_2_parity::composite_close` と同方針）。
         // NaN vs 有限値・Inf vs 有限値等で `rel`/`diff` が NaN になる場合、
         // `<` 比較は IEEE 754 上つねに false になるため合格条件が成立せず
         // fail 側に倒れる。旧実装（`rel >= tol && diff >= tol` を fail と

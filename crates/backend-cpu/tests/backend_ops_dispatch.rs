@@ -1,9 +1,9 @@
 //! TASK-1.9c（#46）の受け入れ条件「同一コードで 3 バックエンド（CPU／
 //! CUDA／Metal）のカーネルが呼び分けられる」を直接検証する統合テスト。
 //!
-//! `backend_cpu::CpuBackendOps`・`backend_cuda::CudaBackendOps`・
-//! （macOS のみ）`backend_metal::MetalBackendOps` を `Vec<&dyn BackendOps>`
-//! へ束ね、`tensor_core::ops_for` が単一の trait オブジェクト経由で
+//! `fandhe_ai_backend_cpu::CpuBackendOps`・`fandhe_ai_backend_cuda::CudaBackendOps`・
+//! （macOS のみ）`fandhe_ai_backend_metal::MetalBackendOps` を `Vec<&dyn BackendOps>`
+//! へ束ね、`fandhe_ai_tensor_core::ops_for` が単一の trait オブジェクト経由で
 //! `Device` ごとに正しい実装へディスパッチできることを、同一の呼び出し
 //! コード（[`run_gemm_through_dispatch`]）で検証する。
 //!
@@ -20,13 +20,13 @@
 //!   `backend-metal/tests/backend_ops_real_device.rs`（実機 `#[ignore]`）で
 //!   引き継いだ（本テストは受け入れ条件検証に必要な最小限に留める）。
 
-use backend_cpu::CpuBackendOps;
-use backend_cuda::CudaBackendOps;
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, Tensor, ops_for};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cuda::CudaBackendOps;
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{BackendOps, Tensor, ops_for};
 
 #[cfg(target_os = "macos")]
-use backend_metal::MetalBackendOps;
+use fandhe_ai_backend_metal::MetalBackendOps;
 
 /// 「単一の計算記述から各バックエンドのカーネルへディスパッチする」受け
 /// 入れ条件そのものを表す関数。呼び出し元は `Device` を変えるだけで CPU

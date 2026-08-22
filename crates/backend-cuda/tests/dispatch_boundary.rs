@@ -1,4 +1,4 @@
-//! CUDA GEMM 経路選択（`tensor_core::dispatch::select_gemm_kernel`）の
+//! CUDA GEMM 経路選択（`fandhe_ai_tensor_core::dispatch::select_gemm_kernel`）の
 //! 境界形状 実測再検証（TASK-11.2c・#69）。
 //!
 //! ## 位置づけ
@@ -60,12 +60,12 @@
 //! 緩和せず後続レビューへ引き渡す。`.claude/rules/coding-rust.md`）。
 //!
 //! ```sh
-//! cargo test -p backend-cuda -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{BenchReport, Measurement, MeasurementConfig};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
 use half::f16;
 
 /// 小形状（`min(M,N,K)` 下限なし検証用。128/256/384/512。「小形状でも

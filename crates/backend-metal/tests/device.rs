@@ -5,8 +5,8 @@
 
 #![cfg(target_os = "macos")]
 
-use backend_metal::MetalDeviceProvider;
-use tensor_core::device::DeviceProvider;
+use fandhe_ai_backend_metal::MetalDeviceProvider;
+use fandhe_ai_tensor_core::device::DeviceProvider;
 
 #[test]
 fn backend_name_is_metal() {
@@ -35,7 +35,7 @@ fn enumerate_never_panics() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn select_metal_device_on_real_hardware() {
-    use tensor_core::device::Device;
+    use fandhe_ai_tensor_core::device::Device;
 
     let provider = MetalDeviceProvider::new();
 

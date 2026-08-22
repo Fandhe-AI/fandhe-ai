@@ -13,7 +13,7 @@
 //! 既存の不変更新パターン（`tests/nn_train_convergence.rs`）にそのまま
 //! 差し込める。
 
-use tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::dense_vec;

@@ -2,7 +2,7 @@
 //! 回帰テスト（TASK-11.1d・#63）。
 //!
 //! `tests/gemm_wmma_tf32.rs`（#62）と同じ方針で、判定式・閾値は
-//! `backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
+//! `fandhe_ai_backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
 //! 絶対誤差 1e-5 未満」の唯一の実体）に一本化し、ここでローカル複製しない
 //! （`.claude/rules/coding-rust.md`）。
 //!
@@ -29,7 +29,7 @@
 //! `wmma_tf32_routed_path_matches_reference_across_shapes`／
 //! `wmma_tf32_routed_path_k4096_stress` が担う）、opt カーネル**単独**の
 //! 形状網羅・回帰検出はこのファイルでは保証できないため
-//! `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+//! `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
 //! `wmma_tf32_opt_kernel_k4096_stress`・
 //! `wmma_tf32_opt_kernel_parity_does_not_regress`（いずれも `src/gemm.rs`。
 //! private field 経由で 3 段選択を経由せず opt カーネルを強制実行する）へ
@@ -39,25 +39,27 @@
 //! （環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載環境では早期
 //! return で green）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装と `run_wmma_tf32`
 /// （3 段選択で実機が実際に選んだ経路——staged・opt・basic のいずれか）の
-/// 出力を [`backend_cpu::assert_parity`] で照合する。
+/// 出力を [`fandhe_ai_backend_cpu::assert_parity`] で照合する。
 fn assert_wmma_tf32_opt_parity(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n: u32, k: u32) {
     let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
     let a = rng.fill_vec((m as usize) * (k as usize));
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm
         .run_wmma_tf32(&a, &b, m, n, k)
         .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner");
 
-    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。
@@ -110,7 +112,7 @@ fn wmma_tf32_opt_parity_smoke_env_adaptive() {
 /// 4 の倍数（cp.async 整列条件を満たす）であるため実機では staged 経路を
 /// 通ることを踏まえると誤解を招く名称だった（「opt を検査している」という
 /// 誤った期待を持たせる）。opt カーネル**単独**の形状網羅は
-/// `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`
+/// `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`
 /// （`src/gemm.rs`）へ移設済み（本ファイル冒頭のモジュールコメント参照）。
 /// 本テストは「実効経路の parity」を検査する別軸の検査として維持する。
 #[test]

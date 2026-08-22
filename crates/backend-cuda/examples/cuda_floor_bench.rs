@@ -37,7 +37,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example cuda_floor_bench --release
+//! cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release
 //! ```
 //!
 //! CUDA 非搭載・NVRTC 非搭載・cc 非対応環境では、各経路の初期化失敗を
@@ -127,10 +127,12 @@
 //! 未実施のまま計測経路の追加（実機到達時に即実行できる状態）のみを
 //! 本 PR に含める（`docs/perf/cuda-gemm-mma-tf32-ab.md` 参照）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaMmaTf32Gemm, CudaWmmaGemm};
 use bench_harness::floor_lower_bound;
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::{
+    CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaMmaTf32Gemm, CudaWmmaGemm,
+};
 use half::f16;
 
 /// 決定的シード（`gemm_mma_bench.rs`・PoC-v2-3 と同一値。過去実測・他

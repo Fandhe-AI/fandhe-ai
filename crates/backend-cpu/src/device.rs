@@ -6,7 +6,7 @@
 //! （`tensor-core::device`）の非エラー経路を確認する基準点になる
 //! （`.claude/rules/coding-rust.md` の「CPU 参照実装」方針と同種の位置付け）。
 
-use tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
+use fandhe_ai_tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
 
 /// CPU バックエンドの `DeviceProvider` 実装。デバイスは常に `Device::Cpu`
 /// 1 件のみで、`compute_units` は論理コア数

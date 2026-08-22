@@ -1,21 +1,21 @@
 //! TASK-1.9a（#44）の受け入れ条件「3 バックエンド（CPU／CUDA／Metal）が
 //! 同一 trait でデバイス列挙・選択できる」を直接検証する統合テスト。
 //!
-//! `backend-cpu::CpuDeviceProvider`・`backend_cuda::CudaDeviceProvider`・
-//! （macOS のみ）`backend_metal::MetalDeviceProvider` を
-//! `Vec<Box<dyn DeviceProvider>>` へ格納し、`tensor_core::device` の
+//! `backend-cpu::CpuDeviceProvider`・`fandhe_ai_backend_cuda::CudaDeviceProvider`・
+//! （macOS のみ）`fandhe_ai_backend_metal::MetalDeviceProvider` を
+//! `Vec<Box<dyn DeviceProvider>>` へ格納し、`fandhe_ai_tensor_core::device` の
 //! `enumerate_all`／`select_from` が単一の trait オブジェクト経由で
 //! 3 バックエンドすべてを横断できることを確認する。3 バックエンド網羅の
 //! 本格的な統合テスト（実カーネル呼び出しを含む）は TASK-1.9d（#47）が
 //! `backend_ops_integration.rs`（同ディレクトリ）以下で担い、本テストは
 //! デバイス抽象層の受け入れ条件（列挙・選択）に限定する。
 
-use backend_cpu::CpuDeviceProvider;
-use backend_cuda::CudaDeviceProvider;
-use tensor_core::device::{Device, DeviceProvider, enumerate_all, select_from};
+use fandhe_ai_backend_cpu::CpuDeviceProvider;
+use fandhe_ai_backend_cuda::CudaDeviceProvider;
+use fandhe_ai_tensor_core::device::{Device, DeviceProvider, enumerate_all, select_from};
 
 #[cfg(target_os = "macos")]
-use backend_metal::MetalDeviceProvider;
+use fandhe_ai_backend_metal::MetalDeviceProvider;
 
 /// CPU・CUDA・（macOS のみ）Metal の provider を `Box<dyn DeviceProvider>`
 /// として束ねる。CUDA ドライバ・Metal デバイスが実行環境に無くても

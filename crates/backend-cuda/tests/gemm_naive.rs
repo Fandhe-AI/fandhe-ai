@@ -5,10 +5,10 @@
 //! 複合判定）は `tests/cpu_cuda_parity.rs`（TASK-2.2b・#54）へ移管した。**
 //! 旧実装はローカル複製の判定式（`rel >= TOL && diff >= TOL` という否定形）
 //! を使っており、NaN/Inf 混入時に誤って合格判定してしまう盲点を持って
-//! いたため、`backend_cpu::assert_parity`（TASK-2.2a・#53）への一本化と
+//! いたため、`fandhe_ai_backend_cpu::assert_parity`（TASK-2.2a・#53）への一本化と
 //! 合わせて移管した（詳細は `cpu_cuda_parity.rs` 冒頭コメント参照）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// `CudaGemm::new` は CUDA 非搭載環境で panic せず型付きエラーを返す
 /// （`CudaDevice::new` が既に満たしている契約を `CudaGemm::new` 経路でも
@@ -58,7 +58,7 @@ mod validate_gemm_dims_tests {
     // 経由で同じ検証が実際に GPU 起動より先に効くこと自体は、実機必須の
     // `#[ignore]` テスト（本ファイル末尾
     // `run_naive_f32_rejects_length_mismatch_before_launch`）で確認する。
-    use backend_cuda::CudaError;
+    use fandhe_ai_backend_cuda::CudaError;
     use std::error::Error;
 
     #[test]

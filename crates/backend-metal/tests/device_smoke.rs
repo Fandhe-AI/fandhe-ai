@@ -7,7 +7,7 @@
 //! 実行するには macOS 実機で以下を叩く:
 //!
 //! ```sh
-//! cargo test -p backend-metal -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture
 //! ```
 //!
 //! 実行手順・テスト一覧の正本は `docs/backend-metal-real-device-testing.md`
@@ -15,7 +15,7 @@
 
 #![cfg(target_os = "macos")]
 
-use backend_metal::{MetalBuffer, MetalContext, MetalError};
+use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalError};
 
 /// デバイス初期化 → キュー生成 → バッファ確保 → データ書き込み → readback が一致することを
 /// 確認する（受け入れ条件「macOS でデバイス初期化・バッファ確保が動作する」の直接検証）。

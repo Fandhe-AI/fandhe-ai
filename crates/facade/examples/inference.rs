@@ -3,10 +3,10 @@
 //! サイト原稿（`site/examples/inference.md`）に転記するコード例の一次
 //! ソース（`getting_started.rs`〈#874〉と同じ理由で二重実装を避ける。
 //! `.claude/rules/code-comment-style.md`）。本 example の実行成功
-//! （`cargo run -p facade --example inference`）が原稿の受け入れ条件
+//! （`cargo run -p fandhe-ai --example inference`）が原稿の受け入れ条件
 //! （コード例がコンパイル・動作確認済みであること）を担保する。
 //!
-//! - **経路 1（`Sequential::predict`）**: 内部で [`facade::tape`]
+//! - **経路 1（`Sequential::predict`）**: 内部で [`fandhe_ai::tape`]
 //!   （composition root。既定 CPU・`CpuBackendOps`・融合有効）を構築し
 //!   forward するだけの 1 ステップ呼び出し（最も簡単な推論入口）。
 //! - **経路 2（外部 `Tape` + `Sequential::forward` + `Var::to_tensor`）**:
@@ -15,7 +15,7 @@
 //!   ドキュメンテーションコメント（`crates/facade/src/compat/
 //!   sequential.rs`）参照。
 
-use facade::compat::{Sequential, array};
+use fandhe_ai::compat::{Sequential, array};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Sequential::new()
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("predict() output[0, 0] = {predicted_00}");
 
     // 経路 2: 外部 Tape + forward + to_tensor。
-    let tape = facade::tape();
+    let tape = fandhe_ai::tape();
     let input_var = tape.var(&input);
     let output_var = model.forward(&tape, &input_var)?;
     let output = output_var.to_tensor();

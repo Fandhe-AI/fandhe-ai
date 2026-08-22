@@ -144,7 +144,7 @@ impl MetalBuffer {
 
     /// バッファの内容を全要素 0 で上書きする。
     ///
-    /// `tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・
+    /// `fandhe_ai_tensor_core::pool::PooledMemory<MetalMemory>`（TASK-#201・
     /// REQ-14 14-3）がプールから再利用したバッファへ、`alloc_zeroed` の
     /// 「全要素 0」契約を再適用するために呼ぶ（`memory.rs::PoolZeroFill`
     /// 実装から呼ばれる想定。Metal 実機検証は #175 完了後）。

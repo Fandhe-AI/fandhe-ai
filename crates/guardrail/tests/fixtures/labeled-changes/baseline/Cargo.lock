@@ -39,56 +39,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "autodiff"
-version = "0.3.0"
-dependencies = [
- "tensor-core",
-]
-
-[[package]]
-name = "backend-cpu"
-version = "0.3.0"
-dependencies = [
- "half",
- "rayon",
- "tensor-core",
-]
-
-[[package]]
-name = "backend-cuda"
-version = "0.3.0"
-dependencies = [
- "cudarc",
- "half",
- "tensor-core",
-]
-
-[[package]]
-name = "backend-metal"
-version = "0.3.0"
-dependencies = [
- "half",
- "objc2",
- "objc2-foundation",
- "objc2-metal",
- "tensor-core",
-]
-
-[[package]]
 name = "bench-harness"
 version = "0.3.0"
 dependencies = [
- "backend-cpu",
- "backend-cuda",
- "backend-metal",
  "cudarc",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-backend-cuda",
+ "fandhe-ai-backend-metal",
+ "fandhe-ai-tensor-core",
  "half",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
  "serde",
  "serde_json",
- "tensor-core",
 ]
 
 [[package]]
@@ -279,6 +243,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
+name = "fandhe-ai-autodiff"
+version = "0.3.0"
+dependencies = [
+ "fandhe-ai-tensor-core",
+]
+
+[[package]]
+name = "fandhe-ai-backend-cpu"
+version = "0.3.0"
+dependencies = [
+ "fandhe-ai-tensor-core",
+ "half",
+ "rayon",
+]
+
+[[package]]
+name = "fandhe-ai-backend-cuda"
+version = "0.3.0"
+dependencies = [
+ "cudarc",
+ "fandhe-ai-tensor-core",
+ "half",
+]
+
+[[package]]
+name = "fandhe-ai-backend-metal"
+version = "0.3.0"
+dependencies = [
+ "fandhe-ai-tensor-core",
+ "half",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+]
+
+[[package]]
+name = "fandhe-ai-tensor-core"
+version = "0.3.0"
+dependencies = [
+ "half",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -324,11 +331,11 @@ dependencies = [
 name = "guardrail_labeled_changes_baseline"
 version = "0.1.0"
 dependencies = [
- "autodiff",
- "backend-cpu",
  "bench-harness",
  "criterion",
- "tensor-core",
+ "fandhe-ai-autodiff",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-tensor-core",
 ]
 
 [[package]]
@@ -729,13 +736,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tensor-core"
-version = "0.3.0"
-dependencies = [
- "half",
 ]
 
 [[package]]

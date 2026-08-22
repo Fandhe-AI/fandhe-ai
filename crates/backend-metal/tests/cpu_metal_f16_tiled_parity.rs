@@ -2,7 +2,7 @@
 //! `gemm_simdgroup_tiled_f16`（イシュー #796）。
 //!
 //! `tests/cpu_metal_f16_parity.rs`（非タイル `gemm_simdgroup_f16`）と同じ
-//! 判定基盤（`backend_cpu::assert_parity`。REQ-2 統一複合判定「相対誤差
+//! 判定基盤（`fandhe_ai_backend_cpu::assert_parity`。REQ-2 統一複合判定「相対誤差
 //! 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体）・同じ 3 段階の参照値
 //! 構築方法（f16 入力を f32 化 → `matmul_reference_fma` → f16 丸め →
 //! f32 化して比較。同ファイル冒頭コメント参照）を使う。本ファイルが追加で
@@ -33,17 +33,17 @@
 //!
 //! `cpu_metal_f16_parity.rs` と同じく `#![cfg(target_os = "macos")]` で
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する。全ケース
-//! `#[ignore]` とし、`cargo test -p backend-metal --release -- --ignored
+//! `#[ignore]` とし、`cargo test -p fandhe-ai-backend-metal --release -- --ignored
 //! --nocapture` で実行する（実装計画 §6.2）。実機アクセス不可時の扱いは
 //! 実装計画 §6.3（テスト実装・クロスビルド確認済みの状態で実機実測を
 //! 後続へ引き継ぐ）を参照。
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::assert_parity;
-use backend_metal::tile::TileConfig;
-use backend_metal::{MetalContext, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_metal::tile::TileConfig;
+use fandhe_ai_backend_metal::{MetalContext, MetalGemm};
 use half::f16;
 
 /// 決定的シードで A・B（f16）を生成し、f16→f32→参照 matmul→f16 丸め→f32 の
@@ -69,7 +69,7 @@ fn assert_metal_f16_tiled_parity(
     let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
     let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; m * n];
-    backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
+    fandhe_ai_backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
         .expect("matmul_reference_fma shape validation must pass for well-formed test input");
     let c_ref_rounded: Vec<f32> = c_ref_f32
         .iter()

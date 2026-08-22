@@ -39,8 +39,8 @@
 
 mod common;
 
-use autodiff::Tape;
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_tensor_core::Tensor;
 
 // =====================================================================
 // 決定的 PRNG（`bench-harness::rng::Xorshift64Star` の移植ではなく
@@ -195,7 +195,7 @@ fn relu_f64(a: &[f64]) -> Vec<f64> {
     a.iter().map(|&v| v.max(0.0)).collect()
 }
 
-/// 平均二乗誤差（全要素平均。`autodiff::eval::mse_loss` と同じ定義。
+/// 平均二乗誤差（全要素平均。`fandhe_ai_autodiff::eval::mse_loss` と同じ定義。
 /// `crates/autodiff/src/eval.rs` の `mse_loss` 参照）。
 fn mse_loss_f64(pred: &[f64], target: &[f64]) -> f64 {
     let n = pred.len() as f64;

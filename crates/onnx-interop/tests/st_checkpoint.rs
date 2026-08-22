@@ -1,8 +1,8 @@
 //! 学習途中状態のチェックポイント検証（イシュー #198・親イシュー #196・REQ-7）。
 //!
 //! 親イシュー #196 の受け入れ条件「save→load ラウンドトリップで bit 一致」を
-//! 学習文脈で検証する。`autodiff::nn::Linear`（`Tape` 経由の forward/backward）・
-//! `autodiff::optim::Sgd` を使い、学習途中の重みを `onnx_interop::st_save` で
+//! 学習文脈で検証する。`fandhe_ai_autodiff::nn::Linear`（`Tape` 経由の forward/backward）・
+//! `fandhe_ai_autodiff::optim::Sgd` を使い、学習途中の重みを `onnx_interop::st_save` で
 //! 書き出し・`onnx_interop::st_load` で読み戻す。
 //!
 //! **optimizer 状態はスコープ外**: イシュー #198 本文の明記事項として、
@@ -43,13 +43,13 @@
 
 use std::collections::HashMap;
 
-use autodiff::Tape;
-use autodiff::nn::Linear;
-use autodiff::nn::activation::Relu;
-use autodiff::optim::{Sgd, SgdConfig};
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_autodiff::nn::Linear;
+use fandhe_ai_autodiff::nn::activation::Relu;
+use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::st_load::load_safetensors_f32;
 use onnx_interop::st_save::save_safetensors_f32;
-use tensor_core::Tensor;
 
 use bench_harness::rng::Xorshift64Star;
 
@@ -115,7 +115,7 @@ fn train_steps(
     let mut log = Vec::with_capacity(steps);
 
     for _ in 0..steps {
-        let tape = Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
+        let tape = Tape::new_with_ops(Box::new(fandhe_ai_backend_cpu::CpuBackendOps::new()));
         let x = tape.var(x_data);
         let y = tape.var(y_data);
 

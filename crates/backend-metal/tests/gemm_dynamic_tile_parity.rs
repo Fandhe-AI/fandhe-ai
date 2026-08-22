@@ -11,21 +11,23 @@
 //! macOS 実機で以下を叩く:
 //!
 //! ```sh
-//! cargo test -p backend-metal -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture
 //! ```
 //!
-//! CPU 参照は `backend_cpu::parity::matmul_reference_fma`（FMA 契約の
-//! 唯一の参照点）、判定は `backend_cpu::parity::assert_parity`（REQ-2
+//! CPU 参照は `fandhe_ai_backend_cpu::parity::matmul_reference_fma`（FMA 契約の
+//! 唯一の参照点）、判定は `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2
 //! 統一複合判定の唯一の実体。閾値の独自定義・緩和は禁止。
 //! `.claude/rules/security.md`）を使う。入力生成は
 //! `bench_harness::rng::Xorshift64Star`（決定的シード）。
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_metal::pad::{pad_matrix, pad8};
-use backend_metal::{GemmVariant, MetalBuffer, MetalContext, MetalError, MetalGemm, TileConfig};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_metal::pad::{pad_matrix, pad8};
+use fandhe_ai_backend_metal::{
+    GemmVariant, MetalBuffer, MetalContext, MetalError, MetalGemm, TileConfig,
+};
 
 /// `variant`（[`GemmVariant::SimdgroupTiled`]）・`(seed_a, seed_b, m, n, k)`
 /// の 1 ケースを実行し、CPU 参照実装との複合判定 PASS を確認する。
@@ -325,7 +327,7 @@ fn dispatch_tiled_prepared_matches_dispatch_variant() {
     );
 
     let padded_c = c_buf.read_to_vec();
-    let actual = backend_metal::pad::unpad_matrix(padded_c, m_eff, n_eff, m, n);
+    let actual = fandhe_ai_backend_metal::pad::unpad_matrix(padded_c, m_eff, n_eff, m, n);
 
     assert_parity(
         "metal dispatch_tiled_prepared vs dispatch_variant m=256 n=256 k=256",

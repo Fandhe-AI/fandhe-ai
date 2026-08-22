@@ -8,8 +8,8 @@
 
 mod common;
 
-use autodiff::{AutodiffError, Tape};
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::{AutodiffError, Tape};
+use fandhe_ai_tensor_core::Tensor;
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).unwrap()
@@ -201,13 +201,13 @@ fn broadcast_add_bias_over_matrix() {
 ///    と同じ挙動（forward 演算が記録・実行できる）を持つこと。
 ///
 ///    **TASK-9.4（#411）での位置づけ**: このテストはもともと
-///    `crates/autodiff/tests/compat_sequential.rs`（`autodiff::compat`
+///    `crates/autodiff/tests/compat_sequential.rs`（`fandhe_ai_autodiff::compat`
 ///    経由の統合テスト）にあったが、対象は `compat::Sequential`/
 ///    `compat::array` ではなく `Tape::default()` 単体の挙動であるため、
-///    compat 層が `facade::compat` へ移設された後も本ファイル（`autodiff`
+///    compat 層が `fandhe_ai::compat` へ移設された後も本ファイル（`autodiff`
 ///    の公開 API のみを使う `Tape` 系テスト）に残置する。入力生成は
-///    `compat::array`（移設先: `facade::compat::array`）ではなく
-///    `tensor_core::Tensor::new`（`autodiff` の直接の依存先）を直接使う
+///    `compat::array`（移設先: `fandhe_ai::compat::array`）ではなく
+///    `fandhe_ai_tensor_core::Tensor::new`（`autodiff` の直接の依存先）を直接使う
 ///    よう置き換えた。
 #[test]
 fn tape_default_records_and_evaluates_ops() {
@@ -224,7 +224,7 @@ fn tape_default_records_and_evaluates_ops() {
     assert_eq!(dense_vec(&total.to_tensor()), vec![36.0]);
 }
 
-/// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API のみを
+/// テスト専用の連続化ヘルパー（`fandhe_ai_tensor_core::Tensor` の `pub` API のみを
 /// 使用。`crates/facade/src/compat/array.rs` のテストヘルパーと同型）。
 fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
     t.contiguous()

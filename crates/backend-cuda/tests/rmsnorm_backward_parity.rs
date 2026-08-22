@@ -3,7 +3,7 @@
 //!
 //! `rmsnorm_parity.rs`（順伝播）と同じ構成方針を踏襲する: 環境適応スモーク
 //! （通常 CI）と実機必須の形状網羅（`#[ignore]`）を分離し、判定式・許容
-//! 誤差は再定義せず `backend_cpu::parity` を唯一の参照とする
+//! 誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の参照とする
 //! （`.claude/rules/coding-rust.md`）。
 //!
 //! CPU 参照実装は本ファイル内のテスト専用関数（`f32::mul_add` 使用）で、
@@ -15,11 +15,11 @@
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --release --test rmsnorm_backward_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --release --test rmsnorm_backward_parity -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaError, CudaRmsNorm, RmsNormShape};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaRmsNorm, RmsNormShape};
 
 mod common;
 
@@ -104,7 +104,7 @@ fn assert_rmsnorm_backward_parity(
     let (cpu_dx, cpu_dw) =
         cpu_rmsnorm_backward_reference(&x_data, w_data.as_deref(), &dy_data, eps, rows, hidden);
 
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
             "rmsnorm backward dx cpu-cuda parity rows={rows} hidden={hidden} \
              with_weight={with_weight} eps={eps}"
@@ -115,7 +115,7 @@ fn assert_rmsnorm_backward_parity(
 
     match (gpu_dw, cpu_dw) {
         (Some(gpu_dw), Some(cpu_dw)) => {
-            backend_cpu::parity::assert_parity(
+            fandhe_ai_backend_cpu::parity::assert_parity(
                 &format!(
                     "rmsnorm backward dw cpu-cuda parity rows={rows} hidden={hidden} eps={eps}"
                 ),
@@ -268,7 +268,7 @@ fn assert_rmsnorm_backward_dw_split_parity(
     let (cpu_dx, cpu_dw) =
         cpu_rmsnorm_backward_reference(&x_data, Some(&w_data), &dy_data, eps, rows, hidden);
 
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
             "rmsnorm backward dx cpu-cuda split-K parity rows={rows} hidden={hidden} \
              num_blocks={num_blocks} eps={eps}"
@@ -276,7 +276,7 @@ fn assert_rmsnorm_backward_dw_split_parity(
         &gpu_dx,
         &cpu_dx,
     );
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!(
             "rmsnorm backward dw cpu-cuda split-K parity rows={rows} hidden={hidden} \
              num_blocks={num_blocks} eps={eps}"

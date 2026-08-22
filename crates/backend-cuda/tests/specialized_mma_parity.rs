@@ -22,8 +22,8 @@
 //!    許容誤差を単独で緩和しない」契約に抵触しない）。
 //! 2. **CPU 参照との複合判定**（4096³・(512,64,4096) を除く形状）:
 //!    `cpu_cuda_mma_parity.rs::assert_mma_f16_parity` と同一手順
-//!    （f16→f32→`backend_cpu::matmul_reference_fma`→f16 丸め→f32、
-//!    判定は `backend_cpu::assert_parity` 一本。tolerance 定数は一切
+//!    （f16→f32→`fandhe_ai_backend_cpu::matmul_reference_fma`→f16 丸め→f32、
+//!    判定は `fandhe_ai_backend_cpu::assert_parity` 一本。tolerance 定数は一切
 //!    変更しない）。
 //! 3. **fail-closed 検査**（負系）: `STATIC_MNK` でコンパイルしたカーネル
 //!    を不一致形状で起動すると `CudaError::InvalidKernelConfig` になる
@@ -35,7 +35,7 @@
 //!    C-4）: `SpecializedMmaKernelHandle::compile`（内部で
 //!    `RenderedMmaKernel::compile` を呼ぶ）を同一形状・同一 `CompiledDims`
 //!    で 2 回実行すると、2 回目はプロセス内 LRU をヒットし
-//!    （`backend_cuda::diagnostics::module_cache_hit_count` の増加で観測）、
+//!    （`fandhe_ai_backend_cuda::diagnostics::module_cache_hit_count` の増加で観測）、
 //!    かつキャッシュ経由でロードしたカーネルの実行結果が非キャッシュ時
 //!    （既定カーネル）と bit 一致すること（キャッシュがソース・数値経路
 //!    に影響しないことの回帰）。
@@ -46,12 +46,12 @@
 //! する（`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]`
 //! で分離」）。
 
-use backend_cuda::{
+use fandhe_ai_backend_cuda::{
     CompiledDims, CudaDevice, CudaError, CudaMmaGemm, SpecializedMmaKernelHandle,
     run_specialized_mma_f16,
 };
+use fandhe_ai_tensor_core::dispatch::GemmShape;
 use half::f16;
-use tensor_core::dispatch::GemmShape;
 
 /// 決定的シードで A・B（f16）を生成する（`cpu_cuda_mma_parity.rs` と
 /// 同じ生成方法。呼び出し元が参照値・特化カーネル出力の双方に同一入力
@@ -63,15 +63,15 @@ fn gen_ab(seed: u64, m: u32, n: u32, k: u32) -> (Vec<f16>, Vec<f16>) {
     (a, b)
 }
 
-/// f16→f32→`backend_cpu::matmul_reference_fma`→f16 丸め→f32 で CPU 参照値
+/// f16→f32→`fandhe_ai_backend_cpu::matmul_reference_fma`→f16 丸め→f32 で CPU 参照値
 /// を得る（`cpu_cuda_mma_parity.rs::assert_mma_f16_parity` と同一手順。
-/// FMA 契約は `backend_cpu::matmul_reference_fma`〈`f32::mul_add`〉を
+/// FMA 契約は `fandhe_ai_backend_cpu::matmul_reference_fma`〈`f32::mul_add`〉を
 /// 再利用し複製しない）。
 fn cpu_reference_f32(a: &[f16], b: &[f16], m: u32, n: u32, k: u32) -> Vec<f32> {
     let a_f32: Vec<f32> = a.iter().map(|x| x.to_f32()).collect();
     let b_f32: Vec<f32> = b.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_f32,
         &b_f32,
         &mut c_ref_f32,
@@ -265,7 +265,7 @@ fn specialized_mma_f16_matches_default_and_reference_across_shapes() {
                 let c_ref_rounded = cpu_reference_f32(&a, &b, m, n, k);
                 let c_specialized_f32: Vec<f32> =
                     specialized_c.iter().map(|x| x.to_f32()).collect();
-                backend_cpu::assert_parity(
+                fandhe_ai_backend_cpu::assert_parity(
                     &format!("specialized mma_f16 compiled={compiled:?} shape m={m} n={n} k={k}"),
                     &c_specialized_f32,
                     &c_ref_rounded,
@@ -353,7 +353,7 @@ fn specialized_mma_f16_static_nk_reuses_across_dynamic_m() {
 
         let c_ref_rounded = cpu_reference_f32(&a, &b, m, n, k);
         let c_specialized_f32: Vec<f32> = specialized_c.iter().map(|x| x.to_f32()).collect();
-        backend_cpu::assert_parity(
+        fandhe_ai_backend_cpu::assert_parity(
             &format!("STATIC_NK dynamic M reuse m={m} n={n} k={k}"),
             &c_specialized_f32,
             &c_ref_rounded,
@@ -408,7 +408,7 @@ fn specialized_mma_f16_handles_k_zero_noop_with_misaligned_n() {
 /// ちょうどで NVRTC コンパイルコストを最小化する）に対して
 /// `SpecializedMmaKernelHandle::compile` を 2 回呼び、2 回目は
 /// `crate::module_cache::KernelModuleCache`（プロセス内 LRU）をヒットする
-/// ことを `backend_cuda::diagnostics::module_cache_hit_count` の増加で
+/// ことを `fandhe_ai_backend_cuda::diagnostics::module_cache_hit_count` の増加で
 /// 確認する。
 ///
 /// プロセス内 LRU はプロセスワイドの `static`（`OnceLock`）であり、他の
@@ -426,7 +426,7 @@ fn specialized_mma_kernel_handle_compile_reuses_process_local_module_cache() {
     let _first = SpecializedMmaKernelHandle::compile(&device, shape, CompiledDims::STATIC_NK)
         .expect("1st compile must succeed on ignored test runner");
 
-    let hits_before = backend_cuda::diagnostics::module_cache_hit_count()
+    let hits_before = fandhe_ai_backend_cuda::diagnostics::module_cache_hit_count()
         .expect("module cache must be initialized after at least one compile() call");
 
     // 2 回目: 同一形状・同一 CompiledDims のため、プロセス内 LRU をヒット
@@ -434,7 +434,7 @@ fn specialized_mma_kernel_handle_compile_reuses_process_local_module_cache() {
     let second = SpecializedMmaKernelHandle::compile(&device, shape, CompiledDims::STATIC_NK)
         .expect("2nd compile must succeed on ignored test runner");
 
-    let hits_after = backend_cuda::diagnostics::module_cache_hit_count()
+    let hits_after = fandhe_ai_backend_cuda::diagnostics::module_cache_hit_count()
         .expect("module cache must remain initialized");
 
     assert!(

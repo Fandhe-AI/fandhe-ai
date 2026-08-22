@@ -1,12 +1,12 @@
 //! numpy `np.array` 慣習のテンソル生成入口（TASK-9.2a・#95）。
 //!
 //! **非推奨シム（TASK-9.4・#411）**: 唯一のサポート対象実装は
-//! `facade::compat::array`（`crates/facade/src/compat/array.rs`）。
+//! `fandhe_ai::compat::array`（`crates/facade/src/compat/array.rs`）。
 //! 本ファイルは移設前の実装を移行期間中のソース互換のためだけに残す
 //! （`compat/mod.rs` モジュール doc 参照）。
 //!
 //! `compat::array()` は 1-D/2-D の Rust ネイティブ構造から
-//! `tensor_core::Tensor<f32>` を組み立てるだけの薄いラッパーで、
+//! `fandhe_ai_tensor_core::Tensor<f32>` を組み立てるだけの薄いラッパーで、
 //! 数値計算・shape 検査ロジックは持たない（すべて `Tensor::new` へ
 //! 委譲する。REQ-9）。ネストが不揃い（jagged）な 2-D 入力だけは
 //! `Tensor::new` に到達する前に検出する必要がある（各行を平坦化して
@@ -15,18 +15,18 @@
 //! ため。A03: 外部由来入力を計算前に検証する契約。`.claude/rules/
 //! security.md`）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 
 /// `compat::array()` が受理する入力の変換 trait。numpy `np.array` の
 /// 「ネストしたリスト/配列から shape を推論する」慣習を模す。
 ///
-/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::array::ArrayData` が
+/// **非推奨シム（TASK-9.4・#411）**: `fandhe_ai::compat::array::ArrayData` が
 /// 唯一のサポート対象実装（`compat/mod.rs` モジュール doc 参照）。
 #[deprecated(
     since = "0.0.0",
-    note = "facade::compat::array::ArrayData へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
+    note = "fandhe_ai::compat::array::ArrayData へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
 )]
 pub trait ArrayData {
     /// 行優先で平坦化したデータ列と shape を返す。jagged 入力はここで
@@ -103,14 +103,14 @@ impl<const M: usize, const N: usize> ArrayData for [[f32; N]; M] {
 
 /// numpy `np.array` 慣習のテンソル生成。1-D（`Vec<f32>`/`&[f32]`/
 /// `[f32; N]`）・2-D（`Vec<Vec<f32>>`/`[[f32; N]; M]`）を受理し、
-/// ネストから shape を推論して `tensor_core::Tensor<f32>` を返す
+/// ネストから shape を推論して `fandhe_ai_tensor_core::Tensor<f32>` を返す
 /// （`Tensor::new` への委譲のみ。モジュール doc 参照）。
 ///
-/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::array` へ移行する
+/// **非推奨シム（TASK-9.4・#411）**: `fandhe_ai::compat::array` へ移行する
 /// こと（`compat/mod.rs` モジュール doc 参照）。
 #[deprecated(
     since = "0.0.0",
-    note = "facade::compat::array へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
+    note = "fandhe_ai::compat::array へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
 )]
 #[allow(deprecated)] // ArrayData 境界自体が非推奨のため。
 pub fn array<A: ArrayData>(data: A) -> Result<Tensor<f32>, AutodiffError> {

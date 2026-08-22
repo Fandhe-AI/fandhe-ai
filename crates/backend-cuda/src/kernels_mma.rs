@@ -946,13 +946,13 @@ impl RenderedMmaKernel {
         let (k, is_k_compiled) = split(self.cfg.dim_k);
         crate::nvrtc::CudaKernelDescriptor::new_with_compiled_dims(
             "mma_f16",
-            tensor_core::dispatch::GemmShape::new(m, n, k),
+            fandhe_ai_tensor_core::dispatch::GemmShape::new(m, n, k),
             self.cfg.bm,
             self.cfg.bn,
             self.cfg.bk,
             self.cfg.stages,
             match self.cfg.dtype {
-                MmaDtype::F16 => tensor_core::dispatch::DType::F16,
+                MmaDtype::F16 => fandhe_ai_tensor_core::dispatch::DType::F16,
             },
             crate::nvrtc::CompiledDims::new(is_m_compiled, is_n_compiled, is_k_compiled),
         )

@@ -206,8 +206,10 @@ fn softmax_row_neon(row: &[f32], out_row: &mut [f32]) {
 /// `backend-cuda::softmax::match_softmax_plan` と同一の 8 op 列・leaf 1
 /// 個・軸は最終次元または `None` のみ受理する契約を持つ（重複実装では
 /// なく同一契約の CPU 側ミラー。モジュール冒頭コメント参照）。
-pub(crate) fn match_softmax_plan(plan: &tensor_core::FusionPlan) -> Option<(usize, usize)> {
-    use tensor_core::{FusedOpKind, RowFusionMeta};
+pub(crate) fn match_softmax_plan(
+    plan: &fandhe_ai_tensor_core::FusionPlan,
+) -> Option<(usize, usize)> {
+    use fandhe_ai_tensor_core::{FusedOpKind, RowFusionMeta};
 
     if plan.leaf_count() != 1 {
         return None;
@@ -304,7 +306,7 @@ mod tests {
 
     #[test]
     fn match_softmax_plan_accepts_canonical_plan_rank1() {
-        use tensor_core::{DType, FusedOpKind, FusionPlan};
+        use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan};
         let ops = vec![
             FusedOpKind::Input { leaf_index: 0 },
             FusedOpKind::Max {
@@ -333,7 +335,7 @@ mod tests {
 
     #[test]
     fn match_softmax_plan_accepts_last_axis_2d() {
-        use tensor_core::{DType, FusedOpKind, FusionPlan};
+        use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan};
         let ops = vec![
             FusedOpKind::Input { leaf_index: 0 },
             FusedOpKind::Max {
@@ -362,7 +364,7 @@ mod tests {
 
     #[test]
     fn match_softmax_plan_rejects_rmsnorm_shaped_plan() {
-        use tensor_core::{DType, FusedOpKind, FusionPlan};
+        use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan};
         let ops = vec![
             FusedOpKind::Input { leaf_index: 0 },
             FusedOpKind::Mul { lhs: 0, rhs: 0 },

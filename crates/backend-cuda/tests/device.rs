@@ -6,8 +6,8 @@
 //! GB10）前提の検証（device 0 選択・デバイス名非空）は `#[ignore]` で
 //! 分離する（`.claude/rules/coding-rust.md`）。
 
-use backend_cuda::CudaDeviceProvider;
-use tensor_core::device::{BackendError, Device, DeviceProvider};
+use fandhe_ai_backend_cuda::CudaDeviceProvider;
+use fandhe_ai_tensor_core::device::{BackendError, Device, DeviceProvider};
 
 #[test]
 fn enumerate_never_panics_regardless_of_driver_presence() {

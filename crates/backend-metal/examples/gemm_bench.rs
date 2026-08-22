@@ -20,7 +20,7 @@
 //! ## 実機実行手順（macOS・Apple Silicon）
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
 //! ```
 //!
 //! size=256/512/1024/2048/4096（正方）で naive/tiled/simdgroup/
@@ -35,9 +35,11 @@
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::{GemmVariant, MetalBuffer, MetalContext, MetalGemm, TileConfig, tile};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
+    use fandhe_ai_backend_metal::{
+        GemmVariant, MetalBuffer, MetalContext, MetalGemm, TileConfig, tile,
+    };
 
     /// 決定的シード（`crates/backend-cpu/examples/gemm_bench.rs` と同一値。
     /// 過去 PoC・CPU 実装ベンチと同じ入力分布に揃える）。
@@ -460,6 +462,6 @@ fn main() {
 fn main() {
     println!(
         "backend-metal gemm_bench example requires macOS (Apple Silicon). \
-         run it on macOS hardware: cargo run -p backend-metal --example gemm_bench --release"
+         run it on macOS hardware: cargo run -p fandhe-ai-backend-metal --example gemm_bench --release"
     );
 }

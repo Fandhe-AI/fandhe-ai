@@ -20,7 +20,7 @@
 //!    （`--nocapture` 実行で `docs/perf/cuda-tensor-core-measurement.md` の
 //!    記録テンプレートへ転記できる形式）。
 //! 2. [`tensor_core_parity_record`]: TF32・f16 経路の複合判定
-//!    （`backend_cpu::assert_parity`。REQ-2 統一複合判定「相対誤差 1e-3
+//!    （`fandhe_ai_backend_cpu::assert_parity`。REQ-2 統一複合判定「相対誤差 1e-3
 //!    未満 または 絶対誤差 1e-5 未満」の唯一の実体）通過を記録用に明示
 //!    出力する。判定式・閾値はここでローカル複製しない
 //!    （`.claude/rules/coding-rust.md`）。
@@ -56,8 +56,8 @@
 //! 転送形状が同一（`a_f32`／`b_f32`／m*n 要素の f32 出力）なので 1 回の
 //! 転送計測を共用する。
 
-use backend_cuda::{CudaDevice, CudaGemm, CudaWmmaGemm};
 use bench_harness::{BenchReport, Measurement, MeasurementConfig};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaWmmaGemm};
 use half::f16;
 
 /// ホスト⇔デバイス転送のみ（`clone_htod`（a・b）／`alloc_zeros`（出力）／
@@ -288,7 +288,7 @@ fn tensor_core_tflops_record() {
 
 /// 複合判定通過の記録（#64 受け入れ条件の数値一致検証分）。
 ///
-/// TF32 経路は `CudaGemm::run_wmma_tf32` と `backend_cpu::matmul_reference_fma`
+/// TF32 経路は `CudaGemm::run_wmma_tf32` と `fandhe_ai_backend_cpu::matmul_reference_fma`
 /// を、f16 経路は `tests/cpu_cuda_wmma_parity.rs` の確立済み手順
 /// （f16→f32 参照計算→f16 丸め→f32 化→`assert_parity`）を踏襲して比較する。
 /// 形状は 512×512×512（CPU 参照計算が実機でも数秒以内に収まる規模。
@@ -312,7 +312,7 @@ fn tensor_core_parity_record() {
     let a_tf32 = rng_tf32.fill_vec((m as usize) * (k as usize));
     let b_tf32 = rng_tf32.fill_vec((k as usize) * (n as usize));
     let mut c_ref_tf32 = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_tf32,
         &b_tf32,
         &mut c_ref_tf32,
@@ -324,10 +324,10 @@ fn tensor_core_parity_record() {
     let c_gpu_tf32 = gemm
         .run_wmma_tf32(&a_tf32, &b_tf32, m, n, k)
         .expect("run_wmma_tf32 must succeed on CUDA-equipped test runner");
-    // 判定式・閾値は `backend_cpu::assert_parity` に一本化する（ローカル
+    // 判定式・閾値は `fandhe_ai_backend_cpu::assert_parity` に一本化する（ローカル
     // 複製しない。`.claude/rules/coding-rust.md`）。実機で外れた場合は
     // 緩和せず #186 へ引き渡す。
-    backend_cpu::assert_parity(
+    fandhe_ai_backend_cpu::assert_parity(
         "tensor_core_parity_record tf32 512x512x512",
         &c_gpu_tf32,
         &c_ref_tf32,
@@ -353,7 +353,7 @@ fn tensor_core_parity_record() {
     let a_f32_from_f16: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
     let b_f32_from_f16: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32_from_f16 = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_f32_from_f16,
         &b_f32_from_f16,
         &mut c_ref_f32_from_f16,
@@ -370,7 +370,7 @@ fn tensor_core_parity_record() {
         .run_f16(&a_f16, &b_f16, m, n, k)
         .expect("run_f16 must succeed on CUDA-equipped test runner");
     let c_gpu_f32_from_f16: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
-    backend_cpu::assert_parity(
+    fandhe_ai_backend_cpu::assert_parity(
         "tensor_core_parity_record f16 512x512x512",
         &c_gpu_f32_from_f16,
         &c_ref_rounded,

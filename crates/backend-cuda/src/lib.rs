@@ -22,7 +22,7 @@
 //! コメント参照）。これにより CUDA 非搭載環境でも panic しない。
 //!
 //! TASK-1.9a（#44）で `device` モジュールに [`device::CudaDeviceProvider`]
-//! （`tensor_core::device::DeviceProvider` の CUDA 実装）を追加した。上記の
+//! （`fandhe_ai_tensor_core::device::DeviceProvider` の CUDA 実装）を追加した。上記の
 //! `CudaDevice` を内部で経由するため panic 回避ゲートは共通で効く。CPU／Metal
 //! 実装（`backend-cpu::CpuDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
 //! と同一 trait で列挙・選択できることを
@@ -40,7 +40,7 @@
 //! 変更でありユーザー承認必須）は #36 のスコープ外として未着手のまま
 //! 残す（`tests/cpu_cuda_parity.rs` 冒頭コメント参照）。
 //! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::CudaMemory`]）を
-//! 追加した。`tensor_core::buffer::MemoryOps` の CUDA 実装であり、
+//! 追加した。`fandhe_ai_tensor_core::buffer::MemoryOps` の CUDA 実装であり、
 //! `CudaDevice` 経由でのみ構築できるため上記の panic 回避ゲートを共有
 //! する。既存の `gemm.rs`（`clone_htod`/`alloc_zeros`/`clone_dtoh`）は
 //! 演算内部にホスト⇔デバイス転送を抱えたままとし、本イシューでは
@@ -91,7 +91,7 @@
 //! 未実装。
 //!
 //! TASK-11.2b（#68）で GEMM 自動経路選択の入口（[`CudaGemmAuto`]）を
-//! 追加した。`tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
+//! 追加した。`fandhe_ai_tensor_core::dispatch::select_gemm_kernel`（#67 が設計した
 //! 決定的規則。`docs/dispatch-rules-design.md`）の結果に従い、naive／
 //! tiled（`CudaGemm`）・WMMA f16（`CudaWmmaGemm`）を呼び分ける。TF32/f32
 //! 経路（`CudaGemm::run_wmma_tf32`・#62）・`mma.sync` 経路（`CudaMmaGemm`・
@@ -102,7 +102,7 @@
 //! （#70）にそのまま温存する（設計文書 §5.4）。
 //!
 //! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::CudaBackendOps`]）を追加した。
-//! `tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
 //! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
 //! tiled 固定とし、`CudaGemmAuto` を介した Tensor Core 経路の自動選択への
 //! 切替は別スコープ）。イシュー #599 で elementwise 5 演算（`add`／`mul`／
@@ -111,7 +111,7 @@
 //! （[`CudaGemm::run_tiled_bias_act_f32`]）で実融合化した（`bias`
 //! ブロードキャスト形状の非厳密一致ケースは非融合合成へフォールバックする。
 //! `ops::gemm_bias_act_route` 参照）。reduction（`sum`／`max`）は GPU
-//! カーネル未実装のまま `tensor_core::device::BackendError::Unsupported`
+//! カーネル未実装のまま `fandhe_ai_tensor_core::device::BackendError::Unsupported`
 //! を返す（out-of-scope-tracking.md 対象）。
 //!
 //! イシュー #499（GEMM 性能改善ツリー #479 の後続）で L2 再利用のための

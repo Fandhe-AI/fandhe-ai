@@ -118,7 +118,7 @@ thread_local! {
     /// 回数（イシュー #599）。
     ///
     /// `ops.rs::CudaBackendOps::gemm_bias_act` の経路選択（融合 vs
-    /// `tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
+    /// `fandhe_ai_tensor_core::backend_ops::BackendOps::gemm_bias_act` デフォルト実装の
     /// 非融合 3 段合成）が実際に融合カーネルへ到達しているかを、実機なしの
     /// 単体テスト（`ops.rs` 内 `#[cfg(test)]`）が検証するための可観測点。
     /// テスト専用の計測であり公開 API の意味論・数値契約には一切影響しない。
@@ -2037,7 +2037,7 @@ mod tests {
                 let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
 
                 let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
-                backend_cpu::matmul_reference_fma(
+                fandhe_ai_backend_cpu::matmul_reference_fma(
                     &a,
                     &b,
                     &mut c_ref,
@@ -2062,7 +2062,7 @@ mod tests {
                          runner",
                     );
 
-                let report = backend_cpu::compare(&c_gpu, &c_ref)
+                let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
                     .expect("shape must match baseline fixture");
 
                 super::parity_baseline_fixture::assert_no_parity_regression(
@@ -2131,7 +2131,7 @@ mod tests {
                 let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
 
                 let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
-                backend_cpu::matmul_reference_fma(
+                fandhe_ai_backend_cpu::matmul_reference_fma(
                     &a,
                     &b,
                     &mut c_ref,
@@ -2156,7 +2156,7 @@ mod tests {
                          runner",
                     );
 
-                let report = backend_cpu::compare(&c_gpu, &c_ref)
+                let report = fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref)
                     .expect("shape must match baseline fixture");
 
                 super::parity_baseline_fixture::assert_no_parity_regression(
@@ -2191,7 +2191,7 @@ mod tests {
     /// （ブロックタイル 64、共有メモリ K タイル 16）を確実に踏む。
     ///
     /// `assert_no_parity_regression`（記録済みベースラインとの比較）ではなく
-    /// [`backend_cpu::assert_parity`]（複合判定そのものでの合否）を使う点が
+    /// [`fandhe_ai_backend_cpu::assert_parity`]（複合判定そのものでの合否）を使う点が
     /// [`wmma_tf32_opt_kernel_parity_does_not_regress`] との違いである:
     /// 本ヘルパーが検査するのは `tests/gemm_wmma_tf32_opt.rs` から移設した
     /// 任意形状の網羅（`docs/perf/cuda-parity-baseline.md` に記録された
@@ -2217,8 +2217,10 @@ mod tests {
         let b = rng.fill_vec((k as usize) * (n as usize));
 
         let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-        backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-            .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+        fandhe_ai_backend_cpu::matmul_reference_fma(
+            &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+        )
+        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
         validate_gemm_dims(a.len(), b.len(), m, n, k)
             .expect("test shape must be a valid GEMM dimension");
@@ -2228,7 +2230,7 @@ mod tests {
             .run_wmma_tf32_opt_kernel(func, &a, &b, m, n, k)
             .expect("opt WMMA(TF32) kernel execution must succeed on this ignored test runner");
 
-        backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+        fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
     }
 
     /// opt カーネル**単独**の形状網羅テスト（PR #678 codex-review P1
@@ -2641,7 +2643,7 @@ mod tests {
     ///
     /// `#[ignore]`: `CudaDevice::new` が CUDA 実機を要求するため
     /// （本ファイル冒頭コメント「検証状態」）。DGX Spark GB10 等の実機で
-    /// `cargo test -p backend-cuda --lib --release -- --ignored --nocapture
+    /// `cargo test -p fandhe-ai-backend-cuda --lib --release -- --ignored --nocapture
     /// wmma_tf32_staged_new_wires_size_conditional_swizzle_into_production_constructor`
     /// から実行する。feature 非依存（`wmma_tf32_staged_swizzle`
     /// フィールド・`CudaGemm::new` はいずれも feature ゲートされていない
@@ -2772,7 +2774,7 @@ mod tests {
     ///   {8,16} 双方で経由させる。
     ///
     /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
-    /// Spark GB10 等の実機で `cargo test -p backend-cuda --lib --release
+    /// Spark GB10 等の実機で `cargo test -p fandhe-ai-backend-cuda --lib --release
     /// --features internal-diagnostics -- --ignored --nocapture
     /// wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output` から
     /// 実行する。`internal-diagnostics` feature（既定 off）でのみコンパイル
@@ -2872,7 +2874,7 @@ mod tests {
     /// 直下コメント参照）。
     ///
     /// `#[ignore]`: 本セッションは NVRTC 非搭載のため実行できない。DGX
-    /// Spark GB10 等の実機で `cargo test -p backend-cuda --lib --release
+    /// Spark GB10 等の実機で `cargo test -p fandhe-ai-backend-cuda --lib --release
     /// --features internal-diagnostics -- --ignored --nocapture
     /// wmma_tf32_staged_pad_variant_matches_base_bit_exact_output` から
     /// 実行する。`internal-diagnostics` feature（既定 off）でのみ

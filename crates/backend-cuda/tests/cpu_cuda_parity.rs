@@ -1,9 +1,9 @@
 //! CPU-CUDA ペアの数値一致回帰テスト（TASK-2.2b・#54）。
 //!
 //! REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」を、
-//! `backend_cpu::parity`（TASK-2.2a・#53）の共通ユーティリティ
-//! （[`backend_cpu::assert_parity`]）を通して naive GEMM（f32）の
-//! CPU 参照実装（[`backend_cpu::matmul_reference_fma`]。FMA 契約の
+//! `fandhe_ai_backend_cpu::parity`（TASK-2.2a・#53）の共通ユーティリティ
+//! （[`fandhe_ai_backend_cpu::assert_parity`]）を通して naive GEMM（f32）の
+//! CPU 参照実装（[`fandhe_ai_backend_cpu::matmul_reference_fma`]。FMA 契約の
 //! 唯一の参照点）と CUDA naive カーネル（[`CudaGemm::run_naive_f32`]）の
 //! 間で検証する。判定式・閾値定数はここで再定義せず `parity.rs` の実体を
 //! 唯一の参照とする（`.claude/rules/coding-rust.md`
@@ -16,7 +16,7 @@
 //! 判定してしまう盲点を持っていた（`parity.rs` の `compare` 関数
 //! ドキュメントコメント参照。Cursor Bugbot 指摘・PR #239 で `parity.rs`
 //! 側は修正済みだが `gemm_naive.rs` 側の複製は未修正のまま残っていた）。
-//! 本ファイルはその複製を廃し `backend_cpu::assert_parity` に一本化する
+//! 本ファイルはその複製を廃し `fandhe_ai_backend_cpu::assert_parity` に一本化する
 //! （受け入れ条件: 判定ロジックの重複実装をしない。`parity.rs` の
 //! ドキュメントコメントに明記された想定）。
 //!
@@ -46,11 +46,11 @@
 //! green になる（`tests/device_init.rs`・`tests/gemm_naive.rs` の
 //! 分岐パターンを踏襲）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装
-/// （[`backend_cpu::matmul_reference_fma`]。FMA 契約の唯一の参照点）と
-/// CUDA naive カーネルの出力を [`backend_cpu::assert_parity`] で照合する。
+/// （[`fandhe_ai_backend_cpu::matmul_reference_fma`]。FMA 契約の唯一の参照点）と
+/// CUDA naive カーネルの出力を [`fandhe_ai_backend_cpu::assert_parity`] で照合する。
 ///
 /// `context` は失敗時の診断メッセージ（`assert_parity` が付与する
 /// 誤差分布統計）の先頭に付く識別子で、呼び出し元の形状ケースを
@@ -61,14 +61,16 @@ fn assert_naive_f32_parity(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n:
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm
         .run_naive_f32(&a, &b, m, n, k)
         .expect("CudaGemm::run_naive_f32 must succeed on CUDA-equipped test runner");
 
-    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。

@@ -4,23 +4,23 @@
 //! イシュー #163 の受け入れ条件は「融合カーネルの数値が非融合実行と
 //! 一致すること」。本ファイルは PoC-9 相当パターン（ew4・fan-out・
 //! fan-in 合流）で、融合カーネル（`run_fused_elementwise`）の結果を
-//! per-op メソッド（`backend_cpu::{add, mul, relu, exp, tanh}`。`elementwise.rs`
+//! per-op メソッド（`fandhe_ai_backend_cpu::{add, mul, relu, exp, tanh}`。`elementwise.rs`
 //! Tensor 入口層）の逐次合成（非融合基準）と突き合わせ、
-//! `backend_cpu::parity::assert_parity`（REQ-2 統一複合判定「相対誤差
+//! `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2 統一複合判定「相対誤差
 //! 1e-3 未満 または 絶対誤差 1e-5 未満」）で判定する。**許容誤差の新設・
 //! 緩和は行わない**（`.claude/rules/coding-rust.md`）。
 //!
-//! `FusionPlan` は `tensor_core::FusionPlan::from_ops`（`autodiff` 専用の
+//! `FusionPlan` は `fandhe_ai_tensor_core::FusionPlan::from_ops`（`autodiff` 専用の
 //! クレート間構築経路。`pub` + `#[doc(hidden)]`）を直接呼んで構築する
 //! （`tensor_core` 内部の `pub(crate)` 型を経由しない。設計書 §3.4）。
 //! `backend-cpu` は融合対象セグメントの検出（`detect_fusion`）を
 //! 行わないため、本ファイルの各テストは検出済みセグメントを模した
 //! `FusedOpKind` 列を直接組み立てる。
 
-use backend_cpu::fused_elementwise::run_fused_elementwise;
-use backend_cpu::parity::assert_parity;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::{DType, FusedOpKind, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_backend_cpu::fused_elementwise::run_fused_elementwise;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan, ShapeError, Tensor};
 
 fn seeded_tensor(seed: u64, shape: &[usize]) -> Tensor<f32> {
     let numel: usize = shape.iter().product();
@@ -58,10 +58,10 @@ fn ew4_plan(shape: Vec<usize>) -> FusionPlan {
 }
 
 fn ew4_sequential(x: &Tensor<f32>, y: &Tensor<f32>) -> Tensor<f32> {
-    let a = backend_cpu::add(x, y).unwrap();
-    let b = backend_cpu::relu(&a).unwrap();
-    let c = backend_cpu::exp(&b).unwrap();
-    backend_cpu::tanh(&c).unwrap()
+    let a = fandhe_ai_backend_cpu::add(x, y).unwrap();
+    let b = fandhe_ai_backend_cpu::relu(&a).unwrap();
+    let c = fandhe_ai_backend_cpu::exp(&b).unwrap();
+    fandhe_ai_backend_cpu::tanh(&c).unwrap()
 }
 
 #[test]
@@ -125,10 +125,10 @@ fn fan_out_matches_sequential() {
 
     let fused = run_fused_elementwise(&plan, &[&x, &y]).unwrap();
 
-    let a = backend_cpu::add(&x, &y).unwrap();
-    let b = backend_cpu::mul(&a, &a).unwrap();
-    let c = backend_cpu::add(&b, &x).unwrap();
-    let expected = backend_cpu::relu(&c).unwrap();
+    let a = fandhe_ai_backend_cpu::add(&x, &y).unwrap();
+    let b = fandhe_ai_backend_cpu::mul(&a, &a).unwrap();
+    let c = fandhe_ai_backend_cpu::add(&b, &x).unwrap();
+    let expected = fandhe_ai_backend_cpu::relu(&c).unwrap();
 
     assert_parity(
         "fan-out",
@@ -167,10 +167,10 @@ fn fan_in_confluence_matches_sequential() {
 
     let fused = run_fused_elementwise(&plan, &[&a, &b, &c, &d]).unwrap();
 
-    let ab = backend_cpu::add(&a, &b).unwrap();
-    let cd = backend_cpu::add(&c, &d).unwrap();
-    let prod = backend_cpu::mul(&ab, &cd).unwrap();
-    let expected = backend_cpu::relu(&prod).unwrap();
+    let ab = fandhe_ai_backend_cpu::add(&a, &b).unwrap();
+    let cd = fandhe_ai_backend_cpu::add(&c, &d).unwrap();
+    let prod = fandhe_ai_backend_cpu::mul(&ab, &cd).unwrap();
+    let expected = fandhe_ai_backend_cpu::relu(&prod).unwrap();
 
     assert_parity(
         "fan-in confluence",
@@ -199,7 +199,7 @@ fn relu_nan_matches_per_op_kernel_behavior() {
     .unwrap();
 
     let fused = run_fused_elementwise(&plan, &[&x]).unwrap();
-    let expected = backend_cpu::relu(&x).unwrap();
+    let expected = fandhe_ai_backend_cpu::relu(&x).unwrap();
 
     let fused_slice = fused.as_slice().unwrap();
     let expected_slice = expected.as_slice().unwrap();
@@ -230,7 +230,7 @@ fn rejects_leaf_count_mismatch() {
     // leaf_count=1 だが 2 個渡す。
     let err = run_fused_elementwise(&plan, &[&x, &x]).unwrap_err();
     match err {
-        tensor_core::BackendError::ShapeMismatch(ShapeError::ElementCountMismatch {
+        fandhe_ai_tensor_core::BackendError::ShapeMismatch(ShapeError::ElementCountMismatch {
             expected,
             actual,
         }) => {
@@ -257,7 +257,10 @@ fn rejects_leaf_shape_mismatch() {
 
     let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
     match err {
-        tensor_core::BackendError::ShapeMismatch(ShapeError::ShapeMismatch { lhs, rhs }) => {
+        fandhe_ai_tensor_core::BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+            lhs,
+            rhs,
+        }) => {
             assert_eq!(lhs, vec![8]);
             assert_eq!(rhs, vec![4]);
         }
@@ -284,12 +287,15 @@ fn rejects_non_contiguous_leaf() {
     .unwrap();
 
     let err = run_fused_elementwise(&plan, &[&transposed]).unwrap_err();
-    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::Unsupported(_)
+    ));
 }
 
 // --- #586: reduction（Sum/Max）・Rsqrt を含む FusionPlan の pre-scan 拒否 ---
 //
-// `tensor_core::fusion` の境界再定義（イシュー #586）により `FusionPlan`
+// `fandhe_ai_tensor_core::fusion` の境界再定義（イシュー #586）により `FusionPlan`
 // は Sum／Max／Rsqrt を含みうるが、対応する CPU カーネル実装は本イシュー
 // のスコープ外（後続 G-3 以降）。`run_fused_elementwise` が pre-scan で
 // fail-closed に拒否し、`eval_one` の到達不能 arm へ落ちて panic したり
@@ -315,7 +321,10 @@ fn rejects_plan_containing_sum() {
     .unwrap();
 
     let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
-    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::Unsupported(_)
+    ));
 }
 
 #[test]
@@ -337,7 +346,10 @@ fn rejects_plan_containing_max() {
     .unwrap();
 
     let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
-    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::Unsupported(_)
+    ));
 }
 
 #[test]
@@ -355,5 +367,8 @@ fn rejects_plan_containing_rsqrt() {
     .unwrap();
 
     let err = run_fused_elementwise(&plan, &[&x]).unwrap_err();
-    assert!(matches!(err, tensor_core::BackendError::Unsupported(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_tensor_core::BackendError::Unsupported(_)
+    ));
 }

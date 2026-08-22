@@ -10,23 +10,23 @@
 //! 以下を叩く:
 //!
 //! ```sh
-//! cargo test -p backend-metal -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture
 //! ```
 //!
 //! 実行手順・テスト一覧の正本は `docs/backend-metal-real-device-testing.md`
 //! （TASK-1.8e・#42）を参照する。
 //!
-//! CPU 参照は `backend_cpu::parity::matmul_reference_fma`（FMA 契約の
-//! 唯一の参照点）、判定は `backend_cpu::parity::assert_parity`（REQ-2
+//! CPU 参照は `fandhe_ai_backend_cpu::parity::matmul_reference_fma`（FMA 契約の
+//! 唯一の参照点）、判定は `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2
 //! 統一複合判定の唯一の実体。閾値の独自定義・緩和は禁止。
 //! `.claude/rules/security.md`）を使う。入力生成は
 //! `bench_harness::rng::Xorshift64Star`（決定的シード）。
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_metal::{MetalContext, MetalError, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_metal::{MetalContext, MetalError, MetalGemm};
 
 /// `(seed_a, seed_b, m, n, k)` の 1 ケースを実行し、CPU 参照実装との
 /// 複合判定 PASS を確認する。
@@ -110,7 +110,15 @@ fn dispatch_and_dispatch_variant_naive_agree() {
         .dispatch(&ctx, &a, &b, m, n, k)
         .expect("dispatch のディスパッチに失敗した");
     let via_variant = gemm
-        .dispatch_variant(&ctx, backend_metal::GemmVariant::Naive, &a, &b, m, n, k)
+        .dispatch_variant(
+            &ctx,
+            fandhe_ai_backend_metal::GemmVariant::Naive,
+            &a,
+            &b,
+            m,
+            n,
+            k,
+        )
         .expect("dispatch_variant(Naive) のディスパッチに失敗した");
 
     assert_eq!(

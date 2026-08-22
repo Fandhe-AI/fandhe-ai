@@ -76,11 +76,11 @@ pub type FusedNodeIndex = usize;
 ///
 /// `tensor-core` は `publish = false`（workspace `Cargo.toml`）かつ
 /// `docs/compat-api-scope.md` §0 が定める**内部クレート**であり、`facade`
-/// のみが「サポートされる公開 API 面」である（`facade::compat` に
+/// のみが「サポートされる公開 API 面」である（`fandhe_ai::compat` に
 /// `FusedOpKind` は再エクスポートされない）。よって本 enum が Rust の
 /// 可視性として `pub`（`backend-cpu`／`autodiff` からのクレート間参照に
 /// 必要なため）であることと、外部利用者向けにサポートされる公開面で
-/// あることは区別する（`docs/compat-api-scope.md` §0 で `autodiff::
+/// あることは区別する（`docs/compat-api-scope.md` §0 で `fandhe_ai_autodiff::
 /// Tape::new_with_ops` 等に対し既に確立済みの区別と同じ整理）。
 /// それでも本 workspace 内の `backend-cpu`／`autodiff` の各クレートは
 /// `FusedOpKind` を跨クレートで exhaustive match するため、`#[non_exhaustive]`
@@ -330,7 +330,7 @@ impl fmt::Display for FusionPlanError {
 impl std::error::Error for FusionPlanError {}
 
 /// [`FusionPlanError`] を [`BackendError`] へ変換する（TASK-12.1d・
-/// #164）。`autodiff::tape::build_lazy_plan`
+/// #164）。`fandhe_ai_autodiff::tape::build_lazy_plan`
 /// （`crates/autodiff/src/tape.rs`）は自身の遅延ノード連鎖から組み立てた
 /// `ops` を [`FusionPlan::from_ops`] へ渡し、戻り値を `Result<_,
 /// BackendError>`（層 1／層 2 の実体化ヘルパーが共通で扱うエラー型。

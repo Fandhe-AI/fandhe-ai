@@ -1,6 +1,6 @@
 //! `CudaMmaTf32Gemm::run_tf32`（イシュー #801。生 `mma.sync`(m16n8k8) 経路）
 //! と `CudaGemm::run_wmma_tf32`（既存 WMMA C++ API staged 経路。イシュー
-//! #500）を、同一入力で `backend_cpu::assert_parity` により相互照合する。
+//! #500）を、同一入力で `fandhe_ai_backend_cpu::assert_parity` により相互照合する。
 //!
 //! 受け入れ条件 3 項（「既存 wmma_tf32 staged と同一入力で数値一致」）の
 //! 本体。staged 側を参照値として扱う（`assert_parity` の `expected` 引数）。
@@ -28,7 +28,7 @@
 //! パターン（環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載・
 //! staged カーネル未対応環境では早期 return で green）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaTf32Gemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaTf32Gemm};
 
 /// 決定的シードで A・B（f32）を生成し、`CudaGemm::run_wmma_tf32`
 /// （staged 経路。整列条件を満たす形状であれば自動選択される）を参照値
@@ -54,7 +54,7 @@ fn assert_mma_tf32_matches_wmma_tf32_staged(
         "CudaMmaTf32Gemm::run_tf32 must succeed on a compute capability >= 8.0 test runner",
     );
 
-    backend_cpu::assert_parity(context, &c_mma, &c_staged);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_mma, &c_staged);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。

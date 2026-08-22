@@ -33,7 +33,7 @@
 //! 二重管理しない）。
 //!
 //! **実行時は必ず外部タイムアウトを付与すること**:
-//! `timeout 120 cargo test -p backend-cuda --release --test
+//! `timeout 120 cargo test -p fandhe-ai-backend-cuda --release --test
 //! setmaxnreg_probe_dec_base_real_device -- --ignored --nocapture`
 //! （`docs/real-hardware-verification-env.md` の手順・
 //! `docs/cuda-tensor-core-design.md` §13.1「実行契約」節）。
@@ -47,7 +47,7 @@
 #[path = "setmaxnreg_common/mod.rs"]
 mod setmaxnreg_common;
 
-use backend_cuda::CudaDevice;
+use fandhe_ai_backend_cuda::CudaDevice;
 use setmaxnreg_common::{
     CONTROL_DEC, PROBE_SETMAXNREG_DEC, WARPGROUP_BLOCK_DIM, report_control_baseline_regs,
     report_environment, try_compile, try_load_and_run,

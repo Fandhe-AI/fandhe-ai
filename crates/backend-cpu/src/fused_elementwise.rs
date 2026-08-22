@@ -1,11 +1,11 @@
 //! CPU 融合カーネル（単一パス実行器。TASK-12.1c・#163）。
 //!
-//! `tensor_core::fusion`（TASK-12.1a〜c・#161〜#163）が検出・生成した
+//! `fandhe_ai_tensor_core::fusion`（TASK-12.1a〜c・#161〜#163）が検出・生成した
 //! elementwise 連鎖を、`elementwise.rs` の per-op カーネル呼び出し
 //! （葉の読み・出力の書きがノード数分発生する）ではなく、**出力要素
 //! ごとに 1 回のレジスタ内評価で完結する単一パス**として実行する
 //! （PoC-9 `ElemwiseFuse` 方式。`docs/fusion-graph-design.md` §2.4）。
-//! `tensor_core::FusionPlan` の公開 DTO アクセサ（`ops`／`output_shape`／
+//! `fandhe_ai_tensor_core::FusionPlan` の公開 DTO アクセサ（`ops`／`output_shape`／
 //! `dtype`／`leaf_count`）のみを読み、`tensor_core` 内部の `pub(crate)`
 //! 融合 IR（`FusionGraph` 等）には一切依存しない（設計書 §3.4
 //! 「privacy 制約」）。
@@ -23,7 +23,7 @@
 //!
 //! # 出力ノードの契約
 //!
-//! `tensor_core::fusion::plan` モジュール冒頭のドキュメンテーション
+//! `fandhe_ai_tensor_core::fusion::plan` モジュール冒頭のドキュメンテーション
 //! コメントが確定する契約（「発生順で最後の `FusedOpKind` エントリが
 //! 出力ノード」）をそのまま前提とする。
 //!
@@ -49,9 +49,9 @@
 //! `FusionPlan` の不変条件であり、本モジュールはそれに加えて安全な
 //! （境界検査付きの）アクセス経路のみを用いることで二重に保護する。
 
+use fandhe_ai_tensor_core::device::BackendError;
+use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan, ShapeError, Tensor};
 use rayon::prelude::*;
-use tensor_core::device::BackendError;
-use tensor_core::{DType, FusedOpKind, FusionPlan, ShapeError, Tensor};
 
 use crate::elementwise::PARALLEL_THRESHOLD;
 
@@ -93,20 +93,20 @@ pub fn run_fused_elementwise(
         )));
     }
 
-    // #586: `tensor_core::fusion` の境界再定義により `FusionPlan` は
+    // #586: `fandhe_ai_tensor_core::fusion` の境界再定義により `FusionPlan` は
     // reduction（`Sum`／`Max`）・`Rsqrt` を含みうるようになったが、対応
     // する CPU カーネル実装は本イシューのスコープ外（後続 G-3 以降）
     // である。ここで pre-scan し fail-closed に拒否することで、
     // `eval_one` の対応する arm（本ファイル下部）へ実際に到達させず、
     // 「静かに誤った 0.0 を返す」経路を作らない（`.claude/rules/
     // coding-rust.md`・`security.md` A04「未実装カーネル経路は
-    // fail-closed」）。`autodiff::tape::build_lazy_plan` は現状 reduction
+    // fail-closed」）。`fandhe_ai_autodiff::tape::build_lazy_plan` は現状 reduction
     // を遅延評価対象にせず `push_eager` で実体化するため
     // （`crates/autodiff/src/tape.rs`）、実運用の `FusedOpKind` 列に
     // これらが混入する経路は存在しない＝本チェックは回帰を起こさない。
     //
     // **denylist ではなく allowlist**（codex-review PR #648 P1 是正・
-    // `tensor_core::FusedOpKind` の `#[non_exhaustive]` 化に伴う変更）:
+    // `fandhe_ai_tensor_core::FusedOpKind` の `#[non_exhaustive]` 化に伴う変更）:
     // `Sum`／`Max`／`Rsqrt` を名指しで拒否する denylist だと、将来
     // `tensor-core` 側で `FusedOpKind` に新 variant が追加された際に
     // この pre-scan をすり抜け、`eval_one` の `_ => 0.0` 分岐へ到達して
@@ -127,7 +127,7 @@ pub fn run_fused_elementwise(
     }) {
         return Err(BackendError::Unsupported(
             "run_fused_elementwise: reduction (Sum/Max), Rsqrt, and any other non-elementwise \
-             fused op are not yet implemented (tensor_core::fusion boundary redefinition #586 \
+             fused op are not yet implemented (fandhe_ai_tensor_core::fusion boundary redefinition #586 \
              extends the IR; the CPU kernel is tracked as a follow-up issue)"
                 .to_string(),
         ));
@@ -154,7 +154,7 @@ pub fn run_fused_elementwise(
     }
 
     let ops: Vec<FusedOpKind> = plan.ops().collect();
-    // `tensor_core::fusion::plan` モジュール冒頭「出力ノードの契約」:
+    // `fandhe_ai_tensor_core::fusion::plan` モジュール冒頭「出力ノードの契約」:
     // 発生順で最後のエントリが出力ノード。`FusionPlan::from_ops`／
     // `from_segment` はいずれも空 `ops`（少なくとも 1 個の elementwise
     // ノードを要求）を拒否済みのため、`ops` は必ず 1 要素以上を持つ
@@ -245,7 +245,7 @@ fn eval_one(
             // （pre-scan の防御を二重化する構成。モジュール冒頭「境界
             // 検査」節と同じ多層防御の考え方）。
             FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } | FusedOpKind::Rsqrt { .. } => 0.0,
-            // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+            // `fandhe_ai_tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
             // PR #648 P1 是正）のため、本クレート（別クレート）からの
             // match は将来の未知 variant に備え `_` 分岐が必須。pre-scan
             // 側の allowlist 反転（本ファイル上部）により、この分岐へ

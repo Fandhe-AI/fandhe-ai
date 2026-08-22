@@ -21,7 +21,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_mma_bench --release
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release
 //! ```
 //!
 //! CUDA 非搭載・NVRTC 非搭載・cc<8.0（mma 経路の下限）環境では、各経路の
@@ -35,9 +35,9 @@
 //! （`kernels_mma.rs` 冒頭コメント「整列制約」）。本ベンチの形状は
 //! すべてこの制約を満たす正方形状のみを使う。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, CudaWmmaGemm};
 use half::f16;
 
 /// 決定的シード（`crates/backend-metal/examples/gemm_bench.rs` と同一値。

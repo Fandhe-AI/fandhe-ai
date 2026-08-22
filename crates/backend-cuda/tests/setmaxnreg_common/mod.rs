@@ -87,8 +87,8 @@
 
 #![allow(dead_code)]
 
-use backend_cuda::{CudaDevice, CudaError, compile_ptx};
 use cudarc::driver::{LaunchConfig, PushKernelArg};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, compile_ptx};
 
 /// warpgroup（4 warp = 128 スレッド）1 個の起動を前提に、`setmaxnreg.dec`
 /// のみを発行してから出力へ書き込むカーネル。
@@ -486,7 +486,7 @@ pub fn try_load_and_run(
     // 演算 1 回のみであり、GPU 側カーネルも同一の演算を 1 回行うだけで
     // 複数命令を組み合わせた累積誤差の余地がないため、期待値との一致は
     // ビット完全一致で判定する（バックエンド間数値一致の複合判定
-    // 「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」〈`backend_cpu::
+    // 「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」〈`fandhe_ai_backend_cpu::
     // assert_parity`〉は GEMM 等の複数命令累積を前提にした閾値であり、
     // ローカルに緩い閾値を複製しない。`.claude/rules/coding-rust.md`）。
     let mismatch = input

@@ -7,7 +7,7 @@
 //! 内部の `#[cfg(test)]`（クレート内部限定の `pub(crate)`/private 定数を
 //! 参照する必要があるため。統合テストからは到達できない）で行う。
 
-use backend_cuda::{CudaDevice, CudaError, CudaWmmaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaWmmaGemm};
 
 /// `CudaWmmaGemm::new` は CUDA 非搭載環境で panic せず型付きエラーを返す。
 /// CUDA 搭載・cc>=7.0 環境では WMMA f16 カーネルのコンパイルが成功する

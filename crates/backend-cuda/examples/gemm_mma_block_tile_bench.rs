@@ -81,7 +81,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_mma_block_tile_bench --release \
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_mma_block_tile_bench --release \
 //!     --features internal-diagnostics
 //! ```
 //!
@@ -105,10 +105,10 @@
 //! 実測値・対現行比・数値一致結果は
 //! `docs/perf/cuda-gemm-mma-block-tile-stages.md` §4 へ記録する。
 
-use backend_cuda::diagnostics::{self, MmaBlockTileLayout};
-use backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::diagnostics::{self, MmaBlockTileLayout};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
 use half::f16;
 
 /// 決定的シード（`gemm_mma_bench.rs`・`gemm_mma_swizzle_bench.rs` と同一値）。
@@ -127,7 +127,7 @@ const CORRECTNESS_N: u32 = 512;
 const CORRECTNESS_K: u32 = 512;
 
 /// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の要素単位
-/// 判定を `backend_cpu::compare`（`RELATIVE_TOLERANCE`/
+/// 判定を `fandhe_ai_backend_cpu::compare`（`RELATIVE_TOLERANCE`/
 /// `ABSOLUTE_RESCUE_THRESHOLD`。`.claude/rules/coding-rust.md`「バックエンド
 /// 構成」）と**同一式**で再現する（`docs/perf/
 /// cuda-gemm-mma-tf32-ab.md`／`parity_baseline.rs` が引用する
@@ -144,8 +144,8 @@ fn is_mismatch(actual: f32, expected: f32) -> bool {
         .max((expected as f64).abs())
         .max(1e-12);
     let rel = diff / scale;
-    let pass =
-        rel < backend_cpu::RELATIVE_TOLERANCE || diff < backend_cpu::ABSOLUTE_RESCUE_THRESHOLD;
+    let pass = rel < fandhe_ai_backend_cpu::RELATIVE_TOLERANCE
+        || diff < fandhe_ai_backend_cpu::ABSOLUTE_RESCUE_THRESHOLD;
     !pass
 }
 
@@ -451,7 +451,7 @@ fn measure_candidate(
 /// 返しており、`bt64x128_s4`／`bt128x128_s3_wt2x4` の FAIL がどの座標・
 /// どの規模の不一致かを追加ログなしには特定できなかった）。
 ///
-/// `mismatch_count`/`max_abs_diff`/`max_rel_err` は [`backend_cpu::
+/// `mismatch_count`/`max_abs_diff`/`max_rel_err` は [`fandhe_ai_backend_cpu::
 /// CompareReport`]（`fail_count`/`max_abs_diff`/`max_rel_err`。全セル
 /// 対象の集計）をそのまま転記する。`docs/perf/cuda-gemm-mma-tf32-ab.md`・
 /// `tests/common/parity_baseline.rs` が引用する同名統計はいずれもこの
@@ -477,11 +477,11 @@ impl ParityDiagnostics {
 
 /// 候補カーネルの数値一致を検査する（計測の前に必ず実施。fail 時は
 /// 当該候補を計測から除外し、残候補の計測は継続する。実装計画「計測
-/// 前へ数値一致検査」節）。CPU 参照実装は `backend_cpu::matmul_reference_
+/// 前へ数値一致検査」節）。CPU 参照実装は `fandhe_ai_backend_cpu::matmul_reference_
 /// fma`（`f32::mul_add` FMA 契約。`tests/cpu_cuda_mma_parity.rs` と同一
 /// 手順: f16→f32→参照 FMA→f16 丸め→f32 の経路で得た参照値と、カーネル
 /// 出力（f16→f32）を統一複合判定で照合する）。判定・集計は
-/// `backend_cpu::compare`（REQ-2 統一複合判定の唯一の正）へ委譲する。
+/// `fandhe_ai_backend_cpu::compare`（REQ-2 統一複合判定の唯一の正）へ委譲する。
 fn candidate_parity_ok(
     compiled: &diagnostics::CompiledMmaF16BlockTileKernel,
     gemm: &CudaMmaGemm,
@@ -504,9 +504,11 @@ fn candidate_parity_ok(
     let actual_f16 = gemm.download_f16(&c_dev)?;
     let actual_f32: Vec<f32> = actual_f16.iter().map(|x| x.to_f32()).collect();
 
-    let report = backend_cpu::compare(&actual_f32, expected_f32).map_err(|e| {
+    let report = fandhe_ai_backend_cpu::compare(&actual_f32, expected_f32).map_err(|e| {
         CudaError::InvalidKernelConfig {
-            detail: format!("candidate_parity_ok: length mismatch in backend_cpu::compare: {e}"),
+            detail: format!(
+                "candidate_parity_ok: length mismatch in fandhe_ai_backend_cpu::compare: {e}"
+            ),
         }
     })?;
     let first_mismatch_index = actual_f32
@@ -608,7 +610,7 @@ fn main() {
     let a_ref_f32: Vec<f32> = a_ref.iter().map(|x| x.to_f32()).collect();
     let b_ref_f32: Vec<f32> = b_ref.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; (CORRECTNESS_M * CORRECTNESS_N) as usize];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_ref_f32,
         &b_ref_f32,
         &mut c_ref_f32,
@@ -669,7 +671,7 @@ fn main() {
             .download_f16(&c_dev)
             .expect("production direct-check download must succeed");
         let actual_f32: Vec<f32> = actual_f16.iter().map(|x| x.to_f32()).collect();
-        let report = backend_cpu::compare(&actual_f32, &expected_f32)
+        let report = fandhe_ai_backend_cpu::compare(&actual_f32, &expected_f32)
             .expect("production direct-check compare shape must match");
         let first_mismatch = actual_f32
             .iter()

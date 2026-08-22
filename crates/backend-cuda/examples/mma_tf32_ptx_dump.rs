@@ -39,7 +39,7 @@
 //! `shared_mem_bytes`）も未実装のままである。
 //!
 //! `internal-diagnostics` feature（既定 off）を要求する。本 example が使う
-//! `backend_cuda::diagnostics::{mma_tf32_source, mma_tf32_source_with_block_tile,
+//! `fandhe_ai_backend_cuda::diagnostics::{mma_tf32_source, mma_tf32_source_with_block_tile,
 //! mma_tf32_block_tile}` は非公開 `mod kernels_mma_tf32` への薄い診断用
 //! ラッパーであり、既定ビルドの公開 API 面（`facade`）には出さない契約
 //! （`mma_ptx_dump.rs` と同じ feature ゲート方針）。`mma_ptx_dump.rs` と
@@ -51,7 +51,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example mma_tf32_ptx_dump --release \
+//! cargo run -p fandhe-ai-backend-cuda --example mma_tf32_ptx_dump --release \
 //!     --features internal-diagnostics -- --out-dir /tmp/mma-tf32-ptx-dump
 //! ```
 //!
@@ -60,7 +60,7 @@
 //! では実行されず、実機セッションでの手動実行が前提）。
 
 #[cfg(feature = "internal-diagnostics")]
-use backend_cuda::{CudaDevice, CudaError, compile_ptx, diagnostics};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, compile_ptx, diagnostics};
 
 #[cfg(feature = "internal-diagnostics")]
 const USAGE: &str = "usage: mma_tf32_ptx_dump [--out-dir PATH]";
@@ -334,12 +334,12 @@ fn main() {
 }
 
 /// `internal-diagnostics` feature 未指定時の no-op（本ファイル冒頭
-/// コメント参照。`cargo build -p backend-cuda --example mma_tf32_ptx_dump`
+/// コメント参照。`cargo build -p fandhe-ai-backend-cuda --example mma_tf32_ptx_dump`
 /// が feature なしでもビルド成立することを保証する）。
 #[cfg(not(feature = "internal-diagnostics"))]
 fn main() {
     println!(
         "mma_tf32_ptx_dump: internal-diagnostics feature not enabled; this diagnostic requires \
-         `cargo run -p backend-cuda --example mma_tf32_ptx_dump --features internal-diagnostics`."
+         `cargo run -p fandhe-ai-backend-cuda --example mma_tf32_ptx_dump --features internal-diagnostics`."
     );
 }

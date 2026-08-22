@@ -22,7 +22,7 @@
 //! （`nn/linear.rs::Linear::from_parameters` 参照）のため、[`Sgd::step`]
 //! も同じ形（更新後の新規 `Tensor<f32>` 列を返す関数型 API）に合わせる。
 
-use tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 

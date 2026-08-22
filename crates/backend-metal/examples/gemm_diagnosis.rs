@@ -19,12 +19,12 @@
 //!
 //! 解析値（threadgroup 数・バリア回数・理論トラフィック・arithmetic
 //! intensity）は macOS 以外でも算出できる（`objc2` 系 FFI に触れない
-//! 純粋関数のため。`cargo run -p backend-metal --example gemm_diagnosis`
+//! 純粋関数のため。`cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis`
 //! で Linux でも実行できる）。壁時計計測・TFLOPS/ロードスループット下限
 //! （`wall_ms` 以降の列）は macOS 実機限定（下記「実測部分の設計」）。
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_diagnosis --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release
 //! ```
 //!
 //! ### GPU デバイスプロファイル（並列度ヒューリスティックのパラメータ）
@@ -40,7 +40,7 @@
 //! 未指定は fail-closed でエラー終了する）:
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_diagnosis --release -- \
+//! cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release -- \
 //!     --gpu-core-count=40 --ideal-groups-multiplier=6
 //! ```
 //!
@@ -60,7 +60,7 @@
 //! 両方 `N` へ引き上げ、区間を意図的に伸ばして使う:
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_diagnosis --release -- \
+//! cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release -- \
 //!     --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200
 //! ```
 //!
@@ -128,7 +128,7 @@
 /// ため `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）でも
 /// コンパイル・実行できる（`crate::tile`・`crate::pad` と同じ設計判断）。
 mod analytics {
-    use backend_metal::TileConfig;
+    use fandhe_ai_backend_metal::TileConfig;
 
     /// GPU デバイスプロファイル（並列度〈concurrency/saturation〉飽和度
     /// ヒューリスティックの算出式 `idealGroups = gpu_core_count *
@@ -168,7 +168,7 @@ mod analytics {
         /// §1）の既定プロファイル。`docs/perf/metal-gemm-dynamic-tile.md:53`
         /// の実測記録（`sysctl -n hw.model` = `Mac16,6`・GPU コア 40）を
         /// 出典とする。`ideal_groups_multiplier` は
-        /// `backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32`
+        /// `fandhe_ai_backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32`
         /// （MFA 経験則の f32 系係数）をそのまま参照し、診断経路と
         /// ライブラリ経路で係数値が食い違わないようにする（単一真実源。
         /// codex-review 指摘・PR #662）。
@@ -181,7 +181,8 @@ mod analytics {
         #[cfg(not(target_os = "macos"))]
         pub const M4_MAX: DeviceProfile = DeviceProfile {
             gpu_core_count: 40,
-            ideal_groups_multiplier: backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32 as u64,
+            ideal_groups_multiplier: fandhe_ai_backend_metal::tile::IDEAL_GROUPS_MULTIPLIER_F32
+                as u64,
         };
     }
 
@@ -233,7 +234,7 @@ mod analytics {
     /// 理論トラフィックを求める（真の occupancy ではない点は
     /// [`DeviceProfile`] のドキュメント参照）。
     pub fn analyze(size: usize, profile: DeviceProfile) -> SizeAnalytics {
-        let tile = backend_metal::tile::select(size, size, size);
+        let tile = fandhe_ai_backend_metal::tile::select(size, size, size);
 
         let groups_m = ceil_div(size, tile.bm);
         let groups_n = ceil_div(size, tile.bn);
@@ -334,9 +335,9 @@ fn parse_device_profile_override() -> Result<Option<analytics::DeviceProfile>, S
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use super::analytics::{self, DeviceProfile, SizeAnalytics};
-    use backend_metal::{MetalContext, MetalGemm};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{Measurement, MeasurementConfig, run as bench_run};
+    use fandhe_ai_backend_metal::{MetalContext, MetalGemm};
 
     /// 決定的シード（`gemm_bench.rs::SEED` と同一値。過去 PoC・既存ベンチと
     /// 同じ入力分布に揃える）。

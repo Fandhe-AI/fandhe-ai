@@ -11,7 +11,7 @@
 //! CI（self-hosted）は `docs/spec`（submodule）を checkout しないため、
 //! 本ファイルは `docs/spec` 配下のいかなるファイルにも依存しない。
 
-use tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 // --- レイアウト: narrow -> transpose -> contiguous の連鎖 ---
 
@@ -160,16 +160,16 @@ fn element_count_overflow_rejected_at_construction() {
 fn ops_shape_matmul_out_shape_matches_tensor_shapes() {
     let lhs = Tensor::<f32>::zeros(&[2, 3]).unwrap();
     let rhs = Tensor::<f32>::zeros(&[3, 4]).unwrap();
-    let out = tensor_core::matmul_out_shape(lhs.shape(), rhs.shape()).unwrap();
+    let out = fandhe_ai_tensor_core::matmul_out_shape(lhs.shape(), rhs.shape()).unwrap();
     assert_eq!(out, vec![2, 4]);
 }
 
 #[test]
 fn ops_shape_reduce_out_shape_matches_tensor_shape() {
     let t = Tensor::<f32>::zeros(&[2, 3, 4]).unwrap();
-    let out = tensor_core::reduce_out_shape(t.shape(), Some(1)).unwrap();
+    let out = fandhe_ai_tensor_core::reduce_out_shape(t.shape(), Some(1)).unwrap();
     assert_eq!(out, vec![2, 4]);
-    let out_full = tensor_core::reduce_out_shape(t.shape(), None).unwrap();
+    let out_full = fandhe_ai_tensor_core::reduce_out_shape(t.shape(), None).unwrap();
     assert!(out_full.is_empty());
 }
 
@@ -177,10 +177,10 @@ fn ops_shape_reduce_out_shape_matches_tensor_shape() {
 fn ops_shape_require_same_shape_matches_tensor_shapes() {
     let a = Tensor::<f32>::zeros(&[2, 3]).unwrap();
     let b = Tensor::<f32>::zeros(&[2, 3]).unwrap();
-    tensor_core::require_same_shape(a.shape(), b.shape()).unwrap();
+    fandhe_ai_tensor_core::require_same_shape(a.shape(), b.shape()).unwrap();
 
     let c = Tensor::<f32>::zeros(&[3, 2]).unwrap();
-    let err = tensor_core::require_same_shape(a.shape(), c.shape()).unwrap_err();
+    let err = fandhe_ai_tensor_core::require_same_shape(a.shape(), c.shape()).unwrap_err();
     assert!(matches!(err, ShapeError::ShapeMismatch { .. }));
 }
 

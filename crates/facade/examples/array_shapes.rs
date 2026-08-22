@@ -4,9 +4,9 @@
 //! （`getting_started.rs` と同じ理由で二重実装を避ける。
 //! `.claude/rules/code-comment-style.md`）。`compat::array` は
 //! numpy `np.array` 慣習でテンソルを組み立てる薄いラッパーで、shape 検査は
-//! `tensor_core::Tensor::new` へ委譲される（REQ-9）。
+//! `fandhe_ai_tensor_core::Tensor::new` へ委譲される（REQ-9）。
 
-use facade::compat::array;
+use fandhe_ai::compat::array;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1-D: `Vec<f32>` → shape [n]

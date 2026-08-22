@@ -10,7 +10,7 @@
 //! `tests/setmaxnreg_common/mod.rs` 冒頭コメント参照。
 //!
 //! **実行時は必ず外部タイムアウトを付与すること**:
-//! `timeout 120 cargo test -p backend-cuda --release --test
+//! `timeout 120 cargo test -p fandhe-ai-backend-cuda --release --test
 //! setmaxnreg_probe_incdec_base_real_device -- --ignored --nocapture`
 //! （`num_regs` を実行ゲートに使わず外部タイムアウトへ委ねる方針の根拠は
 //! `tests/setmaxnreg_common/mod.rs` 冒頭コメント「`num_regs` は診断専用」
@@ -19,7 +19,7 @@
 #[path = "setmaxnreg_common/mod.rs"]
 mod setmaxnreg_common;
 
-use backend_cuda::CudaDevice;
+use fandhe_ai_backend_cuda::CudaDevice;
 use setmaxnreg_common::{
     CONTROL_INCDEC, PROBE_SETMAXNREG_INCDEC, PRODUCER_CONSUMER_BLOCK_DIM,
     report_control_baseline_regs, report_environment, try_compile, try_load_and_run,

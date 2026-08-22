@@ -28,9 +28,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::ops::{GemmAttrs, gemm, relu, sigmoid};
 use serde::Deserialize;
-use tensor_core::Tensor;
 
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/onnx-reference");
 

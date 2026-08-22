@@ -21,7 +21,7 @@
 //! `unwrap()`/`expect()` は使わず `debug_assert!` 経由のフォールバックで
 //! 吸収する。`.claude/rules/coding-rust.md`）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use crate::var::Reduction;
 
@@ -81,7 +81,7 @@ pub(crate) fn dense_vec(tensor: &Tensor<f32>) -> Vec<f32> {
 /// 「構造的に失敗しない」契約（`docs/fusion-graph-design.md` §3.5.3
 /// (iii)）を保つため、本関数自体は引き続き必ず値を返す非 panic 関数の
 /// ままとする——`Err`（理論上到達しない契約違反）は `debug_assert!` で
-/// 検知しつつ [`tensor_core::Tensor::scalar`]（真に infallible）による
+/// 検知しつつ [`fandhe_ai_tensor_core::Tensor::scalar`]（真に infallible）による
 /// 安全側フォールバックへ吸収する。
 pub(crate) fn build_tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     debug_assert_eq!(

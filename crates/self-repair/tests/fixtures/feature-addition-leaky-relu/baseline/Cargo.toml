@@ -33,10 +33,17 @@ path = "src/bin/bench_workload.rs"
 # は本 crate を一意な一時ディレクトリへコピーしたうえで、この相対パスを
 # 絶対パスへ書き換えてから `cargo` を起動する（コピー先ではこの相対深度が
 # 保たれないため）。
-tensor-core = { path = "../../../../../tensor-core" }
-autodiff = { path = "../../../../../autodiff" }
+# イシュー #879: 参照先クレートの `package.name` は crates.io 公開向けに
+# `fandhe-ai-*` へ rename 済み（`docs/crates-io-naming-decision.md`）。
+# 本 fixture は自己修復ループ完走実証（TASK-3.3c）の較正データであり、
+# fixture ソース（`use tensor_core::` 等）は較正データ変更に当たるため
+# 変更しない（`crates/guardrail/tests/fixtures/labeled-changes/baseline/
+# Cargo.toml` と同一方針。実装計画イシュー #879 設計判断 2）。依存キー名は
+# 旧名のまま維持し `package =` で新 crate 名へ alias する。
+tensor-core = { path = "../../../../../tensor-core", package = "fandhe-ai-tensor-core" }
+autodiff = { path = "../../../../../autodiff", package = "fandhe-ai-autodiff" }
 # TASK-12.1d（#164）: `autodiff::Tape::new(ops)` の破壊的変更（ops 必須化）
 # に伴い、本 fixture の学習・推論コードが `Tape` 構築時に渡す
 # `CpuBackendOps` を workspace 内 path 依存として追加する（上記
 # tensor-core/autodiff と同一方針。ユーザー承認フロー対象外）。
-backend-cpu = { path = "../../../../../backend-cpu" }
+backend-cpu = { path = "../../../../../backend-cpu", package = "fandhe-ai-backend-cpu" }

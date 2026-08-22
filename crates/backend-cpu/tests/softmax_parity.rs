@@ -1,18 +1,18 @@
-//! `backend_cpu::softmax::run_softmax_f32` の受け入れ基準対応テスト
+//! `fandhe_ai_backend_cpu::softmax::run_softmax_f32` の受け入れ基準対応テスト
 //! （イシュー #607）。
 //!
 //! 形状網羅（cols 端数〈NEON 4 要素幅の非倍数〉含む）・極値安定性・行和
 //! 1・`run_fused`（canonical プラン。axis None／最終軸 rows>1）を検証
-//! する。判定式・許容誤差は `backend_cpu::parity` を唯一の参照とし
+//! する。判定式・許容誤差は `fandhe_ai_backend_cpu::parity` を唯一の参照とし
 //! 再定義しない（`.claude/rules/coding-rust.md`）。NEON/スカラー A/B
-//! 同値テストは `backend_cpu::softmax` 側の `#[cfg(test)] mod tests`
+//! 同値テストは `fandhe_ai_backend_cpu::softmax` 側の `#[cfg(test)] mod tests`
 //! （`pub(crate)` 関数への直接アクセスが必要なため）に置く。
 
-use backend_cpu::CpuBackendOps;
-use backend_cpu::parity::assert_parity;
-use backend_cpu::softmax::run_softmax_f32;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_cpu::softmax::run_softmax_f32;
+use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
 /// テスト専用の素朴 CPU 参照実装（`run_softmax_f32` と数学的に同一だが、
 /// 独立した実装で突き合わせる）。

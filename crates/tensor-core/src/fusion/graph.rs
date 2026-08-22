@@ -1,7 +1,7 @@
 //! 融合グラフの中間表現（IR）本体（TASK-12.1a・#161 設計の実装。#162）。
 //!
 //! `docs/fusion-graph-design.md` §2 の型スケッチをそのまま実装する。
-//! `autodiff::tape`（`crates/autodiff/src/tape.rs:35` 付近の
+//! `fandhe_ai_autodiff::tape`（`crates/autodiff/src/tape.rs:35` 付近の
 //! `NodeId`／`Op`／`Tape`）と同型の「発生順 `Vec` 追記の DAG、入力は
 //! 常に自ノードより小さい ID」という構成を踏襲するが、本モジュールは
 //! `autodiff` に依存せず `tensor-core` 内に閉じる（§2.5「配置」の決定）。
@@ -177,7 +177,7 @@ impl FusionOp {
 }
 
 /// 融合グラフ内ノードの識別子。`nodes: Vec<FusionNode>` への添字を直接
-/// 表す newtype（`autodiff::tape::NodeId`〈`tape.rs:35`〉と同型パターン。
+/// 表す newtype（`fandhe_ai_autodiff::tape::NodeId`〈`tape.rs:35`〉と同型パターン。
 /// 生の `usize` と取り違えないための型区別）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct FusionNodeId(pub(crate) usize);
@@ -312,7 +312,7 @@ impl From<super::plan::FusionPlanError> for FusionGraphError {
 }
 
 /// 融合グラフ本体（設計書 §2.2）。ノード ID＋隣接（入力エッジ）リストに
-/// よる DAG。`autodiff::Tape` と同様、ノードは発生順に `Vec` へ追記され、
+/// よる DAG。`fandhe_ai_autodiff::Tape` と同様、ノードは発生順に `Vec` へ追記され、
 /// 入力は常に自ノードより小さい `FusionNodeId` を指す不変条件を持つ
 /// （`push` が検証する）。
 #[derive(Debug, Clone, Default)]

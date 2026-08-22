@@ -1,4 +1,4 @@
-//! Metal `simdgroup_matrix` 経路の形状閾値（`tensor_core::dispatch::
+//! Metal `simdgroup_matrix` 経路の形状閾値（`fandhe_ai_tensor_core::dispatch::
 //! METAL_SIMDGROUP_MIN_DIM = 512`）の境界形状 実測再検証（TASK-11.2c・#69）。
 //!
 //! ## 位置づけ
@@ -23,7 +23,7 @@
 //!    〈#64〉と同じ記録様式）。
 //! 2. [`dispatch_backend_auto_matches_reference_at_boundary_shapes`] 関数:
 //!    各境界形状で `MetalGemm::dispatch_backend_auto` の出力が CPU 参照
-//!    実装と複合判定（`backend_cpu::assert_parity`。REQ-2「相対誤差 1e-3
+//!    実装と複合判定（`fandhe_ai_backend_cpu::assert_parity`。REQ-2「相対誤差 1e-3
 //!    未満 または 絶対誤差 1e-5 未満」）で一致することを記録する。
 //!    `select_gemm_kernel` が返す期待経路（`expected_kernel`）は参考情報
 //!    として `println!` に含めるが、`MetalGemm::dispatch_backend_auto` は
@@ -64,16 +64,18 @@
 //! 付近の閾値判定）はこのバイアスを踏まえて解釈すること（PR レビュー指摘）。
 //!
 //! ```sh
-//! cargo test -p backend-metal -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_metal::{GemmVariant, MetalContext, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{BenchReport, MeasurementConfig};
-use tensor_core::dispatch::{DType, GemmShape, METAL_SIMDGROUP_MIN_DIM, select_gemm_kernel};
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_metal::{GemmVariant, MetalContext, MetalGemm};
+use fandhe_ai_tensor_core::dispatch::{
+    DType, GemmShape, METAL_SIMDGROUP_MIN_DIM, select_gemm_kernel,
+};
 
 /// `min(M,N,K)` の境界形状（正方形状。512 の前後に密に取り、クロス
 /// オーバーの実測解像度を上げる。実装計画 §3「境界形状 256/384/448/512/

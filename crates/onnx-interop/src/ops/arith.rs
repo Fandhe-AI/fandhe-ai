@@ -2,7 +2,7 @@
 //! `i64` 版 `Add`／`Mul`／`Div`／`Mod` はイシュー #87 残作業〈TASK-7.4a〉で追加）。
 //!
 //! `Add`／`Mul`／`Div`／`Mod` は ONNX 仕様上 multidirectional broadcasting
-//! （NumPy 互換）に対応する二項演算であり、`tensor_core::Tensor::broadcast_with`
+//! （NumPy 互換）に対応する二項演算であり、`fandhe_ai_tensor_core::Tensor::broadcast_with`
 //! （`broadcast_shape` 委譲。`crates/tensor-core/src/tensor.rs`）で出力 shape へ
 //! 揃えた view を得てから要素ごとに計算する。`Sqrt` は `activation.rs` の
 //! `Relu`/`Sigmoid` と同じ単項要素ごと写像パターンに従う。
@@ -16,7 +16,7 @@
 //! （`transformer.onnx` でも `Sqrt` の直前には常に `Cast(to=FLOAT)` が挟まる。
 //! イシュー #87 実測確認済み）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
 

@@ -51,61 +51,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "autodiff"
-version = "0.3.0"
-dependencies = [
- "bench-harness",
- "serde",
- "serde_json",
- "tensor-core",
-]
-
-[[package]]
-name = "backend-cpu"
-version = "0.3.0"
-dependencies = [
- "autodiff",
- "backend-cuda",
- "backend-metal",
- "bench-harness",
- "half",
- "rayon",
- "tensor-core",
-]
-
-[[package]]
-name = "backend-cuda"
-version = "0.3.0"
-dependencies = [
- "backend-cpu",
- "bench-harness",
- "cudarc",
- "half",
- "tensor-core",
-]
-
-[[package]]
-name = "backend-metal"
-version = "0.3.0"
-dependencies = [
- "backend-cpu",
- "bench-harness",
- "half",
- "objc2",
- "objc2-foundation",
- "objc2-metal",
- "tensor-core",
-]
-
-[[package]]
 name = "bench-harness"
 version = "0.3.0"
 dependencies = [
- "backend-cpu",
- "backend-cuda",
- "backend-metal",
  "criterion",
  "cudarc",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-backend-cuda",
+ "fandhe-ai-backend-metal",
+ "fandhe-ai-tensor-core",
  "half",
  "objc2",
  "objc2-foundation",
@@ -113,7 +67,6 @@ dependencies = [
  "onnx-interop",
  "serde",
  "serde_json",
- "tensor-core",
 ]
 
 [[package]]
@@ -320,15 +273,69 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
-name = "facade"
+name = "fandhe-ai"
 version = "0.3.0"
 dependencies = [
- "autodiff",
- "backend-cpu",
- "backend-cuda",
- "backend-metal",
  "bench-harness",
- "tensor-core",
+ "fandhe-ai-autodiff",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-backend-cuda",
+ "fandhe-ai-backend-metal",
+ "fandhe-ai-tensor-core",
+]
+
+[[package]]
+name = "fandhe-ai-autodiff"
+version = "0.3.0"
+dependencies = [
+ "bench-harness",
+ "fandhe-ai-tensor-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "fandhe-ai-backend-cpu"
+version = "0.3.0"
+dependencies = [
+ "bench-harness",
+ "fandhe-ai-autodiff",
+ "fandhe-ai-backend-cuda",
+ "fandhe-ai-backend-metal",
+ "fandhe-ai-tensor-core",
+ "half",
+ "rayon",
+]
+
+[[package]]
+name = "fandhe-ai-backend-cuda"
+version = "0.3.0"
+dependencies = [
+ "bench-harness",
+ "cudarc",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-tensor-core",
+ "half",
+]
+
+[[package]]
+name = "fandhe-ai-backend-metal"
+version = "0.3.0"
+dependencies = [
+ "bench-harness",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-tensor-core",
+ "half",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+]
+
+[[package]]
+name = "fandhe-ai-tensor-core"
+version = "0.3.0"
+dependencies = [
+ "half",
 ]
 
 [[package]]
@@ -551,15 +558,15 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 name = "onnx-interop"
 version = "0.3.0"
 dependencies = [
- "autodiff",
- "backend-cpu",
  "bench-harness",
+ "fandhe-ai-autodiff",
+ "fandhe-ai-backend-cpu",
+ "fandhe-ai-tensor-core",
  "half",
  "prost",
  "safetensors",
  "serde",
  "serde_json",
- "tensor-core",
 ]
 
 [[package]]
@@ -866,13 +873,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "tensor-core"
-version = "0.3.0"
-dependencies = [
- "half",
 ]
 
 [[package]]

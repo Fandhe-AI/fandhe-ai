@@ -17,7 +17,7 @@
 //!
 //! ## 実行時値モデルと dtype の扱いについて
 //!
-//! `tensor_core::Element` にイシュー #274 で `i64`／`bool` を追加した（`element.rs`）
+//! `fandhe_ai_tensor_core::Element` にイシュー #274 で `i64`／`bool` を追加した（`element.rs`）
 //! ことに伴い、[`Value::I64`]／[`Value::Bool`] は生の `Vec` + shape 表現ではなく
 //! `Tensor<i64>`／`Tensor<bool>` を直接保持する型安全な表現へ置き換えた。
 //! `Gather`／`Unsqueeze`／`Concat`／`Slice`（`ops::*` が `T: Element` でジェネリック化
@@ -47,8 +47,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use half::f16;
-use tensor_core::{ShapeError, Tensor};
 
 use super::graph::{Graph, GraphError, RawTensor};
 use super::proto::NodeProto;
@@ -56,7 +56,7 @@ use crate::ops::{self, ConstantValue, GemmAttrs, LayerNormAttrs, OpError, SliceP
 
 /// 実行時に env（変数束縛）へ格納される値。ONNX の `TensorProto.data_type` の
 /// うち本クレートが対応する 4 種類（`FLOAT`／`INT64`／`BOOL`／`FLOAT16`）に対応する
-/// （`onnx::proto::data_type`）。いずれも `tensor_core::Element` を実装する型を
+/// （`onnx::proto::data_type`）。いずれも `fandhe_ai_tensor_core::Element` を実装する型を
 /// 直接保持する型安全な表現（本モジュール冒頭コメント参照。イシュー #274）。
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -106,7 +106,7 @@ pub enum InterpError {
     /// `ops::*`（TASK-7.2c）が返したオペ固有エラーをそのまま透過する。
     Op(OpError),
     /// initializer の `RawTensor` を [`Value`] へ変換する際の shape 不整合
-    /// （`tensor_core::Tensor::new` が返す）。`build_graph` が既に検証済みのため
+    /// （`fandhe_ai_tensor_core::Tensor::new` が返す）。`build_graph` が既に検証済みのため
     /// 通常到達しない防御的経路。
     Shape(ShapeError),
     /// `Constant` の `value`（TENSOR 型）属性が保持する `TensorProto` の復号エラー。

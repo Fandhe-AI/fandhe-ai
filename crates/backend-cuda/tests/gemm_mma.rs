@@ -16,7 +16,7 @@
 //! `tests/gemm_wmma.rs` と同じ形で green として扱うことが本ファイルの
 //! 前提である。
 
-use backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
 
 /// `CudaMmaGemm::new` は CUDA 非搭載環境で panic せず型付きエラーを返す。
 /// CUDA 搭載・cc>=8.0 環境では `mma.sync`/`ldmatrix`/`cp.async` カーネルの

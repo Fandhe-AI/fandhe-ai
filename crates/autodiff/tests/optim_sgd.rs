@@ -1,5 +1,5 @@
 //! #193（親 #192「optimizer（SGD・AdamW）・gradient clipping の実装」）:
-//! `autodiff::optim::Sgd` の受け入れテスト。
+//! `fandhe_ai_autodiff::optim::Sgd` の受け入れテスト。
 //!
 //! **受け入れ条件**: PyTorch `torch.optim.SGD` と同一系列の更新値一致
 //! テストが green（実装計画 §1）。
@@ -20,11 +20,11 @@
 
 mod common;
 
-use autodiff::Tape;
-use autodiff::nn::Linear;
-use autodiff::nn::activation::Relu;
-use autodiff::optim::{Sgd, SgdConfig};
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_autodiff::nn::Linear;
+use fandhe_ai_autodiff::nn::activation::Relu;
+use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
+use fandhe_ai_tensor_core::Tensor;
 
 use bench_harness::rng::Xorshift64Star;
 
@@ -191,25 +191,37 @@ fn momentum_buffer_recursive_sequence_matches_hand_computed_values() {
 #[test]
 fn config_rejects_negative_lr() {
     let err = Sgd::new(SgdConfig::new(-0.1)).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
 fn config_rejects_negative_momentum() {
     let err = Sgd::new(SgdConfig::new(0.1).with_momentum(-0.5)).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
 fn config_rejects_negative_weight_decay() {
     let err = Sgd::new(SgdConfig::new(0.1).with_weight_decay(-0.01)).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
 fn config_rejects_nesterov_without_momentum() {
     let err = Sgd::new(SgdConfig::new(0.1).with_nesterov(true)).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
@@ -221,7 +233,10 @@ fn config_rejects_nesterov_with_nonzero_dampening() {
             .with_nesterov(true),
     )
     .unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
@@ -231,7 +246,10 @@ fn step_rejects_params_grads_count_mismatch() {
     let g1 = tensor(vec![0.1], &[1]);
     let g2 = tensor(vec![0.2], &[1]);
     let err = sgd.step(&[&p], &[&g1, &g2]).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
@@ -240,7 +258,7 @@ fn step_rejects_param_grad_shape_mismatch() {
     let p = tensor(vec![1.0, 2.0], &[2]);
     let g = tensor(vec![0.1], &[1]);
     let err = sgd.step(&[&p], &[&g]).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::Shape(_)));
+    assert!(matches!(err, fandhe_ai_autodiff::AutodiffError::Shape(_)));
 }
 
 #[test]
@@ -253,7 +271,10 @@ fn step_rejects_shape_change_between_steps_with_momentum() {
     let p2 = tensor(vec![1.0, 2.0], &[2]);
     let g2 = tensor(vec![0.1, 0.1], &[2]);
     let err = sgd.step(&[&p2], &[&g2]).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 #[test]
@@ -266,7 +287,10 @@ fn step_rejects_param_count_change_between_steps_with_momentum() {
     let p2 = tensor(vec![1.0], &[1]);
     let g2 = tensor(vec![0.1], &[1]);
     let err = sgd.step(&[&p1, &p2], &[&g1, &g2]).unwrap_err();
-    assert!(matches!(err, autodiff::AutodiffError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        fandhe_ai_autodiff::AutodiffError::InvalidArgument(_)
+    ));
 }
 
 // =====================================================================
@@ -384,7 +408,7 @@ fn gen_regression_data(seed: u64) -> (Tensor<f32>, Tensor<f32>) {
 /// `Sgd`（momentum=0.9）を optimizer 本体として使う E2E 学習ループ。
 /// `nn_train_convergence.rs::run_regression_training` と同形状の MLP を
 /// 使うが、パラメータ更新をテストローカル `sgd_step` ではなく本イシュー
-/// の `autodiff::optim::Sgd` へ委ねる点が異なる。
+/// の `fandhe_ai_autodiff::optim::Sgd` へ委ねる点が異なる。
 fn run_regression_training_with_sgd(steps: usize, lr: f32) -> Vec<(f32, u32)> {
     let (x_data, y_data) = gen_regression_data(SEED_DATA);
     let relu = Relu;

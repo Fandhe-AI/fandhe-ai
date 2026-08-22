@@ -1,4 +1,4 @@
-//! `backend_cpu::reduction`（TASK-1.6c・#23）の受け入れ条件「軸指定 reduction の
+//! `fandhe_ai_backend_cpu::reduction`（TASK-1.6c・#23）の受け入れ条件「軸指定 reduction の
 //! 数値が期待値と一致する」に対応する統合テスト。
 //!
 //! `src/reduction.rs` のインライン単体テスト（決定性・空縮約・shape 検査）を
@@ -10,8 +10,8 @@
 //! CHUNK 境界決定性・サイズ 1 軸は `CHUNK` 定数参照のため
 //! `src/reduction.rs` のインライン `#[cfg(test)]` へ追加した。
 
-use backend_cpu::reduction::{ReduceError, max, mean, sum};
-use tensor_core::Tensor;
+use fandhe_ai_backend_cpu::reduction::{ReduceError, max, mean, sum};
+use fandhe_ai_tensor_core::Tensor;
 
 /// shape [2, 3, 4] の既知データで axis=0/1/2 それぞれの sum を手計算期待値と
 /// 完全一致で検証する（受け入れ条件の直接対応）。

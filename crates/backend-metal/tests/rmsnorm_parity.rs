@@ -4,7 +4,7 @@
 //! `tests/cpu_metal_parity.rs`（GEMM）と同じ構成方針を踏襲する: Metal 実機
 //! （Apple Silicon）依存のため `#![cfg(target_os = "macos")]` でファイル
 //! 全体を macOS 限定にし、各テストに `#[ignore]` を付けて通常 CI では
-//! 実行しない。判定式・許容誤差は再定義せず `backend_cpu::parity` を唯一の
+//! 実行しない。判定式・許容誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の
 //! 参照とする（`.claude/rules/coding-rust.md`）。
 //!
 //! CPU 参照実装は本ファイル内のテスト専用関数（`f32::mul_add` 使用。CUDA
@@ -14,14 +14,14 @@
 //! 実行コマンド（Mac 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release --test rmsnorm_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release --test rmsnorm_parity -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::assert_parity;
-use backend_metal::{MetalContext, MetalRmsNorm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_metal::{MetalContext, MetalRmsNorm};
 
 /// テスト専用 CPU 参照実装（`f32::mul_add` を使用し、GPU 側 `fma()` と
 /// 丸め方針を揃える）。`out = x * rsqrt(mean(x^2, axis=-1) + eps) * w`
@@ -144,7 +144,7 @@ fn rmsnorm_matches_cpu_across_shapes() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn rmsnorm_run_fused_matches_cpu_composed() {
-    use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+    use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
     let hidden = 16usize;
     let x_data = Xorshift64Star::new(9101).fill_vec(hidden);
@@ -167,7 +167,7 @@ fn rmsnorm_run_fused_matches_cpu_composed() {
     let plan = FusionPlan::from_ops(ops, vec![hidden], DType::F32, 1)
         .expect("canonical RMSNorm plan must construct");
 
-    let metal = backend_metal::MetalBackendOps::new();
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
     let fused_out = metal
         .run_fused(&plan, &[&x])
         .expect("MetalBackendOps::run_fused must succeed on Metal-equipped test runner");
@@ -185,7 +185,7 @@ fn rmsnorm_run_fused_matches_cpu_composed() {
     );
 }
 
-/// CPU-Metal 直接突合（イシュー #607）: `backend_cpu::rmsnorm::
+/// CPU-Metal 直接突合（イシュー #607）: `fandhe_ai_backend_cpu::rmsnorm::
 /// run_rmsnorm_f32`（NEON/rayon 参照実装）を GPU 出力と直接比較する。
 /// 実機必須（`#[ignore]`。CI ではコンパイルのみ）。既存の
 /// `cpu_rmsnorm_reference`（テスト専用ローカル参照実装）と数学的に同一
@@ -205,8 +205,9 @@ fn rmsnorm_matches_backend_cpu_directly() {
     let gpu_out = rmsnorm
         .run_rmsnorm_f32(&ctx, &x_data, Some(&w_data), eps, rows, hidden)
         .expect("MetalRmsNorm::run_rmsnorm_f32 must succeed on Metal-equipped test runner");
-    let cpu_out = backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, Some(&w_data), eps, rows, hidden)
-        .expect("backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
+    let cpu_out =
+        fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32(&x_data, Some(&w_data), eps, rows, hidden)
+            .expect("fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32 must succeed");
 
     assert_parity(
         "rmsnorm cpu(backend_cpu)-metal direct parity",

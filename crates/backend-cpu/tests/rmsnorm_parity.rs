@@ -1,16 +1,16 @@
-//! `backend_cpu::rmsnorm::run_rmsnorm_f32` の受け入れ基準対応テスト
+//! `fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32` の受け入れ基準対応テスト
 //! （イシュー #607）。
 //!
 //! 形状網羅（cols 端数〈NEON 4 要素幅の非倍数〉含む）・weight/eps 有無・
 //! `run_fused`（canonical プラン）vs per-op 合成・NEON/スカラー同値
-//! （aarch64 限定）を検証する。判定式・許容誤差は `backend_cpu::parity`
+//! （aarch64 限定）を検証する。判定式・許容誤差は `fandhe_ai_backend_cpu::parity`
 //! を唯一の参照とし再定義しない（`.claude/rules/coding-rust.md`）。
 
-use backend_cpu::CpuBackendOps;
-use backend_cpu::parity::assert_parity;
-use backend_cpu::rmsnorm::run_rmsnorm_f32;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_cpu::rmsnorm::run_rmsnorm_f32;
+use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
 /// テスト専用の素朴 CPU 参照実装（`f32::mul_add` を使い FMA 契約を揃える。
 /// `run_rmsnorm_f32` と数学的に同一だが、独立した実装で突き合わせることで
@@ -132,7 +132,7 @@ fn rmsnorm_run_fused_matches_per_op_composed() {
     );
 }
 
-// NEON/スカラー A/B 同値テストは `backend_cpu::rmsnorm` 側の
+// NEON/スカラー A/B 同値テストは `fandhe_ai_backend_cpu::rmsnorm` 側の
 // `#[cfg(test)] mod tests`（`pub(crate)` 関数への直接アクセスが必要な
 // ため、統合テストクレートからは呼べない）に置く
 // （`crates/backend-cpu/src/rmsnorm.rs::tests::neon_matches_scalar_various_hidden`）。

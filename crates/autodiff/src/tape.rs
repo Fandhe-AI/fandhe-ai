@@ -23,7 +23,7 @@
 use std::cell::{OnceCell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tensor_core::{
+use fandhe_ai_tensor_core::{
     BackendError, BackendOps, DType, FusedOpKind, FusionPlan, MAX_FUSED_CHAIN_LEN, Tensor,
 };
 
@@ -194,7 +194,7 @@ pub(crate) struct TapeNode {
 }
 
 /// 演算を記録する Wengert list。`Var`（`var.rs`）上の演算のみがここに
-/// 記録される。`tensor_core::Tensor<f32>` に対する演算はテープを構築
+/// 記録される。`fandhe_ai_tensor_core::Tensor<f32>` に対する演算はテープを構築
 /// しないため、追跡の有無は型（`Tensor<f32>` か `Var` か）で表現される
 /// （`docs/public-api-design.md` §3.1「型分離方式」）。
 ///
@@ -630,7 +630,7 @@ fn build_lazy_plan(
 /// [`fallback_per_op`]・`eval_fallback`）で共有する。渡す `shape` は
 /// いずれも既存の `TapeNode` から読んだ値（過去に妥当な shape として
 /// 構築済み）であり実運用でオーバーフローは起こらないが、`Err` 分岐は
-/// `debug_assert!` で検知しつつ [`tensor_core::Tensor::scalar`]（真に
+/// `debug_assert!` で検知しつつ [`fandhe_ai_tensor_core::Tensor::scalar`]（真に
 /// infallible）へ吸収し、本番経路 panic 禁止方針
 /// （`.claude/rules/coding-rust.md`）を保つ。
 fn safe_zeros(shape: &[usize]) -> Tensor<f32> {

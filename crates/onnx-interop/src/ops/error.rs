@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use tensor_core::ShapeError;
+use fandhe_ai_tensor_core::ShapeError;
 
 /// `ops` モジュールの全公開関数が返す型付きエラー。
 ///

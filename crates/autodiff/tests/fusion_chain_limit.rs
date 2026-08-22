@@ -1,7 +1,7 @@
 //! 連鎖長上限（4〜6 段）の遅延評価経路（`Tape::push_lazy`）への適用の
 //! 受け入れテスト（#404・`docs/fusion-graph-design.md` §3.5.4）。
 //!
-//! `tensor_core::MAX_FUSED_CHAIN_LEN`（= 6）到達時点で `Var::add`/`mul`/
+//! `fandhe_ai_tensor_core::MAX_FUSED_CHAIN_LEN`（= 6）到達時点で `Var::add`/`mul`/
 //! `relu`/`exp`/`tanh` がその場実体化することを、`fusion_backend_
 //! integration.rs` と同じフィクスチャ（`CountingFusedOps`・
 //! `AlwaysUnsupportedFused`・`common::NaiveOps`）で黒箱検証する。
@@ -16,8 +16,8 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use autodiff::{Tape, Var};
-use tensor_core::{
+use fandhe_ai_autodiff::{Tape, Var};
+use fandhe_ai_tensor_core::{
     BackendError, BackendOps, Device, FusedOpKind, FusionPlan, MAX_FUSED_CHAIN_LEN, Tensor,
 };
 
@@ -80,7 +80,7 @@ impl BackendOps for RecordingFusedOps {
                 FusedOpKind::Exp { input } => self.inner.exp(&values[input])?,
                 FusedOpKind::Tanh { input } => self.inner.tanh(&values[input])?,
                 // #586 で `FusedOpKind` へ追加された reduction（Sum／Max）
-                // ・Rsqrt は、`autodiff::tape::build_lazy_plan` が現状これらを
+                // ・Rsqrt は、`fandhe_ai_autodiff::tape::build_lazy_plan` が現状これらを
                 // 遅延評価対象にせず `push_eager` で実体化するため
                 // （`crates/autodiff/src/tape.rs`）、本テストフィクスチャの
                 // `run_fused` へ実際に渡される `ops` には現れない。到達不能
@@ -90,17 +90,17 @@ impl BackendOps for RecordingFusedOps {
                 FusedOpKind::Rsqrt { .. } | FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } => {
                     return Err(BackendError::Unsupported(
                         "run_fused test fixture: reduction/Rsqrt not implemented \
-                         (tensor_core::fusion IR extension #586; CPU kernel out of scope)"
+                         (fandhe_ai_tensor_core::fusion IR extension #586; CPU kernel out of scope)"
                             .into(),
                     ));
                 }
-                // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+                // `fandhe_ai_tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
                 // PR #648 P1 是正）のため、別クレートである本テストからの match
                 // は将来の未知 variant に備え `_` 分岐が必須。
                 _ => {
                     return Err(BackendError::Unsupported(
                         "run_fused test fixture: unknown FusedOpKind variant \
-                         (tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
+                         (fandhe_ai_tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
                          variant)"
                             .into(),
                     ));

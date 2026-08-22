@@ -5,7 +5,7 @@
 //! テストを `#[ignore]` で分離）をそのまま踏襲する
 //! （`.claude/rules/coding-rust.md` の実機依存テスト分離規約）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// `CudaGemm::new` は tiled カーネル追加後も CUDA 非搭載環境で panic せず
 /// 型付きエラーを返す契約を維持している（`tests/gemm_naive.rs` の同名
@@ -37,12 +37,12 @@ fn new_compiles_tiled_kernels_or_returns_typed_error_without_panicking() {
 }
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装
-/// （[`backend_cpu::matmul_reference_fma`]。`mul_add` FMA 契約の唯一の
-/// 参照点）と GPU tiled カーネルの出力を [`backend_cpu::assert_parity`]
+/// （[`fandhe_ai_backend_cpu::matmul_reference_fma`]。`mul_add` FMA 契約の唯一の
+/// 参照点）と GPU tiled カーネルの出力を [`fandhe_ai_backend_cpu::assert_parity`]
 /// で照合する。
 ///
 /// 判定式・閾値（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）は
-/// `backend_cpu::parity` の実体を唯一の参照とし、本ファイルではローカル
+/// `fandhe_ai_backend_cpu::parity` の実体を唯一の参照とし、本ファイルではローカル
 /// 複製しない。旧実装はローカル複製の否定形判定（`rel >= TOL && diff >=
 /// TOL`）を使っており、NaN/Inf 混入時に両辺 false となって誤って合格
 /// 判定してしまう盲点を持っていた（`tests/cpu_cuda_parity.rs` 冒頭
@@ -54,14 +54,16 @@ fn assert_tiled_f32_matches_cpu_reference(gemm: &CudaGemm, seed: u64, m: u32, n:
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm
         .run_tiled_f32(&a, &b, m, n, k)
         .expect("CudaGemm::run_tiled_f32 must succeed on CUDA-equipped test runner");
 
-    backend_cpu::assert_parity(
+    fandhe_ai_backend_cpu::assert_parity(
         &format!("tiled f32 GEMM CPU/GPU parity (shape m={m} n={n} k={k})"),
         &c_gpu,
         &c_ref,

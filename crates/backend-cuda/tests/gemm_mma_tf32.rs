@@ -24,10 +24,10 @@
 //! 説明でき、TF32 丸め誤差説への反証にはならない。
 //! `docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に実測ログ・訂正経緯を記録）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装と `run_tf32` の出力を
-/// `backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
+/// `fandhe_ai_backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
 /// 絶対誤差 1e-5 未満」の唯一の実体）で照合する
 /// （`tests/gemm_wmma_tf32_staged.rs::assert_wmma_tf32_staged_parity` と
 /// 同一手順）。
@@ -44,14 +44,16 @@ fn assert_mma_tf32_parity(
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm.run_tf32(&a, &b, m, n, k).expect(
         "CudaMmaTf32Gemm::run_tf32 must succeed on a compute capability >= 8.0 test runner",
     );
 
-    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// `CudaMmaTf32Gemm::new` は CUDA 非搭載環境で panic せず型付きエラーを

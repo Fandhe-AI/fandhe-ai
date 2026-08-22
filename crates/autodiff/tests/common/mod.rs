@@ -15,7 +15,9 @@
 
 #![allow(dead_code)] // テストファイルごとに使う関数が異なるため。
 
-use tensor_core::{BackendError, BackendOps, Device, ShapeError, Tensor, reduce_out_shape};
+use fandhe_ai_tensor_core::{
+    BackendError, BackendOps, Device, ShapeError, Tensor, reduce_out_shape,
+};
 
 pub struct NaiveOps;
 

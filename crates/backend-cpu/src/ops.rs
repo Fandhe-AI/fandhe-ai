@@ -1,6 +1,6 @@
 //! CPU バックエンドの `BackendOps` 実装（TASK-1.9c・#46）。
 //!
-//! `tensor_core::backend_ops::BackendOps` の CPU 実装。既存カーネル
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CPU 実装。既存カーネル
 //! （`gemm_blis::gemm_blis_parallel`・`elementwise::{add,mul,relu,exp,tanh}`・
 //! `reduction::{sum,max}`）への薄い委譲に徹し、カーネル本体・許容誤差・
 //! 境界検査には一切触れない（`.claude/rules/delegation-impl.md` の
@@ -10,8 +10,8 @@
 //! 条件「3 バックエンドが呼び分けられる」の参照実装として、CPU は常に
 //! 実カーネルを実行できることを保証する）。
 
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
 use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
@@ -47,7 +47,7 @@ impl BackendOps for CpuBackendOps {
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -71,14 +71,14 @@ impl BackendOps for CpuBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// [`tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、CPU カーネル内で epilogue を融合
     /// する [`gemm_blis_bias_act_parallel`] へ差し替える（TASK-12.1f・
     /// #203）。CUDA は同型のオーバーライド（`backend-cuda::ops::
     /// CudaBackendOps::gemm_bias_act`）をイシュー #599 で追加済み。Metal
     /// はこのオーバーライドを持たずデフォルト実装（非融合合成）を使う
     /// （elementwise 未実装により `bias`／`act` 指定時は `Unsupported` を
-    /// 透過的に返す。モジュールドキュメント冒頭・`tensor_core::
+    /// 透過的に返す。モジュールドキュメント冒頭・`fandhe_ai_tensor_core::
     /// backend_ops` のコメント参照）。
     ///
     /// 融合カーネル（[`gemm_blis_bias_act_parallel`]）は bias の行方向
@@ -92,7 +92,7 @@ impl BackendOps for CpuBackendOps {
     /// 非融合パスへ落ちる場合も `gemm_blis_bias_act_parallel` の
     /// `BiasLenMismatch` 検証（カーネル本体アクセス前に検証。REQ-8・
     /// OWASP A03）と同じ順序契約を保つため、`self.gemm` を実行する前に
-    /// `tensor_core::broadcast_shape` でブロードキャスト可否のみ先に
+    /// `fandhe_ai_tensor_core::broadcast_shape` でブロードキャスト可否のみ先に
     /// 検証する（m×n×k の GEMM 本体を実行してから失敗が判明する、という
     /// 順序にしない）。エラーは `broadcast_shape` のものをそのまま返す
     /// （誤った `ShapeError` variant を独自に組み立てて診断精度を
@@ -104,7 +104,7 @@ impl BackendOps for CpuBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -117,7 +117,7 @@ impl BackendOps for CpuBackendOps {
             // GEMM 本体を実行する前にブロードキャスト可否を検証する
             // （REQ-8・OWASP A03。`gemm_blis` の `BiasLenMismatch` と
             // 同じ「カーネル本体アクセス前に検証」の順序契約）。
-            tensor_core::broadcast_shape(&out_shape, bias.shape())
+            fandhe_ai_tensor_core::broadcast_shape(&out_shape, bias.shape())
                 .map_err(BackendError::ShapeMismatch)?;
             let mut out = self.gemm(a, b)?;
             out = self.add(&out, bias)?;
@@ -197,7 +197,7 @@ impl BackendOps for CpuBackendOps {
         reduction::max(a, dim).map_err(reduce_error_to_backend_error)
     }
 
-    /// [`tensor_core::BackendOps::run_fused`] のデフォルト実装（`Unsupported`
+    /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装（`Unsupported`
     /// fail-safe）を、CPU 単一パス融合カーネル
     /// [`fused_elementwise::run_fused_elementwise`] へ差し替える。
     ///
@@ -228,7 +228,7 @@ impl BackendOps for CpuBackendOps {
     /// （op 列長〈6 vs 8〉が異なるため両方に一致するプランは存在しない）。
     ///
     /// # 呼び出し元
-    /// `autodiff::tape` の遅延評価 2 層（`materialize_fallible`／
+    /// `fandhe_ai_autodiff::tape` の遅延評価 2 層（`materialize_fallible`／
     /// `materialize_non_fallible`）から `BackendOps::run_fused` 経由で
     /// 呼ばれる。CUDA／Metal は独自の融合カーネル実装（#592/#594/#604）を
     /// 持つため本オーバーライドとは独立。

@@ -1,4 +1,4 @@
-//! `tensor_core::typed`（TASK-10.1c・#100）の型レベル shape 検証テスト整備。
+//! `fandhe_ai_tensor_core::typed`（TASK-10.1c・#100）の型レベル shape 検証テスト整備。
 //!
 //! `typed.rs` 内 `#[cfg(test)] mod tests`（#99・eca971b）は非公開フィールド
 //! （`inner`）にアクセス可能なモジュール内白箱テストであり、`typed` を
@@ -51,8 +51,8 @@
 //! 依存追加としてユーザー承認を得たうえで別タスクで検討する
 //! （`.claude/rules/out-of-scope-tracking.md` 準拠）。
 
-use tensor_core::typed::{BatchedFeatures, FixedMat, FixedVec};
-use tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::typed::{BatchedFeatures, FixedMat, FixedVec};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 // --- 公開 API のみでの構築・変換・型付き演算合成（外部消費者視点） ---
 

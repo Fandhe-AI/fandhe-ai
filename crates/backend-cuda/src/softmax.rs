@@ -24,7 +24,7 @@
 //! 冒頭コメント「log2(e) 事前スケール + exp2f のみ使用」）。数学的には
 //! 恒等（`e^x = 2^(x*log2(e))`）だが丸めは per-op 経路（`onnx-interop`
 //! 素朴実装・CPU 参照実装の `expf`／`f32::exp`）とは異なるため、一致
-//! 判定は常に REQ-2 複合判定（`backend_cpu::parity::assert_parity`。
+//! 判定は常に REQ-2 複合判定（`fandhe_ai_backend_cpu::parity::assert_parity`。
 //! 相対誤差 1e-3 未満または絶対誤差 1e-5 未満）に依る。tolerance は変更
 //! しない（`.claude/rules/coding-rust.md`）。
 
@@ -33,7 +33,7 @@ use std::sync::Arc;
 use cudarc::driver::sys::CUdevice_attribute;
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
-use tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
+use fandhe_ai_tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
@@ -125,7 +125,7 @@ pub(crate) fn validate_softmax_launch(
 /// canonical softmax 融合プラン（`exp(x - max(x)) / sum(exp(x - max(x)))`）
 /// に厳密一致する `plan` から、起動に必要な `(rows, cols)` を取り出す。
 ///
-/// プラン形状は `tensor_core::fusion::plan` の softmax パターン（`leaf` 1
+/// プラン形状は `fandhe_ai_tensor_core::fusion::plan` の softmax パターン（`leaf` 1
 /// 個・8 op 列: `Input → Max{axis} → Broadcast{axis} → Sub{lhs:0,rhs:2} →
 /// Exp{input:3} → Sum{axis} → Broadcast{axis} → Div{lhs:4,rhs:6}`。
 /// `plan.rs::from_ops_builds_softmax_plan_with_row_fusion_metadata`
@@ -435,7 +435,7 @@ mod tests {
 
     // --- match_softmax_plan ---
     //
-    // `tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の
+    // `fandhe_ai_tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の
     // `pub(crate)` のため、`rmsnorm.rs::tests::build_canonical_rmsnorm_plan`
     // と同じ構築経路（`FusionPlan::from_ops`）でプランを直接組み立てる。
     // 8 op 列は `tensor-core` 側の受け入れ済みテスト
@@ -455,7 +455,7 @@ mod tests {
             FusedOpKind::Broadcast { input: 5, axis },
             FusedOpKind::Div { lhs: 4, rhs: 6 },
         ];
-        FusionPlan::from_ops(ops, output_shape, tensor_core::DType::F32, 1).unwrap()
+        FusionPlan::from_ops(ops, output_shape, fandhe_ai_tensor_core::DType::F32, 1).unwrap()
     }
 
     #[test]
@@ -499,7 +499,8 @@ mod tests {
             },
             FusedOpKind::Mul { lhs: 4, rhs: 0 },
         ];
-        let plan = FusionPlan::from_ops(ops, vec![8], tensor_core::DType::F32, 1).unwrap();
+        let plan =
+            FusionPlan::from_ops(ops, vec![8], fandhe_ai_tensor_core::DType::F32, 1).unwrap();
         assert_eq!(match_softmax_plan(&plan), None);
     }
 
@@ -510,7 +511,8 @@ mod tests {
             FusedOpKind::Input { leaf_index: 1 },
             FusedOpKind::Add { lhs: 0, rhs: 1 },
         ];
-        let plan = FusionPlan::from_ops(ops, vec![4], tensor_core::DType::F32, 2).unwrap();
+        let plan =
+            FusionPlan::from_ops(ops, vec![4], fandhe_ai_tensor_core::DType::F32, 2).unwrap();
         assert_eq!(match_softmax_plan(&plan), None);
     }
 
@@ -538,7 +540,8 @@ mod tests {
                 axis: Some(1),
             },
         ];
-        let plan = FusionPlan::from_ops(ops, vec![2, 8], tensor_core::DType::F32, 1).unwrap();
+        let plan =
+            FusionPlan::from_ops(ops, vec![2, 8], fandhe_ai_tensor_core::DType::F32, 1).unwrap();
         assert_eq!(match_softmax_plan(&plan), None);
     }
 

@@ -111,7 +111,7 @@ pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all
 pub use dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 pub use element::Element;
 pub use error::ShapeError;
-// `MAX_FUSED_CHAIN_LEN`（#404）: `autodiff::tape` の push 時上限適用が
+// `MAX_FUSED_CHAIN_LEN`（#404）: `fandhe_ai_autodiff::tape` の push 時上限適用が
 // 参照する単一真実源（`fusion/detect.rs` の doc comment 参照）。
 // `RowFusionMeta`（#588）: 行方向 reduction＋broadcast 融合プランの行
 // メタデータ（`axis`／`row_len`。`fusion/plan.rs` の doc comment 参照）。
