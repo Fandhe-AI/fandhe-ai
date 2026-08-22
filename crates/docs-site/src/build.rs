@@ -135,6 +135,40 @@ fn page_output_path(out: &Path, page_path: &str) -> PathBuf {
     }
 }
 
+/// `path` を開いたうえで、実際に開いた fd（`Metadata` の `(dev, ino)`）が
+/// `canonical_path` を検証した際のファイルと同一であることを確認する。
+///
+/// unix では `std::os::unix::fs::MetadataExt` の `dev()`/`ino()` で fd 起点の
+/// アイデンティティを取れる（`fstat` 相当。パス文字列の再解決を経ないため
+/// TOCTOU に強い）。`canonicalize` はパス解決のみで実ファイルを開かないため、
+/// 「検証したパスの実体」と「実際に読む fd」が同一かどうかまでは保証しない
+/// （`canonicalize` の直後に同じ絶対パスがシンボリックリンクへ差し替えられる
+/// race）。この関数は開いた fd 側から `(dev, ino)` を取り、`canonical_path` を
+/// 独立に再 `canonicalize` した結果と一致することを検査することで、その race を
+/// 検知して fail-closed に倒す（レビュー指摘・PR #899）。unix 以外（Windows 等）
+/// では `MetadataExt` が使えないため検査を no-op にする（`docs-site` は CI
+///〈GitHub ホステッド ubuntu-latest〉・開発者ローカル実行が前提で、Windows は
+/// 現状 CI 対象外。`.claude/rules/ci.md` 実機依存節参照）。
+#[cfg(unix)]
+fn verify_opened_file_matches_canonical_path(
+    file: &fs::File,
+    canonical_path: &Path,
+) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata()?;
+    let reresolved = canonical_path.canonicalize()?;
+    let reresolved_meta = fs::symlink_metadata(&reresolved)?;
+    Ok(opened.dev() == reresolved_meta.dev() && opened.ino() == reresolved_meta.ino())
+}
+
+#[cfg(not(unix))]
+fn verify_opened_file_matches_canonical_path(
+    _file: &fs::File,
+    _canonical_path: &Path,
+) -> std::io::Result<bool> {
+    Ok(true)
+}
+
 /// `page.source` を `repo_root` 配下であることを再検証したうえで、単一の
 /// `File` ハンドルからサイズ確認・内容読み込みの両方を行う。
 ///
@@ -142,13 +176,26 @@ fn page_output_path(out: &Path, page_path: &str) -> PathBuf {
 /// エラーを返すため）だが、実際に読み込む直前にも同じ経路のパスを
 /// `canonicalize` して `repo_root` 配下であることを**再検証**し、その
 /// canonicalize 結果のパスを 1 回だけ `File::open` してサイズ確認・内容読み込み
-/// の両方をその同一ハンドルから行う。`fs::metadata` と `fs::read_to_string` で
-/// 同じパスを別々に再オープンすると、その間にシンボリックリンクをすり替え
-/// られる TOCTOU が残る（レビュー指摘）。事前検証の canonicalize からここまでの
-/// 間の差し替えは依然として原理的な race だが、読み込み直前に再検証し単一
-/// ハンドルへ収斂させることで窓を最小化する（`std::fs` のみで到達可能な現実的な
-/// 緩和策。完全な原子性には `openat2`/`O_NOFOLLOW` 相当のプラットフォーム固有
-/// API が必要で、REQ-1 v2 の外部依存ゼロ方針の範囲外と判断した）。
+/// の両方をその同一ハンドルから行う。
+///
+/// 単一ハンドルへ収斂させても、なお 2 つの残存 race がある（レビュー指摘・
+/// PR #899）。それぞれ次の手当てで塞ぐ:
+/// 1. `canonicalize` から `File::open` までの間に最終コンポーネントがシンボリック
+///    リンクへ差し替えられる race → 開いた fd の `(dev, ino)` を
+///    [`verify_opened_file_matches_canonical_path`] で再検証し、不一致なら
+///    fail-closed に拒否する。
+/// 2. `metadata().len()` でのサイズ確認後、同じハンドルから EOF まで無制限に
+///    読み切っていたため、確認後にファイルが増加すると `MAX_SOURCE_BYTES` を
+///    実効的に迂回できた → `Read::take` で同一ハンドルから
+///    `MAX_SOURCE_BYTES + 1` バイトに上限した bounded read に変更し、
+///    上限超過を拒否する。
+///
+/// 中間コンポーネント（`repo_root` から `canonical_path` までの途中の
+/// ディレクトリ）がリンクへ差し替えられる race は、`std` のみでは
+/// `openat2(RESOLVE_BENEATH|RESOLVE_NO_SYMLINKS)` 相当の API がなく解消でき
+/// ない。これは `libc`/`nix` 等の追加依存が必要な既知のプラットフォーム制約
+/// であり（deps-policy.md: 追加依存はユーザー承認必須）、対応を省略した判断
+/// ではなく現状の制約として残す。
 fn read_verified_source(
     canonical_root: &Path,
     repo_root: &Path,
@@ -165,10 +212,22 @@ fn read_verified_source(
         return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string())));
     }
 
-    let mut file = fs::File::open(&canonical_path).map_err(|error| BuildError::ReadSource {
+    let file = fs::File::open(&canonical_path).map_err(|error| BuildError::ReadSource {
         source: source.to_string(),
         error,
     })?;
+
+    let matches =
+        verify_opened_file_matches_canonical_path(&file, &canonical_path).map_err(|error| {
+            BuildError::ReadSource {
+                source: source.to_string(),
+                error,
+            }
+        })?;
+    if !matches {
+        return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string())));
+    }
+
     let size = file
         .metadata()
         .map_err(|error| BuildError::ReadSource {
@@ -179,12 +238,20 @@ fn read_verified_source(
     if size > MAX_SOURCE_BYTES {
         return Err(BuildError::SourceTooLarge(source.to_string()));
     }
+
+    // bounded read: 確認済みサイズを超えてハンドルから読み進めないよう、同一
+    // ハンドルからの読み取りそのものに上限 `MAX_SOURCE_BYTES + 1` を課す
+    // （fstat 後の追記で無制限読み込みが上限を迂回する経路を塞ぐ）。
     let mut contents = String::new();
-    file.read_to_string(&mut contents)
+    file.take(MAX_SOURCE_BYTES + 1)
+        .read_to_string(&mut contents)
         .map_err(|error| BuildError::ReadSource {
             source: source.to_string(),
             error,
         })?;
+    if contents.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(BuildError::SourceTooLarge(source.to_string()));
+    }
     Ok(contents)
 }
 
@@ -269,9 +336,45 @@ fn write_file_creating_parent(
     {
         return Err(BuildError::UnsafeOutputPath(path_display));
     }
-    fs::write(path, contents).map_err(|error| BuildError::WritePage {
-        path: path_display,
-        error,
+
+    // 上の `symlink_metadata` 検査から実際の書き込みまでの間に、当該パスへ
+    // シンボリックリンクを差し替えられる race がなお残る（レビュー指摘・
+    // PR #899）。`fs::write` はリンクを辿って追従先を上書きしてしまうため、
+    // 検査と書き込みを不可分にする代わりに次の手順で closed に倒す:
+    // 1. `remove_file`（`NotFound` は無視）でそのパス上のエントリ自体を
+    //    unlink する（再ビルドで既存の通常ファイルを上書きする通常経路を
+    //    保つ。symlink であっても unlink はリンク自体を消すだけで追従先には
+    //    触れない）
+    // 2. `OpenOptions::create_new(true)` で新規作成する。POSIX の
+    //    `O_CREAT|O_EXCL` は対象パスが（シンボリックリンクを含め）既に何かを
+    //    指している場合 `EEXIST` で失敗するため、手順 1 と 2 の間で誰かが
+    //    そのパスへシンボリックリンクを再作成しても、その追従先へは絶対に
+    //    書き込まず fail-closed にエラーを返す（`std` のみで実現できる
+    //    atomic な原始命令。`custom_flags(O_NOFOLLOW)` のような手書き
+    //    プラットフォーム定数を要らない）。
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(BuildError::WritePage {
+                path: path_display,
+                error,
+            });
+        }
+    }
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| BuildError::WritePage {
+            path: path_display.clone(),
+            error,
+        })?;
+    std::io::Write::write_all(&mut file, contents.as_bytes()).map_err(|error| {
+        BuildError::WritePage {
+            path: path_display,
+            error,
+        }
     })
 }
 
@@ -305,16 +408,31 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     let nav_toml_path = root.join(NAV_TOML_RELATIVE_PATH);
 
     // DoS 抑止（`nav::MAX_INPUT_BYTES`）をこの唯一の FS アクセス経路で実効化する
-    // ため、ファイル全体を `fs::read_to_string` で読み切る前に `fs::metadata` で
-    // サイズを確認する。`parse_nav` 内の `input.len()` 検査（`nav.rs` 側）は
-    // 既にメモリに載った文字列に対する検査であり、この読み込み前チェックとは
-    // 独立に維持する（`parse_nav` 単体テストの FS 非依存性を壊さないため）。
-    let metadata = fs::metadata(&nav_toml_path).map_err(BuildError::ReadNavToml)?;
+    // ため、ファイル全体を読み切る前にサイズを確認する。`parse_nav` 内の
+    // `input.len()` 検査（`nav.rs` 側）は既にメモリに載った文字列に対する検査で
+    // あり、この読み込み前チェックとは独立に維持する（`parse_nav` 単体テストの
+    // FS 非依存性を壊さないため）。
+    //
+    // `fs::metadata(path)` と `fs::read_to_string(path)` は同じパスを別々に
+    // 再オープンする 2 回の FS アクセスであり、その間にパスがシンボリック
+    // リンクへ差し替えられる・確認後にファイルが増加するという 2 種の TOCTOU が
+    // 残っていた（レビュー指摘・PR #899）。単一の `File` ハンドルへ開き直し、
+    // 同一ハンドルの `metadata()`（早期棄却用）→ `Read::take` による
+    // `MAX_INPUT_BYTES + 1` 上限の bounded read（確認後の増加を無視できない
+    // ようにする）の順に変更する。
+    let nav_toml_file = fs::File::open(&nav_toml_path).map_err(BuildError::ReadNavToml)?;
+    let metadata = nav_toml_file.metadata().map_err(BuildError::ReadNavToml)?;
     if metadata.len() > nav::MAX_INPUT_BYTES as u64 {
         return Err(BuildError::Nav(NavError::TooLarge));
     }
-
-    let input = fs::read_to_string(&nav_toml_path).map_err(BuildError::ReadNavToml)?;
+    let mut input = String::new();
+    nav_toml_file
+        .take(nav::MAX_INPUT_BYTES as u64 + 1)
+        .read_to_string(&mut input)
+        .map_err(BuildError::ReadNavToml)?;
+    if input.len() as u64 > nav::MAX_INPUT_BYTES as u64 {
+        return Err(BuildError::Nav(NavError::TooLarge));
+    }
 
     let parsed: Nav = nav::parse_nav(&input)?;
     nav::validate_sources(&parsed, root)?;
@@ -355,7 +473,17 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     }
 
     let css_path = out.join(SITE_CSS_RELATIVE_PATH);
-    write_file_creating_parent(out, &canonical_out, &css_path, crate::theme::SITE_CSS)?;
+    write_file_creating_parent(out, &canonical_out, &css_path, crate::theme::SITE_CSS).map_err(
+        |error| match error {
+            // ページ書き出し（`WritePage`）と同じヘルパーを使うため、この呼び出し
+            // 元だけは `assets/site.css` 固有の `WriteAsset` へ詰め替える
+            // （Bugbot 指摘・PR #899: 詰め替えないとアセット I/O 失敗がページ
+            // 書き込みエラーとして誤報告され、`BuildError::WriteAsset` が
+            // 到達不能なデッドコードのままになる）。
+            BuildError::WritePage { error, .. } => BuildError::WriteAsset(error),
+            other => other,
+        },
+    )?;
     written.push(PathBuf::from(SITE_CSS_RELATIVE_PATH));
 
     let pages = parsed.sections.iter().map(|s| s.pages.len()).sum();

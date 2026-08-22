@@ -541,8 +541,18 @@ fn try_link(chars: &[char], i: usize, depth: usize) -> Option<(Node, usize)> {
 
     let inner_nodes = parse_inline(&text, depth + 1);
     if is_allowed_url(&url) {
+        // `href` には正規化後（先頭制御文字・半角スペース除去済み）の URL を格納
+        // する。生の `url` をそのまま使うと ` /guides/` のような先頭スペース付き
+        // root-relative リンク（CommonMark 許容）が `is_allowed_url` の判定は
+        // 通過する一方 `layout::rewrite_root_relative_hrefs` の `starts_with('/')`
+        // 判定を素通りしてしまい、`base_path` 書き換えが適用されず GitHub Pages
+        // のプロジェクトサイトでリンク切れになる（Bugbot 指摘・PR #899）。
         Some((
-            Node::element("a", vec![("href".to_string(), url)], inner_nodes),
+            Node::element(
+                "a",
+                vec![("href".to_string(), normalize_url(&url))],
+                inner_nodes,
+            ),
             next_i,
         ))
     } else {
@@ -776,6 +786,19 @@ mod tests {
         assert_eq!(
             html_of("[intro](/guide/intro/)"),
             "<p><a href=\"/guide/intro/\">intro</a></p>"
+        );
+    }
+
+    #[test]
+    fn renders_link_with_leading_space_root_relative_url_trimmed() {
+        // 回帰テスト（Bugbot 指摘・PR #899）: CommonMark は `](  /guides/)` の
+        // ような destination 前後の空白を許容する。href に生の値を格納すると
+        // 先頭スペースが残り `layout::rewrite_root_relative_hrefs` の
+        // `starts_with('/')` 判定を素通りして base_path 書き換えが適用されない
+        // ため、正規化済み（先頭スペース除去済み）の値が格納されることを確認する。
+        assert_eq!(
+            html_of("[guides]( /guides/)"),
+            "<p><a href=\"/guides/\">guides</a></p>"
         );
     }
 
