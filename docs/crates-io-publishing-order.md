@@ -512,8 +512,48 @@ sparse index 反映確認（9.3 節）後、②→③の各クレートについ
 一括バンプ後の同一 `workspace.version` を渡して同様に
 `dry-run-only` → `publish` の順で 1 クレートずつ実行する。
 
+## 11. リリース手順まとめ（バージョン更新〜タグ付け。イシュー #886）
+
+4 節（版数バンプ）・9 節（release ワークフロー運用）を通しの手順として
+まとめ、公開完了後のタグ付けを新たに確定する。
+
+1. **バージョン更新**: 4 節の手順に従い、ルート `Cargo.toml` の
+   `[workspace.package].version` と内部依存 `version = "=x.y.z"`（9 箇所）を
+   同時に更新する。`cargo build --workspace`（または `cargo metadata`）で
+   更新漏れが fail-closed に検出されることを確認する。
+2. **PR → CI green → main マージ**: 通常の Conventional Commits フロー
+   （`build(workspace):` 等）で PR を作成し、`ci-complete` を含む必須
+   チェックが green であることを確認してから main へマージする。
+3. **release ワークフローの実行**: 9.2〜9.3 節の手順（`dry-run-only` →
+   `publish`、①→②→③のトポロジカル順で 1 クレートずつ）に従い、main への
+   マージ後のコミットを起点に実行する。
+4. **公開完了後のタグ付け**: 公開 6 クレート全件の `publish` 完了・sparse
+   index への反映確認（9.3 節）後、公開した main コミットへ注釈付きタグ
+   `vX.Y.Z`（`workspace.version` と同一の単一タグ。lockstep のためクレート
+   別タグは付けない）を付与し push する。
+
+   ```sh
+   git tag -a vX.Y.Z -m "release: vX.Y.Z" <公開完了時点の main コミット sha>
+   git push origin vX.Y.Z
+   ```
+
+   このタグは **記録用（公開済みバージョンと main コミットの対応関係を
+   追跡する目的）であり、CI トリガーではない**。release ワークフロー
+   （#884）は `workflow_dispatch` のみをトリガーとする方式に確定済みで
+   （`.claude/rules/ci.md` release.yml 節）、タグ push によるワークフロー
+   起動は行わない。
+5. **変更履歴への追記**: 本ドキュメントの「変更履歴」節に、公開したバージョン・
+   対応イシュー・付与したタグを追記する。
+
+GitHub Release の作成等、タグ付け以降の追加運用は本ドキュメントのスコープ
+外とする（必要になった時点で別イシューとして起票し検討する）。
+
 ## 変更履歴
 
+- 2026-08-23（#886）: CLAUDE.md・`.claude/rules/ci.md` への公開構成反映に
+  あわせ、4 節（版数バンプ）・9 節（release ワークフロー運用）を通しの
+  リリース手順としてまとめ、公開完了後のタグ付け手順（注釈付きタグ
+  `vX.Y.Z`・記録用で CI トリガーではない）を 11 節として新規追記した。
 - 2026-08-23（#885）: 初回公開実行を試行したが、前提条件ゲート（#880 未マージ・
   environment `crates-io-release` 未設定）が未充足であったため実公開
   （`mode: publish`）を実行せず保留し、実測結果を 10 節として記録した。

@@ -54,6 +54,16 @@ fmt / clippy / test / cargo-deny の 4 ジョブ実体は Fandhe-AI/actions の 
 
 - CUDA 実機（DGX Spark GB10）・Metal 実機依存のテスト・ベンチは `#[ignore]` 分離を前提とし、通常 CI ジョブでは実行しない。実機ジョブを将来追加する場合は `docs/runner-policy.md` の例外整理に従い runner ラベルで対象 runner を明示する（例外の無断拡大は不可）
 
+## release.yml（crates.io publish。イシュー #884）
+
+`.github/workflows/release.yml` は公開 6 クレートの crates.io 公開を担う本リポ固有ワークフロー。手順の詳細・実測記録は `docs/crates-io-publishing-order.md` §9〜11 を正とし、本節では CI 規約上の位置づけのみを記す。
+
+- **トリガーは `workflow_dispatch` のみ**（タグ push トリガー・Trusted Publishing〈OIDC〉はユーザー指示により不採用と確定済み。#884・#885。理由は release.yml 冒頭コメントを正とし本節では書き写さない）
+- **verify → publish の 2 段構成**: `verify` ジョブ（トークン不要。semver 形式検証・`Cargo.toml` バージョン一致検証・crates.io 既公開バージョン検証・`cargo package --list`・`cargo publish --dry-run`）が green であることを確認したうえで、同一入力の `mode: publish` を再ディスパッチする。`publish` ジョブは `environment: crates-io-release` の承認ゲートを経てから `CARGO_REGISTRY_TOKEN`（org secret）をステップ限定で注入し `cargo publish` を実行する。runner は「ワークフロー設計」節の方針に従い `ubuntu-latest`・`timeout-minutes` 設定済み
+- **`mode: publish` の実効的な誤 dispatch 防止は GitHub 側の environment 保護（deployment branch 制限〈main 限定〉＋ required reviewers）に依存する**。これはユーザーが GitHub 側で設定する運用事項であり、本ワークフロー自体では代替できない（`docs/crates-io-publishing-order.md` §10 に前提未充足時の保留記録あり）
+- **PR の required status checks（ruleset `main-protection`）には含めない**: `workflow_dispatch` 専用のため PR 上では起動されず、required 化すると当該チェックが永久に pending 化しマージ不能になる。ジョブ追加・リネーム時の一般的な注意は「ワークフロー設計」節の運用上の注意と同じ
+- **秘密情報**: `CARGO_REGISTRY_TOKEN` は「秘密情報」節のとおり `secrets.*` 経由のみで参照し、値をログ・docs に書かない
+
 ## update-external.yml
 
 - `.github/workflows/update-external.yml` は Fandhe-AI/rust-ai-library-v1 の同名ワークフローをほぼ変更せず流用する（docs/spec サブモジュール・.claude/skills の自動追従）。改変時は upstream と差分が出た理由をコメントに残す
