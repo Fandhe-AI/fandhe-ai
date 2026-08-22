@@ -67,13 +67,14 @@ launch-only 計測（起動可否・スループットのみで出力値の数�
    # unexpected argument になり実行不能）ため、`--test <file>` でテスト
    # バイナリを限定したうえで 1 呼び出し 1 FILTER に分割する。
 
-   # crates/backend-cuda/tests/gemm_mma_tf32.rs（#[ignore] 4 本）
+   # crates/backend-cuda/tests/gemm_mma_tf32.rs（#[ignore] 3 本。
+   # `mma_tf32_zero_dim_shape_returns_empty_without_launch` は #853 で
+   # 環境適応型（`#[test]` のみ）へ変換済みのため通常 CI で実行され、
+   # 本 `--ignored` 一覧からは外れる）
    cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      mma_tf32_matches_reference_across_shapes
    cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      mma_tf32_k4096_stress
-   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
-     mma_tf32_zero_dim_shape_returns_empty_without_launch
    cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch
 
@@ -99,7 +100,7 @@ launch-only 計測（起動可否・スループットのみで出力値の数�
    |---|---|---|
    | `gemm_mma_tf32::mma_tf32_matches_reference_across_shapes` | **FAIL** | 先頭ケース `m=16 n=8 k=8`（1 `mma.sync` 呼び出しちょうど）で `fail_count=128/128, max_abs_diff=3.699e0, max_rel_err=1.948e0, mean_abs_diff=1.118e0, mean_rel_err=9.714e-1` |
    | `gemm_mma_tf32::mma_tf32_k4096_stress` | **FAIL** | `fail_count=16768000/16777216, max_abs_diff=1.148e2, max_rel_err=2.000e0, mean_abs_diff=1.702e1, mean_rel_err=8.028e-1` |
-   | `gemm_mma_tf32::mma_tf32_zero_dim_shape_returns_empty_without_launch` | **FAIL** | `run_tf32` が `InvalidShape { detail: "b length mismatch: expected 16 (k*n), actual 0" }` を返し `unwrap()` で panic（テスト側の呼び出し契約と実装の不整合。数値一致とは別種の不具合） |
+   | `gemm_mma_tf32::mma_tf32_zero_dim_shape_returns_empty_without_launch` | **FAIL** | `run_tf32` が `InvalidShape { detail: "b length mismatch: expected 16 (k*n), actual 0" }` を返し `unwrap()` で panic（テスト側の呼び出し契約と実装の不整合。数値一致とは別種の不具合）。テスト側バッファ長不備は §8.2/§8.3 のとおり **#852 で是正済み**（実機再実測で pass 確認済み）。**#853** ではこの是正済みテストを `#[ignore]` から環境適応型（`#[test]` のみ・通常 CI 対象）へ変換し、`gemm_mma_tf32.rs::run_tf32` のドキュメンテーションコメントへゼロ次元形状の契約（戻り値・バッファ長要件）を明記した（`validate_gemm_dims` 側の検証順序・契約自体は変更していない） |
    | `gemm_mma_tf32::launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch` | pass | ゼロ次元形状で起動せず no-op になる契約は健全 |
    | `mma_tf32_vs_wmma_tf32_staged::mma_tf32_matches_wmma_tf32_staged_across_shapes` | **FAIL** | 先頭ケース `m=64 n=64 k=64`（ブロックタイルちょうど・端数なし）で `fail_count=4092/4096, max_abs_diff=9.464e0, max_rel_err=1.997e0, mean_abs_diff=2.161e0, mean_rel_err=8.057e-1` |
    | `mma_tf32_vs_wmma_tf32_staged::mma_tf32_matches_wmma_tf32_staged_k4096_stress` | **FAIL** | `fail_count=16767942/16777216, max_abs_diff=1.188e2, max_rel_err=2.000e0, mean_abs_diff=1.703e1, mean_rel_err=8.031e-1` |
