@@ -492,9 +492,25 @@ sparse index への到達性のみを read-only な `curl` で確認した（ト
   制限〈main 限定〉）のユーザーによる設定（`.github/workflows/release.yml` 冒頭
   コメント参照。エージェント単独では実施しない）
 
-上記 2 点が満たされた後、9.3 節のトポロジカル順（①→②→③）で
-`gh workflow run release.yml -f mode=dry-run-only` → `-f mode=publish`
-（environment 承認）→ sparse index 反映確認、を 1 クレートずつ実行する。
+上記 2 点が満たされた後、9.3 節のトポロジカル順（①→②→③）で、
+クレートごとに `-f crate=<crate> -f version=<version>` を明示した
+`workflow_dispatch` を実行する（`version` は必須入力で既定値を持たないため、
+`-f version=<version>` を省略すると dispatch できない。9.1 節）。dry-run と
+publish は同一の `crate`／`version` を渡し、まず `dry-run-only` を green
+確認してから `publish`（environment 承認）へ進める（9.2 節）。①のクレート・
+`workspace.version`（4 節で確定した公開バージョン）を仮に `0.3.0` とした例:
+
+```sh
+gh workflow run release.yml \
+  -f crate=fandhe-ai-tensor-core -f version=0.3.0 -f mode=dry-run-only
+gh workflow run release.yml \
+  -f crate=fandhe-ai-tensor-core -f version=0.3.0 -f mode=publish
+```
+
+sparse index 反映確認（9.3 節）後、②→③の各クレートについても
+`-f crate=<crate>` のみを対象クレート名に差し替え、`-f version` は
+一括バンプ後の同一 `workspace.version` を渡して同様に
+`dry-run-only` → `publish` の順で 1 クレートずつ実行する。
 
 ## 変更履歴
 
