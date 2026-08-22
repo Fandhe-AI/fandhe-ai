@@ -82,13 +82,17 @@
 //! ## TF32 丸め（イシュー #800 の設計を踏襲）
 //!
 //! `mma.sync` の tf32 オペランドは明示変換済みビットを要求する。cp.async
-//! は生バイトコピーのため転送「中」に丸めを挟めない。よって
-//! `kernels_wmma_opt.rs::CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`
-//! （イシュー #800）と同一構造・同一の正しさ論証（走査添字が
+//! は生バイトコピーのため転送「中」に丸めを挟めない。よって本ファイル
+//! `CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`（走査添字が
 //! `LOAD_A_STAGE_GROUP`/`LOAD_B_STAGE_GROUP` と完全一致することに依存する
-//! 3 点論証。本ファイル `CONVERT_A_STAGE_GROUP` 定義直上コメント参照）を
-//! 移植し、各 compute イテレーション t の先頭・`cp.async.wait_group` 直後・
-//! `__syncthreads()` 前に、その stage の smem チャンクを 1 回だけ丸める。
+//! 3 点論証。定義直上コメント参照）により、各 compute イテレーション t の
+//! 先頭・`cp.async.wait_group` 直後・`__syncthreads()` 前に、その stage の
+//! smem チャンクを 1 回だけ丸める。#800 で `kernels_wmma_opt.rs`（wmma
+//! 経路）へ同型の丸め位置変更を導入したが、512〜2048 で性能回帰したため
+//! #851 で revert された（記録: `docs/perf/cuda-gemm-wmma-tf32-smem-
+//! staging-rounding.md`）。本ファイル（mma 経路）は bisect 対象外で回帰が
+//! 確認されていないため本設計を維持する（正しさ論証は本ファイル内で完結
+//! し、他ファイルの残存構造には依存しない）。
 //! 変換関数は `wmma::__float_to_tf32`（`#include <mma.h>` 経由。インライン
 //! PTX `cvt.rna.tf32.f32` と同一命令でビット一致・NVRTC 構文検証不能環境
 //! での asm 構文リスクを避けるため既存カーネルで実証済みのこちらを採用）。
@@ -393,8 +397,9 @@ extern "C" __global__ void gemm_mma_tf32(
     // LOAD_B_STAGE_GROUP と完全に同一（同じ (stage, g) に対し同じ tid が
     // 同じチャンクを担当する）。
     //
-    // 正しさの論証（kernels_wmma_opt.rs::CONVERT_A_STAGE_GROUP と同一の
-    // 3 点論証。呼び出し側 = 下記 t ループ先頭）:
+    // 正しさの論証（#800 で `kernels_wmma_opt.rs` に導入後 #851 で
+    // revert された同型構造と同一の 3 点論証。呼び出し側 = 下記 t
+    // ループ先頭）:
     // 1. 自スレッドの読み取り安全性: wait_group は当該スレッド
     //    自身が発行した cp.async の完了を保証する（PTX 契約）。上記の
     //    chunk 一致設計により、本マクロが読む要素は必ず同一スレッドが
@@ -1386,8 +1391,9 @@ mod tests {
     /// `CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP` マクロ定義内のみ
     /// であり、kstep ループ内（mma.sync 発行帯）には存在しないことを検査
     /// する（イシュー #800 の設計「smem ステージング時 1 回化」を本移植
-    /// でも壊していないことの回帰検査。`kernels_wmma_opt.rs` の同型
-    /// テストを参照）。
+    /// でも壊していないことの回帰検査。`kernels_wmma_opt.rs`〈wmma 経路〉
+    /// は #851 で同型構造を revert 済みのため、本テストは mma_tf32 経路
+    /// 単独の契約として維持する）。
     #[test]
     fn mma_tf32_source_rounds_only_in_convert_stage_group_macros() {
         let src = mma_tf32_source();

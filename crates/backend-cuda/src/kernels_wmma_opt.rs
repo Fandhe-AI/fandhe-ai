@@ -915,23 +915,16 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
             int lc = idx % WMMA_TF32_OPT_K_TILE;
             int gr = block_row_base + lr;
             int gc = lc;
-            // REQ-8: guarded load（範囲外はゼロ充填）。イシュー #800: 丸め
-            // （wmma::__float_to_tf32）を smem 格納時に 1 回だけ適用する
-            // （従来は kstep ループ内の fragment ロード直後で毎回丸めて
-            // いた。ゼロ充填値 0.0f は tf32 で正確に表現できるため分岐は
-            // 不要）。
-            as_tile[cur][lr][lc] =
-                (gr < DIM_M && gc < DIM_K) ? wmma::__float_to_tf32(a[gr * DIM_K + gc]) : 0.0f;
+            // REQ-8: guarded load（範囲外はゼロ充填）。
+            as_tile[cur][lr][lc] = (gr < DIM_M && gc < DIM_K) ? a[gr * DIM_K + gc] : 0.0f;
         }
         for (int idx = tid; idx < WMMA_TF32_OPT_K_TILE * WMMA_TF32_OPT_BLOCK_N; idx += num_threads) {
             int lr = idx / WMMA_TF32_OPT_BLOCK_N;
             int lc = idx % WMMA_TF32_OPT_BLOCK_N;
             int gr = lr;
             int gc = block_col_base + lc;
-            // REQ-8: guarded load（範囲外はゼロ充填）。イシュー #800: 上記
-            // と同様、smem 格納時に 1 回だけ丸める。
-            bs_tile[cur][lr][lc] =
-                (gr < DIM_K && gc < DIM_N) ? wmma::__float_to_tf32(b[gr * DIM_N + gc]) : 0.0f;
+            // REQ-8: guarded load（範囲外はゼロ充填）。
+            bs_tile[cur][lr][lc] = (gr < DIM_K && gc < DIM_N) ? b[gr * DIM_N + gc] : 0.0f;
         }
     }
     __syncthreads();
@@ -949,20 +942,16 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
                 int lc = idx % WMMA_TF32_OPT_K_TILE;
                 int gr = block_row_base + lr;
                 int gc = k_base_next + lc;
-                // REQ-8: guarded load（範囲外はゼロ充填）。イシュー #800:
-                // プリフェッチ側も smem 格納時に 1 回だけ丸める。
-                as_tile[nxt][lr][lc] =
-                    (gr < DIM_M && gc < DIM_K) ? wmma::__float_to_tf32(a[gr * DIM_K + gc]) : 0.0f;
+                // REQ-8: guarded load（範囲外はゼロ充填）。
+                as_tile[nxt][lr][lc] = (gr < DIM_M && gc < DIM_K) ? a[gr * DIM_K + gc] : 0.0f;
             }
             for (int idx = tid; idx < WMMA_TF32_OPT_K_TILE * WMMA_TF32_OPT_BLOCK_N; idx += num_threads) {
                 int lr = idx / WMMA_TF32_OPT_BLOCK_N;
                 int lc = idx % WMMA_TF32_OPT_BLOCK_N;
                 int gr = k_base_next + lr;
                 int gc = block_col_base + lc;
-                // REQ-8: guarded load（範囲外はゼロ充填）。イシュー #800:
-                // 同上。
-                bs_tile[nxt][lr][lc] =
-                    (gr < DIM_K && gc < DIM_N) ? wmma::__float_to_tf32(b[gr * DIM_N + gc]) : 0.0f;
+                // REQ-8: guarded load（範囲外はゼロ充填）。
+                bs_tile[nxt][lr][lc] = (gr < DIM_K && gc < DIM_N) ? b[gr * DIM_N + gc] : 0.0f;
             }
         }
 
@@ -978,16 +967,16 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
             wmma::fragment<wmma::matrix_b, WMMA_TF32_OPT_FRAG, WMMA_TF32_OPT_FRAG,
                            WMMA_TF32_OPT_FRAG_K, wmma::precision::tf32, wmma::row_major> b_frag[WMMA_TF32_OPT_FRAG_COLS];
 
-            // イシュー #800: 丸めは smem 格納時（プロローグ／プリフェッチの
-            // guarded load）で完了済みのため、fragment ロード直後の
-            // 変換ループは持たない（二重丸めを避け、mma_sync 発行帯の
-            // 命令数を削減する）。
 #pragma unroll
             for (int fi = 0; fi < WMMA_TF32_OPT_FRAG_ROWS; ++fi) {
                 wmma::load_matrix_sync(
                     a_frag[fi],
                     &as_tile[cur][warp_row_base + fi * WMMA_TF32_OPT_FRAG][k_off],
                     WMMA_TF32_OPT_A_PAD);
+#pragma unroll
+                for (int e = 0; e < a_frag[fi].num_elements; ++e) {
+                    a_frag[fi].x[e] = wmma::__float_to_tf32(a_frag[fi].x[e]);
+                }
             }
 #pragma unroll
             for (int fj = 0; fj < WMMA_TF32_OPT_FRAG_COLS; ++fj) {
@@ -995,6 +984,10 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
                     b_frag[fj],
                     &bs_tile[cur][k_off][warp_col_base + fj * WMMA_TF32_OPT_FRAG],
                     WMMA_TF32_OPT_B_PAD);
+#pragma unroll
+                for (int e = 0; e < b_frag[fj].num_elements; ++e) {
+                    b_frag[fj].x[e] = wmma::__float_to_tf32(b_frag[fj].x[e]);
+                }
             }
 
 #pragma unroll
@@ -1051,15 +1044,14 @@ extern "C" __global__ void gemm_wmma_tf32_opt(
 // 2 面ダブルバッファ・cp.async 不使用）と独立に、WMMA C++ API
 // （`nvcuda::wmma`）の TF32 経路へ横展開したもの。
 //
-// `WMMA_TF32_F32_OPT_BODY` は削除しない（整列非対応形状〈`gemm.rs::run_wmma_tf32`
-// の 3 段選択で cp.async 16 バイト整列条件〈n%4==0 && k%4==0〉を満たさない
-// 形状〉のフォールバック先として温存する。`docs/perf/cuda-gemm-wmma-tf32-phase-b.md`
-// 2 節「技法の選別」参照）。ただしイシュー #800 で丸め（`__float_to_tf32`）
-// の適用位置のみ、kstep ループ内の fragment ロード直後から smem 格納時
-// （guarded load 内）へ移した。数値契約上は「各要素が mma_sync 到達前に
-// ちょうど 1 回丸められる」点が不変のため同値（結果 bit 一致想定）。
-// `WMMA_TF32_F32_STAGED_BODY` 側の同種変更と対で適用する
-// （`docs/perf/cuda-gemm-wmma-tf32-smem-staging-rounding.md` 参照）。
+// `WMMA_TF32_F32_OPT_BODY` はフォールバック経路として削除しない（整列
+// 非対応形状〈`gemm.rs::run_wmma_tf32` の 3 段選択で cp.async 16 バイト
+// 整列条件〈n%4==0 && k%4==0〉を満たさない形状〉のフォールバック先として
+// 温存する。`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` 2 節「技法の選別」
+// 参照）。ただし本体の実装（TF32 丸め〈`__float_to_tf32`〉の適用位置等）
+// は正当な性能是正・実機 A/B の結果として変更しうる（イシュー #800・
+// #816・#851 の経緯を参照。本コメントが禁じるのは「削除」であり
+// 「改変」ではない）。
 // ============================================================================
 
 /// TF32 opt-staged GEMM（イシュー #500）のブロックタイル一辺。既存 TF32
@@ -2282,29 +2274,22 @@ impl CompiledWmmaTf32StagedDynKernel {
 /// （`nvcuda::wmma`）の TF32 経路へそのまま移植したもの。差分は
 /// (1) グローバル→共有メモリのロード粒度が f16 8 要素/16B ではなく f32
 /// 4 要素/16B である点、(2) `ldmatrix` の代わりに `wmma::load_matrix_sync`
-/// を使う点のみで、cp.async 段数管理・commit/wait 配置・issue
+/// を使い、ロード直後に `wmma::__float_to_tf32` による明示変換を適用する
+/// 点（既存 `WMMA_TF32_F32_OPT_BODY` と同一の数値契約。2 面バッファの
+/// どちらの呼び出しからもこの変換を経由するため、先読みバッファに変換
+/// 漏れが生じない）のみで、cp.async 段数管理・commit/wait 配置・issue
 /// interleaving の骨格は f16 版と同一の t/stage 添字算術を使う（正しさの
 /// 論証も同一。本ファイル [`WMMA_TF32_STAGED_STAGES`] 定数直下コメント
 /// 参照）。
-///
-/// **TF32 丸めの適用位置（イシュー #800）**: cp.async は生バイトコピー
-/// のため転送「中」に丸めを挟めない。よって各 compute イテレーション t の
-/// 先頭、`cp.async.wait_group` 直後・`load_matrix_sync` より前に、その
-/// タイル（`compute_stage`）の smem チャンクを 1 回だけ `wmma::__float_to_tf32`
-/// で丸める（`CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`。旧実装は
-/// fragment ロード直後・kstep ループ内で毎回丸めていたが、mma_sync 発行帯
-/// の命令数を減らすため smem ステージング直後の 1 回へ移した。詳細な
-/// 正しさ論証は下記カーネル本体内コメント参照）。
 ///
 /// **`_Pragma` 不使用の方針**: `kernels_mma.rs::MMA_F16_BODY` 冒頭
 /// ドキュメンテーションコメント「マクロを『1 フラグメント単位』に留め」
 /// と同じ理由（本ファイルは NVRTC 構文検証不能環境で書いており、
 /// `_Pragma` 演算子は本ファイル・`kernels_mma.rs` のいずれにも前例がなく
-/// NVRTC 上での挙動を実機なしで確認できない）で、fragment ロードマクロ
-/// （`LDWM_A_FRAG`/`LDWM_B_FRAG`）・TF32 変換マクロ（`CONVERT_A_STAGE_GROUP`/
-/// `CONVERT_B_STAGE_GROUP`）内では `#pragma unroll` を使わない（後者は
-/// チャンクあたり 4 要素のみの小ループを展開しないだけで、正しさには
-/// 影響しない）。`#pragma unroll` は既存 `WMMA_TF32_F32_OPT_BODY` と
+/// NVRTC 上での挙動を実機なしで確認できない）で、fragment ロード＋TF32
+/// 変換マクロ（`LDWM_A_FRAG`/`LDWM_B_FRAG`）内では `#pragma unroll` を
+/// 使わない（`num_elements` 反復のみの小ループを展開しないだけで、正しさ
+/// には影響しない）。`#pragma unroll` は既存 `WMMA_TF32_F32_OPT_BODY` と
 /// 同じく、プリプロセッサ済みの実際の文出現位置（マクロ呼び出し側の
 /// `fi`/`fj`/`ks` ループ）にのみ置く。
 const WMMA_TF32_F32_STAGED_BODY: &str = r#"
@@ -2436,56 +2421,6 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
             wmma_tf32_staged_cp_async16(&bs_tile[stage][row][col0], &b[(size_t)gr_c * DIM_N + gc_c], valid); \
         }
 
-    // イシュー #800: smem ステージング着後の TF32 丸め（1 回化）マクロ。
-    // 走査する idx 範囲・row/col0 算術は上記 LOAD_A_STAGE_GROUP/
-    // LOAD_B_STAGE_GROUP と完全に同一（同じ (stage, g) に対し同じ tid が
-    // 同じチャンクを担当する）。この一致により、各スレッドは「自分が
-    // cp.async で書き込んだチャンクのみ」を読み・変換して書き戻す。
-    //
-    // 正しさの論証（呼び出し側 = 下記 t ループ先頭。本ファイル冒頭・
-    // 上記ドキュメンテーションコメント参照）:
-    // 1. 自スレッドの読み取り安全性: `cp.async.wait_group` は当該
-    //    スレッド自身が発行した cp.async の完了を保証する（PTX 契約）。
-    //    上記の chunk 一致設計により、本マクロが読む要素は必ず同一
-    //    スレッドが直前に cp.async で書き込んだ要素なので、wait_group
-    //    のみで安全に読める（他スレッド分の smem には一切触れない）。
-    // 2. 他スレッドへの公開: 変換結果を全 warp の `load_matrix_sync` へ
-    //    公開するのは wait_group ではなく、呼び出し直後に**既存のまま
-    //    保持している** `__syncthreads()` である（本マクロの呼び出しは
-    //    その `__syncthreads()` より前に置く。順序を入れ替えると本論証
-    //    は成立しない）。
-    // 3. stage バッファ再利用時の WAR 安全性: 同一物理 stage バッファは
-    //    STAGES イテレーションごとに再利用されるが、直前の利用
-    //    （`load_matrix_sync`／`mma_sync` によるフラグメント読み出し）は
-    //    ループ末尾の無条件 `__syncthreads()`（t ループ末尾）で必ず
-    //    完了してから次の cp.async 上書き・本マクロの変換が走る。よって
-    //    「読み出し中の stage への書き込み」は発生しない（二重変換・
-    //    変換漏れも生じない。`wmma::__float_to_tf32` は冪等なので万一の
-    //    重複も数値影響なし）。
-    // src_size=0 でゼロ充填されたチャンクの変換は 0.0f→0.0f で無害
-    // （ガード分岐不要。上記 LOAD マクロのゼロ充填と同じ理由）。
-    #define CONVERT_A_STAGE_GROUP(stage, g) \
-        for (int idx = (g) * A_GROUP_CHUNKS + tid; \
-             idx < A_CHUNKS && idx < ((g) + 1) * A_GROUP_CHUNKS; \
-             idx += num_threads) { \
-            int row = idx / (WMMA_TF32_STAGED_K_TILE / 4); \
-            int col0 = (idx % (WMMA_TF32_STAGED_K_TILE / 4)) * 4; \
-            for (int e = 0; e < 4; ++e) { \
-                as_tile[stage][row][col0 + e] = wmma::__float_to_tf32(as_tile[stage][row][col0 + e]); \
-            } \
-        }
-
-    #define CONVERT_B_STAGE_GROUP(stage, g) \
-        for (int idx = (g) * B_GROUP_CHUNKS + tid; \
-             idx < B_CHUNKS && idx < ((g) + 1) * B_GROUP_CHUNKS; \
-             idx += num_threads) { \
-            int row = idx / (WMMA_TF32_STAGED_BLOCK_N / 4); \
-            int col0 = (idx % (WMMA_TF32_STAGED_BLOCK_N / 4)) * 4; \
-            for (int e = 0; e < 4; ++e) { \
-                bs_tile[stage][row][col0 + e] = wmma::__float_to_tf32(bs_tile[stage][row][col0 + e]); \
-            } \
-        }
-
     // プロローグ（下記）は K タイル 1 段分をまとめてロードする必要が
     // あるため、上記 2 マクロを全グループについて呼ぶ薄いラッパーとして
     // 再定義する（kernels_mma.rs::MMA_F16_BODY「#496」節と同じ設計）。
@@ -2525,22 +2460,6 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
         // 完了数 >= t+1、すなわちタイル t のグループの完了が全 t で
         // 保証される。
         asm volatile("cp.async.wait_group %0;\n" ::"n"(WMMA_TF32_STAGED_STAGES - 2));
-
-        // イシュー #800: 丸めは smem 到着直後・全 warp への公開
-        // （下記 __syncthreads）より前にここで 1 回だけ適用する
-        // （正しさの論証は CONVERT_A_STAGE_GROUP/CONVERT_B_STAGE_GROUP
-        // 定義直上コメント参照。とくに論証 2「他スレッドへの公開は
-        // 直後の __syncthreads() が担う」ため、本ループと
-        // __syncthreads() の順序を入れ替えないこと）。`#pragma unroll`
-        // は付さない（`LOAD_A_STAGE`/`LOAD_B_STAGE` の g_ ラッパー
-        // ループと同じ前例。本ファイルは NVRTC 構文検証不能環境のため、
-        // マクロ呼び出しを含むループへの pragma 付与は前例のある形に
-        // 限定する）。
-        for (int g_ = 0; g_ < K_GROUPS; ++g_) {
-            CONVERT_A_STAGE_GROUP(compute_stage, g_);
-            CONVERT_B_STAGE_GROUP(compute_stage, g_);
-        }
-
         __syncthreads();
 
         // fragment 2 面バッファ（cur/nxt）。kernels_mma.rs::MMA_F16_BODY
@@ -2556,10 +2475,10 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
                        WMMA_TF32_STAGED_FRAG_K, wmma::precision::tf32, wmma::row_major>
             b_frag[2][WMMA_TF32_STAGED_FRAG_COLS];
 
-        // フラグメント 1 個を buf 面へロードするマクロ。イシュー #800:
-        // 丸め（`wmma::__float_to_tf32`）は本マクロには含まれない
-        // （上記 CONVERT_A_STAGE_GROUP/CONVERT_B_STAGE_GROUP で smem
-        // ステージング直後に既に丸め済みのため）。`_Pragma` 不使用の
+        // フラグメント 1 個を buf 面へロードし、TF32 明示変換を直後に
+        // 適用するマクロ（既存 `WMMA_TF32_F32_OPT_BODY` と同一の数値
+        // 契約。2 面バッファのどちらの呼び出しからもこのマクロを経由する
+        // ため、先読みバッファに変換漏れが生じない）。`_Pragma` 不使用の
         // 方針は本ファイルこのテンプレート冒頭ドキュメンテーション
         // コメント参照（呼び出し側で `#pragma unroll` を付す）。
         #define LDWM_A_FRAG(buf, stage, kstep, fi) \
@@ -2568,6 +2487,9 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
                     a_frag[buf][fi], \
                     &as_tile[stage][warp_row_base + (fi) * WMMA_TF32_STAGED_FRAG][(kstep) * WMMA_TF32_STAGED_FRAG_K], \
                     WMMA_TF32_STAGED_A_PAD); \
+                for (int e = 0; e < a_frag[buf][fi].num_elements; ++e) { \
+                    a_frag[buf][fi].x[e] = wmma::__float_to_tf32(a_frag[buf][fi].x[e]); \
+                } \
             } while (0)
 
         #define LDWM_B_FRAG(buf, stage, kstep, fj) \
@@ -2576,6 +2498,9 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
                     b_frag[buf][fj], \
                     &bs_tile[stage][(kstep) * WMMA_TF32_STAGED_FRAG_K][warp_col_base + (fj) * WMMA_TF32_STAGED_FRAG], \
                     WMMA_TF32_STAGED_B_PAD); \
+                for (int e = 0; e < b_frag[buf][fj].num_elements; ++e) { \
+                    b_frag[buf][fj].x[e] = wmma::__float_to_tf32(b_frag[buf][fj].x[e]); \
+                } \
             } while (0)
 
         // warp プロローグ: kstep=0 のフラグメントをバッファ 0 へロードして
@@ -2651,8 +2576,6 @@ extern "C" __global__ void gemm_wmma_tf32_staged(
     #undef LOAD_B_STAGE
     #undef LOAD_A_STAGE_GROUP
     #undef LOAD_B_STAGE_GROUP
-    #undef CONVERT_A_STAGE_GROUP
-    #undef CONVERT_B_STAGE_GROUP
     #undef A_GROUP_CHUNKS
     #undef B_GROUP_CHUNKS
     #undef A_CHUNKS
@@ -3164,27 +3087,30 @@ mod tests {
         }
     }
 
-    /// イシュー #800: TF32 opt（`__syncthreads()` ベース 2 面ダブルバッファ
-    /// 版）側の丸め位置ロック。`wmma_tf32_staged_source_rounds_tf32_once_at_smem_staging`
-    /// と同方針。プロローグ（A/B 各 1 箇所）・プリフェッチ（A/B 各 1 箇所）
-    /// の guarded load 内で smem 格納時に丸めるため、丸め出現回数は 4
-    /// （kstep ループ内の丸めは 0）である。
+    /// #851 レビュー指摘対応: 非 staged TF32 経路（`WMMA_TF32_F32_OPT_BODY`）
+    /// の丸め位置を固定する。`wmma_tf32_opt_source_uses_wmma_instructions`
+    /// は変換命令がどこかに 1 回存在することしか検査できず、A/B 片側や
+    /// 一部の fragment load から `wmma::__float_to_tf32` 変換が欠落しても
+    /// 通過してしまう（単純な部分文字列存在検査の限界）。staged 経路の
+    /// `wmma_tf32_staged_source_applies_tf32_conversion_to_every_fragment_load`
+    /// と同じ「出現回数の突合」方式を非 staged 経路にも適用し、
+    /// `load_matrix_sync`（A・B 各 1 箇所 = 計 2）と `__float_to_tf32` 変換
+    /// ループ（同じく計 2）の個数が一致することを固定する。
     #[test]
-    fn wmma_tf32_opt_source_rounds_tf32_once_at_smem_staging() {
+    fn wmma_tf32_opt_source_applies_tf32_conversion_to_every_fragment_load() {
         let src = wmma_tf32_f32_opt_source();
+        let load_count = src.matches("wmma::load_matrix_sync(").count();
         let convert_count = src.matches("wmma::__float_to_tf32(").count();
         assert_eq!(
-            convert_count, 4,
-            "プロローグ A/B・プリフェッチ A/B の guarded load、計 4 箇所の \
-             wmma::__float_to_tf32 呼び出しが期待されます（実際: {convert_count}）"
+            load_count, convert_count,
+            "wmma::load_matrix_sync の出現回数（{load_count}）と \
+             wmma::__float_to_tf32 変換ループの出現回数（{convert_count}）が一致しません \
+             （A/B いずれかの fragment load で TF32 変換が欠落している可能性）"
         );
-        let kstep_loop_pos = src.find("for (int ks = 0").expect(
-            "wmma_tf32_f32_opt_source() に kstep ループ（for (int ks = 0）が見つかりません",
-        );
-        assert!(
-            !src[kstep_loop_pos..].contains("wmma::__float_to_tf32("),
-            "kstep ループ（位置 {kstep_loop_pos} 以降）に wmma::__float_to_tf32 が見つかりました。 \
-             丸めは smem ステージング時の 1 回に限定する契約（イシュー #800）への回帰です"
+        assert_eq!(
+            load_count, 2,
+            "A フラグメント・B フラグメントそれぞれ 1 箇所ずつ、計 2 箇所の \
+             load_matrix_sync 呼び出しが期待されます（実際: {load_count}）"
         );
     }
 
@@ -3805,54 +3731,45 @@ mod tests {
         );
     }
 
-    /// イシュー #800: TF32 丸めを smem ステージング時（`CONVERT_A_STAGE_GROUP`/
-    /// `CONVERT_B_STAGE_GROUP` マクロ定義）の 1 回に限定する契約のロック。
-    /// 旧テスト（`..._applies_tf32_conversion_to_every_fragment_load`。
-    /// fragment ロード直後に丸める旧契約のロック）を新契約へ差し替える。
+    /// advisor 指摘（PR レビュー相当）: `load_matrix_sync` の呼び出し回数
+    /// と TF32 明示変換ループ（`wmma::__float_to_tf32` を呼ぶ `for` ループ）
+    /// の出現回数が一致することを検査する。fragment ロード直後の変換適用は
+    /// 数値契約の根幹（既存 `WMMA_TF32_F32_OPT_BODY` と同一契約）であり、
+    /// 2 面バッファのどちらか一方だけ変換が漏れる回帰を検出する（単純な
+    /// 部分文字列存在検査では検出できないクラスの回帰のため、出現回数の
+    /// 突合という強い形の検査にする）。
     ///
-    /// 検査観点:
-    /// 1. `wmma::__float_to_tf32(` の出現回数が 2（`CONVERT_A_STAGE_GROUP`・
-    ///    `CONVERT_B_STAGE_GROUP` マクロ定義に 1 箇所ずつ）であること。
-    /// 2. `wmma::load_matrix_sync(` の出現回数は従来どおり 2
-    ///    （`LDWM_A_FRAG`・`LDWM_B_FRAG` マクロ定義に 1 箇所ずつ）で
-    ///    据え置くこと。
-    /// 3. kstep ループ（`for (int ks = 0` の出現箇所）以降に
-    ///    `wmma::__float_to_tf32` が一切出現しないこと。これは
-    ///    「kstep 内変換の復活」＝丸め位置を旧契約へ戻す回帰を検出する
-    ///    （CONVERT マクロの呼び出しはループ先頭・kstep ループの外側で
-    ///    行われるため、正しい実装ではこの検査を必ず満たす）。
+    /// PR #857 レビュー指摘（P1）対応: swizzle 変種
+    /// （[`wmma_tf32_f32_staged_source_with_swizzle`]）は本番変種で通常版
+    /// とは別のソース生成関数を通るため、通常版のみの検査では swizzle
+    /// 側だけ変換が欠落する回帰を見逃す。本テストは通常版・swizzle 版
+    /// （group_width=8）の双方を走査して同一契約を検査する
+    /// （`wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_...`
+    /// が示すとおり swizzle 変種は BODY テンプレートを共有するアンカー
+    /// 置換のみのため、同一契約が両方で成立するはず）。
     #[test]
-    fn wmma_tf32_staged_source_rounds_tf32_once_at_smem_staging() {
-        // イシュー #800 プラン 2.2「swizzle 変種は同一 BODY テンプレート
-        // を共有するため自動追従するはず」という前提を実測で確認する
-        // ため、無印ソースに加えて swizzle 変種（アンカー文字列置換のみ
-        // で丸め関連領域には触れない設計。
-        // `wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_...`
-        // 参照）も同一契約でロックする。
+    fn wmma_tf32_staged_source_applies_tf32_conversion_to_every_fragment_load() {
         let sources = [
             wmma_tf32_f32_staged_source().to_string(),
             wmma_tf32_f32_staged_source_with_swizzle(8).expect("group_width=8 must be accepted"),
         ];
         for src in sources {
-            let convert_count = src.matches("wmma::__float_to_tf32(").count();
-            assert_eq!(
-                convert_count, 2,
-                "CONVERT_A_STAGE_GROUP/CONVERT_B_STAGE_GROUP マクロ定義それぞれ 1 箇所ずつ、計 2 箇所の \
-                 wmma::__float_to_tf32 呼び出しが期待されます（実際: {convert_count}）"
-            );
             let load_count = src.matches("wmma::load_matrix_sync(").count();
+            let convert_count = src.matches("wmma::__float_to_tf32(").count();
+            // マクロ定義側に 1 箇所ずつ（LDWM_A_FRAG・LDWM_B_FRAG）記述されている
+            // のみで、呼び出し側は展開時に増えるが本テストはテンプレート文字列
+            // （展開前のマクロ定義込みソース）を対象にしているため、定義箇所の
+            // 個数（load: 2、convert: 2）が一致することを検査する。
+            assert_eq!(
+                load_count, convert_count,
+                "wmma::load_matrix_sync の出現回数（{load_count}）と \
+                 wmma::__float_to_tf32 変換ループの出現回数（{convert_count}）が一致しません \
+                 （先読みバッファの一方で TF32 変換が欠落している可能性）"
+            );
             assert_eq!(
                 load_count, 2,
                 "LDWM_A_FRAG/LDWM_B_FRAG マクロ定義それぞれ 1 箇所ずつ、計 2 箇所の \
                  load_matrix_sync 呼び出しが期待されます（実際: {load_count}）"
-            );
-            let kstep_loop_pos = src
-                .find("for (int ks = 0")
-                .expect("staged source に kstep ループ（for (int ks = 0）が見つかりません");
-            assert!(
-                !src[kstep_loop_pos..].contains("wmma::__float_to_tf32("),
-                "kstep ループ（位置 {kstep_loop_pos} 以降）に wmma::__float_to_tf32 が見つかりました。 \
-                 丸めは smem ステージング時の 1 回に限定する契約（イシュー #800）への回帰です"
             );
         }
     }

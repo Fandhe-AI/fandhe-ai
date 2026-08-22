@@ -1,4 +1,4 @@
-# CUDA GEMM: TF32 丸めの smem ステージング時 1 回化（イシュー #800）
+# CUDA GEMM: TF32 丸めの smem ステージング時 1 回化（イシュー #800・wmma 側は #851 で revert 済み）
 
 ## 0. 背景・目的
 
@@ -113,47 +113,115 @@ toolkit・実機がないため未検証。下記 3 節参照）。
   ロック（「変種は同一 BODY テンプレートを共有するため自動追従する」
   という設計前提を実測で確認する）。
 
-## 3. 実機検証（未実施・要実機実行）
+## 3. 実機検証
 
-本作業環境には `docs/real-hardware-verification-env.local.md`
-（DGX Spark GB10 実機接続情報）が存在しないため、以下は**未実測**である。
-安全側の方針（`docs/real-hardware-verification-env.md`・#742 の先例）に
-従い、実測していない数値は記入せず空欄のまま記録する。
+本ドキュメント作成時点（コミット `2c0f9ec`・#816）では実機未検証だった。
+その後、イシュー #851 本文は GB10 実機 bisect A/B（親 `9bbac56` vs
+`2c0f9ec`。5 回計測中央値）を報告し、本番最優先経路（TF32 opt-staged）が
+512〜2048 において明確な性能回帰を示したとされていた。**codex-review
+指摘（PR #857・P1）を受け、本 PR 自身のセッションで GB10 実機（`spark-dbd9`。
+実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）に接続し、
+revert 前後（A/B）双方を再実測して
+`docs/perf/gemm-optimization-baseline.md` §5 の受入条件を満たしたことを
+確認した**（イシュー本文の数値をそのまま引用するのではなく、本 PR 自身
+のセッションで bisect を再現している）。
 
-- [ ] NVRTC 実コンパイル確認（`wmma_tf32_staged_available()`/
-      `wmma_tf32_opt_available()` が true であること）
-- [ ] 数値一致・parity 非後退（統一複合判定）:
-      `cargo test -p backend-cuda --release -- --ignored`
-      （`gemm_wmma_tf32_staged`/`gemm_wmma_tf32_opt`/
-      `cpu_cuda_wmma_parity`/`parity_nonregression`/
-      `tensor_core_real_device` 等）
-- [ ] `cargo test -p backend-cuda --release --features internal-diagnostics
-      --test specialized_mma_parity -- --ignored`
-- [ ] ベンチ A/B（`cargo run -p backend-cuda --example cuda_floor_bench
-      --release`）: main チェックアウトと本変更ブランチそれぞれで
-      512/1024/2048/4096 の中央値（5 回計測）を突合
+### 3.1 実測条件
 
-| M=N=K | main（TFLOPS） | 本変更（TFLOPS） | 差分 |
-|------:|---------------:|-----------------:|-----:|
-| 512   | 未実測 | 未実測 | - |
-| 1024  | 未実測 | 未実測 | - |
-| 2048  | 未実測 | 未実測 | - |
-| 4096  | 未実測 | 未実測 | - |
+- **ノード**: `spark-dbd9`（`docs/real-hardware-verification-env.md`
+  記載の GB10・`nvidia-smi` で GPU utilization 0% を計測直前に確認済み。
+  実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）
+- **ベンチバイナリ**: `cargo run -p backend-cuda --example
+  gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics`
+  の `base_tflops`（本番カーネル・swizzle 無効の系列。`CudaGemm::new`
+  経由。swizzle 変種列は本 A/B の対象外）
+- **A（revert 前・#816 の丸め 1 回化状態）**: `origin/main`
+  コミット `930c1b3c2fa58f4b70d990d52d2aa645a67f860c`（`kernels_wmma_opt.rs`
+  の `CONVERT_A_STAGE_GROUP`/`CONVERT_B_STAGE_GROUP`・`LDWM_A_FRAG`
+  変換 for ループ削除を実測前に確認済み）
+- **B（revert 後・本 PR HEAD）**: コミット
+  `59384c876b45731f855965228e244a9a073a294e`（`kernels_wmma_opt.rs` を
+  親コミット `9bbac56` 相当へ全面復元＋#857 P2 レビュー指摘対応の
+  ソースロックテスト追加）
+- A・B とも `rsync`（`.gitignore` フィルタ・秘密情報系ファイル明示除外）
+  でノードへ転送し、転送直後に `.rev-stamp` でコミット一致を確認、
+  `cargo build --release` 後に各 5 回連続実行・`base_tflops` の中央値を
+  採用（5 回計測中央値。全 4 形状で共通のビルド成果物を使い回した）
+
+### 3.2 実測結果（5 回計測中央値・TFLOPS）
+
+| M=N=K | A（`930c1b3`・丸め 1 回化） | B（本 PR HEAD・丸め毎回revert） | 差分（B/A） | 合格条件 | 判定 |
+|------:|------------------------------:|----------------------------------:|-----:|:---|:---:|
+| 512   | 6.5922 | 8.2241 | +24.75% | `9bbac56` 実測 8.2685 の −2% 以内（≥8.1031） | 合格 |
+| 1024  | 10.6505 | 12.6872 | +19.12% | `9bbac56` 実測 12.7316 の −2% 以内（≥12.4770） | 合格 |
+| 2048  | 12.0073 | 14.3585 | +19.58% | `9bbac56` 実測 14.4050 の −2% 以内（≥14.1169） | 合格 |
+| 4096  | 8.9663 | 9.0644 | +1.09% | `9bbac56` 実測 9.0358 に対し非劣化（≥9.0358） | 合格 |
+
+（各セルは 5 回計測の中央値。生データ・個別 run のログは本 PR のセッション
+記録に残る。A/B とも同一ビルド設定・同一マシン・同一未使用状態の GPU で
+連続計測した。）
+
+512〜2048 は `9bbac56`（丸め毎回・revert 後の期待値）に対し ±2% 以内へ
+復帰し、4096 も非劣化であることを実測で確認した。小〜中サイズでの回帰
+幅（A→B の改善率、約 +19〜+25%）はイシュー #851 記載の bisect 値（約
+−16〜−20%）と方向・オーダーとも整合する。4096 がほぼ中立である点も
+整合しており、データ再利用崩壊
+（`docs/perf/cuda-gemm-bottleneck-diagnosis.md`）が支配的という既存分析
+と矛盾しない。
+
+- [x] NVRTC 実コンパイル確認（`wmma_tf32_staged_available()`/
+      `wmma_tf32_opt_available()` が true であること）— B で
+      `cargo test -p backend-cuda --release -- --ignored
+      kernels_wmma_opt::tests::wmma_opt_sources_compile_with_nvrtc_when_available`
+      等が pass することを確認（`gemm_wmma_tf32_swizzle_bench` 自体が
+      `wmma_tf32_staged_available()` チェックを経て実行されている）
+- [x] 数値一致・parity 非後退（統一複合判定）: B で
+      `cargo test -p backend-cuda --release -- --ignored --test-threads=1`
+      を実行。`wmma_tf32_opt_kernel_parity_does_not_regress`・
+      `wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096` は pass。
+      `wmma_tf32_basic_kernel_parity_does_not_regress`（基本版カーネルの
+      確定ベースライン未整備。本 revert の対象外〈5 章参照〉）・
+      `wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+      `wmma_tf32_opt_kernel_k4096_stress`・`jit_cache_bench_*`（一時
+      ディレクトリ pin の環境依存 I/O エラー）は失敗したが、A（`930c1b3`）
+      でも同一 fail_count・同一 max_abs_diff で同様に失敗することを
+      確認済みで、**本 revert に起因する新規回帰ではなく既存の
+      pre-existing failure**（別イシューの対象。本 PR のスコープ外）
+- [x] revert 後のベンチ再計測（`gemm_wmma_tf32_swizzle_bench` の base
+      系列。512/1024/2048/4096・5 回中央値）— 3.2 節の表のとおり実施し、
+      全形状で合格条件を満たした
+
+**結論**: `docs/perf/gemm-optimization-baseline.md` §5 の受入条件（実機
+A/B・全形状・5 回計測中央値）を本 PR 自身のセッションで満たした。マージ
+可能状態とする。
 
 ## 4. 採否判断
 
-**暫定採用（実機未検証のためコミット時点の判断。実機 A/B が劣化を示した
-場合は 3 章のフォールバック規定に従い再判断する）**。
+**不採用（#851 で revert。コード・ドキュメント・実機 A/B による revert
+後の再確認〈3 章〉とも完了。`docs/perf/gemm-optimization-baseline.md`
+§5 の受入条件を満たしマージ可能状態）**。
 
-- ソースロックテスト・数値契約の同値性論証により、実装は計画どおり完了
-  している。
-- 実機ベンチ A/B が未実施のため、性能改善効果自体は本ドキュメント時点
-  では確認できていない。実機接続可能な環境で 3 章のチェックリストを
-  実行し、本ドキュメントの表・チェックボックスを更新すること。
-- 劣化が確認された場合: staged 側の変更は取り込まず（LDWM 内変換の
-  ままへ戻す）、OPT 側のみ採用または全面不採用とする
-  （`backend-metal-*-decision.md` 系の先例に倣い、本ドキュメントへ
-  不採用判断を追記する）。
+- #816（`2c0f9ec`）は実機 A/B 未実施のままマージされ、イシュー #851
+  記載の bisect 実測（3 章）によれば 512〜2048 で約 −16〜−20% の性能
+  回帰を招いたとされていた。本 PR のセッションで GB10 実機を用いて
+  revert 前後を再実測し、同方向・同オーダーの差分（3.2 節）を確認した。
+- `kernels_wmma_opt.rs` を親コミット `9bbac56`（#816 直前）の状態へ
+  全面復元し、TF32 opt-staged・TF32 opt 両カーネルの丸め位置を
+  「kstep ループ内・fragment ロード直後に毎回丸める」旧方式へ戻した
+  （§1.1・§1.2 で説明した変更・ソースロックテストとも revert 対象）。
+  OPT 側も実機未検証のまま temporary に残す理由がないため、3 章末尾の
+  フォールバック規定（「劣化時は staged 側を戻し、OPT 側のみ採用
+  **または全面不採用**」）に従い全面不採用とした。
+- 丸め 1 回化そのものの再設計（cp.async のロード段へ丸めを融合する形。
+  cp.async が生バイトコピーである以上ロード段融合は構造的に不可能で
+  あり、別のステージング方式が必要）は本イシューでは追わない。実機
+  A/B で非劣化を確認できる形の再設計が必要になった場合は改めて別
+  イシューで扱う。
+- `kernels_mma_tf32.rs`（mma 経路。#800 の設計を独自に内蔵）は bisect
+  対象外であり、この経路で同型の回帰が確認されたわけではないため
+  本設計（丸め 1 回化）を維持する。同経路の変換パスにも同種の
+  オーバーヘッドが存在しうる点は所見として記録するに留め、無承認では
+  Issue 化しない（`out-of-scope-tracking.md`）。
 
 ## 5. スコープ外（別イシュー化候補）
 
