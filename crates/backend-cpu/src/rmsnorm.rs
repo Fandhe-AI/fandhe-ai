@@ -5,8 +5,8 @@
 //! モジュール構成方針を踏襲する: [`run_rmsnorm_f32`]（標準 RMSNorm。`mean`
 //! 化 + `eps` + 任意 `weight`）を公開エントリとし、`ops.rs::CpuBackendOps::
 //! run_fused` は canonical 融合プラン（`mean` 化・`eps`・`weight` を含まない
-//! `x * rsqrt(sum(x^2))`）専用の内部エントリ [`run_rmsnorm_f32_raw`] を
-//! `inv_n = 1.0` で直接呼ぶ（[`match_rmsnorm_plan`] が一致判定するプラン
+//! `x * rsqrt(sum(x^2))`）専用の内部エントリ `run_rmsnorm_f32_raw` を
+//! `inv_n = 1.0` で直接呼ぶ（`match_rmsnorm_plan` が一致判定するプラン
 //! 形状は CUDA `rmsnorm.rs::match_rmsnorm_plan` と 1:1 対応）。
 //!
 //! # NEON / スカラー二重経路
@@ -38,7 +38,7 @@ use rayon::prelude::*;
 
 use crate::elementwise::PARALLEL_THRESHOLD;
 
-/// [`run_rmsnorm_f32`]／[`run_rmsnorm_f32_raw`] の型付きエラー
+/// [`run_rmsnorm_f32`]／`run_rmsnorm_f32_raw` の型付きエラー
 /// （`reduction::ReduceError` と同じ「小さな enum」方針）。
 #[non_exhaustive]
 #[derive(Debug)]
@@ -94,7 +94,7 @@ fn validate_rmsnorm_launch(
 /// eps) * w`（`w` が `None` の場合は乗算をスキップ）。
 ///
 /// `x` は `[rows, hidden]` の行優先 1 次元化済みスライス。`inv_n = 1/hidden`
-/// を内部導出し [`run_rmsnorm_f32_raw`] へ委譲する（`hidden == 0` の場合は
+/// を内部導出し `run_rmsnorm_f32_raw` へ委譲する（`hidden == 0` の場合は
 /// `inv_n = 1.0`〈使われない〉として渡し、ゼロ除算を避ける）。
 pub fn run_rmsnorm_f32(
     x: &[f32],

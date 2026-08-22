@@ -336,7 +336,7 @@ pub fn probe_gpu_core_count() -> Option<u32> {
     Some(value as u32)
 }
 
-/// [`MetalDeviceProvider::probe_all`] とは独立に、occupancy 目標算出
+/// `MetalDeviceProvider::probe_all` とは独立に、occupancy 目標算出
 /// （`crate::tile::OccupancyParams`）が必要とする実機値をまとめて取得する
 /// 入口（イシュー #541）。`crate::tile::actual_groups`／
 /// `crate::tile::OccupancyParams::ideal_groups` への `select()` 組み込みは
@@ -357,7 +357,7 @@ pub struct MetalOccupancyInfo {
 
 impl MetalOccupancyInfo {
     /// 指定デバイスから occupancy 算出用の実測値をまとめて取得する。
-    /// `device` は `MTLCopyAllDevices()`（[`MetalDeviceProvider::probe_all`]
+    /// `device` は `MTLCopyAllDevices()`（`MetalDeviceProvider::probe_all`
     /// 内部）等で得た `MTLDevice` プロトコルオブジェクトを想定する。
     pub fn probe(device: &objc2::runtime::ProtocolObject<dyn MTLDevice>) -> Self {
         Self {

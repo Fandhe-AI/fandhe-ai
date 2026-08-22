@@ -66,7 +66,7 @@ use safetensors::tensor::{TensorView, serialize};
 ///
 /// `#[non_exhaustive]` を付す理由: 公開 API 非破壊はガードレール条件
 /// （`.claude/rules/security.md`）であり、後続タスクで variant が増えても
-/// 呼び出し側の網羅的 match を破壊しないため（[`st_load::LoadError`]
+/// 呼び出し側の網羅的 match を破壊しないため（`st_load::LoadError`
 /// (crate::st_load::LoadError) と同じ方針）。
 #[non_exhaustive]
 #[derive(Debug)]
@@ -101,7 +101,7 @@ impl std::error::Error for SaveError {}
 ///
 /// [`save_safetensors_f32`] から呼ばれる本体実装。バイト列を直接返す形に
 /// してあるのは、テスト（`tests/st_save.rs`）がファイル I/O なしにヘッダ
-/// 構造・決定性を検証できるようにするため（[`st_load::load_safetensors_f32_from_bytes`]
+/// 構造・決定性を検証できるようにするため（`st_load::load_safetensors_f32_from_bytes`
 /// (crate::st_load::load_safetensors_f32_from_bytes) と対称の設計）。
 ///
 /// `metadata` は safetensors の `__metadata__`（例: `{"format": "pt"}`）への

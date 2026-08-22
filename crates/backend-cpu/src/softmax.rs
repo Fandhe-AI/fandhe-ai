@@ -4,7 +4,7 @@
 //! `backend-cuda::softmax`（#594）・`backend-metal::softmax`（#604）と同じ
 //! モジュール構成方針を踏襲する: [`run_softmax_f32`] を公開エントリとし、
 //! `ops.rs::CpuBackendOps::run_fused` は canonical 融合プラン
-//! （`exp(x - max(x)) / sum(exp(x - max(x)))`）検出時（[`match_softmax_plan`]
+//! （`exp(x - max(x)) / sum(exp(x - max(x)))`）検出時（`match_softmax_plan`
 //! 参照）に本モジュールへルーティングする。
 //!
 //! # exp 実装方式の採用判断（受入基準 2。tolerance 緩和なし）

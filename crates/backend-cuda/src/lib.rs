@@ -101,7 +101,7 @@
 //! `CudaWmmaGemm`／`CudaMmaGemm` の直接指定 API はテスト・証跡用途
 //! （#70）にそのまま温存する（設計文書 §5.4）。
 //!
-//! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::CudaBackendOps`]）を追加した。
+//! TASK-1.9c（#46）で `ops` モジュール（[`ops::CudaBackendOps`]）を追加した。
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装であり、`gemm` は
 //! [`CudaGemm::run_tiled_f32`] へ委譲する（既定カーネル変種の選択は保守的に
 //! tiled 固定とし、`CudaGemmAuto` を介した Tensor Core 経路の自動選択への
@@ -115,7 +115,7 @@
 //! を返す（out-of-scope-tracking.md 対象）。
 //!
 //! イシュー #499（GEMM 性能改善ツリー #479 の後続）で L2 再利用のための
-//! タイル→SM 割り当てスウィズル（[`swizzle`]・`kernels_mma::
+//! タイル→SM 割り当てスウィズル（`swizzle`・`kernels_mma::
 //! mma_f16_source_with_swizzle`）を opt-in・`internal-diagnostics`
 //! feature（既定 off）ゲート経路として追加した（#497 と同型の判断。本
 //! セッション実行環境〈RTX 3060・NVRTC 非搭載〉では実機 A/B 計測が
@@ -132,7 +132,7 @@
 //! イシュー #775 で 2026-08-20 GB10 実機再計測（4096: base 34.4089 →
 //! swizzle(動的幅 g8) 54.3055 TFLOPS・×1.578 が安定再現。512〜2048 は
 //! ×0.979〜0.992）を根拠に、**サイズ条件付き適用**（総タイル数
-//! `num_m_blocks * num_n_blocks >= 2048`。[`swizzle::should_apply_swizzle`]）
+//! `num_m_blocks * num_n_blocks >= 2048`。`swizzle::should_apply_swizzle`）
 //! のロジック自体は実装したが、`gemm_mma::CudaMmaGemm::new`（本番既定
 //! コンストラクタ）への結線は見送った。#758 差し戻し理由（採用基準の無承認
 //! 読み替え・結線前必須確認未実施・CI 恒久検査の SM 数入力誤り）のうち
@@ -160,7 +160,7 @@
 //! codex-review 指摘への対応として結線済みコード自身に対するマージ前
 //! 検証（2026-08-21・DGX Spark GB10 実機）で全項目解消済み**
 //! （`docs/perf/cuda-gemm-swizzle-ab.md` §6.3 参照）。
-//! PR #784 codex-review P1 是正で、[`swizzle::should_apply_swizzle`] は
+//! PR #784 codex-review P1 是正で、`swizzle::should_apply_swizzle` は
 //! 上記の総タイル数閾値に加えて M/N 各軸のブロック数が実測点
 //! M=N=K=4096 相当以上（`swizzle::SWIZZLE_APPLY_MIN_M_BLOCKS`/
 //! `SWIZZLE_APPLY_MIN_N_BLOCKS`）であることも要求するよう改訂した。実測
@@ -222,7 +222,7 @@
 //! （`exp(x-max(x))/sum(...)`。最終軸または全軸縮約の厳密形状。
 //! `softmax::match_softmax_plan`）検出時のみ本カーネルへルーティングする。
 //!
-//! Phase C-4（#511。親イシュー #503 の最終タスク）で [`module_cache`]
+//! Phase C-4（#511。親イシュー #503 の最終タスク）で `module_cache`
 //! （非公開 `mod`。`pub use` で再公開しない内部実装詳細）を追加し、
 //! `kernels_mma.rs::RenderedMmaKernel::compile` をプロセス内 LRU
 //! （ロード済みモジュールハンドル再利用）→ ディスクキャッシュ

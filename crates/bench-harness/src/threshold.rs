@@ -51,7 +51,7 @@ pub const THRESHOLD_SCHEMA_VERSION: &str = "1";
 /// [`crate::BenchReport::backend`] は自由文字列（`report.rs`: 「列挙型としての固定化は
 /// TASK-8.2 側の関心事」）だが、判定時は本 enum へ fail-closed で解決する。
 /// [`judge`] は `own`/`pytorch` の `backend` 文字列が本 enum の期待値
-/// （[`BackendDtype::expected_backend_str`]）と一致しない場合、Pass に倒さずエラーを返す。
+/// （`BackendDtype::expected_backend_str`）と一致しない場合、Pass に倒さずエラーを返す。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BackendDtype {
     CpuF32,
@@ -347,7 +347,7 @@ impl FloorJudgment {
 ///
 /// # 契約
 ///
-/// - `own`/`pytorch` はいずれも `backend_dtype` の [`BackendDtype::expected_backend_str`] と
+/// - `own`/`pytorch` はいずれも `backend_dtype` の `BackendDtype::expected_backend_str` と
 ///   一致するバックエンド上で計測された [`BenchReport`] であること。不一致は
 ///   Pass に倒さずエラーとする（fail-closed。`.claude/rules/security.md` A08）。
 /// - 比率＝スループット比＝所要時間の逆数比: `pytorch.median_secs / own.median_secs * 100`。

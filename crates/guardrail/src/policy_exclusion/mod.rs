@@ -13,7 +13,7 @@
 //!
 //! # モジュール構成（イシュー #124・TASK-5.2c 時点）
 //! - [`path_match`][]: 自作パス glob マッチャ（`glob` クレート非依存。#122 管轄）。
-//! - [`any_diff_in_paths`][]: `arch-hyperparameter-change`・`dependency-change`
+//! - [`any_diff_in_paths`](fn@any_diff_in_paths): `arch-hyperparameter-change`・`dependency-change`
 //!   の match 評価本体（#122 管轄。`dependency-change` への適用は #124）。
 //! - [`load`][]: `policy-exclusion.toml` 専用ミニ TOML ローダ（[`load::load_from_str`]。
 //!   #124 管轄。`crate::toml_lite` を再利用しない判断理由は同モジュールのドキュメント参照）。
@@ -216,7 +216,7 @@ impl EvaluationContext {
     /// [`GuardrailError`] として伝播する（fail-closed。`match` なし
     /// ＝自動適用方向へ丸めない）。
     ///
-    /// `changed_files` は [`crate::exclusion_match::changed_files_for_policy_exclusion`]
+    /// `changed_files` は `crate::exclusion_match::changed_files_for_policy_exclusion`
     /// （`Cargo.lock` を除外しない取得口）を使う理由は同関数のドキュメント参照
     /// （`dependency-change` ルールが `Cargo.lock` 単独変更を見逃さないため）。
     pub fn from_repo(repo_root: &Path, baseline: &str) -> Result<Self, GuardrailError> {

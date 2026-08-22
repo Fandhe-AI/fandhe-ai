@@ -18,11 +18,11 @@
 //! 自前実装し、[`Isa::detect`] による実行時 CPU 機能検出でマイクロ
 //! カーネルを選択する:
 //!
-//! - aarch64: NEON は常時有効の baseline ISA のため無条件で [`neon`] を選ぶ
+//! - aarch64: NEON は常時有効の baseline ISA のため無条件で `neon` を選ぶ
 //!   （実行時検出は不要。[`Isa::detect`] は常に `Isa::Neon` を返す）
 //! - x86_64: [`Isa::detect`] が `is_x86_feature_detected!("avx512f")` →
-//!   `"avx2"` かつ `"fma"` → 非対応の順に検出し、対応する [`Avx512Kernel`] /
-//!   [`Avx2Kernel`] / [`ScalarKernel`] トークンを選ぶ
+//!   `"avx2"` かつ `"fma"` → 非対応の順に検出し、対応する `Avx512Kernel` /
+//!   `Avx2Kernel` / [`ScalarKernel`] トークンを選ぶ
 //! - その他 arch: 常に [`ScalarKernel`]
 //!
 //! ### 健全性契約（トークン型による dispatch）
@@ -76,7 +76,7 @@ pub mod avx512;
 use std::fmt;
 use std::sync::OnceLock;
 
-/// [`check_c_tile_bounds`] が検出する `ldc`／`c` 長の契約違反を表す型付き
+/// `check_c_tile_bounds` が検出する `ldc`／`c` 長の契約違反を表す型付き
 /// エラー（#691 レビュー P1 再指摘への対応）。
 ///
 /// 従来は `assert!`／`panic!` で検出結果を通知していたが、
@@ -135,7 +135,7 @@ pub enum TileBoundsError {
     /// と一致しない、またはその積が `usize` でオーバーフローする（#691
     /// レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。
     ///
-    /// [`check_panel_lengths`] のドキュメント参照。素朴な `usize` 乗算
+    /// `check_panel_lengths` のドキュメント参照。素朴な `usize` 乗算
     /// （`MR * kc_len` 等）は release ビルド（`overflow-checks` 無効）で
     /// オーバーフロー時にラップし、意図しない短い `ap`／`bp` を境界検査の
     /// 素通りさせて後続の `unsafe` SIMD ロードを未定義動作へ導きうる
@@ -312,14 +312,14 @@ pub use scalar::{MR, NR, kernel};
 
 /// 実行時 ISA ディスパッチが選択可能なマイクロカーネルの共通契約。
 ///
-/// [`super::gemm_blis_region`] はこの trait をジェネリック境界に取り、
+/// `super::gemm_blis_region` はこの trait をジェネリック境界に取り、
 /// `K::MR`／`K::NR` でタイル形状を、[`Microkernel::run`] で累積計算を
-/// 行う。各実装（[`ScalarKernel`]／[`NeonKernel`]／[`Avx2Kernel`]／
-/// [`Avx512Kernel`]）は `Copy + Sync` な ZST（サイズ 0 の型）であり、
+/// 行う。各実装（[`ScalarKernel`]／`NeonKernel`／`Avx2Kernel`／
+/// `Avx512Kernel`）は `Copy + Sync` な ZST（サイズ 0 の型）であり、
 /// rayon のクロージャへそのまま値渡しできる。
 pub trait Microkernel: Copy + Sync {
     /// マイクロカーネルタイルの行数。**契約: 1 以上でなければならない**
-    /// （#691 レビュー指摘。`MR == 0` は [`check_c_tile_bounds`] の
+    /// （#691 レビュー指摘。`MR == 0` は `check_c_tile_bounds` の
     /// `mr.checked_sub(1)` 経由で明示的に
     /// [`TileBoundsError::NonPositiveMrOrOverflow`] を返すが、`0` を許容
     /// する設計ではない。実装がこの契約を破ると
@@ -327,7 +327,7 @@ pub trait Microkernel: Copy + Sync {
     /// `kernel`／`kernel_unchecked` は正しい結果を返さない）。
     const MR: usize;
     /// マイクロカーネルタイルの列数。**契約: 1 以上でなければならない**
-    /// （[`Self::MR`] 同様。`NR == 0` は [`check_c_tile_bounds`] が
+    /// （[`Self::MR`] 同様。`NR == 0` は `check_c_tile_bounds` が
     /// `nr == 0` を明示的に検出して
     /// [`TileBoundsError::NonPositiveNr`] を返す〈#691 レビュー P0 再指摘
     /// `PRRT_kwDOTuUCJc6ZrQZE`〉。以前は `ldc < nr` 判定が `nr == 0` の
@@ -362,7 +362,7 @@ pub trait Microkernel: Copy + Sync {
     /// `ldc` 契約版（#557: 完全タイルの C 直接ロード/ストア）。`c` は要素
     /// `c[i * ldc + j]`（`i in 0..MR`・`j in 0..NR`）のみを読み書きする
     /// 対象とし、それ以外のインデックスへは触れない。この契約により、
-    /// 呼び出し元（[`super::gemm_blis_region`]）は 2 通りの呼び出し方が
+    /// 呼び出し元（`super::gemm_blis_region`）は 2 通りの呼び出し方が
     /// できる:
     ///
     /// - 完全タイル（`mr_eff == MR && nr_eff == NR`）: C の実バッファから
@@ -387,14 +387,14 @@ pub trait Microkernel: Copy + Sync {
     ///   呼んだ後、結果を `ldc` ストライドで `c` へスキャッタし直す
     ///   （正しさ優先のフォールバック。#557 が狙うコピー往復削減の効果は
     ///   本フォールバック経路には及ばないが、組み込みカーネル
-    ///   （[`ScalarKernel`]／[`NeonKernel`]／[`Avx2Kernel`]／
-    ///   [`Avx512Kernel`]）は全て本メソッドを直接オーバーライドしており
-    ///   本番の駆動経路（[`super::gemm_blis_region`]）はこのフォールバック
+    ///   （[`ScalarKernel`]／`NeonKernel`／`Avx2Kernel`／
+    ///   `Avx512Kernel`）は全て本メソッドを直接オーバーライドしており
+    ///   本番の駆動経路（`super::gemm_blis_region`）はこのフォールバック
     ///   を通らない）
     ///
     /// ## 型付きエラー化（#691 レビュー P1 再指摘への対応）
     ///
-    /// `ldc`／`c` 長の契約検査（[`check_c_tile_bounds`]）は本メソッド・
+    /// `ldc`／`c` 長の契約検査（`check_c_tile_bounds`）は本メソッド・
     /// 各 ISA の `kernel_with_ldc`／`kernel_unchecked_with_ldc` から到達
     /// 可能な**公開**入口であり、外部の `Microkernel` 実装が誤った
     /// `ldc`／`c` を渡した場合に panic が本番経路から漏れていた
@@ -410,7 +410,7 @@ pub trait Microkernel: Copy + Sync {
     /// 上記の型付きエラー化は `c`／`ldc` の検査のみを対象としており、
     /// `ap`／`bp` の長さ検査は含んでいなかった。本メソッドは `Result` を
     /// 返す公開入口である以上、各 ISA の `kernel_with_ldc`／
-    /// `kernel_unchecked_with_ldc` と同様に [`check_panel_lengths`]（`ap`／
+    /// `kernel_unchecked_with_ldc` と同様に `check_panel_lengths`（`ap`／
     /// `bp` 長不一致・オーバーフローを `TileBoundsError::
     /// PanelLengthMismatch` として拒否）も `check_c_tile_bounds` と併せて
     /// 実行する。
@@ -662,7 +662,7 @@ impl Microkernel for NeonBLaneqKernel {
     }
 }
 
-/// x86_64 AVX2+FMA トークン。[`Avx2Kernel::try_new`] 経由でのみ構築でき、
+/// x86_64 AVX2+FMA トークン。`Avx2Kernel::try_new` 経由でのみ構築でき、
 /// これが実行 CPU の AVX2+FMA 対応を保証する（[`Microkernel::run`] 内部の
 /// `unsafe { avx2::kernel_unchecked(...) }` の SAFETY 根拠）。
 #[cfg(target_arch = "x86_64")]
@@ -716,7 +716,7 @@ impl Microkernel for Avx2Kernel {
     }
 }
 
-/// x86_64 AVX-512F トークン。[`Avx512Kernel::try_new`] 経由でのみ構築でき、
+/// x86_64 AVX-512F トークン。`Avx512Kernel::try_new` 経由でのみ構築でき、
 /// これが実行 CPU の AVX-512F 対応を保証する。`avx512_stable` cfg
 /// （[`avx512`] モジュールドキュメント参照）が立っている rustc（AVX-512F
 /// intrinsics が stable 化済みと `build.rs` の probe が確認できた場合）

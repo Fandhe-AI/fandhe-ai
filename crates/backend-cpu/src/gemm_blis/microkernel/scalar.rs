@@ -4,7 +4,7 @@
 //! コンパイル時に有効でない環境・NEON を持たない arch（`microkernel::mod`
 //! の cfg 選択がここへフォールバックする条件は同モジュールのドキュメント
 //! 参照）で `gemm_blis` の既定経路として使われる。intrinsics 版
-//! （[`super::neon`]・[`super::avx2`]）と累積順序（p 昇順の `mul_add`
+//! （`super::neon`・`super::avx2`）と累積順序（p 昇順の `mul_add`
 //! 連鎖）を完全に揃えることで、`gemm_naive` との bit 完全一致契約
 //! （REQ-2・PoC-v2-5 の FMA 契約統一）を ISA 間で共有する。
 
@@ -22,7 +22,7 @@ const _: () = assert!(MR * NR <= 256);
 /// p-major）から MR×NR の C タイル `c`（row-major、行ストライド `ldc`）へ
 /// `kc_len` ぶんの寄与を加算する。
 ///
-/// 呼び出し元（[`super::super::mod`] の 5-loop ドライバ）は本関数呼び出し
+/// 呼び出し元（`super::super::mod` の 5-loop ドライバ）は本関数呼び出し
 /// 前に `c` へ実際の C の現在値をロードし、呼び出し後に書き戻す
 /// （複数の `pc` ブロックにまたがる累積を成立させるため）。#557 により
 /// 完全タイルは C の実バッファへ `ldc = n` で直接読み書きし、端タイルは
@@ -50,7 +50,7 @@ const _: () = assert!(MR * NR <= 256);
 /// 検査は当初 `assert_eq!`（panic）のままだったが、本関数が既に `Result`
 /// を返す入口である以上ここも型付きエラーへ揃えるのが一貫すると判断し
 /// （#691 レビュー P0 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）、
-/// [`super::check_panel_lengths`] 経由の検証へ変更した。
+/// `super::check_panel_lengths` 経由の検証へ変更した。
 ///
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
 ///
@@ -105,7 +105,7 @@ fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
 /// ビルドでも有効。`debug_assert!` ではない）で検出し panic する（#557
 /// 以前〈`kernel` が唯一の実装だった頃〉と同じ「呼び出し元契約違反は早期
 /// panic で検出する」方針を維持する。REQ-8 手動境界チェック省略禁止）。
-/// `ap`／`bp` の長さ検査は [`super::panel_len_matches`] で `checked_mul`
+/// `ap`／`bp` の長さ検査は `super::panel_len_matches` で `checked_mul`
 /// によりオーバーフローも確実に不一致として扱う（#691 レビュー P0
 /// 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。`c_tile.len() == MR * NR` の検査は
 /// `ldc` 一般化のリファクタで一時的に失われていたが、`compute` への

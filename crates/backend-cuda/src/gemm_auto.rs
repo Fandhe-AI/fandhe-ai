@@ -89,7 +89,7 @@ const BYTES_PER_ELEMENT_F32: NonZeroU32 = match NonZeroU32::new(4) {
 };
 
 /// `device` の `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK` を実行時
-/// に取得し、[`STATIC_SMEM_BUDGET_CAP_BYTES`] でクランプしたうえで
+/// に取得し、`STATIC_SMEM_BUDGET_CAP_BYTES` でクランプしたうえで
 /// [`derive_pipeline_stages`]（`nvrtc.rs`・C-8）へ渡してパイプライン段数を
 /// 導出する結線ヘルパー（イシュー #521 実装計画 §4）。
 ///
@@ -196,12 +196,12 @@ fn bytes_per_element_for(dtype: DType) -> NonZeroU32 {
 /// | 軸 | 候補 |
 /// |----|------|
 /// | block_m | `BLOCK_M_BASE_CANDIDATES`（`{64, 128}`）。`shape.m <=`
-/// | `SMALL_M_THRESHOLD`（64）の場合のみ [`MMA_WARP_M`]（32）を追加する。
-/// | 16 は本カーネル族の warp タイル（[`MMA_WARP_M`] = 32）が構造的に
+/// | `SMALL_M_THRESHOLD`（64）の場合のみ `MMA_WARP_M`（32）を追加する。
+/// | 16 は本カーネル族の warp タイル（`MMA_WARP_M` = 32）が構造的に
 /// | 分解不能なため候補にしない |
-/// | block_n | [`MMA_WARP_N`]（16）の倍数刻みで `16..=BLOCK_N_MAX_CANDIDATE`
+/// | block_n | `MMA_WARP_N`（16）の倍数刻みで `16..=BLOCK_N_MAX_CANDIDATE`
 /// | （256） |
-/// | block_k | [`MMA_K`]（16）の倍数 `{16, 32, 64}`
+/// | block_k | `MMA_K`（16）の倍数 `{16, 32, 64}`
 /// | （本カーネルの K ループ構造 `MMA_K_STEPS_PER_STAGE = BK / MMA_K`
 /// | の整数制約） |
 /// | cluster | 列挙しない（thread block cluster は本カーネル族が
@@ -244,11 +244,11 @@ fn bytes_per_element_for(dtype: DType) -> NonZeroU32 {
 ///    「swizzle 64B 未満」枝刈りの本カーネル族への適応。既存テスト
 ///    `mma_tile_dims_satisfy_cp_async_alignment_granularity`
 ///    〈`kernels_mma.rs`〉と同じ 16B 粒度契約）。block_n は規則 1 により
-///    常に [`MMA_WARP_N`]（16）の倍数、block_k は規則 1（続き）により
-///    常に [`MMA_K`]（16）の倍数と確定しているため、`bytes_per_element`
+///    常に `MMA_WARP_N`（16）の倍数、block_k は規則 1（続き）により
+///    常に `MMA_K`（16）の倍数と確定しているため、`bytes_per_element`
 ///    が 1 以上である限り両積は常に 16 の倍数になり、現行候補空間では
 ///    この規則も構造的に発火しない〈dead〉。#524 レビュー指摘。将来
-///    warp タイル寸法（[`MMA_WARP_N`]／[`MMA_K`]）が 16 未満に変更される
+///    warp タイル寸法（`MMA_WARP_N`／`MMA_K`）が 16 未満に変更される
 ///    ケースの多層防御として意図的に残す
 /// 5. 段数・SMEM 不成立: [`derive_pipeline_stages`] が `Err`（SMEM
 ///    予算超過と DeepGEMM 由来の最小段数要求〈3 段・小タイル 4 段〉
@@ -283,7 +283,7 @@ fn bytes_per_element_for(dtype: DType) -> NonZeroU32 {
 /// （C-9b・#527 のスコープ）。カーネルソース・tolerance 定数・既定経路は
 /// 一切変更しないため、本関数の追加は既定経路の実行結果・parity
 /// ベースラインに影響しない。候補でのカーネル生成・コンパイル・実測も
-/// 行わない（[実機不要] タスク）。
+/// 行わない（\[実機不要\] タスク）。
 pub fn enumerate_tile_candidates(
     shape: GemmShape,
     dtype: DType,
@@ -340,7 +340,7 @@ pub fn enumerate_tile_candidates(
 /// と同型。イシュー #524 実装計画 §3.3）。
 ///
 /// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK` を取得し
-/// [`STATIC_SMEM_BUDGET_CAP_BYTES`] でクランプしたうえで純関数
+/// `STATIC_SMEM_BUDGET_CAP_BYTES` でクランプしたうえで純関数
 /// [`enumerate_tile_candidates`] へ渡す。属性取得の失敗は
 /// `CudaError::Driver` として呼び出し元へそのまま伝播する（fail-closed）。
 pub fn enumerate_tile_candidates_for_device(
@@ -974,7 +974,7 @@ mod cost_model {
     ///
     /// 単位は `docs/perf/sm121-device-attributes.md` の「単位に関する
     /// 注意」（L2 は device-wide 総帯域・L1 は per-SM 帯域）と厳密に
-    /// 揃える。[`estimate_candidate_cost`] は `l1_bytes_per_cycle_per_sm`
+    /// 揃える。`estimate_candidate_cost` は `l1_bytes_per_cycle_per_sm`
     /// を呼び出し側から渡された `num_sms` 倍して device-wide 換算する。
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MeasuredBandwidth {
@@ -987,7 +987,7 @@ mod cost_model {
     /// sm_121 実測帯域定数（A-2・イシュー #482 が「未実測・要実機実行」の
     /// まま安全側クローズしているため `None`）。
     ///
-    /// `None` の間は [`select_tile_config`] がコストモデルを一切評価せず
+    /// `None` の間は `select_tile_config` がコストモデルを一切評価せず
     /// 固定選定テーブル（`FIXED_TILE_SELECTION`）へ fail-closed に
     /// フォールバックする。`docs/perf/sm121-device-attributes.md` に実測値
     /// が記入され、`docs/perf/cuda-gemm-cost-model-selection.md` の実機
@@ -1009,9 +1009,9 @@ mod cost_model {
     /// 未検証の `CostModel` 選定結果を成功として返してしまう）。
     pub const SM121_COMPUTE_CAPABILITY: (i32, i32) = (12, 1);
 
-    /// [`estimate_candidate_cost`] へ渡すデバイス実行時パラメータ。
+    /// `estimate_candidate_cost` へ渡すデバイス実行時パラメータ。
     ///
-    /// `num_sms` はハードコードせず、呼び出し元（[`select_tile_config_for_device`]）
+    /// `num_sms` はハードコードせず、呼び出し元（`select_tile_config_for_device`）
     /// が `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT` から実行時に構築する。
     #[derive(Debug, Clone, Copy)]
     pub struct CostModelParams {
@@ -1382,10 +1382,10 @@ impl TileSelection {
 ///
 /// `measured` が `Some`（sm_121 実測帯域が確定済み）の場合のみ
 /// [`enumerate_tile_candidates`]（#524）で候補を列挙し
-/// [`cost_model::select_best_tile_candidate`] で最良 1 件を選ぶ。
+/// `cost_model::select_best_tile_candidate` で最良 1 件を選ぶ。
 /// 候補が 0 件、またはコストモデル自体が交差乗算オーバーフローで
 /// 評価不能だった場合は、`measured` の有無に関わらず
-/// [`cost_model::FIXED_TILE_SELECTION`]（実測裏付けのある現行本番構成
+/// `cost_model::FIXED_TILE_SELECTION`（実測裏付けのある現行本番構成
 /// 64/128/32・stages 3）へ fail-closed にフォールバックする（本モジュール
 /// `cost_model` ドキュメンテーションコメント参照）。
 ///
@@ -1397,7 +1397,7 @@ impl TileSelection {
 ///
 /// `measured` が `None`、またはコストモデルが候補ゼロ件／評価不能で
 /// 固定選定テーブルへフォールバックする場合、[`cost_model::
-/// FIXED_TILE_SELECTION`] を無条件に成功として返さず、[`validate_fixed_tile_selection`]
+/// FIXED_TILE_SELECTION`] を無条件に成功として返さず、`validate_fixed_tile_selection`
 /// で呼び出し元が渡した `shape`／`dtype`／`smem_budget_bytes` に対して
 /// 実際に適用可能かを検証する（codex-review #675 P1 指摘: 検証なしで
 /// 固定テーブルを返すと `smem_budget_bytes` 予算超過・`shape` の
@@ -1527,11 +1527,11 @@ fn validate_fixed_tile_selection(
 /// 属性取得の失敗は `CudaError::Driver`／`CudaError::InvalidKernelDescriptor`
 /// として呼び出し元へそのまま伝播する（fail-closed。既存ヘルパーと同型）。
 ///
-/// `device.compute_capability()` を [`SM121_COMPUTE_CAPABILITY`]（sm_121）と
+/// `device.compute_capability()` を `SM121_COMPUTE_CAPABILITY`（sm_121）と
 /// 突き合わせ、一致する場合のみ [`SM121_MEASURED_BANDWIDTH`] を
 /// [`select_tile_config`] へ渡す。不一致（sm_80/sm_90 等の他アーキテクチャ）
 /// の場合は `measured = None` を渡し、[`select_tile_config`] を常に
-/// 検証済み固定選定テーブル経路（[`fixed_table_selection_if_valid`]）へ
+/// 検証済み固定選定テーブル経路（`fixed_table_selection_if_valid`）へ
 /// fail-closed に倒す（codex-review #675 P1 指摘対応: sm_121 実測定数
 /// ——将来 `SM121_MEASURED_BANDWIDTH` が `Some` へ更新された時点——を
 /// アーキテクチャ検証なしに他デバイスへ適用すると、未検証の `CostModel`

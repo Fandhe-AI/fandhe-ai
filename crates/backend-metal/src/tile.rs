@@ -1,9 +1,9 @@
 //! 動的タイル選択（TASK-1.8f・#188）: `gemm_simdgroup_tiled` カーネル用の
 //! BM/BN/BK/WM/WN パラメータと行列サイズ別の候補選択ロジック。
 //!
-//! [`crate::gemm::MetalGemm::dispatch_auto`] が [`select`] で `(m, n, k)`
+//! `crate::gemm::MetalGemm::dispatch_auto` が [`select`] で `(m, n, k)`
 //! から [`TileConfig`] を決定し、`crate::pipeline::make_pipeline_with_constants`
-//! が本モジュールの [`TileConfig::function_constants`] 相当の値（MSL
+//! が本モジュールの `TileConfig::function_constants` 相当の値（MSL
 //! function constant）でパイプラインをビルドする契約（`shaders/gemm.metal`
 //! の `gemm_simdgroup_tiled` と 1:1 対応）。
 //!
@@ -23,7 +23,7 @@
 //! に記録）で確定させる前提（イシュー #188 計画のスコープ）。**真の正方
 //! 立方形状（`m == n == k`。縦長・横長に該当しない形状の部分集合）かつ
 //! `m <= 4096`（実測範囲内）の閾値はイシュー #744・2026-08-19 M4 Max 実機
-//! 実測により CANDIDATES[3]（32x32/bk16/staged）への一律選択で確定済み**
+//! 実測により CANDIDATES\[3\]（32x32/bk16/staged）への一律選択で確定済み**
 //! （512〜4096 の `m == n == k` 全帯域で最良候補比の逸失なし。判断根拠は
 //! `docs/perf/metal-tile-select-correction.md`）。`m == n == k` かつ
 //! `m > 4096`（実測範囲外の正方立方形状）、`m == n` でも `k != m`（K 未
@@ -102,7 +102,7 @@ pub struct TileConfig {
 
 /// [`TileConfig::validate`] が返す検証エラー。
 ///
-/// [`crate::gemm::MetalGemm`] のパイプライン遅延キャッシュ構築時に、
+/// `crate::gemm::MetalGemm` のパイプライン遅延キャッシュ構築時に、
 /// 不成立構成を候補から除外し次善構成へフォールバックする判断材料になる
 /// （fail-closed。計画「パイプライン管理」節）。
 ///
@@ -321,7 +321,7 @@ impl TileConfig {
     /// 範囲を常に一致させる（validate と合わせた fail-closed 契約）。
     ///
     /// `setThreadgroupMemoryLength` へ渡す実際のバイト長（16 バイト境界
-    /// 整合が必要）は [`crate::gemm`] のディスパッチ側で `.max(16)` して
+    /// 整合が必要）は `crate::gemm` のディスパッチ側で `.max(16)` して
     /// 決定する（本メソッドが返す 0 バイトをそのまま渡さない。bugbot
     /// 指摘・#253 レビュー）。`staged=true` の場合は `bm`/`bk`/`bn` が
     /// [`TileConfig::validate`] により常に 8 の倍数へ制約され、`pad`
@@ -372,7 +372,7 @@ impl TileConfig {
 
     /// `shaders/gemm.metal` の `gemm_simdgroup_tiled_f16`（イシュー #796・
     /// エピローグのタイル粒度統合はイシュー #797）が確保する threadgroup
-    /// 共有メモリのバイト数。[`shared_mem_bytes`]（f32 版）とレイアウトの
+    /// 共有メモリのバイト数。`shared_mem_bytes`（f32 版）とレイアウトの
     /// 考え方は同じだが、2 点異なる:
     ///
     /// 1. staged 経路の A・B タイル要素は `half`（2 バイト）単位で確保する
@@ -444,7 +444,7 @@ impl TileConfig {
     /// `bm/bn/bk/wm/wn` の整除制約・デバイス上限（`max_threads_per_tg`:
     /// `MTLComputePipelineState::maxTotalThreadsPerThreadgroup`、
     /// `max_shared_mem_bytes`: `MTLDevice::maxThreadgroupMemoryLength`）
-    /// との整合を検証する。[`crate::gemm::MetalGemm`] のパイプライン構築
+    /// との整合を検証する。`crate::gemm::MetalGemm` のパイプライン構築
     /// （macOS 実機のみ到達）から呼ばれるほか、本ファイル末尾の単体テストで
     /// GPU 非依存に検証できる（Linux CI でも実行可能）。
     pub fn validate(
@@ -659,7 +659,7 @@ pub(crate) const CANDIDATES: &[TileConfig] = &[
 /// 末尾に持つフォールバック候補列を返す（`primary` が既に単一 simdgroup
 /// 構成なら 1 要素のみ）。
 ///
-/// [`crate::gemm::MetalGemm::pipeline_for_tile`] が構成の検証・パイプライン
+/// `crate::gemm::MetalGemm::pipeline_for_tile` が構成の検証・パイプライン
 /// 構築失敗時（デバイス上限超過等）に順に試す（fail-closed。イシュー #188
 /// 計画「パイプライン管理」節）。`SINGLE_SIMDGROUP_8X8` は
 /// `wm=wn=1`・`bm=bn=bk=8` であり、[`TileConfig::validate`] が
@@ -684,10 +684,10 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 }
 
 /// `(m, n, k)` から [`TileConfig`] を選択する（occupancy 判定込み。イシュー
-/// #542）。**[`crate::gemm::MetalGemm::dispatch_auto`] の入口としては不採用
+/// #542）。**`crate::gemm::MetalGemm::dispatch_auto` の入口としては不採用
 /// 確定**（本番ディスパッチは引き続き [`select`] を使う。イシュー #747 で、
 /// #744 是正（段 1 が実測範囲内の正方立方形状に対し occupancy 縮退を経ず
-/// 直接 [`CANDIDATES`]`[3]` を返すよう是正済み）により本関数の縮退経路が
+/// 直接 `CANDIDATES``[3]` を返すよう是正済み）により本関数の縮退経路が
 /// 実測帯域〈512/1024/2048/4096〉で `select()` と常に同一結果へ収束する
 /// ことを確認し、「小サイズ帯のみ occupancy 有効化」という #747 の目的は
 /// #744 是正へ吸収されたと判断した。`crate::gemm` モジュールドキュメンテー
@@ -701,11 +701,11 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 ///    （閾値はパディング前の元次元 `m`/`n`/`k` に対して判定する。
 ///    `crate::pad::pad8` によるパディングは選択後・パイプライン確保直前に
 ///    `crate::gemm` 側で行う。本関数はパディングの有無を問わない純粋関数）。
-/// 2. **occupancy 縮退**: 段 1 の結果が大タイル系（[`CANDIDATES`]`[0..=2]`。
+/// 2. **occupancy 縮退**: 段 1 の結果が大タイル系（`CANDIDATES``[0..=2]`。
 ///    64×64・64×32・32×64）かつ `params` が `Some` のとき、
 ///    [`actual_groups`] と [`OccupancyParams::ideal_groups`]（係数
 ///    [`IDEAL_GROUPS_MULTIPLIER_F32`]）を比較し、[`is_underoccupied`] なら
-///    [`CANDIDATES`]`[3]`（32×32 中形状）へ縮退する。[`TileConfig::
+///    `CANDIDATES``[3]`（32×32 中形状）へ縮退する。[`TileConfig::
 ///    SINGLE_SIMDGROUP_8X8`]（微小形状フォールバック）へはこの経路で縮退
 ///    させない（段 1 の `SMALL` 判定のみが担う責務であり、occupancy 縮退の
 ///    対象は「大タイル→中タイル」の 1 段のみ）。
@@ -715,7 +715,7 @@ pub fn select(m: usize, n: usize, k: usize) -> TileConfig {
 /// 安全側。#541 doc §5 の残課題に対する確定方針）:
 /// - `params` が `None`（呼び出し元が実機値を取得できなかった、または
 ///   意図的に occupancy 判定を無効化したい場合）
-/// - [`actual_groups`] が `None`（`cfg.bm`／`cfg.bn` が 0。[`CANDIDATES`]
+/// - [`actual_groups`] が `None`（`cfg.bm`／`cfg.bn` が 0。`CANDIDATES`
 ///   内の構成では実質発生しないが fail-safe として扱う）
 /// - [`OccupancyParams::ideal_groups`] が `None`（コア数 0・係数 0・SMEM
 ///   予算超過によりデバイス上でタイルが同時常駐不可能・オーバーフロー）

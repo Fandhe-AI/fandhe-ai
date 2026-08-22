@@ -14,8 +14,8 @@
 //! 重ねず `guardrail` 経由に一本化する」方針と同じ）。`guardrail::bench_gate::
 //! BenchGateRunner::measure` の計測設定（`bench_harness::MeasurementConfig`）は
 //! `self-repair` からは型名として参照できない（`guardrail` が `pub use` で
-//! 再輸出していないため）。一方で判定結果型・エラー内部型（[`BenchSignal`]・
-//! [`BenchGateError`]）は本モジュールが `guardrail::bench_gate` から
+//! 再輸出していないため）。一方で判定結果型・エラー内部型（`BenchSignal`・
+//! `BenchGateError`）は本モジュールが `guardrail::bench_gate` から
 //! `pub use` で再輸出しており、呼び出し側がこれらを名指しするために
 //! `guardrail::bench_gate` を直接 import する必要はない。本モジュールは計測設定を公開 API に露出させず、
 //! `Default::default()`（spec 下限 20/20・`bench-harness/src/protocol.rs` 参照）を
@@ -28,9 +28,9 @@
 //!
 //! 本モジュール実装時点（イシュー #137）で TASK-3.1c（#134: 検証フェーズの
 //! `VerificationGate` trait 群）は main 未マージのため、本モジュールは独立した
-//! ベンチゲート実装として配置する。TASK-3.1c マージ後は [`SelfRepairBenchGate`] を
+//! ベンチゲート実装として配置する。TASK-3.1c マージ後は `SelfRepairBenchGate` を
 //! `VerificationGate` の一実装として結線する想定であり、結線点は
-//! [`SelfRepairBenchGate::run`] のシグネチャ（baseline／candidate クロージャを受けて
+//! `SelfRepairBenchGate::run` のシグネチャ（baseline／candidate クロージャを受けて
 //! 判定用の劣化率系列を返す）に閉じている（実装計画 #137 §3.3・§9 リスク）。
 
 pub use guardrail::bench_gate::{BenchGateError, BenchSignal, MIN_BENCH_ITERATIONS};

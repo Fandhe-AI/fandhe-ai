@@ -4,7 +4,7 @@
 //! ゲート実装しか受け取らない設計（`stages.rs` 契約）だが、build/test/clippy
 //! 3 ゲート（[`crate::verify_gates::CargoVerificationGate`]）とベンチゲート
 //! （[`crate::verify_bench::SelfRepairBenchGate`]）を 1 回のループ実行内で
-//! 両方通す「4 ゲート合成」は、[`crate::outcome::VerifiedEvidence::new`] が
+//! 両方通す「4 ゲート合成」は、`crate::outcome::VerifiedEvidence::new` が
 //! `pub(crate)`（本クレート外からは構築不能。`outcome.rs` 参照）であるため、
 //! 本クレート内（`tests/` の統合テストではなく `src/`）に実装する必要がある。
 //! TASK-3.2（#136 系）が「4 ゲート合成」自体を明示的にスコープ外としていた

@@ -86,7 +86,7 @@ pub fn median_q1_q3(samples: &[f64]) -> Result<Quartiles, BenchError> {
 
 /// サンプル列の相対ばらつき `(max − min) / median` を求める。
 ///
-/// [`ab::run_stability`]（同クレート `ab` モジュール。イシュー #746）が
+/// `ab::run_stability`（同クレート `ab` モジュール。イシュー #746）が
 /// 「対照カーネルの複数ラウンド計測がどの程度ばらついたか」を定量化する
 /// ために呼ぶ。ノイズ対策プロトコル（`docs/perf/metal-bench-noise-protocol.md`）
 /// の安定性ゲート（spread ≤5% 程度）の判定材料であり、本関数自体は

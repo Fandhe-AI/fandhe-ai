@@ -4,8 +4,8 @@
 //! を `include_str!` で埋め込み、[`crate::context::MetalContext`] が保持
 //! するデバイス上で `newLibraryWithSource_options_error` によりコンパイル
 //! し、関数名から `MTLComputePipelineState` を構築する。#40（TASK-1.8c）
-//! で [`crate::gemm::MetalGemm::new`] が本モジュールの [`compile_gemm_library`]・
-//! [`make_pipeline`] を 3 回呼んで `gemm_tiled`・`gemm_simdgroup` の
+//! で [`crate::gemm::MetalGemm::new`] が本モジュールの `compile_gemm_library`・
+//! `make_pipeline` を 3 回呼んで `gemm_tiled`・`gemm_simdgroup` の
 //! パイプラインも併設した（naive 版と同じ関数を再利用）。
 //!
 //! **移植元**: `docs/spec/03-poc/poc-v2-4-metal-gemm/code/rust/src/metal_gemm.rs`

@@ -39,7 +39,7 @@
 //! # 返却経路（RAII 維持）
 //!
 //! `MemoryOps` に明示 `free()` は無い（`buffer.rs` モジュールコメント
-//! 「解放方針（RAII 一本化）」）ため、[`PooledBufferHandle`] を導入し、
+//! 「解放方針（RAII 一本化）」）ため、`PooledBufferHandle` を導入し、
 //! `Drop` で内部ハンドルをプールへ返却する。プールが既に破棄済み
 //! （`Weak::upgrade` 失敗）・lock poisoning 時はそのまま内部ハンドルを
 //! drop する（素直に解放。panic させない。`memory_stats::AllocationTracker`
@@ -47,7 +47,7 @@
 //!
 //! # 透過ダウンキャスト
 //!
-//! [`PooledBufferHandle::as_any`] は内部ハンドルの `as_any()` へ転送する。
+//! `PooledBufferHandle::as_any` は内部ハンドルの `as_any()` へ転送する。
 //! `downcast_ref::<H>()` は `Any` オブジェクトが指す**具体型**の
 //! `TypeId` で判定するため、`PooledBufferHandle` 越しでも各バックエンドの
 //! `download`／カーネルの `downcast_handle::<CpuBufferHandle>()` 等が
@@ -464,7 +464,7 @@ impl<M> PooledMemory<M> {
 impl<M: MemoryOps + PoolZeroFill> MemoryOps for PooledMemory<M> {
     /// バイトサイズ完全一致のバケットから再利用を試み、無ければ `inner`
     /// へ委譲して新規確保する。いずれの経路でも返す `DeviceBuffer` の
-    /// ハンドルは [`PooledBufferHandle`] で包み、`Drop` 時にプールへ
+    /// ハンドルは `PooledBufferHandle` で包み、`Drop` 時にプールへ
     /// 返却されるようにする（`numel == 0` はモジュール冒頭「空テンソル
     /// 契約」のとおりプールを介さない）。
     fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {

@@ -57,7 +57,7 @@ impl CommandOutput {
         &self.log_tail
     }
 
-    /// `log_tail()` が [`MAX_CAPTURED_LOG_BYTES`] 超過により先頭側を切り詰め
+    /// `log_tail()` が `MAX_CAPTURED_LOG_BYTES` 超過により先頭側を切り詰め
     /// 済みか（イシュー #137 Codex レビュー指摘）。
     ///
     /// `crate::diff_signals::run_git` はこの値を見て、`git diff --numstat`／

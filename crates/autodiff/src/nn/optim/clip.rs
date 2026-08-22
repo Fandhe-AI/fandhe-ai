@@ -43,7 +43,7 @@ fn read_contiguous(grad: &Tensor<f32>) -> Result<Vec<f32>, AutodiffError> {
 /// `norm_type=2.0` 定義と同一）。二乗和の蓄積は `f32::mul_add`
 /// （`g*g + acc`）で行い、CPU 参照実装の FMA 契約
 /// （`.claude/rules/coding-rust.md`）に揃える。テンソルの走査順は
-/// 引数スライスの順序・各テンソル内は [`read_contiguous`] のメモリ順
+/// 引数スライスの順序・各テンソル内は `read_contiguous` のメモリ順
 /// （行優先。非 contiguous なら `contiguous()` フォールバック）で固定
 /// され、結果は決定的。
 ///

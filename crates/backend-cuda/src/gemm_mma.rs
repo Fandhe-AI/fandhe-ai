@@ -128,8 +128,8 @@ pub(crate) fn validate_mma_grid_bounds(m: u32) -> Result<(), CudaError> {
 /// `mma_f16`: 常時保持する起動カーネル（[`new`](Self::new)（本番既定
 /// コンストラクタ。イシュー #782 でサイズ条件付き swizzle 選択機構を結線
 /// した後も base カーネル自体は常に保持する）・
-/// [`new_without_swizzle`](Self::new_without_swizzle) では swizzle 無適用
-/// base カーネル、[`new_with_swizzle`](Self::new_with_swizzle) では
+/// `new_without_swizzle` では swizzle 無適用
+/// base カーネル、`new_with_swizzle` では
 /// swizzle 変種そのもの。詳細は各コンストラクタ doc comment 参照）。
 ///
 /// `mma_f16_swizzle`: [`new`](Self::new)（本番既定コンストラクタ。イシュー
@@ -139,8 +139,8 @@ pub(crate) fn validate_mma_grid_bounds(m: u32) -> Result<(), CudaError> {
 /// コンパイルできた場合（`launch_f16` は呼び出し形状ごとに [`crate::
 /// swizzle::should_apply_swizzle`] で `mma_f16`／`mma_f16_swizzle` の
 /// いずれを起動するか判定する）。`None` は
-/// [`new_without_swizzle`](Self::new_without_swizzle)・
-/// [`new_with_swizzle`](Self::new_with_swizzle)（いずれも単一カーネルを
+/// `new_without_swizzle`・
+/// `new_with_swizzle`（いずれも単一カーネルを
 /// 強制適用／非適用する診断用入口のため追加変種を持たない）、または
 /// `new` が SM 数を取得できず安全側で base のみを保持した場合（fail-soft。
 /// 下記 [`new`](Self::new) doc comment 参照）を意味する。
@@ -235,7 +235,7 @@ impl CudaMmaGemm {
     /// L2 再利用スウィズル変種（イシュー #499・#775・#782）を結線する）。
     ///
     /// 手順: (1) `device.compute_capability()` が
-    /// [`MIN_COMPUTE_CAPABILITY_MAJOR`]（8.0）未満なら NVRTC コンパイルを
+    /// `MIN_COMPUTE_CAPABILITY_MAJOR`（8.0）未満なら NVRTC コンパイルを
     /// 試みず `CudaError::TensorCoreUnsupported` を返す（`gemm_wmma.rs::new`
     /// と同じ判断。cc 判定をコンパイル前に行うことで、非対応デバイス上での
     /// 無駄な NVRTC 呼び出し・コンパイル失敗の紛れ込みを避ける）。(2)
@@ -248,7 +248,7 @@ impl CudaMmaGemm {
     /// あり、`tests/gemm_mma.rs` の環境適応テストで確認済み。
     /// `kernels_mma.rs` 冒頭「検証状態」参照）。(4)
     /// `device.multiprocessor_count()` が実測 SM 数を返せた場合、
-    /// [`crate::swizzle::select_swizzle_group_width`]（動的幅選択）で
+    /// `crate::swizzle::select_swizzle_group_width`（動的幅選択）で
     /// グルーピング幅を決め、`kernels_mma::mma_f16_source_with_swizzle`
     /// 変種を追加コンパイルして `mma_f16_swizzle` に保持する。
     ///
@@ -279,7 +279,7 @@ impl CudaMmaGemm {
     /// 検査（`swizzle.rs`）のハードコード値誤用は本コンストラクタの判定に
     /// 影響しない（#758 差し戻し理由(c)の解消）。明示幅指定・強制適用が
     /// 必要な場合（A/B 計測用途）は
-    /// [`new_with_swizzle`](Self::new_with_swizzle) を使う。
+    /// `new_with_swizzle` を使う。
     ///
     /// **本番結線の経緯**: イシュー #740 で一度無条件適用として本番結線
     /// し、PR #758 レビュー指摘（採用基準の無承認読み替え・結線前必須確認
@@ -380,7 +380,7 @@ impl CudaMmaGemm {
     /// （`launch_f16` は常に `mma_f16`〈base〉を起動する）。
     ///
     /// **`internal-diagnostics` feature（既定 off）でのみコンパイルされる**
-    /// （[`new_with_swizzle`](Self::new_with_swizzle) と同じ理由・同じ
+    /// （`new_with_swizzle` と同じ理由・同じ
     /// feature ゲート方針。通常ビルドの公開 API 面からは除外する）。
     #[cfg(feature = "internal-diagnostics")]
     pub fn new_without_swizzle(device: &CudaDevice) -> Result<Self, CudaError> {
@@ -467,11 +467,11 @@ impl CudaMmaGemm {
     /// ためこの `Some` は「その形状で必ず適用される」ことまでは意味しない
     /// — 個別呼び出しでの適用有無は
     /// [`swizzle_applies`](Self::swizzle_applies) を使う）・
-    /// [`new_with_swizzle`](Self::new_with_swizzle)（診断用・明示幅指定・
+    /// `new_with_swizzle`（診断用・明示幅指定・
     /// 強制適用。`internal-diagnostics` feature 限定）のいずれか。`None`
     /// は [`new`](Self::new) が SM 数を取得できず安全側で base のみを
     /// 保持した場合（fail-soft）、または
-    /// [`new_without_swizzle`](Self::new_without_swizzle)（診断用・
+    /// `new_without_swizzle`（診断用・
     /// 強制非適用）を意味する。
     ///
     /// `examples/cuda_floor_bench.rs` の起動時診断（#733 の
@@ -498,21 +498,21 @@ impl CudaMmaGemm {
     /// 変種カーネルを起動するかを返す（構造体ドキュメンテーションコメント
     /// 「mma_f16_swizzle」参照。イシュー #775・#782）。
     ///
-    /// 判定規則（[`should_launch_swizzle_kernel`](Self::should_launch_swizzle_kernel)
+    /// 判定規則（`should_launch_swizzle_kernel`
     /// と単一の真実源を共有）:
     /// - [`new`](Self::new)（本番既定コンストラクタ）経由・
     ///   `mma_f16_swizzle` が `Some`（SM 数実測に成功しサイズ条件付き
-    ///   変種を保持している）: [`crate::swizzle::should_apply_swizzle`] を
+    ///   変種を保持している）: `crate::swizzle::should_apply_swizzle` を
     ///   `(m, n)`（raw 次元。PR #784 codex-review P1 是正で追加した正方形
     ///   条件 `m == n` の判定に使う）・そこから導出したブロックタイル数
     ///   （`MMA_BM`/`MMA_BN` 単位の `div_ceil`。`mma_launch_config` の
     ///   grid 次元と同じ導出式）・`k`（PR #784 codex-review 追加指摘の
     ///   是正で追加した K ガード。K はグリッド分割軸ではないため生の値を
     ///   そのまま渡す）へ適用した結果
-    /// - [`new_with_swizzle`](Self::new_with_swizzle) 経由（強制適用。
+    /// - `new_with_swizzle` 経由（強制適用。
     ///   `mma_f16_swizzle` は `None` だが `swizzle_group_width` が
     ///   `Some`）: 形状に関わらず常に `true`
-    /// - [`new_without_swizzle`](Self::new_without_swizzle)・SM 数未取得時の
+    /// - `new_without_swizzle`・SM 数未取得時の
     ///   [`new`](Self::new)（いずれも強制非適用。両フィールドとも
     ///   `None`）: 形状に関わらず常に `false`
     ///
@@ -537,7 +537,7 @@ impl CudaMmaGemm {
     /// [`crate::swizzle::should_apply_swizzle`] で判定し、`None` の場合は
     /// `swizzle_group_width` の有無で強制適用（[`new_with_swizzle`
     /// ](Self::new_with_swizzle)。`mma_f16` 自体が swizzle 変種）／強制
-    /// 非適用（[`new_without_swizzle`](Self::new_without_swizzle)・SM 数
+    /// 非適用（`new_without_swizzle`・SM 数
     /// 未取得時の `new`。`mma_f16` は base）のいずれかを返す。
     fn should_launch_swizzle_kernel(&self, m: u32, n: u32, k: u32) -> bool {
         match &self.mma_f16_swizzle {
@@ -558,7 +558,7 @@ impl CudaMmaGemm {
     /// ホスト側形状検証を 3 段で行う: `validate_gemm_dims`（naive/tiled/WMMA
     /// と共通の一般契約。スライス長の整合性のみを見るため no-op 形状でも
     /// 常に先行させる）→ no-op 形状（`m==0 || n==0 || k==0`）の早期
-    /// return → [`validate_mma_alignment`]／[`validate_mma_grid_bounds`]
+    /// return → `validate_mma_alignment`／`validate_mma_grid_bounds`
     /// （本経路固有の `cp.async` 16 バイト整列制約・grid_dim.y 上限）。
     ///
     /// 整列検証・grid 上限検証を no-op 判定より後に置く（PR #255 レビュー
@@ -617,7 +617,7 @@ impl CudaMmaGemm {
     }
 
     /// C 用のゼロ初期化デバイスバッファを確保する（`run_f16` のバッファ
-    /// 確保部分の切り出し。[`upload_f16`] と同じ理由でベンチマークから
+    /// 確保部分の切り出し。`upload_f16` と同じ理由でベンチマークから
     /// 再利用できるよう公開する）。
     pub fn alloc_output_f16(&self, m: u32, n: u32) -> Result<CudaSlice<f16>, CudaError> {
         Ok(self
@@ -626,21 +626,21 @@ impl CudaMmaGemm {
     }
 
     /// デバイス常駐済みの A/B/C バッファに対してカーネルを起動し、完了を
-    /// 待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。[`upload_f16`]・
-    /// [`alloc_output_f16`] と組み合わせてベンチマークの計測対象を絞る
+    /// 待つ（H2D/D2H を含まない「GPU 実行のみ」の区間。`upload_f16`・
+    /// `alloc_output_f16` と組み合わせてベンチマークの計測対象を絞る
     /// ために公開する）。
     ///
     /// safe な公開 API であるため、呼び出し元（`run_f16` あるいは
     /// ベンチマーク）の事前検証に依存せず、本関数自身が `run_f16` と同じ
-    /// 形状検証（`validate_gemm_dims`・[`validate_mma_alignment`]・
-    /// [`validate_mma_grid_bounds`]）およびデバイスバッファ長検証
+    /// 形状検証（`validate_gemm_dims`・`validate_mma_alignment`・
+    /// `validate_mma_grid_bounds`）およびデバイスバッファ長検証
     /// （`a_dev`/`b_dev`/`c_dev`）を行う（PR #349 codex-review 指摘 P0。
     /// `gemm.rs::launch_tiled_f32` のドキュメンテーションコメント参照。
     /// `gemm_wmma.rs::launch_f16` には同種の指摘があったが本関数は指摘に
     /// 明示されていなかった — 同一パターンの脆弱性のため一貫して修正する）。
     ///
-    /// カーネル選択（イシュー #775）: [`should_launch_swizzle_kernel`
-    /// ](Self::should_launch_swizzle_kernel) の判定に従い、`mma_f16`
+    /// カーネル選択（イシュー #775）: `should_launch_swizzle_kernel`
+    /// の判定に従い、`mma_f16`
     /// （base）または `mma_f16_swizzle`（swizzle 変種。`Some` の場合の
     /// み）のいずれかを起動する（[`swizzle_applies`](Self::swizzle_applies)
     /// と単一の真実源を共有）。base／swizzle いずれの変種もブロックタイル
@@ -715,7 +715,7 @@ impl CudaMmaGemm {
     }
 
     /// C をデバイス→ホストへ転送する（`run_f16` の D2H 部分の切り出し。
-    /// [`upload_f16`] と同じ理由で公開する）。
+    /// `upload_f16` と同じ理由で公開する）。
     pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
         Ok(self.stream.clone_dtoh(c_dev)?)
     }

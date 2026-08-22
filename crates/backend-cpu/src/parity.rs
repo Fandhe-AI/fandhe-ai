@@ -244,7 +244,7 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 
 /// FMA 契約の参照 matmul（`C += A @ B`。逐次・k 昇順の演算順序固定・`f32::mul_add`）。
 ///
-/// [`crate::gemm`]・[`crate::gemm_blis`] の全公開 GEMM 入口（naive/blocked/
+/// [`crate::gemm`]・[`mod@crate::gemm_blis`] の全公開 GEMM 入口（naive/blocked/
 /// parallel/parallel_tuned/gemm_blis/gemm_blis_parallel）は本関数と bit
 /// 完全一致する契約を持つ（`tests/fma_contract.rs`）。CPU-CUDA（#54）・
 /// CPU-Metal（#55）ペアテストが GPU 側出力と比較する際の CPU 側基準点でも

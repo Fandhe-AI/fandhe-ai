@@ -60,7 +60,7 @@ use std::fmt;
 pub type FusedNodeIndex = usize;
 
 /// [`FusionPlan::ops`] が列挙する 1 ノード分の演算内容。内部
-/// `pub(crate)` の [`FusionOp`]（`graph.rs`・§2.1）と 1:1 対応する。
+/// `pub(crate)` の `FusionOp`（`graph.rs`・§2.1）と 1:1 対応する。
 /// `Gemm` のみが常に融合境界ノードのため設計書 §3.2 (b) のとおり
 /// `FusionPlan` 内に現れない（実体化境界のため、融合対象区間そのものに
 /// は含まれない）。`Sum`／`Max`（reduction）はイシュー #586 の境界

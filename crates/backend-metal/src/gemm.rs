@@ -1,6 +1,6 @@
 //! GEMM 公開入口（naive: TASK-1.8b・#39／tiled・simdgroup: TASK-1.8c・#40）。
 //!
-//! [`crate::pipeline::compile_gemm_library`]・[`crate::pipeline::make_pipeline`]
+//! `crate::pipeline::compile_gemm_library`・`crate::pipeline::make_pipeline`
 //! でビルドした `gemm_naive`/`gemm_tiled`/`gemm_simdgroup` の 3 パイプライン
 //! を保持する [`MetalGemm`] を介して [`crate::context::MetalContext::dispatch_sync`]
 //! へエンコーダ結線を委ね、[`crate::buffer::MetalBuffer`] で A・B・C を
@@ -208,7 +208,7 @@ impl MetalGemm {
     /// `shaders/gemm.metal` を `ctx` のデバイス上でコンパイルし、
     /// `gemm_naive`/`gemm_tiled`/`gemm_simdgroup` の 3 パイプラインを
     /// 構築する。`gemm_simdgroup_tiled`（TASK-1.8f・#188）はコンパイル済み
-    /// ライブラリのみ保持し、構成別パイプラインは [`Self::pipeline_for_tile`]
+    /// ライブラリのみ保持し、構成別パイプラインは `Self::pipeline_for_tile`
     /// が初回ディスパッチ時に遅延構築する（候補が有限個でも全構成を
     /// 前もって構築すると起動コストが増えるため）。
     ///
@@ -667,14 +667,14 @@ impl MetalGemm {
     /// パディング・確保・アップロード済みの [`MetalBuffer`] に対して
     /// [`MetalContext::dispatch_sync`] のクロージャ結線のみを行う。呼び出し
     /// 元が `pad8` を経由せず任意の `m_eff`/`n_eff`/`k_eff`・バッファ長を
-    /// 渡せるため、[`validate_prepared_inputs_f32`] で 8 の倍数・バッファ長
+    /// 渡せるため、`validate_prepared_inputs_f32` で 8 の倍数・バッファ長
     /// 一致をエンコード前に検証する（f16 側 `validate_prepared_inputs`・
     /// PR #346 codex-review P1-1 指摘と同水準の検証）。
     ///
     /// `cfg` は呼び出し元が選んだ候補構成（`tile::select(m, n, k)` 等）だが、
-    /// [`Self::pipeline_for_tile`] がデバイス上限超過等でサイレントに
+    /// `Self::pipeline_for_tile` がデバイス上限超過等でサイレントに
     /// `TileConfig::SINGLE_SIMDGROUP_8X8` へフォールバックしうるため
-    /// （フォールバック透明性は [`Self::pipeline_for_tile`] ドキュメント
+    /// （フォールバック透明性は `Self::pipeline_for_tile` ドキュメント
     /// コメント参照）、戻り値として実際に採用された構成（resolved）を返す。
     /// 呼び出し元（ベンチ入口）は戻り値のラベルで実測対象構成を確定できる。
     ///
@@ -739,7 +739,7 @@ impl MetalGemm {
     /// GEMM epilogue（bias 加算・activation）を融合した tiled GEMM（f32。
     /// イシュー #605）を実行し、結果をホストへ読み出す。
     /// `ops.rs::MetalBackendOps::gemm_bias_act` の融合経路
-    /// （[`crate::ops::gemm_bias_act_route`]）からのみ呼ばれる。
+    /// （`crate::ops::gemm_bias_act_route`）からのみ呼ばれる。
     ///
     /// `bias` が `Some` の場合は `bias.len() == n` を fail-closed に検証
     /// する（`shaders/gemm.metal::gemm_tiled_bias_act` の `bias[col]`
@@ -748,9 +748,9 @@ impl MetalGemm {
     /// `m == 0 || n == 0` は no-op（空の結果）、`k == 0` は CPU 参照実装
     /// （`fandhe_ai_backend_cpu::gemm_blis::gemm_blis_bias_act_parallel`）・CUDA 側
     /// `run_tiled_bias_act_f32` と同じ契約で epilogue のみホスト側で計算し
-    /// GPU 起動を回避する（[`BIAS_ACT_FUSED_LAUNCH_COUNT`] は増加させない。
+    /// GPU 起動を回避する（`BIAS_ACT_FUSED_LAUNCH_COUNT` は増加させない。
     /// `validate_dims`〈`m/n/k == 0` を一律 `ZeroDimension` として拒否〉を
-    /// 経由せず、本関数専用の [`validate_bias_act_dims`] で検証してから
+    /// 経由せず、本関数専用の `validate_bias_act_dims` で検証してから
     /// この縮退分岐を判定する）。
     ///
     /// `bias` が `None` の場合は `n` 要素のゼロ初期化バッファを渡す
@@ -1091,7 +1091,7 @@ impl MetalGemm {
     /// 将来 safetensors/ONNX 由来の形状がこの経路に流入する前提の前段
     /// 検証）。[`GemmVariant::Simdgroup`] の場合はさらに [`pad8`] で
     /// 実効次元（8 の倍数）を算出し、パディングにより増える積（m_eff*k_eff
-    /// 等）にも同じオーバーフロー・`u32::MAX` 検証を [`validate_effective_dims`]
+    /// 等）にも同じオーバーフロー・`u32::MAX` 検証を `validate_effective_dims`
     /// で通す（元 shape の検証だけでは実効次元側の桁あふれを見逃すため）。
     /// [`pad_matrix`] で A・B を実効次元へ 0 パディングしてから
     /// [`MetalBuffer::new_with_data`]・[`MetalBuffer::new_zeroed`] で

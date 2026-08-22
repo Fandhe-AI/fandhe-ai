@@ -22,7 +22,7 @@
 //!
 //! 判定統計（中央値ベース）・許容誤差・#540 既存の採否判定基準は本モジュールでは
 //! 変更しない（`.claude/rules/security.md`: ガードレール閾値・テスト許容誤差の
-//! 変更はユーザー承認必須）。[`relative_spread`]（`crate::stats`）による
+//! 変更はユーザー承認必須）。`relative_spread`（`crate::stats`）による
 //! ばらつきの定量報告を追加するのみで、判定閾値自体は呼び出し側 example
 //! （`crates/backend-metal/examples/gemm_swizzle_ab_bench.rs`）が
 //! `docs/perf/metal-bench-noise-protocol.md` の基準に沿って出力するに留める
@@ -262,7 +262,7 @@ fn validate_ab_medians(median_a_secs: f64, median_b_secs: f64) -> Result<(), Ben
 /// [`AbConfig::new`] が保証するため、A 先頭ラウンド数と B 先頭ラウンド数は
 /// 必ず等しくなる。
 ///
-/// 各ラウンドの各 side 計測の直前に [`extended_warmup`] を挟み、直後に
+/// 各ラウンドの各 side 計測の直前に `extended_warmup` を挟み、直後に
 /// `ab_config.cooldown` を待機する（最終ラウンドの最終 side の後は待機しない。
 /// 呼び出し元がこの後すぐ関数を抜けるため）。
 ///

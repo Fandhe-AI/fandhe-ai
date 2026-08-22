@@ -3,7 +3,7 @@
 //! #185（TASK-1.6g）で新規追加。[`super::avx2`] と同じ「モジュールは
 //! `cfg(target_arch = "x86_64")` のみでコンパイルし `target_feature` では
 //! ゲートしない」方針を踏襲する（既定ビルドでもテスト限定の実行時検出
-//! ガード付き直接検証を可能にするため。[`avx2`] モジュールドキュメント
+//! ガード付き直接検証を可能にするため。`avx2` モジュールドキュメント
 //! 参照）。
 //!
 //! レジスタ構成: acc は `__m512`（f32x16）2 本 × MR=8 行 = 16 本、B パネル
@@ -12,7 +12,7 @@
 //! #24 のスコープ）。
 //!
 //! FMA 契約（REQ-2）: `_mm512_fmadd_ps` は IEEE-754 fused multiply-add
-//! であり、[`super::scalar`]・[`super::neon`]・[`super::avx2`] と丸めが
+//! であり、[`super::scalar`]・`super::neon`・[`super::avx2`] と丸めが
 //! 同一になる（PoC-v2-5 の K=4096 ストレスケースで GPU 側含め実測確認済み
 //! の契約。累積順序は p 昇順・レーン間縮約なしで各カーネル共通）。
 
@@ -33,7 +33,7 @@ const _: () = assert!(MR * NR <= 256);
 /// AVX-512F を用いる実装本体。`#[target_feature(enable = "avx512f")]`
 /// が付くため呼び出しは常に `unsafe`（コンパイラ既定の安全弾）であり、
 /// 呼び出し元が「実行 CPU が AVX-512F をサポートする」ことを保証する
-/// 責務を負う（本番経路では [`super::Avx512Kernel::try_new`] が検出済み
+/// 責務を負う（本番経路では `super::Avx512Kernel::try_new` が検出済み
 /// の場合のみトークンを生成することでこの責務を果たす。テストでは
 /// `is_x86_feature_detected!` ガード付き直接呼び出しで同じ責務を果たす）。
 ///
@@ -57,7 +57,7 @@ const _: () = assert!(MR * NR <= 256);
 /// # Safety
 ///
 /// 呼び出し元は実行 CPU が AVX-512F 命令セットをサポートすることを
-/// 保証しなければならない（[`super::Avx512Kernel::try_new`] による
+/// 保証しなければならない（`super::Avx512Kernel::try_new` による
 /// 実行時検出、またはテストの `is_x86_feature_detected!` ガードのいずれか）。
 ///
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
@@ -139,8 +139,8 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
 /// 従来どおり `()` を返す必須シグネチャへ戻す。`check_c_tile_bounds` の
 /// `Result` を `panic!` へ変換する経路は持たない（#691 レビュー P1
-/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: [`compute`] へ直接委譲する）。
-/// `ap`／`bp` の長さ検査は [`super::panel_len_matches`] で `checked_mul`
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: `compute` へ直接委譲する）。
+/// `ap`／`bp` の長さ検査は `super::panel_len_matches` で `checked_mul`
 /// によりオーバーフローも確実に不一致として扱う（#691 レビュー P0
 /// 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。`c.len() == MR * NR` の検査は `ldc`
 /// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に

@@ -96,7 +96,7 @@ pub enum GuardrailError {
     /// 「match なし」へ丸めない。
     DiffUnexpectedFormat { command: String, reason: String },
 
-    /// [`crate::gates::run_gates`] が `cargo build`/`test`/`clippy` を起動する
+    /// `crate::gates::run_gates` が `cargo build`/`test`/`clippy` を起動する
     /// 際の子プロセス起動自体の失敗（実行ファイル不在等）。TASK-4.1c・
     /// イシュー #106。
     ///

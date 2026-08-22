@@ -97,8 +97,8 @@ impl CudaMmaTf32Gemm {
     /// 検証順序（`gemm_mma.rs::CudaMmaGemm::run_f16` と同一設計）:
     /// `validate_gemm_dims`（i32 積ガード含む）を常に先行させる → no-op
     /// 形状（`m==0 || n==0 || k==0`）の早期 return → 本経路固有の
-    /// [`validate_mma_tf32_alignment`]／[`validate_mma_tf32_grid_bounds`]／
-    /// [`validate_mma_tf32_k_bound`]。整列検証・上限検証を no-op 判定より
+    /// `validate_mma_tf32_alignment`／`validate_mma_tf32_grid_bounds`／
+    /// `validate_mma_tf32_k_bound`。整列検証・上限検証を no-op 判定より
     /// 後に置く理由も同一（実際にはカーネルを起動しない形状まで誤って
     /// 拒否しないため）。
     ///
@@ -168,8 +168,8 @@ impl CudaMmaTf32Gemm {
     ///
     /// safe な公開 API であるため、呼び出し元の事前検証に依存せず本関数
     /// 自身が `run_tf32` と同じ形状検証（`validate_gemm_dims`・
-    /// [`validate_mma_tf32_alignment`]・[`validate_mma_tf32_grid_bounds`]・
-    /// [`validate_mma_tf32_k_bound`]）およびデバイスバッファ長検証
+    /// `validate_mma_tf32_alignment`・`validate_mma_tf32_grid_bounds`・
+    /// `validate_mma_tf32_k_bound`）およびデバイスバッファ長検証
     /// （`a_dev`/`b_dev`/`c_dev`）を行う（`gemm_mma.rs::CudaMmaGemm::
     /// launch_f16` ドキュメンテーションコメント「PR #349 codex-review
     /// 指摘 P0」と同一方針）。

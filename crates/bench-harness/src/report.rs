@@ -93,7 +93,7 @@ impl BenchReport {
     ///
     /// 検証項目（`.claude/rules/security.md` A08: 判定の迂回経路を作らない）:
     /// - `schema_version` が [`SCHEMA_VERSION`] と一致する（不一致＝未知スキーマは拒否）
-    /// - `warmup` / `iters` が TASK-8.1 下限（[`MIN_ITERATIONS`] 以上）を満たす
+    /// - `warmup` / `iters` が TASK-8.1 下限（`MIN_ITERATIONS` 以上）を満たす
     /// - `samples_secs.len() == iters` かつ全サンプルが有限・非負
     /// - `q1_secs <= median_secs <= q3_secs` かつ 3 値とも有限
     ///

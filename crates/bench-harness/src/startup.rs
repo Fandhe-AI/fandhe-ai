@@ -34,7 +34,7 @@
 //!
 //! ## 計測プロトコル（`protocol` モジュールとの回数使い分け）
 //!
-//! [`protocol::MIN_ITERATIONS`]（20 回以上）はプロセス内カーネル単発計測用の
+//! `protocol::MIN_ITERATIONS`（20 回以上）はプロセス内カーネル単発計測用の
 //! 下限であり、プロセスそのものを毎回 spawn するプロセスレベル計測に同じ下限を
 //! 課すと 1 フェーズあたり数十プロセスの起動が必要になり過大である。本モジュールは
 //! `.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値を採用し」に従い、
@@ -64,7 +64,7 @@
 //! - probe への引数は許可リスト方式（[`StartupBackend::parse`]）で検証し、
 //!   `Command` の引数配列で子プロセスを起動する（シェル経由の文字列展開を行わない。A03）。
 //! - probe 標準出力・標準エラー出力は `Command::spawn` 後に上限付きストリーミング読み取り
-//!   （[`PROBE_STDOUT_LIMIT_BYTES`]／[`PROBE_STDERR_LIMIT_BYTES`]）を行い、超過を検知した
+//!   （`PROBE_STDOUT_LIMIT_BYTES`／`PROBE_STDERR_LIMIT_BYTES`）を行い、超過を検知した
 //!   時点で子プロセスを kill・reap してから拒否する（`Command::output` による全量バッファ
 //!   後の事後チェックでは、上限チェックが効く前に異常肥大化した出力でメモリ枯渇しうるため
 //!   採用しない。PR #360 codex-review 指摘 P1）。上限内に収まった標準出力のみ `serde_json`
@@ -72,7 +72,7 @@
 //!   スキーマ検証を経ずに生値へアクセスできる経路は設けない（A03・A08）。
 //! - 一時キャッシュディレクトリは一意名で [`std::fs::create_dir`]（既存なら失敗）し、
 //!   予測可能パスの事前作成・シンボリックリンク差し替えによる書き込み先誘導を排除する（A01）。
-//! - probe 1 回の実行は [`PROBE_TIMEOUT`] を上限とし、`mpsc::Receiver::recv_timeout` で
+//! - probe 1 回の実行は `PROBE_TIMEOUT` を上限とし、`mpsc::Receiver::recv_timeout` で
 //!   監視する。GPU ドライバ・カーネル停止等により probe が生存したまま無出力になっても
 //!   `run_probe_once`（延いては `startup_bench`）が無期限にハングしないよう、上限超過時は
 //!   子プロセスを kill・reap して型付きエラー（[`StartupError::ProbeTimeout`]）を返す
@@ -102,8 +102,8 @@ pub const DEFAULT_STARTUP_TRIALS: usize = 5;
 /// 1 フェーズあたりの試行回数の許容上限。
 ///
 /// コールド計測は試行ごとにプロセス spawn ＋一時ディレクトリ作成を伴うため
-/// （[`run_cold`]）、CLI から極端に大きい値（例: `u64::MAX`）を渡されると
-/// [`run_cold`]／[`run_warm`] の `Vec::with_capacity(config.trials)` が
+/// （`run_cold`）、CLI から極端に大きい値（例: `u64::MAX`）を渡されると
+/// `run_cold`／`run_warm` の `Vec::with_capacity(config.trials)` が
 /// 過大なメモリ確保を試み、通常の [`StartupError`] では回収できない abort や
 /// メモリ枯渇を招く（PR #360 codex-review P1 指摘）。実運用の試行回数
 /// （[`DEFAULT_STARTUP_TRIALS`] 5 回・手動デバッグでの数十〜数百回）を
@@ -157,9 +157,9 @@ pub enum StartupError {
     Io(String),
     /// probe が非ゼロ終了コードで終了した（stderr を含む）。
     ProbeExitFailure { status: String, stderr: String },
-    /// probe 標準出力が [`PROBE_STDOUT_LIMIT_BYTES`] を超過した。
+    /// probe 標準出力が `PROBE_STDOUT_LIMIT_BYTES` を超過した。
     ProbeOutputTooLarge(usize),
-    /// probe の 1 回の実行が [`PROBE_TIMEOUT`] を超過した（GPU ドライバ・カーネル停止等による
+    /// probe の 1 回の実行が `PROBE_TIMEOUT` を超過した（GPU ドライバ・カーネル停止等による
     /// ハングを検知し、子プロセスを kill・reap した後に返す）。
     ProbeTimeout(Duration),
     /// probe 標準出力の JSON デコードに失敗した。
@@ -256,7 +256,7 @@ impl StartupPhase {
 /// probe 子プロセスが標準出力へ JSON で返す内部計測結果（1 試行分）。
 ///
 /// `startup_probe` バイナリと本モジュールの driver（[`run_phase`]）が共有する
-/// プロセス間契約。`schema_version` 不一致は [`run_probe_once`] が fail-closed で拒否する
+/// プロセス間契約。`schema_version` 不一致は `run_probe_once` が fail-closed で拒否する
 /// （`report::BenchReport` と同じ「検証を経ない値へアクセスできる経路を設けない」方針）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProbeReport {

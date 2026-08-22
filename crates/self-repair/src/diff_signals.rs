@@ -24,7 +24,7 @@
 //! 埋めず [`Err`] を返す（`.claude/rules/security.md` A08「判定の迂回経路を
 //! 作らない」。`verify_gates.rs` の契約と同じ）。
 //!
-//! 変更ファイル一覧は `git diff --name-status -z`（[`list_changed_files`]）で
+//! 変更ファイル一覧は `git diff --name-status -z`（`list_changed_files`）で
 //! 構造化取得する。`git diff --numstat`（`-z` なし）の 3 列目は rename を
 //! `src/{old.rs => new.rs}` という単一フィールドの人間可読表記で返すため、
 //! これをそのまま `git show <baseline>:<file>` のパス引数に使うと必ず失敗し、
@@ -32,11 +32,11 @@
 //! 破壊的変更（既存 `pub fn` 削除等）を見逃す（PR #361 Codex レビュー P1）。
 //! `git show` の失敗は、`list_changed_files` が返すステータスで新規追加
 //! （`ChangedFile::is_newly_added()`）と確認できた場合のみ許容し、それ以外は
-//! [`Err`]（fail-closed）とする（[`show_file_at_baseline`] ドキュメント参照）。
+//! [`Err`]（fail-closed）とする（`show_file_at_baseline` ドキュメント参照）。
 //!
 //! # A03（インジェクション）対応
 //! `baseline_commit` は git コマンドライン引数へ渡す前に 7〜40 桁の 16 進文字列
-//! であることを検証する（[`validate_commit_ref`]）。検証しない場合、先頭に
+//! であることを検証する（`validate_commit_ref`）。検証しない場合、先頭に
 //! `-` を含む値（例: `--upload-pack=...`）を git のオプションとして誤解釈させる
 //! 攻撃（コマンドラインオプション偽装）が成立しうる
 //! （`.claude/rules/security.md` A03）。パス引数は `--` 区切りで分離し、
@@ -615,7 +615,7 @@ fn gaming_suspect_from_files(changed_files: &[ChangedFile]) -> bool {
 /// **呼び出し元は候補適用前に一度だけ本関数を呼び、返る [`guardrail::
 /// PolicyExclusionConfig`] を試行ループ全体で使い回さなければならない**
 /// （[`crate::verify_direct_composite::RepairCompositeGate`] が保持する）。
-/// 以前の実装は [`evaluate_exclusion_rules`] 内でこのロードを**試行ごとに**
+/// 以前の実装は `evaluate_exclusion_rules` 内でこのロードを**試行ごとに**
 /// （`RepairCompositeGate::verify` が呼ばれるたび）行っていた。
 /// `policy_exclusion_path` の既定値（`main.rs::run_run`）は
 /// sandbox 内の書き込み可能なパス（`sandbox_root/policy-exclusion.toml`。

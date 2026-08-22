@@ -50,7 +50,7 @@ impl std::error::Error for SyncError {}
 
 /// 「ホスト転送を伴わない完了待ち」を表す統一契約（REQ-8）。
 ///
-/// 実装（[`CpuSync`]・[`CudaStreamSync`]・[`MetalCommandBufferSync`]）は
+/// 実装（[`CpuSync`]・[`CudaStreamSync`]・`MetalCommandBufferSync`）は
 /// いずれも `wait_idle` の呼び出しでバックエンド上の未完了処理が完了する
 /// ことのみを保証し、結果データのホスト側 `Vec` への転送は行わない。
 /// 計測コアはカーネル起動直後に `wait_idle` を呼び、その後にホスト転送を

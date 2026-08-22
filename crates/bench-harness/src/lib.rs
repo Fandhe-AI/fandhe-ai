@@ -8,10 +8,10 @@
 //!
 //! ## TASK-8.1a: 計測プロトコル（本イシュー #27 の実装範囲）
 //!
-//! [`protocol`] モジュールが warmup 20 回以上・計測 20 回以上・中央値採用・Q1/Q3 記録という
+//! `protocol` モジュールが warmup 20 回以上・計測 20 回以上・中央値採用・Q1/Q3 記録という
 //! `docs/spec/05-tasks.md` TASK-8.1 の計測プロトコルを実装する。分位点の定義は PoC-v2-1 参照実装
 //! （`docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/rust/src/bin/gemm_bench.rs:17-25`）を踏襲し、
-//! [`stats`] モジュールが純粋関数として提供する。ワークロードはクロージャで受け取る
+//! `stats` モジュールが純粋関数として提供する。ワークロードはクロージャで受け取る
 //! バックエンド非依存設計とし、バックエンド抽象層（TASK-1.9）の完成を待たずに実装している。
 //!
 //! ### `.claude/rules/coding-rust.md` との回数記述の不一致（既知・要フォローアップ）
@@ -31,7 +31,7 @@
 //! - [`sync`]: バックエンド間で統一する同期方式の契約と 3 バックエンド実装。
 //!   「ホスト転送を伴わない完了待ち」への統一（REQ-8）を担う
 //!
-//! [`protocol`] モジュール（本イシュー #27）は計測コアとして独立しており、
+//! `protocol` モジュール（本イシュー #27）は計測コアとして独立しており、
 //! [`sync`] の `SyncPoint` 実装をワークロードクロージャ内から呼び出す形で
 //! 組み合わせる想定（[`sync`] モジュールドキュメント参照）。両モジュールの
 //! 結合（計測区間終端での `wait_idle` 呼び出し）はバックエンド抽象層
@@ -39,7 +39,7 @@
 //!
 //! ## TASK-8.1c: 構造化出力・プロトコル遵守回帰テスト（本イシュー #29 の実装範囲）
 //!
-//! [`report`] モジュールが [`Measurement`] を JSON へ構造化出力する [`BenchReport`] を提供する。
+//! `report` モジュールが [`Measurement`] を JSON へ構造化出力する [`BenchReport`] を提供する。
 //! `guardrail`（判定レポート・`docs/guardrail-self-repair-cli.md` 2.1 節）・`self-repair`
 //! （検証ゲート・TASK-3.2）からの参照可能性は、本クレートが serde 対応の公開型と
 //! JSON 入出力 API を提供することで担保する（依存方向は `guardrail` → `bench-harness`。
@@ -55,7 +55,7 @@
 //!
 //! ## TASK-8.2a: 段階的下限表の自動合否判定（本イシュー #152 の実装範囲）
 //!
-//! [`threshold`] モジュールが REQ-8 段階的下限表（バックエンド×dtype×段階）をデータ化し、
+//! `threshold` モジュールが REQ-8 段階的下限表（バックエンド×dtype×段階）をデータ化し、
 //! [`BenchReport`] 同士（自作実装対 PyTorch 参照実装）から実測比率を算出して合否を
 //! 自動判定する（[`threshold::judge`]）。丸め規則（10% 以上 5% 刻み・10% 未満 1% 刻み）の
 //! 共通ロジック化は別イシュー（TASK-8.2b）のスコープであり、本モジュールは spec 側で
@@ -101,7 +101,7 @@
 //! `TransformerWorkloadSpec`／`baseline_spec()` として単一真実源化する。親 #582（Phase G）の
 //! 評価軸「Transformer 複合ワークロード」は REQ-8 の GEMM 単体 5 行（[`threshold::floor_spec`]
 //! の判定対象）とは別系列であり、本モジュールの値は `floor_spec`／`judge` の判定対象に
-//! 含めない（[`threshold`] モジュールへの変更なし）。定義の確定経緯・計測プロトコル・
+//! 含めない（`threshold` モジュールへの変更なし）。定義の確定経緯・計測プロトコル・
 //! 比較対象 PyTorch 構成・評価方式は `docs/perf/transformer-workload-baseline.md`（#589）を参照。
 
 pub mod ab;

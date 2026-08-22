@@ -220,7 +220,7 @@ impl BackendOps for CpuBackendOps {
     /// op 列・leaf 数・`row_fusion()` の形状を厳密照合する。
     /// `backend-cuda::rmsnorm`／`backend-cuda::softmax` と同一契約の CPU
     /// 側ミラー）で canonical RMSNorm／softmax 融合プランを検出した場合は
-    /// それぞれ [`rmsnorm::run_rmsnorm_f32_raw`]／[`softmax::run_softmax_f32`]
+    /// それぞれ `rmsnorm::run_rmsnorm_f32_raw`／[`softmax::run_softmax_f32`]
     /// へルーティングする。どちらにも一致しない場合（elementwise-only・
     /// 中間軸 softmax 等）は従来どおり [`fused_elementwise::
     /// run_fused_elementwise`] の allowlist 検査へ委ねる（既存 elementwise

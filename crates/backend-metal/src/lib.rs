@@ -27,11 +27,11 @@
 //! FFI 境界の `unsafe`（objc2 系）は必要最小限に留め理由コメントを付す
 //! （`.claude/rules/security.md`）。
 //!
-//! TASK-1.8a（#38）でデバイス・コマンドキュー・バッファ管理の基盤（[`context::MetalContext`]・
-//! [`buffer::MetalBuffer`]・[`error::MetalError`]）を実装済み。TASK-1.8b（#39）で MSL 実行時
-//! コンパイル・パイプライン構築（[`pipeline`]）・naive GEMM ディスパッチ経路（[`gemm::MetalGemm`]）
-//! を追加した。TASK-1.8c（#40）で tiled・simdgroup カーネル（[`gemm::GemmVariant`]・
-//! [`gemm::MetalGemm::dispatch_variant`]）と 8 の倍数パディングユーティリティ（[`pad`]）を
+//! TASK-1.8a（#38）でデバイス・コマンドキュー・バッファ管理の基盤（`context::MetalContext`・
+//! `buffer::MetalBuffer`・`error::MetalError`）を実装済み。TASK-1.8b（#39）で MSL 実行時
+//! コンパイル・パイプライン構築（`pipeline`）・naive GEMM ディスパッチ経路（`gemm::MetalGemm`）
+//! を追加した。TASK-1.8c（#40）で tiled・simdgroup カーネル（`gemm::GemmVariant`・
+//! `gemm::MetalGemm::dispatch_variant`）と 8 の倍数パディングユーティリティ（[`pad`]）を
 //! 追加し、`shaders/gemm.metal` の naive/tiled/simdgroup 3 段すべてを実装済みにした
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.8）。
 //!
@@ -39,7 +39,7 @@
 //! PoC-v2-5 実証構成・REQ-2）。[`pad`] のみ `objc2` 系 FFI に触れない純粋関数群のため
 //! `cfg(target_os = "macos")` を付けず、Linux（CI・本実装環境）でも単体テストが回る。
 //!
-//! TASK-1.9a（#44）で [`device`] モジュール（[`device::MetalDeviceProvider`]）を追加した。
+//! TASK-1.9a（#44）で `device` モジュール（`device::MetalDeviceProvider`）を追加した。
 //! `fandhe_ai_tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
 //! （`backend-cpu::CpuDeviceProvider`／`backend-cuda::device::CudaDeviceProvider`）と
 //! 同一 trait で列挙・選択できることを macOS 実機上のテストで検証する。`Device::Metal`
@@ -50,31 +50,31 @@
 //! 1 simdgroup = C の 8×8 タイル 1 つ）はタイルサイズの自由度がなく、MLX steel カーネル方式
 //! （BM/BN/BK/WM/WN のパラメータ化＋行列サイズ別動的選択）の性能差の核心に対応できないため、
 //! `shaders/gemm.metal` に MSL function constant でパラメータ化した `gemm_simdgroup_tiled` を追加し、
-//! [`gemm::GemmVariant::SimdgroupTiled`]／[`gemm::MetalGemm::dispatch_auto`] から利用する。
+//! `gemm::GemmVariant::SimdgroupTiled`／`gemm::MetalGemm::dispatch_auto` から利用する。
 //! [`tile`] 自体は `objc2` 系 FFI に触れない純粋関数群のため他モジュールと異なり
 //! `cfg(target_os = "macos")` を付けない（[`pad`] と同じ設計判断。Linux でも単体テストが回る）。
 //!
-//! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::MetalMemory`]）を追加した。
+//! TASK-1.9b（#45）で `memory` モジュール（`memory::MetalMemory`）を追加した。
 //! `fandhe_ai_tensor_core::buffer::MemoryOps` の Metal 実装であり、新規 `unsafe` を追加せず
-//! 既存の [`buffer::MetalBuffer`]（`new_with_data`／`new_zeroed`／`read_to_vec`）を
+//! 既存の `buffer::MetalBuffer`（`new_with_data`／`new_zeroed`／`read_to_vec`）を
 //! そのまま再利用する。`StorageModeShared`（UMA）のため CUDA のような明示同期は
 //! 不要（`memory.rs` モジュールコメント参照）。
 //!
 //! TASK-11.2b（#68）で GEMM 自動経路選択入口
-//! （[`gemm::MetalGemm::dispatch_backend_auto`]）を追加した。
+//! （`gemm::MetalGemm::dispatch_backend_auto`）を追加した。
 //! `fandhe_ai_tensor_core::dispatch::select_gemm_kernel`（#67 が設計した決定的規則。
 //! `docs/dispatch-rules-design.md`）が返す経路に従い、`simdgroup_matrix`
-//! （[`gemm::MetalGemm::dispatch_auto`] 経由）／tiled／naive を呼び分ける。
+//! （`gemm::MetalGemm::dispatch_auto` 経由）／tiled／naive を呼び分ける。
 //! 判定材料となる `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)` は
-//! [`context::MetalContext::new`] 時に 1 回評価しキャッシュする
-//! （[`context::MetalContext::caps`]）。既存の [`gemm::MetalGemm::dispatch`]
-//! （naive）／[`gemm::MetalGemm::dispatch_variant`]（経路直接指定）は
+//! `context::MetalContext::new` 時に 1 回評価しキャッシュする
+//! （`context::MetalContext::caps`）。既存の `gemm::MetalGemm::dispatch`
+//! （naive）／`gemm::MetalGemm::dispatch_variant`（経路直接指定）は
 //! テスト・証跡用途（#70）にそのまま温存する（`docs/dispatch-rules-design.md`
 //! §5.4）。
 //!
-//! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::MetalBackendOps`]）を追加した。
+//! TASK-1.9c（#46）で `ops` モジュール（`ops::MetalBackendOps`）を追加した。
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の Metal 実装であり、`gemm` は
-//! [`gemm::MetalGemm::dispatch_auto`]（実装済みの動的タイル選択）へ委譲する。
+//! `gemm::MetalGemm::dispatch_auto`（実装済みの動的タイル選択）へ委譲する。
 //! elementwise・reduction は GPU カーネル未実装のため
 //! `fandhe_ai_tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。`device` モジュールと同じく
@@ -86,24 +86,24 @@
 //! （f32 累算。イシュー #380 の実機検証で half 統一から変更）。カーネル
 //! 冒頭コメントに精度契約の判断根拠を記載）と、その明示ディスパッチ入口
 //! （`gemm::MetalGemm::dispatch_f16_unverified`）を追加した。既存の
-//! [`gemm::MetalGemm::dispatch_auto`]／`dispatch_backend_auto`（f32 専用の
+//! `gemm::MetalGemm::dispatch_auto`／`dispatch_backend_auto`（f32 専用の
 //! 自動経路選択）はそのまま変更していない（f16 の自動ディスパッチ統合は
-//! 本 TASK のスコープ外。イシュー #798 で [`gemm::MetalGemm::dispatch_f16_auto_unverified`]
+//! 本 TASK のスコープ外。イシュー #798 で `gemm::MetalGemm::dispatch_f16_auto_unverified`
 //! として実現した。`docs/dispatch-rules-design.md` 参照）。f16 専用の
-//! Metal バッファ型 [`half_buffer::MetalHalfBuffer`] を新設し、既存
-//! [`buffer::MetalBuffer`]（f32 専用）のシグネチャには一切手を入れていない。
+//! Metal バッファ型 `half_buffer::MetalHalfBuffer` を新設し、既存
+//! `buffer::MetalBuffer`（f32 専用）のシグネチャには一切手を入れていない。
 //!
 //! イシュー #541（D-7a）で occupancy 目標算出の基盤を追加した:
-//! [`device::probe_gpu_core_count`]（IOKit `AGXAccelerator` 実測。
+//! `device::probe_gpu_core_count`（IOKit `AGXAccelerator` 実測。
 //! `device` モジュールと同じく `cfg(target_os = "macos")` 限定）・
-//! [`device::MetalOccupancyInfo`]・[`tile::OccupancyParams`]
+//! `device::MetalOccupancyInfo`・[`tile::OccupancyParams`]
 //! （`tile::actual_groups`／`tile::is_underoccupied` と合わせ `objc2` 系
 //! FFI に触れない純粋関数群）。
 //!
 //! イシュー #542（D-7b）で [`tile::select_with_occupancy`] を実装した。
-//! [`context::MetalContext::new`] が `MetalOccupancyInfo::probe` を 1 回
+//! `context::MetalContext::new` が `MetalOccupancyInfo::probe` を 1 回
 //! だけ実行して `Option<tile::OccupancyParams>` へ写像・キャッシュする
-//! （[`context::MetalContext::occupancy_params`]）。**ただし
+//! （`context::MetalContext::occupancy_params`）。**ただし
 //! `gemm::MetalGemm::dispatch_auto`（本番ディスパッチ経路）は現時点では
 //! `tile::select`（形状のみ）を呼ぶ**: `ideal_groups` の係数（MFA 経験式
 //! 由来の暫定値）は M4 Max 実機での `select()` 比・性能非劣化確認
@@ -120,32 +120,32 @@
 //! 自体は production 自動経路（`dispatch_auto`／`dispatch_backend_auto`）へ
 //! 統合しない方針（イシュー #798 の後方互換方針）のため `_unverified`
 //! suffix・`#[doc(hidden)]` は当面維持する。タイル化 f16 カーネル
-//! （`gemm_simdgroup_tiled_f16`）は #798 で [`gemm::MetalGemm::dispatch_f16_auto_unverified`]
+//! （`gemm_simdgroup_tiled_f16`）は #798 で `gemm::MetalGemm::dispatch_f16_auto_unverified`
 //! から動的タイル選択付きで自動経路へ統合済み（明示 `cfg` 指定用の
 //! `dispatch_f16_tiled_unverified`／`dispatch_f16_tiled_prepared_unverified`
 //! 自体は引き続き `_unverified` suffix・`#[doc(hidden)]` を維持）。詳細は
-//! [`gemm::MetalGemm::dispatch_f16_unverified`]・
-//! [`gemm::MetalGemm::dispatch_f16_auto_unverified`] のドキュメントコメントを
+//! `gemm::MetalGemm::dispatch_f16_unverified`・
+//! `gemm::MetalGemm::dispatch_f16_auto_unverified` のドキュメントコメントを
 //! 参照）。
 //!
-//! イシュー #604 で融合 RMSNorm 順伝播カーネル（[`rmsnorm::MetalRmsNorm`]）と
-//! online softmax カーネル（[`softmax::MetalSoftmax`]）を MSL で追加した。
+//! イシュー #604 で融合 RMSNorm 順伝播カーネル（`rmsnorm::MetalRmsNorm`）と
+//! online softmax カーネル（`softmax::MetalSoftmax`）を MSL で追加した。
 //! CUDA 側 G-6（#592）と同一アルゴリズム契約（1 パス／2 パス経路・
 //! persistent threadgroup・FMA 契約統一）を採るが、`MetalContext::
 //! dispatch_sync` が動的 threadgroup memory 設定 API を経由しないため
-//! 1 パス経路はコンパイル時固定長の `threadgroup` 配列を使う（[`row_kernel`]
+//! 1 パス経路はコンパイル時固定長の `threadgroup` 配列を使う（`row_kernel`
 //! モジュール冒頭コメント参照）。両カーネル・`row_kernel` の経路選択・
-//! canonical 融合プラン照合の cfg 非依存部分は [`row_kernel`] に集約し、
-//! [`ops::MetalBackendOps::run_fused`] からルーティングする。softmax の
+//! canonical 融合プラン照合の cfg 非依存部分は `row_kernel` に集約し、
+//! `ops::MetalBackendOps::run_fused` からルーティングする。softmax の
 //! CUDA 直接 parity 相手（#594・G-7）は本イシュー時点で未実装のため、
 //! 両バックエンドとも CPU 参照実装（REQ-2 統一複合判定）に対する数値一致を
 //! 経由した推移的な担保に留まる（`softmax.rs`／`tests/softmax_parity.rs`
 //! ドキュメンテーションコメント参照）。
 //!
 //! イシュー #605（Phase G・G-14）で elementwise 5 演算
-//! （[`elementwise::MetalElementwise`]。CUDA 側 #599 の対応版）を追加し、
+//! （`elementwise::MetalElementwise`。CUDA 側 #599 の対応版）を追加し、
 //! `ops::MetalBackendOps::gemm_bias_act` を GEMM epilogue 実融合カーネル
-//! （[`gemm::MetalGemm::run_tiled_bias_act_f32`]・`shaders/gemm.metal::
+//! （`gemm::MetalGemm::run_tiled_bias_act_f32`・`shaders/gemm.metal::
 //! gemm_tiled_bias_act`）でオーバーライドした。既存 `gemm_naive`／
 //! `gemm_tiled`／`gemm_simdgroup`／`gemm_simdgroup_tiled`／
 //! `gemm_simdgroup_f16` カーネルには一切触れておらず、GEMM 単体の性能・
@@ -160,27 +160,27 @@
 //! タイル 1 つの非タイル化構造）が対 PyTorch MPS f16 で大きく劣後する
 //! 主因（親イシュー #787）への対応で、f32 版 `gemm_simdgroup_tiled`
 //! （TASK-1.8f・#188）の構造を half 入力対応で移植した。明示 `TileConfig`
-//! 指定の単体ディスパッチ入口（[`gemm::MetalGemm::dispatch_f16_tiled_unverified`]・
-//! [`gemm::MetalGemm::dispatch_f16_tiled_prepared_unverified`]）を追加した
+//! 指定の単体ディスパッチ入口（`gemm::MetalGemm::dispatch_f16_tiled_unverified`・
+//! `gemm::MetalGemm::dispatch_f16_tiled_prepared_unverified`）を追加した
 //! （`_unverified` suffix・`#[doc(hidden)]` の判断根拠は
-//! [`gemm::MetalGemm::dispatch_f16_unverified`] と同一）。協調ロードの
+//! `gemm::MetalGemm::dispatch_f16_unverified` と同一）。協調ロードの
 //! float4 ベクトル化・エピローグの barrier 粒度最適化は #797、実機
 //! 再計測・ベースライン更新は #799 のスコープとする。
 //!
 //! イシュー #798 で動的タイル選択の自動入口
-//! （[`gemm::MetalGemm::dispatch_f16_auto_unverified`]）を追加し、`gemm_simdgroup_tiled_f16`
+//! （`gemm::MetalGemm::dispatch_f16_auto_unverified`）を追加し、`gemm_simdgroup_tiled_f16`
 //! を `tile::select(m, n, k)` による f32 版 `dispatch_auto` と同型のタイル
 //! 構成選択で使う経路を用意した。`GemmVariant` enum へは
 //! f16 を統合しない（`dispatch_variant` が `&[f32]` に閉じる既存設計判断を
 //! 維持。`gemm::MetalGemm::pipeline_simdgroup_f16` フィールドコメント参照）。
 //! 非タイル `gemm_simdgroup_f16`・`dispatch_f16_unverified` 系入口は
 //! 削除・置換せず、計測・回帰基線として存置する後方互換方針を採った
-//! （[`gemm::MetalGemm::dispatch_f16_auto_unverified`] ドキュメンテーションコメント
+//! （`gemm::MetalGemm::dispatch_f16_auto_unverified` ドキュメンテーションコメント
 //! 参照）。数値一致回帰は `tests/gemm_f16_auto_parity.rs`（Metal 実機依存・
 //! `#[ignore]`）で REQ-2 統一複合判定を検証する契約だが、本 PR 時点で実機
 //! 実行は未完了（#799 のスコープ）。**PR #819 codex-review P1 指摘対応**として、
 //! 精度未検証カーネルを検証済み production 入口へ結線しない既存の安全境界
-//! に従い、[`gemm::MetalGemm::dispatch_f16_auto_unverified`] 自体も
+//! に従い、`gemm::MetalGemm::dispatch_f16_auto_unverified` 自体も
 //! `_unverified` suffix・`#[doc(hidden)]` とし、`ops::MetalBackendOps` や
 //! `dispatch_backend_auto`（真の production 自動経路）へは統合していない
 //! （#799 の実機検証完了後、別イシューで統合可否を判断する）。`tensor-core`

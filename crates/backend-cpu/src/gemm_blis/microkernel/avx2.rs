@@ -14,7 +14,7 @@
 //! 検出済み呼び出しでも駆動される（テスト限定の直接呼び出しは維持）。
 //!
 //! FMA 契約（REQ-2）: `_mm256_fmadd_ps` は IEEE-754 fused multiply-add
-//! であり、[`super::scalar::kernel`]・[`super::neon`] と丸めが同一になる
+//! であり、[`super::scalar::kernel`]・`super::neon` と丸めが同一になる
 //! （PoC-v2-5 の K=4096 ストレスケースで GPU 側含め実測確認済みの契約）。
 
 use std::arch::x86_64::{
@@ -33,7 +33,7 @@ const _: () = assert!(MR * NR <= 256);
 /// AVX2+FMA を用いる実装本体。`#[target_feature(enable = "avx2,fma")]`
 /// が付くため呼び出しは常に `unsafe`（コンパイラ既定の安全弾）であり、
 /// 呼び出し元が「実行 CPU が AVX2+FMA をサポートする」ことを保証する
-/// 責務を負う（本ファイル内の [`kernel`]〈コンパイル時 cfg 経由〉、または
+/// 責務を負う（本ファイル内の `kernel`〈コンパイル時 cfg 経由〉、または
 /// `tests/gemm_blis_parity.rs` の `is_x86_feature_detected!` ガード付き
 /// 直接呼び出しがその責務を果たす）。
 ///
@@ -139,8 +139,8 @@ unsafe fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usi
 /// [`super::scalar::kernel`] のドキュメント参照。本関数も同じ理由で
 /// 従来どおり `()` を返す必須シグネチャへ戻す。`check_c_tile_bounds` の
 /// `Result` を `panic!` へ変換する経路は持たない（#691 レビュー P1
-/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: [`compute`] へ直接委譲する）。
-/// `ap`／`bp` の長さ検査は [`super::panel_len_matches`] で `checked_mul`
+/// 再指摘 `PRRT_kwDOTuUCJc6ZrQZG` 対応: `compute` へ直接委譲する）。
+/// `ap`／`bp` の長さ検査は `super::panel_len_matches` で `checked_mul`
 /// によりオーバーフローも確実に不一致として扱う（#691 レビュー P0
 /// 再指摘 `PRRT_kwDOTuUCJc6ZrXKs`）。`c.len() == MR * NR` の検査は `ldc`
 /// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に

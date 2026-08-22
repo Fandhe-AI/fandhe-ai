@@ -101,7 +101,7 @@ pub enum NetworkIsolation {
     /// 従来どおりホストのネットワーク到達性を継承する（既定）。
     #[default]
     Inherit,
-    /// `unshare --user --map-current-user --net`（[`UNSHARE_NET_FLAGS`]）で
+    /// `unshare --user --map-current-user --net`（`UNSHARE_NET_FLAGS`）で
     /// network namespace を分離する（opt-in。`ExecIsolation::probe_unshare_net`
     /// が事前に可用性を確認して
     /// いる前提で使う。probe を経ずに使うと、可用性のない環境で実行時に
@@ -221,7 +221,7 @@ impl ExecIsolation {
         matches!(self.network, NetworkIsolation::UnshareNet)
     }
 
-    /// `unshare --user --map-current-user --net true`（[`UNSHARE_NET_FLAGS`]）
+    /// `unshare --user --map-current-user --net true`（`UNSHARE_NET_FLAGS`）
     /// を実行環境で 1 回試行し、
     /// network namespace 分離が可能かを確認する（fail-closed probe）。
     ///
@@ -314,7 +314,7 @@ fn probe_unshare_net_with_program(program: impl AsRef<OsStr>) -> Result<(), Stri
 ///
 /// # sandbox_root の**外側**（兄弟ディレクトリ）に置く理由（レビュー指摘 #414）
 /// `sandbox_root`（`RunSandbox::root()`）は
-/// [`crate::verify_direct_composite::RepairCompositeGate::verify`]
+/// `crate::verify_direct_composite::RepairCompositeGate::verify`
 /// （→ [`crate::diff_signals::measure_diff_signals`]／`verify_bench_direct.rs`）
 /// が検証のたび `git add -A -- .` で diff を計測する git worktree そのもの。
 /// 隔離ディレクトリを `sandbox_root` の内側に置くと、候補の `build.rs`／

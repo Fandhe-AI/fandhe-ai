@@ -6,7 +6,7 @@
 //! 自体は新規 `unsafe` を追加しない（`.claude/rules/security.md` の
 //! 「unsafe は必要最小限」方針。FFI 境界の safety 根拠は `buffer.rs`
 //! 側に集約済み）。TASK-#201（REQ-14 14-3）で追加した
-//! [`MetalBuffer::zero_fill`] のみ、`read_to_vec` と対になる書き込み版
+//! `MetalBuffer::zero_fill` のみ、`read_to_vec` と対になる書き込み版
 //! FFI アクセスとして `buffer.rs` 側に 1 箇所追加している
 //! （`buffer.rs` モジュールコメント「Safety 境界」参照）。
 //!

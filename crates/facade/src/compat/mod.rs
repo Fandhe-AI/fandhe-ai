@@ -2,7 +2,7 @@
 //!
 //! `autodiff` の自作コア（`Tape`/`Var`/`nn`）の上に薄いラッパーを被せ、
 //! Python 慣習寄りの入口を提供する。テンソル生成は [`array`]
-//! （numpy `np.array` 慣習）、レイヤー積み上げは [`Sequential`]
+//! （numpy `np.array` 慣習）、レイヤー積み上げは `Sequential`
 //! （Keras `Sequential` 慣習）。数値ロジック・shape 検査は一切持ち込まず
 //! `tensor-core::Tensor::new`／`fandhe_ai_autodiff::nn::Module` へ委譲する（REQ-9
 //! 「互換 API 層は自作コアの上の薄いラッパーに徹する」・`.claude/rules/
@@ -25,11 +25,11 @@
 //! **`predict_with_ops`（任意 `BackendOps` 注入経路）は本移設で公開面から
 //! 撤去した**（破壊的変更。REQ-12「任意 `BackendOps` 実装を注入できる
 //! 公開 API を設けない」・`crates/facade/tests/api_surface.rs` の機械検査と
-//! 整合させるため）。[`Sequential::predict`] は本クレートの [`crate::tape`]
+//! 整合させるため）。`Sequential::predict` は本クレートの [`crate::tape`]
 //! （既定 CPU・`CpuBackendOps`・融合有効）で `Tape` を構築して forward する
 //! （`docs/public-api-design.md:431`「facade 経由なら既定バックエンドが
 //! 透過的に効く」と整合）。ops を明示的に選びたい内部用途は
-//! [`Sequential::forward`]（`&fandhe_ai_autodiff::Tape` を受け取るだけで `BackendOps`
+//! `Sequential::forward`（`&fandhe_ai_autodiff::Tape` を受け取るだけで `BackendOps`
 //! は受け取らない）へ、呼び出し元が任意に構築した `Tape` を渡せば足りる。
 //!
 //! `lib.rs` クレート doc の「本クレート自体には互換レイヤ固有のロジック
@@ -41,7 +41,7 @@
 //! **対象範囲**（`docs/compat-api-scope.md` §1〜2）: レイヤーは
 //! Linear・ReLU・Sigmoid・Tanh の 3 種限定。`Sequential` 経由の学習
 //! （勾配取得・パラメータ更新）は #294 で対応済み（`sequential.rs`
-//! 冒頭 doc・[`SequentialVars`] 参照。`fit()`/`compile()` 等の高水準
+//! 冒頭 doc・`SequentialVars` 参照。`fit()`/`compile()` 等の高水準
 //! 学習ループ API は引き続き対象外）。
 
 mod array;

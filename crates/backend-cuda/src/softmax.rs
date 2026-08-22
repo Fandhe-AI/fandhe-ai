@@ -277,7 +277,7 @@ impl CudaSoftmax {
     /// `out[r, :] = softmax(x[r, :])`（行方向・最終軸 softmax）を実行する
     /// 公開エントリ。`x` は `[rows, cols]` の行優先 1 次元化済みバッファ。
     /// `scale = log2(e)`（`std::f32::consts::LOG2_E`）を内部合成して
-    /// [`Self::run_softmax_f32_raw`] へ委譲する。
+    /// `Self::run_softmax_f32_raw` へ委譲する。
     pub fn run_softmax_f32(
         &self,
         x: &[f32],

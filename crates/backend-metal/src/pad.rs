@@ -1,6 +1,6 @@
 //! `simdgroup_matrix`（8×8 ハードウェア行列演算命令）向け 8 の倍数パディング（TASK-1.8c・#40）。
 //!
-//! [`crate::gemm::MetalGemm::dispatch_variant`] が `GemmVariant::Simdgroup`
+//! `crate::gemm::MetalGemm::dispatch_variant` が `GemmVariant::Simdgroup`
 //! を選択した際、入力 A・B を 8 の倍数の実効次元へ 0 パディングしてから
 //! Metal バッファへアップロードし、readback 後は [`unpad_matrix`] で元の
 //! m×n 形状へ切り出す（呼び出し元にパディングの有無を隠蔽する。
@@ -28,7 +28,7 @@ pub fn pad8(x: usize) -> usize {
 /// `src`（`rows`×`cols`、行優先）を `rows_eff`×`cols_eff` へ 0 パディングする。
 ///
 /// サイズが既に一致する場合（`Naive`/`Tiled` 経路等パディング不要な variant）
-/// は `src` をそのまま借用で返し複製しない（[`crate::gemm::MetalGemm::dispatch_variant`]
+/// は `src` をそのまま借用で返し複製しない（`crate::gemm::MetalGemm::dispatch_variant`
 /// が variant を問わず本関数を呼べるようにしつつ、パディング不要な経路で
 /// 毎ディスパッチ発生していた不要な全行列コピーを避けるための `Cow` 化）。
 pub fn pad_matrix<'a>(
@@ -51,7 +51,7 @@ pub fn pad_matrix<'a>(
 /// [`pad_matrix`] の逆操作。`src`（`rows_eff`×`cols_eff`、行優先）から
 /// 先頭 `rows`×`cols` を切り出す（末尾のパディング行・列を捨てる）。
 ///
-/// [`crate::gemm::MetalGemm::dispatch_variant`] が Metal readback 後の
+/// `crate::gemm::MetalGemm::dispatch_variant` が Metal readback 後の
 /// C バッファ（実効次元）を呼び出し元へ渡す元の m×n 形状へ戻すために呼ぶ。
 /// `src` を値渡し（所有権移動）で受け取り、形状が一致するパディング不要
 /// 経路（`Naive`/`Tiled`、および既にアラインメント済みの `Simdgroup`）では
@@ -99,7 +99,7 @@ pub fn pad_matrix_f16<'a>(
 }
 
 /// [`unpad_matrix`] の f16 版（TASK-8.3b・#156）。
-/// [`crate::gemm::MetalGemm::dispatch_f16_unverified`]
+/// `crate::gemm::MetalGemm::dispatch_f16_unverified`
 /// が Metal readback 後の C バッファ（実効次元。half 型）を呼び出し元へ渡す
 /// 元の m×n 形状へ戻すために呼ぶ。
 pub fn unpad_matrix_f16(

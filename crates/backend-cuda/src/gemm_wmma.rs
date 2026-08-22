@@ -85,7 +85,7 @@ impl CudaWmmaGemm {
     /// ハンドルを構築する。
     ///
     /// 手順: (1) `device.compute_capability()` が
-    /// [`MIN_COMPUTE_CAPABILITY_MAJOR`] 未満なら NVRTC コンパイルを試みず
+    /// `MIN_COMPUTE_CAPABILITY_MAJOR` 未満なら NVRTC コンパイルを試みず
     /// `CudaError::TensorCoreUnsupported` を返す（設計メモ 7 節。cc 判定は
     /// コンパイル前に行うことで、非対応デバイス上での無駄な NVRTC 呼び出し
     /// ・コンパイル失敗の紛れ込みを避ける）。(2)
@@ -159,11 +159,11 @@ impl CudaWmmaGemm {
         })
     }
 
-    /// 共有メモリ・タイル最適化版 f16 WMMA カーネル（[`Self::wmma_f16_opt`]）
+    /// 共有メモリ・タイル最適化版 f16 WMMA カーネル（`Self::wmma_f16_opt`）
     /// が `new` 時点でコンパイル・ロードに成功しているかを返す（TASK-11.1e・
     /// #64。`gemm.rs::CudaGemm::wmma_tf32_opt_available` の f16 側鏡写し）。
     ///
-    /// `run_f16` は opt カーネルが `None` の場合に基本版（[`Self::wmma_f16`]）
+    /// `run_f16` は opt カーネルが `None` の場合に基本版（`Self::wmma_f16`）
     /// へ自動フォールバックするため、`run_f16` の戻り値の成否だけでは opt
     /// カーネルが実際に実行されたかを判定できない。実機実測テスト
     /// （`tests/tensor_core_real_device.rs`）はこの関数で事前に可用性を
@@ -173,7 +173,7 @@ impl CudaWmmaGemm {
     }
 
     /// [`Self::wmma_f16_opt_available`] が `false` の場合の失敗理由
-    /// （[`Self::wmma_f16_opt_error`] の公開読み取り口）。opt カーネルが
+    /// （`Self::wmma_f16_opt_error` の公開読み取り口）。opt カーネルが
     /// 利用可能な場合は `None` を返す。テストが「opt カーネルが使用不能
     /// だった具体的な理由」をパニックメッセージへ含められるようにする。
     pub fn wmma_f16_opt_unavailable_reason(&self) -> Option<&str> {
@@ -185,7 +185,7 @@ impl CudaWmmaGemm {
     /// （`kernels_wmma::WMMA_F16` 参照。数値契約は `CudaGemm::run_naive_f16`
     /// と同一。`kernels_wmma.rs` 冒頭ドキュメントコメント「数値契約」参照）。
     ///
-    /// ホスト側形状検証（[`validate_gemm_dims`]）を naive／tiled 経路と
+    /// ホスト側形状検証（`validate_gemm_dims`）を naive／tiled 経路と
     /// 共有する（`gemm.rs` 参照）。グリッド次元は `kernels_wmma::WMMA_TILE`
     /// 単位の `div_ceil` で構築し、末尾タイルの余剰はカーネル内 REQ-8
     /// 境界チェック（`kernels_wmma.rs` 参照）に委ねる。
@@ -196,9 +196,9 @@ impl CudaWmmaGemm {
     /// （本関数専用のグリッド計算を用いる）。
     ///
     /// **TASK-11.1d（#63）フォールバック方針**: 共有メモリ・タイル最適化版
-    /// （[`Self::wmma_f16_opt`]）が `new` 時点でコンパイル・ロードに成功
+    /// （`Self::wmma_f16_opt`）が `new` 時点でコンパイル・ロードに成功
     /// していれば、そちらを優先的に使用する。`None` の場合は基本版
-    /// （[`Self::wmma_f16`]）へ自動フォールバックし、公開シグネチャ・
+    /// （`Self::wmma_f16`）へ自動フォールバックし、公開シグネチャ・
     /// 呼び出し側の挙動は変えない（`gemm.rs::CudaGemm::run_wmma_tf32` と
     /// 同じ設計判断）。
     pub fn run_f16(

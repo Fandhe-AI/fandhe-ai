@@ -19,7 +19,7 @@
 //! 経由）。本モジュール自体は `decide()` を呼ばず、`MatchRule` 列挙・
 //! TOML ロードも持たない（`policy_exclusion` モジュール本体の責務）。
 //!
-//! [`changed_files_for_policy_exclusion`] も同じ理由で `policy_exclusion`
+//! `changed_files_for_policy_exclusion` も同じ理由で `policy_exclusion`
 //! （`EvaluationContext::from_repo`）専用の変更ファイル一覧取得口として提供する
 //! （`Cargo.lock` を除外しない。下記関数ドキュメント参照）。
 //!
@@ -35,7 +35,7 @@
 //! は評価対象になった。
 //!
 //! # 変更ファイルパスの正規化契約
-//! [`changed_files`]／[`changed_files_for_policy_exclusion`] が返すパスは
+//! `changed_files`／`changed_files_for_policy_exclusion` が返すパスは
 //! リポジトリルート相対・先頭 `/` なし・`./` なし・`/` 区切り（git の
 //! `--name-only` 出力形式）である。`git_command` に `-c core.quotePath=false`
 //! を指定し、非 ASCII を含むパスが 8 進数エスケープ表記
@@ -446,12 +446,12 @@ pub(crate) fn touches_prod_logic(
 ///    典型例: `assert!`／`abs() <`／`1e-[0-9]`。`policy-exclusion.toml` の
 ///    ルール定義と同一契約）が含まれる（テストの緩和が起きている）
 /// 2. 本番コード（`src/*.rs`。`tests/` 配下除く）の変更を確認できない
-///    （[`ProdTouch::Touched`] ではない。境界確認済みで確実に変更なしの
-///    場合＝[`ProdTouch::NotTouched`] だけでなく、`mod tests` 境界が非標準
-///    名等で特定できない [`ProdTouch::UnknownBoundary`] の場合も match
+///    （`ProdTouch::Touched` ではない。境界確認済みで確実に変更なしの
+///    場合＝`ProdTouch::NotTouched` だけでなく、`mod tests` 境界が非標準
+///    名等で特定できない `ProdTouch::UnknownBoundary` の場合も match
 ///    （エスカレーション）方向に倒す。安全性を証明できない場合は
 ///    「安全」と誤判定して自動適用をすり抜けさせない。Bugbot 指摘 Medium・
-///    #123。詳細は [`touches_prod_logic`] のドキュメント参照）
+///    #123。詳細は `touches_prod_logic` のドキュメント参照）
 ///
 /// 短絡評価: 条件 1 が偽の場合は `touches_prod_logic` の git 呼び出しを
 /// 省略する（無用な子プロセス起動を避ける）。

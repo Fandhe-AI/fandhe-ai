@@ -182,13 +182,13 @@ impl CudaDevice {
 
     /// SM（マルチプロセッサ）数の公開アクセサ（イシュー #499）。
     ///
-    /// [`compute_units`](Self::compute_units) と同一の取得ロジック・
+    /// `compute_units` と同一の取得ロジック・
     /// fail-soft 方針（取得失敗時 `None`）をそのまま公開する薄いラッパー。
     /// `swizzle::select_swizzle_group_width`（`swizzle.rs`）・
     /// `gemm_mma.rs::CudaMmaGemm::new_with_swizzle`・
     /// `examples/gemm_mma_swizzle_bench.rs` が、グルーピング幅の動的選択に
     /// 使う SM 数をここから取得する。`DeviceInfo::compute_units`
-    /// （[`CudaDeviceProvider::probe`]）は既に同じ値を crate 外へ公開して
+    /// （`CudaDeviceProvider::probe`）は既に同じ値を crate 外へ公開して
     /// いるため（`fandhe_ai_tensor_core::device::DeviceInfo` 経由）、本アクセサは
     /// 新規の公開面を作るものではなく、`CudaDevice` から直接取得する経路を
     /// 追加するのみ。
@@ -205,7 +205,7 @@ impl CudaDevice {
     /// **動的**共有メモリの実効上限で、既定の
     /// `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK`（48KiB。static
     /// `__shared__` 宣言の実効上限と同一値。
-    /// [`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]）より大きい
+    /// `crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`）より大きい
     /// （sm_121 GB10 実測 101,376B。`docs/perf/sm121-device-attributes.md`
     /// §「SMEM 実効帯域」参照）。[`multiprocessor_count`](Self::multiprocessor_count)
     /// と同じ fail-soft 方針（取得失敗時 `None`）。呼び出し元は

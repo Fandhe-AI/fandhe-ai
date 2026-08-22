@@ -3,7 +3,7 @@
 //!
 //! `cfg(target_arch = "aarch64")` 限定でコンパイルされる（NEON は aarch64
 //! のベースライン ISA であり、Metal 実機（Apple M4 Max）・DGX Spark GB10
-//! の Grace CPU 側いずれでも常時利用可能なため、[`super::avx2`] と異なり
+//! の Grace CPU 側いずれでも常時利用可能なため、`super::avx2` と異なり
 //! `target_feature` によるコンパイル時分岐は不要）。x86_64 開発環境では
 //! 実行検証できないため、`cargo check --target aarch64-unknown-linux-gnu`
 //! によるコンパイル検証に留める（実機実行確認は `#[ignore]` テストへ委ねる。
@@ -21,7 +21,7 @@
 //! A オペランドのロードはレーン選択 FMA（`vfmaq_laneq_f32`。単一命令
 //! `FMLA v.4s, v.4s, v.s[lane]`）を用いる（イシュー #552）。旧実装は p
 //! ごとに A の各行値をスカラー読み出し → `vdupq_n_f32` で明示 broadcast
-//! → `vfmaq_f32` する 2 命令方式だったが、[`super::super::pack::pack_a`]
+//! → `vfmaq_f32` する 2 命令方式だったが、`super::super::pack::pack_a`
 //! が A パネルを p-major・mr 方向連続（`dst[p * mr + i]`）で packing する
 //! ため、p ごとに `vld1q_f32` 2 回（8 行ぶん一括）で A 値をロードし、
 //! レーンを直接 FMA へ渡せる。broadcast 命令（DUP）とスカラーロードを
@@ -36,7 +36,7 @@
 //! 連鎖・レーン間縮約なし）自体を変えずタイル形状のみを変えるため、
 //! この bit 完全一致契約は理論上維持される（実機での実測は下記
 //! `docs/perf/cpu-gemm-neon-mr8-nr12.md` の環境ゲート判定を参照）。
-//! [`super::scalar::kernel`]・[`super::avx2`] と丸めが同一になる契約
+//! [`super::scalar::kernel`]・`super::avx2` と丸めが同一になる契約
 //! （PoC-v2-5 の K=4096 ストレスケースで GPU 側含め実測確認済み）も
 //! 維持され、bit 完全一致は `gemm_blis_parity` テストで検証する
 //! （aarch64 実行環境では NEON 経路が既定選択されるため実機実行時に
@@ -85,24 +85,24 @@
 //! レーン参照オペランドを **A 側**に割り当てている（`acc + b * a[LANE]`、
 //! acc は行優先＝C の行 i・列 4g..4g+4）。gemm crate（faer 実体）・
 //! matrixmultiply が採る技法は逆で、**B 側**をレーン参照にする
-//! （`acc + a * b[LANE]`）。この場合アキュムレータは列優先（acc[j][h] =
+//! （`acc + a * b[LANE]`）。この場合アキュムレータは列優先（`acc[j][h]` =
 //! C の列 j・行 4h..4h+4）へ転置される。
 //!
-//! [`compute_b_laneq`] はこの変種を実装する。**この bit 完全一致契約は
+//! `compute_b_laneq` はこの変種を実装する。**この bit 完全一致契約は
 //! 有限値（非 NaN）の乗数に限る**: IEEE-754-2008 は乗算の可換性
 //! （`a*b` と `b*a` が同一結果）を要求するが、両オペランドが NaN の
 //! 場合にどちらの NaN を（どの符号・payload で）返すかは実装依存と
 //! されており（§6.2）、オペランド順序を入れ替える本変種
-//! （`acc + a*b[LANE]`。[`compute`] の `acc + b*a[LANE]` から乗数順を
+//! （`acc + a*b[LANE]`。`compute` の `acc + b*a[LANE]` から乗数順を
 //! 交換）が同じ NaN 選択規則に従う保証はない。したがって
 //! `acc + b*a` と `acc + a*b` の bit 完全一致は**有限値の入力に対して
 //! のみ**主張する（各 C 要素は引き続き p ごとに 1 回だけ FMA を受け
-//! p 昇順の連鎖も不変であるため、有限値では [`compute`] と bit 完全
+//! p 昇順の連鎖も不変であるため、有限値では `compute` と bit 完全
 //! 一致する。ローカル検証は `compute_b_laneq_matches_compute_bit_exact`
 //! テスト・有限値のみ）。NaN を含む入力に対する両変種間の一致は
 //! 主張しない（未検証。`compute_b_laneq_nan_input_does_not_panic`
 //! テストで NaN 入力自体がパニックしないことのみ確認する）。呼び出し元
-//! （現在は [`super::NeonBLaneqKernel`] 経由の A/B 計測専用で既定
+//! （現在は `super::NeonBLaneqKernel` 経由の A/B 計測専用で既定
 //! ディスパッチには未接続）が NaN を含むタイルに対し両変種の bit 一致を
 //! 前提にしてはならない。
 //!
@@ -117,13 +117,13 @@
 //! `vld1q_f32_x3`（B: 12 列を 1 命令）による複数レジスタ同時ロードを
 //! 用いる（stable rustc での aarch64 向けコンパイル可否は計画セッションで
 //! 事前検証済み）。k=4 アンロール＋ソフトウェアパイプライン構造は
-//! [`compute`]（#561）と同型。
+//! `compute`（#561）と同型。
 //!
 //! [`kernel`]・[`kernel_with_ldc`]・[`kernel_12x8`] は本変種の追加により
 //! 一切変更しない（A/B 比較の基準・公開 API 非破壊。#748 実装計画）。
 //! 既定ディスパッチ（[`super::NeonKernel`]）への接続は実機での bit
 //! 一致・非劣化確認後に判断する（fail-closed。未接続の間は
-//! [`super::NeonBLaneqKernel`] 経由の A/B 計測専用）。
+//! `super::NeonBLaneqKernel` 経由の A/B 計測専用）。
 
 use std::arch::aarch64::{
     float32x4_t, vfmaq_laneq_f32, vld1q_f32, vld1q_f32_x2, vld1q_f32_x3, vst1q_f32,
@@ -522,10 +522,10 @@ fn compute_b_laneq(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: us
     }
 }
 
-/// [`compute_b_laneq`] の検査つき公開入口（[`kernel_with_ldc`] と同型・
-/// 同じ `ldc` 契約。イシュー #748）。[`super::super::dispatch_region`] の
+/// `compute_b_laneq` の検査つき公開入口（[`kernel_with_ldc`] と同型・
+/// 同じ `ldc` 契約。イシュー #748）。`super::super::dispatch_region` の
 /// 既定駆動経路には接続しない（実機での bit 一致・非劣化確認後に判断。
-/// モジュール冒頭 #748 節参照）。[`super::NeonBLaneqKernel`] からのみ
+/// モジュール冒頭 #748 節参照）。`super::NeonBLaneqKernel` からのみ
 /// 呼ばれる。
 pub fn kernel_b_laneq_with_ldc(
     ap: &[f32],
@@ -586,7 +586,7 @@ const _: () = assert!(MR_12X8 == 12 && NR_12X8 == 8);
 /// = 12 行 × 2 レジスタ、A 3 本・B 2 本 = 計 29 本で v0〜v31 に収まる）。
 ///
 /// [`kernel`]（既定・8×12）との実機 A/B 計測専用であり、
-/// [`super::super::dispatch_region`] の駆動経路には接続しない
+/// `super::super::dispatch_region` の駆動経路には接続しない
 /// （イシュー #559 §2.3・`crates/backend-cpu/src/gemm_blis/mod.rs` の
 /// `#[cfg(test)]` `mod tests` 経由の A/B 計測テストからのみ呼ばれる）。
 /// 累積契約（p 昇順・レーン間縮約なし）は [`kernel`] と同一であり、
@@ -774,7 +774,7 @@ pub fn kernel_12x8(ap: &[f32], bp: &[f32], c_tile: &mut [f32], kc_len: usize) {
 /// 従来どおり `()` を返す必須シグネチャへ戻し、`check_c_tile_bounds` の
 /// `Result` を `panic!` へ変換する経路は持たない（`compute` へ直接
 /// 委譲する。契約違反時の挙動は #557 以前と同一）。`ap`／`bp` の長さ検査は
-/// [`super::panel_len_matches`] で `checked_mul` によりオーバーフローも
+/// `super::panel_len_matches` で `checked_mul` によりオーバーフローも
 /// 確実に不一致として扱う（#691 レビュー P0 再指摘
 /// `PRRT_kwDOTuUCJc6ZrXKs`）。`c_tile.len() == MR * NR` の検査は `ldc`
 /// 一般化のリファクタで一時的に失われていたが、`compute` への委譲前に
