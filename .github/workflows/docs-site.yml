@@ -46,6 +46,10 @@ jobs:
   # --------------------------------------------------
   build:
     name: build docs-site
+    # workflow_dispatch は任意ブランチから実行可能なため、push（main 限定）と
+    # 同じ「本番 Pages は main の内容のみ公開する」前提を手動実行にも適用する
+    # ガード（codex-review P1・Cursor Bugbot Medium 指摘。イシュー #876）。
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -130,15 +134,24 @@ jobs:
   deploy:
     name: deploy to GitHub Pages
     needs: build
+    # build ジョブと同じ main 限定ガード（pages: write / id-token: write を
+    # 持つ本ジョブが非 main ブランチの内容を本番 Pages へ公開しないための多層防御。
+    # build 側の if でスキップされた場合 needs の結果は skipped になり本条件は評価
+    # されないが、将来 build 側の if を外す変更が入っても deploy 単体で防御できる
+    # よう独立して明示する）。
+    if: github.ref == 'refs/heads/main'
     # reusable workflow は呼び出し側が付与した以上の権限を持てないため、共通側 deploy
     # ジョブが要求する 2 権限（OIDC によるデプロイ元検証 + Pages デプロイ作成）を
     # ここで明示付与する（pages-deploy.yml 冒頭コメントのセットアップ例）。
     permissions:
       pages: write
       id-token: write
-    # SHA は `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決
-    # （追跡 ref: main。実装時点の解決値 e3bec495028ccd62b684e2e71e6df698890f454c）。
-    uses: Fandhe-AI/actions/.github/workflows/pages-deploy.yml@e3bec495028ccd62b684e2e71e6df698890f454c
+    # Fandhe-AI/actions（組織内上流リポジトリ）への参照は AGENTS.md
+    # 「Fandhe-AI/actions の参照方式（@latest）」（2026-08-18・オーナー判断）に従い
+    # 可変タグ @latest を使う（ci.md の SHA 固定は第三者 action にのみ適用され、
+    # Fandhe-AI/actions への @latest 参照は対象外。同ファイル内の
+    # rust-toolchain-setup@latest と同一方針。codex-review P1 指摘・イシュー #876）。
+    uses: Fandhe-AI/actions/.github/workflows/pages-deploy.yml@latest
     with:
       # upload-artifact の path に dist ディレクトリ自体を指定した（artifact ルート =
       # 公開ルート）ため "." を指定する（reusable workflow 冒頭コメントの案内どおり）。
