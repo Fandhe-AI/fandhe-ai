@@ -368,7 +368,7 @@ GitHub の Actions タブから `crates.io release` ワークフローを手動�
 |---|---|
 | `crate` | 公開対象クレート（choice 型で公開 6 クレートに固定） |
 | `version` | 公開バージョン（対象クレートの `Cargo.toml` の `version` と完全一致必須） |
-| `mode` | `dry-run-only`（既定・トークン不要）／`publish`（実公開。environment 承認ゲートを通る） |
+| `mode` | `dry-run-only`（既定・トークン不要）／`publish`（実公開。environment 承認ゲートを通る。main ブランチからのディスパッチ限定） |
 
 ### 9.2 2 段運用（まず dry-run、次に publish）
 
@@ -377,9 +377,14 @@ GitHub の Actions タブから `crates.io release` ワークフローを手動�
    `cargo package --list`・`cargo publish --dry-run`）が green であることを
    確認する。
 2. green を確認したら、同一の `crate`／`version` で `mode: publish` を指定して
-   再実行する。`verify` ジョブが再度走った後、`publish` ジョブが
-   `environment: crates-io-release` の承認ゲート（required reviewers 設定
-   時）を経て `cargo publish` を実行する。
+   再実行する。`mode: publish` は `refs/heads/main` からのディスパッチのみ
+   受け付ける（`verify` ジョブが fail-closed で検査し、main 以外からの
+   ディスパッチはここで失敗する）。`verify` ジョブが再度走った後、`publish`
+   ジョブが `environment: crates-io-release` の承認ゲートを経て
+   `cargo publish` を実行する。`environment` の deployment branch 制限
+   （main 限定）＋ required reviewers は GitHub 側の設定であり（本ワークフロー
+   自体では代替できない）、`mode: publish` を実運用する前にユーザーが GitHub
+   側で設定しておく前提条件である。
 
 ### 9.3 公開順序（3 節のトポロジカル順を 1 クレートずつ実行）
 

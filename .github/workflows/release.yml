@@ -33,10 +33,21 @@
 #   CI 側で担保する）ため、失敗したクレートから再実行すればよい。
 #
 # environment `crates-io-release` について:
-#   本リポは public のため GitHub 環境保護ルール（required reviewers）を設定できる。
-#   その設定自体は GitHub 設定変更でありエージェント単独では行わない（本 PR のスコープ
-#   外。ユーザーが GitHub 側で設定する）。未設定の場合でも mode 既定 dry-run-only +
-#   手動 workflow_dispatch 必須という多層防御は成立する。
+#   本リポは public のため GitHub 環境保護ルール（required reviewers・deployment
+#   branch 制限）を設定できるが、その設定自体は GitHub 設定変更でありエージェント
+#   単独では行わない（本 PR のスコープ外。ユーザーが GitHub 側で設定する）。
+#   `workflow_dispatch` はディスパッチ時に選択した ref 上のワークフロー定義が
+#   そのまま実行されるため、write 権限を持つ者が feature ブランチで release.yml
+#   自体を改変（ガード削除・任意コマンド追加）し、そのブランチを選んで
+#   mode: publish でディスパッチすれば、本ファイル内のいかなる検査（if・run
+#   ステップ）も改変者ごと書き換えられ無力化しうる。この脅威に対する唯一の
+#   実効的な統制は GitHub 側 environment の deployment branch 制限（main 限定）
+#   ＋ required reviewers であり、`mode: publish` を実運用する前にユーザーが
+#   GitHub 側で設定しておく前提条件である（本 PR のスコープ外）。
+#   一方、verify ジョブの「guard: 実行 ref の検証（mode=publish 時）」は
+#   「誤ってブランチを選び間違えた」等の非悪意的な誤操作を fail-closed で
+#   検知する層であり（悪意ある改変者への防御ではない）、environment のブランチ
+#   制限が未設定の間の最低限の抜け穴防止として機能する。
 #
 # crates.io 到達性の前提: runner から crates.io（sparse index・upload API）へ到達
 # できない場合はガード・publish ステップが失敗する（環境エラーとして扱う）。
@@ -84,7 +95,7 @@ concurrency:
 
 jobs:
   # --------------------------------------------------
-  # verify: トークン不要・承認不要。入力検証 3 重ガード + dry-run。
+  # verify: トークン不要・承認不要。ref 検証 + 入力検証 3 重ガード + dry-run。
   # mode に関わらず常に実行する（publish ジョブの前段ゲートを兼ねる）。
   # --------------------------------------------------
   verify:
@@ -107,14 +118,32 @@ jobs:
           submodules: false
           persist-credentials: false
 
+      - name: "guard: 実行 ref の検証（mode=publish 時）"
+        # `workflow_dispatch` はディスパッチ時に選択した ref 上のワークフロー定義が
+        # そのまま実行される。mode 入力自体は実行 ref を制約しないため、
+        # `mode: publish` を選んだディスパッチが main 以外のブランチから来た場合は
+        # ここで明示的にジョブを失敗させる（publish ジョブの `if` を skip ではなく
+        # ここで fail させることで、誤ブランチからの dispatch が無音の success に
+        # ならないようにする。.claude/rules/security.md A08）。この検査は
+        # 「誤ってブランチを選び間違えた」等の非悪意的な誤操作に対する層であり、
+        # release.yml 自体を書き換えられる悪意ある write 権限者への防御ではない
+        # （その脅威への実効的な統制はワークフロー冒頭コメント参照の GitHub 側
+        # environment deployment branch 制限。本ファイル内の検査では代替できない）。
+        run: |
+          set -euo pipefail
+          if [ "${RELEASE_MODE}" = "publish" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::mode: publish は refs/heads/main 上でのみ実行可能です（実際: ${GITHUB_REF}）"
+            exit 1
+          fi
+          echo "ref 検査を通過しました（mode=${RELEASE_MODE}, ref=${GITHUB_REF}）"
+
       - name: Rust toolchain setup（rust-toolchain.toml 同期）
-        # ci.yml の各ジョブと同一 uses 行（Fandhe-AI/actions 側 composite action。
-        # SHA はリリースタグ v1.1.0 の実コミットで固定されている。.claude/rules/ci.md）。
+        # ci.yml の各ジョブと同一 uses 行（Fandhe-AI/actions 側 composite action）。
+        # `@latest` は可変タグ参照であり SHA 固定ではない（ci.yml 本体の各ジョブも
+        # 同一パターンのため本ワークフロー独自の逸脱ではない）。
         uses: Fandhe-AI/actions/rust-toolchain-setup@latest
 
       - name: "guard: 入力バージョン形式の検証"
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-target
         run: |
           set -euo pipefail
           if ! [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
@@ -162,14 +191,22 @@ jobs:
           tmp_body="$(mktemp)"
           trap 'rm -f "${tmp_body}"' EXIT
 
-          # curl は -f を付けず、HTTP status を明示取得して curl 自身の終了コードと
-          # 区別する（curl のネットワーク層エラーと HTTP 404 を混同しない）。
-          http_code="$(curl -sS -o "${tmp_body}" -w '%{http_code}' "${url}")"
+          # curl は -f を付けず、HTTP status を明示取得して 404（未公開）と 200
+          # （公開済み）を判別する。`set -euo pipefail` の下ではネットワーク層エラー
+          # （名前解決失敗・接続不可等）で curl が非 0 終了した時点でスクリプトは
+          # その場で abort し、後続の http_code 分岐には到達しない（結果として
+          # fail-closed のまま）。`--max-time` でハング時に job timeout（30 分）を
+          # 占有し続けるのを防ぐ。
+          http_code="$(curl -sS --max-time 30 -o "${tmp_body}" -w '%{http_code}' "${url}")"
 
           if [ "${http_code}" = "404" ]; then
             echo "${RELEASE_CRATE} は crates.io 未公開です（sparse index 404）。続行します"
           elif [ "${http_code}" = "200" ]; then
-            if grep -q "\"vers\":\"${RELEASE_VERSION}\"" "${tmp_body}"; then
+            # 固定文字列一致（`grep -F`）にする。`RELEASE_VERSION` を通常の
+            # 正規表現として展開すると `.` が任意 1 文字にマッチし、意図せぬ
+            # バージョンとの過剰一致を招く（見逃しにはならないが fail-closed の
+            # 精度を落とすため固定文字列化する）。
+            if grep -qF "\"vers\":\"${RELEASE_VERSION}\"" "${tmp_body}"; then
               echo "::error::${RELEASE_CRATE} v${RELEASE_VERSION} は crates.io に既に公開済みです（sparse index で確認）"
               exit 1
             fi
@@ -209,16 +246,45 @@ jobs:
   publish:
     name: publish (${{ inputs.crate }} ${{ inputs.version }})
     needs: verify
+    # 注意: job の `if` を false 評価にするとジョブは「失敗」ではなく「skip」に
+    # なり、ワークフロー実行全体は success のまま終わる。ref 不一致を検知したい
+    # 場合にここへ `github.ref == 'refs/heads/main'` を加えると、誤 ref からの
+    # dispatch が「何も起きず success」という無音の抜け道になり、fail-closed の
+    # 意図に反する。そのためここでは mode のみで判定し、ref の fail-closed 検査は
+    # environment 承認ゲートの手前（verify ジョブの「guard: 実行 ref の検証
+    # （mode=publish 時）」）で行い、明示的にジョブを失敗させる。
     if: ${{ inputs.mode == 'publish' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # environment 保護ルール（required reviewers）による承認ゲート。設定自体は
-    # GitHub 側（本ワークフローのスコープ外。ワークフロー冒頭コメント参照）。
+    # environment 保護ルール（required reviewers・deployment branch 制限）による
+    # 承認ゲート。設定自体は GitHub 側（本ワークフローのスコープ外。ワークフロー
+    # 冒頭コメント参照）。ただし「write 権限を持つ者が feature ブランチで
+    # release.yml 自体を改変してディスパッチする」という脅威に対しては、本
+    # ワークフロー内のいかなるガード（if・run ステップ）も無力である（改変者は
+    # そのガードごと書き換えられる）。この脅威に対する唯一の実効的な統制は
+    # サーバー側（GitHub）の environment deployment branch 制限（main 限定）＋
+    # required reviewers であり、`mode: publish` を実運用する前にユーザーが
+    # GitHub 側で設定しておく前提条件とする（ワークフロー冒頭コメント参照）。
+    # verify ジョブの ref 検査は「誤ってブランチを選び間違えた」等の非悪意的な
+    # 誤操作を防ぐ層であり、悪意ある改変者への防御ではない。
     environment: crates-io-release
     env:
       RELEASE_CRATE: ${{ inputs.crate }}
       RELEASE_VERSION: ${{ inputs.version }}
     steps:
+      - name: "guard: 実行 ref の再検証"
+        # verify ジョブの「guard: 実行 ref の検証（mode=publish 時）」と同じ ref
+        # （同一 workflow run 内で github.ref は不変）に対する重複検査。verify
+        # 側が本体のゲートであり、ここは低コストな重複検査として保持する
+        # （.claude/rules/security.md A08）。
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::publish ジョブは refs/heads/main 上でのみ実行可能です（実際: ${GITHUB_REF}）"
+            exit 1
+          fi
+          echo "実行 ref は refs/heads/main です"
+
       - name: Checkout
         # verify ジョブと同一コミットへピン留めする（承認待ちの間にブランチが
         # 進んでも verify 済み tree と異なる内容を publish しない。TOCTOU 防止。
