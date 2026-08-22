@@ -5,7 +5,9 @@ mma_f16 ブロックタイル拡大とステージ数増」の実測記録。先
 cuda-gemm-mma-warp-tile-register-budget.md`）の warp タイル拡大候補の実機実測が
 「実行待ち」のまま引き継がれた状態で着手した。
 
-## 状態: 実機 A/B 実測完了（イシュー #840）。採否判断は #842 で確定（§7。**不採用**）
+## 状態: 実機 A/B 実測完了（イシュー #840）。採否判断は #842 で確定（§7。**不採用**）。
+`__launch_bounds__(512)` 境界値変種の実起動可否はイシュー #854 で実測済み
+（§8。**実起動可能・parity FAIL のため不採用は維持**）
 
 #804（PR #831）は本ドキュメントを「未実測・実機実行待ち（Step F フォール
 バック）」のまま残した。イシュー #840 は DGX Spark GB10（sm_121）実機へ
@@ -139,7 +141,7 @@ PER_MULTIPROCESSOR=102,400 bytes`）は `docs/perf/sm121-device-attributes.md`
 | タイル拡大 `bt128x128_s3_wt2x4` | なし | 82 | 0 | 0 | floor(65536/(82×512))=1 | floor(102400/56832)=1 | **1** | 16 |
 | タイル拡大 `bt128x128_s3_wt2x4` | あり(512) | 92 | 0 | 0 | floor(65536/(92×512))=1 | floor(102400/56832)=1 | **1** | 16 |
 | タイル拡大+ `bt128x256_s3_wt4x4` | なし | 130 | 0 | 0 | floor(65536/(130×512))=**0** | floor(102400/81408)=1 | **0**（起動不能） | 0 |
-| タイル拡大+ `bt128x256_s3_wt4x4` | あり(512) | 128 | 0 | 0 | floor(65536/(128×512))=1（境界値 128×512=65,536） | floor(102400/81408)=1 | 1（未計測。下記 §4.1 参照） | 16 |
+| タイル拡大+ `bt128x256_s3_wt4x4` | あり(512) | 128 | 0 | 0 | floor(65536/(128×512))=1（境界値 128×512=65,536） | floor(102400/81408)=1 | 1（**実起動可能と実測確認**。#854・下記 §8 参照） | 16 |
 | タイル拡大+ステージ増 `bt128x256_s4` | — | — | — | — | — | — | 机上除外（108,544B > opt-in 101,376B） | — |
 
 **spill は全候補 0（stores/loads とも）**。`bt128x256_s3_wt4x4`（`launch_bounds`
@@ -238,7 +240,8 @@ design.md` の役割分担を踏襲）。
   を拡張し、再現・切り分けを行うことを推奨する）
 - `bt128x256_s3_wt4x4` の `__launch_bounds__(512)` 付き変種（128
   registers/thread。§4 参照）の実起動可否の実測（境界値 65,536 での
-  実際の occupancy・spill・レジスタ再割当ての有無を確認する）
+  実際の occupancy・spill・レジスタ再割当ての有無を確認する）→ **#854 で
+  実測済み（起動成功・parity FAIL。下記 §8 参照）**
 - 上記原因調査の結果、いずれかの候補が数値一致・起動成功に至った場合の
   再計測（512/1024/2048/4096・5 回中央値）・`mma_f16_base` との比較
 - 採用構成が確定した場合の本番起動側結線: `CudaFunction::
@@ -308,7 +311,8 @@ design.md` の役割分担を踏襲）。
     `compute-sanitizer`（memcheck）・中間 SMEM ダンプ等、実行時観測を
     伴う切り分けが必要（次に実機到達できたセッションへ引き継ぐ）
 - **`__launch_bounds__(512)` 付き `bt128x256_s3_wt4x4` 変種の実起動確認**:
-  実機到達不可のため本セッションでは未実施（§6 記載のまま引き継ぎ）
+  実機到達不可のため本セッションでは未実施（§6 記載のまま引き継ぎ）→
+  **#854 で実測済み（下記 §8 参照）**
 - **本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・`gemm_mma.rs`
   本番コンストラクタ・`swizzle.rs`・`gemm_auto.rs`・tolerance 定数は
   本セッションでも一切変更していない**（不採用判断に伴い変更不要）。
@@ -317,9 +321,13 @@ design.md` の役割分担を踏襲）。
 
 本節は #842 実装セッション自身の内部での気づきであり、#842 自身へ
 「引き継ぐ」ものではない（レビュー指摘。#842 実装計画時点で後続イシュー
-番号は未採番のため、番号確定時に本節へ追記する）。§6 の未消化項目
-（原因調査の実機切り分け・`__launch_bounds__(512)` 変種実測・再計測・
-採用時の本番結線手順）はそのまま有効。加えて:
+番号は未採番のため、番号確定時に本節へ追記する）。後続イシュー番号:
+**#854**（`__launch_bounds__(512)` 変種の実起動可否実測。実施済み。下記
+§8）・**#855**（`extern __shared__` 変換による数値不一致の実行時観測
+での原因特定。未着手）。§6 の未消化項目（原因調査の実機切り分け・
+`__launch_bounds__(512)` 変種実測・再計測・採用時の本番結線手順）の
+うち `__launch_bounds__(512)` 変種実測は #854 で消化済み（下記 §8）。
+残りは #855 のスコープ（後述の下記箇条書き参照）。加えて:
 
 - 拡張済みの bench 診断出力（mismatch 件数・最大誤差・初回不一致座標）
   を使い、`bt64x128_s4`／`bt128x128_s3_wt2x4` の不一致がタイル境界
@@ -328,3 +336,108 @@ design.md` の役割分担を踏襲）。
 - `compute-sanitizer --tool memcheck`／`--tool racecheck` による
   `extern __shared__` 変換経路の実行時検証（境界外アクセス・
   レース検出）
+
+## 8. #854 実測（`__launch_bounds__(512)` 変種の実起動可否。GB10・2026-08-22）
+
+**状態: 実起動可能と確定（起動失敗ではない）。ただし parity FAIL のため
+不採用は維持**。#807 契約（性能値採用に先立ち parity ゲートを通す）に
+より TFLOPS 実測は行っていない（bench 自体が parity FAIL 時に測定を
+スキップする設計。§2「候補が opt-in 予算内かを実測レイアウトから判定
+する」に続く数値一致検査ステップ）。
+
+### 8.1 実行環境・手順
+
+`crates/backend-cuda/examples/gemm_mma_block_tile_bench.rs`
+（`Candidate::launch_bounds: Option<u32>` を追加し、5 番目の候補
+`bt128x256_s3_wt4x4_lb512`〈bm=128, bn=256, bk=32, stages=3, warp タイル
+4x4, `launch_bounds: Some(512)`〉を追加。CSV へ `launch_bounds` 列を
+追加）を DGX Spark GB10 実機（`optin_budget_bytes=101376` 実測）で
+release ビルド・**5 回プロセス起動**した。
+
+- **実機 parity ゲート（#807 契約。性能値採用に先立ち実施）**:
+  `cargo test -p backend-cuda --features internal-diagnostics --test
+  gemm_mma --test cpu_cuda_mma_parity --test parity_nonregression
+  --no-fail-fast -- --ignored --test-threads=1` を debug/release 両
+  プロファイルで実行。既知 fail `mma_f16_k4096_stress`
+  （`fail_count=101/65536, max_abs_diff=6.250e-2, max_rel_err=5.849e-1`）
+  は debug/release で完全に同一の統計値となり非後退を確認した（#840・
+  §4.1 の記録値と一致）。他の parity テスト・`parity_baselines_do_not_
+  regress` はいずれも pass
+- **GPU 占有状況**（5 run 前後で `nvidia-smi --query-gpu=utilization.gpu`
+  を確認）: `0 %`。`--query-compute-apps` は常駐プロセス（`comfyui-env`
+  〈170MiB〉・`kokoro`〈870MiB〉）のみで計測対象プロセスとの競合なし
+  （#840・§4.1 と同一プロトコル・同一常駐構成）
+
+### 8.2 実測結果（5 run とも決定的に同一。乱数シード `0xC0FFEE` 固定）
+
+```
+bt128x256_s3_wt4x4_lb512: FAIL (parity mismatch vs CPU f32::mul_add reference; not measuring;
+  mismatch_count=2/266240, max_abs_diff=1.562e-2, max_rel_err=6.818e-2,
+  first_mismatch=(row=168, col=2))
+```
+
+比較のため同一 run 内の他候補も記載する（5 run 通じて全項目が完全に
+同一）:
+
+| 候補 | launch_bounds | 起動 | parity | 詳細 |
+|------|---------------|------|--------|------|
+| `bt64x128_s4` | なし | 成功 | **FAIL** | mismatch_count=2/266240, max_abs_diff=1.562e-2, max_rel_err=6.818e-2, first_mismatch=(row=168, col=2) |
+| `bt128x128_s3_wt2x4` | なし | 成功 | **FAIL** | 同上（値まで完全一致） |
+| `bt128x256_s3_wt4x4` | なし | **失敗** | — | `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`（"too many resources requested for launch"）。§4 の 130 regs/thread×512=66,560>65,536 が定量的根拠（#840 と同一・非後退） |
+| `bt128x256_s4` | — | — | — | 机上除外（108,544B > opt-in 101,376B。§3.1。非後退） |
+| **`bt128x256_s3_wt4x4_lb512`（#854 追加）** | **あり(512)** | **成功** | **FAIL** | **mismatch_count=2/266240, max_abs_diff=1.562e-2, max_rel_err=6.818e-2, first_mismatch=(row=168, col=2)（`bt64x128_s4`／`bt128x128_s3_wt2x4` と完全一致）** |
+| `mma_f16_base`（現行・比較基準） | なし | 成功 | pass | — |
+
+**`bt128x256_s3_wt4x4_lb512` は `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` を
+起こさず実際に起動・実行された**（§4 の机上見積もり「128 regs/thread ×
+512 threads = 65,536 の境界値ちょうどで 1 block/SM に収まる」が実機で
+裏付けられた。`launch_bounds` なしの兄弟候補 `bt128x256_s3_wt4x4`
+〈130 regs/thread〉との対比で、`__launch_bounds__(512)` のレジスタ
+削減ヒントが起動可否の分水嶺になっていることを実機実測で確認）。
+
+一方で **parity は FAIL**（統一複合判定〈相対誤差 1e-3 未満 または
+絶対誤差 1e-5 未満〉不通過）。`mismatch_count`／`max_abs_diff`／
+`max_rel_err`／`first_mismatch` の 4 項目すべてが `bt64x128_s4`・
+`bt128x128_s3_wt2x4`（いずれも §7 で原因未特定のまま #855 へ引き継いだ
+`extern __shared__` 変換に起因する数値不一致候補）と**完全に一致**して
+いる。3 候補はいずれも `MMA_BK=32`・`extern __shared__` 変換経路
+（§2）を通る点が共通のため、`bt128x256_s3_wt4x4_lb512` の不一致も
+同一の原因（`extern __shared__` 変換のインデックス算術・バンク位相・
+cp.async 転送先アドレスのいずれか）を共有している可能性が高いが、
+**本イシューのスコープ外**（原因調査は #855 に帰属。イシュー本文
+「スコープ境界」参照）。
+
+**#807 契約（parity ゲートが性能値採用に先立つ）により、本候補の
+512/1024/2048/4096 TFLOPS は計測していない**（parity FAIL のため bench
+が測定をスキップする設計どおり。§8.1）。
+
+### 8.3 判断
+
+**#847 で確定した不採用判断（現行 `MMA_BM=64`/`MMA_BN=128`/
+`MMA_STAGES=3` を維持）は変わらず維持する**。§6・§7 で「未計測」
+だった `__launch_bounds__(512)` 変種の実起動可否は「起動可能」と実測
+確定したが、parity FAIL のため採用可能な候補が新たに得られたわけでは
+ない。よって #789／#842／#847 の不採用判断・スコープはそのまま有効。
+
+**本イシューで確定した事実**:
+
+1. `bt128x256_s3_wt4x4` の `launch_bounds` なし版が
+   `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` で起動不能（§4・#840 の
+   非後退再確認）であるのに対し、`__launch_bounds__(512)` 付き版は
+   実機で正常に起動する（境界値 65,536 での机上見積もりが実機で
+   裏付けられた）
+2. しかし `__launch_bounds__(512)` 付き版も `extern __shared__`
+   変換経路を通るため、`bt64x128_s4`／`bt128x128_s3_wt2x4` と同一の
+   数値不一致（4 項目完全一致）を抱えている
+3. 本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・
+   `gemm_mma.rs` 本番コンストラクタ・`swizzle.rs`・`gemm_auto.rs`・
+   tolerance 定数は本イシューでも一切変更していない
+
+**後続への引き継ぎ**: #855（`extern __shared__` 変換の数値不一致の
+実行時観測での原因特定）の対象候補に `bt128x256_s3_wt4x4_lb512`
+（本イシューで追加）を加えることを推奨する。3 候補（`bt64x128_s4`・
+`bt128x128_s3_wt2x4`・`bt128x256_s3_wt4x4_lb512`）が完全に同一の
+mismatch 統計値を示している事実は、原因が個々のタイル形状固有の
+バグではなく `extern __shared__` 変換経路（§2）そのものに共通して
+存在することを強く示唆する追加根拠であり、#855 の原因調査の優先度・
+切り分け範囲の判断材料になる。
