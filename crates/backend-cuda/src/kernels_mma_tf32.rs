@@ -12,18 +12,26 @@
 //! `gemm_auto.rs` の 3 段選択・JIT 特化基盤）へは一切結線しない**。数値
 //! 一致回帰・parity 非後退契約の実機確定は #838 が引き継ぎ、その実測
 //! （数値一致 6 本中 4 本 FAIL＝機能欠陥の疑い）を根拠に本番採否判断は
-//! **#839 で不採用（凍結）と確定した**。再評価条件は
+//! **#839 で不採用（凍結）と確定した**。#852 で原因（A フラグメント
+//! ldmatrix 象限マッピングの PTX ISA 誤読）を特定・修正し、実機
+//! （DGX Spark GB10）再実測で FAIL 件数を大幅に縮小した（詳細・残存差分
+//! は `docs/perf/cuda-gemm-mma-tf32-ab.md` §8）。**ただし数値一致 6 本
+//! 全 pass には至っておらず、凍結は継続する**。凍結解除の判断・性能
+//! 再評価は引き続き #835 系の後続に委ねる。再評価条件は
 //! `docs/perf/cuda-gemm-mma-tf32-ab.md` §5.1 を参照
 //! （`.claude/rules/out-of-scope-tracking.md`）。
 //!
-//! # 検証状態（重要）
+//! # 検証状態（#852 で実機検証済み）
 //!
-//! `kernels_mma.rs` 冒頭コメント「検証状態」と同じ制約: 本実装セッションの
-//! 環境には CUDA driver はあるが NVRTC が無く、本ファイルのカーネルソースは
-//! **NVRTC による構文検証を一度も通過していない**。実機（DGX Spark GB10）
-//! での最初の実行が構文検証を兼ねる。数値一致は同梱テスト（
-//! `tests/gemm_mma_tf32.rs`／`tests/mma_tf32_vs_wmma_tf32_staged.rs`）に
-//! 実装済みだが **実機未到達のため未検証**（#802 が実機で確認する）。
+//! 本ファイルのカーネルソースは実機（DGX Spark GB10・driver 580.159.03・
+//! CUDA 13.0 V13.0.88）の NVRTC 構文検証・実行を通過済み（#852。詳細は
+//! `docs/perf/cuda-gemm-mma-tf32-ab.md` §8）。数値一致は同梱テスト（
+//! `tests/gemm_mma_tf32.rs`／`tests/mma_tf32_vs_wmma_tf32_staged.rs`）で
+//! 実機確認済みだが、残存 FAIL がある。この残存 FAIL の原因は TF32 丸め
+//! 誤差・機能欠陥のいずれとも確定していない（`wmma_tf32` との GPU-GPU
+//! 相互一致誤差が CPU 参照比較より小さいことは、両経路が共有する TF32
+//! 丸め誤差成分の相殺でも説明でき、TF32 丸め誤差説への反証にはならない。
+//! §8.4 参照）。
 //!
 //! # 命令選定
 //!
@@ -47,27 +55,35 @@
 //! 各出力レジスタへどの物理象限を配るかは「アドレスを供給したレーン
 //! グループ（lane/8 の 0..3）」で決まる。本カーネルの `a0..a3` 各々が
 //! 保持すべき象限は PTX ISA の当該命令の A オペランドテーブルから
-//! 以下のとおり導出される（`row = groupID` は a0/a1、`row = groupID+8`
-//! は a2/a3、`col = tid_in_group` は a0/a2、`col = tid_in_group+4` は
-//! a1/a3。ここでの groupID/tid_in_group は「オペランド論理位置」の表記
+//! 以下のとおり導出される（`row = groupID` は a0/a2、`row = groupID+8`
+//! は a1/a3、`col = tid_in_group` は a0/a1、`col = tid_in_group+4` は
+//! a2/a3。ここでの groupID/tid_in_group は「オペランド論理位置」の表記
 //! であり後述のレーン→ldmatrix 対応とは独立）:
 //!
 //! - a0 = 左上象限（行 0-7・列 0-3）
-//! - a1 = 右上象限（行 0-7・列 4-7）
-//! - a2 = 左下象限（行 8-15・列 0-3）
+//! - a1 = 左下象限（行 8-15・列 0-3）
+//! - a2 = 右上象限（行 0-7・列 4-7）
 //! - a3 = 右下象限（行 8-15・列 4-7）
 //!
-//! すなわち象限順序は **TL, TR, BL, BR**（`kernels_mma.rs::LDSM_A_FRAG` の
-//! f16 版が用いる **TL, BL, TR, BR** から BL/TR の位置が入れ替わっている
-//! 点に注意。理由: f16 m16n8k16 の A オペランドは 16x16 全体を直接
-//! `ldmatrix.x4` の 4 象限がそのまま覆うが、TF32 m16n8k8 の A オペランドは
-//! 16x8（=b16 換算 16x16）を上記の異なる行/列分解で覆うため、対応する
-//! 象限順序が異なる。単純な流用〈定数のみ変更〉は誤った出力を生む）。
+//! すなわち象限順序は **TL, BL, TR, BR**（`kernels_mma.rs::LDSM_A_FRAG` の
+//! f16 版と同一。#852 是正: 旧実装は「TF32 m16n8k8 の A オペランドは
+//! f16 m16n8k16 と行/列分解が異なるため象限順序も異なる」と主張し
+//! `a_quad_row = g/2`・`a_quad_col = g%2`〈{TL,TR,BL,BR}〉としていたが、
+//! これは PTX ISA「Matrix Fragments for mma.m16n8k8（.tf32）」の A
+//! オペランド表の誤読だった。同表の a1 は `row = groupID+8`（行8ずれ＝
+//! 下段）・a2 は `col = tid_in_group+4`（列4ずれ＝右列）であり、
+//! a1=左下・a2=右上という f16 版と同一の対応になる（CUTLASS/CuTe の
+//! `SM80_16x8x8_F32TF32TF32F32_TN` の `ALayout`〈value stride (8, 64):
+//! v0 が m+8 方向＝BL、v1 が k+4 方向＝TR〉からも同一結論が導出できる）。
+//! 実機（GB10）で数値一致 6 本中 4 本 FAIL・GPU-GPU 相互一致 FAIL
+//! （最小形状 m16n8k8 で 128/128 要素 FAIL）という #839 の実測は、
+//! a1↔a2 のレジスタ入れ替えに相当する本誤りで説明できる。
 //! `ldmatrix.x4` はアドレスを供給したレーングループ `g = lane/8`
 //! （0..3）の象限データを出力レジスタ `r_g` へ配る（f16 版と共通の
 //! ldmatrix 仕様）ため、`LDSM_A_FRAG` は `g` から上記 4 象限への写像を
-//! `a_quad_row = g/2`・`a_quad_col = g%2`（f16 版は `g%2`/`g/2` で逆）と
-//! することで a_frag[0..3] = {TL,TR,BL,BR} を得る。
+//! `a_quad_row = g%2`・`a_quad_col = g/2`（f16 版〈`kernels_mma.rs`
+//! 1588-1589 行〉と同一の式）とすることで a_frag[0..3] = {TL,BL,TR,BR}
+//! を得る。
 //!
 //! ## B フラグメント: 素の共有メモリロード（`.trans` ldmatrix 不使用）
 //!
@@ -487,15 +503,16 @@ extern "C" __global__ void gemm_mma_tf32(
         unsigned b_frag[2][MMA_TF32_WARP_TILES_N][2];
 
         // A フラグメントロード（本ファイル冒頭コメント「命令選定」節
-        // 「A フラグメント: ldmatrix の b16 流用」参照。象限順序 TL, TR,
-        // BL, BR は f16 版〈TL, BL, TR, BR〉から入れ替わっている点に注意）。
+        // 「A フラグメント: ldmatrix の b16 流用」参照。#852 是正後は
+        // f16 版〈`kernels_mma.rs::LDSM_A_FRAG`〉と同一の象限順序
+        // TL, BL, TR, BR を用いる）。
         #define LDSM_A_FRAG(buf, stage, kstep, mi) \
             do { \
                 int a_col_ = (kstep) * MMA_TF32_K; \
                 int a_row = warp_row * (MMA_TF32_M * MMA_TF32_WARP_TILES_M) + (mi) * MMA_TF32_M; \
                 int a_quad_group = lane / 8; \
-                int a_quad_row = a_quad_group / 2; \
-                int a_quad_col = a_quad_group % 2; \
+                int a_quad_row = a_quad_group % 2; \
+                int a_quad_col = a_quad_group / 2; \
                 int a_row_in_tile = lane % 8; \
                 float* a_addr = &as_tile[stage] \
                                           [a_row + a_quad_row * 8 + a_row_in_tile] \
@@ -1385,6 +1402,23 @@ mod tests {
                 "expected REQ-8 boundary check text {needle:?} to remain in the kernel source"
             );
         }
+    }
+
+    /// #852 の回帰防止: A フラグメントの ldmatrix.x4 4 象限が
+    /// mma.m16n8k8（.tf32）要求順序（TL/BL/TR/BR。`kernels_mma.rs::
+    /// LDSM_A_FRAG` の f16 版・`mma_f16_source_uses_mma_fragment_
+    /// quadrant_order_for_a` と同一契約）どおりに割り当てられていることを
+    /// ロックする。誤って `a_quad_group / 2` を行、`a_quad_group % 2` を
+    /// 列に対応させると TL/TR/BL/BR の順になり（#839 で実測した数値一致
+    /// 6 本中 4 本 FAIL・GPU-GPU 相互不一致の原因）不正な結果を招く。
+    #[test]
+    fn mma_tf32_source_uses_mma_fragment_quadrant_order_for_a() {
+        let src = mma_tf32_source();
+        assert!(
+            src.contains("int a_quad_row = a_quad_group % 2;")
+                && src.contains("int a_quad_col = a_quad_group / 2;"),
+            "mma_tf32_source() の A フラグメント象限順序（TL/BL/TR/BR）が見つかりません"
+        );
     }
 
     /// TF32 丸め（`wmma::__float_to_tf32`）の出現箇所が

@@ -296,11 +296,22 @@ crates/backend-cuda/src/gemm_auto.rs crates/backend-cuda/src/ops.rs` を再実�
 
 ## 6. スコープ外（追跡）
 
-- **`CudaMmaTf32Gemm` の機能欠陥（correctness bug）の原因調査・修正（新規。イシュー #838 実装
-  セッションで発見。§2・§3 参照）。TF32 タイル定数拡大（#806）はこの修正完了が前提条件となるため
-  実質的にブロックされている。ユーザー承認を得たうえで別イシューとして起票する必要がある
-  （`.claude/rules/out-of-scope-tracking.md` に従い、本セッションでは起票していない）**
-- **#839 の採否判断は完了済み（不採用・凍結。§5.1）。再評価は上記機能欠陥修正イシューの完了後**
+- **`CudaMmaTf32Gemm` の機能欠陥（correctness bug）のうち A フラグメント
+  ldmatrix 象限マッピング誤りは #852 で原因特定・修正済み（§8.1・§8.2）。
+  ただし数値一致 6 本の全 pass には至っておらず、`mma_tf32` の残存数値差分
+  の原因は TF32 丸め誤差・機能欠陥のいずれとも未確定（§8.4）。`wmma_tf32`
+  が同一参照・同一許容誤差で pass する事実自体は残るが、両経路が共有する
+  TF32 丸め誤差成分は GPU-GPU 相互比較では相殺されうるため、この事実だけ
+  から TF32 丸めでは説明できないと断定することはできない（§8.4 参照）。
+  基底ベクトル入力プローブ・
+  compute-sanitizer 等による位置特定（§8.6）は #852 では未実施。TF32
+  タイル定数拡大（#806）はこの全 pass 達成が前提条件となるため引き続き
+  ブロックされている。原因特定・全 pass 達成のための後続対応はユーザー
+  承認を得たうえで別イシューとして起票する必要がある
+  （`.claude/rules/out-of-scope-tracking.md` に従い、本セッションでは起票して
+  いない）**
+- **#839 の採否判断は完了済み（不採用・凍結。§5.1）。再評価条件は (a) 充足・
+  (b)(c) 未充足のまま（§8.5）。再評価は上記残存 FAIL 解消の完了後**
 - TF32 タイル定数拡大（Phase 4・#806。診断機構・机上候補表は整備済み。
   `docs/perf/cuda-gemm-mma-tf32-block-tile.md` 参照。上記機能欠陥の修正が前提のためブロック）
 - swizzle 変種の TF32 `mma.sync` への適用（実測を伴うため別途。同上の理由でブロック）
@@ -341,3 +352,155 @@ DGX Spark GB10 実機・CUDA 13.0 toolkit を要求する点が共通のため�
 示した。数値一致 FAIL の候補値は「参考値（採否判断に使用不可）」として
 区分して記録する運用（§4 の踏襲）とした。採否判断・本番結線は #839
 （correctness bug 修正）の後、#842 のスコープで行う。
+
+## 8. #852 原因調査・修正・実機再実測記録（2026-08-22）
+
+イシュー #852「`CudaMmaTf32Gemm` の数値誤りを原因調査・修正する（凍結解除の前提）」
+は §5.1 の再評価条件 (a)（機能欠陥修正）に対応する。本節は原因・修正内容・実機
+再実測結果を記録する。**結論を先に記す: 機能欠陥（A フラグメント象限マッピング
+誤り）は特定・修正でき、実機再実測で FAIL 件数は劇的に縮小したが、数値一致 6 本
+の全 pass（再評価条件 (b)）には至っていない。凍結は継続する。**
+
+### 8.1 原因
+
+`crates/backend-cuda/src/kernels_mma_tf32.rs::LDSM_A_FRAG`（492〜510 行）の A
+フラグメント ldmatrix 象限マッピングが誤っていた。修正前:
+
+```c
+int a_quad_row = a_quad_group / 2;
+int a_quad_col = a_quad_group % 2;
+```
+
+（象限順序 TL, TR, BL, BR）
+
+修正前のモジュール冒頭コメントは「TF32 m16n8k8 の A オペランドは f16 m16n8k16 と
+行/列分解が異なるため、対応する象限順序も異なる（f16 版から入れ替える必要が
+ある）」と主張していたが、これは PTX ISA「Matrix Fragments for mma.m16n8k8
+（.tf32）」の A オペランド表の誤読だった。同表では a1 は `row = groupID+8`
+（行 8 ずれ＝下段）・a2 は `col = tid_in_group+4`（列 4 ずれ＝右列）であり、
+a1=左下（BL）・a2=右上（TR）という、f16 版（`kernels_mma.rs::LDSM_A_FRAG`）と
+**同一**の対応になる（CUTLASS/CuTe の `SM80_16x8x8_F32TF32TF32F32_TN` の
+`ALayout`〈value stride (8, 64): v0 が m+8 方向＝BL、v1 が k+4 方向＝TR〉からも
+同一結論が導出できる）。この a1↔a2 のレジスタ入れ替えが、K 半分×行半分の A
+要素が誤った位置で積和される機能欠陥の原因であり、#838/#839 で実測した
+「最小形状 `m16n8k8` で 128/128 全要素 FAIL・GPU-GPU 相互一致 FAIL」というパターン
+と整合する。
+
+### 8.2 修正内容
+
+- `LDSM_A_FRAG` の `a_quad_row`/`a_quad_col` を f16 版（`kernels_mma.rs` 1588-1589
+  行）と同一の式へ修正（`a_quad_row = a_quad_group % 2`・
+  `a_quad_col = a_quad_group / 2`。象限順序 TL, BL, TR, BR）。
+- モジュール冒頭コメント（誤った導出）を PTX ISA 表・CuTe レイアウトに基づく
+  正しい導出へ書き換え。
+- 回帰防止の pin テスト
+  `kernels_mma_tf32::tests::mma_tf32_source_uses_mma_fragment_quadrant_order_for_a`
+  を追加（f16 版の同型テストと対）。
+- `tests/gemm_mma_tf32.rs` の zero-dim テスト（`mma_tf32_zero_dim_shape_returns_
+  empty_without_launch`）のバッファ長不備（`validate_gemm_dims` 契約違反。f16 版
+  #389 と同種）を是正。
+
+### 8.3 実機再実測結果（DGX Spark GB10・driver 580.159.03・CUDA 13.0 V13.0.88・
+base コミット `d2c76e9`（origin/main）に本イシューの修正（§8.2）を適用した
+作業ツリーを rsync 転送して実行・2026-08-22 UTC）
+
+`cargo test -p backend-cuda --release --test <bin> -- --include-ignored --nocapture`
+（GPU utilization 0%・他プロセス resident memory 小・排他性確認済み）で実行。
+
+| テスト | 修正前（#838/#839 実測） | 修正後（#852 実測） | 判定 |
+|---|---|---|---|
+| `mma_tf32_zero_dim_shape_returns_empty_without_launch` | FAIL（テスト側バッファ長不備で panic） | pass | ✅ |
+| `launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch` | pass | pass | ✅（非後退） |
+| `mma_tf32_matches_reference_across_shapes`（最小形状 `m16n8k8`） | `fail_count=128/128, mean_rel_err≈9.714e-1` | `fail_count=12/128, mean_rel_err=8.907e-4, max_abs_diff=8.534e-4, max_rel_err=5.294e-2` | ❌（残存） |
+| `mma_tf32_k4096_stress`（M=N=K=4096） | FAIL（機能欠陥・全面破綻） | `fail_count=2723936/16777216, mean_rel_err=1.485e-3, max_rel_err=1.998e0` | ❌（残存） |
+| `mma_tf32_vs_wmma_tf32_staged_across_shapes`（512x512x512 を含む 8 形状） | `fail_count=4092/4096`（m=64,n=64,k=64。GPU-GPU 相互不一致） | 512x512x512: `fail_count=7/262144, mean_rel_err=4.818e-6, max_rel_err=1.004e-1` | ❌（残存） |
+| `mma_tf32_vs_wmma_tf32_staged_k4096_stress` | FAIL（機能欠陥） | `fail_count=50074/16777216, mean_rel_err=4.316e-5, max_rel_err=1.977e0` | ❌（残存） |
+| `parity_baselines_do_not_regress`（既存経路 parity 非後退） | pass | pass | ✅（非後退） |
+
+（参考・非 `#[ignore]`）環境適応スモーク `mma_tf32_parity_smoke_env_adaptive`
+（64x64x64）も実機では `fail_count=666/4096, mean_rel_err=1.231e-3` で FAIL する
+（通常 CI は GPU 非搭載のため `DriverUnavailable` 分岐で早期 return し green のまま
+であり非後退には影響しない）。
+
+### 8.4 残存 FAIL の性質（原因未確定。TF32 丸め誤差説・機能欠陥説のいずれも断定できない）
+
+修正前後で FAIL 件数・`mean_rel_err` が数桁改善している（例: `mma_tf32_matches_
+reference_across_shapes` 最小形状で `fail_count` 128/128 → 12/128・`mean_rel_err`
+0.97 → 8.9e-4）ことから、§8.1 のレジスタ配線バグの大部分は解消したと判断できる。
+一方で残存 FAIL の原因は、以下のとおり TF32 丸め誤差・機能欠陥のいずれとも
+確定できていない（初版では `mma_tf32_vs_wmma_tf32_staged_across_shapes` の
+GPU-GPU 相互一致実測を「決定的な反証」として原因未特定の欠陥と断定していたが、
+その推論には反例があるため PR #859 レビュー〈codex-review〉指摘を受けて訂正する）。
+
+- `wmma_tf32`（staged。§8.3 表の参照側）は同一の `matmul_reference_fma`
+  （TF32 丸めなしの f32 精度参照）・同一の `assert_parity`（統一複合判定）に
+  対して既存テスト（`tests/gemm_wmma_tf32_staged.rs`）で pass する。
+  `mma_tf32` と `wmma_tf32` はどちらも A・B を `wmma::__float_to_tf32` 系の
+  同一 TF32 丸め（`cvt.rna.tf32.f32` 相当）で丸めてから積和するため、両経路は
+  同一の TF32 丸め誤差成分を持つ。
+- ここから「両経路が同一丸めを共有するなら GPU-GPU 相互比較でも CPU 参照
+  比較と同程度の誤差が出るはずだ」と推論し、`mma_tf32` と `wmma_tf32` の
+  相互比較（512x512x512。`mean_rel_err=4.818e-6`）が CPU 参照との比較
+  （`mma_tf32` 単独で `mean_rel_err=8.907e-4`〜`1.485e-3`）より約 200 倍
+  小さいことを TF32 丸め誤差説への反証として扱っていた。**しかしこの推論は
+  誤り**: 両経路が同一の TF32 丸め誤差成分を共有する場合、その共通成分は
+  CPU 参照との差分にはそれぞれ独立に現れる一方、GPU-GPU 相互比較では
+  差分を取ることで共通成分同士が相殺されうる。したがって GPU-GPU 誤差が
+  CPU 参照誤差より小さいこと自体は、TF32 丸めが（唯一ではなくとも部分的な）
+  原因である場合にも自然に起こりうる挙動であり、単独では TF32 丸め誤差説を
+  反証する決定的な論拠にならない（PR #859 codex-review 指摘）。
+- 同様に、`mma_tf32` と `wmma_tf32` は積和順序（累積順序）が異なりうるため、
+  統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の境界付近の
+  要素では、丸め方向の違いだけで片方の経路のみが判定を跨いで FAIL/pass が
+  分かれることがありうる。`mma_tf32_vs_wmma_tf32_staged_across_shapes` の
+  512x512x512 ケースで実測された 7 件の不一致要素（`fail_count=7/262144`）
+  についても、個々の入力・出力値と絶対誤差を調査していないため、この
+  「境界付近での判定のブレ」と「本質的な機能欠陥」のどちらに該当するかを
+  記載の集計値のみから区別できない。
+- 一方で、単一 `mma.sync` 発行（K=8・k ループなし）である 16x8x8 ケースで
+  既に `fail_count=12/128`≈9% の要素が FAIL している事実（k ループ・タイル
+  境界を経由しない最小形状での高い FAIL 比率）は、TF32 丸め誤差・累積順序差
+  のみでは説明しきれない規模である可能性を残す。これは残存する疑いとして
+  記録するが、上記の理由により単独では機能欠陥の決定的な論拠にもならない。
+
+**結論**: 残存 FAIL の原因は TF32 丸め誤差・機能欠陥のいずれとも確定して
+いない。GPU-GPU 相互比較の誤差が CPU 参照比較より小さいことは、共通丸め
+誤差成分の相殺により TF32 丸め誤差説とも整合しうるため、単独では原因特定の
+論拠にならない。原因を切り分けるには、不一致要素（512x512x512 ケースの
+7 件を含む）の入力・出力値と絶対誤差の個別調査、または compute-sanitizer 等
+によるレジスタ／メモリレベルの検証が必要であり、本イシュー（#852）の
+スコープでは実施していない（§8.6）。本イシューのスコープでは統一複合判定
+（`backend_cpu::assert_parity`。「相対誤差 1e-3 未満 または 絶対誤差 1e-5
+未満」）・CPU 参照実装（`matmul_reference_fma`）を変更していない
+（`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を
+単独で緩和しない」・実装計画 §6 A08 に従い、tolerance・reference 実装は
+本イシューの判断対象外とした）。この基準に照らす限り、**数値一致 6 本の
+全 pass（再評価条件 (b)）には至っていない**（原因が未確定である以上、
+本節冒頭の判断も含め結論は暫定であり、後続対応での追加調査により見直され
+うる）。
+
+### 8.5 §5.1 再評価条件の更新
+
+- (a) 機能欠陥修正: **充足**（§8.1・§8.2）。
+- (b) 実機で数値一致 6 本すべて pass・`ParityPath::MmaTf32` 初回登録: **未充足**
+  （§8.3・§8.4。6 本中 pass は 2 本のみ。`ParityPath::MmaTf32` の初回登録も
+  未実施。許容誤差の固定化に相当し `cuda-parity-baseline.md` §1 の承認記録
+  プロセス〈ユーザー承認〉を要するため、本イシューでは行わない）。
+- (c) `cuda_floor_bench` 再計測・採用条件充足: **未実施**（(b) 未充足のため
+  本イシューのスコープ外のまま。実施は §5.1 の元の方針どおり別イシューで行う）。
+
+以上により、**#839 の凍結判断（不採用）は継続する**。本番ディスパッチ
+（`gemm.rs`／`gemm_auto.rs`／`ops.rs`）への結線は行っていない（変更なし）。
+凍結解除の判断・(b)(c) を含む後続対応は #835 系にユーザー承認のうえで委ねる。
+
+### 8.6 フォールバック調査について
+
+§8.4 のとおり残存 FAIL の原因は TF32 丸め誤差・機能欠陥のいずれとも確定して
+おらず、compute-sanitizer（memcheck/racecheck/initcheck）によるフォールバック
+調査・基底ベクトル入力プローブ（実装計画 §4。A=one-hot・B=identity で
+`m16n8k8` 単発のレジスタ→要素対応を実測特定する最小プローブ）・不一致要素の
+入力/出力値と絶対誤差の個別調査は、いずれも本イシューの時間配分内では実施
+しなかった。16x8x8（`mma.sync` 1 命令・k ループなし）が最も切り分けが
+容易な最小ケースであり、後続対応ではまずこの形状でのプローブから着手する
+ことを推奨する。原因（TF32 丸め誤差か機能欠陥か、あるいは両方か）の特定・
+(b) の全 pass 達成は後続対応のスコープとして残す（§6 参照）。

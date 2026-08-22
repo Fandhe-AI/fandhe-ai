@@ -10,11 +10,19 @@
 //! 段選択方針）、本ファイルの対象形状はすべて 4 の倍数に揃える
 //! （`tests/gemm_wmma_tf32_staged.rs` と同じ整列前提）。
 //!
-//! **重要（未検証の明記）**: `kernels_mma_tf32.rs` 冒頭コメント「検証
-//! 状態」と同じ制約により、`#[ignore]` 実機テストは実装セッション中
-//! DGX Spark GB10 実機へ到達できず未実行のまま同梱する。両経路の
-//! 相互一致は「テストとして実装済み」であって「実機で確認済み」では
-//! ない（#802 が実機到達可能なセッションで実行・確認する）。
+//! **重要（#852 実機再実測結果）**: `#[ignore]` 実機テストは #852 で DGX
+//! Spark GB10 実機（driver 580.159.03・CUDA 13.0 V13.0.88）にて実行済み。
+//! #839 時点の機能欠陥（`kernels_mma_tf32.rs::LDSM_A_FRAG` の A フラグ
+//! メント象限マッピング誤り）修正後、両経路の乖離は
+//! `mean_rel_err` オーダーで劇的に縮小した（512x512x512:
+//! `fail_count=7/262144・mean_rel_err=4.8e-6`）が僅かに FAIL が残る。
+//! この GPU-GPU 相互比較の残差は `mma_tf32` 単独の CPU 参照比較
+//! （`mean_rel_err` は 200 倍大きい）より大幅に小さいが、両経路が共有する
+//! TF32 丸め誤差成分は GPU-GPU 相互比較では相殺されうるため、この事実
+//! だけから残存 FAIL を TF32 丸め誤差では説明できないと断定する根拠には
+//! ならない。残存 FAIL の原因は TF32 丸め誤差・機能欠陥のいずれとも
+//! 未確定のままである（`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に
+//! 分析を記録）。
 //!
 //! **実機依存の分離**: `tests/gemm_wmma_tf32_staged.rs` と同じ分岐
 //! パターン（環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載・
@@ -97,10 +105,10 @@ fn mma_tf32_matches_wmma_tf32_staged_smoke_env_adaptive() {
 }
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅
-/// テスト。受け入れ条件 3 項の本体。実装セッション中は実機未到達のため
-/// 未実行のまま同梱する（本ファイル冒頭コメント「重要」参照）。
+/// テスト。受け入れ条件 3 項の本体。#852 で実機再実測済み（本ファイル
+/// 冒頭コメント「重要」参照）。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実装セッション中は実機未到達のため未実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_matches_wmma_tf32_staged_across_shapes() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let wmma = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
@@ -128,9 +136,9 @@ fn mma_tf32_matches_wmma_tf32_staged_across_shapes() {
 }
 
 /// K 大のストレスケース（M=N=K=4096。`tests/gemm_wmma_tf32_staged.rs` の
-/// K4096 ストレスケースと揃える）。実機未到達のため未実行のまま同梱する。
+/// K4096 ストレスケースと揃える）。#852 で実機再実測済み。
 #[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須。実装セッション中は実機未到達のため未実行"]
+#[ignore = "CUDA 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須"]
 fn mma_tf32_matches_wmma_tf32_staged_k4096_stress() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let wmma = CudaGemm::new(&device).expect("WMMA(TF32) kernel compilation must succeed");
