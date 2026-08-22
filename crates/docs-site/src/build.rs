@@ -778,60 +778,108 @@ fn write_file_creating_parent(
     Ok(())
 }
 
+/// `out` をレキシカルに「起点（絶対パスならファイルシステムルート `/`、
+/// 相対パスならカレントディレクトリ、または cwd から `..` を遡った祖先）」と
+/// 「起点から見た正規化済み相対パス（`Normal` コンポーネントのみ）」へ分解する。
+///
+/// `..`/`.` はここで**文字列操作のみ**で解決する（実ファイルシステムへ
+/// 問い合わせない。symlink の解釈を一切伴わないため、この分解自体が
+/// シンボリックリンク差し替えの標的にならない）。相対パス先頭の `..` は
+/// ローカルに握り潰さず（`Normal` コンポーネントが 1 つも積まれていない
+/// 状態でのポップは弱化ではなく「まだ cwd より上」を意味するため）、
+/// 起点側（`base`）に `..` を積み増して cwd からの相対的な祖先を指す。
+/// 絶対パスの `..`（filesystem root を超える分）は実際の `/` の挙動と同じく
+/// 単純に無視する（root で clamp）。
+///
+/// 戻り値の `relative` が `None` の場合、`out` は起点そのもの（`--out .`・
+/// `--out ..`・`--out /` 等）を指す。これらは「攻撃者が任意の名前へ
+/// 差し替え可能な独立したディレクトリエントリ」を経由しないため
+/// [`open_out_root_dir`] 側で symlink 検査対象外として扱う。
+fn lexically_split_root(path: &Path) -> (PathBuf, Option<PathBuf>) {
+    use std::path::Component;
+
+    let is_absolute = path.is_absolute();
+    let mut leading_parent_dirs: usize = 0;
+    let mut stack: Vec<&std::ffi::OsStr> = Vec::new();
+
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => stack.push(name),
+            Component::ParentDir => {
+                if stack.pop().is_none() && !is_absolute {
+                    // cwd（または既に積んだ `..`）より上へ遡る。絶対パス
+                    // では filesystem root で clamp される実際の挙動と
+                    // 同じく無視する。
+                    leading_parent_dirs += 1;
+                }
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+
+    let mut base = if is_absolute {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(".")
+    };
+    for _ in 0..leading_parent_dirs {
+        base.push("..");
+    }
+
+    if stack.is_empty() {
+        (base, None)
+    } else {
+        let mut relative = PathBuf::new();
+        for name in stack {
+            relative.push(name);
+        }
+        (base, Some(relative))
+    }
+}
+
 /// `out`（`--out` の値そのもの）を安全に作成・オープンする。
 ///
 /// 既存の [`fd_walk`] は `out` **配下**（各ページの出力先ディレクトリ列。
 /// [`write_file_creating_parent`]）の中間コンポーネントのシンボリックリンク
-/// 差し替えは検証済みだったが、`out` **ルート自体**がシンボリックリンクの
-/// 場合は `fs::create_dir_all(out)` / `fs::File::open(out)` がそのままリンクを
-/// 追従してしまい、fd_walk の検証済み起点に到達する前の段階で `out` の外へ
-/// HTML/CSS を書き込めていた（codex-review 指摘・PR #899 P0）。
+/// 差し替えは検証済みだったが、旧実装は `out` の親ディレクトリ列を
+/// `fs::create_dir_all`/`fs::File::open`（パス文字列の再解決を伴う）で扱って
+/// おり、(1) 親のいずれかが既存のシンボリックリンクならそのリンク先を
+/// 無条件に信頼済み起点として採用してしまう、(2) `create_dir_all` と
+/// `File::open` の間で親がリンクへ差し替えられる TOCTOU が残る、という 2 経路
+/// で `out` ツリー外への書き込みを許してしまっていた（codex-review 追加
+/// ラウンド指摘・PR #899 P0）。
 ///
-/// `out` の親ディレクトリまでは通常の `fs::create_dir_all` で作成する
-/// （`fd_walk` の `O_NOFOLLOW` 全経路ウォークをここまで及ぼさない意図的な
-/// スコープ限定。理由は 2 点: (1) `fd_walk::normalize_components` は `..` を
-/// 含む経路をすべて拒否するため、`out` に相対パス由来の `..` が残る場合
-/// フォールバックできず正当な指定まで壊してしまう。(2) `/`（filesystem
-/// root）を起点に全コンポーネントを `O_NOFOLLOW` で辿ると、`/tmp` 自体が
-/// symlink（macOS の `/tmp` → `/private/tmp`）等の正当な中間 symlink も
-/// 拒否してしまい、`--out /tmp/...` のような一般的な指定が通らなくなる。
-/// 親ディレクトリ列自体の中間シンボリックリンク差し替え TOCTOU は本 P0 指摘
-/// （`out` ルート自体が symlink であるケース）とは別の脅威モデルであり
-/// 本関数のスコープ外とする）。**最終コンポーネント（`out` 自身）だけ**は
+/// 本実装は [`lexically_split_root`] で `out` を「起点（ルート `/` または
+/// cwd 由来）」と「起点から見た正規化済み相対パス」へ分解したうえで、
+/// **起点より下の全コンポーネント**（`out` の親ディレクトリ列を含む）を
 /// [`fd_walk::open_or_create_dir_chain`]（`mkdirat` + `O_DIRECTORY |
-/// O_NOFOLLOW` オープン）で作成・オープンし、`out` が既存のシンボリック
-/// リンクであれば fail-closed に [`BuildError::UnsafeOutputPath`] を返す。
+/// O_NOFOLLOW` オープン）で単一の検証済み fd から fd 相対に辿る。途中の
+/// どのコンポーネントが既存のシンボリックリンクであっても、また作成直後に
+/// 差し替えられても、`O_NOFOLLOW` オープンが `ELOOP`/`ENOTDIR` で拒否し
+/// [`BuildError::UnsafeOutputPath`] へ詰め替える。
 ///
-/// `out.file_name()` が `None`（`.`・`..`・`/` 等、名前を持たない特殊
-/// コンポーネントで終わる経路）の場合は、そもそも「攻撃者が任意の名前へ
-/// 差し替え可能な独立したディレクトリエントリ」が存在しないため
-/// （`.`/`..` はプロセスの実 CWD 自体の別名であり、symlink を仕込む対象と
-/// なる名前付きエントリではない）、本関数の脅威モデルの対象外として旧来の
-/// `fs::create_dir_all` + `fs::File::open` にフォールバックする。
+/// トレードオフ（意図的な許容）: 旧実装が許していた「起点より下の正当な
+/// 中間 symlink」（例: macOS の `/tmp` → `/private/tmp`）はこの実装では
+/// 拒否される（`--out /tmp/...` は `UnsafeOutputPath` になり、シンボリック
+/// リンクを含まない実パス、または起点自体〈cwd〉より上に無い経路を指定する
+/// 必要がある）。`docs-site` は CI・開発者ローカル実行専用ツールで `--out`
+/// の値はビルド実行者が完全に制御できるため、P0（out 配下外への書き込み）を
+/// 閉じることを優先しこの用法制限を許容する。
 fn open_out_root_dir(out: &Path) -> Result<fs::File, BuildError> {
-    let Some(file_name) = out.file_name() else {
-        fs::create_dir_all(out).map_err(BuildError::CreateOutDir)?;
-        return fs::File::open(out).map_err(BuildError::CreateOutDir);
-    };
-    let parent = out.parent().unwrap_or_else(|| Path::new(""));
-
-    let parent_dir_fd = if parent.as_os_str().is_empty() {
-        // `out` がカレントディレクトリ直下の単一コンポーネント（例:
-        // `"out"`）の場合。カレントディレクトリを起点として `out` 自身の
-        // symlink 検査を行う。
-        fs::File::open(".").map_err(BuildError::CreateOutDir)?
-    } else {
-        fs::create_dir_all(parent).map_err(BuildError::CreateOutDir)?;
-        fs::File::open(parent).map_err(BuildError::CreateOutDir)?
-    };
-
-    fd_walk::open_or_create_dir_chain(&parent_dir_fd, Path::new(file_name)).map_err(|error| {
-        if fd_walk::is_symlink_rejection(&error) {
-            BuildError::UnsafeOutputPath(out.display().to_string())
-        } else {
-            BuildError::CreateOutDir(error)
+    let (base, relative) = lexically_split_root(out);
+    let base_dir = fs::File::open(&base).map_err(BuildError::CreateOutDir)?;
+    match relative {
+        Some(relative) => {
+            fd_walk::open_or_create_dir_chain(&base_dir, &relative).map_err(|error| {
+                if fd_walk::is_symlink_rejection(&error) {
+                    BuildError::UnsafeOutputPath(out.display().to_string())
+                } else {
+                    BuildError::CreateOutDir(error)
+                }
+            })
         }
-    })
+        None => Ok(base_dir),
+    }
 }
 
 /// `<root>/site/nav.toml` を読み込み・パース・検証し、各ページを Markdown→HTML
@@ -973,6 +1021,18 @@ mod tests {
                 std::process::id()
             ));
             fs::create_dir_all(&path).expect("create temp dir for build.rs test");
+            // `std::env::temp_dir()` は macOS では `/var/folders/...`
+            // （`/var` 自体が `/private/var` への symlink）を返す。
+            // `open_out_root_dir` は `out` 配下の**全コンポーネント**を
+            // fd 相対 `O_NOFOLLOW` で辿り、経路上のどの symlink も
+            // fail-closed に拒否する（本ファイル冒頭の `open_out_root_dir`
+            // ドキュメントコメント参照。P0 修正・PR #899）ため、symlink を
+            // 含む一時ディレクトリパスをそのまま `out` に渡すとテストが
+            // 偽陽性で失敗する。ここで作成済みの実ディレクトリを
+            // `canonicalize` し、symlink を含まない実パスへ解決してから
+            // 保持する（テストフィクスチャ自身の正規化であり、本番コードの
+            // symlink 拒否ロジックを弱めるものではない）。
+            let path = fs::canonicalize(&path).expect("canonicalize temp dir for build.rs test");
             Self(path)
         }
     }
@@ -981,6 +1041,59 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// [`lexically_split_root`] 単体テスト: 絶対パス・相対パス・`..`/`.`
+    /// 混在の各ケースで、実ファイルシステムへ問い合わせずに正しく
+    /// 「起点」「起点から見た正規化済み相対パス」へ分解できることを確認する。
+    #[test]
+    fn lexically_split_root_handles_absolute_relative_and_parent_dir_components() {
+        assert_eq!(
+            lexically_split_root(Path::new("/a/b/c")),
+            (PathBuf::from("/"), Some(PathBuf::from("a/b/c")))
+        );
+        assert_eq!(
+            lexically_split_root(Path::new("a/b/c")),
+            (PathBuf::from("."), Some(PathBuf::from("a/b/c")))
+        );
+        assert_eq!(
+            lexically_split_root(Path::new("./a/./b")),
+            (PathBuf::from("."), Some(PathBuf::from("a/b")))
+        );
+        // `..` は 1 つ前の `Normal` コンポーネントを打ち消す（レキシカル正規化）。
+        assert_eq!(
+            lexically_split_root(Path::new("a/../b")),
+            (PathBuf::from("."), Some(PathBuf::from("b")))
+        );
+        // 相対パス先頭の `..`（積める `Normal` が無い）は握り潰さず起点側へ
+        // 積み増す。
+        assert_eq!(
+            lexically_split_root(Path::new("../out")),
+            (PathBuf::from("./.."), Some(PathBuf::from("out")))
+        );
+        assert_eq!(
+            lexically_split_root(Path::new("../../out")),
+            (PathBuf::from("./../.."), Some(PathBuf::from("out")))
+        );
+        // 絶対パスの `..`（filesystem root を超える分）は root で clamp。
+        assert_eq!(
+            lexically_split_root(Path::new("/../out")),
+            (PathBuf::from("/"), Some(PathBuf::from("out")))
+        );
+        // 起点そのものを指す経路（相対パスに `Normal` コンポーネントが 1 つも
+        // 残らない）は `relative` が `None`。
+        assert_eq!(
+            lexically_split_root(Path::new(".")),
+            (PathBuf::from("."), None)
+        );
+        assert_eq!(
+            lexically_split_root(Path::new("/")),
+            (PathBuf::from("/"), None)
+        );
+        assert_eq!(
+            lexically_split_root(Path::new("..")),
+            (PathBuf::from("./.."), None)
+        );
     }
 
     /// レビュー指摘（PR #899）の回帰テスト: `read_verified_source` 自体が、
@@ -1465,6 +1578,67 @@ path = "/intro/"
         assert!(
             !outside.0.join("intro").exists(),
             "must not create directories through the symlinked --out root into the outside directory"
+        );
+    }
+
+    /// 回帰テスト（codex-review 追加ラウンド指摘・PR #899 P0 その 2）:
+    /// `--out` **自体**は symlink ではなく未作成の通常コンポーネントだが、
+    /// その**親ディレクトリ**が既存のシンボリックリンクで外部を指している
+    /// ケース。旧実装は `open_out_root_dir` が親を `fs::create_dir_all` +
+    /// `fs::File::open`（パス文字列の再解決）で扱っており、親の symlink を
+    /// 検証済み dirfd として無条件に採用してしまっていた
+    /// （`build_site_rejects_output_root_that_is_itself_a_symlink` は `out`
+    /// 自身が symlink のケースのみを対象にしており、本テストとは異なる）。
+    /// 本テストは `open_out_root_dir` が `out` の**祖先コンポーネント全て**を
+    /// fd 相対 `O_NOFOLLOW` で辿り、途中の symlink を fail-closed に拒否する
+    /// ことを確認する（unix 限定）。
+    #[cfg(unix)]
+    #[test]
+    fn build_site_rejects_output_path_whose_parent_directory_is_a_symlink() {
+        let root = TempDir::new("build-out-parent-symlink-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro").unwrap();
+
+        // `out` の親ディレクトリ（`out_parent_link`）を、`outside` を指す
+        // シンボリックリンクへ差し替える。`out` 自体（`out_path` の最終
+        // コンポーネント）はこの時点でまだ存在しない。
+        let outside = TempDir::new("build-out-parent-symlink-outside");
+        let holder = TempDir::new("build-out-parent-symlink-holder");
+        let out_parent_link = holder.0.join("out-parent-link");
+        std::os::unix::fs::symlink(&outside.0, &out_parent_link)
+            .expect("create symlink standing in for --out's parent directory");
+        let out_path = out_parent_link.join("out");
+
+        match build_site(&root.0, &out_path) {
+            Err(BuildError::UnsafeOutputPath(_)) => {}
+            other => panic!(
+                "expected UnsafeOutputPath for a --out path whose parent is a symlink, got {other:?}"
+            ),
+        }
+        assert!(
+            !outside.0.join("out").exists(),
+            "must not create the out directory through the symlinked parent into the outside directory"
+        );
+        assert!(
+            !outside.0.join("out/intro/index.html").exists(),
+            "must not write through the symlinked parent into the outside directory"
         );
     }
 }
