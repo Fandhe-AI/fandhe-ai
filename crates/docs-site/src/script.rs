@@ -112,14 +112,25 @@ pub(crate) const INLINE_THEME_BOOTSTRAP: &str = "try{var t=localStorage.getItem(
 ///    `fetch` する（`loading` フラグで多重取得を抑止）。取得失敗は `loadFailed`
 ///    フラグで終端失敗状態を保持し、以降の `input` イベントでは無条件の
 ///    再 `fetch` を行わない（404・ネットワークエラー後のキー入力のたびの
-///    retry storm 防止）。
+///    retry storm 防止）。`res.json()` の結果は `isValidSearchIndex` で
+///    `version`・`base_path`・`pages` 配列・各要素の `href`/`title`/`text`
+///    型を検証してから採用する（不正データを無検証で `indexData` へ入れると
+///    `pages.forEach` 等が TypeError で検索 UI を壊すため。検証失敗も
+///    `loadFailed` の終端失敗状態へ fail-closed で合流する）。
 /// 4. クエリは小文字化して部分一致判定する。スコアはタイトル一致 + 3 /
 ///    本文一致 + 1 の決定的加算とし、0 点のページは除外した上でスコア降順に
 ///    並べ替え、上位 `SEARCH_MAX_RESULTS`（8 件）のみを描画する。
 /// 5. 結果の描画は `document.createElement` + `textContent` +
-///    `setAttribute` のみで行う（`innerHTML` 等は使わない）。href は必ず
-///    `/` から始まり `//` から始まらないもの（同一オリジンの相対パス）のみ
-///    描画する多層防御を行う。
+///    `setAttribute` のみで行う（`innerHTML` 等は使わない）。href は
+///    `isSafeHref` で検証したもののみ描画する: `/` から始まり、バック
+///    スラッシュを含まず、`new URL(href, location.origin)` で
+///    解決した結果の `origin` が `location.origin` と一致するもの（同一
+///    オリジンの相対パス）のみを同一オリジン制約として受理する多層防御を
+///    行う。バックスラッシュを明示拒否するのは、WHATWG の special URL 仕様が
+///    パース時にバックスラッシュをスラッシュ相当として扱うため、`/` 始まり
+///    チェックだけでは `/\evil.example/` のような値が `//evil.example/`
+///    （外部オリジン）へ正規化され得るため（origin 一致検証はこの正規化ゆれ
+///    を個別に塞ぐのではなく解決結果そのものを検証する最終防御）。
 /// 6. `Escape` キーで入力・結果をクリアする。
 /// 7. **すべての配線が完了した後にのみ** `.docs-search` の `hidden` を
 ///    解除する（テーマトグルと同じ fail-closed パターン）。
@@ -224,6 +235,15 @@ pub(crate) const SITE_JS: &str = "\
           return res.json();
         })
         .then(function (data) {
+          if (!isValidSearchIndex(data)) {
+            // スキーマ不一致（404 が JSON を返す・キャッシュ破損・
+            // version 不一致等）を無検証で pages.forEach へ渡すと
+            // TypeError で検索 UI が停止する。loadFailed の終端失敗状態へ
+            // fail-closed で誘導し、既存の fetch 失敗経路と同じ扱いにする。
+            loading = false;
+            loadFailed = true;
+            return;
+          }
           indexData = data;
           loading = false;
           renderResults(input.value);
@@ -250,8 +270,57 @@ pub(crate) const SITE_JS: &str = "\
       if (href.indexOf(`/`) !== 0) {
         return false;
       }
-      if (href.indexOf(`//`) === 0) {
+      // バックスラッシュを含む href を明示的に拒否する。WHATWG の special
+      // URL 仕様ではパース時にバックスラッシュがスラッシュ相当として扱わ
+      // れるため、`/` 始まりチェックだけでは（`//` 非開始チェックを併用
+      // しても）バックスラッシュを使った値が `//evil.example/` 相当へ
+      // 正規化され、意図した同一オリジン制約を迂回できてしまう。
+      if (href.indexOf(`\\\\`) !== -1) {
         return false;
+      }
+      var resolved;
+      try {
+        resolved = new URL(href, location.origin);
+      } catch (e) {
+        return false;
+      }
+      // 上記の事前拒否に加え、実際に URL を解決したうえで origin が
+      // 一致することまで検証する（同一オリジン制約の最終的な担保。
+      // 正規化の抜け穴を個別に塞ぎ続けるのではなく、解決結果そのものを
+      // 検証することで fail-closed にする）。
+      if (resolved.origin !== location.origin) {
+        return false;
+      }
+      return true;
+    }
+
+    function isValidSearchIndex(data) {
+      if (typeof data !== `object` || data === null) {
+        return false;
+      }
+      if (data.version !== 1) {
+        return false;
+      }
+      if (typeof data.base_path !== `string`) {
+        return false;
+      }
+      if (!Array.isArray(data.pages)) {
+        return false;
+      }
+      for (var i = 0; i !== data.pages.length; i++) {
+        var page = data.pages[i];
+        if (typeof page !== `object` || page === null) {
+          return false;
+        }
+        if (typeof page.href !== `string`) {
+          return false;
+        }
+        if (typeof page.title !== `string`) {
+          return false;
+        }
+        if (typeof page.text !== `string`) {
+          return false;
+        }
       }
       return true;
     }
@@ -530,13 +599,37 @@ mod tests {
         );
     }
 
-    /// 検索結果の href 検証（`isSafeHref`）が `/` 始まり・`//` 非開始のみを
-    /// 受理することを固定する（OWASP A10 SSRF 対策と同種の多層防御）。
+    /// 検索結果の href 検証（`isSafeHref`）が `/` 始まりの事前チェックに加え、
+    /// `new URL` で解決した結果の `origin` が `location.origin` と一致する
+    /// ことまで検証することを固定する（同一オリジン制約の最終担保）。
     #[test]
     fn site_js_search_validates_result_hrefs_before_rendering() {
         assert!(SITE_JS.contains("function isSafeHref(href)"));
         assert!(SITE_JS.contains("href.indexOf(`/`) !== 0"));
-        assert!(SITE_JS.contains("href.indexOf(`//`) === 0"));
+        assert!(SITE_JS.contains("new URL(href, location.origin)"));
+        assert!(SITE_JS.contains("resolved.origin !== location.origin"));
+    }
+
+    /// `isSafeHref` がバックスラッシュを含む href を明示的に拒否することを
+    /// 固定する（WHATWG special URL のバックスラッシュ＝スラッシュ扱い
+    /// 正規化を悪用した `//evil.example/` 相当への迂回の回帰防止。
+    /// OWASP A03/A01 系の外部入力 URL 検証欠陥）。
+    #[test]
+    fn site_js_is_safe_href_rejects_backslash() {
+        assert!(SITE_JS.contains(r"href.indexOf(`\\`) !== -1"));
+    }
+
+    /// 取得した検索索引（`res.json()`）を無検証で `indexData` へ保存せず、
+    /// `version`・`base_path`・`pages` 配列・各要素の `href`/`title`/`text`
+    /// 型を検証してから採用することを固定する。不正データ（404 が JSON を
+    /// 返す・キャッシュ破損等）で `pages.forEach` が TypeError を起こし
+    /// 検索 UI が停止する回帰を防ぐ。
+    #[test]
+    fn site_js_validates_search_index_schema_before_use() {
+        assert!(SITE_JS.contains("function isValidSearchIndex(data)"));
+        assert!(SITE_JS.contains("if (!isValidSearchIndex(data))"));
+        assert!(SITE_JS.contains("data.version !== 1"));
+        assert!(SITE_JS.contains("Array.isArray(data.pages)"));
     }
 
     /// 検索索引の `fetch` が失敗した場合、`loadFailed` という終端失敗状態が
