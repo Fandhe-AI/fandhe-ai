@@ -7,6 +7,11 @@ description = "Metal バックエンド（objc2 系。macOS 限定。REQ-2）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# crates.io の本クレートページに表示される readme（イシュー #882）。
+# 「fandhe-ai 経由での利用が唯一のサポート面・本クレートへの直接依存は
+# サポート対象外」を明示する per-crate 方式を採用（`crates/facade/Cargo.toml`
+# の同コメント参照）。
+readme = "README.md"
 # crates.io 公開対象 6 クレートの 1 つ（#881・docs/crates-io-publishing-order.md
 # §6）。ルート `[workspace.package]` の `publish = false`（docs-site 等の非公開
 # クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
