@@ -39,11 +39,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = output_var.to_tensor();
     println!("forward() output shape: {:?}", output.shape());
 
-    // 同一モデル・同一入力のため、2 経路の出力はビット一致するはず
-    // （`Sequential::predict` のドキュメンテーションコメント「`predict`
-    // は内部で `tape()` を構築して `forward` を呼ぶだけ」と整合する。
-    // `.claude/rules/coding-rust.md`「許容誤差を単独で緩和しない」の
-    // 趣旨に沿い、ここでは 2 経路が同一計算であることを完全一致で示す）。
+    // 同一モデル・同一入力のため、2 経路の出力は shape・要素数・値の
+    // すべてがビット一致するはず（`Sequential::predict` のドキュメン
+    // テーションコメント「`predict` は内部で `tape()` を構築して
+    // `forward` を呼ぶだけ」と整合する。`.claude/rules/coding-rust.md`
+    // 「許容誤差を単独で緩和しない」の趣旨に沿い、ここでは 2 経路が
+    // 同一計算であることを完全一致で示す）。
+    //
+    // shape が一致しない場合、後続の `zip` は短い側までしか比較せず
+    // 不一致を握り潰してしまうため、値比較の前に shape 自体の一致を
+    // 検査して不一致なら Err で失敗させる。
+    if predicted.shape() != output.shape() {
+        return Err(format!(
+            "predict() と forward() の出力 shape が不一致: {:?} != {:?}",
+            predicted.shape(),
+            output.shape()
+        )
+        .into());
+    }
     let predicted_data = predicted
         .contiguous()
         .as_slice()
@@ -59,6 +72,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .zip(output_data.iter())
         .all(|(a, b)| a.to_bits() == b.to_bits());
     println!("predict() と forward() の出力はビット一致: {bit_exact}");
+    // 出力ビット不一致は数値退行を意味するため、表示だけで成功終了
+    // させず Err を返す（`cargo run` の終了コードで退行を検出できる
+    // ようにする）。
+    if !bit_exact {
+        return Err("predict() と forward() の出力がビット一致しない（数値退行の可能性）".into());
+    }
 
     Ok(())
 }

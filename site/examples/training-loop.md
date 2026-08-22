@@ -104,7 +104,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_loss = initial_loss.ok_or("STEPS > 0 のため初期 loss は必ず記録される")?;
     println!("initial loss: {initial_loss}");
     println!("final loss: {final_loss}");
-    println!("loss decreased: {}", final_loss < initial_loss);
+    let loss_decreased = final_loss < initial_loss;
+    println!("loss decreased: {loss_decreased}");
+
+    // 学習退行（勾配計算・パラメータ更新の不具合で loss が非有限化
+    // する、または減少しなくなる）を表示するだけで見逃さないよう、
+    // 満たさない場合は Err を返して `cargo run` を失敗終了させる。
+    if !final_loss.is_finite() {
+        return Err(format!("final loss が有限値ではない: {final_loss}").into());
+    }
+    if !loss_decreased {
+        return Err(format!(
+            "loss が減少しなかった（退行の可能性）: initial={initial_loss}, final={final_loss}"
+        )
+        .into());
+    }
 
     Ok(())
 }
