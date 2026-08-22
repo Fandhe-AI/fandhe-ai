@@ -18,13 +18,15 @@ fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
 ```
 
 インストール・最小コード例は
-[Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/)
-を参照してください。バックエンド切替（`Device::Cuda(0)` 指定）の例は同ページの
-「バックエンド切替」節を参照してください。
+[`fandhe-ai` の README](https://github.com/Fandhe-AI/rust-ai-library/blob/main/README.md#最小コード例)
+を参照してください。バックエンド切替（`Device::Cuda(0)` 指定）の例は同 README の
+「バックエンド」節を参照してください。
 
 ## ドキュメント・リポジトリ
 
-- [Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/)・[Guides: バックエンド構成](https://fandhe-ai.github.io/rust-ai-library/guides/backends/)
+利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
+[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。
+
 - ソース: <https://github.com/Fandhe-AI/rust-ai-library/tree/main/crates/backend-cuda>
 - バックエンド設計の詳細: [`docs/backend-switching-design.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/backend-switching-design.md)
 

@@ -17,12 +17,14 @@ fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
 ```
 
 インストール・最小コード例は
-[Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/)
+[`fandhe-ai` の README](https://github.com/Fandhe-AI/rust-ai-library/blob/main/README.md#最小コード例)
 を参照してください。
 
 ## ドキュメント・リポジトリ
 
-- [Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/)・[API Reference](https://fandhe-ai.github.io/rust-ai-library/api/)
+利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
+[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。
+
 - ソース: <https://github.com/Fandhe-AI/rust-ai-library/tree/main/crates/autodiff>
 - サポート境界の詳細: [`docs/compat-api-scope.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/compat-api-scope.md)
 

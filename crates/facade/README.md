@@ -53,7 +53,10 @@ CUDA・Metal は実行時にデバイスの存在を検証し、利用できな�
 
 ## ドキュメント・リポジトリ
 
-- [Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/)・[Guides](https://fandhe-ai.github.io/rust-ai-library/guides/)・[Examples](https://fandhe-ai.github.io/rust-ai-library/examples/)・[API Reference](https://fandhe-ai.github.io/rust-ai-library/api/)
+利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
+[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。公開までは
+本 README の「インストール」「最小コード例」「バックエンド」節を参照してください。
+
 - ソース: <https://github.com/Fandhe-AI/rust-ai-library/tree/main/crates/facade>
 - サポート境界の詳細: [`docs/compat-api-scope.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/compat-api-scope.md)
 

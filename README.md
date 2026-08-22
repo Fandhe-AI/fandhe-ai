@@ -4,18 +4,19 @@ Rust 製 AI/ML ライブラリです。Burn 等の既存フレームワークに
 autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層を
 **完全自作コア**として実装しています。
 
-*A from-scratch Rust AI/ML library — no Burn/candle/tch dependency. See
-[Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/)
-for install & a minimal example.*
+*A from-scratch Rust AI/ML library — no Burn/candle/tch dependency. See the
+[Getting Started](#最小コード例) section below for install & a minimal example.*
 
 ## ドキュメント
 
-利用者向けドキュメントは GitHub Pages サイトにまとまっています。
+利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
+[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。公開までは
+本 README と以下を参照してください。
 
-- [Getting Started](https://fandhe-ai.github.io/rust-ai-library/getting-started/): インストール・最小コード例・バックエンド切替
-- [Guides](https://fandhe-ai.github.io/rust-ai-library/guides/): バックエンド構成・数値一致契約・性能の考え方・ONNX/safetensors 相互運用
-- [Examples](https://fandhe-ai.github.io/rust-ai-library/examples/): 学習ループ・推論・GEMM ベンチの実行例
-- [API Reference](https://fandhe-ai.github.io/rust-ai-library/api/): `compat` API・guardrail／self-repair CLI の要点
+- インストール・最小コード例・バックエンド切替: 本 README の「インストール」「最小コード例」「バックエンド」節
+- バックエンド構成・数値一致契約: [`docs/backend-switching-design.md`](docs/backend-switching-design.md)
+- compat API・サポート境界: [`docs/compat-api-scope.md`](docs/compat-api-scope.md)
+- ONNX/safetensors 相互運用: [`crates/onnx-interop`](crates/onnx-interop)（非公開の内部クレート）
 
 ## インストール
 
