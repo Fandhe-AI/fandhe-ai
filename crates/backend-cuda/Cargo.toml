@@ -37,7 +37,9 @@ test = true
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
 # 同種の判断）。TASK-1.9a（#44）でデバイス列挙・選択の共通 trait
 # `tensor_core::device::DeviceProvider` を実装するために追加した。
-fandhe-ai-tensor-core = { path = "../tensor-core" }
+# `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
+# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 # CUDA バックエンド（REQ-2）。無条件依存＋動的ロード方式のため cfg 分離しない
 # （features・default-features は workspace ルートの [workspace.dependencies] で確定済み。
 # member 側で default-features を再指定しても inherited dependency には反映されないため
@@ -127,7 +129,9 @@ required-features = ["internal-diagnostics"]
 # 同士の path 依存であり、許容依存 8 区分（外部クレート）の新規追加には
 # 当たらない（`crates/backend-cpu/Cargo.toml:20-25` の bench-harness 依存と
 # 同じ整理）。
-fandhe-ai-backend-cpu = { path = "../backend-cpu" }
+# `version` 併記の理由は上記 `fandhe-ai-tensor-core` 依存コメント参照
+# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
+fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.3.0" }
 # 決定的シード PRNG（`Xorshift64Star`）を GEMM 入力生成に使う
 # （coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
 # 使う」）。上記と同じ理由で許容依存 8 区分の対象外。

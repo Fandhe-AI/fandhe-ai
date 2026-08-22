@@ -91,6 +91,13 @@ crates.io の名前制約（ASCII 英数字・`-`・`_`、64 文字以内）は�
 - publish フラグ・メタデータ整備（#880）、依存 version 付与（#881）
 - crates.io 上での名前の事前確保（空 publish）。不可逆かつ承認前のため実施しない
 
+**追記（PR #891）**: 依存 version 付与のうち「公開 6 クレート間 path 依存への
+`version = "=0.3.0"`（workspace 公開バージョンと完全一致）併記」のみは、
+PR #891 の codex-review P1 指摘（rename 後の path 依存が crates.io 公開要件を
+欠くとの機械指摘）を受けて #879 側で前倒しして対応済み。#881 に残るスコープは
+依存グラフの公開順序（トポロジカル順）の docs 記録・版数運用（`workspace.
+package.version` 一括更新）方針の記録のみ。
+
 ## 出典
 
 - crates.io API: `GET https://crates.io/api/v1/crates/{name}`（2026-08-22 UTC 実測。
