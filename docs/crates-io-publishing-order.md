@@ -432,8 +432,91 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 同様に発生する想定内の失敗であり、9.3 節の順序どおり ①→②→③ で 1 クレート
 ずつ実行すれば解消されていく。
 
+## 10. 初回公開の前提条件未充足による保留記録（#885）
+
+イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
+`mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
+不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
+**本イシューでは実公開（`mode: publish` dispatch）を一切実行していない**。
+
+### 10.1 実測結果
+
+| 前提 | 確認コマンド | 実測結果（2026-08-23） |
+|------|-------------|------------------------|
+| #880（publish メタデータ整備: `repository`/`keywords`/`categories`/`description` 充実）が main に反映済み | `gh issue view 880 --json state` | **未充足**: `"state":"OPEN"`（未マージ。対応 PR #892 も open） |
+| GitHub environment `crates-io-release` が required reviewers + deployment branch 制限（main 限定）で設定済み | `gh api repos/Fandhe-AI/rust-ai-library/environments` | **未充足**: `{"total_count":0,"environments":[]}`（environment 自体が未作成） |
+
+上記いずれも `.github/workflows/release.yml` 冒頭コメントが明記する前提条件であり、
+未充足のまま `mode: publish` を dispatch すると (a) `manifest has no documentation,
+homepage or repository` 等のメタデータ欠落が当該 version に恒久的に残る、
+(b) environment 承認ゲートが機能せず誤 dispatch を止められない、の 2 リスクを負う。
+よって fail-closed の方針（`.claude/rules/security.md` A08・本ドキュメント冒頭の
+「公開は監査可能な CI ワークフロー経由に限定」方針）に従い、実公開を保留した。
+
+### 10.2 dry-run-only の実行有無
+
+8.1 節・8.2 節の時点（#883）で `fandhe-ai-tensor-core` を含む 6 クレート全件の
+`cargo publish --dry-run` 実測記録が既に存在し、`no matching package named
+fandhe-ai-tensor-core`（依存先未公開時の想定内失敗）等の結果は記録済みである。
+release ワークフロー（#884）経由の `mode: dry-run-only` 再実行は追加の実行環境
+（GitHub Actions runner）で同じ検証を繰り返すのみで、G0-1（#880）が未マージの間は
+同一のメタデータ欠落警告が再現するだけであり新たな知見を追加しない。加えて #880
+マージ後は本節の dry-run 結果自体が陳腐化する。よって本イシューでは release.yml の
+`workflow_dispatch` を一度も実行していない（`gh workflow run` を叩いていない）。
+
+### 10.3 crates.io 未公開の確認（read-only）
+
+sparse index への到達性のみを read-only な `curl` で確認した（トークン不要・
+アップロードなし）。6 クレートすべてで `HTTP 404`（未公開）を確認した。
+
+| クレート | index path | HTTP status |
+|---------|------------|--------------|
+| `fandhe-ai-tensor-core` | `fa/nd/fandhe-ai-tensor-core` | 404 |
+| `fandhe-ai-autodiff` | `fa/nd/fandhe-ai-autodiff` | 404 |
+| `fandhe-ai-backend-cpu` | `fa/nd/fandhe-ai-backend-cpu` | 404 |
+| `fandhe-ai-backend-cuda` | `fa/nd/fandhe-ai-backend-cuda` | 404 |
+| `fandhe-ai-backend-metal` | `fa/nd/fandhe-ai-backend-metal` | 404 |
+| `fandhe-ai` | `fa/nd/fandhe-ai` | 404 |
+
+### 10.4 受け入れ条件の充足状況
+
+イシュー #885 の受け入れ条件 (a)（6 クレート公開・docs.rs ビルド成功）・
+(b)（新規プロジェクトから `cargo add` して最小例が動作）は、上記のとおり
+実公開自体を行っていないため **共に未充足**である。docs.rs ビルド確認・
+`cargo add` スモークテストも実行していない（前提の公開が存在しないため実行不能）。
+
+### 10.5 再開に必要な対応（担当・対応リポジトリ外）
+
+- #880（本リポジトリの PR #892）のマージ
+- GitHub environment `crates-io-release`（required reviewers + deployment branch
+  制限〈main 限定〉）のユーザーによる設定（`.github/workflows/release.yml` 冒頭
+  コメント参照。エージェント単独では実施しない）
+
+上記 2 点が満たされた後、9.3 節のトポロジカル順（①→②→③）で、
+クレートごとに `-f crate=<crate> -f version=<version>` を明示した
+`workflow_dispatch` を実行する（`version` は必須入力で既定値を持たないため、
+`-f version=<version>` を省略すると dispatch できない。9.1 節）。dry-run と
+publish は同一の `crate`／`version` を渡し、まず `dry-run-only` を green
+確認してから `publish`（environment 承認）へ進める（9.2 節）。①のクレート・
+`workspace.version`（4 節で確定した公開バージョン）を仮に `0.3.0` とした例:
+
+```sh
+gh workflow run release.yml \
+  -f crate=fandhe-ai-tensor-core -f version=0.3.0 -f mode=dry-run-only
+gh workflow run release.yml \
+  -f crate=fandhe-ai-tensor-core -f version=0.3.0 -f mode=publish
+```
+
+sparse index 反映確認（9.3 節）後、②→③の各クレートについても
+`-f crate=<crate>` のみを対象クレート名に差し替え、`-f version` は
+一括バンプ後の同一 `workspace.version` を渡して同様に
+`dry-run-only` → `publish` の順で 1 クレートずつ実行する。
+
 ## 変更履歴
 
+- 2026-08-23（#885）: 初回公開実行を試行したが、前提条件ゲート（#880 未マージ・
+  environment `crates-io-release` 未設定）が未充足であったため実公開
+  （`mode: publish`）を実行せず保留し、実測結果を 10 節として記録した。
 - 2026-08-23（#884）: release ワークフロー（`.github/workflows/release.yml`。
   workflow_dispatch + `CARGO_REGISTRY_TOKEN` 方式）による公開手順を新節（§9）
   として追記した。ワークフロー本体の設計・セキュリティ考慮は
