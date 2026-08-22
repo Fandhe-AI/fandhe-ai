@@ -576,6 +576,13 @@ fn is_allowed_url(raw: &str) -> bool {
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return true;
     }
+    // `//` 始まりはプロトコル相対 URL（ページの現在スキームを継承した外部リンク）
+    // であり、ドキュメンテーションコメントが定める許可対象（http/https・`/` 始まりの
+    // 絶対相対パス・スキームなし相対パス）のいずれにも該当しないため、`/` 始まり
+    // 判定より先に明示的に拒否する（Review 指摘: crates/docs-site issue #870）。
+    if normalized.starts_with("//") {
+        return false;
+    }
     if normalized.starts_with('/') {
         return true;
     }
@@ -788,6 +795,14 @@ mod tests {
     #[test]
     fn drops_link_for_disallowed_mailto_scheme() {
         assert_eq!(html_of("[x](mailto:a@b.com)"), "<p><span>x</span></p>");
+    }
+
+    #[test]
+    fn drops_link_for_protocol_relative_url() {
+        // `//evil.com/path` はページの現在スキームを継承した外部サイトへの
+        // リンクになる（プロトコル相対 URL）。`/` 始まり判定に飲み込まれて
+        // 誤って許可されないことを回帰検査する（Review 指摘: issue #870）。
+        assert_eq!(html_of("[x](//evil.com/path)"), "<p><span>x</span></p>");
     }
 
     // ---- 生 HTML はテキストとしてエスケープされる ----
