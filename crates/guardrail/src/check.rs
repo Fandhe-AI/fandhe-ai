@@ -16,7 +16,7 @@
 //!   `NotRun` を「逸脱なし」として扱うため（`decision.rs` テスト
 //!   `all_clean_yields_auto_apply` 参照）、bench 未計測でも auto_apply へ
 //!   到達できる。CLI 結線自体は別イシュー（親 #111 系）で扱う
-//! - **公開 API 破壊検出**: [`crate::checks::api_stability`] は PoC-3 パリティ
+//! - **公開 API 破壊検出**: `crate::checks::api_stability` は PoC-3 パリティ
 //!   （`pub fn`/`pub struct`/`pub enum` の行シグネチャ比較）に留め、
 //!   `cargo public-api` 相当の意味論解析は行わない
 //!
@@ -30,7 +30,7 @@
 //!
 //! # 信頼境界（measured 経路）
 //! [`run_measured`] は `--repo` で指定された対象リポジトリ上で
-//! `cargo build`/`cargo test --release`/`cargo clippy`（[`crate::gates`]）を
+//! `cargo build`/`cargo test --release`/`cargo clippy`（`crate::gates`）を
 //! 実際に**実行**する。つまり対象リポジトリのビルドスクリプト・テスト
 //! コード自体を実行する設計であり（v1・CI 側の bench ゲートと同等）、
 //! `guardrail check`（measured 経路）は運用者が検証意図を持つリポジトリ

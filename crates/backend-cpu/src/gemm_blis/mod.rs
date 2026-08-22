@@ -4,7 +4,7 @@
 //! は自動ベクトル化頼みのスカラーループで、PoC-v2-1 実測では対 PyTorch CPU 比
 //! 5.3%（M=N=K=2048/4096 最小値）に留まり REQ-8 の CPU 最適化後下限（20%）に
 //! 届かない。本モジュールは `std::arch` intrinsics（NEON／AVX2+FMA／AVX-512F）
-//! による マイクロカーネル・A/B packing（[`pack`]）・キャッシュ階層ブロッキング
+//! による マイクロカーネル・A/B packing（`pack`）・キャッシュ階層ブロッキング
 //! （MC/KC/NC）を実装し、性能向上を狙う。
 //!
 //! ## 実行時 ISA ディスパッチ（#185・TASK-1.6g）
@@ -13,7 +13,7 @@
 //! だったため、x86_64 の既定ビルド（`RUSTFLAGS` なし）では実行 CPU が
 //! AVX2/AVX-512 を持っていてもスカラーへ落ちていた。本モジュールの
 //! 公開入口（[`gemm_blis`]／[`gemm_blis_parallel`]）は `dispatch_region`
-//! で 1 回だけ ISA トークンの検出・選択を行い、[`gemm_blis_region`] を
+//! で 1 回だけ ISA トークンの検出・選択を行い、`gemm_blis_region` を
 //! モノモーフィック化されたジェネリック関数として呼ぶ（トークン型による
 //! 健全な dispatch の設計は [`microkernel`] モジュールドキュメント参照）。
 //!
@@ -38,12 +38,12 @@
 //!
 //! ## 境界検査（REQ-8）
 //!
-//! 公開入口は [`crate::gemm::validate_dims`]（`checked_mul` によるオーバー
+//! 公開入口は `crate::gemm::validate_dims`（`checked_mul` によるオーバー
 //! フロー検査・スライス長検査）を再利用する。packing・端タイルの C
 //! 書き戻しは安全な slice 操作で行い、intrinsics のロード／ストアは
 //! マイクロカーネル関数入口の `assert!` で長さを検査した直後の最小
-//! `unsafe` ブロックに限定する（[`microkernel::neon`]／[`microkernel::avx2`]／
-//! [`microkernel::avx512`] 参照）。dispatch 導入を理由とした境界検査の
+//! `unsafe` ブロックに限定する（`microkernel::neon`／`microkernel::avx2`／
+//! `microkernel::avx512` 参照）。dispatch 導入を理由とした境界検査の
 //! 省略は行わない。
 
 // `cache_params`／`partition` は #753 の本番未結線スコープ（下記
@@ -335,7 +335,7 @@ fn panel_capacity(
 
 /// 単一スレッドの BLIS 5-loop GEMM（jc→pc→ic→jr→ir）。
 ///
-/// `gemm_blis_parallel` はこの関数の内部ロジック（[`gemm_blis_region`]）を
+/// `gemm_blis_parallel` はこの関数の内部ロジック（`gemm_blis_region`）を
 /// 行パネルごとに並列呼び出しすることで並列化する（`gemm_blocked`／
 /// `gemm_parallel` と同じ構成。`crate::gemm` 参照）。
 pub fn gemm_blis(
@@ -358,7 +358,7 @@ pub fn gemm_blis(
 
 /// `gemm_blis` を `rayon` で行パネル並列化した版。
 ///
-/// C を行方向にパネル分割し、各パネルを独立スレッドで [`gemm_blis_region`]
+/// C を行方向にパネル分割し、各パネルを独立スレッドで `gemm_blis_region`
 /// に渡す（`crate::gemm::gemm_parallel` と同じ並列化戦略。C の書き込み
 /// 範囲がパネルごとに排他的なためデータ競合なし）。
 pub fn gemm_blis_parallel(

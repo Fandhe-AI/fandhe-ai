@@ -67,10 +67,10 @@ impl<'t> Var<'t> {
     /// 追跡を外し、現在の値を非追跡の `Tensor<f32>` の借用として取り出す。
     ///
     /// **TASK-12.1d（#164）**: 対象ノードが未実体化（elementwise の遅延
-    /// グラフの一部）であれば [`materialize_non_fallible`]（層 2。融合を
+    /// グラフの一部）であれば `materialize_non_fallible`（層 2。融合を
     /// 試み、失敗すれば `ops` の per-op メソッド → `eval.rs` の順に必ず
     /// 値を返す）経由で実体化する。`matmul`/`sum`/`max`・`Tape::backward`
-    /// が使う層 1（[`crate::tape::materialize_fallible`]）とは異なる
+    /// が使う層 1（`crate::tape::materialize_fallible`）とは異なる
     /// エラー処理契約を持つ（`docs/fusion-graph-design.md` §3.5.3）。
     ///
     /// **借用注意**: この `Ref` を保持したまま、同じ `Tape` に対して
@@ -132,7 +132,7 @@ impl<'t> Var<'t> {
     /// `self.tape.ops().gemm`（`BackendOps` 経由）へ置き換えた
     /// （TASK-1.9「backend 経由実行への置き換え」・設計書 §3.5.2）。
     /// 入力が elementwise の遅延グラフであった場合は
-    /// [`materialize_fallible`]（層 1）で自身の実行の一部として実体化
+    /// `materialize_fallible`（層 1）で自身の実行の一部として実体化
     /// する。
     pub fn matmul(&self, other: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         self.check_same_tape(other)?;
@@ -160,13 +160,13 @@ impl<'t> Var<'t> {
     /// 計算済み」であることを意味しない。設計書 §3.5.1）。
     ///
     /// **連鎖長上限（#404・設計書 §3.5.4）**: `push_lazy` を呼ぶ**前**に
-    /// [`Tape::pre_materialize_for_binary_merge`] で fan-in 事前実体化を
+    /// `Tape::pre_materialize_for_binary_merge` で fan-in 事前実体化を
     /// 行う（2 本の未実体化枝を合流させた結果が単独で上限を超えるなら
     /// 大きい方の枝を先に実体化する。codex-review PR #406 の P1 是正。
     /// push 後の自己実体化だけでは fan-in を防げないため必須）。続けて
     /// `push_lazy` が返す `at_limit` が `true`（新規ノードの
     /// `lazy_chain_size` が `MAX_FUSED_CHAIN_LEN` に到達）の場合、層 1
-    /// （[`materialize_fallible`]）でその場実体化する。**いずれの実体化
+    /// （`materialize_fallible`）でその場実体化する。**いずれの実体化
     /// も**発生した場合、`Ok` の意味は「shape が妥当でノードが記録され
     /// **かつバックエンド実行が成功した**」へ拡張される（同じ層 1 契約
     /// を持つ `matmul`/`sum`/`max` と同型の `Ok` 意味）。実体化失敗は
@@ -268,7 +268,7 @@ impl<'t> Var<'t> {
     /// はこのメソッドを呼ぶだけの薄いラッパー（REQ-9）。
     ///
     /// **TASK-12.1d（#164）**: `BackendOps` に対応メソッドがないため
-    /// 融合対象外とし、入力を層 1（[`materialize_fallible`]）で実体化
+    /// 融合対象外とし、入力を層 1（`materialize_fallible`）で実体化
     /// したうえで従来どおり `eval::mse_loss` を直接呼ぶ（設計書 §3.5.1
     /// 「`sigmoid`/`mse_loss`/`cross_entropy_loss` は従来どおり `eval.rs`
     /// で即時計算し `OnceCell` を充填して返す」）。
@@ -357,7 +357,7 @@ impl<'t> Var<'t> {
     /// （`add`/`mul` と同じ遅延契約。TASK-12.1d・#164）。
     ///
     /// **連鎖長上限（#404・設計書 §3.5.4）**: 非 fallible な単項演算
-    /// のため、上限到達時は層 2（[`materialize_non_fallible`]）でその場
+    /// のため、上限到達時は層 2（`materialize_non_fallible`）でその場
     /// 実体化する（`add`/`mul` の層 1 とは異なり、必ず値が入り
     /// panic／`Err` を返さない）。
     pub fn relu(&self) -> Var<'t> {

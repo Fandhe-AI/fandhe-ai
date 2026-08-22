@@ -3,15 +3,15 @@
 //!
 //! [`MetalRmsNorm::new`] が `shaders/rmsnorm.metal`（1 パス／2 パスの
 //! 2 エントリ）を実行時コンパイルしてパイプラインを保持し、
-//! [`MetalRmsNorm::run_rmsnorm_f32_raw`] へホスト側スライスを渡すだけで
-//! 経路選択（[`crate::row_kernel::select_route`]）・persistent grid 導出
-//! （[`crate::row_kernel::derive_persistent_grid`]）・バッファ確保・
+//! `MetalRmsNorm::run_rmsnorm_f32_raw` へホスト側スライスを渡すだけで
+//! 経路選択（`crate::row_kernel::select_route`）・persistent grid 導出
+//! （`crate::row_kernel::derive_persistent_grid`）・バッファ確保・
 //! ディスパッチ・readback を内部で完結できる（`crate::gemm::MetalGemm`
 //! と同じ構成方針）。
 //!
 //! `ops.rs::MetalBackendOps::run_fused` から canonical RMSNorm プラン
 //! （`x * rsqrt(sum(x^2))`。`mean`／`eps`／`weight` を含まない）検出時に
-//! 呼ばれる（[`crate::row_kernel::match_rmsnorm_plan`] 参照）。
+//! 呼ばれる（`crate::row_kernel::match_rmsnorm_plan` 参照）。
 
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLSize};
@@ -87,7 +87,7 @@ impl MetalRmsNorm {
     /// 標準 RMSNorm（mean 正規化あり）: `out = x * rsqrt(mean(x^2, axis=-1)
     /// + eps) * w`（`w` が `None` の場合は乗算をスキップ）を実行する。
     ///
-    /// `inv_n = 1/hidden` を内部導出し [`Self::run_rmsnorm_f32_raw`] へ
+    /// `inv_n = 1/hidden` を内部導出し `Self::run_rmsnorm_f32_raw` へ
     /// 委譲する（CUDA 側 `CudaRmsNorm::run_rmsnorm_f32` と同じ構成。
     /// `ops.rs::MetalBackendOps::run_fused` は canonical プランの意味論に
     /// 厳密一致させるため本メソッドを経由せず `run_rmsnorm_f32_raw` を

@@ -23,7 +23,7 @@
 //! # セキュリティ（A03。`.claude/rules/security.md`）
 //! `change_id`（`changes/` 配下のディレクトリ名）はパス連結**前**に文字クラス
 //! （`[A-Za-z0-9._-]+`・64 字以内）を検証し、`--dataset` ルート外参照
-//! （パストラバーサル）を遮断する（[`is_valid_change_id`]。
+//! （パストラバーサル）を遮断する（`is_valid_change_id`。
 //! `tests/labeled_changes_fixtures.rs`／`tests/labeled_changes_labels.rs` の
 //! 同名関数と同一契約）。`meta.toml`／`poc3-result.json` はいずれも読み込み前に
 //! 64 KiB 上限（[`crate::toml_lite::MAX_INPUT_BYTES`]）を検査する。
@@ -125,7 +125,7 @@ pub fn list_change_ids(dataset_dir: &Path) -> Result<Vec<String>, GuardrailError
 
 /// `change_id` 1 件分の `meta.toml`／`poc3-result.json` を読み、
 /// [`LabeledChange`] へ変換する。`change_id` は呼び出し前提として
-/// [`is_valid_change_id`] を満たすこと（[`list_change_ids`] が返す値を
+/// `is_valid_change_id` を満たすこと（[`list_change_ids`] が返す値を
 /// そのまま渡す想定。未検証の外部文字列を直接渡さない）。
 pub fn load_change(dataset_dir: &Path, change_id: &str) -> Result<LabeledChange, GuardrailError> {
     if !is_valid_change_id(change_id) {

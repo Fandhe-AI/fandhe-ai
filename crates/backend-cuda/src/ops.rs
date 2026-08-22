@@ -327,7 +327,7 @@ impl BackendOps for CudaBackendOps {
     /// activation を融合したカーネル
     /// （[`crate::gemm::CudaGemm::run_tiled_bias_act_f32`]）へ差し替える
     /// （イシュー #599・TASK-12.1f）。`backend-cpu::ops::CpuBackendOps` の
-    /// オーバーライドと同型の分岐（[`gemm_bias_act_route`] 参照）を採り、
+    /// オーバーライドと同型の分岐（`gemm_bias_act_route` 参照）を採り、
     /// `bias` が `None` またはブロードキャストの厳密一致形状 `[n]`
     /// の場合にのみ融合カーネルを使う。それ以外（`[1]`・`[1, n]` 等の
     /// ブロードキャスト可能だが `[n]` ちょうどでない shape）はデフォルト
@@ -452,7 +452,7 @@ impl BackendOps for CudaBackendOps {
     /// [`crate::softmax::CudaSoftmax`]（イシュー #594）へルーティング
     /// する。
     ///
-    /// プラン一致判定は [`match_rmsnorm_plan`]／[`match_softmax_plan`]
+    /// プラン一致判定は `match_rmsnorm_plan`／`match_softmax_plan`
     /// （いずれも純関数。プランの op 列・leaf 数・`row_fusion()` の形状を
     /// 厳密照合する）に委ねる。RMSNorm 判定を先に試し、一致しなければ
     /// softmax 判定を試す（op 列長〈6 vs 8〉が異なるため両方に一致する
@@ -465,7 +465,7 @@ impl BackendOps for CudaBackendOps {
     /// A08「判定の迂回経路を作らない」）。
     ///
     /// RMSNorm 一致時: プランの意味論 `x * rsqrt(sum(x^2))` に厳密一致
-    /// させるため [`crate::rmsnorm::CudaRmsNorm::run_rmsnorm_f32_raw`]
+    /// させるため `crate::rmsnorm::CudaRmsNorm::run_rmsnorm_f32_raw`
     /// （`inv_n` を明示できる内部エントリ）を `inv_n = 1.0`・`eps = 0.0`・
     /// `w = None`（`has_weight = 0`）で直接呼ぶ（`mean` 化・`eps` 加算・
     /// `weight` 乗算を勝手に補わない。標準 RMSNorm 用の公開 API
@@ -477,7 +477,7 @@ impl BackendOps for CudaBackendOps {
     /// 扱う。
     ///
     /// softmax 一致時: プランの意味論 `exp(x - max(x)) / sum(...)` に
-    /// 厳密一致させるため [`crate::softmax::CudaSoftmax::run_softmax_f32_raw`]
+    /// 厳密一致させるため `crate::softmax::CudaSoftmax::run_softmax_f32_raw`
     /// を `scale = log2(e)` で直接呼ぶ（プランの `Exp` は自然指数だが
     /// カーネルは `exp2(x*log2(e))` を計算する恒等式を用いる。数値的な
     /// 一致判定は per-op 経路と丸めが異なるため REQ-2 複合判定に依る。

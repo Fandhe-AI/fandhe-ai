@@ -473,7 +473,7 @@ pub struct VerifyChainSummary {
     /// フィールド）。
     pub last_seq: Option<u64>,
     /// 最終レコードの `hash`（16 進文字列）。レコードが 1 件もない場合は
-    /// チェーン起点ハッシュ（[`genesis_hash`]）のままとなる。
+    /// チェーン起点ハッシュ（`genesis_hash`）のままとなる。
     pub last_hash: String,
 }
 

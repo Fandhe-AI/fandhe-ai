@@ -300,7 +300,7 @@ fn kernel_block(
 }
 
 /// キャッシュブロッキング（MC/KC/NC）を適用した単一スレッド GEMM。
-/// `gemm_parallel` はこの関数の内部ロジック（[`gemm_blocked_region`]）を
+/// `gemm_parallel` はこの関数の内部ロジック（`gemm_blocked_region`）を
 /// 行パネルごとに並列呼び出しすることで並列化する。
 pub fn gemm_blocked(
     a: &[f32],

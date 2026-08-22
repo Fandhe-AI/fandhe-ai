@@ -218,6 +218,21 @@ else
 	@echo "skip: Cargo.toml 未追加のため check-cross-cpu-tests をスキップ"
 endif
 
+# rustdoc 警告ゲート（イシュー #883）。ci.yml の build ジョブに追加した 2 step
+# （Linux ホスト分・aarch64-apple-darwin クロス分）とローカルで同一コマンドを共用し、
+# 再現手順を一本化する。cfg（aarch64 NEON vs x86 AVX・macOS 限定モジュール）により
+# 警告集合がターゲットごとに異なるため両方をゲートする
+# （docs/crates-io-publishing-order.md「公開前検証手順と実測記録」参照）。
+.PHONY: doc-warnings
+doc-warnings: ## cargo doc -D warnings を Linux ホスト分・aarch64-apple-darwin クロス分の両方で検証する
+ifdef HAS_CARGO
+	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
+	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+	RUSTDOCFLAGS="-D warnings" cargo doc -p fandhe-ai-backend-metal -p fandhe-ai-backend-cpu --no-deps --locked --target aarch64-apple-darwin
+else
+	@echo "skip: Cargo.toml 未追加のため doc-warnings をスキップ"
+endif
+
 .PHONY: deny
 deny: ## cargo deny check advisories bans licenses sources（依存監査。cargo-deny 未導入なら自動導入。#353 で advisories / bans 追加）
 ifneq ($(and $(HAS_CARGO),$(HAS_DENY)),)
@@ -376,7 +391,7 @@ else
 endif
 
 .PHONY: ci
-ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
+ci: fmt-check lint build-cross build-no-cuda check-cross-metal-tests check-cross-cpu-tests doc-warnings test deny deps-forbidden runner-policy guardrail-regression verification-gates ## CI（ci.yml）と同一チェックを一括実行する
 
 # --------------------------------------------------
 # Docker（環境非依存の開発。CPU バックエンドのみ。詳細は README 参照）

@@ -46,7 +46,7 @@ pub(crate) enum RmsNormRoute {
 
 /// `rows`／`hidden` の対を 1 引数へまとめる（`clippy::too_many_arguments`
 /// 対策。[`CudaRmsNorm::run_rmsnorm_bwd_f32`]（`pub`）の引数に使うため
-/// `pub` とする。内部専用の [`CudaRmsNorm::run_rmsnorm_f32_inner`] も同じ
+/// `pub` とする。内部専用の `CudaRmsNorm::run_rmsnorm_f32_inner` も同じ
 /// 2 値を使い回すため共有する）。
 #[derive(Debug, Clone, Copy)]
 pub struct RmsNormShape {
@@ -603,11 +603,11 @@ impl CudaRmsNorm {
     /// 標準 RMSNorm（mean 正規化あり）: `out = x * rsqrt(mean(x^2, axis=-1)
     /// + eps) * w`（`w` が `None` の場合は乗算をスキップ）を実行する。
     ///
-    /// `inv_n = 1/hidden` を内部で導出し [`Self::run_rmsnorm_f32_raw`]
+    /// `inv_n = 1/hidden` を内部で導出し `Self::run_rmsnorm_f32_raw`
     /// （`hidden == 0` の早期 return より後に呼ぶため `1/hidden` のゼロ
     /// 除算は起きない）へ委譲する。`ops.rs::CudaBackendOps::run_fused` は
     /// canonical プランの意味論（mean 化しない・`x * rsqrt(sum(x^2))`）に
-    /// 厳密一致させるため本メソッドを経由せず [`Self::run_rmsnorm_f32_raw`]
+    /// 厳密一致させるため本メソッドを経由せず `Self::run_rmsnorm_f32_raw`
     /// を `inv_n = 1.0` で直接呼ぶ（`ops.rs` ドキュメンテーションコメント
     /// 参照）。
     pub fn run_rmsnorm_f32(
@@ -658,7 +658,7 @@ impl CudaRmsNorm {
     /// 学習用エントリ（イシュー #596）: 順伝播 `out` に加え、逆伝播が
     /// 再計算に必要とする行あたりスカラー `rstd`（`len == rows`）を
     /// 併せて返す。`ops.rs::run_fused` 経由の推論専用プランは
-    /// [`Self::run_rmsnorm_f32_raw`]（`save_rstd = 0`・スカラーすら
+    /// `Self::run_rmsnorm_f32_raw`（`save_rstd = 0`・スカラーすら
     /// 書かない）を使い続けるため、本メソッドは学習ループ（autodiff の
     /// `Var::rmsnorm` 相当。#596 スコープでは backend-cuda 単体 API として
     /// 提供する）の呼び出し元にのみ関わる。

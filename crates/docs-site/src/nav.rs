@@ -3,7 +3,7 @@
 //!
 //! # 呼び出し文脈
 //!
-//! `main.rs`（CLI）から [`build::build_site`]（`crate::build`）経由で呼ばれ、
+//! `main.rs`（CLI）から `build::build_site`（`crate::build`）経由で呼ばれ、
 //! [`parse_nav`] → [`validate_sources`] の順に適用される。得られた [`Nav`] は
 //! 兄弟イシュー #870 の Markdown→HTML 変換・layout モジュールが読み取る入力になる
 //! （本イシュー #869 では HTML 生成を行わない。実装計画 §1 参照）。
@@ -538,7 +538,7 @@ pub fn parse_nav(input: &str) -> Result<Nav, NavError> {
 /// codex-review P0 指摘（PR #890）: `repo_root.join(&page.source).is_file()`
 /// のみの検証は、パス中の中間コンポーネントがシンボリックリンクで
 /// `repo_root` 外（例: `/etc/passwd`）を指す場合でも、解決結果が通常ファイル
-/// であれば成功してしまう。[`validate_source_shape`] の構文検査（`..` 禁止等）は
+/// であれば成功してしまう。`validate_source_shape` の構文検査（`..` 禁止等）は
 /// リンク先までは追跡できないため、ここで実ファイルシステム上の解決結果を
 /// `canonicalize` し、`repo_root` の正規化パス配下であることを `starts_with`
 /// で fail-closed に確認する（シンボリックリンク経由の脱出を拒否する回帰

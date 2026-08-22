@@ -221,7 +221,7 @@ impl Drop for RunSandbox {
 /// 作業ツリーへ反映する。
 ///
 /// # 決定的な差分生成
-/// [`crate::verify_direct_composite::RepairCompositeGate::verify`]（→
+/// `crate::verify_direct_composite::RepairCompositeGate::verify`（→
 /// [`crate::diff_signals::measure_diff_signals`]）は検証のたび sandbox 内で
 /// `git add -A` を実行するため、ループ終了時点の sandbox の index は「最後の
 /// 試行がどのゲートで止まったか」に応じて staged 状態・未 staged 状態のいずれ

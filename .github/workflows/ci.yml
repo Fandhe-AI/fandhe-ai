@@ -367,6 +367,32 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo check -p fandhe-ai-backend-cpu --tests --target aarch64-apple-darwin
 
+      # rustdoc 警告ゲート（イシュー #883）。crates.io 公開クレートの docs.rs
+      # ビルド成立性（受け入れ条件 b）を CI で常時検査する。cfg（aarch64 NEON vs
+      # x86 AVX・macOS 限定モジュール）により警告集合がターゲットごとに異なる
+      # ため、Linux ホスト分・aarch64-apple-darwin クロス分の両方をゲートする
+      # （docs/crates-io-publishing-order.md「公開前検証手順と実測記録」参照）。
+      # `--no-deps` は依存クレート自体の doc 生成をスキップするがメタデータ
+      # ビルドは要るため、上の cargo build/check 群と同じくリンクなしで成立する。
+      - name: cargo doc（rustdoc 警告ゲート・Linux ホスト）
+        if: steps.detect.outputs.has_cargo == 'true'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+
+      # macOS ターゲット分は `--workspace` にしない: guardrail の `[[bin]]`
+      # がリンクを要求すると macOS クロスリンカ非搭載の Linux runner 上で
+      # 失敗しうる（上の「cargo build（macOS ターゲット・Metal 有効・lib
+      # のみ）」step が `--lib` に限定している理由と同じ懸念）。cfg 分岐で
+      # 警告集合が実際に変わるのは aarch64 NEON／macOS 限定モジュールを持つ
+      # backend-cpu・backend-metal の 2 クレートのみ（他クレートの警告は
+      # target 非依存）のため、この 2 クレートに限定してゲートする。
+      - name: cargo doc（rustdoc 警告ゲート・macOS ターゲット）
+        if: steps.detect.outputs.has_cargo == 'true'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc -p fandhe-ai-backend-metal -p fandhe-ai-backend-cpu --no-deps --locked --target aarch64-apple-darwin
+
   # --------------------------------------------------
   # CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・イシュー #35／
   # TASK-2.3・イシュー #56）。

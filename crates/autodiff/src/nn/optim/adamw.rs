@@ -52,7 +52,7 @@ struct SlotState {
 
 /// AdamW optimizer 本体。ハイパーパラメータ（[`AdamWConfig`]）と、
 /// step 数・bias correction 用の `beta^t` 逐次積・スロットごとの
-/// モーメント推定値（[`SlotState`]）を保持する。
+/// モーメント推定値（`SlotState`）を保持する。
 pub struct AdamW {
     config: AdamWConfig,
     step_count: u64,

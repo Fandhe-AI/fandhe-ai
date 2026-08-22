@@ -184,7 +184,7 @@ impl BackendOps for MetalBackendOps {
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル
     /// （[`crate::gemm::MetalGemm::run_tiled_bias_act_f32`]）へ差し替える
-    /// （イシュー #605）。CPU／CUDA 実装と同型の分岐（[`gemm_bias_act_route`]
+    /// （イシュー #605）。CPU／CUDA 実装と同型の分岐（`gemm_bias_act_route`
     /// 参照）を採り、`bias` が `None` またはブロードキャストの厳密一致
     /// 形状 `[n]` の場合にのみ融合カーネルを使う。それ以外（`[1]`・
     /// `[1, n]` 等）はデフォルト実装と同じ 3 段合成（`self.gemm` →
@@ -332,9 +332,9 @@ impl BackendOps for MetalBackendOps {
     /// ルーティングする（イシュー #604）。CUDA 側 `CudaBackendOps::run_fused`
     /// （#592）の fail-closed 検証列をそのまま踏襲する:
     ///
-    /// 1. [`row_kernel::match_rmsnorm_plan`]（6 op 列・leaf 1 個・
+    /// 1. `row_kernel::match_rmsnorm_plan`（6 op 列・leaf 1 個・
     ///    `axis: None` のみ受理）→ 一致時 [`MetalRmsNorm`] へ
-    /// 2. [`row_kernel::match_softmax_plan`]（8 op 列・leaf 1 個・`axis` が
+    /// 2. `row_kernel::match_softmax_plan`（8 op 列・leaf 1 個・`axis` が
     ///    最終次元または `None` のみ受理）→ 一致時 [`MetalSoftmax`] へ
     /// 3. どちらにも一致しないプランは `Unsupported` を返し per-op
     ///    フォールバックへ委ねる（allowlist 拒否・迂回経路を作らない。

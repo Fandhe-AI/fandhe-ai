@@ -8,7 +8,7 @@
 //!
 //! `ops.rs::MetalBackendOps::run_fused` から canonical softmax プラン
 //! （`exp(x - max(x)) / sum(exp(x - max(x)))`）検出時に呼ばれる
-//! （[`crate::row_kernel::match_softmax_plan`] 参照）。
+//! （`crate::row_kernel::match_softmax_plan` 参照）。
 //!
 //! **CUDA との parity 状況（重要）**: CUDA 側の online softmax（#594・
 //! G-7）は本イシュー時点で OPEN（未実装）のため、CUDA 直接の parity

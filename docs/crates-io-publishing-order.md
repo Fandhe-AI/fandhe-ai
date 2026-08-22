@@ -205,6 +205,154 @@ crates.io への公開が拒否される（`publish = false` は登録禁止指�
 解消を含む）は別イシュー #883 のスコープであり、本ドキュメント・本 PR は
 実行しない。
 
+## 8. 公開前検証手順と実測記録（#883）
+
+イシュー #883「`cargo publish --dry-run` / `cargo package` 検証と rustdoc
+警告解消」の実測記録。`cargo` バージョンは 1.96.0（2026-08-22 実測）。
+
+### 8.1 多パッケージ dry-run（正式手順）
+
+cargo 1.90 で安定化した workspace publish 機構により、公開 6 クレートを
+1 コマンドで検証できる（3 節のトポロジカル順を内部で解決するため
+`-p` の列挙順に依存しない）。
+
+```sh
+cargo publish --dry-run \
+  -p fandhe-ai-tensor-core \
+  -p fandhe-ai-autodiff \
+  -p fandhe-ai-backend-cpu \
+  -p fandhe-ai-backend-cuda \
+  -p fandhe-ai-backend-metal \
+  -p fandhe-ai
+```
+
+2026-08-22 実測（クリーンな worktree・登録済みトークン不要。`--dry-run` は
+crates.io index の参照のみでアップロードは行わない）: 6 件すべてが
+Packaging → Verifying（依存クレートを一時レジストリで解決してビルド
+検証）→ `warning: aborting upload due to dry run` まで到達し成功した。
+
+### 8.2 単一クレートの dry-run（想定内の失敗。参考情報）
+
+依存順の単一クレート実行は、`fandhe-ai-tensor-core`（依存連鎖の起点。
+外部依存 `half` のみ）のみ単独で成功し、後続クレートは実依存先
+（`fandhe-ai-tensor-core` 等）が crates.io に未公開である限り失敗する。
+これは 8.1 の多パッケージ dry-run が一時レジストリで内部依存を解決する
+のに対し、単一クレート dry-run は本物の crates.io index のみを参照する
+ためであり、想定内の挙動である（受け入れ条件 a の「未公開依存起因の
+失敗は想定内」に対応）。
+
+```sh
+$ cargo publish --dry-run -p fandhe-ai-autodiff
+...
+error: failed to prepare local package for uploading
+
+Caused by:
+  no matching package named `fandhe-ai-tensor-core` found
+  location searched: crates.io index
+  required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
+```
+
+`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`・
+`fandhe-ai` も同様に `fandhe-ai-tensor-core`（および `fandhe-ai-autodiff` 等）
+未公開のため同型のエラーで失敗することを確認した。実際の公開時は 3 節の
+順序に従い ①→②→③ の順で 1 クレートずつ実行すれば、この失敗は publish 済み
+クレートから解消されていく。
+
+### 8.3 パッケージ内容の検証
+
+`cargo package --list -p <クレート>` を公開 6 クレート全件（`fandhe-ai-tensor-core`・
+`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
+`fandhe-ai-backend-metal`・`fandhe-ai`）で個別に実行し、いずれも README.md・
+`LICENSE-APACHE`・`LICENSE-MIT`・`src/`・`tests/`（`facade` は `examples/` も）の
+同梱を確認した（README.md の同梱は 8.1 の 6 クレート dry-run 成功自体が
+間接的に裏付ける。`README.md` 欠落は `cargo package` を fail させるが、
+`LICENSE-*` 欠落は fail させず warning にもならないため、この 6 クレート
+個別実行が LICENSE 同梱を確認する唯一の手段である）。LICENSE ファイルは
+ルート直下の `LICENSE-APACHE`・
+`LICENSE-MIT`（Apache-2.0 / MIT デュアルライセンス全文）を各公開クレート
+ディレクトリへコピーする方式で同梱した（`license = "MIT OR Apache-2.0"`
+のみではクレートディレクトリ外のルート LICENSE ファイルは自動同梱され
+ないため。symlink ではなくコピーにしたのは Windows checkout・`cargo
+package` での確実な同梱のため）。6 クレートいずれも `include`/`exclude`
+キーを持たないため、追加後の同梱漏れリスクはない（実測確認済み）。
+
+`[dev-dependencies]` の strip は 2 節で確認済みの方式が引き続き機能して
+おり、`cargo package` が生成する正規化済み `Cargo.toml`（`.crate` 展開）
+でも空セクションとして出力されることを本イシューの多パッケージ dry-run
+実行時にも再確認した。
+
+**`manifest has no documentation, homepage or repository` 警告について**:
+本イシューの実測時点（2026-08-22）で並行 issue #880「publish メタデータ
+整備と publish フラグの per-crate 制御」は未マージ（open）であり、6 クレート
+すべてでこの警告が引き続き出力される。#880 のスコープ（`repository`・
+`documentation`・`keywords`・`categories`・`description` の整備）であり
+本 PR では対応しない（実装計画のスコープ境界節参照）。#880 マージ後は
+この警告は解消される想定であり、`cargo publish --dry-run` の成否
+（Packaging → Verifying → dry-run 中断）には影響しない warning 止まりの
+項目である。
+
+### 8.4 docs.rs でのビルド成立性
+
+docs.rs 既定ビルド相当の `cargo doc --no-deps --target
+x86_64-unknown-linux-gnu` は全 11 クレート（非公開クレートを含む）で
+ビルド成立を確認した（`cudarc` は動的ロード方式のため CUDA toolkit 非搭載
+でもビルドでき、`objc2` 系は `cfg(target_os = "macos")` により当該
+ターゲットでは自然に除外される）。
+
+`backend-metal` は主要 API（`gemm`・`buffer`・`error` 等）のほぼ全体が
+`cfg(target_os = "macos")` 限定のため、docs.rs の既定ターゲット
+（`x86_64-unknown-linux-gnu`）上ではほぼ空のドキュメントページになる。
+`Cargo.toml` へ `[package.metadata.docs.rs] default-target =
+"aarch64-apple-darwin"` を追加すれば docs.rs 上で macOS 限定 API を
+表示できる可能性があるが、2026-08-22 時点で docs.rs が
+`aarch64-apple-darwin` を実際にサポートするターゲットとして公式に
+明記しているかを本イシューの範囲内では確証できなかった（誤った
+`default-target` 指定は docs.rs 側のビルド失敗を招き、現状の
+「ほぼ空ページ」より悪化しうる）。fail-closed の判断としてこの
+`Cargo.toml` 変更は見送り、`docs.rs` 側のサポート対象ターゲット一覧を
+実機（docs.rs のドキュメント）で確認したうえで別イシューとして対応する
+（out-of-scope 追跡対象。ユーザー承認事項）。
+
+### 8.5 rustdoc 警告の解消
+
+`cargo doc --workspace --no-deps` の rustdoc 警告（cfg による差異のため
+ホスト〈aarch64-apple-darwin〉・`--target x86_64-unknown-linux-gnu` の両方で
+実測。2026-08-22 時点でホスト 279 件・Linux ターゲット 303 件）はすべて
+解消した。大半（343 箇所）は `-->` 付きの位置情報を持つため
+`file:line:col` の和集合で機械抽出できたが、`facade`・`self-repair` の
+モジュール doc（`//!`）内の 8 件は rustdoc が `note: the link appears in
+this line` 形式（`-->` 行なし）で報告したため機械抽出の対象外となり、
+`grep` によるテキスト検索で個別に特定し手動修正した（延べ 351 箇所）。
+修正方針は 3 種:
+
+1. private item へのリンク・cfg で消えるアイテムへの unresolved link
+   （大半）: `` [`foo`] `` → `` `foo` ``（表示テキストは不変のままコード
+   スパン化。情報量を落とさない）
+2. `fn@`/`mod@` ディスアンビゲータで解決した 3 件（同名の関数とモジュール
+   の曖昧参照）
+3. bare URL 1 件を `<...>` でエスケープ
+
+`#[allow(rustdoc::...)]` や `--document-private-items` での抑制、リンク先の
+public 化は行っていない（`.claude/rules/coding-rust.md`・実装計画のスコープ
+境界節）。検証コマンド（CI と同一）:
+
+```sh
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --target x86_64-unknown-linux-gnu
+```
+
+いずれも 2026-08-22 実測で exit 0（警告 0 件）。`.github/workflows/ci.yml`
+の `build` ジョブへ同等のゲート step を追加した: Linux ホスト分は
+`--workspace`、`aarch64-apple-darwin` クロス分は `-p fandhe-ai-backend-metal
+-p fandhe-ai-backend-cpu`（cfg 分岐で警告集合が実際に変わる 2 クレート）に
+限定する。既存の「cargo build（macOS ターゲット・Metal 有効・lib のみ）」
+step が `--workspace` にせず `--lib` 限定にしている理由（guardrail の
+`[[bin]]` が macOS クロスリンカ非搭載の Linux runner 上でリンクを要求し
+うる懸念）と同じ判断であり、`cargo doc --no-deps` はリンクを行わないため
+理論上は安全と考えられるが、既存の縮小方針に倣い実際に警告差分が出る
+2 クレートへ限定することで不要なリスクを避けた。`make doc-warnings` で
+ローカル再現できるようにした（ci.yml と同一コマンドを共用）。
+
 ## 変更履歴
 
 - 2026-08-22（#881）: 本ドキュメント新規作成。PR #891（#880 系）で先行実施
@@ -221,3 +369,14 @@ crates.io への公開が拒否される（`publish = false` は登録禁止指�
   どおりに `cargo publish` しても公開禁止で失敗する矛盾を修正した。公開
   6 クレートの `Cargo.toml` へ `publish = true` を明示する変更を反映し、
   7 節として本方針を追記した。
+- 2026-08-22（#883）: `cargo publish --dry-run`／`cargo package` の実行検証・
+  rustdoc 警告解消（`cargo doc --workspace --no-deps` の全 351 箇所解消。
+  機械抽出できた 343 箇所＋モジュール doc 内の位置情報なし警告 8 箇所）・
+  LICENSE ファイルの per-crate 同梱・docs.rs ビルド成立性確認の結果を
+  8 節として追記した。backend-metal の `[package.metadata.docs.rs]` 追加は
+  docs.rs のターゲットサポート未確証のため見送り、別途確認する
+  out-of-scope 事項とした。ci.yml の macOS ターゲット分 rustdoc ゲート step
+  は既存の「cargo build（macOS ターゲット）」step と同じ理由（guardrail の
+  `[[bin]]` によるクロスリンク失敗の懸念）で `--workspace` にせず、cfg 分岐で
+  警告集合が実際に変わる `fandhe-ai-backend-metal`・`fandhe-ai-backend-cpu`
+  の 2 クレートに限定した。

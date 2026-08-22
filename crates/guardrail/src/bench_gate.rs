@@ -93,7 +93,7 @@ impl From<bench_harness::BenchError> for BenchGateError {
 ///
 /// `--signals` 経由（CLI 仕様書 1.2 節）で外部 JSON からデシリアライズされうるため、
 /// `bench_harness::report::BenchReport` と同じ設計（検証を経ない値へアクセスできる公開
-/// 経路を設けない）を踏襲する。[`Self::from_measurements_pct`]・[`Self::validated`] の
+/// 経路を設けない）を踏襲する。[`Self::from_measurements_pct`]・`Self::validated` の
 /// いずれの構築経路でも [`Self::validate`] を通す。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BenchSignal {

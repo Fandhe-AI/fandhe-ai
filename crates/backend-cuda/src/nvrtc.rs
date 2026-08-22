@@ -805,7 +805,7 @@ impl CudaKernelCacheKey {
 }
 
 /// 手動 `Debug` 実装（C-5・#514・codex-review P1 是正）。`derive(Debug)`
-/// のままだと [`CudaKernelCacheKey::source`]（数十 KB になりうる展開済み
+/// のままだと `CudaKernelCacheKey::source`（数十 KB になりうる展開済み
 /// カーネルソース全文）がそのままログ・パニックメッセージへ出力されて
 /// しまう（情報露出。`.claude/rules/security.md` セキュリティ考慮）。
 ///
@@ -815,10 +815,10 @@ impl CudaKernelCacheKey {
 /// 防止する」（`source` フィールドのドキュメンテーションコメント参照）
 /// という設計方針に反する部分的漏出だった。本実装は `source` の内容を
 /// 一切表示せず、長さと非可逆な変更検知用フィンガープリント
-/// （[`fnv1a_64`]。[`Self::stable_hash`] と同一アルゴリズム）のみを出力
+/// （`fnv1a_64`。`Self::stable_hash` と同一アルゴリズム）のみを出力
 /// する。`fnv1a_64` は非暗号ハッシュのため、このフィンガープリントは
 /// 「同一ソースかどうかの変更検知」用途に限られ、改竄検知・完全性保証
-/// （OWASP A08）の根拠にはしない（[`fnv1a_64`] のドキュメンテーション
+/// （OWASP A08）の根拠にはしない（`fnv1a_64` のドキュメンテーション
 /// コメント参照）。他フィールドは derive 相当の表示を保つ。
 impl std::fmt::Debug for CudaKernelCacheKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

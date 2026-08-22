@@ -600,7 +600,7 @@ impl CudaGemm {
     /// の解決失敗や compute capability 8.0 未満といった、naive/tiled より
     /// 広い環境で失敗しうるため、失敗しても `new` 全体を `Err` にせず
     /// `wmma_tf32` を `None`・detail を `wmma_tf32_error` に保持する
-    /// （[`Self::wmma_tf32`] フィールドのドキュメンテーションコメント
+    /// （`Self::wmma_tf32` フィールドのドキュメンテーションコメント
     /// 参照）。これにより NVRTC が `<mma.h>` を解決できない・compute
     /// capability 8.0 未満の環境でも naive/tiled 4 カーネルは引き続き
     /// 使用可能なままになる。f16 WMMA 経路（`gemm_wmma.rs::CudaWmmaGemm::new`。
@@ -1000,8 +1000,8 @@ impl CudaGemm {
 
     /// naive f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     ///
-    /// ホスト側形状検証（[`validate_gemm_dims`]）を先行させた後、
-    /// 16x16 ブロック・`div_ceil` グリッドで [`Self::run_f32_kernel`] を呼ぶ
+    /// ホスト側形状検証（`validate_gemm_dims`）を先行させた後、
+    /// 16x16 ブロック・`div_ceil` グリッドで `Self::run_f32_kernel` を呼ぶ
     /// （PoC-v2-3 `run_f32` を踏襲。計測用 `Duration` は返さない。
     /// モジュールコメント「PoC からの変更点」参照）。
     pub fn run_naive_f32(
@@ -1032,11 +1032,11 @@ impl CudaGemm {
 
     /// tiled f32 GEMM を実行する。C = A @ B（`m x k` @ `k x n`）。
     ///
-    /// ホスト側形状検証は naive 版と同じ [`validate_gemm_dims`] に加え、
+    /// ホスト側形状検証は naive 版と同じ `validate_gemm_dims` に加え、
     /// tiled カーネル固有のタイルインデックス算術を保護する
-    /// [`validate_tiled_k_bound`] を経由する（モジュールコメント
+    /// `validate_tiled_k_bound` を経由する（モジュールコメント
     /// 「PoC からの変更点」3 参照）。ブロック次元は
-    /// [`TILED_BLOCK_DIM`]（`kernels::TILE` x `kernels::TILE`）で固定する。
+    /// `TILED_BLOCK_DIM`（`kernels::TILE` x `kernels::TILE`）で固定する。
     pub fn run_tiled_f32(
         &self,
         a: &[f32],
@@ -1075,13 +1075,13 @@ impl CudaGemm {
     /// `max(v, 0)` を追加適用する。
     ///
     /// ホスト側形状検証は [`Self::run_tiled_f32`] と同一
-    /// （[`validate_gemm_dims`]・[`validate_tiled_k_bound`]）に加え、
+    /// （`validate_gemm_dims`・`validate_tiled_k_bound`）に加え、
     /// カーネル本体へ触れる前に `bias` の長さが `n` と一致することを検証
     /// する（CPU 参照実装 `gemm_blis_bias_act_parallel` の
     /// `GemmError::BiasLenMismatch` と同じ「カーネル本体アクセス前に検証」
     /// の順序契約。REQ-8・OWASP A03）。
     ///
-    /// **`m == 0 || n == 0`**: [`Self::run_f32_kernel`] と同じ理由（no-op
+    /// **`m == 0 || n == 0`**: `Self::run_f32_kernel` と同じ理由（no-op
     /// 形状）で空の結果を返す。**`k == 0`**: `run_f32_kernel`／
     /// `run_tiled_f32` は「K 方向の累積対象が存在しない = C は全 0」という
     /// GEMM の数学的定義どおり無条件で全 0 を返すが、CPU 参照実装
@@ -1092,7 +1092,7 @@ impl CudaGemm {
     /// CUDA driver が拒否しうる問題〈`run_f32_kernel` の該当コメント参照〉
     /// も同時に回避する）。
     ///
-    /// [`gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`](BIAS_ACT_FUSED_LAUNCH_COUNT)
+    /// `gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`
     /// は実際に GPU カーネルが起動した場合（`m/n > 0` かつ `k > 0`）にのみ
     /// 増加する（上記フィールドのドキュメンテーションコメント参照）。
     #[allow(clippy::too_many_arguments)]
@@ -1192,33 +1192,33 @@ impl CudaGemm {
     /// `k x n`）、入出力は f32（内部で TF32 に丸めて Tensor Core へ投入する。
     /// `kernels::WMMA_TF32_F32` 参照）。
     ///
-    /// ホスト側形状検証は naive/tiled 版と同じ [`validate_gemm_dims`] に加え、
+    /// ホスト側形状検証は naive/tiled 版と同じ `validate_gemm_dims` に加え、
     /// WMMA カーネル固有のタイルインデックス算術を保護する
-    /// [`validate_wmma_tf32_k_bound`] を経由する（`validate_tiled_k_bound`
+    /// `validate_wmma_tf32_k_bound` を経由する（`validate_tiled_k_bound`
     /// と同じ考え方だが `kernels::WMMA_TF32_K_TILE`（8）基準で独立して検証する）。
     /// TASK-11.1c（#62）・REQ-11。
     ///
     /// `CudaGemm::new` 時点で WMMA(TF32) カーネルのコンパイル・ロードが
-    /// 失敗していた場合（[`Self::wmma_tf32`] フィールド参照）は
+    /// 失敗していた場合（`Self::wmma_tf32` フィールド参照）は
     /// `CudaError::WmmaUnavailable` を返す。この場合でも naive/tiled 版の
     /// `run_naive_*`／`run_tiled_*` は道連れにならず引き続き使用できる
     /// （レビュー指摘 #62）。
     ///
     /// **TASK-11.1d（#63）フォールバック方針**: 共有メモリ・タイル最適化版
-    /// （[`Self::wmma_tf32_opt`]）が `new` 時点でコンパイル・ロードに成功
+    /// （`Self::wmma_tf32_opt`）が `new` 時点でコンパイル・ロードに成功
     /// していれば、そちらを優先的に使用する（#63 の受け入れ条件「tiled
     /// 実装を上回る実測」を満たす経路）。opt 版が `None`（コンパイル失敗
-    /// または未対応環境）の場合は基本版（[`Self::wmma_tf32`]）へ自動
+    /// または未対応環境）の場合は基本版（`Self::wmma_tf32`）へ自動
     /// フォールバックし、公開シグネチャ・呼び出し側の挙動は変えない
     /// （REQ-11 は明示切替 API を提供しない方針。`kernels_wmma_opt.rs`
     /// 冒頭ドキュメントコメント「公開 API への影響」参照）。
-    /// 共有メモリ・タイル最適化版 WMMA(TF32) カーネル（[`Self::wmma_tf32_opt`]）
+    /// 共有メモリ・タイル最適化版 WMMA(TF32) カーネル（`Self::wmma_tf32_opt`）
     /// が `new` 時点でコンパイル・ロードに成功しているかを返す（TASK-11.1d・
     /// #63。PR #256 レビュー指摘: chatgpt-codex-connector「Require the
     /// optimized kernel in the optimized benchmark」対応）。
     ///
     /// `run_wmma_tf32` は opt カーネルが `None` の場合に基本版
-    /// （[`Self::wmma_tf32`]）へ自動フォールバックする（公開 API の挙動は
+    /// （`Self::wmma_tf32`）へ自動フォールバックする（公開 API の挙動は
     /// 変えない設計判断。上記ドキュメンテーションコメント参照）ため、
     /// `run_wmma_tf32` の戻り値の成否だけでは opt カーネルが実際に実行
     /// されたかを判定できない。opt カーネル固有の性能・タイル境界を検証
@@ -1230,7 +1230,7 @@ impl CudaGemm {
     }
 
     /// [`Self::wmma_tf32_opt_available`] が `false` の場合の失敗理由
-    /// （[`Self::wmma_tf32_opt_error`] の公開読み取り口）。opt カーネルが
+    /// （`Self::wmma_tf32_opt_error` の公開読み取り口）。opt カーネルが
     /// 利用可能な場合は `None` を返す。テストが「opt カーネルが使用不能
     /// だった具体的な理由」をパニックメッセージへ含められるようにする。
     pub fn wmma_tf32_opt_unavailable_reason(&self) -> Option<&str> {
@@ -1289,7 +1289,7 @@ impl CudaGemm {
         self.wmma_tf32_staged_available() && wmma_tf32_staged_alignment_ok(n, k)
     }
 
-    /// イシュー #856。[`Self::wmma_tf32_staged_swizzle`] に適用された
+    /// イシュー #856。`Self::wmma_tf32_staged_swizzle` に適用された
     /// グルーピング幅（`gemm_mma.rs::CudaMmaGemm::swizzle_group_width` と
     /// 同型のアクセサ）。`examples/cuda_floor_bench.rs` の起動時診断が
     /// 現在選択されている値を可観測にするために呼ぶ。
@@ -1748,7 +1748,7 @@ impl CudaGemm {
     /// PR #349 codex-review 指摘 P0（`launch_*` 系は `pub fn` でありながら
     /// `CudaSlice` 長・`m/n/k` の整合・`i32` 変換上限・tiled 固有の `k` 上限
     /// を検証せずに `unsafe` launch へ渡していた）を受け、`run_tiled_f32`
-    /// と同じ検証（[`validate_gemm_dims`]・[`validate_tiled_k_bound`]）に
+    /// と同じ検証（`validate_gemm_dims`・`validate_tiled_k_bound`）に
     /// 加え、デバイスバッファ長（`a_dev`/`b_dev`/`c_dev`）が `m/n/k` と
     /// 1:1 対応することを起動前に検証する（safe な公開 API である以上、
     /// 呼び出し元の契約違反〈短い A/B/C と大きな次元の組み合わせ〉から
@@ -1797,8 +1797,8 @@ impl CudaGemm {
     /// 確認している前提だが（`cuda_floor_bench.rs::measure_wmma_tf32`
     /// 参照）、本関数自体は safe な公開 API のため、選択される経路
     /// （staged／opt／基本）ごとに必要な `k` 境界検証
-    /// （[`validate_wmma_tf32_staged_k_bound`]／
-    /// [`validate_wmma_tf32_opt_k_bound`]／[`validate_wmma_tf32_k_bound`]）
+    /// （`validate_wmma_tf32_staged_k_bound`／
+    /// `validate_wmma_tf32_opt_k_bound`／`validate_wmma_tf32_k_bound`）
     /// とデバイスバッファ長検証を呼び出し元の事前検証に依存せず自前で行う
     /// （PR #349 codex-review 指摘 P0。[`Self::launch_tiled_f32`] の
     /// ドキュメンテーションコメント参照）。

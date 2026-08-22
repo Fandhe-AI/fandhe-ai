@@ -117,7 +117,7 @@ impl Verdict {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reason {
     /// build/test/clippy のいずれかが `Failed`。`gate` は `"build"`/`"test"`/
-    /// `"clippy"` のいずれか（[`GateSignals::failed_names`] が列挙する名前）。
+    /// `"clippy"` のいずれか（`GateSignals::failed_names` が列挙する名前）。
     GateFailed { gate: &'static str },
     /// 一部のゲートが `Skipped` のまま自動適用の前提条件
     /// （`GateSignals::all_passed`）を満たさない（`Failed` は 1 件もないが

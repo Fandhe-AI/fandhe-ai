@@ -17,7 +17,7 @@
 //! `mean`・軸指定 reduction）を追加した。TASK-1.6d（#24）で `rayon` 並列の粒度・
 //! ブロックサイズ（[`gemm::BlockSizes`]）を実測チューニングし、PoC-v2-1 比の性能改善比
 //! （naive/blocked 比 約 6〜8.5 倍）が本環境でも再現することを確認した
-//! （計測記録: `docs/perf/cpu-gemm-rayon-tuning.md`）。TASK-1.6f（#184）で [`gemm_blis`]
+//! （計測記録: `docs/perf/cpu-gemm-rayon-tuning.md`）。TASK-1.6f（#184）で [`mod@gemm_blis`]
 //! モジュール（BLIS/GotoBLAS2 5-loop model・`std::arch` intrinsics マイクロカーネル・
 //! A/B packing）を追加した。TASK-1.6g（#185）で `gemm_blis`／`gemm_blis_parallel` の
 //! マイクロカーネル選択をコンパイル時 cfg のみから実行時 CPU 機能検出（NEON／AVX2／
@@ -27,7 +27,7 @@
 //! #185 で変更しない）。`BackendOps` トレイトからの結線は TASK-1.9（#43）で行う
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 //!
-//! TASK-1.9a（#44）で [`device`] モジュール（[`device::CpuDeviceProvider`]）を追加した。
+//! TASK-1.9a（#44）で `device` モジュール（[`device::CpuDeviceProvider`]）を追加した。
 //! `fandhe_ai_tensor_core::device::DeviceProvider` の CPU 実装であり、CUDA／Metal 実装
 //! （`backend-cuda::device::CudaDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
 //! と同一 trait で列挙・選択できることを `tests/device_provider_integration.rs` で検証する。
@@ -63,7 +63,7 @@
 //!
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
 //! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
-//! （[`gemm_blis::gemm_blis_parallel`]・[`elementwise`] の `add`/`mul`/`relu`/
+//! （[`gemm_blis::gemm_blis_parallel`]・`elementwise` の `add`/`mul`/`relu`/
 //! `exp`/`tanh`・[`reduction`] の `sum`/`max`）への薄い委譲に徹する。CUDA／
 //! Metal 実装（`backend-cuda::ops::CudaBackendOps`／
 //! `backend-metal::ops::MetalBackendOps`）と同一 trait でカーネルディスパッチ
@@ -83,12 +83,12 @@
 //! （[`fused_elementwise::run_fused_elementwise`]）を追加した。
 //! `fandhe_ai_tensor_core::fusion`（TASK-12.1a〜c・#161〜#163）が検出・生成した
 //! elementwise 連鎖（`fandhe_ai_tensor_core::FusionPlan`）を、per-op カーネル
-//! （[`elementwise`]）の逐次合成ではなく単一パスのレジスタ内評価で実行
+//! （`elementwise`）の逐次合成ではなく単一パスのレジスタ内評価で実行
 //! する CPU 参照実装である（PoC-9 `ElemwiseFuse` 方式。詳細は
 //! `fused_elementwise` モジュール冒頭コメント）。`fandhe_ai_tensor_core::BackendOps::
 //! run_fused`（trait への追加・[`ops::CpuBackendOps`] での override 実装）
 //! への結線は #164 のスコープであり、#163 時点では関数ベースのカーネル
-//! API として独立に提供する（[`gemm`]／[`elementwise`] と同じ「trait
+//! API として独立に提供する（[`gemm`]／`elementwise` と同じ「trait
 //! 定義なし・関数ベース」構成）。数値契約は per-op カーネルと完全に
 //! 揃え、融合の有無で許容誤差・演算定義を変えない（`tests/
 //! fused_elementwise_parity.rs` で融合 vs 非融合の数値一致を検証する。

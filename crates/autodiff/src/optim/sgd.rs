@@ -2,7 +2,7 @@
 //! `optim` モジュール（#193）の第 1 分割。
 //!
 //! `torch.optim.SGD` の更新則（PyTorch ドキュメントの擬似コード。
-//! https://docs.pytorch.org/docs/stable/generated/torch.optim.SGD.html
+//! <https://docs.pytorch.org/docs/stable/generated/torch.optim.SGD.html>
 //! 「Algorithm」節。以下 `g`=grad、`p`=param、`b`=momentum buffer、
 //! `μ`=momentum、`τ`=dampening、`λ`=weight_decay）を厳密に踏襲する:
 //!

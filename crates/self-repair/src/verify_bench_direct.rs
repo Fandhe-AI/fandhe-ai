@@ -26,9 +26,9 @@
 //! 実装計画 §3.1 対案比較）。加えて、候補 diff がベンチワークロードのソース
 //! （`workload_sources`）自体を改変して「軽くして速く見せる」ゲーミングを
 //! [`DirectBenchRunner::measure`] の最初の実質ステップで fail-closed に拒否する
-//! （[`pinned_sources_untouched`]。実装計画 §3.2）。
+//! （`pinned_sources_untouched`。実装計画 §3.2）。
 //!
-//! [`pinned_sources_untouched`] は `workload_sources` に列挙されたベンチ
+//! `pinned_sources_untouched` は `workload_sources` に列挙されたベンチ
 //! ターゲット実体だけでなく、`sandbox_root` 配下の全差分ファイルから
 //! **マニフェスト（`Cargo.toml`／`Cargo.lock`）・ビルドスクリプト（`build.rs`）・
 //! Cargo 設定（`.cargo/config.toml`／`.cargo/config`）に該当するものすべて**を
@@ -108,7 +108,7 @@ pub struct DirectBenchSpec {
     /// ゲーミング防止のためピン留めするワークロードソースファイル
     /// （`sandbox_root` 相対パス。`git diff --name-only` で候補 diff がこれらを
     /// 変更していないか検査する）。マニフェスト・ビルドスクリプト・Cargo 設定は
-    /// ここに列挙せずとも [`pinned_sources_untouched`] が自動でピン留め対象に
+    /// ここに列挙せずとも `pinned_sources_untouched` が自動でピン留め対象に
     /// 含める（モジュール冒頭「ゲーミング防止」参照）。
     pub workload_sources: Vec<String>,
     /// ベンチゲート機構（[`SelfRepairBenchGate::run`]）へ渡す反復回数

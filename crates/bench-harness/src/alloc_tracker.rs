@@ -36,7 +36,7 @@
 //! `BASELINE_BYTES`／`PEAK_BYTES` を上書きし、`gemm_alloc_peak_bytes` が
 //! 過小・過大な値でも「正常」として返ってしまう（PR #370 codex-review
 //! 指摘 P1・alloc_tracker.rs:173 付近）。これを防ぐため、計測区間全体を
-//! [`MEASUREMENT_LOCK`]（`Mutex<()>`）で直列化する [`measure`] を計測の
+//! `MEASUREMENT_LOCK`（`Mutex<()>`）で直列化する [`measure`] を計測の
 //! 唯一の入口とし、`reset_peak`／`peak_since_reset_bytes` は本モジュール
 //! 内部専用（非 `pub`）に格下げする。呼び出し側（`peak_memory::run_cpu_trial`
 //! 等）は `measure` の返す `(戻り値, Option<u64>)` のみを扱う。
@@ -44,7 +44,7 @@
 //! ## テストでの計測検証（プロセス分離。イシュー #161 PR #357 codex-review
 //! 再指摘 P1 対応）
 //!
-//! [`measure`] 自身の直列化（[`MEASUREMENT_LOCK`]）は「他の `measure`
+//! [`measure`] 自身の直列化（`MEASUREMENT_LOCK`）は「他の `measure`
 //! 呼び出し」同士の重なりだけを防ぐものであり、`TrackingAllocator` を
 //! `#[global_allocator]` として共有する**同一テストバイナリ内の他
 //! `#[test]` 関数**からの干渉は防げない。過去（イシュー #161 PR #357
@@ -98,7 +98,7 @@ static BASELINE_BYTES: AtomicUsize = AtomicUsize::new(0);
 static HOOK_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// `System` アロケータへ処理を委譲しつつ、確保・解放バイト数を
-/// [`CURRENT_BYTES`]／[`PEAK_BYTES`] へ記録する `GlobalAlloc` 実装。
+/// `CURRENT_BYTES`／`PEAK_BYTES` へ記録する `GlobalAlloc` 実装。
 ///
 /// `peak_memory_bench` バイナリ（`src/bin/peak_memory_bench.rs`）・
 /// `peak_memory` モジュールの単体テスト（`#[cfg(test)] mod tests`）でのみ
@@ -208,12 +208,12 @@ static MEASUREMENT_LOCK: Mutex<()> = Mutex::new(());
 /// `f` の実行区間中に生じたプロセス全体のヒープ確保ピーク（純増分。
 /// バイト単位）を計測し、`f` の戻り値と併せて返す唯一の公開計測 API。
 ///
-/// [`MEASUREMENT_LOCK`] を `f` の実行完了までホールドし続けることで、
+/// `MEASUREMENT_LOCK` を `f` の実行完了までホールドし続けることで、
 /// 複数スレッド・複数テストから本関数が並行呼び出しされても
 /// `reset_peak`（起点記録）・`peak_since_reset_bytes`（読み出し）の
 /// ペアが他の計測区間と重ならないことを保証する（PR #370 codex-review
 /// 指摘 P1）。`TrackingAllocator` が有効化されていない文脈では
-/// ピーク値は `None` になる（[`peak_since_reset_bytes`] 参照）。
+/// ピーク値は `None` になる（`peak_since_reset_bytes` 参照）。
 ///
 /// ロック汚染（`f` 内での panic）時は `Mutex::lock` の `Err` から
 /// 内部ガードを取り出して継続する: 本ロックが保護するのは単純な

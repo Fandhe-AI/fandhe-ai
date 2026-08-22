@@ -12,7 +12,7 @@
 //! （依存方向は `docs/guardrail-self-repair-cli.md` 1.4 節の既定どおり
 //! `guardrail` → `bench-harness`）。`self-repair` 側は本モジュールを
 //! `pub use guardrail::determinism;` で再輸出し、双方から同一の決定性契約を
-//! 参照できるようにする（[`crate::self-repair`] 側の再輸出はそちらの
+//! 参照できるようにする（`crate::self-repair` 側の再輸出はそちらの
 //! `lib.rs` を参照）。
 //!
 //! **用途限定（重要）**: 内部で用いる xorshift64* は暗号学的に安全な PRNG では

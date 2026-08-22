@@ -29,7 +29,7 @@
 //!
 //! `DeviceBuffer`／`upload`／`download`（§4.2）は本イシューのスコープ外
 //! （TASK-1.9b・#45）。`BackendOps` カーネルディスパッチは
-//! [`crate::backend_ops`]（TASK-1.9c・#46）を参照。
+//! `crate::backend_ops`（TASK-1.9c・#46）を参照。
 
 use std::fmt;
 
@@ -146,7 +146,7 @@ pub fn enumerate_all(providers: &[&dyn DeviceProvider]) -> Vec<DeviceInfo> {
 
 /// 複数の [`DeviceProvider`] を横断して `device` に一致するデバイスを選択
 /// する。`device` の variant（[`Device::Cpu`]／[`Device::Cuda`]／
-/// [`Device::Metal`]）に応じて対応する provider（`backend_name` が
+/// `Device::Metal`）に応じて対応する provider（`backend_name` が
 /// `"cpu"`／`"cuda"`／`"metal"`）の `select` を呼び出す。対応する provider
 /// が `providers` に含まれない場合は
 /// [`BackendError::DeviceUnavailable`] を返す。
