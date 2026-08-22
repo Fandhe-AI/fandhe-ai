@@ -2449,7 +2449,7 @@ pub fn mma_f16_source_with_block_tile(
 /// 基準構成（BM=64/BN=128/BK=32/STAGES=3。静的 41,472B）を本関数で
 /// 強制動的化して起動し、parity が pass すれば「変換は無罪、候補定数
 /// 側の潜在バグ」、fail すれば「変換そのものに欠陥」と判定できる
-/// （`docs/perf/cuda-gemm-mma-block-tile-stages.md` §8 参照）。
+/// （`docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.3 参照）。
 ///
 /// 呼び出し元は [`render_mma_f16_block_tile_forced_dynamic_smem`]
 /// （起動まで完結させる A/B ランナー側のラッパー）のみを想定する

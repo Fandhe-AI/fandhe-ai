@@ -44,7 +44,7 @@
 //! `tests/cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` も本パッチと無関係
 //! に（`main` ブランチ単体でも）同系統の小規模不一致で fail することを
 //! 確認しており、これは本イシューのスコープ外の別課題である（詳細・
-//! 追跡方針は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §8）。
+//! 追跡方針は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.4）。
 //!
 //! ## 計測対象候補（`docs/perf/cuda-gemm-mma-block-tile-stages.md` §3.1）
 //!
@@ -276,7 +276,7 @@ const CANDIDATES: [Candidate; 5] = [
 /// `mismatch_count=2/266240`）で fail したことにより、**#840/#842 が
 /// 「動的 SMEM 変換の欠陥」と推定した不一致は、実際には extern
 /// __shared__ 変換にもタイル候補定数にも起因しない**ことが判明した。
-/// 詳細は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §8 を参照。
+/// 詳細は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.3 を参照。
 ///
 /// - `debug_default_via_diagnostics_path`: 現行本番定数（BM=64/BN=128/
 ///   BK=32/STAGES=3/warp2x2）を非強制（`mma_f16_source()` とバイト一致・
@@ -630,12 +630,12 @@ fn main() {
     // 自身も `CONTROL_CANDIDATES::debug_default_via_diagnostics_path` と
     // 同一箇所・同一値（`mismatch_count=2/266240`・
     // `first_mismatch=(168, 2)`）で不一致を出すことを確認した（イシュー
-    // #855。`docs/perf/cuda-gemm-mma-block-tile-stages.md` §8）。これにより
+    // #855。`docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.3）。これにより
     // #840/#842 が観測した不一致は診断ハーネス（extern __shared__ 変換・
     // タイル候補定数・compile/launch コードパス）に起因せず、production の
     // base カーネル自体が本テストデータ（M=520 非整列端・SEED=0xC0FFEE）
     // に対して持つ既存の狭い数値差（`docs/perf/
-    // cuda-gemm-mma-block-tile-stages.md` §8 参照。既存 `#[ignore]` テスト
+    // cuda-gemm-mma-block-tile-stages.md` §9.4 参照。既存 `#[ignore]` テスト
     // `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` の失敗と同系統）に
     // 起因すると確定できた。以降の A/B 実行でも production 自身の実測値を
     // 常に記録できるよう、この検査は一時デバッグではなく本バイナリの
@@ -694,7 +694,7 @@ fn main() {
     // render/compile/parity 診断（`candidate_parity_ok`）までは実行する。
     // GB10 実機では `CORRECTNESS_M=520`・固定シードにより production の
     // parity が常に不合格になるため（`docs/perf/
-    // cuda-gemm-mma-block-tile-stages.md` §8）、旧実装（不合格時に即
+    // cuda-gemm-mma-block-tile-stages.md` §9.3）、旧実装（不合格時に即
     // `return`）だと `CONTROL_CANDIDATES`（強制 dynamic SMEM・静的対照
     // 候補・diagnostics 経路）の compile/parity 検査自体が実機で恒常的に
     // 到達不能になっていた（PR #862 codex-review P2 指摘）。
@@ -703,7 +703,7 @@ fn main() {
     // 契約）、`skip_performance_measurement` で production・候補いずれの
     // 実測ループも perf 計測部分だけを SKIP させる。既知の狭い数値差
     // 自体は上記 `production_direct` ログ・
-    // docs/perf/cuda-gemm-mma-block-tile-stages.md §8 に記録済み。
+    // docs/perf/cuda-gemm-mma-block-tile-stages.md §9.3 に記録済み。
     let skip_performance_measurement = production_direct_fail_count != 0;
     if skip_performance_measurement {
         println!(
@@ -713,7 +713,7 @@ fn main() {
              production 自身が数値不一致の間は性能比較を行わない。ただし候補の \
              render/compile/parity 診断（CONTROL_CANDIDATES を含む）は打ち切らず継続する \
              （PR #862 codex-review P2 是正）。詳細は上記 production_direct ログ・\
-             docs/perf/cuda-gemm-mma-block-tile-stages.md §8 を参照)"
+             docs/perf/cuda-gemm-mma-block-tile-stages.md §9.3 を参照)"
         );
     }
 
