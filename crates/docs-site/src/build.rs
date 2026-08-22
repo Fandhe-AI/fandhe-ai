@@ -66,7 +66,7 @@ pub enum BuildError {
     /// 固定のメッセージから汎用化した）。
     WriteAsset { path: String, error: std::io::Error },
     /// 検索インデックス（`assets/search-index.json`）の直列化後サイズが
-    /// [`search::MAX_INDEX_BYTES`] を超過した（fail-closed。DoS 抑止。
+    /// `search::MAX_INDEX_BYTES` を超過した（fail-closed。DoS 抑止。
     /// `search.rs` モジュール doc 参照）。`search::IndexTooLarge` は
     /// `pub(crate)` のため、`pub` な本 enum のバリアントとしてそのまま
     /// 包まず、実バイト数・上限のみをコピーして持つ（private_interfaces

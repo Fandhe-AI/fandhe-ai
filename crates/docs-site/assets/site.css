@@ -289,4 +289,30 @@ a {
     flex-basis: auto;
     width: 100%;
   }
+
+  /* イシュー #900 codex-review 指摘対応: 固定幅 12rem の検索欄 + テーマ
+     ボタンを持つ .site-header-actions は折り返さない flex 行のままだと
+     モバイル幅でヘッダー合計最小幅が viewport を超え横スクロール・
+     操作要素欠落を招く。ヘッダー自体を折り返し可能にし、actions 行を
+     全幅で 2 段目へ回して検索欄を可変幅（画面幅に収まる分だけ伸縮）に
+     変える。 */
+  .site-header {
+    flex-wrap: wrap;
+  }
+
+  .site-header-actions {
+    flex-wrap: wrap;
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .docs-search {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .docs-search-input {
+    width: 100%;
+    max-width: none;
+  }
 }
