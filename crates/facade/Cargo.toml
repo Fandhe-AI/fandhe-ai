@@ -8,7 +8,10 @@ description = "composition root・compat 公開面（REQ-1・REQ-9・TASK-9.3）
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+# crates.io 公開対象 6 クレートの 1 つ（#881・docs/crates-io-publishing-order.md
+# §6）。ルート `[workspace.package]` の `publish = false`（docs-site 等の非公開
+# クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
+publish = true
 
 # 依存形状は `crates/bench-harness/Cargo.toml` と同型（spec 確定。
 # docs/spec/05-tasks.md TASK-9.3）: `backend-cuda` は無条件依存（`cudarc`

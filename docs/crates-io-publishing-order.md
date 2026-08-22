@@ -168,9 +168,10 @@ required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
 
 ## 6. 非公開クレートとの依存が公開を阻害しないことの確認
 
-`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`（いずれも
-`publish.workspace = true` が現状 `false` を継承）への依存（dev-dependency
-含む）は、公開 6 クレート（`tensor-core`・`autodiff`・`backend-cpu`・
+`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`docs-site`
+（いずれも `publish.workspace = true` によりルート `[workspace.package]` の
+`publish = false` を継承。非公開 5 クレート）への依存（dev-dependency 含む）
+は、公開 6 クレート（`tensor-core`・`autodiff`・`backend-cpu`・
 `backend-cuda`・`backend-metal`・`facade`）の `Cargo.toml` 全件を実測確認
 した時点（#881 実装時）で以下のいずれかに限られる:
 
@@ -185,6 +186,25 @@ required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
 経路は存在しない。公開 6 クレートの `[dependencies]`（通常依存）に非公開
 クレートが現れないことも合わせて確認済み。
 
+## 7. 公開 6 クレートの `publish = true` 明示（非公開既定の上書き）
+
+ルート `Cargo.toml` の `[workspace.package]` は `publish = false`
+（非公開 5 クレート・#881 時点で追加された `docs-site` 向けの既定。1 節
+冒頭のリポジトリ構成コメント参照）であり、公開 6 クレートは従来
+`publish.workspace = true` でこれをそのまま継承していた。この状態では
+本ドキュメントが確定する公開順序どおりに `cargo publish` を実行しても
+crates.io への公開が拒否される（`publish = false` は登録禁止指定のため）。
+よって公開 6 クレート（`tensor-core`・`autodiff`・`backend-cpu`・
+`backend-cuda`・`backend-metal`・`facade`）の各 `Cargo.toml` では
+`publish.workspace = true` を `publish = true` に変更し、workspace 既定を
+明示的に上書きする（#881 実装時に反映済み）。非公開 5 クレートは
+`publish.workspace = true`（`false` 継承）のまま変更しない。
+
+`publish = true` は crates.io への公開を許可する状態にするのみで、実際の
+初回 `cargo publish` 実行（トークン発行・`--dry-run` 検証・rustdoc 警告
+解消を含む）は別イシュー #883 のスコープであり、本ドキュメント・本 PR は
+実行しない。
+
 ## 変更履歴
 
 - 2026-08-22（#881）: 本ドキュメント新規作成。PR #891（#880 系）で先行実施
@@ -195,3 +215,9 @@ required by package `fandhe-ai-autodiff v0.3.0 (crates/autodiff)`
   `cargo package` 実測で strip 方針（2 節）を裏付け、内部依存 version
   箇所数の誤記（10 → 9）を修正し、`tensor-core` の `Cargo.toml` 実測
   （非公開クレートへの依存なし・依存連鎖の起点であること）を確認した。
+- 2026-08-22（#881・PR #893 codex-review P1 対応）: 公開 6 クレートが
+  ルート `[workspace.package]` の `publish = false` を `publish.workspace =
+  true` 経由でそのまま継承しており、本ドキュメントが確定する公開順序
+  どおりに `cargo publish` しても公開禁止で失敗する矛盾を修正した。公開
+  6 クレートの `Cargo.toml` へ `publish = true` を明示する変更を反映し、
+  7 節として本方針を追記した。

@@ -7,7 +7,10 @@ description = "動的テープ式自動微分（REQ-1）"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-publish.workspace = true
+# crates.io 公開対象 6 クレートの 1 つ（#881・docs/crates-io-publishing-order.md
+# §6）。ルート `[workspace.package]` の `publish = false`（docs-site 等の非公開
+# クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
+publish = true
 
 [dependencies]
 # `Tensor<f32>`（非追跡）を Var の値表現・演算入出力として直接利用する
