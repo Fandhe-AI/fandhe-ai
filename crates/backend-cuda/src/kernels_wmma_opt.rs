@@ -3083,6 +3083,33 @@ mod tests {
         }
     }
 
+    /// #851 レビュー指摘対応: 非 staged TF32 経路（`WMMA_TF32_F32_OPT_BODY`）
+    /// の丸め位置を固定する。`wmma_tf32_opt_source_uses_wmma_instructions`
+    /// は変換命令がどこかに 1 回存在することしか検査できず、A/B 片側や
+    /// 一部の fragment load から `wmma::__float_to_tf32` 変換が欠落しても
+    /// 通過してしまう（単純な部分文字列存在検査の限界）。staged 経路の
+    /// `wmma_tf32_staged_source_applies_tf32_conversion_to_every_fragment_load`
+    /// と同じ「出現回数の突合」方式を非 staged 経路にも適用し、
+    /// `load_matrix_sync`（A・B 各 1 箇所 = 計 2）と `__float_to_tf32` 変換
+    /// ループ（同じく計 2）の個数が一致することを固定する。
+    #[test]
+    fn wmma_tf32_opt_source_applies_tf32_conversion_to_every_fragment_load() {
+        let src = wmma_tf32_f32_opt_source();
+        let load_count = src.matches("wmma::load_matrix_sync(").count();
+        let convert_count = src.matches("wmma::__float_to_tf32(").count();
+        assert_eq!(
+            load_count, convert_count,
+            "wmma::load_matrix_sync の出現回数（{load_count}）と \
+             wmma::__float_to_tf32 変換ループの出現回数（{convert_count}）が一致しません \
+             （A/B いずれかの fragment load で TF32 変換が欠落している可能性）"
+        );
+        assert_eq!(
+            load_count, 2,
+            "A フラグメント・B フラグメントそれぞれ 1 箇所ずつ、計 2 箇所の \
+             load_matrix_sync 呼び出しが期待されます（実際: {load_count}）"
+        );
+    }
+
     #[test]
     fn wmma_f16_opt_source_uses_wmma_instructions() {
         let src = wmma_f16_opt_source();
