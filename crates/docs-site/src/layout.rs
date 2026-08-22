@@ -3,8 +3,8 @@
 //! # 呼び出し文脈
 //!
 //! `build.rs` が [`nav::parse_nav`](crate::nav::parse_nav) 済みの [`Nav`] と
-//! `markdown::markdown_to_nodes` の変換結果（本文ノード列）を [`docs_page`] へ渡し、
-//! 得られた [`crate::html::Node`] を `html::render` で文字列化してから
+//! `markdown::markdown_to_nodes` の変換結果（本文ノード列）を `docs_page` へ渡し、
+//! 得られた `crate::html::Node` を `html::render` で文字列化してから
 //! `<!DOCTYPE html>` を前置してファイルへ書き出す（実装計画 §2.4・§2.6）。
 //!
 //! # スコープ境界（イシュー #870 時点）
@@ -184,8 +184,10 @@ fn rewrite_root_relative_hrefs(base_path: &str, nodes: Vec<Node>) -> Vec<Node> {
 /// `page.path`（`base_path` を含まない）。
 ///
 /// `<!DOCTYPE html>` はここでは前置しない（`build.rs` が書き出し時に前置する。
-/// モジュール冒頭コメント参照）。
-pub fn docs_page(nav: &Nav, page_title: &str, current_path: &str, body: Vec<Node>) -> Node {
+/// モジュール冒頭コメント参照）。`pub(crate)` 限定（`html::Node` が
+/// `pub(crate)` のため。`html.rs` の安全性契約コメント参照）: 呼び出し元は
+/// 同一クレート内の `build.rs` のみ。
+pub(crate) fn docs_page(nav: &Nav, page_title: &str, current_path: &str, body: Vec<Node>) -> Node {
     let base_path = nav.site.base_path.as_str();
     let css_href = asset_href(base_path, "assets/site.css");
 

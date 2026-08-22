@@ -17,7 +17,7 @@
 //!   [`nav::validate_sources`] からなる（`section.index_path` は #870 で追加）
 //! - [`html`][]: 最小 HTML ノード層（`Node` enum + 既定エスケープ `render`）。
 //!   `markdown`・`layout` の両方が最終的な HTML 文字列化をここへ集約する
-//! - [`markdown`][]: 自作 Markdown → [`html::Node`] 変換（外部クレート非依存）
+//! - [`markdown`][]: 自作 Markdown → `html::Node` 変換（外部クレート非依存）
 //! - [`layout`][]: ページ骨格（ヘッダ・サイドバー・本文）の組み立て
 //! - [`theme`][]: ビルド時に埋め込むテーマ CSS 定数（`assets/site.css`）
 //! - [`build`][]: 上記を結線したビルドパイプライン（`nav.toml` 読み込み →
@@ -29,7 +29,7 @@
 //! サブセットパーサー・行番号付きエラー・入力サイズ上限・`unwrap()` 不使用の
 //! 設計方針）を参照するが、本リポジトリは `fandhe-frontend` 系クレートに依存できない
 //! （deps-policy.md の許容 9 区分外・ユーザー承認必須のため追加しない）ため、
-//! [`html::Node`] を自作の最小 HTML ノード層として実装する。参照実装が持つ
+//! `html::Node` を自作の最小 HTML ノード層として実装する。参照実装が持つ
 //! 生 HTML 注入用バリアント（`RawHtml` 相当）はあえて設けず、エスケープを
 //! 構造的に迂回できない設計にしている（`html.rs` モジュールコメント参照）。
 //!
@@ -37,7 +37,8 @@
 //!
 //! 本クレートは既定でクレート全体の `unsafe` を禁止する
 //! （`.claude/rules/coding-rust.md` の unsafe 最小化方針・`.claude/rules/security.md`）。
-//! 唯一の例外が [`build::fd_walk`]（unix 版）: `page.source`／出力先パスへの
+//! 唯一の例外が `build` モジュール内の非公開 `fd_walk` モジュール（unix 版）:
+//! `page.source`／出力先パスへの
 //! アクセスを fd 相対（`openat`/`mkdirat`/`renameat`/`unlinkat`、いずれも
 //! `O_NOFOLLOW`）で行う FFI 境界であり、`canonicalize` 等のパス文字列ベースの
 //! 検証では防げない中間ディレクトリのシンボリックリンク差し替え TOCTOU

@@ -1,11 +1,11 @@
-//! 自作 Markdown → [`crate::html::Node`] 変換。外部 Markdown クレートは使わない
+//! 自作 Markdown → `crate::html::Node` 変換。外部 Markdown クレートは使わない
 //! （deps-policy.md の許容 9 区分外。イシュー #870 実装計画 §2.2）。
 //!
 //! # 呼び出し文脈
 //!
 //! `build.rs` が各 `page.source`（`site/*.md`）の内容を読み込み、
-//! [`markdown_to_nodes`] へ渡して `<article>` 本文の子ノード列を得る。得られた
-//! [`crate::html::Node`] 列は `layout::docs_page` がページ骨格へ組み込み、
+//! `markdown_to_nodes` へ渡して `<article>` 本文の子ノード列を得る。得られた
+//! `crate::html::Node` 列は `layout::docs_page` がページ骨格へ組み込み、
 //! 最終的な文字列化は `html::render` 系関数のみが担う（本モジュールは
 //! `Node::Text` にエスケープ前の生文字列を渡すだけでよい。`html.rs` モジュール
 //! コメント参照）。
@@ -30,7 +30,7 @@
 //!   先頭制御文字トリム）した後にスキームを判定するため `java\tscript:` のような
 //!   偽装を素通りさせない。不合格はリンク化せずテキストのみ出力する（fail-closed）
 //! - Markdown 中の生 HTML タグは構文として解釈しない。通常テキストとして
-//!   [`crate::html::Node::Text`] に積まれ、`html::render` が機械的にエスケープする
+//!   `crate::html::Node::Text` に積まれ、`html::render` が機械的にエスケープする
 //! - 未知・非対応の構文は段落フォールバックとし、本モジュールはパニックしない
 //!   全域関数（`unwrap()` 不使用）として実装する
 
@@ -45,9 +45,11 @@ const MAX_DEPTH: usize = 16;
 /// O(n²) の計算量 DoS を防ぐ。
 const MAX_INLINE_SCAN_WINDOW: usize = 2000;
 
-/// Markdown 原稿全文を [`crate::html::Node`] 列（`<article>` の子として並べる想定）
-/// へ変換する。パニックしない全域関数。
-pub fn markdown_to_nodes(input: &str) -> Vec<Node> {
+/// Markdown 原稿全文を `crate::html::Node` 列（`<article>` の子として並べる想定）
+/// へ変換する。パニックしない全域関数。`pub(crate)` 限定（`html::Node` が
+/// `pub(crate)` のため。`html.rs` の安全性契約コメント参照）: 呼び出し元は
+/// 同一クレート内の `build.rs` のみ。
+pub(crate) fn markdown_to_nodes(input: &str) -> Vec<Node> {
     let lines: Vec<&str> = input.lines().collect();
     parse_blocks(&lines, 0)
 }
@@ -365,7 +367,7 @@ fn parse_table(lines: &[&str]) -> (Node, usize) {
 // インラインパーサー
 // ---------------------------------------------------------------------
 
-/// インラインテキストを [`crate::html::Node`] 列へ変換する。走査は必ず `Vec<char>`
+/// インラインテキストを `crate::html::Node` 列へ変換する。走査は必ず `Vec<char>`
 /// （文字インデックス）で行い、バイトインデックスの `&str[..]` スライスは行わない
 /// （日本語主体の原稿でも非文字境界パニックを起こさないため。モジュール冒頭
 /// コメント参照）。

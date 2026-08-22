@@ -5,8 +5,8 @@
 //!
 //! `main.rs`（CLI）から [`build_site`] が呼ばれる。本モジュールは
 //! `crate::nav`（[`crate::nav::parse_nav`] / [`crate::nav::validate_sources`]）・
-//! `crate::markdown`（[`crate::markdown::markdown_to_nodes`]）・
-//! `crate::layout`（[`crate::layout::docs_page`]）・`crate::theme`
+//! `crate::markdown`（`crate::markdown::markdown_to_nodes`）・
+//! `crate::layout`（`crate::layout::docs_page`）・`crate::theme`
 //! （[`crate::theme::SITE_CSS`]）に依存し、`<root>/site/nav.toml` の読み込みから
 //! `<out>` 配下への実 HTML・CSS 書き出しまでを結線する（実装計画 §2.6・#870）。
 
@@ -209,6 +209,26 @@ mod fd_walk {
 
     // edition 2024 は `extern "C"` ブロック自体に `unsafe` 修飾を要求する
     // （宣言した関数シグネチャの正しさを保証しないため）。
+    //
+    // SAFETY: 以下は POSIX/glibc・macOS libSystem が安定 ABI として提供する
+    // 標準 C 関数（`openat(2)`・`mkdirat(2)`・`renameat(2)`・`unlinkat(2)`）の
+    // 宣言であり、`std` が既にリンクする system libc 以外の依存を要求しない
+    // （追加 Cargo 依存なし。上記コメント参照）。安全性の根拠:
+    // - シグネチャは各関数の POSIX 宣言と一致させている。`openat` のみ
+    //   `mode` を可変長引数（`...`）として宣言し、呼び出し側（`openat_raw`）は
+    //   C の既定引数昇格と同じ `c_uint`（int 幅）で渡す。`mkdirat`/`renameat`/
+    //   `unlinkat` は固定引数のみで可変長引数を持たないため通常の Rust
+    //   extern 宣言で ABI が一致する（可変長引数と固定引数を取り違えた場合の
+    //   実害〈Apple AArch64 での `mode` 破壊〉は上記コメントで実測済み）
+    // - `ModeT`（`mkdirat` の `mode` 型）は OS ごとの実体幅（Linux
+    //   `unsigned int`・macOS `unsigned short`）で個別に宣言しており、本
+    //   モジュールが渡す値（`0o755`・`0o644`）はいずれの幅にも収まる
+    // - 呼び出し側（`openat_raw`・`mkdirat_if_missing`・`rename_beneath`・
+    //   `remove_beneath`）は常に呼び出し元が所有する有効な dirfd と、
+    //   `component_cstring` で NUL 終端検証済みの単一パスコンポーネント
+    //   （`/` を含まない）のみを渡す（各関数呼び出し箇所の SAFETY コメント
+    //   参照）。関数宣言自体はこれらの契約を型で強制できないため、契約の
+    //   遵守は呼び出し側の責務とする
     unsafe extern "C" {
         fn openat(dirfd: c_int, pathname: *const c_char, flags: c_int, ...) -> c_int;
         fn mkdirat(dirfd: c_int, pathname: *const c_char, mode: ModeT) -> c_int;
@@ -230,17 +250,22 @@ mod fd_walk {
     #[cfg(target_os = "macos")]
     const ELOOP: i32 = 62;
 
-    /// macOS/Darwin の `ENOTDIR`。`open_subdir`（`O_DIRECTORY | O_NOFOLLOW`）で
-    /// 対象がシンボリックリンクの場合、Linux は一貫して `ELOOP` を返すが、
-    /// Darwin は `O_NOFOLLOW` によりシンボリックリンクとして解決されない
-    /// 実体を「ディレクトリではない」とみなし `ENOTDIR` を返す（実測確認済み:
-    /// `build_site_rejects_output_path_escaping_via_symlinked_parent` 等の
-    /// 回帰テストで Apple Silicon 実機から検出）。よって macOS に限り
-    /// `ENOTDIR` も symlink 拒否として扱う（実際に「ディレクトリを期待した
-    /// 位置に通常ファイルがある」設定ミスも同じ errno になり得るが、いずれの
-    /// 場合も fail-closed に拒否する点は変わらないため安全側の近似として
-    /// 許容する。CI の実行基盤である Linux〈ubuntu-latest〉では発生しない）。
-    #[cfg(target_os = "macos")]
+    /// `ENOTDIR`。`open_subdir`（`O_DIRECTORY | O_NOFOLLOW`）で対象が
+    /// シンボリックリンクの場合、`O_DIRECTORY` は「最終コンポーネントは
+    /// ディレクトリでなければならない」という制約を課すため、`O_NOFOLLOW` に
+    /// よってシンボリックリンクとして解決されない実体を「ディレクトリでは
+    /// ない」とみなし `ENOTDIR` を返す。これは Darwin だけでなく Linux でも
+    /// 同様（実測確認済み: `build_site_rejects_output_path_escaping_via_symlinked_parent`・
+    /// `read_verified_source_rejects_symlinked_intermediate_directory` の
+    /// 回帰テストが GitHub ホステッド `ubuntu-latest`〈PR #899 CI 実行結果〉・
+    /// Apple Silicon 実機の両方で `ENOTDIR` を観測しており、`ELOOP` 一貫という
+    /// 当初の想定〈Linux は `open(2)` の `O_NOFOLLOW` 単体の記述どおり `ELOOP`
+    /// を返すという誤った類推〉は `O_DIRECTORY` 併用時には成立しない）。
+    /// Linux・Darwin ともに `ENOTDIR` の数値は `20` で一致するため単一定数で
+    /// 扱う。よって全 unix プラットフォームで `ENOTDIR` も symlink 拒否として
+    /// 扱う（実際に「ディレクトリを期待した位置に通常ファイルがある」設定
+    /// ミスも同じ errno になり得るが、いずれの場合も fail-closed に拒否する
+    /// 点は変わらないため安全側の近似として許容する）。
     const ENOTDIR_AS_SYMLINK_REJECTION: i32 = 20;
 
     /// `error` が「`O_NOFOLLOW` によるシンボリックリンク拒否」であるかを
@@ -249,14 +274,7 @@ mod fd_walk {
     /// `UnsafeOutputPath` へ詰め替える。
     pub fn is_symlink_rejection(error: &io::Error) -> bool {
         let raw = error.raw_os_error();
-        #[cfg(target_os = "macos")]
-        {
-            raw == Some(ELOOP) || raw == Some(ENOTDIR_AS_SYMLINK_REJECTION)
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            raw == Some(ELOOP)
-        }
+        raw == Some(ELOOP) || raw == Some(ENOTDIR_AS_SYMLINK_REJECTION)
     }
 
     #[cfg(target_os = "linux")]
@@ -269,6 +287,7 @@ mod fd_walk {
         pub const O_DIRECTORY: c_int = 0o200_000;
         pub const O_NOFOLLOW: c_int = 0o400_000;
         pub const O_CLOEXEC: c_int = 0o2_000_000;
+        pub const O_NONBLOCK: c_int = 0o4_000;
     }
 
     #[cfg(target_os = "macos")]
@@ -281,6 +300,7 @@ mod fd_walk {
         pub const O_NOFOLLOW: c_int = 0x0100;
         pub const O_DIRECTORY: c_int = 0x10_0000;
         pub const O_CLOEXEC: c_int = 0x100_0000;
+        pub const O_NONBLOCK: c_int = 0x0004;
     }
 
     use flags::*;
@@ -433,8 +453,17 @@ mod fd_walk {
     /// - `Ok(false)`: 存在しない
     /// - `Err` かつ `kind() == FilesystemLoop`: 既存の symlink（呼び出し元が
     ///   `UnsafeOutputPath` へ詰め替える）
+    ///
+    /// **`O_NONBLOCK` を併用する**（`open_leaf_readonly` を使い回さない
+    /// 理由）: `out` 配下は再ビルドで使い回されるディレクトリのため、
+    /// 既存生成物の名前を先客の FIFO（named pipe）に差し替えられている
+    /// 可能性を排除できない。`O_NONBLOCK` なしの `open(O_RDONLY)` は FIFO に
+    /// 対して書き込み側が現れるまで無期限にブロックしうる（POSIX の規定
+    /// 動作）ため、存在確認だけのこの用途では `O_NONBLOCK` を付けて即時に
+    /// 復帰させる（Cursor Bugbot 指摘・PR #899）。読み取り専用オープンな
+    /// ので通常ファイル・ディレクトリへの挙動には影響しない。
     pub fn probe_non_symlink_entry(dir: &File, name: &OsStr) -> io::Result<bool> {
-        match open_leaf_readonly(dir, name) {
+        match openat_raw(dir.as_raw_fd(), name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK, 0) {
             Ok(_file) => Ok(true),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
             Err(error) => Err(error),
@@ -753,7 +782,7 @@ fn write_file_creating_parent(
 /// 2. [`nav::parse_nav`] でスキーマ検証 → [`nav::validate_sources`] で
 ///    `page.source` の実ファイル存在検証
 /// 3. 各 `page.source` を（読み込み前サイズ検査つきで）読み、
-///    [`markdown::markdown_to_nodes`] → [`layout::docs_page`] → [`html::render`]
+///    `markdown::markdown_to_nodes` → `layout::docs_page` → `html::render`
 ///    の順で HTML 文字列へ変換する。**全ページの変換をメモリ上で終えてから**
 ///    書き出しを開始する（I/O エラー発生時に部分生成物を減らす安全側の順序。
 ///    完全な fail-closed 原子性は #872 linkcheck の責務）
