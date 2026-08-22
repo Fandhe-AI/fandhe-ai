@@ -77,7 +77,7 @@ pub struct Section {
     pub title: String,
     /// ヘッダのセクションメニューのリンク先（任意）。指定する場合は `page.path` と
     /// 同じ形式規則（`/` 始まり・`/` 終わり・セグメントは英数字・`-`・`_`）を満たす
-    /// 必要がある（[`validate_page_path`]）。ページ実在との突合は行わない
+    /// 必要がある（`validate_page_path`、private 関数）。ページ実在との突合は行わない
     /// （#872 linkcheck の責務。イシュー #870 実装計画 §2.3）。
     pub index_path: Option<String>,
     /// 宣言順を保持したページ列（1 件以上。空セクションはパース時点でエラー）。

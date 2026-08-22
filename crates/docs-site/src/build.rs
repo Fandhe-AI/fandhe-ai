@@ -12,6 +12,7 @@
 
 use std::fmt;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::html;
@@ -45,7 +46,7 @@ pub enum BuildError {
     Nav(NavError),
     /// 出力ディレクトリ（`--out`）の作成に失敗した。
     CreateOutDir(std::io::Error),
-    /// `page.source` が [`MAX_SOURCE_BYTES`] を超過した（読み込み前にサイズ確認で検出）。
+    /// `page.source` が `MAX_SOURCE_BYTES`（private 定数）を超過した（読み込み前にサイズ確認で検出）。
     SourceTooLarge(String),
     /// `page.source` の読み込みに失敗した（`validate_sources` 通過後の再読込エラー。
     /// TOCTOU・権限変更等の稀な経路）。
@@ -57,6 +58,10 @@ pub enum BuildError {
     WritePage { path: String, error: std::io::Error },
     /// `assets/site.css` の書き出しに失敗した。
     WriteAsset(std::io::Error),
+    /// 出力先パスがシンボリックリンク経由で `out` 配下の外を指す、または
+    /// 既存のシンボリックリンクを上書きしようとした（TOCTOU・意図しない上書き
+    /// 対策。レビュー指摘）。
+    UnsafeOutputPath(String),
 }
 
 impl fmt::Display for BuildError {
@@ -83,6 +88,12 @@ impl fmt::Display for BuildError {
             }
             BuildError::WriteAsset(err) => {
                 write!(f, "failed to write {SITE_CSS_RELATIVE_PATH}: {err}")
+            }
+            BuildError::UnsafeOutputPath(path) => {
+                write!(
+                    f,
+                    "output path `{path}` escapes the output directory or overwrites an existing symlink"
+                )
             }
         }
     }
@@ -124,12 +135,105 @@ fn page_output_path(out: &Path, page_path: &str) -> PathBuf {
     }
 }
 
-/// `path` の親ディレクトリを作成してからファイルへ書き出す。
-fn write_file_creating_parent(path: &Path, contents: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+/// `page.source` を `repo_root` 配下であることを再検証したうえで、単一の
+/// `File` ハンドルからサイズ確認・内容読み込みの両方を行う。
+///
+/// [`nav::validate_sources`] は全ページの一括事前検証（早期にわかりやすい
+/// エラーを返すため）だが、実際に読み込む直前にも同じ経路のパスを
+/// `canonicalize` して `repo_root` 配下であることを**再検証**し、その
+/// canonicalize 結果のパスを 1 回だけ `File::open` してサイズ確認・内容読み込み
+/// の両方をその同一ハンドルから行う。`fs::metadata` と `fs::read_to_string` で
+/// 同じパスを別々に再オープンすると、その間にシンボリックリンクをすり替え
+/// られる TOCTOU が残る（レビュー指摘）。事前検証の canonicalize からここまでの
+/// 間の差し替えは依然として原理的な race だが、読み込み直前に再検証し単一
+/// ハンドルへ収斂させることで窓を最小化する（`std::fs` のみで到達可能な現実的な
+/// 緩和策。完全な原子性には `openat2`/`O_NOFOLLOW` 相当のプラットフォーム固有
+/// API が必要で、REQ-1 v2 の外部依存ゼロ方針の範囲外と判断した）。
+fn read_verified_source(
+    canonical_root: &Path,
+    repo_root: &Path,
+    source: &str,
+) -> Result<String, BuildError> {
+    let candidate = repo_root.join(source);
+    let canonical_path = candidate
+        .canonicalize()
+        .map_err(|error| BuildError::ReadSource {
+            source: source.to_string(),
+            error,
+        })?;
+    if !canonical_path.starts_with(canonical_root) {
+        return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string())));
     }
-    fs::write(path, contents)
+
+    let mut file = fs::File::open(&canonical_path).map_err(|error| BuildError::ReadSource {
+        source: source.to_string(),
+        error,
+    })?;
+    let size = file
+        .metadata()
+        .map_err(|error| BuildError::ReadSource {
+            source: source.to_string(),
+            error,
+        })?
+        .len();
+    if size > MAX_SOURCE_BYTES {
+        return Err(BuildError::SourceTooLarge(source.to_string()));
+    }
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)
+        .map_err(|error| BuildError::ReadSource {
+            source: source.to_string(),
+            error,
+        })?;
+    Ok(contents)
+}
+
+/// `path` の親ディレクトリを作成してからファイルへ書き出す。
+///
+/// 書き出し前に 2 点を検査する（レビュー指摘: 出力先の既存シンボリックリンク
+/// を検査せず `create_dir_all`/`fs::write` していたため、`out` 配下外への
+/// 書き込み・既存ファイルの意図しない上書きが可能だった）。
+/// - `create_dir_all` 後の親ディレクトリを `canonicalize` し、`canonical_out`
+///   （`out` の正規化パス）配下であることを確認する（中間コンポーネントが
+///   シンボリックリンクで外を指す場合を拒否する）
+/// - 書き込み先が既存のシンボリックリンクでないことを `fs::symlink_metadata`
+///   （symlink を辿らない）で確認する（既存シンボリックリンク経由の意図しない
+///   上書きを拒否する）
+///
+/// `page_output_path` は `page.path` の安全な形式検証（`nav::validate_page_path`。
+/// 英数字・`-`・`_` のみのセグメント）済みの値のみを結合するため通常は `out`
+/// 内に収まるが、`out` が使い回されるビルド環境等で事前に配置されたシンボリック
+/// リンクによる脱出をここで別途防ぐ。
+fn write_file_creating_parent(
+    canonical_out: &Path,
+    path: &Path,
+    contents: &str,
+) -> Result<(), BuildError> {
+    let path_display = path.display().to_string();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| BuildError::WritePage {
+            path: path_display.clone(),
+            error,
+        })?;
+        let canonical_parent = parent
+            .canonicalize()
+            .map_err(|error| BuildError::WritePage {
+                path: path_display.clone(),
+                error,
+            })?;
+        if !canonical_parent.starts_with(canonical_out) {
+            return Err(BuildError::UnsafeOutputPath(path_display));
+        }
+    }
+    if let Ok(existing) = fs::symlink_metadata(path)
+        && existing.file_type().is_symlink()
+    {
+        return Err(BuildError::UnsafeOutputPath(path_display));
+    }
+    fs::write(path, contents).map_err(|error| BuildError::WritePage {
+        path: path_display,
+        error,
+    })
 }
 
 /// `<root>/site/nav.toml` を読み込み・パース・検証し、各ページを Markdown→HTML
@@ -176,24 +280,19 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     let parsed: Nav = nav::parse_nav(&input)?;
     nav::validate_sources(&parsed, root)?;
 
+    // 手順 3 の読み込み直前の再検証（TOCTOU 対策。`read_verified_source`
+    // モジュールコメント参照）に使う `root` の正規化パス。`validate_sources` が
+    // 直前に同じ `canonicalize` に成功しているため、通常経路でここが失敗する
+    // ことはない。
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|_| BuildError::Nav(NavError::MissingSource(root.display().to_string())))?;
+
     // 手順 3: 全ページを先にメモリ上でレンダリングし切ってから書き出す。
     let mut rendered_pages: Vec<(PathBuf, String)> = Vec::new();
     for section in &parsed.sections {
         for page in &section.pages {
-            let source_path = root.join(&page.source);
-            let source_metadata =
-                fs::metadata(&source_path).map_err(|error| BuildError::ReadSource {
-                    source: page.source.clone(),
-                    error,
-                })?;
-            if source_metadata.len() > MAX_SOURCE_BYTES {
-                return Err(BuildError::SourceTooLarge(page.source.clone()));
-            }
-            let markdown_input =
-                fs::read_to_string(&source_path).map_err(|error| BuildError::ReadSource {
-                    source: page.source.clone(),
-                    error,
-                })?;
+            let markdown_input = read_verified_source(&canonical_root, root, &page.source)?;
 
             let body = markdown::markdown_to_nodes(&markdown_input);
             let page_node = layout::docs_page(&parsed, &page.title, &page.path, body);
@@ -206,21 +305,18 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
 
     // 手順 4: 出力ディレクトリ作成 → ページ書き出し → テーマ CSS 書き出し。
     fs::create_dir_all(out).map_err(BuildError::CreateOutDir)?;
+    let canonical_out = out.canonicalize().map_err(BuildError::CreateOutDir)?;
 
     let mut written = Vec::with_capacity(rendered_pages.len() + 1);
     for (out_path, html_out) in &rendered_pages {
-        write_file_creating_parent(out_path, html_out).map_err(|error| BuildError::WritePage {
-            path: out_path.display().to_string(),
-            error,
-        })?;
+        write_file_creating_parent(&canonical_out, out_path, html_out)?;
         if let Ok(relative) = out_path.strip_prefix(out) {
             written.push(relative.to_path_buf());
         }
     }
 
     let css_path = out.join(SITE_CSS_RELATIVE_PATH);
-    write_file_creating_parent(&css_path, crate::theme::SITE_CSS)
-        .map_err(BuildError::WriteAsset)?;
+    write_file_creating_parent(&canonical_out, &css_path, crate::theme::SITE_CSS)?;
     written.push(PathBuf::from(SITE_CSS_RELATIVE_PATH));
 
     let pages = parsed.sections.iter().map(|s| s.pages.len()).sum();
@@ -463,5 +559,101 @@ path = "/intro/"
             build_site(&root.0, &out.0),
             Err(BuildError::Nav(NavError::TooLarge))
         ));
+    }
+
+    /// レビュー指摘（PR #899）の回帰テスト: 出力先の親ディレクトリコンポーネント
+    /// がシンボリックリンクで `out` 外を指す場合、`write_file_creating_parent` が
+    /// `UnsafeOutputPath` で fail-closed に拒否し、リンク先へ書き込まないことを
+    /// 確認する（symlink を使わない環境〈Windows 等〉では対象外のため unix 限定）。
+    #[cfg(unix)]
+    #[test]
+    fn build_site_rejects_output_path_escaping_via_symlinked_parent() {
+        let root = TempDir::new("build-out-escape-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/guide/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro").unwrap();
+
+        let out = TempDir::new("build-out-escape-out");
+        let outside = TempDir::new("build-out-escape-outside");
+        // `out/guide` を `out` の外（`outside`）を指すシンボリックリンクへ差し
+        // 替える。`page_output_path` 自体は安全な `page.path` からしか組み立てら
+        // れないが、`out` が使い回されるビルド環境で事前に配置されたリンクを
+        // 想定した攻撃シナリオを再現する。
+        fs::create_dir_all(&out.0).unwrap();
+        std::os::unix::fs::symlink(&outside.0, out.0.join("guide"))
+            .expect("create symlinked parent directory escaping out");
+
+        match build_site(&root.0, &out.0) {
+            Err(BuildError::UnsafeOutputPath(_)) => {}
+            other => panic!("expected UnsafeOutputPath for symlinked parent, got {other:?}"),
+        }
+        assert!(
+            !outside.0.join("intro/index.html").exists(),
+            "must not write through the symlinked parent into the outside directory"
+        );
+    }
+
+    /// レビュー指摘（PR #899）の回帰テスト: 出力先ファイル自体が既存の
+    /// シンボリックリンクの場合、`write_file_creating_parent` が
+    /// `UnsafeOutputPath` で拒否し、リンク先を意図せず上書きしないことを確認する
+    /// （unix 限定）。
+    #[cfg(unix)]
+    #[test]
+    fn build_site_rejects_overwriting_existing_symlink_at_output_path() {
+        let root = TempDir::new("build-out-symlink-file-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro").unwrap();
+
+        let out = TempDir::new("build-out-symlink-file-out");
+        let victim_dir = TempDir::new("build-out-symlink-file-victim");
+        let victim = victim_dir.0.join("victim.html");
+        fs::write(&victim, b"do not overwrite me").unwrap();
+
+        fs::create_dir_all(out.0.join("intro")).unwrap();
+        std::os::unix::fs::symlink(&victim, out.0.join("intro/index.html"))
+            .expect("create symlink at the exact output file path");
+
+        match build_site(&root.0, &out.0) {
+            Err(BuildError::UnsafeOutputPath(_)) => {}
+            other => panic!("expected UnsafeOutputPath for existing symlink, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "do not overwrite me",
+            "the symlink target must not be overwritten"
+        );
     }
 }

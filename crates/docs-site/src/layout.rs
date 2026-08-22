@@ -132,6 +132,53 @@ fn sidebar(nav: &Nav, current_path: &str) -> Node {
     )
 }
 
+/// `nodes` 内の `<a href="/...">`（ルート相対・`//` プロトコル相対を除く）を
+/// 再帰的に探し、`asset_href` と同じ規則で `base_path` を反映する。
+///
+/// `markdown::markdown_to_nodes` は `site.base_path` を知らない（Markdown 変換を
+/// サイト設定から独立させる設計。`markdown.rs` モジュールコメント参照）ため、
+/// ヘッダ・サイドバーの nav リンク／CSS の asset リンクと同じ `asset_href` 経由の
+/// プレフィックス付与を、本文（`article` 直下）だけここで別途適用する。適用しない
+/// と GitHub Pages のプロジェクトサイト配下（本番 `site/nav.toml` は
+/// `base_path = "/rust-ai-library"`）で本文内のルート相対リンクだけ `base_path` を
+/// 反映せず素通しになり、nav・asset リンクとの扱いが不整合になる（Cursor Bugbot
+/// 指摘・イシュー #870）。`href` 以外の属性・`a` 以外のタグは対象外。
+fn rewrite_root_relative_hrefs(base_path: &str, nodes: Vec<Node>) -> Vec<Node> {
+    nodes
+        .into_iter()
+        .map(|node| match node {
+            Node::Element {
+                tag,
+                attrs,
+                children,
+            } => {
+                let children = rewrite_root_relative_hrefs(base_path, children);
+                let attrs = if tag == "a" {
+                    attrs
+                        .into_iter()
+                        .map(|(name, value)| {
+                            if name == "href" && value.starts_with('/') && !value.starts_with("//")
+                            {
+                                (name, asset_href(base_path, &value))
+                            } else {
+                                (name, value)
+                            }
+                        })
+                        .collect()
+                } else {
+                    attrs
+                };
+                Node::Element {
+                    tag,
+                    attrs,
+                    children,
+                }
+            }
+            text @ Node::Text(_) => text,
+        })
+        .collect()
+}
+
 /// ページ全体（`<html>`）を組み立てる。`body` は本文（`markdown::markdown_to_nodes`
 /// の戻り値）。`current_path` はサイドバーの `aria-current` 判定に使う生の
 /// `page.path`（`base_path` を含まない）。
@@ -191,7 +238,11 @@ pub fn docs_page(nav: &Nav, page_title: &str, current_path: &str, body: Vec<Node
                     Node::element(
                         "main",
                         vec![("class".to_string(), "site-main".to_string())],
-                        vec![Node::element("article", vec![], body)],
+                        vec![Node::element(
+                            "article",
+                            vec![],
+                            rewrite_root_relative_hrefs(base_path, body),
+                        )],
                     ),
                 ],
             ),
@@ -305,5 +356,61 @@ path = "/api/"
         assert!(html.contains("<title>Guides | rust-ai-library</title>"));
         assert!(html.contains("href=\"/rust-ai-library/assets/site.css\""));
         assert!(html.contains("<article><h1>Guides</h1></article>"));
+    }
+
+    /// Cursor Bugbot 指摘（PR #899）の回帰テスト: 本文（`markdown::markdown_to_nodes`
+    /// 由来）中のルート相対リンク（`/` 始まり）が `site.base_path` を反映せず
+    /// 素通しで出力されると、nav・asset リンクとの扱いが不整合になり GitHub
+    /// Pages のプロジェクトサイト配下（`base_path = "/rust-ai-library"`）で本文内
+    /// リンクが壊れる。`docs_page` が `article` へ埋め込む前に本文中の `<a>` の
+    /// ルート相対 `href` へも `base_path` を反映することを確認する。
+    #[test]
+    fn docs_page_rewrites_root_relative_links_in_body_with_base_path() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let body = vec![Node::element(
+            "p",
+            vec![],
+            vec![Node::element(
+                "a",
+                vec![("href".to_string(), "/guides/backends/".to_string())],
+                vec![Node::text("Backends")],
+            )],
+        )];
+        let html = render(&docs_page(&nav, "Guides", "/guides/", body));
+        assert!(html.contains("<a href=\"/rust-ai-library/guides/backends/\">Backends</a>"));
+        // base_path を反映しない生の `/guides/backends/` はもう出現しない
+        // （本文中の href としては。sidebar 側の同一パスは既に base_path 反映
+        // 済みのため、上の assert と併せて素通し混入がないことを確認する）。
+        assert!(!html.contains("href=\"/guides/backends/\""));
+    }
+
+    /// `base_path = ""`（GitHub Pages のユーザー/組織サイト等、サブパスなし配置）
+    /// では本文中のルート相対リンクを変更しない（`asset_href("", href)` は
+    /// 元の値へ戻る）ことを確認する回帰テスト。
+    #[test]
+    fn docs_page_leaves_root_relative_links_unchanged_when_base_path_is_empty() {
+        let nav = parse_nav(
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "intro.md"
+path = "/intro/"
+"#,
+        )
+        .expect("valid nav.toml");
+        let body = vec![Node::element(
+            "a",
+            vec![("href".to_string(), "/intro/".to_string())],
+            vec![Node::text("Intro")],
+        )];
+        let html = render(&docs_page(&nav, "Top", "/", body));
+        assert!(html.contains("<a href=\"/intro/\">Intro</a>"));
     }
 }
