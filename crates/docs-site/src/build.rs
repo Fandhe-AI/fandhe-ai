@@ -173,7 +173,15 @@ fn page_output_path(out: &Path, page_path: &str) -> PathBuf {
 // ベースの検証では中間ディレクトリのシンボリックリンク差し替え TOCTOU を
 // 防げないため、`std` にない fd 相対 `openat`/`mkdirat`/`renameat`/`unlinkat`
 // を直接 FFI 宣言する。`lib.rs` の「unsafe の使用範囲」節参照）。
-#[cfg(unix)]
+//
+// `cfg(any(target_os = "linux", target_os = "macos"))` に限定する（`cfg(unix)`
+// ではない）理由（codex-review P2 指摘・PR #899）: 本モジュール内の `ModeT`・
+// `ELOOP`・`flags` モジュールはいずれも Linux・macOS 個別の定数値をハード
+// コードしており、他の unix 系 OS（FreeBSD 等）では定義が存在せずコンパイル
+// できない。対応 OS を明示し、それ以外の unix・非 unix は下の
+// `cfg(not(any(...)))` フォールバック（`Unsupported` エラーで fail-closed）に
+// 委ねる。
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(unsafe_code)]
 mod fd_walk {
     use std::ffi::{CString, OsStr};
@@ -503,12 +511,13 @@ mod fd_walk {
     }
 }
 
-/// unix 以外（Windows 等）は `openat` 相当の fd 相対 API がなく、
-/// [`fd_walk`]（unix 版）による TOCTOU 対策を実施できない。レビュー指摘の
-/// とおり検証不能なプラットフォームでは許可せず fail-closed に拒否する
-/// （`docs-site` は CI・開発者ローカル実行とも Linux/macOS が前提。
+/// Linux・macOS 以外（他 unix 系〈FreeBSD 等〉・Windows 等）は、上の
+/// `fd_walk`（Linux/macOS 版）が使う `openat` 相当の fd 相対 API を持たない
+/// か、`ModeT`/`ELOOP`/フラグ定数が未定義でその実装を利用できない。
+/// レビュー指摘のとおり検証不能なプラットフォームでは許可せず fail-closed に
+/// 拒否する（`docs-site` は CI・開発者ローカル実行とも Linux/macOS が前提。
 /// `.claude/rules/ci.md` 実機依存節）。
-#[cfg(not(unix))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod fd_walk {
     use std::ffi::OsStr;
     use std::fs::File;
@@ -769,6 +778,62 @@ fn write_file_creating_parent(
     Ok(())
 }
 
+/// `out`（`--out` の値そのもの）を安全に作成・オープンする。
+///
+/// 既存の [`fd_walk`] は `out` **配下**（各ページの出力先ディレクトリ列。
+/// [`write_file_creating_parent`]）の中間コンポーネントのシンボリックリンク
+/// 差し替えは検証済みだったが、`out` **ルート自体**がシンボリックリンクの
+/// 場合は `fs::create_dir_all(out)` / `fs::File::open(out)` がそのままリンクを
+/// 追従してしまい、fd_walk の検証済み起点に到達する前の段階で `out` の外へ
+/// HTML/CSS を書き込めていた（codex-review 指摘・PR #899 P0）。
+///
+/// `out` の親ディレクトリまでは通常の `fs::create_dir_all` で作成する
+/// （`fd_walk` の `O_NOFOLLOW` 全経路ウォークをここまで及ぼさない意図的な
+/// スコープ限定。理由は 2 点: (1) `fd_walk::normalize_components` は `..` を
+/// 含む経路をすべて拒否するため、`out` に相対パス由来の `..` が残る場合
+/// フォールバックできず正当な指定まで壊してしまう。(2) `/`（filesystem
+/// root）を起点に全コンポーネントを `O_NOFOLLOW` で辿ると、`/tmp` 自体が
+/// symlink（macOS の `/tmp` → `/private/tmp`）等の正当な中間 symlink も
+/// 拒否してしまい、`--out /tmp/...` のような一般的な指定が通らなくなる。
+/// 親ディレクトリ列自体の中間シンボリックリンク差し替え TOCTOU は本 P0 指摘
+/// （`out` ルート自体が symlink であるケース）とは別の脅威モデルであり
+/// 本関数のスコープ外とする）。**最終コンポーネント（`out` 自身）だけ**は
+/// [`fd_walk::open_or_create_dir_chain`]（`mkdirat` + `O_DIRECTORY |
+/// O_NOFOLLOW` オープン）で作成・オープンし、`out` が既存のシンボリック
+/// リンクであれば fail-closed に [`BuildError::UnsafeOutputPath`] を返す。
+///
+/// `out.file_name()` が `None`（`.`・`..`・`/` 等、名前を持たない特殊
+/// コンポーネントで終わる経路）の場合は、そもそも「攻撃者が任意の名前へ
+/// 差し替え可能な独立したディレクトリエントリ」が存在しないため
+/// （`.`/`..` はプロセスの実 CWD 自体の別名であり、symlink を仕込む対象と
+/// なる名前付きエントリではない）、本関数の脅威モデルの対象外として旧来の
+/// `fs::create_dir_all` + `fs::File::open` にフォールバックする。
+fn open_out_root_dir(out: &Path) -> Result<fs::File, BuildError> {
+    let Some(file_name) = out.file_name() else {
+        fs::create_dir_all(out).map_err(BuildError::CreateOutDir)?;
+        return fs::File::open(out).map_err(BuildError::CreateOutDir);
+    };
+    let parent = out.parent().unwrap_or_else(|| Path::new(""));
+
+    let parent_dir_fd = if parent.as_os_str().is_empty() {
+        // `out` がカレントディレクトリ直下の単一コンポーネント（例:
+        // `"out"`）の場合。カレントディレクトリを起点として `out` 自身の
+        // symlink 検査を行う。
+        fs::File::open(".").map_err(BuildError::CreateOutDir)?
+    } else {
+        fs::create_dir_all(parent).map_err(BuildError::CreateOutDir)?;
+        fs::File::open(parent).map_err(BuildError::CreateOutDir)?
+    };
+
+    fd_walk::open_or_create_dir_chain(&parent_dir_fd, Path::new(file_name)).map_err(|error| {
+        if fd_walk::is_symlink_rejection(&error) {
+            BuildError::UnsafeOutputPath(out.display().to_string())
+        } else {
+            BuildError::CreateOutDir(error)
+        }
+    })
+}
+
 /// `<root>/site/nav.toml` を読み込み・パース・検証し、各ページを Markdown→HTML
 /// 変換したうえで `out` 配下へ実ファイルとして書き出すビルドパイプライン。
 ///
@@ -856,8 +921,9 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     }
 
     // 手順 4: 出力ディレクトリ作成 → ページ書き出し → テーマ CSS 書き出し。
-    fs::create_dir_all(out).map_err(BuildError::CreateOutDir)?;
-    let out_root_dir = fs::File::open(out).map_err(BuildError::CreateOutDir)?;
+    // `out` ルート自体の symlink 検査は [`open_out_root_dir`] が担う（P0
+    // 修正・PR #899）。
+    let out_root_dir = open_out_root_dir(out)?;
 
     let mut written = Vec::with_capacity(rendered_pages.len() + 1);
     for (relative_out_path, html_out) in &rendered_pages {
@@ -1341,6 +1407,64 @@ path = "/intro/"
             fs::read_to_string(&victim).unwrap(),
             "do not overwrite me",
             "the symlink target must not be overwritten"
+        );
+    }
+
+    /// 回帰テスト（codex-review 指摘・PR #899 P0）: `--out` で渡されたパス
+    /// **自体**が既存のシンボリックリンクの場合、`open_out_root_dir` が
+    /// `fs::create_dir_all`/`fs::File::open` でリンクを追従せず、
+    /// `UnsafeOutputPath` で fail-closed に拒否することを確認する。既存の
+    /// `build_site_rejects_output_path_escaping_via_symlinked_parent` は
+    /// `out` 配下の中間コンポーネントを対象にしていたが、本テストは `out`
+    /// ルート自体を対象にする点が異なる（unix 限定）。
+    #[cfg(unix)]
+    #[test]
+    fn build_site_rejects_output_root_that_is_itself_a_symlink() {
+        let root = TempDir::new("build-out-root-symlink-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro").unwrap();
+
+        // `out` 自体を、実在しないパスとして用意したうえで `outside` を指す
+        // シンボリックリンクへ差し替える（`--out` の値そのものが symlink の
+        // ケースを再現する）。
+        let outside = TempDir::new("build-out-root-symlink-outside");
+        let out_link_parent = TempDir::new("build-out-root-symlink-parent");
+        let out_path = out_link_parent.0.join("out");
+        std::os::unix::fs::symlink(&outside.0, &out_path)
+            .expect("create symlink standing in for the --out root itself");
+
+        match build_site(&root.0, &out_path) {
+            Err(BuildError::UnsafeOutputPath(_)) => {}
+            other => panic!("expected UnsafeOutputPath for a symlinked --out root, got {other:?}"),
+        }
+        assert!(
+            !outside.0.join("intro/index.html").exists(),
+            "must not write through the symlinked --out root into the outside directory"
+        );
+        assert!(
+            !outside.0.join("assets/site.css").exists(),
+            "must not write assets through the symlinked --out root into the outside directory"
+        );
+        assert!(
+            !outside.0.join("intro").exists(),
+            "must not create directories through the symlinked --out root into the outside directory"
         );
     }
 }
