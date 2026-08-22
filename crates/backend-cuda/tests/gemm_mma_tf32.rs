@@ -147,44 +147,28 @@ fn tensor_core_unsupported_display_mentions_compute_capability_8() {
 }
 
 /// m==0／n==0／k==0 で `run_tf32` を呼んでも CUDA 起動そのものが発生せず、
-/// ゼロ次元形状の契約どおりの結果を返すことを確認する
+/// ゼロ次元形状の契約どおりの結果を返すことを実機で確認する
 /// （`tests/gemm_mma.rs::mma_f16_zero_dim_shape_returns_empty_without_launch`
 /// と同型）。
 ///
-/// **#853 是正: 環境適応型へ変換（`#[ignore]` を外す）**。この分岐が
-/// 検証する no-op 早期 return（`gemm_mma_tf32.rs::run_tf32` 97〜119 行
-/// ドキュメンテーションコメント参照）は `validate_gemm_dims` 通過後・
-/// カーネル起動前のホスト側処理のみで完結するため、`CudaMmaTf32Gemm::
-/// new` が成功する環境（実機）では実際にカーネル起動なしで検証でき、
-/// CUDA・NVRTC 非搭載の通常 CI では `DriverUnavailable`/`NvrtcUnavailable`
-/// 等の分岐で早期 return し green のまま
-/// （`run_tf32_rejects_misaligned_shape_without_launch` と同じ環境適応
-/// パターン）。PR #843 の対象外記録・#389 前例を踏まえたテスト側の
-/// バッファ長是正（検証順序・契約自体は変更しない）と合わせて #853 で
-/// 対応した。
+/// **#853 是正の再修正（codex-review P1 指摘対応）**: 一度は環境適応型
+/// （`#[ignore]` を外し `DriverUnavailable`/`NvrtcUnavailable` 等で
+/// 早期 return する形）へ変換したが、この形では通常 CI（CUDA 非搭載）で
+/// 実際には何も検証せず素通りするだけになり、AGENTS.md・
+/// `.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]` で分離
+/// する」規約に反する（実機依存テストを通常 CI 対象化した扱いになる）
+/// うえ、実機上でも `Driver(_)`/`NvrtcUnavailable`/`TensorCoreUnsupported`
+/// を成功扱いにしてしまいドライバ異常・NVRTC 構成不備を回帰として
+/// 検出できない。よって `#[ignore]` を復元し、`mma_f16_zero_dim_shape_
+/// returns_empty_without_launch` と同じ `expect` ベースの実機専用形へ
+/// 戻す。#389 前例を踏まえたテスト側のバッファ長是正（`validate_gemm_
+/// dims` の検証順序・契約自体は変更しない）は維持する。
 #[test]
+#[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
-    let device = match CudaDevice::new(0) {
-        Ok(dev) => dev,
-        Err(CudaError::DriverUnavailable { detail }) => {
-            assert!(!detail.is_empty(), "detail message must not be empty");
-            return;
-        }
-        Err(CudaError::Driver(_)) => return,
-        Err(other) => panic!("unexpected CudaError variant from CudaDevice::new: {other}"),
-    };
-    let gemm = match CudaMmaTf32Gemm::new(&device) {
-        Ok(gemm) => gemm,
-        Err(CudaError::NvrtcUnavailable { detail }) => {
-            assert!(!detail.is_empty());
-            return;
-        }
-        Err(CudaError::TensorCoreUnsupported { detail }) => {
-            assert!(!detail.is_empty());
-            return;
-        }
-        Err(other) => panic!("unexpected CudaError variant from CudaMmaTf32Gemm::new: {other}"),
-    };
+    let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
+    let gemm =
+        CudaMmaTf32Gemm::new(&device).expect("TF32 mma.sync kernel compilation must succeed");
 
     // `validate_gemm_dims`（`gemm_mma_tf32.rs::run_tf32` が m==0/n==0 の
     // 早期 return より先に必ず呼ぶ）は no-op 形状でも a.len()==m*k・
@@ -193,15 +177,20 @@ fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
     // #389 の教訓を踏襲）。よって m=0 の呼び出しは b（k*n=16 要素）を、
     // n=0 の呼び出しは a（m*k=16 要素）を満たす必要がある（#852 で是正。
     // `validate_gemm_dims` 側の検証順序・契約は変更しない）。
-    assert_eq!(
-        gemm.run_tf32(&[], &[0.0f32; 16], 0, 4, 4).unwrap(),
-        Vec::<f32>::new()
-    );
-    assert_eq!(
-        gemm.run_tf32(&[0.0f32; 16], &[], 4, 0, 4).unwrap(),
-        Vec::<f32>::new()
-    );
-    assert_eq!(gemm.run_tf32(&[], &[], 4, 4, 0).unwrap(), vec![0.0f32; 16]);
+    let c = gemm
+        .run_tf32(&[], &[0.0f32; 16], 0, 4, 4)
+        .expect("m==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+
+    let c = gemm
+        .run_tf32(&[0.0f32; 16], &[], 4, 0, 4)
+        .expect("n==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+
+    let c = gemm
+        .run_tf32(&[], &[], 4, 4, 0)
+        .expect("k==0 must zero-fill C, not fail as a driver launch error");
+    assert_eq!(c, vec![0.0f32; 16]);
 }
 
 /// `launch_tf32`（直接起動 safe API）も `run_tf32` と同じ no-op 形状契約
