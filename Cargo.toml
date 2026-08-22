@@ -59,6 +59,12 @@ version = "0.3.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 publish = false
+# crates.io 公開メタデータ（イシュー #880。PR #892 は #891 rename 前の main を
+# base にしていたためコンフリクトし、origin/main から作り直した。publish フラグの
+# per-crate 制御・path 依存への version 付与・per-crate README は #891〜#894 で
+# 既に main へ反映済みのため、本 PR の残差分はここ〈repository〉と各公開クレートの
+# keywords / categories / description のみ）。
+repository = "https://github.com/Fandhe-AI/rust-ai-library"
 
 # 許容依存 8 区分（.claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
 # 各クレートは `<name>.workspace = true` で参照し、バージョン更新はこのテーブルのみを

@@ -4,10 +4,15 @@
 # 変更しない。lib 名は Rust 識別子化された `fandhe_ai`（`use fandhe_ai::` で
 # 参照する。facade が唯一のサポートされる公開 API 面。CLAUDE.md）。
 name = "fandhe-ai"
-description = "composition root・compat 公開面（REQ-1・REQ-9・TASK-9.3）"
+# crates.io 公開向け説明文（英語。イシュー #880）。内部向け旧説明:
+# 「composition root・compat 公開面（REQ-1・REQ-9・TASK-9.3）」
+description = "Facade crate for a from-scratch Rust AI/ML library: tensors, autodiff, and CPU/CUDA/Metal backends behind one composition root"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# crates.io 公開メタデータ（#880）。`workspace.package.repository`（ルート
+# Cargo.toml）を参照する。
+repository.workspace = true
 # crates.io の各クレートページに表示される readme（イシュー #882）。
 # ルート README 共用ではなく per-crate 方式を採用: ルート README は開発環境
 # 構築・CI 等の内部開発情報まで含むため、crates.io ページにそのまま出すと
@@ -19,6 +24,12 @@ readme = "README.md"
 # §6）。ルート `[workspace.package]` の `publish = false`（docs-site 等の非公開
 # クレート向け既定）を明示的に上書きし、本クレートを公開可能にする。
 publish = true
+# crates.io 検索・カテゴリページ向けメタデータ（#880）。keywords は crates.io
+# 制約（最大 5 個・各 20 文字以内英数字とハイフン）を満たす。categories は
+# crates.io の有効スラッグ（https://crates.io/api/v1/categories で実測確認済み）
+# のみを使う。
+keywords = ["ai", "machine-learning", "deep-learning", "tensor", "autograd"]
+categories = ["science", "mathematics"]
 
 # 依存形状は `crates/bench-harness/Cargo.toml` と同型（spec 確定。
 # docs/spec/05-tasks.md TASK-9.3）: `backend-cuda` は無条件依存（`cudarc`
