@@ -4,10 +4,10 @@
 //! の必須提供と、GEMM（M=N=K=4096, f32）を代表ワークロードとした係数上限
 //! （理論最小ワーキングセット A+B+C ≈ 192MiB の 2 倍以内 = 384MiB 以内）を
 //! 求める。内部計測 API は TASK-14.1（#173〜#176。完了済み）で実装済みの
-//! `tensor_core::memory_stats::{MemoryStats, AllocationTracker,
+//! `fandhe_ai_tensor_core::memory_stats::{MemoryStats, AllocationTracker,
 //! TrackedAllocation}` を `CpuMemory`／`CudaMemory`／`MetalMemory` の 3
 //! バックエンドが同一シグネチャで実装する（`allocated_bytes`／
-//! `peak_allocated_bytes`／`reset_peak`。`tensor_core::memory_stats` モジュール
+//! `peak_allocated_bytes`／`reset_peak`。`fandhe_ai_tensor_core::memory_stats` モジュール
 //! コメント参照）。
 //!
 //! 本モジュール（#178・TASK-14.2a）はこの内部計測 API で GEMM 4096³ の
@@ -17,7 +17,7 @@
 //! であり、本モジュールはその入力データ（内部 API 値と外部参考値の乖離
 //! データ）を生成するのみに留める。
 //!
-//! # 計測対象の粒度（計測境界。`tensor_core::memory_stats` モジュール
+//! # 計測対象の粒度（計測境界。`fandhe_ai_tensor_core::memory_stats` モジュール
 //! コメント「計測対象の粒度」参照）
 //!
 //! [`MemoryStats`] が計上するのは `MemoryOps`（`alloc_zeroed`／`upload`）
@@ -99,9 +99,9 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use tensor_core::device::BackendError;
-use tensor_core::memory_stats::MemoryStats;
-use tensor_core::{BackendOps, MemoryOps, Tensor};
+use fandhe_ai_tensor_core::device::BackendError;
+use fandhe_ai_tensor_core::memory_stats::MemoryStats;
+use fandhe_ai_tensor_core::{BackendOps, MemoryOps, Tensor};
 
 use crate::rng::Xorshift64Star;
 use crate::stats::{self, BenchError as StatsError};
@@ -223,7 +223,7 @@ impl PeakMemoryBackend {
 }
 
 /// `size × size` の正方行列 1 枚分の f32 確保バイト数を検査付きで計算する。
-/// `backend_cpu::memory::checked_byte_len` と同型の方針
+/// `fandhe_ai_backend_cpu::memory::checked_byte_len` と同型の方針
 /// （`.claude/rules/security.md` A03: `--size` は外部入力に相当するため、
 /// バイト数換算でもオーバーフローを型付きエラーとして拒否する）。
 fn byte_len_for_square(size: usize) -> Result<u64, PeakMemoryError> {
@@ -689,14 +689,14 @@ fn make_trial_inputs(
 /// CPU バックエンド 1 trial 分の計測（モジュール冒頭「計測手順」参照）。
 fn run_cpu_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, PeakMemoryError> {
     let (a, b) = make_trial_inputs(size, trial_index)?;
-    let mem = backend_cpu::CpuMemory::new();
+    let mem = fandhe_ai_backend_cpu::CpuMemory::new();
     mem.reset_peak();
 
     let buf_a = mem.upload(&a)?;
     let buf_b = mem.upload(&b)?;
     let buf_c = mem.alloc_zeroed(&[size, size])?;
 
-    let ops = backend_cpu::CpuBackendOps::new();
+    let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
     // `gemm` 実行区間だけを `alloc_tracker` の計測窓に切り出す（`upload`／
     // `alloc_zeroed` 自体のホスト側確保を GEMM 内部確保と混同しないため。
     // PR #370 codex-review 指摘 P1 対応）。`measure` が
@@ -730,23 +730,23 @@ fn run_cpu_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, Pea
 /// を返す（`startup::run_cuda` と同型の fail-closed 契約。
 /// `backend-cuda/src/device.rs` の動的ロードゲート参照）。
 fn run_cuda_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, PeakMemoryError> {
-    if !backend_cuda::CudaDevice::is_available() {
+    if !fandhe_ai_backend_cuda::CudaDevice::is_available() {
         return Err(PeakMemoryError::DeviceUnavailable(
             "CUDA driver が利用不可（is_available() == false）".to_string(),
         ));
     }
-    let device = backend_cuda::CudaDevice::new(0)
+    let device = fandhe_ai_backend_cuda::CudaDevice::new(0)
         .map_err(|e| PeakMemoryError::DeviceUnavailable(format!("CudaDevice::new 失敗: {e}")))?;
 
     let (a, b) = make_trial_inputs(size, trial_index)?;
-    let mem = backend_cuda::CudaMemory::new(&device);
+    let mem = fandhe_ai_backend_cuda::CudaMemory::new(&device);
     mem.reset_peak();
 
     let buf_a = mem.upload(&a)?;
     let buf_b = mem.upload(&b)?;
     let buf_c = mem.alloc_zeroed(&[size, size])?;
 
-    let ops = backend_cuda::CudaBackendOps::new(device.ordinal());
+    let ops = fandhe_ai_backend_cuda::CudaBackendOps::new(device.ordinal());
     let start = Instant::now();
     ops.gemm(&a, &b)?;
     let gemm_secs = start.elapsed().as_secs_f64();
@@ -775,17 +775,17 @@ fn run_cuda_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, Pe
 #[cfg(target_os = "macos")]
 fn run_metal_trial(size: usize, trial_index: usize) -> Result<PeakMemoryTrial, PeakMemoryError> {
     let (a, b) = make_trial_inputs(size, trial_index)?;
-    let context = backend_metal::MetalContext::new().map_err(|e| {
+    let context = fandhe_ai_backend_metal::MetalContext::new().map_err(|e| {
         PeakMemoryError::DeviceUnavailable(format!("MetalContext::new 失敗: {e:?}"))
     })?;
-    let mem = backend_metal::MetalMemory::new(context);
+    let mem = fandhe_ai_backend_metal::MetalMemory::new(context);
     mem.reset_peak();
 
     let buf_a = mem.upload(&a)?;
     let buf_b = mem.upload(&b)?;
     let buf_c = mem.alloc_zeroed(&[size, size])?;
 
-    let ops = backend_metal::MetalBackendOps::new();
+    let ops = fandhe_ai_backend_metal::MetalBackendOps::new();
     let start = Instant::now();
     ops.gemm(&a, &b)?;
     let gemm_secs = start.elapsed().as_secs_f64();

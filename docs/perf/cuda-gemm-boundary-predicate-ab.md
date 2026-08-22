@@ -128,11 +128,11 @@ git fetch origin
 
 # base（変更前 = 本 PR の状態。境界検査は毎回比較のまま。origin/main 相当）
 git checkout <base-sha>
-cargo run -p backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_base.txt
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_base.txt
 
 # head（本ドキュメントの head 案設計スケッチに従い実装した実験ブランチ）
 git checkout <predicate-experiment-branch>
-cargo run -p backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_head.txt
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_head.txt
 ```
 
 出力形式（`crates/backend-cuda/examples/gemm_mma_bench.rs` 参照）の `MMA_F16` 経路（f16
@@ -142,7 +142,7 @@ cargo run -p backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_ben
 検証する）:
 
 ```sh
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 ```
 
 `cpu_cuda_mma_parity`・`parity_nonregression`（tolerance pin テスト含む）等が green であること

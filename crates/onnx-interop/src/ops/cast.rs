@@ -10,13 +10,13 @@
 //! （PyTorch エクスポート・opset 13 以降相当）が使用しうる `FLOAT(1)`／`INT64(7)`／
 //! `BOOL(9)`／`FLOAT16(10)` の相互変換。
 
+use fandhe_ai_tensor_core::Tensor;
 use half::f16;
-use tensor_core::Tensor;
 
 use super::error::OpError;
 
 /// 非 contiguous な入力を実体化してスライスを取り出す共通ヘルパ。
-fn contiguous_slice<T: tensor_core::Element>(
+fn contiguous_slice<T: fandhe_ai_tensor_core::Element>(
     op: &'static str,
     x: &Tensor<T>,
 ) -> Result<(Tensor<T>, Vec<T>), OpError> {

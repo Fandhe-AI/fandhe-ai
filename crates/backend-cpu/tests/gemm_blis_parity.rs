@@ -11,8 +11,8 @@
 //! 3. K を大きく取ったストレス形状で FMA 契約の退行を検出し、
 //! 4. 境界条件（m=0／n=0／k=0）・エラー経路を検証する。
 
-use backend_cpu::{GemmError, gemm_blis, gemm_blis_parallel, gemm_naive};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::{GemmError, gemm_blis, gemm_blis_parallel, gemm_naive};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)

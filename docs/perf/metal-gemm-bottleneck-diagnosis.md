@@ -16,7 +16,7 @@ Metal GEMM が実測（`docs/perf/metal-gemm-dynamic-tile.md`・#381 実測）�
 （`docs/real-hardware-verification-env.md` §1・§7「ローカル直接実行」）だが本セッション環境は Linux のため、
 #188 → #380/#381 の先例に従い、Linux 側で完了できる範囲（診断 example の実装・解析値の算出・doc の計測
 手順・記録テンプレート・判定基準の確定）のみを本 PR で行う。**§4「実測結果」・§5「結論」は Mac 実機セッション
-で `cargo run -p backend-metal --example gemm_diagnosis --release -- --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200`
+で `cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release -- --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200`
 を実行してから記入する（CLI 引数は macOS 実行時必須。§1 参照。`--iters=200` は §2「サンプル数下限」節参照）。**
 
 ## 1. 計測手段
@@ -97,7 +97,7 @@ git fetch origin
 # origin/test/487-metal-gemm-bottleneck-diagnosis を指定する
 git checkout --detach origin/main
 git rev-parse HEAD   # この SHA を §4.1「計測コミット SHA」へ記入する
-cargo run -p backend-metal --example gemm_diagnosis --release -- \
+cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis --release -- \
     --gpu-core-count=40 --ideal-groups-multiplier=6 --iters=200
 ```
 
@@ -170,7 +170,7 @@ done | tee /tmp/gpu_utilization_$(date +%Y%m%d_%H%M%S).log
 計測衛生: AC 電源接続。他 GPU 負荷アプリ（ブラウザ動画・Xcode ビルド・ローカル LLM 等）は終了してから計測する
 （`docs/perf/metal-gemm-dynamic-tile.md`「計測環境」節と同方針）。
 
-## 3. 解析値の事前計算（Linux worktree で算出済み。`cargo run -p backend-metal --example gemm_diagnosis` の
+## 3. 解析値の事前計算（Linux worktree で算出済み。`cargo run -p fandhe-ai-backend-metal --example gemm_diagnosis` の
 非 macOS stub 出力をそのまま転記）
 
 ### 3.1 出典・前提

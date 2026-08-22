@@ -102,7 +102,7 @@ metal-gemm-occupancy-target.md` §3.3 の期待値。実機実測は未完了）
 ## 4. 実機計測手順（Mac 実機セッションで実施）
 
 ```sh
-cargo run -p backend-metal --example gemm_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
 ```
 
 `examples/gemm_bench.rs` の `--- occupancy 判定組み込み比較 ---` セクション（size ∈ {512, 1024, 2048,
@@ -114,7 +114,7 @@ cargo run -p backend-metal --example gemm_bench --release
 完了するまで `select_with_occupancy` を呼ばない**（`crate::gemm` モジュールドキュメンテーション
 コメント参照。codex-review P1・PR #684）。
 
-`cargo test -p backend-metal -- --ignored --nocapture` で `MetalOccupancyInfo::probe` 系テストの実測値
+`cargo test -p fandhe-ai-backend-metal -- --ignored --nocapture` で `MetalOccupancyInfo::probe` 系テストの実測値
 （GPU コア数・SMEM 上限）も確認できる（`docs/perf/metal-gemm-occupancy-target.md` §3.2 と同じ手順）。
 
 ## 5. 記録テンプレート（要実機実測記入）
@@ -178,10 +178,10 @@ occupancy 縮退が有利という実測根拠は存在しないため、本判�
 
 本 PR（コメント・テスト・docs のみ・本番挙動不変）に対する確認は以下のとおり:
 
-- **数値一致 ignored テスト全 pass の確認**（`cargo test -p backend-metal --release -- --ignored`）:
+- **数値一致 ignored テスト全 pass の確認**（`cargo test -p fandhe-ai-backend-metal --release -- --ignored`）:
   本変更は `dispatch_auto`・カーネル・選択ロジックを一切変更していないため理論上非影響。形式確認
   として記入する。結果: （未計測）
-- **512 帯改善の floor bench 反映確認**（`cargo run -p backend-metal --release --example
+- **512 帯改善の floor bench 反映確認**（`cargo run -p fandhe-ai-backend-metal --release --example
   gemm_f32_prepared_bench`）: #744 是正（既マージ）による改善が floor bench に反映されている
   ことの確認。結果: （未計測。`docs/perf/metal-tile-select-correction.md`「floor bench 参考記録」
   節と同一の記入対象）

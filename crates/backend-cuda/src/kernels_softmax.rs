@@ -97,7 +97,7 @@
 //! - **意味論の正**: `tests/softmax_parity.rs` 内のテスト専用 CPU 参照
 //!   実装（`f32::mul_add` 使用）が意味論の正である。`onnx-interop` 側の
 //!   素朴実装（3 パス）とも parity を取るが、本カーネルの数値的な正は
-//!   `backend_cpu::parity::assert_parity`（REQ-2 複合判定）で判定する。
+//!   `fandhe_ai_backend_cpu::parity::assert_parity`（REQ-2 複合判定）で判定する。
 //!
 //! # ベクトル化・ループ添字・REQ-8 境界検査
 //!

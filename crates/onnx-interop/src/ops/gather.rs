@@ -8,7 +8,7 @@
 //! （イシュー #274。`interp::Value` の `F32`／`I64`／`Bool`／`F16` いずれの
 //! `data` に対しても同じ実装で動作する）。
 
-use tensor_core::{Element, Tensor};
+use fandhe_ai_tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;

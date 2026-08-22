@@ -1,15 +1,15 @@
 //! イシュー #294（feat(compat): Sequential の学習 API〈optimizer 接続〉
-//! 対応）の受け入れ条件 2「optimizer（`autodiff::optim::Sgd`・
-//! `autodiff::nn::optim::AdamW`）と組み合わせた学習ループの動作を確認
-//! するテスト」を公開 API（`facade::compat`）経由で検証する統合テスト
-//! （TASK-9.2a・#95 で `autodiff::compat` に実装。TASK-9.4・#411 で
-//! `facade::compat` へ移設）。
+//! 対応）の受け入れ条件 2「optimizer（`fandhe_ai_autodiff::optim::Sgd`・
+//! `fandhe_ai_autodiff::nn::optim::AdamW`）と組み合わせた学習ループの動作を確認
+//! するテスト」を公開 API（`fandhe_ai::compat`）経由で検証する統合テスト
+//! （TASK-9.2a・#95 で `fandhe_ai_autodiff::compat` に実装。TASK-9.4・#411 で
+//! `fandhe_ai::compat` へ移設）。
 //!
 //! `crates/autodiff/tests/nn_train_convergence.rs` は `nn::Linear` を
 //! 直接使う手動学習ループ（optimizer 未実装〈#192 着手前〉当時のテスト
 //! ローカル SGD 代替）を固定するのに対し、本ファイルは
 //! **`compat::Sequential::bind` が返す `SequentialVars` 経由の学習
-//! ループ**と、実装済みの `autodiff::optim::Sgd`/`autodiff::nn::optim::
+//! ループ**と、実装済みの `fandhe_ai_autodiff::optim::Sgd`/`fandhe_ai_autodiff::nn::optim::
 //! AdamW` を接続する点が異なる。
 //!
 //! **決定的シード**: 重み初期化（`Sequential::add_linear` の `seed`
@@ -22,10 +22,10 @@
 //! 新規の許容誤差は設けない。手動ループとのパリティ確認はビット一致
 //! （tolerance 不使用。`coding-rust.md`「許容誤差を単独で緩和しない」）。
 //!
-//! **TASK-9.4 での構成変更**: 旧 `autodiff::compat` 版は `tests/common`
+//! **TASK-9.4 での構成変更**: 旧 `fandhe_ai_autodiff::compat` 版は `tests/common`
 //! （`autodiff` クレート非公開 API を再実装した naive `BackendOps`
 //! フィクスチャ）で `Tape` を構築していたが、`facade` から `autodiff` の
-//! 統合テスト専用フィクスチャは到達できないため、`facade::tape()`
+//! 統合テスト専用フィクスチャは到達できないため、`fandhe_ai::tape()`
 //! （composition root・既定 CPU・`CpuBackendOps`・融合有効）へ差し替えた。
 //! 本ファイルの各テストは「手動ループ」と「Sequential 経由ループ」の
 //! **同一 ops 同士**のビット一致比較（parity ではなく完全一致）が主眼
@@ -34,15 +34,15 @@
 //!
 //! 実機（CUDA/Metal）非依存のため `#[ignore]` 分離は行わない。
 
-use autodiff::AutodiffError;
-use autodiff::nn::Linear;
-use autodiff::nn::activation::Relu;
-use autodiff::nn::loss::{MseLoss, Reduction};
-use autodiff::nn::optim::{AdamW, AdamWConfig};
-use autodiff::optim::{Sgd, SgdConfig};
 use bench_harness::rng::Xorshift64Star;
-use facade::compat::Sequential;
-use tensor_core::Tensor;
+use fandhe_ai::compat::Sequential;
+use fandhe_ai_autodiff::AutodiffError;
+use fandhe_ai_autodiff::nn::Linear;
+use fandhe_ai_autodiff::nn::activation::Relu;
+use fandhe_ai_autodiff::nn::loss::{MseLoss, Reduction};
+use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
+use fandhe_ai_autodiff::optim::{Sgd, SgdConfig};
+use fandhe_ai_tensor_core::Tensor;
 
 const BATCH: usize = 4;
 const D_IN: usize = 8;
@@ -99,7 +99,7 @@ fn train_with_sgd(model: &mut Sequential, steps: usize, lr: f32) -> Vec<f32> {
 
     for _ in 0..steps {
         let updated = {
-            let tape = facade::tape();
+            let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
             let x = tape.var(&x_data);
             let y = tape.var(&y_data);
@@ -157,13 +157,15 @@ fn manual_sgd_step(
     y_data: &Tensor<f32>,
     sgd: &mut Sgd,
 ) -> Result<(f32, [Tensor<f32>; 4]), AutodiffError> {
-    // `Linear::bind`／`Module::forward` は `&autodiff::Tape` を要求する
+    // `Linear::bind`／`Module::forward` は `&fandhe_ai_autodiff::Tape` を要求する
     // ため（`compat::Sequential` の公開シグネチャとは異なり、本関数は
     // `nn::Linear` を直接使う手動ループのテストフィクスチャ）、
-    // `facade::tape()` ではなく同じ ops 構成の生 `autodiff::Tape` を使う
+    // `fandhe_ai::tape()` ではなく同じ ops 構成の生 `fandhe_ai_autodiff::Tape` を使う
     // （`crates/facade/tests/compat_sequential.rs::raw_facade_equivalent_tape`
     // と同型）。
-    let tape = autodiff::Tape::new_with_ops(Box::new(backend_cpu::CpuBackendOps::new()));
+    let tape = fandhe_ai_autodiff::Tape::new_with_ops(Box::new(
+        fandhe_ai_backend_cpu::CpuBackendOps::new(),
+    ));
     let x = tape.var(x_data);
     let y = tape.var(y_data);
 
@@ -172,7 +174,7 @@ fn manual_sgd_step(
     let relu = Relu;
 
     let h1 = l1v.forward(&x)?;
-    let a1 = <Relu as autodiff::nn::Module>::forward(&relu, &tape, &h1)?;
+    let a1 = <Relu as fandhe_ai_autodiff::nn::Module>::forward(&relu, &tape, &h1)?;
     let h2 = l2v.forward(&a1)?;
     let loss = MseLoss::new(Reduction::Mean).forward(&h2, &y)?;
     let loss_value = scalar(&loss.to_tensor());
@@ -228,7 +230,7 @@ fn sequential_training_loop_matches_manual_loop_bit_exact() {
     let mut seq_losses = Vec::with_capacity(STEPS);
     for _ in 0..STEPS {
         let updated = {
-            let tape = facade::tape();
+            let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
             let x = tape.var(&x_data);
             let y = tape.var(&y_data);
@@ -273,7 +275,7 @@ fn sequential_training_loop_matches_manual_loop_bit_exact() {
 // 受け入れ条件 2-3: AdamW 学習ループ
 // =====================================================================
 
-/// AdamW（`autodiff::nn::optim::AdamW`）でも `Sequential` 経由の学習
+/// AdamW（`fandhe_ai_autodiff::nn::optim::AdamW`）でも `Sequential` 経由の学習
 /// ループが動作し loss が減少すること。`AdamW::step` はタプル列
 /// `&[(&Tensor, &Tensor)]` を受け取る（`Sgd::step` の 2 列 API とは
 /// シグネチャが異なる）ため、`trainable_parameters()` と
@@ -290,7 +292,7 @@ fn sequential_adamw_training_loop_reduces_loss() {
 
     for _ in 0..STEPS {
         let updated = {
-            let tape = facade::tape();
+            let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
             let x = tape.var(&x_data);
             let y = tape.var(&y_data);
@@ -330,7 +332,7 @@ fn sequential_adamw_training_loop_reduces_loss() {
 fn trainable_grads_rejects_unreached_parameter() {
     let model = build_model();
 
-    let tape = facade::tape();
+    let tape = fandhe_ai::tape();
     let bound = model.bind(&tape);
     let x_data = tensor(vec![0.1_f32; BATCH * D_IN], &[BATCH, D_IN]);
     let x = tape.var(&x_data);

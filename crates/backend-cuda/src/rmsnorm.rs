@@ -21,7 +21,7 @@ use std::sync::Arc;
 use cudarc::driver::sys::CUdevice_attribute;
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
-use tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
+use fandhe_ai_tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
@@ -65,7 +65,7 @@ pub struct RmsNormShape {
 /// に `f32` 換算で収まるかを純関数で判定する（実機なしで単体テスト可能）。
 ///
 /// **1 パス／2 パス判定は本関数（バックエンド側）の責務**である
-/// （`tensor_core::fusion::RowFusionMeta` ドキュメンテーションコメント
+/// （`fandhe_ai_tensor_core::fusion::RowFusionMeta` ドキュメンテーションコメント
 /// 「1 パス／2 パス判定は各バックエンドの責務」参照。#588 codex-review
 /// P2 是正で `tensor-core` 側から閾値を切り離した設計を、本関数が CUDA
 /// バックエンド側の具体的な予算判定として実装する）。opt-in SMEM
@@ -1331,7 +1331,7 @@ mod tests {
 
     // --- match_rmsnorm_plan ---
     //
-    // `tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の
+    // `fandhe_ai_tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の
     // `pub(crate)`（`fusion/mod.rs` 冒頭コメント「配置は `tensor-core` の
     // 1 か所に閉じる」参照）で `backend-cuda` からは参照できないため、
     // ここでは `autodiff` と同じ構築経路（[`FusionPlan::from_ops`]。`pub` +
@@ -1359,7 +1359,7 @@ mod tests {
             },
             FusedOpKind::Mul { lhs: 4, rhs: 0 },
         ];
-        FusionPlan::from_ops(ops, vec![hidden], tensor_core::DType::F32, 1).unwrap()
+        FusionPlan::from_ops(ops, vec![hidden], fandhe_ai_tensor_core::DType::F32, 1).unwrap()
     }
 
     #[test]
@@ -1394,7 +1394,8 @@ mod tests {
             },
             FusedOpKind::Div { lhs: 4, rhs: 6 },
         ];
-        let plan = FusionPlan::from_ops(ops, vec![2, 8], tensor_core::DType::F32, 1).unwrap();
+        let plan =
+            FusionPlan::from_ops(ops, vec![2, 8], fandhe_ai_tensor_core::DType::F32, 1).unwrap();
         assert_eq!(match_rmsnorm_plan(&plan), None);
     }
 
@@ -1405,7 +1406,8 @@ mod tests {
             FusedOpKind::Input { leaf_index: 1 },
             FusedOpKind::Add { lhs: 0, rhs: 1 },
         ];
-        let plan = FusionPlan::from_ops(ops, vec![4], tensor_core::DType::F32, 2).unwrap();
+        let plan =
+            FusionPlan::from_ops(ops, vec![4], fandhe_ai_tensor_core::DType::F32, 2).unwrap();
         assert_eq!(match_rmsnorm_plan(&plan), None);
     }
 
@@ -1427,7 +1429,8 @@ mod tests {
             },
             FusedOpKind::Mul { lhs: 4, rhs: 0 },
         ];
-        let plan = FusionPlan::from_ops(ops, vec![2, 8], tensor_core::DType::F32, 1).unwrap();
+        let plan =
+            FusionPlan::from_ops(ops, vec![2, 8], fandhe_ai_tensor_core::DType::F32, 1).unwrap();
         assert_eq!(match_rmsnorm_plan(&plan), None);
     }
 

@@ -1,13 +1,13 @@
 //! Metal バックエンドの `BackendOps` 実装（TASK-1.9c・#46。イシュー #605 で
 //! elementwise 5 演算・`gemm_bias_act` 実融合化を追加）。
 //!
-//! `tensor_core::backend_ops::BackendOps` の Metal 実装。GEMM は
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps` の Metal 実装。GEMM は
 //! `gemm::MetalGemm::dispatch_auto`（動的タイル選択済み。TASK-1.8c・#40）
 //! へ委譲する（既存カーネル・許容誤差・境界検査には触れない）。elementwise
 //! （`add`／`mul`／`relu`／`exp`／`tanh`）は `elementwise::MetalElementwise`
 //! へ委譲する（イシュー #605。CUDA 側 #599 の Metal 対応版）。汎用
 //! reduction（`sum`／`max`）は未実装のまま
-//! [`tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
+//! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
 //! out-of-scope-tracking.md 対象）。
 //!
 //! `cfg(target_os = "macos")` 限定（`objc2`／`objc2-foundation`／
@@ -15,8 +15,8 @@
 //! 非 macOS 環境ではこのファイル自体がコンパイル対象に入らない
 //! （`lib.rs` の cfg 境界と整合。`device.rs` と同方針）。
 
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{Activation, BackendOps, FusionPlan, ShapeError, Tensor};
 
 use crate::context::MetalContext;
 use crate::elementwise::MetalElementwise;
@@ -113,9 +113,9 @@ impl MetalBackendOps {
 
 /// [`MetalBackendOps::gemm_bias_act`] が融合カーネル
 /// （`gemm::MetalGemm::run_tiled_bias_act_f32`）と
-/// `tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト実装
+/// `fandhe_ai_tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト実装
 /// （非融合 `gemm`→`add`→`relu` 3 段合成）のどちらを経由するかを表す
-/// （イシュー #605。CUDA 側 `backend_cuda::ops::GemmBiasActRoute`〈#599〉と
+/// （イシュー #605。CUDA 側 `fandhe_ai_backend_cuda::ops::GemmBiasActRoute`〈#599〉と
 /// 同一の意味論）。
 ///
 /// `backend-cpu::ops::CpuBackendOps::gemm_bias_act`・`backend-cuda::ops::
@@ -133,7 +133,7 @@ pub(crate) enum GemmBiasActRoute {
 
 /// [`GemmBiasActRoute`] の選択ロジック（純関数。実機なしで単体テスト可能。
 /// 本ファイル末尾 `#[cfg(test)]` 参照）。CUDA 側
-/// `backend_cuda::ops::gemm_bias_act_route` と同一実装（`pub(crate)`:
+/// `fandhe_ai_backend_cuda::ops::gemm_bias_act_route` と同一実装（`pub(crate)`:
 /// `MetalBackendOps::gemm_bias_act` から呼ばれる）。
 pub(crate) fn gemm_bias_act_route(bias_shape: Option<&[usize]>, n: usize) -> GemmBiasActRoute {
     match bias_shape {
@@ -149,7 +149,7 @@ impl BackendOps for MetalBackendOps {
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -180,7 +180,7 @@ impl BackendOps for MetalBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// [`tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル
     /// （[`crate::gemm::MetalGemm::run_tiled_bias_act_f32`]）へ差し替える
@@ -198,7 +198,7 @@ impl BackendOps for MetalBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0], a.shape()[1]);
         let n = b.shape()[1];
@@ -210,7 +210,7 @@ impl BackendOps for MetalBackendOps {
                     // GEMM 本体を実行する前にブロードキャスト可否を検証
                     // する（CPU／CUDA 実装と同じ「カーネル本体アクセス前に
                     // 検証」の順序契約）。
-                    tensor_core::broadcast_shape(&out_shape, bias.shape())
+                    fandhe_ai_tensor_core::broadcast_shape(&out_shape, bias.shape())
                         .map_err(BackendError::ShapeMismatch)?;
                 }
                 // `self.gemm`（`MetalGemm::dispatch_auto` 経由）は
@@ -326,7 +326,7 @@ impl BackendOps for MetalBackendOps {
         ))
     }
 
-    /// [`tensor_core::BackendOps::run_fused`] のデフォルト実装
+    /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装
     /// （`Unsupported` fail-safe）を、canonical RMSNorm／softmax 融合プラン
     /// 検出時のみ融合カーネル（[`MetalRmsNorm`]／[`MetalSoftmax`]）へ
     /// ルーティングする（イシュー #604）。CUDA 側 `CudaBackendOps::run_fused`
@@ -487,7 +487,7 @@ mod tests {
     use super::*;
 
     // --- gemm_bias_act_route（pure・実機不要。イシュー #605） ---
-    // CUDA 側 `backend_cuda::ops` の同名テスト群と同一の検証項目。
+    // CUDA 側 `fandhe_ai_backend_cuda::ops` の同名テスト群と同一の検証項目。
 
     #[test]
     fn gemm_bias_act_route_selects_fused_when_bias_is_none() {

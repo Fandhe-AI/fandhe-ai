@@ -3,7 +3,7 @@
 //!
 //! `tests/cpu_metal_f16_tiled_parity.rs`（明示 `TileConfig` 指定の
 //! `dispatch_f16_tiled_unverified`）と同じ判定基盤
-//! （`backend_cpu::parity::assert_parity`。REQ-2 統一複合判定「相対誤差
+//! （`fandhe_ai_backend_cpu::parity::assert_parity`。REQ-2 統一複合判定「相対誤差
 //! 1e-3 未満 または 絶対誤差 1e-5 未満」の唯一の実体。許容誤差は変更しない
 //! `.claude/rules/coding-rust.md`）・同じ 3 段階の参照値構築方法（f16 入力を
 //! f32 化 → `matmul_reference_fma` → f16 丸め → f32 化して比較）を使う。
@@ -21,20 +21,20 @@
 //! `gemm_auto_parity.rs`（f32 `dispatch_backend_auto` の対応版）と同じく
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する
 //! （`#![cfg(target_os = "macos")]` ＋ 全ケース `#[ignore]`）。実機アクセス
-//! 不可時は `cargo test -p backend-metal --release -- --ignored --nocapture`
+//! 不可時は `cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture`
 //! の実行を #799 実機セッションへ引き継ぐ（#796 の
 //! `tests/cpu_metal_f16_tiled_parity.rs` 引き継ぎと同一様式）。
 //!
 //! ```sh
-//! cargo test -p backend-metal --release -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_metal::tile::TileConfig;
-use backend_metal::{MetalContext, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_metal::tile::TileConfig;
+use fandhe_ai_backend_metal::{MetalContext, MetalGemm};
 use half::f16;
 
 /// 決定的シードで A・B（f16）を生成し、f16→f32→参照 matmul→f16 丸め→f32 の
@@ -242,7 +242,7 @@ fn dispatch_f16_auto_matches_explicit_tile_select_dispatch() {
     let a: Vec<f16> = rng.fill_vec_f16(m * k);
     let b: Vec<f16> = rng.fill_vec_f16(k * n);
 
-    let cfg: TileConfig = backend_metal::tile::select(m, n, k);
+    let cfg: TileConfig = fandhe_ai_backend_metal::tile::select(m, n, k);
     let explicit = gemm
         .dispatch_f16_tiled_unverified(&ctx, &a, &b, m, n, k, cfg)
         .expect("dispatch_f16_tiled_unverified の dispatch に失敗した");

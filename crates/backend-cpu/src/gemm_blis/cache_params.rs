@@ -31,7 +31,7 @@
 //!    （**レビュー指摘・#753**: 通常の macOS クロスビルドジョブも
 //!    `cfg(test)` 無効のため到達せず、結果として `sysctl_ffi` を継続的に
 //!    型・借用検査するジョブが存在しない状態だった）。この空白を埋めるため
-//!    `ci.yml` build ジョブに `cargo check -p backend-cpu --tests --target
+//!    `ci.yml` build ジョブに `cargo check -p fandhe-ai-backend-cpu --tests --target
 //!    aarch64-apple-darwin`（`cfg(test)` 有効かつ `target_os = "macos"`
 //!    クロスターゲット。backend-metal 向け同型ステップと同じ手法。
 //!    `Makefile` の `check-cross-cpu-tests` と同一コマンド）を追加し、

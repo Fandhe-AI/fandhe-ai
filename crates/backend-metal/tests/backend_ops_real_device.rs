@@ -2,10 +2,10 @@
 //!
 //! `cpu_metal_parity.rs`（TASK-2.2c・#55）は `MetalGemm::dispatch` を直接
 //! 呼び出す形で CPU-Metal ペアの数値一致を検証しているが、本ファイルは
-//! 抽象層 `tensor_core::backend_ops::MetalBackendOps`（TASK-1.9c・#46）が
+//! 抽象層 `fandhe_ai_tensor_core::backend_ops::MetalBackendOps`（TASK-1.9c・#46）が
 //! 内部で使う `MetalGemm::dispatch_auto`（動的タイル選択。TASK-1.8c・#40）
 //! を経由した場合にも同じ複合判定（REQ-2）が成立することを固定する。
-//! 判定式・許容誤差は再定義せず `backend_cpu::parity` を唯一の参照とする
+//! 判定式・許容誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の参照とする
 //! （`.claude/rules/coding-rust.md`）。
 //!
 //! `cpu_metal_parity.rs`（基準形状 512^3・K=4096 ストレス）とは異なる形状を
@@ -28,23 +28,23 @@
 //! Linux CI での型検査（実機なしでもコンパイル可能性を担保）:
 //!
 //! ```sh
-//! cargo check -p backend-metal --tests --target aarch64-apple-darwin
+//! cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
 //! ```
 //!
 //! 実行コマンド（Apple Silicon 実機。`--release` 推奨。
 //! `docs/backend-metal-real-device-testing.md` 参照）:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::CpuBackendOps;
-use backend_metal::MetalBackendOps;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_metal::MetalBackendOps;
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 /// `MetalBackendOps::gemm`（`dispatch_auto` 委譲）を CPU `BackendOps::gemm`
 /// と複合判定で突き合わせる。
@@ -63,7 +63,7 @@ fn assert_backend_ops_gemm_parity(seed_a: u64, seed_b: u64, m: usize, n: usize, 
         .expect("MetalBackendOps::gemm must succeed on Metal-equipped test runner");
 
     assert_eq!(metal_result.shape(), cpu_result.shape());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!("BackendOps cpu-metal gemm parity m={m} n={n} k={k}"),
         metal_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
@@ -119,7 +119,7 @@ fn backend_ops_gemm_matches_cpu_non_power_of_two_shape() {
 /// 置かれてはいるが（`MetalBackendOps` 自体が `cfg(target_os = "macos")`
 /// 限定のため非 macOS 環境ではコンパイル対象に入らない）、実機依存では
 /// ないため `#[ignore]` を付けない。macOS 上での通常の
-/// `cargo test -p backend-metal`（`--ignored` なし）で毎回実行され、
+/// `cargo test -p fandhe-ai-backend-metal`（`--ignored` なし）で毎回実行され、
 /// `sum`／`max` が `Unsupported` を返し続けることを回帰的に固定する。
 ///
 /// `add`／`mul`／`relu`／`exp`／`tanh` はイシュー #605 で実カーネル化
@@ -186,22 +186,22 @@ fn backend_ops_elementwise_matches_cpu() {
 }
 
 /// [`backend_ops_elementwise_matches_cpu`] 用の複合判定ヘルパー（REQ-2:
-/// 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。`backend_cpu::parity`
+/// 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。`fandhe_ai_backend_cpu::parity`
 /// を唯一の参照とする方針（`.claude/rules/coding-rust.md`）に合わせ、
 /// 判定式は再定義せず [`assert_backend_ops_gemm_parity`] と同じ
-/// `backend_cpu::parity::assert_parity` へ委譲する。
+/// `fandhe_ai_backend_cpu::parity::assert_parity` へ委譲する。
 fn assert_tensor_parity(label: &str, cpu: &Tensor<f32>, metal: &Tensor<f32>) {
     assert_eq!(cpu.shape(), metal.shape());
     let cpu_owned = cpu.contiguous();
     let metal_owned = metal.contiguous();
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         label,
         metal_owned.as_slice().expect("metal contiguous"),
         cpu_owned.as_slice().expect("cpu contiguous"),
     );
 }
 
-/// `ops_for`（`tensor_core::backend_ops`）を介したディスパッチでも同じ
+/// `ops_for`（`fandhe_ai_tensor_core::backend_ops`）を介したディスパッチでも同じ
 /// 数値一致が成立することを固定する（`Device::Metal` 選択の回帰保護）。
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
@@ -215,16 +215,16 @@ fn ops_for_selects_metal_backend_and_matches_cpu() {
     let a = Tensor::new(a_data, &[80, 80]).expect("valid tensor");
     let b = Tensor::new(b_data, &[80, 80]).expect("valid tensor");
 
-    let cpu_result = tensor_core::ops_for(&ops, Device::Cpu)
+    let cpu_result = fandhe_ai_tensor_core::ops_for(&ops, Device::Cpu)
         .expect("cpu ops registered")
         .gemm(&a, &b)
         .expect("cpu gemm always succeeds");
-    let metal_result = tensor_core::ops_for(&ops, Device::Metal)
+    let metal_result = fandhe_ai_tensor_core::ops_for(&ops, Device::Metal)
         .expect("metal ops registered")
         .gemm(&a, &b)
         .expect("MetalBackendOps::gemm must succeed on Metal-equipped test runner");
 
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "ops_for-dispatched metal gemm vs cpu",
         metal_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),

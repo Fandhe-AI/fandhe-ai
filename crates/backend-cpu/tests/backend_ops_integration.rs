@@ -1,6 +1,6 @@
 //! TASK-1.9d（#47）: 3 バックエンド（CPU／CUDA／Metal）統合テストの本体。
 //!
-//! `tensor_core::BackendOps`（TASK-1.9c・#46）経由の演算が、抽象層を
+//! `fandhe_ai_tensor_core::BackendOps`（TASK-1.9c・#46）経由の演算が、抽象層を
 //! 介してもなお各バックエンドの実カーネルと同じ結果を返すことを検証する
 //! （受け入れ条件: 抽象層経由の演算が全バックエンドで期待値と一致する）。
 //!
@@ -11,7 +11,7 @@
 //! CPU 全 8 演算の期待値一致・非 contiguous 入力・エラー経路・境界形状・
 //! 3 バックエンド横断のエンドツーエンド経路までを網羅する「本格的な統合
 //! テスト」（同ファイルが引き継ぎ先として明示）を担う。判定式・許容誤差の
-//! 独自定義は行わず、`backend_cpu::parity::{assert_parity,
+//! 独自定義は行わず、`fandhe_ai_backend_cpu::parity::{assert_parity,
 //! matmul_reference_fma}`（REQ-2 統一複合判定・FMA 契約の唯一の参照点）を
 //! 再利用する（`.claude/rules/coding-rust.md`）。
 //!
@@ -19,15 +19,15 @@
 //! `.claude/rules/coding-rust.md`「学習系回帰テストには決定的シード設定
 //! ユーティリティを使う」）。
 
-use backend_cpu::CpuBackendOps;
-use backend_cpu::parity::{assert_parity, matmul_reference_fma};
-use backend_cuda::CudaBackendOps;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor, ops_for};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
+use fandhe_ai_backend_cuda::CudaBackendOps;
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor, ops_for};
 
 #[cfg(target_os = "macos")]
-use backend_metal::MetalBackendOps;
+use fandhe_ai_backend_metal::MetalBackendOps;
 
 // ---------------------------------------------------------------------
 // 1. CPU 全 8 演算の期待値一致
@@ -474,7 +474,7 @@ fn end_to_end_dispatch_metal_matches_cpu_when_available_or_returns_typed_error()
 /// `Unsupported` へフォールバックしていないこと）、結果が per-op 逐次
 /// 合成（非融合基準）と REQ-2 複合判定で一致することを固定する。
 /// プランは `fused_elementwise_parity.rs` の ew4（add→relu→exp→tanh）と
-/// 同型（`tensor_core::FusionPlan::from_ops` はクレート間構築経路。
+/// 同型（`fandhe_ai_tensor_core::FusionPlan::from_ops` はクレート間構築経路。
 /// `docs/kernel-fusion.md` §3.4 根拠）。
 #[test]
 fn cpu_run_fused_via_backend_ops_is_wired_and_matches_sequential_composition() {

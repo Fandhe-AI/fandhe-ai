@@ -11,13 +11,13 @@
 //! `expect` 呼び出しだったが、本実装は [`MetalError`] を返す `Result` 化
 //! （coding-rust.md「本番経路で unwrap/expect を使わない」）。
 
+use fandhe_ai_tensor_core::dispatch::DeviceCaps;
 use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
     MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
     MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice, MTLGPUFamily,
 };
-use tensor_core::dispatch::DeviceCaps;
 
 use crate::device::MetalOccupancyInfo;
 use crate::error::MetalError;
@@ -38,7 +38,7 @@ pub(crate) type MtlQueue = ProtocolObject<dyn MTLCommandQueue>;
 /// TASK-11.2b（#68）で `caps`（[`DeviceCaps`]）を追加した。`MTLDevice::
 /// supportsFamily(MTLGPUFamily::Apple7)` の判定結果を `new` 時に 1 回
 /// キャッシュし、[`crate::gemm::MetalGemm::dispatch_backend_auto`] から
-/// `tensor_core::dispatch::select_gemm_kernel` へそのまま渡せるようにする
+/// `fandhe_ai_tensor_core::dispatch::select_gemm_kernel` へそのまま渡せるようにする
 /// （`docs/dispatch-rules-design.md` §2.1「判定タイミング: デバイス初期化
 /// 時に 1 回」。ディスパッチ呼び出しごとに `supportsFamily` を再照会
 /// しない）。

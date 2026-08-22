@@ -15,14 +15,14 @@
 //! 実行コマンド（Mac 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release --test softmax_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release --test softmax_parity -- --ignored --nocapture
 //! ```
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::assert_parity;
-use backend_metal::{MetalContext, MetalSoftmax};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_metal::{MetalContext, MetalSoftmax};
 
 /// テスト専用 CPU 参照実装（素朴な `exp(x - max(x)) / sum(exp(x -
 /// max(x)))`。カーネル側の「最大値減算後に `log2(e)` を適用 + `exp2`」
@@ -202,7 +202,7 @@ fn softmax_is_numerically_stable_near_f32_max_with_non_multiple_of_32_hidden() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn softmax_run_fused_matches_cpu_reference() {
-    use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+    use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
     let hidden = 32usize;
     let x_data = Xorshift64Star::new(2201).fill_vec(hidden);
@@ -236,7 +236,7 @@ fn softmax_run_fused_matches_cpu_reference() {
     let plan = FusionPlan::from_ops(ops, vec![hidden], DType::F32, 1)
         .expect("canonical softmax plan must construct");
 
-    let metal = backend_metal::MetalBackendOps::new();
+    let metal = fandhe_ai_backend_metal::MetalBackendOps::new();
     let fused_out = metal
         .run_fused(&plan, &[&x])
         .expect("MetalBackendOps::run_fused must succeed on Metal-equipped test runner");
@@ -251,7 +251,7 @@ fn softmax_run_fused_matches_cpu_reference() {
     );
 }
 
-/// CPU-Metal 直接突合（イシュー #607）: `backend_cpu::softmax::
+/// CPU-Metal 直接突合（イシュー #607）: `fandhe_ai_backend_cpu::softmax::
 /// run_softmax_f32`（NEON/rayon 参照実装。`f32::exp` ベース）を GPU 出力
 /// と直接比較する。実機必須（`#[ignore]`。CI ではコンパイルのみ）。
 #[test]
@@ -267,8 +267,8 @@ fn softmax_matches_backend_cpu_directly() {
     let gpu_out = softmax
         .run_softmax_f32(&ctx, &x_data, rows, hidden)
         .expect("MetalSoftmax::run_softmax_f32 must succeed on Metal-equipped test runner");
-    let cpu_out = backend_cpu::softmax::run_softmax_f32(&x_data, rows, hidden)
-        .expect("backend_cpu::softmax::run_softmax_f32 must succeed");
+    let cpu_out = fandhe_ai_backend_cpu::softmax::run_softmax_f32(&x_data, rows, hidden)
+        .expect("fandhe_ai_backend_cpu::softmax::run_softmax_f32 must succeed");
 
     assert_parity(
         "softmax cpu(backend_cpu)-metal direct parity",

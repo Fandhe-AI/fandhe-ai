@@ -1,5 +1,9 @@
 [package]
-name = "facade"
+# crates.io 公開名（イシュー #877/#879・#878 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/facade` は
+# 変更しない。lib 名は Rust 識別子化された `fandhe_ai`（`use fandhe_ai::` で
+# 参照する。facade が唯一のサポートされる公開 API 面。CLAUDE.md）。
+name = "fandhe-ai"
 description = "composition root・compat 公開面（REQ-1・REQ-9・TASK-9.3）"
 version.workspace = true
 edition.workspace = true
@@ -14,22 +18,26 @@ publish.workspace = true
 # ユーザー承認不要と判断する（イシュー #410 実装計画 §2-3。
 # `docs/license-matrix.md` の更新も不要）。
 [dependencies]
+# `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
+# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘。
+# workspace 公開バージョンと完全一致させる）。以下 facade の全 path 依存も同じ。
+#
 # `Device`／`BackendError`（公開 API の引数・戻り値型として再エクスポート）・
 # `DeviceProvider`／`select_from`（CUDA/Metal 選択時の存在検証）に使用する。
-tensor-core = { path = "../tensor-core" }
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 # `Tape::new_with_ops`（facade 向け内部 API。crates/autodiff/src/tape.rs）を
 # composition root の唯一の呼び出し元として使う。
-autodiff = { path = "../autodiff" }
+fandhe-ai-autodiff = { path = "../autodiff", version = "=0.3.0" }
 # 既定バックエンド（TASK-2.5 ユーザー承認済み）である `CpuBackendOps` を
 # `facade::tape()` から構築する。
-backend-cpu = { path = "../backend-cpu" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.3.0" }
 # `Device::Cuda(_)` 指定時に `CudaBackendOps`／`CudaDeviceProvider` を解決する。
-backend-cuda = { path = "../backend-cuda" }
+fandhe-ai-backend-cuda = { path = "../backend-cuda", version = "=0.3.0" }
 
 # `Device::Metal` 指定時に `MetalBackendOps`／`MetalDeviceProvider` を解決する。
 # `cfg(target_os = "macos")` 限定（.claude/rules/deps-policy.md）。
 [target.'cfg(target_os = "macos")'.dependencies]
-backend-metal = { path = "../backend-metal" }
+fandhe-ai-backend-metal = { path = "../backend-metal", version = "=0.3.0" }
 
 # TASK-9.4（#411）: compat 層の移設に伴い追加。学習系統合テスト
 # （`tests/compat_sequential_train.rs`）が決定的シード駆動のデータ生成に

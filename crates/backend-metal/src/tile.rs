@@ -14,7 +14,7 @@
 //!
 //! 本モジュールは `objc2` 系 FFI に一切触れない純粋関数のみで構成する
 //! ため `cfg(target_os = "macos")` を付けず、Linux（CI・本実装環境）の
-//! `cargo test -p backend-metal` でも単体テストが回るようにしてある
+//! `cargo test -p fandhe-ai-backend-metal` でも単体テストが回るようにしてある
 //! （`crate::pad` と同じ設計判断。本ファイル冒頭のコメント参照）。
 //!
 //! **選択閾値は暫定値**: 下記 [`select`] のサイズ閾値・候補パラメータは
@@ -2762,8 +2762,8 @@ mod tests {
     #[test]
     #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
     fn all_tile_candidates_match_cpu_reference_medium_shape() {
-        use backend_cpu::parity::{assert_parity, matmul_reference_fma};
         use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::{assert_parity, matmul_reference_fma};
 
         let ctx = crate::context::MetalContext::new()
             .expect("Metal デバイス・コマンドキューの初期化に失敗した");
@@ -2825,8 +2825,8 @@ mod tests {
     #[test]
     #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
     fn all_tile_candidates_match_cpu_reference_f16_tiled_medium_shape() {
-        use backend_cpu::parity::assert_parity;
         use bench_harness::rng::Xorshift64Star;
+        use fandhe_ai_backend_cpu::parity::assert_parity;
         use half::f16;
 
         let ctx = crate::context::MetalContext::new()
@@ -2853,8 +2853,15 @@ mod tests {
             let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
             let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
             let mut c_ref_f32 = vec![0.0f32; m * n];
-            backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
-                .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
+            fandhe_ai_backend_cpu::parity::matmul_reference_fma(
+                &a_f32,
+                &b_f32,
+                &mut c_ref_f32,
+                m,
+                n,
+                k,
+            )
+            .expect("CPU 参照実装（matmul_reference_fma）の形状検証に失敗した");
             let c_ref_rounded: Vec<f32> = c_ref_f32
                 .iter()
                 .map(|&x| f16::from_f32(x).to_f32())

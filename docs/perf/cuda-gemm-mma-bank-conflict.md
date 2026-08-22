@@ -11,7 +11,7 @@
 
 - `cargo build --workspace`（`const _: () = assert!(...)` によるコンパイル時境界検査。§1 参照）
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda`（`kernels_mma.rs` 内 `#[cfg(test)]` の `#define` 整合検査・SMEM 41,472B 固定・バンク位相分散ロック・STAGES スワップ改訂版・REQ-8 needle 群）
+- `cargo test -p fandhe-ai-backend-cuda`（`kernels_mma.rs` 内 `#[cfg(test)]` の `#define` 整合検査・SMEM 41,472B 固定・バンク位相分散ロック・STAGES スワップ改訂版・REQ-8 needle 群）
 - `cargo test --workspace`（他クレートへの波及なし確認）
 - §5 の `git diff origin/main` 無差分確認（parity 非後退契約）
 
@@ -106,15 +106,15 @@ XOR swizzle は引き続き **不採用（保留）** のまま据え置く。
 ```sh
 git fetch origin
 git checkout perf/498-mma-smem-bank-conflict-padding   # 本イシューの実装ブランチ
-cargo test -p backend-cuda -- --ignored --nocapture     # parity 非後退の全行検査（数値一致確認を性能計測より先に実施）
-cargo run -p backend-cuda --example gemm_mma_bench --release   # パディング後の TFLOPS 計測（5 回中央値）
+cargo test -p fandhe-ai-backend-cuda -- --ignored --nocapture     # parity 非後退の全行検査（数値一致確認を性能計測より先に実施）
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release   # パディング後の TFLOPS 計測（5 回中央値）
 ```
 
 nsight-compute でのプロファイル（`docs/perf/cuda-gemm-bottleneck-diagnosis.md` の手順を踏襲）:
 
 ```sh
 ncu --metrics l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum \
-    cargo run -p backend-cuda --example gemm_profile_target --release
+    cargo run -p fandhe-ai-backend-cuda --example gemm_profile_target --release
 ```
 
 ### 記録欄（実機セッションで埋める）

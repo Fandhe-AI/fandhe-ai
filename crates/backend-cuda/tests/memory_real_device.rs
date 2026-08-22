@@ -7,15 +7,15 @@
 //! CUDA 実機で以下を叩く:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --test memory_real_device -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --test memory_real_device -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaMemory};
-use tensor_core::Tensor;
-use tensor_core::buffer::MemoryOps;
-use tensor_core::device::Device;
-use tensor_core::memory_stats::MemoryStats;
-use tensor_core::pool::{PoolConfig, PooledMemory};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaMemory};
+use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::buffer::MemoryOps;
+use fandhe_ai_tensor_core::device::Device;
+use fandhe_ai_tensor_core::memory_stats::MemoryStats;
+use fandhe_ai_tensor_core::pool::{PoolConfig, PooledMemory};
 
 /// upload → download の roundtrip が bit 完全一致することを確認する
 /// （受け入れ条件「確保・転送がリークなく動作する」の数値面の裏付け。

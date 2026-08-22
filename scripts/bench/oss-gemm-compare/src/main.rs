@@ -1,7 +1,7 @@
 //! OSS 直接比較ハーネス（イシュー #755）の CPU 比較バイナリ。
 //!
 //! GEMM 第 2 次最適化ツリー（#735。Phase 4 親 #754）の各最適化完了時に、
-//! 本体の CPU 最適経路（`backend_cpu::gemm_blis_parallel`。BLIS 5-loop +
+//! 本体の CPU 最適経路（`fandhe_ai_backend_cpu::gemm_blis_parallel`。BLIS 5-loop +
 //! rayon 並列）を、workspace 外部の OSS 実装（matrixmultiply・gemm crate）と
 //! 同一プロトコル（`bench_harness::protocol::run`。warmup 20 回・計測 20 回・
 //! 中央値/Q1/Q3）で計測し、機械可読な JSON Lines として出力する。
@@ -318,7 +318,7 @@ fn chrono_like_utc_date() -> String {
 /// 本番経路（テスト・examples 以外）で `.expect()` を使わない方針
 /// （`.claude/rules/coding-rust.md`「コード品質」節）に従い、`main` は
 /// `Result` を返して型付きエラーを呼び出し元（プロセス終了処理）へ伝播する。
-/// `bench_harness::run`・`backend_cpu::gemm_blis_parallel` はいずれも
+/// `bench_harness::run`・`fandhe_ai_backend_cpu::gemm_blis_parallel` はいずれも
 /// `std::error::Error` 実装済みのエラー型を返すため `Box<dyn Error>` に集約する
 /// （レビュー指摘対応。イシュー #755）。
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -350,7 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // （`size * size` 要素で確保した `a`・`b`・`c_ref`）で常に成立するため、
         // `GemmError` は実運用上発生しない想定だが、本番経路での `.expect()` 禁止
         // 方針（coding-rust.md）に従い `?` で型付きに伝播する。
-        backend_cpu::gemm_blis_parallel(&a, &b, &mut c_ref, size, size, size)?;
+        fandhe_ai_backend_cpu::gemm_blis_parallel(&a, &b, &mut c_ref, size, size, size)?;
 
         // matrixmultiply（既定 feature。threading 未有効のため単一スレッド）。
         let mut c_mm = vec![0.0f32; size * size];
@@ -447,7 +447,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `?` で型付きに伝播する。
         let mut ref_gemm_err = None;
         let m_ref = bench_harness::run(&config, || {
-            if let Err(e) = backend_cpu::gemm_blis_parallel(&a, &b, &mut c_buf, size, size, size) {
+            if let Err(e) =
+                fandhe_ai_backend_cpu::gemm_blis_parallel(&a, &b, &mut c_buf, size, size, size)
+            {
                 ref_gemm_err = Some(e);
             }
         })?;

@@ -4,10 +4,10 @@
 //!
 //! `rmsnorm_parity.rs`（#592）と同じ構成方針を踏襲する: 環境適応スモーク
 //! （属性なし。通常 CI で実行し、CUDA 非搭載環境では
-//! `backend_cuda::CudaError::DriverUnavailable`／`NvrtcUnavailable` を
+//! `fandhe_ai_backend_cuda::CudaError::DriverUnavailable`／`NvrtcUnavailable` を
 //! 確認して panic しないことのみ検証）と、実機必須の形状網羅・極値入力
 //! （`#[ignore]`。DGX Spark GB10 等）を分離する。判定式・許容誤差は
-//! 再定義せず `backend_cpu::parity` を唯一の参照とする
+//! 再定義せず `fandhe_ai_backend_cpu::parity` を唯一の参照とする
 //! （`.claude/rules/coding-rust.md`）。
 //!
 //! CPU 参照実装は本ファイル内のテスト専用関数（自然指数 `f32::exp` を
@@ -21,11 +21,11 @@
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --release --test softmax_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --release --test softmax_parity -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaError, CudaSoftmax};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaSoftmax};
 
 mod common;
 
@@ -33,7 +33,7 @@ mod common;
 /// 実装。`out = exp(x - max(x)) / sum(exp(x - max(x)))`）。カーネルは
 /// `exp2(x*log2(e))` を計算するため（`softmax.rs` モジュール冒頭コメント
 /// 「意味論注記」参照）丸めは異なるが、一致判定は REQ-2 複合判定
-/// （`backend_cpu::parity::assert_parity`）に依るため問題ない。
+/// （`fandhe_ai_backend_cpu::parity::assert_parity`）に依るため問題ない。
 fn cpu_softmax_reference(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; x.len()];
     if cols == 0 {
@@ -61,7 +61,7 @@ fn assert_softmax_parity(softmax: &CudaSoftmax, seed: u64, rows: usize, cols: us
     let cpu_out = cpu_softmax_reference(&x_data, rows, cols);
 
     assert_eq!(gpu_out.len(), cpu_out.len());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!("softmax cpu-cuda parity rows={rows} cols={cols}"),
         &gpu_out,
         &cpu_out,
@@ -264,8 +264,8 @@ fn softmax_numerically_stable_for_extreme_inputs() {
 /// rmsnorm_run_fused_matches_cpu_composed_env_adaptive` と同じパターン）。
 #[test]
 fn softmax_run_fused_matches_cpu_composed_env_adaptive() {
-    use tensor_core::device::BackendError;
-    use tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
+    use fandhe_ai_tensor_core::device::BackendError;
+    use fandhe_ai_tensor_core::{BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
     let cols = 16usize;
     let x_data = Xorshift64Star::new(9201).fill_vec(cols);
@@ -299,13 +299,13 @@ fn softmax_run_fused_matches_cpu_composed_env_adaptive() {
     let plan = FusionPlan::from_ops(ops, vec![cols], DType::F32, 1)
         .expect("canonical softmax plan must construct");
 
-    let cuda = backend_cuda::CudaBackendOps::new(0);
+    let cuda = fandhe_ai_backend_cuda::CudaBackendOps::new(0);
     match cuda.run_fused(&plan, &[&x]) {
         Ok(fused_out) => {
             let composed = cpu_softmax_reference(&x_data, 1, cols);
 
             assert_eq!(fused_out.shape(), &[cols]);
-            backend_cpu::parity::assert_parity(
+            fandhe_ai_backend_cpu::parity::assert_parity(
                 "softmax run_fused vs cpu composed (canonical plan)",
                 fused_out.as_slice().expect("contiguous"),
                 &composed,
@@ -318,7 +318,7 @@ fn softmax_run_fused_matches_cpu_composed_env_adaptive() {
     }
 }
 
-/// CPU-CUDA 直接突合（イシュー #607）: `backend_cpu::softmax::
+/// CPU-CUDA 直接突合（イシュー #607）: `fandhe_ai_backend_cpu::softmax::
 /// run_softmax_f32`（NEON/rayon 参照実装。`f32::exp` ベース）を GPU 出力
 /// （`exp2` ベース）と直接比較する。実機必須（`#[ignore]`。CI では
 /// コンパイルのみ）。丸めが異なるため一致判定は REQ-2 複合判定に依る
@@ -338,10 +338,10 @@ fn softmax_matches_backend_cpu_directly() {
     let gpu_out = softmax
         .run_softmax_f32(&x_data, rows, cols)
         .expect("CudaSoftmax::run_softmax_f32 must succeed on CUDA-equipped test runner");
-    let cpu_out = backend_cpu::softmax::run_softmax_f32(&x_data, rows, cols)
-        .expect("backend_cpu::softmax::run_softmax_f32 must succeed");
+    let cpu_out = fandhe_ai_backend_cpu::softmax::run_softmax_f32(&x_data, rows, cols)
+        .expect("fandhe_ai_backend_cpu::softmax::run_softmax_f32 must succeed");
 
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "softmax cpu(backend_cpu)-cuda direct parity",
         &gpu_out,
         &cpu_out,

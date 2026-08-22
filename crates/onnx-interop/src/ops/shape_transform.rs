@@ -13,7 +13,7 @@
 //! `Tensor<i64>`／`Tensor<bool>`／`Tensor<half::f16>` にも適用できる
 //! （イシュー #274。インタープリタの `Value` 各 variant から共通で呼ばれる）。
 
-use tensor_core::{Element, Tensor};
+use fandhe_ai_tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;

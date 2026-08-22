@@ -27,9 +27,9 @@ use crate::dispatch::DType;
 /// （実装計画イシュー #162 §8「リスク・判断の記録」）。
 ///
 /// **単一真実源（#404）**: 本定数は `detect_fusion`（本モジュール）に
-/// 加え、`autodiff::tape::Tape::push_lazy` の push 時上限適用（設計書
+/// 加え、`fandhe_ai_autodiff::tape::Tape::push_lazy` の push 時上限適用（設計書
 /// §3.5.4）からも参照される。`crate::fusion::mod.rs` の `pub use` を
-/// 経由してクレートルート（`tensor_core::MAX_FUSED_CHAIN_LEN`）から
+/// 経由してクレートルート（`fandhe_ai_tensor_core::MAX_FUSED_CHAIN_LEN`）から
 /// 公開する（`autodiff` → `tensor-core` の依存方向のみで完結し、逆依存
 /// を作らない）。値の重複定義を避けるため、遅延評価経路側で同名の
 /// 定数を再定義しないこと。

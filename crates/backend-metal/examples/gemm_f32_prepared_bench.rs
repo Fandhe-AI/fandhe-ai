@@ -33,7 +33,7 @@
 //! ## 実機実行手順（macOS・Apple Silicon）
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_f32_prepared_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release
 //! ```
 //!
 //! 実行前に数値一致（`gemm_dynamic_tile_parity.rs` の
@@ -41,16 +41,16 @@
 //! 推奨する:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release -- --ignored --nocapture dispatch_tiled_prepared
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture dispatch_tiled_prepared
 //! ```
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::pad::{pad_matrix, pad8};
-    use backend_metal::tile;
-    use backend_metal::{MetalBuffer, MetalContext, MetalGemm};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
+    use fandhe_ai_backend_metal::pad::{pad_matrix, pad8};
+    use fandhe_ai_backend_metal::tile;
+    use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm};
 
     /// 決定的シード（`gemm_bench.rs::SEED`・`gemm_f16_bench.rs::SEED` と
     /// 同一値。PoC-v2 系・既存 bench と同じ入力分布に揃える）。
@@ -173,6 +173,6 @@ fn main() {
 fn main() {
     println!(
         "backend-metal gemm_f32_prepared_bench example requires macOS (Apple Silicon). \
-         run it on macOS hardware: cargo run -p backend-metal --example gemm_f32_prepared_bench --release"
+         run it on macOS hardware: cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release"
     );
 }

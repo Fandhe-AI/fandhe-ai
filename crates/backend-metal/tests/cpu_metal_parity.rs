@@ -3,7 +3,7 @@
 //! REQ-2 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の
 //! CPU-Metal ペア分を固定する。前提条件は 2 点:
 //!
-//! - (a) FMA 契約統一: CPU 参照は `backend_cpu::parity::matmul_reference_fma`
+//! - (a) FMA 契約統一: CPU 参照は `fandhe_ai_backend_cpu::parity::matmul_reference_fma`
 //!   （`f32::mul_add`）。GPU 側は Metal `simdgroup` 系命令の既定 FMA 契約。
 //! - (b) Metal は `mathFloatingPointFunctions=Precise` 明示
 //!   （`crate::pipeline::compile_options` で設定・`pipeline.rs` 内
@@ -27,11 +27,11 @@
 //! を推奨）:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 //! ```
 //!
-//! CPU 参照は `backend_cpu::parity::matmul_reference_fma`（FMA 契約の
-//! 唯一の参照点）、判定は `backend_cpu::parity::{compare, assert_parity}`
+//! CPU 参照は `fandhe_ai_backend_cpu::parity::matmul_reference_fma`（FMA 契約の
+//! 唯一の参照点）、判定は `fandhe_ai_backend_cpu::parity::{compare, assert_parity}`
 //! （REQ-2 統一複合判定の唯一の実体。閾値の独自定義・緩和は禁止。
 //! `.claude/rules/security.md`）を使う。入力生成は
 //! `bench_harness::rng::Xorshift64Star`（決定的シード）。
@@ -43,7 +43,7 @@
 //! PR #243）は `backend-cuda` 側の重複判定式を含む旧テストを削除し
 //! `cpu_cuda_parity.rs` へ移管したが、本ファイルは `gemm_naive_parity.rs`
 //! を削除・移管しない。同ファイルは既に唯一の判定ユーティリティ
-//! （`backend_cpu::parity`）へ一本化済みで重複判定式を含まず、かつ
+//! （`fandhe_ai_backend_cpu::parity`）へ一本化済みで重複判定式を含まず、かつ
 //! 「naive GEMM（#39）の受け入れ条件検証」という別目的を持つため
 //! （本ファイルは TASK-2.2c の数値一致回帰テストという別目的）、削除する
 //! 理由がない。境界形状ケースは意図的に `gemm_naive_parity.rs` とは
@@ -51,9 +51,9 @@
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::{assert_parity, compare, matmul_reference_fma};
-use backend_metal::{MetalContext, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::{assert_parity, compare, matmul_reference_fma};
+use fandhe_ai_backend_metal::{MetalContext, MetalGemm};
 
 /// `(seed_a, seed_b, m, n, k)` の 1 ケースを実行し、CPU 参照実装との
 /// 複合判定 PASS を確認する。`tests/gemm_naive_parity.rs::run_case` と

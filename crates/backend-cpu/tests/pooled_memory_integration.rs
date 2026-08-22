@@ -1,6 +1,6 @@
 //! TASK-#201（REQ-14 14-3）の受け入れ条件「上限超過時に自動破棄され、
 //! ピーク計測 API（TASK-14.1）に反映される」を `backend-cpu::CpuMemory` +
-//! `tensor_core::pool::PooledMemory` の組合せで直接検証する統合テスト。
+//! `fandhe_ai_tensor_core::pool::PooledMemory` の組合せで直接検証する統合テスト。
 //!
 //! `crates/tensor-core/src/pool.rs` の単体テストはモック `MemoryOps` で
 //! プールコアのロジック（バケット分離・LRU 破棄・パススルー分岐）を検証
@@ -9,11 +9,11 @@
 //! `memory_stats::AllocationTracker` の計測反映（PR #359・TASK-14.1a）が
 //! 実際に噛み合うことを確認する（受け入れ条件そのものの直接検証）。
 
-use backend_cpu::CpuMemory;
-use tensor_core::device::Device;
-use tensor_core::memory_stats::MemoryStats;
-use tensor_core::pool::{PoolConfig, PooledMemory};
-use tensor_core::{DeviceBuffer, MemoryOps};
+use fandhe_ai_backend_cpu::CpuMemory;
+use fandhe_ai_tensor_core::device::Device;
+use fandhe_ai_tensor_core::memory_stats::MemoryStats;
+use fandhe_ai_tensor_core::pool::{PoolConfig, PooledMemory};
+use fandhe_ai_tensor_core::{DeviceBuffer, MemoryOps};
 
 /// alloc → drop 後もプール保持分が `MemoryStats::allocated_bytes` に
 /// 計上され続けることを検証する（design §2 point 8「計測反映」）。

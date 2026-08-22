@@ -6,7 +6,7 @@
 終わるよう N=256 の正方 GEMM に抑えています。
 
 ```rust
-use facade::Tensor;
+use fandhe_ai::Tensor;
 use std::time::Instant;
 
 const N: usize = 256;
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ウォームアップ 1 回（アロケータ・キャッシュの初回コストを計測対象
     // から除く）。
     {
-        let tape = facade::tape();
+        let tape = fandhe_ai::tape();
         let a = tape.var(&a_data);
         let b = tape.var(&b_data);
         let _ = a.matmul(&b)?;
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 引き継いで累積させないため。同一 Tape を使い回すとステップ数
         // に応じてグラフ管理コストが増え、計測対象の GEMM 単体コストと
         // 混ざってしまう）。
-        let tape = facade::tape();
+        let tape = fandhe_ai::tape();
         let a = tape.var(&a_data);
         let b = tape.var(&b_data);
 
@@ -67,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 なしの実行速度を測るだけで GEMM 演算の性能デモとしては意味を持ちません）。
 
 ```
-cargo run --release -p facade --example gemm_bench
+cargo run --release -p fandhe-ai --example gemm_bench
 ```
 
 このコードブロックは `crates/facade/examples/gemm_bench.rs` の実行

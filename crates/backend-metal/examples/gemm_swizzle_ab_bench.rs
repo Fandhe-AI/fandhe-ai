@@ -25,7 +25,7 @@
 //! ## 実機実行手順（macOS・Apple Silicon）
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_swizzle_ab_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_swizzle_ab_bench --release
 //! ```
 //!
 //! 実行前後に `pmset -g therm` でサーマル状態を記録すること
@@ -37,10 +37,10 @@
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::{MetalBuffer, MetalContext, MetalGemm, tile};
     use bench_harness::MeasurementConfig;
     use bench_harness::ab::{AbConfig, run_ab, run_stability};
     use bench_harness::rng::Xorshift64Star;
+    use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm, tile};
     use std::time::Duration;
 
     /// `crates/backend-metal/examples/gemm_bench.rs` と同一値

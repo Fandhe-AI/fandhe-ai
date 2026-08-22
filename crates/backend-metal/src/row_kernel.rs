@@ -3,7 +3,7 @@
 //!
 //! `objc2` 系 FFI に一切触れないため、[`crate::pad`]・[`crate::tile`] と
 //! 同じ設計判断で `cfg(target_os = "macos")` を付けない（`lib.rs` 参照）。
-//! Linux（CI・本実装環境）でも `cargo test -p backend-metal` で単体テスト
+//! Linux（CI・本実装環境）でも `cargo test -p fandhe-ai-backend-metal` で単体テスト
 //! が回る。
 //!
 //! CUDA 側 `backend-cuda::rmsnorm`（イシュー #592・G-6）と同じ責務分割
@@ -28,7 +28,7 @@
 //! `lib.rs` 側コメント参照）。
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
-use tensor_core::{DType, FusedOpKind, FusionPlan, RowFusionMeta};
+use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan, RowFusionMeta};
 
 /// 1 パス経路（threadgroup memory 常駐）が扱える最大行長（要素数）。
 /// `shaders/rmsnorm.metal`／`shaders/softmax.metal` の
@@ -244,7 +244,7 @@ impl std::error::Error for RowKernelValidationError {}
 ///
 /// `backend-cuda::rmsnorm::match_rmsnorm_plan` と同一のプラン形状照合
 /// （6 op 列・leaf 1 個・`axis: None` のみ受理）を Metal バックエンド側で
-/// 独立実装する（`tensor_core::fusion::graph`／`detect` は `tensor-core`
+/// 独立実装する（`fandhe_ai_tensor_core::fusion::graph`／`detect` は `tensor-core`
 /// 内部限定の `pub(crate)` でありバックエンドクレートから参照できず、
 /// またバックエンドクレート同士〈`backend-cuda`／`backend-metal`〉は
 /// 相互依存しない設計〈`delegation-impl.md`〉のため、判定ロジック自体を
@@ -384,7 +384,7 @@ pub const SOFTMAX_NEG_FLT_MAX: f32 = f32::MIN;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tensor_core::DType;
+    use fandhe_ai_tensor_core::DType;
 
     // --- select_route ---
 
@@ -536,7 +536,7 @@ mod tests {
 
     // --- match_rmsnorm_plan ---
     //
-    // `tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の
+    // `fandhe_ai_tensor_core::fusion::graph`／`detect` は `tensor-core` 内部限定の
     // `pub(crate)` で `backend-metal` からは参照できないため、CUDA 側
     // テストと同様 `FusionPlan::from_ops`（`pub` + `#[doc(hidden)]`）で
     // 直接 canonical プランを組み立てる。

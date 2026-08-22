@@ -5,20 +5,20 @@
 //! 環境適応スモーク（属性なし。通常 CI で実行し、CUDA 非搭載環境では
 //! `BackendError::CudaUnavailable` を確認して panic しないことのみ検証）と、
 //! 実機必須の形状網羅（`#[ignore]`。DGX Spark GB10 等）を分離する。
-//! 判定式・許容誤差は再定義せず `backend_cpu::parity` を唯一の参照とする
+//! 判定式・許容誤差は再定義せず `fandhe_ai_backend_cpu::parity` を唯一の参照とする
 //! （`.claude/rules/coding-rust.md`）。
 //!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --release --test gemm_bias_act_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --release --test gemm_bias_act_parity -- --ignored --nocapture
 //! ```
 
-use backend_cpu::CpuBackendOps;
-use backend_cuda::CudaBackendOps;
 use bench_harness::rng::Xorshift64Star;
-use tensor_core::device::BackendError;
-use tensor_core::{Activation, BackendOps, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cuda::CudaBackendOps;
+use fandhe_ai_tensor_core::device::BackendError;
+use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 /// CPU 側 `assert_tolerance_constants_pinned`（B-0・イシュー #491）を
 /// 流用し、REQ-2 複合判定の tolerance 定数が本ファイルの実行時点でも
@@ -52,7 +52,7 @@ fn assert_gemm_bias_act_parity(
         .gemm_bias_act(&a, &b, Some(&bias), act)
         .expect("CudaBackendOps::gemm_bias_act must succeed on CUDA-equipped test runner");
     assert_eq!(cuda_result.shape(), cpu_result.shape());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         &format!("gemm_bias_act cpu-cuda parity m={m} n={n} k={k} act={act:?}"),
         cuda_result.as_slice().expect("contiguous"),
         cpu_result.as_slice().expect("contiguous"),
@@ -103,7 +103,7 @@ fn gemm_bias_act_parity_smoke_env_adaptive() {
             let cuda_result = cuda
                 .gemm_bias_act(&a, &b, Some(&bias_broadcast), Activation::Relu)
                 .expect("cuda gemm_bias_act (broadcast fallback) must succeed");
-            backend_cpu::parity::assert_parity(
+            fandhe_ai_backend_cpu::parity::assert_parity(
                 "gemm_bias_act broadcast-fallback cpu-cuda parity",
                 cuda_result.as_slice().expect("contiguous"),
                 cpu_result.as_slice().expect("contiguous"),
@@ -227,7 +227,7 @@ fn elementwise_matches_cpu_across_ops() {
         let cpu_result = run(&cpu, &a, &b);
         let cuda_result = run(&cuda, &a, &b);
         assert_eq!(cuda_result.shape(), cpu_result.shape());
-        backend_cpu::parity::assert_parity(
+        fandhe_ai_backend_cpu::parity::assert_parity(
             &format!("elementwise cpu-cuda parity op={name}"),
             cuda_result.as_slice().expect("contiguous"),
             cpu_result.as_slice().expect("contiguous"),
@@ -242,7 +242,7 @@ fn elementwise_matches_cpu_across_ops() {
     let cpu_bc = cpu.add(&a, &row).expect("cpu broadcast add must succeed");
     let cuda_bc = cuda.add(&a, &row).expect("cuda broadcast add must succeed");
     assert_eq!(cuda_bc.shape(), cpu_bc.shape());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "elementwise broadcast cpu-cuda parity op=add",
         cuda_bc.as_slice().expect("contiguous"),
         cpu_bc.as_slice().expect("contiguous"),

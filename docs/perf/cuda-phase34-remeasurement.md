@@ -78,12 +78,12 @@ cuda-gemm-mma-tf32-block-tile.md` §7「実測表（実行待ち）」・§8「�
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
+  cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
 # release プロファイル（debug と同一結果であることを確認する。両プロファイル実行が必須）
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
+  cargo test -p fandhe-ai-backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
 ```
 
 `--test-threads=1` は必須: 同一バイナリ内 `#[test]` の並列実行は GPU 時間分割により計測値を約 5 倍
@@ -158,11 +158,11 @@ ssh "$CUDA_NODE" \
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
+  cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
       CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
-  cargo test -p backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
+  cargo test -p fandhe-ai-backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
 
 # 4. PyTorch 参照値を計 5 回計測する（§5 参照。同じくノード上で ssh リモート実行する）
 
@@ -182,7 +182,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
       CUDA_FLOOR_BENCH_PYTORCH_F16_1024="<5 run 中央値>" \
       CUDA_FLOOR_BENCH_PYTORCH_F16_2048="<5 run 中央値>" \
       CUDA_FLOOR_BENCH_PYTORCH_F16_4096="<5 run 中央値>" \
-  cargo run -p backend-cuda --example cuda_floor_bench --release --locked'
+  cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked'
 # ↑ を 5 回反復実行し、経路×形状のセルごとに run1〜run5 の median_tflops を独立に中央値化した
 #   ものを代表値として下表へ機械転記する（stdout からの転記のみ。後付け調整は行わない）
 
@@ -278,7 +278,7 @@ F-5（#577・人間承認タスク）と同様の人間承認プロセスへ引�
 
 ## 12. 動作確認（本実装セッションで実施済み・結果記録）
 
-- `cargo build --example cuda_floor_bench -p backend-cuda`（cudarc 動的ロードにより CUDA toolkit
+- `cargo build --example cuda_floor_bench -p fandhe-ai-backend-cuda`（cudarc 動的ロードにより CUDA toolkit
   非搭載環境でもビルド成立することを確認。実行結果は下記参照）
 - 経路カバレッジ再確認（§2）: `grep` によるコード上の確認のみ。GPU 実行は伴わない
 - `cargo fmt --all -- --check`: 差分なし（green）

@@ -22,13 +22,13 @@
 //!
 //! 実行例（AVX2+FMA を有効化してビルド）:
 //! ```text
-//! RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu \
+//! RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu \
 //!     --release -- --ignored gemm_small_shape
 //! ```
 
-use backend_cpu::{gemm_blis, gemm_blis_parallel, gemm_naive};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run};
+use fandhe_ai_backend_cpu::{gemm_blis, gemm_blis_parallel, gemm_naive};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)

@@ -1,7 +1,8 @@
 # oss-gemm-compare
 
 CPU GEMM の OSS 直接比較ハーネス（イシュー #755）。本体の現行最適 CPU 経路
-（`backend_cpu::gemm_blis_parallel`。BLIS 5-loop + rayon 並列）を、
+（`fandhe_ai_backend_cpu::gemm_blis_parallel`。BLIS 5-loop + rayon 並列。
+crates.io 公開向け rename はイシュー #879・`docs/crates-io-naming-decision.md`）を、
 `matrixmultiply`・`gemm` crate（いずれも許容依存第 9 区分〈ベンチ比較対象。
 `.claude/rules/deps-policy.md`〉として条件付きユーザー承認済み〈2026-08-20〉。
 本体 workspace の直接依存〈第 1〜8 区分〉には含まれない）と同一プロトコルで計測する。

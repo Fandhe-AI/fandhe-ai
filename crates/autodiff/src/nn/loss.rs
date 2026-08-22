@@ -21,7 +21,7 @@
 //! ため `crate::var::Reduction`（#190 が定義）をそのまま再利用し、
 //! `nn::loss` 側には重複定義を置かない。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 pub use crate::var::Reduction;
@@ -101,9 +101,10 @@ mod tests {
     #[test]
     fn forward_mean_matches_var_mse_loss() {
         let tape = Tape::new_with_ops(crate::test_support::test_ops());
-        let pred = tape.var(&tensor_core::Tensor::new(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]).unwrap());
-        let target =
-            tape.var(&tensor_core::Tensor::new(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]).unwrap());
+        let pred = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]).unwrap());
+        let target = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]).unwrap());
         let before = tape.len();
 
         let via_module = MseLoss::default().forward(&pred, &target).unwrap();
@@ -123,9 +124,10 @@ mod tests {
     #[test]
     fn forward_sum_matches_var_mse_loss_with() {
         let tape = Tape::new_with_ops(crate::test_support::test_ops());
-        let pred = tape.var(&tensor_core::Tensor::new(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]).unwrap());
-        let target =
-            tape.var(&tensor_core::Tensor::new(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]).unwrap());
+        let pred = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, -2.0, 3.0, 0.5], &[2, 2]).unwrap());
+        let target = tape
+            .var(&fandhe_ai_tensor_core::Tensor::new(vec![0.5, -1.0, 2.5, 1.0], &[2, 2]).unwrap());
 
         let via_module = MseLoss::new(Reduction::Sum)
             .forward(&pred, &target)
@@ -141,8 +143,9 @@ mod tests {
     #[test]
     fn forward_propagates_shape_mismatch_error() {
         let tape = Tape::new_with_ops(crate::test_support::test_ops());
-        let pred = tape.var(&tensor_core::Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
-        let target = tape.var(&tensor_core::Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap());
+        let pred = tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, 2.0], &[2]).unwrap());
+        let target =
+            tape.var(&fandhe_ai_tensor_core::Tensor::new(vec![1.0, 2.0, 3.0], &[3]).unwrap());
 
         let err = MseLoss::default().forward(&pred, &target).unwrap_err();
         assert!(matches!(err, AutodiffError::Shape(_)));

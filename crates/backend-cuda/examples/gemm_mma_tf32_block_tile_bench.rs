@@ -51,7 +51,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_mma_tf32_block_tile_bench --release \
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_mma_tf32_block_tile_bench --release \
 //!     --features internal-diagnostics
 //! ```
 //!
@@ -72,10 +72,10 @@
 //! 実測値・対現行比・数値一致結果は
 //! `docs/perf/cuda-gemm-mma-tf32-block-tile.md` §7 へ記録する。
 
-use backend_cuda::diagnostics::{self, MmaTf32BlockTileLayout};
-use backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::diagnostics::{self, MmaTf32BlockTileLayout};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 
 /// 決定的シード（`gemm_mma_block_tile_bench.rs`・`gemm_mma_tf32_bench.rs`
 /// 系と同一値）。
@@ -94,7 +94,7 @@ const CORRECTNESS_N: u32 = 512;
 const CORRECTNESS_K: u32 = 512;
 
 /// 統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」の要素単位
-/// 判定を `backend_cpu::compare`（`RELATIVE_TOLERANCE`/
+/// 判定を `fandhe_ai_backend_cpu::compare`（`RELATIVE_TOLERANCE`/
 /// `ABSOLUTE_RESCUE_THRESHOLD`）と**同一式**で再現する
 /// （`gemm_mma_block_tile_bench.rs::is_mismatch` と同型設計・同じ理由。
 /// 独自の許容誤差式を再実装しない）。
@@ -105,8 +105,8 @@ fn is_mismatch(actual: f32, expected: f32) -> bool {
         .max((expected as f64).abs())
         .max(1e-12);
     let rel = diff / scale;
-    let pass =
-        rel < backend_cpu::RELATIVE_TOLERANCE || diff < backend_cpu::ABSOLUTE_RESCUE_THRESHOLD;
+    let pass = rel < fandhe_ai_backend_cpu::RELATIVE_TOLERANCE
+        || diff < fandhe_ai_backend_cpu::ABSOLUTE_RESCUE_THRESHOLD;
     !pass
 }
 
@@ -315,10 +315,10 @@ fn run_correctness_shape(
 }
 
 /// 候補出力と参照出力（要素ごと）を統一複合判定で比較し、mismatch が
-/// 0 件かを返す（`backend_cpu::compare` へ委譲。REQ-2 統一複合判定の
+/// 0 件かを返す（`fandhe_ai_backend_cpu::compare` へ委譲。REQ-2 統一複合判定の
 /// 唯一の正であり、独自の許容誤差式を再実装しない）。
 fn matches_reference(actual: &[f32], expected: &[f32]) -> bool {
-    backend_cpu::compare(actual, expected)
+    fandhe_ai_backend_cpu::compare(actual, expected)
         .map(|report| report.passes())
         .unwrap_or(false)
 }
@@ -331,12 +331,12 @@ fn matches_reference(actual: &[f32], expected: &[f32]) -> bool {
 /// （低コスト・対称性維持）」を受けた拡張。本経路は #839 の既知
 /// correctness bug により恒常的に大量 mismatch となるが、件数・規模を
 /// ログへ残すことで bug 修正後の回帰確認や規模比較の材料になる）。
-/// `mismatch_count`/`max_abs_diff`/`max_rel_err` は [`backend_cpu::
+/// `mismatch_count`/`max_abs_diff`/`max_rel_err` は [`fandhe_ai_backend_cpu::
 /// CompareReport`]（全セル対象の集計。`docs/perf/cuda-gemm-mma-tf32-ab.md`
 /// が引用する同名統計と同じ由来）をそのまま転記し、初回不一致座標のみ
 /// `is_mismatch`（`CompareReport` と同一の判定式）で別途走査する。
 fn mismatch_diagnostics(actual: &[f32], expected: &[f32]) -> (usize, f64, f64, Option<usize>) {
-    let report = match backend_cpu::compare(actual, expected) {
+    let report = match fandhe_ai_backend_cpu::compare(actual, expected) {
         Ok(r) => r,
         Err(_) => return (0, 0.0, 0.0, None),
     };
@@ -438,7 +438,7 @@ fn main() {
     let a_ref: Vec<f32> = rng.fill_vec((CORRECTNESS_M * CORRECTNESS_K) as usize);
     let b_ref: Vec<f32> = rng.fill_vec((CORRECTNESS_K * CORRECTNESS_N) as usize);
     let mut expected_cpu = vec![0.0f32; (CORRECTNESS_M * CORRECTNESS_N) as usize];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_ref,
         &b_ref,
         &mut expected_cpu,
@@ -616,7 +616,7 @@ fn main() {
             // 通常経路では parity_cpu == Some(false) は mismatch_count > 0 を含意する
             // （actual/expected_cpu は共に CORRECTNESS_M*CORRECTNESS_N から構築され
             // 長さが一致するため）。ただし `mismatch_diagnostics` は
-            // `backend_cpu::compare` の Err（長さ不一致）を fail-open に
+            // `fandhe_ai_backend_cpu::compare` の Err（長さ不一致）を fail-open に
             // `(0, 0.0, 0.0, None)` へ丸めており、`matches_reference` 側の
             // fail-closed 丸め（Err → false）と非対称なため、万一 Err 経路を
             // 通ると mismatch_count == 0 かつ first_mismatch_index == None に

@@ -65,7 +65,7 @@
 //! 未実装のままである。
 //!
 //! `internal-diagnostics` feature（既定 off）を要求する。本 example が使う
-//! `backend_cuda::diagnostics::{mma_f16_source, mma_f16_source_with_swizzle,
+//! `fandhe_ai_backend_cuda::diagnostics::{mma_f16_source, mma_f16_source_with_swizzle,
 //! mma_f16_source_with_warp_tiles, mma_f16_source_with_block_tile,
 //! mma_swizzle_group_width}` は非公開 `mod kernels_mma`／`mod swizzle` への
 //! 薄い診断用ラッパーであり、既定ビルドの
@@ -79,13 +79,13 @@
 //! 成立する no-op main を明示的に持つ」ことを要件としているため
 //! `required-features` は使わず、ファイル内を丸ごと `#[cfg(feature =
 //! "internal-diagnostics")]`／`#[cfg(not(...))]` で分岐する。これにより
-//! `cargo build -p backend-cuda --example mma_ptx_dump`（feature 未指定を
+//! `cargo build -p fandhe-ai-backend-cuda --example mma_ptx_dump`（feature 未指定を
 //! 明示指定）でもビルドが成立する。
 //!
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example mma_ptx_dump --release \
+//! cargo run -p fandhe-ai-backend-cuda --example mma_ptx_dump --release \
 //!     --features internal-diagnostics -- --out-dir /tmp/mma-ptx-dump
 //! ```
 //!
@@ -104,7 +104,7 @@
 //! `arch()` をそのまま使う。
 
 #[cfg(feature = "internal-diagnostics")]
-use backend_cuda::{CudaDevice, CudaError, compile_ptx, diagnostics};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, compile_ptx, diagnostics};
 
 #[cfg(feature = "internal-diagnostics")]
 const USAGE: &str = "usage: mma_ptx_dump [--out-dir PATH]";
@@ -543,7 +543,7 @@ fn main() {
 }
 
 /// `internal-diagnostics` feature 未指定時の no-op（本ファイル冒頭
-/// コメント参照。`cargo build -p backend-cuda --example mma_ptx_dump`
+/// コメント参照。`cargo build -p fandhe-ai-backend-cuda --example mma_ptx_dump`
 /// が feature なしでもビルド成立することを保証する）。
 #[cfg(not(feature = "internal-diagnostics"))]
 fn main() {

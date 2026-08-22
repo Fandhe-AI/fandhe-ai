@@ -11,7 +11,7 @@
 //! （SGD/AdamW 実装・#193/#194）が `Gradients::get` で取り出した
 //! `&Tensor<f32>` 群をここへ渡す運用を想定する。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 

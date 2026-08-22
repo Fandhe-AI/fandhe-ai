@@ -7,7 +7,7 @@
 //! 実値確認等）は `#[ignore]` 分離のうえ本ファイル末尾に追加する
 //! （`.claude/rules/coding-rust.md` の実機依存分離方針）。
 
-use backend_cuda::{CudaDevice, CudaError};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError};
 
 /// 受け入れ条件そのもの: `CudaDevice::new` は CUDA 非搭載環境で panic
 /// せず型付きエラーを返す。CUDA 搭載環境ではメタデータが取得できる
@@ -123,7 +123,7 @@ fn new_returns_ok_with_valid_metadata_on_real_hardware() {
 /// エラー型の単体テスト（環境非依存）: `Display` 表示・`From` 変換・
 /// `source()` を検証する。
 mod error_type {
-    use backend_cuda::CudaError;
+    use fandhe_ai_backend_cuda::CudaError;
     use std::error::Error;
 
     #[test]

@@ -59,8 +59,8 @@
 //! `isize` で行う契約（`tensor.rs`）に委ねる。現行 `tensor-core` は負
 //! stride を生成しないため、本モジュールは非負 stride のみを前提とする。
 
+use fandhe_ai_tensor_core::{Element, ShapeError, Tensor, elementwise_out_shape};
 use rayon::prelude::*;
-use tensor_core::{Element, ShapeError, Tensor, elementwise_out_shape};
 
 /// rayon 並列化へ切り替える要素数の下限。
 ///

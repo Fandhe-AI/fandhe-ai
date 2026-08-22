@@ -1,16 +1,16 @@
 //! #195（親 #192）: gradient clipping（global norm 方式）のノルム計算・
 //! clip 動作・適用順序契約（backward → unscale → clip）の受け入れテスト。
 //!
-//! `autodiff::nn::optim::clip` は `Gradients`/`Var` に依存しない純関数
+//! `fandhe_ai_autodiff::nn::optim::clip` は `Gradients`/`Var` に依存しない純関数
 //! （`clip.rs` doc 参照）のため、ここでは手組みの `Tensor<f32>` を直接
 //! 渡してテストする。ミニ学習ステップとの統合（backward 由来の実勾配へ
 //! の適用）は `nn_train_convergence.rs` と同型の 2 層 MLP で検証する。
 
 mod common;
 
-use autodiff::Tape;
-use autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_autodiff::nn::optim::{clip_grad_norm, global_grad_norm};
+use fandhe_ai_tensor_core::Tensor;
 
 use bench_harness::rng::Xorshift64Star;
 
@@ -217,7 +217,7 @@ fn sgd_step(param: &Tensor<f32>, grad: &Tensor<f32>, lr: f32) -> Tensor<f32> {
 
 #[test]
 fn clip_applied_to_real_backward_gradients_bounds_update_norm() {
-    use autodiff::nn::Linear;
+    use fandhe_ai_autodiff::nn::Linear;
 
     const BATCH: usize = 4;
     const D_IN: usize = 8;

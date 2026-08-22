@@ -13,7 +13,7 @@
 //! 分離する。呼び出し元は毎ステップ `Linear::bind(&tape)` で
 //! `LinearVars` を作り直し、`forward` を呼ぶ。
 
-use tensor_core::{ShapeError, Tensor};
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 
 use crate::error::AutodiffError;
 use crate::nn::init::{BIAS_SEED_SALT, WEIGHT_SEED_SALT, derive_seed, uniform_init};

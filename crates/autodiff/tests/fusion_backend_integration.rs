@@ -15,8 +15,8 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use autodiff::Tape;
-use tensor_core::{BackendError, BackendOps, Device, FusedOpKind, FusionPlan, Tensor};
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, FusedOpKind, FusionPlan, Tensor};
 
 /// `run_fused` を実際に実行する（`FusionPlan::ops()` を辿って per-op
 /// 単純合成する参照実装）カウンタ付き `BackendOps`。#163（CPU 融合実行
@@ -82,7 +82,7 @@ impl BackendOps for CountingFusedOps {
                 FusedOpKind::Exp { input } => self.inner.exp(&values[input])?,
                 FusedOpKind::Tanh { input } => self.inner.tanh(&values[input])?,
                 // #586 で `FusedOpKind` へ追加された reduction（Sum／Max）
-                // ・Rsqrt は、`autodiff::tape::build_lazy_plan` が現状これらを
+                // ・Rsqrt は、`fandhe_ai_autodiff::tape::build_lazy_plan` が現状これらを
                 // 遅延評価対象にせず `push_eager` で実体化するため
                 // （`crates/autodiff/src/tape.rs`）、本テストフィクスチャの
                 // `run_fused` へ実際に渡される `ops` には現れない。到達不能
@@ -92,17 +92,17 @@ impl BackendOps for CountingFusedOps {
                 FusedOpKind::Rsqrt { .. } | FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } => {
                     return Err(BackendError::Unsupported(
                         "CountingFusedOps::run_fused: reduction/Rsqrt not implemented \
-                         (tensor_core::fusion IR extension #586; CPU kernel out of scope)"
+                         (fandhe_ai_tensor_core::fusion IR extension #586; CPU kernel out of scope)"
                             .into(),
                     ));
                 }
-                // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+                // `fandhe_ai_tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
                 // PR #648 P1 是正）のため、別クレートである本テストからの match
                 // は将来の未知 variant に備え `_` 分岐が必須。
                 _ => {
                     return Err(BackendError::Unsupported(
                         "CountingFusedOps::run_fused: unknown FusedOpKind variant \
-                         (tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
+                         (fandhe_ai_tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
                          variant)"
                             .into(),
                     ));
@@ -163,7 +163,7 @@ fn composite_close(a: f32, b: f32) -> bool {
 
 /// 6 段の elementwise 連鎖（`add → mul → relu → exp → tanh → add`）を
 /// 構築する共通ヘルパー。`x`（tape 上の入力）を起点に返す。
-fn build_chain<'t>(tape: &'t Tape, x: &autodiff::Var<'t>) -> autodiff::Var<'t> {
+fn build_chain<'t>(tape: &'t Tape, x: &fandhe_ai_autodiff::Var<'t>) -> fandhe_ai_autodiff::Var<'t> {
     let bias = tape.var(&Tensor::new(vec![0.1, 0.2, 0.3, 0.4], &[4]).unwrap());
     let scale = tape.var(&Tensor::new(vec![1.1, 0.9, 1.05, 0.95], &[4]).unwrap());
     let h1 = x.add(&bias).unwrap(); // 1
@@ -301,7 +301,7 @@ impl BackendOps for ShapeMismatchOnBroadcastFusedOps {
         let out_shape = plan.output_shape();
         if leaves.iter().any(|l| l.shape() != out_shape) {
             return Err(BackendError::ShapeMismatch(
-                tensor_core::ShapeError::BroadcastIncompatible {
+                fandhe_ai_tensor_core::ShapeError::BroadcastIncompatible {
                     lhs: out_shape.to_vec(),
                     rhs: leaves
                         .iter()
@@ -321,7 +321,7 @@ impl BackendOps for ShapeMismatchOnBroadcastFusedOps {
                 FusedOpKind::Exp { input } => self.inner.exp(&values[input])?,
                 FusedOpKind::Tanh { input } => self.inner.tanh(&values[input])?,
                 // #586 で `FusedOpKind` へ追加された reduction（Sum／Max）
-                // ・Rsqrt は、`autodiff::tape::build_lazy_plan` が現状これらを
+                // ・Rsqrt は、`fandhe_ai_autodiff::tape::build_lazy_plan` が現状これらを
                 // 遅延評価対象にせず `push_eager` で実体化するため
                 // （`crates/autodiff/src/tape.rs`）、本テストフィクスチャの
                 // `run_fused` へ実際に渡される `ops` には現れない。到達不能
@@ -331,17 +331,17 @@ impl BackendOps for ShapeMismatchOnBroadcastFusedOps {
                 FusedOpKind::Rsqrt { .. } | FusedOpKind::Sum { .. } | FusedOpKind::Max { .. } => {
                     return Err(BackendError::Unsupported(
                         "CountingFusedOps::run_fused: reduction/Rsqrt not implemented \
-                         (tensor_core::fusion IR extension #586; CPU kernel out of scope)"
+                         (fandhe_ai_tensor_core::fusion IR extension #586; CPU kernel out of scope)"
                             .into(),
                     ));
                 }
-                // `tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
+                // `fandhe_ai_tensor_core::FusedOpKind` は `#[non_exhaustive]`（codex-review
                 // PR #648 P1 是正）のため、別クレートである本テストからの match
                 // は将来の未知 variant に備え `_` 分岐が必須。
                 _ => {
                     return Err(BackendError::Unsupported(
                         "CountingFusedOps::run_fused: unknown FusedOpKind variant \
-                         (tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
+                         (fandhe_ai_tensor_core::FusedOpKind is #[non_exhaustive]; unrecognized future \
                          variant)"
                             .into(),
                     ));

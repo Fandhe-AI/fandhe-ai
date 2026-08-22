@@ -77,7 +77,7 @@ Phase A 親 #480 は本来「implement-issue-tree に載せず main が手動で
 ### Rust 側
 
 ```bash
-cargo test -p backend-cpu --release --test gemm_blis_perf \
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_perf \
     -- --ignored gemm_blis_baseline --nocapture
 ```
 

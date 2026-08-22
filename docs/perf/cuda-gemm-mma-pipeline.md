@@ -24,9 +24,9 @@ sm_121（DGX Spark GB10。設計上のターゲット）での挙動はさらに
 
 本実装セッションで検証済みの事項:
 
-- `cargo build -p backend-cuda`／`cargo test -p backend-cuda`／`cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo build -p fandhe-ai-backend-cuda`／`cargo test -p fandhe-ai-backend-cuda`／`cargo clippy --workspace --all-targets --all-features -- -D warnings`
   が全て green（Rust 側の型・API 契約・カーネル定数の内部整合性はコンパイル時 `const _: () = assert!(...)`（`kernels_mma.rs`）で検査済み）
-- `cargo run -p backend-cuda --example gemm_mma_bench` を実際に実行し、CUDA driver 到達→NVRTC 不在検出→graceful skip の
+- `cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench` を実際に実行し、CUDA driver 到達→NVRTC 不在検出→graceful skip の
   分岐が意図どおり動作することを確認済み（出力はいずれの経路も `NvrtcUnavailable` で skip）
 - `kernels_mma.rs` 内の `#[cfg(test)]`（tensor core 命令実在検査・タイル定数整合検査・REQ-8 境界チェック実在検査）が
   全て green
@@ -45,7 +45,7 @@ sm_121（DGX Spark GB10。設計上のターゲット）での挙動はさらに
 ```sh
 git fetch origin
 git checkout perf/187-mma-sync-cp-async-pipeline   # 本イシューの実装ブランチ
-cargo run -p backend-cuda --example gemm_mma_bench --release
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release
 ```
 
 出力形式（`examples/gemm_mma_bench.rs` 参照）:
@@ -57,7 +57,7 @@ cargo run -p backend-cuda --example gemm_mma_bench --release
 数値一致確認（受け入れ条件に必須の前提。性能値採用より先に実施すること）:
 
 ```sh
-cargo test -p backend-cuda -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda -- --ignored --nocapture
 ```
 
 `tests/cpu_cuda_mma_parity.rs` の全ケース（タイル倍数形状・8 の倍数の非タイル倍数エッジ形状・K=4096 ストレス・
@@ -147,8 +147,8 @@ Phase F-1）が引き継ぐ。同ドキュメントは本節の「実機セッ�
 検証済み（本ホスト・GPU 不要のロジック検査のみ。実機到達性が無いため以下に限定）:
 
 - `cargo fmt --all` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`: green
-- `cargo build -p backend-cuda --all-targets`: green（`cudarc` 動的ロードのため CUDA toolkit 非搭載環境でも成立）
-- `cargo test -p backend-cuda`（`cuda_floor_bench` の `#[cfg(test)]` 単体検査 14 件を含む）: green
+- `cargo build -p fandhe-ai-backend-cuda --all-targets`: green（`cudarc` 動的ロードのため CUDA toolkit 非搭載環境でも成立）
+- `cargo test -p fandhe-ai-backend-cuda`（`cuda_floor_bench` の `#[cfg(test)]` 単体検査 14 件を含む）: green
 - `git diff origin/main -- crates/backend-cuda/tests/common crates/backend-cuda/src crates/bench-harness`:
   無差分（tolerance 定数・parity fixture・`FloorSpec`・カーネルソースは本イシューで一切変更していない）
 
@@ -166,13 +166,13 @@ Phase F-1）が引き継ぐ。同ドキュメントは本節の「実機セッ�
    で到達性・GPU 排他性を確認する
 2. `docs/real-hardware-verification-env.md` §3 の rsync 手順でコードを転送し、`.rev-stamp` でリビジョン
    一致を確認する
-3. `cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1` ほか
+3. `cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1` ほか
    `--ignored` テスト群で数値一致・parity 非後退を性能値採用より先に確認する（後退時は性能値を採用せず
    打ち切る）
 4. `docs/spec/03-poc/poc-v2-3-cuda-gemm/code/pytorch/gemm_bench_torch_cuda.py <size> 20 20` を
    size ∈ {512, 1024, 2048, 4096} × {f32, f16} で同一実機実行し、PyTorch 参照値を再計測する
 5. `CUDA_FLOOR_BENCH_PYTORCH_{F32,F16}_{512,1024,2048,4096}` と `CUDA_FLOOR_BENCH_PYTORCH_SOURCE` を
-   設定し `cargo run -p backend-cuda --example cuda_floor_bench --release --locked` を 3 回反復実行、
+   設定し `cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked` を 3 回反復実行、
    run 間中央値を代表値として本節・`docs/perf/cuda-gemm-wmma-tf32-phase-b.md` §7 へ機械転記する
 
 ## スコープ外（out-of-scope-tracking.md に従い記録）

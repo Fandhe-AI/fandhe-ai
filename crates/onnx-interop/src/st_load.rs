@@ -33,16 +33,16 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
+use fandhe_ai_tensor_core::{ShapeError, Tensor};
 use safetensors::Dtype;
 use safetensors::tensor::SafeTensors;
-use tensor_core::{ShapeError, Tensor};
 
 /// safetensors ロード経路の型付きエラー。
 ///
 /// `#[non_exhaustive]` を付す理由: 公開 API 非破壊はガードレール条件
 /// （`.claude/rules/security.md`）であり、後続タスク（ONNX 経路等）で
 /// variant が増えても呼び出し側の網羅的 match を破壊しないため
-/// （`tensor_core::ShapeError` と同じ方針）。
+/// （`fandhe_ai_tensor_core::ShapeError` と同じ方針）。
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum LoadError {

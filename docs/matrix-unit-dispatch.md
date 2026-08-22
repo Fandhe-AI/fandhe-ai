@@ -63,10 +63,10 @@ v1 前提を廃した理由そのものである。
 
 ```sh
 # CUDA 側 4 ファイルの命令実在検査（Linux・GPU なしで実行可。文字列検査のみ）
-cargo test -p backend-cuda
+cargo test -p fandhe-ai-backend-cuda
 
 # Metal 側の命令実在検査（Linux・GPU なしで実行可。文字列検査のみ）
-cargo test -p backend-metal --test shader_source_evidence
+cargo test -p fandhe-ai-backend-metal --test shader_source_evidence
 
 # 命令実在を直接 grep で確認する場合の例（テストと同じ検査対象文字列）
 grep -n "wmma::mma_sync" crates/backend-cuda/src/kernels_wmma.rs

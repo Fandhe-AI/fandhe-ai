@@ -45,16 +45,16 @@ aarch64 実機へアクセス可能な後続セッション・Agent（`bench-run
 |---|---|---|
 | fmt | `cargo fmt --all` | 差分なし |
 | clippy（x86_64） | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 警告なし |
-| NEON 型検査 | `cargo check -p backend-cpu --target aarch64-unknown-linux-gnu` | 成功 |
-| NEON クロス型検査 | `cargo check -p backend-cpu --target aarch64-apple-darwin` | 成功 |
-| NEON clippy 型検査 | `cargo clippy -p backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
+| NEON 型検査 | `cargo check -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu` | 成功 |
+| NEON クロス型検査 | `cargo check -p fandhe-ai-backend-cpu --target aarch64-apple-darwin` | 成功 |
+| NEON clippy 型検査 | `cargo clippy -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
 | リグレッション | `cargo test --workspace` | 全 pass（0 failed。x86_64 では scalar/AVX2 経路のみ実行され NEON 経路は実行対象外） |
 
 ## 未実測（fail-closed・後続セッションへの引き継ぎ事項）
 
 以下 2 項目は受け入れ基準だが、本セッションでは aarch64 実機に到達できないため未実施:
 
-1. **bit 完全一致**: `cargo test -p backend-cpu --release --test gemm_blis_parity` を aarch64 実機
+1. **bit 完全一致**: `cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_parity` を aarch64 実機
    （M4 Max または Grace CPU）で実行する。aarch64 では `Isa::detect` が無条件に NEON を選ぶため、
    このテスト実行自体が新方式 NEON 経路の `gemm_naive` との bit 完全一致検証になる。**不一致の場合は
    実装を revert し、tolerance の変更・テスト側の調整で通すことは行わない**（`.claude/rules/coding-rust.md`
@@ -68,10 +68,10 @@ aarch64 実機へアクセス可能な後続セッション・Agent（`bench-run
 
 ```bash
 # bit 完全一致（aarch64 実機）
-cargo test -p backend-cpu --release --test gemm_blis_parity
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_parity
 
 # スループット（aarch64 実機。--ignored ハーネス使用）
-cargo test -p backend-cpu --release --test gemm_blis_perf -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_perf -- --ignored --nocapture
 ```
 
 実機接続手順は `docs/real-hardware-verification-env.md` §3-4（rsync 転送・除外フィルタ厳守）を参照する。

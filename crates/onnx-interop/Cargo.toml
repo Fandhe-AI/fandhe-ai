@@ -19,7 +19,7 @@ prost.workspace = true
 # （Add/Mul/Div/Mod/Sqrt/Constant。TASK-7.3a）・MVP 形状操作オペ（Cast/Reshape/Squeeze/
 # Transpose。TASK-7.3b）が入出力とする `Tensor<f32>`・stride ベース view API を利用するために
 # 必要。
-tensor-core = { path = "../tensor-core" }
+fandhe-ai-tensor-core = { path = "../tensor-core" }
 # 数値型区分の許容依存（deps-policy.md）。workspace には既に固定済みで
 # `tensor-core`/`backend-cpu` 等が使用中のため新規追加ではない。`onnx-interop` では
 # `Cast(to=FLOAT16)`（イシュー #274）が `half::f16` を直接生成するために必要。
@@ -38,7 +38,7 @@ serde_json.workspace = true
 # member 間の path 依存であり、`crates/autodiff/Cargo.toml` の
 # bench-harness dev-dependency と同種の判断。deps-policy.md のユーザー
 # 承認フロー対象外）。
-autodiff = { path = "../autodiff" }
+fandhe-ai-autodiff = { path = "../autodiff" }
 # #198: 学習データの決定的シード生成（`bench_harness::rng::Xorshift64Star`）
 # に使う。`crates/autodiff/tests/nn_train_convergence.rs` と同一の先例
 # （dev-dependency 経由の再利用のみで新規外部依存の追加ではない）。
@@ -49,4 +49,4 @@ bench-harness = { path = "../bench-harness" }
 # 新規追加ではない。workspace 内 path 依存であり、上記 `autodiff`／
 # `bench-harness` dev-dependency と同種の判断。deps-policy.md のユーザー
 # 承認フロー対象外）。
-backend-cpu = { path = "../backend-cpu" }
+fandhe-ai-backend-cpu = { path = "../backend-cpu" }

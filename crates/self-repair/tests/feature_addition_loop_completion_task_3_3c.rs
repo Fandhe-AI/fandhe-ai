@@ -92,8 +92,8 @@ fn candidate_content(leaky_relu_fn: &str) -> String {
     .expect("baseline fixture ファイルは実在する");
 
     let with_import = baseline.replacen(
-        "use autodiff::Var;\nuse autodiff::nn::activation::{Relu, Sigmoid};\n",
-        "use autodiff::Tape;\nuse autodiff::Var;\nuse autodiff::nn::activation::{Relu, Sigmoid};\nuse tensor_core::Tensor;\n",
+        "use fandhe_ai_autodiff::Var;\nuse fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};\n",
+        "use fandhe_ai_autodiff::Tape;\nuse fandhe_ai_autodiff::Var;\nuse fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};\nuse fandhe_ai_tensor_core::Tensor;\n",
         1,
     );
     assert_ne!(

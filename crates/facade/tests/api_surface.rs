@@ -6,12 +6,12 @@
 //! (a) `pub use` で `Tape`／`BackendOps`／`new_with_ops` を再エクスポート
 //! していないこと、(b) `pub fn` のシグネチャが `BackendOps` を引数として
 //! 直接受け取っていないことを固定する。利用者向け公開面が [`Device`]
-//! 識別子のみに限定される（`facade::tape()`／`facade::tape_for(Device)`）
+//! 識別子のみに限定される（`fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`）
 //! ことの構造的裏付け。**`visit_rs_files` は `src/` 配下を再帰走査する
 //! ため、TASK-9.4（#411）で追加した `src/compat/`（`compat::array`／
-//! `compat::Sequential`。旧 `autodiff::compat` からの移設）も自動的に
+//! `compat::Sequential`。旧 `fandhe_ai_autodiff::compat` からの移設）も自動的に
 //! 走査対象へ含まれる**（旧 `compat::Sequential::predict_with_ops` は
-//! `BackendOps` を直接引数に取っていたため、移設後の `facade::compat`
+//! `BackendOps` を直接引数に取っていたため、移設後の `fandhe_ai::compat`
 //! がこれを公開していないことも本テストが機械的に固定する）。
 //!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
@@ -96,23 +96,23 @@ fn facade_public_functions_do_not_accept_backend_ops_argument() {
     );
 }
 
-/// 公開関数 `tape_for` の入力が [`facade::Device`] 識別子のみであることの
+/// 公開関数 `tape_for` の入力が [`fandhe_ai::Device`] 識別子のみであることの
 /// コンパイル時検証（受入基準 2）。型シグネチャが変わればこのテスト自体が
 /// コンパイルエラーになるため、宣言的な固定として機能する。
 ///
-/// 戻り値の型注釈は `facade::Tape`（newtype。`autodiff::Tape` ではない）
-/// である点も併せて固定する（codex-review PR #424 P1 是正: `autodiff::Tape`
+/// 戻り値の型注釈は `fandhe_ai::Tape`（newtype。`fandhe_ai_autodiff::Tape` ではない）
+/// である点も併せて固定する（codex-review PR #424 P1 是正: `fandhe_ai_autodiff::Tape`
 /// を facade の公開シグネチャへ直接露出させない。`src/lib.rs` モジュール
 /// doc「`Tape`（composition root が構築する値）の扱い」参照）。
 #[test]
 fn tape_for_accepts_device_identifier_only() {
     // `Device::Cpu` は常に構築可能（デバイス列挙・検証不要）。
-    let device: facade::Device = facade::Device::Cpu;
-    let result: Result<facade::Tape, facade::BackendError> = facade::tape_for(device);
+    let device: fandhe_ai::Device = fandhe_ai::Device::Cpu;
+    let result: Result<fandhe_ai::Tape, fandhe_ai::BackendError> = fandhe_ai::tape_for(device);
     assert!(result.is_ok(), "Device::Cpu の tape_for は常に成功するはず");
 }
 
-/// `facade::tape()`（既定 CPU）が `CpuBackendOps` を構築していることを
+/// `fandhe_ai::tape()`（既定 CPU）が `CpuBackendOps` を構築していることを
 /// ソース走査で固定する（`Tape::ops()` は `pub(crate)` のため統合テスト
 /// から実行時に観測できない。`fusion_default_parity.rs` が数値一致で
 /// 検証する「融合有効」という結論と、この「CPU バックエンドを結線して
@@ -125,20 +125,20 @@ fn tape_reexport_wires_cpu_backend_ops() {
     let tape_fn = content
         .split("pub fn tape()")
         .nth(1)
-        .expect("facade::tape() の定義が見つからない");
+        .expect("fandhe_ai::tape() の定義が見つからない");
     // 次の `pub fn` 定義（`tape_for`）が始まる手前までを `tape()` の本体とみなす。
     let tape_fn_body = tape_fn.split("pub fn tape_for").next().unwrap_or(tape_fn);
     assert!(
         tape_fn_body.contains("CpuBackendOps"),
-        "facade::tape() の本体が CpuBackendOps を構築していない\
+        "fandhe_ai::tape() の本体が CpuBackendOps を構築していない\
          （既定バックエンド＝CPU の構造的裏付けが崩れている）"
     );
 }
 
-/// `crates/facade/src/compat/` の `pub fn` シグネチャが `autodiff::Tape`
+/// `crates/facade/src/compat/` の `pub fn` シグネチャが `fandhe_ai_autodiff::Tape`
 /// （生の内部クレート型）を直接引数に取っていないことを固定する
 /// （codex-review PR #424 P1 是正: 内部クレートの型を facade の公開
-/// シグネチャへ直接露出させない。`facade::Tape`〈newtype〉のみを取る
+/// シグネチャへ直接露出させない。`fandhe_ai::Tape`〈newtype〉のみを取る
 /// べきこと・`src/lib.rs` モジュール doc「`Tape`（composition root が
 /// 構築する値）の扱い」参照）。
 #[test]
@@ -148,15 +148,15 @@ fn compat_public_functions_do_not_accept_raw_autodiff_tape_argument() {
     visit_rs_files(&compat_dir, &mut |path, content| {
         for line in content.lines() {
             let trimmed = line.trim_start();
-            if trimmed.starts_with("pub fn") && trimmed.contains("autodiff::Tape") {
+            if trimmed.starts_with("pub fn") && trimmed.contains("fandhe_ai_autodiff::Tape") {
                 offending.push(format!("{}: `{trimmed}`", path.display()));
             }
         }
     });
     assert!(
         offending.is_empty(),
-        "facade::compat の pub fn が autodiff::Tape（生の内部クレート型）を\
+        "fandhe_ai::compat の pub fn が fandhe_ai_autodiff::Tape（生の内部クレート型）を\
          直接引数に取っている（内部クレートの型が公開シグネチャへ露出。\
-         facade::Tape〈newtype〉を使うべき）: {offending:?}"
+         fandhe_ai::Tape〈newtype〉を使うべき）: {offending:?}"
     );
 }

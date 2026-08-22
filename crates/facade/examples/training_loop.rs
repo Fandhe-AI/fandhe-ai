@@ -3,13 +3,13 @@
 //! サイト原稿（`site/examples/training-loop.md`）に転記するコード例の
 //! 一次ソース（`getting_started.rs`〈#874〉と同じ理由で二重実装を避ける。
 //! `.claude/rules/code-comment-style.md`）。本 example の実行成功
-//! （`cargo run -p facade --example training_loop`）が原稿の受け入れ
+//! （`cargo run -p fandhe-ai --example training_loop`）が原稿の受け入れ
 //! 条件（コード例がコンパイル・動作確認済みであること）を担保する。
 //!
-//! **手動 SGD にする理由**: `autodiff::optim::{Sgd, AdamW}` は
+//! **手動 SGD にする理由**: `fandhe_ai_autodiff::optim::{Sgd, AdamW}` は
 //! `facade` の公開面（`docs/compat-api-scope.md` §0）に含まれない
-//! 内部 API のため、本 example は `facade::compat::Sequential` と
-//! `facade::{Tape, Var, Tensor}` の公開面だけで完結する最小学習ループ
+//! 内部 API のため、本 example は `fandhe_ai::compat::Sequential` と
+//! `fandhe_ai::{Tape, Var, Tensor}` の公開面だけで完結する最小学習ループ
 //! として `param - lr * grad` を自前で計算する。optimizer 実装自体の
 //! 例は本 example のスコープ外（イシュー #875 実装計画 §7）。
 //!
@@ -28,8 +28,8 @@
 //! coding-rust.md`）に合わせ、`main` は `Result` を返し `?` で伝播する。
 
 use bench_harness::rng::Xorshift64Star;
-use facade::Tensor;
-use facade::compat::Sequential;
+use fandhe_ai::Tensor;
+use fandhe_ai::compat::Sequential;
 
 const BATCH: usize = 4;
 const D_IN: usize = 8;
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 借用）と `tape` が drop され、直後の `apply_parameters`
         // （`&mut model`）呼び出しと借用が競合しない。
         let updated: Vec<Tensor<f32>> = {
-            let tape = facade::tape();
+            let tape = fandhe_ai::tape();
             let bound = model.bind(&tape);
             let x = tape.var(&x_data);
             let y = tape.var(&y_data);

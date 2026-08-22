@@ -27,12 +27,12 @@ git fetch origin
 
 # base（変更前。蛇行走査導入前 = 本 PR の revert 後の状態。origin/main 相当）
 git checkout <base-sha>
-cargo run -p backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_base.txt
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_base.txt
 
 # head（蛇行走査を再導入した実験ブランチ。上記「状態」節の revert 前コミット・
 # または本ドキュメントの記述に従い再実装したもの）
 git checkout <serpentine-experiment-branch>
-cargo run -p backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_head.txt
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release > /tmp/gemm_mma_bench_head.txt
 ```
 
 出力形式（`examples/gemm_mma_bench.rs` 参照）の `MMA_F16` 経路（f16 `mma.sync`/`ldmatrix`/`cp.async`）の
@@ -42,7 +42,7 @@ TFLOPS を base/head で突き合わせる。
 上記蛇行走査式の設計意図「数値不変性」参照）:
 
 ```sh
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 ```
 
 `cpu_cuda_mma_parity`・`parity_nonregression`（tolerance pin テスト含む）等が green であること

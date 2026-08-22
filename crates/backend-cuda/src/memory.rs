@@ -1,6 +1,6 @@
 //! CUDA バックエンドのメモリ操作（TASK-1.9b・#45）。
 //!
-//! `tensor_core::buffer::MemoryOps` の CUDA 実装。既存の GEMM 実装
+//! `fandhe_ai_tensor_core::buffer::MemoryOps` の CUDA 実装。既存の GEMM 実装
 //! （`gemm.rs`）に埋め込まれていたホスト⇔デバイス転送（`clone_htod`/
 //! `alloc_zeros`/`clone_dtoh`）を、演算から独立した「確保・転送・解放」
 //! 抽象として切り出す（`docs/public-api-design.md` §4.2）。
@@ -16,7 +16,7 @@
 //! 実装がストリーム上で `cuMemFreeAsync`/`cuMemFree` を呼ぶ。
 //! `cudarc-0.19.8/src/driver/safe/core.rs` の `impl<T> Drop for
 //! CudaSlice<T>` 参照）。本モジュールは明示 `free()` を持たない
-//! （`tensor_core::buffer` モジュールコメント「解放方針」と同じ RAII
+//! （`fandhe_ai_tensor_core::buffer` モジュールコメント「解放方針」と同じ RAII
 //! 一本化方針）。
 
 use std::any::Any;
@@ -27,15 +27,15 @@ use cudarc::driver::{CudaSlice, CudaStream};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
-use tensor_core::Tensor;
-use tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
-use tensor_core::device::{BackendError, Device};
-use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
-use tensor_core::pool::PoolZeroFill;
+use fandhe_ai_tensor_core::Tensor;
+use fandhe_ai_tensor_core::buffer::{BufferHandle, DeviceBuffer, MemoryOps};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
+use fandhe_ai_tensor_core::pool::PoolZeroFill;
 
 /// CUDA バッファの具体ハンドル。
 ///
-/// `numel == 0`（空テンソルの契約。`tensor_core::buffer` モジュール
+/// `numel == 0`（空テンソルの契約。`fandhe_ai_tensor_core::buffer` モジュール
 /// コメント参照）では `slice` を `None` とし、`cuMemAlloc` 自体を呼ばない
 /// （一部環境の driver は 0 バイト確保を拒否する。`gemm.rs` の `k == 0`
 /// 早期 return コメントと同じ理由）。`CudaSlice<T>` は `#[derive(Debug)]`
@@ -146,7 +146,7 @@ fn checked_numel(shape: &[usize]) -> Result<usize, CudaError> {
 
 /// `CudaError` を `BackendError` へ変換する（転送系呼び出し用）。
 ///
-/// `TransferFailed`（TASK-1.9b で追加。`tensor_core::device` 参照）は
+/// `TransferFailed`（TASK-1.9b で追加。`fandhe_ai_tensor_core::device` 参照）は
 /// 確保済みバッファへのコピー（`clone_htod`/`clone_dtoh`）の失敗を表す。
 /// `CudaError::Driver` は `clone_htod`/`clone_dtoh`（`upload`/`download`）
 /// と `alloc_zeros`（`alloc_zeroed`）の両方から生じうるが、同じ
@@ -171,7 +171,7 @@ fn map_cuda_error(err: CudaError) -> BackendError {
 /// `CudaError` を `BackendError` へ変換する（`alloc_zeroed` 専用）。
 ///
 /// `DeviceAllocationFailed` は確保そのものの失敗（`alloc_zeros` 由来）を
-/// 表す契約（`tensor_core::device::BackendError` ドキュメンテーション
+/// 表す契約（`fandhe_ai_tensor_core::device::BackendError` ドキュメンテーション
 /// コメント参照）。`map_cuda_error` と異なり `CudaError::Driver` を
 /// `DeviceAllocationFailed` にマップする点のみが差分である
 /// （`alloc_zeroed_inner` 内で `CudaError::Driver` を生じさせるのは
@@ -192,7 +192,7 @@ impl CudaMemory {
         // ピークへ計上されてしまう（`backend-cpu::CpuMemory` と同じ順序
         // 契約。TASK-14.1b・#175）。
         let handle: Box<dyn BufferHandle> = if numel == 0 {
-            // 空テンソルの契約（`tensor_core::buffer` モジュールコメント）:
+            // 空テンソルの契約（`fandhe_ai_tensor_core::buffer` モジュールコメント）:
             // FFI を呼ばず空ハンドルを返す。0 バイトの `TrackedAllocation`
             // は current・peak いずれも変化させない no-op（`memory_stats`
             // モジュールコメント参照）だが、他バックエンドと契約を対称に
@@ -229,7 +229,7 @@ impl CudaMemory {
             return Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle));
         }
         // 非 contiguous な入力は実体化してから転送する（`MemoryOps::upload`
-        // の契約。`tensor_core::buffer` モジュールコメント参照）。
+        // の契約。`fandhe_ai_tensor_core::buffer` モジュールコメント参照）。
         let contiguous = tensor.contiguous();
         let data = contiguous
             .as_slice()
@@ -261,7 +261,7 @@ impl CudaMemory {
                 // 非同期コピーのため（`cudarc-0.19.8/src/driver/safe/
                 // core.rs::memcpy_dtoh`）、`download` 復帰時点でホスト
                 // データが確定していることを保証するため
-                // `synchronize()` を後段に挟む（`tensor_core::buffer`
+                // `synchronize()` を後段に挟む（`fandhe_ai_tensor_core::buffer`
                 // モジュールコメント「download の同期契約」参照。
                 // カーネル起動直後の `gemm.rs` はカーネル完了待ちとして
                 // 起動 → synchronize → clone_dtoh の順だが、本関数は
@@ -313,11 +313,11 @@ impl MemoryOps for CudaMemory {
     }
 }
 
-/// `tensor_core::pool::PooledMemory<CudaMemory>`（TASK-#201・REQ-14 14-3）
+/// `fandhe_ai_tensor_core::pool::PooledMemory<CudaMemory>`（TASK-#201・REQ-14 14-3）
 /// が再利用バッファを返す前に呼ぶゼロ初期化フック。プール保持中も
 /// `CudaBufferHandle::_alloc`（`TrackedAllocation`）は生存し続けるため、
 /// 「返却されたが未解放のバッファ」も `allocated_bytes()` に自然に計上
-/// され続ける（リークではなく意図した挙動。`tensor_core::pool` モジュール
+/// され続ける（リークではなく意図した挙動。`fandhe_ai_tensor_core::pool` モジュール
 /// の `MemoryStats for PooledMemory<M>` 転送実装〈`pool.rs`〉参照）。
 /// 実機でのピーク計測の裏取りは TASK-14.2（#177）で実施する。
 /// `CudaStream::memset_zeros`（`cudarc-0.19.8/src/driver/safe/core.rs`）で
@@ -478,6 +478,6 @@ mod tests {
     #[test]
     fn cuda_memory_and_pooled_cuda_memory_implement_memory_stats() {
         assert_memory_stats::<CudaMemory>();
-        assert_memory_stats::<tensor_core::pool::PooledMemory<CudaMemory>>();
+        assert_memory_stats::<fandhe_ai_tensor_core::pool::PooledMemory<CudaMemory>>();
     }
 }

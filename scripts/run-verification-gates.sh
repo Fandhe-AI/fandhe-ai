@@ -41,7 +41,7 @@
 #   build      `cargo build --workspace --locked`
 #   test       `cargo test --workspace --release --locked`
 #   clippy     `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-#   bench      `cargo run --release -p backend-cpu --example gemm_bench`
+#   bench      `cargo run --release -p fandhe-ai-backend-cpu --example gemm_bench`
 #   all        self-test → build → test → clippy を直列実行する（bench は実行時間が
 #              長く push/PR 契機に不向きなため対象外。schedule/手動トリガーで別途実行する）
 #
@@ -105,7 +105,7 @@ cmd_clippy() {
 
 cmd_bench() {
   echo "ゲート 4/4（bench）: 性能回帰検出相当（bench-harness 計測プロトコル）"
-  cargo run --release -p backend-cpu --example gemm_bench
+  cargo run --release -p fandhe-ai-backend-cpu --example gemm_bench
 }
 
 cmd_all() {

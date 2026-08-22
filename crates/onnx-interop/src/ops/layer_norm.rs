@@ -17,7 +17,7 @@
 //! codegen 方式採用時のみ該当し、本関数は純粋関数（インタープリタ向け）
 //! であり該当しない。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
 use super::normalize_axis;

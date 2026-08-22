@@ -15,10 +15,10 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::st_load::load_safetensors_f32;
 use onnx_interop::st_save::{save_safetensors_f32, save_safetensors_f32_to_bytes};
 use safetensors::tensor::SafeTensors;
-use tensor_core::Tensor;
 
 const FIXTURE_DIR: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),

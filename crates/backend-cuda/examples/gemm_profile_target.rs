@@ -26,7 +26,7 @@
 //! `dev-dependencies`（`examples/cuda_floor_bench.rs` 等が使用）であり、
 //! 本ファイルの追加に伴う外部依存の追加は不要（`deps-policy.md` ユーザー
 //! 承認事項に該当しない）。ただし本ファイルが使う
-//! `backend_cuda::diagnostics`（内部カーネルのタイル定数を返す診断専用
+//! `fandhe_ai_backend_cuda::diagnostics`（内部カーネルのタイル定数を返す診断専用
 //! 関数群）は `internal-diagnostics` feature（既定 off）でのみコンパイル
 //! されるため、`Cargo.toml` の `[[example]] required-features` で本
 //! feature を要求する構成にしてある（PR #637 codex-review 指摘の是正:
@@ -36,7 +36,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo build -p backend-cuda --example gemm_profile_target --release \
+//! cargo build -p fandhe-ai-backend-cuda --example gemm_profile_target --release \
 //!     --features internal-diagnostics
 //! ncu --launch-skip <warmup 起動数> --launch-count <iters> \
 //!     --metrics <確定メトリクス名, カンマ区切り> \
@@ -74,7 +74,7 @@
 //!
 //! `--b-pad <N>`（イシュー #743。`--path wmma_tf32` 限定・任意）を指定
 //! すると、`gemm.launch_wmma_tf32`（本番経路。固定 `WMMA_TF32_STAGED_B_PAD`
-//! 既定値）の代わりに `backend_cuda::diagnostics::render_wmma_tf32_staged`
+//! 既定値）の代わりに `fandhe_ai_backend_cuda::diagnostics::render_wmma_tf32_staged`
 //! （**static** 共有メモリ変種。`WmmaTf32StagedKernelConfig { b_pad: N,
 //! ..default_tf32_staged() }`）でコンパイル・起動する。static 変種は本番
 //! カーネルと同一の `__shared__` 宣言・同一 occupancy を持つため、
@@ -125,9 +125,9 @@
 
 use std::time::Instant;
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, diagnostics};
 use bench_harness::rng::Xorshift64Star;
 use cudarc::driver::sys::CUdevice_attribute;
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaMmaGemm, diagnostics};
 use half::f16;
 
 /// 決定的シード（`cuda_floor_bench.rs`・`gemm_mma_bench.rs` と同一値。
@@ -331,7 +331,7 @@ fn tflops(size: u32, secs: f64) -> f64 {
 /// 実測値との突合用に、ブロック単位のタイル分割数と SM 数から求まる
 /// blocks/SM 比を起動時に print する（実装計画 §3 Step 3）。
 fn print_occupancy_estimate(path: Path, size: u32, sm_count: Option<u32>) {
-    // タイル定数はハードコード転記ではなく `backend_cuda::diagnostics` の
+    // タイル定数はハードコード転記ではなく `fandhe_ai_backend_cuda::diagnostics` の
     // 診断専用安定関数（`wmma_tf32_opt_block_tile`／`mma_f16_block_tile`。
     // `lib.rs` 参照）経由で取得する。カーネル側モジュール自体
     // （`mod kernels_wmma_opt`／`mod kernels_mma`）・生の内部定数は非公開の

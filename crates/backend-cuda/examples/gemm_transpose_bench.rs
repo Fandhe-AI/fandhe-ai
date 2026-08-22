@@ -32,12 +32,12 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_transpose_bench --release
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_transpose_bench --release
 //! ```
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaTranspose};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaTranspose};
 
 /// 決定的シード（`gemm_mma_bench.rs`/`gemm_mma_swizzle_bench.rs` と同じ
 /// 値域の入力分布に揃える）。

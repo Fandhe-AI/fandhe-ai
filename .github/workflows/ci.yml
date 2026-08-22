@@ -124,7 +124,7 @@
 # #[ignore] テスト・macOS ターゲット）」ステップは、上記 lib-only build の対象外である
 # tests/（#[ignore] 実機テスト。crates/backend-metal/tests/）を型検査のみで検証する
 # （cargo check はリンクを行わないため、test バイナリのリンクが未対応な上記制約下でも
-# 成立する）。`--workspace --all-targets` ではなく `-p backend-metal --tests` に限定する
+# 成立する）。`--workspace --all-targets` ではなく `-p fandhe-ai-backend-metal --tests` に限定する
 # 理由は docs/backend-metal-real-device-testing.md 参照（bench-harness の
 # dev-dependencies 経由で criterion → alloca を引き込み、macOS クロスコンパイラ非搭載の
 # Linux runner ではネイティブ C ビルドが失敗するため）。
@@ -346,14 +346,14 @@ jobs:
       # bench-harness の dev-dependencies 経由で criterion → alloca を引き込み、
       # macOS クロスコンパイラ非搭載の Linux runner では alloca のネイティブ
       # C ビルドが `cc: unrecognized option '-arch'` で失敗することを実測したため、
-      # `-p backend-metal --tests` に限定する（bench-harness は backend-metal の
+      # `-p fandhe-ai-backend-metal --tests` に限定する（bench-harness は backend-metal の
       # dev-dependencies 経由では [dependencies] のみが解決され criterion を含まない。
       # Makefile の check-cross-metal-tests と同一コマンド）。cargo check はリンクを
       # 行わないため macOS SDK 非搭載でも成立する（上の build ステップとは異なり
       # cargo build ではなく cargo check である点に注意）。
       - name: cargo check（backend-metal の #[ignore] テスト・macOS ターゲット）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: cargo check -p backend-metal --tests --target aarch64-apple-darwin
+        run: cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
 
       # イシュー #753 レビュー指摘（codex-review P2）: `backend-cpu::gemm_blis::cache_params`
       # モジュールは本番未結線のため `#[cfg(test)]` 限定でしかコンパイルされず、内部の
@@ -365,7 +365,7 @@ jobs:
       # macOS SDK 非搭載でも成立する。
       - name: cargo check（backend-cpu の cfg(test) 限定コード・macOS ターゲット）
         if: steps.detect.outputs.has_cargo == 'true'
-        run: cargo check -p backend-cpu --tests --target aarch64-apple-darwin
+        run: cargo check -p fandhe-ai-backend-cpu --tests --target aarch64-apple-darwin
 
   # --------------------------------------------------
   # CUDA toolkit 非搭載環境でのビルド・実行成立検証（TASK-1.7d・イシュー #35／

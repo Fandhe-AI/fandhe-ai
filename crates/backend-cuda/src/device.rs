@@ -1,5 +1,5 @@
 //! CUDA デバイス初期化・メタデータ取得、および
-//! `tensor_core::device::DeviceProvider` の CUDA 実装（TASK-1.7a・#32 と
+//! `fandhe_ai_tensor_core::device::DeviceProvider` の CUDA 実装（TASK-1.7a・#32 と
 //! TASK-1.9a・#44 を統合）。
 //!
 //! PoC-v2-3 の `CudaGemm::new`（`docs/spec/03-poc/poc-v2-3-cuda-gemm/code/rust/src/cuda/mod.rs:119-162`）
@@ -25,7 +25,7 @@
 //! を返してから抜ける。これにより「CUDA 非搭載環境で実行時に型付き
 //! エラーが返る（panic しない）」という #32 の受け入れ条件を満たす。
 //!
-//! [`CudaDeviceProvider`]（`tensor_core::device::DeviceProvider` 実装）は
+//! [`CudaDeviceProvider`]（`fandhe_ai_tensor_core::device::DeviceProvider` 実装）は
 //! `enumerate`／`select` の内部で必ずこの `CudaDevice` 経由の初期化
 //! パスを通す。`CudaContext::new`／`CudaContext::device_count` を
 //! `CudaDevice` を経由せず直接呼ぶと上記の panic 回避ゲートを迂回して
@@ -39,7 +39,7 @@ use cudarc::driver::sys::CUdevice_attribute;
 use cudarc::driver::{CudaContext, CudaStream};
 
 use crate::error::CudaError;
-use tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
+use fandhe_ai_tensor_core::device::{BackendError, Device, DeviceInfo, DeviceProvider};
 
 /// GPU 1 台分のハンドル・メタデータ。
 ///
@@ -189,7 +189,7 @@ impl CudaDevice {
     /// `examples/gemm_mma_swizzle_bench.rs` が、グルーピング幅の動的選択に
     /// 使う SM 数をここから取得する。`DeviceInfo::compute_units`
     /// （[`CudaDeviceProvider::probe`]）は既に同じ値を crate 外へ公開して
-    /// いるため（`tensor_core::device::DeviceInfo` 経由）、本アクセサは
+    /// いるため（`fandhe_ai_tensor_core::device::DeviceInfo` 経由）、本アクセサは
     /// 新規の公開面を作るものではなく、`CudaDevice` から直接取得する経路を
     /// 追加するのみ。
     pub fn multiprocessor_count(&self) -> Option<u32> {
@@ -236,7 +236,7 @@ impl CudaDevice {
 
 /// CUDA バックエンドの `DeviceProvider` 実装（TASK-1.9a・#44）。
 ///
-/// `tensor_core::device::DeviceProvider` の CUDA 実装。`cudarc` は無条件
+/// `fandhe_ai_tensor_core::device::DeviceProvider` の CUDA 実装。`cudarc` は無条件
 /// 依存＋動的ロード方式であるため（`.claude/rules/deps-policy.md`）、CUDA
 /// toolkit・ドライバが非搭載の環境でも本クレートはビルドが成立する。この
 /// 契約の実行時側の受け皿として、本 provider はドライバ不在時に

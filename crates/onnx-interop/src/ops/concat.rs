@@ -4,7 +4,7 @@
 //! ならない（ONNX Concat-13 仕様）。要素コピーのみで算術を伴わないため `T: Element` で
 //! ジェネリック化する（イシュー #274。`interp::Value` の `I64`／`Bool`／`F16` にも適用）。
 
-use tensor_core::{Element, Tensor};
+use fandhe_ai_tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;

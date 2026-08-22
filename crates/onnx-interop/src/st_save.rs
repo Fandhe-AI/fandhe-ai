@@ -58,9 +58,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
+use fandhe_ai_tensor_core::Tensor;
 use safetensors::Dtype;
 use safetensors::tensor::{TensorView, serialize};
-use tensor_core::Tensor;
 
 /// safetensors 書き出し経路の型付きエラー。
 ///

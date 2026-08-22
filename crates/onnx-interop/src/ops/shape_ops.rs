@@ -1,6 +1,6 @@
 //! ONNX `Shape`／`Unsqueeze` オペ（TASK-7.2c）。
 
-use tensor_core::{Element, Tensor};
+use fandhe_ai_tensor_core::{Element, Tensor};
 
 use super::error::OpError;
 use super::normalize_axis;

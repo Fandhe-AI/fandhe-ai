@@ -9,7 +9,7 @@
 //! 導出する（`crates/backend-cpu/src/memory.rs` の `checked_byte_len` と
 //! 同じ換算式）。
 //!
-//! サイズクラス別プール（`tensor_core::pool::PooledMemory`）経由の計測
+//! サイズクラス別プール（`fandhe_ai_tensor_core::pool::PooledMemory`）経由の計測
 //! 反映は `pooled_memory_integration.rs`（#201）が検証済みのため、本ファイル
 //! はプールを介さない素の `CpuMemory` 確保パターンに限定し重複実装しない。
 //! CUDA/Metal（#175・TASK-14.1b は origin/main 未マージ）の実機経路は対象外
@@ -22,9 +22,9 @@
 
 use std::mem::size_of;
 
-use backend_cpu::CpuMemory;
-use tensor_core::memory_stats::MemoryStats;
-use tensor_core::{MemoryOps, Tensor};
+use fandhe_ai_backend_cpu::CpuMemory;
+use fandhe_ai_tensor_core::memory_stats::MemoryStats;
+use fandhe_ai_tensor_core::{MemoryOps, Tensor};
 
 /// shape から `alloc_zeroed` の期待バイト数（numel * size_of::<f32>()）を
 /// 導出する（`backend-cpu::memory::checked_byte_len` と同じ換算式を
@@ -42,7 +42,7 @@ fn alloc_n<M: MemoryOps>(
     mem: &M,
     shape: &[usize],
     n: usize,
-) -> Vec<tensor_core::DeviceBuffer<f32>> {
+) -> Vec<fandhe_ai_tensor_core::DeviceBuffer<f32>> {
     (0..n).map(|_| mem.alloc_zeroed(shape).unwrap()).collect()
 }
 

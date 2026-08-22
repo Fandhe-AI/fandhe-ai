@@ -8,7 +8,7 @@
 //! 依存しないプレーンな Rust enum として受け取り、decode 層の実装順序に
 //! 依存しない（`ops/mod.rs` の設計方針を踏襲）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
 

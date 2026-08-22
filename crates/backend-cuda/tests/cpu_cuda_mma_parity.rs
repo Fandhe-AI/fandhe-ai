@@ -3,7 +3,7 @@
 //!
 //! 受け入れ条件（#187 本文）「数値一致複合判定の通過」の本体。
 //! `cpu_cuda_wmma_parity.rs`（#61）と同じく、判定は
-//! `backend_cpu::assert_parity`（REQ-2 統一複合判定「相対誤差 1e-3 未満
+//! `fandhe_ai_backend_cpu::assert_parity`（REQ-2 統一複合判定「相対誤差 1e-3 未満
 //! または 絶対誤差 1e-5 未満」の唯一の実体）に一本化し、閾値・判定式を
 //! ローカル複製しない。`cpu_cuda_wmma_parity.rs` 冒頭コメントが記す
 //! 「f16 は複合判定の適用が実質的な許容誤差変更にあたるため対象外」
@@ -13,7 +13,7 @@
 //! # 参照実装との比較方法
 //!
 //! `cpu_cuda_wmma_parity.rs::assert_wmma_f16_parity` と同一手順:
-//! f16→f32→`backend_cpu::matmul_reference_fma`→f16 丸め→f32 の経路で
+//! f16→f32→`fandhe_ai_backend_cpu::matmul_reference_fma`→f16 丸め→f32 の経路で
 //! 得た参照値と、カーネル出力（f16→f32）を `assert_parity` で照合する。
 //!
 //! # 実機依存の分離
@@ -27,7 +27,7 @@
 //! エッジ形状（40×24×72 等。ブロックタイル `MMA_BM=64`/`MMA_BN=128`
 //! 〈#494 時点〉の非倍数）で境界チェックの回帰対象とする。
 
-use backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaGemm};
 use half::f16;
 
 /// 決定的シードで A・B（f16）を生成し、参照値とカーネル出力を
@@ -41,7 +41,7 @@ fn assert_mma_f16_parity(gemm: &CudaMmaGemm, context: &str, seed: u64, m: u32, n
     let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
     let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_f32,
         &b_f32,
         &mut c_ref_f32,
@@ -60,7 +60,7 @@ fn assert_mma_f16_parity(gemm: &CudaMmaGemm, context: &str, seed: u64, m: u32, n
         .expect("CudaMmaGemm::run_f16 must succeed on CUDA-equipped test runner");
     let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
 
-    backend_cpu::assert_parity(context, &c_gpu_f32, &c_ref_rounded);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu_f32, &c_ref_rounded);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。
@@ -161,7 +161,7 @@ fn mma_f16_k4096_stress() {
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn mma_f16_cross_check_against_wmma_f16() {
-    use backend_cuda::CudaWmmaGemm;
+    use fandhe_ai_backend_cuda::CudaWmmaGemm;
 
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
     let mma_gemm = CudaMmaGemm::new(&device).expect("mma kernel compilation must succeed");
@@ -181,5 +181,5 @@ fn mma_f16_cross_check_against_wmma_f16() {
 
     let c_mma_f32: Vec<f32> = c_mma_f16.iter().map(|x| x.to_f32()).collect();
     let c_wmma_f32: Vec<f32> = c_wmma_f16.iter().map(|x| x.to_f32()).collect();
-    backend_cpu::assert_parity("mma vs wmma f16 cross-check", &c_mma_f32, &c_wmma_f32);
+    fandhe_ai_backend_cpu::assert_parity("mma vs wmma f16 cross-check", &c_mma_f32, &c_wmma_f32);
 }

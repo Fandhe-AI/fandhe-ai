@@ -1,6 +1,6 @@
 //! Keras `Sequential` 慣習のレイヤー積み上げビルダー（TASK-9.2a・
-//! #95。TASK-9.4・#411 で `autodiff::compat` から本クレートへ移設）。
-//! 数値ロジックは一切持たず、`autodiff::nn::Module` 実装
+//! #95。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から本クレートへ移設）。
+//! 数値ロジックは一切持たず、`fandhe_ai_autodiff::nn::Module` 実装
 //! （`Linear`・`Relu`・`Sigmoid`・`Tanh`）をメソッドチェーンで積み上げ、
 //! `forward`/`predict` で `nn::Module::forward` へ委譲するだけの薄い
 //! ビルダー（REQ-9）。対象レイヤーは `docs/compat-api-scope.md` §1 の
@@ -11,13 +11,13 @@
 //! が返す [`SequentialVars`] を経由して `LinearVars`（勾配取得の入口。
 //! `Tape::backward` 後に `Gradients::get(&vars.weight)` する経路）へ
 //! アクセスできる。[`Sequential::trainable_parameters`]/
-//! [`Sequential::apply_parameters`] と組み合わせ、`autodiff::optim::Sgd`・
-//! `autodiff::nn::optim::AdamW` の位置対応契約にそのまま渡せる。
+//! [`Sequential::apply_parameters`] と組み合わせ、`fandhe_ai_autodiff::optim::Sgd`・
+//! `fandhe_ai_autodiff::nn::optim::AdamW` の位置対応契約にそのまま渡せる。
 //!
 //! **`predict` の既定結線（TASK-9.4・#411）**: `predict` は本クレートの
 //! composition root（[`crate::tape`]。既定 CPU・`CpuBackendOps`・融合
-//! 有効）で `Tape` を構築して forward する。旧 `autodiff::compat` 版が
-//! 依存していた naive 参照実装（`autodiff::default_ops::naive_ops()`。
+//! 有効）で `Tape` を構築して forward する。旧 `fandhe_ai_autodiff::compat` 版が
+//! 依存していた naive 参照実装（`fandhe_ai_autodiff::default_ops::naive_ops()`。
 //! クレート非公開）は facade から到達できないため、この結線先の変更に
 //! 伴い旧 `predict_with_ops`（任意 `BackendOps` 注入経路）は公開面から
 //! 撤去した（REQ-12「任意 `BackendOps` 実装を注入できる公開 API を
@@ -28,19 +28,19 @@
 //! 渡せば足りる。
 //!
 //! **公開シグネチャの型（codex-review PR #424 P1 是正）**: `forward`／
-//! `bind`／`predict` 等は `autodiff::Tape` を直接引数に取らず、本クレート
+//! `bind`／`predict` 等は `fandhe_ai_autodiff::Tape` を直接引数に取らず、本クレート
 //! 所有の newtype [`crate::Tape`] を取る（`crate::lib.rs` モジュール doc
 //! 「`Tape`（composition root が構築する値）の扱い」参照）。`Var`・
 //! `Gradients`・`AutodiffError`・`LinearVars`・`Tensor` は `crate::`
 //! 経由（facade の正式な再エクスポート）で参照する。
 
 use crate::{AutodiffError, Gradients, LinearVars, Tape, Tensor, Var};
-use autodiff::nn::activation::{Relu, Sigmoid, Tanh};
-use autodiff::nn::{Linear, Module};
+use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid, Tanh};
+use fandhe_ai_autodiff::nn::{Linear, Module};
 
 /// Keras `Sequential` 慣習のレイヤー積み上げビルダー。`add_*` はメソッド
 /// チェーン（`self` を消費し `Self` を返す）で層を追加し、`predict` で
-/// 推論を実行する。層は `nn::Module`（`autodiff::nn::module`）実装として
+/// 推論を実行する。層は `nn::Module`（`fandhe_ai_autodiff::nn::module`）実装として
 /// `Vec<Box<dyn Module>>` に格納するため、種類の異なる層（`Linear` と
 /// 活性化関数）を同じ列で扱える。
 pub struct Sequential {
@@ -60,7 +60,7 @@ impl Sequential {
 
     /// 全結合層を追加する（bias あり既定。PyTorch `nn.Linear` の既定
     /// `bias=True` と揃える）。`Linear::new` が `Result` を返す
-    /// （`in_features == 0` を拒否する。`autodiff::nn::linear` 参照）ため、
+    /// （`in_features == 0` を拒否する。`fandhe_ai_autodiff::nn::linear` 参照）ため、
     /// 本メソッドも `Result<Self, AutodiffError>` を返し `?` で連鎖
     /// できるようにする。
     pub fn add_linear(
@@ -96,13 +96,13 @@ impl Sequential {
     /// 積み上げた層を先頭から順に `Module::forward` へ委譲する。
     /// 呼び出し元が用意した `tape` 上で 1 回分の forward を計算する
     /// （`Linear::bind` がステップごとに葉ノードを登録し直す契約に従う。
-    /// `autodiff::nn::module` 参照）。外部 `Tape` 上で呼ぶことで
+    /// `fandhe_ai_autodiff::nn::module` 参照）。外部 `Tape` 上で呼ぶことで
     /// `Tape::backward` までグラフ記録がつながる（推論だけでなく
     /// grad check 等の用途にも使える）。
     pub fn forward<'t>(&self, tape: &'t Tape, input: &Var<'t>) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
         for layer in &self.layers {
-            // `nn::Module::forward` は `&autodiff::Tape` を要求する
+            // `nn::Module::forward` は `&fandhe_ai_autodiff::Tape` を要求する
             // （`autodiff` クレート側の trait 定義のため facade newtype
             // には書き換えられない）。`tape.0`（`pub(crate)` フィールド）
             // 経由で内部の生 `Tape` を取り出す（本ファイル冒頭 doc
@@ -117,10 +117,10 @@ impl Sequential {
     /// composition root。既定 CPU・`CpuBackendOps`・融合有効）で 1
     /// ステップ分の `Tape` を生成し `forward` を呼んだ後 `to_tensor()`
     /// で追跡を外した `Tensor<f32>` を返す（`Tape` はこの呼び出しの
-    /// スコープ内で破棄される。`autodiff::nn::linear` の「`Tape` は
+    /// スコープ内で破棄される。`fandhe_ai_autodiff::nn::linear` の「`Tape` は
     /// ステップごとに生成・破棄される前提」と同じ運用）。
     ///
-    /// **TASK-9.4（#411）**: 旧 `autodiff::compat` 版が持っていた
+    /// **TASK-9.4（#411）**: 旧 `fandhe_ai_autodiff::compat` 版が持っていた
     /// `predict_with_ops`（任意 `BackendOps` 注入経路）は本移設で公開面
     /// から撤去した（モジュール doc 参照）。
     pub fn predict(&self, input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError> {
@@ -143,7 +143,7 @@ impl Sequential {
     /// スコープを抜けてから `apply_parameters` を呼ぶ運用とする。
     /// `crates/facade/tests/compat_sequential_train.rs` に実例がある）。
     pub fn bind<'m, 't>(&'m self, tape: &'t Tape) -> SequentialVars<'m, 't> {
-        // `Linear::bind` も `&autodiff::Tape` を要求する（`forward` と
+        // `Linear::bind` も `&fandhe_ai_autodiff::Tape` を要求する（`forward` と
         // 同じ理由。`tape.0` 経由で取り出す）。
         let linears = self
             .layers
@@ -159,7 +159,7 @@ impl Sequential {
 
     /// 学習可能パラメータ（`Linear` 層の `weight`/`bias`）への参照列を
     /// 層の追加順・各層内は weight → bias（`Some` の場合のみ）の順で
-    /// 返す。`autodiff::optim::Sgd::step`/`autodiff::nn::optim::AdamW::step`
+    /// 返す。`fandhe_ai_autodiff::optim::Sgd::step`/`fandhe_ai_autodiff::nn::optim::AdamW::step`
     /// の位置対応契約にそのまま渡せる。この順序契約は
     /// [`SequentialVars::trainable_vars`]/[`SequentialVars::trainable_grads`]/
     /// [`Sequential::apply_parameters`] と共通（#294 の設計不変条件）。
@@ -178,7 +178,7 @@ impl Sequential {
 
     /// optimizer（`Sgd::step`/`AdamW::step`）が返した更新後テンソル列を
     /// [`Sequential::trainable_parameters`] と同じ順序契約で各 `Linear`
-    /// 層へ書き戻す。内部で `Linear::from_parameters`（`autodiff::nn::linear`）
+    /// 層へ書き戻す。内部で `Linear::from_parameters`（`fandhe_ai_autodiff::nn::linear`）
     /// により層を再構築するため、compat 層自身は新パラメータ単体の内部
     /// 整合性検証ロジックを重複実装しない（REQ-9「薄いラッパーに徹する」）。
     /// ただし**置換前の層 shape との一致検証**（次段落）は
@@ -304,7 +304,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
     /// 使い、活性化層は `Module::forward` へ委譲する。
     ///
     /// **`Linear::bind` を再度呼ばない理由**: `Module::forward`
-    /// （`autodiff::nn::module`）の `Linear` 実装は呼び出しのたびに
+    /// （`fandhe_ai_autodiff::nn::module`）の `Linear` 実装は呼び出しのたびに
     /// `self.bind(tape)` して新しい葉ノードを作る（推論用の使い捨て
     /// 契約）。学習用 forward がこの経路を使うと、`bind` 時点で
     /// 取得した `LinearVars`（[`SequentialVars::trainable_vars`]/
@@ -341,7 +341,7 @@ impl<'m, 't> SequentialVars<'m, 't> {
                 })?;
                 current = vars.forward(&current)?;
             } else {
-                // 活性化層は `nn::Module::forward` へ委譲する（`&autodiff::Tape`
+                // 活性化層は `nn::Module::forward` へ委譲する（`&fandhe_ai_autodiff::Tape`
                 // が必要。`Sequential::forward` と同じ理由で `tape.0` 経由）。
                 current = layer.forward(&tape.0, &current)?;
             }
@@ -415,8 +415,8 @@ mod tests {
     const SEED1: u64 = 1001;
     const SEED2: u64 = 2002;
 
-    /// テスト専用の連続化ヘルパー（`tensor_core::Tensor` の `pub` API
-    /// のみを使用。旧 `autodiff::eval::dense_vec`〈クレート非公開〉の
+    /// テスト専用の連続化ヘルパー（`fandhe_ai_tensor_core::Tensor` の `pub` API
+    /// のみを使用。旧 `fandhe_ai_autodiff::eval::dense_vec`〈クレート非公開〉の
     /// 代替。`compat/array.rs` のテストヘルパーと同型）。
     fn dense_vec(t: &Tensor<f32>) -> Vec<f32> {
         t.contiguous()
@@ -457,7 +457,7 @@ mod tests {
         let input_tensor = Tensor::new(input_data, &[batch, 8]).unwrap();
 
         // 手動経路: Linear -> ReLU -> Linear を直接組み立てる。
-        // `Linear::bind` は `&autodiff::Tape` を要求するため `manual_tape.0`
+        // `Linear::bind` は `&fandhe_ai_autodiff::Tape` を要求するため `manual_tape.0`
         // （同一クレート内なので `pub(crate)` フィールドへアクセス可能）
         // 経由で内部の生 Tape を渡す。
         let manual_tape = crate::tape();
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn add_linear_propagates_invalid_argument() {
         // in_features == 0 は Linear::new が拒否する
-        // （1/sqrt(in_features) が非有限になるため。autodiff::nn::linear 参照）。
+        // （1/sqrt(in_features) が非有限になるため。fandhe_ai_autodiff::nn::linear 参照）。
         // add_linear はこれをそのまま Result で伝播する。
         // `Sequential` は `Box<dyn Module>` を保持し `Debug` を実装しない
         // ため、`unwrap_err()`（`Ok` 側にも `Debug` を要求する）は使わず
@@ -615,7 +615,7 @@ mod tests {
         let mut model = Sequential::new().add_linear(4, 3, SEED1).unwrap();
         // weight は rank 2 の妥当な shape（[4, 3]）だが、bias の shape が
         // weight.shape()[1]（out_features=3）と食い違う（[5]）ケース。
-        // `Linear::from_parameters` の bias 検証（`autodiff::nn::linear`）
+        // `Linear::from_parameters` の bias 検証（`fandhe_ai_autodiff::nn::linear`）
         // がこれを拒否することを確認する（`apply_parameters` は新パラメータ
         // 単体の内部整合性検証を重複実装せず委譲する、という設計の裏付け。
         // 置換前 shape との一致検証〈#426〉は本テストの weight 側では

@@ -45,7 +45,7 @@ const _: () = assert!(MR * NR <= 256);
 /// オーバーフローを含む）・`ldc < NR`／`c.len() < (MR - 1) * ldc + NR`
 /// （本関数がアクセスする最大オフセット `+1`）のいずれも
 /// [`super::TileBoundsError`] として `Result::Err` を返す（panic しない。
-/// 本関数は `backend_cpu::gemm_blis::microkernel` 経由で外部の
+/// 本関数は `fandhe_ai_backend_cpu::gemm_blis::microkernel` 経由で外部の
 /// `Microkernel` 実装からも到達しうる公開入口のため）。`ap`／`bp` の長さ
 /// 検査は当初 `assert_eq!`（panic）のままだったが、本関数が既に `Result`
 /// を返す入口である以上ここも型付きエラーへ揃えるのが一貫すると判断し
@@ -55,7 +55,7 @@ const _: () = assert!(MR * NR <= 256);
 /// # 公開 API 非破壊（#691 レビュー指摘への対応）
 ///
 /// #557 導入時に既存の `kernel(ap, bp, c_tile, kc_len)`（`ldc = NR` 固定）
-/// を本関数へ改名・拡張したが、`backend_cpu::gemm_blis::microkernel` は
+/// を本関数へ改名・拡張したが、`fandhe_ai_backend_cpu::gemm_blis::microkernel` は
 /// `pub mod` であり既存呼び出し元を壊すため（AGENTS.md「公開 API の
 /// 破壊的変更は P1」）、従来シグネチャは [`kernel`] として残し、本関数へ
 /// `ldc = NR` で委譲する薄い後方互換ラッパーとする。
@@ -96,7 +96,7 @@ fn compute(ap: &[f32], bp: &[f32], c: &mut [f32], ldc: usize, kc_len: usize) {
 ///
 /// #557 対応の過程で本関数の戻り値を一時的に
 /// `Result<(), super::TileBoundsError>` へ変更していたが、これは
-/// `backend_cpu::gemm_blis::microkernel::scalar` が `pub mod` であるため
+/// `fandhe_ai_backend_cpu::gemm_blis::microkernel::scalar` が `pub mod` であるため
 /// 「従来 `()` を返す本関数を関数ポインタ・末尾式で使う既存の外部
 /// 呼び出し元」をコンパイル不能にする破壊的変更だった（codex-review・
 /// GraphQL reviewThreads 双方の指摘。AGENTS.md 公開 API 非破壊規約）。

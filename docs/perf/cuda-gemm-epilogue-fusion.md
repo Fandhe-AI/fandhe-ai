@@ -9,7 +9,7 @@
 `elementwise.rs`・`kernels.rs::TILED_BIAS_ACT_F32`・
 `gemm.rs::CudaGemm::run_tiled_bias_act_f32`・`ops.rs::CudaBackendOps` の
 elementwise 5 演算実装・`gemm_bias_act` オーバーライド）は本セッションの
-実行環境（CUDA 非搭載サンドボックス。`cargo test -p backend-cuda` は全て
+実行環境（CUDA 非搭載サンドボックス。`cargo test -p fandhe-ai-backend-cuda` は全て
 `BackendError::CudaUnavailable` 環境適応経路で通過）で完結させた。
 
 `docs/real-hardware-verification-env.md` §2 が示す CUDA 実機
@@ -18,7 +18,7 @@ elementwise 5 演算実装・`gemm_bias_act` オーバーライド）は本セ�
 **未実施**である（実測値を捏造しない。`.claude/rules/coding-rust.md`
 「ベンチは 5 回計測の中央値を採用」・security.md の実測原則に従う）:
 
-- `cargo test -p backend-cuda --release -- --ignored --nocapture`
+- `cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture`
   （`tests/gemm_bias_act_parity.rs`・`tests/backend_ops_real_device.rs` の
   実機 `#[ignore]` テスト全体）
 - 既存 `parity_nonregression.rs`（B-0・イシュー #491）による GEMM 数値
@@ -35,14 +35,14 @@ elementwise 5 演算実装・`gemm_bias_act` オーバーライド）は本セ�
 
 # 1. 新規テスト（elementwise・gemm_bias_act の CPU-CUDA 数値一致・
 #    融合 vs 非融合合成の bit 完全一致・bias 形状グリッド・k=0 縮退）
-cargo test -p backend-cuda --release --test gemm_bias_act_parity \
+cargo test -p fandhe-ai-backend-cuda --release --test gemm_bias_act_parity \
   -- --ignored --nocapture
 
 # 2. 既存実機テスト全体（回帰確認）
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 
 # 3. B-0 parity 非後退契約（既存 GEMM カーネル不変更のため非後退のはず）
-cargo test -p backend-cuda --release --test parity_nonregression \
+cargo test -p fandhe-ai-backend-cuda --release --test parity_nonregression \
   -- --ignored --nocapture
 ```
 

@@ -65,7 +65,7 @@ pub enum MetalError {
     /// `message` は `NSError` の `localizedDescription`。
     PipelineCreation { message: String },
     /// GEMM 公開入口（[`crate::gemm`]）の形状検証で `m`・`n`・`k` の
-    /// いずれかが 0 と判定された（`backend_cpu::gemm::GemmError` の
+    /// いずれかが 0 と判定された（`fandhe_ai_backend_cpu::gemm::GemmError` の
     /// `ZeroBlockSize` 相当。0 次元は Metal ディスパッチ・境界チェックの
     /// 前提を崩すため FFI 呼び出し前に拒否する）。
     ZeroDimension { m: usize, n: usize, k: usize },

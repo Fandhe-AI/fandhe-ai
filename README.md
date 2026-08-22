@@ -15,7 +15,7 @@ M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス�
 
 ## 実装方針（要点）
 
-- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root・compat 公開面）
+- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root・compat 公開面）。ディレクトリ名は上記のまま維持し、crates.io 公開対象 6 クレートのみ `[package] name` を `fandhe-ai` prefix 付き公開名（`fandhe-ai`・`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`）へ rename 済み（イシュー #877/#879。`docs/crates-io-naming-decision.md`）
 - 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理（workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義。TASK-1.1b）
 - 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査（TASK-1.2）
 - バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 動的ロード・`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成。詳細 → [`docs/backend-switching-design.md`](docs/backend-switching-design.md)）
@@ -76,7 +76,7 @@ make docker-ci      # コンテナ内で make ci を実行（環境非依存の�
 ```bash
 make test-ignored-cuda   # backend-cuda に限定した #[ignore] テスト実行（release）
 # 相当コマンド:
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 ```
 
 `backend-cuda` 以外を含む全 `#[ignore]` テスト（Metal 実機分も含む）をまとめて実行したい場合は `make test-ignored`（`cargo test --workspace -- --ignored --nocapture`）を使ってください。
@@ -90,7 +90,7 @@ Tensor Core（WMMA TF32／f16）経路の TFLOPS 実測・複合判定通過の�
 ```bash
 make test-ignored-metal   # backend-metal に限定した #[ignore] テスト実行（release）
 # 相当コマンド:
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 **実測状況**（Metal 実機検証・ベンチ計測トラッキングツリー、親 #379。2026-08-10 完了）: 上記

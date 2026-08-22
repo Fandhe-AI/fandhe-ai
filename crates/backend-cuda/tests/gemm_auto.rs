@@ -4,7 +4,7 @@
 //!     型付きエラーを返すこと（`gemm_naive.rs::new_does_not_panic_and_returns_typed_result`
 //!     と同じ健全性契約）を確認する。
 //! (b) `#[ignore]` 実機依存: `run_f32`／`run_f16` の出力が
-//!     `backend_cpu::assert_parity`（REQ-2 統一複合判定）で参照実装と
+//!     `fandhe_ai_backend_cpu::assert_parity`（REQ-2 統一複合判定）で参照実装と
 //!     一致することを検証する。既存 `cpu_cuda_parity.rs`／
 //!     `cpu_cuda_wmma_parity.rs` と同じ判定式・許容誤差をそのまま使い、
 //!     許容誤差は一切変更しない（`.claude/rules/coding-rust.md`）。
@@ -14,13 +14,13 @@
 //! の `#[cfg(test)]`）が担当する。本ファイルは「選ばれた経路が実際に
 //! 実行され、既存カーネルと同じ数値契約を満たすか」の統合検証に限定する。
 
-use backend_cuda::{
+use fandhe_ai_backend_cuda::{
     CudaDevice, CudaError, CudaGemmAuto, TileSelectionBasis, select_tile_config_for_device,
 };
+use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
 use half::f16;
-use tensor_core::dispatch::{DType, GemmShape};
 
-// `backend_cpu::matmul_reference_fma`／`assert_parity` はクレートルート
+// `fandhe_ai_backend_cpu::matmul_reference_fma`／`assert_parity` はクレートルート
 // で再エクスポートされている（`crates/backend-cpu/src/lib.rs`）。
 // `cpu_cuda_parity.rs`／`cpu_cuda_wmma_parity.rs` と同じ呼び出し規約。
 
@@ -56,7 +56,7 @@ fn new_does_not_panic_and_returns_typed_result() {
 }
 
 /// 実機依存: f32 自動経路（現決定表では常に tiled）が
-/// `backend_cpu::matmul_reference_fma` と複合判定で一致することを検証する。
+/// `fandhe_ai_backend_cpu::matmul_reference_fma` と複合判定で一致することを検証する。
 /// `cpu_cuda_parity.rs` と同じ小型スモーク形状を使う。
 #[test]
 #[ignore = "実機（CUDA ドライバ搭載環境）依存。README/Makefile の \
@@ -74,10 +74,21 @@ fn run_f32_matches_cpu_reference() {
         .expect("run_f32 succeeds on real hardware");
 
     let mut reference = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut reference, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a,
+        &b,
+        &mut reference,
+        m as usize,
+        n as usize,
+        k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
-    backend_cpu::assert_parity("CudaGemmAuto::run_f32 vs CPU reference", &gpu, &reference);
+    fandhe_ai_backend_cpu::assert_parity(
+        "CudaGemmAuto::run_f32 vs CPU reference",
+        &gpu,
+        &reference,
+    );
 }
 
 /// 実機依存: f16 自動経路が（cc >= 7.0 環境では WMMA、それ以外では
@@ -101,7 +112,7 @@ fn run_f16_matches_cpu_reference() {
         .expect("run_f16 succeeds on real hardware");
 
     let mut reference_f32 = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_f32,
         &b_f32,
         &mut reference_f32,
@@ -118,7 +129,7 @@ fn run_f16_matches_cpu_reference() {
         .collect();
     let gpu_f32: Vec<f32> = gpu.iter().map(|&x| x.to_f32()).collect();
 
-    backend_cpu::assert_parity(
+    fandhe_ai_backend_cpu::assert_parity(
         "CudaGemmAuto::run_f16 vs CPU reference",
         &gpu_f32,
         &reference_rounded,

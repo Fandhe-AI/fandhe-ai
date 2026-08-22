@@ -29,7 +29,7 @@ use crate::tensor::checked_numel;
 /// matmul（2 次元前提。`docs/public-api-design.md` §3.2）の出力 shape を
 /// 検査・計算する。
 ///
-/// `autodiff::Var::matmul`（#15）・backend 入口の `BackendOps::matmul`
+/// `fandhe_ai_autodiff::Var::matmul`（#15）・backend 入口の `BackendOps::matmul`
 /// （`docs/public-api-design.md` §4.2）から呼ばれ、カーネル実行前に
 /// 呼び出し元が shape 前提を確認する契約点となる。
 ///

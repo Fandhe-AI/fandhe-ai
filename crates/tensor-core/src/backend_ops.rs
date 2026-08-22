@@ -165,7 +165,7 @@ pub trait BackendOps {
     /// `gemm_bias_act` と同型の非破壊拡張（デフォルトメソッド追加）。
     /// デフォルト実装は `BackendError::Unsupported` を返す fail-safe
     /// （既存 elementwise・reduction 未実装カーネルと同じ設計）であり、
-    /// `autodiff::Tape` の実体化経路（`materialize_fallible`／
+    /// `fandhe_ai_autodiff::Tape` の実体化経路（`materialize_fallible`／
     /// `materialize_non_fallible`。`crates/autodiff/src/tape.rs`）は
     /// `Unsupported` を検出した場合に `leaves` を使わず `self`（同じ
     /// `ops`）の per-op メソッド（`add`／`mul`／`relu`／`exp`／`tanh`）へ

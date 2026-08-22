@@ -7,13 +7,22 @@
 `backend-metal`）。命名方針（prefix 付与 rename）は #864 でユーザー確認済みだが、
 **最終名の確定承認は本イシュー実装時に改めて取る**ことが #864 に明記されている。
 
-## 承認ステータス: 未承認（#878 コメントでユーザー応答待ち）
+## 承認ステータス: 承認済み（#878 は本承認を受け入れ条件として 2026-08-22 に COMPLETED クローズ）
 
-本ドキュメントおよび #878 への issue コメントは「空き状況一覧の作成」「最終名 6 件の
-提案」までを記録するものであり、**ユーザー承認が得られるまで #879（rename 実施）に
-着手しない**。自動運転モード下でも承認の捏造・自己判断代替は行わない
-（`.claude/rules/security.md`「自己修復ループ固有のガードレール」と同旨の安全側判断。
-本件はガードレール閾値変更ではないが、命名という不可逆性の高い決定であり同じ姿勢を適用する）。
+本ドキュメントおよび #878 への issue コメントで提案した最終名 6 件は、#878 の
+受け入れ条件（最終名 6 件のユーザー承認）を満たしたうえで同イシューが
+COMPLETED としてクローズされたことをもって確定した。#879（rename 実施）は
+本承認を受けて着手し、下表の rename を実装済みである（実装内容の詳細は
+イシュー #879 の実装コミット・PR を参照）。
+
+| ディレクトリ（不変） | 旧 `package.name` | 新 `package.name`（rename 済み） |
+|---|---|---|
+| `crates/facade` | `facade` | `fandhe-ai` |
+| `crates/tensor-core` | `tensor-core` | `fandhe-ai-tensor-core` |
+| `crates/autodiff` | `autodiff` | `fandhe-ai-autodiff` |
+| `crates/backend-cpu` | `backend-cpu` | `fandhe-ai-backend-cpu` |
+| `crates/backend-cuda` | `backend-cuda` | `fandhe-ai-backend-cuda` |
+| `crates/backend-metal` | `backend-metal` | `fandhe-ai-backend-metal` |
 
 ## 確認方法
 
@@ -81,6 +90,13 @@ crates.io の名前制約（ASCII 英数字・`-`・`_`、64 文字以内）は�
 - クレート `name` の変更・参照更新（#879 の範囲）
 - publish フラグ・メタデータ整備（#880）、依存 version 付与（#881）
 - crates.io 上での名前の事前確保（空 publish）。不可逆かつ承認前のため実施しない
+
+**追記（PR #891）**: 依存 version 付与のうち「公開 6 クレート間 path 依存への
+`version = "=0.3.0"`（workspace 公開バージョンと完全一致）併記」のみは、
+PR #891 の codex-review P1 指摘（rename 後の path 依存が crates.io 公開要件を
+欠くとの機械指摘）を受けて #879 側で前倒しして対応済み。#881 に残るスコープは
+依存グラフの公開順序（トポロジカル順）の docs 記録・版数運用（`workspace.
+package.version` 一括更新）方針の記録のみ。
 
 ## 出典
 

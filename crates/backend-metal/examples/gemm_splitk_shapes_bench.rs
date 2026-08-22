@@ -24,7 +24,7 @@
 //! `objc2` 系 FFI に触れない純粋関数のため macOS 以外でも算出できる:
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_splitk_shapes_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_splitk_shapes_bench --release
 //! ```
 //!
 //! 実測（`tflops`）は macOS 実機限定。**計測境界は `dispatch_tiled_prepared`
@@ -75,7 +75,7 @@
 /// 付けず、Linux（本実装環境・CI）でも算出できる（`gemm_diagnosis.rs::analytics`
 /// と同じ設計判断）。
 mod analytics {
-    use backend_metal::TileConfig;
+    use fandhe_ai_backend_metal::TileConfig;
 
     /// MLX `steel_gemm_splitk_axpby` の非 NAX 選択条件（Case 1）を
     /// `mlx/backend/metal/matmul.cpp:913-935`（`ml-explore/mlx` コミット
@@ -161,7 +161,7 @@ mod analytics {
     /// 並列度・K ループ回数・MLX 選択域該当を求める。`gemm_diagnosis.rs::
     /// analytics::analyze` と同じ設計だが正方形状に限定しない）。
     pub fn analyze(m: usize, n: usize, k: usize) -> ShapeAnalytics {
-        let tile = backend_metal::tile::select(m, n, k);
+        let tile = fandhe_ai_backend_metal::tile::select(m, n, k);
 
         let groups_m = ceil_div(m, tile.bm);
         let groups_n = ceil_div(n, tile.bn);
@@ -237,11 +237,11 @@ fn print_analytics_line(label: &str, a: &analytics::ShapeAnalytics) {
 #[cfg(target_os = "macos")]
 mod macos_impl {
     use super::{analytics, print_analytics_line, shape_pairs};
-    use backend_metal::pad::{pad_matrix, pad8};
-    use backend_metal::{MetalBuffer, MetalContext, MetalGemm};
     use bench_harness::MeasurementConfig;
     use bench_harness::ab::{AbConfig, run_ab};
     use bench_harness::rng::Xorshift64Star;
+    use fandhe_ai_backend_metal::pad::{pad_matrix, pad8};
+    use fandhe_ai_backend_metal::{MetalBuffer, MetalContext, MetalGemm};
     use std::time::Duration;
 
     /// 決定的シード（`gemm_bench.rs::SEED`・`gemm_diagnosis.rs::SEED` と同一値。
@@ -262,7 +262,7 @@ mod macos_impl {
         m_eff: usize,
         n_eff: usize,
         k_eff: usize,
-        cfg: backend_metal::tile::TileConfig,
+        cfg: fandhe_ai_backend_metal::tile::TileConfig,
         a_buf: MetalBuffer,
         b_buf: MetalBuffer,
         c_buf: MetalBuffer,
@@ -273,7 +273,7 @@ mod macos_impl {
         let a: Vec<f32> = rng.fill_vec(m * k);
         let b: Vec<f32> = rng.fill_vec(k * n);
 
-        let cfg = backend_metal::tile::select(m, n, k);
+        let cfg = fandhe_ai_backend_metal::tile::select(m, n, k);
         let (m_eff, n_eff, k_eff) = (pad8(m), pad8(n), pad8(k));
         let a_padded = pad_matrix(&a, m, k, m_eff, k_eff);
         let b_padded = pad_matrix(&b, k, n, k_eff, n_eff);

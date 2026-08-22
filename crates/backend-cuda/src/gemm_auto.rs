@@ -1,6 +1,6 @@
 //! GEMM 自動経路選択の入口（TASK-11.2b・#68）。
 //!
-//! `tensor_core::dispatch::select_gemm_kernel`（規則の純関数実装。
+//! `fandhe_ai_tensor_core::dispatch::select_gemm_kernel`（規則の純関数実装。
 //! `docs/dispatch-rules-design.md` §5 の決定表）を `backend-cuda` の
 //! 既存 GEMM 実装（`gemm.rs::CudaGemm`〈naive／tiled〉・
 //! `gemm_wmma.rs::CudaWmmaGemm`〈WMMA f16 Tensor Core〉）へ結線する。
@@ -21,8 +21,10 @@
 use std::num::NonZeroU32;
 
 use cudarc::driver::sys::CUdevice_attribute;
+use fandhe_ai_tensor_core::dispatch::{
+    DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel,
+};
 use half::f16;
-use tensor_core::dispatch::{DType, DeviceCaps, GemmShape, KernelKind, select_gemm_kernel};
 
 use crate::device::CudaDevice;
 use crate::error::CudaError;
@@ -163,7 +165,7 @@ pub(crate) fn read_clamped_smem_budget_bytes(device: &CudaDevice) -> Result<u64,
 /// 導出。`kernels_mma.rs` の f16 * 2B と同じ根拠。F32 は将来の mma/tf32
 /// 経路を見越して 4 バイトとする）。
 ///
-/// `DType` は非網羅的でない列挙（`tensor_core::dispatch`）であるため
+/// `DType` は非網羅的でない列挙（`fandhe_ai_tensor_core::dispatch`）であるため
 /// match は両変種を明示し、新変種追加時はコンパイルエラーで見落としを
 /// 検出する（`_ =>` フォールバックは持たない）。両アームともコンパイル
 /// 時定数（[`BYTES_PER_ELEMENT_F16`]／[`BYTES_PER_ELEMENT_F32`]）を返す
@@ -961,7 +963,7 @@ impl TileCandidate {
 mod cost_model {
     use std::num::{NonZeroU32, NonZeroU64, NonZeroU128};
 
-    use tensor_core::dispatch::GemmShape;
+    use fandhe_ai_tensor_core::dispatch::GemmShape;
 
     use crate::error::CudaError;
     use crate::kernels_mma::{MMA_BK, MMA_BM, MMA_BN, MMA_STAGES, MMA_WARP_M, MMA_WARP_N};

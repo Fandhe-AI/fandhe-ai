@@ -5,7 +5,7 @@
 //! CPU 参照実装は丸め方針（FMA 契約）統一方針（`.claude/rules/coding-rust.md`）に従い
 //! 内積の累積に `f32::mul_add` を用いる。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
 

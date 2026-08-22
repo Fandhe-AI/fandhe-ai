@@ -15,7 +15,7 @@
 //! ## 経路選択（性能解釈に影響するため明記する）
 //!
 //! - QKV／出力射影・FFN の 2D GEMM（`[batch*seq, d_model] @ [d_model, d_model]` 等）は
-//!   [`backend_cpu::CpuBackendOps::gemm`]（BLIS 型・rayon 並列の最適化済み自作カーネル）を
+//!   [`fandhe_ai_backend_cpu::CpuBackendOps::gemm`]（BLIS 型・rayon 並列の最適化済み自作カーネル）を
 //!   経由する。REQ-8 が求める「自作カーネルでの Transformer ブロック実測」の主対象。
 //! - attention 内のバッチ行列積（`Q @ K^T`・`softmax(...) @ V`）は
 //!   [`onnx_interop::ops::matmul`]（`numpy.matmul` 準拠のバッチ対応 naive 実装）を使う。
@@ -62,15 +62,15 @@
 
 use std::hint::black_box;
 
-use backend_cpu::CpuBackendOps;
-use backend_cuda::CudaBackendOps;
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::transformer_workload::{baseline_spec, report_name, report_name_fused};
 use bench_harness::{BenchError, BenchReport, MeasurementConfig, run};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cuda::CudaBackendOps;
+use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 use onnx_interop::ops::{
     LayerNormAttrs, add, erf, layer_normalization, matmul, mul, reshape, softmax, transpose,
 };
-use tensor_core::{Activation, BackendOps, DType, FusedOpKind, FusionPlan, Tensor};
 
 /// ワークロード形状（PoC-8 定義。単一真実源は [`bench_harness::transformer_workload::baseline_spec`]。
 /// 本ファイルはローカル `const` へ束縛して既存コードの参照箇所を変えずに済ませる
@@ -392,7 +392,7 @@ fn transformer_block_forward_bench_cpu() {
 
     // CPU は `sync::CpuSync`（no-op）が契約上の同期方式（REQ-8「ホスト転送を伴わない
     // 完了待ち」への統一）に該当する。`ops.gemm` 等はホスト常駐 `Tensor<f32>` を
-    // 同期的に返す契約（`tensor_core::backend_ops::BackendOps` ドキュメンテーション
+    // 同期的に返す契約（`fandhe_ai_tensor_core::backend_ops::BackendOps` ドキュメンテーション
     // コメント参照）のため、`workload` クロージャの戻り時点で計測対象処理は完了しており
     // 追加の `wait_idle()` 呼び出しは不要（`protocol::run` の前提を満たす）。
 
@@ -720,7 +720,7 @@ fn transformer_block_forward_bench_cuda_fused() {
 
 /// #602（G-12）受け入れ基準「改善前後の数値一致」: [`full_forward`]（改善前）
 /// と [`full_forward_fused`]（改善後）の出力が REQ-2 複合判定（相対誤差
-/// 1e-3 未満 または 絶対誤差 1e-5 未満。`backend_cpu::parity::assert_parity`）
+/// 1e-3 未満 または 絶対誤差 1e-5 未満。`fandhe_ai_backend_cpu::parity::assert_parity`）
 /// で一致することを検証する。tolerance は既存値のまま変更しない
 /// （`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を
 /// 単独で緩和しない」）。CUDA 非搭載環境では `#[ignore]` 分離のため通常 CI
@@ -737,7 +737,7 @@ fn transformer_block_forward_cuda_fused_parity() {
     let fused = full_forward_fused(&ops, &x, &layers);
 
     assert_eq!(prefusion.shape(), fused.shape());
-    backend_cpu::parity::assert_parity(
+    fandhe_ai_backend_cpu::parity::assert_parity(
         "transformer block forward: CUDA prefusion vs fused (Phase G)",
         prefusion
             .contiguous()

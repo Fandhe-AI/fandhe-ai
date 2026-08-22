@@ -2,7 +2,7 @@
 //! イシュー #500）GEMM の CPU-CUDA 数値一致回帰テスト。
 //!
 //! `tests/gemm_wmma_tf32_opt.rs`（#63）と同じ方針で、判定式・閾値は
-//! `backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
+//! `fandhe_ai_backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
 //! 絶対誤差 1e-5 未満」の唯一の実体）に一本化し、ここでローカル複製しない
 //! （`.claude/rules/coding-rust.md`）。
 //!
@@ -20,11 +20,11 @@
 //! （環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載環境では早期
 //! return で green）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装と `run_wmma_tf32`
 /// （staged カーネルが利用可能かつ整列条件を満たせばそちら）の出力を
-/// [`backend_cpu::assert_parity`] で照合する。
+/// [`fandhe_ai_backend_cpu::assert_parity`] で照合する。
 fn assert_wmma_tf32_staged_parity(
     gemm: &CudaGemm,
     context: &str,
@@ -38,14 +38,16 @@ fn assert_wmma_tf32_staged_parity(
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm
         .run_wmma_tf32(&a, &b, m, n, k)
         .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner");
 
-    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。
@@ -214,7 +216,7 @@ fn wmma_tf32_staged_zero_dim_shape_returns_empty_without_launch() {
 /// （テスト名・目的が実施内容と一致しない）。「staged が既存 opt 実装を
 /// 上回る」という本来の受け入れ条件は、private field へ直接アクセスできる
 /// ライブラリ単体テスト
-/// （`backend_cuda::gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`。
+/// （`fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_staged_kernel_exceeds_opt_kernel_tflops_at_4096`。
 /// `src/gemm.rs`）へ切り出した。本テストは名称・目的を実施内容（tiled f32
 /// 比較）に揃え、公開 API から到達可能な形で「tiled f32 を上回る」ことを
 /// 検証する（イシュー #500 の受け入れ基準本体はこちら）。

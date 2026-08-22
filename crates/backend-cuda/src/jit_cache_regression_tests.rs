@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
-use tensor_core::dispatch::{DType, GemmShape};
+use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
 
 use super::*;
 

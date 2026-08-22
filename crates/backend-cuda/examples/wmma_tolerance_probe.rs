@@ -2,17 +2,17 @@
 //!
 //! REQ-2 受け入れ基準「tensor core（WMMA/mma）化で TF32／f16 累算経路を
 //! 導入する際は当該経路の数値一致閾値を実測に基づき再評価する」の実測
-//! ステップを担う。TF32 経路（[`backend_cuda::CudaGemm::run_wmma_tf32`]。
+//! ステップを担う。TF32 経路（[`fandhe_ai_backend_cuda::CudaGemm::run_wmma_tf32`]。
 //! `tests/gemm_wmma_tf32.rs`）・f16 WMMA 経路
-//! （[`backend_cuda::CudaWmmaGemm::run_f16`]。`tests/cpu_cuda_wmma_parity.rs`）
-//! それぞれについて、形状×シードごとに `backend_cpu::compare` の
+//! （[`fandhe_ai_backend_cuda::CudaWmmaGemm::run_f16`]。`tests/cpu_cuda_wmma_parity.rs`）
+//! それぞれについて、形状×シードごとに `fandhe_ai_backend_cpu::compare` の
 //! `CompareReport`（誤差分布統計）を収集し、REQ-2 統一複合判定の閾値
-//! （`backend_cpu::RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）に
+//! （`fandhe_ai_backend_cpu::RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）に
 //! 対する閾値マージンを算出して Markdown 表形式で stdout へ出力する
 //! （`docs/perf/cuda-tensor-core-tolerance-evaluation.md` へ転記する
 //! 想定）。
 //!
-//! **本ハーネスは閾値・判定式を一切変更しない**。`backend_cpu::parity`
+//! **本ハーネスは閾値・判定式を一切変更しない**。`fandhe_ai_backend_cpu::parity`
 //! の定数・`compare` 関数をそのまま import して使い、ローカル複製・
 //! 緩和は行わない（`.claude/rules/coding-rust.md`「バックエンド間数値
 //! 一致テストの許容誤差を単独で緩和しない」・`delegation-impl.md`
@@ -27,7 +27,7 @@
 //! # 使い方
 //!
 //! ```text
-//! cargo build --release -p backend-cuda --example wmma_tolerance_probe
+//! cargo build --release -p fandhe-ai-backend-cuda --example wmma_tolerance_probe
 //! ./target/release/examples/wmma_tolerance_probe
 //! ```
 //!
@@ -48,11 +48,11 @@
 //! （`docs/perf/cuda-tensor-core-tolerance-evaluation.md` §1 の手順参照。
 //! #186・PR #257 Codex Review 指摘対応）。
 
-use backend_cpu::{
+use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::{
     ABSOLUTE_RESCUE_THRESHOLD, CompareReport, RELATIVE_TOLERANCE, compare, matmul_reference_fma,
 };
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaWmmaGemm};
-use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaWmmaGemm};
 use half::f16;
 
 /// 形状セット（`tests/gemm_wmma_tf32.rs`・`tests/cpu_cuda_wmma_parity.rs` の

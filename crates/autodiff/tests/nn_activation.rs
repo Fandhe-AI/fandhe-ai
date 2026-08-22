@@ -11,8 +11,8 @@
 
 mod common;
 
-use autodiff::Tape;
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_tensor_core::Tensor;
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")
@@ -165,13 +165,13 @@ fn fixture() -> Fixture {
 
 /// `活性化(x @ w)` の forward loss（`mse_loss` に対する `target` 突合）
 /// を再評価する。`activation` は `eval.rs` の非公開関数と同じ数式の
-/// クレート内テスト用ラッパー（`autodiff::Tape`/`Var` 経由のみを公開
+/// クレート内テスト用ラッパー（`fandhe_ai_autodiff::Tape`/`Var` 経由のみを公開
 /// API サーフェスとして使う）。
 fn forward_loss(
     x: &Tensor<f32>,
     w: &Tensor<f32>,
     target: &Tensor<f32>,
-    activation: impl for<'a> Fn(&'a autodiff::Var<'a>) -> autodiff::Var<'a>,
+    activation: impl for<'a> Fn(&'a fandhe_ai_autodiff::Var<'a>) -> fandhe_ai_autodiff::Var<'a>,
 ) -> f32 {
     let tape = Tape::new_with_ops(common::naive_ops());
     let xv = tape.var(x);
@@ -241,7 +241,7 @@ fn relu_end_to_end_grad_matches_numeric() {
 
 #[test]
 fn nn_activation_sigmoid_matches_var_sigmoid_end_to_end() {
-    use autodiff::nn::activation::Sigmoid;
+    use fandhe_ai_autodiff::nn::activation::Sigmoid;
 
     let f = fixture();
 

@@ -11,7 +11,7 @@ GEMM 性能改善ツリー #479 系・Phase C の C-9b。前段 C-9a（#524・`e
 
 - `cargo build --workspace`
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda`（`gemm_auto.rs::cost_model_tests` の GPU 不要ユニットテスト一式。§2 参照）
+- `cargo test -p fandhe-ai-backend-cuda`（`gemm_auto.rs::cost_model_tests` の GPU 不要ユニットテスト一式。§2 参照）
 - `cargo test --workspace`（回帰確認。全 green）
 
 未検証・実機実行待ちの事項:
@@ -33,10 +33,10 @@ GEMM 性能改善ツリー #479 系・Phase C の C-9b。前段 C-9a（#524・`e
 ```sh
 git fetch origin
 git checkout perf/527-static-cost-model-tile-selection   # 本イシューの実装ブランチ
-cargo test -p backend-cuda -- --ignored --nocapture       # select_tile_config_for_device の実機結線検証を含む
+cargo test -p fandhe-ai-backend-cuda -- --ignored --nocapture       # select_tile_config_for_device の実機結線検証を含む
 ```
 
-1. **3 形状の候補構成を実測する**（M=N=K = 4096 / 2048 / 1024。`docs/perf/cuda-gemm-mma-block-tile.md` §4 と同じ「定数差し替え → 再計測」手順で、`enumerate_tile_candidates` が列挙する各候補について `kernels_mma.rs` の `MMA_BM`/`MMA_BN`/`MMA_BK`/`MMA_STAGES` 定数とカーネルソース `#define` を一時的に差し替えて `cargo run -p backend-cuda --example gemm_mma_bench --release` を実行し、5 回計測中央値の TFLOPS を記録する）
+1. **3 形状の候補構成を実測する**（M=N=K = 4096 / 2048 / 1024。`docs/perf/cuda-gemm-mma-block-tile.md` §4 と同じ「定数差し替え → 再計測」手順で、`enumerate_tile_candidates` が列挙する各候補について `kernels_mma.rs` の `MMA_BM`/`MMA_BN`/`MMA_BK`/`MMA_STAGES` 定数とカーネルソース `#define` を一時的に差し替えて `cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release` を実行し、5 回計測中央値の TFLOPS を記録する）
 2. **`docs/perf/sm121-device-attributes.md` へ帯域実測値を記入**し、同表を正として `crates/backend-cuda/src/gemm_auto.rs::cost_model::SM121_MEASURED_BANDWIDTH` を `Some(MeasuredBandwidth { l1_bytes_per_cycle_per_sm: ..., l2_bytes_per_cycle_device: ... })` へ更新する
 3. **モデル選定と実測最良構成を照合する**（`select_tile_config`／`select_tile_config_for_device` が返す `TileSelection::candidate()` と、§記録欄の実測最良構成の block_m/block_n/block_k を比較する）。**3 形状中 2 形状以上一致**で採用（受け入れ基準）
 4. **不一致の場合**: モデル定数（トラフィック係数・帯域値）の実測補正を **1 回だけ** 行い再判定する。補正はコミット・PR に根拠を明記する。**注意**: `cost_model` モジュールのドキュメンテーションコメント（§トラフィックモデル）が示すとおり、`shape.m`/`shape.n` を割り切るタイル構成の間では L1 トラフィックがタイル構成にほぼ不変（`num_blocks * block_m * block_n ≈ shape.m * shape.n` に近似されるため）であり、`l1_bytes_per_cycle_per_sm` を調整してもランキングをほとんど動かせない。不一致が生じている場合、補正はまず L2 側の係数（`l2_bytes_per_cycle_device`）または wave 効率項の解釈を見直すことを優先する

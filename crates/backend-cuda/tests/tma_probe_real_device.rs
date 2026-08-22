@@ -70,7 +70,7 @@ use cudarc::driver::sys::{
 };
 use cudarc::driver::{DevicePtr, DevicePtrMut};
 
-use backend_cuda::CudaDevice;
+use fandhe_ai_backend_cuda::CudaDevice;
 
 /// [`tma_nvrtc_compile_probe`]・[`tma_execution_probe`]・
 /// [`tma_execution_probe_cta`] が共通で試す arch の優先順位付きリスト
@@ -373,7 +373,7 @@ fn probe_compile(
     kernel_src: &'static str,
     arch: &'static str,
 ) -> CompileProbeResult {
-    match backend_cuda::compile_ptx(kernel_src, arch) {
+    match fandhe_ai_backend_cuda::compile_ptx(kernel_src, arch) {
         Ok(_ptx) => CompileProbeResult {
             arch,
             variant,
@@ -381,8 +381,10 @@ fn probe_compile(
             is_nvrtc_unavailable: false,
         },
         Err(err) => {
-            let is_nvrtc_unavailable =
-                matches!(err, backend_cuda::CudaError::NvrtcUnavailable { .. });
+            let is_nvrtc_unavailable = matches!(
+                err,
+                fandhe_ai_backend_cuda::CudaError::NvrtcUnavailable { .. }
+            );
             CompileProbeResult {
                 arch,
                 variant,
@@ -413,7 +415,7 @@ fn probe_compile(
 fn select_compiling_arch(variant: &'static str, kernel_src: &'static str) -> &'static str {
     let mut failures: Vec<String> = Vec::new();
     for arch in PROBE_ARCHS {
-        match backend_cuda::compile_ptx(kernel_src, arch) {
+        match fandhe_ai_backend_cuda::compile_ptx(kernel_src, arch) {
             Ok(_ptx) => {
                 println!(
                     "tma_compile_probe variant={variant} arch={arch} result=success (selected for execution probe)"
@@ -544,7 +546,7 @@ fn tma_execution_probe() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
     let selected_arch = select_compiling_arch("cluster", TMA_PROBE_KERNEL);
-    let ptx = backend_cuda::compile_ptx(TMA_PROBE_KERNEL, selected_arch).expect(
+    let ptx = fandhe_ai_backend_cuda::compile_ptx(TMA_PROBE_KERNEL, selected_arch).expect(
         "TMA probe kernel must compile for the arch select_compiling_arch just selected \
          (recompiling here avoids threading a Ptx value out of the selection helper)",
     );
@@ -766,7 +768,7 @@ fn tma_execution_probe_cta() {
     let device = CudaDevice::new(0).expect("CUDA device must be available on ignored test runner");
 
     let selected_arch = select_compiling_arch("cta", TMA_PROBE_KERNEL_CTA);
-    let ptx = backend_cuda::compile_ptx(TMA_PROBE_KERNEL_CTA, selected_arch).expect(
+    let ptx = fandhe_ai_backend_cuda::compile_ptx(TMA_PROBE_KERNEL_CTA, selected_arch).expect(
         "TMA probe kernel (cta variant) must compile for the arch select_compiling_arch \
          just selected (recompiling here avoids threading a Ptx value out of the \
          selection helper)",

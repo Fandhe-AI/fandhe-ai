@@ -6,7 +6,7 @@
 //! （`.claude/rules/deps-policy.md`）に数学関数クレート（libm 等）は無いため自前近似で
 //! 実装する（依存追加はユーザー承認必須のため行わない）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
 
@@ -25,7 +25,7 @@ fn map_elementwise(
 
 /// NaN を伝播する `max`。`f32::max` は NaN 入力を暗黙に非 NaN 側へ潰す
 /// （IEEE 754 の `maxNum` 系挙動）ため、`Relu` にそのまま使うと ONNX Runtime・
-/// `autodiff::eval::relu`（`crates/autodiff/src/eval.rs`）の NaN 伝播動作と
+/// `fandhe_ai_autodiff::eval::relu`（`crates/autodiff/src/eval.rs`）の NaN 伝播動作と
 /// 不整合になり、バックエンド数値一致検証で上流の数値破壊（NaN）が
 /// 隠蔽されてしまう。両者の意味論を揃えるため同じ判定を用いる。
 fn nan_propagating_max(a: f32, b: f32) -> f32 {
@@ -37,7 +37,7 @@ fn nan_propagating_max(a: f32, b: f32) -> f32 {
 }
 
 /// `Relu(x) = max(x, 0)`。NaN 入力は `nan_propagating_max` により NaN のまま返す
-/// （`autodiff::eval::relu` と同じ意味論。ONNX Runtime とも整合する）。
+/// （`fandhe_ai_autodiff::eval::relu` と同じ意味論。ONNX Runtime とも整合する）。
 pub fn relu(x: &Tensor<f32>) -> Result<Tensor<f32>, OpError> {
     map_elementwise("Relu", x, |v| nan_propagating_max(v, 0.0))
 }
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn relu_propagates_nan() {
         // `f32::max` は NaN を暗黙に 0.0 へ潰すため NaN 非伝播バグの回帰確認
-        // （autodiff::eval::relu・ONNX Runtime との整合。#272 レビュー指摘）。
+        // （fandhe_ai_autodiff::eval::relu・ONNX Runtime との整合。#272 レビュー指摘）。
         let x = Tensor::<f32>::new(vec![f32::NAN, -1.0, 2.0], &[3]).unwrap();
         let y = relu(&x).unwrap();
         assert!(y.get(&[0]).unwrap().is_nan());

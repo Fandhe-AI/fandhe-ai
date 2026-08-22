@@ -1,7 +1,7 @@
 //! Keras `Sequential` 慣習のレイヤー積み上げビルダー（TASK-9.2a・
 //! #95）の**非推奨シム**（TASK-9.4・#411）。
 //!
-//! 唯一のサポート対象実装は `facade::compat::sequential::Sequential`
+//! 唯一のサポート対象実装は `fandhe_ai::compat::sequential::Sequential`
 //! （`crates/facade/src/compat/sequential.rs`）。本ファイルは移設前の
 //! ソース互換のためだけに実装を複製して残す（`compat/mod.rs` モジュール
 //! doc 参照。`autodiff` は `facade` に依存できないため委譲不可）。
@@ -17,7 +17,7 @@
 //! 実装を注入できる公開 API を設けない」は**唯一のサポート対象公開 API 面**
 //! である `facade`（`CLAUDE.md` 「`facade` が唯一のサポートされる公開 API
 //! 面であり `tensor-core`・`autodiff`・`backend-*` は内部クレート」）を
-//! 対象とする制約であり、`facade::compat::Sequential` 側では
+//! 対象とする制約であり、`fandhe_ai::compat::Sequential` 側では
 //! `predict_with_ops` 相当の注入経路を設けない（`docs/compat-api-scope.md`
 //! §2）。一方で本シムは内部クレート `autodiff` 上の**移行期間中のソース
 //! 互換シム**（サポート対象公開 API 面ではない）であるため、移設前に存在
@@ -35,7 +35,7 @@
 //! `crate::nn::optim::AdamW` の位置対応契約（`optim/sgd.rs`・
 //! `nn/optim/adamw.rs`）にそのまま渡せる。
 
-use tensor_core::{BackendOps, Tensor};
+use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use crate::Gradients;
 use crate::error::AutodiffError;
@@ -50,11 +50,11 @@ use crate::var::Var;
 /// `Vec<Box<dyn Module>>` に格納するため、種類の異なる層（`Linear` と
 /// 活性化関数）を同じ列で扱える。
 ///
-/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::Sequential` へ移行
+/// **非推奨シム（TASK-9.4・#411）**: `fandhe_ai::compat::Sequential` へ移行
 /// すること（本ファイル冒頭 doc 参照）。
 #[deprecated(
     since = "0.0.0",
-    note = "facade::compat::Sequential へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
+    note = "fandhe_ai::compat::Sequential へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
 )]
 pub struct Sequential {
     layers: Vec<Box<dyn Module>>,
@@ -132,9 +132,9 @@ impl Sequential {
     /// 必要な場合は [`Sequential::predict`] を使う。
     #[deprecated(
         since = "0.0.0",
-        note = "facade::compat::Sequential へ移設済み（TASK-9.4・#411）。facade は \
+        note = "fandhe_ai::compat::Sequential へ移設済み（TASK-9.4・#411）。facade は \
                 REQ-12 に従い ops 注入経路を公開しないため、性能最適化された ops を \
-                明示指定したい場合を除き facade::compat::Sequential::predict を使うこと"
+                明示指定したい場合を除き fandhe_ai::compat::Sequential::predict を使うこと"
     )]
     pub fn predict_with_ops(
         &self,
@@ -207,7 +207,7 @@ impl Sequential {
     /// ただし**置換前の層 shape との一致検証**（次段落）は
     /// `Linear::from_parameters` の責務範囲外（層の存在を知らない）なので、
     /// `apply_parameters` 自身の契約として本メソッドが担う（#426。
-    /// `facade::compat::sequential::Sequential::apply_parameters` と同一
+    /// `fandhe_ai::compat::sequential::Sequential::apply_parameters` と同一
     /// 検証をシムとして複製。本ファイル冒頭 doc「非推奨シム」参照）。
     ///
     /// **置換前 shape との完全一致検証（#426。codex-review PR #420 P2 是正）**:
@@ -310,11 +310,11 @@ impl Sequential {
 /// 層順に抽出した `LinearVars` 列）は `Vec<Box<dyn Module>>` の添字とは
 /// 別に独立して保持する。
 ///
-/// **非推奨シム（TASK-9.4・#411）**: `facade::compat::sequential::
+/// **非推奨シム（TASK-9.4・#411）**: `fandhe_ai::compat::sequential::
 /// SequentialVars` へ移行すること（本ファイル冒頭 doc 参照）。
 #[deprecated(
     since = "0.0.0",
-    note = "facade::compat::sequential::SequentialVars へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
+    note = "fandhe_ai::compat::sequential::SequentialVars へ移設済み（TASK-9.4・#411）。移行期間中の非推奨シム"
 )]
 #[allow(deprecated)] // フィールド型 Sequential 自体も非推奨シム（本ファイル冒頭 doc 参照）。
 pub struct SequentialVars<'m, 't> {

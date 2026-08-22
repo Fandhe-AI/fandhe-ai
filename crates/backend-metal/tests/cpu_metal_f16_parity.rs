@@ -2,7 +2,7 @@
 //! （TASK-8.3b・#156）。
 //!
 //! `tests/cpu_metal_parity.rs`（f32・TASK-2.2c）と同じ判定基盤
-//! （`backend_cpu::assert_parity`。REQ-2 統一複合判定「相対誤差 1e-3 未満
+//! （`fandhe_ai_backend_cpu::assert_parity`。REQ-2 統一複合判定「相対誤差 1e-3 未満
 //! または 絶対誤差 1e-5 未満」の唯一の実体）を使うが、参照実装との比較
 //! 方法は CUDA 側 f16 WMMA パリティテスト
 //! （`crates/backend-cuda/tests/cpu_cuda_wmma_parity.rs`）の方式を移植する
@@ -11,7 +11,7 @@
 //!
 //! # 参照実装との比較方法（`cpu_cuda_wmma_parity.rs` と同一の 3 段階）
 //!
-//! 1. f16 入力を f32 化し `backend_cpu::matmul_reference_fma`（FMA 契約の
+//! 1. f16 入力を f32 化し `fandhe_ai_backend_cpu::matmul_reference_fma`（FMA 契約の
 //!    唯一の参照点）で参照値を計算する。
 //! 2. 参照値を f16 経由で丸める（カーネルの `simdgroup_store` による half
 //!    エピローグ store と同じ量子化をホスト側でも再現し、丸め方式の差では
@@ -24,7 +24,7 @@
 //!
 //! 本ファイルは #156 の受け入れ条件「実測記録が残されている」に対応する
 //! 実測手段の一部であり、`gemm_simdgroup_f16` 経路
-//! （[`backend_metal::MetalGemm::dispatch_f16_unverified`]）にのみ複合判定を
+//! （[`fandhe_ai_backend_metal::MetalGemm::dispatch_f16_unverified`]）にのみ複合判定を
 //! 適用する明示的な例外として扱う（他の f16 経路一般を対象化するものでは
 //! ない）。
 //!
@@ -45,7 +45,7 @@
 //! `tests/cpu_metal_parity.rs` と同じく `#![cfg(target_os = "macos")]` で
 //! macOS 実機（Apple Silicon）でのみコンパイル・実行する。CI（self-hosted・
 //! Linux）ではコンパイル対象外になる。全ケース `#[ignore]` とし、
-//! `cargo test -p backend-metal --release -- --ignored --nocapture` で
+//! `cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture` で
 //! 実行する（K=4096 ストレスケースは debug では遅いため release 推奨）。
 //! CUDA 側のような「環境適応型スモーク」（`#[ignore]` なしで通常 CI 実行）
 //! は設けない: Metal は self-hosted Linux runner 上に実機がなく
@@ -55,9 +55,9 @@
 
 #![cfg(target_os = "macos")]
 
-use backend_cpu::parity::assert_parity;
-use backend_metal::{MetalContext, MetalGemm};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_backend_metal::{MetalContext, MetalGemm};
 use half::f16;
 
 /// 決定的シードで A・B（f16）を生成し、f16→f32→参照 matmul→f16 丸め→f32 の
@@ -80,7 +80,7 @@ fn assert_metal_f16_parity(
     let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
     let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; m * n];
-    backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
+    fandhe_ai_backend_cpu::parity::matmul_reference_fma(&a_f32, &b_f32, &mut c_ref_f32, m, n, k)
         .expect("matmul_reference_fma shape validation must pass for well-formed test input");
     // `gemm_simdgroup_f16` の `simdgroup_store`（half エピローグ store）と
     // 同じ量子化を参照側にも適用し、計算経路の差のみを判定対象にする。
@@ -190,8 +190,8 @@ fn f16_dispatch_is_bit_deterministic_across_runs() {
 #[test]
 #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs() {
-    use backend_metal::error::MetalError;
-    use backend_metal::half_buffer::MetalHalfBuffer;
+    use fandhe_ai_backend_metal::error::MetalError;
+    use fandhe_ai_backend_metal::half_buffer::MetalHalfBuffer;
 
     let ctx = MetalContext::new().expect("Metal デバイス・コマンドキューの初期化に失敗した");
     let gemm = MetalGemm::new(&ctx).expect("GEMM パイプラインの構築に失敗した（f16 含む）");

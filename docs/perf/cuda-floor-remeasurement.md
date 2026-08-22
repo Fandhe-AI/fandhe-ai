@@ -79,7 +79,7 @@ git fetch origin
 git checkout test/157-cuda-floor-remeasurement   # 本イシューの実装ブランチ
 
 # 1. 数値一致確認を先に行う（既存 parity テスト群。閾値は緩和しない）
-cargo test -p backend-cuda --release -- --ignored
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored
 
 # 2. （推奨・PR #349 codex-review 指摘 P1 対応）同一実機で PyTorch を再計測し、
 #    候補下限の正式算出に使う env override を用意する。
@@ -96,7 +96,7 @@ export CUDA_FLOOR_BENCH_PYTORCH_F16_2048=<再計測値>
 export CUDA_FLOOR_BENCH_PYTORCH_F16_4096=<再計測値>
 
 # 3. 再実測バイナリを実行
-cargo run -p backend-cuda --example cuda_floor_bench --release
+cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release
 ```
 
 出力形式（`crates/backend-cuda/examples/cuda_floor_bench.rs::main` 参照）:
@@ -161,7 +161,7 @@ PoC-v2-3 固定値との差は数 % 以内（f16 の 4096 のみ 81.26 対 97.63
 
 本イシュー（#390）で DGX Spark GB10（`<cuda-node>`）実機にて `cuda_floor_bench` を
 3 回反復実行し、同一実機で PyTorch 参照値を再計測（`warmup=20 iters=20` 明示指定）した。以下は
-その実測記録である。数値は `cargo run -p backend-cuda --example cuda_floor_bench --release --locked`
+その実測記録である。数値は `cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked`
 の stdout から機械的に転記しており、辻褄合わせの後付け調整は行っていない。
 
 **受け入れ条件「#389 数値一致 green が前提」の実態是正**: イシュー #390 本文は前提を「#389 数値一致
@@ -324,9 +324,9 @@ green であるかのような記述はしない。#393 はこの限定条件を
 
 - `cargo build --workspace --locked` — `cudarc` 動的ロード契約（CUDA toolkit 非搭載環境でもビルド成立する。
   `.claude/rules/coding-rust.md`）を崩していないことを確認済み
-- `cargo build -p backend-cuda --example cuda_floor_bench --release` — example のビルド成立
+- `cargo build -p fandhe-ai-backend-cuda --example cuda_floor_bench --release` — example のビルド成立
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda --example cuda_floor_bench` — 丸め規則（#158 で
+- `cargo test -p fandhe-ai-backend-cuda --example cuda_floor_bench` — 丸め規則（#158 で
   `bench_harness::floor_lower_bound` へ一本化済み。旧 `floor_round`）の単体テスト 3 件
   （仕様例との突合・10% 境界を跨ぐ非減少性・非有限値/負値の防御）・`best_of`（f32 最良経路選出。
   固定優先順位ではなく実測値比較であることの回帰確認）の単体テスト 4 件・`f16_candidate_floor_value`

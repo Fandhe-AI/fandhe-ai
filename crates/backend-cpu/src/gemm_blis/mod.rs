@@ -69,7 +69,7 @@ mod partition;
 
 use std::ops::Range;
 
-use tensor_core::Activation;
+use fandhe_ai_tensor_core::Activation;
 
 use crate::gemm::{BlockSizes, GemmError, validate_dims};
 #[cfg(not(target_arch = "x86_64"))]
@@ -435,7 +435,7 @@ pub fn gemm_blis_parallel(
 ///
 /// `bias` は `Some(&[f32])` の場合 `n`（`B` の列数）と同じ長さが必須で、
 /// 各行へ加算される（`docs/public-api-design.md` §4.2 のブロードキャスト
-/// 規約と同じ「`[n]` を行方向へ複製」の意味論。`tensor_core::BackendOps::
+/// 規約と同じ「`[n]` を行方向へ複製」の意味論。`fandhe_ai_tensor_core::BackendOps::
 /// gemm_bias_act` のデフォルト実装〈`add` の broadcast〉と等価）。長さ
 /// 不一致は [`GemmError::BiasLenMismatch`]（カーネル本体アクセス前に
 /// 検証。REQ-8・OWASP A03）。
@@ -618,7 +618,7 @@ fn gemm_blis_bias_act_parallel_thresholded(
 /// 由来のスライス長で構造的に保証する（明示 `assert`／`unsafe` を要しない。
 /// REQ-8）。
 ///
-/// `Activation` は `#[non_exhaustive]`（`tensor_core::backend_ops`）のため
+/// `Activation` は `#[non_exhaustive]`（`fandhe_ai_tensor_core::backend_ops`）のため
 /// `_ =>` で未知 variant を静かに無視せず、[`GemmError::UnsupportedActivation`]
 /// を返す（未対応 activation を無視して不正な結果を返す fail-open を避ける。
 /// `tensor-core` と同一ワークスペースで管理されるため通常到達しないが、
@@ -2515,7 +2515,7 @@ mod tests {
     /// を参照。採用可否の判定は本テストの出力を見た人間／後続セッションが
     /// 行うため、本テスト自体は勝敗を assert しない（#559 §2.3 と同方針）。
     ///
-    /// `#[ignore]` 分離（実機実行専用。`cargo test -p backend-cpu --release
+    /// `#[ignore]` 分離（実機実行専用。`cargo test -p fandhe-ai-backend-cpu --release
     /// -- --ignored mc_kc_nc_blocking_sweep_median_throughput` で M4 Max
     /// 上から実行する）。
     #[cfg(target_arch = "aarch64")]
@@ -2663,7 +2663,7 @@ mod tests {
     /// の「実機依存テストは `#[ignore]` で分離」・#564 の
     /// `mc_kc_nc_blocking_sweep_median_throughput` と同方針）。
     ///
-    /// `#[ignore]`（実機実行専用。`cargo test -p backend-cpu --release --
+    /// `#[ignore]`（実機実行専用。`cargo test -p fandhe-ai-backend-cpu --release --
     /// --ignored runtime_cache_detect_and_2d_partition_ab_median_throughput`
     /// で個別実行する想定。非 macOS・非実機環境でも `--release` なしで
     /// フォールバック経路のスモークとして完走することは

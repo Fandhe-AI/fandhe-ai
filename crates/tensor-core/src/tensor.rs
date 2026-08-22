@@ -161,7 +161,7 @@ impl<T: Element> Tensor<T> {
     }
 
     /// 総コンストラクタ（TASK-12.1d・#164）: `shape` から `numel` を導出し、
-    /// 添字 `0..numel` を `fill` で埋めて構築する。`autodiff::eval`
+    /// 添字 `0..numel` を `fill` で埋めて構築する。`fandhe_ai_autodiff::eval`
     /// （`crates/autodiff/src/eval.rs`）が「shape とデータ長の一致を型で
     /// 保証する」ことで `unreachable!()` 経由のフォールバックを排除する
     /// ための土台として追加した（`docs/fusion-graph-design.md` §2.5
@@ -181,7 +181,7 @@ impl<T: Element> Tensor<T> {
     /// ElementCountOverflow)` として弾き、呼び出し元に型付きエラーとして
     /// 伝播させる。
     ///
-    /// `autodiff::eval::build_tensor`（`from_shape_fill` の唯一の内部
+    /// `fandhe_ai_autodiff::eval::build_tensor`（`from_shape_fill` の唯一の内部
     /// 呼び出し元）は shape 検査済みの出力のみを渡す契約のため実運用では
     /// `Err` に到達しない。それでも `eval.rs` は本番経路で `panic!`／
     /// `unwrap()`／`expect()`／`unreachable!()` を使わない方針
@@ -215,7 +215,7 @@ impl<T: Element> Tensor<T> {
     /// 要素数積は空 iterator の乗法単位元 `1` であり、`checked_numel` は
     /// 一度も `checked_mul` を呼ばずに `Ok(1)` を返す——すなわち
     /// [`Tensor::from_shape_fill`] と異なりオーバーフロー分岐が構造的に
-    /// 存在しない。`autodiff::eval::build_tensor`・`autodiff::tape` の
+    /// 存在しない。`fandhe_ai_autodiff::eval::build_tensor`・`fandhe_ai_autodiff::tape` の
     /// 各種安全側フォールバック（契約違反検知後にダミー値を返す経路）が、
     /// `from_shape_fill` の `Result` を経由せず本番経路 panic 禁止規約を
     /// 満たすために使う。

@@ -17,6 +17,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::onnx::graph::{Graph, build_graph};
 use onnx_interop::onnx::interp::{InterpError, Value, run};
 use onnx_interop::onnx::proto::{
@@ -24,7 +25,6 @@ use onnx_interop::onnx::proto::{
 };
 use prost::Message;
 use serde::Deserialize;
-use tensor_core::Tensor;
 
 fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

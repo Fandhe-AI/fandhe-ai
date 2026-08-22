@@ -28,7 +28,7 @@
 //! （spec 根拠: `docs/spec/05-tasks.md` TASK-1.1・TASK-1.6）。
 //!
 //! TASK-1.9a（#44）で [`device`] モジュール（[`device::CpuDeviceProvider`]）を追加した。
-//! `tensor_core::device::DeviceProvider` の CPU 実装であり、CUDA／Metal 実装
+//! `fandhe_ai_tensor_core::device::DeviceProvider` の CPU 実装であり、CUDA／Metal 実装
 //! （`backend-cuda::device::CudaDeviceProvider`／`backend-metal::device::MetalDeviceProvider`）
 //! と同一 trait で列挙・選択できることを `tests/device_provider_integration.rs` で検証する。
 //!
@@ -39,11 +39,11 @@
 //! 重複実装しない想定である（`docs/spec/05-tasks.md` TASK-2.2）。
 //!
 //! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::CpuMemory`]）を追加した。
-//! `tensor_core::buffer::MemoryOps` の CPU 実装であり、`upload`/`download`/
+//! `fandhe_ai_tensor_core::buffer::MemoryOps` の CPU 実装であり、`upload`/`download`/
 //! `alloc_zeroed` は FFI を伴わず `Vec<f32>` の複製のみで完結する
 //! （`backend-cuda::CudaMemory`／`backend-metal::MetalMemory` の数値一致の
 //! 参照点。`.claude/rules/coding-rust.md` の「CPU 参照実装」方針）。
-//! TASK-14.1a（#174）で `tensor_core::memory_stats::MemoryStats` を実装し、
+//! TASK-14.1a（#174）で `fandhe_ai_tensor_core::memory_stats::MemoryStats` を実装し、
 //! 確保済みバイト数のピーク値を取得できるようにした（`CpuMemory` は
 //! `Arc<AllocationTracker>` を共有する非 `Copy` 型に変更。CUDA/Metal への
 //! 同フック組み込みは #175）。
@@ -62,7 +62,7 @@
 //!   点に注意。ピークを集約したい場合は明示的に `clone()` する）
 //!
 //! TASK-1.9c（#46）で `ops` モジュール（[`ops::CpuBackendOps`]）を追加した。
-//! `tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CPU 実装であり、既存カーネル
 //! （[`gemm_blis::gemm_blis_parallel`]・[`elementwise`] の `add`/`mul`/`relu`/
 //! `exp`/`tanh`・[`reduction`] の `sum`/`max`）への薄い委譲に徹する。CUDA／
 //! Metal 実装（`backend-cuda::ops::CudaBackendOps`／
@@ -71,7 +71,7 @@
 //!
 //! TASK-12.1f（#203）で [`gemm_blis::gemm_blis_bias_act_parallel`]（GEMM epilogue
 //! 〈bias 加算・activation〉のカーネル内融合）を追加し、[`ops::CpuBackendOps`] の
-//! `gemm_bias_act`（`tensor_core::BackendOps` のデフォルトメソッド。非融合合成）を
+//! `gemm_bias_act`（`fandhe_ai_tensor_core::BackendOps` のデフォルトメソッド。非融合合成）を
 //! オーバーライドして接続した。非融合実行（`gemm` → `add` → `relu` の 3 パス・中間
 //! `Tensor` 2 個割当）に対する性能改善は `docs/perf/cpu-gemm-epilogue-fusion.md` に
 //! 実測記録している（CUTLASS 系実測の動機は平均 1.38〜1.45 倍。本環境実測は 1.46〜
@@ -81,11 +81,11 @@
 //!
 //! TASK-12.1c（#163）で [`fused_elementwise`] モジュール
 //! （[`fused_elementwise::run_fused_elementwise`]）を追加した。
-//! `tensor_core::fusion`（TASK-12.1a〜c・#161〜#163）が検出・生成した
-//! elementwise 連鎖（`tensor_core::FusionPlan`）を、per-op カーネル
+//! `fandhe_ai_tensor_core::fusion`（TASK-12.1a〜c・#161〜#163）が検出・生成した
+//! elementwise 連鎖（`fandhe_ai_tensor_core::FusionPlan`）を、per-op カーネル
 //! （[`elementwise`]）の逐次合成ではなく単一パスのレジスタ内評価で実行
 //! する CPU 参照実装である（PoC-9 `ElemwiseFuse` 方式。詳細は
-//! `fused_elementwise` モジュール冒頭コメント）。`tensor_core::BackendOps::
+//! `fused_elementwise` モジュール冒頭コメント）。`fandhe_ai_tensor_core::BackendOps::
 //! run_fused`（trait への追加・[`ops::CpuBackendOps`] での override 実装）
 //! への結線は #164 のスコープであり、#163 時点では関数ベースのカーネル
 //! API として独立に提供する（[`gemm`]／[`elementwise`] と同じ「trait

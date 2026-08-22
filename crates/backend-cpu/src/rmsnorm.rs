@@ -279,10 +279,10 @@ fn rmsnorm_row_neon(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_ro
 ///
 /// `backend-cuda::rmsnorm::match_rmsnorm_plan` と同一の 6 op 列・leaf 1
 /// 個・`row_fusion().axis() == None` 厳密一致契約を持つ（重複実装ではなく
-/// 同一契約の CPU 側ミラー。プランは `tensor_core::FusionPlan` のバックエンド
+/// 同一契約の CPU 側ミラー。プランは `fandhe_ai_tensor_core::FusionPlan` のバックエンド
 /// 非依存 DTO であり、`tensor-core` 内部の `pub(crate)` 型には依存しない）。
-pub(crate) fn match_rmsnorm_plan(plan: &tensor_core::FusionPlan) -> Option<usize> {
-    use tensor_core::{FusedOpKind, RowFusionMeta};
+pub(crate) fn match_rmsnorm_plan(plan: &fandhe_ai_tensor_core::FusionPlan) -> Option<usize> {
+    use fandhe_ai_tensor_core::{FusedOpKind, RowFusionMeta};
 
     if plan.leaf_count() != 1 {
         return None;
@@ -369,7 +369,7 @@ mod tests {
 
     #[test]
     fn match_rmsnorm_plan_accepts_canonical_plan() {
-        use tensor_core::{DType, FusedOpKind, FusionPlan};
+        use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan};
         let ops = vec![
             FusedOpKind::Input { leaf_index: 0 },
             FusedOpKind::Mul { lhs: 0, rhs: 0 },
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn match_rmsnorm_plan_rejects_elementwise_only_plan() {
-        use tensor_core::{DType, FusedOpKind, FusionPlan};
+        use fandhe_ai_tensor_core::{DType, FusedOpKind, FusionPlan};
         let ops = vec![
             FusedOpKind::Input { leaf_index: 0 },
             FusedOpKind::Input { leaf_index: 1 },

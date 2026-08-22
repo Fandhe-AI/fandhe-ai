@@ -1,5 +1,5 @@
 //! イシュー #194（親 #192「optimizer（SGD・AdamW）・gradient clipping
-//! の実装」）: `autodiff::nn::optim::AdamW` の受け入れテスト。
+//! の実装」）: `fandhe_ai_autodiff::nn::optim::AdamW` の受け入れテスト。
 //!
 //! 受け入れ条件「PyTorch AdamW と同一系列の更新値一致テストが green」
 //! の本体は [`adamw_matches_pytorch_reference`]。参照値は
@@ -21,13 +21,13 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 
-use autodiff::Tape;
-use autodiff::nn::Linear;
-use autodiff::nn::activation::Relu;
-use autodiff::nn::optim::{AdamW, AdamWConfig};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_autodiff::nn::Linear;
+use fandhe_ai_autodiff::nn::activation::Relu;
+use fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig};
+use fandhe_ai_tensor_core::Tensor;
 use serde::Deserialize;
-use tensor_core::Tensor;
 
 #[derive(Deserialize)]
 struct Fixture {

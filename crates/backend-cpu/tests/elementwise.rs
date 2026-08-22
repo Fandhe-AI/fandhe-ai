@@ -16,8 +16,8 @@
 //! （既存の配置規約どおり）。本ファイルには公開 API のみで組み立てられる
 //! 統合テストとして `mul` の非 contiguous view 一致テストを追加する。
 
-use backend_cpu::{add, exp, mul, relu, tanh};
-use tensor_core::Tensor;
+use fandhe_ai_backend_cpu::{add, exp, mul, relu, tanh};
+use fandhe_ai_tensor_core::Tensor;
 
 #[test]
 fn add_matches_expected_values() {
@@ -118,7 +118,7 @@ fn add_incompatible_shapes_returns_broadcast_incompatible() {
     let err = add(&a, &b).unwrap_err();
     assert!(matches!(
         err,
-        tensor_core::ShapeError::BroadcastIncompatible { .. }
+        fandhe_ai_tensor_core::ShapeError::BroadcastIncompatible { .. }
     ));
 }
 

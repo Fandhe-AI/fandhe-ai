@@ -6,19 +6,20 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 
 ## このライブラリの構成
 
-内部は 10 個のクレートに分かれていますが、利用者が直接触れるのは `facade`
+内部は 10 個のクレートに分かれていますが、利用者が直接触れるのは `fandhe-ai`
 クレートだけです。
 
 | クレート | 役割 |
 |---|---|
-| `facade` | **唯一のサポートされる公開 API 面**。composition root（`Device` → バックエンドの結線）と compat 公開面（`compat::array`／`compat::Sequential`）を提供します |
-| `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal` | 内部クレート。直接利用はサポート対象外です |
+| `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`Device` → バックエンドの結線）と compat 公開面（`compat::array`／`compat::Sequential`）を提供します |
+| `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
 | `onnx-interop`・`guardrail`・`self-repair`・`bench-harness` | 相互運用・自己修復ループ・ベンチ計測を担う内部クレート |
 
-`tensor-core`／`autodiff`／`backend-*` の型・関数は Rust の可視性としては
-`pub` な箇所がありますが、サポート境界上は内部 API です。利用者が使うことを
-想定する入口は `facade::tape()`／`facade::tape_for(Device)` と
-`facade::compat::{array, Sequential}` のみです。
+`fandhe-ai-tensor-core`／`fandhe-ai-autodiff`／`fandhe-ai-backend-*` の型・
+関数は Rust の可視性としては `pub` な箇所がありますが、サポート境界上は
+内部 API です。利用者が使うことを想定する入口は `fandhe_ai::tape()`／
+`fandhe_ai::tape_for(Device)` と `fandhe_ai::compat::{array, Sequential}`
+のみです。
 
 ## バックエンド
 

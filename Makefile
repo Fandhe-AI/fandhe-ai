@@ -127,7 +127,7 @@ endif
 .PHONY: test-ignored-cuda
 test-ignored-cuda: ## CUDA 実機専用: backend-cuda の #[ignore] 分離テストを実行する（release）
 ifdef HAS_CARGO
-	cargo test -p backend-cuda --release --all-features -- --ignored --nocapture
+	cargo test -p fandhe-ai-backend-cuda --release --all-features -- --ignored --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-cuda をスキップ"
 endif
@@ -139,7 +139,7 @@ endif
 .PHONY: test-ignored-metal
 test-ignored-metal: ## Metal 実機専用: backend-metal の #[ignore] 分離テストを実行する（release）
 ifdef HAS_CARGO
-	cargo test -p backend-metal --release -- --ignored --nocapture
+	cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 else
 	@echo "skip: Cargo.toml 未追加のため test-ignored-metal をスキップ"
 endif
@@ -188,14 +188,14 @@ endif
 # 必要）を引き込み、macOS クロスコンパイラ非搭載の Linux CI runner（実測当時は
 # self-hosted。#457 で GitHub ホステッドへ移行済みだが技術的前提は不変）では
 # `cc: error: unrecognized command-line option '-arch'` で失敗することを実測済みのため
-# 採用しない（`-p backend-metal --tests` に限定すれば bench-harness は
+# 採用しない（`-p fandhe-ai-backend-metal --tests` に限定すれば bench-harness は
 # `[dependencies]`（criterion を含まない）としてのみ解決され、この失敗を回避できる。
 # `cargo check` はリンクを行わないため macOS SDK 非搭載でも成立する）。
 .PHONY: check-cross-metal-tests
 check-cross-metal-tests: ## backend-metal の #[ignore] テストを aarch64-apple-darwin で型検査する
 ifdef HAS_CARGO
 	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
-	cargo check -p backend-metal --tests --target aarch64-apple-darwin
+	cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin
 else
 	@echo "skip: Cargo.toml 未追加のため check-cross-metal-tests をスキップ"
 endif
@@ -207,13 +207,13 @@ endif
 # check-cross-metal-tests と同じ手法（`--tests` で `cfg(test)` を有効化した状態のまま
 # aarch64-apple-darwin へクロス型検査）で `sysctl_ffi` を継続的コンパイル検証の対象に
 # 含める。criterion → alloca 問題は check-cross-metal-tests と同じ理由で
-# `-p backend-cpu --tests` への限定で回避する（`cargo check` はリンクを行わないため
+# `-p fandhe-ai-backend-cpu --tests` への限定で回避する（`cargo check` はリンクを行わないため
 # macOS SDK 非搭載でも成立する）。
 .PHONY: check-cross-cpu-tests
 check-cross-cpu-tests: ## backend-cpu の cfg(test) 限定コード（sysctl_ffi 等）を aarch64-apple-darwin で型検査する
 ifdef HAS_CARGO
 	rustup target list --installed | grep -qx 'aarch64-apple-darwin' || rustup target add aarch64-apple-darwin
-	cargo check -p backend-cpu --tests --target aarch64-apple-darwin
+	cargo check -p fandhe-ai-backend-cpu --tests --target aarch64-apple-darwin
 else
 	@echo "skip: Cargo.toml 未追加のため check-cross-cpu-tests をスキップ"
 endif

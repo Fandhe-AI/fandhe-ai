@@ -40,7 +40,7 @@
 //! `cfg(target_os = "macos")` を付けず、Linux（CI・本実装環境）でも単体テストが回る。
 //!
 //! TASK-1.9a（#44）で [`device`] モジュール（[`device::MetalDeviceProvider`]）を追加した。
-//! `tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
+//! `fandhe_ai_tensor_core::device::DeviceProvider` の Metal 実装であり、CPU／CUDA 実装
 //! （`backend-cpu::CpuDeviceProvider`／`backend-cuda::device::CudaDeviceProvider`）と
 //! 同一 trait で列挙・選択できることを macOS 実機上のテストで検証する。`Device::Metal`
 //! 自体が `cfg(target_os = "macos")` 限定のため、本モジュールもクレート全体でこの cfg を
@@ -55,14 +55,14 @@
 //! `cfg(target_os = "macos")` を付けない（[`pad`] と同じ設計判断。Linux でも単体テストが回る）。
 //!
 //! TASK-1.9b（#45）で [`memory`] モジュール（[`memory::MetalMemory`]）を追加した。
-//! `tensor_core::buffer::MemoryOps` の Metal 実装であり、新規 `unsafe` を追加せず
+//! `fandhe_ai_tensor_core::buffer::MemoryOps` の Metal 実装であり、新規 `unsafe` を追加せず
 //! 既存の [`buffer::MetalBuffer`]（`new_with_data`／`new_zeroed`／`read_to_vec`）を
 //! そのまま再利用する。`StorageModeShared`（UMA）のため CUDA のような明示同期は
 //! 不要（`memory.rs` モジュールコメント参照）。
 //!
 //! TASK-11.2b（#68）で GEMM 自動経路選択入口
 //! （[`gemm::MetalGemm::dispatch_backend_auto`]）を追加した。
-//! `tensor_core::dispatch::select_gemm_kernel`（#67 が設計した決定的規則。
+//! `fandhe_ai_tensor_core::dispatch::select_gemm_kernel`（#67 が設計した決定的規則。
 //! `docs/dispatch-rules-design.md`）が返す経路に従い、`simdgroup_matrix`
 //! （[`gemm::MetalGemm::dispatch_auto`] 経由）／tiled／naive を呼び分ける。
 //! 判定材料となる `MTLDevice::supportsFamily(MTLGPUFamily::Apple7)` は
@@ -73,10 +73,10 @@
 //! §5.4）。
 //!
 //! TASK-1.9c（#46）で [`ops`] モジュール（[`ops::MetalBackendOps`]）を追加した。
-//! `tensor_core::backend_ops::BackendOps` の Metal 実装であり、`gemm` は
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps` の Metal 実装であり、`gemm` は
 //! [`gemm::MetalGemm::dispatch_auto`]（実装済みの動的タイル選択）へ委譲する。
 //! elementwise・reduction は GPU カーネル未実装のため
-//! `tensor_core::device::BackendError::Unsupported` を返す
+//! `fandhe_ai_tensor_core::device::BackendError::Unsupported` を返す
 //! （out-of-scope-tracking.md 対象）。`device` モジュールと同じく
 //! `cfg(target_os = "macos")` 限定。
 //!
@@ -214,7 +214,7 @@ pub mod rmsnorm;
 // `cfg(target_os = "macos")` を付けず Linux でも単体テストが回る。
 // ただし `pad`／`tile` と異なり `row_kernel` は経路選択・occupancy 定数・
 // 起動検証エラー・canonical FusionPlan 照合などバックエンド内部実装の
-// 密度が高いため、`pub`（クレート外部から `backend_metal::row_kernel::*`
+// 密度が高いため、`pub`（クレート外部から `fandhe_ai_backend_metal::row_kernel::*`
 // として到達可能）にはせず `pub(crate)` を維持する（codex-review P1
 // 指摘・PR #714）。実際の呼び出し元（`ops.rs`／`rmsnorm.rs`／
 // `softmax.rs`）は macOS 限定のため、Linux 単体ビルド（`cargo build`／

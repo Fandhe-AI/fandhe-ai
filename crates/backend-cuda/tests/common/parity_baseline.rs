@@ -4,13 +4,13 @@
 //! # 位置づけ
 //!
 //! `wmma_tf32`・`wmma_tf32_opt`・`mma_f16` 系経路は REQ-2 統一複合判定
-//! （`backend_cpu::RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）で恒常
+//! （`fandhe_ai_backend_cpu::RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）で恒常
 //! fail の既知状態にある（#186 由来。`docs/backend-cuda-real-device-testing.md`
 //! §5.3 に実測記録済み）。以降の Phase B/C カーネル改修は「parity green」を
 //! 受け入れ条件にできないため、本モジュールは「fail 比率・平均絶対誤差が
 //! 記録済みベースラインを上回らない」ことを機械検査する**非後退契約**を提供
 //! する。判定式・閾値定数（`RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD`）
-//! 自体は一切変更しない（`backend_cpu::parity` を単に呼ぶだけで複製しない）。
+//! 自体は一切変更しない（`fandhe_ai_backend_cpu::parity` を単に呼ぶだけで複製しない）。
 //!
 //! ## 承認記録（PR #640 codex-review 指摘対応）
 //!
@@ -58,7 +58,7 @@ pub enum ParityPath {
     /// cp.async 16 バイト整列条件（`n%4==0 && k%4==0`）を満たす形状では
     /// staged 経路を最優先で選ぶ（`gemm.rs::run_wmma_tf32` 3 段選択）ため、
     /// 公開 API 経由では opt カーネル単独を強制実行できない形状が生じた。
-    /// この行の非後退検査は公開 API を経由せず、`backend_cuda::gemm::tests::
+    /// この行の非後退検査は公開 API を経由せず、`fandhe_ai_backend_cuda::gemm::tests::
     /// wmma_tf32_opt_kernel_parity_does_not_regress`（`src/gemm.rs` 内の
     /// ライブラリ単体テスト。private field `CudaGemm::wmma_tf32_opt`・
     /// private fn `run_wmma_tf32_opt_kernel` へ同一モジュール内から直接
@@ -72,9 +72,9 @@ pub enum ParityPath {
     /// 512×512×4096）しか検査しない。opt カーネル固有のタイル境界
     /// （ブロックタイル倍数・非倍数境界・非正方・極小）を網羅する検査は、
     /// 同じ private field 経由アクセスで CPU 参照実装と直接照合する
-    /// `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
+    /// `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_opt_kernel_matches_reference_across_shapes`・
     /// `wmma_tf32_opt_kernel_k4096_stress`（いずれも `src/gemm.rs`。
-    /// `assert_no_parity_regression` ではなく `backend_cpu::assert_parity`
+    /// `assert_no_parity_regression` ではなく `fandhe_ai_backend_cpu::assert_parity`
     /// を使う——未計測形状を `BASELINES` へ追加すると
     /// `baseline_provenance_unconfirmed: true` の fail-closed 契約により
     /// 無条件 panic になるため、この 2 テストは本 fixture を経由しない）
@@ -151,7 +151,7 @@ pub struct ParityBaseline {
     /// だった）。`WmmaTf32`（基本版）行は記録元テストが opt カーネル
     /// 可用性を確認せず `run_wmma_tf32` を呼んだため、記録値が opt
     /// カーネルの実測結果である可能性が高く、基本版カーネル専用の実測経路
-    /// （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
+    /// （`fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
     /// `src/gemm.rs` 内のライブラリ単体テスト）と比較すると、カーネルが
     /// 異なり fail_count・mean_abs_diff の分布も異なるため、後退していない
     /// 変更を拒否する false-fail と、基本版の後退を見逃す false-pass の
@@ -186,7 +186,7 @@ pub static BASELINES: &[ParityBaseline] = &[
     // （DGX Spark GB10 実機では opt が概ね利用可能。
     // `docs/perf/cuda-parity-baseline.md` §3「既知の限界」参照）。基本版
     // カーネル専用の単体テスト
-    // （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
+    // （`fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`。
     // `src/gemm.rs`）による非後退検査との比較でこの provenance 不確実性を
     // 認識したうえで扱うこと。実機再測定でのみ解消可能（推定値での上書きは
     // しない）。
@@ -231,7 +231,7 @@ pub static BASELINES: &[ParityBaseline] = &[
     // opt 可用性さえ確認すれば `run_wmma_tf32` が実際に opt 経路を通ったが、
     // #500 以降 `run_wmma_tf32` は整列形状で staged を最優先するため、この
     // 記録値の非後退検査は公開 API 経由では行わない（PR #678 codex-review
-    // P1 指摘対応）: `backend_cuda::gemm::tests::
+    // P1 指摘対応）: `fandhe_ai_backend_cuda::gemm::tests::
     // wmma_tf32_opt_kernel_parity_does_not_regress`（`src/gemm.rs`）が
     // private field 経由で opt カーネルを直接強制実行して検査する
     // （`ParityPath::WmmaTf32Opt` ドキュメンテーションコメント参照）。
@@ -333,7 +333,7 @@ pub static BASELINES: &[ParityBaseline] = &[
 
 /// 非後退判定: `report` がベースラインを上回っていないことを assert する。
 ///
-/// `backend_cpu::compare` が返す `CompareReport` をそのまま使い、判定式
+/// `fandhe_ai_backend_cpu::compare` が返す `CompareReport` をそのまま使い、判定式
 /// （複合判定の合否）を複製・改変しない（`.claude/rules/security.md` A08
 /// 「判定の迂回経路を作らない」）。
 ///
@@ -346,7 +346,7 @@ pub static BASELINES: &[ParityBaseline] = &[
 ///
 /// # Panics
 ///
-/// いずれかの検査に失敗した場合、`backend_cpu::assert_parity` と同水準の
+/// いずれかの検査に失敗した場合、`fandhe_ai_backend_cpu::assert_parity` と同水準の
 /// 診断情報（fail_count・mean_abs_diff 等の分布統計）を付けて panic する。
 /// `baseline.baseline_provenance_unconfirmed == true` の場合は上記 3 点の
 /// 比較を行わず、実機再測定が必要である旨のメッセージで即座に panic する
@@ -357,7 +357,7 @@ pub static BASELINES: &[ParityBaseline] = &[
 #[track_caller]
 pub fn assert_no_parity_regression(
     context: &str,
-    report: &backend_cpu::CompareReport,
+    report: &fandhe_ai_backend_cpu::CompareReport,
     baseline: &ParityBaseline,
 ) {
     assert!(
@@ -412,13 +412,13 @@ pub fn assert_no_parity_regression(
 #[track_caller]
 pub fn assert_tolerance_constants_pinned() {
     assert_eq!(
-        backend_cpu::RELATIVE_TOLERANCE,
+        fandhe_ai_backend_cpu::RELATIVE_TOLERANCE,
         1e-3,
         "RELATIVE_TOLERANCE が無断変更されています（ガードレール閾値の変更は \
          ユーザー承認必須。.claude/rules/security.md A08）"
     );
     assert_eq!(
-        backend_cpu::ABSOLUTE_RESCUE_THRESHOLD,
+        fandhe_ai_backend_cpu::ABSOLUTE_RESCUE_THRESHOLD,
         1e-5,
         "ABSOLUTE_RESCUE_THRESHOLD が無断変更されています（ガードレール閾値の \
          変更はユーザー承認必須。.claude/rules/security.md A08）"

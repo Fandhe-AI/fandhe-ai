@@ -97,7 +97,7 @@ CUDA 比を**確定計測**し、`docs/perf/cuda-floor-remeasurement.md`（#157/
 
 性能値採用の前提ゲートとして、実機セッションは計測前に `docs/perf/cuda-gemm-mma-pipeline.md`「Phase B
 完了時点の再計測（#502）」節の手順 3 と同一コマンド
-（`cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`。
+（`cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1`。
 `--test-threads=1` は必須: `docs/perf/cuda-floor-remeasurement.md`「tiled f32 @4096 のバイナリ間乖離の
 突合結果」節が記録するとおり、同一バイナリ内 `#[test]` の並列実行は GPU 時間分割により計測値を約 5 倍
 歪ませた実績があるため）で parity テスト群を実行し、**非後退**（tolerance 定数不変・fail 比率/
@@ -138,7 +138,7 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$CUDA_NODE" \
 # 3. 数値一致確認を性能値採用より先に行う（非後退確認。既存 tolerance は緩和しない。
 #    --test-threads=1 は同一バイナリ内並列実行による GPU 時間分割歪みを避けるため必須。
 #    「数値一致（parity）確認」節参照）
-cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1
+cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1
 
 # 4. 同一実機で PyTorch 参照値を計 5 回計測する（size ∈ {512, 1024, 2048, 4096} × {f32, f16}）。
 #    リポジトリ規約「ベンチは 5 回計測の中央値」（coding-rust.md）に合わせ、PyTorch 参照値も
@@ -164,7 +164,7 @@ export CUDA_FLOOR_BENCH_PYTORCH_F16_512=<5 run 中央値>
 export CUDA_FLOOR_BENCH_PYTORCH_F16_1024=<5 run 中央値>
 export CUDA_FLOOR_BENCH_PYTORCH_F16_2048=<5 run 中央値>
 export CUDA_FLOOR_BENCH_PYTORCH_F16_4096=<5 run 中央値>
-cargo run -p backend-cuda --example cuda_floor_bench --release --locked
+cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked
 # ↑ を 5 回反復実行し、経路×形状のセルごとに run1〜run5 の median_tflops を独立に中央値化した
 #   ものを代表値として下表へ機械転記する（stdout からの転記のみ。後付け調整は行わない）
 ```
@@ -320,7 +320,7 @@ TFLOPS・run2）= **37.47%**（丸め後 floor **35**）である。
 ## 数値一致（parity）状態の限定条件
 
 `docs/perf/cuda-gemm-mma-pipeline.md`「Phase B 完了時点の再計測（#502）」節の手順 3 と同一コマンド
-（`cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`。debug/release
+（`cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1`。debug/release
 両プロファイルで実行し同一結果を確認）を実行した結果、`parity_baselines_do_not_regress` は
 `wmma_tf32_staged 512×512×4096 seed=0xC0FFEE` の 1 件（`WmmaTf32Staged` 行を検査する内部ヘルパー
 `check_wmma_tf32_staged_baseline`）で FAIL した（`MmaF16` 行は同じテスト内で検査され pass。下記表参照）。
@@ -372,8 +372,8 @@ staged 行固有の理由ではない。staged 行が未確定な実際の理由
 `wmma_tf32` opt）ではなく区分 2（判定不能）の経路の実測値である。後続課題は「未実施・後続作業」節へ
 申し送る。
 
-本セッションで実行した parity 系テスト全体（`parity_nonregression`・`cargo test -p backend-cuda --lib
--- --ignored`・`cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored`）の結果を、各テスト
+本セッションで実行した parity 系テスト全体（`parity_nonregression`・`cargo test -p fandhe-ai-backend-cuda --lib
+-- --ignored`・`cargo test -p fandhe-ai-backend-cuda --test cpu_cuda_mma_parity -- --ignored`）の結果を、各テスト
 が実際に比較する対象（正本ベースラインとの相対比較 `assert_no_parity_regression` か、REQ-2 tolerance
 との絶対比較 `backend_cpu::assert_parity` か）に基づき 3 区分に分けて整理する:
 
@@ -461,14 +461,14 @@ PyTorch 参照値計測スクリプト（`gemm_bench_torch_cuda.py`）は Mac �
 - `cargo build --workspace --locked` — `cudarc` 動的ロード契約（CUDA toolkit 非搭載環境でもビルド成立
   する。`.claude/rules/coding-rust.md`）を崩していないことを確認済み（実機は CUDA 13.0 搭載のため本
   確認は Linux worktree 側の当初整備セッションの結果を踏襲）
-- `cargo build -p backend-cuda --example cuda_floor_bench --release` — example のビルド成立（無変更）
-- `cargo test -p backend-cuda --test parity_nonregression -- --ignored --test-threads=1`（debug/release
-  両方）・`cargo test -p backend-cuda --lib -- --ignored`・
-  `cargo test -p backend-cuda --test cpu_cuda_mma_parity -- --ignored` — 既知 fail のみで新規 fail は
+- `cargo build -p fandhe-ai-backend-cuda --example cuda_floor_bench --release` — example のビルド成立（無変更）
+- `cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1`（debug/release
+  両方）・`cargo test -p fandhe-ai-backend-cuda --lib -- --ignored`・
+  `cargo test -p fandhe-ai-backend-cuda --test cpu_cuda_mma_parity -- --ignored` — 既知 fail のみで新規 fail は
   ない。非後退の判定可否は経路別（上記「数値一致（parity）状態の限定条件」節の 3 区分）に従う——
   `wmma_tf32` opt・`mma_f16` は後退なしを確認できたが、`wmma_tf32`（基本版）・`wmma_tf32_staged`
   （f32 候補下限の実測経路）は `baseline_provenance_unconfirmed` により判定不能
-- `cargo run -p backend-cuda --example cuda_floor_bench --release --locked` を計 5 回実行（生ログ
+- `cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release --locked` を計 5 回実行（生ログ
   `floor_bench_run{1..5}.log`）
 - `git diff 86e7e7e..abaa94e -- crates/backend-cuda/src crates/backend-cuda/tests/common crates/bench-harness`
   が tolerance 定数（`RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`）・parity fixture・`FloorSpec`・

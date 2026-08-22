@@ -28,12 +28,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::onnx::graph::build_graph;
 use onnx_interop::onnx::interp::{Value, run};
 use onnx_interop::onnx::proto::ModelProto;
 use prost::Message;
 use serde::Deserialize;
-use tensor_core::Tensor;
 
 /// `reference.json` のうち本テストが使う部分のみを deserialize する。
 /// `config` 等の付随メタデータ（onnxruntime セルフチェック値含む）は

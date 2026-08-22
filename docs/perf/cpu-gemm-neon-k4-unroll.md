@@ -68,7 +68,7 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
   短時間ではあるが 32 本を超えうる（スピルの恐れ。イシュー #561 の実装計画 §3.3 で事前に
   想定済みのリスク）。この懸念は「コンパイル済み機械語にスピル命令（NEON ベクタレジスタの
   スタック退避 `str`／`stur` の `[sp, ...]` オペランド）が存在するか」で実機なしに判定
-  できる。`cargo build -p backend-cpu --release --target aarch64-unknown-linux-gnu` の成果物
+  できる。`cargo build -p fandhe-ai-backend-cpu --release --target aarch64-unknown-linux-gnu` の成果物
   （`target/aarch64-unknown-linux-gnu/release/libbackend_cpu.rlib`）を
   `llvm-objdump --disassemble-symbols=<mangled `neon::kernel`>` で逆アセンブルし確認した:
   主ループ（アドレス `0x94`〜`0x34c`。逆方向分岐 `b.lo 0x94` で確認できるループ本体）は
@@ -88,18 +88,18 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
 |---|---|---|
 | フォーマット | `cargo fmt --all` | 差分なし（PostToolUse hook 自動適用込み） |
 | lint（x86_64） | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 警告なし |
-| NEON クロス型検査 | `cargo check -p backend-cpu --target aarch64-unknown-linux-gnu` | 成功 |
-| NEON クロス型検査 | `cargo check -p backend-cpu --target aarch64-apple-darwin` | 成功 |
-| NEON クロス型検査（テスト込み） | `cargo check -p backend-cpu --target aarch64-unknown-linux-gnu --tests` | 成功 |
-| NEON クロス clippy | `cargo clippy -p backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
-| NEON レジスタスピル静的検査 | `cargo build -p backend-cpu --release --target aarch64-unknown-linux-gnu` 後 `llvm-objdump --disassemble-symbols=<mangled symbol>` で `neon::kernel` を逆アセンブルし主ループ内 `[sp` 参照を検査 | 主ループ（`fmla` 96 個）内に `[sp` 参照 0 件（スピルなし） |
+| NEON クロス型検査 | `cargo check -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu` | 成功 |
+| NEON クロス型検査 | `cargo check -p fandhe-ai-backend-cpu --target aarch64-apple-darwin` | 成功 |
+| NEON クロス型検査（テスト込み） | `cargo check -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu --tests` | 成功 |
+| NEON クロス clippy | `cargo clippy -p fandhe-ai-backend-cpu --target aarch64-unknown-linux-gnu --all-targets -- -D warnings` | 警告なし |
+| NEON レジスタスピル静的検査 | `cargo build -p fandhe-ai-backend-cpu --release --target aarch64-unknown-linux-gnu` 後 `llvm-objdump --disassemble-symbols=<mangled symbol>` で `neon::kernel` を逆アセンブルし主ループ内 `[sp` 参照を検査 | 主ループ（`fmla` 96 個）内に `[sp` 参照 0 件（スピルなし） |
 | リグレッション | `cargo test --workspace` | 全 pass。`SHAPE_GRID_K` へ追加した k=2/4/6 は x86_64 では scalar/AVX2/AVX-512 経路（`gemm_naive` との bit 完全一致検証）を通じて実行済み。`neon_8x12_and_12x8_match_scalar_forced_bit_exact`（`#[cfg(target_arch = "aarch64")]` 限定の lib テスト）のみコンパイル対象外のため x86_64 側では実行されない（NEON 経路の実行検証は下記「未実測」節） |
 
 ## 未実測（fail-closed・後続セッションへの引き継ぎ事項）
 
 以下 2 項目は受け入れ基準だが、本セッションでは aarch64 実機に到達できないため未実施:
 
-1. **bit 完全一致**: `cargo test -p backend-cpu --release --test gemm_blis_parity`
+1. **bit 完全一致**: `cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_parity`
    （拡張後の `SHAPE_GRID_K = [1, 2, 3, 4, 6, 255, 257, 700]` を含む）および
    `neon_8x12_and_12x8_match_scalar_forced_bit_exact`（lib 単体テスト。k=700〜703 反復）を
    aarch64 実機（M4 Max または Grace CPU）で実行する。aarch64 では `Isa::detect` が無条件に
@@ -120,12 +120,12 @@ Grace CPU）でのみ有効という前提のもと、実装セッション開�
    # 変更前（82d86e1）
    git worktree add /tmp/neon-k4-baseline 82d86e1
    cd /tmp/neon-k4-baseline
-   cargo test -p backend-cpu --release --lib \
+   cargo test -p fandhe-ai-backend-cpu --release --lib \
      -- --ignored neon_8x12_vs_12x8_ab_median_throughput --nocapture
 
    # 変更後（本 PR HEAD）
    cd <本リポジトリの作業ブランチ>
-   cargo test -p backend-cpu --release --lib \
+   cargo test -p fandhe-ai-backend-cpu --release --lib \
      -- --ignored neon_8x12_vs_12x8_ab_median_throughput --nocapture
    ```
 

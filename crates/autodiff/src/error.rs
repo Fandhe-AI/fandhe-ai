@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use tensor_core::ShapeError;
+use fandhe_ai_tensor_core::ShapeError;
 
 /// `autodiff` の公開 API が返すエラー型。
 ///
@@ -58,10 +58,10 @@ pub enum AutodiffError {
     InvalidArgument(String),
     /// 融合実行・実体化（TASK-12.1d・#164。`materialize_fallible`。
     /// `tape.rs`）で発生した型付きバックエンドエラー。
-    /// `tensor_core::BackendError` をラップする（`docs/
+    /// `fandhe_ai_tensor_core::BackendError` をラップする（`docs/
     /// fusion-graph-design.md` §3.5.2「層 1 は `Unsupported` 以外の
     /// `run_fused` の失敗をフォールバックせずそのまま伝播する」）。
-    Backend(tensor_core::BackendError),
+    Backend(fandhe_ai_tensor_core::BackendError),
 }
 
 impl From<ShapeError> for AutodiffError {
@@ -70,8 +70,8 @@ impl From<ShapeError> for AutodiffError {
     }
 }
 
-impl From<tensor_core::BackendError> for AutodiffError {
-    fn from(err: tensor_core::BackendError) -> Self {
+impl From<fandhe_ai_tensor_core::BackendError> for AutodiffError {
+    fn from(err: fandhe_ai_tensor_core::BackendError) -> Self {
         AutodiffError::Backend(err)
     }
 }

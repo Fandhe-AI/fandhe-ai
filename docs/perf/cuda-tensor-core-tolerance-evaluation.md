@@ -32,7 +32,7 @@ TF32 側 (1,1,1)・f16 側 (17,19,23) の追加）・`CompareReport` への `max
 | compute capability | 8.6（Ampere。TF32〈cc 8.0+〉・f16 WMMA〈cc 7.0+〉の両経路の実測要件を満たす） |
 | driver | 595.71.05（`CUDA Version: 13.2` 表示） |
 | rustc | 1.96.0 (ac68faa20 2026-05-25) |
-| ビルド条件 | `cargo build --release -p backend-cuda --example wmma_tolerance_probe` |
+| ビルド条件 | `cargo build --release -p fandhe-ai-backend-cuda --example wmma_tolerance_probe` |
 | 計測バイナリ | `crates/backend-cuda/examples/wmma_tolerance_probe.rs`（TASK-11.1g で新規追加。#186 Review 対応で形状・出力列を拡充） |
 | 決定的シード | 形状ごとに 5 シード（1〜5）。`bench_harness::rng::Xorshift64Star` |
 | 決定性確認 | 同一バイナリ・同一環境変数で 2 回実行し stdout の完全一致（`diff` 差分なし、exit code 0）を確認済み |
@@ -68,7 +68,7 @@ cp -r <SCRATCH>/deb-extract/usr/local/cuda-13.1/targets/x86_64-linux/include/crt
 export LD_LIBRARY_PATH=<SCRATCH>/pylibs/nvidia/cu13/lib:$LD_LIBRARY_PATH
 export CUDA_INCLUDE_PATH=<SCRATCH>/pylibs/nvidia/cu13/include
 
-cargo build --release -p backend-cuda --example wmma_tolerance_probe
+cargo build --release -p fandhe-ai-backend-cuda --example wmma_tolerance_probe
 ./target/release/examples/wmma_tolerance_probe   # ビルドと同じ env が有効なシェルで実行する
 ```
 
@@ -319,7 +319,7 @@ GEMM の絶対誤差は入力のスケール `s`（両行列を `s` 倍した場
 本イシュー着手時点で `make test-ignored-cuda` 相当（§1 の NVRTC プロビジョニング環境）を実行した結果:
 
 ```
-$ cargo test -p backend-cuda --test gemm_wmma_tf32 -- --ignored --test-threads=1
+$ cargo test -p fandhe-ai-backend-cuda --test gemm_wmma_tf32 -- --ignored --test-threads=1
 test wmma_tf32_zero_k_returns_all_zero ... ok
 test wmma_tf32_zero_dim_shape_returns_empty_without_launch ... ok
 test wmma_tf32_matches_reference_across_shapes ... FAILED（shape m=32 n=32 k=32:
@@ -327,7 +327,7 @@ test wmma_tf32_matches_reference_across_shapes ... FAILED（shape m=32 n=32 k=32
 test wmma_tf32_k4096_stress_poc_v2_5 ... FAILED（256x256x4096:
   複合判定 FAIL fail_count=10647/65536, max_abs_diff=2.312e-2, max_rel_err=1.910e0）
 
-$ cargo test -p backend-cuda --test cpu_cuda_wmma_parity -- --ignored --test-threads=1
+$ cargo test -p fandhe-ai-backend-cuda --test cpu_cuda_wmma_parity -- --ignored --test-threads=1
 test wmma_f16_matches_reference_across_shapes ... ok
 test wmma_f16_cross_check_against_naive_f16 ... ok
 test wmma_f16_k4096_stress ... FAILED（256x256x4096:

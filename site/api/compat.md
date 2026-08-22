@@ -1,8 +1,8 @@
 # compat API
 
-`facade::compat` は自作コア（`autodiff` の `Tape`／`Var`／`nn`）の上に
+`fandhe_ai::compat` は自作コア（`fandhe-ai-autodiff` の `Tape`／`Var`／`nn`）の上に
 被せた薄いラッパーです。数値ロジック・shape 検査は一切持ち込まず、
-`tensor-core::Tensor::new` や `autodiff::nn::Module` へ委譲します。
+`fandhe_ai_tensor_core::Tensor::new` や `fandhe_ai_autodiff::nn::Module` へ委譲します。
 
 対象レイヤーは Linear・ReLU・Sigmoid・Tanh の 4 種限定です。
 
@@ -11,7 +11,7 @@
 numpy `np.array` 慣習でテンソルを組み立てます。
 
 ```rust
-use facade::compat::array;
+use fandhe_ai::compat::array;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1-D: `Vec<f32>` → shape [n]
@@ -57,18 +57,18 @@ Keras `Sequential` 慣習でレイヤーを積み上げるビルダーです。`
 | `trainable_grads(&grads)` | `Tape::backward` の結果から同じ順序で勾配参照列を取得する |
 
 `Sequential::trainable_parameters()` / `Sequential::apply_parameters(updated)`
-と組み合わせることで、`autodiff::optim::Sgd` や `autodiff::nn::optim::AdamW`
+と組み合わせることで、`fandhe_ai_autodiff::optim::Sgd` や `fandhe_ai_autodiff::nn::optim::AdamW`
 の位置対応契約にそのまま渡せます。`apply_parameters` は shape を変えない
 更新専用の契約であり、層幅を変えるリサイズ用途はサポート対象外です。
 
-### `facade::Tape` newtype について
+### `fandhe_ai::Tape` newtype について
 
-`Sequential::forward`／`Sequential::bind` はいずれも `autodiff::Tape` では
-なく `facade::Tape`（`facade` 側の newtype）を引数に取ります。これは
-`facade` が任意の `BackendOps` 実装を注入できる公開 API をあえて設けない
+`Sequential::forward`／`Sequential::bind` はいずれも `fandhe_ai_autodiff::Tape` では
+なく `fandhe_ai::Tape`（`fandhe-ai` 側の newtype）を引数に取ります。これは
+`fandhe-ai` が任意の `BackendOps` 実装を注入できる公開 API をあえて設けない
 という設計判断（サポート境界の一部）によるもので、`Tape` は
 `var`／`backward` の 2 メソッドのみを公開しています。`Tape` を構築できる
-のは `facade::tape()` / `facade::tape_for(Device)` だけです。
+のは `fandhe_ai::tape()` / `fandhe_ai::tape_for(Device)` だけです。
 
 コード例・動作確認済みの一次ソースは
 [Getting Started](/getting-started/) を参照してください。

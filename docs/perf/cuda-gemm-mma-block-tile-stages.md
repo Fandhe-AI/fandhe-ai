@@ -167,7 +167,7 @@ registers/thread）は 128×512=65,536 とちょうど境界値に収まり `blo
 
 ## 4.1 A/B 実測（5 回計測。イシュー #840）
 
-`cargo run -p backend-cuda --example gemm_mma_block_tile_bench --release
+`cargo run -p fandhe-ai-backend-cuda --example gemm_mma_block_tile_bench --release
 --features internal-diagnostics` を **5 回**プロセス起動した（計測前後の
 GPU 占有状況: `nvidia-smi --query-gpu=utilization.gpu` は 5 run 通じて
 `0 %`、`--query-compute-apps` は `comfyui-env`〈170MiB〉・`kokoro`〈870MiB〉の
@@ -361,7 +361,7 @@ design.md` の役割分担を踏襲）。
 release ビルド・**5 回プロセス起動**した。
 
 - **実機 parity ゲート（#807 契約。性能値採用に先立ち実施）**:
-  `cargo test -p backend-cuda --features internal-diagnostics --test
+  `cargo test -p fandhe-ai-backend-cuda --features internal-diagnostics --test
   gemm_mma --test cpu_cuda_mma_parity --test parity_nonregression
   --no-fail-fast -- --ignored --test-threads=1` を debug/release 両
   プロファイルで実行。既知 fail `mma_f16_k4096_stress`

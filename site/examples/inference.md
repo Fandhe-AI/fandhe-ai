@@ -2,7 +2,7 @@
 
 `compat::Sequential` による推論の 2 経路を示す最小例です。
 
-- **経路 1（`Sequential::predict`）**: 内部で `facade::tape()`
+- **経路 1（`Sequential::predict`）**: 内部で `fandhe_ai::tape()`
   （composition root。既定 CPU・`CpuBackendOps`・融合有効）を構築して
   forward するだけの 1 ステップ呼び出し。最も簡単な推論入口です。
 - **経路 2（外部 `Tape` + `Sequential::forward` + `Var::to_tensor`）**:
@@ -10,7 +10,7 @@
   計算グラフを自分で組みたい場合等）向けです。
 
 ```rust
-use facade::compat::{Sequential, array};
+use fandhe_ai::compat::{Sequential, array};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model = Sequential::new()
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("predict() output[0, 0] = {predicted_00}");
 
     // 経路 2: 外部 Tape + forward + to_tensor。
-    let tape = facade::tape();
+    let tape = fandhe_ai::tape();
     let input_var = tape.var(&input);
     let output_var = model.forward(&tape, &input_var)?;
     let output = output_var.to_tensor();
@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 このコードブロックは `crates/facade/examples/inference.rs` の実行
 コード部分（冒頭のモジュールドキュメンテーションコメントを除く `use`
-以降）と同一です（`cargo run -p facade --example inference` で実行
+以降）と同一です（`cargo run -p fandhe-ai --example inference` で実行
 確認済み。出力は次の 4 行）。
 
 ```
@@ -101,6 +101,6 @@ predict() と forward() の出力はビット一致: true
 同一演算列である限り環境非依存で成立します。）
 
 2 経路が同一出力になるのは、`Sequential::predict` が内部で
-`facade::tape()` を構築して `forward` を呼ぶだけの薄いラッパーである
+`fandhe_ai::tape()` を構築して `forward` を呼ぶだけの薄いラッパーである
 ためです（`crates/facade/src/compat/sequential.rs` の
 `Sequential::predict` ドキュメンテーションコメント参照）。

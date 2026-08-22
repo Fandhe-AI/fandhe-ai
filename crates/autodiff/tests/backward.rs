@@ -19,8 +19,8 @@
 
 mod common;
 
-use autodiff::{AutodiffError, Tape};
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::{AutodiffError, Tape};
+use fandhe_ai_tensor_core::Tensor;
 
 fn t(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")

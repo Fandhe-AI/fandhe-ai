@@ -3,11 +3,11 @@
 //! Transformer の Attention 計算（`Q @ K^T`・`softmax(...) @ V`）はバッチ・ヘッド軸を
 //! 持つ 3〜4 次元テンソル同士の行列積を要求するため、`Gemm`（2 次元専用。TASK-7.2c）
 //! とは別関数として提供する。末尾 2 軸を行列積対象とし、それより前の軸は NumPy 互換
-//! ブロードキャスト（`tensor_core::broadcast_shape`）でバッチ次元を揃える。
+//! ブロードキャスト（`fandhe_ai_tensor_core::broadcast_shape`）でバッチ次元を揃える。
 //! 内積の累積は丸め方針（FMA 契約）統一方針（`.claude/rules/coding-rust.md`）に従い
 //! `f32::mul_add` を用いる（`gemm.rs` と同一方針）。
 
-use tensor_core::{Tensor, broadcast_shape};
+use fandhe_ai_tensor_core::{Tensor, broadcast_shape};
 
 use super::error::OpError;
 

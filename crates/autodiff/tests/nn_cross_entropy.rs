@@ -53,10 +53,10 @@
 
 mod common;
 
-use autodiff::{AutodiffError, Tape};
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::{AutodiffError, Tape};
+use fandhe_ai_tensor_core::Tensor;
 
-use autodiff::nn::loss::{CrossEntropyLoss, Reduction};
+use fandhe_ai_autodiff::nn::loss::{CrossEntropyLoss, Reduction};
 
 // 承認済み複合判定（`.claude/rules/coding-rust.md`）: 相対誤差 1e-3
 // 未満または絶対誤差 1e-5 未満。
@@ -510,7 +510,7 @@ fn errors_for_rank0_logits() {
 
 #[test]
 fn end_to_end_linear_then_cross_entropy_backward_reaches_all_params() {
-    let linear = autodiff::nn::Linear::new(3, 4, true, 42).unwrap();
+    let linear = fandhe_ai_autodiff::nn::Linear::new(3, 4, true, 42).unwrap();
     let tape = Tape::new_with_ops(common::naive_ops());
     let vars = linear.bind(&tape);
 

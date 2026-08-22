@@ -4,14 +4,14 @@
 //! `tests/cpu_cuda_wmma_parity.rs`（#61）と同じ方針・同じ複合判定例外
 //! （WMMA f16 経路は #61 の受け入れ条件により複合判定〈1e-3/1e-5〉の対象。
 //! 本ファイル冒頭コメント参照元の説明をそのまま踏襲する）。判定は
-//! `backend_cpu::assert_parity` に一本化し閾値をローカル複製しない。
+//! `fandhe_ai_backend_cpu::assert_parity` に一本化し閾値をローカル複製しない。
 //!
 //! **公開 API との関係**: `CudaWmmaGemm::run_f16` は opt カーネルが
 //! `CudaWmmaGemm::new` 時点でコンパイル・ロードに成功していれば自動的に
 //! opt 経路を選ぶ（`gemm_wmma.rs` フォールバック方針。専用の切替 API は
 //! 存在しない）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaWmmaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaWmmaGemm};
 use half::f16;
 
 /// 決定的シードで A・B（f16）を生成し、f16→f32→参照 matmul→f16 丸め→f32 の
@@ -33,7 +33,7 @@ fn assert_wmma_f16_opt_parity(
     let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
     let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_f32,
         &b_f32,
         &mut c_ref_f32,
@@ -52,7 +52,7 @@ fn assert_wmma_f16_opt_parity(
         .expect("CudaWmmaGemm::run_f16 must succeed on CUDA-equipped test runner");
     let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
 
-    backend_cpu::assert_parity(context, &c_gpu_f32, &c_ref_rounded);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu_f32, &c_ref_rounded);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。

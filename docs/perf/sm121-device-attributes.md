@@ -29,7 +29,7 @@ DeepGEMM（`csrc/jit_kernels/heuristics/sm90.hpp`）が持つ SMEM 予算・L1/L
 `device_attributes_dump` の出力全文（生ログ）を実機セッションで回収し転記することで充足する。
 
 `docs/real-hardware-verification-env.md` の手順（`.rev-stamp` → rsync → SSH 実行 →
-`cargo run -p backend-cuda --example device_attributes_dump --release` → 出力回収）に従って実機実行し、
+`cargo run -p fandhe-ai-backend-cuda --example device_attributes_dump --release` → 出力回収）に従って実機実行し、
 残る「未実測」欄を埋めること。
 
 ### 動作検証（sm_121 ではない代替 CUDA GPU 上での機能確認。参考値・DGX Spark GB10 の代替ではない）

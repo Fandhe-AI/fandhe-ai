@@ -15,7 +15,7 @@
 
 #![cfg(test)]
 
-use tensor_core::{BackendError, BackendOps, Device, Tensor};
+use fandhe_ai_tensor_core::{BackendError, BackendOps, Device, Tensor};
 
 /// `eval.rs` の naive 参照実装へ委譲するテスト専用 `BackendOps`。
 /// `gemm`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` はいずれも
@@ -54,15 +54,15 @@ impl BackendOps for TestOps {
 
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         let shape = a.shape().to_vec();
-        let out_shape =
-            tensor_core::reduce_out_shape(&shape, dim).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = fandhe_ai_tensor_core::reduce_out_shape(&shape, dim)
+            .map_err(BackendError::ShapeMismatch)?;
         Ok(crate::eval::sum(a, dim, &out_shape))
     }
 
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         let shape = a.shape().to_vec();
-        let out_shape =
-            tensor_core::reduce_out_shape(&shape, dim).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = fandhe_ai_tensor_core::reduce_out_shape(&shape, dim)
+            .map_err(BackendError::ShapeMismatch)?;
         Ok(crate::eval::max(a, dim, &out_shape))
     }
 }

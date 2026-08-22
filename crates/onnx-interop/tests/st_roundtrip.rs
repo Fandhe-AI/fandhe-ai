@@ -20,9 +20,9 @@
 
 use std::collections::HashMap;
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::st_load::load_safetensors_f32_from_bytes;
 use onnx_interop::st_save::save_safetensors_f32_to_bytes;
-use tensor_core::Tensor;
 
 fn tensor(data: Vec<f32>, shape: &[usize]) -> Tensor<f32> {
     Tensor::new(data, shape).expect("test fixture: shape とデータ長は事前に一致させている")

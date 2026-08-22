@@ -7,18 +7,18 @@
 //! （`.claude/rules/coding-rust.md` の実機依存テスト分離規約）。
 //!
 //! 転置は演算を伴わない純置換（積和のような丸め誤差が入らない）ため、
-//! CPU 参照実装との照合は `backend_cpu::parity::assert_parity`（複合誤差
+//! CPU 参照実装との照合は `fandhe_ai_backend_cpu::parity::assert_parity`（複合誤差
 //! 判定）ではなく **bit 完全一致**（`assert_eq!`）で行う（実装計画 6.2 節
 //! 「転置は演算なしの純置換のため tolerance 不要。緩和なし」）。
 //!
 //! 実行コマンド（DGX Spark GB10 等 CUDA 実機。`#[ignore]` テストのみ）:
 //!
 //! ```sh
-//! cargo test -p backend-cuda --release --test transpose_parity -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-cuda --release --test transpose_parity -- --ignored --nocapture
 //! ```
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaTranspose};
 use bench_harness::rng::Xorshift64Star;
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, CudaTranspose};
 use half::f16;
 
 /// CPU 参照転置（f32）。`dst[col*m+row] = src[row*n+col]`。
@@ -187,7 +187,7 @@ fn tiled_transposed_f32_matches_host_transposed_tiled_and_cpu_reference() {
         // `tests/cpu_cuda_parity.rs` と同じ判定式は使わず、転置の
         // bit 完全一致という本テスト固有の主張に閉じる）。
         let mut c_cpu = vec![0.0f32; m * n];
-        backend_cpu::matmul_reference_fma(&a, &b, &mut c_cpu, m, n, k)
+        fandhe_ai_backend_cpu::matmul_reference_fma(&a, &b, &mut c_cpu, m, n, k)
             .expect("matmul_reference_fma must succeed for valid shapes");
         let c_cpu_transposed = cpu_transpose_f32(&c_cpu, m, n);
         assert_eq!(

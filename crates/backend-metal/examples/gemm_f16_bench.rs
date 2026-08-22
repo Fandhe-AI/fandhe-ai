@@ -43,7 +43,7 @@
 //! ## 実機実行手順（macOS・Apple Silicon）
 //!
 //! ```sh
-//! cargo run -p backend-metal --example gemm_f16_bench --release
+//! cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
 //! ```
 //!
 //! 実行前に数値一致（`cpu_metal_f16_parity.rs`・タイル化後経路は
@@ -51,18 +51,18 @@
 //! ことを推奨する（イシュー #799 実装計画 §4「実機で計測可能な場合のみ」）:
 //!
 //! ```sh
-//! cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
-//! cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_tiled_parity
-//! cargo test -p backend-metal --release -- --ignored --nocapture gemm_f16_auto_parity
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_tiled_parity
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture gemm_f16_auto_parity
 //! ```
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use backend_metal::pad::{pad_matrix_f16, pad8};
-    use backend_metal::tile::{self, TileConfig};
-    use backend_metal::{MetalContext, MetalGemm, MetalHalfBuffer};
     use bench_harness::rng::Xorshift64Star;
     use bench_harness::{MeasurementConfig, run as bench_run};
+    use fandhe_ai_backend_metal::pad::{pad_matrix_f16, pad8};
+    use fandhe_ai_backend_metal::tile::{self, TileConfig};
+    use fandhe_ai_backend_metal::{MetalContext, MetalGemm, MetalHalfBuffer};
     use half::f16;
 
     /// 決定的シード（`gemm_bench.rs::SEED` と同一値。PoC-v2 系・既存 bench
@@ -262,6 +262,6 @@ fn main() {
 fn main() {
     println!(
         "backend-metal gemm_f16_bench example requires macOS (Apple Silicon). \
-         run it on macOS hardware: cargo run -p backend-metal --example gemm_f16_bench --release"
+         run it on macOS hardware: cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release"
     );
 }

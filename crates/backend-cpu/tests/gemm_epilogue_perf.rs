@@ -1,5 +1,5 @@
 //! `CpuBackendOps::gemm_bias_act`（融合カーネル。TASK-12.1f・#203）と
-//! `tensor_core::BackendOps::gemm_bias_act` の**デフォルト実装**（非融合
+//! `fandhe_ai_tensor_core::BackendOps::gemm_bias_act` の**デフォルト実装**（非融合
 //! `gemm` → `add` → `relu` の 3 段合成。利用者が現在得られる経路）の
 //! 性能比較ハーネス。`bench_harness::protocol::run`（warmup 20 回以上・
 //! 計測 20 回以上・中央値／Q1/Q3 記録。TASK-8.1 準拠。
@@ -10,7 +10,7 @@
 //!
 //! 当初 `gemm_blis_parallel` を直接呼び逐次 `for` ループで bias 加算・
 //! `relu` を模した baseline を使っていたが、実際の非融合経路
-//! （`tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト
+//! （`fandhe_ai_tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト
 //! 実装が呼ぶ `elementwise::add`／`elementwise::relu`）は
 //! `PARALLEL_THRESHOLD`（`1<<15` 要素。`crates/backend-cpu/src/elementwise.rs`）
 //! 以上で rayon 並列化される。本ハーネスの全形状（最小 512×512=262144 要素）
@@ -27,14 +27,14 @@
 //!
 //! 実行例（AVX2+FMA を有効化してビルド）:
 //! ```text
-//! RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu \
+//! RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu \
 //!     --release -- --ignored gemm_epilogue_perf
 //! ```
 
-use backend_cpu::CpuBackendOps;
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run};
-use tensor_core::{Activation, BackendOps, Tensor};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_tensor_core::{Activation, BackendOps, Tensor};
 
 fn random_matrix(seed: u64, len: usize) -> Vec<f32> {
     Xorshift64Star::new(seed).fill_vec(len)

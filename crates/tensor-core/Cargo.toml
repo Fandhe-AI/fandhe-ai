@@ -1,5 +1,8 @@
 [package]
-name = "tensor-core"
+# crates.io 公開名（イシュー #877/#879・#878 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/tensor-core`
+# は変更しない。lib 名は Rust 識別子化された `fandhe_ai_tensor_core`。
+name = "fandhe-ai-tensor-core"
 description = "テンソル型・演算グラフ／カーネル融合機構の完全自作コア（REQ-1）"
 version.workspace = true
 edition.workspace = true

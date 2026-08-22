@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
+use fandhe_ai_tensor_core::memory_stats::{AllocationTracker, MemoryStats, TrackedAllocation};
 
 /// N 個の同一サイズ確保を生存させたまま積み、各ステップで
 /// `current == i * size`・全確保後 `peak == n * size` となることを検証する。

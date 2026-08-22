@@ -1,12 +1,12 @@
 //! CUDA バックエンドの `BackendOps` 実装（TASK-1.9c・#46。イシュー #599 で
 //! elementwise 5 演算・`gemm_bias_act` 実融合化を追加）。
 //!
-//! `tensor_core::backend_ops::BackendOps` の CUDA 実装。GEMM は
+//! `fandhe_ai_tensor_core::backend_ops::BackendOps` の CUDA 実装。GEMM は
 //! `gemm::CudaGemm::run_tiled_f32` へ委譲する（既存カーネル・許容誤差・
 //! 境界検査には触れない）。elementwise（`add`／`mul`／`relu`／`exp`／
 //! `tanh`）は `elementwise::CudaElementwise` へ委譲する（イシュー #599）。
 //! 汎用 reduction（`sum`／`max`）は未実装のまま
-//! [`tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
+//! [`fandhe_ai_tensor_core::device::BackendError::Unsupported`] を返す（スコープ外。
 //! out-of-scope-tracking.md 対象）。イシュー #592 で `run_fused` を
 //! オーバーライドし、canonical RMSNorm 融合プラン（`x * rsqrt(sum(x^2))`）
 //! 検出時のみ融合カーネル（[`crate::rmsnorm::CudaRmsNorm`]）へルーティング
@@ -18,8 +18,8 @@
 //! `BackendError::CudaUnavailable` へ変換する（panic しない。
 //! `.claude/rules/coding-rust.md`）。
 
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
@@ -30,7 +30,7 @@ use crate::softmax::{CudaSoftmax, match_softmax_plan};
 
 /// CUDA バックエンドの `BackendOps` 実装。`ordinal` は `Device::Cuda(_)`
 /// の一致判定に使う `cudarc` のデバイス番号
-/// （`CudaContext::new(ordinal)` に対応。`tensor_core::device::Device`
+/// （`CudaContext::new(ordinal)` に対応。`fandhe_ai_tensor_core::device::Device`
 /// の doc コメント参照）。
 ///
 /// `CudaDevice`／`CudaGemm`／`CudaElementwise` は各メソッド呼び出し時に
@@ -229,7 +229,7 @@ impl CudaBackendOps {
 
 /// [`CudaBackendOps::gemm_bias_act`] が融合カーネル
 /// （`gemm::CudaGemm::run_tiled_bias_act_f32`）と
-/// `tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト実装
+/// `fandhe_ai_tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト実装
 /// （非融合 `gemm`→`add`→`relu` 3 段合成）のどちらを経由するかを表す。
 ///
 /// `backend-cpu::ops::CpuBackendOps::gemm_bias_act` の分岐条件
@@ -297,7 +297,7 @@ impl BackendOps for CudaBackendOps {
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
@@ -322,7 +322,7 @@ impl BackendOps for CudaBackendOps {
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
-    /// [`tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
+    /// [`fandhe_ai_tensor_core::BackendOps::gemm_bias_act`] のデフォルト実装（非融合
     /// `gemm` → `add` → `relu` 合成）を、GEMM epilogue に bias 加算・
     /// activation を融合したカーネル
     /// （[`crate::gemm::CudaGemm::run_tiled_bias_act_f32`]）へ差し替える
@@ -337,7 +337,7 @@ impl BackendOps for CudaBackendOps {
     /// （モジュール冒頭コメント参照）。
     ///
     /// フォールバック時も CPU 実装と同じ順序契約（GEMM 本体を実行する前に
-    /// `tensor_core::broadcast_shape` でブロードキャスト可否のみ先に検証。
+    /// `fandhe_ai_tensor_core::broadcast_shape` でブロードキャスト可否のみ先に検証。
     /// REQ-8・OWASP A03）を保つ。
     fn gemm_bias_act(
         &self,
@@ -346,7 +346,7 @@ impl BackendOps for CudaBackendOps {
         bias: Option<&Tensor<f32>>,
         act: Activation,
     ) -> Result<Tensor<f32>, BackendError> {
-        let out_shape = tensor_core::matmul_out_shape(a.shape(), b.shape())
+        let out_shape = fandhe_ai_tensor_core::matmul_out_shape(a.shape(), b.shape())
             .map_err(BackendError::ShapeMismatch)?;
         let (m, k) = (a.shape()[0] as u32, a.shape()[1] as u32);
         let n = b.shape()[1] as u32;
@@ -358,7 +358,7 @@ impl BackendOps for CudaBackendOps {
                     // GEMM 本体を実行する前にブロードキャスト可否を検証
                     // する（CPU 実装 `CpuBackendOps::gemm_bias_act` と同じ
                     // 「カーネル本体アクセス前に検証」の順序契約）。
-                    tensor_core::broadcast_shape(&out_shape, bias.shape())
+                    fandhe_ai_tensor_core::broadcast_shape(&out_shape, bias.shape())
                         .map_err(BackendError::ShapeMismatch)?;
                 }
                 let mut out = self.gemm(a, b)?;
@@ -443,7 +443,7 @@ impl BackendOps for CudaBackendOps {
         self.elementwise_unary(a, |ew, a_s| ew.run_tanh_f32(a_s))
     }
 
-    /// [`tensor_core::BackendOps::run_fused`] のデフォルト実装
+    /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装
     /// （`Unsupported` fail-safe）を、canonical RMSNorm 融合プラン
     /// （`x * rsqrt(sum(x^2))`。mean 化・eps・weight を含まない厳密形状）
     /// 検出時に [`crate::rmsnorm::CudaRmsNorm`]（イシュー #592）へ、
@@ -459,7 +459,7 @@ impl BackendOps for CudaBackendOps {
     /// プランは存在しない）。どちらにも一致しないプラン
     /// （elementwise-only・中間軸 softmax 等）は本オーバーライドの対象外
     /// としてデフォルト実装（`Unsupported`）へ委ね、呼び出し元
-    /// （`autodiff::Tape` の実体化経路）の per-op フォールバックへ倒す
+    /// （`fandhe_ai_autodiff::Tape` の実体化経路）の per-op フォールバックへ倒す
     /// （`backend-cpu::fused_elementwise::run_fused_elementwise` の
     /// allowlist 拒否方針と同じ fail-closed。`.claude/rules/security.md`
     /// A08「判定の迂回経路を作らない」）。
@@ -597,7 +597,7 @@ mod tests {
     /// 環境適応（CUDA 非搭載環境でも実行可能。実機なら本体まで検証）:
     /// `gemm_bias_act`（`bias.shape() == [n]`）が実際に融合カーネル
     /// （`gemm::CudaGemm::run_tiled_bias_act_f32`）へ到達し、
-    /// `tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト
+    /// `fandhe_ai_tensor_core::backend_ops::BackendOps::gemm_bias_act` のデフォルト
     /// 実装（非融合 3 段合成）を経由していないことを、
     /// [`crate::gemm::BIAS_ACT_FUSED_LAUNCH_COUNT`] の増加で検証する
     /// （実装計画 3.3 節「フォールバックを経由しないことのテスト機構」）。
@@ -612,7 +612,7 @@ mod tests {
     /// （直列化・プロセス全体 Mutex は不要）。
     #[test]
     fn gemm_bias_act_fused_path_increments_launch_counter_env_adaptive() {
-        use tensor_core::Tensor;
+        use fandhe_ai_tensor_core::Tensor;
 
         let cuda = CudaBackendOps::new(0);
         let a = Tensor::new(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("valid tensor");
@@ -641,20 +641,23 @@ mod tests {
     /// のみ差し替え）。`rmsnorm.rs::tests::build_canonical_rmsnorm_plan`
     /// と同じ op 列（`plan.rs::
     /// from_segment_builds_rmsnorm_plan_with_row_fusion_metadata` 参照）。
-    fn build_canonical_rmsnorm_plan(hidden: usize, dtype: tensor_core::DType) -> FusionPlan {
+    fn build_canonical_rmsnorm_plan(
+        hidden: usize,
+        dtype: fandhe_ai_tensor_core::DType,
+    ) -> FusionPlan {
         let ops = vec![
-            tensor_core::FusedOpKind::Input { leaf_index: 0 },
-            tensor_core::FusedOpKind::Mul { lhs: 0, rhs: 0 },
-            tensor_core::FusedOpKind::Sum {
+            fandhe_ai_tensor_core::FusedOpKind::Input { leaf_index: 0 },
+            fandhe_ai_tensor_core::FusedOpKind::Mul { lhs: 0, rhs: 0 },
+            fandhe_ai_tensor_core::FusedOpKind::Sum {
                 input: 1,
                 axis: None,
             },
-            tensor_core::FusedOpKind::Rsqrt { input: 2 },
-            tensor_core::FusedOpKind::Broadcast {
+            fandhe_ai_tensor_core::FusedOpKind::Rsqrt { input: 2 },
+            fandhe_ai_tensor_core::FusedOpKind::Broadcast {
                 input: 3,
                 axis: None,
             },
-            tensor_core::FusedOpKind::Mul { lhs: 4, rhs: 0 },
+            fandhe_ai_tensor_core::FusedOpKind::Mul { lhs: 4, rhs: 0 },
         ];
         FusionPlan::from_ops(ops, vec![hidden], dtype, 1).unwrap()
     }
@@ -668,7 +671,7 @@ mod tests {
     /// 検証する」）。
     #[test]
     fn run_fused_rejects_non_f32_dtype_before_device_access() {
-        let plan = build_canonical_rmsnorm_plan(8, tensor_core::DType::F16);
+        let plan = build_canonical_rmsnorm_plan(8, fandhe_ai_tensor_core::DType::F16);
         let x = Tensor::new(vec![1.0f32; 8], &[8]).expect("valid tensor");
         let cuda = CudaBackendOps::new(0);
 
@@ -686,7 +689,7 @@ mod tests {
     /// PR #706 レビュー同上）。
     #[test]
     fn run_fused_rejects_leaf_shape_mismatch_before_device_access() {
-        let plan = build_canonical_rmsnorm_plan(8, tensor_core::DType::F32);
+        let plan = build_canonical_rmsnorm_plan(8, fandhe_ai_tensor_core::DType::F32);
         // 要素数（8）は `row_len` と一致するが shape が異なる。
         let x = Tensor::new(vec![1.0f32; 8], &[2, 4]).expect("valid tensor");
         let cuda = CudaBackendOps::new(0);

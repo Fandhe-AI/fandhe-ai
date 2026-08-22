@@ -23,7 +23,7 @@ REQ-8 性能下限表（`docs/spec/04-requirements.md`）の「Metal f16 対 PyT
   `gemm_simdgroup`/`gemm_simdgroup_tiled` を含む `gemm.metal` 全体）が `MetalGemm::new` の
   `newLibraryWithSource` で実機コンパイル成功する（**MSL 構文検証は完了**。当初の懸念「実機での最初の
   実行が構文検証を兼ねる」は成立し、かつ pass した）
-- `tests/cpu_metal_f16_parity.rs` 6 件全件が `cargo test -p backend-metal --release -- --ignored --nocapture`
+- `tests/cpu_metal_f16_parity.rs` 6 件全件が `cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture`
   で PASS（数値一致は下記「数値一致」節を参照）
 - `tests/shader_source_evidence.rs`（`include_str!` ベースの文字列検査のみ。`cfg(target_os = "macos")`
   不要で Linux CI でも実行可能）は実機セッションでも green
@@ -76,7 +76,7 @@ K=4096 ストレスケースで 60155/65536 要素（max_rel_err 1.992・max_abs
 ```sh
 git fetch origin
 git checkout perf/383-metal-f16-vs-mps-f16   # イシュー #383 の実装ブランチ（origin/main〈3f72039 以降〉から作成）
-cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
 ```
 
 `tests/cpu_metal_f16_parity.rs` の全ケース（8x8x8 基準・512 基準・非倍数境界形状・K=4096 ストレス・決定性）が
@@ -86,7 +86,7 @@ PASS することを確認する。K=4096 ストレスケースが FAIL した�
 ### 2. Rust 側（Metal f16）実測
 
 ```sh
-cargo run -p backend-metal --example gemm_f16_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
 ```
 
 出力形式（`examples/gemm_f16_bench.rs` 参照）: `size=<N> metal_f16_simdgroup_tflops=<値>` 行を
@@ -138,7 +138,7 @@ half 統一アキュムレータでの実機実測、after は #380 の f32 累�
 （`git diff -- crates/backend-cpu/src/parity.rs` は空）。
 
 **イシュー #383（計測リビジョン `3f72039`）での再確認**: TFLOPS 実測に先立ち同一 SHA で
-`cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity` を再実行し、
+`cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity` を再実行し、
 6 件全件（`f16_parity_baseline_8x8x8`・`f16_parity_boundary_shapes_non_multiple_of_eight`・
 `f16_parity_baseline_shape_512`・`f16_k4096_stress`・`f16_dispatch_is_bit_deterministic_across_runs`・
 `f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs`）が PASS することを確認済み
@@ -318,12 +318,12 @@ git checkout "$(gh pr view 825 --repo Fandhe-AI/rust-ai-library --json headRefOi
 # （`git log origin/main --grep '#799'` 等で特定）を使う。
 
 # 1. 数値一致の先行確認（3 系統。全 PASS が計測の前提）
-cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
-cargo test -p backend-metal --release -- --ignored --nocapture cpu_metal_f16_tiled_parity
-cargo test -p backend-metal --release -- --ignored --nocapture gemm_f16_auto_parity
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_tiled_parity
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture gemm_f16_auto_parity
 
 # 2. Rust 側（新旧 f16 経路。プロセス単位で 5 回独立実行）
-cargo run -p backend-metal --example gemm_f16_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
 
 # 3. PyTorch 側（MPS f16。同一セッションで 5 回独立実行）
 source .venv-mps-bench/bin/activate

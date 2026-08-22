@@ -503,7 +503,7 @@ mod tests {
     /// 変更した際に片方だけ更新し忘れると `TILED_BLOCK_DIM` とカーネル内
     /// `__shared__` 配列サイズ・ループ範囲がずれ、コンパイルエラーにもならず
     /// 誤った積和結果を静かに生成しうる（レビュー指摘 #34）。この test は
-    /// その不整合を CI 上（`cargo test -p backend-cuda`。実機不要・文字列
+    /// その不整合を CI 上（`cargo test -p fandhe-ai-backend-cuda`。実機不要・文字列
     /// 突合のみ）で機械検出する。
     #[test]
     fn tile_constant_matches_kernel_source_define() {

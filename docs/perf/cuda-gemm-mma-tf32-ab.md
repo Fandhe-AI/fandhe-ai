@@ -72,26 +72,26 @@ launch-only 計測（起動可否・スループットのみで出力値の数�
    # 一時的に環境適応型（`#[test]` のみ）へ変換したが、実機でのみ再現
    # する `InvalidShape` panic を通常 CI では検出できないため `#[ignore]`
    # を復元済み。本 `--ignored` 一覧に含む）
-   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      mma_tf32_matches_reference_across_shapes
-   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      mma_tf32_k4096_stress
-   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      mma_tf32_zero_dim_shape_returns_empty_without_launch
-   cargo test -p backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test gemm_mma_tf32 -- --ignored --nocapture \
      launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch
 
    # crates/backend-cuda/tests/mma_tf32_vs_wmma_tf32_staged.rs（#[ignore] 2 本）
-   cargo test -p backend-cuda --release --test mma_tf32_vs_wmma_tf32_staged -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test mma_tf32_vs_wmma_tf32_staged -- --ignored --nocapture \
      mma_tf32_matches_wmma_tf32_staged_across_shapes
-   cargo test -p backend-cuda --release --test mma_tf32_vs_wmma_tf32_staged -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test mma_tf32_vs_wmma_tf32_staged -- --ignored --nocapture \
      mma_tf32_matches_wmma_tf32_staged_k4096_stress
 
-   cargo test -p backend-cuda --release --test parity_nonregression -- --ignored --nocapture \
+   cargo test -p fandhe-ai-backend-cuda --release --test parity_nonregression -- --ignored --nocapture \
      parity_baselines_do_not_regress
    ```
 
-   （テスト名は `cargo test -p backend-cuda --test <file> -- --list` で実測確認済み
+   （テスト名は `cargo test -p fandhe-ai-backend-cuda --test <file> -- --list` で実測確認済み
    〔2026-08-21〕。`--ignored` 実機テストは `parity_nonregression.rs` 内では
    `parity_baselines_do_not_regress` の 1 本のみで、ファイル名そのものをフィルタ文字列に
    使うと 0 件マッチの偽 green になるため注意。他 8 本〔`tolerance_constants_are_pinned` 等〕
@@ -150,7 +150,7 @@ launch-only 計測（起動可否・スループットのみで出力値の数�
 使用不可**として扱うこと（`wmma_tf32` 側の数値は既存の妥当な経路であり参考として有効）。
 
 ```sh
-cargo run -p backend-cuda --example cuda_floor_bench --release
+cargo run -p fandhe-ai-backend-cuda --example cuda_floor_bench --release
 ```
 
 - サイズ 512／1024／2048／4096 の `wmma_tf32_tflops`・`mma_tf32_tflops`・
@@ -408,7 +408,7 @@ a1=左下（BL）・a2=右上（TR）という、f16 版（`kernels_mma.rs::LDSM
 base コミット `d2c76e9`（origin/main）に本イシューの修正（§8.2）を適用した
 作業ツリーを rsync 転送して実行・2026-08-22 UTC）
 
-`cargo test -p backend-cuda --release --test <bin> -- --include-ignored --nocapture`
+`cargo test -p fandhe-ai-backend-cuda --release --test <bin> -- --include-ignored --nocapture`
 （GPU utilization 0%・他プロセス resident memory 小・排他性確認済み）で実行。
 
 | テスト | 修正前（#838/#839 実測） | 修正後（#852 実測） | 判定 |

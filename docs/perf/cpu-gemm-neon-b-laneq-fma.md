@@ -124,9 +124,9 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
 |---|---|---|
 | フォーマット | `cargo fmt --all` | 差分なし |
 | lint（x86_64） | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | 警告なし |
-| NEON クロス型検査（テスト込み） | `cargo clippy -p backend-cpu --all-targets --target aarch64-unknown-linux-gnu -- -D warnings` | 警告なし |
-| NEON クロスビルド（release） | `cargo build -p backend-cpu --release --target aarch64-unknown-linux-gnu --lib` | 成功（`vld1q_f32_x2`／`vld1q_f32_x3` を含むコード全体がコンパイル可能であることを実測確認） |
-| x86_64 リグレッション | `cargo test -p backend-cpu` | 全 pass |
+| NEON クロス型検査（テスト込み） | `cargo clippy -p fandhe-ai-backend-cpu --all-targets --target aarch64-unknown-linux-gnu -- -D warnings` | 警告なし |
+| NEON クロスビルド（release） | `cargo build -p fandhe-ai-backend-cpu --release --target aarch64-unknown-linux-gnu --lib` | 成功（`vld1q_f32_x2`／`vld1q_f32_x3` を含むコード全体がコンパイル可能であることを実測確認） |
+| x86_64 リグレッション | `cargo test -p fandhe-ai-backend-cpu` | 全 pass |
 | workspace テスト | `cargo test --workspace` | 全 pass |
 
 `compute_b_laneq_matches_compute_bit_exact`（本イシューの最重要ローカル検証。既定
@@ -154,9 +154,9 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
    検証するため `NeonBLaneqKernel` には影響しない）。検証対象は「設計判断の要点」節で
    述べた FMA 乗数可換性に加え、複数レジスタロードのレーン順序セマンティクス（前提が
    誤っていれば下記テストは必ず失敗する）の 2 点:
-   - `cargo test -p backend-cpu --release --lib -- neon_8x12_and_12x8_match_scalar_forced_bit_exact`
+   - `cargo test -p fandhe-ai-backend-cpu --release --lib -- neon_8x12_and_12x8_match_scalar_forced_bit_exact`
      （`NeonBLaneqKernel` の ScalarKernel 強制経路との bit 完全一致を含む拡張後版）
-   - `cargo test -p backend-cpu --lib -- compute_b_laneq_matches_compute_bit_exact
+   - `cargo test -p fandhe-ai-backend-cpu --lib -- compute_b_laneq_matches_compute_bit_exact
      kernel_b_laneq_matches_hand_computed_subset
      kernel_b_laneq_with_larger_ldc_matches_tight_packing_and_preserves_gap
      kernel_b_laneq_rejects_ldc_smaller_than_nr`（`neon.rs` 内の新設ユニットテスト。
@@ -168,7 +168,7 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
    を比較する。再現コマンド:
 
    ```bash
-   cargo test -p backend-cpu --release --lib \
+   cargo test -p fandhe-ai-backend-cpu --release --lib \
      -- --ignored neon_8x12_vs_b_laneq_ab_median_throughput --nocapture
    ```
 
@@ -179,7 +179,7 @@ aarch64 実機での bit 完全一致・A/B スループット計測は後続セ
    劣化時は既定切り替えを行わず変種併設のまま計測結果を記録する（安全側。#748 実装計画
    §2 の fail-closed 方針）。
 3. **レジスタスピル静的検査**: 上記「検証済み事項」注記のとおり `llvm-objdump` が利用可能な
-   環境で `cargo build -p backend-cpu --release --target aarch64-unknown-linux-gnu` の成果物
+   環境で `cargo build -p fandhe-ai-backend-cpu --release --target aarch64-unknown-linux-gnu` の成果物
    を `compute_b_laneq`／`kernel_b_laneq` シンボルについて逆アセンブルし、`[sp` 参照
    （ベクタレジスタのスタック退避）の有無を確認する（#561 と同一手法）。
 

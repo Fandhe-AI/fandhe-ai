@@ -24,9 +24,9 @@
 //! P1 指摘対応・イシュー #491）
 //!
 //! `ParityPath::WmmaTf32`（基本版カーネル単独）の非後退検査は
-//! `backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
+//! `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`
 //! （`crates/backend-cuda/src/gemm.rs` 内のライブラリ単体テスト。`cargo test
-//! -p backend-cuda --lib -- --ignored` で実行）へ移設済みである。
+//! -p fandhe-ai-backend-cuda --lib -- --ignored` で実行）へ移設済みである。
 //!
 //! 以前は `run_wmma_tf32`（opt 可用なら常に opt を優先する公開 API）とは
 //! 別に、基本版カーネルを強制実行するテスト専用エントリポイント
@@ -58,7 +58,7 @@
 //! 実際には staged カーネルの実測になってしまい、opt カーネル自体の回帰を
 //! 検出できなくなっていた（opt 非後退テストが黙って staged 経路へ
 //! すり替わる。codex-review P1 指摘）。修正として、opt カーネル単独の検査は
-//! `backend_cuda::gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress`
+//! `fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_opt_kernel_parity_does_not_regress`
 //! （`src/gemm.rs`。private field `wmma_tf32_opt`・private fn
 //! `run_wmma_tf32_opt_kernel` へ同一モジュール内から直接アクセスし、
 //! 3 段選択を経由せず opt カーネルを強制実行する）へ移設した。本ファイルは
@@ -68,11 +68,11 @@
 
 mod common;
 
-use backend_cuda::{CudaDevice, CudaGemm, CudaMmaGemm};
 use common::parity_baseline::{
     BASELINES, ParityBaseline, ParityPath, assert_no_parity_regression,
     assert_tolerance_constants_pinned,
 };
+use fandhe_ai_backend_cuda::{CudaDevice, CudaGemm, CudaMmaGemm};
 use half::f16;
 
 // --- 通常 CI テスト（GPU 不要） ---
@@ -219,7 +219,7 @@ fn assert_no_parity_regression_panics_on_unconfirmed_baseline() {
     };
     let a = vec![0.0f32; baseline.total];
     let b = vec![0.0f32; baseline.total];
-    let report = backend_cpu::compare(&a, &b).expect("length must match");
+    let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
     assert_no_parity_regression("synthetic unconfirmed", &report, &baseline);
 }
 
@@ -253,7 +253,7 @@ fn assert_no_parity_regression_panics_on_fail_count_regression() {
     b[0] = 1.0;
     b[1] = 1.0;
     b[2] = 1.0;
-    let report = backend_cpu::compare(&a, &b).expect("length must match");
+    let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
     assert_no_parity_regression("synthetic", &report, &baseline);
 }
 
@@ -280,7 +280,7 @@ fn assert_no_parity_regression_panics_on_mean_abs_diff_regression() {
     // 絶対誤差救済閾値(1e-5)未満のため複合判定は pass するが、
     // mean_abs_diff(約 5e-6) は baseline_mean_abs_diff_ceiling(1e-6) を上回る。
     let b = vec![5e-6f32; baseline.total];
-    let report = backend_cpu::compare(&a, &b).expect("length must match");
+    let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
     assert_no_parity_regression("synthetic mean_abs_diff", &report, &baseline);
 }
 
@@ -304,7 +304,7 @@ fn assert_no_parity_regression_panics_on_total_mismatch() {
     // total が baseline(16) と異なる合成レポート。
     let a = vec![0.0f32; 9];
     let b = vec![0.0f32; 9];
-    let report = backend_cpu::compare(&a, &b).expect("length must match");
+    let report = fandhe_ai_backend_cpu::compare(&a, &b).expect("length must match");
     assert_no_parity_regression("synthetic total mismatch", &report, &baseline);
 }
 
@@ -329,7 +329,7 @@ fn parity_baselines_do_not_regress() {
         // `self.wmma_tf32_opt`）へ直接アクセスしないと 3 段選択を経由せず
         // 強制実行できず、独立クレート扱いの本ファイルから公開 API を
         // 増やさずに到達する手段がないため、ライブラリ自身の単体テスト
-        // （`backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`・
+        // （`fandhe_ai_backend_cuda::gemm::tests::wmma_tf32_basic_kernel_parity_does_not_regress`・
         // `wmma_tf32_opt_kernel_parity_does_not_regress`。`src/gemm.rs`）へ
         // 検査自体を移設済み（本ファイル冒頭ドキュメンテーションコメント
         // 参照。PR #640・#678 codex-review P1 指摘対応）。
@@ -377,7 +377,7 @@ fn parity_baselines_do_not_regress() {
 /// 利用可能な環境では `run_wmma_tf32` の 3 段選択が必ず staged 経路を
 /// 選ぶ（`gemm.rs::run_wmma_tf32` ドキュメンテーションコメント参照）。
 ///
-/// 参照値は `backend_cpu::matmul_reference_fma`（非量子化。
+/// 参照値は `fandhe_ai_backend_cpu::matmul_reference_fma`（非量子化。
 /// `docs/backend-cuda-real-device-testing.md` §5.3 が確認済みの意図的設計を
 /// 踏襲する）。事前に `wmma_tf32_staged_available()` を assert し、staged
 /// カーネルが実際に利用可能な環境で計測していることを保証してから実行する
@@ -395,7 +395,7 @@ fn check_wmma_tf32_staged_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
     let b = rng.fill_vec((baseline.k as usize) * (baseline.n as usize));
 
     let mut c_ref = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a,
         &b,
         &mut c_ref,
@@ -409,7 +409,8 @@ fn check_wmma_tf32_staged_baseline(gemm: &CudaGemm, baseline: &ParityBaseline) {
         .run_wmma_tf32(&a, &b, baseline.m, baseline.n, baseline.k)
         .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner");
 
-    let report = backend_cpu::compare(&c_gpu, &c_ref).expect("shape must match baseline fixture");
+    let report =
+        fandhe_ai_backend_cpu::compare(&c_gpu, &c_ref).expect("shape must match baseline fixture");
 
     assert_no_parity_regression(baseline.context, &report, baseline);
 }
@@ -427,7 +428,7 @@ fn check_mma_f16_baseline(gemm: &CudaMmaGemm, baseline: &ParityBaseline) {
     let a_f32: Vec<f32> = a_f16.iter().map(|x| x.to_f32()).collect();
     let b_f32: Vec<f32> = b_f16.iter().map(|x| x.to_f32()).collect();
     let mut c_ref_f32 = vec![0.0f32; (baseline.m as usize) * (baseline.n as usize)];
-    backend_cpu::matmul_reference_fma(
+    fandhe_ai_backend_cpu::matmul_reference_fma(
         &a_f32,
         &b_f32,
         &mut c_ref_f32,
@@ -446,7 +447,7 @@ fn check_mma_f16_baseline(gemm: &CudaMmaGemm, baseline: &ParityBaseline) {
         .expect("CudaMmaGemm::run_f16 must succeed on CUDA-equipped test runner");
     let c_gpu_f32: Vec<f32> = c_gpu_f16.iter().map(|x| x.to_f32()).collect();
 
-    let report = backend_cpu::compare(&c_gpu_f32, &c_ref_rounded)
+    let report = fandhe_ai_backend_cpu::compare(&c_gpu_f32, &c_ref_rounded)
         .expect("shape must match baseline fixture");
     assert_no_parity_regression(baseline.context, &report, baseline);
 }

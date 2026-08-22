@@ -19,7 +19,7 @@ MC=128・KC=256・NC=512（`src/gemm_blis/mod.rs` の定数）・M=N=K=4096 の�
 
 ## 数値一致
 
-`PanelBuffers` の再利用は各反復のサブスライスを `pack_a`／`pack_b` が完全に上書きする（端タイルは `dst.fill(0.0)` してから書く。`pack.rs`）ため、前反復の残留値には依存しない。累積順序・FMA 契約（`f32::mul_add` 連鎖）は変更していないため、`gemm_naive` との bit 完全一致契約（REQ-2）は維持される。既存 parity テスト（`tests/gemm_blis_parity.rs`・`tests/gemm_epilogue_parity.rs`）が変更なしで全て green（`cargo test -p backend-cpu` 実測）。加えて、並列タスク間のバッファ分離を検証する回帰テスト `gemm_blis_parallel_panel_buffers_are_task_local_across_repeated_runs`（固定 4 スレッドプール・複数行パネル／端タイルを跨ぐ形状 m=257,n=193,k=131 を 8 回反復）を新設し green を確認した。
+`PanelBuffers` の再利用は各反復のサブスライスを `pack_a`／`pack_b` が完全に上書きする（端タイルは `dst.fill(0.0)` してから書く。`pack.rs`）ため、前反復の残留値には依存しない。累積順序・FMA 契約（`f32::mul_add` 連鎖）は変更していないため、`gemm_naive` との bit 完全一致契約（REQ-2）は維持される。既存 parity テスト（`tests/gemm_blis_parity.rs`・`tests/gemm_epilogue_parity.rs`）が変更なしで全て green（`cargo test -p fandhe-ai-backend-cpu` 実測）。加えて、並列タスク間のバッファ分離を検証する回帰テスト `gemm_blis_parallel_panel_buffers_are_task_local_across_repeated_runs`（固定 4 スレッドプール・複数行パネル／端タイルを跨ぐ形状 m=257,n=193,k=131 を 8 回反復）を新設し green を確認した。
 
 ## 計測環境
 
@@ -29,13 +29,13 @@ MC=128・KC=256・NC=512（`src/gemm_blis/mod.rs` の定数）・M=N=K=4096 の�
 | 論理コア数 | 12（`nproc`） |
 | OS | Linux 7.0.0-29-generic |
 | rustc | 1.96.0 (ac68faa20 2026-05-25) |
-| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release`（`cpu-gemm-epilogue-fusion.md` と同一条件） |
+| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release`（`cpu-gemm-epilogue-fusion.md` と同一条件） |
 | 計測プロトコル | `bench-harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3 記録。`crates/backend-cpu/tests/gemm_blis_perf.rs`） |
 
 ## 再現コマンド
 
 ```bash
-RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release \
+RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release \
   -- --ignored gemm_blis_perf --nocapture
 ```
 

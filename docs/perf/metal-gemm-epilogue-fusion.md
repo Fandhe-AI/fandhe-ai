@@ -13,8 +13,8 @@ CUDA 側 `docs/perf/cuda-gemm-epilogue-fusion.md`（#599）と同一方針・同
 elementwise 5 演算実装・`gemm_bias_act` オーバーライド）は本セッションの
 実行環境（Linux サンドボックス）で完結させた。Linux 上で実行可能な範囲
 （`cargo fmt`・`cargo clippy --workspace`・`cargo test --workspace`・
-`cargo check -p backend-metal --tests --target aarch64-apple-darwin`・
-`cargo clippy -p backend-metal --all-targets --target aarch64-apple-darwin`）
+`cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin`・
+`cargo clippy -p fandhe-ai-backend-metal --all-targets --target aarch64-apple-darwin`）
 はすべて green を確認済み（下記「Linux 側で確認済みの検証」参照）。
 
 `docs/real-hardware-verification-env.md` §1 が示す Metal 実機
@@ -23,13 +23,13 @@ elementwise 5 演算実装・`gemm_bias_act` オーバーライド）は本セ�
 捏造しない。`.claude/rules/coding-rust.md`「ベンチは 5 回計測の中央値を
 採用」・security.md の実測原則に従う。#599 の承認済み先例と同じ扱い）:
 
-- `cargo test -p backend-metal --release --test gemm_bias_act_parity --
+- `cargo test -p fandhe-ai-backend-metal --release --test gemm_bias_act_parity --
   --ignored --nocapture`（elementwise・`gemm_bias_act` の CPU-Metal 数値
   一致・融合 vs 非融合合成の複合判定・bias 形状グリッド・`k=0` 縮退）
 - `crates/backend-metal/src/gemm.rs` 内クレート内テスト 2 件
   （`run_tiled_bias_act_f32_increments_fused_launch_counter`・
   `run_tiled_bias_act_f32_k_zero_does_not_increment_fused_launch_counter`。
-  `cargo test -p backend-metal --release -- --ignored --nocapture` に含む）
+  `cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture` に含む）
 - 既存 `#[ignore]` 実機テスト全体（回帰確認。既存 GEMM カーネル
   〈`gemm_naive`／`gemm_tiled`／`gemm_simdgroup`／`gemm_simdgroup_tiled`／
   `gemm_simdgroup_f16`〉は本イシューで一切変更していないため理論上は
@@ -51,12 +51,12 @@ elementwise 5 演算実装・`gemm_bias_act` オーバーライド）は本セ�
 
 # 1. 新規テスト（elementwise・gemm_bias_act の CPU-Metal 数値一致・
 #    融合 vs 非融合合成の複合判定・bias 形状グリッド・k=0 縮退）
-cargo test -p backend-metal --release --test gemm_bias_act_parity \
+cargo test -p fandhe-ai-backend-metal --release --test gemm_bias_act_parity \
   -- --ignored --nocapture
 
 # 2. 既存実機テスト全体（回帰確認。融合カーネル起動カウンタの
 #    in-crate テスト 2 件を含む）
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 
 # 3. GEMM 単体（REQ-8 Metal f32/f16 行）の非劣化再計測
 #    docs/perf/metal-floor-remeasurement.md の手順に従う
@@ -69,8 +69,8 @@ cargo test -p backend-metal --release -- --ignored --nocapture
 | `cargo fmt --all -- --check` | green |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | green |
 | `cargo test --workspace` | green |
-| `cargo check -p backend-metal --tests --target aarch64-apple-darwin` | green |
-| `cargo clippy -p backend-metal --all-targets --target aarch64-apple-darwin -- -D warnings` | 新規コードに起因する warning なし（既存 4 件は本イシュー無関係の pre-existing。`git stash` 比較で確認済み） |
+| `cargo check -p fandhe-ai-backend-metal --tests --target aarch64-apple-darwin` | green |
+| `cargo clippy -p fandhe-ai-backend-metal --all-targets --target aarch64-apple-darwin -- -D warnings` | 新規コードに起因する warning なし（既存 4 件は本イシュー無関係の pre-existing。`git stash` 比較で確認済み） |
 | `elementwise_gemm_bias_act_source_evidence.rs`（Linux 実行） | green（6 件） |
 
 ## 実測すべき項目（実機到達後に本節を実測値で置き換える）

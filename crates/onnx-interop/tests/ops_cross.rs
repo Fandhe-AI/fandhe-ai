@@ -21,11 +21,11 @@
 //! 前提にしないよう、この節を残す。#83／#84 マージ後の 22 オペ完全カバレッジ化（`Cast`／
 //! `Reshape`／`Squeeze`／`Transpose`／`MatMul`／`Softmax`／`Erf` の追加）は別途対応する。
 
+use fandhe_ai_tensor_core::Tensor;
 use onnx_interop::ops::{
     ConstantValue, GemmAttrs, LayerNormAttrs, SliceParams, add, concat, constant, div, gather,
     gemm, layer_normalization, modulo, mul, relu, shape, sigmoid, slice, sqrt, unsqueeze,
 };
-use tensor_core::Tensor;
 
 fn assert_close(a: f32, b: f32) {
     let tol = 1e-4_f32.max(b.abs() * 1e-3);

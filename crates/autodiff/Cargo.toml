@@ -1,5 +1,8 @@
 [package]
-name = "autodiff"
+# crates.io 公開名（イシュー #877/#879・#878 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/autodiff`
+# は変更しない。lib 名は Rust 識別子化された `fandhe_ai_autodiff`。
+name = "fandhe-ai-autodiff"
 description = "動的テープ式自動微分（REQ-1）"
 version.workspace = true
 edition.workspace = true
@@ -11,7 +14,16 @@ publish.workspace = true
 # workspace 内 path 依存。deps-policy.md の許容依存 8 区分の対象外
 # （外部クレートではなく workspace member 間の依存のためユーザー承認
 # フローの対象にならない。TASK-1.5a・#16）。
-tensor-core = { path = "../tensor-core" }
+# `version` 併記（crates.io 公開対象 6 クレート間の path 依存。
+# イシュー #881・PR #891 codex-review P1 指摘）: `cargo package`／
+# `cargo publish` は `[dependencies]`（`dev-dependencies` を除く）の
+# path 依存に crates.io 解決可能な `version` がないと公開パッケージを
+# 生成できないため、workspace 公開バージョン（`Cargo.toml` の
+# `[workspace.package].version`）と完全一致させて明記する。非公開
+# クレート（`bench-harness` 等。`publish.workspace = true` が現状
+# `false` を継承）への path 依存には付与しない（存在しない crates.io
+# パッケージを指すことになるため）。
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 
 [dev-dependencies]
 # PoC-v2-2 突合テスト（`tests/poc_v2_2_parity.rs`・TASK-1.5d・#19）が

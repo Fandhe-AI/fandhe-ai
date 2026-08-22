@@ -202,17 +202,17 @@ gh pr checkout 667   # 本イシューの実装 PR（perf/499-tile-sm-swizzle。
 # 各出力要素のアキュムレート順序を変えないため、bit 一致で主張できる前提を検証する）。
 # cpu_cuda_mma_parity・parity_nonregression（feature 非依存）はこの通常経路で
 # 実行される。
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 
 # mma_f16_swizzle_variant_matches_base_bit_exact_output は internal-diagnostics
 # feature（既定 off。CudaMmaGemm::new_with_swizzle 自体が同 feature でゲート
 # されているため）配下の #[cfg] のみでコンパイルされる（gemm_mma.rs 同テスト
 # doc コメント参照）。上記コマンドには --features がないため対象テストが
 # コンパイル・実行されず green と誤認する（PR #667 codex-review P1 是正）。
-cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --ignored --nocapture mma_f16_swizzle_variant_matches_base_bit_exact_output
+cargo test -p fandhe-ai-backend-cuda --lib --release --features internal-diagnostics -- --ignored --nocapture mma_f16_swizzle_variant_matches_base_bit_exact_output
 
 # A/B 計測（動的選択幅の表示 + base/head の TFLOPS 比較。internal-diagnostics feature 必須）
-cargo run -p backend-cuda --example gemm_mma_swizzle_bench --release --features internal-diagnostics
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_swizzle_bench --release --features internal-diagnostics
 ```
 
 `cpu_cuda_mma_parity`・`parity_nonregression`（tolerance pin テスト含む）・
@@ -234,7 +234,7 @@ GB10 実機の CUDA 13.0 toolkit（`/usr/local/cuda-13.0/bin/ptxas`）へオフ�
 ```sh
 # 1. base（mma_f16_source）・head（mma_f16_source_with_swizzle、動的選択幅）の
 #    2 種類の PTX をダンプする（出力先は既定で target/mma-ptx-dump。--out-dir で変更可）。
-cargo run -p backend-cuda --example mma_ptx_dump --release \
+cargo run -p fandhe-ai-backend-cuda --example mma_ptx_dump --release \
     --features internal-diagnostics -- --out-dir /tmp/mma-ptx-dump
 
 # 標準出力に num_sms・動的 group_width・出力ファイルパス（mma_f16_base.ptx・
@@ -402,12 +402,12 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
 `swizzle.rs` の境界値ユニットテスト・`parity_nonregression.rs`／`tests/common/parity_baseline` の
 無差分確認）は実施し全て pass していたが、これは実機検証を代替しない。
 
-- `cargo test -p backend-cuda --lib --features internal-diagnostics -- --ignored --nocapture
+- `cargo test -p fandhe-ai-backend-cuda --lib --features internal-diagnostics -- --ignored --nocapture
   mma_f16_swizzle_variant_matches_base_bit_exact_output`（当時: `CudaMmaGemm::
   new_with_size_conditional_swizzle`〈opt-in・実機検証専用入口〉自身の bit 一致——base 選択時〈閾値未満
   形状〉・swizzle 選択時〈閾値以上形状。m=n=4096, k=32〉の両方——を検証する版。#782 で同関数は `new`
   自身を検証する版へ更新済み。`gemm_mma.rs` 参照）
-- `cargo test -p backend-cuda --test parity_nonregression -- --ignored`（結線後の parity 非後退確認）
+- `cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored`（結線後の parity 非後退確認）
 - レジスタスピル確認（§3「レジスタスピル確認」節の手順。base／swizzle 変種間でレジスタ数・local memory
   使用量に有意差がないことを確認する）
 - 非正方形形状（縦長・横長。M≠N）での A/B 計測（PR レビュー指摘・Medium。上記実測はいずれも正方形形状
@@ -419,7 +419,7 @@ RTX 3060・NVRTC 非搭載環境）自身による再計測ではない（§2「
   なくなった**。将来この A/B 計測で非正方形形状の改善を確認できた場合は、本節と同じ実機計測手順
   （§3）に従って実測し、`should_apply_swizzle` の正方形条件をアスペクト比考慮の判定式へ改訂することを
   検討する）
-- `cargo run -p backend-cuda --release --example cuda_floor_bench`（5 回中央値。実機検証・`new` 既定切替
+- `cargo run -p fandhe-ai-backend-cuda --release --example cuda_floor_bench`（5 回中央値。実機検証・`new` 既定切替
   後に、起動時診断が swizzle 適用状態を正しく報告することを確認する）
 
 ### 6.2 2026-08-21 実測（イシュー #782・本番結線ゲート。main `0d80a50`）
@@ -489,7 +489,7 @@ DGX Spark GB10 へ転送して実施したマージ前検証。各ベンチ直�
   `mma_f16_new_wires_size_conditional_swizzle_into_production_constructor` ok（`internal-diagnostics`
   あり: 16 件中 11 passed / 5 failed、feature なし: 13 件中 8 passed / 5 failed。failed はいずれも
   #186×2・basic 版 provenance fail-closed×1・JIT キャッシュ `/tmp` pin×2 の既知 5 件のみで新規 fail なし）
-- **parity 非後退（解消）**: `cargo test -p backend-cuda --release --test parity_nonregression --
+- **parity 非後退（解消）**: `cargo test -p fandhe-ai-backend-cuda --release --test parity_nonregression --
   --ignored` → `parity_baselines_do_not_regress` ok（1 passed / 0 failed）。ベースライン形状
   （256×256×4096 = 総ブロックタイル数 8）は閾値 2048 未満で base 経路を選ぶ契約のため、swizzle 分岐
   自体の数値網羅は上記 bit 一致テスト（m=n=4096）が担う（役割分担）
@@ -596,19 +596,19 @@ git fetch origin
 gh pr checkout <本イシューの PR 番号>   # perf/741-wmma-tf32-staged-swizzle（opt-in 経路のみ・本番カーネル無変更）
 
 # 数値一致確認（TFLOPS 比較より前に必須）。既存 parity 系（feature 非依存）はこの通常経路で実行される。
-cargo test -p backend-cuda --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture
 
 # wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output は internal-diagnostics
 # feature（既定 off）配下の #[cfg] のみでコンパイルされる（gemm.rs 同テスト doc コメント参照）。
 # 上記コマンドには --features がないため対象テストがコンパイル・実行されず green と誤認する
 # （#499 §3 と同じ注意点）。
-cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --ignored --nocapture wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output
+cargo test -p fandhe-ai-backend-cuda --lib --release --features internal-diagnostics -- --ignored --nocapture wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output
 
 # NVRTC ログでのレジスタ/スピル差分確認（§3 と同じ理由。remap は追加の整数演算のため
 # コンパイラが定数畳み込みしきれない場合はレジスタ使用量が変わりうる）
 
 # A/B 計測（動的選択幅の表示 + base/head の TFLOPS 比較。internal-diagnostics feature 必須）
-cargo run -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics
+cargo run -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics
 ```
 
 **計測境界（イシュー #776 で是正・#7.7 参照）**: `measure_wmma_tf32` は
@@ -765,7 +765,7 @@ crates/backend-cuda/src/` が空であることをローカルで確認済み）
 （`docs/real-hardware-verification-env.local.md`）への接続情報がローカルに存在せず、
 実機切り分け（§2.2 の 5 run 生値記録・`nvidia-smi dmon` 併走）・§7.4 の採用判定が
 実施できなかった。本セッションで完了したのはハーネス是正とローカル検証のみである:
-`cargo build -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release
+`cargo build -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_swizzle_bench --release
 --features internal-diagnostics` でのビルド成立確認、実行して CUDA 非搭載環境での
 DriverUnavailable スキップ経路が正常動作することの確認、`cargo fmt --all -- --check`・
 `cargo clippy --workspace --all-targets --all-features -- -D warnings`・
@@ -887,16 +887,16 @@ GB10 は `memory.used` が `[N/A]` のため utilization とプロセス一覧�
 
 **G2（A/B 計測。main 基準）**: §7.3 の順に実施。
 
-1. parity 系（`cargo test -p backend-cuda --release -- --ignored --nocapture`）: 8 passed / 5 failed。
+1. parity 系（`cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture`）: 8 passed / 5 failed。
    FAILED はいずれも `docs/perf/cuda-optimized-remeasurement.md`・`docs/perf/cuda-parity-baseline.md`
    に記録済みの既知恒常 fail（`wmma_tf32_basic_kernel_parity_does_not_regress`〈baseline_provenance_
    unconfirmed〉・`wmma_tf32_opt_kernel_matches_reference_across_shapes`・`wmma_tf32_opt_kernel_
    k4096_stress`〈opt カーネルの既知の複合判定 FAIL〉・`jit_cache_bench_*` 2 件〈`/tmp` キャッシュ
    root pin の既知の環境依存 FAIL〉）であり、本 PR の変更はこの集合を増やさなかった（結線後の
    再実行でも同一の 5 件のみが FAIL のままであることを確認済み。下記「マージ前実機ゲート」参照）。
-2. bit 一致（`cargo test -p backend-cuda --lib --release --features internal-diagnostics -- --ignored
+2. bit 一致（`cargo test -p fandhe-ai-backend-cuda --lib --release --features internal-diagnostics -- --ignored
    --nocapture wmma_tf32_staged_swizzle_variant_matches_base_bit_exact_output`）: pass。
-3. A/B（`cargo run -p backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features
+3. A/B（`cargo run -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_swizzle_bench --release --features
    internal-diagnostics`）5 run: §7.6 に記載。`nvidia-smi dmon` 併走でクロック安定を確認（同節）。
 4. §7.4／§7.4.1 の両基準評価: §7.6 に記載（§7.4.1 基準で 4096 級正方形限定採用）。
 

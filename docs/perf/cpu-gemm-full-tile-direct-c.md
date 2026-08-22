@@ -21,7 +21,7 @@ M=N=K=2048（AVX2 カーネル MR=6・NR=16 の場合）を例に取ると、完
 
 ## 数値一致
 
-`ldc` の導入で変わるのはロード/ストアのアドレッシング（`i*NR` → `i*ldc`）のみで、FMA 連鎖（p 昇順・レーン間縮約なし）・累積順序・丸めは一切変更していない。したがって `gemm_naive` との bit 完全一致契約（REQ-2）は成立し続ける。既存 parity テスト（`tests/gemm_blis_parity.rs`・`tests/gemm_epilogue_parity.rs`・`tests/fma_contract.rs`）は変更なしで全て green（`cargo test -p backend-cpu` 実測）。加えて、`ldc > NR` でも `ldc = NR` と bit 完全一致しギャップ列（隣接領域）を破壊しないことを検証する回帰テストを scalar／avx2／avx512／neon の各マイクロカーネルへ新設し、全タイルが完全タイル（直接経路のみ）となる形状（M=256, N=512, K=300）で `gemm_naive` と bit 完全一致することを確認するドライバレベルテストも追加した（いずれも green）。
+`ldc` の導入で変わるのはロード/ストアのアドレッシング（`i*NR` → `i*ldc`）のみで、FMA 連鎖（p 昇順・レーン間縮約なし）・累積順序・丸めは一切変更していない。したがって `gemm_naive` との bit 完全一致契約（REQ-2）は成立し続ける。既存 parity テスト（`tests/gemm_blis_parity.rs`・`tests/gemm_epilogue_parity.rs`・`tests/fma_contract.rs`）は変更なしで全て green（`cargo test -p fandhe-ai-backend-cpu` 実測）。加えて、`ldc > NR` でも `ldc = NR` と bit 完全一致しギャップ列（隣接領域）を破壊しないことを検証する回帰テストを scalar／avx2／avx512／neon の各マイクロカーネルへ新設し、全タイルが完全タイル（直接経路のみ）となる形状（M=256, N=512, K=300）で `gemm_naive` と bit 完全一致することを確認するドライバレベルテストも追加した（いずれも green）。
 
 ## 計測環境
 
@@ -31,13 +31,13 @@ M=N=K=2048（AVX2 カーネル MR=6・NR=16 の場合）を例に取ると、完
 | 論理コア数 | 12（`nproc`） |
 | OS | Linux 7.0.0-29-generic |
 | rustc | 1.96.0 (ac68faa20 2026-05-25) |
-| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release`（`cpu-gemm-packing-buffer-reuse.md` と同一条件） |
+| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release`（`cpu-gemm-packing-buffer-reuse.md` と同一条件） |
 | 計測プロトコル | `bench-harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3 記録。`crates/backend-cpu/tests/gemm_blis_perf.rs`） |
 
 ## 再現コマンド
 
 ```bash
-RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release \
+RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release \
   -- --ignored gemm_blis_perf --nocapture
 ```
 
@@ -57,7 +57,7 @@ RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release \
 
 計画 §7 の判断基準（(a) 改善またはノイズ幅内の差 → 採用／(b) 全形状で中央値が IQR を明確に超えて悪化 → 不採用）に照らし、全形状で変更後中央値が変更前中央値を下回った（-2.8%〜-6.9%）ため **(a) 採用**と判断した。コピー削減量自体はコード変更から直接導かれる確定事実（上記節）であり、独立 5 回計測でもその方向と整合する結果が得られている。より安定した計測環境（専有ハードウェア等）での再計測は行っていない。
 
-NEON（aarch64 実機）の実測はローカル環境（x86_64）では実行不可のため、`cargo check --target aarch64-unknown-linux-gnu -p backend-cpu --all-targets` によるコンパイル検証に留め、実機ベンチは実機検証ツリー（#408 系）の枠組みへ委ねる。
+NEON（aarch64 実機）の実測はローカル環境（x86_64）では実行不可のため、`cargo check --target aarch64-unknown-linux-gnu -p fandhe-ai-backend-cpu --all-targets` によるコンパイル検証に留め、実機ベンチは実機検証ツリー（#408 系）の枠組みへ委ねる。
 
 ## スコープ外（本イシューで対応しない事項）
 

@@ -47,7 +47,7 @@ git checkout perf/809-metal-fine-barrier-buffer-pool   # 本イシューの実�
 # 実行前のサーマル状態を記録する（非特権コマンド。sudo 必須の powermetrics は不使用）。
 pmset -g therm
 
-cargo run -p backend-metal --example gemm_fine_barrier_ab_bench --release > /tmp/gemm_fine_barrier_ab_bench.txt
+cargo run -p fandhe-ai-backend-metal --example gemm_fine_barrier_ab_bench --release > /tmp/gemm_fine_barrier_ab_bench.txt
 
 # 実行後のサーマル状態も記録する。
 pmset -g therm
@@ -70,7 +70,7 @@ pmset -g therm
 数値一致確認（採否判断より前に必須。フェーズ 0 に加え、既存の parity テストでも再確認する）:
 
 ```sh
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 ```
 
 `gemm_dynamic_tile_parity`・`cpu_metal_parity`・`gemm_auto_parity` 等が green であること（tolerance は変更しない。

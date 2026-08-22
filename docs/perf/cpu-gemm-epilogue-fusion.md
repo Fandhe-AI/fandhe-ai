@@ -11,7 +11,7 @@
 | 論理コア数 | 12（`nproc`） |
 | OS | Linux 7.0.0-28-generic |
 | rustc | 1.96.0 (ac68faa20 2026-05-25) |
-| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release`（AVX2+FMA を実行時 ISA ディスパッチが選ぶよう明示。`gemm_blis` の dispatch は実行時検出のためこのフラグなしでも動作するが、コンパイル時の AVX2 コード生成を確実にするため付与） |
+| ビルド条件 | `RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release`（AVX2+FMA を実行時 ISA ディスパッチが選ぶよう明示。`gemm_blis` の dispatch は実行時検出のためこのフラグなしでも動作するが、コンパイル時の AVX2 コード生成を確実にするため付与） |
 | 計測プロトコル | `bench-harness::protocol::run`（warmup 20 回・計測 20 回・中央値/Q1/Q3 記録。TASK-8.1 準拠。coding-rust.md の「5 回計測の中央値」下限を包含） |
 | 計測バイナリ | `crates/backend-cpu/tests/gemm_epilogue_perf.rs`（`#[ignore]` 分離） |
 | 比較対象（非融合 baseline） | `tensor_core::BackendOps::gemm_bias_act` の**デフォルト実装そのもの**（`CpuBackendOps` 経由で `ops.gemm(...)` → `ops.add(...)` → `ops.relu(...)` を明示的に呼ぶ。両ステップとも `elementwise` の実カーネル〈`PARALLEL_THRESHOLD=1<<15` 要素以上で rayon 並列化。本ハーネスの全形状はこの閾値を超える〉・`Tensor` 出力割当を経由する。利用者が現在 `gemm_bias_act` から実際に得る経路と完全に同一コードパス） |
@@ -22,7 +22,7 @@
 ## 再現コマンド
 
 ```bash
-RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu --release \
+RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu --release \
   -- --ignored gemm_epilogue_perf --nocapture
 ```
 

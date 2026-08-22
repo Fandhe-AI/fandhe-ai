@@ -4,8 +4,8 @@
 //!
 //! `tests/poc_v2_2_parity.rs`（TASK-1.5d・#19）は生の `Var` 演算
 //! （`matmul`/`add`/`relu`/`mse_loss`）を直接組んだ 50 step SGD の
-//! 決定性テストを持つが、本ファイルは **`autodiff::nn::Linear`/
-//! `autodiff::nn::activation::{Relu, Sigmoid}` を経由した学習ループ**
+//! 決定性テストを持つが、本ファイルは **`fandhe_ai_autodiff::nn::Linear`/
+//! `fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid}` を経由した学習ループ**
 //! が収束・再現することを固定する点が異なる（互換 API 層の受け入れ
 //! 検証。REQ-9・受け入れ条件「決定的シードで再現可能な収束テストが
 //! green」）。
@@ -40,10 +40,10 @@
 
 mod common;
 
-use autodiff::Tape;
-use autodiff::nn::Linear;
-use autodiff::nn::activation::{Relu, Sigmoid};
-use tensor_core::Tensor;
+use fandhe_ai_autodiff::Tape;
+use fandhe_ai_autodiff::nn::Linear;
+use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid};
+use fandhe_ai_tensor_core::Tensor;
 
 use bench_harness::rng::Xorshift64Star;
 

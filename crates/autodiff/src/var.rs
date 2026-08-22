@@ -1,6 +1,6 @@
 //! テープ上の 1 ノードを指す追跡対象値 `Var` と、その forward 演算群。
 //!
-//! `tensor_core::Tensor<f32>` に対する演算は一切テープを構築しない
+//! `fandhe_ai_tensor_core::Tensor<f32>` に対する演算は一切テープを構築しない
 //! （非追跡）。`Var` に対する演算のみが `Tape::push`（`tape.rs`）を
 //! 経由してテープへ記録される。この「型分離」により、勾配追跡の
 //! ON/OFF がコンパイル時に保証される（`docs/public-api-design.md`
@@ -15,7 +15,7 @@
 
 use std::cell::Ref;
 
-use tensor_core::{
+use fandhe_ai_tensor_core::{
     Tensor, broadcast_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 

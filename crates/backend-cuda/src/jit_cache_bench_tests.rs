@@ -84,8 +84,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use cudarc::driver::PushKernelArg;
+use fandhe_ai_tensor_core::dispatch::{DType, GemmShape};
 use half::f16;
-use tensor_core::dispatch::{DType, GemmShape};
 
 use bench_harness::{MeasurementConfig, median_q1_q3, rng::Xorshift64Star};
 

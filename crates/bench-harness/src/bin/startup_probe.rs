@@ -13,9 +13,9 @@
 
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::startup::{PROBE_SCHEMA_VERSION, ProbeReport, StartupBackend};
+use fandhe_ai_tensor_core::{BackendOps, Tensor, matmul_out_shape};
 use std::process::ExitCode;
 use std::time::Instant;
-use tensor_core::{BackendOps, Tensor, matmul_out_shape};
 
 /// 起動コスト計測用ワークロードの正方行列サイズ。
 ///
@@ -99,7 +99,7 @@ fn run(backend: StartupBackend, process_start: Instant) -> Result<ProbeReport, S
 /// `device_init_secs` はハンドル構築コストのみを表す参照点になる
 /// （`startup` モジュールドキュメントの [`ProbeReport::device_init_secs`] 注記参照）。
 fn run_cpu(process_start: Instant, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<(f64, f64), String> {
-    let ops = backend_cpu::CpuBackendOps::new();
+    let ops = fandhe_ai_backend_cpu::CpuBackendOps::new();
     let device_init_secs = process_start.elapsed().as_secs_f64();
 
     ops.gemm(a, b)
@@ -117,8 +117,8 @@ fn run_cpu(process_start: Instant, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<(
 /// `ops.rs` 冒頭コメント参照）であり、これを経由すると `first_kernel_secs` の区間に
 /// 「NVRTC コンパイル＋カーネル起動＋完了待ち」だけでなく二重目のフル device 初期化が
 /// 混入し計測が歪む（レビュー指摘。#170）。そのため本関数では `CudaBackendOps::gemm` を
-/// 使わず、`device_handle` で取得済みの `CudaDevice` を [`backend_cuda::CudaGemm::new`] に
-/// 明示的に渡して GEMM を実行する（`backend_cuda::CudaGemm` は `pub`。`ops.rs` の
+/// 使わず、`device_handle` で取得済みの `CudaDevice` を [`fandhe_ai_backend_cuda::CudaGemm::new`] に
+/// 明示的に渡して GEMM を実行する（`fandhe_ai_backend_cuda::CudaGemm` は `pub`。`ops.rs` の
 /// `CudaBackendOps::gemm` 実装と同じ手順を、device 再取得なしで踏襲する）。
 ///
 /// 注意: `run_tiled_f32` はホスト側スライスを受け取り内部で `clone_htod`／`clone_dtoh`
@@ -130,11 +130,11 @@ fn run_cuda(
     a: &Tensor<f32>,
     b: &Tensor<f32>,
 ) -> Result<(f64, f64), String> {
-    if !backend_cuda::CudaDevice::is_available() {
+    if !fandhe_ai_backend_cuda::CudaDevice::is_available() {
         return Err("CUDA driver が利用不可（is_available() == false）".to_string());
     }
-    let device =
-        backend_cuda::CudaDevice::new(0).map_err(|e| format!("CudaDevice::new 失敗: {e}"))?;
+    let device = fandhe_ai_backend_cuda::CudaDevice::new(0)
+        .map_err(|e| format!("CudaDevice::new 失敗: {e}"))?;
     let device_init_secs = process_start.elapsed().as_secs_f64();
 
     let out_shape = matmul_out_shape(a.shape(), b.shape())
@@ -150,8 +150,8 @@ fn run_cuda(
         .as_slice()
         .ok_or_else(|| "CUDA gemm: rhs not contiguous".to_string())?;
 
-    let gemm =
-        backend_cuda::CudaGemm::new(&device).map_err(|e| format!("CudaGemm::new 失敗: {e}"))?;
+    let gemm = fandhe_ai_backend_cuda::CudaGemm::new(&device)
+        .map_err(|e| format!("CudaGemm::new 失敗: {e}"))?;
     let out = gemm
         .run_tiled_f32(a_slice, b_slice, m, n, k)
         .map_err(|e| format!("CUDA gemm 失敗: {e}"))?;
@@ -181,10 +181,11 @@ fn run_metal(
     // ビルド確認できないため CUDA 経路と異なりここでは計測経路自体は変更せず、
     // 区間の意味をコメントで正確化するに留める。真の解消は `MetalContext` の
     // ハンドル常駐化以降）。
-    backend_metal::MetalContext::new().map_err(|e| format!("MetalContext::new 失敗: {e:?}"))?;
+    fandhe_ai_backend_metal::MetalContext::new()
+        .map_err(|e| format!("MetalContext::new 失敗: {e:?}"))?;
     let device_init_secs = process_start.elapsed().as_secs_f64();
 
-    let ops = backend_metal::MetalBackendOps::new();
+    let ops = fandhe_ai_backend_metal::MetalBackendOps::new();
     ops.gemm(a, b)
         .map_err(|e| format!("Metal gemm 失敗: {e:?}"))?;
     let first_kernel_secs = process_start.elapsed().as_secs_f64();

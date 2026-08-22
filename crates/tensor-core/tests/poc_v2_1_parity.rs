@@ -17,7 +17,7 @@
 //! 実際に読む数値突合テストのみ `#[ignore]` で分離し、submodule
 //! checkout 済みのローカル環境でのみ実行する。
 
-use tensor_core::{ShapeError, Tensor, broadcast_shape};
+use fandhe_ai_tensor_core::{ShapeError, Tensor, broadcast_shape};
 
 // --- PoC-v2-1 テストベクタ 1: row-major strides ---
 // PoC: `strides_are_row_major`（tensor.rs:214）。
@@ -119,10 +119,10 @@ fn row_major_traversal_matches_source_slice() {
 /// ことを確認する。
 #[test]
 fn ops_shape_matmul_and_elementwise_match_poc_rules() {
-    let out = tensor_core::matmul_out_shape(&[2, 3], &[3, 4]).unwrap();
+    let out = fandhe_ai_tensor_core::matmul_out_shape(&[2, 3], &[3, 4]).unwrap();
     assert_eq!(out, vec![2, 4]);
 
-    let out = tensor_core::elementwise_out_shape(&[2, 3], &[2, 3]).unwrap();
+    let out = fandhe_ai_tensor_core::elementwise_out_shape(&[2, 3], &[2, 3]).unwrap();
     assert_eq!(out, vec![2, 3]);
 }
 

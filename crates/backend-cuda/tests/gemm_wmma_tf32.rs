@@ -1,10 +1,10 @@
 //! WMMA(TF32) GEMM の CPU-CUDA 数値一致回帰テスト（TASK-11.1c・#62）。
 //!
 //! `tests/cpu_cuda_parity.rs`（naive f32、#54）と同じ方針で、判定式・閾値は
-//! `backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
+//! `fandhe_ai_backend_cpu::assert_parity`（統一複合判定「相対誤差 1e-3 未満 または
 //! 絶対誤差 1e-5 未満」の唯一の実体）に一本化し、ここでローカル複製しない
 //! （`.claude/rules/coding-rust.md`「バックエンド間数値一致テストの許容誤差を
-//! 単独で緩和しない」）。CPU 参照実装は `backend_cpu::matmul_reference_fma`
+//! 単独で緩和しない」）。CPU 参照実装は `fandhe_ai_backend_cpu::matmul_reference_fma`
 //! （FMA 契約の唯一の参照点）を用いる。
 //!
 //! **TF32 経路特有の留意点**（`docs/cuda-tensor-core-design.md` 6 節）: TF32 は
@@ -18,24 +18,26 @@
 //! toolkit 非搭載）で実行され、CUDA/NVRTC 非搭載環境では早期 return で green に
 //! なる（`tests/cpu_cuda_parity.rs` の分岐パターンを踏襲）。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm};
 
 /// 決定的シードで A・B（f32）を生成し、CPU 参照実装と WMMA(TF32) カーネルの
-/// 出力を [`backend_cpu::assert_parity`] で照合する。
+/// 出力を [`fandhe_ai_backend_cpu::assert_parity`] で照合する。
 fn assert_wmma_tf32_parity(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n: u32, k: u32) {
     let mut rng = bench_harness::rng::Xorshift64Star::new(seed);
     let a = rng.fill_vec((m as usize) * (k as usize));
     let b = rng.fill_vec((k as usize) * (n as usize));
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
 
     let c_gpu = gemm
         .run_wmma_tf32(&a, &b, m, n, k)
         .expect("CudaGemm::run_wmma_tf32 must succeed on a compute capability >= 8.0 test runner");
 
-    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// 環境適応型のスモークテスト（`#[ignore]` なし。通常 CI で実行）。
@@ -101,9 +103,11 @@ fn wmma_tf32_parity_or_skip(gemm: &CudaGemm, context: &str, seed: u64, m: u32, n
     };
 
     let mut c_ref = vec![0.0f32; (m as usize) * (n as usize)];
-    backend_cpu::matmul_reference_fma(&a, &b, &mut c_ref, m as usize, n as usize, k as usize)
-        .expect("matmul_reference_fma shape validation must pass for well-formed test input");
-    backend_cpu::assert_parity(context, &c_gpu, &c_ref);
+    fandhe_ai_backend_cpu::matmul_reference_fma(
+        &a, &b, &mut c_ref, m as usize, n as usize, k as usize,
+    )
+    .expect("matmul_reference_fma shape validation must pass for well-formed test input");
+    fandhe_ai_backend_cpu::assert_parity(context, &c_gpu, &c_ref);
 }
 
 /// 実機（DGX Spark GB10 等、compute capability 8.0 以降）必須の形状網羅

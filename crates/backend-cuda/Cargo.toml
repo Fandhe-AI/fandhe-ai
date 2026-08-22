@@ -1,5 +1,8 @@
 [package]
-name = "backend-cuda"
+# crates.io 公開名（イシュー #877/#879・#878 でユーザー承認済み。
+# `docs/crates-io-naming-decision.md`）。ディレクトリ名 `crates/backend-cuda`
+# は変更しない。lib 名は Rust 識別子化された `fandhe_ai_backend_cuda`。
+name = "fandhe-ai-backend-cuda"
 description = "CUDA バックエンド（cudarc 動的ロード。REQ-2）"
 version.workspace = true
 edition.workspace = true
@@ -10,7 +13,7 @@ publish.workspace = true
 # `cargo test --workspace`（Makefile の `test` ターゲット・CI の rust-ci
 # test ジョブが使うコマンド）は既定では example ターゲットの `test = false`
 # のため、`#[cfg(test)] mod tests` を持つ example はテストハーネスがビルド
-# されるだけで実行されない（`cargo test -p backend-cuda --example
+# されるだけで実行されない（`cargo test -p fandhe-ai-backend-cuda --example
 # device_attributes_dump` の明示指定時のみ実行される）。本 example が追加
 # した `bw_grid_dim`・`bandwidth_gbps`・`bytes_per_cycle` の単体テストを
 # CI で確実に実行するため `test = true` を明示する（イシュー #482 Review
@@ -34,7 +37,9 @@ test = true
 # ユーザー承認不要（外部依存の新規追加ではない。`backend-cpu/Cargo.toml` の #29 先例と
 # 同種の判断）。TASK-1.9a（#44）でデバイス列挙・選択の共通 trait
 # `tensor_core::device::DeviceProvider` を実装するために追加した。
-tensor-core = { path = "../tensor-core" }
+# `version` 併記の理由は `crates/autodiff/Cargo.toml` の同依存コメントを参照
+# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
+fandhe-ai-tensor-core = { path = "../tensor-core", version = "=0.3.0" }
 # CUDA バックエンド（REQ-2）。無条件依存＋動的ロード方式のため cfg 分離しない
 # （features・default-features は workspace ルートの [workspace.dependencies] で確定済み。
 # member 側で default-features を再指定しても inherited dependency には反映されないため
@@ -124,7 +129,9 @@ required-features = ["internal-diagnostics"]
 # 同士の path 依存であり、許容依存 8 区分（外部クレート）の新規追加には
 # 当たらない（`crates/backend-cpu/Cargo.toml:20-25` の bench-harness 依存と
 # 同じ整理）。
-backend-cpu = { path = "../backend-cpu" }
+# `version` 併記の理由は上記 `fandhe-ai-tensor-core` 依存コメント参照
+# （公開 6 クレート間 path 依存。イシュー #881・PR #891 codex-review P1 指摘）。
+fandhe-ai-backend-cpu = { path = "../backend-cpu", version = "=0.3.0" }
 # 決定的シード PRNG（`Xorshift64Star`）を GEMM 入力生成に使う
 # （coding-rust.md「学習系回帰テストには決定的シード設定ユーティリティを
 # 使う」）。上記と同じ理由で許容依存 8 区分の対象外。

@@ -16,14 +16,14 @@
 //! `required-features`）。動的グルーピング幅選択
 //! （`swizzle::select_swizzle_group_width`）は非公開 `mod swizzle` の
 //! 関数であり、crate 外部（本 example）からは
-//! `backend_cuda::diagnostics::mma_swizzle_group_width` 経由でのみ到達
+//! `fandhe_ai_backend_cuda::diagnostics::mma_swizzle_group_width` 経由でのみ到達
 //! できるため（`lib.rs::diagnostics` モジュール冒頭コメント参照。
 //! `examples/gemm_profile_target.rs` と同じ feature ゲート方針）。
 //!
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_mma_swizzle_bench --release \
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_mma_swizzle_bench --release \
 //!     --features internal-diagnostics
 //! ```
 //!
@@ -36,9 +36,9 @@
 //! （`kernels_mma.rs` 冒頭コメント「整列制約」）。本ベンチの形状はすべて
 //! この制約を満たす正方形状のみを使う。
 
-use backend_cuda::{CudaDevice, CudaError, CudaMmaGemm, diagnostics};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaMmaGemm, diagnostics};
 use half::f16;
 
 /// 決定的シード（`gemm_mma_bench.rs` と同一値。過去 PoC・他ベンチと同じ

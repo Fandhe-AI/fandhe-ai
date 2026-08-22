@@ -30,7 +30,12 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # workspace 内部クレート（path 依存）。本体の現行最適 CPU GEMM 経路
 # （BLIS 5-loop・rayon 並列。`gemm_blis_parallel`）を比較対象として使う。
-backend-cpu = { path = "../../../crates/backend-cpu" }
+# イシュー #879: 参照先クレートの `package.name` は crates.io 公開向けに
+# `fandhe-ai-backend-cpu` へ rename 済み（`docs/crates-io-naming-decision.md`）。
+# 本パッケージは較正データではないため alias を使わず依存キー名自体を
+# 新名へ揃え、`use fandhe_ai_backend_cpu::` として参照する（実装計画
+# イシュー #879 設計判断 1）。
+fandhe-ai-backend-cpu = { path = "../../../crates/backend-cpu" }
 # 計測プロトコル（warmup 20・iters 20・中央値/Q1/Q3。TASK-8.1）を OSS 側にも
 # 同一で適用するために使う。
 bench-harness = { path = "../../../crates/bench-harness" }

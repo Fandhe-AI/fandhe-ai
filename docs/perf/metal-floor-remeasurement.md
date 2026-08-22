@@ -108,14 +108,14 @@ git fetch origin
 git checkout bench/572-metal-floor-remeasurement   # 本イシューの実装ブランチ
 
 # 1. 数値一致確認を先に行う（既存 parity テスト群。閾値は緩和しない）
-cargo test -p backend-metal --release -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
 
 # 2. Rust 側ベンチを各 5 回独立実行し、size ごとに中央値を採用する
 #    （MeasurementConfig::default() 自体が warmup 20・計測 20・中央値を内包するため、
 #    5 プロセス独立実行との組み合わせで「5 回計測の中央値」下限
 #    〈.claude/rules/coding-rust.md〉を二重に満たす。#547 先例と同方式）
-cargo run -p backend-metal --example gemm_f32_prepared_bench --release
-cargo run -p backend-metal --example gemm_f16_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release
+cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
 ```
 
 PyTorch 側は一時 venv（リポジトリ管理外。`.venv-mps-bench` 先例）で実行する:
@@ -259,9 +259,9 @@ f32 は現行 30% を候補下限値 10% が下回る（Metal f32 の計測境�
 ## 動作確認（実機セッションで実施済み）
 
 - `cargo build --workspace --all-targets`
-- `cargo build -p backend-metal --examples --release`（`gemm_f32_prepared_bench`・`gemm_f16_bench` の
+- `cargo build -p fandhe-ai-backend-metal --examples --release`（`gemm_f32_prepared_bench`・`gemm_f16_bench` の
   ビルド成立を確認。生ログ `bench572/build.log`）
-- `cargo test -p backend-metal --release -- --ignored --nocapture` — 80 テスト全 pass（0 failed。
+- `cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture` — 80 テスト全 pass（0 failed。
   `dispatch_tiled_prepared_matches_dispatch_variant`・`cpu_metal_f16_parity` 系 6 件を含む。生ログ
   `bench572/parity_test.log`。「数値一致（parity）確認」節参照）
 - `git diff 35514db..abaa94e -- crates/bench-harness/src/threshold.rs` および数値一致 tolerance 定数
@@ -302,7 +302,7 @@ f16: size=512 median=0.9755  size=1024 median=5.4229  size=2048 median=12.5509 s
 
 ### parity 実行結果（`bench572/parity_test.log`）
 
-- `cargo test -p backend-metal --release -- --ignored --nocapture`: 80 テスト全 pass（0 failed）
+- `cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture`: 80 テスト全 pass（0 failed）
 - `dispatch_tiled_prepared_matches_dispatch_variant`（`tests/gemm_dynamic_tile_parity.rs`）: pass
 - `cpu_metal_f16_parity.rs`: 6 テスト全 pass
 

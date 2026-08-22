@@ -14,7 +14,7 @@
 //! ## A/B 比較方式（PoC-9 の feature 切替の v2 対応物）
 //!
 //! - **融合条件**: `CpuBackendOps`（`run_fused` オーバーライド込み）を
-//!   `Tape::new_with_ops` へ渡す。`autodiff::tape` の遅延評価 2 層
+//!   `Tape::new_with_ops` へ渡す。`fandhe_ai_autodiff::tape` の遅延評価 2 層
 //!   （`push_lazy`／`materialize_*`）が 4 段以上の elementwise 連鎖を
 //!   `run_fused` へ回す。
 //! - **非融合条件**: `NonFusedCpuOps`（本ファイル定義）——`CpuBackendOps`
@@ -23,7 +23,7 @@
 //!   fusion_backend_integration.rs` の `AlwaysUnsupportedFused` と同型
 //!   （同ファイルは `common::NaiveOps` へ委譲するが、本ハーネスは実際の
 //!   `CpuBackendOps` カーネルへ委譲する点のみ異なる）。`run_fused` が
-//!   `Unsupported` を返すと `autodiff::tape` は per-op フォールバックへ
+//!   `Unsupported` を返すと `fandhe_ai_autodiff::tape` は per-op フォールバックへ
 //!   倒れる契約（`docs/kernel-fusion.md` §1 (a)）。
 //!
 //! 両条件とも同一カーネル・同一実行系（`CpuBackendOps` の per-op 実体）
@@ -41,17 +41,17 @@
 //!
 //! 実行例（AVX2+FMA を有効化してビルド）:
 //! ```text
-//! RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p backend-cpu \
+//! RUSTFLAGS="-C target-feature=+avx2,+fma" cargo test -p fandhe-ai-backend-cpu \
 //!     --release --test fusion_effect_perf -- --ignored --nocapture
 //! ```
 
-use autodiff::{Tape, Var};
-use backend_cpu::CpuBackendOps;
-use backend_cpu::parity::assert_parity;
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run};
-use tensor_core::device::{BackendError, Device};
-use tensor_core::{BackendOps, FusionPlan, Tensor};
+use fandhe_ai_autodiff::{Tape, Var};
+use fandhe_ai_backend_cpu::CpuBackendOps;
+use fandhe_ai_backend_cpu::parity::assert_parity;
+use fandhe_ai_tensor_core::device::{BackendError, Device};
+use fandhe_ai_tensor_core::{BackendOps, FusionPlan, Tensor};
 
 /// `CpuBackendOps` の全 per-op メソッドへ委譲しつつ `run_fused` は
 /// オーバーライドしない（デフォルト `Unsupported` のまま）ラッパー。
@@ -73,7 +73,7 @@ impl BackendOps for NonFusedCpuOps {
         a: &Tensor<f32>,
         b: &Tensor<f32>,
         bias: Option<&Tensor<f32>>,
-        act: tensor_core::Activation,
+        act: fandhe_ai_tensor_core::Activation,
     ) -> Result<Tensor<f32>, BackendError> {
         self.inner.gemm_bias_act(a, b, bias, act)
     }

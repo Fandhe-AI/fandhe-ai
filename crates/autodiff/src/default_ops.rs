@@ -3,9 +3,9 @@
 //! 是正）。
 //!
 //! **TASK-9.4（#411）での位置づけ変更**: compat 層（旧
-//! `autodiff::compat::Sequential::predict`）は `facade::compat` へ移設
+//! `fandhe_ai_autodiff::compat::Sequential::predict`）は `fandhe_ai::compat` へ移設
 //! されたのに伴い、`predict` の既定結線先を本モジュール（`NaiveOps`・
-//! 融合を経ない逐次参照実装）から [`facade::tape`]（composition root・
+//! 融合を経ない逐次参照実装）から [`fandhe_ai::tape`]（composition root・
 //! `CpuBackendOps`・融合有効）へ変更した（`crates/facade/src/compat/
 //! sequential.rs` 参照）。本モジュールは `Tape::new()`／`Tape::default()`
 //! （無引数構築の compat 経路。`autodiff` クレート単体でも「デフォルト
@@ -36,11 +36,13 @@
 //! 経路に徹し、性能が必要な呼び出し元は引き続き `Tape::new_with_ops(ops)`
 //! へ最適化済み `BackendOps`（`facade` composition root が結線する
 //! `backend-cpu`／`backend-cuda`／`backend-metal` 等）を明示的に渡すか、
-//! `facade` の compat 公開面（`facade::compat::Sequential::predict`）を
-//! 使う（既定で `facade::tape()`＝`CpuBackendOps` へ結線済み。
+//! `facade` の compat 公開面（`fandhe_ai::compat::Sequential::predict`）を
+//! 使う（既定で `fandhe_ai::tape()`＝`CpuBackendOps` へ結線済み。
 //! `docs/public-api-design.md` §4.1「承認済み内容と結線の実装場所」）。
 
-use tensor_core::{BackendError, BackendOps, Device, Tensor, broadcast_shape, matmul_out_shape};
+use fandhe_ai_tensor_core::{
+    BackendError, BackendOps, Device, Tensor, broadcast_shape, matmul_out_shape,
+};
 
 /// `eval.rs` の naive 参照実装へ委譲する compat 用 `BackendOps`。
 /// `gemm`/`add`/`mul`/`relu`/`exp`/`tanh`/`sum`/`max` はいずれも構造的に
@@ -92,8 +94,8 @@ impl BackendOps for NaiveOps {
 
     fn sum(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         let shape = a.shape().to_vec();
-        let out_shape =
-            tensor_core::reduce_out_shape(&shape, dim).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = fandhe_ai_tensor_core::reduce_out_shape(&shape, dim)
+            .map_err(BackendError::ShapeMismatch)?;
         Ok(crate::eval::sum(a, dim, &out_shape))
     }
 
@@ -106,8 +108,8 @@ impl BackendOps for NaiveOps {
     /// `sum` は単位元 0 を持つため本検査は不要）。
     fn max(&self, a: &Tensor<f32>, dim: Option<usize>) -> Result<Tensor<f32>, BackendError> {
         let shape = a.shape().to_vec();
-        let out_shape =
-            tensor_core::reduce_out_shape(&shape, dim).map_err(BackendError::ShapeMismatch)?;
+        let out_shape = fandhe_ai_tensor_core::reduce_out_shape(&shape, dim)
+            .map_err(BackendError::ShapeMismatch)?;
         // `backend-cpu::reduction::max`（`crates/backend-cpu/src/
         // reduction.rs`）と同じ条件式: 縮約軸の長さが 0 かつ出力要素数が
         // 1 個以上（＝各出力位置の縮約グループが空）の場合のみエラーと

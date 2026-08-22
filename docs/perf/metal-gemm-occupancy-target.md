@@ -93,7 +93,7 @@ threadgroup memory 上限は既存の safe API（`MTLDevice::maxThreadgroupMemor
 ### 3.2 実行コマンド（Mac 実機）
 
 ```sh
-cargo test -p backend-metal -- --ignored
+cargo test -p fandhe-ai-backend-metal -- --ignored
 ```
 
 `device::tests::probe_gpu_core_count_returns_positive_value_on_apple_silicon`・

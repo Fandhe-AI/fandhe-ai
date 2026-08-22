@@ -40,8 +40,8 @@
 
 use std::fmt;
 
+use fandhe_ai_tensor_core::{ShapeError, Tensor, reduce_out_shape};
 use rayon::prelude::*;
-use tensor_core::{ShapeError, Tensor, reduce_out_shape};
 
 /// 全縮約（`dim=None`）の決定的チャンク結合に用いる固定チャンクサイズ。
 ///
@@ -55,7 +55,7 @@ const CHUNK: usize = 4096;
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum ReduceError {
-    /// shape・軸検査の失敗（`tensor_core::reduce_out_shape` に委譲する検査の
+    /// shape・軸検査の失敗（`fandhe_ai_tensor_core::reduce_out_shape` に委譲する検査の
     /// 失敗をそのまま透過する）。
     Shape(ShapeError),
     /// 縮約対象の要素数が 0（`max`・`mean` は単位元を持たないためエラーとする。

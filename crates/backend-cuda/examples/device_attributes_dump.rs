@@ -30,7 +30,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example device_attributes_dump --release
+//! cargo run -p fandhe-ai-backend-cuda --example device_attributes_dump --release
 //! ```
 //!
 //! 出力（属性名・実測値・単位換算値、帯域 GB/s・bytes/cycle）を
@@ -50,10 +50,10 @@
 //! として記録する方針とする（イシュー #482 実装計画 §4 Step 2 の安全側
 //! フォールバック）。
 
-use backend_cuda::{CudaDevice, CudaError, compile_ptx};
 use bench_harness::{MeasurementConfig, run as bench_run};
 use cudarc::driver::sys::CUdevice_attribute;
 use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, compile_ptx};
 
 /// grid-stride の単純コピー（+1）カーネル。読み出し帯域・書き込み帯域を
 /// 両方含めて 1 回の反復（内側ループ 1 周）で 2N 要素分のメモリトラフィック

@@ -7,7 +7,7 @@
 //! `__shared__` 宣言では 48KiB 上限（
 //! [`crate::kernels_mma::MMA_STATIC_SMEM_LIMIT_BYTES`]）により stages<=3
 //! しか焼き込めないため、本 example は**計測専用の動的共有メモリ変種**
-//! （`backend_cuda::diagnostics::render_wmma_tf32_staged_dyn`。
+//! （`fandhe_ai_backend_cuda::diagnostics::render_wmma_tf32_staged_dyn`。
 //! `WMMA_TF32_STAGED_DYNAMIC_SMEM=1` の `#if` 分岐。opt-in 属性
 //! `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES` で 48KiB を超える
 //! 割り当てを行う）を使い、stages 2..=10 を GB10 実測 optin 予算
@@ -22,7 +22,7 @@
 //! ## 実行手順
 //!
 //! ```sh
-//! cargo run -p backend-cuda --example gemm_wmma_tf32_staged_stages_bench \
+//! cargo run -p fandhe-ai-backend-cuda --example gemm_wmma_tf32_staged_stages_bench \
 //!     --release --features internal-diagnostics
 //! ```
 //!
@@ -39,9 +39,9 @@
 //! 実測値・SMEM/occupancy 試算・採否判断は
 //! `docs/perf/cuda-gemm-wmma-tf32-staged-stages-sweep.md` へ記録する。
 
-use backend_cuda::{CudaDevice, CudaError, CudaGemm, diagnostics};
 use bench_harness::rng::Xorshift64Star;
 use bench_harness::{MeasurementConfig, run as bench_run};
+use fandhe_ai_backend_cuda::{CudaDevice, CudaError, CudaGemm, diagnostics};
 
 /// 決定的シード（`gemm_mma_bench.rs`・`gemm_mma_swizzle_bench.rs` と同一値。
 /// 過去 PoC・他ベンチと同じ入力分布に揃える）。
@@ -118,7 +118,7 @@ impl TflopsMeasurement {
 /// 動的 SMEM 変種の GPU 実行のみを計測する（H2D/D2H・出力確保は計測区間
 /// 外。`gemm_mma_swizzle_bench.rs::measure_mma_f16` と同じ計測方針）。
 fn measure_dyn_staged(
-    compiled: &backend_cuda::diagnostics::CompiledWmmaTf32StagedDynKernel,
+    compiled: &fandhe_ai_backend_cuda::diagnostics::CompiledWmmaTf32StagedDynKernel,
     device: &CudaDevice,
     gemm: &CudaGemm,
     size: usize,

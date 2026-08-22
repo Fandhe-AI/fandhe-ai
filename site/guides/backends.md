@@ -24,15 +24,15 @@ PoC 実測（PoC-v2-1／PoC-v2-3／PoC-v2-5）根拠は
 利用者が composition root（`Device` → 具体バックエンドの結線）に触れる
 入口は 2 関数だけです。
 
-- `facade::tape()`: 常に利用可能な既定バックエンド（CPU）で `Tape` を
+- `fandhe_ai::tape()`: 常に利用可能な既定バックエンド（CPU）で `Tape` を
   構築します。デバイスの存在検証が不要なため非 fallible（`Result` を
   返しません）。
-- `facade::tape_for(Device)`: `Device::Cpu`／`Device::Cuda(ordinal)`／
+- `fandhe_ai::tape_for(Device)`: `Device::Cpu`／`Device::Cuda(ordinal)`／
   `Device::Metal`（macOS 限定）を明示的に指定します。CUDA・Metal は
   構築時にドライバ・デバイスの存在検証を行い、`Result<Tape, BackendError>`
   を返します。
 
-`crates/facade/examples/backend_switching.rs`（`cargo run -p facade
+`crates/facade/examples/backend_switching.rs`（`cargo run -p fandhe-ai
 --example backend_switching` で実行確認済み。転記コードは
 [Getting Started の「バックエンド切替」節](/getting-started/)参照）が
 示すとおり、`Device::Cuda(0)` が失敗した場合の CPU フォールバックは
@@ -42,7 +42,7 @@ PoC 実測（PoC-v2-1／PoC-v2-3／PoC-v2-5）根拠は
 
 `Device::Cuda(ordinal)`／`Device::Metal` はいずれも構築時にデバイスの
 存在を検証し、ドライバ不在・範囲外 ordinal の場合は
-`BackendError` を返します。**`facade` はデバイスが利用できないときに
+`BackendError` を返します。**`fandhe-ai` はデバイスが利用できないときに
 自動的に別のバックエンドへフォールバックすることはしません。**
 フォールバックが必要なら、呼び出し側で `Result` を見て分岐してください。
 

@@ -6,7 +6,7 @@
 //! transformer.onnx（opset 13+ 前提。TASK-7.4）のみを対象とし、旧セマンティクスは
 //! スコープ外とする（`out-of-scope-tracking.md`。必要が判明すれば Issue で追跡）。
 
-use tensor_core::Tensor;
+use fandhe_ai_tensor_core::Tensor;
 
 use super::error::OpError;
 use super::normalize_axis;

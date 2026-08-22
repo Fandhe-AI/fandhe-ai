@@ -73,7 +73,7 @@
 //! 設計判断とする。`plan` モジュールの公開 DTO・`FusionPlan::from_ops` は
 //! `backend-cpu`（`run_fused` 経由）・`autodiff`（`tape.rs`）から実際に
 //! 使用されるため dead_code 対象外。`detect::MAX_FUSED_CHAIN_LEN` も
-//! `autodiff::tape` の push 時上限適用（#404）が参照する単一真実源と
+//! `fandhe_ai_autodiff::tape` の push 時上限適用（#404）が参照する単一真実源と
 //! なったため dead_code 対象外（`detect_fusion` 自体は未結線のまま
 //! dead_code スコープに残る）。
 
@@ -90,7 +90,7 @@ mod plan;
 pub(crate) use detect::{
     FallbackReason, FusionDecision, FusionSegment, MIN_FUSED_CHAIN_LEN, detect_fusion,
 };
-// `autodiff::tape` の push 時上限適用（#404）が参照する単一真実源
+// `fandhe_ai_autodiff::tape` の push 時上限適用（#404）が参照する単一真実源
 // として `pub` 昇格（`detect.rs` の doc comment 参照）。クレートルート
 // （`lib.rs`）で再 re-export する。`MAX_FUSED_SEGMENT_NODES`（#588）は
 // 現状クレート内利用者を持たないが、`MAX_FUSED_CHAIN_LEN` と対の

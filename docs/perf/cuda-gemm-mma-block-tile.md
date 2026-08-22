@@ -11,7 +11,7 @@ GEMM 性能改善ツリー #479 → Phase 2 親 #490 の B-3。先行 B-2（#493
 
 - `cargo build --workspace`（`const _: () = assert!(...)` によるコンパイル時境界検査。§1 参照）
 - `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p backend-cuda`（`kernels_mma.rs` 内 `#[cfg(test)]` の `#define` 整合検査・REQ-8 needle・タイル定数 pin・`gemm_mma.rs` の launch config div_ceil 被覆テスト）
+- `cargo test -p fandhe-ai-backend-cuda`（`kernels_mma.rs` 内 `#[cfg(test)]` の `#define` 整合検査・REQ-8 needle・タイル定数 pin・`gemm_mma.rs` の launch config div_ceil 被覆テスト）
 - `tests/parity_nonregression.rs` の通常 CI 実行分（tolerance 定数 pin・fixture 自己整合。無変更で green）
 
 未検証・実機実行待ちの事項（#502「Phase B 完了時点の再計測」へ引き継ぐ）:
@@ -57,11 +57,11 @@ B-2（#493）は warp あたり 2x2 レジスタブロッキング（warp タイ
 ```sh
 git fetch origin
 git checkout perf/494-mma-block-tile-expansion   # 本イシューの実装ブランチ
-cargo test -p backend-cuda -- --ignored --nocapture   # parity 非後退の全行検査（数値一致確認を性能計測より先に実施）
-cargo run -p backend-cuda --example gemm_mma_bench --release   # 候補 B（既定値）の TFLOPS 計測
+cargo test -p fandhe-ai-backend-cuda -- --ignored --nocapture   # parity 非後退の全行検査（数値一致確認を性能計測より先に実施）
+cargo run -p fandhe-ai-backend-cuda --example gemm_mma_bench --release   # 候補 B（既定値）の TFLOPS 計測
 ```
 
-候補 A/C/D を計測する場合は `kernels_mma.rs` の `MMA_BM`/`MMA_BN` 定数とカーネルソース内 `#define BM`/`#define BN`/`#define WARPS_N` を候補表の値に一時的に差し替えてから同じ手順を実行する（`WARPS_M` はソース内に現れず `warp_id / WARPS_N` で導出されるため変更不要）。差し替え後は必ず `cargo test -p backend-cuda`（コンパイル時 `const _: () = assert!(...)` の再検査）を先に実行すること。
+候補 A/C/D を計測する場合は `kernels_mma.rs` の `MMA_BM`/`MMA_BN` 定数とカーネルソース内 `#define BM`/`#define BN`/`#define WARPS_N` を候補表の値に一時的に差し替えてから同じ手順を実行する（`WARPS_M` はソース内に現れず `warp_id / WARPS_N` で導出されるため変更不要）。差し替え後は必ず `cargo test -p fandhe-ai-backend-cuda`（コンパイル時 `const _: () = assert!(...)` の再検査）を先に実行すること。
 
 ### 記録欄（実機セッションで埋める）
 

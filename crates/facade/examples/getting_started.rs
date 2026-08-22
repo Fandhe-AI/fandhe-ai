@@ -13,11 +13,11 @@
 //! `unwrap()`/`expect()` を使わない方針（`.claude/rules/coding-rust.md`）
 //! に合わせ、`main` は `Result` を返し `?` で伝播する。
 
-use facade::compat::{Sequential, array};
+use fandhe_ai::compat::{Sequential, array};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // numpy `np.array` 慣習でテンソルを組み立てる（2 行 4 列のバッチ入力）。
-    // 実データ・shape 検査は `tensor_core::Tensor::new` へ委譲される
+    // 実データ・shape 検査は `fandhe_ai_tensor_core::Tensor::new` へ委譲される
     // （compat 層は薄いラッパーに徹する。REQ-9）。
     let input = array(vec![
         vec![0.1_f32, 0.2, 0.3, 0.4],
@@ -27,13 +27,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keras `Sequential` 慣習でレイヤーを積み上げる（対象は Linear・
     // ReLU/Sigmoid/Tanh の 4 種限定。`docs/compat-api-scope.md` §1）。
     // `add_linear` は `in_features == 0` を拒否するため `Result` を返し
-    // `?` で連鎖できる（`Linear::new` への委譲。`autodiff::nn::linear`）。
+    // `?` で連鎖できる（`Linear::new` への委譲。`fandhe_ai_autodiff::nn::linear`）。
     let model = Sequential::new()
         .add_linear(4, 8, /* seed = */ 42)?
         .add_relu()
         .add_linear(8, 2, /* seed = */ 43)?;
 
-    // 推論の入口。内部で `facade::tape()`（既定 CPU・`CpuBackendOps`・
+    // 推論の入口。内部で `fandhe_ai::tape()`（既定 CPU・`CpuBackendOps`・
     // 融合有効）を構築し forward するだけの 1 ステップ呼び出し
     // （`Sequential::predict` のドキュメントコメント参照）。
     let output = model.predict(&input)?;

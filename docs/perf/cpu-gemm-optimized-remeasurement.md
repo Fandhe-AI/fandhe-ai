@@ -84,13 +84,13 @@ git checkout bench/574-cpu-optimized-remeasurement   # 本イシューの実装�
 git log b96c3b3..main -- crates/backend-cpu           # 空であることを再確認（空でなければ b96c3b3 を使う）
 
 # 1. 数値一致確認を先に行う（既存 parity テスト群。閾値は緩和しない）
-cargo test -p backend-cpu --release --test gemm_blis_parity
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_parity
 
 # 2. Rust 側ベンチを 5 回独立実行し、size ごとに 5 run の中央値の中央値を採用する
 #    （MeasurementConfig::default() 自体が warmup 20・iters 20・中央値を内包するため、
 #    5 プロセス独立実行との組み合わせで「5 回計測の中央値」下限
 #    〈.claude/rules/coding-rust.md〉を二重に満たす。#567 先例と同方式）
-cargo test -p backend-cpu --release --test gemm_blis_perf \
+cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_perf \
     -- --ignored gemm_blis_baseline_pytorch_square_512_to_4096 --nocapture
 ```
 
@@ -135,7 +135,7 @@ python3 docs/spec/03-poc/poc-v2-1-tensor-cpu-gemm/code/pytorch/gemm_bench_torch_
 | venv 構成 | `python3 -m venv` + `pip install torch==2.13.0 numpy`（リポジトリ管理外） |
 | 計測コミット SHA（ベースライン） | `1cb2938` |
 | 計測コミット SHA（HEAD） | `b96c3b3`（上記「SHA 規則」参照） |
-| parity（`gemm_blis_parity`） | `cargo test -p backend-cpu --release --test gemm_blis_parity` → 16 passed; 0 failed |
+| parity（`gemm_blis_parity`） | `cargo test -p fandhe-ai-backend-cpu --release --test gemm_blis_parity` → 16 passed; 0 failed |
 | 計測プロトコル | `bench_harness::protocol::run`（warmup 20・iters 20・中央値/Q1/Q3。TASK-8.1）を 5 回独立実行し size ごとに中央値の中央値を採用（Rust・PyTorch 双方） |
 | 決定的シード | `Xorshift64Star`（`bench_harness::rng`。ハーネス内固定シード `3000+size`/`4000+size`） |
 | 同期境界 | Rust: `gemm_blis_parallel` 呼び出し完了（CPU 同期処理のため追加の完了待ちは不要）／PyTorch: スクリプト内計測ループ完了 |
@@ -228,7 +228,7 @@ BLAS であることが要因の一部と考えられる。反映判断（下限
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace`（Linux 実行分。実機依存・`#[ignore]` テストは除外）
-- `cargo test -p backend-cpu --test gemm_blis_perf`（`--ignored` を付けない通常実行でハーネスの
+- `cargo test -p fandhe-ai-backend-cpu --test gemm_blis_perf`（`--ignored` を付けない通常実行でハーネスの
   コンパイル成立を確認。x86_64 上で `--ignored` 実測は行わない）
 - `git diff --stat` で `crates/bench-harness/src/threshold.rs`・数値一致 tolerance 定数・
   `docs/spec/`・`guardrail.toml`・`Cargo.toml`／`Cargo.lock` に差分がないことを確認

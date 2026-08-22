@@ -32,7 +32,7 @@ warp タイルを拡大すると 1 回の `ldmatrix` ロードあたりの `mma.
    シグネチャへ `__launch_bounds__(v)` を付与したソース文字列を返す。本番定数
    （`MMA_WARP_TILES_M`/`_N`）自体は変更しない。
 2. `docs/real-hardware-verification-env.md` の手順（rsync 転送 → SSH →
-   `cargo run -p backend-cuda --example mma_ptx_dump --release
+   `cargo run -p fandhe-ai-backend-cuda --example mma_ptx_dump --release
    --features internal-diagnostics -- --out-dir <dir>`）で、下記候補表 4 形状 ×
    `__launch_bounds__`（なし／導出スレッド数で明示付与）2 通り = 8 ソースを NVRTC で
    コンパイルし `.ptx` としてダンプする（base／swizzle の既存 2 ダンプに追加）。

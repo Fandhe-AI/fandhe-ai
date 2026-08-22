@@ -88,7 +88,7 @@
 //! ## TASK-14.2a: GEMM 4096³ ピークメモリ計測ハーネス（本イシュー #178 の実装範囲）
 //!
 //! [`peak_memory`] モジュールが、TASK-14.1（#173〜#176）で実装済みの内部計測 API
-//! （`tensor_core::memory_stats::MemoryStats`）を用いて GEMM（M=N=K=4096, f32）の
+//! （`fandhe_ai_tensor_core::memory_stats::MemoryStats`）を用いて GEMM（M=N=K=4096, f32）の
 //! ピークメモリを 3 バックエンドで再現可能に計測するハーネス（[`peak_memory::run_peak_memory`]）を
 //! 提供する。係数の確定・再調整は兄弟イシュー #179（TASK-14.2b）、計測手段の環境差文書化は
 //! #180（TASK-14.3）のスコープであり、本イシューは実測記録の入力データ生成のみを行う。
