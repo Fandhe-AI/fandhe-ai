@@ -322,13 +322,29 @@ fn validate_page_path(path: &str) -> Result<(), NavError> {
     }
 }
 
+/// `source` の先頭が Windows ドライブレター絶対パス（`C:/...`・`C:\...`）の
+/// 形式かを判定する。`\` は [`validate_source_shape`]側で別途拒否済みだが、
+/// `C:/...` は `/` 始まりではないため単純な `starts_with('/')` 検査を
+/// すり抜ける。Cursor Bugbot 指摘（PR #890）: これを許すと後段の
+/// `repo_root.join(source)` が `Path::join` のセマンティクスにより絶対パス
+/// 側（`source`）で `repo_root` を丸ごと置き換えてしまい、`validate_sources`
+/// の `repo_root` 配下チェックを迂回して任意ファイルを指せる。
+fn looks_like_windows_drive_path(source: &str) -> bool {
+    let mut chars = source.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.next() == Some(':')
+        && matches!(chars.next(), Some('/') | Some('\\') | None)
+}
+
 /// `source` が相対パスの安全条件（非空・絶対パス禁止・`..` セグメント禁止・
-/// `\` 禁止）を満たすかを構文レベルで検証する（パストラバーサル対策の早期検出。
-/// 実ファイル存在確認は [`validate_sources`] が別途行う）。
+/// `\` 禁止・Windows ドライブレター絶対パス禁止）を満たすかを構文レベルで
+/// 検証する（パストラバーサル対策の早期検出。実ファイル存在確認・シンボリック
+/// リンク経由の `repo_root` 脱出防止は [`validate_sources`] が別途行う）。
 fn validate_source_shape(source: &str) -> Result<(), NavError> {
     let looks_safe = !source.is_empty()
         && !source.starts_with('/')
         && !source.contains('\\')
+        && !looks_like_windows_drive_path(source)
         && source.split('/').all(|segment| segment != "..");
     if looks_safe {
         Ok(())
@@ -519,16 +535,40 @@ pub fn parse_nav(input: &str) -> Result<Nav, NavError> {
 /// [`parse_nav`] から FS アクセスを分離し、単体テストをファイルシステムに
 /// 依存させないための独立関数（実装計画 §4）。
 ///
+/// codex-review P0 指摘（PR #890）: `repo_root.join(&page.source).is_file()`
+/// のみの検証は、パス中の中間コンポーネントがシンボリックリンクで
+/// `repo_root` 外（例: `/etc/passwd`）を指す場合でも、解決結果が通常ファイル
+/// であれば成功してしまう。[`validate_source_shape`] の構文検査（`..` 禁止等）は
+/// リンク先までは追跡できないため、ここで実ファイルシステム上の解決結果を
+/// `canonicalize` し、`repo_root` の正規化パス配下であることを `starts_with`
+/// で fail-closed に確認する（シンボリックリンク経由の脱出を拒否する回帰
+/// テストは `tests` モジュールの `validate_sources_rejects_symlink_escape` を
+/// 参照）。
+///
 /// # Errors
 ///
-/// いずれかの `page.source` が `repo_root` 配下のファイルとして存在しない場合、
-/// 最初に見つかった不在ファイルについて [`NavError::MissingSource`] を返す。
+/// - `repo_root` 自体が `canonicalize` できない（存在しない・権限不足等）場合は
+///   [`NavError::MissingSource`]（`repo_root` の表示文字列を含む）を返す。
+/// - いずれかの `page.source` が `repo_root` 配下のファイルとして存在しない
+///   （または `canonicalize` に失敗する）場合、最初に見つかった不在ファイルに
+///   ついて [`NavError::MissingSource`] を返す。
+/// - `page.source` が実在するが、シンボリックリンクの解決の結果
+///   `repo_root` の外を指す場合は [`NavError::UnsafeSource`] を返す。
 pub fn validate_sources(nav: &Nav, repo_root: &Path) -> Result<(), NavError> {
+    let canonical_root = repo_root
+        .canonicalize()
+        .map_err(|_| NavError::MissingSource(repo_root.display().to_string()))?;
     for section in &nav.sections {
         for page in &section.pages {
             let full_path = repo_root.join(&page.source);
-            if !full_path.is_file() {
+            let canonical_path = full_path
+                .canonicalize()
+                .map_err(|_| NavError::MissingSource(page.source.clone()))?;
+            if !canonical_path.is_file() {
                 return Err(NavError::MissingSource(page.source.clone()));
+            }
+            if !canonical_path.starts_with(&canonical_root) {
+                return Err(NavError::UnsafeSource(page.source.clone()));
             }
         }
     }
@@ -1133,5 +1173,65 @@ path = "/p1/"
 "#;
         let nav = parse_nav(input).expect("valid nav.toml should parse");
         assert!(validate_sources(&nav, &temp.0).is_ok());
+    }
+
+    /// codex-review P0 指摘（PR #890）の回帰テスト: `page.source` が
+    /// シンボリックリンクを経由して `repo_root` 外の実ファイルを指す場合、
+    /// リンク先が通常ファイルであっても [`validate_sources`] が
+    /// `UnsafeSource` で fail-closed に拒否することを確認する
+    /// （symlink を使わない環境〈Windows 等〉では対象外のため unix 限定）。
+    #[cfg(unix)]
+    #[test]
+    fn validate_sources_rejects_symlink_escape() {
+        let root = TempDir::new("symlink-escape-root");
+        let outside = TempDir::new("symlink-escape-outside");
+        let secret = outside.0.join("secret.md");
+        std::fs::write(&secret, b"outside repo_root").expect("write fixture outside repo_root");
+        std::os::unix::fs::symlink(&secret, root.0.join("linked.md"))
+            .expect("create symlink escaping repo_root for test fixture");
+
+        let input = r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "A"
+
+[[section.page]]
+title = "P1"
+source = "linked.md"
+path = "/p1/"
+"#;
+        let nav = parse_nav(input).expect("structurally valid nav.toml should parse");
+        match validate_sources(&nav, &root.0) {
+            Err(NavError::UnsafeSource(source)) => assert_eq!(source, "linked.md"),
+            other => panic!("expected UnsafeSource for symlink escape, got {other:?}"),
+        }
+    }
+
+    /// Cursor Bugbot 指摘（PR #890）の回帰テスト: `validate_source_shape` が
+    /// `/` 始まりのみを絶対パス扱いしているため、Windows ドライブレター
+    /// 絶対パス（例: `C:/secret.txt`）を相対パスと誤認して通してしまうと、
+    /// 後段の `repo_root.join(source)` が `Path::join` のセマンティクスにより
+    /// `repo_root` を丸ごと破棄して絶対パス側を採用してしまう
+    /// （`std::path::Path::join` のドキュメント参照）。構文検証時点で
+    /// fail-closed に拒否することを確認する。
+    #[test]
+    fn parse_nav_rejects_windows_drive_path_source() {
+        let input = r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "A"
+
+[[section.page]]
+title = "P1"
+source = "C:/secret.txt"
+path = "/p1/"
+"#;
+        assert!(matches!(parse_nav(input), Err(NavError::UnsafeSource(_))));
     }
 }

@@ -21,8 +21,8 @@
 //!
 //! # 参照実装との関係
 //!
-//! `/Users/nancy/fandhe/framework/fandhe-backend/crates/docs-site`（外部依存ゼロの
-//! TOML サブセットパーサー・行番号付きエラー・入力サイズ上限・`unwrap()` 不使用の
+//! 参照実装 `fandhe-backend`（`crates/docs-site`。外部依存ゼロの TOML
+//! サブセットパーサー・行番号付きエラー・入力サイズ上限・`unwrap()` 不使用の
 //! 設計方針）を参照するが、本リポジトリは `fandhe-frontend` 系クレートに依存できない
 //! （deps-policy.md の許容 9 区分外・ユーザー承認必須のため追加しない）ため、
 //! HTML ノード生成を含まない Node レンダラ非依存の純データモデルとして実装する
