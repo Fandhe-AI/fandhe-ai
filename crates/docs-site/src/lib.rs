@@ -28,9 +28,15 @@
 //! - `script`: テーマ切替・全文検索のクライアント側 JS 定数（イシュー
 //!   #871）。`build` が `assets/site.js` へ書き出し、`layout` が `<script>`
 //!   経由で埋め込み・参照する
+//! - [`linkcheck`][]: ビルド内蔵 linkcheck（fail-closed。イシュー #872）。
+//!   全ページの最終形 `html::Node` から `href`／`src` を再帰収集し、
+//!   ページ間リンク・`#fragment` アンカー・アセット参照の実在を突合する。
+//!   壊れたリンクが 1 件でもあれば `build` は `out` へ 1 バイトも書き出さず
+//!   非 0 終了する
 //! - [`build`][]: 上記を結線したビルドパイプライン（`nav.toml` 読み込み →
-//!   パース → 検証 → 各ページの Markdown→HTML 変換・検索索引収集 → `<out>`
-//!   への書き出し）
+//!   パース → 検証 → 各ページの Markdown→HTML 変換・検索索引収集 →
+//!   `linkcheck::check_links`（`pub(crate)`。private-item への intra-doc
+//!   link を避けるためコードスパンで参照する） → `<out>` への書き出し）
 //!
 //! # 参照実装との関係
 //!
@@ -63,6 +69,7 @@
 pub mod build;
 pub mod html;
 pub mod layout;
+pub mod linkcheck;
 pub mod markdown;
 pub mod nav;
 pub(crate) mod script;

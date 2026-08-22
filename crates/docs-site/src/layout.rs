@@ -105,8 +105,32 @@ fn search_ui(index_href: &str) -> Node {
     )
 }
 
-/// ヘッダ: サイトタイトル（ルートへのリンク）・`index_path` を持つセクションの
-/// メニューリンク・テーマトグル・検索 UI・GitHub リポジトリリンク。
+/// サイトタイトルのリンク先（「ホーム」への href）。`nav.toml` は `page.path
+/// = "/"` の宣言を必須としない（`nav::Nav` の型が保証する唯一の不変条件は
+/// 「1 件以上のセクション」「各セクション 1 件以上のページ」）ため、無条件に
+/// `asset_href(base_path, "/")` を使うと、ルートページを宣言していない
+/// nav.toml では実在しないページへのリンクになってしまう
+/// （イシュー #872 の linkcheck 実装時に発見: `docs-site` 自身の単体・統合
+/// テスト用 fixture の大半は `page.path = "/"` を宣言していないため、
+/// linkcheck 導入前は誰にも検出されない潜在的なリンク切れだった）。
+///
+/// 実サイト（`site/nav.toml`）は先頭セクションの先頭ページが `path = "/"`
+/// （Home）であるため実質的な変更はないが、`path = "/"` を宣言しない
+/// nav.toml（テスト fixture 含む）でも常に実在するリンクにするため、
+/// 「先頭セクションの先頭ページ」（`nav::parse_nav` が保証する不変条件により
+/// 必ず存在する）を安全なホームリンク先として採用する。
+fn home_href(nav: &Nav) -> String {
+    let base_path = nav.site.base_path.as_str();
+    nav.sections
+        .first()
+        .and_then(|section| section.pages.first())
+        .map(|page| asset_href(base_path, &page.path))
+        .unwrap_or_else(|| asset_href(base_path, "/"))
+}
+
+/// ヘッダ: サイトタイトル（[`home_href`] が指す「ホーム」へのリンク）・
+/// `index_path` を持つセクションのメニューリンク・テーマトグル・検索 UI・
+/// GitHub リポジトリリンク。
 fn header(nav: &Nav) -> Node {
     let base_path = nav.site.base_path.as_str();
 
@@ -154,7 +178,7 @@ fn header(nav: &Nav) -> Node {
                 vec![("class".to_string(), "site-title".to_string())],
                 vec![Node::element(
                     "a",
-                    vec![("href".to_string(), asset_href(base_path, "/"))],
+                    vec![("href".to_string(), home_href(nav))],
                     vec![Node::text(nav.site.title.clone())],
                 )],
             ),
@@ -445,6 +469,28 @@ path = "/api/"
         assert!(html.contains(&format!("href=\"{GITHUB_REPO_URL}\"")));
         assert!(html.contains("target=\"_blank\""));
         assert!(html.contains("rel=\"noopener noreferrer\""));
+    }
+
+    /// イシュー #872 回帰テスト: `SAMPLE_NAV` は `page.path = "/"` を宣言
+    /// していない（`nav.rs`・`nav::Nav` の不変条件はそれを必須にしない）。
+    /// このような nav.toml でもサイトタイトルのリンク先（`home_href`）が
+    /// 実在するページ（先頭セクションの先頭ページ）を指すこと（無条件
+    /// `asset_href(base_path, "/")` を使うと linkcheck が壊れたリンクとして
+    /// 検出する。`home_href` ドキュメンテーションコメント参照）。
+    #[test]
+    fn header_site_title_links_to_first_page_when_root_path_is_not_declared() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&header(&nav));
+        assert!(html.contains("class=\"site-title\""));
+        assert!(html.contains("<a href=\"/rust-ai-library/guides/\">rust-ai-library</a>"));
+    }
+
+    /// `home_href` 単体テスト: 先頭セクションの先頭ページの `asset_href`
+    /// 適用済み href を返す。
+    #[test]
+    fn home_href_returns_first_section_first_page_href() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        assert_eq!(home_href(&nav), "/rust-ai-library/guides/");
     }
 
     #[test]

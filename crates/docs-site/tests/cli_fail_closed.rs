@@ -130,6 +130,34 @@ fn missing_key_fixture_exits_nonzero() {
     assert!(stderr.contains("build failed"));
 }
 
+/// イシュー #872 受け入れ基準: リンク切れ fixture（実在しないページへの
+/// ルート相対リンクを含む）はビルド内蔵 linkcheck により非 0 終了し、
+/// `out` ディレクトリが一切作成されない（fail-closed。`--out` を渡していても
+/// `open_out_root_dir` の呼び出し自体に到達しないため。`build.rs`・
+/// `linkcheck.rs` のモジュールコメント参照）。
+#[test]
+fn broken_link_fixture_exits_nonzero_and_creates_no_output_directory() {
+    let root = fixture_root("broken-link");
+    let out = TempOutDir::new("broken-link");
+
+    let output = bin()
+        .arg("--root")
+        .arg(&root)
+        .arg("--out")
+        .arg(&out.0)
+        .output()
+        .expect("docs-site binary should launch");
+
+    assert!(!output.status.success());
+    assert!(
+        !out.0.exists(),
+        "out directory must not be created when linkcheck fails"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("build failed"));
+    assert!(stderr.contains("does-not-exist"));
+}
+
 #[test]
 fn missing_source_fixture_exits_nonzero() {
     let root = fixture_root("missing-source");
