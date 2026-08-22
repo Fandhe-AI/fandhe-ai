@@ -135,37 +135,65 @@ fn page_output_path(out: &Path, page_path: &str) -> PathBuf {
     }
 }
 
-/// `path` を開いたうえで、実際に開いた fd（`Metadata` の `(dev, ino)`）が
-/// `canonical_path` を検証した際のファイルと同一であることを確認する。
+/// `canonical_path` の実体を（symlink を辿らない）`lstat` 相当で確認し、
+/// シンボリックリンクでないことを検査したうえでその `(dev, ino)` を返す。
+/// `File::open` より前に呼ぶことで「検証時点の実体」の身分証明として使う。
 ///
-/// unix では `std::os::unix::fs::MetadataExt` の `dev()`/`ino()` で fd 起点の
-/// アイデンティティを取れる（`fstat` 相当。パス文字列の再解決を経ないため
-/// TOCTOU に強い）。`canonicalize` はパス解決のみで実ファイルを開かないため、
-/// 「検証したパスの実体」と「実際に読む fd」が同一かどうかまでは保証しない
-/// （`canonicalize` の直後に同じ絶対パスがシンボリックリンクへ差し替えられる
-/// race）。この関数は開いた fd 側から `(dev, ino)` を取り、`canonical_path` を
-/// 独立に再 `canonicalize` した結果と一致することを検査することで、その race を
-/// 検知して fail-closed に倒す（レビュー指摘・PR #899）。unix 以外（Windows 等）
-/// では `MetadataExt` が使えないため検査を no-op にする（`docs-site` は CI
-///〈GitHub ホステッド ubuntu-latest〉・開発者ローカル実行が前提で、Windows は
-/// 現状 CI 対象外。`.claude/rules/ci.md` 実機依存節参照）。
+/// 旧実装（PR #899 当初版）は `File::open` の**後**に同じパス文字列を再
+/// `canonicalize` し、開いた fd の `(dev, ino)` と再解決結果を比較していた。
+/// しかしこれは自己無矛盾性の検査に過ぎない: `canonicalize`（`repo_root`
+/// 配下チェック時点）の直後・`File::open` 前にパスがシンボリックリンクへ
+/// 差し替えられた場合、`open` はその新しいリンク先を開き、直後の再
+/// `canonicalize` も同じ新しいリンク先を指すため、両者は常に一致してしまい
+/// race を検知できなかった（Cursor Bugbot 指摘・PR #899）。
+///
+/// 本関数は `File::open` より**前**に呼び出し、その時点の実体の身分
+/// （`(dev, ino)`）を記録する。呼び出し元はこれを `File::open` 後の
+/// `file.metadata()` と比較する（[`read_verified_source`]）。両者が一致するのは
+/// 「`repo_root` 配下チェックを通過した実体」と「実際に読んだ fd」が同一の
+/// 場合に限られるため、`canonicalize` と `open` の間のシンボリックリンク
+/// 差し替え race を検知できる（差し替え後の新しい実体は身分が異なるため
+/// 不一致になり fail-closed に拒否される）。
+///
+/// unix 以外（Windows 等）では `MetadataExt` が使えないため検査を no-op に
+/// する（`docs-site` は CI〈GitHub ホステッド ubuntu-latest〉・開発者ローカル
+/// 実行が前提で、Windows は現状 CI 対象外。`.claude/rules/ci.md` 実機依存節
+/// 参照）。
 #[cfg(unix)]
-fn verify_opened_file_matches_canonical_path(
-    file: &fs::File,
-    canonical_path: &Path,
-) -> std::io::Result<bool> {
+fn lstat_non_symlink_identity(canonical_path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    let opened = file.metadata()?;
-    let reresolved = canonical_path.canonicalize()?;
-    let reresolved_meta = fs::symlink_metadata(&reresolved)?;
-    Ok(opened.dev() == reresolved_meta.dev() && opened.ino() == reresolved_meta.ino())
+    let lstat = fs::symlink_metadata(canonical_path)?;
+    if lstat.file_type().is_symlink() {
+        // 呼び出し元（`read_verified_source`）が `ErrorKind` を見て
+        // `BuildError::Nav(NavError::UnsafeSource(..))` へ詰め替える。
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path was replaced with a symlink after the repo_root containment check",
+        ));
+    }
+    Ok((lstat.dev(), lstat.ino()))
 }
 
 #[cfg(not(unix))]
-fn verify_opened_file_matches_canonical_path(
-    _file: &fs::File,
-    _canonical_path: &Path,
+fn lstat_non_symlink_identity(_canonical_path: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// [`lstat_non_symlink_identity`] が返した「開く前の身分」と、実際に開いた
+/// `file` の `fstat` 結果が同一であることを検査する。不一致は `canonicalize`
+/// と `File::open` の間のシンボリックリンク差し替え race を意味する。
+#[cfg(unix)]
+fn verify_opened_file_matches_identity(
+    file: &fs::File,
+    expected: (u64, u64),
 ) -> std::io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let opened = file.metadata()?;
+    Ok((opened.dev(), opened.ino()) == expected)
+}
+
+#[cfg(not(unix))]
+fn verify_opened_file_matches_identity(_file: &fs::File, _expected: ()) -> std::io::Result<bool> {
     Ok(true)
 }
 
@@ -181,8 +209,12 @@ fn verify_opened_file_matches_canonical_path(
 /// 単一ハンドルへ収斂させても、なお 2 つの残存 race がある（レビュー指摘・
 /// PR #899）。それぞれ次の手当てで塞ぐ:
 /// 1. `canonicalize` から `File::open` までの間に最終コンポーネントがシンボリック
-///    リンクへ差し替えられる race → 開いた fd の `(dev, ino)` を
-///    [`verify_opened_file_matches_canonical_path`] で再検証し、不一致なら
+///    リンクへ差し替えられる race → `File::open` 前に
+///    [`lstat_non_symlink_identity`] で実体の身分（`(dev, ino)`）を記録し、
+///    開いた fd の `fstat` 結果を [`verify_opened_file_matches_identity`] で
+///    照合する（PR #899 追補: 旧実装は open 後に同じパスを再 canonicalize
+///    して自己無矛盾性しか検査しておらず race を検知できていなかった。
+///    [`lstat_non_symlink_identity`] のドキュメント参照）。不一致なら
 ///    fail-closed に拒否する。
 /// 2. `metadata().len()` でのサイズ確認後、同じハンドルから EOF まで無制限に
 ///    読み切っていたため、確認後にファイルが増加すると `MAX_SOURCE_BYTES` を
@@ -212,13 +244,26 @@ fn read_verified_source(
         return Err(BuildError::Nav(NavError::UnsafeSource(source.to_string())));
     }
 
+    // `File::open` より前に実体の身分を記録する（race window を最小化する。
+    // `lstat_non_symlink_identity` のドキュメント参照）。
+    let pre_open_identity = lstat_non_symlink_identity(&canonical_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::InvalidInput {
+            BuildError::Nav(NavError::UnsafeSource(source.to_string()))
+        } else {
+            BuildError::ReadSource {
+                source: source.to_string(),
+                error,
+            }
+        }
+    })?;
+
     let file = fs::File::open(&canonical_path).map_err(|error| BuildError::ReadSource {
         source: source.to_string(),
         error,
     })?;
 
     let matches =
-        verify_opened_file_matches_canonical_path(&file, &canonical_path).map_err(|error| {
+        verify_opened_file_matches_identity(&file, pre_open_identity).map_err(|error| {
             BuildError::ReadSource {
                 source: source.to_string(),
                 error,
@@ -338,44 +383,97 @@ fn write_file_creating_parent(
     }
 
     // 上の `symlink_metadata` 検査から実際の書き込みまでの間に、当該パスへ
-    // シンボリックリンクを差し替えられる race がなお残る（レビュー指摘・
-    // PR #899）。`fs::write` はリンクを辿って追従先を上書きしてしまうため、
-    // 検査と書き込みを不可分にする代わりに次の手順で closed に倒す:
-    // 1. `remove_file`（`NotFound` は無視）でそのパス上のエントリ自体を
-    //    unlink する（再ビルドで既存の通常ファイルを上書きする通常経路を
-    //    保つ。symlink であっても unlink はリンク自体を消すだけで追従先には
-    //    触れない）
-    // 2. `OpenOptions::create_new(true)` で新規作成する。POSIX の
-    //    `O_CREAT|O_EXCL` は対象パスが（シンボリックリンクを含め）既に何かを
-    //    指している場合 `EEXIST` で失敗するため、手順 1 と 2 の間で誰かが
-    //    そのパスへシンボリックリンクを再作成しても、その追従先へは絶対に
-    //    書き込まず fail-closed にエラーを返す（`std` のみで実現できる
-    //    atomic な原始命令。`custom_flags(O_NOFOLLOW)` のような手書き
-    //    プラットフォーム定数を要らない）。
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(BuildError::WritePage {
-                path: path_display,
-                error,
-            });
+    // シンボリックリンクを差し替えられる race がなお残る。`fs::write` は
+    // リンクを辿って追従先を上書きしてしまうため、以前は
+    // `remove_file`（既存エントリの unlink）→ `create_new` の 2 手順で
+    // fail-closed に倒していた。しかしこの順序は **codex-review 指摘（PR
+    // #899・CI ブロック要因の P0）**のとおりデータ破壊経路になる: `remove_file`
+    // で既存の正常な生成物を先に消してしまうため、その後の `open`/`write_all`
+    // が権限変更・容量不足・I/O エラー・プロセス停止等で失敗すると、ビルド
+    // エラーになるだけでなく既存生成物も失われる（途中まで書かれた不完全な
+    // ファイルが残ることもある）。
+    //
+    // 修正: 同じ検証済みディレクトリ内（`parent`。`create_dir_all_verified`
+    // が直前に `canonical_out` 配下であることを確認済み）へ一時ファイルを
+    // `create_new` で作成し、書き込み・`sync_all` 完了後に初めて
+    // `fs::rename` で本来のパスへ置換する。
+    // - 一時ファイル名は `.{ファイル名}.tmp-{pid}-{カウンタ}-{nanos}` とし、
+    //   同一プロセス内の並行呼び出し・過去の残骸との衝突を避ける
+    //   （`AlreadyExists` は限られた回数だけ次の候補へ retry し、それでも
+    //   衝突する場合は fail-closed にエラーを返す）。
+    // - 一時ファイル自体も `create_new` で作るため、事前に何か（symlink
+    //   含む）がそのパスを指していれば `EEXIST` で失敗し、その追従先へは
+    //   書き込まない。
+    // - `fs::rename` は POSIX 上、置換先が既存のシンボリックリンクであっても
+    //   そのリンクエントリ自体を置き換えるだけで、リンク先を辿って上書き
+    //   することはない（`remove_file` が持っていた「リンク自体だけを消す」
+    //   性質を rename でも保つ）。よって置換先が既存の通常ファイルであれば
+    //   `rename` は書き込み完了後に不可分に置換し、途中失敗時は元の生成物を
+    //   一切変更しない。
+    // - 書き込み・`rename` のいずれかが失敗した場合は一時ファイルを
+    //   ベストエフォートで削除し、元の生成物・エラー内容はそのまま呼び出し元
+    //   へ返す。
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "output".to_string());
+
+    static TMP_NAME_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    const MAX_TMP_NAME_ATTEMPTS: u32 = 8;
+
+    let mut attempt = 0u32;
+    let (tmp_path, mut tmp_file) = loop {
+        let counter = TMP_NAME_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let tmp_path = parent.join(format!(
+            ".{file_name}.tmp-{}-{counter}-{nanos}",
+            std::process::id()
+        ));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)
+        {
+            Ok(file) => break (tmp_path, file),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists
+                    && attempt < MAX_TMP_NAME_ATTEMPTS =>
+            {
+                attempt += 1;
+            }
+            Err(error) => {
+                return Err(BuildError::WritePage {
+                    path: path_display,
+                    error,
+                });
+            }
         }
-    }
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|error| BuildError::WritePage {
-            path: path_display.clone(),
-            error,
-        })?;
-    std::io::Write::write_all(&mut file, contents.as_bytes()).map_err(|error| {
-        BuildError::WritePage {
+    };
+
+    let write_result = std::io::Write::write_all(&mut tmp_file, contents.as_bytes())
+        .and_then(|()| tmp_file.sync_all());
+    drop(tmp_file);
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(BuildError::WritePage {
             path: path_display,
             error,
-        }
-    })
+        });
+    }
+
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(BuildError::WritePage {
+            path: path_display,
+            error,
+        });
+    }
+
+    Ok(())
 }
 
 /// `<root>/site/nav.toml` を読み込み・パース・検証し、各ページを Markdown→HTML
@@ -583,6 +681,65 @@ path = "/intro/"
         assert!(html.starts_with("<!DOCTYPE html>\n"));
         assert!(html.contains("<h1>Intro</h1>"));
         assert!(html.contains("assets/site.css"));
+    }
+
+    /// レビュー指摘の回帰テスト（PR #899・codex-review P0・CI ブロック要因）:
+    /// `write_file_creating_parent` は既存生成物を `remove_file` で消してから
+    /// 書き込む代わりに、一時ファイル＋`rename` の atomic replace で置換する。
+    /// 同一 `out` への再ビルドが（1）内容を正しく更新し、（2）一時ファイルの
+    /// 残骸（`.{name}.tmp-*`）を残さないことを確認する。
+    #[test]
+    fn build_site_rebuild_replaces_existing_output_without_tmp_residue() {
+        let root = TempDir::new("build-rebuild-root");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        let nav_toml = r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#;
+        fs::write(root.0.join("site/nav.toml"), nav_toml).unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# First").unwrap();
+
+        let out = TempDir::new("build-rebuild-out");
+        build_site(&root.0, &out.0).expect("first build should succeed");
+        let first_html = fs::read_to_string(out.0.join("intro/index.html")).unwrap();
+        assert!(first_html.contains("<h1>First</h1>"));
+
+        // 同じ `out` へ内容を変えて再ビルドする。
+        fs::write(root.0.join("site/intro.md"), b"# Second").unwrap();
+        build_site(&root.0, &out.0).expect("second build should succeed");
+        let second_html = fs::read_to_string(out.0.join("intro/index.html")).unwrap();
+        assert!(
+            second_html.contains("<h1>Second</h1>"),
+            "rebuild must replace the previous generated content"
+        );
+
+        // `out` 配下（`assets/` 含む）のどこにも一時ファイルの残骸が残っていない
+        // ことを確認する。
+        fn assert_no_tmp_residue(dir: &Path) {
+            for entry in fs::read_dir(dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                assert!(
+                    !name.contains(".tmp-"),
+                    "leftover temp file found: {}",
+                    path.display()
+                );
+                if entry.file_type().unwrap().is_dir() {
+                    assert_no_tmp_residue(&path);
+                }
+            }
+        }
+        assert_no_tmp_residue(&out.0);
     }
 
     #[test]
