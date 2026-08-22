@@ -409,6 +409,16 @@ pub mod diagnostics {
         render_mma_f16_block_tile,
     };
 
+    // イシュー #855: `render_mma_f16_block_tile` と同じ候補パラメータで、
+    // 静的予算以下でも `extern __shared__` 動的 SMEM 変換を強制適用する
+    // 対照実験用ランナー（`kernels_mma.rs::mma_f16_source_with_block_tile_
+    // forced_dynamic_smem` ドキュメンテーションコメント「目的」節参照）。
+    // 実機観測で「変換そのものの欠陥」か「候補定数側の潜在バグ」かを
+    // 切り分けるための唯一の呼び出し元は
+    // `examples/gemm_mma_block_tile_bench.rs`。本番経路はこの再公開に
+    // 一切依存しない。
+    pub use kernels_mma::render_mma_f16_block_tile_forced_dynamic_smem;
+
     // derive_mma_block_tile_layout は非公開関数（`kernels_mma.rs` 内部の
     // レイアウト導出ロジックの単一の真実源）だが、`examples/
     // gemm_mma_block_tile_bench.rs` は候補表定義・opt-in 予算比較・

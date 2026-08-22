@@ -17,6 +17,35 @@
 //! 等の本番定数）は一切変更しない**。採否判断・本番結線は後続イシュー
 //! #842 のスコープ。
 //!
+//! ## 実行時観測（イシュー #855）
+//!
+//! #840 の GB10 実機 A/B で `bt64x128_s4`／`bt128x128_s3_wt2x4`
+//! （いずれも `extern __shared__` 動的 SMEM 変換を通る候補）のみが CPU
+//! `f32::mul_add` 参照との数値一致に fail し、#842 の机上調査ではアドレス
+//! 計算・アライメントに欠陥を特定できなかった。イシュー #855 は
+//! `CONTROL_CANDIDATES`（対照実験行）と `compute-sanitizer` による実機
+//! 実行時観測でこれを切り分けた。
+//!
+//! **結論: 不一致の原因は `extern __shared__` 変換にもタイル候補定数にも
+//! ない**。`CONTROL_CANDIDATES::debug_default_via_diagnostics_path`
+//! （production とバイト一致のソース・静的 SMEM のまま、診断コンパイル・
+//! 起動経路のみを経由）が production 自身（本ファイルが標準出力へ書く
+//! `production_direct(no diagnostics path):` 行）と全く同一の座標・同一値
+//! （`mismatch_count=2/266240`・`max_abs_diff=1.562e-2`・
+//! `max_rel_err=6.818e-2`・`first_mismatch=(168, 2)`）で不一致を出すことを
+//! 確認した。すなわち production の base カーネル自身が、本バイナリの
+//! 正しさ検査データ（`CORRECTNESS_M=520`・`SEED=0xC0FFEE`）に対して
+//! この不一致を既に持っており、#840/#842 はこれを「動的 SMEM 変換の
+//! 欠陥」と誤って帰属していた。`compute-sanitizer --tool memcheck` は
+//! 全候補（`extern __shared__` 変種を含む）でメモリ安全性エラーを検出
+//! しなかった（起動不能な `bt128x256_s3_wt4x4` の
+//! `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` を除く。これは #854 で既知の
+//! レジスタ不足）。既存の `#[ignore]` テスト
+//! `tests/cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` も本パッチと無関係
+//! に（`main` ブランチ単体でも）同系統の小規模不一致で fail することを
+//! 確認しており、これは本イシューのスコープ外の別課題である（詳細・
+//! 追跡方針は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.4）。
+//!
 //! ## 計測対象候補（`docs/perf/cuda-gemm-mma-block-tile-stages.md` §3.1）
 //!
 //! | 識別子 | BM/BN/BK | STAGES | warp タイル | SMEM（机上見積もり） |
@@ -151,6 +180,13 @@ impl TflopsMeasurement {
 /// （既存 4 候補・比較基準行と揃える）、`Some(v)` はシグネチャへ
 /// `__launch_bounds__(v)` を付与する（`diagnostics::render_mma_f16_
 /// block_tile` の `launch_bounds: Option<u32>` 引数へそのまま渡す）。
+///
+/// `force_dynamic_smem`（イシュー #855 で追加）: 真の場合
+/// `diagnostics::render_mma_f16_block_tile_forced_dynamic_smem` を使い、
+/// 静的 48KiB 予算以下の候補でも `extern __shared__` 動的 SMEM 変換を
+/// 強制適用する（対照実験専用。本ファイル冒頭コメント「実行時観測」
+/// 節・`CONTROL_CANDIDATES` 参照）。既存候補はすべて `false`（本番と
+/// 同じ「48KiB 超のみ動的化」の既定挙動）。
 struct Candidate {
     label: &'static str,
     bm: u32,
@@ -160,6 +196,7 @@ struct Candidate {
     warp_tiles_m: u32,
     warp_tiles_n: u32,
     launch_bounds: Option<u32>,
+    force_dynamic_smem: bool,
 }
 
 const CANDIDATES: [Candidate; 5] = [
@@ -172,6 +209,7 @@ const CANDIDATES: [Candidate; 5] = [
         warp_tiles_m: 2,
         warp_tiles_n: 2,
         launch_bounds: None,
+        force_dynamic_smem: false,
     },
     Candidate {
         label: "bt128x128_s3_wt2x4",
@@ -182,6 +220,7 @@ const CANDIDATES: [Candidate; 5] = [
         warp_tiles_m: 2,
         warp_tiles_n: 4,
         launch_bounds: None,
+        force_dynamic_smem: false,
     },
     Candidate {
         label: "bt128x256_s3_wt4x4",
@@ -192,6 +231,7 @@ const CANDIDATES: [Candidate; 5] = [
         warp_tiles_m: 4,
         warp_tiles_n: 4,
         launch_bounds: None,
+        force_dynamic_smem: false,
     },
     Candidate {
         label: "bt128x256_s4",
@@ -202,6 +242,7 @@ const CANDIDATES: [Candidate; 5] = [
         warp_tiles_m: 4,
         warp_tiles_n: 4,
         launch_bounds: None,
+        force_dynamic_smem: false,
     },
     // イシュー #854: `bt128x256_s3_wt4x4`（`launch_bounds` なし）は
     // 130 registers/thread × 512 threads = 66,560 > 65,536（GB10
@@ -220,6 +261,98 @@ const CANDIDATES: [Candidate; 5] = [
         warp_tiles_m: 4,
         warp_tiles_n: 4,
         launch_bounds: Some(512),
+        force_dynamic_smem: false,
+    },
+];
+
+/// イシュー #855 対照実験行（本ファイル冒頭コメント「実行時観測（イシュー
+/// #855）」節）。`CANDIDATES` とは独立の配列にし、既存 5 候補の意味
+/// （#840/#842 実測の対象）を変えずに切り分け専用行を追加する。
+///
+/// **実機観測の結論（#855。本ファイル冒頭コメント参照）**: 以下 4 行の
+/// うち `debug_default_via_diagnostics_path`（production とバイト一致
+/// ソース・静的 SMEM のまま、診断コンパイル・起動経路のみを経由）が
+/// production 自身と同じ座標（`(row=168, col=2)`・
+/// `mismatch_count=2/266240`）で fail したことにより、**#840/#842 が
+/// 「動的 SMEM 変換の欠陥」と推定した不一致は、実際には extern
+/// __shared__ 変換にもタイル候補定数にも起因しない**ことが判明した。
+/// 詳細は `docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.3 を参照。
+///
+/// - `debug_default_via_diagnostics_path`: 現行本番定数（BM=64/BN=128/
+///   BK=32/STAGES=3/warp2x2）を非強制（`mma_f16_source()` とバイト一致・
+///   静的 `__shared__` のまま）で診断コンパイル・起動経路
+///   （`RenderedMmaF16BlockTileKernel::compile`／
+///   `CompiledMmaF16BlockTileKernel::launch_f16`）のみを経由して起動する。
+///   production（`CudaMmaGemm`）との差はコンパイル・起動コードパスの
+///   みであり、これが fail することで「診断ハーネスの compile/launch
+///   コードパス自体のバグではなく、カーネル・参照値比較そのものに起因
+///   する不一致」（実際には後述の通り production 自身も同じ不一致を
+///   出す）と判明した。
+/// - `mma_f16_base_dynsmem`: 現行本番定数を [`Candidate::
+///   force_dynamic_smem`] で強制動的化したもの（動的 41,472B）。
+///   `debug_default_via_diagnostics_path` と同一箇所・同一値で fail し、
+///   動的 SMEM 変換の有無が結果に影響しないことを追加確認する。
+/// - `bt64x64_s4_static`: `bt64x128_s4`（BM=64/BN=128/BK=32/STAGES=4。
+///   動的 55,296B）から BN のみ 64 へ縮小し、STAGES=4 のパイプライン
+///   段数を静的予算内（38,912B。`extern __shared__` 変換を経ない）で
+///   単独検証する。これも同一箇所・同一値で fail し、STAGES=4 側にも
+///   欠陥がないことを確認した。
+/// - `bt128x64_s3_wt2x4_static`: `bt128x128_s3_wt2x4`（BM=128/BN=128/
+///   BK=32/STAGES=3・warp2x4。動的 56,832B）から BN のみ 64 へ縮小し、
+///   BM=128・warp2x4 のタイル写像を静的予算内（44,544B。`extern
+///   __shared__` 変換を経ない）で単独検証する。同じく同一箇所・同一値で
+///   fail し、BM=128/warp2x4 タイル写像側にも欠陥がないことを確認した。
+///
+/// いずれも `derive_mma_block_tile_layout`（`(bm*a_pad + bk*b_pad) * 2 *
+/// stages`、`a_pad=bk+8`・`b_pad=bn+8`）から机上算出した値
+/// （下記コメント）で `MMA_STATIC_SMEM_LIMIT_BYTES`＝49,152B 以下に収まる
+/// ことを確認済み。
+const CONTROL_CANDIDATES: [Candidate; 4] = [
+    Candidate {
+        label: "debug_default_via_diagnostics_path",
+        bm: 64,
+        bn: 128,
+        bk: 32,
+        stages: 3,
+        warp_tiles_m: 2,
+        warp_tiles_n: 2,
+        launch_bounds: None,
+        force_dynamic_smem: false,
+    },
+    Candidate {
+        label: "mma_f16_base_dynsmem",
+        bm: 64,
+        bn: 128,
+        bk: 32,
+        stages: 3,
+        warp_tiles_m: 2,
+        warp_tiles_n: 2,
+        launch_bounds: None,
+        force_dynamic_smem: true,
+    },
+    Candidate {
+        // (64*40 + 32*72) * 2 * 4 = 38,912B（静的）。
+        label: "bt64x64_s4_static",
+        bm: 64,
+        bn: 64,
+        bk: 32,
+        stages: 4,
+        warp_tiles_m: 2,
+        warp_tiles_n: 2,
+        launch_bounds: None,
+        force_dynamic_smem: false,
+    },
+    Candidate {
+        // (128*40 + 32*72) * 2 * 3 = 44,544B（静的）。
+        label: "bt128x64_s3_wt2x4_static",
+        bm: 128,
+        bn: 64,
+        bk: 32,
+        stages: 3,
+        warp_tiles_m: 2,
+        warp_tiles_n: 4,
+        launch_bounds: None,
+        force_dynamic_smem: false,
     },
 ];
 
@@ -489,6 +622,101 @@ fn main() {
         .map(|&x| f16::from_f32(x).to_f32())
         .collect();
 
+    // production 直接検査行（イシュー #855）: production 経路
+    // （`CudaMmaGemm::launch_f16`。診断ハーネスの
+    // `CompiledMmaF16BlockTileKernel` を一切経由しない）が同じ
+    // CORRECTNESS_M/N/K・同じ a_ref/b_ref・同じ expected_f32 に対しても
+    // 同一箇所で不一致を出すかを検査する行。実機観測の結果、production
+    // 自身も `CONTROL_CANDIDATES::debug_default_via_diagnostics_path` と
+    // 同一箇所・同一値（`mismatch_count=2/266240`・
+    // `first_mismatch=(168, 2)`）で不一致を出すことを確認した（イシュー
+    // #855。`docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.3）。これにより
+    // #840/#842 が観測した不一致は診断ハーネス（extern __shared__ 変換・
+    // タイル候補定数・compile/launch コードパス）に起因せず、production の
+    // base カーネル自体が本テストデータ（M=520 非整列端・SEED=0xC0FFEE）
+    // に対して持つ既存の狭い数値差（`docs/perf/
+    // cuda-gemm-mma-block-tile-stages.md` §9.4 参照。既存 `#[ignore]` テスト
+    // `cpu_cuda_mma_parity.rs::mma_f16_k4096_stress` の失敗と同系統）に
+    // 起因すると確定できた。以降の A/B 実行でも production 自身の実測値を
+    // 常に記録できるよう、この検査は一時デバッグではなく本バイナリの
+    // 標準出力の一部として残す。
+    // `production_direct_fail_count` はブロック外（下記 fail-closed 分岐）
+    // でも参照するため、ブロック式の値として持ち出す（codex-review 是正:
+    // PR #862 review。以前は `report.fail_count` を println するだけで
+    // ブロック外へ持ち出さず、直後の性能計測（`production_medians`
+    // 構築・全候補の ratio 分母採用）が production 自身の parity 結果を
+    // 一切見ずに進んでいた。本ファイル冒頭コメントおよび PR 本文が掲げる
+    // 「parity ゲートが性能値採用に先立つ」契約・AGENTS.md の数値契約に
+    // 反するため、production も候補〈`candidate_parity_ok` 呼び出し側の
+    // fail-closed 分岐〉と同じ fail-closed ゲートを通す）。
+    let production_direct_fail_count: usize = {
+        let (a_dev, b_dev) = gemm
+            .upload_f16(&a_ref, &b_ref)
+            .expect("production direct-check upload must succeed");
+        let mut c_dev = gemm
+            .alloc_output_f16(CORRECTNESS_M, CORRECTNESS_N)
+            .expect("production direct-check alloc must succeed");
+        gemm.launch_f16(
+            &a_dev,
+            &b_dev,
+            &mut c_dev,
+            CORRECTNESS_M,
+            CORRECTNESS_N,
+            CORRECTNESS_K,
+        )
+        .expect("production direct-check launch must succeed");
+        let actual_f16 = gemm
+            .download_f16(&c_dev)
+            .expect("production direct-check download must succeed");
+        let actual_f32: Vec<f32> = actual_f16.iter().map(|x| x.to_f32()).collect();
+        let report = backend_cpu::compare(&actual_f32, &expected_f32)
+            .expect("production direct-check compare shape must match");
+        let first_mismatch = actual_f32
+            .iter()
+            .zip(expected_f32.iter())
+            .position(|(a, e)| is_mismatch(*a, *e));
+        println!(
+            "production_direct(no diagnostics path): mismatch_count={}/{}, \
+             max_abs_diff={:.3e}, max_rel_err={:.3e}, first_mismatch={:?}",
+            report.fail_count,
+            (CORRECTNESS_M * CORRECTNESS_N) as usize,
+            report.max_abs_diff,
+            report.max_rel_err,
+            first_mismatch.map(|idx| (idx / CORRECTNESS_N as usize, idx % CORRECTNESS_N as usize)),
+        );
+        report.fail_count
+    };
+
+    // 二段階ゲート（codex-review P1 是正・PR #862 review 追補。イシュー
+    // #855）: production 自身が本テストデータに対して統一複合判定に
+    // 不合格（`mismatch_count != 0`）の場合でも、**性能計測のみ**を
+    // スキップし、候補（`CANDIDATES`・`CONTROL_CANDIDATES`）の
+    // render/compile/parity 診断（`candidate_parity_ok`）までは実行する。
+    // GB10 実機では `CORRECTNESS_M=520`・固定シードにより production の
+    // parity が常に不合格になるため（`docs/perf/
+    // cuda-gemm-mma-block-tile-stages.md` §9.3）、旧実装（不合格時に即
+    // `return`）だと `CONTROL_CANDIDATES`（強制 dynamic SMEM・静的対照
+    // 候補・diagnostics 経路）の compile/parity 検査自体が実機で恒常的に
+    // 到達不能になっていた（PR #862 codex-review P2 指摘）。
+    // `ratio_vs_production` 等の性能値は不正な基準実装との比率になり
+    // 得るため採用禁止のまま維持し（本ファイル冒頭コメント・PR 本文の
+    // 契約）、`skip_performance_measurement` で production・候補いずれの
+    // 実測ループも perf 計測部分だけを SKIP させる。既知の狭い数値差
+    // 自体は上記 `production_direct` ログ・
+    // docs/perf/cuda-gemm-mma-block-tile-stages.md §9.3 に記録済み。
+    let skip_performance_measurement = production_direct_fail_count != 0;
+    if skip_performance_measurement {
+        println!(
+            "mma_f16_base(production): FAIL (parity mismatch vs CPU f32::mul_add reference; \
+             mismatch_count={production_direct_fail_count}; skipping performance measurement \
+             for production and all candidates — parity ゲートが性能値採用に先立つ契約のため、\
+             production 自身が数値不一致の間は性能比較を行わない。ただし候補の \
+             render/compile/parity 診断（CONTROL_CANDIDATES を含む）は打ち切らず継続する \
+             （PR #862 codex-review P2 是正）。詳細は上記 production_direct ログ・\
+             docs/perf/cuda-gemm-mma-block-tile-stages.md §9.3 を参照)"
+        );
+    }
+
     println!(
         "candidate,bm,bn,bk,stages,warp_tiles_m,warp_tiles_n,launch_bounds,threads,smem_bytes,\
          dynamic_smem,{}",
@@ -542,7 +770,17 @@ fn main() {
         // 計測時間が 2 倍になる、の 2 点の実害を生む）。
         let mut production_medians: std::collections::HashMap<usize, f64> =
             std::collections::HashMap::new();
+        // `skip_performance_measurement` が真の場合（production 自身が
+        // parity FAIL）は上記二段階ゲートの契約により性能計測を行わず
+        // 全 size を n/a で埋める。`production_medians` は空のままとなり、
+        // 後続の候補ループでも ratio 分母が見つからず ratio は n/a になる
+        // （`ratio.filter(base != 0.0)` の分母探索が空 HashMap で必ず
+        // `None` を返すため。#855）。
         for &size in &BENCH_SIZES {
+            if skip_performance_measurement {
+                row.push_str(",n/a,n/a,n/a,n/a");
+                continue;
+            }
             let config = MeasurementConfig::default();
             match measure_production(&gemm, size, &config) {
                 Ok(m) => {
@@ -561,21 +799,45 @@ fn main() {
         production_medians
     };
 
-    for candidate in &CANDIDATES {
+    // イシュー #855: 既存 5 候補（本番の「48KiB 超のみ動的化」既定挙動）
+    // に続けて対照実験行（`CONTROL_CANDIDATES`）も同じループ・同じ CSV
+    // スキーマで計測する。`.chain()` で 1 本のイテレータへ合成すること
+    // で、計測手順（layout 導出 → render → compile → parity → 計測）を
+    // 重複実装しない（本ファイル冒頭コメント「実行時観測」節参照）。
+    for candidate in CANDIDATES.iter().chain(CONTROL_CANDIDATES.iter()) {
         let Some(layout) = layout_or_print_excluded(candidate, optin_budget_bytes) else {
             continue;
         };
 
-        let rendered = match diagnostics::render_mma_f16_block_tile(
-            candidate.bm,
-            candidate.bn,
-            candidate.bk,
-            candidate.stages,
-            candidate.warp_tiles_m,
-            candidate.warp_tiles_n,
-            candidate.launch_bounds,
-            optin_budget_bytes,
-        ) {
+        // `force_dynamic_smem` は対照実験専用（`CONTROL_CANDIDATES` の
+        // `mma_f16_base_dynsmem` のみ真）。真の場合は静的予算以下でも
+        // `extern __shared__` 変換を強制する診断専用エントリポイントへ
+        // 分岐する（`diagnostics::render_mma_f16_block_tile_forced_
+        // dynamic_smem` ドキュメンテーションコメント「目的」節参照）。
+        let rendered = if candidate.force_dynamic_smem {
+            diagnostics::render_mma_f16_block_tile_forced_dynamic_smem(
+                candidate.bm,
+                candidate.bn,
+                candidate.bk,
+                candidate.stages,
+                candidate.warp_tiles_m,
+                candidate.warp_tiles_n,
+                candidate.launch_bounds,
+                optin_budget_bytes,
+            )
+        } else {
+            diagnostics::render_mma_f16_block_tile(
+                candidate.bm,
+                candidate.bn,
+                candidate.bk,
+                candidate.stages,
+                candidate.warp_tiles_m,
+                candidate.warp_tiles_n,
+                candidate.launch_bounds,
+                optin_budget_bytes,
+            )
+        };
+        let rendered = match rendered {
             Ok(r) => r,
             Err(e) => {
                 println!("{}: SKIP (render failed: {e})", candidate.label);
@@ -625,6 +887,13 @@ fn main() {
         let launch_bounds_field = candidate
             .launch_bounds
             .map_or_else(|| "none".to_string(), |v| v.to_string());
+        // `dynamic_smem` 列は実際に起動側で使う動的 SMEM 設定
+        // （`RenderedMmaF16BlockTileKernel::uses_dynamic_smem` と同じ式。
+        // イシュー #855）を反映する。`layout.needs_dynamic_smem()`
+        // （静的判定のみ）をそのまま使うと `force_dynamic_smem=true` の
+        // 対照実験行で「静的扱いのまま動的起動している」という CSV 上の
+        // 矛盾が生じる。
+        let uses_dynamic_smem = layout.needs_dynamic_smem() || candidate.force_dynamic_smem;
         let mut row = format!(
             "{},{},{},{},{},{},{},{},{},{},{}",
             candidate.label,
@@ -637,9 +906,18 @@ fn main() {
             launch_bounds_field,
             layout.threads,
             layout.smem_bytes,
-            layout.needs_dynamic_smem(),
+            uses_dynamic_smem,
         );
+        // `skip_performance_measurement` が真の場合、この候補の
+        // render/compile/parity 診断は上で完了済みだが（#855 二段階
+        // ゲート）、production 自身が parity FAIL のため性能値の採用は
+        // 禁止のまま維持し、全 size を n/a で埋めて `measure_candidate`
+        // を呼ばない。
         for &size in &BENCH_SIZES {
+            if skip_performance_measurement {
+                row.push_str(",n/a,n/a,n/a,n/a");
+                continue;
+            }
             let config = MeasurementConfig::default();
             match measure_candidate(&compiled, &gemm, &device, size, &config) {
                 Ok(m) => {

@@ -7,7 +7,11 @@ cuda-gemm-mma-warp-tile-register-budget.md`）の warp タイル拡大候補の�
 
 ## 状態: 実機 A/B 実測完了（イシュー #840）。採否判断は #842 で確定（§7。**不採用**）。
 `__launch_bounds__(512)` 境界値変種の実起動可否はイシュー #854 で実測済み
-（§8。**実起動可能・parity FAIL のため不採用は維持**）
+（§8。**実起動可能・parity FAIL のため不採用は維持**）。数値不一致の
+原因はイシュー #855 で実行時観測により特定済み（§9。**`extern
+__shared__` 変換にもタイル候補定数にも起因せず、production の base
+カーネル自身が既に持つ既存の数値差に帰属する**。#840/#842/#854 の
+「変換経路に共通の原因」という帰属は誤りだったと訂正）
 
 #804（PR #831）は本ドキュメントを「未実測・実機実行待ち（Step F フォール
 バック）」のまま残した。イシュー #840 は DGX Spark GB10（sm_121）実機へ
@@ -324,10 +328,12 @@ design.md` の役割分担を踏襲）。
 番号は未採番のため、番号確定時に本節へ追記する）。後続イシュー番号:
 **#854**（`__launch_bounds__(512)` 変種の実起動可否実測。実施済み。下記
 §8）・**#855**（`extern __shared__` 変換による数値不一致の実行時観測
-での原因特定。未着手）。§6 の未消化項目（原因調査の実機切り分け・
+での原因特定。**実施済み・§9 参照。結論: 原因は変換にもタイル候補定数
+にもなく、production の base カーネル自身が既に持つ既存の数値差に
+帰属することを確認した**）。§6 の未消化項目（原因調査の実機切り分け・
 `__launch_bounds__(512)` 変種実測・再計測・採用時の本番結線手順）の
 うち `__launch_bounds__(512)` 変種実測は #854 で消化済み（下記 §8）。
-残りは #855 のスコープ（後述の下記箇条書き参照）。加えて:
+不一致原因の実機切り分けは #855 で消化済み（下記 §9）。加えて:
 
 - 拡張済みの bench 診断出力（mismatch 件数・最大誤差・初回不一致座標）
   を使い、`bt64x128_s4`／`bt128x128_s3_wt2x4` の不一致がタイル境界
@@ -441,3 +447,150 @@ mismatch 統計値を示している事実は、原因が個々のタイル形�
 バグではなく `extern __shared__` 変換経路（§2）そのものに共通して
 存在することを強く示唆する追加根拠であり、#855 の原因調査の優先度・
 切り分け範囲の判断材料になる。
+
+## 9. #855 実行時観測の結果（原因特定・GB10・2026-08-22）
+
+**状態: 原因特定済み。修正なし（修正対象がない）。#840/#842/#854 の
+「不一致は `extern __shared__` 変換経路に起因する」という帰属は誤り
+だったと訂正する**。
+
+### 9.1 実施内容
+
+DGX Spark GB10 実機（`docs/real-hardware-verification-env.md` 記載の
+node4。CUDA 13.0 + NVRTC・`compute-sanitizer`〈CUDA toolkit 同梱〉導入
+済み）で、以下を実施した:
+
+1. `kernels_mma.rs` へ診断専用の強制動的 SMEM 変換フラグ
+   （`mma_f16_source_with_block_tile_forced_dynamic_smem`／
+   `render_mma_f16_block_tile_forced_dynamic_smem`。静的予算以下の候補
+   でも `extern __shared__` 変換を強制適用する）を追加し、production
+   と完全同一パラメータ（BM=64/BN=128/BK=32/STAGES=3/warp2x2）を
+   強制動的化した対照実験行 `mma_f16_base_dynsmem` を
+   `gemm_mma_block_tile_bench.rs::CONTROL_CANDIDATES` に追加した。
+2. `bt64x128_s4`（STAGES=4 のみ差）・`bt128x128_s3_wt2x4`（BM=128・
+   warp2x4 のみ差）それぞれから BN を 64 へ縮小し、**静的予算内
+   （`extern __shared__` 変換を経ない）で同じパラメータ差分を単独検証
+   する**対照候補 `bt64x64_s4_static`（38,912B）・
+   `bt128x64_s3_wt2x4_static`（44,544B）を追加した。
+3. **決定打となった対照実験**: production と完全同一パラメータを
+   **非強制**（source が `mma_f16_source()` とバイト一致・静的
+   `__shared__` のまま）で診断専用のコンパイル・起動経路
+   （`RenderedMmaF16BlockTileKernel::compile`／
+   `CompiledMmaF16BlockTileKernel::launch_f16`。production の
+   `CudaMmaGemm::launch_f16` とはコード上別経路）のみを通す対照候補
+   `debug_default_via_diagnostics_path` を追加した。
+4. `gemm_mma_block_tile_bench.rs` に production 直接検査行
+   （`CudaMmaGemm::launch_f16` を診断ハーネスを一切経由せず直接呼び、
+   同じ `CORRECTNESS_M/N/K`・同じ `a_ref`/`b_ref`・同じ `expected_f32`
+   で parity 検査する。標準出力の `production_direct(no diagnostics
+   path):` 行）を追加した。
+5. `compute-sanitizer --tool memcheck ./gemm_mma_block_tile_bench` を
+   実行し、全候補（`extern __shared__` 変種を含む）のメモリ安全性を
+   検証した。
+
+### 9.2 観測結果
+
+全候補・対照行が**完全に同一**の parity 統計値で fail した:
+
+| 行 | 種別 | `extern __shared__` 変換 | parity |
+|----|------|---------------------------|--------|
+| `mma_f16_base`（production・別コード経路） | 比較基準 | — | pass（本 bench は TFLOPS のみ計測・parity 未検査） |
+| `production_direct(no diagnostics path)` | production 直接検査（本イシューで追加） | — | **FAIL**（`mismatch_count=2/266240, max_abs_diff=1.562e-2, max_rel_err=6.818e-2, first_mismatch=(168, 2)`） |
+| `debug_default_via_diagnostics_path` | production と同一パラメータ・診断経路のみ差（本イシューで追加） | 非適用（静的のまま） | **FAIL**（上記と完全一致） |
+| `mma_f16_base_dynsmem` | production と同一パラメータ・強制動的化（本イシューで追加） | 適用（強制） | **FAIL**（上記と完全一致） |
+| `bt64x64_s4_static` | STAGES=4 単独・静的予算内（本イシューで追加） | 非適用（静的） | **FAIL**（上記と完全一致） |
+| `bt128x64_s3_wt2x4_static` | BM=128/warp2x4 単独・静的予算内（本イシューで追加） | 非適用（静的） | **FAIL**（上記と完全一致） |
+| `bt64x128_s4` | #840 既存候補 | 適用 | FAIL（既知。上記と完全一致） |
+| `bt128x128_s3_wt2x4` | #840 既存候補 | 適用 | FAIL（既知。上記と完全一致） |
+| `bt128x256_s3_wt4x4_lb512` | #854 既存候補 | 適用 | FAIL（既知。上記と完全一致） |
+
+`compute-sanitizer --tool memcheck` は**全候補でメモリ安全性エラーを
+検出しなかった**（境界外アクセス・未初期化読み出しのいずれもゼロ件）。
+唯一の報告は `bt128x256_s3_wt4x4`（`launch_bounds` なし。#840/#854 で
+既知のレジスタ不足）の `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES` であり、
+これはメモリ破壊ではなく起動不能（1 block/SM に収まらない）という
+別事象である。
+
+### 9.3 結論
+
+**`debug_default_via_diagnostics_path`（production とバイト一致の
+ソース・静的 `__shared__` のまま・診断コンパイル・起動経路のみ経由）が
+`production_direct`（production 自身の `CudaMmaGemm::launch_f16`）と
+全く同一の座標・同一値で fail したことが決定的な証拠である**。両者の
+違いはコンパイル・起動コードパスのみであり、カーネルソースは完全に
+同一（`mma_f16_source_with_block_tile_default_matches_mma_f16_source`
+テストが保証）。したがって:
+
+1. **`extern __shared__` 動的 SMEM 変換（`DYNAMIC_SMEM_REPLACEMENT`）は
+   無罪である**。強制動的化（`mma_f16_base_dynsmem`）・非強制（静的の
+   まま）のいずれでも同一の不一致が生じるため、変換の適用有無は結果に
+   影響しない。
+2. **候補のタイル定数（BM/BN/STAGES/warp タイル）も無罪である**。
+   静的予算内に収まるよう縮小した対照候補（`bt64x64_s4_static`・
+   `bt128x64_s3_wt2x4_static`。いずれも `extern __shared__` 変換を
+   経ない）も同一の不一致を示すため、STAGES=4・BM=128・warp2x4 いずれの
+   タイル変更も原因ではない。
+3. **診断ハーネスの compile/launch コードパス自体も無罪である**。
+   production 自身の `CudaMmaGemm::launch_f16`（診断ハーネスを一切
+   経由しない）が同一の不一致を出すため、`RenderedMmaF16BlockTileKernel`
+   ／`CompiledMmaF16BlockTileKernel` の実装に固有の欠陥でもない。
+4. **真の原因**: production の base カーネル自身が、本 bench の正しさ
+   検査データ（`CORRECTNESS_M=520` 非整列端・`CORRECTNESS_N=512`・
+   `CORRECTNESS_K=512`・`SEED=0xC0FFEE`）に対して**既に**この 2 要素の
+   数値差（`f16` 丸め後で相対誤差 6.818e-2・絶対誤差 1.562e-2 と、
+   統一複合判定の閾値〈相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満〉を
+   大きく超える）を持っている。#840/#842/#854 はこのデータ点で base
+   カーネル自身がどうなるかを一度も検査しないまま、動的 SMEM 変換を
+   通る候補群だけが fail する状況から「変換に共通の原因がある」と
+   推定したため、誤って帰属した（本 bench が比較基準行 `mma_f16_base`
+   に対して TFLOPS のみを計測し parity を検査してこなかったことが
+   誤帰属の直接要因。§9.1 の `production_direct` 検査行はこの欠落を
+   埋める恒久追加である）。
+
+### 9.4 スコープ外事項（#855 のスコープ外）
+
+**本イシュー（#855）は「`extern __shared__` 変換による数値不一致」の
+原因調査であり、原因が変換にないと判明した以上、`mismatch_count=
+2/266240` 自体の是正は本イシューのスコープ外である。** 加えて、
+既存の `#[ignore]` テスト `crates/backend-cuda/tests/
+cpu_cuda_mma_parity.rs::mma_f16_k4096_stress`（M=N=256, K=4096.
+`CudaMmaGemm` 経由）が本パッチと**無関係に**（`main` ブランチ単体でも
+再現。2026-08-22 GB10 実機で確認）
+`fail_count=101/65536, max_abs_diff=6.250e-2, max_rel_err=5.849e-1` で
+fail することを確認した。一方、同ファイルの `#[ignore]` なしスモーク・
+`mma_f16_matches_reference_across_shapes`（12 形状の境界網羅テスト）は
+pass する。
+
+以上から、**production の base `mma.sync` カーネルには、特定のデータ・
+形状の組み合わせ（K=4096 の大深度蓄積、または本イシューで見つかった
+M=520/`SEED=0xC0FFEE` の組み合わせ）でのみ顕在化する、既存の・
+`extern __shared__` 変換とは無関係な数値不一致が存在する**可能性が
+高い。これは #804/#840/#842/#854/#855 のいずれのスコープにも含まれない
+別課題であり、ガードレール・テスト許容誤差の緩和はユーザー承認必須
+（`.claude/rules/security.md`・`coding-rust.md`）のため本セッションでは
+一切変更していない。追跡 issue の起票要否は本イシューの成果物（PR）
+本文でユーザーへ提起する（`.claude/rules/out-of-scope-tracking.md`）。
+
+### 9.5 本イシューで変更したコード
+
+- `crates/backend-cuda/src/kernels_mma.rs`: 診断専用の強制動的 SMEM
+  変換フラグ（`mma_f16_source_with_block_tile_impl`／
+  `render_mma_f16_block_tile_impl` の `force_dynamic_smem: bool`。
+  既存 8 引数の公開シグネチャは無変更のまま
+  `mma_f16_source_with_block_tile_forced_dynamic_smem`／
+  `render_mma_f16_block_tile_forced_dynamic_smem` を追加）・
+  `RenderedMmaF16BlockTileKernel`/`CompiledMmaF16BlockTileKernel` へ
+  `uses_dynamic_smem: bool` フィールドを追加（`layout.
+  needs_dynamic_smem()` ではなく本フィールドで起動側 opt-in 設定・
+  `shared_mem_bytes` を決定する契約）。ソース検査テスト
+  （`mma_f16_source_with_block_tile_forced_dynamic_smem_applies_
+  transform_below_static_budget`・`render_mma_f16_block_tile_forced_
+  dynamic_smem_marks_uses_dynamic_smem`）を追加。
+- `crates/backend-cuda/src/lib.rs`: `diagnostics` モジュールへ
+  `render_mma_f16_block_tile_forced_dynamic_smem` を再公開。
+- `crates/backend-cuda/examples/gemm_mma_block_tile_bench.rs`:
+  `Candidate::force_dynamic_smem` フィールド追加・`CONTROL_CANDIDATES`
+  （§9.1 の 4 対照行）追加・production 直接検査行（§9.1）追加。
+- **本番カーネル定数（`MMA_BM`/`MMA_BN`/`MMA_STAGES`）・
+  `gemm_mma.rs` 本番コンストラクタ・`swizzle.rs`・`gemm_auto.rs`・
+  tolerance 定数は本イシューでも一切変更していない**。

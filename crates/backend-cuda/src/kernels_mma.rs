@@ -2417,6 +2417,88 @@ pub fn mma_f16_source_with_block_tile(
     launch_bounds: Option<u32>,
     optin_budget_bytes: u32,
 ) -> Result<String, CudaError> {
+    mma_f16_source_with_block_tile_impl(
+        bm,
+        bn,
+        bk,
+        stages,
+        warp_tiles_m,
+        warp_tiles_n,
+        launch_bounds,
+        optin_budget_bytes,
+        false,
+    )
+}
+
+/// 診断専用（`internal-diagnostics` feature 限定。イシュー #855）:
+/// [`mma_f16_source_with_block_tile`] と同じ候補パラメータで、静的
+/// 48KiB 予算以下でも常に `extern __shared__` 動的 SMEM 変換
+/// （[`mma_f16_source_with_block_tile_impl`] の `force_dynamic_smem`）を
+/// 強制適用したソースを返す。
+///
+/// # 目的（イシュー #842 からの引き継ぎ・実行時観測の第一段）
+///
+/// #840 の GB10 実機 A/B で、動的 SMEM 変換を通る候補（`bt64x128_s4`・
+/// `bt128x128_s3_wt2x4`）のみが CPU `f32::mul_add` 参照との数値一致に
+/// fail した。#842 の机上調査では変換のアドレス計算・アライメントに
+/// 欠陥を特定できず、「動的変換そのものが原因か・48KiB 超で初めて
+/// 顕在化する候補定数側の潜在バグか」を実機の対照実験で切り分ける
+/// 必要があるとして本イシューへ引き継がれた
+/// （`docs/perf/cuda-gemm-mma-block-tile-stages.md` §7.1）。
+///
+/// 基準構成（BM=64/BN=128/BK=32/STAGES=3。静的 41,472B）を本関数で
+/// 強制動的化して起動し、parity が pass すれば「変換は無罪、候補定数
+/// 側の潜在バグ」、fail すれば「変換そのものに欠陥」と判定できる
+/// （`docs/perf/cuda-gemm-mma-block-tile-stages.md` §9.3 参照）。
+///
+/// 呼び出し元は [`render_mma_f16_block_tile_forced_dynamic_smem`]
+/// （起動まで完結させる A/B ランナー側のラッパー）のみを想定する
+/// （`examples/gemm_mma_block_tile_bench.rs` 経由）。本番経路
+/// （`gemm_mma.rs::CudaMmaGemm`）はこの関数に一切依存しない。
+#[allow(dead_code)]
+#[allow(clippy::too_many_arguments)]
+pub fn mma_f16_source_with_block_tile_forced_dynamic_smem(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+) -> Result<String, CudaError> {
+    mma_f16_source_with_block_tile_impl(
+        bm,
+        bn,
+        bk,
+        stages,
+        warp_tiles_m,
+        warp_tiles_n,
+        launch_bounds,
+        optin_budget_bytes,
+        true,
+    )
+}
+
+/// [`mma_f16_source_with_block_tile`]／
+/// [`mma_f16_source_with_block_tile_forced_dynamic_smem`] の共通実体。
+/// `force_dynamic_smem` は後者専用の診断フラグ（イシュー #855）で、
+/// 真の場合は静的予算以下の候補でも `extern __shared__` 変換
+/// （[`DYNAMIC_SMEM_REPLACEMENT`]）を適用する。既存 8 引数の公開シグ
+/// ネチャ（呼び出し元・テスト多数）を変えずに強制フラグを追加するため
+/// 本関数を切り出した。
+#[allow(clippy::too_many_arguments)]
+fn mma_f16_source_with_block_tile_impl(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+    force_dynamic_smem: bool,
+) -> Result<String, CudaError> {
     let invalid = |detail: String| CudaError::InvalidKernelConfig { detail };
 
     // レイアウト導出（不変条件検査込み）は [`derive_mma_block_tile_layout`]
@@ -2449,7 +2531,7 @@ pub fn mma_f16_source_with_block_tile(
              ({optin_budget_bytes} bytes; CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN)"
         )));
     }
-    let needs_dynamic_smem = smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES;
+    let needs_dynamic_smem = smem_bytes > MMA_STATIC_SMEM_LIMIT_BYTES || force_dynamic_smem;
 
     // ブロックタイル・段数の #define をアンカー置換する（`mma_f16_source()`
     // 実体は既定 config の bm=64/bn=128/bk=32/stages=3/a_pad=40/b_pad=136 が
@@ -2559,6 +2641,17 @@ pub fn mma_f16_source_with_block_tile(
 pub struct RenderedMmaF16BlockTileKernel {
     source: String,
     layout: MmaBlockTileLayout,
+    /// 実際に動的 SMEM 変種を使うか（イシュー #855）。既定の
+    /// `render_mma_f16_block_tile` は `layout.needs_dynamic_smem()`
+    /// （静的 48KiB 超）と一致するが、
+    /// `render_mma_f16_block_tile_forced_dynamic_smem`（診断専用の対照
+    /// 実験）は静的予算以下の候補でも真になる。`compile`/`launch_f16`
+    /// はこのフィールドのみを見て動的 SMEM の起動側設定
+    /// （`set_attribute`／`shared_mem_bytes`）を決める必要がある
+    /// （`layout.needs_dynamic_smem()` を直接見ると、強制動的候補で
+    /// `shared_mem_bytes=0` のまま起動してしまい「変換の欠陥」と
+    /// 「起動側設定漏れ」が交絡する）。
+    uses_dynamic_smem: bool,
 }
 
 impl RenderedMmaF16BlockTileKernel {
@@ -2589,7 +2682,7 @@ impl RenderedMmaF16BlockTileKernel {
             .context()
             .load_module(ptx)?
             .load_function("gemm_mma_f16")?;
-        if self.layout.needs_dynamic_smem() {
+        if self.uses_dynamic_smem {
             let bytes_i32 = i32::try_from(self.layout.smem_bytes).map_err(|_| {
                 CudaError::InvalidKernelConfig {
                     detail: format!(
@@ -2608,6 +2701,7 @@ impl RenderedMmaF16BlockTileKernel {
         Ok(CompiledMmaF16BlockTileKernel {
             func,
             layout: self.layout,
+            uses_dynamic_smem: self.uses_dynamic_smem,
         })
     }
 
@@ -2640,6 +2734,70 @@ pub fn render_mma_f16_block_tile(
     launch_bounds: Option<u32>,
     optin_budget_bytes: u32,
 ) -> Result<RenderedMmaF16BlockTileKernel, CudaError> {
+    render_mma_f16_block_tile_impl(
+        bm,
+        bn,
+        bk,
+        stages,
+        warp_tiles_m,
+        warp_tiles_n,
+        launch_bounds,
+        optin_budget_bytes,
+        false,
+    )
+}
+
+/// 診断専用（`internal-diagnostics` feature 限定。イシュー #855）:
+/// [`render_mma_f16_block_tile`] と同じ候補パラメータで、
+/// [`mma_f16_source_with_block_tile_forced_dynamic_smem`] を使い
+/// `extern __shared__` 動的 SMEM 変換を強制適用した
+/// [`RenderedMmaF16BlockTileKernel`] を返す（`uses_dynamic_smem=true`
+/// 固定。`compile`/`launch_f16` が起動側 opt-in 設定・
+/// `shared_mem_bytes` を実際に動的変種として扱うことを保証する）。
+///
+/// 呼び出し元は `examples/gemm_mma_block_tile_bench.rs` の対照実験行
+/// （基準構成を強制動的化した control。`mma_f16_source_with_block_tile_
+/// forced_dynamic_smem` ドキュメンテーションコメント「目的」節参照）。
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn render_mma_f16_block_tile_forced_dynamic_smem(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+) -> Result<RenderedMmaF16BlockTileKernel, CudaError> {
+    render_mma_f16_block_tile_impl(
+        bm,
+        bn,
+        bk,
+        stages,
+        warp_tiles_m,
+        warp_tiles_n,
+        launch_bounds,
+        optin_budget_bytes,
+        true,
+    )
+}
+
+/// [`render_mma_f16_block_tile`]／
+/// [`render_mma_f16_block_tile_forced_dynamic_smem`] の共通実体
+/// （イシュー #855。`mma_f16_source_with_block_tile_impl` と同じ
+/// 「既存 8 引数シグネチャを変えずに強制フラグを追加する」設計）。
+#[allow(clippy::too_many_arguments)]
+fn render_mma_f16_block_tile_impl(
+    bm: u32,
+    bn: u32,
+    bk: u32,
+    stages: u32,
+    warp_tiles_m: u32,
+    warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
+    optin_budget_bytes: u32,
+    force_dynamic_smem: bool,
+) -> Result<RenderedMmaF16BlockTileKernel, CudaError> {
     let layout = derive_mma_block_tile_layout(bm, bn, bk, stages, warp_tiles_m, warp_tiles_n)?;
     if layout.smem_bytes > optin_budget_bytes {
         return Err(CudaError::InvalidKernelConfig {
@@ -2651,7 +2809,7 @@ pub fn render_mma_f16_block_tile(
             ),
         });
     }
-    let source = mma_f16_source_with_block_tile(
+    let source = mma_f16_source_with_block_tile_impl(
         bm,
         bn,
         bk,
@@ -2660,8 +2818,14 @@ pub fn render_mma_f16_block_tile(
         warp_tiles_n,
         launch_bounds,
         optin_budget_bytes,
+        force_dynamic_smem,
     )?;
-    Ok(RenderedMmaF16BlockTileKernel { source, layout })
+    let uses_dynamic_smem = layout.needs_dynamic_smem() || force_dynamic_smem;
+    Ok(RenderedMmaF16BlockTileKernel {
+        source,
+        layout,
+        uses_dynamic_smem,
+    })
 }
 
 /// [`RenderedMmaF16BlockTileKernel::compile`] が返す、コンパイル済み
@@ -2672,6 +2836,14 @@ pub fn render_mma_f16_block_tile(
 pub struct CompiledMmaF16BlockTileKernel {
     func: cudarc::driver::CudaFunction,
     layout: MmaBlockTileLayout,
+    /// [`RenderedMmaF16BlockTileKernel::uses_dynamic_smem`] を `compile`
+    /// が引き継いだもの（イシュー #855）。`launch_f16` は
+    /// `layout.needs_dynamic_smem()` ではなく本フィールドを見て
+    /// `shared_mem_bytes` を決める（強制動的候補で `layout` 自体は
+    /// 静的判定のままのため、`layout` 側だけを見ると起動時
+    /// `shared_mem_bytes=0` のまま `extern __shared__` カーネルを
+    /// 起動してしまう）。
+    uses_dynamic_smem: bool,
 }
 
 impl CompiledMmaF16BlockTileKernel {
@@ -2712,7 +2884,7 @@ impl CompiledMmaF16BlockTileKernel {
         }
         validate_mma_k_tile_bound(k, self.layout.bk)?;
 
-        let smem_bytes_u32 = if self.layout.needs_dynamic_smem() {
+        let smem_bytes_u32 = if self.uses_dynamic_smem {
             self.layout.smem_bytes
         } else {
             0
@@ -4227,6 +4399,71 @@ mod tests {
         assert!(
             !src.contains("__shared__ __align__(16) __half as_tile[STAGES][BM][A_PAD];"),
             "the static declaration must be fully replaced, not left alongside the dynamic one"
+        );
+    }
+
+    /// 診断専用の強制動的 SMEM 変種（イシュー #855）: 静的予算以下（基準
+    /// 構成 41,472B）でも `extern __shared__` 変換が適用されることを
+    /// 検査する。`mma_f16_source_with_block_tile`（非強制）は同じ引数で
+    /// 静的宣言のままであることも合わせて確認し、強制フラグが「静的
+    /// 予算以下では無変換」という既定挙動を壊さないことを担保する。
+    #[test]
+    fn mma_f16_source_with_block_tile_forced_dynamic_smem_applies_transform_below_static_budget() {
+        let forced =
+            mma_f16_source_with_block_tile_forced_dynamic_smem(64, 128, 32, 3, 2, 2, None, 101_376)
+                .expect("41,472B base config must fit within the opt-in budget");
+        assert!(
+            forced.contains("extern __shared__ __align__(16) unsigned char mma_dyn_smem[];"),
+            "force_dynamic_smem=true must apply the extern __shared__ transform even when \
+             smem_bytes (41,472B) is within the static 48KiB limit"
+        );
+        assert!(
+            !forced.contains("__shared__ __align__(16) __half as_tile[STAGES][BM][A_PAD];"),
+            "the static declaration must be fully replaced under force_dynamic_smem"
+        );
+
+        let unforced = mma_f16_source_with_block_tile(64, 128, 32, 3, 2, 2, None, 101_376)
+            .expect("41,472B base config must fit within the opt-in budget");
+        assert!(
+            unforced.contains("__shared__ __align__(16) __half as_tile[STAGES][BM][A_PAD];"),
+            "the non-forced entry point must keep the static declaration for a candidate at \
+             or below the static budget (regression guard for the force flag threading)"
+        );
+    }
+
+    /// [`render_mma_f16_block_tile_forced_dynamic_smem`] が返す
+    /// descriptor の `uses_dynamic_smem` が強制的に真になり、
+    /// `layout.needs_dynamic_smem()`（静的判定のまま）とは独立している
+    /// ことを検査する（イシュー #855。`CompiledMmaF16BlockTileKernel::
+    /// launch_f16` が `uses_dynamic_smem` を見て `shared_mem_bytes` を
+    /// 決める契約の前提）。
+    #[test]
+    fn render_mma_f16_block_tile_forced_dynamic_smem_marks_uses_dynamic_smem() {
+        let rendered =
+            render_mma_f16_block_tile_forced_dynamic_smem(64, 128, 32, 3, 2, 2, None, 101_376)
+                .expect("41,472B base config must fit within the opt-in budget");
+        assert!(
+            rendered.uses_dynamic_smem,
+            "forced-dynamic rendering must set uses_dynamic_smem=true regardless of \
+             layout.needs_dynamic_smem()"
+        );
+        assert!(
+            !rendered.layout.needs_dynamic_smem(),
+            "the underlying layout for the 41,472B base config must still report the static \
+             judgement (force is a rendering-time override, not a layout property)"
+        );
+        assert!(
+            rendered
+                .source
+                .contains("extern __shared__ __align__(16) unsigned char mma_dyn_smem[];")
+        );
+
+        let unforced = render_mma_f16_block_tile(64, 128, 32, 3, 2, 2, None, 101_376)
+            .expect("41,472B base config must fit within the opt-in budget");
+        assert!(
+            !unforced.uses_dynamic_smem,
+            "the non-forced entry point must derive uses_dynamic_smem from \
+             layout.needs_dynamic_smem() (false for the static base config)"
         );
     }
 
