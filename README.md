@@ -1,31 +1,124 @@
 # rust-ai-library
 
-Rust 製 AI/ML ライブラリの実装リポジトリです。Burn 依存を排した完全自作コア（v2 方針）で実装します。
+Rust 製 AI/ML ライブラリです。Burn 等の既存フレームワークに依存せず、テンソル・
+autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層を
+**完全自作コア**として実装しています。
 
-## 位置づけ
+*A from-scratch Rust AI/ML library — no Burn/candle/tch dependency. See the
+[Getting Started](#最小コード例) section below for install & a minimal example.*
 
-- **本リポジトリは public**（#457 Phase 1〜3 完了。CI は GitHub ホステッド `ubuntu-latest` 既定へ移行済みで、self-hosted への逆戻りは `runner-policy` ジョブ〈#472〉が fail-closed で検知します。詳細 → [`.claude/rules/ci.md`](.claude/rules/ci.md)）。一方、仕様 submodule（`docs/spec`）と旧実装（v1）は下記のとおり private を維持しています（#463・#461）
-- **仕様・要件定義**: [rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec)（`docs/spec` に submodule 参照。**private リポジトリとして意図的に非公開を維持**する方針であり、アクセス権のない環境（アクセス権を持たない外部ユーザーによる clone 等）からは submodule を解決できません。#463）
-- **旧実装（v1・Burn ベース）**: [rust-ai-library-v1](https://github.com/Fandhe-AI/rust-ai-library-v1)（アーカイブ済み・**private リポジトリ**。アクセス権のない外部ユーザーからはリンク先を解決できません。資産の引き継ぎ記録は [v1-assets-inventory.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v1-assets-inventory.md)〈同じく private な `rust-ai-library-spec` 配下〉を参照。#461）
-- **立ち上げ手順**: [v2-repo-migration.md](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/v2-repo-migration.md)
+## ドキュメント
+
+利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
+[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。公開までは
+本 README と以下を参照してください。
+
+- インストール・最小コード例・バックエンド切替: 本 README の「インストール」「最小コード例」「バックエンド」節
+- バックエンド構成・数値一致契約: [`docs/backend-switching-design.md`](docs/backend-switching-design.md)
+- compat API・サポート境界: [`docs/compat-api-scope.md`](docs/compat-api-scope.md)
+- ONNX/safetensors 相互運用: [`crates/onnx-interop`](crates/onnx-interop)（非公開の内部クレート）
+
+## インストール
+
+本ライブラリは Rust の `stable` チャンネルを前提としています（リポジトリ直下の
+[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io
+公開準備中のため、現時点では `fandhe-ai` クレートを Git 依存として参照してください
+（公開後は `fandhe-ai = "x.y.z"` の形で crates.io から参照できるようになります）。
+
+```toml
+[dependencies]
+fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
+```
+
+利用者が直接依存すべきクレートは `fandhe-ai` だけです。`fandhe-ai-tensor-core`・
+`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
+`fandhe-ai-backend-metal` は内部クレートであり、直接の依存・利用はサポート対象外
+です（下記「クレート構成」参照）。
+
+## 最小コード例
+
+`compat::array`（numpy `np.array` 慣習のテンソル生成）と `compat::Sequential`
+（Keras `Sequential` 慣習のレイヤー積み上げ）を使うと、数行でモデルを組み立てて
+推論できます。以下は
+[`crates/facade/examples/getting_started.rs`](crates/facade/examples/getting_started.rs)
+（`cargo run -p fandhe-ai --example getting_started` で実行確認済み）と同一のコードです。
+
+```rust
+use fandhe_ai::compat::{Sequential, array};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let input = array(vec![
+        vec![0.1_f32, 0.2, 0.3, 0.4],
+        vec![0.5_f32, 0.6, 0.7, 0.8],
+    ])?;
+
+    let model = Sequential::new()
+        .add_linear(4, 8, /* seed = */ 42)?
+        .add_relu()
+        .add_linear(8, 2, /* seed = */ 43)?;
+
+    let output = model.predict(&input)?;
+
+    println!("output shape: {:?}", output.shape());
+    Ok(())
+}
+```
+
+実行コマンドと期待出力:
+
+```bash
+cargo run -p fandhe-ai --example getting_started
+# => output shape: [2, 2]
+```
+
+## クレート構成とサポート境界
+
+内部は複数のクレートに分かれていますが、利用者が直接触れるのは `fandhe-ai`
+クレートだけです。
+
+| クレート | 役割 |
+|---|---|
+| `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`Device` → バックエンドの結線）と compat 公開面（`compat::array`／`compat::Sequential`）を提供します |
+| `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
+
+上記 6 クレートが crates.io 公開対象です（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。
+ディレクトリ名（`crates/tensor-core` 等）はリネーム前のまま維持しており、
+`[package] name`（crates.io 公開名）のみ `fandhe-ai` prefix 付きへ変更しています。
+
+このほか、相互運用（`onnx-interop`）・自己修復ループ（`guardrail`・`self-repair`）・
+ベンチ計測（`bench-harness`）・ドキュメントサイト生成（`docs-site`）を担う非公開の
+内部クレートがあります。
+
+## バックエンド
+
+バックエンド切替は feature フラグを使わない **cfg ベース**です。CPU は常に利用
+可能な既定バックエンドで、CUDA・Metal は実行時にデバイスの存在を検証し、利用
+できない場合はエラーを返します（自動フォールバックはしません）。バックエンド
+間の数値一致は「相対誤差 1e-3 未満または絶対誤差 1e-5 未満」の複合判定で担保
+します（詳細 → [`docs/backend-switching-design.md`](docs/backend-switching-design.md)）。
+
+Metal バインディングは `objc2-metal` 直接（`wgpu` 不採用: 直接比 約 2.3 倍実測・
+PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal-wgpu-decision.md)）。
 
 ## ステータス
 
-M0（リポ基盤: workspace 骨格・依存禁止 CI 検査・ライセンス可否表）は着手中です。TASK-1.1（workspace `Cargo.toml`・9 クレート雛形・許容依存 8 区分の `=x.y.z` 固定・`Cargo.lock` コミット）は完了し、CI の cargo 系チェック（fmt / clippy / test / 依存禁止検査）は有効化・green を確認済みです（TASK-1.2 の依存禁止検査は稼働中）。TASK-1.3（`deny.toml` 導入・`docs/license-matrix.md` 作成によるライセンス監査）も完了しています。タスク定義は spec リポの [`05-tasks.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/05-tasks.md)（TASK-1.1〜1.3）、マイルストーンは [`06-roadmap.md`](https://github.com/Fandhe-AI/rust-ai-library-spec/blob/main/06-roadmap.md)（M0〜M5・全 51 タスク）を参照してください。
+コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・3 バックエンド
+（CPU／CUDA／Metal）の実装と性能実測が進行しており、crates.io への公開準備を
+進めています。
 
-## 実装方針（要点）
+## 開発（コントリビュータ向け）
 
-- 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（composition root・compat 公開面）。ディレクトリ名は上記のまま維持し、crates.io 公開対象 6 クレートのみ `[package] name` を `fandhe-ai` prefix 付き公開名（`fandhe-ai`・`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`）へ rename 済み（イシュー #877/#879。`docs/crates-io-naming-decision.md`）
-- 許容依存 8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）を `=x.y.z` 完全固定で管理（workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義。TASK-1.1b）
-- 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査（TASK-1.2）
-- バックエンド切替は feature フラグなしの cfg ベース（`cudarc` 動的ロード・`objc2` 系は `cfg(target_os = "macos")` 分離。PoC-v2-5 実証構成。詳細 → [`docs/backend-switching-design.md`](docs/backend-switching-design.md)）
-- Metal バインディングは `objc2-metal` 直接（`wgpu` 不採用: 直接比 約 2.3 倍実測・PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal-wgpu-decision.md)）
+以下はライブラリを clone してコントリビュートする開発者向けの情報です（利用者は上記の
+「インストール」「最小コード例」だけで十分です）。
+
+- 依存は許容 9 区分のみを `=x.y.z` 完全固定で管理する。うち第 1〜8 区分（`cudarc`／`objc2` 系／`safetensors`／`prost`／`serde` 系／`rayon`／`half`／`criterion`）は本体 workspace ルート `Cargo.toml` の `[workspace.dependencies]` に一元定義し、第 9 区分（`matrixmultiply`／`gemm`。OSS GEMM ベンチ比較対象）は `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト）限定で本体 workspace への混入を禁止する（詳細 → [`.claude/rules/deps-policy.md`](.claude/rules/deps-policy.md)）
+- 依存禁止リスト（`burn` 系一式・`cubecl`・`candle`・`tch`・`ndarray`）を CI で機械検査
 
 ### 依存追加・更新フロー
 
 依存の追加・更新は必ずユーザー承認を経て行う（`.claude/rules/deps-policy.md`）。承認後の実施手順:
 
-1. **判断理由の記録**: 許容依存 8 区分以外を新規追加する場合、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
+1. **判断理由の記録**: 許容依存 9 区分以外を新規追加する場合、判断軸 a〜e（数値意味論か境界層か／AI 保守ガードレール対象か／自作コスト対差別化価値／unsafe・FFI 面積／ライセンス適合。`docs/spec/01-brainstorm.md` の「v2 自作範囲の境界定義」節）に基づく判断理由を PR 本文・コミットメッセージに記録する
 2. **バージョン固定**: `Cargo.toml` で `=x.y.z` 完全固定とし、`Cargo.lock` を同一コミットでコミットする
 3. **`docs/license-matrix.md` の同時更新**: 新規・更新する依存のライセンスを確認し、`docs/license-matrix.md`（未作成の場合は同一 PR で作成）を更新する。MPL-2.0 等コピーレフトの推移的混入は推定で記述せず、有効化しうる feature 組合せごとの `cargo tree` 実測で個別に適合確認する
 4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` によるライセンス監査）が green であることを確認する
