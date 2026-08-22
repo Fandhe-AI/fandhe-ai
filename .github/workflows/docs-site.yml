@@ -1,0 +1,149 @@
+# GitHub Pages 公開用 CI（イシュー #876）。
+#
+# `crates/docs-site`（自作 SSG。#868〜#872）+ `site/`（原稿・ナビ定義。#873 系）から
+# 静的サイトを生成し、Fandhe-AI/actions の pages-deploy.yml reusable workflow へ
+# デプロイを委譲する 2 ジョブ構成（build → deploy）。同型リポ fandhe-backend の
+# docs-site.yml を底本に、本リポの規約（deps-policy.md の Cargo.lock コミット方針・
+# ci.md の runner-policy／SHA 固定／timeout-minutes 必須）へ適合させた。
+#
+# トリガーを push（main）+ workflow_dispatch のみに限定する設計（PR では起動しない）
+# のため、本 workflow は PR 上に check-run を作らない。よって ci.yml の ci-complete
+# 集約・ruleset main-protection の required contexts 更新は不要（.claude/rules/ci.md
+# 「ワークフロー設計」節の G0 ゲート要件と矛盾しない）。
+#
+# Pages 有効化（`gh api -X POST repos/Fandhe-AI/rust-ai-library/pages -f
+# build_type=workflow` または Settings → Pages → Source: GitHub Actions）はリポジトリ
+# 設定変更のためユーザー承認事項であり、本 workflow の追加だけでは行われない
+# （deps-policy.md／ci.md の ruleset 変更と同じ扱い。.claude/rules/out-of-scope-
+# tracking.md）。有効化前に main へ push されると、build ジョブは成功し deploy ジョブの
+# みが「Get Pages site failed」相当で失敗する（pages-deploy.yml 側の前提コメント参照）。
+# 有効化後は本 workflow の再実行（次の対象パス push か workflow_dispatch）で初回公開が
+# 完了する。
+name: docs-site (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - "crates/docs-site/**"
+      - ".github/workflows/docs-site.yml"
+  # Cargo.lock 経由の依存更新など、上記 paths に乗らない変更後の手動再デプロイ用。
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  # Pages デプロイ中断による中途半端な公開状態を避けるため cancel-in-progress: false
+  # とする（reusable workflow 側 README・pages-deploy.yml 冒頭コメントの推奨方針）。
+  group: docs-site-pages
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------
+  # サイト生成（`cargo run -p docs-site`）+ 生成物の非空検証 + artifact アップロード。
+  # --------------------------------------------------
+  build:
+    name: build docs-site
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        # persist-credentials: false（ci.yml の各ジョブと同一方針。docs/spec submodule
+        # は site/ の source 参照に含まれないため checkout しない）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml（stable + rustfmt/clippy）へ同期する（ci.yml の build
+      # ジョブ等と同一の参照形式・同一 ref 表記を踏襲する）。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
+        uses: Fandhe-AI/actions/rust-toolchain-setup@latest
+
+      # cargo registry（ci.yml の build 系ジョブと同一方針のキャッシュ設計。SHA は
+      # v4 系最新タグ v4.3.0 を `gh api repos/actions/cache/git/refs/tags/v4.3.0` で
+      # 解決〈追跡 ref: v4.3.0〉。ci.yml と同一キーを使うことでジョブ間のキャッシュ
+      # 再利用を狙う）。
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      # target（docs-site ジョブ専用。ci.yml の build 系ジョブと内容が異なるため分離する）。
+      - name: Cache cargo target
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: target-docs-site-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            target-docs-site-${{ runner.os }}-
+
+      # 本リポは Cargo.lock コミット方針（.claude/rules/deps-policy.md）のため
+      # `--locked` を付与し、意図しない依存解決の書き換え・runner 汚染を防止する
+      # （ci.yml の build ジョブと同一方針。`--root` は既定 `.` のため省略）。
+      - name: サイト生成（cargo run -p docs-site）
+        run: |
+          cargo run -p docs-site --locked -- --out "${RUNNER_TEMP}/docs-site-dist"
+
+      # 生成物の非空検証（fail-closed）。`build_site()` は linkcheck 内蔵でリンク切れ時は
+      # 書き出しなしで非 0 終了するため、このステップに到達した時点でリンク切れは
+      # 無いが、書き出し自体が空・部分生成のまま成功扱いになる回帰を防ぐため 4 生成物
+      # （crates/docs-site/src/build.rs 実装確認済みの出力構成）を個別に検証する。
+      - name: 生成物の非空検証
+        run: |
+          set -euo pipefail
+          dist="${RUNNER_TEMP}/docs-site-dist"
+          for f in "index.html" "assets/site.css" "assets/site.js" "assets/search-index.json"; do
+            if [ ! -s "${dist}/${f}" ]; then
+              echo "::error::生成物が空か存在しません: ${dist}/${f}"
+              exit 1
+            fi
+          done
+          echo "生成物の非空検証: OK"
+
+      # dist を汎用 artifact としてアップロードする（Pages 専用形式への変換は
+      # pages-deploy.yml reusable workflow 側の upload-pages-artifact が担う。本 job の
+      # 責務は build 側の SSG 実行に閉じる）。SHA は v7 系最新タグ v7.0.1 を
+      # `gh api repos/actions/upload-artifact/git/refs/tags/v7.0.1` で解決
+      # （追跡 ref: v7.0.1）。include-hidden-files: true は pages-deploy.yml 側の
+      # upload-pages-artifact と同様、dotfile（.nojekyll 等）のサイレント脱落を防ぐため
+      # 呼び出し側でも指定する（reusable workflow 冒頭コメント参照）。
+      - name: dist を artifact としてアップロード
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pages-dist
+          path: ${{ runner.temp }}/docs-site-dist
+          if-no-files-found: error
+          include-hidden-files: true
+
+  # --------------------------------------------------
+  # Pages へのデプロイ（Fandhe-AI/actions の pages-deploy.yml reusable workflow へ委譲）。
+  # --------------------------------------------------
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    # reusable workflow は呼び出し側が付与した以上の権限を持てないため、共通側 deploy
+    # ジョブが要求する 2 権限（OIDC によるデプロイ元検証 + Pages デプロイ作成）を
+    # ここで明示付与する（pages-deploy.yml 冒頭コメントのセットアップ例）。
+    permissions:
+      pages: write
+      id-token: write
+    # SHA は `gh api repos/Fandhe-AI/actions/commits/main --jq '.sha'` で解決
+    # （追跡 ref: main。実装時点の解決値 e3bec495028ccd62b684e2e71e6df698890f454c）。
+    uses: Fandhe-AI/actions/.github/workflows/pages-deploy.yml@e3bec495028ccd62b684e2e71e6df698890f454c
+    with:
+      # upload-artifact の path に dist ディレクトリ自体を指定した（artifact ルート =
+      # 公開ルート）ため "." を指定する（reusable workflow 冒頭コメントの案内どおり）。
+      dist-dir: "."
+      # 共通側既定 self-hosted の明示オーバーライド（public 区分〈#457〉・
+      # runner-policy 検査〈scripts/check-workflow-runner-policy.py〉との整合。
+      # artifact-name は既定 pages-dist のまま省略〈build ジョブのアップロード名と一致〉）。
+      runner-label: ubuntu-latest
