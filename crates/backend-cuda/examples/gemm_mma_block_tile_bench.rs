@@ -29,9 +29,25 @@
 //! 超のため除外候補。固定除外ではなく実測上限との動的比較で判定する。
 //! `mma_ptx_dump.rs` の同種コメント・PR #831 codex-review P1 是正と同じ
 //! 方針） |
+//! | `bt128x256_s3_wt4x4_lb512`（イシュー #854 で追加） | 128/256/32 | 3 |
+//! 4x4 | 81,408B（`bt128x256_s3_wt4x4` と同一形状・`__launch_bounds__(512)`
+//! のみが異なる） |
 //!
-//! 全候補 threads/block=512（`launch_bounds` は付与しない。占有率ヒント
-//! 無しでのレジスタ割り当てを比較基準行と揃えるため）・`MMA_BK=32` 不変。
+//! 最初の 4 候補は threads/block=512（`launch_bounds` は付与しない。占有率
+//! ヒント無しでのレジスタ割り当てを比較基準行と揃えるため）。
+//! `bt128x256_s3_wt4x4_lb512` のみ `launch_bounds: Some(512)` を付与する
+//! （イシュー #854。命名は `mma_ptx_dump.rs` の `_lb{v}` サフィックス規約に
+//! 一致）。`bt128x256_s3_wt4x4`〈`launch_bounds` なし〉は 130
+//! registers/thread × 512 threads = 66,560 > 65,536（GB10 per-SM レジスタ
+//! 上限）で 1 ブロックも起動できないと実測済み（`docs/perf/
+//! cuda-gemm-mma-block-tile-stages.md` §4・#840）。一方 `ptxas -v` 実測では
+//! `__launch_bounds__(512)` 付き変種が 128 registers/thread（128×512=65,536
+//! の境界値ちょうど）となり、机上では 1 block/SM で起動可能と見積もられる
+//! が、#840 の A/B 計測は `launch_bounds` を付与しない構成のみを対象とした
+//! ため未計測のまま #842 へ引き継がれた（同 doc §4「未計測」・§6 引き継ぎ
+//! 事項）。**本イシュー（#854）はこの境界値変種の実起動可否を実測する**
+//! （実起動不能なら #847 の不採用判断を確定、起動できれば性能比較へ進む）。
+//! `MMA_BK=32` は全候補で不変。
 //!
 //! ## 実行手順
 //!
@@ -130,6 +146,11 @@ impl TflopsMeasurement {
 }
 
 /// #840 実装計画候補表（本ファイル冒頭コメント参照）1 行分の静的定義。
+///
+/// `launch_bounds`（イシュー #854 で追加）: `None` は「占有率ヒント無し」
+/// （既存 4 候補・比較基準行と揃える）、`Some(v)` はシグネチャへ
+/// `__launch_bounds__(v)` を付与する（`diagnostics::render_mma_f16_
+/// block_tile` の `launch_bounds: Option<u32>` 引数へそのまま渡す）。
 struct Candidate {
     label: &'static str,
     bm: u32,
@@ -138,9 +159,10 @@ struct Candidate {
     stages: u32,
     warp_tiles_m: u32,
     warp_tiles_n: u32,
+    launch_bounds: Option<u32>,
 }
 
-const CANDIDATES: [Candidate; 4] = [
+const CANDIDATES: [Candidate; 5] = [
     Candidate {
         label: "bt64x128_s4",
         bm: 64,
@@ -149,6 +171,7 @@ const CANDIDATES: [Candidate; 4] = [
         stages: 4,
         warp_tiles_m: 2,
         warp_tiles_n: 2,
+        launch_bounds: None,
     },
     Candidate {
         label: "bt128x128_s3_wt2x4",
@@ -158,6 +181,7 @@ const CANDIDATES: [Candidate; 4] = [
         stages: 3,
         warp_tiles_m: 2,
         warp_tiles_n: 4,
+        launch_bounds: None,
     },
     Candidate {
         label: "bt128x256_s3_wt4x4",
@@ -167,6 +191,7 @@ const CANDIDATES: [Candidate; 4] = [
         stages: 3,
         warp_tiles_m: 4,
         warp_tiles_n: 4,
+        launch_bounds: None,
     },
     Candidate {
         label: "bt128x256_s4",
@@ -176,6 +201,25 @@ const CANDIDATES: [Candidate; 4] = [
         stages: 4,
         warp_tiles_m: 4,
         warp_tiles_n: 4,
+        launch_bounds: None,
+    },
+    // イシュー #854: `bt128x256_s3_wt4x4`（`launch_bounds` なし）は
+    // 130 registers/thread × 512 threads = 66,560 > 65,536（GB10
+    // per-SM レジスタ上限）で起動不能と実測済み（`docs/perf/
+    // cuda-gemm-mma-block-tile-stages.md` §4・#840）。`__launch_bounds__
+    // (512)` を付与すると `ptxas -v` 実測で 128 registers/thread
+    // （128×512=65,536 の境界値ちょうど）となり、机上では 1 block/SM で
+    // 起動可能と見積もられるが実起動は未計測だった（同 doc §6）。本候補
+    // でその実起動可否を実測する（本ファイル冒頭コメント参照）。
+    Candidate {
+        label: "bt128x256_s3_wt4x4_lb512",
+        bm: 128,
+        bn: 256,
+        bk: 32,
+        stages: 3,
+        warp_tiles_m: 4,
+        warp_tiles_n: 4,
+        launch_bounds: Some(512),
     },
 ];
 
@@ -446,7 +490,8 @@ fn main() {
         .collect();
 
     println!(
-        "candidate,bm,bn,bk,stages,warp_tiles_m,warp_tiles_n,threads,smem_bytes,dynamic_smem,{}",
+        "candidate,bm,bn,bk,stages,warp_tiles_m,warp_tiles_n,launch_bounds,threads,smem_bytes,\
+         dynamic_smem,{}",
         BENCH_SIZES
             .iter()
             .map(|s| format!(
@@ -477,8 +522,12 @@ fn main() {
             layout.smem_bytes,
             layout.needs_dynamic_smem(),
         );
+        // 比較基準行（本番経路）は `launch_bounds` を付与しない構成のため
+        // 候補行と同じ表記規約で "none" を記す（イシュー #854 で CSV へ
+        // 追加した列。候補行は `Candidate.launch_bounds` を同じ表記で出力
+        // する。下記候補行の該当箇所参照）。
         let mut row = format!(
-            "mma_f16_base(production),{bm},{bn},{bk},{stages},{warp_tiles_m},{warp_tiles_n},\
+            "mma_f16_base(production),{bm},{bn},{bk},{stages},{warp_tiles_m},{warp_tiles_n},none,\
              {threads},{smem_bytes},{dynamic_smem}"
         );
         // 比較基準行の実測値は `measure_production` を size ごとに 1 回だけ
@@ -524,7 +573,7 @@ fn main() {
             candidate.stages,
             candidate.warp_tiles_m,
             candidate.warp_tiles_n,
-            None,
+            candidate.launch_bounds,
             optin_budget_bytes,
         ) {
             Ok(r) => r,
@@ -571,8 +620,13 @@ fn main() {
             }
         }
 
+        // `launch_bounds` 列（イシュー #854 で追加）は `None` を "none"
+        // （比較基準行と同じ表記）、`Some(v)` を数値そのものへ変換する。
+        let launch_bounds_field = candidate
+            .launch_bounds
+            .map_or_else(|| "none".to_string(), |v| v.to_string());
         let mut row = format!(
-            "{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{}",
             candidate.label,
             candidate.bm,
             candidate.bn,
@@ -580,6 +634,7 @@ fn main() {
             candidate.stages,
             candidate.warp_tiles_m,
             candidate.warp_tiles_n,
+            launch_bounds_field,
             layout.threads,
             layout.smem_bytes,
             layout.needs_dynamic_smem(),
