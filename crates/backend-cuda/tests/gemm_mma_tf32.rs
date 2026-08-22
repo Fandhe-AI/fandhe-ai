@@ -10,9 +10,12 @@
 //!
 //! **重要（#852 実機再実測結果）**: 本ファイルの `#[ignore]` 実機テストは
 //! #852 で DGX Spark GB10 実機（driver 580.159.03・CUDA 13.0 V13.0.88）に
-//! て実行済み。`mma_tf32_zero_dim_shape_returns_empty_without_launch`・
-//! `launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch` は
-//! pass。`mma_tf32_matches_reference_across_shapes`・
+//! て実行済み。`mma_tf32_zero_dim_shape_returns_empty_without_launch`
+//! （#853 で一時的に環境適応型〔`#[ignore]` なし〕へ変換したが、実機
+//! でのみ再現する `InvalidShape` panic を検出できないため `#[ignore]` を
+//! 復元済み。`.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]`
+//! で分離」の原則に従う）・`launch_tf32_zero_dim_shape_is_noop_or_zero_fills_without_launch`
+//! は pass。`mma_tf32_matches_reference_across_shapes`・
 //! `mma_tf32_k4096_stress` は #839 時点の機能欠陥（A フラグメント象限
 //! マッピング誤り。`kernels_mma_tf32.rs::LDSM_A_FRAG` 参照）修正後も
 //! FAIL が残る。この残存 FAIL の原因は TF32 丸め誤差・機能欠陥のいずれ
@@ -145,10 +148,23 @@ fn tensor_core_unsupported_display_mentions_compute_capability_8() {
     assert!(err.source().is_none());
 }
 
-/// m==0／n==0 で `run_tf32` を呼んでも CUDA 起動そのものが発生せず、空の
-/// 結果を返すことを実機で確認する
+/// m==0／n==0／k==0 で `run_tf32` を呼んでも CUDA 起動そのものが発生せず、
+/// ゼロ次元形状の契約どおりの結果を返すことを実機で確認する
 /// （`tests/gemm_mma.rs::mma_f16_zero_dim_shape_returns_empty_without_launch`
 /// と同型）。
+///
+/// **#853 是正の再修正（codex-review P1 指摘対応）**: 一度は環境適応型
+/// （`#[ignore]` を外し `DriverUnavailable`/`NvrtcUnavailable` 等で
+/// 早期 return する形）へ変換したが、この形では通常 CI（CUDA 非搭載）で
+/// 実際には何も検証せず素通りするだけになり、AGENTS.md・
+/// `.claude/rules/coding-rust.md`「実機依存テストは `#[ignore]` で分離
+/// する」規約に反する（実機依存テストを通常 CI 対象化した扱いになる）
+/// うえ、実機上でも `Driver(_)`/`NvrtcUnavailable`/`TensorCoreUnsupported`
+/// を成功扱いにしてしまいドライバ異常・NVRTC 構成不備を回帰として
+/// 検出できない。よって `#[ignore]` を復元し、`mma_f16_zero_dim_shape_
+/// returns_empty_without_launch` と同じ `expect` ベースの実機専用形へ
+/// 戻す。#389 前例を踏まえたテスト側のバッファ長是正（`validate_gemm_
+/// dims` の検証順序・契約自体は変更しない）は維持する。
 #[test]
 #[ignore = "CUDA 実機（compute capability 8.0 以上・NVRTC 搭載）必須"]
 fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
@@ -163,15 +179,20 @@ fn mma_tf32_zero_dim_shape_returns_empty_without_launch() {
     // #389 の教訓を踏襲）。よって m=0 の呼び出しは b（k*n=16 要素）を、
     // n=0 の呼び出しは a（m*k=16 要素）を満たす必要がある（#852 で是正。
     // `validate_gemm_dims` 側の検証順序・契約は変更しない）。
-    assert_eq!(
-        gemm.run_tf32(&[], &[0.0f32; 16], 0, 4, 4).unwrap(),
-        Vec::<f32>::new()
-    );
-    assert_eq!(
-        gemm.run_tf32(&[0.0f32; 16], &[], 4, 0, 4).unwrap(),
-        Vec::<f32>::new()
-    );
-    assert_eq!(gemm.run_tf32(&[], &[], 4, 4, 0).unwrap(), vec![0.0f32; 16]);
+    let c = gemm
+        .run_tf32(&[], &[0.0f32; 16], 0, 4, 4)
+        .expect("m==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+
+    let c = gemm
+        .run_tf32(&[0.0f32; 16], &[], 4, 0, 4)
+        .expect("n==0 must be treated as a no-op, not a driver launch error");
+    assert!(c.is_empty());
+
+    let c = gemm
+        .run_tf32(&[], &[], 4, 4, 0)
+        .expect("k==0 must zero-fill C, not fail as a driver launch error");
+    assert_eq!(c, vec![0.0f32; 16]);
 }
 
 /// `launch_tf32`（直接起動 safe API）も `run_tf32` と同じ no-op 形状契約
