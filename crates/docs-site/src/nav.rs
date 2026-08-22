@@ -259,11 +259,21 @@ fn set_once(
     Ok(())
 }
 
+/// `site.base_path` を検証する。`""` または `/` 始まり・`/` 終わりでない形式に加え、
+/// `page.path` と同じセグメントホワイトリスト（[`is_safe_path_segment`]）を課す。
+/// 形式（先頭・末尾 `/`）だけの検証では `base_path = "/../../etc"` のような
+/// パストラバーサル用セグメント（`..`）を通してしまうため（`page.path` 側の
+/// [`validate_page_path`] と同方針。#870 が `base_path` を出力レイアウトの
+/// プレフィックスとして使う前提のため、こちらも fail-closed に揃える）。
 fn validate_base_path(base_path: &str) -> Result<(), NavError> {
     if base_path.is_empty() {
         return Ok(());
     }
-    if base_path.starts_with('/') && !base_path.ends_with('/') {
+    if !base_path.starts_with('/') || base_path.ends_with('/') {
+        return Err(NavError::InvalidBasePath(base_path.to_string()));
+    }
+    let inner = &base_path[1..];
+    if inner.split('/').all(is_safe_path_segment) {
         Ok(())
     } else {
         Err(NavError::InvalidBasePath(base_path.to_string()))
@@ -296,8 +306,14 @@ fn validate_page_path(path: &str) -> Result<(), NavError> {
     }
     let inner = &path[1..path.len() - 1];
     if inner.is_empty() {
-        // "//" のような縮退ケース。セグメントなしとして許可する。
-        return Ok(());
+        // "//" 等、"/" 以外で内部セグメントが空になるケース。サイトトップは
+        // 上の `path.len() == 1` 分岐（`path == "/"`）だけで既に許可済みのため、
+        // ここに到達するのは "//" のような縮退表記のみであり、`"/"` とは
+        // 別文字列として `DuplicatePath` 検査（文字列一致）をすり抜けて共存しうる
+        // （#870 が `page.path` を `--out` 配下の実ファイル書き出しパスとして使う
+        // ため、"/" と "//" が別ページとして共存すると出力先の衝突・上書きに
+        // つながる）。よってここは許可せず拒否する。
+        return Err(NavError::InvalidPagePath(path.to_string()));
     }
     if inner.split('/').all(is_safe_path_segment) {
         Ok(())
@@ -832,6 +848,29 @@ path = "/p1/"
     }
 
     #[test]
+    fn rejects_base_path_with_parent_traversal_segment() {
+        // `page.path` 側の `is_safe_path_segment` ホワイトリストとの非対称
+        // （レビュー指摘）を解消する回帰テスト。
+        let input = r#"
+[site]
+title = "Docs"
+base_path = "/../../etc"
+
+[[section]]
+title = "A"
+
+[[section.page]]
+title = "P1"
+source = "p1.md"
+path = "/p1/"
+"#;
+        assert!(matches!(
+            parse_nav(input),
+            Err(NavError::InvalidBasePath(_))
+        ));
+    }
+
+    #[test]
     fn rejects_page_path_without_leading_slash() {
         let input = r#"
 [site]
@@ -887,6 +926,60 @@ title = "A"
 title = "P1"
 source = "p1.md"
 path = "/../../etc/"
+"#;
+        assert!(matches!(
+            parse_nav(input),
+            Err(NavError::InvalidPagePath(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_double_slash_page_path_degenerate_case() {
+        // "/" と "//" が別々の妥当な path として共存すると、#870 の実ファイル
+        // 書き出しで衝突・上書きにつながりうる（レビュー指摘）。
+        let input = r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "A"
+
+[[section.page]]
+title = "P1"
+source = "p1.md"
+path = "//"
+"#;
+        assert!(matches!(
+            parse_nav(input),
+            Err(NavError::InvalidPagePath(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_double_slash_and_root_path_coexisting_across_sections() {
+        // "//" 単体の拒否だけでなく、"/" と "//" が別セクションに分かれて
+        // 存在するケースでも重複検査をすり抜けず拒否されることを確認する。
+        let input = r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "A"
+
+[[section.page]]
+title = "Top"
+source = "index.md"
+path = "/"
+
+[[section]]
+title = "B"
+
+[[section.page]]
+title = "Dup"
+source = "dup.md"
+path = "//"
 "#;
         assert!(matches!(
             parse_nav(input),

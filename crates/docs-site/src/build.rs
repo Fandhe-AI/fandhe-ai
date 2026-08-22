@@ -72,8 +72,12 @@ pub struct BuildReport {
 /// 作成するビルドパイプラインの枠組み。
 ///
 /// 手順:
-/// 1. `<root>/site/nav.toml` を読む（不在・読み込み失敗・[`nav::MAX_INPUT_BYTES`]
-///    超過はエラー。サイズ超過は [`nav::parse_nav`] 内で検知される）
+/// 1. `<root>/site/nav.toml` を読む（不在・読み込み失敗はエラー）。
+///    [`nav::MAX_INPUT_BYTES`] 超過は、DoS 抑止の実効性を保つため
+///    `fs::metadata` でファイルサイズを見てから `fs::read_to_string` する
+///    （超過ファイル全体をメモリに読み切ってから [`nav::parse_nav`] 内で
+///    拒否する経路だと、この唯一の FS アクセス経路では「読み込み前」の
+///    抑止が効かない。レビュー指摘）
 /// 2. [`nav::parse_nav`] でスキーマ検証 → [`nav::validate_sources`] で
 ///    `page.source` の実ファイル存在検証
 /// 3. `out` ディレクトリを作成（[`fs::create_dir_all`]。既存でも成功として扱う）
@@ -88,6 +92,17 @@ pub struct BuildReport {
 /// いずれかで [`BuildError`] を返す。
 pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     let nav_toml_path = root.join(NAV_TOML_RELATIVE_PATH);
+
+    // DoS 抑止（`nav::MAX_INPUT_BYTES`）をこの唯一の FS アクセス経路で実効化する
+    // ため、ファイル全体を `fs::read_to_string` で読み切る前に `fs::metadata` で
+    // サイズを確認する。`parse_nav` 内の `input.len()` 検査（`nav.rs` 側）は
+    // 既にメモリに載った文字列に対する検査であり、この読み込み前チェックとは
+    // 独立に維持する（`parse_nav` 単体テストの FS 非依存性を壊さないため）。
+    let metadata = fs::metadata(&nav_toml_path).map_err(BuildError::ReadNavToml)?;
+    if metadata.len() > nav::MAX_INPUT_BYTES as u64 {
+        return Err(BuildError::Nav(NavError::TooLarge));
+    }
+
     let input = fs::read_to_string(&nav_toml_path).map_err(BuildError::ReadNavToml)?;
 
     let parsed: Nav = nav::parse_nav(&input)?;
@@ -210,6 +225,24 @@ path = "/intro/"
         assert!(matches!(
             build_site(&root.0, &out.0),
             Err(BuildError::Nav(NavError::Parse { .. }))
+        ));
+    }
+
+    #[test]
+    fn build_site_rejects_oversized_nav_toml_without_reading_it_fully() {
+        // `fs::metadata` によるサイズ確認が `fs::read_to_string` の前段で効いて
+        // いることの回帰テスト（レビュー指摘: DoS 抑止の「読み込み前」実効化）。
+        let root = TempDir::new("build-oversized-nav");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        let mut oversized = String::from("[site]\ntitle = \"");
+        oversized.push_str(&"a".repeat(nav::MAX_INPUT_BYTES + 1));
+        oversized.push_str("\"\nbase_path = \"\"\n");
+        fs::write(root.0.join("site/nav.toml"), oversized).unwrap();
+
+        let out = TempDir::new("build-oversized-nav-out");
+        assert!(matches!(
+            build_site(&root.0, &out.0),
+            Err(BuildError::Nav(NavError::TooLarge))
         ));
     }
 }
