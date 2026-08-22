@@ -3734,26 +3734,40 @@ mod tests {
     /// 2 面バッファのどちらか一方だけ変換が漏れる回帰を検出する（単純な
     /// 部分文字列存在検査では検出できないクラスの回帰のため、出現回数の
     /// 突合という強い形の検査にする）。
+    ///
+    /// PR #857 レビュー指摘（P1）対応: swizzle 変種
+    /// （[`wmma_tf32_f32_staged_source_with_swizzle`]）は本番変種で通常版
+    /// とは別のソース生成関数を通るため、通常版のみの検査では swizzle
+    /// 側だけ変換が欠落する回帰を見逃す。本テストは通常版・swizzle 版
+    /// （group_width=8）の双方を走査して同一契約を検査する
+    /// （`wmma_tf32_f32_staged_source_with_swizzle_does_not_mutate_...`
+    /// が示すとおり swizzle 変種は BODY テンプレートを共有するアンカー
+    /// 置換のみのため、同一契約が両方で成立するはず）。
     #[test]
     fn wmma_tf32_staged_source_applies_tf32_conversion_to_every_fragment_load() {
-        let src = wmma_tf32_f32_staged_source();
-        let load_count = src.matches("wmma::load_matrix_sync(").count();
-        let convert_count = src.matches("wmma::__float_to_tf32(").count();
-        // マクロ定義側に 1 箇所ずつ（LDWM_A_FRAG・LDWM_B_FRAG）記述されている
-        // のみで、呼び出し側は展開時に増えるが本テストはテンプレート文字列
-        // （展開前のマクロ定義込みソース）を対象にしているため、定義箇所の
-        // 個数（load: 2、convert: 2）が一致することを検査する。
-        assert_eq!(
-            load_count, convert_count,
-            "wmma::load_matrix_sync の出現回数（{load_count}）と \
-             wmma::__float_to_tf32 変換ループの出現回数（{convert_count}）が一致しません \
-             （先読みバッファの一方で TF32 変換が欠落している可能性）"
-        );
-        assert_eq!(
-            load_count, 2,
-            "LDWM_A_FRAG/LDWM_B_FRAG マクロ定義それぞれ 1 箇所ずつ、計 2 箇所の \
-             load_matrix_sync 呼び出しが期待されます（実際: {load_count}）"
-        );
+        let sources = [
+            wmma_tf32_f32_staged_source().to_string(),
+            wmma_tf32_f32_staged_source_with_swizzle(8).expect("group_width=8 must be accepted"),
+        ];
+        for src in sources {
+            let load_count = src.matches("wmma::load_matrix_sync(").count();
+            let convert_count = src.matches("wmma::__float_to_tf32(").count();
+            // マクロ定義側に 1 箇所ずつ（LDWM_A_FRAG・LDWM_B_FRAG）記述されている
+            // のみで、呼び出し側は展開時に増えるが本テストはテンプレート文字列
+            // （展開前のマクロ定義込みソース）を対象にしているため、定義箇所の
+            // 個数（load: 2、convert: 2）が一致することを検査する。
+            assert_eq!(
+                load_count, convert_count,
+                "wmma::load_matrix_sync の出現回数（{load_count}）と \
+                 wmma::__float_to_tf32 変換ループの出現回数（{convert_count}）が一致しません \
+                 （先読みバッファの一方で TF32 変換が欠落している可能性）"
+            );
+            assert_eq!(
+                load_count, 2,
+                "LDWM_A_FRAG/LDWM_B_FRAG マクロ定義それぞれ 1 箇所ずつ、計 2 箇所の \
+                 load_matrix_sync 呼び出しが期待されます（実際: {load_count}）"
+            );
+        }
     }
 
     /// REQ-8: guarded load／guarded store の境界チェックがソースから

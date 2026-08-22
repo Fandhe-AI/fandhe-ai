@@ -119,16 +119,18 @@ toolkit・実機がないため未検証。下記 3 節参照）。
 その後、イシュー #851 本文は GB10 実機 bisect A/B（親 `9bbac56` vs
 `2c0f9ec`。5 回計測中央値）を報告し、本番最優先経路（TF32 opt-staged）が
 512〜2048 において明確な性能回帰を示したとされていた。**codex-review
-指摘（PR #857・P1）を受け、本 PR 自身のセッションで GB10 実機（node
-`local.fandhe.spark-dbd9`）に接続し、revert 前後（A/B）双方を再実測して
+指摘（PR #857・P1）を受け、本 PR 自身のセッションで GB10 実機（`spark-dbd9`。
+実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）に接続し、
+revert 前後（A/B）双方を再実測して
 `docs/perf/gemm-optimization-baseline.md` §5 の受入条件を満たしたことを
 確認した**（イシュー本文の数値をそのまま引用するのではなく、本 PR 自身
 のセッションで bisect を再現している）。
 
 ### 3.1 実測条件
 
-- **ノード**: `local.fandhe.spark-dbd9`（`docs/real-hardware-verification-env.md`
-  記載の GB10・`nvidia-smi` で GPU utilization 0% を計測直前に確認済み）
+- **ノード**: `spark-dbd9`（`docs/real-hardware-verification-env.md`
+  記載の GB10・`nvidia-smi` で GPU utilization 0% を計測直前に確認済み。
+  実ホスト名は `docs/real-hardware-verification-env.local.md` 参照）
 - **ベンチバイナリ**: `cargo run -p backend-cuda --example
   gemm_wmma_tf32_swizzle_bench --release --features internal-diagnostics`
   の `base_tflops`（本番カーネル・swizzle 無効の系列。`CudaGemm::new`
