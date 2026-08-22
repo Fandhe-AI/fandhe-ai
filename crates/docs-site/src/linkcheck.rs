@@ -108,20 +108,58 @@ fn is_external_url(href: &str) -> bool {
     }
     if let Some(colon_idx) = href.find(':') {
         let scheme_candidate = &href[..colon_idx];
-        // スキームはコロンより前に `/` を含まない（`RFC 3986` の `scheme`
-        // 生成規則: 英数字・`+`・`-`・`.` のみ）。相対パス中にコロンが
-        // 現れる非現実的なケース（`/a:b` 等）を誤って外部リンク扱いしない
-        // ための条件。
-        if !scheme_candidate.is_empty()
+        // スキームはコロンより前に `/` を含まない（`RFC 3986` §3.1 の
+        // `scheme` 生成規則: 先頭は英字必須、2 文字目以降は英数字・`+`・
+        // `-`・`.` を許容）。相対パス中にコロンが現れる非現実的なケース
+        // （`/a:b` 等）を誤って外部リンク扱いしないための条件。
+        //
+        // レビュー指摘（PR #901・github-actions(bot) P2）: 先頭文字にも
+        // 英数字を許すと `123:missing` のような数字始まりの相対パスを
+        // scheme 付き外部 URL と誤認し、検証対象から除外してしまう
+        // （壊れたリンクが linkcheck をすり抜ける）。先頭文字は
+        // `is_ascii_alphabetic()` で検証し、2 文字目以降のみ現行の文字
+        // 集合（英数字・`+`・`-`・`.`）を適用する。
+        let mut chars = scheme_candidate.chars();
+        let starts_with_alpha = chars.next().is_some_and(|c| c.is_ascii_alphabetic());
+        if starts_with_alpha
             && !scheme_candidate.contains('/')
-            && scheme_candidate
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
         {
             return true;
         }
     }
     false
+}
+
+/// `s`（percent-encoding を含みうる文字列）を percent-decode する。
+///
+/// レビュー指摘（PR #901・github-actions(bot) P2）: fragment を
+/// percent-decode せず `id` 属性値と直接比較すると、`#foo%20bar`
+/// のようなブラウザ上は `foo bar` として解決可能なリンクを誤って
+/// 壊れたリンクと判定してしまう（fail-closed でビルド全体が失敗しうる）。
+/// `href`／`id` 双方とも percent-decode 後の値で突合するのが正しい。
+///
+/// 不正な percent-encoding（`%` の後ろに 2 桁の 16 進数が続かない、または
+/// デコード結果が不正な UTF-8 バイト列になる）は `None` を返し、
+/// 呼び出し元がその fragment を明示的に broken と判定する（あいまいな
+/// 入力を許容側へ倒さない。`.claude/rules/security.md` A03 準拠）。
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let hex_str = std::str::from_utf8(hex).ok()?;
+            let value = u8::from_str_radix(hex_str, 16).ok()?;
+            out.push(value);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// `href` を `(path 部分, fragment 部分)` へ分割する（`#` の有無で判定）。
@@ -286,8 +324,21 @@ pub(crate) fn check_links(
             // `...#` で終わる形。HTML 仕様上「文書先頭」を意味し、ページ側に
             // 対応する `id` 実在を要求すべきではない）は検証対象から除く。
             if let Some(fragment) = fragment_part.filter(|fragment| !fragment.is_empty()) {
+                // レビュー指摘（PR #901・github-actions(bot) P2）: fragment は
+                // percent-encoding されうる（`#foo%20bar` 等）ため、`id`
+                // 属性値（percent-decode 前提の生の値）と比較する前に
+                // percent-decode する。不正な percent-encoding は明示的に
+                // broken と判定する（`percent_decode` doc 参照）。
+                let Some(decoded_fragment) = percent_decode(fragment) else {
+                    broken.push(BrokenLink {
+                        page_path: page_path.clone(),
+                        href: raw.clone(),
+                        reason: format!("fragment `#{fragment}` is not validly percent-encoded"),
+                    });
+                    continue;
+                };
                 match page_ids_by_key.get(&key) {
-                    Some(target_ids) if target_ids.contains(fragment) => {}
+                    Some(target_ids) if target_ids.contains(&decoded_fragment) => {}
                     Some(_) => broken.push(BrokenLink {
                         page_path: page_path.clone(),
                         href: raw.clone(),
@@ -547,6 +598,50 @@ mod tests {
             Node::element("html", vec![], vec![link("#")]),
         )];
         assert!(check_links(&pages, "", &[]).is_empty());
+    }
+
+    #[test]
+    fn percent_encoded_fragment_matching_an_id_reports_no_broken_links() {
+        // レビュー指摘（PR #901・github-actions(bot) P2）: `#foo%20bar` は
+        // ブラウザ上 `id="foo bar"` へ解決可能なため、percent-decode 後に
+        // 突合すれば壊れたリンクと誤判定されない。
+        let pages = vec![page(
+            "/guide/",
+            Node::element(
+                "html",
+                vec![],
+                vec![link("#foo%20bar"), heading_with_id("foo bar")],
+            ),
+        )];
+        assert!(check_links(&pages, "", &[]).is_empty());
+    }
+
+    #[test]
+    fn invalid_percent_encoded_fragment_is_reported_broken() {
+        // 不正な percent-encoding（`%` の後ろに 2 桁の 16 進数が続かない）は
+        // 曖昧な入力を許容側へ倒さず明示的に broken とする。
+        let pages = vec![page(
+            "/guide/",
+            Node::element("html", vec![], vec![link("#foo%2")]),
+        )];
+        let broken = check_links(&pages, "", &[]);
+        assert_eq!(broken.len(), 1);
+        assert!(broken[0].reason.contains("percent-encoded"));
+    }
+
+    #[test]
+    fn scheme_starting_with_a_digit_is_not_treated_as_external_and_is_validated() {
+        // レビュー指摘（PR #901・github-actions(bot) P2）: RFC 3986 は
+        // scheme の先頭を英字必須とするため、`123:missing` のような
+        // 数字始まりは外部 URL 扱いせずサイト内リンクとして検証すべき
+        // （既知ターゲット表に存在しないため壊れたリンクとして検出される）。
+        let pages = vec![page(
+            "/guide/",
+            Node::element("html", vec![], vec![link("123:missing")]),
+        )];
+        let broken = check_links(&pages, "", &[]);
+        assert_eq!(broken.len(), 1);
+        assert!(broken[0].reason.contains("does not exist"));
     }
 
     #[test]
