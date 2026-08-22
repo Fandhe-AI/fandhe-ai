@@ -29,7 +29,21 @@ impl TempOutDir {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        Self(std::env::temp_dir().join(format!(
+        // `std::env::temp_dir()` は macOS では `/var/folders/...`
+        // （`/var` 自体が `/private/var` への symlink）を返す。`build_site`
+        // の `open_out_root_dir` は `out` 配下の全コンポーネントを fd 相対
+        // `O_NOFOLLOW` で辿り経路上のどの symlink も拒否する（P0 修正・
+        // PR #899。`crates/docs-site/src/build.rs` の同関数ドキュメント
+        // コメント参照）ため、symlink を含む一時ディレクトリを `out` へ
+        // そのまま渡すとテストが偽陽性で失敗する。まだ存在しない出力先
+        // 自体は `canonicalize` できないため、既に実在する
+        // `std::env::temp_dir()` の方を先に symlink 無しの実パスへ解決し、
+        // その上へ一意なサフィックス付きコンポーネントを追加する
+        // （テストフィクスチャ自身の正規化であり、本番コードの symlink
+        // 拒否ロジックを弱めるものではない）。
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonicalize std::env::temp_dir() for site_nav test");
+        Self(base.join(format!(
             "rust-ai-library-docs-site-site-nav-test-{tag}-{}-{unique}",
             std::process::id()
         )))
@@ -49,6 +63,70 @@ fn valid_fixture_builds_and_reports_all_pages() {
     let report = build_site(&root, &out.0).expect("valid fixture should build");
     assert_eq!(report.pages, 3);
     assert!(out.0.is_dir());
+}
+
+/// 受け入れ基準 2: 生成 HTML が nav.toml のセクション構造どおりのサイドバーを
+/// 持つこと（イシュー #870）。
+#[test]
+fn valid_fixture_generates_sidebar_matching_nav_structure() {
+    let root = fixture_root("valid");
+    let out = TempOutDir::new("valid-sidebar");
+    build_site(&root, &out.0).expect("valid fixture should build");
+
+    let html = std::fs::read_to_string(out.0.join("guide/intro/index.html"))
+        .expect("intro page should be written");
+
+    // セクション見出し・ページリンクが nav.toml の宣言順どおり現れる。
+    let guide_pos = html.find("Guide").expect("Guide section heading present");
+    let reference_pos = html
+        .find("Reference")
+        .expect("Reference section heading present");
+    assert!(
+        guide_pos < reference_pos,
+        "sections must keep declaration order"
+    );
+
+    assert!(html.contains("href=\"/guide/intro/\""));
+    assert!(html.contains("href=\"/guide/getting-started/\""));
+    assert!(html.contains("href=\"/reference/api/\""));
+    // 現在ページ（intro）に aria-current="page" が付与されている。
+    assert!(html.contains("aria-current=\"page\">Introduction</a>"));
+}
+
+/// Markdown 由来の各種タグが本文（`<article>`）に反映されていることの確認
+/// （受け入れ基準 1 の統合テスト側カバレッジ）。
+#[test]
+fn valid_fixture_renders_markdown_syntax_into_html() {
+    let root = fixture_root("valid");
+    let out = TempOutDir::new("valid-markdown");
+    build_site(&root, &out.0).expect("valid fixture should build");
+
+    let intro_html = std::fs::read_to_string(out.0.join("guide/intro/index.html")).unwrap();
+    assert!(intro_html.contains("<h1>Introduction</h1>"));
+    assert!(intro_html.contains("<ul><li>first item</li>"));
+    assert!(intro_html.contains("<blockquote>"));
+    assert!(intro_html.contains("<table>"));
+
+    let getting_started_html =
+        std::fs::read_to_string(out.0.join("guide/getting-started/index.html")).unwrap();
+    assert!(getting_started_html.contains("<pre><code class=\"language-rust\">"));
+    assert!(getting_started_html.contains("<strong>bold</strong>"));
+    assert!(getting_started_html.contains("<em>em</em>"));
+    assert!(getting_started_html.contains("<strong><em>bold+em</em></strong>"));
+    assert!(getting_started_html.contains("<a href=\"/guide/intro/\">link</a>"));
+}
+
+/// `assets/site.css` が生成されることの確認（テーマ CSS 書き出し。実装計画 §2.5）。
+#[test]
+fn valid_fixture_writes_theme_css_asset() {
+    let root = fixture_root("valid");
+    let out = TempOutDir::new("valid-css");
+    build_site(&root, &out.0).expect("valid fixture should build");
+
+    let css = std::fs::read_to_string(out.0.join("assets/site.css"))
+        .expect("assets/site.css should be written");
+    assert!(css.contains(":root"));
+    assert!(css.contains("prefers-color-scheme: dark"));
 }
 
 #[test]

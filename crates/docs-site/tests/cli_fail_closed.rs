@@ -25,7 +25,21 @@ impl TempOutDir {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        Self(std::env::temp_dir().join(format!(
+        // `std::env::temp_dir()` は macOS では `/var/folders/...`
+        // （`/var` 自体が `/private/var` への symlink）を返す。`build_site`
+        // の `open_out_root_dir` は `out` 配下の全コンポーネントを fd 相対
+        // `O_NOFOLLOW` で辿り経路上のどの symlink も拒否する（P0 修正・
+        // PR #899。`crates/docs-site/src/build.rs` の同関数ドキュメント
+        // コメント参照）ため、symlink を含む一時ディレクトリを `--out` へ
+        // そのまま渡すと E2E テストが偽陽性で失敗する。まだ存在しない
+        // 出力先自体は `canonicalize` できないため、既に実在する
+        // `std::env::temp_dir()` の方を先に symlink 無しの実パスへ解決し、
+        // その上へ一意なサフィックス付きコンポーネントを追加する
+        // （テストフィクスチャ自身の正規化であり、本番コードの symlink
+        // 拒否ロジックを弱めるものではない）。
+        let base = std::fs::canonicalize(std::env::temp_dir())
+            .expect("canonicalize std::env::temp_dir() for cli_fail_closed test");
+        Self(base.join(format!(
             "rust-ai-library-docs-site-cli-test-{tag}-{}-{unique}",
             std::process::id()
         )))
