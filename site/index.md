@@ -31,5 +31,8 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 
 - [Getting Started](/getting-started/): インストール・最小
   コード例・バックエンド切替
+- [Guides](/guides/): バックエンド構成・数値一致契約・性能の考え方・
+  ONNX/safetensors 相互運用の解説
+- [Examples](/examples/): 学習ループ・推論・GEMM ベンチの実行例
 - [API Reference](/api/): `compat` API・guardrail／self-repair
   CLI の要点
