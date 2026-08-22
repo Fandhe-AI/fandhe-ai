@@ -15,8 +15,9 @@
 //! pass。`mma_tf32_matches_reference_across_shapes`・
 //! `mma_tf32_k4096_stress` は #839 時点の機能欠陥（A フラグメント象限
 //! マッピング誤り。`kernels_mma_tf32.rs::LDSM_A_FRAG` 参照）修正後も
-//! 近似ゼロ出力要素の相対誤差判定で僅かに FAIL が残る（
-//! `docs/perf/cuda-gemm-mma-tf32-ab.md` §8 に実測ログを記録）。
+//! 原因未特定の欠陥に起因する FAIL が残る（`wmma_tf32` は同一 CPU 参照・
+//! 同一許容誤差で pass するため TF32 丸め誤差では説明できないことを
+//! 確認済み。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4 に実測ログを記録）。
 
 use backend_cuda::{CudaDevice, CudaError, CudaMmaTf32Gemm};
 
@@ -87,9 +88,9 @@ fn new_does_not_panic_and_returns_typed_result() {
 /// `DriverUnavailable` 分岐で早期 return し green のまま。コンパイル・
 /// 起動失敗を誤って parity 通過とみなす退行を防ぐため、CUDA+NVRTC
 /// 環境に限っては厳格化する。`.claude/rules/coding-rust.md` テスト・
-/// ベンチ節）。**#852 実機再実測（GB10）**: 64x64x64 形状でも近似ゼロ
-/// 出力要素の相対誤差判定で FAIL が残る（`fail_count=666/4096`。
-/// `docs/perf/cuda-gemm-mma-tf32-ab.md` §8）。本経路は本番未結線・
+/// ベンチ節）。**#852 実機再実測（GB10）**: 64x64x64 形状でも原因未特定の
+/// 欠陥に起因する FAIL が残る（`fail_count=666/4096`。
+/// `docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4）。本経路は本番未結線・
 /// 凍結継続のため通常 CI（GPU 非搭載）には影響しないが、将来 GPU 搭載
 /// CI／実機セッションでこのテストを走らせると FAIL する状態が残って
 /// いる点に注意（凍結解除判断の一部として #835 系で扱う）。

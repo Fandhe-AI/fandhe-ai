@@ -15,9 +15,12 @@
 //! #839 時点の機能欠陥（`kernels_mma_tf32.rs::LDSM_A_FRAG` の A フラグ
 //! メント象限マッピング誤り）修正後、両経路の乖離は
 //! `mean_rel_err` オーダーで劇的に縮小した（512x512x512:
-//! `fail_count=7/262144・mean_rel_err=4.8e-6`）が、近似ゼロ出力要素の
-//! 相対誤差判定で僅かに FAIL が残る（`docs/perf/cuda-gemm-mma-tf32-ab.md`
-//! §8 に実測ログを記録）。
+//! `fail_count=7/262144・mean_rel_err=4.8e-6`）が僅かに FAIL が残る。
+//! この極めて小さい残差こそが、`mma_tf32` 単独の CPU 参照比較（
+//! `mean_rel_err` は 200 倍大きい）に見られる残存 FAIL を TF32 丸め誤差
+//! だけでは説明できないことを示す根拠になっている（両経路とも同一の
+//! TF32 丸めを適用するため。`docs/perf/cuda-gemm-mma-tf32-ab.md` §8.4
+//! に分析を記録）。
 //!
 //! **実機依存の分離**: `tests/gemm_wmma_tf32_staged.rs` と同じ分岐
 //! パターン（環境適応スモークのみ通常 CI で実行、CUDA/NVRTC 非搭載・
