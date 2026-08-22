@@ -551,16 +551,20 @@ fn try_link(chars: &[char], i: usize, depth: usize) -> Option<(Node, usize)> {
     }
 }
 
-/// URL の `\t` `\n` `\r` を除去し、先頭の制御文字をトリムして正規化する。
-/// `java\tscript:` のようなタブ挿入によるスキーム偽装を無害化してから
-/// [`is_allowed_url`] のスキーム判定にかけるための前処理。
+/// URL の `\t` `\n` `\r` を除去し、先頭の制御文字・半角スペースをトリムして
+/// 正規化する。`java\tscript:` のようなタブ挿入によるスキーム偽装を無害化して
+/// から [`is_allowed_url`] のスキーム判定にかけるための前処理。半角スペース
+/// （U+0020）は `char::is_control` が Cc カテゴリしか見ないため対象外になり、
+/// ` //evil.com` のような先頭スペース付きプロトコル相対 URL が `//` 始まり
+/// 判定を回避して `is_allowed_url` の相対パス許可分岐へ落ちてしまう
+/// （Review 指摘・issue #870: WHATWG URL 仕様のトリム対象と同様に空白も除く）。
 fn normalize_url(raw: &str) -> String {
     let filtered: String = raw
         .chars()
         .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
         .collect();
     filtered
-        .trim_start_matches(|c: char| c.is_control())
+        .trim_start_matches(|c: char| c.is_control() || c == ' ')
         .to_string()
 }
 
@@ -570,6 +574,15 @@ fn normalize_url(raw: &str) -> String {
 fn is_allowed_url(raw: &str) -> bool {
     let normalized = normalize_url(raw);
     if normalized.is_empty() {
+        return false;
+    }
+    // `\` を含む URL は http(s) 絶対 URL・サイト内相対パスのいずれにも正当な
+    // 用途がなく、WHATWG URL 仕様ではブラウザが special scheme の相対解決で
+    // `\` を `/` と等価に扱うため `\\/evil.com` 等が `//evil.com` のプロトコル
+    // 相対 URL 偽装として機能しうる。`/` 始まり判定より先に無条件で拒否する
+    // （`nav.rs::validate_source_shape` が `source` の `\` を拒否するのと同方針。
+    // Review 指摘・issue #870）。
+    if normalized.contains('\\') {
         return false;
     }
     let lower = normalized.to_ascii_lowercase();
@@ -803,6 +816,36 @@ mod tests {
         // リンクになる（プロトコル相対 URL）。`/` 始まり判定に飲み込まれて
         // 誤って許可されないことを回帰検査する（Review 指摘: issue #870）。
         assert_eq!(html_of("[x](//evil.com/path)"), "<p><span>x</span></p>");
+    }
+
+    #[test]
+    fn drops_link_for_backslash_disguised_protocol_relative_url() {
+        // WHATWG URL 仕様ではブラウザが special scheme の相対解決で `\` を `/`
+        // と等価に扱うため、`\` 混じりの `//evil.com` 変種も外部誘導になりうる
+        // （Review 指摘・issue #870）。`\` を含む URL を無条件拒否することで
+        // バリエーションをまとめて遮断できることを回帰検査する。
+        for url in ["\\/evil.com/x", "/\\evil.com/x", "\\\\evil.com/x"] {
+            assert_eq!(
+                html_of(&format!("[x]({url})")),
+                "<p><span>x</span></p>",
+                "url={url} が拒否されなかった"
+            );
+        }
+    }
+
+    #[test]
+    fn drops_link_for_space_disguised_protocol_relative_url() {
+        // 半角スペース（U+0020）は `char::is_control`（Cc カテゴリ）の対象外の
+        // ため、先頭スペース付き ` //evil.com` が `normalize_url` のトリムを
+        // すり抜けて `//` 始まり判定を回避していた（Review 指摘・issue #870）。
+        assert_eq!(html_of("[x]( //evil.com/path)"), "<p><span>x</span></p>");
+    }
+
+    #[test]
+    fn drops_link_for_space_and_backslash_disguised_protocol_relative_url() {
+        // 先頭スペース・`\` 偽装の組み合わせも同時に閉じることを回帰検査する
+        // （Review 指摘・issue #870）。
+        assert_eq!(html_of("[x]( \\/evil.com/path)"), "<p><span>x</span></p>");
     }
 
     // ---- 生 HTML はテキストとしてエスケープされる ----
