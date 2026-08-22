@@ -19,6 +19,8 @@ use crate::html;
 use crate::layout;
 use crate::markdown;
 use crate::nav::{self, Nav, NavError};
+use crate::script;
+use crate::search;
 
 /// `nav.toml` の相対配置（`repo_root` からの相対パス）。
 const NAV_TOML_RELATIVE_PATH: &str = "site/nav.toml";
@@ -56,8 +58,21 @@ pub enum BuildError {
     },
     /// ページ HTML の書き出し（親ディレクトリ作成含む）に失敗した。
     WritePage { path: String, error: std::io::Error },
-    /// `assets/site.css` の書き出しに失敗した。
-    WriteAsset(std::io::Error),
+    /// 静的アセット（`assets/site.css`・`assets/site.js`・
+    /// `assets/search-index.json`）の書き出しに失敗した。`path` はどのアセット
+    /// かを診断に残すため保持する（`WritePage` と同じ形にすることで、複数
+    /// アセットへ使い回せるようにした。イシュー #871 で `site.js`・
+    /// `search-index.json` の書き出しにも使うため `SITE_CSS_RELATIVE_PATH`
+    /// 固定のメッセージから汎用化した）。
+    WriteAsset { path: String, error: std::io::Error },
+    /// 検索インデックス（`assets/search-index.json`）の直列化後サイズが
+    /// `search::MAX_INDEX_BYTES` を超過した（fail-closed。DoS 抑止。
+    /// `search.rs` モジュール doc 参照）。`search::IndexTooLarge` は
+    /// `pub(crate)` のため、`pub` な本 enum のバリアントとしてそのまま
+    /// 包まず、実バイト数・上限のみをコピーして持つ（private_interfaces
+    /// lint 回避。`build.rs` は `docs-site` の唯一の公開ビルド API のため
+    /// 内部型を漏らさない）。
+    IndexTooLarge { bytes: usize, max: usize },
     /// 出力先パスがシンボリックリンク経由で `out` 配下の外を指す、または
     /// 既存のシンボリックリンクを上書きしようとした（TOCTOU・意図しない上書き
     /// 対策。レビュー指摘）。
@@ -86,8 +101,14 @@ impl fmt::Display for BuildError {
             BuildError::WritePage { path, error } => {
                 write!(f, "failed to write page output `{path}`: {error}")
             }
-            BuildError::WriteAsset(err) => {
-                write!(f, "failed to write {SITE_CSS_RELATIVE_PATH}: {err}")
+            BuildError::WriteAsset { path, error } => {
+                write!(f, "failed to write asset `{path}`: {error}")
+            }
+            BuildError::IndexTooLarge { bytes, max } => {
+                write!(
+                    f,
+                    "search index ({bytes} bytes) exceeds the {max} byte size limit"
+                )
             }
             BuildError::UnsafeOutputPath(path) => {
                 write!(
@@ -954,12 +975,31 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
     // `relative_out_path` は `out` からの相対パス（`page_output_path` に空の
     // ベースを渡して算出する）。書き出しは fd 相対（[`write_file_creating_parent`]）
     // で行うため絶対パスは不要で、`out` は表示用にのみ渡す。
+    //
+    // 検索索引エントリ（`search_pages`）は `markdown::markdown_to_nodes` の
+    // 戻り値（`body`。レンダリング済み HTML ではなく `html::Node` 木）から
+    // `layout::docs_page` へ渡す前に抽出する（イシュー #871。`search.rs`
+    // モジュール doc 参照）。`href` は `layout::asset_href` 経由で
+    // `base_path` を反映済みにし、ヘッダの nav・asset リンクと同じ扱いに
+    // 揃える。
     let mut rendered_pages: Vec<(PathBuf, String)> = Vec::new();
+    let mut search_pages: Vec<search::SearchPage> = Vec::new();
     for section in &parsed.sections {
         for page in &section.pages {
             let markdown_input = read_verified_source(&root_dir, &page.source)?;
 
             let body = markdown::markdown_to_nodes(&markdown_input);
+            let text = search::truncate_at_char_boundary(
+                &search::extract_plain_text(&body),
+                search::MAX_PAGE_TEXT_BYTES,
+            )
+            .to_string();
+            search_pages.push(search::SearchPage {
+                href: layout::asset_href(&parsed.site.base_path, &page.path),
+                title: page.title.clone(),
+                text,
+            });
+
             let page_node = layout::docs_page(&parsed, &page.title, &page.path, body);
             let html_out = format!("{DOCTYPE}{}", html::render(&page_node));
 
@@ -968,30 +1008,64 @@ pub fn build_site(root: &Path, out: &Path) -> Result<BuildReport, BuildError> {
         }
     }
 
-    // 手順 4: 出力ディレクトリ作成 → ページ書き出し → テーマ CSS 書き出し。
-    // `out` ルート自体の symlink 検査は [`open_out_root_dir`] が担う（P0
-    // 修正・PR #899）。
+    // 検索索引の直列化・サイズ検証は書き出し開始前に行う（`out` へ 1 バイトも
+    // 書く前に fail-closed で拒否する。既存の「全ページをメモリ上で変換し
+    // 切ってから書き出す」安全側の順序を踏襲する）。
+    let search_index = search::SearchIndex {
+        base_path: parsed.site.base_path.clone(),
+        pages: search_pages,
+    };
+    let search_index_json = search::serialize_index(&search_index);
+    search::validate_index_size(&search_index_json, search::MAX_INDEX_BYTES).map_err(|err| {
+        BuildError::IndexTooLarge {
+            bytes: err.bytes,
+            max: err.max,
+        }
+    })?;
+
+    // 手順 4: 出力ディレクトリ作成 → ページ書き出し → テーマ CSS・JS・検索索引
+    // 書き出し。`out` ルート自体の symlink 検査は [`open_out_root_dir`] が
+    // 担う（P0 修正・PR #899）。
     let out_root_dir = open_out_root_dir(out)?;
 
-    let mut written = Vec::with_capacity(rendered_pages.len() + 1);
+    let mut written = Vec::with_capacity(
+        rendered_pages.len() + 3, /* site.css・site.js・search-index.json */
+    );
     for (relative_out_path, html_out) in &rendered_pages {
         write_file_creating_parent(out, &out_root_dir, relative_out_path, html_out)?;
         written.push(relative_out_path.clone());
     }
 
+    // ページ書き出し（`WritePage`）と同じヘルパー（`write_file_creating_parent`）
+    // を静的アセット 3 種（CSS・JS・検索索引）へ使い回すため、このクロージャで
+    // `WritePage` を `WriteAsset` へ詰め替える（Bugbot 指摘・PR #899 の教訓：
+    // 詰め替えないとアセット I/O 失敗がページ書き込みエラーとして誤報告され、
+    // `BuildError::WriteAsset` が到達不能なデッドコードのままになる）。
+    fn write_asset(
+        out: &Path,
+        out_root_dir: &fs::File,
+        relative_path: &Path,
+        contents: &str,
+    ) -> Result<(), BuildError> {
+        write_file_creating_parent(out, out_root_dir, relative_path, contents).map_err(|error| {
+            match error {
+                BuildError::WritePage { path, error } => BuildError::WriteAsset { path, error },
+                other => other,
+            }
+        })
+    }
+
     let css_path = PathBuf::from(SITE_CSS_RELATIVE_PATH);
-    write_file_creating_parent(out, &out_root_dir, &css_path, crate::theme::SITE_CSS).map_err(
-        |error| match error {
-            // ページ書き出し（`WritePage`）と同じヘルパーを使うため、この呼び出し
-            // 元だけは `assets/site.css` 固有の `WriteAsset` へ詰め替える
-            // （Bugbot 指摘・PR #899: 詰め替えないとアセット I/O 失敗がページ
-            // 書き込みエラーとして誤報告され、`BuildError::WriteAsset` が
-            // 到達不能なデッドコードのままになる）。
-            BuildError::WritePage { error, .. } => BuildError::WriteAsset(error),
-            other => other,
-        },
-    )?;
-    written.push(PathBuf::from(SITE_CSS_RELATIVE_PATH));
+    write_asset(out, &out_root_dir, &css_path, crate::theme::SITE_CSS)?;
+    written.push(css_path);
+
+    let script_path = PathBuf::from(script::SCRIPT_REL_PATH);
+    write_asset(out, &out_root_dir, &script_path, script::SITE_JS)?;
+    written.push(script_path);
+
+    let index_path = PathBuf::from(search::INDEX_REL_PATH);
+    write_asset(out, &out_root_dir, &index_path, &search_index_json)?;
+    written.push(index_path);
 
     let pages = parsed.sections.iter().map(|s| s.pages.len()).sum();
     Ok(BuildReport {
@@ -1185,10 +1259,113 @@ path = "/intro/"
         assert!(out.0.is_dir());
         assert!(out.0.join("intro/index.html").is_file());
         assert!(out.0.join("assets/site.css").is_file());
+        assert!(out.0.join("assets/site.js").is_file());
+        assert!(out.0.join("assets/search-index.json").is_file());
         let html = fs::read_to_string(out.0.join("intro/index.html")).unwrap();
         assert!(html.starts_with("<!DOCTYPE html>\n"));
         assert!(html.contains("<h1>Intro</h1>"));
         assert!(html.contains("assets/site.css"));
+    }
+
+    /// イシュー #871 受け入れ基準 1: `search-index.json` が nav.toml 宣言の
+    /// 全ページを含むこと。fixture 全ページ（複数セクション）の `href`・
+    /// `title`・本文断片が索引 JSON に含まれることを確認する。
+    #[test]
+    fn build_site_search_index_contains_all_pages_with_href_title_and_text() {
+        let root = TempDir::new("build-search-index");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = "/docs-site"
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+
+[[section.page]]
+title = "Advanced"
+source = "site/advanced.md"
+path = "/advanced/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro\n\nHello world").unwrap();
+        fs::write(root.0.join("site/advanced.md"), b"# Advanced\n\nDeep dive").unwrap();
+
+        let out = TempDir::new("build-search-index-out");
+        let report = build_site(&root.0, &out.0).expect("build should succeed");
+        assert_eq!(report.pages, 2);
+
+        let index_json = fs::read_to_string(out.0.join("assets/search-index.json")).unwrap();
+        assert!(index_json.contains(r#""href":"/docs-site/intro/""#));
+        assert!(index_json.contains(r#""title":"Intro""#));
+        assert!(index_json.contains("Hello world"));
+        assert!(index_json.contains(r#""href":"/docs-site/advanced/""#));
+        assert!(index_json.contains(r#""title":"Advanced""#));
+        assert!(index_json.contains("Deep dive"));
+    }
+
+    /// イシュー #871 受け入れ基準 3 の一部（決定性）: 同一入力を 2 回ビルドした
+    /// `search-index.json` がバイト同一であること。
+    #[test]
+    fn build_site_search_index_is_byte_identical_across_rebuilds() {
+        let root = TempDir::new("build-search-index-determinism");
+        fs::create_dir_all(root.0.join("site")).unwrap();
+        fs::write(
+            root.0.join("site/nav.toml"),
+            r#"
+[site]
+title = "Docs"
+base_path = ""
+
+[[section]]
+title = "Guide"
+
+[[section.page]]
+title = "Intro"
+source = "site/intro.md"
+path = "/intro/"
+"#,
+        )
+        .unwrap();
+        fs::write(root.0.join("site/intro.md"), b"# Intro\n\nHello").unwrap();
+
+        let out = TempDir::new("build-search-index-determinism-out");
+        build_site(&root.0, &out.0).expect("first build should succeed");
+        let first = fs::read(out.0.join("assets/search-index.json")).unwrap();
+        build_site(&root.0, &out.0).expect("second build should succeed");
+        let second = fs::read(out.0.join("assets/search-index.json")).unwrap();
+        assert_eq!(
+            first, second,
+            "search-index.json must be byte-identical across rebuilds"
+        );
+    }
+
+    /// イシュー #871 受け入れ基準 3（fail-closed）: [`search::validate_index_size`]
+    /// が拒否する経路を直接確認する（実サイトでは到達しない上限超過を、小さい
+    /// 上限を注入したテストで検証する。`search.rs` モジュール doc 参照）。
+    #[test]
+    fn validate_index_size_rejects_a_small_injected_limit_directly() {
+        let index = search::SearchIndex {
+            base_path: String::new(),
+            pages: vec![search::SearchPage {
+                href: "/intro/".to_string(),
+                title: "Intro".to_string(),
+                text: "hello world".to_string(),
+            }],
+        };
+        let json = search::serialize_index(&index);
+        let err = search::validate_index_size(&json, 4)
+            .expect_err("small injected limit should reject the serialized index");
+        assert_eq!(err.max, 4);
+        assert!(err.bytes > 4);
     }
 
     /// レビュー指摘の回帰テスト（PR #899・codex-review P0・CI ブロック要因）:

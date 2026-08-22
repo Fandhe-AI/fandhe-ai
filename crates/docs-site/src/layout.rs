@@ -7,15 +7,20 @@
 //! 得られた `crate::html::Node` を `html::render` で文字列化してから
 //! `<!DOCTYPE html>` を前置してファイルへ書き出す（実装計画 §2.4・§2.6）。
 //!
-//! # スコープ境界（イシュー #870 時点）
+//! # スコープ境界（イシュー #870 → #871 で解消）
 //!
-//! 3 カラム TOC・全文検索 UI・テーマトグルボタン・FOUC 抑止スクリプトは
-//! 兄弟イシュー #871 のスコープであり実装しない。本モジュールはそれらを
-//! 後付けできる骨格（ヘッダのアクション領域・CSS 側の `data-theme` フック
-//! （`theme.rs`/`assets/site.css`）まで）に留める。
+//! イシュー #870 時点ではヘッダのアクション領域・CSS 側の `data-theme` フック
+//! （`theme.rs`/`assets/site.css`）のみを用意し、3 カラム TOC・全文検索 UI・
+//! テーマトグルボタン・FOUC 抑止スクリプトは実装しなかった（兄弟イシュー
+//! #871 のスコープとして先送りしていた）。本イシュー（#871）でテーマ
+//! トグルボタン・検索 UI・`<head>` への FOUC 抑止スクリプト埋め込みを実装
+//! した（3 カラム TOC は依然スコープ外。ページ内目次は `markdown.rs` が
+//! 見出し `id` を生成しないため対象外。実装計画 §4.3・§7）。
 
 use crate::html::Node;
 use crate::nav::Nav;
+use crate::script;
+use crate::search;
 
 /// rust-ai-library の GitHub リポジトリ URL。ヘッダの外部リンク先として使う。
 const GITHUB_REPO_URL: &str = "https://github.com/Fandhe-AI/rust-ai-library";
@@ -33,8 +38,75 @@ pub fn asset_href(base_path: &str, relative: &str) -> String {
     format!("{base_path}/{trimmed}")
 }
 
+/// ヘッダのアクション領域に置くテーマトグルボタン。
+///
+/// `hidden` を既定属性として持つ: `crate::script::SITE_JS` がイベント配線
+/// 完了後にのみ `hidden` を解除する fail-closed 設計（`script.rs` モジュール
+/// doc の「責務（テーマトグル）」手順 6 参照）。JS 不達・実行前は非表示のまま
+/// とし、「押しても何も起きないボタン」を利用者に見せない。
+fn theme_toggle_button() -> Node {
+    Node::element(
+        "button",
+        vec![
+            ("type".to_string(), "button".to_string()),
+            ("class".to_string(), "docs-theme-toggle".to_string()),
+            ("hidden".to_string(), "".to_string()),
+            ("aria-pressed".to_string(), "false".to_string()),
+        ],
+        vec![],
+    )
+}
+
+/// ヘッダのアクション領域に置く全文検索 UI（入力欄 + 結果表示領域）。
+///
+/// `index_href`（`crate::search::INDEX_REL_PATH` を [`asset_href`] 経由で
+/// `base_path` 反映済みにした URL）を `data-search-index` 属性へ埋め込み、
+/// `crate::script::SITE_JS` の `initSearch` がここから索引 URL を読み取る
+/// （`script.rs` モジュール doc「責務（全文検索）」手順 2）。コンテナ自体も
+/// テーマトグルと同じ理由で既定 `hidden`（JS 配線完了後に解除）。
+fn search_ui(index_href: &str) -> Node {
+    Node::element(
+        "div",
+        vec![
+            ("class".to_string(), "docs-search".to_string()),
+            ("hidden".to_string(), "".to_string()),
+        ],
+        vec![
+            Node::element(
+                "label",
+                vec![("for".to_string(), "docs-search-input".to_string())],
+                vec![Node::text("Search")],
+            ),
+            Node::element(
+                "input",
+                vec![
+                    ("id".to_string(), "docs-search-input".to_string()),
+                    ("class".to_string(), "docs-search-input".to_string()),
+                    ("type".to_string(), "search".to_string()),
+                    ("data-search-index".to_string(), index_href.to_string()),
+                    ("autocomplete".to_string(), "off".to_string()),
+                    (
+                        "aria-controls".to_string(),
+                        "docs-search-results".to_string(),
+                    ),
+                ],
+                vec![],
+            ),
+            Node::element(
+                "div",
+                vec![
+                    ("id".to_string(), "docs-search-results".to_string()),
+                    ("class".to_string(), "docs-search-results".to_string()),
+                    ("hidden".to_string(), "".to_string()),
+                ],
+                vec![],
+            ),
+        ],
+    )
+}
+
 /// ヘッダ: サイトタイトル（ルートへのリンク）・`index_path` を持つセクションの
-/// メニューリンク・GitHub リポジトリリンク。
+/// メニューリンク・テーマトグル・検索 UI・GitHub リポジトリリンク。
 fn header(nav: &Nav) -> Node {
     let base_path = nav.site.base_path.as_str();
 
@@ -71,6 +143,8 @@ fn header(nav: &Nav) -> Node {
         )],
     ));
 
+    let index_href = asset_href(base_path, search::INDEX_REL_PATH);
+
     Node::element(
         "header",
         vec![("class".to_string(), "site-header".to_string())],
@@ -85,6 +159,11 @@ fn header(nav: &Nav) -> Node {
                 )],
             ),
             Node::element("nav", vec![], vec![Node::element("ul", vec![], menu_items)]),
+            Node::element(
+                "div",
+                vec![("class".to_string(), "site-header-actions".to_string())],
+                vec![search_ui(&index_href), theme_toggle_button()],
+            ),
         ],
     )
 }
@@ -190,42 +269,65 @@ fn rewrite_root_relative_hrefs(base_path: &str, nodes: Vec<Node>) -> Vec<Node> {
 pub(crate) fn docs_page(nav: &Nav, page_title: &str, current_path: &str, body: Vec<Node>) -> Node {
     let base_path = nav.site.base_path.as_str();
     let css_href = asset_href(base_path, "assets/site.css");
+    let script_href = asset_href(base_path, script::SCRIPT_REL_PATH);
 
-    let head = Node::element(
-        "head",
-        vec![],
+    let mut head_children = vec![
+        Node::element(
+            "meta",
+            vec![("charset".to_string(), "utf-8".to_string())],
+            vec![],
+        ),
+        Node::element(
+            "meta",
+            vec![
+                ("name".to_string(), "viewport".to_string()),
+                (
+                    "content".to_string(),
+                    "width=device-width, initial-scale=1".to_string(),
+                ),
+            ],
+            vec![],
+        ),
+        Node::element(
+            "title",
+            vec![],
+            vec![Node::text(format!("{page_title} | {}", nav.site.title))],
+        ),
+    ];
+
+    // FOUC 抑止スクリプトは stylesheet `<link>` より前に配置する（同期実行の
+    // インライン `<script>` は後続のパース・レンダリングをブロックするため、
+    // ここで `<html data-theme>` を確定させてからスタイルシートを適用させる。
+    // `script.rs` の `inline_theme_bootstrap` は escape-safe 検証に落ちた場合
+    // `None` を返し、その場合は `<script>` 自体を出力せず CSS 側の
+    // `prefers-color-scheme` 追従へ fail-closed に退避する（壊れた JS を
+    // 配信しない。`script.rs` モジュール doc 参照）。
+    if let Some(bootstrap) = script::inline_theme_bootstrap() {
+        head_children.push(Node::element("script", vec![], vec![Node::text(bootstrap)]));
+    }
+
+    head_children.push(Node::element(
+        "link",
         vec![
-            Node::element(
-                "meta",
-                vec![("charset".to_string(), "utf-8".to_string())],
-                vec![],
-            ),
-            Node::element(
-                "meta",
-                vec![
-                    ("name".to_string(), "viewport".to_string()),
-                    (
-                        "content".to_string(),
-                        "width=device-width, initial-scale=1".to_string(),
-                    ),
-                ],
-                vec![],
-            ),
-            Node::element(
-                "title",
-                vec![],
-                vec![Node::text(format!("{page_title} | {}", nav.site.title))],
-            ),
-            Node::element(
-                "link",
-                vec![
-                    ("rel".to_string(), "stylesheet".to_string()),
-                    ("href".to_string(), css_href),
-                ],
-                vec![],
-            ),
+            ("rel".to_string(), "stylesheet".to_string()),
+            ("href".to_string(), css_href),
         ],
-    );
+        vec![],
+    ));
+
+    // `crate::script::SITE_JS` 本体は `defer` で読み込む（DOM 構築をブロック
+    // せず、`DOMContentLoaded` 相当のタイミングで実行される。`script.rs` の
+    // `ready()` 自体も `document.readyState` を見て二重に安全側へ倒す）。
+    head_children.push(Node::element(
+        "script",
+        vec![
+            ("defer".to_string(), "".to_string()),
+            ("src".to_string(), script_href),
+        ],
+        vec![],
+    ));
+
+    let head = Node::element("head", vec![], head_children);
 
     let body_node = Node::element(
         "body",
@@ -414,5 +516,57 @@ path = "/intro/"
         )];
         let html = render(&docs_page(&nav, "Top", "/", body));
         assert!(html.contains("<a href=\"/intro/\">Intro</a>"));
+    }
+
+    /// イシュー #871 回帰テスト: FOUC 抑止インラインスクリプトが `<head>` 内で
+    /// stylesheet `<link>` より前に位置すること（`docs_page` モジュール doc
+    /// 「FOUC 抑止スクリプトは stylesheet `<link>` より前に配置する」の固定）。
+    #[test]
+    fn docs_page_places_inline_theme_bootstrap_before_stylesheet_link() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&docs_page(&nav, "Guides", "/guides/", vec![]));
+        let script_pos = html
+            .find("<script>")
+            .expect("inline theme bootstrap script should be present");
+        let link_pos = html
+            .find("<link rel=\"stylesheet\"")
+            .expect("stylesheet link should be present");
+        assert!(
+            script_pos < link_pos,
+            "FOUC 抑止スクリプトは stylesheet より前に位置する必要がある"
+        );
+        assert!(html.contains(crate::script::THEME_STORAGE_KEY));
+    }
+
+    /// イシュー #871 回帰テスト: `<script defer src>` で `site.js` を
+    /// `base_path` 反映済み URL で読み込むこと。
+    #[test]
+    fn docs_page_loads_site_js_with_defer_and_base_path() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&docs_page(&nav, "Guides", "/guides/", vec![]));
+        assert!(html.contains("<script defer=\"\" src=\"/rust-ai-library/assets/site.js\""));
+    }
+
+    /// イシュー #871 回帰テスト: 検索入力欄の `data-search-index` が
+    /// `base_path` を反映した索引 URL であること。
+    #[test]
+    fn header_search_input_reflects_base_path_in_index_url() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&header(&nav));
+        assert!(html.contains("data-search-index=\"/rust-ai-library/assets/search-index.json\""));
+    }
+
+    /// イシュー #871 回帰テスト: テーマトグルボタン・検索 UI コンテナは
+    /// 既定で `hidden`（JS 配線完了後にのみ解除する fail-closed 設計。
+    /// `layout.rs` の `theme_toggle_button`/`search_ui` doc 参照）。
+    #[test]
+    fn header_theme_toggle_and_search_ui_default_to_hidden() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&header(&nav));
+        assert!(html.contains("class=\"docs-theme-toggle\" hidden=\"\""));
+        assert!(html.contains("class=\"docs-search\" hidden=\"\""));
+        assert!(
+            html.contains("id=\"docs-search-results\" class=\"docs-search-results\" hidden=\"\"")
+        );
     }
 }

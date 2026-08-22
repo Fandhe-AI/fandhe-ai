@@ -18,10 +18,19 @@
 //! - [`html`][]: 最小 HTML ノード層（`Node` enum + 既定エスケープ `render`）。
 //!   `markdown`・`layout` の両方が最終的な HTML 文字列化をここへ集約する
 //! - [`markdown`][]: 自作 Markdown → `html::Node` 変換（外部クレート非依存）
-//! - [`layout`][]: ページ骨格（ヘッダ・サイドバー・本文）の組み立て
+//! - [`layout`][]: ページ骨格（ヘッダ・サイドバー・本文）の組み立て。
+//!   イシュー #871 でテーマトグルボタン・検索 UI・`<head>` への FOUC 抑止
+//!   スクリプト埋め込みを追加した
 //! - [`theme`][]: ビルド時に埋め込むテーマ CSS 定数（`assets/site.css`）
+//! - `search`: 全文検索インデックス生成（sans-I/O な純関数群。イシュー
+//!   #871）。ページ本文の `html::Node` 木から抽出したプレーンテキストを
+//!   `assets/search-index.json` へ決定的直列化する
+//! - `script`: テーマ切替・全文検索のクライアント側 JS 定数（イシュー
+//!   #871）。`build` が `assets/site.js` へ書き出し、`layout` が `<script>`
+//!   経由で埋め込み・参照する
 //! - [`build`][]: 上記を結線したビルドパイプライン（`nav.toml` 読み込み →
-//!   パース → 検証 → 各ページの Markdown→HTML 変換 → `<out>` への書き出し）
+//!   パース → 検証 → 各ページの Markdown→HTML 変換・検索索引収集 → `<out>`
+//!   への書き出し）
 //!
 //! # 参照実装との関係
 //!
@@ -56,4 +65,6 @@ pub mod html;
 pub mod layout;
 pub mod markdown;
 pub mod nav;
+pub(crate) mod script;
+pub(crate) mod search;
 pub mod theme;

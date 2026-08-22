@@ -129,6 +129,40 @@ fn valid_fixture_writes_theme_css_asset() {
     assert!(css.contains("prefers-color-scheme: dark"));
 }
 
+/// イシュー #871: `assets/site.js`（テーマ切替・全文検索 JS）が生成される
+/// ことの確認。
+#[test]
+fn valid_fixture_writes_site_js_asset() {
+    let root = fixture_root("valid");
+    let out = TempOutDir::new("valid-site-js");
+    build_site(&root, &out.0).expect("valid fixture should build");
+
+    let js = std::fs::read_to_string(out.0.join("assets/site.js"))
+        .expect("assets/site.js should be written");
+    assert!(js.contains("docs-theme-toggle"));
+    assert!(js.contains("docs-search-input"));
+}
+
+/// イシュー #871 受け入れ基準 1: `search-index.json` が nav.toml 宣言の全ページ
+/// （fixture 3 ページ）を含むこと。`serialize_index` はキー順固定の決定的
+/// 直列化のため、文字列 contains での検証が可能（`search.rs` モジュール doc
+/// 参照）。
+#[test]
+fn valid_fixture_search_index_contains_all_declared_pages() {
+    let root = fixture_root("valid");
+    let out = TempOutDir::new("valid-search-index");
+    build_site(&root, &out.0).expect("valid fixture should build");
+
+    let index_json = std::fs::read_to_string(out.0.join("assets/search-index.json"))
+        .expect("assets/search-index.json should be written");
+    assert!(index_json.contains(r#""href":"/guide/intro/""#));
+    assert!(index_json.contains(r#""title":"Introduction""#));
+    assert!(index_json.contains(r#""href":"/guide/getting-started/""#));
+    assert!(index_json.contains(r#""title":"Getting Started""#));
+    assert!(index_json.contains(r#""href":"/reference/api/""#));
+    assert!(index_json.contains(r#""title":"API""#));
+}
+
 #[test]
 fn unknown_key_fixture_fails_closed_with_parse_error() {
     let root = fixture_root("unknown-key");
