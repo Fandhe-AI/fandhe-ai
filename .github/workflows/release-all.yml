@@ -103,6 +103,11 @@ concurrency:
   # pending を暗黙にキャンセルして置き換える」挙動のため、連続 dispatch した
   # リリースが黙って落ちる（PR #906 Cursor Bugbot Medium）。max（最大 100 件を
   # FIFO で待機）へ明示して、待機中のリリースが取りこぼされないようにする。
+  # `queue` は concurrency 配下の正式なキー（group・cancel-in-progress と並ぶ
+  # 第 3 のキー。許容値 single/max。公式リファレンス
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+  # で確認済み・2026-08-23）。禁止は `queue: max` + `cancel-in-progress: true`
+  # の組み合わせのみで、本設定（cancel-in-progress: false）は有効。
   queue: max
 
 jobs:
