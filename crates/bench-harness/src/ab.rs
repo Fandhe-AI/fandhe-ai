@@ -348,6 +348,24 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// タイマー分解能未満の 0 秒計測を回避するための最小限の実作業ワークロード。
+    ///
+    /// 無 op クロージャ（`|| {}`）は `protocol::run` の計測ループで測ると、
+    /// macOS ローカル環境の並列テスト実行下（他テストとの CPU 競合）で
+    /// 中央値がタイマー分解能（数十 ns 〜 1µs 程度）以下の 0 になることがあり、
+    /// `run_ab`／`run_stability` の 0 秒拒否（[`validate_ab_medians`]）が
+    /// `ProtocolViolation` を返して間欠的にテストが失敗していた（イシュー #904）。
+    /// `std::hint::black_box` で最適化除去を防ぎつつ固定回数の演算を行うことで、
+    /// 負荷下でも計測時間が確実にタイマー分解能を超えるようにする（`run_ab`／
+    /// `run_stability` の 0 秒拒否契約自体は変更しない）。
+    fn spin_workload() {
+        let mut acc: u64 = 0;
+        for i in 0..2_000u64 {
+            acc = std::hint::black_box(acc.wrapping_add(std::hint::black_box(i)));
+        }
+        std::hint::black_box(acc);
+    }
+
     #[test]
     fn new_rejects_odd_rounds() {
         let err = AbConfig::new(3, Duration::ZERO, Duration::ZERO)
@@ -373,9 +391,9 @@ mod tests {
     fn run_stability_collects_one_median_per_round() {
         let ab_config = AbConfig::new(4, Duration::ZERO, Duration::ZERO).unwrap();
         let measurement_config = MeasurementConfig::new(20, 20).unwrap();
-        let result = run_stability(&ab_config, &measurement_config, || {}).unwrap();
+        let result = run_stability(&ab_config, &measurement_config, spin_workload).unwrap();
         assert_eq!(result.round_medians_secs.len(), 4);
-        // 軽量ダミーワークロードは全ラウンドほぼ 0 秒のため spread は 0 近傍。
+        // 軽量な固定回数ワークロードは全ラウンドほぼ同じ短時間のため spread は 0 近傍。
         assert!(result.spread >= 0.0);
     }
 
@@ -400,8 +418,14 @@ mod tests {
         run_ab(
             &ab_config,
             &measurement_config,
-            || call_log.borrow_mut().push('a'),
-            || call_log.borrow_mut().push('b'),
+            || {
+                spin_workload();
+                call_log.borrow_mut().push('a');
+            },
+            || {
+                spin_workload();
+                call_log.borrow_mut().push('b');
+            },
         )
         .unwrap();
 
@@ -445,8 +469,14 @@ mod tests {
         // `crate::protocol::run` の契約。cooldown の sleep はその外側で呼ぶ設計）。
         let ab_config = AbConfig::new(2, Duration::from_millis(5), Duration::ZERO).unwrap();
         let measurement_config = MeasurementConfig::new(20, 20).unwrap();
-        let result = run_ab(&ab_config, &measurement_config, || {}, || {}).unwrap();
-        // 軽量ダミーワークロードの中央値は cooldown（5ms）よりはるかに小さいはず。
+        let result = run_ab(
+            &ab_config,
+            &measurement_config,
+            spin_workload,
+            spin_workload,
+        )
+        .unwrap();
+        // 軽量な固定回数ワークロードの中央値は cooldown（5ms）よりはるかに小さいはず。
         assert!(result.median_a_secs < 0.001);
         assert!(result.median_b_secs < 0.001);
     }
@@ -465,12 +495,9 @@ mod tests {
         // 両者が同じ向きの値だと誤って扱わないことをロックする。
         let ab_config = AbConfig::new(2, Duration::ZERO, Duration::ZERO).unwrap();
         let measurement_config = MeasurementConfig::new(20, 20).unwrap();
-        let result = run_ab(
-            &ab_config,
-            &measurement_config,
-            || {},
-            || std::thread::sleep(Duration::from_micros(200)),
-        )
+        let result = run_ab(&ab_config, &measurement_config, spin_workload, || {
+            std::thread::sleep(Duration::from_micros(200))
+        })
         .unwrap();
         assert!(
             result.b_over_a_ratio > 1.0,
