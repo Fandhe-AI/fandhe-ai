@@ -526,7 +526,9 @@ sparse index 反映確認（9.3 節）後、②→③の各クレートについ
    チェックが green であることを確認してから main へマージする。
 3. **release ワークフローの実行**: 9.2〜9.3 節の手順（`dry-run-only` →
    `publish`、①→②→③のトポロジカル順で 1 クレートずつ）に従い、main への
-   マージ後のコミットを起点に実行する。
+   マージ後のコミットを起点に実行する。1 回の dispatch で 6 クレート
+   まとめて実行したい場合は 12 節の `release-all.yml` を使ってもよい
+   （この場合も dry-run-only → publish の 2 段運用は変わらない）。
 4. **公開完了後のタグ付け**: 公開 6 クレート全件の `publish` 完了・sparse
    index への反映確認（9.3 節）後、公開した main コミットへ注釈付きタグ
    `vX.Y.Z`（`workspace.version` と同一の単一タグ。lockstep のためクレート
@@ -548,8 +550,64 @@ sparse index 反映確認（9.3 節）後、②→③の各クレートについ
 GitHub Release の作成等、タグ付け以降の追加運用は本ドキュメントのスコープ
 外とする（必要になった時点で別イシューとして起票し検討する）。
 
+## 12. 一括リリースワークフロー `release-all.yml`（ユーザー指示 2026-08-23）
+
+公開 6 クレートを 1 回の `workflow_dispatch` でまとめてリリースしたいという
+ユーザー指示（2026-08-23）に基づき、`.github/workflows/release-all.yml` を
+新設した。release.yml（単一クレート・crate choice 入力）は障害復旧用として
+そのまま残す。
+
+### 12.1 release.yml との使い分け
+
+| | release.yml | release-all.yml |
+|---|---|---|
+| 対象 | 入力で選んだ 1 クレート | 公開 6 クレート固定（入力なし） |
+| 用途 | 1 クレートずつの実行・障害復旧 | 通常運用（1 回の dispatch で完了） |
+| 承認 | クレートごとに 1 回 | 全体で 1 回（12.3 節の前提条件つき） |
+| 再開設計 | 冪等（既公開ガードにより同一クレートの再実行は安全） | 非再開（部分公開後の再開は release.yml へ切り替える） |
+
+### 12.2 6 パッケージ一括 `cargo publish -p ... --locked` の根拠
+
+8.1 節で実測したとおり、cargo 1.90 で安定化した複数パッケージ publish
+機構は 6 クレート同時指定でワークスペース内の `path` 依存をローカルで
+解決するため、依存先クレートが実 crates.io に未公開の間でも
+`cargo publish --dry-run` が成功する（実行環境の cargo は 1.96.0。
+`cargo publish --help` の Package Selection に `-p, --package [<SPEC>]`
+〈複数指定可〉があることを確認済み）。これは release.yml の単一クレート
+dry-run（8.2 節。実 index のみを参照するため依存先未公開の間は
+`no matching package named ...` で失敗する）との決定的な違いであり、
+`release-all.yml` の `verify` ジョブは**初回公開前から green になる**。
+公開順序の解決・順次アップロード・crates.io index への反映待ちは
+cargo 自身が内部で行うため、`release-all.yml` は per-crate ループへの
+フォールバックを持たない。
+
+### 12.3 前提条件・既知の制約
+
+- **environment `crates-io-release` の承認が全体に効くのは、GitHub 側で
+  同 environment に required reviewers + deployment branch 制限（main
+  限定）が設定されて初めてである**。10.1 節時点でこの environment は
+  未作成（`{"total_count":0,"environments":[]}`）であり、未設定の間は
+  `mode: publish` を実運用しない（release.yml と同一の前提条件）。
+- **release.yml との同時実行を防ぐ機構はない**。`release-all.yml` の
+  concurrency グループ（`release-all`）と release.yml のグループ
+  （`release-${{ inputs.crate }}`）は別系列のため、GitHub Actions の
+  concurrency では相互排他されない。実質的なバックストップは両ワーク
+  フロー共通の「crates.io 既公開バージョンの検証」ガード（sparse index
+  参照）と `cargo publish` 自体の非冪等性（同一バージョンの二重
+  アップロードは crates.io 側が拒否する）であり、運用上は両ワークフローを
+  同時に dispatch しないことを前提とする。
+- **途中失敗時は再開せず release.yml へ切り替える**: 6 パッケージ一括
+  `cargo publish` が一部クレートの公開後に失敗した場合、`release-all.yml`
+  を再実行すると公開済みクレート分で既公開ガードが fail する（意図した
+  挙動）。部分公開状態からの復旧は release.yml で未公開の残りクレートを
+  1 クレートずつ実行する（9.4 節と同一方針）。
+
 ## 変更履歴
 
+- 2026-08-23（ユーザー指示・対応 issue なし）: 公開 6 クレートを 1 回の
+  `workflow_dispatch` でまとめてリリースする `.github/workflows/release-all.yml`
+  を新設し、release.yml（単一クレート・障害復旧用）との使い分け・6 パッケージ
+  一括 `cargo publish` の根拠・前提条件・既知の制約を 12 節として追記した。
 - 2026-08-23（#886）: CLAUDE.md・`.claude/rules/ci.md` への公開構成反映に
   あわせ、4 節（版数バンプ）・9 節（release ワークフロー運用）を通しの
   リリース手順としてまとめ、公開完了後のタグ付け手順（注釈付きタグ
