@@ -31,16 +31,16 @@
 #   per-crate ループへフォールバックせず、6 クレートを 1 回の `cargo publish`
 #   呼び出しで扱う。
 #
-# 承認は 1 回で全クレートに効く設計の前提条件（未充足。#885 §10.1 実測）:
+# 承認は 1 回で全クレートに効く設計の前提条件（充足済み。2026-08-23 設定完了）:
 #   `environment: crates-io-release` の required reviewers + deployment
 #   branch 制限（main 限定）が GitHub 側で設定されて初めて、本ワークフローの
 #   1 回の承認が 6 クレートの publish 全体に対するゲートとして機能する。
-#   2026-08-23 時点で同 environment は未作成（`gh api
-#   repos/Fandhe-AI/rust-ai-library/environments` が `{"total_count":0}`）で
-#   あり、未設定の間は `environment:` 指定が実質ノーガードの参照になる
-#   （release.yml 冒頭コメントと同一の前提条件・同一の未充足状態）。
-#   `mode: publish` を実運用する前にユーザーが GitHub 側で設定しておく
-#   必要がある。
+#   同 environment は 2026-08-23 に設定済み（required reviewers + main 限定
+#   deployment branch 制限。`docs/crates-io-publishing-order.md` §10 追補）で
+#   あり、現在この前提は充足している。将来 environment が削除・改変され
+#   未設定になった場合は `environment:` 指定が実質ノーガードの参照になる
+#   ため、復旧するまで `mode: publish` を実運用しない（release.yml 冒頭
+#   コメントと同一の前提条件）。
 #
 # release.yml との同時実行に関する既知の制約（fail-closed の裏付けあり）:
 #   本ワークフローの concurrency グループ（`release-all`）は release.yml の
