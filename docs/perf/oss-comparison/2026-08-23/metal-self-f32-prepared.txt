@@ -1,0 +1,6 @@
+    Finished `release` profile [optimized] target(s) in 2.12s
+     Running `target/release/examples/gemm_f32_prepared_bench`
+size=512 metal_f32_simdgroup_tiled_tflops=0.8362 q1_tflops=0.8346 q3_tflops=0.8406 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+size=1024 metal_f32_simdgroup_tiled_tflops=1.7916 q1_tflops=1.7505 q3_tflops=2.6750 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+size=2048 metal_f32_simdgroup_tiled_tflops=8.3602 q1_tflops=8.1767 q3_tflops=8.5449 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }
+size=4096 metal_f32_simdgroup_tiled_tflops=7.2331 q1_tflops=7.1893 q3_tflops=7.3136 resolved_tile_config=TileConfig { bm: 32, bn: 32, bk: 16, wm: 2, wn: 2, staged: true }

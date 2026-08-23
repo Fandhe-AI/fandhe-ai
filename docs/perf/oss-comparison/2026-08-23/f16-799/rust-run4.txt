@@ -1,0 +1,10 @@
+    Finished `release` profile [optimized] target(s) in 0.02s
+     Running `target/release/examples/gemm_f16_bench`
+size=512 metal_f16_simdgroup_tflops=0.7503 q1_tflops=0.4029 q3_tflops=0.7961
+size=512 metal_f16_tiled_tflops=1.2531 q1_tflops=1.2202 q3_tflops=1.3076 tile=32x32x16_wm2_wn2_stagedtrue
+size=1024 metal_f16_simdgroup_tflops=2.0388 q1_tflops=1.9610 q3_tflops=2.0509
+size=1024 metal_f16_tiled_tflops=6.0337 q1_tflops=5.9708 q3_tflops=6.1001 tile=32x32x16_wm2_wn2_stagedtrue
+size=2048 metal_f16_simdgroup_tflops=2.4899 q1_tflops=2.4715 q3_tflops=2.4945
+size=2048 metal_f16_tiled_tflops=9.7585 q1_tflops=9.7210 q3_tflops=9.7831 tile=32x32x16_wm2_wn2_stagedtrue
+size=4096 metal_f16_simdgroup_tflops=2.4921 q1_tflops=2.4426 q3_tflops=2.5331
+size=4096 metal_f16_tiled_tflops=9.0205 q1_tflops=8.9954 q3_tflops=9.0994 tile=32x32x16_wm2_wn2_stagedtrue

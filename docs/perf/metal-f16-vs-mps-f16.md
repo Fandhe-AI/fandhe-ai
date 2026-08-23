@@ -318,9 +318,12 @@ git checkout "$(gh pr view 825 --repo Fandhe-AI/rust-ai-library --json headRefOi
 # （`git log origin/main --grep '#799'` 等で特定）を使う。
 
 # 1. 数値一致の先行確認（3 系統。全 PASS が計測の前提）
-cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_parity
-cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture cpu_metal_f16_tiled_parity
-cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture gemm_f16_auto_parity
+# 注意（2026-08-23 実測時に判明・修正）: これらの名前は test target（ファイル）名であり
+# テスト関数名ではないため、自由形式フィルタ（`-- <filter>`）に渡すと 0 件一致のまま
+# "test result: ok"（空虚な PASS）になる。必ず `--test <target名>` でターゲット選択する。
+cargo test -p fandhe-ai-backend-metal --release --test cpu_metal_f16_parity -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release --test cpu_metal_f16_tiled_parity -- --ignored --nocapture
+cargo test -p fandhe-ai-backend-metal --release --test gemm_f16_auto_parity -- --ignored --nocapture
 
 # 2. Rust 側（新旧 f16 経路。プロセス単位で 5 回独立実行）
 cargo run -p fandhe-ai-backend-metal --example gemm_f16_bench --release
@@ -335,7 +338,10 @@ python3 scripts/bench/gemm_bench_torch_mps_f16.py
 比較手順・GPU 排他・計測衛生（AC 電源・`pmset -g therm`）は上記「実測結果（イシュー #383）」節の
 「計測環境」表と同一条件を踏襲する。
 
-### 状態: プロトコル整備済み・実測は Mac 実機セッションで消化（#799 未消化）
+### 状態: 実測消化済み（2026-08-23・Mac 実機セッション。下記「実測結果」節）
+
+（以下はプロトコル整備時点＝実機未到達時の経緯の記録。実測は 2026-08-23 の
+Mac 実機セッションで下記「実測結果（イシュー #799・2026-08-23）」節のとおり消化した）
 
 本実装セッションは Linux dev-box（`.claude/worktrees/wf_6c80a1fd-533-85`）であり、`docs/real-hardware-verification-env.md`
 §1 が定める Metal 実機（M4 Max）到達手段は「ローカル直接実行」のみで、Linux dev-box からの SSH 経路・
@@ -349,3 +355,68 @@ python3 scripts/bench/gemm_bench_torch_mps_f16.py
 実測完了時は本節（または新設の実測結果表）へ以下を記録する: 計測環境表（GPU・OS・rustc・torch
 バージョン・計測リビジョン）・数値一致 3 系統の PASS 確認・per-size 5 回生値・中央値/Q1/Q3・
 新旧経路それぞれの対 MPS f16 比・改善幅（pt）。
+
+## 実測結果（イシュー #799・2026-08-23）
+
+生データは `docs/perf/oss-comparison/2026-08-23/f16-799/`（parity ログ 3 件・
+`rust-run1〜5.txt`・`torch-run1〜5.txt`・`hygiene.txt`）にコミット済み。
+
+### 計測環境
+
+| 項目 | 値 |
+|------|-----|
+| GPU | Apple M4 Max（macOS 26.6.2 / Darwin arm64） |
+| rustc | 1.96.0（stable-aarch64-apple-darwin） |
+| torch | 2.13.0（`device=mps`。全 5 run の出力 1 行目で確認） |
+| 計測リビジョン | `7cc5f3d423e70af3d9be9d0820a32abf54b88497`（origin/main HEAD をローカル直接実行） |
+| 計測衛生 | AC 電源給電（計測前後とも確認）・`pmset -g therm` サーマル警告なし（前後同一）・bench 残存プロセスなし |
+
+### 数値一致の先行確認（3 系統すべて PASS）
+
+- `cpu_metal_f16_parity`: 6/6 PASS
+- `cpu_metal_f16_tiled_parity`: 5/5 PASS
+- `gemm_f16_auto_parity`: 8/8 PASS
+
+いずれも上記「実機計測手順」節の注意どおり `--test <target名>` によるターゲット選択で
+実行した（自由形式フィルタでは 0 件一致の空虚な PASS になることを実行時に確認し、
+手順側のコマンドを修正済み）。
+
+### per-size 5 回生値・中央値・Q1/Q3（TFLOPS）
+
+プロセス単位 5 回独立実行の値（各値はプロセス内 warmup + 20 回計測の中央値）。
+Q1/Q3 は 5 値に対する四分位（`statistics.quantiles(n=4, method="inclusive")` 相当）。
+新経路の resolved tile 構成は**全 5 run・全 4 size で `32x32x16_wm2_wn2_stagedtrue`**
+（BM=32/BN=32/BK=16・WM=2/WN=2・staged）に統一されており、`pipeline_for_tile_f16` の
+サイレントフォールバック（`SINGLE_SIMDGROUP_8X8`）は発生していない。
+
+| size | 系列 | run1〜5 | 中央値 | Q1 | Q3 |
+|------|------|---------|--------|----|----|
+| 512 | 旧経路 simdgroup | 0.4001 / 0.3861 / 0.4048 / 0.7503 / 0.3707 | 0.4001 | 0.3861 | 0.4048 |
+| 512 | 新経路 tiled | 0.9744 / 1.5645 / 1.6236 / 1.2531 / 1.1552 | 1.2531 | 1.1552 | 1.5645 |
+| 512 | PyTorch MPS f16 | 0.9572 / 0.9781 / 1.2707 / 0.8518 / 0.9240 | 0.9572 | 0.9240 | 0.9781 |
+| 1024 | 旧経路 simdgroup | 2.1754 / 2.0522 / 2.0735 / 2.0388 / 2.0660 | 2.0660 | 2.0522 | 2.0735 |
+| 1024 | 新経路 tiled | 6.1999 / 6.1850 / 6.1746 / 6.0337 / 6.0210 | 6.1746 | 6.0337 | 6.1850 |
+| 1024 | PyTorch MPS f16 | 4.9751 / 5.2891 / 6.0746 / 7.0151 / 6.9213 | 6.0746 | 5.2891 | 6.9213 |
+| 2048 | 旧経路 simdgroup | 2.4951 / 2.4938 / 2.4990 / 2.4899 / 2.4921 | 2.4938 | 2.4921 | 2.4951 |
+| 2048 | 新経路 tiled | 9.8335 / 10.2162 / 9.7410 / 9.7585 / 9.8304 | 9.8304 | 9.7585 | 9.8335 |
+| 2048 | PyTorch MPS f16 | 10.8818 / 12.7896 / 12.1834 / 12.5848 / 12.2883 | 12.2883 | 12.1834 | 12.5848 |
+| 4096 | 旧経路 simdgroup | 2.5678 / 2.5671 / 2.5678 / 2.4921 / 2.5545 | 2.5671 | 2.5545 | 2.5678 |
+| 4096 | 新経路 tiled | 9.4251 / 9.3784 / 9.3687 / 9.0205 / 8.7986 | 9.3687 | 9.0205 | 9.3784 |
+| 4096 | PyTorch MPS f16 | 14.6626 / 14.7149 / 14.3407 / 14.7178 / 13.7544 | 14.6626 | 14.3407 | 14.7149 |
+
+### 対 MPS f16 比（5 回中央値ベース）と改善幅
+
+| size | 旧経路/MPS | 新経路/MPS | 改善幅（pt） |
+|------|-----------|-----------|------|
+| 512 | 41.80% | 130.91% | +89.11 pt |
+| 1024 | 34.01% | 101.65% | +67.64 pt |
+| 2048 | 20.29% | 80.00% | +59.70 pt |
+| **4096（主指標）** | **17.51%** | **63.90%** | **+46.39 pt** |
+
+- 本計測の旧経路 4096 比 17.51% は、直近確定値 18.5%（#785・2026-08-21）と
+  同水準であり、セッション差の範囲内（計測の再現性を確認）
+- タイル化（新経路）により 4096 の対 MPS 比は 17.51% → **63.90%**（約 3.6 倍）へ改善。
+  size≦1024 では新経路が MPS f16 実測を上回る（512: 130.91%・1024: 101.65%）
+- 残ギャップ: size 増大に伴い比が単調低下する傾向（512→4096 で 130.91%→63.90%）は
+  残存しており、4096 では依然 MPS に劣後する。大形状側の最適化は #735/#785 系の
+  後続キャンペーンで追跡する
