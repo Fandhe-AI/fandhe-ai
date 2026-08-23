@@ -434,6 +434,17 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 
 ## 10. 初回公開の前提条件未充足による保留記録（#885）
 
+> **追補（2026-08-23）**: 本節の保留は解消済み。#880（PR #892）マージと GitHub
+> environment `crates-io-release`（required reviewers + main 限定 deployment branch
+> 制限）の設定完了後、`release.yml` の workflow_dispatch により公開 6 クレート
+> （`fandhe-ai-tensor-core` → `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・
+> `fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` → `fandhe-ai`）を
+> トポロジカル順に dry-run → publish で実行し、**v0.3.0 の初回公開を完了した**
+> （計 12 run 全 success・2026-08-23 01:19〜01:52 UTC）。crates.io sparse index
+> 反映・docs.rs 全 6 クレートのビルド成功・新規プロジェクトからの
+> `cargo add fandhe-ai@0.3.0` → ビルド成功も実測確認済み（イシュー #867 の
+> クローズコメント参照）。以下の本文は保留当時の記録として原文のまま残す。
+
 イシュー #885「初回公開実行と crates.io / docs.rs 反映検証」の実行時（2026-08-23）に
 `mode: publish` 実行前の必須ゲート（G0。`cargo publish` は unpublish 不可・yank のみの
 不可逆操作であるため設けた事前チェック）を再実測した結果、以下 2 点が未充足であり、
