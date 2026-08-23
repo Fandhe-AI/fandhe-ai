@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/cpu_metal_f16_tiled_parity.rs (target/release/deps/cpu_metal_f16_tiled_parity-37193f4d8dd012e8)
+
+running 5 tests
+test f16_tiled_parity_boundary_shape_non_multiple_of_tile ... ok
+test f16_tiled_parity_matches_existing_8x8_kernel ... ok
+test f16_tiled_parity_staged_baseline_shape_512 ... ok
+test f16_tiled_parity_direct_load_single_simdgroup_8x8 ... ok
+test f16_tiled_k4096_stress ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+

@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/gemm_f16_auto_parity.rs (target/release/deps/gemm_f16_auto_parity-1730ad5bc2ad81bf)
+
+running 8 tests
+test dispatch_f16_auto_matches_cpu_reference_tiny_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_non_multiple_of_8_boundary_shape ... ok
+test dispatch_f16_auto_matches_existing_non_tiled_8x8_kernel ... ok
+test dispatch_f16_auto_matches_explicit_tile_select_dispatch ... ok
+test dispatch_f16_auto_matches_cpu_reference_square_cube_512 ... ok
+test dispatch_f16_auto_matches_cpu_reference_large_near_square_rectangle ... ok
+test dispatch_f16_auto_matches_cpu_reference_tall_shape ... ok
+test dispatch_f16_auto_matches_cpu_reference_wide_shape ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+

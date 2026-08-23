@@ -1,0 +1,13 @@
+    Finished `release` profile [optimized] target(s) in 0.03s
+     Running tests/cpu_metal_f16_parity.rs (target/release/deps/cpu_metal_f16_parity-3c508c6669c69a4e)
+
+running 6 tests
+test f16_dispatch_prepared_rejects_undersized_and_misaligned_inputs ... ok
+test f16_parity_baseline_8x8x8 ... ok
+test f16_dispatch_is_bit_deterministic_across_runs ... ok
+test f16_parity_boundary_shapes_non_multiple_of_eight ... ok
+test f16_parity_baseline_shape_512 ... ok
+test f16_k4096_stress ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
