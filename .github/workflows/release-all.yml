@@ -99,6 +99,11 @@ env:
 concurrency:
   group: crates-io-release
   cancel-in-progress: false
+  # queue の既定値 single は「pending は 1 件まで・新しい dispatch が古い
+  # pending を暗黙にキャンセルして置き換える」挙動のため、連続 dispatch した
+  # リリースが黙って落ちる（PR #906 Cursor Bugbot Medium）。max（最大 100 件を
+  # FIFO で待機）へ明示して、待機中のリリースが取りこぼされないようにする。
+  queue: max
 
 jobs:
   # --------------------------------------------------
