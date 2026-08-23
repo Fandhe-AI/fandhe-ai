@@ -596,9 +596,11 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
 
 - **environment `crates-io-release` の承認が全体に効くのは、GitHub 側で
   同 environment に required reviewers + deployment branch 制限（main
-  限定）が設定されて初めてである**。10.1 節時点でこの environment は
-  未作成（`{"total_count":0,"environments":[]}`）であり、未設定の間は
-  `mode: publish` を実運用しない（release.yml と同一の前提条件）。
+  限定）が設定されていることが前提である**。この environment は 10 節
+  追補のとおり 2026-08-23 に設定済み（required reviewers + main 限定
+  deployment branch 制限）であり、現在この前提は充足している。将来
+  environment が削除・改変された場合は、未設定の間 `mode: publish` を
+  実運用しない（release.yml と同一の前提条件）。
 - **release.yml との同時実行を防ぐ機構はない**。`release-all.yml` の
   concurrency グループ（`release-all`）と release.yml のグループ
   （`release-${{ inputs.crate }}`）は別系列のため、GitHub Actions の
