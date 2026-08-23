@@ -90,8 +90,23 @@ permissions:
 # 公開処理の途中キャンセルは crates.io 側の中途半端な状態を招きうるため
 # cancel-in-progress は行わない。
 concurrency:
-  group: release-${{ inputs.crate }}
+  # release-all.yml（一括リリース）と同一グループで相互排他する（PR #906
+  # codex-review P1）。従来の `release-${{ inputs.crate }}`（クレート単位の
+  # 直列化）では一括リリースとの並走を防げなかったため、リリース系
+  # ワークフロー全体で単一グループに統一する（クレート間の並列 dispatch は
+  # できなくなるが、復旧用途の本ワークフローでは逐次実行が前提のため許容）。
+  group: crates-io-release
   cancel-in-progress: false
+  # queue の既定値 single は「pending は 1 件まで・新しい dispatch が古い
+  # pending を暗黙にキャンセルして置き換える」挙動のため、連続 dispatch した
+  # リリースが黙って落ちる（PR #906 Cursor Bugbot Medium）。max（最大 100 件を
+  # FIFO で待機）へ明示して、待機中のリリースが取りこぼされないようにする。
+  # `queue` は concurrency 配下の正式なキー（group・cancel-in-progress と並ぶ
+  # 第 3 のキー。許容値 single/max。公式リファレンス
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+  # で確認済み・2026-08-23）。禁止は `queue: max` + `cancel-in-progress: true`
+  # の組み合わせのみで、本設定（cancel-in-progress: false）は有効。
+  queue: max
 
 jobs:
   # --------------------------------------------------

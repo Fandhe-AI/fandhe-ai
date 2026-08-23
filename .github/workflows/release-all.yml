@@ -1,0 +1,366 @@
+# crates.io 一括リリースワークフロー（ユーザー指示 2026-08-23）。
+#
+# release.yml（単一クレート・crate choice 入力）との使い分け:
+#   - release.yml: 1 クレートずつの実行・障害復旧用。途中で失敗したクレートの
+#     再実行や、依存順どおり 1 つずつ確認しながら進めたい場合はこちらを使う。
+#   - 本ファイル（release-all.yml）: 公開 6 クレート（`fandhe-ai-tensor-core`・
+#     `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
+#     `fandhe-ai-backend-metal`・`fandhe-ai`。命名確定は
+#     docs/crates-io-naming-decision.md、公開順序・版数運用は
+#     docs/crates-io-publishing-order.md）を単一の workflow_dispatch で一括
+#     リリースする。両ファイルとも並行して存置し、release.yml は削除しない。
+#
+# 対象クレートをハードコードで固定する理由:
+#   本ワークフローの対象は常に公開 6 クレート全件であり、crate 選択入力は
+#   不要（release.yml と異なり choice 入力を持たない）。対象一覧は下記
+#   `env.RELEASE_CRATES`（スペース区切り 1 箇所）に集約し、複数箇所への
+#   重複記述を避ける。
+#
+# 複数パッケージ `cargo publish -p ... -p ...` が依存順・index 反映待ちを
+# 内包する根拠:
+#   cargo 1.90 で安定化した複数パッケージ publish 機構（本ワークフロー実行
+#   環境の cargo 1.96.0 で `cargo publish --help` の Package Selection に
+#   `-p, --package [<SPEC>]`〈複数指定可〉があることを実装時に確認済み）は、
+#   ワークスペース内の `path` 依存をローカルで解決したうえで、依存順の解決・
+#   順次アップロード・crates.io index への反映待ちを cargo 自身が行う
+#   （docs/crates-io-publishing-order.md §8.1: 2026-08-22 実測で 6 クレート
+#   同時指定の dry-run が Packaging → Verifying → dry-run 中断まで全件成功。
+#   単一クレートの dry-run〈§8.2〉は実 crates.io index のみを参照するため
+#   依存先未公開の間は失敗するのに対し、6 クレート同時指定はこの失敗を
+#   経由せず verify が公開前から green になる）。よって本ワークフローは
+#   per-crate ループへフォールバックせず、6 クレートを 1 回の `cargo publish`
+#   呼び出しで扱う。
+#
+# 承認は 1 回で全クレートに効く設計の前提条件（充足済み。2026-08-23 設定完了）:
+#   `environment: crates-io-release` の required reviewers + deployment
+#   branch 制限（main 限定）が GitHub 側で設定されて初めて、本ワークフローの
+#   1 回の承認が 6 クレートの publish 全体に対するゲートとして機能する。
+#   同 environment は 2026-08-23 に設定済み（required reviewers + main 限定
+#   deployment branch 制限。`docs/crates-io-publishing-order.md` §10 追補）で
+#   あり、現在この前提は充足している。将来 environment が削除・改変され
+#   未設定になった場合は `environment:` 指定が実質ノーガードの参照になる
+#   ため、復旧するまで `mode: publish` を実運用しない（release.yml 冒頭
+#   コメントと同一の前提条件）。
+#
+# release.yml との相互排他（GitHub Actions concurrency で保証。PR #906 P1）:
+#   本ワークフローと release.yml は同一の concurrency グループ
+#   （`crates-io-release`・cancel-in-progress: false）を共有するため、
+#   一括リリースと単体リリースが同時に dispatch されても GitHub Actions が
+#   直列化し、同一クレートへの publish が並走することはない。加えて
+#   両ワークフローの verify ジョブが共有する「crates.io 既公開バージョンの
+#   検証」ガード（sparse index 参照）と `cargo publish` 自体の非冪等性
+#   （同一バージョンの二重アップロードは crates.io 側が拒否する）が
+#   多層のバックストップとして機能する。
+#
+# 途中失敗時の再開方針（本ワークフローは非再開設計）:
+#   6 パッケージ一括 `cargo publish` が一部クレートの公開後に失敗した場合、
+#   本ワークフローを再実行すると「crates.io 既公開バージョンの検証」ガードが
+#   公開済みクレート分で fail する（意図した挙動）。**部分公開状態からの
+#   再開・再実行は本ワークフローでは行わず、release.yml で未公開の残り
+#   クレートを 1 クレートずつ実行する**（release.yml 冒頭コメント「途中失敗時
+#   の再実行手順」と同一方針）。
+name: crates.io release (all crates)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "公開バージョン（公開 6 クレート共通の workspace version と完全一致必須。例: 0.3.0）"
+        type: string
+        required: true
+      mode:
+        description: "dry-run-only: verify のみ（既定・トークン不要）。publish: verify 通過後に 6 クレート一括で実公開（environment 承認ゲートを通る）"
+        type: choice
+        required: true
+        default: dry-run-only
+        options:
+          - dry-run-only
+          - publish
+
+# ワークフロー既定は contents: read の最小権限（.claude/rules/ci.md）。
+# secrets への到達はジョブ・ステップ側で個別に絞る。
+permissions:
+  contents: read
+
+# 対象 6 クレート一覧の単一ソース（依存順ではなく列挙順。公開順序自体は cargo の
+# 複数 -p publish が内部で解決するため列挙順に意味はない。
+# docs/crates-io-publishing-order.md §3）。verify・publish 両ジョブで参照するため
+# ワークフロー直下（ジョブ横断で参照可能な唯一の env スコープ）に 1 箇所だけ定義する。
+env:
+  RELEASE_CRATES: >-
+    fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
+    fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai
+
+# release.yml と同一グループ（`crates-io-release`）で相互排他する: 一括リリースと
+# 単体リリース（復旧用）が同時に走ると同一クレートへの publish が競合しうるため、
+# GitHub Actions の concurrency 機構でリリース系ワークフロー全体を直列化する
+# （PR #906 codex-review P1）。公開処理の途中キャンセルは crates.io 側の
+# 中途半端な状態を招きうるため cancel-in-progress は行わない。
+concurrency:
+  group: crates-io-release
+  cancel-in-progress: false
+  # queue の既定値 single は「pending は 1 件まで・新しい dispatch が古い
+  # pending を暗黙にキャンセルして置き換える」挙動のため、連続 dispatch した
+  # リリースが黙って落ちる（PR #906 Cursor Bugbot Medium）。max（最大 100 件を
+  # FIFO で待機）へ明示して、待機中のリリースが取りこぼされないようにする。
+  # `queue` は concurrency 配下の正式なキー（group・cancel-in-progress と並ぶ
+  # 第 3 のキー。許容値 single/max。公式リファレンス
+  # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency
+  # で確認済み・2026-08-23）。禁止は `queue: max` + `cancel-in-progress: true`
+  # の組み合わせのみで、本設定（cancel-in-progress: false）は有効。
+  queue: max
+
+jobs:
+  # --------------------------------------------------
+  # verify: トークン不要・承認不要。ref 検証 + 入力検証 + 6 クレート全件の
+  # 既公開チェック + 6 パッケージ一括 dry-run。mode に関わらず常に実行する
+  # （publish ジョブの前段ゲートを兼ねる）。
+  # --------------------------------------------------
+  verify:
+    name: verify (all crates ${{ inputs.version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      # workflow_dispatch 入力を run 本文へ直接展開せず env 経由でシェル変数
+      # として受け取る（式インジェクション対策。.claude/rules/security.md A03）。
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_MODE: ${{ inputs.mode }}
+    steps:
+      - name: Checkout
+        # ci.yml の build ジョブ・release.yml と同一 SHA 固定
+        # （.claude/rules/ci.md「actions はコミット SHA へ固定する」）。
+        # docs/spec は private submodule であり公開処理に不要なため取得しない
+        # （submodules: false。取得しないことで資格情報も不要）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          submodules: false
+          persist-credentials: false
+
+      - name: "guard: 実行 ref の検証（mode=publish 時）"
+        # release.yml と同一方針。`workflow_dispatch` はディスパッチ時に選択した
+        # ref 上のワークフロー定義がそのまま実行されるため、`mode: publish` を
+        # 選んだディスパッチが main 以外のブランチから来た場合はここで明示的に
+        # ジョブを失敗させる（publish ジョブの `if` を skip ではなくここで
+        # fail させることで、誤ブランチからの dispatch が無音の success に
+        # ならないようにする。.claude/rules/security.md A08）。この検査は
+        # 「誤ってブランチを選び間違えた」等の非悪意的な誤操作に対する層であり、
+        # release.yml と同様にワークフロー自体を書き換えられる悪意ある write
+        # 権限者への防御ではない（実効的な統制は下記 environment のブランチ
+        # 制限。release.yml 冒頭コメント参照）。
+        run: |
+          set -euo pipefail
+          if [ "${RELEASE_MODE}" = "publish" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::mode: publish は refs/heads/main 上でのみ実行可能です（実際: ${GITHUB_REF}）"
+            exit 1
+          fi
+          echo "ref 検査を通過しました（mode=${RELEASE_MODE}, ref=${GITHUB_REF}）"
+
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
+        # ci.yml・release.yml の各ジョブと同一 uses 行（Fandhe-AI/actions 側
+        # composite action）。`@latest` は可変タグ参照であり SHA 固定ではないが、
+        # ci.yml 本体の各ジョブ・release.yml も同一パターンのため本ワークフロー
+        # 独自の逸脱ではない。
+        uses: Fandhe-AI/actions/rust-toolchain-setup@latest
+
+      - name: "guard: 入力バージョン形式の検証"
+        run: |
+          set -euo pipefail
+          if ! [[ "${RELEASE_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::version 入力 '${RELEASE_VERSION}' が semver 形式ではありません"
+            exit 1
+          fi
+          echo "入力 version '${RELEASE_VERSION}' は semver 形式です"
+
+      - name: "guard: Cargo.toml バージョン一致の検証（6 クレート全件）"
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
+        run: |
+          set -euo pipefail
+          failed=0
+          for crate in ${RELEASE_CRATES}; do
+            pkgid="$(cargo pkgid -p "${crate}" --locked)"
+            # cargo pkgid の出力形式は `path+file://...#name@version`（cargo 1.96
+            # 実測。過去バージョンでは `#name:version` 形式もありうるため
+            # `#`/`@` の両区切りに対応する抽出にする（release.yml を踏襲）。
+            actual_version="${pkgid##*[@:]}"
+            if [ "${actual_version}" != "${RELEASE_VERSION}" ]; then
+              echo "::error::${crate} の Cargo.toml バージョン '${actual_version}' が入力 '${RELEASE_VERSION}' と一致しません"
+              failed=1
+            else
+              echo "${crate} の Cargo.toml バージョンは入力と一致します（${actual_version}）"
+            fi
+          done
+          if [ "${failed}" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: "guard: crates.io 既公開バージョンの検証（6 クレート全件）"
+        run: |
+          set -euo pipefail
+          # 非冪等な `cargo publish` の再実行で同一バージョンを二重公開しない
+          # ための fail-closed ガード（.claude/rules/security.md A08）。
+          # release.yml の同名ガードと同一ロジックを 6 クレート分ループする。
+          # 1 件でも既公開なら失敗させるが、どのクレートが既公開済みかを
+          # 1 回の実行でまとめて把握できるよう、最初の失敗で即 exit せず
+          # 全件走査してから判定する。
+          tmp_body="$(mktemp)"
+          trap 'rm -f "${tmp_body}"' EXIT
+          failed=0
+          for name in ${RELEASE_CRATES}; do
+            # sparse index のシャーディング規則（cargo book 準拠）:
+            #   1-2 文字: <len>/<name>
+            #   3 文字  : 3/<先頭1文字>/<name>
+            #   4 文字以上: <先頭2文字>/<次2文字>/<name>
+            name_len="${#name}"
+            if [ "${name_len}" -le 2 ]; then
+              index_path="${name_len}/${name}"
+            elif [ "${name_len}" -eq 3 ]; then
+              index_path="3/${name:0:1}/${name}"
+            else
+              index_path="${name:0:2}/${name:2:2}/${name}"
+            fi
+            url="https://index.crates.io/${index_path}"
+
+            # curl は -f を付けず、HTTP status を明示取得して 404（未公開）と
+            # 200（公開済み）を判別する。`set -euo pipefail` の下ではネット
+            # ワーク層エラー（名前解決失敗・接続不可等）で curl が非 0 終了した
+            # 時点でスクリプトはその場で abort し、後続の http_code 分岐には
+            # 到達しない（結果として fail-closed のまま）。`--max-time` で
+            # ハング時に job timeout を占有し続けるのを防ぐ。
+            http_code="$(curl -sS --max-time 30 -o "${tmp_body}" -w '%{http_code}' "${url}")"
+
+            if [ "${http_code}" = "404" ]; then
+              echo "${name} は crates.io 未公開です（sparse index 404）。続行します"
+            elif [ "${http_code}" = "200" ]; then
+              # 固定文字列一致（`grep -F`）にする。`RELEASE_VERSION` を通常の
+              # 正規表現として展開すると `.` が任意 1 文字にマッチし、意図せぬ
+              # バージョンとの過剰一致を招く。
+              if grep -qF "\"vers\":\"${RELEASE_VERSION}\"" "${tmp_body}"; then
+                echo "::error::${name} v${RELEASE_VERSION} は crates.io に既に公開済みです（sparse index で確認）"
+                failed=1
+              else
+                echo "${name} は公開済みですが v${RELEASE_VERSION} は未公開です。続行します"
+              fi
+            else
+              echo "::error::sparse index（${url}）の取得に失敗しました（HTTP ${http_code}）"
+              failed=1
+            fi
+          done
+          if [ "${failed}" -ne 0 ]; then
+            echo "::error::6 クレート中 1 件以上が既公開バージョンとの衝突・取得失敗のため中断します"
+            exit 1
+          fi
+
+      - name: "verify: cargo package --list（6 クレート全件・同梱ファイル一覧の監査ログ）"
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
+        run: |
+          set -euo pipefail
+          {
+            for crate in ${RELEASE_CRATES}; do
+              echo "### cargo package --list -p ${crate}"
+              echo '```'
+              cargo package --list -p "${crate}" --locked
+              echo '```'
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: "verify: cargo publish --dry-run（6 パッケージ一括）"
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
+        run: |
+          set -euo pipefail
+          # 6 パッケージ同時指定はワークスペース内の path 依存をローカルで解決
+          # するため、依存先クレートが実 crates.io 未公開でも成功する
+          # （docs/crates-io-publishing-order.md §8.1）。release.yml の単一
+          # クレート dry-run（§8.2。実 index のみ参照するため依存先未公開の
+          # 間は失敗）とは異なり、本ワークフローの verify は初回公開前から
+          # green になる。
+          # shellcheck disable=SC2086  # RELEASE_CRATES は単語分割前提のスペース区切りリスト
+          cargo publish --dry-run \
+            $(for crate in ${RELEASE_CRATES}; do printf -- '-p %s ' "${crate}"; done) \
+            --locked
+
+  # --------------------------------------------------
+  # publish: mode=publish のときのみ実行。environment 承認ゲートを通過後、
+  # CARGO_REGISTRY_TOKEN をステップ限定で注入して 6 パッケージ一括で実公開する。
+  # --------------------------------------------------
+  publish:
+    name: publish (all crates ${{ inputs.version }})
+    needs: verify
+    # 注意: job の `if` を false 評価にするとジョブは「失敗」ではなく「skip」に
+    # なり、ワークフロー実行全体は success のまま終わる。ref 不一致を検知したい
+    # 場合にここへ `github.ref == 'refs/heads/main'` を加えると、誤 ref からの
+    # dispatch が「何も起きず success」という無音の抜け道になり、fail-closed の
+    # 意図に反する（release.yml と同一方針）。そのためここでは mode のみで
+    # 判定し、ref の fail-closed 検査は environment 承認ゲートの手前（verify
+    # ジョブの「guard: 実行 ref の検証（mode=publish 時）」）で行い、明示的に
+    # ジョブを失敗させる。
+    if: ${{ inputs.mode == 'publish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # environment 保護ルール（required reviewers・deployment branch 制限）に
+    # よる承認ゲート。設定自体は GitHub 側（本ワークフローのスコープ外。
+    # ワークフロー冒頭コメント参照）。ただし「write 権限を持つ者が feature
+    # ブランチで release-all.yml 自体を改変してディスパッチする」という脅威に
+    # 対しては、本ワークフロー内のいかなるガード（if・run ステップ）も無力で
+    # ある（改変者はそのガードごと書き換えられる）。この脅威に対する唯一の
+    # 実効的な統制はサーバー側（GitHub）の environment deployment branch 制限
+    # （main 限定）＋ required reviewers であり、`mode: publish` を実運用する
+    # 前にユーザーが GitHub 側で設定しておく前提条件とする（ワークフロー冒頭
+    # コメント参照）。verify ジョブの ref 検査は「誤ってブランチを選び間違えた」
+    # 等の非悪意的な誤操作を防ぐ層であり、悪意ある改変者への防御ではない。
+    environment: crates-io-release
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - name: "guard: 実行 ref の再検証"
+        # verify ジョブの「guard: 実行 ref の検証（mode=publish 時）」と同じ ref
+        # （同一 workflow run 内で github.ref は不変）に対する重複検査。verify
+        # 側が本体のゲートであり、ここは低コストな重複検査として保持する
+        # （.claude/rules/security.md A08。release.yml と同一方針）。
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::publish ジョブは refs/heads/main 上でのみ実行可能です（実際: ${GITHUB_REF}）"
+            exit 1
+          fi
+          echo "実行 ref は refs/heads/main です"
+
+      - name: Checkout
+        # verify ジョブと同一コミットへピン留めする（承認待ちの間にブランチが
+        # 進んでも verify 済み tree と異なる内容を publish しない。TOCTOU 防止。
+        # .claude/rules/security.md A08）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          submodules: false
+          persist-credentials: false
+
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
+        uses: Fandhe-AI/actions/rust-toolchain-setup@latest
+
+      - name: "guard: CARGO_REGISTRY_TOKEN の存在確認"
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          # 値は一切出力せず存在有無のみ判定する（.claude/rules/security.md A02/A07）。
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::error::org secret CARGO_REGISTRY_TOKEN が未設定です"
+            exit 1
+          fi
+          echo "CARGO_REGISTRY_TOKEN が設定されていることを確認しました"
+
+      - name: "publish: cargo publish（6 パッケージ一括）"
+        env:
+          # トークンはこのステップの env にのみ注入する（ジョブ env・他ステップへ
+          # 広げない。.claude/rules/security.md A02/A07）。
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rust-ai-library-release-all-target
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # RELEASE_CRATES は単語分割前提のスペース区切りリスト
+          cargo publish \
+            $(for crate in ${RELEASE_CRATES}; do printf -- '-p %s ' "${crate}"; done) \
+            --locked
