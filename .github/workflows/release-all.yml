@@ -83,6 +83,15 @@ on:
 permissions:
   contents: read
 
+# 対象 6 クレート一覧の単一ソース（依存順ではなく列挙順。公開順序自体は cargo の
+# 複数 -p publish が内部で解決するため列挙順に意味はない。
+# docs/crates-io-publishing-order.md §3）。verify・publish 両ジョブで参照するため
+# ワークフロー直下（ジョブ横断で参照可能な唯一の env スコープ）に 1 箇所だけ定義する。
+env:
+  RELEASE_CRATES: >-
+    fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
+    fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai
+
 # release.yml とは別グループ（クレート単位ではなく本ワークフロー全体で直列化）。
 # 公開処理の途中キャンセルは crates.io 側の中途半端な状態を招きうるため
 # cancel-in-progress は行わない。
@@ -105,12 +114,6 @@ jobs:
       # として受け取る（式インジェクション対策。.claude/rules/security.md A03）。
       RELEASE_VERSION: ${{ inputs.version }}
       RELEASE_MODE: ${{ inputs.mode }}
-      # 対象 6 クレート一覧の単一ソース（依存順ではなく列挙順。公開順序自体は
-      # cargo の複数 -p publish が内部で解決するため列挙順に意味はない。
-      # docs/crates-io-publishing-order.md §3）。
-      RELEASE_CRATES: >-
-        fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
-        fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai
     steps:
       - name: Checkout
         # ci.yml の build ジョブ・release.yml と同一 SHA 固定
@@ -299,9 +302,6 @@ jobs:
     environment: crates-io-release
     env:
       RELEASE_VERSION: ${{ inputs.version }}
-      RELEASE_CRATES: >-
-        fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
-        fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai
     steps:
       - name: "guard: 実行 ref の再検証"
         # verify ジョブの「guard: 実行 ref の検証（mode=publish 時）」と同じ ref
