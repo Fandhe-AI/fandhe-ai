@@ -90,7 +90,12 @@ permissions:
 # 公開処理の途中キャンセルは crates.io 側の中途半端な状態を招きうるため
 # cancel-in-progress は行わない。
 concurrency:
-  group: release-${{ inputs.crate }}
+  # release-all.yml（一括リリース）と同一グループで相互排他する（PR #906
+  # codex-review P1）。従来の `release-${{ inputs.crate }}`（クレート単位の
+  # 直列化）では一括リリースとの並走を防げなかったため、リリース系
+  # ワークフロー全体で単一グループに統一する（クレート間の並列 dispatch は
+  # できなくなるが、復旧用途の本ワークフローでは逐次実行が前提のため許容）。
+  group: crates-io-release
   cancel-in-progress: false
 
 jobs:

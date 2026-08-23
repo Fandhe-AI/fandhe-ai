@@ -601,14 +601,14 @@ cargo 自身が内部で行うため、`release-all.yml` は per-crate ループ
   deployment branch 制限）であり、現在この前提は充足している。将来
   environment が削除・改変された場合は、未設定の間 `mode: publish` を
   実運用しない（release.yml と同一の前提条件）。
-- **release.yml との同時実行を防ぐ機構はない**。`release-all.yml` の
-  concurrency グループ（`release-all`）と release.yml のグループ
-  （`release-${{ inputs.crate }}`）は別系列のため、GitHub Actions の
-  concurrency では相互排他されない。実質的なバックストップは両ワーク
-  フロー共通の「crates.io 既公開バージョンの検証」ガード（sparse index
-  参照）と `cargo publish` 自体の非冪等性（同一バージョンの二重
-  アップロードは crates.io 側が拒否する）であり、運用上は両ワークフローを
-  同時に dispatch しないことを前提とする。
+- **release.yml との相互排他は GitHub Actions の concurrency で保証する**
+  （PR #906 codex-review P1 対応）。`release-all.yml` と release.yml は
+  同一の concurrency グループ（`crates-io-release`・cancel-in-progress:
+  false）を共有するため、両者が同時に dispatch されても直列化され、
+  同一クレートへの publish が並走することはない。加えて両ワークフロー
+  共通の「crates.io 既公開バージョンの検証」ガード（sparse index 参照）と
+  `cargo publish` 自体の非冪等性（同一バージョンの二重アップロードは
+  crates.io 側が拒否する）が多層のバックストップとして機能する。
 - **途中失敗時は再開せず release.yml へ切り替える**: 6 パッケージ一括
   `cargo publish` が一部クレートの公開後に失敗した場合、`release-all.yml`
   を再実行すると公開済みクレート分で既公開ガードが fail する（意図した

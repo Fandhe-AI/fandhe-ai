@@ -42,16 +42,15 @@
 #   ため、復旧するまで `mode: publish` を実運用しない（release.yml 冒頭
 #   コメントと同一の前提条件）。
 #
-# release.yml との同時実行に関する既知の制約（fail-closed の裏付けあり）:
-#   本ワークフローの concurrency グループ（`release-all`）は release.yml の
-#   concurrency グループ（`release-${{ inputs.crate }}`）と別系列のため、
-#   本ワークフローの実行中に release.yml で同一クレートを同時 dispatch
-#   すること自体は GitHub Actions の concurrency 機構では防げない。ただし
+# release.yml との相互排他（GitHub Actions concurrency で保証。PR #906 P1）:
+#   本ワークフローと release.yml は同一の concurrency グループ
+#   （`crates-io-release`・cancel-in-progress: false）を共有するため、
+#   一括リリースと単体リリースが同時に dispatch されても GitHub Actions が
+#   直列化し、同一クレートへの publish が並走することはない。加えて
 #   両ワークフローの verify ジョブが共有する「crates.io 既公開バージョンの
-#   検証」ガード（sparse index 参照）と、`cargo publish` 自体の非冪等性
-#   （同一バージョンの二重アップロードは crates.io 側が拒否する）が実質的な
-#   バックストップとして機能する。運用上は両ワークフローを同時に dispatch
-#   しないことを前提とする。
+#   検証」ガード（sparse index 参照）と `cargo publish` 自体の非冪等性
+#   （同一バージョンの二重アップロードは crates.io 側が拒否する）が
+#   多層のバックストップとして機能する。
 #
 # 途中失敗時の再開方針（本ワークフローは非再開設計）:
 #   6 パッケージ一括 `cargo publish` が一部クレートの公開後に失敗した場合、
@@ -92,11 +91,13 @@ env:
     fandhe-ai-tensor-core fandhe-ai-autodiff fandhe-ai-backend-cpu
     fandhe-ai-backend-cuda fandhe-ai-backend-metal fandhe-ai
 
-# release.yml とは別グループ（クレート単位ではなく本ワークフロー全体で直列化）。
-# 公開処理の途中キャンセルは crates.io 側の中途半端な状態を招きうるため
-# cancel-in-progress は行わない。
+# release.yml と同一グループ（`crates-io-release`）で相互排他する: 一括リリースと
+# 単体リリース（復旧用）が同時に走ると同一クレートへの publish が競合しうるため、
+# GitHub Actions の concurrency 機構でリリース系ワークフロー全体を直列化する
+# （PR #906 codex-review P1）。公開処理の途中キャンセルは crates.io 側の
+# 中途半端な状態を招きうるため cancel-in-progress は行わない。
 concurrency:
-  group: release-all
+  group: crates-io-release
   cancel-in-progress: false
 
 jobs:
