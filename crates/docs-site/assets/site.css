@@ -110,6 +110,11 @@ a {
  */
 
 .docs-header-nav {
+  /* `.site-header` は `justify-content: space-between` のため、伸長しない
+     子は余白を両側に分配されて中央へ寄る。`flex: 1` でメニューにタイトル
+     右隣からアクション領域手前までを占有させ、トリガー列をタイトルの
+     隣に据え置く（`min-width: 0` は狭幅で縮めるための指定）。 */
+  flex: 1;
   margin-left: 1.25rem;
   min-width: 0;
 }
