@@ -9,21 +9,36 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 
 ## ドキュメント
 
-利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
-[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。公開までは
-本 README と以下を参照してください。
+利用者向けドキュメントサイト（GitHub Pages）は公開済みです。
 
-- インストール・最小コード例・バックエンド切替: 本 README の「インストール」「最小コード例」「バックエンド」節
-- バックエンド構成・数値一致契約: [`docs/backend-switching-design.md`](docs/backend-switching-design.md)
-- compat API・サポート境界: [`docs/compat-api-scope.md`](docs/compat-api-scope.md)
-- ONNX/safetensors 相互運用: [`crates/onnx-interop`](crates/onnx-interop)（非公開の内部クレート）
+- https://fandhe-ai.github.io/rust-ai-library/
+
+ローカルでビルドして確認する場合は次のコマンドを実行してください。
+
+```bash
+cargo run -p docs-site -- --out dist/
+```
+
+生成物は `dist/index.html` から閲覧できます。ビルドには内部リンク検証（linkcheck）が
+内蔵されており、リンク切れを検出した場合は非 0 終了します。コンテンツの正は
+`site/` 配下、サイト構成は `site/nav.toml` です。
 
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています（リポジトリ直下の
-[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io
-公開準備中のため、現時点では `fandhe-ai` クレートを Git 依存として参照してください
-（公開後は `fandhe-ai = "x.y.z"` の形で crates.io から参照できるようになります）。
+[`rust-toolchain.toml`](./rust-toolchain.toml) が単一真実源です）。crates.io（v0.3.0・
+2026-08-23 公開済み）から利用できます。
+
+```toml
+[dependencies]
+fandhe-ai = "0.3.0"
+```
+
+公開ドキュメントは以下のとおりです。
+
+- https://docs.rs/fandhe-ai
+
+開発版を試す場合は Git 依存で参照できます。
 
 ```toml
 [dependencies]
@@ -87,7 +102,7 @@ cargo run -p fandhe-ai --example getting_started
 
 このほか、相互運用（`onnx-interop`）・自己修復ループ（`guardrail`・`self-repair`）・
 ベンチ計測（`bench-harness`）・ドキュメントサイト生成（`docs-site`）を担う非公開の
-内部クレートがあります。
+内部クレートがあります。compat API のサポート境界の詳細は [`docs/compat-api-scope.md`](docs/compat-api-scope.md) を参照してください。
 
 ## バックエンド
 
@@ -102,9 +117,12 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 
 ## ステータス
 
-コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・3 バックエンド
-（CPU／CUDA／Metal）の実装と性能実測が進行しており、crates.io への公開準備を
-進めています。
+- **crates.io 初回公開完了**: v0.3.0（6 クレート: `fandhe-ai`・`fandhe-ai-tensor-core`・
+  `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
+  `fandhe-ai-backend-metal`）を 2026-08-23 に公開済み
+- **ドキュメントサイト公開済み**: https://fandhe-ai.github.io/rust-ai-library/
+- **実装の進行状況**: コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・
+  3 バックエンド（CPU／CUDA／Metal）の実装と性能実測を継続中
 
 ## 開発（コントリビュータ向け）
 
@@ -123,17 +141,46 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 3. **`docs/license-matrix.md` の同時更新**: 新規・更新する依存のライセンスを確認し、`docs/license-matrix.md`（未作成の場合は同一 PR で作成）を更新する。MPL-2.0 等コピーレフトの推移的混入は推定で記述せず、有効化しうる feature 組合せごとの `cargo tree` 実測で個別に適合確認する
 4. **CI 検査の確認**: `deps-forbidden` ジョブ（禁止リストの `Cargo.lock` 機械検査）・`deny` ジョブ（`deny.toml` によるライセンス監査）が green であることを確認する
 
-## 開発環境構築
+## 開発環境セットアップ
+
+### クローンと初期化
+
+仕様書が `docs/spec/` にサブモジュールとして取り込まれているため、
+クローン時に `--recurse-submodules` を指定してください。
 
 ```bash
-git clone git@github.com:Fandhe-AI/rust-ai-library.git
+git clone --recurse-submodules git@github.com:Fandhe-AI/rust-ai-library.git
 cd rust-ai-library
-make setup   # サブモジュール取得 → rustup → lefthook（git hooks）を一括構築
 ```
 
-`docs/spec`（`rust-ai-library-spec`）は private リポジトリのため、アクセス権のない環境では `make setup`（内部で `git submodule update --init`）の submodule 取得ステップが失敗します。この場合も `docs/spec` 抜き（空ディレクトリ）で `cargo build --workspace`・`cargo test --workspace`（`#[ignore]` を除く通常テスト）は成立することを実測確認済みです（#463）。docs/spec 配下のファイル読み取りに依存するテストは 3 件のみで、いずれも `#[ignore]` により通常実行から分離されています（`crates/autodiff/tests/poc_v2_2_parity.rs`・`crates/backend-cpu/tests/gemm_parity.rs`・`crates/tensor-core/tests/poc_v2_1_parity.rs`）。submodule 未取得の環境でこれら 3 件を `--ignored` 指定で実行すると、evidence ファイルを読めない旨のエラーで失敗することを実測確認済みです。
+既存クローンがある場合は以下で初期化してください。
 
-主な make ターゲット（`make help` で一覧表示）:
+```bash
+git submodule update --init
+```
+
+### 最短セットアップ
+
+ローカル開発環境の構築は `make setup` で行います。サブモジュール取得 → rustup（`stable` の導入。rustfmt / clippy は `rust-toolchain.toml` の components で同期）→ lefthook（git hooks）の順に一括構築します。
+
+```bash
+make setup
+```
+
+その後、以下で基本的なチェック（ビルド・テスト・整形・lint）を実行できます。
+
+```bash
+cargo build --workspace
+make test
+make fmt
+make lint
+```
+
+全ターゲット一覧は `make help` で確認してください。
+
+仕様書 submodule は private リポジトリのため、アクセス権のない環境では submodule 取得ステップが失敗します。この場合も `docs/spec` 抜き（空ディレクトリ）で `cargo build --workspace`・`cargo test --workspace`（`#[ignore]` を除く通常テスト）は成立することを実測確認済みです（#463）。docs/spec 配下のファイル読み取りに依存するテストは 3 件のみで、いずれも `#[ignore]` により通常実行から分離されています（`crates/autodiff/tests/poc_v2_2_parity.rs`・`crates/backend-cpu/tests/gemm_parity.rs`・`crates/tensor-core/tests/poc_v2_1_parity.rs`）。submodule 未取得の環境でこれら 3 件を `--ignored` 指定で実行すると、evidence ファイルを読めない旨のエラーで失敗することを実測確認済みです。
+
+### Make ターゲット
 
 | ターゲット | 内容 |
 |-----------|------|
@@ -144,7 +191,7 @@ make setup   # サブモジュール取得 → rustup → lefthook（git hooks�
 | `make test-ignored` | 実機（Metal / CUDA）専用の `#[ignore]` 分離テスト |
 | `make test-ignored-cuda` | CUDA 実機専用: `backend-cuda` の `#[ignore]` 分離テストのみ実行（TASK-1.7e・#36） |
 | `make test-ignored-metal` | Metal 実機専用: `backend-metal` の `#[ignore]` 分離テストのみ実行・release（TASK-1.8e・#42） |
-| `make deny` | `cargo deny check licenses sources`（依存ライセンス監査。`cargo-deny` 未導入なら自動導入） |
+| `make deny` | `cargo deny --locked check advisories bans licenses sources`（依存の脆弱性・重複・ライセンス・取得元監査〈#353〉。`cargo-deny` 未導入なら自動導入） |
 | `make deps-forbidden` | 依存禁止リスト（burn 系等）の混入検査 |
 | `make ci` | CI（`.github/workflows/ci.yml`）と同一チェックの一括実行 |
 
@@ -161,6 +208,8 @@ make docker-ci      # コンテナ内で make ci を実行（環境非依存の�
 ```
 
 コンテナ内で使えるのは CPU（rayon）バックエンドのみです。Metal はホスト macOS 直接実行、CUDA は実機（DGX Spark GB10 等）で実行します（`cudarc` の動的ロード方式のため、CUDA バックエンドの「ビルド」は CUDA toolkit 無しのコンテナでも成立します）。
+
+## 実機テスト（CUDA / Metal）
 
 ### CUDA 実機での `#[ignore]` テスト実行
 
@@ -200,7 +249,50 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 - `ci.yml`: `rust-ci`（fmt / clippy / test / deny の reusable workflow 呼び出し）＋固有ジョブ（build / build-no-cuda-toolkit / deps-forbidden / runner-policy / guardrail-regression / verification-gates）＋集約ジョブ `ci-complete`（fail-closed 集約の核。branch protection の required status check の詳細は `.claude/rules/ci.md`「ワークフロー設計」節を参照。二重管理を避けるため本節では書き写さない）
 - `update-external.yml`: `docs/spec` サブモジュールと `.claude/skills` の自動追従（毎日 09:00 JST。PR label: `dependencies`・`automated`）。`docs/spec` は private リポジトリのため、org secret `SUBMODULE_PAT`（visibility=all）を優先参照して取得します（`GITHUB_TOKEN` はフォールバックのみで、public 化後も private submodule は取得できません。#463）
 
-## 開発体制（Claude Code）
+## 仕様
+
+仕様書（ブレスト〜PoC〜要件定義〜タスク分解〜ロードマップ）は [Fandhe-AI/rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec) で管理し、`docs/spec/` にサブモジュールとして取り込んでいます。本リポジトリでは編集しません。
+
+| ドキュメント | 内容 |
+|-------------|------|
+| `docs/spec/04-requirements.md` | MoSCoW 優先度付き要件・受け入れ基準 |
+| `docs/spec/05-tasks.md` | タスク分解（依存関係・工数） |
+| `docs/spec/06-roadmap.md` | マイルストーン M0〜M5・着手判定 |
+
+## 開発の進め方
+
+### ロードマップ・タスク
+
+`docs/spec/06-roadmap.md` のマイルストーン（M0〜M5）と `docs/spec/05-tasks.md` のタスク（4h 粒度）に従って実装します。M0（workspace・CI・依存監査ベースライン）は完了し、コア・3 バックエンドの実装と性能実測、crates.io 公開（v0.3.0）・ドキュメントサイト公開まで到達しています（「ステータス」節参照）。未着手・進行中の作業は GitHub Issues で追跡しています。
+
+### Conventional Commits と git hooks
+
+本プロジェクトは Conventional Commits を採用しています（型・スコープの詳細は [`.claude/rules/conventional-commits.md`](.claude/rules/conventional-commits.md) を参照）。
+
+```
+feat(scope): 日本語説明
+fix(scope): バグ修正の説明
+test(scope): テスト追加・修正
+...
+```
+
+git hooks は [lefthook](https://lefthook.dev/)（`lefthook.yml`）で管理し、commit 時に以下が自動実行されます。
+
+- `cargo fmt --all --check`（整形ガード）
+- 簡易シークレット検知（API キー検出）
+- Conventional Commits 形式検証
+
+`--no-verify` による bypass は [`.claude/rules/conventional-commits.md`](.claude/rules/conventional-commits.md) で禁止されています。
+
+### CI の実行
+
+`make ci` で本リポジトリの CI（`.github/workflows/ci.yml`）と同一チェック（fmt / clippy / test / deny / deps-forbidden ほか）の一括実行ができます。
+
+```bash
+make ci
+```
+
+### Claude Code による開発体制
 
 `.claude/` に Claude Code の運用体系（Agents・Rules・Skills・hooks）を整備しています。概要は [CLAUDE.md](./CLAUDE.md) を参照してください。
 
