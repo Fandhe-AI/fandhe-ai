@@ -91,21 +91,116 @@ a {
   color: var(--color-text);
 }
 
-.site-header nav ul {
+/*
+ * ---- ヘッダーセクションメニュー（fandhe-backend/frontend と同設計） ----
+ *
+ * `layout::header_nav` の実出力（nav.docs-header-nav > ul.docs-header-menu >
+ * li.docs-header-group > a.docs-header-trigger + ul.docs-header-dropdown）。
+ * fandhe-backend/fandhe-frontend の docs-site と同じ設計・クラス名体系。
+ *
+ * ドロップダウンの開閉は JS を使わず :hover / :focus-within のみで行う
+ * （layout.rs モジュール冒頭「ヘッダーメニュー・サイドバー設計」節参照）。
+ * `top: 100%` で group に密着させ、トリガーからドロップダウンへポインタを
+ * 移動する途中に隙間（hover が切れる領域）を作らない。
+ *
+ * すべて class セレクタで記述する（`.site-header nav ul` 等の汎用子孫
+ * セレクタは使わない）: 汎用セレクタは詳細度でこれらのクラスセレクタより
+ * 優先されてしまい、`.docs-header-dropdown { display: none }` が
+ * 常時上書きされてドロップダウンが閉じなくなる事故を招くため。
+ */
+
+.docs-header-nav {
+  /* `.site-header` は `justify-content: space-between` のため、伸長しない
+     子は余白を両側に分配されて中央へ寄る。`flex: 1` でメニューにタイトル
+     右隣からアクション領域手前までを占有させ、トリガー列をタイトルの
+     隣に据え置く（`min-width: 0` は狭幅で縮めるための指定）。 */
+  flex: 1;
+  margin-left: 1.25rem;
+  min-width: 0;
+}
+
+.docs-header-menu {
   display: flex;
-  gap: 1rem;
+  align-items: center;
+  gap: 0.25rem;
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.site-header nav a {
-  text-decoration: none;
-  color: var(--color-text-muted);
+.docs-header-group {
+  position: relative;
 }
 
-.site-header nav a[aria-current="page"] {
+.docs-header-trigger {
+  display: block;
+  padding: 0.3rem 0.65rem;
+  border-radius: 0.4rem;
+  text-decoration: none;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.docs-header-trigger:hover,
+.docs-header-trigger:focus-visible {
+  color: var(--color-text);
+  background: var(--color-bg-raised);
+}
+
+/* 現在ページが属するセクションのトリガー（`aria-current="true"`。ページ
+   完全一致の `"page"` とは意味軸が異なる。`layout::header_nav` doc 参照）。 */
+.docs-header-trigger[aria-current="true"] {
   color: var(--color-accent);
+  background: var(--color-bg-raised);
+  font-weight: 600;
+}
+
+.docs-header-dropdown {
+  display: none;
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 20;
+  min-width: 14rem;
+  margin: 0;
+  padding: 0.4rem;
+  list-style: none;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 0.5rem;
+  box-shadow: 0 0.5rem 1.5rem rgba(0, 0, 0, 0.12);
+}
+
+.docs-header-group:hover .docs-header-dropdown,
+.docs-header-group:focus-within .docs-header-dropdown {
+  display: block;
+}
+
+.docs-header-dropdown li {
+  margin: 0;
+}
+
+.docs-header-dropdown a {
+  display: block;
+  padding: 0.4rem 0.6rem;
+  border-radius: 0.4rem;
+  text-decoration: none;
+  color: var(--color-text);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.docs-header-dropdown a:hover,
+.docs-header-dropdown a:focus-visible {
+  background: var(--color-bg-raised);
+  outline: none;
+}
+
+.docs-header-dropdown a[aria-current="page"] {
+  color: var(--color-accent);
+  background: var(--color-bg-raised);
   font-weight: 600;
 }
 
@@ -113,6 +208,18 @@ a {
   display: flex;
   align-items: center;
   gap: 0.75rem;
+}
+
+.docs-github-link {
+  text-decoration: none;
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+.docs-github-link:hover,
+.docs-github-link:focus-visible {
+  color: var(--color-text);
 }
 
 .docs-theme-toggle {
@@ -212,8 +319,22 @@ a {
   font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--color-text-muted);
   margin: 1.25rem 0 0.5rem;
+}
+
+/* セクション見出し（セクション着地点への `<a>` に変更。
+   `layout::sidebar` doc 参照）は本文リンクと同じ `.site-sidebar a` の
+   色（`--color-text`）で上書きされるため、見出しらしい控えめな配色に
+   個別で戻す。詳細度は `.site-sidebar h2 a`（0,1,2）> `.site-sidebar a`
+   （0,1,1）で確実に優先される。 */
+.site-sidebar h2 a {
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.site-sidebar h2 a:hover,
+.site-sidebar h2 a:focus-visible {
+  color: var(--color-text);
 }
 
 .site-sidebar ul {
@@ -322,5 +443,32 @@ a {
   .docs-search-input {
     width: 100%;
     max-width: none;
+  }
+
+  /*
+   * 狭幅ではサイドバーが現在セクションのみになるため、
+   * ヘッダーセクションメニューを消すと他セクションへの導線が絶たれる。
+   * メニューは非表示にせず折り返し（トリガーの横スクロール列）、
+   * ドロップダウンのみ無効化する（:hover はタッチ環境で信頼できないため。
+   * トリガー自体がセクション着地点ページへのリンクとして導線を担い、
+   * 到達後はサイドバーが当該セクションの全ページを表示する。
+   * `layout.rs` モジュール冒頭「ヘッダーメニュー・サイドバー設計」節参照）。
+   *
+   * 参照実装（fandhe-backend）は `max-width: 767px` の別ブレークポイントを
+   * 使うが、本リポジトリは既存のイシュー #900 対応ブレークポイント
+   * （`max-width: 48rem` = 768px）に統一し、2 つのブレークポイントが
+   * 1px 幅でずれて挙動が食い違う窓を作らない（advisor 指摘）。
+   */
+  .docs-header-nav {
+    order: 3;
+    width: 100%;
+    overflow-x: auto;
+    margin-left: 0;
+  }
+
+  .docs-header-dropdown,
+  .docs-header-group:hover .docs-header-dropdown,
+  .docs-header-group:focus-within .docs-header-dropdown {
+    display: none;
   }
 }
