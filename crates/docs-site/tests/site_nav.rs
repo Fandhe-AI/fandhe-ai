@@ -65,10 +65,14 @@ fn valid_fixture_builds_and_reports_all_pages() {
     assert!(out.0.is_dir());
 }
 
-/// 受け入れ基準 2: 生成 HTML が nav.toml のセクション構造どおりのサイドバーを
-/// 持つこと（イシュー #870）。
+/// 受け入れ基準 2: 生成 HTML のサイドバーが現在ページの属するセクション
+/// （Guide）のページのみで構成されること（ヘッダーの
+/// ドロップダウンで別セクションへ導線を持つため、サイドバーは現在地の
+/// 詳細に絞り込む設計。`layout::sidebar` doc 参照）。他セクション
+/// （Reference）はヘッダーのセクションメニューには現れるがサイドバーには
+/// 現れない。
 #[test]
-fn valid_fixture_generates_sidebar_matching_nav_structure() {
+fn valid_fixture_generates_sidebar_scoped_to_current_section() {
     let root = fixture_root("valid");
     let out = TempOutDir::new("valid-sidebar");
     build_site(&root, &out.0).expect("valid fixture should build");
@@ -76,21 +80,43 @@ fn valid_fixture_generates_sidebar_matching_nav_structure() {
     let html = std::fs::read_to_string(out.0.join("guide/intro/index.html"))
         .expect("intro page should be written");
 
-    // セクション見出し・ページリンクが nav.toml の宣言順どおり現れる。
-    let guide_pos = html.find("Guide").expect("Guide section heading present");
-    let reference_pos = html
-        .find("Reference")
-        .expect("Reference section heading present");
-    assert!(
-        guide_pos < reference_pos,
-        "sections must keep declaration order"
-    );
-
+    // サイドバーには現在ページが属する Guide セクションのページのみが現れる。
     assert!(html.contains("href=\"/guide/intro/\""));
     assert!(html.contains("href=\"/guide/getting-started/\""));
-    assert!(html.contains("href=\"/reference/api/\""));
     // 現在ページ（intro）に aria-current="page" が付与されている。
     assert!(html.contains("aria-current=\"page\">Introduction</a>"));
+
+    // Reference セクションはヘッダーのドロップダウン（docs-header-dropdown）
+    // には現れるが、サイドバー側の href としては現れない
+    // （`nav.sidebar` の外側では出現しないことを確認するため、サイドバー本体の
+    // 出力範囲を `<div class="site-body">` 開始位置から絞り込んで判定する）。
+    let sidebar_start = html
+        .find("class=\"site-sidebar\"")
+        .expect("sidebar container present");
+    let sidebar_end = html
+        .find("class=\"site-main\"")
+        .expect("main container present");
+    let sidebar_html = &html[sidebar_start..sidebar_end];
+    assert!(!sidebar_html.contains("href=\"/reference/api/\""));
+}
+
+/// 要件 1: ヘッダーのセクションメニューは Guide・Reference 両セクションを
+/// トリガーとして持つ（`nav.toml` 宣言順どおり）。
+#[test]
+fn valid_fixture_header_menu_includes_all_sections() {
+    let root = fixture_root("valid");
+    let out = TempOutDir::new("valid-header-menu");
+    build_site(&root, &out.0).expect("valid fixture should build");
+
+    let html = std::fs::read_to_string(out.0.join("guide/intro/index.html"))
+        .expect("intro page should be written");
+
+    assert!(html.contains("class=\"docs-header-nav\""));
+    assert!(html.contains("class=\"docs-header-trigger\""));
+    assert!(html.contains(">Guide</a>"));
+    assert!(html.contains(">Reference</a>"));
+    // Guide は現在ページの属するセクションのため aria-current="true" が付く。
+    assert!(html.contains(r#"href="/guide/intro/" aria-current="true">Guide</a>"#));
 }
 
 /// Markdown 由来の各種タグが本文（`<article>`）に反映されていることの確認

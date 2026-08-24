@@ -16,9 +16,33 @@
 //! トグルボタン・検索 UI・`<head>` への FOUC 抑止スクリプト埋め込みを実装
 //! した（3 カラム TOC は依然スコープ外。ページ内目次は `markdown.rs` が
 //! 見出し `id` を生成しないため対象外。実装計画 §4.3・§7）。
+//!
+//! # ヘッダーメニュー・サイドバー設計（Fandhe-AI/fandhe-backend・fandhe-frontend
+//! の docs-site と同一方針）
+//!
+//! - ヘッダーは各セクションをトリガー（`a.docs-header-trigger`）とし、
+//!   `:hover`/`:focus-within` でセクション配下ページの一覧
+//!   （`ul.docs-header-dropdown`）を表示するホバーメニュー方式にする
+//!   （[`header`]）。開閉状態を JS で管理せず CSS のみで完結させるのは、
+//!   参照実装と同じく `role`/`aria-expanded`/`aria-haspopup` 等の
+//!   「JS が更新する動的状態」を偽装しないため（静的マークアップに
+//!   支援技術向けの虚偽の動的状態を持たせない。`assets/site.css` の
+//!   `.docs-header-dropdown` セレクタ群コメント参照）
+//! - サイドバー（[`sidebar`]）はヘッダーとは対照的に「現在ページが属する
+//!   セクションのページのみ」を描画する。ヘッダーのドロップダウンで別
+//!   セクションへ遷移すると、遷移後のページ描画時にサイドバーの内容も
+//!   その新しいセクションへ切り替わる（参照実装と同じ「ヘッダー＝全体
+//!   俯瞰・サイドバー＝現在地の詳細」という役割分担）
+//! - モバイル（`assets/site.css` の `@media (max-width: 48rem)`。既存の
+//!   イシュー #900 対応ブレークポイントと統一し、参照実装の `767px` とは
+//!   別ブレークポイントを増設しない）ではドロップダウンを無効化し、
+//!   トリガー列の横スクロールのみ残す。`:hover` はタッチ環境で信頼できず、
+//!   トリガー自体がセクション索引ページへのリンクとして導線を担うため
+//!   （トリガー到達後はサイドバーが当該セクションの全ページを表示する。
+//!   導線をゼロにしない fail-closed 方針）
 
 use crate::html::Node;
-use crate::nav::Nav;
+use crate::nav::{Nav, Section};
 use crate::script;
 use crate::search;
 
@@ -128,45 +152,136 @@ fn home_href(nav: &Nav) -> String {
         .unwrap_or_else(|| asset_href(base_path, "/"))
 }
 
-/// ヘッダ: サイトタイトル（[`home_href`] が指す「ホーム」へのリンク）・
-/// `index_path` を持つセクションのメニューリンク・テーマトグル・検索 UI・
-/// GitHub リポジトリリンク。
-fn header(nav: &Nav) -> Node {
+/// セクションの「着地点」href。`section.index_path` があればそれを、
+/// なければ先頭ページ（[`crate::nav::parse_nav`] が保証する「1 セクション
+/// 1 ページ以上」の不変条件により必ず存在する）を使う。
+///
+/// [`header`] のトリガーリンクと [`sidebar`] の見出しリンクの双方から呼ぶ
+/// 単一実装点にすることで、同じセクションを指す 2 箇所のリンク先が実装の
+/// 分岐によって食い違う事故を防ぐ（advisor 指摘）。
+fn section_landing_href(base_path: &str, section: &Section) -> String {
+    match section.index_path.as_deref() {
+        Some(index_path) => asset_href(base_path, index_path),
+        None => section
+            .pages
+            .first()
+            .map(|page| asset_href(base_path, &page.path))
+            .unwrap_or_else(|| asset_href(base_path, "/")),
+    }
+}
+
+/// `current_path` が属するセクションを返す（[`sidebar`] の絞り込み表示に使う）。
+/// `nav.toml` は同一 `page.path` の重複を禁止する（`nav::parse_nav` の
+/// `DuplicatePath` 検証）ため、一致するセクションは高々 1 件。
+fn section_for_path<'a>(nav: &'a Nav, current_path: &str) -> Option<&'a Section> {
+    nav.sections
+        .iter()
+        .find(|section| section.pages.iter().any(|page| page.path == current_path))
+}
+
+/// ヘッダーのアクション領域に置く GitHub リポジトリリンク。
+fn github_link() -> Node {
+    Node::element(
+        "a",
+        vec![
+            ("class".to_string(), "docs-github-link".to_string()),
+            ("href".to_string(), GITHUB_REPO_URL.to_string()),
+            ("target".to_string(), "_blank".to_string()),
+            // tabnabbing 対策（.claude/rules/security.md A05）。
+            ("rel".to_string(), "noopener noreferrer".to_string()),
+        ],
+        vec![Node::text("GitHub")],
+    )
+}
+
+/// ヘッダーのセクションメニュー（構造:
+/// `nav.docs-header-nav` の内側に `ul.docs-header-menu`、その内側に
+/// `li.docs-header-group` が並ぶ）。各セクションのトリガー
+/// （`a.docs-header-trigger`。href は [`section_landing_href`]）+
+/// セクション配下ページのドロップダウン（`ul.docs-header-dropdown`）からなる。
+///
+/// - トリガーには現在ページがそのセクションに属するとき `aria-current="true"`
+///   を付与する（ページ完全一致を表す `"page"` とは意味軸を分離し、
+///   「現在のセクション」というより粗い粒度を表す。参照実装
+///   `fandhe-backend::docs_site::nav::header_nav` と同じ契約）
+/// - ドロップダウン内リンクは `page.path == current_path` のとき
+///   `aria-current="page"` を付与する（[`sidebar`] と同一契約）
+/// - 開閉は JS を使わず CSS の `:hover`/`:focus-within` のみで行うため、
+///   `role`/`aria-expanded`/`aria-haspopup` は付与しない（モジュール冒頭
+///   「ヘッダーメニュー・サイドバー設計」節参照）
+fn header_nav(nav: &Nav, current_path: &str) -> Node {
     let base_path = nav.site.base_path.as_str();
 
-    let mut menu_items: Vec<Node> = nav
+    let groups: Vec<Node> = nav
         .sections
         .iter()
-        .filter_map(|section| {
-            section.index_path.as_ref().map(|index_path| {
-                Node::element(
-                    "li",
-                    vec![],
-                    vec![Node::element(
-                        "a",
-                        vec![("href".to_string(), asset_href(base_path, index_path))],
-                        vec![Node::text(section.title.clone())],
-                    )],
-                )
-            })
+        .map(|section| {
+            let in_section = section.pages.iter().any(|page| page.path == current_path);
+            let trigger_href = section_landing_href(base_path, section);
+            let mut trigger_attrs = vec![
+                ("class".to_string(), "docs-header-trigger".to_string()),
+                ("href".to_string(), trigger_href),
+            ];
+            if in_section {
+                trigger_attrs.push(("aria-current".to_string(), "true".to_string()));
+            }
+            let trigger =
+                Node::element("a", trigger_attrs, vec![Node::text(section.title.clone())]);
+
+            let items: Vec<Node> = section
+                .pages
+                .iter()
+                .map(|page| {
+                    let mut attrs = vec![("href".to_string(), asset_href(base_path, &page.path))];
+                    if page.path == current_path {
+                        attrs.push(("aria-current".to_string(), "page".to_string()));
+                    }
+                    Node::element(
+                        "li",
+                        vec![],
+                        vec![Node::element(
+                            "a",
+                            attrs,
+                            vec![Node::text(page.title.clone())],
+                        )],
+                    )
+                })
+                .collect();
+            let dropdown = Node::element(
+                "ul",
+                vec![("class".to_string(), "docs-header-dropdown".to_string())],
+                items,
+            );
+
+            Node::element(
+                "li",
+                vec![("class".to_string(), "docs-header-group".to_string())],
+                vec![trigger, dropdown],
+            )
         })
         .collect();
 
-    menu_items.push(Node::element(
-        "li",
-        vec![],
+    Node::element(
+        "nav",
+        vec![
+            ("class".to_string(), "docs-header-nav".to_string()),
+            ("aria-label".to_string(), "Site sections".to_string()),
+        ],
         vec![Node::element(
-            "a",
-            vec![
-                ("href".to_string(), GITHUB_REPO_URL.to_string()),
-                ("target".to_string(), "_blank".to_string()),
-                // tabnabbing 対策（.claude/rules/security.md A05）。
-                ("rel".to_string(), "noopener noreferrer".to_string()),
-            ],
-            vec![Node::text("GitHub")],
+            "ul",
+            vec![("class".to_string(), "docs-header-menu".to_string())],
+            groups,
         )],
-    ));
+    )
+}
 
+/// ヘッダ: サイトタイトル（[`home_href`] が指す「ホーム」へのリンク）・
+/// セクションメニュー（[`header_nav`]）・検索 UI・GitHub リポジトリリンク・
+/// テーマトグルの順で構成する（アクション領域内の順序は参照実装
+/// `fandhe-backend` の `div.docs-header-actions` と同じ「検索 → GitHub →
+/// テーマ」順）。
+fn header(nav: &Nav, current_path: &str) -> Node {
+    let base_path = nav.site.base_path.as_str();
     let index_href = asset_href(base_path, search::INDEX_REL_PATH);
 
     Node::element(
@@ -182,28 +297,46 @@ fn header(nav: &Nav) -> Node {
                     vec![Node::text(nav.site.title.clone())],
                 )],
             ),
-            Node::element("nav", vec![], vec![Node::element("ul", vec![], menu_items)]),
+            header_nav(nav, current_path),
             Node::element(
                 "div",
                 vec![("class".to_string(), "site-header-actions".to_string())],
-                vec![search_ui(&index_href), theme_toggle_button()],
+                vec![search_ui(&index_href), github_link(), theme_toggle_button()],
             ),
         ],
     )
 }
 
-/// サイドバー: nav.toml の宣言順どおりセクション見出し + ページリンク列。
-/// 現在ページ（`current_path`。生の `page.path` と比較する。`base_path` を
-/// 含まない）には `aria-current="page"` を付与する。
+/// サイドバー: 現在ページ（`current_path`。生の `page.path` と比較する。
+/// `base_path` を含まない）が属するセクションのみを描画する
+/// （[`section_for_path`]）。セクション見出し（`h2`）は
+/// [`section_landing_href`] へのリンクにする（要件 2: ヘッダーのトリガーと
+/// 同じ着地点を指す）。ページの `<a>` には `page.path == current_path` の
+/// ときのみ `aria-current="page"` を付与する。
+///
+/// `current_path` が `nav` 中のどの `page.path` にも一致しない場合は
+/// 全セクション・全ページの列挙へフォールバックする（fail-open。参照実装
+/// `fandhe-backend::docs_site::nav::sidebar` と同方針: サイトナビゲーション
+/// 表示はアクセス境界ではなく、nav 未登録ページで導線を全損させるより
+/// 全件表示の方が安全側。実運用の `site/nav.toml` は全ページを列挙するため
+/// この分岐は本番経路では通常発生しない）。
 fn sidebar(nav: &Nav, current_path: &str) -> Node {
     let base_path = nav.site.base_path.as_str();
-    let mut children = Vec::new();
+    let sections: Vec<&Section> = match section_for_path(nav, current_path) {
+        Some(section) => vec![section],
+        None => nav.sections.iter().collect(),
+    };
 
-    for section in &nav.sections {
+    let mut children = Vec::new();
+    for section in sections {
         children.push(Node::element(
             "h2",
             vec![],
-            vec![Node::text(section.title.clone())],
+            vec![Node::element(
+                "a",
+                vec![("href".to_string(), section_landing_href(base_path, section))],
+                vec![Node::text(section.title.clone())],
+            )],
         ));
 
         let page_items: Vec<Node> = section
@@ -357,7 +490,7 @@ pub(crate) fn docs_page(nav: &Nav, page_title: &str, current_path: &str, body: V
         "body",
         vec![],
         vec![
-            header(nav),
+            header(nav, current_path),
             Node::element(
                 "div",
                 vec![("class".to_string(), "site-body".to_string())],
@@ -433,10 +566,37 @@ path = "/api/"
         assert_eq!(asset_href("/rust-ai-library", "/"), "/rust-ai-library/");
     }
 
+    /// 要件 2: サイドバーは現在ページが属するセクションのページのみを描画する
+    /// （ヘッダーのドロップダウンで別セクションへ遷移すると切り替わる設計。
+    /// モジュール冒頭「ヘッダーメニュー・サイドバー設計」節参照）。
     #[test]
-    fn sidebar_preserves_nav_section_and_page_order() {
+    fn sidebar_scopes_to_current_section_only() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&sidebar(&nav, "/guides/backends/"));
+        assert!(html.contains("Guides"));
+        assert!(html.contains("href=\"/rust-ai-library/guides/\""));
+        assert!(html.contains("href=\"/rust-ai-library/guides/backends/\""));
+        // 現在ページが属さない API セクションは含まれない。
+        assert!(!html.contains(">API<"));
+        assert!(!html.contains("href=\"/rust-ai-library/api/\""));
+    }
+
+    /// 要件 2: セクション見出し（`h2`）はそのセクションの着地点（`index_path`。
+    /// 無ければ先頭ページ）へのリンクにする（[`section_landing_href`]）。
+    #[test]
+    fn sidebar_section_heading_links_to_section_landing_href() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&sidebar(&nav, "/guides/backends/"));
+        assert!(html.contains("<h2><a href=\"/rust-ai-library/guides/\">Guides</a></h2>"));
+    }
+
+    /// 要件 2 のフォールバック（fail-open）: `current_path` がどのページにも
+    /// 一致しない場合は全セクション・全ページを描画する（参照実装
+    /// `fandhe-backend::docs_site::nav::sidebar` と同方針。`sidebar` doc 参照）。
+    #[test]
+    fn sidebar_falls_back_to_all_sections_when_current_path_is_unknown() {
+        let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
+        let html = render(&sidebar(&nav, "/unknown/"));
         let guides_pos = html.find("Guides").expect("Guides section present");
         let api_pos = html.find(">API<").expect("API section present");
         assert!(
@@ -459,14 +619,30 @@ path = "/api/"
         assert!(!html.contains("<a href=\"/rust-ai-library/guides/\" aria-current=\"page\">"));
     }
 
+    /// 要件 1: ヘッダーは各セクションをトリガーとするドロップダウンメニュー
+    /// になる。`index_path` を持たないセクション（API）は先頭ページへ
+    /// フォールバックする（[`section_landing_href`]）。
     #[test]
-    fn header_includes_index_path_menu_and_github_link_with_safe_rel() {
+    fn header_includes_dropdown_for_each_section_and_github_link_with_safe_rel() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
-        let html = render(&header(&nav));
-        assert!(html.contains("href=\"/rust-ai-library/guides/\">Guides</a>"));
-        // index_path を持たないセクション（API）はヘッダメニューに現れない。
-        assert!(!html.contains(">API</a>"));
+        let html = render(&header(&nav, "/guides/backends/"));
+        assert!(html.contains("class=\"docs-header-nav\""));
+        assert!(html.contains("class=\"docs-header-menu\""));
+        assert!(
+            html.contains(r#"class="docs-header-trigger" href="/rust-ai-library/guides/" aria-current="true">Guides</a>"#)
+        );
+        // ドロップダウンにセクション配下ページが含まれる。
+        assert!(html.contains("class=\"docs-header-dropdown\""));
+        assert!(html.contains(
+            "<a href=\"/rust-ai-library/guides/backends/\" aria-current=\"page\">Backends</a>"
+        ));
+        // index_path を持たないセクション（API）は先頭ページへフォールバックし、
+        // 現在ページはこのセクションに属さないため aria-current は付かない。
+        assert!(
+            html.contains(r#"class="docs-header-trigger" href="/rust-ai-library/api/">API</a>"#)
+        );
         assert!(html.contains(&format!("href=\"{GITHUB_REPO_URL}\"")));
+        assert!(html.contains("class=\"docs-github-link\""));
         assert!(html.contains("target=\"_blank\""));
         assert!(html.contains("rel=\"noopener noreferrer\""));
     }
@@ -480,7 +656,7 @@ path = "/api/"
     #[test]
     fn header_site_title_links_to_first_page_when_root_path_is_not_declared() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
-        let html = render(&header(&nav));
+        let html = render(&header(&nav, "/guides/"));
         assert!(html.contains("class=\"site-title\""));
         assert!(html.contains("<a href=\"/rust-ai-library/guides/\">rust-ai-library</a>"));
     }
@@ -598,7 +774,7 @@ path = "/intro/"
     #[test]
     fn header_search_input_reflects_base_path_in_index_url() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
-        let html = render(&header(&nav));
+        let html = render(&header(&nav, "/guides/"));
         assert!(html.contains("data-search-index=\"/rust-ai-library/assets/search-index.json\""));
     }
 
@@ -608,7 +784,7 @@ path = "/intro/"
     #[test]
     fn header_theme_toggle_and_search_ui_default_to_hidden() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
-        let html = render(&header(&nav));
+        let html = render(&header(&nav, "/guides/"));
         assert!(html.contains("class=\"docs-theme-toggle\" hidden=\"\""));
         assert!(html.contains("class=\"docs-search\" hidden=\"\""));
         assert!(
