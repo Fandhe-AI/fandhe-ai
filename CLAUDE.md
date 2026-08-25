@@ -8,7 +8,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開 6 クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群。手順・版数運用の正は `docs/crates-io-publishing-order.md`）。初回公開（v0.3.0・6 クレート）は 2026-08-23 に完了済み（crates.io・docs.rs 反映確認済み。同 doc §10 追補）
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
-- 現状 M0 着手中（TASK-1.1a: workspace `Cargo.toml` と 9 クレート雛形を追加済み。TASK-1.1b: 許容依存 8 区分を `[workspace.dependencies]` に `=x.y.z` 完全固定で反映し `Cargo.lock` をコミット済み。TASK-1.2: 依存禁止検査は CI 上で稼働中〈green〉。TASK-1.3: `deny.toml` 導入・`docs/license-matrix.md` 作成済み）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
+- 現状 M0 完了（TASK-1 通し完了: workspace Cargo.toml・9 クレート雛形・許容依存 8 区分の =x.y.z 完全固定・依存禁止検査・deny.toml・license-matrix.md）。crates.io 初回公開 v0.3.0（2026-08-23）・GitHub Pages 公開済み（`crates/docs-site` + `site/` + `.github/workflows/docs-site.yml`。ヘッダーのホバーメニュー・セクション連動サイドバーは #909）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
 
 ## Repository Structure
 
@@ -49,7 +49,8 @@ rust-ai-library/
 │   ├── verification-gate-bench.yml # bench ゲート（schedule／workflow_dispatch。TASK-6.1c）
 │   ├── guardrail-regression-schedule.yml # guardrail 2 層検証の schedule 定期実行・失敗時 Issue 可視化（TASK-6.1b）
 │   ├── release.yml          # crates.io publish（workflow_dispatch + `CARGO_REGISTRY_TOKEN`・environment `crates-io-release` 承認ゲート。#884。手順は `docs/crates-io-publishing-order.md` §9〜11・`.claude/rules/ci.md` release.yml 節）
-│   └── update-external.yml  # docs/spec・.claude/skills の自動追従
+│   ├── update-external.yml  # docs/spec・.claude/skills の自動追従
+│   └── docs-site.yml        # GitHub Pages ビルド・デプロイ（Fandhe-AI/actions `pages-deploy.yml` 呼び出し）
 ├── site/                    # GitHub Pages 公開原稿（`nav.toml` + Markdown。#873/#874/#875。`docs/spec` の内容は含めない）
 ├── .claude/
 │   ├── agents/              # research / implement / testing / quality / docs

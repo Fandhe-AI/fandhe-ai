@@ -3,9 +3,19 @@
 ## インストール
 
 本ライブラリは Rust の `stable` チャンネルを前提としています
-（リポジトリ直下の `rust-toolchain.toml` が単一真実源です）。まだ
-crates.io には公開していないため、`fandhe-ai` クレートは Git 依存として
-参照してください。
+（リポジトリ直下の `rust-toolchain.toml` が単一真実源です）。crates.io（v0.3.0・
+2026-08-23 公開済み）から利用できます。
+
+```toml
+[dependencies]
+fandhe-ai = "0.3.0"
+```
+
+公開ドキュメントは以下のとおりです。
+
+- https://docs.rs/fandhe-ai
+
+開発版を試す場合は Git 依存で参照できます。
 
 ```toml
 [dependencies]

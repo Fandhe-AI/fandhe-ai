@@ -1,14 +1,11 @@
 # サイトナビゲーション定義（イシュー #874・親 #873。自作 SSG `crates/docs-site`
 # 〈親イシュー #865〉が読み込むスキーマ）。
 #
-# `crates/docs-site` は本コミット時点で本リポジトリに未マージ（#868〜#872 が
-# 全て OPEN）のため、スキーマは同型リポ fandhe-backend の `site/nav.toml`
-# （`gh api repos/Fandhe-AI/fandhe-backend/contents/site/nav.toml` で実際に
-# 取得・確認済み。`[site]` title/base_path・`[[section]]` title/index_path・
+# スキーマは同型リポ fandhe-backend の `site/nav.toml` に合わせて記述
+# （`[site]` title/base_path・`[[section]]` title/index_path・
 # `[[section.page]]` title/source/path の 3 段構成。`path` は `base_path` を
-# 含まない base-relative な値であることも fandhe-backend 側の実データで確認
-# 済み）に合わせて記述する。実ビルド確認（`crates/docs-site` によるパース・
-# linkcheck）は親 #873 の受け入れ条件へ委ねる。
+# 含まない base-relative な値）。現在は `crates/docs-site` が本ファイルを読み込み
+# GitHub Pages（https://fandhe-ai.github.io/rust-ai-library/）を生成している。
 #
 # セクション順（Getting Started → Guides → Examples → API Reference）で
 # 4 セクション全てを宣言する。Getting Started・API Reference は #874
