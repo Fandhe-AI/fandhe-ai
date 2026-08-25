@@ -14,6 +14,13 @@ crates.io にも公開されています（依存解決のため）。
 
 ```toml
 [dependencies]
+fandhe-ai = "0.3.0"
+```
+
+開発版を試す場合は Git 依存でも参照できます。
+
+```toml
+[dependencies]
 fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
 ```
 
@@ -24,8 +31,7 @@ fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
 
 ## ドキュメント・リポジトリ
 
-利用者向けドキュメントサイト（GitHub Pages）は準備中です（進捗 →
-[#864](https://github.com/Fandhe-AI/rust-ai-library/issues/864)）。
+利用者向けドキュメントサイト（GitHub Pages）: https://fandhe-ai.github.io/rust-ai-library/（Getting Started / Guides / Examples / API Reference）。API リファレンスは https://docs.rs/fandhe-ai
 
 - ソース: <https://github.com/Fandhe-AI/rust-ai-library/tree/main/crates/backend-metal>
 - Metal 実装方式（`wgpu` 不採用判断）の詳細: [`docs/backend-metal-wgpu-decision.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/backend-metal-wgpu-decision.md)
