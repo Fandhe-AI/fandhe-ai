@@ -8,7 +8,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開 6 クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群。手順・版数運用の正は `docs/crates-io-publishing-order.md`）。初回公開（v0.3.0・6 クレート）は 2026-08-23 に完了済み（crates.io・docs.rs 反映確認済み。同 doc §10 追補）
 - 依存は許容 8 区分のみ・`=x.y.z` 完全固定（`.claude/rules/deps-policy.md`）。禁止リスト（`burn` 系・`cubecl`・`candle`・`tch`・`ndarray`）は CI で機械検査
 - バックエンド切替は feature フラグなしの cfg ベース（PoC-v2-5 実証構成）
-- 現状 M0 完了（TASK-1 通し完了: workspace Cargo.toml・9 クレート雛形・許容依存 8 区分の =x.y.z 完全固定・依存禁止検査・deny.toml・license-matrix.md）。crates.io 初回公開 v0.3.0（2026-08-23）・GitHub Pages 公開済み（`crates/docs-site` + `site/` + `.github/workflows/docs-site.yml`。ヘッダーのホバーメニュー・セクション連動サイドバーは #909）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
+- 現状 M0 完了（TASK-1 通し完了: workspace Cargo.toml・9 クレート雛形・本体 workspace 直接依存の許容 8 区分〈ベンチ比較対象の第 9 区分は `scripts/bench/oss-gemm-compare/` 限定。計 9 区分の正は `.claude/rules/deps-policy.md`〉の =x.y.z 完全固定・依存禁止検査・deny.toml・license-matrix.md）。crates.io 初回公開 v0.3.0（2026-08-23）・GitHub Pages 公開済み（`crates/docs-site` + `site/` + `.github/workflows/docs-site.yml`。ヘッダーのホバーメニュー・セクション連動サイドバーは #909）。CI・Makefile の cargo 系チェック（fmt / clippy / test / deny / deps-forbidden）は全て有効化済み
 
 ## Repository Structure
 
