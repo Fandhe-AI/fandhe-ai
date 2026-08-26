@@ -247,8 +247,10 @@ pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                 }
                 let data: Vec<f32> = t
                     .raw_data
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect();
                 Ok(RawTensor::F32 { data, shape })
             } else if !t.float_data.is_empty() {
@@ -303,17 +305,15 @@ pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
                         actual_bytes: t.raw_data.len(),
                     });
                 }
-                // chunks_exact(8) により各チャンクは必ず 8 要素の &[u8] となるため、
-                // 固定長配列への変換（try_into）は失敗しない。`unwrap()` の代わりに
-                // 固定長配列を直接構築し本番経路の unwrap を避ける（coding-rust.md）。
+                // as_chunks::<8>() は固定長配列 `&[u8; 8]` を直接与えるため、
+                // 本番経路に unwrap / 中間バッファなしで変換できる（coding-rust.md。
+                // 直前の長さ検証により余り要素は生じない）。
                 let data: Vec<i64> = t
                     .raw_data
-                    .chunks_exact(8)
-                    .map(|b| {
-                        let mut buf = [0u8; 8];
-                        buf.copy_from_slice(b);
-                        i64::from_le_bytes(buf)
-                    })
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|b| i64::from_le_bytes(*b))
                     .collect();
                 Ok(RawTensor::I64 { data, shape })
             } else if !t.int64_data.is_empty() {
@@ -387,8 +387,10 @@ pub(crate) fn decode_tensor(t: &TensorProto) -> Result<RawTensor, GraphError> {
             }
             let data: Vec<half::f16> = t
                 .raw_data
-                .chunks_exact(2)
-                .map(|b| half::f16::from_le_bytes([b[0], b[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|b| half::f16::from_le_bytes(*b))
                 .collect();
             Ok(RawTensor::F16 { data, shape })
         }
