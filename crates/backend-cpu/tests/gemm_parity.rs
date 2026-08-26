@@ -140,7 +140,7 @@ fn gemm_parallel_matches_naive_bit_exact() {
 /// 明示構築し `install` 内で `gemm_parallel` を実行して、`gemm_naive` との
 /// bit 完全一致（許容誤差なし）をスレッド数によらず確認する（issue #21
 /// 方針コメント
-/// https://github.com/Fandhe-AI/rust-ai-library/issues/21#issuecomment-5200554933
+/// https://github.com/Fandhe-AI/fandhe-ai/issues/21#issuecomment-5200554933
 /// で指定されたレビュー Medium 指摘対応。`tests/reduction.rs` の
 /// `full_reduction_deterministic_across_thread_pools` と同一パターン）。
 /// 形状は NC/KC/MC いずれも複数ブロックを跨ぐ ragged panel

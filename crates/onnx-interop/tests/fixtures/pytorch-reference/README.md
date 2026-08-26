@@ -8,7 +8,7 @@ tensor_views.rs` 冒頭コメント参照）、テストが依存する fixture 
 配下に複製して持つ。
 
 出所（PoC-v2-6 `code/fixtures/README.md` からの転記）: v1 実装リポ
-`Fandhe-AI/rust-ai-library`（コミット `e259c369b7349ecf06eb1ca81886555dddee2262`、
+`Fandhe-AI/fandhe-ai`（コミット `e259c369b7349ecf06eb1ca81886555dddee2262`、
 取得日 2026-08-05）の `crates/rust-ai-library/tests/fixtures/pytorch-reference/`。
 
 - PyTorch 2.13.0+cpu・`torch.manual_seed(42)`（学習）・`torch.manual_seed(0)`

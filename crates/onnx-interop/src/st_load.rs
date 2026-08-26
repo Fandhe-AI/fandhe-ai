@@ -151,8 +151,10 @@ pub fn load_safetensors_f32_from_bytes(
         // safetensors のテンソルデータは仕様上常にリトルエンディアン。
         // `unsafe` は使わず `from_le_bytes` で変換する。
         let data: Vec<f32> = raw
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
 
         // (4) shape 検査（要素数積オーバーフロー等）は Tensor::new に委譲。

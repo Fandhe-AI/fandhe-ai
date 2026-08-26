@@ -514,7 +514,7 @@ mod tests {
                 "html",
                 vec![],
                 vec![
-                    link("https://github.com/Fandhe-AI/rust-ai-library"),
+                    link("https://github.com/Fandhe-AI/fandhe-ai"),
                     link("mailto:someone@example.com"),
                     link("//cdn.example.com/asset.js"),
                 ],
@@ -655,11 +655,11 @@ mod tests {
                     // `layout::rewrite_root_relative_hrefs` は本文中のルート
                     // 相対リンクへ `base_path` を反映済みにする。ここではその
                     // 反映済みの形をそのまま模する。
-                    vec![link("/rust-ai-library/reference/")],
+                    vec![link("/fandhe-ai/reference/")],
                 ),
             ),
             page("/reference/", Node::element("html", vec![], vec![])),
         ];
-        assert!(check_links(&pages, "/rust-ai-library", &[]).is_empty());
+        assert!(check_links(&pages, "/fandhe-ai", &[]).is_empty());
     }
 }

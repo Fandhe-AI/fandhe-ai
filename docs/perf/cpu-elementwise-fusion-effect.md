@@ -1,6 +1,6 @@
 # CPU elementwise 融合効果の計測記録（#167・TASK-12.2a）
 
-イシュー [#167](https://github.com/Fandhe-AI/rust-ai-library/issues/167)「test(fusion): TASK-12.2a 融合効果の実測（連鎖・fan-out・transpose 混在）」の実測記録。
+イシュー [#167](https://github.com/Fandhe-AI/fandhe-ai/issues/167)「test(fusion): TASK-12.2a 融合効果の実測（連鎖・fan-out・transpose 混在）」の実測記録。
 受け入れ条件「実測記録が残されている」に対応する。`docs/kernel-fusion.md` §5 が本記録を実測正本として参照する。
 
 ## 0-a. 実測値の再取得（RNG 二重スケーリング修正、Bugbot 指摘対応）

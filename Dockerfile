@@ -1,4 +1,4 @@
-# rust-ai-library の開発コンテナ。
+# fandhe-ai の開発コンテナ。
 #
 # 環境非依存の開発・検証用（make docker-shell / docker-ci から利用。compose.yaml 参照）。
 # コンテナ内で使えるのは CPU（rayon）バックエンドのみ:

@@ -13,7 +13,7 @@ Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を�
 ## Repository Structure
 
 ```
-rust-ai-library/
+fandhe-ai/
 ├── CLAUDE.md                # 本ファイル
 ├── README.md                # 開発環境構築・実装方針の要点
 ├── LICENSE-APACHE           # Apache License 2.0 全文（MIT/Apache-2.0 デュアルライセンス。#462）

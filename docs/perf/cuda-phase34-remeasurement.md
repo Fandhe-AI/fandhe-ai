@@ -77,12 +77,12 @@ cuda-gemm-mma-tf32-block-tile.md` §7「実測表（実行待ち）」・§8「�
 # debug プロファイル
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
 # release プロファイル（debug と同一結果であることを確認する。両プロファイル実行が必須）
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
 ```
 
@@ -157,11 +157,11 @@ ssh "$CUDA_NODE" \
 # 3. 数値一致確認を性能値採用より先に行う（§4 参照。debug/release 両プロファイルとも実行し同一結果を確認する）
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --test parity_nonregression -- --ignored --test-threads=1'
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --test parity_nonregression --release -- --ignored --test-threads=1'
 
 # 4. PyTorch 参照値を計 5 回計測する（§5 参照。同じくノード上で ssh リモート実行する）
@@ -172,7 +172,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 #    入力リダイレクトと解釈されるのを防いでいる）
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
       CUDA_FLOOR_BENCH_PYTORCH_SOURCE="gemm_bench_torch_cuda.py 5 run 再実行 (warmup=20 iters=20) の run 間中央値, <実施日>, 同一 GB10 個体" \
       CUDA_FLOOR_BENCH_PYTORCH_F32_512="<5 run 中央値>" \
       CUDA_FLOOR_BENCH_PYTORCH_F32_1024="<5 run 中央値>" \

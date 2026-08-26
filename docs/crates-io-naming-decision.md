@@ -54,7 +54,7 @@ COMPLETED としてクローズされたことをもって確定した。#879（
 `cargo search fandhe-ai --limit 20` では `fandhe-ai` 前方一致の既存クレートはヒットせず、
 近接する `fandhe-backend-*`（HTTP サーバフレームワーク。`fandhe-backend-core` 等）・
 `fandhe-frontend-*`（フロントエンドレンダリングコア。`fandhe-frontend-core` 等）が
-ヒットした。これらは本リポジトリ（`rust-ai-library`）とは別プロジェクトの既存クレートで
+ヒットした。これらは本リポジトリ（`fandhe-ai`）とは別プロジェクトの既存クレートで
 あり、名前の紛らわしさ・衝突のいずれも生じない（prefix `fandhe-ai` は `fandhe-backend`・
 `fandhe-frontend` と語として明確に分離しており誤認の懸念は低いと判断する）。
 

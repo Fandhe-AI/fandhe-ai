@@ -11,7 +11,7 @@
 # 集約・ruleset main-protection の required contexts 更新は不要（.claude/rules/ci.md
 # 「ワークフロー設計」節の G0 ゲート要件と矛盾しない）。
 #
-# Pages 有効化（`gh api -X POST repos/Fandhe-AI/rust-ai-library/pages -f
+# Pages 有効化（`gh api -X POST repos/Fandhe-AI/fandhe-ai/pages -f
 # build_type=workflow` または Settings → Pages → Source: GitHub Actions）はリポジトリ
 # 設定変更のためユーザー承認事項であり、本 workflow の追加だけでは行われない
 # （deps-policy.md／ci.md の ruleset 変更と同じ扱い。.claude/rules/out-of-scope-

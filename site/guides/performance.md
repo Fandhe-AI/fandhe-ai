@@ -2,10 +2,10 @@
 
 ## REQ-8 段階的下限
 
-`rust-ai-library` の性能要件（REQ-8）は「一発で理想的な性能を出す」
+`fandhe-ai` の性能要件（REQ-8）は「一発で理想的な性能を出す」
 ことを目標にせず、**段階的な下限**を確定させながら積み上げる方針を
 取っています。全バックエンド横断の下限一覧は
-[`docs/performance-targets.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/performance-targets.md)
+[`docs/performance-targets.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/performance-targets.md)
 にまとまっています。GEMM 最適化の実測記録（CPU・CUDA・Metal 各
 バックエンドのボトルネック診断・OSS 直接比較）は `docs/perf/` 配下に
 蓄積されています。

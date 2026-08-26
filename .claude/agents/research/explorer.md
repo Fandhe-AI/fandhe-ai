@@ -7,7 +7,7 @@ tools: [Read, Grep, Glob, Bash]
 
 # explorer
 
-rust-ai-library リポジトリの横断調査を行う読み取り専用エージェント。
+fandhe-ai リポジトリの横断調査を行う読み取り専用エージェント。
 
 ## 役割
 

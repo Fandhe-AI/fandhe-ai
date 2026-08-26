@@ -46,8 +46,8 @@ use crate::nav::{Nav, Section};
 use crate::script;
 use crate::search;
 
-/// rust-ai-library の GitHub リポジトリ URL。ヘッダの外部リンク先として使う。
-const GITHUB_REPO_URL: &str = "https://github.com/Fandhe-AI/rust-ai-library";
+/// fandhe-ai の GitHub リポジトリ URL。ヘッダの外部リンク先として使う。
+const GITHUB_REPO_URL: &str = "https://github.com/Fandhe-AI/fandhe-ai";
 
 /// `base_path` と `relative`（`/` 始まりでも始まりでなくてもよい）を結合し、
 /// GitHub Pages プロジェクトサイト等の `base_path` プレフィックスを考慮した
@@ -376,7 +376,7 @@ fn sidebar(nav: &Nav, current_path: &str) -> Node {
 /// ヘッダ・サイドバーの nav リンク／CSS の asset リンクと同じ `asset_href` 経由の
 /// プレフィックス付与を、本文（`article` 直下）だけここで別途適用する。適用しない
 /// と GitHub Pages のプロジェクトサイト配下（本番 `site/nav.toml` は
-/// `base_path = "/rust-ai-library"`）で本文内のルート相対リンクだけ `base_path` を
+/// `base_path = "/fandhe-ai"`）で本文内のルート相対リンクだけ `base_path` を
 /// 反映せず素通しになり、nav・asset リンクとの扱いが不整合になる（Cursor Bugbot
 /// 指摘・イシュー #870）。`href` 以外の属性・`a` 以外のタグは対象外。
 fn rewrite_root_relative_hrefs(base_path: &str, nodes: Vec<Node>) -> Vec<Node> {
@@ -525,8 +525,8 @@ mod tests {
 
     const SAMPLE_NAV: &str = r#"
 [site]
-title = "rust-ai-library"
-base_path = "/rust-ai-library"
+title = "fandhe-ai"
+base_path = "/fandhe-ai"
 
 [[section]]
 title = "Guides"
@@ -554,16 +554,13 @@ path = "/api/"
     #[test]
     fn asset_href_joins_base_path_and_relative() {
         assert_eq!(
-            asset_href("/rust-ai-library", "assets/site.css"),
-            "/rust-ai-library/assets/site.css"
+            asset_href("/fandhe-ai", "assets/site.css"),
+            "/fandhe-ai/assets/site.css"
         );
         assert_eq!(asset_href("", "assets/site.css"), "/assets/site.css");
-        assert_eq!(
-            asset_href("/rust-ai-library", "/guides/"),
-            "/rust-ai-library/guides/"
-        );
+        assert_eq!(asset_href("/fandhe-ai", "/guides/"), "/fandhe-ai/guides/");
         assert_eq!(asset_href("", "/"), "/");
-        assert_eq!(asset_href("/rust-ai-library", "/"), "/rust-ai-library/");
+        assert_eq!(asset_href("/fandhe-ai", "/"), "/fandhe-ai/");
     }
 
     /// 要件 2: サイドバーは現在ページが属するセクションのページのみを描画する
@@ -574,11 +571,11 @@ path = "/api/"
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&sidebar(&nav, "/guides/backends/"));
         assert!(html.contains("Guides"));
-        assert!(html.contains("href=\"/rust-ai-library/guides/\""));
-        assert!(html.contains("href=\"/rust-ai-library/guides/backends/\""));
+        assert!(html.contains("href=\"/fandhe-ai/guides/\""));
+        assert!(html.contains("href=\"/fandhe-ai/guides/backends/\""));
         // 現在ページが属さない API セクションは含まれない。
         assert!(!html.contains(">API<"));
-        assert!(!html.contains("href=\"/rust-ai-library/api/\""));
+        assert!(!html.contains("href=\"/fandhe-ai/api/\""));
     }
 
     /// 要件 2: セクション見出し（`h2`）はそのセクションの着地点（`index_path`。
@@ -587,7 +584,7 @@ path = "/api/"
     fn sidebar_section_heading_links_to_section_landing_href() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&sidebar(&nav, "/guides/backends/"));
-        assert!(html.contains("<h2><a href=\"/rust-ai-library/guides/\">Guides</a></h2>"));
+        assert!(html.contains("<h2><a href=\"/fandhe-ai/guides/\">Guides</a></h2>"));
     }
 
     /// 要件 2 のフォールバック（fail-open）: `current_path` がどのページにも
@@ -603,9 +600,9 @@ path = "/api/"
             guides_pos < api_pos,
             "sections must appear in declaration order"
         );
-        assert!(html.contains("href=\"/rust-ai-library/guides/\""));
-        assert!(html.contains("href=\"/rust-ai-library/guides/backends/\""));
-        assert!(html.contains("href=\"/rust-ai-library/api/\""));
+        assert!(html.contains("href=\"/fandhe-ai/guides/\""));
+        assert!(html.contains("href=\"/fandhe-ai/guides/backends/\""));
+        assert!(html.contains("href=\"/fandhe-ai/api/\""));
     }
 
     #[test]
@@ -613,10 +610,10 @@ path = "/api/"
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&sidebar(&nav, "/guides/backends/"));
         assert!(html.contains(
-            "<a href=\"/rust-ai-library/guides/backends/\" aria-current=\"page\">Backends</a>"
+            "<a href=\"/fandhe-ai/guides/backends/\" aria-current=\"page\">Backends</a>"
         ));
         // 現在ページでないリンクには aria-current を付与しない。
-        assert!(!html.contains("<a href=\"/rust-ai-library/guides/\" aria-current=\"page\">"));
+        assert!(!html.contains("<a href=\"/fandhe-ai/guides/\" aria-current=\"page\">"));
     }
 
     /// 要件 1: ヘッダーは各セクションをトリガーとするドロップダウンメニュー
@@ -629,18 +626,16 @@ path = "/api/"
         assert!(html.contains("class=\"docs-header-nav\""));
         assert!(html.contains("class=\"docs-header-menu\""));
         assert!(
-            html.contains(r#"class="docs-header-trigger" href="/rust-ai-library/guides/" aria-current="true">Guides</a>"#)
+            html.contains(r#"class="docs-header-trigger" href="/fandhe-ai/guides/" aria-current="true">Guides</a>"#)
         );
         // ドロップダウンにセクション配下ページが含まれる。
         assert!(html.contains("class=\"docs-header-dropdown\""));
         assert!(html.contains(
-            "<a href=\"/rust-ai-library/guides/backends/\" aria-current=\"page\">Backends</a>"
+            "<a href=\"/fandhe-ai/guides/backends/\" aria-current=\"page\">Backends</a>"
         ));
         // index_path を持たないセクション（API）は先頭ページへフォールバックし、
         // 現在ページはこのセクションに属さないため aria-current は付かない。
-        assert!(
-            html.contains(r#"class="docs-header-trigger" href="/rust-ai-library/api/">API</a>"#)
-        );
+        assert!(html.contains(r#"class="docs-header-trigger" href="/fandhe-ai/api/">API</a>"#));
         assert!(html.contains(&format!("href=\"{GITHUB_REPO_URL}\"")));
         assert!(html.contains("class=\"docs-github-link\""));
         assert!(html.contains("target=\"_blank\""));
@@ -658,7 +653,7 @@ path = "/api/"
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&header(&nav, "/guides/"));
         assert!(html.contains("class=\"site-title\""));
-        assert!(html.contains("<a href=\"/rust-ai-library/guides/\">rust-ai-library</a>"));
+        assert!(html.contains("<a href=\"/fandhe-ai/guides/\">fandhe-ai</a>"));
     }
 
     /// `home_href` 単体テスト: 先頭セクションの先頭ページの `asset_href`
@@ -666,7 +661,7 @@ path = "/api/"
     #[test]
     fn home_href_returns_first_section_first_page_href() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
-        assert_eq!(home_href(&nav), "/rust-ai-library/guides/");
+        assert_eq!(home_href(&nav), "/fandhe-ai/guides/");
     }
 
     #[test]
@@ -679,15 +674,15 @@ path = "/api/"
             vec![Node::element("h1", vec![], vec![Node::text("Guides")])],
         ));
         assert!(html.starts_with("<html lang=\"ja\">"));
-        assert!(html.contains("<title>Guides | rust-ai-library</title>"));
-        assert!(html.contains("href=\"/rust-ai-library/assets/site.css\""));
+        assert!(html.contains("<title>Guides | fandhe-ai</title>"));
+        assert!(html.contains("href=\"/fandhe-ai/assets/site.css\""));
         assert!(html.contains("<article><h1>Guides</h1></article>"));
     }
 
     /// Cursor Bugbot 指摘（PR #899）の回帰テスト: 本文（`markdown::markdown_to_nodes`
     /// 由来）中のルート相対リンク（`/` 始まり）が `site.base_path` を反映せず
     /// 素通しで出力されると、nav・asset リンクとの扱いが不整合になり GitHub
-    /// Pages のプロジェクトサイト配下（`base_path = "/rust-ai-library"`）で本文内
+    /// Pages のプロジェクトサイト配下（`base_path = "/fandhe-ai"`）で本文内
     /// リンクが壊れる。`docs_page` が `article` へ埋め込む前に本文中の `<a>` の
     /// ルート相対 `href` へも `base_path` を反映することを確認する。
     #[test]
@@ -703,7 +698,7 @@ path = "/api/"
             )],
         )];
         let html = render(&docs_page(&nav, "Guides", "/guides/", body));
-        assert!(html.contains("<a href=\"/rust-ai-library/guides/backends/\">Backends</a>"));
+        assert!(html.contains("<a href=\"/fandhe-ai/guides/backends/\">Backends</a>"));
         // base_path を反映しない生の `/guides/backends/` はもう出現しない
         // （本文中の href としては。sidebar 側の同一パスは既に base_path 反映
         // 済みのため、上の assert と併せて素通し混入がないことを確認する）。
@@ -766,7 +761,7 @@ path = "/intro/"
     fn docs_page_loads_site_js_with_defer_and_base_path() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&docs_page(&nav, "Guides", "/guides/", vec![]));
-        assert!(html.contains("<script defer=\"\" src=\"/rust-ai-library/assets/site.js\""));
+        assert!(html.contains("<script defer=\"\" src=\"/fandhe-ai/assets/site.js\""));
     }
 
     /// イシュー #871 回帰テスト: 検索入力欄の `data-search-index` が
@@ -775,7 +770,7 @@ path = "/intro/"
     fn header_search_input_reflects_base_path_in_index_url() {
         let nav = parse_nav(SAMPLE_NAV).expect("valid nav.toml");
         let html = render(&header(&nav, "/guides/"));
-        assert!(html.contains("data-search-index=\"/rust-ai-library/assets/search-index.json\""));
+        assert!(html.contains("data-search-index=\"/fandhe-ai/assets/search-index.json\""));
     }
 
     /// イシュー #871 回帰テスト: テーマトグルボタン・検索 UI コンテナは

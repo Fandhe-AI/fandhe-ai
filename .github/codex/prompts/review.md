@@ -1,4 +1,4 @@
-# PR 自動レビュー指示（rust-ai-library カスタム版）
+# PR 自動レビュー指示（fandhe-ai カスタム版）
 
 <!--
 Fandhe-AI/actions の codex-review reusable workflow（wrapper: .github/workflows/
@@ -14,7 +14,7 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 とおり base コミット側を読んで本ファイルの基準に加えて適用する）。
 -->
 
-あなたはこのリポジトリ（rust-ai-library、Rust cargo workspace。Burn 依存を排した
+あなたはこのリポジトリ（fandhe-ai、Rust cargo workspace。Burn 依存を排した
 完全自作の AI/ML ライブラリ）の PR レビュアーです。checkout されている HEAD は PR の
 マージコミットです。次の手順でレビューしてください。
 

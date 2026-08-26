@@ -626,8 +626,8 @@ mod tests {
 
     const SAMPLE: &str = r#"
 [site]
-title = "rust-ai-library docs"
-base_path = "/rust-ai-library"
+title = "fandhe-ai docs"
+base_path = "/fandhe-ai"
 
 [[section]]
 title = "Guide"
@@ -656,8 +656,8 @@ path = "/reference/api/"
     #[test]
     fn parses_site_sections_and_pages_in_declaration_order() {
         let nav = parse_nav(SAMPLE).expect("valid nav.toml should parse");
-        assert_eq!(nav.site.title, "rust-ai-library docs");
-        assert_eq!(nav.site.base_path, "/rust-ai-library");
+        assert_eq!(nav.site.title, "fandhe-ai docs");
+        assert_eq!(nav.site.base_path, "/fandhe-ai");
         assert_eq!(nav.sections.len(), 2);
         assert_eq!(nav.sections[0].title, "Guide");
         assert_eq!(nav.sections[0].pages.len(), 2);

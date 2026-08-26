@@ -41,7 +41,7 @@
 //!
 //! 上記のフィールド非公開化・PR #305（`bench_gate.rs`）との統合は
 //! `out-of-scope-tracking.md` の規約に従い親イシュー #111 へ追跡コメントを記録済み
-//! （<https://github.com/Fandhe-AI/rust-ai-library/issues/111#issuecomment-5218294865>）。
+//! （<https://github.com/Fandhe-AI/fandhe-ai/issues/111#issuecomment-5218294865>）。
 
 use crate::decision::BenchSignal;
 use std::fmt;

@@ -1,4 +1,4 @@
-# rust-ai-library の品質ゲート CI。
+# fandhe-ai の品質ゲート CI。
 #
 # fmt / clippy / test / cargo-deny のベースライン品質ゲートは Fandhe-AI/actions の
 # rust-base-ci reusable workflow（rust-ci ジョブ）へ集約した（イシュー #325。
@@ -250,7 +250,7 @@ jobs:
       # ホステッド（使い捨て VM）移行後も、まずは移行前と同じ 45 分を維持する
       # （共通側既定は 30 分）。#465 の PR #618 実測: rust-ci / cargo test は 2m9s
       # （04:18:38〜04:20:47 UTC。
-      # https://github.com/Fandhe-AI/rust-ai-library/actions/runs/31769466364/job/94672194814）
+      # https://github.com/Fandhe-AI/fandhe-ai/actions/runs/31769466364/job/94672194814）
       # であり 35 分を大幅に下回るため 45 分を維持で確定した（60 分への引き上げは不要）
       test-timeout-minutes: 45
       # ホステッド（使い捨て VM）向けキャッシュ設計の確立（#622）。詳細は本ジョブ
