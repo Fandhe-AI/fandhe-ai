@@ -312,7 +312,7 @@ git fetch origin
 # 本 PR（#825）の実際の HEAD コミット SHA を実行時に解決して checkout する
 # （ドキュメントへ個別 SHA を固定値で書き写すと次のコミットで陳腐化するため、
 # `gh pr view` で都度取得する）。
-git checkout "$(gh pr view 825 --repo Fandhe-AI/rust-ai-library --json headRefOid --jq .headRefOid)"
+git checkout "$(gh pr view 825 --repo Fandhe-AI/fandhe-ai --json headRefOid --jq .headRefOid)"
 
 # マージ後に再計測する場合は、代わりに origin/main 上のマージコミット SHA
 # （`git log origin/main --grep '#799'` 等で特定）を使う。

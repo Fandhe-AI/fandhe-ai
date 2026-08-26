@@ -19,7 +19,7 @@ fandhe-ai = "0.3.0"
 
 ```toml
 [dependencies]
-fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
+fandhe-ai = { git = "https://github.com/Fandhe-AI/fandhe-ai" }
 ```
 
 リポジトリを clone してワークスペース内から利用する場合は、path 依存でも
@@ -27,7 +27,7 @@ fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
 
 ```toml
 [dependencies]
-fandhe-ai = { path = "../rust-ai-library/crates/facade" }
+fandhe-ai = { path = "../fandhe-ai/crates/facade" }
 ```
 
 利用者が直接依存すべきクレートは `fandhe-ai` だけです。`fandhe-ai-tensor-core`・

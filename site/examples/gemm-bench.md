@@ -86,5 +86,5 @@ N=256 median=383.917µs GFLOP/s=87.400
 依存するため、原稿としては「5 回計測の中央値を取る手順」が再現できる
 ことを主眼にしています。性能下限（REQ-8）判定を目的とした正式な本格
 計測は
-[`docs/performance-targets.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/performance-targets.md)
+[`docs/performance-targets.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/performance-targets.md)
 と `bench-harness` クレート（criterion ベース）の領分です。

@@ -328,7 +328,7 @@ rm .rev-stamp
 # 消えないようにするため）
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   make startup-bench BACKEND=cuda TRIALS=5'
 ```
 

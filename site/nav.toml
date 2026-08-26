@@ -5,7 +5,7 @@
 # （`[site]` title/base_path・`[[section]]` title/index_path・
 # `[[section.page]]` title/source/path の 3 段構成。`path` は `base_path` を
 # 含まない base-relative な値）。現在は `crates/docs-site` が本ファイルを読み込み
-# GitHub Pages（https://fandhe-ai.github.io/rust-ai-library/）を生成している。
+# GitHub Pages（https://fandhe-ai.github.io/fandhe-ai/）を生成している。
 #
 # セクション順（Getting Started → Guides → Examples → API Reference）で
 # 4 セクション全てを宣言する。Getting Started・API Reference は #874
@@ -14,8 +14,8 @@
 # ある」を本ファイルの充足で満たす）。
 
 [site]
-title = "rust-ai-library"
-base_path = "/rust-ai-library"
+title = "fandhe-ai"
+base_path = "/fandhe-ai"
 
 [[section]]
 title = "Getting Started"

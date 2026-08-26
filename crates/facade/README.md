@@ -2,7 +2,7 @@
 
 *A from-scratch Rust AI/ML library — no Burn/candle/tch dependency.*
 
-Rust 製 AI/ML ライブラリ [rust-ai-library](https://github.com/Fandhe-AI/rust-ai-library) の
+Rust 製 AI/ML ライブラリ [fandhe-ai](https://github.com/Fandhe-AI/fandhe-ai) の
 composition root であり、**唯一のサポートされる公開 API 面**です。テンソル・autodiff・
 バックエンド抽象層を完全自作コアとして実装した内部クレート群（`fandhe-ai-tensor-core`・
 `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
@@ -20,7 +20,7 @@ fandhe-ai = "0.3.0"
 
 ```toml
 [dependencies]
-fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
+fandhe-ai = { git = "https://github.com/Fandhe-AI/fandhe-ai" }
 ```
 
 ## 最小コード例
@@ -60,13 +60,13 @@ CUDA・Metal は実行時にデバイスの存在を検証し、利用できな�
 
 ## ドキュメント・リポジトリ
 
-利用者向けドキュメントサイト（GitHub Pages）: https://fandhe-ai.github.io/rust-ai-library/（Getting Started / Guides / Examples / API Reference）。API リファレンスは https://docs.rs/fandhe-ai
+利用者向けドキュメントサイト（GitHub Pages）: https://fandhe-ai.github.io/fandhe-ai/（Getting Started / Guides / Examples / API Reference）。API リファレンスは https://docs.rs/fandhe-ai
 
-- ソース: <https://github.com/Fandhe-AI/rust-ai-library/tree/main/crates/facade>
-- サポート境界の詳細: [`docs/compat-api-scope.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/compat-api-scope.md)
+- ソース: <https://github.com/Fandhe-AI/fandhe-ai/tree/main/crates/facade>
+- サポート境界の詳細: [`docs/compat-api-scope.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/compat-api-scope.md)
 
 ## ライセンス
 
 MIT または Apache License 2.0（デュアルライセンス）。
-[LICENSE-MIT](https://github.com/Fandhe-AI/rust-ai-library/blob/main/LICENSE-MIT) ／
-[LICENSE-APACHE](https://github.com/Fandhe-AI/rust-ai-library/blob/main/LICENSE-APACHE)
+[LICENSE-MIT](https://github.com/Fandhe-AI/fandhe-ai/blob/main/LICENSE-MIT) ／
+[LICENSE-APACHE](https://github.com/Fandhe-AI/fandhe-ai/blob/main/LICENSE-APACHE)

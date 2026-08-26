@@ -266,9 +266,9 @@ mod tests {
     #[test]
     fn serialize_index_is_deterministic_with_fixed_key_order() {
         let index = SearchIndex {
-            base_path: "/rust-ai-library".to_string(),
+            base_path: "/fandhe-ai".to_string(),
             pages: vec![SearchPage {
-                href: "/rust-ai-library/guides/".to_string(),
+                href: "/fandhe-ai/guides/".to_string(),
                 title: "Guides".to_string(),
                 text: "hello world".to_string(),
             }],
@@ -276,9 +276,7 @@ mod tests {
         let first = serialize_index(&index);
         let second = serialize_index(&index);
         assert_eq!(first, second);
-        assert!(
-            first.starts_with(r#"{"version":1,"base_path":"/rust-ai-library","pages":[{"href":"#)
-        );
+        assert!(first.starts_with(r#"{"version":1,"base_path":"/fandhe-ai","pages":[{"href":"#));
         assert!(first.contains(r#""text":"hello world"}"#));
     }
 

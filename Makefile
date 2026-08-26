@@ -1,4 +1,4 @@
-# rust-ai-library の開発タスクランナー。
+# fandhe-ai の開発タスクランナー。
 #
 # `make setup` 一発で開発環境（rustup・lefthook・サブモジュール）を構築し、
 # `make ci` で CI（.github/workflows/ci.yml）と同一のチェックをローカル実行する。

@@ -4,7 +4,7 @@
 と、検出・修正生成・検証・取り込み判断の 1 ループを起動する
 `self-repair` の CLI コマンド要点です。詳しい引数・JSON スキーマ・終了
 コード契約は、リポジトリ内のコマンド仕様
-[`docs/guardrail-self-repair-cli.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/guardrail-self-repair-cli.md)
+[`docs/guardrail-self-repair-cli.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/guardrail-self-repair-cli.md)
 を正としてください（本ページはその要点整理です）。
 
 ## guardrail

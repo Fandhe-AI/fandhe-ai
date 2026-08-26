@@ -32,7 +32,7 @@
 ```sh
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --release --locked --no-fail-fast -- --ignored --nocapture'
 ```
 

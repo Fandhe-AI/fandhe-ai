@@ -39,7 +39,7 @@ TASK-7.2a（イシュー #77）向けに `docs/spec`（正本 submodule）の
 12MB 超のバイナリのためリポジトリにコミットしない（`docs/spec` の
 PoC-v2-6 README と同方針）。
 
-- 出所: v1 実装リポ `Fandhe-AI/rust-ai-library`（コミット
+- 出所: v1 実装リポ `Fandhe-AI/rust-ai-library-v1`（コミット
   `a14568897521f7bea6eac93218fe917cf2a25f04`）の
   `crates/rust-ai-library/src/interop/onnx_model/transformer.onnx`
 - サイズ: 12,632,320 bytes

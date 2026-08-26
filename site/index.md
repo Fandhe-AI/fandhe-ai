@@ -1,4 +1,4 @@
-# rust-ai-library
+# fandhe-ai
 
 Rust 製 AI/ML ライブラリです。Burn 等の既存フレームワークに依存せず、テンソル・
 autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層を

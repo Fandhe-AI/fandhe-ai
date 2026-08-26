@@ -1,4 +1,4 @@
-# rust-ai-library の workspace ルート定義。
+# fandhe-ai の workspace ルート定義。
 #
 # Burn 依存を排した完全自作コア方針（REQ-1 v2。.claude/rules/coding-rust.md）に基づき、
 # tensor-core・autodiff・backend-cpu/cuda/metal・onnx-interop・guardrail・self-repair・
@@ -64,7 +64,7 @@ publish = false
 # per-crate 制御・path 依存への version 付与・per-crate README は #891〜#894 で
 # 既に main へ反映済みのため、本 PR の残差分はここ〈repository〉と各公開クレートの
 # keywords / categories / description のみ）。
-repository = "https://github.com/Fandhe-AI/rust-ai-library"
+repository = "https://github.com/Fandhe-AI/fandhe-ai"
 
 # 許容依存 8 区分（.claude/rules/deps-policy.md）を =x.y.z 完全固定で一元定義する。
 # 各クレートは `<name>.workspace = true` で参照し、バージョン更新はこのテーブルのみを

@@ -1,4 +1,4 @@
-# rust-ai-library
+# fandhe-ai
 
 Rust 製 AI/ML ライブラリです。Burn 等の既存フレームワークに依存せず、テンソル・
 autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層を
@@ -11,7 +11,7 @@ autodiff・演算グラフ／カーネル融合機構・計算カーネル・バ
 
 利用者向けドキュメントサイト（GitHub Pages）は公開済みです。
 
-- https://fandhe-ai.github.io/rust-ai-library/
+- https://fandhe-ai.github.io/fandhe-ai/
 
 ローカルでビルドして確認する場合は次のコマンドを実行してください。
 
@@ -42,7 +42,7 @@ fandhe-ai = "0.3.0"
 
 ```toml
 [dependencies]
-fandhe-ai = { git = "https://github.com/Fandhe-AI/rust-ai-library" }
+fandhe-ai = { git = "https://github.com/Fandhe-AI/fandhe-ai" }
 ```
 
 利用者が直接依存すべきクレートは `fandhe-ai` だけです。`fandhe-ai-tensor-core`・
@@ -120,7 +120,7 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 - **crates.io 初回公開完了**: v0.3.0（6 クレート: `fandhe-ai`・`fandhe-ai-tensor-core`・
   `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
   `fandhe-ai-backend-metal`）を 2026-08-23 に公開済み
-- **ドキュメントサイト公開済み**: https://fandhe-ai.github.io/rust-ai-library/
+- **ドキュメントサイト公開済み**: https://fandhe-ai.github.io/fandhe-ai/
 - **実装の進行状況**: コア（テンソル・autodiff・演算グラフ／カーネル融合機構）・
   3 バックエンド（CPU／CUDA／Metal）の実装と性能実測を継続中
 
@@ -149,8 +149,8 @@ PoC-v2-4。詳細 → [`docs/backend-metal-wgpu-decision.md`](docs/backend-metal
 クローン時に `--recurse-submodules` を指定してください。
 
 ```bash
-git clone --recurse-submodules git@github.com:Fandhe-AI/rust-ai-library.git
-cd rust-ai-library
+git clone --recurse-submodules git@github.com:Fandhe-AI/fandhe-ai.git
+cd fandhe-ai
 ```
 
 既存クローンがある場合は以下で初期化してください。

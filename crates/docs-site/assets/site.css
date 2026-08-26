@@ -1,5 +1,5 @@
 /*
- * rust-ai-library ドキュメントサイトのベーステーマ CSS。
+ * fandhe-ai ドキュメントサイトのベーステーマ CSS。
  *
  * イシュー #870（crates/docs-site::theme）が `include_str!` で埋め込み、
  * ビルド時に `<out>/assets/site.css` へ書き出す。リポジトリルートの `site/`

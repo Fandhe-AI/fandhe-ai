@@ -96,7 +96,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 ### 注意
 
 - ノード側の作業ディレクトリは `~/work/rust-ai-library-run`（ソースのみ。ビルドキャッシュは置かない）
-- **ビルドキャッシュは同期ツリー外の `$HOME/work/target-rust-ai-library` に置く**（`CARGO_TARGET_DIR` で指定）。同期ツリー内に `target/` を置くと `--delete-excluded` で消えるため、この分離が前提。この構成なら再 rsync 後もキャッシュが残り warm ビルドになる（実測: 再 rsync 後も 176MB のキャッシュが残存し `--ignored` テストが 0.29s で pass）
+- **ビルドキャッシュは同期ツリー外の `$HOME/work/target-fandhe-ai` に置く**（`CARGO_TARGET_DIR` で指定）。同期ツリー内に `target/` を置くと `--delete-excluded` で消えるため、この分離が前提。この構成なら再 rsync 後もキャッシュが残り warm ビルドになる（実測: 再 rsync 後も 176MB のキャッシュが残存し `--ignored` テストが 0.29s で pass）
 - `~/work/rust-ai-library`（末尾 `-run` なし）は 2026-08-04 時点の古い checkout。使わない
 - `docs/spec`（submodule）の実体も worktree のコピーとして転送される（PyTorch 参照スクリプトが submodule 配下にあるため必要）
 
@@ -107,7 +107,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture'
 ```
 
@@ -128,7 +128,7 @@ ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   setsid nohup env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   cargo test -p fandhe-ai-backend-cuda --release -- --ignored --nocapture \
   > $HOME/work/cuda-test.log 2>&1 < /dev/null & echo started'
 ssh "$CUDA_NODE" 'tail -5 $HOME/work/cuda-test.log'
@@ -141,7 +141,7 @@ ssh "$CUDA_NODE" 'tail -5 $HOME/work/cuda-test.log'
 ```bash
 ssh "$CUDA_NODE" 'cd ~/work/rust-ai-library-run && \
   env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-      CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+      CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
   timeout 120 cargo test -p fandhe-ai-backend-cuda --release \
       --test setmaxnreg_probe_dec_base_real_device -- --ignored --nocapture'
 # 他 3 ファイル（setmaxnreg_probe_dec_accel_real_device / incdec_base / incdec_accel）も同様に個別実行する

@@ -455,7 +455,7 @@ CI 側で担保する設計。release.yml 冒頭コメント参照）。よっ�
 | 前提 | 確認コマンド | 実測結果（2026-08-23） |
 |------|-------------|------------------------|
 | #880（publish メタデータ整備: `repository`/`keywords`/`categories`/`description` 充実）が main に反映済み | `gh issue view 880 --json state` | **未充足**: `"state":"OPEN"`（未マージ。対応 PR #892 も open） |
-| GitHub environment `crates-io-release` が required reviewers + deployment branch 制限（main 限定）で設定済み | `gh api repos/Fandhe-AI/rust-ai-library/environments` | **未充足**: `{"total_count":0,"environments":[]}`（environment 自体が未作成） |
+| GitHub environment `crates-io-release` が required reviewers + deployment branch 制限（main 限定）で設定済み | `gh api repos/Fandhe-AI/fandhe-ai/environments` | **未充足**: `{"total_count":0,"environments":[]}`（environment 自体が未作成） |
 
 上記いずれも `.github/workflows/release.yml` 冒頭コメントが明記する前提条件であり、
 未充足のまま `mode: publish` を dispatch すると (a) `manifest has no documentation,

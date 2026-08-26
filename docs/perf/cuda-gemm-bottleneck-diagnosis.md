@@ -151,7 +151,7 @@ ncu 実行自体の exit code 検査（二次防御）が担う。
 
 ```sh
 env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
-    CARGO_TARGET_DIR=$HOME/work/target-rust-ai-library \
+    CARGO_TARGET_DIR=$HOME/work/target-fandhe-ai \
     cargo build -p fandhe-ai-backend-cuda --example gemm_profile_target --release \
     --features internal-diagnostics
 ```
@@ -193,7 +193,7 @@ env PATH=$HOME/.cargo/bin:/usr/local/cuda/bin:$PATH \
 # ログを表示する構成へ変更した（シェル実装・pipefail 設定に依存しない
 # fail-closed 判定）。
 
-BIN=$HOME/work/target-rust-ai-library/release/examples/gemm_profile_target
+BIN=$HOME/work/target-fandhe-ai/release/examples/gemm_profile_target
 METRICS="sm__warps_active.avg.pct_of_peak_sustained_active,\
 lts__t_sector_hit_rate.pct,\
 l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
@@ -402,7 +402,7 @@ SSH 不達・ncu 不在・カウンタ権限なしで採取不能な指標があ
   （6 通り × 4 指標の記録と主因 → Phase B 対応づけ）は実機（DGX Spark GB10）でのみ実行可能であり、
   本 PR のセッションはそのアクセスを持たない。そのため本 PR は #486 をクローズせず（`Closes #486` では
   なく `Refs #486`）、#486 が定義する受け入れ基準の完了を後続イシュー #653
-  （<https://github.com/Fandhe-AI/rust-ai-library/issues/653>・親 #480 配下の sub-issue）に分離した。
+  （<https://github.com/Fandhe-AI/fandhe-ai/issues/653>・親 #480 配下の sub-issue）に分離した。
   本 PR（診断基盤の整備）のスコープは以下に限定する:
   - `gemm_profile_target` example（診断専用バイナリ）
   - §3 の ncu 採取手順（事前検証・転送・6 通りループ・`ALLOC_ZEROS_LAUNCHES` 前提の実機検証手順を含む）

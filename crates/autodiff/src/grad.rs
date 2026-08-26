@@ -494,7 +494,7 @@ mod tests {
     //! ユーザー承認必須」規定に基づく本閾値（新規 grad-check 専用
     //! `REL_TOL`/`ABS_TOL`）の承認は完了している。
     //! - 承認者: ユーザー／承認日: 2026-08-09
-    //! - 承認記録: <https://github.com/Fandhe-AI/rust-ai-library/issues/223#issuecomment-5230026874>
+    //! - 承認記録: <https://github.com/Fandhe-AI/fandhe-ai/issues/223#issuecomment-5230026874>
     //! - 判断材料: 全 grad-check テストの実測誤差マージン採取で、
     //!   最も僅差のケースでも絶対誤差側に約 3.4 倍の余裕
     //!   （実測 `diff ≈ 2.9e-4` に対し `ABS_TOL = 1e-3`）を確認

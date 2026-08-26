@@ -807,8 +807,8 @@ mod tests {
     #[test]
     fn renders_link_with_allowed_https_url() {
         assert_eq!(
-            html_of("[repo](https://github.com/Fandhe-AI/rust-ai-library)"),
-            "<p><a href=\"https://github.com/Fandhe-AI/rust-ai-library\">repo</a></p>"
+            html_of("[repo](https://github.com/Fandhe-AI/fandhe-ai)"),
+            "<p><a href=\"https://github.com/Fandhe-AI/fandhe-ai\">repo</a></p>"
         );
     }
 

@@ -2,7 +2,7 @@
 
 ## feature フラグなしの cfg ベース切替
 
-`rust-ai-library` はバックエンド（CPU・CUDA・Metal）の切替に Cargo
+`fandhe-ai` はバックエンド（CPU・CUDA・Metal）の切替に Cargo
 feature を使いません。**`target_os`／条件付きコンパイル（`cfg`）だけで
 切り替わる構成**です。
 
@@ -16,7 +16,7 @@ feature の組合せが増えるほど CI の検証マトリクスが組合せ�
 feature 指定漏れによる経路欠落が起きえます。cfg ベースはターゲットから
 自動的に決定されるため、この失敗モード自体が存在しません。設計の詳細・
 PoC 実測（PoC-v2-1／PoC-v2-3／PoC-v2-5）根拠は
-[`docs/backend-switching-design.md`](https://github.com/Fandhe-AI/rust-ai-library/blob/main/docs/backend-switching-design.md)
+[`docs/backend-switching-design.md`](https://github.com/Fandhe-AI/fandhe-ai/blob/main/docs/backend-switching-design.md)
 を参照してください。
 
 ## `tape()` と `tape_for(Device)` の使い分け
