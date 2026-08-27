@@ -41,7 +41,14 @@
      （承認外バージョンへのドリフト・比較対象の削除を検出）
   4. 各メンバー crate の `[dependencies]` が承認済み allowlist（比較対象の
      `=x.y.z` 完全固定 + `bench-common` の path 依存のみ）の範囲内であること
-     （`tch` を含む allowlist 外の直接依存追加・完全固定でないバージョン指定を検出）
+     （`tch` を含む allowlist 外の直接依存追加・ドット付きキー宣言・完全固定でない
+     バージョン指定を検出）
+  5. 各 Cargo.toml のセクションヘッダが allowlist の範囲内であること
+     （`[dev-dependencies]`・`[build-dependencies]`・`[target.'cfg'.dependencies]`・
+     `[dependencies.<crate>]` 等の代替依存宣言経路をセクション単位で遮断）
+  6. workspace `members` 宣言が期待値と完全一致すること
+  7. ディレクトリ配下の Cargo.toml ファイル集合が契約と一致すること
+     （allowlist 未登録の member crate 追加を遮断）
 - 専用 `scripts/bench/framework-compare/deny.toml` による依存監査
   （advisories / bans / licenses / sources）を CI（`ci.yml` の `deps-forbidden`
   ジョブ）の必須ステップとして実行する（oss-gemm-compare と同一方式）
