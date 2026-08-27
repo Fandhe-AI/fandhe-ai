@@ -39,6 +39,9 @@
   2. `Cargo.toml` の独自 `[workspace]` 宣言（本体 workspace への構造的非混入）
   3. 承認済みピン（burn 0.21.0・candle-core 0.11.0・fandhe-ai 0.3.0）の存在
      （承認外バージョンへのドリフト・比較対象の削除を検出）
+  4. 各メンバー crate の `[dependencies]` が承認済み allowlist（比較対象の
+     `=x.y.z` 完全固定 + `bench-common` の path 依存のみ）の範囲内であること
+     （`tch` を含む allowlist 外の直接依存追加・完全固定でないバージョン指定を検出）
 - 専用 `scripts/bench/framework-compare/deny.toml` による依存監査
   （advisories / bans / licenses / sources）を CI（`ci.yml` の `deps-forbidden`
   ジョブ）の必須ステップとして実行する（oss-gemm-compare と同一方式）

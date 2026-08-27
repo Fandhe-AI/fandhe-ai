@@ -103,8 +103,10 @@ def section(path, rows):
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - |")
     lines.append("")
 
-    lines.append("### (c) 推論スループット（同 MLP forward のみ、バッチ 64）\n")
-    lines.append("| デバイス | フレームワーク | 中央値 | Q1 | Q3 | 推論/秒 |")
+    lines.append(
+        "### (c) 推論スループット（同 MLP forward のみ、バッチ 64。表のスループットはバッチ/秒 = 1/中央値。1 バッチ = 64 件）\n"
+    )
+    lines.append("| デバイス | フレームワーク | 中央値 | Q1 | Q3 | バッチ/秒 |")
     lines.append("| --- | --- | --- | --- | --- | --- |")
     for device in devices_in(rows, "infer"):
         for fw in FRAMEWORKS:

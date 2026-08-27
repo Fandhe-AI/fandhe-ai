@@ -22,7 +22,11 @@
 #                独自の [workspace] を宣言していること（本体 workspace への構造的
 #                非混入）、(3) 承認済み比較対象のピン（burn 0.21.0・candle-core 0.11.0・
 #                fandhe-ai 0.3.0。deps-policy.md 第 9 区分の承認バージョン）が
-#                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出）。
+#                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出）、
+#                (4) 各メンバー crate の [dependencies] が承認済み allowlist
+#                （比較対象の =x.y.z 完全固定 + bench-common の path 依存）の範囲内で
+#                あること（`tch` 等 allowlist 外の直接依存追加・完全固定でない
+#                バージョン指定を検出）。
 #                承認済みピン以外への変更・検査の緩和はユーザー承認必須
 #                （deps-policy.md）。本体 workspace への混入は引き続きルート
 #                Cargo.lock・cargo tree 検査で fail-closed に検出される。
@@ -57,6 +61,17 @@ FORBIDDEN_CRATES_ALT='burn|burn-[a-z0-9-]+|cubecl|cubecl-[a-z0-9-]+|candle|candl
 # ユーザー承認必須（検査対象の追加は fail-closed の強化であり承認不要）。
 FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
 FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.3.0"
+
+# 同ベンチの各メンバー crate が [dependencies] に宣言してよい直接依存の allowlist
+# （`<manifest 相対パス>:<crate>[@=version]...` 形式）。承認済み比較対象（=x.y.z 完全
+# 固定必須）と workspace 内の path 依存 bench-common のみを許容し、これ以外の直接依存
+# （禁止リストの `tch` を含む任意のクレート）の追加を fail-closed に検出する。
+# allowlist の拡張はユーザー承認必須（deps-policy.md 第 9 区分）。
+FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST="\
+bench-common/Cargo.toml:
+bench-fandhe/Cargo.toml:bench-common,fandhe-ai@=0.3.0
+bench-candle/Cargo.toml:bench-common,candle-core@=0.11.0
+bench-burn/Cargo.toml:bench-common,burn@=0.21.0"
 
 # Cargo.lock の `name = "<crate>"` 行に対する完全一致パターン。
 FORBIDDEN_LOCK_PATTERN="^name = \"(${FORBIDDEN_CRATES_ALT})\"\$"
@@ -112,7 +127,8 @@ check_lock_all() {
 
   # フレームワーク横並びベンチ（scripts/bench/framework-compare/。第 9 区分の
   # 適用範囲拡張）: 禁止リスト grep の代わりに専用の fail-closed 契約検査を適用する
-  # （関数冒頭コメント参照。存在・[workspace] 隔離・承認済みピンの 3 点）。
+  # （関数冒頭コメント参照。存在・[workspace] 隔離・承認済みピン・直接依存
+  # allowlist の 4 点）。
   check_framework_compare || failed=1
 
   if [ "${failed}" -ne 0 ]; then
@@ -137,8 +153,70 @@ check_lock_pin_text() {
   return 1
 }
 
+# Cargo.toml 形式テキストの [dependencies] セクションを、許容された直接依存の
+# allowlist（カンマ区切り `<crate>` または `<crate>@=<version>`。`@=` 付きは
+# `"=<version>"` の完全固定宣言を要求する）と突合する（テキスト入力版。self-test
+# から固定文字列で直接検証できるよう、ファイル I/O と分離する）。allowlist 外の
+# 直接依存（禁止リストの `tch` を含む任意のクレート）・完全固定でないバージョン
+# 指定を fail-closed に検出する。
+check_manifest_deps_text() {
+  local label="$1"
+  local text="$2"
+  local allowlist="$3" # 例: "bench-common,burn@=0.21.0"（空文字列 = 直接依存なし）
+  local failed=0
+
+  # [dependencies] セクションのみを抜き出し、依存宣言行（`name = ...`）を列挙する。
+  # [features]・[package] 等の他セクションは対象外。
+  local dep_lines
+  dep_lines=$(echo "${text}" | awk '
+    /^\[dependencies\]/ { in_deps = 1; next }
+    /^\[/ { in_deps = 0 }
+    in_deps && /^[a-zA-Z0-9_-]+[[:space:]]*=/ { print }
+  ')
+
+  local line name entry entry_name entry_version found
+  while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    name="${line%%=*}"
+    # 依存名の前後空白を除去する
+    name="$(echo "${name}" | tr -d '[:space:]')"
+    found=0
+    local IFS_SAVE="${IFS}"
+    IFS=','
+    for entry in ${allowlist}; do
+      IFS="${IFS_SAVE}"
+      entry_name="${entry%%@*}"
+      if [ "${name}" = "${entry_name}" ]; then
+        found=1
+        if [ "${entry}" != "${entry_name}" ]; then
+          # `@=` 付きエントリ: `"=<version>"` の完全固定宣言を要求する。
+          entry_version="${entry#*@}"
+          if ! echo "${line}" | grep -qF "\"${entry_version}\""; then
+            echo "::error::${label} の直接依存 ${name} が承認済みの完全固定 ${entry_version} で宣言されていません（.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
+            failed=1
+          fi
+        fi
+        break
+      fi
+      IFS=','
+    done
+    IFS="${IFS_SAVE}"
+    if [ "${found}" -eq 0 ]; then
+      echo "::error::${label} に allowlist 外の直接依存 ${name} が宣言されています（承認済み比較対象以外の依存追加はユーザー承認必須。.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
+      failed=1
+    fi
+  done <<EOF_DEPS
+${dep_lines}
+EOF_DEPS
+
+  if [ "${failed}" -ne 0 ]; then
+    return 1
+  fi
+  echo "OK: ${label} の直接依存は allowlist（${allowlist:-なし}）の範囲内"
+}
+
 # フレームワーク横並びベンチ（scripts/bench/framework-compare/）専用の fail-closed
-# 契約検査（lock-all から呼ぶ。呼び出し元コメントの (1)〜(3)）。
+# 契約検査（lock-all から呼ぶ。呼び出し元コメントの (1)〜(4)）。
 # 同 workspace の Cargo.lock は比較対象として禁止リストのクレートを意図的に含むため
 # check_lock（禁止リスト grep）は適用せず、代わりに「本体 workspace への構造的
 # 非混入」と「承認済みピンからのドリフト検出」を fail-closed で検査する。
@@ -169,6 +247,25 @@ check_framework_compare() {
     version="${pin#*=}"
     check_lock_pin_text "${lock}" "$(cat "${lock}")" "${crate}" "${version}" || failed=1
   done
+
+  # (4) 各メンバー crate の [dependencies] が allowlist（承認済み比較対象の完全固定 +
+  #     bench-common の path 依存）の範囲内であること。allowlist 外の直接依存
+  #     （禁止リストの `tch` を含む）の追加・完全固定でないバージョン指定を
+  #     fail-closed に検出する。
+  local mapping member_manifest member_allowlist
+  while IFS= read -r mapping; do
+    [ -n "${mapping}" ] || continue
+    member_manifest="${dir}/${mapping%%:*}"
+    member_allowlist="${mapping#*:}"
+    if [ ! -f "${member_manifest}" ]; then
+      echo "::error::${member_manifest} が見つかりません（framework-compare のメンバー構成が契約から変更されています。.claude/rules/deps-policy.md 第 9 区分）" >&2
+      failed=1
+      continue
+    fi
+    check_manifest_deps_text "${member_manifest}" "$(cat "${member_manifest}")" "${member_allowlist}" || failed=1
+  done <<EOF_MAPPING
+${FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST}
+EOF_MAPPING
 
   if [ "${failed}" -ne 0 ]; then
     return 1
@@ -273,6 +370,43 @@ version = "0.22.0"'
     failed=1
   else
     echo "self-test OK: pin drift fixture は fail する"
+  fi
+
+  # check_manifest_deps_text（framework-compare の直接依存 allowlist 検査）も同方式で
+  # 直接検証する（allowlist 外依存・非完全固定の検出退行の防止）。
+  local manifest_ok_text='[package]
+name = "bench-burn"
+
+[dependencies]
+bench-common = { path = "../bench-common" }
+burn = { version = "=0.21.0", default-features = false }
+
+[features]
+default = ["metal"]'
+  local manifest_extra_dep_text='[dependencies]
+bench-common = { path = "../bench-common" }
+burn = { version = "=0.21.0" }
+tch = { version = "=0.22.0" }'
+  local manifest_unpinned_text='[dependencies]
+bench-common = { path = "../bench-common" }
+burn = { version = "0.21" }'
+  if check_manifest_deps_text "self-test manifest fixture" "${manifest_ok_text}" "bench-common,burn@=0.21.0" >/dev/null; then
+    echo "self-test OK: manifest fixture（allowlist 内・完全固定）は pass する"
+  else
+    echo "self-test NG: manifest fixture（allowlist 内・完全固定）が誤って fail した" >&2
+    failed=1
+  fi
+  if check_manifest_deps_text "self-test manifest extra-dep fixture" "${manifest_extra_dep_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest extra-dep fixture が誤って pass した（allowlist 外依存の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest extra-dep fixture は fail する"
+  fi
+  if check_manifest_deps_text "self-test manifest unpinned fixture" "${manifest_unpinned_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest unpinned fixture が誤って pass した（完全固定検査が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest unpinned fixture は fail する"
   fi
 
   if [ "${failed}" -ne 0 ]; then

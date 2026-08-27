@@ -54,7 +54,7 @@
   禁止リストクレートは、承認済み比較対象（burn 0.21.0・candle-core 0.11.0）とその
   推移的依存ツリーとしての意図的保持に限り P0 の混入には当たらない。同 workspace は
   禁止リスト grep の代わりに `scripts/check-forbidden-deps.sh lock-all` の専用
-  fail-closed 契約検査（`[workspace]` 隔離・承認済みピンのドリフト検出）で統制され、
+  fail-closed 契約検査（`[workspace]` 隔離・承認済みピンのドリフト検出・直接依存 allowlist）で統制され、
   この検査・専用 deny.toml・適用範囲を緩める変更は P0
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、

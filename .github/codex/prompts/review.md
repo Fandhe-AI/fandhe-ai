@@ -91,7 +91,7 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   その推移的依存ツリーとしての意図的保持。2026-08-28 ユーザー承認・PR #915・
   `docs/framework-compare-harness-decision.md`。`scripts/check-forbidden-deps.sh`
   lock-all の専用 fail-closed 契約検査〈`[workspace]` 隔離・承認済みピンのドリフト
-  検出〉と専用 `deny.toml` の CI 監査で統制〉に限り対象外。この統制・適用範囲を
+  検出・直接依存 allowlist〉と専用 `deny.toml` の CI 監査で統制〉に限り対象外。この統制・適用範囲を
   緩める変更は P0）、
   および既存 ML フレームワークへの統合・完全自作
   コア方針（REQ-1 v2）の放棄: **P0**

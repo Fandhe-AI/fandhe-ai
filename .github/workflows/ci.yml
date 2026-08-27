@@ -513,7 +513,10 @@ jobs:
     # advisories/bans を監査範囲へ追加（PR #770 review 指摘 P1 対応）したことで
     # RUSTSEC アドバイザリ DB の初回 clone が加わるため 30 → 35 に引き上げる
     # （ルート deny ジョブの `deny-timeout-minutes` 既定 20 分と同様の余裕を確保）。
-    timeout-minutes: 35
+    # フレームワーク横並びベンチ（framework-compare）の cargo-deny 監査
+    # （634 パッケージのメタデータ解決・フェッチ）と bench-common テストを追加した
+    # ため 35 → 45 に引き上げる（PR #915 Cursor Bugbot 指摘対応）。
+    timeout-minutes: 45
     steps:
       - name: Checkout
         # persist-credentials: false（fmt ジョブと同一方針）。
@@ -557,6 +560,13 @@ jobs:
 
       # cargo registry のみ（cargo tree は依存解決・フェッチのみでビルドしないため target
       # キャッシュは不要。本ファイル冒頭コメントのキャッシュ設計参照）。
+      # 本ジョブはルート workspace に加えて第 9 区分ハーネス
+      # （oss-gemm-compare・framework-compare）の依存もフェッチするため、キーの
+      # hashFiles に両ハーネスの Cargo.lock を含めたジョブ専用キーとする（共有キー
+      # `cargo-registry-<os>-<root lock>` のままだと完全一致ヒット時に再保存されず、
+      # ハーネス依存（framework-compare は 634 パッケージ）が永続的にキャッシュへ
+      # 入らない。PR #915 Cursor Bugbot 指摘対応）。restore-keys の前方一致で
+      # 他ジョブの共有キャッシュからの部分復元は従来どおり効く。
       - name: Cache cargo registry
         if: steps.detect.outputs.has_cargo == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -565,8 +575,9 @@ jobs:
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
-          key: cargo-registry-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-registry-deps-forbidden-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/bench/oss-gemm-compare/Cargo.lock', 'scripts/bench/framework-compare/Cargo.lock') }}
           restore-keys: |
+            cargo-registry-deps-forbidden-${{ runner.os }}-
             cargo-registry-${{ runner.os }}-
 
       - name: cargo tree の依存禁止検査

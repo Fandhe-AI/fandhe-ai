@@ -145,7 +145,9 @@ pub struct Record<'a> {
     pub stats: Stats,
     /// GFLOP/s for GEMM (2N^3 / median); None for other tasks.
     pub gflops: Option<f64>,
-    /// throughput (e.g. inferences/s); None if not applicable.
+    /// throughput: forward passes (batches) per second for the infer task
+    /// (each pass processes one batch of 64 inputs; this is batches/s, not
+    /// single-sample inferences/s); None if not applicable.
     pub throughput_per_s: Option<f64>,
     /// checksum of the result tensor (proves host materialization + sanity).
     pub checksum: f64,
