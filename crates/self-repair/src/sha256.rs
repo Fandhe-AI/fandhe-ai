@@ -61,8 +61,8 @@ fn compress(h: &mut [u32; 8], block: &[u8]) {
 
     // メッセージスケジュール W[0..64]（6.2.2 手順 1）。
     let mut w = [0u32; 64];
-    for (i, chunk) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (i, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*chunk);
     }
     for i in 16..64 {
         let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
@@ -117,7 +117,7 @@ fn compress(h: &mut [u32; 8], block: &[u8]) {
 pub fn sha256(message: &[u8]) -> [u8; 32] {
     let padded = pad(message);
     let mut h = H0;
-    for block in padded.chunks_exact(64) {
+    for block in padded.as_chunks::<64>().0 {
         compress(&mut h, block);
     }
     let mut digest = [0u8; 32];
