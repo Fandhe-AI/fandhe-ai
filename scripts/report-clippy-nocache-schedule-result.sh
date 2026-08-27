@@ -84,9 +84,30 @@ cmd_report() {
   : "${RUN_URL:?RUN_URL が未設定です}"
   : "${GH_TOKEN:?GH_TOKEN が未設定です}"
   : "${GH_REPO:?GH_REPO が未設定です}"
+  : "${EVENT_NAME:?EVENT_NAME が未設定です（github.event_name を渡してください）}"
 
   local now
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+  # Issue の起票・追記・クローズ（状態変更）は schedule 実行に限定する（コードレビュー
+  # 指摘 #940）。workflow_dispatch は任意のブランチ／コミットで手動実行できるため、
+  # 状態変更を許すと検証用ブランチでの手動実行の失敗が main 用の固定タイトル障害
+  # Issue を誤って起票・追記したり、成功が未復旧の main の Issue を誤ってクローズ
+  # したりしうる（定期検証結果の fail-closed な可視化という運用契約を壊す）。
+  # schedule トリガーは GitHub Actions の仕様上 default branch 上の workflow 定義から
+  # しか発火しない（本スクリプト冒頭コメント・.github/workflows/clippy-nocache-
+  # schedule.yml 冒頭コメント）ため、EVENT_NAME == schedule の判定のみでブランチ限定
+  # の意図を満たす。workflow_dispatch は run 自体の exit code（サマリ出力のみ）で
+  # 可視化し、Issue 側は一切変更しない。
+  if [ "${EVENT_NAME}" != "schedule" ]; then
+    echo "NOTE: EVENT_NAME=${EVENT_NAME} のため Issue の起票・追記・クローズは行いません（schedule 実行専用。結果: ${RESULT}）"
+    if [ "${RESULT}" != "success" ]; then
+      echo "NG: キャッシュなしフルビルド clippy が失敗しました（手動実行のため Issue 可視化はスキップ）: ${RUN_URL}" >&2
+      return 1
+    fi
+    echo "OK: キャッシュなしフルビルド clippy は成功しました（手動実行のため Issue 可視化はスキップ）"
+    return 0
+  fi
 
   local existing
   existing=$(find_open_issue)
@@ -161,11 +182,18 @@ self_test_arg_validation() {
     echo "OK: 不正サブコマンドは非 0 終了します"
   fi
 
-  if env -u RESULT -u RUN_URL -u GH_TOKEN -u GH_REPO bash "$0" report >/dev/null 2>&1; then
+  if env -u RESULT -u RUN_URL -u GH_TOKEN -u GH_REPO -u EVENT_NAME bash "$0" report >/dev/null 2>&1; then
     echo "NG: 必須環境変数欠落時に exit 0 になりました" >&2
     failed=1
   else
     echo "OK: 必須環境変数欠落時は非 0 終了します"
+  fi
+
+  if env -u EVENT_NAME RESULT=success RUN_URL=https://example.invalid/run/0 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+    echo "NG: EVENT_NAME 欠落時に exit 0 になりました" >&2
+    failed=1
+  else
+    echo "OK: EVENT_NAME 欠落時は非 0 終了します"
   fi
 
   return "${failed}"
@@ -205,7 +233,7 @@ self_test_branches() {
 
   # 分岐 1: 失敗 + 既存 Issue なし → 新規起票（gh issue create が呼ばれる）。
   setup_gh_stub ''
-  if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/1 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=schedule RESULT=failure RUN_URL=https://example.invalid/run/1 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     echo "NG: 失敗時に report が exit 0 になりました" >&2
     failed=1
   elif grep -q '^issue create' "${self_test_stub_dir}/calls.log"; then
@@ -218,7 +246,7 @@ self_test_branches() {
 
   # 分岐 2: 失敗 + 既存 Issue あり → 追記（gh issue comment が呼ばれ、create は呼ばれない）。
   setup_gh_stub "$(printf '42\t%s' "${ISSUE_TITLE}")"
-  if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/2 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=schedule RESULT=failure RUN_URL=https://example.invalid/run/2 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     echo "NG: 失敗時に report が exit 0 になりました" >&2
     failed=1
   elif grep -q '^issue comment 42' "${self_test_stub_dir}/calls.log" && ! grep -q '^issue create' "${self_test_stub_dir}/calls.log"; then
@@ -231,7 +259,7 @@ self_test_branches() {
 
   # 分岐 3: 成功 + 既存 Issue あり → クローズ（comment → close の順で呼ばれる）。
   setup_gh_stub "$(printf '43\t%s' "${ISSUE_TITLE}")"
-  if PATH="${self_test_stub_dir}:${PATH}" RESULT=success RUN_URL=https://example.invalid/run/3 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=schedule RESULT=success RUN_URL=https://example.invalid/run/3 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     if grep -q '^issue close 43' "${self_test_stub_dir}/calls.log"; then
       echo "OK: 成功＋既存 Issue あり → issue close が呼ばれました"
     else
@@ -246,7 +274,7 @@ self_test_branches() {
 
   # 分岐 4: 成功 + 既存 Issue なし → 何もしない（create/comment/close いずれも呼ばれない）。
   setup_gh_stub ''
-  if PATH="${self_test_stub_dir}:${PATH}" RESULT=success RUN_URL=https://example.invalid/run/4 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=schedule RESULT=success RUN_URL=https://example.invalid/run/4 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     if grep -qE '^issue (create|comment|close)' "${self_test_stub_dir}/calls.log"; then
       echo "NG: 成功＋既存 Issue なしで不要な issue 操作が呼ばれました" >&2
       failed=1
@@ -270,7 +298,7 @@ self_test_duplicate_issue_fail_closed() {
   local failed=0
 
   setup_gh_stub "$(printf '50\t%s\n51\t%s' "${ISSUE_TITLE}" "${ISSUE_TITLE}")"
-  if PATH="${self_test_stub_dir}:${PATH}" RESULT=failure RUN_URL=https://example.invalid/run/5 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=schedule RESULT=failure RUN_URL=https://example.invalid/run/5 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
     echo "NG: 固定タイトルの open Issue が複数存在するのに report が exit 0 になりました" >&2
     failed=1
   elif grep -qE '^issue (create|comment|close)' "${self_test_stub_dir}/calls.log"; then
@@ -284,11 +312,51 @@ self_test_duplicate_issue_fail_closed() {
   return "${failed}"
 }
 
+# EVENT_NAME != schedule（workflow_dispatch 等）では、失敗・成功いずれの RESULT でも
+# gh issue list/create/comment/close が一切呼ばれない（find_open_issue 自体を呼ばない
+# ため gh コマンドが 1 度も起動されない）こと、かつ RESULT に応じた exit code
+# （失敗→非 0／成功→0）だけは維持されることを検証する（コードレビュー指摘 #940 の
+# P1: 手動実行が main の定期検証 Issue を誤更新することを防ぐ本体）。
+self_test_workflow_dispatch_no_issue_mutation() {
+  local failed=0
+
+  # 手動実行 + 失敗 → Issue 操作なし・run 自体は非 0 終了（可視化は run ステータスのみ）。
+  setup_gh_stub ''
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=workflow_dispatch RESULT=failure RUN_URL=https://example.invalid/run/6 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+    echo "NG: workflow_dispatch + 失敗で report が exit 0 になりました" >&2
+    failed=1
+  elif [ -s "${self_test_stub_dir}/calls.log" ]; then
+    echo "NG: workflow_dispatch 実行で gh コマンドが呼ばれました（Issue 状態変更の可能性）" >&2
+    failed=1
+  else
+    echo "OK: workflow_dispatch + 失敗 → gh は一切呼ばれず、report は非 0 終了します"
+  fi
+  cleanup_self_test
+
+  # 手動実行 + 成功 → Issue 操作なし・run 自体は 0 終了。
+  setup_gh_stub ''
+  if PATH="${self_test_stub_dir}:${PATH}" EVENT_NAME=workflow_dispatch RESULT=success RUN_URL=https://example.invalid/run/7 GH_TOKEN=dummy GH_REPO=dummy/dummy bash "$0" report >/dev/null 2>&1; then
+    if [ -s "${self_test_stub_dir}/calls.log" ]; then
+      echo "NG: workflow_dispatch + 成功で gh コマンドが呼ばれました（Issue 状態変更の可能性）" >&2
+      failed=1
+    else
+      echo "OK: workflow_dispatch + 成功 → gh は一切呼ばれず、report は 0 終了します"
+    fi
+  else
+    echo "NG: workflow_dispatch + 成功で report が非 0 終了しました" >&2
+    failed=1
+  fi
+  cleanup_self_test
+
+  return "${failed}"
+}
+
 cmd_self_test() {
   local failed=0
   self_test_arg_validation || failed=1
   self_test_branches || failed=1
   self_test_duplicate_issue_fail_closed || failed=1
+  self_test_workflow_dispatch_no_issue_mutation || failed=1
 
   if [ "${failed}" -ne 0 ]; then
     echo "NG: self-test に失敗しました" >&2

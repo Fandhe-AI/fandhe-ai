@@ -182,4 +182,10 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          # Issue の起票・追記・クローズを schedule 実行に限定するための判定材料
+          # （コードレビュー指摘 #940。scripts/report-clippy-nocache-schedule-result.sh
+          # 側の EVENT_NAME 検証を参照）。workflow_dispatch は任意のブランチ／コミット
+          # で実行できるため、この値なしでは検証用ブランチでの手動実行の失敗・成功が
+          # main 用の固定タイトル障害 Issue を誤って起票・追記・クローズしうる。
+          EVENT_NAME: ${{ github.event_name }}
         run: bash scripts/report-clippy-nocache-schedule-result.sh report
