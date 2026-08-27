@@ -188,10 +188,12 @@ check_manifest_deps_text() {
   local dep_lines
   # ドット付きキー（`tch.version = "..."` 形式）も依存宣言として拾う（名前は最初の
   # `.` までで切り出して allowlist と突合する）。
+  # インデント付きのセクションヘッダ・キー宣言も TOML として有効なため、行頭の
+  # 空白を許容して走査する（インデントによる検査すり抜けの防止）。
   dep_lines=$(echo "${text}" | awk '
-    /^\[dependencies\]/ { in_deps = 1; next }
-    /^\[/ { in_deps = 0 }
-    in_deps && /^[a-zA-Z0-9_.-]+[[:space:]]*=/ { print }
+    /^[[:space:]]*\[dependencies\][[:space:]]*$/ { in_deps = 1; next }
+    /^[[:space:]]*\[/ { in_deps = 0 }
+    in_deps && /^[[:space:]]*[a-zA-Z0-9_.-]+[[:space:]]*=/ { print }
   ')
 
   local line name entry entry_name entry_version found
@@ -267,7 +269,7 @@ check_manifest_sections_text() {
       failed=1
     fi
   done <<EOF_SECTIONS
-$(echo "${text}" | grep -E '^\[' | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]]*#.*$//')
+$(echo "${text}" | grep -E '^[[:space:]]*\[' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]]*#.*$//')
 EOF_SECTIONS
 
   if [ "${failed}" -ne 0 ]; then
@@ -564,6 +566,27 @@ name = "x"
     failed=1
   else
     echo "self-test OK: sections dotted fixture は fail する"
+  fi
+
+  # インデント付きセクションヘッダ（TOML として有効）が検査をすり抜けないこと。
+  local sections_indented_text='[package]
+
+  [dev-dependencies]'
+  if check_manifest_sections_text "self-test sections indented fixture" "${sections_indented_text}" "[package],[dependencies],[features]" >/dev/null 2>&1; then
+    echo "self-test NG: sections indented fixture が誤って pass した（インデント付きヘッダの検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: sections indented fixture は fail する"
+  fi
+
+  # インデント付きの依存キー宣言も [dependencies] 走査に乗ること。
+  local manifest_indented_dep_text='[dependencies]
+  tch = { version = "=0.22.0" }'
+  if check_manifest_deps_text "self-test manifest indented-dep fixture" "${manifest_indented_dep_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest indented-dep fixture が誤って pass した（インデント付き依存宣言の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest indented-dep fixture は fail する"
   fi
 
   if [ "${failed}" -ne 0 ]; then
