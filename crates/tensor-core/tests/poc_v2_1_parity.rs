@@ -183,8 +183,10 @@ fn parse_dump_case(bytes: &[u8]) -> DumpCase {
 
     let read_f32_le = |start: usize, len: usize| -> Vec<f32> {
         bytes[start..start + len * 4]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect()
     };
     let a_start = HEADER_LEN;
