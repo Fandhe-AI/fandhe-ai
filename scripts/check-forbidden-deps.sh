@@ -190,8 +190,11 @@ check_manifest_deps_text() {
   # `.` までで切り出して allowlist と突合する）。
   # インデント付きのセクションヘッダ・キー宣言も TOML として有効なため、行頭の
   # 空白を許容して走査する（インデントによる検査すり抜けの防止）。
+  # セクションヘッダは行末コメント（`[dependencies]  # ...`）付きでも TOML として
+  # 有効なため、ヘッダ判定はコメントの有無を許容する（コメント付きヘッダ配下の
+  # 依存宣言が走査から漏れる fail-open の防止）。
   dep_lines=$(echo "${text}" | awk '
-    /^[[:space:]]*\[dependencies\][[:space:]]*$/ { in_deps = 1; next }
+    /^[[:space:]]*\[dependencies\][[:space:]]*(#.*)?$/ { in_deps = 1; next }
     /^[[:space:]]*\[/ { in_deps = 0 }
     in_deps && /^[[:space:]]*[a-zA-Z0-9_.-]+[[:space:]]*=/ { print }
   ')
@@ -577,6 +580,16 @@ name = "x"
     failed=1
   else
     echo "self-test OK: sections indented fixture は fail する"
+  fi
+
+  # 行末コメント付きの [dependencies] ヘッダ配下の依存宣言も走査に乗ること。
+  local manifest_comment_header_text='[dependencies] # comment
+tch = { version = "=0.22.0" }'
+  if check_manifest_deps_text "self-test manifest comment-header fixture" "${manifest_comment_header_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest comment-header fixture が誤って pass した（コメント付きヘッダの走査が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest comment-header fixture は fail する"
   fi
 
   # インデント付きの依存キー宣言も [dependencies] 走査に乗ること。
