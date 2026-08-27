@@ -1,0 +1,6 @@
+[workspace]
+resolver = "2"
+members = ["bench-common", "bench-fandhe", "bench-candle", "bench-burn"]
+
+[profile.release]
+debug = false

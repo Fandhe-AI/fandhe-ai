@@ -150,6 +150,36 @@ crates.io の `license` フィールドを `cargo metadata --locked` 経由で�
 
 いずれも deny.toml の `[licenses] allow` リスト（MIT・Apache-2.0 等。本表 2 節と同一方針）の範囲内であることを `cargo deny check licenses` が機械検査済み。推移的依存（`gemm-common`・`gemm-f32`・`pulp`・`dyn-stack` 等）を含む全域監査は同コマンドの `sources` 検査と合わせて CI（`ci.yml` の `deps-forbidden` ジョブ「OSS 直接比較ハーネスのライセンス監査」ステップ）で毎回再実行し、本表への転記のみに依拠しない（cargo-deny の fail-closed 機械検査が一次情報源）。
 
+### 8b. 第 9 区分の適用範囲拡張の監査（フレームワーク横並びベンチ。PR #915）
+
+`scripts/bench/framework-compare/`（本体 workspace 外の独立 Cargo workspace）の
+`burn`・`candle-core`・`fandhe-ai`（crates.io 公開版の自社クレート）は、許容依存
+第 9 区分（ベンチ比較対象）の適用範囲拡張として 2026-08-28 にユーザー承認済み
+（承認記録・設計判断は `docs/framework-compare-harness-decision.md`）。適用範囲の
+定義は `.claude/rules/deps-policy.md`「許容依存 9 区分」表を正とし本節では二重管理
+しない。allow リストの実体は `scripts/bench/framework-compare/deny.toml` 冒頭
+コメントを参照する（比較対象の推移的依存に含まれる MPL-2.0・CC0-1.0・BSL-1.0 を
+**本 workspace 限定**で許容。ルート `deny.toml`・本表 2 節の適合基準は変更しない）。
+
+実測（2026-08-28）:
+
+- 対象 `Cargo.lock`: `scripts/bench/framework-compare/Cargo.lock`
+- `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked check --config scripts/bench/framework-compare/deny.toml advisories bans licenses sources` の実行結果: `advisories ok, bans ok, licenses ok, sources ok`
+- `cargo metadata --manifest-path scripts/bench/framework-compare/Cargo.toml --format-version 1 --locked` で直接依存 3 crate のライセンス式を抽出（推定記載ではなく実測値）:
+
+| crate | version | license（`cargo metadata` 実測） |
+|-------|---------|-----------------------------------|
+| `burn` | 0.21.0 | `MIT OR Apache-2.0` |
+| `candle-core` | 0.11.0 | `MIT OR Apache-2.0` |
+| `fandhe-ai` | 0.3.0 | `MIT OR Apache-2.0` |
+
+推移的依存を含む全域監査は CI（`ci.yml` の `deps-forbidden` ジョブ
+「フレームワーク横並びベンチの依存監査」ステップ）で毎回再実行し、本表への転記
+のみに依拠しない（cargo-deny の fail-closed 機械検査が一次情報源）。同 workspace の
+`Cargo.lock` は禁止リスト grep の対象外だが、`scripts/check-forbidden-deps.sh
+lock-all` の専用契約検査（存在・`[workspace]` 隔離・承認済みピンのドリフト検出）が
+fail-closed で適用される。
+
 ## 8. 運用
 
 - 依存の追加・更新は本表の更新とセットで行う（**ユーザー承認必須**。REQ-5・deps-policy.md）

@@ -1,0 +1,9 @@
+bench-fandhe v0.1.0 (bench-fandhe)
+├── bench-common v0.1.0 (bench-common)
+└── fandhe-ai v0.3.0
+bench-candle v0.1.0 (bench-candle)
+├── bench-common v0.1.0 (bench-common)
+└── candle-core v0.11.0
+bench-burn v0.1.0 (bench-burn)
+├── bench-common v0.1.0 (bench-common)
+└── burn v0.21.0

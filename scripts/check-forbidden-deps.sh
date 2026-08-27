@@ -10,9 +10,32 @@
 # サブコマンド:
 #   lock <path>  Cargo.lock の `name = "<crate>"` 行を検査する（Cargo.toml 未追加時は
 #                呼び出し側で存在チェックしてからこのスクリプトを呼ぶ想定）
-#   lock-all     本リポジトリが持つ全 Cargo.lock（本体 workspace ルート・
+#   lock-all     本リポジトリが持つ検査対象の全 Cargo.lock（本体 workspace ルート・
 #                scripts/bench/oss-gemm-compare/ の OSS 直接比較ハーネス〈許容依存
 #                第 9 区分。.claude/rules/deps-policy.md〉）をまとめて検査する。
+#                scripts/bench/framework-compare/（第 9 区分の適用範囲拡張。
+#                フレームワーク横並びベンチ）の Cargo.lock は、比較対象という性質上
+#                依存禁止リストのクレート（candle-*・burn-*・cubecl・ndarray・tch 等）を
+#                意図的に含むため、禁止リストの grep 検査（check_lock）ではなく
+#                **専用の fail-closed 契約検査**（check_framework_compare）を適用する:
+#                (1) Cargo.lock の存在（不在はエラー）、(2) 同ディレクトリの Cargo.toml が
+#                独自の [workspace] を宣言していること（本体 workspace への構造的
+#                非混入）、(3) 承認済み比較対象のピン（burn 0.21.0・candle-core 0.11.0・
+#                fandhe-ai 0.3.0。deps-policy.md 第 9 区分の承認バージョン）が
+#                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出）、
+#                (4) 各メンバー crate の [dependencies] が承認済み allowlist
+#                （比較対象の =x.y.z 完全固定 + bench-common の path 依存）の範囲内で
+#                あること（`tch` 等 allowlist 外の直接依存追加・ドット付きキー宣言・
+#                完全固定でないバージョン指定を検出）、(5) 各 Cargo.toml のセクション
+#                ヘッダが allowlist の範囲内であること（[dev-dependencies]・
+#                [build-dependencies]・[target.'cfg'.dependencies]・
+#                [dependencies.<crate>] 等の代替依存宣言経路を遮断）、
+#                (6) workspace members 宣言が期待値と完全一致すること、
+#                (7) ディレクトリ配下の Cargo.toml ファイル集合が契約と一致すること
+#                （未登録 member crate の追加を遮断）。
+#                承認済みピン以外への変更・検査の緩和はユーザー承認必須
+#                （deps-policy.md）。本体 workspace への混入は引き続きルート
+#                Cargo.lock・cargo tree 検査で fail-closed に検出される。
 #                対象パスの列挙をこの 1 箇所に集約し、呼び出し側（ci.yml・Makefile）で
 #                個別パスをハードコードしない（「CI と同一判定をローカル再現」を
 #                二重管理なしで満たすため）。ルート Cargo.lock は workspace 骨格
@@ -37,6 +60,36 @@
 set -euo pipefail
 
 FORBIDDEN_CRATES_ALT='burn|burn-[a-z0-9-]+|cubecl|cubecl-[a-z0-9-]+|candle|candle-[a-z0-9-]+|tch|ndarray'
+
+# フレームワーク横並びベンチ（許容依存第 9 区分の適用範囲拡張。
+# .claude/rules/deps-policy.md「ベンチ比較対象（フレームワーク横並び）」）の
+# 承認済みピン。`<crate>=<version>` 形式のスペース区切り。ここを緩める・削る変更は
+# ユーザー承認必須（検査対象の追加は fail-closed の強化であり承認不要）。
+FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
+FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.3.0"
+
+# 同ベンチの各メンバー crate が [dependencies] に宣言してよい直接依存の allowlist
+# （`<manifest 相対パス>:<crate>[@=version]...` 形式）。承認済み比較対象（=x.y.z 完全
+# 固定必須）と workspace 内の path 依存 bench-common のみを許容し、これ以外の直接依存
+# （禁止リストの `tch` を含む任意のクレート）の追加を fail-closed に検出する。
+# allowlist の拡張はユーザー承認必須（deps-policy.md 第 9 区分）。
+FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST="\
+bench-common/Cargo.toml:
+bench-fandhe/Cargo.toml:bench-common,fandhe-ai@=0.3.0
+bench-candle/Cargo.toml:bench-common,candle-core@=0.11.0
+bench-burn/Cargo.toml:bench-common,burn@=0.21.0"
+
+# 同ベンチ workspace の members 宣言の期待値（完全一致で検査する。member の追加・
+# 削除・並び替えはユーザー承認必須の契約変更として fail-closed に検出する）。
+FRAMEWORK_COMPARE_EXPECTED_MEMBERS='members = ["bench-common", "bench-fandhe", "bench-candle", "bench-burn"]'
+
+# 各 Cargo.toml に出現してよい TOML セクションヘッダの allowlist（完全一致）。
+# [dev-dependencies]・[build-dependencies]・[target.'cfg(...)'.dependencies]・
+# [dependencies.<crate>]（ドット付きセクション）等、[dependencies] 以外の経路での
+# 依存宣言をセクション単位で fail-closed に遮断する（allowlist 外のセクションは
+# 内容を問わずエラー）。
+FRAMEWORK_COMPARE_MEMBER_SECTIONS="[package],[dependencies],[features]"
+FRAMEWORK_COMPARE_ROOT_SECTIONS="[workspace],[profile.release]"
 
 # Cargo.lock の `name = "<crate>"` 行に対する完全一致パターン。
 FORBIDDEN_LOCK_PATTERN="^name = \"(${FORBIDDEN_CRATES_ALT})\"\$"
@@ -88,6 +141,245 @@ check_lock_all() {
   else
     echo "::error::${oss_gemm_compare_lock} が見つかりません（許容依存第 9 区分は有効化済みのため必須。.claude/rules/deps-policy.md）" >&2
     failed=1
+  fi
+
+  # フレームワーク横並びベンチ（scripts/bench/framework-compare/。第 9 区分の
+  # 適用範囲拡張）: 禁止リスト grep の代わりに専用の fail-closed 契約検査を適用する
+  # （関数冒頭コメント参照。存在・[workspace] 隔離・承認済みピン・直接依存
+  # allowlist・セクション allowlist・members 完全一致・Cargo.toml 集合一致の 7 点）。
+  check_framework_compare || failed=1
+
+  if [ "${failed}" -ne 0 ]; then
+    return 1
+  fi
+}
+
+# Cargo.lock 形式テキストに `name = "<crate>"` + `version = "<version>"` の
+# パッケージエントリが存在することを検査する（テキスト入力版。self-test から
+# 固定文字列で直接検証できるよう、ファイル I/O と分離する）。
+check_lock_pin_text() {
+  local label="$1"
+  local text="$2"
+  local crate="$3"
+  local version="$4"
+  # Cargo.lock の [[package]] エントリは `name = "..."` の直後の行が `version = "..."`。
+  if echo "${text}" | grep -A1 "^name = \"${crate}\"\$" | grep -qF "version = \"${version}\""; then
+    echo "OK: ${label} に承認済みピン ${crate} ${version} が存在"
+    return 0
+  fi
+  echo "::error::${label} に承認済みピン ${crate} ${version} が見つかりません（承認外バージョンへのドリフト、または比較対象の削除。.claude/rules/deps-policy.md 第 9 区分）" >&2
+  return 1
+}
+
+# Cargo.toml 形式テキストの [dependencies] セクションを、許容された直接依存の
+# allowlist（カンマ区切り `<crate>` または `<crate>@=<version>`。`@=` 付きは
+# `"=<version>"` の完全固定宣言を要求する）と突合する（テキスト入力版。self-test
+# から固定文字列で直接検証できるよう、ファイル I/O と分離する）。allowlist 外の
+# 直接依存（禁止リストの `tch` を含む任意のクレート）・完全固定でないバージョン
+# 指定を fail-closed に検出する。
+check_manifest_deps_text() {
+  local label="$1"
+  local text="$2"
+  local allowlist="$3" # 例: "bench-common,burn@=0.21.0"（空文字列 = 直接依存なし）
+  local failed=0
+
+  # [dependencies] セクションのみを抜き出し、依存宣言行（`name = ...`）を列挙する。
+  # [features]・[package] 等の他セクションは対象外。
+  local dep_lines
+  # ドット付きキー（`tch.version = "..."` 形式）も依存宣言として拾う（名前は最初の
+  # `.` までで切り出して allowlist と突合する）。
+  # インデント付きのセクションヘッダ・キー宣言も TOML として有効なため、行頭の
+  # 空白を許容して走査する（インデントによる検査すり抜けの防止）。
+  # セクションヘッダは行末コメント（`[dependencies]  # ...`）付きでも TOML として
+  # 有効なため、ヘッダ判定はコメントの有無を許容する（コメント付きヘッダ配下の
+  # 依存宣言が走査から漏れる fail-open の防止）。
+  dep_lines=$(echo "${text}" | awk '
+    /^[[:space:]]*\[dependencies\][[:space:]]*(#.*)?$/ { in_deps = 1; next }
+    /^[[:space:]]*\[/ { in_deps = 0 }
+    in_deps && /^[[:space:]]*[a-zA-Z0-9_.-]+[[:space:]]*=/ { print }
+  ')
+
+  local line name entry entry_name entry_version found
+  while IFS= read -r line; do
+    [ -n "${line}" ] || continue
+    name="${line%%=*}"
+    # 依存名の前後空白を除去し、ドット付きキーは最初の `.` までを依存名とする
+    name="$(echo "${name}" | tr -d '[:space:]')"
+    name="${name%%.*}"
+    found=0
+    local IFS_SAVE="${IFS}"
+    IFS=','
+    for entry in ${allowlist}; do
+      IFS="${IFS_SAVE}"
+      entry_name="${entry%%@*}"
+      if [ "${name}" = "${entry_name}" ]; then
+        found=1
+        if [ "${entry}" != "${entry_name}" ]; then
+          # `@=` 付きエントリ: `"=<version>"` の完全固定宣言を要求する。
+          entry_version="${entry#*@}"
+          if ! echo "${line}" | grep -qF "\"${entry_version}\""; then
+            echo "::error::${label} の直接依存 ${name} が承認済みの完全固定 ${entry_version} で宣言されていません（.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
+            failed=1
+          fi
+        fi
+        break
+      fi
+      IFS=','
+    done
+    IFS="${IFS_SAVE}"
+    if [ "${found}" -eq 0 ]; then
+      echo "::error::${label} に allowlist 外の直接依存 ${name} が宣言されています（承認済み比較対象以外の依存追加はユーザー承認必須。.claude/rules/deps-policy.md 第 9 区分）: ${line}" >&2
+      failed=1
+    fi
+  done <<EOF_DEPS
+${dep_lines}
+EOF_DEPS
+
+  if [ "${failed}" -ne 0 ]; then
+    return 1
+  fi
+  echo "OK: ${label} の直接依存は allowlist（${allowlist:-なし}）の範囲内"
+}
+
+# Cargo.toml 形式テキストのセクションヘッダ（`[...]` 行）が allowlist（カンマ区切り・
+# 完全一致）の範囲内であることを検査する（テキスト入力版）。[dev-dependencies]・
+# [build-dependencies]・[target.'cfg(...)'.dependencies]・[dependencies.<crate>] 等、
+# [dependencies] 以外の経路での依存宣言セクションを内容を問わず fail-closed に
+# 遮断する。
+check_manifest_sections_text() {
+  local label="$1"
+  local text="$2"
+  local allowed="$3" # 例: "[package],[dependencies],[features]"
+  local failed=0
+
+  local section entry found
+  while IFS= read -r section; do
+    [ -n "${section}" ] || continue
+    found=0
+    local IFS_SAVE="${IFS}"
+    IFS=','
+    for entry in ${allowed}; do
+      IFS="${IFS_SAVE}"
+      if [ "${section}" = "${entry}" ]; then
+        found=1
+        break
+      fi
+      IFS=','
+    done
+    IFS="${IFS_SAVE}"
+    if [ "${found}" -eq 0 ]; then
+      echo "::error::${label} に allowlist 外のセクション ${section} が宣言されています（[dependencies] 以外の依存宣言経路はセクション単位で禁止。.claude/rules/deps-policy.md 第 9 区分）" >&2
+      failed=1
+    fi
+  done <<EOF_SECTIONS
+$(echo "${text}" | grep -E '^[[:space:]]*\[' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/[[:space:]]*#.*$//')
+EOF_SECTIONS
+
+  if [ "${failed}" -ne 0 ]; then
+    return 1
+  fi
+  echo "OK: ${label} のセクションは allowlist（${allowed}）の範囲内"
+}
+
+# フレームワーク横並びベンチ（scripts/bench/framework-compare/）専用の fail-closed
+# 契約検査（lock-all から呼ぶ。呼び出し元コメントの (1)〜(7)）。
+# 同 workspace の Cargo.lock は比較対象として禁止リストのクレートを意図的に含むため
+# check_lock（禁止リスト grep）は適用せず、代わりに「本体 workspace への構造的
+# 非混入」と「承認済みピンからのドリフト検出」を fail-closed で検査する。
+check_framework_compare() {
+  local dir="${FRAMEWORK_COMPARE_DIR}"
+  local lock="${dir}/Cargo.lock"
+  local manifest="${dir}/Cargo.toml"
+  local failed=0
+
+  # (1) Cargo.lock の存在（第 9 区分の適用範囲拡張が有効化済みのため必須。
+  #     再現性担保のコミット対象。不在はエラー）。
+  if [ ! -f "${lock}" ]; then
+    echo "::error::${lock} が見つかりません（第 9 区分の適用範囲拡張は有効化済みのため必須。.claude/rules/deps-policy.md）" >&2
+    return 1
+  fi
+
+  # (2) 独自 [workspace] の宣言（本体 workspace への構造的非混入。宣言が消えると
+  #     cargo が親 workspace を探索し、本体 Cargo.lock へ依存が混入しうる）。
+  if [ ! -f "${manifest}" ] || ! grep -q '^\[workspace\]' "${manifest}"; then
+    echo "::error::${manifest} が独自の [workspace] を宣言していません（本体 workspace への構造的非混入の契約。.claude/rules/deps-policy.md 第 9 区分）" >&2
+    failed=1
+  fi
+
+  # (3) 承認済み比較対象のピンが Cargo.lock に存在すること。
+  local pin crate version
+  for pin in ${FRAMEWORK_COMPARE_PINS}; do
+    crate="${pin%%=*}"
+    version="${pin#*=}"
+    check_lock_pin_text "${lock}" "$(cat "${lock}")" "${crate}" "${version}" || failed=1
+  done
+
+  # (4) 各メンバー crate の [dependencies] が allowlist（承認済み比較対象の完全固定 +
+  #     bench-common の path 依存）の範囲内であること。allowlist 外の直接依存
+  #     （禁止リストの `tch` を含む）の追加・完全固定でないバージョン指定を
+  #     fail-closed に検出する。
+  local mapping member_manifest member_allowlist
+  while IFS= read -r mapping; do
+    [ -n "${mapping}" ] || continue
+    member_manifest="${dir}/${mapping%%:*}"
+    member_allowlist="${mapping#*:}"
+    if [ ! -f "${member_manifest}" ]; then
+      echo "::error::${member_manifest} が見つかりません（framework-compare のメンバー構成が契約から変更されています。.claude/rules/deps-policy.md 第 9 区分）" >&2
+      failed=1
+      continue
+    fi
+    check_manifest_deps_text "${member_manifest}" "$(cat "${member_manifest}")" "${member_allowlist}" || failed=1
+  done <<EOF_MAPPING
+${FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST}
+EOF_MAPPING
+
+  # (5) 各 Cargo.toml のセクションヘッダが allowlist の範囲内であること
+  #     （[dev-dependencies]・[build-dependencies]・[target.'cfg'.dependencies]・
+  #     [dependencies.<crate>] 等、(4) の [dependencies] 走査に乗らない依存宣言経路を
+  #     セクション単位で遮断する）。
+  check_manifest_sections_text "${manifest}" "$(cat "${manifest}")" "${FRAMEWORK_COMPARE_ROOT_SECTIONS}" || failed=1
+  while IFS= read -r mapping; do
+    [ -n "${mapping}" ] || continue
+    member_manifest="${dir}/${mapping%%:*}"
+    if [ -f "${member_manifest}" ]; then
+      check_manifest_sections_text "${member_manifest}" "$(cat "${member_manifest}")" "${FRAMEWORK_COMPARE_MEMBER_SECTIONS}" || failed=1
+    fi
+  done <<EOF_MAPPING2
+${FRAMEWORK_COMPARE_MANIFEST_ALLOWLIST}
+EOF_MAPPING2
+
+  # (6) workspace members 宣言が期待値と完全一致すること（allowlist 未登録の新規
+  #     member crate を workspace へ追加して依存を持ち込む迂回を遮断する）。
+  local members_line
+  members_line=$(grep -E '^members = ' "${manifest}" | sed -e 's/[[:space:]]*$//' || true)
+  if [ "${members_line}" != "${FRAMEWORK_COMPARE_EXPECTED_MEMBERS}" ]; then
+    echo "::error::${manifest} の members 宣言が契約と一致しません（member の追加・削除はユーザー承認必須。.claude/rules/deps-policy.md 第 9 区分）。期待: ${FRAMEWORK_COMPARE_EXPECTED_MEMBERS} / 実際: ${members_line:-（members 行なし）}" >&2
+    failed=1
+  else
+    echo "OK: ${manifest} の members 宣言は契約と一致"
+  fi
+
+  # (7) ディレクトリ配下の Cargo.toml が契約どおりのファイル集合であること
+  #     （members 宣言に載らない場所への Cargo.toml 追加も検出する）。
+  local expected_manifests actual_manifests
+  expected_manifests=$(printf '%s\n' \
+    "${dir}/Cargo.toml" \
+    "${dir}/bench-common/Cargo.toml" \
+    "${dir}/bench-fandhe/Cargo.toml" \
+    "${dir}/bench-candle/Cargo.toml" \
+    "${dir}/bench-burn/Cargo.toml" | sort)
+  # target/（ビルド生成物。.gitignore 対象）配下はベンダーされた依存の Cargo.toml を
+  # 含みうるため除外する（リポジトリにコミットされる範囲が検査対象）。
+  actual_manifests=$(find "${dir}" -path "${dir}/target" -prune -o -name Cargo.toml -print | sort)
+  if [ "${actual_manifests}" != "${expected_manifests}" ]; then
+    echo "::error::${dir} 配下の Cargo.toml 集合が契約と一致しません（crate の追加・削除はユーザー承認必須。.claude/rules/deps-policy.md 第 9 区分）。" >&2
+    echo "期待:" >&2
+    echo "${expected_manifests}" >&2
+    echo "実際:" >&2
+    echo "${actual_manifests}" >&2
+    failed=1
+  else
+    echo "OK: ${dir} 配下の Cargo.toml 集合は契約と一致"
   fi
 
   if [ "${failed}" -ne 0 ]; then
@@ -171,6 +463,143 @@ self_test() {
     failed=1
   else
     echo "self-test OK: tree forbidden fixture は fail する"
+  fi
+
+  # check_lock_pin_text（framework-compare の承認済みピン検査）も同じ固定入力方式で
+  # 直接検証する（新設の検査経路の退行取りこぼし防止。ファイル fixture は増やさず
+  # インライン文字列で足りる）。
+  local pin_ok_text='[[package]]
+name = "burn"
+version = "0.21.0"'
+  local pin_drift_text='[[package]]
+name = "burn"
+version = "0.22.0"'
+  if check_lock_pin_text "self-test pin fixture" "${pin_ok_text}" "burn" "0.21.0" >/dev/null; then
+    echo "self-test OK: pin fixture（承認済みバージョン）は pass する"
+  else
+    echo "self-test NG: pin fixture（承認済みバージョン）が誤って fail した" >&2
+    failed=1
+  fi
+  if check_lock_pin_text "self-test pin drift fixture" "${pin_drift_text}" "burn" "0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: pin drift fixture が誤って pass した（ドリフト検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: pin drift fixture は fail する"
+  fi
+
+  # check_manifest_deps_text（framework-compare の直接依存 allowlist 検査）も同方式で
+  # 直接検証する（allowlist 外依存・非完全固定の検出退行の防止）。
+  local manifest_ok_text='[package]
+name = "bench-burn"
+
+[dependencies]
+bench-common = { path = "../bench-common" }
+burn = { version = "=0.21.0", default-features = false }
+
+[features]
+default = ["metal"]'
+  local manifest_extra_dep_text='[dependencies]
+bench-common = { path = "../bench-common" }
+burn = { version = "=0.21.0" }
+tch = { version = "=0.22.0" }'
+  local manifest_unpinned_text='[dependencies]
+bench-common = { path = "../bench-common" }
+burn = { version = "0.21" }'
+  if check_manifest_deps_text "self-test manifest fixture" "${manifest_ok_text}" "bench-common,burn@=0.21.0" >/dev/null; then
+    echo "self-test OK: manifest fixture（allowlist 内・完全固定）は pass する"
+  else
+    echo "self-test NG: manifest fixture（allowlist 内・完全固定）が誤って fail した" >&2
+    failed=1
+  fi
+  if check_manifest_deps_text "self-test manifest extra-dep fixture" "${manifest_extra_dep_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest extra-dep fixture が誤って pass した（allowlist 外依存の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest extra-dep fixture は fail する"
+  fi
+  if check_manifest_deps_text "self-test manifest unpinned fixture" "${manifest_unpinned_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest unpinned fixture が誤って pass した（完全固定検査が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest unpinned fixture は fail する"
+  fi
+
+  # ドット付きキー（`tch.version = ...`）による [dependencies] 内の依存宣言も
+  # allowlist 外として検出されること。
+  local manifest_dotted_text='[dependencies]
+bench-common = { path = "../bench-common" }
+tch.version = "=0.22.0"'
+  if check_manifest_deps_text "self-test manifest dotted-key fixture" "${manifest_dotted_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest dotted-key fixture が誤って pass した（ドット付きキーの検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest dotted-key fixture は fail する"
+  fi
+
+  # check_manifest_sections_text（セクション allowlist 検査）: [dev-dependencies]・
+  # [dependencies.<crate>] 等の代替依存宣言セクションが遮断されること。
+  local sections_ok_text='[package]
+name = "x"
+
+[dependencies]
+
+[features]'
+  local sections_dev_text='[package]
+
+[dependencies]
+
+[dev-dependencies]'
+  local sections_dotted_text='[package]
+
+[dependencies.tch]'
+  if check_manifest_sections_text "self-test sections fixture" "${sections_ok_text}" "[package],[dependencies],[features]" >/dev/null; then
+    echo "self-test OK: sections fixture（allowlist 内）は pass する"
+  else
+    echo "self-test NG: sections fixture（allowlist 内）が誤って fail した" >&2
+    failed=1
+  fi
+  if check_manifest_sections_text "self-test sections dev fixture" "${sections_dev_text}" "[package],[dependencies],[features]" >/dev/null 2>&1; then
+    echo "self-test NG: sections dev fixture が誤って pass した（[dev-dependencies] の遮断が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: sections dev fixture は fail する"
+  fi
+  if check_manifest_sections_text "self-test sections dotted fixture" "${sections_dotted_text}" "[package],[dependencies],[features]" >/dev/null 2>&1; then
+    echo "self-test NG: sections dotted fixture が誤って pass した（[dependencies.<crate>] の遮断が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: sections dotted fixture は fail する"
+  fi
+
+  # インデント付きセクションヘッダ（TOML として有効）が検査をすり抜けないこと。
+  local sections_indented_text='[package]
+
+  [dev-dependencies]'
+  if check_manifest_sections_text "self-test sections indented fixture" "${sections_indented_text}" "[package],[dependencies],[features]" >/dev/null 2>&1; then
+    echo "self-test NG: sections indented fixture が誤って pass した（インデント付きヘッダの検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: sections indented fixture は fail する"
+  fi
+
+  # 行末コメント付きの [dependencies] ヘッダ配下の依存宣言も走査に乗ること。
+  local manifest_comment_header_text='[dependencies] # comment
+tch = { version = "=0.22.0" }'
+  if check_manifest_deps_text "self-test manifest comment-header fixture" "${manifest_comment_header_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest comment-header fixture が誤って pass した（コメント付きヘッダの走査が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest comment-header fixture は fail する"
+  fi
+
+  # インデント付きの依存キー宣言も [dependencies] 走査に乗ること。
+  local manifest_indented_dep_text='[dependencies]
+  tch = { version = "=0.22.0" }'
+  if check_manifest_deps_text "self-test manifest indented-dep fixture" "${manifest_indented_dep_text}" "bench-common,burn@=0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: manifest indented-dep fixture が誤って pass した（インデント付き依存宣言の検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: manifest indented-dep fixture は fail する"
   fi
 
   if [ "${failed}" -ne 0 ]; then

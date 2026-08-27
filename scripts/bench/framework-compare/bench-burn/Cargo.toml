@@ -1,0 +1,23 @@
+[package]
+name = "bench-burn"
+version = "0.1.0"
+edition = "2024"
+# 本リポジトリと同一のデュアルライセンス。cargo-deny（licenses）の unlicensed 検出を
+# 明示宣言で解消する（scripts/bench/framework-compare/deny.toml）
+license = "MIT OR Apache-2.0"
+# ベンチ専用ツール（crates.io へ公開しない）。publish = false により cargo-deny の
+# wildcards 検査で path 依存（bench-common）が allow-wildcard-paths の対象になる
+publish = false
+
+[dependencies]
+bench-common = { path = "../bench-common" }
+# deps-policy.md（第 9 区分の適用範囲拡張。本 workspace 限定）に合わせ =x.y.z 完全固定
+burn = { version = "=0.21.0", default-features = false, features = ["std", "ndarray", "autodiff"] }
+
+# Burn backends are feature-gated modules, so both Cargo.toml and src/main.rs
+# use feature gates. macOS keeps the default (metal = wgpu backend); on CUDA
+# hosts build with: --no-default-features --features cuda
+[features]
+default = ["metal"]
+metal = ["burn/wgpu"]
+cuda = ["burn/cuda"]

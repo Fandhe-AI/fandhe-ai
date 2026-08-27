@@ -86,18 +86,30 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 ## 禁止事項（明示的に P0/P1 へ格上げ。.claude/rules/deps-policy.md / coding-rust.md）
 
 - **依存禁止リストのクレート混入**（`burn` 系一式・`cubecl`・`candle`・`tch`・
-  `ndarray`。直接・推移を問わない）、および既存 ML フレームワークへの統合・完全自作
+  `ndarray`。直接・推移を問わない。ただし `scripts/bench/framework-compare/` 配下
+  〈第 9 区分の適用範囲拡張。承認済み比較対象 burn 0.21.0・candle-core 0.11.0 と
+  その推移的依存ツリーとしての意図的保持。2026-08-28 ユーザー承認・PR #915・
+  `docs/framework-compare-harness-decision.md`。`scripts/check-forbidden-deps.sh`
+  lock-all の専用 fail-closed 契約検査〈`[workspace]` 隔離・承認済みピンのドリフト
+  検出・直接依存 allowlist〉と専用 `deny.toml` の CI 監査で統制〉に限り対象外。この統制・適用範囲を
+  緩める変更は P0）、
+  および既存 ML フレームワークへの統合・完全自作
   コア方針（REQ-1 v2）の放棄: **P0**
 - **許容依存 9 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
   rayon / half / criterion〈dev 限定〉/ ベンチ比較対象〈matrixmultiply・gemm〉）以外
   の依存追加**、または許容依存でも `=x.y.z` 完全固定でないバージョン指定・
   `docs/license-matrix.md` 更新やユーザー承認の記録を伴わない依存追加・更新: **P1**。
-  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`）は
+  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`、および適用範囲拡張の
+  `candle-core`・`burn`〈推移的依存ツリー込み〉）は
   `scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立 Cargo
-  プロジェクト）限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体 workspace
-  〈ルート `Cargo.toml`／`Cargo.lock`〉への非混入・専用 `deny.toml` による CI 監査。
+  プロジェクト）・`scripts/bench/framework-compare/`（独自の `[workspace]` を持つ
+  独立 Cargo workspace）限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体
+  workspace〈ルート `Cargo.toml`／`Cargo.lock`〉への非混入・各ディレクトリ専用
+  `deny.toml` による CI 監査〈advisories / bans / licenses / sources〉。
   deps-policy.md「許容依存 9 区分」表を参照）の違反は従来どおり **P1**
-  （2026-08-20 ユーザー承認。イシュー #755）
+  （oss-gemm-compare: 2026-08-20 ユーザー承認・イシュー #755。framework-compare:
+  2026-08-28 ユーザー承認・PR #915。承認記録は
+  `docs/framework-compare-harness-decision.md`）
 - **`// SAFETY:`（理由コメント）のない `unsafe`**、および不変条件の根拠が不十分な
   `unsafe`: **P0**。`unsafe` の使用域は FFI 境界（cudarc・objc2 系）・CPU SIMD
   intrinsics（backend-cpu のカーネル実装）等の必要最小限に限る規約
