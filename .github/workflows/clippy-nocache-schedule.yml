@@ -141,8 +141,18 @@ jobs:
             GH_VERSION="2.97.0"
             ARCH=$(uname -m)
             case "${ARCH}" in
-              x86_64) GH_ARCH=amd64 ;;
-              aarch64) GH_ARCH=arm64 ;;
+              x86_64)
+                GH_ARCH=amd64
+                # https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_checksums.txt
+                # から取得し固定した公式 sha256（2026-08-27 実測）。GH_VERSION 更新時は
+                # 同 URL の checksums.txt から該当アーカイブ行を再取得し値を合わせて
+                # 更新すること（バージョン固定だけでは取得物の改竄を検出できないため）。
+                GH_SHA256="a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+                ;;
+              aarch64)
+                GH_ARCH=arm64
+                GH_SHA256="73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5"
+                ;;
               *)
                 echo "NG: 未対応アーキテクチャです: ${ARCH}" >&2
                 exit 1
@@ -153,6 +163,10 @@ jobs:
             curl --proto '=https' --tlsv1.2 -fsSL \
               "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
               -o "${TMP_DIR}/gh.tar.gz"
+            # 取得物の改竄検出（サプライチェーン対策）。以降のステップで issues:write
+            # 権限の GITHUB_TOKEN を用いて gh を実行するため、バージョン固定だけでなく
+            # 公式チェックサムとの一致を fail-closed で確認してから展開・配置する。
+            echo "${GH_SHA256}  ${TMP_DIR}/gh.tar.gz" | sha256sum -c -
             tar -xzf "${TMP_DIR}/gh.tar.gz" -C "${TMP_DIR}"
             mkdir -p "${HOME}/.local/bin"
             cp "${TMP_DIR}/gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" "${HOME}/.local/bin/gh"

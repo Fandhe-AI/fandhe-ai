@@ -49,15 +49,18 @@ usage() {
 #
 # --limit は gh CLI 既定の 30 件で打ち切られると、固定タイトルの追跡 Issue が
 # ページ外に出た際に「既存 Issue なし」と誤判定してしまう（report-guardrail-schedule-
-# result.sh と同一方針）。本リポの open Issue 数は運用上 200 件を大きく超えない想定の
-# ため、十分大きい固定値で明示し、既定値依存の暗黙的な打ち切りを避ける。
+# result.sh と同一方針）。gh issue list --limit は指定件数まで自動でページングして
+# 取得する（gh CLI 実装）ため、既定値依存の暗黙的な打ち切りを避ける目的で、本リポの
+# 想定運用規模を大きく超える 1000 件を明示指定し「先頭 N 件のみ検査して見落とす」
+# リスクを実質的に排除する（コードレビュー指摘 #940。以前の 200 件固定では想定超過時に
+# 既存 Issue を見落とし重複起票しうる余地があったための引き上げ）。
 #
 # gh 側は number/title の TSV 化のみを `--jq`（gh CLI 内蔵の Go 実装。外部 jq 非依存）
 # で行い、タイトル完全一致・複数一致 fail-closed の判定は bash 側に残す
 # （runner に外部 jq が未導入でも壊れないようにするため）。
 find_open_issue() {
   local tsv
-  tsv=$(gh issue list --state open --limit 200 --json number,title \
+  tsv=$(gh issue list --state open --limit 1000 --json number,title \
         --jq '.[] | [.number, .title] | @tsv')
   local numbers=""
   local count=0
