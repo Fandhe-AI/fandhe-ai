@@ -1,7 +1,8 @@
 #!/bin/bash
 # Run the full benchmark sweep. Results: results/raw/results.jsonl
 # Failures are recorded in results/raw/skipped.log (never fabricated).
-set -u
+# pipefail: ビルド失敗を tail へのパイプで握り潰さない（下の build ガード参照）
+set -uo pipefail
 cd "$(dirname "$0")"
 
 OUT=results/raw/results.jsonl
@@ -20,7 +21,12 @@ run() { # run <binary> <task> <device> <size>
   rm -f err.tmp
 }
 
-cargo build --release 2>&1 | tail -1
+# ビルド失敗時はここで中断する（古い target/release バイナリを現行ツリーの結果として
+# 計測・記録しないため。pipefail により tail 越しでも cargo の失敗が伝播する）
+if ! cargo build --release 2>&1 | tail -20; then
+  echo "BUILD FAILED: aborting sweep (stale binaries must not be measured)" >&2
+  exit 1
+fi
 
 for bin in bench-fandhe bench-candle bench-burn; do
   # (a) GEMM

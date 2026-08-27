@@ -16,9 +16,16 @@
 #                scripts/bench/framework-compare/（第 9 区分の適用範囲拡張。
 #                フレームワーク横並びベンチ）の Cargo.lock は、比較対象という性質上
 #                依存禁止リストのクレート（candle-*・burn-*・cubecl・ndarray・tch 等）を
-#                意図的に含むため、lock-all の走査対象に**含めない**（意図的除外。
-#                deps-policy.md 第 9 区分の該当行参照。本体 workspace への混入は
-#                引き続きルート Cargo.lock・cargo tree 検査で fail-closed に検出される）。
+#                意図的に含むため、禁止リストの grep 検査（check_lock）ではなく
+#                **専用の fail-closed 契約検査**（check_framework_compare）を適用する:
+#                (1) Cargo.lock の存在（不在はエラー）、(2) 同ディレクトリの Cargo.toml が
+#                独自の [workspace] を宣言していること（本体 workspace への構造的
+#                非混入）、(3) 承認済み比較対象のピン（burn 0.21.0・candle-core 0.11.0・
+#                fandhe-ai 0.3.0。deps-policy.md 第 9 区分の承認バージョン）が
+#                Cargo.lock に存在すること（承認外バージョンへのドリフトを検出）。
+#                承認済みピン以外への変更・検査の緩和はユーザー承認必須
+#                （deps-policy.md）。本体 workspace への混入は引き続きルート
+#                Cargo.lock・cargo tree 検査で fail-closed に検出される。
 #                対象パスの列挙をこの 1 箇所に集約し、呼び出し側（ci.yml・Makefile）で
 #                個別パスをハードコードしない（「CI と同一判定をローカル再現」を
 #                二重管理なしで満たすため）。ルート Cargo.lock は workspace 骨格
@@ -43,6 +50,13 @@
 set -euo pipefail
 
 FORBIDDEN_CRATES_ALT='burn|burn-[a-z0-9-]+|cubecl|cubecl-[a-z0-9-]+|candle|candle-[a-z0-9-]+|tch|ndarray'
+
+# フレームワーク横並びベンチ（許容依存第 9 区分の適用範囲拡張。
+# .claude/rules/deps-policy.md「ベンチ比較対象（フレームワーク横並び）」）の
+# 承認済みピン。`<crate>=<version>` 形式のスペース区切り。ここを緩める・削る変更は
+# ユーザー承認必須（検査対象の追加は fail-closed の強化であり承認不要）。
+FRAMEWORK_COMPARE_DIR="scripts/bench/framework-compare"
+FRAMEWORK_COMPARE_PINS="burn=0.21.0 candle-core=0.11.0 fandhe-ai=0.3.0"
 
 # Cargo.lock の `name = "<crate>"` 行に対する完全一致パターン。
 FORBIDDEN_LOCK_PATTERN="^name = \"(${FORBIDDEN_CRATES_ALT})\"\$"
@@ -95,6 +109,66 @@ check_lock_all() {
     echo "::error::${oss_gemm_compare_lock} が見つかりません（許容依存第 9 区分は有効化済みのため必須。.claude/rules/deps-policy.md）" >&2
     failed=1
   fi
+
+  # フレームワーク横並びベンチ（scripts/bench/framework-compare/。第 9 区分の
+  # 適用範囲拡張）: 禁止リスト grep の代わりに専用の fail-closed 契約検査を適用する
+  # （関数冒頭コメント参照。存在・[workspace] 隔離・承認済みピンの 3 点）。
+  check_framework_compare || failed=1
+
+  if [ "${failed}" -ne 0 ]; then
+    return 1
+  fi
+}
+
+# Cargo.lock 形式テキストに `name = "<crate>"` + `version = "<version>"` の
+# パッケージエントリが存在することを検査する（テキスト入力版。self-test から
+# 固定文字列で直接検証できるよう、ファイル I/O と分離する）。
+check_lock_pin_text() {
+  local label="$1"
+  local text="$2"
+  local crate="$3"
+  local version="$4"
+  # Cargo.lock の [[package]] エントリは `name = "..."` の直後の行が `version = "..."`。
+  if echo "${text}" | grep -A1 "^name = \"${crate}\"\$" | grep -qF "version = \"${version}\""; then
+    echo "OK: ${label} に承認済みピン ${crate} ${version} が存在"
+    return 0
+  fi
+  echo "::error::${label} に承認済みピン ${crate} ${version} が見つかりません（承認外バージョンへのドリフト、または比較対象の削除。.claude/rules/deps-policy.md 第 9 区分）" >&2
+  return 1
+}
+
+# フレームワーク横並びベンチ（scripts/bench/framework-compare/）専用の fail-closed
+# 契約検査（lock-all から呼ぶ。呼び出し元コメントの (1)〜(3)）。
+# 同 workspace の Cargo.lock は比較対象として禁止リストのクレートを意図的に含むため
+# check_lock（禁止リスト grep）は適用せず、代わりに「本体 workspace への構造的
+# 非混入」と「承認済みピンからのドリフト検出」を fail-closed で検査する。
+check_framework_compare() {
+  local dir="${FRAMEWORK_COMPARE_DIR}"
+  local lock="${dir}/Cargo.lock"
+  local manifest="${dir}/Cargo.toml"
+  local failed=0
+
+  # (1) Cargo.lock の存在（第 9 区分の適用範囲拡張が有効化済みのため必須。
+  #     再現性担保のコミット対象。不在はエラー）。
+  if [ ! -f "${lock}" ]; then
+    echo "::error::${lock} が見つかりません（第 9 区分の適用範囲拡張は有効化済みのため必須。.claude/rules/deps-policy.md）" >&2
+    return 1
+  fi
+
+  # (2) 独自 [workspace] の宣言（本体 workspace への構造的非混入。宣言が消えると
+  #     cargo が親 workspace を探索し、本体 Cargo.lock へ依存が混入しうる）。
+  if [ ! -f "${manifest}" ] || ! grep -q '^\[workspace\]' "${manifest}"; then
+    echo "::error::${manifest} が独自の [workspace] を宣言していません（本体 workspace への構造的非混入の契約。.claude/rules/deps-policy.md 第 9 区分）" >&2
+    failed=1
+  fi
+
+  # (3) 承認済み比較対象のピンが Cargo.lock に存在すること。
+  local pin crate version
+  for pin in ${FRAMEWORK_COMPARE_PINS}; do
+    crate="${pin%%=*}"
+    version="${pin#*=}"
+    check_lock_pin_text "${lock}" "$(cat "${lock}")" "${crate}" "${version}" || failed=1
+  done
 
   if [ "${failed}" -ne 0 ]; then
     return 1
@@ -177,6 +251,28 @@ self_test() {
     failed=1
   else
     echo "self-test OK: tree forbidden fixture は fail する"
+  fi
+
+  # check_lock_pin_text（framework-compare の承認済みピン検査）も同じ固定入力方式で
+  # 直接検証する（新設の検査経路の退行取りこぼし防止。ファイル fixture は増やさず
+  # インライン文字列で足りる）。
+  local pin_ok_text='[[package]]
+name = "burn"
+version = "0.21.0"'
+  local pin_drift_text='[[package]]
+name = "burn"
+version = "0.22.0"'
+  if check_lock_pin_text "self-test pin fixture" "${pin_ok_text}" "burn" "0.21.0" >/dev/null; then
+    echo "self-test OK: pin fixture（承認済みバージョン）は pass する"
+  else
+    echo "self-test NG: pin fixture（承認済みバージョン）が誤って fail した" >&2
+    failed=1
+  fi
+  if check_lock_pin_text "self-test pin drift fixture" "${pin_drift_text}" "burn" "0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: pin drift fixture が誤って pass した（ドリフト検出が退行している）" >&2
+    failed=1
+  else
+    echo "self-test OK: pin drift fixture は fail する"
   fi
 
   if [ "${failed}" -ne 0 ]; then

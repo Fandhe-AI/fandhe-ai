@@ -87,7 +87,12 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
 
 - **依存禁止リストのクレート混入**（`burn` 系一式・`cubecl`・`candle`・`tch`・
   `ndarray`。直接・推移を問わない。ただし `scripts/bench/framework-compare/` 配下
-  〈第 9 区分の適用範囲拡張。ベンチ比較対象としての意図的保持〉は対象外）、
+  〈第 9 区分の適用範囲拡張。承認済み比較対象 burn 0.21.0・candle-core 0.11.0 と
+  その推移的依存ツリーとしての意図的保持。2026-08-28 ユーザー承認・PR #915・
+  `docs/framework-compare-harness-decision.md`。`scripts/check-forbidden-deps.sh`
+  lock-all の専用 fail-closed 契約検査〈`[workspace]` 隔離・承認済みピンのドリフト
+  検出〉と専用 `deny.toml` の CI 監査で統制〉に限り対象外。この統制・適用範囲を
+  緩める変更は P0）、
   および既存 ML フレームワークへの統合・完全自作
   コア方針（REQ-1 v2）の放棄: **P0**
 - **許容依存 9 区分（cudarc / objc2 系 / safetensors / prost / serde・serde_json /
@@ -99,11 +104,12 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   `scripts/bench/oss-gemm-compare/`（`[workspace]` を空テーブルで持つ独立 Cargo
   プロジェクト）・`scripts/bench/framework-compare/`（独自の `[workspace]` を持つ
   独立 Cargo workspace）限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体
-  workspace〈ルート `Cargo.toml`／`Cargo.lock`〉への非混入・oss-gemm-compare は
-  専用 `deny.toml` による CI 監査。
+  workspace〈ルート `Cargo.toml`／`Cargo.lock`〉への非混入・各ディレクトリ専用
+  `deny.toml` による CI 監査〈advisories / bans / licenses / sources〉。
   deps-policy.md「許容依存 9 区分」表を参照）の違反は従来どおり **P1**
   （oss-gemm-compare: 2026-08-20 ユーザー承認・イシュー #755。framework-compare:
-  導入 PR で承認確認中）
+  2026-08-28 ユーザー承認・PR #915。承認記録は
+  `docs/framework-compare-harness-decision.md`）
 - **`// SAFETY:`（理由コメント）のない `unsafe`**、および不変条件の根拠が不十分な
   `unsafe`: **P0**。`unsafe` の使用域は FFI 境界（cudarc・objc2 系）・CPU SIMD
   intrinsics（backend-cpu のカーネル実装）等の必要最小限に限る規約

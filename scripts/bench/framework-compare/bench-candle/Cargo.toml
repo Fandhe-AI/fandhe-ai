@@ -2,6 +2,12 @@
 name = "bench-candle"
 version = "0.1.0"
 edition = "2024"
+# 本リポジトリと同一のデュアルライセンス。cargo-deny（licenses）の unlicensed 検出を
+# 明示宣言で解消する（scripts/bench/framework-compare/deny.toml）
+license = "MIT OR Apache-2.0"
+# ベンチ専用ツール（crates.io へ公開しない）。publish = false により cargo-deny の
+# wildcards 検査で path 依存（bench-common）が allow-wildcard-paths の対象になる
+publish = false
 
 [dependencies]
 bench-common = { path = "../bench-common" }

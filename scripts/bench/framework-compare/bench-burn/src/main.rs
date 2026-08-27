@@ -34,13 +34,16 @@ fn tensor2<B: Backend>(data: Vec<f32>, shape: [usize; 2], dev: &B::Device) -> Te
 }
 
 /// Host-materialize and checksum (forces sync on async backends).
-fn checksum<B: Backend, const D: usize>(t: Tensor<B, D>) -> f64 {
-    t.into_data()
+/// Conversion failures are propagated as errors, not panics.
+fn checksum<B: Backend, const D: usize>(
+    t: Tensor<B, D>,
+) -> Result<f64, Box<dyn std::error::Error>> {
+    Ok(t.into_data()
         .to_vec::<f32>()
-        .expect("into_data to_vec")
+        .map_err(|e| format!("MEASURE_ERROR: into_data to_vec failed: {e:?}"))?
         .iter()
         .map(|&x| x as f64)
-        .sum()
+        .sum())
 }
 
 fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::error::Error>> {
@@ -49,21 +52,21 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
     let b = tensor2::<B>(Xorshift64Star::new(SEED_B).fill_vec(n * n), [n, n], dev);
     let mut cs = 0.0;
 
-    let one = |cs: &mut f64| -> Duration {
+    let one = |cs: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.clone().matmul(b.clone());
-        *cs = checksum(c);
-        start.elapsed()
+        *cs = checksum(c)?;
+        Ok(start.elapsed())
     };
 
     for _ in 0..WARMUP_ITERS {
-        one(&mut cs);
+        one(&mut cs)?;
     }
     let mut durations = Vec::with_capacity(MEASURE_ITERS);
     for _ in 0..MEASURE_ITERS {
-        durations.push(one(&mut cs));
+        durations.push(one(&mut cs)?);
     }
-    let st = stats(&durations);
+    let st = stats(&durations)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -77,7 +80,7 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
     }
-    .emit(&cli.out);
+    .emit(&cli.out)?;
     Ok(())
 }
 
@@ -167,7 +170,7 @@ fn run_train<B: AutodiffBackend>(
         return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
     }
     let measured = &durations[TRAIN_WARMUP..];
-    let st = stats(measured);
+    let st = stats(measured)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -181,7 +184,7 @@ fn run_train<B: AutodiffBackend>(
         warmup: TRAIN_WARMUP,
         iters: measured.len(),
     }
-    .emit(&cli.out);
+    .emit(&cli.out)?;
     Ok(())
 }
 
@@ -190,21 +193,21 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
     let (x, _) = mlp_inputs::<B>(dev);
     let mut cs = 0.0;
 
-    let one = |cs: &mut f64| -> Duration {
+    let one = |cs: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let out = model.forward(x.clone());
-        *cs = checksum(out);
-        start.elapsed()
+        *cs = checksum(out)?;
+        Ok(start.elapsed())
     };
 
     for _ in 0..WARMUP_ITERS {
-        one(&mut cs);
+        one(&mut cs)?;
     }
     let mut durations = Vec::with_capacity(MEASURE_ITERS);
     for _ in 0..MEASURE_ITERS {
-        durations.push(one(&mut cs));
+        durations.push(one(&mut cs)?);
     }
-    let st = stats(&durations);
+    let st = stats(&durations)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -218,7 +221,7 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
     }
-    .emit(&cli.out);
+    .emit(&cli.out)?;
     Ok(())
 }
 
@@ -235,8 +238,15 @@ where
 }
 
 fn main() {
-    let cli = parse_cli();
-    let result = match cli.device.as_str() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = parse_cli()?;
+    match cli.device.as_str() {
         "cpu" => dispatch::<NdArray>(&cli, &NdArrayDevice::Cpu),
         #[cfg(feature = "metal")]
         "metal" => dispatch::<Wgpu>(&cli, &WgpuDevice::default()),
@@ -248,9 +258,5 @@ fn main() {
             cfg!(feature = "cuda"),
         )
         .into()),
-    };
-    if let Err(e) = result {
-        eprintln!("{e}");
-        std::process::exit(1);
     }
 }

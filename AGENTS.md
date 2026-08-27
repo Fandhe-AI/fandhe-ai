@@ -45,11 +45,17 @@
   `scripts/bench/oss-gemm-compare/`・`scripts/bench/framework-compare/`
   （いずれも独立 Cargo プロジェクト／workspace。本体 workspace 外）
   限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体 workspace〈ルート
-  `Cargo.toml`／`Cargo.lock`〉への非混入・oss-gemm-compare は専用 `deny.toml` による
-  CI 監査。`.claude/rules/deps-policy.md`「許容依存 9 区分」表を参照）の違反は
+  `Cargo.toml`／`Cargo.lock`〉への非混入・各ディレクトリ専用 `deny.toml` による
+  CI 監査〈advisories / bans / licenses / sources〉。
+  `.claude/rules/deps-policy.md`「許容依存 9 区分」表を参照）の違反は
   従来どおり P1（oss-gemm-compare: 2026-08-20 ユーザー承認・イシュー #755。
-  framework-compare: 導入 PR で承認確認中）。framework-compare 配下の禁止リスト
-  クレートは比較対象としての意図的保持であり P0 の混入には当たらない
+  framework-compare: 2026-08-28 ユーザー承認・PR #915。承認記録は
+  `docs/framework-compare-harness-decision.md`）。framework-compare 配下の
+  禁止リストクレートは、承認済み比較対象（burn 0.21.0・candle-core 0.11.0）とその
+  推移的依存ツリーとしての意図的保持に限り P0 の混入には当たらない。同 workspace は
+  禁止リスト grep の代わりに `scripts/check-forbidden-deps.sh lock-all` の専用
+  fail-closed 契約検査（`[workspace]` 隔離・承認済みピンのドリフト検出）で統制され、
+  この検査・専用 deny.toml・適用範囲を緩める変更は P0
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、
   シェル呼び出しへの外部入力の非クォート展開等のインジェクション経路は P0（A03）

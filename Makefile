@@ -251,7 +251,9 @@ endif
 # （検査ロジックは ci.yml の deps-forbidden ジョブと同一スクリプトを共用し、二重管理しない）。
 # self-test で検査ロジック自体の退行を検出したうえで、lock-all（本体 workspace ルート
 # Cargo.lock・OSS 直接比較ハーネス scripts/bench/oss-gemm-compare/Cargo.lock。許容依存
-# 第 9 区分・イシュー #755。走査対象パスの列挙は scripts/check-forbidden-deps.sh 側の
+# 第 9 区分・イシュー #755。フレームワーク横並びベンチ scripts/bench/framework-compare/
+# は禁止リスト grep の代わりに専用の fail-closed 契約検査〈PR #915〉が適用される。
+# 走査対象パスの列挙は scripts/check-forbidden-deps.sh 側の
 # lock-all サブコマンドに集約済みでここではハードコードしない）・cargo tree
 # （Cargo.toml があれば）を検査する。
 .PHONY: deps-forbidden

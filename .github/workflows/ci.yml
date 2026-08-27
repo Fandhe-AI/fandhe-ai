@@ -641,6 +641,32 @@ jobs:
         if: steps.detect.outputs.has_cargo == 'true'
         run: cargo test --manifest-path scripts/bench/oss-gemm-compare/Cargo.toml --locked --release
 
+      # フレームワーク横並びベンチ（scripts/bench/framework-compare/。許容依存第 9 区分の
+      # 適用範囲拡張。PR #915・`docs/framework-compare-harness-decision.md`）専用の
+      # 依存監査。本 workspace は本体 workspace の member ではないためルート
+      # `deny.toml` の走査対象に含まれない。専用の
+      # scripts/bench/framework-compare/deny.toml（advisories・bans・licenses・
+      # sources。比較対象の推移的依存に含まれる MPL-2.0/CC0-1.0/BSL-1.0 の許容と
+      # RUSTSEC ignore の理由は同ファイルのコメント参照）を対象に監査する。
+      # cargo deny はメタデータ解決のみでビルドしないため burn / candle の
+      # コンパイルは発生しない。
+      - name: フレームワーク横並びベンチの依存監査（advisories/bans/licenses/sources）
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml \
+            --locked check \
+            --config scripts/bench/framework-compare/deny.toml \
+            advisories bans licenses sources
+
+      # フレームワーク横並びベンチの共有ロジック（bench-common: RNG 決定性・分位点
+      # 統計・typed error）の回帰テスト。bench-burn / bench-candle まで含めた
+      # workspace 全体のビルドは burn / candle の大規模な依存コンパイルになるため
+      # CI では bench-common（外部依存ゼロ）に限定する（計測バイナリ自体のビルドは
+      # 実測キャンペーン時にローカルで行う。README 参照）。
+      - name: フレームワーク横並びベンチ bench-common のテスト実行
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: cargo test --manifest-path scripts/bench/framework-compare/bench-common/Cargo.toml --locked --release
+
   # --------------------------------------------------
   # self-hosted runner 逆戻り防止の fail-closed 契約検査（イシュー #472）。
   # #457 Phase 2（#465〜#469）で .github/workflows/ の全ジョブが runs-on: ubuntu-latest へ

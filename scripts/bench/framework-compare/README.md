@@ -1,7 +1,7 @@
 # framework-compare: Rust ML フレームワーク横並びベンチマーク
 
 fandhe-ai を candle・Burn と同一プロトコルで横並び比較する独立ベンチ workspace。
-`scripts/bench/oss-gemm-compare/`（イシュー #755。許容依存第 9 区分）と同じく**本体 workspace 外の独立 Cargo workspace** であり、ルート `Cargo.toml` / `Cargo.lock` には一切現れない。本 workspace の `Cargo.lock` は比較対象として依存禁止リストのクレート（`candle-core`・`burn` と、その推移的依存の `cubecl`・`ndarray`・`tch` 等）を**意図的に含む**ため、`scripts/check-forbidden-deps.sh lock-all` の走査対象外とする（`.claude/rules/deps-policy.md`「第 9 区分」の適用範囲拡張を参照）。
+`scripts/bench/oss-gemm-compare/`（イシュー #755。許容依存第 9 区分）と同じく**本体 workspace 外の独立 Cargo workspace** であり、ルート `Cargo.toml` / `Cargo.lock` には一切現れない。本 workspace の `Cargo.lock` は比較対象として依存禁止リストのクレート（`candle-core`・`burn` と、その推移的依存の `cubecl`・`ndarray`・`tch` 等）を**意図的に含む**ため、`scripts/check-forbidden-deps.sh lock-all` は禁止リスト grep の代わりに専用の fail-closed 契約検査（Cargo.lock の存在・独自 `[workspace]` 宣言・承認済みピンのドリフト検出）を適用する（`.claude/rules/deps-policy.md`「第 9 区分」の適用範囲拡張、および `docs/framework-compare-harness-decision.md` を参照）。依存監査（advisories / bans / licenses / sources）は専用の `deny.toml` を対象に CI（`deps-forbidden` ジョブ）で毎回実行される。
 
 実測記録（`results/summary.md`・raw JSONL）は「実行資産は scripts/bench・記録は docs/perf」の区分の例外として、再現に必要な生成物一式を本ディレクトリ配下で管理する（`docs/perf/` の実測記録群と同趣旨のコミット済み一次データ）。
 
@@ -46,8 +46,10 @@ cd scripts/bench/framework-compare
 ./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ → results/raw/results-cuda.jsonl
 # 個別実行:
 cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048
-# 集計（JSONL → Markdown 表）:
+# 集計（JSONL → Markdown 表。既定は results/raw/*.jsonl 全件を標準出力へ。
+# コミット済みの results/summary.md は既定動作では上書きされない）:
 python3 summarize.py
+python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力・出力の明示
 ```
 
 失敗した組み合わせは `results/raw/skipped.log`（CUDA は `skipped-cuda.log`）に理由付きで記録される（数値の捏造はしない）。
@@ -57,3 +59,4 @@ python3 summarize.py
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）
 - 本体 workspace（ルート `Cargo.toml` / `Cargo.lock`）への混入は引き続き禁止であり、ルート `Cargo.lock` / `cargo tree` に対する `scripts/check-forbidden-deps.sh` の検査で fail-closed に検出される
+- 承認記録（2026-08-28 ユーザー承認・PR #915）・ライセンス実測・統制の全体像は `docs/framework-compare-harness-decision.md` と `docs/license-matrix.md` 8b 節を参照

@@ -62,7 +62,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..MEASURE_ITERS {
         durations.push(one(&mut checksum)?);
     }
-    let st = stats(&durations);
+    let st = stats(&durations)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -76,7 +76,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
     }
-    .emit(&cli.out);
+    .emit(&cli.out)?;
     Ok(())
 }
 
@@ -153,7 +153,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
     }
     let measured = &durations[TRAIN_WARMUP..];
-    let st = stats(measured);
+    let st = stats(measured)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -167,7 +167,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         warmup: TRAIN_WARMUP,
         iters: measured.len(),
     }
-    .emit(&cli.out);
+    .emit(&cli.out)?;
     Ok(())
 }
 
@@ -191,7 +191,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..MEASURE_ITERS {
         durations.push(one(&mut checksum)?);
     }
-    let st = stats(&durations);
+    let st = stats(&durations)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -205,20 +205,23 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
     }
-    .emit(&cli.out);
+    .emit(&cli.out)?;
     Ok(())
 }
 
 fn main() {
-    let cli = parse_cli();
-    let result = match cli.task.as_str() {
+    if let Err(e) = run() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = parse_cli()?;
+    match cli.task.as_str() {
         "gemm" => run_gemm(&cli),
         "train" => run_train(&cli),
         "infer" => run_infer(&cli),
         other => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
-    };
-    if let Err(e) = result {
-        eprintln!("{e}");
-        std::process::exit(1);
     }
 }

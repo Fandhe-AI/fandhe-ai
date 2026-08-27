@@ -7,6 +7,51 @@
 use std::io::Write;
 use std::time::Duration;
 
+/// Typed error for the shared bench utilities. Bench binaries propagate this
+/// (as `Box<dyn Error>`) up to `main`, diagnose on stderr, and exit non-zero;
+/// no `panic!` / `unwrap` / `expect` on these paths (coding-rust.md).
+#[derive(Debug)]
+pub enum BenchError {
+    /// `stats` was called with an empty sample set.
+    EmptySamples,
+    /// Result-file I/O failed (open / create-dir / write).
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+    /// A CLI flag had an unparsable value.
+    InvalidArg { flag: &'static str, value: String },
+}
+
+impl std::fmt::Display for BenchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BenchError::EmptySamples => write!(f, "MEASURE_ERROR: no samples to aggregate"),
+            BenchError::Io { path, source } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: results file I/O failed ({path}): {source}"
+                )
+            }
+            BenchError::InvalidArg { flag, value } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: {flag} must be an integer (got '{value}')"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BenchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            BenchError::Io { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 /// xorshift64* PRNG (Vigna 2016). Deterministic across platforms.
 pub struct Xorshift64Star {
     state: u64,
@@ -67,10 +112,15 @@ pub struct Stats {
 }
 
 /// Median / Q1 / Q3 over a set of durations (linear interpolation quartiles).
-pub fn stats(durations: &[Duration]) -> Stats {
-    assert!(!durations.is_empty());
+/// Errors on an empty sample set instead of panicking.
+pub fn stats(durations: &[Duration]) -> Result<Stats, BenchError> {
+    if durations.is_empty() {
+        return Err(BenchError::EmptySamples);
+    }
     let mut secs: Vec<f64> = durations.iter().map(|d| d.as_secs_f64()).collect();
-    secs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    // total_cmp: Duration::as_secs_f64 never yields NaN, and a total order
+    // avoids the partial_cmp unwrap.
+    secs.sort_by(f64::total_cmp);
     let q = |p: f64| -> f64 {
         let idx = p * (secs.len() - 1) as f64;
         let lo = idx.floor() as usize;
@@ -78,11 +128,11 @@ pub fn stats(durations: &[Duration]) -> Stats {
         let frac = idx - lo as f64;
         secs[lo] * (1.0 - frac) + secs[hi] * frac
     };
-    Stats {
+    Ok(Stats {
         median_s: q(0.5),
         q1_s: q(0.25),
         q3_s: q(0.75),
-    }
+    })
 }
 
 /// One benchmark result, serialized as one JSON line.
@@ -129,19 +179,26 @@ impl Record<'_> {
         s
     }
 
-    /// Print to stdout and append to `path` (JSONL).
-    pub fn emit(&self, path: &str) {
+    /// Print to stdout and append to `path` (JSONL). I/O failures are
+    /// propagated (typed) instead of panicking, so a bench binary exits with a
+    /// diagnostic and the sweep script records the combination as skipped.
+    pub fn emit(&self, path: &str) -> Result<(), BenchError> {
+        let io_err = |source: std::io::Error| BenchError::Io {
+            path: path.to_string(),
+            source,
+        };
         let line = self.to_json_line();
         println!("{line}");
         if let Some(parent) = std::path::Path::new(path).parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent).map_err(io_err)?;
         }
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .expect("open results file");
-        writeln!(f, "{line}").expect("write results file");
+            .map_err(io_err)?;
+        writeln!(f, "{line}").map_err(io_err)?;
+        Ok(())
     }
 }
 
@@ -153,7 +210,9 @@ pub struct Cli {
     pub out: String,
 }
 
-pub fn parse_cli() -> Cli {
+/// Parse the CLI arguments. An unparsable `--size` is a typed error
+/// (diagnosed at the binary boundary), not a panic.
+pub fn parse_cli() -> Result<Cli, BenchError> {
     let args: Vec<String> = std::env::args().collect();
     let get = |flag: &str| -> Option<String> {
         args.iter()
@@ -161,14 +220,19 @@ pub fn parse_cli() -> Cli {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-    Cli {
+    let size = match get("--size") {
+        Some(s) => s.parse().map_err(|_| BenchError::InvalidArg {
+            flag: "--size",
+            value: s,
+        })?,
+        None => 256,
+    };
+    Ok(Cli {
         task: get("--task").unwrap_or_else(|| "gemm".into()),
         device: get("--device").unwrap_or_else(|| "cpu".into()),
-        size: get("--size")
-            .map(|s| s.parse().expect("--size must be an integer"))
-            .unwrap_or(256),
+        size,
         out: get("--out").unwrap_or_else(|| "results/raw/results.jsonl".into()),
-    }
+    })
 }
 
 pub fn gemm_gflops(n: usize, median_s: f64) -> f64 {
@@ -191,9 +255,14 @@ mod tests {
     #[test]
     fn stats_quartiles() {
         let d: Vec<Duration> = (1..=5).map(Duration::from_secs).collect();
-        let s = stats(&d);
+        let s = stats(&d).expect("non-empty samples");
         assert!((s.median_s - 3.0).abs() < 1e-9);
         assert!((s.q1_s - 2.0).abs() < 1e-9);
         assert!((s.q3_s - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stats_empty_is_typed_error() {
+        assert!(matches!(stats(&[]), Err(BenchError::EmptySamples)));
     }
 }

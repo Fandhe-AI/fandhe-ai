@@ -1,0 +1,82 @@
+# フレームワーク横並びベンチ（scripts/bench/framework-compare/。許容依存第 9 区分の
+# 適用範囲拡張。PR #915）専用の cargo-deny 設定。本 workspace は本体 workspace
+# （ルート Cargo.toml）の member ではないため、ルート `deny.toml` の監査範囲に
+# 含まれない。この監査欠落を埋めるため、本 workspace 専用の Cargo.lock を対象に
+# `cargo deny --manifest-path scripts/bench/framework-compare/Cargo.toml --locked
+# check --config scripts/bench/framework-compare/deny.toml advisories bans licenses
+# sources` を CI（.github/workflows/ci.yml の deps-forbidden ジョブ）から実行する
+# （scripts/bench/oss-gemm-compare/deny.toml と同一方式。
+# `docs/framework-compare-harness-decision.md` 参照）。
+#
+# 本 workspace は比較対象（burn =0.21.0・candle-core =0.11.0）の大規模な推移的
+# 依存ツリーを持つベンチ専用ツールであり、全クレート `publish = false`・成果物を
+# 配布しない（バイナリはローカル計測にのみ使う）。この位置づけを前提に、
+# ルート `deny.toml` の allow リストへ 3 ライセンスを追加している（下の
+# [licenses] コメント参照。2026-08-28 ユーザー承認: PR #915 導入指示）。
+# 本体 workspace のライセンス方針（ルート deny.toml・docs/license-matrix.md）は
+# 変更しない。
+
+[advisories]
+# RUSTSEC アドバイザリ監査（ルート `deny.toml` の [advisories] と同一方針）。
+version = 2
+ignore = [
+    # RUSTSEC-2025-0141: `bincode` 2.0.1 が unmaintained（開発恒久停止の情報提供型
+    # アドバイザリであり脆弱性ではない）。比較対象 `burn =0.21.0` の推移的依存で
+    # あり、burn 側が bincode 依存を解消した新版へは比較条件（=x.y.z 完全固定・
+    # 実測記録済みバージョン）を崩さない限り更新できない。ベンチ専用・非配布の
+    # ツリーであるため受容する（2026-08-28 ユーザー承認: PR #915 導入指示）。
+    # 解消予定: 比較対象バージョンを更新する再計測キャンペーン時に要否を再評価する。
+    "RUSTSEC-2025-0141",
+    # RUSTSEC-2024-0436: `paste`（手続き型マクロ crate）が unmaintained（情報提供型
+    # アドバイザリであり脆弱性ではない）。比較対象の推移的依存（macerator・pulp・
+    # tokenizers 経由）で、oss-gemm-compare/deny.toml の同 ignore と同一の判断
+    # （アップグレード先なし・ベンチ専用ツリーで受容。2026-08-28 ユーザー承認:
+    # PR #915 導入指示）。
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+version = 2
+include-dev = true
+# 先頭 8 件はルート `deny.toml` の [licenses] allow と同一リスト。
+# 末尾 3 件（MPL-2.0・CC0-1.0・BSL-1.0）は本 workspace 限定の追加（cargo deny の
+# 実測で比較対象の推移的依存に含まれることを確認済み。ベンチ専用・非配布のため
+# 受容する。2026-08-28 ユーザー承認: PR #915 導入指示。本体側のルート deny.toml
+# には追加しない）:
+#   - MPL-2.0: `colored`（burn 経由）・`option-ext`（dirs 経由）。ファイル単位の
+#     弱いコピーレフト。ソース改変・再配布を行わないベンチ実行のみの利用
+#   - CC0-1.0: `hexf-parse`・`tiny-keccak`（wgpu / cubecl 経由）。パブリックドメイン相当
+#   - BSL-1.0: `xxhash-rust`（burn 経由）。Boost Software License（permissive）
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSD-2-Clause",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+
+[sources]
+# 全依存が crates.io 由来であることを要求する（ルート `deny.toml` と同一方針）。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# 依存禁止リスト（.claude/rules/deps-policy.md）は本 workspace には適用しない
+# （比較対象として意図的に含む）。代わりに scripts/check-forbidden-deps.sh lock-all の
+# 専用契約検査（[workspace] 隔離・承認済みピンのドリフト検出）が別途 fail-closed で
+# 走る。ここでは oss-gemm-compare/deny.toml と同一方針の重複バージョン・
+# ワイルドカード監査のみ行う。
+multiple-versions = "warn"
+# バージョン要求 `*` の依存宣言を拒否する（`=x.y.z` 完全固定方針）。bench-* の
+# path 依存（bench-common）は全クレート `publish = false` のため
+# allow-wildcard-paths の対象になり許容される。
+wildcards = "deny"
+allow-wildcard-paths = true
