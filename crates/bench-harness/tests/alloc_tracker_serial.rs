@@ -59,6 +59,8 @@ fn check_measure_reflects_real_heap_allocation() {
     const LEN: usize = 64 * 1024 * 1024;
     let (_, peak) = measure(|| {
         let v: Vec<u8> = vec![0u8; LEN];
+        // release 最適化（malloc/free ペア除去）による確保自体の除去を防ぐ観測点。
+        std::hint::black_box(v.as_ptr());
         drop(v);
     });
 
@@ -79,6 +81,8 @@ fn check_measure_clears_previous_interval() {
     const LEN: usize = 64 * 1024 * 1024;
     let (_, first_peak) = measure(|| {
         let v: Vec<u8> = vec![0u8; LEN];
+        // release 最適化（malloc/free ペア除去）による確保自体の除去を防ぐ観測点。
+        std::hint::black_box(v.as_ptr());
         drop(v);
     });
     let first_peak = first_peak.unwrap();
