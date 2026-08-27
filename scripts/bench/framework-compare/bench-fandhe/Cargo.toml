@@ -1,0 +1,9 @@
+[package]
+name = "bench-fandhe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bench-common = { path = "../bench-common" }
+# deps-policy.md（第 9 区分の適用範囲拡張。本 workspace 限定）に合わせ =x.y.z 完全固定
+fandhe-ai = "=0.3.0"

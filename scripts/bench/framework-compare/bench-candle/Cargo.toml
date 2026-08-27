@@ -1,0 +1,18 @@
+[package]
+name = "bench-candle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bench-common = { path = "../bench-common" }
+# deps-policy.md（第 9 区分の適用範囲拡張。本 workspace 限定）に合わせ =x.y.z 完全固定
+candle-core = { version = "=0.11.0" }
+
+# Device::new_metal / new_cuda exist unconditionally in candle-core (they
+# return NotCompiledWith*Support errors when the feature is off), so only the
+# Cargo features differ per platform. macOS keeps the default (metal); on
+# CUDA hosts build with: --no-default-features --features cuda
+[features]
+default = ["metal"]
+metal = ["candle-core/metal"]
+cuda = ["candle-core/cuda"]
