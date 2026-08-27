@@ -46,17 +46,27 @@
 #     直近キャッシュから部分復元する
 #   - target（build・build-no-cuda-toolkit・guardrail-regression・verification-gates の
 #     ジョブ別）: `target/` を対象に
-#     `target-<job-id>-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}`
-#     キーで保存・復元する。toolchain 定義変更時に古い rustc の成果物へ増分ビルドしない
-#     ためキーに `rust-toolchain.toml` を含める（stable のマイナー更新自体は cargo 側の
-#     フィンガープリント再ビルドで安全に処理される）。build（Linux debug +
-#     aarch64-apple-darwin クロス lib + backend-metal check）・build-no-cuda-toolkit
-#     （Linux debug + test 成果物）・guardrail-regression（guardrail クレートの debug
-#     テスト成果物）・verification-gates（debug build + release test + clippy 成果物）で
-#     target 内容がジョブごとに異なるため分離する（混在させると復元・保存サイズが
-#     無駄に膨らむ。verification-gates は他ジョブより成果物が大きくなりうるため、
-#     キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合の縮小策〈release のみ
-#     保存する等〉は #468 以降の判断に委ねる）
+#     `target-<job-id>-${{ runner.os }}-rustc<実解決版数>-clippy<実解決版数>-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}`
+#     キーで保存・復元する（`<実解決版数>` は各ジョブの「toolchain 実解決版数の取得」
+#     ステップが `rustc --version` / `cargo clippy --version` を実行して得る値）。
+#     従来は `hashFiles('rust-toolchain.toml', 'Cargo.lock')` のみをキーに使い、
+#     「stable のマイナー更新自体は cargo 側のフィンガープリント再ビルドで安全に処理
+#     される」としていたが、`rust-toolchain.toml` は `channel = "stable"` のまま内容が
+#     変化しないため toolchain 更新をキャッシュミスとして捕捉できず、この想定は実測で
+#     反証された（clippy 1.98 の新規 lint 違反〈PR #914〉が main push CI のキャッシュ
+#     命中により検出されず、キャッシュミスした別 PR ブランチで初めて顕在化。イシュー
+#     #917）。実解決版数をキーへ組み込み、restore-keys も同一版数スコープの前方一致に
+#     限定する（旧版数の target を新版数の run へ復元しない）ことで、toolchain 更新後の
+#     最初の CI run では target キャッシュが構成上フルミスし、
+#     `cargo clippy --workspace --all-targets --all-features` が全クレートを再検査する
+#     ことを保証する。build（Linux debug + aarch64-apple-darwin クロス lib +
+#     backend-metal check）・build-no-cuda-toolkit（Linux debug + test 成果物）・
+#     guardrail-regression（guardrail クレートの debug テスト成果物）・
+#     verification-gates（debug build + release test + clippy 成果物）で target 内容が
+#     ジョブごとに異なるため分離する（混在させると復元・保存サイズが無駄に膨らむ。
+#     verification-gates は他ジョブより成果物が大きくなりうるため、キャッシュ容量
+#     〈リポジトリ上限・LRU 退避〉を圧迫する場合の縮小策〈release のみ保存する等〉は
+#     #468 以降の判断に委ねる）
 #   - deps-forbidden は `cargo tree`（依存解決・フェッチのみでビルドしない）のみ実行する
 #     ため registry キャッシュのみとし target キャッシュは持たない
 #   - ci-complete は checkout・toolchain セットアップを行わない判定専用ジョブのため
@@ -213,10 +223,23 @@ jobs:
   # 指定しない（二重管理回避の原則）。
   #
   # #466 設計との差分と許容理由（本ジョブは共通側実装に従うため下記は本リポ側で
-  # 制御できない差分だが、安全性への影響がないことを確認済み）:
-  #   - target キーに rust-toolchain.toml のハッシュを含まない: stable
-  #     チャネル更新時は cargo 側のフィンガープリント再ビルドで安全に処理される
-  #     （#466 コメント自身が明記済みの性質）。安全性は等価で最適性のみ僅かに劣る
+  # 制御できない差分）:
+  #   - target キーに toolchain 実解決版数（rustc/clippy version）を含まない:
+  #     共通側キャッシュ restore ステップが toolchain setup より前にあり、
+  #     reusable workflow の `with:` 入力は静的値のみで実行時コマンド出力を渡せない
+  #     ため、呼び出し側からは共通側キーを修正できない構造的制約がある。この
+  #     ギャップにより共通側 clippy ジョブは toolchain 更新後も target キャッシュが
+  #     命中しうる（イシュー #917 で実測反証済み: PR #914 で clippy 1.98 の新規 lint
+  #     違反が main push CI のキャッシュ命中により検出されなかった）。担保は本リポ
+  #     固有の verification-gates ジョブ（ゲート 3/3）が同一コマンド
+  #     〈`cargo clippy --workspace --all-targets --all-features -- -D warnings`〉で
+  #     シャドーイングする設計に委ねる: verification-gates は target キーに実解決
+  #     版数を含み（本ファイル冒頭のキャッシュ設計コメント参照）、toolchain 更新後の
+  #     最初の run で構成上フルミス・全クレート再検査となるため、rust-ci 側の clippy
+  #     が偽 green でも `ci-complete` が verification-gates の失敗を fail-closed に
+  #     集約し CI run 全体としては検出できる。共通側（Fandhe-AI/actions）自体の改善
+  #     （版数取得の cache 前移動・キーへの組み込み）は別リポジトリ作業のため
+  #     Issue 起票にユーザー承認が要り（out-of-scope-tracking.md）本変更では見送る
   #   - `hashFiles('**/Cargo.lock')`（#466 側は `'Cargo.lock'`）: ルート単一
   #     Cargo.lock 構成＋submodule 非 checkout のため実質同一
   #   - fmt ジョブにも target を含むキャッシュがある: fmt はビルドしないため
@@ -319,15 +342,42 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
+      # toolchain 実解決版数の取得（イシュー #917）。rust-toolchain.toml は
+      # `channel = "stable"` のまま内容が変化しないため、hashFiles ベースの target
+      # キーだけでは stable 更新（clippy lint 集合の変化を伴う）をキャッシュミスとして
+      # 捕捉できない（PR #914 で clippy 1.98 の新規 lint 違反が main push CI の
+      # キャッシュ命中により検出されず、キャッシュミスした別 PR ブランチで初めて
+      # 顕在化した実測に基づく）。rustc/clippy の実解決版数をキーへ組み込み、
+      # toolchain 更新時に target キャッシュを構成上フルミスさせることで
+      # `cargo clippy --workspace --all-targets --all-features` の全クレート再実行を
+      # 保証する。空値・想定外形式のままキーへ混入すると版数なしキーへ縮退し
+      # 偽陰性対策が無効化されるため、正規表現検証を通らない場合は fail-closed で
+      # run を失敗させる。
+      - name: toolchain 実解決版数の取得（target キャッシュキー用）
+        id: toolchain-versions
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustc_ver="$(rustc --version | awk '{print $2}')"
+          clippy_ver="$(cargo clippy --version | awk '{print $2}')"
+          for v in "${rustc_ver}" "${clippy_ver}"; do
+            printf '%s' "${v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.]+)?$' \
+              || { echo "::error::toolchain 版数の取得に失敗: rustc=${rustc_ver} clippy=${clippy_ver}" >&2; exit 1; }
+          done
+          echo "rustc=${rustc_ver}" >> "${GITHUB_OUTPUT}"
+          echo "clippy=${clippy_ver}" >> "${GITHUB_OUTPUT}"
+
       # target（build ジョブ専用。本ファイル冒頭コメントのキャッシュ設計参照）。
+      # restore-keys は toolchain 実解決版数スコープ内の前方一致に限定する（旧版数の
+      # target を新版数の run へ復元しない。イシュー #917）。
       - name: Cache cargo target
         if: steps.detect.outputs.has_cargo == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-build-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-build-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-build-${{ runner.os }}-
+            target-build-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: cargo build（Linux ホスト）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -470,15 +520,32 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
+      # toolchain 実解決版数の取得（イシュー #917。build ジョブと同一契約。
+      # 版数取得ステップの意図・fail-closed の理由は build ジョブのコメント参照）。
+      - name: toolchain 実解決版数の取得（target キャッシュキー用）
+        id: toolchain-versions
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustc_ver="$(rustc --version | awk '{print $2}')"
+          clippy_ver="$(cargo clippy --version | awk '{print $2}')"
+          for v in "${rustc_ver}" "${clippy_ver}"; do
+            printf '%s' "${v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.]+)?$' \
+              || { echo "::error::toolchain 版数の取得に失敗: rustc=${rustc_ver} clippy=${clippy_ver}" >&2; exit 1; }
+          done
+          echo "rustc=${rustc_ver}" >> "${GITHUB_OUTPUT}"
+          echo "clippy=${clippy_ver}" >> "${GITHUB_OUTPUT}"
+
       # target（build-no-cuda-toolkit ジョブ専用。本ファイル冒頭コメントのキャッシュ設計参照）。
+      # restore-keys は toolchain 実解決版数スコープ内の前方一致に限定する（イシュー #917）。
       - name: Cache cargo target
         if: steps.detect.outputs.has_cargo == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-build-no-cuda-toolkit-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-build-no-cuda-toolkit-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-build-no-cuda-toolkit-${{ runner.os }}-
+            target-build-no-cuda-toolkit-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: cargo build（toolkit 非搭載）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -775,16 +842,33 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
+      # toolchain 実解決版数の取得（イシュー #917。build ジョブと同一契約。
+      # guardrail-regression-schedule.yml も本ジョブとキーを共有するため同期必須）。
+      - name: toolchain 実解決版数の取得（target キャッシュキー用）
+        id: toolchain-versions
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustc_ver="$(rustc --version | awk '{print $2}')"
+          clippy_ver="$(cargo clippy --version | awk '{print $2}')"
+          for v in "${rustc_ver}" "${clippy_ver}"; do
+            printf '%s' "${v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.]+)?$' \
+              || { echo "::error::toolchain 版数の取得に失敗: rustc=${rustc_ver} clippy=${clippy_ver}" >&2; exit 1; }
+          done
+          echo "rustc=${rustc_ver}" >> "${GITHUB_OUTPUT}"
+          echo "clippy=${clippy_ver}" >> "${GITHUB_OUTPUT}"
+
       # target（guardrail-regression ジョブ専用。guardrail クレートの debug テスト
       # 成果物のみのため他ジョブと内容が異なり分離する。本ファイル冒頭コメント参照）。
+      # restore-keys は toolchain 実解決版数スコープ内の前方一致に限定する（イシュー #917）。
       - name: Cache cargo target
         if: steps.detect.outputs.has_cargo == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-guardrail-regression-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-guardrail-regression-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-guardrail-regression-${{ runner.os }}-
+            target-guardrail-regression-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: 1 層目（REQ-4・判定器単体）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -856,18 +940,36 @@ jobs:
           restore-keys: |
             cargo-registry-${{ runner.os }}-
 
+      # toolchain 実解決版数の取得（イシュー #917。build ジョブと同一契約。
+      # verification-gates は clippy ゲート〈ゲート 3/3〉を担うジョブそのものであり、
+      # 本ステップが偽陰性対策の要となる）。
+      - name: toolchain 実解決版数の取得（target キャッシュキー用）
+        id: toolchain-versions
+        if: steps.detect.outputs.has_cargo == 'true'
+        run: |
+          set -euo pipefail
+          rustc_ver="$(rustc --version | awk '{print $2}')"
+          clippy_ver="$(cargo clippy --version | awk '{print $2}')"
+          for v in "${rustc_ver}" "${clippy_ver}"; do
+            printf '%s' "${v}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.]+)?$' \
+              || { echo "::error::toolchain 版数の取得に失敗: rustc=${rustc_ver} clippy=${clippy_ver}" >&2; exit 1; }
+          done
+          echo "rustc=${rustc_ver}" >> "${GITHUB_OUTPUT}"
+          echo "clippy=${clippy_ver}" >> "${GITHUB_OUTPUT}"
+
       # target（verification-gates ジョブ専用。debug build + release test + clippy の
       # 成果物を含み他ジョブと内容が大きく異なるため分離する。本ファイル冒頭コメント参照。
       # キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合は release のみ保存する等の
-      # 縮小策を #468 以降で検討する）。
+      # 縮小策を #468 以降で検討する）。restore-keys は toolchain 実解決版数スコープ内の
+      # 前方一致に限定する（イシュー #917）。
       - name: Cache cargo target
         if: steps.detect.outputs.has_cargo == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
-          key: target-verification-gates-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          key: target-verification-gates-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
-            target-verification-gates-${{ runner.os }}-
+            target-verification-gates-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
 
       - name: ゲート 1/3（build）
         if: steps.detect.outputs.has_cargo == 'true'
