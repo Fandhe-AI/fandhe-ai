@@ -75,6 +75,12 @@
 #     なし）とする。ソース変更のみでは target キャッシュを更新しない設計であり、依存
 #     コンパイルの再利用が支配的な高速化要因であるため、コミットごとの保存は
 #     キャッシュ容量（リポジトリ上限・LRU 退避）の浪費になる
+#   - verification-gates ジョブの target キャッシュのみ `actions/cache/restore` +
+#     明示 `actions/cache/save` の分離構成を使う（ヒット種別ログ記録のため。イシュー
+#     #919。alloc_tracker_serial.rs 間欠失敗のキャッシュ起因切り分け）。保存条件
+#     （`cache-hit != 'true'` かつステップ既定の `success()`）は上記の複合アクション
+#     既定と同値であり、他ジョブの target キャッシュは従来どおり複合アクションのまま
+#     とする
 #   - ブランチスコープ（GitHub Actions cache の既定挙動）: PR ブランチで保存した
 #     キャッシュは当該 PR に閉じ、main（push トリガー）で保存したキャッシュが全 PR の
 #     共通ベースになる。fork PR がベースキャッシュを汚染できない性質もこの既定挙動で
@@ -962,14 +968,55 @@ jobs:
       # キャッシュ容量〈リポジトリ上限・LRU 退避〉を圧迫する場合は release のみ保存する等の
       # 縮小策を #468 以降で検討する）。restore-keys は toolchain 実解決版数スコープ内の
       # 前方一致に限定する（イシュー #917）。
-      - name: Cache cargo target
+      #
+      # イシュー #919: alloc_tracker_serial.rs の間欠失敗（PR #914 で black_box 観測点を
+      # 追加済みだが根本原因未確定）の有力仮説の 1 つが、本キャッシュの restore-keys
+      # 前方一致フォールバック（古い Cargo.lock／toolchain 世代の target/ への増分ビルド）
+      # 起因説。複合アクション `actions/cache` は cache-hit（完全一致の真偽のみ）しか
+      # 出力せず完全一致・接頭辞一致・ミスを区別できないため、`actions/cache/restore` +
+      # 明示 `actions/cache/save` に分離してヒット種別を判別可能にする。
+      # 同一 SHA（v4.3.0）のサブパスを使うため SHA 固定規約（.claude/rules/ci.md）は
+      # 維持したまま新規 action 追加なしで実現する。
+      - name: Cache cargo target（restore）
+        id: cache-target-restore
         if: steps.detect.outputs.has_cargo == 'true'
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: target/
           key: target-verification-gates-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
             target-verification-gates-${{ runner.os }}-rustc${{ steps.toolchain-versions.outputs.rustc }}-clippy${{ steps.toolchain-versions.outputs.clippy }}-
+
+      # target キャッシュ復元結果の記録（イシュー #919）。
+      # cache-matched-key が空なら miss、cache-primary-key と一致すれば exact、
+      # それ以外は restore-keys 前方一致フォールバックによる prefix ヒットと判定する
+      # （target/ の有無を見るヒューリスティックではなく restore サブアクションの出力を
+      # 直接使うため推定なしで正確に分類できる）。判定結果はゲートの成否に一切影響させず
+      # 情報記録専用とする。式はインジェクション対策の慣行として env 経由で受け渡す。
+      - name: target キャッシュ復元結果の記録（イシュー #919）
+        if: steps.detect.outputs.has_cargo == 'true'
+        env:
+          PRIMARY_KEY: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
+          MATCHED_KEY: ${{ steps.cache-target-restore.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          if [ -z "${MATCHED_KEY}" ]; then
+            HIT_KIND="miss"
+          elif [ "${MATCHED_KEY}" = "${PRIMARY_KEY}" ]; then
+            HIT_KIND="exact"
+          else
+            HIT_KIND="prefix（restore-keys フォールバック）"
+          fi
+          echo "::notice::target キャッシュヒット種別（イシュー #919）: ${HIT_KIND} / primary=${PRIMARY_KEY} / matched=${MATCHED_KEY}"
+          {
+            echo "### target キャッシュ復元結果（イシュー #919）"
+            echo ""
+            echo "| 項目 | 値 |"
+            echo "|------|-----|"
+            echo "| ヒット種別 | ${HIT_KIND} |"
+            echo "| primary key | \`${PRIMARY_KEY}\` |"
+            echo "| matched key | \`${MATCHED_KEY}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: ゲート 1/3（build）
         if: steps.detect.outputs.has_cargo == 'true'
@@ -982,6 +1029,19 @@ jobs:
       - name: ゲート 3/3（clippy）
         if: steps.detect.outputs.has_cargo == 'true'
         run: bash scripts/run-verification-gates.sh clippy
+
+      # target キャッシュの保存（イシュー #919。restore/save 分離構成の対）。
+      # 完全一致時（cache-hit == 'true'）は再保存しない・ジョブ成功時のみ保存という、
+      # 複合アクション `actions/cache` 既定の保存セマンティクス（本ファイル冒頭コメント
+      # 「保存タイミング」節）と同値になるよう、ステップ既定の success() に加えて
+      # cache-hit を明示検査する。key は cache-primary-key を再参照し hashFiles の
+      # 二重計算を避ける。
+      - name: Cache cargo target（save）
+        if: steps.detect.outputs.has_cargo == 'true' && steps.cache-target-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: target/
+          key: ${{ steps.cache-target-restore.outputs.cache-primary-key }}
 
   # --------------------------------------------------
   # 集約ジョブ。branch protection（ruleset main-protection・id 20587668）は
