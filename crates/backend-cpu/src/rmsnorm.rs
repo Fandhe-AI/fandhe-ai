@@ -30,7 +30,7 @@
 //!
 //! # 境界検査（REQ-8）
 //!
-//! NEON 経路は `chunks_exact(4)` で検証済みの full チャンクのみを `unsafe`
+//! NEON 経路は `as_chunks::<4>()` で検証済みの full チャンクのみを `unsafe`
 //! ロード対象とし、端数（`hidden % 4 != 0`）はスカラーで処理する
 //! （`get_unchecked` は使わない）。
 
@@ -201,7 +201,7 @@ pub(crate) fn rmsnorm_row_scalar(
 
 /// NEON 経路（`cfg(target_arch = "aarch64")` 限定）。
 ///
-/// 二乗和は `chunks_exact(4)` の full チャンクを `vfmaq_f32` で累積し、
+/// 二乗和は `as_chunks::<4>()` の full チャンクを `vfmaq_f32` で累積し、
 /// 端数（`hidden % 4 != 0`）はスカラー（[`rmsnorm_row_scalar`] と同一定義の
 /// `f32::mul_add`）で処理する（REQ-8 境界検査。ベクトル化ロードは検証済み
 /// full チャンクのみを対象とし `get_unchecked` は使わない）。出力パスも
@@ -210,11 +210,10 @@ pub(crate) fn rmsnorm_row_scalar(
 fn rmsnorm_row_neon(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_row: &mut [f32]) {
     use std::arch::aarch64::{vaddvq_f32, vfmaq_f32, vld1q_f32, vmulq_f32, vmulq_n_f32, vst1q_f32};
 
-    let chunks = row.chunks_exact(4);
-    let remainder = chunks.remainder();
-    // SAFETY: `chunks_exact(4)` が返す各チャンクは長さ 4 を境界検査済み
+    let (chunks, remainder) = row.as_chunks::<4>();
+    // SAFETY: `as_chunks::<4>()` が返す各チャンクは長さ 4 の固定長配列
     // （REQ-8）。`vld1q_f32` はチャンク先頭ポインタから 4 要素（16 バイト）
-    // 読み出すが、チャンク自体が 4 要素ちょうどのスライスであるため範囲外
+    // 読み出すが、チャンク自体が 4 要素ちょうどの配列であるため範囲外
     // 読み出しは起きない。
     let acc_vec = unsafe {
         let mut acc = std::arch::aarch64::vdupq_n_f32(0.0);
@@ -234,13 +233,13 @@ fn rmsnorm_row_neon(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_ro
     let acc = unsafe { vaddvq_f32(acc_vec) } + acc_scalar;
     let rstd = 1.0f32 / acc.mul_add(inv_n, eps).sqrt();
 
-    let out_chunks = out_row.chunks_exact_mut(4);
-    let row_chunks = row.chunks_exact(4);
+    let out_chunks = out_row.as_chunks_mut::<4>().0.iter_mut();
+    let row_chunks = row.as_chunks::<4>().0.iter();
     match w {
         Some(w) => {
-            let w_chunks = w.chunks_exact(4);
+            let w_chunks = w.as_chunks::<4>().0.iter();
             for ((oc, rc), wc) in out_chunks.zip(row_chunks).zip(w_chunks) {
-                // SAFETY: `chunks_exact(4)` により `oc`/`rc`/`wc` はいずれも
+                // SAFETY: `as_chunks::<4>()` により `oc`/`rc`/`wc` はいずれも
                 // 長さ 4（境界検査済み）。`vld1q_f32`/`vst1q_f32` は
                 // 4 要素のみを読み書きする。
                 unsafe {
@@ -251,7 +250,7 @@ fn rmsnorm_row_neon(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_ro
                     vst1q_f32(oc.as_mut_ptr(), out_v);
                 }
             }
-            let rem_start = row.len() - row.chunks_exact(4).remainder().len();
+            let rem_start = row.len() - row.as_chunks::<4>().1.len();
             for i in rem_start..row.len() {
                 out_row[i] = row[i] * rstd * w[i];
             }
@@ -265,7 +264,7 @@ fn rmsnorm_row_neon(row: &[f32], w: Option<&[f32]>, eps: f32, inv_n: f32, out_ro
                     vst1q_f32(oc.as_mut_ptr(), out_v);
                 }
             }
-            let rem_start = row.len() - row.chunks_exact(4).remainder().len();
+            let rem_start = row.len() - row.as_chunks::<4>().1.len();
             for i in rem_start..row.len() {
                 out_row[i] = row[i] * rstd;
             }

@@ -36,7 +36,7 @@
 //!
 //! [`rmsnorm`](crate::rmsnorm) モジュールと同じ方針（`cfg(target_arch =
 //! "aarch64")` の `std::arch::aarch64` intrinsics + 常時コンパイルの
-//! スカラー参照実装。REQ-8 境界検査は `chunks_exact(4)` の full チャンクの
+//! スカラー参照実装。REQ-8 境界検査は `as_chunks::<4>()` の full チャンクの
 //! みを `unsafe` ロード対象とする）。
 
 use rayon::prelude::*;
@@ -153,7 +153,7 @@ pub(crate) fn softmax_row_scalar(row: &[f32], out_row: &mut [f32]) {
 
 /// NEON 経路（`cfg(target_arch = "aarch64")` 限定）。
 ///
-/// pass1（行 max）は `chunks_exact(4)` の full チャンクを `vmaxq_f32` で
+/// pass1（行 max）は `as_chunks::<4>()` の full チャンクを `vmaxq_f32` で
 /// 縮約し、端数はスカラー `f32::max` を適用する（REQ-8）。pass2
 /// （`exp(v - max)` の書き込み + `sum` 集約）は `exp` 自体をベクトル化
 /// せず（NEON に `exp` intrinsic はなく、多項式近似は本イシューで未検証
@@ -164,10 +164,9 @@ pub(crate) fn softmax_row_scalar(row: &[f32], out_row: &mut [f32]) {
 fn softmax_row_neon(row: &[f32], out_row: &mut [f32]) {
     use std::arch::aarch64::{vld1q_f32, vmaxq_f32, vmaxvq_f32};
 
-    let chunks = row.chunks_exact(4);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = row.as_chunks::<4>();
     let mut max_v = f32::NEG_INFINITY;
-    // SAFETY: `chunks_exact(4)` が返す各チャンクは長さ 4 を境界検査済み
+    // SAFETY: `as_chunks::<4>()` が返す各チャンクは長さ 4 の固定長配列
     // （REQ-8）。`vld1q_f32` はチャンク先頭ポインタから 4 要素のみ読む。
     if row.len() >= 4 {
         let max_vec = unsafe {
