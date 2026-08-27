@@ -10,9 +10,15 @@
 # サブコマンド:
 #   lock <path>  Cargo.lock の `name = "<crate>"` 行を検査する（Cargo.toml 未追加時は
 #                呼び出し側で存在チェックしてからこのスクリプトを呼ぶ想定）
-#   lock-all     本リポジトリが持つ全 Cargo.lock（本体 workspace ルート・
+#   lock-all     本リポジトリが持つ検査対象の全 Cargo.lock（本体 workspace ルート・
 #                scripts/bench/oss-gemm-compare/ の OSS 直接比較ハーネス〈許容依存
 #                第 9 区分。.claude/rules/deps-policy.md〉）をまとめて検査する。
+#                scripts/bench/framework-compare/（第 9 区分の適用範囲拡張。
+#                フレームワーク横並びベンチ）の Cargo.lock は、比較対象という性質上
+#                依存禁止リストのクレート（candle-*・burn-*・cubecl・ndarray・tch 等）を
+#                意図的に含むため、lock-all の走査対象に**含めない**（意図的除外。
+#                deps-policy.md 第 9 区分の該当行参照。本体 workspace への混入は
+#                引き続きルート Cargo.lock・cargo tree 検査で fail-closed に検出される）。
 #                対象パスの列挙をこの 1 箇所に集約し、呼び出し側（ci.yml・Makefile）で
 #                個別パスをハードコードしない（「CI と同一判定をローカル再現」を
 #                二重管理なしで満たすため）。ルート Cargo.lock は workspace 骨格

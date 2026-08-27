@@ -40,12 +40,16 @@
   `=x.y.z` 完全固定でないバージョン指定、`docs/license-matrix.md` 更新・ユーザー承認
   記録を伴わない依存追加・更新は P1（A06。`deny.toml` の licenses / sources /
   advisories / bans 検査と `scripts/check-forbidden-deps.sh` が機械検査する）。
-  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`）は
-  `scripts/bench/oss-gemm-compare/`（独立 Cargo プロジェクト。本体 workspace 外）
+  第 9 区分（ベンチ比較対象。`matrixmultiply`・`gemm`、および適用範囲拡張の
+  `candle-core`・`burn`〈推移的依存ツリー込み〉）は
+  `scripts/bench/oss-gemm-compare/`・`scripts/bench/framework-compare/`
+  （いずれも独立 Cargo プロジェクト／workspace。本体 workspace 外）
   限定であり、同区分の必須条件（`=x.y.z` 完全固定・本体 workspace〈ルート
-  `Cargo.toml`／`Cargo.lock`〉への非混入・専用 `deny.toml` による CI 監査。
-  `.claude/rules/deps-policy.md`「許容依存 9 区分」表を参照）の違反は従来どおり
-  P1（2026-08-20 ユーザー承認。イシュー #755）
+  `Cargo.toml`／`Cargo.lock`〉への非混入・oss-gemm-compare は専用 `deny.toml` による
+  CI 監査。`.claude/rules/deps-policy.md`「許容依存 9 区分」表を参照）の違反は
+  従来どおり P1（oss-gemm-compare: 2026-08-20 ユーザー承認・イシュー #755。
+  framework-compare: 導入 PR で承認確認中）。framework-compare 配下の禁止リスト
+  クレートは比較対象としての意図的保持であり P0 の混入には当たらない
 - **外部フォーマットのパース検証（P0）**: safetensors / ONNX（prost）・TOML 設定・
   guardrail CLI 入力のパース時は長さ・形状の事前検証を行う。検証の欠落・後退、
   シェル呼び出しへの外部入力の非クォート展開等のインジェクション経路は P0（A03）
