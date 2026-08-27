@@ -1,0 +1,193 @@
+# キャッシュなしフルビルド clippy を定期的に実行し、main の push CI（rust-base-ci
+# reusable workflow の clippy ジョブ）がキャッシュ命中時に検査対象を狭めてしまう
+# 「キャッシュ偽陰性」を defense-in-depth として補足する（イシュー #918）。
+#
+# 背景: toolchain 更新（clippy 1.98 の新 lint 等）起因の違反が main 上で潜伏したまま
+# 検出されない事例が実際に起きた（#912 の対応漏れが、キャッシュミスした PR ブランチ
+# #913/#914 で初めて顕在化）。対策はトラッキング #916 配下で 2 系統に分かれ、キャッシュ
+# キー側の恒久対策は #917（別イシュー）が担う。本 workflow はそれとは独立に、
+# キャッシュ復元を一切行わないフルビルド clippy を毎日実行して取りこぼしを補足する。
+#
+# ci.yml 側（rust-base-ci の clippy ジョブ。キャッシュあり）との責務分担:
+#   ci.yml    push/PR 契機の高速フィードバック（キャッシュにより速いが偽陰性リスクあり）
+#   本 workflow  schedule/workflow_dispatch 契機の定期検証（低速だが偽陰性を補足する）
+#
+# 契約: 本ジョブのステップに actions/cache 系ステップを一切置かない。これが本
+# workflow の目的そのもの（キャッシュなしでの clippy 実行）であるため、後続変更で
+# キャッシュステップを追加しないこと（レビュー観点）。Fandhe-AI/actions/
+# rust-toolchain-setup は toolchain 同期のみを行い cargo キャッシュを復元しない。
+#
+# schedule トリガーは default branch（main）上に登録されたワークフロー定義でのみ発火
+# する（GitHub Actions の仕様）。マージ前は workflow_dispatch による構文検証のみが
+# 可能で、実際の schedule 発火・実行結果はマージ後に確認する。
+#
+# report ジョブ（scripts/report-clippy-nocache-schedule-result.sh）は、schedule 実行が
+# push/PR チェックと異なり人の目に触れないため、失敗を追跡用 Issue に可視化する
+# （.claude/rules/security.md A09。clippy の検査コマンドそのものには関与しない
+# 「純粋な可視化」。同 A08 参照。guardrail-regression-schedule.yml と同型の構成）。
+name: Clippy Nocache Full Build (schedule)
+
+on:
+  schedule:
+    # 21:30 UTC = 06:30 JST 毎日。既存 schedule（guardrail 20:30 UTC・bench 月曜 18:00
+    # UTC・update-external 00:00 UTC）と時刻をずらし、0 分ちょうどの混雑帯も避ける。
+    - cron: '30 21 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clippy-nocache-schedule
+  # 実行中の検証を途中破棄すると検証結果が欠落するため、直列化のみ行い cancel はしない
+  # （guardrail-regression-schedule.yml と同一判断）。
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------
+  # キャッシュなしフルビルド clippy 本体
+  # --------------------------------------------------
+  clippy-nocache:
+    name: キャッシュなしフルビルド clippy（定期検証）
+    runs-on: ubuntu-latest
+    # コールドフルビルド（キャッシュなし）の見込み値。実測で不足する場合は引き上げる
+    # （引き下げは行わない。フルビルドは push CI のキャッシュ命中時より明確に遅い）。
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        # actions/checkout v6.0.3（ci.yml・guardrail-regression-schedule.yml と同一 SHA
+        # に固定）。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          # 本ジョブは checkout 後に GITHUB_TOKEN を使わない（report ジョブのみ
+          # issues:write を使う。.claude/rules/ci.md）。
+          persist-credentials: false
+
+      # 本リポジトリは既に Cargo workspace（ルート Cargo.toml 常設）であり、
+      # manifest 不在は checkout 異常等の異常事態でしかありえない。以前は
+      # has_cargo=false でスキップして clippy ステップを実行せずジョブを成功
+      # 扱いにしていたが、これは fail-open（manifest 消失時も定期検証が成功
+      # 扱いになり、後続 report ジョブが既存の障害 Issue を誤ってクローズし
+      # うる）だったため廃止する（コードレビュー指摘 #940）。Cargo.toml の
+      # 存在を fail-closed に検証し、欠落時は明示的にジョブを失敗させる。
+      - name: Cargo.toml の存在を検証（fail-closed）
+        run: |
+          set -euo pipefail
+          if [ ! -f "Cargo.toml" ]; then
+            echo "::error::Cargo.toml が見つかりません（本リポジトリは常設の Cargo workspace であり、checkout 異常等の異常事態です）。キャッシュなしフルビルド clippy を fail-closed で失敗させます" >&2
+            exit 1
+          fi
+
+      # ubuntu-latest は rustup プリインストール済みのため実質 no-op で通過し、
+      # rust-toolchain.toml へ同期する（ci.yml・guardrail-regression-schedule.yml と
+      # 同一方針）。toolchain 同期のみを行い cargo キャッシュは復元しない。
+      - name: Rust toolchain setup（rust-toolchain.toml 同期）
+        uses: Fandhe-AI/actions/rust-toolchain-setup@latest
+
+      # actions/cache 系ステップを意図的に置かない（本 workflow の目的そのもの。
+      # coding-rust.md の規約コマンドと完全一致させる）。
+      - name: cargo clippy（キャッシュなしフルビルド）
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # 結果継続確認の一次可視化（実行日時・対象 commit SHA を run ごとに残す）。
+      # 失敗検知の可視化そのものは後続 report ジョブが担う。
+      - name: 結果サマリを記録
+        if: always()
+        run: |
+          {
+            echo "### キャッシュなしフルビルド clippy（定期検証）"
+            echo ""
+            echo "- 実行日時（UTC）: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "- 対象 commit: ${GITHUB_SHA}"
+            echo "- ジョブ結果: ${{ job.status }}"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  # --------------------------------------------------
+  # 失敗検知の可視化（scripts/report-clippy-nocache-schedule-result.sh が単一ソース）
+  # --------------------------------------------------
+  report:
+    name: 結果の可視化（失敗時 Issue 起票・復旧時クローズ）
+    needs: [clippy-nocache]
+    # 上流ジョブが失敗・キャンセルされた場合にも必ず実行し、fail-closed で報告する
+    # （.claude/rules/ci.md の ci-complete ジョブ・guardrail-regression-schedule.yml の
+    # report ジョブと同一方針）。
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # Issue 起票・追記・クローズのみに限定して昇格する（.claude/rules/ci.md・security.md）。
+      issues: write
+    steps:
+      - name: Checkout
+        # スクリプト取得のみが目的で GITHUB_TOKEN を使う git 操作は行わないため
+        # persist-credentials: false を維持する。
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      # ubuntu-latest には gh CLI がプリインストール済みのため本ステップは実質 no-op で
+      # 通過する。バージョン固定ダウンロードはプリインストールされていない場合
+      # （ランナーイメージ変更等）のフェイルセーフとして維持する（冪等。$HOME 配下のみ
+      # への導入で使い捨て VM 外へ影響しない。guardrail-regression-schedule.yml と同一
+      # パターン）。self-test 実行前に置く: self-test は gh をスタブ化して検証するため
+      # 本ステップの有無を検知できず、また本 workflow の report ジョブは push/PR 契機の
+      # CI（ci.yml）では動かないため、バイナリ欠如は schedule/workflow_dispatch 実行で
+      # 初めて顕在化する。self-test をゲートせず先に導入することで gh 未導入環境でも
+      # self-test 自体が実行できることを保証する。ubuntu-latest（linux）前提のため、
+      # Linux 版バイナリの取得のみに対応する。
+      - name: Ensure gh is installed
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            GH_VERSION="2.97.0"
+            ARCH=$(uname -m)
+            case "${ARCH}" in
+              x86_64)
+                GH_ARCH=amd64
+                # https://github.com/cli/cli/releases/download/v2.97.0/gh_2.97.0_checksums.txt
+                # から取得し固定した公式 sha256（2026-08-27 実測）。GH_VERSION 更新時は
+                # 同 URL の checksums.txt から該当アーカイブ行を再取得し値を合わせて
+                # 更新すること（バージョン固定だけでは取得物の改竄を検出できないため）。
+                GH_SHA256="a2c9b8497e1f85b1ad0dfcb78b5a622e098801b8e461e459e88e1ee12f018112"
+                ;;
+              aarch64)
+                GH_ARCH=arm64
+                GH_SHA256="73ea440ecad9c9e284429997ee6f93577bc6f7bc6fba357ef62c53ad8fb641a5"
+                ;;
+              *)
+                echo "NG: 未対応アーキテクチャです: ${ARCH}" >&2
+                exit 1
+                ;;
+            esac
+            TMP_DIR=$(mktemp -d)
+            trap 'rm -rf "${TMP_DIR}"' EXIT
+            curl --proto '=https' --tlsv1.2 -fsSL \
+              "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
+              -o "${TMP_DIR}/gh.tar.gz"
+            # 取得物の改竄検出（サプライチェーン対策）。以降のステップで issues:write
+            # 権限の GITHUB_TOKEN を用いて gh を実行するため、バージョン固定だけでなく
+            # 公式チェックサムとの一致を fail-closed で確認してから展開・配置する。
+            echo "${GH_SHA256}  ${TMP_DIR}/gh.tar.gz" | sha256sum -c -
+            tar -xzf "${TMP_DIR}/gh.tar.gz" -C "${TMP_DIR}"
+            mkdir -p "${HOME}/.local/bin"
+            cp "${TMP_DIR}/gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" "${HOME}/.local/bin/gh"
+            echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+          fi
+
+      - name: 報告ロジックの self-test
+        run: bash scripts/report-clippy-nocache-schedule-result.sh self-test
+
+      - name: 結果を Issue へ可視化
+        env:
+          RESULT: ${{ needs.clippy-nocache.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Issue の起票・追記・クローズを schedule 実行に限定するための判定材料
+          # （コードレビュー指摘 #940。scripts/report-clippy-nocache-schedule-result.sh
+          # 側の EVENT_NAME 検証を参照）。workflow_dispatch は任意のブランチ／コミット
+          # で実行できるため、この値なしでは検証用ブランチでの手動実行の失敗・成功が
+          # main 用の固定タイトル障害 Issue を誤って起票・追記・クローズしうる。
+          EVENT_NAME: ${{ github.event_name }}
+        run: bash scripts/report-clippy-nocache-schedule-result.sh report
