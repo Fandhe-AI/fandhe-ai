@@ -63,6 +63,19 @@
 //! （新規空ディレクトリでの初回 JIT）を厳密に分離した計測は本イシューの
 //! スコープ外とし、実装完了報告の `outOfScope` に記録する。
 //!
+//! # 実行時は必ず `--test-threads=1`（Review #945 指摘: GPU 上での競合）
+//!
+//! 本ファイルの 3 テスト（[`init_cost_diag_phase_breakdown`]・
+//! [`init_cost_diag_e2e_matches_framework_compare_shape`]・
+//! [`init_cost_diag_reused_handle_steady_state_reference`]）はいずれも
+//! `CudaDevice::new(0)`（device 0）を使う。`cargo test` の既定テストハーネスは
+//! 複数スレッドで `#[test]` 関数を並行実行するため、既定のまま `--ignored` で
+//! まとめて起動すると 3 テストの `Instant` 計測区間が同一 GPU 上で競合し、
+//! 本ファイルが記録するフェーズ計測（(p1)〜(p4)・e2e gemm・再利用ハンドル）に
+//! カーネル起動待ち・SM 占有の競合が混入して値が歪みうる。§5.3
+//! （`docs/perf/cuda-tape-init-cost-diagnosis.md`）の実行コマンドは
+//! `--test-threads=1` を明示し、この 3 テストを直列実行する。
+//!
 //! # gating しない方針（Review #534 と同じ理由）
 //!
 //! 本ファイルの `#[test]` はすべて **実行が成功すること**（NVRTC
@@ -194,13 +207,30 @@ fn measure_one_trial() -> TrialSample {
     }
 
     // 本番と同一の単一呼び出し（`CudaGemm::new`）での (p2)+(p3) 合計実測。
+    //
+    // Review #945 指摘: 本番経路（`ops.rs::CudaBackendOps::gemm`）は呼び出し
+    // ごとに新規 `CudaDevice::new` を都度構築する設計（`ops.rs`
+    // `CudaBackendOps` 構造体ドキュメンテーションコメント参照）であり、直前に
+    // 同一デバイス上で同じ 8 カーネルを compile_ptx／load_module 済みという
+    // 状態は本番には存在しない。上の診断ループで使った `device` をそのまま
+    // 使うと driver 側のモジュール常駐状態の恩恵を受け `gemm_new_secs` が
+    // 本番より低めに偏るため、本番と忠実に対応させるべく独立した新規
+    // デバイスハンドルで計測する（この新規デバイス生成自体の所要時間は
+    // どの集計にも含めない。あくまで `gemm_new_secs` を汚染しないための
+    // 隔離目的）。
+    let device_for_gemm_new = CudaDevice::new(0).expect(
+        "CUDA device must be available on the ignored diagnostic bench runner \
+         (isolated handle for gemm_new_secs measurement)",
+    );
     let t_gemm_new = Instant::now();
-    let gemm = CudaGemm::new(&device)
+    let gemm = CudaGemm::new(&device_for_gemm_new)
         .expect("CudaGemm::new must succeed given the manual compile/load pass above succeeded");
     let gemm_new_secs = t_gemm_new.elapsed().as_secs_f64();
 
     // (p4) 実 GEMM 実行（N=1024。ホスト→デバイス転送・カーネル起動・
     // 同期・デバイス→ホスト転送の合計。`run_tiled_f32` の契約どおり）。
+    // 本番同様、直前に構築した `gemm`（`device_for_gemm_new` 由来）をそのまま
+    // 使う。
     let (a, b) = gen_square_ab(0x926, P4_MATMUL_N);
     let n = P4_MATMUL_N as u32;
     let t_run = Instant::now();

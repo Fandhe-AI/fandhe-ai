@@ -147,8 +147,14 @@ naive f32/f16・tiled f32/f16・tiled_bias_act_f32（5 本）・WMMA TF32 基本
 ### 5.3 実行コマンド（実機）
 
 ```bash
-cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --nocapture init_cost_diag
+cargo test -p fandhe-ai-backend-cuda --release --lib -- --ignored --nocapture --test-threads=1 init_cost_diag
 ```
+
+`--test-threads=1` は必須（Review #945 指摘）。本ファイルの 3 テストはいずれも
+device 0 を使うため、既定の並行テストハーネスのまま起動すると 3 テストの
+`Instant` 計測区間が同一 GPU 上で競合し、フェーズ計測（(p1)〜(p4)・e2e gemm・
+再利用ハンドル）にカーネル起動待ち・SM 占有の競合が混入して値が歪みうる
+（`init_cost_diag_tests.rs` 冒頭コメント「実行時は必ず `--test-threads=1`」参照）。
 
 環境記録項目（GPU・driver・NVRTC 版・rustc・リビジョン）・GPU 占有確認手順は
 `docs/real-hardware-verification-env.md` §6.1 に従う。実ホスト名は書かない
