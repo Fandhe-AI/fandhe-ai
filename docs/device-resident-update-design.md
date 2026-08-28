@@ -67,11 +67,20 @@ download 済み → 今回ステップの forward で再度 upload」という�
 
 ## 3. 更新経路（design decision 1）
 
-### 3.1 採用方針: `BackendOps` の非破壊拡張 + 段階的常駐化
+### 3.1 採用方針: `BackendOps: MemoryOps`（supertrait 結線）+ デフォルトメソッド + 常駐 forward 入口
 
-`tensor-core::BackendOps` に対し、`gemm_bias_act`/`run_fused` 相当の**デフォルト
-メソッド追加**（既存メソッドのシグネチャ変更なし。TASK-1.9c の非破壊拡張方針
-〈`backend_ops.rs:19-27`〉を踏襲）として、in-place パラメータ更新の入口を追加する。
+`tensor-core::buffer.rs` は当初から「`MemoryOps` は `BackendOps` の
+supertrait となる想定（TASK-1.9c では結線しない）」と明記していた
+（`buffer.rs:11-13`）。本設計はこの保留を**確定する**: `sgd_step_device`
+のデフォルト実装が `download`/`upload` を呼ぶ以上、`Self: MemoryOps` を
+満たす必要があり、これを個々のデフォルトメソッドの where 句として都度
+付けるのではなく、`BackendOps: MemoryOps` という trait 定義そのものの
+supertrait 関係として一度だけ確定する（§3.2 で object safety との関係を
+扱う）。
+
+`tensor-core::BackendOps` に対し、次の 2 メソッドを追加する（既存メソッドの
+シグネチャ変更なし。TASK-1.9c の非破壊拡張方針〈`backend_ops.rs:19-27`〉を
+踏襲）:
 
 ```rust
 /// デバイス常駐パラメータの in-place SGD 更新入口（#934 設計・#935 実装）。
@@ -87,6 +96,24 @@ fn sgd_step_device(
     velocity: Option<&mut DeviceBuffer<f32>>,
     config: &SgdStepConfig,
 ) -> Result<(), BackendError>;
+
+/// `DeviceParamStore`（§3.3）常駐時の `nn::Linear` forward 入口
+/// （#934 設計・#935 実装）。既存の `gemm`/`add` 系メソッド（ホスト
+/// `Tensor<f32>` 入出力契約。§2）と異なり、`weight`/`bias` はデバイス
+/// 常駐のまま渡す。`input`/戻り値は本段階（§3.3）のスコープに従い
+/// ホスト `Tensor<f32>` のまま（forward/backward の完全デバイス常駐化は
+/// §6(b) のとおりスコープ外）。オーバーライドしない場合の既定実装は
+/// `self.download(weight)`/`self.download(bias)`（`MemoryOps`。§3.1 の
+/// supertrait 結線により呼べる）でホスト値を得たうえで既存の
+/// `gemm`+`add` 相当の計算へ委譲する（CPU は §2 のとおり追加転送
+/// コストなし。CUDA/Metal は最適化時、weight/bias の再アップロードを
+/// 省略するオーバーライドに置き換える）。
+fn linear_forward_resident(
+    &self,
+    input: &Tensor<f32>,
+    weight: &DeviceBuffer<f32>,
+    bias: Option<&DeviceBuffer<f32>>,
+) -> Result<Tensor<f32>, BackendError>;
 ```
 
 `SgdStepConfig`（`tensor-core` 側に新設。`autodiff::optim::SgdConfig` の
@@ -97,30 +124,56 @@ SgdStepConfig` 等）は #935 が実装する。`tensor-core` は `autodiff` に
 （既存の依存方向: `autodiff` → `tensor-core`）ため、`SgdStepConfig` は
 `tensor-core` 側に独立定義し、`autodiff` 側が変換して渡す構成とする。
 
-### 3.2 デフォルト実装の方針: fail-safe 合成（`Unsupported` 分岐にしない）
+### 3.2 デフォルト実装の方針: fail-safe 合成 + object safety の確定
 
 既存の未実装カーネル（GPU 側 elementwise/reduction の一部）は `BackendError::
-Unsupported` を返す設計だが（`backend_ops.rs:28-33`）、`sgd_step_device` は
-**それとは異なり「必ず成立するが遅い」合成をデフォルト実装とする**:
+Unsupported` を返す設計だが（`backend_ops.rs:28-33`）、`sgd_step_device`／
+`linear_forward_resident` は**それとは異なり「必ず成立するが遅い」合成を
+デフォルト実装とする**:
 
 ```text
-デフォルト実装 = download(param) → ホスト参照実装（CPU と同一式順序・
-                 f32::mul_add）で更新 → upload(param) で書き戻し
-                 （velocity も同様に往復）
+sgd_step_device の既定実装        = download(param) → ホスト参照実装
+                                    （CPU と同一式順序・f32::mul_add）で
+                                    更新 → upload(param) で書き戻し
+                                    （velocity も同様に往復）
+linear_forward_resident の既定実装 = download(weight)・download(bias)
+                                    → 既存 gemm+add（ホスト Tensor 契約）
+                                    へ委譲
 ```
 
 採否理由: `Unsupported` + 呼び出し側ホストフォールバックにすると、#935 の
 実装順序（CPU → CUDA → Metal）の途中で「まだデバイスカーネルを実装していない
-バックエンド」を使うコードパスが `sgd_step_device` を呼べず、`autodiff::optim`
+バックエンド」を使うコードパスがこれらのメソッドを呼べず、`autodiff::optim`
 側に「両方の経路（デバイス常駐 API と旧ホスト API）を呼び分ける分岐」を
 恒久的に持たせることになる。デフォルト実装が fail-safe に成立していれば、
-`autodiff::optim::DeviceParamStore`（§3.3）は常に `sgd_step_device` だけを
-呼べばよく、各バックエンドが最適化されたカーネルを持つかどうかは実装詳細に
-留められる。デフォルト実装は `MemoryOps` が既に提供する `download`/`upload`
-のみで構成でき、`MemoryOps` を `BackendOps` の supertrait にする必要はない
-（デフォルト実装の実装側で `MemoryOps: Sized` 経由の呼び出しに閉じる、あるいは
-`sgd_step_device` のデフォルト実装を持つ trait 側で `Self: MemoryOps` の
-where 句を付ける形を #935 で確定する）。
+`autodiff::optim::DeviceParamStore`（§3.3）は常に `sgd_step_device`／
+`linear_forward_resident` だけを呼べばよく、各バックエンドが最適化された
+カーネルを持つかどうかは実装詳細に留められる。
+
+**object safety の確定**（レビュー指摘 #934: `BackendOps` は現状
+`MemoryOps` の supertrait ではないため、デフォルト実装が `Self:
+MemoryOps` を要求すると `Box<dyn BackendOps + Send>`（既存の呼び出し形態。
+`facade`/`autodiff` 側が保持する型）から呼び出せない）: 本設計は
+`pub trait BackendOps: MemoryOps { ... }` として **`MemoryOps` を
+`BackendOps` の supertrait にする**（§3.1）。`MemoryOps` は
+`buffer.rs:203` のドキュメンテーションコメントが明記するとおり
+「object-safe に設計している（`&dyn MemoryOps` として扱える）」ため、
+supertrait 化しても `dyn BackendOps`（`Box<dyn BackendOps + Send>` を
+含む）のトレイトオブジェクト安全性は損なわれない（supertrait のメソッドは
+トレイトオブジェクトの vtable にそのまま含まれ、既存呼び出し側の型・
+呼び出し形態は変更不要）。これにより `sgd_step_device`／
+`linear_forward_resident` のデフォルト実装は `self.download(..)`／
+`self.upload(..)` を追加の where 句なしに呼べる。
+
+現状 `CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`（`BackendOps`
+実装型）と `CpuMemory`／`CudaMemory`／`MetalMemory`（既存の `MemoryOps`
+実装型。`backend-{cpu,cuda,metal}/src/memory.rs`）は別構造体である
+（`ops.rs`／`memory.rs` 実装箇所を実測確認済み）。#935 は各
+`XBackendOps` へ `impl MemoryOps for XBackendOps` を追加する（既存
+`XMemory` の実装本体へ委譲する形でよく、`XBackendOps` が `XMemory` を
+フィールドとして保持するか、都度その場で構築するかは実装時に選べる
+実装詳細とする。いずれの選択でも本節が確定した trait 構造・呼び出し
+形態には影響しない）。
 
 ### 3.3 段階設計: 「param + optimizer 状態のみ常駐、勾配は毎ステップ 1 回 upload」
 
@@ -145,14 +198,56 @@ param 往復（§2 末尾）が「学習開始時の 1 回の upload + 終了時
 （forward/backward 自体が `Tensor<f32>` 契約のカーネルを呼ぶ限り、勾配は
 一度ホストへ出てくるため）。
 
+### 3.3a forward への結線（レビュー指摘 #934: line 134 の解消）
+
+§3.3 の常駐化が成立するには、`nn::Linear`/`Sequential` の forward が
+**`DeviceParamStore` の `DeviceBuffer` を直接読む**必要がある。既存
+`Sequential::forward`（`sequential.rs:102`）／`SequentialVars::forward`
+（`sequential.rs:315`）は `self.layers` の各 `Linear` が保持する**ホスト**
+`weight`/`bias`（§2 の現状整理表「パラメータ保持」行）を読む。`Linear` は
+`apply_parameters`（two-pass 再構築。§3.5）を通じてのみ更新されるが、
+`DeviceParamStore` 常駐時は毎ステップの `apply_parameters` 呼び出しを
+行わない（§3.3 の目的そのもの）ため、`Linear` 側のホスト値は「セッション
+開始時のスナップショット」のまま stale になる。これが指摘の核心であり、
+本節で結線を確定する:
+
+- **所有者は `Sequential` レベル**（`Linear` 単体ではない）。`Linear` は
+  毎ステップ `apply_parameters` で丸ごと再構築される設計（§2）のため、
+  `Linear` 自身に常駐ストアへの参照を持たせると再構築のたびに配線し直す
+  必要が生じ、寿命管理が複雑になる。`Sequential` は既に `apply_parameters`
+  の two-pass 検証（§3.5・#426）の主体であり、層の並び順（インデックス）
+  を単一に把握している唯一のクレート内オブジェクトのため、常駐ストアの
+  結線もここに集約する。
+- **層インデックス対応**: `DeviceParamStore::new(sequential: &Sequential)`
+  が `Sequential::trainable_parameters()`（既存 API。`apply_parameters` と
+  同じ並び順契約〈§4.2「位置対応契約」・`sgd.rs:183-200`〉）と同一順序で
+  各層の `weight`/`bias`（と `velocity`）を `upload` し、層インデックス→
+  `DeviceBuffer` の対応表として保持する。既存の位置対応契約をそのまま
+  再利用するため、新たな対応規則を追加で決定する必要はない。
+- **新規 forward 入口**: `Sequential` に既存 `forward` を置き換えない
+  追加メソッド `forward_resident(&self, tape: &Tape, input: &Var,
+  store: &DeviceParamStore) -> Result<Var, AutodiffError>`（仮称。確定
+  シグネチャは #935）を追加する。内部実装は既存 `forward` と同じ層
+  イテレーションだが、各 `Linear` 層について自身のホスト `weight`/
+  `bias` の代わりに `store` から対応するインデックスの `DeviceBuffer` を
+  取得し、`BackendOps::linear_forward_resident`（§3.1）を呼ぶ。入力
+  バッチ・中間活性・活性化関数（ReLU 等）・backward の記録方式は既存
+  `forward` と同一（`Tape`/`Var` への登録ロジックは変更しない。呼び出す
+  `BackendOps` メソッドが変わるのみ）。
+- **既存 `forward` との関係**: 既存 `forward`（ホスト `Tensor` のみで
+  完結）は変更・削除しない（§3.5 の「既存 API 非破壊」方針）。
+  `DeviceParamStore` を使う学習ループは `forward_resident` を呼び、
+  `predict`／保存等は既存 `forward` + 明示同期後の `apply_parameters`
+  を使う（§3.5）。
+
 ### 3.4 クレート責務分担
 
 | クレート | 責務 |
 |---|---|
-| `tensor-core` | `sgd_step_device` trait メソッド・`SgdStepConfig` 型定義（`BackendOps` の非破壊拡張） |
-| `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
+| `tensor-core` | `sgd_step_device`／`linear_forward_resident` trait メソッド・`SgdStepConfig` 型定義（`BackendOps: MemoryOps` supertrait 結線を含む非破壊拡張。§3.1・§3.2） |
+| `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
 | `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック |
-| `facade` | 公開面。#932 の optimizer facade 公開設計の結論に従属させる（本ドキュメントは compat 面の意匠を確定しない） |
+| `facade`（`compat::Sequential` 経由で `Sequential::forward_resident` を実装） | `Sequential` への `forward_resident`・層インデックス対応表の保持（§3.3a）。公開面は #932 の optimizer facade 公開設計の結論に従属させる（本ドキュメントは compat 面の意匠を確定しない） |
 
 ### 3.5 既存 API との関係
 
@@ -220,9 +315,44 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
 更新フェーズ: 検証済みの全件について sgd_step_device を呼ぶ
 ```
 
-検証フェーズを更新フェーズより前に完全に終わらせることで、途中エラーに
-よる「一部パラメータのみ更新済み」の混在状態を防ぐ（#935 の
-`DeviceParamStore::step` 実装が満たすべき契約として明記する）。
+**検証フェーズが排除するのは事前検証可能な失敗のみ**（レビュー指摘
+#934: line 223。`sgd_step_device` は `Result` を返すため、検証フェーズを
+通過した後の更新フェーズでも、2 件目以降の呼び出しがデバイス側の実行時
+エラー〈CUDA カーネル起動失敗・ドライバエラー・OOM 等〉で失敗しうる。
+これは事前の shape/device 検証では検出できない失敗であり、two-pass
+方式だけでは「一部パラメータのみ更新済み」の混在状態を排除できない。
+これが指摘の正当な核心であり、本節は保証範囲を次のとおり確定する（
+チェックポイント/ロールバック方式は、更新のたびに全パラメータ分の
+一時バッファを追加確保する必要があり、本設計が §1 で削減対象とする
+ホスト往復コストとは別種だが同水準の追加コストを生むため不採用とする）:
+
+- **検証フェーズの保証（変更なし）**: shape/device 不一致・件数不一致は
+  検証フェーズで検出され、1 件でも不一致なら更新フェーズは一切開始
+  されない（どのバッファも未更新のまま `Result::Err` を返す）。
+- **更新フェーズの保証（新設・非保証の明示）**: 検証フェーズ通過後の
+  更新フェーズで `sgd_step_device` が実行時エラーを返した場合、
+  `DeviceParamStore` はその時点で更新済みのバッファと未更新のバッファが
+  混在する状態になり得ることを**明示的に非保証（no atomicity）の契約と
+  する**。この場合 `DeviceParamStore::step` は最初に発生したエラーを
+  `Result::Err` として返すと同時に、ストア自身を **poisoned 状態**へ
+  遷移させる（`std::sync::Mutex` の poisoning と同じ考え方）。poisoned
+  状態の `DeviceParamStore` は以後 `step`／`sync_to_host`（§3.5）の
+  いずれも `BackendError`（新設 variant。名称は #935 で確定するが、
+  「poisoned のため再初期化が必要」であることを呼び出し元が判別できる
+  こと自体は本設計で確定する）を返し、暗黙に「部分更新済みの値」を
+  正常値として使わせない（暗黙コピー禁止方針〈§4.1〉と同じ「stale／
+  不正な値を誤って使わせない」設計軸の延長）。回復手段は「セッション
+  開始時に保持していたホスト `Tensor<f32>`（§4.1 のスナップショット。
+  最後の明示同期時点の値）から `DeviceParamStore` を再構築する」ことに
+  限定する（デバイス側の実行時エラーはドライバ・ハードウェア起因が
+  多く、同一 `DeviceParamStore` インスタンス内での自動リトライは対象と
+  しない）。
+- **§4.1／§4.4 との整合**: poisoned 状態は「新しい状態」を追加するのみで、
+  §4.1 の単一真実源（`DeviceParamStore` が正）・stale スナップショット
+  契約（ホスト `Tensor` は最後の明示同期時点の値）とも、§4.4 の RAII
+  一本化（poisoned 状態でも `Drop` 経由の解放は通常どおり働く。
+  poisoned は「使用不可」を表すフラグであり、解放不能状態ではない）とも
+  矛盾しない。
 
 ### 4.4 解放・スレッド境界
 
@@ -263,6 +393,15 @@ CPU ホスト参照実装（既存 `optim::Sgd::step` の式順序・`f32::mul_a
 バックエンド間で異なると、複合判定の閾値内であっても丸め誤差の蓄積パターンが
 変わり得るため、#935 実装レビューで式順序の一致を明示確認する。
 
+`linear_forward_resident`（§3.1・§3.3a）の出力は、同一入力・同一
+weight/bias 値に対する既存 `gemm`+`add`（ホスト `Tensor<f32>` 契約）経路の
+出力と本節と同じ統一複合判定を満たすことを #936 の parity テストへ
+引き渡す（forward 経路を切り替えても数値契約は変わらないことの確認。
+既定実装〈§3.2〉はホスト経路への委譲そのものであるため定義上一致するが、
+CUDA/Metal が weight/bias 再アップロードを省略する最適化カーネルへ
+オーバーライドした場合はカーネル実装差による丸め誤差が生じ得るため、
+オーバーライド後も本判定での確認を要する）。
+
 ### 5.3 累積 parity の判定方式
 
 単一ステップの判定（§5.1）に加え、#936 の parity テスト設計への引き渡し
@@ -290,26 +429,37 @@ CPU ホスト参照実装（既存 `optim::Sgd::step` の式順序・`f32::mul_a
 | 案 | 内容 | 採否 |
 |---|---|---|
 | (a) 暗黙常駐キャッシュ方式 | `Tensor` 内部にデバイスキャッシュを持たせ、書き込み時に暗黙で同期する方式（candle の `Var::set` 型） | **不採用**。暗黙コピー禁止方針（`docs/public-api-design.md` §2.2.1）・型分離（ホスト `Tensor` とデバイス `DeviceBuffer` を明確に分ける現行設計）との不整合。stale 値の誤用検知も難しくなる |
-| (b) `BackendOps` 全面 `DeviceBuffer` 化を先行 | forward/backward を含む全カーネル入口を `DeviceBuffer` 契約へ一気に移行してから更新経路を設計する | **不採用（本イシュースコープでは）**。変更範囲が 4h 粒度を大きく超え、#931（デバイスハンドル再利用の公開 API 設計）・phase-4（#924）と重複する。接続点のみ §3.3 に記録し、本設計は非破壊拡張 + 段階常駐化（案 c）で先行する |
-| (c) 採用案 | §2〜§4 の非破壊拡張（`sgd_step_device` デフォルトメソッド）+ 常駐ストア（`DeviceParamStore`）+ 段階的常駐化（param/velocity のみ常駐、grad は毎ステップ 1 回 upload） | **採用** |
+| (b) `BackendOps` 全面 `DeviceBuffer` 化を先行 | forward/backward を含む全カーネル入口（`gemm`/`add`/`relu` 等すべて）を `DeviceBuffer` 契約へ一気に移行してから更新経路を設計する | **不採用（本イシュースコープでは）**。変更範囲が 4h 粒度を大きく超え、#931（デバイスハンドル再利用の公開 API 設計）・phase-4（#924）と重複する。§3.1・§3.3a で追加する `linear_forward_resident` はこの不採用案とは異なる: 対象は `Linear` forward の weight/bias 入力のみ（1 メソッドの追加）であり、入力バッチ・中間活性・backward・他の全カーネル（`add`/`relu`/畳み込み等）は既存のホスト `Tensor<f32>` 契約のまま変更しない。「全カーネル入口の一括移行」という本 (b) 案の対象範囲（forward/backward 全体）とは規模・影響範囲が異なるため、本設計のスコープに含めても 4h 粒度・#931/phase-4 との重複を引き起こさない |
+| (c) 採用案 | §2〜§4 の非破壊拡張（`sgd_step_device`／`linear_forward_resident` デフォルトメソッド・`BackendOps: MemoryOps` supertrait 結線）+ 常駐ストア（`DeviceParamStore`）+ 段階的常駐化（param/velocity のみ常駐、grad は毎ステップ 1 回 upload）+ `Sequential::forward_resident` による forward 結線（§3.3a）+ 更新フェーズの poisoned 状態契約（§4.3） | **採用** |
 
 ## 7. スコープ境界・受け渡し
 
 ### #935（実装）への引き渡し事項
 
-- §3.1 の確定シグネチャ（`sgd_step_device`／`SgdStepConfig`）をそのまま
-  `tensor-core::backend_ops` へ追加する。
+- §3.1 の確定シグネチャ（`sgd_step_device`／`linear_forward_resident`／
+  `SgdStepConfig`）をそのまま `tensor-core::backend_ops` へ追加し、
+  `BackendOps: MemoryOps`（§3.1・§3.2 で確定した supertrait 結線）を
+  `backend_ops.rs` へ反映する（`buffer.rs:11-13` の保留コメントは本設計で
+  解消済みのため、#935 で該当コメントも更新する）。
+- 各 `XBackendOps`（`CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`）
+  へ `impl MemoryOps for XBackendOps` を追加する（既存 `XMemory` 実装への
+  委譲か、フィールド保持かは §3.2 のとおり実装詳細として #935 が選ぶ。
+  trait 構造・呼び出し形態への影響はどちらでもない）。
 - 実装順序: CPU → CUDA → Metal（既存 GEMM カーネルの実装順序・PoC 実証の
   蓄積と揃える）。
-- フォールバック契約: §3.2 のデフォルト実装（download → ホスト更新 →
-  upload）を先に用意し、各バックエンドが最適化カーネルでオーバーライド
-  する形で段階的に置き換える（デフォルト実装のままでも正しく動作する
-  ことを前提に、性能改善は独立した最適化として進められる）。
-- `DeviceParamStore` の具体的な API（`new`/`step`/`sync_to_host` 等の
-  シグネチャ）・`autodiff::optim` 内の配置（既存 `optim::Sgd` との関係。
-  `Sgd` を置き換えるのではなく、`DeviceParamStore` が内部で §5.1 の判定に
-  使う参照実装として `Sgd::step` 相当のロジックを再利用する形を想定）は
-  #935 側で確定する。
+- フォールバック契約: §3.2 のデフォルト実装（`sgd_step_device`:
+  download → ホスト更新 → upload。`linear_forward_resident`: download →
+  既存 gemm+add 委譲）を先に用意し、各バックエンドが最適化カーネルで
+  オーバーライドする形で段階的に置き換える（デフォルト実装のままでも
+  正しく動作することを前提に、性能改善は独立した最適化として進められる）。
+- `Sequential::forward_resident`（§3.3a）を `facade::compat::Sequential`
+  へ追加し、`DeviceParamStore::new` が `trainable_parameters()` と同一の
+  位置対応契約で層インデックス→`DeviceBuffer` 対応表を構築する。
+- `DeviceParamStore` の API（`new`/`step`/`sync_to_host` 等の確定
+  シグネチャ）・`autodiff::optim` 内の配置は #935 が決める。決定済みの
+  設計軸（`Sgd` を置き換えず `Sgd::step` 相当のロジックを §5.1 の参照
+  実装として再利用する構成・§4.3 の poisoned 状態を表す `BackendError`
+  variant を持つこと）はそのまま踏襲する。
 - 更新カーネル（CUDA NVRTC・Metal compute shader）の `unsafe` 使用は
   FFI 境界に限定し、理由コメント + security-auditor レビュー必須
   （`.claude/rules/security.md`「unsafe」節）。
