@@ -46,8 +46,7 @@ use std::time::Instant;
 use bench_harness::median_q1_q3;
 use fandhe_ai::Device;
 use fandhe_ai::Tensor;
-use fandhe_ai_backend_cuda::CudaDeviceProvider;
-use fandhe_ai_tensor_core::device::DeviceProvider;
+use fandhe_ai_backend_cuda::CudaDevice;
 
 /// 5 回計測中央値方針（`.claude/rules/coding-rust.md`）。
 const WARM_TRIALS: usize = 5;
@@ -65,6 +64,20 @@ fn sample_tensor() -> Tensor<f32> {
 /// （[`fandhe_ai_tensor_core::BackendOps::gemm`]）を実際に起動する経路の
 /// うち facade 公開 API から到達できる最小の呼び出しであり、
 /// `context_cache::cached_gemm`（`ops::CudaBackendOps::gemm`）を通す。
+///
+/// `product`（非スカラー）をそのまま `backward` の loss に渡す理由
+/// （Cursor Bugbot 指摘。イシュー #929 PR #946）: `product.sum(None)` は
+/// `BackendOps::sum` を直接呼ぶが、`CudaBackendOps::sum`
+/// （`backend-cuda/src/ops.rs`）は汎用 reduction カーネル未実装のため
+/// 常に `BackendError::Unsupported` を返す（#599 スコープ外・別イシュー）。
+/// このため本ベンチは cold/warm いずれの試行も `sum(None)` の時点で必ず
+/// panic し、計測自体が実行できていなかった。`Tape::backward` は
+/// 非スカラー loss に対し「全要素 1 のシードで逆伝播する」（`sum(loss)
+/// .backward()` と数学的に等価な暗黙の総和射影。`backward.rs`
+/// 「非スカラー loss のセマンティクス」参照）契約を持つため、`sum` を
+/// 経由せず `product` を直接 loss として渡せば計測対象（`tape_for` の
+/// 結線 + `matmul` 経由の `cached_gemm` + `backward`）を変えずに
+/// `CudaBackendOps::sum` の未実装を回避できる。
 fn measure_tape_for_cuda_matmul() -> f64 {
     let t = Instant::now();
     let tape = fandhe_ai::tape_for(Device::Cuda(0))
@@ -74,8 +87,7 @@ fn measure_tape_for_cuda_matmul() -> f64 {
     let product = a
         .matmul(&b)
         .expect("2x2 正方行列同士の matmul は shape 一致で成功する");
-    let loss = product.sum(None).expect("sum は成功する");
-    let _grads = tape.backward(&loss).expect("backward は成功する");
+    let _grads = tape.backward(&product).expect("backward は成功する");
     t.elapsed().as_secs_f64()
 }
 
@@ -90,8 +102,24 @@ fn measure_tape_for_cuda_matmul() -> f64 {
 #[test]
 #[ignore = "CUDA 実機必須。イシュー #929 受け入れ条件 1（cold/warm 初期化コスト比較）"]
 fn tape_for_cuda_second_call_avoids_reinitialization_cost() {
+    // `CudaDevice::device_count()`（static。ドライバへの device count
+    // 問い合わせのみで `CudaContext` を構築しない軽量プローブ）を使う
+    // 理由（Cursor Bugbot 指摘。イシュー #929 PR #946）: 旧実装は
+    // `CudaDeviceProvider::new().is_available()`（`DeviceProvider`
+    // トレイト実装。`device.rs` 参照）を呼んでいたが、これは
+    // `enumerate()` → `probe()` → `context_cache::cached_device(ordinal)`
+    // を経由するため、このガード呼び出し自体が cold サンプル計測より前に
+    // プロセス全体のデバイスキャッシュを温めてしまい、本ベンチが計測
+    // すると主張する `CudaContext::new`（受け入れ条件 1 のコスト本体）が
+    // cold パスから漏れ落ちる欠陥があった。`device_count()` はデバイス
+    // キャッシュに触れない（コンテキストを構築しない）ため、ガードが
+    // 計測対象へ副作用を与えない。「選択可能デバイスが 1 台以上ある」の
+    // 確認は `count > 0` で行う（`is_available()` トレイト実装の
+    // `enumerate` 経由チェックより弱いが、`probe` 成功まで確認しない分
+    // だけキャッシュを汚染しない）。
+    let device_count = CudaDevice::device_count().unwrap_or(0);
     assert!(
-        CudaDeviceProvider::new().is_available(),
+        device_count > 0,
         "本ベンチは CUDA driver 搭載・選択可能デバイスが 1 台以上ある実機でのみ実行する \
          （#[ignore] で通常 CI からは除外される）"
     );

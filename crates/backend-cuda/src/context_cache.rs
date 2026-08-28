@@ -35,8 +35,10 @@
 //!
 //! # 所有モデル・生存期間
 //!
-//! 各キャッシュは `ordinal` をキーとする `HashMap<usize, Arc<T>>` を
-//! `OnceLock<Mutex<_>>` で保持するプロセスワイド static。エントリは
+//! 各キャッシュは `ordinal` をキーとする
+//! `HashMap<usize, Arc<Mutex<Option<Arc<T>>>>>`（外側はエントリ登録専用の
+//! 短命ロック、内側はキー単位の single-flight ロック。[`get_or_build`]
+//! 参照）を `OnceLock<Mutex<_>>` で保持するプロセスワイド static。エントリは
 //! プロセスの生存期間中 evict されない（キーは物理デバイス ordinal で
 //! 有界であり、`module_cache.rs::KernelModuleCache`〈shape 特化コンパイル
 //! キャッシュ。無限に増えうる key 空間のため LRU 容量上限を持つ〉とは
@@ -90,6 +92,16 @@ const _: fn() = || {
     assert_send_sync::<CudaSoftmax>();
 };
 
+/// `ordinal` 単位の single-flight ロック。`None` は未構築（またはミスの
+/// まま失敗して片付いた状態）、`Some` は構築済みハンドルの共有 `Arc`。
+/// [`get_or_build`] 参照。
+type Slot<T> = Arc<Mutex<Option<Arc<T>>>>;
+
+/// `ordinal` をキーとする [`Slot<T>`] のプロセスワイドキャッシュ本体の型
+/// エイリアス（clippy `type_complexity` 回避。実体は [`get_or_build`] 冒頭
+/// のドキュメント参照）。
+type SingleFlightCache<T> = Mutex<HashMap<usize, Slot<T>>>;
+
 /// `Mutex` guard 取得の共通ヘルパー。poison を
 /// [`CudaError::ContextCacheUnavailable`] へ変換する（`module_cache.rs::
 /// KernelModuleCache::get`/`insert` と同じ変換方針。panic 経路を持たない
@@ -102,37 +114,46 @@ fn lock_cache<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, CudaError> {
         })
 }
 
-/// `ordinal` キーのプロセスワイド `HashMap<usize, Arc<T>>` に対する
-/// 「ヒットなら clone・ミスなら `build` で構築して登録」の共通ロジック。
+/// `ordinal` キーのプロセスワイド `HashMap<usize, Arc<Mutex<Option<Arc<T>>>>>`
+/// に対する「ヒットなら clone・ミスなら `build` で構築して登録」の
+/// single-flight ロジック（codex-review 指摘。イシュー #929 PR #946）。
 ///
-/// ロック区間を 2 段に分ける（先に読み取り専用でヒット判定、ミス時のみ
-/// `build` をロック外で実行してから再度ロックして登録）ことで、
-/// コストの高い `build`（NVRTC コンパイル等を含みうる）をプロセス全体の
-/// `Mutex` 保持中に実行しない（`module_cache.rs::KernelModuleCache::insert`
-/// の「evict をロック外で drop する」判断と同じ「重い処理をロック外に
-/// 追い出す」方針）。2 スレッドが同時にミスした場合は両方が `build` を
-/// 実行しうるが、登録は `entry().or_insert_with` で先着 1 件のみが採用
-/// され、後着側の構築結果は呼び出し元に返した後 drop されるだけであり
-/// 数値的な誤りにはつながらない（許容する冗長構築。呼び出し頻度に対し
-/// 発生確率は低く、複雑な二重チェックロックを導入するほどではないと
-/// 判断した。実装計画 §3.1）。
+/// ロックを 2 階層に分ける: 外側の `cache` Mutex は「`ordinal` に対応する
+/// キー単位ロック（`Arc<Mutex<Option<Arc<T>>>>`）を取得・登録する」だけの
+/// ごく短い臨界区間に限定し、コストの高い `build`（NVRTC コンパイル等を
+/// 含みうる）を実行している間は保持しない（他 ordinal への同時アクセスを
+/// 妨げない）。実際の構築は内側のキー単位 `Mutex` を保持したまま行う
+/// ため、同一 `ordinal` への並行呼び出しは 2 つ目以降がこのキー単位
+/// ロックの取得で待機し、`build` を二重実行しない（旧実装は「先にロック外
+/// で `build` し、登録は先着 1 件のみ採用・後着は破棄」という楽観的方式
+/// だったため、同一 ordinal への並行初回呼び出しで `CudaDevice::new`／
+/// `CudaGemm::new` 等の NVRTC コンパイルが重複実行されうる欠陥があった。
+/// 本方式はキー単位ロックで構築区間そのものを直列化することでこれを防ぐ）。
 ///
-/// `build` の失敗（`Err`）はキャッシュへ格納せず、そのまま呼び出し元へ
-/// 伝播する（モジュール冒頭「fail-fast 契約」参照）。
+/// `build` の失敗（`Err`）はスロットへ格納せず（`None` のまま）、そのまま
+/// 呼び出し元へ伝播する（モジュール冒頭「fail-fast 契約」参照）。次回
+/// 呼び出しはキー単位ロックを再度取得できるため `build` を再試行できる。
 fn get_or_build<T>(
-    cache: &Mutex<HashMap<usize, Arc<T>>>,
+    cache: &SingleFlightCache<T>,
     ordinal: usize,
     build: impl FnOnce() -> Result<T, CudaError>,
 ) -> Result<Arc<T>, CudaError> {
-    {
-        let guard = lock_cache(cache)?;
-        if let Some(existing) = guard.get(&ordinal) {
-            return Ok(Arc::clone(existing));
-        }
+    let slot = {
+        let mut guard = lock_cache(cache)?;
+        Arc::clone(
+            guard
+                .entry(ordinal)
+                .or_insert_with(|| Arc::new(Mutex::new(None))),
+        )
+    };
+
+    let mut slot_guard = lock_cache(&slot)?;
+    if let Some(existing) = slot_guard.as_ref() {
+        return Ok(Arc::clone(existing));
     }
     let built = Arc::new(build()?);
-    let mut guard = lock_cache(cache)?;
-    Ok(Arc::clone(guard.entry(ordinal).or_insert(built)))
+    *slot_guard = Some(Arc::clone(&built));
+    Ok(built)
 }
 
 /// `ordinal` 番目の GPU に対応する [`CudaDevice`] をプロセス内キャッシュ
@@ -143,7 +164,7 @@ fn get_or_build<T>(
 /// 内部経路）・[`crate::ops::CudaBackendOps::device_handle`] の唯一の
 /// 呼び出し先とする。
 pub(crate) fn cached_device(ordinal: usize) -> Result<Arc<CudaDevice>, CudaError> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<CudaDevice>>>> = OnceLock::new();
+    static CACHE: OnceLock<SingleFlightCache<CudaDevice>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ordinal, || CudaDevice::new(ordinal))
 }
@@ -153,7 +174,7 @@ pub(crate) fn cached_device(ordinal: usize) -> Result<Arc<CudaDevice>, CudaError
 ///
 /// `ops::CudaBackendOps::gemm`／`gemm_bias_act` の唯一の呼び出し先。
 pub(crate) fn cached_gemm(ordinal: usize, device: &CudaDevice) -> Result<Arc<CudaGemm>, CudaError> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<CudaGemm>>>> = OnceLock::new();
+    static CACHE: OnceLock<SingleFlightCache<CudaGemm>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ordinal, || CudaGemm::new(device))
 }
@@ -165,7 +186,7 @@ pub(crate) fn cached_elementwise(
     ordinal: usize,
     device: &CudaDevice,
 ) -> Result<Arc<CudaElementwise>, CudaError> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<CudaElementwise>>>> = OnceLock::new();
+    static CACHE: OnceLock<SingleFlightCache<CudaElementwise>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ordinal, || CudaElementwise::new(device))
 }
@@ -177,7 +198,7 @@ pub(crate) fn cached_rmsnorm(
     ordinal: usize,
     device: &CudaDevice,
 ) -> Result<Arc<CudaRmsNorm>, CudaError> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<CudaRmsNorm>>>> = OnceLock::new();
+    static CACHE: OnceLock<SingleFlightCache<CudaRmsNorm>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ordinal, || CudaRmsNorm::new(device))
 }
@@ -189,7 +210,7 @@ pub(crate) fn cached_softmax(
     ordinal: usize,
     device: &CudaDevice,
 ) -> Result<Arc<CudaSoftmax>, CudaError> {
-    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<CudaSoftmax>>>> = OnceLock::new();
+    static CACHE: OnceLock<SingleFlightCache<CudaSoftmax>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ordinal, || CudaSoftmax::new(device))
 }
@@ -202,7 +223,7 @@ mod tests {
     /// 実 CUDA 型を要求しない汎用 `T`（ここでは `u32`）で検証する
     /// （`module_cache.rs::LruCache` のテストと同じ「GPU 不要ロジックは
     /// 実カーネル型に依存しない形でテストする」方針）。
-    fn fresh_cache<T>() -> Mutex<HashMap<usize, Arc<T>>> {
+    fn fresh_cache<T>() -> SingleFlightCache<T> {
         Mutex::new(HashMap::new())
     }
 
@@ -230,6 +251,57 @@ mod tests {
             "build は 1 回だけ呼ばれるはず"
         );
         assert!(Arc::ptr_eq(&first, &second), "同一 Arc を共有するはず");
+    }
+
+    /// codex-review 指摘の回帰テスト（イシュー #929 PR #946）: 同一
+    /// `ordinal` への並行初回呼び出しは `build` を single-flight で
+    /// 直列化し、二重実行しない（旧実装は「先にロック外で build し登録は
+    /// 先着 1 件のみ採用」という楽観的方式のため、同時ミス時に `build` が
+    /// 複数回実行されうる欠陥があった）。`build` 内にスリープを挟んで
+    /// 2 スレッドの実行区間を重ねさせ、それでも `build` が 1 回しか
+    /// 呼ばれないことを確認する。
+    #[test]
+    fn get_or_build_single_flights_concurrent_misses() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let cache = std::sync::Arc::new(fresh_cache::<u32>());
+        let calls = std::sync::Arc::new(AtomicU32::new(0));
+
+        let spawn = |cache: std::sync::Arc<SingleFlightCache<u32>>,
+                     calls: std::sync::Arc<AtomicU32>| {
+            std::thread::spawn(move || {
+                get_or_build(&cache, 0, || {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    Ok(99)
+                })
+            })
+        };
+
+        let t1 = spawn(std::sync::Arc::clone(&cache), std::sync::Arc::clone(&calls));
+        // t1 が `build`（内側のキー単位ロック取得〜スリープ中）に確実に
+        // 入ってから t2 を開始し、single-flight でなければ t2 も build に
+        // 入ってしまう猶予を与える。
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = spawn(std::sync::Arc::clone(&cache), std::sync::Arc::clone(&calls));
+
+        let r1 = t1
+            .join()
+            .expect("thread 1 does not panic")
+            .expect("build succeeds");
+        let r2 = t2
+            .join()
+            .expect("thread 2 does not panic")
+            .expect("build succeeds");
+
+        assert_eq!(*r1, 99);
+        assert_eq!(*r2, 99);
+        assert!(Arc::ptr_eq(&r1, &r2), "同一 Arc を共有するはず");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "single-flight のため build は 1 回だけ呼ばれるはず（同時ミスでも重複構築しない）"
+        );
     }
 
     #[test]
