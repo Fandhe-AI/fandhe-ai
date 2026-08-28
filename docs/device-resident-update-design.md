@@ -139,7 +139,19 @@ fn sgd_step_device(
 /// 誤って記述していた）:
 /// 1. **Tape 非依存の resident 推論**（`predict` 相当。勾配不要）は、
 ///    このメソッドを直接呼ぶ。これが本メソッド本来の主眼であり、下記の
-///    既定実装がそのまま使われる。
+///    既定実装がそのまま使われる。**ただし `weight`/`bias` が
+///    `DeviceParamStore`（§3.3）由来の `DeviceBuffer` である場合、
+///    呼び出し元はこのメソッドを直接呼んではならず、必ず
+///    `DeviceParamStore::predict_resident`（§3.3c。P0 レビュー指摘の
+///    解消）を経由する契約とする**。理由: 本メソッドは `tensor-core`
+///    （`DeviceParamStore`・poisoned 状態を一切知らない層）に閉じた
+///    「渡された `DeviceBuffer` をそのまま downloaded 値として計算
+///    するだけ」の入口であり、`DeviceParamStore` 由来のバッファを
+///    そのまま渡す直接呼び出しを許すと、§4.3 が定める poisoned 検査
+///    （`step`／`sync_to_host`／`forward_resident`）をこの経路だけが
+///    素通りしてしまう（`DeviceParamStore` に一切紐付かない、呼び出し
+///    元が独立に保持する `DeviceBuffer` に対する直接呼び出しは、
+///    poisoned という概念自体が存在しないため引き続き許可される）。
 /// 2. **`Tape` 追跡下の学習 forward**（`Sequential::forward_resident`。
 ///    §3.3b）は、**このメソッドを呼ばない**。VJP を成立させるには
 ///    `Op::MatMul`/`Op::Add` 登録経路（`Tape` を持つ `autodiff` 層でしか
@@ -253,6 +265,89 @@ trait オブジェクトとして扱えるようにする（同じ具象値を 2
 生成する必要がない）。外部の `BackendOps` 実装型がこの `impl` を
 持たない場合でも、`BackendOps` trait 自体のコンパイルには一切影響
 しない（§3.1 の非破壊性）。
+
+### 3.2a `self`（`BackendOps`）と `mem`（`MemoryOps`）の同一バックエンド
+検査（P1 レビュー指摘の解消）
+
+**指摘の核心**: §3.1／§3.3a は `sgd_step_device`／`linear_forward_resident`／
+`forward_resident` いずれも「呼び出し元が保持する同一バックエンドの
+`MemoryOps` 実装値をそのまま渡す」ことを前提としているが、これは
+ドキュメント上の慣習（呼び出し元の責任）に過ぎず、`self: &dyn
+BackendOps` と `mem: &dyn MemoryOps` が実際に同一バックエンド・同一
+インスタンスであることを検証する仕組みが存在しなかった。`BackendOps::
+device()`（`backend_ops.rs:86`）による `param`/`grad` 間のデバイス一致
+検査（§4.2）は `self` と `mem` の組み合わせ自体を対象にしていないため、
+外部 `BackendOps` 実装（第三者が実装する `impl BackendOps for
+CustomBackend` 等。crates.io 公開 trait のため想定内）を含む公開契約
+では、誤って別バックエンドの `mem`（例: `CudaBackendOps` に対し
+`MetalMemory` を渡す）を渡せてしまい、誤った handle の扱い・別
+context での操作・静かな誤計算につながりうる。
+
+**採用方針**: `MemoryOps` にも `BackendOps::device()` と対になる非破壊
+拡張（デフォルトメソッド）を追加し、`sgd_step_device`／
+`linear_forward_resident` の既定実装の冒頭で `self` と `mem` の
+デバイス一致を検査する:
+
+```rust
+pub trait MemoryOps {
+    // 既存メソッド（alloc_zeroed／upload／download）は変更しない。
+
+    /// この `MemoryOps` 実装が属するデバイスを返す（P1 レビュー指摘の
+    /// 解消）。`BackendOps::device()`（`backend_ops.rs:86`）と対になる
+    /// 識別情報。**デフォルトメソッドとして追加する**（`;` で終わる
+    /// 必須メソッドにすると既存の外部 `impl MemoryOps for X` を破壊
+    /// するため、§3.1／§3.2 と同じ非破壊拡張方針を踏襲する）。既定は
+    /// `None`（「このバックエンドを識別できない」ことを表す。§3.2a
+    /// 下記の検査ロジックが `None` を fail-closed に扱うため、この
+    /// デフォルトのままでも既存の呼び出し形態は壊れない一方、`mem`
+    /// 引数を要求する新設メソッド〈`sgd_step_device`／
+    /// `linear_forward_resident`〉を安全に使うには、実装側が本メソッド
+    /// をオーバーライドして具体的な `Device` を返す必要がある）。
+    fn device(&self) -> Option<Device> {
+        None
+    }
+}
+```
+
+各 `XMemory`（`CpuMemory`／`CudaMemory`／`MetalMemory`）は本メソッドを
+オーバーライドして `Some(Device::Cpu)`／`Some(Device::Cuda(ordinal))`／
+`Some(Device::Metal)` を返すこと（#935 の実装事項として引き渡す）。
+
+`sgd_step_device`／`linear_forward_resident` の既定実装（§3.1・§3.2）は、
+`mem.download`／`mem.upload` を呼ぶ**前に**次の検査を行う:
+
+```text
+match mem.device() {
+    Some(mem_device) if mem_device != self.device() => Err(BackendMismatch),
+    _ => { /* 一致、または mem 側が device() 未オーバーライド
+             （None）で検証不能。後者は §3.1 の docstring が要求する
+             「呼び出し元責任」を維持しつつ、既存呼び出し形態を破壊
+             しない fail-safe 側へ倒す（後述の残存リスク参照） */ }
+}
+```
+
+新設する `BackendError::BackendMismatch`（variant 名は #935 で確定）は
+「`self`（`BackendOps`）と `mem`（`MemoryOps`）が異なるデバイスに
+属する」ことを呼び出し元が判別できるための型付きエラーとする。
+`Sequential::forward_resident`（§3.3a）・`DeviceParamStore::
+predict_resident`（§3.3c）についても、内部で `BackendOps` の各
+メソッドへ委譲する前に同じ検査を適用する（`forward_resident` は
+`ops`／`mem` の両方を明示引数として受け取るため、同一箇所で検査
+できる）。
+
+**残存リスク（fail-closed の限界を明示する）**: `mem.device()` が
+`None`（外部実装が本メソッドをオーバーライドしない場合の既定）を
+返す組み合わせは、`self` と `mem` の不一致を検出できないまま通過する。
+これは「新設メソッドを安全に使うには `MemoryOps::device()` の
+オーバーライドが必要」という新しい前提を外部実装者へ課す代わりに、
+既存の外部 `impl MemoryOps for X`（本設計以前に存在する実装）を
+一切破壊しないための意図的なトレードオフである。内部 3 バックエンド
+（CPU／CUDA／Metal）はすべてオーバーライドするため、本リポジトリ内の
+呼び出し（`DeviceParamStore` 経由）では常に検査が機能する。この残存
+リスクは #935 の実装コメントおよび `docs/public-api-design.md` へ
+明記し、対象外として記録済みとする（`.claude/rules/out-of-scope-tracking.md`
+の追跡対象にはしない: これは実装不備ではなく、非破壊拡張の設計上の
+トレードオフとして本節が確定する契約であるため）。
 
 ### 3.3 段階設計: 「param + optimizer 状態のみ常駐、勾配は毎ステップ 1 回 upload」
 
@@ -503,6 +598,55 @@ Tape 非依存の resident 推論専用に残す）:
   蓄積（同一パラメータに対する複数回の forward 分の勾配を合算してから
   1 回 `step` する運用）は本設計のスコープ外とし、必要になった時点で
   別途 #935 以降で検討する（§7「スコープ外事項」へ追記する）。
+- **`pending_grad_sources` の解放経路（Medium/Cursor Bugbot 指摘の
+  解消: 未消費ロックからの復旧手段がない）**: 上記の「1 回の
+  `forward_resident` につき高々 1 回の `step`」契約は、`forward_resident`
+  成功後に `tape.backward()` が失敗する（`autodiff` 側のエラー・panic
+  からの回復等）、または呼び出し元がそもそも `step` を呼ばずに学習
+  ループを中断する場合、`pending_grad_sources` が `Some` のまま残り、
+  以後すべての `forward_resident` 呼び出しが「未消費の forward_resident
+  結果が残っている」エラーで拒否され続ける、という回復不能な
+  デッドロックを生む。旧稿はこの状態からの復旧手段を「`DeviceParamStore`
+  全体の再構築・パラメータ再アップロード」以外に定めておらず、コストが
+  高い。これを解消するため、`DeviceParamStore` に次のメソッドを追加
+  する:
+
+  ```rust
+  impl DeviceParamStore {
+      /// 未消費の `pending_grad_sources`（前回 `forward_resident` が
+      /// 記録した `NodeId`／`TapeId` の一時状態）を、対応する `step`
+      /// を実行せずに破棄する（Medium/Cursor Bugbot 指摘の解消）。
+      ///
+      /// **安全性の根拠**: `pending_grad_sources` は `NodeId`／
+      /// `TapeId` の一時的な帳簿にすぎず（§3.3b 冒頭）、
+      /// `forward_resident` 自体はどの `DeviceBuffer`（`weight`/
+      /// `bias`/`velocity_*`）へも書き込みを行わない（書き込みは
+      /// `step` 内の `sgd_step_device` 呼び出し時のみ発生する。§4.3）。
+      /// したがって本メソッドは §4.1 の単一真実源・§4.3 の poisoned
+      /// 状態のいずれにも影響せず、`DeviceParamStore` が保持する
+      /// `DeviceBuffer` 群を一切変更しない、副作用のない状態リセット
+      /// である（poisoned 状態のリセットとは別物であり、本メソッドは
+      /// poisoned 状態を解除しない。poisoned からの回復手段は
+      /// §4.3 のとおり変更しない）。
+      ///
+      /// 呼び出し後、次の `forward_resident` 呼び出しが再び許可される。
+      /// 破棄すべき保留状態がない場合（`pending_grad_sources` が
+      /// 既に `None`）は何もせず `false` を返す（エラーにはしない。
+      /// 冪等な「念のための呼び出し」を許容する）。
+      pub fn abandon_pending_forward(&mut self) -> bool {
+          // 実装詳細（フィールドクリアのみ）は #935 が確定する。
+          unimplemented!()
+      }
+  }
+  ```
+
+  本メソッドは `tape`／`TapeId` の一致検査を要求しない（`step` とは
+  異なり、呼び出し元が「このまま前回 forward 分を破棄したい」という
+  明示的な意思表示そのものであり、誤った `Tape` を渡すリスクが
+  `step` のケースと同型ではないため）。呼び出し元が誤って有効な
+  勾配計算の途中でこれを呼んだ場合の結果は「その forward 分の更新が
+  単に適用されない」であり、既存の「`step` を呼び忘れた」場合と
+  同じ挙動（無害だが学習が進まない）に留まる。
 - `tape.backward()` 実行後、呼び出し元は `DeviceParamStore::step(&mut
   self, tape: &Tape, grads: &Gradients, mem: &dyn MemoryOps, config:
   &SgdStepConfig) -> Result<(), BackendError>`（仮称。確定シグネチャは
@@ -552,6 +696,72 @@ Op）が必要であり、これは forward/backward 全体を `DeviceBuffer` �
 （forward/backward の入出力〈入力バッチ・中間活性〉・weight/bias の
 VJP 用スナップショット・勾配、の 3 種が「毎ステップ／毎 forward 1 回
 転送」の対象となる）。
+
+### 3.3c `DeviceParamStore` 経由の resident 推論エントリ（P0 レビュー
+指摘の解消: resident 推論経路が poisoned 検査を経由しない）
+
+**指摘の核心**: §3.1 で確定した `BackendOps::linear_forward_resident` の
+「呼び出し元は 2 系統」記述は、系統 1（Tape 非依存の resident 推論）を
+「このメソッドを直接呼ぶ」とだけ定めており、`weight`/`bias` の
+`DeviceBuffer` を `DeviceParamStore` から読み出して渡す具体的な経路には
+一切触れていなかった。`DeviceParamStore` は `sgd_step_device` の
+実行時エラー（§4.3）により poisoned 状態へ遷移しうるが、poisoned 検査は
+`step`／`sync_to_host`／`forward_resident` の 3 箇所にしか課されておらず
+（旧稿の §4.3 最終箇条）、`linear_forward_resident` を直接呼ぶ resident
+推論はこの 3 箇所のどれにも該当しない。結果として、更新途中の実行時
+エラーで一部パラメータのみ更新された poisoned な `DeviceParamStore` から
+`weight`/`bias` の `DeviceBuffer` 参照を取り出し、それをそのまま
+`linear_forward_resident` へ渡せば、poisoned フラグを一切検査せずに
+破損混在状態のバッファで推論が実行できてしまう（fail-closed 契約・
+AGENTS.md「fail-closed の維持（P0）」への抵触）。
+
+**採用方針**: `DeviceParamStore` が保持するバッファを使う resident 推論は
+必ず新設の `DeviceParamStore` 側メソッドを経由させ、`tensor-core` 側の
+`linear_forward_resident` を呼び出し元が直接呼ぶ経路を閉じる:
+
+```rust
+impl DeviceParamStore {
+    /// `DeviceParamStore` 常駐のパラメータを使う Tape 非依存の resident
+    /// 推論入口（`predict` 相当）。§3.3a の `forward_resident`
+    /// （Tape 追跡・`&mut self`）とは独立の読み取り専用 API
+    /// （`&self`。推論は勾配を必要としないため書き込みは発生しない）。
+    ///
+    /// 内部で各層について次を行う（`ops: &dyn BackendOps` は
+    /// `forward_resident` と同じく呼び出し元が渡す。§3.3a の `mem` 明示
+    /// 引数と同じ設計軸で、`store` 自身は `BackendOps`/`MemoryOps` の
+    /// 所有権を持たない）:
+    ///
+    /// 1. **poisoned 検査を最初に行う**（§4.3。他のいずれの処理より前）。
+    ///    poisoned であれば `mem.download` を一切呼ばず、同じ
+    ///    `BackendError`（poisoned variant）を返す。
+    /// 2. poisoned でなければ、各層の `weight`/`bias` の `DeviceBuffer`
+    ///    を `ops.linear_forward_resident(mem, ..)`（§3.1）へそのまま
+    ///    渡して forward を計算する。この内側の呼び出しは
+    ///    `DeviceParamStore` の外に出ないため、§3.1 が新設する「直接
+    ///    呼び出し禁止」制約には抵触しない（`predict_resident` 自身が
+    ///    唯一の正当な呼び出し元となる）。
+    pub fn predict_resident(
+        &self,
+        ops: &dyn BackendOps,
+        mem: &dyn MemoryOps,
+        input: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        // 確定シグネチャ・層イテレーション詳細は #935 が実装する。
+        // ここでの契約は「poisoned 検査が forward 計算より必ず先に
+        // 実行される」ことのみを確定する。
+        unimplemented!()
+    }
+}
+```
+
+**§4.3 との整合**: これにより poisoned 検査の対象は `step`／
+`sync_to_host`／`forward_resident`／`predict_resident` の 4 箇所となる
+（§4.3 の最終箇条を本節の追加に合わせて更新する）。`linear_forward_resident`
+自体は `tensor-core` に留まり poisoned という概念を知らないままでよく
+（`tensor-core` は `autodiff::optim::DeviceParamStore` に依存しない設計
+〈既存の依存方向〉を維持する）、poisoned 検査は常に `autodiff` 側の
+`DeviceParamStore` メソッド呼び出し時点で行う、という責務分担が本節の
+確定事項である。
 
 ### 3.4 クレート責務分担
 
@@ -670,18 +880,25 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
   一本化（poisoned 状態でも `Drop` 経由の解放は通常どおり働く。
   poisoned は「使用不可」を表すフラグであり、解放不能状態ではない）とも
   矛盾しない。
-- **`forward_resident` も poison チェック対象とする（Cursor Bugbot 指摘の
-  解消）**: 旧稿は `step`／`sync_to_host` のみ poisoned 時に
-  `BackendError` を返すと定めており、`Sequential::forward_resident`
-  （§3.3a・§3.3b）が破損混在状態のバッファをチェックなしに読める抜け穴が
-  残っていた。`forward_resident` は各層の `DeviceBuffer` を読む
-  （`mem.download` する）**前に** `DeviceParamStore` の poisoned
-  フラグを検査し、poisoned であれば計算を一切行わず同じ
-  `BackendError`（poisoned variant）を返す契約とする。これにより
-  「破損した混在状態のパラメータで forward が実行される」経路を閉じる
-  （`step`／`sync_to_host`／`forward_resident` の 3 箇所すべてが
-  poison チェックを通過して初めて `DeviceParamStore` の内部状態へ
-  アクセスできることを、本設計が確定する fail-closed 契約とする）。
+- **`forward_resident`／`predict_resident` も poison チェック対象とする
+  （Cursor Bugbot 指摘・P0 レビュー指摘の解消）**: 旧稿は `step`／
+  `sync_to_host` のみ poisoned 時に `BackendError` を返すと定めており、
+  `Sequential::forward_resident`（§3.3a・§3.3b）が破損混在状態の
+  バッファをチェックなしに読める抜け穴が残っていた。`forward_resident`
+  は各層の `DeviceBuffer` を読む（`mem.download` する）**前に**
+  `DeviceParamStore` の poisoned フラグを検査し、poisoned であれば
+  計算を一切行わず同じ `BackendError`（poisoned variant）を返す契約と
+  する。同様に、`DeviceParamStore` 経由の Tape 非依存 resident 推論
+  （`predict_resident`。§3.3c）も、`linear_forward_resident`（§3.1）を
+  呼ぶ前に同じ poisoned 検査を行う（§3.1 で「`DeviceParamStore` 由来の
+  バッファを使う場合は `linear_forward_resident` を直接呼ばず
+  `predict_resident` を経由する」契約を確定させたことで、この経路にも
+  poison チェックが必ず課される）。これにより「破損した混在状態の
+  パラメータで forward／推論が実行される」経路を閉じる（`step`／
+  `sync_to_host`／`forward_resident`／`predict_resident` の 4 箇所
+  すべてが poison チェックを通過して初めて `DeviceParamStore` の内部
+  状態へアクセスできることを、本設計が確定する fail-closed 契約と
+  する）。
 
 ### 4.4 解放・スレッド境界
 
@@ -816,6 +1033,24 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
   実装として再利用する構成・§4.3 の poisoned 状態を表す `BackendError`
   variant を持つこと・§3.1 の `is_first_step` を用いた momentum 初回
   ステップの dampening 分岐）はそのまま踏襲する。
+- **`DeviceParamStore::predict_resident`（§3.3c）を実装する**: poisoned
+  検査を `linear_forward_resident`（§3.1）呼び出しより前に行う契約を
+  そのまま実装する。§3.1 の docstring が確定した「`DeviceParamStore`
+  由来の `DeviceBuffer` に対する `linear_forward_resident` の直接
+  呼び出し禁止」を、`predict_resident` 以外から `tensor-core` の
+  `linear_forward_resident` を呼ばない、というクレート内の呼び出し
+  規律として維持する（`tensor-core` 側に強制手段はないため、
+  `facade`/`autodiff` 側のコードレビューで担保する）。
+- **`MemoryOps::device()`（§3.2a）を `CpuMemory`／`CudaMemory`／
+  `MetalMemory` へ実装する**: 各々 `Some(Device::Cpu)`／
+  `Some(Device::Cuda(ordinal))`／`Some(Device::Metal)` を返し、
+  `sgd_step_device`／`linear_forward_resident`／`forward_resident`／
+  `predict_resident` の既定実装が行う `self`/`mem` 同一バックエンド
+  検査（新設 `BackendError::BackendMismatch`）を機能させる。
+- **`DeviceParamStore::abandon_pending_forward`（§3.3b 末尾）を実装
+  する**: `pending_grad_sources` を副作用なくクリアする冪等メソッド。
+  `step` を呼ばずに学習ループを中断・再試行するテストケース（回復
+  シナリオの受け入れテスト）を #935 のテストに追加する。
 - 更新カーネル（CUDA NVRTC・Metal compute shader）の `unsafe` 使用は
   FFI 境界に限定し、理由コメント + security-auditor レビュー必須
   （`.claude/rules/security.md`「unsafe」節）。
