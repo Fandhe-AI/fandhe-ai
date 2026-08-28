@@ -256,32 +256,255 @@ fn optim_module_reexports_exactly_expected_surface() {
 
 /// `src/optim.rs` が facade 独自の型・関数を定義しない純再エクスポート
 /// モジュールであることを固定する（モジュール冒頭コメント (c)）。
-/// `pub fn`／`pub struct`／`pub enum`／`pub trait`／`impl ` 行が存在
-/// しないことを検査し、`BackendOps`／`MemoryOps` を引数に取る公開関数が
-/// 将来紛れ込む余地を構造的に断つ（既存 (a)/(b) の検査は `visit_rs_files`
-/// 経由で自動適用されるが、optim 固有の観点として追加する）。
+///
+/// codex-review PR #972 P2 是正: 旧実装は行頭文字列接頭辞
+/// （`pub fn`／`pub struct`／`pub enum`／`pub trait`／`impl `）の列挙
+/// だけを見ていたため、`pub type`／`pub const`／`pub static`／`pub mod`／
+/// `pub union`／`pub async fn`／`pub(crate) fn` 等、契約上あってはならない
+/// 公開宣言の追加を見逃していた。本実装はコメント・文字列リテラル・
+/// char リテラル（ライフタイム注記は区別して保持する）を除去したうえで
+/// トークン境界に基づき `pub` キーワードを走査し、直後のアイテム種別が
+/// `use`（再エクスポート）でなければ fail-closed に拒否する。`impl` は
+/// 可視性修飾子の有無に関わらず単独で拒否する（既存 forbidden_prefixes
+/// の "impl " 相当をトークン境界検査に置き換えたもの）。
 #[test]
 fn optim_module_is_pure_reexport() {
     let path = optim_rs_path();
     let content = read_to_string_or_panic(&path);
-
-    let forbidden_prefixes = ["pub fn", "pub struct", "pub enum", "pub trait", "impl "];
-    let mut offending = Vec::new();
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if forbidden_prefixes
-            .iter()
-            .any(|prefix| trimmed.starts_with(prefix))
-        {
-            offending.push(trimmed.to_string());
-        }
-    }
-
+    let offending = scan_forbidden_pub_items(&content);
     assert!(
         offending.is_empty(),
-        "src/optim.rs が facade 独自の型・関数・impl を定義している\
-         （純再エクスポートモジュールの契約違反）: {offending:?}"
+        "src/optim.rs が facade 独自の型・関数・impl・pub type/const/static/mod/union 等の\
+         公開宣言を定義している（純再エクスポートモジュールの契約違反。Rust トークン境界\
+         走査による検出。文字列接頭辞列挙では見逃していた `pub type`/`pub const`/`pub static`/\
+         `pub mod`/`pub union`/`pub async fn` 等を含む）: {offending:?}"
     );
+}
+
+/// [`optim_module_is_pure_reexport`] が使う前処理: 行コメント・ブロック
+/// コメント（ネスト対応）・文字列リテラル（raw string 含む）・char
+/// リテラルの中身を、境界を保ったままスペースへ置換した `Vec<char>` を
+/// 返す。文字列・コメント中に `pub fn` 等の語が現れても誤検出しない
+/// ための前処理であり、出力は入力と文字数が一致する（走査後の char
+/// index がそのまま元テキストの char index として使える）。ライフタイム
+/// 注記（`'a` 等）は char リテラルと区別し、そのまま残す。
+fn strip_comments_and_literals(src: &str) -> Vec<char> {
+    let chars: Vec<char> = src.chars().collect();
+    let len = chars.len();
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0usize;
+    while i < len {
+        let c = chars[i];
+        // 行コメント。
+        if c == '/' && i + 1 < len && chars[i + 1] == '/' {
+            while i < len && chars[i] != '\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        // ブロックコメント（Rust 仕様どおりネスト対応）。
+        if c == '/' && i + 1 < len && chars[i + 1] == '*' {
+            let mut depth = 1i32;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            while i < len && depth > 0 {
+                if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
+                    depth += 1;
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                } else if i + 1 < len && chars[i] == '*' && chars[i + 1] == '/' {
+                    depth -= 1;
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                } else {
+                    out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // raw string リテラル（r"..."／r#"..."#／r##"..."## 等）。
+        if c == 'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < len && chars[j] == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < len && chars[j] == '"' {
+                out.push(' ');
+                out.extend(std::iter::repeat_n(' ', hashes));
+                out.push(' ');
+                let mut k = j + 1;
+                loop {
+                    if k >= len {
+                        i = k;
+                        break;
+                    }
+                    if chars[k] == '"' {
+                        let mut h = 0usize;
+                        let mut m = k + 1;
+                        while m < len && chars[m] == '#' && h < hashes {
+                            h += 1;
+                            m += 1;
+                        }
+                        if h == hashes {
+                            out.push(' ');
+                            out.extend(std::iter::repeat_n(' ', hashes));
+                            k = m;
+                            i = k;
+                            break;
+                        }
+                        out.push(' ');
+                        k += 1;
+                    } else {
+                        out.push(if chars[k] == '\n' { '\n' } else { ' ' });
+                        k += 1;
+                    }
+                }
+                continue;
+            }
+            // 通常の識別子 `r` として下の通常処理へフォールスルーする。
+        }
+        // 通常の文字列リテラル。
+        if c == '"' {
+            out.push(' ');
+            i += 1;
+            while i < len {
+                if chars[i] == '\\' && i + 1 < len {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    out.push(' ');
+                    i += 1;
+                    break;
+                }
+                out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            continue;
+        }
+        // char リテラル（'x'／'\n' 等）とライフタイム注記（'a 等）の判別。
+        if c == '\'' {
+            if i + 1 < len && chars[i + 1] == '\\' {
+                let mut k = i + 2;
+                while k < len && chars[k] != '\'' {
+                    k += 1;
+                }
+                if k < len {
+                    out.extend(std::iter::repeat_n(' ', k - i + 1));
+                    i = k + 1;
+                    continue;
+                }
+            } else if i + 2 < len && chars[i + 2] == '\'' {
+                out.push(' ');
+                out.push(' ');
+                out.push(' ');
+                i += 3;
+                continue;
+            }
+            // ライフタイム注記はコード構造の一部として保持する。
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// 識別子先頭文字（ASCII のみ。本リポの Rust 識別子は ASCII 前提）。
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+/// 識別子構成文字。
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// `chars[..idx]` 中の改行数から 1 始まりの行番号を求める（オフェンス
+/// 報告用）。
+fn line_at(chars: &[char], idx: usize) -> usize {
+    chars[..idx].iter().filter(|&&c| c == '\n').count() + 1
+}
+
+/// コメント・文字列リテラルを除去したうえで、`pub` キーワードのうち
+/// 直後のアイテム種別が `use` でないもの（`pub type`／`pub const`／
+/// `pub static`／`pub mod`／`pub union`／`pub fn`／`pub struct`／
+/// `pub enum`／`pub trait`／`pub(crate) fn` 等。可視性修飾子
+/// `pub(...)` の有無を問わない）と、可視性修飾子の有無を問わない
+/// `impl` ブロックをトークン境界（識別子の前後が識別子構成文字でない
+/// こと）で検出する。文字列接頭辞の列挙ではなくキーワード単位の走査の
+/// ため、契約上禁止される公開宣言の種別を将来追加しても取りこぼさない。
+fn scan_forbidden_pub_items(original: &str) -> Vec<String> {
+    let cleaned = strip_comments_and_literals(original);
+    let len = cleaned.len();
+    let mut offenses = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        if is_ident_start(cleaned[i]) {
+            let start = i;
+            let mut j = i + 1;
+            while j < len && is_ident_char(cleaned[j]) {
+                j += 1;
+            }
+            let word: String = cleaned[start..j].iter().collect();
+            if word == "pub" {
+                let mut k = j;
+                while k < len && cleaned[k].is_whitespace() {
+                    k += 1;
+                }
+                // 可視性修飾子 `pub(crate)`／`pub(super)` 等を読み飛ばす。
+                if k < len && cleaned[k] == '(' {
+                    let mut depth = 1i32;
+                    k += 1;
+                    while k < len && depth > 0 {
+                        match cleaned[k] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    while k < len && cleaned[k].is_whitespace() {
+                        k += 1;
+                    }
+                }
+                if k < len && is_ident_start(cleaned[k]) {
+                    let ks = k;
+                    let mut ke = k + 1;
+                    while ke < len && is_ident_char(cleaned[ke]) {
+                        ke += 1;
+                    }
+                    let next_word: String = cleaned[ks..ke].iter().collect();
+                    if next_word != "use" {
+                        offenses.push(format!(
+                            "line {}: `pub {next_word}` は再エクスポート（`pub use`）以外の公開宣言",
+                            line_at(&cleaned, start)
+                        ));
+                    }
+                }
+            } else if word == "impl" {
+                offenses.push(format!(
+                    "line {}: `impl` ブロックの定義",
+                    line_at(&cleaned, start)
+                ));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    offenses
 }
 
 /// `fandhe_ai::optim` の全再エクスポート型・関数が facade のみを通じて
