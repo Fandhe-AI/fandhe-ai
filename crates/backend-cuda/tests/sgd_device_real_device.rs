@@ -23,9 +23,11 @@ fn assert_close(actual: f32, expected: f32, ctx: &str) {
     );
 }
 
-#[test]
-#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
-fn momentum_sgd_matches_cpu_reference_across_multiple_steps() {
+/// `momentum`・`weight_decay`・`nesterov` を有効にした構成で `steps` 回
+/// `sgd_step_device` を CUDA／CPU の双方で回し、最終パラメータのみを
+/// 統一複合判定で突合する（中間ステップの判定は必須としない。イシュー
+/// #936・設計文書 §5.3）。
+fn run_parity_across_steps(steps: usize) {
     let device =
         CudaDevice::new(0).expect("CUDA device 0 must be available on ignored test runner");
     let cuda_ops = CudaBackendOps::new(device.ordinal());
@@ -45,7 +47,7 @@ fn momentum_sgd_matches_cpu_reference_across_multiple_steps() {
     let mut cpu_param = cpu_mem.upload(&Tensor::new(init, &[4]).unwrap()).unwrap();
     let mut cpu_velocity = cpu_mem.alloc_zeroed(&[4]).unwrap();
 
-    for step in 0..5 {
+    for step in 0..steps {
         let grad_data: Vec<f32> = (0..4)
             .map(|i| 0.1 * (step as f32 + 1.0) + 0.05 * i as f32)
             .collect();
@@ -81,7 +83,23 @@ fn momentum_sgd_matches_cpu_reference_across_multiple_steps() {
         assert_close(
             cuda_result.get(&[i]).unwrap(),
             cpu_result.get(&[i]).unwrap(),
-            &format!("index {i}"),
+            &format!("index {i} (steps={steps})"),
         );
     }
+}
+
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn momentum_sgd_matches_cpu_reference_across_multiple_steps() {
+    run_parity_across_steps(5);
+}
+
+/// イシュー #936 §5.3（`docs/device-resident-update-design.md`）が要求する
+/// 「100 step 程度の累積・最終値判定」をカーネル単体レベルで保険的に検証
+/// する CUDA 版（`crates/backend-cpu/tests/sgd_device_parity.rs`・
+/// `crates/backend-metal/tests/sgd_device_parity.rs` の同名ケースと対）。
+#[test]
+#[ignore = "CUDA 実機（DGX Spark GB10 等）必須"]
+fn momentum_sgd_matches_cpu_reference_across_100_steps() {
+    run_parity_across_steps(100);
 }

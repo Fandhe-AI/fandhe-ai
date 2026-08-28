@@ -182,6 +182,98 @@ fn device_resident_matches_host_sgd_within_composite_tolerance() {
     }
 }
 
+/// 設計文書 `docs/device-resident-update-design.md` §5.3・§7「#936 への
+/// 引き渡し事項」が要求する「決定的シードで 100 step 程度学習し、CPU
+/// ホスト参照実装（`Sgd::step`）の最終パラメータとデバイス常駐経路の
+/// 最終パラメータを、最終値に対してのみ統一複合判定で比較する」検証
+/// （中間ステップごとの判定は必須としない）。
+///
+/// `device_resident_matches_host_sgd_within_composite_tolerance`
+/// （20 step・step ごとの loss 突合も行う既存テスト）は変更せず、本テストは
+/// §5.3 が明示する「100 step 累積・最終値のみ」の判定方式を別ケースとして
+/// 追加する（momentum・weight_decay・nesterov を含む構成でも 1 本行う
+/// ことで、SGD の全オプション経路を累積誤差の観点でも保険的にカバーする）。
+#[test]
+fn device_resident_matches_host_sgd_across_100_steps_final_value_only() {
+    const STEPS: usize = 100;
+    const LR: f32 = 0.02;
+
+    // momentum・weight_decay・nesterov を有効化した構成（`SgdConfig` の
+    // builder。`crates/backend-cpu/tests/sgd_device_parity.rs` の
+    // `full_combo_matches_host_reference_across_100_steps` と同じ意図で、
+    // 全オプション経路を 100 step 累積で保険的に検証する）。
+    fn train_device(steps: usize, lr: f32) -> Vec<Tensor<f32>> {
+        let model = build_model();
+        let (x_data, y_data) = gen_regression_data(SEED_DATA);
+
+        let init_tape = fandhe_ai::tape();
+        let mut store = model.init_device_param_store(&init_tape).unwrap();
+        drop(init_tape);
+
+        let config = FacadeSgdConfig::new(lr)
+            .with_momentum(0.9)
+            .with_weight_decay(0.01)
+            .with_nesterov(true);
+
+        for _ in 0..steps {
+            let tape = fandhe_ai::tape();
+            let x = tape.var(&x_data);
+            let y = tape.var(&y_data);
+            let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
+            let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+            let grads = tape.backward(&loss).unwrap();
+            tape.step_device_param_store(&mut store, &grads, &config)
+                .unwrap();
+        }
+
+        let final_tape = fandhe_ai::tape();
+        final_tape.sync_device_param_store_to_host(&store).unwrap()
+    }
+
+    fn train_host(steps: usize, lr: f32) -> Vec<Tensor<f32>> {
+        let mut model = build_model();
+        let (x_data, y_data) = gen_regression_data(SEED_DATA);
+        let sgd_config = SgdConfig::new(lr)
+            .with_momentum(0.9)
+            .with_weight_decay(0.01)
+            .with_nesterov(true);
+        let mut sgd = Sgd::new(sgd_config).unwrap();
+
+        for _ in 0..steps {
+            let updated = {
+                let tape = fandhe_ai::tape();
+                let bound = model.bind(&tape);
+                let x = tape.var(&x_data);
+                let y = tape.var(&y_data);
+                let pred = bound.forward(&tape, &x).unwrap();
+                let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+                let grads = tape.backward(&loss).unwrap();
+                let grad_refs = bound.trainable_grads(&grads).unwrap();
+                let param_refs = model.trainable_parameters();
+                sgd.step(&param_refs, &grad_refs).unwrap()
+            };
+            model.apply_parameters(updated).unwrap();
+        }
+
+        model.trainable_parameters().into_iter().cloned().collect()
+    }
+
+    let device_params = train_device(STEPS, LR);
+    let host_params = train_host(STEPS, LR);
+
+    assert_eq!(device_params.len(), host_params.len());
+    for (i, (d, h)) in device_params.iter().zip(host_params.iter()).enumerate() {
+        assert_eq!(d.shape(), h.shape(), "param {i} shape mismatch");
+        let d_slice = d.contiguous();
+        let h_slice = h.contiguous();
+        let d_data = d_slice.as_slice().unwrap();
+        let h_data = h_slice.as_slice().unwrap();
+        for (j, (dv, hv)) in d_data.iter().zip(h_data.iter()).enumerate() {
+            assert_close(*dv, *hv, &format!("100 step 累積後 param {i} element {j}"));
+        }
+    }
+}
+
 /// `predict_resident` が、学習を経てデバイス側で更新された後の
 /// パラメータでも `sync_device_param_store_to_host` → `apply_parameters`
 /// した独立モデルの `predict` と一致することを検証する（設計文書 §3.3c
