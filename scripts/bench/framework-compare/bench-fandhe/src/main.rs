@@ -82,11 +82,15 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut checksum = 0.0;
 
     let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
-        // fresh tape per measurement (no accumulated graph)
+        // fresh tape per measurement (no accumulated graph)。計時開始は
+        // tape 構築より前に置く（イシュー #925 レビュー指摘）。「fresh は
+        // tape/デバイス初期化コスト（CUDA コンテキスト作成・NVRTC カーネル
+        // コンパイル等）を毎計測に含む」という上記モジュールコメント・reuse
+        // モードとの対比説明が実際の計測範囲と一致するようにするため。
+        let start = Instant::now();
         let tape = make_tape(&cli.device)?;
         let a = tape.var(&a_data);
         let b = tape.var(&b_data);
-        let start = Instant::now();
         let c = a.matmul(&b)?;
         // sync: materialize result on host and read elements
         *sync_checksum = checksum_var(&c)?;
