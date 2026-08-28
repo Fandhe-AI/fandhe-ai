@@ -55,10 +55,17 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let b = Tensor::from_vec(b_host, (n, n), &dev)?;
     let mut checksum = 0.0;
 
+    // イシュー #965 codex-review 指摘: checksum は毎反復上書きされるため、
+    // ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。
+    // burn 側の縮退 checksum 遮断（bench-burn/src/main.rs）と対称に、
+    // candle 側でも将来同種の不具合が出た場合に壊れた計算の実行時間を
+    // 性能値として記録しないよう、checksum 計算直後・warmup を含む
+    // 全反復で検査する。
     let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.matmul(&b)?;
         *sync_checksum = checksum2(&c)?;
+        validate_gemm_checksum(*sync_checksum)?;
         Ok(start.elapsed())
     };
 

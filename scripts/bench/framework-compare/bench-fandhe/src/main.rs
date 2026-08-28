@@ -94,6 +94,13 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let c = a.matmul(&b)?;
         // sync: materialize result on host and read elements
         *sync_checksum = checksum_var(&c)?;
+        // イシュー #965 codex-review 指摘: sync_checksum は毎反復上書きされる
+        // ため、ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。
+        // burn 側の縮退 checksum 遮断（bench-burn/src/main.rs）と対称に、
+        // fandhe-ai 側でも将来同種の不具合が出た場合に壊れた計算の実行時間を
+        // 性能値として記録しないよう、checksum 計算直後・warmup を含む
+        // 全反復で検査する。
+        validate_gemm_checksum(*sync_checksum)?;
         Ok(start.elapsed())
     };
 
@@ -144,6 +151,11 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let b = tape.var(&b_data);
     let c0 = a.matmul(&b)?;
     let mut checksum = checksum_var(&c0)?;
+    // イシュー #965 codex-review 指摘: checksum は毎反復上書きされるため、
+    // ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。init 計測分
+    // を含め reuse 経路（同一 tape を使い回す）でも fresh 経路と同様に
+    // checksum 計算直後・全反復で検証する。
+    validate_gemm_checksum(checksum)?;
     let init_s = init_start.elapsed().as_secs_f64();
 
     // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
@@ -152,6 +164,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.matmul(&b)?;
         checksum = checksum_var(&c)?;
+        validate_gemm_checksum(checksum)?;
         Ok(start.elapsed())
     };
     for _ in 0..WARMUP_ITERS.saturating_sub(1) {

@@ -91,6 +91,14 @@ python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力�
 `summarize.py` はこの節を集計対象として渡した各入力 JSONL と同一ディレクトリの `skipped*.log` からのみ収集する（入力省略時は従来どおり `results/raw/` 配下が対象。イシュー #971）。
 集計は `results/summary.md` を参照。
 
+`summarize.py` は GEMM の checksum（全フレームワーク・全 mode で同一入力のため本来一致するはず）を
+size ごとに相互突合し、参照値と外れる行を表で「（無効: checksum 不一致）」表示する
+（既定では stderr へ警告のみ、`--strict` を付けると不一致 1 件以上で終了コード 2）。
+各バイナリ側にも `bench-common::validate_gemm_checksum` による縮退 checksum（全ゼロ・非有限）の
+emit 前ガードがある（`skipped.log` に理由付きで記録される）。**既知の無効データ**: Burn(wgpu)
+Metal GEMM の N>=512 は upstream 既知バグ（`docs/perf/burn-wgpu-metal-gemm-zero-result.md`。
+イシュー #965）により結果テンソル全ゼロを返すため無効（`results/summary.md`「データ有効性の注記」参照）。
+
 ## 依存ポリシー上の位置づけ
 
 - 本 workspace は許容依存第 9 区分（ベンチ比較対象）の適用範囲拡張として、`candle-core =0.11.0`・`burn =0.21.0` を**本ディレクトリ限定**で保持する（`.claude/rules/deps-policy.md`）

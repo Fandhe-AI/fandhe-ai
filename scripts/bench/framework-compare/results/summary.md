@@ -18,6 +18,29 @@
 | candle | candle-core (metal feature) | 0.11.0 |
 | Burn | burn (ndarray / wgpu backend) | 0.21.0 |
 
+## データ有効性の注記（イシュー #965）
+
+**Burn(wgpu) Metal GEMM の N=512/1024/2048/4096 の 4 行は無効。実行時間・GFLOP/s を
+性能値として扱わない。** 結果テンソルが全ゼロ（`results/raw/results.jsonl` の該当行は
+`"checksum":0.000000`）であり、同一入力を使う他フレームワーク・他デバイスの同 N が
+すべて 6 桁一致する中で当該 4 行のみ乖離する。原因は Burn 0.21.0（cubek-matmul 0.2.0）
+の wgpu/Metal 経路に存在した upstream 既知バグ（tracel-ai/burn#4966 →
+tracel-ai/cubek#283 で修正。承認済みピン `burn =0.21.0` の範囲では修正版を取得できない）
+であり、本ハーネスの実装起因ではない。切り分けの詳細・追試手順は
+`docs/perf/burn-wgpu-metal-gemm-zero-result.md` を参照。
+
+- `results/raw/results.jsonl`（raw 記録）は変更せず残置する。無効データを黙って
+  削除・改変しない（`.claude/rules/security.md` A08）
+- 下表 Metal 節の該当 4 行は「（無効: checksum 不一致）」を付記し GFLOP/s 列を `-` にする
+  （N=256 の burn 行は checksum 一致・有効）
+- 再計測は、`tracel-ai/cubek#283`（修正 PR）を含むバージョンへの Burn ピン更新
+  （`.claude/rules/deps-policy.md` 第 9 区分・ユーザー承認事項。対象バージョンの
+  確定は `docs/perf/burn-wgpu-metal-gemm-zero-result.md` §2.5 参照）後に実施する
+- 同種の不具合の再発防止として `summarize.py` が GEMM の checksum をフレームワーク間で
+  相互突合し、不一致行を機械的に「無効」表示する（`--strict` で終了コード 2）。
+  `bench-common::validate_gemm_checksum` は各バイナリ側でも縮退 checksum（全ゼロ・
+  非有限）を emit 前に遮断する（「計測プロトコル」節・README.md 参照）
+
 ## (a) GEMM（C = A×B、f32、正方行列）
 
 ### CPU
@@ -46,16 +69,16 @@
 | 256 | burn | 1.493 ms | 1.479 ms | 1.509 ms | 22.5 |
 | 512 | fandhe-ai | 5.724 ms | 5.570 ms | 5.889 ms | 46.9 |
 | 512 | candle | 519.0 µs | 499.5 µs | 613.8 µs | 517.2 |
-| 512 | burn | 3.044 ms | 3.017 ms | 3.200 ms | 88.2 |
+| 512 | burn（無効: checksum 不一致。注記参照） | 3.044 ms | 3.017 ms | 3.200 ms | - |
 | 1024 | fandhe-ai | 7.894 ms | 7.738 ms | 8.029 ms | 272.1 |
 | 1024 | candle | 1.086 ms | 1.079 ms | 1.113 ms | 1976.7 |
-| 1024 | burn | 3.613 ms | 3.595 ms | 3.623 ms | 594.3 |
+| 1024 | burn（無効: checksum 不一致。注記参照） | 3.613 ms | 3.595 ms | 3.623 ms | - |
 | 2048 | fandhe-ai | 14.576 ms | 14.075 ms | 17.032 ms | 1178.6 |
 | 2048 | candle | 4.958 ms | 4.647 ms | 5.125 ms | 3464.9 |
-| 2048 | burn | 5.548 ms | 5.532 ms | 5.586 ms | 3096.7 |
+| 2048 | burn（無効: checksum 不一致。注記参照） | 5.548 ms | 5.532 ms | 5.586 ms | - |
 | 4096 | fandhe-ai | 46.415 ms | 45.855 ms | 47.355 ms | 2961.1 |
 | 4096 | candle | 23.635 ms | 23.416 ms | 23.911 ms | 5815.1 |
-| 4096 | burn | 13.194 ms | 13.171 ms | 13.241 ms | 10416.9 |
+| 4096 | burn（無効: checksum 不一致。注記参照） | 13.194 ms | 13.171 ms | 13.241 ms | - |
 
 **Metal 表のプロトコル注意（イシュー #925 レビュー指摘）**: 上表の fandhe-ai 行は `--mode fresh`
 （既定）の計測であり、`tape_for(Device::Metal)` をループの各回内で再構築する。candle
@@ -101,7 +124,8 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
 
 ## 備考
 
-- GEMM の入力は全フレームワークで同一（checksum が一致することを JSONL で確認できる）
+- GEMM の入力は全フレームワークで同一（checksum は Burn(wgpu) Metal N>=512 の 4 行
+  （「データ有効性の注記」参照）を除き JSONL で一致することを確認できる）
 - 学習・推論の重みは candle / Burn は共有 RNG で同一。fandhe-ai は `Sequential::add_linear` の内部初期化（シード指定）のため重みの値は異なるが、同一アーキテクチャ・同一入力・同一バッチであり実行時間の比較には影響しない
 - fandhe-ai の学習ループは公開 API のみ（`compat::Sequential` + `tape.backward` + 手動 SGD）。パラメータ更新はホスト側で `param - lr * grad` を計算して `apply_parameters` で書き戻す実装であり、フレームワークにより更新方式が異なる（candle: `Var::set`、Burn: `from_inner + require_grad`）
 
