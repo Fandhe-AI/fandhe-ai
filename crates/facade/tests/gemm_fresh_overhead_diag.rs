@@ -145,15 +145,15 @@ fn measure_p2_keep_alive(
     let c = av
         .matmul(&bv)
         .expect("matmul must succeed for a well-formed square GEMM");
-    let c_tensor = c.to_tensor();
-    let checksum = c_tensor
-        .contiguous()
-        .as_slice()
-        .expect("as_slice() must return Some after contiguous()")
-        .iter()
-        .map(|&x| x as f64)
-        .sum();
-    keep_alive.push(c_tensor);
+    // P0 と同じ checksum_var（to_tensor() + contiguous().as_slice().to_vec()）
+    // を使う。P2 が計測したいのは「Tape drop によるホストバッファ解放の
+    // 抑止」単独の効果であり、checksum 経路（to_vec() コピーの有無）を
+    // P0 と揃えないと高速化要因が「C 保持」由来か「to_vec() コピー除去」
+    // 由来か切り分けられない（PR #973 レビュー指摘）。C の保持は
+    // `c.to_tensor()`（`Arc<Storage>` の安価な clone）を別途
+    // `keep_alive` へ退避することで行う（checksum 計算自体には使わない）。
+    let checksum = checksum_var(&c);
+    keep_alive.push(c.to_tensor());
     let elapsed = start.elapsed().as_secs_f64();
     drop(tape);
     (elapsed, checksum)

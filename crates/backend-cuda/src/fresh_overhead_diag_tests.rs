@@ -183,6 +183,21 @@ fn measure_one_phase_trial(
             let out = stream
                 .clone_dtoh(&c_dev)
                 .expect("D2H download (untouched-page Vec, production clone_dtoh) must succeed");
+            // `clone_dtoh`／`memcpy_dtoh` は `cuMemcpyDtoHAsync` を発行する
+            // だけで返る（plain `Vec<T>` は `HostSlice::stream_synced_mut_
+            // slice` が `SyncOnDrop::Sync(None)` を返すため drop 時の暗黙
+            // sync も無い。cudarc-0.19.8 `src/driver/safe/core.rs`
+            // `memcpy_dtoh`／`HostSlice for Vec<T>` 実装）。ここで
+            // `stream.synchronize()` を挟まないと、直後の drop（このすぐ
+            // 下）がホストバッファを解放する一方で GPU 側の書き込みが
+            // 未完了のままになりうる（転送未完了のうちに解放される安全性
+            // 問題。GB10 実機で顕在化しうる。PR #973 レビュー指摘）。
+            // これにより d2h_secs は「転送発行のみ」ではなく「転送完了
+            // まで」を計測する値になる（本診断の (e) D2H フェーズの定義
+            // 〈ファイル冒頭コメント〉に合わせて正確化）。
+            stream
+                .synchronize()
+                .expect("stream synchronize after D2H must succeed before host buffer is freed");
             let d2h_secs = t.elapsed().as_secs_f64();
             let out_len = out.len();
             // (f3) 相当: fresh モードのイテレーション末尾で C が drop
@@ -198,6 +213,15 @@ fn measure_one_phase_trial(
             let out = stream
                 .clone_dtoh(&c_dev)
                 .expect("D2H download (untouched-page Vec, kept alive) must succeed");
+            // Fresh 分岐と同じ理由（上記コメント）で、`keep_alive` へ退避
+            // する前に転送完了を待つ。KeepAlive はこの試行内では drop
+            // しないが、`keep_alive` は次サイズへ進む前に呼び出し元が
+            // 明示的に drop するため（本ファイル内の使用箇所参照）、
+            // その時点で転送未完了のまま解放されるのを防ぐには、ここで
+            // 完了を確定させておく必要がある。
+            stream
+                .synchronize()
+                .expect("stream synchronize after D2H must succeed before host buffer is freed");
             let d2h_secs = t.elapsed().as_secs_f64();
             let out_len = out.len();
             // reuse 相当: 保持して次試行以降も解放しない（H3 判別: 解放を
@@ -225,6 +249,14 @@ fn measure_one_phase_trial(
             stream
                 .memcpy_dtoh(&c_dev, &mut dst)
                 .expect("D2H download (pre-touched Vec) must succeed");
+            // `memcpy_dtoh` は `cuMemcpyDtoHAsync` を発行するだけで返る
+            // （Fresh 分岐と同じ理由。上記コメント参照）。直後の drop が
+            // ホスト destination（`dst`）を解放する前に転送完了を確定
+            // させないと、GB10 実機で転送未完了のうちに解放されうる
+            // （V2 固有の安全性問題として PR #973 レビューで指摘）。
+            stream
+                .synchronize()
+                .expect("stream synchronize after D2H must succeed before host buffer is freed");
             let d2h_secs = t.elapsed().as_secs_f64();
             let out_len = dst.len();
             let t = Instant::now();
