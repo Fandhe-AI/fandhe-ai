@@ -19,13 +19,11 @@ use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{Activation, BackendOps, FusionPlan, ShapeError, Tensor};
 
 use crate::context::MetalContext;
+use crate::context_cache;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
-use crate::gemm::MetalGemm;
 use crate::memory::map_metal_error;
-use crate::rmsnorm::MetalRmsNorm;
 use crate::row_kernel::{self, plan_dtype_is_f32};
-use crate::softmax::MetalSoftmax;
 
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
 /// 持たない単一 variant のため（`docs/public-api-design.md` §4.1・
@@ -33,10 +31,12 @@ use crate::softmax::MetalSoftmax;
 /// 個別選択をサポートしない（システムデフォルトの Metal デバイスに
 /// 対応する）。
 ///
-/// `MetalContext`／`MetalGemm` は各メソッド呼び出し時に都度構築する
-/// （`backend-cuda::ops::CudaBackendOps` と同じ設計判断。TASK-1.9b の
-/// デバイスハンドル常駐が未着地のため。ハンドル常駐化は TASK-1.9b／1.9d
-/// 以降の最適化対象）。
+/// `MetalContext`／`MetalGemm`／`MetalElementwise`／`MetalRmsNorm`／
+/// `MetalSoftmax` はいずれも `crate::context_cache` 経由でプロセス内
+/// キャッシュから取得する（イシュー #930 で常駐化完了。診断 #927 が特定
+/// した「演算メソッド呼び出しごとの都度構築」固定オーバーヘッド〈約 5 ms・
+/// N 非依存〉を解消する。CUDA 側 `backend-cuda::ops::CudaBackendOps`
+/// も同時期に同型キャッシュ〈#929〉へ移行済み）。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MetalBackendOps;
 
@@ -80,8 +80,8 @@ impl MetalBackendOps {
             BackendError::KernelLaunchFailed("elementwise: rhs not contiguous".into())
         })?;
 
-        let ctx = MetalContext::new().map_err(map_metal_error)?;
-        let ew = MetalElementwise::new(&ctx)
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ew = context_cache::cached_elementwise(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = run(&ew, &ctx, a_slice, b_slice)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -102,8 +102,8 @@ impl MetalBackendOps {
             BackendError::KernelLaunchFailed("elementwise: input not contiguous".into())
         })?;
 
-        let ctx = MetalContext::new().map_err(map_metal_error)?;
-        let ew = MetalElementwise::new(&ctx)
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let ew = context_cache::cached_elementwise(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = run(&ew, &ctx, a_slice)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -165,14 +165,16 @@ impl BackendOps for MetalBackendOps {
             .as_slice()
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
-        // `MetalContext::new` の失敗（デバイス不在等）は
-        // `MetalDeviceProvider::select`（`device.rs`）と同一分類の
-        // `BackendError::DeviceUnavailable` に統一する（`map_metal_error`
-        // 経由。誤って `DeviceAllocationFailed`〈VRAM／アロケータ起因〉
-        // に分類すると、呼び出し側が Metal デバイス不在を検知する経路が
-        // 一方に偏る。Bugbot 指摘対応。PR #262 レビュースレッド）。
-        let ctx = MetalContext::new().map_err(map_metal_error)?;
-        let gemm = MetalGemm::new(&ctx)
+        // コンテキスト取得（`context_cache::cached_context`）の失敗
+        // （デバイス不在等）は `MetalDeviceProvider::select`（`device.rs`）
+        // と同一分類の `BackendError::DeviceUnavailable` に統一する
+        // （`map_metal_error` 経由。誤って `DeviceAllocationFailed`〈VRAM／
+        // アロケータ起因〉に分類すると、呼び出し側が Metal デバイス不在を
+        // 検知する経路が一方に偏る。Bugbot 指摘対応。PR #262 レビュー
+        // スレッド。イシュー #930 でプロセス内キャッシュ経由へ変更した
+        // 後もこの分類契約は不変）。
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let gemm = context_cache::cached_gemm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = gemm
             .dispatch_auto(&ctx, a_slice, b_slice, m, n, k)
@@ -283,8 +285,8 @@ impl BackendOps for MetalBackendOps {
                     None => None,
                 };
 
-                let ctx = MetalContext::new().map_err(map_metal_error)?;
-                let gemm = MetalGemm::new(&ctx)
+                let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+                let gemm = context_cache::cached_gemm(&ctx)
                     .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
                 let out = gemm
                     .run_tiled_bias_act_f32(&ctx, a_slice, b_slice, bias_slice, act_relu, m, n, k)
@@ -328,14 +330,15 @@ impl BackendOps for MetalBackendOps {
 
     /// [`fandhe_ai_tensor_core::BackendOps::run_fused`] のデフォルト実装
     /// （`Unsupported` fail-safe）を、canonical RMSNorm／softmax 融合プラン
-    /// 検出時のみ融合カーネル（[`MetalRmsNorm`]／[`MetalSoftmax`]）へ
-    /// ルーティングする（イシュー #604）。CUDA 側 `CudaBackendOps::run_fused`
+    /// 検出時のみ融合カーネル（[`crate::rmsnorm::MetalRmsNorm`]／
+    /// [`crate::softmax::MetalSoftmax`]）へルーティングする（イシュー #604）。
+    /// CUDA 側 `CudaBackendOps::run_fused`
     /// （#592）の fail-closed 検証列をそのまま踏襲する:
     ///
     /// 1. `row_kernel::match_rmsnorm_plan`（6 op 列・leaf 1 個・
-    ///    `axis: None` のみ受理）→ 一致時 [`MetalRmsNorm`] へ
+    ///    `axis: None` のみ受理）→ 一致時 [`crate::rmsnorm::MetalRmsNorm`] へ
     /// 2. `row_kernel::match_softmax_plan`（8 op 列・leaf 1 個・`axis` が
-    ///    最終次元または `None` のみ受理）→ 一致時 [`MetalSoftmax`] へ
+    ///    最終次元または `None` のみ受理）→ 一致時 [`crate::softmax::MetalSoftmax`] へ
     /// 3. どちらにも一致しないプランは `Unsupported` を返し per-op
     ///    フォールバックへ委ねる（allowlist 拒否・迂回経路を作らない。
     ///    `.claude/rules/security.md` A08）
@@ -369,7 +372,7 @@ impl BackendOps for MetalBackendOps {
 
 impl MetalBackendOps {
     /// 一致した leaf・shape・dtype を検証してから
-    /// [`MetalRmsNorm::run_rmsnorm_f32_raw`] を `inv_n = 1.0`・`eps = 0.0`・
+    /// [`crate::rmsnorm::MetalRmsNorm::run_rmsnorm_f32_raw`] を `inv_n = 1.0`・`eps = 0.0`・
     /// `w = None`（`has_weight = 0`）で直接呼ぶ（プランの意味論 `x *
     /// rsqrt(sum(x^2))` に厳密一致させる。`mean` 化・`eps` 加算・`weight`
     /// 乗算を勝手に補わない。`backend-cuda::ops::CudaBackendOps::run_fused`
@@ -388,8 +391,8 @@ impl MetalBackendOps {
             BackendError::KernelLaunchFailed("run_fused: rmsnorm input not contiguous".into())
         })?;
 
-        let ctx = MetalContext::new().map_err(map_metal_error)?;
-        let rmsnorm = MetalRmsNorm::new(&ctx)
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let rmsnorm = context_cache::cached_rmsnorm(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = rmsnorm
             .run_rmsnorm_f32_raw(&ctx, x_slice, None, 0.0, 1.0, 1, hidden)
@@ -398,7 +401,7 @@ impl MetalBackendOps {
     }
 
     /// [`Self::run_fused_rmsnorm`] と同じ検証順序で
-    /// [`MetalSoftmax::run_softmax_f32`] を呼ぶ。
+    /// [`crate::softmax::MetalSoftmax::run_softmax_f32`] を呼ぶ。
     ///
     /// `row_kernel::match_softmax_plan` は `axis: None`（全軸縮約。
     /// `rows = 1` 相当）だけでなく `axis` が最終次元（行方向縮約。
@@ -407,7 +410,7 @@ impl MetalBackendOps {
     /// （`validate_fused_leaf` が `x.shape() == plan.output_shape()` を
     /// 検証済みのため `x_slice.len()` は `plan.output_shape()` の要素数積
     /// と一致する）から導出する。`hidden == 0` は
-    /// `MetalSoftmax::run_softmax_f32` 側の 0 要素早期 return 契約に委ね、
+    /// `crate::softmax::MetalSoftmax::run_softmax_f32` 側の 0 要素早期 return 契約に委ね、
     /// ここでは `checked_div`（`hidden == 0` なら `rows = 0`）でゼロ除算
     /// のみを避ける。
     fn run_fused_softmax(
@@ -427,8 +430,8 @@ impl MetalBackendOps {
         // の場合は `rows = 0`、それ以外は通常の整数除算）。
         let rows = x_slice.len().checked_div(hidden).unwrap_or(0);
 
-        let ctx = MetalContext::new().map_err(map_metal_error)?;
-        let softmax = MetalSoftmax::new(&ctx)
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let softmax = context_cache::cached_softmax(&ctx)
             .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
         let out = softmax
             .run_softmax_f32(&ctx, x_slice, rows, hidden)

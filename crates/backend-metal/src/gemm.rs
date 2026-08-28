@@ -21,8 +21,9 @@
 //! `MetalGemm { pipeline_naive, pipeline_tiled, pipeline_simdgroup, .. }`
 //! と同型の設計。#39 時点は naive のみを productize していた）。
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use objc2::rc::Retained;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLSize};
@@ -135,7 +136,12 @@ struct Dims {
 /// [`MetalContext`] とは別に保持する理由: パイプライン構築（MSL コンパイル
 /// 込み）は比較的重い処理であり、`MetalGemm::new` を 1 回呼んで使い回す
 /// ことを想定する（`MetalContext` はデバイス・キューのみの軽量ハンドル。
-/// TASK-1.8a・#38 の責務分離を維持する）。
+/// TASK-1.8a・#38 の責務分離を維持する）。イシュー #930 で
+/// `ops::MetalBackendOps::gemm`／`gemm_bias_act` は演算呼び出しごとの
+/// 都度構築をやめ、`crate::context_cache::cached_gemm` 経由で
+/// `Arc<MetalGemm>` をプロセス内キャッシュから取得する本番経路へ移行した
+/// （A/B 計測専用の `new_with_swizzle`／`new_with_fine_barrier` 入口は
+/// キャッシュ対象外のまま従来どおり直接構築する）。
 pub struct MetalGemm {
     pipeline_naive: objc2::rc::Retained<MtlPipeline>,
     pipeline_tiled: objc2::rc::Retained<MtlPipeline>,
@@ -162,10 +168,13 @@ pub struct MetalGemm {
     /// ディスパッチ時に構築したパイプラインを以降のディスパッチで使い回す
     /// （`MTLFunctionConstantValues` を介したコンパイルは比較的重い処理。
     /// イシュー #188 計画「パイプライン管理」節）。`&self` の非可変参照から
-    /// 書き込むため `RefCell` で内部可変性を持たせる（`Retained` は
-    /// 参照カウント型でありスレッド境界を跨がない前提。本クレートの
-    /// ディスパッチは呼び出しごとに同期完了するため並行アクセスは想定しない）。
-    tiled_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
+    /// 書き込むため内部可変性を持たせる。イシュー #930（プロセス内
+    /// コンテキストキャッシュ化）で `MetalGemm` を `Arc` 経由の複数スレッド
+    /// 共有ハンドル（`crate::context_cache::cached_gemm`）にしたため、
+    /// `!Sync` な `RefCell` から `Mutex` へ変更した（`RefCell` のままだと
+    /// `MetalGemm: !Sync` となり `Arc<MetalGemm>` を跨スレッド共有できず
+    /// `context_cache` の `Send + Sync` コンパイル時アサーションが破綻する）。
+    tiled_cache: Mutex<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
     /// `gemm_simdgroup_tiled_f16`（イシュー #796）の構成キー
     /// （[`TileConfig`]）→ パイプラインの遅延キャッシュ（[`Self::pipeline_for_tile_f16`]）。
     /// f32 版 [`Self::tiled_cache`] と同じ設計判断（候補構成は有限個のため
@@ -174,7 +183,9 @@ pub struct MetalGemm {
     /// は関数名が異なる別パイプラインのため、同一 `TileConfig` キーで
     /// あってもキャッシュを混在させない（f32 版キャッシュとの取り違えは
     /// 誤った関数へのディスパッチに直結するため独立フィールドとして持つ）。
-    tiled_f16_cache: RefCell<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
+    /// `tiled_cache` と同じ理由（イシュー #930）で `RefCell` から `Mutex`
+    /// へ変更した。
+    tiled_f16_cache: Mutex<HashMap<TileConfig, objc2::rc::Retained<MtlPipeline>>>,
     /// threadgroup ID スウィズル（イシュー #540）をこのインスタンスの
     /// `SimdgroupTiled` 経路（[`Self::pipeline_for_tile`]・
     /// `encode_dispatch_tiled`）で有効化するかどうか。イシュー #746 で
@@ -202,6 +213,21 @@ pub struct MetalGemm {
     /// 本番既定 `tile::FINE_BARRIER_ENABLED`（`false`）を渡すため既定挙動は
     /// 不変。
     fine_barrier_enabled: bool,
+}
+
+/// `tiled_cache`／`tiled_f16_cache`（`Mutex` 化。イシュー #930）の共通
+/// ロックヘルパー。poison を [`MetalError::ContextCacheUnavailable`] へ
+/// 変換し panic させない（`crate::context_cache::lock_cache` と同じ変換
+/// 方針。`.claude/rules/coding-rust.md`「本番経路で unwrap/expect を
+/// 使わない」）。
+fn lock_tile_cache<T>(
+    mutex: &Mutex<HashMap<TileConfig, T>>,
+) -> Result<std::sync::MutexGuard<'_, HashMap<TileConfig, T>>, MetalError> {
+    mutex
+        .lock()
+        .map_err(|e| MetalError::ContextCacheUnavailable {
+            detail: format!("tile pipeline cache mutex poisoned: {e}"),
+        })
 }
 
 impl MetalGemm {
@@ -291,8 +317,8 @@ impl MetalGemm {
             pipeline_simdgroup_f16,
             pipeline_tiled_bias_act,
             library,
-            tiled_cache: RefCell::new(HashMap::new()),
-            tiled_f16_cache: RefCell::new(HashMap::new()),
+            tiled_cache: Mutex::new(HashMap::new()),
+            tiled_f16_cache: Mutex::new(HashMap::new()),
             swizzle_enabled,
             fine_barrier_enabled,
         })
@@ -333,7 +359,7 @@ impl MetalGemm {
         let mut last_err: Option<MetalError> = None;
 
         for candidate in tile::fallback_chain(cfg) {
-            if let Some(pipeline) = self.tiled_cache.borrow().get(&candidate) {
+            if let Some(pipeline) = lock_tile_cache(&self.tiled_cache)?.get(&candidate) {
                 return Ok((Retained::clone(pipeline), candidate));
             }
 
@@ -360,8 +386,7 @@ impl MetalGemm {
                     if candidate.thread_count() > actual_max_threads {
                         continue;
                     }
-                    self.tiled_cache
-                        .borrow_mut()
+                    lock_tile_cache(&self.tiled_cache)?
                         .insert(candidate, Retained::clone(&pipeline));
                     return Ok((pipeline, candidate));
                 }
@@ -406,7 +431,7 @@ impl MetalGemm {
         let mut last_err: Option<MetalError> = None;
 
         for candidate in tile::fallback_chain(cfg) {
-            if let Some(pipeline) = self.tiled_f16_cache.borrow().get(&candidate) {
+            if let Some(pipeline) = lock_tile_cache(&self.tiled_f16_cache)?.get(&candidate) {
                 return Ok((Retained::clone(pipeline), candidate));
             }
 
@@ -432,8 +457,7 @@ impl MetalGemm {
                     if candidate.thread_count() > actual_max_threads {
                         continue;
                     }
-                    self.tiled_f16_cache
-                        .borrow_mut()
+                    lock_tile_cache(&self.tiled_f16_cache)?
                         .insert(candidate, Retained::clone(&pipeline));
                     return Ok((pipeline, candidate));
                 }
