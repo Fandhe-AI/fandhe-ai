@@ -33,6 +33,11 @@
   壊さない）。`--strict` を付けると不一致 1 件以上で終了コード 2 を返す。
   要素単位の誤差（max abs/rel error）比較は本ツールのスコープ外
   （イシュー #970）。
+- 実行時失敗（skipped*.log）節は、集計対象として渡された各入力 JSONL と
+  同一ディレクトリの skipped*.log のみを集める（入力省略時は従来どおり
+  results/raw/ 配下が対象。articles#68 Bugbot 指摘・イシュー #971）。
+- (c) のバッチ/秒は 10 未満を小数 1 桁で表示する（`:.0f` だと 1 未満の値が
+  1 に丸まり実際の約 2 倍に見えるため。articles#68 Bugbot 指摘・イシュー #971）。
 """
 
 import argparse
@@ -303,12 +308,21 @@ def section(path, rows):
     )
     lines.append("| デバイス | フレームワーク | 中央値 | Q1 | Q3 | バッチ/秒 |")
     lines.append("| --- | --- | --- | --- | --- | --- |")
+
+    def fmt_tps(v):
+        # 10 バッチ/秒未満は小数 1 桁。`:.0f` だと 1 未満の値（fandhe-ai CUDA
+        # 初回計測の約 0.55）が 1 に丸まり約 2 倍に見える（articles#68
+        # Bugbot 指摘・イシュー #971）。
+        if v < 10:
+            return f"{v:.1f}"
+        return f"{v:.0f}"
+
     for device in devices_in(rows, "infer"):
         for fw in FRAMEWORKS:
             r = get(rows, fw, "infer", device)
             if r:
                 lines.append(
-                    f"| {device} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['throughput_per_s']:.0f} |"
+                    f"| {device} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {fmt_tps(r['throughput_per_s'])} |"
                 )
             else:
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - | - |")
@@ -370,7 +384,18 @@ def main():
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
 
-    skip_logs = sorted(glob.glob(os.path.join(HERE, "results/raw/skipped*.log")))
+    # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
+    # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
+    # 無関係な別ホスト・別ラウンドの skipped*.log が混ざる（articles#68
+    # Bugbot 指摘・イシュー #971）。入力省略時は inputs が
+    # HERE/results/raw/*.jsonl になるため、収集元は従来どおり
+    # results/raw/ に一致する（後方互換）。
+    input_dirs = sorted({os.path.dirname(os.path.abspath(p)) for p in inputs})
+    skip_logs = sorted(
+        log
+        for d in input_dirs
+        for log in glob.glob(os.path.join(d, "skipped*.log"))
+    )
     lines.append("## 実行時失敗（skipped*.log）\n")
     any_skip = False
     for sl in skip_logs:
