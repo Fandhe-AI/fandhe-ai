@@ -58,10 +58,19 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
     let b = tensor2::<B>(Xorshift64Star::new(SEED_B).fill_vec(n * n), [n, n], dev);
     let mut cs = 0.0;
 
+    // イシュー #965 codex-review 指摘: cs は毎反復上書きされるため、ループ後に
+    // 最後の値だけを検査すると途中反復が縮退（全ゼロ/非有限）していても
+    // 最終反復が正常なら見逃す。壊れた計算の実行時間を性能値として記録しない
+    // 契約（`.claude/rules/security.md` A08）を反復単位で満たすため、
+    // checksum 計算直後・warmup を含む全反復で検証する。
     let one = |cs: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.clone().matmul(b.clone());
         *cs = checksum(c)?;
+        // イシュー #965: Burn(wgpu) Metal 経路は N>=512 で結果テンソル全ゼロを
+        // 返す upstream 既知バグを持つ（tracel-ai/burn#4966 →
+        // tracel-ai/cubek#283。`docs/perf/burn-wgpu-metal-gemm-zero-result.md`）。
+        validate_gemm_checksum(*cs)?;
         Ok(start.elapsed())
     };
 
@@ -73,11 +82,6 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         durations.push(one(&mut cs)?);
     }
     let st = stats(&durations)?;
-    // イシュー #965: Burn(wgpu) Metal 経路は N>=512 で結果テンソル全ゼロを
-    // 返す upstream 既知バグを持つ（tracel-ai/burn#4966 →
-    // tracel-ai/cubek#283。`docs/perf/burn-wgpu-metal-gemm-zero-result.md`）。
-    // 壊れた計算の実行時間を性能値として記録しないよう emit 前に遮断する。
-    validate_gemm_checksum(cs)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
