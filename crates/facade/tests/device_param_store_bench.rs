@@ -86,7 +86,12 @@ fn run_legacy_path(device: Device, steps: usize) -> (f64, f64) {
 
     for _ in 0..steps {
         let t_step = Instant::now();
-        let updated = {
+        // `t_update` は `sgd.step` 直前に確定するが、経過時間の加算は
+        // `model.apply_parameters` の後で行う。update フェーズの定義
+        // （本ファイル冒頭コメント・#955 レビュー指摘）は「`Sgd::step` +
+        // `apply_parameters`」であり、resident 側の `step_device_param_store`
+        // （更新処理全体を計測）と対称な区間にするため。
+        let (updated, t_update) = {
             let tape = fandhe_ai::tape_for(device).unwrap();
             let bound = model.bind(&tape);
             let x = tape.var(&x_data);
@@ -99,10 +104,10 @@ fn run_legacy_path(device: Device, steps: usize) -> (f64, f64) {
             let t_update = Instant::now();
             let param_refs = model.trainable_parameters();
             let updated = sgd.step(&param_refs, &grad_refs).unwrap();
-            update_secs += t_update.elapsed().as_secs_f64();
-            updated
+            (updated, t_update)
         };
         model.apply_parameters(updated).unwrap();
+        update_secs += t_update.elapsed().as_secs_f64();
         total_secs += t_step.elapsed().as_secs_f64();
     }
 

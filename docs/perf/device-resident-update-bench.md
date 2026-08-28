@@ -40,23 +40,41 @@ facade/tests/device_param_store_train.rs` と同一モデル様式）。
 
 環境: Apple M4 Max（macOS 26.6.2）・`rustc 1.96.0`・`--release`。
 
+**#955 レビュー指摘（PR #955・`crates/facade/tests/device_param_store_bench.rs`
+の計測区間修正）を反映した再計測値**: 旧経路の `update_secs` は従来
+`Sgd::step` 直後（`model.apply_parameters(updated)` を含まない）で確定して
+いたため、resident 側（`step_device_param_store` 全体を計測）と非対称な
+区間の比較になっていた。`t_update` の経過時間加算を `apply_parameters` の
+後へ移し、update フェーズを両経路とも「`Sgd::step`（または相当処理）+
+パラメータ反映」で揃えたうえで下表を再計測した。
+
 | バックエンド | legacy 中央値 (s/step) | resident 中央値 (s/step) | total_speedup_x | resident_faster |
 |---|---|---|---|---|
-| CPU | 1.23〜1.31e-4 | 1.21〜1.29e-4 | 0.96〜1.08 | 試行によりどちらも僅差（ノイズレベル） |
-| Metal（実機） | 5.8〜6.9e-4 | 9.4〜11.2e-4 | 0.61〜0.64 | **false（新経路が一貫して遅い）** |
+| CPU | 1.18〜1.22e-4 | 1.27〜1.36e-4 | 0.88〜0.94 | 試行によりどちらも僅差（ノイズレベル） |
+| Metal（実機） | 6.3〜7.2e-4 | 1.04〜1.11e-3 | 0.60〜0.65 | **false（新経路が一貫して遅い）** |
 | CUDA | 未計測（本ローカル環境に実機なし。`#[ignore]` テスト整備済み） | — | — | — |
 
-update フェーズ単体（参考。1 step 全体のうち更新処理のみ）:
+update フェーズ単体（参考。1 step 全体のうち更新処理のみ。修正後は旧経路も
+`apply_parameters` を含む）:
 
 | バックエンド | legacy update 中央値 (s) | resident update 中央値 (s) | update_speedup_x |
 |---|---|---|---|
-| CPU | ~1.49e-6 | ~1.15e-6 | 1.11〜1.30（僅差で resident 側が速い） |
-| Metal | ~1.5e-6 | 4.1〜4.3e-4 | **0.004（resident 側が約 250 倍遅い）** |
+| CPU | ~2.97〜3.13e-6 | ~1.19〜1.35e-6 | 2.3〜2.5（resident 側が明確に速い） |
+| Metal | ~2.88〜2.98e-6 | ~3.94〜4.37e-4 | **0.007（resident 側が約 132〜152 倍遅い）** |
+
+`apply_parameters`（`crates/autodiff/src/compat/sequential.rs`）はホスト側の
+`Tensor<f32>` 差し替えのみで GPU ディスパッチを伴わないため、修正前後で
+legacy update の絶対値自体はいずれのバックエンドも同オーダー（数 μs 未満）
+のまま変化していない。一方 CPU の `update_speedup_x` は「resident 側が
+僅差で速い（1.11〜1.30）」から「resident 側が明確に速い（2.3〜2.5）」へ、
+Metal の乖離倍率は「約 250 倍」から「約 132〜152 倍」へ、それぞれ計測区間の
+対称化により数値が変わった（結論の方向性——CPU は非後退・Metal は resident
+側が update フェーズ単体で 2 桁倍遅い——は変わらない）。
 
 CPU は複数回実行してもいずれかが僅かに速い程度でノイズレベル（±1 割
 程度）の差に留まり、明確な後退は観測されない。**Metal は複数回実行して
-一貫して新経路（resident）が旧経路より遅い**（total で約 1.6〜1.7 倍、
-update フェーズ単体では約 250 倍）。
+一貫して新経路（resident）が旧経路より遅い**（total で約 1.5〜1.7 倍、
+update フェーズ単体では約 132〜152 倍）。
 
 ## 4. 原因分析（転送モデルの前提との突合）
 
@@ -93,8 +111,8 @@ tolerance・実装（`register_resident_leaves`・`DeviceParamStore::step` の
 ## 5. 非後退判定の結論
 
 - **CPU**: 非後退（ノイズレベルの差。明確な後退なし）
-- **Metal**: **後退を観測**（実機・複数回実行で再現。total 約 1.6〜1.7 倍
-  遅い、update フェーズ単体では約 250 倍遅い）。原因は上記 4 節のとおり
+- **Metal**: **後退を観測**（実機・複数回実行で再現。total 約 1.5〜1.7 倍
+  遅い、update フェーズ単体では約 132〜152 倍遅い）。原因は上記 4 節のとおり
   小規模モデルにおける GPU ディスパッチ回数増加（D2H download 継続 + grad
   upload のパラメータ単位分割）であり、tolerance・実装の変更で対処する
   事項ではないためスコープ外として記録する（4 節参照。改善実装は本
