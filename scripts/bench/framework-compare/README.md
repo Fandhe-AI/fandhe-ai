@@ -14,10 +14,11 @@ fandhe-ai を candle・Burn と同一プロトコルで横並び比較する独�
 | Burn | `burn` | =0.21.0 | CPU（ndarray）/ Metal（wgpu）/ CUDA（cubecl） |
 | tch-rs | — | 未計測 | libtorch 依存のため省略 |
 
-計測済み環境は 2 系統（詳細・結果は `results/summary.md`）:
+計測済み環境は 3 系統（詳細・結果は `results/summary.md`）:
 
 - 環境 1: Apple M4 Max / macOS（CPU + Metal）→ `results/raw/results.jsonl`
 - 環境 2: DGX Spark（NVIDIA GB10。CUDA + ARM CPU）→ `results/raw/results-dgx.jsonl`。CUDA ホストでは `./run_all_cuda.sh` を使う（bench-candle / bench-burn は `--no-default-features --features cuda` でビルドされる。fandhe-ai は cfg + 実行時プローブのため feature 指定不要）
+- 環境 3: NVIDIA GeForce RTX 3060（12 GiB）/ Linux（CUDA。デバイス/tape 再利用モードの fresh/reuse 比較用）→ `results/raw/results-rtx3060.jsonl`（イシュー #925）
 
 ## 計測タスク
 
@@ -38,15 +39,32 @@ fandhe-ai を candle・Burn と同一プロトコルで横並び比較する独�
 - 重み初期化: candle / Burn は共有 RNG（同一シード）で同一の重み。fandhe-ai の `Sequential::add_linear` は
   内部初期化（シード指定）のため重みの値自体は異なるが、実行時間には影響しない（同一アーキテクチャ・同一入力）
 
+### `--mode fresh|reuse`（イシュー #925。デバイス/tape 再利用モード）
+
+- 既定は `fresh`（上記「計測ごとに新しい計算グラフを作る」プロトコルと完全に同一。既存 JSONL・集計表との互換維持）
+- `reuse`（`bench-fandhe` の `gemm` タスクのみ対応。`bench-candle` / `bench-burn` は
+  デバイス再利用が API 上の既定設計のため対象外で MEASURE_ERROR を返す）:
+  tape/デバイスを 1 回だけ構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
+  経過時間を `init_s`（JSONL のフィールド。初期化 1 回分のコスト）として分離記録したうえで、
+  同一 tape 上で warmup 残り 19 回 → 計測 20 回を回し、`median_s`/`q1_s`/`q3_s` を
+  「カーネル実行時間」として記録する
+- **tape 上のノード蓄積に関する注意**: 葉 Var（A・B）は tape 上に 1 回だけ登録して使い回すが、
+  matmul の結果ノードは呼ぶたびに tape へ蓄積される（N=2048 で約 16 MiB/回 × 40 回 ≒ 640 MiB。
+  N=4096 でも約 2.6 GiB で対象 GPU メモリ内に収まる。長時間・大サイズの reuse 計測では
+  メモリ使用量の増加に留意する）
+- 使用例: `cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse`
+
 ## 使い方
 
 ```bash
 cd scripts/bench/framework-compare
-./run_all.sh                 # macOS: cpu + metal 全組み合わせ → results/raw/results.jsonl
-./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ → results/raw/results-cuda.jsonl
+./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal reuse スイープ）→ results/raw/results.jsonl
+./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda reuse スイープ）→ results/raw/results-cuda.jsonl
 # 個別実行:
 cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048
+cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse
 # 集計（JSONL → Markdown 表。既定は results/raw/*.jsonl 全件を標準出力へ。
+# reuse 行が存在するファイルには (a') 節が追加される。
 # コミット済みの results/summary.md は既定動作では上書きされない）:
 python3 summarize.py
 python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力・出力の明示

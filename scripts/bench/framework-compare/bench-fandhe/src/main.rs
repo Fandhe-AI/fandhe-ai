@@ -5,6 +5,15 @@
 //! builds a fresh tape. The measured region ends with host materialization
 //! (`to_tensor()` + element readout) so asynchronous device execution cannot
 //! leak out of the timing window.
+//!
+//! `--mode reuse`（イシュー #925。`gemm` タスクのみ）: 上記の毎回新規 tape
+//! プロトコルは fandhe-ai の CUDA/Metal でタイル初期化コスト（CUDA コンテキ
+//! スト作成・NVRTC カーネルコンパイル等）を毎計測に含めてしまい、デバイス・
+//! グラフを使い回す candle / Burn との比較でフレームワーク間の不公平が生じる
+//! （`results/summary.md` 環境 2 の備考）。reuse モードは tape を 1 回だけ
+//! 構築し、その初期化コスト（init_s）を「カーネル実行時間」（中央値・Q1/Q3）
+//! と分離して記録することで、初期化コストとカーネル実行を切り分けて比較可能
+//! にする。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -104,6 +113,65 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum,
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
+/// `--mode reuse` の gemm 計測（イシュー #925）。tape/デバイスを 1 回だけ
+/// 構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの経過を
+/// init_s として分離記録したうえで、同一 tape 上で warmup 残り + 計測を回す。
+/// 葉 Var（A・B）は 1 回だけ登録して使い回すが、matmul の結果ノードは呼ぶ
+/// たびに tape へ蓄積される（N=2048 で約 16 MiB/回 × 40 回 ≒ 640 MiB。
+/// N=4096 でも約 2.6 GiB で対象 GPU メモリ内に収まる。README 計測プロトコル
+/// 節に明記）。
+fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let n = cli.size;
+    let (a_data, b_data) = gemm_inputs(n)?;
+
+    // init_s: tape 構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
+    // 経過（CUDA コンテキスト作成・NVRTC コンパイル等の一度きりのコストを
+    // すべて含む）。
+    let init_start = Instant::now();
+    let tape = make_tape(&cli.device)?;
+    let a = tape.var(&a_data);
+    let b = tape.var(&b_data);
+    let c0 = a.matmul(&b)?;
+    let mut checksum = checksum_var(&c0)?;
+    let init_s = init_start.elapsed().as_secs_f64();
+
+    // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
+    // 葉 Var を使い回し、matmul のみを繰り返す。
+    let mut one = || -> Result<Duration, Box<dyn std::error::Error>> {
+        let start = Instant::now();
+        let c = a.matmul(&b)?;
+        checksum = checksum_var(&c)?;
+        Ok(start.elapsed())
+    };
+    for _ in 0..WARMUP_ITERS.saturating_sub(1) {
+        one()?;
+    }
+    let mut durations = Vec::with_capacity(MEASURE_ITERS);
+    for _ in 0..MEASURE_ITERS {
+        durations.push(one()?);
+    }
+    let st = stats(&durations)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "gemm",
+        device: &cli.device,
+        size: n,
+        stats: st,
+        gflops: Some(gemm_gflops(n, st.median_s)),
+        throughput_per_s: None,
+        checksum,
+        warmup: WARMUP_ITERS,
+        iters: MEASURE_ITERS,
+        mode: "reuse",
+        init_s: Some(init_s),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -187,6 +255,8 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum: last_loss as f64,
         warmup: TRAIN_WARMUP,
         iters: measured.len(),
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -238,6 +308,8 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum,
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -250,12 +322,20 @@ fn main() {
     }
 }
 
+/// task × mode の分岐。reuse モードは受け入れ条件の範囲（gemm のみ）に限定
+/// し、train / infer × reuse は MEASURE_ERROR で fail-fast する（イシュー
+/// #925 §2.1・§8 のスコープ境界。将来対応が必要な場合は別イシューで追跡）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
-    match cli.task.as_str() {
-        "gemm" => run_gemm(&cli),
-        "train" => run_train(&cli),
-        "infer" => run_infer(&cli),
-        other => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
+    match (cli.task.as_str(), cli.mode.as_str()) {
+        ("gemm", "fresh") => run_gemm(&cli),
+        ("gemm", "reuse") => run_gemm_reuse(&cli),
+        ("train", "fresh") => run_train(&cli),
+        ("infer", "fresh") => run_infer(&cli),
+        (task, "reuse") => Err(format!(
+            "MEASURE_ERROR: --mode reuse is not implemented for task '{task}' (gemm only; issue #925)"
+        )
+        .into()),
+        (other, _) => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
     }
 }

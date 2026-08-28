@@ -179,3 +179,44 @@
 - candle の CUDA GEMM は N=2048（4204 GFLOP/s）→ N=4096（2265 GFLOP/s）で効率が低下する。burn は N=4096 で 2936 GFLOP/s
 - ARM CPU の GEMM は環境 1（M4 Max）と同傾向（fandhe-ai と candle が同水準、burn の ndarray バックエンドが 1 桁遅い）。N=4096 では fandhe-ai（821 GFLOP/s）が candle(621 GFLOP/s) を上回った
 - 計測は本番稼働サービス（ComfyUI / Kokoro / gateway）を停止せずに実施（GPU 使用率 0% のアイドル時間帯、干渉は上記常駐 1 GB のみ）
+
+## 環境 3: NVIDIA GeForce RTX 3060（デバイス/tape 再利用モード fresh vs reuse 比較。イシュー #925）
+
+- GPU: NVIDIA GeForce RTX 3060（12 GiB、compute capability 8.6）
+- OS: Linux（x86_64、7.0.0-30-generic）
+- GPU ドライバ: 595.71.05（CUDA 13.2 対応）
+- CUDA NVRTC / ランタイムヘッダ: 完全な CUDA Toolkit が本機に未導入のため、`libnvrtc.so.13`（`nvidia-cuda-nvrtc` pip パッケージ v13.0.88）+ `cuda_fp16.h` 等のヘッダ（`nvidia-cuda-runtime`/`nvidia-cuda-cccl` pip パッケージ）を Python venv 内に取得し、`LD_LIBRARY_PATH`（`libnvrtc.so.13` の場所）・`CUDA_INCLUDE_PATH`（`compile_ptx` のフォールバック候補パス経由。`nvrtc.rs` の 2 段構えコンパイル）を実行時に指定して計測した。ドライバの CUDA 13.2 対応より新しい NVRTC（v13.3.x）は `CUDA_ERROR_UNSUPPORTED_PTX_VERSION` になったため v13.0.88 に固定（本体 workspace・framework-compare workspace の依存はいずれも変更していない。あくまで実行時ライブラリの一時的な提供手段）
+- ツールチェーン: rustc/cargo 1.96.0（`--release` ビルド）
+- 計測日: 2026-08-28
+- 対象: `bench-fandhe` の GEMM（`--task gemm --device cuda`）のみ（受け入れ条件 1 の必須項目 N=2048 に加え、サイズ非依存性を確認するため 256/512/1024/4096 も計測）。MLP 学習・推論・candle/burn の CUDA ビルドは本機では `nvcc` 未導入のため実施していない（下記「計測不可・未計測項目」参照）
+- 生データ: `results/raw/results-rtx3060.jsonl`（fresh・reuse 両方の行を含む）
+
+### (a) / (a') GEMM — CUDA（fresh vs reuse）
+
+| N | mode | 初期化(init_s) | 中央値 | Q1 | Q3 | GFLOP/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 256 | fresh | - | 267.254 ms | 263.324 ms | 268.936 ms | 0.1 |
+| 256 | reuse | 477.869 ms | 295.149 ms | 285.541 ms | 311.193 ms | 0.1 |
+| 512 | fresh | - | 333.016 ms | 288.506 ms | 350.769 ms | 0.8 |
+| 512 | reuse | 484.626 ms | 260.525 ms | 259.086 ms | 261.049 ms | 1.0 |
+| 1024 | fresh | - | 275.626 ms | 268.969 ms | 287.997 ms | 7.8 |
+| 1024 | reuse | 465.571 ms | 300.868 ms | 283.915 ms | 316.275 ms | 7.1 |
+| 2048 | fresh | - | 291.567 ms | 289.523 ms | 296.560 ms | 58.9 |
+| 2048 | reuse | 573.555 ms | 297.019 ms | 294.843 ms | 301.696 ms | 57.8 |
+| 4096 | fresh | - | 506.611 ms | 484.172 ms | 545.168 ms | 271.3 |
+| 4096 | reuse | 684.670 ms | 474.396 ms | 469.370 ms | 480.577 ms | 289.7 |
+
+### 環境 3 の計測不可・未計測項目
+
+- Metal: macOS 実機がこのエージェント実行環境から到達不能のため未計測。再現コマンド:
+  `cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048 --mode reuse`
+  （macOS 実機での追試をユーザーへ案内する）
+- MLP 学習・推論（train/infer）の reuse モード: `bench-fandhe` は受け入れ条件の範囲（gemm タスクのみ）に限定して実装したため未対応（`docs/spec` 変更を伴わないスコープ判断。PR 本文の対象外項目を参照）
+- bench-candle / bench-burn の CUDA ビルド: 本機に `nvcc` が未導入のため `candle-kernels`（build.rs が nvcc を要求）のビルドが失敗し未計測。`--mode reuse` は API 設計上 candle/burn には適用されないため（README 参照）、この欠落は受け入れ条件の達成に影響しない
+
+### 環境 3 の備考
+
+- **reuse モードでも中央値は fresh モードとほぼ同水準（数十 ms 以内の差）で、DGX Spark GB10（環境 2）で観測された「tape 初期化コストの毎回計上」という仮説どおりには初期化コストが消えなかった**。むしろ reuse モードの `init_s`（tape 構築 + 初回 matmul + ホスト実体化）自体が 465〜685 ms とサイズ非依存の大きな値を示し、かつ同一 tape を使い回した 2 回目以降の呼び出し（`median_s`）も 260〜506 ms とほぼ同水準にとどまる。つまり本環境では「初期化コストは tape 構築 1 回限りで、以降の呼び出しはカーネル実行のみの短時間になる」という当初仮説は成立せず、**行列積 1 回ごとに数百 ms の固定オーバーヘッドが繰り返し発生している**ことが実測で判明した
+- checksum は fresh/reuse で完全一致（同一入力に対する行列積であり期待どおり。数値的な副作用なし）
+- 上記の性質（reuse でも per-call オーバーヘッドが消えない原因）は本イシューの受け入れ条件（fresh/reuse の差分を記録する）を満たす実測結果であり、原因の切り分け自体は未実施（fandhe-ai 側のカーネル選択・ディスクキャッシュ照会等が候補だが未確認）。原因調査は別イシューとして追跡することを推奨する（PR 本文のスコープ外項目を参照）
+- 本環境は CUDA Toolkit を完全インストールしていない簡易構成（NVRTC・ヘッダのみを pip 経由で一時取得）のため、DGX Spark（環境 2。nvcc 込みの標準インストール）とはビルド・実行環境が異なる点に留意する

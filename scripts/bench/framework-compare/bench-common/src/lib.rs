@@ -21,6 +21,10 @@ pub enum BenchError {
     },
     /// A CLI flag had an unparsable value.
     InvalidArg { flag: &'static str, value: String },
+    /// `--mode` was neither `fresh` nor `reuse` (allowlist validation; see
+    /// `parse_cli`). A3 インジェクション対策と同じ思想で、未知の値を
+    /// フレームワーク側の分岐へそのまま流さず、ここで fail-fast する。
+    InvalidMode { value: String },
 }
 
 impl std::fmt::Display for BenchError {
@@ -37,6 +41,12 @@ impl std::fmt::Display for BenchError {
                 write!(
                     f,
                     "MEASURE_ERROR: {flag} must be an integer (got '{value}')"
+                )
+            }
+            BenchError::InvalidMode { value } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: --mode must be 'fresh' or 'reuse' (got '{value}')"
                 )
             }
         }
@@ -153,6 +163,14 @@ pub struct Record<'a> {
     pub checksum: f64,
     pub warmup: usize,
     pub iters: usize,
+    /// 計測モード（"fresh" = 毎回新規デバイス/tape・"reuse" = 使い回し）。
+    /// 常に emit する。既存コミット済み JSONL（本フィールド追加前）にはこの
+    /// キーが無いため、読み手（summarize.py）は欠損を "fresh" として扱う
+    /// （イシュー #925。互換維持）。
+    pub mode: &'a str,
+    /// reuse モードのみ Some: デバイス/tape 構築から初回計測までの
+    /// 初期化 1 回分の経過時間（秒）。fresh モードは常に None（emit しない）。
+    pub init_s: Option<f64>,
 }
 
 impl Record<'_> {
@@ -175,9 +193,14 @@ impl Record<'_> {
             s.push_str(&format!(",\"throughput_per_s\":{t:.3}"));
         }
         s.push_str(&format!(
-            ",\"checksum\":{:.6},\"warmup\":{},\"iters\":{}}}",
+            ",\"checksum\":{:.6},\"warmup\":{},\"iters\":{}",
             self.checksum, self.warmup, self.iters
         ));
+        s.push_str(&format!(",\"mode\":\"{}\"", self.mode));
+        if let Some(init) = self.init_s {
+            s.push_str(&format!(",\"init_s\":{init:.9}"));
+        }
+        s.push('}');
         s
     }
 
@@ -204,16 +227,22 @@ impl Record<'_> {
     }
 }
 
-/// Parsed CLI: --task gemm|train|infer --device cpu|metal --size N [--out path]
+/// Parsed CLI: --task gemm|train|infer --device cpu|metal --size N
+/// [--mode fresh|reuse] [--out path]
 pub struct Cli {
     pub task: String,
     pub device: String,
     pub size: usize,
     pub out: String,
+    /// "fresh"（既定。既存プロトコルと同一）または "reuse"（イシュー #925。
+    /// デバイス/tape を使い回し、初期化コストとカーネル実行を分離計測する）。
+    pub mode: String,
 }
 
-/// Parse the CLI arguments. An unparsable `--size` is a typed error
-/// (diagnosed at the binary boundary), not a panic.
+/// Parse the CLI arguments. An unparsable `--size` / unknown `--mode` is a
+/// typed error (diagnosed at the binary boundary), not a panic. `--mode` は
+/// allowlist（fresh/reuse）検証のみで、それ以外の値をフレームワーク側の
+/// 分岐へそのまま流さない（security.md A03 相当の方針）。
 pub fn parse_cli() -> Result<Cli, BenchError> {
     let args: Vec<String> = std::env::args().collect();
     let get = |flag: &str| -> Option<String> {
@@ -229,11 +258,16 @@ pub fn parse_cli() -> Result<Cli, BenchError> {
         })?,
         None => 256,
     };
+    let mode = get("--mode").unwrap_or_else(|| "fresh".into());
+    if mode != "fresh" && mode != "reuse" {
+        return Err(BenchError::InvalidMode { value: mode });
+    }
     Ok(Cli {
         task: get("--task").unwrap_or_else(|| "gemm".into()),
         device: get("--device").unwrap_or_else(|| "cpu".into()),
         size,
         out: get("--out").unwrap_or_else(|| "results/raw/results.jsonl".into()),
+        mode,
     })
 }
 
@@ -266,5 +300,52 @@ mod tests {
     #[test]
     fn stats_empty_is_typed_error() {
         assert!(matches!(stats(&[]), Err(BenchError::EmptySamples)));
+    }
+
+    fn sample_record<'a>(mode: &'a str, init_s: Option<f64>) -> Record<'a> {
+        Record {
+            framework: "fandhe-ai",
+            framework_version: "0.3.0",
+            task: "gemm",
+            device: "cpu",
+            size: 256,
+            stats: Stats {
+                median_s: 0.001,
+                q1_s: 0.0009,
+                q3_s: 0.0011,
+            },
+            gflops: Some(123.456),
+            throughput_per_s: None,
+            checksum: 1.0,
+            warmup: 20,
+            iters: 20,
+            mode,
+            init_s,
+        }
+    }
+
+    #[test]
+    fn json_line_fresh_mode_omits_init_s() {
+        let line = sample_record("fresh", None).to_json_line();
+        assert!(line.contains("\"mode\":\"fresh\""));
+        assert!(!line.contains("init_s"));
+    }
+
+    #[test]
+    fn json_line_reuse_mode_includes_init_s() {
+        let line = sample_record("reuse", Some(0.45)).to_json_line();
+        assert!(line.contains("\"mode\":\"reuse\""));
+        assert!(line.contains("\"init_s\":0.450000000"));
+    }
+
+    #[test]
+    fn invalid_mode_is_typed_error() {
+        let err = BenchError::InvalidMode {
+            value: "bogus".to_string(),
+        };
+        assert!(
+            err.to_string()
+                .contains("--mode must be 'fresh' or 'reuse'")
+        );
     }
 }
