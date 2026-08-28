@@ -202,6 +202,36 @@ class ParityStatusTests(unittest.TestCase):
         row = _with_parity(_base_row(size=256), total=65536, fail_count=0.5)
         self.assertEqual(summarize.parity_status(row), "fail")
 
+    # --- イシュー #970 PR #978 codex-review P0 指摘（巨大整数）の回帰テスト ---
+    # `_is_plain_number` が `int` にも `math.isfinite()` を適用していた
+    # 実装は、桁数の大きい `int`（Python は任意精度）で `float` 変換に
+    # 失敗し `OverflowError` を送出して集計全体が例外終了していた
+    # （fail-closed 契約違反）。以下は例外を送出せず "fail" を返すことを
+    # 確認する非後退テスト。
+
+    def test_huge_parity_total_is_fail_without_exception(self):
+        row = _with_parity(_base_row(size=256), total=10**1000, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_huge_parity_fail_count_is_fail_without_exception(self):
+        row = _with_parity(_base_row(size=256), total=65536, fail_count=10**1000)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_huge_size_is_fail_without_exception(self):
+        row = _with_parity(_base_row(size=10**1000), total=65536, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_huge_max_abs_err_does_not_raise(self):
+        # max_abs_err 自体は fail_count>0 と組み合わせないと "fail" になら
+        # ないため、`_parity_reason` の指数表記フォーマット
+        # （`_format_maybe_huge`）が巨大整数で例外送出しないことを、
+        # "fail" 行（fail_count>0）で直接確認する。
+        row = _with_parity(_base_row(size=256), total=65536, fail_count=1)
+        row["parity_max_abs_err"] = 10**1000
+        self.assertEqual(summarize.parity_status(row), "fail")
+        reason = summarize._parity_reason(row)
+        self.assertIn(str(10**1000), reason)
+
 
 class GemmParityHelpersTests(unittest.TestCase):
     def test_gemm_parity_failures_filters_task_and_status(self):

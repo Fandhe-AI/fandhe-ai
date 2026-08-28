@@ -297,10 +297,46 @@ def _is_plain_number(v):
     パース可能にする（RFC 8259 非準拠の拡張）ため、型が `float` であっても
     `math.isfinite()` を別途要求する（イシュー #970 PR #978 codex-review P0
     指摘: 外部 JSONL の `NaN` が型検査だけでは弾けず "ok" 判定へ通ってしまう）。
+
+    `int` は Python では任意精度で常に有限（`NaN`/`Infinity` になり得ない）
+    ため `math.isfinite()` を適用しない。適用すると内部で `float` へ変換
+    されるため、外部 JSONL の桁数の大きい `int`（例:
+    `parity_total: 10**1000`）で `OverflowError: int too large to convert
+    to float` が発生し、"fail" 判定を返す前に集計全体が例外終了してしまう
+    （イシュー #970 PR #978 codex-review P0 指摘: 巨大整数で fail-closed
+    契約が破られる）。`int` は有限として扱ったうえで、後続の値域・整数性・
+    期待要素数検証（`parity_status`）で明示的に妥当性を判定する。
     """
     if not isinstance(v, (int, float)) or isinstance(v, bool):
         return False
+    if isinstance(v, int):
+        return True
     return math.isfinite(v)
+
+
+def _non_integral(v):
+    """`v` が整数値でない `float` かどうかを判定する。
+
+    `float(total) != int(total)` のような整数性検証は、`total` が桁数の
+    大きい `int`（`_is_plain_number` により通過済み）の場合に `float()`
+    変換で `OverflowError` を送出する（上記 `_is_plain_number` と同じ
+    問題）。`int` は変換なしに自明に整数値であるため、`float` の場合の
+    みを判定対象とする。
+    """
+    return isinstance(v, float) and not v.is_integer()
+
+
+def _format_maybe_huge(v):
+    """指数表記フォーマット（`f"{v:.3e}"`）は桁数の大きい `int` に対し
+    内部で `float` 変換が発生し `OverflowError` になる（`_is_plain_number`
+    と同根の問題）。報告用文字列の生成で集計全体を例外終了させないよう、
+    フォーマット失敗時は `str()` へフォールバックする（fail-closed。
+    イシュー #970 PR #978 codex-review P0 指摘）。
+    """
+    try:
+        return f"{v:.3e}"
+    except OverflowError:
+        return str(v)
 
 
 def parity_status(row):
@@ -348,7 +384,7 @@ def parity_status(row):
         return "fail"
     # 整数性検証（イシュー #970 PR #978 codex-review P0 指摘2）: total・
     # fail_count は要素数のカウントであり非整数値（例: 1.5）は不正入力。
-    if float(total) != int(total) or float(fail_count) != int(fail_count):
+    if _non_integral(total) or _non_integral(fail_count):
         return "fail"
     total = int(total)
     fail_count = int(fail_count)
@@ -365,7 +401,7 @@ def parity_status(row):
     # 完全一致しなければならない。row["size"] は本ツールが自ファイルから
     # 読んだ信頼できる値（JSONL の parity_* とは独立の情報源）。
     size = row.get("size")
-    if not _is_plain_number(size) or float(size) != int(size) or int(size) < 0:
+    if not _is_plain_number(size) or _non_integral(size) or int(size) < 0:
         return "fail"
     expected_total = int(size) * int(size)
     if total != expected_total:
@@ -401,8 +437,8 @@ def _parity_reason(row):
         if _is_plain_number(fail_count) and _is_plain_number(total)
         else "?"
     )
-    abs_str = f"{max_abs:.3e}" if _is_plain_number(max_abs) else "null"
-    rel_str = f"{max_rel:.3e}" if _is_plain_number(max_rel) else "null"
+    abs_str = _format_maybe_huge(max_abs) if _is_plain_number(max_abs) else "null"
+    rel_str = _format_maybe_huge(max_rel) if _is_plain_number(max_rel) else "null"
     return f"要素誤差超過 fail={fail_str}, max_abs={abs_str}, max_rel={rel_str}"
 
 
