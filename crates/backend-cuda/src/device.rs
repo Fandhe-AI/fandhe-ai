@@ -245,7 +245,7 @@ impl CudaDevice {
 /// §4.4 `BackendError::CudaUnavailable` のコメント参照）。
 ///
 /// `enumerate`／`select` の呼び出しごとに [`CudaDevice::device_count`]／
-/// [`Self::probe`]（内部で `crate::context_cache::cached_device` を経由。
+/// `Self::probe`（内部で `crate::context_cache::cached_device` を経由。
 /// イシュー #929）を経由してプローブする。いずれも内部で必ず
 /// `is_culib_present()` の panic 回避ゲートを通すため（モジュール冒頭
 /// コメント参照）、本 provider が `CudaContext` を直接呼ぶことはない。

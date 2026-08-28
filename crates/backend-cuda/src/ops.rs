@@ -53,7 +53,7 @@ pub struct CudaBackendOps {
 impl CudaBackendOps {
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
     /// 構築自体は driver 初期化を行わないため常に成功する（実際の
-    /// driver 呼び出しは各メソッドが [`Self::device_handle`]（`context_cache`
+    /// driver 呼び出しは各メソッドが `Self::device_handle`（`context_cache`
     /// 経由）を呼んだ時点）。
     pub fn new(ordinal: usize) -> Self {
         Self { ordinal }
