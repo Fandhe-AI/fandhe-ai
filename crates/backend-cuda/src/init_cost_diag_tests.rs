@@ -334,15 +334,15 @@ fn init_cost_diag_e2e_matches_framework_compare_shape() {
         let mut samples = Vec::with_capacity(MEASURED_TRIALS);
         for _ in 0..MEASURED_TRIALS {
             let (a, b) = gen_square_ab(0x926_e2e ^ (n as u64), n);
-            let a_t =
-                Tensor::new(a, &[n, n]).expect("lhs tensor construction must succeed for N={n}");
-            let b_t =
-                Tensor::new(b, &[n, n]).expect("rhs tensor construction must succeed for N={n}");
+            let a_t = Tensor::new(a, &[n, n])
+                .unwrap_or_else(|e| panic!("lhs tensor construction must succeed for N={n}: {e}"));
+            let b_t = Tensor::new(b, &[n, n])
+                .unwrap_or_else(|e| panic!("rhs tensor construction must succeed for N={n}: {e}"));
 
             let t = Instant::now();
-            let out = backend
-                .gemm(&a_t, &b_t)
-                .expect("fresh-handle CudaBackendOps::gemm must succeed for N={n}");
+            let out = backend.gemm(&a_t, &b_t).unwrap_or_else(|e| {
+                panic!("fresh-handle CudaBackendOps::gemm must succeed for N={n}: {e}")
+            });
             samples.push(t.elapsed().as_secs_f64());
 
             assert_eq!(
