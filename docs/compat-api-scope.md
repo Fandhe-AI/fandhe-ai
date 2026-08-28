@@ -40,12 +40,16 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
   `StepLr` の素の再エクスポート（`docs/facade-optimizer-promotion-decision.md`
   §4 案 A）。`Tape`／`Var`／`BackendOps` に依存しない値型・純関数のみで
   REQ-12 と矛盾せず、`crates/facade/tests/api_surface.rs` の optim
-  固有検査で固定される。以上の **3 つが、利用者が使うことを想定する
-  唯一の入口である**。`SgdConfig` はクレート root からも再エクスポート
-  される同一型（`lib.rs` コメント）であり、`DeviceParamStore`／
-  `Tape::step_device_param_store`（デバイス常駐更新。#954）は `optim`
-  モジュールに含めず root 公開のままである（`optim.rs` モジュール doc
-  「デバイス常駐更新との違い」と整合）
+  固有検査で固定される。加えて、`fandhe_ai::DeviceParamStore`／
+  `Tape::step_device_param_store`（デバイス常駐更新。#954。クレート
+  root からの再エクスポート。`crates/facade/src/lib.rs`）も利用者が使う
+  ことを想定した入口である。`SgdConfig` はクレート root からも
+  再エクスポートされる同一型（`lib.rs` コメント）であり、
+  `DeviceParamStore`／`Tape::step_device_param_store` はデバイス常駐
+  更新という別経路のため `optim` モジュールには含めず root 公開のまま
+  である（`optim.rs` モジュール doc「デバイス常駐更新との違い」と整合）。
+  以上の **4 つ（`tape()`系・`compat`・`optim`・デバイス常駐更新経路）が、
+  利用者が使うことを想定する唯一の入口である**
 - **`fandhe_ai::optim` の位置づけ（イシュー #962）**: optimizer は
   numpy／Keras 慣習のラッパーではないため **1 節（compat 層の対象範囲）は
   変更しない**。facade 素の公開契約（`tape()`／再エクスポート値型と同じ層）
