@@ -282,6 +282,16 @@ mod gemm_auto;
 mod gemm_mma;
 mod gemm_mma_tf32;
 mod gemm_wmma;
+// イシュー #956: #946（`context_cache` プロセス内キャッシュ）反映後の
+// fresh モード GEMM で N=2048 のみに現れる約 166 ms の再現性ある固定
+// コストのフェーズ分解診断テスト。`init_cost_diag_tests`（#926）と同じ
+// 理由（`kernels` 系非公開 `mod`・`context_cache` 非公開 `mod` への到達）
+// でクレートルートの兄弟モジュールとして配置する
+// （`fresh_overhead_diag_tests.rs` 冒頭ドキュメンテーションコメント
+// 参照）。プロダクションコード（`gemm.rs`・`memory.rs`・
+// `context_cache.rs` 等）は本イシューで変更しない。
+#[cfg(test)]
+mod fresh_overhead_diag_tests;
 #[cfg(test)]
 mod init_cost_diag_tests;
 mod kernels;
