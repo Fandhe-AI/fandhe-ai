@@ -264,7 +264,8 @@ phase-4（#924）へ接続するスコープ外事項とする。§5(b) 参照�
 そのため第 1 段（#935 スコープ）は次の分担とする:
 
 - **常駐化する（param の再アップロードを排除する）**: パラメータ本体
-  （`weight`/`bias`）・momentum バッファ（`velocity`）。学習セッション
+  （`weight`/`bias`）・momentum バッファ（`velocity_weight`／
+  `velocity_bias`。§3.3a のとおり `weight`/`bias` 別個に保持する）。学習セッション
   開始時に 1 回 `upload` し、以降 `param` への **再アップロードは発生
   させない**（`sgd_step_device` の in-place 更新のみで完結させる）。
 - **常駐化しない（毎ステップ／毎 forward 1 回転送。§3.3b で確定）**:
@@ -334,18 +335,56 @@ forward 呼び出しごとに 1 回）と **grad の upload**（1 ステップ�
   層インデックスは `Sequential.layers`（活性化層を挟む生の層リスト）の
   添字ではなく、この並びに対する 0 始まりの連番（trainable 層インデックス）
   とする。各キーに対応する値は `weight: DeviceBuffer<f32>`・
-  `bias: Option<DeviceBuffer<f32>>`・`velocity: Option<DeviceBuffer<f32>>`
-  （momentum 有効時のみ）の組であり、**1 キーに複数バッファを保持できる**
-  構造とする（「層インデックス→単一 `DeviceBuffer`」という誤読を避ける
-  ため本節で明示する）。`Sequential::forward_resident`（後述）は
+  `bias: Option<DeviceBuffer<f32>>`・`velocity_weight:
+  Option<DeviceBuffer<f32>>`・`velocity_bias: Option<DeviceBuffer<f32>>`
+  （いずれも momentum 有効時のみ）の組であり、**1 キーに複数バッファを
+  保持できる**構造とする（「層インデックス→単一 `DeviceBuffer`」という
+  誤読を避けるため本節で明示する）。**momentum バッファは `weight`／
+  `bias` それぞれ専用に分ける（codex-review 指摘の解消）**: `weight` と
+  `bias` は一般に shape が異なり（例: `Linear` の `weight` は
+  `[out, in]`、`bias` は `[out]`）、かつ §3.1 の `sgd_step_device` は
+  `weight`・`bias` それぞれに対して個別に 1 回ずつ呼ばれる契約
+  （`velocity: Option<&mut DeviceBuffer<f32>>` を 1 パラメータにつき
+  1 個受け取るシグネチャ。§3.1）である。旧稿の「1 キーにつき単一の
+  `velocity`」という記述では、この単一バッファを `weight` 用・`bias` 用
+  のどちらの `sgd_step_device` 呼び出しにも使い回すことになり、
+  shape 不一致（`weight` の velocity を `bias` の shape で読む、または
+  その逆）で §4.2 のデバイス一致検査／shape 検査に失敗するか、検査を
+  すり抜けた場合は誤った momentum 更新を静かに適用しうる。これを避ける
+  ため、`velocity_weight`／`velocity_bias` を独立した `DeviceBuffer`
+  として保持し、`sgd_step_device(weight, grad_weight, velocity_weight,
+  …)`／`sgd_step_device(bias, grad_bias, velocity_bias, …)` のように
+  対応する片方のみを渡す（`bias` が存在しない層では
+  `velocity_bias` も常に `None`）。`Sequential::forward_resident`（後述）は
   `Sequential.layers` を通常どおりイテレーションしつつ、`Linear` 層に
   出会うたびにこの trainable 層インデックスを別途カウントアップして
   対応するキーを引く（活性化層はカウントしない）。既存の位置対応契約
   そのものは変更しないため、新たな対応規則を追加で決定する必要はない。
 - **新規 forward 入口**: `Sequential` に既存 `forward` を置き換えない
   追加メソッド `forward_resident<'t>(&self, tape: &'t Tape, input: &Var<'t>,
-  store: &mut DeviceParamStore) -> Result<Var<'t>, AutodiffError>`（仮称。
-  確定シグネチャは #935）を追加する。**`store` を `&mut` で受け取る**
+  store: &mut DeviceParamStore, mem: &dyn MemoryOps) -> Result<Var<'t>,
+  AutodiffError>`（仮称。確定シグネチャは #935）を追加する。**`mem: &dyn
+  MemoryOps` を明示引数として受け取る（codex-review 指摘の解消）**:
+  §3.3b のとおり `forward_resident` は各層で `mem.download` を呼ぶ必要が
+  あるが、`Sequential`（`facade::compat::sequential::Sequential`）が
+  保持するのは `&dyn BackendOps`（または `Box<dyn BackendOps + Send>`）の
+  みであり、`&dyn BackendOps` から `&dyn MemoryOps` へ実行時に再変換する
+  安全な手段はない（trait オブジェクトの downcast は対象の具象型を
+  知らない限り成立せず、§3.2 で確定した「supertrait 化はしない」方針とも
+  整合しない）。したがって `mem` は `sgd_step_device`／
+  `linear_forward_resident`（§3.1）と同じ設計軸で、**呼び出し元が保持する
+  同一バックエンドの `MemoryOps` 実装値をそのまま明示引数として渡す**
+  （旧稿はこの引数を欠落させており、§3.3b の学習経路が実装不能だった。
+  呼び出し元は §3.4 のとおり `facade` 側であり、`Sequential` 初期化時に
+  `BackendOps` と対になる `MemoryOps` 実装値〈同一 `XBackendOps` に対する
+  `impl MemoryOps for XBackendOps`。§3.2〉を既に把握しているため、
+  `forward_resident` 呼び出し時にそれをそのまま渡せばよく、`Store` 側に
+  `MemoryOps` の所有権を持たせる代替案〈`DeviceParamStore` が自身の
+  `mem` を保持する案〉は採らない: `DeviceParamStore` は tape とも
+  backend インスタンスとも独立な寿命を持つ設計〈§4.1〉であり、`mem` の
+  所有権まで持たせると特定バックエンドインスタンスへの暗黙の結び付きが
+  生じ、§4.1 の「バックエンド／tape のいずれの寿命にも依存しない」設計
+  意図と矛盾する）。**`store` を `&mut` で受け取る**
   （`&` ではない）: §3.3b のとおり、この呼び出しが生成する weight/bias
   leaf の `NodeId` を `store` 自身の内部状態として書き込むため（呼び出し
   元がこの対応表を別途持ち回る必要をなくす。Cursor Bugbot 指摘の解消。
@@ -412,14 +451,63 @@ Tape 非依存の resident 推論専用に残す）:
   自体ではなく `NodeId`。`Var<'t>` は `Tape` への借用を持つため
   `DeviceParamStore`〈`Tape` とは独立の寿命。§4.1〉のフィールドとして
   保持できない）を、層インデックスと対応付けて書き込む
-  （`pending_grad_sources: Vec<{ weight: NodeId, bias: Option<NodeId> }>`
-  相当。前回分は forward 呼び出しのたびに上書きする「1 forward 分のみ
-  保持する」一時状態であり、§4.1 の恒久的な単一真実源〈`DeviceBuffer`
-  群〉とは別区分の状態であることを明示する）。
+  （`pending_grad_sources: Option<{ tape_id: TapeId, entries: Vec<{
+  weight: NodeId, bias: Option<NodeId> }> }>` 相当。前回分は forward
+  呼び出しのたびに上書きする「1 forward 分のみ保持する」一時状態であり、
+  §4.1 の恒久的な単一真実源〈`DeviceBuffer` 群〉とは別区分の状態である
+  ことを明示する）。
+  - **`TapeId` によるタイプ一致検査（codex-review 指摘の解消:
+    `NodeId` のみの保存では Tape 同一性を検証できない）**: `NodeId` は
+    単に「その `Tape` インスタンス内での連番」に過ぎず、`Tape` インスタンス
+    をまたいで一意である保証はない（毎ステップ `Tape` を再生成する現行
+    設計〈§4.1〉では、新しい `Tape` でも同じ添字の `NodeId` が別の
+    無関係なノードを指しうる）。旧稿は `pending_grad_sources` に
+    `NodeId` のみを保存しており、`step` に渡された `tape` が
+    `forward_resident` 呼び出し時に使われた `Tape` と実際に同一である
+    ことを検証していなかった。これは呼び出し元が誤って別セッションの
+    `Tape`（例: 前ステップの使い回し・別モデルの `Tape`）を `step` に
+    渡した場合、`Var::from_raw(tape, node_id)` が「その `Tape` の中で
+    たまたま同じ添字を持つ無関係なノード」を指してしまい、無関係な
+    勾配を静かに weight/bias の更新へ適用しうる欠陥である。これを塞ぐ
+    ため、`forward_resident` は `tape` から取得できる一意な識別子
+    `TapeId`（`Tape` 生成時に採番される値。既存 `tape.rs` に未実装なら
+    #935 で新設する軽量フィールドとし、`Tape` の公開契約・既存 API は
+    変更しない）を `pending_grad_sources` へ `entries` と併せて保存する。
+    `step` はまず `tape.id() == pending_grad_sources.tape_id` を検査し、
+    不一致（または `pending_grad_sources` が `None`）であれば
+    `Var::from_raw` を一切呼ばずに型付きエラー（`BackendError` の新設
+    variant。名称は #935 で確定。「渡された Tape が forward_resident
+    呼び出し時の Tape と一致しない」ことを呼び出し元が判別できることを
+    本設計で確定する）を返す（fail-closed）。
+- **2 回目以降の `forward_resident` 呼び出しに対する検証（codex-review
+  指摘の解消: 複数 forward による無検証上書き）**: 旧稿は
+  `pending_grad_sources` を「forward 呼び出しのたびに無条件で上書きする」
+  としていたが、`step()`（下記）が呼ばれる前に同一 `store` に対して
+  `forward_resident` が 2 回以上呼ばれた場合（例: 勾配蓄積・
+  マイクロバッチ学習で複数 forward → 1 backward → 1 step という
+  呼び出し順序を取るコード）、1 回目の forward が生成した leaf の
+  `NodeId` が無検証に破棄され、1 回目の forward 分の重みに対する勾配が
+  `step` に一切反映されないまま `Result::Ok` を返してしまう（誤った
+  学習結果を正常終了として返す、静かなデータ欠落）。本設計はこれを
+  「`DeviceParamStore` は 1 回の `forward_resident` 呼び出しにつき
+  高々 1 回の `step` 呼び出しを前提とする単一 forward／単一 step 契約」
+  として確定し、次の fail-closed 検査を追加する: `forward_resident` は
+  呼び出し開始時に `pending_grad_sources` が既に `Some`（前回 forward
+  分が `step` によってまだ消費されていない）であれば、新規の
+  `mem.download`／`tape.var` 登録を一切行わず型付きエラー（`BackendError`
+  の新設 variant。「未消費の forward_resident 結果が残っている状態での
+  再呼び出し」であることを呼び出し元が判別できることを本設計で確定する。
+  名称は #935 が確定する）を返す。`step()` は正常終了時（§4.3 の poisoned
+  へ遷移しない場合）に `pending_grad_sources` を `None` へ戻し、次の
+  `forward_resident` 呼び出しを許可する。複数 forward にまたがる勾配
+  蓄積（同一パラメータに対する複数回の forward 分の勾配を合算してから
+  1 回 `step` する運用）は本設計のスコープ外とし、必要になった時点で
+  別途 #935 以降で検討する（§7「スコープ外事項」へ追記する）。
 - `tape.backward()` 実行後、呼び出し元は `DeviceParamStore::step(&mut
   self, tape: &Tape, grads: &Gradients, mem: &dyn MemoryOps, config:
   &SgdStepConfig) -> Result<(), BackendError>`（仮称。確定シグネチャは
-  #935）を呼ぶ。`step` は内部で `pending_grad_sources` の各 `NodeId` に
+  #935）を呼ぶ。`step` はまず上記の `TapeId` 一致検査を行い、通過した
+  場合のみ内部で `pending_grad_sources` の各 `NodeId` に
   ついて `Var::from_raw(tape, node_id)`（`autodiff` クレート内部限定の
   `pub(crate)` コンストラクタ。`autodiff::optim` は同一クレートのため
   呼べる。`var.rs:63`）で `Var` を再構築し、`grads.get(&var)`
@@ -432,6 +520,7 @@ Tape 非依存の resident 推論専用に残す）:
   整合する。呼び出し元は `NodeId`／`Var` を一切自分で保持する必要が
   なく、`forward_resident` の戻り値（出力 `Var`。損失計算に使う）と
   `tape.backward()` の戻り値（`Gradients`）だけを受け渡せばよい。
+  正常終了時は上記のとおり `pending_grad_sources` を `None` に戻す。
 - **新規 Op／新規 Tape API は不要**: 既存 `Op::MatMul`/`Op::Add` の
   VJP 実装・既存 `Gradients::get`／`Var::from_raw`（いずれも実装済み
   API）をそのまま再利用するため、`Tape`／`Gradients` 側に「resident
@@ -515,8 +604,11 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
 `sgd_step_device` 呼び出し前に `DeviceParamStore` が担う検証（`Sgd::step`
 既存契約〈`sgd.rs:183-200`〉と同水準を装置常駐版へ引き継ぐ):
 
-- **デバイス一致検査**: `param.device() == grad.device()`（`velocity` がある
-  場合は同様に検査）でなければ `BackendError::DeviceMismatch` を返す
+- **デバイス一致検査**: `param.device() == grad.device()`（対応する
+  `velocity_weight`／`velocity_bias` がある場合は同様に検査。§3.3a の
+  とおり `weight` 呼び出しには `velocity_weight`、`bias` 呼び出しには
+  `velocity_bias` のみを渡すため、この検査も呼び出しごとに独立に行う）
+  でなければ `BackendError::DeviceMismatch` を返す
   （`buffer.rs` の `DeviceBuffer::device()` を用いる）。
 - **位置対応契約**: `params.len() != grads.len()` は `InvalidArgument`。
   momentum 有効時、2 回目以降の呼び出しで件数・各 `DeviceBuffer` の
@@ -534,7 +626,8 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
 更新にも適用する契約とする:
 
 ```text
-検証フェーズ: 全パラメータ・全 velocity の shape・device 一致を検査
+検証フェーズ: 全パラメータ・全 velocity_weight／velocity_bias の shape・
+              device 一致を検査
               （1 件でも不一致なら早期 return、どのバッファも未更新）
 更新フェーズ: 検証済みの全件について sgd_step_device を呼ぶ
 ```
@@ -698,17 +791,25 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
   `facade::compat::Sequential` へ追加し、`DeviceParamStore::new` が
   `trainable_parameters()` と同一の位置対応契約で層インデックス→
   `DeviceBuffer` 対応表を構築する。`forward_resident` は `&mut
-  DeviceParamStore` を受け取り、§3.3b のとおり forward 呼び出しごとに
-  weight/bias の downloaded スナップショットを `Tape` の leaf として
-  新規登録したうえで、生成した `NodeId` を `store` 自身の一時状態
-  （`pending_grad_sources`）へ書き込む。`tape.backward()` 後、呼び出し
+  DeviceParamStore` に加え `mem: &dyn MemoryOps`（§3.3a。呼び出し元が
+  `Sequential` 初期化時に把握している `BackendOps` と対になる
+  `MemoryOps` 実装値をそのまま渡す）を受け取り、§3.3b のとおり forward
+  呼び出しごとに weight/bias の downloaded スナップショットを `Tape`
+  の leaf として新規登録したうえで、生成した `NodeId` を `TapeId`
+  （§3.3b の `Tape` 同一性検査用）と併せて `store` 自身の一時状態
+  （`pending_grad_sources`）へ書き込む。`pending_grad_sources` が既に
+  `Some`（前回 forward 分が未消費）の状態での再呼び出しは §3.3b の
+  とおり型付きエラーで拒否する。`tape.backward()` 後、呼び出し
   元は `DeviceParamStore::step(&mut self, tape: &Tape, grads:
   &Gradients, mem: &dyn MemoryOps, config: &SgdStepConfig)` を呼び、
-  `step` が内部で `Var::from_raw`（`var.rs:63`。`autodiff` クレート内部
+  `step` はまず `tape` の `TapeId` が `pending_grad_sources` に保存された
+  ものと一致するかを検査したうえで（不一致は型付きエラー。§3.3b）、
+  内部で `Var::from_raw`（`var.rs:63`。`autodiff` クレート内部
   限定）+ `Gradients::get`（`backward.rs:49`）を使って
   `pending_grad_sources` から `grad_weight`／`grad_bias` を取り出す
   （新規 `Op`／`Tape` API 拡張は不要。既存 `Op::MatMul`/`Op::Add` の
-  VJP・既存 `Gradients` API をそのまま再利用する）。
+  VJP・既存 `Gradients` API をそのまま再利用する。`Tape` に新設する
+  `TapeId` 採番のみが #935 の新規実装事項となる）。
 - `DeviceParamStore` の API（`new`/`step`/`sync_to_host` 等の確定
   シグネチャ）・`autodiff::optim` 内の配置は #935 が決める。決定済みの
   設計軸（`Sgd` を置き換えず `Sgd::step` 相当のロジックを §5.1 の参照
@@ -757,5 +858,13 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
   削減できるが、変更範囲が forward/backward 全体の `DeviceBuffer` 契約
   移行（§6(b)）と同水準になるため本ツリーのスコープ外とする。接続先:
   §6(b) と同じく #931・phase-4（#924）。
+- **複数 forward にまたがる勾配蓄積（マイクロバッチ学習）のネイティブ
+  サポート**（§3.3b「2 回目以降の `forward_resident` 呼び出しに対する
+  検証」参照）: 本設計は「1 forward・1 backward・1 step」を単位契約とし、
+  `step` に未消費のまま 2 回目の `forward_resident` を呼ぶことを型付き
+  エラーで拒否する（データを静かに欠落させる誤りを防ぐ fail-closed 措置）。
+  複数 forward 分の勾配を合算してから 1 回 `step` する運用（マイクロ
+  バッチ）を正式にサポートするための「位置ごとの勾配集約」機構は
+  本ツリーのスコープ外とし、必要になった時点で別途 Issue 化する。
 - f16 経路への拡張。
 - optimizer 公開面（`facade` 側の意匠）の変更 — 接続先: #932。
