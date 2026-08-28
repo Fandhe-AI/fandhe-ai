@@ -280,6 +280,7 @@ mod tests {
     /// 返る（実 Metal デバイスが必要なため Mac 実機でのみ実行される。
     /// `tests/device_smoke.rs` と同じ前提）。
     #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
     fn cached_context_returns_same_instance_across_calls() {
         let first = cached_context().expect("Metal context available on test host");
         let second = cached_context().expect("cache hit");
@@ -291,6 +292,7 @@ mod tests {
 
     /// [`cached_gemm`] も同様に同一インスタンスを返す。
     #[test]
+    #[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
     fn cached_gemm_returns_same_instance_across_calls() {
         let ctx = cached_context().expect("Metal context available on test host");
         let first = cached_gemm(&ctx).expect("gemm suite builds");
