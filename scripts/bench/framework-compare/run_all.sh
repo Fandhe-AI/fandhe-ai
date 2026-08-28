@@ -11,11 +11,11 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
-run() { # run <binary> <task> <device> <size>
-  local bin=$1 task=$2 device=$3 size=$4
-  echo "== $bin $task $device size=$size =="
-  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --out "$OUT" 2>err.tmp; then
-    echo "$bin task=$task device=$device size=$size : $(cat err.tmp)" >> "$SKIP"
+run() { # run <binary> <task> <device> <size> [mode]
+  local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh}
+  echo "== $bin $task $device size=$size mode=$mode =="
+  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" --out "$OUT" 2>err.tmp; then
+    echo "$bin task=$task device=$device size=$size mode=$mode : $(cat err.tmp)" >> "$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
   fi
   rm -f err.tmp
@@ -41,6 +41,13 @@ for bin in bench-fandhe bench-candle bench-burn; do
     run "$bin" train "$dev" 64
     run "$bin" infer "$dev" 64
   done
+done
+
+# (a') GEMM — デバイス/tape 再利用モード（イシュー #925。bench-fandhe の
+# gemm タスクのみ対応。bench-candle / bench-burn は MEASURE_ERROR で
+# fail-fast し skipped.log に記録される既存機構に乗る）
+for n in 256 512 1024 2048 4096; do
+  run bench-fandhe gemm metal "$n" reuse
 done
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
