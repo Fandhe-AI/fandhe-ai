@@ -19,8 +19,8 @@
 | デバイス | fandhe-ai | candle | burn | 出典行 |
 |---|---|---|---|---|
 | CUDA（環境 2・DGX Spark GB10） | 2.418 s | 268.1 µs | — | summary.md:165-166 |
-| CPU（環境 1・Apple M4 Max） | 18.185 ms | 797.5 µs | 626.5 µs | summary.md:74-76 |
-| Metal（環境 1） | 48.845 ms | 751.8 µs | 1.606 ms | summary.md:77 |
+| CPU（環境 1・Apple M4 Max） | 18.185 ms | 797.5 µs | 626.5 µs | summary.md:72-74 |
+| Metal（環境 1） | 48.845 ms | 751.8 µs | 1.606 ms | summary.md:75-77 |
 
 summary.md 自身の注記（191 行目）が指摘するとおり、この差の支配要因は 2 つに
 分解できる:
