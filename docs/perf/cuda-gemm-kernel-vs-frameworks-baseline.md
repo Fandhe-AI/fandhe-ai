@@ -5,16 +5,23 @@
 #926（tape 初期化コスト内訳診断。PR #945 でマージ済み）の後続として、fandhe-ai の CUDA GEMM を
 **初期化コストを含まないカーネル単体性能**として candle / Burn・REQ-8 下限と突合する。
 
-## 状態: 既存一次データの突合で受け入れ条件を充足（GB10 新規実測は未実施）
+## 状態: 受け入れ条件は部分充足（N=2048・4096 のみ。N=256〜1024 のカーネル単体データは欠落。GB10 新規実測は未実施）
 
 本ドキュメント作成時点で `docs/real-hardware-verification-env.local.md`（実機ホスト名のローカル
 管理ファイル）が実装セッションに存在せず、DGX Spark GB10 実機へは SSH 到達不能だった。実測値の
 捏造は行わない方針（PR #713 で確立）に従い、GB10 での `--mode reuse` 新規実測は実施していない。
-一方、受け入れ条件（N=256〜4096 の分離計測記録・vs candle/Burn 比較・REQ-8 下限との突合）は
-**既存コミット済み一次データ**（環境 2: DGX Spark GB10 の candle/Burn 実測、環境 3: RTX 3060 の
-fresh/reuse 分離実測、`cuda-optimized-remeasurement.md` のカーネル単体実測）の突合で充足できるため、
-本ドキュメントはその突合結果を記録する。GB10 での reuse 実測は §6 に再現手順を残し、実機セッションへ
-引き継ぐ。
+受け入れ条件（N=256〜4096 の分離計測記録・vs candle/Burn 比較・REQ-8 下限との突合）のうち、
+「N=256〜4096 の分離計測記録」は**既存コミット済み一次データ**（環境 2: DGX Spark GB10 の
+candle/Burn 実測、環境 3: RTX 3060 の fresh/reuse 分離実測）の突合で全範囲を充足できる（§3）。
+一方「vs candle/Burn 比較」「REQ-8 下限との突合」を**カーネル実行時間そのもの**（tape・ホスト実体化
+を含まない launch-only 計測）で行うには `cuda_floor_bench` の実測値が要るが、既存コミット済みの
+`cuda-optimized-remeasurement.md` は **N=2048・4096 のみ**を計測対象としており、N=256〜1024 の
+`cuda_floor_bench` 値は存在しない。§3 の N=256〜1024 fresh/reuse 実測値は §2 の定義どおり tape 構築・
+per-call 固定オーバーヘッドを含むため本文自身がカーネル実行時間とはみなせないと説明しており、これを
+代用してカーネル単体の受け入れ条件を充足させることはできない。したがって本ドキュメントは
+**N=2048・4096 に限定してカーネル単体の vs candle/Burn 比較・REQ-8 下限突合を充足**し、N=256〜1024
+についてはカーネル単体の受け入れ条件を**未充足のまま §7 にスコープ外として記録**する（GB10 での
+該当サイズの `cuda_floor_bench` 新規実測が必要。§6 に再現手順を残し実機セッションへ引き継ぐ）。
 
 ## 1. 目的・位置づけ
 
@@ -98,12 +105,18 @@ fandhe-ai の (c) 実測と異なる（§4 の限定条件で明記）。
 GB10 では fandhe-ai の `--mode reuse` 実測は未実施（本ドキュメント作成時点で GB10 到達不能）。
 再現手順・再計測キャンペーン表は §6 に記録する。
 
-## 4. vs candle / Burn（GB10・既存一次データ突合。カーネル単体）
+## 4. vs candle / Burn（GB10・既存一次データ突合。カーネル単体。N=2048・4096 限定）
 
 fandhe-ai の CUDA GEMM「カーネル単体」実測は `docs/perf/cuda-optimized-remeasurement.md`（#571・
-PR #725、同一 GB10 個体・`cuda_floor_bench` 5 run 中央値・launch-only 同期境界）にある。これと
-環境 2 の candle / Burn 実測（fresh。tape/デバイス構築を含まないためカーネル実行に近い）を GFLOP/s
-換算で突合する。
+PR #725、計測日 2026-08-18。同ドキュメント内の PyTorch 参照値・`cuda_floor_bench` 実測は同一計測
+セッション内で同一 GB10 個体上のもの）にある。これと環境 2 の candle / Burn 実測（fresh。
+`scripts/bench/framework-compare/results/summary.md`、計測日 2026-08-28。tape/デバイス構築を
+含まないためカーネル実行に近い）を GFLOP/s 換算で突合する。**両者は計測日・計測セッションが異なる
+別実測であり、GB10 個体が同一であることは確認できていない**（framework-compare 側の一次記録は
+実ホスト名を伏せた「内部クラスタの 1 ノード」としか記録しておらず、`cuda-optimized-remeasurement.md`
+側の実機個体と照合できる provenance が無い。GPU ドライバ版数も前者 580.159.03・後者 580.173.02 と
+異なる）。したがって本突合は「同一 GPU 型（NVIDIA GB10）だが個体は未確認のクロスセッション比較」
+として解釈する必要がある（限定条件 7 参照）。
 
 | N | 経路 | fandhe-ai（カーネル単体） | candle（fresh） | burn（fresh） | fandhe-ai / candle | fandhe-ai / burn |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -165,13 +178,24 @@ PR #725、同一 GB10 個体・`cuda_floor_bench` 5 run 中央値・launch-only 
    採用は「実測基準でゲートを機能させ、今後の最適化で性能を改善していく」という 2026-08-18
    ユーザー承認済みの方針判断であること。したがって §5 の候補下限突合・優位性比較は**継続する
    限定条件 1〜3 付きの承認済み候補値**に基づくものであり、無条件に確定した性能値の比較ではない
+7. **クロスセッション比較で GB10 個体の同一性は未確認**: §4 冒頭のとおり、`cuda-optimized-remeasurement.md`
+   （2026-08-18 計測）と framework-compare（2026-08-28 計測）は別々の計測セッションの一次記録であり、
+   同一 GB10 個体であることを確認できる識別子（実ホスト名等）が framework-compare 側に残っていない
+   （`docs/real-hardware-verification-env.md` の運用によりホスト名はローカル管理でドキュメントへ
+   書かない方針のため）。GPU ドライバ版数も 580.159.03（前者）と 580.173.02（後者）で異なり、同一個体か
+   別個体かのいずれとも断定できない。したがって §4・§5 の比較は「同一 GPU 型（GB10）だが個体は
+   未確認のクロスセッション比較」として扱う。個体同一性を確認するには、両セッションの一次記録に
+   共通の個体識別子（`nvidia-smi -q` の GPU UUID 等）を追記する実機セッションでの追試が必要
+   （§7 のスコープ外事項として記録）
 
 ## 5. REQ-8 下限との突合
 
 `docs/performance-targets.md` §2 は CUDA f32 最適化後下限を **50%**（対 PyTorch、size=4096 が最小、
-`wmma_tf32` 実測 51.96%）と確定している。同一 GB10 個体の PyTorch f32 参照値（4096:
-17.4467 TFLOPS、5 run 中央値。`cuda-optimized-remeasurement.md`「PyTorch 参照値の再集計」節）を分母に、
-candle / Burn の対 PyTorch 比を同一形式で並べる。
+`wmma_tf32` 実測 51.96%）と確定している。`cuda-optimized-remeasurement.md`「PyTorch 参照値の再集計」
+節の PyTorch f32 参照値（4096: 17.4467 TFLOPS、5 run 中央値。同ドキュメント内の同一計測セッション・
+同一 GB10 個体上の値）を分母に、candle / Burn の対 PyTorch 比を同一形式で並べる。**この分母
+（2026-08-18 計測）と candle/Burn の分子（framework-compare、2026-08-28 計測）は限定条件 7 のとおり
+別セッションの実測であり GB10 個体の同一性が未確認のクロスセッション比較である**点に注意する。
 
 | N | 経路 | 対 PyTorch 比 | 出典 |
 | --- | --- | --- | --- |
@@ -236,6 +260,15 @@ done
 
 ## 7. 未計測・スコープ外
 
+- **N=256〜1024 のカーネル単体（`cuda_floor_bench`）実測が欠落しており、この範囲の vs candle/Burn
+  比較・REQ-8 下限突合は受け入れ条件を未充足のまま残す**（§0「状態」・§4）: `cuda-optimized-remeasurement.md`
+  は N=2048・4096 のみを計測対象としており、N=256・512・1024 の `cuda_floor_bench` 値は存在しない。
+  §3.1 の同サイズ fresh/reuse 実測値は tape 構築・per-call 固定オーバーヘッドを含むためカーネル
+  実行時間とみなせず（§2・§3.1）、代用できない。GB10 実機セッションで該当サイズの `cuda_floor_bench`
+  を追加実測することが必要（§6 の再現手順を N=256・512・1024 にも適用して追試する）
+- **§4・§5 の GB10 個体同一性が未確認**（限定条件 7）: `cuda-optimized-remeasurement.md`（2026-08-18）
+  と framework-compare（2026-08-28）の GB10 個体が同一かどうかを確認できる識別子（GPU UUID 等）が
+  一次記録に残っていない。実機セッションで両計測に共通の個体識別子を記録し照合することが必要
 - **GB10 での `--mode reuse` 新規実測**: 到達不能のため §6 に手順を残置。実機セッションでの追試が必要
 - **reuse モードでも per-call 固定オーバーヘッドが残る原因の切り分け**（§3.1・§4 限定条件 5）:
   fandhe-ai 側のカーネル選択・ディスクキャッシュ照会等が候補だが未確認。`docs/perf/cuda-tape-init-cost-diagnosis.md`
