@@ -96,18 +96,22 @@ upstream バグの再現と判断する根拠。
 
 ### 2.5 承認済みピンでの修正版入手可否
 
-`scripts/bench/framework-compare/Cargo.lock`（§2.1）が実測どおり `cubek-matmul
-=0.2.0` に解決される一方、`cubek#283`（修正 PR）のマージは 2026-05-21（`#4966`
-クローズと同日）であり、`Cargo.lock` の解決結果が示す時点でこの修正が
-`cubek-matmul 0.2.0` に含まれているかどうかは、本 doc 執筆環境（crates.io への
-直接ネットワークアクセスが不可）からは確認できていない（`--未検証--`）。いずれの
-場合も、`.claude/rules/deps-policy.md` 第 9 区分の承認済みピンは `burn =0.21.0`
-（→ `cubek-matmul =0.2.0`）に固定済みであり、ピンを動かす（`burn` の別バージョンへ
-更新する）こと自体が依存追加・更新のユーザー承認事項に該当する。したがって
-「現行ピンのままで修正版が使えるかどうか」を確定させることと無関係に、**再計測を
-正式に行うには承認された手順でのピン更新が前提**になる（§4 参照）。この確認
-（`cubek-matmul 0.2.0` に修正が含まれるか）はネットワーク到達可能なセッションでの
-追試事項として記録する。
+crates.io の登録メタデータ（index.crates.io 実測）によると `cubek-matmul 0.2.0`
+の公開日時（`pubtime`）は 2026-05-07T17:53:00Z であり、`cubek#283`（修正 PR。
+`tracel-ai/cubek` へのマージコミット `d713fd4`）のマージ日時は
+2026-05-20T12:57:41Z（GitHub API `merged_at` 実測）である。修正 PR のマージは
+`cubek-matmul 0.2.0` の公開より約 13 日後であるため、**`cubek-matmul 0.2.0` には
+`#4966`/`cubek#283` の修正が含まれていない**と判断できる（公開済みの crates.io
+パッケージは再公開されない限り内容が変わらないため、公開日時が修正マージより
+前であれば当該修正を含み得ない）。したがって `scripts/bench/framework-compare/
+Cargo.lock`（§2.1）が実測どおり `cubek-matmul =0.2.0` に解決される本ハーネスの
+現行ピン構成では、本現象（Metal wgpu 経路 N≥512 GEMM 全ゼロ）は再現し続ける
+はずであり、修正取り込みには `cubek-matmul`（推移的には `burn`）の後続版への
+更新が必要になる。`.claude/rules/deps-policy.md` 第 9 区分の承認済みピンは
+`burn =0.21.0`（→ `cubek-matmul =0.2.0`）に固定済みであり、ピンを動かす（`burn`
+の別バージョンへ更新する）こと自体が依存追加・更新のユーザー承認事項に該当する。
+よって本 PR ではピン更新は行わず、承認された手順でのピン更新を前提とした再計測を
+§4 の追試事項として記録するに留める。
 
 upstream `#4966` は既に該当事象で解決済みのイシューであるため、新規の upstream
 起票は行わない（自動運転中は外部リポジトリへの書き込みを行わない方針とも整合）。
@@ -152,9 +156,17 @@ Mac 実機が到達不能なため以下は未計測（結果欄「未計測」�
   （`$HOME/.cache/` 配下）の削除で挙動が変わるか: `--未計測--`
 
 再計測（正式な是正）については `results/summary.md`「データ有効性の注記」
-節のとおり、`cubek#283` の修正を含むバージョンへの `burn` ピン更新（§2.5 参照。
-具体的な対象バージョンはネットワーク到達可能なセッションで `cubek-matmul` の
-バージョン履歴を確認してから確定する）を経て実施する。ピン更新自体は
+節のとおり、`cubek#283` の修正を含むバージョンへの `burn` ピン更新（§2.5 参照）を
+経て実施する。crates.io の登録メタデータ（index.crates.io 実測。2026-08-28
+時点）を確認したところ、`cubek-matmul` に `0.2.0` 直後の \`0.2.x\` パッチ版は
+存在せず、次の版は `cubecl =0.11.0-pre.*` を要求する `0.3.0-pre.1`
+（2026-07-29 公開）以降のプレリリース版のみである。対応する `burn` 側も
+同様に、`0.21.0`（2026-05-07 公開。現行ピン）の次の安定版 `0.22.0` は
+2026-08-28 時点で未公開（プレリリース `0.22.0-pre.1`〜`0.22.0-pre.3` のみ存在。
+最新 `0.22.0-pre.3` は 2026-08-25 公開）である。したがって**現時点では
+修正を含む安定版 `burn` が存在しない**（プレリリース版のみ）ため、ピン更新を
+実施する場合は「プレリリース版への更新を承認するか、安定版 `0.22.0` の公開を
+待つか」を含めてユーザー判断を仰ぐ必要がある。ピン更新自体は
 `.claude/rules/deps-policy.md` 第 9 区分の依存追加・更新に該当し、人間承認を
 経てから実施する事項として記録する（`.claude/rules/out-of-scope-tracking.md`
 準拠）。
@@ -174,6 +186,9 @@ Mac 実機が到達不能なため以下は未計測（結果欄「未計測」�
   `tracel-ai/cubek#283`（`gh pr view 283 --repo tracel-ai/cubek --json
   number,title,state,mergedAt` でタイトル・マージ日時のみ実測確認。本文は
   未確認）
+- `https://index.crates.io/cu/be/cubek-matmul`・`https://index.crates.io/bu/rn/burn`
+  （crates.io 公式インデックスを 2026-08-28 に直接取得し、`cubek-matmul`・
+  `burn` の全公開版と `pubtime` を実測。§2.5・§4 の版数・日時根拠）
 - `scripts/bench/framework-compare/bench-burn/Cargo.toml`（feature 構成の実測）
 - `scripts/bench/framework-compare/bench-common/src/lib.rs`
   `validate_gemm_checksum`・`scripts/bench/framework-compare/summarize.py`
