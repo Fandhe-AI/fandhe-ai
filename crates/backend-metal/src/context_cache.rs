@@ -74,6 +74,7 @@ use crate::error::MetalError;
 use crate::gemm::MetalGemm;
 use crate::generic_cache::get_or_build;
 use crate::rmsnorm::MetalRmsNorm;
+use crate::sgd::MetalSgd;
 use crate::softmax::MetalSoftmax;
 
 /// poison 時のエラー変換（`crate::generic_cache::get_or_build` へ注入する
@@ -153,6 +154,17 @@ pub(crate) fn cached_softmax(ctx: &Arc<MetalContext>) -> Result<Arc<MetalSoftmax
     static CACHE: OnceLock<Mutex<Option<Arc<MetalSoftmax>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
     get_or_build(cache, on_poison, || MetalSoftmax::new(ctx))
+}
+
+/// [`MetalSgd`] スイートをプロセス内キャッシュから取得する（イシュー
+/// #935）。`ops::MetalBackendOps::sgd_step_device` の唯一の呼び出し先。
+/// デバイス常駐パラメータ更新は学習ループの毎ステップ呼ばれるため、
+/// MSL 再コンパイルを避けるキャッシュの効果が他スイート以上に重要
+/// （`docs/device-resident-update-design.md` §3.3d「Cross-tape 契約」）。
+pub(crate) fn cached_sgd(ctx: &Arc<MetalContext>) -> Result<Arc<MetalSgd>, MetalError> {
+    static CACHE: OnceLock<Mutex<Option<Arc<MetalSgd>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    get_or_build(cache, on_poison, || MetalSgd::new(ctx))
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@
 //! 非 macOS 環境ではこのファイル自体がコンパイル対象に入らない
 //! （`lib.rs` の cfg 境界と整合。`device.rs` と同方針）。
 
+use fandhe_ai_tensor_core::buffer::MemoryOps;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{Activation, BackendOps, FusionPlan, ShapeError, Tensor};
 
@@ -22,7 +23,7 @@ use crate::context::MetalContext;
 use crate::context_cache;
 use crate::elementwise::MetalElementwise;
 use crate::error::MetalError;
-use crate::memory::map_metal_error;
+use crate::memory::{MetalBufferHandle, MetalMemory, map_metal_error};
 use crate::row_kernel::{self, plan_dtype_is_f32};
 
 /// Metal バックエンドの `BackendOps` 実装。`Device::Metal` は ordinal を
@@ -143,9 +144,150 @@ pub(crate) fn gemm_bias_act_route(bias_shape: Option<&[usize]>, n: usize) -> Gem
     }
 }
 
+/// `Device::Metal`（単一 variant。ordinal なし）に対応する
+/// `&'static MetalMemory` をプロセス内シングルトンとして取得する
+/// （イシュー #935）。
+///
+/// `BackendOps::memory_ops(&self) -> Option<&dyn MemoryOps>` は戻り値を
+/// `&self`（`MetalBackendOps`。unit struct・`Copy`）の寿命へ束縛できる
+/// 型で返す必要がある一方、`AllocationTracker` の計測系列（`docs/
+/// device-resident-update-design.md` §3.3d）を維持するには `MetalMemory`
+/// をプロセス全体で 1 個だけ共有しなければならない。`backend-cuda::ops::
+/// static_cuda_memory` と同型の意図的な `Box::leak`（`context_cache.rs`
+/// モジュール冒頭コメント「所有モデル・生存期間」と同じ「エントリは
+/// プロセスの生存期間中 evict されない」設計に倣う。`Device::Metal` は
+/// 単一デバイスのためキーは不要）。
+///
+/// `MetalMemory::new` は `context_cache::cached_context()` が返す
+/// `Arc<MetalContext>` を共有できない（`MetalMemory::new` は所有権を
+/// 要求する既存の公開シグネチャであり、crates.io 公開済み API のため
+/// 変更しない）。そのため本関数専用に独立した `MetalContext::new()` を
+/// 1 回だけ構築する（プロセス内で 2 個目の `MetalContext` が生じるが、
+/// 一度構築されれば以後は本関数のシングルトンから再利用されるため
+/// 初期化コストは 1 回のみ）。
+fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
+    use std::sync::{Mutex, OnceLock};
+
+    static CACHE: OnceLock<Mutex<Option<&'static MetalMemory>>> = OnceLock::new();
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().map_err(|_| {
+        BackendError::DeviceUnavailable("static_metal_memory: cache mutex poisoned".to_string())
+    })?;
+    if let Some(mem) = *guard {
+        return Ok(mem);
+    }
+    let ctx = MetalContext::new().map_err(map_metal_error)?;
+    let mem: &'static MetalMemory = Box::leak(Box::new(MetalMemory::new(ctx)));
+    *guard = Some(mem);
+    Ok(mem)
+}
+
 impl BackendOps for MetalBackendOps {
     fn device(&self) -> Device {
         Device::Metal
+    }
+
+    /// `static_metal_memory()`（プロセス内シングルトン）を返す
+    /// （イシュー #935）。デバイス非対応等で初期化に失敗した場合は
+    /// `None`（`memory_ops` のデフォルト契約と同じ fail-safe）。
+    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        static_metal_memory().ok().map(|m| m as &dyn MemoryOps)
+    }
+
+    /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
+    /// `docs/device-resident-update-design.md` §3.2・§5.2）。
+    /// `context_cache::cached_sgd`（プロセス内 MSL コンパイル済みパイプ
+    /// ラインキャッシュ）を経由するため、学習ループの 2 回目以降の
+    /// ステップは再コンパイルを支払わない。
+    fn sgd_step_device(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+    ) -> Result<(), BackendError> {
+        if param.device() != Device::Metal || grad.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if param.shape() != grad.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: grad.shape().to_vec(),
+            }));
+        }
+        let use_momentum = config.momentum != 0.0;
+        if let Some(v) = &velocity
+            && (v.device() != Device::Metal || v.shape() != param.shape())
+        {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: v.shape().to_vec(),
+            }));
+        }
+        if use_momentum && velocity.is_none() {
+            return Err(BackendError::Unsupported(
+                "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
+            ));
+        }
+
+        let numel = param.numel();
+        if numel == 0 {
+            return Ok(());
+        }
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let sgd = context_cache::cached_sgd(&ctx).map_err(map_metal_error)?;
+
+        let grad_handle = grad
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(grad_metal_buf) = grad_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "sgd_step_device: grad buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let velocity_metal_buf = match &velocity {
+            Some(v) => {
+                let handle = v
+                    .downcast_handle::<MetalBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                Some(handle.buffer.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "sgd_step_device: velocity buffer has numel > 0 but no device allocation"
+                            .into(),
+                    )
+                })?)
+            }
+            None => None,
+        };
+
+        let param_handle = param
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(param_metal_buf) = param_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "sgd_step_device: param buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let kernel_params = crate::sgd::SgdKernelParams {
+            lr: config.lr,
+            momentum: config.momentum,
+            dampening: config.dampening,
+            weight_decay: config.weight_decay,
+            nesterov: config.nesterov,
+            is_first_step: config.is_first_step,
+        };
+        sgd.run(
+            &ctx,
+            param_metal_buf,
+            grad_metal_buf,
+            velocity_metal_buf,
+            numel,
+            &kernel_params,
+        )
+        .map_err(map_metal_error)
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {

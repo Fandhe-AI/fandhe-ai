@@ -10,13 +10,37 @@
 //! 条件「3 バックエンドが呼び分けられる」の参照実装として、CPU は常に
 //! 実カーネルを実行できることを保証する）。
 
+use std::sync::OnceLock;
+
+use fandhe_ai_tensor_core::buffer::{DeviceBuffer, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
+use fandhe_ai_tensor_core::{
+    Activation, BackendOps, DType, FusionPlan, SgdStepConfig, ShapeError, Tensor,
+};
 
 use crate::gemm_blis::{gemm_blis_bias_act_parallel, gemm_blis_parallel};
+use crate::memory::{CpuBufferHandle, CpuMemory};
 use crate::rmsnorm::{self, match_rmsnorm_plan};
 use crate::softmax::{self, match_softmax_plan};
 use crate::{elementwise, fused_elementwise, reduction};
+
+/// `CpuBackendOps` が `MemoryOps` を実装するための、プロセスワイドに共有
+/// する単一 `CpuMemory`（イシュー #935・`docs/device-resident-update-design.md`
+/// §3.3d「`AllocationTracker` の計測系列単一化」）。
+///
+/// `CpuBackendOps` は `#[derive(Debug, Default, Clone, Copy)] pub struct
+/// CpuBackendOps;`（unit struct）であり、`fandhe-ai-backend-cpu` として
+/// crates.io へ公開済みのためフィールド追加は破壊的変更になりうる
+/// （実装計画 §3.2「CPU は `CpuBackendOps` が unit struct で公開済みの
+/// ためフィールド追加不可」）。そのためプロセスワイド `static` で
+/// `AllocationTracker` の計測系列を共有する（`CpuMemory::new()` を毎回
+/// 呼ぶと `Arc<AllocationTracker>` が呼び出しごとに新規生成され、
+/// `sgd_step_device` の一連の `alloc_zeroed`／`upload`／`download` 呼び出し
+/// 間でピーク計測が繋がらなくなるため）。
+fn shared_cpu_memory() -> &'static CpuMemory {
+    static SHARED: OnceLock<CpuMemory> = OnceLock::new();
+    SHARED.get_or_init(CpuMemory::new)
+}
 
 /// CPU バックエンドの `BackendOps` 実装。状態を持たないゼロサイズ型
 /// （CPU カーネルはホストメモリのみを扱い、CUDA `CudaDevice`／Metal
@@ -41,9 +65,130 @@ fn gemm_contiguity_fail_safe(msg: impl std::fmt::Display) -> BackendError {
     BackendError::KernelLaunchFailed(msg.to_string())
 }
 
+/// [`MemoryOps`] の CPU 実装（イシュー #935）。`shared_cpu_memory()`
+/// （プロセスワイド共有 `CpuMemory`）へ委譲する薄いラッパー。
+impl MemoryOps for CpuBackendOps {
+    fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
+        shared_cpu_memory().alloc_zeroed(shape)
+    }
+
+    fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
+        shared_cpu_memory().upload(tensor)
+    }
+
+    fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+        shared_cpu_memory().download(buffer)
+    }
+}
+
 impl BackendOps for CpuBackendOps {
     fn device(&self) -> Device {
         Device::Cpu
+    }
+
+    /// `CpuBackendOps` 自身が [`MemoryOps`] を実装する（上記 `impl
+    /// MemoryOps for CpuBackendOps`）ため、`self` をそのまま返す
+    /// （イシュー #935）。
+    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        Some(self)
+    }
+
+    /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
+    /// `docs/device-resident-update-design.md` §3.2・§5.2）。CPU は
+    /// 「デバイス」がホストメモリそのものであるため、`downcast_handle_mut`
+    /// で取り出した `Vec<f32>` を直接書き換えるだけで完結する（転送コスト
+    /// ゼロ）。
+    ///
+    /// 更新式の項順序は `fandhe_ai_autodiff::optim::sgd::Sgd::step`（ホスト
+    /// 参照実装）と同一（weight_decay → momentum〈`is_first_step` で
+    /// `b ← g` 分岐〉→ nesterov → 減算）。丸えは `.claude/rules/
+    /// coding-rust.md` の FMA 契約統一方針に従い `f32::mul_add` を使う
+    /// （GEMM 系 CPU 参照実装と同じく、CUDA `fmaf`／Metal
+    /// `fma`〈`shaders/sgd.metal`〉と丸めを揃えるため。`Sgd::step` 自身は
+    /// PyTorch 参照 fixture との parity を優先し `mul_add` を使わない別の
+    /// 契約を持つ〈`sgd.rs` 該当コメント参照〉が、本メソッドは 3
+    /// バックエンド間一致が目的のため対象が異なる）。
+    fn sgd_step_device(
+        &self,
+        param: &mut DeviceBuffer<f32>,
+        grad: &DeviceBuffer<f32>,
+        velocity: Option<&mut DeviceBuffer<f32>>,
+        config: &SgdStepConfig,
+    ) -> Result<(), BackendError> {
+        if param.device() != Device::Cpu || grad.device() != Device::Cpu {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if param.shape() != grad.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: grad.shape().to_vec(),
+            }));
+        }
+        let grad_handle = grad
+            .downcast_handle::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+
+        let use_momentum = config.momentum != 0.0;
+        let mut velocity_handle = match velocity {
+            Some(v) => {
+                if v.device() != Device::Cpu {
+                    return Err(BackendError::DeviceMismatch);
+                }
+                if v.shape() != param.shape() {
+                    return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                        lhs: param.shape().to_vec(),
+                        rhs: v.shape().to_vec(),
+                    }));
+                }
+                Some(
+                    v.downcast_handle_mut::<CpuBufferHandle>()
+                        .ok_or(BackendError::DeviceMismatch)?,
+                )
+            }
+            None => {
+                if use_momentum {
+                    return Err(BackendError::Unsupported(
+                        "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
+                    ));
+                }
+                None
+            }
+        };
+        let param_handle = param
+            .downcast_handle_mut::<CpuBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+
+        for j in 0..param_handle.data.len() {
+            let p = param_handle.data[j];
+            let mut g = grad_handle.data[j];
+            if config.weight_decay != 0.0 {
+                g = config.weight_decay.mul_add(p, g);
+            }
+            if use_momentum {
+                // 直前の分岐（`velocity.is_none() && use_momentum` の
+                // 早期 return）により、ここへ到達する時点で
+                // `velocity_handle` は必ず `Some` である。
+                let Some(velocity_handle) = velocity_handle.as_deref_mut() else {
+                    return Err(BackendError::Unsupported(
+                        "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
+                    ));
+                };
+                let prev = velocity_handle.data[j];
+                let b = if config.is_first_step {
+                    g
+                } else {
+                    config.momentum.mul_add(prev, (1.0 - config.dampening) * g)
+                };
+                velocity_handle.data[j] = b;
+                g = if config.nesterov {
+                    config.momentum.mul_add(b, g)
+                } else {
+                    b
+                };
+            }
+            param_handle.data[j] = p - config.lr * g;
+        }
+        Ok(())
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {

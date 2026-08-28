@@ -24,6 +24,8 @@
 //! 共通 `Optimizer` trait の導入は AdamW 実装時に必要性を判断する
 //! （過剰な抽象化を避ける。#193 計画 §8）。
 
+mod device_store;
 mod sgd;
 
+pub use device_store::DeviceParamStore;
 pub use sgd::{Sgd, SgdConfig};

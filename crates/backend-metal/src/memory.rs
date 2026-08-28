@@ -44,9 +44,15 @@ use fandhe_ai_tensor_core::pool::PoolZeroFill;
 /// 確保時に記録したバイト数を `AllocationTracker` へ返すだけ
 /// （`backend-cpu::CpuBufferHandle`／`backend-cuda::CudaBufferHandle` の
 /// `_alloc` と同型の契約）であるため、drop 順は計測上問題にならない。
+/// `pub(crate)`（イシュー #935・`docs/device-resident-update-design.md`
+/// §3.2 で `ops.rs::MetalBackendOps::sgd_step_device`／`sgd.rs::MetalSgd::run`
+/// が `DeviceBuffer::downcast_handle_mut` 経由で in-place 書き換えを行う
+/// ために `crate::memory::MetalBufferHandle` として参照する必要があり、
+/// 可視性を crate 内に広げた。`backend-cpu::CpuBufferHandle`／
+/// `backend-cuda::CudaBufferHandle` と同じ判断）。
 #[derive(Debug)]
-struct MetalBufferHandle {
-    buffer: Option<MetalBuffer>,
+pub(crate) struct MetalBufferHandle {
+    pub(crate) buffer: Option<MetalBuffer>,
     _alloc: TrackedAllocation,
 }
 

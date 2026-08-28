@@ -36,9 +36,14 @@ use fandhe_ai_tensor_core::pool::PoolZeroFill;
 /// 参照せず、確保時に記録したバイト数を `AllocationTracker` へ返すだけ）。
 /// 明示的に保持しているだけで、`data` の `Drop` と同時に解放計上される
 /// （RAII 一本化。`buffer.rs` モジュールコメント参照）。
+/// `pub(crate)`（本来は module-private でよいが、イシュー #935・
+/// `docs/device-resident-update-design.md` §3.2 で `ops.rs::CpuBackendOps::
+/// sgd_step_device` が `DeviceBuffer::downcast_handle_mut` 経由で in-place
+/// 書き換えを行うために `crate::memory::CpuBufferHandle` として参照する
+/// 必要があり、可視性を crate 内に広げた）。
 #[derive(Debug)]
-struct CpuBufferHandle {
-    data: Vec<f32>,
+pub(crate) struct CpuBufferHandle {
+    pub(crate) data: Vec<f32>,
     _alloc: TrackedAllocation,
 }
 

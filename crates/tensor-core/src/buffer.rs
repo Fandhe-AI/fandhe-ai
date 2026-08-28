@@ -9,8 +9,14 @@
 //! 往復が発生する構造）を解消する土台として、`backend-cpu`/`backend-cuda`/
 //! `backend-metal` が共通実装する [`MemoryOps`] トレイトと、その戻り値
 //! である [`DeviceBuffer`] を定義する。カーネルディスパッチ本体
-//! （`BackendOps`。§4.2）は TASK-1.9c（#46）のスコープであり、
-//! `MemoryOps` はその supertrait となる想定（本イシューでは結線しない）。
+//! （`BackendOps`。§4.2）は TASK-1.9c（#46）のスコープ。当初 `MemoryOps` は
+//! `BackendOps` の supertrait にする想定だったが、`BackendOps` は
+//! crates.io 公開済み trait（`fandhe-ai-tensor-core`）であり supertrait 化は
+//! 既存実装のコンパイルを壊す破壊的変更となるため不採用と確定した
+//! （イシュー #935・`docs/device-resident-update-design.md` §3.1）。代わりに
+//! `BackendOps::memory_ops(&self) -> Option<&dyn MemoryOps>`
+//! （デフォルト実装 `None`）という非破壊拡張（デフォルトメソッド追加）で
+//! 結線する（`backend_ops.rs` 参照）。
 //!
 //! # 依存逆転構成
 //!
@@ -179,6 +185,20 @@ impl<T: Element> DeviceBuffer<T> {
     /// 等へ変換する想定）。
     pub fn downcast_handle<H: BufferHandle>(&self) -> Option<&H> {
         self.handle.as_any().downcast_ref::<H>()
+    }
+
+    /// `downcast_handle` の可変版（イシュー #935・
+    /// `docs/device-resident-update-design.md` §3.1）。
+    ///
+    /// `BackendOps::sgd_step_device`（`backend_ops.rs`）の 3 バックエンド
+    /// 実装が、呼び出し元から渡された `&mut DeviceBuffer<f32>`（param・
+    /// velocity）を自分自身の具体ハンドル型（`CpuBufferHandle`／
+    /// `CudaBufferHandle`／`MetalBufferHandle`）へ可変ダウンキャストし、
+    /// 中身を in-place で書き換えるために使う唯一の経路。`H` が `handle`
+    /// の実型と一致しない場合は `None`（他バックエンドの `DeviceBuffer`
+    /// を誤って渡した等。`downcast_handle` と同じ契約）。
+    pub fn downcast_handle_mut<H: BufferHandle>(&mut self) -> Option<&mut H> {
+        self.handle.as_any_mut().downcast_mut::<H>()
     }
 
     /// 内部ハンドルの所有権を取り出す（`downcast_handle` は参照しか返さない）。

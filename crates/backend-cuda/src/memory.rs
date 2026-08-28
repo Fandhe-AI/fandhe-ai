@@ -53,9 +53,14 @@ use fandhe_ai_tensor_core::pool::PoolZeroFill;
 /// `cuMemFreeAsync` の実処理が非同期であっても計測上の問題にはならない
 /// （計測は「ハンドル Drop 時点の論理解放」を数える。CPU と同一の
 /// 「確保済みバイト数」セマンティクス）。
+/// `pub(crate)`（イシュー #935・`docs/device-resident-update-design.md`
+/// §3.2 で `ops.rs::CudaBackendOps::sgd_step_device`／`sgd.rs::CudaSgd::run`
+/// が `DeviceBuffer::downcast_handle_mut` 経由で in-place 書き換えを行う
+/// ために `crate::memory::CudaBufferHandle` として参照する必要があり、
+/// 可視性を crate 内に広げた。`backend-cpu::CpuBufferHandle` と同じ判断）。
 #[derive(Debug)]
-struct CudaBufferHandle {
-    slice: Option<CudaSlice<f32>>,
+pub(crate) struct CudaBufferHandle {
+    pub(crate) slice: Option<CudaSlice<f32>>,
     _alloc: TrackedAllocation,
 }
 
@@ -158,7 +163,7 @@ fn checked_numel(shape: &[usize]) -> Result<usize, CudaError> {
 /// `KernelLaunchFailed` を wildcard の受け皿とする（`Compile`/
 /// `TensorCoreUnsupported` はこのモジュールの呼び出し経路からは発生
 /// しないが、`non_exhaustive` ゆえに網羅的 match は書けない）。
-fn map_cuda_error(err: CudaError) -> BackendError {
+pub(crate) fn map_cuda_error(err: CudaError) -> BackendError {
     match err {
         CudaError::DriverUnavailable { detail } => BackendError::CudaUnavailable(detail),
         CudaError::NvrtcUnavailable { detail } => BackendError::CudaUnavailable(detail),
