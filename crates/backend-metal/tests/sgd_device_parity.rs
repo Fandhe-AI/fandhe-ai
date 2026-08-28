@@ -1,17 +1,22 @@
 //! `MetalBackendOps::sgd_step_device`（イシュー #935・in-place デバイス
 //! 常駐 SGD 更新）の実機テスト。
 //!
-//! Metal 実機（Apple Silicon）は本 CI・実装検証環境で利用可能なため
-//! （`.claude/rules/ci.md`「実機依存」節・実機検証環境ドキュメント）、
-//! `backend-cuda` 側の `#[ignore]` 分離とは異なり通常テストとして実行する
-//! （`crates/backend-metal/tests/` 配下の既存 parity テスト群と同じ方針）。
-//!
 //! `MetalBackendOps` は `crates/backend-metal/src/lib.rs` 側で
 //! `cfg(target_os = "macos")` ゲートされている（`backend-metal` クレート
 //! 自体は全 OS でビルド対象になる）ため、本テストファイルにも同じ
 //! `cfg(target_os = "macos")` を付けて非 macOS の CI（GitHub ホステッド
 //! ubuntu-latest）でコンパイル対象から除外する（付けないと
-//! `unresolved import` でビルド失敗する）。
+//! `unresolved import` でビルド失敗する）。`cfg(target_os = "macos")` は
+//! コンパイル対象を絞るのみで実機の有無までは保証しないため
+//! （`.claude/rules/ci.md`「実機依存」節・`.claude/rules/coding-rust.md`
+//! 「テスト・ベンチ」節）、各 `#[test]` には理由付き `#[ignore]` を付け
+//! `crates/backend-metal/tests/cpu_metal_parity.rs` と同じ方針で通常
+//! CI（GitHub ホステッド ubuntu-latest。Metal 実機非搭載）から除外し、
+//! macOS 実機で `--ignored` を明示指定したときのみ実行する:
+//!
+//! ```sh
+//! cargo test -p fandhe-ai-backend-metal --release -- --ignored --nocapture
+//! ```
 #![cfg(target_os = "macos")]
 
 use fandhe_ai_backend_metal::MetalBackendOps;
@@ -96,16 +101,19 @@ fn run_parity(momentum: f32, dampening: f32, weight_decay: f32, nesterov: bool, 
 }
 
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn vanilla_sgd_matches_cpu_reference() {
     run_parity(0.0, 0.0, 0.0, false, 5);
 }
 
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn momentum_sgd_matches_cpu_reference() {
     run_parity(0.9, 0.0, 0.0, false, 5);
 }
 
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn full_combo_matches_cpu_reference() {
     run_parity(0.9, 0.0, 0.01, true, 8);
 }
@@ -115,11 +123,13 @@ fn full_combo_matches_cpu_reference() {
 /// （`crates/backend-cpu/tests/sgd_device_parity.rs` の同名ケースと対の
 /// Metal 版）。
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn full_combo_matches_cpu_reference_across_100_steps() {
     run_parity(0.9, 0.0, 0.01, true, 100);
 }
 
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn sgd_step_device_rejects_shape_mismatch() {
     let ops = MetalBackendOps::new();
     let mem = ops.memory_ops().unwrap();
@@ -147,6 +157,7 @@ fn sgd_step_device_rejects_shape_mismatch() {
 }
 
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn sgd_step_device_rejects_missing_velocity_when_momentum_enabled() {
     let ops = MetalBackendOps::new();
     let mem = ops.memory_ops().unwrap();
@@ -170,6 +181,7 @@ fn sgd_step_device_rejects_missing_velocity_when_momentum_enabled() {
 }
 
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn empty_tensor_step_is_a_no_op() {
     let ops = MetalBackendOps::new();
     let mem = ops.memory_ops().unwrap();

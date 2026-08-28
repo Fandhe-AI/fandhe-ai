@@ -200,8 +200,13 @@ fn legacy_vs_resident_per_step_cpu() {
 }
 
 /// Metal 実機（macOS）での旧経路 vs 新経路比較。
+///
+/// ```sh
+/// cargo test -p fandhe-ai --release --test device_param_store_bench -- --ignored --nocapture
+/// ```
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn legacy_vs_resident_per_step_metal() {
     bench_legacy_vs_resident(Device::Metal, "metal");
 }

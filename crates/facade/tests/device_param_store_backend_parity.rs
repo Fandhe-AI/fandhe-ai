@@ -16,12 +16,13 @@
 //! 絶対誤差 1e-5 未満。`.claude/rules/coding-rust.md`）で比較する」方式
 //! （中間ステップごとの判定は必須としない）。
 //!
-//! **実機ゲーティング**: Metal は macOS 実機（本 CI・実装検証環境で
-//! 利用可能。`.claude/rules/ci.md`「実機依存」節）なので通常テストとして
-//! `cfg(target_os = "macos")` のみで実行する
-//! （`crates/backend-metal/tests/sgd_device_parity.rs` と同じ方針）。
-//! CUDA は DGX Spark 等の実機必須のため `#[ignore]` 分離する
-//! （`crates/backend-cuda/tests/sgd_device_real_device.rs` と同じ方針）。
+//! **実機ゲーティング**: `cfg(target_os = "macos")` は非 macOS の CI での
+//! コンパイル対象除外にしかならず実機の有無までは保証しないため
+//! （`.claude/rules/ci.md`「実機依存」節・`.claude/rules/coding-rust.md`
+//! 「テスト・ベンチ」節）、Metal・CUDA いずれも理由付き `#[ignore]` で
+//! 通常 CI（GitHub ホステッド ubuntu-latest）から分離する
+//! （`crates/backend-metal/tests/sgd_device_parity.rs`・
+//! `crates/backend-cuda/tests/sgd_device_real_device.rs` と同じ方針）。
 
 use bench_harness::rng::Xorshift64Star;
 use fandhe_ai::compat::Sequential;
@@ -152,8 +153,13 @@ fn assert_params_match(device_params: &[Tensor<f32>], host_params: &[Tensor<f32>
 }
 
 /// Metal 実機（macOS）での 100 step 累積・最終値判定 parity。
+///
+/// ```sh
+/// cargo test -p fandhe-ai --test device_param_store_backend_parity -- --ignored --nocapture
+/// ```
 #[cfg(target_os = "macos")]
 #[test]
+#[ignore = "Metal 実機（Apple Silicon）依存。CI では実行しない"]
 fn device_resident_matches_host_sgd_on_metal_across_100_steps() {
     let device_params = train_device_resident(Device::Metal, STEPS, LR);
     let host_params = train_host_reference(STEPS, LR);
