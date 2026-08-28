@@ -105,6 +105,13 @@ trait 定義（`pub trait BackendOps { ... }`）は変更しない。呼び出�
 /// `MemoryOps` 実装（`BackendOps` の supertrait ではない。§3.1 の
 /// 採否理由参照）。CPU/CUDA/Metal 各バックエンドは自身のカーネルで
 /// オーバーライドできる（デフォルト実装のままでも正しく動作する）。
+///
+/// **デフォルトメソッドとして trait 定義に本体を持たせる**（`;` で終わる
+/// 必須メソッド宣言ではない。レビュー指摘 #934 のとおり、本体なしの
+/// 必須メソッドとして追加すると、既存の外部 `impl BackendOps for X` を
+/// 破壊する。§3.2 が確定する「fail-safe 合成をデフォルト実装とする」
+/// 方針は、この本体をここに書くことで初めて成立する）。本体は次を
+/// 呼ぶ（velocity は `Some` のときのみ同様に往復させる）:
 fn sgd_step_device(
     &self,
     mem: &dyn MemoryOps,
@@ -112,26 +119,52 @@ fn sgd_step_device(
     grad: &DeviceBuffer<f32>,
     velocity: Option<&mut DeviceBuffer<f32>>,
     config: &SgdStepConfig,
-) -> Result<(), BackendError>;
+) -> Result<(), BackendError> {
+    // 既定実装（§3.2）: download → ホスト参照実装（`f32::mul_add`。
+    // §5.2 の FMA 契約）で更新 → upload。§3.1 の採否理由（object safety・
+    // 非破壊性）により `self.download`/`self.upload` ではなく
+    // `mem.download`/`mem.upload` を呼ぶ。実装詳細（ホスト側計算関数へ
+    // の委譲）は #935 が確定する。
+    default_sgd_step_via_host(mem, param, grad, velocity, config)
+}
 
 /// `DeviceParamStore`（§3.3）常駐時の `nn::Linear` forward 入口
 /// （#934 設計・#935 実装）。既存の `gemm`/`add` 系メソッド（ホスト
 /// `Tensor<f32>` 入出力契約。§2）と異なり、`weight`/`bias` はデバイス
 /// 常駐のまま渡す。`input`/戻り値は本段階（§3.3）のスコープに従い
 /// ホスト `Tensor<f32>` のまま（forward/backward の完全デバイス常駐化は
-/// §6(b) のとおりスコープ外）。オーバーライドしない場合の既定実装は
-/// `mem.download(weight)`/`mem.download(bias)` でホスト値を得たうえで
-/// 既存の `gemm`+`add` 相当の計算へ委譲する（CPU は §2 のとおり追加転送
-/// コストなし。CUDA/Metal は最適化時、weight/bias の再アップロードを
-/// 省略するオーバーライドに置き換える）。§3.3b のとおり、この
-/// downloaded スナップショットは同時に Tape の leaf として登録される。
+/// §6(b) のとおりスコープ外）。
+///
+/// **呼び出し元は 2 系統ある**（§3.3a で確定。旧稿はここを単一経路と
+/// 誤って記述していた）:
+/// 1. **Tape 非依存の resident 推論**（`predict` 相当。勾配不要）は、
+///    このメソッドを直接呼ぶ。これが本メソッド本来の主眼であり、下記の
+///    既定実装がそのまま使われる。
+/// 2. **`Tape` 追跡下の学習 forward**（`Sequential::forward_resident`。
+///    §3.3b）は、**このメソッドを呼ばない**。VJP を成立させるには
+///    `Op::MatMul`/`Op::Add` 登録経路（`Tape` を持つ `autodiff` 層でしか
+///    組み立てられない）を通す必要があり、`tensor-core`（`autodiff` に
+///    非依存）に閉じたこのメソッドの内部では `Tape` へのノード登録が
+///    行えないため（§3.3b で結線を確定する）。
+///
+/// この 2 系統の重複を避けるため、`Sequential::forward_resident` は
+/// 「`mem.download` で weight/bias スナップショットを得る」処理のみ
+/// このメソッドの既定実装と共有し（下記本体を呼ぶ形にはしない。
+/// 独立に `mem.download` を呼ぶ。§3.3b）、以降の計算は既存
+/// `Op::MatMul`/`Op::Add` 経路に委ねる。既定実装は次のとおり:
 fn linear_forward_resident(
     &self,
     mem: &dyn MemoryOps,
     input: &Tensor<f32>,
     weight: &DeviceBuffer<f32>,
     bias: Option<&DeviceBuffer<f32>>,
-) -> Result<Tensor<f32>, BackendError>;
+) -> Result<Tensor<f32>, BackendError> {
+    // 既定実装（§3.2）: download(weight)・download(bias) → 既存
+    // gemm+add（ホスト Tensor<f32> 契約）へ委譲。CPU は §2 のとおり
+    // 追加転送コストなし。CUDA/Metal 最適化時は weight/bias の再
+    // アップロードを省略するオーバーライドに置き換えられる（§3.2）。
+    default_linear_forward_via_host(mem, input, weight, bias)
+}
 ```
 
 `SgdStepConfig`（`tensor-core` 側に新設。`autodiff::optim::SgdConfig` の
@@ -141,6 +174,27 @@ lr・momentum・dampening・weight_decay・nesterov をそのまま保持する�
 SgdStepConfig` 等）は #935 が実装する。`tensor-core` は `autodiff` に依存しない
 （既存の依存方向: `autodiff` → `tensor-core`）ため、`SgdStepConfig` は
 `tensor-core` 側に独立定義し、`autodiff` 側が変換して渡す構成とする。
+
+**`is_first_step: bool` フィールド（Cursor Bugbot 指摘の解消）**:
+`sgd.rs:1-23` のアルゴリズムは momentum 有効時、`t = 1`（その
+パラメータに対する最初の `step` 呼び出し）でのみ `b ← g`（dampening
+`τ` を適用しない）、`t ≥ 2` では `b ← μ·b + (1−τ)·g` と分岐する。
+`DeviceParamStore` 常駐時の `velocity: DeviceBuffer<f32>` はセッション
+開始時にゼロ初期化される（§3.3）ため、この `t = 1` 分岐を
+`sgd_step_device` 側が知らないまま「常にゼロ初期化された `velocity` に
+対して `b ← μ·b + (1−τ)·g` を適用する」実装にすると、`τ ≠ 0` の場合に
+初回ステップの結果が `(1−τ)·g` となり、正しい `g` と食い違う（旧稿は
+この分岐をどこにも持たせておらず、ゼロ初期化 `velocity` から `t = 1`
+分岐を復元できない実装不備があった）。これを解消するため、
+`SgdStepConfig` に `is_first_step: bool` を追加する: `DeviceParamStore`
+は各パラメータ位置ごとに「これまで `step` が呼ばれた回数」を保持し
+（§4.2 の位置対応契約と同じキー空間。全パラメータは同一のステップ数で
+足並みを揃えて進む設計のため、実装上は `DeviceParamStore` 全体で単一の
+ステップカウンタ 1 つを持てば足りる）、1 回目の呼び出しでのみ
+`is_first_step = true` を渡す。`sgd_step_device` の既定実装（本節冒頭の
+コード）は `is_first_step` が `true` のとき `b ← g` に分岐し、`false` の
+ときのみ `b ← μ·b + (1−τ)·g` を適用する（`sgd.rs:1-23` の分岐をそのまま
+移植する。式順序自体は §5.2 の FMA 契約に従う）。
 
 ### 3.2 デフォルト実装の方針: fail-safe 合成 + object safety の確定
 
@@ -209,19 +263,34 @@ phase-4（#924）へ接続するスコープ外事項とする。§5(b) 参照�
 
 そのため第 1 段（#935 スコープ）は次の分担とする:
 
-- **常駐化する**: パラメータ本体（`weight`/`bias`）・momentum バッファ
-  （`velocity`）。学習セッション開始時に 1 回 `upload` し、以降は
-  `sgd_step_device` の in-place 更新のみで完結させる。
-- **常駐化しない（毎ステップ 1 回転送）**: forward/backward の入出力
-  （入力バッチ・中間活性・勾配）。`Tape::backward` が返すホスト勾配を
-  `sgd_step_device` 呼び出し直前に 1 回だけ `upload` する。
+- **常駐化する（param の再アップロードを排除する）**: パラメータ本体
+  （`weight`/`bias`）・momentum バッファ（`velocity`）。学習セッション
+  開始時に 1 回 `upload` し、以降 `param` への **再アップロードは発生
+  させない**（`sgd_step_device` の in-place 更新のみで完結させる）。
+- **常駐化しない（毎ステップ／毎 forward 1 回転送。§3.3b で確定）**:
+  forward/backward の入出力（入力バッチ・中間活性）に加え、
+  **weight/bias の VJP 用ホストスナップショット**（`forward_resident`
+  呼び出しごとに `mem.download` で 1 回。§3.3b）と**勾配**
+  （`Tape::backward` が返すホスト勾配を `sgd_step_device` 呼び出し
+  直前に 1 回だけ `upload`）の 2 種を含む。旧稿はこの download を
+  ここに列挙し損ねており、codex-review 指摘（毎 forward の download が
+  転送縮退契約と矛盾する）はこの記述漏れを指した正当な指摘である。
+  本節はこの記述を修正することで整合させる（§3.3b「転送モデルとの
+  整合性の明記」参照）。
 
 これにより、現行「forward での param upload → backward 後の grad
 download → ホスト更新 → 次ステップの param 再 upload」という毎ステップの
-param 往復（§2 末尾）が「学習開始時の 1 回の upload + 終了時（または明示
-同期時）の 1 回の download」に縮退する。grad の upload は本段階では残る
-（forward/backward 自体が `Tensor<f32>` 契約のカーネルを呼ぶ限り、勾配は
-一度ホストへ出てくるため）。
+param 往復（§2 末尾）のうち、**param の再アップロード**は「学習開始時の
+1 回の upload + 終了時（または明示同期時）の 1 回の `sync_to_host`」に
+縮退する。一方、**weight/bias の download**（VJP 用スナップショット。
+forward 呼び出しごとに 1 回）と **grad の upload**（1 ステップごとに
+1 回）は本段階では残る（前者は forward/backward が既存 `Op::MatMul`/
+`Op::Add`〈`Tensor<f32>` 契約〉の VJP をそのまま再利用するために必要
+〈§3.3b〉、後者は forward/backward 自体が `Tensor<f32>` 契約のカーネルを
+呼ぶ限り勾配は一度ホストへ出てくるため）。本設計が実測（§1）に対して
+主張する削減効果は「param 往復のうち再アップロード分の排除」であり、
+「param に関わる全転送の排除」ではない点を、性能目標・ベンチ受け入れ
+基準（#936 引き渡し。§7）の解釈上ここで明確化する。
 
 ### 3.3a forward への結線（レビュー指摘 #934: line 134 の解消）
 
@@ -274,18 +343,26 @@ param 往復（§2 末尾）が「学習開始時の 1 回の upload + 終了時
   対応するキーを引く（活性化層はカウントしない）。既存の位置対応契約
   そのものは変更しないため、新たな対応規則を追加で決定する必要はない。
 - **新規 forward 入口**: `Sequential` に既存 `forward` を置き換えない
-  追加メソッド `forward_resident(&self, tape: &Tape, input: &Var,
-  store: &DeviceParamStore) -> Result<Var, AutodiffError>`（仮称。確定
-  シグネチャは #935）を追加する。内部実装は既存 `forward` と同じ層
-  イテレーションだが、各 `Linear` 層について自身のホスト `weight`/
-  `bias` の代わりに `store` から対応するインデックスの `DeviceBuffer` を
-  取得し、`BackendOps::linear_forward_resident`（§3.1）を呼ぶ。入力
-  バッチ・中間活性・活性化関数（ReLU 等）は既存 `forward` と同一だが、
-  `Tape`/`Var` への登録ロジックは既存 `forward` の登録（`Op::MatMul`
-  ベース）をそのまま流用できない。weight/bias の勾配（VJP）が成立する
-  ための結線は §3.3b で別途確定する（レビュー指摘 #934: line 233 の
-  解消。旧稿の「登録ロジックは変更しない」という記述は誤りであり、
-  本節で訂正する）。
+  追加メソッド `forward_resident<'t>(&self, tape: &'t Tape, input: &Var<'t>,
+  store: &mut DeviceParamStore) -> Result<Var<'t>, AutodiffError>`（仮称。
+  確定シグネチャは #935）を追加する。**`store` を `&mut` で受け取る**
+  （`&` ではない）: §3.3b のとおり、この呼び出しが生成する weight/bias
+  leaf の `NodeId` を `store` 自身の内部状態として書き込むため（呼び出し
+  元がこの対応表を別途持ち回る必要をなくす。Cursor Bugbot 指摘の解消。
+  下記参照）。内部実装は既存 `forward` と同じ層イテレーションだが、
+  各 `Linear` 層について自身のホスト `weight`/`bias` の代わりに `store`
+  から対応するインデックスの `DeviceBuffer` を読む。**`BackendOps::
+  linear_forward_resident`（§3.1）は呼ばない**——同メソッドは
+  `tensor-core`（`Tape`/`Var` を知らない）に閉じた「downloaded 値を
+  ホスト経由で計算するだけ」の入口であり、weight/bias の VJP を
+  成立させる `Op::MatMul`/`Op::Add` 登録は `autodiff` 層（`Tape` を
+  保持する層）でしか組み立てられないため（§3.1 の「呼び出し元は 2 系統
+  ある」注記・レビュー指摘 #934 の重複 2 件〈resident forward の出力が
+  どの Op/NodeId として Tape に登録されるか未定義〉の解消）。入力
+  バッチ・中間活性・活性化関数（ReLU 等）は既存 `forward` と同一。
+  weight/bias の勾配（VJP）が成立するための結線は §3.3b で確定する
+  （レビュー指摘 #934: line 233 の解消。旧稿の「登録ロジックは変更
+  しない」という記述は誤りであり、本節で訂正する）。
 - **既存 `forward` との関係**: 既存 `forward`（ホスト `Tensor` のみで
   完結）は変更・削除しない（§3.5 の「既存 API 非破壊」方針）。
   `DeviceParamStore` を使う学習ループは `forward_resident` を呼び、
@@ -302,59 +379,90 @@ param 往復（§2 末尾）が「学習開始時の 1 回の upload + 終了時
 VJP が成立しない（`Sgd::step`／`sgd_step_device` が必要とする `grad`
 の出所が設計上欠落する）。本節はこの結線を確定する。
 
-**採用方針**: `linear_forward_resident` の既定実装（§3.2: `mem.download`
-→ 既存 `gemm`+`add` へ委譲）と、weight/bias 再アップロードを省略する
-最適化オーバーライドの両方に共通して使える形として、**forward 呼び出し
-ごとに weight/bias の「その時点のスナップショット」を `Tape` の leaf
-`Var` として登録する**方式を採る:
+**採用方針**: `Sequential::forward_resident` 自身が weight/bias の
+「その時点のスナップショット」を毎 forward 呼び出しで `mem.download`
+し、**既存 `Op::MatMul`/`Op::Add` 登録経路（`Linear` 単体ではなく
+`Sequential` 内の forward 実装が既に持つ経路）にそのまま乗せて** `Tape`
+の leaf `Var` として登録する方式を採る（`BackendOps::
+linear_forward_resident` は §3.1 のとおりこの経路では呼ばれず、
+Tape 非依存の resident 推論専用に残す）:
 
 - `Sequential::forward_resident` は各層について、まず
   `mem.download(store.weight(layer_idx))`／
   `mem.download(store.bias(layer_idx))`（`MemoryOps`。§3.1 の `mem`
   引数と同じ実装値）でホスト `Tensor<f32>` スナップショットを取得し、
-  これを `tape.leaf(snapshot)` として **毎 forward 呼び出しで新規に**
+  これを `tape.var(&snapshot)`（既存 API。`tape.rs:288`。leaf ノードとして
+  登録する既存の入口）で **毎 forward 呼び出しで新規に**
   登録する（前ステップの `NodeId` を再利用しない。§4.1 の「stale な
   ホスト値を現在のパラメータとして使わせない」契約と整合させるため、
   スナップショットは常にその回の `download` 結果のみを表す）。
   以降の計算（`gemm`+`add`・活性化関数）は既存 `forward` と同じ
-  `Op::MatMul`／`Op::Add` 登録経路にそのまま乗せる。これにより
-  `linear_forward_resident` は「downloaded スナップショットを作って
-  既存 forward 経路へ渡す薄い橋渡し」として実装でき、既存の VJP
-  実装（`Op::MatMul`/`Op::Add` の backward）を一切変更せずに
-  weight/bias の勾配が計算できる。
-  - 最適化オーバーライド（weight/bias の再アップロードを省略し
-    device 上で完結させる実装）を採用するバックエンドであっても、
-    **backward のために必要な最小限のスナップショット取得
-    （`mem.download`）自体は省略しない**契約とする。省略できるのは
-    「forward の計算そのものを host Tensor 経由の既存 `gemm` へ
-    委譲する部分」（＝計算コストの重複）であり、「勾配を計算する
-    ために weight/bias が host 値として少なくとも一度観測可能である
-    こと」は省略しない。これにより §3.1 の最適化余地（再アップロード
-    省略）と本節の VJP 成立要件は両立する。
-- `Sequential::forward_resident` は各層で生成した weight/bias leaf の
-  `NodeId` を（`Linear` 単体ではなく `Sequential` が §3.3a のとおり
-  層インデックスを一元管理するため）層インデックスと対応付けて
-  一時的に保持する（呼び出し中のみ有効なローカル対応表でよく、
-  `DeviceParamStore` の恒久的な状態には含めない）。
-- `tape.backward()` 実行後、この対応表を使って各層の `grad_weight`／
-  `grad_bias`（ホスト `Tensor<f32>`。既存 `Tape::backward` が
-  `NodeId` ごとに返す勾配と同一の仕組みで得られる）を
+  `Op::MatMul`／`Op::Add` 登録経路にそのまま乗せる。既存の VJP
+  実装（`Op::MatMul`/`Op::Add` の backward）は一切変更しない。
+  - weight/bias の再アップロードを省略する最適化オーバーライド
+    （§3.1 の resident 推論専用経路側の最適化）は、この
+    `forward_resident` の `mem.download` 自体には影響しない
+    （両者は §3.1 のとおり別経路のため）。「勾配を計算するために
+    weight/bias が host 値として少なくとも一度観測可能であること」は
+    `forward_resident` を使う限り常に必要であり、省略しない。
+- **NodeId の保持先は `DeviceParamStore` 自身**（Cursor Bugbot 指摘の
+  解消: 呼び出し元が `Gradients::get` 用のハンドルを得られない問題）。
+  `forward_resident` は `&mut DeviceParamStore`（§3.3a）で受け取った
+  `store` へ、各層で生成した weight/bias leaf の `NodeId`（`Var`
+  自体ではなく `NodeId`。`Var<'t>` は `Tape` への借用を持つため
+  `DeviceParamStore`〈`Tape` とは独立の寿命。§4.1〉のフィールドとして
+  保持できない）を、層インデックスと対応付けて書き込む
+  （`pending_grad_sources: Vec<{ weight: NodeId, bias: Option<NodeId> }>`
+  相当。前回分は forward 呼び出しのたびに上書きする「1 forward 分のみ
+  保持する」一時状態であり、§4.1 の恒久的な単一真実源〈`DeviceBuffer`
+  群〉とは別区分の状態であることを明示する）。
+- `tape.backward()` 実行後、呼び出し元は `DeviceParamStore::step(&mut
+  self, tape: &Tape, grads: &Gradients, mem: &dyn MemoryOps, config:
+  &SgdStepConfig) -> Result<(), BackendError>`（仮称。確定シグネチャは
+  #935）を呼ぶ。`step` は内部で `pending_grad_sources` の各 `NodeId` に
+  ついて `Var::from_raw(tape, node_id)`（`autodiff` クレート内部限定の
+  `pub(crate)` コンストラクタ。`autodiff::optim` は同一クレートのため
+  呼べる。`var.rs:63`）で `Var` を再構築し、`grads.get(&var)`
+  （`backward.rs:49`。既存 `Gradients` API をそのまま使う）で
+  `grad_weight`／`grad_bias`（ホスト `Tensor<f32>`）を取り出したうえで、
   `Sequential::trainable_parameters()` と同じ並び順（§3.3a）で
-  取り出し、`DeviceParamStore::step`（§3.4・#935 が命名）へ渡す。
-  これは §3.3 が既に定めた「`Tape::backward` が返すホスト勾配を
-  `sgd_step_device` 呼び出し直前に 1 回だけ `upload` する」という
-  転送モデルとそのまま整合する（新しい転送経路を追加しない）。
+  `sgd_step_device` へ 1 パラメータずつ upload・呼び出しする。これは
+  §3.3 が定める「`Tape::backward` が返すホスト勾配を `sgd_step_device`
+  呼び出し直前に 1 回だけ `upload` する」という転送モデルとそのまま
+  整合する。呼び出し元は `NodeId`／`Var` を一切自分で保持する必要が
+  なく、`forward_resident` の戻り値（出力 `Var`。損失計算に使う）と
+  `tape.backward()` の戻り値（`Gradients`）だけを受け渡せばよい。
 - **新規 Op／新規 Tape API は不要**: 既存 `Op::MatMul`/`Op::Add` の
-  VJP 実装をそのまま再利用するため、`Tape` 側に「resident 専用の
-  勾配側チャネル」等の拡張は要らない。`linear_forward_resident`
-  自身は「スナップショットを取得して既存 forward 経路へ渡す」薄い
-  合成として実装できることが、この結線が 4h 粒度の #935 実装に
-  収まる根拠である。
+  VJP 実装・既存 `Gradients::get`／`Var::from_raw`（いずれも実装済み
+  API）をそのまま再利用するため、`Tape`／`Gradients` 側に「resident
+  専用の勾配側チャネル」等の拡張は要らない。これが、この結線が 4h
+  粒度の #935 実装に収まる根拠である。
 - **既存 `forward`（非常駐）との差異はここに限定される**: 通常の
   `forward` は `Linear` が保持するホスト `Tensor` をそのまま
   leaf 登録するのに対し、`forward_resident` は `DeviceParamStore`
-  からの `download` 結果を leaf 登録する。leaf 登録・VJP 計算の
-  仕組み自体は共通である。
+  からの `download` 結果を leaf 登録し、その `NodeId` を `store` へ
+  書き戻す。leaf 登録・VJP 計算の仕組み自体は共通である。
+
+**転送モデルとの整合性の明記（レビュー指摘 #934 の重複 2 件・codex-review
+P1〈毎 forward の download が §3.3 の転送縮退契約と矛盾する〉の解消）**:
+上記のとおり `forward_resident` は毎 forward 呼び出しで weight/bias の
+`mem.download` を行う。これは §3.3 が「常駐化しない（毎ステップ 1 回
+転送）」に列挙した対象（forward/backward の入出力）には含まれておらず、
+旧稿はこの download を転送モデルの記述に反映し損ねていた。実態を正しく
+記すと、本設計が §3.3 で削減するのはあくまで **param の再アップロード
+（毎ステップの `upload`）のみ**であり、param の **download**（VJP 用の
+host スナップショット取得）は forward 呼び出しごとに 1 回残る
+（velocity・grad の扱いは §3.3 の記述のまま変更しない）。この download を
+さらに削減するには、`Op::MatMul`/`Op::Add` に依存しない
+resident-aware な VJP（`DeviceBuffer` 上で直接 backward を実行する専用
+Op）が必要であり、これは forward/backward 全体を `DeviceBuffer` 契約へ
+移行する変更（§6(b)）と同水準の変更範囲になるため、本設計（#933 ツリー
+第 1 段）のスコープ外とする（§7「スコープ外事項」へ追記する）。§3.3 の
+「常駐化する」「常駐化しない」の 2 分類は、この download を「常駐化しない
+（forward ごとに 1 回転送）」の対象へ追加する形で更新する
+（forward/backward の入出力〈入力バッチ・中間活性〉・weight/bias の
+VJP 用スナップショット・勾配、の 3 種が「毎ステップ／毎 forward 1 回
+転送」の対象となる）。
 
 ### 3.4 クレート責務分担
 
@@ -589,17 +697,24 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
 - `Sequential::forward_resident`（§3.3a・§3.3b）を
   `facade::compat::Sequential` へ追加し、`DeviceParamStore::new` が
   `trainable_parameters()` と同一の位置対応契約で層インデックス→
-  `DeviceBuffer` 対応表を構築する。`forward_resident` は §3.3b の
-  とおり、forward 呼び出しごとに weight/bias の downloaded スナップ
-  ショットを `Tape` の leaf として新規登録し、`tape.backward()` 後に
-  同じ層インデックス対応で `grad_weight`／`grad_bias` を取り出せる
-  ようにする（新規 `Op`／`Tape` API 拡張は不要。既存 `Op::MatMul`/
-  `Op::Add` の VJP をそのまま再利用する）。
+  `DeviceBuffer` 対応表を構築する。`forward_resident` は `&mut
+  DeviceParamStore` を受け取り、§3.3b のとおり forward 呼び出しごとに
+  weight/bias の downloaded スナップショットを `Tape` の leaf として
+  新規登録したうえで、生成した `NodeId` を `store` 自身の一時状態
+  （`pending_grad_sources`）へ書き込む。`tape.backward()` 後、呼び出し
+  元は `DeviceParamStore::step(&mut self, tape: &Tape, grads:
+  &Gradients, mem: &dyn MemoryOps, config: &SgdStepConfig)` を呼び、
+  `step` が内部で `Var::from_raw`（`var.rs:63`。`autodiff` クレート内部
+  限定）+ `Gradients::get`（`backward.rs:49`）を使って
+  `pending_grad_sources` から `grad_weight`／`grad_bias` を取り出す
+  （新規 `Op`／`Tape` API 拡張は不要。既存 `Op::MatMul`/`Op::Add` の
+  VJP・既存 `Gradients` API をそのまま再利用する）。
 - `DeviceParamStore` の API（`new`/`step`/`sync_to_host` 等の確定
   シグネチャ）・`autodiff::optim` 内の配置は #935 が決める。決定済みの
   設計軸（`Sgd` を置き換えず `Sgd::step` 相当のロジックを §5.1 の参照
   実装として再利用する構成・§4.3 の poisoned 状態を表す `BackendError`
-  variant を持つこと）はそのまま踏襲する。
+  variant を持つこと・§3.1 の `is_first_step` を用いた momentum 初回
+  ステップの dampening 分岐）はそのまま踏襲する。
 - 更新カーネル（CUDA NVRTC・Metal compute shader）の `unsafe` 使用は
   FFI 境界に限定し、理由コメント + security-auditor レビュー必須
   （`.claude/rules/security.md`「unsafe」節）。
@@ -635,5 +750,12 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
 
 - forward/backward の完全デバイス常駐化（`DeviceBuffer` 版 `BackendOps` への
   全面移行）— §6(b) 参照。接続先: #931・phase-4（#924）。
+- **resident-aware な VJP**（`Op::MatMul`/`Op::Add` の host `Tensor<f32>`
+  経路を経由せず、`DeviceBuffer` 上で weight/bias の勾配を直接計算する
+  専用 Op）— §3.3b「転送モデルとの整合性の明記」参照。これが実現すれば
+  forward ごとの weight/bias `download`（現設計で残る転送）をさらに
+  削減できるが、変更範囲が forward/backward 全体の `DeviceBuffer` 契約
+  移行（§6(b)）と同水準になるため本ツリーのスコープ外とする。接続先:
+  §6(b) と同じく #931・phase-4（#924）。
 - f16 経路への拡張。
 - optimizer 公開面（`facade` 側の意匠）の変更 — 接続先: #932。
