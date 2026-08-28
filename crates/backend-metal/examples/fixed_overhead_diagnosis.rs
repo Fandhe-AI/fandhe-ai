@@ -9,9 +9,16 @@
 //! Metal 節）で、fandhe-ai の Metal GEMM は N=256 中央値 5.441 ms・
 //! N=512 中央値 5.724 ms とサイズにほぼ非依存の約 5 ms に張り付く
 //! （candle は同条件 257.6 µs／519.0 µs）。MLP 推論 24.125 ms・学習
-//! 48.845 ms/step（同 summary.md「(b)」「(c)」節）も、GEMM 呼び出し回数
-//! （前者は forward 1 回、後者は forward + backward 相当の複数回）に
-//! この固定費を乗じた値と桁が整合する。
+//! 48.845 ms/step（同 summary.md「(b)」「(c)」節）も、GEMM 呼び出し回数に
+//! この固定費を乗じた値と桁が整合する。ベンチ対象の MLP
+//! （`scripts/bench/framework-compare/bench-fandhe/src/main.rs`
+//! `build_model`）は 784→256・256→10 の 2 層構成のため、推論
+//! （forward 1 回）は各層 1 回ずつ計 **GEMM 2 回**の呼び出しを含む
+//! （`Sequential::forward` → 各 `Var::matmul` 呼び出し）。学習は forward
+//! 2 回に加え、`autodiff::grad::matmul_vjp`（`crates/autodiff/src/grad.rs`）
+//! が `matmul` 1 回あたり `da`/`db` 2 回の GEMM を計算するため、backward
+//! は 2 層 × 2 回 = 4 回。1 step 合計で **GEMM 6 回**（forward 2 +
+//! backward 4）が発生する。
 //!
 //! 計測ハーネス（`scripts/bench/framework-compare/bench-fandhe/src/
 //! main.rs`）の GEMM 計測窓は `tape.var`（テンソル生成）の**後**・
@@ -52,10 +59,15 @@
 //! 中央値 約 42 ms（同 doc「Metal 実測結果」節）。これは
 //! `MetalGemm::new` がプロセス起動後**最初**に `gemm.metal` 全体を
 //! runtime コンパイルする経路であり、システム側 Metal コンパイラ
-//! キャッシュが未温な状態でのコストを含む。本 example の P4/P5/P6/P7 は
+//! キャッシュが未温な状態でのコストを含む。本 example の `P4 first`
+//! （`measure_p4_library_compile` が返す `first_secs`）はプロセス内で
+//! warmup を経ない**最初の** MSL コンパイル呼び出しそのものであり、
+//! 上記 startup-cost の cold 値と同じ母集団（システムキャッシュ未温）に
+//! 属する。一方 `P4 rest`（`config.iters` 回の 2 回目以降）・P5・P6・P7 は
 //! いずれもプロセス内 2 回目以降（warmup 済み・システムキャッシュ温存下）
-//! の都度構築費であり、上記 startup-cost の cold 値とは異なる母集団を
-//! 計測している点に注意する（本 doc 「実測結果」節で突合する）。
+//! の都度構築費であり、`P4 first` とは異なる母集団である点に注意する
+//! （本 doc 「実測結果」節で `P4 first` は cold 側、`P4 rest`/P5/P6/P7 は
+//! warm 側としてそれぞれ突合する）。
 //!
 //! ## 実行方法
 //!
@@ -136,11 +148,36 @@ mod macos_impl {
         options
     }
 
+    /// `--size` の 1 辺が取りうる上限（要素数）。P6/P7（`measure_p6_rebuild_each_call`・
+    /// `measure_p7_reused_dispatch`）は `size * size` 個の `f32` を持つ正方行列
+    /// A・B を 2 枚（P7 はさらに C readback も同サイズ）確保するため、
+    /// `size * size` 自体の `usize` オーバーフロー・および 1 枚あたりの確保
+    /// バイト数の両方を解析時（`parse_sizes`）に fail-closed で検証する
+    /// （OWASP A03「外部入力の検証」観点。実行時に `checked_mul` が失敗する
+    /// 経路〈`elements_for`〉へ到達させない）。上限は 1 枚あたり 1 GiB
+    /// （`f32` で `size` 上限 16384 相当）とし、診断用途で現実的に必要な
+    /// サイズ（framework-compare 実測対象の 256/512 等）を十分に超える
+    /// 一方、`--iters` と組み合わせた誤指定による OOM を防ぐ。
+    const MAX_MATRIX_BYTES: usize = 1 << 30;
+
+    /// `size * size` 個の `f32` 要素数を安全に計算する（`checked_mul`）。
+    /// `parse_sizes` が解析時に `size` の上限（`MAX_MATRIX_BYTES` 相当）を
+    /// 検証済みのため、ここでのオーバーフローは到達しない契約だが、
+    /// 呼び出し側（P6/P7）が直接 `size * size` を書かない多層防御として
+    /// `expect` で失敗を即座に検出する。
+    fn elements_for(size: usize) -> usize {
+        size.checked_mul(size)
+            .expect("size は parse_sizes で検証済みのため size*size はオーバーフローしない")
+    }
+
     /// `--size=<N>[,<N>...]` を解析する（許可リスト方式: カンマ区切りの
     /// 正の整数のみを受理し、それ以外は `Err` で拒否する。OWASP A03
     /// 「外部入力の検証」観点。シェル経由の文字列展開は行わない）。
     /// 未指定時は `[256, 512]`（framework-compare の実測対象サイズと同一。
-    /// モジュール冒頭コメント「背景・出典」参照）。
+    /// モジュール冒頭コメント「背景・出典」参照）。各値は `size * size`
+    /// の整数オーバーフロー・および `f32` 換算での過大メモリ確保を防ぐため
+    /// `MAX_MATRIX_BYTES` 上限まで検証する（P6/P7 が確保する正方行列の
+    /// 1 枚あたりバイト数がこの上限を超える `size` は拒否する）。
     fn parse_sizes() -> Result<Vec<usize>, String> {
         for arg in std::env::args().skip(1) {
             if let Some(v) = arg.strip_prefix("--size=") {
@@ -152,6 +189,21 @@ mod macos_impl {
                         .map_err(|_| format!("--size の値が不正: '{part}'"))?;
                     if n == 0 {
                         return Err("--size の各値は正数である必要がある".to_string());
+                    }
+                    let elems = n.checked_mul(n).ok_or_else(|| {
+                        format!("--size の値が大きすぎる（size*size がオーバーフローする）: '{n}'")
+                    })?;
+                    let bytes = elems
+                        .checked_mul(std::mem::size_of::<f32>())
+                        .ok_or_else(|| {
+                            format!(
+                                "--size の値が大きすぎる（バイト数計算がオーバーフローする）: '{n}'"
+                            )
+                        })?;
+                    if bytes > MAX_MATRIX_BYTES {
+                        return Err(format!(
+                            "--size の値 '{n}' は上限（1 枚あたり {MAX_MATRIX_BYTES} バイト）を超える"
+                        ));
                     }
                     sizes.push(n);
                 }
@@ -293,8 +345,9 @@ mod macos_impl {
     /// 冒頭コメント「背景・出典」参照）。
     fn measure_p6_rebuild_each_call(config: &MeasurementConfig, size: usize) -> Quartiles {
         let mut rng = Xorshift64Star::new(SEED);
-        let a_data = rng.fill_vec(size * size);
-        let b_data = rng.fill_vec(size * size);
+        let elems = elements_for(size);
+        let a_data = rng.fill_vec(elems);
+        let b_data = rng.fill_vec(elems);
         let a = Tensor::new(a_data, &[size, size]).expect("Tensor::new(a) に失敗した");
         let b = Tensor::new(b_data, &[size, size]).expect("Tensor::new(b) に失敗した");
 
@@ -321,8 +374,9 @@ mod macos_impl {
         let ctx = MetalContext::new().expect("MetalContext::new に失敗した（実機前提）");
         let gemm = MetalGemm::new(&ctx).expect("MetalGemm::new に失敗した（実機前提）");
         let mut rng = Xorshift64Star::new(SEED);
-        let a = rng.fill_vec(size * size);
-        let b = rng.fill_vec(size * size);
+        let elems = elements_for(size);
+        let a = rng.fill_vec(elems);
+        let b = rng.fill_vec(elems);
 
         let measurement = bench_run(config, || {
             gemm.dispatch_auto(&ctx, &a, &b, size, size, size)

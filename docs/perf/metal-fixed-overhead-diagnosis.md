@@ -31,8 +31,12 @@ PR #915 のフレームワーク横並び実測（`scripts/bench/framework-compa
 学習 48.845 ms/step・推論 24.125 ms（同 batch=64・784→256→10 MLP）と、CPU 経路（学習
 18.185 ms・推論 505.7 µs）や candle/Burn の Metal 経路（学習 0.75〜1.6 ms・推論
 0.25〜1.5 ms）に比べ大きく劣後する。これは「GEMM 呼び出し回数 × 約 5 ms の固定費」で
-桁が整合する（推論は forward 1 回の GEMM 呼び出し、学習は forward + backward 相当の
-複数回呼び出しを含む）。
+桁が整合する。ベンチ対象の MLP（`scripts/bench/framework-compare/bench-fandhe/src/
+main.rs::build_model`）は 784→256・256→10 の 2 層構成のため、推論（forward 1 回）は
+各層 1 回ずつ計 **GEMM 2 回**の呼び出しを含む。学習は forward 2 回に加え、
+`autodiff::grad::matmul_vjp`（`crates/autodiff/src/grad.rs`）が `matmul` 1 回あたり
+`da`/`db` 2 回の GEMM を計算するため backward は 2 層 × 2 回 = 4 回、1 step 合計で
+**GEMM 6 回**（forward 2 + backward 4）が発生する。
 
 ## 2. 計測窓の定義（固定費の所在の切り分け）
 
@@ -130,14 +134,20 @@ cargo run -p fandhe-ai-backend-metal --example fixed_overhead_diagnosis --releas
 プロセス初回（cold）で `device_init_secs` 中央値 約 35.280 ms（run1 cold）・`first_kernel_secs`
 中央値 約 42.649 ms（run1 cold）。これは `MetalGemm::new` がプロセス起動後**最初**に
 `gemm.metal` 全体を runtime コンパイルする経路であり、システム側 Metal コンパイラ
-キャッシュが未温な状態でのコストを含む。本診断の P4/P5/P6/P7 はいずれもプロセス内
-2 回目以降（warmup 済み・システムキャッシュ温存下）の都度構築費であり、上記
-startup-cost の cold 値とは異なる母集団を計測している。この関係（cold 35〜43 ms 対
-プロセス内 2 回目以降 約 5 ms）が本診断の実測値でどう再現されるかを記入する。
+キャッシュが未温な状態でのコストを含む。本診断の `P4 first`（`measure_p4_library_compile`
+の `first_secs`）はプロセス内で warmup を経ない**最初の** MSL コンパイル呼び出しそのもの
+であり、上記 startup-cost の cold 値と同じ母集団（システムキャッシュ未温）に属する。
+一方 `P4 rest`（2 回目以降）・P5・P6・P7 はいずれもプロセス内 2 回目以降（warmup 済み・
+システムキャッシュ温存下）の都度構築費であり、`P4 first` とは異なる母集団である。
+この関係（`P4 first` ≒ cold 35〜43 ms 側、`P4 rest`/P5/P6/P7 ≒ プロセス内 2 回目以降
+約 5 ms 側）が本診断の実測値でどう再現されるかを、`P4 first` と `P4 rest` を分離した
+うえで記入する。
 
-infer 24.125 ms（forward 1 回相当）・train 48.845 ms/step（forward+backward 相当の
-複数回呼び出し）が「GEMM 呼び出し回数 × 固定費（P6−P7）」の概算とどの程度整合するかを
-記入する。
+推論 1 回は 2 層 MLP（784→256・256→10）の各層 1 回ずつで **GEMM 2 回**、学習 1 step は
+forward 2 回 + backward 4 回（`matmul_vjp` が 1 回の `matmul` あたり `da`/`db` 2 回を
+計算するため 2 層 × 2 回）の合計 **GEMM 6 回**（モジュール冒頭「1. 背景・出典」参照）。
+infer 24.125 ms・train 48.845 ms/step がこの呼び出し回数と「GEMM 呼び出し回数 ×
+固定費（P6−P7）」の概算とどの程度整合するかを記入する。
 
 ## 8. Phase 2（#930）への示唆（Mac 実機セッションで記入）
 
