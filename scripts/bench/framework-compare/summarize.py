@@ -31,8 +31,20 @@
   設計のため checksum が一致しない。突合しない）。既定では警告を stderr へ
   出すのみで終了コードは変えない（`--out` 契約と同様、既存の呼び出し元を
   壊さない）。`--strict` を付けると不一致 1 件以上で終了コード 2 を返す。
-  要素単位の誤差（max abs/rel error）比較は本ツールのスコープ外
-  （イシュー #970）。
+- 要素単位検証（イシュー #970）: checksum（全要素和）は要素の入れ替わり・
+  正負誤差の相殺で偶然一致しうる破損を見逃す。GEMM バイナリ
+  （`bench-fandhe`/`bench-candle`/`bench-burn`）は各反復で結果を FMA 契約の
+  参照 GEMM（`bench-common::GemmReference`。本体 `backend-cpu::parity::
+  matmul_reference_fma` と同じ契約）と要素単位で突合し、反復間 worst-case
+  を `parity_total`/`parity_fail_count`/`parity_max_abs_err`/
+  `parity_max_rel_err` として JSONL に記録する（閾値は本体の数値一致契約と
+  同一の `PARITY_ABS_TOL`/`PARITY_REL_TOL`）。本ツールはこれを読み、
+  `parity_fail_count > 0` または各フィールドの型・値が不正（`null` 含む）
+  な行を GEMM 表で「無効（要素誤差超過）」表示し `--strict` の対象にする
+  （`parity_status`）。本フィールド追加前の JSONL（キー欠損）は「無効」と
+  区別して「未検証（旧形式）」と表示する（fail-closed だがデータの誤破棄を
+  しない）。checksum 突合（#965）とは独立に判定し、両方に該当する行は
+  理由を併記する。
 - 実行時失敗（skipped*.log）節は、集計対象として渡された各入力 JSONL と
   同一ディレクトリの skipped*.log のみを集める（入力省略時は従来どおり
   results/raw/ 配下が対象。articles#68 Bugbot 指摘・イシュー #971）。
@@ -93,6 +105,13 @@ def devices_in(rows, task, mode="fresh"):
 # 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。ここを緩めない。
 CHECKSUM_ABS_TOL = 1e-5
 CHECKSUM_REL_TOL = 1e-3
+
+# 要素単位検証（イシュー #970）の閾値。CHECKSUM_* と同値（本体契約と揃える
+# ための独立の名前。JSONL 側の生成は `bench-common::parity::{PARITY_ABS_TOL,
+# PARITY_REL_TOL}` を正とし、判定はバイナリ側で完結する。本ツールは判定済み
+# の parity_fail_count 等を読むだけで、ここでは閾値を再適用しない）。
+PARITY_ABS_TOL = CHECKSUM_ABS_TOL
+PARITY_REL_TOL = CHECKSUM_REL_TOL
 
 # 参照値選択の優先順（イシュー #965）。GEMM の入力は全フレームワーク共通
 # なので、最も検証済みの経路（CPU・fresh）から優先的に参照を取る。
@@ -266,6 +285,77 @@ def gemm_checksum_unverifiable(rows):
     return unverifiable
 
 
+def _is_plain_number(v):
+    """`bool` は `int` のサブクラスのため `isinstance(v, (int, float))` だけ
+    では `True`/`False` を数値として通してしまう。JSON の `parity_*` 4
+    フィールドは常に数値または `null`（非有限センチネル）であるべきで、
+    誤って `bool` が混入した場合も無効として扱いたい（fail-closed。
+    security.md A03 と同じ「外部入力の型を信頼しない」思想）。
+    """
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def parity_status(row):
+    """GEMM 行の要素単位検証結果（イシュー #970）を判定する。
+
+    戻り値: "unverified" | "fail" | "ok"
+
+    - "unverified": `parity_fail_count` キー自体が存在しない（本フィールド
+      追加前にコミットされた旧形式 JSONL）。`row.get(...)` だけでは
+      「キー欠損（None）」と「値が JSON `null`（= Python None、非有限
+      センチネル）」を区別できないため、まずキーの存在を検査する
+      （欠損＝旧形式・未検証と、存在するが不正＝無効を混同しない）。
+    - "fail": `parity_fail_count` キーは存在するが、4 フィールドのいずれか
+      の型が不正（数値でない・`null`）、または `parity_fail_count > 0`。
+      壊れた入力を黙って「一致」扱いにしない（fail-closed）。
+    - "ok": 4 フィールドすべてが妥当な数値で `parity_fail_count == 0`。
+    """
+    if "parity_fail_count" not in row:
+        return "unverified"
+    fail_count = row.get("parity_fail_count")
+    total = row.get("parity_total")
+    max_abs = row.get("parity_max_abs_err")
+    max_rel = row.get("parity_max_rel_err")
+    if not _is_plain_number(fail_count) or not _is_plain_number(total):
+        return "fail"
+    if not _is_plain_number(max_abs) or not _is_plain_number(max_rel):
+        return "fail"
+    if fail_count > 0:
+        return "fail"
+    return "ok"
+
+
+def gemm_parity_failures(rows):
+    """`parity_status(r) == "fail"` の gemm 行を列挙する。"""
+    return [r for r in rows if r["task"] == "gemm" and parity_status(r) == "fail"]
+
+
+def gemm_parity_unverified(rows):
+    """`parity_status(r) == "unverified"`（旧形式 JSONL）の gemm 行を列挙する。"""
+    return [r for r in rows if r["task"] == "gemm" and parity_status(r) == "unverified"]
+
+
+def _parity_reason(row):
+    """表・データ有効性節向けの「無効（要素誤差超過）」理由テキスト。
+
+    `parity_status(row) != "fail"` の場合は `None` を返す。
+    """
+    if parity_status(row) != "fail":
+        return None
+    fail_count = row.get("parity_fail_count")
+    total = row.get("parity_total")
+    max_abs = row.get("parity_max_abs_err")
+    max_rel = row.get("parity_max_rel_err")
+    fail_str = (
+        f"{fail_count}/{total}"
+        if _is_plain_number(fail_count) and _is_plain_number(total)
+        else "?"
+    )
+    abs_str = f"{max_abs:.3e}" if _is_plain_number(max_abs) else "null"
+    rel_str = f"{max_rel:.3e}" if _is_plain_number(max_rel) else "null"
+    return f"要素誤差超過 fail={fail_str}, max_abs={abs_str}, max_rel={rel_str}"
+
+
 def _row_key(r):
     return (r["framework"], r["device"], r["size"], r["mode"])
 
@@ -294,6 +384,27 @@ def section(path, rows):
                 file=sys.stderr,
             )
 
+    # イシュー #970: GEMM 要素単位検証。閾値超過（または parity フィールドの
+    # 型・値が不正）は checksum 突合とは独立に「無効」表示・GFLOP/s "-" の
+    # 対象にする。旧形式（キー欠損）は「未検証」として区別し無効扱いしない。
+    parity_failures = gemm_parity_failures(rows)
+    for r in parity_failures:
+        print(
+            f"warning: {rel}: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+            f"の gemm 要素単位検証が閾値超過 — {_parity_reason(r)} — 無効データとして表示",
+            file=sys.stderr,
+        )
+
+    def invalid_reasons(r):
+        """表のフレームワーク列に付記する「無効」理由のリスト（無ければ空）。"""
+        reasons = []
+        if mismatch_by_key.get(_row_key(r)) is not None:
+            reasons.append("checksum 不一致")
+        preason = _parity_reason(r)
+        if preason is not None:
+            reasons.append(preason)
+        return reasons
+
     versions = {r["framework"]: r["version"] for r in rows}
     lines.append("| フレームワーク | バージョン |")
     lines.append("| --- | --- |")
@@ -313,10 +424,11 @@ def section(path, rows):
             for fw in FRAMEWORKS:
                 r = get(rows, fw, "gemm", device, n)
                 if r:
-                    mm = mismatch_by_key.get(_row_key(r))
-                    if mm is not None:
+                    reasons = invalid_reasons(r)
+                    if reasons:
+                        fw_col = f"{fw}（無効: {'; '.join(reasons)}）"
                         lines.append(
-                            f"| {n} | {fw}（無効: checksum 不一致） | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - |"
+                            f"| {n} | {fw_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - |"
                         )
                     else:
                         lines.append(
@@ -353,9 +465,9 @@ def section(path, rows):
                     fresh = get(rows, fw, "gemm", device, n, mode="fresh")
                     fresh_col = fmt_ms(fresh["median_s"]) if fresh else "未計測"
                     init_col = fmt_ms(r["init_s"]) if r.get("init_s") is not None else "-"
-                    mm = mismatch_by_key.get(_row_key(r))
-                    fw_col = f"{fw}（無効: checksum 不一致）" if mm is not None else fw
-                    gflops_col = "-" if mm is not None else f"{r['gflops']:.1f}"
+                    reasons = invalid_reasons(r)
+                    fw_col = f"{fw}（無効: {'; '.join(reasons)}）" if reasons else fw
+                    gflops_col = "-" if reasons else f"{r['gflops']:.1f}"
                     lines.append(
                         f"| {n} | {fw_col} | {init_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {gflops_col} | {fresh_col} |"
                     )
@@ -402,7 +514,7 @@ def section(path, rows):
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - | - |")
     lines.append("")
 
-    lines.append("#### データ有効性（checksum 突合。イシュー #965）\n")
+    lines.append("#### データ有効性（checksum 突合・要素単位検証。イシュー #965・#970）\n")
     # candidate_count<=1（この JSONL 内に比較対象となる他フレームワーク／
     # 他デバイス行が無い）の行は、値そのものは正当でも相互突合が原理的に
     # できていない。「一致」と混同されないよう区別して報告する
@@ -436,8 +548,32 @@ def section(path, rows):
                 f"— checksum {r['checksum']:.6f}、この JSONL 内に比較対象となる他フレームワーク／"
                 "他デバイス行が無いため相互突合していない（値の正当性を否定するものではない）"
             )
+
+    # イシュー #970: 要素単位検証の集計（checksum 突合とは独立の節）。
+    unverified_rows = gemm_parity_unverified(rows)
+    parity_verified_total = sum(
+        1 for r in rows if r["task"] == "gemm" and parity_status(r) != "unverified"
+    )
+    if parity_failures:
+        for r in parity_failures:
+            lines.append(
+                f"- **無効（要素誤差超過）**: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                f"— {_parity_reason(r)}"
+            )
+    elif parity_verified_total > 0:
+        lines.append(
+            f"- 要素誤差超過なし（検証済み {parity_verified_total} 行が全て閾値内。"
+            f"PARITY_ABS_TOL={PARITY_ABS_TOL:.0e}、PARITY_REL_TOL={PARITY_REL_TOL:.0e}）"
+        )
+    else:
+        lines.append("- 要素単位検証済みの行なし（全 gemm 行が旧形式または対象外）")
+    if unverified_rows:
+        lines.append(
+            f"- **未検証（旧形式）**: {len(unverified_rows)} 行（本フィールド追加〈イシュー #970〉前に"
+            "コミットされた JSONL のため要素単位検証未実施。値の正当性を否定するものではない）"
+        )
     lines.append("")
-    return lines, bool(mismatches)
+    return lines, bool(mismatches), bool(parity_failures)
 
 
 def main():
@@ -456,7 +592,10 @@ def main():
     parser.add_argument(
         "--strict",
         action="store_true",
-        help="GEMM checksum の不一致（イシュー #965）が 1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）",
+        help=(
+            "GEMM checksum の不一致（イシュー #965）または要素単位検証の閾値超過"
+            "（イシュー #970）が 1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）"
+        ),
     )
     args = parser.parse_args()
 
@@ -467,15 +606,17 @@ def main():
 
     lines = ["# ベンチマーク集計（summarize.py 生成）\n"]
     any_checksum_mismatch = False
+    any_parity_failure = False
     for path in inputs:
         rows = load_rows(path)
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
             continue
-        section_lines, has_mismatch = section(path, rows)
+        section_lines, has_mismatch, has_parity_failure = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
+        any_parity_failure = any_parity_failure or has_parity_failure
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -509,11 +650,17 @@ def main():
     else:
         sys.stdout.write(text)
 
-    if any_checksum_mismatch and args.strict:
-        print(
-            "error: --strict: 1 件以上の gemm checksum 不一致（イシュー #965）",
-            file=sys.stderr,
-        )
+    if (any_checksum_mismatch or any_parity_failure) and args.strict:
+        if any_checksum_mismatch:
+            print(
+                "error: --strict: 1 件以上の gemm checksum 不一致（イシュー #965）",
+                file=sys.stderr,
+            )
+        if any_parity_failure:
+            print(
+                "error: --strict: 1 件以上の gemm 要素単位検証の閾値超過（イシュー #970）",
+                file=sys.stderr,
+            )
         return 2
     return 0
 

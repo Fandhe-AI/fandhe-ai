@@ -7,6 +7,9 @@
 use std::io::Write;
 use std::time::Duration;
 
+pub mod parity;
+pub use parity::{GemmReference, PARITY_ABS_TOL, PARITY_REL_TOL, ParityStats, compare_elementwise};
+
 /// Typed error for the shared bench utilities. Bench binaries propagate this
 /// (as `Box<dyn Error>`) up to `main`, diagnose on stderr, and exit non-zero;
 /// no `panic!` / `unwrap` / `expect` on these paths (coding-rust.md).
@@ -30,6 +33,14 @@ pub enum BenchError {
     /// 返す既知の upstream バグ（`docs/perf/burn-wgpu-metal-gemm-zero-result.md`
     /// 参照）を、壊れた計算の実行時間を性能値として記録する前に遮断する。
     DegenerateChecksum { value: f64 },
+    /// [`parity::GemmReference::compute`] に `n == 0` が渡された（正方行列の
+    /// 一辺長は正でなければならない）。イシュー #970。
+    InvalidShape { n: usize },
+    /// [`parity::GemmReference::compute`] / [`parity::compare_elementwise`]
+    /// に渡された 2 つのスライスの要素数が一致しない（呼び出し誤りの早期
+    /// 検出。`backend-cpu::parity::ParityError::LengthMismatch` と同じ思想）。
+    /// イシュー #970。
+    ParityLengthMismatch { expected: usize, actual: usize },
 }
 
 impl std::fmt::Display for BenchError {
@@ -58,6 +69,15 @@ impl std::fmt::Display for BenchError {
                 write!(
                     f,
                     "MEASURE_ERROR: gemm checksum is degenerate ({value}) — result tensor is all-zero or non-finite; refusing to record timing"
+                )
+            }
+            BenchError::InvalidShape { n } => {
+                write!(f, "MEASURE_ERROR: gemm reference requires n > 0 (got {n})")
+            }
+            BenchError::ParityLengthMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: parity comparison length mismatch (expected {expected}, got {actual})"
                 )
             }
         }
@@ -182,6 +202,12 @@ pub struct Record<'a> {
     /// reuse モードのみ Some: デバイス/tape 構築から初回計測までの
     /// 初期化 1 回分の経過時間（秒）。fresh モードは常に None（emit しない）。
     pub init_s: Option<f64>,
+    /// GEMM の要素単位検証結果（イシュー #970）。`gemm` タスクのみ
+    /// `Some`（反復間 worst-case を [`ParityStats::worst`] で集約したもの）。
+    /// `train`/`infer` は fandhe-ai の重み初期化が candle/Burn と異なる
+    /// 設計で比較不能なため常に `None`（emit しない。summarize.py 側は
+    /// キー欠損を「旧形式（未検証）」として区別し「無効」と混同しない）。
+    pub parity: Option<ParityStats>,
 }
 
 impl Record<'_> {
@@ -210,6 +236,19 @@ impl Record<'_> {
         s.push_str(&format!(",\"mode\":\"{}\"", self.mode));
         if let Some(init) = self.init_s {
             s.push_str(&format!(",\"init_s\":{init:.9}"));
+        }
+        if let Some(p) = &self.parity {
+            // 非有限（INFINITY センチネル。`compare_elementwise` 参照）は JSON
+            // として妥当でないため `null` にする。summarize.py 側はこれを
+            // 「無効」（parity フィールドが存在するが値が不正）として扱う
+            // （キー欠損＝旧形式・未検証とは区別する。イシュー #970）。
+            s.push_str(&format!(
+                ",\"parity_total\":{},\"parity_fail_count\":{},\"parity_max_abs_err\":{},\"parity_max_rel_err\":{}",
+                p.total,
+                p.fail_count,
+                fmt_f64_or_null(p.max_abs_err),
+                fmt_f64_or_null(p.max_rel_err),
+            ));
         }
         s.push('}');
         s
@@ -286,6 +325,17 @@ pub fn gemm_gflops(n: usize, median_s: f64) -> f64 {
     2.0 * (n as f64).powi(3) / median_s / 1e9
 }
 
+/// `Record::to_json_line` 用: 非有限値（`ParityStats` の `INFINITY` センチネル）
+/// を JSON として妥当な `null` に変換する。有限値は科学記数法（JSON の
+/// number 構文として妥当。E 表記可）で出力する。
+fn fmt_f64_or_null(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v:.6e}")
+    } else {
+        "null".to_string()
+    }
+}
+
 /// GEMM checksum（結果テンソル全要素の総和）が縮退していないか検査する。
 ///
 /// イシュー #965: `bench-burn` の Metal（wgpu）経路が N>=512 で結果テンソル
@@ -352,6 +402,7 @@ mod tests {
             iters: 20,
             mode,
             init_s,
+            parity: None,
         }
     }
 
@@ -419,5 +470,50 @@ mod tests {
         let err = BenchError::DegenerateChecksum { value: 0.0 };
         assert!(err.to_string().starts_with("MEASURE_ERROR:"));
         assert!(err.to_string().contains("gemm checksum is degenerate"));
+    }
+
+    // イシュー #970: Record.parity の JSON 出力（キー欠損＝旧形式・未検証と
+    // `null`＝無効を summarize.py 側が区別できるようにするための契約）。
+
+    fn sample_record_with_parity(parity: Option<ParityStats>) -> Record<'static> {
+        let mut r = sample_record("fresh", None);
+        r.parity = parity;
+        r
+    }
+
+    #[test]
+    fn json_line_without_parity_omits_parity_keys() {
+        let line = sample_record_with_parity(None).to_json_line();
+        assert!(!line.contains("parity_"));
+    }
+
+    #[test]
+    fn json_line_with_parity_includes_four_keys() {
+        let stats = ParityStats {
+            total: 65536,
+            fail_count: 0,
+            max_abs_err: 1.234e-6,
+            max_rel_err: 5.678e-7,
+        };
+        let line = sample_record_with_parity(Some(stats)).to_json_line();
+        assert!(line.contains("\"parity_total\":65536"));
+        assert!(line.contains("\"parity_fail_count\":0"));
+        assert!(line.contains("\"parity_max_abs_err\":1.234000e-6"));
+        assert!(line.contains("\"parity_max_rel_err\":5.678000e-7"));
+    }
+
+    #[test]
+    fn json_line_with_nonfinite_parity_errors_emits_null() {
+        let stats = ParityStats {
+            total: 4,
+            fail_count: 1,
+            max_abs_err: f64::INFINITY,
+            max_rel_err: f64::INFINITY,
+        };
+        let line = sample_record_with_parity(Some(stats)).to_json_line();
+        assert!(line.contains("\"parity_max_abs_err\":null"));
+        assert!(line.contains("\"parity_max_rel_err\":null"));
+        // fail_count 自体は非有限ではないので通常どおり数値で出力される。
+        assert!(line.contains("\"parity_fail_count\":1"));
     }
 }

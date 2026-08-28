@@ -61,6 +61,20 @@ fn checksum_var(v: &fandhe_ai::Var) -> Result<f64, Box<dyn std::error::Error>> {
     Ok(slice.iter().map(|&x| x as f64).sum())
 }
 
+/// Host-materialize a Var result and return the raw elements (forces sync).
+/// `run_gemm`/`run_gemm_reuse`（イシュー #970）は checksum（全要素和）に
+/// 加え要素単位の参照比較（`GemmReference::verify`）が必要なため、
+/// `checksum_var` とは別に生の `Vec<f32>` を返す readout を用意する
+/// （`checksum_var`/`checksum_tensor` は `run_infer` が引き続き使うため
+/// シグネチャを変更しない）。
+fn readout_var(v: &fandhe_ai::Var) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let t = v.to_tensor();
+    Ok(t.contiguous()
+        .as_slice()
+        .ok_or("as_slice() returned None after contiguous()")?
+        .to_vec())
+}
+
 fn checksum_tensor(t: &Tensor<f32>) -> Result<f64, Box<dyn std::error::Error>> {
     let slice = t
         .contiguous()
@@ -79,9 +93,27 @@ fn gemm_inputs(n: usize) -> Result<(Tensor<f32>, Tensor<f32>), Box<dyn std::erro
 fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
     let (a_data, b_data) = gemm_inputs(n)?;
-    let mut checksum = 0.0;
+    // 要素単位検証（イシュー #970）の参照値。本体 `backend-cpu::parity::
+    // matmul_reference_fma` と同じ FMA 契約（f32 mul_add・逐次 k 昇順）の
+    // 参照 GEMM を計測窓の外（warmup 前）で 1 回だけ計算する。
+    let a_host = a_data
+        .contiguous()
+        .as_slice()
+        .ok_or("a_data as_slice() returned None")?
+        .to_vec();
+    let b_host = b_data
+        .contiguous()
+        .as_slice()
+        .ok_or("b_data as_slice() returned None")?
+        .to_vec();
+    let reference = GemmReference::compute(n, &a_host, &b_host)?;
 
-    let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
+    let mut checksum = 0.0;
+    let mut parity: Option<ParityStats> = None;
+
+    let one = |sync_checksum: &mut f64,
+               parity: &mut Option<ParityStats>|
+     -> Result<Duration, Box<dyn std::error::Error>> {
         // fresh tape per measurement (no accumulated graph)。計時開始は
         // tape 構築より前に置く（イシュー #925 レビュー指摘）。「fresh は
         // tape/デバイス初期化コスト（CUDA コンテキスト作成・NVRTC カーネル
@@ -92,8 +124,11 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let a = tape.var(&a_data);
         let b = tape.var(&b_data);
         let c = a.matmul(&b)?;
-        // sync: materialize result on host and read elements
-        *sync_checksum = checksum_var(&c)?;
+        // sync: materialize result on host and read elements（従来どおり
+        // 計測窓内。checksum の計算コストも従来と変えない）。
+        let out = readout_var(&c)?;
+        *sync_checksum = out.iter().map(|&x| x as f64).sum();
+        let elapsed = start.elapsed();
         // イシュー #965 codex-review 指摘: sync_checksum は毎反復上書きされる
         // ため、ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。
         // burn 側の縮退 checksum 遮断（bench-burn/src/main.rs）と対称に、
@@ -101,15 +136,25 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         // 性能値として記録しないよう、checksum 計算直後・warmup を含む
         // 全反復で検査する。
         validate_gemm_checksum(*sync_checksum)?;
-        Ok(start.elapsed())
+        // イシュー #970: 要素単位の複合判定（O(n^2)）は計測窓の外で行う
+        // （GEMM 自体は O(n^3) だが、比較コストが計測時間へ混入するのを
+        // 避けるため elapsed 取得後に実行する）。反復間の worst-case を
+        // 保持し、途中反復の破損（要素の入れ替わり等、checksum では
+        // 見逃しうる破損）も見逃さない。
+        let stats = reference.verify(&out)?;
+        *parity = Some(match parity.take() {
+            Some(prev) => prev.worst(stats),
+            None => stats,
+        });
+        Ok(elapsed)
     };
 
     for _ in 0..WARMUP_ITERS {
-        one(&mut checksum)?;
+        one(&mut checksum, &mut parity)?;
     }
     let mut durations = Vec::with_capacity(MEASURE_ITERS);
     for _ in 0..MEASURE_ITERS {
-        durations.push(one(&mut checksum)?);
+        durations.push(one(&mut checksum, &mut parity)?);
     }
     let st = stats(&durations)?;
     Record {
@@ -126,6 +171,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: MEASURE_ITERS,
         mode: "fresh",
         init_s: None,
+        parity,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -141,6 +187,19 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
     let (a_data, b_data) = gemm_inputs(n)?;
+    // イシュー #970: 参照 GEMM は init_s 計測（tape/デバイス初期化コスト）
+    // を汚さないよう、init_start より前に計算する。
+    let a_host = a_data
+        .contiguous()
+        .as_slice()
+        .ok_or("a_data as_slice() returned None")?
+        .to_vec();
+    let b_host = b_data
+        .contiguous()
+        .as_slice()
+        .ok_or("b_data as_slice() returned None")?
+        .to_vec();
+    let reference = GemmReference::compute(n, &a_host, &b_host)?;
 
     // init_s: tape 構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
     // 経過（CUDA コンテキスト作成・NVRTC コンパイル等の一度きりのコストを
@@ -150,22 +209,29 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let a = tape.var(&a_data);
     let b = tape.var(&b_data);
     let c0 = a.matmul(&b)?;
-    let mut checksum = checksum_var(&c0)?;
+    let out0 = readout_var(&c0)?;
+    let mut checksum: f64 = out0.iter().map(|&x| x as f64).sum();
+    let init_s = init_start.elapsed().as_secs_f64();
     // イシュー #965 codex-review 指摘: checksum は毎反復上書きされるため、
     // ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。init 計測分
     // を含め reuse 経路（同一 tape を使い回す）でも fresh 経路と同様に
     // checksum 計算直後・全反復で検証する。
     validate_gemm_checksum(checksum)?;
-    let init_s = init_start.elapsed().as_secs_f64();
+    // イシュー #970: init 計測分の要素単位検証は init_s の外（elapsed 取得後）
+    // で行う。以後の反復と worst-case で集約する。
+    let mut parity = reference.verify(&out0)?;
 
     // 残り warmup（1 回は init 計測内で消費済み）+ 計測本体。同一 tape・同一
     // 葉 Var を使い回し、matmul のみを繰り返す。
     let mut one = || -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.matmul(&b)?;
-        checksum = checksum_var(&c)?;
+        let out = readout_var(&c)?;
+        checksum = out.iter().map(|&x| x as f64).sum();
+        let elapsed = start.elapsed();
         validate_gemm_checksum(checksum)?;
-        Ok(start.elapsed())
+        parity = parity.worst(reference.verify(&out)?);
+        Ok(elapsed)
     };
     for _ in 0..WARMUP_ITERS.saturating_sub(1) {
         one()?;
@@ -189,6 +255,7 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: MEASURE_ITERS,
         mode: "reuse",
         init_s: Some(init_s),
+        parity: Some(parity),
     }
     .emit(&cli.out)?;
     Ok(())
@@ -274,6 +341,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: measured.len(),
         mode: "fresh",
         init_s: None,
+        parity: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -327,6 +395,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: MEASURE_ITERS,
         mode: "fresh",
         init_s: None,
+        parity: None,
     }
     .emit(&cli.out)?;
     Ok(())

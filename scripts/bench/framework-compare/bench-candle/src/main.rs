@@ -46,14 +46,29 @@ fn checksum2(t: &Tensor) -> Result<f64, Box<dyn std::error::Error>> {
     Ok(rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum())
 }
 
+/// Host-materialize a 2D tensor and return the flattened (row-major)
+/// elements (forces sync). `run_gemm`（イシュー #970）は checksum に加え
+/// 要素単位の参照比較（`GemmReference::verify`）が必要なため、`checksum2`
+/// とは別に生の `Vec<f32>` を返す readout を用意する（`checksum2` は
+/// `run_infer` が引き続き使うためシグネチャを変更しない）。
+fn readout2(t: &Tensor) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let rows = t.to_vec2::<f32>()?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
 fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let n = cli.size;
     let dev = make_device(&cli.device)?;
     let a_host = Xorshift64Star::new(SEED_A).fill_vec(n * n);
     let b_host = Xorshift64Star::new(SEED_B).fill_vec(n * n);
+    // イシュー #970: 参照 GEMM は `Tensor::from_vec` が host Vec を消費する
+    // 前に、その clone から計算する（本体の FMA 契約と同じ参照。計測窓の
+    // 外・warmup 前に 1 回だけ）。
+    let reference = GemmReference::compute(n, &a_host, &b_host)?;
     let a = Tensor::from_vec(a_host, (n, n), &dev)?;
     let b = Tensor::from_vec(b_host, (n, n), &dev)?;
     let mut checksum = 0.0;
+    let mut parity: Option<ParityStats> = None;
 
     // イシュー #965 codex-review 指摘: checksum は毎反復上書きされるため、
     // ループ後に最後の値だけを検査すると途中反復の縮退を見逃す。
@@ -61,20 +76,33 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // candle 側でも将来同種の不具合が出た場合に壊れた計算の実行時間を
     // 性能値として記録しないよう、checksum 計算直後・warmup を含む
     // 全反復で検査する。
-    let one = |sync_checksum: &mut f64| -> Result<Duration, Box<dyn std::error::Error>> {
+    let one = |sync_checksum: &mut f64,
+               parity: &mut Option<ParityStats>|
+     -> Result<Duration, Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.matmul(&b)?;
-        *sync_checksum = checksum2(&c)?;
+        // sync: materialize result on host and read elements（従来どおり
+        // 計測窓内）。
+        let out = readout2(&c)?;
+        *sync_checksum = out.iter().map(|&x| x as f64).sum();
+        let elapsed = start.elapsed();
         validate_gemm_checksum(*sync_checksum)?;
-        Ok(start.elapsed())
+        // イシュー #970: 要素単位検証は計測窓の外で行う（O(n^2)。GEMM 自体
+        // の O(n^3) に対する比較コストの混入を避けるため）。
+        let stats = reference.verify(&out)?;
+        *parity = Some(match parity.take() {
+            Some(prev) => prev.worst(stats),
+            None => stats,
+        });
+        Ok(elapsed)
     };
 
     for _ in 0..WARMUP_ITERS {
-        one(&mut checksum)?;
+        one(&mut checksum, &mut parity)?;
     }
     let mut durations = Vec::with_capacity(MEASURE_ITERS);
     for _ in 0..MEASURE_ITERS {
-        durations.push(one(&mut checksum)?);
+        durations.push(one(&mut checksum, &mut parity)?);
     }
     let st = stats(&durations)?;
     Record {
@@ -91,6 +119,7 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: MEASURE_ITERS,
         mode: "fresh",
         init_s: None,
+        parity,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -184,6 +213,7 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: measured.len(),
         mode: "fresh",
         init_s: None,
+        parity: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -224,6 +254,7 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         iters: MEASURE_ITERS,
         mode: "fresh",
         init_s: None,
+        parity: None,
     }
     .emit(&cli.out)?;
     Ok(())

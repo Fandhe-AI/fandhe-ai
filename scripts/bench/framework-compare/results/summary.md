@@ -41,6 +41,24 @@ tracel-ai/cubek#283 で修正。承認済みピン `burn =0.21.0` の範囲で�
   `bench-common::validate_gemm_checksum` は各バイナリ側でも縮退 checksum（全ゼロ・
   非有限）を emit 前に遮断する（「計測プロトコル」節・README.md 参照）
 
+## データ有効性の注記（要素単位検証。イシュー #970）
+
+本ページが参照する 3 つの raw JSONL（`results/raw/results.jsonl`・`results-dgx.jsonl`・
+`results-rtx3060.jsonl`）は、GEMM 結果を参照実装と要素単位で突合する検証（`parity_total`・
+`parity_fail_count`・`parity_max_abs_err`・`parity_max_rel_err`。README.md「要素単位検証」節）
+の**追加前**に計測されたものであり、当該フィールドを持たない。`summarize.py` はこれを
+「無効」ではなく「未検証（旧形式）」として区別して報告する（キー欠損と検証失敗を混同しない。
+値そのものの正当性を否定するものではない）。**本 PR では既存の raw JSONL の再計測・数値の
+書き換えは行っていない**（実測を捏造しない方針。`.claude/rules/security.md` A08）。次回の
+実機再計測キャンペーンから要素単位検証が有効になる。
+
+- **Burn(wgpu) Metal 経路の低精度の可能性**: 上記の checksum 乖離バグとは別に、Burn の
+  wgpu/Metal 経路は内部で TF32 相当の低精度演算を使う場合がある（環境 2 の備考に記載の
+  既知事項）。checksum 修正後の再計測で要素単位検証が閾値超過（無効）と判定された場合、
+  それが実装の破損ではなく精度契約外（TF32 等）の低精度実装に起因する可能性を切り分ける
+  必要がある。閾値（本体の数値一致契約と同値）は緩めず、**未検証・要追試**として記録する
+  （閾値変更はユーザー承認が必須。`.claude/rules/coding-rust.md`）
+
 ## (a) GEMM（C = A×B、f32、正方行列）
 
 ### CPU

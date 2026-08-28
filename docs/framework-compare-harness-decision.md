@@ -89,3 +89,35 @@ libtorch（C++ 配布物）の導入・リンクが必要で、ベンチ環境�
 Rust 純正 3 者比較の目的に見合わないため未計測とする（`results/summary.md` に
 「未計測」として明記。数値の捏造はしない）。`tch` crate 自体は candle / burn の
 推移的依存として Cargo.lock に現れるが、計測バイナリからは使用しない。
+
+## 6. 結果検証の設計（イシュー #965・#970）
+
+GEMM の結果検証は 2 層防御で構成する。
+
+1. **バイナリ内の縮退ガード**（`bench-common::validate_gemm_checksum`。#965）:
+   結果テンソル全要素和（checksum）が 0.0 または非有限なら emit 前に遮断する
+   （壊れた計算の実行時間を性能値として記録しない）
+2. **要素単位検証**（`bench-common::parity`。#970）: checksum は要素の入れ替わり・
+   正負誤差の相殺で偶然一致しうる破損を見逃すため、各反復で結果を FMA 契約の
+   参照 GEMM（`GemmReference`。本体 `backend-cpu::parity::matmul_reference_fma`
+   と同じ契約の自前実装）と要素単位で突合し、`parity_total`/`parity_fail_count`/
+   `parity_max_abs_err`/`parity_max_rel_err` を JSONL に記録する
+
+`summarize.py` はさらに 2 段の突合を行う: (1) checksum のフレームワーク間相互突合
+（#965。同一 size の checksum が本体の数値一致契約内で一致するはずという性質を
+利用）、(2) 要素単位検証の閾値超過報告（#970。バイナリ側の判定をそのまま集計）。
+両者は独立に判定し、該当行は表・データ有効性節で理由を併記する。`--strict` は
+両方を対象にする。
+
+**閾値は本体の数値一致契約（`.claude/rules/coding-rust.md`「バックエンド構成」節。
+相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）と同値に固定する。変更はユーザー
+承認事項**（`.claude/rules/security.md` A08・`crates/backend-cpu/src/parity.rs`
+の `RELATIVE_TOLERANCE`/`ABSOLUTE_RESCUE_THRESHOLD` と同じ制約）。ベンチの相互
+検証を本体の数値一致契約と異なる基準で判定すると、閾値の意味が本体と乖離し
+「ベンチで無効表示だが本体の契約では合格」という混乱を生むため、ベンチ側で
+独自に緩めない。
+
+参照実装は f64 累積（真値との差という別の指標になり本体契約と整合しない）でも
+結果ダンプ + summarize.py 側突合（N=4096 で 64 MiB/行になりコミット・転送が
+非現実的）でもなく、各バイナリが自己完結で計算する自前 GEMM を採用した
+（詳細・タイミング実測は README.md「要素単位検証」節を参照）。
