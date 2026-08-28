@@ -116,17 +116,21 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
 対象範囲はこの 3 種（配列生成関数・Sequential ビルダー・基本レイヤー／活性化の
 薄いラッパー）に限定する。
 
-- **`Sequential` の学習パラメータ取得 API・optimizer 接続**（#294）:
+- **`Sequential` の学習パラメータ取得 API**（#294）:
   `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/facade/src/
   compat/sequential.rs`。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から移設。
   4.2 節参照）経由で学習可能パラメータ（`Linear` 層の `weight`/`bias`）・
   勾配へアクセスできる。`Sequential::trainable_parameters`/
-  `Sequential::apply_parameters` と組み合わせ **`fandhe_ai::optim::{Sgd,
-  AdamW}`**（0 節「`fandhe_ai::optim` の位置づけ」参照。移行予定の入口・
-  確定入口ではない。昇格元の内部 API は
-  `fandhe_ai_autodiff::optim::Sgd`・`fandhe_ai_autodiff::nn::optim::AdamW`）
-  へ接続する（4 節参照）。`fit()`/`compile()`
-  等の高水準学習ループ API は 2 節のとおり引き続き対象外
+  `Sequential::apply_parameters` を optimizer と組み合わせる場合、現時点で
+  サポート境界上の確定入口となる接続方法は内部 API（`fandhe_ai_autodiff::
+  optim::Sgd`・`fandhe_ai_autodiff::nn::optim::AdamW`。0 節のとおり
+  `pub` ではあるがサポート境界上は内部 API）を直接利用する経路のみである。
+  **`fandhe_ai::optim`**（0 節「`fandhe_ai::optim` の位置づけ」参照）は
+  正本 spec 改定・submodule ポインタ更新が完了するまでは移行予定の
+  将来提案にとどまり、確定入口ではないため、本節でも `Sequential` との
+  具体的な接続手順を利用案内としては示さない（codex-review PR #974
+  P1 是正）。`fit()`/`compile()` 等の高水準学習ループ API は 2 節の
+  とおり引き続き対象外
 
 ## 2. 対象外（out of scope）
 
