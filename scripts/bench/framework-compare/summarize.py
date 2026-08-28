@@ -103,14 +103,31 @@ _REFERENCE_PRIORITY = [
 ]
 
 
+def _priority_rank(row):
+    """`_REFERENCE_PRIORITY` 上の (framework, device) の優先順位を返す。
+
+    該当が無ければ `_REFERENCE_PRIORITY` の長さ（最下位）を返す。
+    """
+    key = (row["framework"], row["device"])
+    for i, cand in enumerate(_REFERENCE_PRIORITY):
+        if cand == key:
+            return i
+    return len(_REFERENCE_PRIORITY)
+
+
 def checksums_match(a, b):
-    """本体の数値一致契約と同一の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。"""
+    """本体の数値一致契約と同一の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。
+
+    分母は `max(abs(a), abs(b), 1e-12)` とし、引数順序（a, b のどちらを参照値と
+    するか）に依らず対称な判定にする（`composite_close` 相当。イシュー #965
+    codex-review P1 指摘: 旧実装の `diff / abs(b)` は非対称で、境界付近では
+    a/b の順序次第で判定結果が変わりうる問題があった）。
+    """
     diff = abs(a - b)
     if diff < CHECKSUM_ABS_TOL:
         return True
-    if b == 0:
-        return diff < CHECKSUM_ABS_TOL
-    return diff / abs(b) < CHECKSUM_REL_TOL
+    denom = max(abs(a), abs(b), 1e-12)
+    return diff / denom < CHECKSUM_REL_TOL
 
 
 def gemm_checksum_reference(rows):
@@ -125,7 +142,10 @@ def gemm_checksum_reference(rows):
     フォールバックする（イシュー #965 P2 指摘: 優先経路が無条件採用されると
     孤立した誤値でも参照として選ばれてしまう問題の修正）。全候補が互いに
     不一致（最大クラスタが 1 件）の場合は多数派による否定ができないため、
-    優先経路の値をそのまま信頼する。
+    優先経路の値をそのまま信頼する。クラスタサイズが同点の場合はファイル内
+    出現順ではなく `_REFERENCE_PRIORITY` 上の最上位メンバーを含むクラスタを
+    優先する（イシュー #965 Bugbot 指摘: 出現順依存だと GPU 行が先に現れる
+    ケースで CPU 優先経路の checksum が不当に無効判定されうる問題の修正）。
 
     候補が 1 件も無い、または相互一致クラスタが 2 件未満で優先経路にも
     該当が無い場合は突合不能として None を返す。
@@ -151,13 +171,26 @@ def gemm_checksum_reference(rows):
         ]
 
         # 相互一致するクラスタのうち最大のものを先に求める（多数派の把握）。
+        # クラスタサイズが同点の場合、ファイル内での出現順（GPU 行が先に
+        # 現れるかどうか）で多数派が決まってしまうと、CPU 優先経路
+        # （`_REFERENCE_PRIORITY`）の checksum が不当に「孤立した誤値」
+        # 判定されうる（イシュー #965 Bugbot 指摘）。そこで同点時は
+        # `_REFERENCE_PRIORITY` 上の最上位メンバーを含むクラスタを優先する
+        # （それも同点なら最初に見つかったクラスタを使う。決定的な順序）。
         best_cluster = []
+        best_rank = len(_REFERENCE_PRIORITY)
         for r in candidates:
             cluster = [
                 c for c in candidates if checksums_match(c["checksum"], r["checksum"])
             ]
-            if len(cluster) > len(best_cluster):
+            cluster_rank = min(
+                (_priority_rank(c) for c in cluster), default=len(_REFERENCE_PRIORITY)
+            )
+            if len(cluster) > len(best_cluster) or (
+                len(cluster) == len(best_cluster) and cluster_rank < best_rank
+            ):
                 best_cluster = cluster
+                best_rank = cluster_rank
 
         ref = None
         ref_label = None
