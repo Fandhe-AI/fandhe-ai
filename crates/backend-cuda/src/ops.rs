@@ -18,26 +18,33 @@
 //! `BackendError::CudaUnavailable` へ変換する（panic しない。
 //! `.claude/rules/coding-rust.md`）。
 
+use std::sync::Arc;
+
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
-use crate::gemm::CudaGemm;
-use crate::rmsnorm::{CudaRmsNorm, match_rmsnorm_plan};
-use crate::softmax::{CudaSoftmax, match_softmax_plan};
+use crate::rmsnorm::match_rmsnorm_plan;
+use crate::softmax::match_softmax_plan;
 
 /// CUDA バックエンドの `BackendOps` 実装。`ordinal` は `Device::Cuda(_)`
 /// の一致判定に使う `cudarc` のデバイス番号
 /// （`CudaContext::new(ordinal)` に対応。`fandhe_ai_tensor_core::device::Device`
 /// の doc コメント参照）。
 ///
-/// `CudaDevice`／`CudaGemm`／`CudaElementwise` は各メソッド呼び出し時に
-/// 都度構築する（TASK-1.9b の `DeviceBuffer`／デバイスハンドル常駐が
-/// 未着地のため。モジュール冒頭 `backend_ops` の突合コメント参照）。
-/// ハンドル常駐化・再利用による初期化コスト削減は TASK-1.9b／1.9d 以降の
-/// 最適化対象（出典なき性能主張として本イシューでは行わない）。
+/// イシュー #929: `CudaDevice`／`CudaGemm`／`CudaElementwise`／
+/// `CudaRmsNorm`／`CudaSoftmax` は各メソッド呼び出し時に都度構築せず、
+/// `crate::context_cache`（`ordinal` キーのプロセス内キャッシュ）経由で
+/// 取得する。同一プロセス内の 2 回目以降の呼び出しは `CudaContext` 生成・
+/// NVRTC コンパイルを再実行しない（`context_cache` モジュール冒頭コメント
+/// 参照。実測根拠: `scripts/bench/framework-compare/results/
+/// summary.md:177`）。エラー（driver 不在等）はキャッシュされず毎回
+/// 再試行される（fail-fast 契約は不変）ため、`Self::device_handle` の
+/// 戻り値型が `Result<..., BackendError>` である点・エラー伝播の意味論
+/// 自体は変更しない。
 #[derive(Debug, Clone, Copy)]
 pub struct CudaBackendOps {
     ordinal: usize,
@@ -46,17 +53,19 @@ pub struct CudaBackendOps {
 impl CudaBackendOps {
     /// 指定した `ordinal` に対応する `CudaBackendOps` を構築する。
     /// 構築自体は driver 初期化を行わないため常に成功する（実際の
-    /// driver 呼び出しは各メソッドが `CudaDevice::new` を経由した時点）。
+    /// driver 呼び出しは各メソッドが [`Self::device_handle`]（`context_cache`
+    /// 経由）を呼んだ時点）。
     pub fn new(ordinal: usize) -> Self {
         Self { ordinal }
     }
 
-    /// `CudaDevice::new` を経由してデバイスハンドルを取得する。
-    /// driver 不在・初期化失敗は `BackendError::CudaUnavailable` へ
-    /// 変換する（panic 回避ゲートは `CudaDevice::new` 内部で完結する。
-    /// `device.rs` 参照）。
-    fn device_handle(&self) -> Result<CudaDevice, BackendError> {
-        CudaDevice::new(self.ordinal)
+    /// `context_cache::cached_device` を経由してデバイスハンドルを取得
+    /// する（イシュー #929。プロセス内キャッシュのヒット時は
+    /// `CudaContext::new` を再実行しない）。driver 不在・初期化失敗は
+    /// `BackendError::CudaUnavailable` へ変換する（panic 回避ゲートは
+    /// `CudaDevice::new` 内部で完結する。`device.rs` 参照）。
+    fn device_handle(&self) -> Result<Arc<CudaDevice>, BackendError> {
+        context_cache::cached_device(self.ordinal)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))
     }
 
@@ -88,7 +97,7 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let ew = CudaElementwise::new(&device)
+        let ew = context_cache::cached_elementwise(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         let out = run(&ew, a_slice, b_slice)
             .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -110,7 +119,7 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let ew = CudaElementwise::new(&device)
+        let ew = context_cache::cached_elementwise(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         let out = run(&ew, a_slice)
             .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -172,7 +181,8 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let rmsnorm = CudaRmsNorm::new(&device).map_err(map_fused_kernel_init_error)?;
+        let rmsnorm = context_cache::cached_rmsnorm(self.ordinal, &device)
+            .map_err(map_fused_kernel_init_error)?;
         let out = rmsnorm
             .run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden)
             .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -219,7 +229,8 @@ impl CudaBackendOps {
         })?;
 
         let device = self.device_handle()?;
-        let softmax = CudaSoftmax::new(&device).map_err(map_fused_kernel_init_error)?;
+        let softmax = context_cache::cached_softmax(self.ordinal, &device)
+            .map_err(map_fused_kernel_init_error)?;
         let out = softmax
             .run_softmax_f32_raw(x_slice, std::f32::consts::LOG2_E, rows, cols)
             .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
@@ -245,7 +256,7 @@ pub(crate) enum GemmBiasActRoute {
     ComposedFallback,
 }
 
-/// [`CudaRmsNorm::new`]／[`CudaSoftmax::new`] の初期化失敗を
+/// [`crate::rmsnorm::CudaRmsNorm::new`]／[`crate::softmax::CudaSoftmax::new`] の初期化失敗を
 /// `BackendError` へ変換する（純関数。実機なしで単体テスト可能）。
 ///
 /// `CudaError::DriverUnavailable`／`NvrtcUnavailable` のみを環境不在
@@ -265,7 +276,7 @@ pub(crate) enum GemmBiasActRoute {
 ///
 /// イシュー #594: 判定ロジックは RMSNorm 固有ではなく `CudaError` の
 /// variant 分岐のみに依るため、`run_fused` の softmax ルーティング
-/// （[`CudaSoftmax::new`] の初期化失敗変換）でもそのまま共用する（実装
+/// （[`crate::softmax::CudaSoftmax::new`] の初期化失敗変換）でもそのまま共用する（実装
 /// 計画 §3.4「初期化エラー変換は共通化」。旧名 `map_rmsnorm_init_error`
 /// から RMSNorm 専用でない名前へ改名した）。
 fn map_fused_kernel_init_error(err: CudaError) -> BackendError {
@@ -314,7 +325,7 @@ impl BackendOps for CudaBackendOps {
             .ok_or_else(|| BackendError::KernelLaunchFailed("gemm: rhs not contiguous".into()))?;
 
         let device = self.device_handle()?;
-        let gemm = CudaGemm::new(&device)
+        let gemm = context_cache::cached_gemm(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
         let out = gemm
             .run_tiled_f32(a_slice, b_slice, m, n, k)
@@ -413,7 +424,7 @@ impl BackendOps for CudaBackendOps {
                 };
 
                 let device = self.device_handle()?;
-                let gemm = CudaGemm::new(&device)
+                let gemm = context_cache::cached_gemm(self.ordinal, &device)
                     .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
                 let out = gemm
                     .run_tiled_bias_act_f32(a_slice, b_slice, bias_slice, act_relu, m, n, k)

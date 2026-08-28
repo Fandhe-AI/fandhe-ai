@@ -245,12 +245,15 @@ impl CudaDevice {
 /// §4.4 `BackendError::CudaUnavailable` のコメント参照）。
 ///
 /// `enumerate`／`select` の呼び出しごとに [`CudaDevice::device_count`]／
-/// [`CudaDevice::new`] を経由してプローブする。両者は内部で必ず
+/// [`Self::probe`]（内部で `crate::context_cache::cached_device` を経由。
+/// イシュー #929）を経由してプローブする。いずれも内部で必ず
 /// `is_culib_present()` の panic 回避ゲートを通すため（モジュール冒頭
-/// コメント参照）、本 provider が `CudaContext` を直接呼ぶことはない
-/// （本イシューのスコープはデバイス検出・プロパティ取得のみであり、
-/// コンテキストの常駐・再利用は `BackendOps` 結線を担う TASK-1.9c
-/// （#46）に引き継ぐ）。
+/// コメント参照）、本 provider が `CudaContext` を直接呼ぶことはない。
+/// コンテキストの常駐・再利用（`ordinal` キーのプロセス内キャッシュ）は
+/// `crate::context_cache` が一元的に担い、`BackendOps` 結線
+/// （`ops::CudaBackendOps`）も同じキャッシュを参照するため、2 回目以降の
+/// `select`（`facade::tape_for(Device::Cuda(_))` の存在検証経路）は
+/// `CudaContext::new` を再実行しない。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CudaDeviceProvider;
 
@@ -267,8 +270,17 @@ impl CudaDeviceProvider {
     /// をそのまま呼び出し元へ伝播し、`CudaUnavailable`／
     /// `DeviceUnavailable` への変換は呼び出し元（`enumerate`／`select`）
     /// が文脈に応じて行う。
+    ///
+    /// イシュー #929: `CudaDevice::new` を直接呼ばず
+    /// `crate::context_cache::cached_device` 経由にする。2 回目以降の
+    /// `select`（`facade::tape_for(Device::Cuda(_))` の存在検証経路）が
+    /// `CudaContext::new` を再実行しないため（受け入れ条件 1）。失敗は
+    /// キャッシュされず毎回再試行される（`context_cache` モジュール冒頭
+    /// コメント「fail-fast 契約」参照）ため、本関数の fail-fast セマン
+    /// ティクス（範囲外 ordinal・driver 不在の区別。`enumerate`/`select`
+    /// ドキュメンテーションコメント参照）は変更しない。
     fn probe(ordinal: usize) -> Result<DeviceInfo, CudaError> {
-        let device = CudaDevice::new(ordinal)?;
+        let device = crate::context_cache::cached_device(ordinal)?;
         let total_memory_bytes = device.total_memory_bytes();
         let compute_units = device.compute_units();
         Ok(DeviceInfo::new(

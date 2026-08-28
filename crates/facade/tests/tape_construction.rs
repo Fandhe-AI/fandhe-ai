@@ -104,3 +104,47 @@ fn tape_for_cuda_out_of_range_ordinal_returns_err() {
         "範囲外 ordinal（usize::MAX）は Err を返すはず"
     );
 }
+
+/// イシュー #929: `backend-cuda` のプロセス内キャッシュ
+/// （`crate::context_cache`）はミス（driver 不在・範囲外 ordinal 等）を
+/// キャッシュしない契約であるため、`tape_for(Device::Cuda(_))` を
+/// 連続して複数回呼んでも毎回同じ型付きエラーを返し続ける（panic
+/// しない・「一度失敗したら以後は成功扱いにされる」等の誤ったキャッシュ
+/// 挙動が紛れ込んでいないことを固定する。CUDA driver 搭載環境では
+/// 毎回 `Ok` になることを検証する対称のケースも合わせて確認する）。
+#[test]
+fn tape_for_cuda_repeated_calls_are_fail_fast_and_do_not_cache_errors() {
+    const REPEATS: usize = 3;
+    let is_available = CudaDeviceProvider::new().is_available();
+
+    for attempt in 0..REPEATS {
+        let result = fandhe_ai::tape_for(Device::Cuda(0));
+        if is_available {
+            assert!(
+                result.is_ok(),
+                "CUDA driver 搭載環境では attempt={attempt} も成功するはず: {result:?}"
+            );
+        } else {
+            assert!(
+                result.is_err(),
+                "CUDA driver 非搭載環境では attempt={attempt} も失敗するはず"
+            );
+        }
+    }
+}
+
+/// [`tape_for_cuda_repeated_calls_are_fail_fast_and_do_not_cache_errors`]
+/// と対の範囲外 ordinal 版: `usize::MAX` は driver の有無によらず常に
+/// `Err` のはずで、連続呼び出しでも毎回 `Err` を返し続ける（エラーが
+/// キャッシュされて 2 回目以降だけ挙動が変わる、といった回帰がないこと
+/// を固定する）。
+#[test]
+fn tape_for_cuda_out_of_range_ordinal_repeated_calls_stay_err() {
+    for attempt in 0..3 {
+        let result = fandhe_ai::tape_for(Device::Cuda(usize::MAX));
+        assert!(
+            result.is_err(),
+            "attempt={attempt}: 範囲外 ordinal（usize::MAX）は毎回 Err を返すはず"
+        );
+    }
+}

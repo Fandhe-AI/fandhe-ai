@@ -57,7 +57,13 @@
 //! - `Device::Cpu` → `CpuBackendOps::new()`（常に利用可能なため検証不要）。
 //! - `Device::Cuda(ordinal)` → `CudaDeviceProvider::select` で存在検証
 //!   （driver 不在・範囲外 ordinal は [`BackendError`] を返す fail-fast）
-//!   したうえで `CudaBackendOps::new(ordinal)` を構築する。
+//!   したうえで `CudaBackendOps::new(ordinal)` を構築する。イシュー #929:
+//!   `CudaBackendOps` の各演算メソッドは `backend-cuda` 側のプロセス内
+//!   キャッシュ（`crate::context_cache`。`ordinal` キー）を経由するため、
+//!   同一プロセス内で 2 回目以降に `tape_for(Device::Cuda(_))` を呼んでも
+//!   `CudaContext` 生成・NVRTC コンパイルは再実行されない。`resolve_ops`
+//!   自体（この関数）は毎回新しい `CudaBackendOps`／`Tape` を構築する
+//!   軽量な値であり、重い初期化コストはバックエンド側キャッシュが吸収する。
 //! - `Device::Metal`（`cfg(target_os = "macos")`）→ `MetalDeviceProvider::select`
 //!   で検証したうえで `MetalBackendOps::new()` を構築する。
 //!

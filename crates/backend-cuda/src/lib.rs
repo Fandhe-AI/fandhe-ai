@@ -249,7 +249,23 @@
 //! （`kernels_mma_tf32.rs` 冒頭ドキュメンテーションコメント「位置づけ・
 //! 非結線」参照）。数値一致回帰・parity 非後退契約・本番採否判断は後続
 //! イシュー #802 のスコープ。
+//!
+//! イシュー #929 で [`context_cache`]（プロセス内キャッシュ）を追加した。
+//! 上記の「固定ソースの一回コンパイル経路はインスタンス構築時 1 回のみの
+//! コンパイルであり結線しない」判断（Phase C-4・イシュー #511 時点）は
+//! shape 特化コンパイルキャッシュ（`module_cache.rs`）のスコープ判断
+//! だったが、`ops::CudaBackendOps` はそのインスタンス自体を演算呼び出し
+//! ごとに都度構築していたため、2 回目以降の呼び出しでも `CudaContext`
+//! 生成・NVRTC コンパイルが繰り返し発生していた（`scripts/bench/
+//! framework-compare/results/summary.md:177` 実測: サイズ非依存の固定
+//! オーバーヘッド約 440〜460ms）。`context_cache` は `ordinal` をキーに
+//! `CudaDevice`／`CudaGemm`／`CudaElementwise`／`CudaRmsNorm`／
+//! `CudaSoftmax` をプロセスワイドに常駐させ、`ops.rs`（`device_handle`・
+//! 各演算メソッド）・`device.rs`（`CudaDeviceProvider::probe`）の両方から
+//! 参照する。カーネルソース・許容誤差・境界検査には触れない（構造的に
+//! 数値一致契約は不変）。
 
+mod context_cache;
 pub mod device;
 mod elementwise;
 mod error;
