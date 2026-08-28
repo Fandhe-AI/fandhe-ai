@@ -1,6 +1,8 @@
 # framework-compare: Rust ML フレームワーク横並びベンチマーク
 
-fandhe-ai を candle・Burn と同一プロトコルで横並び比較する独立ベンチ workspace。
+fandhe-ai を candle・Burn と同一プロトコルで横並び比較する独立ベンチ workspace
+（プロトコル同一性の範囲・例外は「計測プロトコル」節の `--mode fresh|reuse` の説明を参照。
+Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 `scripts/bench/oss-gemm-compare/`（イシュー #755。許容依存第 9 区分）と同じく**本体 workspace 外の独立 Cargo workspace** であり、ルート `Cargo.toml` / `Cargo.lock` には一切現れない。本 workspace の `Cargo.lock` は比較対象として依存禁止リストのクレート（`candle-core`・`burn` と、その推移的依存の `cubecl`・`ndarray`・`tch` 等）を**意図的に含む**ため、`scripts/check-forbidden-deps.sh lock-all` は禁止リスト grep の代わりに専用の fail-closed 契約検査（Cargo.lock の存在・独自 `[workspace]` 宣言・承認済みピンのドリフト検出）を適用する（`.claude/rules/deps-policy.md`「第 9 区分」の適用範囲拡張、および `docs/framework-compare-harness-decision.md` を参照）。依存監査（advisories / bans / licenses / sources）は専用の `deny.toml` を対象に CI（`deps-forbidden` ジョブ）で毎回実行される。
 
 実測記録（`results/summary.md`・raw JSONL）は「実行資産は scripts/bench・記録は docs/perf」の区分の例外として、再現に必要な生成物一式を本ディレクトリ配下で管理する（`docs/perf/` の実測記録群と同趣旨のコミット済み一次データ）。
@@ -38,16 +40,31 @@ fandhe-ai を candle・Burn と同一プロトコルで横並び比較する独�
   この条件は fandhe-ai の CUDA で tape ごとの初期化コスト約 440〜460 ms を毎回計測区間に含める。`results/summary.md` 環境 2 の備考を参照）
 - 重み初期化: candle / Burn は共有 RNG（同一シード）で同一の重み。fandhe-ai の `Sequential::add_linear` は
   内部初期化（シード指定）のため重みの値自体は異なるが、実行時間には影響しない（同一アーキテクチャ・同一入力）
+- **`fresh` の計測範囲は fandhe-ai と candle / Burn とで非対称（イシュー #925 レビュー指摘）**:
+  「計測ごとに新しい計算グラフを作る」は fandhe-ai の `tape()` / `tape_for(Device::…)` にのみ適用され、
+  デバイス・入力テンソルの構築を毎回計測区間内で行う。一方 candle（`bench-candle/src/main.rs`）・
+  Burn（`bench-burn/src/main.rs`）は `Device` と入力 `Tensor` をループ外（計測開始前）で 1 回だけ構築し、
+  計測区間は `matmul` + ホスト実体化のみを含む。したがって CPU（`tape()` はデバイス選択コストを持たない）
+  では実質的に同一プロトコルとみなせるが、**Metal / CUDA では `fresh` の GFLOP/s はフレームワーク間で
+  プロトコル同一とは言えない**（fandhe-ai 側にのみ毎回のデバイス/tape 構築コストが乗る）。上記 GEMM
+  比較表（Metal・CUDA 環境 2）の fandhe-ai 行はこの固定オーバーヘッドを含んだ数値であり、GEMM カーネル
+  単体の速度差として解釈しない。フレームワーク間でプロトコルが完全一致する比較には次の `--mode reuse`
+  （`gemm` タスクのみ）を使う
 
 ### `--mode fresh|reuse`（イシュー #925。デバイス/tape 再利用モード）
 
-- 既定は `fresh`（上記「計測ごとに新しい計算グラフを作る」プロトコルと完全に同一。既存 JSONL・集計表との互換維持）
+- 既定は `fresh`（上記「計測ごとに新しい計算グラフを作る」プロトコルと完全に同一。既存 JSONL・集計表との互換維持。
+  ただし上記のとおり Metal / CUDA では candle / Burn とプロトコル同一ではない点に注意）
 - `reuse`（`bench-fandhe` の `gemm` タスクのみ対応。`bench-candle` / `bench-burn` は
   デバイス再利用が API 上の既定設計のため対象外で MEASURE_ERROR を返す）:
   tape/デバイスを 1 回だけ構築し、その構築 + 葉 Var 登録 + 初回 matmul + ホスト実体化までの
   経過時間を `init_s`（JSONL のフィールド。初期化 1 回分のコスト）として分離記録したうえで、
   同一 tape 上で warmup 残り 19 回 → 計測 20 回を回し、`median_s`/`q1_s`/`q3_s` を
-  「カーネル実行時間」として記録する
+  「カーネル実行時間」として記録する。この計測区間（`matmul` + ホスト実体化のみ）は
+  candle / Burn の計測区間（デバイス・入力テンソルをループ外で構築済みの `matmul` +
+  ホスト実体化）と一致するため、**Metal / CUDA で fandhe-ai を candle / Burn とプロトコル
+  同一で GFLOP/s 比較したい場合は `reuse` モードの `median_s`/GFLOP/s を用いる**（`fresh` の
+  GFLOP/s ではない）
 - **tape 上のノード蓄積に関する注意**: 葉 Var（A・B）は tape 上に 1 回だけ登録して使い回すが、
   matmul の結果ノードは呼ぶたびに tape へ蓄積される（N=2048 で約 16 MiB/回 × 40 回 ≒ 640 MiB。
   N=4096 でも約 2.6 GiB で対象 GPU メモリ内に収まる。長時間・大サイズの reuse 計測では

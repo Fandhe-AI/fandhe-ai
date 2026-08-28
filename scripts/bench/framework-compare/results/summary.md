@@ -57,6 +57,14 @@
 | 4096 | candle | 23.635 ms | 23.416 ms | 23.911 ms | 5815.1 |
 | 4096 | burn | 13.194 ms | 13.171 ms | 13.241 ms | 10416.9 |
 
+**Metal 表のプロトコル注意（イシュー #925 レビュー指摘）**: 上表の fandhe-ai 行は `--mode fresh`
+（既定）の計測であり、`tape_for(Device::Metal)` をループの各回内で再構築する。candle
+（`Device::new_metal(0)`）・Burn はデバイス・入力テンソルをループ外で 1 回だけ構築し `matmul` +
+ホスト実体化のみを計測するため、fandhe-ai 行にのみ毎回のデバイス/tape 構築コストが乗る。
+GEMM カーネル単体の速度としてではなく、fandhe-ai の「計測ごとに新規グラフを作る」運用コストを
+含む数値として解釈する（`README.md` 計測プロトコル節参照。プロトコル完全一致の比較は
+`--mode reuse` の `gemm` タスク。環境 3 の (a')「GEMM — CUDA（fresh vs reuse）」参照）。
+
 ## (b) MLP 学習（784→256→10、ReLU、バッチ 64、MSE、SGD lr=0.01、1 ステップあたり時間）
 
 | デバイス | フレームワーク | 中央値 | Q1 | Q3 |
@@ -78,6 +86,12 @@
 | metal | fandhe-ai | 24.125 ms | 22.486 ms | 25.086 ms | 41 |
 | metal | candle | 251.3 µs | 244.9 µs | 270.3 µs | 3979 |
 | metal | burn | 1.503 ms | 1.500 ms | 1.507 ms | 665 |
+
+**(b)/(c) Metal 行のプロトコル注意**: GEMM 表と同様、fandhe-ai の学習・推論は毎ステップ / 毎回
+新規 `tape_for(Device::Metal)` を構築する一方、candle / Burn はデバイスを使い回すため、上記
+Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが乗っている（`README.md` 計測
+プロトコル節参照。`reuse` モードは `gemm` タスクのみ対応のため train/infer にはこの分離手段が
+現時点でない。イシュー #925 のスコープ外）。
 
 ## 計測不可・未計測項目
 
