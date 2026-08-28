@@ -33,27 +33,31 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
   公開面であることは区別する
 - `fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`（composition root。
   `crates/facade/src/lib.rs`）、`fandhe_ai::compat::{array, Sequential}`
-  （本文書が定める compat 公開面。1〜2 節）、**`fandhe_ai::optim`**
-  （`crates/facade/src/optim.rs`。イシュー #961・親 #960・PR #972）:
-  `Sgd`／`SgdConfig`／`AdamW`／`AdamWConfig`／`clip_grad_norm`／
-  `global_grad_norm`／`ClipGradResult`／`LrScheduler`／`ConstantLr`／
-  `StepLr` の素の再エクスポート（`docs/facade-optimizer-promotion-decision.md`
-  §4 案 A）。`Tape`／`Var`／`BackendOps` に依存しない値型・純関数のみで
-  REQ-12 と矛盾せず、`crates/facade/tests/api_surface.rs` の optim
-  固有検査で固定される。加えて、`fandhe_ai::DeviceParamStore`／
+  （本文書が定める compat 公開面。1〜2 節）、`fandhe_ai::DeviceParamStore`／
   `Tape::step_device_param_store`（デバイス常駐更新。#954。クレート
-  root からの再エクスポート。`crates/facade/src/lib.rs`）も利用者が使う
-  ことを想定した入口である。`SgdConfig` はクレート root からも
-  再エクスポートされる同一型（`lib.rs` コメント）であり、
-  `DeviceParamStore`／`Tape::step_device_param_store` はデバイス常駐
-  更新という別経路のため `optim` モジュールには含めず root 公開のまま
-  である（`optim.rs` モジュール doc「デバイス常駐更新との違い」と整合）。
-  以上の **4 つ（`tape()`系・`compat`・`optim`・デバイス常駐更新経路）が、
-  利用者が使うことを想定する唯一の入口である**
-- **`fandhe_ai::optim` の位置づけ（イシュー #962）**: optimizer は
-  numpy／Keras 慣習のラッパーではないため **1 節（compat 層の対象範囲）は
-  変更しない**。facade 素の公開契約（`tape()`／再エクスポート値型と同じ層）
-  への追加である（`docs/facade-optimizer-promotion-decision.md` §6 の結論）。
+  root からの再エクスポート。`crates/facade/src/lib.rs`）が、**正本 spec
+  側の記述（REQ-9 の 2026-08-08 追記）と現時点で整合する確定済みの入口**
+  である。これに加え、**`fandhe_ai::optim`**（`crates/facade/src/optim.rs`。
+  イシュー #961・親 #960・PR #972）: `Sgd`／`SgdConfig`／`AdamW`／
+  `AdamWConfig`／`clip_grad_norm`／`global_grad_norm`／`ClipGradResult`／
+  `LrScheduler`／`ConstantLr`／`StepLr` の素の再エクスポート
+  （`docs/facade-optimizer-promotion-decision.md` §4 案 A）。
+  `Tape`／`Var`／`BackendOps` に依存しない値型・純関数のみで REQ-12 と
+  矛盾せず、`crates/facade/tests/api_surface.rs` の optim 固有検査で
+  固定されるが、**正本 spec 側の改定が未了のため、下記の位置づけの
+  とおり本節では確定入口ではなく移行予定の入口として扱う**（`SgdConfig`
+  はクレート root からも再エクスポートされる同一型〈`lib.rs` コメント〉
+  であり、`DeviceParamStore`／`Tape::step_device_param_store` はデバイス
+  常駐更新という別経路のため `optim` モジュールには含めず root 公開のまま
+  である。`optim.rs` モジュール doc「デバイス常駐更新との違い」と整合）。
+  以上の **3 つ（`tape()`系・`compat`・デバイス常駐更新経路）が確定済みの
+  入口であり、`fandhe_ai::optim` は次項のとおり spec 改定完了までは
+  移行予定の入口として区別する**
+- **`fandhe_ai::optim` の位置づけ（イシュー #962・移行予定・確定入口では
+  ない）**: optimizer は numpy／Keras 慣習のラッパーではないため **1 節
+  （compat 層の対象範囲）は変更しない**。facade 素の公開契約（`tape()`／
+  再エクスポート値型と同じ層）への追加を**提案**するものである
+  （`docs/facade-optimizer-promotion-decision.md` §6 の結論）。
   **5 節手続きの充足**: 経路 2（本リポジトリのユーザー承認を得たうえでの
   Issue 起票・本文書の更新）を採用した。根拠は同文書 §8 の後続提案に対する
   ユーザー承認を受けて起票された親 #960 ツリー（#961〜#963。2026-08-28）で
@@ -62,8 +66,11 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
   明文化〉に `fandhe_ai::optim` を入口の 1 つとして追記する改定）。
   `docs/spec/` は本リポで編集しないため spec リポ側の実改定は本イシュー
   対象外とし、別イシュー（spec リポ側）での対応をユーザーへ提案する。
-  **改定完了までの間、本節の記述が spec 側追記に先行している状態**である
-  ことに留意する
+  **正本 spec 側の改定が完了し submodule ポインタが更新されるまでの間、
+  `fandhe_ai::optim` は本文書上「利用者が使うことを想定した入口」として
+  案内はするが、1 節冒頭の確定済み入口（`tape()`系・`compat`・デバイス
+  常駐更新経路）と同列の確定済み契約とは扱わない**。改定完了後、この
+  節を確定入口の列挙（前項）へ統合し、本注記を削除する
 - サポート境界の変更（内部クレートの直接利用をサポート対象に含める等）は
   正本 spec リポジトリ側での REQ-9／REQ-12 受け入れ基準の改定を要する
   （5 節「範囲拡張の手続き」と同じ手続き。本節の `fandhe_ai::optim` 追記は
