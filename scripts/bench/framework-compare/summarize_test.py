@@ -169,9 +169,38 @@ class ParityStatusTests(unittest.TestCase):
 
     def test_boundary_fail_count_equals_zero_total_positive_is_ok(self):
         # 値域検証を追加しても、正当な "ok" ケース（fail_count=0,
-        # total>0）が誤って fail 化されない非後退確認。
-        row = _with_parity(_base_row(), total=1, fail_count=0)
+        # total>0 かつ size*size と一致）が誤って fail 化されない非後退確認。
+        # size=1 の正方行列は要素数 1 のため total=1 が正しい期待値になる
+        # （size のデフォルト値 256 のままだと total=1 は期待要素数
+        # 65536 と不一致になり、期待要素数検証〈イシュー #970 PR #978
+        # codex-review P0 指摘2〉により意図的に "fail" 化される）。
+        row = _with_parity(_base_row(size=1), total=1, fail_count=0)
         self.assertEqual(summarize.parity_status(row), "ok")
+
+    def test_total_mismatched_with_size_squared_is_fail(self):
+        # イシュー #970 PR #978 codex-review P0 指摘2: parity_total が
+        # GEMM の期待要素数（size*size）と一致しない場合、たとえ
+        # parity_total>0・parity_fail_count<=total であっても「ok」に
+        # してはならない（破損・改変 JSONL が結果の一部しか検証していない
+        # のを見逃さない）。
+        row = _with_parity(_base_row(size=256), total=1, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_total_matches_size_squared_is_ok(self):
+        # 上記の対比: size*size と完全一致する total は "ok" のまま。
+        row = _with_parity(_base_row(size=256), total=65536, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "ok")
+
+    def test_non_integer_total_is_fail(self):
+        # parity_total が整数値でない（例: 65536.5）場合は不正入力として
+        # fail-closed で "fail" にする（イシュー #970 PR #978 codex-review
+        # P0 指摘2: fail_count/total の整数性検証）。
+        row = _with_parity(_base_row(size=256), total=65536.5, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_non_integer_fail_count_is_fail(self):
+        row = _with_parity(_base_row(size=256), total=65536, fail_count=0.5)
+        self.assertEqual(summarize.parity_status(row), "fail")
 
 
 class GemmParityHelpersTests(unittest.TestCase):

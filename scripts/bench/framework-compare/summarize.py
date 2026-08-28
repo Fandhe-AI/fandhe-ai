@@ -314,13 +314,27 @@ def parity_status(row):
       センチネル）」を区別できないため、まずキーの存在を検査する
       （欠損＝旧形式・未検証と、存在するが不正＝無効を混同しない）。
     - "fail": `parity_fail_count` キーは存在するが、4 フィールドのいずれか
-      の型が不正（数値でない・`null`・非有限）、値域が不正（`parity_total`
-      が 0 以下、`parity_fail_count` が負または `parity_total` 超過、誤差
-      2 項が負）、または `parity_fail_count > 0`。壊れた入力を黙って
-      「一致」扱いにしない（fail-closed。イシュー #970 PR #978 codex-review
-      P0 指摘: 型検査のみでは `parity_fail_count=-1`・`parity_total=0`・
-      負の誤差値を伴う外部 JSONL が "ok" 判定へ通ってしまっていた）。
-    - "ok": 4 フィールドすべてが妥当な数値・値域で `parity_fail_count == 0`。
+      の型が不正（数値でない・`null`・非有限）、`parity_total`/
+      `parity_fail_count` が整数値でない、値域が不正（`parity_total` が
+      0 以下、`parity_fail_count` が負または `parity_total` 超過、誤差
+      2 項が負）、`parity_total` が GEMM の期待要素数（`size * size`）と
+      不一致、または `parity_fail_count > 0`。壊れた入力を黙って「一致」
+      扱いにしない（fail-closed。イシュー #970 PR #978 codex-review P0
+      指摘1: 型検査のみでは `parity_fail_count=-1`・`parity_total=0`・
+      負の誤差値を伴う外部 JSONL が "ok" 判定へ通ってしまっていた。P0
+      指摘2: `parity_total` の値そのものは検査していなかったため、
+      `parity_total=1, parity_fail_count=0` のように GEMM 結果のごく
+      一部しか検証していない破損・改変 JSONL でも "ok" 判定になり
+      GFLOP/s を有効値として表示してしまっていた。`size * size` との
+      完全一致を要求することで、検証件数の水増し・過小を fail-closed に
+      検出する。size 自体は本ツールが自ファイルから読んだ `row["size"]`
+      であり JSONL の parity_* フィールドとは独立した信頼できる値のため、
+      比較の基準として使える。Python の int は多倍長のためオーバーフロー
+      しないが、`size` 側が数値型で非負整数であることも併せて検査する
+      （`size` が不正な外部入力であれば期待要素数を算出できず、
+      その場合も fail-closed で "fail" とする）。
+    - "ok": 4 フィールドすべてが妥当な数値・整数値・値域で、`parity_total`
+      が `size * size` と完全一致し、`parity_fail_count == 0`。
     """
     if "parity_fail_count" not in row:
         return "unverified"
@@ -332,13 +346,29 @@ def parity_status(row):
         return "fail"
     if not _is_plain_number(max_abs) or not _is_plain_number(max_rel):
         return "fail"
-    # 値域検証（イシュー #970 PR #978 codex-review P0）: total は正、
+    # 整数性検証（イシュー #970 PR #978 codex-review P0 指摘2）: total・
+    # fail_count は要素数のカウントであり非整数値（例: 1.5）は不正入力。
+    if float(total) != int(total) or float(fail_count) != int(fail_count):
+        return "fail"
+    total = int(total)
+    fail_count = int(fail_count)
+    # 値域検証（イシュー #970 PR #978 codex-review P0 指摘1）: total は正、
     # fail_count は [0, total] の範囲、誤差 2 項は非負でなければならない。
     if total <= 0:
         return "fail"
     if fail_count < 0 or fail_count > total:
         return "fail"
     if max_abs < 0 or max_rel < 0:
+        return "fail"
+    # 期待要素数検証（イシュー #970 PR #978 codex-review P0 指摘2）: GEMM は
+    # size×size 要素の正方行列であるため、parity_total は size*size と
+    # 完全一致しなければならない。row["size"] は本ツールが自ファイルから
+    # 読んだ信頼できる値（JSONL の parity_* とは独立の情報源）。
+    size = row.get("size")
+    if not _is_plain_number(size) or float(size) != int(size) or int(size) < 0:
+        return "fail"
+    expected_total = int(size) * int(size)
+    if total != expected_total:
         return "fail"
     if fail_count > 0:
         return "fail"
