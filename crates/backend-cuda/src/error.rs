@@ -219,6 +219,20 @@ pub enum CudaError {
     /// 誤表示を避ける」方針。本 variant 上部の `InvalidRmsNormShape`
     /// ドキュメンテーションコメント参照）。
     InvalidSoftmaxShape { detail: String },
+
+    /// プロセス内キャッシュ（`context_cache.rs`。イシュー #929）が
+    /// [`crate::device::CudaDevice`]・[`crate::gemm::CudaGemm`]・
+    /// [`crate::elementwise::CudaElementwise`]・[`crate::rmsnorm::CudaRmsNorm`]・
+    /// [`crate::softmax::CudaSoftmax`] を保持する `Mutex` が poison していた
+    /// （別スレッドがロック保持中に panic した場合にのみ発生。本クレートの
+    /// 臨界区間自体は `unwrap`/`expect` を持たないため通常到達しない）。
+    ///
+    /// `ModuleCacheUnavailable`（`module_cache.rs`）と同じ変換方針だが、
+    /// 対象が異なる別キャッシュのため独立 variant とする（`Display`
+    /// メッセージの誤表示を避ける。`InvalidElementwiseShape` 等と同じ
+    /// 「専用 variant」方針）。`.claude/rules/coding-rust.md`「本番経路で
+    /// `unwrap()`/`expect()` を使わない」に従い panic させない。
+    ContextCacheUnavailable { detail: String },
 }
 
 impl fmt::Display for CudaError {
@@ -284,6 +298,9 @@ impl fmt::Display for CudaError {
             }
             CudaError::InvalidSoftmaxShape { detail } => {
                 write!(f, "invalid softmax shape/argument: {detail}")
+            }
+            CudaError::ContextCacheUnavailable { detail } => {
+                write!(f, "CUDA context/kernel-suite cache unavailable: {detail}")
             }
         }
     }
