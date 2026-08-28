@@ -39,7 +39,9 @@
 //! `?` 早期 return に合流・WMMA TF32 基本/opt/staged の 3 本は失敗を
 //! `Option` へ退避するフォールバック方式。`gemm.rs::CudaGemm::new`
 //! ドキュメンテーションコメント参照）と全く同じソース・関数名の組を
-//! ここでも使う（[`KERNEL_SPECS`]）。DGX Spark GB10（sm_121・Blackwell
+//! ここでも使う（[`crate::gemm::kernel_specs`]。本番側と本ファイルが
+//! 手作業複製で乖離しないよう、`gemm.rs` 側の単一の真実源をそのまま
+//! 呼び出す。Review #945 P2 指摘）。DGX Spark GB10（sm_121・Blackwell
 //! 系。compute capability 8.0 以上）を計測対象実機として想定し、WMMA TF32
 //! 3 本もコンパイル成功を前提とする（本番同様の非致命扱いはしない。実機
 //! 到達不能なローカル環境では `#[ignore]` によりこの前提の是非自体が
@@ -110,9 +112,7 @@ use fandhe_ai_tensor_core::{BackendOps, Tensor};
 use bench_harness::{Quartiles, median_q1_q3, rng::Xorshift64Star};
 
 use crate::device::CudaDevice;
-use crate::gemm::CudaGemm;
-use crate::kernels;
-use crate::kernels_wmma_opt;
+use crate::gemm::{CudaGemm, kernel_specs};
 use crate::nvrtc::compile_ptx;
 use crate::ops::CudaBackendOps;
 
@@ -126,35 +126,6 @@ const WARMUP_TRIALS: usize = 3;
 /// 5 回計測の中央値を採用し」の下限 5 を超える 10 回とし、Q1/Q3 の分散も
 /// より安定させる）。
 const MEASURED_TRIALS: usize = 10;
-
-/// `gemm::CudaGemm::new` がコンパイル・ロードする 8 カーネルの
-/// `(診断用ラベル, NVRTC ソース, ロードする関数名)` 組。順序・ソース・
-/// 関数名は `gemm.rs::CudaGemm::new` 本体と完全に一致させる（本ファイル
-/// 冒頭「8 カーネルの内訳」参照）。
-fn kernel_specs() -> [(&'static str, &'static str, &'static str); 8] {
-    [
-        ("naive_f32", kernels::NAIVE_F32, "gemm_naive_f32"),
-        ("naive_f16", kernels::NAIVE_F16, "gemm_naive_f16"),
-        ("tiled_f32", kernels::TILED_F32, "gemm_tiled_f32"),
-        ("tiled_f16", kernels::TILED_F16, "gemm_tiled_f16"),
-        (
-            "tiled_bias_act_f32",
-            kernels::TILED_BIAS_ACT_F32,
-            "gemm_tiled_bias_act_f32",
-        ),
-        ("wmma_tf32", kernels::WMMA_TF32_F32, "gemm_wmma_tf32"),
-        (
-            "wmma_tf32_opt",
-            kernels_wmma_opt::wmma_tf32_f32_opt_source(),
-            "gemm_wmma_tf32_opt",
-        ),
-        (
-            "wmma_tf32_staged",
-            kernels_wmma_opt::wmma_tf32_f32_staged_source(),
-            "gemm_wmma_tf32_staged",
-        ),
-    ]
-}
 
 /// 決定的シードで `n x n` の f32 正方行列 2 枚（A・B）を生成する
 /// （`jit_cache_bench_tests::gen_ab` と同じ「決定的シード PRNG」方針。
