@@ -54,9 +54,15 @@ candle／Burn はデバイス・入力テンソルをループ外で 1 回だけ
 では 46.415 ms 対 23.635 ms（差 約 22.8 ms）であり、固定費 5 ms を差し引いても
 約 17.8 ms の差が残る。したがって**固定費は N=256〜512 のギャップの大半を説明する
 一方、N=4096（本イシュー表題の「大サイズ」）のギャップは固定費だけでは説明できず、
-§2.2・§2.3 の要因が主要因である**。
+§2.2・§2.3 の要因が主要因候補である**。ただし §2.2（転送コスト）・§2.3（カーネル
+本体差）とも本 doc 執筆時点（Linux worktree）では寄与分を分離した実測値を持たない
+仮説段階の分解であり、「主要因」と確定させるには §5.2「gemm_bench」改善前後比較・
+§5.3「gemm_f32_prepared_bench」による転送コスト分離実測（いずれも Mac 実機。
+現状 `--未計測--`）が完了し、残差 約 17.8 ms のうち転送コスト起因分とカーネル本体
+起因分の内訳が定量的に切り分けられて初めて確定する。本 PR の時点では確定ではなく
+候補の提示に留める。
 
-### 2.2 計測境界の非対称
+### 2.2 計測境界の非対称（主要因候補・実測未確定）
 
 `scripts/bench/framework-compare/bench-fandhe/src/main.rs` の GEMM 計測窓は毎
 イテレーションで A/B のホスト→デバイスアップロード（N=4096・f32 正方で
@@ -73,7 +79,7 @@ end-to-end、P7: 資源再利用のみ）はいずれも転送・バッファ確
 本 doc 執筆時点（Linux worktree）では定量化できない実測待ち事項である（§5 手順
 「gemm_f32_prepared_bench」参照）。
 
-### 2.3 カーネル本体差
+### 2.3 カーネル本体差（主要因候補・実測未確定）
 
 `docs/perf/metal-gemm-bottleneck-diagnosis.md`（#487）の解析値は、staged タイルの
 arithmetic intensity が size に依らずほぼ一定（15.06〜15.88 FLOP/byte。同 doc
@@ -151,15 +157,34 @@ Q1/Q3 を記録する（TASK-8.1 プロトコル・`.claude/rules/coding-rust.md
 ### 5.1 #930/#948 適用後の framework-compare 再計測（最優先）
 
 `fandhe-ai = "=0.3.0"`（crates.io 公開版）を pin したままでは #930/#948 の効果が
-現れない（§2.1）。再計測には以下いずれかが必要:
+現れない（§2.1）。**正式な再計測手順（summary.md・framework-compare の正式結果として
+扱ってよい唯一の経路）は次のみ**:
 
-1. `fandhe-ai` の次期バージョン公開（#930/#948 を含む版）を待って pin を更新する、または
-2. 一時的に `scripts/bench/framework-compare/bench-fandhe/Cargo.toml` の
-   `fandhe-ai` 依存を path 依存へ切り替えて計測する（deps-policy.md の
-   `=x.y.z` 完全固定・独立 workspace 限定の条件を一時的に外れるため、計測後は
-   `=0.3.0` pin へ戻すか、この切り替え自体をユーザー承認事項として扱う）
+1. `fandhe-ai` の次期バージョン公開（#930/#948 を含む版）を待って
+   `scripts/bench/framework-compare/bench-fandhe/Cargo.toml` の pin（`=x.y.z`
+   完全固定・deps-policy.md 第 9 区分適用範囲拡張の条件）を更新し、通常どおり
+   `run_all.sh` で再計測して summary.md を更新する。
 
-再計測後、summary.md 「Metal」節と本 doc §2.1 の表を突き合わせ、N=256〜512 の
+**path 依存への一時切り替えは正式手順ではない**。deps-policy.md の
+`=x.y.z` 完全固定・独立 workspace 限定の条件を外れる暫定的な診断用途に限り、
+かつ次の条件をすべて満たす専用手順として扱う場合のみ許容する（本 doc は
+この専用手順自体を設計・実施するものではなく、必要になった時点でユーザー
+承認を得たうえで別途起票する。`.claude/rules/deps-policy.md`・
+`out-of-scope-tracking.md` 準拠）:
+
+- 事前にユーザー承認を得ること（deps-policy.md の完全固定条件の一時逸脱は
+  人間承認必須）
+- 計測結果は summary.md 本体・正式な再計測キャンペーン表へは書き込まず、
+  診断専用の別ファイル（例: `docs/perf/`配下の一時ノート）に分離して記録すること
+- 記録には計測時点の `fandhe-ai` 側 commit SHA・path 依存切り替えによる
+  working tree の dirty 状態の有無・上記ユーザー承認の参照（Issue/PR 番号）を
+  必ず添えること
+- 計測完了後は Cargo.toml の pin を `=0.3.0` へ確実に戻し、独立 workspace の
+  `Cargo.lock`・専用契約検査（`check_framework_compare`）が正常に通る状態へ
+  復元すること
+
+上記条件を満たさない切り替えは行わない。正式な再計測（手順 1）完了後、
+summary.md 「Metal」節と本 doc §2.1 の表を突き合わせ、N=256〜512 の
 ギャップが 5 ms 固定費分縮小したか（`--未計測--`）を記録する。
 
 ### 5.2 `gemm_bench`（`dispatch_auto`・転送込み境界）改善前後比較
