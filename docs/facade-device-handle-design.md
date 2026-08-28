@@ -91,18 +91,24 @@ elementwise: `ops.rs:100`・`ops.rs:122`、rmsnorm: `ops.rs:184`、softmax: `ops
   の変更禁止方針どおり）。したがって #929 適用後の fresh/reuse 再計測は現時点で
   未実施
 
-### 2.4 Metal 側は同型の対応が未着手
+### 2.4 Metal 側も同型の対応が完了済み（イシュー #930/#948）
 
-`crates/backend-metal/src/ops.rs`（`MetalBackendOps`）は現行も次のコメントを持つ:
+本文書の執筆後、イシュー #930（診断 #927 が特定した Metal 側の固定オーバーヘッド
+〈約 5 ms・N 非依存〉の常駐化）が PR #948 で実装され、docs/931 ブランチへも
+base 取り込み済みである。`crates/backend-metal/src/context_cache.rs` が
+`crates/backend-cuda/src/context_cache.rs`（#929/#946）と同型のプロセス内
+常駐キャッシュを提供し、`crates/backend-metal/src/ops.rs`（`MetalBackendOps`）は
+各メソッド呼び出しで `context_cache::cached_context`／`cached_gemm`／
+`cached_elementwise`／`cached_rmsnorm`／`cached_softmax` を経由するよう
+書き換わっている（`ops.rs` 冒頭コメント「イシュー #930 で常駐化完了」参照）。
 
-> `MetalContext`／`MetalGemm` は各メソッド呼び出し時に都度構築する
-> （`backend-cuda::ops::CudaBackendOps` と同じ設計判断。TASK-1.9b の
-> デバイスハンドル常駐が未着地のため）
-
-`crates/backend-cuda/src/context_cache.rs` に相当する Metal 側の常駐キャッシュは
-存在しない。したがって CUDA については 2.2 で解消済みの問題が、Metal については
-未解消のまま残っている（`Device::Metal` は ordinal を持たない単一 variant のため
-キーは不要だが、`OnceLock` 等でプロセス内シングルトン化する実装自体が未着手）。
+`Device::Metal` は ordinal を持たない単一 variant のため、CUDA 側の
+`HashMap<usize, Arc<T>>`（ordinal キー）とは異なり、`OnceLock<Mutex<Option<Arc<T>>>>`
+による型ごと単一エントリのプロセスワイドシングルトンで足りる設計となっている
+（`context_cache.rs` 冒頭コメント）。fail-fast 契約（ミス時の構築失敗はキャッシュ
+しない）・生存期間（プロセス生存期間中 evict されない）は CUDA 側と同じ方針を
+踏襲しており、したがって CUDA・Metal の両バックエンドで 2.2 の問題は解消済みと
+なった。
 
 `CpuBackendOps`（`crates/backend-cpu/src/ops.rs:25-32`）は unit struct で毎回の
 構築コストを持たず（GPU コンテキスト・NVRTC/シェーダコンパイルに相当する重い
@@ -123,7 +129,8 @@ elementwise: `ops.rs:100`・`ops.rs:122`、rmsnorm: `ops.rs:184`、softmax: `ops
   一切影響しない
 - **fail-fast 契約**: `context_cache.rs` は「ミス時の構築が失敗した場合、その `Err` は
   キャッシュへ格納しない」（同ファイル冒頭コメント「fail-fast 契約」節。
-  `get_or_build` 実装 `crates/backend-cuda/src/context_cache.rs:136-157`）。
+  `get_or_build` 実装 `crates/backend-cuda/src/context_cache.rs:136-157`。
+  `crates/backend-metal/src/context_cache.rs` も同じ契約を踏襲する）。
   この検証（driver 不在・範囲外 ordinal・NVRTC コンパイル失敗）が再実行されるのは
   **キャッシュミス時のみ**であり、driver が後から利用可能になった環境でも次回の
   ミス（＝未構築のスロットへの呼び出し）で `tape_for(Device::Cuda(_))` は正しく
@@ -157,7 +164,7 @@ Burn のデバイス型を関数引数として渡す構成）。これは「公
 | 案 | 内容 | 状態 |
 |----|------|------|
 | 案 A | facade に新規公開型（`DeviceHandle` 等）を追加し、利用者が明示的に生存期間を管理する | 不採用（本文書の判断） |
-| 案 B | バックエンド内部（`backend-cuda`）にプロセス内常駐キャッシュを持たせ、`tape_for` を透過的に高速化する | **CUDA について実装済み（#929/#946）。Metal は後続課題（§7）** |
+| 案 B | バックエンド内部（`backend-cuda`／`backend-metal`）にプロセス内常駐キャッシュを持たせ、`tape_for` を透過的に高速化する | **CUDA（#929/#946）・Metal（#930/#948）ともに実装済み** |
 | 案 C | A + B 併用 | 不採用（B のみで目的を達成できるため A を追加する必然性がない） |
 
 ### 採否判断
@@ -213,20 +220,17 @@ spec 側 Issue の起票提案は不要と判断する。
 うえで別イシューとして追跡することを提案する（`out-of-scope-tracking.md`
 方針。本エージェントはここでの Issue 起票は行わない）。
 
-1. **Metal 側の常駐キャッシュ実装**（§2.4）: `backend-metal` に
-   `context_cache.rs` 相当のプロセス内常駐キャッシュ（`MetalContext`／
-   `MetalGemm` 等）を追加し、`MetalBackendOps` を経由させる。`Device::Metal`
-   は ordinal を持たない単一 variant のため、キーなしのプロセス内シングルトン
-   （`OnceLock` 直接、または `ordinal` 相当の固定キー 1 個）で足りる設計と
-   なる見込み
-2. **CUDA 側の削減幅の実機再計測**: `docs/perf/cuda-tape-init-cost-diagnosis.md`
+**Metal 側の常駐キャッシュ実装**（旧 §2.4 の後続課題）は本文書の執筆後、
+イシュー #930・PR #948 で実装が完了したため、以下からは除外した（§2.4 参照）。
+
+1. **CUDA 側の削減幅の実機再計測**: `docs/perf/cuda-tape-init-cost-diagnosis.md`
    §6（フェーズ別内訳）、および `scripts/bench/framework-compare/` の
    fresh/reuse 比較（環境 3 相当）を #929/#946 適用後の状態で DGX Spark GB10
    にて再実測し、440〜460 ms 帯からの実際の削減幅を定量記録する（実機ツリー
    #408 への引き継ぎ事項）
-3. **Metal 側の固定オーバーヘッド診断**（イシュー #927。本文書執筆時点で
-   状態未確認）との統合: 1. の実装後、Metal の固定オーバーヘッドがどこまで
-   縮小するかを同様に定量記録する
+2. **Metal 側の削減幅の実機再計測**: イシュー #927（診断）・#930/#948（常駐化
+   実装）を踏まえ、Metal 実機で常駐化前後の固定オーバーヘッド（約 5 ms 帯）の
+   実際の削減幅を定量記録する（同じく実機ツリー #408 への引き継ぎ事項）
 
 ## 8. 出典・関連文書
 
@@ -236,6 +240,8 @@ spec 側 Issue の起票提案は不要と判断する。
   遅延初期化の機構診断）
 - `crates/backend-cuda/src/context_cache.rs`（#929/#946。実装本体）
 - `crates/backend-cuda/src/ops.rs`（`context_cache` への結線箇所）
+- `crates/backend-metal/src/context_cache.rs`（#930/#948。CUDA 側と同型の実装本体）
+- `crates/backend-metal/src/ops.rs`（`context_cache` への結線箇所）
 - `crates/facade/src/lib.rs`（公開面の設計・`Device::Cuda(_)` の構築規則コメント）
 - `docs/spec/04-requirements.md:249`・`docs/spec/05-tasks.md:316`（REQ-12「公開面を
   `Device` 識別子のみに限定する」記述）
