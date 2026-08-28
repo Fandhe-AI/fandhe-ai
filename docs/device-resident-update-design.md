@@ -141,17 +141,23 @@ fn sgd_step_device(
 ///    このメソッドを直接呼ぶ。これが本メソッド本来の主眼であり、下記の
 ///    既定実装がそのまま使われる。**ただし `weight`/`bias` が
 ///    `DeviceParamStore`（§3.3）由来の `DeviceBuffer` である場合、
-///    呼び出し元はこのメソッドを直接呼んではならず、必ず
-///    `DeviceParamStore::predict_resident`（§3.3c。P0 レビュー指摘の
-///    解消）を経由する契約とする**。理由: 本メソッドは `tensor-core`
-///    （`DeviceParamStore`・poisoned 状態を一切知らない層）に閉じた
-///    「渡された `DeviceBuffer` をそのまま downloaded 値として計算
-///    するだけ」の入口であり、`DeviceParamStore` 由来のバッファを
+///    呼び出し元は `Sequential::predict_resident`（§3.3c。P0 レビュー
+///    指摘の解消）を経由する契約とする**。理由: 本メソッドは
+///    `tensor-core`（`DeviceParamStore`・poisoned 状態を一切知らない層）
+///    に閉じた「渡された `DeviceBuffer` をそのまま downloaded 値として
+///    計算するだけ」の入口であり、`DeviceParamStore` 由来のバッファを
 ///    そのまま渡す直接呼び出しを許すと、§4.3 が定める poisoned 検査
-///    （`step`／`sync_to_host`／`forward_resident`）をこの経路だけが
-///    素通りしてしまう（`DeviceParamStore` に一切紐付かない、呼び出し
-///    元が独立に保持する `DeviceBuffer` に対する直接呼び出しは、
-///    poisoned という概念自体が存在しないため引き続き許可される）。
+///    （`step`／`sync_to_host`／`forward_resident`／`predict_resident`）
+///    をこの経路だけが素通りしてしまう（`DeviceParamStore` に一切
+///    紐付かない、呼び出し元が独立に保持する `DeviceBuffer` に対する
+///    直接呼び出しは、poisoned という概念自体が存在しないため引き続き
+///    許可される）。**この契約は §3.3c が確定するとおりコードレビュー
+///    規律ではなく型・可視性で構造的に強制する**（`DeviceParamStore` は
+///    `weight`/`bias`/`velocity_*` の `&DeviceBuffer` を返す公開
+///    アクセサを一切持たず、`DeviceParamStore::with_resident_buffers`
+///    〈poisoned 検査済みスコープ付きクロージャ。§3.3c〉の中でしか
+///    参照を得られないため、この関数を `DeviceParamStore` 由来のバッファ
+///    で直接呼び出すこと自体が構造的に不可能である）。
 /// 2. **`Tape` 追跡下の学習 forward**（`Sequential::forward_resident`。
 ///    §3.3b）は、**このメソッドを呼ばない**。VJP を成立させるには
 ///    `Op::MatMul`/`Op::Add` 登録経路（`Tape` を持つ `autodiff` 層でしか
@@ -318,36 +324,44 @@ pub trait MemoryOps {
 
 ```text
 match mem.device() {
-    Some(mem_device) if mem_device != self.device() => Err(BackendMismatch),
-    _ => { /* 一致、または mem 側が device() 未オーバーライド
-             （None）で検証不能。後者は §3.1 の docstring が要求する
-             「呼び出し元責任」を維持しつつ、既存呼び出し形態を破壊
-             しない fail-safe 側へ倒す（後述の残存リスク参照） */ }
+    Some(mem_device) if mem_device == self.device() => { /* 一致。続行 */ }
+    _ => return Err(BackendMismatch),
+    // `None`（mem 側が device() 未オーバーライド）も上記 `_` に含まれ、
+    // 「識別不能」を「一致」とは扱わず一致不明のまま fail-closed に
+    // 拒否する（P0 レビュー指摘の解消。旧稿はここを fail-safe 側へ
+    // 倒しており、外部 MemoryOps 実装が device() を未オーバーライドの
+    // まま渡された場合にバックエンド不一致検査そのものを回避できる
+    // fail-open な抜け道になっていた）。
 }
 ```
 
 新設する `BackendError::BackendMismatch`（variant 名は #935 で確定）は
 「`self`（`BackendOps`）と `mem`（`MemoryOps`）が異なるデバイスに
-属する」ことを呼び出し元が判別できるための型付きエラーとする。
-`Sequential::forward_resident`（§3.3a）・`DeviceParamStore::
-predict_resident`（§3.3c）についても、内部で `BackendOps` の各
+属する、または `mem` 側のバックエンドを識別できない」ことを呼び出し元が
+判別できるための型付きエラーとする。`Sequential::forward_resident`
+（§3.3a）・`Sequential::predict_resident`（§3.3c。`DeviceParamStore::
+with_resident_buffers` 経由）についても、内部で `BackendOps` の各
 メソッドへ委譲する前に同じ検査を適用する（`forward_resident` は
 `ops`／`mem` の両方を明示引数として受け取るため、同一箇所で検査
 できる）。
 
-**残存リスク（fail-closed の限界を明示する）**: `mem.device()` が
-`None`（外部実装が本メソッドをオーバーライドしない場合の既定）を
-返す組み合わせは、`self` と `mem` の不一致を検出できないまま通過する。
-これは「新設メソッドを安全に使うには `MemoryOps::device()` の
-オーバーライドが必要」という新しい前提を外部実装者へ課す代わりに、
-既存の外部 `impl MemoryOps for X`（本設計以前に存在する実装）を
-一切破壊しないための意図的なトレードオフである。内部 3 バックエンド
-（CPU／CUDA／Metal）はすべてオーバーライドするため、本リポジトリ内の
-呼び出し（`DeviceParamStore` 経由）では常に検査が機能する。この残存
-リスクは #935 の実装コメントおよび `docs/public-api-design.md` へ
-明記し、対象外として記録済みとする（`.claude/rules/out-of-scope-tracking.md`
-の追跡対象にはしない: これは実装不備ではなく、非破壊拡張の設計上の
-トレードオフとして本節が確定する契約であるため）。
+**`None` を一致扱いにしない契約の帰結（旧稿の残存リスクを解消する）**:
+本節が新設する `sgd_step_device`／`linear_forward_resident`／
+`forward_resident`／`predict_resident` はいずれも本設計で新設する
+メソッドであり、本設計以前にこれらを呼ぶ既存呼び出し元は存在しない。
+したがって「`mem.device()` が `None` の組み合わせを拒否する」への
+変更は、いかなる既存呼び出し形態も破壊しない（破壊されうるのは
+`impl MemoryOps for X` 自体のコンパイルであり、`device()` はデフォルト
+メソッドのままなので既存の外部実装は引き続きコンパイルできる。単に
+これらの新設メソッドを「安全に使う」ためには `MemoryOps::device()` の
+オーバーライドが必須になる、という新しい前提を課すのみである）。
+内部 3 バックエンド（CPU／CUDA／Metal）はすべてオーバーライドする
+（§3.2a 末尾）ため、本リポジトリ内の呼び出し（`DeviceParamStore` 経由）
+は常に検査が機能する。外部 `BackendOps`／`MemoryOps` 実装がこれらの
+新設メソッドを呼ぶには `device()` のオーバーライドが必須という制約は
+`docs/public-api-design.md` へ明記する（#935 の実装コメントにも同旨を
+残す）。これは「識別不能なら拒否する」という fail-closed 契約そのもの
+であり、対象外として記録すべき残存リスクではない。
 
 ### 3.3 段階設計: 「param + optimizer 状態のみ常駐、勾配は毎ステップ 1 回 upload」
 
@@ -698,70 +712,148 @@ VJP 用スナップショット・勾配、の 3 種が「毎ステップ／毎 
 転送」の対象となる）。
 
 ### 3.3c `DeviceParamStore` 経由の resident 推論エントリ（P0 レビュー
-指摘の解消: resident 推論経路が poisoned 検査を経由しない）
+指摘 2 件の解消: (1) resident 推論経路が poisoned 検査を経由しない、
+(2) poisoned 検査の迂回防止をコードレビュー規律のみに依存している。
+Cursor Bugbot 指摘の解消: resident 推論が活性化関数を実行しない）
 
-**指摘の核心**: §3.1 で確定した `BackendOps::linear_forward_resident` の
-「呼び出し元は 2 系統」記述は、系統 1（Tape 非依存の resident 推論）を
-「このメソッドを直接呼ぶ」とだけ定めており、`weight`/`bias` の
-`DeviceBuffer` を `DeviceParamStore` から読み出して渡す具体的な経路には
-一切触れていなかった。`DeviceParamStore` は `sgd_step_device` の
-実行時エラー（§4.3）により poisoned 状態へ遷移しうるが、poisoned 検査は
-`step`／`sync_to_host`／`forward_resident` の 3 箇所にしか課されておらず
-（旧稿の §4.3 最終箇条）、`linear_forward_resident` を直接呼ぶ resident
-推論はこの 3 箇所のどれにも該当しない。結果として、更新途中の実行時
-エラーで一部パラメータのみ更新された poisoned な `DeviceParamStore` から
-`weight`/`bias` の `DeviceBuffer` 参照を取り出し、それをそのまま
-`linear_forward_resident` へ渡せば、poisoned フラグを一切検査せずに
-破損混在状態のバッファで推論が実行できてしまう（fail-closed 契約・
-AGENTS.md「fail-closed の維持（P0）」への抵触）。
+**指摘の核心 (1)（poisoned 検査の迂回）**: §3.1 で確定した `BackendOps::
+linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 1
+（Tape 非依存の resident 推論）を「このメソッドを直接呼ぶ」とだけ定めて
+おり、`weight`/`bias` の `DeviceBuffer` を `DeviceParamStore` から
+読み出して渡す具体的な経路には一切触れていなかった。`DeviceParamStore`
+は `sgd_step_device` の実行時エラー（§4.3）により poisoned 状態へ
+遷移しうるが、poisoned 検査は `step`／`sync_to_host`／`forward_resident`
+の 3 箇所にしか課されておらず（旧稿の §4.3 最終箇条）、
+`linear_forward_resident` を直接呼ぶ resident 推論はこの 3 箇所の
+どれにも該当しない。結果として、更新途中の実行時エラーで一部パラメータ
+のみ更新された poisoned な `DeviceParamStore` から `weight`/`bias` の
+`DeviceBuffer` 参照を取り出し、それをそのまま `linear_forward_resident`
+へ渡せば、poisoned フラグを一切検査せずに破損混在状態のバッファで推論が
+実行できてしまう（fail-closed 契約・AGENTS.md「fail-closed の維持（P0）」
+への抵触）。
 
-**採用方針**: `DeviceParamStore` が保持するバッファを使う resident 推論は
-必ず新設の `DeviceParamStore` 側メソッドを経由させ、`tensor-core` 側の
-`linear_forward_resident` を呼び出し元が直接呼ぶ経路を閉じる:
+**指摘の核心 (2)（迂回防止の実効性）**: 旧稿（本節の前稿）は上記 (1) の
+解消策として「`DeviceParamStore::predict_resident` を新設し、直接呼び出し
+禁止を docstring で定める」対応のみを採ったが、この禁止はコードレビュー
+規律にのみ依拠しており型・可視性で強制されていなかった。しかも
+`facade` 側の呼び出し元（`Sequential`）が `store` 内のバッファを読む
+ためには何らかのアクセス経路が必要であり、旧稿はそのアクセス経路
+自体を未定義のまま残していた。将来 `DeviceParamStore` へ `weight`/
+`bias` の生の `&DeviceBuffer` を返す public アクセサが（`facade` 側の
+実装上の都合等で）追加されれば、そのアクセサから得た参照を
+`linear_forward_resident` へ直接渡すことで poisoned 検査を迂回できて
+しまい、docstring 上の禁止は実効性を持たない。
 
-```rust
-impl DeviceParamStore {
-    /// `DeviceParamStore` 常駐のパラメータを使う Tape 非依存の resident
-    /// 推論入口（`predict` 相当）。§3.3a の `forward_resident`
-    /// （Tape 追跡・`&mut self`）とは独立の読み取り専用 API
-    /// （`&self`。推論は勾配を必要としないため書き込みは発生しない）。
-    ///
-    /// 内部で各層について次を行う（`ops: &dyn BackendOps` は
-    /// `forward_resident` と同じく呼び出し元が渡す。§3.3a の `mem` 明示
-    /// 引数と同じ設計軸で、`store` 自身は `BackendOps`/`MemoryOps` の
-    /// 所有権を持たない）:
-    ///
-    /// 1. **poisoned 検査を最初に行う**（§4.3。他のいずれの処理より前）。
-    ///    poisoned であれば `mem.download` を一切呼ばず、同じ
-    ///    `BackendError`（poisoned variant）を返す。
-    /// 2. poisoned でなければ、各層の `weight`/`bias` の `DeviceBuffer`
-    ///    を `ops.linear_forward_resident(mem, ..)`（§3.1）へそのまま
-    ///    渡して forward を計算する。この内側の呼び出しは
-    ///    `DeviceParamStore` の外に出ないため、§3.1 が新設する「直接
-    ///    呼び出し禁止」制約には抵触しない（`predict_resident` 自身が
-    ///    唯一の正当な呼び出し元となる）。
-    pub fn predict_resident(
-        &self,
-        ops: &dyn BackendOps,
-        mem: &dyn MemoryOps,
-        input: &Tensor<f32>,
-    ) -> Result<Tensor<f32>, BackendError> {
-        // 確定シグネチャ・層イテレーション詳細は #935 が実装する。
-        // ここでの契約は「poisoned 検査が forward 計算より必ず先に
-        // 実行される」ことのみを確定する。
-        unimplemented!()
-    }
-}
-```
+**指摘の核心 (3)（Cursor Bugbot・活性化関数の欠落）**: 旧稿の
+`predict_resident` は `DeviceParamStore`（`autodiff::optim`。`Linear`
+層の `weight`/`bias` のみを保持し、`Sequential` の層構成〈活性化層を
+含む〉を一切知らない型。§3.3a）のメソッドとして定義されていたため、
+`ops.linear_forward_resident` を各層の `weight`/`bias` へ順に適用する
+だけで、層間の `ReLU` 等の活性化関数を一切実行しない実装にしかなり
+えなかった。既存 `Sequential::forward`（活性化層を含む全層を順に
+適用する。§2）・`forward_resident`（§3.3a・同様に活性化層を含む）との
+非対称であり、resident 推論の出力が非 resident の `predict` と一致しない
+（数値一致契約 §5 にも抵触しうる）。
+
+**採用方針（迂回不能な構造的強制 + 活性化関数の結線）**: 上記 3 点を
+同時に解消するため、責務を次のとおり分離する:
+
+- **`DeviceParamStore` は `weight`/`bias`/`velocity_*` の生の
+  `&DeviceBuffer` を返す public アクセサを一切持たない**（既存設計の
+  追認であり本節が新たに課す制約ではない。§3.3a はこの型を「常駐
+  ストア」とのみ定義しており、個別バッファの getter は元より定義して
+  いない）。個別バッファへ触れる唯一の手段として、次の poisoned
+  検査済みスコープ付きクロージャ API を新設する:
+
+  ```rust
+  impl DeviceParamStore {
+      /// poisoned 検査を通過した場合に限り、内部の trainable 層バッファ
+      /// 群（`weight`/`bias`/`velocity_*`。§3.3a の対応表と同じ並び順）
+      /// への読み取り専用アクセスをクロージャへ一時的に貸し出す
+      /// （P0 レビュー指摘 (2) の解消: 型・可視性による構造的強制）。
+      ///
+      /// **迂回不能性の根拠**: 引数 `f` はクロージャの引数として
+      /// 受け取る `&[ResidentLayerBuffers<'_>]`（`'_` は本呼び出しに
+      /// 対して匿名の高階ライフタイム。`std::thread::scope` と同型の
+      /// scoped-closure パターン）にのみ触れられ、戻り値の型 `R` は
+      /// この匿名ライフタイムを含められない（含めばコンパイルエラーに
+      /// なる）ため、生の `DeviceBuffer` 参照をクロージャのスコープ
+      /// 外へ持ち出す経路がコンパイラのボローチェッカーにより存在
+      /// しない。したがって「`DeviceParamStore` 由来のバッファを
+      /// `linear_forward_resident` へ直接渡す」という迂回は、
+      /// docstring 上の禁止ではなく型システムにより不可能になる。
+      /// poisoned であれば `f` を一切呼ばず（クロージャの中身が
+      /// 実行されないため、破損混在状態のバッファに触れる経路自体が
+      /// 生じない）、`f` が要求する戻り値型と同じ `Result` 型の
+      /// `BackendError`（poisoned variant）を返す。
+      pub fn with_resident_buffers<R>(
+          &self,
+          f: impl FnOnce(&[ResidentLayerBuffers<'_>]) -> Result<R, BackendError>,
+      ) -> Result<R, BackendError> {
+          // 実装詳細（poisoned フラグ検査 → 内部バッファ配列の構築 →
+          // f 呼び出し）は #935 が確定する。`ResidentLayerBuffers` の
+          // フィールド（`weight`/`bias`/`velocity_weight`/
+          // `velocity_bias` の `&DeviceBuffer<f32>`／
+          // `Option<&DeviceBuffer<f32>>`）も #935 が確定する。
+          unimplemented!()
+      }
+  }
+  ```
+
+- **Tape 非依存の resident 推論エントリは `Sequential` 側に置く**
+  （`facade::compat::Sequential::predict_resident`。`forward_resident`
+  〈§3.3a〉と対になる読み取り専用版）。`Sequential` は既に層構成
+  （`Linear` と活性化層を含む並び。§2・§3.3a）を唯一把握するオブジェクト
+  であるため、活性化関数の適用箇所を正しく判断できるのは `Sequential`
+  のみであり、`DeviceParamStore`（`autodiff::optim`）側にこの責務を
+  置くこと自体が指摘 (3) の構造的な原因だった:
+
+  ```rust
+  impl Sequential {
+      /// `store` 常駐のパラメータを使う Tape 非依存の resident 推論
+      /// （`predict` 相当）。`forward_resident`（§3.3a）と対になる
+      /// 読み取り専用 API（`&self`。`store` は poisoned チェック用に
+      /// `&DeviceParamStore` で十分——書き込みは発生しない）。
+      pub fn predict_resident(
+          &self,
+          store: &DeviceParamStore,
+          ops: &dyn BackendOps,
+          mem: &dyn MemoryOps,
+          input: &Tensor<f32>,
+      ) -> Result<Tensor<f32>, BackendError> {
+          // `store.with_resident_buffers` の呼び出し 1 回のみでクロージャ
+          // 内へ入り、以後は `self.layers`（既存 `forward` と同じ層
+          // イテレーション）を順に辿る: `Linear` 層は対応する
+          // `ResidentLayerBuffers` を trainable 層インデックス（§3.3a）
+          // で引いて `ops.linear_forward_resident(mem, current, weight,
+          // bias)` を呼び、活性化層（`ReLU` 等）は既存 `forward` と
+          // 同じ `BackendOps` の活性化メソッドをそのまま `current` へ
+          // 適用する。既存 `forward`／`forward_resident` と同一の層
+          // 適用順序をここでも維持するため、活性化関数は resident
+          // 推論でも通常どおり実行される（Cursor Bugbot 指摘の解消）。
+          // 確定シグネチャ・層イテレーション詳細は #935 が実装する。
+          unimplemented!()
+      }
+  }
+  ```
+
+  poisoned であれば `store.with_resident_buffers` がクロージャを
+  一切呼ばずに `BackendError`（poisoned variant）を返すため、
+  `predict_resident` は poisoned 検査を必ず forward 計算より先に
+  行う契約を自動的に満たす（`with_resident_buffers` 自体が唯一の
+  バッファアクセス経路であるため、この検査を素通りする経路は
+  存在しない）。
 
 **§4.3 との整合**: これにより poisoned 検査の対象は `step`／
 `sync_to_host`／`forward_resident`／`predict_resident` の 4 箇所となる
 （§4.3 の最終箇条を本節の追加に合わせて更新する）。`linear_forward_resident`
-自体は `tensor-core` に留まり poisoned という概念を知らないままでよく
-（`tensor-core` は `autodiff::optim::DeviceParamStore` に依存しない設計
-〈既存の依存方向〉を維持する）、poisoned 検査は常に `autodiff` 側の
-`DeviceParamStore` メソッド呼び出し時点で行う、という責務分担が本節の
-確定事項である。
+自体・`with_resident_buffers` が返すクロージャの中身自体は `tensor-core`
+（`predict_resident` は `facade` 層。`with_resident_buffers` は
+`autodiff::optim` 層）に留まり、poisoned 検査そのものは常に
+`DeviceParamStore::with_resident_buffers` の呼び出し時点で行う、
+という責務分担が本節の確定事項である（`tensor-core` は引き続き
+`autodiff::optim::DeviceParamStore` に依存しない設計〈既存の依存方向〉
+を維持する）。
 
 ### 3.4 クレート責務分担
 
@@ -769,8 +861,8 @@ impl DeviceParamStore {
 |---|---|
 | `tensor-core` | `sgd_step_device`／`linear_forward_resident` trait メソッド（`mem: &dyn MemoryOps` 明示引数。supertrait 化はしない非破壊拡張）・`SgdStepConfig` 型定義（§3.1・§3.2） |
 | `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2。呼び出し側の利便性のための追加であり trait 定義上の要求ではない）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
-| `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック（§3.3b の leaf 登録・勾配取り出しを含む） |
-| `facade`（`compat::Sequential` 経由で `Sequential::forward_resident` を実装） | `Sequential` への `forward_resident`・層インデックス対応表の保持（§3.3a）。公開面は #932 の optimizer facade 公開設計の結論に従属させる（本ドキュメントは compat 面の意匠を確定しない） |
+| `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック（§3.3b の leaf 登録・勾配取り出しを含む）・`DeviceParamStore::with_resident_buffers`（poisoned 検査済みスコープ付きクロージャ。§3.3c。個別バッファへの唯一のアクセス経路） |
+| `facade`（`compat::Sequential` 経由で `Sequential::forward_resident`／`Sequential::predict_resident` を実装） | `Sequential` への `forward_resident`・`predict_resident`（§3.3c。`store.with_resident_buffers` 経由で活性化層を含む既存の層イテレーション順序を再利用する）・層インデックス対応表の保持（§3.3a）。公開面は #932 の optimizer facade 公開設計の結論に従属させる（本ドキュメントは compat 面の意匠を確定しない） |
 
 ### 3.5 既存 API との関係
 
@@ -888,17 +980,20 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
   は各層の `DeviceBuffer` を読む（`mem.download` する）**前に**
   `DeviceParamStore` の poisoned フラグを検査し、poisoned であれば
   計算を一切行わず同じ `BackendError`（poisoned variant）を返す契約と
-  する。同様に、`DeviceParamStore` 経由の Tape 非依存 resident 推論
-  （`predict_resident`。§3.3c）も、`linear_forward_resident`（§3.1）を
-  呼ぶ前に同じ poisoned 検査を行う（§3.1 で「`DeviceParamStore` 由来の
-  バッファを使う場合は `linear_forward_resident` を直接呼ばず
-  `predict_resident` を経由する」契約を確定させたことで、この経路にも
-  poison チェックが必ず課される）。これにより「破損した混在状態の
-  パラメータで forward／推論が実行される」経路を閉じる（`step`／
-  `sync_to_host`／`forward_resident`／`predict_resident` の 4 箇所
-  すべてが poison チェックを通過して初めて `DeviceParamStore` の内部
-  状態へアクセスできることを、本設計が確定する fail-closed 契約と
-  する）。
+  する。同様に、`Sequential::predict_resident`（§3.3c）も
+  `store.with_resident_buffers`（§3.3c）を経由してのみ `weight`/`bias`
+  の `DeviceBuffer` へアクセスするため、poisoned であれば
+  `with_resident_buffers` がクロージャを一切呼ばず `BackendError`
+  （poisoned variant）を返し、`ops.linear_forward_resident`（§3.1）へも
+  到達しない。`DeviceParamStore` が個別バッファの public アクセサを
+  一切持たない設計（§3.3c）により、`with_resident_buffers` を経由せず
+  `weight`/`bias` の `DeviceBuffer` を得る手段自体が存在しないため、
+  この poison チェックはコードレビュー規律ではなく型・可視性で構造的に
+  強制される。これにより「破損した混在状態のパラメータで forward／
+  推論が実行される」経路を閉じる（`step`／`sync_to_host`／
+  `forward_resident`／`predict_resident` の 4 箇所すべてが poison
+  チェックを通過して初めて `DeviceParamStore` の内部状態へアクセス
+  できることを、本設計が確定する fail-closed 契約とする）。
 
 ### 4.4 解放・スレッド境界
 
@@ -1033,14 +1128,22 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
   実装として再利用する構成・§4.3 の poisoned 状態を表す `BackendError`
   variant を持つこと・§3.1 の `is_first_step` を用いた momentum 初回
   ステップの dampening 分岐）はそのまま踏襲する。
-- **`DeviceParamStore::predict_resident`（§3.3c）を実装する**: poisoned
-  検査を `linear_forward_resident`（§3.1）呼び出しより前に行う契約を
-  そのまま実装する。§3.1 の docstring が確定した「`DeviceParamStore`
-  由来の `DeviceBuffer` に対する `linear_forward_resident` の直接
-  呼び出し禁止」を、`predict_resident` 以外から `tensor-core` の
-  `linear_forward_resident` を呼ばない、というクレート内の呼び出し
-  規律として維持する（`tensor-core` 側に強制手段はないため、
-  `facade`/`autodiff` 側のコードレビューで担保する）。
+- **`DeviceParamStore::with_resident_buffers`（§3.3c）を実装する**:
+  poisoned フラグ検査 → `ResidentLayerBuffers` 配列の構築 → 引数
+  クロージャ呼び出し、の順で実装する。`DeviceParamStore` には
+  `weight`/`bias`/`velocity_*` の生の `&DeviceBuffer` を返す public
+  アクセサを一切追加しない（本メソッドが個別バッファへの唯一の
+  アクセス経路であることの実装上の担保）。
+- **`Sequential::predict_resident`（§3.3c・`facade` クレート）を実装
+  する**: `store.with_resident_buffers` のクロージャ内でのみ
+  `ops.linear_forward_resident`（§3.1）を呼び、`self.layers`
+  （既存 `forward`／`forward_resident` と同じ層イテレーション）を
+  辿って活性化層（`ReLU` 等）を通常どおり適用する（Cursor Bugbot
+  指摘の解消。resident 推論の出力が非 resident の `predict` と
+  一致することを #936 の parity テストで確認する）。poisoned 検査の
+  迂回不能性は `with_resident_buffers` の型・可視性設計（§3.3c）
+  そのものにより担保されるため、`facade`/`autodiff` 側のコードレビュー
+  規律には依存しない。
 - **`MemoryOps::device()`（§3.2a）を `CpuMemory`／`CudaMemory`／
   `MetalMemory` へ実装する**: 各々 `Some(Device::Cpu)`／
   `Some(Device::Cuda(ordinal))`／`Some(Device::Metal)` を返し、
