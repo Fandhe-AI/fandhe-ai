@@ -186,11 +186,27 @@
 //! （#799 の実機検証完了後、別イシューで統合可否を判断する）。`tensor-core`
 //! 決定表（`select_gemm_kernel`）・`dispatch_backend_auto` の f16 拡張は
 //! 本イシューのスコープ外のまま残す。
+//!
+//! イシュー #930 で `context_cache` モジュールを追加し、`ops::MetalBackendOps`
+//! が演算メソッド呼び出しごとに都度構築していた `MetalContext`／
+//! `MetalGemm`／`MetalElementwise`／`MetalRmsNorm`／`MetalSoftmax` を
+//! プロセス内キャッシュへ常駐化した（診断 #927 が特定した約 5 ms・N 非依存の
+//! 固定オーバーヘッドの解消。CUDA 側 #929 と同型設計）。`gemm::MetalGemm`
+//! の tile パイプラインキャッシュ（`tiled_cache`／`tiled_f16_cache`）は
+//! `Arc` 経由の複数スレッド共有に対応するため `RefCell` から `Mutex` へ
+//! 変更した。カーネルソース・ディスパッチロジック・許容誤差・境界検査は
+//! 一切変更していない。
 
 #[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
 pub mod context;
+// `ops::MetalBackendOps` からのみ参照する内部モジュール（CUDA 側
+// `context_cache`〈feat/929-cuda-ctx-cache〉と同じ可視性方針）。
+// `MetalContext`／`MetalGemm` 等の公開型はここを経由せず既存の `pub use`
+// でも到達可能なため、本モジュール自体は非公開のままでよい。
+#[cfg(target_os = "macos")]
+pub(crate) mod context_cache;
 #[cfg(target_os = "macos")]
 pub mod device;
 #[cfg(target_os = "macos")]
