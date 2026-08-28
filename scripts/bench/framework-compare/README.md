@@ -88,6 +88,7 @@ python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力�
 ```
 
 失敗した組み合わせは `results/raw/skipped.log`（CUDA は `skipped-cuda.log`）に理由付きで記録される（数値の捏造はしない）。
+`summarize.py` はこの節を集計対象として渡した各入力 JSONL と同一ディレクトリの `skipped*.log` からのみ収集する（入力省略時は従来どおり `results/raw/` 配下が対象。イシュー #971）。
 集計は `results/summary.md` を参照。
 
 ## 依存ポリシー上の位置づけ
