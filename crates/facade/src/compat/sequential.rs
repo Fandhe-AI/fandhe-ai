@@ -395,6 +395,20 @@ impl Sequential {
                 current = layer.forward(tape, &current)?;
             }
         }
+        // `vars` が `self.layers` の要求件数より多い（より大きなモデルの
+        // `DeviceParamStore` を誤って渡した等）場合、余剰要素を無視した
+        // まま黙って forward が成功すると、位置対応契約（層順に
+        // weight → bias）が崩れているにもかかわらず誤った推論結果を
+        // 返してしまう（Review 指摘）。`cursor` を消費し切ったことを
+        // ここで検査し、余剰があれば fail-closed に拒否する
+        // （`.claude/rules/security.md` A03）。
+        if cursor.next().is_some() {
+            return Err(AutodiffError::InvalidArgument(
+                "Sequential::forward_from_flat_vars: vars has more elements than \
+                 trainable_parameters() requires (extra weight/bias ignored)"
+                    .to_string(),
+            ));
+        }
         Ok(current)
     }
 }

@@ -384,13 +384,21 @@ impl BackendOps for CudaBackendOps {
             }));
         }
         let use_momentum = config.momentum != 0.0;
-        if let Some(v) = &velocity
-            && (v.device() != Device::Cuda(self.ordinal) || v.shape() != param.shape())
-        {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: v.shape().to_vec(),
-            }));
+        if let Some(v) = &velocity {
+            // デバイス不一致とテンソル shape 不一致を同一の
+            // `ShapeMismatch` に丸めていた（Review 指摘）。
+            // `BackendOps::sgd_step_device` の契約（`param`/`grad` と同じ
+            // く、デバイス不一致は `DeviceMismatch` を返す）に velocity
+            // も揃えるため、判定を分離する。
+            if v.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if v.shape() != param.shape() {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: param.shape().to_vec(),
+                    rhs: v.shape().to_vec(),
+                }));
+            }
         }
         if use_momentum && velocity.is_none() {
             return Err(BackendError::Unsupported(

@@ -4,9 +4,15 @@
 //! Metal 実機（Apple Silicon）は本 CI・実装検証環境で利用可能なため
 //! （`.claude/rules/ci.md`「実機依存」節・実機検証環境ドキュメント）、
 //! `backend-cuda` 側の `#[ignore]` 分離とは異なり通常テストとして実行する
-//! （`crates/backend-metal/tests/` 配下の既存 parity テスト群と同じ方針。
-//! macOS 以外の CI（Linux ubuntu-latest）では本クレート自体が
-//! `cfg(target_os = "macos")` で空になるためコンパイル対象に入らない）。
+//! （`crates/backend-metal/tests/` 配下の既存 parity テスト群と同じ方針）。
+//!
+//! `MetalBackendOps` は `crates/backend-metal/src/lib.rs` 側で
+//! `cfg(target_os = "macos")` ゲートされている（`backend-metal` クレート
+//! 自体は全 OS でビルド対象になる）ため、本テストファイルにも同じ
+//! `cfg(target_os = "macos")` を付けて非 macOS の CI（GitHub ホステッド
+//! ubuntu-latest）でコンパイル対象から除外する（付けないと
+//! `unresolved import` でビルド失敗する）。
+#![cfg(target_os = "macos")]
 
 use fandhe_ai_backend_metal::MetalBackendOps;
 use fandhe_ai_tensor_core::{BackendOps, SgdStepConfig, Tensor};

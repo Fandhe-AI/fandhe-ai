@@ -230,6 +230,16 @@ impl DeviceParamStore {
     ) -> Result<(), BackendError> {
         self.check_not_poisoned()?;
         self.check_device(tape)?;
+        // `Sgd::new` を経由しないため（本 `step` は毎呼び出しで `SgdConfig`
+        // を直接適用する。モジュール冒頭「簡略化」節）、`Sgd::new` と
+        // 同基準の検証（有限値・非負・nesterov 条件）をここで明示的に
+        // 通す（Review 指摘: 検証なしに不正な `SgdConfig` がデバイス側
+        // パラメータへ in-place 適用されてしまう抜け穴があった）。事前
+        // 検証フェーズの一部として、どのパラメータも更新する前に検査する
+        // （fail-closed。`.claude/rules/security.md` A03）。
+        config
+            .validate()
+            .map_err(|e| BackendError::InvalidArgument(e.to_string()))?;
 
         let Some(pending) = self.pending.take() else {
             return Err(BackendError::InvalidArgument(

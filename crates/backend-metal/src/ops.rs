@@ -217,13 +217,22 @@ impl BackendOps for MetalBackendOps {
             }));
         }
         let use_momentum = config.momentum != 0.0;
-        if let Some(v) = &velocity
-            && (v.device() != Device::Metal || v.shape() != param.shape())
-        {
-            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
-                lhs: param.shape().to_vec(),
-                rhs: v.shape().to_vec(),
-            }));
+        if let Some(v) = &velocity {
+            // デバイス不一致とテンソル shape 不一致を同一の
+            // `ShapeMismatch` に丸めていた（Review 指摘。`backend-cuda`
+            // 側 `ops.rs::sgd_step_device` と同型の問題）。
+            // `BackendOps::sgd_step_device` の契約（`param`/`grad` と同じ
+            // く、デバイス不一致は `DeviceMismatch` を返す）に velocity
+            // も揃えるため、判定を分離する。
+            if v.device() != Device::Metal {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if v.shape() != param.shape() {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: param.shape().to_vec(),
+                    rhs: v.shape().to_vec(),
+                }));
+            }
         }
         if use_momentum && velocity.is_none() {
             return Err(BackendError::Unsupported(
