@@ -124,9 +124,12 @@ pub trait BackendOps {
     /// 消す）。**デフォルトメソッドとして追加する**（`;` で終わる必須
     /// メソッドにすると crates.io 公開済み trait への破壊的変更になる
     /// ため、§3.1 冒頭の非破壊拡張方針を踏襲する）。既定は `None`
-    /// （`MemoryOps` 未実装のバックエンドは `sgd_step_device`／
-    /// `linear_forward_resident` の既定実装から `BackendError::
-    /// Unsupported` を受け取る——fail-open ではなく fail-closed）。
+    /// （`MemoryOps` 未実装のバックエンドは `DeviceParamStore::new`／
+    /// `register_resident_leaves`／`snapshot_resident_leaves`／`step`／
+    /// `sync_to_host`（§3.3a〜§3.5。いずれも本メソッドから `mem` を導出
+    /// する）から `BackendError::Unsupported` を受け取る——fail-open では
+    /// なく fail-closed。`sgd_step_device`〈下記〉はこの `None` 分岐とは
+    /// 無関係に、§3.2 改訂により常に `Unsupported` を既定とする）。
     /// `impl BackendOps for XBackendOps`（#935）は `XBackendOps` 自身が
     /// `impl MemoryOps for XBackendOps`（§3.2）を持つ場合、`Some(self)`
     /// を返すようオーバーライドする。`&self`・ジェネリクスなし・
@@ -142,11 +145,19 @@ pub trait BackendOps {
 }
 ```
 
-`sgd_step_device`／`linear_forward_resident` の両メソッドは、旧稿が
-外部引数として要求していた `mem: &dyn MemoryOps` を**削除**し、既定
-実装の内部で `self.memory_ops()` を呼んで導出する（`Ok`/`Some` で
-なければ `BackendError::Unsupported` を返す）。`BackendOps` 自身が
-`MemoryOps` を実装している必要は引き続きなく、trait 定義
+旧稿が `sgd_step_device`／`linear_forward_resident` の両方に外部引数と
+して要求していた `mem: &dyn MemoryOps` は**削除**する（`linear_forward_
+resident` 自体は §3.1 後段で削除済み）。`autodiff::optim::
+DeviceParamStore` 側の各メソッド（`new`／`register_resident_leaves`／
+`snapshot_resident_leaves`／`step` の grad upload／`sync_to_host`）は
+これに代わり `self.memory_ops()` を内部で呼んで `mem` を導出する
+（`None` なら `BackendError::Unsupported`）。**`sgd_step_device` 自身は
+この `memory_ops()` 導出パターンの対象外である**（§3.2 改訂: 既定
+実装は `self.memory_ops()` を一切呼ばず常に `Unsupported` を返す。各
+バックエンドのオーバーライドが `memory_ops()` を使うかどうかは実装
+詳細——CPU は使わず、CUDA/Metal も自身の更新カーネルが直接デバイス
+メモリへ書き込むため通常は使わない）。`BackendOps` 自身が `MemoryOps`
+を実装している必要は引き続きなく、trait 定義
 （`pub trait BackendOps { ... }`）へ supertrait を追加しない点は
 旧稿から変更しない。呼び出し側（`autodiff::optim::DeviceParamStore`。
 §3.3a）は `mem` を一切保持・受け渡ししなくなり、`tape.ops()`
@@ -163,19 +174,23 @@ pub trait BackendOps {
 /// デバイス常駐パラメータの in-place SGD 更新入口（#934 設計・#935 実装）。
 ///
 /// `param` を `grad`（および `velocity`。momentum 有効時のみ `Some`）から
-/// 直接更新し、ホストへの往復を発生させない契約とする。既定実装は
-/// fail-safe（§3.2）。`mem` は外部引数として受け取らず、既定実装の内部で
-/// `self.memory_ops()`（本節冒頭で新設）を呼んで導出する（`None` なら
-/// `BackendError::Unsupported`）。CPU/CUDA/Metal 各バックエンドは自身の
-/// カーネルでオーバーライドできる（デフォルト実装のままでも正しく
-/// 動作する）。
+/// 直接更新し、ホストへの往復・再アップロードを一切発生させない契約と
+/// する（§3.3「常駐化する」項の「in-place 更新のみで完結させる」契約
+/// そのもの）。既定実装は `BackendError::Unsupported`（§3.2 の改訂で
+/// fail-closed に変更。理由は §3.2 参照）。CPU/CUDA/Metal 各バックエンドは
+/// このメソッドを自身の真に in-place なカーネル（§3.2）でオーバーライド
+/// する契約であり、#935 はこの 3 バックエンドすべてを本メソッドの
+/// スコープ内で実装する（既定 `Unsupported` のまま残すバックエンドを
+/// 作らない）。
 ///
 /// **デフォルトメソッドとして trait 定義に本体を持たせる**（`;` で終わる
 /// 必須メソッド宣言ではない。レビュー指摘 #934 のとおり、本体なしの
 /// 必須メソッドとして追加すると、既存の外部 `impl BackendOps for X` を
-/// 破壊する。§3.2 が確定する「fail-safe 合成をデフォルト実装とする」
-/// 方針は、この本体をここに書くことで初めて成立する）。本体は次を
-/// 呼ぶ（velocity は `Some` のときのみ同様に往復させる）:
+/// 破壊する。本体を `Err(BackendError::Unsupported(..))` 一行にする
+/// ことで、`backend_ops.rs:28-33`／`:233`〈`Err(BackendError::
+/// Unsupported("mock: gemm".into()))` 等〉の未実装カーネル〈GPU 側
+/// elementwise/reduction の一部〉と同型の非破壊拡張パターン・同型の
+/// `Unsupported(String)` 呼び出し規約をそのまま踏襲できる）:
 fn sgd_step_device(
     &self,
     param: &mut DeviceBuffer<f32>,
@@ -183,12 +198,16 @@ fn sgd_step_device(
     velocity: Option<&mut DeviceBuffer<f32>>,
     config: &SgdStepConfig,
 ) -> Result<(), BackendError> {
-    // 既定実装（§3.2）: self.memory_ops() で mem を導出（None なら
-    // Unsupported）→ download → ホスト参照実装（`f32::mul_add`。
-    // §5.2 の FMA 契約）で更新 → upload。実装詳細（ホスト側計算関数へ
-    // の委譲）は #935 が確定する。
-    let mem = self.memory_ops().ok_or(BackendError::Unsupported)?;
-    default_sgd_step_via_host(mem, param, grad, velocity, config)
+    // 既定実装（§3.2 改訂: PR #951 レビュー指摘の解消。本体は
+    // `Unsupported` を返すのみで、`self.memory_ops()`／`mem.download`／
+    // `mem.upload` のいずれも呼ばない）。`BackendError::Unsupported` は
+    // `Unsupported(String)`（`device.rs:218`）のためメッセージを渡す。
+    let _ = (param, grad, velocity, config);
+    Err(BackendError::Unsupported(
+        "sgd_step_device: この BackendOps 実装は in-place SGD 更新を \
+         サポートしない（既定実装。各バックエンドのオーバーライドが必要）"
+            .into(),
+    ))
 }
 ```
 
@@ -237,33 +256,114 @@ SgdStepConfig` 等）は #935 が実装する。`tensor-core` は `autodiff` に
 ときのみ `b ← μ·b + (1−τ)·g` を適用する（`sgd.rs:1-23` の分岐をそのまま
 移植する。式順序自体は §5.2 の FMA 契約に従う）。
 
-### 3.2 デフォルト実装の方針: fail-safe 合成 + object safety の確定
+### 3.2 デフォルト実装の方針: fail-closed（`Unsupported`）+ object safety の確定
 
-既存の未実装カーネル（GPU 側 elementwise/reduction の一部）は `BackendError::
-Unsupported` を返す設計だが（`backend_ops.rs:28-33`）、`sgd_step_device`
-は**それとは異なり「必ず成立するが遅い」合成をデフォルト実装とする**:
+**改訂（PR #951 レビュー指摘 P1「デフォルト更新経路が『再 upload なし』の
+常駐契約を満たさない」の解消）**: 旧稿は `sgd_step_device` の既定実装を
+「`self.memory_ops()` で `mem` を導出 → `mem.download(param)` → ホスト
+参照実装で更新 → `mem.upload(param)` で書き戻し」という「必ず成立するが
+遅い」合成としていた。しかしこの合成は §3.3 が確定する常駐契約と構造的に
+矛盾する: `MemoryOps::upload`（`buffer.rs:229`）のシグネチャは
+`fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>,
+BackendError>` であり、**既存バッファへ書き戻す API ではなく、新しい
+`DeviceBuffer`（＝新しいデバイスメモリ確保）を返す API である**。旧稿の
+合成をそのまま実装すると、`sgd_step_device` の呼び出しのたびに
+`param`（を指す `&mut DeviceBuffer<f32>`）へ新しく確保したバッファを
+再代入することになり、これは §3.3 が「学習セッション開始時に 1 回
+`upload` し、以降 param への再アップロードは発生させない（`sgd_step_
+device` の in-place 更新のみで完結させる）」と定める中心契約に反する
+（毎ステップの再アップロード・再確保が発生する）。加えて、この
+再確保は §3.1/§3.2 が前提とする「`mem` は常に `self`（＝呼び出しに
+使われた `Tape`/`BackendOps` インスタンス）から導出される」という
+構造とも噛み合わない: 再確保された `DeviceBuffer` が今後どの
+stream/context に紐づくかは、その時点で `self.memory_ops()` が返した
+`mem` の実装詳細（§3.2 後段。`XMemory` を都度その場で構築してよい
+実装になっている）に依存してしまい、後述の Cross-tape 対応（§3.3d）が
+確立する「同一デバイスに属する `MemoryOps` はすべて同一の常駐
+stream/context を指す」という不変条件を、再確保のたびに再確認する
+必要が生じる（不変条件が保たれている限り実害はないが、再確保
+そのものが§3.3 の契約違反である点は変わらない）。
 
-```text
-sgd_step_device の既定実装 = self.memory_ops() で mem を導出（None なら
-                             Unsupported）→ download(param) → ホスト
-                             参照実装（CPU と同一式順序・f32::mul_add）
-                             で更新 → upload(param) で書き戻し
-                             （velocity も同様に往復）
+**採用方針（fail-closed に変更）**: `sgd_step_device` の既定実装は、
+既存の未実装カーネル（GPU 側 elementwise/reduction の一部。
+`backend_ops.rs:28-33`）と同型の `BackendError::Unsupported` を返す
+だけとする（`self.memory_ops()`／`mem.download`／`mem.upload` のいずれも
+呼ばない）。「`MemoryOps` を実装済みのバックエンドなら必ず動く汎用
+フォールバック」は設けない——`MemoryOps` の 3 メソッド（`alloc_zeroed`/
+`upload`/`download`）だけを合成して「param を書き換えずに更新する」
+ことは（`upload` が常に新規確保である以上）原理的に不可能なため、
+汎用フォールバックという選択肢自体が存在しない。**真に in-place な
+更新は、各バックエンドが自身の内部表現（CPU: ハンドル内の `Vec<f32>`
+を直接書き換え・CUDA/Metal: 既存デバイスメモリへ書き込む更新
+カーネル）に応じて個別に実装する以外にない**ため、`sgd_step_device`
+は `CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps` の 3 者すべてが
+`impl BackendOps` 内でオーバーライドする必須の実装対象とする（#935 は
+この 3 バックエンドを本メソッドのスコープ内で実装し、既定
+`Unsupported` のまま残すバックエンドを作らない。旧稿にあった
+「デフォルト実装のままでも正しく動作する」という引き渡し条件は撤回する
+——デフォルトのままでは `Unsupported` を返すのみであり、`#935` の
+完了をもって初めて「動作する」状態になる）。
+
+**`tensor-core` 側に新設が必要な最小限のプリミティブ（実装状況の確認
+込み）**: 各バックエンドが「真に in-place」を実装するには、`&mut
+DeviceBuffer<f32>` から自分の具体ハンドル型（`CpuBufferHandle`／
+`CudaBufferHandle`／`MetalBufferHandle`）へ**可変**アクセスする経路が
+要る。既存の `DeviceBuffer::downcast_handle<H>(&self) -> Option<&H>`
+（`buffer.rs:180`）は不変参照のみを返し、`DeviceBuffer::into_handle`
+（`buffer.rs:194`）は `pub(crate)`（`tensor-core` の外——`backend-cpu`
+等——からは呼べない）であるため、現状の公開 API だけでは
+`sgd_step_device` の実装が `param`/`velocity` の中身を書き換えられない
+（実測確認済み: `grep -n "pub fn \|pub(crate) fn " crates/tensor-core/
+src/buffer.rs` に可変ダウンキャストは存在しない）。一方、書き込みに
+必要な下位のフックはすでに存在する: `BufferHandle::as_any_mut(&mut
+self) -> &mut dyn Any`（`buffer.rs` 既定は `unimplemented!` だが、
+`CpuBufferHandle`／`CudaBufferHandle`／`MetalBufferHandle` の 3 者は
+`pool::PoolZeroFill::zero_fill`〈TASK-#201〉のために既に `{ self }` へ
+オーバーライド済み。`crates/backend-{cpu,cuda,metal}/src/memory.rs`）。
+したがって #935 は `tensor-core::buffer` へ次のメソッドを追加する
+（`DeviceBuffer` は trait ではなく struct のため、新規 `pub fn` の追加は
+SemVer 上非破壊——`BackendOps`/`BufferHandle` のようなトレイトメソッド
+追加とは異なり互換性検討は不要）:
+
+```rust
+impl<T: Element> DeviceBuffer<T> {
+    /// `downcast_handle` の可変版。内部ハンドルを具体型へ可変
+    /// ダウンキャストする（in-place 書き込みカーネル用。#934 §3.2 改訂で
+    /// 新設。`downcast_handle`〈`buffer.rs:180`〉と同じ「型不一致は
+    /// `None`」契約）。
+    pub fn downcast_handle_mut<H: BufferHandle>(&mut self) -> Option<&mut H> {
+        self.handle.as_any_mut().downcast_mut::<H>()
+    }
+}
 ```
 
-採否理由: `Unsupported` 一辺倒にすると、#935 の実装順序（CPU → CUDA →
-Metal）の途中で「まだデバイスカーネルを実装していないバックエンド」を
-使うコードパスがこのメソッドを呼べず、`autodiff::optim` 側に「両方の
-経路（デバイス常駐 API と旧ホスト API）を呼び分ける分岐」を恒久的に
-持たせることになる。デフォルト実装が fail-safe に成立していれば、
-`autodiff::optim::DeviceParamStore`（§3.3）は常に `sgd_step_device`
-だけを呼べばよく、各バックエンドが最適化されたカーネルを持つかどうかは
-実装詳細に留められる（`self.memory_ops()` が `None` を返す＝`MemoryOps`
-未実装のバックエンドについては `Unsupported` を返す。これは「必ず成立
-する」対象を「`MemoryOps` を実装済みのバックエンド」に限定するもので
-あり、fail-safe 方針と矛盾しない——fail-open ではなく fail-closed の
-`Unsupported` である点が §3.3c で新設する `sigmoid` 等の通常カーネルと
-同格の扱いに揃う）。
+`downcast_handle_mut` が `None` を返した場合（他バックエンドの
+`DeviceBuffer` を誤って `sgd_step_device` へ渡した等、ハンドルの実型が
+`H` と一致しない場合）の契約: `downcast_handle`〈`buffer.rs:178-179`〉の
+既存ドキュメンテーションコメントが定める「呼び出し元は
+`BackendError::DeviceMismatch` 等へ変換する想定」をそのまま踏襲し、
+`sgd_step_device` の各バックエンドオーバーライドは `None` を検出した
+時点で `BackendError::DeviceMismatch` を返し、`param`／`velocity` の
+いずれにも書き込みを行わない（`unwrap`/`expect` しない。§4.2 の
+デバイス一致検査と同種の fail-closed 判定であり、通常は §4.2 の事前
+検査〈`param.device() == grad.device()`〉を通過していればここで `None`
+にはならないはずだが、`downcast_handle_mut` 自体は独立した型レベルの
+安全弁として同じ変換規約を持たせる）。
+
+CPU にとっては、この「真に in-place」な実装はむしろ旧稿の fail-safe
+合成より単純になる: CPU の `DeviceBuffer` はハンドル内の `Vec<f32>`
+（`backend-cpu::memory::CpuBufferHandle`。実測: `memory.rs:40` 付近）
+そのものであり、`param.downcast_handle_mut::<CpuBufferHandle>()`
+（上記新設 API）で直接書き換えれば `mem.download`/`upload` のいずれも
+要らない、文字どおりのホスト内 in-place 更新になる（デバイス往復
+ゼロ）。CUDA/Metal も同じ `downcast_handle_mut` 経由で確保済みデバイス
+メモリのハンドル（`CudaSlice<f32>`／`MetalBuffer`）を取り出し、SGD
+更新式（§1・§5.2）を実行する
+専用カーネル 1 個（既存 GEMM カーネルより単純な elementwise 演算）を
+デバイス上で走らせるだけでよく、`mem.download`/`upload` を経由しない
+（`3.4` のクレート責務表が既に「CPU: 逐次または `rayon` 並列 in-place・
+CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個」としていた実装方針を、
+本節はデフォルト実装の削除により「唯一の実装経路」として確定する）。
 
 **object safety・非破壊性の確定**（レビュー指摘 #934: line 157。旧稿は
 `BackendOps` が `MemoryOps` の supertrait ではないため、デフォルト実装が
@@ -276,11 +376,15 @@ memory_ops()`（`&self` を取るだけの object-safe なデフォルトメソ�
 のドキュメンテーションコメントが明記するとおり「object-safe に設計
 している（`&dyn MemoryOps` として扱える）」ため、`Option<&dyn
 MemoryOps>` を返り値として持ち回ること自体に制約はない。
-`sgd_step_device` のデフォルト実装は `self.memory_ops()` の戻り値へ
-`mem.download(..)`／`mem.upload(..)` を呼ぶだけでよく、`BackendOps`
-trait 定義（`Box<dyn BackendOps + Send>` を含む既存の呼び出し形態）は
-一切変更されないため object safety・既存実装型の互換性いずれも
-保たれる。
+`memory_ops()` は `sgd_step_device` の既定実装からはもはや呼ばれない
+（§3.2 改訂により既定実装は `Unsupported` 一択となったため）が、
+`DeviceParamStore::new`（初期 `upload`）・`register_resident_leaves`／
+`snapshot_resident_leaves`（weight/bias の `mem.download`。§3.3b・
+§3.3c）・`step`（grad の `mem.upload`。§3.3b）・`sync_to_host`（§3.5）が
+引き続き `tape.ops().memory_ops()` の戻り値へ `mem.download(..)`／
+`mem.upload(..)` を呼ぶ唯一の経路として利用する。`BackendOps` trait
+定義（`Box<dyn BackendOps + Send>` を含む既存の呼び出し形態）は一切
+変更されないため object safety・既存実装型の互換性いずれも保たれる。
 
 現状 `CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`（`BackendOps`
 実装型）と `CpuMemory`／`CudaMemory`／`MetalMemory`（既存の `MemoryOps`
@@ -711,7 +815,50 @@ impl DeviceParamStore {
   `grad_weight`／`grad_bias`（ホスト `Tensor<f32>`）を取り出したうえで、
   `Sequential::trainable_parameters()` と同じ並び順（§3.3a）で
   `tape.ops().sgd_step_device(..)` を 1 パラメータずつ upload・
-  呼び出しする。これは
+  呼び出しする。
+
+  **`grads.get(&var)` が `Ok(None)` を返す場合の契約（PR #951 レビュー
+  指摘 P2「勾配が存在しないパラメータの step 契約が未定義」の解消）**:
+  `Gradients::get`（`backward.rs:49`）の既存戻り値は `Result<Option<&
+  Tensor<f32>>, AutodiffError>` であり、`var`（weight/bias leaf）が
+  `loss` から到達しない場合は `Ok(None)` になる（`tape.backward()` の
+  既存契約。§4.1・`backward.rs` doc コメント参照）。`Sgd::step`
+  （`sgd.rs:183-200`）はこの状況をそもそも経由しない設計（呼び出し元が
+  常にホスト `Tensor<f32>` の `grads: &[&Tensor<f32>]` を直接渡す関数型
+  API のため、勾配が存在しない状態自体を表現できない）ため、既存
+  `Sgd::step` には参照すべき先例がない。旧稿はこの分岐を一切定めておらず、
+  #935 の実装ごとに「更新をスキップする」「ゼロ勾配として扱う」
+  「`unwrap`/`panic` する」のいずれに倒れるか未定義だった。本設計は
+  次のとおり確定する: **`Ok(None)` は型付きエラーとして扱う（fail-closed。
+  更新スキップ・ゼロ勾配のいずれの黙示的フォールバックも採用しない）**。
+  `.claude/rules/coding-rust.md`「コード品質」節（本番経路で `unwrap()`/
+  `expect()` を使わない）に従い、`step` は `Ok(None)` を検出した時点で
+  `BackendError` の新設 variant（`MissingGradient` 相当。名称は #935 が
+  確定する。`tensor-core::device::BackendError` は `#[non_exhaustive]`
+  であるため既存 variant 一覧〈`device.rs:184-218`〉への非破壊拡張として
+  追加できる）を返し、`sgd_step_device` を一切呼ばずに `step` 全体を
+  中断する（§4.3 の「検証フェーズ」に相当する事前チェックとして扱う——
+  1 パラメータでも勾配欠落があれば、どの `DeviceBuffer` も未更新のまま
+  `Result::Err` を返す。§4.3 が定める「検証フェーズ通過前はどのバッファも
+  未更新」という保証と整合させるため、この検査は §4.2 の shape/device
+  検証と同じタイミング〈`sgd_step_device` 呼び出し前〉で行う。この経路
+  由来のエラーは §4.3 の poisoned 状態には遷移させない——poisoned は
+  「検証フェーズ通過後、更新フェーズの実行時エラーで一部のみ更新済み」
+  という状態を表すためのものであり、勾配欠落は事前検証で検出できる
+  失敗であるため、`DeviceParamStore` は引き続き使用可能なまま
+  `Result::Err` を返してよい）。
+  「更新をスキップする」「ゼロ勾配として扱う」を採らない理由:
+  いずれも「呼び出し元がその意図を明示していないのに、更新が実質
+  無効化される」という静かな学習結果の変化を招く（forward の配線
+  ミス・意図しない `detach` 等の実装バグを、正常終了として隠蔽して
+  しまう）。§3.3b の「未消費の forward_resident 結果」に対する
+  `abandon_pending_forward` のような明示的な意思表示 API がこの用途にも
+  必要になった場合は、#935 以降で別途検討する（本設計は「暗黙の
+  スキップ」を既定挙動にしない、という fail-closed の方向のみを
+  確定する）。
+
+  以上を踏まえたうえで `tape.ops().sgd_step_device(..)` を 1 パラメータ
+  ずつ upload・呼び出しする。これは
   §3.3 が定める「`Tape::backward` が返すホスト勾配を `sgd_step_device`
   呼び出し直前に 1 回だけ `upload` する」という転送モデルとそのまま
   整合する。呼び出し元は `NodeId`／`Var` を一切自分で保持する必要が
@@ -985,11 +1132,122 @@ buffers` が返すクロージャの中身自体は `tensor-core` に依存せ�
 `autodiff::optim::DeviceParamStore` に依存しない設計〈既存の依存方向〉
 を維持する）。
 
+### 3.3d Cross-tape `MemoryOps` の安全性（Cursor Bugbot 指摘「Cross-tape
+MemoryOps orphans buffers」の解消）
+
+**指摘の核心**: `DeviceParamStore` は `mem` を「その時点で手元にある
+`Tape`」（`tape.ops().memory_ops()`。§3.1）から都度導出する設計だが、
+`DeviceParamStore` に対する一連の呼び出しは 1 つの `Tape` に閉じない:
+`new`（construction 時。§3.3a）は呼び出し元が渡した `Tape` から、
+`forward_resident`／`step`（学習ループの per-step。§3.3a・§3.3b）は
+毎ステップ新規生成される別の `Tape` から、`predict_resident`（§3.3c）は
+`facade::tape_for(store.device())` で都度構築する専用の `Tape` から、
+それぞれ独立に `mem` を導出する。`DeviceBuffer` ハンドルは確保元の
+CUDA stream／Metal context に紐づく実装（`backend-cuda::memory::
+CudaMemory` は `Arc<CudaStream>` を、`backend-metal::memory::
+MetalMemory` は `MetalContext` を保持。実測: `crates/backend-cuda/
+src/memory.rs`・`crates/backend-metal/src/memory.rs`）であり、§3.2 は
+「`XBackendOps` が `XMemory` をフィールドとして保持するか、都度その場で
+構築するかは実装時に選べる実装詳細とする」と述べていた。この裁量の
+まま `impl MemoryOps for XBackendOps` が `memory_ops()` 呼び出しごとに
+**独立した** stream/context を持つ `XMemory` を構築する実装になって
+いた場合、`DeviceParamStore::new` が確保した `DeviceBuffer`（ある
+stream/context 由来）を、後続の `step`／`forward_resident`／
+`predict_resident`（別の `Tape` の `ops()` 由来、したがって潜在的に別の
+stream/context を指しうる `mem`）が操作しようとして失敗するか、誤った
+コンテキストを読む可能性がある——これが Bugbot の指摘する「バッファが
+孤立する（orphan）」危険である。
+
+**解決策（実装済みの process-wide キャッシュへ経路を固定する契約として
+確定する）**: `docs/facade-device-handle-design.md`（#931。§2.2・§2.4）が
+記録するとおり、CUDA・Metal いずれも「毎呼び出しごとの都度構築」問題は
+本設計に先立つイシューで既に解消済みである:
+
+- CUDA: `crates/backend-cuda/src/context_cache.rs`（#929/#946）が
+  `ordinal` をキーとする `HashMap<usize, Arc<Mutex<Option<Arc<
+  CudaDevice>>>>>` をプロセスワイド static（`OnceLock`）として保持し、
+  同一プロセス内では同一 `ordinal` に対して常に同一の `Arc<CudaDevice>`
+  （延いては同一の `Arc<CudaStream>`／`Arc<CudaContext>`）を返す
+  （プロセス生存期間中 evict されない。§ドキュメント冒頭コメント
+  「所有モデル・生存期間」）。`CudaBackendOps::device_handle`
+  （`crates/backend-cuda/src/ops.rs:67-69` 実測）は既に
+  `context_cache::cached_device(self.ordinal)` を経由しており、
+  `gemm`／`add`／`relu` 等の既存カーネルメソッドはすべてこの経路を
+  通る。
+- Metal: `crates/backend-metal/src/context_cache.rs`（#930/#948）が
+  同型の `OnceLock<Mutex<Option<Arc<T>>>>`（単一 variant のため
+  ordinal キー不要）でプロセスワイド単一の `MetalContext` を共有する
+  （facade-device-handle-design.md §2.4）。
+
+**本設計が確定する追加契約**: `impl MemoryOps for XBackendOps`
+（#935。§3.2）は、`XMemory` が保持する stream/context ハンドルを
+**必ず `context_cache::cached_device`／`context_cache::cached_context`
+（`XBackendOps` の既存カーネルメソッドがすでに経由している同じ関数）
+経由で取得する**契約とする（§3.2 が「実装時に選べる実装詳細」とした
+のは `XMemory` を都度その場で構築するか `XBackendOps` にフィールドとして
+持たせるかという**構築の頻度**であり、本節はどちらを選んでも「どの
+stream/context を指すか」が常に一意に定まることを追加で要求する。
+`XMemory::new` は `context_cache` から取得した `Arc<CudaDevice>`／
+`MetalContext` を受け取って構築する形にする——`CudaDevice::new`／
+新規の Metal コンテキスト初期化を `XMemory` 側で独自に呼ばない）。
+これにより、`DeviceParamStore::new` が確保した `DeviceBuffer` と、
+後続の `step`／`forward_resident`／`predict_resident` が呼び出し時点で
+導出する `mem` は、`Tape` インスタンスが異なっていても常に同一の
+stream/context を指す（同一プロセス・同一 `ordinal`／同一 Metal
+デバイスである限り、`context_cache` のエントリはプロセス生存期間中
+不変であるため）。`CpuBackendOps`（unit struct・状態なし。
+facade-device-handle-design.md §2.4「本設計判断の対象外」）はこの
+制約の対象外である（stream/context という概念自体を持たない）。
+
+**`AllocationTracker`（TASK-14.1b・#175）への波及も同一契約の対象と
+する**: `CudaMemory::new`／`MetalMemory::new`（実測: `crates/backend-
+cuda/src/memory.rs:95`・`crates/backend-metal/src/memory.rs` 該当箇所）
+はいずれも呼び出しのたびに `Arc::new(AllocationTracker::new())` で
+**新規の**計測系列を生成するコンストラクタしか持たない。`memory_ops()`
+が呼び出しごとに独立した `XMemory` を構築してよいという §3.2 の裁量を
+そのまま適用すると、ある `mem` 経由の `upload`／`download` が記録する
+確保・解放は、別の呼び出しで得た別の `mem`（＝別の `AllocationTracker`
+インスタンス）には反映されず、`MemoryStats`（ピーク値・現在値）の
+計測系列が呼び出しごとに分断される。stream/context の一意性（上記）
+とは独立に成立しうる別種の不整合であるため、本設計は追加で次を確定
+する: `impl MemoryOps for XBackendOps` が `memory_ops()` 呼び出しごとに
+`XMemory` を都度構築する実装を選ぶ場合、その `tracker` フィールドは
+新規生成せず、`context_cache` が管理する同一デバイスの他の `XMemory`
+呼び出しと共有される `Arc<AllocationTracker>` を使う（具体的な共有経路
+——`context_cache` 側に `tracker` も含めて常駐させるか、`XBackendOps`
+自身がフィールドとして `Arc<AllocationTracker>` を保持し `XMemory::new`
+へ渡すか——は #935 が選べる実装詳細とするが、「`DeviceParamStore` に
+対する一連の呼び出しを通じて `MemoryStats` の計測系列が単一である」
+ことは本設計が確定する不変条件とする。#935 は `CudaMemory::new`／
+`MetalMemory::new` に既存の `tracker: Arc<AllocationTracker>` を引数で
+受け取るコンストラクタを追加するか、既存 `new` 自体を `context_cache`
+共有の tracker を使うよう変更する）。
+
+**適用範囲の明示（単一デバイス前提）**: `DeviceParamStore` は construction
+時に固定した単一の `Device`（§3.3a の `device()`）に対してのみ有効な
+設計であり、異なる `ordinal`／異なるデバイス種別をまたいだ `DeviceBuffer`
+の共有は元より想定しない（§4.2 のデバイス一致検査が `param`/`grad` 間の
+一致を検査するのはこの前提の一部）。本節が確定する契約は「同一デバイス
+に対する `mem` 導出が呼び出し元の `Tape` インスタンスに依存せず安定する」
+ことであり、複数デバイスにまたがる常駐化は本設計のスコープ外のまま
+変更しない。
+
+**#935／#936 への引き渡し**: #935 は `impl MemoryOps for XBackendOps`
+の実装が上記の `context_cache` 経由制約を満たすことをコードレビューで
+確認する。#936 は parity テスト（§5.3）に加え、`DeviceParamStore::new`
+で使った `Tape` とは別に新規構築した `Tape`（`facade::tape_for` を
+再度呼ぶ）経由で `step`／`forward_resident`／`predict_resident` を
+呼ぶ「cross-tape スモークテスト」を 1 本含める（`predict_resident` は
+設計上すでに毎回別 `Tape` を使うため、この経路は少なくとも
+`predict_resident` の既存呼び出しパターンとしてテストされる。CUDA/Metal
+実機限定・`#[ignore]` 分離は `.claude/rules/coding-rust.md`「テスト・
+ベンチ」節の既存方針に従う）。
+
 ### 3.4 クレート責務分担
 
 | クレート | 責務 |
 |---|---|
-| `tensor-core` | `BackendOps::memory_ops()`（§3.1。`mem` を `self` から導出する唯一の経路。デフォルトメソッド・非破壊拡張）・`sgd_step_device`（§3.1・§3.2。既定実装が `self.memory_ops()` を使う）・`SgdStepConfig` 型定義（§3.1・§3.2） |
+| `tensor-core` | `BackendOps::memory_ops()`（§3.1。`mem` を `self` から導出する唯一の経路。デフォルトメソッド・非破壊拡張）・`sgd_step_device`（§3.1・§3.2。既定実装は `Unsupported` 固定・各バックエンドのオーバーライドが唯一の実装経路）・`SgdStepConfig` 型定義（§3.1・§3.2）・`DeviceBuffer::downcast_handle_mut`（§3.2。in-place 書き込みの唯一の経路。struct への非破壊追加） |
 | `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2）＋ `impl BackendOps for XBackendOps` 側の `memory_ops()` オーバーライド（`Some(self)`。§3.1・§3.2）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
 | `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者。`device: Device` フィールド・`device()` アクセサを含む。§3.3a）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック・`DeviceParamStore::with_resident_buffers`（poisoned 検査済みスコープ付きクロージャ。§3.3c。個別バッファへの唯一のアクセス経路）・`DeviceParamStore::register_resident_leaves`（`forward_resident` 専用。`&mut self`・`pending_grad_sources` を書く。§3.3b）・`DeviceParamStore::snapshot_resident_leaves`（`predict_resident` 専用。`&self`・読み取り専用版。§3.3c）。いずれも `tape.ops()`〈`pub(crate)`〉→ `.memory_ops()` の経路で `mem` を内部導出し、`facade` へ `mem`/`ops` を一切渡さない |
 | `facade`（`compat::Sequential` 経由で `Sequential::forward_resident`／`Sequential::predict_resident` を実装） | `Sequential` への `forward_resident`・`predict_resident`（§3.3b・§3.3c。いずれも `tape: &Tape` のみを受け取り `register_resident_leaves`／`snapshot_resident_leaves` が返す `Var` を使って `LinearVars::forward`／`Module::forward` を既存 `SequentialVars::forward` と同じパターンで呼ぶ。`mem`／`ops`／`BackendOps`／`MemoryOps` にはいずれも一切触れない）・層インデックス対応表の保持（§3.3a） |
@@ -1222,7 +1480,8 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
 
 - §3.1 の確定シグネチャ（`BackendOps::memory_ops()`〈`self` から `mem`
   を導出するデフォルトメソッド〉・`sgd_step_device`〈`mem` 引数なし。
-  内部で `self.memory_ops()` を呼ぶ〉・`SgdStepConfig`。`BackendOps`
+  既定実装は `self.memory_ops()` を呼ばず常に `BackendError::
+  Unsupported` を返す。§3.2 改訂〉・`SgdStepConfig`。`BackendOps`
   trait 定義への supertrait 追加はしない）をそのまま `tensor-core::
   backend_ops` へ追加する（`buffer.rs:11-13` の保留コメント
   「`MemoryOps` は `BackendOps` の supertrait となる想定」は本設計で
@@ -1230,20 +1489,35 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
   crates.io 公開 trait への破壊的変更となるため不採用（§3.1）」という
   趣旨に更新する）。旧稿にあった `linear_forward_resident` は本改訂
   （§3.1）で削除済みのため実装対象に含めない。
+- **`tensor-core::buffer` へ `DeviceBuffer::downcast_handle_mut`
+  （§3.2）を追加する**: `DeviceBuffer` は struct（trait ではない）ため
+  新規 `pub fn` の追加は SemVer 上非破壊。各バックエンドの
+  `sgd_step_device` オーバーライドが `param`/`velocity` の内部ハンドルへ
+  可変アクセスするための唯一の経路であり、これなしには CPU/CUDA/Metal
+  いずれも「真に in-place」な更新を実装できない（§3.2「本設計が確定する
+  最小限のプリミティブ」参照）。`None` 分岐は `downcast_handle`
+  （`buffer.rs:178-179`）と同じ `BackendError::DeviceMismatch` 変換規約
+  に従う。
 - 各 `XBackendOps`（`CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`）
   へ `impl MemoryOps for XBackendOps` を追加し（既存 `XMemory` 実装への
-  委譲か、フィールド保持かは §3.2 のとおり実装詳細として #935 が選ぶ）、
-  `impl BackendOps for XBackendOps` の `memory_ops()` オーバーライドを
-  `Some(self)` にする（§3.1・§3.2。`DeviceParamStore` が `mem` を得る
-  唯一の経路がこのオーバーライドである）。
-- 実装順序: CPU → CUDA → Metal（既存 GEMM カーネルの実装順序・PoC 実証の
-  蓄積と揃える）。
-- フォールバック契約: §3.2 のデフォルト実装（`sgd_step_device`:
-  `self.memory_ops()` で `mem` を導出〈`None` なら `Unsupported`〉→
-  `mem.download` → ホスト更新 → `mem.upload`）を先に用意し、各バック
-  エンドが最適化カーネルでオーバーライドする形で段階的に置き換える
-  （デフォルト実装のままでも正しく動作することを前提に、性能改善は
-  独立した最適化として進められる）。
+  委譲か、フィールド保持かは §3.2 のとおり実装詳細として #935 が選ぶ。
+  ただし §3.3d の契約により、`XMemory` が保持する stream/context
+  ハンドルは必ず `context_cache::cached_device`／`cached_context`
+  経由で取得したものを使う——`XMemory` 側で独自に新しい device/context
+  を初期化しない）、`impl BackendOps for XBackendOps` の `memory_ops()`
+  オーバーライドを `Some(self)` にする（§3.1・§3.2。`DeviceParamStore`
+  が `mem` を得る唯一の経路がこのオーバーライドである）。
+- **`sgd_step_device` はデフォルト実装（`Unsupported`）を持たない実装
+  対象として扱う**（§3.2 改訂。フォールバック実装は設けない）:
+  `CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps` の 3 者すべてが
+  自身の真に in-place な更新（CPU: バッファ内 `Vec<f32>` の直接書き換え、
+  CUDA/Metal: 既存デバイスメモリへ書き込む更新カーネル 1 個）で
+  オーバーライドすることを #935 のスコープとする。実装順序は
+  CPU → CUDA → Metal（既存 GEMM カーネルの実装順序・PoC 実証の蓄積と
+  揃える）とするが、旧稿と異なり中間段階で「まだ未実装のバックエンドは
+  デフォルトのフォールバックで動く」という前提は置かない——3 バックエンド
+  すべての実装が完了して初めて `DeviceParamStore::step` が全対応
+  バックエンドで動作する。
 - **`DeviceParamStore::device(&self) -> Device`（§3.3a）を実装する**:
   `new` が `tape.ops().device()`（既存の必須メソッド）から取得した値を
   フィールドとして保持し、そのまま返す読み取り専用アクセサ。
@@ -1285,8 +1559,9 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
   シグネチャ）・`autodiff::optim` 内の配置は #935 が決める。決定済みの
   設計軸（`Sgd` を置き換えず `Sgd::step` 相当のロジックを §5.1 の参照
   実装として再利用する構成・§4.3 の poisoned 状態を表す `BackendError`
-  variant を持つこと・§3.1 の `is_first_step` を用いた momentum 初回
-  ステップの dampening 分岐）はそのまま踏襲する。
+  variant を持つこと・§3.3b の勾配欠落〈`grads.get` が `Ok(None)`〉を
+  表す `BackendError` variant を持つこと・§3.1 の `is_first_step` を
+  用いた momentum 初回ステップの dampening 分岐）はそのまま踏襲する。
 - **`DeviceParamStore::with_resident_buffers`（§3.3c）を実装する**:
   poisoned フラグ検査 → `ResidentLayerBuffers` 配列の構築 → 引数
   クロージャ呼び出し、の順で実装する。`DeviceParamStore` には
