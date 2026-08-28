@@ -121,16 +121,18 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   compat/sequential.rs`。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から移設。
   4.2 節参照）経由で学習可能パラメータ（`Linear` 層の `weight`/`bias`）・
   勾配へアクセスできる。`Sequential::trainable_parameters`/
-  `Sequential::apply_parameters` を optimizer と組み合わせる場合、現時点で
-  サポート境界上の確定入口となる接続方法は内部 API（`fandhe_ai_autodiff::
-  optim::Sgd`・`fandhe_ai_autodiff::nn::optim::AdamW`。0 節のとおり
-  `pub` ではあるがサポート境界上は内部 API）を直接利用する経路のみである。
-  **`fandhe_ai::optim`**（0 節「`fandhe_ai::optim` の位置づけ」参照）は
-  正本 spec 改定・submodule ポインタ更新が完了するまでは移行予定の
-  将来提案にとどまり、確定入口ではないため、本節でも `Sequential` との
-  具体的な接続手順を利用案内としては示さない（codex-review PR #974
-  P1 是正）。`fit()`/`compile()` 等の高水準学習ループ API は 2 節の
-  とおり引き続き対象外
+  `Sequential::apply_parameters` を optimizer と組み合わせる接続入口は、
+  本節時点では確定していない。技術的には `fandhe_ai_autodiff::optim::Sgd`・
+  `fandhe_ai_autodiff::nn::optim::AdamW` を直接呼び出すことは可能だが、
+  これらは 0 節の定義どおり `pub` であってもサポート境界上は
+  `facade` を経由しない内部 API であり、サポートされる確定入口として
+  案内しない（内部 API 直接利用を確定入口として扱わない。codex-review
+  PR #974 P1 是正）。**`fandhe_ai::optim`**（0 節「`fandhe_ai::optim` の
+  位置づけ」参照）も、正本 spec 改定・submodule ポインタ更新が完了する
+  までは移行予定の将来提案にとどまり確定入口ではないため、本節でも
+  `Sequential` との具体的な接続手順は、内部 API・将来提案のいずれについても
+  利用案内としては示さない。`fit()`/`compile()` 等の高水準学習ループ API は
+  2 節のとおり引き続き対象外
 
 ## 2. 対象外（out of scope）
 
