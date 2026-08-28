@@ -50,6 +50,18 @@ CPU で 1 桁以上、Metal ではさらに大きな差が生じている。た�
 解消する」ことを主目的とし、性能改善の定量的な内訳分析は本文書のスコープ外とする（切り分けが
 必要であれば後続イシューで計測する）。
 
+**注意（誤認防止）**: 上記のホスト往復コストは手動 SGD 経路だけに固有のものではない。昇格対象
+である現行 `Sgd::step`（`crates/autodiff/src/optim/sgd.rs:252-253,305-306`）・`AdamW::step`
+（`crates/autodiff/src/nn/optim/adamw.rs:196-197,221`）自身も、各 parameter/gradient を
+`crate::eval::dense_vec`（内部で `contiguous()` → `as_slice()` を経由する稠密化。同モジュール
+冒頭コメント）によりホストの `Vec<f32>` へ複製し、更新後の値を `Tensor::new` でテンソルへ
+再構築している。すなわち `Sgd`/`AdamW` を facade へ昇格しても、この複製・再構築コスト自体は
+解消されない。**optimizer API 昇格が解消するのはサポート境界の矛盾（§2〜§3）であり、
+ホスト往復コストの解消はデバイス常駐 optimizer（テープ/デバイス上でパラメータ・勾配を保持し
+ホストへの往復を伴わずに更新する実装）という別の前提条件・後続課題を要する。この後続課題は
+§5 の #933〜#936（デバイス常駐化）の範囲、または新規の後続イシューとして切り出すべき事項であり、
+本文書（#932）はサポート境界の矛盾解消の判断に限定する。
+
 ## §2 現状の公開面と矛盾
 
 `facade`（`fandhe_ai` クレート）が唯一のサポートされる公開 API 面であり、内部クレート
@@ -217,8 +229,8 @@ numpy/Keras 慣習のラッパーではなく、**facade 素の公開契約（`t
 | `scripts/bench/framework-compare/bench-fandhe/src/main.rs:206-238` | 手動 SGD 実装（`run_train`。`as_slice().to_vec()`・`Tensor::from_slice` によるホスト往復） |
 | `crates/facade/src/lib.rs:83-101` | facade の現行公開面（`compat`・値型再エクスポート・`Tape` newtype とその理由） |
 | `crates/facade/tests/api_surface.rs:1-16` | REQ-12 機械検査（`pub use` 禁止語・`pub fn` 引数検査）の対象・走査方式 |
-| `crates/autodiff/src/optim/sgd.rs:185-188`・`optim/mod.rs` | `Sgd::step` シグネチャ・`Tape`/`Var` 非依存の設計方針コメント |
-| `crates/autodiff/src/nn/optim/adamw.rs:139-141`・`nn/optim/mod.rs` | `AdamW::step` シグネチャ・適用順序契約（`backward → clip → step`）・モジュール配置不統一の経緯 |
+| `crates/autodiff/src/optim/sgd.rs:185-188,252-253,305-306`・`optim/mod.rs` | `Sgd::step` シグネチャ・`Tape`/`Var` 非依存の設計方針コメント・`dense_vec`/`Tensor::new` によるホスト往復の実装箇所 |
+| `crates/autodiff/src/nn/optim/adamw.rs:139-141,196-197,221`・`nn/optim/mod.rs` | `AdamW::step` シグネチャ・適用順序契約（`backward → clip → step`）・モジュール配置不統一の経緯・`dense_vec`/`Tensor::new` によるホスト往復の実装箇所 |
 | `crates/facade/src/compat/sequential.rs:14-15,160-260,379` | 位置対応契約・内部クレート `fandhe_ai_autodiff::optim`/`nn::optim` への doc 案内（サポート境界との矛盾箇所） |
 | `docs/compat-api-scope.md` §0 | サポート境界（facade が唯一の公開面・入口 2 つの列挙・§5 と同じ手続きの適用） |
 | `docs/compat-api-scope.md` §1・§5・§6 | compat 層対象範囲（3 種限定）・範囲拡張の手続き・出典一覧の体裁踏襲元 |
