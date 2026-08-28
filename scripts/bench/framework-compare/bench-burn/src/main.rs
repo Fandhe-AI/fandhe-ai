@@ -73,6 +73,11 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         durations.push(one(&mut cs)?);
     }
     let st = stats(&durations)?;
+    // イシュー #965: Burn(wgpu) Metal 経路は N>=512 で結果テンソル全ゼロを
+    // 返す upstream 既知バグを持つ（tracel-ai/burn#4966 →
+    // tracel-ai/cubek#283。`docs/perf/burn-wgpu-metal-gemm-zero-result.md`）。
+    // 壊れた計算の実行時間を性能値として記録しないよう emit 前に遮断する。
+    validate_gemm_checksum(cs)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,

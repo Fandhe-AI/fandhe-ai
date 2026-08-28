@@ -21,6 +21,18 @@
   欠損は "fresh" として扱う（互換維持。get(row, "mode", "fresh")）。
   既存の GEMM 表（(a)）は fresh 行のみを集計し、reuse 行が存在するファイル
   にのみ (a') 節（初期化 init_s・中央値・fresh との並記）を追加する。
+- checksum 相互突合（イシュー #965）: GEMM は全フレームワーク・全 mode で
+  同一入力（xorshift64* の同一シード・同一生成式）のため、同一 size の
+  checksum は本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5
+  未満。`.claude/rules/coding-rust.md`）内で一致するはずである。本ツールは
+  各 size ごとに参照値を選び、外れる行を GEMM 表で「無効」表示する
+  （`gemm_checksum_reference` / `gemm_checksum_mismatches`）。対象は gemm
+  タスクのみ（train/infer は fandhe-ai の重み初期化が candle/Burn と異なる
+  設計のため checksum が一致しない。突合しない）。既定では警告を stderr へ
+  出すのみで終了コードは変えない（`--out` 契約と同様、既存の呼び出し元を
+  壊さない）。`--strict` を付けると不一致 1 件以上で終了コード 2 を返す。
+  要素単位の誤差（max abs/rel error）比較は本ツールのスコープ外
+  （イシュー #970）。
 """
 
 import argparse
@@ -72,10 +84,136 @@ def devices_in(rows, task, mode="fresh"):
     return [d for d in DEVICE_ORDER if d in present]
 
 
+# 本体の数値一致契約と同一（`.claude/rules/coding-rust.md`「バックエンド構成」節）:
+# 相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。ここを緩めない。
+CHECKSUM_ABS_TOL = 1e-5
+CHECKSUM_REL_TOL = 1e-3
+
+# 参照値選択の優先順（イシュー #965）。GEMM の入力は全フレームワーク共通
+# なので、最も検証済みの経路（CPU・fresh）から優先的に参照を取る。
+_REFERENCE_PRIORITY = [
+    ("fandhe-ai", "cpu"),
+    ("candle", "cpu"),
+    ("burn", "cpu"),
+]
+
+
+def checksums_match(a, b):
+    """本体の数値一致契約と同一の複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満）。"""
+    diff = abs(a - b)
+    if diff < CHECKSUM_ABS_TOL:
+        return True
+    if b == 0:
+        return diff < CHECKSUM_ABS_TOL
+    return diff / abs(b) < CHECKSUM_REL_TOL
+
+
+def gemm_checksum_reference(rows):
+    """size ごとの GEMM checksum 参照値を選ぶ。
+
+    優先順は `_REFERENCE_PRIORITY`（fandhe-ai/cpu → candle/cpu → burn/cpu、
+    いずれも fresh）。該当が無い size は、その size の gemm 行を checksum で
+    グルーピングし最大クラスタ（`checksums_match` で相互一致する集合のうち
+    最大のもの）の代表値を参照とする（多数決フォールバック）。それも決まら
+    ない場合は突合不能として None を返す。
+
+    `candidate_count` は同一 size の fresh 行の総数。1 以下（この JSONL
+    ファイル内に比較対象となる他フレームワーク／他デバイスの行がそもそも
+    存在しない）の場合、`gemm_checksum_mismatches` はその size を「無効」と
+    誤判定しない（クロスチェック不能と実データの不整合を区別するため。
+    例: `results-rtx3060.jsonl` は fandhe-ai/cuda のみを計測しており、
+    比較対象が無いだけで checksum 自体は正当）。
+
+    戻り値: {size: (ref_value, ref_source_label, candidate_count)}
+    """
+    sizes = sorted({r["size"] for r in rows if r["task"] == "gemm"})
+    result = {}
+    for size in sizes:
+        candidates = [
+            r
+            for r in rows
+            if r["task"] == "gemm" and r["size"] == size and r["mode"] == "fresh"
+        ]
+        ref = None
+        ref_label = None
+        for fw, device in _REFERENCE_PRIORITY:
+            hit = next(
+                (r for r in candidates if r["framework"] == fw and r["device"] == device),
+                None,
+            )
+            if hit is not None:
+                ref = hit["checksum"]
+                ref_label = f"{fw}/{device}/fresh"
+                break
+        if ref is None:
+            # 多数決フォールバック: 相互一致するクラスタのうち最大のものを採用。
+            best_cluster = []
+            for r in candidates:
+                cluster = [
+                    c for c in candidates if checksums_match(c["checksum"], r["checksum"])
+                ]
+                if len(cluster) > len(best_cluster):
+                    best_cluster = cluster
+            if len(best_cluster) >= 2:
+                rep = best_cluster[0]
+                ref = rep["checksum"]
+                ref_label = f"{rep['framework']}/{rep['device']}/fresh（多数決）"
+        result[size] = (ref, ref_label, len(candidates))
+    return result
+
+
+def gemm_checksum_mismatches(rows):
+    """GEMM 行のうち参照値と不一致なものを列挙する。
+
+    reuse 行も同一 size の参照（fresh 由来）に対して突合する（fresh/reuse は
+    同一入力のため）。train/infer は対象外（モジュール docstring 参照）。
+    同一 size の fresh 行が 1 件以下（クロスチェックできる他行が無い）場合は
+    「突合不能」を報告しない（`gemm_checksum_reference` docstring 参照）。
+
+    戻り値: [(row, ref_value_or_None, ref_label_or_None), ...]
+    """
+    reference = gemm_checksum_reference(rows)
+    mismatches = []
+    for r in rows:
+        if r["task"] != "gemm":
+            continue
+        ref, ref_label, candidate_count = reference.get(r["size"], (None, None, 0))
+        if ref is None:
+            if candidate_count >= 2:
+                mismatches.append((r, None, None))
+            continue
+        if not checksums_match(r["checksum"], ref):
+            mismatches.append((r, ref, ref_label))
+    return mismatches
+
+
+def _row_key(r):
+    return (r["framework"], r["device"], r["size"], r["mode"])
+
+
 def section(path, rows):
     lines = []
     rel = os.path.relpath(path, HERE)
     lines.append(f"## 集計対象: {rel}\n")
+
+    # イシュー #965: GEMM checksum 相互突合。不一致行は表で「無効」表示し、
+    # GFLOP/s 列を "-" にする（壊れた計算の実行時間を性能値として見せない）。
+    mismatches = gemm_checksum_mismatches(rows)
+    mismatch_by_key = {_row_key(r): (ref, ref_label) for r, ref, ref_label in mismatches}
+    for r, ref, ref_label in mismatches:
+        if ref is None:
+            print(
+                f"warning: {rel}: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                "の gemm checksum は参照値を決定できず突合不能",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"warning: {rel}: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                f"の gemm checksum {r['checksum']:.6f} が参照 {ref:.6f}（{ref_label}）と不一致 "
+                "— 無効データとして表示",
+                file=sys.stderr,
+            )
 
     versions = {r["framework"]: r["version"] for r in rows}
     lines.append("| フレームワーク | バージョン |")
@@ -96,9 +234,15 @@ def section(path, rows):
             for fw in FRAMEWORKS:
                 r = get(rows, fw, "gemm", device, n)
                 if r:
-                    lines.append(
-                        f"| {n} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} |"
-                    )
+                    mm = mismatch_by_key.get(_row_key(r))
+                    if mm is not None:
+                        lines.append(
+                            f"| {n} | {fw}（無効: checksum 不一致） | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | - |"
+                        )
+                    else:
+                        lines.append(
+                            f"| {n} | {fw} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} |"
+                        )
                 else:
                     lines.append(f"| {n} | {fw} | 計測不可 | - | - | - |")
         lines.append("")
@@ -130,8 +274,11 @@ def section(path, rows):
                     fresh = get(rows, fw, "gemm", device, n, mode="fresh")
                     fresh_col = fmt_ms(fresh["median_s"]) if fresh else "未計測"
                     init_col = fmt_ms(r["init_s"]) if r.get("init_s") is not None else "-"
+                    mm = mismatch_by_key.get(_row_key(r))
+                    fw_col = f"{fw}（無効: checksum 不一致）" if mm is not None else fw
+                    gflops_col = "-" if mm is not None else f"{r['gflops']:.1f}"
                     lines.append(
-                        f"| {n} | {fw} | {init_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} | {fresh_col} |"
+                        f"| {n} | {fw_col} | {init_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {gflops_col} | {fresh_col} |"
                     )
             lines.append("")
 
@@ -166,7 +313,24 @@ def section(path, rows):
             else:
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - | - |")
     lines.append("")
-    return lines
+
+    lines.append("#### データ有効性（checksum 突合。イシュー #965）\n")
+    if mismatches:
+        for r, ref, ref_label in mismatches:
+            if ref is None:
+                lines.append(
+                    f"- **無効（突合不能）**: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                    f"— checksum {r['checksum']:.6f}、参照値を決定できず"
+                )
+            else:
+                lines.append(
+                    f"- **無効**: {r['framework']}/{r['device']}/size={r['size']}/{r['mode']} "
+                    f"— checksum {r['checksum']:.6f} が参照 {ref:.6f}（{ref_label}）と不一致"
+                )
+    else:
+        lines.append("- 不一致なし（全 gemm 行の checksum が参照値と一致）")
+    lines.append("")
+    return lines, bool(mismatches)
 
 
 def main():
@@ -182,6 +346,11 @@ def main():
         "--out",
         help="出力先ファイル（省略時は標準出力。コミット済み summary.md を既定で上書きしない）",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="GEMM checksum の不一致（イシュー #965）が 1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）",
+    )
     args = parser.parse_args()
 
     inputs = args.inputs or sorted(glob.glob(os.path.join(HERE, "results/raw/*.jsonl")))
@@ -190,13 +359,16 @@ def main():
         return 1
 
     lines = ["# ベンチマーク集計（summarize.py 生成）\n"]
+    any_checksum_mismatch = False
     for path in inputs:
         rows = load_rows(path)
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
             continue
-        lines.extend(section(path, rows))
+        section_lines, has_mismatch = section(path, rows)
+        lines.extend(section_lines)
+        any_checksum_mismatch = any_checksum_mismatch or has_mismatch
 
     skip_logs = sorted(glob.glob(os.path.join(HERE, "results/raw/skipped*.log")))
     lines.append("## 実行時失敗（skipped*.log）\n")
@@ -218,6 +390,13 @@ def main():
         print(f"wrote {args.out}", file=sys.stderr)
     else:
         sys.stdout.write(text)
+
+    if any_checksum_mismatch and args.strict:
+        print(
+            "error: --strict: 1 件以上の gemm checksum 不一致（イシュー #965）",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

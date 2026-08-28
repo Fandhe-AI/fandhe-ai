@@ -70,6 +70,10 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         durations.push(one(&mut checksum)?);
     }
     let st = stats(&durations)?;
+    // イシュー #965: burn 側の縮退 checksum 遮断（bench-burn/src/main.rs）と
+    // 対称に、candle 側でも将来同種の不具合が出た場合に壊れた計算の実行時間
+    // を性能値として記録しないよう emit 前に検査する。
+    validate_gemm_checksum(checksum)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,

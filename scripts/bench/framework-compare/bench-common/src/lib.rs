@@ -25,6 +25,11 @@ pub enum BenchError {
     /// `parse_cli`). A3 インジェクション対策と同じ思想で、未知の値を
     /// フレームワーク側の分岐へそのまま流さず、ここで fail-fast する。
     InvalidMode { value: String },
+    /// GEMM の結果 checksum が縮退（全要素ゼロ、または非有限）していた。
+    /// イシュー #965: Burn(wgpu) Metal GEMM N>=512 が結果テンソル全ゼロを
+    /// 返す既知の upstream バグ（`docs/perf/burn-wgpu-metal-gemm-zero-result.md`
+    /// 参照）を、壊れた計算の実行時間を性能値として記録する前に遮断する。
+    DegenerateChecksum { value: f64 },
 }
 
 impl std::fmt::Display for BenchError {
@@ -47,6 +52,12 @@ impl std::fmt::Display for BenchError {
                 write!(
                     f,
                     "MEASURE_ERROR: --mode must be 'fresh' or 'reuse' (got '{value}')"
+                )
+            }
+            BenchError::DegenerateChecksum { value } => {
+                write!(
+                    f,
+                    "MEASURE_ERROR: gemm checksum is degenerate ({value}) — result tensor is all-zero or non-finite; refusing to record timing"
                 )
             }
         }
@@ -275,6 +286,26 @@ pub fn gemm_gflops(n: usize, median_s: f64) -> f64 {
     2.0 * (n as f64).powi(3) / median_s / 1e9
 }
 
+/// GEMM checksum（結果テンソル全要素の総和）が縮退していないか検査する。
+///
+/// イシュー #965: `bench-burn` の Metal（wgpu）経路が N>=512 で結果テンソル
+/// 全ゼロを返す upstream 既知バグ（tracel-ai/burn#4966 → tracel-ai/cubek#283。
+/// `docs/perf/burn-wgpu-metal-gemm-zero-result.md` 参照）を持ち込んだ。
+/// 入力は xorshift64* の一様乱数 [-0.5, 0.5) を `SEED_A`/`SEED_B` から
+/// 生成しており、N×N 要素の総和が厳密に 0.0 になる確率は無視できる
+/// （浮動小数点の丸めで偶然一致する余地もほぼ無い）ため、`checksum == 0.0`
+/// は「計算が実行されず結果バッファが未初期化のまま読み出された」ことの
+/// 強いシグナルとして扱う。非有限値（NaN/inf）も同様に計算破綻の徴候。
+/// `run_gemm`（`bench-fandhe`/`bench-candle`/`bench-burn`）は `Record::emit`
+/// の直前でこれを呼び、壊れた計算の実行時間を性能値として記録しない
+/// （数値の捏造をしない方針。`.claude/rules/security.md` A08）。
+pub fn validate_gemm_checksum(checksum: f64) -> Result<(), BenchError> {
+    if checksum == 0.0 || !checksum.is_finite() {
+        return Err(BenchError::DegenerateChecksum { value: checksum });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +378,46 @@ mod tests {
             err.to_string()
                 .contains("--mode must be 'fresh' or 'reuse'")
         );
+    }
+
+    #[test]
+    fn zero_checksum_is_degenerate() {
+        assert!(matches!(
+            validate_gemm_checksum(0.0),
+            Err(BenchError::DegenerateChecksum { value }) if value == 0.0
+        ));
+    }
+
+    #[test]
+    fn nan_checksum_is_degenerate() {
+        assert!(matches!(
+            validate_gemm_checksum(f64::NAN),
+            Err(BenchError::DegenerateChecksum { .. })
+        ));
+    }
+
+    #[test]
+    fn infinite_checksum_is_degenerate() {
+        assert!(matches!(
+            validate_gemm_checksum(f64::INFINITY),
+            Err(BenchError::DegenerateChecksum { .. })
+        ));
+        assert!(matches!(
+            validate_gemm_checksum(f64::NEG_INFINITY),
+            Err(BenchError::DegenerateChecksum { .. })
+        ));
+    }
+
+    #[test]
+    fn ordinary_checksum_is_ok() {
+        assert!(validate_gemm_checksum(937.743233).is_ok());
+        assert!(validate_gemm_checksum(-6016.774008).is_ok());
+    }
+
+    #[test]
+    fn degenerate_checksum_error_message_is_measure_error() {
+        let err = BenchError::DegenerateChecksum { value: 0.0 };
+        assert!(err.to_string().starts_with("MEASURE_ERROR:"));
+        assert!(err.to_string().contains("gemm checksum is degenerate"));
     }
 }

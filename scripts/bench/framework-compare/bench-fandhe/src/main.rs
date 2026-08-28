@@ -105,6 +105,10 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         durations.push(one(&mut checksum)?);
     }
     let st = stats(&durations)?;
+    // イシュー #965: burn 側の縮退 checksum 遮断（bench-burn/src/main.rs）と
+    // 対称に、fandhe-ai 側でも将来同種の不具合が出た場合に壊れた計算の実行
+    // 時間を性能値として記録しないよう emit 前に検査する。
+    validate_gemm_checksum(checksum)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
@@ -162,6 +166,9 @@ fn run_gemm_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         durations.push(one()?);
     }
     let st = stats(&durations)?;
+    // イシュー #965: reuse 経路（同一 tape を使い回す）でも fresh 経路と同様
+    // に縮退 checksum を emit 前に遮断する。
+    validate_gemm_checksum(checksum)?;
     Record {
         framework: FRAMEWORK,
         framework_version: VERSION,
