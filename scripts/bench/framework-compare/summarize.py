@@ -55,6 +55,7 @@
 import argparse
 import glob
 import json
+import math
 import os
 import sys
 
@@ -291,8 +292,15 @@ def _is_plain_number(v):
     フィールドは常に数値または `null`（非有限センチネル）であるべきで、
     誤って `bool` が混入した場合も無効として扱いたい（fail-closed。
     security.md A03 と同じ「外部入力の型を信頼しない」思想）。
+
+    Python の `json` モジュールは既定で `NaN`/`Infinity`/`-Infinity` を
+    パース可能にする（RFC 8259 非準拠の拡張）ため、型が `float` であっても
+    `math.isfinite()` を別途要求する（イシュー #970 PR #978 codex-review P0
+    指摘: 外部 JSONL の `NaN` が型検査だけでは弾けず "ok" 判定へ通ってしまう）。
     """
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    return math.isfinite(v)
 
 
 def parity_status(row):
@@ -306,9 +314,13 @@ def parity_status(row):
       センチネル）」を区別できないため、まずキーの存在を検査する
       （欠損＝旧形式・未検証と、存在するが不正＝無効を混同しない）。
     - "fail": `parity_fail_count` キーは存在するが、4 フィールドのいずれか
-      の型が不正（数値でない・`null`）、または `parity_fail_count > 0`。
-      壊れた入力を黙って「一致」扱いにしない（fail-closed）。
-    - "ok": 4 フィールドすべてが妥当な数値で `parity_fail_count == 0`。
+      の型が不正（数値でない・`null`・非有限）、値域が不正（`parity_total`
+      が 0 以下、`parity_fail_count` が負または `parity_total` 超過、誤差
+      2 項が負）、または `parity_fail_count > 0`。壊れた入力を黙って
+      「一致」扱いにしない（fail-closed。イシュー #970 PR #978 codex-review
+      P0 指摘: 型検査のみでは `parity_fail_count=-1`・`parity_total=0`・
+      負の誤差値を伴う外部 JSONL が "ok" 判定へ通ってしまっていた）。
+    - "ok": 4 フィールドすべてが妥当な数値・値域で `parity_fail_count == 0`。
     """
     if "parity_fail_count" not in row:
         return "unverified"
@@ -319,6 +331,14 @@ def parity_status(row):
     if not _is_plain_number(fail_count) or not _is_plain_number(total):
         return "fail"
     if not _is_plain_number(max_abs) or not _is_plain_number(max_rel):
+        return "fail"
+    # 値域検証（イシュー #970 PR #978 codex-review P0）: total は正、
+    # fail_count は [0, total] の範囲、誤差 2 項は非負でなければならない。
+    if total <= 0:
+        return "fail"
+    if fail_count < 0 or fail_count > total:
+        return "fail"
+    if max_abs < 0 or max_rel < 0:
         return "fail"
     if fail_count > 0:
         return "fail"

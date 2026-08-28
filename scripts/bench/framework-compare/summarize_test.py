@@ -113,6 +113,66 @@ class ParityStatusTests(unittest.TestCase):
         del row["parity_total"]
         self.assertEqual(summarize.parity_status(row), "fail")
 
+    # --- イシュー #970 PR #978 codex-review P0 指摘の回帰テスト ---
+    # 型が数値であっても値域・有限性を検証しない実装は、外部 JSONL の
+    # 不正な parity 値を "ok" 判定へ通してしまっていた（fail-open）。
+    # 以下は境界値ごとに fail-closed になることを確認する。
+
+    def test_negative_fail_count_is_fail(self):
+        row = _with_parity(_base_row(), fail_count=-1)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_zero_total_is_fail(self):
+        # parity_total=0 は「比較対象要素数ゼロ」であり検証したことになら
+        # ない。fail_count=0 と組み合わせても "ok" にしてはならない。
+        row = _with_parity(_base_row(), total=0, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_negative_total_is_fail(self):
+        row = _with_parity(_base_row(), total=-1, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_fail_count_exceeds_total_is_fail(self):
+        row = _with_parity(_base_row(), total=10, fail_count=11)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_fail_count_equals_total_is_fail(self):
+        # fail_count == total > 0 は境界値だが、fail_count > 0 の既存分岐で
+        # 引き続き "fail" になることを確認する（値域検証追加後の非後退）。
+        row = _with_parity(_base_row(), total=10, fail_count=10)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_negative_max_abs_err_is_fail(self):
+        row = _with_parity(_base_row(), max_abs_err=-1e-6)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_negative_max_rel_err_is_fail(self):
+        row = _with_parity(_base_row(), max_rel_err=-1e-6)
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_nan_max_abs_err_is_fail(self):
+        # JSON の json.loads は既定で NaN/Infinity を受理する（RFC 8259
+        # 非準拠の拡張）ため、型検査だけでは弾けない非有限値を明示検証する。
+        row = _with_parity(_base_row())
+        row["parity_max_abs_err"] = float("nan")
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_infinite_max_rel_err_is_fail(self):
+        row = _with_parity(_base_row())
+        row["parity_max_rel_err"] = float("inf")
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_nan_fail_count_is_fail(self):
+        row = _with_parity(_base_row())
+        row["parity_fail_count"] = float("nan")
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_boundary_fail_count_equals_zero_total_positive_is_ok(self):
+        # 値域検証を追加しても、正当な "ok" ケース（fail_count=0,
+        # total>0）が誤って fail 化されない非後退確認。
+        row = _with_parity(_base_row(), total=1, fail_count=0)
+        self.assertEqual(summarize.parity_status(row), "ok")
+
 
 class GemmParityHelpersTests(unittest.TestCase):
     def test_gemm_parity_failures_filters_task_and_status(self):
