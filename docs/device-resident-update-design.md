@@ -45,7 +45,7 @@ summary.md 自身の注記（191 行目）が指摘するとおり、この差�
 | パラメータ保持 | `nn::Linear` がホスト `Tensor<f32>` を所有。毎ステップ `Linear::from_parameters` で新規構築（イミュータブルな丸ごと差し替え運用） | `crates/autodiff/src/nn/linear.rs`・`crates/autodiff/src/optim/sgd.rs:20` コメント |
 | 更新計算 | `optim::Sgd::step` がホスト側 `Tensor<f32>` ループで `torch.optim.SGD` の更新則（weight_decay → momentum → nesterov → 減算の式順序）を計算し、更新後 `Vec<Tensor<f32>>` を返す関数型 API | `crates/autodiff/src/optim/sgd.rs:1-23`（アルゴリズム引用）・`:183-200`（`step` シグネチャ・位置対応契約） |
 | 書き戻し | `Sequential::apply_parameters`（two-pass: 1 パス目で全層の shape 完全一致検証込み `Linear` 再構築、2 パス目で代入。#426 の置換前 shape 完全一致契約） | `crates/facade/src/compat/sequential.rs:229-` |
-| デバイス転送抽象 | `MemoryOps`（`alloc_zeroed`/`upload`/`download`）と `DeviceBuffer<f32>`（`Box<dyn BufferHandle>` 経由の不透明ハンドル・RAII 解放・空テンソル契約・download 同期契約）は `tensor-core::buffer` に実装済みだが、`BackendOps` の supertrait としては未結線（TASK-1.9c 時点で意図的に未結線。`backend_ops.rs` 冒頭コメント。本設計〈§3.1〉は supertrait 化ではなく `mem: &dyn MemoryOps` 明示引数で結線する） | `crates/tensor-core/src/buffer.rs:1-13`・`crates/tensor-core/src/backend_ops.rs:10-27` |
+| デバイス転送抽象 | `MemoryOps`（`alloc_zeroed`/`upload`/`download`）と `DeviceBuffer<f32>`（`Box<dyn BufferHandle>` 経由の不透明ハンドル・RAII 解放・空テンソル契約・download 同期契約）は `tensor-core::buffer` に実装済みだが、`BackendOps` の supertrait としては未結線（TASK-1.9c 時点で意図的に未結線。`backend_ops.rs` 冒頭コメント。本設計〈§3.1〉は supertrait 化ではなく `BackendOps::memory_ops()` アクセサ〈`self` から `mem` を導出するデフォルトメソッド〉で結線する） | `crates/tensor-core/src/buffer.rs:1-13`・`crates/tensor-core/src/backend_ops.rs:10-27` |
 | カーネル入口 | `BackendOps` はホスト `Tensor<f32>` 入出力契約。CPU 実装は追加転送コストなし、CUDA/Metal 実装は各メソッド内で H2D（`upload` 相当）→ カーネル → D2H（`download` 相当）を完結させる。GEMM 以外の一部カーネル（GPU 側 elementwise/reduction の一部）は `BackendError::Unsupported` fail-safe | `crates/tensor-core/src/backend_ops.rs:28-40`（trait 定義冒頭コメント）・`:83-103`（メソッド一覧） |
 | 数値一致 | バックエンド間統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」・FMA 契約（CPU: `f32::mul_add`、GPU: 既定 FMA 契約） | `.claude/rules/coding-rust.md` |
 | 隣接イシュー | #931（デバイスハンドル再利用の公開 API 設計。phase-2）・#932（optimizer facade 公開の設計判断）・#935（本設計の実装）・#936（parity・ベンチ非後退確認） | gh issue 参照 |
@@ -67,7 +67,7 @@ download 済み → 今回ステップの forward で再度 upload」という�
 
 ## 3. 更新経路（design decision 1）
 
-### 3.1 採用方針: `MemoryOps` は明示引数として渡す（supertrait 化はしない）+ デフォルトメソッド + 常駐 forward 入口
+### 3.1 採用方針: `BackendOps::memory_ops()` アクセサ経由で `mem` を導出する（supertrait 化はしない）+ デフォルトメソッド + 常駐 forward 入口
 
 `tensor-core::buffer.rs` は当初から「`MemoryOps` は `BackendOps` の
 supertrait となる想定（TASK-1.9c では結線しない）」と明記していた
@@ -82,29 +82,93 @@ Rust の可視性上真に公開の trait である。supertrait を追加する
 超え、trait 定義そのものへの破壊的変更である。`.claude/rules/security.md`
 A08・AGENTS.md の公開 API 非破壊契約に抵触するため不採用とする）。
 
-代わりに、`sgd_step_device`／`linear_forward_resident` の両メソッドへ
-**`mem: &dyn MemoryOps` を明示引数として追加する**。デフォルト実装は
-`self.download`/`self.upload` ではなく `mem.download`/`mem.upload` を
-呼ぶため、`BackendOps` 自身が `MemoryOps` を実装している必要が一切なく、
-trait 定義（`pub trait BackendOps { ... }`）は変更しない。呼び出し側
-（`autodiff::optim::DeviceParamStore`。§3.3a）は、各 `XBackendOps` が
-すでに `impl MemoryOps for XBackendOps`（#935 で追加。§3.2）を持つため、
-同じ具象値を `&dyn BackendOps` と `&dyn MemoryOps` の 2 通りの trait
-オブジェクトとして扱い、後者を `mem` 引数へ渡せばよい。
+**採用方針（改訂: PR #951 レビューで下記の「明示引数」方式が構造的に
+破綻することが判明したため、`BackendOps` 自身に `mem` を返させる方式へ
+置き換える）**: 旧稿は `sgd_step_device`／`linear_forward_resident`
+（および `DeviceParamStore::new`／`step`／`forward_resident`／
+`predict_resident`）のすべてに `mem: &dyn MemoryOps` を**呼び出し元が
+明示的に渡す引数**として追加していた。この方式は次の 2 点で破綻する
+（Cursor Bugbot 指摘・codex-review P1 の解消。詳細は旧 §3.2a を参照して
+いた自己/`mem` 同一性検査ごと本節で置き換える）:
 
-`tensor-core::BackendOps` に対し、次の 2 メソッドを追加する（既存メソッドの
+1. **呼び出し元が「同じ具象値」を 2 通りの trait オブジェクトとして
+   本当に用意できるとは限らない**。`DeviceParamStore::step` の唯一の
+   実引数は `tape: &Tape`（`ops` を所有する）であり、呼び出し元が
+   別途保持する `mem: &dyn MemoryOps` は**独立に構築・借用された値**に
+   なりうる。両者が偶然にも同一具象値に由来していても、「別々の
+   `Box`／別々の借用として渡される」構造自体は変わらない。
+2. **`facade` は元より `&dyn BackendOps` を一切保持できない**
+   （`REQ-12`。`facade::resolve_ops` は非公開関数で `BackendOps` を
+   `facade` の外へ一切出さない）。`Sequential::forward_resident`／
+   `predict_resident` は `facade` に実装されるため、旧稿が要求する
+   `mem: &dyn MemoryOps` を呼び出し元（アプリケーションコード）から
+   受け取る経路自体が REQ-12 の禁止する「任意 `BackendOps`／
+   `MemoryOps` 実装の facade への注入」を再導入してしまう。
+
+**解決策**: `mem` を独立引数として受け渡すのをやめ、`BackendOps` 自身に
+「自分に対応する `MemoryOps` ビューを返す」デフォルトメソッドを持たせる。
+これにより `mem` は常に `self` から導出され、`self` と `mem` が別々の
+値になる可能性が構造的に消える（両者を独立に比較・検証する必要が
+そもそもなくなる）:
+
+```rust
+pub trait BackendOps {
+    // 既存メソッドは変更しない。
+
+    /// この `BackendOps` 実装に対応する `MemoryOps` ビューを返す
+    /// （codex-review P1・Cursor Bugbot 指摘の解消: `mem` を呼び出し元が
+    /// 独立に用意する「明示引数」方式は、self と mem が別々の trait
+    /// オブジェクトになりうる構造そのものが破綻の原因だった。本メソッド
+    /// は `self` から `mem` を導出する唯一の経路とすることで、
+    /// 「self と mem が同一具象値に由来するか」を検証する必要自体を
+    /// 消す）。**デフォルトメソッドとして追加する**（`;` で終わる必須
+    /// メソッドにすると crates.io 公開済み trait への破壊的変更になる
+    /// ため、§3.1 冒頭の非破壊拡張方針を踏襲する）。既定は `None`
+    /// （`MemoryOps` 未実装のバックエンドは `sgd_step_device`／
+    /// `linear_forward_resident` の既定実装から `BackendError::
+    /// Unsupported` を受け取る——fail-open ではなく fail-closed）。
+    /// `impl BackendOps for XBackendOps`（#935）は `XBackendOps` 自身が
+    /// `impl MemoryOps for XBackendOps`（§3.2）を持つ場合、`Some(self)`
+    /// を返すようオーバーライドする。`&self`・ジェネリクスなし・
+    /// `Self: Sized` 境界なしのため object safety を壊さず（`Box<dyn
+    /// BackendOps + Send>` を含む既存呼び出し形態は変更されない）、
+    /// `Some(self)` は `XBackendOps` が両方の trait を実装している
+    /// 場合にのみ型検査を通る（`impl BackendOps for XBackendOps` の
+    /// 実装ブロック内で `self: &XBackendOps` が `&dyn MemoryOps` へ
+    /// unsize coercion されるだけであり、`unsafe` を要さない）。
+    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        None
+    }
+}
+```
+
+`sgd_step_device`／`linear_forward_resident` の両メソッドは、旧稿が
+外部引数として要求していた `mem: &dyn MemoryOps` を**削除**し、既定
+実装の内部で `self.memory_ops()` を呼んで導出する（`Ok`/`Some` で
+なければ `BackendError::Unsupported` を返す）。`BackendOps` 自身が
+`MemoryOps` を実装している必要は引き続きなく、trait 定義
+（`pub trait BackendOps { ... }`）へ supertrait を追加しない点は
+旧稿から変更しない。呼び出し側（`autodiff::optim::DeviceParamStore`。
+§3.3a）は `mem` を一切保持・受け渡ししなくなり、`tape.ops()`
+（`pub(crate)`。同一クレート `autodiff` 内でのみ到達可能）経由で得た
+`&dyn BackendOps` に対して `.memory_ops()` を呼ぶだけでよい。
+
+`tensor-core::BackendOps` に対し、次のメソッドを追加する（既存メソッドの
 シグネチャ変更なし・trait 定義への supertrait 追加もなし。TASK-1.9c の
-非破壊拡張方針〈`backend_ops.rs:19-27`〉を踏襲する真の非破壊拡張）:
+非破壊拡張方針〈`backend_ops.rs:19-27`〉を踏襲する真の非破壊拡張。
+`memory_ops()` は本節冒頭ですでに追加済みのため、ここでは
+`sgd_step_device` のみを追加する）:
 
 ```rust
 /// デバイス常駐パラメータの in-place SGD 更新入口（#934 設計・#935 実装）。
 ///
 /// `param` を `grad`（および `velocity`。momentum 有効時のみ `Some`）から
 /// 直接更新し、ホストへの往復を発生させない契約とする。既定実装は
-/// fail-safe（§3.2）。`mem` は呼び出し側が渡す同一バックエンドの
-/// `MemoryOps` 実装（`BackendOps` の supertrait ではない。§3.1 の
-/// 採否理由参照）。CPU/CUDA/Metal 各バックエンドは自身のカーネルで
-/// オーバーライドできる（デフォルト実装のままでも正しく動作する）。
+/// fail-safe（§3.2）。`mem` は外部引数として受け取らず、既定実装の内部で
+/// `self.memory_ops()`（本節冒頭で新設）を呼んで導出する（`None` なら
+/// `BackendError::Unsupported`）。CPU/CUDA/Metal 各バックエンドは自身の
+/// カーネルでオーバーライドできる（デフォルト実装のままでも正しく
+/// 動作する）。
 ///
 /// **デフォルトメソッドとして trait 定義に本体を持たせる**（`;` で終わる
 /// 必須メソッド宣言ではない。レビュー指摘 #934 のとおり、本体なしの
@@ -114,76 +178,35 @@ trait 定義（`pub trait BackendOps { ... }`）は変更しない。呼び出�
 /// 呼ぶ（velocity は `Some` のときのみ同様に往復させる）:
 fn sgd_step_device(
     &self,
-    mem: &dyn MemoryOps,
     param: &mut DeviceBuffer<f32>,
     grad: &DeviceBuffer<f32>,
     velocity: Option<&mut DeviceBuffer<f32>>,
     config: &SgdStepConfig,
 ) -> Result<(), BackendError> {
-    // 既定実装（§3.2）: download → ホスト参照実装（`f32::mul_add`。
-    // §5.2 の FMA 契約）で更新 → upload。§3.1 の採否理由（object safety・
-    // 非破壊性）により `self.download`/`self.upload` ではなく
-    // `mem.download`/`mem.upload` を呼ぶ。実装詳細（ホスト側計算関数へ
+    // 既定実装（§3.2）: self.memory_ops() で mem を導出（None なら
+    // Unsupported）→ download → ホスト参照実装（`f32::mul_add`。
+    // §5.2 の FMA 契約）で更新 → upload。実装詳細（ホスト側計算関数へ
     // の委譲）は #935 が確定する。
+    let mem = self.memory_ops().ok_or(BackendError::Unsupported)?;
     default_sgd_step_via_host(mem, param, grad, velocity, config)
 }
-
-/// `DeviceParamStore`（§3.3）常駐時の `nn::Linear` forward 入口
-/// （#934 設計・#935 実装）。既存の `gemm`/`add` 系メソッド（ホスト
-/// `Tensor<f32>` 入出力契約。§2）と異なり、`weight`/`bias` はデバイス
-/// 常駐のまま渡す。`input`/戻り値は本段階（§3.3）のスコープに従い
-/// ホスト `Tensor<f32>` のまま（forward/backward の完全デバイス常駐化は
-/// §6(b) のとおりスコープ外）。
-///
-/// **呼び出し元は 2 系統ある**（§3.3a で確定。旧稿はここを単一経路と
-/// 誤って記述していた）:
-/// 1. **Tape 非依存の resident 推論**（`predict` 相当。勾配不要）は、
-///    このメソッドを直接呼ぶ。これが本メソッド本来の主眼であり、下記の
-///    既定実装がそのまま使われる。**ただし `weight`/`bias` が
-///    `DeviceParamStore`（§3.3）由来の `DeviceBuffer` である場合、
-///    呼び出し元は `Sequential::predict_resident`（§3.3c。P0 レビュー
-///    指摘の解消）を経由する契約とする**。理由: 本メソッドは
-///    `tensor-core`（`DeviceParamStore`・poisoned 状態を一切知らない層）
-///    に閉じた「渡された `DeviceBuffer` をそのまま downloaded 値として
-///    計算するだけ」の入口であり、`DeviceParamStore` 由来のバッファを
-///    そのまま渡す直接呼び出しを許すと、§4.3 が定める poisoned 検査
-///    （`step`／`sync_to_host`／`forward_resident`／`predict_resident`）
-///    をこの経路だけが素通りしてしまう（`DeviceParamStore` に一切
-///    紐付かない、呼び出し元が独立に保持する `DeviceBuffer` に対する
-///    直接呼び出しは、poisoned という概念自体が存在しないため引き続き
-///    許可される）。**この契約は §3.3c が確定するとおりコードレビュー
-///    規律ではなく型・可視性で構造的に強制する**（`DeviceParamStore` は
-///    `weight`/`bias`/`velocity_*` の `&DeviceBuffer` を返す公開
-///    アクセサを一切持たず、`DeviceParamStore::with_resident_buffers`
-///    〈poisoned 検査済みスコープ付きクロージャ。§3.3c〉の中でしか
-///    参照を得られないため、この関数を `DeviceParamStore` 由来のバッファ
-///    で直接呼び出すこと自体が構造的に不可能である）。
-/// 2. **`Tape` 追跡下の学習 forward**（`Sequential::forward_resident`。
-///    §3.3b）は、**このメソッドを呼ばない**。VJP を成立させるには
-///    `Op::MatMul`/`Op::Add` 登録経路（`Tape` を持つ `autodiff` 層でしか
-///    組み立てられない）を通す必要があり、`tensor-core`（`autodiff` に
-///    非依存）に閉じたこのメソッドの内部では `Tape` へのノード登録が
-///    行えないため（§3.3b で結線を確定する）。
-///
-/// この 2 系統の重複を避けるため、`Sequential::forward_resident` は
-/// 「`mem.download` で weight/bias スナップショットを得る」処理のみ
-/// このメソッドの既定実装と共有し（下記本体を呼ぶ形にはしない。
-/// 独立に `mem.download` を呼ぶ。§3.3b）、以降の計算は既存
-/// `Op::MatMul`/`Op::Add` 経路に委ねる。既定実装は次のとおり:
-fn linear_forward_resident(
-    &self,
-    mem: &dyn MemoryOps,
-    input: &Tensor<f32>,
-    weight: &DeviceBuffer<f32>,
-    bias: Option<&DeviceBuffer<f32>>,
-) -> Result<Tensor<f32>, BackendError> {
-    // 既定実装（§3.2）: download(weight)・download(bias) → 既存
-    // gemm+add（ホスト Tensor<f32> 契約）へ委譲。CPU は §2 のとおり
-    // 追加転送コストなし。CUDA/Metal 最適化時は weight/bias の再
-    // アップロードを省略するオーバーライドに置き換えられる（§3.2）。
-    default_linear_forward_via_host(mem, input, weight, bias)
-}
 ```
+
+**旧稿が定義していた `linear_forward_resident`（Tape 非依存の resident
+推論専用メソッド）は本改訂で削除する**（codex-review P1・Cursor Bugbot
+指摘の解消。詳細は §3.3c を参照）。旧稿は「呼び出し元は 2 系統ある」と
+述べ、系統 1（Tape 非依存の resident 推論）の主要呼び出し元として
+`Sequential::predict_resident` を位置付けていたが、§3.3c の改訂により
+`predict_resident` は `forward_resident`（系統 2）と同じ `Tape`/`Var`
+経路を再利用する設計に変わったため、系統 1 を単独で担う呼び出し元が
+本設計内に存在しなくなった。`tensor-core` に呼び出し元のない default
+メソッドを追加すると、実装（#935）・数値一致テスト（#936）双方の対象が
+実際には駆動されない「死んだ拡張点」になり、`.claude/rules/coding-rust.md`
+の品質基準（未使用コードを残さない）とも整合しないため、本設計の
+スコープからは除外する。`DeviceParamStore` に一切紐付かない、呼び出し元が
+独立に保持する `DeviceBuffer` に対する resident 推論が将来必要になった
+場合は、その時点で改めて別 Issue として設計する（`sgd_step_device` と
+同じ `memory_ops()` 導出パターンをそのまま踏襲できる）。
 
 `SgdStepConfig`（`tensor-core` 側に新設。`autodiff::optim::SgdConfig` の
 lr・momentum・dampening・weight_decay・nesterov をそのまま保持する変換先の
@@ -217,40 +240,43 @@ SgdStepConfig` 等）は #935 が実装する。`tensor-core` は `autodiff` に
 ### 3.2 デフォルト実装の方針: fail-safe 合成 + object safety の確定
 
 既存の未実装カーネル（GPU 側 elementwise/reduction の一部）は `BackendError::
-Unsupported` を返す設計だが（`backend_ops.rs:28-33`）、`sgd_step_device`／
-`linear_forward_resident` は**それとは異なり「必ず成立するが遅い」合成を
-デフォルト実装とする**:
+Unsupported` を返す設計だが（`backend_ops.rs:28-33`）、`sgd_step_device`
+は**それとは異なり「必ず成立するが遅い」合成をデフォルト実装とする**:
 
 ```text
-sgd_step_device の既定実装        = download(param) → ホスト参照実装
-                                    （CPU と同一式順序・f32::mul_add）で
-                                    更新 → upload(param) で書き戻し
-                                    （velocity も同様に往復）
-linear_forward_resident の既定実装 = download(weight)・download(bias)
-                                    → 既存 gemm+add（ホスト Tensor 契約）
-                                    へ委譲
+sgd_step_device の既定実装 = self.memory_ops() で mem を導出（None なら
+                             Unsupported）→ download(param) → ホスト
+                             参照実装（CPU と同一式順序・f32::mul_add）
+                             で更新 → upload(param) で書き戻し
+                             （velocity も同様に往復）
 ```
 
-採否理由: `Unsupported` + 呼び出し側ホストフォールバックにすると、#935 の
-実装順序（CPU → CUDA → Metal）の途中で「まだデバイスカーネルを実装していない
-バックエンド」を使うコードパスがこれらのメソッドを呼べず、`autodiff::optim`
-側に「両方の経路（デバイス常駐 API と旧ホスト API）を呼び分ける分岐」を
-恒久的に持たせることになる。デフォルト実装が fail-safe に成立していれば、
-`autodiff::optim::DeviceParamStore`（§3.3）は常に `sgd_step_device`／
-`linear_forward_resident` だけを呼べばよく、各バックエンドが最適化された
-カーネルを持つかどうかは実装詳細に留められる。
+採否理由: `Unsupported` 一辺倒にすると、#935 の実装順序（CPU → CUDA →
+Metal）の途中で「まだデバイスカーネルを実装していないバックエンド」を
+使うコードパスがこのメソッドを呼べず、`autodiff::optim` 側に「両方の
+経路（デバイス常駐 API と旧ホスト API）を呼び分ける分岐」を恒久的に
+持たせることになる。デフォルト実装が fail-safe に成立していれば、
+`autodiff::optim::DeviceParamStore`（§3.3）は常に `sgd_step_device`
+だけを呼べばよく、各バックエンドが最適化されたカーネルを持つかどうかは
+実装詳細に留められる（`self.memory_ops()` が `None` を返す＝`MemoryOps`
+未実装のバックエンドについては `Unsupported` を返す。これは「必ず成立
+する」対象を「`MemoryOps` を実装済みのバックエンド」に限定するもので
+あり、fail-safe 方針と矛盾しない——fail-open ではなく fail-closed の
+`Unsupported` である点が §3.3c で新設する `sigmoid` 等の通常カーネルと
+同格の扱いに揃う）。
 
 **object safety・非破壊性の確定**（レビュー指摘 #934: line 157。旧稿は
 `BackendOps` が `MemoryOps` の supertrait ではないため、デフォルト実装が
 `Self: MemoryOps` を要求すると `Box<dyn BackendOps + Send>`（既存の
 呼び出し形態。`facade`/`autodiff` 側が保持する型）から呼び出せない、と
 して supertrait 化を提案していたが、これは crates.io 公開済み trait への
-破壊的変更になるため不採用と確定した。§3.1 のとおり、`mem: &dyn
-MemoryOps` を明示引数として渡す方式を採用する。`MemoryOps` は
-`buffer.rs:203` のドキュメンテーションコメントが明記するとおり
-「object-safe に設計している（`&dyn MemoryOps` として扱える）」ため、
-`&dyn MemoryOps` を関数引数として受け渡すこと自体に制約はない。
-`sgd_step_device`／`linear_forward_resident` のデフォルト実装は
+破壊的変更になるため不採用と確定した。§3.1 のとおり、`BackendOps::
+memory_ops()`（`&self` を取るだけの object-safe なデフォルトメソッド）
+経由で `mem` を導出する方式を採用する。`MemoryOps` は `buffer.rs:203`
+のドキュメンテーションコメントが明記するとおり「object-safe に設計
+している（`&dyn MemoryOps` として扱える）」ため、`Option<&dyn
+MemoryOps>` を返り値として持ち回ること自体に制約はない。
+`sgd_step_device` のデフォルト実装は `self.memory_ops()` の戻り値へ
 `mem.download(..)`／`mem.upload(..)` を呼ぶだけでよく、`BackendOps`
 trait 定義（`Box<dyn BackendOps + Send>` を含む既存の呼び出し形態）は
 一切変更されないため object safety・既存実装型の互換性いずれも
@@ -260,166 +286,40 @@ trait 定義（`Box<dyn BackendOps + Send>` を含む既存の呼び出し形態
 実装型）と `CpuMemory`／`CudaMemory`／`MetalMemory`（既存の `MemoryOps`
 実装型。`backend-{cpu,cuda,metal}/src/memory.rs`）は別構造体である
 （`ops.rs`／`memory.rs` 実装箇所を実測確認済み）。#935 は各
-`XBackendOps` へ `impl MemoryOps for XBackendOps` を追加する（既存
+`XBackendOps` へ `impl MemoryOps for XBackendOps` を追加し（既存
 `XMemory` の実装本体へ委譲する形でよく、`XBackendOps` が `XMemory` を
 フィールドとして保持するか、都度その場で構築するかは実装時に選べる
-実装詳細とする）。この `impl MemoryOps for XBackendOps` は §3.1 の
-trait 定義（supertrait 不採用）が要求するものではなく、**呼び出し側の
-利便性のため**に追加する: `DeviceParamStore` が同一の `XBackendOps`
-値を `&dyn BackendOps` と `&dyn MemoryOps`（= `mem` 引数）の 2 通りの
-trait オブジェクトとして扱えるようにする（同じ具象値を 2 度保持・
-生成する必要がない）。外部の `BackendOps` 実装型がこの `impl` を
-持たない場合でも、`BackendOps` trait 自体のコンパイルには一切影響
-しない（§3.1 の非破壊性）。**この「同じ具象値の 2 通りの trait
-オブジェクト」という構成そのものが、§3.2a で確定する `self`/`mem`
-同一性検査（ポインタ ID 比較）の前提となる**——`DeviceParamStore` が
-`mem` を得る唯一の経路をこの構成に限定するからこそ、`self` と `mem`
-が指す実体が常に同一であることを検査で機械的に確認できる（もし
-`mem` を無関係な `MemoryOps` 実装値から都度構築してよいことにすると、
-§3.2a の識別子ベース検査は意味を持たなくなる）。
+実装詳細とする）、`impl BackendOps for XBackendOps` の `memory_ops()`
+オーバーライドを `Some(self)` にする（`XBackendOps` 自身が両方の
+trait を実装しているため、`self: &XBackendOps` を `&dyn MemoryOps`
+として unsize coercion で返すだけであり `unsafe` を要さない）。外部の
+`BackendOps` 実装型がこの `impl` を持たない場合でも、`BackendOps`
+trait 自体のコンパイルには一切影響しない（§3.1 の非破壊性。
+`memory_ops()` の既定 `None` がそのまま使われ、`sgd_step_device` は
+`Unsupported` を返すのみ）。
 
-### 3.2a `self`（`BackendOps`）と `mem`（`MemoryOps`）の同一バックエンド・
-同一インスタンス検査（P1 レビュー指摘の解消）
-
-**指摘の核心 (1)（同一バックエンドの検証手段がない）**: §3.1／§3.3a は
-`sgd_step_device`／`linear_forward_resident`／`forward_resident` いずれも
-「呼び出し元が保持する同一バックエンドの `MemoryOps` 実装値をそのまま
-渡す」ことを前提としているが、これはドキュメント上の慣習（呼び出し元の
-責任）に過ぎず、`self: &dyn BackendOps` と `mem: &dyn MemoryOps` が実際に
-同一バックエンド・同一インスタンスであることを検証する仕組みが存在
-しなかった。`BackendOps::device()`（`backend_ops.rs:86`）による
-`param`/`grad` 間のデバイス一致検査（§4.2）は `self` と `mem` の組み
-合わせ自体を対象にしていないため、外部 `BackendOps` 実装（第三者が
-実装する `impl BackendOps for CustomBackend` 等。crates.io 公開 trait の
-ため想定内）を含む公開契約では、誤って別バックエンドの `mem`（例:
-`CudaBackendOps` に対し `MetalMemory` を渡す）を渡せてしまい、誤った
-handle の扱い・別 context での操作・静かな誤計算につながりうる。
-
-**指摘の核心 (2)（デバイス種別一致だけでは同一インスタンスを保証
-できない。P1 レビュー指摘の追加分の解消）**: 旧稿の採用方針は
-`mem.device() == self.device()` という `Device` 列挙値どうしの値比較
-のみを検査手段としていた。しかし `Device`（`device.rs:47`）は
-`Cuda(usize)`（ordinal）のように**デバイス種別＋序数**の値であって
-インスタンス識別子ではないため、同一 ordinal を指す 2 つの**別々の**
-バックエンドインスタンス（例: 同一 CUDA ordinal 0 に対して構築された、
-互いに無関係な 2 つの `CudaContext` に基づく `CudaBackendOps` と
-`CudaMemory`。あるいは #931 のデバイスハンドル再利用が確定する前の
-過渡期に、呼び出し元が誤って別セッションの `MemoryOps` 値を渡した
-場合）を、この値比較は区別できない。`self` の指す実行 context と
-`mem` の指す実行 context が実際には異なるにもかかわらず「一致」と
-判定してしまう検査は、§3.2a (1) が解消しようとした問題（誤った
-handle の組み合わせによる静かな誤計算）を部分的にしか塞げていない。
-
-**採用方針（識別子は「同一デバイス種別」ではなく「同一具象値」を
-検証する）**: 上記 (2) を解消するため、検査の主軸を `Device` の値
-比較から**ポインタ ID による同一具象値検査**へ置き換える。§3.2 で
-確定したとおり `mem` は「`self` と同じ具象値を `&dyn MemoryOps` として
-再解釈したもの」という構成（`impl MemoryOps for XBackendOps`）に限定
-されるため、`self` と `mem` が指すデータの先頭アドレスが一致するか
-どうかは「両者が文字どおり同一のバックエンドインスタンスに由来する
-か」を直接検証できる、値比較よりも厳密な識別子である。`BackendOps`・
-`MemoryOps` の両方に次のデフォルトメソッドを追加する:
-
-```rust
-pub trait BackendOps {
-    // 既存メソッドは変更しない。
-
-    /// この trait オブジェクトが指す実体（データ部分）の識別子を返す
-    /// （P1 レビュー指摘 (2) の解消: `Device` の値比較〈種別＋序数〉
-    /// だけでは同一デバイス種別の別インスタンスを区別できないため、
-    /// より厳密な「同一具象値かどうか」の識別に用いる）。
-    /// `self as *const Self as *const ()` は `&dyn BackendOps` の
-    /// fat pointer からデータポインタ（vtable を含まない部分）のみを
-    /// 取り出す標準的な手法（`Rc::ptr_eq`/`Arc::ptr_eq` が内部で使う
-    /// ものと同種）であり、参照を外れる（dereference する）操作を
-    /// 一切含まないため `unsafe` を要さない。**デフォルトメソッドとして
-    /// 追加する**ため、既存の外部 `impl BackendOps for X` は
-    /// オーバーライド不要でそのままコンパイルでき、かつ「オーバー
-    /// ライドし忘れて既定値のまま検査が機能しない」という失敗モード
-    /// （後述 §7 の `MemoryOps::device()` 旧稿が抱えていたのと同種の
-    /// リスク）が構造的に発生しない。
-    fn instance_id(&self) -> *const () {
-        self as *const Self as *const ()
-    }
-}
-
-pub trait MemoryOps {
-    // 既存メソッド（alloc_zeroed／upload／download）は変更しない。
-
-    /// [`BackendOps::instance_id`] と対になる識別子。実装・根拠は同一。
-    fn instance_id(&self) -> *const () {
-        self as *const Self as *const ()
-    }
-
-    /// この `MemoryOps` 実装が属するデバイスを返す（P1 レビュー指摘 (1)
-    /// の解消の一部として残す。`BackendOps::device()`〈backend_ops.rs:86〉
-    /// と対になる識別情報）。**デフォルトメソッドとして追加する**（`;`
-    /// で終わる必須メソッドにすると既存の外部 `impl MemoryOps for X` を
-    /// 破壊するため、§3.1／§3.2 と同じ非破壊拡張方針を踏襲する）。
-    /// **`self`/`mem` 同一性検査の合否は下記のとおり `instance_id()` が
-    /// 決定するため、本メソッドの役割は §4.2 の既存 `param`/`grad`
-    /// デバイス一致検査（`instance_id()` を持たない `Device` 値どうしの
-    /// 比較で足りる既存用途）との後方互換・診断用エラーメッセージの
-    /// 充実に限定される（`instance_id()` が一致していれば `device()` は
-    /// 論理的に必ず一致するため、`self`/`mem` 同一性検査そのものには
-    /// 不要——後述）。既定は `None`。
-    fn device(&self) -> Option<Device> {
-        None
-    }
-}
-```
-
-`sgd_step_device`／`linear_forward_resident` の既定実装（§3.1・§3.2）は、
-`mem.download`／`mem.upload` を呼ぶ**前に**次の検査を行う:
-
-```text
-if self.instance_id() != mem.instance_id() {
-    return Err(BackendMismatch);
-    // ポインタ ID が不一致 = self と mem が同一の具象値に由来しない
-    // （§3.2 の構成〈mem は self と同じ値の再解釈でなければならない〉
-    // に違反している）ことを意味し、デバイス種別が偶然一致していても
-    // fail-closed に拒否する（P1 レビュー指摘 (2) の解消）。エラー
-    // メッセージ生成時は `self.device()`／`mem.device()`（`Some`
-    // であれば）を診断情報として付記してよいが、判定そのものには
-    // 使わない。
-}
-```
-
-`instance_id()` はデフォルトメソッドであり、`impl MemoryOps for
-XBackendOps`（§3.2。#935 が追加）は明示的なオーバーライドを一切
-必要とせず常に正しい識別子を返す（`self as *const Self as *const ()`
-は具象型 `XBackendOps` へ委譲した時点で自動的にその値のアドレスを
-指す）ため、**§3.2a (1) の旧稿が抱えていた「`MemoryOps::device()` の
-オーバーライドを実装側が忘れると検査が常に `BackendMismatch` を返す
-（あるいは常に一致してしまう）」というフェイルモードは、`self`/`mem`
-同一性検査については構造的に存在しない**。`Device` ベースの
-`device()` はそれとは独立に §4.2 の既存用途（`param`/`grad` 間の
-デバイス一致検査）で使われ続けるため、各 `XMemory`
-（`CpuMemory`／`CudaMemory`／`MetalMemory`）が本メソッドをオーバー
-ライドして `Some(Device::Cpu)`／`Some(Device::Cuda(ordinal))`／
-`Some(Device::Metal)` を返すことは引き続き #935 の実装事項として
-引き渡す（§7）が、これは `self`/`mem` 同一性検査の正しさの前提
-条件ではない。
-
-新設する `BackendError::BackendMismatch`（variant 名は #935 で確定）は
-「`self`（`BackendOps`）と `mem`（`MemoryOps`）が同一の具象値に由来
-しない」ことを呼び出し元が判別できるための型付きエラーとする。
-`Sequential::forward_resident`（§3.3a）・`Sequential::predict_resident`
-（§3.3c。`DeviceParamStore::with_resident_buffers` 経由）についても、
-内部で `BackendOps` の各メソッドへ委譲する前に同じ検査を適用する
-（`forward_resident` は `ops`／`mem` の両方を明示引数として受け取る
-ため、同一箇所で検査できる）。
-
-**この検査が前提とする呼び出し契約**: `self`/`mem` 同一性検査は
-「`mem` が `self` と文字どおり同一の具象値の別 trait オブジェクト
-表現である」ことを要求する（§3.2 の構成そのもの）。将来的に「同一
-デバイス上の異なるインスタンス間で `mem` を使い回したい」という
-正当な要求が生じた場合（例: #931 のデバイスハンドル再利用設計が
-複数の論理ハンドルを許容する構成を採るケース）、本節の検査はその
-組み合わせを意図的に拒否する。これは本設計のスコープ外とし、
-必要になった時点で #931 側の結論を踏まえて再検討する（§7「#931／#932
-との整合前提」参照）。
-
+**旧稿にあった `self`（`BackendOps`）と `mem`（`MemoryOps`）の同一性
+検査（§3.2a・`instance_id()`／`BackendMismatch`）は本改訂で削除する**
+（Cursor Bugbot 指摘「Pointer identity rejects valid backends」「ZST
+instance IDs are not unique」の解消）。理由: 旧稿は `mem` を「呼び出し元が
+独立に用意して渡す引数」として扱っていたため、`self` と `mem` が本当に
+同一具象値に由来するかを実行時に検証する必要があった。しかしこの検証は
+2 つの理由で構造的に機能しなかった——(a) `self as *const Self as *const
+()` によるポインタ比較は、`DeviceParamStore::step` が `tape` 所有の
+`Box<dyn BackendOps>` と呼び出し元が別途保持する `mem` を渡す構成である
+限り、両者が同一の `Box` 割り当てになることはなく、実運用の呼び出しが
+常に不一致と判定される（正当な呼び出しを fail-closed に拒否する）。
+(b) `CpuBackendOps`／`MetalBackendOps` のような ZST（ゼロサイズ型）は
+異なるインスタンスへの参照がダングリングポインタとして同一アドレスを
+指しうるため、`instance_id()` は異なるインスタンスを区別できない場合が
+ある（fail-open）。§3.1 の改訂（`mem` を `self.memory_ops()` から導出する
+方式へ変更）はこの検査が対象としていた「`self` と `mem` が別々の値に
+なりうる」という前提そのものを消す。`mem` は常に `self` 自身が返す値で
+あるため、両者が異なる具象値に由来する余地が構造的に存在せず、実行時の
+同一性検査は不要になる。新設した `BackendError::BackendMismatch`
+variant（旧稿）もこの用途では不要となるため追加しない（§4.2 の
+`param`/`grad` 間デバイス一致検査は `DeviceBuffer::device()` の値比較を
+用いる別の既存検査であり、本節の削除とは無関係にそのまま維持する）。
 ### 3.3 段階設計: 「param + optimizer 状態のみ常駐、勾配は毎ステップ 1 回 upload」
 
 現行 `Tape::backward` はホスト `Tensor` を返す（forward/backward の完全
@@ -489,11 +389,29 @@ forward 呼び出しごとに 1 回）と **grad の upload**（1 ステップ�
   代わりに `Sequential::trainable_parameters()`（既存 API。`apply_parameters`
   と同じ並び順契約〈§4.2「位置対応契約」・`sgd.rs:183-200`〉）が返す
   `Vec<&Tensor<f32>>` 相当の「学習対象パラメータの並び」をそのまま
-  受け取る形にする: `DeviceParamStore::new(mem: &dyn MemoryOps, params:
+  受け取る形にする: `DeviceParamStore::new(tape: &Tape, params:
   &[TrainableParam])`（host `Tensor<f32>` から `DeviceBuffer<f32>` への
-  upload を行うため、他のデバイス操作 API〈§3.1／§3.2／§3.2a／§3.3a〉と
-  同様に `mem: &dyn MemoryOps` を明示引数として受け取る。§3.3a で一度検出・
-  修正した `forward_resident` の mem 引数欠落と同種の欠落を未然に防ぐ）。
+  upload を行うため `mem` を要するが、`mem: &dyn MemoryOps` を外部引数
+  として受け取ることはしない。**`DeviceParamStore` は `autodiff::optim`
+  に属し、`Tape`（`autodiff::tape`）と同一クレートであるため、`Tape::
+  ops()`〈`pub(crate)`。`tape.rs:308`〉へ直接アクセスできる**——この
+  crate 内可視性は `DeviceParamStore::new` の呼び出し元が `facade` で
+  あっても崩れない（`pub(crate)` は「そのアイテムを定義したコード」の
+  可視性であり、「そのコードを呼び出す側」の可視性ではないため、
+  `DeviceParamStore::new` の実装本体〈`autodiff` 側で書かれる〉は
+  `tape.ops()` を呼べる。§3.3a 末尾の `forward_resident` シグネチャで
+  この非対称——`autodiff::optim` は `tape.ops()` に届くが `facade` は
+  届かない——を利用する）。したがって `new` は内部で `tape.ops().
+  memory_ops()`〈§3.1〉から `mem` を導出し、`self.device = tape.ops().
+  device()`〈`BackendOps::device()`。既存の必須メソッドで常に正しい値を
+  返す〉を保持する（後述 `Sequential::predict_resident` が
+  `facade::tape_for(store.device())` を呼ぶために必要。§3.3c）。
+  旧稿の `mem: &dyn MemoryOps` 明示引数は削除する（§3.1 の改訂と同じ
+  理由: 呼び出し元〈facade〉が独立に `mem` を用意する経路は REQ-12 が
+  禁じる `BackendOps`/`MemoryOps` 実装の facade への注入を再導入する
+  ため。codex-review P1「'forward_resident' では要求されたバックエンド
+  同一性検査を実装できない」の解消——この経路を `tape: &Tape` 単独に
+  揃えることで、`forward_resident`〈後述〉も同じパターンを踏襲できる）。
   （`TrainableParam` は `autodiff` 側に新設する `{ weight: &Tensor<f32>,
   bias: Option<&Tensor<f32>> }` 相当の平坦なスライス型。確定シグネチャ
   は #935）。呼び出し元（`facade::compat::Sequential::forward_resident`
@@ -530,48 +448,42 @@ forward 呼び出しごとに 1 回）と **grad の upload**（1 ステップ�
   出会うたびにこの trainable 層インデックスを別途カウントアップして
   対応するキーを引く（活性化層はカウントしない）。既存の位置対応契約
   そのものは変更しないため、新たな対応規則を追加で決定する必要はない。
+- **`DeviceParamStore::device(&self) -> Device`**（新設。`new` が
+  `tape.ops().device()` から取得し内部フィールドとして保持した値を
+  そのまま返す読み取り専用アクセサ）。`BackendOps::device()`
+  （`backend_ops.rs:86`）は既存の**必須**メソッド（デフォルトを持たない
+  ため実装漏れがありえない）であり、旧稿が §3.2a で持ち出した
+  `MemoryOps::device()`（デフォルト `None`。実装漏れで fail-open しうる）
+  とは異なる、常に信頼できる値である。この `device()` アクセサは
+  `Sequential::predict_resident`（§3.3c）が「`store` に対応する
+  `Tape` を自前で構築する」ために使う。
 - **新規 forward 入口**: `Sequential` に既存 `forward` を置き換えない
   追加メソッド `forward_resident<'t>(&self, tape: &'t Tape, input: &Var<'t>,
-  store: &mut DeviceParamStore, mem: &dyn MemoryOps) -> Result<Var<'t>,
-  AutodiffError>`（仮称。確定シグネチャは #935）を追加する。**`mem: &dyn
-  MemoryOps` を明示引数として受け取る（codex-review 指摘の解消）**:
-  §3.3b のとおり `forward_resident` は各層で `mem.download` を呼ぶ必要が
-  あるが、`Sequential`（`facade::compat::sequential::Sequential`）が
-  保持するのは `&dyn BackendOps`（または `Box<dyn BackendOps + Send>`）の
-  みであり、`&dyn BackendOps` から `&dyn MemoryOps` へ実行時に再変換する
-  安全な手段はない（trait オブジェクトの downcast は対象の具象型を
-  知らない限り成立せず、§3.2 で確定した「supertrait 化はしない」方針とも
-  整合しない）。したがって `mem` は `sgd_step_device`／
-  `linear_forward_resident`（§3.1）と同じ設計軸で、**呼び出し元が保持する
-  同一バックエンドの `MemoryOps` 実装値をそのまま明示引数として渡す**
-  （旧稿はこの引数を欠落させており、§3.3b の学習経路が実装不能だった。
-  呼び出し元は §3.4 のとおり `facade` 側であり、`Sequential` 初期化時に
-  `BackendOps` と対になる `MemoryOps` 実装値〈同一 `XBackendOps` に対する
-  `impl MemoryOps for XBackendOps`。§3.2〉を既に把握しているため、
-  `forward_resident` 呼び出し時にそれをそのまま渡せばよく、`Store` 側に
-  `MemoryOps` の所有権を持たせる代替案〈`DeviceParamStore` が自身の
-  `mem` を保持する案〉は採らない: `DeviceParamStore` は tape とも
-  backend インスタンスとも独立な寿命を持つ設計〈§4.1〉であり、`mem` の
-  所有権まで持たせると特定バックエンドインスタンスへの暗黙の結び付きが
-  生じ、§4.1 の「バックエンド／tape のいずれの寿命にも依存しない」設計
-  意図と矛盾する）。**`store` を `&mut` で受け取る**
-  （`&` ではない）: §3.3b のとおり、この呼び出しが生成する weight/bias
-  leaf の `NodeId` を `store` 自身の内部状態として書き込むため（呼び出し
-  元がこの対応表を別途持ち回る必要をなくす。Cursor Bugbot 指摘の解消。
-  下記参照）。内部実装は既存 `forward` と同じ層イテレーションだが、
-  各 `Linear` 層について自身のホスト `weight`/`bias` の代わりに `store`
-  から対応するインデックスの `DeviceBuffer` を読む。**`BackendOps::
-  linear_forward_resident`（§3.1）は呼ばない**——同メソッドは
-  `tensor-core`（`Tape`/`Var` を知らない）に閉じた「downloaded 値を
-  ホスト経由で計算するだけ」の入口であり、weight/bias の VJP を
-  成立させる `Op::MatMul`/`Op::Add` 登録は `autodiff` 層（`Tape` を
-  保持する層）でしか組み立てられないため（§3.1 の「呼び出し元は 2 系統
-  ある」注記・レビュー指摘 #934 の重複 2 件〈resident forward の出力が
-  どの Op/NodeId として Tape に登録されるか未定義〉の解消）。入力
-  バッチ・中間活性・活性化関数（ReLU 等）は既存 `forward` と同一。
-  weight/bias の勾配（VJP）が成立するための結線は §3.3b で確定する
-  （レビュー指摘 #934: line 233 の解消。旧稿の「登録ロジックは変更
-  しない」という記述は誤りであり、本節で訂正する）。
+  store: &mut DeviceParamStore) -> Result<Var<'t>, AutodiffError>`
+  （仮称。確定シグネチャは #935）を追加する。**`mem`／`ops` のいずれも
+  引数に持たない（codex-review P1「'forward_resident' では要求された
+  バックエンド同一性検査を実装できない」の解消）**: 旧稿は本メソッドが
+  `mem: &dyn MemoryOps` を明示引数として受け取ると定めていたが、
+  `Sequential`（`facade::compat::sequential::Sequential`）は REQ-12 に
+  より `&dyn BackendOps`/`&dyn MemoryOps` のいずれも一切保持・受け取り
+  できない（`facade::resolve_ops` は非公開関数。§3.1 冒頭で確定した
+  破綻理由 2 点のうち (2) がここで顕在化していた）。**採用方針**:
+  `mem` を要する「weight/bias スナップショットの download + `Tape` leaf
+  登録」処理そのものを `facade` から `autodiff::optim::DeviceParamStore`
+  側の新設メソッドへ移す（§3.3b で確定する
+  `DeviceParamStore::register_resident_leaves`）。`facade` の
+  `forward_resident` はこのメソッドを `tape`（自身がすでに引数として
+  持つ）だけで呼び出せばよく、`mem`/`ops` に一切触れない。**`store`
+  を `&mut` で受け取る**（`&` ではない）: §3.3b のとおり、この呼び出しが
+  生成する weight/bias leaf の `NodeId` を `store` 自身の内部状態として
+  書き込むため（呼び出し元がこの対応表を別途持ち回る必要をなくす。
+  Cursor Bugbot 指摘の解消。下記参照）。内部実装は既存 `forward` と
+  同じ層イテレーションだが、各 `Linear` 層について自身のホスト
+  `weight`/`bias` の代わりに `register_resident_leaves` が返す
+  `Var`（`store` から download・leaf 登録済み）を使う。weight/bias の
+  勾配（VJP）が成立するための結線は §3.3b で確定する（レビュー指摘
+  #934: line 233 の解消。旧稿の「登録ロジックは変更しない」という
+  記述は誤りであり、本節で訂正する）。
 - **既存 `forward` との関係**: 既存 `forward`（ホスト `Tensor` のみで
   完結）は変更・削除しない（§3.5 の「既存 API 非破壊」方針）。
   `DeviceParamStore` を使う学習ループは `forward_resident` を呼び、
@@ -580,83 +492,107 @@ forward 呼び出しごとに 1 回）と **grad の upload**（1 ステップ�
 
 ### 3.3b 常駐パラメータの勾配経路・VJP（レビュー指摘 #934: line 233 の解消）
 
-**指摘の核心**: `linear_forward_resident`（§3.1）は `weight`/`bias` を
-`DeviceBuffer` として直接受け取るのみで、既存の `Tape::backward` が
-勾配を計算できる対象（`Op::MatMul` が保持する `NodeId` に対応する
-`Var` leaf）としては一切登録されない。旧稿はこの点を「forward の
-配線を変えるだけ」と過小評価しており、実際には weight/bias に対する
-VJP が成立しない（`Sgd::step`／`sgd_step_device` が必要とする `grad`
-の出所が設計上欠落する）。本節はこの結線を確定する。
+**指摘の核心**: 旧稿が §3.1 に置いていた `linear_forward_resident` は
+`weight`/`bias` を `DeviceBuffer` として直接受け取るのみで、既存の
+`Tape::backward` が勾配を計算できる対象（`Op::MatMul` が保持する
+`NodeId` に対応する `Var` leaf）としては一切登録されない構造だった。
+旧稿はこの点を「forward の配線を変えるだけ」と過小評価しており、実際
+には weight/bias に対する VJP が成立しない（`Sgd::step`／
+`sgd_step_device` が必要とする `grad` の出所が設計上欠落する）。本節は
+この結線を確定する（`linear_forward_resident` 自体は §3.1 の改訂で
+本設計から削除済みであり、以下は §3.1 とは独立に完結する）。
 
-**採用方針**: `Sequential::forward_resident` 自身が weight/bias の
-「その時点のスナップショット」を毎 forward 呼び出しで `mem.download`
-し、**既存 `Op::MatMul`/`Op::Add` 登録経路（`Linear` 単体ではなく
-`Sequential` 内の forward 実装が既に持つ経路）にそのまま乗せて** `Tape`
-の leaf `Var` として登録する方式を採る（`BackendOps::
-linear_forward_resident` は §3.1 のとおりこの経路では呼ばれず、
-Tape 非依存の resident 推論専用に残す）:
+**採用方針（改訂: `mem` への到達不能な `facade` の代わりに
+`autodiff::optim` 側へ処理を寄せる）**: 旧稿は `Sequential::
+forward_resident`（`facade` に実装）自身が `store.with_resident_
+buffers` のクロージャ内で `mem.download` を呼ぶ構成だったが、§3.3a の
+改訂により `forward_resident` は `mem` を一切受け取らない。そこで
+weight/bias の「その時点のスナップショットを download し `Tape` の
+leaf として登録する」処理そのものを `autodiff::optim::
+DeviceParamStore` 側の新設メソッドへ移す:
 
-- **アクセス経路は `store.with_resident_buffers`（§3.3c）に限定する
-  （codex-review P1〈line 543〉指摘の解消: `DeviceParamStore` は
-  `weight`/`bias` の生の `&DeviceBuffer` を返す public アクセサを
-  §3.3c のとおり一切持たないため、旧稿の `store.weight(layer_idx)`／
-  `store.bias(layer_idx)` という直接呼び出しはそもそも実装不能
-  だった。`facade` クレート〈`forward_resident` の実装場所〉は
-  `autodiff::optim::DeviceParamStore` の非公開フィールドへ触れられず、
-  §3.3c が確定した「個別バッファへの唯一のアクセス経路」という制約は
-  `predict_resident` だけでなく `forward_resident` にも等しく適用
-  される）**。`Sequential::forward_resident` は各層のホスト
-  `Tensor<f32>` スナップショットを次の手順で取得する:
-  1. `store.with_resident_buffers(|buffers| { ... })`（§3.3c。`&self`
-     で足りる読み取り専用貸し出し）を 1 回呼び、クロージャ内で
-     `Sequential.layers` を辿って `Linear` 層に出会うたびに対応する
-     `buffers[trainable_idx]`（`ResidentLayerBuffers`）を引き、
-     `mem.download(buffers[trainable_idx].weight)`／
-     `mem.download(buffers[trainable_idx].bias)`（`MemoryOps`。§3.1 の
-     `mem` 引数と同じ実装値）でホスト `Tensor<f32>` スナップショットを
-     取得して `Vec<(usize, Tensor<f32>, Option<Tensor<f32>>)>`
-     （層インデックス・weight スナップショット・bias スナップショット）
-     として**所有権ごと**クロージャの戻り値 `R` に積んで返す。
-  2. §3.1 で確定した `with_resident_buffers` の `for<'a> FnOnce(&'a
-     [ResidentLayerBuffers<'a>]) -> Result<R, BackendError>` という
-     HRTB 境界により、`R`（このスナップショット列）は
-     `ResidentLayerBuffers<'a>` が持つ `&DeviceBuffer` 参照を一切
-     含められない（含めれば型検査に失敗する）ため、ここで得られる
-     `Vec<Tensor<f32>>` は `DeviceBuffer` から独立した所有権付きの
-     ホスト値であることが型システムにより保証される。したがって
-     `with_resident_buffers` の呼び出しが返った時点（クロージャの
-     借用スコープが終わった時点）で `store` への `&mut` アクセスが
-     再び可能になり、これは同一メソッド内で `store` を後述の
-     `pending_grad_sources` 書き込み（`&mut DeviceParamStore`。§3.3a）
-     に使うために必要（同時に `&self` の読み取り借用と `&mut self` の
-     書き込み借用を両立させる必要がないため、借用チェッカーと矛盾
-     しない）。
-  3. 得られたスナップショット列を順に `tape.var(&snapshot)`（既存
-     API。`tape.rs:288`。leaf ノードとして登録する既存の入口）で
-     **毎 forward 呼び出しで新規に**登録する（前ステップの `NodeId`
-     を再利用しない。§4.1 の「stale なホスト値を現在のパラメータ
-     として使わせない」契約と整合させるため、スナップショットは常に
-     その回の `download` 結果のみを表す）。以降の計算（`gemm`+`add`・
-     活性化関数）は既存 `forward` と同じ `Op::MatMul`／`Op::Add`
-     登録経路にそのまま乗せる。既存の VJP 実装（`Op::MatMul`/`Op::Add`
-     の backward）は一切変更しない。
-  - poisoned であれば `with_resident_buffers` がクロージャを一切
-    呼ばず `BackendError`（poisoned variant）を返すため、
-    `forward_resident` はこの 1 回の呼び出しだけで §4.3 の poison
-    チェック（下記参照）を自動的に満たす。
-  - weight/bias の再アップロードを省略する最適化オーバーライド
-    （§3.1 の resident 推論専用経路側の最適化）は、この
-    `forward_resident` の `mem.download` 自体には影響しない
-    （両者は §3.1 のとおり別経路のため）。「勾配を計算するために
-    weight/bias が host 値として少なくとも一度観測可能であること」は
-    `forward_resident` を使う限り常に必要であり、省略しない。
+```rust
+impl DeviceParamStore {
+    /// weight/bias の現在値を download し、`tape` の leaf `Var` として
+    /// 登録したうえで、生成した `NodeId` を `TapeId` と併せて
+    /// `pending_grad_sources`（下記）へ書き込む（`forward_resident`
+    /// 専用。§3.3a）。`&mut self` で受け取る理由: 本メソッド自身が
+    /// `pending_grad_sources` を書き込む（呼び出し元の `facade` 側に
+    /// 書き込みロジックを持たせない。Cursor Bugbot 指摘の解消。下記
+    /// 参照）。
+    ///
+    /// **`mem`/`ops` を一切受け取らない（codex-review P1 の解消）**:
+    /// `DeviceParamStore` は `autodiff::optim` に属し、`Tape`
+    /// （`autodiff::tape`）と同一クレートであるため、本メソッドの
+    /// 実装本体は `tape.ops()`〈`pub(crate)`。§3.3a〉→
+    /// `.memory_ops()`〈§3.1〉という経路で `mem` を自ら導出できる。
+    /// 呼び出し元（`facade`）はこの経路に一切触れない。
+    ///
+    /// 内部実装: `self.with_resident_buffers(|buffers| { ... })`
+    /// （poisoned 検査済みスコープ付きクロージャ。§3.3c）を 1 回呼び、
+    /// クロージャ内で各 trainable 層の `buffers[i].weight`／
+    /// `buffers[i].bias` を `mem.download(..)` してホスト
+    /// `Tensor<f32>` スナップショットを取得し、`Vec<(usize,
+    /// Tensor<f32>, Option<Tensor<f32>>)>` として**所有権ごと**
+    /// クロージャの戻り値へ積んで返す（§3.3c の `for<'a>` HRTB 境界
+    /// により、`&DeviceBuffer` 参照自体はクロージャのスコープ外へ
+    /// 一切持ち出せない。持ち出せるのは download 済みの独立した
+    /// ホスト値のみ）。`with_resident_buffers` の呼び出しが返った
+    /// 時点（クロージャの借用スコープが終わった時点）で `self` への
+    /// `&mut` アクセスが再び可能になるため、続けて各スナップショットを
+    /// `tape.var(&snapshot)`（既存 API。`tape.rs:288`）で**毎回新規に**
+    /// leaf 登録し（前ステップの `NodeId` を再利用しない。§4.1 の
+    /// 「stale なホスト値を現在のパラメータとして使わせない」契約と
+    /// 整合）、生成された `NodeId` 列を `tape.id()`（`TapeId`。下記）と
+    /// 併せて `self.pending_grad_sources` へ書き込んでから、呼び出し元へ
+    /// 返す `Var<'t>` 列を組み立てる。poisoned であれば
+    /// `with_resident_buffers` がクロージャを一切呼ばず `BackendError`
+    /// （poisoned variant）を返すため、本メソッドはこの 1 回の呼び出し
+    /// だけで §4.3 の poison チェックを自動的に満たす。
+    ///
+    /// 戻り値の `ResidentLeafVars<'t> { trainable_idx: usize, weight:
+    /// Var<'t>, bias: Option<Var<'t>> }`（新設。`autodiff::optim` に
+    /// 定義し `pub` とする——`facade` が層イテレーション時にこの型を
+    /// 直接扱うため）は trainable 層インデックス順（§3.3a の対応表と
+    /// 同じ並び）の `Vec` として返す。
+    pub fn register_resident_leaves<'t>(
+        &mut self,
+        tape: &'t Tape,
+    ) -> Result<Vec<ResidentLeafVars<'t>>, BackendError> {
+        // 実装詳細は #935 が確定する。
+        unimplemented!()
+    }
+}
+```
+
+- `Sequential::forward_resident`（facade）は `store.register_resident_
+  leaves(tape)?` を 1 回呼び、返る `Vec<ResidentLeafVars<'t>>` を
+  trainable 層インデックスで引きながら `self.layers` を辿る。`Linear`
+  層では対応する `ResidentLeafVars` から `fandhe_ai_autodiff::nn::
+  linear::LinearVars { weight, bias }`（既存の公開フィールド型。
+  `Linear::bind`〈`linear.rs:131`〉が返すものと同型）を構築して
+  `.forward(&current)` を呼ぶ（既存 `SequentialVars::forward`
+  〈`sequential.rs:315`〉が `self.linears`〈`Linear::bind` 由来の
+  `LinearVars`〉に対して行っているのと全く同じ呼び出しパターンを、
+  `DeviceParamStore` 由来の `LinearVars` に対して行うだけである）。
+  活性化層では既存 `forward`／`SequentialVars::forward` と同じく
+  `layer.forward(&tape.0, &current)`（`Module::forward` への多態
+  dispatch）を呼ぶ。**この設計により、`forward_resident` の計算列は
+  `SequentialVars::forward` と同一の `Var` API・同一の `Module::
+  forward` 経路をたどるため、`Op::MatMul`/`Op::Add`/活性化関数いずれの
+  VJP・数値計算も既存実装をそのまま再利用でき、新規の弱いレイヤ
+  （旧稿の `linear_forward_resident`／`ops.sigmoid` 等）を一切必要と
+  しない**。`facade` は `mem`／`ops`／`BackendOps`／`MemoryOps` の
+  いずれにも一切触れない。
 - **NodeId の保持先は `DeviceParamStore` 自身**（Cursor Bugbot 指摘の
   解消: 呼び出し元が `Gradients::get` 用のハンドルを得られない問題）。
-  `forward_resident` は `&mut DeviceParamStore`（§3.3a）で受け取った
-  `store` へ、各層で生成した weight/bias leaf の `NodeId`（`Var`
-  自体ではなく `NodeId`。`Var<'t>` は `Tape` への借用を持つため
-  `DeviceParamStore`〈`Tape` とは独立の寿命。§4.1〉のフィールドとして
-  保持できない）を、層インデックスと対応付けて書き込む
+  上記のとおり `register_resident_leaves`（`&mut self` で `store` 自身が
+  実行する。`forward_resident` から見れば `store.register_resident_
+  leaves(tape)?` という 1 回の呼び出しの内部で完結する）が、生成した
+  weight/bias leaf の `NodeId`（`Var` 自体ではなく `NodeId`。`Var<'t>`
+  は `Tape` への借用を持つため `DeviceParamStore`〈`Tape` とは独立の
+  寿命。§4.1〉のフィールドとして保持できない）を、層インデックスと
+  対応付けて自身へ書き込む
   （`pending_grad_sources: Option<{ tape_id: TapeId, entries: Vec<{
   weight: NodeId, bias: Option<NodeId> }> }>` 相当。前回分は forward
   呼び出しのたびに上書きする「1 forward 分のみ保持する」一時状態であり、
@@ -759,9 +695,14 @@ Tape 非依存の resident 推論専用に残す）:
   単に適用されない」であり、既存の「`step` を呼び忘れた」場合と
   同じ挙動（無害だが学習が進まない）に留まる。
 - `tape.backward()` 実行後、呼び出し元は `DeviceParamStore::step(&mut
-  self, tape: &Tape, grads: &Gradients, mem: &dyn MemoryOps, config:
-  &SgdStepConfig) -> Result<(), BackendError>`（仮称。確定シグネチャは
-  #935）を呼ぶ。`step` はまず上記の `TapeId` 一致検査を行い、通過した
+  self, tape: &Tape, grads: &Gradients, config: &SgdStepConfig) ->
+  Result<(), BackendError>`（仮称。確定シグネチャは #935）を呼ぶ。
+  **`mem` を外部引数として受け取らない**（`new`／`register_resident_
+  leaves` と同じ理由: `step` は `autodiff::optim` に属し `tape.ops()`
+  〈`pub(crate)`〉→ `.memory_ops()`〈§3.1〉で内部から導出できるため。
+  §3.1 の `sgd_step_device`〈`self.memory_ops()` で導出〉と同じ経路を、
+  `step` 自身も `tape.ops()` を `self` として辿ることでそのまま使える）。
+  `step` はまず上記の `TapeId` 一致検査を行い、通過した
   場合のみ内部で `pending_grad_sources` の各 `NodeId` に
   ついて `Var::from_raw(tape, node_id)`（`autodiff` クレート内部限定の
   `pub(crate)` コンストラクタ。`autodiff::optim` は同一クレートのため
@@ -769,7 +710,8 @@ Tape 非依存の resident 推論専用に残す）:
   （`backward.rs:49`。既存 `Gradients` API をそのまま使う）で
   `grad_weight`／`grad_bias`（ホスト `Tensor<f32>`）を取り出したうえで、
   `Sequential::trainable_parameters()` と同じ並び順（§3.3a）で
-  `sgd_step_device` へ 1 パラメータずつ upload・呼び出しする。これは
+  `tape.ops().sgd_step_device(..)` を 1 パラメータずつ upload・
+  呼び出しする。これは
   §3.3 が定める「`Tape::backward` が返すホスト勾配を `sgd_step_device`
   呼び出し直前に 1 回だけ `upload` する」という転送モデルとそのまま
   整合する。呼び出し元は `NodeId`／`Var` を一切自分で保持する必要が
@@ -813,47 +755,51 @@ VJP 用スナップショット・勾配、の 3 種が「毎ステップ／毎 
 (2) poisoned 検査の迂回防止をコードレビュー規律のみに依存している。
 Cursor Bugbot 指摘の解消: resident 推論が活性化関数を実行しない）
 
-**指摘の核心 (1)（poisoned 検査の迂回）**: §3.1 で確定した `BackendOps::
-linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 1
-（Tape 非依存の resident 推論）を「このメソッドを直接呼ぶ」とだけ定めて
-おり、`weight`/`bias` の `DeviceBuffer` を `DeviceParamStore` から
-読み出して渡す具体的な経路には一切触れていなかった。`DeviceParamStore`
-は `sgd_step_device` の実行時エラー（§4.3）により poisoned 状態へ
-遷移しうるが、poisoned 検査は `step`／`sync_to_host`／`forward_resident`
-の 3 箇所にしか課されておらず（旧稿の §4.3 最終箇条）、
-`linear_forward_resident` を直接呼ぶ resident 推論はこの 3 箇所の
-どれにも該当しない。結果として、更新途中の実行時エラーで一部パラメータ
-のみ更新された poisoned な `DeviceParamStore` から `weight`/`bias` の
-`DeviceBuffer` 参照を取り出し、それをそのまま `linear_forward_resident`
-へ渡せば、poisoned フラグを一切検査せずに破損混在状態のバッファで推論が
-実行できてしまう（fail-closed 契約・AGENTS.md「fail-closed の維持（P0）」
-への抵触）。
+**指摘の核心 (1)（poisoned 検査の迂回）**: 旧稿が §3.1 に置いていた
+`BackendOps::linear_forward_resident`（本改訂で削除済み。§3.1）の
+「呼び出し元は 2 系統」記述は、系統 1（Tape 非依存の resident 推論）を
+「このメソッドを直接呼ぶ」とだけ定めており、`weight`/`bias` の
+`DeviceBuffer` を `DeviceParamStore` から読み出して渡す具体的な経路に
+は一切触れていなかった。`DeviceParamStore` は `sgd_step_device` の
+実行時エラー（§4.3）により poisoned 状態へ遷移しうるが、poisoned 検査は
+`step`／`sync_to_host`／`forward_resident` の 3 箇所にしか課されて
+おらず（旧稿の §4.3 最終箇条）、`linear_forward_resident` を直接呼ぶ
+resident 推論はこの 3 箇所のどれにも該当しなかった。結果として、
+更新途中の実行時エラーで一部パラメータのみ更新された poisoned な
+`DeviceParamStore` から `weight`/`bias` の `DeviceBuffer` 参照を
+取り出し、それをそのまま渡せば poisoned フラグを一切検査せずに破損
+混在状態のバッファで推論が実行できてしまう（fail-closed 契約・
+AGENTS.md「fail-closed の維持（P0）」への抵触）という問題があった。
+本改訂で `linear_forward_resident` 自体を削除したため、この特定の
+迂回経路は消えたが、下記の `with_resident_buffers`（個別バッファへの
+唯一のアクセス経路）は引き続き必要である——理由は指摘 (2) のとおり、
+迂回不能性を型・可視性で構造的に強制するためであり、`linear_forward_
+resident` の有無に依存しない設計上の要請である。
 
-**指摘の核心 (2)（迂回防止の実効性）**: 旧稿（本節の前稿）は上記 (1) の
-解消策として「`DeviceParamStore::predict_resident` を新設し、直接呼び出し
-禁止を docstring で定める」対応のみを採ったが、この禁止はコードレビュー
-規律にのみ依拠しており型・可視性で強制されていなかった。しかも
-`facade` 側の呼び出し元（`Sequential`）が `store` 内のバッファを読む
-ためには何らかのアクセス経路が必要であり、旧稿はそのアクセス経路
-自体を未定義のまま残していた。将来 `DeviceParamStore` へ `weight`/
-`bias` の生の `&DeviceBuffer` を返す public アクセサが（`facade` 側の
-実装上の都合等で）追加されれば、そのアクセサから得た参照を
-`linear_forward_resident` へ直接渡すことで poisoned 検査を迂回できて
-しまい、docstring 上の禁止は実効性を持たない。
+**指摘の核心 (2)（迂回防止の実効性）**: `DeviceParamStore` は
+`weight`/`bias`/`velocity_*` の生の `&DeviceBuffer` を返す public
+アクセサを持たない設計を維持する。`facade` 側の呼び出し元
+（`Sequential`）が `store` 内のバッファ由来の値（download 済みホスト
+スナップショット）を得るための唯一の経路を、poisoned 検査済みスコープ
+付きクロージャ API（`with_resident_buffers`。下記）に限定し続ける。
 
-**指摘の核心 (3)（Cursor Bugbot・活性化関数の欠落）**: 旧稿の
-`predict_resident` は `DeviceParamStore`（`autodiff::optim`。`Linear`
-層の `weight`/`bias` のみを保持し、`Sequential` の層構成〈活性化層を
-含む〉を一切知らない型。§3.3a）のメソッドとして定義されていたため、
-`ops.linear_forward_resident` を各層の `weight`/`bias` へ順に適用する
-だけで、層間の `ReLU` 等の活性化関数を一切実行しない実装にしかなり
-えなかった。既存 `Sequential::forward`（活性化層を含む全層を順に
-適用する。§2）・`forward_resident`（§3.3a・同様に活性化層を含む）との
-非対称であり、resident 推論の出力が非 resident の `predict` と一致しない
-（数値一致契約 §5 にも抵触しうる）。
+**指摘の核心 (3)（Cursor Bugbot・活性化関数の欠落・sigmoid parity）**:
+旧稿の `predict_resident` は `DeviceParamStore`（`autodiff::optim`。
+`Linear` 層の `weight`/`bias` のみを保持し、`Sequential` の層構成
+〈活性化層を含む〉を一切知らない型。§3.3a）の外側で、生の `BackendOps`
+（`ops.linear_forward_resident`／新設 `ops.sigmoid` 等）を直接呼ぶ
+実装を想定していた。これは 2 つの問題を生む: (a) `facade` が `ops`／
+`mem` を保持できない（REQ-12・codex-review P1「'predict_resident' が
+facade に任意の 'BackendOps' 注入経路を再導入する」）。(b) 活性化関数
+の適用が既存 `predict`（`Var::sigmoid` → `eval::sigmoid` という
+確立された数値経路）とは別の新設 `BackendOps::sigmoid`（素朴な
+`1 / (1 + exp(-x))`）を経由するため、両者の数値表現が食い違う保証が
+なく §5.1 の parity 契約を満たすとは限らない（Cursor Bugbot 指摘
+「Sigmoid path breaks predict parity」）。
 
-**採用方針（迂回不能な構造的強制 + 活性化関数の結線）**: 上記 3 点を
-同時に解消するため、責務を次のとおり分離する:
+**採用方針（迂回不能な構造的強制 + `forward_resident` と同一経路の
+再利用による parity の構造的保証）**: 上記を同時に解消するため、
+責務を次のとおり分離する:
 
 - **`DeviceParamStore` は `weight`/`bias`/`velocity_*` の生の
   `&DeviceBuffer` を返す public アクセサを一切持たない**（既存設計の
@@ -894,15 +840,16 @@ linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 
       /// 名指しできないという型検査上の帰結）ため、生の `DeviceBuffer`
       /// 参照をクロージャのスコープ外へ持ち出す経路がコンパイラの
       /// ボローチェッカーにより存在しない。したがって「`DeviceParamStore`
-      /// 由来のバッファを `linear_forward_resident` へ直接渡す」という
-      /// 迂回は、docstring 上の禁止ではなく型システムにより不可能になる
-      /// （このため、後述 §3.3b の `forward_resident` はクロージャ内で
-      /// `mem.download` した「所有権を持つホスト `Tensor<f32>` の
-      /// スナップショット」だけを `R` として持ち出し、クロージャの
-      /// スコープを抜けたあとに `store` への `&mut` 書き込みを行う
-      /// 構成を取れる）。poisoned であれば `f` を一切呼ばず（クロージャ
-      /// の中身が実行されないため、破損混在状態のバッファに触れる経路
-      /// 自体が生じない）、`f` が要求する戻り値型と同じ `Result` 型の
+      /// 由来のバッファを個別バッファアクセサ経由で外部へ持ち出す」
+      /// という迂回は、docstring 上の禁止ではなく型システムにより
+      /// 不可能になる（このため、§3.3b の `DeviceParamStore::
+      /// register_resident_leaves` はクロージャ内で `mem.download`
+      /// した「所有権を持つホスト `Tensor<f32>` のスナップショット」
+      /// だけを `R` として持ち出し、クロージャのスコープを抜けたあとに
+      /// `self` への `&mut` 書き込みを行う構成を取れる）。poisoned
+      /// であれば `f` を一切呼ばず（クロージャの中身が実行されない
+      /// ため、破損混在状態のバッファに触れる経路自体が生じない）、
+      /// `f` が要求する戻り値型と同じ `Result` 型の
       /// `BackendError`（poisoned variant）を返す。
       pub fn with_resident_buffers<R>(
           &self,
@@ -918,159 +865,121 @@ linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 
   }
   ```
 
-- **Tape 非依存の resident 推論エントリは `Sequential` 側に置く**
+- **`Tape` 依存の resident 推論エントリを `Sequential` 側に置く**
   （`facade::compat::Sequential::predict_resident`。`forward_resident`
-  〈§3.3a〉と対になる読み取り専用版）。`Sequential` は既に層構成
-  （`Linear` と活性化層を含む並び。§2・§3.3a）を唯一把握するオブジェクト
-  であるため、活性化関数の適用箇所を正しく判断できるのは `Sequential`
-  のみであり、`DeviceParamStore`（`autodiff::optim`）側にこの責務を
-  置くこと自体が指摘 (3) の構造的な原因だった。
+  〈§3.3a〉と対になる読み取り専用版。改訂: 旧稿の「Tape 非依存」という
+  設計軸は撤回する——理由は指摘 (3) のとおり、`Tape` を経由しない独自
+  経路は既存 `predict`／`forward_resident` の活性化関数の数値経路と
+  分岐し、parity を構造的に保証できないため）。`Sequential` は既に
+  層構成（`Linear` と活性化層を含む並び。§2・§3.3a）を唯一把握する
+  オブジェクトであるため、活性化関数の適用箇所を正しく判断できるのは
+  `Sequential` のみである点は旧稿から変更しない。
 
-  **活性化種別の判別手段（codex-review P1〈line 833〉・Bugbot 指摘の
-  解消: 「既存 forward と同じ活性化メソッドを適用する」だけでは
-  未定義だった具体的な結線）**: 既存 `Sequential::forward`（ホスト
-  `Tensor`／`Var` 経路）は `Vec<Box<dyn Module>>` の多態 `forward`
-  （`Module::forward(&self, tape, input) -> Var`。`nn/module.rs`）に
-  委譲することで、`Module` 実装型（`Linear`／`Relu`／`Sigmoid`／
-  `Tanh`）を個別に判別せずに活性化を適用している。しかし
-  `predict_resident` は `Tape`/`Var` を経由しない `BackendOps`
-  （ホスト `Tensor<f32>` 契約）経路であり、`Module::forward` を
-  呼べない。現行の `Module` trait（`nn/module.rs`）が持つ唯一の型
-  判別フックは `as_linear`/`as_linear_mut`（`Linear` 層の識別専用）
-  であり、活性化層 3 種のうちどれかを判別する手段が存在しない。
-  加えて `BackendOps`（`backend_ops.rs:91-98`）は `relu`／`tanh` は
-  持つが `sigmoid` を持たず、`Sigmoid` 層に出会った場合に呼べる
-  `BackendOps` メソッドがそもそも欠けている。本設計はこの 2 点を
-  解消するため、次を新設する:
+  **採用方針（`forward_resident` と同一の `Var`/`Module::forward` 経路を
+  再利用する。ActivationKind／`BackendOps::sigmoid` は新設しない）**:
+  `predict_resident` は次の 3 手順のみで構成する。
 
-  ```rust
-  // `autodiff::nn::module`（`Module` trait と同じモジュール。
-  // 活性化種別は `docs/compat-api-scope.md` §1 が定める閉集合
-  // 〈ReLU/Sigmoid/Tanh の 3 種〉のみであるため、`as_linear` と
-  // 同じ「閉集合を明示フックとして列挙する」設計軸〈module.rs
-  // 冒頭コメント〉を踏襲し、`std::any::Any` によるダウンキャスト
-  // は使わない）。
-  #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-  pub enum ActivationKind {
-      Relu,
-      Sigmoid,
-      Tanh,
-  }
+  1. **`facade::tape_for(store.device())?`（既存の公開 composition
+     root。§3.1 末尾で新設した `DeviceParamStore::device()`）で、
+     `store` が常駐する先と同じデバイス種別の `Tape` をこの呼び出し
+     専用に構築する**。これは既存 `predict`（`crate::tape()` で
+     CPU 既定の `Tape` を毎回構築する。`sequential.rs:126`）と同じ
+     設計軸——**呼び出しごとに `Tape` を生成・破棄する**——を、
+     デバイスを `store.device()` に合わせて踏襲したものである。
+     `facade::tape_for` は既に公開 API（REQ-12 が許す唯一の
+     `BackendOps` 解決経路）であるため、この手順は `ops`／`mem` の
+     いずれにも触れない。
+  2. **`store.snapshot_resident_leaves(&tape)`（`autodiff::optim`。
+     新設。下記）を 1 回呼び、`Vec<ResidentLeafVars<'t>>` を得る**。
+     `register_resident_leaves`（§3.3b。`forward_resident` 専用）との
+     違いは `&self` で受け取り `pending_grad_sources` を一切書き込まない
+     点のみ（`predict_resident` はこの呼び出し後に `step` を期待
+     しないため、学習ループ側の `pending_grad_sources` 状態と干渉
+     しない——学習中の `store` に対して `predict_resident` を呼んでも
+     進行中の forward/step サイクルを壊さない）。内部実装は
+     `with_resident_buffers` を経由して poisoned 検査を必ず先に行う
+     （§3.3c 冒頭の指摘 (1)(2) の解消はここでも同様に成立する）。
 
-  pub trait Module {
-      // 既存メソッド（forward／as_linear／as_linear_mut）は変更しない。
+     ```rust
+     impl DeviceParamStore {
+         /// [`DeviceParamStore::register_resident_leaves`] の読み取り専用版
+         /// （`predict_resident` 専用）。`pending_grad_sources` を
+         /// 書き込まない・`TapeId` 一致検査の対象にもしない点のみが
+         /// 異なり、download・leaf 登録の内部実装（`with_resident_
+         /// buffers` 経由の poisoned 検査を含む）は共有する。
+         pub fn snapshot_resident_leaves<'t>(
+             &self,
+             tape: &'t Tape,
+         ) -> Result<Vec<ResidentLeafVars<'t>>, BackendError> {
+             // 実装詳細は #935 が確定する。
+             unimplemented!()
+         }
+     }
+     ```
 
-      /// この層が活性化関数（`Relu`/`Sigmoid`/`Tanh`）であれば対応する
-      /// [`ActivationKind`] を返す（P1 レビュー指摘の解消: `Tape` を
-      /// 経由しない resident 推論〈predict_resident〉が、`Module::forward`
-      /// の多態 dispatch に頼らず活性化種別を判別するためのフック）。
-      /// 既定実装は `None`（`Linear` を含む非活性化層はオーバーライド
-      /// しない。デフォルトメソッドのため既存の外部 `impl Module for X`
-      /// を破壊しない非破壊拡張）。
-      fn as_activation_kind(&self) -> Option<ActivationKind> {
-          None
-      }
-  }
-
-  impl Module for Relu {
-      fn as_activation_kind(&self) -> Option<ActivationKind> {
-          Some(ActivationKind::Relu)
-      }
-  }
-  impl Module for Sigmoid {
-      fn as_activation_kind(&self) -> Option<ActivationKind> {
-          Some(ActivationKind::Sigmoid)
-      }
-  }
-  impl Module for Tanh {
-      fn as_activation_kind(&self) -> Option<ActivationKind> {
-          Some(ActivationKind::Tanh)
-      }
-  }
-  ```
-
-  ```rust
-  pub trait BackendOps {
-      // 既存メソッド（gemm／add／relu／tanh 等）は変更しない。
-
-      /// シグモイド活性化（`1 / (1 + exp(-x))`）。P1 レビュー指摘の
-      /// 解消: `predict_resident` が `ActivationKind::Sigmoid` を
-      /// 呼べるようにするための新設メソッド。既存の未実装カーネル
-      /// 群（`backend_ops.rs:28-33`）と同じ fail-safe 方針を踏襲し、
-      /// **デフォルト実装は `BackendError::Unsupported` を返す**
-      /// （§3.2 冒頭が区別するとおり、`sgd_step_device`／
-      /// `linear_forward_resident` の「必ず成立する」デフォルトとは
-      /// 異なる区分——`sigmoid` は既存の `relu`/`tanh` と同格の
-      /// 通常カーネルであり、ホスト経由の汎用フォールバックを
-      /// 新設しない）。CPU 実装は #935 が `f32::exp` ベースで即時
-      /// 追加し（`f32::mul_add` 契約とは無関係な単項関数のため
-      /// §5.2 の FMA 契約は適用外）、CUDA/Metal は実装順序
-      /// （§3.4「実装順序は CPU → CUDA → Metal」）に従って追って
-      /// 追加する。**デフォルトメソッドとして追加する**ため、`relu`/
-      /// `tanh` と異なり既存の外部 `impl BackendOps for X` を破壊
-      /// しない（trait 定義への非破壊拡張。§3.1 と同じ方針）。
-      fn sigmoid(&self, a: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
-          Err(BackendError::Unsupported)
-      }
-  }
-  ```
+  3. **`self.layers` を `forward_resident`（§3.3b）と全く同じパターンで
+     辿り、`Linear` 層では `LinearVars { weight, bias }.forward(&current)`
+     （`fandhe_ai_autodiff::nn::linear::LinearVars`。手順 2 の
+     `ResidentLeafVars` から構築）を、活性化層では `layer.forward(&tape.0,
+     &current)`（`Module::forward` への多態 dispatch）を呼ぶ。最終的な
+     `Var` を `.to_tensor()`（既存 `predict` と同じ。`sequential.rs:128`）
+     でホスト `Tensor<f32>` へ変換して返す。**この手順は `forward_resident`
+     の層イテレーションと完全に同一のコードパスであり**（違いは
+     `tape.backward()` を呼ばない点のみ）、活性化層は `Module::forward`
+     経由で既存 `Var::sigmoid`／`Var::relu`／`Var::tanh` → 既存
+     `eval::sigmoid` 等をそのまま通る。これにより predict_resident の
+     出力は既存 `predict`（同じ `Module::forward` 経路）と**構造的に
+     同一の数値計算列**になり、§5.1 の parity 契約を「テストで確認する」
+     のではなく「同じコードパスを通る設計そのもの」で満たす
+     （Cursor Bugbot 指摘「Sigmoid path breaks predict parity」の解消）。
+     新設した `ActivationKind`／`Module::as_activation_kind`／
+     `BackendOps::sigmoid`（いずれも旧稿）はこの設計では不要になる
+     ため追加しない——`Module::forward` の既存多態 dispatch がそのまま
+     活性化種別を判別済みであり、`predict_resident` 側で改めて種別を
+     判別する必要がないため（旧稿が `Tape` 非依存の生 `BackendOps` 経路
+     を取っていたために、この既存の判別機構を使えず新設が必要になって
+     いた。本改訂はその前提自体を解消する）。
 
   ```rust
   impl Sequential {
-      /// `store` 常駐のパラメータを使う Tape 非依存の resident 推論
-      /// （`predict` 相当）。`forward_resident`（§3.3a）と対になる
-      /// 読み取り専用 API（`&self`。`store` は poisoned チェック用に
-      /// `&DeviceParamStore` で十分——書き込みは発生しない）。
+      /// `store` 常駐のパラメータを使う resident 推論（`predict` 相当）。
+      /// `forward_resident`（§3.3a）と対になる読み取り専用 API
+      /// （`&self`。`store` も `&DeviceParamStore` で十分——書き込みは
+      /// 発生しない）。内部で `facade::tape_for(store.device())` により
+      /// 専用の `Tape` を構築する（`ops`／`mem` を一切外部から受け取ら
+      /// ない。codex-review P1「'predict_resident' が facade に任意の
+      /// 'BackendOps' 注入経路を再導入する」の解消）。
       pub fn predict_resident(
           &self,
           store: &DeviceParamStore,
-          ops: &dyn BackendOps,
-          mem: &dyn MemoryOps,
           input: &Tensor<f32>,
-      ) -> Result<Tensor<f32>, BackendError> {
-          // `store.with_resident_buffers` の呼び出し 1 回のみでクロージャ
-          // 内へ入り、以後は `self.layers`（既存 `forward` と同じ層
-          // イテレーション）を順に辿る: `Linear` 層（`layer.as_linear()`
-          // が `Some` を返す層）は対応する `ResidentLayerBuffers` を
-          // trainable 層インデックス（§3.3a）で引いて
-          // `ops.linear_forward_resident(mem, current, weight, bias)` を
-          // 呼ぶ。活性化層（`layer.as_activation_kind()` が `Some` を
-          // 返す層）は `match` で `ActivationKind::Relu => ops.relu(&current)`／
-          // `ActivationKind::Sigmoid => ops.sigmoid(&current)`／
-          // `ActivationKind::Tanh => ops.tanh(&current)` を呼び、結果で
-          // `current` を差し替える（`ops.sigmoid` が `Unsupported` を
-          // 返した場合はそのまま呼び出し元へ伝播する——CPU 実装が揃う
-          // までは Sigmoid を含む `Sequential` の resident 推論は
-          // fail-closed に失敗する、既存 `relu`/`tanh` と同じ規約）。
-          // `as_linear()`/`as_activation_kind()` のいずれも `None` を
-          // 返す層は `docs/compat-api-scope.md` §1 の閉集合契約上
-          // 到達しないが、到達した場合は型付きエラー（新設 variant。
-          // 名称は #935 が確定）で fail-closed に扱う。既存
-          // `forward`／`forward_resident` と同一の層適用順序をここでも
-          // 維持するため、活性化関数は resident 推論でも通常どおり
-          // 実行され、CPU 実装が揃った状態では既存 `predict` と同一の
-          // 演算列（同じ `relu`/`sigmoid`/`tanh` 実装への委譲）になる
-          // ため #936 の数値一致契約（§5.1）を満たせる（Cursor Bugbot
-          // 指摘の解消）。確定シグネチャ・層イテレーション詳細は #935
-          // が実装する。
+      ) -> Result<Tensor<f32>, AutodiffError> {
+          // 1. let tape = crate::tape_for(store.device())?;
+          // 2. let leaves = store.snapshot_resident_leaves(&tape)?;
+          // 3. self.layers を forward_resident と同じパターンで辿り、
+          //    Linear 層は LinearVars::forward、活性化層は
+          //    Module::forward（layer.forward(&tape.0, &current)）を
+          //    呼ぶ。最終 Var を .to_tensor() して返す。
+          // 確定シグネチャ・エラー型変換（BackendError → AutodiffError。
+          // 既存 predict/forward と同じ変換規約）は #935 が実装する。
           unimplemented!()
       }
   }
   ```
 
-  poisoned であれば `store.with_resident_buffers` がクロージャを
-  一切呼ばずに `BackendError`（poisoned variant）を返すため、
-  `predict_resident` は poisoned 検査を必ず forward 計算より先に
-  行う契約を自動的に満たす（`with_resident_buffers` 自体が唯一の
-  バッファアクセス経路であるため、この検査を素通りする経路は
-  存在しない）。
+  poisoned であれば `store.snapshot_resident_leaves`（内部で
+  `with_resident_buffers` を経由する）がクロージャを一切呼ばずに
+  `BackendError`（poisoned variant）を返すため、`predict_resident` は
+  poisoned 検査を必ず forward 計算より先に行う契約を自動的に満たす
+  （`with_resident_buffers` 自体が唯一のバッファアクセス経路であるため、
+  この検査を素通りする経路は存在しない）。
 
 **§4.3 との整合**: これにより poisoned 検査の対象は `step`／
-`sync_to_host`／`forward_resident`／`predict_resident` の 4 箇所となる
-（§4.3 の最終箇条を本節の追加に合わせて更新する）。`linear_forward_resident`
-自体・`with_resident_buffers` が返すクロージャの中身自体は `tensor-core`
-（`predict_resident` は `facade` 層。`with_resident_buffers` は
-`autodiff::optim` 層）に留まり、poisoned 検査そのものは常に
+`sync_to_host`／`forward_resident`（`register_resident_leaves` 経由）／
+`predict_resident`（`snapshot_resident_leaves` 経由）の 4 箇所となる
+（§4.3 の最終箇条を本節の追加に合わせて更新する）。`with_resident_
+buffers` が返すクロージャの中身自体は `tensor-core` に依存せず
+`autodiff::optim` 層に留まり、poisoned 検査そのものは常に
 `DeviceParamStore::with_resident_buffers` の呼び出し時点で行う、
 という責務分担が本節の確定事項である（`tensor-core` は引き続き
 `autodiff::optim::DeviceParamStore` に依存しない設計〈既存の依存方向〉
@@ -1080,11 +989,10 @@ linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 
 
 | クレート | 責務 |
 |---|---|
-| `tensor-core` | `sgd_step_device`／`linear_forward_resident`／`sigmoid`（§3.3c。activation 判別と対になる新設デフォルトメソッド）trait メソッド（`mem: &dyn MemoryOps` 明示引数。supertrait 化はしない非破壊拡張）・`BackendOps::instance_id`／`MemoryOps::instance_id`（§3.2a。`self`/`mem` 同一性検査用デフォルトメソッド）・`SgdStepConfig` 型定義（§3.1・§3.2） |
-| `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2。呼び出し側の利便性のための追加であり trait 定義上の要求ではない。`instance_id` はデフォルトメソッドのためオーバーライド不要）＋ `sigmoid` の CPU 実装（§3.3c。CUDA/Metal は実装順序どおり後続）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
-| `autodiff::nn` | `ActivationKind` enum・`Module::as_activation_kind`（§3.3c。`Relu`/`Sigmoid`/`Tanh` の 3 型がオーバーライド。既存 `Module::forward`／`as_linear`／`as_linear_mut` は変更しない非破壊拡張） |
-| `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック（§3.3b の leaf 登録・勾配取り出しを含む）・`DeviceParamStore::with_resident_buffers`（poisoned 検査済みスコープ付きクロージャ。§3.3c。個別バッファへの唯一のアクセス経路） |
-| `facade`（`compat::Sequential` 経由で `Sequential::forward_resident`／`Sequential::predict_resident` を実装） | `Sequential` への `forward_resident`・`predict_resident`（§3.3b・§3.3c。いずれも `store.with_resident_buffers` 経由で個別バッファへアクセスし、`as_linear`／`as_activation_kind` で層種別を判別しつつ既存の層イテレーション順序を再利用する）・層インデックス対応表の保持（§3.3a）。公開面は #932 の optimizer facade 公開設計の結論に従属させる（本ドキュメントは compat 面の意匠を確定しない） |
+| `tensor-core` | `BackendOps::memory_ops()`（§3.1。`mem` を `self` から導出する唯一の経路。デフォルトメソッド・非破壊拡張）・`sgd_step_device`（§3.1・§3.2。既定実装が `self.memory_ops()` を使う）・`SgdStepConfig` 型定義（§3.1・§3.2） |
+| `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2）＋ `impl BackendOps for XBackendOps` 側の `memory_ops()` オーバーライド（`Some(self)`。§3.1・§3.2）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
+| `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者。`device: Device` フィールド・`device()` アクセサを含む。§3.3a）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック・`DeviceParamStore::with_resident_buffers`（poisoned 検査済みスコープ付きクロージャ。§3.3c。個別バッファへの唯一のアクセス経路）・`DeviceParamStore::register_resident_leaves`（`forward_resident` 専用。`&mut self`・`pending_grad_sources` を書く。§3.3b）・`DeviceParamStore::snapshot_resident_leaves`（`predict_resident` 専用。`&self`・読み取り専用版。§3.3c）。いずれも `tape.ops()`〈`pub(crate)`〉→ `.memory_ops()` の経路で `mem` を内部導出し、`facade` へ `mem`/`ops` を一切渡さない |
+| `facade`（`compat::Sequential` 経由で `Sequential::forward_resident`／`Sequential::predict_resident` を実装） | `Sequential` への `forward_resident`・`predict_resident`（§3.3b・§3.3c。いずれも `tape: &Tape` のみを受け取り `register_resident_leaves`／`snapshot_resident_leaves` が返す `Var` を使って `LinearVars::forward`／`Module::forward` を既存 `SequentialVars::forward` と同じパターンで呼ぶ。`mem`／`ops`／`BackendOps`／`MemoryOps` にはいずれも一切触れない）・層インデックス対応表の保持（§3.3a） |
 
 ### 3.5 既存 API との関係
 
@@ -1093,11 +1001,15 @@ linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 
 `.claude/rules/security.md` A08）。デバイス常駐経路（`DeviceParamStore` 経由の
 学習ループ）は既存経路に追加する新経路であり、既存経路を置き換えない。
 `DeviceParamStore` からホスト `Tensor<f32>` への同期（学習終了時・`predict`/
-保存前）は明示 API（例: `DeviceParamStore::sync_to_host(&self, mem: &dyn
-MemoryOps) -> Vec<Tensor<f32>>`。`DeviceBuffer<f32>` から host `Tensor<f32>`
-への download を行うため `new` と同様に `mem: &dyn MemoryOps` を明示引数
-として受け取る。確定シグネチャは #935 で行う）を介して行い、
-`apply_parameters` へ渡す形で
+保存前）は明示 API（例: `DeviceParamStore::sync_to_host(&self, tape: &Tape)
+-> Result<Vec<Tensor<f32>>, BackendError>`。`DeviceBuffer<f32>` から host
+`Tensor<f32>` への download を行うため `mem` を要するが、`new`／
+`register_resident_leaves`／`snapshot_resident_leaves`〈§3.3a・§3.3b・
+§3.3c〉と同じ理由・同じパターンで `mem: &dyn MemoryOps` を外部引数として
+受け取らず、`tape.ops().memory_ops()` から内部導出する。呼び出し元
+〈`facade`〉は `predict_resident` と同様 `facade::tape_for(store.device())`
+で構築した `Tape` をそのまま渡せばよい。確定シグネチャは #935 で行う）を
+介して行い、`apply_parameters` へ渡す形で
 既存の書き戻し経路と接続する。
 
 ## 4. 所有権（design decision 2）
@@ -1201,18 +1113,18 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
   （Cursor Bugbot 指摘・P0 レビュー指摘の解消）**: 旧稿は `step`／
   `sync_to_host` のみ poisoned 時に `BackendError` を返すと定めており、
   `Sequential::forward_resident`（§3.3a・§3.3b）が破損混在状態の
-  バッファをチェックなしに読める抜け穴が残っていた。§3.3b の改訂
-  （codex-review P1〈line 543〉指摘の解消）により、`forward_resident`
+  バッファをチェックなしに読める抜け穴が残っていた。`forward_resident`
   は個別の poisoned フラグ検査コードを別途持つのではなく、
-  `Sequential::predict_resident`（§3.3c）と全く同じ経路——
+  `register_resident_leaves`（§3.3b）・`predict_resident` が呼ぶ
+  `snapshot_resident_leaves`（§3.3c）のいずれも内部で
   `store.with_resident_buffers`（§3.3c。個別バッファへの唯一の
-  アクセス経路）——を経由してのみ `weight`/`bias` の `DeviceBuffer`
-  へアクセスする。poisoned であれば `with_resident_buffers` がクロー
+  アクセス経路）を経由してのみ `weight`/`bias` の `DeviceBuffer` へ
+  アクセスする。poisoned であれば `with_resident_buffers` がクロー
   ジャを一切呼ばず `BackendError`（poisoned variant）を返し、
-  `forward_resident` 側では `mem.download` にも `ops.linear_forward_resident`
-  （§3.1）にも到達しない（`predict_resident` 側も同様に
-  `ops.linear_forward_resident` へ到達しない）。`DeviceParamStore` が
-  個別バッファの public アクセサを一切持たない設計（§3.3c）により、
+  `register_resident_leaves`／`snapshot_resident_leaves` のいずれも
+  `mem.download` に到達しない（`forward_resident`／`predict_resident`
+  はこの戻り値のエラーをそのまま伝播するだけでよい）。`DeviceParamStore`
+  が個別バッファの public アクセサを一切持たない設計（§3.3c）により、
   `with_resident_buffers` を経由せず `weight`/`bias` の `DeviceBuffer`
   を得る手段自体が存在しないため、この poison チェックはコードレビュー
   規律ではなく型・可視性で構造的に強制される（`forward_resident`／
@@ -1263,14 +1175,16 @@ CPU ホスト参照実装（既存 `optim::Sgd::step` の式順序・`f32::mul_a
 バックエンド間で異なると、複合判定の閾値内であっても丸め誤差の蓄積パターンが
 変わり得るため、#935 実装レビューで式順序の一致を明示確認する。
 
-`linear_forward_resident`（§3.1・§3.3a）の出力は、同一入力・同一
-weight/bias 値に対する既存 `gemm`+`add`（ホスト `Tensor<f32>` 契約）経路の
-出力と本節と同じ統一複合判定を満たすことを #936 の parity テストへ
-引き渡す（forward 経路を切り替えても数値契約は変わらないことの確認。
-既定実装〈§3.2〉はホスト経路への委譲そのものであるため定義上一致するが、
-CUDA/Metal が weight/bias 再アップロードを省略する最適化カーネルへ
-オーバーライドした場合はカーネル実装差による丸め誤差が生じ得るため、
-オーバーライド後も本判定での確認を要する）。
+**`forward_resident`／`predict_resident` の forward 計算列は、既存
+`SequentialVars::forward`／`Sequential::forward`（`Module::forward` への
+多態 dispatch・`Var::matmul`/`Var::add`/`Var::relu`/`Var::sigmoid`/
+`Var::tanh`）と同一のコードパスを再利用する設計（§3.3b・§3.3c）である
+ため、通常の GEMM/活性化カーネルの数値契約（本節・既存 `gemm`/`relu`
+等の判定基準）がそのまま適用され、resident 経路専用の追加 parity
+判定は不要である**（旧稿が想定していた `linear_forward_resident` 専用の
+parity 確認は、同メソッドの削除〈§3.1〉に伴い対象がなくなったため
+削除する）。#936 が確認すべき対象は §5.3 の累積 parity（`sgd_step_
+device` の更新式・§5.2 の FMA 契約）に集約される。
 
 ### 5.3 累積 parity の判定方式
 
@@ -1299,51 +1213,67 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
 | 案 | 内容 | 採否 |
 |---|---|---|
 | (a) 暗黙常駐キャッシュ方式 | `Tensor` 内部にデバイスキャッシュを持たせ、書き込み時に暗黙で同期する方式（candle の `Var::set` 型） | **不採用**。暗黙コピー禁止方針（`docs/public-api-design.md` §2.2.1）・型分離（ホスト `Tensor` とデバイス `DeviceBuffer` を明確に分ける現行設計）との不整合。stale 値の誤用検知も難しくなる |
-| (b) `BackendOps` 全面 `DeviceBuffer` 化を先行 | forward/backward を含む全カーネル入口（`gemm`/`add`/`relu` 等すべて）を `DeviceBuffer` 契約へ一気に移行してから更新経路を設計する | **不採用（本イシュースコープでは）**。変更範囲が 4h 粒度を大きく超え、#931（デバイスハンドル再利用の公開 API 設計）・phase-4（#924）と重複する。§3.1・§3.3a で追加する `linear_forward_resident` はこの不採用案とは異なる: 対象は `Linear` forward の weight/bias 入力のみ（1 メソッドの追加）であり、入力バッチ・中間活性・backward・他の全カーネル（`add`/`relu`/畳み込み等）は既存のホスト `Tensor<f32>` 契約のまま変更しない。「全カーネル入口の一括移行」という本 (b) 案の対象範囲（forward/backward 全体）とは規模・影響範囲が異なるため、本設計のスコープに含めても 4h 粒度・#931/phase-4 との重複を引き起こさない |
-| (c) 採用案 | §2〜§4 の非破壊拡張（`sgd_step_device`／`linear_forward_resident` デフォルトメソッド・`mem: &dyn MemoryOps` 明示引数）+ 常駐ストア（`DeviceParamStore`）+ 段階的常駐化（param/velocity のみ常駐、grad は毎ステップ 1 回 upload）+ `Sequential::forward_resident` による forward 結線・weight/bias の Tape leaf 登録による VJP 成立（§3.3a・§3.3b）+ 更新フェーズの poisoned 状態契約（§4.3） | **採用** |
+| (b) `BackendOps` 全面 `DeviceBuffer` 化を先行 | forward/backward を含む全カーネル入口（`gemm`/`add`/`relu` 等すべて）を `DeviceBuffer` 契約へ一気に移行してから更新経路を設計する | **不採用（本イシュースコープでは）**。変更範囲が 4h 粒度を大きく超え、#931（デバイスハンドル再利用の公開 API 設計）・phase-4（#924）と重複する。§3.1 で追加する `sgd_step_device` はこの不採用案とは異なる: 対象は in-place SGD 更新のみ（1 メソッドの追加）であり、forward/backward・入力バッチ・中間活性・他の全カーネル（`gemm`/`add`/`relu`/畳み込み等）は既存のホスト `Tensor<f32>` 契約のまま変更しない（`forward_resident`／`predict_resident` は既存 `Var`/`Module::forward` 経路を再利用するのみで新規カーネル入口を追加しない。§3.3b・§3.3c）。「全カーネル入口の一括移行」という本 (b) 案の対象範囲（forward/backward 全体）とは規模・影響範囲が異なるため、本設計のスコープに含めても 4h 粒度・#931/phase-4 との重複を引き起こさない |
+| (c) 採用案 | §2〜§4 の非破壊拡張（`sgd_step_device` デフォルトメソッド・`BackendOps::memory_ops()` による `mem` の自己導出）+ 常駐ストア（`DeviceParamStore`）+ 段階的常駐化（param/velocity のみ常駐、grad は毎ステップ 1 回 upload）+ `Sequential::forward_resident`／`predict_resident` による既存 `Var`/`Module::forward` 経路の再利用（forward 結線・weight/bias の Tape leaf 登録による VJP 成立・resident 推論の parity を構造的に保証。§3.3a・§3.3b・§3.3c）+ 更新フェーズの poisoned 状態契約（§4.3） | **採用** |
 
 ## 7. スコープ境界・受け渡し
 
 ### #935（実装）への引き渡し事項
 
-- §3.1 の確定シグネチャ（`sgd_step_device`／`linear_forward_resident`／
-  `SgdStepConfig`。いずれも `mem: &dyn MemoryOps` 明示引数を持ち、
-  `BackendOps` trait 定義への supertrait 追加はしない）をそのまま
-  `tensor-core::backend_ops` へ追加する（`buffer.rs:11-13` の保留
-  コメント「`MemoryOps` は `BackendOps` の supertrait となる想定」は
-  本設計で**不採用と確定**したため、#935 で該当コメントを「supertrait
-  化は crates.io 公開 trait への破壊的変更となるため不採用（§3.1）」
-  という趣旨に更新する）。
+- §3.1 の確定シグネチャ（`BackendOps::memory_ops()`〈`self` から `mem`
+  を導出するデフォルトメソッド〉・`sgd_step_device`〈`mem` 引数なし。
+  内部で `self.memory_ops()` を呼ぶ〉・`SgdStepConfig`。`BackendOps`
+  trait 定義への supertrait 追加はしない）をそのまま `tensor-core::
+  backend_ops` へ追加する（`buffer.rs:11-13` の保留コメント
+  「`MemoryOps` は `BackendOps` の supertrait となる想定」は本設計で
+  **不採用と確定**したため、#935 で該当コメントを「supertrait 化は
+  crates.io 公開 trait への破壊的変更となるため不採用（§3.1）」という
+  趣旨に更新する）。旧稿にあった `linear_forward_resident` は本改訂
+  （§3.1）で削除済みのため実装対象に含めない。
 - 各 `XBackendOps`（`CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`）
-  へ `impl MemoryOps for XBackendOps` を追加する（既存 `XMemory` 実装への
-  委譲か、フィールド保持かは §3.2 のとおり実装詳細として #935 が選ぶ。
-  trait 構造・呼び出し形態への影響はどちらでもない。この `impl` は
-  呼び出し側〈`DeviceParamStore`〉が `mem` 引数を得るための利便性であり
-  `BackendOps` trait 自体は要求しない）。
+  へ `impl MemoryOps for XBackendOps` を追加し（既存 `XMemory` 実装への
+  委譲か、フィールド保持かは §3.2 のとおり実装詳細として #935 が選ぶ）、
+  `impl BackendOps for XBackendOps` の `memory_ops()` オーバーライドを
+  `Some(self)` にする（§3.1・§3.2。`DeviceParamStore` が `mem` を得る
+  唯一の経路がこのオーバーライドである）。
 - 実装順序: CPU → CUDA → Metal（既存 GEMM カーネルの実装順序・PoC 実証の
   蓄積と揃える）。
 - フォールバック契約: §3.2 のデフォルト実装（`sgd_step_device`:
-  `mem.download` → ホスト更新 → `mem.upload`。`linear_forward_resident`:
-  `mem.download` → 既存 gemm+add 委譲）を先に用意し、各バックエンドが
-  最適化カーネルでオーバーライドする形で段階的に置き換える（デフォルト
-  実装のままでも正しく動作することを前提に、性能改善は独立した最適化
-  として進められる）。
-- `Sequential::forward_resident`（§3.3a・§3.3b）を
-  `facade::compat::Sequential` へ追加し、`DeviceParamStore::new` が
-  `trainable_parameters()` と同一の位置対応契約で層インデックス→
-  `DeviceBuffer` 対応表を構築する。`forward_resident` は `&mut
-  DeviceParamStore` に加え `mem: &dyn MemoryOps`（§3.3a。呼び出し元が
-  `Sequential` 初期化時に把握している `BackendOps` と対になる
-  `MemoryOps` 実装値をそのまま渡す）を受け取り、§3.3b のとおり forward
-  呼び出しごとに weight/bias の downloaded スナップショットを `Tape`
-  の leaf として新規登録したうえで、生成した `NodeId` を `TapeId`
-  （§3.3b の `Tape` 同一性検査用）と併せて `store` 自身の一時状態
-  （`pending_grad_sources`）へ書き込む。`pending_grad_sources` が既に
-  `Some`（前回 forward 分が未消費）の状態での再呼び出しは §3.3b の
-  とおり型付きエラーで拒否する。`tape.backward()` 後、呼び出し
-  元は `DeviceParamStore::step(&mut self, tape: &Tape, grads:
-  &Gradients, mem: &dyn MemoryOps, config: &SgdStepConfig)` を呼び、
-  `step` はまず `tape` の `TapeId` が `pending_grad_sources` に保存された
+  `self.memory_ops()` で `mem` を導出〈`None` なら `Unsupported`〉→
+  `mem.download` → ホスト更新 → `mem.upload`）を先に用意し、各バック
+  エンドが最適化カーネルでオーバーライドする形で段階的に置き換える
+  （デフォルト実装のままでも正しく動作することを前提に、性能改善は
+  独立した最適化として進められる）。
+- **`DeviceParamStore::device(&self) -> Device`（§3.3a）を実装する**:
+  `new` が `tape.ops().device()`（既存の必須メソッド）から取得した値を
+  フィールドとして保持し、そのまま返す読み取り専用アクセサ。
+- `DeviceParamStore::new(tape: &Tape, params: &[TrainableParam])`（§3.3a。
+  `mem` を外部引数として受け取らず `tape.ops().memory_ops()` から内部
+  導出する）を `autodiff::optim` へ実装し、`trainable_parameters()` と
+  同一の位置対応契約で層インデックス→`DeviceBuffer` 対応表を構築する。
+- `Sequential::forward_resident<'t>(&self, tape: &'t Tape, input:
+  &Var<'t>, store: &mut DeviceParamStore) -> Result<Var<'t>,
+  AutodiffError>`（§3.3a・§3.3b）を `facade::compat::Sequential` へ
+  追加する。**`mem`／`ops` のいずれも受け取らない**（§3.3a。codex-review
+  P1「'forward_resident' では要求されたバックエンド同一性検査を実装
+  できない」の解消）。内部は `store.register_resident_leaves(tape)?`
+  （`autodiff::optim::DeviceParamStore` に実装する。§3.3b。内部で
+  `tape.ops().memory_ops()` から `mem` を導出し、weight/bias を
+  download・`tape.var(..)` で leaf 登録・`NodeId`/`TapeId` を
+  `pending_grad_sources` へ書き込む）を 1 回呼び、返る
+  `Vec<ResidentLeafVars<'t>>` を使って `self.layers` を辿りながら
+  `Linear` 層では `fandhe_ai_autodiff::nn::linear::LinearVars {
+  weight, bias }.forward(&current)` を、活性化層では
+  `layer.forward(&tape.0, &current)`（`Module::forward`）を呼ぶ
+  （既存 `SequentialVars::forward`〈`sequential.rs:315`〉と同一の
+  イテレーションパターン。§3.3b）。`pending_grad_sources` が既に
+  `Some`（前回 forward 分が未消費）の状態での再呼び出しは
+  `register_resident_leaves` 内で型付きエラーとして拒否する
+  （§3.3b）。`tape.backward()` 後、呼び出し元は `DeviceParamStore::
+  step(&mut self, tape: &Tape, grads: &Gradients, config:
+  &SgdStepConfig) -> Result<(), BackendError>`（§3.3b。同じく `mem`
+  を受け取らず `tape.ops().memory_ops()` から導出する）を呼び、`step`
+  はまず `tape` の `TapeId` が `pending_grad_sources` に保存された
   ものと一致するかを検査したうえで（不一致は型付きエラー。§3.3b）、
   内部で `Var::from_raw`（`var.rs:63`。`autodiff` クレート内部
   限定）+ `Gradients::get`（`backward.rs:49`）を使って
@@ -1363,42 +1293,32 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
   `weight`/`bias`/`velocity_*` の生の `&DeviceBuffer` を返す public
   アクセサを一切追加しない（本メソッドが個別バッファへの唯一の
   アクセス経路であることの実装上の担保）。
-- **`ActivationKind`／`Module::as_activation_kind`（§3.3c・`autodiff::nn`）
-  を実装する**: `Relu`／`Sigmoid`／`Tanh` の 3 型が対応する variant を
-  返すようオーバーライドする（既定 `None` は `Linear` を含む他の
-  `Module` 実装がそのまま踏襲する非破壊拡張）。
-- **`BackendOps::sigmoid`（§3.3c・`tensor-core`）を実装する**: CPU は
-  #935 で即時追加（既存 `relu`/`tanh` と同じ扱い）、CUDA/Metal は
-  §3.4 の実装順序（CPU → CUDA → Metal）に従って追って追加する。
-  デフォルト実装（`BackendError::Unsupported`）はカーネル未実装の
-  バックエンドでも trait のコンパイルを壊さない。
-- **`Sequential::predict_resident`（§3.3c・`facade` クレート）を実装
-  する**: `store.with_resident_buffers` のクロージャ内でのみ
-  `ops.linear_forward_resident`（§3.1）を呼び、`self.layers`
-  （既存 `forward`／`forward_resident` と同じ層イテレーション）を
-  辿って `layer.as_linear()`／`layer.as_activation_kind()`（§3.3c）で
-  層種別を判別し、`ActivationKind` に対応する `ops.relu`／
-  `ops.sigmoid`／`ops.tanh` を適用する（Cursor Bugbot 指摘の解消。
-  resident 推論の出力が非 resident の `predict` と一致することを
-  #936 の parity テストで確認する。`Sigmoid` を含む `Sequential` で
-  `ops.sigmoid` が `Unsupported` を返す間は resident 推論も
-  fail-closed に失敗する契約であることをテストで確認する）。poisoned
-  検査の迂回不能性は `with_resident_buffers` の型・可視性設計
-  （§3.3c）そのものにより担保されるため、`facade`/`autodiff` 側の
-  コードレビュー規律には依存しない。
-- **`BackendOps::instance_id`／`MemoryOps::instance_id`（§3.2a）を
-  実装する**: いずれもデフォルトメソッド（`self as *const Self as
-  *const ()`）のため各バックエンド側でのオーバーライドは不要。
-  `impl MemoryOps for XBackendOps`（§3.2）を追加した時点で自動的に
-  正しい識別子を返す。
-- **`MemoryOps::device()`（§3.2a）を `CpuMemory`／`CudaMemory`／
-  `MetalMemory` へ実装する**: 各々 `Some(Device::Cpu)`／
-  `Some(Device::Cuda(ordinal))`／`Some(Device::Metal)` を返す。§4.2 の
-  既存 `param`/`grad` デバイス一致検査・診断用エラーメッセージで
-  引き続き使用する（`self`/`mem` 同一性検査自体の合否は
-  `instance_id()` が決定するため、本オーバーライドの有無は
-  `sgd_step_device`／`linear_forward_resident`／`forward_resident`／
-  `predict_resident` の `BackendMismatch` 判定には影響しない）。
+- **`DeviceParamStore::register_resident_leaves`／
+  `snapshot_resident_leaves`（§3.3b・§3.3c）を実装する**: 前者は
+  `&mut self`（`pending_grad_sources` を書く。`forward_resident`
+  専用）、後者は `&self`（書き込まない。`predict_resident` 専用）。
+  いずれも `with_resident_buffers` を経由して poisoned 検査を行い、
+  `tape.ops().memory_ops()` から導出した `mem` で download する内部
+  実装を共有する。戻り値 `ResidentLeafVars<'t> { trainable_idx: usize,
+  weight: Var<'t>, bias: Option<Var<'t>> }` を新設し `pub` とする。
+- **`Sequential::predict_resident(&self, store: &DeviceParamStore,
+  input: &Tensor<f32>) -> Result<Tensor<f32>, AutodiffError>`（§3.3c・
+  `facade` クレート）を実装する**: **`ops`／`mem` のいずれも受け取らない**
+  （codex-review P1「'predict_resident' が facade に任意の 'BackendOps'
+  注入経路を再導入する」の解消）。内部で `facade::tape_for(store.
+  device())?` により専用の `Tape` を構築し、`store.snapshot_resident_
+  leaves(&tape)?` → `forward_resident` と同じ層イテレーション
+  （`LinearVars::forward`／`Module::forward`）→ `.to_tensor()` の順で
+  計算する。この設計により resident 推論の出力は既存 `predict` と
+  構造的に同一の数値計算列になり（`Module::forward` の既存多態
+  dispatch を経由するため）、旧稿が新設していた `ActivationKind`／
+  `Module::as_activation_kind`／`BackendOps::sigmoid` はいずれも
+  実装しない（§3.3c。Cursor Bugbot 指摘「Sigmoid path breaks predict
+  parity」の解消: 別経路を新設せず既存経路を再利用することで parity
+  を構造的に保証する）。poisoned 検査の迂回不能性は
+  `with_resident_buffers` の型・可視性設計（§3.3c）そのものにより
+  担保されるため、`facade`/`autodiff` 側のコードレビュー規律には
+  依存しない。
 - **`DeviceParamStore::abandon_pending_forward`（§3.3b 末尾）を実装
   する**: `pending_grad_sources` を副作用なくクリアする冪等メソッド。
   `step` を呼ばずに学習ループを中断・再試行するテストケース（回復
