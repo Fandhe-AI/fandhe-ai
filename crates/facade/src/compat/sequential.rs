@@ -338,8 +338,9 @@ impl Sequential {
     /// 呼び出しのスコープ内で破棄される（`Sequential::predict` と同じ
     /// 運用。`fandhe_ai_autodiff::nn::linear`「`Tape` はステップごとに
     /// 生成・破棄される前提」参照）。既存 `ActivationKind`／
-    /// `BackendOps::sigmoid` 等を新設せず [`Sequential::forward_from_flat_vars`]
-    /// （`forward_resident` と共有する同一の層イテレーション）を再利用
+    /// `BackendOps::sigmoid` 等を新設せず `forward_from_flat_vars`
+    /// （`forward_resident` と共有する同一の層イテレーション。private ヘルパーの
+    /// ためインドキュメントリンクは張らずコードスパン表記とする）を再利用
     /// することで、`predict` との parity を構造的に保証する（設計文書
     /// §3.3c）。
     pub fn predict_resident(
