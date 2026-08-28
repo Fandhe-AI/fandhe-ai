@@ -47,11 +47,17 @@
 //! | P6 | 都度構築 end-to-end（`MetalBackendOps::new()` + `BackendOps::gemm` を毎反復） | `src/ops.rs::MetalBackendOps::gemm` |
 //! | P7 | 対照: 資源再利用（`MetalContext`/`MetalGemm` を 1 回構築して `dispatch_auto` を反復） | `src/gemm.rs::MetalGemm::dispatch_auto` |
 //!
-//! 導出値 `P6 − P7` はプロセス都度構築による固定費の実測値であり、
-//! `P3 + P5`（デバイス/キュー/caps/occupancy 構築 + ライブラリ/パイプライン
-//! 構築の合算）との突合により、残差（tile 特殊化パイプライン・バッファ
-//! 確保等 [`fandhe_ai_backend_metal::gemm::MetalGemm::dispatch_auto`] 内部の
-//! 追加コスト）を見積もる。
+//! 導出値 `P6 − P7` はプロセス都度構築による固定費の実測値である。`P6`・`P7`
+//! はいずれも A/B のアップロード・Metal バッファ確保・カーネル実行・同期・
+//! C readback を反復ごとに行う（[`fandhe_ai_backend_metal::gemm::MetalGemm::
+//! dispatch_auto`] 内で共通）ため、これらの転送・バッファ確保コストは
+//! `P6 − P7` の減算で原則相殺される。`P3 + P5`（デバイス/キュー/caps/
+//! occupancy 構築 + ライブラリ/パイプライン構築の合算）との突合で得られる
+//! 残差は、転送・バッファ確保ではなく主に (1) tile 構成別特殊化パイプライン
+//! がインスタンス単位の遅延キャッシュのため都度構築（P6）では毎回コールドに
+//! なる一方、資源再利用（P7）ではキャッシュが温存される差、(2)
+//! `BackendOps::gemm`（`src/ops.rs`）固有の処理（形状検証・contiguous 化・
+//! `Tensor` 再構築）が P6 側にのみ含まれる差、に帰属させて見積もる。
 //!
 //! 参考ベースライン（既存実測との突合に使う）: `docs/perf/
 //! startup-cost-measurement.md` の Metal 実測（Apple M4 Max）はプロセス

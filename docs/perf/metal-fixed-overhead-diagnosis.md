@@ -71,9 +71,19 @@ main.rs::build_model`）は 784→256・256→10 の 2 層構成のため、推�
 | P6 | 都度構築 end-to-end（`MetalBackendOps::new()` + `BackendOps::gemm` を毎反復。framework-compare の 1 反復と同等条件） | `crates/backend-metal/src/ops.rs::MetalBackendOps::gemm` |
 | P7 | 対照: 資源再利用（`MetalContext`/`MetalGemm` を 1 回構築して `dispatch_auto` を反復。転送・カーネル実行・同期のみ） | `crates/backend-metal/src/gemm.rs::MetalGemm::dispatch_auto` |
 
-導出値: `P6 − P7 ≒ 都度構築固定費`。`P3 + P5`（デバイス/キュー/caps/occupancy 構築 +
-ライブラリ/パイプライン構築の合算）との整合を突合し、残差（tile 特殊化パイプライン・
-バッファ確保・A/B アップロード等）を記録する。
+導出値: `P6 − P7 ≒ 都度構築固定費`。`P6`・`P7` はいずれも A/B のホスト→デバイス
+アップロード・Metal バッファ確保・カーネル実行・同期・C readback を反復ごとに
+行う（`MetalGemm::dispatch_auto` 内で共通。§4「計測窓は... readback を含む
+end-to-end 壁時計時間」参照）ため、これらの転送・バッファ確保コストは
+`P6 − P7` の減算で原則相殺される。したがって `P3 + P5` との整合を突合した
+残差は、転送・バッファ確保ではなく主に次の 2 点に帰属させて説明する:
+(1) tile 構成別特殊化パイプライン（`pipeline_for_tile`）がインスタンス単位の
+遅延キャッシュのため、都度構築（P6）では毎回コールドに構築される一方、
+資源再利用（P7）では 1 回目の呼び出し以降キャッシュが温存されている差、
+(2) `BackendOps::gemm`（`ops.rs:151-180`）固有の処理（`matmul_out_shape`
+形状検証・`a.contiguous()`/`b.contiguous()`・`Tensor::new` によるテンソル
+再構築）が P6 側にのみ計測窓へ含まれる差。転送・確保コストを分離対照したい
+場合は専用の対照フェーズを別途追加する必要がある（本 doc では追加しない）。
 
 ## 4. 計測手段・手順
 
@@ -120,7 +130,8 @@ cargo run -p fandhe-ai-backend-metal --example fixed_overhead_diagnosis --releas
 
 - `P6 − P7`（fixed_cost, size=256）と framework-compare 実測（5.441 ms）の整合
 - `P6 − P7`（fixed_cost, size=512）と framework-compare 実測（5.724 ms）の整合
-- `P3 + P5` と `P6 − P7` の残差（tile 特殊化パイプライン・バッファ確保等の見積り）
+- `P3 + P5` と `P6 − P7` の残差（tile 特殊化パイプライン構築差・`BackendOps::gemm`
+  固有処理〈形状検証・contiguous 化・Tensor 再構築〉の見積り。§3 参照）
 - `P4 library_compile_first` と `P4 library_compile_rest` の比（システムコンパイラ
   キャッシュの温存効果）
 
