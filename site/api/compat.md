@@ -57,8 +57,8 @@ Keras `Sequential` 慣習でレイヤーを積み上げるビルダーです。`
 | `trainable_grads(&grads)` | `Tape::backward` の結果から同じ順序で勾配参照列を取得する |
 
 `Sequential::trainable_parameters()` / `Sequential::apply_parameters(updated)`
-と組み合わせることで、`fandhe_ai_autodiff::optim::Sgd` や `fandhe_ai_autodiff::nn::optim::AdamW`
-の位置対応契約にそのまま渡せます。`apply_parameters` は shape を変えない
+と組み合わせることで、`fandhe_ai::optim::Sgd` や `fandhe_ai::optim::AdamW`
+（facade 公開面）の位置対応契約にそのまま渡せます。`apply_parameters` は shape を変えない
 更新専用の契約であり、層幅を変えるリサイズ用途はサポート対象外です。
 
 ### `fandhe_ai::Tape` newtype について
