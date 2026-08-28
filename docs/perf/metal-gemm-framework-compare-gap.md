@@ -49,18 +49,23 @@ candle／Burn はデバイス・入力テンソルをループ外で 1 回だけ
 作る』運用コストを含む数値」（summary.md 該当節）であり、#927/#930 が特定・解消
 した固定費と同一の構造要因である。
 
-固定費の実測値（約 5 ms・N 非依存。#927 診断）は N=256〜512 のギャップ（fandhe-ai
-5.441/5.724 ms 対 candle 257.6/519.0 µs、差 約 5.2/5.2 ms）とほぼ一致する。N=4096
-では 46.415 ms 対 23.635 ms（差 約 22.8 ms）であり、固定費 5 ms を差し引いても
-約 17.8 ms の差が残る。したがって**固定費は N=256〜512 のギャップの大半を説明する
-一方、N=4096（本イシュー表題の「大サイズ」）のギャップは固定費だけでは説明できず、
-§2.2・§2.3 の要因が主要因候補である**。ただし §2.2（転送コスト）・§2.3（カーネル
-本体差）とも本 doc 執筆時点（Linux worktree）では寄与分を分離した実測値を持たない
-仮説段階の分解であり、「主要因」と確定させるには §5.2「gemm_bench」改善前後比較・
-§5.3「gemm_f32_prepared_bench」による転送コスト分離実測（いずれも Mac 実機。
-現状 `--未計測--`）が完了し、残差 約 17.8 ms のうち転送コスト起因分とカーネル本体
-起因分の内訳が定量的に切り分けられて初めて確定する。本 PR の時点では確定ではなく
-候補の提示に留める。
+**固定費「約 5 ms」は #927 の直接実測値ではない**。`docs/perf/
+metal-fixed-overhead-diagnosis.md` §5「実測結果」の P6/P7 実測表は Mac 実機
+セッション待ちで全欄が未記入（`--未計測--` 相当）であり、同 doc が定義する
+`P6 − P7`（都度構築固定費の直接測定量）はまだ得られていない。本 doc が使う
+「約 5 ms」は、N=256〜512 の fandhe-ai・candle 差分（5.441/5.724 ms 対
+257.6/519.0 µs、差 約 5.2/5.2 ms）から**逆算した推定値**であり、この差分自体が
+「fandhe-ai 側の固定費のみに起因する」という前提（candle 側のギャップ寄与が
+無視できるという未検証の仮定を含む）の上に成り立つ。N=4096 では 46.415 ms
+対 23.635 ms（差 約 22.8 ms）であり、この推定固定費 約 5 ms を差し引くと
+約 17.8 ms の残差になる計算だが、固定費自体が推定値であるため**この残差も
+推定であり確定値ではない**。したがって「固定費は N=256〜512 のギャップの
+大半を説明し、N=4096 のギャップは固定費だけでは説明できない」という整理は、
+§5.2・§5.3（後述）で実際に有効性が確認できなかった実測手順を前提にしていた
+ため**本 PR の時点では成立を確認できない仮説**として扱う。§2.2・§2.3 は
+その仮説段階の候補提示であり、確定には `fixed_overhead_diagnosis`
+（#927 example）による P6/P7 の直接実測（Mac 実機セッション。§5.1 準拠の
+正式な再計測完了後）が前提となる。
 
 ### 2.2 計測境界の非対称（主要因候補・実測未確定）
 
@@ -76,8 +81,16 @@ end-to-end、P7: 資源再利用のみ）はいずれも転送・バッファ確
 （同 doc P6/P7 定義: 「A/B のホスト→デバイスアップロード・Metal バッファ確保・
 カーネル実行・同期・C readback を反復ごとに行う」）、P6−P7 の差分（固定費）には
 転送コストは現れない。すなわち転送コストの寄与分は §2.1 の固定費とは別勘定であり、
-本 doc 執筆時点（Linux worktree）では定量化できない実測待ち事項である（§5 手順
-「gemm_f32_prepared_bench」参照）。
+本 doc 執筆時点（Linux worktree）では定量化できない実測待ち事項である。**当初
+§5.3「gemm_f32_prepared_bench」で prepared 境界と framework-compare `--mode fresh`
+の差分から転送コストを分離する想定だったが、両者は計測経路自体が異なる
+（`gemm_f32_prepared_bench` は `MetalGemm::dispatch_tiled_prepared` を backend-metal
+クレートから直接呼ぶのに対し、framework-compare `--mode fresh` は
+`fandhe_ai::tape_for` 経由で facade・autodiff テープ構築・`MetalBackendOps::gemm`
+の形状検証等を経る）ため、差分には転送コスト以外に tape／facade 構築コスト等が
+混入し、転送コストだけを分離できない（§5.3 参照）。転送コストを正しく分離するには
+`MetalGemm::dispatch_auto` 相当の呼び出しをループ内外でホスト→デバイス転送の
+有無だけを変えて対照する専用の計測経路が別途必要であり、本 doc では設計しない。
 
 ### 2.3 カーネル本体差（主要因候補・実測未確定）
 
@@ -187,18 +200,27 @@ Q1/Q3 を記録する（TASK-8.1 プロトコル・`.claude/rules/coding-rust.md
 summary.md 「Metal」節と本 doc §2.1 の表を突き合わせ、N=256〜512 の
 ギャップが 5 ms 固定費分縮小したか（`--未計測--`）を記録する。
 
-### 5.2 `gemm_bench`（`dispatch_auto`・転送込み境界）改善前後比較
+### 5.2 `gemm_bench`（`dispatch_auto`・転送込み境界）は #930/#948 改善前後比較に使えない（訂正）
 
-```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
-```
+当初、下記コマンドで `gemm_bench` を改善前後比較に使う想定だったが誤りと判明した
+ため、実施しない。理由: `gemm_bench.rs`（`crates/backend-metal/examples/
+gemm_bench.rs`）は `MetalContext::new()`／`MetalGemm::new(&ctx)` を計測ループの
+**外側で 1 回だけ**構築してから `dispatch_variant`/`dispatch_auto` を反復する
+実装であり（`docs/perf/metal-fixed-overhead-diagnosis.md` の P7「資源再利用」と
+同型の構成）、`MetalBackendOps::gemm`（`crates/backend-metal/src/ops.rs`）が
+呼び出しのたびに `context_cache::cached_context`/`cached_gemm` を経由する
+構成とは別の呼び出し経路である。#930/#948 が解消したのはまさに
+`MetalBackendOps::gemm` の**呼び出しごとの再構築コスト**であり、`gemm_bench`
+はそのコストをそもそも計測窓に含んでいない（#930/#948 の変更前後を通じて
+`gemm_bench` 自体のホットパスは変わらない）。したがって `gemm_bench` の
+改善前後比較は #930/#948 の効果を反映せず、有意な差は期待できない。
 
-`gemm_bench.rs` は `--size` 等の CLI オプションを持たず、size=256/512/1024/2048/4096
-（正方）をソース内の固定配列（`crates/backend-metal/examples/gemm_bench.rs` 内
-`for size in [256usize, 512, 1024, 2048, 4096]`）で計測する。上記コマンドの実行
-だけで当該サイズ集合が得られる。
-
-改善前（v0.3.0 相当）／改善後（#930/#948 適用後）で 5 回計測・中央値比較: `--未計測--`
+#930/#948 の効果を実測するには、`MetalBackendOps::gemm`（＝ facade
+`tape_for(Device::Metal)` 経由の `matmul`）を呼び出す経路が必要であり、
+§5.1 の framework-compare 再計測（`fandhe-ai` pin 更新後）、または #927 の
+`fixed_overhead_diagnosis` example（P6 `rebuild_each_call` を #930/#948 適用前
+コミットと適用後コミットの双方でチェックアウトして計測・比較する）のいずれかを
+使う（いずれも Mac 実機セッション。`--未計測--`）。
 
 ### 5.3 `gemm_f32_prepared_bench`（カーネル純境界。転送を含まない）
 
@@ -211,8 +233,17 @@ cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release
 `for size in [512usize, 1024, 2048, 4096]`。256 は対象外）で size=512/1024/2048/4096
 を計測する。
 
-§2.2 の転送コスト寄与分を分離するため、prepared（デバイス常駐入力）境界と
-`--mode fresh` の e2e 境界の差分を記録する: `--未計測--`
+**当初想定していた §2.2 の転送コスト分離目的には使えない（訂正）。**
+`gemm_f32_prepared_bench.rs` は `MetalGemm::dispatch_tiled_prepared` を
+`crates/backend-metal` クレートから直接呼ぶ（tape・facade・
+`MetalBackendOps::gemm` を経由しない）のに対し、framework-compare
+`--mode fresh` は `fandhe_ai::tape_for` 経由でテープ構築・`matmul` 呼び出し・
+`MetalBackendOps::gemm` の形状検証／`contiguous()` 化を経る。両者の差分には
+転送コスト以外にこれらの計測経路差が混入するため、prepared 境界と
+`--mode fresh` の単純な差分を「転送コスト」と結論づけることはできない
+（§2.2 参照）。本バイナリ自体は f32 カーネル単体の TFLOPS（PyTorch MPS f32
+比較用。冒頭コメント参照）の記録に限定して使い、転送コスト分離の根拠には
+用いない: `--未計測--`
 
 ### 5.4 `scripts/bench/framework-compare/run_all.sh` 横並び再計測
 
