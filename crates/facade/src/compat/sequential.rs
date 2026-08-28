@@ -11,8 +11,54 @@
 //! が返す [`SequentialVars`] を経由して `LinearVars`（勾配取得の入口。
 //! `Tape::backward` 後に `Gradients::get(&vars.weight)` する経路）へ
 //! アクセスできる。[`Sequential::trainable_parameters`]/
-//! [`Sequential::apply_parameters`] と組み合わせ、`fandhe_ai_autodiff::optim::Sgd`・
-//! `fandhe_ai_autodiff::nn::optim::AdamW` の位置対応契約にそのまま渡せる。
+//! [`Sequential::apply_parameters`] と組み合わせ、[`crate::optim::Sgd`]・
+//! [`crate::optim::AdamW`]（`fandhe_ai::optim`。facade 公開面。イシュー #961）
+//! の位置対応契約にそのまま渡せる。`facade` が唯一のサポートされる公開
+//! API 面であり（`docs/compat-api-scope.md` §0）、利用者は内部クレート
+//! `fandhe_ai_autodiff` へ直接依存する必要はない。適用順序契約
+//! （`backward → clip → optimizer step`）の正は [`crate::optim`]
+//! モジュール doc とする（イシュー #963）。
+//!
+//! ```
+//! use fandhe_ai::Tensor;
+//! use fandhe_ai::compat::Sequential;
+//! use fandhe_ai::optim::{Sgd, SgdConfig, clip_grad_norm};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let x = Tensor::new(vec![0.1_f32, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8], &[2, 4])?;
+//! let y = Tensor::new(vec![0.0_f32, 1.0, 1.0, 0.0], &[2, 2])?;
+//!
+//! let mut model = Sequential::new()
+//!     .add_linear(4, 8, /* seed = */ 42)?
+//!     .add_relu()
+//!     .add_linear(8, 2, /* seed = */ 43)?;
+//!
+//! let mut sgd = Sgd::new(SgdConfig::new(0.01))?;
+//!
+//! // `SequentialVars`（`bound`）は `&model`／`&tape` を借用するため、
+//! // `apply_parameters`（`&mut model`）を呼ぶ前にブロックを抜けて
+//! // 借用を解放する。
+//! let updated = {
+//!     let tape = fandhe_ai::tape();
+//!     let bound = model.bind(&tape);
+//!     let x_var = tape.var(&x);
+//!     let y_var = tape.var(&y);
+//!
+//!     let pred = bound.forward(&tape, &x_var)?;
+//!     let loss = pred.mse_loss(&y_var)?;
+//!
+//!     let grads = tape.backward(&loss)?;
+//!     let grad_refs = bound.trainable_grads(&grads)?;
+//!     // 適用順序契約: backward → clip → optimizer step。
+//!     let clipped = clip_grad_norm(&grad_refs, /* max_norm = */ 1.0)?;
+//!     let clipped_grad_refs: Vec<&Tensor<f32>> = clipped.grads.iter().collect();
+//!     let param_refs = model.trainable_parameters();
+//!     sgd.step(&param_refs, &clipped_grad_refs)?
+//! };
+//! model.apply_parameters(updated)?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! **`predict` の既定結線（TASK-9.4・#411）**: `predict` は本クレートの
 //! composition root（[`crate::tape`]。既定 CPU・`CpuBackendOps`・融合
@@ -161,7 +207,7 @@ impl Sequential {
 
     /// 学習可能パラメータ（`Linear` 層の `weight`/`bias`）への参照列を
     /// 層の追加順・各層内は weight → bias（`Some` の場合のみ）の順で
-    /// 返す。`fandhe_ai_autodiff::optim::Sgd::step`/`fandhe_ai_autodiff::nn::optim::AdamW::step`
+    /// 返す。[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]
     /// の位置対応契約にそのまま渡せる。この順序契約は
     /// [`SequentialVars::trainable_vars`]/[`SequentialVars::trainable_grads`]/
     /// [`Sequential::apply_parameters`] と共通（#294 の設計不変条件）。
@@ -178,7 +224,8 @@ impl Sequential {
         out
     }
 
-    /// optimizer（`Sgd::step`/`AdamW::step`）が返した更新後テンソル列を
+    /// optimizer（[`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`]）
+    /// が返した更新後テンソル列を
     /// [`Sequential::trainable_parameters`] と同じ順序契約で各 `Linear`
     /// 層へ書き戻す。内部で `Linear::from_parameters`（`fandhe_ai_autodiff::nn::linear`）
     /// により層を再構築するため、compat 層自身は新パラメータ単体の内部
@@ -521,7 +568,8 @@ impl<'m, 't> SequentialVars<'m, 't> {
     /// `Ok(None)` を返す場合）は黙って除外せず `InvalidArgument` にする
     /// （fail-closed）: 除外してしまうと戻り値の件数が
     /// `trainable_parameters()` の件数より少なくなり、
-    /// `Sgd::step`/`AdamW::step` の位置対応契約（`params[i]` ↔ `grads[i]`）
+    /// [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`] の
+    /// 位置対応契約（`params[i]` ↔ `grads[i]`）
     /// が呼び出し元の意図と無関係にずれて、誤ったパラメータへ誤った
     /// 勾配を適用しかねないため（`.claude/rules/security.md` A03）。
     pub fn trainable_grads<'g>(
