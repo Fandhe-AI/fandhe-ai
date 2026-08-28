@@ -243,12 +243,36 @@ param 往復（§2 末尾）が「学習開始時の 1 回の upload + 終了時
   の two-pass 検証（§3.5・#426）の主体であり、層の並び順（インデックス）
   を単一に把握している唯一のクレート内オブジェクトのため、常駐ストアの
   結線もここに集約する。
-- **層インデックス対応**: `DeviceParamStore::new(sequential: &Sequential)`
-  が `Sequential::trainable_parameters()`（既存 API。`apply_parameters` と
-  同じ並び順契約〈§4.2「位置対応契約」・`sgd.rs:183-200`〉）と同一順序で
-  各層の `weight`/`bias`（と `velocity`）を `upload` し、層インデックス→
-  `DeviceBuffer` の対応表として保持する。既存の位置対応契約をそのまま
-  再利用するため、新たな対応規則を追加で決定する必要はない。
+- **層インデックス対応・型の所在（Cursor Bugbot 指摘の解消）**:
+  `DeviceParamStore` は `autodiff::optim` に属する（§3.4）が、`Sequential`
+  の実体は `facade::compat::sequential::Sequential` であり（`autodiff`
+  にも同名の非推奨型 `autodiff::compat::sequential::Sequential` が残存する。
+  CLAUDE.md の compat 面移設注記参照）、依存方向は `facade` →
+  `autodiff` のみで逆方向（`autodiff` → `facade`）は取れない。したがって
+  `DeviceParamStore::new` は **`&Sequential` を直接受け取らない**。
+  代わりに `Sequential::trainable_parameters()`（既存 API。`apply_parameters`
+  と同じ並び順契約〈§4.2「位置対応契約」・`sgd.rs:183-200`〉）が返す
+  `Vec<&Tensor<f32>>` 相当の「学習対象パラメータの並び」をそのまま
+  受け取る形にする: `DeviceParamStore::new(params: &[TrainableParam])`
+  （`TrainableParam` は `autodiff` 側に新設する `{ weight: &Tensor<f32>,
+  bias: Option<&Tensor<f32>> }` 相当の平坦なスライス型。確定シグネチャ
+  は #935）。呼び出し元（`facade::compat::Sequential::forward_resident`
+  もしくはその初期化ヘルパー）が `trainable_parameters()` 相当の抽出を
+  行ってから `DeviceParamStore::new` へ渡すことで、`autodiff` は
+  `facade`/`Sequential` 型を一切知らずに済む（依存方向を壊さない）。
+  **対応表のキー空間**: この「学習対象パラメータの並び」（`weight`→
+  `bias` の順で活性化層をスキップした並び）を単一の真実源とし、内部の
+  層インデックスは `Sequential.layers`（活性化層を挟む生の層リスト）の
+  添字ではなく、この並びに対する 0 始まりの連番（trainable 層インデックス）
+  とする。各キーに対応する値は `weight: DeviceBuffer<f32>`・
+  `bias: Option<DeviceBuffer<f32>>`・`velocity: Option<DeviceBuffer<f32>>`
+  （momentum 有効時のみ）の組であり、**1 キーに複数バッファを保持できる**
+  構造とする（「層インデックス→単一 `DeviceBuffer`」という誤読を避ける
+  ため本節で明示する）。`Sequential::forward_resident`（後述）は
+  `Sequential.layers` を通常どおりイテレーションしつつ、`Linear` 層に
+  出会うたびにこの trainable 層インデックスを別途カウントアップして
+  対応するキーを引く（活性化層はカウントしない）。既存の位置対応契約
+  そのものは変更しないため、新たな対応規則を追加で決定する必要はない。
 - **新規 forward 入口**: `Sequential` に既存 `forward` を置き換えない
   追加メソッド `forward_resident(&self, tape: &Tape, input: &Var,
   store: &DeviceParamStore) -> Result<Var, AutodiffError>`（仮称。確定
@@ -445,6 +469,18 @@ stale なホスト値を「現在のパラメータ」として使う事故を�
   一本化（poisoned 状態でも `Drop` 経由の解放は通常どおり働く。
   poisoned は「使用不可」を表すフラグであり、解放不能状態ではない）とも
   矛盾しない。
+- **`forward_resident` も poison チェック対象とする（Cursor Bugbot 指摘の
+  解消）**: 旧稿は `step`／`sync_to_host` のみ poisoned 時に
+  `BackendError` を返すと定めており、`Sequential::forward_resident`
+  （§3.3a・§3.3b）が破損混在状態のバッファをチェックなしに読める抜け穴が
+  残っていた。`forward_resident` は各層の `DeviceBuffer` を読む
+  （`mem.download` する）**前に** `DeviceParamStore` の poisoned
+  フラグを検査し、poisoned であれば計算を一切行わず同じ
+  `BackendError`（poisoned variant）を返す契約とする。これにより
+  「破損した混在状態のパラメータで forward が実行される」経路を閉じる
+  （`step`／`sync_to_host`／`forward_resident` の 3 箇所すべてが
+  poison チェックを通過して初めて `DeviceParamStore` の内部状態へ
+  アクセスできることを、本設計が確定する fail-closed 契約とする）。
 
 ### 4.4 解放・スレッド境界
 
