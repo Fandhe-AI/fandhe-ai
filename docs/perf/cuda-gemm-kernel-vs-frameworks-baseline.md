@@ -68,7 +68,7 @@ fandhe-ai の (c) 実測と異なる（§4 の限定条件で明記）。
 | 4096 | reuse | 684.670 ms | 474.396 ms | 289.7 |
 
 **観察**: reuse モードの `init_s`（tape 構築 + 初回 matmul + ホスト実体化）は 465〜685 ms とサイズ
-非依存の大きな値であり、かつ 2 回目以降の呼び出し（中央値列）も 260〜506 ms とほぼ同水準にとどまる。
+非依存の大きな値であり、かつ 2 回目以降の呼び出し（中央値列）も 260〜474 ms とほぼ同水準にとどまる。
 すなわち本環境では「tape 構築 1 回限りで以降はカーネル実行のみの短時間になる」という当初仮説
 （#925 計画時点の想定）は成立せず、**行列積 1 回ごとに数百 ms の固定オーバーヘッドが繰り返し発生する**
 ことが実測された（詳細な原因切り分けは未実施。§7 参照）。
@@ -130,17 +130,41 @@ PR #725、同一 GB10 個体・`cuda_floor_bench` 5 run 中央値・launch-only 
 4. **【最重要】既定カーネル変種は tiled f32 固定であり、上表 wmma_tf32 行は公開 API が実際に通る経路
    ではない**: `crates/backend-cuda/src/ops.rs`（`CudaBackendOps::gemm`, `run_tiled_f32` 呼び出し
    1 箇所のみ）を確認したところ、facade → tape → backend-cuda の公開 API 経由の matmul（framework-compare
-   の fandhe-ai 実測が通る経路）は `CudaGemm::run_tiled_f32` に固定されている。Tensor Core 経路
-   （`wmma_tf32`）は `CudaGemmAuto`（`crates/backend-cuda/src/gemm_auto.rs`）経由でのみ到達可能だが、
-   `cuda-optimized-remeasurement.md` 自身が「既定カーネル変種の選択は保守的に tiled 固定とし、
-   `CudaGemmAuto` を介した Tensor Core 経路の自動選択への切替は別スコープ」と明記しており、
-   `CudaGemmAuto` は公開 API から未接続。**すなわち上表の tiled f32 行（2048: 0.56 倍、4096: 0.87〜0.67 倍。
-   candle/burn 未満）こそが「公開 API が実際に実行するカーネルの性能」であり、wmma_tf32 行
-   （3.09〜4.00 倍優位）は公開 API 経由では享受できない未接続の候補経路の実測値である**
+   の fandhe-ai 実測が通る経路）は `CudaGemm::run_tiled_f32` に固定されている。上表 wmma_tf32 行の
+   実測値は `cuda_floor_bench`（`crates/backend-cuda/examples/cuda_floor_bench.rs`）が `CudaGemm` の
+   計測 API（`launch_wmma_tf32` 等）を直接呼ぶ経路によるもので、`CudaGemmAuto`（`crates/backend-cuda/src/gemm_auto.rs`）
+   を経由しない（`cuda-optimized-remeasurement.md`「役割分担」節の記述どおり、`CudaGemmAuto` は
+   `cuda_floor_bench.rs` からも既定ビルドからも呼ばれていない）。また現行の `CudaGemmAuto::run_f32`
+   （`gemm_auto.rs:1615-1631`）は `KernelKind::MatrixUnit`・`KernelKind::Tiled` のいずれも
+   `run_tiled_f32` へ委譲する実装（TF32/f32 Tensor Core 経路は #62 未実装のためコメントで明記の上
+   tiled へフォールバック）であり、**`CudaGemmAuto` を経由しても f32 の Tensor Core 経路
+   （`wmma_tf32`）へは現状到達できない**。したがって「`CudaGemmAuto` を公開 API へ接続すれば
+   Tensor Core 経路へ切り替わる」は成立せず、公開 API を wmma_tf32 経路へ切り替えるには単なる
+   `CudaGemmAuto` 接続ではなく、`CudaGemmAuto::run_f32` 側に f32 の `MatrixUnit` 分岐を実装する
+   こと・カーネル選択契約（`select_gemm_kernel`）の見直し・§4 限定条件の parity 検証を伴う変更が
+   必要である。**すなわち上表の tiled f32 行（2048: 0.56 倍、4096: 0.87〜0.67 倍。candle/burn 未満）
+   こそが「公開 API が実際に実行するカーネルの性能」であり、wmma_tf32 行（3.09〜4.00 倍優位）は
+   公開 API 経由では享受できない未接続の候補経路の実測値である**
 5. **tape 経由 reuse per-call とカーネル単体の乖離**: §3.1 の環境 3 実測が示すとおり、fandhe-ai の
    公開 API（tape）経由では reuse per-call でも数百 ms の固定オーバーヘッドが残る。上記限定条件 4
    により、この乖離を解消しても到達するのは tiled f32（candle/burn 未満）であり wmma_tf32
    （3.09〜4.00 倍優位）ではない点に注意する
+6. **wmma_tf32 実測値（51.96%／83.53%）は `wmma_tf32_staged` 経路の値であり、この経路固有の
+   数値一致（parity）状態には経緯がある**: `cuda-optimized-remeasurement.md`「数値一致（parity）
+   状態の限定条件」節は当初（2026-08-18 実測時点）`wmma_tf32_staged`（512×512×4096）を
+   `baseline_provenance_unconfirmed == true` により **判定不能（fail-closed）** と記録していたが、
+   同ドキュメント追記（イシュー #726・2026-08-19）および正本 `docs/perf/performance-floor-decision.md`
+   §10 限定条件 4 のとおり、DGX Spark GB10 実機で staged 固有の確定ベースラインを確立し
+   （fail_count=43019/262144・mean_abs_diff=4.463436e-3）、`parity_baselines_do_not_regress` が
+   staged 行を含む全対象行で pass することを確認済みであるため**この判定不能状態は解消済み**である。
+   ただし `performance-floor-decision.md` §10 が明記するとおり限定条件 1〜3 は #726 のスコープ外で
+   継続する: (a) 候補算出経路（`wmma_tf32`・`mma_f16`）は #389 §5.3 が記録した数値一致 parity の
+   恒常 fail 対象と一致する（`assert_parity` による絶対比較では K=4096 ストレス等で 16〜17% 台の
+   fail が既知事象として残る）、(b) TF32/f16 Tensor Core 経路の複合判定改定（REQ-2 改定）は
+   #186 close 後も閾値定数自体は変更されておらず spec リポジトリ側対応待ちのまま、(c) 50% の
+   採用は「実測基準でゲートを機能させ、今後の最適化で性能を改善していく」という 2026-08-18
+   ユーザー承認済みの方針判断であること。したがって §5 の候補下限突合・優位性比較は**継続する
+   限定条件 1〜3 付きの承認済み候補値**に基づくものであり、無条件に確定した性能値の比較ではない
 
 ## 5. REQ-8 下限との突合
 
@@ -158,20 +182,24 @@ candle / Burn の対 PyTorch 比を同一形式で並べる。
 | 2048 | candle（fresh、GB10 環境 2） | 24.50% | 本ドキュメント §4 換算（4204.3 / 17158.2 GFLOP/s） |
 | 2048 | burn（fresh、GB10 環境 2） | 24.45% | 同上（4194.7 / 17158.2 GFLOP/s） |
 
-**両論併記の確定事項（§4 限定条件 4 を踏まえ、2 つの原因を分離して記録する）**:
+**両論併記の確定事項（§4 限定条件 4・6 を踏まえ、2 つの原因を分離して記録する）**:
 
 - **REQ-8 下限を満たす候補経路（wmma_tf32・Tensor Core）のカーネル単体性能は candle / Burn の
-  CUDA GEMM 実測を明確に上回る水準にある**（4096 で fandhe-ai wmma_tf32 51.96% 対 candle 12.98% /
-  burn 16.83%、2048 で fandhe-ai wmma_tf32 83.53% 対 candle/burn 約 24.5%）。これは §4 の限定条件
-  1〜3 付きながら、`wmma_tf32` カーネル実装それ自体の性能はフレームワーク横並びの実測値に対し
-  優位であることを示す
+  CUDA GEMM 実測を上回る水準にある**（4096 で fandhe-ai wmma_tf32 51.96% 対 candle 12.98% /
+  burn 16.83%、2048 で fandhe-ai wmma_tf32 83.53% 対 candle/burn 約 24.5%）。ただしこの 51.96%／
+  83.53% は `wmma_tf32_staged` 経路の実測値であり、§4 限定条件 6 のとおり同経路固有の parity
+  判定不能状態は #726 で解消済みである一方、`performance-floor-decision.md` §10 が継続と明記する
+  限定条件 1〜3（数値一致 parity の恒常 fail・REQ-2 改定待ち・実測基準ゲートという運用方針）は
+  解消していない。**すなわち 50%（REQ-8 f32 下限）自体が「限定条件付きでユーザー承認済みの
+  候補下限」であり、本比較が示す candle/Burn 優位は §4 の限定条件 1〜3・6 を伴う候補経路の性能に
+  ついてであって、無条件に確定した性能値としての優位ではない**点に注意する
 - **しかし公開 API（facade → tape → backend-cuda）が実際に実行する既定カーネルは tiled f32 固定であり
   （§4 限定条件 4）、その性能は candle / Burn 未満である**（4096 で tiled f32 GFLOP/s は candle の
   約 0.87 倍・burn の約 0.67 倍、2048 では約 0.56 倍）。framework-compare の fandhe-ai 実測は
   この tiled f32 経路を通っているため、**tape 初期化コストや per-call オーバーヘッドを仮に完全に
   ゼロへ縮小できたとしても、公開 API 経由の実効性能は candle/Burn を下回ったままである**
 - **原因は 2 つに分離される**: (i) tape 経由の固定オーバーヘッド（環境 2 fresh 458〜594 ms、環境 3
-  reuse per-call でも 260〜506 ms。#926 系の後続対応が対象）、(ii) 既定カーネル変種が Tensor Core
+  reuse per-call でも 260〜474 ms。#926 系の後続対応が対象）、(ii) 既定カーネル変種が Tensor Core
   経路（`CudaGemmAuto`／`wmma_tf32`）へ未接続で tiled f32 に固定されていること（`CudaGemmAuto` の
   公開 API への接続自体が別スコープと `cuda-optimized-remeasurement.md` に明記済み）。(i) の解消
   だけでは candle/Burn 対比の逆転（tiled f32 が下回る現状）を覆せず、(ii) の対応（既定カーネル変種を
