@@ -213,8 +213,14 @@ pub mod device;
 pub mod elementwise;
 #[cfg(target_os = "macos")]
 pub mod error;
+// `context_cache` のコア判定ロジック（ヒット判定・ビルド・poison 変換）の
+// 切り出し（イシュー #930 codex-review 対応）。`pad`／`tile`／`row_kernel`
+// と同じ設計判断で `objc2` 系 FFI に触れないため `cfg(target_os = "macos")`
+// を付けず、Linux CI でも汎用キャッシュ契約（ヒットの clone・ビルド失敗の
+// 非キャッシュ・poison 時 fail-closed）を検証できるようにしてある。
 #[cfg(target_os = "macos")]
 pub mod gemm;
+pub(crate) mod generic_cache;
 #[cfg(target_os = "macos")]
 pub mod half_buffer;
 #[cfg(target_os = "macos")]

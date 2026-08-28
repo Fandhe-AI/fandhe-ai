@@ -127,8 +127,9 @@ pub enum MetalError {
     /// `CudaError::InvalidElementwiseShape` と同じ役割）。`detail` に
     /// 具体的な不整合内容（長さ不一致等）を保持する。
     InvalidElementwiseShape { detail: String },
-    /// [`crate::context_cache`]（プロセス内コンテキスト／カーネルスイート
-    /// キャッシュ。イシュー #930）の `Mutex` が poison していた。CUDA 側
+    /// `crate::context_cache`（プロセス内コンテキスト／カーネルスイート
+    /// キャッシュ。イシュー #930。非公開モジュールのためリンクではなく
+    /// コードスパン表記とする）の `Mutex` が poison していた。CUDA 側
     /// `CudaError::ContextCacheUnavailable`（feat/929-cuda-ctx-cache）と
     /// 同名・同義の専用 variant とする（`.claude/rules/coding-rust.md`
     /// 「本番経路で unwrap/expect を使わない」に従い panic させず、既存
