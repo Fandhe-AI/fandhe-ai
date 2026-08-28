@@ -271,9 +271,19 @@ mod elementwise;
 mod error;
 mod gemm;
 mod gemm_auto;
+// イシュー #926: CUDA GEMM の固定初期化コスト（tape_for 初期化コスト。
+// フレームワーク横並びベンチ・PR #915 実測 440〜460 ms 帯）のフェーズ分解
+// 診断テスト。`kernels`／`kernels_wmma_opt`（非公開 `mod`）へ到達するため
+// integration test ではなくクレートルートの兄弟モジュールとして配置する
+// （`init_cost_diag_tests.rs` 冒頭ドキュメンテーションコメント参照。
+// `jit_cache_bench_tests.rs`〈#534・`nvrtc.rs` 子モジュール〉と同型の判断）。
+// プロダクションコード（`ops.rs`・`gemm.rs`・`device.rs` 等）は本イシューで
+// 変更しない（改善実装は Phase 2 のスコープ）。
 mod gemm_mma;
 mod gemm_mma_tf32;
 mod gemm_wmma;
+#[cfg(test)]
+mod init_cost_diag_tests;
 mod kernels;
 mod kernels_elementwise;
 mod kernels_mma;

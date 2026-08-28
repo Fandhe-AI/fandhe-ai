@@ -487,6 +487,67 @@ pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
     n.is_multiple_of(4) && k.is_multiple_of(4)
 }
 
+/// `CudaGemm::new` が 1 回の構築で NVRTC コンパイル・ロードする 8 カーネル
+/// の `(診断・ログ用ラベル, NVRTC ソース, ロードする関数名)` 組の**唯一の
+/// 真実源**。
+///
+/// 順序は naive f32/f16・tiled f32/f16・tiled_bias_act_f32（先頭 5 件、
+/// `?` 早期 return に合流する必須カーネル）・wmma_tf32・wmma_tf32_opt・
+/// wmma_tf32_staged（末尾 3 件、失敗を `Option` へ退避するフォールバック
+/// カーネル）の順に固定する。先頭 5 件は [`CudaGemm::new`] が本関数の
+/// スライスを直接ループして compile_ptx／load_module／load_function する
+/// ため実装上ずれようがなく、末尾 3 件は [`compile_wmma_tf32`]／
+/// [`compile_wmma_tf32_opt`]／[`compile_wmma_tf32_staged`] がそれぞれ本関数
+/// の対応要素からソース・関数名を取得する（これらは失敗を `Option` へ退避
+/// するフォールバック方式のため、先頭 5 件と同じ単純ループへは合流させ
+/// ない。個別関数化の理由は各関数のドキュメンテーションコメント参照）。
+///
+/// `crates/backend-cuda/src/init_cost_diag_tests.rs`（イシュー #926 の
+/// フェーズ分解診断テスト）も本関数をそのまま呼び出し、8 カーネルの
+/// 内訳を個別計測する。以前は同テストファイル側に本関数と同一内容を
+/// 手作業で複製していたが、本番側でカーネルの追加・削除・ソース差し替え
+/// が起きても診断側の一覧が追従せず乖離しうるため、単一の `pub(crate)`
+/// 関数へ統合した（Review #945 P2 指摘）。
+pub(crate) fn kernel_specs() -> [(&'static str, &'static str, &'static str); 8] {
+    [
+        ("naive_f32", kernels::NAIVE_F32, "gemm_naive_f32"),
+        ("naive_f16", kernels::NAIVE_F16, "gemm_naive_f16"),
+        ("tiled_f32", kernels::TILED_F32, "gemm_tiled_f32"),
+        ("tiled_f16", kernels::TILED_F16, "gemm_tiled_f16"),
+        (
+            "tiled_bias_act_f32",
+            kernels::TILED_BIAS_ACT_F32,
+            "gemm_tiled_bias_act_f32",
+        ),
+        ("wmma_tf32", kernels::WMMA_TF32_F32, "gemm_wmma_tf32"),
+        (
+            "wmma_tf32_opt",
+            kernels_wmma_opt::wmma_tf32_f32_opt_source(),
+            "gemm_wmma_tf32_opt",
+        ),
+        (
+            "wmma_tf32_staged",
+            kernels_wmma_opt::wmma_tf32_f32_staged_source(),
+            "gemm_wmma_tf32_staged",
+        ),
+    ]
+}
+
+/// WMMA(TF32) カーネル（[`kernel_specs`] index 5）を単独でコンパイル・
+/// ロードする。`CudaGemm::new` から呼ばれ、戻り値の `Err` は naive/tiled
+/// 4 カーネルの `?` 早期 return には合流させず、呼び出し元で
+/// `wmma_tf32_error` として退避する（[`CudaGemm::wmma_tf32`] フィールドの
+/// ドキュメンテーションコメント参照。レビュー指摘 #62）。
+fn compile_wmma_tf32(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
+    let (_, source, func_name) = kernel_specs()[5];
+    let ptx = compile_ptx(source, arch)?;
+    let func = device
+        .context()
+        .load_module(ptx)?
+        .load_function(func_name)?;
+    Ok(func)
+}
+
 /// `kernels::WMMA_TF32_BLOCK_M`／`WMMA_TF32_BLOCK_N`（ブロックタイル一辺）を
 /// 単位に `m`/`n` を `div_ceil` で包含するグリッド次元を構築する。
 ///
@@ -496,20 +557,6 @@ pub(crate) fn wmma_tf32_staged_alignment_ok(n: u32, k: u32) -> bool {
 /// 束ねた形）とタイル一辺（32×32、2×2 warp グリッド）が異なるため、
 /// 専用のグリッド計算関数として分離する。末尾ブロックの余剰スレッドは
 /// カーネル内の手動境界チェック（REQ-8）に委ねる契約は共通。
-/// WMMA(TF32) カーネル（`kernels::WMMA_TF32_F32`）を単独でコンパイル・
-/// ロードする。`CudaGemm::new` から呼ばれ、戻り値の `Err` は naive/tiled
-/// 4 カーネルの `?` 早期 return には合流させず、呼び出し元で
-/// `wmma_tf32_error` として退避する（[`CudaGemm::wmma_tf32`] フィールドの
-/// ドキュメンテーションコメント参照。レビュー指摘 #62）。
-fn compile_wmma_tf32(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let ptx = compile_ptx(kernels::WMMA_TF32_F32, arch)?;
-    let func = device
-        .context()
-        .load_module(ptx)?
-        .load_function("gemm_wmma_tf32")?;
-    Ok(func)
-}
-
 fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
     let grid_dim = (
         n.div_ceil(kernels::WMMA_TF32_BLOCK_N),
@@ -523,16 +570,17 @@ fn wmma_tf32_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
-/// WMMA(TF32) opt カーネル（`kernels_wmma_opt::wmma_tf32_f32_opt_source()`）を単独で
+/// WMMA(TF32) opt カーネル（[`kernel_specs`] index 6）を単独で
 /// コンパイル・ロードする。[`compile_wmma_tf32`] と同じ理由（レビュー指摘
 /// #62 の踏襲）で `CudaGemm::new` の早期 return には合流させず、呼び出し元で
 /// `wmma_tf32_opt_error` として退避する。
 fn compile_wmma_tf32_opt(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let ptx = compile_ptx(kernels_wmma_opt::wmma_tf32_f32_opt_source(), arch)?;
+    let (_, source, func_name) = kernel_specs()[6];
+    let ptx = compile_ptx(source, arch)?;
     let func = device
         .context()
         .load_module(ptx)?
-        .load_function("gemm_wmma_tf32_opt")?;
+        .load_function(func_name)?;
     Ok(func)
 }
 
@@ -553,17 +601,17 @@ fn wmma_tf32_opt_launch_config(m: u32, n: u32) -> LaunchConfig {
     }
 }
 
-/// WMMA(TF32) opt-staged カーネル（イシュー #500・
-/// `kernels_wmma_opt::wmma_tf32_f32_staged_source()`）を単独でコンパイル・
-/// ロードする。[`compile_wmma_tf32_opt`] と同じ理由で `CudaGemm::new` の
-/// 早期 return には合流させず、呼び出し元で `wmma_tf32_staged_error` として
-/// 退避する。
+/// WMMA(TF32) opt-staged カーネル（イシュー #500・[`kernel_specs`] index 7）
+/// を単独でコンパイル・ロードする。[`compile_wmma_tf32_opt`] と同じ理由で
+/// `CudaGemm::new` の早期 return には合流させず、呼び出し元で
+/// `wmma_tf32_staged_error` として退避する。
 fn compile_wmma_tf32_staged(device: &CudaDevice, arch: &str) -> Result<CudaFunction, CudaError> {
-    let ptx = compile_ptx(kernels_wmma_opt::wmma_tf32_f32_staged_source(), arch)?;
+    let (_, source, func_name) = kernel_specs()[7];
+    let ptx = compile_ptx(source, arch)?;
     let func = device
         .context()
         .load_module(ptx)?
-        .load_function("gemm_wmma_tf32_staged")?;
+        .load_function(func_name)?;
     Ok(func)
 }
 
@@ -614,37 +662,51 @@ impl CudaGemm {
     pub fn new(device: &CudaDevice) -> Result<Self, CudaError> {
         let arch = device.arch();
 
-        let naive_f32_ptx = compile_ptx(kernels::NAIVE_F32, arch)?;
-        let naive_f16_ptx = compile_ptx(kernels::NAIVE_F16, arch)?;
-        let tiled_f32_ptx = compile_ptx(kernels::TILED_F32, arch)?;
-        let tiled_f16_ptx = compile_ptx(kernels::TILED_F16, arch)?;
+        // naive f32/f16・tiled f32/f16・tiled_bias_act_f32（イシュー #599。
+        // epilogue 融合カーネルも naive/tiled と同様 `#include` を使わず全
+        // compute capability で成立するため、WMMA(TF32) 系のような Option
+        // 化・失敗の退避は行わず、`new` の早期 return（`?`）に合流させる）の
+        // 5 カーネルは [`kernel_specs`]（本番・イシュー #926 診断テストの
+        // 双方が参照する単一の真実源。Review #945 P2 指摘）の先頭 5 要素
+        // からソース・関数名を取得してコンパイル・ロードする（固定長配列の
+        // 直接インデックス参照のため、本番経路で禁止される `unwrap`/
+        // `expect` を要素取得に必要としない。`.claude/rules/coding-rust.md`）。
+        let specs = kernel_specs();
 
+        let (_, naive_f32_source, naive_f32_func) = specs[0];
+        let naive_f32_ptx = compile_ptx(naive_f32_source, arch)?;
         let naive_f32 = device
             .context()
             .load_module(naive_f32_ptx)?
-            .load_function("gemm_naive_f32")?;
+            .load_function(naive_f32_func)?;
+
+        let (_, naive_f16_source, naive_f16_func) = specs[1];
+        let naive_f16_ptx = compile_ptx(naive_f16_source, arch)?;
         let naive_f16 = device
             .context()
             .load_module(naive_f16_ptx)?
-            .load_function("gemm_naive_f16")?;
+            .load_function(naive_f16_func)?;
+
+        let (_, tiled_f32_source, tiled_f32_func) = specs[2];
+        let tiled_f32_ptx = compile_ptx(tiled_f32_source, arch)?;
         let tiled_f32 = device
             .context()
             .load_module(tiled_f32_ptx)?
-            .load_function("gemm_tiled_f32")?;
+            .load_function(tiled_f32_func)?;
+
+        let (_, tiled_f16_source, tiled_f16_func) = specs[3];
+        let tiled_f16_ptx = compile_ptx(tiled_f16_source, arch)?;
         let tiled_f16 = device
             .context()
             .load_module(tiled_f16_ptx)?
-            .load_function("gemm_tiled_f16")?;
+            .load_function(tiled_f16_func)?;
 
-        // イシュー #599: epilogue 融合カーネルは naive/tiled と同様
-        // `#include` を使わず全 compute capability で成立するため、
-        // WMMA(TF32) 系のような Option 化・失敗の退避は行わず、`new` の
-        // 早期 return（`?`）に合流させる（上記 4 カーネルと同じ扱い）。
-        let tiled_bias_act_f32_ptx = compile_ptx(kernels::TILED_BIAS_ACT_F32, arch)?;
+        let (_, tiled_bias_act_f32_source, tiled_bias_act_f32_func) = specs[4];
+        let tiled_bias_act_f32_ptx = compile_ptx(tiled_bias_act_f32_source, arch)?;
         let tiled_bias_act_f32 = device
             .context()
             .load_module(tiled_bias_act_f32_ptx)?
-            .load_function("gemm_tiled_bias_act_f32")?;
+            .load_function(tiled_bias_act_f32_func)?;
 
         // `kernels::WMMA_TF32_F32` はブロックタイル（M/N=32）を warp タイル
         // （WMMA_TF32_FRAG=16）の 2x2 グリッドに割ることを前提にしており、
