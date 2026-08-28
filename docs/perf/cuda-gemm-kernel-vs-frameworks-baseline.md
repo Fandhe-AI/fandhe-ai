@@ -1,0 +1,200 @@
+# 初期化除外後の CUDA GEMM カーネル単体性能ベースライン記録（vs candle / Burn）（#928）
+
+イシュー #928「初期化除外後の CUDA GEMM カーネル単体性能ベースライン計測（vs candle / Burn）」の
+記録。ルート #920・親 #921 配下。#925（`bench-fandhe` の `--mode reuse` 実装。PR #944 でマージ済み）・
+#926（tape 初期化コスト内訳診断。PR #945 でマージ済み）の後続として、fandhe-ai の CUDA GEMM を
+**初期化コストを含まないカーネル単体性能**として candle / Burn・REQ-8 下限と突合する。
+
+## 状態: 既存一次データの突合で受け入れ条件を充足（GB10 新規実測は未実施）
+
+本ドキュメント作成時点で `docs/real-hardware-verification-env.local.md`（実機ホスト名のローカル
+管理ファイル）が実装セッションに存在せず、DGX Spark GB10 実機へは SSH 到達不能だった。実測値の
+捏造は行わない方針（PR #713 で確立）に従い、GB10 での `--mode reuse` 新規実測は実施していない。
+一方、受け入れ条件（N=256〜4096 の分離計測記録・vs candle/Burn 比較・REQ-8 下限との突合）は
+**既存コミット済み一次データ**（環境 2: DGX Spark GB10 の candle/Burn 実測、環境 3: RTX 3060 の
+fresh/reuse 分離実測、`cuda-optimized-remeasurement.md` のカーネル単体実測）の突合で充足できるため、
+本ドキュメントはその突合結果を記録する。GB10 での reuse 実測は §6 に再現手順を残し、実機セッションへ
+引き継ぐ。
+
+## 1. 目的・位置づけ
+
+- **目的**: fandhe-ai の CUDA GEMM について、tape 初期化コスト（約 440〜460 ms。#926 診断対象）を
+  除いた「カーネル実行そのものの性能」を candle / Burn の CUDA GEMM 実測、および REQ-8 の CUDA f32
+  下限（`docs/performance-targets.md` §2）と突合し、「fandhe-ai の CUDA カーネルは他フレームワーク・
+  REQ-8 下限に対しどの水準にあるか」を確定記録する
+- **#925 との関係**: `bench-fandhe --mode reuse`（gemm タスクのみ）により tape 構築を `init_s` として
+  分離計測する手段が確立した（PR #944・コミット `d156e72`）。ただし環境 3（RTX 3060）の実測では reuse
+  モードでも per-call 数百 ms の固定オーバーヘッドが残ることが判明しており（§3）、`--mode reuse` の
+  数値それ自体はまだ「カーネル実行時間」とみなせない。本ドキュメントのカーネル単体実測（§4）は
+  `--mode reuse` ではなく `cuda_floor_bench`（backend API 直・launch-only 同期。REQ-8 用に別途整備済み）
+  の実測値を採用する
+- **#926 との関係**: tape 初期化コスト（約 440〜460 ms）の内訳診断（`docs/perf/cuda-tape-init-cost-diagnosis.md`）
+  は実機未到達のため静的分析までで止まっている。本ドキュメントは初期化コストの内訳ではなく、
+  初期化コストを含まない実行時間側（カーネル単体・reuse per-call）の比較に焦点を当てる
+
+## 2. 計測境界の定義（3 層の区別）
+
+同じ「CUDA GEMM の実行時間」でも計測境界が異なる 3 層のデータが存在する。混同を避けるため定義する。
+
+| 層 | 内容 | 含むもの | 出典 |
+| --- | --- | --- | --- |
+| (a) fresh | `bench-fandhe --mode fresh`（既定）。ループ毎回 `tape_for(Device::Cuda(0))` を新規構築 | tape/デバイス初期化 + カーネル実行 + ホスト実体化 | `scripts/bench/framework-compare/results/summary.md` 環境 2・環境 3 |
+| (b) reuse per-call | `bench-fandhe --mode reuse`（#925）。tape 構築を `init_s` として分離し、2 回目以降の呼び出しを計測 | tape 経由 matmul 呼び出し 1 回（初期化は含まないはずだが、環境 3 実測では per-call 固定オーバーヘッドが残存） + ホスト実体化 | `scripts/bench/framework-compare/results/summary.md` 環境 3（`results/raw/results-rtx3060.jsonl`） |
+| (c) カーネル単体 | `cuda_floor_bench`（`crates/backend-cuda/examples/cuda_floor_bench.rs`）。backend API を直接呼び launch-only 同期境界で計測 | カーネル launch + 完了同期のみ（tape・ホスト実体化を含まない） | `docs/perf/cuda-optimized-remeasurement.md`（#571・PR #725） |
+
+candle / Burn は環境 2・環境 3 いずれも「デバイス・入力テンソルをループ外で 1 回構築し、matmul +
+ホスト実体化のみを計測」するため、その実測値は (a) fresh の中でも (b)・(c) に近い性質を持つ
+（tape/デバイス構築を含まない）。ただし (c) のような launch-only 同期ではなくホスト実体化を含む点は
+fandhe-ai の (c) 実測と異なる（§4 の限定条件で明記）。
+
+## 3. N=256〜4096 の分離計測記録
+
+### 3.1 環境 3（RTX 3060）: fresh vs reuse の実測
+
+`scripts/bench/framework-compare/results/summary.md` 環境 3（計測日 2026-08-28、
+`results/raw/results-rtx3060.jsonl`）より転記。
+
+| N | mode | 初期化(init_s) | 中央値 | GFLOP/s |
+| --- | --- | --- | --- | --- |
+| 256 | fresh | - | 267.254 ms | 0.1 |
+| 256 | reuse | 477.869 ms | 295.149 ms | 0.1 |
+| 512 | fresh | - | 333.016 ms | 0.8 |
+| 512 | reuse | 484.626 ms | 260.525 ms | 1.0 |
+| 1024 | fresh | - | 275.626 ms | 7.8 |
+| 1024 | reuse | 465.571 ms | 300.868 ms | 7.1 |
+| 2048 | fresh | - | 291.567 ms | 58.9 |
+| 2048 | reuse | 573.555 ms | 297.019 ms | 57.8 |
+| 4096 | fresh | - | 506.611 ms | 271.3 |
+| 4096 | reuse | 684.670 ms | 474.396 ms | 289.7 |
+
+**観察**: reuse モードの `init_s`（tape 構築 + 初回 matmul + ホスト実体化）は 465〜685 ms とサイズ
+非依存の大きな値であり、かつ 2 回目以降の呼び出し（中央値列）も 260〜506 ms とほぼ同水準にとどまる。
+すなわち本環境では「tape 構築 1 回限りで以降はカーネル実行のみの短時間になる」という当初仮説
+（#925 計画時点の想定）は成立せず、**行列積 1 回ごとに数百 ms の固定オーバーヘッドが繰り返し発生する**
+ことが実測された（詳細な原因切り分けは未実施。§7 参照）。
+
+### 3.2 環境 2（DGX Spark GB10）: fresh のみ（既存実測）
+
+同じ summary.md 環境 2 より、fandhe-ai fresh モードと candle / Burn の実測（計測日 2026-08-28）。
+
+| N | フレームワーク | 中央値 | GFLOP/s |
+| --- | --- | --- | --- |
+| 256 | fandhe-ai (fresh) | 440.042 ms | 0.1 |
+| 256 | candle | 79.3 µs | 423.0 |
+| 256 | burn | 381.4 µs | 88.0 |
+| 512 | fandhe-ai (fresh) | 450.692 ms | 0.6 |
+| 512 | candle | 242.0 µs | 1109.3 |
+| 512 | burn | 314.1 µs | 854.6 |
+| 1024 | fandhe-ai (fresh) | 435.171 ms | 4.9 |
+| 1024 | candle | 946.4 µs | 2269.1 |
+| 1024 | burn | 1.098 ms | 1956.4 |
+| 2048 | fandhe-ai (fresh) | 458.350 ms | 37.5 |
+| 2048 | candle | 4.086 ms | 4204.3 |
+| 2048 | burn | 4.096 ms | 4194.7 |
+| 4096 | fandhe-ai (fresh) | 593.890 ms | 231.4 |
+| 4096 | candle | 60.676 ms | 2265.1 |
+| 4096 | burn | 46.819 ms | 2935.5 |
+
+GB10 では fandhe-ai の `--mode reuse` 実測は未実施（本ドキュメント作成時点で GB10 到達不能）。
+再現手順・再計測キャンペーン表は §6 に記録する。
+
+## 4. vs candle / Burn（GB10・既存一次データ突合。カーネル単体）
+
+fandhe-ai の CUDA GEMM「カーネル単体」実測は `docs/perf/cuda-optimized-remeasurement.md`（#571・
+PR #725、同一 GB10 個体・`cuda_floor_bench` 5 run 中央値・launch-only 同期境界）にある。これと
+環境 2 の candle / Burn 実測（fresh。tape/デバイス構築を含まないためカーネル実行に近い）を GFLOP/s
+換算で突合する。
+
+| N | 経路 | fandhe-ai（カーネル単体） | candle（fresh） | burn（fresh） | fandhe-ai / candle | fandhe-ai / burn |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2048 | wmma_tf32（f32 最良経路） | 14332.6 GFLOP/s (14.3326 TFLOPS) | 4204.3 GFLOP/s | 4194.7 GFLOP/s | **約 3.41 倍** | **約 3.42 倍** |
+| 2048 | tiled f32（基準経路） | 2342.5 GFLOP/s (2.3425 TFLOPS) | 4204.3 GFLOP/s | 4194.7 GFLOP/s | 約 0.56 倍 | 約 0.56 倍 |
+| 4096 | wmma_tf32（f32 最良経路） | 9065.5 GFLOP/s (9.0655 TFLOPS) | 2265.1 GFLOP/s | 2935.5 GFLOP/s | **約 4.00 倍** | **約 3.09 倍** |
+| 4096 | tiled f32（基準経路） | 1972.3 GFLOP/s (1.9723 TFLOPS) | 2265.1 GFLOP/s | 2935.5 GFLOP/s | 約 0.87 倍 | 約 0.67 倍 |
+
+（倍率は `wmma_tf32 GFLOP/s ÷ candle(or burn) GFLOP/s` を python で機械計算。例:
+2048 wmma_tf32/candle = 14332.6 / 4204.3 ≈ 3.409）
+
+**限定条件（比較の解釈に必須）**:
+
+1. **計測境界差**: fandhe-ai の値は `cuda_floor_bench` の launch-only 同期（カーネル完了待ちのみ）、
+   candle/burn は matmul + ホスト実体化を含む（§2 表）。ホスト実体化コストは行列サイズに対し
+   カーネル実行より小さいと考えられるが未定量化であり、上記倍率は「同一境界での比較」ではない
+2. **バージョン差**: fandhe-ai 側は crates.io 公開版（v0.3.0）ではなく本リポジトリ実装（#571 実測時点、
+   最適化後カーネル）の実測。framework-compare（§3）の fandhe-ai facade は v0.3.0 のため、同一
+   バージョンでの直接比較ではない
+3. **TF32 使用有無未確認**: 環境 2 の備考（summary.md）で candle/burn の CUDA GEMM checksum に
+   下位桁のずれがあり、TF32 等の低精度アキュムレーションを使っている可能性があるが未確認。
+   fandhe-ai の wmma_tf32 経路も TF32 入力変換を伴うため、両者が同種の精度トレードオフを取っている
+   可能性がある一方、confirmed ではない
+4. **tape 経由 reuse per-call とカーネル単体の乖離**: §3.1 の環境 3 実測が示すとおり、fandhe-ai の
+   公開 API（tape）経由では reuse per-call でも数百 ms の固定オーバーヘッドが残り、上表のカーネル
+   単体性能（3.09〜4.00 倍優位）を公開 API 経由の実効性能としては享受できていない。原因切り分けは
+   #926 系の後続対応に依存する（§7）
+
+## 5. REQ-8 下限との突合
+
+`docs/performance-targets.md` §2 は CUDA f32 最適化後下限を **50%**（対 PyTorch、size=4096 が最小、
+`wmma_tf32` 実測 51.96%）と確定している。同一 GB10 個体の PyTorch f32 参照値（4096:
+17.4467 TFLOPS、5 run 中央値。`cuda-optimized-remeasurement.md`「PyTorch 参照値の再集計」節）を分母に、
+candle / Burn の対 PyTorch 比を同一形式で並べる。
+
+| N | 経路 | 対 PyTorch 比 | 出典 |
+| --- | --- | --- | --- |
+| 4096 | fandhe-ai wmma_tf32（カーネル単体） | **51.96%**（REQ-8 f32 下限 50% の根拠） | `cuda-optimized-remeasurement.md` |
+| 4096 | candle（fresh、GB10 環境 2） | 12.98% | 本ドキュメント §4 換算（2265.1 / 17446.7 GFLOP/s） |
+| 4096 | burn（fresh、GB10 環境 2） | 16.83% | 同上（2935.5 / 17446.7 GFLOP/s） |
+| 2048 | fandhe-ai wmma_tf32（カーネル単体） | 83.53% | `cuda-optimized-remeasurement.md` |
+| 2048 | candle（fresh、GB10 環境 2） | 24.50% | 本ドキュメント §4 換算（4204.3 / 17158.2 GFLOP/s） |
+| 2048 | burn（fresh、GB10 環境 2） | 24.45% | 同上（4194.7 / 17158.2 GFLOP/s） |
+
+**両論併記の確定事項**:
+
+- **REQ-8 下限を満たすカーネル単体性能は candle / Burn の CUDA GEMM 実測を明確に上回る水準にある**
+  （4096 で fandhe-ai 51.96% 対 candle 12.98% / burn 16.83%、2048 で fandhe-ai 83.53% 対
+  candle/burn 約 24.5%）。これは §4 の限定条件付きながら、fandhe-ai の CUDA カーネル実装
+  （wmma_tf32・TF32 Tensor Core 経路）自体の性能はフレームワーク横並びの実測値に対し優位であることを
+  示す
+- **一方で、tape 公開 API 経由の実効性能（framework-compare の fresh/reuse 実測）は per-call
+  オーバーヘッドにより未達である**（環境 2: fresh 458〜594 ms、環境 3: reuse per-call でも
+  260〜506 ms。カーネル単体の μs〜ms オーダーに対し 2〜3 桁遅い）。この解消は #926 系の後続対応
+  （tape 初期化コストの内訳診断・削減）に依存し、本イシューのスコープ外である
+
+## 6. GB10 での reuse 実測（未実施・再現手順）
+
+実装セッションから DGX Spark GB10 へは到達不能（`docs/real-hardware-verification-env.local.md` 不在）
+のため、環境 2 での `--mode reuse` 実測は未実施。実機セッションでの追試手順を記録する。
+
+```bash
+# docs/real-hardware-verification-env.md の rsync/SSH 手順で framework-compare を転送後、
+# nvidia-smi でアイドル確認のうえ実行する。
+cd scripts/bench/framework-compare
+for N in 256 512 1024 2048 4096; do
+  cargo run --release -p bench-fandhe -- --task gemm --device cuda --size "$N" --mode reuse
+done
+```
+
+### 再計測キャンペーン表（GB10・reuse モード。実測時に埋める）
+
+| N | mode | 初期化(init_s) | 中央値 | Q1 | Q3 | GFLOP/s | 計測日 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 256 | reuse | | | | | | |
+| 512 | reuse | | | | | | |
+| 1024 | reuse | | | | | | |
+| 2048 | reuse | | | | | | |
+| 4096 | reuse | | | | | | |
+
+実測後は raw JSONL を `scripts/bench/framework-compare/results/raw/` へ保存し、
+`scripts/bench/framework-compare/results/summary.md` 環境 2 へ追記する（ホスト名は
+`<cuda-node>` プレースホルダ規約を厳守する）。
+
+## 7. 未計測・スコープ外
+
+- **GB10 での `--mode reuse` 新規実測**: 到達不能のため §6 に手順を残置。実機セッションでの追試が必要
+- **reuse モードでも per-call 固定オーバーヘッドが残る原因の切り分け**（§3.1・§4 限定条件 4）:
+  fandhe-ai 側のカーネル選択・ディスクキャッシュ照会等が候補だが未確認。`docs/perf/cuda-tape-init-cost-diagnosis.md`
+  （#926）の後続対応として、原因調査を別イシューで追跡することを推奨する（本ドキュメントでは着手しない）
+- **train/infer タスクの reuse モード対応**: `bench-fandhe --mode reuse` は gemm タスクのみに限定
+  実装済み（#925・PR #944 で対象外と確定済み）
+- **fandhe-ai 本体 API の初期化コスト削減実装**: #921 フェーズの後続フェーズ扱い（本イシューは計測・
+  記録のみ）
