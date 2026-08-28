@@ -75,6 +75,7 @@ fandhe-ai/
     ├── cuda-streamk-decision.md        # CUDA GEMM StreamK スケジューリングの機構要約・wave 定量化・採否判断（保留。#812）
     ├── cuda-tensor-core-design.md      # TASK-11.1a WMMA/mma カーネル設計メモ（#60）
     ├── device-resident-update-design.md # 学習ループのパラメータ更新デバイス常駐化の設計（更新経路・所有権・数値一致契約。#933 ツリー・#934）
+    ├── facade-device-handle-design.md # デバイスハンドル再利用の公開 API 設計判断（案 B のみ採用・#929/#946 実装済みの追認・#931）
     ├── git-history-exposure-decision.md # git 履歴残存内部情報・個人メールアドレスの扱い判断・暫定方針（#477）
     ├── guardrail-change-policy.md    # TASK-6.2 判定器変更時フローの明文化（#149）
     ├── guardrail-self-repair-cli.md  # guardrail／self-repair CLI コマンド仕様（#183）
