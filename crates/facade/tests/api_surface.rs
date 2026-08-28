@@ -14,6 +14,12 @@
 //! `BackendOps` を直接引数に取っていたため、移設後の `fandhe_ai::compat`
 //! がこれを公開していないことも本テストが機械的に固定する）。
 //!
+//! (c) `src/optim.rs`（イシュー #961）は昇格元公開面
+//! （`fandhe_ai_autodiff::optim`／`fandhe_ai_autodiff::nn::optim`）と 1 対 1 で
+//! 対応し、facade 独自の型・関数を持ち込まない純再エクスポートである
+//! ことを固定する（`optim_module_reexports_exactly_expected_surface`／
+//! `optim_module_is_pure_reexport`）。
+//!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
 //! 外部入力を受け取らない（`.claude/rules/security.md`）。
@@ -159,4 +165,161 @@ fn compat_public_functions_do_not_accept_raw_autodiff_tape_argument() {
          直接引数に取っている（内部クレートの型が公開シグネチャへ露出。\
          fandhe_ai::Tape〈newtype〉を使うべき）: {offending:?}"
     );
+}
+
+/// `src/optim.rs`（イシュー #961）専用の固定パス。ソース走査対象は
+/// `crates/facade/` 配下の固定パスのみに限定する（A03 対策。モジュール
+/// 冒頭コメント参照）。
+fn optim_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/optim.rs")
+}
+
+/// `src/optim.rs` の `pub use` 行から `{...}` 内の識別子を抽出し、
+/// 昇格元公開面（`fandhe_ai_autodiff::optim`／`fandhe_ai_autodiff::nn::optim`）
+/// と完全一致（過不足とも fail）することを固定する（モジュール冒頭
+/// コメント (c)）。各行の path 接頭辞が上記 2 経路のいずれかであることも
+/// 検査し、`tensor_core` 等の無関係なクレートからの混入を遮断する。
+#[test]
+fn optim_module_reexports_exactly_expected_surface() {
+    let path = optim_rs_path();
+    let content = read_to_string_or_panic(&path);
+
+    let allowed_prefixes = [
+        "pub use fandhe_ai_autodiff::optim::",
+        "pub use fandhe_ai_autodiff::nn::optim::",
+    ];
+
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        let Some(prefix) = allowed_prefixes
+            .iter()
+            .find(|prefix| trimmed.starts_with(**prefix))
+        else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        // `pub use <prefix>{A, B, C};` の `{...}` 部分を抽出する。単一
+        // 識別子の再エクスポート（`{}` なし）は本ファイルでは使わない
+        // 契約のため、`{`/`}` が見つからない行は不正として扱う。
+        let rest = &trimmed[prefix.len()..];
+        let Some(open) = rest.find('{') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        let Some(close) = rest.find('}') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        for ident in rest[open + 1..close].split(',') {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                found.insert(ident.to_string());
+            }
+        }
+    }
+
+    assert!(
+        offending_lines.is_empty(),
+        "src/optim.rs の pub use が昇格元公開面\
+         （fandhe_ai_autodiff::optim / fandhe_ai_autodiff::nn::optim）以外の\
+         接頭辞を持つか、`{{...}}` 形式でない行を含む: {offending_lines:?}"
+    );
+
+    let expected: std::collections::BTreeSet<String> = [
+        "AdamW",
+        "AdamWConfig",
+        "ClipGradResult",
+        "clip_grad_norm",
+        "global_grad_norm",
+        "ConstantLr",
+        "LrScheduler",
+        "StepLr",
+        "Sgd",
+        "SgdConfig",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "src/optim.rs が再エクスポートする識別子が期待集合と一致しない\
+         （過不足いずれも不可。昇格元公開面と 1 対 1 対応であることの固定）"
+    );
+}
+
+/// `src/optim.rs` が facade 独自の型・関数を定義しない純再エクスポート
+/// モジュールであることを固定する（モジュール冒頭コメント (c)）。
+/// `pub fn`／`pub struct`／`pub enum`／`pub trait`／`impl ` 行が存在
+/// しないことを検査し、`BackendOps`／`MemoryOps` を引数に取る公開関数が
+/// 将来紛れ込む余地を構造的に断つ（既存 (a)/(b) の検査は `visit_rs_files`
+/// 経由で自動適用されるが、optim 固有の観点として追加する）。
+#[test]
+fn optim_module_is_pure_reexport() {
+    let path = optim_rs_path();
+    let content = read_to_string_or_panic(&path);
+
+    let forbidden_prefixes = ["pub fn", "pub struct", "pub enum", "pub trait", "impl "];
+    let mut offending = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if forbidden_prefixes
+            .iter()
+            .any(|prefix| trimmed.starts_with(prefix))
+        {
+            offending.push(trimmed.to_string());
+        }
+    }
+
+    assert!(
+        offending.is_empty(),
+        "src/optim.rs が facade 独自の型・関数・impl を定義している\
+         （純再エクスポートモジュールの契約違反）: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::optim` の全再エクスポート型・関数が facade のみを通じて
+/// 到達可能であることのコンパイル時固定（モジュール冒頭コメント (c)、
+/// 受入基準 1）。`fandhe_ai_autodiff` は import しない。
+///
+/// `let _: fandhe_ai::SgdConfig = fandhe_ai::optim::SgdConfig::new(...)`
+/// でクレート root 再エクスポートと `optim::SgdConfig` が同一型である
+/// ことも併せて固定する（`src/lib.rs` root `SgdConfig` コメント参照）。
+#[test]
+fn optim_types_are_reachable_via_facade_only() {
+    let sgd_config = fandhe_ai::optim::SgdConfig::new(0.1);
+    // root 再エクスポートと `optim::SgdConfig` が同一型であることの固定。
+    let _same_type: fandhe_ai::SgdConfig = sgd_config;
+    let mut sgd = fandhe_ai::optim::Sgd::new(sgd_config)
+        .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
+    let _ = &mut sgd;
+
+    let mut adamw = fandhe_ai::optim::AdamW::new(fandhe_ai::optim::AdamWConfig::default())
+        .unwrap_or_else(|e| panic!("test fixture: AdamW::new が失敗した: {e}"));
+    let _ = &mut adamw;
+
+    let constant_lr = fandhe_ai::optim::ConstantLr::new(0.1)
+        .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));
+    let step_lr = fandhe_ai::optim::StepLr::new(0.1, 2, 0.5)
+        .unwrap_or_else(|e| panic!("test fixture: StepLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &constant_lr;
+    let _: &dyn fandhe_ai::optim::LrScheduler = &step_lr;
+
+    let result: fandhe_ai::optim::ClipGradResult = fandhe_ai::optim::clip_grad_norm(&[], 1.0)
+        .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+    assert_eq!(
+        result.total_norm, 0.0,
+        "test fixture: 空スライスの norm は 0"
+    );
+    assert!(!result.scaled, "test fixture: 空スライスは scaled しない");
+
+    let global_norm = fandhe_ai::optim::global_grad_norm(&[])
+        .unwrap_or_else(|e| panic!("test fixture: global_grad_norm が失敗した: {e}"));
+    assert_eq!(global_norm, 0.0, "test fixture: 空スライスの norm は 0");
 }
