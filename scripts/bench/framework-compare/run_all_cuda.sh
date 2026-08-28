@@ -56,12 +56,16 @@ for bin in "${BINS[@]}"; do
 done
 
 # (a') GEMM — デバイス/tape 再利用モード（イシュー #925。bench-fandhe の
-# gemm タスクのみ対応。bench-candle / bench-burn は BINS に含まれていれば
-# MEASURE_ERROR で fail-fast し skipped-cuda.log に記録される）
-for bin in "${BINS[@]}"; do
+# gemm タスクのみ対応。bench-candle / bench-burn は reuse モードを必ず
+# MEASURE_ERROR で fail-fast する仕様のため、対象外の 2 バイナリまで
+# ループに含めると計 10 件（5 サイズ×2 バイナリ）の既知の対象外失敗が
+# skipped-cuda.log の「Failures」に混じり実際の計測失敗と判別しづらくなる
+# （codex-review 指摘 #944 discussion_r3877595038）。BINS に bench-fandhe が
+# 含まれる場合に限り、bench-fandhe のみを対象にこのループを実行する
+if [[ " ${BINS[*]} " == *" bench-fandhe "* ]]; then
   for n in 256 512 1024 2048 4096; do
-    run "$bin" gemm cuda "$n" reuse
+    run bench-fandhe gemm cuda "$n" reuse
   done
-done
+fi
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"
