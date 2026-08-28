@@ -45,7 +45,7 @@ summary.md 自身の注記（191 行目）が指摘するとおり、この差�
 | パラメータ保持 | `nn::Linear` がホスト `Tensor<f32>` を所有。毎ステップ `Linear::from_parameters` で新規構築（イミュータブルな丸ごと差し替え運用） | `crates/autodiff/src/nn/linear.rs`・`crates/autodiff/src/optim/sgd.rs:20` コメント |
 | 更新計算 | `optim::Sgd::step` がホスト側 `Tensor<f32>` ループで `torch.optim.SGD` の更新則（weight_decay → momentum → nesterov → 減算の式順序）を計算し、更新後 `Vec<Tensor<f32>>` を返す関数型 API | `crates/autodiff/src/optim/sgd.rs:1-23`（アルゴリズム引用）・`:183-200`（`step` シグネチャ・位置対応契約） |
 | 書き戻し | `Sequential::apply_parameters`（two-pass: 1 パス目で全層の shape 完全一致検証込み `Linear` 再構築、2 パス目で代入。#426 の置換前 shape 完全一致契約） | `crates/facade/src/compat/sequential.rs:229-` |
-| デバイス転送抽象 | `MemoryOps`（`alloc_zeroed`/`upload`/`download`）と `DeviceBuffer<f32>`（`Box<dyn BufferHandle>` 経由の不透明ハンドル・RAII 解放・空テンソル契約・download 同期契約）は `tensor-core::buffer` に実装済みだが、`BackendOps` の supertrait としては未結線（TASK-1.9c 時点で意図的に未結線。`backend_ops.rs` 冒頭コメント） | `crates/tensor-core/src/buffer.rs:1-13`・`crates/tensor-core/src/backend_ops.rs:10-27` |
+| デバイス転送抽象 | `MemoryOps`（`alloc_zeroed`/`upload`/`download`）と `DeviceBuffer<f32>`（`Box<dyn BufferHandle>` 経由の不透明ハンドル・RAII 解放・空テンソル契約・download 同期契約）は `tensor-core::buffer` に実装済みだが、`BackendOps` の supertrait としては未結線（TASK-1.9c 時点で意図的に未結線。`backend_ops.rs` 冒頭コメント。本設計〈§3.1〉は supertrait 化ではなく `mem: &dyn MemoryOps` 明示引数で結線する） | `crates/tensor-core/src/buffer.rs:1-13`・`crates/tensor-core/src/backend_ops.rs:10-27` |
 | カーネル入口 | `BackendOps` はホスト `Tensor<f32>` 入出力契約。CPU 実装は追加転送コストなし、CUDA/Metal 実装は各メソッド内で H2D（`upload` 相当）→ カーネル → D2H（`download` 相当）を完結させる。GEMM 以外の一部カーネル（GPU 側 elementwise/reduction の一部）は `BackendError::Unsupported` fail-safe | `crates/tensor-core/src/backend_ops.rs:28-40`（trait 定義冒頭コメント）・`:83-103`（メソッド一覧） |
 | 数値一致 | バックエンド間統一複合判定「相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満」・FMA 契約（CPU: `f32::mul_add`、GPU: 既定 FMA 契約） | `.claude/rules/coding-rust.md` |
 | 隣接イシュー | #931（デバイスハンドル再利用の公開 API 設計。phase-2）・#932（optimizer facade 公開の設計判断）・#935（本設計の実装）・#936（parity・ベンチ非後退確認） | gh issue 参照 |
@@ -67,30 +67,47 @@ download 済み → 今回ステップの forward で再度 upload」という�
 
 ## 3. 更新経路（design decision 1）
 
-### 3.1 採用方針: `BackendOps: MemoryOps`（supertrait 結線）+ デフォルトメソッド + 常駐 forward 入口
+### 3.1 採用方針: `MemoryOps` は明示引数として渡す（supertrait 化はしない）+ デフォルトメソッド + 常駐 forward 入口
 
 `tensor-core::buffer.rs` は当初から「`MemoryOps` は `BackendOps` の
 supertrait となる想定（TASK-1.9c では結線しない）」と明記していた
-（`buffer.rs:11-13`）。本設計はこの保留を**確定する**: `sgd_step_device`
-のデフォルト実装が `download`/`upload` を呼ぶ以上、`Self: MemoryOps` を
-満たす必要があり、これを個々のデフォルトメソッドの where 句として都度
-付けるのではなく、`BackendOps: MemoryOps` という trait 定義そのものの
-supertrait 関係として一度だけ確定する（§3.2 で object safety との関係を
-扱う）。
+（`buffer.rs:11-13`）。**本設計はこの保留を supertrait 化では解消しない**
+（旧稿はここで `BackendOps: MemoryOps` の supertrait 化を採用と記載して
+いたが、レビュー指摘 #934〈line 157〉のとおり、`fandhe-ai-tensor-core`
+は 2026-08-23 に crates.io 公開済みの crate であり `BackendOps` は
+Rust の可視性上真に公開の trait である。supertrait を追加すると、
+`impl BackendOps for X` を持つ既存の外部実装型はすべて追加で
+`impl MemoryOps for X` を要求されコンパイル不能になる——これは
+「既存メソッドのシグネチャ変更なし」で担保できる非破壊性の範囲を
+超え、trait 定義そのものへの破壊的変更である。`.claude/rules/security.md`
+A08・AGENTS.md の公開 API 非破壊契約に抵触するため不採用とする）。
+
+代わりに、`sgd_step_device`／`linear_forward_resident` の両メソッドへ
+**`mem: &dyn MemoryOps` を明示引数として追加する**。デフォルト実装は
+`self.download`/`self.upload` ではなく `mem.download`/`mem.upload` を
+呼ぶため、`BackendOps` 自身が `MemoryOps` を実装している必要が一切なく、
+trait 定義（`pub trait BackendOps { ... }`）は変更しない。呼び出し側
+（`autodiff::optim::DeviceParamStore`。§3.3a）は、各 `XBackendOps` が
+すでに `impl MemoryOps for XBackendOps`（#935 で追加。§3.2）を持つため、
+同じ具象値を `&dyn BackendOps` と `&dyn MemoryOps` の 2 通りの trait
+オブジェクトとして扱い、後者を `mem` 引数へ渡せばよい。
 
 `tensor-core::BackendOps` に対し、次の 2 メソッドを追加する（既存メソッドの
-シグネチャ変更なし。TASK-1.9c の非破壊拡張方針〈`backend_ops.rs:19-27`〉を
-踏襲）:
+シグネチャ変更なし・trait 定義への supertrait 追加もなし。TASK-1.9c の
+非破壊拡張方針〈`backend_ops.rs:19-27`〉を踏襲する真の非破壊拡張）:
 
 ```rust
 /// デバイス常駐パラメータの in-place SGD 更新入口（#934 設計・#935 実装）。
 ///
 /// `param` を `grad`（および `velocity`。momentum 有効時のみ `Some`）から
 /// 直接更新し、ホストへの往復を発生させない契約とする。既定実装は
-/// fail-safe（§3.2）。CPU/CUDA/Metal 各バックエンドは自身のカーネルで
+/// fail-safe（§3.2）。`mem` は呼び出し側が渡す同一バックエンドの
+/// `MemoryOps` 実装（`BackendOps` の supertrait ではない。§3.1 の
+/// 採否理由参照）。CPU/CUDA/Metal 各バックエンドは自身のカーネルで
 /// オーバーライドできる（デフォルト実装のままでも正しく動作する）。
 fn sgd_step_device(
     &self,
+    mem: &dyn MemoryOps,
     param: &mut DeviceBuffer<f32>,
     grad: &DeviceBuffer<f32>,
     velocity: Option<&mut DeviceBuffer<f32>>,
@@ -103,13 +120,14 @@ fn sgd_step_device(
 /// 常駐のまま渡す。`input`/戻り値は本段階（§3.3）のスコープに従い
 /// ホスト `Tensor<f32>` のまま（forward/backward の完全デバイス常駐化は
 /// §6(b) のとおりスコープ外）。オーバーライドしない場合の既定実装は
-/// `self.download(weight)`/`self.download(bias)`（`MemoryOps`。§3.1 の
-/// supertrait 結線により呼べる）でホスト値を得たうえで既存の
-/// `gemm`+`add` 相当の計算へ委譲する（CPU は §2 のとおり追加転送
+/// `mem.download(weight)`/`mem.download(bias)` でホスト値を得たうえで
+/// 既存の `gemm`+`add` 相当の計算へ委譲する（CPU は §2 のとおり追加転送
 /// コストなし。CUDA/Metal は最適化時、weight/bias の再アップロードを
-/// 省略するオーバーライドに置き換える）。
+/// 省略するオーバーライドに置き換える）。§3.3b のとおり、この
+/// downloaded スナップショットは同時に Tape の leaf として登録される。
 fn linear_forward_resident(
     &self,
+    mem: &dyn MemoryOps,
     input: &Tensor<f32>,
     weight: &DeviceBuffer<f32>,
     bias: Option<&DeviceBuffer<f32>>,
@@ -150,20 +168,21 @@ linear_forward_resident の既定実装 = download(weight)・download(bias)
 `linear_forward_resident` だけを呼べばよく、各バックエンドが最適化された
 カーネルを持つかどうかは実装詳細に留められる。
 
-**object safety の確定**（レビュー指摘 #934: `BackendOps` は現状
-`MemoryOps` の supertrait ではないため、デフォルト実装が `Self:
-MemoryOps` を要求すると `Box<dyn BackendOps + Send>`（既存の呼び出し形態。
-`facade`/`autodiff` 側が保持する型）から呼び出せない）: 本設計は
-`pub trait BackendOps: MemoryOps { ... }` として **`MemoryOps` を
-`BackendOps` の supertrait にする**（§3.1）。`MemoryOps` は
+**object safety・非破壊性の確定**（レビュー指摘 #934: line 157。旧稿は
+`BackendOps` が `MemoryOps` の supertrait ではないため、デフォルト実装が
+`Self: MemoryOps` を要求すると `Box<dyn BackendOps + Send>`（既存の
+呼び出し形態。`facade`/`autodiff` 側が保持する型）から呼び出せない、と
+して supertrait 化を提案していたが、これは crates.io 公開済み trait への
+破壊的変更になるため不採用と確定した。§3.1 のとおり、`mem: &dyn
+MemoryOps` を明示引数として渡す方式を採用する。`MemoryOps` は
 `buffer.rs:203` のドキュメンテーションコメントが明記するとおり
 「object-safe に設計している（`&dyn MemoryOps` として扱える）」ため、
-supertrait 化しても `dyn BackendOps`（`Box<dyn BackendOps + Send>` を
-含む）のトレイトオブジェクト安全性は損なわれない（supertrait のメソッドは
-トレイトオブジェクトの vtable にそのまま含まれ、既存呼び出し側の型・
-呼び出し形態は変更不要）。これにより `sgd_step_device`／
-`linear_forward_resident` のデフォルト実装は `self.download(..)`／
-`self.upload(..)` を追加の where 句なしに呼べる。
+`&dyn MemoryOps` を関数引数として受け渡すこと自体に制約はない。
+`sgd_step_device`／`linear_forward_resident` のデフォルト実装は
+`mem.download(..)`／`mem.upload(..)` を呼ぶだけでよく、`BackendOps`
+trait 定義（`Box<dyn BackendOps + Send>` を含む既存の呼び出し形態）は
+一切変更されないため object safety・既存実装型の互換性いずれも
+保たれる。
 
 現状 `CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`（`BackendOps`
 実装型）と `CpuMemory`／`CudaMemory`／`MetalMemory`（既存の `MemoryOps`
@@ -172,8 +191,14 @@ supertrait 化しても `dyn BackendOps`（`Box<dyn BackendOps + Send>` を
 `XBackendOps` へ `impl MemoryOps for XBackendOps` を追加する（既存
 `XMemory` の実装本体へ委譲する形でよく、`XBackendOps` が `XMemory` を
 フィールドとして保持するか、都度その場で構築するかは実装時に選べる
-実装詳細とする。いずれの選択でも本節が確定した trait 構造・呼び出し
-形態には影響しない）。
+実装詳細とする）。この `impl MemoryOps for XBackendOps` は §3.1 の
+trait 定義（supertrait 不採用）が要求するものではなく、**呼び出し側の
+利便性のため**に追加する: `DeviceParamStore` が同一の `XBackendOps`
+値を `&dyn BackendOps` と `&dyn MemoryOps`（= `mem` 引数）の 2 通りの
+trait オブジェクトとして扱えるようにする（同じ具象値を 2 度保持・
+生成する必要がない）。外部の `BackendOps` 実装型がこの `impl` を
+持たない場合でも、`BackendOps` trait 自体のコンパイルには一切影響
+しない（§3.1 の非破壊性）。
 
 ### 3.3 段階設計: 「param + optimizer 状態のみ常駐、勾配は毎ステップ 1 回 upload」
 
@@ -231,22 +256,89 @@ param 往復（§2 末尾）が「学習開始時の 1 回の upload + 終了時
   イテレーションだが、各 `Linear` 層について自身のホスト `weight`/
   `bias` の代わりに `store` から対応するインデックスの `DeviceBuffer` を
   取得し、`BackendOps::linear_forward_resident`（§3.1）を呼ぶ。入力
-  バッチ・中間活性・活性化関数（ReLU 等）・backward の記録方式は既存
-  `forward` と同一（`Tape`/`Var` への登録ロジックは変更しない。呼び出す
-  `BackendOps` メソッドが変わるのみ）。
+  バッチ・中間活性・活性化関数（ReLU 等）は既存 `forward` と同一だが、
+  `Tape`/`Var` への登録ロジックは既存 `forward` の登録（`Op::MatMul`
+  ベース）をそのまま流用できない。weight/bias の勾配（VJP）が成立する
+  ための結線は §3.3b で別途確定する（レビュー指摘 #934: line 233 の
+  解消。旧稿の「登録ロジックは変更しない」という記述は誤りであり、
+  本節で訂正する）。
 - **既存 `forward` との関係**: 既存 `forward`（ホスト `Tensor` のみで
   完結）は変更・削除しない（§3.5 の「既存 API 非破壊」方針）。
   `DeviceParamStore` を使う学習ループは `forward_resident` を呼び、
   `predict`／保存等は既存 `forward` + 明示同期後の `apply_parameters`
   を使う（§3.5）。
 
+### 3.3b 常駐パラメータの勾配経路・VJP（レビュー指摘 #934: line 233 の解消）
+
+**指摘の核心**: `linear_forward_resident`（§3.1）は `weight`/`bias` を
+`DeviceBuffer` として直接受け取るのみで、既存の `Tape::backward` が
+勾配を計算できる対象（`Op::MatMul` が保持する `NodeId` に対応する
+`Var` leaf）としては一切登録されない。旧稿はこの点を「forward の
+配線を変えるだけ」と過小評価しており、実際には weight/bias に対する
+VJP が成立しない（`Sgd::step`／`sgd_step_device` が必要とする `grad`
+の出所が設計上欠落する）。本節はこの結線を確定する。
+
+**採用方針**: `linear_forward_resident` の既定実装（§3.2: `mem.download`
+→ 既存 `gemm`+`add` へ委譲）と、weight/bias 再アップロードを省略する
+最適化オーバーライドの両方に共通して使える形として、**forward 呼び出し
+ごとに weight/bias の「その時点のスナップショット」を `Tape` の leaf
+`Var` として登録する**方式を採る:
+
+- `Sequential::forward_resident` は各層について、まず
+  `mem.download(store.weight(layer_idx))`／
+  `mem.download(store.bias(layer_idx))`（`MemoryOps`。§3.1 の `mem`
+  引数と同じ実装値）でホスト `Tensor<f32>` スナップショットを取得し、
+  これを `tape.leaf(snapshot)` として **毎 forward 呼び出しで新規に**
+  登録する（前ステップの `NodeId` を再利用しない。§4.1 の「stale な
+  ホスト値を現在のパラメータとして使わせない」契約と整合させるため、
+  スナップショットは常にその回の `download` 結果のみを表す）。
+  以降の計算（`gemm`+`add`・活性化関数）は既存 `forward` と同じ
+  `Op::MatMul`／`Op::Add` 登録経路にそのまま乗せる。これにより
+  `linear_forward_resident` は「downloaded スナップショットを作って
+  既存 forward 経路へ渡す薄い橋渡し」として実装でき、既存の VJP
+  実装（`Op::MatMul`/`Op::Add` の backward）を一切変更せずに
+  weight/bias の勾配が計算できる。
+  - 最適化オーバーライド（weight/bias の再アップロードを省略し
+    device 上で完結させる実装）を採用するバックエンドであっても、
+    **backward のために必要な最小限のスナップショット取得
+    （`mem.download`）自体は省略しない**契約とする。省略できるのは
+    「forward の計算そのものを host Tensor 経由の既存 `gemm` へ
+    委譲する部分」（＝計算コストの重複）であり、「勾配を計算する
+    ために weight/bias が host 値として少なくとも一度観測可能である
+    こと」は省略しない。これにより §3.1 の最適化余地（再アップロード
+    省略）と本節の VJP 成立要件は両立する。
+- `Sequential::forward_resident` は各層で生成した weight/bias leaf の
+  `NodeId` を（`Linear` 単体ではなく `Sequential` が §3.3a のとおり
+  層インデックスを一元管理するため）層インデックスと対応付けて
+  一時的に保持する（呼び出し中のみ有効なローカル対応表でよく、
+  `DeviceParamStore` の恒久的な状態には含めない）。
+- `tape.backward()` 実行後、この対応表を使って各層の `grad_weight`／
+  `grad_bias`（ホスト `Tensor<f32>`。既存 `Tape::backward` が
+  `NodeId` ごとに返す勾配と同一の仕組みで得られる）を
+  `Sequential::trainable_parameters()` と同じ並び順（§3.3a）で
+  取り出し、`DeviceParamStore::step`（§3.4・#935 が命名）へ渡す。
+  これは §3.3 が既に定めた「`Tape::backward` が返すホスト勾配を
+  `sgd_step_device` 呼び出し直前に 1 回だけ `upload` する」という
+  転送モデルとそのまま整合する（新しい転送経路を追加しない）。
+- **新規 Op／新規 Tape API は不要**: 既存 `Op::MatMul`/`Op::Add` の
+  VJP 実装をそのまま再利用するため、`Tape` 側に「resident 専用の
+  勾配側チャネル」等の拡張は要らない。`linear_forward_resident`
+  自身は「スナップショットを取得して既存 forward 経路へ渡す」薄い
+  合成として実装できることが、この結線が 4h 粒度の #935 実装に
+  収まる根拠である。
+- **既存 `forward`（非常駐）との差異はここに限定される**: 通常の
+  `forward` は `Linear` が保持するホスト `Tensor` をそのまま
+  leaf 登録するのに対し、`forward_resident` は `DeviceParamStore`
+  からの `download` 結果を leaf 登録する。leaf 登録・VJP 計算の
+  仕組み自体は共通である。
+
 ### 3.4 クレート責務分担
 
 | クレート | 責務 |
 |---|---|
-| `tensor-core` | `sgd_step_device`／`linear_forward_resident` trait メソッド・`SgdStepConfig` 型定義（`BackendOps: MemoryOps` supertrait 結線を含む非破壊拡張。§3.1・§3.2） |
-| `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
-| `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック |
+| `tensor-core` | `sgd_step_device`／`linear_forward_resident` trait メソッド（`mem: &dyn MemoryOps` 明示引数。supertrait 化はしない非破壊拡張）・`SgdStepConfig` 型定義（§3.1・§3.2） |
+| `backend-cpu`／`backend-cuda`／`backend-metal` | 各バックエンドのカーネル実装（CPU: 逐次または `rayon` 並列 in-place・CUDA: NVRTC 1 カーネル・Metal: compute shader 1 個）＋ `impl MemoryOps for XBackendOps`（§3.2。呼び出し側の利便性のための追加であり trait 定義上の要求ではない）。実装順序は CPU → CUDA → Metal（#935 引き渡し事項。§6） |
+| `autodiff::optim` | `DeviceParamStore`（常駐ストア保持型。§3.3・§4 の所有者）・`SgdConfig → SgdStepConfig` 変換・`Tape` の勾配出力を `DeviceParamStore` へ渡す統合ロジック（§3.3b の leaf 登録・勾配取り出しを含む） |
 | `facade`（`compat::Sequential` 経由で `Sequential::forward_resident` を実装） | `Sequential` への `forward_resident`・層インデックス対応表の保持（§3.3a）。公開面は #932 の optimizer facade 公開設計の結論に従属させる（本ドキュメントは compat 面の意匠を確定しない） |
 
 ### 3.5 既存 API との関係
@@ -430,31 +522,43 @@ CUDA/Metal が weight/bias 再アップロードを省略する最適化カー�
 |---|---|---|
 | (a) 暗黙常駐キャッシュ方式 | `Tensor` 内部にデバイスキャッシュを持たせ、書き込み時に暗黙で同期する方式（candle の `Var::set` 型） | **不採用**。暗黙コピー禁止方針（`docs/public-api-design.md` §2.2.1）・型分離（ホスト `Tensor` とデバイス `DeviceBuffer` を明確に分ける現行設計）との不整合。stale 値の誤用検知も難しくなる |
 | (b) `BackendOps` 全面 `DeviceBuffer` 化を先行 | forward/backward を含む全カーネル入口（`gemm`/`add`/`relu` 等すべて）を `DeviceBuffer` 契約へ一気に移行してから更新経路を設計する | **不採用（本イシュースコープでは）**。変更範囲が 4h 粒度を大きく超え、#931（デバイスハンドル再利用の公開 API 設計）・phase-4（#924）と重複する。§3.1・§3.3a で追加する `linear_forward_resident` はこの不採用案とは異なる: 対象は `Linear` forward の weight/bias 入力のみ（1 メソッドの追加）であり、入力バッチ・中間活性・backward・他の全カーネル（`add`/`relu`/畳み込み等）は既存のホスト `Tensor<f32>` 契約のまま変更しない。「全カーネル入口の一括移行」という本 (b) 案の対象範囲（forward/backward 全体）とは規模・影響範囲が異なるため、本設計のスコープに含めても 4h 粒度・#931/phase-4 との重複を引き起こさない |
-| (c) 採用案 | §2〜§4 の非破壊拡張（`sgd_step_device`／`linear_forward_resident` デフォルトメソッド・`BackendOps: MemoryOps` supertrait 結線）+ 常駐ストア（`DeviceParamStore`）+ 段階的常駐化（param/velocity のみ常駐、grad は毎ステップ 1 回 upload）+ `Sequential::forward_resident` による forward 結線（§3.3a）+ 更新フェーズの poisoned 状態契約（§4.3） | **採用** |
+| (c) 採用案 | §2〜§4 の非破壊拡張（`sgd_step_device`／`linear_forward_resident` デフォルトメソッド・`mem: &dyn MemoryOps` 明示引数）+ 常駐ストア（`DeviceParamStore`）+ 段階的常駐化（param/velocity のみ常駐、grad は毎ステップ 1 回 upload）+ `Sequential::forward_resident` による forward 結線・weight/bias の Tape leaf 登録による VJP 成立（§3.3a・§3.3b）+ 更新フェーズの poisoned 状態契約（§4.3） | **採用** |
 
 ## 7. スコープ境界・受け渡し
 
 ### #935（実装）への引き渡し事項
 
 - §3.1 の確定シグネチャ（`sgd_step_device`／`linear_forward_resident`／
-  `SgdStepConfig`）をそのまま `tensor-core::backend_ops` へ追加し、
-  `BackendOps: MemoryOps`（§3.1・§3.2 で確定した supertrait 結線）を
-  `backend_ops.rs` へ反映する（`buffer.rs:11-13` の保留コメントは本設計で
-  解消済みのため、#935 で該当コメントも更新する）。
+  `SgdStepConfig`。いずれも `mem: &dyn MemoryOps` 明示引数を持ち、
+  `BackendOps` trait 定義への supertrait 追加はしない）をそのまま
+  `tensor-core::backend_ops` へ追加する（`buffer.rs:11-13` の保留
+  コメント「`MemoryOps` は `BackendOps` の supertrait となる想定」は
+  本設計で**不採用と確定**したため、#935 で該当コメントを「supertrait
+  化は crates.io 公開 trait への破壊的変更となるため不採用（§3.1）」
+  という趣旨に更新する）。
 - 各 `XBackendOps`（`CpuBackendOps`／`CudaBackendOps`／`MetalBackendOps`）
   へ `impl MemoryOps for XBackendOps` を追加する（既存 `XMemory` 実装への
   委譲か、フィールド保持かは §3.2 のとおり実装詳細として #935 が選ぶ。
-  trait 構造・呼び出し形態への影響はどちらでもない）。
+  trait 構造・呼び出し形態への影響はどちらでもない。この `impl` は
+  呼び出し側〈`DeviceParamStore`〉が `mem` 引数を得るための利便性であり
+  `BackendOps` trait 自体は要求しない）。
 - 実装順序: CPU → CUDA → Metal（既存 GEMM カーネルの実装順序・PoC 実証の
   蓄積と揃える）。
 - フォールバック契約: §3.2 のデフォルト実装（`sgd_step_device`:
-  download → ホスト更新 → upload。`linear_forward_resident`: download →
-  既存 gemm+add 委譲）を先に用意し、各バックエンドが最適化カーネルで
-  オーバーライドする形で段階的に置き換える（デフォルト実装のままでも
-  正しく動作することを前提に、性能改善は独立した最適化として進められる）。
-- `Sequential::forward_resident`（§3.3a）を `facade::compat::Sequential`
-  へ追加し、`DeviceParamStore::new` が `trainable_parameters()` と同一の
-  位置対応契約で層インデックス→`DeviceBuffer` 対応表を構築する。
+  `mem.download` → ホスト更新 → `mem.upload`。`linear_forward_resident`:
+  `mem.download` → 既存 gemm+add 委譲）を先に用意し、各バックエンドが
+  最適化カーネルでオーバーライドする形で段階的に置き換える（デフォルト
+  実装のままでも正しく動作することを前提に、性能改善は独立した最適化
+  として進められる）。
+- `Sequential::forward_resident`（§3.3a・§3.3b）を
+  `facade::compat::Sequential` へ追加し、`DeviceParamStore::new` が
+  `trainable_parameters()` と同一の位置対応契約で層インデックス→
+  `DeviceBuffer` 対応表を構築する。`forward_resident` は §3.3b の
+  とおり、forward 呼び出しごとに weight/bias の downloaded スナップ
+  ショットを `Tape` の leaf として新規登録し、`tape.backward()` 後に
+  同じ層インデックス対応で `grad_weight`／`grad_bias` を取り出せる
+  ようにする（新規 `Op`／`Tape` API 拡張は不要。既存 `Op::MatMul`/
+  `Op::Add` の VJP をそのまま再利用する）。
 - `DeviceParamStore` の API（`new`/`step`/`sync_to_host` 等の確定
   シグネチャ）・`autodiff::optim` 内の配置は #935 が決める。決定済みの
   設計軸（`Sgd` を置き換えず `Sgd::step` 相当のロジックを §5.1 の参照
