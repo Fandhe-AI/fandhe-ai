@@ -344,13 +344,21 @@ def parity_status(row):
 
     戻り値: "unverified" | "fail" | "ok"
 
-    - "unverified": `parity_fail_count` キー自体が存在しない（本フィールド
-      追加前にコミットされた旧形式 JSONL）。`row.get(...)` だけでは
-      「キー欠損（None）」と「値が JSON `null`（= Python None、非有限
-      センチネル）」を区別できないため、まずキーの存在を検査する
-      （欠損＝旧形式・未検証と、存在するが不正＝無効を混同しない）。
-    - "fail": `parity_fail_count` キーは存在するが、4 フィールドのいずれか
-      の型が不正（数値でない・`null`・非有限）、`parity_total`/
+    - "unverified": `parity_fail_count`・`parity_total`・
+      `parity_max_abs_err`・`parity_max_rel_err` の 4 キーが**すべて**
+      存在しない（本フィールド追加前にコミットされた旧形式 JSONL）。
+      `row.get(...)` だけでは「キー欠損（None）」と「値が JSON `null`
+      （= Python None、非有限センチネル）」を区別できないため、まずキー
+      の存在を検査する（欠損＝旧形式・未検証と、存在するが不正＝無効を
+      混同しない）。4 キーのうち一部だけが欠けている場合は旧形式ではなく
+      部分的に破損・改変された JSONL であるため "unverified" ではなく
+      "fail" とする（fail-closed。イシュー #970 PR #978 codex-review P0
+      指摘3: `parity_fail_count` のみが欠落し他 3 キーが存在する外部
+      JSONL が "unverified" 扱いとなり `invalid_reasons()` の無効理由に
+      含まれず GFLOP/s が有効値として表示され `--strict` も通過して
+      しまっていた）。
+    - "fail": 上記の「4 キー全欠損」に該当しないが、4 フィールドのいずれか
+      の型が不正（キー欠損・数値でない・`null`・非有限）、`parity_total`/
       `parity_fail_count` が整数値でない、値域が不正（`parity_total` が
       0 以下、`parity_fail_count` が負または `parity_total` 超過、誤差
       2 項が負）、`parity_total` が GEMM の期待要素数（`size * size`）と
@@ -372,7 +380,13 @@ def parity_status(row):
     - "ok": 4 フィールドすべてが妥当な数値・整数値・値域で、`parity_total`
       が `size * size` と完全一致し、`parity_fail_count == 0`。
     """
-    if "parity_fail_count" not in row:
+    parity_keys = (
+        "parity_fail_count",
+        "parity_total",
+        "parity_max_abs_err",
+        "parity_max_rel_err",
+    )
+    if all(k not in row for k in parity_keys):
         return "unverified"
     fail_count = row.get("parity_fail_count")
     total = row.get("parity_total")

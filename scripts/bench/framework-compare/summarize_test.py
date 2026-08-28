@@ -81,6 +81,20 @@ class ParityStatusTests(unittest.TestCase):
         row = _with_parity(_base_row())
         self.assertEqual(summarize.parity_status(row), "ok")
 
+    def test_partial_missing_keys_is_fail_not_unverified(self):
+        # イシュー #970 PR #978 codex-review P0 指摘3: parity_fail_count
+        # のみが欠落し他 3 キー（parity_total 等）が存在する外部 JSONL は
+        # 旧形式（4 キー全欠損）ではなく部分的な破損・改変とみなし
+        # "unverified" ではなく "fail" にする（fail-open 防止）。
+        row = _with_parity(_base_row())
+        del row["parity_fail_count"]
+        self.assertEqual(summarize.parity_status(row), "fail")
+
+    def test_partial_missing_total_is_fail_not_unverified(self):
+        row = _with_parity(_base_row())
+        del row["parity_total"]
+        self.assertEqual(summarize.parity_status(row), "fail")
+
     def test_positive_fail_count_is_fail(self):
         row = _with_parity(_base_row(), fail_count=3)
         self.assertEqual(summarize.parity_status(row), "fail")
