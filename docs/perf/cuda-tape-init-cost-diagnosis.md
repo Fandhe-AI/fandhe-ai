@@ -144,6 +144,16 @@ naive f32/f16・tiled f32/f16・tiled_bias_act_f32（5 本）・WMMA TF32 基本
 「ウォーム」相当）1 条件のみ**を計測する。ドライバ側 JIT キャッシュの cold 条件を厳密に
 分離した計測は本イシューのスコープ外とする（実装完了報告の `outOfScope` に記録）。
 
+**§6 の数値を読む際の注意（Review #945 指摘）**: `cudarc` の `CudaDevice::new` は device
+ordinal に対する CUDA の primary context を取得する構成のため、同一プロセス・同一 ordinal
+では `init_cost_diag_tests.rs::measure_one_trial` 内で新規に構築したハンドル（
+`device_for_gemm_new` 等）であっても同じ primary context・driver 側 JIT キャッシュへ接続
+する。したがって (p3) `load_module`/`load_function` は 1 試行目以降ウォーム計測になり、
+(p2+p3) `CudaGemm::new`（`gemm_new_secs`）も 1 試行目から直前の診断ループのウォーム状態を
+引き継ぐ。§6・§7 の (p3)・`gemm_new_secs` は**本番のコールドプロセス初回呼び出しの実測値
+ではなく、ウォーム条件下の下界**として解釈する（詳細は
+`init_cost_diag_tests.rs` 冒頭コメント参照）。
+
 ### 5.3 実行コマンド（実機）
 
 ```bash

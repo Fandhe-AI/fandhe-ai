@@ -63,6 +63,22 @@
 //! （新規空ディレクトリでの初回 JIT）を厳密に分離した計測は本イシューの
 //! スコープ外とし、実装完了報告の `outOfScope` に記録する。
 //!
+//! この「子プロセス分離をしない」スコープ縮小は、**同一プロセス内での
+//! `CudaDevice::new(0)` の反復呼び出しが本番のフレッシュプロセス相当には
+//! ならない**という副作用も伴う（Review #945 指摘）。`cudarc` の
+//! `CudaDevice::new` は device ordinal に対する CUDA の *primary context*
+//! を取得する構成であり、同一プロセス・同一 ordinal では新規に構築した
+//! ハンドルであっても同じ primary context に接続し、driver 側の
+//! PTX→SASS JIT 結果（インメモリ／`CUDA_CACHE_PATH` ディスクキャッシュ
+//! いずれも）を共有する。したがって [`measure_one_trial`] 内で
+//! `device_for_gemm_new`（後述）を独立したハンドルとして構築しても、
+//! 直前の診断ループ・過去の試行が同じ 8 カーネルを既に driver ロード
+//! 済みであれば `gemm_new_secs`（(p3) 相当分）はウォーム JIT を計測する。
+//! 同様に `MEASURED_TRIALS` の 2 回目以降は `load_secs`（(p3)）も同じ
+//! 理由でウォーム計測になる。§6 の実測値を解釈する際は、(p3)・
+//! `gemm_new_secs` を「本番のコールドプロセス初回呼び出しの上界」では
+//! なく**下界（ウォーム条件下の値）**として扱う。
+//!
 //! # 実行時は必ず `--test-threads=1`（Review #945 指摘: GPU 上での競合）
 //!
 //! 本ファイルの 3 テスト（[`init_cost_diag_phase_breakdown`]・
@@ -213,11 +229,17 @@ fn measure_one_trial() -> TrialSample {
     // `CudaBackendOps` 構造体ドキュメンテーションコメント参照）であり、直前に
     // 同一デバイス上で同じ 8 カーネルを compile_ptx／load_module 済みという
     // 状態は本番には存在しない。上の診断ループで使った `device` をそのまま
-    // 使うと driver 側のモジュール常駐状態の恩恵を受け `gemm_new_secs` が
-    // 本番より低めに偏るため、本番と忠実に対応させるべく独立した新規
-    // デバイスハンドルで計測する（この新規デバイス生成自体の所要時間は
-    // どの集計にも含めない。あくまで `gemm_new_secs` を汚染しないための
-    // 隔離目的）。
+    // 使うと同一ハンドル内に保持された module 常駐状態の恩恵を受け
+    // `gemm_new_secs` が偏るため、ハンドルは独立した新規デバイスで計測する
+    // （この新規デバイス生成自体の所要時間はどの集計にも含めない。あくまで
+    // `gemm_new_secs` を汚染しないための隔離目的）。
+    //
+    // ただし本ファイル冒頭「なぜドライバ側 JIT キャッシュ…単一条件で計測
+    // するか」節（Review #945 再指摘）のとおり、これはハンドルレベルの
+    // module 常駐を排除するのみであり、**同一プロセス・同一 device ordinal
+    // が接続する CUDA primary context・driver 側 JIT キャッシュまでは隔離
+    // しない**。よって `gemm_new_secs` は本番のコールドプロセス初回呼び出し
+    // と忠実に対応する値ではなく、ウォーム条件下の下界として扱う。
     let device_for_gemm_new = CudaDevice::new(0).expect(
         "CUDA device must be available on the ignored diagnostic bench runner \
          (isolated handle for gemm_new_secs measurement)",
