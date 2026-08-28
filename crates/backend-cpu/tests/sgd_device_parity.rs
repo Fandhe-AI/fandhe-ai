@@ -131,6 +131,16 @@ fn full_combo_matches_host_reference() {
     run_parity(0.9, 0.0, 0.01, true, 8);
 }
 
+/// イシュー #936 §5.3（設計文書 `docs/device-resident-update-design.md`）が
+/// 要求する「100 step 程度の累積・最終値判定」をカーネル単体レベルで
+/// 保険的に検証する（forward GEMM の丸め差と独立に `sgd_step_device`
+/// 更新式そのものの誤差蓄積を捕捉する）。momentum・weight_decay・
+/// nesterov を含む構成で 100 step 累積してから最終値のみを突合する。
+#[test]
+fn full_combo_matches_host_reference_across_100_steps() {
+    run_parity(0.9, 0.0, 0.01, true, 100);
+}
+
 #[test]
 fn sgd_step_device_rejects_shape_mismatch() {
     let ops = CpuBackendOps::new();

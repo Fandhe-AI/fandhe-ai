@@ -110,6 +110,15 @@ fn full_combo_matches_cpu_reference() {
     run_parity(0.9, 0.0, 0.01, true, 8);
 }
 
+/// イシュー #936 §5.3（`docs/device-resident-update-design.md`）が要求する
+/// 「100 step 程度の累積・最終値判定」を Metal 実機で保険的に検証する
+/// （`crates/backend-cpu/tests/sgd_device_parity.rs` の同名ケースと対の
+/// Metal 版）。
+#[test]
+fn full_combo_matches_cpu_reference_across_100_steps() {
+    run_parity(0.9, 0.0, 0.01, true, 100);
+}
+
 #[test]
 fn sgd_step_device_rejects_shape_mismatch() {
     let ops = MetalBackendOps::new();
