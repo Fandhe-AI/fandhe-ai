@@ -114,7 +114,8 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   4.2 節参照）経由で学習可能パラメータ（`Linear` 層の `weight`/`bias`）・
   勾配へアクセスできる。`Sequential::trainable_parameters`/
   `Sequential::apply_parameters` と組み合わせ **`fandhe_ai::optim::{Sgd,
-  AdamW}`**（0 節第 3 の入口。昇格元の内部 API は
+  AdamW}`**（0 節「`fandhe_ai::optim` の位置づけ」参照。移行予定の入口・
+  確定入口ではない。昇格元の内部 API は
   `fandhe_ai_autodiff::optim::Sgd`・`fandhe_ai_autodiff::nn::optim::AdamW`）
   へ接続する（4 節参照）。`fit()`/`compile()`
   等の高水準学習ループ API は 2 節のとおり引き続き対象外
