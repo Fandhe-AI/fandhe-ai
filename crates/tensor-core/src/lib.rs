@@ -104,7 +104,7 @@ pub mod pool;
 mod tensor;
 pub mod typed;
 
-pub use backend_ops::{Activation, BackendOps, ops_for};
+pub use backend_ops::{Activation, BackendOps, SgdStepConfig, ops_for};
 pub use broadcast::broadcast_shape;
 pub use buffer::{BufferHandle, DeviceBuffer, MemoryOps};
 pub use device::{BackendError, Device, DeviceInfo, DeviceProvider, enumerate_all, select_from};

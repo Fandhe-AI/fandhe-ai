@@ -86,6 +86,12 @@ pub mod compat;
 // REQ-12）。`Var`／`Gradients`／`AutodiffError`／`LinearVars`・`Tensor` は
 // 迂回経路を持たない値型・エラー型のため facade の正式な公開契約として
 // 再エクスポートする（codex-review PR #424 P1 是正）。
+// `tests/api_surface.rs::facade_does_not_reexport_tape_or_backend_ops` は
+// `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査するため、
+// 複数行に折り返す `pub use fandhe_ai_autodiff::{ ... };` ブロックは
+// 開き括弧の行しか検査対象に入らず、ブロック内部に `Tape` が紛れ込んでも
+// 検出できない（レビュー指摘対応）。1 文 1 行を維持する。
+pub use fandhe_ai_autodiff::optim::{DeviceParamStore, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};
 
@@ -123,6 +129,32 @@ impl Tape {
     /// への委譲）。
     pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
         self.0.backward(loss)
+    }
+
+    /// [`DeviceParamStore::step`] への委譲入口（イシュー #935）。
+    ///
+    /// `DeviceParamStore` の状態機械メソッドは `fandhe_ai_autodiff::Tape`
+    /// （内部クレートの生の型）を直接引数に取るため、`facade::Tape`
+    /// （本型。内部フィールド `0` は `pub(crate)`）の利用者からは直接
+    /// 呼べない。本メソッドは `&self.0` を渡すだけの薄い委譲であり、
+    /// `BackendOps`／`MemoryOps` を利用者向け公開面へ露出しない
+    /// （`crate::lib.rs` モジュール doc「公開面の設計」・REQ-12）。
+    pub fn step_device_param_store(
+        &self,
+        store: &mut DeviceParamStore,
+        grads: &Gradients,
+        config: &SgdConfig,
+    ) -> Result<(), BackendError> {
+        store.step(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::sync_to_host`] への委譲入口（イシュー #935）。
+    /// 上記 `step_device_param_store` と同じ理由の薄い委譲。
+    pub fn sync_device_param_store_to_host(
+        &self,
+        store: &DeviceParamStore,
+    ) -> Result<Vec<Tensor<f32>>, BackendError> {
+        store.sync_to_host(&self.0)
     }
 }
 

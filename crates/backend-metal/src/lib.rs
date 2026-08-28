@@ -232,6 +232,8 @@ pub mod pad;
 pub mod pipeline;
 #[cfg(target_os = "macos")]
 pub mod rmsnorm;
+#[cfg(target_os = "macos")]
+pub(crate) mod sgd;
 // `pad`／`tile` と同じ設計判断: `objc2` 系 FFI に触れないため
 // `cfg(target_os = "macos")` を付けず Linux でも単体テストが回る。
 // ただし `pad`／`tile` と異なり `row_kernel` は経路選択・occupancy 定数・

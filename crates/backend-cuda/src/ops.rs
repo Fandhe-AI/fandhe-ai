@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 
+use fandhe_ai_tensor_core::buffer::MemoryOps;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{Activation, BackendOps, DType, FusionPlan, ShapeError, Tensor};
 
@@ -27,6 +28,7 @@ use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
+use crate::memory::{CudaBufferHandle, CudaMemory, map_cuda_error};
 use crate::rmsnorm::match_rmsnorm_plan;
 use crate::softmax::match_softmax_plan;
 
@@ -302,9 +304,168 @@ pub(crate) fn gemm_bias_act_route(bias_shape: Option<&[usize]>, n: usize) -> Gem
     }
 }
 
+/// `ordinal` に対応する `&'static CudaMemory` をプロセス内キャッシュから
+/// 取得する（イシュー #935）。
+///
+/// `BackendOps::memory_ops(&self) -> Option<&dyn MemoryOps>` は戻り値の
+/// 参照を `&self`（`CudaBackendOps`。`ordinal: usize` のみを持つ軽量な
+/// `Copy` 値で、呼び出しのたびに新規構築されうる）の寿命に束縛できる型で
+/// 返す必要がある一方、`AllocationTracker` の計測系列（`docs/
+/// device-resident-update-design.md` §3.3d「計測系列単一化」）を維持する
+/// には `CudaMemory` 自体をプロセス全体で 1 個だけ共有しなければならない。
+/// `context_cache`（`Arc<T>` を返す）はこの用途に使えない（`Arc` の中身は
+/// `&self` の寿命へ縮小できるが、`Arc` 自体をどこかに所有し続ける主体が
+/// 必要で、`CudaBackendOps` 自身はフィールド追加不可の `Copy` 値のため
+/// 保持先がない）ため、本関数は `Box::leak` で `'static` 参照へ格上げして
+/// 保持する。`ordinal`（物理 GPU 台数で有界）をキーとする点は
+/// `context_cache` と同じ「エントリはプロセスの生存期間中 evict されない」
+/// 設計（`context_cache.rs` モジュール冒頭コメント「所有モデル・生存
+/// 期間」）に倣った意図的なリークであり、通常のメモリリークとは区別する。
+fn static_cuda_memory(
+    ordinal: usize,
+    device: &CudaDevice,
+) -> Result<&'static CudaMemory, BackendError> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<usize, &'static CudaMemory>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().map_err(|_| {
+        BackendError::DeviceUnavailable("static_cuda_memory: cache mutex poisoned".to_string())
+    })?;
+    if let Some(mem) = guard.get(&ordinal) {
+        return Ok(mem);
+    }
+    let mem: &'static CudaMemory = Box::leak(Box::new(CudaMemory::new(device)));
+    guard.insert(ordinal, mem);
+    Ok(mem)
+}
+
 impl BackendOps for CudaBackendOps {
     fn device(&self) -> Device {
         Device::Cuda(self.ordinal)
+    }
+
+    /// `context_cache::cached_device` で得たデバイス上に `ordinal` キーの
+    /// プロセス内シングルトン `CudaMemory` を構築・共有する
+    /// （`static_cuda_memory`。イシュー #935）。driver 不在等で
+    /// `device_handle()` が失敗した場合は `None` を返す（`memory_ops`
+    /// のデフォルト契約と同じ fail-safe。`tensor-core::backend_ops`
+    /// 参照）。
+    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        let device = self.device_handle().ok()?;
+        static_cuda_memory(self.ordinal, &device)
+            .ok()
+            .map(|m| m as &dyn MemoryOps)
+    }
+
+    /// SGD の 1 パラメータ分の更新を in-place で実行する（イシュー #935・
+    /// `docs/device-resident-update-design.md` §3.2・§5.2）。
+    /// `context_cache::cached_sgd`（`ordinal` キーのプロセス内 NVRTC
+    /// コンパイル済みカーネルキャッシュ）を経由するため、学習ループの
+    /// 2 回目以降のステップは再コンパイルを支払わない。
+    fn sgd_step_device(
+        &self,
+        param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        grad: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        velocity: Option<&mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+        config: &fandhe_ai_tensor_core::SgdStepConfig,
+    ) -> Result<(), BackendError> {
+        if param.device() != Device::Cuda(self.ordinal)
+            || grad.device() != Device::Cuda(self.ordinal)
+        {
+            return Err(BackendError::DeviceMismatch);
+        }
+        if param.shape() != grad.shape() {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: param.shape().to_vec(),
+                rhs: grad.shape().to_vec(),
+            }));
+        }
+        let use_momentum = config.momentum != 0.0;
+        if let Some(v) = &velocity {
+            // デバイス不一致とテンソル shape 不一致を同一の
+            // `ShapeMismatch` に丸めていた（Review 指摘）。
+            // `BackendOps::sgd_step_device` の契約（`param`/`grad` と同じ
+            // く、デバイス不一致は `DeviceMismatch` を返す）に velocity
+            // も揃えるため、判定を分離する。
+            if v.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if v.shape() != param.shape() {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: param.shape().to_vec(),
+                    rhs: v.shape().to_vec(),
+                }));
+            }
+        }
+        if use_momentum && velocity.is_none() {
+            return Err(BackendError::Unsupported(
+                "sgd_step_device: momentum enabled but no velocity buffer provided".into(),
+            ));
+        }
+
+        let device = self.device_handle()?;
+        let sgd = context_cache::cached_sgd(self.ordinal, &device).map_err(map_cuda_error)?;
+
+        let grad_handle = grad
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        // `download`（`memory.rs::CudaMemory::download`）と同じ「空バッファ
+        // は `slice: None`」契約のため、numel == 0 はカーネル起動前に
+        // 早期 return する（`CudaSgd::run` 側の `numel == 0` early-return
+        // では `grad_slice` を取り出す前に `param_slice` を要求してしまう
+        // ため、ここで先に判定する）。
+        let numel = param.numel();
+        if numel == 0 {
+            return Ok(());
+        }
+        let Some(grad_slice) = grad_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "sgd_step_device: grad buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let velocity_handle_slice = match velocity {
+            Some(v) => {
+                let handle = v
+                    .downcast_handle_mut::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)?;
+                Some(handle.slice.as_mut().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "sgd_step_device: velocity buffer has numel > 0 but no device allocation"
+                            .into(),
+                    )
+                })?)
+            }
+            None => None,
+        };
+
+        let param_handle = param
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(param_slice) = param_handle.slice.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "sgd_step_device: param buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let kernel_params = crate::sgd::SgdKernelParams {
+            lr: config.lr,
+            momentum: config.momentum,
+            dampening: config.dampening,
+            weight_decay: config.weight_decay,
+            nesterov: config.nesterov,
+            is_first_step: config.is_first_step,
+        };
+        sgd.run(
+            param_slice,
+            grad_slice,
+            velocity_handle_slice,
+            &kernel_params,
+        )
+        .map_err(map_cuda_error)
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {

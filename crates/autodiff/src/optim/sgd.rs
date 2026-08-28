@@ -79,6 +79,69 @@ impl SgdConfig {
         self.nesterov = nesterov;
         self
     }
+
+    /// ハイパーパラメータの妥当性を検証する（[`Sgd::new`] の検証本体を
+    /// 抽出したもの。検証基準は [`Sgd::new`] の doc コメント参照）。
+    ///
+    /// [`Sgd::new`] に加え、`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::step`（イシュー #935）からも呼ばれる。
+    /// `DeviceParamStore::step` は `Sgd::new` を経由せず `SgdConfig` を
+    /// 毎 step 直接適用するため、同じ検証（有限値・非負・nesterov 条件）
+    /// を経ないまま NaN・不正値がデバイス側パラメータへ in-place 適用
+    /// されてしまう抜け穴があった（Review 指摘）。検証ロジックを本メソッド
+    /// へ一本化し、両呼び出し元が同一基準を共有することでその抜け穴を
+    /// 塞ぐ。
+    pub fn validate(&self) -> Result<(), AutodiffError> {
+        if !self.lr.is_finite() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: lr must be finite, got {}",
+                self.lr
+            )));
+        }
+        if self.lr < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: invalid lr: {} (must be >= 0)",
+                self.lr
+            )));
+        }
+        if !self.momentum.is_finite() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: momentum must be finite, got {}",
+                self.momentum
+            )));
+        }
+        if self.momentum < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: invalid momentum value: {} (must be >= 0)",
+                self.momentum
+            )));
+        }
+        if !self.dampening.is_finite() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: dampening must be finite, got {}",
+                self.dampening
+            )));
+        }
+        if !self.weight_decay.is_finite() {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: weight_decay must be finite, got {}",
+                self.weight_decay
+            )));
+        }
+        if self.weight_decay < 0.0 {
+            return Err(AutodiffError::InvalidArgument(format!(
+                "SgdConfig::validate: invalid weight_decay value: {} (must be >= 0)",
+                self.weight_decay
+            )));
+        }
+        if self.nesterov && (self.momentum == 0.0 || self.dampening != 0.0) {
+            return Err(AutodiffError::InvalidArgument(
+                "SgdConfig::validate: Nesterov momentum requires a momentum and zero dampening"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// SGD optimizer 本体。`step()` をまたいで momentum バッファ
@@ -118,53 +181,7 @@ impl Sgd {
     ///   NaN/inf を伝播させ、実行時に気づきにくい形で学習を破壊する
     ///   ため、構築時に安全側で拒否する）
     pub fn new(config: SgdConfig) -> Result<Sgd, AutodiffError> {
-        if !config.lr.is_finite() {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: lr must be finite, got {}",
-                config.lr
-            )));
-        }
-        if config.lr < 0.0 {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: invalid lr: {} (must be >= 0)",
-                config.lr
-            )));
-        }
-        if !config.momentum.is_finite() {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: momentum must be finite, got {}",
-                config.momentum
-            )));
-        }
-        if config.momentum < 0.0 {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: invalid momentum value: {} (must be >= 0)",
-                config.momentum
-            )));
-        }
-        if !config.dampening.is_finite() {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: dampening must be finite, got {}",
-                config.dampening
-            )));
-        }
-        if !config.weight_decay.is_finite() {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: weight_decay must be finite, got {}",
-                config.weight_decay
-            )));
-        }
-        if config.weight_decay < 0.0 {
-            return Err(AutodiffError::InvalidArgument(format!(
-                "Sgd::new: invalid weight_decay value: {} (must be >= 0)",
-                config.weight_decay
-            )));
-        }
-        if config.nesterov && (config.momentum == 0.0 || config.dampening != 0.0) {
-            return Err(AutodiffError::InvalidArgument(
-                "Sgd::new: Nesterov momentum requires a momentum and zero dampening".to_string(),
-            ));
-        }
+        config.validate()?;
         Ok(Sgd {
             config,
             velocity: None,

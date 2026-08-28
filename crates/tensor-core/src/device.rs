@@ -216,6 +216,43 @@ pub enum BackendError {
     /// `.claude/rules/coding-rust.md`）。GPU 側カーネルの実装自体は本
     /// イシューのスコープ外（out-of-scope-tracking.md 対象）。
     Unsupported(String),
+    /// デバイス上パラメータ更新（`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore`。イシュー #935・`docs/device-resident-update-design.md`
+    /// §3.1）が「以前の `step()` 失敗により実行時エラー後の状態」で
+    /// 呼ばれたことを表す。`DeviceParamStore` は `sgd_step_device` の
+    /// 実行時エラー（GPU 側の実際の起動失敗等。件数・shape 不一致のような
+    /// 事前検証で弾ける契約違反とは別）を検出すると内部状態を poisoned へ
+    /// 遷移し、以降の `step`／`sync_to_host`／`register_resident_leaves`／
+    /// `snapshot_resident_leaves` をすべてこの variant で fail-closed に
+    /// 拒否する（「部分的に更新されたデバイス側パラメータをそのまま学習
+    /// 継続・推論に使ってしまう」ことを構造的に防ぐ。`.claude/rules/
+    /// security.md` A08）。回復は新しい `DeviceParamStore` の再構築のみ。
+    StorePoisoned,
+    /// `DeviceParamStore::step`／`sync_to_host` 等に、`DeviceParamStore`
+    /// 構築時・直近の `register_resident_leaves` 呼び出しと異なる
+    /// `Tape`（`TapeId` 不一致）を渡した（`fandhe_ai_autodiff::var::Var` の
+    /// クロステープ検査〈`AutodiffError::TapeMismatch`〉と同種の契約を
+    /// デバイス常駐パラメータ側にも課す。イシュー #935）。
+    TapeMismatch,
+    /// `DeviceParamStore::register_resident_leaves`（forward 用の
+    /// デバイス→ホスト download・葉ノード登録）を、直前の登録が
+    /// `step()` で消費（または `abandon_pending_forward()` で破棄）される
+    /// 前に再度呼んだ。1 回の forward 記録に対し高々 1 回の `step()` が
+    /// 対応する契約（イシュー #935・設計文書 §3.3a）を守るための
+    /// fail-closed 拒否。
+    PendingForwardUnconsumed,
+    /// `DeviceParamStore::step` が `Gradients::get` で該当パラメータの
+    /// 勾配を取得しようとしたが `Ok(None)`（loss へ未到達）だった。
+    /// `fandhe_ai::compat::sequential::SequentialVars::trainable_grads` と
+    /// 同じ fail-closed 方針（黙って一部パラメータの更新をスキップしない。
+    /// `.claude/rules/security.md` A03）。
+    MissingGradient(String),
+    /// `DeviceParamStore` の構築・`step` 呼び出し引数が構造的に不正
+    /// （パラメータ件数と勾配件数の不一致・momentum 構成〈velocity
+    /// バッファの有無〉が前回 `step` から変化した等）。既存 variant
+    /// （`ShapeMismatch`・`DeviceMismatch`）のいずれにも意味的に適合しない
+    /// 引数検証失敗をここへ集約する（イシュー #935）。
+    InvalidArgument(String),
 }
 
 impl fmt::Display for BackendError {
@@ -231,6 +268,20 @@ impl fmt::Display for BackendError {
             BackendError::DeviceUnavailable(msg) => write!(f, "device unavailable: {msg}"),
             BackendError::TransferFailed(msg) => write!(f, "transfer failed: {msg}"),
             BackendError::Unsupported(msg) => write!(f, "unsupported operation: {msg}"),
+            BackendError::StorePoisoned => write!(
+                f,
+                "device param store is poisoned after a previous step() failure; \
+                 construct a new store"
+            ),
+            BackendError::TapeMismatch => {
+                write!(f, "device param store operation used a mismatched Tape")
+            }
+            BackendError::PendingForwardUnconsumed => write!(
+                f,
+                "device param store has a pending forward registration not yet consumed by step()"
+            ),
+            BackendError::MissingGradient(msg) => write!(f, "missing gradient: {msg}"),
+            BackendError::InvalidArgument(msg) => write!(f, "invalid argument: {msg}"),
         }
     }
 }

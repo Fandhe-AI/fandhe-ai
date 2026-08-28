@@ -47,8 +47,47 @@
 //! 本イシューは受け入れ条件検証に必要な最小限のテストに留める。
 
 use crate::Tensor;
+use crate::buffer::{DeviceBuffer, MemoryOps};
 use crate::device::{BackendError, Device};
 use crate::fusion::FusionPlan;
+
+/// [`BackendOps::sgd_step_device`] の 1 ステップ分のハイパーパラメータ
+/// （イシュー #935・`docs/device-resident-update-design.md` §3.1）。
+///
+/// `fandhe_ai_autodiff::optim::sgd::SgdConfig`（ホスト参照実装。`lr`／
+/// `momentum`／`dampening`／`weight_decay`／`nesterov` の 5 フィールド）と
+/// 同じ意味論のフィールドに `is_first_step` を加えたもの。`autodiff`
+/// クレートは `tensor-core` へ依存する側（`tensor-core` → `autodiff` の
+/// 逆依存は作らない）であるため、`SgdConfig` をここへ再エクスポートせず
+/// 独立した型として定義する（`fandhe_ai_autodiff::optim::device_store::
+/// DeviceParamStore::step` が `SgdConfig` から本型へ変換して渡す）。
+///
+/// `is_first_step`: PyTorch `torch.optim.SGD` の momentum 初期化規則
+/// （`docs/spec` 由来。`fandhe_ai_autodiff::optim::sgd` モジュールコメント
+/// 「Algorithm」節）は「初回 step は `b ← g`、2 回目以降は
+/// `b ← μ·b + (1−τ)·g`」であり、この分岐はパラメータの値そのものではなく
+/// 呼び出し元（`DeviceParamStore`）が保持するステップカウンタに依存する。
+/// `SgdConfig` 自体は構築後不変（`fandhe_ai_autodiff::optim::sgd::SgdConfig`
+///参照）だが、`is_first_step` はステップごとに変化するため `SgdConfig` の
+/// フィールドではなく本型（呼び出しごとに構築する値）のフィールドとする。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SgdStepConfig {
+    /// 学習率。
+    pub lr: f32,
+    /// momentum 係数 `μ`。`0.0` は momentum 無効（`velocity` 引数は
+    /// 無視してよい）。
+    pub momentum: f32,
+    /// dampening `τ`。
+    pub dampening: f32,
+    /// weight decay `λ`（L2 正則化。`torch.optim.SGD` と同じく `p` に
+    /// 係数を乗じて勾配へ加算する）。
+    pub weight_decay: f32,
+    /// nesterov momentum を使うか。
+    pub nesterov: bool,
+    /// このパラメータ列にとって最初の `step()` 呼び出しか（momentum
+    /// バッファの初期化分岐。上記フィールドドキュメント参照）。
+    pub is_first_step: bool,
+}
 
 /// GEMM epilogue で適用する activation 種別（TASK-12.1f・#203）。
 ///
@@ -84,6 +123,73 @@ pub trait BackendOps {
     /// このインスタンスが対応する [`Device`]（呼び出し元がログ・
     /// エラーメッセージで識別するために使う）。
     fn device(&self) -> Device;
+
+    /// このバックエンドの [`MemoryOps`]（確保・アップロード・ダウンロード）
+    /// 実装への参照（イシュー #935・`docs/device-resident-update-design.md`
+    /// §3.1）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（`MemoryOps` を持たない）。`BackendOps` を
+    /// `MemoryOps` の supertrait にする案（`buffer.rs` モジュール冒頭
+    /// コメント旧稿）は crates.io 公開済み trait への破壊的変更となる
+    /// ため不採用と確定した（設計文書 §3.1）。本デフォルトメソッド追加は
+    /// `gemm_bias_act`／`run_fused` と同じ非破壊拡張パターン（`BackendOps`
+    /// を実装する外部クレートは何もしなくても既存実装のままコンパイル
+    /// が通る）。
+    ///
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::new` が
+    /// `tape.ops().memory_ops()` を呼び、`None` の場合は
+    /// [`BackendError::Unsupported`] としてデバイス常駐パラメータ更新を
+    /// 拒否する（fail-closed。「`memory_ops()` を呼ぶフォールバック合成は
+    /// 設けない」という設計文書 §3.2 改訂の確定事項に従い、`Some` を返す
+    /// バックエンドのみがこの経路をサポートする）。CPU／CUDA／Metal の 3
+    /// バックエンドはいずれも本デフォルトを `Some(self)` へオーバーライド
+    /// する（各バックエンドクレートの `ops.rs` 参照）。
+    fn memory_ops(&self) -> Option<&dyn MemoryOps> {
+        None
+    }
+
+    /// SGD の 1 パラメータ分の更新をデバイス上で in-place に実行する
+    /// （イシュー #935・`docs/device-resident-update-design.md` §3.2）。
+    ///
+    /// `param`／`grad`／`velocity`（momentum 有効時のみ）はいずれも
+    /// このバックエンド自身が確保した [`DeviceBuffer<f32>`]
+    /// （[`MemoryOps::alloc_zeroed`]／[`MemoryOps::upload`] の戻り値）を
+    /// 要求する契約。呼び出し元（`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::step`）は毎ステップ `grad` のみをアップロードし
+    /// `param`／`velocity` は前ステップから使い回すことで、param の
+    /// ホスト再アップロードを排除する（本イシューの受け入れ条件）。
+    ///
+    /// 更新式は `fandhe_ai_autodiff::optim::sgd`（`Sgd::step` ホスト参照
+    /// 実装）と同一の項順序（weight_decay → momentum〈`is_first_step` で
+    /// `b ← g` 分岐〉→ nesterov → 減算）を 3 バックエンドで揃える契約
+    /// （設計文書 §5.2）。カーネル境界検査は省略しない（REQ-8・
+    /// `.claude/rules/coding-rust.md`）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は常に [`BackendError::Unsupported`] を返す fail-closed
+    /// （`memory_ops()` を呼ぶフォールバック合成は設けない。設計文書
+    /// §3.2 改訂）。CPU／CUDA／Metal はこのデフォルトを実カーネルで
+    /// オーバーライドする。
+    ///
+    /// # エラー
+    /// - `param`／`grad`／`velocity` のいずれかがこのバックエンドの
+    ///   ハンドル型へダウンキャストできない・デバイスが一致しない →
+    ///   [`BackendError::DeviceMismatch`]
+    /// - shape が一致しない → [`BackendError::ShapeMismatch`]
+    /// - `config.momentum != 0.0` なのに `velocity` が `None` →
+    ///   [`BackendError::Unsupported`]
+    fn sgd_step_device(
+        &self,
+        _param: &mut DeviceBuffer<f32>,
+        _grad: &DeviceBuffer<f32>,
+        _velocity: Option<&mut DeviceBuffer<f32>>,
+        _config: &SgdStepConfig,
+    ) -> Result<(), BackendError> {
+        Err(BackendError::Unsupported(
+            "sgd_step_device: default fail-safe (no in-place SGD kernel available)".into(),
+        ))
+    }
 
     /// 行列積 `C = A @ B` を計算する（`A: [m, k]`・`B: [k, n]` の 2 次元
     /// テンソルのみ受け付ける。shape 不整合は

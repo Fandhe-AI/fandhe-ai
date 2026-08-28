@@ -215,6 +215,22 @@ pub(crate) fn cached_softmax(
     get_or_build(cache, ordinal, || CudaSoftmax::new(device))
 }
 
+/// `ordinal` に対応する [`CudaSgd`] スイートをプロセス内キャッシュから
+/// 取得する（イシュー #935）。`ops::CudaBackendOps::sgd_step_device` の
+/// 唯一の呼び出し先。デバイス常駐パラメータ更新は学習ループの毎ステップ
+/// 呼ばれるため、NVRTC 再コンパイルを避けるキャッシュの効果が
+/// `cached_gemm`／`cached_elementwise` 以上に重要（`docs/
+/// device-resident-update-design.md` §3.3d「Cross-tape 契約」: `XMemory` が
+/// 持つ stream/context は必ず既存 `context_cache` 経由で取得する）。
+pub(crate) fn cached_sgd(
+    ordinal: usize,
+    device: &CudaDevice,
+) -> Result<Arc<crate::sgd::CudaSgd>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<crate::sgd::CudaSgd>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ordinal, || crate::sgd::CudaSgd::new(device))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
