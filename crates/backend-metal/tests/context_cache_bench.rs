@@ -41,8 +41,20 @@
 //! 実行コマンド（Apple Silicon 実機。`--release` 推奨）:
 //!
 //! ```sh
-//! cargo test -p fandhe-ai-backend-metal --test context_cache_bench -- --ignored --nocapture
+//! cargo test -p fandhe-ai-backend-metal --test context_cache_bench -- --ignored --nocapture --test-threads=1
 //! ```
+//!
+//! `--test-threads=1` が必須の理由: 本ファイルの
+//! `gemm_second_call_avoids_reconstruction_cost` は「プロセス内で最初の
+//! `MetalBackendOps::gemm` 呼び出し」を cold として計測する前提であり
+//! （「cold をプロセス内で 1 回しか観測できないことについて」節参照）、
+//! 同じテストバイナリ内の `gemm_repeated_calls_are_deterministic_via_cache`
+//! と並列実行されると、どちらが先に Metal 経路へ触れるかが不定になり
+//! cold 側の計測値が汚染される（`context_cache` のプロセスワイド
+//! シングルトン性質上、後から実行された方は必ずキャッシュヒットになる
+//! ため）。`--test-threads=1` で直列化するか、
+//! `-- --ignored gemm_second_call_avoids_reconstruction_cost` のように
+//! 対象テストを単独指定して実行すること。
 
 #![cfg(target_os = "macos")]
 
