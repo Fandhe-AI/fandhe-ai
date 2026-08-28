@@ -9,9 +9,11 @@
 ## 判断サマリ
 
 **昇格を採用と推奨する。** `fandhe_ai::optim` モジュール（案 A）として `Sgd`/`SgdConfig`/
-`AdamW`/`AdamWConfig` を再エクスポートする形を軸とし、`clip_grad_norm`/`LrScheduler` の同時
-昇格も推奨する。あわせて、サポート境界の変更を伴うため `docs/compat-api-scope.md` §0 の入口
-列挙の更新と、正本 spec リポジトリ側での REQ-9 受け入れ基準の改定提案が必要と判断する（§7）。
+`AdamW`/`AdamWConfig` を再エクスポートする形を軸とし、`clip_grad_norm`/`LrScheduler` に加え、
+これらが公開シグネチャで直接使う関連型・関連関数（`ClipGradResult`・`global_grad_norm`・
+`ConstantLr`・`StepLr`。§4.2）の同時昇格も推奨する。あわせて、サポート境界の変更を伴うため
+`docs/compat-api-scope.md` §0 の入口列挙の更新と、正本 spec リポジトリ側での REQ-9 受け入れ
+基準の改定提案が必要と判断する（§7）。
 本文書は判断の記録であり、範囲拡張の実施自体は `docs/compat-api-scope.md` §5 の手続き（spec
 改定またはユーザー承認）を経て別イシューで行う。
 
@@ -125,6 +127,27 @@ CPU で 1 桁以上、Metal ではさらに大きな差が生じている。た�
 facade 側の doc でも踏襲して明記する必要があり、後続の実装イシューで `fandhe_ai::optim` の
 モジュール doc に契約を転記することを推奨する。
 
+これら 2 つを昇格する場合、**公開シグネチャが直接参照する関連型・関連関数も同時に再エクスポート
+しなければ、facade だけでは呼び出しが完結しない**（AGENTS.md「公開 API への内部表現の漏出は
+P1」・facade が唯一のサポート対象公開面であるという契約に抵触する）。具体的には次の 4 つが
+対象になる。
+
+- `clip::ClipGradResult`（`clip_grad_norm` の戻り値型。`crates/autodiff/src/nn/optim/clip.rs`）:
+  戻り値型を再エクスポートしないと、利用者は `fandhe_ai::optim::clip_grad_norm` の戻り値を
+  名指しできず、内部クレートの型に依存せざるを得なくなる
+- `clip::global_grad_norm`（`clip_grad_norm` と対になる、クリップ前の global L2 ノルムを単独で
+  計算する関数。同ファイル）: `clip_grad_norm` を公開対象にするなら、同じ低レベル計算を公開する
+  この関数も対応付けて公開するのが一貫する（公開しない場合は理由を明記した除外判断が必要になる）
+- `lr_scheduler::ConstantLr`/`lr_scheduler::StepLr`（`LrScheduler` trait の組み込み実装。
+  `crates/autodiff/src/nn/optim/lr_scheduler.rs`）: trait のみ公開して具象実装を公開しないと、
+  利用者は facade だけでは `LrScheduler` を実装するどちらの組み込みスケジューラも構築できず、
+  trait 昇格の実利がない
+
+後続の実装イシュー（§8-1）では、`crates/autodiff/src/nn/optim/mod.rs` の公開面
+（`pub use adamw::{AdamW, AdamWConfig}; pub use clip::{ClipGradResult, clip_grad_norm,
+global_grad_norm}; pub use lr_scheduler::{ConstantLr, LrScheduler, StepLr};`）と 1 対 1 で対応
+付けて `fandhe_ai::optim` へ再エクスポートすることを推奨する。
+
 ### 4.3 シグネチャ不統一の扱い
 
 `Sgd::step(&mut self, params: &[&Tensor<f32>], grads: &[&Tensor<f32>]) -> Result<Vec<Tensor<f32>>,
@@ -206,8 +229,9 @@ numpy/Keras 慣習のラッパーではなく、**facade 素の公開契約（`t
 `create-issue`/`create-issue-tree` で起票する）。
 
 1. `crates/facade/src/optim.rs`（新規）: `fandhe_ai_autodiff::optim::{Sgd, SgdConfig}`・
-   `fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig}`・`clip::clip_grad_norm`・
-   `lr_scheduler::LrScheduler` を `fandhe_ai::optim` として再エクスポートし、適用順序契約
+   `fandhe_ai_autodiff::nn::optim::{AdamW, AdamWConfig, ClipGradResult, clip_grad_norm,
+   global_grad_norm, ConstantLr, LrScheduler, StepLr}`（`nn::optim::mod.rs` の公開面と 1 対 1
+   対応。§4.2）を `fandhe_ai::optim` として再エクスポートし、適用順序契約
    （`backward → clip → step`）を doc に転記する
 2. `crates/facade/tests/api_surface.rs` の拡張: 新規追加分についても (a)/(b) の機械検査対象に
    含める（`visit_rs_files` は `src/` 配下を再帰走査するため自動的に含まれるが、`optim.rs` 固有
@@ -231,6 +255,9 @@ numpy/Keras 慣習のラッパーではなく、**facade 素の公開契約（`t
 | `crates/facade/tests/api_surface.rs:1-16` | REQ-12 機械検査（`pub use` 禁止語・`pub fn` 引数検査）の対象・走査方式 |
 | `crates/autodiff/src/optim/sgd.rs:185-188,252-253,305-306`・`optim/mod.rs` | `Sgd::step` シグネチャ・`Tape`/`Var` 非依存の設計方針コメント・`dense_vec`/`Tensor::new` によるホスト往復の実装箇所 |
 | `crates/autodiff/src/nn/optim/adamw.rs:139-141,196-197,221`・`nn/optim/mod.rs` | `AdamW::step` シグネチャ・適用順序契約（`backward → clip → step`）・モジュール配置不統一の経緯・`dense_vec`/`Tensor::new` によるホスト往復の実装箇所 |
+| `crates/autodiff/src/nn/optim/mod.rs:46-48` | `nn::optim` の公開面一覧（`AdamW`/`AdamWConfig`・`ClipGradResult`/`clip_grad_norm`/`global_grad_norm`・`ConstantLr`/`LrScheduler`/`StepLr`）。facade 再エクスポートの 1 対 1 対応付け元（§4.2・§8-1） |
+| `crates/autodiff/src/nn/optim/clip.rs` | `clip_grad_norm`/`global_grad_norm`/`ClipGradResult` の実装・戻り値型 |
+| `crates/autodiff/src/nn/optim/lr_scheduler.rs` | `LrScheduler` trait・組み込み実装 `ConstantLr`/`StepLr` |
 | `crates/facade/src/compat/sequential.rs:14-15,160-260,379` | 位置対応契約・内部クレート `fandhe_ai_autodiff::optim`/`nn::optim` への doc 案内（サポート境界との矛盾箇所） |
 | `docs/compat-api-scope.md` §0 | サポート境界（facade が唯一の公開面・入口 2 つの列挙・§5 と同じ手続きの適用） |
 | `docs/compat-api-scope.md` §1・§5・§6 | compat 層対象範囲（3 種限定）・範囲拡張の手続き・出典一覧の体裁踏襲元 |
