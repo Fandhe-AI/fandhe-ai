@@ -432,7 +432,11 @@ forward 呼び出しごとに 1 回）と **grad の upload**（1 ステップ�
   代わりに `Sequential::trainable_parameters()`（既存 API。`apply_parameters`
   と同じ並び順契約〈§4.2「位置対応契約」・`sgd.rs:183-200`〉）が返す
   `Vec<&Tensor<f32>>` 相当の「学習対象パラメータの並び」をそのまま
-  受け取る形にする: `DeviceParamStore::new(params: &[TrainableParam])`
+  受け取る形にする: `DeviceParamStore::new(mem: &dyn MemoryOps, params:
+  &[TrainableParam])`（host `Tensor<f32>` から `DeviceBuffer<f32>` への
+  upload を行うため、他のデバイス操作 API〈§3.1／§3.2／§3.2a／§3.3a〉と
+  同様に `mem: &dyn MemoryOps` を明示引数として受け取る。§3.3a で一度検出・
+  修正した `forward_resident` の mem 引数欠落と同種の欠落を未然に防ぐ）。
   （`TrainableParam` は `autodiff` 側に新設する `{ weight: &Tensor<f32>,
   bias: Option<&Tensor<f32>> }` 相当の平坦なスライス型。確定シグネチャ
   は #935）。呼び出し元（`facade::compat::Sequential::forward_resident`
@@ -871,8 +875,11 @@ linear_forward_resident` の「呼び出し元は 2 系統」記述は、系統 
 `.claude/rules/security.md` A08）。デバイス常駐経路（`DeviceParamStore` 経由の
 学習ループ）は既存経路に追加する新経路であり、既存経路を置き換えない。
 `DeviceParamStore` からホスト `Tensor<f32>` への同期（学習終了時・`predict`/
-保存前）は明示 API（例: `DeviceParamStore::sync_to_host() -> Vec<Tensor<f32>>`。
-確定シグネチャは #935 で行う）を介して行い、`apply_parameters` へ渡す形で
+保存前）は明示 API（例: `DeviceParamStore::sync_to_host(&self, mem: &dyn
+MemoryOps) -> Vec<Tensor<f32>>`。`DeviceBuffer<f32>` から host `Tensor<f32>`
+への download を行うため `new` と同様に `mem: &dyn MemoryOps` を明示引数
+として受け取る。確定シグネチャは #935 で行う）を介して行い、
+`apply_parameters` へ渡す形で
 既存の書き戻し経路と接続する。
 
 ## 4. 所有権（design decision 2）
