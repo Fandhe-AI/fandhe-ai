@@ -127,10 +127,20 @@ PR #725、同一 GB10 個体・`cuda_floor_bench` 5 run 中央値・launch-only 
    下位桁のずれがあり、TF32 等の低精度アキュムレーションを使っている可能性があるが未確認。
    fandhe-ai の wmma_tf32 経路も TF32 入力変換を伴うため、両者が同種の精度トレードオフを取っている
    可能性がある一方、confirmed ではない
-4. **tape 経由 reuse per-call とカーネル単体の乖離**: §3.1 の環境 3 実測が示すとおり、fandhe-ai の
-   公開 API（tape）経由では reuse per-call でも数百 ms の固定オーバーヘッドが残り、上表のカーネル
-   単体性能（3.09〜4.00 倍優位）を公開 API 経由の実効性能としては享受できていない。原因切り分けは
-   #926 系の後続対応に依存する（§7）
+4. **【最重要】既定カーネル変種は tiled f32 固定であり、上表 wmma_tf32 行は公開 API が実際に通る経路
+   ではない**: `crates/backend-cuda/src/ops.rs`（`CudaBackendOps::gemm`, `run_tiled_f32` 呼び出し
+   1 箇所のみ）を確認したところ、facade → tape → backend-cuda の公開 API 経由の matmul（framework-compare
+   の fandhe-ai 実測が通る経路）は `CudaGemm::run_tiled_f32` に固定されている。Tensor Core 経路
+   （`wmma_tf32`）は `CudaGemmAuto`（`crates/backend-cuda/src/gemm_auto.rs`）経由でのみ到達可能だが、
+   `cuda-optimized-remeasurement.md` 自身が「既定カーネル変種の選択は保守的に tiled 固定とし、
+   `CudaGemmAuto` を介した Tensor Core 経路の自動選択への切替は別スコープ」と明記しており、
+   `CudaGemmAuto` は公開 API から未接続。**すなわち上表の tiled f32 行（2048: 0.56 倍、4096: 0.87〜0.67 倍。
+   candle/burn 未満）こそが「公開 API が実際に実行するカーネルの性能」であり、wmma_tf32 行
+   （3.09〜4.00 倍優位）は公開 API 経由では享受できない未接続の候補経路の実測値である**
+5. **tape 経由 reuse per-call とカーネル単体の乖離**: §3.1 の環境 3 実測が示すとおり、fandhe-ai の
+   公開 API（tape）経由では reuse per-call でも数百 ms の固定オーバーヘッドが残る。上記限定条件 4
+   により、この乖離を解消しても到達するのは tiled f32（candle/burn 未満）であり wmma_tf32
+   （3.09〜4.00 倍優位）ではない点に注意する
 
 ## 5. REQ-8 下限との突合
 
@@ -148,17 +158,25 @@ candle / Burn の対 PyTorch 比を同一形式で並べる。
 | 2048 | candle（fresh、GB10 環境 2） | 24.50% | 本ドキュメント §4 換算（4204.3 / 17158.2 GFLOP/s） |
 | 2048 | burn（fresh、GB10 環境 2） | 24.45% | 同上（4194.7 / 17158.2 GFLOP/s） |
 
-**両論併記の確定事項**:
+**両論併記の確定事項（§4 限定条件 4 を踏まえ、2 つの原因を分離して記録する）**:
 
-- **REQ-8 下限を満たすカーネル単体性能は candle / Burn の CUDA GEMM 実測を明確に上回る水準にある**
-  （4096 で fandhe-ai 51.96% 対 candle 12.98% / burn 16.83%、2048 で fandhe-ai 83.53% 対
-  candle/burn 約 24.5%）。これは §4 の限定条件付きながら、fandhe-ai の CUDA カーネル実装
-  （wmma_tf32・TF32 Tensor Core 経路）自体の性能はフレームワーク横並びの実測値に対し優位であることを
-  示す
-- **一方で、tape 公開 API 経由の実効性能（framework-compare の fresh/reuse 実測）は per-call
-  オーバーヘッドにより未達である**（環境 2: fresh 458〜594 ms、環境 3: reuse per-call でも
-  260〜506 ms。カーネル単体の μs〜ms オーダーに対し 2〜3 桁遅い）。この解消は #926 系の後続対応
-  （tape 初期化コストの内訳診断・削減）に依存し、本イシューのスコープ外である
+- **REQ-8 下限を満たす候補経路（wmma_tf32・Tensor Core）のカーネル単体性能は candle / Burn の
+  CUDA GEMM 実測を明確に上回る水準にある**（4096 で fandhe-ai wmma_tf32 51.96% 対 candle 12.98% /
+  burn 16.83%、2048 で fandhe-ai wmma_tf32 83.53% 対 candle/burn 約 24.5%）。これは §4 の限定条件
+  1〜3 付きながら、`wmma_tf32` カーネル実装それ自体の性能はフレームワーク横並びの実測値に対し
+  優位であることを示す
+- **しかし公開 API（facade → tape → backend-cuda）が実際に実行する既定カーネルは tiled f32 固定であり
+  （§4 限定条件 4）、その性能は candle / Burn 未満である**（4096 で tiled f32 GFLOP/s は candle の
+  約 0.87 倍・burn の約 0.67 倍、2048 では約 0.56 倍）。framework-compare の fandhe-ai 実測は
+  この tiled f32 経路を通っているため、**tape 初期化コストや per-call オーバーヘッドを仮に完全に
+  ゼロへ縮小できたとしても、公開 API 経由の実効性能は candle/Burn を下回ったままである**
+- **原因は 2 つに分離される**: (i) tape 経由の固定オーバーヘッド（環境 2 fresh 458〜594 ms、環境 3
+  reuse per-call でも 260〜506 ms。#926 系の後続対応が対象）、(ii) 既定カーネル変種が Tensor Core
+  経路（`CudaGemmAuto`／`wmma_tf32`）へ未接続で tiled f32 に固定されていること（`CudaGemmAuto` の
+  公開 API への接続自体が別スコープと `cuda-optimized-remeasurement.md` に明記済み）。(i) の解消
+  だけでは candle/Burn 対比の逆転（tiled f32 が下回る現状）を覆せず、(ii) の対応（既定カーネル変種を
+  Tensor Core 経路へ切り替える判断）も併せて必要になる。いずれも本イシューのスコープ外であり、
+  §7 に対象外事項として記録する
 
 ## 6. GB10 での reuse 実測（未実施・再現手順）
 
@@ -191,9 +209,13 @@ done
 ## 7. 未計測・スコープ外
 
 - **GB10 での `--mode reuse` 新規実測**: 到達不能のため §6 に手順を残置。実機セッションでの追試が必要
-- **reuse モードでも per-call 固定オーバーヘッドが残る原因の切り分け**（§3.1・§4 限定条件 4）:
+- **reuse モードでも per-call 固定オーバーヘッドが残る原因の切り分け**（§3.1・§4 限定条件 5）:
   fandhe-ai 側のカーネル選択・ディスクキャッシュ照会等が候補だが未確認。`docs/perf/cuda-tape-init-cost-diagnosis.md`
   （#926）の後続対応として、原因調査を別イシューで追跡することを推奨する（本ドキュメントでは着手しない）
+- **既定カーネル変種を Tensor Core 経路（`CudaGemmAuto` / `wmma_tf32`）へ切り替える判断**（§4 限定条件 4・
+  §5）: 公開 API は現状 `CudaGemm::run_tiled_f32` 固定であり、`CudaGemmAuto` は未接続。この切替は
+  `cuda-optimized-remeasurement.md` 自身が「別スコープ」と明記した既存の設計判断であり、本イシューの
+  範囲外。切替判断自体はユーザー承認・別イシューでの追跡を推奨する
 - **train/infer タスクの reuse モード対応**: `bench-fandhe --mode reuse` は gemm タスクのみに限定
   実装済み（#925・PR #944 で対象外と確定済み）
 - **fandhe-ai 本体 API の初期化コスト削減実装**: #921 フェーズの後続フェーズ扱い（本イシューは計測・
