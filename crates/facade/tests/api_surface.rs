@@ -14,6 +14,12 @@
 //! `BackendOps` を直接引数に取っていたため、移設後の `fandhe_ai::compat`
 //! がこれを公開していないことも本テストが機械的に固定する）。
 //!
+//! (c) `src/optim.rs`（イシュー #961）は昇格元公開面
+//! （`fandhe_ai_autodiff::optim`／`fandhe_ai_autodiff::nn::optim`）と 1 対 1 で
+//! 対応し、facade 独自の型・関数を持ち込まない純再エクスポートである
+//! ことを固定する（`optim_module_reexports_exactly_expected_surface`／
+//! `optim_module_is_pure_reexport`）。
+//!
 //! **A03 インジェクション対策の一環**でもある: `crates/facade/`
 //! （`Cargo.toml`・`src/`）以外は走査しない固定パスのみを対象とし、
 //! 外部入力を受け取らない（`.claude/rules/security.md`）。
@@ -159,4 +165,384 @@ fn compat_public_functions_do_not_accept_raw_autodiff_tape_argument() {
          直接引数に取っている（内部クレートの型が公開シグネチャへ露出。\
          fandhe_ai::Tape〈newtype〉を使うべき）: {offending:?}"
     );
+}
+
+/// `src/optim.rs`（イシュー #961）専用の固定パス。ソース走査対象は
+/// `crates/facade/` 配下の固定パスのみに限定する（A03 対策。モジュール
+/// 冒頭コメント参照）。
+fn optim_rs_path() -> std::path::PathBuf {
+    facade_crate_root().join("src/optim.rs")
+}
+
+/// `src/optim.rs` の `pub use` 行から `{...}` 内の識別子を抽出し、
+/// 昇格元公開面（`fandhe_ai_autodiff::optim`／`fandhe_ai_autodiff::nn::optim`）
+/// と完全一致（過不足とも fail）することを固定する（モジュール冒頭
+/// コメント (c)）。各行の path 接頭辞が上記 2 経路のいずれかであることも
+/// 検査し、`tensor_core` 等の無関係なクレートからの混入を遮断する。
+#[test]
+fn optim_module_reexports_exactly_expected_surface() {
+    let path = optim_rs_path();
+    let content = read_to_string_or_panic(&path);
+
+    let allowed_prefixes = [
+        "pub use fandhe_ai_autodiff::optim::",
+        "pub use fandhe_ai_autodiff::nn::optim::",
+    ];
+
+    let mut found: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut offending_lines = Vec::new();
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("pub use") {
+            continue;
+        }
+        let Some(prefix) = allowed_prefixes
+            .iter()
+            .find(|prefix| trimmed.starts_with(**prefix))
+        else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        // `pub use <prefix>{A, B, C};` の `{...}` 部分を抽出する。単一
+        // 識別子の再エクスポート（`{}` なし）は本ファイルでは使わない
+        // 契約のため、`{`/`}` が見つからない行は不正として扱う。
+        let rest = &trimmed[prefix.len()..];
+        let Some(open) = rest.find('{') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        let Some(close) = rest.find('}') else {
+            offending_lines.push(trimmed.to_string());
+            continue;
+        };
+        for ident in rest[open + 1..close].split(',') {
+            let ident = ident.trim();
+            if !ident.is_empty() {
+                found.insert(ident.to_string());
+            }
+        }
+    }
+
+    assert!(
+        offending_lines.is_empty(),
+        "src/optim.rs の pub use が昇格元公開面\
+         （fandhe_ai_autodiff::optim / fandhe_ai_autodiff::nn::optim）以外の\
+         接頭辞を持つか、`{{...}}` 形式でない行を含む: {offending_lines:?}"
+    );
+
+    let expected: std::collections::BTreeSet<String> = [
+        "AdamW",
+        "AdamWConfig",
+        "ClipGradResult",
+        "clip_grad_norm",
+        "global_grad_norm",
+        "ConstantLr",
+        "LrScheduler",
+        "StepLr",
+        "Sgd",
+        "SgdConfig",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect();
+
+    assert_eq!(
+        found, expected,
+        "src/optim.rs が再エクスポートする識別子が期待集合と一致しない\
+         （過不足いずれも不可。昇格元公開面と 1 対 1 対応であることの固定）"
+    );
+}
+
+/// `src/optim.rs` が facade 独自の型・関数を定義しない純再エクスポート
+/// モジュールであることを固定する（モジュール冒頭コメント (c)）。
+///
+/// codex-review PR #972 P2 是正: 旧実装は行頭文字列接頭辞
+/// （`pub fn`／`pub struct`／`pub enum`／`pub trait`／`impl `）の列挙
+/// だけを見ていたため、`pub type`／`pub const`／`pub static`／`pub mod`／
+/// `pub union`／`pub async fn`／`pub(crate) fn` 等、契約上あってはならない
+/// 公開宣言の追加を見逃していた。本実装はコメント・文字列リテラル・
+/// char リテラル（ライフタイム注記は区別して保持する）を除去したうえで
+/// トークン境界に基づき `pub` キーワードを走査し、直後のアイテム種別が
+/// `use`（再エクスポート）でなければ fail-closed に拒否する。`impl` は
+/// 可視性修飾子の有無に関わらず単独で拒否する（既存 forbidden_prefixes
+/// の "impl " 相当をトークン境界検査に置き換えたもの）。
+#[test]
+fn optim_module_is_pure_reexport() {
+    let path = optim_rs_path();
+    let content = read_to_string_or_panic(&path);
+    let offending = scan_forbidden_pub_items(&content);
+    assert!(
+        offending.is_empty(),
+        "src/optim.rs が facade 独自の型・関数・impl・pub type/const/static/mod/union 等の\
+         公開宣言を定義している（純再エクスポートモジュールの契約違反。Rust トークン境界\
+         走査による検出。文字列接頭辞列挙では見逃していた `pub type`/`pub const`/`pub static`/\
+         `pub mod`/`pub union`/`pub async fn` 等を含む）: {offending:?}"
+    );
+}
+
+/// [`optim_module_is_pure_reexport`] が使う前処理: 行コメント・ブロック
+/// コメント（ネスト対応）・文字列リテラル（raw string 含む）・char
+/// リテラルの中身を、境界を保ったままスペースへ置換した `Vec<char>` を
+/// 返す。文字列・コメント中に `pub fn` 等の語が現れても誤検出しない
+/// ための前処理であり、出力は入力と文字数が一致する（走査後の char
+/// index がそのまま元テキストの char index として使える）。ライフタイム
+/// 注記（`'a` 等）は char リテラルと区別し、そのまま残す。
+fn strip_comments_and_literals(src: &str) -> Vec<char> {
+    let chars: Vec<char> = src.chars().collect();
+    let len = chars.len();
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0usize;
+    while i < len {
+        let c = chars[i];
+        // 行コメント。
+        if c == '/' && i + 1 < len && chars[i + 1] == '/' {
+            while i < len && chars[i] != '\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        // ブロックコメント（Rust 仕様どおりネスト対応）。
+        if c == '/' && i + 1 < len && chars[i + 1] == '*' {
+            let mut depth = 1i32;
+            out.push(' ');
+            out.push(' ');
+            i += 2;
+            while i < len && depth > 0 {
+                if i + 1 < len && chars[i] == '/' && chars[i + 1] == '*' {
+                    depth += 1;
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                } else if i + 1 < len && chars[i] == '*' && chars[i + 1] == '/' {
+                    depth -= 1;
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                } else {
+                    out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // raw string リテラル（r"..."／r#"..."#／r##"..."## 等）。
+        if c == 'r' {
+            let mut j = i + 1;
+            let mut hashes = 0usize;
+            while j < len && chars[j] == '#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < len && chars[j] == '"' {
+                out.push(' ');
+                out.extend(std::iter::repeat_n(' ', hashes));
+                out.push(' ');
+                let mut k = j + 1;
+                loop {
+                    if k >= len {
+                        i = k;
+                        break;
+                    }
+                    if chars[k] == '"' {
+                        let mut h = 0usize;
+                        let mut m = k + 1;
+                        while m < len && chars[m] == '#' && h < hashes {
+                            h += 1;
+                            m += 1;
+                        }
+                        if h == hashes {
+                            out.push(' ');
+                            out.extend(std::iter::repeat_n(' ', hashes));
+                            k = m;
+                            i = k;
+                            break;
+                        }
+                        out.push(' ');
+                        k += 1;
+                    } else {
+                        out.push(if chars[k] == '\n' { '\n' } else { ' ' });
+                        k += 1;
+                    }
+                }
+                continue;
+            }
+            // 通常の識別子 `r` として下の通常処理へフォールスルーする。
+        }
+        // 通常の文字列リテラル。
+        if c == '"' {
+            out.push(' ');
+            i += 1;
+            while i < len {
+                if chars[i] == '\\' && i + 1 < len {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == '"' {
+                    out.push(' ');
+                    i += 1;
+                    break;
+                }
+                out.push(if chars[i] == '\n' { '\n' } else { ' ' });
+                i += 1;
+            }
+            continue;
+        }
+        // char リテラル（'x'／'\n' 等）とライフタイム注記（'a 等）の判別。
+        if c == '\'' {
+            if i + 1 < len && chars[i + 1] == '\\' {
+                let mut k = i + 2;
+                while k < len && chars[k] != '\'' {
+                    k += 1;
+                }
+                if k < len {
+                    out.extend(std::iter::repeat_n(' ', k - i + 1));
+                    i = k + 1;
+                    continue;
+                }
+            } else if i + 2 < len && chars[i + 2] == '\'' {
+                out.push(' ');
+                out.push(' ');
+                out.push(' ');
+                i += 3;
+                continue;
+            }
+            // ライフタイム注記はコード構造の一部として保持する。
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// 識別子先頭文字（ASCII のみ。本リポの Rust 識別子は ASCII 前提）。
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_'
+}
+
+/// 識別子構成文字。
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// `chars[..idx]` 中の改行数から 1 始まりの行番号を求める（オフェンス
+/// 報告用）。
+fn line_at(chars: &[char], idx: usize) -> usize {
+    chars[..idx].iter().filter(|&&c| c == '\n').count() + 1
+}
+
+/// コメント・文字列リテラルを除去したうえで、`pub` キーワードのうち
+/// 直後のアイテム種別が `use` でないもの（`pub type`／`pub const`／
+/// `pub static`／`pub mod`／`pub union`／`pub fn`／`pub struct`／
+/// `pub enum`／`pub trait`／`pub(crate) fn` 等。可視性修飾子
+/// `pub(...)` の有無を問わない）と、可視性修飾子の有無を問わない
+/// `impl` ブロックをトークン境界（識別子の前後が識別子構成文字でない
+/// こと）で検出する。文字列接頭辞の列挙ではなくキーワード単位の走査の
+/// ため、契約上禁止される公開宣言の種別を将来追加しても取りこぼさない。
+fn scan_forbidden_pub_items(original: &str) -> Vec<String> {
+    let cleaned = strip_comments_and_literals(original);
+    let len = cleaned.len();
+    let mut offenses = Vec::new();
+    let mut i = 0usize;
+    while i < len {
+        if is_ident_start(cleaned[i]) {
+            let start = i;
+            let mut j = i + 1;
+            while j < len && is_ident_char(cleaned[j]) {
+                j += 1;
+            }
+            let word: String = cleaned[start..j].iter().collect();
+            if word == "pub" {
+                let mut k = j;
+                while k < len && cleaned[k].is_whitespace() {
+                    k += 1;
+                }
+                // 可視性修飾子 `pub(crate)`／`pub(super)` 等を読み飛ばす。
+                if k < len && cleaned[k] == '(' {
+                    let mut depth = 1i32;
+                    k += 1;
+                    while k < len && depth > 0 {
+                        match cleaned[k] {
+                            '(' => depth += 1,
+                            ')' => depth -= 1,
+                            _ => {}
+                        }
+                        k += 1;
+                    }
+                    while k < len && cleaned[k].is_whitespace() {
+                        k += 1;
+                    }
+                }
+                if k < len && is_ident_start(cleaned[k]) {
+                    let ks = k;
+                    let mut ke = k + 1;
+                    while ke < len && is_ident_char(cleaned[ke]) {
+                        ke += 1;
+                    }
+                    let next_word: String = cleaned[ks..ke].iter().collect();
+                    if next_word != "use" {
+                        offenses.push(format!(
+                            "line {}: `pub {next_word}` は再エクスポート（`pub use`）以外の公開宣言",
+                            line_at(&cleaned, start)
+                        ));
+                    }
+                }
+            } else if word == "impl" {
+                offenses.push(format!(
+                    "line {}: `impl` ブロックの定義",
+                    line_at(&cleaned, start)
+                ));
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    offenses
+}
+
+/// `fandhe_ai::optim` の全再エクスポート型・関数が facade のみを通じて
+/// 到達可能であることのコンパイル時固定（モジュール冒頭コメント (c)、
+/// 受入基準 1）。`fandhe_ai_autodiff` は import しない。
+///
+/// `let _: fandhe_ai::SgdConfig = fandhe_ai::optim::SgdConfig::new(...)`
+/// でクレート root 再エクスポートと `optim::SgdConfig` が同一型である
+/// ことも併せて固定する（`src/lib.rs` root `SgdConfig` コメント参照）。
+#[test]
+fn optim_types_are_reachable_via_facade_only() {
+    let sgd_config = fandhe_ai::optim::SgdConfig::new(0.1);
+    // root 再エクスポートと `optim::SgdConfig` が同一型であることの固定。
+    let _same_type: fandhe_ai::SgdConfig = sgd_config;
+    let mut sgd = fandhe_ai::optim::Sgd::new(sgd_config)
+        .unwrap_or_else(|e| panic!("test fixture: Sgd::new が失敗した: {e}"));
+    let _ = &mut sgd;
+
+    let mut adamw = fandhe_ai::optim::AdamW::new(fandhe_ai::optim::AdamWConfig::default())
+        .unwrap_or_else(|e| panic!("test fixture: AdamW::new が失敗した: {e}"));
+    let _ = &mut adamw;
+
+    let constant_lr = fandhe_ai::optim::ConstantLr::new(0.1)
+        .unwrap_or_else(|e| panic!("test fixture: ConstantLr::new が失敗した: {e}"));
+    let step_lr = fandhe_ai::optim::StepLr::new(0.1, 2, 0.5)
+        .unwrap_or_else(|e| panic!("test fixture: StepLr::new が失敗した: {e}"));
+    let _: &dyn fandhe_ai::optim::LrScheduler = &constant_lr;
+    let _: &dyn fandhe_ai::optim::LrScheduler = &step_lr;
+
+    let result: fandhe_ai::optim::ClipGradResult = fandhe_ai::optim::clip_grad_norm(&[], 1.0)
+        .unwrap_or_else(|e| panic!("test fixture: clip_grad_norm が失敗した: {e}"));
+    assert_eq!(
+        result.total_norm, 0.0,
+        "test fixture: 空スライスの norm は 0"
+    );
+    assert!(!result.scaled, "test fixture: 空スライスは scaled しない");
+
+    let global_norm = fandhe_ai::optim::global_grad_norm(&[])
+        .unwrap_or_else(|e| panic!("test fixture: global_grad_norm が失敗した: {e}"));
+    assert_eq!(global_norm, 0.0, "test fixture: 空スライスの norm は 0");
 }

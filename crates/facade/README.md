@@ -7,7 +7,8 @@ composition root であり、**唯一のサポートされる公開 API 面**で
 バックエンド抽象層を完全自作コアとして実装した内部クレート群（`fandhe-ai-tensor-core`・
 `fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・
 `fandhe-ai-backend-metal`）を結線し、`Device` 指定によるバックエンド選択と
-compat 公開面（`compat::array`／`compat::Sequential`）を提供します。
+compat 公開面（`compat::array`／`compat::Sequential`）・optimizer 公開面
+（`optim::{Sgd, AdamW, clip_grad_norm, LrScheduler}` 等）を提供します。
 
 ## インストール
 

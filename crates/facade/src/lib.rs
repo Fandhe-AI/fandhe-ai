@@ -18,6 +18,11 @@
 //!    対象公開 API 面であり `tensor-core`／`autodiff`／`backend-*` は
 //!    内部クレート）は `docs/compat-api-scope.md` を参照。
 //!
+//! 3. **optim 公開面**（[`optim`]。イシュー #961・親 #960）: SGD・AdamW・
+//!    gradient clipping・LR スケジューラを `fandhe_ai::optim` の単一入口
+//!    へ再エクスポートする。値型・純関数のみのため REQ-12 と矛盾しない
+//!    （詳細は [`optim`] モジュール doc）。
+//!
 //! # 公開面の設計（REQ-12: 任意 `BackendOps` 注入の公開 API を設けない）
 //!
 //! 利用者向けに公開するのは [`Device`] 識別子を受け取る 2 関数
@@ -80,6 +85,11 @@ use fandhe_ai_tensor_core::{BackendOps, DeviceProvider};
 /// doc・`docs/compat-api-scope.md` 参照）。
 pub mod compat;
 
+/// optimizer 公開面（イシュー #961・親 #960）。SGD・AdamW・gradient
+/// clipping・LR スケジューラを再エクスポートする（詳細・適用順序契約は
+/// モジュール doc 参照）。
+pub mod optim;
+
 // 公開面として再エクスポートする型（モジュール冒頭「公開面の設計」参照）。
 // `fandhe_ai_autodiff::Tape`（生の型）・`fandhe_ai_tensor_core::BackendOps` は意図的に含めない
 // （`Tape::new_with_ops` という BackendOps 注入経路が到達可能になるため。
@@ -91,6 +101,13 @@ pub mod compat;
 // 複数行に折り返す `pub use fandhe_ai_autodiff::{ ... };` ブロックは
 // 開き括弧の行しか検査対象に入らず、ブロック内部に `Tape` が紛れ込んでも
 // 検出できない（レビュー指摘対応）。1 文 1 行を維持する。
+//
+// `SgdConfig` はここ（クレート root）と `crate::optim::SgdConfig`
+// （イシュー #961）の 2 経路から再エクスポートされるが、いずれも
+// `fandhe_ai_autodiff::optim::SgdConfig` を指す同一型である（再エクスポート
+// 経路が 2 つあるだけで型は 1 つ。`Tape::step_device_param_store` の
+// 引数型として本経路が既に使われているため、`optim` モジュール新設に
+// 伴いこちら側を除去・付け替えることはしない）。
 pub use fandhe_ai_autodiff::optim::{DeviceParamStore, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};
