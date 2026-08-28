@@ -80,8 +80,9 @@ main.rs::build_model`）は 784→256・256→10 の 2 層構成のため、推�
 `crates/backend-metal/examples/fixed_overhead_diagnosis.rs`（本イシューで新規作成）。
 
 - P1・P2・P4 はサイズ非依存のため 1 度だけ計測する。P3・P5・P6・P7 は size ごとに計測する。
-- P4（MSL ライブラリコンパイル）のみ初回と 2 回目以降（`--iters` 回。既定 20 回）を分離集計し、
-  システム側 Metal コンパイラキャッシュの温存効果を観測する。
+- P4（MSL ライブラリコンパイル）のみ初回と 2 回目以降（`--iters` 回。既定 20 回）を分離集計する。
+  初回はプロセス内 1 回目というだけであり、システム側 Metal コンパイラキャッシュの温存状態は
+  制御・記録していない（§7「既存実測との整合」参照。「未温」と断定しない）。
 - それ以外のフェーズは `bench_harness::protocol::run`（`MeasurementConfig::default()` =
   warmup 20 回・計測 20 回・中央値/Q1/Q3。TASK-8.1）を使う。
 - 計測窓は A・B のホスト→デバイス転送・カーネル実行・`waitUntilCompleted` 同期・C の
@@ -133,15 +134,24 @@ cargo run -p fandhe-ai-backend-metal --example fixed_overhead_diagnosis --releas
 参考ベースライン: `docs/perf/startup-cost-measurement.md`「Metal 実測結果」節（Apple M4 Max）は
 プロセス初回（cold）で `device_init_secs` 中央値 約 35.280 ms（run1 cold）・`first_kernel_secs`
 中央値 約 42.649 ms（run1 cold）。これは `MetalGemm::new` がプロセス起動後**最初**に
-`gemm.metal` 全体を runtime コンパイルする経路であり、システム側 Metal コンパイラ
-キャッシュが未温な状態でのコストを含む。本診断の `P4 first`（`measure_p4_library_compile`
-の `first_secs`）はプロセス内で warmup を経ない**最初の** MSL コンパイル呼び出しそのもの
-であり、上記 startup-cost の cold 値と同じ母集団（システムキャッシュ未温）に属する。
-一方 `P4 rest`（2 回目以降）・P5・P6・P7 はいずれもプロセス内 2 回目以降（warmup 済み・
-システムキャッシュ温存下）の都度構築費であり、`P4 first` とは異なる母集団である。
-この関係（`P4 first` ≒ cold 35〜43 ms 側、`P4 rest`/P5/P6/P7 ≒ プロセス内 2 回目以降
-約 5 ms 側）が本診断の実測値でどう再現されるかを、`P4 first` と `P4 rest` を分離した
-うえで記入する。
+`gemm.metal` 全体を runtime コンパイルする経路である。ただし同 doc「コールド／ウォームの
+検証」節（168〜183 行目）が明記するとおり、macOS はコンパイル済み Metal 関数を**システム
+レベル**（MTLCompilerService・ユーザーごとキャッシュ）で保持し、同ハーネスの cold/warm
+フラグはこのシステムキャッシュを一切制御・削除しない。したがって同 doc の「cold」観測点は
+「本プロセスにとっての 1 回目」を意味するに過ぎず、システムキャッシュが未温であることまで
+は保証しない限界がある。
+
+本診断の `P4 first`（`measure_p4_library_compile` の `first_secs`）も同じ限界を持つ:
+warmup を経ない**プロセス内最初の** MSL コンパイル呼び出しではあるが、直前に別プロセスが
+同一シェーダーをコンパイル済みであればシステムキャッシュが温存されている可能性を否定できず、
+上記 startup-cost の cold 値と「同じ母集団（システムキャッシュ未温）」と断定することはできない。
+よって `P4 first` は**「プロセス内初回（システムキャッシュ状態は未制御・未記録）」**として
+記録・突合する。一方 `P4 rest`（2 回目以降）・P5・P6・P7 はいずれもプロセス内 2 回目以降
+（warmup 済み）の都度構築費であり、`P4 first` とは異なる母集団である。
+この関係（`P4 first` は startup-cost の cold 35〜43 ms 側との類似が観測されうるが、システム
+キャッシュ未温の直接証明ではない点に留意する。`P4 rest`/P5/P6/P7 ≒ プロセス内 2 回目以降
+約 5 ms 側）が本診断の実測値でどう再現されるかを、`P4 first` と `P4 rest` を分離したうえで、
+上記の限界を明記して記入する。
 
 推論 1 回は 2 層 MLP（784→256・256→10）の各層 1 回ずつで **GEMM 2 回**、学習 1 step は
 forward 2 回 + backward 4 回（`matmul_vjp` が 1 回の `matmul` あたり `da`/`db` 2 回を

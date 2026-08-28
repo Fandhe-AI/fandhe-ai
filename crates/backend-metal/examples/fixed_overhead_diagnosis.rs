@@ -56,18 +56,23 @@
 //! 参考ベースライン（既存実測との突合に使う）: `docs/perf/
 //! startup-cost-measurement.md` の Metal 実測（Apple M4 Max）はプロセス
 //! 初回（cold）で `device_init_secs` 中央値 約 35 ms・`first_kernel_secs`
-//! 中央値 約 42 ms（同 doc「Metal 実測結果」節）。これは
-//! `MetalGemm::new` がプロセス起動後**最初**に `gemm.metal` 全体を
-//! runtime コンパイルする経路であり、システム側 Metal コンパイラ
-//! キャッシュが未温な状態でのコストを含む。本 example の `P4 first`
-//! （`measure_p4_library_compile` が返す `first_secs`）はプロセス内で
-//! warmup を経ない**最初の** MSL コンパイル呼び出しそのものであり、
-//! 上記 startup-cost の cold 値と同じ母集団（システムキャッシュ未温）に
-//! 属する。一方 `P4 rest`（`config.iters` 回の 2 回目以降）・P5・P6・P7 は
-//! いずれもプロセス内 2 回目以降（warmup 済み・システムキャッシュ温存下）
-//! の都度構築費であり、`P4 first` とは異なる母集団である点に注意する
-//! （本 doc 「実測結果」節で `P4 first` は cold 側、`P4 rest`/P5/P6/P7 は
-//! warm 側としてそれぞれ突合する）。
+//! 中央値 約 42 ms（同 doc「Metal 実測結果」節）。ただし同 doc「コールド／
+//! ウォームの検証」節が明記するとおり、macOS はコンパイル済み Metal 関数を
+//! **システムレベル**（MTLCompilerService・ユーザーごとキャッシュ）で保持し、
+//! そのハーネスの cold/warm フラグはこのシステムキャッシュを一切制御・削除
+//! しない。したがって同 doc の「cold」観測点は「本プロセスにとっての 1 回目」
+//! を意味するに過ぎず、システムキャッシュが未温であることまでは保証しない。
+//! 本 example の `P4 first`（`measure_p4_library_compile` が返す
+//! `first_secs`）も同様の限界を持つ: warmup を経ない**プロセス内最初の** MSL
+//! コンパイル呼び出しではあるが、直前に他プロセスが同一 `gemm.metal` 相当の
+//! シェーダーをコンパイル済みであれば、システムキャッシュがすでに温存されて
+//! いる可能性を否定できない。よって `P4 first` を「システムキャッシュ未温な
+//! 真のコールド値」と断定せず、**「プロセス内初回（システムキャッシュ状態は
+//! 未制御・未記録）」**として扱う。`P4 rest`（`config.iters` 回の 2 回目以降）・
+//! P5・P6・P7 はいずれもプロセス内 2 回目以降（warmup 済み）の都度構築費で
+//! あり、`P4 first` とは異なる母集団である点に注意する（本 doc「実測結果」節
+//! では `P4 first` を上記の限界を明記したうえで記録し、`P4 rest`/P5/P6/P7 は
+//! warm 側として突合する）。
 //!
 //! ## 実行方法
 //!
@@ -152,7 +157,7 @@ mod macos_impl {
     /// `measure_p7_reused_dispatch`）は `size * size` 個の `f32` を持つ正方行列
     /// A・B を 2 枚（P7 はさらに C readback も同サイズ）確保するため、
     /// `size * size` 自体の `usize` オーバーフロー・および 1 枚あたりの確保
-    /// バイト数の両方を解析時（`parse_sizes`）に fail-closed で検証する
+    /// バイト数の両方を解析時（`parse_sizes_value`）に fail-closed で検証する
     /// （OWASP A03「外部入力の検証」観点。実行時に `checked_mul` が失敗する
     /// 経路〈`elements_for`〉へ到達させない）。上限は 1 枚あたり 1 GiB
     /// （`f32` で `size` 上限 16384 相当）とし、診断用途で現実的に必要な
@@ -161,76 +166,110 @@ mod macos_impl {
     const MAX_MATRIX_BYTES: usize = 1 << 30;
 
     /// `size * size` 個の `f32` 要素数を安全に計算する（`checked_mul`）。
-    /// `parse_sizes` が解析時に `size` の上限（`MAX_MATRIX_BYTES` 相当）を
+    /// `parse_sizes_value` が解析時に `size` の上限（`MAX_MATRIX_BYTES` 相当）を
     /// 検証済みのため、ここでのオーバーフローは到達しない契約だが、
     /// 呼び出し側（P6/P7）が直接 `size * size` を書かない多層防御として
     /// `expect` で失敗を即座に検出する。
     fn elements_for(size: usize) -> usize {
         size.checked_mul(size)
-            .expect("size は parse_sizes で検証済みのため size*size はオーバーフローしない")
+            .expect("size は parse_sizes_value で検証済みのため size*size はオーバーフローしない")
     }
 
-    /// `--size=<N>[,<N>...]` を解析する（許可リスト方式: カンマ区切りの
+    /// `--size=<N>[,<N>...]` の値部分を解析する（許可リスト方式: カンマ区切りの
     /// 正の整数のみを受理し、それ以外は `Err` で拒否する。OWASP A03
-    /// 「外部入力の検証」観点。シェル経由の文字列展開は行わない）。
-    /// 未指定時は `[256, 512]`（framework-compare の実測対象サイズと同一。
-    /// モジュール冒頭コメント「背景・出典」参照）。各値は `size * size`
-    /// の整数オーバーフロー・および `f32` 換算での過大メモリ確保を防ぐため
-    /// `MAX_MATRIX_BYTES` 上限まで検証する（P6/P7 が確保する正方行列の
-    /// 1 枚あたりバイト数がこの上限を超える `size` は拒否する）。
-    fn parse_sizes() -> Result<Vec<usize>, String> {
+    /// 「外部入力の検証」観点）。各値は `size * size` の整数オーバーフロー・
+    /// および `f32` 換算での過大メモリ確保を防ぐため `MAX_MATRIX_BYTES` 上限
+    /// まで検証する（P6/P7 が確保する正方行列の 1 枚あたりバイト数がこの上限を
+    /// 超える `size` は拒否する）。呼び出し元（[`parse_args`]）が引数列全体を
+    /// 一度だけ走査したうえで本関数へ値部分のみを渡す。
+    fn parse_sizes_value(v: &str) -> Result<Vec<usize>, String> {
+        let mut sizes = Vec::new();
+        for part in v.split(',') {
+            let n: usize = part
+                .trim()
+                .parse()
+                .map_err(|_| format!("--size の値が不正: '{part}'"))?;
+            if n == 0 {
+                return Err("--size の各値は正数である必要がある".to_string());
+            }
+            let elems = n.checked_mul(n).ok_or_else(|| {
+                format!("--size の値が大きすぎる（size*size がオーバーフローする）: '{n}'")
+            })?;
+            let bytes = elems
+                .checked_mul(std::mem::size_of::<f32>())
+                .ok_or_else(|| {
+                    format!("--size の値が大きすぎる（バイト数計算がオーバーフローする）: '{n}'")
+                })?;
+            if bytes > MAX_MATRIX_BYTES {
+                return Err(format!(
+                    "--size の値 '{n}' は上限（1 枚あたり {MAX_MATRIX_BYTES} バイト）を超える"
+                ));
+            }
+            sizes.push(n);
+        }
+        if sizes.is_empty() {
+            return Err("--size に値が 1 つも指定されていない".to_string());
+        }
+        Ok(sizes)
+    }
+
+    /// 解析済みの CLI 引数（[`parse_args`] の戻り値）。
+    struct CliArgs {
+        sizes: Vec<usize>,
+        config: MeasurementConfig,
+    }
+
+    /// `std::env::args()` を**一度だけ**走査して `--size=<N>[,<N>...]`・
+    /// `--iters=<N>` を解析する（許可リスト方式。OWASP A03「外部入力の検証」
+    /// 観点）。従来は `parse_sizes`／`resolve_measurement_config` がそれぞれ
+    /// 独立に引数列を走査し、自分の対象外の引数を無条件で無視していたため、
+    /// 未知の引数（例: typo `--szie=512`）が黙って既定値扱いになり、
+    /// `--size` の重複指定もエラーにならない欠陥があった（イシュー #943
+    /// レビュー指摘）。本関数は全引数を一度の走査で分類し、以下を
+    /// fail-closed で拒否する:
+    /// - `--size=`／`--iters=` のいずれの許可プレフィックスにも一致しない引数
+    ///   （typo・未知フラグを含む）
+    /// - 同一プレフィックスの重複指定（`--size=256 --size=512` 等）
+    ///
+    /// 未指定時は `--size` が `[256, 512]`（framework-compare の実測対象
+    /// サイズと同一。モジュール冒頭コメント「背景・出典」参照）、`--iters` は
+    /// [`MeasurementConfig::default`]（20/20）を使う。
+    fn parse_args() -> Result<CliArgs, String> {
+        let mut size_raw: Option<String> = None;
+        let mut iters_raw: Option<String> = None;
         for arg in std::env::args().skip(1) {
             if let Some(v) = arg.strip_prefix("--size=") {
-                let mut sizes = Vec::new();
-                for part in v.split(',') {
-                    let n: usize = part
-                        .trim()
-                        .parse()
-                        .map_err(|_| format!("--size の値が不正: '{part}'"))?;
-                    if n == 0 {
-                        return Err("--size の各値は正数である必要がある".to_string());
-                    }
-                    let elems = n.checked_mul(n).ok_or_else(|| {
-                        format!("--size の値が大きすぎる（size*size がオーバーフローする）: '{n}'")
-                    })?;
-                    let bytes = elems
-                        .checked_mul(std::mem::size_of::<f32>())
-                        .ok_or_else(|| {
-                            format!(
-                                "--size の値が大きすぎる（バイト数計算がオーバーフローする）: '{n}'"
-                            )
-                        })?;
-                    if bytes > MAX_MATRIX_BYTES {
-                        return Err(format!(
-                            "--size の値 '{n}' は上限（1 枚あたり {MAX_MATRIX_BYTES} バイト）を超える"
-                        ));
-                    }
-                    sizes.push(n);
+                if size_raw.is_some() {
+                    return Err(format!("--size は複数回指定できない（重複指定）: '{arg}'"));
                 }
-                if sizes.is_empty() {
-                    return Err("--size に値が 1 つも指定されていない".to_string());
+                size_raw = Some(v.to_string());
+            } else if let Some(v) = arg.strip_prefix("--iters=") {
+                if iters_raw.is_some() {
+                    return Err(format!("--iters は複数回指定できない（重複指定）: '{arg}'"));
                 }
-                return Ok(sizes);
+                iters_raw = Some(v.to_string());
+            } else {
+                return Err(format!(
+                    "未知の引数: '{arg}'（許可される引数は --size=<N>[,<N>...] と --iters=<N> のみ）"
+                ));
             }
         }
-        Ok(vec![256, 512])
-    }
 
-    /// `--iters=<N>` で warmup・計測回数（`MeasurementConfig::{warmup,iters}`）
-    /// を両方 `N` へ引き上げる（`gemm_diagnosis.rs::parse_iters_override`
-    /// と同じ設計。TASK-8.1 の 20 回下限は `MeasurementConfig::new` が
-    /// fail-closed で検証する）。未指定なら [`MeasurementConfig::default`]
-    /// （20/20）を使う。
-    fn resolve_measurement_config() -> Result<MeasurementConfig, String> {
-        for arg in std::env::args().skip(1) {
-            if let Some(v) = arg.strip_prefix("--iters=") {
+        let sizes = match size_raw {
+            Some(v) => parse_sizes_value(&v)?,
+            None => vec![256, 512],
+        };
+        let config = match iters_raw {
+            Some(v) => {
                 let n: usize = v
+                    .trim()
                     .parse()
                     .map_err(|_| format!("--iters の値が不正: '{v}'"))?;
-                return MeasurementConfig::new(n, n).map_err(|e| e.to_string());
+                MeasurementConfig::new(n, n).map_err(|e| e.to_string())?
             }
-        }
-        Ok(MeasurementConfig::default())
+            None => MeasurementConfig::default(),
+        };
+        Ok(CliArgs { sizes, config })
     }
 
     /// ミリ秒単位の [`Quartiles`] を整形する共通ヘルパ（`Measurement`
@@ -289,12 +328,13 @@ mod macos_impl {
     }
 
     /// P4: `newLibraryWithSource_options_error`（MSL 実行時コンパイル）の
-    /// 呼び出しコスト。初回（プロセス内でシステム Metal コンパイラ
-    /// キャッシュが未温な可能性がある 1 回）と 2 回目以降（`config.iters`
-    /// 回。下限 20 回は `MeasurementConfig::new` 経由で検証済み）を分離
-    /// 集計する（モジュール冒頭コメント「構造分析」表 P4 参照。warmup は
-    /// 行わない — warmup 自体が「2 回目以降」の一部になってしまい初回と
-    /// 分離する目的に反するため）。
+    /// 呼び出しコスト。初回（プロセス内 1 回目。システム Metal コンパイラ
+    /// キャッシュの温存状態はハーネス側から制御・記録していないため
+    /// 「未温」と断定しない — モジュール冒頭コメント「参考ベースライン」節
+    /// 参照）と 2 回目以降（`config.iters` 回。下限 20 回は
+    /// `MeasurementConfig::new` 経由で検証済み）を分離集計する（モジュール
+    /// 冒頭コメント「構造分析」表 P4 参照。warmup は行わない — warmup 自体が
+    /// 「2 回目以降」の一部になってしまい初回と分離する目的に反するため）。
     fn measure_p4_library_compile(
         config: &MeasurementConfig,
         device: &objc2::runtime::ProtocolObject<dyn MTLDevice>,
@@ -391,15 +431,8 @@ mod macos_impl {
     }
 
     pub fn main() {
-        let sizes = match parse_sizes() {
-            Ok(sizes) => sizes,
-            Err(msg) => {
-                eprintln!("{msg}");
-                std::process::exit(1);
-            }
-        };
-        let config = match resolve_measurement_config() {
-            Ok(config) => config,
+        let CliArgs { sizes, config } = match parse_args() {
+            Ok(args) => args,
             Err(msg) => {
                 eprintln!("{msg}");
                 std::process::exit(1);
