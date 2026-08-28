@@ -165,16 +165,26 @@ Q1/Q3 を記録する（TASK-8.1 プロトコル・`.claude/rules/coding-rust.md
 ### 5.2 `gemm_bench`（`dispatch_auto`・転送込み境界）改善前後比較
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_bench --release -- --size=256,512,1024,2048,4096
+cargo run -p fandhe-ai-backend-metal --example gemm_bench --release
 ```
+
+`gemm_bench.rs` は `--size` 等の CLI オプションを持たず、size=256/512/1024/2048/4096
+（正方）をソース内の固定配列（`crates/backend-metal/examples/gemm_bench.rs` 内
+`for size in [256usize, 512, 1024, 2048, 4096]`）で計測する。上記コマンドの実行
+だけで当該サイズ集合が得られる。
 
 改善前（v0.3.0 相当）／改善後（#930/#948 適用後）で 5 回計測・中央値比較: `--未計測--`
 
 ### 5.3 `gemm_f32_prepared_bench`（カーネル純境界。転送を含まない）
 
 ```sh
-cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release -- --size=256,512,1024,2048,4096
+cargo run -p fandhe-ai-backend-metal --example gemm_f32_prepared_bench --release
 ```
+
+`gemm_f32_prepared_bench.rs` も `--size` オプションは持たず、ソース内の固定配列
+（`crates/backend-metal/examples/gemm_f32_prepared_bench.rs` 内
+`for size in [512usize, 1024, 2048, 4096]`。256 は対象外）で size=512/1024/2048/4096
+を計測する。
 
 §2.2 の転送コスト寄与分を分離するため、prepared（デバイス常駐入力）境界と
 `--mode fresh` の e2e 境界の差分を記録する: `--未計測--`
