@@ -321,6 +321,19 @@ impl Sequential {
     /// `tape.backward(...)` → `tape.step_device_param_store(&mut store,
     /// &grads, &config)` と繋げる（`crates/facade/tests/
     /// device_param_store_train.rs` に実例がある）。
+    ///
+    /// **forward 失敗時の pending ロールバック（codex-review PR #954 P2
+    /// 是正）**: `register_resident_leaves` で `store` を pending 状態へ
+    /// 遷移させた後、`forward_from_flat_vars`（層数不一致・バックエンド
+    /// 演算エラー等）が失敗した場合、そのまま `Err` を返すと `store` は
+    /// pending のまま残り、次回呼び出しの `register_resident_leaves` が
+    /// `BackendError::PendingForwardUnconsumed` で拒否される
+    /// （`DeviceParamStore` モジュール doc「状態機械」参照）。呼び出し元は
+    /// forward の失敗を理由に `store` を破棄する義務を負わないため、公開
+    /// ラッパーである本メソッド内で `store.abandon_pending_forward()` に
+    /// より pending をロールバックしてから元のエラーを返す
+    /// （`register_resident_leaves` 自体が失敗した場合は pending 状態へ
+    /// 遷移していないため、`?` でそのまま伝播してよい）。
     pub fn forward_resident<'t>(
         &self,
         tape: &'t Tape,
@@ -328,7 +341,13 @@ impl Sequential {
         store: &mut DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
         let vars = store.register_resident_leaves(&tape.0)?;
-        self.forward_from_flat_vars(&tape.0, input, &vars)
+        match self.forward_from_flat_vars(&tape.0, input, &vars) {
+            Ok(output) => Ok(output),
+            Err(e) => {
+                store.abandon_pending_forward();
+                Err(e)
+            }
+        }
     }
 
     /// デバイス常駐パラメータでの推論（イシュー #935）。`store.device()`

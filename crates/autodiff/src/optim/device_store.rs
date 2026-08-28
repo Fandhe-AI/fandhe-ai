@@ -241,7 +241,15 @@ impl DeviceParamStore {
             .validate()
             .map_err(|e| BackendError::InvalidArgument(e.to_string()))?;
 
-        let Some(pending) = self.pending.take() else {
+        // `pending` はこの事前検証フェーズ全体を通じて `take()` せず参照
+        // だけで検査する（Review 指摘: 全事前検証より先に `take()` すると、
+        // 勾配欠落・shape 不一致・momentum 構成不一致・`MemoryOps` 未提供・
+        // velocity 確保失敗のいずれでもパラメータ未更新のまま pending
+        // 登録が失われ、`register_resident_leaves` からやり直す必要が
+        // 生じてしまう）。実際に `take()` するのは②更新フェーズへ入る
+        // 直前（＝以降のエラーはどのみち `poisoned` へ遷移し `pending` の
+        // 意味を失う地点）のみ。
+        let Some(pending) = self.pending.as_ref() else {
             return Err(BackendError::InvalidArgument(
                 "DeviceParamStore::step: no pending forward registration (call \
                  register_resident_leaves first)"
@@ -250,9 +258,8 @@ impl DeviceParamStore {
         };
         if pending.tape_id != tape.id {
             // 呼び出し元の誤り（別 Tape を渡した）であり、ストア自体は
-            // 壊れていない。次回の `step()` 呼び出しが正しい `Tape` で
-            // 成功できるよう `pending` を復元する。
-            self.pending = Some(pending);
+            // 壊れていない。`take()` していないため `pending` は復元不要
+            // でそのまま残る。
             return Err(BackendError::TapeMismatch);
         }
 
@@ -329,6 +336,13 @@ impl DeviceParamStore {
                 }
             }
         }
+
+        // ここまでの事前検証（勾配存在・shape・momentum 構成・
+        // `MemoryOps` 提供・velocity 確保）を全て通過し、以降は実際に
+        // デバイス側パラメータを更新するフェーズへ入る。ここで初めて
+        // `pending` を消費する（以降のエラーは `poisoned` 遷移で `pending`
+        // の意味自体が失われるため、これより手前で `take()` しない）。
+        self.pending = None;
 
         // ② 更新フェーズ: 1 パラメータずつ grad を upload →
         // `sgd_step_device`。実行時エラーは最初のエラーを返しつつ
@@ -675,14 +689,13 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, BackendError::InvalidArgument(_)));
 
-        // momentum 構成拒否は `poisoned` へは遷移しない（実行前に判明した
-        // 失敗であり、デバイス側パラメータは未変更のまま安全なため。
-        // `TapeMismatch` と異なり `pending` は復元しないため、正しい
-        // 設定で再開するには `register_resident_leaves` を呼び直す）。
-        let vars = store.register_resident_leaves(&tape).unwrap();
-        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
-        let loss = vars[0].mse_loss(&target).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        // momentum 構成拒否は `poisoned` へは遷移せず（実行前に判明した
+        // 失敗であり、デバイス側パラメータは未変更のまま安全なため）、
+        // `pending` も失われない（codex-review PR #954 P2 是正: `step()` は
+        // 事前検証フェーズ全体を `pending.take()` せず参照だけで通し、
+        // ②更新フェーズへ入る直前にのみ消費する）。そのため
+        // `register_resident_leaves` を呼び直さず、同じ `grads` で正しい
+        // 設定の `step` を再試行するだけで成功する。
         store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
     }
 

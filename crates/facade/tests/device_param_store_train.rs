@@ -235,3 +235,39 @@ fn predict_resident_matches_predict_after_training() {
         assert_close(*av, *bv, "predict_resident と sync 後 predict の突合");
     }
 }
+
+/// `forward_resident` が forward 失敗時に `pending` をロールバックする
+/// ことを検証する（codex-review PR #954 P2 是正）。`register_resident_leaves`
+/// で pending 状態へ遷移した後、入力 shape 不整合で
+/// `forward_from_flat_vars` を失敗させ、その直後に呼んだ 2 回目の
+/// `forward_resident`（正しい入力）が `PendingForwardUnconsumed` ではなく
+/// 成功することを確認する（`abandon_pending_forward` によるロールバック
+/// がなければ、この 2 回目呼び出しは pending 未消費のまま拒否される）。
+#[test]
+fn forward_resident_rolls_back_pending_on_forward_error() {
+    let model = build_model();
+    let init_tape = fandhe_ai::tape();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
+    drop(init_tape);
+
+    // 1 回目: D_IN と食い違う特徴次元の入力で forward を意図的に失敗させる。
+    {
+        let tape = fandhe_ai::tape();
+        let bad_x = tensor(vec![0.0f32; BATCH * (D_IN + 1)], &[BATCH, D_IN + 1]);
+        let bad_input = tape.var(&bad_x);
+        model
+            .forward_resident(&tape, &bad_input, &mut store)
+            .expect_err("shape 不整合の入力なので forward は失敗するはず");
+    }
+
+    // 2 回目: 正しい shape の入力で forward_resident を呼び直す。
+    // ロールバックされていなければ `BackendError::PendingForwardUnconsumed`
+    // 由来のエラーで拒否される。
+    let (x_data, _) = gen_regression_data(SEED_DATA);
+    let tape = fandhe_ai::tape();
+    let x = tape.var(&x_data);
+    let pred = model
+        .forward_resident(&tape, &x, &mut store)
+        .expect("pending がロールバックされていれば 2 回目の forward_resident は成功する");
+    assert_eq!(pred.to_tensor().shape(), &[BATCH, D_OUT]);
+}
