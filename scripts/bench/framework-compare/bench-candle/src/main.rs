@@ -4,6 +4,13 @@
 //! The measured region ends with host materialization (`to_vec2()` /
 //! `to_scalar()`) so asynchronous Metal execution cannot leak out of the
 //! timing window.
+//!
+//! `--mode reuse`（イシュー #925）: candle は本ハーネスのプロトコル上でも
+//! `Device` を一度だけ構築して使い回す設計（`make_device` は毎回呼ぶが
+//! 内部状態を持たない値を返すのみ）のため、fandhe-ai 向けの reuse モード
+//! （デバイス/tape 初期化コストの分離計測）は対象外。`--mode reuse` は
+//! MEASURE_ERROR で fail-fast する（run_all.sh のスイープでは skipped.log
+//! に理由付きで記録される）。
 
 use bench_common::*;
 use candle_core::{DType, Device, Tensor, Var};
@@ -75,6 +82,8 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum,
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -166,6 +175,8 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum: last_loss as f64,
         warmup: TRAIN_WARMUP,
         iters: measured.len(),
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -204,6 +215,8 @@ fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         checksum,
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -216,8 +229,16 @@ fn main() {
     }
 }
 
+/// `--mode reuse` は対象外（モジュールコメント参照。イシュー #925）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
+    if cli.mode == "reuse" {
+        return Err(
+            "MEASURE_ERROR: --mode reuse is not applicable to candle (device reuse is already \
+             the default API design; issue #925)"
+                .into(),
+        );
+    }
     match cli.task.as_str() {
         "gemm" => run_gemm(&cli),
         "train" => run_train(&cli),

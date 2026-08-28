@@ -12,11 +12,11 @@ mkdir -p results/raw
 : > "$OUT"
 : > "$SKIP"
 
-run() { # run <binary> <task> <device> <size>
-  local bin=$1 task=$2 device=$3 size=$4
-  echo "== $bin $task $device size=$size =="
-  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --out "$OUT" 2>err.tmp; then
-    echo "$bin task=$task device=$device size=$size : $(cat err.tmp)" >> "$SKIP"
+run() { # run <binary> <task> <device> <size> [mode]
+  local bin=$1 task=$2 device=$3 size=$4 mode=${5:-fresh}
+  echo "== $bin $task $device size=$size mode=$mode =="
+  if ! "./target/release/$bin" --task "$task" --device "$device" --size "$size" --mode "$mode" --out "$OUT" 2>err.tmp; then
+    echo "$bin task=$task device=$device size=$size mode=$mode : $(cat err.tmp)" >> "$SKIP"
     echo "  -> FAILED (recorded in $SKIP)"
   fi
   rm -f err.tmp
@@ -54,5 +54,18 @@ for bin in "${BINS[@]}"; do
     run "$bin" infer "$dev" 64
   done
 done
+
+# (a') GEMM — デバイス/tape 再利用モード（イシュー #925。bench-fandhe の
+# gemm タスクのみ対応。bench-candle / bench-burn は reuse モードを必ず
+# MEASURE_ERROR で fail-fast する仕様のため、対象外の 2 バイナリまで
+# ループに含めると計 10 件（5 サイズ×2 バイナリ）の既知の対象外失敗が
+# skipped-cuda.log の「Failures」に混じり実際の計測失敗と判別しづらくなる
+# （codex-review 指摘 #944 discussion_r3877595038）。BINS に bench-fandhe が
+# 含まれる場合に限り、bench-fandhe のみを対象にこのループを実行する
+if [[ " ${BINS[*]} " == *" bench-fandhe "* ]]; then
+  for n in 256 512 1024 2048 4096; do
+    run bench-fandhe gemm cuda "$n" reuse
+  done
+fi
 
 echo "done. results in $OUT ; failures (if any) in $SKIP"

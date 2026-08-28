@@ -15,6 +15,12 @@
 - 環境情報（チップ・OS 等）は入力 JSONL からは分からないため出力に含めない
   （リモート環境の JSONL をローカルのホスト情報でラベル付けしない）。
   環境の正は results/summary.md・results/versions.txt・run_all*.log。
+- mode（イシュー #925）: "fresh"（既定・毎回新規デバイス/tape）と "reuse"
+  （デバイス/tape 使い回し。初期化コスト init_s を分離計測）を区別する。
+  本フィールド追加前にコミットされた JSONL には mode キーが無いため、
+  欠損は "fresh" として扱う（互換維持。get(row, "mode", "fresh")）。
+  既存の GEMM 表（(a)）は fresh 行のみを集計し、reuse 行が存在するファイル
+  にのみ (a') 節（初期化 init_s・中央値・fresh との並記）を追加する。
 """
 
 import argparse
@@ -39,20 +45,30 @@ def fmt_ms(s):
 
 
 def load_rows(path):
+    # mode（イシュー #925）欠損は "fresh" 扱い（本フィールド追加前にコミット
+    # 済みの JSONL との互換維持。モジュール docstring 参照）。
     with open(path) as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def get(rows, fw, task, device, size=None):
+        rows = [json.loads(line) for line in f if line.strip()]
     for r in rows:
-        if r["framework"] == fw and r["task"] == task and r["device"] == device:
+        r.setdefault("mode", "fresh")
+    return rows
+
+
+def get(rows, fw, task, device, size=None, mode="fresh"):
+    for r in rows:
+        if (
+            r["framework"] == fw
+            and r["task"] == task
+            and r["device"] == device
+            and r["mode"] == mode
+        ):
             if size is None or r["size"] == size:
                 return r
     return None
 
 
-def devices_in(rows, task):
-    present = {r["device"] for r in rows if r["task"] == task}
+def devices_in(rows, task, mode="fresh"):
+    present = {r["device"] for r in rows if r["task"] == task and r["mode"] == mode}
     return [d for d in DEVICE_ORDER if d in present]
 
 
@@ -86,6 +102,38 @@ def section(path, rows):
                 else:
                     lines.append(f"| {n} | {fw} | 計測不可 | - | - | - |")
         lines.append("")
+
+    # (a') デバイス/tape 再利用モード（イシュー #925）。reuse 行が存在する
+    # ファイルにのみ出力する（本フィールド追加前の JSONL では常にスキップ）。
+    if any(r["task"] == "gemm" and r["mode"] == "reuse" for r in rows):
+        lines.append(
+            "### (a') GEMM（デバイス/tape 再利用モード。初期化コストとカーネル実行の分離。イシュー #925）\n"
+        )
+        for device in devices_in(rows, "gemm", mode="reuse"):
+            sizes = sorted(
+                {
+                    r["size"]
+                    for r in rows
+                    if r["task"] == "gemm" and r["device"] == device and r["mode"] == "reuse"
+                }
+            )
+            lines.append(f"#### {DEVICE_LABEL[device]}\n")
+            lines.append(
+                "| N | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | GFLOP/s | fresh 中央値（参考） |"
+            )
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+            for n in sizes:
+                for fw in FRAMEWORKS:
+                    r = get(rows, fw, "gemm", device, n, mode="reuse")
+                    if not r:
+                        continue
+                    fresh = get(rows, fw, "gemm", device, n, mode="fresh")
+                    fresh_col = fmt_ms(fresh["median_s"]) if fresh else "未計測"
+                    init_col = fmt_ms(r["init_s"]) if r.get("init_s") is not None else "-"
+                    lines.append(
+                        f"| {n} | {fw} | {init_col} | {fmt_ms(r['median_s'])} | {fmt_ms(r['q1_s'])} | {fmt_ms(r['q3_s'])} | {r['gflops']:.1f} | {fresh_col} |"
+                    )
+            lines.append("")
 
     lines.append(
         "### (b) MLP 学習（784→256→10、ReLU、バッチ 64、MSE、SGD lr=0.01、1 ステップあたり時間）\n"

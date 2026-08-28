@@ -5,6 +5,12 @@
 //! The measured region ends with host materialization (`into_data()` +
 //! element readout) so asynchronous GPU execution cannot leak out of the
 //! timing window.
+//!
+//! `--mode reuse`（イシュー #925）: Burn はバックエンドの `Device` を
+//! 一度だけ構築して使い回す設計（`dispatch` の呼び出し元で構築した
+//! `B::Device` をタスク関数へ借用で渡すのみ）のため、fandhe-ai 向けの
+//! reuse モード（デバイス/tape 初期化コストの分離計測）は対象外。
+//! `--mode reuse` は MEASURE_ERROR で fail-fast する。
 
 use bench_common::*;
 use burn::backend::ndarray::NdArrayDevice;
@@ -79,6 +85,8 @@ fn run_gemm<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::e
         checksum: cs,
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -183,6 +191,8 @@ fn run_train<B: AutodiffBackend>(
         checksum: last_loss as f64,
         warmup: TRAIN_WARMUP,
         iters: measured.len(),
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -220,6 +230,8 @@ fn run_infer<B: Backend>(cli: &Cli, dev: &B::Device) -> Result<(), Box<dyn std::
         checksum: cs,
         warmup: WARMUP_ITERS,
         iters: MEASURE_ITERS,
+        mode: "fresh",
+        init_s: None,
     }
     .emit(&cli.out)?;
     Ok(())
@@ -244,8 +256,16 @@ fn main() {
     }
 }
 
+/// `--mode reuse` は対象外（モジュールコメント参照。イシュー #925）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
+    if cli.mode == "reuse" {
+        return Err(
+            "MEASURE_ERROR: --mode reuse is not applicable to burn (device reuse is already \
+             the default API design; issue #925)"
+                .into(),
+        );
+    }
     match cli.device.as_str() {
         "cpu" => dispatch::<NdArray>(&cli, &NdArrayDevice::Cpu),
         #[cfg(feature = "metal")]
