@@ -33,8 +33,9 @@ tracel-ai/cubek#283 で修正。承認済みピン `burn =0.21.0` の範囲で�
   削除・改変しない（`.claude/rules/security.md` A08）
 - 下表 Metal 節の該当 4 行は「（無効: checksum 不一致）」を付記し GFLOP/s 列を `-` にする
   （N=256 の burn 行は checksum 一致・有効）
-- 再計測は、修正版を含む Burn（0.22 系以降）へのピン更新（`.claude/rules/deps-policy.md`
-  第 9 区分・ユーザー承認事項）後に実施する
+- 再計測は、`tracel-ai/cubek#283`（修正 PR）を含むバージョンへの Burn ピン更新
+  （`.claude/rules/deps-policy.md` 第 9 区分・ユーザー承認事項。対象バージョンの
+  確定は `docs/perf/burn-wgpu-metal-gemm-zero-result.md` §2.5 参照）後に実施する
 - 同種の不具合の再発防止として `summarize.py` が GEMM の checksum をフレームワーク間で
   相互突合し、不一致行を機械的に「無効」表示する（`--strict` で終了コード 2）。
   `bench-common::validate_gemm_checksum` は各バイナリ側でも縮退 checksum（全ゼロ・

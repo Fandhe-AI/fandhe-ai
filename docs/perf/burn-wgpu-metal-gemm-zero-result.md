@@ -50,9 +50,16 @@ version = "0.2.0"
 | `tracel-ai/burn#4907` | 「WGPU backend matmul returns all zeros」（macOS M4 Pro / burn 0.21.0-pre.4） | クローズ（同種の既知不具合として認識） |
 | `tracel-ai/cubek#283` | 「Fix/matmul/smem bust」。2026-05-20 マージ | マージ済み（`#4966` の修正 PR） |
 
-`#4966` は本イシューと一致する環境・症状（Burn 0.21.0 / macOS / Metal（wgpu 経由）、
-M=256 は正常・M=535 以降で出力ゼロ〜異常）で報告されており、メンテナが macOS で
-再現・Linux(wgpu) では非再現と回答し、`cubek#283` で修正した経緯が記録されている。
+`#4966` の本文・コメント（`gh issue view 4966 --repo tracel-ai/burn --json body,comments`
+で実測確認）は本イシューと一致する環境・症状を報告している: 報告者の実測表は
+「M=256（`rel_rms_err` 4.08e-7・正常）→ M=535（`rel_rms_err` 1.00・全ゼロ）」という
+境界を示し、環境は「Burn 0.21.0（`burn-wgpu` 0.21.0・既定 cubecl 0.10.0 backend）・
+macOS 26.3.1・Apple M1（Metal via wgpu）」。メンテナ（`laggui`）は 2026-05-19 の
+コメントで「macOS で再現・wgpu(Linux) では非再現」と報告し、2026-05-21 のコメントで
+「`tracel-ai/cubek#283` で修正済み」と述べている。`#4907`（本文実測確認）も同種の
+症状（`Tensor::matmul` on wgpu が全ゼロ。環境「MacBook Pro M4 Pro・macOS 26.4.1・
+Burn 0.21.0-pre.4」）を報告しており、`#4966` の報告者自身が本文で `#4907` に類似する
+旨に言及している。
 
 ### 2.3 閾値の実測確認（512 境界の根拠）
 
@@ -89,12 +96,18 @@ upstream バグの再現と判断する根拠。
 
 ### 2.5 承認済みピンでの修正版入手可否
 
-`cubek-matmul` の公開版は 0.2.0（2026-05-07）の次が 0.3.0-pre.1（2026-07-29）
-であり、0.2.x 系のパッチリリースは存在しない。`cubek#283` の修正は Burn
-0.22.0-pre.x 系（`cubek` 0.3.0-pre.x 系）にのみ含まれ、`.claude/rules/deps-policy.md`
-第 9 区分の承認済みピン `burn =0.21.0` の範囲では取得できない。ピン更新
-（0.22 系以降への更新）は依存追加・更新のユーザー承認事項であり、本 PR の
-スコープ外として次回再計測キャンペーン時に扱う（§4 参照）。
+`scripts/bench/framework-compare/Cargo.lock`（§2.1）が実測どおり `cubek-matmul
+=0.2.0` に解決される一方、`cubek#283`（修正 PR）のマージは 2026-05-21（`#4966`
+クローズと同日）であり、`Cargo.lock` の解決結果が示す時点でこの修正が
+`cubek-matmul 0.2.0` に含まれているかどうかは、本 doc 執筆環境（crates.io への
+直接ネットワークアクセスが不可）からは確認できていない（`--未検証--`）。いずれの
+場合も、`.claude/rules/deps-policy.md` 第 9 区分の承認済みピンは `burn =0.21.0`
+（→ `cubek-matmul =0.2.0`）に固定済みであり、ピンを動かす（`burn` の別バージョンへ
+更新する）こと自体が依存追加・更新のユーザー承認事項に該当する。したがって
+「現行ピンのままで修正版が使えるかどうか」を確定させることと無関係に、**再計測を
+正式に行うには承認された手順でのピン更新が前提**になる（§4 参照）。この確認
+（`cubek-matmul 0.2.0` に修正が含まれるか）はネットワーク到達可能なセッションでの
+追試事項として記録する。
 
 upstream `#4966` は既に該当事象で解決済みのイシューであるため、新規の upstream
 起票は行わない（自動運転中は外部リポジトリへの書き込みを行わない方針とも整合）。
@@ -139,10 +152,12 @@ Mac 実機が到達不能なため以下は未計測（結果欄「未計測」�
   （`$HOME/.cache/` 配下）の削除で挙動が変わるか: `--未計測--`
 
 再計測（正式な是正）については `results/summary.md`「データ有効性の注記」
-節のとおり、修正版を含む Burn（0.22 系以降）へのピン更新後に実施する。ピン
-更新自体は `.claude/rules/deps-policy.md` 第 9 区分の依存追加・更新に該当し、
-人間承認を経てから実施する事項として記録する
-（`.claude/rules/out-of-scope-tracking.md` 準拠）。
+節のとおり、`cubek#283` の修正を含むバージョンへの `burn` ピン更新（§2.5 参照。
+具体的な対象バージョンはネットワーク到達可能なセッションで `cubek-matmul` の
+バージョン履歴を確認してから確定する）を経て実施する。ピン更新自体は
+`.claude/rules/deps-policy.md` 第 9 区分の依存追加・更新に該当し、人間承認を
+経てから実施する事項として記録する（`.claude/rules/out-of-scope-tracking.md`
+準拠）。
 
 ## 5. 出典
 
@@ -153,8 +168,12 @@ Mac 実機が到達不能なため以下は未計測（結果欄「未計測」�
 - `~/.cargo/registry/src/index.crates.io-*/cubek-matmul-0.2.0/src/launch/tune_key.rs`
   （`MatmulGlobalScale::from_size` の 512 境界。ローカル cargo レジストリ
   キャッシュから直接確認）
-- `tracel-ai/burn#4966`・`tracel-ai/burn#4907`・`tracel-ai/cubek#283`（`gh
-  issue view`/`gh pr view` で 2026-08-28 に実測確認）
+- `tracel-ai/burn#4966`（`gh issue view 4966 --repo tracel-ai/burn --json
+  body,comments,state,createdAt,closedAt` で本文・全コメントを 2026-08-28 に
+  実測確認）・`tracel-ai/burn#4907`（同 `--json body` で本文実測確認）・
+  `tracel-ai/cubek#283`（`gh pr view 283 --repo tracel-ai/cubek --json
+  number,title,state,mergedAt` でタイトル・マージ日時のみ実測確認。本文は
+  未確認）
 - `scripts/bench/framework-compare/bench-burn/Cargo.toml`（feature 構成の実測）
 - `scripts/bench/framework-compare/bench-common/src/lib.rs`
   `validate_gemm_checksum`・`scripts/bench/framework-compare/summarize.py`
