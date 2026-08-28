@@ -77,7 +77,7 @@ impl BufferHandle for MetalBufferHandle {
 /// （out-of-scope。受け入れ条件「3 バックエンドで同一 API からピーク値が
 /// 取得できる」は `MemoryStats` 実装のみを要求し `Clone` を要求しない）。
 pub struct MetalMemory {
-    context: MetalContext,
+    context: Arc<MetalContext>,
     tracker: Arc<AllocationTracker>,
 }
 
@@ -85,7 +85,30 @@ impl MetalMemory {
     /// 初期化済みの [`MetalContext`] から `MetalMemory` を構築する。
     /// 新規の計測系列を持つトラッカーを生成する
     /// （`backend-cpu::CpuMemory::new` と同型）。
+    ///
+    /// 内部で [`Self::from_shared`] へ委譲する（`Arc::new` で包むだけの
+    /// 薄いラッパー）。呼び出し元が単発で所有権を持つ `MetalContext` を
+    /// そのまま渡せるよう、シグネチャは変更しない（非破壊）。
     pub fn new(context: MetalContext) -> Self {
+        Self::from_shared(Arc::new(context))
+    }
+
+    /// 既に `Arc` 共有されている [`MetalContext`] から `MetalMemory` を
+    /// 構築する（イシュー #935 レビュー対応）。
+    ///
+    /// `ops.rs::static_metal_memory` が `context_cache::cached_context`
+    /// （`Arc<MetalContext>` を返す既存のプロセス全体シングルトン）と
+    /// 同一の `MetalContext` を共有するために追加した。これにより
+    /// バッファ確保（本モジュール）とカーネルディスパッチ
+    /// （`sgd.rs::MetalSgd::run` 等）が同一の `MTLDevice`／
+    /// `MTLCommandQueue` を経由することを構造的に保証する
+    /// （`context_cache` 経由取得の一本化。`docs/device-resident-
+    /// update-design.md` §3.3d「独自初期化禁止」）。
+    ///
+    /// フィールド型（`context: Arc<MetalContext>`）は非公開のため、この
+    /// コンストラクタ追加は `MetalMemory` の公開 API（`new` の
+    /// シグネチャ）を変更しない SemVer 非破壊な拡張である。
+    pub fn from_shared(context: Arc<MetalContext>) -> Self {
         Self {
             context,
             tracker: Arc::new(AllocationTracker::new()),

@@ -34,7 +34,9 @@
 //! `Gradients`・`AutodiffError`・`LinearVars`・`Tensor` は `crate::`
 //! 経由（facade の正式な再エクスポート）で参照する。
 
-use crate::{AutodiffError, DeviceParamStore, Gradients, LinearVars, Tape, Tensor, Var};
+use crate::{
+    AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, Tape, Tensor, Var,
+};
 use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module};
 
@@ -300,10 +302,7 @@ impl Sequential {
     /// 新しい `tape`（`crate::tape_for` 等で構築）を [`Sequential::
     /// forward_resident`]／[`Tape::step_device_param_store`] へ渡しつつ、
     /// 同じ `DeviceParamStore` インスタンスを使い回す。
-    pub fn init_device_param_store(
-        &self,
-        tape: &Tape,
-    ) -> Result<DeviceParamStore, fandhe_ai_tensor_core::BackendError> {
+    pub fn init_device_param_store(&self, tape: &Tape) -> Result<DeviceParamStore, BackendError> {
         let params = self.trainable_parameters();
         DeviceParamStore::new(&tape.0, &params)
     }

@@ -86,11 +86,13 @@ pub mod compat;
 // REQ-12）。`Var`／`Gradients`／`AutodiffError`／`LinearVars`・`Tensor` は
 // 迂回経路を持たない値型・エラー型のため facade の正式な公開契約として
 // 再エクスポートする（codex-review PR #424 P1 是正）。
-pub use fandhe_ai_autodiff::{
-    AutodiffError, Gradients, Var,
-    nn::LinearVars,
-    optim::{DeviceParamStore, SgdConfig},
-};
+// `tests/api_surface.rs::facade_does_not_reexport_tape_or_backend_ops` は
+// `pub use` を行単位（`trimmed.starts_with("pub use")`）で走査するため、
+// 複数行に折り返す `pub use fandhe_ai_autodiff::{ ... };` ブロックは
+// 開き括弧の行しか検査対象に入らず、ブロック内部に `Tape` が紛れ込んでも
+// 検出できない（レビュー指摘対応）。1 文 1 行を維持する。
+pub use fandhe_ai_autodiff::optim::{DeviceParamStore, SgdConfig};
+pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};
 
 /// composition root（[`tape`]／[`tape_for`]）が構築する `Tape` の

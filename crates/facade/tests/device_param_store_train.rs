@@ -182,27 +182,56 @@ fn device_resident_matches_host_sgd_within_composite_tolerance() {
     }
 }
 
-/// `predict_resident` が `predict` と同一の結果を返すことを検証する
-/// （設計文書 §3.3c「既存経路再利用で parity を構造的に保証する」）。
+/// `predict_resident` が、学習を経てデバイス側で更新された後の
+/// パラメータでも `sync_device_param_store_to_host` → `apply_parameters`
+/// した独立モデルの `predict` と一致することを検証する（設計文書 §3.3c
+/// 「既存経路再利用で parity を構造的に保証する」）。
+///
+/// 未学習モデルの読み取り一致だけでは `predict_resident` が
+/// デバイス側パラメータを実際に読んでいる保証にならない（初期化直後は
+/// デバイス側とホスト側が同一値のため、`predict` 側の実装だけを
+/// 呼んでいても偶然一致しうる）ため、学習ループを経由させてから
+/// 突合する（レビュー指摘対応）。
 #[test]
 fn predict_resident_matches_predict_after_training() {
+    const STEPS: usize = 20;
+    const LR: f32 = 0.05;
+
     let model = build_model();
     let init_tape = fandhe_ai::tape();
-    let store = model.init_device_param_store(&init_tape).unwrap();
+    let mut store = model.init_device_param_store(&init_tape).unwrap();
     drop(init_tape);
 
-    let (x_data, _y_data) = gen_regression_data(SEED_DATA);
-    let via_resident = model.predict_resident(&store, &x_data).unwrap();
-    let via_predict = model.predict(&x_data).unwrap();
+    let (x_data, y_data) = gen_regression_data(SEED_DATA);
+    let config = FacadeSgdConfig::new(LR);
+    for _ in 0..STEPS {
+        let tape = fandhe_ai::tape();
+        let x = tape.var(&x_data);
+        let y = tape.var(&y_data);
+        let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
+        let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        tape.step_device_param_store(&mut store, &grads, &config)
+            .unwrap();
+    }
+
+    // デバイス側で学習した結果をホスト側の独立モデルへ同期し、通常の
+    // `predict` 経路と比較する（`predict_resident` はこの同期を経由せず
+    // デバイス側パラメータを直接読む）。
+    let sync_tape = fandhe_ai::tape();
+    let synced = sync_tape.sync_device_param_store_to_host(&store).unwrap();
+    drop(sync_tape);
+    let mut host_model = build_model();
+    host_model.apply_parameters(synced).unwrap();
+
+    let (x_query, _) = gen_regression_data(SEED_DATA ^ 0xABCD);
+    let via_resident = model.predict_resident(&store, &x_query).unwrap();
+    let via_predict = host_model.predict(&x_query).unwrap();
 
     assert_eq!(via_resident.shape(), via_predict.shape());
     let a = via_resident.contiguous();
     let b = via_predict.contiguous();
     for (av, bv) in a.as_slice().unwrap().iter().zip(b.as_slice().unwrap()) {
-        assert_eq!(
-            av.to_bits(),
-            bv.to_bits(),
-            "predict_resident と predict は bit 一致するはず"
-        );
+        assert_close(*av, *bv, "predict_resident と sync 後 predict の突合");
     }
 }

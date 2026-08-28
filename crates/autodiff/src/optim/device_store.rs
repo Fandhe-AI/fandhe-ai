@@ -274,6 +274,29 @@ impl DeviceParamStore {
         }
 
         let use_momentum = config.momentum != 0.0;
+
+        // momentum 構成の途中変更を拒否する（設計文書 §3.3 事前検証
+        // フェーズ「件数・shape・device・momentum 構成」・
+        // `BackendError::InvalidArgument` の doc コメント「件数・momentum
+        // 構成不一致」）。`step_count > 0` かつ velocity バッファの有無
+        // （`momentum_state_exists`）と今回の `use_momentum` が食い違う
+        // 場合、`is_first_step` の意味が曖昧になる: momentum を途中から
+        // 有効化すると velocity は未確保のままここへ来て遅延確保される
+        // が、`is_first_step` は false のため PyTorch の
+        // `b ← g`（初回ルール）ではなく `b ← μ・0 + (1-τ)・g` を通って
+        // しまい、`dampening != 0` のとき数値が食い違う（ホスト参照実装
+        // `Sgd::step` にはこの経路自体が存在しない）。途中で無効化する
+        // 場合も既存 velocity を握ったまま無視することになり、後で
+        // 再度有効化した際の意味が不定になるため同様に拒否する。
+        let momentum_state_exists = self.velocities.iter().any(|v| v.is_some());
+        if self.step_count > 0 && momentum_state_exists != use_momentum {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceParamStore::step: momentum configuration changed mid-training \
+                 (previously {momentum_state_exists}, now {use_momentum}); reconstruct the \
+                 store to change momentum settings"
+            )));
+        }
+
         let is_first_step = self.step_count == 0;
         let ops = tape.ops();
         let mem = ops.memory_ops().ok_or_else(|| {
@@ -615,6 +638,42 @@ mod tests {
     fn full_pipeline_with_momentum_updates_parameters() {
         let (w, _b) = train_one_step(0.9);
         assert_ne!(w.get(&[0]).unwrap(), 1.0);
+    }
+
+    /// momentum を途中で有効化すると `InvalidArgument` で拒否される
+    /// （`step()` の momentum 構成検査。レビュー指摘対応）。
+    #[test]
+    fn enabling_momentum_mid_training_is_rejected() {
+        let tape = simple_tape(None);
+        let w_init = tensor(vec![1.0, 2.0], &[2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+
+        // 1 ステップ目は momentum 無効で成功させる（step_count が 0 → 1）。
+        let vars = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
+        let loss = vars[0].mse_loss(&target).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+
+        // 2 ステップ目で momentum を有効化すると拒否される。
+        let vars = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
+        let loss = vars[0].mse_loss(&target).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        let err = store
+            .step(&tape, &grads, &SgdConfig::new(0.1).with_momentum(0.9))
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
+
+        // momentum 構成拒否は `poisoned` へは遷移しない（実行前に判明した
+        // 失敗であり、デバイス側パラメータは未変更のまま安全なため。
+        // `TapeMismatch` と異なり `pending` は復元しないため、正しい
+        // 設定で再開するには `register_resident_leaves` を呼び直す）。
+        let vars = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
+        let loss = vars[0].mse_loss(&target).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
     }
 
     #[test]

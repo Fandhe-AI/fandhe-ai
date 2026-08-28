@@ -158,13 +158,14 @@ pub(crate) fn gemm_bias_act_route(bias_shape: Option<&[usize]>, n: usize) -> Gem
 /// プロセスの生存期間中 evict されない」設計に倣う。`Device::Metal` は
 /// 単一デバイスのためキーは不要）。
 ///
-/// `MetalMemory::new` は `context_cache::cached_context()` が返す
-/// `Arc<MetalContext>` を共有できない（`MetalMemory::new` は所有権を
-/// 要求する既存の公開シグネチャであり、crates.io 公開済み API のため
-/// 変更しない）。そのため本関数専用に独立した `MetalContext::new()` を
-/// 1 回だけ構築する（プロセス内で 2 個目の `MetalContext` が生じるが、
-/// 一度構築されれば以後は本関数のシングルトンから再利用されるため
-/// 初期化コストは 1 回のみ）。
+/// `MetalMemory::from_shared`（イシュー #935 レビュー対応・`memory.rs`
+/// 参照）が `context_cache::cached_context()` の返す `Arc<MetalContext>`
+/// をそのまま受け取れるため、本関数はバッファ確保用の `MetalContext` と
+/// カーネルディスパッチ（`sgd.rs::MetalSgd::run` 等）が使う `MetalContext`
+/// を同一インスタンスに揃える（`docs/device-resident-update-design.md`
+/// §3.3d「`XMemory` が持つ stream/context は必ず既存 `context_cache`
+/// 経由で取得（独自初期化禁止）」）。`MetalMemory::new`（所有権を要求する
+/// 既存の公開シグネチャ）は crates.io 公開済み API のため変更しない。
 fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
     use std::sync::{Mutex, OnceLock};
 
@@ -176,8 +177,8 @@ fn static_metal_memory() -> Result<&'static MetalMemory, BackendError> {
     if let Some(mem) = *guard {
         return Ok(mem);
     }
-    let ctx = MetalContext::new().map_err(map_metal_error)?;
-    let mem: &'static MetalMemory = Box::leak(Box::new(MetalMemory::new(ctx)));
+    let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+    let mem: &'static MetalMemory = Box::leak(Box::new(MetalMemory::from_shared(ctx)));
     *guard = Some(mem);
     Ok(mem)
 }
