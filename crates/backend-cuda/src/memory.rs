@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use fandhe_ai_tensor_core::Tensor;
@@ -241,22 +242,36 @@ impl CudaMemory {
                 _alloc: alloc,
             })
         };
-        Ok(DeviceBuffer::new(
+        // イシュー #1013 設計文書 §9 item 7: 確保時点の ordinal 世代を
+        // バッファへ刻印する（`buffer.rs::DeviceBuffer::new_with_generation`
+        // 参照）。`invalidate` による回復（poison → 新世代）が起きた後、
+        // 旧世代のうちに確保されたバッファが誤って新世代のコンテキストへ
+        // 渡されることを演算入口（`begin_driver_call`）で検出するための
+        // 前提。CPU/Metal は世代検査を行わないため通常 `new`（世代 0）で
+        // 足りるが、CUDA はこの刻印が不可欠。
+        Ok(DeviceBuffer::new_with_generation(
             Device::Cuda(self.ordinal),
             shape.to_vec(),
             handle,
+            context_cache::current_generation(self.ordinal),
         ))
     }
 
     fn upload_inner(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, CudaError> {
         let shape = tensor.shape().to_vec();
+        let generation = context_cache::current_generation(self.ordinal);
         if tensor.numel() == 0 {
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
             let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
                 slice: None,
                 _alloc: alloc,
             });
-            return Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle));
+            return Ok(DeviceBuffer::new_with_generation(
+                Device::Cuda(self.ordinal),
+                shape,
+                handle,
+                generation,
+            ));
         }
         // 非 contiguous な入力は実体化してから転送する（`MemoryOps::upload`
         // の契約。`fandhe_ai_tensor_core::buffer` モジュールコメント参照）。
@@ -275,7 +290,12 @@ impl CudaMemory {
             slice: Some(slice),
             _alloc: alloc,
         });
-        Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle))
+        Ok(DeviceBuffer::new_with_generation(
+            Device::Cuda(self.ordinal),
+            shape,
+            handle,
+            generation,
+        ))
     }
 
     fn download_inner(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, CudaError> {
@@ -299,13 +319,44 @@ impl CudaMemory {
     }
 }
 
+impl CudaMemory {
+    /// `MemoryOps` 実装の各公開メソッド（本 impl 直後の `impl MemoryOps for
+    /// CudaMemory`）が唯一の driver 呼び出し境界として使う共通ヘルパー
+    /// （イシュー #1013 設計文書 §9 item 9「TOCTOU 回避のため事前検査を
+    /// 別ステップにしない」・PR #1064 の Phase C 結線）。
+    ///
+    /// `begin_driver_call` を演算入口で 1 回だけ呼び（`resource_generations`
+    /// に、当該演算が読み書きする既存 `DeviceBuffer` の
+    /// [`fandhe_ai_tensor_core::buffer::DeviceBuffer::generation`] を渡す。
+    /// 新規確保〈`alloc_zeroed`／`upload`〉には検査対象の既存バッファが
+    /// ないため空スライスでよい）、`f` の内部で行われる 1 回以上の driver
+    /// 呼び出し（`clone_htod`／`alloc_zeros`／`clone_dtoh`／`synchronize`。
+    /// いずれも `?` で直結しているため、最初に失敗した 1 回だけが
+    /// `CudaError::Driver` として `f` の戻り値に現れる）の結果を
+    /// `observe_cuda_result` で観測し、sticky エラーなら ordinal を
+    /// poison する（`context_cache::observe_cuda_result` ドキュメンテー
+    /// ションコメント参照）。最終的な `CudaError` は呼び出し元が渡す
+    /// `map` で `BackendError` へ変換する（`alloc_zeroed` は
+    /// `map_cuda_alloc_error`、`upload`／`download` は `map_cuda_error`
+    /// と、呼び出し元ごとに異なる variant 割り当てを保つため）。
+    fn with_driver_call<T>(
+        &self,
+        resource_generations: &[u64],
+        map: impl FnOnce(CudaError) -> BackendError,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, BackendError> {
+        let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
+    }
+}
+
 impl MemoryOps for CudaMemory {
     fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.alloc_zeroed_inner(shape).map_err(map_cuda_alloc_error)
+        self.with_driver_call(&[], map_cuda_alloc_error, || self.alloc_zeroed_inner(shape))
     }
 
     fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.upload_inner(tensor).map_err(map_cuda_error)
+        self.with_driver_call(&[], map_cuda_error, || self.upload_inner(tensor))
     }
 
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -330,7 +381,13 @@ impl MemoryOps for CudaMemory {
         if buffer.device() != Device::Cuda(self.ordinal) {
             return Err(BackendError::DeviceMismatch);
         }
-        self.download_inner(buffer).map_err(map_cuda_error)
+        // `buffer.generation()`（確保時点で刻印済み。`alloc_zeroed_inner`／
+        // `upload_inner` 参照）を渡し、`invalidate` による回復後の新世代に
+        // 対して旧世代のバッファが誤って読まれることを検出する
+        // （イシュー #1013 設計文書 §9 item 7）。
+        self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
+            self.download_inner(buffer)
+        })
     }
 }
 

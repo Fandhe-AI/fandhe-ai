@@ -23,13 +23,17 @@
 //! 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行したが、
 //! 本セルは使わず `backend-cuda::context_cache` 独自の ordinal 単位
 //! poison 状態機械（`Phase::Poisoned`・`BackendError::
-//! DeviceContextPoisoned` 等）で遅延エラーを表現する**予定**である。
-//! ただし同状態機械の演算入口（`ops.rs`・`sgd.rs`）への結線
-//! （`begin_driver_call`／`observe_driver_result` の呼び出し）は
-//! Phase C として #1062 へ引き継がれており、イシュー #1013 時点では
-//! 未結線（起動後の非同期実行時エラーは `step()` 時点では検出されず、
-//! 後続の readback 同期点で顕在化する。`device_store.rs`・
-//! `backend_ops.rs` の同趣旨の注記を参照）。
+//! DeviceContextPoisoned` 等）で遅延エラーを表現する。同状態機械の
+//! 演算入口（`ops.rs`・`memory.rs` の `BackendOps`／`MemoryOps` 実装
+//! 境界）への結線（`begin_driver_call`／`observe_driver_result`／
+//! `observe_cuda_result` の呼び出し）は PR #1064（イシュー #1013 の
+//! codex-review P0 指摘への対応）で完了した。起動後の非同期実行時
+//! エラーは、それを最初に観測した driver 呼び出し（同一 ordinal 上の
+//! 別演算でもよい）の時点で ordinal 単位に poison 化され、以降の
+//! `begin_driver_call` が fail-closed に拒否する（`device_store.rs`・
+//! `backend_ops.rs` の同趣旨の注記を参照）。ただし poison からの
+//! **回復**（`context_cache::invalidate_with` を実 CUDA クロージャで
+//! 呼び出す経路）は #1062 へ引き継いだままである。
 
 use std::sync::{Arc, Mutex};
 

@@ -71,6 +71,34 @@ impl CudaBackendOps {
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))
     }
 
+    /// `BackendOps` の各公開メソッドが唯一の driver 呼び出し境界として
+    /// 使う共通ヘルパー（イシュー #1013 設計文書 §9 item 7・9。PR #1064
+    /// の Phase C 結線。`memory.rs::CudaMemory::with_driver_call` と同じ
+    /// 設計）。
+    ///
+    /// `context_cache::begin_driver_call` を演算入口で 1 回だけ呼び
+    /// （`resource_generations` には当該演算が読み書きするデバイス常駐
+    /// バッファ〈`DeviceBuffer`／`DeviceBufferView`〉の
+    /// [`fandhe_ai_tensor_core::buffer::DeviceBuffer::generation`] を渡す。
+    /// ホスト `Tensor` のみを読み書きする演算〈`gemm`／`add`／`relu` 等〉
+    /// には検査対象の既存デバイス常駐バッファがないため空スライスでよく、
+    /// これは検査を省略する fail-open ではなく「1 回の呼び出し内で
+    /// 完結し、跨ぐ世代が存在しない」ことに対応する）、`f` の内部で
+    /// `gemm.rs`／`elementwise.rs`／`softmax.rs`／`rmsnorm.rs`／`sgd.rs`
+    /// が行う 1 回以上の driver 呼び出しの結果（`?` で直結しているため
+    /// 呼び出し元まで伝播する `CudaError` は常に最初に失敗した 1 回を
+    /// 表す）を `observe_cuda_result` で観測し、sticky エラーなら
+    /// ordinal を poison する。
+    fn with_driver_call<T>(
+        &self,
+        resource_generations: &[u64],
+        map: impl FnOnce(CudaError) -> BackendError,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, BackendError> {
+        let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
+    }
+
     /// 二項 elementwise 共通のディスパッチ（`add`／`mul`）。
     ///
     /// `Tensor::broadcast_with`（NumPy 互換ブロードキャスト。CPU
@@ -101,8 +129,11 @@ impl CudaBackendOps {
         let device = self.device_handle()?;
         let ew = context_cache::cached_elementwise(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        let out = run(&ew, a_slice, b_slice)
-            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || run(&ew, a_slice, b_slice),
+        )?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -123,8 +154,11 @@ impl CudaBackendOps {
         let device = self.device_handle()?;
         let ew = context_cache::cached_elementwise(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        let out = run(&ew, a_slice)
-            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || run(&ew, a_slice),
+        )?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -185,9 +219,11 @@ impl CudaBackendOps {
         let device = self.device_handle()?;
         let rmsnorm = context_cache::cached_rmsnorm(self.ordinal, &device)
             .map_err(map_fused_kernel_init_error)?;
-        let out = rmsnorm
-            .run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden)
-            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || rmsnorm.run_rmsnorm_f32_raw(x_slice, None, 0.0, 1.0, 1, hidden),
+        )?;
         Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
     }
 
@@ -233,9 +269,11 @@ impl CudaBackendOps {
         let device = self.device_handle()?;
         let softmax = context_cache::cached_softmax(self.ordinal, &device)
             .map_err(map_fused_kernel_init_error)?;
-        let out = softmax
-            .run_softmax_f32_raw(x_slice, std::f32::consts::LOG2_E, rows, cols)
-            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || softmax.run_softmax_f32_raw(x_slice, std::f32::consts::LOG2_E, rows, cols),
+        )?;
         Tensor::new(out, plan.output_shape()).map_err(BackendError::ShapeMismatch)
     }
 }
@@ -406,6 +444,19 @@ impl BackendOps for CudaBackendOps {
             ));
         }
 
+        // イシュー #1013 設計文書 §9 item 7: `param`／`grad`／`velocity` は
+        // 学習ループを跨いで生存するデバイス常駐バッファ（`docs/
+        // device-resident-update-design.md` §3.2）であり、`invalidate` に
+        // よる回復（poison → 新世代）を跨いで使い回されうる唯一の経路
+        // （`gemm`／`elementwise` 等はホスト `Tensor` を都度アップロードし
+        // 直すため世代を跨がない）。ハンドルを可変借用する前に、この
+        // 時点の世代を収集しておく（`downcast_handle_mut` 後は `param`／
+        // `velocity` を再度 `&` で読めないため）。
+        let resource_generations: Vec<u64> = std::iter::once(param.generation())
+            .chain(std::iter::once(grad.generation()))
+            .chain(velocity.as_deref().map(|v| v.generation()))
+            .collect();
+
         let device = self.device_handle()?;
         let sgd = context_cache::cached_sgd(self.ordinal, &device).map_err(map_cuda_error)?;
 
@@ -459,13 +510,14 @@ impl BackendOps for CudaBackendOps {
             nesterov: config.nesterov,
             is_first_step: config.is_first_step,
         };
-        sgd.run(
-            param_slice,
-            grad_slice,
-            velocity_handle_slice,
-            &kernel_params,
-        )
-        .map_err(map_cuda_error)
+        self.with_driver_call(&resource_generations, map_cuda_error, || {
+            sgd.run(
+                param_slice,
+                grad_slice,
+                velocity_handle_slice,
+                &kernel_params,
+            )
+        })
     }
 
     fn gemm(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -488,9 +540,11 @@ impl BackendOps for CudaBackendOps {
         let device = self.device_handle()?;
         let gemm = context_cache::cached_gemm(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        let out = gemm
-            .run_tiled_f32(a_slice, b_slice, m, n, k)
-            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        let out = self.with_driver_call(
+            &[],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || gemm.run_tiled_f32(a_slice, b_slice, m, n, k),
+        )?;
         Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
     }
 
@@ -587,9 +641,11 @@ impl BackendOps for CudaBackendOps {
                 let device = self.device_handle()?;
                 let gemm = context_cache::cached_gemm(self.ordinal, &device)
                     .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-                let out = gemm
-                    .run_tiled_bias_act_f32(a_slice, b_slice, bias_slice, act_relu, m, n, k)
-                    .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+                let out = self.with_driver_call(
+                    &[],
+                    |e| BackendError::KernelLaunchFailed(e.to_string()),
+                    || gemm.run_tiled_bias_act_f32(a_slice, b_slice, bias_slice, act_relu, m, n, k),
+                )?;
                 Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
             }
         }
@@ -717,17 +773,32 @@ impl BackendOps for CudaBackendOps {
 
         let gemm = context_cache::cached_gemm(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        gemm.launch_tiled_bias_act_f32_resident(
-            a_slice,
-            &w_view,
-            bias_view.as_ref(),
-            false,
-            c_slice,
-            m as u32,
-            n as u32,
-            k as u32,
-        )
-        .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        // `w`（・`bias`）はデバイス常駐のまま渡す唯一の入力（`a` はこの
+        // 呼び出し内で毎回アップロードし直すため世代を跨がない。イシュー
+        // #1013 設計文書 §9 item 7）。
+        let resident_generations = [
+            Some(w.buffer().generation()),
+            bias.map(|b| b.buffer().generation()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        self.with_driver_call(
+            &resident_generations,
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                gemm.launch_tiled_bias_act_f32_resident(
+                    a_slice,
+                    &w_view,
+                    bias_view.as_ref(),
+                    false,
+                    c_slice,
+                    m as u32,
+                    n as u32,
+                    k as u32,
+                )
+            },
+        )?;
 
         mem.download(&c_dev_buf)
     }
@@ -807,8 +878,18 @@ impl BackendOps for CudaBackendOps {
 
         let gemm = context_cache::cached_gemm(self.ordinal, &device)
             .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
-        gemm.launch_tiled_f32_resident(&w_view, b_slice, c_slice, p as u32, r as u32, q as u32)
-            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        // `w` のみがデバイス常駐入力（`b` はこの呼び出し内で毎回
+        // アップロードし直すため世代を跨がない。イシュー #1013 設計文書
+        // §9 item 7）。
+        self.with_driver_call(
+            &[w.buffer().generation()],
+            |e| BackendError::KernelLaunchFailed(e.to_string()),
+            || {
+                gemm.launch_tiled_f32_resident(
+                    &w_view, b_slice, c_slice, p as u32, r as u32, q as u32,
+                )
+            },
+        )?;
 
         mem.download(&c_dev_buf)
     }

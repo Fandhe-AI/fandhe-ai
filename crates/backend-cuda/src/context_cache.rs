@@ -316,28 +316,21 @@ const LIMIT_PROBE_RETRIES: u32 = 3;
 /// static に依存しない構造体として切り出す（`get_or_build` テストと
 /// 同方針。本番経路は [`ordinal_registry`] が返すプロセスワイド static
 /// インスタンスを使う）。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 /// ordinal 単位の `(Mutex<OrdinalState>, Condvar)` セルへの共有ハンドル
 /// （clippy `type_complexity` 回避。実体は [`OrdinalRegistry`] 参照）。
 type OrdinalCell = Arc<(Mutex<OrdinalState>, Condvar)>;
 
-#[allow(dead_code)]
+// 本 PR（#1064）で `ops.rs`／`memory.rs` の BackendOps／MemoryOps 実装
+// 入口（`with_driver_call` ヘルパー経由）から `begin_driver_call` を
+// 呼ぶよう結線した（Phase C。旧コメント「Phase C は #1062 へ引き継ぐ」は
+// 解消済み）ため、以降の `OrdinalRegistry`・`ordinal_registry`・
+// `CallToken`・`begin_driver_call`・`observe_driver_result`・
+// `current_generation`・`ResultClass`・`classify_cuda_result` は本番経路
+// から実際に呼ばれる（`#[allow(dead_code)]` 不要）。
 struct OrdinalRegistry {
     states: Mutex<HashMap<usize, OrdinalCell>>,
 }
 
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 impl OrdinalRegistry {
     fn new() -> Self {
         Self {
@@ -361,13 +354,6 @@ impl OrdinalRegistry {
 
 /// プロセスワイドな [`OrdinalRegistry`]（本番経路が使う唯一のインスタンス。
 /// テストは [`OrdinalRegistry::new`] で独立インスタンスを使う）。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 fn ordinal_registry() -> &'static OrdinalRegistry {
     static REGISTRY: OnceLock<OrdinalRegistry> = OnceLock::new();
     REGISTRY.get_or_init(OrdinalRegistry::new)
@@ -378,13 +364,6 @@ fn ordinal_registry() -> &'static OrdinalRegistry {
 /// （`Condvar::notify_all`）へ通知する。演算関数のスコープ末尾で自然に
 /// drop される（`?` によるアーリーリターン・panic 経路でも解放される。
 /// `.claude/rules/coding-rust.md` の RAII 一本化方針と同型）。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct CallToken {
     ordinal: usize,
@@ -422,13 +401,6 @@ impl Drop for CallToken {
 /// [`BackendError::DeviceContextUnrecoverable`]、`Retiring` →
 /// [`BackendError::DeviceContextRetiring`]。`Active` かつ世代一致なら
 /// `in_flight += 1` して [`CallToken`] を返す。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 pub(crate) fn begin_driver_call(
     ordinal: usize,
     resource_generations: &[u64],
@@ -490,13 +462,6 @@ pub(crate) fn begin_driver_call(
 /// 永久待機させないため。`invalidate` 自身がストリーム同期・プローブで
 /// 別途エラーを検出する）。`Err` はそのまま呼び出し元へ返す
 /// （分類・poison 化は副作用であり戻り値は変えない）。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 pub(crate) fn observe_driver_result<T>(
     ordinal: usize,
     token: &CallToken,
@@ -516,14 +481,51 @@ pub(crate) fn observe_driver_result<T>(
     result
 }
 
+/// [`observe_driver_result`] の `CudaError` 版（イシュー #1013 設計文書
+/// §9 item 7・本 PR #1064 の Phase C 結線）。
+///
+/// `ops.rs`／`memory.rs` の演算入口は、内部の `gemm.rs`／`elementwise.rs`／
+/// `softmax.rs`／`rmsnorm.rs`／`sgd.rs` の起動 API から
+/// `Result<T, CudaError>` を受け取る（これらは `?` により
+/// `cudarc::driver::result::DriverError` を必ず [`CudaError::Driver`] へ
+/// 変換する契約。`error.rs` の `impl From<DriverError> for CudaError`
+/// 参照）。本関数はその境界で 1 回だけ呼び、`CudaError::Driver(e)` のみを
+/// [`observe_driver_result`] へ委譲して分類・poison 化する
+/// （`CudaError::Driver` 以外の variant は driver 呼び出し由来ではない
+/// ため素通しする）。
+///
+/// `?` チェーンは最初に失敗した 1 回の driver 呼び出しで早期 return する
+/// ため（本クレート全体の契約。個々の `.launch()`／`clone_htod`／
+/// `clone_dtoh`／`synchronize()` はいずれも `?` で直結している）、演算
+/// 内部で複数回の driver 呼び出しが起きても、呼び出し元まで伝播する
+/// `CudaError` は常にその「最初に失敗した 1 回」を表す。したがって
+/// 演算入口で 1 個の [`CallToken`]（`begin_driver_call` で 1 回だけ取得）
+/// に対して本関数を 1 回呼ぶだけで、個々の内部呼び出しをすべて
+/// `observe_driver_result` でラップした場合と同じ分類結果が得られる
+/// （成功した先行呼び出しは `Ok` のため観測しても副作用がない）。
+pub(crate) fn observe_cuda_result<T>(
+    ordinal: usize,
+    token: &CallToken,
+    result: Result<T, CudaError>,
+) -> Result<T, CudaError> {
+    match result {
+        Err(CudaError::Driver(e)) => match observe_driver_result::<()>(ordinal, token, Err(e)) {
+            Err(e) => Err(CudaError::Driver(e)),
+            Ok(()) => unreachable!(
+                "observe_driver_result passes Err(_) through unchanged; it cannot turn an \
+                 Err input into Ok"
+            ),
+        },
+        other => other,
+    }
+}
+
 /// `ordinal` が現在 poison 状態（`Poisoned{..}`。`unrecoverable` の
 /// いずれも含む）かを返す。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
+// 本番経路では `begin_driver_call` が同等の poison 判定を内包する
+// ため個別に呼ぶ必要がなく、`#[cfg(test)] mod poison_state_tests`
+// からのみ参照される。テスト・将来の診断 CLI（`docs/
+// guardrail-self-repair-cli.md` 系の拡張）用の公開面として残す。
 #[allow(dead_code)]
 pub(crate) fn is_poisoned(ordinal: usize) -> bool {
     let Ok(cell) = ordinal_registry().entry(ordinal) else {
@@ -539,13 +541,6 @@ pub(crate) fn is_poisoned(ordinal: usize) -> bool {
 
 /// `ordinal` の現行世代を返す（レジストリ未取得時は `0`。新規 ordinal は
 /// `OrdinalState::default()` の世代 `0` と整合する）。
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 pub(crate) fn current_generation(ordinal: usize) -> u64 {
     let Ok(cell) = ordinal_registry().entry(ordinal) else {
         return 0;
@@ -559,12 +554,13 @@ pub(crate) fn current_generation(ordinal: usize) -> u64 {
 /// `invalidate` の実処理プローブが検出しうる失敗の分類
 /// （[`invalidate_with`] のテスト注入用クロージャの戻り値）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
+// 本 PR（#1064）で検出側（`begin_driver_call`／`observe_driver_result`・
+// `observe_cuda_result`）は `ops.rs`／`memory.rs` へ結線済みだが、回復側
+// （`invalidate_with` を実 CUDA のストリーム同期・プローブクロージャで
+// 呼び出す経路）はスコープ外のまま残す（poison 後の自動再生成は本 PR の
+// 対象外。呼び出し元は #1062 へ引き継ぐ）。`ProbeFailure` は
+// `invalidate_with` のテスト注入用クロージャの戻り値としてのみ使われる
+// ため、本番経路では未使用のまま。
 #[allow(dead_code)]
 enum ProbeFailure {
     /// 一時的・当該試行固有の失敗（例: OOM）。再試行の余地がある。
@@ -581,25 +577,11 @@ enum ProbeFailure {
 /// sticky 側へ倒す**（fail-closed。個々のエラーコードを網羅できていない
 /// 場合に fail-open にしないための既定）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 enum ResultClass {
     Sticky,
     OperationLocal,
 }
 
-// #[allow(dead_code)]: 本 PR（#1013）は状態機械本体（Phase B）のみを実装し、
-// `ops.rs` 各演算入口への結線（Phase C。§9 item 7・9〜11）は advisor 助言
-// （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
-// （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
-// これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
-#[allow(dead_code)]
 fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClass {
     use cudarc::driver::sys::CUresult::*;
     // operation-local: 当該呼び出しの引数・リソース状況に起因し、以降の
@@ -625,10 +607,14 @@ fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClas
 
 /// `invalidate`（本体は [`invalidate_with`]。実 CUDA のプローブ処理は
 /// 本関数自身では実装せず、`ops.rs`／`memory.rs` 側の復旧経路が実 CUDA
-/// クロージャを渡して呼ぶ想定。イシュー #1013 の本 PR 時点では
-/// `begin_driver_call`／`observe_driver_result` の結線（Phase C）を
-/// スコープ外としたため、本関数の呼び出し元は未結線（テストのみが
-/// `invalidate_with` を直接検証する。結線は #1062 で行う）。
+/// クロージャを渡して呼ぶ想定）。本 PR（#1064）で検出側
+/// （`begin_driver_call`／`observe_driver_result`／`observe_cuda_result`）
+/// は `ops.rs`／`memory.rs` へ結線し、sticky エラー観測後は ordinal を
+/// fail-closed に poison するようになったが、poison からの**回復**
+/// （本関数を実 CUDA クロージャ付きで呼び出す経路）は本 PR のスコープ外
+/// のまま残す。呼び出し元の実装（poison 検出後にどのタイミングで
+/// `invalidate` を試みるか）は #1062 へ引き継ぐ（テストのみが本関数を
+/// 直接検証する）。
 ///
 /// state 遷移: retire（`Retiring` へ。他スレッドが既に `Retiring` 中なら
 /// 完了を待つ。`Poisoned{true}` は即エラー）→ drain（`in_flight == 0` を
@@ -648,6 +634,21 @@ fn invalidate_with(
     // a. retire: 所有権を一本化する。他スレッドが既に Retiring 中なら
     // Condvar でその完了を待つ（drain 中に別スレッドが invalidate を
     // 呼んでも二重に実処理プローブを走らせない）。
+    //
+    // Cursor Bugbot 指摘（PR #1064）: 待機側が `Retiring` の完了を待った
+    // 後、単純にループの先頭へ戻って `state.phase` を再マッチすると、
+    // 先行呼び出しが回復に成功して `Active` へ戻った直後の状態を
+    // 「新規の Active」と誤認し、待機側自身が③（新たな retire の所有者）
+    // へ遷移してしまう。これは 1 回の `invalidate` 要求ストームに対して
+    // 世代を 2 回進めてしまい、直後（1 回目の回復で正しくなったはず）の
+    // ハンドル・バッファを再び stale 世代にしてしまう欠陥だった。設計文書
+    // `docs/backend-cuda-async-execution-design.md` §5 item 4a②の契約
+    // 「待機側は先行呼び出しが確定させた結果をそのまま返して終了する
+    // （③へ遷移して所有権を新たに得ることはない）」に従い、`Retiring` を
+    // 一度でも観測した呼び出しは `became_waiter` を立てて待機専用の経路へ
+    // 固定し、ループを抜けたあとは新規 retire の所有者にはならず、先行
+    // 呼び出しが残した最終状態をそのまま Ok/Err に変換して return する。
+    let mut became_waiter = false;
     let mut state = cell.0.lock().map_err(|e| {
         BackendError::DeviceContextPoisoned(format!(
             "context_cache::OrdinalState の Mutex が poison しました（ordinal={ordinal}）: {e}"
@@ -664,6 +665,7 @@ fn invalidate_with(
                 });
             }
             Phase::Retiring => {
+                became_waiter = true;
                 state = cell.1.wait(state).map_err(|e| {
                     BackendError::DeviceContextPoisoned(format!(
                         "invalidate の Condvar 待機中に Mutex が poison しました: {e}"
@@ -672,11 +674,40 @@ fn invalidate_with(
                 continue;
             }
             Phase::Active | Phase::Poisoned { .. } => {
-                state.phase = Phase::Retiring;
                 break;
             }
         }
     }
+
+    if became_waiter {
+        // 先行呼び出し（所有者）が retire を確定させた最終状態を、
+        // このスレッド自身の結果としてそのまま返す（新たな所有権は
+        // 取らない。sync/probe を再実行しない）。
+        return match state.phase {
+            Phase::Active => Ok(()),
+            Phase::Poisoned {
+                unrecoverable: true,
+            } => Err(BackendError::DeviceContextUnrecoverable {
+                ordinal,
+                probe_error: "concurrent invalidate() call observed a permanently poisoned \
+                    result"
+                    .to_string(),
+            }),
+            Phase::Poisoned {
+                unrecoverable: false,
+            } => Err(BackendError::DeviceContextPoisoned(format!(
+                "ordinal {ordinal} is poisoned; call invalidate() to attempt recovery"
+            ))),
+            Phase::Retiring => unreachable!(
+                "wait loop only exits when phase is no longer Retiring (see loop above)"
+            ),
+        };
+    }
+
+    // ここに到達するのは `became_waiter == false` の場合のみ、すなわち
+    // このスレッドが最初に `Active`／`Poisoned{false}` を観測して自ら
+    // 所有者になった場合に限る。
+    state.phase = Phase::Retiring;
 
     // b. drain: in_flight == 0 になるまで待つ。
     while state.in_flight != 0 {
@@ -1049,6 +1080,79 @@ mod poison_state_tests {
     }
 
     #[test]
+    fn observe_cuda_result_poisons_ordinal_on_sticky_driver_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        let observed =
+            observe_cuda_result::<()>(ordinal, &token, Err(CudaError::Driver(sticky_err())));
+        assert!(observed.is_err(), "Err はそのまま伝播するはず");
+        assert!(
+            is_poisoned(ordinal),
+            "CudaError::Driver に包まれた sticky エラーも poison するはず \
+             （ops.rs／memory.rs の境界結線が観測する形そのもの）"
+        );
+
+        // 演算入口の P0 契約: poison 後の次回呼び出しは `begin_driver_call`
+        // が fail-closed に拒否する（PR #1064・`sgd.rs:180` codex-review
+        // P0 指摘への対応そのもの）。
+        let rejected = begin_driver_call(ordinal, &[0]);
+        assert!(matches!(
+            rejected,
+            Err(BackendError::DeviceContextPoisoned(_))
+        ));
+    }
+
+    #[test]
+    fn observe_cuda_result_does_not_poison_on_non_driver_cuda_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        // `CudaError::InvalidShape` はホスト側の事前検証失敗であり driver
+        // 呼び出し由来ではないため、素通しして poison しない。
+        let observed = observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::InvalidShape {
+                detail: "host-side validation failure, not a driver call".to_string(),
+            }),
+        );
+        assert!(observed.is_err());
+        assert!(
+            !is_poisoned(ordinal),
+            "driver 呼び出し由来でないエラーは poison しないはず"
+        );
+    }
+
+    #[test]
+    fn observe_cuda_result_does_not_poison_on_operation_local_driver_error() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        let observed = observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(operation_local_err())),
+        );
+        assert!(observed.is_err());
+        assert!(!is_poisoned(ordinal));
+        // operation-local エラーでは以降の呼び出しを拒否しない
+        // （sticky エラーとの非対称性の検証。P0 対応の裏取り）。
+        drop(token);
+        let next = begin_driver_call(ordinal, &[0]);
+        assert!(
+            next.is_ok(),
+            "operation-local エラーの観測後も begin_driver_call は成功し続けるはず"
+        );
+    }
+
+    #[test]
+    fn observe_cuda_result_passes_through_ok_without_side_effects() {
+        let ordinal = unique_ordinal();
+        let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
+        let observed = observe_cuda_result(ordinal, &token, Ok::<_, CudaError>(7));
+        assert_eq!(observed.unwrap(), 7);
+        assert!(!is_poisoned(ordinal));
+    }
+
+    #[test]
     fn observe_driver_result_passes_through_ok_without_side_effects() {
         let ordinal = unique_ordinal();
         let token = begin_driver_call(ordinal, &[0]).expect("begin succeeds");
@@ -1235,5 +1339,90 @@ mod poison_state_tests {
         // ままであることで独立性を確認する）。
         let isolated = unique_ordinal();
         assert_eq!(current_generation(isolated), 0);
+    }
+
+    /// Cursor Bugbot 指摘（PR #1064・`context_cache.rs:679` 相当）の
+    /// 回帰テスト: 並行 `invalidate` 要求のうち、先に `Retiring` を観測
+    /// して待機した側（waiter）は、所有者（owner）が回復を確定させた後に
+    /// 自ら新たな所有者へ遷移して 2 回目の retire/probe を走らせては
+    /// ならない。これが起きると 1 回の要求ストームで `generation` が
+    /// 2 回進んでしまい、1 回目の回復で正しくなったはずのハンドルを
+    /// 再び stale 世代にしてしまう。
+    ///
+    /// `std::thread::scope` で owner／waiter を同時に起動し、owner の
+    /// `sync` クロージャ内でチャネル通知＋ waiter 側のポーリングにより
+    /// 「waiter が `Phase::Retiring` を観測してから owner の sync/probe が
+    /// 完了する」という実行順序を強制する。修正前の実装だと waiter が
+    /// 誤って所有者に成り代わり `generation` が 2 まで進んでしまう
+    /// （修正後は 1 のまま）。
+    #[test]
+    fn invalidate_with_concurrent_waiter_does_not_become_a_new_owner() {
+        use std::sync::mpsc;
+
+        let registry = OrdinalRegistry::new();
+        let ordinal = 0usize;
+        let (owner_entered_tx, owner_entered_rx) = mpsc::channel::<()>();
+        let (release_owner_tx, release_owner_rx) = mpsc::channel::<()>();
+
+        std::thread::scope(|scope| {
+            let registry_ref = &registry;
+            let owner = scope.spawn(move || {
+                invalidate_with(
+                    registry_ref,
+                    ordinal,
+                    move || {
+                        // owner が Retiring へ遷移しロックを手放した直後
+                        // （sync クロージャ呼び出し時点）に waiter を起動
+                        // してよいことを知らせ、waiter が Retiring を
+                        // 実際に観測するまで待ってから sync を完了させる。
+                        owner_entered_tx.send(()).unwrap();
+                        release_owner_rx.recv().unwrap();
+                        Ok(())
+                    },
+                    || Ok(()),
+                )
+            });
+
+            // owner が Retiring へ遷移するのを待つ。
+            owner_entered_rx.recv().unwrap();
+
+            let waiter = scope.spawn(move || {
+                // waiter が実際に `Phase::Retiring` を観測してから owner
+                // の sync を完了させる（waiter がまだロックへ到達して
+                // いない状態で owner を進めてしまうと、waiter が
+                // `Retiring` を一度も観測せず「たまたま owner になる」
+                // 経路に落ちてテストの意図が崩れるため、ポーリングで
+                // 明示的に同期する）。
+                let cell = registry_ref.entry(ordinal).unwrap();
+                loop {
+                    if matches!(cell.0.lock().unwrap().phase, Phase::Retiring) {
+                        break;
+                    }
+                    std::thread::yield_now();
+                }
+                release_owner_tx.send(()).unwrap();
+                invalidate_with(registry_ref, ordinal, || Ok(()), || Ok(()))
+            });
+
+            let owner_result = owner.join().expect("owner thread does not panic");
+            let waiter_result = waiter.join().expect("waiter thread does not panic");
+
+            assert!(owner_result.is_ok(), "owner の retire は成功するはず");
+            assert!(
+                waiter_result.is_ok(),
+                "waiter は owner が確定させた Active 状態をそのまま Ok として返すはず \
+                 （新たな所有者にはならない）: {waiter_result:?}"
+            );
+        });
+
+        let cell = registry.entry(ordinal).unwrap();
+        let state = cell.0.lock().unwrap();
+        assert_eq!(
+            state.generation, 1,
+            "1 回の要求ストーム（owner 1 回 + waiter 1 回）に対して generation は \
+             1 回だけ進むはず（waiter が 2 回目の retire/probe を走らせていたら 2 に \
+             なってしまう）"
+        );
+        assert_eq!(state.phase, Phase::Active);
     }
 }

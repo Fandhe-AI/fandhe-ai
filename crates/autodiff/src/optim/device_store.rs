@@ -92,19 +92,25 @@
 //! `failure_token` を使わず、`step()` 内の即時エラーでこれまでどおり
 //! `poisoned` へ遷移する。CUDA はイシュー #1013（`docs/backend-cuda-
 //! async-execution-design.md` §5）でカーネル起動直後の都度
-//! `synchronize()` を除去し非同期実行契約へ移行したが、`failure_token`
-//! は使わない。`backend-cuda::context_cache` は ordinal 単位の poison
-//! 状態機械（`begin_driver_call`／`observe_driver_result`／
-//! `is_poisoned`）を**備えてはいる**が、本 PR（#1013）時点では
-//! `ops.rs`／`sgd.rs` のどこからも呼ばれておらず（Phase C は本 PR の
-//! スコープ外。同設計文書 §12）、CUDA の `sgd_step_device` は
-//! カーネル起動自体が成功する限り `Ok(())` を返す。すなわち起動後の
-//! 非同期実行時エラー（illegal address 等の sticky エラー）は
-//! `step()` 呼び出し時点では検出されず、`StorePoisoned` への自己遷移
-//! も起きない。実際にエラーが表面化するのは偶発的な次の同期点
-//! （明示的な `download` 等）まで遅延する。したがって現時点で CUDA は
-//! Metal のような即時 poison 検知を持たない（`context_cache` の poison
-//! 状態機械への `sgd.rs` 結線は Phase C として #1062 へ引き継ぐ）。
+//! `synchronize()` を除去し非同期実行契約へ移行しており、`failure_token`
+//! は使わない（Metal 専用の機構のまま）。代わりに
+//! `backend-cuda::context_cache` の ordinal 単位 poison 状態機械
+//! （`begin_driver_call`／`observe_driver_result`／`observe_cuda_result`）
+//! を PR #1064（イシュー #1013 の codex-review P0 指摘への対応）で
+//! `backend-cuda::ops`／`backend-cuda::memory` の演算入口へ結線した
+//! （同設計文書 §12）。sticky エラー（illegal address 等）は、それを
+//! 最初に観測した同一 ordinal 上の driver 呼び出し時点で ordinal を
+//! poison 化し、以降の `sgd_step_device` 呼び出しは `begin_driver_call`
+//! の拒否により `Err` を返す。この `Err` は `step()` の
+//! `if let Err(e) = ops.sgd_step_device_tracked(..) { self.poisoned.store
+//! (true, ..); .. }` を経て必ず `StorePoisoned` への自己遷移につながる
+//! （本ファイル下部 `step` 実装参照）。ただし検出は「エラー発生後、
+//! 同一 ordinal 上で次に driver 呼び出しが起きた時点」に限られる
+//! （sticky エラーの発生自体を即座に検出する仕組みではない。単一
+//! ストリームの FIFO 順序保証を前提に、当該演算自身の次の driver
+//! 呼び出し、または起動直後に同期を要求しない限り、その呼び出し自体で
+//! 検出されることが多い）。poison からの**回復**（`context_cache::
+//! invalidate_with` の呼び出し）は #1062 へ引き継いだままである。
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
