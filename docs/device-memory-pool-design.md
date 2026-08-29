@@ -309,16 +309,29 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    §2 事実 6）で解放する呼び出しも `release_cached()` の内部契約に含める
    （A/B いずれの設計かに関わらず必須。§3.3 参照）。これにより
    `release_cached()` が REQ-14 の解放 API として自作プール保持分だけで
-   なく driver 予約分も含めて解放する契約になる。**この driver トリム
-   呼び出し（CUDA FFI 経由）は失敗し得るため、`release_cached()` の
+   なく driver 予約分も含めて解放する契約になる。**`has_async_alloc()`
+   が真の環境では `CudaSlice` の drop は `cuMemFreeAsync` を対象 stream
+   へ enqueue するのみで、free の完了を待たない（§2 事実 6）。トリム
+   （`cuMemPoolTrimTo(0)` 相当）は「プールが現在保持する空き領域のうち
+   閾値超過分」を対象にするため、enqueue 済みで未完了の free はトリム
+   時点でまだプールへ返却されておらず解放可能領域に含まれない。この
+   未完了区間を放置すると §3.4 の OOM 再試行・本節冒頭の REQ-14 実メモリ
+   上限保証（driver 予約分も含めた解放）が達成できない。したがって
+   `release_cached()` は driver トリムを呼ぶ**前に**、当該プールに紐づく
+   対象 stream を同期（`cuStreamSynchronize` 相当。cudarc の同期
+   API 経由）し、enqueue 済みの `cuMemFreeAsync` がすべて完了したこと
+   （＝解放領域がプールに返却済みであること）を確認してからトリムを
+   実行する契約とする。この stream 同期呼び出し（CUDA FFI 経由）は driver
+   トリム呼び出しと同様に失敗し得るため、`release_cached()` の
    戻り値は `Result<u64, BackendError>` とする（§3.1 の trait 定義）。
    自作プール層のフリーリスト解放（インメモリ操作）自体は失敗しないため、
-   `Err` は driver トリム失敗に限定される。トリム失敗時に成功したものと
-   して扱う（黙殺）・`panic!` する・エラーを判別不能な値へ曖昧に符号化する
-   （例: 失敗を `0` として返す）のいずれも、driver 予約分の残存を「解放
-   成功」と誤認させ fail-open になるため禁止する（本番経路の panic 禁止・
-   fail-closed の維持。`.claude/rules/coding-rust.md`）。呼び出し元
-   （LRU／OOM フォールバック。§3.4）はこの `Err` を上位の
+   `Err` は stream 同期失敗または driver トリム失敗のいずれかに限定される。
+   同期・トリムいずれかの失敗時に成功したものとして扱う（黙殺）・
+   `panic!` する・エラーを判別不能な値へ曖昧に符号化する（例: 失敗を `0`
+   として返す）のいずれも、driver 予約分の残存を「解放成功」と誤認させ
+   fail-open になるため禁止する（本番経路の panic 禁止・fail-closed の
+   維持。`.claude/rules/coding-rust.md`）。呼び出し元（LRU／OOM
+   フォールバック。§3.4）はこの `Err` を上位の
    `BackendError::DeviceAllocationFailed` 等の型付きエラーへそのまま
    伝播する契約とする。**
 3. OOM フォールバック（§3.4）。
