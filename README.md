@@ -93,7 +93,7 @@ cargo run -p fandhe-ai --example getting_started
 
 | クレート | 役割 |
 |---|---|
-| `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`Device` → バックエンドの結線）と compat 公開面（`compat::array`／`compat::Sequential`）を提供します |
+| `fandhe-ai` | **唯一のサポートされる公開 API 面**。composition root（`tape()`／`tape_for(Device)`）・compat 公開面（`compat::array`／`compat::Sequential`）・`optim`（`Sgd`／`AdamW` 等）・デバイス常駐更新経路（`DeviceParamStore`／`Tape::step_device_param_store`）の 4 つを確定入口として提供します（[`docs/compat-api-scope.md`](docs/compat-api-scope.md) §0） |
 | `fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal` | 内部クレート。直接利用はサポート対象外です |
 
 上記 6 クレートが crates.io 公開対象です（[`docs/crates-io-naming-decision.md`](docs/crates-io-naming-decision.md)）。

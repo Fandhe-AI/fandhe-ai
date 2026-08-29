@@ -12,6 +12,10 @@
 //! global_grad_norm, ConstantLr, LrScheduler, StepLr}`）を `fandhe_ai::optim`
 //! という単一の入口へ吸収する。
 //!
+//! `fandhe_ai::optim` は REQ-9 の 2026-08-29 追記（正本 spec
+//! `docs/spec/04-requirements.md:211-212`。実装リポ #984／#986）で、
+//! `tape()`系・`compat` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
+//!
 //! # 呼び出し文脈（`compat::Sequential` との位置対応契約）
 //!
 //! [`crate::optim::Sgd::step`]／[`crate::optim::AdamW::step`] が受け取る `params`／`grads` の順序は、
