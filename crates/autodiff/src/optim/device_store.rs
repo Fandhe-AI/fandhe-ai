@@ -43,13 +43,17 @@
 //!   学習継続・推論に使わせない）。回復は新しい `DeviceParamStore` の
 //!   再構築のみ。
 
+use std::marker::PhantomData;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{SgdStepConfig, Tensor};
 
 use crate::backward::Gradients;
+use crate::error::AutodiffError;
 use crate::optim::sgd::SgdConfig;
-use crate::tape::{NodeId, Tape, TapeId};
+use crate::tape::{NodeId, Op, ResidentResolver, Tape, TapeId};
 use crate::var::Var;
 
 /// forward で登録済みだが `step()` にまだ消費されていない葉ノード列
@@ -58,6 +62,47 @@ use crate::var::Var;
 struct PendingForward {
     tape_id: TapeId,
     node_ids: Vec<NodeId>,
+}
+
+/// プロセス全体で共有する `store_id` 発行カウンタ（イシュー #1022）。
+/// `tape::TapeId`（`tape.rs::NEXT_TAPE_ID`）と同じ理由（単調増加 ID は
+/// プロセス生存中に衝突しない）で `DeviceParamStore::new` からのみ
+/// インクリメントされる。`Op::ResidentLeaf { store_id, .. }` が
+/// [`ResidentResolver::resident_buffer`] 経由で「どのストアの葉か」を
+/// 一意に識別するための鍵になる。
+static NEXT_STORE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// [`DeviceParamStore::register_resident_leaves`]／
+/// [`DeviceParamStore::snapshot_resident_leaves`] が返す、テープ上の
+/// `Op::ResidentLeaf` ノードへの不透明なハンドル（イシュー #1022）。
+///
+/// **`Var` ではなく専用の不透明型にする理由**: `Var::value()`／
+/// `to_tensor()`（`var.rs`）は非 fallible な API であり、ホスト値を
+/// 持たない `Op::ResidentLeaf` に対して呼ばれると「panic させる」か
+/// 「黙示的にゼロを返す」のいずれかしか選べない。本型は `shape()` の
+/// みを公開し、値アクセサ（`value()`／`to_tensor()` 相当）を持たない
+/// ことで、呼び出し元がこの罠に到達する経路自体を型で塞ぐ
+/// （`tape::Op::ResidentLeaf` doc 参照）。
+///
+/// ライフタイム `'t` は `Var<'t>` と同じく「元となった `Tape` の生存
+/// 期間」を表す（このハンドル自体は `Tape` への参照を保持しないが、
+/// `DeviceParamStore::linear_forward`／`backward` に渡す際に同じ `'t` の
+/// `Tape`／`Var<'t>` としか組み合わせられないよう型で拘束する）。
+#[derive(Debug, Clone)]
+pub struct ResidentLeaf<'t> {
+    node_id: NodeId,
+    store_id: u64,
+    slot: usize,
+    shape: Vec<usize>,
+    _marker: PhantomData<&'t Tape>,
+}
+
+impl<'t> ResidentLeaf<'t> {
+    /// このパラメータのデバイス上 shape（実体化不要。`TapeNode.shape`
+    /// と同じく構造的に確定済みの値をそのまま保持する）。
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
 }
 
 /// デバイス常駐パラメータ更新の状態機械本体（モジュール冒頭コメント
@@ -69,11 +114,48 @@ struct PendingForward {
 #[derive(Debug)]
 pub struct DeviceParamStore {
     device: Device,
+    /// このストアの一意識別子（イシュー #1022）。`Op::ResidentLeaf`／
+    /// `ResidentLeaf` が保持し、`ResidentResolver::resident_buffer` が
+    /// 「別ストアの葉が誤って混入していないか」を検査する鍵になる
+    /// （`NEXT_STORE_ID` のドキュメンテーションコメント参照）。
+    store_id: u64,
     params: Vec<DeviceBuffer<f32>>,
     velocities: Vec<Option<DeviceBuffer<f32>>>,
     step_count: u64,
     poisoned: bool,
     pending: Option<PendingForward>,
+}
+
+/// `AutodiffError` を `BackendError` へ変換する（イシュー #1022）。
+/// [`DeviceParamStore::linear_forward`] は `Result<_, BackendError>` を
+/// 返す契約（`BackendOps::gemm_resident_rhs` 等と同じエラー型）だが、
+/// `materialize_fallible`（`tape.rs`）は `AutodiffError` を返すため橋渡し
+/// が要る。`AutodiffError::Backend`（既に `BackendError` を包んでいる
+/// 場合）はそのまま unwrap し、それ以外（`Shape`／`TapeMismatch`／
+/// `InvalidArgument`／`Backward`）は `Display` 実装（`error.rs`）の
+/// 文字列を保持したまま `BackendError::Unsupported` へ包む（エラー種別
+/// を誤って別カテゴリへすり替えない範囲での最善の橋渡し。厳密な 1:1
+/// 対応が必要になった場合は将来 `BackendError` 側に variant を追加する）。
+fn autodiff_err_to_backend(err: AutodiffError) -> BackendError {
+    match err {
+        AutodiffError::Backend(be) => be,
+        other => BackendError::Unsupported(other.to_string()),
+    }
+}
+
+impl ResidentResolver for DeviceParamStore {
+    /// `grad::vjp`（`Op::LinearResident` の VJP）から
+    /// `Tape::backward_with_resident` 経由で呼ばれる（イシュー #1022）。
+    /// [`DeviceParamStore::checked_resident_buffer`] へ委譲する薄い実装
+    /// （`linear_forward` と同じ検証を共有する）。
+    fn resident_buffer(
+        &self,
+        store_id: u64,
+        slot: usize,
+    ) -> Result<&DeviceBuffer<f32>, AutodiffError> {
+        self.checked_resident_buffer(store_id, slot)
+            .map_err(AutodiffError::Backend)
+    }
 }
 
 impl DeviceParamStore {
@@ -102,6 +184,7 @@ impl DeviceParamStore {
         }
         Ok(DeviceParamStore {
             device,
+            store_id: NEXT_STORE_ID.fetch_add(1, Ordering::Relaxed),
             velocities: (0..uploaded.len()).map(|_| None).collect(),
             params: uploaded,
             step_count: 0,
@@ -139,66 +222,193 @@ impl DeviceParamStore {
         Ok(())
     }
 
-    /// forward 用: 現在デバイス上にある各パラメータを `tape` の葉ノードと
-    /// して**毎回新規登録**し（`tape.var(&tensor)`。既存 `Tape::var` と
-    /// 同じ「使い捨て」契約）、`step()` が消費するまで
+    /// forward 用: 現在デバイス上にある各パラメータを `tape` の
+    /// `Op::ResidentLeaf` ノードとして**毎回新規登録**し（`tape.
+    /// push_resident_leaf(...)`。ホストへの download を伴わない。本
+    /// イシュー #1022 の中核）、`step()` が消費するまで
     /// [`BackendError::PendingForwardUnconsumed`] で以後の再登録を拒否する
     /// （モジュール冒頭「状態機械」参照）。
     ///
-    /// ダウンロードした `Tensor<f32>` は forward が消費するために必要な
-    /// ホスト側実体化であり、param のホスト**再アップロード**（本イシュー
-    /// が排除する対象）とは別（設計文書 §3.3b: 「削減は param 再 upload
-    /// のみ。VJP 用 weight/bias download と grad upload は本段階で残る」）。
+    /// **#1022 による変更**: 旧実装は `mem.download(buf)` でホストへ
+    /// 落としてから `tape.var(&tensor)`（`Op::Leaf`）に登録していた
+    /// （設計文書 §3.3b が「本段階で残る転送」と明記していたもの）。
+    /// 本イシューでこの download を排除し、代わりに `Op::ResidentLeaf`
+    /// （ホスト値を持たないテープノード）を登録して不透明型
+    /// [`ResidentLeaf`] を返す（`Var` を返さない理由は同型の doc 参照）。
+    /// 呼び出し元は返った `ResidentLeaf` を [`Self::linear_forward`] へ
+    /// 渡して forward する。
     pub fn register_resident_leaves<'t>(
         &mut self,
         tape: &'t Tape,
-    ) -> Result<Vec<Var<'t>>, BackendError> {
+    ) -> Result<Vec<ResidentLeaf<'t>>, BackendError> {
         self.check_not_poisoned()?;
         self.check_device(tape)?;
         if self.pending.is_some() {
             return Err(BackendError::PendingForwardUnconsumed);
         }
-        let mem = tape.ops().memory_ops().ok_or_else(|| {
-            BackendError::Unsupported(
-                "DeviceParamStore::register_resident_leaves: backend does not implement \
-                 MemoryOps"
-                    .to_string(),
-            )
-        })?;
-        let mut vars = Vec::with_capacity(self.params.len());
+        let mut leaves = Vec::with_capacity(self.params.len());
         let mut node_ids = Vec::with_capacity(self.params.len());
-        for buf in &self.params {
-            let tensor = mem.download(buf)?;
-            let var = tape.var(&tensor);
-            node_ids.push(var.node_id());
-            vars.push(var);
+        for (slot, buf) in self.params.iter().enumerate() {
+            let shape = buf.shape().to_vec();
+            let node_id = tape.push_resident_leaf(shape.clone(), self.store_id, slot);
+            node_ids.push(node_id);
+            leaves.push(ResidentLeaf {
+                node_id,
+                store_id: self.store_id,
+                slot,
+                shape,
+                _marker: PhantomData,
+            });
         }
         self.pending = Some(PendingForward {
             tape_id: tape.id,
             node_ids,
         });
-        Ok(vars)
+        Ok(leaves)
     }
 
     /// 推論用の読み取り専用版（`register_resident_leaves` と異なり
     /// `pending` 状態を変化させない。`step()` で消費する必要がないため）。
+    /// #1022 による変更点は `register_resident_leaves` と同じ
+    /// （download を排除し `ResidentLeaf` を返す）。
     pub fn snapshot_resident_leaves<'t>(
         &self,
         tape: &'t Tape,
-    ) -> Result<Vec<Var<'t>>, BackendError> {
+    ) -> Result<Vec<ResidentLeaf<'t>>, BackendError> {
         self.check_not_poisoned()?;
         self.check_device(tape)?;
-        let mem = tape.ops().memory_ops().ok_or_else(|| {
-            BackendError::Unsupported(
-                "DeviceParamStore::snapshot_resident_leaves: backend does not implement \
-                 MemoryOps"
-                    .to_string(),
-            )
-        })?;
-        self.params
+        Ok(self
+            .params
             .iter()
-            .map(|buf| Ok(tape.var(&mem.download(buf)?)))
-            .collect()
+            .enumerate()
+            .map(|(slot, buf)| {
+                let shape = buf.shape().to_vec();
+                let node_id = tape.push_resident_leaf(shape.clone(), self.store_id, slot);
+                ResidentLeaf {
+                    node_id,
+                    store_id: self.store_id,
+                    slot,
+                    shape,
+                    _marker: PhantomData,
+                }
+            })
+            .collect())
+    }
+
+    /// `store_id`／`slot` を検証したうえで対応する `DeviceBuffer<f32>` を
+    /// 返す（イシュー #1022）。[`Self::linear_forward`]・
+    /// [`ResidentResolver::resident_buffer`] の共通実装。別ストアの葉が
+    /// 混入した場合・`slot` が範囲外の場合は fail-closed に拒否する
+    /// （`.claude/rules/security.md` A08）。
+    fn checked_resident_buffer(
+        &self,
+        store_id: u64,
+        slot: usize,
+    ) -> Result<&DeviceBuffer<f32>, BackendError> {
+        if store_id != self.store_id {
+            return Err(BackendError::InvalidArgument(
+                "DeviceParamStore: resident leaf belongs to a different DeviceParamStore \
+                 (store_id mismatch)"
+                    .to_string(),
+            ));
+        }
+        self.params.get(slot).ok_or_else(|| {
+            BackendError::InvalidArgument(format!(
+                "DeviceParamStore: resident leaf slot {slot} is out of range (store has {} \
+                 parameters)",
+                self.params.len()
+            ))
+        })
+    }
+
+    /// forward 用: `weight`（・`bias`）をデバイス常駐のまま
+    /// `BackendOps::gemm_resident_rhs`（`tensor-core`）へ渡し、
+    /// `y = input.matmul(weight) (+ bias)` を計算してテープへ
+    /// `Op::LinearResident` として記録する（イシュー #1022 の中核）。
+    ///
+    /// `input`（活性化値）はホスト常駐のまま渡してよい（本イシューが
+    /// 排除する D2H は weight／bias のものに限る。§1.2 の解釈）。
+    /// `weight`／`bias` はいずれも `self`（同一 `DeviceParamStore`）が
+    /// [`Self::register_resident_leaves`]／[`Self::snapshot_resident_leaves`]
+    /// で返した [`ResidentLeaf`] でなければならない（[`Self::
+    /// checked_resident_buffer`] が `store_id`／`slot` を検証する）。
+    ///
+    /// `bias` は `Some` の場合 `[n]`（`weight` の列数）への厳密一致のみ
+    /// 対応する（`BackendOps::gemm_resident_rhs` の融合カーネル契約と
+    /// 同じ。ブロードキャスト全般は非対応のため、この形状検査はカーネル
+    /// 本体へ触れる前にここで行う。REQ-8・OWASP A03）。
+    pub fn linear_forward<'t>(
+        &self,
+        tape: &'t Tape,
+        input: &Var<'t>,
+        weight: &ResidentLeaf<'t>,
+        bias: Option<&ResidentLeaf<'t>>,
+    ) -> Result<Var<'t>, BackendError> {
+        self.check_not_poisoned()?;
+        self.check_device(tape)?;
+        if input.tape_id() != tape.id {
+            return Err(BackendError::TapeMismatch);
+        }
+
+        let w_buf = self.checked_resident_buffer(weight.store_id, weight.slot)?;
+        let b_buf = match bias {
+            Some(b) => Some(self.checked_resident_buffer(b.store_id, b.slot)?),
+            None => None,
+        };
+        if let (Some(b), Some(n)) = (&b_buf, w_buf.shape().get(1))
+            && b.shape() != [*n]
+        {
+            return Err(BackendError::ShapeMismatch(
+                fandhe_ai_tensor_core::ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![*n],
+                },
+            ));
+        }
+
+        // `input` のホスト値は `materialize_fallible`（層 1。`Var::
+        // matmul` 等と同じ経路）で取得する。`Var::to_tensor()`（層 2・
+        // 非 fallible）ではなくこちらを使う理由: forward 演算の失敗
+        // （`Unsupported` 以外の `run_fused` エラー等）を黙示的に吸収
+        // させず、本メソッドの `Result` へそのまま伝播させるため
+        // （`docs/fusion-graph-design.md` §3.5.2 の層 1 契約）。
+        let x_val = {
+            // `nodes`（`pub(crate) RefCell<Vec<TapeNode>>`）はクレート内
+            // 限定公開のため同一クレート（`autodiff`）内の本ファイルから
+            // 直接借用できる（`var.rs::Var::matmul` と同じ借用パターン）。
+            let nodes = tape.nodes.borrow();
+            crate::tape::materialize_fallible(&nodes, tape.ops(), input.node_id())
+                .map_err(autodiff_err_to_backend)?
+                .clone()
+        };
+
+        let y = tape.ops().gemm_resident_rhs(&x_val, w_buf, b_buf)?;
+        let node_id = tape.push_eager(
+            Op::LinearResident {
+                input: input.node_id(),
+                weight: weight.node_id,
+                bias: bias.map(|b| b.node_id),
+            },
+            y,
+        );
+        Ok(Var::from_raw(tape, node_id))
+    }
+
+    /// `loss` から逆伝播し、常駐 weight／bias（`Op::ResidentLeaf`・
+    /// `Op::LinearResident`）を含むグラフの勾配を計算する（イシュー
+    /// #1022）。`self` を [`ResidentResolver`] として `tape.
+    /// backward_with_resident` へ渡す薄いラッパー。
+    ///
+    /// **素の `tape.backward(loss)` との違い**: `Op::LinearResident` の
+    /// VJP は weight の `DeviceBuffer<f32>` を解決する手段
+    /// （`ResidentResolver`）を要求するため、素の `backward` は
+    /// `AutodiffError::InvalidArgument` で拒否する（`tape::Op::
+    /// LinearResident` doc 参照）。`Sequential::forward_resident` で
+    /// forward したグラフは必ず本メソッドで backward すること。
+    pub fn backward(&self, tape: &Tape, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
+        self.check_not_poisoned().map_err(AutodiffError::Backend)?;
+        self.check_device(tape).map_err(AutodiffError::Backend)?;
+        tape.backward_with_resident(loss, self)
     }
 
     /// `pending`（未消費の forward 登録）を副作用なくクリアする冪等
@@ -425,6 +635,20 @@ mod tests {
     struct MockDeviceOps {
         fail_after: Option<usize>,
         call_count: AtomicUsize,
+        /// `MemoryOps::download` の累計呼び出し回数（イシュー #1022 の
+        /// 受け入れ条件 1「reuse 学習 1 step 内の D2H が loss 実体化以外
+        /// 0 回」を機械検証するためのカウンタ）。`gemm_resident_rhs`／
+        /// `gemm_resident_lhs`（下記）は本カウンタを増やさない実装
+        /// （`downcast_handle` で直接読む。`backend-cpu::ops::
+        /// CpuBackendOps` の「ゼロコピー」実装と同じモデル）とすることで、
+        /// forward／backward が実際に `download()` を呼んでいないことを
+        /// 区別して検証できる。
+        /// `Arc` にする理由: `Tape::new_with_ops` は `Box<dyn BackendOps +
+        /// Send>` として所有権を奪うため、`BackendOps` トレイトを介さず
+        /// カウンタだけをテスト側に残して読み出すには共有参照が要る
+        /// （`BackendOps` は `Any` を要求しないため `tape.ops()` から
+        /// downcast する経路は取れない）。
+        download_count: std::sync::Arc<AtomicUsize>,
     }
 
     impl MockDeviceOps {
@@ -432,6 +656,7 @@ mod tests {
             Self {
                 fail_after: None,
                 call_count: AtomicUsize::new(0),
+                download_count: std::sync::Arc::new(AtomicUsize::new(0)),
             }
         }
 
@@ -439,7 +664,26 @@ mod tests {
             Self {
                 fail_after: Some(n),
                 call_count: AtomicUsize::new(0),
+                download_count: std::sync::Arc::new(AtomicUsize::new(0)),
             }
+        }
+
+        /// カウンタの共有ハンドルを複製する（`Tape::new_with_ops` へ
+        /// `self` の所有権を渡した後もテスト側から読み出せるようにする。
+        /// `resident_forward_backward_has_zero_param_download` 参照）。
+        fn download_counter(&self) -> std::sync::Arc<AtomicUsize> {
+            self.download_count.clone()
+        }
+
+        /// `DeviceBuffer<f32>` の中身をコピー取得する（`download()` を
+        /// 経由しないため `download_count` を増やさない。`gemm_resident_
+        /// rhs`／`gemm_resident_lhs` 専用のヘルパー）。
+        fn read_resident(buf: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+            let handle = buf
+                .downcast_handle::<MockHandle>()
+                .ok_or(BackendError::DeviceMismatch)?;
+            let data = handle.data.borrow().clone();
+            Tensor::new(data, buf.shape()).map_err(BackendError::ShapeMismatch)
         }
     }
 
@@ -485,6 +729,7 @@ mod tests {
         }
 
         fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
+            self.download_count.fetch_add(1, Ordering::SeqCst);
             let handle = buffer
                 .downcast_handle::<MockHandle>()
                 .ok_or(BackendError::DeviceMismatch)?;
@@ -565,6 +810,37 @@ mod tests {
             Ok(crate::eval::matmul(a, b))
         }
 
+        /// `w`（デバイス常駐）を [`MockDeviceOps::read_resident`] で直接
+        /// 読み取り（`download()` を経由しないため `download_count` は
+        /// 増えない。イシュー #1022 の受け入れ条件 1 を機械検証するテスト
+        /// の前提）、`a @ w (+ bias)` をホスト側 `eval` で計算する。
+        fn gemm_resident_rhs(
+            &self,
+            a: &Tensor<f32>,
+            w: &DeviceBuffer<f32>,
+            bias: Option<&DeviceBuffer<f32>>,
+        ) -> Result<Tensor<f32>, BackendError> {
+            let w_tensor = Self::read_resident(w)?;
+            let mut y = crate::eval::matmul(a, &w_tensor);
+            if let Some(bias) = bias {
+                let b_tensor = Self::read_resident(bias)?;
+                y = crate::eval::add(&y, &b_tensor);
+            }
+            Ok(y)
+        }
+
+        /// [`Self::gemm_resident_rhs`] と同じく `download()` を経由しない
+        /// `w @ b` の計算（`Op::LinearResident` の VJP が `d_input` を
+        /// 求めるために使う）。
+        fn gemm_resident_lhs(
+            &self,
+            w: &DeviceBuffer<f32>,
+            b: &Tensor<f32>,
+        ) -> Result<Tensor<f32>, BackendError> {
+            let w_tensor = Self::read_resident(w)?;
+            Ok(crate::eval::matmul(&w_tensor, b))
+        }
+
         fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
             Ok(crate::eval::add(a, b))
         }
@@ -624,21 +900,28 @@ mod tests {
         assert_eq!(synced[1].get(&[1]).unwrap(), -0.5);
     }
 
-    /// エンドツーエンド: register → forward → backward → step → sync が
-    /// vanilla SGD の手計算と一致することを検証する。
+    /// エンドツーエンド: register → forward（`linear_forward`） →
+    /// backward（`DeviceParamStore::backward`） → step → sync が vanilla
+    /// SGD の手計算と一致することを検証する（#1022 で `Op::LinearResident`
+    /// 経路へ書き換え）。`w_init` は `[2, 2]` の 2 次元行列（`linear_forward`
+    /// の `matmul` 契約に合わせる。旧テストの `[2]` 要素ごとの `mul` とは
+    /// 異なる形状だが、「forward→backward→step でパラメータが変化する」
+    /// という検証意図は変わらない）。
     fn train_one_step(momentum: f32) -> (Tensor<f32>, Tensor<f32>) {
         let tape = simple_tape(None);
-        let w_init = tensor(vec![1.0, 2.0], &[2]);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
         let b_init = tensor(vec![0.5, -0.5], &[2]);
         let mut store = DeviceParamStore::new(&tape, &[&w_init, &b_init]).unwrap();
 
-        let vars = store.register_resident_leaves(&tape).unwrap();
-        let x = tape.var(&tensor(vec![2.0, 3.0], &[2]));
-        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
 
-        let pred = vars[0].mul(&x).unwrap().add(&vars[1]).unwrap();
+        let pred = store
+            .linear_forward(&tape, &x, &leaves[0], Some(&leaves[1]))
+            .unwrap();
         let loss = pred.mse_loss(&target).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
 
         let mut config = SgdConfig::new(0.1);
         if momentum != 0.0 {
@@ -654,14 +937,14 @@ mod tests {
     fn full_pipeline_updates_parameters() {
         let (w, b) = train_one_step(0.0);
         // w/b は更新前から変化しているはず（勾配がゼロでない限り）。
-        assert_ne!(w.get(&[0]).unwrap(), 1.0);
+        assert_ne!(w.get(&[0, 0]).unwrap(), 1.0);
         assert_ne!(b.get(&[0]).unwrap(), 0.5);
     }
 
     #[test]
     fn full_pipeline_with_momentum_updates_parameters() {
         let (w, _b) = train_one_step(0.9);
-        assert_ne!(w.get(&[0]).unwrap(), 1.0);
+        assert_ne!(w.get(&[0, 0]).unwrap(), 1.0);
     }
 
     /// momentum を途中で有効化すると `InvalidArgument` で拒否される
@@ -669,21 +952,24 @@ mod tests {
     #[test]
     fn enabling_momentum_mid_training_is_rejected() {
         let tape = simple_tape(None);
-        let w_init = tensor(vec![1.0, 2.0], &[2]);
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
         let mut store = DeviceParamStore::new(&tape, &[&w_init]).unwrap();
+        let x = tape.var(&tensor(vec![1.0, 1.0], &[1, 2]));
 
         // 1 ステップ目は momentum 無効で成功させる（step_count が 0 → 1）。
-        let vars = store.register_resident_leaves(&tape).unwrap();
-        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
-        let loss = vars[0].mse_loss(&target).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
         store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
 
         // 2 ステップ目で momentum を有効化すると拒否される。
-        let vars = store.register_resident_leaves(&tape).unwrap();
-        let target = tape.var(&tensor(vec![10.0, 10.0], &[2]));
-        let loss = vars[0].mse_loss(&target).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
         let err = store
             .step(&tape, &grads, &SgdConfig::new(0.1).with_momentum(0.9))
             .unwrap_err();
@@ -737,9 +1023,10 @@ mod tests {
     fn step_with_mismatched_tape_is_rejected_and_pending_is_restored() {
         let tape1 = simple_tape(None);
         let tape2 = simple_tape(None);
-        let w = tensor(vec![1.0], &[1]);
+        let w = tensor(vec![1.0], &[1, 1]);
         let mut store = DeviceParamStore::new(&tape1, &[&w]).unwrap();
-        let vars1 = store.register_resident_leaves(&tape1).unwrap();
+        let leaves1 = store.register_resident_leaves(&tape1).unwrap();
+        let x1 = tape1.var(&tensor(vec![1.0], &[1, 1]));
 
         let x2 = tape2.var(&tensor(vec![1.0], &[1]));
         let loss2 = x2.mse_loss(&x2).unwrap();
@@ -752,23 +1039,28 @@ mod tests {
         // pending は復元されているため、正しい tape・正しい grads を
         // 与えれば `step` は成功する（`register_resident_leaves` を
         // 呼び直す必要はない）。
-        let loss1 = vars1[0]
-            .mse_loss(&tape1.var(&tensor(vec![2.0], &[1])))
+        let pred1 = store
+            .linear_forward(&tape1, &x1, &leaves1[0], None)
             .unwrap();
-        let grads1 = tape1.backward(&loss1).unwrap();
+        let loss1 = pred1
+            .mse_loss(&tape1.var(&tensor(vec![2.0], &[1, 1])))
+            .unwrap();
+        let grads1 = store.backward(&tape1, &loss1).unwrap();
         store.step(&tape1, &grads1, &SgdConfig::new(0.1)).unwrap();
     }
 
     #[test]
     fn step_with_missing_gradient_is_rejected() {
         let tape = simple_tape(None);
-        let w = tensor(vec![1.0], &[1]);
-        let unused = tensor(vec![2.0], &[1]);
+        let w = tensor(vec![1.0], &[1, 1]);
+        let unused = tensor(vec![2.0], &[1, 1]);
         let mut store = DeviceParamStore::new(&tape, &[&w, &unused]).unwrap();
-        let vars = store.register_resident_leaves(&tape).unwrap();
-        // loss は vars[0] のみに依存し、vars[1] へは勾配が流れない。
-        let loss = vars[0].mse_loss(&vars[0]).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let x = tape.var(&tensor(vec![1.0], &[1, 1]));
+        // loss は leaves[0] のみに依存し、leaves[1] へは勾配が流れない。
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&pred).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
         let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
         assert!(matches!(err, BackendError::MissingGradient(_)));
     }
@@ -776,14 +1068,21 @@ mod tests {
     #[test]
     fn poisoned_after_failing_step_blocks_all_four_entry_points() {
         // 2 パラメータのうち 1 個目の `sgd_step_device` 成功後、2 個目で
-        // 失敗させる（部分更新後の poisoned 遷移を検証する）。
+        // 失敗させる（部分更新後の poisoned 遷移を検証する）。2 層の
+        // `linear_forward` を連鎖させ、両パラメータへ勾配が流れる形にする
+        // （#1022 で `Op::LinearResident` 経路へ書き換え。旧テストの
+        // `vars[0].mul(&vars[1])` は `ResidentLeaf` 同士の直接演算が
+        // できなくなったため代替）。
         let tape = simple_tape(Some(2));
-        let w = tensor(vec![1.0], &[1]);
-        let b = tensor(vec![1.0], &[1]);
+        let w = tensor(vec![1.0], &[1, 1]);
+        let b = tensor(vec![1.0], &[1, 1]);
         let mut store = DeviceParamStore::new(&tape, &[&w, &b]).unwrap();
-        let vars = store.register_resident_leaves(&tape).unwrap();
-        let loss = vars[0].mul(&vars[1]).unwrap().mse_loss(&vars[0]).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let x = tape.var(&tensor(vec![1.0], &[1, 1]));
+        let y1 = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let y2 = store.linear_forward(&tape, &y1, &leaves[1], None).unwrap();
+        let loss = y2.mse_loss(&y1).unwrap();
+        let grads = store.backward(&tape, &loss).unwrap();
         let err = store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap_err();
         assert!(matches!(err, BackendError::KernelLaunchFailed(_)));
 
@@ -824,6 +1123,83 @@ mod tests {
         let store = DeviceParamStore::new(&tape, &[]).unwrap();
         assert!(store.is_empty());
         assert_eq!(store.len(), 0);
+    }
+
+    /// イシュー #1022 受け入れ条件 1: reuse 学習 1 step 内（forward の
+    /// `register_resident_leaves`／`linear_forward`・backward の
+    /// `DeviceParamStore::backward`）で `MemoryOps::download`（D2H）が
+    /// 0 回であることを機械検証する。`MockDeviceOps::gemm_resident_rhs`／
+    /// `gemm_resident_lhs` は `downcast_handle` で直接読む実装
+    /// （`download()` を経由しない）であり、`register_resident_leaves`／
+    /// `snapshot_resident_leaves` 自体も本イシューで download を撤去
+    /// 済みのため、`step()`／`sync_to_host()` を呼ばない本テストの範囲
+    /// では `download_count()` が終始 0 のまま推移するはずである。
+    #[test]
+    fn resident_forward_backward_has_zero_param_download() {
+        let ops = MockDeviceOps::new();
+        let download_count = ops.download_counter();
+        let tape = Tape::new_with_ops(Box::new(ops));
+        let w_init = tensor(vec![1.0, 0.0, 0.0, 1.0], &[2, 2]);
+        let b_init = tensor(vec![0.5, -0.5], &[2]);
+        let mut store = DeviceParamStore::new(&tape, &[&w_init, &b_init]).unwrap();
+
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let x = tape.var(&tensor(vec![2.0, 3.0], &[1, 2]));
+        let target = tape.var(&tensor(vec![10.0, 10.0], &[1, 2]));
+        let pred = store
+            .linear_forward(&tape, &x, &leaves[0], Some(&leaves[1]))
+            .unwrap();
+        let loss = pred.mse_loss(&target).unwrap();
+        let _grads = store.backward(&tape, &loss).unwrap();
+
+        assert_eq!(
+            download_count.load(Ordering::SeqCst),
+            0,
+            "register_resident_leaves/linear_forward/backward の 1 step 内で \
+             MemoryOps::download が呼ばれてはならない（#1022 受け入れ条件 1）"
+        );
+    }
+
+    /// 素の `Tape::backward`（`DeviceParamStore::backward` を経由しない）
+    /// を `Op::LinearResident` を含むグラフへ適用すると、weight のデバイス
+    /// バッファを解決する手段（`ResidentResolver`）がないため型付き
+    /// エラーで拒否される（fail-closed。`tape::Op::LinearResident` doc
+    /// 参照）。
+    #[test]
+    fn plain_backward_on_resident_graph_is_rejected() {
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0], &[1, 1]);
+        let mut store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+        let leaves = store.register_resident_leaves(&tape).unwrap();
+        let x = tape.var(&tensor(vec![1.0], &[1, 1]));
+        let pred = store.linear_forward(&tape, &x, &leaves[0], None).unwrap();
+        let loss = pred.mse_loss(&pred).unwrap();
+
+        let err = tape.backward(&loss).unwrap_err();
+        assert!(matches!(err, AutodiffError::InvalidArgument(_)));
+    }
+
+    /// 別ストアの `ResidentLeaf` を `linear_forward` に渡すと
+    /// `store_id` 不一致で fail-closed に拒否される（`.claude/rules/
+    /// security.md` A08）。
+    #[test]
+    fn linear_forward_rejects_leaf_from_a_different_store() {
+        let tape = simple_tape(None);
+        let w1 = tensor(vec![1.0], &[1, 1]);
+        let w2 = tensor(vec![2.0], &[1, 1]);
+        let store1 = DeviceParamStore::new(&tape, &[&w1]).unwrap();
+        let mut store2 = DeviceParamStore::new(&tape, &[&w2]).unwrap();
+        let leaves2 = store2.register_resident_leaves(&tape).unwrap();
+        let x = tape.var(&tensor(vec![1.0], &[1, 1]));
+
+        let err = store1
+            .linear_forward(&tape, &x, &leaves2[0], None)
+            .unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)));
+        // store2 側の pending は消費されていないため、store2 の
+        // register_resident_leaves を呼び直す必要はなく引き続き有効。
+        store2.abandon_pending_forward();
+        let _ = store1;
     }
 
     /// `BackendOps` の default メソッド（`gemm_bias_act`／`run_fused`）が

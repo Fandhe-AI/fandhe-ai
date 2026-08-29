@@ -1959,6 +1959,94 @@ impl CudaGemm {
         Ok(())
     }
 
+    /// デバイス常駐済みの A/B/C バッファに対して bias 加算・activation
+    /// 融合 tiled f32 カーネルを起動し、完了を待つ（イシュー #1022。
+    /// [`Self::launch_tiled_f32`] と同じ「GPU 実行のみ」契約を
+    /// [`Self::run_tiled_bias_act_f32`] の epilogue 融合版へ拡張したもの）。
+    ///
+    /// `ops::CudaBackendOps::gemm_resident_rhs` が `w`（デバイス常駐
+    /// weight）をホストへ download せずに forward するために使う——
+    /// `run_tiled_bias_act_f32` は `a`／`b` をホストスライスから
+    /// `clone_htod` する契約のため、既にデバイス上にある `w` に対して
+    /// 呼ぶと download→upload の往復（本イシューが排除する対象）が
+    /// 発生してしまう。本関数は `a_dev`／`b_dev`（`w` はここに渡す）が
+    /// 既にデバイス上にあることを前提にする。
+    ///
+    /// `bias_dev` が `None` の場合は `has_bias = 0` を渡し、カーネル側は
+    /// このバッファを実際には参照しない（`run_tiled_bias_act_f32` と
+    /// 同じ契約。呼び出し元はダミーバッファを用意する必要はなく、代わりに
+    /// `a_dev` を再利用してよい〈`has_bias=0` のため参照されない〉）。
+    ///
+    /// ホスト側形状検証は [`Self::launch_tiled_f32`] と同一
+    /// （`validate_gemm_dims`・`validate_tiled_k_bound`・
+    /// `validate_output_len`）に加え、`bias_dev` の長さが `n` と一致する
+    /// ことをカーネル本体アクセス前に検証する（REQ-8・OWASP A03。
+    /// `run_tiled_bias_act_f32` と同じ順序契約）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_tiled_bias_act_f32(
+        &self,
+        a_dev: &CudaSlice<f32>,
+        b_dev: &CudaSlice<f32>,
+        bias_dev: Option<&CudaSlice<f32>>,
+        act_relu: bool,
+        c_dev: &mut CudaSlice<f32>,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<(), CudaError> {
+        validate_gemm_dims(a_dev.len(), b_dev.len(), m, n, k)?;
+        validate_tiled_k_bound(k)?;
+        validate_output_len(c_dev.len(), m, n)?;
+        if let Some(bias_dev) = bias_dev
+            && bias_dev.len() != n as usize
+        {
+            return Err(CudaError::InvalidElementwiseShape {
+                detail: format!(
+                    "bias length mismatch: expected {n} (n), actual {}",
+                    bias_dev.len()
+                ),
+            });
+        }
+
+        let (has_bias, bias_arg): (i32, &CudaSlice<f32>) = match bias_dev {
+            Some(bias_dev) => (1, bias_dev),
+            // `has_bias == 0` のガードによりカーネル側はこのバッファを
+            // 実際には参照しない（`run_tiled_bias_act_f32` ドキュメント
+            // コメント「`bias` が `None` の場合はダミーの 1 要素バッファ」
+            // と同じ設計。ここでは既存の `a_dev` を安全なダミーとして
+            // 再利用し、新規デバイス確保を避ける）。
+            None => (0, a_dev),
+        };
+
+        let cfg = launch_config(m, n, TILED_BLOCK_DIM);
+        let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
+        let act_i: i32 = if act_relu { 1 } else { 0 };
+
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+
+        // SAFETY: run_f32_kernel と同一の根拠（`launch_tiled_f32` の
+        // 該当コメント参照）。追加引数（bias_arg・has_bias・act_i）は
+        // 上記で検証済みの `n`／`bias_dev` の有無と 1:1 対応し、カーネル
+        // 内 epilogue は書き込みガード（`row < m && col < n`）の内側でのみ
+        // `bias[col]` を参照するため OOB は発生しない（REQ-8）。
+        unsafe {
+            self.stream
+                .launch_builder(&self.tiled_bias_act_f32)
+                .arg(a_dev)
+                .arg(b_dev)
+                .arg(bias_arg)
+                .arg(c_dev)
+                .arg(&m_i)
+                .arg(&n_i)
+                .arg(&k_i)
+                .arg(&has_bias)
+                .arg(&act_i)
+                .launch(cfg)?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
     /// デバイス常駐済みの A/B/C バッファに対して WMMA(TF32) カーネルを
     /// 起動し、完了を待つ（[`Self::launch_tiled_f32`] と同じ「GPU 実行
     /// のみ」契約）。`run_wmma_tf32` と同一の 3 段選択ロジック（staged →

@@ -869,6 +869,88 @@ impl MetalGemm {
         Ok(c_buf.read_to_vec())
     }
 
+    /// デバイス常駐済みの A/B/(bias)/C バッファに対して bias 加算・
+    /// activation 融合 tiled GEMM を実行する（イシュー #1022）。
+    /// [`Self::run_tiled_bias_act_f32`] がホストスライスから
+    /// `MetalBuffer::new_with_data` で毎回アップロードするのに対し、本
+    /// 関数は呼び出し元が既に確保・アップロード済みの [`MetalBuffer`]
+    /// をそのまま結線する「GPU 実行のみ」契約（`crate::gemm::MetalGemm::
+    /// dispatch_tiled_prepared` と同じ設計方針）。`ops::MetalBackendOps::
+    /// gemm_resident_rhs` が `w`（デバイス常駐 weight）をホストへ
+    /// download せずに forward するために使う。
+    ///
+    /// `bias_buf` が `None` の場合は `n` 要素のゼロ初期化バッファを内部で
+    /// 確保して渡す（`run_tiled_bias_act_f32` と同じ理由。`shaders/
+    /// gemm.metal::gemm_tiled_bias_act` 冒頭コメント「`bias` が `None`」
+    /// 参照: 1 要素ダミーでは Metal コンパイラの select 化最適化次第で
+    /// 範囲外アクセスになりうる fail-closed 対策）。
+    ///
+    /// `m == 0 || n == 0` は no-op（呼び出し元が空の `c_buf` を用意する
+    /// 前提。#39 系「デバイス常駐済みバッファに対する GPU 実行のみ」契約
+    /// と同様、shape 0 の縮退はここでは扱わない——呼び出し元
+    /// （`ops::MetalBackendOps`）が事前に検査する）。`k == 0` は
+    /// `validate_bias_act_dims` が `a_len == 0`／`b_len == 0` を正しい
+    /// 積として受理するため通常どおりディスパッチする（GPU 側で `acc`
+    /// が 0 のまま epilogue のみ適用される。ホスト側 early-return は
+    /// 行わない——`k == 0` はどのみち `Linear::new` の `in_features > 0`
+    /// 制約により実運用では到達しない）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_bias_act_prepared(
+        &self,
+        ctx: &MetalContext,
+        a_buf: &MetalBuffer,
+        b_buf: &MetalBuffer,
+        bias_buf: Option<&MetalBuffer>,
+        act_relu: bool,
+        c_buf: &MetalBuffer,
+        m: usize,
+        n: usize,
+        k: usize,
+    ) -> Result<(), MetalError> {
+        let dims = validate_bias_act_dims(a_buf.len(), b_buf.len(), m, n, k)?;
+        if c_buf.len() != m * n {
+            return Err(MetalError::CLenMismatch {
+                expected: m * n,
+                actual: c_buf.len(),
+            });
+        }
+        if let Some(b) = bias_buf
+            && b.len() != n
+        {
+            return Err(MetalError::InvalidElementwiseShape {
+                detail: format!("bias length mismatch: expected {n} (n), actual {}", b.len()),
+            });
+        }
+
+        let zero_bias;
+        let (bias_ref, has_bias): (&MetalBuffer, i32) = match bias_buf {
+            Some(b) => (b, 1),
+            None => {
+                zero_bias = MetalBuffer::new_zeroed(ctx, n)?;
+                (&zero_bias, 0)
+            }
+        };
+        let act_i: i32 = if act_relu { 1 } else { 0 };
+
+        ctx.dispatch_sync(|encoder| {
+            encode_dispatch_bias_act(
+                encoder,
+                &self.pipeline_tiled_bias_act,
+                a_buf,
+                b_buf,
+                bias_ref,
+                c_buf,
+                dims,
+                has_bias,
+                act_i,
+            );
+        })?;
+
+        BIAS_ACT_FUSED_LAUNCH_COUNT.with(|c| c.set(c.get() + 1));
+
+        Ok(())
+    }
+
     /// f16 GEMM（`C = A @ B`。TASK-8.3b・#156）を実行し、結果をホストへ
     /// 読み出す。`gemm_simdgroup_f16`（`shaders/gemm.metal`）のみを対象と
     /// する明示ディスパッチ入口であり、[`Self::dispatch_auto`]／

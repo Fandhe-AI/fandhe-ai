@@ -98,7 +98,7 @@ fn train_device_resident(device: Device, steps: usize, lr: f32) -> Vec<Tensor<f3
         let y = tape.var(&y_data);
         let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
         let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let grads = tape.backward_device_param_store(&loss, &store).unwrap();
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
     }

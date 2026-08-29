@@ -130,6 +130,80 @@ pub(crate) enum Op {
         class_dim: usize,
         reduction: crate::var::Reduction,
     },
+    /// デバイス常駐パラメータの葉ノード（イシュー #1022・`docs/
+    /// device-resident-update-design.md` §3.3e）。`Op::Leaf` と異なり
+    /// **ホスト値を持たない**（`TapeNode::value` は常に空の `OnceCell`
+    /// のまま。`Tape::push_resident_leaf` 参照）。
+    ///
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` の
+    /// `register_resident_leaves`／`snapshot_resident_leaves`（forward
+    /// 用）のみが構築し、外部へは不透明型
+    /// `optim::device_store::ResidentLeaf`（`shape()` のみ公開）として
+    /// しか見えない——`Var` として公開しないのは、`Var::value()`／
+    /// `to_tensor()`（`var.rs`）が非 fallible な API であり、ホスト値を
+    /// 持たない本ノードに誤って到達すると「panic させる」か「黙示的に
+    /// ゼロを返す」のいずれかしか選べず、本イシューが求める fail-closed
+    /// な型付きエラー化と両立しないため。
+    ///
+    /// `store_id`／`slot` は [`ResidentResolver::resident_buffer`] が
+    /// `Op::LinearResident` の VJP から対応する `DeviceBuffer<f32>`
+    /// （weight／bias の実体）を引くための鍵（`store_id` は
+    /// `DeviceParamStore` ごとに一意、`slot` はそのストア内の位置）。
+    /// `grad.rs::vjp` は本 variant を `Op::Leaf` と同じく「入力を持たない
+    /// （contributions が空）」として扱う。
+    ResidentLeaf { store_id: u64, slot: usize },
+    /// デバイス常駐 `weight`（・`bias`）で forward した Linear 相当ノード
+    /// （イシュー #1022）。`y = input.matmul(weight) (+ bias)` と数式は
+    /// 同じだが、`weight`／`bias` はいずれも `Op::ResidentLeaf`（ホスト値
+    /// を持たない）を指すため既存 `Op::MatMul`／`Op::Add` の合成では
+    /// 表現できず専用 variant とする。
+    ///
+    /// **常に実体化済み**（`push_eager`）: `DeviceParamStore::
+    /// linear_forward`（`optim::device_store`）が
+    /// `BackendOps::gemm_resident_rhs`（`tensor-core`）で forward 値を
+    /// 計算した直後に積む。融合対象外（elementwise 5 演算ではないため
+    /// `push_lazy` を経由しない。`Op::is_lazy_elementwise` 参照）。
+    ///
+    /// **素の [`Tape::backward`]（resolver なし）では型付きエラー**:
+    /// 本 variant の VJP（`grad.rs`）は `weight`（・`bias`）の
+    /// `DeviceBuffer<f32>` を [`ResidentResolver`] 経由で取得する必要が
+    /// あり、素の `backward` はこの解決手段を持たないため
+    /// `AutodiffError::InvalidArgument`（「`DeviceParamStore::backward`
+    /// を使え」を含むメッセージ）を返す（fail-closed。`docs/
+    /// device-resident-update-design.md` §3.3e）。`DeviceParamStore::
+    /// backward`（`optim::device_store`。自身が [`ResidentResolver`] を
+    /// 実装する）を使うと正しく計算される。
+    LinearResident {
+        input: NodeId,
+        weight: NodeId,
+        bias: Option<NodeId>,
+    },
+}
+
+/// [`Op::LinearResident`] の VJP（`grad.rs`）が `weight`／`bias` の
+/// `Op::ResidentLeaf { store_id, slot }` から実際の `DeviceBuffer<f32>`
+/// を引くための解決インタフェース（イシュー #1022）。
+///
+/// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` が実装し、
+/// `Tape::backward_with_resident` から `grad::vjp` へスレッドする。`Tape`
+/// は `Send` を維持する必要があり（`tests/fusion_backend_integration.rs`
+/// の `tape_is_send`）`DeviceBuffer<f32>`（`!Send` な `Box<dyn
+/// BufferHandle>` を保持しうる）を `TapeNode`／`Tape` 自身へ持たせられ
+/// ないため、バッファの所有は `DeviceParamStore` 側に留め、backward の
+/// 呼び出し側から本トレイトオブジェクトとして一時的に借用する設計と
+/// した（`docs/device-resident-update-design.md` §3.3e）。
+pub(crate) trait ResidentResolver {
+    /// `store_id`（このリゾルバ自身が保持するストアと一致するはず）・
+    /// `slot`（ストア内の位置）から対応する `DeviceBuffer<f32>` を返す。
+    /// 別ストアの葉が混入した場合・`slot` が範囲外の場合は
+    /// `AutodiffError::InvalidArgument` で fail-closed に拒否する
+    /// （`.claude/rules/security.md` A08。誤った勾配をデバイスへ適用
+    /// させない）。
+    fn resident_buffer(
+        &self,
+        store_id: u64,
+        slot: usize,
+    ) -> Result<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>, AutodiffError>;
 }
 
 impl Op {
@@ -324,6 +398,30 @@ impl Tape {
             op,
             shape,
             value: OnceCell::from(value),
+            lazy_chain_size: 0,
+        });
+        id
+    }
+
+    /// デバイス常駐パラメータの葉ノード（[`Op::ResidentLeaf`]）を追記する
+    /// （イシュー #1022）。`push_eager` と異なり**ホスト値を渡さない**
+    /// （`value: OnceCell::new()` のまま空で登録する）——これが本イシュー
+    /// の中核である「forward のたびにパラメータをホストへ download
+    /// しない」を実現する箇所そのもの。`shape` は呼び出し元
+    /// （`DeviceParamStore`）が保持するデバイスバッファの shape（構造的に
+    /// 既知。実体化不要）をそのまま渡す。
+    pub(crate) fn push_resident_leaf(
+        &self,
+        shape: Vec<usize>,
+        store_id: u64,
+        slot: usize,
+    ) -> NodeId {
+        let mut nodes = self.nodes.borrow_mut();
+        let id = NodeId(nodes.len());
+        nodes.push(TapeNode {
+            op: Op::ResidentLeaf { store_id, slot },
+            shape,
+            value: OnceCell::new(),
             lazy_chain_size: 0,
         });
         id

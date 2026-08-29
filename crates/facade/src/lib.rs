@@ -113,7 +113,7 @@ pub mod optim;
 // 経路）は REQ-9 の 2026-08-29 追記（正本 spec
 // `docs/spec/04-requirements.md:213`。実装リポ #984／#986）で `tape()`系・
 // `compat`／`optim` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
-pub use fandhe_ai_autodiff::optim::{DeviceParamStore, SgdConfig};
+pub use fandhe_ai_autodiff::optim::{DeviceParamStore, ResidentLeaf, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};
 
@@ -168,6 +168,26 @@ impl Tape {
         config: &SgdConfig,
     ) -> Result<(), BackendError> {
         store.step(&self.0, grads, config)
+    }
+
+    /// [`DeviceParamStore::backward`] への委譲入口（イシュー #1022）。
+    ///
+    /// `Sequential::forward_resident`（`compat::sequential`）で forward
+    /// したグラフ（`Op::LinearResident` を含む）は、weight のデバイス
+    /// バッファを解決できる本メソッドで backward する必要がある——
+    /// 素の [`Tape::backward`] はこの解決手段を持たず型付きエラーで
+    /// 拒否する（`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore::backward` doc・`docs/device-resident-update-
+    /// design.md` §3.3e 参照）。`step_device_param_store` と同じ理由の
+    /// 薄い委譲であり、`BackendOps`／`MemoryOps` を利用者向け公開面へ
+    /// 露出しない（`crate::lib.rs` モジュール doc「公開面の設計」・
+    /// REQ-12）。
+    pub fn backward_device_param_store(
+        &self,
+        loss: &Var<'_>,
+        store: &DeviceParamStore,
+    ) -> Result<Gradients, AutodiffError> {
+        store.backward(&self.0, loss)
     }
 
     /// [`DeviceParamStore::sync_to_host`] への委譲入口（イシュー #935）。

@@ -91,7 +91,10 @@ fn train_with_device_param_store(steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor
         let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
         log.push(scalar(&loss.to_tensor()));
 
-        let grads = tape.backward(&loss).unwrap();
+        // `Op::LinearResident` を含むグラフのため素の `tape.backward` は
+        // 型付きエラーで拒否される（イシュー #1022）。
+        // `tape.backward_device_param_store` を使う。
+        let grads = tape.backward_device_param_store(&loss, &store).unwrap();
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
     }
@@ -221,7 +224,7 @@ fn device_resident_matches_host_sgd_across_100_steps_final_value_only() {
             let y = tape.var(&y_data);
             let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
             let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-            let grads = tape.backward(&loss).unwrap();
+            let grads = tape.backward_device_param_store(&loss, &store).unwrap();
             tape.step_device_param_store(&mut store, &grads, &config)
                 .unwrap();
         }
@@ -302,7 +305,7 @@ fn predict_resident_matches_predict_after_training() {
         let y = tape.var(&y_data);
         let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
         let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let grads = tape.backward_device_param_store(&loss, &store).unwrap();
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
     }

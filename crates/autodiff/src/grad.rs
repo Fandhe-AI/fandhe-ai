@@ -21,7 +21,7 @@ use fandhe_ai_tensor_core::{BackendOps, Tensor};
 
 use crate::error::AutodiffError;
 use crate::eval::{self, build_tensor, dense_vec};
-use crate::tape::{NodeId, Op, TapeNode, materialize_fallible};
+use crate::tape::{NodeId, Op, ResidentResolver, TapeNode, materialize_fallible};
 use crate::var::Reduction;
 
 /// ノード 1 個分の VJP。`upstream`（出力側勾配）と記録済みノード列
@@ -37,12 +37,22 @@ use crate::var::Reduction;
 /// forward 記録済みの未実体化ノードを [`materialize_fallible`]（層 1。
 /// `run_fused` の失敗のうち `Unsupported` 以外は `?` で伝播する）経由で
 /// 読む（`Var::value`〈層 2〉は呼ばない。§3.5.2）。
+///
+/// `resident`（イシュー #1022）: `Op::LinearResident` の VJP が
+/// `weight`／`bias` のデバイス常駐バッファを取得するための
+/// [`ResidentResolver`]。素の [`crate::tape::Tape::backward`] からは
+/// `None` が渡り、`DeviceParamStore::backward`（`optim::device_store`）
+/// 経由の呼び出し（`Tape::backward_with_resident`）でのみ `Some` になる
+/// （`tape::Op::LinearResident` doc「素の `Tape::backward`（resolver
+/// なし）では型付きエラー」参照）。`Op::ResidentLeaf` 自身は `Op::Leaf`
+/// と同じく入力を持たないため `resident` を参照しない。
 pub(crate) fn vjp(
     op: &Op,
     out_value: &Tensor<f32>,
     upstream: &Tensor<f32>,
     nodes: &[TapeNode],
     ops: &dyn BackendOps,
+    resident: Option<&dyn ResidentResolver>,
 ) -> Result<Vec<(NodeId, Tensor<f32>)>, AutodiffError> {
     // `Op` は `CrossEntropyLoss` の `targets: Tensor<i32>` payload
     // ゆえに `Copy` を持たない（`tape.rs::Op` doc 参照）。旧
@@ -130,6 +140,65 @@ pub(crate) fn vjp(
             // 寄与を返すのは `logits` の 1 系統のみ（`tape::Op::
             // CrossEntropyLoss` doc 参照）。
             vec![(logits, dlogits)]
+        }
+        // デバイス常駐パラメータの葉（イシュー #1022）。`Op::Leaf` と同じく
+        // 入力を持たないため寄与なし（`tape::Op::ResidentLeaf` doc 参照）。
+        Op::ResidentLeaf { .. } => Vec::new(),
+        // デバイス常駐 weight（・bias）で forward した Linear 相当ノード
+        // （イシュー #1022）。`resident`（`ResidentResolver`）経由でしか
+        // `weight` の `DeviceBuffer<f32>` を取得できないため、`None` の
+        // 場合は型付きエラーで拒否する（`tape::Op::LinearResident` doc
+        // 「素の `Tape::backward`（resolver なし）では型付きエラー」）。
+        Op::LinearResident {
+            input,
+            weight,
+            bias,
+        } => {
+            let Some(resident) = resident else {
+                return Err(AutodiffError::InvalidArgument(
+                    "grad::vjp: Op::LinearResident requires DeviceParamStore::backward (a plain \
+                     Tape::backward cannot resolve the resident weight buffer)"
+                        .to_string(),
+                ));
+            };
+            let (store_id, slot) = match &nodes[weight.0].op {
+                Op::ResidentLeaf { store_id, slot } => (*store_id, *slot),
+                _ => {
+                    return Err(AutodiffError::InvalidArgument(
+                        "grad::vjp: Op::LinearResident.weight does not point to an \
+                         Op::ResidentLeaf node (contract violation)"
+                            .to_string(),
+                    ));
+                }
+            };
+            let w_dev = resident.resident_buffer(store_id, slot)?;
+            let x_val = materialize_fallible(nodes, ops, input)?;
+
+            // d_input^T = W @ g^T（`W: [k,n]`・`g: [m,n]` → `g^T: [n,m]`
+            // → `tmp: [k,m]`）。`W` はデバイス常駐のまま
+            // `ops.gemm_resident_lhs` へ渡し、ホストへ download しない
+            // （本イシューの受け入れ条件の中核）。
+            let g_t = transpose2d(upstream);
+            let tmp = ops
+                .gemm_resident_lhs(w_dev, &g_t)
+                .map_err(AutodiffError::Backend)?;
+            let d_input = transpose2d(&tmp);
+
+            // d_weight = x^T @ g（既存 `matmul_vjp` の `dB` と同一式。
+            // `x`・`g` はいずれもホスト常駐のため通常の `eval::matmul` で
+            // 計算できる）。
+            let x_t = transpose2d(x_val);
+            let d_weight = eval::matmul(&x_t, upstream);
+
+            let mut contributions = vec![(input, d_input), (weight, d_weight)];
+            if let Some(bias_id) = bias {
+                // bias の勾配は `Op::Add` の VJP と同じ縮約
+                // （`reduce_to_shape`。行方向ブロードキャストの逆演算）。
+                let bias_shape = &nodes[bias_id.0].shape;
+                let d_bias = reduce_to_shape(upstream, bias_shape);
+                contributions.push((bias_id, d_bias));
+            }
+            contributions
         }
     };
     Ok(contributions)
@@ -1059,7 +1128,7 @@ mod tests {
         let op = Op::MatMul(NodeId(0), NodeId(1));
         let g = t(&[1.0, -0.5, 0.3, 2.0], &[2, 2]);
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1077,7 +1146,7 @@ mod tests {
         let nodes = vec![leaf_node(a), leaf_node(b)];
         let op = Op::Add(NodeId(0), NodeId(1));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1095,7 +1164,7 @@ mod tests {
         let nodes = vec![leaf_node(a.clone()), leaf_node(b.clone())];
         let op = Op::Mul(NodeId(0), NodeId(1));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1112,7 +1181,7 @@ mod tests {
         let nodes = vec![leaf_node(a.clone())];
         let op = Op::Relu(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1130,7 +1199,7 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Exp(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1148,7 +1217,7 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Tanh(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1164,7 +1233,7 @@ mod tests {
         let nodes = vec![leaf_node(a)];
         let op = Op::Sigmoid(NodeId(0));
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1183,7 +1252,7 @@ mod tests {
             dim: Some(0),
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1202,7 +1271,7 @@ mod tests {
             dim: Some(0),
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1223,7 +1292,7 @@ mod tests {
             reduction: Reduction::Mean,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1248,7 +1317,7 @@ mod tests {
             reduction: Reduction::Sum,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 2);
         assert_eq!(grads[0].0, NodeId(0));
@@ -1277,7 +1346,7 @@ mod tests {
             reduction: Reduction::Mean,
         };
 
-        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops()).unwrap();
+        let grads = vjp(&op, &out_value, &g, &nodes, &test_ops(), None).unwrap();
 
         assert_eq!(grads.len(), 1);
         assert_eq!(grads[0].0, NodeId(0));

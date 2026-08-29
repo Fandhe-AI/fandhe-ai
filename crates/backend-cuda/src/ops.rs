@@ -595,6 +595,203 @@ impl BackendOps for CudaBackendOps {
         }
     }
 
+    /// デバイス常駐 `w`（・`bias`）のまま `y = a @ w (+ bias)` を計算する
+    /// （イシュー #1022）。`a`（活性化値）のみをホストからアップロード
+    /// し、`w`／`bias` は [`crate::gemm::CudaGemm::launch_tiled_bias_act_f32`]
+    /// （device-slice 起動。イシュー #1022 で `run_tiled_bias_act_f32` の
+    /// 本体から切り出した経路）へそのまま渡すことで、これらの download
+    /// を発生させない（`sgd_step_device` と同じ「転送コストを最小化する」
+    /// 方針）。
+    fn gemm_resident_rhs(
+        &self,
+        a: &Tensor<f32>,
+        w: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        bias: Option<&fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if w.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Cuda(self.ordinal) {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        if k == 0 {
+            // `fandhe_ai_autodiff::nn::linear::Linear::new` が
+            // `in_features == 0` を構築時に拒否するため、この分岐は
+            // `Sequential` 経由の forward では到達しない
+            // （`tensor-core::backend_ops::BackendOps::gemm_resident_rhs`
+            // doc 参照）。CPU 参照実装のようにホスト側 epilogue のみで
+            // 済ませるには resident `bias` を download する必要があり、
+            // それは本メソッドが排除する対象の D2H そのものになるため、
+            // フォールバックを設けず型付きエラーで拒否する。
+            return Err(BackendError::InvalidArgument(
+                "gemm_resident_rhs: k == 0 is unreachable via Linear::new (in_features == 0 is \
+                 rejected at construction); a host epilogue fallback would require downloading \
+                 the resident bias, defeating the zero-D2H contract this method exists for"
+                    .to_string(),
+            ));
+        }
+        if m == 0 || n == 0 {
+            return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
+        }
+
+        let w_handle = w
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_slice) = w_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let bias_handle = bias
+            .map(|b| {
+                b.downcast_handle::<CudaBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+            })
+            .transpose()?;
+        let bias_slice = match &bias_handle {
+            Some(h) => Some(h.slice.as_ref().ok_or_else(|| {
+                BackendError::DeviceAllocationFailed(
+                    "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation".into(),
+                )
+            })?),
+            None => None,
+        };
+
+        let device = self.device_handle()?;
+        let mem = CudaMemory::new(&device);
+        let a_dev_buf = mem.upload(a)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_slice) = a_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let mut c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_slice) = c_handle.slice.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(self.ordinal, &device)
+            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        gemm.launch_tiled_bias_act_f32(
+            a_slice, w_slice, bias_slice, false, c_slice, m as u32, n as u32, k as u32,
+        )
+        .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        mem.download(&c_dev_buf)
+    }
+
+    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022）。
+    /// `Op::LinearResident` の VJP が `d_input^T = w @ g^T` を計算する
+    /// ために使う。[`Self::gemm_resident_rhs`] と同じく `w` は download
+    /// せず [`crate::gemm::CudaGemm::launch_tiled_f32`]（device-slice
+    /// 起動。既存メソッド）へそのまま渡す。
+    fn gemm_resident_lhs(
+        &self,
+        w: &fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if w.device() != Device::Cuda(self.ordinal) {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let w_shape = w.shape();
+        if w_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: w_shape.len(),
+            }));
+        }
+        let (p, q) = (w_shape[0], w_shape[1]);
+        let b_shape = b.shape();
+        if b_shape.len() != 2 || b_shape[0] != q {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: w_shape.to_vec(),
+                rhs: b_shape.to_vec(),
+            }));
+        }
+        let r = b_shape[1];
+        if p == 0 || r == 0 {
+            return Tensor::new(Vec::new(), &[p, r]).map_err(BackendError::ShapeMismatch);
+        }
+        if q == 0 {
+            // `w` の縮約次元（`out_features`。`Linear::new` は
+            // `out_features == 0` を許容する）が 0 の場合、GEMM の数学的
+            // 定義どおり結果は全 0（`gemm`／`run_tiled_f32` の `k == 0`
+            // 契約と同じ）。GPU 起動を回避してホスト側で直接構築する。
+            return Tensor::from_shape_fill(&[p, r], |_| 0.0).map_err(BackendError::ShapeMismatch);
+        }
+
+        let w_handle = w
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_slice) = w_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let device = self.device_handle()?;
+        let mem = CudaMemory::new(&device);
+        let b_dev_buf = mem.upload(b)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_slice) = b_handle.slice.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs: b buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let mut c_dev_buf = mem.alloc_zeroed(&[p, r])?;
+        let c_handle = c_dev_buf
+            .downcast_handle_mut::<CudaBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_slice) = c_handle.slice.as_mut() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(self.ordinal, &device)
+            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        gemm.launch_tiled_f32(w_slice, b_slice, c_slice, p as u32, r as u32, q as u32)
+            .map_err(|e: CudaError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        mem.download(&c_dev_buf)
+    }
+
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {
         self.elementwise_binary(a, b, |ew, a_s, b_s| ew.run_add_f32(a_s, b_s))
     }

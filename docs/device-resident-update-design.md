@@ -1650,3 +1650,44 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
   本ツリーのスコープ外とし、必要になった時点で別途 Issue 化する。
 - f16 経路への拡張。
 - optimizer 公開面（`facade` 側の意匠）の変更 — 接続先: #932。
+
+## 追補: #1022 による resident-aware VJP の実装（§3.3b「転送モデルとの整合性の明記」・上記スコープ外事項「resident-aware な VJP」の解消）
+
+上記スコープ外事項に記した **resident-aware な VJP** をイシュー #1022 で
+実装した。本節はその実装内容の要約を記録する（設計判断の詳細は PR 説明・
+`crates/autodiff/src/tape.rs::Op::ResidentLeaf`／`Op::LinearResident`・
+`crates/autodiff/src/optim/device_store.rs` の各ドキュメンテーション
+コメントを正とし、本節は追補記録に留める）。
+
+- **転送モデルの変更**: §3.3b が「本段階で残る転送」と明記していた
+  「forward 用 weight/bias `download`」を排除した。`DeviceParamStore::
+  register_resident_leaves`／`snapshot_resident_leaves` はテープへ
+  `Op::ResidentLeaf`（ホスト値を持たない葉ノード）を登録するのみで
+  download を行わず、`DeviceParamStore::linear_forward` が
+  `BackendOps::gemm_resident_rhs`（新設・非破壊デフォルトメソッド）へ
+  `w`／`bias` のデバイスバッファをそのまま渡す。残る D2H は演算出力
+  （`y`・勾配等）の readback のみであり、これは phase-4（#924）のスコープ
+  （§6(b)・上記スコープ外事項参照）。
+- **`Tape: Send` 制約との整合**（§3.4 相当の追加判断）: `DeviceBuffer<f32>`
+  は `!Send` になりうるため `TapeNode`／`Tape` へ持たせられない
+  （`tests/fusion_backend_integration.rs::tape_is_send`）。そのため
+  backward は `DeviceParamStore` 自身が実装する `ResidentResolver`
+  トレイト（`tape.rs`。`store_id`／`slot` → `&DeviceBuffer<f32>`）経由で
+  一時的にバッファを解決する設計とした。`Tape::backward`（resolver なし）
+  は `Op::LinearResident` を含むグラフに対し
+  `AutodiffError::InvalidArgument` を返す（fail-closed）。呼び出し元は
+  `DeviceParamStore::backward`（`facade::Tape::
+  backward_device_param_store`）を使う。
+- **公開面の破壊的変更**: `register_resident_leaves`／
+  `snapshot_resident_leaves` の戻り型が `Vec<Var<'t>>` から不透明型
+  `optim::ResidentLeaf<'t>`（`shape()` のみ公開）へ変わった。これに伴い
+  `facade::compat::Sequential::forward_from_flat_vars`（private）は
+  `forward_from_flat_leaves` へ改名し `DeviceParamStore::linear_forward`
+  を呼ぶ形へ変更した。`facade` の公開面には `Tape::
+  backward_device_param_store`（新設）を追加した
+  （`docs/compat-api-scope.md` §0 追記）。
+- **受け入れ条件 1 の解釈**: 本イシューが 0 回にするのは
+  `DeviceParamStore` が保持するパラメータ（weight/bias）に対する
+  `MemoryOps::download` であり、演算出力（y・dXᵀ・loss 等）の D2H は
+  含まない（現行アーキテクチャの `BackendOps` がホスト `Tensor<f32>`
+  契約であるため。演算単位同期の廃止は #1011〜#1014・phase-4 のスコープ）。

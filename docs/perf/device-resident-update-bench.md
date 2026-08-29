@@ -130,3 +130,39 @@ tolerance・実装（`register_resident_leaves`・`DeviceParamStore::step` の
 満たすため、原因分析とともにここへ記録する。改善（例: grad upload の
 バッチ化・D2H download 頻度の削減）が必要かどうかの判断・後続対応は
 別イシューでの検討をユーザーへ提案する（`out-of-scope-tracking.md`）。
+
+## 6. #1022 後の再計測（forward の param D2H 排除）
+
+イシュー #1022 は「削減されるのは param 再アップロードのみ」という
+上記 4 節・設計文書 §3.3 の前提そのもの（`register_resident_leaves` が
+毎 step weight/bias を download していた点）を変更した——
+`DeviceParamStore::register_resident_leaves`／`linear_forward` が
+download を行わなくなったため、新経路の GPU ディスパッチ回数は
+「grad upload × パラメータ数 + `sgd_step_device` カーネル起動 ×
+パラメータ数」（forward 側の download が消えた分だけ旧経路より少ない）
+へ変わった。
+
+**計測区間・環境**: `crates/facade/tests/device_param_store_bench.rs`
+（4 節と同一ハーネス・同一モデル・`TRIALS=5`・`STEPS_PER_TRIAL=20`）。
+本ラン環境は Linux x86_64（RTX 3060・nvcc なし。CUDA 実機計測は本ランの
+スコープ外。手順注記参照）。
+
+- **CPU**（`cargo test -p fandhe-ai --release --test device_param_store_bench
+  legacy_vs_resident_per_step_cpu -- --nocapture`）:
+  `legacy_total_median=64.9µs (q1=56.6µs, q3=77.0µs)` 対
+  `resident_total_median=59.8µs (q1=56.7µs, q3=64.7µs)`
+  （`total_speedup_x=1.09`。resident が僅かに高速）。update フェーズ単体は
+  `legacy=2.76µs` 対 `resident=1.12µs`（`update_speedup_x=2.48`）。
+  4 節の CPU 計測（非後退・ノイズレベル差）から明確な後退は生じておらず、
+  update フェーズは #1022 と無関係に既存どおり高速だが、total 側も
+  #1022 前よりわずかに resident 優位側へ寄っている（forward の download
+  排除分。ただし CPU は転送コスト自体が小さいためこの差もノイズレベルに
+  近い。4 節の record only 方針を維持し hard assert はしない）。
+- **Metal／CUDA**: 本ラン（Linux・Metal 実機なし・CUDA toolkit なし）では
+  未計測。Mac / DGX Spark セッションでの実測を後続に委ねる
+  （`crates/facade/tests/device_param_store_bench.rs::
+  legacy_vs_resident_per_step_cuda`〈`#[ignore]`〉・Metal 実機での
+  `cargo test -p fandhe-ai --release --test device_param_store_bench --
+  --ignored --nocapture` を参照）。4 節で観測された Metal の後退
+  （小規模モデルでの GPU ディスパッチ回数増加が主因）が #1022 の
+  forward download 排除でどの程度緩和されるかは実機再計測が必要。

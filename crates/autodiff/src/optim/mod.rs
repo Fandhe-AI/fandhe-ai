@@ -27,5 +27,5 @@
 mod device_store;
 mod sgd;
 
-pub use device_store::DeviceParamStore;
+pub use device_store::{DeviceParamStore, ResidentLeaf};
 pub use sgd::{Sgd, SgdConfig};
