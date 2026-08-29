@@ -516,6 +516,22 @@ struct OrdinalState {
     /// 連続回数。[`LIMIT_PROBE_RETRIES`] に達すると恒久 poison へ確定する
     /// （無限リトライを避ける fail-closed な上限）。
     probe_retry_count: u32,
+    /// 現在 `invalidate_with` の retire ループで `Phase::Retiring` を
+    /// 観測し `Condvar::wait` により駐機中（parked）のスレッド数。
+    /// `Condvar` 自体は「現在待機中のスレッド数」を問い合わせる API を
+    /// 持たないため、`invalidate_with` 内で明示的にカウントする
+    /// （`became_waiter` の判定と対で 1 回だけ増減する）。並行 `invalidate`
+    /// の統合テスト（`invalidate_with_concurrent_waiter_does_not_become_a_new_owner`）
+    /// が「waiter が実際に `Condvar::wait` で駐機した後で初めて owner を
+    /// 完了させる」という決定的な同期点を得るために使う（この値が 0 から
+    /// 1 になった時点を観測すれば、waiter 自身の `invalidate_with` 呼び
+    /// 出しが `Phase::Retiring` を観測し `wait` へ入ったことを保証できる。
+    /// テストの外側から `Phase::Retiring` を別途ポーリングするだけでは
+    /// 「waiter がまだ呼び出しさえ始めていない」状態と区別できず、
+    /// owner を早期に完了させてしまうレースが起きうる）。将来的な
+    /// 診断（「現在この ordinal の回復待ちで停止しているスレッド数」）
+    /// にも転用できる。
+    retiring_waiters: u64,
 }
 
 impl Default for OrdinalState {
@@ -525,6 +541,7 @@ impl Default for OrdinalState {
             phase: Phase::Active,
             in_flight: 0,
             probe_retry_count: 0,
+            retiring_waiters: 0,
         }
     }
 }
@@ -911,7 +928,12 @@ fn invalidate_with(
                 });
             }
             Phase::Retiring => {
-                became_waiter = true;
+                if !became_waiter {
+                    // 1 回だけ増やす（同じスレッドが spurious wakeup で
+                    // 複数回このアームへ戻ってきても二重加算しない）。
+                    became_waiter = true;
+                    state.retiring_waiters += 1;
+                }
                 state = cell.1.wait(state).map_err(|e| {
                     BackendError::DeviceContextPoisoned(format!(
                         "invalidate の Condvar 待機中に Mutex が poison しました: {e}"
@@ -926,6 +948,10 @@ fn invalidate_with(
     }
 
     if became_waiter {
+        // 駐機終了（`retiring_waiters` を対で減らす。モジュール内
+        // `OrdinalState::retiring_waiters` ドキュメンテーションコメント
+        // 参照）。
+        state.retiring_waiters -= 1;
         // 先行呼び出し（所有者）が retire を確定させた最終状態を、
         // このスレッド自身の結果としてそのまま返す（新たな所有権は
         // 取らない。sync/probe を再実行しない）。
@@ -1847,15 +1873,34 @@ mod poison_state_tests {
     /// 2 回進んでしまい、1 回目の回復で正しくなったはずのハンドルを
     /// 再び stale 世代にしてしまう。
     ///
-    /// `std::thread::scope` で owner／waiter を同時に起動し、owner の
-    /// `sync` クロージャ内でチャネル通知＋ waiter 側のポーリングにより
-    /// 「waiter が `Phase::Retiring` を観測してから owner の sync/probe が
-    /// 完了する」という実行順序を強制する。修正前の実装だと waiter が
-    /// 誤って所有者に成り代わり `generation` が 2 まで進んでしまう
-    /// （修正後は 1 のまま）。
+    /// `std::thread::scope` で owner／waiter を同時に起動する。owner の
+    /// `sync` クロージャ内でチャネル通知した後、`OrdinalState::
+    /// retiring_waiters`（waiter 自身の `invalidate_with` 呼び出しが
+    /// `Phase::Retiring` を観測し `Condvar::wait` で実際に駐機した
+    /// ことを示す明示カウンタ）が 1 になるまでポーリングしてから owner
+    /// の sync を完了させる。
+    ///
+    /// CI 実測で間欠的に FAILED（イシュー #1064 追補）: 旧実装は
+    /// waiter 側で `Phase::Retiring` を別途ポーリングしてから
+    /// `invalidate_with` を呼んでいたが、「ポーリングが `Retiring` を
+    /// 観測する」タイミングと「waiter 自身の `invalidate_with` 呼び出しが
+    /// 実際に `Phase::Retiring` を観測して `wait` に入る」タイミングは
+    /// 別々のロック取得であり、両者の間に owner が sync/probe を完了
+    /// させてしまうと waiter の `invalidate_with` 呼び出しは
+    /// `Phase::Active` を最初から観測し、became_waiter とはならず
+    /// **自ら新たな所有者になってしまう**（`Condvar` は「現在待機中の
+    /// スレッド数」を問い合わせる API を持たないため、外側からの
+    /// ポーリングだけでは「waiter の呼び出しが `wait` に入った」ことを
+    /// 判定できなかった）。`retiring_waiters` は waiter の
+    /// `invalidate_with` 呼び出し自身が `wait` へ入る直前に増分する
+    /// ため、これをポーリングすれば「waiter は必ず `Phase::Retiring` を
+    /// 観測して `wait` に入った」ことを取りこぼしなく判定できる
+    /// （`OrdinalState::retiring_waiters` ドキュメンテーションコメント
+    /// 参照）。
     #[test]
     fn invalidate_with_concurrent_waiter_does_not_become_a_new_owner() {
         use std::sync::mpsc;
+        use std::time::{Duration, Instant};
 
         let registry = OrdinalRegistry::new();
         let ordinal = 0usize;
@@ -1871,8 +1916,8 @@ mod poison_state_tests {
                     move || {
                         // owner が Retiring へ遷移しロックを手放した直後
                         // （sync クロージャ呼び出し時点）に waiter を起動
-                        // してよいことを知らせ、waiter が Retiring を
-                        // 実際に観測するまで待ってから sync を完了させる。
+                        // してよいことを知らせ、waiter が実際に `wait` へ
+                        // 入るまで待ってから sync を完了させる。
                         owner_entered_tx.send(()).unwrap();
                         release_owner_rx.recv().unwrap();
                         Ok(())
@@ -1884,23 +1929,26 @@ mod poison_state_tests {
             // owner が Retiring へ遷移するのを待つ。
             owner_entered_rx.recv().unwrap();
 
-            let waiter = scope.spawn(move || {
-                // waiter が実際に `Phase::Retiring` を観測してから owner
-                // の sync を完了させる（waiter がまだロックへ到達して
-                // いない状態で owner を進めてしまうと、waiter が
-                // `Retiring` を一度も観測せず「たまたま owner になる」
-                // 経路に落ちてテストの意図が崩れるため、ポーリングで
-                // 明示的に同期する）。
-                let cell = registry_ref.entry(ordinal).unwrap();
-                loop {
-                    if matches!(cell.0.lock().unwrap().phase, Phase::Retiring) {
-                        break;
-                    }
-                    std::thread::yield_now();
+            let waiter =
+                scope.spawn(move || invalidate_with(registry_ref, ordinal, || Ok(()), || Ok(())));
+
+            // waiter 自身の `invalidate_with` 呼び出しが `Phase::Retiring`
+            // を観測し `Condvar::wait` で実際に駐機するまで待つ
+            // （`retiring_waiters` が 1 になった時点が「waiter は必ず
+            // 待機側の経路に入った」ことを意味する決定的な同期点）。
+            let cell = registry_ref.entry(ordinal).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if cell.0.lock().unwrap().retiring_waiters >= 1 {
+                    break;
                 }
-                release_owner_tx.send(()).unwrap();
-                invalidate_with(registry_ref, ordinal, || Ok(()), || Ok(()))
-            });
+                assert!(
+                    Instant::now() < deadline,
+                    "waiter が 5 秒以内に Condvar::wait へ入らなかった（テスト環境の                      スレッドスケジューリング異常の疑い）"
+                );
+                std::thread::yield_now();
+            }
+            release_owner_tx.send(()).unwrap();
 
             let owner_result = owner.join().expect("owner thread does not panic");
             let waiter_result = waiter.join().expect("waiter thread does not panic");
@@ -1922,5 +1970,9 @@ mod poison_state_tests {
              なってしまう）"
         );
         assert_eq!(state.phase, Phase::Active);
+        assert_eq!(
+            state.retiring_waiters, 0,
+            "テスト終了時点で駐機中のスレッドは残らないはず"
+        );
     }
 }
