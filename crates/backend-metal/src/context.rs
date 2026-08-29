@@ -335,7 +335,7 @@ impl MetalContext {
     /// `zero_fill`・`Self::dispatch_sync`・`Drop` から呼ばれる。イシュー
     /// #1017・設計文書 §3.5）。
     ///
-    /// 開いているバッチはまず [`Self::flush_locked`] で commit してから
+    /// 開いているバッチはまず `flush_locked` で commit してから
     /// 待つ。複数バッチにまたがって失敗した場合、**全バッチの登録済み
     /// トークンへ伝播**したうえで最初のエラーを返す（`.claude/rules/
     /// security.md` A08。1 個のエラーで打ち切って残りのバッチの失敗を
@@ -346,7 +346,7 @@ impl MetalContext {
     ///
     /// `flush_locked` の `endEncoding()`／`commit()` に加え、本メソッド
     /// 自身の `waitUntilCompleted()`／`status()`／`error()` も
-    /// autoreleased なオブジェクトを返しうる（[`Self::encode`] の
+    /// autoreleased なオブジェクトを返しうる（`encode` の
     /// autoreleasepool コメント参照）。`encode` から `should_auto_flush`
     /// 経由で `flush_locked` のみが呼ばれる経路は `encode` 側の
     /// `autoreleasepool` で覆われているが、本メソッドを直接呼ぶ経路
@@ -391,7 +391,7 @@ impl MetalContext {
 
     /// コンピュートエンコーダを生成し `encode_fn` にディスパッチ内容の
     /// 記録を委ね、即座に完了を待つ同期実行ヘルパ（イシュー #1017 で
-    /// [`Self::encode`] + [`Self::synchronize`] の薄いラッパーへ変更した。
+    /// `encode` + [`Self::synchronize`] の薄いラッパーへ変更した。
     /// シグネチャ・戻り値の意味は不変であり既存呼び出し元
     /// （`gemm.rs`／`elementwise.rs`／`rmsnorm.rs`／`softmax.rs`）は無
     /// 変更のまま動作する）。同期方式は PoC-v2-4 の計測境界
@@ -401,7 +401,7 @@ impl MetalContext {
     /// `resources` を渡さない（`&[]`）のは、このバッファ列が
     /// `synchronize()` 完了まで呼び出し元の関数スコープで生存する契約
     /// （呼び出し元が `dispatch_sync` の戻り待ちを行う）ため、
-    /// [`Batch::in_flight`] による追加の生存延長が不要なため
+    /// `in_flight` による追加の生存延長が不要なため
     /// （`sgd.rs::MetalSgd::run` が `Self::encode` を直接使う際は
     /// `param`／`grad`／`velocity` を渡す点と対照的）。
     pub fn dispatch_sync<F>(&self, encode_fn: F) -> Result<(), MetalError>

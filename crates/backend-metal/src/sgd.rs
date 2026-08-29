@@ -101,16 +101,18 @@ impl MetalSgd {
     /// 要求する。`numel == 0` の場合はディスパッチ自体を回避する
     /// （`elementwise.rs::MetalElementwise::run_binary` と同じ理由）。
     ///
-    /// イシュー #1017（コマンドバッファ共有）で `ctx.dispatch_sync`
-    /// （1 dispatch = 1 コマンドバッファ + 即時 `waitUntilCompleted`）
-    /// から `ctx.encode`（バッファ結線のみ・待たない）へ切り替えた。
-    /// `token`（`Some` の場合）は `ctx.encode` と同一ロック区間で
-    /// バッチへ登録され、後続の `ctx.synchronize()`（ホスト実体化時）が
-    /// 実行時エラーを検出した際にそこへ書き込まれる（`ops.rs::
-    /// MetalBackendOps::sgd_step_device_tracked` 参照）。呼び出し元は
-    /// 本メソッドの復帰時点で GPU 実行の完了・成否を確認**できない**
-    /// （`ctx.synchronize()` を明示的に呼ぶまで遅延する）契約に変わった
-    /// 点に注意。
+    /// イシュー #1017（コマンドバッファ共有）で `token` の有無によって
+    /// 同期方式を分岐する（PR #1057 レビュー指摘。既存公開 API
+    /// `BackendOps::sgd_step_device`〈`token: None`〉の同期契約を壊さない
+    /// ため）: `token` が `None`（`ops.rs::MetalBackendOps::
+    /// sgd_step_device` 経由）の場合は `encode` 直後に本メソッド内で
+    /// `ctx.synchronize()` まで行い、復帰時点で GPU 実行の完了・成否
+    /// （`Result`）を呼び出し元へ返す（従来の `ctx.dispatch_sync` と
+    /// 同じ「1 呼び出し = 完了保証」契約）。`token` が `Some`（`ops.rs::
+    /// MetalBackendOps::sgd_step_device_tracked` 経由）の場合はバッチ化
+    /// のため待たず、実行時エラーは `ctx.encode` と同一ロック区間で
+    /// バッチへ登録した `token` へ、後続の `ctx.synchronize()`（ホスト
+    /// 実体化時）が検出した際に書き込まれる（非同期契約）。
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
@@ -161,7 +163,14 @@ impl MetalSgd {
                     use_momentum,
                 );
             },
-        )
+        )?;
+
+        // `token` が `None` の場合のみここで待つ（上記ドキュメント参照）。
+        // `Some` の場合はバッチ化された非同期契約のため待たずに返す。
+        match token {
+            None => ctx.synchronize(),
+            Some(_) => Ok(()),
+        }
     }
 }
 

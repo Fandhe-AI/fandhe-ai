@@ -311,9 +311,14 @@ impl BackendOps for MetalBackendOps {
     /// ラインキャッシュ）を経由するため、学習ループの 2 回目以降の
     /// ステップは再コンパイルを支払わない。
     ///
-    /// 実体は [`Self::sgd_step_device_impl`]（`token: None`）。
+    /// 実体は `sgd_step_device_impl`（`token: None`）。
     /// [`BackendOps::sgd_step_device_tracked`] のオーバーライド
-    /// （下記）とロジックを共有する（イシュー #1017。二重化しない）。
+    /// （下記）とロジックを共有する（イシュー #1017。二重化しない）が、
+    /// `token: None` を受けた `sgd.rs::MetalSgd::run` が `encode` 直後に
+    /// `ctx.synchronize()` まで行うため、本メソッドは従来どおり
+    /// **同期契約**（復帰時点で GPU 実行の完了・成否を返す）を保つ
+    /// （PR #1057 レビュー指摘。バッチ化された非同期契約は
+    /// `sgd_step_device_tracked` 限定）。
     fn sgd_step_device(
         &self,
         param: &mut fandhe_ai_tensor_core::buffer::DeviceBuffer<f32>,
@@ -326,9 +331,12 @@ impl BackendOps for MetalBackendOps {
 
     /// [`BackendOps::sgd_step_device_tracked`] の Metal オーバーライド
     /// （イシュー #1017・`docs/backend-metal-command-batching-design.md`
-    /// §3.7）。`token` を [`Self::sgd_step_device_impl`] → `sgd.rs::
+    /// §3.7）。`token` を `sgd_step_device_impl` → `sgd.rs::
     /// MetalSgd::run` → `context.rs::MetalContext::encode` へそのまま
-    /// 渡し、encode と同一ロック区間でバッチへ登録させる。
+    /// 渡し、encode と同一ロック区間でバッチへ登録させる。`token` が
+    /// `Some` のため `MetalSgd::run` は `encode` 後に待たず、遅延実行
+    /// （バッチ化）される非同期契約となる（`sgd_step_device` との違いは
+    /// 同メソッド doc 参照）。
     /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::step`
     /// が呼び出し元となる（`device_store.rs` モジュール冒頭コメント
     /// 「遅延失敗トークン経由の poison」参照）。
