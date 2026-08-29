@@ -111,6 +111,13 @@ impl MetalHalfBuffer {
     /// バッファの内容をホストへ読み出す
     /// （`crate::buffer::MetalBuffer::read_to_vec` の f16 版）。
     ///
+    /// 呼び出し前提はそちらと同一（イシュー #1017: GPU 書き込み完了が
+    /// `context.rs::MetalContext::synchronize` 等で保証済みであること）。
+    /// 本モジュールの唯一の呼び出し元（`gemm.rs` の f16 ディスパッチ入口）
+    /// は現時点でも `ctx.dispatch_sync`（encode + 即時 `synchronize` の
+    /// 薄いラッパー）経由のまま変更していないため、この前提は既に
+    /// 満たされている。
+    ///
     /// # Safety 境界
     /// `crate::buffer::MetalBuffer::read_to_vec` と同一の契約
     /// （`contents()` は `StorageModeShared` バッファの CPU 可視アドレス。

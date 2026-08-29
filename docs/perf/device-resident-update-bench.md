@@ -130,3 +130,41 @@ tolerance・実装（`register_resident_leaves`・`DeviceParamStore::step` の
 満たすため、原因分析とともにここへ記録する。改善（例: grad upload の
 バッチ化・D2H download 頻度の削減）が必要かどうかの判断・後続対応は
 別イシューでの検討をユーザーへ提案する（`out-of-scope-tracking.md`）。
+
+## 6. 追補（#1023）: `DeviceParamStore` の連結バッファ化
+
+上記 4 節が診断した「ディスパッチ単位あたり固定オーバーヘッド ×
+パラメータ数」を解消するため、#1023 で `DeviceParamStore` の内部実装を
+全パラメータ単一の連結（フラット）`DeviceBuffer<f32>` へ再構成し、
+`step()` の更新フェーズ（grad upload・カーネル起動）をパラメータ数に
+依らず 1 回／step へバッチ化した（forward 用 D2H download
+〈`register_resident_leaves`／`snapshot_resident_leaves`／
+`sync_to_host`〉も同様に 1 回へ縮退）。設計・実装の詳細は
+`docs/device-resident-update-design.md`「追補（#1023）」節・
+`crates/autodiff/src/optim/device_store.rs` モジュール冒頭コメントを
+正とする。
+
+理論上のディスパッチ回数（パラメータ件数 `N` の場合）:
+
+| フェーズ | #1023 以前 | #1023 以降 |
+|----------|-----------|-----------|
+| 更新（grad upload + カーネル起動） | `2N` | `2`（`N` に依存しない） |
+| forward 用 download | `N` | `1` |
+
+**実機再計測は本追補の記録時点では未実施**（本イシューを実装したセッション
+は Linux x86_64・RTX 3060〈CUDA driver あり・nvcc なし〉環境であり、Metal
+実機（M4 Max）・DGX Spark GB10 実機のいずれにも到達できなかったため）。
+4〜5 節が記録した Metal の後退（update フェーズ単体で約 132〜152 倍）が
+解消するかどうかは、Mac / DGX Spark セッションで以下を再実行して判定
+する必要がある:
+
+```
+cargo test -p fandhe-ai --release --test device_param_store_bench -- --nocapture
+cargo test -p fandhe-ai --release --test device_param_store_bench -- --ignored --nocapture
+```
+
+再計測結果が得られ次第、本節を実測値で更新し、5 節の「後退」判定を
+再評価する。理論上のディスパッチ回数削減（上表）は R2（Metal 後退解消）
+を保証するものではない点に注意する（小規模モデルでは command buffer
+往復自体の固定コストが `2` 回起動でも残るため。設計文書「追補（#1023）」
+節の制約・既知の限界を参照）。

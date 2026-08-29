@@ -196,7 +196,32 @@
 //! `Arc` 経由の複数スレッド共有に対応するため `RefCell` から `Mutex` へ
 //! 変更した。カーネルソース・ディスパッチロジック・許容誤差・境界検査は
 //! 一切変更していない。
+//!
+//! イシュー #1017（親 #1015・設計 #1016・`docs/backend-metal-command-
+//! batching-design.md`）で `MetalContext` にコマンドバッファ共有バッチ
+//! （`context::MetalContext::encode`／`context::MetalContext::synchronize`）を
+//! 追加した。既存の
+//! `context::MetalContext::dispatch_sync`（`encode` + 即時
+//! `synchronize` の薄いラッパーへ変更。シグネチャ・戻り値の意味は不変）
+//! を経由する既存呼び出し元（`gemm.rs`／`elementwise.rs`／`rmsnorm.rs`／
+//! `softmax.rs`）は無変更のまま後方互換を保つ。`sgd.rs::MetalSgd::run`
+//! のみ `encode` へ直接切り替え、`ops::MetalBackendOps::
+//! sgd_step_device_tracked`（`tensor-core::BackendOps` の非破壊拡張）
+//! から [`fandhe_ai_tensor_core::DispatchFailureCell`] を encode と
+//! 同一ロック区間で登録することで、`DeviceParamStore::step` の毎ステップ
+//! 呼び出しが個別のコマンドバッファ生成・`waitUntilCompleted` を支払わず
+//! 済むようにした（診断: `docs/perf/device-resident-update-bench.md`。
+//! ホスト実体化（`memory.rs::download_inner`／`zero_fill`）が唯一の
+//! 同期点となる）。`batch_state` モジュールが cfg 非依存の純粋ロジック
+//! （ラベル記録・自動 flush 上限・失敗伝播）を担う。
 
+// `context.rs::MetalContext::encode`／`flush`／`synchronize`
+// （イシュー #1017）のうち `objc2-metal` の型に触れない部分（ラベル
+// 記録・自動 flush 判定・失敗伝播・診断メッセージ整形）を切り出した
+// モジュール。`generic_cache`／`row_kernel`／`pad`／`tile` と同じ設計
+// 判断で `cfg(target_os = "macos")` を付けず、Linux（本実装環境・CI）
+// でも単体テストが回るようにする。
+pub(crate) mod batch_state;
 #[cfg(target_os = "macos")]
 pub mod buffer;
 #[cfg(target_os = "macos")]
