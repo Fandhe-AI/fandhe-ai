@@ -1,6 +1,6 @@
 # REQ-2 複合判定改定・REQ-8 表更新の REQ 改定提案（草案）
 
-> **本文書は spec リポジトリ（Fandhe-AI/rust-ai-library-spec）への REQ-2・REQ-8 改定提案の草案**であり、
+> **本文書は spec リポジトリ（Fandhe-AI/fandhe-ai-spec）への REQ-2・REQ-8 改定提案の草案**であり、
 > 正本ではない。採否・spec 側への起票判断は人間（ユーザー）の承認事項（イシュー #580）。本リポジトリの
 > `docs/spec/`（正本 submodule）は本提案作成にあたって一切編集していない。本リポジトリでは
 > `RELATIVE_TOLERANCE`・`ABSOLUTE_RESCUE_THRESHOLD`・`threshold.rs::floor_spec` のいずれの値も本提案の

@@ -1,6 +1,6 @@
 # FP8/INT8 量子化 GEMM の REQ 追加提案（草案）
 
-> **本文書は spec リポジトリ（Fandhe-AI/rust-ai-library-spec）への REQ 追加**提案の草案**であり、正本ではない。
+> **本文書は spec リポジトリ（Fandhe-AI/fandhe-ai-spec）への REQ 追加**提案の草案**であり、正本ではない。
 > 採否・spec 側への起票判断は人間（ユーザー）の承認事項（イシュー #584）。本リポジトリの
 > `docs/spec/`（正本 submodule）は本提案作成にあたって一切編集していない。**
 

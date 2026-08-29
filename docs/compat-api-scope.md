@@ -72,7 +72,7 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
   得たうえでの Issue 起票・本文書の更新。親 #960 ツリー・#961〜#963）で
   正本 spec 改定の要否「要」を確定させたうえで、経路 1（正本 spec
   リポジトリ側での REQ-9 受け入れ基準の改定）を実施した（実装リポ
-  イシュー #984・spec リポ `Fandhe-AI/rust-ai-library-spec` PR #59・
+  イシュー #984・spec リポ `Fandhe-AI/fandhe-ai-spec` PR #59・
   2026-08-29 マージ）。submodule ポインタ更新（実装リポ #985・PR #988）
   完了を受け、本イシュー #986 で確定入口の列挙へ統合した。
 - サポート境界の変更（内部クレートの直接利用をサポート対象に含める等）は
@@ -157,7 +157,7 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   - 実装リポ側で追跡が完結する事項: `.claude/rules/out-of-scope-tracking.md`
     の規約に沿って Issue で追跡する
   - 受け入れ基準・REQ-9 自体の改定が必要な事項: 正本 spec リポジトリ
-    （`Fandhe-AI/rust-ai-library-spec`）側での対応をユーザーに提案する
+    （`Fandhe-AI/fandhe-ai-spec`）側での対応をユーザーに提案する
     （`docs/spec/` は本リポでは編集しない）
 
 ## 3. 設計原則
@@ -293,7 +293,7 @@ P1」）を受けた是正である。
 必須とする。AI 自律メンテナンス（self-repair ループ）による無断拡大は
 行わない（REQ-5／`.claude/rules/security.md` の自己修復ガードレールと整合）。
 
-1. 正本 spec リポジトリ（`Fandhe-AI/rust-ai-library-spec`）側での REQ-9
+1. 正本 spec リポジトリ（`Fandhe-AI/fandhe-ai-spec`）側での REQ-9
    受け入れ基準の改定
 2. 本リポジトリのユーザー承認を得たうえでの Issue 起票・本文書の更新
 
@@ -338,5 +338,5 @@ P1」）を受けた是正である。
 | イシュー #984（spec 改定提案・正本 spec PR #59 の起票元） | クローズ済み |
 | イシュー #985（`docs/spec` submodule ポインタ更新） | クローズ済み |
 | イシュー #986（本文書 §0 の暫定注記削除・確定入口統合） | 本イシュー |
-| spec リポ `Fandhe-AI/rust-ai-library-spec` PR #59 | REQ-9 の 2026-08-29 追記（マージ済み。merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`） |
+| spec リポ `Fandhe-AI/fandhe-ai-spec` PR #59 | REQ-9 の 2026-08-29 追記（マージ済み。merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`） |
 | PR #988 | `docs/spec` submodule ポインタ更新（イシュー #985 の実装 PR） |

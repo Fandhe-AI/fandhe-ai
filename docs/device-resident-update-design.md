@@ -1626,7 +1626,7 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
 本設計は REQ-2（数値一致複合判定・FMA 契約）・REQ-8（境界検査）の枠内で
 完結し、`docs/spec/` の要件・受け入れ基準の変更を要しない見込みである。
 実装中に spec 変更が必要と判明した場合は、`docs/spec/` を直接編集せず
-正本リポジトリ（`Fandhe-AI/rust-ai-library-spec`）側での対応をユーザーへ
+正本リポジトリ（`Fandhe-AI/fandhe-ai-spec`）側での対応をユーザーへ
 提案する（`.claude/rules/out-of-scope-tracking.md`「仕様変更が必要な場合」節）。
 
 ### スコープ外事項（本ツリー #933 の対象外）

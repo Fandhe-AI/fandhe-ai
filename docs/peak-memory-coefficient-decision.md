@@ -113,7 +113,7 @@ CUDA（DGX Spark GB10）・Metal（Apple Silicon）の実機実測の転記が�
 ## spec リポ側への申し送りメモ
 
 `docs/spec/05-tasks.md`「Phase 4 への逆戻り提案」節（`:541`）は「TASK-14.2 の係数実測結果は
-REQ-14 受け入れ基準への反映が必要」と定めている。本決定に基づく Fandhe-AI/rust-ai-library-spec
+REQ-14 受け入れ基準への反映が必要」と定めている。本決定に基づく Fandhe-AI/fandhe-ai-spec
 側での反映文案は以下のとおり（`docs/spec/` は本リポでは編集しない。反映は spec リポ側で
 人間が実施すること）:
 

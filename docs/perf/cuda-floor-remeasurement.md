@@ -340,7 +340,7 @@ green であるかのような記述はしない。#393 はこの限定条件を
 
 - **#158（TASK-8.3d・人間判断）**: 本ドキュメントの候補下限値を受け取り、下限の最終確定・
   `docs/spec/04-requirements.md` への反映判断を行う。`docs/spec/` の更新自体は spec リポジトリ
-  （Fandhe-AI/rust-ai-library-spec）側で対応する（本リポでは編集しない）
+  （Fandhe-AI/fandhe-ai-spec）側で対応する（本リポでは編集しない）
 - **`docs/spec/v2-amendment-proposal-2026-08-06.md`**（改定提案ドラフトが存在する場合）: 下限＝回帰検知
   ラインとし目標 90% を別レイヤ化する改定案との関係整理は #158 側で行う
 - **`docs/performance-targets.md`（TASK-8.4・#159）**: 段階的下限の一覧整備。本ドキュメントは #157

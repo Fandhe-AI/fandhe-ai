@@ -268,7 +268,7 @@ fusion-graph-design.md` §1・§6.2「transpose 混在連鎖のメタデータ�
   wgpu` の `fusion` feature・`CUBECL_DEBUG_LOG` を前提としたまま（v2
   全面改定未実施）である。本文書は TASK-12.1〜12.2 の読み替え（自作
   elementwise 融合機構）に基づいて記述しているが、REQ-12 自体の文言
-  更新は正本リポジトリ（`Fandhe-AI/rust-ai-library-spec`）側の課題で
+  更新は正本リポジトリ（`Fandhe-AI/fandhe-ai-spec`）側の課題で
   あり、本文書のスコープ外である（`docs/spec/` は編集しない）。
 
 ## 7. Phase G を受けた方針改定要否の判断（#591）

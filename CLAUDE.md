@@ -2,7 +2,7 @@
 
 ## Overview
 
-Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public**（#457 Phase 1〜3 完了）で、CI は GitHub ホステッド `ubuntu-latest` 既定へ移行済み（self-hosted への逆戻りは `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
+Rust 製 AI/ML ライブラリの実装リポジトリ（v2）。Burn 依存を排した**完全自作コア**（テンソル・autodiff・演算グラフ／カーネル融合機構・計算カーネル・バックエンド抽象層）で実装する。仕様の正本は [Fandhe-AI/fandhe-ai-spec](https://github.com/Fandhe-AI/fandhe-ai-spec)（`docs/spec` submodule）にあり、本リポでは編集しない。本リポジトリ自体は **public**（#457 Phase 1〜3 完了）で、CI は GitHub ホステッド `ubuntu-latest` 既定へ移行済み（self-hosted への逆戻りは `runner-policy` ジョブ〈#472〉が fail-closed で検知。詳細 → `.claude/rules/ci.md`）。仕様 submodule（`docs/spec`）と旧実装（v1）は private を維持する（README「位置づけ」節）。
 
 - 想定クレート 10 個: `tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`・`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`facade`（TASK-9.3・イシュー #410 で新設した composition root に、TASK-9.4・イシュー #411 で `autodiff::compat` から compat 公開面〈`compat::array`・`compat::Sequential`〉を移設済み。`facade` が唯一のサポートされる公開 API 面であり `tensor-core`・`autodiff`・`backend-*` は内部クレート。`docs/compat-api-scope.md` §0）に加え、GitHub Pages 公開ツリー（#865 Phase 1）向けの開発者・CI 専用 SSG クレート `docs-site`（11 個目・`publish = false`。イシュー #868/#869。本体ライブラリの公開 API とは無関係で外部依存ゼロ）。上記の名称はディレクトリ名（`crates/<name>`）であり変更しない。crates.io 公開対象 6 クレート（`facade`・`tensor-core`・`autodiff`・`backend-cpu`・`backend-cuda`・`backend-metal`）は `[package] name` を `fandhe-ai` prefix 付き公開名（`fandhe-ai`・`fandhe-ai-tensor-core`・`fandhe-ai-autodiff`・`fandhe-ai-backend-cpu`・`fandhe-ai-backend-cuda`・`fandhe-ai-backend-metal`）へ rename 済み（イシュー #877/#879・#878 でユーザー承認済み。`docs/crates-io-naming-decision.md`）。`onnx-interop`・`guardrail`・`self-repair`・`bench-harness`・`docs-site` は非公開のため対象外
 - crates.io への公開は一括リリース `.github/workflows/release-all.yml`（workflow_dispatch 1 回・environment `crates-io-release` 承認 1 回で公開 6 クレートを依存順に publish）を基本とし、単一クレートの再実行・障害復旧には `.github/workflows/release.yml` を使う（いずれも `CARGO_REGISTRY_TOKEN`〈org secret〉・fail-closed ガード群。手順・版数運用の正は `docs/crates-io-publishing-order.md`）。初回公開（v0.3.0・6 クレート）は 2026-08-23 に完了済み（crates.io・docs.rs 反映確認済み。同 doc §10 追補）。v0.4.0 は 2026-08-29 に `release-all.yml` で公開済み（同 doc §10 追補）
@@ -102,7 +102,7 @@ fandhe-ai/
     ├── real-hardware-verification-env.local.md.example # 上記の実値（内部ホスト名等）を書くローカル用テンプレート（#461。実体は .gitignore 対象）
     ├── self-repair-candidate-isolation.md # 候補実行の OS レベル縦深防御の調査結果・採否判断（#414）
     ├── self-repair-revalidation-plan.md # TASK-3.3a 自己修復ループ再実証の実証計画・題材選定（#140）
-    └── spec/                # 正本 submodule（rust-ai-library-spec。編集禁止）
+    └── spec/                # 正本 submodule（fandhe-ai-spec。編集禁止）
         ├── 04-requirements.md  # REQ-1〜14
         ├── 05-tasks.md         # TASK 一覧（4h 粒度）
         ├── 06-roadmap.md       # M0〜M5・全 51 タスク

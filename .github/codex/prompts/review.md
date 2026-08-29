@@ -140,7 +140,7 @@ security / ci）から抽出して本ファイルへ直接埋め込む（基準�
   渡す `workflow_run` 等。public 化により fork PR が現実化するため独立項目とする。
   codex 専用 runner（唯一の self-hosted 例外・永続環境）に対する fork PR 実行拒否等の
   多層防御の弱体化を含む）: **P0**
-- **`docs/spec/` サブモジュール実体の書き換え**（仕様の正本は rust-ai-library-spec
+- **`docs/spec/` サブモジュール実体の書き換え**（仕様の正本は fandhe-ai-spec
   リポジトリであり本リポでは編集禁止。submodule ポインタの前進自体は通常の更新として
   扱う）: **P1**
 

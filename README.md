@@ -252,7 +252,7 @@ f16・起動コスト・ピークメモリのベンチ実測を完了し（#381�
 
 ## 仕様
 
-仕様書（ブレスト〜PoC〜要件定義〜タスク分解〜ロードマップ）は [Fandhe-AI/rust-ai-library-spec](https://github.com/Fandhe-AI/rust-ai-library-spec) で管理し、`docs/spec/` にサブモジュールとして取り込んでいます。本リポジトリでは編集しません。
+仕様書（ブレスト〜PoC〜要件定義〜タスク分解〜ロードマップ）は [Fandhe-AI/fandhe-ai-spec](https://github.com/Fandhe-AI/fandhe-ai-spec) で管理し、`docs/spec/` にサブモジュールとして取り込んでいます。本リポジトリでは編集しません。
 
 | ドキュメント | 内容 |
 |-------------|------|

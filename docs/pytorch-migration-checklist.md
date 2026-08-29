@@ -106,4 +106,4 @@ ONNX 経路はランタイムインタープリタ方式を主経路とし、ビ
   依存禁止リスト、CI で機械検査）
 - `docs/spec/`（正本 submodule）の受け入れ基準・判定式を、本書を含むいかなる文書側でも
   弱める記述に置き換えない。変更が必要な場合は正本リポジトリ
-  （`Fandhe-AI/rust-ai-library-spec`）側で対応する
+  （`Fandhe-AI/fandhe-ai-spec`）側で対応する
