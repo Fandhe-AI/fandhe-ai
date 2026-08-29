@@ -389,3 +389,82 @@ fn fresh_overhead_diag_g_cached_device_select_reference() {
     println!("=== (g) context_cache::cached_device(0) 参照値（イシュー #956 H4）===");
     print_quartiles_ms("cached_device(0) [warm]", median_of(&samples));
 }
+
+/// V3: (c) C 確保フェーズを `crate::pool::CudaAllocator`（イシュー #1020・
+/// REQ-14 のサイズクラス別プール）経由へ差し替えた変種。
+///
+/// V0（`stream.alloc_zeros` 直接呼び出し・毎試行フルコスト）との対比で、
+/// プールが (c) フェーズにどの程度効くかを実機で確認するための計測点
+/// （1 試行目＝プールミス〈初回確保〉と、2 試行目以降＝プールヒット
+/// 〈再利用〉を分離して記録する）。
+///
+/// **正直な記録（実装計画 AC-3）**: #956/#1025 の N=2048 固有 166 ms は
+/// 主にホスト側 `Vec<f32>` 解放（(f3)。上記 `DownloadVariant::Fresh` 分岐
+/// の `free_host_secs`）に帰属する仮説であり、本プールが直接効くのは
+/// デバイス側 C 確保（(c)。`alloc_c_secs` 相当）のみである。V3 が (c) を
+/// 大幅短縮しても、166 ms 全体の解消を意味しない点を実測時に区別して
+/// 転記すること（`docs/perf/cuda-fresh-gemm-n2048-overhead-diagnosis.md`
+/// §8 記入欄参照）。
+#[test]
+#[ignore = "CUDA 実機（NVRTC 搭載・compute capability 8.0 以上。DGX Spark GB10 想定）必須。#956/#1020"]
+fn fresh_overhead_diag_v3_pooled_output() {
+    let device = cached_device(0)
+        .expect("CUDA device must be available on the ignored diagnostic bench runner");
+    let gemm =
+        cached_gemm(0, &device).expect("CudaGemm construction (via context_cache) must succeed");
+    let allocator = crate::context_cache::cached_allocator(0, &device)
+        .expect("CudaAllocator construction (via context_cache) must succeed");
+
+    println!("=== fresh GEMM (c) C 確保フェーズ: V3-pooled（イシュー #1020）===");
+    for &n in &SIZES {
+        let (a, b) = gen_square_ab(0x1020_0000 ^ (n as u64), n);
+        let numel = n * n;
+
+        // ウォームアップ: 1 回目でプールへ確保させ（ミス）、その後
+        // プールへ返却する。以後の `MEASURED_TRIALS` 回はプールヒット
+        // （再利用）区間として (c) 確保フェーズのみを計測する
+        // （GEMM 本体・H2D/D2H は V0〜V2 が既に計測済みのためここでは
+        // 重複計測しない。`crate::gemm::CudaGemm::run_tiled_f32`〈本番
+        // 経路。既に本イシューでプール接続済み〉を素通しで 1 回呼び、
+        // 「プール経由の C 確保が GEMM 実行と組み合わせても壊れない」
+        // ことを合わせて確認する）。
+        let t = Instant::now();
+        let _ = gemm
+            .run_tiled_f32(&a, &b, n as u32, n as u32, n as u32)
+            .expect("warmup run_tiled_f32 (pooled output, via production path) must succeed");
+        let miss_secs = t.elapsed().as_secs_f64();
+
+        let mut hit_samples = Vec::with_capacity(MEASURED_TRIALS);
+        for _ in 0..MEASURED_TRIALS {
+            // `alloc_zeroed_f32` 単体（(c) フェーズのみ）を計測する
+            // （`run_tiled_f32` 内部の H2D／launch／D2H は計測対象外）。
+            let t = Instant::now();
+            let handle = allocator
+                .alloc_zeroed_f32(numel)
+                .expect("pooled allocation must succeed");
+            let alloc_secs = t.elapsed().as_secs_f64();
+            hit_samples.push(alloc_secs);
+            // `handle` はここで drop されプールへ返却される（次イテレー
+            // ションの `alloc_zeroed_f32` がヒットする）。
+            drop(handle);
+        }
+
+        println!("--- N={n} ---");
+        println!(
+            "  run_tiled_f32 [pool miss on first C alloc, warmup]: {:.3} ms",
+            miss_secs * 1000.0
+        );
+        print_quartiles_ms("  (c) alloc_zeroed_f32 [pool hit]", median_of(&hit_samples));
+        println!("  pool stats after N={n}: {:?}", allocator.stats());
+    }
+
+    // 実機セッションでの後片付け（次の変種・次のテスト実行への持ち越しを
+    // 避ける）。`release_cached` 自体の実測（フェーズ (i)〜(iv)）は
+    // `crates/backend-cuda/src/pool.rs` の `#[cfg(test)]` フォールト注入
+    // テストが GPU 非依存ロジックとして既にカバーしており、本箇所は
+    // 実機での通し確認のみを目的とする。
+    let freed_bytes = allocator
+        .release_cached()
+        .expect("release_cached must succeed after V3 measurement loop");
+    println!("=== release_cached: freed_bytes={freed_bytes} ===");
+}

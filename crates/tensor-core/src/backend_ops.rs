@@ -416,6 +416,30 @@ pub trait BackendOps {
             "run_fused: default fail-safe (no fusion kernel available)".into(),
         ))
     }
+
+    /// デバイスメモリプール（`backend-cuda::pool::CudaAllocator` 等。
+    /// イシュー #1020・REQ-14）がアイドル保持している分を即座に実解放する。
+    ///
+    /// `crate::pool::PooledMemory::release_all_pooled`（`MemoryOps` デコレータ
+    /// 側の解放 API）とは別経路であり、本メソッドはホットパス確保
+    /// （`backend_ops::BackendOps` 経由の GEMM／elementwise／softmax カーネル）
+    /// が使う `SizeClassPool` を対象とする。既定実装は no-op（`Ok(())`）で
+    /// あり、プール未接続のバックエンド（`backend-cpu`・`backend-metal`。
+    /// Metal 実装は後続 #1021）を破壊しない非破壊拡張（デフォルトメソッド
+    /// 追加）である。`backend-cuda::CudaBackendOps` はプール実体へ委譲する
+    /// オーバーライドを持つ（`crates/backend-cuda/src/ops.rs`）。
+    fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
+
+    /// デバイスメモリプールの現在の利用統計（[`crate::PoolStats`]）を返す。
+    ///
+    /// プールを持たないバックエンド（既定実装。`backend-cpu`・
+    /// 本イシュー時点の `backend-metal`）は `None` を返す。`backend-cuda`
+    /// のみ `Some(stats)` を返すオーバーライドを持つ。
+    fn device_memory_pool_stats(&self) -> Option<crate::PoolStats> {
+        None
+    }
 }
 
 /// 複数の `&dyn BackendOps` を横断して `device` に一致する実装を選択する。

@@ -20,10 +20,12 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels_elementwise::{self, EW_BLOCK_DIM};
 use crate::nvrtc::compile_ptx;
+use crate::pool::CudaAllocator;
 
 /// elementwise 演算 1 回あたりのブロック次元（1 次元、`EW_BLOCK_DIM` 幅）。
 const EW_BLOCK: (u32, u32, u32) = (EW_BLOCK_DIM, 1, 1);
@@ -81,6 +83,11 @@ fn elementwise_launch_config(numel: u32) -> LaunchConfig {
 /// しない。
 pub struct CudaElementwise {
     stream: Arc<CudaStream>,
+    /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
+    /// `gemm.rs::CudaGemm::allocator` と同一の設計（`crate::pool` 冒頭
+    /// コメント参照）。`context_cache::cached_allocator` 経由で
+    /// `CudaGemm` と同じ `(ordinal, 既定 stream)` 単位プールを共有する。
+    allocator: Arc<CudaAllocator>,
     add_f32: CudaFunction,
     mul_f32: CudaFunction,
     relu_f32: CudaFunction,
@@ -131,8 +138,11 @@ impl CudaElementwise {
             .load_module(tanh_ptx)?
             .load_function("ew_tanh_f32")?;
 
+        let allocator = context_cache::cached_allocator(device.ordinal(), device)?;
+
         Ok(Self {
             stream: device.stream().clone(),
+            allocator,
             add_f32,
             mul_f32,
             relu_f32,
@@ -156,7 +166,10 @@ impl CudaElementwise {
 
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
-        let mut out_dev = self.stream.alloc_zeros::<f32>(numel)?;
+        // イシュー #1020: 全カーネル（`ew_add_f32` 等）が
+        // `if (idx < numel)` ガード内で `out[idx]` を必ず埋める
+        // （`kernels_elementwise.rs` 参照）ため `alloc_uninit_f32` を使う。
+        let mut out_dev = self.allocator.alloc_uninit_f32(numel)?;
 
         let cfg = elementwise_launch_config(numel as u32);
         let numel_i = numel as i32;
@@ -173,13 +186,13 @@ impl CudaElementwise {
                 .launch_builder(func)
                 .arg(&a_dev)
                 .arg(&b_dev)
-                .arg(&mut out_dev)
+                .arg(&mut out_dev.as_view_mut())
                 .arg(&numel_i)
                 .launch(cfg)?;
         }
         self.stream.synchronize()?;
 
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        Ok(self.stream.clone_dtoh(&out_dev.as_view())?)
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
@@ -191,7 +204,7 @@ impl CudaElementwise {
         }
 
         let a_dev = self.stream.clone_htod(a)?;
-        let mut out_dev = self.stream.alloc_zeros::<f32>(numel)?;
+        let mut out_dev = self.allocator.alloc_uninit_f32(numel)?;
 
         let cfg = elementwise_launch_config(numel as u32);
         let numel_i = numel as i32;
@@ -201,13 +214,13 @@ impl CudaElementwise {
             self.stream
                 .launch_builder(func)
                 .arg(&a_dev)
-                .arg(&mut out_dev)
+                .arg(&mut out_dev.as_view_mut())
                 .arg(&numel_i)
                 .launch(cfg)?;
         }
         self.stream.synchronize()?;
 
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        Ok(self.stream.clone_dtoh(&out_dev.as_view())?)
     }
 
     /// `out[i] = a[i] + b[i]`（f32・同一長）。

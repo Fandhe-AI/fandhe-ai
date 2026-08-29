@@ -909,6 +909,37 @@ impl BackendOps for CudaBackendOps {
             "CudaBackendOps::max: reduction カーネル未実装（#599 スコープ外）".into(),
         ))
     }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::release_cached_device_memory`] の CUDA 実装
+    /// （イシュー #1020・REQ-14）。`gemm.rs`／`elementwise.rs`／`softmax.rs`
+    /// が `context_cache::cached_allocator` 経由で共有する
+    /// `(ordinal, 既定 stream)` 単位のサイズクラス別プールを即座に解放する。
+    ///
+    /// エラー文字列にはフェーズ識別子（`crate::pool::ReleasePhase`。
+    /// "pre-free sync"／"handle release"／"post-free sync"／"driver trim"）
+    /// を含める（新しい `BackendError` variant は追加しない設計判断。
+    /// `docs/backend-cuda-pool-allocator-decision.md` 参照）。
+    fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        let device = self.device_handle()?;
+        let allocator = context_cache::cached_allocator(self.ordinal, &device)
+            .map_err(|e: CudaError| BackendError::CudaUnavailable(e.to_string()))?;
+        allocator
+            .release_cached()
+            .map(|_freed_bytes| ())
+            .map_err(|e| {
+                BackendError::DeviceAllocationFailed(format!("release_cached_device_memory: {e}"))
+            })
+    }
+
+    /// [`fandhe_ai_tensor_core::BackendOps::device_memory_pool_stats`] の CUDA 実装。
+    /// driver 不在等で `device_handle()` が失敗した場合は `None` を返す
+    /// （`memory_ops` と同じ fail-safe 契約。統計取得の失敗で呼び出し元の
+    /// エラー処理を複雑化させない）。
+    fn device_memory_pool_stats(&self) -> Option<fandhe_ai_tensor_core::PoolStats> {
+        let device = self.device_handle().ok()?;
+        let allocator = context_cache::cached_allocator(self.ordinal, &device).ok()?;
+        Some(allocator.stats())
+    }
 }
 
 #[cfg(test)]

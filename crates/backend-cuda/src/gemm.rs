@@ -38,12 +38,14 @@ use std::sync::Arc;
 use cudarc::driver::{CudaFunction, CudaSlice, CudaStream, CudaView, LaunchConfig, PushKernelArg};
 use half::f16;
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::kernels;
 use crate::kernels_wmma_opt;
 use crate::module_cache::load_function_cached;
 use crate::nvrtc::{CompiledDims, CudaKernelDescriptor};
+use crate::pool::CudaAllocator;
 // `compile_ptx` は本番経路（`CudaGemm::new`。イシュー #1024 で
 // `load_function_cached` 経由へ結線済み）ではなく、`internal-diagnostics`
 // feature（既定 off）限定の診断用コンストラクタ
@@ -159,6 +161,14 @@ thread_local! {
 /// `run_naive_*`／`run_tiled_*` 呼び出しのたびに再コンパイルしない。
 pub struct CudaGemm {
     stream: Arc<CudaStream>,
+    /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
+    /// `run_f32_kernel`／`run_tiled_bias_act_f32` の `alloc_zeros::<f32>`
+    /// 直接呼び出しを置換する（`crate::pool` モジュール冒頭参照）。
+    /// `context_cache::cached_allocator` 経由で `(ordinal, 既定 stream)`
+    /// 単位のプロセスワイドプールを共有するため、`CudaGemm` の複数
+    /// インスタンス（`new_with_tf32_staged_swizzle` 等の診断用変種を
+    /// 含む）が同一 `ordinal` であれば同じプール状態を共有する。
+    allocator: Arc<CudaAllocator>,
     naive_f32: CudaFunction,
     naive_f16: CudaFunction,
     tiled_f32: CudaFunction,
@@ -963,8 +973,11 @@ impl CudaGemm {
             _ => (None, None, None),
         };
 
+        let allocator = context_cache::cached_allocator(device.ordinal(), device)?;
+
         Ok(Self {
             stream: device.stream().clone(),
+            allocator,
             naive_f32,
             naive_f16,
             tiled_f32,
@@ -1434,9 +1447,13 @@ impl CudaGemm {
             Some(bias) => (self.stream.clone_htod(bias)?, 1),
             None => (self.stream.alloc_zeros::<f32>(1)?, 0),
         };
+        // イシュー #1020: `run_f32_kernel` と同じ理由（epilogue も
+        // `row < m && col < n` ガード内で全 `m*n` 要素を必ず埋める。
+        // `kernels::TILED_BIAS_ACT_F32` 参照）でプール経由 `alloc_uninit_f32`
+        // を使う。
         let mut c_dev = self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+            .allocator
+            .alloc_uninit_f32((m as usize) * (n as usize))?;
 
         let cfg = launch_config(m, n, TILED_BLOCK_DIM);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
@@ -1453,7 +1470,7 @@ impl CudaGemm {
                 .arg(&a_dev)
                 .arg(&b_dev)
                 .arg(&bias_dev)
-                .arg(&mut c_dev)
+                .arg(&mut c_dev.as_view_mut())
                 .arg(&m_i)
                 .arg(&n_i)
                 .arg(&k_i)
@@ -1463,7 +1480,7 @@ impl CudaGemm {
         }
         self.stream.synchronize()?;
 
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        let c_host = self.stream.clone_dtoh(&c_dev.as_view())?;
         Ok(c_host)
     }
 
@@ -1940,9 +1957,18 @@ impl CudaGemm {
 
         let a_dev = self.stream.clone_htod(a)?;
         let b_dev = self.stream.clone_htod(b)?;
+        // イシュー #1020: 出力バッファはサイズクラス別プール
+        // （`crate::pool::CudaAllocator`）経由で確保する（都度
+        // `alloc_zeros`／解放していた固定費の削減。#1008 実測が主因の
+        // 1 つとして指摘）。naive/tiled いずれのカーネルも `if (row < m
+        // && col < n)` の書き込みガード内で全 `m*n` 要素を必ず埋める
+        // （`kernels.rs` 参照）ため `alloc_uninit_f32` を使う（前利用
+        // データの残留は起動直後に全要素上書きされ露出しない。OWASP A02
+        // ではなく `docs/backend-cuda-pool-allocator-decision.md` §「`
+        // alloc_uninit` の適用」の確認済みケース）。
         let mut c_dev = self
-            .stream
-            .alloc_zeros::<f32>((m as usize) * (n as usize))?;
+            .allocator
+            .alloc_uninit_f32((m as usize) * (n as usize))?;
 
         let cfg = launch_config(m, n, block_dim);
         let (m_i, n_i, k_i) = (m as i32, n as i32, k as i32);
@@ -1956,13 +1982,14 @@ impl CudaGemm {
         // REQ-8）と合わせて OOB 読み書きが起きない根拠とする。グリッド
         // 次元は `div_ceil` で m/n を包含するよう構築しており
         // （launch_config）、末尾ブロックの余剰スレッドはカーネル内境界
-        // チェックで弾かれる。
+        // チェックで弾かれる。`c_dev.as_view_mut()` は論理長 `m*n` の
+        // ビュー（サイズクラス丸めによる余剰容量は含まない）。
         unsafe {
             self.stream
                 .launch_builder(func)
                 .arg(&a_dev)
                 .arg(&b_dev)
-                .arg(&mut c_dev)
+                .arg(&mut c_dev.as_view_mut())
                 .arg(&m_i)
                 .arg(&n_i)
                 .arg(&k_i)
@@ -1970,7 +1997,7 @@ impl CudaGemm {
         }
         self.stream.synchronize()?;
 
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        let c_host = self.stream.clone_dtoh(&c_dev.as_view())?;
         Ok(c_host)
     }
 

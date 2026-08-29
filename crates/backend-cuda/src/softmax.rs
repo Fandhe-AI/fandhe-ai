@@ -35,11 +35,13 @@ use cudarc::driver::{CudaFunction, CudaStream, LaunchConfig, PushKernelArg};
 
 use fandhe_ai_tensor_core::{FusedOpKind, FusionPlan, RowFusionMeta};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use crate::gemm_auto::read_clamped_smem_budget_bytes;
 use crate::kernels_softmax::{self, SOFTMAX_BLOCK_DIM};
 use crate::nvrtc::compile_ptx;
+use crate::pool::CudaAllocator;
 use crate::rmsnorm::{
     RmsNormRoute, derive_persistent_grid_one_pass, derive_persistent_grid_two_pass, rmsnorm_route,
 };
@@ -206,6 +208,15 @@ pub(crate) fn match_softmax_plan(plan: &FusionPlan) -> Option<(usize, usize)> {
 /// （SMEM 予算・SM 数）を保持する。
 pub struct CudaSoftmax {
     stream: Arc<CudaStream>,
+    /// 出力バッファのサイズクラス別プール（イシュー #1020・REQ-14）。
+    /// `gemm.rs::CudaGemm::allocator` と同一設計。persistent grid 方式
+    /// （グリッドストライドで行を分担する）は `gemm.rs`／`elementwise.rs`
+    /// の「1 スレッド=1 出力要素」より書き込み網羅性の確認コストが高い
+    /// ため、本イシュー（#1020）では `alloc_uninit_f32` を使わず
+    /// `alloc_zeroed_f32`（プール経由だがゼロ初期化は維持）に留める
+    /// （`docs/backend-cuda-pool-allocator-decision.md` §「`alloc_uninit`
+    /// の適用」: 未確認のカーネルは zeroed のまま、という安全側判断）。
+    allocator: Arc<CudaAllocator>,
     onepass_f32: CudaFunction,
     twopass_f32: CudaFunction,
     /// per-block SMEM 予算（[`softmax_route`] の分岐に使う）。
@@ -264,8 +275,11 @@ impl CudaSoftmax {
                 ),
             })?;
 
+        let allocator = context_cache::cached_allocator(device.ordinal(), device)?;
+
         Ok(Self {
             stream: device.stream().clone(),
+            allocator,
             onepass_f32,
             twopass_f32,
             smem_per_block_budget_bytes,
@@ -320,7 +334,7 @@ impl CudaSoftmax {
         let route = softmax_route(cols, self.smem_per_block_budget_bytes);
 
         let x_dev = self.stream.clone_htod(x)?;
-        let mut out_dev = self.stream.alloc_zeros::<f32>(x.len())?;
+        let mut out_dev = self.allocator.alloc_zeroed_f32(x.len())?;
 
         let rows_i = rows as i32;
         let cols_i = cols as i32;
@@ -376,7 +390,7 @@ impl CudaSoftmax {
             self.stream
                 .launch_builder(func)
                 .arg(&x_dev)
-                .arg(&mut out_dev)
+                .arg(&mut out_dev.as_view_mut())
                 .arg(&rows_i)
                 .arg(&cols_i)
                 .arg(&scale)
@@ -384,7 +398,7 @@ impl CudaSoftmax {
         }
         self.stream.synchronize()?;
 
-        Ok(self.stream.clone_dtoh(&out_dev)?)
+        Ok(self.stream.clone_dtoh(&out_dev.as_view())?)
     }
 }
 

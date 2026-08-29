@@ -70,6 +70,7 @@ use crate::device::CudaDevice;
 use crate::elementwise::CudaElementwise;
 use crate::error::CudaError;
 use crate::gemm::CudaGemm;
+use crate::pool::CudaAllocator;
 use crate::rmsnorm::CudaRmsNorm;
 use crate::softmax::CudaSoftmax;
 
@@ -90,6 +91,7 @@ const _: fn() = || {
     assert_send_sync::<CudaElementwise>();
     assert_send_sync::<CudaRmsNorm>();
     assert_send_sync::<CudaSoftmax>();
+    assert_send_sync::<CudaAllocator>();
 };
 
 /// `ordinal` 単位の single-flight ロック。`None` は未構築（またはミスの
@@ -229,6 +231,24 @@ pub(crate) fn cached_sgd(
     static CACHE: OnceLock<SingleFlightCache<crate::sgd::CudaSgd>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     get_or_build(cache, ordinal, || crate::sgd::CudaSgd::new(device))
+}
+
+/// `ordinal` に対応する [`CudaAllocator`]（出力バッファのサイズクラス別
+/// プール。イシュー #1020・REQ-14）をプロセス内キャッシュから取得する。
+///
+/// `crate::ops::CudaBackendOps::release_cached_device_memory`／
+/// `device_memory_pool_stats` の唯一の呼び出し先であり、`gemm.rs`
+/// （`CudaGemm::new` が `device.ordinal()` 経由で本関数を呼び、
+/// `allocator` フィールドとして保持する）からも参照される。`CudaAllocator::
+/// new` はカーネルコンパイルを伴わず失敗しない（`Result` を返さない）ため、
+/// `get_or_build` の `build` クロージャは常に `Ok` を返す。
+pub(crate) fn cached_allocator(
+    ordinal: usize,
+    device: &CudaDevice,
+) -> Result<Arc<CudaAllocator>, CudaError> {
+    static CACHE: OnceLock<SingleFlightCache<CudaAllocator>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    get_or_build(cache, ordinal, || Ok(CudaAllocator::new(device)))
 }
 
 #[cfg(test)]
