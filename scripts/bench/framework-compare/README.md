@@ -82,8 +82,17 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   （`Sequential::init_device_param_store` で全パラメータを 1 回だけ H2D upload → 以後は
   同一 `DeviceParamStore` を使い回す）であり、`run_train_reuse` はその構造に揃える
 - **`init_s` の定義**: 初回 tape 構築 + `init_device_param_store`（全パラメータの 1 回限りの
-  H2D upload）までの経過時間。以後 100 step（先頭 20 を warmup として除外、残り 80 を計測）
-  は gemm 同様 `median_s`/`q1_s`/`q3_s` として記録する
+  H2D upload）+ その完了を保証する明示同期点（`sync_device_param_store_to_host`）までの
+  経過時間。`bench-fandhe` が依存できる公開 API 面（`fandhe-ai =0.4.0`）には「ホスト転送を
+  伴わない完了待ち」が公開されていないため、この同期点は D2H 実体化コストを伴う
+  （codex-review PR #998 P2 指摘。`main.rs` の `run_train_reuse` init_s コメント参照）。
+  これは `gemm reuse` の `init_s` が「初回 matmul + ホスト実体化」を明示的に含めている前例
+  と同じ扱いであり、`init_s` は純粋な H2D upload 時間ではなく「upload 完了を確認可能な
+  最初の時点」までの時間として解釈する。以後 100 step（先頭 20 を warmup として除外、
+  残り 80 を計測）は gemm 同様 `median_s`/`q1_s`/`q3_s` として記録する。各 step の計測窓は
+  デバイス上 SGD 更新の完了を待たずに終える（次 step 冒頭の `register_resident_leaves` の
+  D2H download が同期点として機能し、定常状態では窓の境界が 1 step ずれるだけで
+  `forward + backward + update` の総和は変わらない。`main.rs` のループ冒頭コメント参照）
 - **tape は step ごとに新規生成する**（gemm reuse と異なり、tape 自体は使い回さない）:
   `fandhe_ai_autodiff::Tape` はノード列クリア API を持たず学習ループはステップごとに
   tape を生成・破棄する設計契約であり、単一 tape を 100 step 使い回すと `Tape::backward`

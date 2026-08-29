@@ -393,20 +393,34 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let (x_data, y_data) = mlp_data()?;
 
     // init_s: 初回 tape 構築 + 全パラメータの 1 回限りの H2D upload
-    // （`init_device_param_store`）までの経過。以後の DeviceParamStore は
-    // このデバイス・バッファを固定して使い回す。
+    // （`init_device_param_store`）+ その完了保証のための明示同期点まで
+    // の経過（README「train --mode reuse」節「init_s の定義」参照）。
+    // 以後の DeviceParamStore はこのデバイス・バッファを固定して使い回す。
     //
-    // codex-review PR #998 P2 是正: `init_device_param_store` の内部
-    // 実装（`MemoryOps::upload`）は CUDA では `clone_htod` 等の非同期
-    // H2D コピーを発行するのみで、発行元ストリーム上の完了を待たない
-    // （`DeviceParamStore::new` doc・`CudaMemory::upload_inner` 参照）。
-    // `elapsed()` を非同期発行直後に取得すると、転送完了待ちのコストが
-    // `init_s` から漏れ、代わりに最初の `forward_resident` 内の
-    // download 同期（暗黙のストリーム同期点）へ計上されてしまう。
-    // ここでは `sync_to_host` の明示同期点（`DeviceParamStore::
-    // sync_to_host` doc「明示同期点」参照）を `elapsed()` 取得前に挟み、
-    // アップロードされた全パラメータの転送完了を保証したうえで `init_s`
-    // を確定する（ダウンロードした内容自体は計測対象ではないため破棄）。
+    // `init_device_param_store` の内部実装（`MemoryOps::upload`）は CUDA
+    // では `clone_htod` 等の非同期 H2D コピーを発行するのみで、発行元
+    // ストリーム上の完了を待たない（`DeviceParamStore::new` doc・
+    // `CudaMemory::upload_inner` 参照）。`elapsed()` を非同期発行直後に
+    // 取得すると、転送完了待ちのコストが `init_s` から漏れ、代わりに
+    // 最初の `forward_resident` 内の download 同期（暗黙のストリーム
+    // 同期点）へ計上されてしまう（codex-review PR #998 P2 指摘 1）。
+    //
+    // 完了を保証する同期点として `sync_device_param_store_to_host` を
+    // 使うのは、`bench-fandhe` が依存できる公開 API 面（`fandhe-ai
+    // =0.4.0`。第 9 区分の適用範囲拡張・`.claude/rules/deps-policy.md`）
+    // に「ホスト転送を伴わない完了待ち」（`bench-harness::sync::
+    // SyncPoint::wait_idle` 相当）が公開されていないためであり、これは
+    // `bench-fandhe`（`fandhe-ai` crate 経由のみで実装する制約）からは
+    // 解決できないギャップである。そのため `init_s` は「純粋な H2D
+    // upload 時間」ではなく、そのアップロードを確定させる D2H 実体化
+    // （`sync_to_host` が返す `Vec<Tensor<f32>>` の構築コスト）も含む
+    // （codex-review PR #998 P2 指摘 2。ダウンロードした内容自体は計測
+    // 目的ではなく破棄する）。この扱いは `run_gemm_reuse` の `init_s`
+    // が「初回 matmul + ホスト実体化」を明示的に含めている前例（本ファイル
+    // `run_gemm_reuse` doc 参照）と整合する。公開 API 面へホスト転送を
+    // 伴わない完了待ちを追加する対応は本 PR のスコープ外（`facade` の
+    // 公開面変更・crates.io 再公開を要するため）とし、必要であれば別途
+    // 追跡する。
     let init_start = Instant::now();
     let init_tape = make_tape(&cli.device)?;
     let mut store = model.init_device_param_store(&init_tape)?;
@@ -418,6 +432,27 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut durations = Vec::with_capacity(TRAIN_STEPS);
     let mut last_loss = 0.0f32;
 
+    // ループ全体の計時に関する注意（codex-review PR #998 P2 指摘 3）:
+    // `step_device_param_store`（デバイス上 SGD 更新）が CUDA で更新
+    // カーネルを非同期発行する場合、直後の `start.elapsed()` はその
+    // 更新の完了を待たない。ここで `sync_to_host` 相当の明示同期を
+    // 追加すると（init_s と同じ理由で）D2H 実体化コストが毎 step の
+    // 計測へ混入し、reuse が候補とする「ホスト転送を伴わない完了待ち」
+    // API（上記 init_s のコメント参照）が公開 API 面に無いという同じ
+    // ギャップに阻まれる。
+    //
+    // 代わりに、次 step 冒頭の `forward_resident` →
+    // `register_resident_leaves` が毎 step 必ず全パラメータを D2H
+    // download する（`DeviceParamStore::register_resident_leaves` doc・
+    // README「既知の前提」節）ことを同期点として利用する: 計測窓 i は
+    // 実際には「step i-1 の更新完了待ち + forward_i + backward_i +
+    // step i の更新発行」を計測しており、定常状態では
+    // `forward + backward + update` の総和に等しい（境界がひとつずれる
+    // だけで、欠落する項はない）。ずれの影響を受けるのは先頭の計測 step
+    // （warmup 20 step 側に含まれ捨てられる）と最終 step の更新完了
+    // （ループ後の `sync_device_param_store_to_host` による終端同期が
+    // 保証する）のみであり、`median_s`/`q1_s`/`q3_s` の対象となる残り
+    // 80 step の統計には影響しない。
     for _ in 0..TRAIN_STEPS {
         let start = Instant::now();
         // fresh tape per step（モジュール doc 参照: DeviceParamStore は
