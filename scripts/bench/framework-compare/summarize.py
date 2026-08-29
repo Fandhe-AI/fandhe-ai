@@ -21,6 +21,11 @@
   欠損は "fresh" として扱う（互換維持。get(row, "mode", "fresh")）。
   既存の GEMM 表（(a)）は fresh 行のみを集計し、reuse 行が存在するファイル
   にのみ (a') 節（初期化 init_s・中央値・fresh との並記）を追加する。
+  train の reuse 行（イシュー #957/#958/#959。`DeviceParamStore` によるデバイス
+  常駐パラメータ更新）も同様に (b') 節で集計し、最終 loss（checksum）を fresh と
+  突合する（gemm と異なりフレームワーク間では突合しない: 重み初期化が異なる設計
+  のため fandhe-ai と candle/Burn の最終 loss は一致しない。突合は同一フレーム
+  ワーク内の fresh vs reuse のみ）。
 - checksum 相互突合（イシュー #965）: GEMM は全フレームワーク・全 mode で
   同一入力（xorshift64* の同一シード・同一生成式）のため、同一 size の
   checksum は本体の数値一致契約（相対誤差 1e-3 未満 または 絶対誤差 1e-5
@@ -51,6 +56,14 @@
   results/raw/ 配下が対象。articles#68 Bugbot 指摘・イシュー #971）。
 - (c) のバッチ/秒は 10 未満を小数 1 桁で表示する（`:.0f` だと 1 未満の値が
   1 に丸まり実際の約 2 倍に見えるため。articles#68 Bugbot 指摘・イシュー #971）。
+- (b') train reuse（イシュー #957/#958/#959）: reuse 行の checksum（最終
+  loss）を同一フレームワークの fresh 行と突合し、不一致・突合不能（無効
+  値）・時間値（median_s/q1_s/q3_s）の不正を表で「無効」表示するだけでなく
+  `--strict` の失敗条件（終了コード 2）にも含める。fresh 行が存在しない
+  （比較対象なしで突合不能）のみは値そのものの正当性を否定しないため
+  「無効」扱いにせず `--strict` の対象にしない（イシュー #959 codex-review
+  P1 指摘: 旧実装は表示のみで `section()` の戻り値に反映されず
+  `--strict` でも終了コード 0 のままだった）。
 """
 
 import argparse
@@ -73,6 +86,52 @@ def fmt_ms(s):
     if s >= 1e-3:
         return f"{s * 1e3:.3f} ms"
     return f"{s * 1e6:.1f} µs"
+
+
+def _safe_time_s(v):
+    """外部 JSONL 由来の時間値（init_s / median_s / q1_s / q3_s）を表示・
+    比率計算の前に検証する。`_is_plain_number` で bool・NaN・Infinity・
+    非数値を弾いたうえで、時間として不正な非正値（0 以下）も無効とする
+    （security.md「外部フォーマットのパース時検証（A03）」。イシュー #959
+    codex-review P0 指摘: (b') 経路で検証していたのは比率計算の
+    median_s のみで、init_s・q1_s・q3_s・fresh 側の値は未検証のまま
+    `fmt_ms` へ渡され、文字列や負値・NaN が混入すると比較演算で
+    TypeError になるか不正な表示を生じていた）。有効なら `float` を、
+    無効なら `None` を返す（fail-closed。呼び出し側は `None` を
+    「無効な値」表示に倒す）。
+
+    `_is_plain_number` は任意精度の `int`（例: `10**1000`）を有限として
+    許容するため、`float(v)` 自体が `OverflowError: int too large to
+    convert to float` を送出しうる（イシュー #959 codex-review 2 巡目 P0
+    指摘: 巨大整数 1 件の混入で集計スクリプト全体が例外終了していた）。
+    変換不能な値も「無効な値」として `None` に倒す（fail-closed）。
+    """
+    if not _is_plain_number(v):
+        return None
+    try:
+        fv = float(v)
+    except OverflowError:
+        return None
+    return fv if fv > 0 else None
+
+
+def _safe_finite_number(v):
+    """外部 JSONL 由来の数値（checksum 等、正値制約のないもの）を使用前に
+    検証する。`_is_plain_number` と同じ bool・NaN・Infinity 除外に加え、
+    `float` へ正規化する（イシュー #959 codex-review P0 指摘。`checksums_match`
+    への未検証な受け渡しを避ける）。有効なら `float` を、無効なら `None` を
+    返す。
+
+    `_safe_time_s` と同じ理由（巨大整数 `int` の `float` 変換）で
+    `OverflowError` を捕捉し `None` に倒す（イシュー #959 codex-review
+    2 巡目 P0 指摘）。
+    """
+    if not _is_plain_number(v):
+        return None
+    try:
+        return float(v)
+    except OverflowError:
+        return None
 
 
 def load_rows(path):
@@ -598,6 +657,140 @@ def section(path, rows):
                 lines.append(f"| {device} | {fw} | 計測不可 | - | - |")
     lines.append("")
 
+    # (b') MLP 学習 — デバイス常駐パラメータ更新モード（イシュー #957/#958/#959）。
+    # reuse 行が存在するファイルにのみ出力する（(a') と同じく本フィールド追加前
+    # の JSONL では常にスキップ）。gemm と異なり fandhe-ai/candle/Burn 間の
+    # checksum（最終 loss）は重み初期化の違いにより一致しないため、フレーム
+    # ワーク横断の参照値は選ばず、同一フレームワーク内の fresh 行とのみ突合する。
+    # イシュー #959 codex-review P1 指摘: 上記 fw_col/match_col が「無効」
+    # 判定する状態（checksum 不一致・checksum 突合不能・時間値の無効値）を
+    # `section()` の戻り値へ反映していなかったため `--strict` が fail-open
+    # のままだった（`summarize_test.py` の
+    # `test_main_strict_exit_code_unaffected_by_train_reuse_rows` が固定して
+    # いた挙動）。fresh 欠落のみ（`match_col == "突合不能"`、比較対象なし）
+    # は gemm 側の「突合不能（検証対象外）」と同様に値そのものの正当性を
+    # 否定しないため無効扱いにしない。
+    has_train_reuse_invalid = False
+    if any(r["task"] == "train" and r["mode"] == "reuse" for r in rows):
+        lines.append(
+            "### (b') MLP 学習（デバイス常駐パラメータ更新モード。ホスト経由 SGD との分離。イシュー #957/#958/#959）\n"
+        )
+        lines.append(
+            "| デバイス | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | fresh 中央値（参考） | fresh/reuse 比 | 最終 loss 突合（fresh） |"
+        )
+        lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        for device in devices_in(rows, "train", mode="reuse"):
+            for fw in FRAMEWORKS:
+                r = get(rows, fw, "train", device, mode="reuse")
+                if not r:
+                    continue
+                fresh = get(rows, fw, "train", device, mode="fresh")
+                # median_s・q1_s・q3_s・init_s（表示・比率計算に使う全時間値）
+                # と checksum（最終 loss 突合）は外部 JSONL（bench-fandhe /
+                # 他フレームワークの計測出力）由来であり、型・値域を検証せず
+                # `fmt_ms` へ渡す・除数にする・`checksums_match` へ渡すと、
+                # 文字列で TypeError、bool・NaN・Infinity・負値で不正な表示・
+                # 判定を生じる（security.md「外部フォーマットのパース時検証
+                # （A03）」。イシュー #959 codex-review P0 指摘: 旧実装は
+                # 比率計算の median_s のみを検証しており、init_s・q1_s・q3_s・
+                # fresh 側の値・checksum は未検証のまま使われていた）。
+                # `_safe_time_s`（時間値: 有限かつ正のみ有効）・
+                # `_safe_finite_number`（checksum: 有限数のみ有効、符号は
+                # 制約しない）で使用前に検証し、不正な値は表示・計算に
+                # 使わず fail-closed に「無効な値」扱いとする。
+                r_median = _safe_time_s(r.get("median_s"))
+                r_q1 = _safe_time_s(r.get("q1_s"))
+                r_q3 = _safe_time_s(r.get("q3_s"))
+                # `_safe_time_s(None)` は `_is_plain_number(None)` が False
+                # を返すため素通しで None になる（`r.get("init_s") is not
+                # None` による事前分岐は不要）。
+                r_init = _safe_time_s(r.get("init_s"))
+                r_checksum = _safe_finite_number(r.get("checksum"))
+
+                init_col = fmt_ms(r_init) if r_init is not None else "-"
+                median_col = fmt_ms(r_median) if r_median is not None else "無効な値"
+                q1_col = fmt_ms(r_q1) if r_q1 is not None else "無効な値"
+                q3_col = fmt_ms(r_q3) if r_q3 is not None else "無効な値"
+
+                fresh_median = _safe_time_s(fresh.get("median_s")) if fresh else None
+                fresh_checksum = _safe_finite_number(fresh.get("checksum")) if fresh else None
+
+                # fresh_col は fresh 自身の有効性のみで決める（reuse 側の
+                # median が無効でも fresh の計測値自体は隠さない。Bugbot
+                # 指摘: reuse median_s 無効・fresh 有効時に「計測不正」で
+                # 上書きされ有効な fresh 計測値が見えなくなっていた）。
+                # ratio_col（fresh/reuse 比）は両者が揃って初めて計算できる
+                # ため別条件で判定する。
+                if fresh:
+                    fresh_col = fmt_ms(fresh_median) if fresh_median is not None else "計測不正"
+                    if fresh_median is not None and r_median is not None:
+                        ratio_col = f"{fresh_median / r_median:.2f} 倍"
+                    else:
+                        ratio_col = "-"
+                else:
+                    fresh_col = "未計測"
+                    ratio_col = "-"
+
+                # 時間値（median_s/q1_s/q3_s）の無効値も「無効」判定の一部
+                # として扱う（イシュー #959 codex-review P1 指摘）。
+                # reuse 行の init_s は本節（(b')）が計測する初期化コストの
+                # 主対象であり必須フィールドのため、欠損・不正値も無効判定
+                # に含める（イシュー #959 codex-review 2 巡目 P0 指摘:
+                # 旧実装は init_s を表示列にのみ反映し `row_invalid` へ
+                # 含めていなかったため、init_s が不正でも `--strict` が
+                # exit 0 のまま fail-open していた）。
+                # fresh 側 median_s（fresh/reuse 比の算出・突合に使う値）が
+                # fresh 行自体は存在するのに不正（NaN・負値等）な場合も、
+                # 比較に使う値そのものが信頼できないため無効判定に含める
+                # （fresh 行が存在しない「突合不能」ケースとは区別する。
+                # 同 P0 指摘）。
+                row_invalid = (
+                    r_median is None
+                    or r_q1 is None
+                    or r_q3 is None
+                    or r_init is None
+                    or (fresh is not None and fresh_median is None)
+                )
+
+                if fresh:
+                    if r_checksum is None or fresh_checksum is None:
+                        match_col = "突合不能（無効値）"
+                        fw_col = f"{fw}（無効: checksum が不正な値）"
+                        row_invalid = True
+                        print(
+                            f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
+                            "checksum が不正な値（非数値・NaN・Infinity 等）のため突合不能 "
+                            "— 無効データとして表示",
+                            file=sys.stderr,
+                        )
+                    elif checksums_match(r_checksum, fresh_checksum):
+                        match_col = "一致"
+                        fw_col = fw
+                    else:
+                        match_col = "不一致"
+                        fw_col = f"{fw}（無効: fresh と最終 loss 不一致）"
+                        row_invalid = True
+                        print(
+                            f"warning: {rel}: {fw}/{device}/train/reuse の最終 loss "
+                            f"{r_checksum:.6f} が fresh {fresh_checksum:.6f} と不一致 "
+                            "— 無効データとして表示",
+                            file=sys.stderr,
+                        )
+                else:
+                    match_col = "突合不能"
+                    fw_col = fw
+
+                if row_invalid:
+                    has_train_reuse_invalid = True
+                    if "（無効" not in fw_col:
+                        fw_col = f"{fw}（無効: 時間値が不正な値）"
+
+                lines.append(
+                    f"| {device} | {fw_col} | {init_col} | {median_col} | "
+                    f"{q1_col} | {q3_col} | {fresh_col} | {ratio_col} | {match_col} |"
+                )
+        lines.append("")
+
     lines.append(
         "### (c) 推論スループット（同 MLP forward のみ、バッチ 64。表のスループットはバッチ/秒 = 1/中央値。1 バッチ = 64 件）\n"
     )
@@ -682,7 +875,7 @@ def section(path, rows):
             "コミットされた JSONL のため要素単位検証未実施。値の正当性を否定するものではない）"
         )
     lines.append("")
-    return lines, bool(mismatches), bool(parity_failures), bool(unverified_rows)
+    return lines, bool(mismatches), bool(parity_failures), bool(unverified_rows), has_train_reuse_invalid
 
 
 def main():
@@ -703,8 +896,10 @@ def main():
         action="store_true",
         help=(
             "GEMM checksum の不一致（イシュー #965）・要素単位検証の閾値超過・"
-            "要素単位検証を受けていない旧形式行（いずれもイシュー #970）が"
-            "1 件以上あれば終了コード 2 を返す（既定は 0 のまま警告のみ）"
+            "要素単位検証を受けていない旧形式行（いずれもイシュー #970）・"
+            "train reuse (b') の checksum 不一致／突合不能／時間値不正"
+            "（イシュー #959）が1 件以上あれば終了コード 2 を返す"
+            "（既定は 0 のまま警告のみ）"
         ),
     )
     args = parser.parse_args()
@@ -718,17 +913,25 @@ def main():
     any_checksum_mismatch = False
     any_parity_failure = False
     any_parity_unverified = False
+    any_train_reuse_invalid = False
     for path in inputs:
         rows = load_rows(path)
         if not rows:
             lines.append(f"## 集計対象: {os.path.relpath(path, HERE)}\n")
             lines.append("（有効な行なし）\n")
             continue
-        section_lines, has_mismatch, has_parity_failure, has_unverified = section(path, rows)
+        (
+            section_lines,
+            has_mismatch,
+            has_parity_failure,
+            has_unverified,
+            has_train_reuse_invalid,
+        ) = section(path, rows)
         lines.extend(section_lines)
         any_checksum_mismatch = any_checksum_mismatch or has_mismatch
         any_parity_failure = any_parity_failure or has_parity_failure
         any_parity_unverified = any_parity_unverified or has_unverified
+        any_train_reuse_invalid = any_train_reuse_invalid or has_train_reuse_invalid
 
     # 入力 JSONL と同一ディレクトリからのみ skipped*.log を収集する。HERE
     # 固定 glob だと、別ディレクトリの JSONL を明示指定して集計した際に
@@ -763,7 +966,10 @@ def main():
         sys.stdout.write(text)
 
     if (
-        any_checksum_mismatch or any_parity_failure or any_parity_unverified
+        any_checksum_mismatch
+        or any_parity_failure
+        or any_parity_unverified
+        or any_train_reuse_invalid
     ) and args.strict:
         if any_checksum_mismatch:
             print(
@@ -779,6 +985,16 @@ def main():
             print(
                 "error: --strict: 1 件以上の gemm 行が要素単位検証を受けていない"
                 "旧形式（イシュー #970）",
+                file=sys.stderr,
+            )
+        if any_train_reuse_invalid:
+            # イシュー #959 codex-review P1 指摘: train reuse (b') の
+            # checksum 不一致・checksum 突合不能（無効値）・時間値の無効値
+            # を fail-closed に --strict の失敗条件へ含める（旧実装は
+            # 表示のみで section() の戻り値に反映されず fail-open だった）。
+            print(
+                "error: --strict: 1 件以上の train reuse 行が無効"
+                "（checksum 不一致・突合不能・時間値の不正。イシュー #959）",
                 file=sys.stderr,
             )
         return 2

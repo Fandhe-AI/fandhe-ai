@@ -21,6 +21,7 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 - 環境 1: Apple M4 Max / macOS（CPU + Metal）→ `results/raw/results.jsonl`
 - 環境 2: DGX Spark（NVIDIA GB10。CUDA + ARM CPU）→ `results/raw/results-dgx.jsonl`。CUDA ホストでは `./run_all_cuda.sh` を使う（bench-candle / bench-burn は `--no-default-features --features cuda` でビルドされる。fandhe-ai は cfg + 実行時プローブのため feature 指定不要）
 - 環境 3: NVIDIA GeForce RTX 3060（12 GiB）/ Linux（CUDA。デバイス/tape 再利用モードの fresh/reuse 比較用）→ `results/raw/results-rtx3060.jsonl`（イシュー #925）
+- 環境 4: 環境 3 と同一機（RTX 3060 / Linux）。MLP 学習のデバイス常駐更新モード（`train --mode reuse`）の fresh/reuse 比較用 → `results/raw/results-rtx3060-train.jsonl`（イシュー #957/#958/#959。fandhe-ai 0.4.0 計測のため 0.3.0 計測の環境 3 とは別ファイル）
 
 ## 計測タスク
 
@@ -108,8 +109,18 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   `train_reuse_matches_fresh_final_loss_within_composite_tolerance`（cpu・実機非依存。
   fresh/reuse の最終 loss を統一複合判定で突合）を含む
 - 使用例: `cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse`
-- スイープ・`run_all*.sh`/`summarize.py` への組み込み・cpu/metal/cuda 実測・
-  `results/summary.md` への反映はイシュー #959 の担当（本イシュー #958 のスコープ外）
+- スイープ（`run_all*.sh` の (b') ループ）・集計（`summarize.py` の (b') 節）・
+  cpu/cuda 実測（RTX 3060。環境 4）は #959 で実装済み。Apple Silicon 実機（cpu/metal）・
+  DGX Spark GB10（cuda）での実測は本 PR 時点で未計測（`results/summary.md` 環境 4
+  「計測不可・未計測項目」参照。再現コマンドを記載済み）
+- **(b') 節の読み方**（`results/summary.md`・`summarize.py` 出力）: `初期化(init_s)` は
+  `DeviceParamStore` 構築 1 回分のコスト、`中央値/Q1/Q3` は以後 80 step の 1 step あたり
+  時間（`fresh` と同一プロトコル）。`fresh 中央値（参考）` と `fresh/reuse 比` で
+  ホスト経由 SGD（fresh）との速度差を確認できる。`最終 loss 突合（fresh）` は
+  fresh/reuse の最終 loss（checksum）を本体の数値一致契約（相対誤差 1e-3 未満 または
+  絶対誤差 1e-5 未満）で突合した結果（`一致`/`不一致`/`突合不能`）。gemm の (a') と異なり
+  フレームワーク間（fandhe-ai vs candle/Burn）の checksum 突合は行わない（重み初期化が
+  異なる設計のため最終 loss が一致しない。上記モジュール doc・`summarize.py` docstring 参照）
 
 ### 要素単位検証（イシュー #970）
 
@@ -149,14 +160,15 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 ```bash
 cd scripts/bench/framework-compare
-./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal reuse スイープ）→ results/raw/results.jsonl
-./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda reuse スイープ）→ results/raw/results-cuda.jsonl
+./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal gemm reuse・train reuse スイープ）→ results/raw/results.jsonl
+./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse スイープ）→ results/raw/results-cuda.jsonl
 # 個別実行:
 cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048
 cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse
 cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse
 # 集計（JSONL → Markdown 表。既定は results/raw/*.jsonl 全件を標準出力へ。
-# reuse 行が存在するファイルには (a') 節が追加される。
+# gemm reuse 行が存在するファイルには (a') 節、train reuse 行が存在する
+# ファイルには (b') 節が追加される（イシュー #957/#958/#959）。
 # コミット済みの results/summary.md は既定動作では上書きされない）:
 python3 summarize.py
 python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力・出力の明示

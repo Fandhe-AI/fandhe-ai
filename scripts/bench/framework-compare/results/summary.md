@@ -131,8 +131,9 @@ GEMM カーネル単体の速度としてではなく、fandhe-ai の「計測�
 **(b)/(c) Metal 行のプロトコル注意**: GEMM 表と同様、fandhe-ai の学習・推論は毎ステップ / 毎回
 新規 `tape_for(Device::Metal)` を構築する一方、candle / Burn はデバイスを使い回すため、上記
 Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが乗っている（`README.md` 計測
-プロトコル節参照。`reuse` モードは `gemm` タスクのみ対応のため train/infer にはこの分離手段が
-現時点でない。イシュー #925 のスコープ外）。
+プロトコル節参照。`train` タスクの `reuse` モードは #958/#959 で対応済み（`DeviceParamStore`
+によるデバイス常駐パラメータ更新）だが、Apple Silicon 実機での計測は本 PR 時点で未計測
+（環境 4「計測不可・未計測項目」参照）。`infer` の `reuse` は引き続き対象外）。
 
 ## 計測不可・未計測項目
 
@@ -267,7 +268,7 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
 - Metal: macOS 実機がこのエージェント実行環境から到達不能のため未計測。再現コマンド:
   `cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048 --mode reuse`
   （macOS 実機での追試をユーザーへ案内する）
-- MLP 学習・推論（train/infer）の reuse モード: `bench-fandhe` は受け入れ条件の範囲（gemm タスクのみ）に限定して実装したため未対応（`docs/spec` 変更を伴わないスコープ判断。PR 本文の対象外項目を参照）
+- MLP 学習（train）の reuse モード: 本節（環境 3）の計測当時（イシュー #925）は gemm タスクのみ対応だったが、`train --mode reuse` は #958 で実装済み・#959 でスイープ・集計に統合済み（`DeviceParamStore` によるデバイス常駐パラメータ更新。実測は環境 4 参照）。推論（infer）の reuse は依然未対応（#958/#959 のスコープ外）
 - bench-candle / bench-burn の CUDA ビルド: 本機に `nvcc` が未導入のため `candle-kernels`（build.rs が nvcc を要求）のビルドが失敗し未計測。`--mode reuse` は API 設計上 candle/burn には適用されないため（README 参照）、この欠落は受け入れ条件の達成に影響しない
 
 ### 環境 3 の備考
@@ -276,3 +277,87 @@ Metal 行の fandhe-ai 数値には毎回のデバイス/tape 構築コストが
 - checksum は fresh/reuse で完全一致（同一入力に対する行列積であり期待どおり。数値的な副作用なし）
 - 上記の性質（reuse でも per-call オーバーヘッドが消えない原因）は本イシューの受け入れ条件（fresh/reuse の差分を記録する）を満たす実測結果であり、原因の切り分け自体は未実施（fandhe-ai 側のカーネル選択・ディスクキャッシュ照会等が候補だが未確認）。原因調査は別イシューとして追跡することを推奨する（PR 本文のスコープ外項目を参照）
 - 本環境は CUDA Toolkit を完全インストールしていない簡易構成（NVRTC・ヘッダのみを pip 経由で一時取得）のため、DGX Spark（環境 2。nvcc 込みの標準インストール）とはビルド・実行環境が異なる点に留意する
+
+## 環境 4: NVIDIA GeForce RTX 3060 / x86_64（train fresh vs reuse。イシュー #957/#958/#959）
+
+- GPU: NVIDIA GeForce RTX 3060（12 GiB、compute capability 8.6）— 環境 3 と同一機
+- OS: Linux（x86_64、7.0.0-30-generic）
+- GPU ドライバ: 595.71.05（CUDA 13.2 対応）
+- CUDA NVRTC / ランタイムヘッダ: 環境 3 と同じ一時プロビジョニング構成（`nvidia-cuda-nvrtc`
+  pip パッケージ v13.0.88 由来の `libnvrtc.so.13` + `nvidia-cuda-runtime`/`nvidia-cuda-cccl` の
+  ヘッダを `LD_LIBRARY_PATH`/`CUDA_INCLUDE_PATH` で実行時に指定。本体・framework-compare の
+  依存は変更していない）
+- ツールチェーン: rustc/cargo 1.96.0（`--release` ビルド）
+- fandhe-ai バージョン: 0.4.0（環境 3 の 0.3.0 から更新済み。#958/#998 の `train --mode reuse` 実装を含む）
+- 計測日: 2026-08-29
+- 対象: `bench-fandhe` の `train`（cpu / cuda、fresh・reuse 両方）。加えて CPU 横並び参考として
+  candle（`--no-default-features`）・Burn（`--no-default-features`。既定 feature が既に
+  `ndarray`）の `train --mode fresh --device cpu` を手動で追加計測した（本体 `run_all_cuda.sh`
+  は `bench-candle`/`bench-burn` を `--features cuda` でのみビルドするため、cuda ビルド失敗時は
+  CPU 版も含め BINS に入らない。下記「計測不可・未計測項目」参照）
+- 生データ: `results/raw/results-rtx3060-train.jsonl`（`run_all_cuda.sh` の 1 ラン分の train 行 +
+  上記 candle CPU 手動計測 1 行）・`results/raw/skipped-rtx3060-train.log`・
+  `results/run_all_cuda-rtx3060-train.log`
+- ノイズ対策: train fresh/reuse（cuda・cpu）は `run_all_cuda.sh` の 1 回に加え個別コマンドで
+  追加 4 回（計 5 回）実行した。JSONL には `run_all_cuda.sh` の 1 ラン分のみをコミットし
+  （選別・捏造をしないため）、5 回分の傾向は下記「備考」に中央値のみ要約する
+
+### (b) MLP 学習（cpu / cuda、fresh。summarize.py 生成）
+
+| デバイス | フレームワーク | 中央値 | Q1 | Q3 |
+| --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 37.793 ms | 37.457 ms | 37.984 ms |
+| cpu | candle | 1.551 ms | 1.443 ms | 1.665 ms |
+| cpu | burn | 1.000 ms | 992.2 µs | 1.006 ms |
+| cuda | fandhe-ai | 36.857 ms | 36.681 ms | 37.221 ms |
+| cuda | candle | 計測不可 | - | - |
+| cuda | burn | 計測不可 | - | - |
+
+### (b') MLP 学習（デバイス常駐パラメータ更新モード。summarize.py 生成）
+
+| デバイス | フレームワーク | 初期化(init_s) | 中央値 | Q1 | Q3 | fresh 中央値（参考） | fresh/reuse 比 | 最終 loss 突合（fresh） |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| cpu | fandhe-ai | 535.0 µs | 37.978 ms | 37.714 ms | 38.208 ms | 37.793 ms | 1.00 倍 | 一致 |
+| cuda | fandhe-ai | 132.333 ms | 36.898 ms | 36.755 ms | 37.294 ms | 36.857 ms | 1.00 倍 | 一致 |
+
+### 環境 4 の計測不可・未計測項目
+
+- Metal（Apple Silicon 実機）: このエージェント実行環境（x86_64 Linux）から到達不能のため未計測。
+  再現コマンド: Apple Silicon 実機で `./run_all.sh`（(b') ループが `train cpu 64 reuse` /
+  `train metal 64 reuse` を実行する）
+- DGX Spark GB10（CUDA 実機）: `docs/real-hardware-verification-env.local.md` が本エージェント
+  環境に存在せず SSH ホスト名が不明なため到達不能。再現コマンド: DGX Spark 実機で
+  `./run_all_cuda.sh`
+- bench-candle の CUDA ビルド: 本機に `nvcc` が未導入のため `--features cuda` ビルドが失敗
+  （環境 3 と同一の既知制約）。CPU（`--no-default-features`）ビルドは成功し、`train fresh` の
+  CPU 行のみ上表に含めた
+- bench-burn の CUDA 実行: **ビルド自体は成功する**が（環境 3 の記述「candle/burn とも build
+  失敗」は burn には当てはまらないことが本計測で判明した）、実行時に cubecl-cuda が
+  「CUDA installation not found」（`CUDA_PATH` 未設定・本機に `/usr/local/cuda` 相当の完全な
+  CUDA Toolkit が無い）で失敗する。`gemm` タスクは checksum 退化検出（`MEASURE_ERROR`）で
+  自動的に拒否されるが、`train`/`infer` タスクには同種の検出が無いため `checksum=0.000000`
+  という無効な結果が生成されうる（`skipped-rtx3060-train.log` 参照）。この無効行は
+  `results-rtx3060-train.jsonl` に含めていない（性能値として提示すると誤解を招くため）。
+  fandhe-ai は cudarc の動的ロード方式のためこの制約の影響を受けない
+
+### 環境 4 の備考
+
+- **fresh と reuse の中央値はほぼ同水準（cpu: 37.79 ms vs 37.98 ms、cuda: 36.86 ms vs 36.90 ms。
+  比はいずれも 1.00 倍）で、gemm の reuse（環境 3・環境 2）で見られたような明確な高速化は
+  train では観測されなかった**。これは `run_train_reuse`（`bench-fandhe/src/main.rs` モジュール
+  doc「train --mode reuse」節）の設計上の理由による: reuse で排除するのはホスト経由 SGD の
+  download/upload のみで、`register_resident_leaves` が毎 step 全パラメータを D2H download する
+  経路は reuse でも残存する（#954 申し送り）。つまり本環境の実測は、この既知の設計制約
+  （ホスト転送を伴わない完了待ち API が公開 API 面に無いギャップ）が実際の計測時間にも
+  現れていることを裏付けるものであり、想定外の結果ではない
+- 追加 4 回（計 5 回）の実行でも中央値の傾向は同様（cpu fresh: 37.60〜37.79 ms、
+  cpu reuse: 37.98〜38.10 ms、cuda fresh: 36.72〜37.58 ms、cuda reuse: 36.90〜37.14 ms。
+  いずれも fresh/reuse 差は数百 µs 以内でノイズの範囲内）
+- 最終 loss（checksum）は fandhe-ai の cpu/cuda いずれも fresh/reuse で完全一致（0.080541。
+  数値一致契約を満たす。上表「最終 loss 突合（fresh）」列参照）
+- candle・Burn の CPU train 中央値（それぞれ 1.551 ms・1.000 ms）は fandhe-ai の CPU train
+  （37.79 ms）よりおよそ 25〜38 倍高速である。この差は reuse では縮まらない（上記のとおり
+  fresh/reuse 比が 1.00 倍のため）。candle/Burn は本 PR のスコープ外である reuse 相当の
+  API（デバイス常駐更新）を標準で使っているのに対し、fandhe-ai の reuse も残存する毎 step
+  D2H（上記備考）に律速されているためと考えられる。詳細な要因分解は別イシューで追跡することを
+  推奨する（PR 本文の対象外項目を参照）
