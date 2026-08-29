@@ -68,6 +68,19 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
      1e-5 未満）・FMA 契約に従う（出典: `docs/spec/
      04-requirements.md:213`・設計 `docs/device-resident-update-design.md`
      〈#951・#1022 追補〉・#955〈parity テスト・ベンチ非後退確認〉）
+  5. **デバイスメモリプール解放 API `fandhe_ai::release_cached_memory(Device)`／
+     `fandhe_ai::memory_pool_stats(Device)`**（イシュー #1020・REQ-14 14-3。
+     クレート root からの再エクスポート。`crates/facade/src/lib.rs`）:
+     `resolve_ops(device)?.release_cached_device_memory()` /
+     `.device_memory_pool_stats()`（`BackendOps` の非破壊拡張〈デフォルト
+     メソッド追加〉）への薄い委譲。値は unit／`Option<PoolStats>`（POD。
+     `fandhe_ai::PoolStats` として root 再エクスポート）のみで、
+     `DeviceAllocator`／`BufferHandle`／`SizeClassPool` 等のプール実装型は
+     一切露出しない（`crates/facade/tests/api_surface.rs::
+     facade_does_not_expose_pool_implementation_types` が機械的に固定）。
+     `BackendOps`／`MemoryOps` は他の確定入口と同じく利用者向け公開面へ
+     露出しない。設計・採用判断は `docs/device-memory-pool-design.md`・
+     `docs/backend-cuda-pool-allocator-decision.md` を参照
 
   5. **デバイスメモリプールの明示解放・統計 API `fandhe_ai::
      release_cached_memory(Device)`／`fandhe_ai::memory_pool_stats(Device)`**

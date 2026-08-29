@@ -137,6 +137,11 @@ pub use ops_shape::{
     elementwise_out_shape, matmul_out_shape, reduce_out_shape, require_same_shape,
 };
 pub use pool::{PoolConfig, PoolZeroFill, PooledMemory};
+// `pool_core::SizeClassPoolConfig` は `pool::PoolConfig`（crates.io 0.4.0
+// 公開済み）と紛らわしい命名衝突を避けるため意図的に非公開のまま
+// （`pool_core.rs` モジュールコメント「命名の差異」参照）。`PoolStats` の
+// みを再公開する（`backend_ops::BackendOps::device_memory_pool_stats` の
+// 戻り値型。CUDA〈#1020〉・Metal〈#1021〉共通の統計スナップショット型）。
 pub use pool_core::PoolStats;
 pub use tensor::Tensor;
 pub use typed::{BatchedFeatures, FixedMat, FixedVec};

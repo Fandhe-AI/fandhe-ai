@@ -167,6 +167,54 @@ fn compat_public_functions_do_not_accept_raw_autodiff_tape_argument() {
     );
 }
 
+/// `crates/facade/src/` が `DeviceAllocator`／`BufferHandle`／
+/// `SizeClassPool`（内部クレートのプール実装型。イシュー #1020・REQ-14）
+/// を一切公開していないことを固定する（`docs/device-memory-pool-design.md`
+/// §「facade 到達経路」: facade はプール実装型を露出させず、
+/// [`fandhe_ai::PoolStats`]（POD）と `release_cached_memory`/
+/// `memory_pool_stats`（unit/Option 返却関数）のみを確定入口とする）。
+#[test]
+fn facade_does_not_expose_pool_implementation_types() {
+    let src_dir = facade_crate_root().join("src");
+    let mut offending = Vec::new();
+    visit_rs_files(&src_dir, &mut |path, content| {
+        for forbidden in ["DeviceAllocator", "BufferHandle", "SizeClassPool"] {
+            if content.contains(forbidden) {
+                offending.push(format!("{}: `{forbidden}` を含む", path.display()));
+            }
+        }
+    });
+    assert!(
+        offending.is_empty(),
+        "facade がプール実装型（DeviceAllocator/BufferHandle/SizeClassPool）を\
+         公開面に露出させている: {offending:?}"
+    );
+}
+
+/// `fandhe_ai::release_cached_memory`／`memory_pool_stats` が `pub fn`
+/// として、`PoolStats` が `pub use` として存在することを固定する
+/// （イシュー #1020 の facade 確定入口。`docs/compat-api-scope.md` §0）。
+#[test]
+fn facade_exposes_pool_release_api_and_pool_stats_reexport() {
+    let lib_rs = facade_crate_root().join("src/lib.rs");
+    let content = read_to_string_or_panic(&lib_rs);
+    assert!(
+        content.contains("pub fn release_cached_memory"),
+        "fandhe_ai::release_cached_memory が pub fn として見つからない"
+    );
+    assert!(
+        content.contains("pub fn memory_pool_stats"),
+        "fandhe_ai::memory_pool_stats が pub fn として見つからない"
+    );
+    let has_pool_stats_reexport = content
+        .lines()
+        .any(|line| line.trim_start().starts_with("pub use") && line.contains("PoolStats"));
+    assert!(
+        has_pool_stats_reexport,
+        "fandhe_ai::PoolStats の pub use 再エクスポートが見つからない"
+    );
+}
+
 /// `src/optim.rs`（イシュー #961）専用の固定パス。ソース走査対象は
 /// `crates/facade/` 配下の固定パスのみに限定する（A03 対策。モジュール
 /// 冒頭コメント参照）。

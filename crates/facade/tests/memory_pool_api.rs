@@ -1,9 +1,17 @@
 //! `fandhe_ai::release_cached_memory`／`fandhe_ai::memory_pool_stats`
-//! （REQ-14 の明示解放 API。イシュー #1018 ツリー・#1021）の受入テスト。
+//! （REQ-14 の明示解放 API。イシュー #1018 ツリー・#1020 CUDA・#1021
+//! Metal）の受入テスト。
 //!
-//! CPU 経路（プールを持たない既定契約）は Linux CI でも実行できる。
-//! Metal 経路（実際のプール保持・解放の裏付け）は Apple Silicon 実機
-//! 依存のため `#[ignore]` で分離する（`.claude/rules/coding-rust.md`）。
+//! CPU 経路（プールを持たない既定契約。`BackendOps` の既定メソッド。
+//! `crates/tensor-core/src/backend_ops.rs`）は Linux CI でも実行できる
+//! ため CI（GitHub ホステッド）で固定する。
+//!
+//! CUDA 経路は `tests/tape_construction.rs` と同じ「実行環境適応型」
+//! 方針（`CudaDeviceProvider::is_available()` で選択可能デバイスの有無を
+//! 判定してから分岐）に従い、実機がある場合のみ確保→drop→解放→
+//! `cached_bytes == 0` を検証する。Metal 経路（実際のプール保持・解放の
+//! 裏付け）は Apple Silicon 実機依存のため両方とも `#[ignore]` で分離
+//! する（`.claude/rules/coding-rust.md`）。
 
 use fandhe_ai::Device;
 
@@ -47,5 +55,47 @@ fn release_cached_memory_on_metal_reports_zero_cached_bytes_afterwards() {
     assert_eq!(
         stats.cached_bytes, 0,
         "release_cached_memory 直後は cached_bytes == 0 のはず"
+    );
+}
+
+/// CUDA 実機（`libcuda` 到達可能かつ選択可能デバイス 1 台以上）がある
+/// 場合のみ実行する。GEMM を 1 回実行してプールへ確保させたのち
+/// `release_cached_memory` で解放し、`cached_bytes == 0` を確認する。
+///
+/// `#[ignore]`（実機依存。`.claude/rules/coding-rust.md`）。実行例:
+/// `cargo test -p fandhe-ai --test memory_pool_api -- --ignored`
+#[test]
+#[ignore]
+fn release_cached_memory_on_cuda_drains_pool_after_gemm() {
+    use fandhe_ai_backend_cuda::CudaDeviceProvider;
+    use fandhe_ai_tensor_core::Tensor;
+    use fandhe_ai_tensor_core::device::DeviceProvider;
+
+    if !CudaDeviceProvider::new().is_available() {
+        eprintln!("CUDA デバイス未検出のためスキップ（実機依存テスト）");
+        return;
+    }
+
+    let device = Device::Cuda(0);
+    let tape = fandhe_ai::tape_for(device).expect("CUDA tape_for は実機があれば成功する");
+    let a = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("shape 一致");
+    let b = Tensor::new(vec![1.0f32; 4], &[2, 2]).expect("shape 一致");
+    let a_var = tape.var(&a);
+    let b_var = tape.var(&b);
+    let _ = a_var
+        .matmul(&b_var)
+        .expect("GEMM は shape 一致で成功する（プールへ確保が発生する）");
+
+    // `a_var`／`b_var`／matmul 結果はここで drop 済み（スコープ終端で
+    // 明示的に処理する必要はない）。`release_cached_memory` はプールが
+    // アイドル保持している分（返却済みバッファ）を実解放する。
+    fandhe_ai::release_cached_memory(device).expect("release_cached_memory は成功する");
+
+    let stats = fandhe_ai::memory_pool_stats(device)
+        .expect("memory_pool_stats は成功する")
+        .expect("CUDA は Some(PoolStats) を返す");
+    assert_eq!(
+        stats.cached_bytes, 0,
+        "release_cached_memory 後はアイドル保持バイト数が 0 のはず"
     );
 }

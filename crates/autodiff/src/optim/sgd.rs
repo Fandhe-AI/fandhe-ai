@@ -259,20 +259,23 @@ impl Sgd {
 
         for (i, (param, grad)) in params.iter().zip(grads.iter()).enumerate() {
             // `as_slice()` は非 contiguous view で `None` を返す（`tensor.rs`）
-            // ため、要素順の走査を保証できる稠密化が要る。`eval::dense_vec`
+            // ため、要素順の走査を保証できる稠密化が要る。`eval::dense_vec_ref`
             // （`crate::eval`）は同じ正規化（`contiguous()` → `as_slice()`、
             // 理論上到達しない `None` 経路は `debug_assert!` 付きフォール
-            // バックで吸収）を forward/backward 双方の値計算で既に使って
-            // いるため、ここでも同じ稠密化ロジックを再利用し 2 か所に
-            // 別実装しない（`eval.rs` doc・coding-rust.md「本番経路で
-            // unwrap()/expect() を使わない」参照）。
-            let param_data = crate::eval::dense_vec(param);
-            let grad_data = crate::eval::dense_vec(grad);
+            // バックで吸収）を再利用しつつ、ここでの用途（`param`/`grad`/
+            // momentum バッファは読み取り専用の走査のみで書き換えない）
+            // では contiguous 入力に対する `slice.to_vec()` コピーが不要
+            // なため、借用のまま返せる `dense_vec_ref`（`Cow<[f32]>`）を
+            // 使う（イシュー #1026「学習ループのホスト側コピー・再構築を
+            // 除去する」。`eval.rs::dense_vec_ref` doc 参照。2 か所に別
+            // 実装しない方針は変えない）。
+            let param_data = crate::eval::dense_vec_ref(param);
+            let grad_data = crate::eval::dense_vec_ref(grad);
 
             let prev_v = self
                 .velocity
                 .as_ref()
-                .map(|v| crate::eval::dense_vec(&v[i]));
+                .map(|v| crate::eval::dense_vec_ref(&v[i]));
 
             let mut out = Vec::with_capacity(param_data.len());
             let mut v_out: Vec<f32> = if use_momentum {

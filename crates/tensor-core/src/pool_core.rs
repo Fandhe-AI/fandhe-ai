@@ -34,6 +34,29 @@
 //! [`SizeClassPoolConfig`] を採用する（クレート root へは [`PoolStats`]
 //! のみ再エクスポートし、本設定型は `pool_core::SizeClassPoolConfig` の
 //! パス経由でのみ到達可能とする）。#1020（CUDA 実装）はこの命名へ揃える。
+//!
+//! # #1020／#1021 統合時の経緯（PR #1063 マージコンフリクト解消）
+//!
+//! #1020（CUDA・PR #1061）と #1021（Metal・本 PR）は共通祖先
+//! （#1056・設計文書のみのコミット）から本モジュールを独立に実装した
+//! ため、main への統合時に本ファイルが add/add コンフリクトになった。
+//! CUDA 側の独自実装（`PoolConfig`〈フィールド名 `small_band_max` 等〉・
+//! `size_class_for` が `Result<Option<u64>, _>` を返す・`put` が
+//! `Vec<H>` を返す・`record_allocation(class_bytes, requested_bytes)` が
+//! take 成功・新規確保の両経路を担う・`record_loan_end()` が引数無し）
+//! ではなく、**本ファイル（Metal 側）の API を単一の正とした**（理由:
+//! 巨大帯クラス別上限〈`evict_over_huge_class_limit`〉・オクターブ境界
+//! `(1.75p, 2p]` の切り上げ・再利用貸出時の `capacity_waste_bytes` 計上
+//! 〈`record_reuse`〉という 3 件の codex-review／Cursor Bugbot 是正
+//! （PR #1063）が本ファイル側にのみ存在し、CUDA 側の独自実装には同等の
+//! 修正が反映されていなかったため）。`crates/backend-cuda/src/pool.rs`
+//! は本ファイルの API（`SizeClassPoolConfig`・`take`／`record_reuse`／
+//! `record_allocation`（引数順は `(logical_bytes, class_bytes)`）／
+//! `put` が返す `Vec<(u64, H)>`／`record_loan_end(logical_bytes,
+//! class_bytes)`）へ合わせて書き換えた（CUDA の統計・テスト意図
+//! 〈`alloc_count`／`reuse_count`／`capacity_waste_bytes` の増減契約〉は
+//! 本ファイルの契約と等価であることを確認済み。差分は主に命名・引数
+//! 形状のみ）。
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
