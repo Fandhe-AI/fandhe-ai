@@ -216,6 +216,104 @@ impl<T: Element> DeviceBuffer<T> {
     }
 }
 
+/// 連結（フラット）デバイスバッファ内の 1 パラメータ分を指す、コピー
+/// なしの軽量ビュー（イシュー #1022／#1023「R3: 要素オフセット付き
+/// 常駐ビュー」設計。`docs/device-resident-update-design.md` 追補
+/// 参照。candle の `Storage` + `Layout`（offset 保持）と同じ発想）。
+///
+/// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore` は全
+/// パラメータを 1 本の連結 `DeviceBuffer<f32>`（イシュー #1023）として
+/// 常駐させる。`BackendOps::gemm_resident_rhs`／`gemm_resident_lhs`
+/// （常駐 weight／bias を forward/backward の VJP へ渡す）はパラメータ
+/// 単位の shape を必要とするため、連結バッファのどの要素範囲が
+/// 当該パラメータかを表す本ビュー型を介して受け渡す。実データは一切
+/// コピーしない（`buffer` への参照のみを保持する）。
+///
+/// `offset`／`shape` は要素単位（バイト単位ではない）。バイト単位への
+/// 変換はバックエンド実装側の責務（例: Metal の `setBuffer:offset:` は
+/// バイトオフセットを要求するため `offset * size_of::<f32>()` へ変換
+/// する。`backend-metal::ops` 参照）。
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceBufferView<'a> {
+    buffer: &'a DeviceBuffer<f32>,
+    offset: usize,
+    shape: &'a [usize],
+    /// 構築時に `checked_mul` で検証済みの `shape` の積。`numel()` はこれを
+    /// 返し、未検査の積を再計算しない（release ビルドでの折り返しによる
+    /// 境界検査迂回の再発防止。PR #1059 codex-review P0）。
+    numel: usize,
+}
+
+impl<'a> DeviceBufferView<'a> {
+    /// `buffer` の `[offset, offset + shape.iter().product())` 範囲を
+    /// 指すビューを構築する。範囲が `buffer` の要素数を超える場合は
+    /// 本番経路で panic させず [`BackendError::InvalidArgument`] を返す
+    /// （fail-closed。`.claude/rules/coding-rust.md`「本番経路で
+    /// `unwrap()`/`expect()` を使わない」・REQ-8 の境界検査契約）。
+    pub fn new(
+        buffer: &'a DeviceBuffer<f32>,
+        offset: usize,
+        shape: &'a [usize],
+    ) -> Result<Self, BackendError> {
+        // shape の積は `checked_mul` で求める。未検査の `product()` は release
+        // ビルドで折り返し、巨大な論理 shape と小さな実バッファのビューが
+        // 境界検査を通過してしまう（REQ-8 手動境界チェックの欠落。
+        // PR #1059 codex-review P0）。
+        let numel = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(format!(
+                    "DeviceBufferView::new: shape {shape:?} の要素数が usize を超える"
+                ))
+            })?;
+        let end = offset.checked_add(numel).ok_or_else(|| {
+            BackendError::InvalidArgument(
+                "DeviceBufferView::new: offset + numel overflows usize".to_string(),
+            )
+        })?;
+        if end > buffer.numel() {
+            return Err(BackendError::InvalidArgument(format!(
+                "DeviceBufferView::new: view range [{offset}, {end}) exceeds backing buffer \
+                 length ({})",
+                buffer.numel()
+            )));
+        }
+        Ok(Self {
+            buffer,
+            offset,
+            shape,
+            numel,
+        })
+    }
+
+    /// 元となる連結バッファへの参照。バックエンド実装が具体ハンドル型へ
+    /// `downcast_handle` するために使う。
+    pub fn buffer(&self) -> &'a DeviceBuffer<f32> {
+        self.buffer
+    }
+
+    /// 連結バッファ内での先頭要素位置（要素単位）。
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    /// このビューが表すパラメータの shape。
+    pub fn shape(&self) -> &'a [usize] {
+        self.shape
+    }
+
+    /// このビューの要素数（構築時に検証済みの `shape` の積）。
+    pub fn numel(&self) -> usize {
+        self.numel
+    }
+
+    /// このビューが属するデバイス（元バッファと同一）。
+    pub fn device(&self) -> Device {
+        self.buffer.device()
+    }
+}
+
 /// 各バックエンド（CPU/CUDA/Metal）が実装するメモリ操作の共通入口
 /// （`docs/public-api-design.md` §4.2 の `upload`/`download` を土台に、
 /// `alloc_zeroed` を追加した v1・f32 固定版）。
@@ -315,6 +413,42 @@ mod tests {
         assert_eq!(buf.shape(), &[2, 3]);
         assert_eq!(buf.numel(), 6);
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn device_buffer_view_rejects_shape_numel_overflow() {
+        // shape の積が usize を超える場合、未検査の product() は release
+        // ビルドで折り返して境界検査を迂回しうる（PR #1059 codex-review P0）。
+        // checked_mul により InvalidArgument で拒否されることを確認する。
+        let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+            drop_count: Rc::new(Cell::new(0)),
+            payload: vec![0.0; 4],
+        });
+        let buf: DeviceBuffer<f32> = DeviceBuffer::new(Device::Cpu, vec![4], handle);
+        // usize::MAX × 2 は必ずオーバーフローし、折り返せば偶数の小さな値になりうる
+        let shape = [usize::MAX, 2];
+        let err = DeviceBufferView::new(&buf, 0, &shape).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+        // 折り返しが 0 になる組合せ（2^32 × 2^32 = 2^64 → 0）も拒否する
+        let shape = [1usize << 32, 1usize << 32];
+        let err = DeviceBufferView::new(&buf, 0, &shape).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+    }
+
+    #[test]
+    fn device_buffer_view_numel_matches_validated_product() {
+        let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+            drop_count: Rc::new(Cell::new(0)),
+            payload: vec![0.0; 6],
+        });
+        let buf: DeviceBuffer<f32> = DeviceBuffer::new(Device::Cpu, vec![6], handle);
+        let shape = [2usize, 2];
+        let view = DeviceBufferView::new(&buf, 2, &shape).unwrap();
+        assert_eq!(view.numel(), 4);
+        assert_eq!(view.offset(), 2);
+        // 範囲超過（2 + 5 > 6）は拒否
+        let shape = [5usize];
+        assert!(DeviceBufferView::new(&buf, 2, &shape).is_err());
     }
 
     #[test]

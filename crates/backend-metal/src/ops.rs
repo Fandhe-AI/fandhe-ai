@@ -15,7 +15,7 @@
 //! 非 macOS 環境ではこのファイル自体がコンパイル対象に入らない
 //! （`lib.rs` の cfg 境界と整合。`device.rs` と同方針）。
 
-use fandhe_ai_tensor_core::buffer::MemoryOps;
+use fandhe_ai_tensor_core::buffer::{DeviceBufferView, MemoryOps};
 use fandhe_ai_tensor_core::device::{BackendError, Device};
 use fandhe_ai_tensor_core::{
     Activation, BackendOps, DispatchFailureCell, FusionPlan, ShapeError, Tensor,
@@ -497,6 +497,230 @@ impl BackendOps for MetalBackendOps {
                 Tensor::new(out, &out_shape).map_err(BackendError::ShapeMismatch)
             }
         }
+    }
+
+    /// デバイス常駐 `w`（・`bias`）のまま `y = a @ w (+ bias)` を計算する
+    /// （イシュー #1022・#1023「R3」）。`a`（活性化値）のみをホストから
+    /// アップロードし、`w`／`bias` は [`crate::gemm::MetalGemm::
+    /// dispatch_bias_act_prepared`]（イシュー #1022 で追加した
+    /// prepared 版入口。#1023 でオフセット引数を追加し `DeviceBufferView`
+    /// の部分範囲をそのまま `setBuffer:offset:` へ渡せるようにした）へ
+    /// そのまま渡すことでこれらの download を発生させない（Apple Silicon
+    /// の UMA・`StorageModeShared` のため CUDA のような明示同期は不要。
+    /// `memory.rs` モジュールコメント参照）。
+    fn gemm_resident_rhs(
+        &self,
+        a: &Tensor<f32>,
+        w: DeviceBufferView<'_>,
+        bias: Option<DeviceBufferView<'_>>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if w.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let a_shape = a.shape();
+        if a_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: a_shape.len(),
+            }));
+        }
+        let (m, k) = (a_shape[0], a_shape[1]);
+        let w_shape = w.shape();
+        if w_shape.len() != 2 || w_shape[0] != k {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: a_shape.to_vec(),
+                rhs: w_shape.to_vec(),
+            }));
+        }
+        let n = w_shape[1];
+        if let Some(b) = bias {
+            if b.device() != Device::Metal {
+                return Err(BackendError::DeviceMismatch);
+            }
+            if b.shape() != [n] {
+                return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                    lhs: b.shape().to_vec(),
+                    rhs: vec![n],
+                }));
+            }
+        }
+        if k == 0 {
+            // `fandhe_ai_autodiff::nn::linear::Linear::new` が
+            // `in_features == 0` を構築時に拒否するため到達不能
+            // （CPU／CUDA 実装の同分岐と同じ判断。`tensor-core::
+            // backend_ops::BackendOps::gemm_resident_rhs` doc 参照）。
+            return Err(BackendError::InvalidArgument(
+                "gemm_resident_rhs: k == 0 is unreachable via Linear::new (in_features == 0 is \
+                 rejected at construction); a host epilogue fallback would require downloading \
+                 the resident bias, defeating the zero-D2H contract this method exists for"
+                    .to_string(),
+            ));
+        }
+        if m == 0 || n == 0 {
+            return Tensor::new(Vec::new(), &[m, n]).map_err(BackendError::ShapeMismatch);
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_buf) = w_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let bias_handle = bias
+            .map(|b| {
+                b.buffer()
+                    .downcast_handle::<MetalBufferHandle>()
+                    .ok_or(BackendError::DeviceMismatch)
+                    .map(|h| (h, b.offset()))
+            })
+            .transpose()?;
+        let bias_arg = match &bias_handle {
+            Some((h, offset)) => {
+                let buf = h.buffer.as_ref().ok_or_else(|| {
+                    BackendError::DeviceAllocationFailed(
+                        "gemm_resident_rhs: bias buffer has numel > 0 but no device allocation"
+                            .into(),
+                    )
+                })?;
+                Some((buf, *offset))
+            }
+            None => None,
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+        let a_dev_buf = mem.upload(a)?;
+        let a_handle = a_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(a_buf) = a_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: a buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let c_dev_buf = mem.alloc_zeroed(&[m, n])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_rhs: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.dispatch_bias_act_prepared(
+            &ctx,
+            a_buf,
+            0,
+            w_buf,
+            w.offset(),
+            bias_arg,
+            false,
+            c_buf,
+            m,
+            n,
+            k,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        mem.download(&c_dev_buf)
+    }
+
+    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
+    /// #1023「R3」）。`Op::LinearResident` の VJP が `d_input^T = w @ g^T`
+    /// を計算するために使う。`bias` なし（`None`）で [`Self::
+    /// gemm_resident_rhs`] と同じ [`crate::gemm::MetalGemm::
+    /// dispatch_bias_act_prepared`] を呼ぶ（`has_bias=0`・`act=0` で
+    /// 純粋な `w @ b` になる）。
+    fn gemm_resident_lhs(
+        &self,
+        w: DeviceBufferView<'_>,
+        b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        if w.device() != Device::Metal {
+            return Err(BackendError::DeviceMismatch);
+        }
+        let w_shape = w.shape();
+        if w_shape.len() != 2 {
+            return Err(BackendError::ShapeMismatch(ShapeError::RankMismatch {
+                expected: 2,
+                actual: w_shape.len(),
+            }));
+        }
+        let (p, q) = (w_shape[0], w_shape[1]);
+        let b_shape = b.shape();
+        if b_shape.len() != 2 || b_shape[0] != q {
+            return Err(BackendError::ShapeMismatch(ShapeError::ShapeMismatch {
+                lhs: w_shape.to_vec(),
+                rhs: b_shape.to_vec(),
+            }));
+        }
+        let r = b_shape[1];
+        if p == 0 || r == 0 {
+            return Tensor::new(Vec::new(), &[p, r]).map_err(BackendError::ShapeMismatch);
+        }
+        if q == 0 {
+            // `w` の縮約次元（`out_features`）が 0 の場合、GEMM の数学的
+            // 定義どおり結果は全 0（CPU／CUDA 実装の同分岐と同じ判断）。
+            // GPU 起動を回避してホスト側で直接構築する。
+            return Tensor::from_shape_fill(&[p, r], |_| 0.0).map_err(BackendError::ShapeMismatch);
+        }
+
+        let w_handle = w
+            .buffer()
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(w_buf) = w_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs: w buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let ctx = context_cache::cached_context().map_err(map_metal_error)?;
+        let mem = MetalMemory::from_shared(ctx.clone());
+        let b_dev_buf = mem.upload(b)?;
+        let b_handle = b_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(b_buf) = b_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs: b buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+        let c_dev_buf = mem.alloc_zeroed(&[p, r])?;
+        let c_handle = c_dev_buf
+            .downcast_handle::<MetalBufferHandle>()
+            .ok_or(BackendError::DeviceMismatch)?;
+        let Some(c_buf) = c_handle.buffer.as_ref() else {
+            return Err(BackendError::DeviceAllocationFailed(
+                "gemm_resident_lhs: output buffer has numel > 0 but no device allocation".into(),
+            ));
+        };
+
+        let gemm = context_cache::cached_gemm(&ctx)
+            .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+        gemm.dispatch_bias_act_prepared(
+            &ctx,
+            w_buf,
+            w.offset(),
+            b_buf,
+            0,
+            None,
+            false,
+            c_buf,
+            p,
+            r,
+            q,
+        )
+        .map_err(|e: MetalError| BackendError::KernelLaunchFailed(e.to_string()))?;
+
+        mem.download(&c_dev_buf)
     }
 
     fn add(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Result<Tensor<f32>, BackendError> {

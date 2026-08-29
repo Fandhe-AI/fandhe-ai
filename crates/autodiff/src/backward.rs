@@ -22,7 +22,7 @@ use fandhe_ai_tensor_core::Tensor;
 
 use crate::error::AutodiffError;
 use crate::grad;
-use crate::tape::{NodeId, Tape, TapeId};
+use crate::tape::{NodeId, Op, ResidentResolver, Tape, TapeId};
 use crate::var::Var;
 
 /// `Tape::backward` が返す勾配の入れ物。`Var` 単位で `get()` から
@@ -71,6 +71,31 @@ impl Tape {
     /// 単純形として確定させているため、全域で定義可能なこの意味論を
     /// 採用する）。
     pub fn backward(&self, loss: &Var<'_>) -> Result<Gradients, AutodiffError> {
+        self.backward_impl(loss, None)
+    }
+
+    /// [`Tape::backward`] のデバイス常駐対応版（イシュー #1022）。
+    /// `resolver`（`fandhe_ai_autodiff::optim::device_store::
+    /// DeviceParamStore` が実装する [`ResidentResolver`]）を
+    /// `grad::vjp` へスレッドし、`Op::LinearResident` の VJP が
+    /// weight のデバイスバッファを取得できるようにする。
+    /// `DeviceParamStore::backward`（`optim::device_store`）からのみ
+    /// 呼ばれる（`tape::Op::LinearResident` doc 参照）。
+    pub(crate) fn backward_with_resident(
+        &self,
+        loss: &Var<'_>,
+        resolver: &dyn ResidentResolver,
+    ) -> Result<Gradients, AutodiffError> {
+        self.backward_impl(loss, Some(resolver))
+    }
+
+    /// `backward`／`backward_with_resident` の共通実装（イシュー #1022 で
+    /// `resolver` 引数を追加する形へ整理）。
+    fn backward_impl(
+        &self,
+        loss: &Var<'_>,
+        resolver: Option<&dyn ResidentResolver>,
+    ) -> Result<Gradients, AutodiffError> {
         if loss.tape_id() != self.id {
             return Err(AutodiffError::TapeMismatch);
         }
@@ -121,10 +146,29 @@ impl Tape {
             // 経由で実体化する。当該ノードが elementwise の遅延グラフ
             // 末端の場合に備える（TASK-12.1d・#164。`Var::value()`〈層
             // 2〉は呼ばず、`Unsupported` 以外の失敗は `?` で伝播する）。
-            let node_value =
-                crate::tape::materialize_fallible(&nodes, self.ops(), NodeId(id))?.clone();
             let node = &nodes[id];
-            let contributions = grad::vjp(&node.op, &node_value, &upstream, &nodes, self.ops())?;
+            // `Op::ResidentLeaf`（イシュー #1022）はホスト値を持たない
+            // （`TapeNode::value` が常に空。`Tape::push_resident_leaf`
+            // 参照）ため、`materialize_fallible` を呼ぶと「実体化済みの
+            // はずが未実体化だった」契約違反フォールバック（`tape.rs::
+            // lazy_leaf_value` の `debug_assert!` + ゼロ埋め）に誤って
+            // 到達してしまう。`grad::vjp` は本 variant を `Op::Leaf` と
+            // 同じく `out_value` を参照しないため、プレースホルダで
+            // 十分（`Op::Leaf` は元々実体化済みで実害がなかったのと同じ
+            // 理由で、ここでも実際の値は使われない）。
+            let node_value = if matches!(node.op, Op::ResidentLeaf { .. }) {
+                Tensor::scalar(0.0)
+            } else {
+                crate::tape::materialize_fallible(&nodes, self.ops(), NodeId(id))?.clone()
+            };
+            let contributions = grad::vjp(
+                &node.op,
+                &node_value,
+                &upstream,
+                &nodes,
+                self.ops(),
+                resolver,
+            )?;
             for (target, contribution) in contributions {
                 accumulate(&mut grads, target, contribution);
             }

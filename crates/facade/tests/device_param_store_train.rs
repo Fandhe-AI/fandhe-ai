@@ -91,7 +91,10 @@ fn train_with_device_param_store(steps: usize, lr: f32) -> (Vec<f32>, Vec<Tensor
         let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
         log.push(scalar(&loss.to_tensor()));
 
-        let grads = tape.backward(&loss).unwrap();
+        // `Op::LinearResident` を含むグラフのため素の `tape.backward` は
+        // 型付きエラーで拒否される（イシュー #1022）。
+        // `tape.backward_device_param_store` を使う。
+        let grads = tape.backward_device_param_store(&loss, &store).unwrap();
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
     }
@@ -221,7 +224,7 @@ fn device_resident_matches_host_sgd_across_100_steps_final_value_only() {
             let y = tape.var(&y_data);
             let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
             let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-            let grads = tape.backward(&loss).unwrap();
+            let grads = tape.backward_device_param_store(&loss, &store).unwrap();
             tape.step_device_param_store(&mut store, &grads, &config)
                 .unwrap();
         }
@@ -302,7 +305,7 @@ fn predict_resident_matches_predict_after_training() {
         let y = tape.var(&y_data);
         let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
         let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let grads = tape.backward_device_param_store(&loss, &store).unwrap();
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
     }
@@ -329,7 +332,7 @@ fn predict_resident_matches_predict_after_training() {
 }
 
 /// `forward_resident` が forward 失敗時に `pending` をロールバックする
-/// ことを検証する（codex-review PR #954 P2 是正）。`register_resident_leaves`
+/// ことを検証する（codex-review PR #954 P2 是正）。`register_resident_params`
 /// で pending 状態へ遷移した後、入力 shape 不整合で
 /// `forward_from_flat_vars` を失敗させ、その直後に呼んだ 2 回目の
 /// `forward_resident`（正しい入力）が `PendingForwardUnconsumed` ではなく

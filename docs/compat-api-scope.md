@@ -47,17 +47,27 @@ REQ-9 の 2026-08-29 追記・イシュー #986）
      制御 API を設けない・任意 `BackendOps` 実装を注入できる公開 API を
      設けない）と矛盾しない（出典: `docs/spec/04-requirements.md:212`）
   4. **デバイス常駐更新経路 `fandhe_ai::DeviceParamStore`／
-     `Tape::step_device_param_store`**（`Tape::sync_device_param_store_to_host`
-     を含む。#954。クレート root からの再エクスポート。
-     `crates/facade/src/lib.rs`）: 学習ループのパラメータ（および
-     momentum 等の optimizer 状態）をデバイス上に常駐させ、SGD 更新を
-     デバイス上で完結させることでステップごとのホスト⇔デバイス往復を
-     削減する経路。`facade::Tape` newtype からの薄い委譲として提供し、
-     `BackendOps`／`MemoryOps` は利用者向け公開面へ露出しない。数値一致は
-     REQ-2 のバックエンド間統一複合判定（相対誤差 1e-3 未満 または
-     絶対誤差 1e-5 未満）・FMA 契約に従う（出典: `docs/spec/
+     `Tape::step_device_param_store`**（`Tape::sync_device_param_store_to_host`・
+     `Tape::backward_device_param_store`〈#1022 で追加。`Op::LinearResident`
+     を含むグラフの backward 入口。素の `Tape::backward` はこのグラフに
+     対し型付きエラーを返すため必須〉を含む。#954。クレート root からの
+     再エクスポート。`crates/facade/src/lib.rs`）: 学習ループのパラメータ
+     （および momentum 等の optimizer 状態）をデバイス上に常駐させ、SGD
+     更新をデバイス上で完結させることでステップごとのホスト⇔デバイス
+     往復を削減する経路。#1022 で forward 用のパラメータ download を
+     排除した新経路 `register_resident_params`／`snapshot_resident_params`
+     を追加し、`DeviceParamStore::linear_forward`（`BackendOps::
+     gemm_resident_rhs` 経由）がデバイス常駐のまま forward する（旧
+     `register_resident_leaves`／`snapshot_resident_leaves`〈download を
+     伴う・`Vec<Var<'t>>` を返す〉は crates.io 0.4.0 公開済み API との
+     SemVer 互換のため `#[deprecated]` として維持する。codex-review PR
+     #1059 P1 是正）。
+     `facade::Tape` newtype からの薄い委譲として提供し、`BackendOps`／
+     `MemoryOps` は利用者向け公開面へ露出しない。数値一致は REQ-2 の
+     バックエンド間統一複合判定（相対誤差 1e-3 未満 または絶対誤差
+     1e-5 未満）・FMA 契約に従う（出典: `docs/spec/
      04-requirements.md:213`・設計 `docs/device-resident-update-design.md`
-     〈#951〉・#955〈parity テスト・ベンチ非後退確認〉）
+     〈#951・#1022 追補〉・#955〈parity テスト・ベンチ非後退確認〉）
 
   `SgdConfig` はクレート root（4 の経路）と `crate::optim::SgdConfig`
   （3 の経路）の 2 経路から再エクスポートされる同一型〈`lib.rs`

@@ -147,7 +147,7 @@ fn run_resident_path(device: Device, steps: usize) -> (f64, f64) {
         let y = tape.var(&y_data);
         let pred = model.forward_resident(&tape, &x, &mut store).unwrap();
         let loss = MseLoss::new(Reduction::Mean).forward(&pred, &y).unwrap();
-        let grads = tape.backward(&loss).unwrap();
+        let grads = tape.backward_device_param_store(&loss, &store).unwrap();
 
         let t_update = Instant::now();
         tape.step_device_param_store(&mut store, &grads, &config)

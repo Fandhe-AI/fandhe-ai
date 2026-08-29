@@ -131,7 +131,43 @@ tolerance・実装（`register_resident_leaves`・`DeviceParamStore::step` の
 バッチ化・D2H download 頻度の削減）が必要かどうかの判断・後続対応は
 別イシューでの検討をユーザーへ提案する（`out-of-scope-tracking.md`）。
 
-## 6. 追補（#1023）: `DeviceParamStore` の連結バッファ化
+## 6. #1022 後の再計測（forward の param D2H 排除）
+
+イシュー #1022 は「削減されるのは param 再アップロードのみ」という
+上記 4 節・設計文書 §3.3 の前提そのもの（`register_resident_leaves` が
+毎 step weight/bias を download していた点）を変更した——
+`DeviceParamStore::register_resident_leaves`／`linear_forward` が
+download を行わなくなったため、新経路の GPU ディスパッチ回数は
+「grad upload × パラメータ数 + `sgd_step_device` カーネル起動 ×
+パラメータ数」（forward 側の download が消えた分だけ旧経路より少ない）
+へ変わった。
+
+**計測区間・環境**: `crates/facade/tests/device_param_store_bench.rs`
+（4 節と同一ハーネス・同一モデル・`TRIALS=5`・`STEPS_PER_TRIAL=20`）。
+本ラン環境は Linux x86_64（RTX 3060・nvcc なし。CUDA 実機計測は本ランの
+スコープ外。手順注記参照）。
+
+- **CPU**（`cargo test -p fandhe-ai --release --test device_param_store_bench
+  legacy_vs_resident_per_step_cpu -- --nocapture`）:
+  `legacy_total_median=64.9µs (q1=56.6µs, q3=77.0µs)` 対
+  `resident_total_median=59.8µs (q1=56.7µs, q3=64.7µs)`
+  （`total_speedup_x=1.09`。resident が僅かに高速）。update フェーズ単体は
+  `legacy=2.76µs` 対 `resident=1.12µs`（`update_speedup_x=2.48`）。
+  4 節の CPU 計測（非後退・ノイズレベル差）から明確な後退は生じておらず、
+  update フェーズは #1022 と無関係に既存どおり高速だが、total 側も
+  #1022 前よりわずかに resident 優位側へ寄っている（forward の download
+  排除分。ただし CPU は転送コスト自体が小さいためこの差もノイズレベルに
+  近い。4 節の record only 方針を維持し hard assert はしない）。
+- **Metal／CUDA**: 本ラン（Linux・Metal 実機なし・CUDA toolkit なし）では
+  未計測。Mac / DGX Spark セッションでの実測を後続に委ねる
+  （`crates/facade/tests/device_param_store_bench.rs::
+  legacy_vs_resident_per_step_cuda`〈`#[ignore]`〉・Metal 実機での
+  `cargo test -p fandhe-ai --release --test device_param_store_bench --
+  --ignored --nocapture` を参照）。4 節で観測された Metal の後退
+  （小規模モデルでの GPU ディスパッチ回数増加が主因）が #1022 の
+  forward download 排除でどの程度緩和されるかは実機再計測が必要。
+
+## 7. 追補（#1023）: `DeviceParamStore` の連結バッファ化
 
 上記 4 節が診断した「ディスパッチ単位あたり固定オーバーヘッド ×
 パラメータ数」を解消するため、#1023 で `DeviceParamStore` の内部実装を
@@ -164,7 +200,46 @@ cargo test -p fandhe-ai --release --test device_param_store_bench -- --ignored -
 ```
 
 再計測結果が得られ次第、本節を実測値で更新し、5 節の「後退」判定を
-再評価する。理論上のディスパッチ回数削減（上表）は R2（Metal 後退解消）
-を保証するものではない点に注意する（小規模モデルでは command buffer
+再評価する。理論上のディスパッチ回数削減（上表）は Metal 後退解消を
+保証するものではない点に注意する（小規模モデルでは command buffer
 往復自体の固定コストが `2` 回起動でも残るため。設計文書「追補（#1023）」
 節の制約・既知の限界を参照）。
+
+## 8. 追補（#1022・#1023 統合、R3: 要素オフセット付き常駐ビュー）
+
+6 節（#1022: forward download 排除）と 7 節（#1023: 連結バッファ化・
+単一カーネル起動）は、当時それぞれ独立したブランチ上で `DeviceParamStore`
+の内部表現を書き換えていたため単純併合できず、統合時に
+`DeviceBufferView`（要素オフセット付き常駐ビュー。candle の
+`Storage`＋`Layout` と同じ発想）を導入して両立させた（設計の詳細は
+`docs/device-resident-update-design.md`「追補（#1022・#1023 統合、R3）」
+節を正とする）。理論上のディスパッチ回数は 7 節の表のまま変わらない
+（`DeviceBufferView` はコピーを伴わない参照のみのビューであり、
+追加の転送・カーネル起動を発生させないため）。
+
+本追補の記録セッションでも Metal・CUDA 実機には到達できず（Linux
+環境・GPU 実機なし）、6・7 節が未実施のまま残した実機再計測（`cargo
+test -p fandhe-ai --release --test device_param_store_bench --
+--nocapture` および `-- --ignored --nocapture`）は本統合後も引き続き
+Mac / DGX Spark セッションへの申し送り事項のままである。CPU 参照実装
+（`crates/backend-cpu/tests/gemm_resident_parity.rs`）とローカル
+ユニットテスト（`crates/autodiff/src/optim/device_store.rs` の
+`resident_forward_backward_has_zero_param_download`・
+`step_launches_sgd_kernel_exactly_once_regardless_of_param_count` 等）
+では、R3 統合後も「forward 1 step 内の D2H 0 回」（#1022 受け入れ条件）
+と「`step()` の起動・upload がパラメータ件数に依らず 1 回／step」
+（#1023）の両方が同時に成立することを機械検証済み。
+
+## 9. 追補（codex-review PR #1059 P1 是正）: メソッド名の SemVer 互換分離
+
+8 節までの記述で `register_resident_leaves`／`snapshot_resident_leaves`
+と呼んでいた D2H を伴わないメソッドは、`DeviceParamStore` が crates.io
+`fandhe-ai` 0.4.0 で公開済みの API であるため破壊的変更を避ける目的で
+`register_resident_params`／`snapshot_resident_params` へ改名した。旧名
+`register_resident_leaves`／`snapshot_resident_leaves` は 0.4.0 と同じ
+シグネチャ・挙動（D2H を伴い `Vec<Var<'t>>` を返す）のまま
+`#[deprecated(since = "0.5.0")]` として維持する。本ベンチ（`crates/
+facade/tests/device_param_store_bench.rs`）が計測する `forward_resident`
+は内部で新経路 `register_resident_params` を呼ぶため、6〜8 節の実測値・
+理論値の解釈に変更はない。設計の詳細は `docs/device-resident-update-
+design.md`「追補（#1022・#1023 統合、R3）」節の同項目を正とする。

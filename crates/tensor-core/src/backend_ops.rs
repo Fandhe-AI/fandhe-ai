@@ -47,7 +47,7 @@
 //! 本イシューは受け入れ条件検証に必要な最小限のテストに留める。
 
 use crate::Tensor;
-use crate::buffer::{DeviceBuffer, MemoryOps};
+use crate::buffer::{DeviceBuffer, DeviceBufferView, MemoryOps};
 use crate::device::{BackendError, Device};
 use crate::dispatch_failure::DispatchFailureCell;
 use crate::fusion::FusionPlan;
@@ -306,6 +306,89 @@ pub trait BackendOps {
             Activation::Relu => self.relu(&out)?,
         };
         Ok(out)
+    }
+
+    /// デバイス常駐 `w`（・`bias`）のまま `y = a @ w (+ bias)` を計算する
+    /// （イシュー #1022・#1023「R3」・`docs/device-resident-update-design.md`
+    /// §3.3e）。
+    ///
+    /// `fandhe_ai_autodiff::optim::device_store::DeviceParamStore::linear_forward`
+    /// が学習ループの forward で使う。`a`（ホスト常駐）は毎ステップ変化
+    /// する活性化値、`w`（デバイス常駐）は学習対象パラメータであり、
+    /// `sgd_step_device` と同じく **本メソッドが `w`／`bias` を
+    /// ホストへ download しない**ことが受け入れ条件の中核（本イシューが
+    /// 排除する対象は「forward のたびにパラメータをホストへ落とす」
+    /// D2H であり、`a`・戻り値の D2H は含まない。`docs/device-resident-
+    /// update-design.md` §1.2 の解釈）。
+    ///
+    /// `w`／`bias` は [`DeviceBufferView`]（イシュー #1023「パラメータ
+    /// 横断の単一連結バッファ化」後、`DeviceParamStore` が全パラメータを
+    /// 1 本の連結 `DeviceBuffer<f32>` として保持するため、個々の
+    /// パラメータは連結バッファ内の要素オフセット範囲としてしか
+    /// 表現できない。「R3: 要素オフセット付き常駐ビュー」設計。
+    /// `docs/device-resident-update-design.md` 追補参照）で渡す。実装は
+    /// `view.offset()..view.offset() + view.numel()` の範囲のみを
+    /// `view.shape()` の重みとして扱う契約（この範囲チェック自体は
+    /// [`DeviceBufferView::new`] が構築時に行うため、本メソッドの実装は
+    /// 追加のオフセット境界検査を要しないが、カーネル側の手動境界検査
+    /// 〈REQ-8〉は従来どおり省略しない）。
+    ///
+    /// `bias` は `Some` の場合 `[n]`（`w` の列数）への行方向複製のみ
+    /// 対応する（[`BackendOps::gemm_bias_act`] の融合カーネルと同じ厳密
+    /// 一致契約。ブロードキャスト全般は非対応）。`k`（`a` の列数 = `w`
+    /// の行数）が 0 の呼び出しは `sgd_step_device` と同様に呼び出し元
+    /// （`fandhe_ai_autodiff::nn::linear::Linear::new` が `in_features == 0`
+    /// を構築時に拒否する）の契約により実運用では到達しない。
+    ///
+    /// # デフォルト実装
+    ///
+    /// 本メソッドは `sgd_step_device`／`gemm_bias_act` と同じ非破壊拡張
+    /// （デフォルトメソッド追加。公開 API 非破壊はガードレール条件・
+    /// `.claude/rules/security.md`）であり、既定は
+    /// [`BackendError::Unsupported`] を返す fail-safe とする（デバイス
+    /// 常駐オペランドを扱えないバックエンドが誤って黙示のホスト
+    /// フォールバック〈`w` を download してから `gemm_bias_act` へ委譲する
+    /// 等〉を行い、D2H 排除という受け入れ条件を静かに破ることを防ぐため。
+    /// `download` してよいなら本メソッドを呼ぶ意味がない）。CPU／CUDA／
+    /// Metal の各実装はこのデフォルトをカーネル呼び出しでオーバーライド
+    /// する（`backend-cpu::ops::CpuBackendOps`・`backend-cuda::ops::
+    /// CudaBackendOps`・`backend-metal::ops::MetalBackendOps` 参照）。
+    fn gemm_resident_rhs(
+        &self,
+        _a: &Tensor<f32>,
+        _w: DeviceBufferView<'_>,
+        _bias: Option<DeviceBufferView<'_>>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_resident_rhs: default fail-safe (no resident-operand GEMM kernel available)"
+                .into(),
+        ))
+    }
+
+    /// デバイス常駐 `w` のまま `c = w @ b` を計算する（イシュー #1022・
+    /// #1023「R3」）。
+    ///
+    /// `DeviceParamStore` の resident backward（`Op::LinearResident` の
+    /// VJP。`fandhe_ai_autodiff::grad`）が `d_input^T = w @ g^T` を計算する
+    /// ために使う（`w: [k, n]`・`b: [n, m]` → `c: [k, m]`。呼び出し元が
+    /// `c` を転置して `d_input: [m, k]` を得る）。[`Self::gemm_resident_rhs`]
+    /// と対になる「常駐オペランドが左辺」の形（`w` が左、`b` がホスト
+    /// 常駐の右辺）。`w` が [`DeviceBufferView`] を取る理由は
+    /// [`Self::gemm_resident_rhs`] と同じ。
+    ///
+    /// # デフォルト実装
+    ///
+    /// [`Self::gemm_resident_rhs`] と同じ理由・同じ fail-safe 方針
+    /// （[`BackendError::Unsupported`]）のデフォルトメソッド。
+    fn gemm_resident_lhs(
+        &self,
+        _w: DeviceBufferView<'_>,
+        _b: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, BackendError> {
+        Err(BackendError::Unsupported(
+            "gemm_resident_lhs: default fail-safe (no resident-operand GEMM kernel available)"
+                .into(),
+        ))
     }
 
     /// 融合グラフ（#162 が検出した elementwise 連鎖・#163 が生成する

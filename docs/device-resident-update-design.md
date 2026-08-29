@@ -1651,6 +1651,47 @@ device` の更新式・§5.2 の FMA 契約）に集約される。
 - f16 経路への拡張。
 - optimizer 公開面（`facade` 側の意匠）の変更 — 接続先: #932。
 
+## 追補: #1022 による resident-aware VJP の実装（§3.3b「転送モデルとの整合性の明記」・上記スコープ外事項「resident-aware な VJP」の解消）
+
+上記スコープ外事項に記した **resident-aware な VJP** をイシュー #1022 で
+実装した。本節はその実装内容の要約を記録する（設計判断の詳細は PR 説明・
+`crates/autodiff/src/tape.rs::Op::ResidentLeaf`／`Op::LinearResident`・
+`crates/autodiff/src/optim/device_store.rs` の各ドキュメンテーション
+コメントを正とし、本節は追補記録に留める）。
+
+- **転送モデルの変更**: §3.3b が「本段階で残る転送」と明記していた
+  「forward 用 weight/bias `download`」を排除した。`DeviceParamStore::
+  register_resident_leaves`／`snapshot_resident_leaves` はテープへ
+  `Op::ResidentLeaf`（ホスト値を持たない葉ノード）を登録するのみで
+  download を行わず、`DeviceParamStore::linear_forward` が
+  `BackendOps::gemm_resident_rhs`（新設・非破壊デフォルトメソッド）へ
+  `w`／`bias` のデバイスバッファをそのまま渡す。残る D2H は演算出力
+  （`y`・勾配等）の readback のみであり、これは phase-4（#924）のスコープ
+  （§6(b)・上記スコープ外事項参照）。
+- **`Tape: Send` 制約との整合**（§3.4 相当の追加判断）: `DeviceBuffer<f32>`
+  は `!Send` になりうるため `TapeNode`／`Tape` へ持たせられない
+  （`tests/fusion_backend_integration.rs::tape_is_send`）。そのため
+  backward は `DeviceParamStore` 自身が実装する `ResidentResolver`
+  トレイト（`tape.rs`。`store_id`／`slot` → `&DeviceBuffer<f32>`）経由で
+  一時的にバッファを解決する設計とした。`Tape::backward`（resolver なし）
+  は `Op::LinearResident` を含むグラフに対し
+  `AutodiffError::InvalidArgument` を返す（fail-closed）。呼び出し元は
+  `DeviceParamStore::backward`（`facade::Tape::
+  backward_device_param_store`）を使う。
+- **公開面の破壊的変更**: `register_resident_leaves`／
+  `snapshot_resident_leaves` の戻り型が `Vec<Var<'t>>` から不透明型
+  `optim::ResidentLeaf<'t>`（`shape()` のみ公開）へ変わった。これに伴い
+  `facade::compat::Sequential::forward_from_flat_vars`（private）は
+  `forward_from_flat_leaves` へ改名し `DeviceParamStore::linear_forward`
+  を呼ぶ形へ変更した。`facade` の公開面には `Tape::
+  backward_device_param_store`（新設）を追加した
+  （`docs/compat-api-scope.md` §0 追記）。
+- **受け入れ条件 1 の解釈**: 本イシューが 0 回にするのは
+  `DeviceParamStore` が保持するパラメータ（weight/bias）に対する
+  `MemoryOps::download` であり、演算出力（y・dXᵀ・loss 等）の D2H は
+  含まない（現行アーキテクチャの `BackendOps` がホスト `Tensor<f32>`
+  契約であるため。演算単位同期の廃止は #1011〜#1014・phase-4 のスコープ）。
+
 ### 追補（#1023）: `DeviceParamStore` の連結バッファ化
 
 §3.3 が記述する「1 パラメータずつ grad を upload し `sgd_step_device` を
@@ -1668,3 +1709,75 @@ device-resident-update-bench.md` §3〜§5）で resident update が legacy 比
 「パラメータ横断の単一連結バッファ化（イシュー #1023）」節を正とする。
 Metal 実機・DGX Spark GB10 実機での再計測は本追補の記録時点では未実施
 （`docs/perf/device-resident-update-bench.md` §6 追補参照）。
+
+### 追補（#1022・#1023 統合、R3: 要素オフセット付き常駐ビュー）
+
+上記 2 つの追補は、それぞれ別ブランチ上で独立に `DeviceParamStore` の
+内部表現を書き換えたため、単純な統合ではどちらか一方の最適化を
+リバートすることになる緊張関係があった:
+
+- #1022 の resident-aware VJP は `linear_forward`／VJP が
+  `BackendOps::gemm_resident_rhs`／`gemm_resident_lhs` へ**パラメータ
+  ごとの独立した `DeviceBuffer`**（その shape そのものを表す）を渡す
+  前提だった。
+- #1023 の連結バッファ化は全パラメータを**単一の連結 `DeviceBuffer`**
+  （shape `[total_numel]`）へまとめ、`step()` の grad upload・カーネル
+  起動をパラメータ数に依らず 1 回にする。
+
+`gemm_resident_rhs`／`gemm_resident_lhs` は「渡されたバッファの shape が
+そのまま重みの shape」という契約であり、オフセット・サブビューの概念を
+持たなかったため、連結バッファの一部を直接渡すことができなかった。
+
+この緊張を解消するため、**両者を両立させる「R3: 要素オフセット付き
+常駐ビュー」設計**を採用した（candle の `Storage` + `Layout`〈offset
+保持〉と同じ発想）。
+
+- `tensor-core` に軽量ビュー型 `buffer::DeviceBufferView<'a>`
+  （`buffer: &'a DeviceBuffer<f32>`・`offset: usize`〈要素単位〉・
+  `shape: &'a [usize]`）を追加した。コンストラクタ `DeviceBufferView::
+  new` は `offset + shape.numel() <= buffer.numel()` を検証し、超過は
+  `BackendError::InvalidArgument`（本番経路で panic しない）で拒否する。
+- `BackendOps::gemm_resident_rhs`／`gemm_resident_lhs` の引数を
+  `&DeviceBuffer<f32>` から `DeviceBufferView<'_>` へ変更した。契約は
+  「ビューの `offset..offset+numel` 範囲を shape の重みとして扱う」。
+  カーネル側の手動境界検査（REQ-8）は従来どおり維持する。
+- CPU 実装はホストスライスの範囲インデックス（`&data[offset..offset+
+  numel]`）、CUDA 実装は `cudarc::driver::CudaSlice::slice(offset..
+  offset+numel)`（`CudaView`）、Metal 実装は `setBuffer:offset:atIndex:`
+  のバイトオフセット（`offset * size_of::<f32>()`）でそれぞれビューを
+  実現する。3 バックエンドとも既存カーネル本体（PTX／MSL）は無変更。
+- `DeviceParamStore` は #1023 の連結バッファ（`params: DeviceBuffer<f32>`・
+  `layout: Vec<ParamLayout>`）をそのまま採用し、`register_resident_
+  leaves`／`snapshot_resident_leaves`（#1022）は download を行わず
+  `layout` の添字（`slot`）で `Op::ResidentLeaf` を登録する。
+  `linear_forward` は `checked_resident_buffer(store_id, slot)` が
+  `layout[slot]` の `offset`／`shape` から `DeviceBufferView` を構築して
+  `gemm_resident_rhs`／`gemm_resident_lhs` へ渡す。`step()` の更新
+  フェーズ（grad upload・カーネル起動）は #1023 のまま単一連結バッファへ
+  の 1 回／step を維持する。
+- **P1 是正（codex-review 指摘）**: `ResidentLeaf` に `tape_id: TapeId`
+  を追加し、`linear_forward` で `weight`／`bias` の `tape_id` が引数
+  `tape` と一致することを検証する（`BackendError::TapeMismatch`）。
+  ライフタイム引数 `'t` のみでは `Tape` の同一性を保証しないため、
+  同じ `DeviceParamStore` から別 `Tape` 上で得た `ResidentLeaf` を
+  誤って渡すと、`grad::vjp` が別テープの `nodes` を誤って読む余地が
+  あった。あわせて `grad::vjp` の `Op::LinearResident` 分岐は
+  `nodes[weight.0]`／`nodes[bias_id.0]` の直接添字アクセスを
+  `nodes.get(...)` へ置き換え、範囲外添字を fail-closed に拒否する
+  （縦深防御。`.claude/rules/security.md` A08）。
+- **公開 API の SemVer 互換維持（codex-review PR #1059 P1 是正・追補）**:
+  `DeviceParamStore` は `facade` の公開 API（crates.io `fandhe-ai` 0.4.0 で
+  公開済み）であり、`register_resident_leaves`／`snapshot_resident_leaves`
+  の戻り型を `Vec<Var<'t>>` から `Vec<ResidentLeaf<'t>>` へ直接変更する
+  ことは破壊的変更になる。そのため D2H を伴わない常駐 forward 経路は
+  新規メソッド名 `register_resident_params`／`snapshot_resident_params`
+  として追加し（実体はここまでの本節が説明する挙動そのもの）、旧
+  `register_resident_leaves`／`snapshot_resident_leaves` は旧シグネチャ・
+  旧挙動（`mem.download` を伴い `tape.var(&tensor)` で `Op::Leaf` へ登録
+  する。#1022 以前の実装）のまま `#[deprecated(since = "0.5.0")]` として
+  維持する。`facade::compat::Sequential::forward_resident`／
+  `predict_resident`（内部実装）は新経路 `*_resident_params` を呼ぶ。
+
+Metal・CUDA 実機での再計測は本追補の記録セッションでは未実施（実機環境
+未接続。Mac／DGX Spark 実機セッションへ申し送り。`docs/perf/
+device-resident-update-bench.md` 追補参照）。

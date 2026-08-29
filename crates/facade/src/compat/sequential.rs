@@ -81,7 +81,8 @@
 //! 経由（facade の正式な再エクスポート）で参照する。
 
 use crate::{
-    AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, Tape, Tensor, Var,
+    AutodiffError, BackendError, DeviceParamStore, Gradients, LinearVars, ResidentLeaf, Tape,
+    Tensor, Var,
 };
 use fandhe_ai_autodiff::nn::activation::{Relu, Sigmoid, Tanh};
 use fandhe_ai_autodiff::nn::{Linear, Module};
@@ -354,32 +355,37 @@ impl Sequential {
         DeviceParamStore::new(&tape.0, &params)
     }
 
-    /// デバイス常駐パラメータでの学習用 forward（イシュー #935）。
+    /// デバイス常駐パラメータでの学習用 forward（イシュー #935・
+    /// #1022 でパラメータの毎 step D2H を排除）。
     ///
-    /// `store.register_resident_leaves(&tape.0)` を 1 回呼び（forward 用
-    /// download・葉ノード登録。`DeviceParamStore` のドキュメント参照）、
-    /// 返る `Var` 列から [`LinearVars`] を層順に組み立てて
-    /// [`Sequential::forward`]（`SequentialVars::forward`）と同一の層
-    /// イテレーション（活性化層は `Module::forward` 多態 dispatch）を
-    /// 辿る。`mem`／`ops`（`BackendOps`／`MemoryOps`）は一切表面に出さ
-    /// ない（REQ-12）。
+    /// `store.register_resident_params(&tape.0)` を 1 回呼び（forward 用
+    /// 葉ノード登録。#1022 でホストへの download を撤去済み——
+    /// `DeviceParamStore::register_resident_params` のドキュメント
+    /// 参照）、返る [`ResidentLeaf`] 列から [`Sequential::forward`]
+    /// （`SequentialVars::forward`）と同一の層イテレーション（`Linear`
+    /// 層は `store.linear_forward`〈デバイス常駐 weight のまま forward〉・
+    /// 活性化層は `Module::forward` 多態 dispatch）を辿る。`mem`／`ops`
+    /// （`BackendOps`／`MemoryOps`）は一切表面に出さない（REQ-12）。
     ///
     /// 呼び出し元は本メソッドの戻り値（`loss` 計算に使う `Var`）から
-    /// `tape.backward(...)` → `tape.step_device_param_store(&mut store,
-    /// &grads, &config)` と繋げる（`crates/facade/tests/
-    /// device_param_store_train.rs` に実例がある）。
+    /// `tape.backward_device_param_store(...)`（素の `tape.backward` は
+    /// `Op::LinearResident` を含むグラフに対し型付きエラーを返す。
+    /// `DeviceParamStore::backward` doc 参照）→
+    /// `tape.step_device_param_store(&mut store, &grads, &config)` と
+    /// 繋げる（`crates/facade/tests/device_param_store_train.rs` に
+    /// 実例がある）。
     ///
     /// **forward 失敗時の pending ロールバック（codex-review PR #954 P2
-    /// 是正）**: `register_resident_leaves` で `store` を pending 状態へ
-    /// 遷移させた後、`forward_from_flat_vars`（層数不一致・バックエンド
+    /// 是正）**: `register_resident_params` で `store` を pending 状態へ
+    /// 遷移させた後、`forward_from_flat_leaves`（層数不一致・バックエンド
     /// 演算エラー等）が失敗した場合、そのまま `Err` を返すと `store` は
-    /// pending のまま残り、次回呼び出しの `register_resident_leaves` が
+    /// pending のまま残り、次回呼び出しの `register_resident_params` が
     /// `BackendError::PendingForwardUnconsumed` で拒否される
     /// （`DeviceParamStore` モジュール doc「状態機械」参照）。呼び出し元は
     /// forward の失敗を理由に `store` を破棄する義務を負わないため、公開
     /// ラッパーである本メソッド内で `store.abandon_pending_forward()` に
     /// より pending をロールバックしてから元のエラーを返す
-    /// （`register_resident_leaves` 自体が失敗した場合は pending 状態へ
+    /// （`register_resident_params` 自体が失敗した場合は pending 状態へ
     /// 遷移していないため、`?` でそのまま伝播してよい）。
     pub fn forward_resident<'t>(
         &self,
@@ -387,8 +393,8 @@ impl Sequential {
         input: &Var<'t>,
         store: &mut DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
-        let vars = store.register_resident_leaves(&tape.0)?;
-        match self.forward_from_flat_vars(&tape.0, input, &vars) {
+        let leaves = store.register_resident_params(&tape.0)?;
+        match self.forward_from_flat_leaves(&tape.0, input, &leaves, store) {
             Ok(output) => Ok(output),
             Err(e) => {
                 store.abandon_pending_forward();
@@ -397,72 +403,84 @@ impl Sequential {
         }
     }
 
-    /// デバイス常駐パラメータでの推論（イシュー #935）。`store.device()`
-    /// へ結線した新規 [`Tape`]（`crate::tape_for`）を内部で構築し、
-    /// `store.snapshot_resident_leaves`（読み取り専用版。`pending` 状態を
-    /// 変化させない）で得た `Var` 列から forward する。`Tape` はこの
-    /// 呼び出しのスコープ内で破棄される（`Sequential::predict` と同じ
-    /// 運用。`fandhe_ai_autodiff::nn::linear`「`Tape` はステップごとに
-    /// 生成・破棄される前提」参照）。既存 `ActivationKind`／
-    /// `BackendOps::sigmoid` 等を新設せず `forward_from_flat_vars`
-    /// （`forward_resident` と共有する同一の層イテレーション。private ヘルパーの
-    /// ためインドキュメントリンクは張らずコードスパン表記とする）を再利用
-    /// することで、`predict` との parity を構造的に保証する（設計文書
-    /// §3.3c）。
+    /// デバイス常駐パラメータでの推論（イシュー #935・#1022 でパラメータの
+    /// download を撤去）。`store.device()` へ結線した新規 [`Tape`]
+    /// （`crate::tape_for`）を内部で構築し、`store.
+    /// snapshot_resident_params`（読み取り専用版。`pending` 状態を
+    /// 変化させない。#1022 で download を撤去済み）で得た [`ResidentLeaf`]
+    /// 列から forward する。`Tape` はこの呼び出しのスコープ内で破棄される
+    /// （`Sequential::predict` と同じ運用。`fandhe_ai_autodiff::nn::linear`
+    /// 「`Tape` はステップごとに生成・破棄される前提」参照）。既存
+    /// `ActivationKind`／`BackendOps::sigmoid` 等を新設せず
+    /// `forward_from_flat_leaves`（`forward_resident` と共有する同一の
+    /// 層イテレーション。private ヘルパーのためインドキュメントリンクは
+    /// 張らずコードスパン表記とする）を再利用することで、`predict` との
+    /// parity を構造的に保証する（設計文書 §3.3c）。
     pub fn predict_resident(
         &self,
         store: &DeviceParamStore,
         input: &Tensor<f32>,
     ) -> Result<Tensor<f32>, AutodiffError> {
         let tape = crate::tape_for(store.device())?;
-        let vars = store.snapshot_resident_leaves(&tape.0)?;
+        let leaves = store.snapshot_resident_params(&tape.0)?;
         let input_var = tape.var(input);
-        let output = self.forward_from_flat_vars(&tape.0, &input_var, &vars)?;
+        let output = self.forward_from_flat_leaves(&tape.0, &input_var, &leaves, store)?;
         Ok(output.to_tensor())
     }
 
-    /// `tape`（`self.layers` を辿る forward 用）と `vars`（`self.layers`
+    /// `tape`（`self.layers` を辿る forward 用）と `leaves`（`self.layers`
     /// のうち `Linear` 層に対応する、層順に weight → bias〈`Some` の
-    /// 場合のみ〉のフラットな `Var` 列。[`Sequential::trainable_parameters`]
-    /// と同一の順序契約）から forward する共通ロジック。
-    /// [`Sequential::forward_resident`]／[`Sequential::predict_resident`] の
-    /// 両方から呼ばれる（層イテレーションの二重実装を避ける。設計文書
-    /// §3.3c）。
-    fn forward_from_flat_vars<'t>(
+    /// 場合のみ〉のフラットな [`ResidentLeaf`] 列。[`Sequential::
+    /// trainable_parameters`] と同一の順序契約）・`store`（`leaves` の
+    /// 発行元であり `linear_forward` の実行主体）から forward する共通
+    /// ロジック。[`Sequential::forward_resident`]／[`Sequential::
+    /// predict_resident`] の両方から呼ばれる（層イテレーションの二重実装
+    /// を避ける。設計文書 §3.3c）。
+    ///
+    /// **#1022 による変更**: 旧実装は `Var` 列から [`LinearVars`] を
+    /// 組み立てて `LinearVars::forward`（ホスト常駐 weight 前提の
+    /// `matmul`／`add`）を呼んでいた。`register_resident_params`／
+    /// `snapshot_resident_params` の戻り型が不透明な `ResidentLeaf`
+    /// （ホスト値を持たない）へ変わったため、`Linear` 層は
+    /// `store.linear_forward`（デバイス常駐のまま `BackendOps::
+    /// gemm_resident_rhs` へ委譲）を呼ぶ形へ置き換える。
+    fn forward_from_flat_leaves<'t>(
         &self,
         tape: &'t fandhe_ai_autodiff::Tape,
         input: &Var<'t>,
-        vars: &[Var<'t>],
+        leaves: &[ResidentLeaf<'t>],
+        store: &DeviceParamStore,
     ) -> Result<Var<'t>, AutodiffError> {
         let mut current = *input;
-        let mut cursor = vars.iter();
+        let mut cursor = leaves.iter();
         for layer in &self.layers {
             if let Some(linear) = layer.as_linear() {
-                let weight = *cursor.next().ok_or_else(|| {
+                let weight = cursor.next().ok_or_else(|| {
                     AutodiffError::InvalidArgument(
-                        "Sequential::forward_from_flat_vars: vars has fewer elements than \
+                        "Sequential::forward_from_flat_leaves: leaves has fewer elements than \
                          trainable_parameters() (weight missing)"
                             .to_string(),
                     )
                 })?;
                 let bias = if linear.bias().is_some() {
-                    Some(*cursor.next().ok_or_else(|| {
+                    Some(cursor.next().ok_or_else(|| {
                         AutodiffError::InvalidArgument(
-                            "Sequential::forward_from_flat_vars: vars has fewer elements than \
-                             trainable_parameters() (bias missing)"
+                            "Sequential::forward_from_flat_leaves: leaves has fewer elements \
+                             than trainable_parameters() (bias missing)"
                                 .to_string(),
                         )
                     })?)
                 } else {
                     None
                 };
-                let linear_vars = LinearVars { weight, bias };
-                current = linear_vars.forward(&current)?;
+                current = store
+                    .linear_forward(tape, &current, weight, bias)
+                    .map_err(AutodiffError::Backend)?;
             } else {
                 current = layer.forward(tape, &current)?;
             }
         }
-        // `vars` が `self.layers` の要求件数より多い（より大きなモデルの
+        // `leaves` が `self.layers` の要求件数より多い（より大きなモデルの
         // `DeviceParamStore` を誤って渡した等）場合、余剰要素を無視した
         // まま黙って forward が成功すると、位置対応契約（層順に
         // weight → bias）が崩れているにもかかわらず誤った推論結果を
@@ -471,7 +489,7 @@ impl Sequential {
         // （`.claude/rules/security.md` A03）。
         if cursor.next().is_some() {
             return Err(AutodiffError::InvalidArgument(
-                "Sequential::forward_from_flat_vars: vars has more elements than \
+                "Sequential::forward_from_flat_leaves: leaves has more elements than \
                  trainable_parameters() requires (extra weight/bias ignored)"
                     .to_string(),
             ));
