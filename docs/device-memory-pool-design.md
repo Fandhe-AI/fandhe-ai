@@ -66,17 +66,19 @@
   allocator;` として `lib.rs` から re-export）。`MemoryOps`（shape 単位・
   `DeviceBuffer<f32>` を扱う既存の上位抽象）の**下位**に位置する、バイト
   単位のバックエンド非依存プール抽象として新設する。
-- 結線: `BackendOps::allocator(&self) -> Option<&dyn DeviceAllocator> {
-  None }`（デフォルト実装付き）を追加する。`memory_ops()` と同じ「既存
-  trait への非破壊拡張」パターンを踏襲する。crates.io 公開済み trait
-  （`BackendOps`）に**必須**メソッドを追加するのは破壊的変更であり、
-  `BufferHandle::as_any_mut` 追加時（tensor-core 0.2.0 → 0.3.0）に生じた
-  「既存実装者のビルドを壊す」問題と同種の教訓（`crates/tensor-core/src/
-  buffer.rs`「破壊的変更」節）から、デフォルト実装で非対応バックエンドの
-  ビルドを継続させる。
+- **結線は公開 `BackendOps` trait に一切追加しない**（codex-review PR
+  #1056 P1 是正。旧稿は `BackendOps::allocator(&self) -> Option<&dyn
+  DeviceAllocator> { None }` という `memory_ops()` 同型の非破壊拡張
+  デフォルトメソッドを提案していたが、`BackendOps` は crates.io 公開済み
+  trait（`fandhe-ai-tensor-core`）であり、これに `&dyn DeviceAllocator`
+  を返すメソッドを追加すると `docs/compat-api-scope.md` §0「`facade` が
+  唯一のサポート対象公開 API 面」に反して、内部クレートの低水準バッファ
+  表現（`Box<dyn BufferHandle + Send>`。下記 trait 案参照）へ到達する
+  新たな公開経路を作ってしまう。詳細な理由・代替経路は下記
+  「`DeviceAllocator` の到達可能性」を参照）。
 - trait 案（object-safe・`Send + Sync` を要求する。理由は §3.5）。
-  **未初期化確保はこの公開 trait に含めない**（下記「`alloc_uninit` の
-  可視性」を参照）:
+  **未初期化確保はこの公開 trait に含めない**（下記「`DeviceAllocator`
+  の到達可能性」を参照）:
 
 ```rust
 pub trait DeviceAllocator: Send + Sync {
@@ -92,9 +94,13 @@ pub trait DeviceAllocator: Send + Sync {
     /// （エラーコード返却）ことを型で表現する。黙殺・panic は禁止
     /// （本番経路の panic 禁止・fail-closed の維持。`.claude/rules/
     /// coding-rust.md`）。自作プール層のフリーリスト解放（インメモリ
-    /// 操作）自体は失敗しないため、`Err` は driver トリム由来に限定
-    /// される。呼び出し元（LRU／OOM フォールバック。§3.4）はこの
-    /// `Err` を上位の `BackendError::DeviceAllocationFailed` 等へ
+    /// 操作）自体は失敗しないため、`Err` はトリム前の対象 stream 同期
+    /// 失敗（§3.6 (2)。enqueue 済み `cuMemFreeAsync` の完了確認）または
+    /// driver トリム失敗のいずれかに限定される（codex-review PR #1056
+    /// P2 是正。旧稿は driver トリム由来のみに限定すると誤って記載して
+    /// おり §3.6 (2) の契約と矛盾していた）。呼び出し元（LRU／OOM
+    /// フォールバック。§3.4）はこの `Err` を上記いずれの原因であっても
+    /// 区別なく上位の `BackendError::DeviceAllocationFailed` 等へ
     /// そのまま伝播し、driver 予約分の残存を「解放成功」と誤認しない。
     fn release_cached(&self) -> Result<u64, BackendError>;
 
@@ -106,38 +112,62 @@ pub trait DeviceAllocator: Send + Sync {
 }
 ```
 
-- **`alloc_uninit` の可視性（レビュー指摘反映。§7 A02）**: 当初案は
-  `alloc_uninit`（ゼロ初期化を伴わない確保）を上記 `DeviceAllocator` の
-  メソッドとして含めていたが、`DeviceAllocator` は `BackendOps::
-  allocator()`（公開 API）から `&dyn DeviceAllocator` として得られる
-  object-safe な公開 trait であるため、trait に載せた時点で
-  `tensor-core`／`backend-*`（crates.io 公開クレート。CLAUDE.md の
-  「facade が唯一のサポートされる公開 API 面」という**運用上の**制約は
-  Rust の可視性検査では強制されない）を直接依存に追加した任意の外部
-  コードが `alloc_uninit` を呼び出せてしまい、前利用者のデータが残留した
-  未初期化バッファを読み出せる。「内部用途に限定」「facade へ露出しない」
-  という文書上の注記だけでは型システム上の防御にならないため、以下の
-  設計へ変更する:
-  - `alloc_uninit` は `DeviceAllocator` trait には含めない。各バックエンド
-    の具体アロケータ型（例: `backend-cuda` の `CudaAllocator`・
-    `backend-metal` の `MetalAllocator`）に **`pub(crate)` の固有メソッド**
-    として実装する（`pub(crate) fn alloc_uninit(&self, bytes: u64) ->
-    Result<Box<dyn BufferHandle + Send>, BackendError>`）。`pub(crate)` は
-    クレート境界そのものが可視性検査の対象になるため、`dyn
-    DeviceAllocator` のような trait オブジェクト経由の迂回では到達
-    できない（sealed trait パターンが防ぐ「外部からの trait 実装」ではなく
-    「外部からの呼び出し」を防ぐ必要があるため、可視性修飾子で直接塞ぐ
-    方式を採る）。
+- **`DeviceAllocator` の到達可能性（レビュー指摘反映。§7 A02・
+  codex-review PR #1056 P1）**: 本設計は 2 段階のレビュー指摘を経て、
+  `DeviceAllocator`（`alloc_zeroed`／`alloc_uninit`／`release_cached`／
+  `stats`／`config`）全体を「技術的には `pub` trait だが公開ディスパッチ
+  trait（`BackendOps`）からは到達不能」という位置づけに確定した。
+  - **A02 指摘（`alloc_uninit` 個別。当初の指摘）**: 当初案は
+    `alloc_uninit`（ゼロ初期化を伴わない確保）を `DeviceAllocator` の
+    メソッドとして含めていたが、`DeviceAllocator` は `BackendOps::
+    allocator()`（当時の公開 API 案）から `&dyn DeviceAllocator` として
+    得られる object-safe な公開 trait であったため、trait に載せた時点で
+    `tensor-core`／`backend-*`（crates.io 公開クレート。CLAUDE.md の
+    「facade が唯一のサポートされる公開 API 面」という**運用上の**制約は
+    Rust の可視性検査では強制されない）を直接依存に追加した任意の外部
+    コードが `alloc_uninit` を呼び出せてしまい、前利用者のデータが残留
+    した未初期化バッファを読み出せる、という指摘だった。
+  - **P1 指摘（`DeviceAllocator` 全体・`BackendOps::allocator()` 自体）**:
+    後続レビューは、`alloc_zeroed`（ゼロ初期化済みで A02 の意味では安全）
+    を含む `DeviceAllocator` 全体が `BackendOps::allocator()` という公開
+    ディスパッチ trait のメソッド経由で到達可能である点自体が、
+    `docs/compat-api-scope.md` §0 の「`facade` が唯一のサポート対象
+    公開 API 面」に反する内部低水準バッファ表現（`Box<dyn BufferHandle +
+    Send>`）の漏出だと指摘した。§3.1 冒頭「ホットパスへの接続点」が
+    列挙する呼び出し箇所（`backend-cuda/src/{gemm,elementwise,
+    softmax}.rs`・`backend-metal/src/{gemm,elementwise}.rs`）はいずれも
+    各バックエンドクレート**自身の内部実装**であり、`memory_ops()`
+    （`DeviceParamStore` からの汎用クロスクレート呼び出しが必要）とは
+    異なり `BackendOps` 経由の動的ディスパッチを必要としない。したがって
+    `BackendOps::allocator()` は「内部用途に限定」という文書上の注記
+    だけでは型システム上の防御にならない到達経路を、実利なく新設する
+    ことになる。
+  - **統一した設計**: 上記いずれの指摘も同一の解決策（可視性修飾子で
+    直接塞ぐ。sealed trait パターンが防ぐ「外部からの trait 実装」では
+    なく「外部からの呼び出し」を防ぐ必要があるため）で解消する。
+    `BackendOps::allocator()` は公開 trait に追加しない（上記「結線」）。
+    `alloc_zeroed`／`release_cached`／`stats`／`config` は
+    `DeviceAllocator`（`pub` trait。`backend-cuda`／`backend-metal` という
+    別クレートが実装するため `tensor-core` 内で `pub(crate)` には
+    閉じられない）に残すが、その実装インスタンス（各バックエンドの具体
+    アロケータ型。例: `backend-cuda` の `CudaAllocator`・`backend-metal`
+    の `MetalAllocator`）自体を `pub(crate)` の固有フィールド／アクセサ
+    としてのみ保持し、`BackendOps` を含むいかなる公開関数の戻り値
+    としても返さない。`alloc_uninit` はさらに一段狭く、
+    `DeviceAllocator` trait 自体にも含めず、具体アロケータ型の
+    `pub(crate) fn alloc_uninit(&self, bytes: u64) -> Result<Box<dyn
+    BufferHandle + Send>, BackendError>` として実装する（A02 対策として
+    `alloc_zeroed` よりさらに一段絞る必要があるため）。
   - ホットパス（§3.1 冒頭の接続点。`backend-cuda/src/gemm.rs`・
     `elementwise.rs`・`softmax.rs`・`backend-metal/src/gemm.rs`・
-    `elementwise.rs`）は、`BackendOps::allocator()` が返す `&dyn
-    DeviceAllocator` 経由ではなく、各クレート内部で具体アロケータ型への
-    参照を直接保持し `alloc_uninit` を呼ぶ（同一クレート内なので
-    `pub(crate)` メソッドへ到達できる）。カーネルが確保領域の全要素を
-    書き切る出力専用の用途であることをカーネル実装側で保証する責務は
-    変わらない。
+    `elementwise.rs`）は、いずれも各クレート内部で具体アロケータ型への
+    参照を直接保持し `alloc_zeroed`／`alloc_uninit` を呼ぶ（同一クレート
+    内なので `pub(crate)` メソッド・フィールドへ到達できる。`BackendOps`
+    を経由しない）。カーネルが確保領域の全要素を書き切る出力専用の
+    用途であることをカーネル実装側で保証する責務は変わらない。
   - `AllocatorStats`／`PoolConfig`（診断用）は `alloc_uninit` 呼び出しの
-    有無に依存しないため、公開 `DeviceAllocator` 側に残す。
+    有無に依存しないため、`DeviceAllocator` trait 側に残す（ただし上記の
+    とおり `BackendOps` からは到達不能）。
 
 - **capacity と論理長の分離**: `DeviceBuffer` の `shape`（論理 numel）と、
   ハンドル内部の `capacity_bytes`（サイズクラス丸め後の実確保量）を分離
@@ -154,14 +184,14 @@ pub trait DeviceAllocator: Send + Sync {
 - ホットパスへの接続点（#1020／#1021 の作業対象。§2 事実 3・4 の箇所）:
   `backend-cuda/src/gemm.rs`・`elementwise.rs`・`softmax.rs` の
   `alloc_zeros` 呼び出しと、`backend-metal/src/gemm.rs`・`elementwise.rs`
-  の `new_zeroed` 呼び出しを、ゼロ初期化が必要な箇所は `BackendOps::
-  allocator()`（`&dyn DeviceAllocator`）経由の `alloc_zeroed` へ、
-  カーネルが全要素を書き切る出力専用の箇所は上記「`alloc_uninit` の
-  可視性」節のとおり各クレート内部で具体アロケータ型を直接保持し
-  `pub(crate) alloc_uninit` を呼ぶ経路へ置き換える。入力側のアップロード
-  経路（`clone_htod`・`new_with_data`）は本イシューの対象外とする
-  （`upload_into` の同期契約が前提であり、forward 常駐化〈別イシュー〉が
-  進むことで直接確保の頻度は自然に減っていく）。
+  の `new_zeroed` 呼び出しを、いずれも各クレート内部で具体アロケータ型を
+  直接保持するアクセサ経由（`BackendOps` を経由しない。上記
+  「`DeviceAllocator` の到達可能性」参照）へ置き換える: ゼロ初期化が
+  必要な箇所は `DeviceAllocator::alloc_zeroed`、カーネルが全要素を書き
+  切る出力専用の箇所は `pub(crate) alloc_uninit` を呼ぶ。入力側の
+  アップロード経路（`clone_htod`・`new_with_data`）は本イシューの対象外
+  とする（`upload_into` の同期契約が前提であり、forward 常駐化〈別
+  イシュー〉が進むことで直接確保の頻度は自然に減っていく）。
 
 ### 3.2 サイズクラス表（受け入れ条件）
 
@@ -383,6 +413,7 @@ fresh/reuse の 4 通り）:
 | slab／サブアロケーション（`SlicedPool` 相当） | 1 回の大きな確保を複数の論理バッファへオフセット分割して再利用する | オフセットビューと寿命結合の実装コストが大きく、`CudaSlice`／`MTLBuffer` 双方への影響範囲がホットパス全体に及ぶ。v1 では見送り、§3.4 の代替案として記録するに留める |
 | バイトサイズ完全一致を継続（現状） | 既存 `PooledMemory` の方式をそのまま接続する | ワークロードごとにバイトサイズが微妙に異なるケース（バッチサイズ違い等）でヒット率が低く、サイズクラス化のメリット（内部断片化の許容と引き換えの高ヒット率）が得られない |
 | `PooledMemory` を `memory_ops()` にそのまま差し込む | 新規 trait を作らず既存デコレータを本番経路へ接続するだけにする | §2 事実 5 の「完全一致でないと `download` 契約を壊す」制約が残ったまま、サイズクラス化（§3.2）が実現できない。層構造（§3.1）として `MemoryOps` の下にバイト単位の抽象を置く方が既存 API と非破壊に両立できる |
+| 公開 `BackendOps` へ `allocator()` を追加する（旧稿） | `BackendOps::allocator(&self) -> Option<&dyn DeviceAllocator>` というデフォルトメソッドを `memory_ops()` と同型で公開 trait へ追加し、動的ディスパッチで各バックエンドの `DeviceAllocator` へ到達させる | crates.io 公開済み trait（`fandhe-ai-tensor-core::BackendOps`）から `Box<dyn BufferHandle + Send>` を返す低水準プール操作へ到達できてしまい、`docs/compat-api-scope.md` §0「`facade` が唯一のサポート対象公開 API 面」に反する（codex-review PR #1056 P1）。§3.1 の呼び出し箇所はいずれも各バックエンドクレート自身の内部実装であり `memory_ops()` のような他クレートからの汎用呼び出しを必要としないため、`BackendOps` 経由のディスパッチは実利なく到達可能性のみを広げる。§3.1「`DeviceAllocator` の到達可能性」のとおりクレート内固有アクセサへ変更した |
 
 ## §5 検証方法（本文書内の記載の正しさ）
 
@@ -424,6 +455,11 @@ fresh/reuse の 4 通り）:
   が 0 になることに加え、driver 側の実メモリ使用量（`nvidia-smi` 等）も
   併せて確認し、両者に有意な乖離が残らないことを確認する（§3.6 の driver
   トリム契約の回帰防止）。
+- `crates/facade/tests/api_surface.rs`（既存のソース走査方式。§3.1
+  「`DeviceAllocator` の到達可能性」の不変条件を機械的に固定する）へ、
+  `DeviceAllocator`／`BufferHandle`／`allocator` のいずれも `facade` の
+  公開ソース（`pub use`・公開シグネチャ）に出現しないことを検査する
+  ケースを追加する。
 
 ### 6.3 スコープ外（`.claude/rules/out-of-scope-tracking.md` に従い記録のみ。起票はユーザー承認後）
 
@@ -447,10 +483,16 @@ fresh/reuse の 4 通り）:
   型システムで担保されないとレビューで指摘された。このため `alloc_uninit`
   は公開 `DeviceAllocator` trait には含めず、各バックエンドの具体
   アロケータ型に `pub(crate)` 固有メソッドとして実装し、ホットパスは
-  同一クレート内から具体型経由で直接呼び出す設計へ変更した（§3.1
-  「`alloc_uninit` の可視性」）。Metal でデバイス側フィル
-  （`fillBuffer`）を採用する場合も「貸出前に必ずフィルを encode する」
-  ことを不変条件とする（§3.3）。
+  同一クレート内から具体型経由で直接呼び出す設計へ変更した。加えて
+  後続レビュー（P1）は、A02 の観点では安全な `alloc_zeroed` を含む
+  `DeviceAllocator` 全体が `BackendOps::allocator()` という公開
+  ディスパッチ trait 経由で到達可能であること自体が、内部クレートの
+  低水準バッファ表現の漏出（`docs/compat-api-scope.md` §0 違反）だと
+  指摘したため、`BackendOps::allocator()` 自体を廃し、
+  `DeviceAllocator` の実装インスタンスはいずれの公開関数からも返さない
+  設計へ変更した（§3.1「`DeviceAllocator` の到達可能性」）。Metal で
+  デバイス側フィル（`fillBuffer`）を採用する場合も「貸出前に必ずフィルを
+  encode する」ことを不変条件とする（§3.3）。
 - **A03 インジェクション（入力検証）**: shape は safetensors／ONNX 経由で
   外部入力が流入しうる。サイズクラス丸め・capacity 計算は `checked_mul`／
   `checked_add`（`u64`）で行い、オーバーフローは型付きエラー
