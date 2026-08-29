@@ -42,10 +42,28 @@
 //!   security.md` A08。部分的に更新されたデバイス側パラメータをそのまま
 //!   学習継続・推論に使わせない）。回復は新しい `DeviceParamStore` の
 //!   再構築のみ。
+//!
+//! # 遅延失敗トークン経由の poison（イシュー #1017）
+//!
+//! Metal のコマンドバッファ共有バッチ（`backend-metal::context::
+//! MetalContext::encode`／`synchronize`。`docs/backend-metal-command-
+//! batching-design.md`）では、`step()` 呼び出し中の `sgd_step_device`
+//! 自体は encode（バッファ結線のみ）で即座に成功を返し、実行時エラー
+//! （GPU fault 等）はホスト実体化（`download`／`zero_fill`／`Drop`）まで
+//! 判明しない。このため `step()` 呼び出し時点では検出できない失敗が
+//! ある。`failure_token`（[`fandhe_ai_tensor_core::DispatchFailureCell`]）
+//! を `ops.sgd_step_device_tracked` へ同一ロック区間で渡しておき、
+//! `check_not_poisoned` が 4 つの状態機械エントリいずれかへの
+//! 入口で `failure_token.is_set()` を検査して `poisoned` へ自己遷移する
+//! （`ops` 側からの能動的な通知を待たない。CPU／CUDA は同期実行のため
+//! `failure_token` を使わず、`step()` 内の即時エラーでこれまでどおり
+//! `poisoned` へ遷移する）。
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use fandhe_ai_tensor_core::buffer::DeviceBuffer;
 use fandhe_ai_tensor_core::device::{BackendError, Device};
-use fandhe_ai_tensor_core::{SgdStepConfig, Tensor};
+use fandhe_ai_tensor_core::{DispatchFailureCell, SgdStepConfig, Tensor};
 
 use crate::backward::Gradients;
 use crate::optim::sgd::SgdConfig;
@@ -65,15 +83,25 @@ struct PendingForward {
 /// 決定し、以後変更不可）。`Debug` は `unwrap_err()`（テストコード）が
 /// `Result<DeviceParamStore, _>` を要求するため導出する（フィールドは
 /// いずれも `Debug` 実装済み: `Device`／`DeviceBuffer<f32>`（`tensor-core`
-/// 側で導出済み）／`PendingForward`〈上記〉）。
+/// 側で導出済み）／`PendingForward`〈上記〉／`AtomicBool`／
+/// `DispatchFailureCell`）。
+///
+/// `poisoned` は `AtomicBool`（`Cell<bool>` ではない）とする: `&self`
+/// メソッド（`sync_to_host`／`snapshot_resident_leaves`）からも
+/// `check_not_poisoned` が「遅延失敗トークンを検出して自己
+/// poison する」ために書き込みが必要であり、`&self` からの内部可変性を
+/// 要求するため（モジュール冒頭「遅延失敗トークン経由の poison」参照）。
 #[derive(Debug)]
 pub struct DeviceParamStore {
     device: Device,
     params: Vec<DeviceBuffer<f32>>,
     velocities: Vec<Option<DeviceBuffer<f32>>>,
     step_count: u64,
-    poisoned: bool,
+    poisoned: AtomicBool,
     pending: Option<PendingForward>,
+    /// `ops.sgd_step_device_tracked` へ渡す共有失敗トークン
+    /// （モジュール冒頭「遅延失敗トークン経由の poison」参照）。
+    failure_token: DispatchFailureCell,
 }
 
 impl DeviceParamStore {
@@ -105,8 +133,9 @@ impl DeviceParamStore {
             velocities: (0..uploaded.len()).map(|_| None).collect(),
             params: uploaded,
             step_count: 0,
-            poisoned: false,
+            poisoned: AtomicBool::new(false),
             pending: None,
+            failure_token: DispatchFailureCell::new(),
         })
     }
 
@@ -125,8 +154,21 @@ impl DeviceParamStore {
         self.params.is_empty()
     }
 
+    /// 4 つの状態機械エントリ（`step`／`sync_to_host`／
+    /// `register_resident_leaves`／`snapshot_resident_leaves`）が共通で
+    /// 呼ぶ poison 検査。既に `poisoned` なら即座に拒否する。まだ
+    /// `poisoned` でなくても `failure_token`（イシュー #1017）が
+    /// 設定済み（Metal バッチの遅延実行時エラーが `synchronize` 時点で
+    /// 判明した）なら、ここで `poisoned` へ自己遷移してから拒否する
+    /// （モジュール冒頭「遅延失敗トークン経由の poison」参照。`ops` 側
+    /// からの能動的な通知を待たず、次にストアへアクセスした経路が
+    /// 検出する設計）。
     fn check_not_poisoned(&self) -> Result<(), BackendError> {
-        if self.poisoned {
+        if self.poisoned.load(Ordering::SeqCst) {
+            return Err(BackendError::StorePoisoned);
+        }
+        if self.failure_token.is_set() {
+            self.poisoned.store(true, Ordering::SeqCst);
             return Err(BackendError::StorePoisoned);
         }
         Ok(())
@@ -173,6 +215,16 @@ impl DeviceParamStore {
             node_ids.push(var.node_id());
             vars.push(var);
         }
+        // Cursor Bugbot 指摘（PR #1057）対応: `download` 呼び出し中に
+        // 別スレッドが先に `synchronize` して GPU fault を検出し
+        // `failure_token` をセットした場合、この関数冒頭の
+        // `check_not_poisoned` はその発生前に通過済みのため見逃す
+        // （`MetalContext::synchronize` は commit 済みバッチを一度だけ
+        // drain するため、後続の `download` 内 `synchronize` 呼び出しは
+        // 既に空の committed リストに対して成功扱いで返り、実際は無効な
+        // バッファ内容を読んだ可能性がある）。`download` 完了直後にも
+        // 再検査し、その間に poison 化していれば結果を破棄して拒否する。
+        self.check_not_poisoned()?;
         self.pending = Some(PendingForward {
             tape_id: tape.id,
             node_ids,
@@ -195,10 +247,17 @@ impl DeviceParamStore {
                     .to_string(),
             )
         })?;
-        self.params
+        let vars: Vec<Var<'t>> = self
+            .params
             .iter()
             .map(|buf| Ok(tape.var(&mem.download(buf)?)))
-            .collect()
+            .collect::<Result<_, BackendError>>()?;
+        // `register_resident_leaves` と同じレース（Cursor Bugbot 指摘・
+        // PR #1057）への対処: `download` の間に別スレッドが GPU fault を
+        // 検出し `failure_token` を設定した可能性があるため、返却直前に
+        // 再検査する。
+        self.check_not_poisoned()?;
+        Ok(vars)
     }
 
     /// `pending`（未消費の forward 登録）を副作用なくクリアする冪等
@@ -358,7 +417,7 @@ impl DeviceParamStore {
             let grad_buf = match mem.upload(grad_tensors[i]) {
                 Ok(buf) => buf,
                 Err(e) => {
-                    self.poisoned = true;
+                    self.poisoned.store(true, Ordering::SeqCst);
                     return Err(e);
                 }
             };
@@ -375,10 +434,20 @@ impl DeviceParamStore {
             } else {
                 None
             };
-            if let Err(e) =
-                ops.sgd_step_device(&mut self.params[i], &grad_buf, velocity_ref, &step_config)
-            {
-                self.poisoned = true;
+            // `sgd_step_device_tracked`（イシュー #1017）: Metal は encode
+            // と同一ロック区間で `self.failure_token` をバッチへ登録する
+            // ため、`step()` 自身の即時エラーに加え `check_not_poisoned`
+            // 経由の遅延検出（モジュール冒頭コメント）でも取りこぼさない。
+            // デフォルト実装（CPU／CUDA）は `sgd_step_device` へそのまま
+            // 委譲するため、この呼び出し自体の挙動は変わらない。
+            if let Err(e) = ops.sgd_step_device_tracked(
+                &mut self.params[i],
+                &grad_buf,
+                velocity_ref,
+                &step_config,
+                &self.failure_token,
+            ) {
+                self.poisoned.store(true, Ordering::SeqCst);
                 return Err(e);
             }
         }
@@ -398,7 +467,15 @@ impl DeviceParamStore {
                 "DeviceParamStore::sync_to_host: backend does not implement MemoryOps".to_string(),
             )
         })?;
-        self.params.iter().map(|buf| mem.download(buf)).collect()
+        let tensors: Vec<Tensor<f32>> = self
+            .params
+            .iter()
+            .map(|buf| mem.download(buf))
+            .collect::<Result<_, BackendError>>()?;
+        // `register_resident_leaves`／`snapshot_resident_leaves` と同じ
+        // レース（Cursor Bugbot 指摘・PR #1057）への対処。
+        self.check_not_poisoned()?;
+        Ok(tensors)
     }
 }
 
@@ -788,6 +865,58 @@ mod tests {
         assert!(matches!(err, BackendError::KernelLaunchFailed(_)));
 
         // 4 経路すべてが StorePoisoned で拒否される。
+        assert!(matches!(
+            store.step(&tape, &grads, &SgdConfig::new(0.1)),
+            Err(BackendError::StorePoisoned)
+        ));
+        assert!(matches!(
+            store.sync_to_host(&tape),
+            Err(BackendError::StorePoisoned)
+        ));
+        assert!(matches!(
+            store.register_resident_leaves(&tape),
+            Err(BackendError::StorePoisoned)
+        ));
+        assert!(matches!(
+            store.snapshot_resident_leaves(&tape),
+            Err(BackendError::StorePoisoned)
+        ));
+    }
+
+    /// イシュー #1017: Metal のコマンドバッファ共有バッチでは
+    /// `sgd_step_device_tracked` 自体は即座に成功を返し、実行時エラーは
+    /// `synchronize`（ホスト実体化時）まで判明しない。本テストは
+    /// `step()` が正常終了した**後**に外部（Metal 側の `synchronize`
+    /// 相当）から `failure_token` へエラーを設定し、`step()` を含む
+    /// 4 つの状態機械エントリすべてが次回アクセス時に
+    /// `check_not_poisoned` 経由で `StorePoisoned` へ遷移することを
+    /// 検証する（`poisoned_after_failing_step_blocks_all_four_entry_points`
+    /// の「即時エラー」経路に対する「遅延エラー」経路の対）。
+    #[test]
+    fn deferred_failure_token_poisons_store_on_next_entry() {
+        let tape = simple_tape(None);
+        let w = tensor(vec![1.0], &[1]);
+        let mut store = DeviceParamStore::new(&tape, &[&w]).unwrap();
+
+        let vars = store.register_resident_leaves(&tape).unwrap();
+        let target = tape.var(&tensor(vec![10.0], &[1]));
+        let loss = vars[0].mse_loss(&target).unwrap();
+        let grads = tape.backward(&loss).unwrap();
+        // 1 ステップ目は成功する（`sgd_step_device_tracked` のデフォルト
+        // 委譲は `MockDeviceOps::sgd_step_device` へそのまま流れる）。
+        store.step(&tape, &grads, &SgdConfig::new(0.1)).unwrap();
+
+        // Metal の `MetalContext::synchronize` が実行時エラーを検出し
+        // `propagate_failure` でトークンへ書き込む経路を模擬する
+        // （`failure_token` は `pub(crate)` ではなくプライベートフィールド
+        // だが、`tests` は `device_store` の子モジュールのため直接
+        // アクセスできる）。
+        store.failure_token.set(BackendError::KernelLaunchFailed(
+            "simulated deferred Metal command buffer failure".into(),
+        ));
+
+        // 4 経路すべてが StorePoisoned で拒否される
+        // （即時エラー経路と同一の受け入れ条件）。
         assert!(matches!(
             store.step(&tape, &grads, &SgdConfig::new(0.1)),
             Err(BackendError::StorePoisoned)

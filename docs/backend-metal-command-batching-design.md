@@ -448,3 +448,38 @@ Metal API を直接呼ばない純粋なロジック）は `cfg(target_os = "mac
 - forward 経路の常駐化（別イシュー、#1022 と紐づく想定）。
 - SGD の単一カーネル化（別イシュー、#1023 と紐づく想定）。
 - `MTLDispatchTypeConcurrent` によるバッチ内並列化（§5(c)）。
+
+## 7. 実装記録（#1017）
+
+§0 で「最終決定は #1017 が行う」としていた事項の確定内容:
+
+- **`Batch: Send`（§2.1）**: `unsafe impl Send for Batch`
+  （`crates/backend-metal/src/context.rs`）を採用した。`Batch`
+  （`cmd_buf`／`encoder`／`in_flight`／`tokens`）は `MetalContext::batch`
+  （`Mutex<BatchSlots>`）のロック下でのみアクセスされ、`encode`／
+  `flush`／`synchronize`／`Drop` の全経路がこの直列化を通る（Mutex に
+  よる全アクセスの完全直列化）。§2.1 で検討した代替案（thread_local
+  バッチ・個別コマンドバッファ即時 commit・`addCompletedHandler`）は
+  いずれも不採用のまま（context.rs の SAFETY コメント参照）。
+- **共有失敗トークンの経路（§3.7 (2)）**: `BackendOps` へ
+  `sgd_step_device_tracked`（デフォルトメソッド。既定は
+  `sgd_step_device` へ委譲。`crates/tensor-core/src/backend_ops.rs`）を
+  追加する非破壊拡張を採用した。トークン
+  （`fandhe_ai_tensor_core::DispatchFailureCell`。
+  `crates/tensor-core/src/dispatch_failure.rs`）は `MetalContext::encode`
+  と同一ロック区間でバッチへ登録する。「encode 後に別 API で登録」方式
+  は不採用。
+- **`BackendOps::synchronize`（§3.7 (3)）**: 本 PR では追加しない。
+  `#1012`（CUDA 側）マージ後に main が trait 契約を判断する（§6.2 は
+  未着手のまま残す）。
+- **上限値**: `MAX_DISPATCHES_PER_BATCH = 256`
+  （`crates/backend-metal/src/batch_state.rs`）。
+- **同期点**: `memory.rs::download_inner`／`PoolZeroFill::zero_fill`・
+  `MetalContext::Drop` に `synchronize()` を追加した（§3.5 の表どおり）。
+  既存の `dispatch_sync` 呼び出し元（`gemm.rs`／`elementwise.rs`／
+  `rmsnorm.rs`／`softmax.rs`）はシグネチャ・挙動とも無変更。
+- **§4 実測**: Metal 実機（Mac セッション）未実施のため空欄のまま
+  （PR 本文に明記）。実測手順は
+  `crates/backend-metal/tests/command_batching.rs` 冒頭コメント・
+  `crates/facade/tests/device_param_store_bench.rs` の
+  `legacy_vs_resident_per_step_metal` を参照。
