@@ -105,8 +105,12 @@
 
 方針:
 
-- 遅延エラー・Drop 時エラーの発生後は、同一 `CudaContext` での処理継続を禁じる（fail-closed）。学習ループ側は既存の `DeviceParamStore` poisoned 遷移（`BackendError::StorePoisoned`、`crates/tensor-core/src/device.rs:219-230`）と同じ考え方で継続を拒否する。回復手段は `DeviceParamStore` の再構築および `context_cache` エントリの再生成のみであり、これは `context_cache` が「エラーをキャッシュしない fail-fast」契約（同モジュール冒頭コメント）と整合する
-- `BackendError` への新規 variant 追加は**本設計では行わない**。`#[non_exhaustive]` により非破壊追加自体は可能だが、帰属情報を持てない遅延エラー専用の variant を設ける必要性は薄いと判断した。#1014 の実装過程で必要性が判明した場合は別イシューとして起票する（out-of-scope-tracking.md）
+- 遅延エラー・Drop 時エラーの発生後は、同一 `CudaContext` での処理継続を禁じる（fail-closed）。ただし継続禁止を実効化するには「誰が・どの状態を・どこで検査して拒否するか」を契約化する必要があり、2.6 の `context_cache` の現状（「エントリはプロセスの生存期間中 evict されない」・`context_cache.rs` 冒頭コメント「所有モデル・生存期間」節）はエラー検出後の**自動的な**回復手段を持たない。したがって本設計は以下の 3 点を #1013 の実装対象として明文化する（レビュー指摘 PR #1053・本ファイル該当行への回答）:
+  1. **context 単位の poison 状態管理**: `context_cache` のキャッシュエントリ（`cached_device`／`cached_gemm`／`cached_elementwise`／`cached_rmsnorm`／`cached_softmax` の内側 `Arc<Mutex<Option<Arc<T>>>>` と同じ `ordinal` キー空間）に、`ordinal` ごとに独立した `poisoned` フラグ（`AtomicBool` 等）を追加する。`CudaGemm`・`CudaElementwise`・`CudaRmsNorm`・`CudaSoftmax`・`CudaSgd`・`CudaMemory` が同一 `Arc<CudaStream>`（延いては同一 `CudaContext`）を共有する現行構成（2.1）を踏まえ、いずれか 1 つの経路が遅延エラー・Drop 時エラーを検出したら同一 `ordinal` の全スイートへ波及させる
+  2. **以後の API 呼び出しを拒否する経路**: `crate::context_cache` に `mark_poisoned(ordinal)`（エラー検出側が呼ぶ）と `is_poisoned(ordinal) -> bool`（各スイートの演算メソッド入口が呼ぶ）を追加する。`ops::CudaBackendOps` の各演算メソッド（`gemm`／`add`／`mul`／…）・`sgd_step_device`・`MemoryOps::download`／`upload` は、実処理に入る前に `is_poisoned` を検査し、真であれば新規 variant（下記）で即座に拒否する。これにより「poison 検出後も同一 `CudaContext` 上で新たな演算を投入できてしまう」抜け道を塞ぐ
+  3. **明示的な再生成手段**: `context_cache` に `invalidate(ordinal)`（該当 `ordinal` の `cached_device`／各 `cached_*` エントリを `None` へ戻し `poisoned` フラグをクリアする）を追加する。呼び出し元（学習ループ・facade 側）は下記 variant のエラーを受け取ったら `invalidate(ordinal)` を呼んでから次の `tape_for(Device::Cuda(ordinal))` を行うことで、新しい `CudaContext` を明示的に再構築できる。これが「回復手段は再生成のみ」という記述が前提とする API であり、`context_cache` 側に該当 API を新設するのは本改訂が初めて（実装なしの記述不整合を解消する変更点）
+  - 学習ループ側の `DeviceParamStore` poisoned 遷移（`BackendError::StorePoisoned`、`crates/tensor-core/src/device.rs:219-230`）は「`step()` 自体の実行時エラー」のみを検出対象とする既存契約であり、`DeviceParamStore` を経由しない素の `BackendOps::gemm` 呼び出し等、任意の `download` で初めて表面化しうる context-wide な遅延エラーはこの経路を通らない。上記 1〜3 は `DeviceParamStore` の外側・`context_cache` 層で完結する別契約として設ける（`StorePoisoned` を置き換えず、両者は独立に有効なまま併存する）
+- `BackendError` への新規 variant 追加を**本設計で採用する**（旧版の「行わない」判断を、上記の実装可能性検証の結果として訂正する）。`BackendError::DeviceContextPoisoned(String)`（`ordinal` とトリガー元エラーの要約を保持する文字列）を `#[non_exhaustive]` 列挙体への非破壊追加として `crates/tensor-core/src/device.rs` に追加し、`StorePoisoned` と同様「帰属情報を持たないが継続を拒否する」ことを示す。メッセージには `invalidate(ordinal)` 経由での再生成が必要である旨を含める
 - 「同期漏れによって静かに間違った値が返る」失敗はエラーとして検出できない。この種の失敗は §8 のテスト方針で構造的に防ぐ（境界チェックを緩めることでは対処しない。`.claude/rules/coding-rust.md`）
 
 ## 6. 複数デバイス・複数 tape・スレッド間の順序保証（design decision 4）
@@ -132,7 +136,9 @@
 - **配置**: `crates/backend-cuda/tests/async_ordering_real_device.rs`（新規・実機依存のため `#[ignore]`）に加え、既存の数値一致回帰テスト群の非後退確認
 - **T1（順序依存）**: 同一ストリームで forward → backward → `sgd_step_device` を明示同期なしに連鎖投入し、各段で同期する参照実行と統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。緩和しない）で一致することを確認する
 - **T2（早期 D2H の検出）**: 実行時間の長いカーネル（大形状 GEMM）投入直後に `download` し、期待値と一致することを確認する。負の対照として、`internal-diagnostics` 限定で「明示同期なしの生 `memcpy_dtoh` を pinned バッファへ発行し不一致を観測する」試験は任意とする（ペイジャブルメモリでは CUDA の実装依存の待ち合わせにより不一致を再現できない場合がある点を明記する）
-- **T3（エラー伝播）**: 起動時エラー（無効な grid 次元等）が投入 API 呼び出し時点で即座に `KernelLaunchFailed` として返ることを確認する。遅延エラー（カーネル実行時 fault）はテスト側で安全に誘発する手段がない（境界チェックを外すことは規約違反）ため、`DeviceParamStore` の poisoned 遷移テスト（既存のモックベーステスト）で代替し、実機での fault 誘発テストは対象外と明記する
+- **T3（エラー伝播・context poison 遷移）**: 起動時エラー（無効な grid 次元等）が投入 API 呼び出し時点で即座に `KernelLaunchFailed` として返ることを確認する。遅延エラー（カーネル実行時 fault）はテスト側で安全に誘発する手段がない（境界チェックを外すことは規約違反）ため直接再現しないが、§5 で新設する context 単位の poison 状態遷移そのものは以下の 2 段でテスト可能にする（既存の `DeviceParamStore` poisoned モックテストは `step()` 失敗経路のみを検証するものであり、これとは別に新設が必要）:
+  - **T3a（`context_cache` 単体）**: `crate::context_cache` のテスト内で `mark_poisoned(ordinal)` → `is_poisoned(ordinal)` が真になる → `invalidate(ordinal)` 後に `is_poisoned(ordinal)` が偽へ戻り `cached_device` 等が再構築されることを、実 CUDA デバイスなしのモック／フェイク実装（`CudaDevice` 生成を要さない範囲）で検証する（CI・GitHub ホステッドで実行可能）
+  - **T3b（呼び出し側の拒否経路・実機依存）**: `#[ignore]` テストとして、実 CUDA デバイス上で `mark_poisoned` を直接呼んでから `ops::CudaBackendOps` の演算メソッド（`gemm` 等）・`sgd_step_device`・`download`／`upload` を呼び出し、いずれも実処理に入らず `BackendError::DeviceContextPoisoned` を即座に返すことを確認する。実際のカーネル fault 注入は行わず（境界チェックを外すことは規約違反）、poison フラグを直接セットする経路のみを検証対象とする（driver 抽象のモック化によるフォールト注入は #1013 実装時に技術的な到達可否を判断し、不可の場合は本 T3b の直接セット方式を正とする）
 - **T4（前提確認）**: `CudaContext::has_async_alloc()` が実機で真であることを記録するプローブテスト（`#[ignore]`）。GB10 実機セッションで実測し、本文書の I4 の注記を確定値へ更新する
 - CI（GitHub ホステッド・CUDA 非搭載環境）で実行されるのは型検査・モックベースのテストのみであり、実機実行は `make test-ignored-cuda`（または相当の手順）に委ねる
 
@@ -144,6 +150,9 @@
 2. `sgd.rs:174` の `synchronize()` を除去する（最優先。D2H を伴わない唯一の常駐経路であり、除去効果が最も直接的に測れる）
 3. ホスト `Tensor` を返すラッパー群（`gemm.rs`・`gemm_wmma.rs`・`gemm_mma.rs`・`gemm_mma_tf32.rs`・`kernels_mma.rs`・`kernels_mma_tf32.rs`・`kernels_wmma_opt.rs`・`elementwise.rs`・`softmax.rs`・`rmsnorm.rs`・`transpose.rs`）の「launch 直後 `synchronize()`」を、readback ヘルパ 1 回への置換に統一する（2.2 の棚卸し表の順で機械的に適用できる）
 4. `rmsnorm.rs:1102`／`rmsnorm.rs:1105` のような分岐内二重同期を単一化する
+5. `context_cache.rs` に §5 の poison 状態管理（`ordinal` ごとの `poisoned` フラグ・`mark_poisoned`／`is_poisoned`／`invalidate`）を追加する
+6. `crates/tensor-core/src/device.rs` の `BackendError` に `DeviceContextPoisoned(String)`（`#[non_exhaustive]` 非破壊追加）を追加する
+7. `ops::CudaBackendOps` の各演算メソッド・`sgd_step_device`・`MemoryOps::download`／`upload` の入口に `is_poisoned` 検査を追加し、真であれば `DeviceContextPoisoned` を返す（実処理へ進まない）。遅延エラー・Drop 時エラーの検出箇所（readback ヘルパ・Drop 実装）から `mark_poisoned` を呼ぶ
 
 **触らないもの**: カーネル本体・手動境界チェック・数値一致の許容誤差・`memory.rs:276`（`download` の同期。維持対象）・診断/ベンチ専用テストの同期呼び出し。
 
@@ -164,7 +173,6 @@
 
 - pinned host memory の導入
 - CUDA Graph の導入
-- 遅延エラー専用の `BackendError` variant 追加
 - ホスト `Tensor` API の `DeviceBuffer` 版への拡張（#1022 と重なる可能性がある）
 
 ## 12. 出典
