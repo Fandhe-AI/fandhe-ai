@@ -180,7 +180,40 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
       取り出す。§3.6 の解放トランザクションで使う。**一括 `drain()` は
       設けない**〈part failure 時にキャッシュ全損させないため。理由は
       下記「解放時の所有権遷移」〉）。
+    - `fn record_release(&self, class_bytes: u64)`（新規。統計専用。
+      **ハンドルを一切受け取らない**）: `release_cached()`〈内部
+      メソッド〉のフェーズ (ii) で `take_one_for_release` により取り
+      出したハンドルの個別解放が成功するたびに呼ぶ（`cached_bytes` は
+      `take_one_for_release` 自体が既に減算済みのため、本メソッドは
+      `released_bytes` の加算のみを行う）。下記「フィールド更新契約」
+      参照。
+    - `fn record_pending_return(&self, class_bytes: u64)`（新規。Metal
+      専用の統計専用メソッド。**ハンドルを一切受け取らない**）:
+      `PooledMetalHandle::Drop` が `pending_pool_returns` へ所有権を
+      委譲した**後**（§3.5「Metal `pending_pool_returns` の排他制御」の
+      とおり `BatchSlots` のロックを解放してから）呼ぶ。
+      `pending_return_bytes` を加算する。
+    - `fn record_pending_merge(&self, class_bytes: u64)`（新規。Metal
+      専用の統計専用メソッド。**ハンドルを一切受け取らない**）:
+      `MetalContext::synchronize()` が `pending_pool_returns` から取り
+      出したエントリを `put` へ合流させる際、`put` と対にして呼ぶ
+      （`BatchSlots` のロックを解放した後。§3.5）。`pending_return_bytes`
+      を減算する。
     - `fn stats(&self) -> PoolStats`／`fn config(&self) -> PoolConfig`
+
+    **統計専用メソッドの検証（`record_allocation`／`record_loan_end`／
+    `record_release`／`record_pending_return`／`record_pending_merge`
+    共通。Cursor Bugbot・codex-review 指摘対応）**: いずれも
+    `SizeClassPool<H>` 内部の `Mutex<PoolCore<H>>`（本節冒頭）で保護し、
+    実装バグにより減算対象のフィールドが `0` を下回る呼び出しが
+    発生した場合は、`debug_assert!`（デバッグ・テストビルドで即座に
+    検知する）に加え、リリースビルドでは `saturating_sub` により
+    `0` に飽和させる（本番経路で `panic!` しない。`.claude/rules/
+    coding-rust.md`）。この飽和は「バグを黙認する」ものではなく
+    `debug_assert!` がテストで先に検知する前提の**多層防御**であり、
+    統計フィールドの意味論的な正しさを設計上保証するものではない
+    （あくまで診断用フィールドの表示が負値になって混乱を招くことを
+    防ぐための保険）。
 
     **`PoolStats` フィールド更新契約（codex-review PR #1056 P1 是正。
     どの操作でどう増減するかを一意に定める）**:
@@ -190,9 +223,9 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
     | `alloc_count` | `record_allocation` 呼び出しごとに `+1` | なし（単調増加のカウンタ） | 新規物理確保の回数 |
     | `reuse_count` | `take` 成功（`Some` を返した）ごとに `+1` | なし（単調増加のカウンタ） | フリーリストからの再利用ヒット回数 |
     | `cached_bytes` | `put` で `+class_bytes` | `take` 成功で `−class_bytes`（取り出した分）／`take_one_for_release` で `−class_bytes`（取り出した分） | フリーリストが現在保持する総バイト数。恒等式 `cached_bytes == Σ(フリーリスト中の各エントリの class_bytes)` を常に満たす |
-    | `pending_return_bytes` | `PooledMetalHandle::Drop` が `pending_pool_returns` へ委譲した時点で `+class_bytes`（§3.3「Metal」） | `MetalContext::synchronize()` が `pending_pool_returns` の各エントリを `put` へ合流させた時点で `−class_bytes`（`record_loan_end` は既に `Drop` 時点で呼び出し済みのためここでは呼ばない。下記「Metal の返却待ちバイト数」参照） | CUDA・CPU では常に `0`（`pending_pool_returns` 相当の機構を持たないため） |
+    | `pending_return_bytes` | `record_pending_return(class_bytes)` 呼び出しごとに `+class_bytes`（`PooledMetalHandle::Drop` が `pending_pool_returns` へ委譲した後・`BatchSlots` ロック解放後に呼ぶ。§3.3「Metal」・§3.5） | `record_pending_merge(class_bytes)` 呼び出しごとに `−class_bytes`（`MetalContext::synchronize()` が `pending_pool_returns` の各エントリを `put` へ合流させる際、`BatchSlots` ロック解放後に呼ぶ。`record_loan_end` は既に `Drop` 時点で呼び出し済みのためここでは呼ばない。下記「Metal の返却待ちバイト数」参照） | CUDA・CPU では常に `0`（`pending_pool_returns` 相当の機構を持たないため呼ばれない）。`BatchSlots` ロック解放から本メソッド呼び出しまでの短い窓で `pending_return_bytes` の値が実態（真に `pending_pool_returns` に入っている／出た件数）と一時的にずれうることは許容する（§3.5「Metal `pending_pool_returns` の排他制御」。custody 自体〈`pending_pool_returns` のベクタ本体〉は `BatchSlots` ロックで正しく直列化されており安全性に影響しない。ずれるのは診断用カウンタの表示のみ） |
     | `capacity_waste_bytes` | `record_allocation` で `+(class_bytes − logical_bytes)`／`take` 成功で `+(class_bytes − bytes)`〈`bytes` はその回の `take` 呼び出しの論理バイト数〉 | 対応する貸出が終了する時（`record_loan_end(logical_bytes, class_bytes)` 呼び出しごとに `−(class_bytes − logical_bytes)`。**この `logical_bytes` はその貸出が `record_allocation` または `take` で開始した時点の値と同一でなければならない**〈RAII ラッパーが自身の `logical_bytes` フィールドに保持し続けることで担保する〉 | **意味論はストック量**（現在貸出中の全ハンドルについて `Σ(class_bytes − logical_bytes)` を表すリアルタイムの内部断片化実測値であり、`capacity_waste_bytes` 単体では「これまでの累積無駄」ではない）。`release_cached()` の再挿入（`put` のみ・`record_loan_end` を伴わない）はこのフィールドに影響しない（対象エントリは貸出中ではなくアイドルだったため） |
-    | `released_bytes` | `release_cached()`〈内部メソッド。§3.1「2 段構成の命名規約」〉のフェーズ (ii) で個別解放が成功するごとに `+class_bytes` | なし（単調増加のカウンタ） | §3.6 (2) 参照。プロセス起動からの累積解放バイト数（診断用） |
+    | `released_bytes` | `record_release(class_bytes)` 呼び出しごとに `+class_bytes`（`release_cached()`〈内部メソッド。§3.1「2 段構成の命名規約」〉のフェーズ (ii) で個別解放が成功するたびに呼ぶ） | なし（単調増加のカウンタ） | §3.6 (2) 参照。プロセス起動からの累積解放バイト数（診断用） |
 
     **Metal の返却待ちバイト数（`pending_return_bytes`）と
     `capacity_waste_bytes` の関係**: `pending_pool_returns` へ委譲された
@@ -316,8 +349,15 @@ pub trait BackendOps {
     /// # エラー（codex-review PR #1056 P1 是正。旧稿は 2 種類に限定して
     /// おり §3.6 (2) の 4 フェーズ設計と矛盾していた）
     /// `Err` は §3.6 (2)「バックエンド別の該当フェーズ」表が定める
-    /// フェーズのいずれかの失敗を表す（CUDA は最大 4 種、Metal は
-    /// 最大 2 種、CPU は常に `Ok` のため該当なし）。黙殺・panic は禁止
+    /// フェーズのいずれかの失敗を表す。**実際に到達しうる `Err` の
+    /// 種別・個数はバックエンドごとに異なり**（例: Metal はフェーズ
+    /// (ii) が失敗しない設計のため実質的にフェーズ (i) 失敗の 1 種類
+    /// のみへ到達しうる。CPU は本メソッドを常にデフォルト実装のまま
+    /// 使うため到達しない）、本 doc comment では数を明記しない
+    /// （codex-review PR #1056 P2 是正。旧稿はここでバックエンド別の
+    /// 種類数を書き下し、§3.6 (2) の正本表と数が食い違っていた。数を
+    /// 書かず正本表を参照する形にすることで今後の齟齬を構造的に防ぐ）。
+    /// 黙殺・panic は禁止
     /// （fail-closed。`.claude/rules/coding-rust.md`）。**フェーズごとに
     /// 失敗時のプール内部状態が異なる**（あるフェーズでは未解放分が
     /// フリーリストへ再挿入されて残り、別のフェーズでは解放自体は
@@ -545,42 +585,62 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
     現在の `BatchSlots` を検査する: **`open` バッチが存在する、または
     `committed`（commit 済みだが `waitUntilCompleted` 未実行）バッチが
     1 つ以上存在する場合**（＝直近の `synchronize()` 以降に GPU へ
-    投入した work が残っている状態）は、`put()` を呼ばず
+    投入した work が残っている状態）は、`put()` を呼ばず**ロック内で**
     `pending_pool_returns` へ `(class_bytes, handle, pool)` を追加して
-    所有権を委譲し、**同時に `PoolStats::pending_return_bytes` へ
-    `class_bytes` を加算する**（codex-review PR #1056 P1 是正・Cursor
-    Bugbot 指摘対応。§3.1「フィールド更新契約」）。個々のバッファが
-    どの dispatch に実際に参照されたかまでは追跡しない（#1054 §3.4 の
-    「過剰同期側」方針と同じ粒度の保守的判定であり、実装コストと
-    安全性のバランスを崩さない）。**`open`／`committed` のいずれも
+    所有権を委譲する。個々のバッファがどの dispatch に実際に参照された
+    かまでは追跡しない（#1054 §3.4 の「過剰同期側」方針と同じ粒度の
+    保守的判定であり、実装コストと安全性のバランスを崩さない）。
+    **`BatchSlots` の**ロックを解放した**後**（§3.5「Metal
+    `pending_pool_returns` の排他制御」・ロック順序の逆転防止。
+    codex-review PR #1056 P1 是正・Cursor Bugbot 指摘対応）、
+    `pool.record_pending_return(class_bytes)`（§3.1。ハンドルを一切
+    受け取らない統計専用メソッド）を呼び `PoolStats::
+    pending_return_bytes` を加算する。**`open`／`committed` のいずれも
     存在しない場合**（＝直前の `synchronize()` で全て完了済み、かつ
     その後まだ何も encode されていない状態。「フラッシュ前に Drop
     されたラッパー」ではなく「in-flight なしの状態で Drop された
-    ラッパー」に相当）は、その場で `pool.put(class_bytes, handle)` を
-    呼んでよい（この経路では `pending_return_bytes` は変化しない）。
+    ラッパー」に相当）は、`BatchSlots` のロックを解放した後、その場で
+    `pool.put(class_bytes, handle)` を呼んでよい（この経路では
+    `pending_return_bytes` は変化しない）。
   - `MetalContext::synchronize()`（`waitUntilCompleted()` で全 committed
-    バッチを完了させる箇所。実行時エラーの有無に関わらず、GPU 実行
-    自体はその時点で完了しているため）は、`waitUntilCompleted()` 完了
-    後に `pending_pool_returns` の各エントリへ
-    `pool.put(class_bytes, handle)` を呼び（`record_loan_end` は
-    `Drop` 時点で既に呼び出し済みのためここでは呼ばない。§3.1「フィール
-    ド更新契約」`pending_return_bytes` 行）、`PoolStats::
-    pending_return_bytes` から同額を減算してから `pending_pool_returns`
-    を空にする（completion handler〈`addCompletedHandler`〉方式は
-    採らない。既存 `synchronize()` がブロッキングの
-    `waitUntilCompleted()` ポーリング方式で実装済み〈#1054/#1057〉で
-    あり、その完了直後に処理するほうが既存のロック区間・エラー伝播
-    〈`batch_state::propagate_failure`〉と一貫するため）。**この合流は
-    `synchronize()` が復帰する時点（`Ok`／`Err` いずれの場合も）までに
-    必ず完了する契約とする**: `synchronize()` 呼び出し後は常に
-    `pending_pool_returns`
-    が空（＝`PoolStats::pending_return_bytes == 0`）であることが
-    保証され、`release_cached_device_memory()`（§3.6 (2)。フリーリスト
-    を走査する `take_one_for_release` を含む）等フリーリスト走査を伴う
-    操作は、Metal では**必ずこの `synchronize()` を先に完了させてから**
-    呼ぶ契約とする（Cursor Bugbot 指摘「`pending_pool_returns` が
-    フリーリスト外に置かれ `release_cached`／`take_one_for_release`／
-    `cached_bytes`／LRU から見えない」への対応。§3.4・§3.6 (2) 参照）。
+    バッチを完了させる箇所）は、`waitUntilCompleted()` 完了後、**まず
+    `BatchSlots` のロック内で** `pending_pool_returns` を
+    `std::mem::take` して空にし（§3.5「Metal `pending_pool_returns`
+    の排他制御」と同一のロック順序）、**その後ロックを解放してから**
+    取り出した各エントリ `(class_bytes, handle, pool)` について
+    `pool.record_pending_merge(class_bytes)`（§3.1。`PoolStats::
+    pending_return_bytes` を減算する）と `pool.put(class_bytes,
+    handle)`（フリーリストへ実際に記帳する。`cached_bytes` を加算する）
+    を呼ぶ（`record_loan_end` は `Drop` 時点で既に呼び出し済みのため
+    ここでは呼ばない。§3.1「フィールド更新契約」`pending_return_bytes`
+    行）。**この合流（`pending_pool_returns` のロック内 `take` と、
+    ロック外での `record_pending_merge`／`put` 呼び出し）は、
+    `waitUntilCompleted()` の実行時エラーの有無に関わらず、すなわち
+    `synchronize()` が `Ok` を返す場合・`Err` を返す場合のいずれでも
+    必ず行う**（codex-review PR #1056 P1 是正・Cursor Bugbot 指摘
+    対応。理由: `waitUntilCompleted()` から復帰した時点で、対象コマンド
+    バッファは成功・失敗いずれの結果であっても GPU 上での実行は完了
+    しており、GPU 側がそのバッファをこれ以上参照することはないため、
+    合流〈フリーリストへの返却〉自体の安全性は実行結果の成否に依存
+    しない。合流はフェーズ (i) 自体の一部であり、フェーズ (ii) が担う
+    「解放処理」ではない。この区別が §3.6 (2)「バックエンド別の該当
+    フェーズ」表・「フェーズ (i) 失敗時の共通契約」の前提である）。
+    `synchronize()` が `Ok`／`Err` いずれで復帰する場合も、復帰した
+    時点では常に `pending_pool_returns` が空（＝`PoolStats::
+    pending_return_bytes == 0`〈直後に読んだ場合。ロック解放後の短い
+    窓での一時的なずれは §3.1「フィールド更新契約」`pending_return_bytes`
+    行の許容範囲〉）であることが保証される。`take_one_for_release` に
+    よるフリーリスト走査を伴う操作（`release_cached_device_memory()`
+    のフェーズ (ii)。§3.6 (2)）は、Metal では**必ずこの `synchronize()`
+    の完了（`Ok`／`Err` いずれも含む）を先に待ってから開始する**契約
+    とする（Cursor Bugbot 指摘「`pending_pool_returns` がフリーリスト
+    外に置かれ `release_cached`／`take_one_for_release`／
+    `cached_bytes`／LRU から見えない」への対応。§3.4・§3.6 (2) 参照。
+    completion handler〈`addCompletedHandler`〉方式は採らない。既存
+    `synchronize()` がブロッキングの `waitUntilCompleted()` ポーリング
+    方式で実装済み〈#1054/#1057〉であり、その完了直後に処理するほうが
+    既存のロック区間・エラー伝播〈`batch_state::propagate_failure`〉と
+    一貫するため）。
   - ゼロ初期化はホスト書き込み（`zero_fill`。#1054 §3.5 が定義する
     同期点）ではなく、`MTLBlitCommandEncoder::fillBuffer` によるデバイス
     側フィルをバッチへ encode する案を推奨する（同期点を新たに増やさ
@@ -714,16 +774,43 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   設計（#1054 §3.5「同時実行の扱い」・`context.rs::synchronize` コメント
   「他スレッドからの `encode`／`synchronize` はこの間ブロックされる」）
   と同じ「正しさ優先・並行性は最適化しない」方針に合わせるためである。
-  `pool.put()` 自体（`SizeClassPool<H>` 内部の `Mutex<PoolCore<H>>`）は
-  別ロックであり、`BatchSlots` のロックを保持したまま呼ぶとロック順序が
-  ネストする。ロック順序の逆転（デッドロック）を避けるため、
-  `synchronize()` は `pending_pool_returns` を `std::mem::take` で
-  `BatchSlots` のロック内から取り出してから**ロックを解放し**、
-  ロック外で各エントリへ `pool.put()` を呼ぶ（`flush_locked` が
-  `slots.committed` を `waitUntilCompleted` ループの前に `std::mem::take`
-  する既存パターンと同型。ロックを保持したまま FFI 呼び出しを行わない
-  という本節冒頭の方針を `pool.put()`〈フリーリスト操作のみで FFI では
-  ないが、別ロック取得を伴うため同様に扱う〉にも適用する）。
+  `pool.put()`・`pool.record_pending_return()`・`pool.record_pending_
+  merge()`（いずれも `SizeClassPool<H>` 内部の `Mutex<PoolCore<H>>`。
+  §3.1）は `BatchSlots` とは**別ロック**であり、`BatchSlots` のロックを
+  保持したままこれらを呼ぶとロック順序がネストする（Cursor Bugbot
+  指摘: `pending_return_bytes` の更新規則〈§3.1〉と本節冒頭の
+  ロック順序規則が両立しないという矛盾の指摘。是正内容は次のとおり）。
+  ロック順序の逆転（デッドロック）を避けるため、`SizeClassPool<H>` へ
+  触れる呼び出しは必ず `BatchSlots` のロックを解放した**後**に行う
+  契約で統一する:
+  - `PooledMetalHandle::Drop`（§3.3「Metal」）: `BatchSlots` のロック内
+    では `pending_pool_returns` への push（または `open`／`committed`
+    共に存在しない場合の判定）**のみ**を行い、`pool.record_pending_
+    return(class_bytes)`・`pool.put(class_bytes, handle)` はいずれも
+    ロックを解放した**後**に呼ぶ。
+  - `MetalContext::synchronize()`（§3.3「Metal」）: `synchronize()` は
+    `pending_pool_returns` を `std::mem::take` で `BatchSlots` のロック
+    内から取り出してから**ロックを解放し**、ロック外で取り出した
+    各エントリへ `pool.record_pending_merge(class_bytes)`・
+    `pool.put(class_bytes, handle)` を呼ぶ（`flush_locked` が
+    `slots.committed` を `waitUntilCompleted` ループの前に
+    `std::mem::take` する既存パターンと同型。ロックを保持したまま FFI
+    呼び出しを行わないという本節冒頭の方針を、これらの `SizeClassPool<H>`
+    呼び出し〈フリーリスト操作・統計更新のみで FFI ではないが、別ロック
+    取得を伴うため同様に扱う〉にも適用する）。
+  - **許容する一時的な不整合**: 上記のとおり `BatchSlots` のロック解放
+    から `SizeClassPool<H>` 側の統計更新（`record_pending_return`／
+    `record_pending_merge`）までの間には短い窓が生じる。この窓の間、
+    `PoolStats::pending_return_bytes` の値は「実際に `pending_pool_
+    returns` に入っている（または合流待ちの）バイト数」と一時的に
+    ずれうる（例: `Drop` が `pending_pool_returns` へ push した直後・
+    `record_pending_return` 呼び出し前に、別スレッドが `stats()` を
+    読むと `pending_return_bytes` が実態より小さく見える）。これは
+    **診断用カウンタの表示上の一時的なずれ**であり、`pending_pool_
+    returns` 自体の custody（どのハンドルがフリーリスト・貸出中・
+    返却待ちのいずれにあるか。§3.1「不変条件」）は常に `BatchSlots`
+    ロックまたは `SizeClassPool<H>` 内部ロックのいずれかで正しく
+    直列化されているため、メモリ安全性・二重貸出防止には影響しない。
 
 ### 3.6 解放戦略（受け入れ条件）
 
@@ -787,8 +874,21 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    いずれかであり、呼び出し元（LRU／OOM フォールバック。§3.4）は
    種別ごとに異なる状態を前提としてよい:
    - **フェーズ (i) 失敗**（`BackendError::DeviceAllocationFailed`
-     に `"pre-free sync"` 等の識別可能な理由文字列を含める）:
-     フリーリストは完全に無傷（全件キャッシュ残存）。
+     に `"pre-free sync"` 等の識別可能な理由文字列を含める）: **共通
+     契約は「解放対象としてのフリーリスト走査・取り出し（`take_one_
+     for_release` の呼び出し）を一切開始しない」ことであり、「フリー
+     リストへ一切触れない」ことまでは要求しない**（Cursor Bugbot 指摘
+     対応。旧稿は後者〈CUDA にのみ当てはまる帰結〉を共通契約として
+     誤って記載していた）。バックエンドごとの帰結は次のとおり:
+     CUDA は `pending_pool_returns` 相当の合流機構を持たないため文字
+     通りフリーリストは完全に無傷（全件キャッシュ残存）。Metal は
+     `synchronize()`（フェーズ (i) そのもの）が `pending_pool_returns`
+     の全件合流（`record_pending_merge`／`put`）を**同期の成否に
+     関わらず**行うため（§3.3「Metal」）、フリーリストは合流分だけ
+     増加しうる。この増加は「解放処理」ではなくフェーズ (i) 自体が
+     担う入出金（返却待ちからフリーリストへの移動）であり、`take_
+     one_for_release` によるフリーリストからの取り出しはいずれの
+     バックエンドでも一切発生しない点は共通する。
    - **フェーズ (ii) 個別解放失敗**（現行 CUDA 実装では発生しない
      防御的経路。理由文字列に `"handle release"` 等を含める）: 失敗した
      エントリのみ `put` で再挿入され、以降の未着手エントリもフリー
@@ -812,8 +912,12 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    になるため、既存 `DeviceAllocationFailed(String)` の文字列で区別する
    非破壊な方式を採る）。
    **部分失敗時の状態一貫性（fail-closed。§3.4 との整合）**: フェーズ
-   (i) で失敗した場合はフリーリストは無傷（全件キャッシュ残存）。
-   フェーズ (ii) の途中で個別の解放処理が失敗した場合（上記のとおり
+   (i) で失敗した場合、CUDA ではフリーリストは無傷（全件キャッシュ
+   残存）。Metal では `synchronize()`（フェーズ (i)）自体が
+   `pending_pool_returns` を同期の成否に関わらず全件合流させるため
+   フリーリストは増加しうるが（上記「`Err` の種別」参照）、いずれの
+   場合も `take_one_for_release` によるフリーリストからの取り出しは
+   一切発生しない。フェーズ (ii) の途中で個別の解放処理が失敗した場合（上記のとおり
    CUDA の現行実装では発生しないが、防御として規定する）は、その
    `(class_bytes, handle)` のみ `put` で同じフリーリストへ再挿入し、
    以降の未着手エントリもフリーリストに残ったまま `Err` を返す（二重
@@ -834,7 +938,7 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    | バックエンド | フェーズ (i) | フェーズ (ii) | フェーズ (iii) | フェーズ (iv) |
    |---|---|---|---|---|
    | CUDA | `cuStreamSynchronize` 相当（トリム前の対象 stream 同期） | `take_one_for_release` ループでの個別解放（`CudaSlice` の drop。`cuMemFreeAsync` の enqueue のみで完了を待たない） | `cuStreamSynchronize` 相当（(ii) で enqueue した `cuMemFreeAsync` の完了待ち。新設） | `cuMemPoolTrimTo(0)` 相当（driver 予約メモリのトリム） |
-   | Metal | `MetalContext::synchronize()`（`waitUntilCompleted()`。**この時点で `pending_pool_returns`〈§3.3「Metal」〉が全件フリーリストへ合流する**。フェーズ (ii) 開始時点で必ず `pending_return_bytes == 0` であることが前提条件） | `take_one_for_release` ループでの個別解放（`Retained<ProtocolObject<dyn MTLBuffer>>` の drop による ObjC 参照カウント減算。呼び出し可能な解放 FFI が存在せず**失敗しない**） | なし（Metal に driver 側 memory pool・トリム相当の機構が存在しないため） | なし（同上） |
+   | Metal | `MetalContext::synchronize()`（`waitUntilCompleted()`。**`Ok`／`Err` いずれで復帰する場合も、復帰前に `pending_pool_returns`〈§3.3「Metal」〉を全件フリーリストへ合流させる**〈`record_pending_merge`／`put`。合流は「解放処理」ではなくフェーズ (i) 自体が担う。上記「`Err` の種別」参照〉。フェーズ (ii) 開始時点で必ず `pending_return_bytes == 0` であることが前提条件） | `take_one_for_release` ループでの個別解放（`Retained<ProtocolObject<dyn MTLBuffer>>` の drop による ObjC 参照カウント減算。呼び出し可能な解放 FFI が存在せず**失敗しない**） | なし（Metal に driver 側 memory pool・トリム相当の機構が存在しないため） | なし（同上） |
    | CPU | 該当なし（プール自体が本イシューの対象外。#1026） | 該当なし | 該当なし | 該当なし |
 
    Metal は driver トリムを持たないため `release_cached()` の `Err` は
@@ -904,6 +1008,9 @@ fresh/reuse の 4 通り）:
 | `SizeClassPool<H>` を `take`／`put`／解放系メソッドのみに留め、新規確保は統計を一切更新しない（旧稿） | 新規確保は `take` を経由せず RAII ラッパーが直接包むため、`SizeClassPool<H>` はハンドルの custody を持つ操作（`take`／`put`／`take_one_for_release`）でしか統計を更新できないという前提のまま設計する | 新規確保の発生・その内部断片化（`class_bytes − logical_bytes`）を記録する経路が存在せず、`alloc_count`／`capacity_waste_bytes` という `PoolStats` の宣言済みフィールドを実装不能にする（codex-review PR #1056 P1）。本設計（§3.1）は `record_allocation`／`record_loan_end`（いずれもハンドルを受け取らない統計専用メソッド）を追加し、ハンドルの custody とは独立に統計だけを更新できるようにした |
 | 公開 `BackendOps::release_cached_device_memory()` の doc comment を「`Err` は 2 種類」のまま維持する（旧稿） | トリム前 stream 同期失敗・driver トリム失敗の 2 種類のみを doc comment に列挙する | §3.6 (2) の 4 フェーズ設計（post-free sync 失敗を含む）と矛盾し、実装者が post-free sync 失敗を表現・伝播できず fail-closed 契約を破るおそれがある（codex-review PR #1056 P1）。本設計（§3.1・§3.6 (2)）は doc comment を §3.6 (2)「バックエンド別の該当フェーズ」表を参照する形へ改め、CUDA／Metal／CPU 別の該当フェーズを明記した |
 | `pending_pool_returns` の会計を `PoolStats` の外に置いたままにする（旧稿） | `cached_bytes`・`release_cached`・LRU 判定はいずれもフリーリストのみを見る設計のままにする | Metal では `Drop` 後 `synchronize()` されるまでのバッファが `cached_bytes`・LRU・`release_cached_device_memory()` のいずれからも不可視になり、`cached_bytes == 0` でも実際にはデバイスメモリが保持され得る（Cursor Bugbot High 指摘）。本設計（§3.1・§3.3・§3.4）は `PoolStats::pending_return_bytes` を新設して可視化し、`max_pool_bytes`／LRU 判定を `cached_bytes + pending_return_bytes` へ拡張し、`release_cached_device_memory()` の Metal 版フェーズ (i)（`synchronize()`）が `pending_pool_returns` を必ず全件フリーリストへ合流させてから後続のフリーリスト走査を行う契約とした |
+| Metal フェーズ (i) 共通失敗契約を「フリーリストへ一切触れない」のまま CUDA・Metal 共通にする（旧稿） | `synchronize()`（Metal のフェーズ (i)）が `Err` を返した場合は `pending_pool_returns` の合流を行わず、フリーリストを CUDA と同様に完全に無傷のまま保つ | `synchronize()` は `Ok`／`Err` いずれで復帰する場合も `waitUntilCompleted()` の完了を経ており、GPU 側は対象バッファをこれ以上参照しないため、合流自体を `Err` 時に見送る安全上の理由がない。むしろ合流を見送ると、次回以降の `synchronize()` まで返却待ちバッファがフリーリストへ入らず回収が遅延し続ける（Cursor Bugbot Medium 指摘）。本設計（§3.3・§3.6 (2)）は共通契約を「解放対象としてのフリーリスト走査・取り出しは開始しない」へ narrow 化し、Metal の合流（`put` のみ・`take_one_for_release` を伴わない）はこの契約と両立すると整理した |
+| Metal `Drop`／`synchronize()` が `BatchSlots` ロック保持中に直接 `PoolStats::pending_return_bytes` を増減する（旧稿） | `pending_pool_returns` への push／`take` と同一ロック区間内で `SizeClassPool<H>` の統計フィールドも直接書き換える | `SizeClassPool<H>` の統計は内部の別 `Mutex<PoolCore<H>>` で保護されており、`BatchSlots` のロックを保持したままこれに触れるとロック順序がネストし、§3.5 冒頭の「ロックを保持したまま外部呼び出しを行わない」方針・デッドロック回避方針と両立しない（Cursor Bugbot Medium 指摘）。本設計（§3.1・§3.3・§3.5）は `record_pending_return`／`record_pending_merge`（ハンドルを一切受け取らない統計専用メソッド）を新設し、いずれも `BatchSlots` のロックを解放した後に呼ぶ契約とした。ロック解放から統計反映までの短い窓で `pending_return_bytes` が実態と一時的にずれることは許容し明記した |
+| `released_bytes`（backend の `release_cached()` が直接更新）を `SizeClassPool<H>` の API 一覧に含めない（旧稿） | `pending_return_bytes` 用の統計専用メソッドのみ追加し、`released_bytes` は backend 側が `PoolStats` の私有フィールドへ直接書き込む想定のままにする | 統計の所有者を `SizeClassPool<H>` に一本化する方針（§3.1）と矛盾し、backend が private 統計を直接触る記述が残ってしまう（codex-review 指摘）。本設計（§3.1）は `record_release(class_bytes)`（ハンドルを一切受け取らない統計専用メソッド）を追加し、`released_bytes` の更新経路も `SizeClassPool<H>` のメソッド呼び出しとして閉じた |
 
 ## §5 検証方法（本文書内の記載の正しさ）
 
@@ -965,7 +1072,8 @@ fresh/reuse の 4 通り）:
   「現在貸出中のバッファについてのストック量」であり `take` のたびに
   その回の論理バイト数で再計算されることの回帰防止）。
   (d) `release_cached()`（内部メソッド）のフェーズ (ii) で個別解放が
-  成功するたびに `released_bytes` が `+class_bytes` されること。
+  成功するたびに `record_release(class_bytes)` が呼ばれ
+  `released_bytes` が `+class_bytes` されること。
   (e) `release_cached()` の再挿入経路（フェーズ (ii) の防御的失敗
   ハンドリング。§3.6 (2)）では `put` のみが呼ばれ `record_loan_end` は
   呼ばれない（＝再挿入は `capacity_waste_bytes` に影響しない）こと。
@@ -1002,7 +1110,20 @@ fresh/reuse の 4 通り）:
   `synchronize()` で合流したエントリを含めてフリーリストから正しく
   取り出せる（＝`release_cached_device_memory()` 実行後に
   `cached_bytes` が `0` になる）ことを確認する。
-  (d) `#[ignore]` Metal 実機テスト: 未完了バッチ中（`encode` 済み・
+  (d) **フェーズ (i) 失敗時も合流することのテスト（新規。Cursor
+  Bugbot Medium 是正。§3.6 (2)「`Err` の種別」フェーズ (i) 行の回帰
+  防止）**: 同じ CPU 単体テストで、フェイク `waitUntilCompleted` が
+  実行時エラー（`MTLCommandBufferStatus::Error`）を返すよう設定した
+  うえで `open`／`committed` バッチが存在する状態から `synchronize()`
+  を呼ぶ。`synchronize()` が `Err` を返すにもかかわらず、
+  `pending_pool_returns` が空になり `pending_return_bytes` が `0` に
+  戻り `cached_bytes` へ合流分が反映されていることを確認する（＝
+  合流はフェーズ (i) 自体の一部であり同期の成否に依存しないことの
+  回帰防止）。同時に、この `Err` 復帰後に `take_one_for_release` を
+  一切呼んでいない（フリーリストからの取り出しが発生していない）
+  ことも確認する（「解放対象としての走査は開始しない」共通契約の
+  回帰防止）。
+  (e) `#[ignore]` Metal 実機テスト: 未完了バッチ中（`encode` 済み・
   `synchronize()` 未実行）に `PooledMetalHandle` を `drop` したハンドルが、
   `synchronize()` 呼び出し**前**の `take(class_bytes)` では返らない
   （フリーリストが空のまま `None`）ことを確認したうえで、
@@ -1152,3 +1273,81 @@ fresh/reuse の 4 通り）:
   呼ばない（§3.5）・poison 時は panic せず継続する・二重返却を
   `Option<H>::take()` で構造的に防止する（§3.1・§3.3。codex-review PR
   #1056 P2 是正で `ManuallyDrop` 方式から統一した）ことを契約として記す。
+
+## §8 本設計文書で確定する事項／実装イシューで確定する事項
+
+本 PR（#1056）は codex-review・Cursor Bugbot との往復が複数巡にわたり、
+各巡の是正が次巡で新たな不整合（trim 前後の同期順序・所有権遷移の粒度・
+統計更新経路・ロック順序等）を生む展開になった。以降のレビューで実装
+レベルの指摘が出た場合に、本文書のどこまでを「設計判断として動かさない
+線」とし、どこからを実装イシュー（#1020・#1021）側の裁量に委ねるかを
+文書自身が示すため、区分を明記する。
+
+### 8.1 本設計文書で確定する事項（変更にはユーザー承認・spec 整合の
+再確認を要する）
+
+- **公開面**: `tensor-core` に置く POD 型（`PoolConfig`／`PoolStats`）・
+  ハンドル型非依存の `SizeClassPool<H>`（§3.1）。低水準 trait
+  （`DeviceAllocator` 相当）を公開しないこと。`BackendOps` への追加は
+  `release_cached_device_memory()`／`device_memory_pool_stats()` の
+  unit／POD 返却 2 メソッドに限ること。`facade` からの
+  `release_cached_memory(device)`／`memory_pool_stats(device)` 自由
+  関数（§3.1「facade からの再公開」）。
+- **所有権不変条件**: 同一ハンドルがフリーリストと貸出中に同時に存在
+  しないこと（§3.1「不変条件」）。返却は RAII 限定・明示 `free()` を
+  設けないこと（§3.3）。二重返却・use-after-return の構造的防止は
+  `Option<H>::take()` 方式に統一すること（§3.1・§3.3。`ManuallyDrop`
+  方式は採らない）。
+- **REQ-14 の解放プロトコルの段階と失敗時状態**: `release_cached()` の
+  フェーズ構成（CUDA 4 段・Metal 2 段。§3.6 (2)「バックエンド別の該当
+  フェーズ」表）・各フェーズの `Err` 時のプール状態（フリーリストへの
+  影響の有無。§3.6 (2)「`Err` の種別」「部分失敗時の状態一貫性」）・
+  フェーズ (i) 失敗時の共通契約（「解放対象としての走査・取り出しは
+  開始しない」。フリーリストへの合流〈Metal のみ〉はこれと矛盾しない
+  ことを含む）。
+- **Metal の返却待ち機構と合流順序**: `pending_pool_returns` による
+  GPU 完了待ちの返却遅延（§3.3「Metal」）・`synchronize()` が同期の
+  成否に関わらず全件合流させること・フリーリスト走査を伴う操作は
+  Metal では必ず `synchronize()` 完了後に行うこと（§3.3・§3.6 (2)）。
+- **統計フィールドの意味**: `PoolStats` の各フィールド（`alloc_count`・
+  `reuse_count`・`cached_bytes`・`pending_return_bytes`・
+  `capacity_waste_bytes`・`released_bytes`）が何を数える／表す量か
+  （§3.1「フィールド更新契約」）。とくに `capacity_waste_bytes` が
+  「現在貸出中のバッファについてのストック量」であり累積量ではない
+  ことと、`pending_return_bytes` が Metal 以外で常に `0` であること。
+- **不変事項**（§0 で既述のものを再掲。本設計文書のスコープ内で緩和・
+  変更しない）: バックエンド間数値一致の複合判定・カーネル境界検査・
+  依存の完全固定・REQ-14 のピークメモリ係数上限（2 倍以内）・ガード
+  レール閾値／テスト許容誤差。
+
+### 8.2 実装イシュー（#1020・#1021）で確定する事項（本文書は「案」を
+示すに留め、実装時の判断に委ねる）
+
+- **ロック粒度**: `SizeClassPool<H>` 内部の `Mutex<PoolCore<H>>` の
+  分割粒度（単一ロックか、フリーリストと統計を別ロックにするか等）。
+  §3.5 が定める「`BatchSlots` ロックを保持したまま `SizeClassPool<H>`
+  を呼ばない」というロック**順序**の制約は 8.1 の確定事項だが、
+  `SizeClassPool<H>` **内部**のロック実装詳細は実装時に決めてよい。
+- **具体メソッドの引数形状の微調整**: `record_allocation`／
+  `record_loan_end`／`record_release`／`record_pending_return`／
+  `record_pending_merge`（§3.1）の引数の型・順序・まとめ方（例:
+  `class_bytes`・`logical_bytes` を個別の `u64` にするか小さな構造体に
+  まとめるか）。「ハンドルを一切受け取らない統計専用メソッドである
+  こと」「どの操作から呼ばれるか」「どのフィールドをどう増減させる
+  契約か」は 8.1 の確定事項だが、シグネチャの具体形は実装時に決めて
+  よい。
+- **統計更新の順序の細部**: 同一イベント内で複数の統計フィールドを
+  更新する際の呼び出し順序（例: `record_pending_merge` と `put` の
+  呼び出し順）。ロック**外**で行う限りにおいて、この順序自体が
+  他の契約（不変条件・fail-closed 状態遷移）に影響しない範囲は実装時の
+  裁量とする。
+- **エラー種別の表現**: `BackendError::DeviceAllocationFailed(String)`
+  の理由文字列によるフェーズ区別（§3.6 (2)）は本設計文書が定める
+  **暫定の**非破壊な表現方式である。より型安全な表現（`BackendError`
+  への新規 variant 追加等）が望ましいと判明した場合、それは crates.io
+  公開済み trait への破壊的変更判断であり **REQ-1／deps-policy.md 系の
+  通常のユーザー承認フローに従う**（本文書が先回りして承認するもの
+  ではない）。
+
+この区分は本文書のレビュー往復で生じた不整合の再発を防ぐための運用上の
+指針であり、REQ・spec の記述そのものを変更するものではない。
