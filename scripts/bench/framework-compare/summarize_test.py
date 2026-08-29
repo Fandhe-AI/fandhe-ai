@@ -135,18 +135,24 @@ def _train_phases_row(
 
 
 def _train_phases_group(device="cpu", mode="fresh", init_s=None):
-    """1 step 分の典型的な train_phases 行グループ（fresh: 4 phase +
-    step_total、reuse は呼び出し側が phase 名を変えて使う）。全 phase の
-    `median_s` の和が `step_total` の `median_s`（0.01）以下になるよう
-    構成する（`train_phases_each_step_phase_sum_does_not_exceed_total` と
-    同じ不変条件）。
+    """1 step 分の典型的な train_phases 行グループを構成する。
+
+    `summarize._TRAIN_PHASES_REQUIRED_PHASES[mode]` の必須 phase 名を
+    `phase_index` 0 始まりの連番で全件含める（`_train_phases_validate` の
+    必須 phase 集合・順序・件数チェック — codex-review 指摘・PR #1055 —
+    に対して「有効な group」の基準となるため、producer 側 `PHASE_*` 定数
+    と同じ集合を実プロダクションの一部として合成する）。`step_total` 以外
+    の `median_s` は小さめの固定値とし、その和が `step_total` の
+    `median_s`（0.01）以下になるよう構成する
+    （`train_phases_each_step_phase_sum_does_not_exceed_total` と同じ
+    不変条件）。
     """
-    return [
-        _train_phases_row(device, mode, "tape_build", 0, 0.001, init_s),
-        _train_phases_row(device, mode, "forward", 1, 0.002, init_s),
-        _train_phases_row(device, mode, "backward", 2, 0.003, init_s),
-        _train_phases_row(device, mode, "step_total", 3, 0.01, init_s),
-    ]
+    phases = summarize._TRAIN_PHASES_REQUIRED_PHASES[mode]
+    rows = []
+    for phase_index, phase in enumerate(phases):
+        median_s = 0.01 if phase == "step_total" else 0.0005
+        rows.append(_train_phases_row(device, mode, phase, phase_index, median_s, init_s))
+    return rows
 
 
 class ParityStatusTests(unittest.TestCase):
@@ -884,6 +890,50 @@ class TrainPhasesSectionTests(unittest.TestCase):
             *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_phases_invalid)
         self.assertIn("step_total", buf.getvalue())
+
+    def test_missing_required_non_step_total_phase_is_invalid(self):
+        # codex-review 指摘（PR #1055）: `backward` 等の必須 phase 行が
+        # 欠落していても `step_total` 行さえ残っていれば修正前は有効判定
+        # されていた（`_train_phases_validate` が `step_total` の存在のみ
+        # を検証していたため）。`phase_index` を詰め直さず欠番のまま残す
+        # ことで、mode ごとの必須 phase 集合・順序チェックが単独で欠落を
+        # 検出できることを固定する。
+        rows = [r for r in _train_phases_group(mode="fresh") if r["phase"] != "backward"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("必須 phase 集合と不一致", buf.getvalue())
+        self.assertIn("backward", buf.getvalue())
+
+    def test_missing_required_phase_fails_with_strict_even_with_step_total(self):
+        rows = [r for r in _train_phases_group(mode="reuse") if r["phase"] != "device_update"]
+        path = _write_jsonl(rows)
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 2)
+        self.assertIn("train_phases", buf_err.getvalue())
+
+    def test_extra_unknown_phase_alongside_full_required_set_is_invalid(self):
+        # 必須集合を全て満たしたうえで余剰 phase（producer 契約に無い名前）
+        # が混入した場合も、件数不一致として無効化する。
+        rows = _train_phases_group(mode="fresh")
+        extra = dict(rows[0])
+        extra["phase"] = "unexpected_extra_phase"
+        extra["phase_index"] = max(r["phase_index"] for r in rows) + 1
+        rows = rows + [extra]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("必須 phase 集合と不一致", buf.getvalue())
 
     def test_duplicate_phase_index_is_invalid(self):
         rows = _train_phases_group()

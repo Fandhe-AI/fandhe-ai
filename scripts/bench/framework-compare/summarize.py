@@ -74,7 +74,11 @@
   `median_s`/`q1_s`/`q3_s`（reuse 行は `init_s` も必須）は `_safe_time_s`、
   `phase` は非空 `str`、`phase_index` は非負整数として検証する。
   `step_total` phase の欠落・`phase`/`phase_index` の重複・`step_total`
-  比が 100% を超える不整合（時間値の集計不整合を示す）は表で「無効」表示
+  比が 100% を超える不整合（時間値の集計不整合を示す）に加え、mode ごとの
+  必須 phase 名・順序・件数（`_TRAIN_PHASES_REQUIRED_PHASES`。fresh:
+  `phase_index` 0..9・reuse: 0..7）との不一致（`backward` 等の必須 phase
+  行が欠落していても `step_total` さえ残っていれば有効判定してしまって
+  いた codex-review 指摘・PR #1055 への対処）は表で「無効」表示
   し `--strict` の失敗条件にも含める（`section()` の戻り値に
   `has_train_phases_invalid` を追加）。`task != "train_phases"` の既存
   節（(a)/(a')/(b)/(b')/(c)・checksum 突合・parity 判定・`devices_in`）は
@@ -101,6 +105,40 @@ DEVICE_LABEL = {"cpu": "CPU", "metal": "Metal", "cuda": "CUDA"}
 # （codex-review 指摘。PR #1055）。
 _TRAIN_PHASES_MODES = ("fresh", "reuse")
 _PHASE_NAME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_")
+
+# `bench-fandhe --task train --phases`（本 harness の
+# `bench-fandhe/src/main.rs` の `PHASE_*` 定数群）が mode ごとに出力する
+# phase 名の完全な集合・順序（`phase_index` 0 始まり連番）。codex-review
+# 指摘（PR #1055）: `_train_phases_validate` が `step_total` の存在のみを
+# 検証し、`backward` 等の必須 phase 行が欠落しても `step_total` さえ残って
+# いれば有効判定してしまっていたため、mode ごとの必須 phase 名・順序・件数
+# を突合する（集合・順序・件数のいずれかが不一致なら当該グループ全体を
+# 無効とする）。producer 側で phase を追加・変更した場合は本定数も追従
+# させる必要がある（`bench-fandhe/src/main.rs` 側の doc コメント参照）。
+_TRAIN_PHASES_REQUIRED_PHASES = {
+    "fresh": (
+        "tape_build",
+        "leaf_register",
+        "forward",
+        "loss_readout",
+        "backward",
+        "param_readout",
+        "host_sgd",
+        "apply_params",
+        "tape_drop",
+        "step_total",
+    ),
+    "reuse": (
+        "tape_build",
+        "leaf_register",
+        "forward_resident",
+        "loss_readout",
+        "backward",
+        "device_update",
+        "tape_drop",
+        "step_total",
+    ),
+}
 
 
 def _valid_phase_name(value):
@@ -613,7 +651,7 @@ def _train_phases_devices(groups):
     return sorted(groups.keys(), key=rank)
 
 
-def _train_phases_validate(group_rows):
+def _train_phases_validate(group_rows, mode):
     """1 つの `(device, mode)` グループ内の `train_phases` 行を検証する。
 
     外部 JSONL 由来の `phase`/`phase_index`/時間値は使用前に検証する
@@ -635,13 +673,21 @@ def _train_phases_validate(group_rows):
       一意に決まらないため）。
     - 各 phase の中央値が `step_total` の中央値を上回る（計時区間の
       合計が全体を超過する不整合）場合もその行を無効とする。
+    - 上記の個別行検証を通過しても、mode ごとの必須 phase 名の集合・
+      `phase_index` 順序・件数（`_TRAIN_PHASES_REQUIRED_PHASES`。producer
+      側 `bench-fandhe/src/main.rs` の `PHASE_*` 定数と同期）に完全一致
+      しなければ本グループ全体を無効とする。`step_total` 行さえ残って
+      いれば `backward` 等の必須 phase 行が欠落していても有効判定して
+      しまっていた（codex-review 指摘・PR #1055）ことへの対処。
 
-    戻り値: (entries, invalid, step_total_median)
+    戻り値: (entries, invalid, step_total_median, phase_set_reason)
     entries: [{"phase": str, "median": float|None, "q1": float|None,
                "q3": float|None, "reason": str|None}, ...]
              （有効な phase_index を持つ行は昇順、それ以外は末尾）
     invalid: bool（本グループに 1 件以上の無効行があるか）
     step_total_median: float|None（比の分母。一意に決まらなければ None）
+    phase_set_reason: str|None（必須 phase 集合・順序・件数の不一致理由。
+                       一致していれば None）
     """
     invalid = False
     keyed = {}
@@ -708,7 +754,30 @@ def _train_phases_validate(group_rows):
     for phase, r, reason in unresolved:
         entries.append({"phase": phase, "median": None, "q1": None, "q3": None, "reason": reason})
 
-    return entries, invalid, step_total_median
+    # 必須 phase 名の集合・`phase_index` 順序・件数の突合（codex-review
+    # 指摘・PR #1055）。`keyed` は個別行検証を通過した行のみを含むため、
+    # 欠落・余剰・順序違いのいずれも `actual_order != required` として
+    # 検出できる（同名 phase の重複は上記 `duplicate_names` 側で既に
+    # invalid 化済みだが、`actual_order` にも重複が残るため二重に不一致
+    # となり結果は変わらない）。
+    phase_set_reason = None
+    required = _TRAIN_PHASES_REQUIRED_PHASES.get(mode)
+    if required is not None:
+        actual_order = tuple(keyed[pi][0] for pi in sorted(keyed))
+        if actual_order != required:
+            invalid = True
+            missing = [p for p in required if p not in name_to_pis]
+            extra = [p for p in name_to_pis if p not in required]
+            details = []
+            if missing:
+                details.append(f"欠落: {', '.join(missing)}")
+            if extra:
+                details.append(f"未知: {', '.join(extra)}")
+            if not details:
+                details.append("phase の並び順が想定と不一致")
+            phase_set_reason = f"mode={mode!r} の必須 phase 集合と不一致（{'; '.join(details)}）"
+
+    return entries, invalid, step_total_median, phase_set_reason
 
 
 def _train_phases_section(rel, rows):
@@ -730,7 +799,7 @@ def _train_phases_section(rel, rows):
         )
     for device, mode in _train_phases_devices(groups):
         group_rows = groups[(device, mode)]
-        entries, invalid, step_total_median = _train_phases_validate(group_rows)
+        entries, invalid, step_total_median, phase_set_reason = _train_phases_validate(group_rows, mode)
         any_invalid = any_invalid or invalid
         device_label = DEVICE_LABEL.get(device, device or "?")
         lines.append(f"#### {device_label} / {mode}\n")
@@ -746,6 +815,11 @@ def _train_phases_section(rel, rows):
                 print(
                     f"warning: {rel}: train_phases {device}/{mode} "
                     "の step_total 行が欠落または不正 — 比の算出不能",
+                    file=sys.stderr,
+                )
+            if phase_set_reason is not None:
+                print(
+                    f"warning: {rel}: train_phases {device}/{mode} — {phase_set_reason}",
                     file=sys.stderr,
                 )
         if mode == "reuse":
