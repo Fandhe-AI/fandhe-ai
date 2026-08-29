@@ -253,10 +253,10 @@ allocator()` を削除し `DeviceAllocator` の実装インスタンスをいず
     | フィールド | 増加 | 減少 | 備考 |
     |---|---|---|---|
     | `alloc_count` | `record_allocation` 呼び出しごとに `+1` | なし（単調増加のカウンタ） | 新規物理確保の回数 |
-    | `reuse_count` | `take` 成功（`Some` を返した）ごとに `+1` | なし（単調増加のカウンタ） | フリーリストからの再利用ヒット回数 |
+    | `reuse_count` | `take` 成功（`Some` を返した）ごとに `+1`（実装は `take` 自身ではなく、`Some` を受け取った直後に呼ぶ `record_reuse` が加算する。§8.2「具体メソッドの引数形状の微調整」の範囲・PR #1063） | なし（単調増加のカウンタ） | フリーリストからの再利用ヒット回数 |
     | `cached_bytes` | `put` で `+class_bytes` | `take` 成功で `−class_bytes`（取り出した分）／`take_one_for_release` で `−class_bytes`（取り出した分） | フリーリストが現在保持する総バイト数。恒等式 `cached_bytes == Σ(フリーリスト中の各エントリの class_bytes)` を常に満たす |
     | `pending_return_bytes`（`AtomicU64`。`Mutex<PoolCore<H>>` の外） | `record_pending_return(class_bytes)` 呼び出しごとに `+class_bytes`（`fetch_add`／`Relaxed`。`PooledMetalHandle::Drop` が `pending_pool_returns` へ push するのと**同一の `BatchSlots` クリティカルセクション内**で呼ぶ。§3.3「Metal」・§3.5） | `record_pending_merge(class_bytes)` 呼び出しごとに `−class_bytes`（`fetch_sub`／`Relaxed`。`MetalContext::synchronize()` が `pending_pool_returns` から `std::mem::take` するのと**同一の `BatchSlots` クリティカルセクション内**で呼ぶ。`record_loan_end` は既に `Drop` 時点で呼び出し済みのためここでは呼ばない。下記「Metal の返却待ちバイト数」参照） | CUDA・CPU では常に `0`（`pending_pool_returns` 相当の機構を持たないため呼ばれない）。push／`take` と加減算が同一クリティカルセクションで対になるため（Cursor Bugbot・codex-review 再指摘対応。旧稿は `BatchSlots` ロック解放後に加減算する契約だったため、別スレッドの `synchronize()` が先着すると `record_pending_merge` の減算が `record_pending_return` の加算より先に走り、`saturating_sub` で `0` に張り付いた後の加算が恒久的な誤差として残り得た）、`pending_return_bytes` に恒久的な誤差は生じない。ただし `record_pending_merge`〈ロック内〉と `put`〈ロック解放後〉の間の短い窓では、当該バイト数は `pending_return_bytes` にも `cached_bytes` にも含まれない中間状態になる（二重計上にはならず、`max_pool_bytes`／LRU の判定〈§3.4〉は実態より少なく見える保守側にのみ振れる） |
-    | `capacity_waste_bytes` | `record_allocation` で `+(class_bytes − logical_bytes)`／`take` 成功で `+(class_bytes − bytes)`〈`bytes` はその回の `take` 呼び出しの論理バイト数〉 | 対応する貸出が終了する時（`record_loan_end(logical_bytes, class_bytes)` 呼び出しごとに `−(class_bytes − logical_bytes)`。**この `logical_bytes` はその貸出が `record_allocation` または `take` で開始した時点の値と同一でなければならない**〈RAII ラッパーが自身の `logical_bytes` フィールドに保持し続けることで担保する〉 | **意味論はストック量**（現在貸出中の全ハンドルについて `Σ(class_bytes − logical_bytes)` を表すリアルタイムの内部断片化実測値であり、`capacity_waste_bytes` 単体では「これまでの累積無駄」ではない）。`release_cached()` の再挿入（`put` のみ・`record_loan_end` を伴わない）はこのフィールドに影響しない（対象エントリは貸出中ではなくアイドルだったため） |
+    | `capacity_waste_bytes` | `record_allocation` で `+(class_bytes − logical_bytes)`／`take` 成功で `+(class_bytes − bytes)`〈`bytes` はその回の `take` 呼び出しの論理バイト数。実装は `take` 自身ではなく `record_reuse` が加算する（`reuse_count` と同じ理由。上記行参照）。codex-review P2・Cursor Bugbot 指摘対応: 旧稿はこの加算が実装から漏れており、再利用貸出後に `record_loan_end` が減算しても対応する加算がなく過小表示・`debug_assert!` 失敗を招いていた（PR #1063）〉 | 対応する貸出が終了する時（`record_loan_end(logical_bytes, class_bytes)` 呼び出しごとに `−(class_bytes − logical_bytes)`。**この `logical_bytes` はその貸出が `record_allocation` または `take` で開始した時点の値と同一でなければならない**〈RAII ラッパーが自身の `logical_bytes` フィールドに保持し続けることで担保する〉 | **意味論はストック量**（現在貸出中の全ハンドルについて `Σ(class_bytes − logical_bytes)` を表すリアルタイムの内部断片化実測値であり、`capacity_waste_bytes` 単体では「これまでの累積無駄」ではない）。`release_cached()` の再挿入（`put` のみ・`record_loan_end` を伴わない）はこのフィールドに影響しない（対象エントリは貸出中ではなくアイドルだったため） |
     | `released_bytes` | `record_release(class_bytes)` 呼び出しごとに `+class_bytes`（`release_cached()`〈内部メソッド。§3.1「2 段構成の命名規約」〉のフェーズ (ii) で個別解放が成功するたびに呼ぶ） | なし（単調増加のカウンタ） | §3.6 (2) 参照。プロセス起動からの累積解放バイト数（診断用） |
 
     **Metal の返却待ちバイト数（`pending_return_bytes`）と
@@ -497,7 +497,7 @@ jemalloc 型の方式を採用する: 2 の冪ごとの区間（オクターブ�
 |---|---|---|
 | 最小 | `bytes == 0` | プール非経由（従来どおり空ハンドルを即返す） |
 | 極小 | 1 B 〜 255 B | 256 B（小帯の最小クラス）へ切り上げてプール経由とする（小帯と同一のフリーリストを使う。専用クラスは設けない） |
-| 小 | 256 B 〜 1 MiB | 各オクターブを `1x`／`1.25x`／`1.5x`／`1.75x` の 4 段に分割（内部断片化の理論上限 25%） |
+| 小 | 256 B 〜 1 MiB | 各オクターブを `1x`／`1.25x`／`1.5x`／`1.75x` の 4 段に分割（内部断片化の理論上限 25%）。`(1.75x, 2x]` の範囲（4 段目の丸め先を超える端数）は次オクターブの `1x`（`= 2x`）へ切り上げる（Cursor Bugbot High 指摘対応・PR #1063。旧稿の `pool_core.rs::size_class_for` 実装はこの範囲を「到達不能」と誤って前提し `BackendError` を返していた） |
 | 大 | 1 MiB 超 〜 64 MiB 未満 | 2 MiB 単位切り上げ（exclusive プール。1 バッファ 1 エントリ） |
 | 巨大 | 64 MiB 以上 | 完全一致のみ・保持上限 1 エントリ／クラス |
 
@@ -1420,12 +1420,13 @@ fresh/reuse の 4 通り）:
   `SizeClassPool<H>` **内部**のロック実装詳細は実装時に決めてよい。
 - **具体メソッドの引数形状の微調整**: `record_allocation`／
   `record_loan_end`／`record_release`／`record_pending_return`／
-  `record_pending_merge`（§3.1）の引数の型・順序・まとめ方（例:
-  `class_bytes`・`logical_bytes` を個別の `u64` にするか小さな構造体に
-  まとめるか）。「ハンドルを一切受け取らない統計専用メソッドである
-  こと」「どの操作から呼ばれるか」「どのフィールドをどう増減させる
-  契約か」は 8.1 の確定事項だが、シグネチャの具体形は実装時に決めて
-  よい。
+  `record_pending_merge`／`record_reuse`（新設。`take` 成功直後に呼び
+  `reuse_count`＋`capacity_waste_bytes` をまとめて更新する。PR #1063・
+  §3.1）の引数の型・順序・まとめ方（例: `class_bytes`・`logical_bytes`
+  を個別の `u64` にするか小さな構造体にまとめるか）。「ハンドルを
+  一切受け取らない統計専用メソッドであること」「どの操作から呼ばれる
+  か」「どのフィールドをどう増減させる契約か」は 8.1 の確定事項だが、
+  シグネチャの具体形・メソッド分割自体は実装時に決めてよい。
 - **統計更新の順序の細部**: 同一イベント内で複数の統計フィールドを
   更新する際の呼び出し順序（例: `record_pending_merge` と `put` の
   呼び出し順）。ロック**外**で行う限りにおいて、この順序自体が
@@ -1504,11 +1505,21 @@ Metal 側実装（イシュー #1021）が §8.2 の裁量事項を以下のと�
 - 既存 `crate::pool::PooledMemory` の `arc_with_non_send_sync` allow 解消
   は、上記実測訂正のとおり Metal 側では前提が崩れたため見送る（#1020
   側の判断に委ねる）。
-- **`SizeClassPoolConfig::huge_entries_per_class` は未実装**（値を保持
-  するのみで参照・強制しない。`SizeClassPool::put` は `max_pool_bytes`
-  総量上限＋グローバル LRU〈§3.4〉のみを実装する。理由・判断根拠は
-  `pool_core.rs::SizeClassPoolConfig::huge_entries_per_class` の
-  doc comment を正とする）。
+- **`SizeClassPoolConfig::huge_entries_per_class` は実装済み**
+  （codex-review P1 是正・PR #1063。`SizeClassPool::put` が記帳直後に
+  `class_bytes >= huge_min_bytes` のエントリ数を数え、本フィールドの
+  上限を超える間は最も古い同一クラスのエントリを追い出す。
+  `max_pool_bytes` 総量上限＋グローバル LRU〈§3.4〉とは独立に働く
+  追加の安全弁。詳細は `pool_core.rs::SizeClassPool::put`／
+  `evict_over_huge_class_limit` の doc comment を正とする）。
+- **`SizeClassPool::record_reuse(logical_bytes, class_bytes)` を新設**
+  （codex P2・Cursor Bugbot 指摘対応・PR #1063・§8.2「具体メソッドの
+  引数形状の微調整」の範囲）。`take` 成功直後に呼ぶ統計専用メソッドで、
+  `reuse_count` の `+1`（旧稿は `take` 自身が加算していた）と
+  `capacity_waste_bytes` の `+(class_bytes − logical_bytes)`（§3.1
+  契約表が定めるが実装が漏れていた加算）をまとめて行う。これにより
+  再利用貸出でも新規確保と同様に waste が計上され、対応する
+  `record_loan_end` の減算と過不足なく対になる。
 - **`crate::pool::MetalAllocator::pending_pool_returns` 経由の GPU 完了
   待ち返却（§3.3「Metal」）は、本 PR が接続したホットパス（`gemm.rs`／
   `elementwise.rs`／`softmax.rs`／`rmsnorm.rs`／`memory.rs`）からは

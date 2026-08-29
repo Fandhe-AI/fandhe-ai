@@ -65,16 +65,13 @@ pub struct SizeClassPoolConfig {
     /// エントリ／クラス」を確定済み。将来の見直しに備え設定値として
     /// 持たせる）。
     ///
-    /// **未実装（イシュー #1021 実装時点。out-of-scope 記録）**:
-    /// `SizeClassPool::put`（[`Self::default`] が持つ既定値 128 MiB の
-    /// `max_pool_bytes`・グローバル LRU〈§3.4〉のみを実装しており、
-    /// クラス単位の本フィールドは値を保持するのみで参照・強制していない
-    /// （巨大帯 1 エントリ = 数十 MiB のため、既定 `max_pool_bytes`
-    /// 128 MiB の下では実質的に少数エントリしか同時保持できず、
-    /// グローバル LRU が代替的な安全弁として機能する。設計文書 §0
-    /// 不変事項〈REQ-14 係数上限〉を侵さない範囲での意図的な簡略化）。
-    /// クラス単位の厳密な強制が必要と判明した場合は別途実装する
-    /// （`docs/device-memory-pool-design.md` §9 実装記録参照）。
+    /// `SizeClassPool::put` が記帳直後に本フィールドを参照し、
+    /// `class_bytes >= huge_min_bytes`（巨大帯）のエントリ数がこの上限を
+    /// 超える間は最も古い同一クラスのエントリから追い出す
+    /// （codex-review P1 是正。旧稿は総量上限＋グローバル LRU〈§3.4〉
+    /// のみに委ねクラス単位の強制をしていなかったため、既定
+    /// `max_pool_bytes` 128 MiB を上回るまで同一巨大クラスを複数保持
+    /// できてしまっていた）。
     pub huge_entries_per_class: usize,
 }
 
@@ -176,13 +173,16 @@ pub fn size_class_for(bytes: u64, cfg: &SizeClassPoolConfig) -> Result<u64, Back
             return Ok(class);
         }
     }
-    // 到達不能（`mult == 7` は `base * 1.75` であり、`bytes < 2^(octave+1)
-    // == base * 2` の不変条件から必ず `class >= bytes` を満たす分岐に
-    // 入る）。`.claude/rules/coding-rust.md`「本番経路で panic しない」に
-    // 従い、万一到達した場合も型付きエラーで返す（防御的経路）。
-    Err(BackendError::DeviceAllocationFailed(format!(
-        "size_class_for: unreachable rounding failure for bytes={bytes}"
-    )))
+    // `mult == 7`（`base * 1.75`）でも `class >= bytes` を満たさない場合
+    // （`bytes` が `(base * 1.75, base * 2)` の範囲。Cursor Bugbot 指摘。
+    // 旧稿はここを「到達不能」と誤って前提していたが、`octave` の不変
+    // 条件 `bytes < 2^(octave+1) == base * 2` はこの区間を排除しない
+    // ため実際に到達しうる）は、次オクターブの base（`base * 2` ==
+    // `2^(octave+1)`）へ切り上げる。設計文書 §3.2 が「巨大帯下限
+    // 未満はオクターブ内 4 段丸め、それ以上は次段階の丸め」を要求して
+    // おり、`2p` ちょうどまでの切り上げが小帯の契約（内部断片化の理論
+    // 上限 25%）と整合する。
+    base.checked_mul(2).ok_or_else(|| overflow_err(bytes))
 }
 
 fn overflow_err(bytes: u64) -> BackendError {
@@ -280,12 +280,21 @@ where
     /// 呼び出し元へ移り、フリーリストからは消える。無ければ `None`
     /// （呼び出し元が新規確保 FFI を呼び `record_allocation` で統計を
     /// 更新する契約。設計文書 §3.1）。
+    ///
+    /// **`reuse_count`／`capacity_waste_bytes` の更新はここでは行わない**
+    /// （codex-review・Cursor Bugbot 指摘対応。旧稿は本メソッドが
+    /// `reuse_count` のみを直接加算し、`capacity_waste_bytes`
+    /// への加算〈設計文書 §3.1 契約表「`take` 成功で
+    /// `+(class_bytes − bytes)`」〉が漏れていたため、再利用貸出後に
+    /// `record_loan_end` が減算しても対応する加算が存在せず
+    /// `saturating_sub` で過小表示・`debug_assert!` 失敗を招いていた）。
+    /// 呼び出し元が `Some` を受け取った直後に必ず [`Self::record_reuse`]
+    /// を呼び、両フィールドをまとめて更新する契約とする。
     pub fn take(&self, class_bytes: u64) -> Option<H> {
         let mut core = self.lock();
         let idx = core.free.iter().position(|(c, _)| *c == class_bytes)?;
         let (c, handle) = core.free.remove(idx);
         core.cached_bytes = core.cached_bytes.saturating_sub(c);
-        core.reuse_count += 1;
         Some(handle)
     }
 
@@ -295,6 +304,33 @@ where
     pub fn record_allocation(&self, logical_bytes: u64, class_bytes: u64) {
         let mut core = self.lock();
         core.alloc_count += 1;
+        core.capacity_waste_bytes = core
+            .capacity_waste_bytes
+            .saturating_add(class_bytes.saturating_sub(logical_bytes));
+        debug_assert!(
+            class_bytes >= logical_bytes,
+            "size class must never round below the requested logical size"
+        );
+    }
+
+    /// フリーリストからの再利用貸出が成功したことを記録する統計専用
+    /// メソッド（ハンドルを一切受け取らない。`take` が `Some` を返した
+    /// 直後に具体アロケータが呼ぶ。§3.1 契約表・§8.2「具体メソッドの
+    /// 引数形状の微調整」の範囲での新設）。
+    ///
+    /// `reuse_count` の `+1`（旧稿は `take` 自身が加算していた）と
+    /// `capacity_waste_bytes` の `+(class_bytes − logical_bytes)`
+    /// （codex-review P2・Cursor Bugbot 指摘対応。新規確保
+    /// （`record_allocation`）と同様、再利用貸出でも `capacity_bytes −
+    /// 論理バイト数` の内部断片化ストックを計上しなければ、対応する
+    /// `record_loan_end` の減算と対にならない）を単一のロック区間で
+    /// まとめて行う。`logical_bytes` はこの貸出が終わる際に呼ばれる
+    /// `record_loan_end` へ渡す値と同一でなければならない
+    /// （RAII ラッパーが自身のフィールドに保持し続けることで担保する。
+    /// `record_allocation` と同じ契約）。
+    pub fn record_reuse(&self, logical_bytes: u64, class_bytes: u64) {
+        let mut core = self.lock();
+        core.reuse_count += 1;
         core.capacity_waste_bytes = core
             .capacity_waste_bytes
             .saturating_add(class_bytes.saturating_sub(logical_bytes));
@@ -322,12 +358,59 @@ where
     /// FFI 呼び出しを行わない」方針と同じ理由）。`max_pool_bytes == 0`
     /// はプール無効（全パススルー）契約のため、この場合は挿入した
     /// エントリ自身を含め全件が追い出される。
+    ///
+    /// **巨大帯クラス別保持上限（`SizeClassPoolConfig::
+    /// huge_entries_per_class`。設計文書 §3.2「巨大 | 64 MiB 以上 |
+    /// 完全一致のみ・保持上限 1 エントリ／クラス」・codex-review P1
+    /// 指摘対応）**: `class_bytes >= huge_min_bytes`（巨大帯）の場合、
+    /// 記帳直後にフリーリスト中の同一 `class_bytes` のエントリ数を数え、
+    /// `huge_entries_per_class` を超える間は最も古い同一クラスの
+    /// エントリから追い出す（今回挿入した分は必ず最新のため対象外。
+    /// 巨大帯は完全一致クラスのため「同一クラス」は「同一物理サイズ」
+    /// と同義）。追い出したエントリは上記のグローバル LRU 追い出しと
+    /// 同じ戻り値へ合流させ、呼び出し元が `Mutex` 解放後に drop する
+    /// 契約を共有する。
     #[must_use = "追い出されたエントリは呼び出し元が Mutex 解放後に drop すること"]
     pub fn put(&self, class_bytes: u64, handle: H) -> Vec<(u64, H)> {
         let mut core = self.lock();
         core.free.push((class_bytes, handle));
         core.cached_bytes = core.cached_bytes.saturating_add(class_bytes);
-        self.evict_over_capacity(&mut core)
+        let mut evicted = self.evict_over_huge_class_limit(&mut core, class_bytes);
+        evicted.extend(self.evict_over_capacity(&mut core));
+        evicted
+    }
+
+    /// [`Self::put`] が記帳直後に呼ぶ巨大帯クラス別保持上限の強制本体。
+    /// `class_bytes` が巨大帯（`>= huge_min_bytes`）でなければ何もしない
+    /// （小帯・大帯はクラス別ではなく総量上限＋グローバル LRU
+    /// （[`Self::evict_over_capacity`]）のみで制御する設計文書 §3.2 の
+    /// 契約どおり）。
+    fn evict_over_huge_class_limit(
+        &self,
+        core: &mut PoolCore<H>,
+        class_bytes: u64,
+    ) -> Vec<(u64, H)> {
+        let mut evicted = Vec::new();
+        if class_bytes < self.config.huge_min_bytes {
+            return evicted;
+        }
+        loop {
+            let count = core.free.iter().filter(|(c, _)| *c == class_bytes).count();
+            if count <= self.config.huge_entries_per_class {
+                break;
+            }
+            // 同一クラスのうち最も古い（`free` 内で最も先頭に近い）
+            // エントリから追い出す（グローバル LRU と同じ「挿入順が
+            // 最古から」の方針。今回挿入した分は末尾にあるため、他に
+            // 同一クラスのエントリが残っている限りそちらが先に選ばれる）。
+            let Some(idx) = core.free.iter().position(|(c, _)| *c == class_bytes) else {
+                break;
+            };
+            let (bytes, handle) = core.free.remove(idx);
+            core.cached_bytes = core.cached_bytes.saturating_sub(bytes);
+            evicted.push((bytes, handle));
+        }
+        evicted
     }
 
     /// [`Self::put`] が記帳直後に呼ぶ LRU 追い出しの本体。`core` は
@@ -506,6 +589,42 @@ mod tests {
     }
 
     #[test]
+    fn size_class_octave_1_75x_boundary_rounds_within_octave() {
+        // Cursor Bugbot 指摘の境界（`1.75p` ちょうど）: オクターブ内
+        // 4 段丸めの最終段（`base * 1.75`）自身に一致する場合はその
+        // クラスへ丸める（次オクターブへの繰り上げは発生しない）。
+        // オクターブ 10（`base = 1024`）で検証する。
+        let c = cfg();
+        let base = 1024u64;
+        assert_eq!(size_class_for(base + base * 3 / 4, &c).unwrap(), 1792);
+    }
+
+    #[test]
+    fn size_class_between_1_75x_and_2x_rounds_up_to_next_octave() {
+        // Cursor Bugbot High 指摘の回帰テスト: `(1.75p, 2p)` の範囲は
+        // 旧稿では `size_class_for` が「到達不能」と誤って前提していた
+        // 分岐に入り `AllocationSizeOverflow` 相当のエラーになっていた。
+        // 設計文書 §3.2 は `2p` までの切り上げを要求するため、次
+        // オクターブの base（`2p`）へ切り上げる。
+        let c = cfg();
+        assert_eq!(
+            size_class_for(1793, &c).unwrap(),
+            2048,
+            "1.75p + 1 は 2p へ切り上げ"
+        );
+    }
+
+    #[test]
+    fn size_class_exact_2x_is_next_octave_base() {
+        // `2p` ちょうどは（`octave` の再計算により）次オクターブの
+        // 1x（そのもの）として既に正しく扱われていたことの確認
+        // （回帰防止。上記 2 テストと合わせて `1.75p`／`1.75p+1`／`2p`
+        // の 3 点を境界として押さえる）。
+        let c = cfg();
+        assert_eq!(size_class_for(2048, &c).unwrap(), 2048);
+    }
+
+    #[test]
     fn size_class_overflow_rejected() {
         // `bytes == u64::MAX` は既定設定では巨大帯（完全一致・丸め計算
         // なし）に該当し `Ok` を返してしまうため、大帯（`checked_add`
@@ -537,9 +656,46 @@ mod tests {
 
         let handle = pool.take(256).expect("reuse hit");
         assert_eq!(handle, 42);
+        // `take` 自体は `reuse_count`／`capacity_waste_bytes` を更新
+        // しない契約（`record_reuse` 呼び出し前は据え置き）。
         let stats = pool.stats();
         assert_eq!(stats.cached_bytes, 0);
+        assert_eq!(stats.reuse_count, 0);
+
+        pool.record_reuse(200, 256);
+        let stats = pool.stats();
         assert_eq!(stats.reuse_count, 1);
+        assert_eq!(stats.capacity_waste_bytes, 56);
+    }
+
+    #[test]
+    fn record_reuse_waste_is_reversed_by_record_loan_end() {
+        // codex P2・Cursor Bugbot 指摘対応の回帰テスト: 再利用貸出
+        // （`take` 成功 → `record_reuse`）でも新規確保
+        // （`record_allocation`）と同様に `capacity_waste_bytes` が
+        // 加算され、対応する `record_loan_end` で過不足なく相殺される
+        // ことを検証する（設計文書 §3.1 契約表「`take` 成功で
+        // `+(class_bytes − bytes)`」）。
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+        let _ = pool.put(256, 1);
+        let handle = pool.take(256).expect("reuse hit");
+        pool.record_reuse(200, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 56);
+
+        pool.record_loan_end(200, 256);
+        assert_eq!(
+            pool.stats().capacity_waste_bytes,
+            0,
+            "再利用貸出で加算した waste は record_loan_end で過不足なく相殺されるべき"
+        );
+
+        // 相殺後、返却して次の貸出（新規確保経路）でも整合することを
+        // 確認する（複数貸出経路をまたいだ加算・減算の対称性）。
+        let _ = pool.put(256, handle);
+        pool.record_allocation(180, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 76);
+        pool.record_loan_end(180, 256);
+        assert_eq!(pool.stats().capacity_waste_bytes, 0);
     }
 
     #[test]
@@ -677,5 +833,99 @@ mod tests {
     fn size_class_pool_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<SizeClassPool<u32>>();
+    }
+
+    // --- 巨大帯クラス別保持上限（codex-review P1 是正の回帰テスト） ---
+
+    #[test]
+    fn put_evicts_oldest_same_huge_class_entry_over_per_class_limit() {
+        // 既定 `huge_entries_per_class == 1` のまま、`max_pool_bytes` を
+        // 十分大きくして総量上限＋グローバル LRU（`evict_over_capacity`）
+        // が介入しない条件で、巨大帯クラス別上限のみで追い出されることを
+        // 確認する。
+        let huge = 64 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge * 10,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        let evicted = pool.put(huge, 1);
+        assert!(evicted.is_empty(), "1 件目は上限（1 件／クラス）以内");
+
+        // 同一クラスへ 2 件目を挿入すると上限超過し、最古（1 件目）が
+        // 追い出される。
+        let evicted = pool.put(huge, 2);
+        assert_eq!(
+            evicted,
+            vec![(huge, 1)],
+            "同一巨大クラスの最古エントリが追い出されるはず"
+        );
+        assert_eq!(pool.stats().cached_bytes, huge, "残るのは 2 件目の分のみ");
+    }
+
+    #[test]
+    fn put_huge_class_limit_does_not_affect_other_classes() {
+        // 巨大帯クラス別上限は「同一 `class_bytes`」単位。異なる巨大
+        // クラス（完全一致丸めのため異なるバイト数 = 異なるクラス）は
+        // 互いに干渉しない。
+        let huge_a = 64 * 1024 * 1024u64;
+        let huge_b = 65 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge_a + huge_b + 1,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        assert!(pool.put(huge_a, 1).is_empty());
+        assert!(
+            pool.put(huge_b, 2).is_empty(),
+            "異なる巨大クラスは互いの上限に影響しない"
+        );
+        assert_eq!(pool.stats().cached_bytes, huge_a + huge_b);
+    }
+
+    #[test]
+    fn put_huge_class_limit_does_not_apply_below_huge_min_bytes() {
+        // 巨大帯クラス別上限は `class_bytes >= huge_min_bytes` の場合の
+        // み適用する。小帯・大帯は従来どおり総量上限＋グローバル LRU の
+        // みで制御される（設計文書 §3.2）。
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: u64::MAX,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        // 同一クラス（256 バイト。小帯）を複数保持しても追い出されない。
+        assert!(pool.put(256, 1).is_empty());
+        assert!(pool.put(256, 2).is_empty());
+        assert!(pool.put(256, 3).is_empty());
+        assert_eq!(pool.stats().cached_bytes, 256 * 3);
+    }
+
+    #[test]
+    fn put_huge_class_limit_respects_configured_entries_per_class() {
+        // `huge_entries_per_class` を 2 に緩めた場合、3 件目の挿入で
+        // 初めて追い出しが発生することを確認する（上限値そのものが
+        // 参照されていることの直接検証）。
+        let huge = 64 * 1024 * 1024u64;
+        let cfg = SizeClassPoolConfig {
+            max_pool_bytes: huge * 10,
+            huge_entries_per_class: 2,
+            ..SizeClassPoolConfig::default()
+        };
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg);
+
+        assert!(pool.put(huge, 1).is_empty());
+        assert!(
+            pool.put(huge, 2).is_empty(),
+            "2 件目までは上限（2 件／クラス）以内"
+        );
+        let evicted = pool.put(huge, 3);
+        assert_eq!(
+            evicted,
+            vec![(huge, 1)],
+            "3 件目で最古（1 件目）が追い出される"
+        );
     }
 }

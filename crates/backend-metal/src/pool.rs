@@ -241,6 +241,16 @@ impl MetalAllocator {
             .map_err(|_| MetalError::AllocationSizeOverflow { len })?;
 
         if let Some(raw) = self.pool.take(class_bytes) {
+            // 再利用貸出の統計記帳（codex P2・Cursor Bugbot 指摘対応。
+            // `pool_core.rs::SizeClassPool::take` の doc comment が定める
+            // 契約: `Some` を受け取った直後に必ず `record_reuse` を呼び、
+            // `reuse_count`／`capacity_waste_bytes`（貸出中ストック量）を
+            // まとめて更新する。新規確保経路の `record_allocation`
+            // 〈下記 `wrap_fresh`〉と対になる。これを怠ると `Drop` 時の
+            // `record_loan_end` の減算に対応する加算が存在せず、
+            // `capacity_waste_bytes` が過小表示・`debug_assert!` 失敗に
+            // なる）。
+            self.pool.record_reuse(logical_bytes, class_bytes);
             if zero_on_reuse {
                 // 再利用時のゼロ初期化契約（設計文書 §3.3「ゼロ初期化は
                 // ホスト書き込み」・§6「A02」）: 前利用者のバイト残留を
