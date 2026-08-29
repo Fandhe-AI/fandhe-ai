@@ -108,6 +108,11 @@ pub mod optim;
 // 経路が 2 つあるだけで型は 1 つ。`Tape::step_device_param_store` の
 // 引数型として本経路が既に使われているため、`optim` モジュール新設に
 // 伴いこちら側を除去・付け替えることはしない）。
+//
+// `DeviceParamStore`／`Tape::step_device_param_store`（デバイス常駐更新
+// 経路）は REQ-9 の 2026-08-29 追記（正本 spec
+// `docs/spec/04-requirements.md:213`。実装リポ #984／#986）で `tape()`系・
+// `compat`／`optim` と並ぶ確定入口となった（`docs/compat-api-scope.md` §0）。
 pub use fandhe_ai_autodiff::optim::{DeviceParamStore, SgdConfig};
 pub use fandhe_ai_autodiff::{AutodiffError, Gradients, Var, nn::LinearVars};
 pub use fandhe_ai_tensor_core::{BackendError, Device, Tensor};

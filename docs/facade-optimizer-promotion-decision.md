@@ -223,6 +223,14 @@ numpy/Keras 慣習のラッパーではなく、**facade 素の公開契約（`t
 > `LrScheduler` 等の optimizer 群）も facade が唯一のサポートされる公開 API 面に含まれる入口の
 > 1 つである」旨を追記する。根拠はイシュー #932（本文書）の判断記録。
 
+**改定完了（2026-08-29）**: 上記改定提案は実装リポ イシュー #984 で正本 spec リポジトリ側へ
+提案され、spec リポ `Fandhe-AI/rust-ai-library-spec` PR #59 として実施・ユーザーによりマージ済み
+（merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`・2026-08-29）。改定内容は `optim` に
+加えデバイス常駐更新経路（`fandhe_ai::DeviceParamStore`／`Tape::step_device_param_store`。#954）
+も同時に確定入口へ追加している（`docs/spec/04-requirements.md:211-213`。改定履歴は同 390 行目）。
+実装リポ側の `docs/spec` submodule ポインタ更新はイシュー #985・PR #988 で完了し、これを受けて
+`docs/compat-api-scope.md` §0 の暫定注記削除・確定入口統合をイシュー #986 で実施した。
+
 ## §8 後続イシューの提案（実施はユーザー承認後）
 
 以下を実装イシューとして切り出すことを提案する（本文書では起票しない。ユーザー承認後に
@@ -259,8 +267,10 @@ numpy/Keras 慣習のラッパーではなく、**facade 素の公開契約（`t
 | `crates/autodiff/src/nn/optim/clip.rs` | `clip_grad_norm`/`global_grad_norm`/`ClipGradResult` の実装・戻り値型 |
 | `crates/autodiff/src/nn/optim/lr_scheduler.rs` | `LrScheduler` trait・組み込み実装 `ConstantLr`/`StepLr` |
 | `crates/facade/src/compat/sequential.rs:14-15,160-260,379` | 位置対応契約・内部クレート `fandhe_ai_autodiff::optim`/`nn::optim` への doc 案内（サポート境界との矛盾箇所） |
-| `docs/compat-api-scope.md` §0 | サポート境界（facade が唯一の公開面・入口 2 つの列挙・§5 と同じ手続きの適用） |
+| `docs/compat-api-scope.md` §0 | サポート境界（facade が唯一の公開面・確定入口 4 つ〈`tape()`系・`compat`・`optim`・デバイス常駐更新経路〉の列挙・§5 と同じ手続きの適用。2026-08-29 追記でイシュー #986 として確定入口へ統合） |
 | `docs/compat-api-scope.md` §1・§5・§6 | compat 層対象範囲（3 種限定）・範囲拡張の手続き・出典一覧の体裁踏襲元 |
+| spec リポ `Fandhe-AI/rust-ai-library-spec` PR #59 | REQ-9 の 2026-08-29 追記（`optim`・デバイス常駐更新経路の確定入口化。マージ済み。merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`） |
+| `docs/spec/04-requirements.md:211-213,390` | REQ-9 の 2026-08-29 追記本文・改定履歴表エントリ |
 | `docs/public-api-design.md:6,13` | compat 層と自作コア素の公開 API の境界記述 |
 | `.claude/rules/coding-rust.md`「基盤方針」 | 「互換 API 層は自作コアの上の薄いラッパーに徹する（REQ-9）」 |
 | `.claude/rules/conventional-commits.md` | 破壊的変更時の `!`・`BREAKING CHANGE:` 記載規約 |

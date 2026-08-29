@@ -12,12 +12,13 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
 詳細範囲は REQ-9 系後続タスクへ委譲している。本文書はその受け皿である。
 
 ## 0. サポート境界（TASK-9.4・REQ-9 の 2026-08-08 追記・イシュー #411・
-イシュー #962（`fandhe_ai::optim` 追記））
+REQ-9 の 2026-08-29 追記・イシュー #986）
 
 `facade` クレートが**唯一のサポートされる公開 API 面**である。`tensor-core`／
 `autodiff`／`backend-cpu`／`backend-cuda`／`backend-metal` は内部クレートで
 あり、これらを `facade` を経由せず直接利用することはサポート対象外とする
 （出典: `docs/spec/04-requirements.md:209-210` の 2026-08-08 追記・
+`docs/spec/04-requirements.md:211-213` の 2026-08-29 追記・
 `docs/spec/05-tasks.md:322` TASK-9.4）。
 
 - **本文書が定める対象範囲（1〜2 節）は `fandhe_ai::compat` として提供される
@@ -31,67 +32,53 @@ REQ-9「Python 慣習寄りの互換 API 層」（`docs/spec/04-requirements.md:
   REQ-12「利用者向け融合制御 API」・REQ-9「互換 API 層」のいずれにも
   該当しない。技術的に `pub` であることと、利用者向けにサポートされる
   公開面であることは区別する
-- `fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`（composition root。
-  `crates/facade/src/lib.rs`）、`fandhe_ai::compat::{array, Sequential}`
-  （本文書が定める compat 公開面。1〜2 節）が、**正本 spec 側の記述
-  （REQ-9 の 2026-08-08 追記）と現時点で整合する確定済みの入口**である。
-  これに加え、`fandhe_ai::DeviceParamStore`／`Tape::step_device_param_store`
-  （デバイス常駐更新。#954。クレート root からの再エクスポート。
-  `crates/facade/src/lib.rs`）と、**`fandhe_ai::optim`**（`crates/facade/src/optim.rs`。
-  イシュー #961・親 #960・PR #972）: `Sgd`／`SgdConfig`／`AdamW`／
-  `AdamWConfig`／`clip_grad_norm`／`global_grad_norm`／`ClipGradResult`／
-  `LrScheduler`／`ConstantLr`／`StepLr` の素の再エクスポート
-  （`docs/facade-optimizer-promotion-decision.md` §4 案 A）はいずれも API
-  としてはクレート root から既に到達可能だが、**正本 spec 側の改定が
-  未了のため、本節では確定入口ではなく移行予定の入口として扱う**（本節
-  における位置づけは codex-review PR #974 P1 是正: デバイス常駐更新経路
-  も `fandhe_ai::optim` と同様、5 節が定めるサポート境界変更の手続き
-  〈正本 spec 改定〉を経ていないため確定入口へ含めない）。`SgdConfig`
-  はクレート root からも再エクスポートされる同一型〈`lib.rs` コメント〉
-  であり、`DeviceParamStore`／`Tape::step_device_param_store` はデバイス
-  常駐更新という別経路のため `optim` モジュールには含めず root 公開のまま
-  である（`optim.rs` モジュール doc「デバイス常駐更新との違い」と整合）。
-  以上の **2 つ（`tape()`系・`compat`）が確定済みの入口であり、
-  `fandhe_ai::DeviceParamStore`／`Tape::step_device_param_store` と
-  `fandhe_ai::optim` はいずれも次項のとおり spec 改定完了までは
-  移行予定の入口として区別する**
-- **`fandhe_ai::DeviceParamStore`／`Tape::step_device_param_store` の
-  位置づけ（デバイス常駐更新。#954・移行予定・確定入口ではない）**:
-  API としてはクレート root から既に再エクスポート済みだが、5 節が定める
-  サポート境界の変更手続き（正本 spec 側の REQ-9／REQ-12 受け入れ基準
-  改定）を経ていないため、本節では確定入口として案内せず、`fandhe_ai::optim`
-  と同様の将来提案として扱う。正本 spec 側の改定・submodule ポインタ
-  更新が完了した時点で確定入口の列挙（前項）へ統合する
-- **`fandhe_ai::optim` の位置づけ（イシュー #962・移行予定・確定入口では
-  ない）**: optimizer は numpy／Keras 慣習のラッパーではないため **1 節
-  （compat 層の対象範囲）は変更しない**。facade 素の公開契約（`tape()`／
-  再エクスポート値型と同じ層）への追加を**提案**するものである
-  （`docs/facade-optimizer-promotion-decision.md` §6 の結論）。
-  **5 節手続きの充足**: 経路 2（本リポジトリのユーザー承認を得たうえでの
-  Issue 起票・本文書の更新）を採用した。根拠は同文書 §8 の後続提案に対する
-  ユーザー承認を受けて起票された親 #960 ツリー（#961〜#963。2026-08-28）で
-  あり、本更新は同ツリーの #962 として実施した。**正本 spec 側の改定要否**:
-  同文書 §7 のとおり「要」（REQ-9 の 2026-08-08 追記〈サポート境界の
-  明文化〉に `fandhe_ai::optim` を入口の 1 つとして追記する改定）。
-  `docs/spec/` は本リポで編集しないため spec リポ側の実改定は本イシュー
-  対象外とし、別イシュー（spec リポ側）での対応をユーザーへ提案する。
-  **正本 spec 側の改定が完了し submodule ポインタが更新されるまでの間、
-  `fandhe_ai::optim` を本文書上「利用者が使うことを想定した入口」として
-  案内することはしない**（codex-review PR #974 P1 是正: 「移行予定」の
-  書き分けをしていても利用者向け入口としての案内自体が、5 節が定める
-  サポート境界変更の手続き〈正本 spec 改定〉の先行実施に相当するため）。
-  `fandhe_ai::optim`（`crates/facade/src/optim.rs`）は API としては既に
-  存在し `crates/facade/tests/api_surface.rs` の検査対象でもあるが、
-  本節では**正本 spec 改定完了までの間の将来提案としてのみ記載し**、
-  1 節冒頭の確定済み入口（`tape()`系・`compat`）と同列の利用案内・
-  確定済み契約としては扱わない。正本 spec 側の改定
-  （`docs/facade-optimizer-promotion-decision.md` §7 の改定提案文案）が
-  完了し submodule ポインタが更新された後に、この節を確定入口の列挙
-  （前項）へ統合し、本注記を削除する
+- **確定入口は次の 4 つ**である（正本 spec 側の記述〈REQ-9 の 2026-08-08
+  追記・2026-08-29 追記〉と整合済み）:
+  1. `fandhe_ai::tape()`／`fandhe_ai::tape_for(Device)`（composition root。
+     `crates/facade/src/lib.rs`）
+  2. `fandhe_ai::compat::{array, Sequential}`（本文書が定める compat 公開面。
+     1〜2 節。1 節の対象範囲は本追記で変更しない）
+  3. **`fandhe_ai::optim`**（`crates/facade/src/optim.rs`。イシュー #961・
+     親 #960・PR #972）: `Sgd`／`SgdConfig`／`AdamW`／`AdamWConfig`／
+     `clip_grad_norm`／`global_grad_norm`／`ClipGradResult`／`LrScheduler`／
+     `ConstantLr`／`StepLr` の素の再エクスポート（`docs/facade-optimizer-
+     promotion-decision.md` §4 案 A）。値型・純関数のみで構成され
+     `BackendOps` 系の型・注入経路を含まないため REQ-12（利用者向け融合
+     制御 API を設けない・任意 `BackendOps` 実装を注入できる公開 API を
+     設けない）と矛盾しない（出典: `docs/spec/04-requirements.md:212`）
+  4. **デバイス常駐更新経路 `fandhe_ai::DeviceParamStore`／
+     `Tape::step_device_param_store`**（`Tape::sync_device_param_store_to_host`
+     を含む。#954。クレート root からの再エクスポート。
+     `crates/facade/src/lib.rs`）: 学習ループのパラメータ（および
+     momentum 等の optimizer 状態）をデバイス上に常駐させ、SGD 更新を
+     デバイス上で完結させることでステップごとのホスト⇔デバイス往復を
+     削減する経路。`facade::Tape` newtype からの薄い委譲として提供し、
+     `BackendOps`／`MemoryOps` は利用者向け公開面へ露出しない。数値一致は
+     REQ-2 のバックエンド間統一複合判定（相対誤差 1e-3 未満 または
+     絶対誤差 1e-5 未満）・FMA 契約に従う（出典: `docs/spec/
+     04-requirements.md:213`・設計 `docs/device-resident-update-design.md`
+     〈#951〉・#955〈parity テスト・ベンチ非後退確認〉）
+
+  `SgdConfig` はクレート root（4 の経路）と `crate::optim::SgdConfig`
+  （3 の経路）の 2 経路から再エクスポートされる同一型〈`lib.rs`
+  コメント〉であり、`DeviceParamStore`／`Tape::step_device_param_store` は
+  デバイス常駐更新という別経路のため `optim` モジュールには含めず root
+  公開のままである（`optim.rs` モジュール doc「デバイス常駐更新との
+  違い」と整合）。
+
+  **確定に至る経緯（履歴）**: 3・4 は当初、正本 spec 側の改定が未了のため
+  「移行予定の入口」として区別していた（イシュー #962。codex-review
+  PR #974 P1 是正）。5 節手続きのうち経路 2（本リポジトリのユーザー承認を
+  得たうえでの Issue 起票・本文書の更新。親 #960 ツリー・#961〜#963）で
+  正本 spec 改定の要否「要」を確定させたうえで、経路 1（正本 spec
+  リポジトリ側での REQ-9 受け入れ基準の改定）を実施した（実装リポ
+  イシュー #984・spec リポ `Fandhe-AI/rust-ai-library-spec` PR #59・
+  2026-08-29 マージ）。submodule ポインタ更新（実装リポ #985・PR #988）
+  完了を受け、本イシュー #986 で確定入口の列挙へ統合した。
 - サポート境界の変更（内部クレートの直接利用をサポート対象に含める等）は
   正本 spec リポジトリ側での REQ-9／REQ-12 受け入れ基準の改定を要する
-  （5 節「範囲拡張の手続き」と同じ手続き。本節の `fandhe_ai::optim` 追記は
-  同手続きの適用例である）
+  （5 節「範囲拡張の手続き」と同じ手続き。本節の `optim`・デバイス常駐
+  更新経路の追加は同手続き〈経路 1〉を経て確定した適用例である）
 - **内部クレートの `pub` enum への `#[non_exhaustive]` 付与は本節の適用例**
   （codex-review PR #648 P1 是正）: `fandhe_ai_tensor_core::fusion::FusedOpKind`
   （`crates/tensor-core/src/fusion/plan.rs`）は `facade` から再エクスポート
@@ -129,19 +116,15 @@ TASK-9.1／TASK-9.2（`docs/spec/05-tasks.md:299-311`）に基づき、以下に
   `Sequential::bind(&tape)` が返す `SequentialVars`（`crates/facade/src/
   compat/sequential.rs`。TASK-9.4・#411 で `fandhe_ai_autodiff::compat` から移設。
   4.2 節参照）経由で学習可能パラメータ（`Linear` 層の `weight`/`bias`）・
-  勾配へアクセスできる。`Sequential::trainable_parameters`/
-  `Sequential::apply_parameters` を optimizer と組み合わせる接続入口は、
-  本節時点では確定していない。技術的には `fandhe_ai_autodiff::optim::Sgd`・
-  `fandhe_ai_autodiff::nn::optim::AdamW` を直接呼び出すことは可能だが、
-  これらは 0 節の定義どおり `pub` であってもサポート境界上は
-  `facade` を経由しない内部 API であり、サポートされる確定入口として
-  案内しない（内部 API 直接利用を確定入口として扱わない。codex-review
-  PR #974 P1 是正）。**`fandhe_ai::optim`**（0 節「`fandhe_ai::optim` の
-  位置づけ」参照）も、正本 spec 改定・submodule ポインタ更新が完了する
-  までは移行予定の将来提案にとどまり確定入口ではないため、本節でも
-  `Sequential` との具体的な接続手順は、内部 API・将来提案のいずれについても
-  利用案内としては示さない。`fit()`/`compile()` 等の高水準学習ループ API は
-  2 節のとおり引き続き対象外
+  勾配へアクセスできる。`fandhe_ai_autodiff::optim::Sgd`・
+  `fandhe_ai_autodiff::nn::optim::AdamW` を直接呼び出すことは 0 節の
+  定義どおり `pub` であってもサポート境界上は `facade` を経由しない
+  内部 API であり、確定入口として案内しない（内部 API 直接利用を確定
+  入口として扱わない。codex-review PR #974 P1 是正）。**`fandhe_ai::optim`**
+  （0 節参照）は 0 節の 2026-08-29 追記で確定入口となったため、
+  `Sequential` との接続手順の正は `crates/facade/src/compat/sequential.rs`
+  のモジュール doc（doctest 付き。#963）とする。`fit()`/`compile()` 等の
+  高水準学習ループ API は 2 節のとおり引き続き対象外
 
 ## 2. 対象外（out of scope）
 
@@ -318,7 +301,7 @@ P1」）を受けた是正である。
 
 | 出典 | 内容 |
 |------|------|
-| `docs/spec/04-requirements.md:200-209` | REQ-9 概要・受け入れ基準・関連 PoC |
+| `docs/spec/04-requirements.md:200-215` | REQ-9 概要・受け入れ基準・関連 PoC |
 | `docs/spec/05-tasks.md:299-311` | TASK-9.1（基本 NN モジュール）・TASK-9.2（compat 再実装・対象範囲明文化） |
 | `docs/spec/03-poc/poc-v2-6-interop/code/rust/src/mlp.rs` | `Mlp::from_safetensors`（自作コア上の薄い互換層の v2 実例） |
 | `docs/public-api-design.md:6,13,556` | compat 層と自作コア素の公開 API の境界記述 |
@@ -337,13 +320,23 @@ P1」）を受けた是正である。
 | `crates/facade/src/compat/` | TASK-9.4（#411）移設先の `array`／`Sequential`（現行の compat 公開面） |
 | `crates/autodiff/src/nn/module.rs` | TASK-9.2a（#95）実装済みの共通 `Module` trait（現行も `autodiff` 側に残置） |
 | `docs/spec/04-requirements.md:209-210` | REQ-9 の 2026-08-08 追記（サポート境界の明文化） |
+| `docs/spec/04-requirements.md:211-213` | REQ-9 の 2026-08-29 追記（`optim`・デバイス常駐更新経路を確定入口へ追加） |
+| `docs/spec/04-requirements.md:390` | REQ-9 の 2026-08-29 追記に対応する改定履歴表エントリ |
 | `docs/spec/05-tasks.md:322` | TASK-9.4 |
 | `crates/facade/src/optim.rs` | `fandhe_ai::optim` 公開面（#961・PR #972。4 行の `pub use`） |
 | `crates/facade/tests/api_surface.rs` | optim 固有検査（純再エクスポート・昇格元公開面との 1 対 1） |
-| `docs/facade-optimizer-promotion-decision.md` §4・§6・§7・§8-3 | 昇格の設計判断・整合確認・spec 改定要否・本イシューの提案元 |
+| `docs/facade-optimizer-promotion-decision.md` §4・§6・§7・§8-3・§9 | 昇格の設計判断・整合確認・spec 改定要否・提案元・改定完了記録 |
+| `docs/device-resident-update-design.md` | デバイス常駐更新経路の設計（更新経路・所有権・数値一致契約。#951） |
 | イシュー #932（設計判断） | クローズ済み |
+| イシュー #954（デバイス常駐更新の実装） | クローズ済み |
+| イシュー #955（parity テスト・ベンチ非後退確認） | クローズ済み |
 | イシュー #960（親。§8 提案のユーザー承認を受けた起票） | 参照 |
 | イシュー #961（`fandhe_ai::optim` 実装） | クローズ済み |
-| イシュー #962（本文書 §0 入口列挙の更新） | 本イシュー |
-| イシュー #963（`Sequential` doc 差し替え） | 兄弟イシュー |
+| イシュー #962（本文書 §0 入口列挙の暫定更新〈移行予定扱い〉） | クローズ済み |
+| イシュー #963（`Sequential` doc 差し替え） | クローズ済み |
 | PR #972 | イシュー #961 の実装 PR |
+| イシュー #984（spec 改定提案・正本 spec PR #59 の起票元） | クローズ済み |
+| イシュー #985（`docs/spec` submodule ポインタ更新） | クローズ済み |
+| イシュー #986（本文書 §0 の暫定注記削除・確定入口統合） | 本イシュー |
+| spec リポ `Fandhe-AI/rust-ai-library-spec` PR #59 | REQ-9 の 2026-08-29 追記（マージ済み。merge commit `64364b4bf7e46f91f07d779b2d1c4d14adbd4e48`） |
+| PR #988 | `docs/spec` submodule ポインタ更新（イシュー #985 の実装 PR） |
