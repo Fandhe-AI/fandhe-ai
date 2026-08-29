@@ -60,138 +60,199 @@
 
 ## §3 設計（design decisions）
 
-### 3.1 層構造と `DeviceAllocator` trait（API 案）
+### 3.1 層構造（`SizeClassPool<H>`・`PoolConfig`・`PoolStats`。API 案）
 
-- 配置: `crates/tensor-core/src/allocator.rs`（新規モジュール。`pub mod
-  allocator;` として `lib.rs` から re-export）。`MemoryOps`（shape 単位・
-  `DeviceBuffer<f32>` を扱う既存の上位抽象）の**下位**に位置する、バイト
-  単位のバックエンド非依存プール抽象として新設する。
-- **結線は公開 `BackendOps` trait に一切追加しない**（codex-review PR
-  #1056 P1 是正。旧稿は `BackendOps::allocator(&self) -> Option<&dyn
-  DeviceAllocator> { None }` という `memory_ops()` 同型の非破壊拡張
-  デフォルトメソッドを提案していたが、`BackendOps` は crates.io 公開済み
-  trait（`fandhe-ai-tensor-core`）であり、これに `&dyn DeviceAllocator`
-  を返すメソッドを追加すると `docs/compat-api-scope.md` §0「`facade` が
-  唯一のサポート対象公開 API 面」に反して、内部クレートの低水準バッファ
-  表現（`Box<dyn BufferHandle + Send>`。下記 trait 案参照）へ到達する
-  新たな公開経路を作ってしまう。詳細な理由・代替経路は下記
-  「`DeviceAllocator` の到達可能性」を参照）。
-- trait 案（object-safe・`Send + Sync` を要求する。理由は §3.5）。
-  **未初期化確保はこの公開 trait に含めない**（下記「`DeviceAllocator`
-  の到達可能性」を参照）:
+**レビュー履歴（設計の 3 段階）**: 本節は codex-review PR #1056 で 2 度の
+P1 指摘を経て以下の設計へ確定した。(1) 当初案は `BackendOps::allocator()`
+が `&dyn DeviceAllocator`（`Box<dyn BufferHandle + Send>` を返す trait）を
+公開する設計だった → `BackendOps` という公開ディスパッチ trait から内部
+低水準バッファ表現へ到達できる、との P1 指摘（1 巡目）。(2) `BackendOps::
+allocator()` を削除し `DeviceAllocator` の実装インスタンスをいずれの公開
+関数からも返さない設計へ変更した → しかし `pub trait DeviceAllocator` と
+`Box<dyn BufferHandle + Send>` という型定義自体が `fandhe-ai-tensor-core`
+の公開面（`pub mod allocator`）に残り、外部コードがこのクレートへ直接
+依存すれば型を参照・実装できてしまう、との P1 再指摘（2 巡目。「実装
+インスタンスを返さない」だけでは型の到達可能性を防げない）。(3) 本節が
+確定する設計は、**低水準 trait（`DeviceAllocator`）自体を廃止**し、
+`tensor-core` にはハンドルの内部表現を一切含まない POD 型
+（`PoolConfig`／`PoolStats`）とハンドル型非依存の generic なプール
+実装（`SizeClassPool<H>`）のみを置く。加えて REQ-14（明示解放 API の
+提供義務）を満たすため、公開 `BackendOps` trait に unit／POD のみを返す
+2 メソッドを追加し、`facade` から薄く再公開する（後述）。
+
+- **`tensor-core` に置く公開面（`crates/tensor-core/src/pool_core.rs`。
+  新規モジュール。既存 `pool.rs`〈`PooledMemory`〉とは別モジュール）**:
+  - `pub struct PoolConfig { .. }`（サイズクラス境界・総量上限
+    `max_pool_bytes`・クラス別アイドル上限等の設定値。§3.2 の帯・丸め
+    粒度に対応するフィールドを持つ）。POD（`Copy`・`Debug`・`PartialEq`）。
+  - `pub struct PoolStats { .. }`（確保回数・フリーリストヒット回数・
+    解放回数・現在キャッシュ済みバイト数〈`cached_bytes`〉・
+    `capacity_waste_bytes`〈§3.4 の内部断片化可視化〉等の数値のみ。
+    ハンドル・ポインタ・trait object を一切含まない）。POD。
+  - `pub struct SizeClassPool<H> { .. }`（`H` を型パラメータに取る
+    ハンドル型非依存のフリーリスト・サイズクラス丸め・統計更新ロジック。
+    **シグネチャに `BufferHandle`／`DeviceBuffer` を一切含めない**。`H`
+    に trait 境界を課さない〈`H: Send` のみ。理由は §3.5〉ため、`H` が
+    何であるかを `tensor-core` 側は一切知らない。API 案:
+    `fn new(config: PoolConfig) -> Self`／`fn take(&self, bytes: u64)
+    -> Option<H>`（フリーリストに適合クラスの空きがあれば取り出す。
+    無ければ `None`。実際の確保 FFI 呼び出しは行わない）／
+    `fn register(&self, class_bytes: u64, handle: H)`（新規確保した
+    ハンドルをフリーリストへ記帳する。ハンドル生成・ゼロ初期化自体は
+    呼び出し元の責務）／`fn drain(&self) -> Vec<H>`（アイドル保持中の
+    全ハンドルを取り出して呼び出し元へ返す。**実際の解放 FFI 呼び出し・
+    driver トリム・stream 同期は呼び出し元〈各バックエンドの
+    `pub(crate)` アロケータ〉の責務であり、`tensor-core` はそれらを
+    一切知らない**）／`fn stats(&self) -> PoolStats`／`fn config(&self)
+    -> PoolConfig`）。
+  - `SizeClassPool<H>: Send + Sync where H: Send`（`Mutex<PoolCore<H>>`
+    で保護する内部実装。§3.5 参照）。
+- **各バックエンドクレート内に閉じる `pub(crate)` 面（`backend-cuda`・
+  `backend-metal` それぞれ独立に実装。`tensor-core` からは不可視）**:
+  - ハンドル型（例: `backend-cuda::pool::PooledCudaHandle`〈内部に
+    `CudaSlice` を保持〉・`backend-metal::pool::PooledMetalHandle`
+    〈内部に `Retained<ProtocolObject<dyn MTLBuffer>>` を保持〉）。
+    `SizeClassPool<H>` の `H` を埋める具体型であり、`tensor-core` の
+    どの公開シグネチャにも現れない。
+  - 具体アロケータ型（例: `backend-cuda::pool::CudaAllocator`）が
+    `SizeClassPool<H>` を保持し、`alloc_zeroed`／`alloc_uninit`（実際の
+    確保 FFI・ゼロ初期化）・解放（driver トリム・stream 同期を含む
+    実際の FFI）を実装する。いずれも `pub(crate)` 固有メソッドであり、
+    `tensor-core` のどの trait にも属さない（sealed ではなく、そもそも
+    `tensor-core` 側に対応する trait 自体が存在しない）。
+  - ホットパス（§2 事実 3・4。`backend-cuda/src/{gemm,elementwise,
+    softmax}.rs`・`backend-metal/src/{gemm,elementwise}.rs`）は同一
+    クレート内で `CudaAllocator`／`MetalAllocator` インスタンスへ直接
+    アクセスし `alloc_zeroed`／`alloc_uninit` を呼ぶ（`BackendOps` を
+    経由しない。呼び出し箇所はいずれも各バックエンド自身の内部実装で
+    あり、他クレートからの汎用呼び出しを必要としないため）。
+  - プールは device 単位のプロセスワイド singleton とする
+    （`static_cuda_memory`／同等の `Box::leak` 所有モデル。§2 事実 2 の
+    計測系列単一化と整合させる）。CPU バックエンドは本イシューの
+    対象外（別イシュー #1026 が担当）。
+
+- **REQ-14 の到達経路（公開 `BackendOps` への追加。codex-review PR
+  #1056 P1「利用者から到達できない」是正）**: 上記のとおり低水準
+  アロケータ・ハンドル型は一切公開しないが、REQ-14 は「プール等の
+  キャッシュ機構を導入する場合、係数上限を維持できなければプール解放
+  API を提供する」ことを求めており、内部 OOM フォールバックから呼べる
+  だけでは満たさない（`facade` を含む利用者側から到達できる必要がある）。
+  `memory_ops()`（既存）と同型の非破壊拡張パターンで、`BackendOps` に
+  戻り値が unit／POD のみの 2 メソッドを追加する:
 
 ```rust
-pub trait DeviceAllocator: Send + Sync {
-    /// ゼロ初期化保証付きの確保。再利用バッファも必ずゼロ埋めしてから返す
-    /// （A02 対策。§6 セキュリティ）。
-    fn alloc_zeroed(&self, bytes: u64) -> Result<Box<dyn BufferHandle + Send>, BackendError>;
+pub trait BackendOps {
+    // ...（既存メソッド）
 
-    /// アイドル保持中のバッファを全て解放し、解放できたバイト数を返す
-    /// （REQ-14 の明示解放 API。既存 `release_all_pooled` の後継）。
-    /// CUDA で `has_async_alloc()` が真の環境では自作プール層の解放に
-    /// 加え driver 側 memory pool のトリム（`cuMemPoolTrimTo(0)` 相当。
-    /// §3.6 (2)）を伴うため、この driver FFI 呼び出しが失敗し得る
-    /// （エラーコード返却）ことを型で表現する。黙殺・panic は禁止
-    /// （本番経路の panic 禁止・fail-closed の維持。`.claude/rules/
-    /// coding-rust.md`）。自作プール層のフリーリスト解放（インメモリ
-    /// 操作）自体は失敗しないため、`Err` はトリム前の対象 stream 同期
-    /// 失敗（§3.6 (2)。enqueue 済み `cuMemFreeAsync` の完了確認）または
-    /// driver トリム失敗のいずれかに限定される（codex-review PR #1056
-    /// P2 是正。旧稿は driver トリム由来のみに限定すると誤って記載して
-    /// おり §3.6 (2) の契約と矛盾していた）。呼び出し元（LRU／OOM
-    /// フォールバック。§3.4）はこの `Err` を上記いずれの原因であっても
-    /// 区別なく上位の `BackendError::DeviceAllocationFailed` 等へ
-    /// そのまま伝播し、driver 予約分の残存を「解放成功」と誤認しない。
-    fn release_cached(&self) -> Result<u64, BackendError>;
+    /// REQ-14 の明示解放 API。このバックエンドのデバイスメモリプールが
+    /// アイドル保持しているバッファを全て解放する。CUDA で
+    /// `has_async_alloc()` が真の環境では、自作プール層の解放に加え
+    /// driver 側 memory pool のトリム（`cuMemPoolTrimTo(0)` 相当）・
+    /// トリム前の対象 stream 同期を内部で行う（§3.6 (2)）。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `Ok(())`（プールを持たないバックエンドは解放対象なし。
+    /// fail-open ではなく「対象が存在しないため自明に成功」という
+    /// 意味）。CPU バックエンドは本イシューの対象外（#1026）のためこの
+    /// デフォルトのまま。CUDA／Metal は §3.6 (2) の契約で実カーネルへ
+    /// オーバーライドする。
+    ///
+    /// # エラー
+    /// `Err` は「トリム前の対象 stream 同期失敗」または「driver トリム
+    /// 失敗」のいずれかに限定される（§3.6 (2)）。黙殺・panic は禁止
+    /// （fail-closed。`.claude/rules/coding-rust.md`）。失敗時もプール
+    /// 内部状態は一貫させる契約とする（解放できた分のみフリーリストから
+    /// 外し、未解放分はキャッシュに残す。二重解放しない。§3.6 (2)）。
+    fn release_cached_device_memory(&self) -> Result<(), BackendError> {
+        Ok(())
+    }
 
-    /// 統計（診断・受け入れ条件の検証用）。
-    fn stats(&self) -> AllocatorStats;
-
-    /// 現在有効な設定のスナップショット。
-    fn config(&self) -> PoolConfig;
+    /// デバイスメモリプールの統計スナップショット（診断用）。
+    /// `PoolStats`（POD。内部ハンドル表現を一切含まない）のみを返す。
+    ///
+    /// # デフォルト実装（非破壊拡張）
+    /// 既定は `None`（プールを持たないバックエンド）。
+    fn device_memory_pool_stats(&self) -> Option<PoolStats> {
+        None
+    }
 }
 ```
 
-- **`DeviceAllocator` の到達可能性（レビュー指摘反映。§7 A02・
-  codex-review PR #1056 P1）**: 本設計は 2 段階のレビュー指摘を経て、
-  `DeviceAllocator`（`alloc_zeroed`／`alloc_uninit`／`release_cached`／
-  `stats`／`config`）全体を「技術的には `pub` trait だが公開ディスパッチ
-  trait（`BackendOps`）からは到達不能」という位置づけに確定した。
-  - **A02 指摘（`alloc_uninit` 個別。当初の指摘）**: 当初案は
-    `alloc_uninit`（ゼロ初期化を伴わない確保）を `DeviceAllocator` の
-    メソッドとして含めていたが、`DeviceAllocator` は `BackendOps::
-    allocator()`（当時の公開 API 案）から `&dyn DeviceAllocator` として
-    得られる object-safe な公開 trait であったため、trait に載せた時点で
-    `tensor-core`／`backend-*`（crates.io 公開クレート。CLAUDE.md の
-    「facade が唯一のサポートされる公開 API 面」という**運用上の**制約は
-    Rust の可視性検査では強制されない）を直接依存に追加した任意の外部
-    コードが `alloc_uninit` を呼び出せてしまい、前利用者のデータが残留
-    した未初期化バッファを読み出せる、という指摘だった。
-  - **P1 指摘（`DeviceAllocator` 全体・`BackendOps::allocator()` 自体）**:
-    後続レビューは、`alloc_zeroed`（ゼロ初期化済みで A02 の意味では安全）
-    を含む `DeviceAllocator` 全体が `BackendOps::allocator()` という公開
-    ディスパッチ trait のメソッド経由で到達可能である点自体が、
-    `docs/compat-api-scope.md` §0 の「`facade` が唯一のサポート対象
-    公開 API 面」に反する内部低水準バッファ表現（`Box<dyn BufferHandle +
-    Send>`）の漏出だと指摘した。§3.1 冒頭「ホットパスへの接続点」が
-    列挙する呼び出し箇所（`backend-cuda/src/{gemm,elementwise,
-    softmax}.rs`・`backend-metal/src/{gemm,elementwise}.rs`）はいずれも
-    各バックエンドクレート**自身の内部実装**であり、`memory_ops()`
-    （`DeviceParamStore` からの汎用クロスクレート呼び出しが必要）とは
-    異なり `BackendOps` 経由の動的ディスパッチを必要としない。したがって
-    `BackendOps::allocator()` は「内部用途に限定」という文書上の注記
-    だけでは型システム上の防御にならない到達経路を、実利なく新設する
-    ことになる。
-  - **統一した設計**: 上記いずれの指摘も同一の解決策（可視性修飾子で
-    直接塞ぐ。sealed trait パターンが防ぐ「外部からの trait 実装」では
-    なく「外部からの呼び出し」を防ぐ必要があるため）で解消する。
-    `BackendOps::allocator()` は公開 trait に追加しない（上記「結線」）。
-    `alloc_zeroed`／`release_cached`／`stats`／`config` は
-    `DeviceAllocator`（`pub` trait。`backend-cuda`／`backend-metal` という
-    別クレートが実装するため `tensor-core` 内で `pub(crate)` には
-    閉じられない）に残すが、その実装インスタンス（各バックエンドの具体
-    アロケータ型。例: `backend-cuda` の `CudaAllocator`・`backend-metal`
-    の `MetalAllocator`）自体を `pub(crate)` の固有フィールド／アクセサ
-    としてのみ保持し、`BackendOps` を含むいかなる公開関数の戻り値
-    としても返さない。`alloc_uninit` はさらに一段狭く、
-    `DeviceAllocator` trait 自体にも含めず、具体アロケータ型の
-    `pub(crate) fn alloc_uninit(&self, bytes: u64) -> Result<Box<dyn
-    BufferHandle + Send>, BackendError>` として実装する（A02 対策として
-    `alloc_zeroed` よりさらに一段絞る必要があるため）。
-  - ホットパス（§3.1 冒頭の接続点。`backend-cuda/src/gemm.rs`・
-    `elementwise.rs`・`softmax.rs`・`backend-metal/src/gemm.rs`・
-    `elementwise.rs`）は、いずれも各クレート内部で具体アロケータ型への
-    参照を直接保持し `alloc_zeroed`／`alloc_uninit` を呼ぶ（同一クレート
-    内なので `pub(crate)` メソッド・フィールドへ到達できる。`BackendOps`
-    を経由しない）。カーネルが確保領域の全要素を書き切る出力専用の
-    用途であることをカーネル実装側で保証する責務は変わらない。
-  - `AllocatorStats`／`PoolConfig`（診断用）は `alloc_uninit` 呼び出しの
-    有無に依存しないため、`DeviceAllocator` trait 側に残す（ただし上記の
-    とおり `BackendOps` からは到達不能）。
+  - **2 段構成の命名規約（narrative 中の「`release_cached()`」の指示先を
+    一意にする）**: 各バックエンドの `pub(crate)` 具体アロケータ型は
+    内部実装として `pub(crate) fn release_cached(&self) -> Result<u64,
+    BackendError>`（フリーリスト解放バイト数を返す。driver トリム・
+    stream 同期を含む。§3.6 (2)）を持つ。公開 `BackendOps::
+    release_cached_device_memory()` はこれを呼び出し、`Ok` 時はバイト数を
+    捨てて `Ok(())` へ、`Err` はそのまま伝播する（バイト数は
+    `device_memory_pool_stats()` が返す `PoolStats::cached_bytes`〈解放後
+    は 0〉から確認できるため、公開 API 側では返す必要がない）。以降
+    §3.3・§3.4・§3.6 の本文中で単に「`release_cached()`」と書く箇所は
+    この内部メソッドを指し、利用者から到達可能な公開 API を指す場合は
+    明示的に「`BackendOps::release_cached_device_memory()`」
+    （facade 経由では `release_cached_memory()`）と書く。
+
+  - **`facade` からの再公開（確定入口。`docs/compat-api-scope.md` §0 の
+    確定入口一覧への追記は実装イシュー〈#1020／#1021〉側で行う。§6.1
+    「ドキュメント追従」参照）**: `facade::Device` は識別子 enum（`Cpu`／`Cuda(ordinal)`／
+    `Metal`）であり `tensor-core` 由来の**外部型**のため、facade は
+    `Device` へ inherent メソッドを追加できない（Rust の orphan rule。
+    `docs/facade-device-handle-design.md` が確定した「案 B のみ採用
+    （新規ハンドル型を作らずバックエンド内部常駐化で解決する）」方針とも
+    整合する）。したがって `tape`／`tape_for` と同型の**自由関数**として
+    公開する:
+
+    ```rust
+    /// REQ-14 の明示解放 API。`device` に対応するバックエンドのデバイス
+    /// メモリプールを全て解放する。プールを持たないバックエンド（CPU
+    /// 等）は何もせず `Ok(())` を返す。
+    pub fn release_cached_memory(device: Device) -> Result<(), BackendError> {
+        resolve_ops(device)?.release_cached_device_memory()
+    }
+
+    /// デバイスメモリプールの統計スナップショット（診断用。POD
+    /// `PoolStats` のみを返し、内部ハンドル表現は含まない）。
+    pub fn memory_pool_stats(device: Device) -> Result<Option<PoolStats>, BackendError> {
+        Ok(resolve_ops(device)?.device_memory_pool_stats())
+    }
+    ```
+
+    `PoolStats` は `crate::{AutodiffError, Tensor}` 等と同じ「迂回経路を
+    持たない値型」として `pub use fandhe_ai_tensor_core::PoolStats;` を
+    facade クレート root へ追加する（`tests/api_surface.rs` が `pub use`
+    を行単位で走査する制約〈`crates/facade/src/lib.rs` コメント〉に従い
+    1 文 1 行を維持する）。`resolve_ops` は毎回新しい `Box<dyn
+    BackendOps>` を構築する軽量値だが、実際のプール状態は §3.5 の
+    プロセスワイド singleton が保持するため、呼び出しごとに新しい
+    `BackendOps` インスタンスを介しても解放・統計は正しく機能する
+    （`memory_ops()`／`CudaBackendOps` の `context_cache` 経由アクセスと
+    同型の前提。`docs/facade-device-handle-design.md` §2.2）。
 
 - **capacity と論理長の分離**: `DeviceBuffer` の `shape`（論理 numel）と、
-  ハンドル内部の `capacity_bytes`（サイズクラス丸め後の実確保量）を分離
-  する契約を導入する。`download` 側・カーネル側は常に論理長のみを読む
+  ハンドル内部の `capacity_bytes`（サイズクラス丸め後の実確保量。
+  バックエンド内部のハンドル型が保持し `tensor-core` 側は関知しない）を
+  分離する契約を導入する。`download` 側・カーネル側は常に論理長のみを読む
   （CUDA は `CudaSlice` の論理長ビュー相当のスライシング、Metal は
   `MTLBuffer::length()` ではなくディスクリプタに保持した論理長引数を使う）。
   これは §2 事実 5 の「完全一致」制約を解除する唯一の前提であり、本設計が
   確定させる中核の変更点である。
 - 既存 `PooledMemory`（`crates/tensor-core/src/pool.rs`）との関係: 廃止・
-  削除はしない。`DeviceAllocator` 上の薄い互換アダプタとして残すか、
+  削除はしない。`SizeClassPool<H>` とは別モジュール（`pool_core.rs`）で
+  共存させる。`PooledMemory` を新設計上の薄い互換アダプタとして残すか、
   実装後に非推奨化するかは実装イシュー（#1020）の判断に委ねる。本文書が
   確定するのは「既存公開 API（`PooledMemory`・`PoolZeroFill`）を壊さない」
   という制約のみ。
 - ホットパスへの接続点（#1020／#1021 の作業対象。§2 事実 3・4 の箇所）:
   `backend-cuda/src/gemm.rs`・`elementwise.rs`・`softmax.rs` の
   `alloc_zeros` 呼び出しと、`backend-metal/src/gemm.rs`・`elementwise.rs`
-  の `new_zeroed` 呼び出しを、いずれも各クレート内部で具体アロケータ型を
-  直接保持するアクセサ経由（`BackendOps` を経由しない。上記
-  「`DeviceAllocator` の到達可能性」参照）へ置き換える: ゼロ初期化が
-  必要な箇所は `DeviceAllocator::alloc_zeroed`、カーネルが全要素を書き
-  切る出力専用の箇所は `pub(crate) alloc_uninit` を呼ぶ。入力側の
-  アップロード経路（`clone_htod`・`new_with_data`）は本イシューの対象外
-  とする（`upload_into` の同期契約が前提であり、forward 常駐化〈別
-  イシュー〉が進むことで直接確保の頻度は自然に減っていく）。
+  の `new_zeroed` 呼び出しを、いずれも各クレート内部の具体アロケータ型
+  （`CudaAllocator`／`MetalAllocator`）への直接アクセサ経由（`BackendOps`
+  を経由しない）へ置き換える: ゼロ初期化が必要な箇所は
+  `alloc_zeroed`、カーネルが全要素を書き切る出力専用の箇所は
+  `pub(crate) alloc_uninit` を呼ぶ。入力側のアップロード経路
+  （`clone_htod`・`new_with_data`）は本イシューの対象外とする
+  （`upload_into` の同期契約が前提であり、forward 常駐化〈別イシュー〉が
+  進むことで直接確保の頻度は自然に減っていく）。
 
 ### 3.2 サイズクラス表（受け入れ条件）
 
@@ -281,8 +342,9 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
 ### 3.4 断片化
 
 - **内部断片化**: 小クラス帯は理論上限 25%（実効はもっと小さい。§3.2 表
-  参照）。大クラス帯は 2 MiB 未満／バッファ。`AllocatorStats::
-  capacity_waste_bytes`（= Σ(capacity_bytes − 論理バイト数)）で可視化する。
+  参照）。大クラス帯は 2 MiB 未満／バッファ。`PoolStats::
+  capacity_waste_bytes`（= Σ(capacity_bytes − 論理バイト数)。POD。
+  `AllocatorStats` から改称。§3.1）で可視化する。
 - **外部断片化**: v1 では slab／サブアロケーション（burn/cubecl の
   `SlicedPool` 相当。1 つの大きな確保を複数の論理バッファへオフセット
   分割する方式）を採用しない。`CudaSlice`／`MTLBuffer` のオフセットビュー
@@ -290,18 +352,25 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   （不採用理由・代替案は §4）。個々のプールエントリは driver／OS 側の
   独立確保であり、外部断片化の管理は driver に委ねる。
 - **緩和策**: 総量上限＋グローバル LRU（既存踏襲）・クラス別アイドル
-  上限・`release_cached()`・OOM 時は `release_cached()` を 1 回実行して
-  から再試行し、それでも失敗すれば `BackendError::DeviceAllocationFailed`
-  を返す（fail-closed。無限リトライしない）。**`release_cached()` が
-  `Result<u64, BackendError>` を返す契約（§3.1）により、この OOM
-  フォールバック経路は 2 種類の失敗を区別して扱う**: (i) `release_cached()`
-  自体が `Err` を返した場合（driver トリム失敗）は、その `Err` をここで
-  黙殺せず、確保の再試行を行わずに `BackendError::DeviceAllocationFailed`
-  へ変換して即座に呼び出し元へ返す（driver 側の異常状態のまま再試行しても
-  成功する見込みが薄く、黙殺すると fail-open になるため）。(ii)
-  `release_cached()` が `Ok` を返した（解放自体は成功した）にもかかわらず
-  再確保が失敗した場合のみ、上記のとおり `BackendError::
-  DeviceAllocationFailed` を返す。
+  上限・`release_cached()`（内部メソッド。§3.1「2 段構成の命名規約」）・
+  OOM 時は `release_cached()` を 1 回実行してから再試行し、それでも
+  失敗すれば `BackendError::DeviceAllocationFailed` を返す（fail-closed。
+  無限リトライしない）。**`release_cached()` が `Result<u64,
+  BackendError>` を返す契約（§3.1）により、この OOM フォールバック経路は
+  2 種類の失敗を区別して扱う**: (i) `release_cached()` 自体が `Err` を
+  返した場合（stream 同期失敗または driver トリム失敗。§3.6 (2)）は、
+  その `Err` をここで黙殺せず、確保の再試行を行わずに
+  `BackendError::DeviceAllocationFailed` へ変換して即座に呼び出し元へ
+  返す（driver 側の異常状態のまま再試行しても成功する見込みが薄く、
+  黙殺すると fail-open になるため）。この場合もプール内部状態は一貫
+  させる（§3.6 (2) の fail-closed 契約により、解放できた分のみフリー
+  リストから外れ未解放分はキャッシュに残るため、直後に再試行しても
+  同じキャッシュ状態から再開できる）。(ii) `release_cached()` が `Ok`
+  を返した（解放自体は成功した）にもかかわらず再確保が失敗した場合
+  のみ、上記のとおり `BackendError::DeviceAllocationFailed` を返す。
+  この内部 `release_cached()` の `Err` は、公開 API
+  `BackendOps::release_cached_device_memory()`（§3.1）が利用者から
+  明示的に呼ばれた場合にも同じ契約でそのまま伝播する。
 
 ### 3.5 スレッド安全
 
@@ -310,29 +379,37 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
   （フリーリスト操作のみをロック内で行い、確保が必要な場合はロック解放後
   に FFI を呼ぶ）。poison 時は既存方針（`into_inner` で継続。panic させ
   ない）を踏襲する。
-- **`Send`/`Sync` 方針の更新**: `DeviceAllocator: Send + Sync` とし、
-  プールが格納するハンドルは `Box<dyn BufferHandle + Send>` を要求する。
+- **`Send`/`Sync` 方針の更新**: `SizeClassPool<H>: Send + Sync where H:
+  Send` とし、各バックエンドのハンドル型 `H`（例:
+  `PooledCudaHandle`・`PooledMetalHandle`。§3.1）は `Send` を実装する。
   根拠は §2 事実 6・8: `CudaSlice` は `Send + Sync`、Metal の `MTLBuffer`
   protocol も objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ。
   `crates/tensor-core/src/buffer.rs`「Send/Sync 境界」節が定めた「必要に
   なった時点で再検討する」の条件に、複数スレッド（学習ループのワーカー間
-  でのプール共有）から確保・返却を行う本設計で到達したと位置づける。ただし
-  `BufferHandle` trait 自体の supertrait は変更しない（公開 trait の
-  非破壊）。この変更により `crates/tensor-core/src/pool.rs` の
-  `arc_with_non_send_sync` allow は解消できる見込みであり、#1020／#1021 へ
-  申し送る。
+  でのプール共有）から確保・返却を行う本設計で到達したと位置づける。
+  §2 事実 7 が定める「`BufferHandle`／`DeviceBuffer` は `Send`/`Sync` を
+  要求しない」という既存方針自体は変更しない（`H` はバックエンド内部の
+  独自ハンドル型であり、公開 `BufferHandle` trait とは別物。§3.1 の
+  とおり `SizeClassPool<H>` は `tensor-core` の公開面に `BufferHandle`
+  を一切持ち込まないため、`BufferHandle` trait 自体の supertrait 変更は
+  不要かつ発生しない）。この変更により `crates/tensor-core/src/pool.rs`
+  の `arc_with_non_send_sync` allow は解消できる見込みであり、
+  #1020／#1021 へ申し送る。
 - プールは device 単位のプロセスワイド singleton とする（`static_cuda_
   memory`／同等の `Box::leak` 所有モデル。§2 事実 2 の計測系列単一化と
   整合させる）。CPU バックエンドは本イシューの対象外（別イシュー #1026 が
-  担当）だが、trait 自体は backend 非依存に設計し、CPU 実装が必要になった
-  際は恒等実装（`Vec` 確保をそのまま返す）で満たせるようにする。
+  担当）だが、`SizeClassPool<H>` 自体は backend 非依存に設計されている
+  ため、CPU 実装が必要になった際は恒等実装（`Vec` 確保をそのまま返す）
+  で満たせる。
 
 ### 3.6 解放戦略（受け入れ条件）
 
 1. 総量上限（既定 128 MiB を暫定継続）＋グローバル LRU。学習ワーキング
    セットとの関係は #1010 の内訳実測後に再評価する（変更する場合はユーザー
    承認事項）。
-2. `release_cached()`（明示解放。REQ-14 の要求する解放 API）。CUDA で
+2. `release_cached()`（内部メソッド。§3.1「2 段構成の命名規約」。
+   公開 API `BackendOps::release_cached_device_memory()` から呼ばれる。
+   REQ-14 の要求する解放 API）。CUDA で
    `has_async_alloc()` が真の環境では、自作プールのフリーリスト解放
    （`CudaSlice` の drop）に加え、driver 側 memory pool（§3.3）に残る
    予約メモリを `cuMemPoolTrimTo(0)` 相当（`result::mem_pool` 経由。
@@ -353,7 +430,7 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    （＝解放領域がプールに返却済みであること）を確認してからトリムを
    実行する契約とする。この stream 同期呼び出し（CUDA FFI 経由）は driver
    トリム呼び出しと同様に失敗し得るため、`release_cached()` の
-   戻り値は `Result<u64, BackendError>` とする（§3.1 の trait 定義）。
+   戻り値は `Result<u64, BackendError>` とする（§3.1 の内部メソッド定義）。
    自作プール層のフリーリスト解放（インメモリ操作）自体は失敗しないため、
    `Err` は stream 同期失敗または driver トリム失敗のいずれかに限定される。
    同期・トリムいずれかの失敗時に成功したものとして扱う（黙殺）・
@@ -364,6 +441,14 @@ MLP 学習の全テンソルは小クラス帯（≤ 1 MiB）に収まり、GEMM
    フォールバック。§3.4）はこの `Err` を上位の
    `BackendError::DeviceAllocationFailed` 等の型付きエラーへそのまま
    伝播する契約とする。**
+   **部分失敗時の状態一貫性（fail-closed。§3.4 との整合）**: 同期・
+   トリムいずれかが `Err` を返した場合でも、自作プール層のフリーリスト
+   解放（インメモリ操作）自体は途中まで進んでいる可能性がある。この
+   場合、**既に解放できたエントリのみをフリーリストから外し、未解放の
+   エントリはキャッシュへ残す**（二重解放しない。解放済みエントリを
+   再度解放しようとしない）。呼び出し元は `Err` を受け取った時点で
+   プールの状態を「一部解放済み・残りはキャッシュ保持中」として扱い、
+   再試行（§3.4）は残存分に対してのみ行われる。
 3. OOM フォールバック（§3.4）。
 4. プロセス終了時は OS 側の回収に委ねる（既存 `Box::leak` 方針と同じ、
    意図的な「解放しないリーク」であることを明記する）。
@@ -375,10 +460,11 @@ REQ-14 との整合: プール保持分は既存 `AllocationTracker::allocated_b
 `has_async_alloc()` が真の環境では、driver 側 memory pool の予約メモリ
 （§3.3）は自作プール層より下（cudarc 内部）で保持されるため
 `AllocationTracker` の計上対象に含まれない。この差分を放置すると
-`release_cached()`／LRU 破棄後も実メモリは driver 側に残存し得るため、
+内部 `release_cached()`／LRU 破棄後も実メモリは driver 側に残存し得るため、
 GEMM 4096³ の係数 2.0 判定を `AllocationTracker` の値のみで行うと実際の
 ピークメモリを過小評価するおそれがある。したがって本設計では
-(i) `release_cached()` が §3.6 (2) の driver トリム呼び出しを含むことで
+(i) 内部 `release_cached()`（公開 `BackendOps::release_cached_device_memory()`
+からも到達可能）が §3.6 (2) の driver トリム呼び出しを含むことで
 driver 予約分の残存を都度解消し、(ii) #1020 の実機計測では
 `AllocationTracker::allocated_bytes` に加えて driver 側の実メモリ使用量
 （`nvidia-smi` またはプロセスの実メモリ計測）も併せて確認し、両者の乖離が
@@ -413,7 +499,9 @@ fresh/reuse の 4 通り）:
 | slab／サブアロケーション（`SlicedPool` 相当） | 1 回の大きな確保を複数の論理バッファへオフセット分割して再利用する | オフセットビューと寿命結合の実装コストが大きく、`CudaSlice`／`MTLBuffer` 双方への影響範囲がホットパス全体に及ぶ。v1 では見送り、§3.4 の代替案として記録するに留める |
 | バイトサイズ完全一致を継続（現状） | 既存 `PooledMemory` の方式をそのまま接続する | ワークロードごとにバイトサイズが微妙に異なるケース（バッチサイズ違い等）でヒット率が低く、サイズクラス化のメリット（内部断片化の許容と引き換えの高ヒット率）が得られない |
 | `PooledMemory` を `memory_ops()` にそのまま差し込む | 新規 trait を作らず既存デコレータを本番経路へ接続するだけにする | §2 事実 5 の「完全一致でないと `download` 契約を壊す」制約が残ったまま、サイズクラス化（§3.2）が実現できない。層構造（§3.1）として `MemoryOps` の下にバイト単位の抽象を置く方が既存 API と非破壊に両立できる |
-| 公開 `BackendOps` へ `allocator()` を追加する（旧稿） | `BackendOps::allocator(&self) -> Option<&dyn DeviceAllocator>` というデフォルトメソッドを `memory_ops()` と同型で公開 trait へ追加し、動的ディスパッチで各バックエンドの `DeviceAllocator` へ到達させる | crates.io 公開済み trait（`fandhe-ai-tensor-core::BackendOps`）から `Box<dyn BufferHandle + Send>` を返す低水準プール操作へ到達できてしまい、`docs/compat-api-scope.md` §0「`facade` が唯一のサポート対象公開 API 面」に反する（codex-review PR #1056 P1）。§3.1 の呼び出し箇所はいずれも各バックエンドクレート自身の内部実装であり `memory_ops()` のような他クレートからの汎用呼び出しを必要としないため、`BackendOps` 経由のディスパッチは実利なく到達可能性のみを広げる。§3.1「`DeviceAllocator` の到達可能性」のとおりクレート内固有アクセサへ変更した |
+| 公開 `BackendOps` へ `allocator()` を追加する（旧稿・1 巡目） | `BackendOps::allocator(&self) -> Option<&dyn DeviceAllocator>` というデフォルトメソッドを `memory_ops()` と同型で公開 trait へ追加し、動的ディスパッチで各バックエンドの `DeviceAllocator` へ到達させる | crates.io 公開済み trait（`fandhe-ai-tensor-core::BackendOps`）から `Box<dyn BufferHandle + Send>` を返す低水準プール操作へ到達できてしまい、`docs/compat-api-scope.md` §0「`facade` が唯一のサポート対象公開 API 面」に反する（codex-review PR #1056 P1・1 巡目） |
+| `pub trait DeviceAllocator` は維持し `BackendOps::allocator()` のみ削除する（旧稿・2 巡目） | `BackendOps` への到達経路（`allocator()`）を削除すれば、`DeviceAllocator` の実装インスタンスがいずれの公開関数からも返らなくなるため十分と考えた | 「実装インスタンスを公開関数から返さない」ことと「型定義自体が公開面から不可視であること」は別の防御であり、後者を満たさない。`pub trait DeviceAllocator`・`pub mod allocator` として `fandhe-ai-tensor-core` に残る限り、外部コードが本クレートへ直接依存すれば `Box<dyn BufferHandle + Send>` を含む型を直接参照・独自実装できてしまう（codex-review PR #1056 P1・2 巡目。「facade が唯一のサポート対象公開 API 面」という**運用上の制約**は Rust の可視性検査を代替しない）。本設計（§3.1）は低水準 trait 自体を廃し、ハンドル型非依存の `SizeClassPool<H>`（`H` に trait 境界を課さない）と POD 型（`PoolConfig`／`PoolStats`）のみを `tensor-core` の公開面に残すことでこれを解消する |
+| REQ-14 の解放 API を内部 OOM フォールバックのみで満たす（旧稿） | `release_cached()` を「REQ-14 の明示解放 API」と位置づけつつ、実装インスタンスをいずれの公開関数からも返さない設計のままにする | 内部 OOM フォールバック（§3.4）から呼べるだけでは、`facade` を含む利用者側からプールを明示的に解放する経路が存在せず、REQ-14 が求める「プール解放 API の提供」を満たさない（codex-review PR #1056 P1）。本設計（§3.1）は低水準アロケータを一切露出せずに `BackendOps::release_cached_device_memory()`／`facade::release_cached_memory(device)`（unit のみを返す）を確定入口として追加することでこれを解消する |
 
 ## §5 検証方法（本文書内の記載の正しさ）
 
@@ -433,33 +521,64 @@ fresh/reuse の 4 通り）:
 §3.1「ホットパスへの接続点」に記載の `backend-cuda`／`backend-metal` の
 各ファイルの直接確保呼び出しを対象とする。
 
+**ドキュメント追従（実装 PR 側の作業）**: `docs/compat-api-scope.md` §0
+の確定入口一覧（現在 4 項目）へ、5 項目目として
+`fandhe_ai::release_cached_memory(Device)`／
+`fandhe_ai::memory_pool_stats(Device)`（§3.1）を追記する。本設計文書
+自体は docs-only の設計判断文書であり `docs/compat-api-scope.md` の
+更新は対象外とする（実装が確定した時点で追記する）。
+
 ### 6.2 テスト方針（#1020／#1021 が実装）
 
 - サイズクラス丸めの単体テスト（境界値・`u64` オーバーフロー）。
 - 再利用時ゼロ初期化のテスト（A02 対策の回帰防止。§7）。
 - LRU 破棄が `AllocationTracker::allocated_bytes` に正しく反映されること。
-- `release_cached()` が `Ok` を返すこと、および実行後にプール保持分が
-  0 になること。
-- `release_cached()` が driver トリム失敗を模擬したフォールト注入
+- 内部 `release_cached()`（§3.1「2 段構成の命名規約」）が `Ok` を返す
+  こと、および実行後に `PoolStats::cached_bytes` が 0 になること。
+- 内部 `release_cached()` が driver トリム失敗を模擬したフォールト注入
   （CPU バックエンド等 driver FFI を持たない実装では該当なしのためスキップ
   可）で `Err(BackendError::…)` を返し、OOM フォールバック（§3.4）が
   この `Err` を黙殺・panic せず `BackendError::DeviceAllocationFailed`
-  へそのまま伝播すること（§3.1・§3.6 (2) の契約の回帰防止）。
+  へそのまま伝播すること（§3.1・§3.6 (2) の契約の回帰防止）。同時に
+  `PoolStats::cached_bytes` が「解放できた分のみ減り、未解放分は残る」
+  という部分失敗時の状態一貫性（§3.6 (2)）を確認する。
 - `#[ignore]` 実機テスト（既存 `memory_real_device.rs`／
   `memory_roundtrip.rs` の拡張。`has_async_alloc()` プローブは #1012 の
   該当タスクと共有する）。
 - 既存 `pooled_memory_integration.rs` の係数 2 倍回帰テストを新
-  `DeviceAllocator` 経路へ移植する。
+  `SizeClassPool<H>` 経路（§3.1）へ移植する。
 - `#[ignore]` 実機テスト（DGX Spark GB10・`has_async_alloc()` が真の
-  環境）: `release_cached()` 実行後に `AllocationTracker::allocated_bytes`
-  が 0 になることに加え、driver 側の実メモリ使用量（`nvidia-smi` 等）も
-  併せて確認し、両者に有意な乖離が残らないことを確認する（§3.6 の driver
-  トリム契約の回帰防止）。
-- `crates/facade/tests/api_surface.rs`（既存のソース走査方式。§3.1
-  「`DeviceAllocator` の到達可能性」の不変条件を機械的に固定する）へ、
-  `DeviceAllocator`／`BufferHandle`／`allocator` のいずれも `facade` の
-  公開ソース（`pub use`・公開シグネチャ）に出現しないことを検査する
-  ケースを追加する。
+  環境）: 内部 `release_cached()` 実行後に
+  `AllocationTracker::allocated_bytes` が 0 になることに加え、driver 側の
+  実メモリ使用量（`nvidia-smi` 等）も併せて確認し、両者に有意な乖離が
+  残らないことを確認する（§3.6 の driver トリム契約の回帰防止）。
+- `crates/facade/tests/api_surface.rs`（既存のソース走査方式。§3.1 の
+  「低水準 trait 自体を tensor-core の公開面へ出さない」不変条件を機械的
+  に固定する。codex-review PR #1056 P1 是正）へ、次の 2 種のケースを
+  追加する:
+  (a) **低水準型の不在確認**: `DeviceAllocator`／`BufferHandle` のいずれも
+  `facade`（および `tensor-core` の `pub` 宣言のうち facade が
+  再エクスポートする範囲）の公開ソースに出現しないことを検査する。
+  (b) **REQ-14 解放 API の到達確認**: `facade` の公開ソースに
+  `release_cached_memory`／`memory_pool_stats`（§3.1）が `pub fn` として
+  存在し、かつ `PoolStats` が `pub use` で再エクスポートされていること
+  を検査する（REQ-14 の解放 API が facade から到達可能であることの
+  機械的固定。§3.1「facade からの再公開」）。
+- **facade 到達性の機能テスト（新規。REQ-14 是正の受け入れ条件）**:
+  (a) CPU（プールなし）: `fandhe_ai::release_cached_memory(Device::Cpu)`
+  が `Ok(())` を返し、`fandhe_ai::memory_pool_stats(Device::Cpu)` が
+  `Ok(None)` を返すこと。
+  (b) CUDA／Metal（`#[ignore]` 実機テスト）: 確保 → drop（プールへ返却）
+  → `release_cached_memory(device)` → `memory_pool_stats(device)` の順で
+  呼び、`PoolStats::cached_bytes` が 0 になることを確認する。
+  (c) CUDA（`#[ignore]` 実機テスト。`has_async_alloc()` が真の環境）:
+  stream 同期失敗を模擬したフォールト注入（内部 `release_cached()` の
+  単体テストと同じ注入経路を `BackendOps::
+  release_cached_device_memory()` 経由で駆動する）で `Err` が
+  facade の `release_cached_memory()` までそのまま伝播し、かつ
+  `memory_pool_stats()` の `PoolStats::cached_bytes` が「未解放分を含む
+  一貫した値」であること（§3.6 (2) の部分失敗時状態一貫性の facade
+  到達確認）。
 
 ### 6.3 スコープ外（`.claude/rules/out-of-scope-tracking.md` に従い記録のみ。起票はユーザー承認後）
 
@@ -474,25 +593,33 @@ fresh/reuse の 4 通り）:
 ## §7 セキュリティ考慮事項（OWASP Top 10）
 
 - **A02 暗号化の失敗／機微データ露出**: 再利用バッファに前利用者のデータ
-  が残留するリスクがある。`alloc_zeroed` 経路は再利用時に必ずゼロ初期化
+  が残留するリスクがある。`alloc_zeroed`（各バックエンドの `pub(crate)`
+  具体アロケータ型のメソッド。§3.1）経路は再利用時に必ずゼロ初期化
   （既存 `PoolZeroFill` 相当）を適用する。`alloc_uninit` はカーネルが
-  確保領域の全要素を書き切る内部出力専用に限定する。当初案は「`facade`
-  の公開 API へは露出しない」という文書上の注記のみで済ませていたが、
-  `DeviceAllocator`（公開 trait）のメソッドとして定義すると
+  確保領域の全要素を書き切る内部出力専用に限定する。**レビュー指摘の
+  変遷（3 段階。§3.1「レビュー履歴」）**: (1) 当初案は「`facade` の
+  公開 API へは露出しない」という文書上の注記のみで済ませていたが、
+  `DeviceAllocator`（当時は公開 trait）のメソッドとして定義すると
   `BackendOps::allocator()` 経由で外部利用者が直接呼び出せてしまい注記が
-  型システムで担保されないとレビューで指摘された。このため `alloc_uninit`
-  は公開 `DeviceAllocator` trait には含めず、各バックエンドの具体
-  アロケータ型に `pub(crate)` 固有メソッドとして実装し、ホットパスは
-  同一クレート内から具体型経由で直接呼び出す設計へ変更した。加えて
-  後続レビュー（P1）は、A02 の観点では安全な `alloc_zeroed` を含む
-  `DeviceAllocator` 全体が `BackendOps::allocator()` という公開
-  ディスパッチ trait 経由で到達可能であること自体が、内部クレートの
-  低水準バッファ表現の漏出（`docs/compat-api-scope.md` §0 違反）だと
-  指摘したため、`BackendOps::allocator()` 自体を廃し、
-  `DeviceAllocator` の実装インスタンスはいずれの公開関数からも返さない
-  設計へ変更した（§3.1「`DeviceAllocator` の到達可能性」）。Metal で
-  デバイス側フィル（`fillBuffer`）を採用する場合も「貸出前に必ずフィルを
-  encode する」ことを不変条件とする（§3.3）。
+  型システムで担保されないと指摘された。(2) `BackendOps::allocator()`
+  自体を廃し実装インスタンスを公開関数から返さない設計へ変更したが、
+  `pub trait DeviceAllocator` という型定義自体が `tensor-core` の公開面
+  （`pub mod allocator`）に残るため、外部コードが本クレートへ直接依存
+  すれば型を直接参照・独自実装できてしまう（「実装インスタンスを返さ
+  ない」だけでは型の到達可能性を防げない）と再指摘された。(3) 本設計
+  （現行。§3.1）は低水準 trait（`DeviceAllocator`）自体を廃止し、
+  `alloc_zeroed`／`alloc_uninit` はいずれも各バックエンドクレート内の
+  `pub(crate)` 固有メソッドとして実装する。`tensor-core` の公開面には
+  ハンドル非依存の `SizeClassPool<H>`（`H` に trait 境界を課さない）と
+  POD 型（`PoolConfig`／`PoolStats`）のみが残り、`BufferHandle` を含む
+  低水準型は一切 `tensor-core` の公開面に現れない。ホットパスは同一
+  クレート内から具体アロケータ型経由で直接呼び出す（§3.1「ホットパス
+  への接続点」）。REQ-14 の解放 API は `alloc_zeroed`／`alloc_uninit`
+  とは独立に、unit／POD のみを返す `BackendOps::
+  release_cached_device_memory()`／`device_memory_pool_stats()`
+  （§3.1）として別途確保する。Metal でデバイス側フィル（`fillBuffer`）
+  を採用する場合も「貸出前に必ずフィルを encode する」ことを不変条件と
+  する（§3.3）。
 - **A03 インジェクション（入力検証）**: shape は safetensors／ONNX 経由で
   外部入力が流入しうる。サイズクラス丸め・capacity 計算は `checked_mul`／
   `checked_add`（`u64`）で行い、オーバーフローは型付きエラー
@@ -517,8 +644,9 @@ fresh/reuse の 4 通り）:
   `cuMemPoolTrimTo`（§3.6 の driver 予約メモリ解放契約）等の FFI・
   `fillBuffer` の encode 呼び出し）は FFI 境界に限定し、理由コメント
   と security-auditor によるレビューを必須とする。
-- **A09 セキュリティログ・監視の不足**: `AllocatorStats` はバイト数・
-  カウンタのみを公開し、デバイスポインタ値をログや統計に含めない。
+- **A09 セキュリティログ・監視の不足**: `PoolStats`（`AllocatorStats`
+  から改称。§3.1）はバイト数・カウンタのみを公開し、デバイスポインタ値を
+  ログや統計に含めない。
 - **スレッド安全性（メモリ安全上の前提）**: ロックを保持したまま FFI を
   呼ばない（§3.5）・poison 時は panic せず継続する・二重返却を
   `ManuallyDrop` で構造的に防止する（§3.3）ことを契約として記す。
