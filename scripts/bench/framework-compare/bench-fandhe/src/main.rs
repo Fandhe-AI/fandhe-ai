@@ -14,10 +14,39 @@
 //! 構築し、その初期化コスト（init_s）を「カーネル実行時間」（中央値・Q1/Q3）
 //! と分離して記録することで、初期化コストとカーネル実行を切り分けて比較可能
 //! にする。
+//!
+//! `train --mode reuse`（イシュー #958）: gemm の reuse（イシュー #925）と
+//! 同じ「初期化コストとカーネル実行の分離」の考えを学習ループへ適用する。
+//! fresh の `run_train` は各 step でホスト経由 SGD（勾配を download →
+//! ホストで `p - lr*g` → `apply_parameters` で書き戻し）を行っており、
+//! candle（`Var::set`）や Burn（デバイス上更新）と非対称なプロトコルに
+//! なっている（#957 背景）。reuse は #954 で追加されたデバイス常駐パラ
+//! メータ更新 API（`fandhe_ai::DeviceParamStore`）を使い、`p - lr*g` の
+//! 更新自体をデバイス上で完結させる。
+//!
+//! 参照実装は `crates/facade/tests/device_param_store_train.rs` の
+//! `train_with_device_param_store`（`init_device_param_store` で 1 回だけ
+//! 全パラメータを H2D upload → 以後は同一 `DeviceParamStore` を使い回す）
+//! であり、本関数（`run_train_reuse`）はその構造に揃える。tape 自体は
+//! （gemm reuse と異なり）**step ごとに新規生成**する: `fandhe_ai_autodiff::
+//! Tape` はノード列クリア API を持たず学習ループはステップごとに tape を
+//! 生成・破棄する設計契約（`crates/autodiff/src/tape.rs`）であり、単一
+//! tape を 100 step 使い回すと `Tape::backward` の逆順走査コストが step
+//! 数に比例して増加し 1 step の計測時間が非定常になる。reuse で使い回す
+//! のは tape ではなく `DeviceParamStore`（デバイス常駐バッファ・デバイス
+//! を固定する側）であり、fresh/reuse の計時差は「ホスト経由 SGD vs デバ
+//! イス常駐更新」に限定される。
+//!
+//! 既知の前提（改善量の解釈範囲）: `Sequential::forward_resident` が呼ぶ
+//! `DeviceParamStore::register_resident_leaves` は forward 用に毎 step
+//! パラメータを D2H download する（`crates/autodiff/src/optim/
+//! device_store.rs`・`docs/device-resident-update-design.md` §3.3b・
+//! イシュー #954 申し送り）。reuse が排除するのは「毎 step の再アップ
+//! ロード（H2D）+ ホスト計算」であり、この D2H は reuse でも残存する。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
-use fandhe_ai::{Device, Tape, Tensor};
+use fandhe_ai::{Device, SgdConfig, Tape, Tensor};
 use std::time::{Duration, Instant};
 
 const FRAMEWORK: &str = "fandhe-ai";
@@ -353,6 +382,100 @@ fn run_train(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `--mode reuse` の train 計測（イシュー #958）。`DeviceParamStore` を
+/// 1 回だけ構築し（`init_s` として初期化コストを分離記録）、以後の各 step
+/// は新規 tape 上で `forward_resident` → `backward` →
+/// `step_device_param_store`（デバイス上 SGD 更新）を行う。ホスト経由の
+/// download/upload（fresh の `p - lr*g` 相当）はループ内で一切行わない。
+/// モジュール doc「train --mode reuse」節に設計判断の詳細を記す。
+fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let model = build_model()?;
+    let (x_data, y_data) = mlp_data()?;
+
+    // init_s: 初回 tape 構築 + 全パラメータの 1 回限りの H2D upload
+    // （`init_device_param_store`）までの経過。以後の DeviceParamStore は
+    // このデバイス・バッファを固定して使い回す。
+    let init_start = Instant::now();
+    let init_tape = make_tape(&cli.device)?;
+    let mut store = model.init_device_param_store(&init_tape)?;
+    drop(init_tape);
+    let init_s = init_start.elapsed().as_secs_f64();
+
+    let config = SgdConfig::new(LR);
+    let mut durations = Vec::with_capacity(TRAIN_STEPS);
+    let mut last_loss = 0.0f32;
+
+    for _ in 0..TRAIN_STEPS {
+        let start = Instant::now();
+        // fresh tape per step（モジュール doc 参照: DeviceParamStore は
+        // 使い回すが tape は使い回さない）。
+        let tape = make_tape(&cli.device)?;
+        let x = tape.var(&x_data);
+        let y = tape.var(&y_data);
+        let pred = model.forward_resident(&tape, &x, &mut store)?;
+        let loss = pred.mse_loss(&y)?;
+        // host readout of the loss（fresh と同じくループ内の同期点）。
+        last_loss = loss
+            .to_tensor()
+            .get(&[])
+            .ok_or("loss should be a scalar with shape []")?;
+        let grads = tape.backward(&loss)?;
+        // デバイス上 SGD 更新（ホストへの download/upload を経由しない）。
+        tape.step_device_param_store(&mut store, &grads, &config)?;
+        durations.push(start.elapsed());
+    }
+
+    if !last_loss.is_finite() {
+        return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
+    }
+
+    // 終端同期: 新規 tape から DeviceParamStore の内容をホストへ実体化する
+    // （計測窓の外。gemm reuse の checksum 実体化と同じ位置づけ）。件数が
+    // trainable_parameters() と不一致・非有限要素があれば MEASURE_ERROR
+    // として記録を拒否する（A08: 破損した学習結果を性能値として残さない）。
+    let final_tape = make_tape(&cli.device)?;
+    let synced = final_tape.sync_device_param_store_to_host(&store)?;
+    let expected_len = model.trainable_parameters().len();
+    if synced.len() != expected_len {
+        return Err(format!(
+            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
+            synced.len()
+        )
+        .into());
+    }
+    for t in &synced {
+        let slice = t
+            .contiguous()
+            .as_slice()
+            .ok_or("synced param as_slice() returned None")?
+            .to_vec();
+        if slice.iter().any(|v| !v.is_finite()) {
+            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
+        }
+    }
+
+    let measured = &durations[TRAIN_WARMUP..];
+    let st = stats(measured)?;
+    Record {
+        framework: FRAMEWORK,
+        framework_version: VERSION,
+        task: "train",
+        device: &cli.device,
+        size: BATCH,
+        stats: st,
+        gflops: None,
+        throughput_per_s: None,
+        checksum: last_loss as f64,
+        warmup: TRAIN_WARMUP,
+        iters: measured.len(),
+        mode: "reuse",
+        init_s: Some(init_s),
+        parity: None,
+    }
+    .emit(&cli.out)?;
+    Ok(())
+}
+
 fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let model = build_model()?;
     let (x_data, _) = mlp_data()?;
@@ -414,20 +537,117 @@ fn main() {
     }
 }
 
-/// task × mode の分岐。reuse モードは受け入れ条件の範囲（gemm のみ）に限定
-/// し、train / infer × reuse は MEASURE_ERROR で fail-fast する（イシュー
-/// #925 §2.1・§8 のスコープ境界。将来対応が必要な場合は別イシューで追跡）。
+/// task × mode の分岐。reuse モードは受け入れ条件の範囲（gemm・train）に
+/// 限定し、infer × reuse は MEASURE_ERROR で fail-fast する（gemm は
+/// イシュー #925 §2.1・§8、train はイシュー #958。infer への拡張は将来
+/// 対応が必要な場合は別イシューで追跡）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
     match (cli.task.as_str(), cli.mode.as_str()) {
         ("gemm", "fresh") => run_gemm(&cli),
         ("gemm", "reuse") => run_gemm_reuse(&cli),
         ("train", "fresh") => run_train(&cli),
+        ("train", "reuse") => run_train_reuse(&cli),
         ("infer", "fresh") => run_infer(&cli),
         (task, "reuse") => Err(format!(
-            "MEASURE_ERROR: --mode reuse is not implemented for task '{task}' (gemm only; issue #925)"
+            "MEASURE_ERROR: --mode reuse is not implemented for task '{task}' (gemm / train only; issue #925 / #958)"
         )
         .into()),
         (other, _) => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
+    }
+}
+
+/// `run_train`（fresh）と `run_train_reuse`（reuse）の最終 loss（checksum）
+/// が統一複合判定（相対誤差 1e-3 未満 または 絶対誤差 1e-5 未満。
+/// `.claude/rules/coding-rust.md`）の範囲内で一致することを検証する
+/// （受け入れ条件 5。イシュー #958）。cpu 経由・実機非依存のため `#[ignore]`
+/// は付けない。`--release` 推奨（README 参照。debug では GEMM が遅い）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// テスト間で衝突しない一時 JSONL パスを作る（pid + カウンタで一意化。
+    /// 並行テスト実行時の読み取り／削除の混入を防ぐ）。
+    fn temp_out_path(tag: &str) -> std::path::PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "bench-fandhe-test-{tag}-{}-{n}.jsonl",
+            std::process::id()
+        ))
+    }
+
+    fn make_cli(task: &str, mode: &str, out: &std::path::Path) -> Cli {
+        Cli {
+            task: task.to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: mode.to_string(),
+        }
+    }
+
+    /// JSONL の最終行から `"checksum":<value>` を取り出す最小パーサー
+    /// （フル JSON デコーダを新規依存させないための最小実装。`Record::emit`
+    /// の出力形式に依存する）。
+    fn last_line_checksum(path: &std::path::Path) -> f64 {
+        let content = std::fs::read_to_string(path).expect("test: JSONL 読み取り失敗");
+        let last = content.lines().next_back().expect("test: JSONL に行がない");
+        let key = "\"checksum\":";
+        let start = last
+            .find(key)
+            .expect("test: checksum フィールドが見つからない")
+            + key.len();
+        let rest = &last[start..];
+        let end = rest
+            .find([',', '}'])
+            .expect("test: checksum フィールドの終端が見つからない");
+        rest[..end]
+            .trim()
+            .parse::<f64>()
+            .expect("test: checksum を f64 としてパースできない")
+    }
+
+    #[test]
+    fn train_reuse_matches_fresh_final_loss_within_composite_tolerance() {
+        let fresh_path = temp_out_path("fresh");
+        let reuse_path = temp_out_path("reuse");
+
+        run_train(&make_cli("train", "fresh", &fresh_path)).expect("run_train (fresh) failed");
+        run_train_reuse(&make_cli("train", "reuse", &reuse_path))
+            .expect("run_train_reuse (reuse) failed");
+
+        let fresh_checksum = last_line_checksum(&fresh_path);
+        let reuse_checksum = last_line_checksum(&reuse_path);
+
+        let _ = std::fs::remove_file(&fresh_path);
+        let _ = std::fs::remove_file(&reuse_path);
+
+        assert!(
+            fresh_checksum.is_finite() && reuse_checksum.is_finite(),
+            "checksum must be finite: fresh={fresh_checksum} reuse={reuse_checksum}"
+        );
+        let abs_diff = (fresh_checksum - reuse_checksum).abs();
+        let rel_diff = abs_diff / fresh_checksum.abs().max(1e-12);
+        assert!(
+            abs_diff < 1e-5 || rel_diff < 1e-3,
+            "fresh/reuse final loss mismatch: fresh={fresh_checksum} reuse={reuse_checksum} \
+             abs_diff={abs_diff} rel_diff={rel_diff}"
+        );
+    }
+
+    #[test]
+    fn train_reuse_produces_expected_record_fields() {
+        let out = temp_out_path("reuse-fields");
+        run_train_reuse(&make_cli("train", "reuse", &out)).expect("run_train_reuse failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let last = content.lines().next_back().expect("test: JSONL に行がない");
+        assert!(last.contains("\"task\":\"train\""), "line={last}");
+        assert!(last.contains("\"mode\":\"reuse\""), "line={last}");
+        assert!(last.contains("\"init_s\":"), "line={last}");
+        assert!(!last.contains("\"init_s\":null"), "line={last}");
     }
 }
