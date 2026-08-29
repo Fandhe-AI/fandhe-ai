@@ -353,9 +353,14 @@ impl<H: Send> SizeClassPool<H> {
         }
     }
 
-    /// 確保が発生した（プールミス）ことを記録する。`take` がヒットした
-    /// 場合はこのメソッドを呼ばない（`alloc_count`/`reuse_count` は
-    /// `take` 自体が計上するため）。
+    /// サイズクラス丸めによる無駄バイト数（`class_bytes - requested_bytes`）
+    /// を `PoolStats::capacity_waste_bytes` へ加算する。呼び出し元
+    /// （`backend-cuda::pool::PooledCudaAllocator::alloc_zeroed_f32`／
+    /// `alloc_uninit_f32`）は `take` ヒット時・ミス時いずれの経路でも
+    /// 本メソッドを呼ぶ（クラス丸めによる無駄はヒット時の再利用でも
+    /// 都度発生するため、両経路で計上するのが意図した契約。
+    /// `alloc_count`/`reuse_count` の計上とは独立で、それらは
+    /// `take` 自体が行う）。
     pub fn record_allocation(&self, class_bytes: u64, requested_bytes: u64) {
         match self.core.lock() {
             Ok(mut core) => core.record_capacity_waste(class_bytes, requested_bytes),
