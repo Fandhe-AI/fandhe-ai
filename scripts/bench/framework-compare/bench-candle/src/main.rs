@@ -46,14 +46,23 @@ fn checksum2(t: &Tensor) -> Result<f64, Box<dyn std::error::Error>> {
     Ok(rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum())
 }
 
-/// Host-materialize a 2D tensor and return the flattened (row-major)
-/// elements (forces sync). `run_gemm`（イシュー #970）は checksum に加え
-/// 要素単位の参照比較（`GemmReference::verify`）が必要なため、`checksum2`
-/// とは別に生の `Vec<f32>` を返す readout を用意する（`checksum2` は
-/// `run_infer` が引き続き使うためシグネチャを変更しない）。
-fn readout2(t: &Tensor) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let rows = t.to_vec2::<f32>()?;
-    Ok(rows.into_iter().flatten().collect())
+/// Host-materialize a 2D tensor and return the row-major `Vec<Vec<f32>>`
+/// (forces sync). `run_gemm`（イシュー #970）は checksum に加え要素単位の
+/// 参照比較（`GemmReference::verify`）が必要なため、`checksum2` とは別に
+/// 生の行データを返す readout を用意する（`checksum2` は `run_infer` が
+/// 引き続き使うためシグネチャを変更しない）。
+///
+/// イシュー #970 codex-review 指摘（PR #978）: 以前はここで
+/// `rows.into_iter().flatten().collect::<Vec<f32>>()` により行データを
+/// フラット化していたが、`to_vec2` が既に返す `Vec<Vec<f32>>` に加えて
+/// 新規に O(n^2) の Vec を確保・コピーする分だけ、計測窓内（`elapsed`
+/// 取得前）のコストが従来の `checksum2`（`to_vec2` の結果を
+/// `flat_map`/`iter` で走査するのみ・追加確保なし）より増えてしまう。
+/// フラット化（`GemmReference::verify` が要求する `&[f32]`）は `elapsed`
+/// 取得後に行う（呼び出し元 `run_gemm` 参照）ことで、計測窓内のコストを
+/// `checksum2` と同一に保つ。
+fn readout2(t: &Tensor) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+    Ok(t.to_vec2::<f32>()?)
 }
 
 fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -82,13 +91,16 @@ fn run_gemm(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         let c = a.matmul(&b)?;
         // sync: materialize result on host and read elements（従来どおり
-        // 計測窓内）。
-        let out = readout2(&c)?;
-        *sync_checksum = out.iter().map(|&x| x as f64).sum();
+        // 計測窓内）。checksum は `checksum2` と同じく `rows` を走査するのみ
+        // で、新規の平坦化 Vec は確保しない（PR #978 codex-review 指摘）。
+        let rows = readout2(&c)?;
+        *sync_checksum = rows.iter().flat_map(|r| r.iter()).map(|&x| x as f64).sum();
         let elapsed = start.elapsed();
         validate_gemm_checksum(*sync_checksum)?;
         // イシュー #970: 要素単位検証は計測窓の外で行う（O(n^2)。GEMM 自体
-        // の O(n^3) に対する比較コストの混入を避けるため）。
+        // の O(n^3) に対する比較コストの混入を避けるため）。行データの平坦化
+        // （`GemmReference::verify` が要求する `&[f32]`）もここで行う。
+        let out: Vec<f32> = rows.into_iter().flatten().collect();
         let stats = reference.verify(&out)?;
         *parity = Some(match parity.take() {
             Some(prev) => prev.worst(stats),
