@@ -395,9 +395,22 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // init_s: 初回 tape 構築 + 全パラメータの 1 回限りの H2D upload
     // （`init_device_param_store`）までの経過。以後の DeviceParamStore は
     // このデバイス・バッファを固定して使い回す。
+    //
+    // codex-review PR #998 P2 是正: `init_device_param_store` の内部
+    // 実装（`MemoryOps::upload`）は CUDA では `clone_htod` 等の非同期
+    // H2D コピーを発行するのみで、発行元ストリーム上の完了を待たない
+    // （`DeviceParamStore::new` doc・`CudaMemory::upload_inner` 参照）。
+    // `elapsed()` を非同期発行直後に取得すると、転送完了待ちのコストが
+    // `init_s` から漏れ、代わりに最初の `forward_resident` 内の
+    // download 同期（暗黙のストリーム同期点）へ計上されてしまう。
+    // ここでは `sync_to_host` の明示同期点（`DeviceParamStore::
+    // sync_to_host` doc「明示同期点」参照）を `elapsed()` 取得前に挟み、
+    // アップロードされた全パラメータの転送完了を保証したうえで `init_s`
+    // を確定する（ダウンロードした内容自体は計測対象ではないため破棄）。
     let init_start = Instant::now();
     let init_tape = make_tape(&cli.device)?;
     let mut store = model.init_device_param_store(&init_tape)?;
+    let _ = init_tape.sync_device_param_store_to_host(&store)?;
     drop(init_tape);
     let init_s = init_start.elapsed().as_secs_f64();
 
