@@ -118,6 +118,33 @@ impl CompareReport {
 /// バックエンド非依存の `&[f32]` インターフェースのため、CPU-CUDA・
 /// CPU-Metal・（将来の）CUDA-Metal のいずれのペアでも同一関数を呼べる
 /// （受け入れ条件: 全ペア共通で成立する判定ユーティリティ）。
+/// `values` の最大値を求める（`f64::max` ベースの素朴な `fold` と異なり、
+/// 非有限（NaN・Inf）要素を silently に無視しない）。
+///
+/// `f64::max` は IEEE 754 の `maxNum` 相当で NaN を相手側の値に置き換える
+/// （`0.0f64.max(f64::NAN) == 0.0`）。同符号 Inf 同士の差分（`Inf - Inf`）は
+/// NaN になるため、`abs_diffs`/`rel_errs`（`max_fail_abs_diff` と異なり
+/// fail セル限定ではなく全セル対象の集計）に素朴な `fold(0.0, f64::max)` を
+/// 使うと、NaN 要素が「最大値に寄与しない」として扱われ、他の要素が
+/// すべて 0.0 のとき集計値が 0.0 のまま残ってしまう。呼び出し元の
+/// `margin()`（`wmma_tolerance_probe.rs`）は `observed <= 0.0` を
+/// 「誤差ゼロ・余裕は無限大」として `"inf"` と表示するため、f16
+/// オーバーフロー等で本来使用不能なスイープ行が誤って `inf` margin
+/// （最良の結果）と誤表示される（#997 Cursor Bugbot 指摘）。
+/// 非有限要素が 1 件でもあれば `f64::INFINITY` を返し、以後 `.max()` で
+/// 上書きされないセンチネルとして扱う（`max_fail_abs_diff` と同じ設計。
+/// 本関数コメント中段参照）。
+fn max_nonfinite_aware(values: &[f64]) -> f64 {
+    let mut acc = 0.0f64;
+    for &v in values {
+        if !v.is_finite() {
+            return f64::INFINITY;
+        }
+        acc = acc.max(v);
+    }
+    acc
+}
+
 pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
     if a.len() != b.len() {
         return Err(ParityError::LengthMismatch {
@@ -171,9 +198,9 @@ pub fn compare(a: &[f32], b: &[f32]) -> Result<CompareReport, ParityError> {
     }
 
     let total = a.len();
-    let max_abs_diff = abs_diffs.iter().cloned().fold(0.0f64, f64::max);
+    let max_abs_diff = max_nonfinite_aware(&abs_diffs);
     let mean_abs_diff = abs_diffs.iter().sum::<f64>() / total as f64;
-    let max_rel_err = rel_errs.iter().cloned().fold(0.0f64, f64::max);
+    let max_rel_err = max_nonfinite_aware(&rel_errs);
     let mean_rel_err = rel_errs.iter().sum::<f64>() / total as f64;
 
     let mut sorted = abs_diffs.clone();
@@ -399,6 +426,32 @@ mod tests {
         assert_eq!(report.fail_count, 1);
         assert!(report.max_abs_diff > report.max_fail_abs_diff);
         assert!((report.max_fail_abs_diff - 0.01).abs() < 1e-6);
+    }
+
+    #[test]
+    fn max_abs_diff_promotes_to_infinity_when_same_sign_inf_pair_yields_nan_diff() {
+        // #997 Cursor Bugbot 指摘の回帰: 同符号 Inf 対 Inf（`Inf - Inf`）は
+        // NaN diff になる。素朴な `fold(0.0, f64::max)` は NaN を無視して
+        // 相手側の値をそのまま残すため（`0.0f64.max(f64::NAN) == 0.0`）、
+        // 他セルがすべて完全一致（diff=0.0）だと `max_abs_diff`/
+        // `max_rel_err` が 0.0 のまま残ってしまう。呼び出し元
+        // `wmma_tolerance_probe.rs::margin()` は `observed <= 0.0` を
+        // 「誤差ゼロ・余裕は無限大」として `"inf"` と表示するため、f16
+        // オーバーフロー等で本来使用不能なスイープ行が `inf` margin
+        // （最良の結果）と誤表示される。`max_nonfinite_aware` は非有限
+        // 要素を `f64::INFINITY` センチネルへ昇格させ、この誤表示を防ぐ。
+        let a = [f32::INFINITY, 1.0f32];
+        let b = [f32::INFINITY, 1.0f32];
+        let report = compare(&a, &b).unwrap();
+        // index0（Inf vs Inf）は diff=NaN・rel=NaN で `<` 比較がつねに
+        // false になるため fail 側に倒れる（compare() 内コメント参照）。
+        assert_eq!(report.fail_count, 1);
+        assert!(!report.passes());
+        // 全セル対象の集計が NaN 由来で 0.0 に落ちず INFINITY へ
+        // 昇格していることを固定する（マスクされていた旧実装ではここが
+        // 0.0 のままだった）。
+        assert_eq!(report.max_abs_diff, f64::INFINITY);
+        assert_eq!(report.max_rel_err, f64::INFINITY);
     }
 
     #[test]

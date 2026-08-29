@@ -194,6 +194,20 @@ fn parse_scales(raw: &str) -> Result<Vec<f64>, String> {
                 "invalid --scales value: '{trimmed}' must be a positive finite number"
             ));
         }
+        // `scaled_f32_inputs`/`scaled_f16_inputs` は本値を `scale as f32` で
+        // 使う（f64 → f32 の narrowing cast）。境界値（例: `1e-50` は
+        // f32 では表現不能で `0.0f32` へ、`1e39` は `f32::INFINITY` へ）は
+        // f64 としては有限・正でも f32 変換後に崩れ、全ゼロ入力による
+        // 見かけ上の完全一致や非有限入力のカーネル投入を招く。ここで
+        // narrowing 後の値も有限・正であることを検証し fail-closed で
+        // 拒否する（security.md A03: 外部入力の事前検証。#997 Codex
+        // Review 指摘）。
+        let narrowed = value as f32;
+        if !narrowed.is_finite() || narrowed <= 0.0 {
+            return Err(format!(
+                "invalid --scales value: '{trimmed}' is out of the representable f32 range                  (converts to {narrowed} after narrowing)"
+            ));
+        }
         if scales.contains(&value) {
             return Err(format!(
                 "invalid --scales value: duplicate scale '{trimmed}'"
@@ -829,6 +843,34 @@ mod tests {
     #[test]
     fn parse_scales_rejects_duplicates() {
         assert!(parse_scales("1,2,1").is_err());
+    }
+
+    #[test]
+    fn parse_scales_rejects_f32_underflow_to_zero() {
+        // #997 codex-review P0 指摘の回帰: `1e-50` は f64 としては有限・正
+        // だが `scale as f32` の narrowing cast で `0.0f32` になる
+        // （f32 の最小 subnormal 約 1.4e-45 を下回る）。`scaled_f32_inputs`/
+        // `scaled_f16_inputs` は本値を `scale as f32` で使うため、
+        // narrowing 後のゼロ化を検出せず通すと全ゼロ入力による見かけ上の
+        // 完全一致を招く。
+        assert!(parse_scales("1e-50").is_err());
+    }
+
+    #[test]
+    fn parse_scales_rejects_f32_overflow_to_infinity() {
+        // #997 codex-review P0 指摘の回帰: `1e39` は f64 としては有限・正
+        // だが f32 の表現上限（約 3.4e38）を超えるため `scale as f32` は
+        // `f32::INFINITY` になる。narrowing 後に非有限化するスケールを
+        // 拒否せず通すと非有限入力（Inf）のままカーネルへ投入される。
+        assert!(parse_scales("1e39").is_err());
+    }
+
+    #[test]
+    fn parse_scales_accepts_f32_representable_boundary_values() {
+        // narrowing 検証が過剰に厳しくなっていないことの確認（f32 で表現
+        // 可能な範囲内の極端な値は引き続き受理される）。
+        assert!(parse_scales("1e-40").is_ok());
+        assert!(parse_scales("1e38").is_ok());
     }
 
     #[test]
