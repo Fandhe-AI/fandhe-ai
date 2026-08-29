@@ -99,7 +99,7 @@ impl RawMetalBuffer {
 
 // SAFETY（codex-review P0 再指摘対応。`Send` の証明に必要なのは
 // 「値を他スレッドへ移動した後、その型に対して行う操作が（直列化
-// された前提で）安全である」ことであり、以下 1〜5 でこれを示す）:
+// された前提で）安全である」ことであり、以下 1〜6 でこれを示す）:
 //
 // 設計文書 §3.5「`Send`/`Sync` 方針の更新」は「Metal の `MTLBuffer`
 // protocol も objc2-metal 0.3.2 で `Send + Sync` を supertrait に持つ」
@@ -154,13 +154,33 @@ impl RawMetalBuffer {
 //    直列化）のいずれかの経路に限られ、複数スレッドから同時に
 //    （並行して）アクセスされることはない。よって `Sync` は主張せず
 //    `Send` のみを付与する。
-// 5. objc2-metal が `Send` を実装しないのは同クレート側の保守的既定
-//    （他の多くの Objective-C ラッパー同様、実際のスレッド安全性契約を
-//    精査せず未実装のまま据え置く方針）であり、上記 1〜4 の下では本型
-//    の利用範囲（フリーリスト・RAII ラッパー・返却待ち列のいずれかで
-//    直列化されたアクセスのみ）において安全である。
+// 5. **objc2-metal が `Send`/`Sync` を付ける型・付けない型の実測に
+//    基づく境界線**: objc2-metal 0.3.2 は `MTLDevice`・
+//    `MTLCommandQueue`・pipeline state 系にはスレッドセーフ性を
+//    静的に保証できるため `Send + Sync` を付ける一方、`contents()`
+//    が生ポインタを露出し型システムでは同時アクセスの安全性を証明
+//    できない `MTLBuffer` には（推測ではなく実測のとおり）付けない
+//    （直列化の責務をユーザー側に残す設計）。本型はその直列化責務を
+//    上記 4（`Mutex` 経由の 3 経路への限定）で果たしている。
+// 6. **本リポジトリ内の既存前例（`crates/backend-metal/src/
+//    context.rs::Batch` の `unsafe impl Send`。イシュー #1017・
+//    レビュー済み・main マージ済み。`docs/backend-metal-command-
+//    batching-design.md` §0）**: 本 `Send` 付与は `Batch` の
+//    `unsafe impl Send` と同一の根拠構造（Apple のスレッディング
+//    契約が「同時アクセス不可」のみを課しスレッド親和性を持たない
+//    こと＋`Mutex` による完全直列化）である。`Batch` は Apple が
+//    同時アクセス不可を**明示する** `MTLCommandBuffer`／
+//    `MTLComputeCommandEncoder` に加え、`in_flight: Vec<Retained<
+//    MtlBuffer>>`（＝ `Retained<MtlBuffer>` そのものの保持列）を
+//    フィールドに持ち、`Batch` が `Send` になることで `in_flight`
+//    中の `Retained<MtlBuffer>` 群もスレッド間を移動しうる。すなわち
+//    「`Retained<MtlBuffer>` のスレッド間移動」自体は本リポジトリで
+//    既に確立済みの契約であり、`RawMetalBuffer`（`Retained<MtlBuffer>`
+//    を 1 個保持するのみ・Apple はそもそも `MTLBuffer` に同時
+//    アクセス不可の明示すら課していない）はこの前例より**弱い
+//    ケース**である。
 //
-// 以上 1〜5 により、`RawMetalBuffer` を他スレッドへ `Send` した後に
+// 以上 1〜6 により、`RawMetalBuffer` を他スレッドへ `Send` した後に
 // 行う全操作（`contents()` 取得・`raw()` 経由のメソッド呼び出し・
 // `Drop` での `release`）は安全であり、`unsafe impl Send` の付与は
 // 妥当である（`Sync` は付与しない: `SizeClassPool<H>: Send + Sync
