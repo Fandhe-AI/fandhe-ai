@@ -93,12 +93,18 @@
 //! `poisoned` へ遷移する。CUDA はイシュー #1013（`docs/backend-cuda-
 //! async-execution-design.md` §5）でカーネル起動直後の都度
 //! `synchronize()` を除去し非同期実行契約へ移行したが、`failure_token`
-//! は使わない: `backend-cuda::context_cache` が ordinal 単位の poison
-//! 状態機械で sticky エラーを検出すると、以降その ordinal 上の全 driver
-//! 呼び出しが `Err` を返すため、`step()` 自体の呼び出しが失敗して
-//! 従来どおり即時に `poisoned` へ遷移する。`StorePoisoned` と
-//! `context_cache` 側の poison は独立に併存する契約であり、どちらか
-//! 一方の存在が他方を代替しない）。
+//! は使わない。`backend-cuda::context_cache` は ordinal 単位の poison
+//! 状態機械（`begin_driver_call`／`observe_driver_result`／
+//! `is_poisoned`）を**備えてはいる**が、本 PR（#1013）時点では
+//! `ops.rs`／`sgd.rs` のどこからも呼ばれておらず（Phase C は本 PR の
+//! スコープ外。同設計文書 §12）、CUDA の `sgd_step_device` は
+//! カーネル起動自体が成功する限り `Ok(())` を返す。すなわち起動後の
+//! 非同期実行時エラー（illegal address 等の sticky エラー）は
+//! `step()` 呼び出し時点では検出されず、`StorePoisoned` への自己遷移
+//! も起きない。実際にエラーが表面化するのは偶発的な次の同期点
+//! （明示的な `download` 等）まで遅延する。したがって現時点で CUDA は
+//! Metal のような即時 poison 検知を持たない（`context_cache` の poison
+//! 状態機械への `sgd.rs` 結線は Phase C として #1062 へ引き継ぐ）。
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

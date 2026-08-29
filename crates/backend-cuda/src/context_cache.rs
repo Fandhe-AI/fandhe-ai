@@ -321,7 +321,7 @@ const LIMIT_PROBE_RETRIES: u32 = 3;
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 /// ordinal 単位の `(Mutex<OrdinalState>, Condvar)` セルへの共有ハンドル
 /// （clippy `type_complexity` 回避。実体は [`OrdinalRegistry`] 参照）。
 type OrdinalCell = Arc<(Mutex<OrdinalState>, Condvar)>;
@@ -336,7 +336,7 @@ struct OrdinalRegistry {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 impl OrdinalRegistry {
     fn new() -> Self {
@@ -366,7 +366,7 @@ impl OrdinalRegistry {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 fn ordinal_registry() -> &'static OrdinalRegistry {
     static REGISTRY: OnceLock<OrdinalRegistry> = OnceLock::new();
@@ -383,7 +383,7 @@ fn ordinal_registry() -> &'static OrdinalRegistry {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) struct CallToken {
@@ -427,7 +427,7 @@ impl Drop for CallToken {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 pub(crate) fn begin_driver_call(
     ordinal: usize,
@@ -495,7 +495,7 @@ pub(crate) fn begin_driver_call(
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 pub(crate) fn observe_driver_result<T>(
     ordinal: usize,
@@ -523,7 +523,7 @@ pub(crate) fn observe_driver_result<T>(
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 pub(crate) fn is_poisoned(ordinal: usize) -> bool {
     let Ok(cell) = ordinal_registry().entry(ordinal) else {
@@ -544,7 +544,7 @@ pub(crate) fn is_poisoned(ordinal: usize) -> bool {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 pub(crate) fn current_generation(ordinal: usize) -> u64 {
     let Ok(cell) = ordinal_registry().entry(ordinal) else {
@@ -564,7 +564,7 @@ pub(crate) fn current_generation(ordinal: usize) -> u64 {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 enum ProbeFailure {
     /// 一時的・当該試行固有の失敗（例: OOM）。再試行の余地がある。
@@ -586,7 +586,7 @@ enum ProbeFailure {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 enum ResultClass {
     Sticky,
@@ -598,7 +598,7 @@ enum ResultClass {
 // （「部分結線は fail-open になりかねない」）に基づき本 PR の範囲外とした
 // （PR 本文・out-of-scope へ記録）。単体テスト（`#[cfg(test)] mod tests`）は
 // これらを直接呼んで検証するが、`cargo build`（非 test）では未使用と判定
-// されるため許容する。後続 PR の Phase C 結線で解消する想定。
+// されるため許容する。後続 #1062 の Phase C 結線で解消する想定。
 #[allow(dead_code)]
 fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClass {
     use cudarc::driver::sys::CUresult::*;
@@ -628,7 +628,7 @@ fn classify_cuda_result(err: &cudarc::driver::result::DriverError) -> ResultClas
 /// クロージャを渡して呼ぶ想定。イシュー #1013 の本 PR 時点では
 /// `begin_driver_call`／`observe_driver_result` の結線（Phase C）を
 /// スコープ外としたため、本関数の呼び出し元は未結線（テストのみが
-/// `invalidate_with` を直接検証する）。
+/// `invalidate_with` を直接検証する。結線は #1062 で行う）。
 ///
 /// state 遷移: retire（`Retiring` へ。他スレッドが既に `Retiring` 中なら
 /// 完了を待つ。`Poisoned{true}` は即エラー）→ drain（`in_flight == 0` を

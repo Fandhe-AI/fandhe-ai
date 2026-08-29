@@ -217,14 +217,20 @@ pub trait BackendOps {
     /// （`docs/backend-cuda-async-execution-design.md` §5）でカーネル
     /// 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行した
     /// が、本 `token`（`DispatchFailureCell`）は使わずオーバーライドも
-    /// しない（このデフォルトのまま）。CUDA の遅延エラーは
-    /// `backend-cuda::context_cache` 独自の ordinal 単位 poison 状態機械
-    /// （`BackendError::DeviceContextPoisoned` 等。単一ストリームの
-    /// FIFO 順序保証により sticky エラー観測時点で ordinal を poison し
-    /// 以降の演算入口を拒否する）で表現され、`sgd_step_device` 自体の
-    /// `Err` を通じて `DeviceParamStore::step` の `StorePoisoned` 自己
-    /// 遷移（§5 末尾「独立に併存」）へつながるため、Metal と異なり
-    /// バッチ単位の事前登録機構を必要としない。Metal のみ
+    /// しない（このデフォルトのまま）。`backend-cuda::context_cache` は
+    /// ordinal 単位の poison 状態機械（`begin_driver_call`／
+    /// `observe_driver_result`／`is_poisoned`。単一ストリームの FIFO
+    /// 順序保証を前提に sticky エラー観測時点で ordinal を poison する
+    /// 設計）を**備えてはいる**が、本 PR（#1013）時点では `ops.rs`／
+    /// `sgd.rs` のどこからも呼ばれておらず未結線（Phase C は本 PR の
+    /// スコープ外。結線は #1062 で行う。
+    /// `docs/backend-cuda-async-execution-design.md` §12）。
+    /// このため CUDA の `sgd_step_device` はカーネル起動自体が成功する
+    /// 限り `Ok(())` を返し、起動後の非同期実行時エラーは `step()`
+    /// 呼び出し時点では検出されず `DeviceParamStore::step` の
+    /// `StorePoisoned` 自己遷移にはつながらない（実際にエラーが表面化
+    /// するのは偶発的な次の同期点まで遅延する）。よって現時点で CUDA は
+    /// Metal のようなバッチ単位の事前登録機構の代替を持たない。Metal のみ
     /// `backend-metal::ops::MetalBackendOps` がオーバーライドし、
     /// `MetalContext::encode` と**同一ロック区間で** `token` をバッチへ
     /// 登録する（encode と登録の間に別スレッドの `synchronize` が
