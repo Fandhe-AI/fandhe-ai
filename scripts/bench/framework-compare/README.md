@@ -123,6 +123,82 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
   フレームワーク間（fandhe-ai vs candle/Burn）の checksum 突合は行わない（重み初期化が
   異なる設計のため最終 loss が一致しない。上記モジュール doc・`summarize.py` docstring 参照）
 
+### `train --phases`（イシュー #1009。1 step のフェーズ分解）
+
+`run_train`（fresh）/`run_train_reuse`（reuse）は 1 step の合計時間しか記録せず、
+fandhe-ai の train 1 step が candle/Burn より 1 桁以上遅い理由（tape 構築・forward・
+backward・パラメータ更新のどこが支配的か）を追跡できない。`bench-fandhe` の
+`--task train --phases`（値なしフラグ）はこの 1 step を公開 API の呼び出し境界で
+区間分解し、区間ごとの median/Q1/Q3 を `task:"train_phases"` の JSONL 行として出力する。
+**`bench-fandhe`（`--task train`）専用**であり、`bench-candle`/`bench-burn` や
+`--task gemm`/`--task infer` との組合せは MEASURE_ERROR で fail-fast する。
+
+区間は「公開 API のどの呼び出しに時間が乗るか」を表し、GPU 内部（カーネル／転送）の
+内訳ではない: fandhe-ai 0.4.0 の `Tensor<f32>` はホスト常駐で、CUDA/Metal の各演算は
+演算ごとに H2D→カーネル→D2H を行う（`fandhe-ai-backend-cuda-0.4.0/src/ops.rs::gemm`）。
+また `matmul` は即時実行、elementwise（relu・mse）は実体化境界（`to_tensor()`/`get()`）まで
+遅延する（TASK-12.1d）。
+
+**fresh の区間定義**（`run_train` と同一の処理順・API 呼び出しを `Instant` で分割）:
+
+| phase | 計測対象 |
+| --- | --- |
+| `tape_build` | `make_tape(&cli.device)` |
+| `leaf_register` | `model.bind(&tape)` + 入力/教師データの `tape.var(...)` |
+| `forward` | `bound.forward(&tape, &x)` + `pred.mse_loss(&y)`（matmul 即時実行・elementwise 遅延） |
+| `loss_readout` | `loss.to_tensor().get(&[])`（遅延 elementwise の実体化 = 同期点） |
+| `backward` | `tape.backward(&loss)` + `bound.trainable_grads(&grads)` |
+| `param_readout` | param/grad の `contiguous().as_slice().to_vec()`（D2H） |
+| `host_sgd` | `p - LR*g` の計算 + `Tensor::from_slice`（ホスト計算） |
+| `apply_params` | `model.apply_parameters(next)`（H2D 位置。層再構築） |
+| `tape_drop` | `bound`/`param_refs` の解放 + `drop(tape)`（テンソル解放） |
+| `step_total` | step 全体のウォールクロック時間（検算用。Σphase ≤ step_total） |
+
+**reuse の区間定義**（`run_train_reuse` と同一）:
+
+| phase | 計測対象 |
+| --- | --- |
+| `tape_build` | `make_tape(&cli.device)` |
+| `leaf_register` | 入力/教師データの `tape.var(...)` |
+| `forward_resident` | `model.forward_resident(&tape, &x, &mut store)` + `mse_loss`（`register_resident_leaves` の毎 step D2H を含む） |
+| `loss_readout` | `loss.to_tensor().get(&[])` |
+| `backward` | `tape.backward(&loss)` |
+| `device_update` | `tape.step_device_param_store(&mut store, &grads, &config)`（grad H2D + デバイス上 SGD 発行。CUDA では非同期発行のため完了待ちは次 step の `forward_resident` に計上される） |
+| `tape_drop` | `drop(tape)` |
+| `step_total` | 検算用 |
+
+**「同期待ち」を独立区間にできない理由**: `fandhe-ai =0.4.0` の公開 API 面には
+ホスト転送を伴わない完了待ち（`bench-harness::sync::SyncPoint::wait_idle` 相当）が
+公開されておらず（`run_train_reuse` の `init_s` コメント・PR #998 P2 と同じギャップ）、
+同期は必ず `loss_readout`（実体化）の D2H を通じて発生する。そのため「同期待ち」は
+独立区間にはできず `loss_readout` へ計上される。
+
+reuse 行には `init_s`（`DeviceParamStore` 構築コスト。`run_train_reuse` と同一定義）が
+乗る。`--phases` 実行時は既存の `task:"train"` 行は出さない（`step_total` 行が代替する。
+計時分割つきの step 合計を通常プロトコルの値と混同させないため）。
+
+**JSONL スキーマ**: 既存 `Record` のキー（`framework`・`version`・`task:"train_phases"`・
+`device`・`size`・`median_s`/`q1_s`/`q3_s`・`checksum`・`warmup`・`iters`・`mode`・
+reuse のみ `init_s`）に加え、`phase`（区間名）・`phase_index`（出力順。0 始まり）の
+2 キーを末尾に追加する（`bench_common::PhaseRecord`）。
+
+**`summarize.py` (b'') 節の読み方**: `(device, mode)` ごとに `phase_index` 昇順で表示し、
+`中央値`/`Q1`/`Q3` に加え `step_total 比`（= phase 中央値 / step_total 中央値。100% に
+近いほど支配的な区間）を表示する。表末尾の「フェーズ合計（中央値の和）」は参考値であり
+（中央値は加法的でないため `step_total` と厳密には一致しない）、`step_total` 行の欠落・
+`phase`/`phase_index` の不正や重複・phase 中央値が `step_total` を超える不整合は
+「無効」表示され `--strict` の対象になる。
+
+使用例:
+
+```bash
+cargo run --release -p bench-fandhe -- --task train --device cpu --mode fresh --phases
+cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse --phases
+```
+
+Metal（M4 Max）・DGX Spark GB10 実機での計測・`results/summary.md` への記録は
+本 PR のスコープ外（Mac / DGX Spark 実機を持つセッションでの追加計測に委ねる）。
+
 ### 要素単位検証（イシュー #970）
 
 `(a)` GEMM の checksum（全要素和）は、要素の入れ替わりや正負誤差の相殺で偶然一致しうる破損を
@@ -161,15 +237,17 @@ Metal / CUDA の `fresh` GEMM 比較は例外にあたる）。
 
 ```bash
 cd scripts/bench/framework-compare
-./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal gemm reuse・train reuse スイープ）→ results/raw/results.jsonl
-./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse スイープ）→ results/raw/results-cuda.jsonl
+./run_all.sh                 # macOS: cpu + metal 全組み合わせ（+ metal gemm reuse・train reuse・train phases スイープ）→ results/raw/results.jsonl
+./run_all_cuda.sh            # CUDA ホスト: cuda + cpu 全組み合わせ（+ cuda gemm reuse・train reuse・train phases スイープ）→ results/raw/results-cuda.jsonl
 # 個別実行:
 cargo run --release -p bench-fandhe -- --task gemm --device metal --size 2048
 cargo run --release -p bench-fandhe -- --task gemm --device cuda --size 2048 --mode reuse
 cargo run --release -p bench-fandhe -- --task train --device cuda --mode reuse
+cargo run --release -p bench-fandhe -- --task train --device cpu --mode fresh --phases  # 1 step のフェーズ分解（イシュー #1009）
 # 集計（JSONL → Markdown 表。既定は results/raw/*.jsonl 全件を標準出力へ。
 # gemm reuse 行が存在するファイルには (a') 節、train reuse 行が存在する
-# ファイルには (b') 節が追加される（イシュー #957/#958/#959）。
+# ファイルには (b') 節（イシュー #957/#958/#959）、train_phases 行が存在する
+# ファイルには (b'') 節（イシュー #1009）が追加される。
 # コミット済みの results/summary.md は既定動作では上書きされない）:
 python3 summarize.py
 python3 summarize.py results/raw/results.jsonl --out /tmp/tables.md   # 入力・出力の明示

@@ -43,6 +43,18 @@
 //! device_store.rs`・`docs/device-resident-update-design.md` §3.3b・
 //! イシュー #954 申し送り）。reuse が排除するのは「毎 step の再アップ
 //! ロード（H2D）+ ホスト計算」であり、この D2H は reuse でも残存する。
+//!
+//! `train --phases`（イシュー #1009）: `run_train`/`run_train_reuse` が
+//! 1 step の合計時間しか記録しない点を補い、公開 API の呼び出し境界で
+//! 区間分解した median/Q1/Q3 を `task:"train_phases"` の JSONL 行として
+//! 出力する（`--task train` 限定。`--task gemm`/`--task infer` との組合せは
+//! MEASURE_ERROR）。区間は「公開 API のどの呼び出しに時間が乗るか」を
+//! 表し、GPU 内部（カーネル／転送）の内訳ではない（`fandhe-ai` 0.4.0 の
+//! `Tensor<f32>` はホスト常駐で CUDA/Metal は演算ごとに H2D→カーネル→D2H
+//! を行うため）。詳細な区間定義・「同期待ち」を独立区間にできない理由は
+//! README「`train --phases`」節を参照。実装は
+//! `measure_train_phases`/`measure_train_reuse_phases`（計測本体）と
+//! `run_train_phases`/`run_train_reuse_phases`（JSONL emit）に分離する。
 
 use bench_common::*;
 use fandhe_ai::compat::Sequential;
@@ -59,6 +71,60 @@ const D_OUT: usize = 10;
 const TRAIN_STEPS: usize = 100;
 const TRAIN_WARMUP: usize = 20;
 const LR: f32 = 0.01;
+
+// `train --phases`（イシュー #1009）の区間名。JSONL の `phase` フィールド値
+// になる（`PhaseRecord` 側で `[a-z0-9_]+` allowlist 検証される定数のみ渡す
+// ため、定数自体もその制約を満たす）。README「train --phases」節の区間定義
+// 表と対応する。
+const PHASE_TAPE_BUILD: &str = "tape_build";
+const PHASE_LEAF_REGISTER: &str = "leaf_register";
+const PHASE_FORWARD: &str = "forward";
+const PHASE_FORWARD_RESIDENT: &str = "forward_resident";
+const PHASE_LOSS_READOUT: &str = "loss_readout";
+const PHASE_BACKWARD: &str = "backward";
+const PHASE_PARAM_READOUT: &str = "param_readout";
+const PHASE_HOST_SGD: &str = "host_sgd";
+const PHASE_APPLY_PARAMS: &str = "apply_params";
+const PHASE_DEVICE_UPDATE: &str = "device_update";
+const PHASE_TAPE_DROP: &str = "tape_drop";
+const PHASE_STEP_TOTAL: &str = "step_total";
+
+/// `train --phases` の 1 step 分の区間計測を保持する順序付きサンプル集合
+/// （イシュー #1009）。phase の初出順が `phase_index`（README「train
+/// --phases」節・summarize.py (b'') 節の表示順と一致させる）。
+/// `measure_train_phases`/`measure_train_reuse_phases` は全 phase を
+/// `TRAIN_STEPS` 回ずつ push する構造（ループ本体が phase を毎回同じ順序で
+/// 通過する）ため、同一 phase の `durations()` は要素数 `TRAIN_STEPS`・
+/// インデックス i が「同じ step」を指す前提が成り立つ
+/// （`tests::train_phases_each_step_phase_sum_does_not_exceed_total` が
+/// この前提を固定する）。
+struct PhaseSamples {
+    order: Vec<&'static str>,
+    samples: std::collections::HashMap<&'static str, Vec<Duration>>,
+}
+
+impl PhaseSamples {
+    fn new() -> Self {
+        Self {
+            order: Vec::new(),
+            samples: std::collections::HashMap::new(),
+        }
+    }
+
+    fn push(&mut self, phase: &'static str, dur: Duration) {
+        match self.samples.get_mut(phase) {
+            Some(v) => v.push(dur),
+            None => {
+                self.order.push(phase);
+                self.samples.insert(phase, vec![dur]);
+            }
+        }
+    }
+
+    fn durations(&self, phase: &str) -> &[Duration] {
+        self.samples.get(phase).map(Vec::as_slice).unwrap_or(&[])
+    }
+}
 
 fn make_tape(device: &str) -> Result<Tape, Box<dyn std::error::Error>> {
     match device {
@@ -524,6 +590,248 @@ fn run_train_reuse(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// `train --phases`（fresh。イシュー #1009）の計測本体。`run_train` と
+/// 同一の処理順・同一の API 呼び出し（fresh/phases 間の最終 loss 一致は
+/// `tests::train_phases_fresh_final_loss_matches_run_train` が固定する）を
+/// 公開 API 呼び出し境界で区間分解する。`bound`/`param_refs`（いずれも
+/// `model` への不変借用）は `model.apply_parameters`（`&mut self`）の前に
+/// 明示的に手放す（`run_train` の `{}` ブロックによるスコープ終端と同じ
+/// 借用構造。ここでは明示 `drop` を「テンソル解放」区間の計測点として使う）。
+fn measure_train_phases(cli: &Cli) -> Result<(PhaseSamples, f32), Box<dyn std::error::Error>> {
+    let mut model = build_model()?;
+    let (x_data, y_data) = mlp_data()?;
+    let mut phases = PhaseSamples::new();
+    let mut last_loss = 0.0f32;
+
+    for _ in 0..TRAIN_STEPS {
+        let step_start = Instant::now();
+
+        let t0 = Instant::now();
+        let tape = make_tape(&cli.device)?;
+        phases.push(PHASE_TAPE_BUILD, t0.elapsed());
+
+        let t0 = Instant::now();
+        let bound = model.bind(&tape);
+        let x = tape.var(&x_data);
+        let y = tape.var(&y_data);
+        phases.push(PHASE_LEAF_REGISTER, t0.elapsed());
+
+        let t0 = Instant::now();
+        let pred = bound.forward(&tape, &x)?;
+        let loss = pred.mse_loss(&y)?;
+        phases.push(PHASE_FORWARD, t0.elapsed());
+
+        let t0 = Instant::now();
+        last_loss = loss
+            .to_tensor()
+            .get(&[])
+            .ok_or("loss should be a scalar with shape []")?;
+        phases.push(PHASE_LOSS_READOUT, t0.elapsed());
+
+        let t0 = Instant::now();
+        let grads = tape.backward(&loss)?;
+        let grad_refs = bound.trainable_grads(&grads)?;
+        phases.push(PHASE_BACKWARD, t0.elapsed());
+
+        // param_refs は model への不変借用（bound と共存可）。
+        let param_refs = model.trainable_parameters();
+        let t0 = Instant::now();
+        let mut host_params = Vec::with_capacity(param_refs.len());
+        let mut host_grads = Vec::with_capacity(param_refs.len());
+        let mut shapes = Vec::with_capacity(param_refs.len());
+        for (param, grad) in param_refs.iter().zip(grad_refs.iter()) {
+            let p = param
+                .contiguous()
+                .as_slice()
+                .ok_or("param as_slice None")?
+                .to_vec();
+            let g = grad
+                .contiguous()
+                .as_slice()
+                .ok_or("grad as_slice None")?
+                .to_vec();
+            shapes.push(param.shape().to_vec());
+            host_params.push(p);
+            host_grads.push(g);
+        }
+        phases.push(PHASE_PARAM_READOUT, t0.elapsed());
+
+        let t0 = Instant::now();
+        let mut next = Vec::with_capacity(host_params.len());
+        for ((p, g), shape) in host_params.iter().zip(host_grads.iter()).zip(shapes.iter()) {
+            let upd: Vec<f32> = p.iter().zip(g.iter()).map(|(p, g)| p - LR * g).collect();
+            next.push(Tensor::from_slice(&upd, shape)?);
+        }
+        phases.push(PHASE_HOST_SGD, t0.elapsed());
+
+        // `apply_parameters` は `&mut model` を要求するため、model への
+        // 不変借用（bound・param_refs）をここで明示的に手放す。この解放
+        // コストは「テンソル解放」区間（tape_drop）の一部として、後段の
+        // tape 解放コストと合算して記録する（プロトコル節参照）。
+        let t0 = Instant::now();
+        drop(param_refs);
+        drop(bound);
+        let borrow_release = t0.elapsed();
+
+        let t0 = Instant::now();
+        model.apply_parameters(next)?;
+        phases.push(PHASE_APPLY_PARAMS, t0.elapsed());
+
+        let t0 = Instant::now();
+        drop(tape);
+        phases.push(PHASE_TAPE_DROP, borrow_release + t0.elapsed());
+
+        phases.push(PHASE_STEP_TOTAL, step_start.elapsed());
+    }
+
+    if !last_loss.is_finite() {
+        return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
+    }
+    Ok((phases, last_loss))
+}
+
+/// `train --phases`（reuse。イシュー #1009）の計測本体。`run_train_reuse`
+/// と同一の処理順・同一 API 呼び出しを区間分解する（`init_s` の定義・
+/// 終端同期の検証は `run_train_reuse` と同一。モジュール doc「train
+/// --mode reuse」節参照）。
+fn measure_train_reuse_phases(
+    cli: &Cli,
+) -> Result<(PhaseSamples, f32, f64), Box<dyn std::error::Error>> {
+    let model = build_model()?;
+    let (x_data, y_data) = mlp_data()?;
+
+    let init_start = Instant::now();
+    let init_tape = make_tape(&cli.device)?;
+    let mut store = model.init_device_param_store(&init_tape)?;
+    let _ = init_tape.sync_device_param_store_to_host(&store)?;
+    drop(init_tape);
+    let init_s = init_start.elapsed().as_secs_f64();
+
+    let config = SgdConfig::new(LR);
+    let mut phases = PhaseSamples::new();
+    let mut last_loss = 0.0f32;
+
+    for _ in 0..TRAIN_STEPS {
+        let step_start = Instant::now();
+
+        let t0 = Instant::now();
+        let tape = make_tape(&cli.device)?;
+        phases.push(PHASE_TAPE_BUILD, t0.elapsed());
+
+        let t0 = Instant::now();
+        let x = tape.var(&x_data);
+        let y = tape.var(&y_data);
+        phases.push(PHASE_LEAF_REGISTER, t0.elapsed());
+
+        let t0 = Instant::now();
+        let pred = model.forward_resident(&tape, &x, &mut store)?;
+        let loss = pred.mse_loss(&y)?;
+        phases.push(PHASE_FORWARD_RESIDENT, t0.elapsed());
+
+        let t0 = Instant::now();
+        last_loss = loss
+            .to_tensor()
+            .get(&[])
+            .ok_or("loss should be a scalar with shape []")?;
+        phases.push(PHASE_LOSS_READOUT, t0.elapsed());
+
+        let t0 = Instant::now();
+        let grads = tape.backward(&loss)?;
+        phases.push(PHASE_BACKWARD, t0.elapsed());
+
+        let t0 = Instant::now();
+        tape.step_device_param_store(&mut store, &grads, &config)?;
+        phases.push(PHASE_DEVICE_UPDATE, t0.elapsed());
+
+        let t0 = Instant::now();
+        drop(tape);
+        phases.push(PHASE_TAPE_DROP, t0.elapsed());
+
+        phases.push(PHASE_STEP_TOTAL, step_start.elapsed());
+    }
+
+    if !last_loss.is_finite() {
+        return Err(format!("MEASURE_ERROR: final loss not finite: {last_loss}").into());
+    }
+
+    // 終端同期: run_train_reuse と同一の検証（A08: 破損した学習結果を
+    // 性能値として残さない）。
+    let final_tape = make_tape(&cli.device)?;
+    let synced = final_tape.sync_device_param_store_to_host(&store)?;
+    let expected_len = model.trainable_parameters().len();
+    if synced.len() != expected_len {
+        return Err(format!(
+            "MEASURE_ERROR: sync_device_param_store_to_host returned {} tensors, expected {expected_len}",
+            synced.len()
+        )
+        .into());
+    }
+    for t in &synced {
+        let slice = t
+            .contiguous()
+            .as_slice()
+            .ok_or("synced param as_slice() returned None")?
+            .to_vec();
+        if slice.iter().any(|v| !v.is_finite()) {
+            return Err("MEASURE_ERROR: synced parameter contains non-finite element".into());
+        }
+    }
+
+    Ok((phases, last_loss, init_s))
+}
+
+/// `measure_train_phases`/`measure_train_reuse_phases` の結果を phase ごと
+/// に 1 行の JSONL（`task:"train_phases"`）として出力する（§3.3）。
+/// `--phases` 実行時は既存の `task:"train"` 行は出さない（`step_total` 行が
+/// 代替する。計時分割つきの step 合計を通常プロトコルの値と混同させない
+/// ため）。
+fn emit_phase_records(
+    cli: &Cli,
+    phases: &PhaseSamples,
+    mode: &'static str,
+    checksum: f64,
+    init_s: Option<f64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for (phase_index, &phase) in phases.order.iter().enumerate() {
+        let measured = &phases.durations(phase)[TRAIN_WARMUP..];
+        let st = stats(measured)?;
+        PhaseRecord {
+            base: Record {
+                framework: FRAMEWORK,
+                framework_version: VERSION,
+                task: "train_phases",
+                device: &cli.device,
+                size: BATCH,
+                stats: st,
+                gflops: None,
+                throughput_per_s: None,
+                checksum,
+                warmup: TRAIN_WARMUP,
+                iters: measured.len(),
+                mode,
+                init_s,
+                parity: None,
+            },
+            phase,
+            phase_index,
+        }
+        .emit(&cli.out)?;
+    }
+    Ok(())
+}
+
+/// `--task train --mode fresh --phases`（イシュー #1009）。
+fn run_train_phases(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (phases, last_loss) = measure_train_phases(cli)?;
+    emit_phase_records(cli, &phases, "fresh", last_loss as f64, None)
+}
+
+/// `--task train --mode reuse --phases`（イシュー #1009）。
+fn run_train_reuse_phases(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let (phases, last_loss, init_s) = measure_train_reuse_phases(cli)?;
+    emit_phase_records(cli, &phases, "reuse", last_loss as f64, Some(init_s))
+}
+
 fn run_infer(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let model = build_model()?;
     let (x_data, _) = mlp_data()?;
@@ -585,23 +893,38 @@ fn main() {
     }
 }
 
-/// task × mode の分岐。reuse モードは受け入れ条件の範囲（gemm・train）に
-/// 限定し、infer × reuse は MEASURE_ERROR で fail-fast する（gemm は
-/// イシュー #925 §2.1・§8、train はイシュー #958。infer への拡張は将来
-/// 対応が必要な場合は別イシューで追跡）。
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli()?;
-    match (cli.task.as_str(), cli.mode.as_str()) {
-        ("gemm", "fresh") => run_gemm(&cli),
-        ("gemm", "reuse") => run_gemm_reuse(&cli),
-        ("train", "fresh") => run_train(&cli),
-        ("train", "reuse") => run_train_reuse(&cli),
-        ("infer", "fresh") => run_infer(&cli),
-        (task, "reuse") => Err(format!(
+    dispatch(&cli)
+}
+
+/// task × mode × `--phases` の分岐。reuse モードは受け入れ条件の範囲
+/// （gemm・train）に限定し、infer × reuse は MEASURE_ERROR で fail-fast
+/// する（gemm はイシュー #925 §2.1・§8、train はイシュー #958。infer への
+/// 拡張は将来対応が必要な場合は別イシューで追跡）。`--phases` は
+/// `--task train`（fresh/reuse 双方）にのみ対応し、`gemm`/`infer` との
+/// 組合せは MEASURE_ERROR とする（イシュー #1009）。`run()` から分離して
+/// あるのは `parse_cli()`（`std::env::args()` 依存）を経由せず
+/// `tests::phases_with_gemm_or_infer_is_measure_error` から直接分岐を
+/// 検証できるようにするため。
+fn dispatch(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    match (cli.task.as_str(), cli.mode.as_str(), cli.phases) {
+        ("train", "fresh", true) => run_train_phases(cli),
+        ("train", "reuse", true) => run_train_reuse_phases(cli),
+        (task, _, true) => Err(format!(
+            "MEASURE_ERROR: --phases is only implemented for task 'train' (got '{task}'; issue #1009)"
+        )
+        .into()),
+        ("gemm", "fresh", false) => run_gemm(cli),
+        ("gemm", "reuse", false) => run_gemm_reuse(cli),
+        ("train", "fresh", false) => run_train(cli),
+        ("train", "reuse", false) => run_train_reuse(cli),
+        ("infer", "fresh", false) => run_infer(cli),
+        (task, "reuse", false) => Err(format!(
             "MEASURE_ERROR: --mode reuse is not implemented for task '{task}' (gemm / train only; issue #925 / #958)"
         )
         .into()),
-        (other, _) => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
+        (other, _, false) => Err(format!("MEASURE_ERROR: unknown task '{other}'").into()),
     }
 }
 
@@ -634,6 +957,7 @@ mod tests {
             size: 64,
             out: out.to_string_lossy().into_owned(),
             mode: mode.to_string(),
+            phases: false,
         }
     }
 
@@ -697,5 +1021,208 @@ mod tests {
         assert!(last.contains("\"mode\":\"reuse\""), "line={last}");
         assert!(last.contains("\"init_s\":"), "line={last}");
         assert!(!last.contains("\"init_s\":null"), "line={last}");
+    }
+
+    // イシュー #1009: `train --phases` の受け入れ条件（区間別 median/Q1/Q3
+    // を JSONL に出力する・cpu で動作する・fresh/reuse の最終 loss が
+    // run_train/run_train_reuse と一致する）を固定する回帰テスト群。
+
+    fn make_phases_cli(mode: &str, out: &std::path::Path) -> Cli {
+        Cli {
+            task: "train".to_string(),
+            device: "cpu".to_string(),
+            size: 64,
+            out: out.to_string_lossy().into_owned(),
+            mode: mode.to_string(),
+            phases: true,
+        }
+    }
+
+    #[test]
+    fn train_phases_fresh_emits_one_row_per_phase_in_order() {
+        let out = temp_out_path("phases-fresh-order");
+        run_train_phases(&make_phases_cli("fresh", &out)).expect("run_train_phases failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        let lines: Vec<&str> = content.lines().collect();
+        // fresh の区間数（モジュール doc の PHASE_* 定数のうち fresh 経路で
+        // 使うもの）: tape_build/leaf_register/forward/loss_readout/
+        // backward/param_readout/host_sgd/apply_params/tape_drop/step_total
+        // = 10。
+        assert_eq!(lines.len(), 10, "lines={lines:?}");
+        for (i, line) in lines.iter().enumerate() {
+            assert!(line.contains("\"task\":\"train_phases\""), "line={line}");
+            assert!(
+                line.contains(&format!("\"phase_index\":{i}")),
+                "line={line}"
+            );
+        }
+        assert!(lines.last().unwrap().contains("\"phase\":\"step_total\""));
+        assert!(!lines.iter().any(|l| l.contains("\"init_s\":")));
+    }
+
+    #[test]
+    fn train_phases_each_step_phase_sum_does_not_exceed_total() {
+        let cli = make_phases_cli("fresh", &temp_out_path("phases-fresh-sum"));
+        let (phases, _last_loss) = measure_train_phases(&cli).expect("measure_train_phases failed");
+        let totals = phases.durations(PHASE_STEP_TOTAL);
+        assert_eq!(totals.len(), TRAIN_STEPS);
+        let component_phases: Vec<&str> = phases
+            .order
+            .iter()
+            .copied()
+            .filter(|&p| p != PHASE_STEP_TOTAL)
+            .collect();
+        for (step, &total) in totals.iter().enumerate() {
+            let sum: Duration = component_phases
+                .iter()
+                .map(|&p| phases.durations(p)[step])
+                .sum();
+            assert!(
+                sum <= total,
+                "step={step}: phase sum {sum:?} exceeds step_total {total:?}"
+            );
+            // 計時オーバーヘッド（Instant::now() 呼び出し自体のコスト）の
+            // 上限を固定する回帰テスト。数値一致許容誤差ではない
+            // （coding-rust.md のバックエンド間許容誤差とは無関係）。
+            assert!(
+                sum.as_secs_f64() >= 0.9 * total.as_secs_f64(),
+                "step={step}: phase sum {sum:?} is less than 90% of step_total {total:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn train_phases_fresh_final_loss_matches_run_train() {
+        let fresh_path = temp_out_path("fresh-vs-phases");
+        run_train(&make_cli("train", "fresh", &fresh_path)).expect("run_train failed");
+        let fresh_checksum = last_line_checksum(&fresh_path);
+        let _ = std::fs::remove_file(&fresh_path);
+
+        let phases_cli = make_phases_cli("fresh", &temp_out_path("phases-loss-fresh"));
+        let (_phases, last_loss) =
+            measure_train_phases(&phases_cli).expect("measure_train_phases failed");
+        let phases_checksum = last_loss as f64;
+
+        let abs_diff = (fresh_checksum - phases_checksum).abs();
+        let rel_diff = abs_diff / fresh_checksum.abs().max(1e-12);
+        assert!(
+            abs_diff < 1e-5 || rel_diff < 1e-3,
+            "run_train/measure_train_phases final loss mismatch: \
+             fresh={fresh_checksum} phases={phases_checksum} abs_diff={abs_diff} rel_diff={rel_diff}"
+        );
+    }
+
+    #[test]
+    fn train_reuse_phases_final_loss_matches_run_train_reuse() {
+        let reuse_path = temp_out_path("reuse-vs-phases");
+        run_train_reuse(&make_cli("train", "reuse", &reuse_path)).expect("run_train_reuse failed");
+        let reuse_checksum = last_line_checksum(&reuse_path);
+        let _ = std::fs::remove_file(&reuse_path);
+
+        let phases_cli = make_phases_cli("reuse", &temp_out_path("phases-loss-reuse"));
+        let (_phases, last_loss, _init_s) =
+            measure_train_reuse_phases(&phases_cli).expect("measure_train_reuse_phases failed");
+        let phases_checksum = last_loss as f64;
+
+        let abs_diff = (reuse_checksum - phases_checksum).abs();
+        let rel_diff = abs_diff / reuse_checksum.abs().max(1e-12);
+        assert!(
+            abs_diff < 1e-5 || rel_diff < 1e-3,
+            "run_train_reuse/measure_train_reuse_phases final loss mismatch: \
+             reuse={reuse_checksum} phases={phases_checksum} abs_diff={abs_diff} rel_diff={rel_diff}"
+        );
+    }
+
+    #[test]
+    fn train_reuse_phases_includes_init_s() {
+        let out = temp_out_path("phases-reuse-init");
+        run_train_reuse_phases(&make_phases_cli("reuse", &out))
+            .expect("run_train_reuse_phases failed");
+        let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+        let _ = std::fs::remove_file(&out);
+        for line in content.lines() {
+            assert!(line.contains("\"task\":\"train_phases\""), "line={line}");
+            assert!(line.contains("\"mode\":\"reuse\""), "line={line}");
+            assert!(line.contains("\"init_s\":"), "line={line}");
+            assert!(!line.contains("\"init_s\":null"), "line={line}");
+        }
+    }
+
+    #[test]
+    fn phases_with_gemm_or_infer_is_measure_error() {
+        // `dispatch()`（`run()` の分岐本体。`parse_cli()` を経由せず直接
+        // 呼べるよう分離してある）を通して、`--phases` が `--task train`
+        // 限定であることを固定する。gemm は fresh/reuse 両方を確認する。
+        for (task, mode) in [("gemm", "fresh"), ("gemm", "reuse"), ("infer", "fresh")] {
+            let out = temp_out_path(&format!("phases-unsupported-{task}-{mode}"));
+            let cli = Cli {
+                task: task.to_string(),
+                device: "cpu".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: true,
+            };
+            let err = dispatch(&cli).expect_err("task/--phases combination must be rejected");
+            let msg = err.to_string();
+            assert!(msg.starts_with("MEASURE_ERROR:"), "msg={msg}");
+            assert!(msg.contains("--phases"), "msg={msg}");
+            assert!(msg.contains(task), "msg={msg}");
+        }
+    }
+
+    /// 実機（CUDA）依存の smoke テスト（coding-rust.md「実機依存テストは
+    /// `#[ignore]` で分離」）。fresh/reuse とも行数・`step_total` の存在の
+    /// みを確認する（数値そのものの妥当性は cpu 側の回帰テストが担う）。
+    #[test]
+    #[ignore]
+    fn train_phases_cuda_smoke() {
+        for mode in ["fresh", "reuse"] {
+            let out = temp_out_path(&format!("phases-cuda-smoke-{mode}"));
+            let cli = Cli {
+                task: "train".to_string(),
+                device: "cuda".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: true,
+            };
+            dispatch(&cli).expect("cuda train --phases smoke failed");
+            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+            let _ = std::fs::remove_file(&out);
+            assert!(content.lines().count() > 1, "content={content}");
+            assert!(
+                content.contains("\"phase\":\"step_total\""),
+                "content={content}"
+            );
+        }
+    }
+
+    /// 実機（Metal）依存の smoke テスト。macOS のみコンパイル対象
+    /// （coding-rust.md「実機依存テストは `#[ignore]` で分離」）。
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore]
+    fn train_phases_metal_smoke() {
+        for mode in ["fresh", "reuse"] {
+            let out = temp_out_path(&format!("phases-metal-smoke-{mode}"));
+            let cli = Cli {
+                task: "train".to_string(),
+                device: "metal".to_string(),
+                size: 64,
+                out: out.to_string_lossy().into_owned(),
+                mode: mode.to_string(),
+                phases: true,
+            };
+            dispatch(&cli).expect("metal train --phases smoke failed");
+            let content = std::fs::read_to_string(&out).expect("test: JSONL 読み取り失敗");
+            let _ = std::fs::remove_file(&out);
+            assert!(content.lines().count() > 1, "content={content}");
+            assert!(
+                content.contains("\"phase\":\"step_total\""),
+                "content={content}"
+            );
+        }
     }
 }
