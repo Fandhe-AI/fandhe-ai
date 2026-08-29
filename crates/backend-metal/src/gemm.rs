@@ -1717,7 +1717,6 @@ fn encode_dispatch(
 /// （16×16・`div_ceil(16)`。`gemm_tiled_bias_act` は `gemm_tiled` と同じ
 /// タイリング形状のため）。
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn encode_dispatch_bias_act(
     encoder: &objc2::runtime::ProtocolObject<dyn MTLComputeCommandEncoder>,
     pipeline: &MtlPipeline,
