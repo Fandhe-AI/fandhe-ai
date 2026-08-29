@@ -73,7 +73,17 @@ fn compiled_kernel_count(gemm: &CudaGemm) -> u64 {
     .into_iter()
     .filter(|available| *available)
     .count() as u64;
-    MANDATORY_KERNEL_COUNT + optional_available_count
+    // staged swizzle 変種（`wmma_tf32_staged_swizzle_descriptor` / kernel_name
+    // "wmma_tf32_staged_swizzle"）は `kernel_specs` に含まれない別カーネル
+    // エントリだが、`CudaGemm::new` から `load_function_cached` 経由で
+    // ロードされる（`gemm.rs::CudaGemm::new` の swizzle 分岐参照）。
+    // 成功時（`wmma_tf32_staged_swizzle_group_width()` が `Some`）はキャッシュへ
+    // insert 済みのため、実際にコンパイル・ロードへ成功したカーネル数へ
+    // 含めないと 1st/2nd 構築間の miss/hit 期待値がずれる
+    // （イシュー #1024 レビュー指摘。Cursor Bugbot Low Severity。
+    // PRRT_kwDOTuUCJc6da-Ta）。
+    let swizzle_available_count = u64::from(gemm.wmma_tf32_staged_swizzle_group_width().is_some());
+    MANDATORY_KERNEL_COUNT + optional_available_count + swizzle_available_count
 }
 
 /// [`compiled_kernel_count`] の否定側: TF32 WMMA 系 3 種のうち NVRTC
@@ -104,7 +114,22 @@ fn unavailable_optional_kernel_count(gemm: &CudaGemm) -> u64 {
     .into_iter()
     .filter(|available| *available)
     .count() as u64;
-    total_optional - available_count
+    // staged swizzle 変種の fail-soft miss も加算する（レビュー指摘対応。
+    // イシュー #1024・Cursor Bugbot Low Severity。PRRT_kwDOTuUCJc6da-Ta）:
+    // `wmma_tf32_staged_swizzle_unavailable_reason()` が `Some` を返すのは
+    // `CudaGemm::new` が実際に swizzle 変種の `load_function_cached` 呼び出し
+    // を試みた（`wmma_tf32_staged` 本体のコンパイルに成功し `device.
+    // multiprocessor_count()` も実測できた）にもかかわらず NVRTC コンパイル
+    // に失敗した場合のみ（`gemm.rs::CudaGemm::wmma_tf32_staged_swizzle_unavailable_reason`
+    // ドキュメンテーションコメント参照）。この場合、`load_function_cached`
+    // は 1 段目（`KernelModuleCache::get`）で miss を計上するが insert
+    // されないため、[`unavailable_optional_kernel_count`] の 3 種と同様
+    // 2 回目の構築でも同じ miss が再度発生する。base 側が未対応・SM 数が
+    // 取得できず試み自体が起きなかった場合（reason・group_width とも
+    // `None`）は miss が発生しないため加算しない。
+    let swizzle_repeated_miss =
+        u64::from(gemm.wmma_tf32_staged_swizzle_unavailable_reason().is_some());
+    (total_optional - available_count) + swizzle_repeated_miss
 }
 
 /// (a) 同一 `context_cache::cached_device` 上で `CudaGemm::new` を 2 回
