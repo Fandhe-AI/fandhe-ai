@@ -99,6 +99,62 @@ def _train_row(
     }
 
 
+def _train_phases_row(
+    device="cpu",
+    mode="fresh",
+    phase="tape_build",
+    phase_index=0,
+    median_s=0.001,
+    init_s=None,
+):
+    """train_phases タスク（(b'') 節。イシュー #1009）用の合成行。
+
+    `_train_row` と異なりフィールド集合が異なる（`phase`/`phase_index`
+    を持ち `gflops` を持たない。`bench_common::PhaseRecord::to_json_line`
+    参照）。
+    """
+    row = {
+        "framework": "fandhe-ai",
+        "version": "0.4.0",
+        "task": "train_phases",
+        "device": device,
+        "size": 64,
+        "median_s": median_s,
+        "q1_s": median_s * 0.9,
+        "q3_s": median_s * 1.1,
+        "checksum": 0.08054,
+        "warmup": 20,
+        "iters": 80,
+        "mode": mode,
+        "phase": phase,
+        "phase_index": phase_index,
+    }
+    if init_s is not None:
+        row["init_s"] = init_s
+    return row
+
+
+def _train_phases_group(device="cpu", mode="fresh", init_s=None):
+    """1 step 分の典型的な train_phases 行グループを構成する。
+
+    `summarize._TRAIN_PHASES_REQUIRED_PHASES[mode]` の必須 phase 名を
+    `phase_index` 0 始まりの連番で全件含める（`_train_phases_validate` の
+    必須 phase 集合・順序・件数チェック — codex-review 指摘・PR #1055 —
+    に対して「有効な group」の基準となるため、producer 側 `PHASE_*` 定数
+    と同じ集合を実プロダクションの一部として合成する）。`step_total` 以外
+    の `median_s` は小さめの固定値とし、その和が `step_total` の
+    `median_s`（0.01）以下になるよう構成する
+    （`train_phases_each_step_phase_sum_does_not_exceed_total` と同じ
+    不変条件）。
+    """
+    phases = summarize._TRAIN_PHASES_REQUIRED_PHASES[mode]
+    rows = []
+    for phase_index, phase in enumerate(phases):
+        median_s = 0.01 if phase == "step_total" else 0.0005
+        rows.append(_train_phases_row(device, mode, phase, phase_index, median_s, init_s))
+    return rows
+
+
 class ParityStatusTests(unittest.TestCase):
     def test_missing_keys_is_unverified(self):
         row = _base_row()
@@ -347,7 +403,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [_with_parity(_base_row(), fail_count=5, max_abs_err=1.2e-3, max_rel_err=4.5e-2)]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, has_checksum_mismatch, has_parity_failure, _, _ = summarize.section(
+            lines, has_checksum_mismatch, has_parity_failure, _, _, _ = summarize.section(
                 "dummy.jsonl", rows
             )
         text = "\n".join(lines)
@@ -360,7 +416,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_ok_row_not_marked_invalid(self):
         rows = [_with_parity(_base_row())]
-        lines, has_checksum_mismatch, has_parity_failure, _, _ = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _, _, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -370,7 +426,7 @@ class SectionRenderingTests(unittest.TestCase):
 
     def test_old_format_row_reported_as_unverified_not_invalid(self):
         rows = [_base_row()]
-        lines, has_checksum_mismatch, has_parity_failure, has_unverified, _ = (
+        lines, has_checksum_mismatch, has_parity_failure, has_unverified, _, _ = (
             summarize.section("dummy.jsonl", rows)
         )
         text = "\n".join(lines)
@@ -392,7 +448,7 @@ class SectionRenderingTests(unittest.TestCase):
                 fail_count=1,  # かつ要素誤差超過
             ),
         ]
-        lines, has_checksum_mismatch, has_parity_failure, _, _ = summarize.section(
+        lines, has_checksum_mismatch, has_parity_failure, _, _, _ = summarize.section(
             "dummy.jsonl", rows
         )
         text = "\n".join(lines)
@@ -412,7 +468,7 @@ class SectionRenderingTests(unittest.TestCase):
         rows = [row]
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            lines, _, has_parity_failure, _, _ = summarize.section("dummy.jsonl", rows)
+            lines, _, has_parity_failure, _, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertTrue(has_parity_failure)
         self.assertIn("(a')", text)
@@ -424,7 +480,7 @@ class SectionRenderingTests(unittest.TestCase):
         row = _with_parity(_base_row(mode="reuse"))
         row["init_s"] = 0.01
         rows = [row]
-        lines, _, has_parity_failure, _, _ = summarize.section("dummy.jsonl", rows)
+        lines, _, has_parity_failure, _, _, _ = summarize.section("dummy.jsonl", rows)
         text = "\n".join(lines)
         self.assertFalse(has_parity_failure)
         self.assertIn("(a')", text)
@@ -635,7 +691,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", checksum=0.08),
             _train_row(mode="reuse", checksum=999.0),
         ]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_checksum_as_invalid(self):
@@ -643,7 +699,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=0.02, checksum=float("inf")),
             _train_row(mode="reuse", median_s=0.01, checksum=0.08054),
         ]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_median_as_invalid(self):
@@ -651,7 +707,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
             _train_row(mode="reuse", median_s=-0.01, checksum=0.08054),
         ]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_does_not_flag_ok_train_reuse_row(self):
@@ -659,7 +715,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=0.02, checksum=0.08054),
             _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
         ]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_train_reuse_invalid)
 
     def test_section_does_not_flag_train_reuse_row_without_fresh(self):
@@ -670,7 +726,7 @@ class TrainReuseSectionTests(unittest.TestCase):
         # 検証は下の `test_section_flags_train_reuse_missing_init_s_as_invalid`
         # に分離。イシュー #959 codex-review 2 巡目 P0 指摘）。
         rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005)]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertFalse(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_missing_init_s_as_invalid(self):
@@ -679,12 +735,12 @@ class TrainReuseSectionTests(unittest.TestCase):
         # だが、旧実装は表示列（"-"）にのみ反映し `has_train_reuse_invalid`
         # へ反映していなかったため `--strict` が fail-open だった。
         rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=None)]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_init_s_as_invalid(self):
         rows = [_train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=-1.0)]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_section_flags_train_reuse_invalid_fresh_median_as_invalid(self):
@@ -699,7 +755,7 @@ class TrainReuseSectionTests(unittest.TestCase):
             _train_row(mode="fresh", median_s=float("nan"), checksum=0.08054),
             _train_row(mode="reuse", median_s=0.01, checksum=0.08054, init_s=0.005),
         ]
-        *_, has_train_reuse_invalid = summarize.section("dummy.jsonl", rows)
+        *_, has_train_reuse_invalid, _ = summarize.section("dummy.jsonl", rows)
         self.assertTrue(has_train_reuse_invalid)
 
     def test_main_strict_exit_code_reflects_train_reuse_missing_init_s(self):
@@ -782,6 +838,249 @@ class TrainReuseSectionTests(unittest.TestCase):
                 _train_row(mode="reuse", checksum=0.08, init_s=0.005),
             ]
         )
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 0)
+
+
+class TrainPhasesSectionTests(unittest.TestCase):
+    """(b'') train_phases 節の集計（イシュー #1009）。"""
+
+    def test_no_train_phases_rows_omits_section(self):
+        # 旧 JSONL（train_phases 行なし）では (b'') を出力しない
+        # （(a')/(b') と同じ互換維持方針）。
+        rows = [_train_row(mode="fresh")]
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertNotIn("(b'')", text)
+
+    def test_valid_group_renders_table_in_phase_index_order(self):
+        rows = _train_phases_group(device="cpu", mode="fresh")
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("(b'')", text)
+        self.assertIn("CPU / fresh", text)
+        # phase_index 昇順（tape_build → forward → backward → step_total）。
+        # 各 phase のテーブル行（"| <phase> |" で始まる）の出現位置で判定する
+        # （列見出し「step_total 比」に "step_total" が部分文字列として
+        # 含まれるため、素の `text.index(phase)` はヘッダ行を拾ってしまう）。
+        order = [text.index(f"| {p} |") for p in ["tape_build", "forward", "backward", "step_total"]]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("100.0%", text)  # step_total 行自身の比
+        self.assertNotIn("無効", text)
+
+    def test_reuse_group_shows_init_s(self):
+        rows = _train_phases_group(device="cpu", mode="reuse", init_s=0.002)
+        lines, *_ = summarize.section("dummy.jsonl", rows)
+        text = "\n".join(lines)
+        self.assertIn("CPU / reuse", text)
+        self.assertIn("初期化(init_s): 2.000 ms", text)
+
+    def test_missing_step_total_is_invalid_and_strict_fails(self):
+        rows = [r for r in _train_phases_group() if r["phase"] != "step_total"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("step_total", buf.getvalue())
+
+    def test_missing_required_non_step_total_phase_is_invalid(self):
+        # codex-review 指摘（PR #1055）: `backward` 等の必須 phase 行が
+        # 欠落していても `step_total` 行さえ残っていれば修正前は有効判定
+        # されていた（`_train_phases_validate` が `step_total` の存在のみ
+        # を検証していたため）。`phase_index` を詰め直さず欠番のまま残す
+        # ことで、mode ごとの必須 phase 集合・順序チェックが単独で欠落を
+        # 検出できることを固定する。
+        rows = [r for r in _train_phases_group(mode="fresh") if r["phase"] != "backward"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("必須 phase 集合と不一致", buf.getvalue())
+        self.assertIn("backward", buf.getvalue())
+
+    def test_missing_required_phase_fails_with_strict_even_with_step_total(self):
+        rows = [r for r in _train_phases_group(mode="reuse") if r["phase"] != "device_update"]
+        path = _write_jsonl(rows)
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 2)
+        self.assertIn("train_phases", buf_err.getvalue())
+
+    def test_extra_unknown_phase_alongside_full_required_set_is_invalid(self):
+        # 必須集合を全て満たしたうえで余剰 phase（producer 契約に無い名前）
+        # が混入した場合も、件数不一致として無効化する。
+        rows = _train_phases_group(mode="fresh")
+        extra = dict(rows[0])
+        extra["phase"] = "unexpected_extra_phase"
+        extra["phase_index"] = max(r["phase_index"] for r in rows) + 1
+        rows = rows + [extra]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("必須 phase 集合と不一致", buf.getvalue())
+
+    def test_duplicate_phase_index_is_invalid(self):
+        rows = _train_phases_group()
+        rows[1] = dict(rows[1])
+        rows[1]["phase_index"] = rows[0]["phase_index"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("重複", "\n".join(lines))
+
+    def test_non_string_phase_is_invalid(self):
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["phase"] = 123
+        *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_phase_with_markdown_injection_chars_is_invalid(self):
+        # producer 契約は `[a-z0-9_]+`（`bench_common::validate_phase_name`）。
+        # 非空文字列チェックのみでは改行・`|` を含む値が検証を素通りし表へ
+        # 無加工出力される（codex-review 指摘・PR #1055）。
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["phase"] = "tape_build|injected\n# hijacked heading"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        text = "\n".join(lines)
+        self.assertNotIn("injected", text)
+        self.assertNotIn("hijacked", text)
+
+    def test_unhashable_device_does_not_raise(self):
+        # `device`/`mode` は外部 JSONL 由来のためグループ化キーへ使う前に
+        # 型検証する。配列等の unhashable な値をそのまま辞書キーにすると
+        # `TypeError` で集計全体が例外終了する（codex-review 指摘・PR #1055）。
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["device"] = ["cpu"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("(b'')", "\n".join(lines))
+
+    def test_unallowlisted_mode_does_not_raise(self):
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["mode"] = "evil"
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("(b'')", "\n".join(lines))
+
+    def test_duplicate_phase_name_with_distinct_index_is_invalid(self):
+        # phase_index が別々でも同じ phase 名（"step_total"）を混入させると、
+        # 修正前は最初の行だけが分母として無検証に採用されていた
+        # （codex-review 指摘・PR #1055）。
+        rows = _train_phases_group()
+        extra = dict(rows[-1])  # 2 つ目の "step_total"（phase_index だけ変える）
+        extra["phase_index"] = max(r["phase_index"] for r in rows) + 1
+        extra["median_s"] = 0.05
+        rows = rows + [extra]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        text = "\n".join(lines)
+        self.assertIn("重複", text)
+        # 分母が一意に決まらないため比の算出不能警告が出る（修正前は
+        # 最初の "step_total" 行が無検証に分母として使われていた）。
+        self.assertIn("step_total 行が欠落または不正", buf.getvalue())
+
+    def test_negative_phase_index_is_invalid(self):
+        rows = _train_phases_group()
+        rows[0] = dict(rows[0])
+        rows[0]["phase_index"] = -1
+        *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_non_finite_median_is_invalid(self):
+        rows = _train_phases_group()
+        rows[1] = dict(rows[1])
+        rows[1]["median_s"] = float("nan")
+        lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("無効な値", "\n".join(lines))
+
+    def test_reuse_missing_init_s_is_invalid(self):
+        rows = _train_phases_group(mode="reuse", init_s=0.001)
+        rows[1] = dict(rows[1])
+        del rows[1]["init_s"]
+        *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+
+    def test_phase_median_exceeding_step_total_is_invalid(self):
+        # 計時区間の合計が全体（step_total）を超えるのは不整合（コメント
+        # 「各 phase の中央値が `step_total` の中央値を上回る」参照）。
+        rows = _train_phases_group()
+        rows[1] = dict(rows[1])
+        rows[1]["median_s"] = rows[-1]["median_s"] * 2  # step_total の 2 倍
+        rows[1]["q1_s"] = rows[1]["median_s"] * 0.9
+        rows[1]["q3_s"] = rows[1]["median_s"] * 1.1
+        lines, *_, has_train_phases_invalid = summarize.section("dummy.jsonl", rows)
+        self.assertTrue(has_train_phases_invalid)
+        self.assertIn("100% を超過", "\n".join(lines))
+
+    def test_train_phases_rows_do_not_affect_train_section(self):
+        # (b)/(b') は task == "train" のみを読むため、train_phases 行を
+        # 混ぜても (b)/(b') の集計結果に影響しないことを固定する。
+        rows_without_phases = [_train_row(mode="fresh", median_s=0.02, checksum=0.08054)]
+        rows_with_phases = rows_without_phases + _train_phases_group()
+        lines_a, *_ = summarize.section("dummy.jsonl", rows_without_phases)
+        lines_b, *_ = summarize.section("dummy.jsonl", rows_with_phases)
+        # (b) の行（"| cpu | fandhe-ai |" で始まる 5 列の行）は不変。
+        b_row_a = next(line for line in lines_a if line.startswith("| cpu | fandhe-ai |"))
+        b_row_b = next(line for line in lines_b if line.startswith("| cpu | fandhe-ai |"))
+        self.assertEqual(b_row_a, b_row_b)
+
+    def test_train_phases_rows_do_not_affect_gemm_or_devices_in(self):
+        gemm_rows = [_with_parity(_base_row())]
+        rows = gemm_rows + _train_phases_group()
+        self.assertEqual(
+            summarize.gemm_checksum_mismatches(rows), summarize.gemm_checksum_mismatches(gemm_rows)
+        )
+        self.assertEqual(summarize.devices_in(rows, "gemm"), summarize.devices_in(gemm_rows, "gemm"))
+
+    def test_main_strict_exit_code_reflects_train_phases_invalid(self):
+        rows = [r for r in _train_phases_group() if r["phase"] != "step_total"]
+        path = _write_jsonl(rows)
+        old_argv = sys.argv
+        sys.argv = ["summarize.py", path, "--strict"]
+        buf_out, buf_err = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                code = summarize.main()
+        finally:
+            sys.argv = old_argv
+            os.unlink(path)
+        self.assertEqual(code, 2)
+        self.assertIn("train_phases", buf_err.getvalue())
+
+    def test_main_strict_exit_code_unaffected_by_valid_train_phases_rows(self):
+        rows = _train_phases_group()
+        path = _write_jsonl(rows)
         old_argv = sys.argv
         sys.argv = ["summarize.py", path, "--strict"]
         buf_out, buf_err = io.StringIO(), io.StringIO()
