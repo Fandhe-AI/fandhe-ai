@@ -161,6 +161,16 @@ pub trait BackendOps {
     /// `param`／`velocity` は前ステップから使い回すことで、param の
     /// ホスト再アップロードを排除する（本イシューの受け入れ条件）。
     ///
+    /// **呼び出し元は全パラメータを連結した単一バッファで 1 回だけ呼ぶ**
+    /// （イシュー #1023「パラメータ横断の単一連結バッファ化」）。
+    /// `param`／`grad`／`velocity` はいずれもパラメータ数だけ個別に渡す
+    /// のではなく、`DeviceParamStore` が全パラメータを 1 本の shape
+    /// `[total_numel]` バッファへ連結して常駐させ、`step()` ごとに本
+    /// メソッド（`sgd_step_device_tracked` 経由）を 1 回だけ起動する。
+    /// 本メソッド自体は要素単位で shape 非依存に定義されているため、
+    /// この呼び出し規約変更はシグネチャ・カーネル実装（CPU／CUDA／
+    /// Metal のいずれも）に一切変更を要求しない。
+    ///
     /// 更新式は `fandhe_ai_autodiff::optim::sgd`（`Sgd::step` ホスト参照
     /// 実装）と同一の項順序（weight_decay → momentum〈`is_first_step` で
     /// `b ← g` 分岐〉→ nesterov → 減算）を 3 バックエンドで揃える契約
