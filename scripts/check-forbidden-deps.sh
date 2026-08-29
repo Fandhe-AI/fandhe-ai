@@ -172,31 +172,67 @@ check_lock_all() {
 }
 
 # Cargo.lock 形式テキストに `name = "<crate>"` + `version = "<version>"` +
-# `source = "registry+https://github.com/rust-lang/crates.io-index"` の
-# パッケージエントリが存在することを検査する（テキスト入力版。self-test から
-# 固定文字列で直接検証できるよう、ファイル I/O と分離する）。
+# `source = "registry+https://github.com/rust-lang/crates.io-index"` が
+# **同一の [[package]] エントリ内に揃って**存在することを検査する（テキスト入力版。
+# self-test から固定文字列で直接検証できるよう、ファイル I/O と分離する）。
 # source 行の必須化はイシュー #982: path 依存は [[package]] エントリから
 # source/checksum 行そのものが消え、git 依存は `source = "git+…"` になるため、
 # version 一致だけでは非 registry 取得元への差し替えを検出できない
 # （check_manifest_deps_text の非 registry 取得元検出と対をなす Cargo.lock 層の防御）。
+# エントリ単位での判定が必須な理由（イシュー #982 レビュー指摘・PR #991
+# codex-review / Cursor Bugbot 双方が独立検出）: 旧実装は `grep -A3` で crate 名に
+# 一致する全 [[package]] ブロックの断片を 1 つの文字列へ連結したうえで、
+# version・source を別々に（`grep -qF` 2 回で）検査していた。このため
+# 「承認バージョンのエントリが path/git 依存（source 行なし）」かつ
+# 「同名クレートの別バージョンのエントリが registry 依存」という Cargo.lock が
+# 現れると、version 条件は前者のブロックで、source 条件は後者のブロックで
+# それぞれ成立してしまい、承認バージョン自体が非 registry 取得元へ差し替えられた
+# ケースを検出できない fail-open だった（本リポの Cargo.lock に実際に
+# candle-core 0.10.2 / 0.11.0 のような同名複数バージョンが併存することを
+# Cursor Bugbot が指摘）。Cargo.lock の [[package]] エントリは空行区切りの
+# パラグラフのため、awk の paragraph mode（RS=""）でエントリ単位に分割し、
+# name・version・source の 3 条件を同一エントリ内でのみ判定する。
 check_lock_pin_text() {
   local label="$1"
   local text="$2"
   local crate="$3"
   local version="$4"
-  local block
-  # Cargo.lock の [[package]] エントリは `name = "..."` の直後に version・source・
-  # checksum が続く（-A3 で version 行 + source 候補行 + checksum 候補行まで拾う）。
-  block=$(echo "${text}" | grep -A3 "^name = \"${crate}\"\$" || true)
-  if ! echo "${block}" | grep -qF "version = \"${version}\""; then
-    echo "::error::${label} に承認済みピン ${crate} ${version} が見つかりません（承認外バージョンへのドリフト、または比較対象の削除。.claude/rules/deps-policy.md 第 9 区分）" >&2
-    return 1
-  fi
-  if ! echo "${block}" | grep -qF 'source = "registry+https://github.com/rust-lang/crates.io-index"'; then
-    echo "::error::${label} の承認済みピン ${crate} ${version} が crates.io registry 取得元ではありません（path/git 依存等への差し替えの可能性。.claude/rules/deps-policy.md 第 9 区分）" >&2
-    return 1
-  fi
-  echo "OK: ${label} に承認済みピン ${crate} ${version}（registry 取得元）が存在"
+  local result
+  result=$(echo "${text}" | awk -v crate="${crate}" -v version="${version}" '
+    BEGIN { RS = ""; FS = "\n"; found_name_version = 0; ok = 0 }
+    {
+      has_name = 0; has_version = 0; has_source = 0
+      for (i = 1; i <= NF; i++) {
+        line = $i
+        if (line == "name = \"" crate "\"") has_name = 1
+        if (line == "version = \"" version "\"") has_version = 1
+        if (line == "source = \"registry+https://github.com/rust-lang/crates.io-index\"") has_source = 1
+      }
+      if (has_name && has_version) {
+        found_name_version = 1
+        if (has_source) { ok = 1 }
+      }
+    }
+    END {
+      if (ok) { print "OK"; exit }
+      if (found_name_version) { print "NO_SOURCE"; exit }
+      print "NOT_FOUND"
+    }
+  ')
+  case "${result}" in
+    OK)
+      echo "OK: ${label} に承認済みピン ${crate} ${version}（registry 取得元）が存在"
+      return 0
+      ;;
+    NO_SOURCE)
+      echo "::error::${label} の承認済みピン ${crate} ${version} が crates.io registry 取得元ではありません（path/git 依存等への差し替えの可能性。.claude/rules/deps-policy.md 第 9 区分）" >&2
+      return 1
+      ;;
+    *)
+      echo "::error::${label} に承認済みピン ${crate} ${version} が見つかりません（承認外バージョンへのドリフト、または比較対象の削除。.claude/rules/deps-policy.md 第 9 区分）" >&2
+      return 1
+      ;;
+  esac
 }
 
 # Cargo.toml 形式テキストの [dependencies] セクションを、許容された直接依存の
@@ -563,6 +599,30 @@ source = "git+https://github.com/tracel-ai/burn?rev=deadbeef#deadbeef"'
     failed=1
   else
     echo "self-test OK: pin git-dep fixture は fail する"
+  fi
+
+  # check_lock_pin_text のエントリ横断 fail-open 回帰検出（イシュー #982・PR #991
+  # codex-review / Cursor Bugbot 指摘）: 承認バージョンのエントリが path 依存
+  # （source 行なし）で、かつ同名クレートの別バージョンのエントリが registry
+  # 依存という Cargo.lock（[[package]] は空行区切り）を与えたとき、version 条件と
+  # source 条件をエントリ横断でそれぞれ満たしてしまい誤って pass する退行を防ぐ。
+  local pin_cross_entry_text='[[package]]
+name = "burn"
+version = "0.21.0"
+dependencies = [
+ "burn-core",
+]
+
+[[package]]
+name = "burn"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "deadbeef"'
+  if check_lock_pin_text "self-test pin cross-entry fixture" "${pin_cross_entry_text}" "burn" "0.21.0" >/dev/null 2>&1; then
+    echo "self-test NG: pin cross-entry fixture が誤って pass した（同名クレートの別バージョン registry エントリを誤検出し fail-open している）" >&2
+    failed=1
+  else
+    echo "self-test OK: pin cross-entry fixture は fail する"
   fi
 
   # check_manifest_deps_text（framework-compare の直接依存 allowlist 検査）も同方式で
