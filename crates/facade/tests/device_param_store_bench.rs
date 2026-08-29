@@ -153,6 +153,18 @@ fn run_resident_path(device: Device, steps: usize) -> (f64, f64) {
         tape.step_device_param_store(&mut store, &grads, &config)
             .unwrap();
         update_secs += t_update.elapsed().as_secs_f64();
+        // イシュー #1013（カーネル起動直後の都度 `synchronize()` 除去）
+        // 後は、この step のループ本体には明示的な完了待ちが一切残らない
+        // （forward/backward/update いずれも非同期投入のみ）。`Instant`
+        // による経過時間計測がホスト側のディスパッチ時間（enqueue コスト）
+        // しか捉えず GPU 実行完了を反映しない見かけ上の高速化に化けるのを
+        // 防ぐため、`sync_to_host`（readback 境界。`DeviceParamStore`
+        // の実処理は `MemoryOps::download` 経由で維持される同期点）を
+        // 明示的に呼び、旧経路が暗黙に持っていた「launch 直後の同期」と
+        // 同等の完了保証をこの計測境界へ復元する。before/after 双方の
+        // 計測を同一の本ファイルで取ることで比較可能性を保つ
+        // （before は #1013 変更前のソースに対して本行を含めて計測する）。
+        let _ = tape.sync_device_param_store_to_host(&store).unwrap();
         total_secs += t_step.elapsed().as_secs_f64();
     }
 

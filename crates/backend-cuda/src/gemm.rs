@@ -1484,9 +1484,10 @@ impl CudaGemm {
                 .arg(&act_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev.as_view())?;
+        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+        // ため、論理長ビュー（`as_view()`）を渡す。
+        let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
         Ok(c_host)
     }
 
@@ -1805,9 +1806,8 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
         Ok(c_host)
     }
 
@@ -1859,9 +1859,8 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
         Ok(c_host)
     }
 
@@ -1913,9 +1912,8 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
         Ok(c_host)
     }
 
@@ -2001,9 +1999,10 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev.as_view())?;
+        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+        // ため、論理長ビュー（`as_view()`）を渡す。
+        let c_host = crate::memory::readback(&self.stream, &c_dev.as_view())?;
         Ok(c_host)
     }
 
@@ -2056,9 +2055,8 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
         Ok(c_host)
     }
 
@@ -2134,7 +2132,9 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
         Ok(())
     }
 
@@ -2222,7 +2222,9 @@ impl CudaGemm {
                 .arg(&act_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
         Ok(())
     }
 
@@ -2305,7 +2307,9 @@ impl CudaGemm {
                 .arg(&act_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
         Ok(())
     }
 
@@ -2344,7 +2348,9 @@ impl CudaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
         Ok(())
     }
 
@@ -2439,14 +2445,31 @@ impl CudaGemm {
                     .to_string(),
             });
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_f32`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
         Ok(())
     }
 
     /// C（f32）をデバイス→ホストへ転送する（[`Self::upload_f32`] と同じ
     /// 理由で公開する。tiled f32・WMMA(TF32) で共有）。
+    ///
+    /// 同期点（#1013）: 常駐 `launch_*` は非同期投入のみで完了を待たない
+    /// ため、本関数が readback ヘルパー経由で完了を確定する。
     pub fn download_f32(&self, c_dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        Ok(self.stream.clone_dtoh(c_dev)?)
+        crate::memory::readback(&self.stream, c_dev)
+    }
+
+    /// ストリームの完了を明示的に待つ（イシュー #1013）。
+    ///
+    /// `launch_*`（常駐 API）が非同期投入のみに契約変更されたことで、
+    /// D2H を伴わない計測区間（`examples/cuda_floor_bench.rs` 等の
+    /// 「GPU 実行 + 完了待ち」を PyTorch 参照計測と同一境界で比較する
+    /// マイクロベンチ）が完了保証を失った。本関数はその計測境界を
+    /// 明示的に復元するための公開 API であり、本番ディスパッチ
+    /// （`ops.rs`）からは呼ばれない。
+    pub fn synchronize(&self) -> Result<(), CudaError> {
+        Ok(self.stream.synchronize()?)
     }
 }
 

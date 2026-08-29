@@ -1332,7 +1332,9 @@ impl CompiledMmaTf32BlockTileKernel {
                 .arg(&k_i)
                 .launch(launch_config)?;
         }
-        stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点
+        // （`download_*`／`MemoryOps::download`／明示 `synchronize`）へ
+        // 委ねる（設計文書 §3〜§4）。
         Ok(())
     }
 }

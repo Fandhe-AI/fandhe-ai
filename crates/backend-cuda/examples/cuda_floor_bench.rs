@@ -300,6 +300,12 @@ fn measure_tiled_f32(gemm: &CudaGemm, size: usize, config: &MeasurementConfig) -
     let measurement = bench_run(config, || {
         gemm.launch_tiled_f32(&a_dev, &b_dev, &mut c_dev, m, n, k)
             .expect("tiled f32 GEMM must succeed on CUDA-equipped runner");
+        // イシュー #1013 で `launch_tiled_f32` は非同期投入のみに契約
+        // 変更されたため、「GPU 実行 + 同期」の計測境界（本関数
+        // ドキュメンテーションコメント）を維持するには明示的な
+        // `synchronize` が必要（PyTorch 参照計測との境界整合）。
+        gemm.synchronize()
+            .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops_sample(size, &measurement)
@@ -357,6 +363,9 @@ fn measure_wmma_tf32(
             .expect(
                 "WMMA(TF32) GEMM must succeed on CUDA-equipped runner (availability probed above)",
             );
+        // #1013: 非同期投入契約への変更に伴う計測境界維持（上記と同じ理由）。
+        gemm.synchronize()
+            .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     Some(tflops_sample(size, &measurement))
@@ -382,6 +391,9 @@ fn measure_wmma_f16(gemm: &CudaWmmaGemm, size: usize, config: &MeasurementConfig
     let measurement = bench_run(config, || {
         gemm.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)
             .expect("WMMA f16 GEMM must succeed on CUDA-equipped runner");
+        // #1013: 非同期投入契約への変更に伴う計測境界維持（上記と同じ理由）。
+        gemm.synchronize()
+            .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops_sample(size, &measurement)
@@ -416,6 +428,9 @@ fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) 
             size as u32,
         )
         .expect("mma.sync f16 GEMM must succeed on CUDA-equipped runner");
+        // #1013: 非同期投入契約への変更に伴う計測境界維持（上記と同じ理由）。
+        gemm.synchronize()
+            .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops_sample(size, &measurement)
@@ -508,6 +523,12 @@ fn measure_mma_tf32(
             return;
         }
         if let Err(e) = gemm.launch_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k) {
+            first_err = Some(e);
+            return;
+        }
+        // #1013: 非同期投入契約への変更に伴う計測境界維持（本ファイル
+        // 冒頭の「計測境界の統一」参照）。
+        if let Err(e) = gemm.synchronize() {
             first_err = Some(e);
         }
     })

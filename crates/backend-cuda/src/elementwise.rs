@@ -190,9 +190,10 @@ impl CudaElementwise {
                 .arg(&numel_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        Ok(self.stream.clone_dtoh(&out_dev.as_view())?)
+        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+        // ため、論理長ビュー（`as_view()`）を渡す。
+        crate::memory::readback(&self.stream, &out_dev.as_view())
     }
 
     /// 単項演算共通の起動手続き。[`Self::run_binary`] と同一構造。
@@ -218,9 +219,10 @@ impl CudaElementwise {
                 .arg(&numel_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        Ok(self.stream.clone_dtoh(&out_dev.as_view())?)
+        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+        // ため、論理長ビュー（`as_view()`）を渡す。
+        crate::memory::readback(&self.stream, &out_dev.as_view())
     }
 
     /// `out[i] = a[i] + b[i]`（f32・同一長）。

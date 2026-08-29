@@ -607,6 +607,12 @@ fn main() {
                              CUDA-equipped runner",
                         );
                 }
+                // #1013: ウォームアップの投入分が測定区間へ漏れ込まない
+                // よう、計測開始前に一度だけ完了を待つ（下記の測定ループ
+                // 末尾コメント参照）。
+                stream
+                    .synchronize()
+                    .expect("stream synchronize must succeed on CUDA-equipped runner");
                 let start = Instant::now();
                 for _ in 0..args.iters {
                     compiled
@@ -616,6 +622,19 @@ fn main() {
                              CUDA-equipped runner",
                         );
                 }
+                // イシュー #1013 で `launch_tf32_staged` は非同期投入のみに
+                // 契約変更された。旧実装はループ内の各起動が
+                // `synchronize()` を内包していたため `start.elapsed()` が
+                // GPU 完了時刻を自動的に捉えていたが、契約変更後はループ
+                // 全体が投入のみで完了せず、明示同期なしでは `elapsed()`
+                // が enqueue コストしか計測しない見かけ上の高速化に化ける
+                // （ncu 実測値との突合という本バイナリの目的そのものが
+                // 崩れる）。ループ末尾で 1 回だけ同期することで、個々の
+                // 起動間の同期オーバーヘッドを排した「N 回連続投入 + 1 回
+                // 完了待ち」の総時間を計測する。
+                stream
+                    .synchronize()
+                    .expect("stream synchronize must succeed on CUDA-equipped runner");
                 let elapsed = start.elapsed().as_secs_f64();
                 let per_iter_secs = elapsed / args.iters as f64;
                 println!(
@@ -702,19 +721,25 @@ fn main() {
                 // 起動数> --launch-count <iters>` でこのループ内のカーネル
                 // 起動番号を直接指定してプロファイルする（モジュール冒頭
                 // ドキュメンテーションコメント「実行手順」参照）。
-                // `launch_wmma_tf32` は呼び出しごとに内部で
-                // `stream.synchronize()` するため
-                // （`gemm.rs::launch_wmma_tf32` 末尾参照）、ここでの追加
-                // 同期は不要。
+                // イシュー #1013 で `launch_wmma_tf32` の契約が「呼び出し
+                // ごとに内部で `stream.synchronize()` する」から「非同期
+                // 投入のみ」へ変更されたため、ここでは明示的な
+                // `synchronize` を挟む。`synchronize` 自体は
+                // `cuLaunchKernel` を経由しないため ncu の起動通し番号
+                // （`--launch-skip`/`--launch-count`）には影響しない。
                 for _ in 0..args.warmup {
                     gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
                         .expect("wmma_tf32 warmup launch must succeed on CUDA-equipped runner");
                 }
+                gemm.synchronize()
+                    .expect("stream synchronize must succeed on CUDA-equipped runner");
                 let start = Instant::now();
                 for _ in 0..args.iters {
                     gemm.launch_wmma_tf32(&a_dev, &b_dev, &mut c_dev, m, n, k)
                         .expect("wmma_tf32 measured launch must succeed on CUDA-equipped runner");
                 }
+                gemm.synchronize()
+                    .expect("stream synchronize must succeed on CUDA-equipped runner");
                 let elapsed = start.elapsed().as_secs_f64();
                 let per_iter_secs = elapsed / args.iters as f64;
                 println!(
@@ -757,15 +782,22 @@ fn main() {
                 .alloc_output_f16(m, n)
                 .expect("mma_f16 output allocation must succeed on CUDA-equipped runner");
 
+            // #1013: `launch_f16` の非同期投入契約への変更に伴い、上の
+            // `Path::WmmaTf32` 分岐と同じ理由で明示的な同期を挟む
+            // （ncu の起動通し番号には影響しない）。
             for _ in 0..args.warmup {
                 gemm.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)
                     .expect("mma_f16 warmup launch must succeed on CUDA-equipped runner");
             }
+            gemm.synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
             let start = Instant::now();
             for _ in 0..args.iters {
                 gemm.launch_f16(&a_dev, &b_dev, &mut c_dev, m, n, k)
                     .expect("mma_f16 measured launch must succeed on CUDA-equipped runner");
             }
+            gemm.synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
             let elapsed = start.elapsed().as_secs_f64();
             let per_iter_secs = elapsed / args.iters as f64;
             println!(

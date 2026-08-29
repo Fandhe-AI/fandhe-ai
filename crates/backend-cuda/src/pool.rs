@@ -174,10 +174,22 @@ impl ReleasePhase {
 }
 
 /// [`CudaAllocator::release_cached`] の失敗（フェーズ識別子付き）。
+///
+/// `detail` は `String` ではなく [`CudaError`] を保持する（codex-review
+/// P0 指摘・PR #1064 追補）。旧実装は `sync_pre`／`sync_post`／`trim`
+/// クロージャの戻り値を `Result<(), String>`（`format!("{e:?}")` で
+/// 即座に文字列化）としていたため、`stream.synchronize()`／driver
+/// トリムが返す実際の `DriverError` が呼び出し元（`ops.rs::
+/// CudaBackendOps::release_cached_device_memory`）まで到達せず、sticky
+/// エラー（先行する非同期カーネルの実行時 fault を最初に観測しうる
+/// 同期点）が発生しても `context_cache` の poison 状態機械へ渡せない
+/// fail-open な経路になっていた。`detail` を `CudaError` のまま保持する
+/// ことで、呼び出し元が `context_cache::observe_cuda_error_ref` へ
+/// そのまま渡して分類・poison 化できる。
 #[derive(Debug)]
 pub(crate) struct ReleaseCacheError {
     pub(crate) phase: ReleasePhase,
-    pub(crate) detail: String,
+    pub(crate) detail: CudaError,
 }
 
 impl std::fmt::Display for ReleaseCacheError {
@@ -199,9 +211,9 @@ impl std::fmt::Display for ReleaseCacheError {
 /// 注記参照）→ (iii) `sync_post` → (iv) `trim`。
 fn release_cached_with<H: Send>(
     pool: &SizeClassPool<H>,
-    mut sync_pre: impl FnMut() -> Result<(), String>,
-    mut sync_post: impl FnMut() -> Result<(), String>,
-    mut trim: impl FnMut() -> Result<(), String>,
+    mut sync_pre: impl FnMut() -> Result<(), CudaError>,
+    mut sync_post: impl FnMut() -> Result<(), CudaError>,
+    mut trim: impl FnMut() -> Result<(), CudaError>,
 ) -> Result<u64, ReleaseCacheError> {
     sync_pre().map_err(|detail| ReleaseCacheError {
         phase: ReleasePhase::PreFreeSync,
@@ -412,8 +424,8 @@ impl CudaAllocator {
         let ctx = Arc::clone(&self.ctx);
         release_cached_with(
             &self.pool,
-            move || stream_pre.synchronize().map_err(|e| format!("{e:?}")),
-            move || stream_post.synchronize().map_err(|e| format!("{e:?}")),
+            move || stream_pre.synchronize().map_err(CudaError::from),
+            move || stream_post.synchronize().map_err(CudaError::from),
             move || {
                 if !has_async_alloc(&ctx) {
                     return Ok(());
@@ -426,9 +438,9 @@ impl CudaAllocator {
                 // 戻り値をそのまま `trim_to` に渡すため事前条件を満たす）。
                 unsafe {
                     let mem_pool = cudarc::driver::result::device::get_mem_pool(ctx.cu_device())
-                        .map_err(|e| format!("{e:?}"))?;
+                        .map_err(CudaError::from)?;
                     cudarc::driver::result::mem_pool::trim_to(mem_pool, 0)
-                        .map_err(|e| format!("{e:?}"))?;
+                        .map_err(CudaError::from)?;
                 }
                 Ok(())
             },
@@ -475,7 +487,11 @@ mod tests {
 
         let err = release_cached_with(
             &pool,
-            || Err("pre-free sync boom".to_string()),
+            || {
+                Err(CudaError::CacheIo {
+                    detail: "pre-free sync boom".to_string(),
+                })
+            },
             || Ok(()),
             || Ok(()),
         )
@@ -496,7 +512,11 @@ mod tests {
         let err = release_cached_with(
             &pool,
             || Ok(()),
-            || Err("post-free sync boom".to_string()),
+            || {
+                Err(CudaError::CacheIo {
+                    detail: "post-free sync boom".to_string(),
+                })
+            },
             || Ok(()),
         )
         .expect_err("post-free sync failure propagates");
@@ -518,7 +538,11 @@ mod tests {
             &pool,
             || Ok(()),
             || Ok(()),
-            || Err("driver trim boom".to_string()),
+            || {
+                Err(CudaError::CacheIo {
+                    detail: "driver trim boom".to_string(),
+                })
+            },
         )
         .expect_err("driver trim failure propagates");
 
@@ -526,6 +550,40 @@ mod tests {
         // (ii)(iii) は成功済み: フリーリストは空・released_bytes は加算済み。
         assert_eq!(pool.stats().cached_bytes, 0);
         assert_eq!(pool.stats().released_bytes, 256 + 512);
+    }
+
+    /// codex-review P0 指摘（`ops.rs:1117` 相当・PR #1064 追補）の回帰
+    /// テスト: `trim` クロージャが（先行する非同期カーネルの実行時 fault
+    /// を最初に観測した同期点を模した）sticky `CudaError::Driver` を
+    /// 返した場合、`ReleaseCacheError::detail` にその `CudaError` が
+    /// そのまま（文字列化されずに）伝播することを確認する。これにより
+    /// 呼び出し元（`ops.rs::CudaBackendOps::release_cached_device_memory`）
+    /// が `context_cache::observe_cuda_error_ref` へ渡して分類・poison
+    /// 化できる（`.to_string()`／`{:?}` で整形すると、CUDA toolkit 非
+    /// 搭載環境でのテストでは `cuGetErrorString` 経由の `culib()` 遅延
+    /// ロードが panic するため、本テストは整形せず `matches!` で型のみ
+    /// 検証する）。
+    #[test]
+    fn release_cached_with_driver_trim_failure_preserves_raw_cuda_error_for_classification() {
+        let pool: SizeClassPool<u32> = SizeClassPool::new(cfg());
+
+        let err = release_cached_with(
+            &pool,
+            || Ok(()),
+            || Ok(()),
+            || {
+                Err(CudaError::Driver(cudarc::driver::result::DriverError(
+                    cudarc::driver::sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS,
+                )))
+            },
+        )
+        .expect_err("driver trim failure propagates");
+
+        assert_eq!(err.phase, ReleasePhase::DriverTrim);
+        assert!(
+            matches!(err.detail, CudaError::Driver(_)),
+            "sticky エラーが CudaError::Driver のまま伝播するはず（文字列化されない）"
+        );
     }
 
     #[test]
@@ -540,7 +598,9 @@ mod tests {
     fn release_phase_display_matches_identifier() {
         let err = ReleaseCacheError {
             phase: ReleasePhase::DriverTrim,
-            detail: "boom".to_string(),
+            detail: CudaError::CacheIo {
+                detail: "boom".to_string(),
+            },
         };
         let rendered = err.to_string();
         assert!(rendered.contains("driver trim"));

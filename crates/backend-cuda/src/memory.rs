@@ -23,8 +23,9 @@ use std::any::Any;
 use std::mem::size_of;
 use std::sync::Arc;
 
-use cudarc::driver::{CudaSlice, CudaStream};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr};
 
+use crate::context_cache;
 use crate::device::CudaDevice;
 use crate::error::CudaError;
 use fandhe_ai_tensor_core::Tensor;
@@ -62,6 +63,18 @@ use fandhe_ai_tensor_core::pool::PoolZeroFill;
 pub(crate) struct CudaBufferHandle {
     pub(crate) slice: Option<CudaSlice<f32>>,
     _alloc: TrackedAllocation,
+    /// 確保時点の ordinal 世代（`buffer.rs::DeviceBuffer::generation` と
+    /// 同じ値をハンドル自身にも刻印する。codex-review P0 指摘・PR #1064
+    /// 追補）。`DeviceBuffer::generation` は `PooledMemory`（`tensor-core::
+    /// pool`）がプールから再利用したバッファを新規 `DeviceBuffer::new`
+    /// （既定世代 0）で包み直す際に失われる（`PoolZeroFill::zero_fill`
+    /// は `&mut dyn BufferHandle` のみを受け取り `DeviceBuffer` を経由
+    /// しないため、プール再利用時の世代情報を運ぶ手段が
+    /// `DeviceBuffer::generation` には存在しない）。ハンドル自身に世代を
+    /// 持たせることで、プール経由で再利用されても
+    /// `zero_fill`（本ファイル下部 `PoolZeroFill` 実装）が正しい世代
+    /// 検査を行える。
+    pub(crate) generation: u64,
 }
 
 impl BufferHandle for CudaBufferHandle {
@@ -121,6 +134,31 @@ impl MemoryStats for CudaMemory {
     fn reset_peak(&self) {
         self.tracker.reset_peak();
     }
+}
+
+/// カーネル起動直後の都度 `synchronize()` を除去した非同期実行契約
+/// （イシュー #1013・`docs/backend-cuda-async-execution-design.md` §3〜
+/// §4）の下で、ホストへ結果を読み戻す全ての readback 経路が共有する
+/// 唯一の同期点。`clone_dtoh` は `cuMemcpyDtoHAsync` を発行する非同期
+/// コピー（`cudarc-0.19.8` `core.rs::memcpy_dtoh`）のため、呼び出し
+/// 直後にホスト側データが確定していることを保証するには `clone_dtoh`
+/// → `synchronize` の順が必須（逆順ではコピー自体の完了を待てない）。
+/// 起動元のカーネルが `unsafe { stream.launch(..) }` を経て投入した
+/// 非同期作業も、同一ストリーム上の FIFO 順序保証により本関数の
+/// `synchronize` で合わせて完了が確定する（`CudaDevice` は ordinal ごとに
+/// 単一ストリームを共有する。設計文書 §3「実行モデル」）。
+/// `download_inner`（本ファイル）・`gemm.rs`／`gemm_wmma.rs`／
+/// `gemm_mma.rs`／`gemm_mma_tf32.rs` の `download_f32`／`download_f16`・
+/// 各演算のホスト `Tensor` 返却ラッパーはすべて本関数を経由し、
+/// 「同期点は D2H 境界のみ」という契約を単一箇所に集約する。
+pub(crate) fn readback<T, Src>(stream: &Arc<CudaStream>, dev: &Src) -> Result<Vec<T>, CudaError>
+where
+    T: DeviceRepr,
+    Src: DevicePtr<T>,
+{
+    let host = stream.clone_dtoh(dev)?;
+    stream.synchronize()?;
+    Ok(host)
 }
 
 /// `numel` 分の `f32` 確保が消費するバイト数を検査付きで計算する
@@ -192,6 +230,12 @@ fn map_cuda_alloc_error(err: CudaError) -> BackendError {
 impl CudaMemory {
     fn alloc_zeroed_inner(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, CudaError> {
         let numel = checked_numel(shape)?;
+        // イシュー #1013 設計文書 §9 item 7: 確保時点の ordinal 世代を
+        // 先に確定させ、`DeviceBuffer`（`new_with_generation`）と
+        // `CudaBufferHandle`（`generation` フィールド。codex-review P0
+        // 指摘・PR #1064 追補。`CudaBufferHandle` ドキュメンテーション
+        // コメント参照）の両方へ同じ値を刻印する。
+        let generation = context_cache::current_generation(self.ordinal);
         // 計測（`TrackedAllocation::new`）は確保成功後に行う。確保が
         // 失敗しうる `?` の前でカウントすると、失敗した確保が一時的に
         // ピークへ計上されてしまう（`backend-cpu::CpuMemory` と同じ順序
@@ -206,6 +250,7 @@ impl CudaMemory {
             Box::new(CudaBufferHandle {
                 slice: None,
                 _alloc: alloc,
+                generation,
             })
         } else {
             let slice = self.stream.alloc_zeros::<f32>(numel)?;
@@ -214,24 +259,33 @@ impl CudaMemory {
             Box::new(CudaBufferHandle {
                 slice: Some(slice),
                 _alloc: alloc,
+                generation,
             })
         };
-        Ok(DeviceBuffer::new(
+        Ok(DeviceBuffer::new_with_generation(
             Device::Cuda(self.ordinal),
             shape.to_vec(),
             handle,
+            generation,
         ))
     }
 
     fn upload_inner(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, CudaError> {
         let shape = tensor.shape().to_vec();
+        let generation = context_cache::current_generation(self.ordinal);
         if tensor.numel() == 0 {
             let alloc = TrackedAllocation::new(Arc::clone(&self.tracker), 0);
             let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
                 slice: None,
                 _alloc: alloc,
+                generation,
             });
-            return Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle));
+            return Ok(DeviceBuffer::new_with_generation(
+                Device::Cuda(self.ordinal),
+                shape,
+                handle,
+                generation,
+            ));
         }
         // 非 contiguous な入力は実体化してから転送する（`MemoryOps::upload`
         // の契約。`fandhe_ai_tensor_core::buffer` モジュールコメント参照）。
@@ -249,8 +303,14 @@ impl CudaMemory {
         let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
             slice: Some(slice),
             _alloc: alloc,
+            generation,
         });
-        Ok(DeviceBuffer::new(Device::Cuda(self.ordinal), shape, handle))
+        Ok(DeviceBuffer::new_with_generation(
+            Device::Cuda(self.ordinal),
+            shape,
+            handle,
+            generation,
+        ))
     }
 
     fn download_inner(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, CudaError> {
@@ -262,19 +322,10 @@ impl CudaMemory {
         let data = match &handle.slice {
             None => Vec::new(),
             Some(slice) => {
-                // `clone_dtoh` は内部で `cuMemcpyDtoHAsync` を発行する
-                // 非同期コピーのため（`cudarc-0.19.8/src/driver/safe/
-                // core.rs::memcpy_dtoh`）、`download` 復帰時点でホスト
-                // データが確定していることを保証するため
-                // `synchronize()` を後段に挟む（`fandhe_ai_tensor_core::buffer`
-                // モジュールコメント「download の同期契約」参照。
-                // カーネル起動直後の `gemm.rs` はカーネル完了待ちとして
-                // 起動 → synchronize → clone_dtoh の順だが、本関数は
-                // 「clone_dtoh 自体の非同期完了待ち」が主目的のため
-                // clone_dtoh → synchronize の順になる）。
-                let host = self.stream.clone_dtoh(slice)?;
-                self.stream.synchronize()?;
-                host
+                // 同期点は本モジュール共通の `readback` ヘルパーへ集約
+                // 済み（#1013。`fandhe_ai_tensor_core::buffer` モジュール
+                // コメント「download の同期契約」参照）。
+                readback(&self.stream, slice)?
             }
         };
         Tensor::new(data, buffer.shape()).map_err(|err| CudaError::InvalidShape {
@@ -283,13 +334,44 @@ impl CudaMemory {
     }
 }
 
+impl CudaMemory {
+    /// `MemoryOps` 実装の各公開メソッド（本 impl 直後の `impl MemoryOps for
+    /// CudaMemory`）が唯一の driver 呼び出し境界として使う共通ヘルパー
+    /// （イシュー #1013 設計文書 §9 item 9「TOCTOU 回避のため事前検査を
+    /// 別ステップにしない」・PR #1064 の Phase C 結線）。
+    ///
+    /// `begin_driver_call` を演算入口で 1 回だけ呼び（`resource_generations`
+    /// に、当該演算が読み書きする既存 `DeviceBuffer` の
+    /// [`fandhe_ai_tensor_core::buffer::DeviceBuffer::generation`] を渡す。
+    /// 新規確保〈`alloc_zeroed`／`upload`〉には検査対象の既存バッファが
+    /// ないため空スライスでよい）、`f` の内部で行われる 1 回以上の driver
+    /// 呼び出し（`clone_htod`／`alloc_zeros`／`clone_dtoh`／`synchronize`。
+    /// いずれも `?` で直結しているため、最初に失敗した 1 回だけが
+    /// `CudaError::Driver` として `f` の戻り値に現れる）の結果を
+    /// `observe_cuda_result` で観測し、sticky エラーなら ordinal を
+    /// poison する（`context_cache::observe_cuda_result` ドキュメンテー
+    /// ションコメント参照）。最終的な `CudaError` は呼び出し元が渡す
+    /// `map` で `BackendError` へ変換する（`alloc_zeroed` は
+    /// `map_cuda_alloc_error`、`upload`／`download` は `map_cuda_error`
+    /// と、呼び出し元ごとに異なる variant 割り当てを保つため）。
+    fn with_driver_call<T>(
+        &self,
+        resource_generations: &[u64],
+        map: impl FnOnce(CudaError) -> BackendError,
+        f: impl FnOnce() -> Result<T, CudaError>,
+    ) -> Result<T, BackendError> {
+        let token = context_cache::begin_driver_call(self.ordinal, resource_generations)?;
+        context_cache::observe_cuda_result(self.ordinal, &token, f()).map_err(map)
+    }
+}
+
 impl MemoryOps for CudaMemory {
     fn alloc_zeroed(&self, shape: &[usize]) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.alloc_zeroed_inner(shape).map_err(map_cuda_alloc_error)
+        self.with_driver_call(&[], map_cuda_alloc_error, || self.alloc_zeroed_inner(shape))
     }
 
     fn upload(&self, tensor: &Tensor<f32>) -> Result<DeviceBuffer<f32>, BackendError> {
-        self.upload_inner(tensor).map_err(map_cuda_error)
+        self.with_driver_call(&[], map_cuda_error, || self.upload_inner(tensor))
     }
 
     fn download(&self, buffer: &DeviceBuffer<f32>) -> Result<Tensor<f32>, BackendError> {
@@ -314,7 +396,13 @@ impl MemoryOps for CudaMemory {
         if buffer.device() != Device::Cuda(self.ordinal) {
             return Err(BackendError::DeviceMismatch);
         }
-        self.download_inner(buffer).map_err(map_cuda_error)
+        // `buffer.generation()`（確保時点で刻印済み。`alloc_zeroed_inner`／
+        // `upload_inner` 参照）を渡し、`invalidate` による回復後の新世代に
+        // 対して旧世代のバッファが誤って読まれることを検出する
+        // （イシュー #1013 設計文書 §9 item 7）。
+        self.with_driver_call(&[buffer.generation()], map_cuda_error, || {
+            self.download_inner(buffer)
+        })
     }
 }
 
@@ -333,17 +421,33 @@ impl PoolZeroFill for CudaMemory {
         let Some(cuda_handle) = handle.as_any_mut().downcast_mut::<CudaBufferHandle>() else {
             return Err(BackendError::DeviceMismatch);
         };
+        // `CudaBufferHandle::generation`（確保時点に刻印済み。
+        // `CudaBufferHandle` ドキュメンテーションコメント参照）を通常経路
+        // と同じ generation 検査へ渡す（codex-review P0 指摘・PR #1064
+        // 追補・`memory.rs:348` 相当: `PoolZeroFill::zero_fill` は
+        // `MemoryOps::{alloc_zeroed,upload,download}` と異なり
+        // `with_driver_call` の外側で `self.stream.memset_zeros` を直接
+        // 呼んでいたため、(a) poison 済み ordinal でもプール再利用時に
+        // 拒否されない (b) ここで初めて観測しうる sticky
+        // `DriverError` が `observe_cuda_result` に渡らない (c)
+        // `invalidate` 後の旧世代 allocation の世代検査もない、という
+        // fail-closed 状態機械の迂回経路になっていた）。
+        let generation = cuda_handle.generation;
         // 空ハンドル（`numel == 0`）は `pool.rs::PooledMemory::alloc_zeroed`
         // が空テンソル契約によりそもそもプールを介さない経路で扱うため
         // 到達しない想定だが、`CudaBufferHandle::slice` が `None` の場合に
         // 備えて no-op として安全に振る舞う（`buffer.rs` モジュールコメント
-        // 「空テンソルの契約」と同じ扱い）。
+        // 「空テンソルの契約」と同じ扱い）。空入力の早期 return でも
+        // poison・世代検査は fail-closed に行う（`ops.rs::
+        // gemm_resident_rhs`／`gemm_resident_lhs` の空 shape 早期 return
+        // と同じ方針。codex-review P1 指摘・PR #1064 追補）。
         let Some(slice) = cuda_handle.slice.as_mut() else {
+            context_cache::begin_driver_call(self.ordinal, &[generation])?;
             return Ok(());
         };
-        self.stream
-            .memset_zeros(slice)
-            .map_err(|e| BackendError::DeviceAllocationFailed(format!("{e:?}")))
+        self.with_driver_call(&[generation], map_cuda_error, || {
+            self.stream.memset_zeros(slice).map_err(CudaError::from)
+        })
     }
 }
 
@@ -434,6 +538,7 @@ mod tests {
                 let handle: Box<dyn BufferHandle> = Box::new(CudaBufferHandle {
                     slice: None,
                     _alloc: alloc,
+                    generation: 0,
                 });
                 let buffer: DeviceBuffer<f32> =
                     DeviceBuffer::new(Device::Cuda(other_ordinal), vec![0], handle);
@@ -484,5 +589,126 @@ mod tests {
     fn cuda_memory_and_pooled_cuda_memory_implement_memory_stats() {
         assert_memory_stats::<CudaMemory>();
         assert_memory_stats::<fandhe_ai_tensor_core::pool::PooledMemory<CudaMemory>>();
+    }
+
+    // ---------------------------------------------------------------
+    // `PoolZeroFill::zero_fill` の poison／世代検査回帰テスト
+    // （codex-review P0 指摘・`memory.rs:348` 相当・PR #1064 追補）。
+    //
+    // `CudaMemory` は `stream: Arc<CudaStream>` を必須フィールドに持ち、
+    // `CudaMemory::new` は初期化済みの実 `CudaDevice`（実 driver）を
+    // 要求する。本ファイルの他テスト（`download_rejects_mismatched_
+    // device_ordinal` 等）と同じ理由で、`zero_fill` を実際に呼び出す
+    // エンドツーエンドテストは CUDA 搭載環境が必要（`match
+    // CudaDevice::new(0) { Ok(_) => .., Err(_) => 空搭載環境としてスキップ
+    // }` の環境適応パターンでのみ組める）。
+    //
+    // 一方 `zero_fill` の poison／世代検査そのもの（`context_cache::
+    // begin_driver_call(self.ordinal, &[cuda_handle.generation])` の
+    // 早期 return 分岐、および `self.with_driver_call` 経由の
+    // `context_cache::observe_cuda_result` 分類）は `self.stream` に
+    // 一切触れずに完結する（`zero_fill` の実装本体を参照。poison 済み
+    // ordinal では `self.stream.memset_zeros` へ到達する前に
+    // `begin_driver_call` が拒否する）。そのためこれらのテストは
+    // `zero_fill` が実際に呼ぶのと同じ `context_cache` API を同じ引数
+    // 形状（`&[generation]`・`CudaError::from(DriverError)`）で直接
+    // 検証することで、実機なしに wiring の正しさを確認する
+    // （`ops.rs::tests::with_driver_call_poisons_ordinal_when_construction_
+    // closure_returns_sticky_error` と同じ「hardware 非依存プリミティブ
+    // レベル検証」方針）。
+
+    fn unique_zero_fill_test_ordinal() -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(40_000);
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// `zero_fill` の空ハンドル早期 return 分岐
+    /// （`context_cache::begin_driver_call(self.ordinal, &[generation])`）
+    /// は、poison 済み ordinal を fail-closed に拒否する。
+    #[test]
+    fn zero_fill_early_return_poison_check_rejects_poisoned_ordinal() {
+        let ordinal = unique_zero_fill_test_ordinal();
+        let generation = context_cache::current_generation(ordinal);
+
+        // context_cache の poison 状態機械を直接操作して poison 化する
+        // （`context_cache::poison_state_tests` と同じ手法）。
+        let token = context_cache::begin_driver_call(ordinal, &[]).expect("begin succeeds");
+        let _ = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(cudarc::driver::result::DriverError(
+                cudarc::driver::sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS,
+            ))),
+        );
+        drop(token);
+
+        // `zero_fill` の早期 return 分岐と同一の呼び出し
+        // （`self.ordinal` → `ordinal`、`cuda_handle.generation` →
+        // `generation`）。
+        let result = context_cache::begin_driver_call(ordinal, &[generation]);
+        assert!(
+            matches!(result, Err(BackendError::DeviceContextPoisoned(_))),
+            "poison 済み ordinal では zero_fill の早期 return 分岐も              fail-closed に拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `zero_fill` の空ハンドル早期 return 分岐は、`invalidate` 後の
+    /// 旧世代ハンドル（`cuda_handle.generation` が現行世代と不一致）を
+    /// `StaleDeviceGeneration` で拒否する。
+    #[test]
+    fn zero_fill_early_return_generation_check_rejects_stale_generation() {
+        let ordinal = unique_zero_fill_test_ordinal();
+        let current = context_cache::current_generation(ordinal);
+        assert_eq!(current, 0, "新規 ordinal の現行世代は既定 0 のはず");
+
+        // `cuda_handle.generation` が現行世代（0）と異なる旧世代
+        // ハンドルを模す。
+        let stale_generation = 1;
+        let result = context_cache::begin_driver_call(ordinal, &[stale_generation]);
+        assert!(
+            matches!(
+                result,
+                Err(BackendError::StaleDeviceGeneration {
+                    resource_generation: 1,
+                    current_generation: 0,
+                    ..
+                })
+            ),
+            "旧世代ハンドルは zero_fill の早期 return 分岐でも              StaleDeviceGeneration で拒否されるはず: {result:?}"
+        );
+    }
+
+    /// `zero_fill` の実処理分岐（`self.with_driver_call` 経由の
+    /// `memset_zeros` 呼び出し）が sticky な driver エラーを観測した
+    /// 場合、対象 ordinal は poison 化され、以降の呼び出し（同一
+    /// ordinal 上の `zero_fill`／他の演算いずれも）は
+    /// `begin_driver_call` の拒否により fail-closed になる
+    /// （`with_driver_call` の実装は `CudaBackendOps::with_driver_call`
+    /// と同一パターンのため、`memset_zeros` の代わりに直接
+    /// `context_cache::observe_cuda_result` を同じ形状で呼んで検証する）。
+    #[test]
+    fn zero_fill_real_path_poisons_ordinal_on_sticky_driver_error() {
+        let ordinal = unique_zero_fill_test_ordinal();
+        let generation = context_cache::current_generation(ordinal);
+
+        // `zero_fill` の `self.with_driver_call(&[generation], ...)` と
+        // 同一の呼び出し形状。
+        let token =
+            context_cache::begin_driver_call(ordinal, &[generation]).expect("begin succeeds");
+        let observed = context_cache::observe_cuda_result::<()>(
+            ordinal,
+            &token,
+            Err(CudaError::Driver(cudarc::driver::result::DriverError(
+                cudarc::driver::sys::CUresult::CUDA_ERROR_ILLEGAL_ADDRESS,
+            ))),
+        );
+        assert!(observed.is_err());
+
+        let rejected = context_cache::begin_driver_call(ordinal, &[generation]);
+        assert!(
+            matches!(rejected, Err(BackendError::DeviceContextPoisoned(_))),
+            "zero_fill 経路で観測された sticky エラーにより ordinal は poison され、             以降の呼び出しは fail-closed に拒否されるはず: {rejected:?}"
+        );
     }
 }

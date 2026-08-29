@@ -284,9 +284,8 @@ impl CudaWmmaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        let c_host = self.stream.clone_dtoh(&c_dev)?;
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        let c_host = crate::memory::readback(&self.stream, &c_dev)?;
         Ok(c_host)
     }
 
@@ -364,14 +363,24 @@ impl CudaWmmaGemm {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+        // 委ねる。
         Ok(())
     }
 
     /// C（f16）をデバイス→ホストへ転送する（[`Self::upload_f16`] と同じ
     /// 理由で公開する）。
+    ///
+    /// 同期点（#1013）: 常駐 `launch_f16` は非同期投入のみで完了を待たない
+    /// ため、本関数が readback ヘルパー経由で完了を確定する。
     pub fn download_f16(&self, c_dev: &CudaSlice<f16>) -> Result<Vec<f16>, CudaError> {
-        Ok(self.stream.clone_dtoh(c_dev)?)
+        crate::memory::readback(&self.stream, c_dev)
+    }
+
+    /// ストリームの完了を明示的に待つ（イシュー #1013。
+    /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    pub fn synchronize(&self) -> Result<(), CudaError> {
+        Ok(self.stream.synchronize()?)
     }
 }
 

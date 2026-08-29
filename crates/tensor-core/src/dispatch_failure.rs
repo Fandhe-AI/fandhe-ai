@@ -17,8 +17,23 @@
 //! [`crate::backend_ops::BackendOps::sgd_step_device_tracked`]
 //! （デフォルトメソッド。非破壊拡張）の追加引数として渡す。実際に
 //! 登録・検査するのは Metal 実装（`backend-metal::ops::
-//! MetalBackendOps::sgd_step_device_tracked`）のみで、CPU／CUDA は
-//! 同期実行のため実行時エラーが即座に判明し本セルを使わない。
+//! MetalBackendOps::sgd_step_device_tracked`）のみで、CPU は同期実行の
+//! ため実行時エラーが即座に判明し本セルを使わない。CUDA はイシュー
+//! #1013（`docs/backend-cuda-async-execution-design.md` §5）でカーネル
+//! 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行したが、
+//! 本セルは使わず `backend-cuda::context_cache` 独自の ordinal 単位
+//! poison 状態機械（`Phase::Poisoned`・`BackendError::
+//! DeviceContextPoisoned` 等）で遅延エラーを表現する。同状態機械の
+//! 演算入口（`ops.rs`・`memory.rs` の `BackendOps`／`MemoryOps` 実装
+//! 境界）への結線（`begin_driver_call`／`observe_driver_result`／
+//! `observe_cuda_result` の呼び出し）は PR #1064（イシュー #1013 の
+//! codex-review P0 指摘への対応）で完了した。起動後の非同期実行時
+//! エラーは、それを最初に観測した driver 呼び出し（同一 ordinal 上の
+//! 別演算でもよい）の時点で ordinal 単位に poison 化され、以降の
+//! `begin_driver_call` が fail-closed に拒否する（`device_store.rs`・
+//! `backend_ops.rs` の同趣旨の注記を参照）。ただし poison からの
+//! **回復**（`context_cache::invalidate_with` を実 CUDA クロージャで
+//! 呼び出す経路）は #1062 へ引き継いだままである。
 
 use std::sync::{Arc, Mutex};
 

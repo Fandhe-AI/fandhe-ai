@@ -827,14 +827,19 @@ impl CudaRmsNorm {
                 .arg(&save_rstd_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
+        // 同期点は本関数末尾へ 1 回に集約する（#1013。設計文書 §9
+        // item 4）。`clone_dtoh` 自体は `cuMemcpyDtoHAsync` を発行する
+        // だけの非同期コピー（`memory.rs::readback` ドキュメンテーション
+        // コメント参照）のため、2 回の `clone_dtoh` をまとめて投入した後
+        // `synchronize` を 1 回だけ呼べば両方の完了を確定できる（2 回目の
+        // 個別 `synchronize` は不要な直列化を招くだけで正当化されない）。
         let out = self.stream.clone_dtoh(&out_dev)?;
         let rstd = if save_rstd {
             Some(self.stream.clone_dtoh(&rstd_dev)?)
         } else {
             None
         };
+        self.stream.synchronize()?;
         Ok((out, rstd))
     }
 
@@ -1099,14 +1104,17 @@ impl CudaRmsNorm {
                 }
             }
 
-            self.stream.synchronize()?;
             Some(self.stream.clone_dtoh(&dw_dev)?)
         } else {
-            self.stream.synchronize()?;
             None
         };
 
-        let dx = self.stream.clone_dtoh(&dx_dev)?;
+        // 同期点は `dx` の readback（本関数の唯一の必須戻り値）で 1 回に
+        // 単一化する（#1013。設計文書 §9 item 4）。分岐内の個別
+        // `synchronize()` は「`dw_dev`／`dx_dev` いずれも同一
+        // `self.stream` 上へ enqueue 済みの `clone_dtoh` を、まとめて
+        // 1 回の完了待ちで確定できる」冗長な直列化であったため除去した。
+        let dx = crate::memory::readback(&self.stream, &dx_dev)?;
         Ok((dx, dw))
     }
 }

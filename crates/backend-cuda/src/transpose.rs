@@ -297,8 +297,18 @@ impl CudaTranspose {
     }
 
     /// デバイス常駐バッファ（f32）をホストへ回収する。
+    ///
+    /// 同期点（#1013）: 常駐 `launch_*_f32` は非同期投入のみで完了を
+    /// 待たないため、本関数が readback ヘルパー経由で完了を確定する
+    /// （`memory.rs::readback` ドキュメンテーションコメント参照）。
     pub fn download_f32(&self, dev: &CudaSlice<f32>) -> Result<Vec<f32>, CudaError> {
-        Ok(self.stream.clone_dtoh(dev)?)
+        crate::memory::readback(&self.stream, dev)
+    }
+
+    /// ストリームの完了を明示的に待つ（イシュー #1013。
+    /// `gemm.rs::CudaGemm::synchronize` と同じ理由の公開 API）。
+    pub fn synchronize(&self) -> Result<(), CudaError> {
+        Ok(self.stream.synchronize()?)
     }
 
     /// 素朴転置（f32）を、デバイス常駐済みの `src_dev`/`dst_dev` に対して
@@ -383,14 +393,19 @@ impl CudaTranspose {
             // `c_t_dev` を明示的にゼロクリアすることで、呼び出し元が
             // ゼロ初期化済みバッファ（`alloc_output_f32`）を渡したかに
             // 依らず数学的に正しい結果を保証する。
-            // `memset_zeros` は同一ストリーム上への非同期投入に留まるため、
-            // 通常のカーネル起動経路と同様に `synchronize()` で完了を待って
-            // から返す。待たずに返すと、呼び出し元が別ストリームで直ちに
-            // `c_t_dev` を参照した場合に stale 値を観測しうるほか、非同期
-            // 実行エラーもこの API から返せなくなる（codex-review 指摘 P1・
-            // PR #690）。
+            // `memset_zeros` は同一ストリーム上への非同期投入に留まる。
+            // 旧実装はここで `synchronize()` を挟んでいたが、イシュー
+            // #1013 で本関数（常駐 API）の契約を「ストリームへの非同期
+            // 投入のみ。完了保証は呼び出し元の次の同期点（`download_*`／
+            // `MemoryOps::download`／明示 `synchronize`）に委ねる」へ
+            // 統一した（`docs/backend-cuda-async-execution-design.md`
+            // §3〜§4）。単一ストリームの FIFO 順序保証により、後続の
+            // 同期点は本 `memset_zeros` を含む全ての先行投入を合わせて
+            // 待つため、codex-review 指摘（PR #690）が懸念した「stale 値
+            // の観測」「非同期実行エラーの取りこぼし」は生じない（同期点
+            // 自体が readback ヘルパー等へ集約され、契約として保証される
+            // ため）。
             self.stream.memset_zeros(c_t_dev)?;
-            self.stream.synchronize()?;
             return Ok(());
         }
 
@@ -415,7 +430,8 @@ impl CudaTranspose {
                 .arg(&k_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+        // 委ねる（本ファイル冒頭の該当コメント・設計文書 §3〜§4）。
         Ok(())
     }
 
@@ -447,7 +463,8 @@ impl CudaTranspose {
                 .arg(&n_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
+        // 非同期投入契約（#1013）。完了保証は呼び出し元の次の同期点へ
+        // 委ねる。
         Ok(())
     }
 
@@ -596,8 +613,8 @@ impl CudaTranspose {
                 .arg(&n_i)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-        let dst_host = self.stream.clone_dtoh(&dst_dev)?;
+        // 同期点は readback ヘルパーへ集約（#1013）。
+        let dst_host = crate::memory::readback(&self.stream, &dst_dev)?;
         Ok(dst_host)
     }
 }

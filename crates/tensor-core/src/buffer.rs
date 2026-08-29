@@ -137,6 +137,17 @@ pub struct DeviceBuffer<T: Element> {
     device: Device,
     shape: Vec<usize>,
     handle: Box<dyn BufferHandle>,
+    /// このバッファを確保した時点の、対象デバイス（`device`）の世代
+    /// （イシュー #1013・`docs/backend-cuda-async-execution-design.md`
+    /// §9 item 7）。CUDA の `context_cache` が ordinal ごとに管理する
+    /// 世代カウンタと突き合わせ、`invalidate`（poison からの復旧）で
+    /// 再生成された後の新世代に対して旧世代のバッファが誤って使われる
+    /// ことを演算入口で検出するために使う。CPU／Metal は poison/
+    /// invalidate の概念を持たないため常に `0`（`new()` の既定）のままで
+    /// 意味を持たず、検査自体も CUDA 経路でのみ行われる
+    /// （`DeviceMismatch` 検査が先行するため他バックエンドの `DeviceBuffer`
+    /// が誤って世代検査に到達することはない）。
+    generation: u64,
     _marker: std::marker::PhantomData<T>,
 }
 
@@ -145,13 +156,45 @@ impl<T: Element> DeviceBuffer<T> {
     /// `CudaMemory`／`MetalMemory` の `MemoryOps` 実装）の `alloc_zeroed`／
     /// `upload` から呼ばれる、具体ハンドルを持つバックエンド専用の構築
     /// 入口（`tensor-core`/backend 入口の他コードから直接構築しない）。
+    ///
+    /// `generation` は `0`（世代検査を行わないバックエンド向けの既定値。
+    /// CUDA は世代追従が必要な構築経路で [`Self::new_with_generation`]
+    /// を使う）。
     pub fn new(device: Device, shape: Vec<usize>, handle: Box<dyn BufferHandle>) -> Self {
         Self {
             device,
             shape,
             handle,
+            generation: 0,
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// `generation` を明示指定して構築する（イシュー #1013）。
+    ///
+    /// CUDA の `CudaMemory::upload_inner`／`alloc_zeroed_inner` が、構築
+    /// 時点の `context_cache::current_generation(ordinal)` を刻印するために
+    /// 使う。他バックエンドは世代検査を行わないため通常 [`Self::new`]
+    /// （`generation = 0`）で足りる。
+    pub fn new_with_generation(
+        device: Device,
+        shape: Vec<usize>,
+        handle: Box<dyn BufferHandle>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            device,
+            shape,
+            handle,
+            generation,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// このバッファが刻印している世代（[`Self::new_with_generation`]
+    /// 参照）。
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// このバッファが属するデバイス。

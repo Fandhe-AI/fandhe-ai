@@ -77,6 +77,10 @@ fn measure_mma_f16(gemm: &CudaMmaGemm, size: usize, config: &MeasurementConfig) 
             size as u32,
         )
         .expect("mma.sync f16 GEMM must succeed on CUDA-equipped runner");
+        // #1013: `launch_f16` は非同期投入のみに契約変更されたため、
+        // 明示的な同期で計測境界を維持する。
+        gemm.synchronize()
+            .expect("stream synchronize must succeed on CUDA-equipped runner");
     })
     .expect("MeasurementConfig::default satisfies the 20/20 lower bound");
     tflops(size, measurement.median_secs)

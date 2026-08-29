@@ -396,9 +396,10 @@ impl CudaSoftmax {
                 .arg(&scale)
                 .launch(cfg)?;
         }
-        self.stream.synchronize()?;
-
-        Ok(self.stream.clone_dtoh(&out_dev.as_view())?)
+        // 同期点は readback ヘルパーへ集約（#1013）。プール割当ハンドル
+        // （`PooledCudaHandle`。イシュー #1020）は `DevicePtr` を直接実装しない
+        // ため、論理長ビュー（`as_view()`）を渡す。
+        crate::memory::readback(&self.stream, &out_dev.as_view())
     }
 }
 

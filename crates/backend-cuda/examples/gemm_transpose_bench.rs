@@ -108,22 +108,35 @@ fn main() {
         let mut dst_dev = transpose
             .alloc_output_f32(size as u32, size as u32)
             .expect("alloc_output_f32 must succeed on CUDA-equipped runner");
+        // イシュー #1013 で `launch_*` は非同期投入のみに契約変更された
+        // ため、以下すべての計測クロージャで明示 `synchronize` を追加し
+        // 「GPU 実行 + 完了待ち」の計測境界（本ファイルの帯域計測前提）を
+        // 維持する。
         let secs_naive = median_secs(&config, || {
             transpose
                 .launch_naive_f32(&c_dev, &mut dst_dev, size as u32, size as u32)
                 .expect("launch_naive_f32 must succeed on CUDA-equipped runner");
+            transpose
+                .synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
         });
 
         let secs_smem_pad = median_secs(&config, || {
             transpose
                 .launch_smem_f32(&c_dev, &mut dst_dev, size as u32, size as u32, false)
                 .expect("launch_smem_f32(pad) must succeed on CUDA-equipped runner");
+            transpose
+                .synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
         });
 
         let secs_smem_swizzle = median_secs(&config, || {
             transpose
                 .launch_smem_f32(&c_dev, &mut dst_dev, size as u32, size as u32, true)
                 .expect("launch_smem_f32(pad+swizzle) must succeed on CUDA-equipped runner");
+            transpose
+                .synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
         });
 
         let bw_naive = bandwidth_gbps(size, size, 4, secs_naive);
@@ -177,6 +190,11 @@ fn main() {
             transpose
                 .launch_naive_f32(&c_dev, &mut c_t_dev, size as u32, size as u32)
                 .expect("launch_naive_f32 must succeed on CUDA-equipped runner");
+            // #1013: 同一ストリーム上の 2 カーネルをまとめて完了待ちする
+            // （分離経路自体の意味は変わらない。系統 A と同じ理由）。
+            transpose
+                .synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
         });
 
         // 融合経路: launch_tiled_transposed_f32（中間バッファ C を HBM へ
@@ -192,6 +210,9 @@ fn main() {
                     size as u32,
                 )
                 .expect("launch_tiled_transposed_f32 must succeed on CUDA-equipped runner");
+            transpose
+                .synchronize()
+                .expect("stream synchronize must succeed on CUDA-equipped runner");
         });
 
         println!(

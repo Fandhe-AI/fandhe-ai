@@ -211,9 +211,34 @@ pub trait BackendOps {
     ///
     /// # デフォルト実装
     /// 既定は `token` を無視して [`BackendOps::sgd_step_device`] へ
-    /// そのまま委譲する。CPU／CUDA は dispatch ごとに同期実行するため
-    /// 実行時エラーが呼び出し元に即座に返り、遅延失敗トークンを必要と
-    /// しない（このデフォルトのままでよい）。Metal のみ
+    /// そのまま委譲する。CPU は dispatch ごとに同期実行するため実行時
+    /// エラーが呼び出し元に即座に返り、遅延失敗トークンを必要としない
+    /// （このデフォルトのままでよい）。CUDA はイシュー #1013
+    /// （`docs/backend-cuda-async-execution-design.md` §5）でカーネル
+    /// 起動直後の都度 `synchronize()` を除去し非同期実行契約へ移行した
+    /// が、本 `token`（`DispatchFailureCell`）は使わずオーバーライドも
+    /// しない（このデフォルトのまま）。`backend-cuda::context_cache` は
+    /// ordinal 単位の poison 状態機械（`begin_driver_call`／
+    /// `observe_driver_result`／`observe_cuda_result`／`is_poisoned`。
+    /// 単一ストリームの FIFO 順序保証を前提に sticky エラー観測時点で
+    /// ordinal を poison する設計）を備え、PR #1064（イシュー #1013 の
+    /// codex-review P0 指摘への対応）で `backend-cuda::ops`／
+    /// `backend-cuda::memory` の `BackendOps`／`MemoryOps` 実装境界
+    /// （`with_driver_call` ヘルパー）へ結線済みである
+    /// （`docs/backend-cuda-async-execution-design.md` §12）。
+    /// これにより、`sgd_step_device` 自身のカーネル起動が sticky な
+    /// 実行時エラーを引き起こした場合、その ordinal 上で最初に
+    /// `observe_cuda_result` が観測した時点（同一ステップの起動自体・
+    /// 別の同一ステップ内 driver 呼び出し・または別テンソル演算の
+    /// いずれか）で poison 化され、以降の `sgd_step_device` 呼び出しは
+    /// `begin_driver_call` の拒否により `Err` を返す。`DeviceParamStore::
+    /// step` は `sgd_step_device_tracked` が返す `Err` を常に
+    /// `poisoned.store(true, ..)` へ変換する（`device_store.rs`
+    /// `step` 実装参照）ため、この `Err` は必ず `StorePoisoned` への
+    /// 自己遷移につながる。ただし検出は「次に同一 ordinal 上で
+    /// driver 呼び出しが起きた時点」に限られ、poison からの**回復**
+    /// （`context_cache::invalidate_with` の呼び出し）は #1062 へ
+    /// 引き継いだままである。Metal のみ
     /// `backend-metal::ops::MetalBackendOps` がオーバーライドし、
     /// `MetalContext::encode` と**同一ロック区間で** `token` をバッチへ
     /// 登録する（encode と登録の間に別スレッドの `synchronize` が
