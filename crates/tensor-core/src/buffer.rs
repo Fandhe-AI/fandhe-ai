@@ -238,6 +238,10 @@ pub struct DeviceBufferView<'a> {
     buffer: &'a DeviceBuffer<f32>,
     offset: usize,
     shape: &'a [usize],
+    /// 構築時に `checked_mul` で検証済みの `shape` の積。`numel()` はこれを
+    /// 返し、未検査の積を再計算しない（release ビルドでの折り返しによる
+    /// 境界検査迂回の再発防止。PR #1059 codex-review P0）。
+    numel: usize,
 }
 
 impl<'a> DeviceBufferView<'a> {
@@ -251,7 +255,18 @@ impl<'a> DeviceBufferView<'a> {
         offset: usize,
         shape: &'a [usize],
     ) -> Result<Self, BackendError> {
-        let numel: usize = shape.iter().product();
+        // shape の積は `checked_mul` で求める。未検査の `product()` は release
+        // ビルドで折り返し、巨大な論理 shape と小さな実バッファのビューが
+        // 境界検査を通過してしまう（REQ-8 手動境界チェックの欠落。
+        // PR #1059 codex-review P0）。
+        let numel = shape
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                BackendError::InvalidArgument(format!(
+                    "DeviceBufferView::new: shape {shape:?} の要素数が usize を超える"
+                ))
+            })?;
         let end = offset.checked_add(numel).ok_or_else(|| {
             BackendError::InvalidArgument(
                 "DeviceBufferView::new: offset + numel overflows usize".to_string(),
@@ -268,6 +283,7 @@ impl<'a> DeviceBufferView<'a> {
             buffer,
             offset,
             shape,
+            numel,
         })
     }
 
@@ -287,9 +303,9 @@ impl<'a> DeviceBufferView<'a> {
         self.shape
     }
 
-    /// このビューの要素数（`shape` の積）。
+    /// このビューの要素数（構築時に検証済みの `shape` の積）。
     pub fn numel(&self) -> usize {
-        self.shape.iter().product()
+        self.numel
     }
 
     /// このビューが属するデバイス（元バッファと同一）。
@@ -397,6 +413,42 @@ mod tests {
         assert_eq!(buf.shape(), &[2, 3]);
         assert_eq!(buf.numel(), 6);
         assert!(!buf.is_empty());
+    }
+
+    #[test]
+    fn device_buffer_view_rejects_shape_numel_overflow() {
+        // shape の積が usize を超える場合、未検査の product() は release
+        // ビルドで折り返して境界検査を迂回しうる（PR #1059 codex-review P0）。
+        // checked_mul により InvalidArgument で拒否されることを確認する。
+        let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+            drop_count: Rc::new(Cell::new(0)),
+            payload: vec![0.0; 4],
+        });
+        let buf: DeviceBuffer<f32> = DeviceBuffer::new(Device::Cpu, vec![4], handle);
+        // usize::MAX × 2 は必ずオーバーフローし、折り返せば偶数の小さな値になりうる
+        let shape = [usize::MAX, 2];
+        let err = DeviceBufferView::new(&buf, 0, &shape).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+        // 折り返しが 0 になる組合せ（2^32 × 2^32 = 2^64 → 0）も拒否する
+        let shape = [1usize << 32, 1usize << 32];
+        let err = DeviceBufferView::new(&buf, 0, &shape).unwrap_err();
+        assert!(matches!(err, BackendError::InvalidArgument(_)), "{err:?}");
+    }
+
+    #[test]
+    fn device_buffer_view_numel_matches_validated_product() {
+        let handle: Box<dyn BufferHandle> = Box::new(MockHandle {
+            drop_count: Rc::new(Cell::new(0)),
+            payload: vec![0.0; 6],
+        });
+        let buf: DeviceBuffer<f32> = DeviceBuffer::new(Device::Cpu, vec![6], handle);
+        let shape = [2usize, 2];
+        let view = DeviceBufferView::new(&buf, 2, &shape).unwrap();
+        assert_eq!(view.numel(), 4);
+        assert_eq!(view.offset(), 2);
+        // 範囲超過（2 + 5 > 6）は拒否
+        let shape = [5usize];
+        assert!(DeviceBufferView::new(&buf, 2, &shape).is_err());
     }
 
     #[test]
